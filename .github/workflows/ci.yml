@@ -25,9 +25,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup CMake
+        id: setup_cmake
         uses: jwlawson/actions-setup-cmake@v1
+        continue-on-error: true
         with:
           cmake-version: "3.26.4"
+
+      # Fallback: if the setup action failed, install CMake manually per-platform.
+      - name: Fallback install CMake on Windows
+        if: steps.setup_cmake.outcome != 'success' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install cmake --version=3.26.4 -y
+
+      - name: Fallback install CMake on Linux/macOS
+        if: steps.setup_cmake.outcome != 'success' && runner.os != 'Windows'
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            brew update
+            brew install cmake
+          fi
+        shell: bash
 
       - name: Configure (Linux/macOS)
         if: runner.os != 'Windows'
