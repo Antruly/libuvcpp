@@ -11,6 +11,9 @@
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
 #include "req/uvcpp_work.h"
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 using namespace uvcpp;
 
