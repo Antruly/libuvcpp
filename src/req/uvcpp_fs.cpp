@@ -267,52 +267,13 @@ int uvcpp_fs::unlink(uvcpp_loop* loop,
 }
 
 int uvcpp_fs::write(uvcpp_loop* loop,
-                     uv_file file, const uv_buf bufs[],
-                     unsigned int nbufs,
-                     int64_t offset,
-                     ::std::function<void(uvcpp_fs*)> write_cb) {
+                    uv_file file, const uv_buf bufs[],
+                    unsigned int nbufs,
+                    int64_t offset,
+                    ::std::function<void(uvcpp_fs*)> write_cb) {
   fs_write_cb = write_cb;
-  // copy buffer descriptors to internal storage so they remain valid for the
-  // duration of the async write operation
-  if (_tmp_bufs) {
-    delete[] _tmp_bufs;
-    _tmp_bufs = nullptr;
-    _tmp_nbufs = 0;
-  }
-  _tmp_nbufs = nbufs;
-  bool alloc_ok = false;
-  try {
-    _tmp_bufs = new ::uv_buf_t[nbufs];
-    if (_tmp_bases) {
-      for (unsigned int i = 0; i < _tmp_nbufs; ++i) {
-        if (_tmp_bases[i]) uvcpp::uv_free_bytes(_tmp_bases[i]);
-      }
-      delete[] _tmp_bases;
-      _tmp_bases = nullptr;
-    }
-    _tmp_bases = new char*[nbufs];
-    for (unsigned int i = 0; i < nbufs; ++i) {
-      _tmp_bases[i] = (char*)uvcpp::uv_alloc_bytes(bufs[i].len);
-      memcpy(_tmp_bases[i], bufs[i].base, bufs[i].len);
-      _tmp_bufs[i].base = _tmp_bases[i];
-      _tmp_bufs[i].len = bufs[i].len;
-    }
-    alloc_ok = true;
-  } catch (const std::bad_alloc& e) {
-    // cleanup partial allocations
-    if (_tmp_bufs) { delete[] _tmp_bufs; _tmp_bufs = nullptr; }
-    if (_tmp_bases) {
-      for (unsigned int i = 0; i < nbufs; ++i) {
-        if (_tmp_bases[i]) uvcpp::uv_free_bytes(_tmp_bases[i]);
-      }
-      delete[] _tmp_bases;
-      _tmp_bases = nullptr;
-    }
-    _tmp_nbufs = 0;
-    return UV_ENOMEM;
-  }
-  if (!alloc_ok) return UV_ENOMEM;
-  return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, _tmp_bufs, nbufs, offset, callback_write);
+  return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
+                     reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, callback_write);
 }
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 14
