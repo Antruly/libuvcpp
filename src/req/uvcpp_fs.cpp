@@ -267,10 +267,10 @@ int uvcpp_fs::unlink(uvcpp_loop* loop,
 }
 
 int uvcpp_fs::write(uvcpp_loop* loop,
-                    uv_file file, const uv_buf bufs[],
-                    unsigned int nbufs,
-                    int64_t offset,
-                    ::std::function<void(uvcpp_fs*)> write_cb) {
+                     uv_file file, const uv_buf bufs[],
+                     unsigned int nbufs,
+                     int64_t offset,
+                     ::std::function<void(uvcpp_fs*)> write_cb) {
   fs_write_cb = write_cb;
   return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                      reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, callback_write);
