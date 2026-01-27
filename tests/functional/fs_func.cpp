@@ -42,9 +42,9 @@ int main() {
       char *base = (char*)uvcpp::uv_alloc_bytes(txt_len + 1);
       memcpy(base, txt, txt_len);
       base[txt_len] = '\\0';
-      ::uv_buf_t *b = new ::uv_buf_t();
-      b->base = base;
+      uvcpp::uv_buf *b = new uvcpp::uv_buf();
       b->len = (unsigned int)txt_len;
+      b->base = base;
       // debug: print addresses and try a synchronous write to diagnose EFAULT
 #if !defined(_WIN32)
       std::cout << "[functional fs] fd=" << fd << " buf=" << static_cast<void*>(b->base)
@@ -57,7 +57,7 @@ int main() {
       }
 #endif
       // write async with callback
-      fs.write(&loop, fd, reinterpret_cast<const ::uv_buf_t*>(b), 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
+      fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
           int err = (int)wreq->get_result();
           std::cerr << "[functional fs] write failed: " << err << " "
@@ -115,11 +115,11 @@ int main() {
     }
     uv_file fd = (uv_file)oreq->get_result();
     // allocate read buffer
-    ::uv_buf_t* rb = new ::uv_buf_t();
-    rb->base = (char*)uvcpp::uv_alloc_bytes(4096);
+    uvcpp::uv_buf* rb = new uvcpp::uv_buf();
     rb->len = 4096;
+    rb->base = (char*)uvcpp::uv_alloc_bytes(4096);
 
-    fs2.read(&loop, fd, reinterpret_cast<const ::uv_buf_t*>(rb), 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
+    fs2.read(&loop, fd, rb, 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
       if (rreq->get_result() < 0) {
         int err = (int)rreq->get_result();
         std::cerr << "[functional fs] read failed: " << err << " "
