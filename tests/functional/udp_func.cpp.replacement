@@ -1,0 +1,149 @@
+#include <iostream>
+#include <cstring>
+#include <thread>
+#include <future>
+#include <atomic>
+#include <uv.h>
+
+#include "handle/uvcpp_loop.h"
+#include "handle/uvcpp_udp.h"
+#include "req/uvcpp_udp_send.h"
+#include "handle/uvcpp_timer.h"
+#include "handle/uvcpp_async.h"
+
+using namespace uvcpp;
+
+int main() {
+  std::cout << "[functional udp] start\n";
+  std::atomic<bool> success(false);
+  std::promise<int> port_promise;
+  auto port_future = port_promise.get_future();
+  uvcpp_async server_stop_async;
+  std::promise<void> server_ready_promise;
+  auto server_ready_future = server_ready_promise.get_future();
+
+  // Server thread
+  std::thread server_thread([&](){
+    uvcpp_loop server_loop;
+    server_loop.init();
+
+    uvcpp_udp server(&server_loop);
+    server.init();
+    sockaddr_in addr;
+    uv_ip4_addr("127.0.0.1", 0, &addr);
+    server.bind((const sockaddr*)&addr, 0);
+
+    // init async used to stop the server loop
+    server_stop_async.init([&server_loop](uvcpp_async* a){
+      server_loop.stop();
+    }, &server_loop);
+
+    // get assigned port
+    sockaddr_in name;
+    int namelen = sizeof(name);
+    server.getsockname((sockaddr*)&name, &namelen);
+    int port = ntohs(name.sin_port);
+    std::cout << "[functional udp] server bound port=" << port << std::endl;
+
+    server.recv_start(
+      [](uvcpp_handle* h, size_t suggested_size, uv_buf* buf){
+        buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
+        buf->len = suggested_size;
+      },
+      [&](uvcpp_udp* u, ssize_t nread, const uv_buf* buf, const sockaddr* addr, unsigned flags){
+        if (nread > 0) {
+          std::string s(buf->base, (size_t)nread);
+          std::cout << "[functional udp] server recv: " << s << std::endl;
+          // echo back using udp_send request
+          uvcpp_udp_send *req = new uvcpp_udp_send();
+          req->init();
+          uv_buf* echo = new uv_buf();
+          echo->base = (char*)uvcpp::uv_alloc_bytes((size_t)nread);
+          memcpy(echo->base, buf->base, (size_t)nread);
+          echo->len = (unsigned int)nread;
+          req->set_data(echo);
+          u->send(req, echo, 1, addr, [&](uvcpp_udp_send* r, int status){
+            if (status < 0) {
+              std::cout << "[functional udp] server echo send error : " << uv_strerror(status) << std::endl;
+            }
+            std::cout << "[functional udp] server echo send status=" << status << std::endl;
+            uv_buf *echo = (uv_buf *)r->get_data();
+            uvcpp::uv_free_bytes(echo->base);
+            delete echo;
+            delete r;
+          });
+        }
+        if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+      }
+    );
+
+    // now that recv_start is registered, publish port to client and mark ready
+    server.getsockname((sockaddr*)&name, &namelen);
+    int port_after = ntohs(name.sin_port);
+    port_promise.set_value(port_after);
+    server_ready_promise.set_value();
+    std::cout << "[functional udp] server listening (recv started) port=" << port_after << std::endl;
+
+    server_loop.run(UV_RUN_DEFAULT);
+  });
+
+  // Client thread
+  std::thread client_thread([&](){
+    int port = port_future.get();
+    // wait until server async is ready
+    server_ready_future.get();
+
+    uvcpp_loop client_loop;
+    client_loop.init();
+    uvcpp_udp client(&client_loop);
+    client.init();
+
+    sockaddr_in dest;
+    uv_ip4_addr("127.0.0.1", port, &dest);
+    const char *msg = "udp_hello";
+    uv_buf b;
+    b.base = const_cast<char*>(msg);
+    b.len = (unsigned int)strlen(msg);
+
+    // prepare receiver to get echo
+    client.recv_start(
+      [](uvcpp_handle* h, size_t suggested_size, uv_buf* buf){
+        buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
+        buf->len = suggested_size;
+      },
+      [&](uvcpp_udp* u, ssize_t nread, const uv_buf* buf, const sockaddr* addr, unsigned flags){
+        if (nread > 0) {
+          std::string s(buf->base, (size_t)nread);
+          std::cout << "[functional udp] client recv: " << s << std::endl;
+          // received echo -- notify server to stop and exit
+          u->recv_stop();
+          server_stop_async.send();
+          client_loop.stop();
+        }
+        if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+      }
+    );
+
+    // start periodic timer to send until echo received
+    uvcpp_timer timer(&client_loop);
+    timer.init();
+    timer.start([&](uvcpp_timer* t){
+      uvcpp_udp_send *sreq = new uvcpp_udp_send();
+      sreq->init();
+      client.send(sreq, &b, 1, (const sockaddr*)&dest, [&](uvcpp_udp_send* r, int status){
+        // ignore status here
+        delete r;
+      });
+    }, 100, 100);
+
+    client_loop.run(UV_RUN_DEFAULT);
+  });
+
+  client_thread.join();
+  server_thread.join();
+
+  std::cout << "[functional udp] done received=" << (success.load() ? "true" : "false") << std::endl;
+  return success.load() ? 0 : 2;
+}
+
+

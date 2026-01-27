@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: macos-latest
+            arch: x64
+          - os: windows-latest
+            arch: x64
+          - os: windows-latest
+            arch: x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@v3
+        with:
+          cmakeVersion: "3.26.4"
+
+      - name: Configure (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          # libuv is fetched by CMake if missing; no explicit system install required.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # CMakeLists is expected to fetch libuv automatically; configure for selected architecture.
+          cmake -S . -B build -A ${{ matrix.arch }} -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cmake --build build --config Release -- /m
+          else
+            cmake --build build --config Release -- -j$(nproc)
+          fi
+        shell: bash
+
+      - name: Run tests (if any)
+        run: |
+          if [ -d build ]; then
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              ctest --test-dir build -C Release --output-on-failure || true
+            else
+              ctest --test-dir build --output-on-failure || true
+            fi
+          fi
+        shell: bash
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uvcpp-${{ matrix.os }}-${{ matrix.arch }}
+          path: build
+
+

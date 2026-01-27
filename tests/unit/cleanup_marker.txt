@@ -1,0 +1,2 @@
+Per-user request: individual per-type tests removed; use the three unit projects.
+
