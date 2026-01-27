@@ -385,6 +385,7 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
   // temporary storage for copied buffers used by async write/read operations
   ::uv_buf_t* _tmp_bufs = nullptr;
   unsigned int _tmp_nbufs = 0;
+  char** _tmp_bases = nullptr;
 
   static void callback_close(uv_fs_t* req) {
     if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_close_cb)
@@ -422,6 +423,13 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
       delete[] self->_tmp_bufs;
       self->_tmp_bufs = nullptr;
       self->_tmp_nbufs = 0;
+    }
+    if (self->_tmp_bases) {
+      for (unsigned int i = 0; i < self->_tmp_nbufs; ++i) {
+        if (self->_tmp_bases[i]) uvcpp::uv_free_bytes(self->_tmp_bases[i]);
+      }
+      delete[] self->_tmp_bases;
+      self->_tmp_bases = nullptr;
     }
     /* Clean up libuv request internal data */
     uv_fs_req_cleanup(req);
