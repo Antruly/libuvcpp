@@ -1,13 +1,10 @@
-﻿#include <iostream>
+#include <iostream>
 #include <cstring>
 #include <cstdio>
 #include "handle/uvcpp_loop.h"
 #include "req/uvcpp_fs.h"
 #include <future>
 #include <uv.h>
-#if !defined(_WIN32)
-#include <unistd.h>
-#endif
 
 using namespace uvcpp;
 
@@ -34,46 +31,23 @@ int main() {
         return;
       }
       uv_file fd = (uv_file)req->get_result();
-      // prepare write buffer (allocate on heap because uv_fs_write is asynchronous
-      // and buffers must remain valid until the request completes)
+      // prepare write buffer
       const char *txt = "hello functional fs";
-      // allocate raw buffer and wrap in C libuv uv_buf_t to avoid C++ wrapper ABI issues
-      size_t txt_len = strlen(txt);
-      char *base = (char*)uvcpp::uv_alloc_bytes(txt_len + 1);
-      memcpy(base, txt, txt_len);
-      base[txt_len] = '\\0';
-      uvcpp::uv_buf *b = new uvcpp::uv_buf();
-      b->len = (unsigned int)txt_len;
-      b->base = base;
-      // debug: print addresses and try a synchronous write to diagnose EFAULT
-#if !defined(_WIN32)
-      std::cout << "[functional fs] fd=" << fd << " buf=" << static_cast<void*>(b->base)
-                << " len=" << b->len << std::endl;
-      ssize_t syncw = ::write(fd, b->base, b->len);
-      if (syncw < 0) {
-        std::cerr << "[functional fs] sync write error: " << errno << " - " << strerror(errno) << std::endl;
-      } else {
-        std::cout << "[functional fs] sync write ok, wrote=" << syncw << std::endl;
-      }
-#endif
+      uv_buf b;
+      b.base = const_cast<char*>(txt);
+      b.len = (unsigned int)strlen(txt);
       // write async with callback
-      fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
+      fs.write(&loop, fd, &b, 1, 0, [&fs, fd, &done_promise, &loop](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
           int err = (int)wreq->get_result();
           std::cerr << "[functional fs] write failed: " << err << " "
                     << uv_err_name(err) << " - " << uv_strerror(err) << std::endl;
           fs.close(&loop, fd);
-          // free buffer
-          if (b && b->base) uvcpp::uv_free_bytes(b->base);
-          delete b;
           done_promise.set_value(3);
           return;
         }
         // close async
-        fs.close(&loop, fd, [&done_promise, b](uvcpp_fs* creq){
-          // free buffer
-          if (b && b->base) uvcpp::uv_free_bytes(b->base);
-          delete b;
+        fs.close(&loop, fd, [&done_promise](uvcpp_fs* creq){
           // completion
           done_promise.set_value(0);
         });
@@ -115,11 +89,11 @@ int main() {
     }
     uv_file fd = (uv_file)oreq->get_result();
     // allocate read buffer
-    uvcpp::uv_buf* rb = new uvcpp::uv_buf();
-    rb->len = 4096;
+    uv_buf_t* rb = new uv_buf_t();
     rb->base = (char*)uvcpp::uv_alloc_bytes(4096);
+    rb->len = 4096;
 
-    fs2.read(&loop, fd, rb, 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
+    fs2.read(&loop, fd, reinterpret_cast<const uv_buf*>(rb), 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
       if (rreq->get_result() < 0) {
         int err = (int)rreq->get_result();
         std::cerr << "[functional fs] read failed: " << err << " "
