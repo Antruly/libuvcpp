@@ -419,18 +419,20 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
     if (self->fs_write_cb)
       self->fs_write_cb(self);
     // free any temporary buffer descriptors copied for async operation
+    // preserve count then free buffers and bases
+    unsigned int n = self->_tmp_nbufs;
     if (self->_tmp_bufs) {
       delete[] self->_tmp_bufs;
       self->_tmp_bufs = nullptr;
-      self->_tmp_nbufs = 0;
     }
     if (self->_tmp_bases) {
-      for (unsigned int i = 0; i < self->_tmp_nbufs; ++i) {
+      for (unsigned int i = 0; i < n; ++i) {
         if (self->_tmp_bases[i]) uvcpp::uv_free_bytes(self->_tmp_bases[i]);
       }
       delete[] self->_tmp_bases;
       self->_tmp_bases = nullptr;
     }
+    self->_tmp_nbufs = 0;
     /* Clean up libuv request internal data */
     uv_fs_req_cleanup(req);
   }
