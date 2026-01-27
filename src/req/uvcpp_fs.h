@@ -419,6 +419,8 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
       self->_tmp_bufs = nullptr;
       self->_tmp_nbufs = 0;
     }
+    /* Clean up libuv request internal data */
+    uv_fs_req_cleanup(req);
   }
 
   static void callback_copyfile(uv_fs_t* req) {
