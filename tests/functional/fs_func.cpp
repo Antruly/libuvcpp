@@ -53,7 +53,7 @@ int main() {
       } else {
         std::cout << "[functional fs] sync write ok, wrote=" << syncw << std::endl;
       }
-      
+#endif
       // write async with callback
       fs.write(&loop, fd, reinterpret_cast<const uvcpp::uv_buf*>(b), 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
