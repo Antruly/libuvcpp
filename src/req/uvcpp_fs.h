@@ -382,6 +382,10 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
   ::std::function<void(uvcpp_fs*)> fs_statfs_cb;
 
  private:
+  // temporary storage for copied buffers used by async write/read operations
+  ::uv_buf_t* _tmp_bufs = nullptr;
+  unsigned int _tmp_nbufs = 0;
+
   static void callback_close(uv_fs_t* req) {
     if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_close_cb)
       reinterpret_cast<uvcpp_fs*>(req->data)->fs_close_cb(
@@ -406,9 +410,15 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
   }
 
   static void callback_write(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_write_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_write_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    if (self->fs_write_cb)
+      self->fs_write_cb(self);
+    // free any temporary buffer descriptors copied for async operation
+    if (self->_tmp_bufs) {
+      delete[] self->_tmp_bufs;
+      self->_tmp_bufs = nullptr;
+      self->_tmp_nbufs = 0;
+    }
   }
 
   static void callback_copyfile(uv_fs_t* req) {

@@ -272,8 +272,20 @@ int uvcpp_fs::write(uvcpp_loop* loop,
                      int64_t offset,
                      ::std::function<void(uvcpp_fs*)> write_cb) {
   fs_write_cb = write_cb;
-  return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
-                     reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, callback_write);
+  // copy buffer descriptors to internal storage so they remain valid for the
+  // duration of the async write operation
+  if (_tmp_bufs) {
+    delete[] _tmp_bufs;
+    _tmp_bufs = nullptr;
+    _tmp_nbufs = 0;
+  }
+  _tmp_nbufs = nbufs;
+  _tmp_bufs = new ::uv_buf_t[nbufs];
+  for (unsigned int i = 0; i < nbufs; ++i) {
+    _tmp_bufs[i].base = const_cast<char*>(bufs[i].base);
+    _tmp_bufs[i].len = bufs[i].len;
+  }
+  return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, _tmp_bufs, nbufs, offset, callback_write);
 }
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 14
