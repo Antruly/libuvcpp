@@ -37,23 +37,25 @@ int main() {
       // prepare write buffer (allocate on heap because uv_fs_write is asynchronous
       // and buffers must remain valid until the request completes)
       const char *txt = "hello functional fs";
-      uvcpp::uv_buf *b = uvcpp::uv_alloc<uvcpp::uv_buf>();
-      b->base = (char*)uvcpp::uv_alloc_bytes(strlen(txt));
-      memcpy(b->base, txt, strlen(txt));
+      // allocate raw buffer and wrap in C libuv uv_buf_t to avoid C++ wrapper ABI issues
+      char *base = (char*)uvcpp::uv_alloc_bytes(strlen(txt));
+      memcpy(base, txt, strlen(txt));
+      ::uv_buf_t *b = new ::uv_buf_t();
+      b->base = base;
       b->len = (unsigned int)strlen(txt);
       // debug: print addresses and try a synchronous write to diagnose EFAULT
+#if !defined(_WIN32)
       std::cout << "[functional fs] fd=" << fd << " buf=" << static_cast<void*>(b->base)
                 << " len=" << b->len << std::endl;
-#if !defined(_WIN32)
       ssize_t syncw = ::write(fd, b->base, b->len);
       if (syncw < 0) {
         std::cerr << "[functional fs] sync write error: " << errno << " - " << strerror(errno) << std::endl;
       } else {
         std::cout << "[functional fs] sync write ok, wrote=" << syncw << std::endl;
       }
-#endif
+      
       // write async with callback
-      fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
+      fs.write(&loop, fd, reinterpret_cast<const uvcpp::uv_buf*>(b), 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
           int err = (int)wreq->get_result();
           std::cerr << "[functional fs] write failed: " << err << " "
