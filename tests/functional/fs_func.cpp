@@ -5,6 +5,9 @@
 #include "req/uvcpp_fs.h"
 #include <future>
 #include <uv.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 using namespace uvcpp;
 
@@ -38,6 +41,17 @@ int main() {
       b->base = (char*)uvcpp::uv_alloc_bytes(strlen(txt));
       memcpy(b->base, txt, strlen(txt));
       b->len = (unsigned int)strlen(txt);
+      // debug: print addresses and try a synchronous write to diagnose EFAULT
+      std::cout << "[functional fs] fd=" << fd << " buf=" << static_cast<void*>(b->base)
+                << " len=" << b->len << std::endl;
+#if !defined(_WIN32)
+      ssize_t syncw = ::write(fd, b->base, b->len);
+      if (syncw < 0) {
+        std::cerr << "[functional fs] sync write error: " << errno << " - " << strerror(errno) << std::endl;
+      } else {
+        std::cout << "[functional fs] sync write ok, wrote=" << syncw << std::endl;
+      }
+#endif
       // write async with callback
       fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
