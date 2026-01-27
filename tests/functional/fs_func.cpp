@@ -34,12 +34,12 @@ int main() {
       // prepare write buffer (allocate on heap because uv_fs_write is asynchronous
       // and buffers must remain valid until the request completes)
       const char *txt = "hello functional fs";
-      uv_buf *b = new uv_buf();
+      uvcpp::uv_buf *b = uvcpp::uv_alloc<uvcpp::uv_buf>();
       b->base = (char*)uvcpp::uv_alloc_bytes(strlen(txt));
       memcpy(b->base, txt, strlen(txt));
       b->len = (unsigned int)strlen(txt);
       // write async with callback
-      fs.write(&loop, fd, reinterpret_cast<const uv_buf*>(b), 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
+      fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop, b](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
           int err = (int)wreq->get_result();
           std::cerr << "[functional fs] write failed: " << err << " "
