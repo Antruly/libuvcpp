@@ -33,11 +33,13 @@ int main() {
       uv_file fd = (uv_file)req->get_result();
       // prepare write buffer
       const char *txt = "hello functional fs";
-      uv_buf b;
-      b.base = const_cast<char*>(txt);
-      b.len = (unsigned int)strlen(txt);
+      uv_buf *b = new uv_buf();
+      b->base = (char *)uvcpp::uv_alloc_bytes(strlen(txt));
+      b->len = (unsigned int)strlen(txt);
+      memcpy(b->base, txt, b->len);
+      fs.set_data(b);
       // write async with callback
-      fs.write(&loop, fd, &b, 1, 0, [&fs, fd, &done_promise, &loop](uvcpp_fs* wreq){
+      fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
           int err = (int)wreq->get_result();
           std::cerr << "[functional fs] write failed: " << err << " "
@@ -50,6 +52,9 @@ int main() {
         fs.close(&loop, fd, [&done_promise](uvcpp_fs* creq){
           // completion
           done_promise.set_value(0);
+          uv_buf *b = (uv_buf *)creq->get_data();
+          uvcpp::uv_free_bytes(b->base);
+          delete b;
         });
       });
     });
