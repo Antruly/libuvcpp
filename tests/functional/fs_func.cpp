@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <cstring>
 #include <cstdio>
 #include "handle/uvcpp_loop.h"
@@ -94,11 +94,11 @@ int main() {
     }
     uv_file fd = (uv_file)oreq->get_result();
     // allocate read buffer
-    uv_buf_t* rb = new uv_buf_t();
+    uv_buf* rb = new uv_buf();
     rb->base = (char*)uvcpp::uv_alloc_bytes(4096);
     rb->len = 4096;
 
-    fs2.read(&loop, fd, reinterpret_cast<const uv_buf*>(rb), 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
+    fs2.read(&loop, fd, rb, 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
       if (rreq->get_result() < 0) {
         int err = (int)rreq->get_result();
         std::cerr << "[functional fs] read failed: " << err << " "
