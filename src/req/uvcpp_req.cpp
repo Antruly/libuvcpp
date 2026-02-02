@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_req.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_req::uvcpp_req(): req(nullptr) ,vdata(nullptr){
-  req = uvcpp::uv_alloc<uv_req_t>();
+  req = uvcpp::uvcpp_alloc<uv_req_t>();
   this->set_req_data();
 }
 
@@ -17,7 +17,7 @@ uvcpp_req::~uvcpp_req() { free_req(); }
 uvcpp_req::uvcpp_req(const uvcpp_req &obj) {
   if (obj.req != nullptr) {
     size_t sz = uv_req_size(obj.req->type);
-    req = (uv_req_t *)uvcpp::uv_alloc_bytes(sz);
+    req = (uv_req_t *)uvcpp::uvcpp_alloc_bytes(sz);
     if (req == nullptr)
       throw std::bad_alloc();
     memcpy(req, obj.req, sz);
@@ -31,7 +31,7 @@ uvcpp_req &uvcpp_req::operator=(const uvcpp_req &obj) {
   this->free_req();
   if (obj.req != nullptr) {
     size_t sz = uv_req_size(obj.req->type);
-    req = (uv_req_t *)uvcpp::uv_alloc_bytes(sz);
+    req = (uv_req_t *)uvcpp::uvcpp_alloc_bytes(sz);
     if (req == nullptr)
       throw std::bad_alloc();
     memcpy(req, obj.req, sz);

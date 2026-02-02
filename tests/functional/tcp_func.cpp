@@ -11,6 +11,7 @@
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
 #include "req/uvcpp_work.h"
+#include "uvcpp/uvcpp_buf.h"
 
 
 using namespace uvcpp;
@@ -42,36 +43,32 @@ int main() {
         client->connect(conn, (const sockaddr*)&addr, [client, conn, &client_loop, &success](uvcpp_connect* r, int status){
           if (status == 0) {
             // start read to get echo
-            client->read_start(
-              [](uvcpp_handle *h, size_t suggested_size, uv_buf *buf) {
-                buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
-                buf->len = suggested_size;
-              },
-              [client, &client_loop, &success](uvcpp_stream *stream, ssize_t nread, const uv_buf *buf) {
-                if (nread > 0) {
-                  std::string received(buf->base, (size_t)nread);
-                  std::cout << "[functional tcp client] recv: " << received << std::endl;
-                  if (received == std::string(kMsg)) success.store(true);
-                } else if (nread == UV_EOF) {
-                  // peer closed
-                }
-                if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
-                // close client and stop loop
-                stream->close([&client_loop, client](uvcpp_handle*){
-                  client_loop.stop();
-                  delete client;
-                });
-              }
-            );
+        client->read_start(
+          [](uvcpp_handle *h, size_t suggested_size, uv_buf_t* buf) {
+            uvcpp_buf::alloc_buf(buf, suggested_size);
+          },
+          [client, &client_loop, &success](uvcpp_stream *stream, ssize_t nread, const uv_buf_t* buf) {
+            if (nread > 0) {
+              std::string received(buf->base, (size_t)nread);
+              std::cout << "[functional tcp client] recv: " << received << std::endl;
+              if (received == std::string(kMsg)) success.store(true);
+            } else if (nread == UV_EOF) {
+              // peer closed
+            }
+            uvcpp_free_bytes(buf->base);
+            // close client and stop loop
+            stream->close([&client_loop, client](uvcpp_handle*){
+              client_loop.stop();
+              delete client;
+            });
+          }
+        );
 
-            // write message
-            uv_buf *b = new uv_buf();
-            b->base = (char*)uvcpp::uv_alloc_bytes(strlen(kMsg));
-            memcpy(b->base, kMsg, strlen(kMsg));
-            b->len = (unsigned int)strlen(kMsg);
-
+            // write message using uvcpp_buf
+            uvcpp_buf bufcpp(kMsg);
+            uv_buf_t* b = bufcpp.out_uv_buf();
             uvcpp_write *w = new uvcpp_write();
-            w->set_buf(b, true);
+            w->set_uv_buf(b, true);
             client->write(w, b, 1, [](uvcpp_write* req, int stat){
               // free write req (will free buffer if owner)
               if (stat < 0) {
@@ -150,23 +147,20 @@ int main() {
             uvcpp_tcp *client = client_data->client;
             uvcpp_loop *work_loop = client_data->work_loop;
           client->read_start(
-            [](uvcpp_handle *h, size_t suggested_size, uv_buf *buf) {
-              buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
-              buf->len = suggested_size;
+            [](uvcpp_handle *h, size_t suggested_size, uv_buf_t* buf) {
+              uvcpp_buf::alloc_buf(buf, suggested_size);
             },
             [client](uvcpp_stream *stream, ssize_t nread,
-                                    const uv_buf *buf) {
+                                    const uv_buf_t* buf) {
               if (nread > 0) {
                 std::string received(buf->base, (size_t)nread);
                 std::cout << "[worker client] recv: " << received << std::endl;
                 // echo back
-                uv_buf *echo = uvcpp::uv_alloc<uv_buf>();
-                echo->base = (char*)uvcpp::uv_alloc_bytes((size_t)nread);
-                memcpy(echo->base, buf->base, (size_t)nread);
-                echo->len = (unsigned int)nread;
+                uvcpp_buf bufcpp(buf->base, nread);
+                uv_buf_t* echo = bufcpp.out_uv_buf();
                 uvcpp_write *wreq = new uvcpp_write();
-                wreq->set_buf(echo, true);
-                client->write(wreq, echo, 1, [](uvcpp_write* req, int stat){
+                wreq->set_uv_buf(echo, true);
+                client->write(wreq, echo, 1,[](uvcpp_write* req, int stat){
                   delete req;
                 });
               } else if (nread == UV_EOF || nread < 0) {
@@ -174,7 +168,7 @@ int main() {
                 std::cout << "[functional tcp] tcp src_client closed" << std::endl;
                 });
               }
-              if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+              uvcpp_free_bytes(buf->base);
             }
           );
 

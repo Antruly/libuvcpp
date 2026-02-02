@@ -1,10 +1,10 @@
 ﻿#include "uvcpp_env_item.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 30
 namespace uvcpp {
 uvcpp_env_item::uvcpp_env_item() {
-  this->env_item = uvcpp::uv_alloc<uv_env_item_t>();
+  this->env_item = uvcpp::uvcpp_alloc<uv_env_item_t>();
   this->init();
 }
 
@@ -12,7 +12,7 @@ uvcpp_env_item::~uvcpp_env_item() { UVCPP_VFREE(this->env_item); }
 
 uvcpp_env_item::uvcpp_env_item(const uvcpp_env_item& obj) {
   if (this->env_item != nullptr) {
-    uv_env_item_t* hd = uvcpp::uv_alloc<uv_env_item_t>();
+    uv_env_item_t* hd = uvcpp::uvcpp_alloc<uv_env_item_t>();
     memcpy(hd, this->env_item, sizeof(uv_env_item_t));
     this->env_item = hd;
   } else {
@@ -21,7 +21,7 @@ uvcpp_env_item::uvcpp_env_item(const uvcpp_env_item& obj) {
 }
 uvcpp_env_item& uvcpp_env_item::operator=(const uvcpp_env_item& obj) {
   if (this->env_item != nullptr) {
-    uv_env_item_t* hd = uvcpp::uv_alloc<uv_env_item_t>();
+    uv_env_item_t* hd = uvcpp::uvcpp_alloc<uv_env_item_t>();
     memcpy(hd, this->env_item, sizeof(uv_env_item_t));
     this->env_item = hd;
   } else {

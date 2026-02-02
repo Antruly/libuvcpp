@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_getaddrinfo.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_getaddrinfo::uvcpp_getaddrinfo() : uvcpp_req() {
-  uv_getaddrinfo_t* req = uvcpp::uv_alloc<uv_getaddrinfo_t>();
+  uv_getaddrinfo_t* req = uvcpp::uvcpp_alloc<uv_getaddrinfo_t>();
   this->set_req(req);
   this->init();
 }

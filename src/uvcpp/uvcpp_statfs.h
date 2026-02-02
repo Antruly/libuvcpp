@@ -9,11 +9,10 @@
 #ifndef SRC_UVCPP_UVCPP_STATFS_H
 #define SRC_UVCPP_UVCPP_STATFS_H
 
-#include <uvcpp/uv_define.h>
+#include <uvcpp/uvcpp_define.h>
 
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 29
-#include <uvcpp/uvcpp_define.h>
 
 namespace uvcpp {
 class UVCPP_API uvcpp_statfs {

@@ -1,17 +1,17 @@
 ﻿#include "uvcpp_utsname.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 25
 namespace uvcpp {
 uvcpp_utsname::uvcpp_utsname() {
-  this->utsname = uvcpp::uv_alloc<uv_utsname_t>();
+  this->utsname = uvcpp::uvcpp_alloc<uv_utsname_t>();
   this->init();
 }
 uvcpp_utsname::~uvcpp_utsname() { UVCPP_VFREE(this->utsname); }
 uvcpp_utsname::uvcpp_utsname(const uvcpp_utsname& obj) {
   if (this->utsname != nullptr) {
-    uv_utsname_t* hd = uvcpp::uv_alloc<uv_utsname_t>();
+    uv_utsname_t* hd = uvcpp::uvcpp_alloc<uv_utsname_t>();
     memcpy(hd, this->utsname, sizeof(uv_utsname_t));
     this->utsname = hd;
   } else {
@@ -20,7 +20,7 @@ uvcpp_utsname::uvcpp_utsname(const uvcpp_utsname& obj) {
 }
 uvcpp_utsname& uvcpp_utsname::operator=(const uvcpp_utsname& obj) {
   if (this->utsname != nullptr) {
-    uv_utsname_t* hd = uvcpp::uv_alloc<uv_utsname_t>();
+    uv_utsname_t* hd = uvcpp::uvcpp_alloc<uv_utsname_t>();
     memcpy(hd, this->utsname, sizeof(uv_utsname_t));
     this->utsname = hd;
   } else {

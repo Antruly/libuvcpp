@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_check.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_check::uvcpp_check() : uvcpp_handle() {
-  uv_check_t *check = uvcpp::uv_alloc<uv_check_t>();
+  uv_check_t *check = uvcpp::uvcpp_alloc<uv_check_t>();
   this->set_handle(check, true);
   init();
 }
@@ -10,7 +10,7 @@ uvcpp_check::uvcpp_check() : uvcpp_handle() {
 uvcpp_check::~uvcpp_check() {}
 
 uvcpp_check::uvcpp_check(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_check_t *check = uvcpp::uv_alloc<uv_check_t>();
+  uv_check_t *check = uvcpp::uvcpp_alloc<uv_check_t>();
   this->set_handle(check, true);
   this->init(loop);
 }

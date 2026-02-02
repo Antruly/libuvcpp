@@ -1,15 +1,15 @@
 ﻿#include "uvcpp_udp.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_udp::uvcpp_udp() : uvcpp_handle(), udp_recv_cb(){
-  uv_udp_t *udp = uvcpp::uv_alloc<uv_udp_t>();
+  uv_udp_t *udp = uvcpp::uvcpp_alloc<uv_udp_t>();
   this->set_handle(udp, true);
   this->init();
 }
 uvcpp_udp::~uvcpp_udp() {}
 
 uvcpp_udp::uvcpp_udp(uvcpp_loop *loop) : uvcpp_handle(), udp_recv_cb() {
-  uv_udp_t *udp = uvcpp::uv_alloc<uv_udp_t>();
+  uv_udp_t *udp = uvcpp::uvcpp_alloc<uv_udp_t>();
   this->set_handle(udp, true);
   this->init(loop);
 }
@@ -17,7 +17,7 @@ uvcpp_udp::uvcpp_udp(uvcpp_loop *loop) : uvcpp_handle(), udp_recv_cb() {
 #if UV_VERSION_MINOR >= 6
 uvcpp_udp::uvcpp_udp(uvcpp_loop *loop, unsigned int flags)
     : uvcpp_handle(), udp_recv_cb() {
-  uv_udp_t *udp = uvcpp::uv_alloc<uv_udp_t>();
+  uv_udp_t *udp = uvcpp::uvcpp_alloc<uv_udp_t>();
   this->set_handle(udp, true);
   this->init(loop, flags);
 }
@@ -105,18 +105,19 @@ int uvcpp_udp::set_broadcast(int on) { return uv_udp_set_broadcast(UVCPP_UDP_HAN
 
 int uvcpp_udp::set_ttl(int ttl) { return uv_udp_set_ttl(UVCPP_UDP_HANDLE, ttl); }
 
-int uvcpp_udp::send(uvcpp_udp_send *req, const uv_buf bufs[], unsigned int nbufs,
+int uvcpp_udp::send(uvcpp_udp_send *req, const uv_buf_t bufs[], unsigned int nbufs,
                const sockaddr *addr,
                std::function<void(uvcpp_udp_send *, int)> udp_send_cb) {
   req->udp_send_cb = udp_send_cb;
 
   return uv_udp_send(OBJ_UVCPP_UDP_SEND_REQ(*req), UVCPP_UDP_HANDLE,
-                     reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, addr,
+                     bufs,
+                     nbufs, addr,
                      uvcpp_udp_send::callback_udp_send);
 }
 
-int uvcpp_udp::recv_start(std::function<void(uvcpp_handle *, size_t, uv_buf *)> alloc_cb,
-                    std::function<void(uvcpp_udp *, ssize_t, const uv_buf *,
+int uvcpp_udp::recv_start(std::function<void(uvcpp_handle *, size_t, uv_buf_t*)> alloc_cb,
+                    std::function<void(uvcpp_udp *, ssize_t, const uv_buf_t*,
                                        const struct sockaddr *, unsigned int)>
                         recv_cb) {
   this->handle_alloc_cb = alloc_cb;
@@ -149,7 +150,8 @@ void uvcpp_udp::callback_udp_recv(uv_udp_t *handle, ssize_t nread,
   uvcpp_udp *wrapper = reinterpret_cast<uvcpp_udp *>(handle->data);
   if (!wrapper || !wrapper->udp_recv_cb)
     return;
-  const uv_buf *view = reinterpret_cast<const uv_buf *>(buf);
-  wrapper->udp_recv_cb(wrapper, nread, view, addr, flags);
+  wrapper->udp_recv_cb(wrapper, nread, buf,
+                       addr, flags);
+
 }
 } // namespace uvcpp

@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_poll.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_poll::uvcpp_poll() : uvcpp_handle() {
-  uv_poll_t* poll = uvcpp::uv_alloc<uv_poll_t>();
+  uv_poll_t* poll = uvcpp::uvcpp_alloc<uv_poll_t>();
   this->set_handle(poll, true);
   this->init();
 }
@@ -10,13 +10,13 @@ uvcpp_poll::uvcpp_poll() : uvcpp_handle() {
 uvcpp_poll::~uvcpp_poll() {}
 #ifdef WIN32
 uvcpp_poll::uvcpp_poll(uvcpp_loop *loop, int fd) : uvcpp_handle() {
-  uv_poll_t* poll = uvcpp::uv_alloc<uv_poll_t>();
+  uv_poll_t* poll = uvcpp::uvcpp_alloc<uv_poll_t>();
   this->set_handle(poll, true);
   init(loop, fd);
 }
 #endif
 uvcpp_poll::uvcpp_poll(uvcpp_loop *loop, uv_os_sock_t socket) : uvcpp_handle() {
-  uv_poll_t* poll = uvcpp::uv_alloc<uv_poll_t>();
+  uv_poll_t* poll = uvcpp::uvcpp_alloc<uv_poll_t>();
   this->set_handle(poll, true);
   init(loop, socket);
 }

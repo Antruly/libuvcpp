@@ -1,6 +1,6 @@
 ﻿/**
  * @file src/uvcpp/uvcpp_buf.h
- * @brief Higher-level buffer utility built on top of `uv_buf`.
+ * @brief Higher-level buffer utility built on top of `uv_buf_t`.
  * @author zhuweiye
  * @version 1.0.0
  */
@@ -9,26 +9,24 @@
 #ifndef SRC_UVCPP_UVCPP_BUF_H
 #define SRC_UVCPP_UVCPP_BUF_H
 
-#include <uvcpp/uv_define.h>
 #include <uvcpp/uvcpp_define.h>
-#include <uvcpp/uv_buf.h>
 #include <string>
 
 namespace uvcpp {
 
-class UVCPP_API uvcpp_buf : public uv_buf {
+class UVCPP_API uvcpp_buf{
 public:
+  UVCPP_DEFINE_FUNC(uvcpp_buf)
   UVCPP_DEFINE_COPY_FUNC(uvcpp_buf)
-  explicit uvcpp_buf();
-  ~uvcpp_buf();
+
   explicit uvcpp_buf(const char *bf, size_t sz);
   explicit uvcpp_buf(const ::std::string &str);
 
   void *operator new(size_t size);
   void operator delete(void *p);
 
-  explicit uvcpp_buf(const uv_buf &bf);
-  uvcpp_buf &operator=(const uv_buf &bf);
+  explicit uvcpp_buf(const uv_buf_t &bf);
+  uvcpp_buf &operator=(const uv_buf_t &bf);
 
   uvcpp_buf operator+(const uvcpp_buf &bf) const;
 
@@ -47,10 +45,13 @@ public:
   void resize(size_t sz);
   // set_data sets an external view (non-owning) when clean==false; when clean==true
   // it will copy data and take ownership.
-  void set_data(const char *bf, size_t sz, bool clean = true);
+  void set_data(const char *bf, size_t sz);
   void clone_data(const char *bf, size_t sz);
+  void clone_data(const uv_buf_t &src_buf);
   void append(const uvcpp_buf &srcBuf);
   void append_data(const char *bf, size_t sz);
+  void move_buf(uvcpp_buf &src_buf);
+  void clone_buf(const uvcpp_buf &src_buf);
 
   void insert_data(uint64_t point, const char *bf, size_t sz);
   void rewrite_data(uint64_t point, const char *bf, size_t sz);
@@ -67,9 +68,14 @@ public:
 
   ::std::string to_string() const;
 
+  uv_buf_t *out_uv_buf();
+  void in_uv_buf(uv_buf_t* bf);
+
+  static void alloc_buf(uv_buf_t *bf, size_t len);
+  static void free_buf(uv_buf_t *bf);
+
 private:
-  // Indicates whether this object owns base and should free it on destruction.
-  bool _owner = true;
+  uv_buf_t buf;
 };
 } // namespace uvcpp
 

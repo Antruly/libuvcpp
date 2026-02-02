@@ -1,13 +1,13 @@
 ﻿#include "uvcpp_timer.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_timer::uvcpp_timer() : uvcpp_handle() {
-  uv_timer_t* timer = uvcpp::uv_alloc<uv_timer_t>();
+  uv_timer_t* timer = uvcpp::uvcpp_alloc<uv_timer_t>();
   this->set_handle(timer, true);
   this->init();
 }
 uvcpp_timer::uvcpp_timer(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_timer_t* timer = uvcpp::uv_alloc<uv_timer_t>();
+  uv_timer_t* timer = uvcpp::uvcpp_alloc<uv_timer_t>();
   this->set_handle(timer, true);
   this->init(loop);
 }

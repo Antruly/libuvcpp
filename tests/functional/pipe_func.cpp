@@ -11,6 +11,7 @@
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
 #include "req/uvcpp_work.h"
+#include "uvcpp/uvcpp_buf.h"
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -52,7 +53,7 @@ int main() {
 
   client_ready_async.init([&](uvcpp_async* a) {
     // runs on client loop when server signals ready: connect and exchange via pipe
-    uvcpp_pipe *client = new uvcpp_pipe(&client_loop, 0);
+    uvcpp_pipe *client = new uvcpp_pipe(&client_loop, 1);  // ipc=1 for IPC mode
     uvcpp_connect *conn = new uvcpp_connect();
     client->connect(
         conn, pipe_name.c_str(),
@@ -60,13 +61,12 @@ int main() {
       if (status == 0) {
         // prepare to read echo
         client->read_start(
-          [](uvcpp_handle* h, size_t suggested_size, uv_buf* buf){
-            buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
-            buf->len = suggested_size;
+          [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf){
+            uvcpp_buf::alloc_buf(buf, suggested_size);
           },
           [&success, &client_loop, &server_stop_async](
                 uvcpp_stream *stream, ssize_t nread,
-                                 const uv_buf *buf) {
+                                 const uv_buf_t *buf) {
             if (nread > 0) {
               std::string s(buf->base, (size_t)nread);
               std::cout << "[functional pipe] client recv: " << s << std::endl;
@@ -76,21 +76,18 @@ int main() {
               stream->close(
                   [&client_loop](uvcpp_handle *hd) {
                 client_loop.stop();
-                delete hd;
               });
             }
-            if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+            uvcpp_free_bytes(buf->base);
           }
         );
 
         // send message
         const char *msg = "pipe_hello";
-        uv_buf *b = uvcpp::uv_alloc<uv_buf>();
-        b->base = (char*)uvcpp::uv_alloc_bytes(strlen(msg));
-        memcpy(b->base, msg, strlen(msg));
-        b->len = (unsigned int)strlen(msg);
+        uvcpp_buf bufcpp(msg);
+        uv_buf_t* b = bufcpp.out_uv_buf();
         uvcpp_write *w = new uvcpp_write();
-        w->set_buf(b, true);
+        w->set_uv_buf(b, true);
         client->write(w, b, 1, [](uvcpp_write* req, int stat){
           delete req;
         });
@@ -152,30 +149,28 @@ int main() {
           uvcpp_loop *work_loop = cd->work_loop;
 
           client->read_start(
-            [](uvcpp_handle* h, size_t suggested_size, uv_buf* buf){
-              buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
-              buf->len = suggested_size;
+            [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf){
+              uvcpp_buf::alloc_buf(buf, suggested_size);
             },
-            [work_loop](uvcpp_stream* stream, ssize_t nread, const uv_buf* buf){
+            [work_loop](uvcpp_stream* stream, ssize_t nread, const uv_buf_t* buf){
               if (nread > 0) {
                 std::string s(buf->base, (size_t)nread);
                 std::cout << "[worker pipe] recv: " << s << std::endl;
                 // echo back
-                uv_buf *echo = uvcpp::uv_alloc<uv_buf>();
-                echo->base = (char*)uvcpp::uv_alloc_bytes((size_t)nread);
-                memcpy(echo->base, buf->base, (size_t)nread);
-                echo->len = (unsigned int)nread;
+                uvcpp_buf bufcpp(buf->base, nread);
+                uv_buf_t* echo = bufcpp.out_uv_buf();
                 uvcpp_write *wreq = new uvcpp_write();
-                wreq->set_buf(echo, true);
-                stream->write(wreq, echo, 1, [](uvcpp_write* req, int stat){
+                wreq->set_uv_buf(echo, true);
+                stream->write(wreq, echo, 1, [wreq](uvcpp_write* req, int stat){
+                  // 发送完成，删除请求和回显缓冲区
                   delete req;
                 });
               } else if (nread == UV_EOF || nread < 0) {
-                stream->close([=](uvcpp_handle *hd) {
+                stream->close([work_loop](uvcpp_handle *hd) {
                   work_loop->stop();
                 });
               }
-              if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+              uvcpp_free_bytes(buf->base);
             }
           );
           // run the worker loop for this client

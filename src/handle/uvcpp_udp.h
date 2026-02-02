@@ -11,7 +11,6 @@
 #ifndef SRC_HANDLE_UVCPP_UDP_H
 #define SRC_HANDLE_UVCPP_UDP_H
 
-#include <uvcpp/uv_buf.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <handle/uvcpp_loop.h>
 #include <req/uvcpp_connect.h>
@@ -91,11 +90,11 @@ class UVCPP_API uvcpp_udp : public uvcpp_handle {
    * @param addr Destination address.
    * @param udp_send_cb Completion callback.
    */
-  int send(uvcpp_udp_send *req, const uv_buf bufs[], unsigned int nbufs,
+  int send(uvcpp_udp_send *req, const uv_buf_t bufs[], unsigned int nbufs,
            const struct sockaddr* addr,
            ::std::function<void(uvcpp_udp_send*, int)> udp_send_cb);
   /** @brief Try to send without queuing; returns error if would block. */
-  int try_send(const uv_buf bufs[], unsigned int nbufs,
+  int try_send(const uv_buf_t bufs[], unsigned int nbufs,
               const struct sockaddr* addr) {
     return uv_udp_try_send(UVCPP_UDP_HANDLE, reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, addr);
   }
@@ -106,9 +105,8 @@ class UVCPP_API uvcpp_udp : public uvcpp_handle {
    * @param udp_recv_cb Callback invoked for each received datagram.
    */
   int recv_start(
-      ::std::function<void(uvcpp_handle *, size_t, uv_buf *)> alloc_cb,
-                ::std::function<void(uvcpp_udp*,
-                                   ssize_t, const uv_buf *,
+      ::std::function<void(uvcpp_handle *, size_t, uv_buf_t*)> alloc_cb,
+                ::std::function<void(uvcpp_udp*, ssize_t, const uv_buf_t*,
                                    const struct sockaddr*,
                                    unsigned int)> udp_recv_cb_);
 #if UV_VERSION_MAJOR >= 1
@@ -130,7 +128,7 @@ class UVCPP_API uvcpp_udp : public uvcpp_handle {
  
 
  protected:
-  ::std::function<void(uvcpp_udp *, ssize_t, const uv_buf *,
+  ::std::function<void(uvcpp_udp *, ssize_t, const uv_buf_t*,
                         const struct sockaddr *, unsigned int)>
       udp_recv_cb;
  private:

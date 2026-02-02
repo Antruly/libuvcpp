@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_signal.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_signal::uvcpp_signal() : uvcpp_handle() {
-  uv_signal_t* signal = uvcpp::uv_alloc<uv_signal_t>();
+  uv_signal_t* signal = uvcpp::uvcpp_alloc<uv_signal_t>();
   this->set_handle(signal, true);
   this->init();
 }
@@ -10,7 +10,7 @@ uvcpp_signal::uvcpp_signal() : uvcpp_handle() {
 uvcpp_signal::~uvcpp_signal() { }
 
 uvcpp_signal::uvcpp_signal(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_signal_t* signal = uvcpp::uv_alloc<uv_signal_t>();
+  uv_signal_t* signal = uvcpp::uvcpp_alloc<uv_signal_t>();
   this->set_handle(signal, true);
   this->init(loop);
 }

@@ -1,10 +1,10 @@
 ﻿#include "uvcpp_random.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 33
 uvcpp_random::uvcpp_random() : uvcpp_req() {
-  uv_random_t* req = uvcpp::uv_alloc<uv_random_t>();
+  uv_random_t* req = uvcpp::uvcpp_alloc<uv_random_t>();
   this->set_req(req);
   this->init();
 }

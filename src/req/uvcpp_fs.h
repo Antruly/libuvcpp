@@ -51,7 +51,7 @@ class UVCPP_API uvcpp_fs : public uvcpp_req {
 
   int read(uvcpp_loop* loop,
            uv_file file,
-           const uv_buf bufs[],
+           const uv_buf_t bufs[],
            unsigned int nbufs,
            int64_t offset);
 
@@ -59,7 +59,7 @@ class UVCPP_API uvcpp_fs : public uvcpp_req {
 
   int write(uvcpp_loop* loop,
             uv_file file,
-            const uv_buf bufs[],
+            const uv_buf_t bufs[],
             unsigned int nbufs,
             int64_t offset);
 
@@ -163,7 +163,7 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
 
   int read(uvcpp_loop* loop,
            uv_file file,
-           const uv_buf bufs[],
+           const uv_buf_t bufs[],
            unsigned int nbufs,
            int64_t offset,
            ::std::function<void(uvcpp_fs*)> read_cb);
@@ -174,7 +174,7 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
 
   int write(uvcpp_loop* loop,
             uv_file file,
-            const uv_buf bufs[],
+            const uv_buf_t bufs[],
             unsigned int nbufs,
             int64_t offset,
             ::std::function<void(uvcpp_fs*)> write_cb);

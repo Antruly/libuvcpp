@@ -1,15 +1,15 @@
 ﻿#include "uvcpp_async.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_async::uvcpp_async() : uvcpp_handle() {
-  uv_async_t *async = uvcpp::uv_alloc<uv_async_t>();
+  uv_async_t *async = uvcpp::uvcpp_alloc<uv_async_t>();
   this->set_handle(async, true);
   this->init();
 }
 uvcpp_async::~uvcpp_async() {}
 
 uvcpp_async::uvcpp_async(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_async_t *async = uvcpp::uv_alloc<uv_async_t>();
+  uv_async_t *async = uvcpp::uvcpp_alloc<uv_async_t>();
   this->set_handle(async, true);
   this->init(loop);
 }

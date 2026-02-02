@@ -1,16 +1,16 @@
 ﻿#include "uvcpp_idle.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 namespace uvcpp {
 uvcpp_idle::uvcpp_idle() : uvcpp_handle() {
-  uv_idle_t *idle = uvcpp::uv_alloc<uv_idle_t>();
+  uv_idle_t *idle = uvcpp::uvcpp_alloc<uv_idle_t>();
   this->set_handle(idle, true);
   this->init();
 }
 uvcpp_idle::~uvcpp_idle() {}
 
 uvcpp_idle::uvcpp_idle(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_idle_t *idle = uvcpp::uv_alloc<uv_idle_t>();
+  uv_idle_t *idle = uvcpp::uvcpp_alloc<uv_idle_t>();
   this->set_handle(idle, true);
   this->init(loop);
 }

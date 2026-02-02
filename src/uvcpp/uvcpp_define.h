@@ -7,10 +7,11 @@
 #endif
 
 #include <cstdlib>
+#include <uvcpp/uvcpp_uv_define.h>
 // Allocation helpers
-#include "uvcpp/uv_alloc.h"
+#include <uvcpp/uvcpp_alloc.h>
 // Export macro for shared library visibility
-#include "uvcpp/uvcpp_export.h"
+#include <uvcpp/uvcpp_export.h>
 
 // Visual C++ 6.0
 #define _MSC_VER_VS6 1200 // _MSC_VER = 1200
@@ -50,7 +51,7 @@
 
 #define UVCPP_VFREE(_data)                                                     \
   if ((_data) != nullptr) {                                                    \
-    uvcpp::uv_free_bytes((void *)(_data));                                     \
+    uvcpp::uvcpp_free_bytes((void *)(_data));                                     \
     (_data) = nullptr;                                                         \
   };
 #define VFREE_ARRAY(_data, minNum, maxNum)                                     \

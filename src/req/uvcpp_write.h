@@ -10,7 +10,6 @@
 #define SRC_REQ_UVCPP_WRITE_H
 
 #include <req/uvcpp_req.h>
-#include <uvcpp/uv_buf.h>
 #include <uvcpp/uvcpp_buf.h>
 
 namespace uvcpp {
@@ -29,27 +28,23 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
   int init();
 
   /** @brief Set the main buffer to write; if owner=true wrapper will free it. */
-  void set_buf(const uv_buf *bf, bool owner = false);
+  void set_uv_buf(uv_buf_t *bf, bool owner = false);
   /** @brief Get the buffer previously set. */
-  const uv_buf *get_buf();
+  uv_buf_t *get_uv_buf();
   /** @brief Set a source buffer (used for send_handle scenarios). */
-  void set_src_buf(const uv_buf *bf, bool owner = false);
+  void set_src_buf(const uvcpp_buf *bf, bool owner = false);
   /** @brief Get the source buffer previously set. */
-  const uv_buf *get_src_buf();
+  const uvcpp_buf *get_src_buf();
   ::std::function<void(uvcpp_write*,int)> m_write_cb;
  public:
 
   /** @brief libuv uv_write_cb forwarded to m_write_cb. */
-  static void callback_write(uv_write_t* req, int status) {
-    if (reinterpret_cast<uvcpp_write*>(req->data)->m_write_cb)
-      reinterpret_cast<uvcpp_write*>(req->data)->m_write_cb(
-          reinterpret_cast<uvcpp_write*>(req->data), status);
-  }
+  static void callback_write(uv_write_t *req, int status);
 
   private:
-  const uv_buf *buf = nullptr;
-  const uv_buf *src_buf = nullptr;
-  bool buf_owner = false;
+  uv_buf_t *uv_buf = nullptr;
+  const uvcpp_buf *src_buf = nullptr;
+  bool uv_buf_owner = false;
   bool src_buf_owner = false;
 };
 } // namespace uvcpp

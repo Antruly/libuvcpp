@@ -1,17 +1,17 @@
 ﻿#include "uvcpp_metrics.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 45
 namespace uvcpp {
 uvcpp_metrics::uvcpp_metrics() {
-  this->metrics = uvcpp::uv_alloc<uv_metrics_t>();
+  this->metrics = uvcpp::uvcpp_alloc<uv_metrics_t>();
   this->init();
 }
 uvcpp_metrics::~uvcpp_metrics() { UVCPP_VFREE(this->metrics); }
 uvcpp_metrics::uvcpp_metrics(const uvcpp_metrics& obj) {
   if (this->metrics != nullptr) {
-    uv_metrics_t* hd = uvcpp::uv_alloc<uv_metrics_t>();
+    uv_metrics_t* hd = uvcpp::uvcpp_alloc<uv_metrics_t>();
     memcpy(hd, this->metrics, sizeof(uv_metrics_t));
     this->metrics = hd;
   } else {
@@ -20,7 +20,7 @@ uvcpp_metrics::uvcpp_metrics(const uvcpp_metrics& obj) {
 }
 uvcpp_metrics& uvcpp_metrics::operator=(const uvcpp_metrics& obj) {
   if (this->metrics != nullptr) {
-    uv_metrics_t* hd = uvcpp::uv_alloc<uv_metrics_t>();
+    uv_metrics_t* hd = uvcpp::uvcpp_alloc<uv_metrics_t>();
     memcpy(hd, this->metrics, sizeof(uv_metrics_t));
     this->metrics = hd;
   } else {

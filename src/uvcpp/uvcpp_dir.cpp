@@ -1,16 +1,16 @@
 ﻿#include "uvcpp_dir.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 28
 
 namespace uvcpp {
 uvcpp_dir::uvcpp_dir() {
-  _dir = uvcpp::uv_alloc<uv_dir_t>();
+  _dir = uvcpp::uvcpp_alloc<uv_dir_t>();
   init();
 }
 uvcpp_dir::~uvcpp_dir() { UVCPP_VFREE(_dir); }
 uvcpp_dir::uvcpp_dir(uvcpp_dirent *dr) {
-  _dir = uvcpp::uv_alloc<uv_dir_t>();
+  _dir = uvcpp::uvcpp_alloc<uv_dir_t>();
   init();
   _dir->dirents = dr->get_dirent();
 }

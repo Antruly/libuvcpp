@@ -1,15 +1,15 @@
 ﻿#include "uvcpp_fs_poll.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_fs_poll::uvcpp_fs_poll() : uvcpp_handle() {
-  uv_fs_poll_t *fs_poll = uvcpp::uv_alloc<uv_fs_poll_t>();
+  uv_fs_poll_t *fs_poll = uvcpp::uvcpp_alloc<uv_fs_poll_t>();
   this->set_handle(fs_poll, true);
   this->init();
 }
 uvcpp_fs_poll::~uvcpp_fs_poll() {}
 
 uvcpp_fs_poll::uvcpp_fs_poll(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_fs_poll_t *fs_poll = uvcpp::uv_alloc<uv_fs_poll_t>();
+  uv_fs_poll_t *fs_poll = uvcpp::uvcpp_alloc<uv_fs_poll_t>();
   this->set_handle(fs_poll, true);
   this->init(loop);
 }

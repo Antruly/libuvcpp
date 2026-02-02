@@ -1,17 +1,17 @@
 ﻿#include "uvcpp_passwd.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 9
 namespace uvcpp {
 uvcpp_passwd::uvcpp_passwd() {
-  this->passwd = uvcpp::uv_alloc<uv_passwd_t>();
+  this->passwd = uvcpp::uvcpp_alloc<uv_passwd_t>();
   this->init();
 }
 uvcpp_passwd::~uvcpp_passwd() { UVCPP_VFREE(this->passwd); }
 uvcpp_passwd::uvcpp_passwd(const uvcpp_passwd& obj) {
   if (this->passwd != nullptr) {
-    uv_passwd_t* hd = uvcpp::uv_alloc<uv_passwd_t>();
+    uv_passwd_t* hd = uvcpp::uvcpp_alloc<uv_passwd_t>();
     memcpy(hd, this->passwd, sizeof(uv_passwd_t));
     this->passwd = hd;
   } else {
@@ -20,7 +20,7 @@ uvcpp_passwd::uvcpp_passwd(const uvcpp_passwd& obj) {
 }
 uvcpp_passwd& uvcpp_passwd::operator=(const uvcpp_passwd& obj) {
   if (this->passwd != nullptr) {
-    uv_passwd_t* hd = uvcpp::uv_alloc<uv_passwd_t>();
+    uv_passwd_t* hd = uvcpp::uvcpp_alloc<uv_passwd_t>();
     memcpy(hd, this->passwd, sizeof(uv_passwd_t));
     this->passwd = hd;
   } else {

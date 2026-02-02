@@ -1,9 +1,9 @@
 ﻿#include "uvcpp_tty.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 
 uvcpp_tty::uvcpp_tty() : uvcpp_handle() {
-  uv_tty_t* tty = uvcpp::uv_alloc<uv_tty_t>();
+  uv_tty_t* tty = uvcpp::uvcpp_alloc<uv_tty_t>();
   this->set_handle(tty, true);
   this->init();
 }
@@ -11,7 +11,7 @@ uvcpp_tty::~uvcpp_tty() {}
 
 uvcpp_tty::uvcpp_tty(uvcpp_loop *loop, uv_file fd, int readable)
     : uvcpp_handle() {
-  uv_tty_t* tty = uvcpp::uv_alloc<uv_tty_t>();
+  uv_tty_t* tty = uvcpp::uvcpp_alloc<uv_tty_t>();
   this->set_handle(tty, true);
   this->init(loop, fd, readable);
 }

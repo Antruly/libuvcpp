@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_barrier.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_barrier::uvcpp_barrier() {
-  this->barrier = uvcpp::uv_alloc<uv_barrier_t>();
+  this->barrier = uvcpp::uvcpp_alloc<uv_barrier_t>();
 }
 uvcpp_barrier::~uvcpp_barrier() { UVCPP_VFREE(this->barrier); }
 int uvcpp_barrier::init(int ct) {

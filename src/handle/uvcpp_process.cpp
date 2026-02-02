@@ -1,5 +1,5 @@
 ﻿#include "uvcpp_process.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 namespace uvcpp {
 const char* _STR_NULL = "";
@@ -23,13 +23,13 @@ const char* _STR_NULL_ARRY[] = {_STR_NULL, nullptr};
 }
 
 uvcpp_process::uvcpp_process() : uvcpp_handle() {
-  uv_process_t* process = uvcpp::uv_alloc<uv_process_t>();
+  uv_process_t* process = uvcpp::uvcpp_alloc<uv_process_t>();
   this->set_handle(process, true);
   this->init();
 }
 
 uvcpp_process::uvcpp_process(uvcpp_loop* loop) : uvcpp_handle() {
-  uv_process_t* process = uvcpp::uv_alloc<uv_process_t>();
+  uv_process_t* process = uvcpp::uvcpp_alloc<uv_process_t>();
   this->set_handle(process, true);
   this->init(loop);
 }
@@ -43,7 +43,7 @@ uvcpp_process::~uvcpp_process() {
 int uvcpp_process::init() {
   // ensure options struct is allocated for later set_options usage
   if (options == nullptr) {
-    options = uvcpp::uv_alloc<uv_process_options_t>();
+    options = uvcpp::uvcpp_alloc<uv_process_options_t>();
   }
   memset(options, 0, sizeof(uv_process_options_t));
   memset(UVCPP_PROCESS_HANDLE, 0, sizeof(uv_process_t));
@@ -55,7 +55,7 @@ int uvcpp_process::init(uvcpp_loop *lp) {
   loop = lp;
   // ensure options struct is allocated for later set_options usage
   if (options == nullptr) {
-    options = uvcpp::uv_alloc<uv_process_options_t>();
+    options = uvcpp::uvcpp_alloc<uv_process_options_t>();
   }
   memset(options, 0, sizeof(uv_process_options_t));
   memset(UVCPP_PROCESS_HANDLE, 0, sizeof(uv_process_t));

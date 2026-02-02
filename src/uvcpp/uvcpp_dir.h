@@ -9,11 +9,10 @@
 #ifndef SRC_UVCPP_UVCPP_DIR_H
 #define SRC_UVCPP_UVCPP_DIR_H
 
-#include <uvcpp/uv_define.h>
+#include <uvcpp/uvcpp_define.h>
 
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 28
-#include <uvcpp/uvcpp_define.h>
 #include <uvcpp/uvcpp_dirent.h>
 
 namespace uvcpp {

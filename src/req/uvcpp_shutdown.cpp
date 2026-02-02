@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_shutdown.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_shutdown::uvcpp_shutdown() : uvcpp_req() {
-  uv_shutdown_t* shutdown = uvcpp::uv_alloc<uv_shutdown_t>();
+  uv_shutdown_t* shutdown = uvcpp::uvcpp_alloc<uv_shutdown_t>();
   this->set_req(shutdown);
   this->init();
 }

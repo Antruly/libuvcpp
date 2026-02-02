@@ -5,6 +5,7 @@
 #include "handle/uvcpp_poll.h"
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
+#include "uvcpp/uvcpp_buf.h"
 
 using namespace uvcpp;
 
@@ -61,28 +62,25 @@ int main() {
         std::cout << "[functional poll] server poll callback events=" << events << " status=" << status << std::endl;
         // start libuv read on the peer to consume data and echo it back
         peer->read_start(
-          [](uvcpp_handle* h, size_t suggested_size, uv_buf* buf) {
-            buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
-            buf->len = suggested_size;
+          [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf) {
+            uvcpp_buf::alloc_buf(buf, suggested_size);
           },
-          [peer, poller, p, &server_loop, &success](uvcpp_stream* stream, ssize_t nread, const uv_buf* buf) {
+          [peer, poller, p, &server_loop, &success](uvcpp_stream* stream, ssize_t nread, const uv_buf_t* buf) {
             if (nread > 0) {
               std::string s(buf->base, (size_t)nread);
               std::cout << "[functional poll] server read: " << s << std::endl;
               // echo back
-              uv_buf* b = uvcpp::uv_alloc<uv_buf>();
-              b->base = (char*)uvcpp::uv_alloc_bytes((size_t)nread);
-              memcpy(b->base, buf->base, (size_t)nread);
-              b->len = (unsigned int)nread;
+              uvcpp_buf bufcpp(buf->base, nread);
+              uv_buf_t* b = bufcpp.out_uv_buf();
               uvcpp_write* w = new uvcpp_write();
-              w->set_buf(b, true);
+              w->set_uv_buf(b, true);
               stream->write(w, b, 1, [w](uvcpp_write* req, int stat){
                 delete req;
               });
             } else {
               std::cout << "[functional poll] server read nread=" << nread << std::endl;
             }
-            if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+            uvcpp_free_bytes(buf->base);
             // on EOF or error, cleanup
             if (nread <= 0) {
               p->stop();
@@ -114,11 +112,10 @@ int main() {
       if (status == 0) {
         // start read to receive echo
         client.read_start(
-          [](uvcpp_handle* h, size_t suggested_size, uv_buf* buf) {
-            buf->base = (char*)uvcpp::uv_alloc_bytes(suggested_size);
-            buf->len = suggested_size;
+          [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf) {
+            uvcpp_buf::alloc_buf(buf, suggested_size);
           },
-          [&client_loop, &success](uvcpp_stream* stream, ssize_t nread, const uv_buf* buf) {
+          [&client_loop, &success](uvcpp_stream* stream, ssize_t nread, const uv_buf_t* buf) {
             if (nread > 0) {
               std::string s(buf->base, (size_t)nread);
               std::cout << "[functional poll] client recv: " << s << std::endl;
@@ -127,18 +124,16 @@ int main() {
                 client_loop.stop();
               });
             }
-            if (buf && buf->base) UVCPP_VFREE(((uv_buf*)buf)->base)
+            uvcpp_free_bytes(buf->base);
           }
         );
 
         // send message
         const char* msg = "poll_ping";
-        uv_buf* b = uvcpp::uv_alloc<uv_buf>();
-        b->base = (char*)uvcpp::uv_alloc_bytes(strlen(msg));
-        memcpy(b->base, msg, strlen(msg));
-        b->len = (unsigned int)strlen(msg);
+        uvcpp_buf bufcpp(msg);
+        uv_buf_t* b = bufcpp.out_uv_buf();
         uvcpp_write* w = new uvcpp_write();
-        w->set_buf(b, true);
+        w->set_uv_buf(b, true);
         client.write(w, b, 1, [w](uvcpp_write* req, int stat){
           delete req;
         });
@@ -158,5 +153,4 @@ int main() {
   std::cout << "[functional poll] done success=" << (success.load() ? "true" : "false") << std::endl;
   return success.load() ? 0 : 2;
 }
-
 

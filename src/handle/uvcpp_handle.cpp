@@ -48,10 +48,8 @@ void uvcpp_handle::callback_alloc(uv_handle_t *handle, size_t suggested_size,
   uvcpp_handle *wrapper = reinterpret_cast<uvcpp_handle *>(handle->data);
   if (!wrapper || !wrapper->handle_alloc_cb)
     return;
-
-  // Call user alloc callback with a uv_buf view directly (no copy).
-  uv_buf *view = reinterpret_cast<uv_buf *>(buf);
-  wrapper->handle_alloc_cb(wrapper, suggested_size, view);
+  // Call user alloc callback with a uvcpp_buf view directly (no copy).
+  wrapper->handle_alloc_cb(wrapper, suggested_size, buf);
 }
 
 void uvcpp_handle::callback_close(uv_handle_t *handle) {
@@ -88,7 +86,7 @@ uvcpp_handle::uvcpp_handle(const uvcpp_handle &obj)
     : handle_close_cb(), handle_alloc_cb(), _handle(nullptr), _handle_union() {
   if (obj._handle != nullptr) {
     size_t sz = uv_handle_size(obj._handle->type);
-    _handle = (uv_handle_t *)uvcpp::uv_alloc_bytes(sz);
+    _handle = (uv_handle_t *)uvcpp::uvcpp_alloc_bytes(sz);
     if (_handle == nullptr)
       throw std::bad_alloc();
     memcpy(this->_handle, obj._handle, sz);
@@ -105,7 +103,7 @@ uvcpp_handle &uvcpp_handle::operator=(const uvcpp_handle &obj) {
 
   if (obj._handle != nullptr) {
     size_t sz = uv_handle_size(obj._handle->type);
-    _handle = (uv_handle_t *)uvcpp::uv_alloc_bytes(sz);
+    _handle = (uv_handle_t *)uvcpp::uvcpp_alloc_bytes(sz);
     if (_handle == nullptr)
       throw std::bad_alloc();
     memcpy(this->_handle, obj._handle, sz);

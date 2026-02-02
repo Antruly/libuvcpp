@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_tcp.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_tcp::uvcpp_tcp() : uvcpp_stream() {
-  uv_tcp_t* tcp = uvcpp::uv_alloc<uv_tcp_t>();
+  uv_tcp_t* tcp = uvcpp::uvcpp_alloc<uv_tcp_t>();
   this->set_handle(tcp, true);
   this->init();
 }
@@ -16,14 +16,14 @@ uvcpp_tcp::~uvcpp_tcp() {
 }
 
 uvcpp_tcp::uvcpp_tcp(uvcpp_loop *loop) : uvcpp_stream() {
-  uv_tcp_t* tcp = uvcpp::uv_alloc<uv_tcp_t>();
+  uv_tcp_t* tcp = uvcpp::uvcpp_alloc<uv_tcp_t>();
   this->set_handle(tcp, true);
   this->init(loop);
 }
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 7
 uvcpp_tcp::uvcpp_tcp(uvcpp_loop *loop, unsigned int flags) : uvcpp_stream() {
-  uv_tcp_t* tcp = uvcpp::uv_alloc<uv_tcp_t>();
+  uv_tcp_t* tcp = uvcpp::uvcpp_alloc<uv_tcp_t>();
   this->set_handle(tcp, true);
   init(loop, flags);
 }

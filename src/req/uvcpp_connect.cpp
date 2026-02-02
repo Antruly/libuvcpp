@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_connect.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_connect::uvcpp_connect() : uvcpp_req() {
-  uv_connect_t* req = uvcpp::uv_alloc<uv_connect_t>();
+  uv_connect_t* req = uvcpp::uvcpp_alloc<uv_connect_t>();
   this->set_req(req);
   this->init();
 }

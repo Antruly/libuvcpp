@@ -1,7 +1,7 @@
 ﻿#include "uvcpp_loop.h"
 namespace uvcpp {
 uvcpp_loop::uvcpp_loop() : uvcpp_handle() {
-  uv_loop_t *loop = uvcpp::uv_alloc<uv_loop_t>();
+  uv_loop_t *loop = uvcpp::uvcpp_alloc<uv_loop_t>();
   if (loop == nullptr)
     throw std::bad_alloc();
   this->set_handle(loop, true);

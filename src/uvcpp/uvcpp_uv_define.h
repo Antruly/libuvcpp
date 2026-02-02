@@ -1,13 +1,13 @@
 ﻿/**
- * @file src/uvcpp/uv_define.h
+ * @file src/uvcpp/uvcpp_uv_define.h
  * @brief Project-wide low-level defines and helpers for libuv integration.
  * @author zhuweiye
  * @version 1.0.0
  */
 
 #pragma once
-#ifndef SRC_UVCPP_UV_DEFINE_H
-#define SRC_UVCPP_UV_DEFINE_H
+#ifndef SRC_UVCPP_UVCPP_UV_DEFINE_H
+#define SRC_UVCPP_UVCPP_UV_DEFINE_H
 
 extern "C" {
 #include <uv.h>
@@ -48,4 +48,4 @@ extern "C" {
     return;                                                                    \
   }
 
-#endif // SRC_UVCPP_UV_DEFINE_H
+#endif // SRC_UVCPP_UVCPP_UV_DEFINE_H

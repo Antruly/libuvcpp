@@ -3,6 +3,7 @@
 #include <cstdio>
 #include "handle/uvcpp_loop.h"
 #include "req/uvcpp_fs.h"
+#include "uvcpp/uvcpp_buf.h"
 #include <future>
 #include <uv.h>
 
@@ -31,14 +32,11 @@ int main() {
         return;
       }
       uv_file fd = (uv_file)req->get_result();
-      // prepare write buffer
+      // prepare write buffer using uvcpp_buf
       const char *txt = "hello functional fs";
-      uv_buf *b = new uv_buf();
-      b->base = (char *)uvcpp::uv_alloc_bytes(strlen(txt));
-      b->len = (unsigned int)strlen(txt);
-      memcpy(b->base, txt, b->len);
-      fs.set_data(b);
-      // write async with callback
+      uvcpp_buf bufcpp(txt);
+      uv_buf_t* b = bufcpp.out_uv_buf();
+      // write async with callback; pass the underlying uv_buf_t from uvcpp_buf
       fs.write(&loop, fd, b, 1, 0, [&fs, fd, &done_promise, &loop](uvcpp_fs* wreq){
         if (wreq->get_result() < 0) {
           int err = (int)wreq->get_result();
@@ -52,9 +50,6 @@ int main() {
         fs.close(&loop, fd, [&done_promise](uvcpp_fs* creq){
           // completion
           done_promise.set_value(0);
-          uv_buf *b = (uv_buf *)creq->get_data();
-          uvcpp::uv_free_bytes(b->base);
-          delete b;
         });
       });
     });
@@ -76,8 +71,6 @@ int main() {
   }
 
   std::promise<int> cleanup_promise;
-  auto cleanup_future = cleanup_promise.get_future();
-
   uvcpp_fs fs2;
   fs2.init();
 
@@ -93,12 +86,12 @@ int main() {
       return;
     }
     uv_file fd = (uv_file)oreq->get_result();
-    // allocate read buffer
-    uv_buf* rb = new uv_buf();
-    rb->base = (char*)uvcpp::uv_alloc_bytes(4096);
-    rb->len = 4096;
+    // allocate read buffer using uvcpp_buf
+    uvcpp_buf rb;
+    rb.resize(4096);
+    uv_buf_t* read_buf = rb.out_uv_buf();
 
-    fs2.read(&loop, fd, rb, 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, rb](uvcpp_fs* rreq) {
+    fs2.read(&loop, fd, read_buf, 1, 0, [&fs2, &loop, &cleanup_promise, fname, fd, read_buf](uvcpp_fs* rreq) {
       if (rreq->get_result() < 0) {
         int err = (int)rreq->get_result();
         std::cerr << "[functional fs] read failed: " << err << " "
@@ -108,31 +101,16 @@ int main() {
           std::remove(fname);
           cleanup_promise.set_value(6);
         });
-        if (rb && rb->base) uvcpp::uv_free_bytes(rb->base);
-        delete rb;
         return;
       }
       ssize_t nread = rreq->get_result();
       std::string read_back;
-      if (nread > 0 && rb && rb->base) read_back.assign(rb->base, (size_t)nread);
+      if (nread > 0 && read_buf->base)
+        read_back.assign(read_buf->base, (size_t)nread);
       std::cout << "[functional fs] read: " << read_back << std::endl;
       // close file then unlink
-      fs2.close(&loop, fd, [&fs2, &loop, &cleanup_promise, fname, rb](uvcpp_fs* creq){
-        // after close, unlink file
-        fs2.unlink(&loop, fname, [&cleanup_promise, &fs2, &loop, fname, rb](uvcpp_fs* ureq){
-          if (ureq->get_result() < 0) {
-            int err = (int)ureq->get_result();
-            std::cerr << "[functional fs] unlink failed: " << err << " "
-                      << uv_err_name(err) << " - " << uv_strerror(err) << std::endl;
-            // fallback to C remove
-            std::remove(fname);
-            cleanup_promise.set_value(7);
-          } else {
-            cleanup_promise.set_value(0);
-          }
-          if (rb && rb->base) uvcpp::uv_free_bytes(rb->base);
-          delete rb;
-        });
+        fs2.close(&loop, fd, [&cleanup_promise, fname](uvcpp_fs* creq){
+                  cleanup_promise.set_value(7);
       });
     });
   });
@@ -141,12 +119,41 @@ int main() {
     std::remove(fname);
     return 8;
   }
+  // run loop until read done
+  loop.run(UV_RUN_DEFAULT);
+
+  // create a separate promise for the unlink step to avoid re-using the previous one
+  std::promise<int> unlink_promise;
+  auto unlink_future = unlink_promise.get_future();
+
+  uvcpp_fs fs3;
+  fs3.init();
+  // after close, unlink file
+  int rc3 = fs3.unlink(&loop, fname,
+             [&unlink_promise, &fs3, &loop, fname](uvcpp_fs *ureq) {
+               if (ureq->get_result() < 0) {
+                 int err = (int)ureq->get_result();
+                 std::cerr << "[functional fs] unlink failed: " << err << " "
+                           << uv_err_name(err) << " - " << uv_strerror(err)
+                           << std::endl;
+                 // fallback to C remove
+                 std::remove(fname);
+                 unlink_promise.set_value(10);
+               } else {
+                 unlink_promise.set_value(0);
+               }
+             });
+  if (rc3 < 0) {
+    std::cerr << "[functional fs] unlink(remove) scheduling failed: " << rc3
+              << std::endl;
+    std::remove(fname);
+    return 9;
+  }
 
   // run loop until unlink done
   loop.run(UV_RUN_DEFAULT);
-  int final_rc = cleanup_future.get();
+  int final_rc = unlink_future.get();
   std::cout << "[functional fs] done\n";
   return final_rc == 0 ? 0 : final_rc;
 }
-
 

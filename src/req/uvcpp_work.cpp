@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_work.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_work::uvcpp_work() : uvcpp_req(),loop(nullptr) {
-  uv_work_t* work = uvcpp::uv_alloc<uv_work_t>();
+  uv_work_t* work = uvcpp::uvcpp_alloc<uv_work_t>();
   this->set_req(work);
   this->init();
 }

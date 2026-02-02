@@ -5,7 +5,7 @@ option(UVCPP_BUILD_TESTS "Build tests" ON)
 option(UVCPP_USE_SYSTEM_LIBUV "Prefer system libuv if found" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 message(STATUS "UVCPP version (from header will be printed at configure)")
@@ -57,15 +57,13 @@ if(WIN32 AND TARGET uvcpp)
     COMMENT "Copying uvcpp DLL next to test executables")
 endif()
 
-if(WIN32 AND TARGET uv)
-  # Copy libuv DLL next to unit and functional test executables after libuv build.
-  add_custom_command(TARGET uv POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>/"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uv> "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>/"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uv> "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/"
-    COMMENT "Copying libuv DLL next to test executables")
-endif()
+## NOTE:
+## We must not call add_custom_command(TARGET uv ...) from this directory because
+## the `uv` target is created inside the libuv subproject when FetchContent
+## brings it in. CMake requires add_custom_command(TARGET ...) to be invoked in
+## the same directory that created the target. Instead we rely on the
+## `copy_test_dlls` custom target below which adds PRE_BUILD copy steps and may
+## DEPEND on the `uv` target if it exists.
 
 if(WIN32)
   # Ensure PATH for tests includes build output dirs and install bin so DLLs are found.

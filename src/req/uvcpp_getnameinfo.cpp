@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_getnameinfo.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_getnameinfo::uvcpp_getnameinfo() : uvcpp_req() {
-  uv_getnameinfo_t* req = uvcpp::uv_alloc<uv_getnameinfo_t>();
+  uv_getnameinfo_t* req = uvcpp::uvcpp_alloc<uv_getnameinfo_t>();
   this->set_req(req);
   this->init();
 }

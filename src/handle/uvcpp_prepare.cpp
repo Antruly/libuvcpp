@@ -1,13 +1,13 @@
 ﻿#include "uvcpp_prepare.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_prepare::uvcpp_prepare() : uvcpp_handle() {
-  uv_prepare_t* prepare = uvcpp::uv_alloc<uv_prepare_t>();
+  uv_prepare_t* prepare = uvcpp::uvcpp_alloc<uv_prepare_t>();
   this->set_handle(prepare, true);
   this->init();
 }
 uvcpp_prepare::uvcpp_prepare(uvcpp_loop* loop) : uvcpp_handle() {
-  uv_prepare_t* prepare = uvcpp::uv_alloc<uv_prepare_t>();
+  uv_prepare_t* prepare = uvcpp::uvcpp_alloc<uv_prepare_t>();
   this->set_handle(prepare, true);
   this->init(loop);
 }

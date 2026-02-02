@@ -1,9 +1,9 @@
 ﻿#include "uvcpp_dirent.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 namespace uvcpp {
 uvcpp_dirent::uvcpp_dirent() {
-  this->dirent = uvcpp::uv_alloc<uv_dirent_t>();
+  this->dirent = uvcpp::uvcpp_alloc<uv_dirent_t>();
   this->init();
 }
 
@@ -11,7 +11,7 @@ uvcpp_dirent::~uvcpp_dirent() { UVCPP_VFREE(this->dirent); }
 
 uvcpp_dirent::uvcpp_dirent(const uvcpp_dirent& obj) {
   if (this->dirent != nullptr) {
-    uv_dirent_t* hd = uvcpp::uv_alloc<uv_dirent_t>();
+    uv_dirent_t* hd = uvcpp::uvcpp_alloc<uv_dirent_t>();
     memcpy(hd, this->dirent, sizeof(uv_dirent_t));
     this->dirent = hd;
   } else {
@@ -20,7 +20,7 @@ uvcpp_dirent::uvcpp_dirent(const uvcpp_dirent& obj) {
 }
 uvcpp_dirent& uvcpp_dirent::operator=(const uvcpp_dirent& obj) {
   if (this->dirent != nullptr) {
-    uv_dirent_t* hd = uvcpp::uv_alloc<uv_dirent_t>();
+    uv_dirent_t* hd = uvcpp::uvcpp_alloc<uv_dirent_t>();
     memcpy(hd, this->dirent, sizeof(uv_dirent_t));
     this->dirent = hd;
   } else {

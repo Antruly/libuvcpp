@@ -14,9 +14,8 @@
 
 #include <functional>
 #include <uvcpp/uvcpp_define.h>
-#include <uvcpp/uv_buf.h>
 #include <uvcpp/uvcpp_buf.h>
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 // ================= Handle类型转换宏 =================
 #define UVCPP_LOOP_HANDLE      reinterpret_cast<uv_loop_t *>(this->get_handle())
@@ -166,7 +165,7 @@ protected:
     /** @brief Replace the underlying handle pointer with ownership flag. */
     virtual void set_handle(void *hd, bool owns);
     ::std::function<void(uvcpp_handle *)> handle_close_cb;
-    ::std::function<void(uvcpp_handle *, size_t, uv_buf *)> handle_alloc_cb;
+    ::std::function<void(uvcpp_handle *, size_t, uv_buf_t*)> handle_alloc_cb;
 
 private:
     /** @brief Free internal handle memory if owned. */

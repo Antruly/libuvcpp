@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_fs_event.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_fs_event::uvcpp_fs_event() : uvcpp_handle() {
-  uv_fs_event_t *fs_event = uvcpp::uv_alloc<uv_fs_event_t>();
+  uv_fs_event_t *fs_event = uvcpp::uvcpp_alloc<uv_fs_event_t>();
   this->set_handle(fs_event, true);
   this->init();
 }
@@ -10,7 +10,7 @@ uvcpp_fs_event::uvcpp_fs_event() : uvcpp_handle() {
 uvcpp_fs_event::~uvcpp_fs_event() {}
 
 uvcpp_fs_event::uvcpp_fs_event(uvcpp_loop *loop) : uvcpp_handle() {
-  uv_fs_event_t *fs_event = uvcpp::uv_alloc<uv_fs_event_t>();
+  uv_fs_event_t *fs_event = uvcpp::uvcpp_alloc<uv_fs_event_t>();
   this->set_handle(fs_event, true);
   this->init(loop);
 }

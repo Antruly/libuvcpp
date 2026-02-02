@@ -9,11 +9,10 @@
 #ifndef SRC_UVCPP_UVCPP_METRICS_H
 #define SRC_UVCPP_UVCPP_METRICS_H
 
-#include <uvcpp/uv_define.h>
+#include <uvcpp/uvcpp_define.h>
 
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 45
-#include <uvcpp/uvcpp_define.h>
 #include <handle/uvcpp_loop.h>
 namespace uvcpp {
 class UVCPP_API uvcpp_metrics {

@@ -1,9 +1,9 @@
 ﻿#include "uvcpp_rwlock.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 
 uvcpp_rwlock::uvcpp_rwlock() {
-  this->rwlock = uvcpp::uv_alloc<uv_rwlock_t>();
+  this->rwlock = uvcpp::uvcpp_alloc<uv_rwlock_t>();
 }
 uvcpp_rwlock::~uvcpp_rwlock() { UVCPP_VFREE(this->rwlock); }
 int uvcpp_rwlock::init() { return uv_rwlock_init(this->rwlock); }

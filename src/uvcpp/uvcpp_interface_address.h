@@ -9,7 +9,6 @@
 #ifndef SRC_UVCPP_UVCPP_INTERFACE_ADDRESS_H
 #define SRC_UVCPP_UVCPP_INTERFACE_ADDRESS_H
 
-#include <uvcpp/uv_define.h>
 #include <uvcpp/uvcpp_define.h>
 #include <string>
 #include <vector>

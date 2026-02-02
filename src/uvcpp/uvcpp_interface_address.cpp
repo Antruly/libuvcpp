@@ -1,9 +1,9 @@
 ﻿#include "uvcpp_interface_address.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_interface_address::uvcpp_interface_address(
     const uvcpp_interface_address &addrs) {
-  interface_address = uvcpp::uv_alloc<uv_interface_address_t>();
+  interface_address = uvcpp::uvcpp_alloc<uv_interface_address_t>();
   memcpy(interface_address, addrs.interface_address, sizeof(uv_interface_address_t));
 }
 uvcpp_interface_address &
@@ -22,7 +22,7 @@ uvcpp_interface_address::get_all_interface_addresses() {
   for (int i = 0; i < count; ++i) {
     uvcpp_interface_address vaddrs;
     if (vaddrs.interface_address == nullptr) {
-      vaddrs.interface_address = uvcpp::uv_alloc<uv_interface_address_t>();
+      vaddrs.interface_address = uvcpp::uvcpp_alloc<uv_interface_address_t>();
     }
     memcpy(vaddrs.interface_address, &paddrs[i],
            sizeof(uv_interface_address_t));
@@ -35,7 +35,7 @@ uv_interface_address_t *uvcpp_interface_address::get_interface_address() const {
   return this->interface_address;
 }
 uvcpp_interface_address::uvcpp_interface_address() {
-  this->interface_address = uvcpp::uv_alloc<uv_interface_address_t>();
+  this->interface_address = uvcpp::uvcpp_alloc<uv_interface_address_t>();
 }
 uvcpp_interface_address::~uvcpp_interface_address() {
   UVCPP_VFREE(this->interface_address);

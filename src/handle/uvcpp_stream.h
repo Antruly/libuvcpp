@@ -13,7 +13,6 @@
 
 #include <handle/uvcpp_loop.h>
 #include <req/uvcpp_write.h>
-#include <uvcpp/uv_buf.h>
 namespace uvcpp {
 /**
  * @brief Wrapper for libuv stream handles providing TCP/pipe stream semantics.
@@ -38,8 +37,8 @@ public:
    * @param read_cb Read callback invoked with data or error.
    */
   int read_start(
-      ::std::function<void(uvcpp_handle *, size_t, uv_buf *)> alloc_cb,
-      ::std::function<void(uvcpp_stream *, ssize_t, const uv_buf *)>
+      ::std::function<void(uvcpp_handle *, size_t, uv_buf_t *)> alloc_cb,
+      ::std::function<void(uvcpp_stream *, ssize_t, const uv_buf_t *)>
           read_cb);
   /** @brief Stop reading from the stream. */
   int read_stop() { return uv_read_stop(UVCPP_STREAM_HANDLE); }
@@ -50,19 +49,19 @@ public:
    * @param nbufs Number of buffers.
    * @param write_cb Completion callback.
    */
-  int write(uvcpp_write *req, const uv_buf bufs[], unsigned int nbufs,
+  int write(uvcpp_write *req, const uv_buf_t bufs[], unsigned int nbufs,
             ::std::function<void(uvcpp_write*, int)> write_cb);
   /**
    * @brief Queue a write request and optionally send a handle.
    * @param send_handle Optional stream whose handle will be sent.
    */
-  int write(uvcpp_write *req, const uv_buf bufs[], unsigned int nbufs,
+  int write(uvcpp_write *req, const uv_buf_t bufs[], unsigned int nbufs,
             uvcpp_stream* send_handle,
             ::std::function<void(uvcpp_write*, int)> write_cb);
 
   /** @brief Try to write immediately without queuing. */
-  int try_write(const uv_buf bufs[], unsigned int nbufs);
-  int try_write(const uv_buf bufs[], unsigned int nbufs,
+  int try_write(const uv_buf_t bufs[], unsigned int nbufs);
+  int try_write(const uv_buf_t bufs[], unsigned int nbufs,
                uvcpp_stream *send_handle);
 
   /** @brief Return non-zero if stream is readable. */
@@ -74,14 +73,15 @@ public:
 
 protected:
   std::function<void(uvcpp_stream *, int)> stream_connection_cb;
-  std::function<void(uvcpp_stream *, ssize_t, const uv_buf *)>
+  std::function<void(uvcpp_stream *, ssize_t, const uv_buf_t*)>
       stream_read_cb;
 
 private:
   /** @brief Internal callback for new connections from libuv. */
   static void callback_connection(uv_stream_t* handle, int status);
   /** @brief Internal callback for read events from libuv. */
-  static void callback_read(uv_stream_t* handle, ssize_t nread, const uv_buf_t* buf);
+  static void callback_read(uv_stream_t *handle, ssize_t nread,
+                            const uv_buf_t *buf);
 };
 } // namespace uvcpp
 

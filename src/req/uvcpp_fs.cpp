@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_fs.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_fs::uvcpp_fs() : uvcpp_req() {
-  uv_fs_t* req = uvcpp::uv_alloc<uv_fs_t>();
+  uv_fs_t* req = uvcpp::uvcpp_alloc<uv_fs_t>();
   this->set_req(req);
   this->init();
 }
@@ -47,21 +47,23 @@ int uvcpp_fs::open(uvcpp_loop* loop, const char* path, int flags, int mode) {
                     nullptr);
 }
 
-int uvcpp_fs::read(uvcpp_loop* loop, uv_file file, const uv_buf bufs[], unsigned int nbufs,
+int uvcpp_fs::read(uvcpp_loop* loop, uv_file file, const uv_buf_t bufs[], unsigned int nbufs,
               int64_t offset) {
   return uv_fs_read(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
-                    reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, nullptr);
+                    reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
+                    nullptr);
 }
 
 int uvcpp_fs::unlink(uvcpp_loop* loop, const char* path) {
   return uv_fs_unlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, nullptr);
 }
 
-int uvcpp_fs::write(uvcpp_loop *loop, uv_file file, const uv_buf bufs[],
+int uvcpp_fs::write(uvcpp_loop *loop, uv_file file, const uv_buf_t bufs[],
                     unsigned int nbufs,
                int64_t offset) {
   return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
-                     reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, nullptr);
+                     reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
+                     nullptr);
 }
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 14
@@ -250,13 +252,14 @@ int uvcpp_fs::open(uvcpp_loop* loop,
 }
 
 int uvcpp_fs::read(uvcpp_loop* loop,
-                     uv_file file, const uv_buf bufs[],
+                     uv_file file, const uv_buf_t bufs[],
                      unsigned int nbufs,
                      int64_t offset,
                      ::std::function<void(uvcpp_fs*)> read_cb) {
   fs_read_cb = read_cb;
   return uv_fs_read(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
-                    reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, callback_read);
+                    reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
+                    callback_read);
 }
 
 int uvcpp_fs::unlink(uvcpp_loop* loop,
@@ -267,13 +270,14 @@ int uvcpp_fs::unlink(uvcpp_loop* loop,
 }
 
 int uvcpp_fs::write(uvcpp_loop* loop,
-                     uv_file file, const uv_buf bufs[],
+                     uv_file file, const uv_buf_t bufs[],
                      unsigned int nbufs,
                      int64_t offset,
                      ::std::function<void(uvcpp_fs*)> write_cb) {
   fs_write_cb = write_cb;
   return uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
-                     reinterpret_cast<const ::uv_buf_t*>(bufs), nbufs, offset, callback_write);
+                     reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
+                     callback_write);
 }
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 14

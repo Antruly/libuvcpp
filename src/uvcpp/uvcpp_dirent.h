@@ -9,7 +9,6 @@
 #ifndef SRC_UVCPP_UVCPP_DIRENT_H
 #define SRC_UVCPP_UVCPP_DIRENT_H
 
-#include <uvcpp/uv_define.h>
 #include <uvcpp/uvcpp_define.h>
 
 namespace uvcpp {

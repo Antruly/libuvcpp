@@ -1,8 +1,8 @@
 ﻿#include "uvcpp_pipe.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 namespace uvcpp {
 uvcpp_pipe::uvcpp_pipe() : uvcpp_stream() {
-  uv_pipe_t *pipe = uvcpp::uv_alloc<uv_pipe_t>();
+  uv_pipe_t *pipe = uvcpp::uvcpp_alloc<uv_pipe_t>();
   this->set_handle(pipe, true);
   this->init();
 }
@@ -10,7 +10,7 @@ uvcpp_pipe::uvcpp_pipe() : uvcpp_stream() {
 uvcpp_pipe::~uvcpp_pipe() {}
 
 uvcpp_pipe::uvcpp_pipe(uvcpp_loop *loop, int pic) : uvcpp_stream() {
-  uv_pipe_t *pipe = uvcpp::uv_alloc<uv_pipe_t>();
+  uv_pipe_t *pipe = uvcpp::uvcpp_alloc<uv_pipe_t>();
   this->set_handle(pipe, true);
   this->init(loop, pic);
 }

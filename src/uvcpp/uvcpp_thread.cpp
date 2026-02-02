@@ -1,9 +1,9 @@
 ﻿#include "uvcpp_thread.h"
-#include <uvcpp/uv_alloc.h>
+#include <uvcpp/uvcpp_alloc.h>
 
 namespace uvcpp {
 uvcpp_thread::uvcpp_thread() {
-  thread = uvcpp::uv_alloc<uv_thread_t>();
+  thread = uvcpp::uvcpp_alloc<uv_thread_t>();
 }
 
 uvcpp_thread::~uvcpp_thread() { UVCPP_VFREE(this->thread); }
