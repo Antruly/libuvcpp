@@ -40,7 +40,7 @@
 
 ## 构建要求 (Requirements)
 
-- C++17 或更高版本
+- C++11 或更高版本
 - CMake 3.16+
 - libuv 1.0.0+
 - 支持 Windows / Linux / macOS

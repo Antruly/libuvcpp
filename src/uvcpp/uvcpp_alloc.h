@@ -27,7 +27,7 @@ template<typename T>
 inline T* uvcpp_alloc_arry(size_t len) {
   T* p = static_cast<T*>(std::malloc(sizeof(T)*len));
   if (p == nullptr) throw std::bad_alloc();
-  std::memset(p, 0, sizeof(T));
+  std::memset(p, 0, sizeof(T)*len);  // 修复：初始化整个数组
   return p;
 }
 
