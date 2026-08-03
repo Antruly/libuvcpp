@@ -13,6 +13,7 @@
     #include <windows.h>
 #else
     #include <sys/mman.h>
+    #include <unistd.h>
 #endif
 #include <uvcpp/uvcpp_alloc.h>
 

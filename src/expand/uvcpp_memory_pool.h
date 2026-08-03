@@ -29,6 +29,7 @@
 #include <thread>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <new>
 
 namespace uvcpp {

@@ -355,9 +355,8 @@ private:
 // Thread Cache - 每个线程本地缓存
 // ========================
 
-// 前向声明 central_cache
+// Forward declaration for central_cache (used by thread_cache before definition)
 class central_cache;
-// 全局 Central Cache（在使用前必须先初始化，这里声明，定义在后面）
 extern central_cache g_central_cache;
 
 class thread_cache {
@@ -550,7 +549,7 @@ private:
 static thread_local thread_cache g_thread_cache;
 
 // 全局 Central Cache
-static central_cache g_central_cache;
+central_cache g_central_cache;
 
 // ========================
 // Span 管理
