@@ -1,0 +1,21 @@
+# Build directories
+build/
+build_libuvcpp_vs2022_x64/
+out/
+_deps/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+
+# OS
+.DS_Store
+Thumbs.db

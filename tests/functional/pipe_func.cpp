@@ -1,16 +1,16 @@
-﻿#include <iostream>
+#include <iostream>
 #include <thread>
 #include <uv.h>
 #include <future>
 #include <atomic>
 #include <cstring>
+#include <string>
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_pipe.h"
 #include "handle/uvcpp_timer.h"
 #include "handle/uvcpp_async.h"
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
-#include "req/uvcpp_work.h"
 #include "uvcpp/uvcpp_buf.h"
 #if !defined(_WIN32)
 #include <unistd.h>
@@ -20,94 +20,32 @@ using namespace uvcpp;
 
 int main() {
   std::cout << "[functional pipe] start\n";
-  uvcpp_loop loop;
-  loop.init();
 
-  // Two-thread pipe test (server/client) with async readiness and stop signals.
   std::atomic<bool> success(false);
   std::string pipe_name;
 #if defined(_WIN32)
-  pipe_name = "\\\\.\\pipe\\uvcpp_pipe_test";
+  pipe_name = "\\\\.\\pipe\\uvcpp_pipe_test_" + std::to_string(GetCurrentProcessId());
 #else
-  pipe_name = "/tmp/uvcpp_pipe_test";
+  pipe_name = "/tmp/uvcpp_pipe_test_" + std::to_string(getpid());
 #endif
 
   std::promise<void> server_ready;
   auto server_ready_future = server_ready.get_future();
-  std::atomic<uvcpp_async*> client_ready_async_ptr(nullptr);
+  std::promise<void> client_loop_ready;
+  auto client_loop_ready_future = client_loop_ready.get_future();
 
-  uvcpp_async server_stop_async;
-  uvcpp_async client_ready_async;
-
-  uvcpp_loop server_loop;
-  server_loop.init();
-  // client loop and its ready async created before server thread so server can notify it
-  uvcpp_loop client_loop;
-  client_loop.init();
-
-  // init async to stop server (client will call)
-  server_stop_async.init([&server_loop](uvcpp_async *a) { 
-      server_loop.stop(); 
-      },
-                         &server_loop);
-
-  client_ready_async.init([&](uvcpp_async* a) {
-    // runs on client loop when server signals ready: connect and exchange via pipe
-    uvcpp_pipe *client = new uvcpp_pipe(&client_loop, 1);  // ipc=1 for IPC mode
-    uvcpp_connect *conn = new uvcpp_connect();
-    client->connect(
-        conn, pipe_name.c_str(),
-        [conn, client, &success, &client_loop, &server_stop_async](uvcpp_connect *r, int status) {
-      if (status == 0) {
-        // prepare to read echo
-        client->read_start(
-          [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf){
-            uvcpp_buf::alloc_buf(buf, suggested_size);
-          },
-          [&success, &client_loop, &server_stop_async](
-                uvcpp_stream *stream, ssize_t nread,
-                                 const uv_buf_t *buf) {
-            if (nread > 0) {
-              std::string s(buf->base, (size_t)nread);
-              std::cout << "[functional pipe] client recv: " << s << std::endl;
-              success.store(true);
-              // notify server to stop, then close and stop client
-              server_stop_async.send();
-              stream->close(
-                  [&client_loop](uvcpp_handle *hd) {
-                client_loop.stop();
-              });
-            }
-            uvcpp_free_bytes(buf->base);
-          }
-        );
-
-        // send message
-        const char *msg = "pipe_hello";
-        uvcpp_buf bufcpp(msg);
-        uv_buf_t* b = bufcpp.out_uv_buf();
-        uvcpp_write *w = new uvcpp_write();
-        w->set_uv_buf(b, true);
-        client->write(w, b, 1, [](uvcpp_write* req, int stat){
-          delete req;
-        });
-      } else {
-        std::cout << "[functional pipe] client error status: " << status
-                  << " name=" << uv_err_name(status)
-                  << " msg=" << uv_strerror(status) << std::endl;
-        client_loop.stop();
-      }
-      delete conn;
-    });
-  }, &client_loop);
-  client_ready_async_ptr.store(&client_ready_async);
-
-  // server thread
+  // server thread: loop created and run in the same thread
   std::thread server_thread([&](){
-   
+    uvcpp_loop server_loop;
+    server_loop.init();
+
+    uvcpp_async server_stop_async;
+    server_stop_async.init([&server_loop](uvcpp_async*) {
+      server_loop.stop();
+    }, &server_loop);
+
     uvcpp_pipe server(&server_loop, 0);
 #if !defined(_WIN32)
-    // remove leftover socket file to avoid bind failure when running whole suite
     ::unlink(pipe_name.c_str());
 #endif
     int rc = server.bind(pipe_name.c_str());
@@ -115,114 +53,135 @@ int main() {
       std::cout << "[functional pipe] server bind failed rc=" << rc
                 << " (" << uv_err_name(rc) << ") "
                 << uv_strerror(rc) << std::endl;
-      server_loop.stop();
+      exit(rc);
       return;
     }
     std::cout << "[functional pipe] server bind/listen setup\n";
+
     server.listen([&](uvcpp_stream* s, int status){
       if (status < 0) return;
-      // accept into a peer handle and hand off to worker via uvcpp_work
-      // create a client pipe bound to the worker loop (so accept transfers to worker loop)
+      uvcpp_pipe* peer = new uvcpp_pipe(&server_loop, 0);
+      int rc = s->accept(peer);
+      if (rc != 0) {
+        std::cout << "[functional pipe] server accept failed rc=" << rc << " ("
+                  << uv_err_name(rc) << ") " << uv_strerror(rc) << std::endl;
+        delete peer;
+        return;
+      }
 
-      struct new_client_data {
-        uvcpp_loop *work_loop;
-        uvcpp_pipe *client;
-      };
-
-      new_client_data *client_data = new new_client_data();
-      client_data->work_loop = new uvcpp_loop();
-      client_data->work_loop->init();
-      client_data->client = new uvcpp_pipe(client_data->work_loop, 0);
-      s->accept(client_data->client);
-      std::cout << "[functional pipe] accepted client, queued to work\n";
-
-      uvcpp_work* work = new uvcpp_work();
-      work->init();
-      work->set_data(client_data);
-
-      work->queue_work(&server_loop,
-        // work_cb: runs in worker thread
-        [](uvcpp_work* w) {
-          std::cout << "[functional pipe] work_cb start\n";
-          new_client_data *cd = (new_client_data *)w->get_data();
-          uvcpp_pipe *client = cd->client;
-          uvcpp_loop *work_loop = cd->work_loop;
-
-          client->read_start(
-            [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf){
-              uvcpp_buf::alloc_buf(buf, suggested_size);
-            },
-            [work_loop](uvcpp_stream* stream, ssize_t nread, const uv_buf_t* buf){
-              if (nread > 0) {
-                std::string s(buf->base, (size_t)nread);
-                std::cout << "[worker pipe] recv: " << s << std::endl;
-                // echo back
-                uvcpp_buf bufcpp(buf->base, nread);
-                uv_buf_t* echo = bufcpp.out_uv_buf();
-                uvcpp_write *wreq = new uvcpp_write();
-                wreq->set_uv_buf(echo, true);
-                stream->write(wreq, echo, 1, [wreq](uvcpp_write* req, int stat){
-                  // 发送完成，删除请求和回显缓冲区
-                  delete req;
-                });
-              } else if (nread == UV_EOF || nread < 0) {
-                stream->close([work_loop](uvcpp_handle *hd) {
-                  work_loop->stop();
-                });
-              }
-              uvcpp_free_bytes(buf->base);
-            }
-          );
-          // run the worker loop for this client
-          work_loop->run(UV_RUN_DEFAULT);
-          std::cout << "[functional pipe] work_cb end\n";
-
+      // Pipe is a stream, use read_start directly (no poll needed)
+      peer->read_start(
+        [](uvcpp_handle*, size_t sz, uv_buf_t* buf) {
+          uvcpp_buf::alloc_buf(buf, sz > 0 ? sz : 4096);
         },
-        // after_work: runs on server loop thread, cleanup
-        [&server_loop](uvcpp_work *w, int status) {
-          std::cout << "[functional pipe] after_work start status=" << status << std::endl;
-          new_client_data *cd = (new_client_data *)w->get_data();
-          uvcpp_pipe *client = cd->client;
-          uvcpp_loop *work_loop = cd->work_loop;
-          delete client;
-          delete work_loop;
-          delete cd;
-          std::cout << "[functional pipe] after_work cleanup done\n";
-          delete w;
+        [peer, &server_loop](uvcpp_stream* stream, ssize_t nread, const uv_buf_t* buf) {
+          if (nread > 0) {
+            std::string s(buf->base, (size_t)nread);
+            std::cout << "[functional pipe] server recv: " << s << std::endl;
+            // Echo back
+            std::unique_ptr<uvcpp_buf> bufcpp(new uvcpp_buf(buf->base, nread));
+            uvcpp_buf::free_buf(const_cast<uv_buf_t*>(buf));
+
+            uvcpp_write* w = new uvcpp_write();
+            w->set_uv_buf(bufcpp->out_uv_buf(), true);
+            stream->write(w, w->get_uv_buf(), 1, [w, bufcpp = bufcpp.release()](uvcpp_write* req, int stat){
+              delete bufcpp;
+              delete req;
+            });
+          } else {
+            uvcpp_buf::free_buf(const_cast<uv_buf_t*>(buf));
+            stream->close([&server_loop, peer](uvcpp_handle*){
+              server_loop.stop();
+              delete peer;
+            });
+          }
         }
       );
     }, 128);
 
-    // start a watchdog timer on server loop to avoid hangs
+    // Watchdog timer
     uvcpp_timer server_watchdog(&server_loop);
     server_watchdog.start([&server_loop](uvcpp_timer *t){
       std::cout << "[functional pipe] server watchdog timeout, stopping loop\n";
       server_loop.stop();
       t->stop();
-    }, 10000, 0);
+    }, 5000, 0);
 
+    // Wait for client loop to be ready, then signal
+    client_loop_ready_future.wait();
     std::cout << "[functional pipe] server listen configured, signaling client\n";
-    // server ready -> notify client via client's async
-    uvcpp_async* client_async = client_ready_async_ptr.load();
-    if (client_async) client_async->send();
     server_ready.set_value();
     server_loop.run(UV_RUN_DEFAULT);
-
   });
 
-  // start a watchdog timer on client loop
-  uvcpp_timer *client_watchdog = new uvcpp_timer(&client_loop);
-  client_watchdog->start(
-      [&client_loop, client_watchdog](uvcpp_timer *t) {
-        std::cout
-            << "[functional pipe] client watchdog timeout, stopping loop\n";
-        client_loop.stop();
-        t->stop();
-      },
-      10000, 0);
+  // client thread: loop created and run in the same thread
+  std::thread client_thread([&](){
+    uvcpp_loop client_loop;
+    client_loop.init();
 
-  // run client loop in separate thread
-  std::thread client_thread([&client_loop]() {
+    // Client async: triggered when server is ready
+    uvcpp_async client_start_async;
+    client_start_async.init([&](uvcpp_async*) {
+      uvcpp_pipe *client = new uvcpp_pipe(&client_loop, 1);  // ipc=1 for IPC mode
+      uvcpp_connect *conn = new uvcpp_connect();
+      client->connect(
+          conn, pipe_name.c_str(),
+          [conn, client, &success, &client_loop](uvcpp_connect *r, int status) {
+        if (status == 0) {
+          client->read_start(
+            [](uvcpp_handle* h, size_t suggested_size, uv_buf_t* buf){
+              uvcpp_buf::alloc_buf(buf, suggested_size > 0 ? suggested_size : 4096);
+            },
+            [client, &success, &client_loop](uvcpp_stream *stream, ssize_t nread, const uv_buf_t *buf) {
+              if (nread > 0) {
+                std::string s(buf->base, (size_t)nread);
+                std::cout << "[functional pipe] client recv: " << s << std::endl;
+                success.store(true);
+              }
+              uvcpp_buf::free_buf(const_cast<uv_buf_t*>(buf));
+              stream->close([&client_loop, client](uvcpp_handle*) {
+                client_loop.stop();
+                delete client;
+              });
+            }
+          );
+
+          const char *msg = "pipe_hello";
+          std::unique_ptr<uvcpp_buf> bufcpp(new uvcpp_buf(msg));
+          uvcpp_write *w = new uvcpp_write();
+          w->set_uv_buf(bufcpp->out_uv_buf(), true);
+          client->write(w, w->get_uv_buf(), 1, [w, bufcpp = bufcpp.release()](uvcpp_write* req, int stat){
+            delete bufcpp;
+            delete req;
+          });
+        } else {
+          std::cout << "[functional pipe] client error status: " << status
+                    << " name=" << uv_err_name(status)
+                    << " msg=" << uv_strerror(status) << std::endl;
+          client_loop.stop();
+          delete client;
+        }
+        delete conn;
+      });
+    }, &client_loop);
+
+    // Signal that client loop is ready
+    client_loop_ready.set_value();
+
+    // Wait for server to be ready, then trigger client
+    server_ready_future.wait();
+
+    // Send async to start client connection
+    client_start_async.send();
+
+    // Watchdog timer
+    uvcpp_timer client_watchdog(&client_loop);
+    client_watchdog.start([&client_loop](uvcpp_timer *t) {
+      std::cout << "[functional pipe] client watchdog timeout, stopping loop\n";
+      client_loop.stop();
+      t->stop();
+    }, 5000, 0);
+
     client_loop.run(UV_RUN_DEFAULT);
   });
 
@@ -232,5 +191,3 @@ int main() {
   std::cout << "[functional pipe] done success=" << (success.load() ? "true" : "false") << std::endl;
   return success.load() ? 0 : 2;
 }
-
-

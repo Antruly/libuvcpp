@@ -5,6 +5,9 @@ option(UVCPP_BUILD_TESTS "Build tests" ON)
 option(UVCPP_USE_SYSTEM_LIBUV "Prefer system libuv if found" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
+# 扩展模块选项（默认开启）
+option(UVCPP_BUILD_EXPAND "Build expand module (memory pool, page heap)" ON)
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -125,9 +128,13 @@ option(UVCPP_BUILD_STATIC "Build static uvcpp library" ${_default_uvcpp_build_st
 file(GLOB UVCPP_SRC_FILES "${CMAKE_SOURCE_DIR}/src/uvcpp/*.h" "${CMAKE_SOURCE_DIR}/src/uvcpp/*.cpp")
 file(GLOB HANDLE_SRC_FILES "${CMAKE_SOURCE_DIR}/src/handle/*.h" "${CMAKE_SOURCE_DIR}/src/handle/*.cpp")
 file(GLOB REQ_SRC_FILES "${CMAKE_SOURCE_DIR}/src/req/*.h" "${CMAKE_SOURCE_DIR}/src/req/*.cpp")
+file(GLOB EXPAND_SRC_FILES "${CMAKE_SOURCE_DIR}/src/expand/*.h" "${CMAKE_SOURCE_DIR}/src/expand/*.cpp")
 source_group("uvcpp" FILES ${UVCPP_SRC_FILES})
 source_group("handle" FILES ${HANDLE_SRC_FILES})
 source_group("req" FILES ${REQ_SRC_FILES})
+if(UVCPP_BUILD_EXPAND)
+  source_group("expand" FILES ${EXPAND_SRC_FILES})
+endif()
 
 # read version from header (src/uvcpp/uvcpp_version.h)
 file(READ "${CMAKE_SOURCE_DIR}/src/uvcpp/uvcpp_version.h" UVCPP_VERSION_H)
@@ -143,6 +150,28 @@ message(STATUS "uvcpp version: ${UVCPP_VERSION}")
 # sources
 file(GLOB_RECURSE UVCPP_SOURCES CONFIGURE_DEPENDS src/*.cpp src/*/*.cpp)
 file(GLOB_RECURSE UVCPP_HEADERS CONFIGURE_DEPENDS src/*.h src/*/*.h)
+
+# 定义宏：当启用 expand 模块时启用内存池
+if(UVCPP_BUILD_EXPAND)
+  add_compile_definitions(UVCPP_ENABLE_MEMORY_POOL=1)
+  message(STATUS "Memory pool enabled (UVCPP_ENABLE_MEMORY_POOL=1)")
+else()
+  add_compile_definitions(UVCPP_ENABLE_MEMORY_POOL=0)
+  message(STATUS "Memory pool disabled (UVCPP_ENABLE_MEMORY_POOL=0)")
+endif()
+
+# 根据 UVCPP_BUILD_EXPAND 选项排除 expand 模块
+if(NOT UVCPP_BUILD_EXPAND)
+  message(STATUS "Excluding expand module from build")
+  list(REMOVE_ITEM UVCPP_SOURCES "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_allocator.cpp")
+  list(REMOVE_ITEM UVCPP_SOURCES "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_memory_pool_span.cpp")
+  list(REMOVE_ITEM UVCPP_SOURCES "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_heap.cpp")
+  list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_allocator.h")
+  list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_memory_pool_span.h")
+  list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_heap.h")
+else()
+  message(STATUS "Including expand module in build (TCMalloc-like allocator)")
+endif()
 
 # Create uvcpp targets according to user selection.
 # Shared target
@@ -234,6 +263,9 @@ if (UVCPP_BUILD_TESTS)
   if (UVCPP_BUILD_FUNCTIONAL)
     add_subdirectory(tests/functional)
   endif()
+  if (UVCPP_BUILD_EXPAND)
+    add_subdirectory(tests/expand)
+  endif()
 endif()
 
 # Only add the legacy req tests subdirectory if it still exists (we consolidated tests into unit/)
@@ -288,6 +320,11 @@ endif()
 file(GLOB REQ_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/req/*.h")
 if(REQ_HEADER_FILES)
   install(FILES ${REQ_HEADER_FILES} DESTINATION include/req)
+endif()
+
+file(GLOB EXPAND_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/expand/*.h")
+if(EXPAND_HEADER_FILES AND UVCPP_BUILD_EXPAND)
+  install(FILES ${EXPAND_HEADER_FILES} DESTINATION include/expand)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too
