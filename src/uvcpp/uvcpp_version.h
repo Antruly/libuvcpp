@@ -2,7 +2,7 @@
  * @file src/uvcpp/uvcpp_version.h
  * @brief Library version macros and helpers.
  * @author zhuweiye
- * @version 1.0.2
+ * @version 1.0.3
  */
 
 #pragma once
