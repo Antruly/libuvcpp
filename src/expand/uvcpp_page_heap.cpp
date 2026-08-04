@@ -454,13 +454,13 @@ public:
                         last = ptr;
                     }
                     actual_count++;
-                    span->in_use.fetch_sub(1, std::memory_order_relaxed);
+                    span->in_use.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
             }
             if (!ptr) break;
         }
-        
+
         if (first) {
             *((void**)last) = nullptr;
             // 将获取的块添加到 thread cache
@@ -840,52 +840,69 @@ void* uvcpp_memory_pool_enterprise::allocate_from_span(size_t size)
 {
     size_t size_class = uvcpp_size_class_index(size);
     const auto& info = k_size_classes[size_class];
-    
-    // 尝试从 central cache 获取
-    span_header* span = g_central_cache.remove_span(size_class);
-    
-    if (!span) {
-        // 需要分配新 span
-        span = allocate_span_from_system(info.pages, info.block_size);
-        if (!span) return nullptr;
 
-        // 初始化 freelist，每个块前面有 page_block_header
-        char* user_ptr = (char*)span->base_addr + k_span_header_size_actual;
-        size_t total_size = info.pages * k_page_size();
-        char* end = (char*)span->base_addr + total_size;
-        
-        void* first = nullptr;
-        void* prev = nullptr;
-        
-        while (user_ptr + info.block_size + k_page_block_header_size_actual <= end) {
-            // 设置 page_block_header
-            page_block_header* header = (page_block_header*)user_ptr;
-            header->size_class = (uint32_t)size_class;
-            header->requested_size = size;
-            header->flags = 0;
-            header->span = span;
-            header->next = nullptr;
-            
-            // 用户指针从 page_block_header 之后开始
-            void* cur = (void*)(user_ptr + k_page_block_header_size_actual);
-            *((void**)cur) = nullptr;
-            
-            if (prev) {
-                *((void**)prev) = cur;
-            } else {
-                first = cur;
+    // Try to get an existing span from central cache and pop a block from it.
+    span_header* span = g_central_cache.remove_span(size_class);
+
+    if (span) {
+        // Try to pop a block from the existing span's freelist.
+        void* ptr = span->free_list.load(std::memory_order_relaxed);
+        while (ptr) {
+            void* next = *((void**)ptr);
+            if (span->free_list.compare_exchange_weak(ptr, next,
+                std::memory_order_release, std::memory_order_relaxed)) {
+                span->in_use.fetch_add(1, std::memory_order_relaxed);
+                g_in_use.fetch_add(1, std::memory_order_relaxed);
+                // Re-add the span to central cache so other threads can
+                // use its remaining blocks.
+                g_central_cache.add_span(span, size_class);
+                return ptr;
             }
-            prev = cur;
-            user_ptr += k_page_block_header_size_actual + info.block_size;
         }
-        
-        span->free_list.store(first, std::memory_order_relaxed);
-        
-        // 添加到 central cache
+        // The existing span's freelist is exhausted. Re-add it to the
+        // central cache (freed blocks will be returned to it) and fall
+        // through to allocate a fresh span.
         g_central_cache.add_span(span, size_class);
     }
-    
-    // 从 span 获取一个块
+
+    // Allocate a fresh span from the system.
+    span = allocate_span_from_system(info.pages, info.block_size);
+    if (!span) return nullptr;
+
+    // Initialize freelist with page_block_header before each block.
+    char* user_ptr = (char*)span->base_addr + k_span_header_size_actual;
+    size_t total_size = info.pages * k_page_size();
+    char* end = (char*)span->base_addr + total_size;
+
+    void* first = nullptr;
+    void* prev = nullptr;
+
+    while (user_ptr + info.block_size + k_page_block_header_size_actual <= end) {
+        page_block_header* header = (page_block_header*)user_ptr;
+        header->size_class = (uint32_t)size_class;
+        header->requested_size = size;
+        header->flags = 0;
+        header->span = span;
+        header->next = nullptr;
+
+        void* cur = (void*)(user_ptr + k_page_block_header_size_actual);
+        *((void**)cur) = nullptr;
+
+        if (prev) {
+            *((void**)prev) = cur;
+        } else {
+            first = cur;
+        }
+        prev = cur;
+        user_ptr += k_page_block_header_size_actual + info.block_size;
+    }
+
+    span->free_list.store(first, std::memory_order_relaxed);
+
+    // Add to central cache so other threads can find it.
+    g_central_cache.add_span(span, size_class);
+
+    // Pop one block from the new span.
     void* ptr = span->free_list.load(std::memory_order_relaxed);
     while (ptr) {
         void* next = *((void**)ptr);
@@ -896,7 +913,8 @@ void* uvcpp_memory_pool_enterprise::allocate_from_span(size_t size)
             return ptr;
         }
     }
-    
+
+    // A freshly allocated span should always have free blocks.
     return nullptr;
 }
 
