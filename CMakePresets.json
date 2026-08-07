@@ -1,0 +1,28 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (net module only)",
+      "description": "Build with net module, no web/HTTP",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "UVCPP_BUILD_NET": "ON",
+        "UVCPP_BUILD_WEB": "OFF"
+      }
+    },
+    {
+      "name": "web",
+      "displayName": "Web (HTTP/WebSocket)",
+      "description": "Build with net + web module (llhttp)",
+      "binaryDir": "${sourceDir}/build_web",
+      "cacheVariables": {
+        "UVCPP_BUILD_NET": "ON",
+        "UVCPP_BUILD_WEB": "ON",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "FETCHCONTENT_SOURCE_DIR_LLHTTP": "${sourceDir}/_local_deps/llhttp",
+        "FETCHCONTENT_SOURCE_DIR_LIBUV": "${sourceDir}/_local_deps/libuv"
+      }
+    }
+  ]
+}

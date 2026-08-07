@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 3.20)
 project(uvcpp_functional_tests)
 
 file(GLOB FUNC_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
+
+# Exclude web tests when web module is not built
+if(NOT UVCPP_BUILD_WEB)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "web_.*\.cpp$")
+endif()
+
 foreach(test_src ${FUNC_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
   string(REGEX REPLACE "[^a-zA-Z0-9_]" "_" exe_name "test_${test_name}")

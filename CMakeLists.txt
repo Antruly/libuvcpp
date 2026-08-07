@@ -8,6 +8,25 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 # 扩展模块选项（默认开启）
 option(UVCPP_BUILD_EXPAND "Build expand module (memory pool, page heap)" ON)
 
+# =========================================================================
+# 网络模块和 Web 模块开关
+# =========================================================================
+option(UVCPP_BUILD_NET  "Build net module (TCP/UDP client/server)"  ON)
+option(UVCPP_BUILD_WEB  "Build web module (HTTP/WebSocket)"         OFF)
+
+# =========================================================================
+# Web 子开关 — 仅在 UVCPP_BUILD_WEB=ON 时有效
+# =========================================================================
+option(UVCPP_ENABLE_ZLIB    "Enable zlib (gzip, WebSocket Per-Message Deflate)"  OFF)
+option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS, WSS) [NOT YET IMPLEMENTED]"   OFF)
+
+# =========================================================================
+# 依赖库版本覆盖
+# =========================================================================
+set(LLHTTP_VERSION  "release/v9.2.0" CACHE STRING "llhttp git tag to fetch")
+set(ZLIB_VERSION    "v1.3.1"         CACHE STRING "zlib git tag to fetch")
+set(OPENSSL_VERSION "openssl-3.4.0"  CACHE STRING "OpenSSL git tag to fetch")
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -36,6 +55,71 @@ if (UVCPP_BUILD_LIBUV_FROM_SOURCE OR NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIB OR N
   # When fetched, prefer building/using the libuv target provided by libuv CMake
   set(LIBUV_INCLUDE_DIR ${libuv_SOURCE_DIR}/include)
   set(LIBUV_LIB uv)
+endif()
+
+# =========================================================================
+# Web 模块依赖下载
+# =========================================================================
+if(UVCPP_BUILD_WEB)
+  # -------------------------------------------------------------------
+  # llhttp — HTTP 解析器, WEB=ON 时必须下载
+  # -------------------------------------------------------------------
+  message(STATUS "Fetching llhttp via FetchContent (tag=${LLHTTP_VERSION})")
+  FetchContent_Declare(
+    llhttp
+    GIT_REPOSITORY  https://github.com/nodejs/llhttp.git
+    GIT_TAG         ${LLHTTP_VERSION}
+    GIT_SHALLOW     TRUE
+  )
+  FetchContent_MakeAvailable(llhttp)
+  message(STATUS "llhttp integrated (tag=${LLHTTP_VERSION})")
+
+  # -------------------------------------------------------------------
+  # zlib
+  # -------------------------------------------------------------------
+  if(UVCPP_ENABLE_ZLIB)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+      message(STATUS "Using system zlib ${ZLIB_VERSION_STRING}")
+    else()
+      message(STATUS "Fetching zlib via FetchContent (tag=${ZLIB_VERSION})")
+      FetchContent_Declare(
+        zlib
+        GIT_REPOSITORY  https://github.com/madler/zlib.git
+        GIT_TAG         ${ZLIB_VERSION}
+        GIT_SHALLOW     TRUE
+      )
+      FetchContent_MakeAvailable(zlib)
+      message(STATUS "zlib integrated (tag=${ZLIB_VERSION})")
+    endif()
+  endif()
+
+  # -------------------------------------------------------------------
+  # OpenSSL / SSL module
+  # -------------------------------------------------------------------
+  if(UVCPP_ENABLE_OPENSSL)
+    # Try system OpenSSL first, then FetchContent as fallback
+    find_package(OpenSSL QUIET)
+    if(OPENSSL_FOUND)
+      message(STATUS "Using system OpenSSL ${OPENSSL_VERSION}")
+      set(UVCPP_SSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
+    else()
+      # FetchContent for OpenSSL is complex (requires Perl for config).
+      # On Windows, prefer installing via vcpkg or pre-built binaries.
+      message(WARNING "System OpenSSL not found. Install OpenSSL or use vcpkg.")
+      message(WARNING "  vcpkg: vcpkg install openssl:x64-windows")
+      message(WARNING "  Or download from https://slproweb.com/products/Win32OpenSSL.html")
+      set(UVCPP_ENABLE_OPENSSL OFF)
+    endif()
+  endif()
+endif()
+
+# =========================================================================
+# SSL 模块源文件
+# =========================================================================
+if(UVCPP_ENABLE_OPENSSL)
+  file(GLOB SSL_SRC_FILES "${CMAKE_SOURCE_DIR}/src/ssl/*.h" "${CMAKE_SOURCE_DIR}/src/ssl/*.cpp")
+  source_group("ssl" FILES ${SSL_SRC_FILES})
 endif()
 
 # After all tests registered, set ENV for each test so PATH includes uvcpp/libuv build dirs and install bin.
@@ -138,6 +222,12 @@ if(UVCPP_BUILD_EXPAND)
   source_group("expand" FILES ${EXPAND_SRC_FILES})
 endif()
 
+# web module source_group
+file(GLOB WEB_SRC_FILES "${CMAKE_SOURCE_DIR}/src/web/*.h" "${CMAKE_SOURCE_DIR}/src/web/*.cpp")
+if(UVCPP_BUILD_WEB)
+  source_group("web" FILES ${WEB_SRC_FILES})
+endif()
+
 # read version from header (src/uvcpp/uvcpp_version.h)
 file(READ "${CMAKE_SOURCE_DIR}/src/uvcpp/uvcpp_version.h" UVCPP_VERSION_H)
 string(REGEX MATCH "#define[ \t]+UVCPP_VERSION_MAJOR[ \t]+([0-9]+)" _ ${UVCPP_VERSION_H})
@@ -162,6 +252,39 @@ else()
   message(STATUS "Memory pool disabled (UVCPP_ENABLE_MEMORY_POOL=0)")
 endif()
 
+# 定义宏：net / web 模块开关
+if(UVCPP_BUILD_NET)
+  add_compile_definitions(UVCPP_NET_ENABLE=1)
+  message(STATUS "Net module enabled (UVCPP_NET_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_NET_ENABLE=0)
+  message(STATUS "Net module disabled (UVCPP_NET_ENABLE=0)")
+endif()
+
+if(UVCPP_BUILD_WEB)
+  add_compile_definitions(UVCPP_WEB_ENABLE=1)
+  message(STATUS "Web module enabled (UVCPP_WEB_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_WEB_ENABLE=0)
+  message(STATUS "Web module disabled (UVCPP_WEB_ENABLE=0)")
+endif()
+
+if(UVCPP_ENABLE_ZLIB)
+  add_compile_definitions(UVCPP_ZLIB_ENABLE=1)
+  message(STATUS "zlib enabled (UVCPP_ZLIB_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_ZLIB_ENABLE=0)
+  message(STATUS "zlib disabled (UVCPP_ZLIB_ENABLE=0)")
+endif()
+
+if(UVCPP_ENABLE_OPENSSL)
+  add_compile_definitions(UVCPP_OPENSSL_ENABLE=1)
+  message(STATUS "OpenSSL enabled (UVCPP_OPENSSL_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_OPENSSL_ENABLE=0)
+  message(STATUS "OpenSSL disabled (UVCPP_OPENSSL_ENABLE=0)")
+endif()
+
 # 根据 UVCPP_BUILD_EXPAND 选项排除 expand 模块
 if(NOT UVCPP_BUILD_EXPAND)
   message(STATUS "Excluding expand module from build")
@@ -173,6 +296,32 @@ if(NOT UVCPP_BUILD_EXPAND)
   list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_heap.h")
 else()
   message(STATUS "Including expand module in build (TCMalloc-like allocator)")
+endif()
+
+# 根据 UVCPP_BUILD_NET 选项排除 net 模块
+if(NOT UVCPP_BUILD_NET)
+  message(STATUS "Excluding net module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/net/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/net/")
+else()
+  message(STATUS "Including net module in build")
+endif()
+
+# 根据 UVCPP_BUILD_WEB 选项排除 web 模块
+if(NOT UVCPP_BUILD_WEB)
+  message(STATUS "Excluding web module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/web/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/web/")
+else()
+  message(STATUS "Including web module in build")
+endif()
+
+# 根据 UVCPP_ENABLE_OPENSSL 排除 ssl 模块
+if(NOT UVCPP_ENABLE_OPENSSL)
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/ssl/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/ssl/")
+else()
+  message(STATUS "Including ssl module in build (OpenSSL ${OPENSSL_VERSION})")
 endif()
 
 # Create uvcpp targets according to user selection.
@@ -250,6 +399,35 @@ if (TARGET uvcpp_a)
 endif()
 if (TARGET uvcpp_a_s)
   set_target_properties(uvcpp_a_s PROPERTIES DEBUG_POSTFIX "d")
+endif()
+
+# =========================================================================
+# Web 模块依赖链接 — 为所有 uvcpp target 附加 llhttp / zlib
+# =========================================================================
+if(UVCPP_BUILD_WEB)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      target_link_libraries(${_tgt} PRIVATE llhttp::llhttp)
+      if(UVCPP_ENABLE_ZLIB)
+        if(TARGET zlibstatic)
+          target_link_libraries(${_tgt} PRIVATE zlibstatic)
+        elseif(ZLIB_FOUND)
+          target_link_libraries(${_tgt} PRIVATE ${ZLIB_LIBRARIES})
+        endif()
+      endif()
+    endif()
+  endforeach()
+endif()
+
+if(UVCPP_ENABLE_OPENSSL)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      target_link_libraries(${_tgt} PRIVATE ${UVCPP_SSL_LIBS})
+      if(WIN32)
+        target_link_libraries(${_tgt} PRIVATE crypt32 user32 advapi32)
+      endif()
+    endif()
+  endforeach()
 endif()
 
 # Select the library target that tests/consumers should link to by default.
@@ -340,6 +518,16 @@ endif()
 file(GLOB NET_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/net/*.h")
 if(NET_HEADER_FILES)
   install(FILES ${NET_HEADER_FILES} DESTINATION include/net)
+endif()
+
+file(GLOB WEB_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/web/*.h")
+if(WEB_HEADER_FILES AND UVCPP_BUILD_WEB)
+  install(FILES ${WEB_HEADER_FILES} DESTINATION include/web)
+endif()
+
+file(GLOB SSL_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/ssl/*.h")
+if(SSL_HEADER_FILES AND UVCPP_ENABLE_OPENSSL)
+  install(FILES ${SSL_HEADER_FILES} DESTINATION include/ssl)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too

@@ -1,8 +1,20 @@
 # Build directories
 build/
-build_libuvcpp_vs2022_x64/
+build_*/
+build_noexpand/
+build_nopool/
 out/
 _deps/
+_local_*/
+Testing/
+
+# Development docs / temp
+docs/
+*.txt
+websocket_parser.h
+websocket_parser.c
+stdout.txt
+stderr.txt
 
 # IDE
 .vs/
@@ -15,7 +27,13 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 *.cmake
+!cmake/uvcppConfig.cmake.in
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Package
+*.tar.gz
+*.zip
+*.7z

@@ -447,6 +447,7 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
             write_fn_  = nullptr;
             write_arg_ = nullptr;
           }
+          has_async_write_cb_ = false;
           delete wr;
         });
 
@@ -766,10 +767,20 @@ int uvcpp_tcp_client::read_wait(uvcpp_buf& out_buf, int timeout_ms) {
 int uvcpp_tcp_client::read_stop() {
   clear_status(TCP_CLIENT_READABLE);
   read_started_ = false;
+  has_async_read_cb_ = false;
+  if (read_arg_ != nullptr) {
+    delete static_cast<std::function<void(uvcpp_buf*)>*>(read_arg_);
+    read_arg_ = nullptr;
+  }
+  read_fn_ = nullptr;
   return tcp_->read_stop();
 }
 
 void uvcpp_tcp_client::set_on_close(std::function<void()> cb) {
+  if (close_arg_ != nullptr) {
+    delete static_cast<std::function<void()>*>(close_arg_);
+    close_arg_ = nullptr;
+  }
   close_fn_  = trampoline_close;
   close_arg_ = new std::function<void()>(cb);
 }
