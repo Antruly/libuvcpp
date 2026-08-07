@@ -75,6 +75,15 @@ class UVCPP_API uvcpp_tcp_client {
   UVCPP_DEFINE_FUNC(uvcpp_tcp_client)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_tcp_client)
 
+  /**
+   * @brief Construct a client that shares an external event loop.
+   *
+   * Used by uvcpp_tcp_server to create accepted clients that run on the
+   * server's loop. The client does NOT own the loop and will not close it
+   * on destruction.
+   */
+  explicit uvcpp_tcp_client(uvcpp_loop* external_loop);
+
   // -----------------------------------------------------------------
   // Accessors
   // -----------------------------------------------------------------
@@ -96,6 +105,24 @@ class UVCPP_API uvcpp_tcp_client {
 
   /** @brief Check whether all given status flags are set. */
   bool has_status(int flags) const;
+
+  /** @brief Check whether an async read callback has been registered. */
+  bool has_read_callback() const;
+
+  /** @brief Check whether an async write callback has been registered. */
+  bool has_write_callback() const;
+
+  /** @brief Check whether a close callback has been registered. */
+  bool has_close_callback() const;
+
+  /**
+   * @brief Mark the client as accepted (connected without a connect() call).
+   *
+   * Used by uvcpp_tcp_server to set the initial CONNECTED | READABLE |
+   * WRITABLE state on accepted clients so that write() and read_start()
+   * work correctly.
+   */
+  void mark_accepted();
 
   // -----------------------------------------------------------------
   // Address helpers
@@ -156,7 +183,7 @@ class UVCPP_API uvcpp_tcp_client {
   // -----------------------------------------------------------------
 
   /**
-   * @brief Write data to the connection.
+   * @brief Write data to the connection (raw pointer + length).
    *
    * @param data Pointer to data to send.
    * @param len  Number of bytes to send.
@@ -169,11 +196,45 @@ class UVCPP_API uvcpp_tcp_client {
             std::function<void(int)> cb = nullptr);
 
   /**
-   * @brief Synchronous write with explicit timeout.
+   * @brief Write data from a uvcpp_buf (auto-copy).
+   *
+   * The buffer's data is copied internally; the caller retains ownership
+   * and the original uvcpp_buf is unchanged after the call.
+   */
+  int write(const uvcpp_buf& buf,
+            std::function<void(int)> cb = nullptr);
+
+  /**
+   * @brief Write data from a uvcpp_buf pointer (zero-copy, transfers ownership).
+   *
+   * The buffer's internal data is moved out via out_uv_buf() and passed
+   * directly to the write layer.  After the call the uvcpp_buf is empty.
+   * The caller still owns the uvcpp_buf object itself (e.g. must delete
+   * it if heap-allocated) — only the data payload is transferred.
+   *
+   * NOTE: do NOT pass the address of a temporary; the pointer must remain
+   * valid until the write callback fires (for async) or the call returns
+   * (for sync).
+   */
+  int write(uvcpp_buf* buf,
+            std::function<void(int)> cb = nullptr);
+
+  /**
+   * @brief Synchronous write with explicit timeout (raw pointer).
    * @throws std::runtime_error if an async write callback was already
    *         registered.
    */
   int write_wait(const char* data, size_t len, int timeout_ms = 30000);
+
+  /**
+   * @brief Synchronous write from uvcpp_buf (auto-copy).
+   */
+  int write_wait(const uvcpp_buf& buf, int timeout_ms = 30000);
+
+  /**
+   * @brief Synchronous write from uvcpp_buf pointer (zero-copy).
+   */
+  int write_wait(uvcpp_buf* buf, int timeout_ms = 30000);
 
   // -----------------------------------------------------------------
   // Read
@@ -203,6 +264,17 @@ class UVCPP_API uvcpp_tcp_client {
 
   /** @brief Stop reading from the connection. */
   int read_stop();
+
+  /**
+   * @brief Register a callback to be invoked when the connection closes.
+   *
+   * Fires on UV_EOF (graceful peer shutdown) or read error.
+   * Used by uvcpp_tcp_server to auto-delete disconnected clients.
+   */
+  void set_on_close(std::function<void()> cb);
+
+  /** @brief Remove any registered close callback. */
+  void clear_on_close();
 
   // -----------------------------------------------------------------
   // Loop control (async mode)
@@ -245,6 +317,7 @@ class UVCPP_API uvcpp_tcp_client {
 
   uvcpp_loop* loop_ = nullptr;
   uvcpp_tcp*  tcp_  = nullptr;
+  bool owns_loop_   = true;  ///< false for server-managed clients
   int status_       = TCP_CLIENT_NONE;
   int last_error_code_ = 0;
 
@@ -264,6 +337,7 @@ class UVCPP_API uvcpp_tcp_client {
   using connect_callback_t = void(*)(int status, void* arg);
   using write_callback_t   = void(*)(int status, void* arg);
   using read_callback_t    = void(*)(uvcpp_buf* buf, void* arg);
+  using close_callback_t   = void(*)(void* arg);
 
   connect_callback_t connect_fn_  = nullptr;
   void*              connect_arg_ = nullptr;
@@ -271,6 +345,8 @@ class UVCPP_API uvcpp_tcp_client {
   void*              write_arg_   = nullptr;
   read_callback_t    read_fn_     = nullptr;
   void*              read_arg_    = nullptr;
+  close_callback_t   close_fn_    = nullptr;
+  void*              close_arg_   = nullptr;
 
   // Sync operation coordination
   bool sync_connect_done_   = false;

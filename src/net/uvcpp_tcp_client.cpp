@@ -41,12 +41,27 @@ static void trampoline_read(uvcpp_buf* buf, void* arg) {
   // Note: cb is NOT deleted here — read callback persists for multiple reads
 }
 
+static void trampoline_close(void* arg) {
+  auto* cb = static_cast<std::function<void()>*>(arg);
+  (*cb)();
+  delete cb;
+}
+
 // =========================================================================
 // Construction / Destruction
 // =========================================================================
 
 uvcpp_tcp_client::uvcpp_tcp_client() {
   loop_ = new uvcpp_loop();  // constructor already calls init()
+
+  tcp_ = new uvcpp_tcp(loop_);
+
+  status_ = TCP_CLIENT_NONE;
+}
+
+uvcpp_tcp_client::uvcpp_tcp_client(uvcpp_loop* external_loop) {
+  owns_loop_ = false;
+  loop_ = external_loop;
 
   tcp_ = new uvcpp_tcp(loop_);
 
@@ -60,42 +75,54 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     read_started_ = false;
   }
 
-  // Always close the TCP handle to remove it from the loop's handle queue.
-  // Even a non-active handle must be closed before uv_loop_close() (libuv
-  // asserts the handle queue is empty in debug builds).
+  // Ensure the TCP handle is fully closed and its endgame processed
+  // before we try to close the loop.  libuv asserts the handle queue is
+  // empty before uv_loop_close().
   if (tcp_ != nullptr) {
-    if (!tcp_->is_closing()) {
-      bool close_done = false;
-      tcp_->close([&close_done](uvcpp_handle*) { close_done = true; });
+    if (!tcp_->is_closing() && tcp_->is_active()) {
+      // Handle is still active — close it and pump the loop.
+      if (owns_loop_) {
+        bool close_done = false;
+        tcp_->close([&close_done](uvcpp_handle*) { close_done = true; });
 
-      // Drain the loop until close completes or timeout.
-      // UV_RUN_NOWAIT is used because we only want to process already-queued
-      // events; on localhost the TCP handshake completes almost instantly.
-      auto start = std::chrono::steady_clock::now();
-      while (!close_done) {
-        if (loop_ != nullptr) {
-          loop_->run(UV_RUN_NOWAIT);
+        auto start = std::chrono::steady_clock::now();
+        while (!close_done) {
+          if (loop_ != nullptr) {
+            loop_->run(UV_RUN_NOWAIT);
+          }
+          auto elapsed =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - start)
+                  .count();
+          if (elapsed > 5000) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start)
-                .count();
-        if (elapsed > 5000) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } else {
+        tcp_->close([](uvcpp_handle*) {});
+      }
+    } else if (tcp_->is_closing()) {
+      // Handle was already closed (e.g. by EOF callback) but its
+      // endgame hasn't fired yet.  Pump the loop once to let it run.
+      if (owns_loop_ && loop_ != nullptr) {
+        loop_->run(UV_RUN_NOWAIT);
       }
     }
-    delete tcp_;
-    tcp_ = nullptr;
+    // else: handle already fully closed (endgame fired) — nothing to do.
   }
 
-  // Close loop (handle queue must be empty at this point)
-  if (loop_ != nullptr) {
-    if (loop_->loop_alive() > 0) {
-      loop_->stop();
-    }
+  // Close the loop BEFORE deleting the TCP handle wrapper.
+  // This ensures any internal libuv clean-up queued during handle close
+  // is fully drained before uv_loop_close() validates the handle queue.
+  if (loop_ != nullptr && owns_loop_) {
     loop_->loop_close();
     delete loop_;
     loop_ = nullptr;
+  }
+
+  // Now safe to delete the TCP handle — the loop is already closed.
+  if (tcp_ != nullptr) {
+    delete tcp_;
+    tcp_ = nullptr;
   }
 
   // Free read cache
@@ -116,6 +143,10 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   if (read_arg_ != nullptr) {
     delete static_cast<std::function<void(uvcpp_buf*)>*>(read_arg_);
     read_arg_ = nullptr;
+  }
+  if (close_arg_ != nullptr) {
+    delete static_cast<std::function<void()>*>(close_arg_);
+    close_arg_ = nullptr;
   }
 }
 
@@ -141,6 +172,22 @@ int uvcpp_tcp_client::get_last_error() const {
 
 bool uvcpp_tcp_client::has_status(int flags) const {
   return (status_ & flags) == flags;
+}
+
+bool uvcpp_tcp_client::has_read_callback() const {
+  return has_async_read_cb_;
+}
+
+bool uvcpp_tcp_client::has_write_callback() const {
+  return has_async_write_cb_;
+}
+
+bool uvcpp_tcp_client::has_close_callback() const {
+  return close_fn_ != nullptr;
+}
+
+void uvcpp_tcp_client::mark_accepted() {
+  set_status(TCP_CLIENT_CONNECTED | TCP_CLIENT_READABLE | TCP_CLIENT_WRITABLE);
 }
 
 // =========================================================================
@@ -469,6 +516,103 @@ int uvcpp_tcp_client::write_wait(const char* data, size_t len,
   return sync_write_result_;
 }
 
+// uvcpp_buf& overload (copy) — delegates to const char* version
+int uvcpp_tcp_client::write(const uvcpp_buf& buf,
+                             std::function<void(int)> cb) {
+  return write(buf.get_const_data(), buf.size(), cb);
+}
+
+int uvcpp_tcp_client::write_wait(const uvcpp_buf& buf, int timeout_ms) {
+  return write_wait(buf.get_const_data(), buf.size(), timeout_ms);
+}
+
+// uvcpp_buf* overload (zero-copy, transfers ownership of buffer data)
+int uvcpp_tcp_client::write(uvcpp_buf* buf,
+                             std::function<void(int)> cb) {
+  if (buf == nullptr) return UV_EINVAL;
+  if (!has_status(TCP_CLIENT_CONNECTED)) return UV_ENOTCONN;
+
+  if (cb != nullptr) {
+    // --- Async mode ---
+    if (has_async_write_cb_) return UV_EALREADY;
+
+    has_async_write_cb_ = true;
+    write_fn_  = trampoline_write;
+    write_arg_ = new std::function<void(int)>(cb);
+
+    uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership from buf
+
+    uvcpp_write* w = new uvcpp_write();
+    w->set_uv_buf(raw, true);
+
+    int rc = tcp_->write(
+        w, w->get_uv_buf(), 1,
+        [this](uvcpp_write* wr, int status) {
+          if (status != 0) last_error_code_ = status;
+          if (write_fn_) {
+            write_fn_(status, write_arg_);
+            write_fn_  = nullptr;
+            write_arg_ = nullptr;
+          }
+          delete wr;
+        });
+
+    if (rc != 0) {
+      last_error_code_ = rc;
+      delete w;
+      delete static_cast<std::function<void(int)>*>(write_arg_);
+      write_fn_  = nullptr;
+      write_arg_ = nullptr;
+      return rc;
+    }
+    return 0;
+  } else {
+    return write_wait(buf, 30000);
+  }
+}
+
+int uvcpp_tcp_client::write_wait(uvcpp_buf* buf, int timeout_ms) {
+  if (buf == nullptr) return UV_EINVAL;
+  if (!has_status(TCP_CLIENT_CONNECTED)) return UV_ENOTCONN;
+  if (has_async_write_cb_)
+    throw std::runtime_error(
+        "uvcpp_tcp_client::write_wait: cannot use sync write after "
+        "async write callback was registered");
+
+  sync_write_done_   = false;
+  sync_write_result_ = 0;
+
+  uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership from buf
+
+  uvcpp_write* w = new uvcpp_write();
+  w->set_uv_buf(raw, true);
+
+  int rc = tcp_->write(
+      w, w->get_uv_buf(), 1,
+      [this](uvcpp_write* wr, int status) {
+        if (status != 0) last_error_code_ = status;
+        sync_write_result_ = status;
+        sync_write_done_   = true;
+        delete wr;
+      });
+
+  if (rc != 0) {
+    last_error_code_ = rc;
+    delete w;
+    return rc;
+  }
+
+  bool completed = wait_for_condition(
+      [this]() { return sync_write_done_; }, timeout_ms);
+
+  if (!completed) {
+    last_error_code_ = UV_ETIMEDOUT;
+    return UV_ETIMEDOUT;
+  }
+
+  return sync_write_result_;
+}
+
 // =========================================================================
 // Read
 // =========================================================================
@@ -505,6 +649,12 @@ int uvcpp_tcp_client::read_start(std::function<void(uvcpp_buf*)> cb) {
               last_error_code_ = static_cast<int>(nread);
               if (nread != UV_EOF) {
                 set_status(TCP_CLIENT_ERROR);
+              }
+              // Notify close callback on connection close or error
+              if (close_fn_) {
+                close_fn_(close_arg_);
+                close_fn_  = nullptr;
+                close_arg_ = nullptr;
               }
             }
             // Free the buffer even on error/EOF
@@ -619,6 +769,19 @@ int uvcpp_tcp_client::read_stop() {
   return tcp_->read_stop();
 }
 
+void uvcpp_tcp_client::set_on_close(std::function<void()> cb) {
+  close_fn_  = trampoline_close;
+  close_arg_ = new std::function<void()>(cb);
+}
+
+void uvcpp_tcp_client::clear_on_close() {
+  if (close_arg_ != nullptr) {
+    delete static_cast<std::function<void()>*>(close_arg_);
+    close_arg_ = nullptr;
+  }
+  close_fn_ = nullptr;
+}
+
 // =========================================================================
 // Loop control
 // =========================================================================
@@ -701,6 +864,12 @@ void uvcpp_tcp_client::on_internal_read(uvcpp_stream* /*s*/, ssize_t nread,
     } else {
       // UV_EOF: peer closed gracefully
       set_status(TCP_CLIENT_CLOSED);
+    }
+    // Notify close callback on connection close or error
+    if (close_fn_) {
+      close_fn_(close_arg_);
+      close_fn_  = nullptr;
+      close_arg_ = nullptr;
     }
     if (buf->base != nullptr) {
       uvcpp_free_bytes(buf->base);
