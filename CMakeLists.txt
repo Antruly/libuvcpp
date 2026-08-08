@@ -71,10 +71,7 @@ if(UVCPP_BUILD_WEB)
     GIT_TAG         ${LLHTTP_VERSION}
     GIT_SHALLOW     TRUE
   )
-  set(_prev_bsl ${BUILD_SHARED_LIBS})
-  set(BUILD_SHARED_LIBS OFF)
   FetchContent_MakeAvailable(llhttp)
-  set(BUILD_SHARED_LIBS ${_prev_bsl})
   message(STATUS "llhttp integrated (tag=${LLHTTP_VERSION})")
 
   # -------------------------------------------------------------------
@@ -92,10 +89,7 @@ if(UVCPP_BUILD_WEB)
         GIT_TAG         ${ZLIB_VERSION}
         GIT_SHALLOW     TRUE
       )
-      set(_prev_bsl2 ${BUILD_SHARED_LIBS})
-      set(BUILD_SHARED_LIBS OFF)
       FetchContent_MakeAvailable(zlib)
-      set(BUILD_SHARED_LIBS ${_prev_bsl2})
       message(STATUS "zlib integrated (tag=${ZLIB_VERSION})")
     endif()
   endif()
