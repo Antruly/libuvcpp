@@ -53,7 +53,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Windows basic: shared build only (static is covered by windows-static job)
-  # Splitting avoids the double-build timeout issue on slow Windows MSVC.
   # ---------------------------------------------------------------------------
   windows-basic:
     runs-on: windows-latest
@@ -61,13 +60,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure & Build & Test (shared)
+      - name: Configure & Build
         shell: bash
         run: |
           cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-shared --config Release --parallel
+
+      - name: Copy DLLs for tests (Windows)
+        shell: bash
+        run: |
+          for d in tests/unit tests/functional; do
+            mkdir -p "build-shared/$d/Release"
+            cp build-shared/Release/uvcpp.dll "build-shared/$d/Release/" 2>/dev/null || true
+            cp build-shared/_deps/libuv-build/Release/uv.dll "build-shared/$d/Release/" 2>/dev/null || true
+          done
+
+      - name: Test
+        shell: bash
+        run: |
           ctest --test-dir build-shared --output-on-failure -C Release \
             --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
 
@@ -95,12 +107,26 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libuv ninja
 
-      - name: Configure & Build & Test
+      - name: Configure & Build
         shell: bash
         run: |
           cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_WEB=ON
           cmake --build build-web --config Release --parallel
+
+      - name: Copy DLLs for tests (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for d in tests/unit tests/functional; do
+            mkdir -p "build-web/$d/Release"
+            cp build-web/Release/uvcpp.dll "build-web/$d/Release/" 2>/dev/null || true
+            cp build-web/_deps/libuv-build/Release/uv.dll "build-web/$d/Release/" 2>/dev/null || true
+          done
+
+      - name: Test
+        shell: bash
+        run: |
           ctest --test-dir build-web --output-on-failure -C Release \
             --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
 
@@ -132,20 +158,32 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install openssl --no-progress
 
-      - name: Configure & Build & Test
+      - name: Configure & Build
         shell: bash
         run: |
           cmake -S . -B build-ssl -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON
           cmake --build build-ssl --config Release --parallel
+
+      - name: Copy DLLs for tests (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for d in tests/unit tests/functional; do
+            mkdir -p "build-ssl/$d/Release"
+            cp build-ssl/Release/uvcpp.dll "build-ssl/$d/Release/" 2>/dev/null || true
+            cp build-ssl/_deps/libuv-build/Release/uv.dll "build-ssl/$d/Release/" 2>/dev/null || true
+          done
+
+      - name: Test
+        shell: bash
+        run: |
           ctest --test-dir build-ssl --output-on-failure -C Release \
             --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
 
   # ---------------------------------------------------------------------------
   # Full: Web + OpenSSL + zlib (Ubuntu + macOS)
-  # Windows excluded because zlib via FetchContent + OpenSSL via chocolatey is
-  # too slow to build in a single job.
   # ---------------------------------------------------------------------------
   full:
     runs-on: ${{ matrix.os }}
@@ -167,19 +205,23 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libuv openssl zlib ninja
 
-      - name: Configure & Build & Test
+      - name: Configure & Build
         shell: bash
         run: |
           cmake -S . -B build-full -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
           cmake --build build-full --config Release --parallel
+
+      - name: Test
+        shell: bash
+        run: |
           ctest --test-dir build-full --output-on-failure -C Release \
             --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
 
   # ---------------------------------------------------------------------------
   # Windows static: MSVC static build (web=OFF, no shared lib)
-  # Uses explicit Visual Studio generator (not Ninja) for MSVC coverage.
+  # No explicit generator - let CMake pick the default (VS 2026 on current runners).
   # ---------------------------------------------------------------------------
   windows-static:
     runs-on: windows-latest
@@ -187,13 +229,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure & Build & Test
+      - name: Configure & Build
         shell: bash
         run: |
-          cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-msvc -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=ON -DUVCPP_BUILD_SHARED=OFF \
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-msvc --config Release --parallel
+
+      - name: Copy DLLs for tests (libuv)
+        shell: bash
+        run: |
+          for d in tests/unit tests/functional; do
+            mkdir -p "build-msvc/$d/Release"
+            cp build-msvc/_deps/libuv-build/Release/uv.dll "build-msvc/$d/Release/" 2>/dev/null || true
+          done
+
+      - name: Test
+        shell: bash
+        run: |
           ctest --test-dir build-msvc --output-on-failure -C Release \
             --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true

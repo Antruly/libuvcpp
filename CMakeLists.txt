@@ -122,17 +122,8 @@ if(UVCPP_ENABLE_OPENSSL)
   source_group("ssl" FILES ${SSL_SRC_FILES})
 endif()
 
-# After all tests registered, set ENV for each test so PATH includes uvcpp/libuv build dirs and install bin.
-if(WIN32)
-  get_property(_cmake_all_tests GLOBAL PROPERTY TESTS)
-  if(_cmake_all_tests)
-    foreach(_t ${_cmake_all_tests})
-      set(_env_items "PATH=$<TARGET_FILE_DIR:uvcpp>;$<TARGET_FILE_DIR:uv>;${CMAKE_BINARY_DIR}/$<CONFIG>;$<SHELL_PATH:${CMAKE_BINARY_DIR}/_deps/libuv-build/$<CONFIG>>;${CMAKE_INSTALL_PREFIX}/bin")
-      # Note: $<SHELL_PATH:...> used to ensure proper separators on Windows
-      set_tests_properties(${_t} PROPERTIES ENVIRONMENT "${_env_items}")
-    endforeach()
-  endif()
-endif()
+# NOTE: PATH for Windows tests is set *after* add_subdirectory(tests) below
+# to ensure tesets are registered before we query TESTS property.
 
 if(WIN32 AND TARGET uvcpp)
   # Copy uvcpp DLL next to unit and functional test executables after build.
@@ -153,22 +144,33 @@ endif()
 ## DEPEND on the `uv` target if it exists.
 
 if(WIN32)
-  # Ensure PATH for tests includes build output dirs and install bin so DLLs are found.
+  # Ensure PATH for tests includes build output dirs so DLLs are found.
+  # Build a single PATH=… entry — CMake treats ';' as list separator,
+  # so we escape intra-value semicolons with '\;' to keep them literal.
   get_property(_all_tests GLOBAL PROPERTY TESTS)
   if(_all_tests)
     foreach(_t ${_all_tests})
-      set(_env_entries "")
+      set(_path "")
       if(TARGET uvcpp)
-        list(APPEND _env_entries "PATH=$<TARGET_FILE_DIR:uvcpp>")
+        set(_path "$<TARGET_FILE_DIR:uvcpp>")
       endif()
       if(TARGET uv)
-        list(APPEND _env_entries "PATH=$<TARGET_FILE_DIR:uv>")
+        if(_path)
+          set(_path "${_path}\\;$<TARGET_FILE_DIR:uv>")
+        else()
+          set(_path "$<TARGET_FILE_DIR:uv>")
+        endif()
       endif()
-      # Add install bin directory (configured install runtime destination)
-      list(APPEND _env_entries "PATH=${CMAKE_INSTALL_PREFIX}/bin")
-      string(JOIN ";" _env_str ${_env_entries})
-      if(_env_str)
-        set_tests_properties(${_t} PROPERTIES ENVIRONMENT "${_env_str}")
+      # Also include libuv build dir (statically-built libuv may not have a TARGET_FILE_DIR)
+      if(TARGET uv_a)
+        if(_path)
+          set(_path "${_path}\\;$<TARGET_FILE_DIR:uv_a>")
+        else()
+          set(_path "$<TARGET_FILE_DIR:uv_a>")
+        endif()
+      endif()
+      if(_path)
+        set_tests_properties(${_t} PROPERTIES ENVIRONMENT "PATH=${_path}")
       endif()
     endforeach()
   endif()
@@ -607,14 +609,9 @@ if(WIN32)
     add_custom_command(TARGET copy_test_dlls PRE_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uv> "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>/"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uv> "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/"
-      DEPENDS uv
     )
+    add_dependencies(copy_test_dlls uv)
   endif()
-  # Also attempt to copy libuv DLL directly from the populated _deps build folder if present.
-  add_custom_command(TARGET copy_test_dlls PRE_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/_deps/libuv-build/$<CONFIG>/uv.dll" "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>/" || ${CMAKE_COMMAND} -E echo "libuv dll not found in _deps build folder"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/_deps/libuv-build/$<CONFIG>/uv.dll" "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/" || ${CMAKE_COMMAND} -E echo ""
-  )
 
   add_dependencies(run_uvcpp_tests copy_test_dlls)
 endif()
