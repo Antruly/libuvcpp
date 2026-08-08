@@ -1,202 +1,356 @@
-# libuvcpp
-
-<!-- badges -->
-[![GitHub release](https://img.shields.io/badge/release-1.0.0-blue.svg)](./)
+[![GitHub release](https://img.shields.io/badge/release-1.0.9--dev-blue.svg)](./)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![CI](https://img.shields.io/badge/ci-GitHub%20Actions-blue)](.github/workflows/ci.yml)
+[![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
 # libuvcpp
 
-🔧 C++ wrapper for libuv — lightweight, header-friendly wrappers around libuv handles and requests.
+🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
+object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- Version: `1.0.0` — Author: `zhuweiye` — License: `MIT`
-
+- **Version**: `1.0.9-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
-Overview
---------
+---
 
-libuvcpp is designed to make building event-driven C++ applications with libuv faster and more pleasant without sacrificing libuv performance or control. It organizes libuv's primitives into intuitive C++ classes and groups functionality into two main categories:
+## Overview
 
-- handle: object wrappers for libuv handle types (loop, stream, tcp, udp, pipe, timer, etc.)  
-- req: request wrappers for one-off operations (fs, write, connect, getaddrinfo, etc.)  
-- uvcpp: utility helpers (buffers, threads, rwlocks, version info, etc.)
+libuvcpp provides a thin, idiomatic C++ layer over libuv's event loop, handles, and requests.
+It preserves libuv's performance while adding RAII resource management, `std::function` callbacks,
+and higher-level client/server abstractions for TCP, UDP, HTTP, and WebSocket.
 
-Design goals
-------------
+The library is organized into layered modules:
 
-- Object-oriented convenience: expose libuv primitives as classes so developers can use inheritance, RAII and std::function callbacks.  
-- Preserve libuv semantics: APIs keep the original libuv flow and performance characteristics.  
-- Compatibility: aims to be compatible with libuv v1.x.x series.  
-- Developer ergonomics: methods and helpers are grouped into the most relevant class to reduce boilerplate and make code easier to read and maintain.
+```
+application
+┌────────────┐
+│ web (HTTP/WS) │  ← uvcpp_http_client/server, uvcpp_ws_client/server
+├────────────┤
+│ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL wrapper)
+├────────────┤
+│ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
+├────────────┤
+│ handle + req │  ← uvcpp_loop, uvcpp_tcp, uvcpp_timer, uvcpp_write, ...
+├────────────┤
+│ uvcpp core   │  ← uvcpp_buf, uvcpp_thread, uvcpp_alloc, ...
+└────────────┘
+```
 
-Why use libuvcpp
-----------------
+---
 
-- Rapid C++ development on top of a proven async I/O engine.  
-- Minimal overhead — wrapper is thin and designed to be ABI-friendly with libuv structures.  
-- Clean, documented headers: core APIs are declared in `src/handle`, `src/req` and `src/uvcpp`.
+## Features
 
-Installation & Build
---------------------
+### Core (handle + req)
 
-Prerequisites:
-- CMake (>= 3.16 recommended).  
-- A C++ compiler; on Windows a Visual Studio environment is required (see below).
+| Category | Classes |
+|----------|---------|
+| **Event loop** | `uvcpp_loop` |
+| **Stream handles** | `uvcpp_tcp`, `uvcpp_pipe`, `uvcpp_udp`, `uvcpp_tty` |
+| **Timers & hooks** | `uvcpp_timer`, `uvcpp_idle`, `uvcpp_prepare`, `uvcpp_check` |
+| **Signals & process** | `uvcpp_signal`, `uvcpp_process` |
+| **File system** | `uvcpp_fs`, `uvcpp_fs_event`, `uvcpp_fs_poll` |
+| **Polling** | `uvcpp_poll`, `uvcpp_async` |
+| **Requests** | `uvcpp_write`, `uvcpp_connect`, `uvcpp_shutdown`, `uvcpp_work`, `uvcpp_getaddrinfo`, `uvcpp_getnameinfo`, `uvcpp_udp_send`, `uvcpp_random` |
 
-Notes:
-- The project's CMakeLists is able to automatically download/build libuv when it's not available on the system; you do not need to pre-install libuv.  
-- On Windows, install Visual Studio (see examples below).
+### Utilities (`src/uvcpp/`)
 
-Build examples:
+Thread pool, RW locks, barriers, CPU info, network interfaces, passwd/group, directory traversal,
+environment variables, buffer management (`uvcpp_buf`), metrics, and allocator integration.
 
-- Linux / macOS:
+### Expand module (`src/expand/`)
+
+TCMalloc-style memory pool: page heap, span allocator, thread cache, enterprise allocator.
+Enabled by default (`UVCPP_BUILD_EXPAND=ON`).
+
+### Net module (`src/net/`) — `UVCPP_BUILD_NET=ON` (default)
+
+| Class | Description |
+|-------|-------------|
+| `uvcpp_tcp_client` | High-level TCP client with dual-mode API (async callback / sync `wait()` with timeout) |
+| `uvcpp_tcp_server` | TCP server with `bind()`/`listen()`/`on_connection()` |
+| `uvcpp_udp_client` | UDP client with dual-mode send/recv |
+| `uvcpp_udp_server` | UDP server with `bind()`/`recv_start()` |
+
+### Web module (`src/web/`) — `UVCPP_BUILD_WEB=ON`
+
+| Class | Description |
+|-------|-------------|
+| `uvcpp_http_client` | HTTP/1.1 client with keep-alive, streaming parse, dual-mode `send()`/`send_wait()` |
+| `uvcpp_http_server` | HTTP/1.1 server with route registration, per-connection parser, upgrade detection |
+| `uvcpp_http_parser` | Streaming HTTP parser (wraps [llhttp](https://github.com/nodejs/llhttp)), PIMPL pattern |
+| `uvcpp_http_request` | Request object with `to_string()` / `from_parser()` serialization |
+| `uvcpp_http_response` | Response object with factory methods (`ok()`, `not_found()`, etc.) |
+| `uvcpp_ws_client` | WebSocket client (RFC 6455), parses `ws://`/`wss://` URLs, upgrade handshake |
+| `uvcpp_ws_server` | WebSocket server, auto-upgrade from HTTP via `on_upgrade()` |
+| `uvcpp_ws_connection` | WebSocket connection: `send_text()`/`send_binary()`/`send_ping()`/`send_close()` |
+| `uvcpp_ws_parser` | Streaming WebSocket frame parser (RFC 6455), 8-state state machine |
+| `uvcpp_ws_frame` | Frame struct with opcode, mask, close-code helpers |
+| `uvcpp_http_common` | HTTP method/status enums, version enum (HVER_10/11/20), header helpers |
+
+**Optional features** (opt-in, not auto-enabled):
+
+- `UVCPP_ENABLE_ZLIB=ON` — Per-Message Deflate compression (RFC 7692) for WebSocket
+- `UVCPP_ENABLE_OPENSSL=ON` — HTTPS (WSS) via SSL/TLS module
+
+### SSL module (`src/ssl/`) — `UVCPP_ENABLE_OPENSSL=ON`
+
+| Class | Description |
+|-------|-------------|
+| `uvcpp_ssl_context` | SSL/TLS context (wraps `SSL_CTX*`), cert/key loading, self-signed cert generation |
+| `uvcpp_ssl` | Per-connection SSL wrapper, `handshake()`/`read()`/`write()`/`shutdown()` |
+| `uvcpp_ssl_common` | `tls_version`, `tls_mode`, `tls_verify_mode`, `tls_cert_info` enums/structs |
+
+---
+
+## Requirements
+
+- **C++11** or later
+- **CMake** ≥ 3.20
+- **Compiler**: MSVC 2019+, GCC 7+, Clang 5+
+- **libuv**: auto-fetched via FetchContent if not found on system
+- **Platforms**: Windows, Linux, macOS
+
+---
+
+## Build
+
+### Basic build (core only)
 
 ```bash
 mkdir build && cd build
-cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release
-# (optional) run tests:
-ctest --output-on-failure
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON
+cmake --build . --config Release --parallel
+ctest --output-on-failure -C Release
 ```
 
-- Windows (x64, Visual Studio 2022):
+### With Web module (HTTP + WebSocket)
 
-```powershell
-mkdir build
-cmake -S . -B build -A x64 -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -- /m
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
+  -DUVCPP_BUILD_WEB=ON
+cmake --build . --config Release --parallel
 ```
 
-- Windows (x86, Visual Studio 2013):
+### With Web + SSL + compression (full)
 
-```powershell
-mkdir build
-cmake -S . -B build -A Win32 -G "Visual Studio 12 2013" -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -- /m
+```bash
+# Linux: install system deps first
+sudo apt-get install libssl-dev zlib1g-dev
+
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
+  -DUVCPP_BUILD_WEB=ON \
+  -DUVCPP_ENABLE_OPENSSL=ON \
+  -DUVCPP_ENABLE_ZLIB=ON
+cmake --build . --config Release --parallel
 ```
 
-Quick start example
--------------------
+### CMake Options
 
-Simple program that prints the library version and runs the default loop:
+| Option | Default | Description |
+|--------|---------|-------------|
+| `UVCPP_BUILD_TESTS` | `ON` | Build test executables |
+| `BUILD_SHARED_LIBS` | `ON` | Build shared libraries |
+| `UVCPP_BUILD_STATIC` | auto | Build static uvcpp library |
+| `UVCPP_BUILD_SHARED` | auto | Build shared uvcpp library |
+| `UVCPP_BUILD_EXPAND` | `ON` | Build expand module (memory pool) |
+| `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
+| `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
+| `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
+| `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
+| `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
+
+**Important**: `UVCPP_ENABLE_ZLIB` and `UVCPP_ENABLE_OPENSSL` are NOT auto-enabled
+when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly.
+
+---
+
+## Quick Start
+
+### TCP Echo Server
 
 ```cpp
 #include "uvcpp.h"
+#include "net/uvcpp_tcp_server.h"
 #include <iostream>
 
 int main() {
-  std::cout << "libuvcpp version: " << UVCPP_VERSION_STRING << std::endl;
-  uvcpp::uvcpp_loop loop;
-  loop.init();
-  loop.run();
-  return 0;
+    uvcpp::uvcpp_tcp_server server;
+    server.bind("127.0.0.1", 8080);
+
+    server.on_connection([](uvcpp::uvcpp_tcp_client* client) {
+        client->on_data([](uvcpp::uvcpp_tcp_client* c, const char* data, size_t len) {
+            std::cout << "Received: " << std::string(data, len) << std::endl;
+            c->write(data, len);  // echo back
+        });
+        client->on_close([](uvcpp::uvcpp_tcp_client* c) {
+            std::cout << "Client disconnected" << std::endl;
+        });
+    });
+
+    server.listen();
+    std::cout << "Echo server on :8080" << std::endl;
+    server.run();
+    return 0;
 }
 ```
 
-Common usage snippets
----------------------
-
-- Timer (run a callback after timeout and optionally repeat):
+### HTTP GET Request
 
 ```cpp
-#include "uvcpp.h"
+#include "web/uvcpp_http_client.h"
 #include <iostream>
 
 int main() {
-  uvcpp::uvcpp_loop loop;
-  loop.init();
+    uvcpp::uvcpp_http_client client;
 
-  uvcpp::uvcpp_timer timer(&loop);
-  timer.start([](uvcpp::uvcpp_timer* t){
-    std::cout << "timer fired\n";
-    t->stop(); // single-shot
-  }, 1000, 0); // timeout=1000ms, repeat=0
+    client.get("http://httpbin.org/get", [](uvcpp::uvcpp_http_response* rsp, int err) {
+        if (!err && rsp) {
+            std::cout << "Status: " << rsp->get_status_code() << std::endl;
+            std::cout << "Body: " << rsp->get_body() << std::endl;
+        }
+    });
 
-  loop.run();
-  return 0;
+    client.run();
+    return 0;
 }
 ```
 
-- Idle (run when loop is idle):
+### WebSocket Client
 
 ```cpp
-#include "uvcpp.h"
+#include "web/uvcpp_ws_client.h"
 #include <iostream>
 
 int main() {
-  uvcpp::uvcpp_loop loop;
-  loop.init();
+    uvcpp::uvcpp_ws_client client;
 
-  uvcpp::uvcpp_idle idle(&loop);
-  idle.start([](uvcpp::uvcpp_idle* i){
-    static int count = 0;
-    std::cout << "idle callback: " << ++count << std::endl;
-    if (count >= 5) {
-      i->stop();
-    }
-  });
+    client.connect("ws://echo.websocket.org/chat",
+        [](uvcpp::uvcpp_ws_connection* conn, int err) {
+            if (err) return;
 
-  loop.run();
-  return 0;
+            conn->on_text([](const std::string& msg) {
+                std::cout << "Echo reply: " << msg << std::endl;
+            });
+
+            conn->send_text("Hello WebSocket!");
+        });
+
+    client.run();
+    return 0;
 }
 ```
 
-Notes & next steps
-------------------
-- Browse `src/handle` and `src/req` to explore available wrappers and their callback signatures.  
-- Use the included `tests/functional` folder as working examples for the most common patterns (timer, pipe, poll, etc.).  
-- Contributions welcome — open an issue or PR; keep changes focused and follow the project's style.
+### WebSocket Server
 
-License
--------
+```cpp
+#include "web/uvcpp_ws_server.h"
+#include <iostream>
 
-This project is available under the MIT License — see `LICENSE`.
+int main() {
+    uvcpp::uvcpp_ws_server server;
+    server.bind("127.0.0.1", 8080);
+
+    server.on_connection([](uvcpp::uvcpp_ws_connection* conn) {
+        std::cout << "WS client connected" << std::endl;
+
+        conn->on_text([conn](const std::string& msg) {
+            std::cout << "Received: " << msg << std::endl;
+            conn->send_text("Echo: " + msg);
+        });
+
+        conn->on_close([](uvcpp::uvcpp_ws_connection*) {
+            std::cout << "WS client disconnected" << std::endl;
+        });
+    });
+
+    server.listen();
+    server.run();
+    return 0;
+}
+```
+
+### SSL/TLS Server
+
+```cpp
+#include "ssl/uvcpp_ssl_context.h"
+#include "net/uvcpp_tcp_server.h"
+
+int main() {
+    // Create SSL context
+    uvcpp::uvcpp_ssl_context ssl_ctx(uvcpp::tls_mode::SERVER);
+    ssl_ctx.generate_self_signed("localhost");  // or load_certificate_file()
+
+    uvcpp::uvcpp_tcp_server server;
+    server.set_ssl_context(&ssl_ctx);
+    server.bind("127.0.0.1", 8443);
+    // ... on_connection, listen, run
+}
+```
+
+---
+
+## Testing
+
+```bash
+# Build with tests
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON
+cmake --build build --config Release --parallel
+
+# Run all tests
+ctest --test-dir build --output-on-failure -C Release
+
+# Run only web module tests
+ctest --test-dir build -C Release -R "web_"
+
+# Run with exclusions
+ctest --test-dir build -C Release --exclude-regex "test_shutdown_func|test_tcp_func"
+```
+
+Test coverage:
+- **Unit tests**: `tests/unit/` — handle types, request types, uvcpp utilities
+- **Functional tests**: `tests/functional/` — runtime behavior for all modules
+- **Expand tests**: `tests/expand/` — memory pool allocation tests
+
+---
+
+## Project Structure
+
+```
+libuvcpp/
+├── src/
+│   ├── uvcpp/     # Core utilities (buf, thread, version, alloc, ...)
+│   ├── handle/    # libuv handle wrappers (loop, tcp, udp, timer, ...)
+│   ├── req/       # libuv request wrappers (write, connect, fs, work, ...)
+│   ├── expand/    # Memory pool (page heap, span, enterprise allocator)
+│   ├── net/       # TCP/UDP client/server
+│   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
+│   └── ssl/       # SSL/TLS context and connection wrapper
+├── tests/
+│   ├── unit/      # Unit tests
+│   ├── functional/# Functional/integration tests
+│   └── expand/    # Memory pool tests
+├── doc/           # Documentation
+│   └── ci-guide.md   # CI maintenance guidelines
+├── cmake/         # CMake config templates
+├── .github/workflows/  # CI pipeline
+├── CMakeLists.txt
+├── README.md
+└── README.zh.md
+```
+
+---
+
+## CI & Contributing
+
+CI runs on every push and PR via GitHub Actions. See [doc/ci-guide.md](doc/ci-guide.md) for
+the CI maintenance guidelines — contributors modifying the CI must read it first.
+
+Contributions are welcome. Please open an issue or PR, keep changes focused, and follow
+the existing code style.
+
+---
+
+## License
+
+MIT License — see [LICENSE](./LICENSE).
 
 uvcpp — C++ wrapper for libuv
-================================
-
-This repository contains a C++ wrapper around libuv (`uvcpp`) with:
-- Core wrapper sources under `src/`
-- Unit tests (type/init checks) under `tests/handle` and `tests/req`
-- Functional tests (runtime feature tests) under `tests/functional`
-
-Build (example)
--------------
-
-Prerequisites:
-- CMake >= 3.20
-- A C/C++ compiler toolchain (Visual Studio on Windows, clang/gcc on macOS/Linux)
-
-Basic build (shared lib, tests and functional tests):
-```
-mkdir build
-cd build
-cmake .. -DBUILD_SHARED_LIBS=ON -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_FUNCTIONAL=ON
-cmake --build . --config Release --parallel
-ctest --output-on-failure
-```
-
-Notes
------
-- The top-level CMake will try to find a system libuv first. If not found it will fetch libuv using FetchContent and build it.
-- Control build options via:
-  - `BUILD_SHARED_LIBS` (ON/OFF)
-  - `UVCPP_BUILD_TESTS` (ON/OFF)
-  - `UVCPP_BUILD_FUNCTIONAL` (ON/OFF)
-
-Version
--------
-The project version is defined in `src/uvcpp/uvcpp_version.h`. CMake reads that header at configure-time and prints the version.
-
-Tests
------
-- Unit tests (handle/req) are lightweight checks ensuring types initialize.
-- Functional tests under `tests/functional` are runtime behavior checks (tcp/udp/fs/async/prepare/poll/pipe/tty/process).
-  These may require network/IPC capabilities in CI and may be disabled there as needed.
-
-License & contribution
-----------------------
-See repository license and CONTRIBUTING notes (add if you maintain one).
-
-
