@@ -121,6 +121,9 @@ jobs:
             mkdir -p "build-web/$d/Release"
             cp build-web/Release/uvcpp.dll "build-web/$d/Release/" 2>/dev/null || true
             cp build-web/_deps/libuv-build/Release/uv.dll "build-web/$d/Release/" 2>/dev/null || true
+            # llhttp — built as shared when BUILD_SHARED_LIBS=ON
+            cp build-web/_deps/llhttp-build/Release/llhttp.dll "build-web/$d/Release/" 2>/dev/null || true
+            cp build-web/_deps/llhttp-build/llhttp.dll "build-web/$d/Release/" 2>/dev/null || true
           done
 
       - name: Test
@@ -174,9 +177,11 @@ jobs:
         run: |
           for d in tests/unit tests/functional tests/expand; do
             mkdir -p "build-ssl/$d/Release"
-            # uvcpp + libuv
+            # uvcpp + libuv + llhttp (llhttp built as shared when BUILD_SHARED_LIBS=ON)
             cp build-ssl/Release/uvcpp.dll "build-ssl/$d/Release/" 2>/dev/null || true
             cp build-ssl/_deps/libuv-build/Release/uv.dll "build-ssl/$d/Release/" 2>/dev/null || true
+            cp build-ssl/_deps/llhttp-build/Release/llhttp.dll "build-ssl/$d/Release/" 2>/dev/null || true
+            cp build-ssl/_deps/llhttp-build/llhttp.dll "build-ssl/$d/Release/" 2>/dev/null || true
           done
           # OpenSSL DLLs — uvcpp.dll links against them; they must be findable
           for ssl_dir in \
