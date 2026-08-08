@@ -600,8 +600,8 @@ if(WIN32)
     add_custom_command(TARGET copy_test_dlls PRE_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uvcpp> "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>/"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uvcpp> "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/"
-      DEPENDS uvcpp
     )
+    add_dependencies(copy_test_dlls uvcpp)
   endif()
   if(TARGET uv)
     add_custom_command(TARGET copy_test_dlls PRE_BUILD
