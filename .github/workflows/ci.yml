@@ -54,6 +54,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+          - os: macos-latest
           - os: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +62,10 @@ jobs:
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libuv1-dev ninja-build
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libuv ninja
 
       - name: Configure & Build & Test
         shell: bash
@@ -78,6 +83,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+          - os: macos-latest
           - os: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,6 +91,10 @@ jobs:
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libuv1-dev libssl-dev ninja-build
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libuv openssl ninja
 
       - name: Install deps (Windows)
         if: runner.os == 'Windows'
@@ -124,11 +134,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure & Build & Test
-        shell: bash
+        shell: pwsh
         run: |
-          cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=ON -DUVCPP_BUILD_SHARED=OFF \
+          cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=ON -DUVCPP_BUILD_SHARED=OFF `
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-msvc --config Release --parallel
           ctest --test-dir build-msvc --output-on-failure -C Release
