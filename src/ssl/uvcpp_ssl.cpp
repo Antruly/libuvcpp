@@ -84,10 +84,10 @@ tls_cert_info uvcpp_ssl::get_peer_cert_info() const {
   if (!cert) return info;
 
   char buf[512] = {0};
-  X509_NAME* subj = X509_get_subject_name(cert);
+  const X509_NAME* subj = X509_get_subject_name(cert);
   if (subj) { X509_NAME_oneline(subj, buf, sizeof(buf)); info.subject = buf; }
 
-  X509_NAME* iss = X509_get_issuer_name(cert);
+  const X509_NAME* iss = X509_get_issuer_name(cert);
   if (iss) { memset(buf,0,sizeof(buf)); X509_NAME_oneline(iss, buf, sizeof(buf)); info.issuer = buf; }
 
   const ASN1_TIME* nb = X509_get0_notBefore(cert);

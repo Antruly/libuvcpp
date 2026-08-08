@@ -153,7 +153,7 @@ bool uvcpp_ssl_context::generate_self_signed(const std::string& cn, int bits) {
   X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 3600);
   X509_set_pubkey(x509, pkey);
 
-  X509_NAME* name = X509_get_subject_name(x509);
+  X509_NAME* name = const_cast<X509_NAME*>(X509_get_subject_name(x509));
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                               reinterpret_cast<const unsigned char*>(cn.c_str()), -1, -1, 0);
   X509_set_issuer_name(x509, name);
