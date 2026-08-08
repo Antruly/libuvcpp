@@ -51,7 +51,7 @@ int main() {
   bool pass = ok.load();
   std::cout << "  -> " << (pass ? "PASS" : "FAIL") << std::endl;
   // Skip cleanup (known dual-loop issue), exit fast
-  ::_exit(pass ? 0 : 2);
+  std::_Exit(pass ? 0 : 2);
 }
 #else
 int main() { return 0; }
