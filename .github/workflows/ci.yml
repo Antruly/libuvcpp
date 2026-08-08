@@ -7,101 +7,163 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-and-test:
+  # =========================================================================
+  # Basic build (no optional deps) — all platforms
+  # =========================================================================
+  basic:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            triplet: x64-linux
-            generator: ""
-            arch: ""
+            name: linux
           - os: macos-latest
-            triplet: x64-osx
-            generator: ""
-            arch: ""
+            name: macos
           - os: windows-latest
-            triplet: x64-windows-static
-            generator: "Visual Studio 17 2022"
-            arch: x64
-          - os: windows-latest
-            triplet: x86-windows-static
-            generator: "Visual Studio 12 2013"
-            arch: Win32
+            name: windows
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup CMake
-        uses: jwlawson/actions-setup-cmake@v1
-        with:
-          cmake-version: "3.26.4"
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev ninja-build
 
-      - name: Install dependencies on Ubuntu
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libuv ninja
+
+      - name: Configure & Build & Test (static)
+        run: |
+          cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON \
+            -DUVCPP_BUILD_SHARED=OFF -DUVCPP_BUILD_STATIC=ON \
+            -DUVCPP_BUILD_WEB=OFF \
+            -DUVCPP_BUILD_NET=ON
+          cmake --build build-static --config Release --parallel
+          ctest --test-dir build-static --output-on-failure -C Release
+
+      - name: Configure & Build & Test (shared)
+        run: |
+          cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON \
+            -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=OFF \
+            -DUVCPP_BUILD_NET=ON
+          cmake --build build-shared --config Release --parallel
+          ctest --test-dir build-shared --output-on-failure -C Release
+
+  # =========================================================================
+  # Web module build (llhttp) — Ubuntu + Windows
+  # =========================================================================
+  web:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev ninja-build
+
+      - name: Configure & Build & Test (web)
+        run: |
+          cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON \
+            -DUVCPP_BUILD_SHARED=ON \
+            -DUVCPP_BUILD_WEB=ON
+          cmake --build build-web --config Release --parallel
+          ctest --test-dir build-web --output-on-failure -C Release
+
+  # =========================================================================
+  # SSL build (OpenSSL) — Ubuntu + Windows
+  # =========================================================================
+  ssl:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ninja-build
-        shell: bash
+          sudo apt-get install -y libuv1-dev libssl-dev ninja-build
 
-      - name: Install dependencies on macOS
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew install ninja
-        shell: bash
-
-      - name: Install dependencies on Windows (minimal)
+      - name: Install deps (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Write-Host "Windows runner: assuming Visual Studio toolchain is available."
+          choco install openssl --no-progress
+          echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
 
-      - name: Configure & build (non-Windows) - static
-        if: runner.os != 'Windows'
+      - name: Configure & Build & Test (ssl)
         run: |
-          cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_STATIC_LIB=ON -DENABLE_SHARED_LIB=OFF
-          cmake --build build-static --config Release -- -j
-          ctest --test-dir build-static --output-on-failure --build-config Release || true
-        shell: bash
+          cmake -S . -B build-ssl -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON \
+            -DUVCPP_BUILD_SHARED=ON \
+            -DUVCPP_BUILD_WEB=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON
+          cmake --build build-ssl --config Release --parallel
+          ctest --test-dir build-ssl --output-on-failure -C Release
 
-      - name: Configure & build (non-Windows) - shared
-        if: runner.os != 'Windows'
+  # =========================================================================
+  # Full build (web + ssl + zlib) — Ubuntu only
+  # =========================================================================
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
         run: |
-          cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_STATIC_LIB=OFF -DENABLE_SHARED_LIB=ON
-          cmake --build build-shared --config Release -- -j
-          ctest --test-dir build-shared --output-on-failure --build-config Release || true
-        shell: bash
+          sudo apt-get update
+          sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 
-      - name: Configure & build (Windows) - static
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Configure & Build & Test (full)
         run: |
-          $gen = '${{ matrix.generator }}'
-          $arch = '${{ matrix.arch }}'
-          Write-Host "Using generator: $gen, arch: $arch"
-          cmake -S . -B build-static -G "$gen" -A $arch -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_STATIC_LIB=ON -DENABLE_SHARED_LIB=OFF
-          cmake --build build-static --config Release
-          & ctest --test-dir build-static --output-on-failure --build-config Release || true
+          cmake -S . -B build-full -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON \
+            -DUVCPP_BUILD_SHARED=ON \
+            -DUVCPP_BUILD_WEB=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_ZLIB=ON
+          cmake --build build-full --config Release --parallel
+          ctest --test-dir build-full --output-on-failure -C Release
 
-      - name: Configure & build (Windows) - shared
-        if: runner.os == 'Windows'
-        shell: pwsh
+  # =========================================================================
+  # Windows MSVC static (x64), basic only
+  # =========================================================================
+  windows-static:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure & Build & Test
         run: |
-          $gen = '${{ matrix.generator }}'
-          $arch = '${{ matrix.arch }}'
-          Write-Host "Using generator: $gen, arch: $arch"
-          cmake -S . -B build-shared -G "$gen" -A $arch -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_STATIC_LIB=OFF -DENABLE_SHARED_LIB=ON
-          cmake --build build-shared --config Release
-          & ctest --test-dir build-shared --output-on-failure --build-config Release || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: uvcpp-${{ matrix.os }}-${{ matrix.triplet }}
-          path: |
-            build-static
-            build-shared
-
-
+          cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DUVCPP_BUILD_TESTS=ON `
+            -DUVCPP_BUILD_SHARED=OFF -DUVCPP_BUILD_STATIC=ON `
+            -DUVCPP_BUILD_WEB=OFF
+          cmake --build build-msvc --config Release --parallel
+          ctest --test-dir build-msvc --output-on-failure -C Release
