@@ -44,7 +44,7 @@ http_compress_method http_compress::parse_accept_encoding(
     double q = 1.0;
     size_t qpos = enc.find(";q=");
     if (qpos != std::string::npos) {
-      q = std::stod(enc.substr(qpos + 3));
+      try { q = std::stod(enc.substr(qpos + 3)); } catch (...) { q = 0.0; }
       enc = enc.substr(0, qpos);
       // Re-trim
       while (!enc.empty() && enc.back() == ' ') enc.pop_back();

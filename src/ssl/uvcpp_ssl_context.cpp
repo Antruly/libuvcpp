@@ -11,7 +11,6 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <openssl/rsa.h>
 #include <openssl/x509.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -136,18 +135,22 @@ bool uvcpp_ssl_context::load_private_key_data(const std::string& pem) {
 
 bool uvcpp_ssl_context::generate_self_signed(const std::string& cn, int bits) {
   if (!ctx_) return false;
-  EVP_PKEY* pkey = EVP_PKEY_new();
-  RSA* rsa = RSA_new();
-  BIGNUM* bn = BN_new();
-  if (!pkey || !rsa || !bn) { clear_error(); EVP_PKEY_free(pkey); RSA_free(rsa); BN_free(bn); return false; }
-  BN_set_word(bn, RSA_F4);
-  if (RSA_generate_key_ex(rsa, bits, bn, nullptr) != 1) {
-    clear_error(); EVP_PKEY_free(pkey); RSA_free(rsa); BN_free(bn); return false;
+
+  // Generate RSA key via EVP_PKEY_keygen (OpenSSL 1.1.1+ / 3.x compatible,
+  // avoids deprecated RSA_generate_key_ex / RSA_free / BN_*)
+  EVP_PKEY* pkey = nullptr;
+  EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+  if (!pctx) { clear_error(); return false; }
+  if (EVP_PKEY_keygen_init(pctx) <= 0 ||
+      EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, bits) <= 0 ||
+      EVP_PKEY_keygen(pctx, &pkey) <= 0) {
+    clear_error(); EVP_PKEY_CTX_free(pctx); return false;
   }
-  EVP_PKEY_assign_RSA(pkey, rsa); // pkey now owns rsa
+  EVP_PKEY_CTX_free(pctx);
+  if (!pkey) { clear_error(); return false; }
 
   X509* x509 = X509_new();
-  if (!x509) { clear_error(); EVP_PKEY_free(pkey); BN_free(bn); return false; }
+  if (!x509) { clear_error(); EVP_PKEY_free(pkey); return false; }
   ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
   X509_gmtime_adj(X509_get_notBefore(x509), 0);
   X509_gmtime_adj(X509_get_notAfter(x509), 365 * 24 * 3600);
@@ -157,16 +160,17 @@ bool uvcpp_ssl_context::generate_self_signed(const std::string& cn, int bits) {
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                               reinterpret_cast<const unsigned char*>(cn.c_str()), -1, -1, 0);
   X509_set_issuer_name(x509, name);
-  if (X509_sign(x509, pkey, EVP_sha256()) == 0) { clear_error(); X509_free(x509); EVP_PKEY_free(pkey); BN_free(bn); return false; }
+  if (X509_sign(x509, pkey, EVP_sha256()) == 0) {
+    clear_error(); X509_free(x509); EVP_PKEY_free(pkey); return false;
+  }
 
   int rc = SSL_CTX_use_certificate(ctx_, x509);
-  if (rc != 1) { clear_error(); X509_free(x509); EVP_PKEY_free(pkey); BN_free(bn); return false; }
+  if (rc != 1) { clear_error(); X509_free(x509); EVP_PKEY_free(pkey); return false; }
   rc = SSL_CTX_use_PrivateKey(ctx_, pkey);
-  if (rc != 1) { clear_error(); X509_free(x509); EVP_PKEY_free(pkey); BN_free(bn); return false; }
+  if (rc != 1) { clear_error(); X509_free(x509); EVP_PKEY_free(pkey); return false; }
   rc = SSL_CTX_check_private_key(ctx_);
   X509_free(x509);
   EVP_PKEY_free(pkey);
-  BN_free(bn);
   if (rc != 1) { clear_error(); return false; }
   return true;
 }
