@@ -24,6 +24,8 @@
 
 #if UVCPP_WEB_ENABLE
 
+#include <uvcpp/uvcpp_define.h>
+
 #include <string>
 #include <vector>
 
@@ -66,8 +68,8 @@ namespace http_compress {
  * @param method Target encoding (GZIP or DEFLATE).
  * @return Compressed result (check result.success).
  */
-http_compress_result compress(const char* data, size_t len,
-                               http_compress_method method);
+UVCPP_API http_compress_result compress(const char* data, size_t len,
+                                         http_compress_method method);
 
 /**
  * @brief Decompress input data.
@@ -76,7 +78,7 @@ http_compress_result compress(const char* data, size_t len,
  * @param len   Input length.
  * @return Decompressed result.
  */
-http_compress_result decompress(const char* data, size_t len);
+UVCPP_API http_compress_result decompress(const char* data, size_t len);
 
 #endif  // UVCPP_ZLIB_ENABLE
 
@@ -89,7 +91,7 @@ http_compress_result decompress(const char* data, size_t len);
  * @param header  Value of the Accept-Encoding request header.
  * @return        Best method, or NONE if no supported encoding is acceptable.
  */
-http_compress_method parse_accept_encoding(const std::string& header);
+UVCPP_API http_compress_method parse_accept_encoding(const std::string& header);
 
 /**
  * @brief Determine whether a response should be compressed.
@@ -98,8 +100,8 @@ http_compress_method parse_accept_encoding(const std::string& header);
  *                       Supports wildcard: "image/*" matches "image/png", etc.
  * @return true if compression is appropriate.
  */
-bool should_compress(const std::string& content_type,
-                     const std::vector<std::string>& excluded_types);
+UVCPP_API bool should_compress(const std::string& content_type,
+                                const std::vector<std::string>& excluded_types);
 
 /**
  * @brief Default MIME types excluded from HTTP compression.
@@ -108,7 +110,7 @@ bool should_compress(const std::string& content_type,
  * that gain little from gzip.  Callers can use this as a base and
  * customise via set_compress_excluded_types() on the server.
  */
-const std::vector<std::string>& default_excluded_mime_types();
+UVCPP_API const std::vector<std::string>& default_excluded_mime_types();
 
 }  // namespace http_compress
 }  // namespace uvcpp
