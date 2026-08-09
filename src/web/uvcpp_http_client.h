@@ -168,7 +168,8 @@ class UVCPP_API uvcpp_http_client {
   // -------------------------------------------------------------------
 
 #if UVCPP_ZLIB_ENABLE
-  /** @brief Enable automatic Accept-Encoding + response decompression. */
+  /** @brief Enable/disable automatic Accept-Encoding + response decompression.
+   *         Default: OFF — user must opt in explicitly. */
   void set_compression_enabled(bool enable);
   bool is_compression_enabled() const;
 #endif
@@ -233,7 +234,7 @@ class UVCPP_API uvcpp_http_client {
 #endif
 
 #if UVCPP_ZLIB_ENABLE
-  bool compress_enabled_ = true;
+  bool compress_enabled_ = false;   // OFF by default — user must opt in
   size_t compress_min_body_ = 1024;
 #endif
 };

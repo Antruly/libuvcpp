@@ -93,7 +93,6 @@ std::string uvcpp_http_response::to_string() const {
 
   // Detect chunked transfer encoding
   bool chunked = false;
-  bool has_te = false;
   for (const auto& h : headers) {
     if (http_name_equal(h.name, "transfer-encoding") &&
         h.value.find("chunked") != std::string::npos) {
