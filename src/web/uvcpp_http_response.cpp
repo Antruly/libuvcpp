@@ -91,6 +91,16 @@ std::string uvcpp_http_response::to_string() const {
       << static_cast<int>(status_code) << " "
       << reason << "\r\n";
 
+  // Detect chunked transfer encoding
+  bool chunked = false;
+  bool has_te = false;
+  for (const auto& h : headers) {
+    if (http_name_equal(h.name, "transfer-encoding") &&
+        h.value.find("chunked") != std::string::npos) {
+      chunked = true;
+    }
+  }
+
   // --- Headers ---
   bool has_cl = has_header("content-length");
 
@@ -98,7 +108,9 @@ std::string uvcpp_http_response::to_string() const {
     oss << h.name << ": " << h.value << "\r\n";
   }
 
-  if (!has_cl && body.size() > 0) {
+  if (chunked) {
+    // Chunked: no Content-Length (included)
+  } else if (!has_cl && body.size() > 0) {
     oss << "content-length: " << body.size() << "\r\n";
   }
 
@@ -107,7 +119,15 @@ std::string uvcpp_http_response::to_string() const {
 
   // --- Body ---
   std::string result = oss.str();
-  if (body.size() > 0) {
+  if (chunked && body.size() > 0) {
+    std::ostringstream hex_oss;
+    hex_oss << std::hex << body.size();
+    result += hex_oss.str();
+    result += "\r\n";
+    result.append(body.get_const_data(), body.size());
+    result += "\r\n";
+    result += "0\r\n\r\n";
+  } else if (body.size() > 0) {
     result.append(body.get_const_data(), body.size());
   }
 

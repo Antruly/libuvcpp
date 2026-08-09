@@ -100,7 +100,32 @@ static bool test_response_factory() {
 }
 
 // =========================================================================
-// Test 6: HTTP compress/decompress roundtrip (gzip)
+// Test 6: Chunked transfer encoding parsing (client receive path)
+// =========================================================================
+static bool test_chunked_parse() {
+  uvcpp_http_parser parser(http_parser_mode::PARSE_RESPONSE);
+  const char* raw =
+      "HTTP/1.1 200 OK\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "Content-Type: text/plain\r\n"
+      "\r\n"
+      "5\r\n"
+      "Hello\r\n"
+      "7\r\n"
+      " World!\r\n"
+      "0\r\n"
+      "\r\n";
+  parser.execute(raw, strlen(raw));
+  parser.finish();
+  if (!parser.is_complete() || parser.has_error()) return false;
+  if (parser.get_status_code() != http_status::OK) return false;
+  // llhttp decodes chunked body — on_body callbacks receive decoded data
+  // The parser headers should NOT include transfer-encoding as it's handled internally
+  return true;
+}
+
+// =========================================================================
+// Test 7: HTTP compress/decompress roundtrip (gzip)
 // =========================================================================
 #if UVCPP_ZLIB_ENABLE
 #include <web/uvcpp_http_compress.h>
@@ -216,6 +241,7 @@ int main() {
     {"request_roundtrip", test_request_roundtrip},
     {"post_request", test_post_request},
     {"response_factory", test_response_factory},
+    {"chunked_parse", test_chunked_parse},
 #if UVCPP_ZLIB_ENABLE
     {"compress_gzip", test_compress_gzip_roundtrip},
     {"compress_deflate", test_compress_deflate_roundtrip},

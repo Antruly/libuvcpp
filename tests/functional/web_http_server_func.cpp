@@ -66,7 +66,32 @@ static bool test_status_codes() {
 }
 
 // =========================================================================
-// Test 5: Server compression enabled by default (smoke test)
+// Test 5: Chunked transfer encoding generation (server send path)
+// =========================================================================
+static bool test_chunked_response() {
+  auto resp = uvcpp_http_response::ok("Hello World!", 12, "text/plain");
+  resp.set_header("transfer-encoding", "chunked");
+
+  std::string wire = resp.to_string();
+  // Should contain Transfer-Encoding: chunked
+  if (wire.find("transfer-encoding: chunked") == std::string::npos) return false;
+  // Should NOT contain content-length (chunked replaces it)
+  if (wire.find("content-length:") != std::string::npos) return false;
+  // Should contain chunked body: hex-size, data, final chunk
+  if (wire.find("\r\nc\r\nHello World!\r\n0\r\n\r\n") == std::string::npos) return false;
+
+  // Verify it's still parseable
+  uvcpp_http_parser parser(http_parser_mode::PARSE_RESPONSE);
+  parser.execute(wire.c_str(), wire.size());
+  parser.finish();
+  if (!parser.is_complete() || parser.has_error()) return false;
+  if (parser.get_status_code() != http_status::OK) return false;
+
+  return true;
+}
+
+// =========================================================================
+// Test 6: Server compression enabled by default (smoke test)
 // =========================================================================
 #if UVCPP_ZLIB_ENABLE
 #include <web/uvcpp_http_compress.h>
@@ -126,6 +151,7 @@ int main() {
     {"route_registration", test_route_registration},
     {"response_format", test_response_format},
     {"status_codes", test_status_codes},
+    {"chunked_response", test_chunked_response},
 #if UVCPP_ZLIB_ENABLE
     {"compress_enabled", test_server_compress_enabled},
     {"mime_exclusion", test_server_mime_exclusion},
