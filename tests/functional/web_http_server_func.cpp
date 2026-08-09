@@ -5,6 +5,7 @@
 
 #if UVCPP_WEB_ENABLE
 #include <web/uvcpp_http_server.h>
+#include <web/uvcpp_http_parser.h>
 using namespace uvcpp;
 
 // Test 1: Server construction, bind, listen, status
