@@ -155,7 +155,7 @@ http_compress_result http_compress::compress(const char* data, size_t len,
     return result;
   }
 
-  strm.next_in   = reinterpret_cast<const Bytef*>(data);
+  strm.next_in   = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(data));
   strm.avail_in  = static_cast<uInt>(len);
 
   int ret;
