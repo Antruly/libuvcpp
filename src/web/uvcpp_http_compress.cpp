@@ -166,7 +166,8 @@ http_compress_result http_compress::compress(const char* data, size_t len,
     strm.avail_out = C;
     ret = deflate(&strm, Z_FINISH);
     size_t written = C - strm.avail_out;
-    if (written > 0) result.data.append(reinterpret_cast<const char*>(tmp), written);
+    if (written > 0)
+      result.data.append_data(reinterpret_cast<const char*>(tmp), written);
   } while (ret == Z_OK);
 
   result.success = (ret == Z_STREAM_END);
@@ -202,15 +203,14 @@ http_compress_result http_compress::decompress(const char* data, size_t len) {
     strm.avail_out = C;
     ret = inflate(&strm, Z_FINISH);
     size_t written = C - strm.avail_out;
-    if (written > 0) result.data.append(reinterpret_cast<const char*>(tmp), written);
+    if (written > 0)
+      result.data.append_data(reinterpret_cast<const char*>(tmp), written);
   } while (ret == Z_OK);
 
   // Determine which encoding was detected
   if (ret == Z_STREAM_END) {
-    // strm.data_type & 0x08: gzip header detected
-    // But zlib doesn't reliably expose this; just report success
     result.success = true;
-    result.method = http_compress_method::GZIP;  // default assumption
+    result.method = http_compress_method::GZIP;
     inflateEnd(&strm);
   } else {
     // Try raw deflate as fallback (some servers send bare deflate)
@@ -226,7 +226,8 @@ http_compress_result http_compress::decompress(const char* data, size_t len) {
         strm.avail_out = C;
         ret = inflate(&strm, Z_FINISH);
         size_t written = C - strm.avail_out;
-        if (written > 0) result.data.append(reinterpret_cast<const char*>(tmp), written);
+        if (written > 0)
+          result.data.append_data(reinterpret_cast<const char*>(tmp), written);
       } while (ret == Z_OK);
       result.success = (ret == Z_STREAM_END);
       result.method = http_compress_method::DEFLATE;

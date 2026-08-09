@@ -325,7 +325,7 @@ void uvcpp_http_client::on_response_complete() {
             pending_resp_.body.size());
         if (result.success) {
           pending_resp_.body.clear();
-          pending_resp_.body.append_data(result.data.c_str(), result.data.size());
+          pending_resp_.body.clone(result.data);
           pending_resp_.remove_header("content-encoding");
           pending_resp_.remove_header("content-length");
         }

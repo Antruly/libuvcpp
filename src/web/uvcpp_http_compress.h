@@ -25,6 +25,7 @@
 #if UVCPP_WEB_ENABLE
 
 #include <uvcpp/uvcpp_define.h>
+#include <uvcpp/uvcpp_buf.h>
 
 #include <string>
 #include <vector>
@@ -46,10 +47,11 @@ enum class http_compress_method : int {
 // Compression result
 // =========================================================================
 
-/** @brief Result of a compress or decompress operation. */
+/** @brief Result of a compress or decompress operation.
+ *         Uses uvcpp_buf (not std::string) — safe for binary payloads. */
 struct http_compress_result {
   bool                success = false;  ///< true if operation completed
-  std::string         data;             ///< Result payload (empty on failure)
+  uvcpp_buf           data;             ///< Result payload (empty on failure)
   http_compress_method method = http_compress_method::NONE;  ///< Encoding used
 };
 

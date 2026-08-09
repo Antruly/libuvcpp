@@ -137,14 +137,16 @@ static bool test_compress_gzip_roundtrip() {
 
   auto cresult = http_compress::compress(plain, len, http_compress_method::GZIP);
   if (!cresult.success) return false;
-  if (cresult.data.empty()) return false;
+  if (cresult.data.size() == 0) return false;
 
   // Compressed data should be different from original
-  if (cresult.data == std::string(plain, len)) return false;
+  std::string compressed(cresult.data.get_const_data(), cresult.data.size());
+  if (compressed == std::string(plain, len)) return false;
 
-  auto dresult = http_compress::decompress(cresult.data.c_str(), cresult.data.size());
+  auto dresult = http_compress::decompress(cresult.data.get_const_data(), cresult.data.size());
   if (!dresult.success) return false;
-  if (dresult.data != std::string(plain, len)) return false;
+  std::string decompressed(dresult.data.get_const_data(), dresult.data.size());
+  if (decompressed != std::string(plain, len)) return false;
 
   return true;
 }
@@ -158,11 +160,12 @@ static bool test_compress_deflate_roundtrip() {
 
   auto cresult = http_compress::compress(plain, len, http_compress_method::DEFLATE);
   if (!cresult.success) return false;
-  if (cresult.data.empty()) return false;
+  if (cresult.data.size() == 0) return false;
 
-  auto dresult = http_compress::decompress(cresult.data.c_str(), cresult.data.size());
+  auto dresult = http_compress::decompress(cresult.data.get_const_data(), cresult.data.size());
   if (!dresult.success) return false;
-  if (dresult.data != std::string(plain, len)) return false;
+  std::string decompressed2(dresult.data.get_const_data(), dresult.data.size());
+  if (decompressed2 != std::string(plain, len)) return false;
 
   return true;
 }

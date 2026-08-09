@@ -190,7 +190,7 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
             resp.body.get_const_data(), resp.body.size(), best);
         if (result.success) {
           resp.body.clear();
-          resp.body.append_data(result.data.c_str(), result.data.size());
+          resp.body.clone(result.data);
           resp.set_header("content-encoding",
                           best == http_compress_method::GZIP ? "gzip" : "deflate");
           // Remove old Content-Length — to_string() will re-add with compressed size
