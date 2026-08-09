@@ -10,6 +10,7 @@
 #if UVCPP_WEB_ENABLE
 
 #include <web/uvcpp_http_parser.h>
+#include <web/uvcpp_http_compress.h>
 #include <cctype>
 #include <cstring>
 
@@ -168,6 +169,40 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     resp = uvcpp_http_response::not_found();
   }
 
+  // -------------------------------------------------------------------
+  // Compression (server → client)
+  // -------------------------------------------------------------------
+#if UVCPP_ZLIB_ENABLE
+  if (compress_enabled_ &&
+      resp.body.size() >= compress_min_body_ &&
+      !resp.has_header("content-encoding")) {
+    // Check Accept-Encoding from client
+    std::string ae = http_get_header(req.headers, "accept-encoding");
+    http_compress_method best = http_compress::parse_accept_encoding(ae);
+
+    if (best != http_compress_method::NONE) {
+      // Check MIME exclusion
+      std::string ct = resp.content_type();
+      if (http_compress::should_compress(ct, compress_excluded_types_.empty()
+                                                  ? http_compress::default_excluded_mime_types()
+                                                  : compress_excluded_types_)) {
+        auto result = http_compress::compress(
+            resp.body.get_const_data(), resp.body.size(), best);
+        if (result.success) {
+          resp.body.clear();
+          resp.body.append_data(result.data.c_str(), result.data.size());
+          resp.set_header("content-encoding",
+                          best == http_compress_method::GZIP ? "gzip" : "deflate");
+          // Remove old Content-Length — to_string() will re-add with compressed size
+          resp.remove_header("content-length");
+          // Vary for CDN/proxy cache correctness (RFC 7231 §7.1.4)
+          if (!resp.has_header("vary")) resp.set_header("vary", "accept-encoding");
+        }
+      }
+    }
+  }
+#endif
+
   // Keep-Alive logic (RFC 7230 Section 6.3):
   // HTTP/1.1 defaults to keep-alive unless Connection: close
   // HTTP/1.0 defaults to close unless Connection: keep-alive
@@ -214,6 +249,25 @@ void uvcpp_http_server::stop(std::function<void()> on_stopped) {
 int uvcpp_http_server::get_status() const { return status_; }
 bool uvcpp_http_server::has_status(int flags) const { return (status_ & flags) == flags; }
 uvcpp_tcp_server* uvcpp_http_server::get_tcp_server() { return tcp_server_; }
+
+#if UVCPP_ZLIB_ENABLE
+void uvcpp_http_server::set_compression_enabled(bool enable) {
+  compress_enabled_ = enable;
+}
+bool uvcpp_http_server::is_compression_enabled() const {
+  return compress_enabled_;
+}
+void uvcpp_http_server::set_compress_min_body_size(size_t min_size) {
+  compress_min_body_ = min_size;
+}
+void uvcpp_http_server::set_compress_excluded_types(
+    const std::vector<std::string>& types) {
+  compress_excluded_types_ = types;
+}
+void uvcpp_http_server::add_compress_excluded_type(const std::string& mime_type) {
+  compress_excluded_types_.push_back(mime_type);
+}
+#endif
 
 }  // namespace uvcpp
 

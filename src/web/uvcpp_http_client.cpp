@@ -10,6 +10,7 @@
 #if UVCPP_WEB_ENABLE
 
 #include <web/uvcpp_http_parser.h>
+#include <web/uvcpp_http_compress.h>
 #include <handle/uvcpp_tcp.h>
 #include <req/uvcpp_write.h>
 #include <chrono>
@@ -189,7 +190,17 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
 
   // Serialize request and write
   set_status(HTTP_CLIENT_SENDING);
+
+#if UVCPP_ZLIB_ENABLE
+  // If compression enabled, add Accept-Encoding (on a mutable copy)
+  uvcpp_http_request req_copy = req;
+  if (compress_enabled_ && !req_copy.has_header("accept-encoding")) {
+    req_copy.set_header("accept-encoding", "gzip, deflate");
+  }
+  std::string raw = req_copy.to_string();
+#else
   std::string raw = req.to_string();
+#endif
 
   tcp_->write(raw.c_str(), raw.size(), [this](int status) {
     if (status != 0) {
@@ -293,6 +304,36 @@ void uvcpp_http_client::on_response_complete() {
     keep_alive_ = false;
   }
 
+#if UVCPP_ZLIB_ENABLE
+  // Auto-decompress response body if Content-Encoding is set
+  if (compress_enabled_) {
+    std::string ce = http_get_header(pending_resp_.headers, "content-encoding");
+    if (!ce.empty()) {
+      http_compress_method enc = http_compress_method::NONE;
+      {
+        std::string cel = ce;
+        for (auto& c : cel) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (cel == "gzip" || cel == "x-gzip")
+          enc = http_compress_method::GZIP;
+        else if (cel == "deflate" || cel == "x-deflate")
+          enc = http_compress_method::DEFLATE;
+      }
+      if (enc != http_compress_method::NONE &&
+          pending_resp_.body.size() >= compress_min_body_) {
+        auto result = http_compress::decompress(
+            pending_resp_.body.get_const_data(),
+            pending_resp_.body.size());
+        if (result.success) {
+          pending_resp_.body.clear();
+          pending_resp_.body.append_data(result.data.c_str(), result.data.size());
+          pending_resp_.remove_header("content-encoding");
+          pending_resp_.remove_header("content-length");
+        }
+      }
+    }
+  }
+#endif
+
   if (user_cb_) {
     auto cb = std::move(user_cb_);
     user_cb_ = nullptr;
@@ -380,6 +421,19 @@ int uvcpp_http_client::ssl_write(const char* data, size_t len) {
   return ssl_->write(data, len);
 }
 
+#endif
+
+// =========================================================================
+// Compression support
+// =========================================================================
+
+#if UVCPP_ZLIB_ENABLE
+void uvcpp_http_client::set_compression_enabled(bool enable) {
+  compress_enabled_ = enable;
+}
+bool uvcpp_http_client::is_compression_enabled() const {
+  return compress_enabled_;
+}
 #endif
 
 }  // namespace uvcpp

@@ -59,6 +59,15 @@ bool uvcpp_http_response::has_header(const std::string& key) const {
   return http_has_header(headers, key);
 }
 
+void uvcpp_http_response::remove_header(const std::string& key) {
+  for (auto it = headers.begin(); it != headers.end(); ++it) {
+    if (http_name_equal(it->name, key)) {
+      headers.erase(it);
+      return;
+    }
+  }
+}
+
 std::string uvcpp_http_response::content_type() const {
   return get_header("content-type");
 }

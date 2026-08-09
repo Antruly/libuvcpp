@@ -100,6 +100,111 @@ static bool test_response_factory() {
 }
 
 // =========================================================================
+// Test 6: HTTP compress/decompress roundtrip (gzip)
+// =========================================================================
+#if UVCPP_ZLIB_ENABLE
+#include <web/uvcpp_http_compress.h>
+
+static bool test_compress_gzip_roundtrip() {
+  const char* plain = "Hello HTTP compression! This is some text to compress. "
+                      "It should be significantly smaller after gzip encoding.";
+  size_t len = strlen(plain);
+
+  auto cresult = http_compress::compress(plain, len, http_compress_method::GZIP);
+  if (!cresult.success) return false;
+  if (cresult.data.empty()) return false;
+
+  // Compressed data should be different from original
+  if (cresult.data == std::string(plain, len)) return false;
+
+  auto dresult = http_compress::decompress(cresult.data.c_str(), cresult.data.size());
+  if (!dresult.success) return false;
+  if (dresult.data != std::string(plain, len)) return false;
+
+  return true;
+}
+
+// =========================================================================
+// Test 7: HTTP compress/decompress roundtrip (deflate)
+// =========================================================================
+static bool test_compress_deflate_roundtrip() {
+  const char* plain = "This is a test of deflate compression for HTTP bodies.";
+  size_t len = strlen(plain);
+
+  auto cresult = http_compress::compress(plain, len, http_compress_method::DEFLATE);
+  if (!cresult.success) return false;
+  if (cresult.data.empty()) return false;
+
+  auto dresult = http_compress::decompress(cresult.data.c_str(), cresult.data.size());
+  if (!dresult.success) return false;
+  if (dresult.data != std::string(plain, len)) return false;
+
+  return true;
+}
+
+// =========================================================================
+// Test 8: Accept-Encoding parsing
+// =========================================================================
+static bool test_accept_encoding_parse() {
+  // Basic
+  if (http_compress::parse_accept_encoding("gzip, deflate") != http_compress_method::GZIP)
+    return false;
+  if (http_compress::parse_accept_encoding("deflate") != http_compress_method::DEFLATE)
+    return false;
+  // deflate first → gzip should still win (higher priority)
+  if (http_compress::parse_accept_encoding("deflate, gzip") != http_compress_method::GZIP)
+    return false;
+  // Only gzip
+  if (http_compress::parse_accept_encoding("gzip") != http_compress_method::GZIP)
+    return false;
+  // None supported
+  if (http_compress::parse_accept_encoding("identity") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("") != http_compress_method::NONE)
+    return false;
+  // x- variants
+  if (http_compress::parse_accept_encoding("x-gzip") != http_compress_method::GZIP)
+    return false;
+  // Wildcard → gzip
+  if (http_compress::parse_accept_encoding("*") != http_compress_method::GZIP)
+    return false;
+  // q=0 should skip
+  if (http_compress::parse_accept_encoding("gzip;q=0, deflate") != http_compress_method::DEFLATE)
+    return false;
+  return true;
+}
+
+// =========================================================================
+// Test 9: MIME type exclusion
+// =========================================================================
+static bool test_mime_exclusion() {
+  const auto& excl = http_compress::default_excluded_mime_types();
+
+  // Image types should be excluded (prefix match "image/")
+  if (http_compress::should_compress("image/png", excl)) return false;
+  if (http_compress::should_compress("image/jpeg", excl)) return false;
+  if (http_compress::should_compress("image/gif", excl)) return false;
+
+  // Video/audio
+  if (http_compress::should_compress("video/mp4", excl)) return false;
+  if (http_compress::should_compress("audio/mpeg", excl)) return false;
+
+  // Application types
+  if (http_compress::should_compress("application/zip", excl)) return false;
+  if (http_compress::should_compress("application/pdf", excl)) return false;
+  if (http_compress::should_compress("application/octet-stream", excl)) return false;
+
+  // Text types SHOULD be compressed
+  if (!http_compress::should_compress("text/html", excl)) return false;
+  if (!http_compress::should_compress("text/plain", excl)) return false;
+  if (!http_compress::should_compress("application/json", excl)) return false;
+  if (!http_compress::should_compress("text/css", excl)) return false;
+
+  return true;
+}
+#endif  // UVCPP_ZLIB_ENABLE
+
+// =========================================================================
 // main
 // =========================================================================
 int main() {
@@ -111,6 +216,12 @@ int main() {
     {"request_roundtrip", test_request_roundtrip},
     {"post_request", test_post_request},
     {"response_factory", test_response_factory},
+#if UVCPP_ZLIB_ENABLE
+    {"compress_gzip", test_compress_gzip_roundtrip},
+    {"compress_deflate", test_compress_deflate_roundtrip},
+    {"accept_encoding", test_accept_encoding_parse},
+    {"mime_exclusion", test_mime_exclusion},
+#endif
   };
 
   for (const auto& t : tests) {

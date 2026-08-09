@@ -54,6 +54,9 @@ class UVCPP_API uvcpp_http_response {
   /** @brief Check if a header exists (case-insensitive). */
   bool has_header(const std::string& key) const;
 
+  /** @brief Remove a header by name (case-insensitive). */
+  void remove_header(const std::string& key);
+
   // -------------------------------------------------------------------
   // Content-Type shortcut
   // -------------------------------------------------------------------

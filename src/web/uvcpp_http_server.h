@@ -122,6 +122,26 @@ class UVCPP_API uvcpp_http_server {
   void head(const std::string& path, http_request_handler handler);
 
   // -------------------------------------------------------------------
+  // Compression (UVCPP_ZLIB_ENABLE=1 only)
+  // -------------------------------------------------------------------
+
+#if UVCPP_ZLIB_ENABLE
+  /** @brief Enable/disable automatic response body compression.
+   *         Default: enabled when UVCPP_ZLIB_ENABLE=1. */
+  void set_compression_enabled(bool enable);
+  bool is_compression_enabled() const;
+
+  /** @brief Set the minimum body size (bytes) to trigger compression. Default 1024. */
+  void set_compress_min_body_size(size_t min_size);
+
+  /** @brief Override the default MIME exclusion list. */
+  void set_compress_excluded_types(const std::vector<std::string>& types);
+
+  /** @brief Add a single MIME type to the exclusion list. */
+  void add_compress_excluded_type(const std::string& mime_type);
+#endif
+
+  // -------------------------------------------------------------------
   // Loop control
   // -------------------------------------------------------------------
 
@@ -189,6 +209,12 @@ class UVCPP_API uvcpp_http_server {
   upgrade_handler_t upgrade_handler_;
 
   std::map<uvcpp_tcp_client*, conn_ctx> contexts_;
+
+#if UVCPP_ZLIB_ENABLE
+  bool compress_enabled_ = true;
+  size_t compress_min_body_ = 1024;
+  std::vector<std::string> compress_excluded_types_;
+#endif
 };
 
 }  // namespace uvcpp

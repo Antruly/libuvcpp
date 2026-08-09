@@ -164,6 +164,16 @@ class UVCPP_API uvcpp_http_client {
   void set_keep_alive(bool enable);
 
   // -------------------------------------------------------------------
+  // Compression (UVCPP_ZLIB_ENABLE=1 only)
+  // -------------------------------------------------------------------
+
+#if UVCPP_ZLIB_ENABLE
+  /** @brief Enable automatic Accept-Encoding + response decompression. */
+  void set_compression_enabled(bool enable);
+  bool is_compression_enabled() const;
+#endif
+
+  // -------------------------------------------------------------------
   // SSL / HTTPS support (UVCPP_OPENSSL_ENABLE=1 only)
   // -------------------------------------------------------------------
 #if UVCPP_OPENSSL_ENABLE
@@ -220,6 +230,11 @@ class UVCPP_API uvcpp_http_client {
   int do_ssl_handshake(int fd);
   int ssl_read(char* buf, size_t len);
   int ssl_write(const char* data, size_t len);
+#endif
+
+#if UVCPP_ZLIB_ENABLE
+  bool compress_enabled_ = true;
+  size_t compress_min_body_ = 1024;
 #endif
 };
 
