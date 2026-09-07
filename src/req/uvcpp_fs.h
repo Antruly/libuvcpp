@@ -381,221 +381,304 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
   ::std::function<void(uvcpp_fs*)> fs_lchown_cb;
   ::std::function<void(uvcpp_fs*)> fs_statfs_cb;
 
+  // Guard: reject re-submitting async work while a prior op is still in flight.
+  // A single shared uv_fs_t would otherwise corrupt libuv's thread-pool queue
+  // (lost work items -> active_reqs imbalance -> uv_run spins).
+  bool async_pending_ = false;
+
  private:
 
+  // req_cleanup() MUST run before the user callback: the callback may chain a
+  // new async op on this same object, and uv_fs_* re-inits the shared uv_fs_t
+  // (uv__fs_req_init resets flags/pointers), so cleaning up after the callback
+  // would either leak the completed op's path buffer (flags already reset) or
+  // corrupt the in-flight op. get_result() survives req_cleanup(); the statbuf/
+  // ptr/path accessors are cleared, so callbacks must not rely on them.
   static void callback_close(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_close_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_close_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_close_cb)
+      self->fs_close_cb(self);
   }
   static void callback_open(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_open_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_open_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_open_cb)
+      self->fs_open_cb(self);
   }
 
   static void callback_read(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_read_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_read_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_read_cb)
+      self->fs_read_cb(self);
   }
 
   static void callback_unlink(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_unlink_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_unlink_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_unlink_cb)
+      self->fs_unlink_cb(self);
   }
 
   static void callback_write(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
     if (self->fs_write_cb)
       self->fs_write_cb(self);
   }
 
   static void callback_copyfile(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_copyfile_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_copyfile_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_copyfile_cb)
+      self->fs_copyfile_cb(self);
   }
 
   static void callback_mkdir(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_mkdir_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_mkdir_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_mkdir_cb)
+      self->fs_mkdir_cb(self);
   }
 
   static void callback_mkdtemp(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_mkdtemp_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_mkdtemp_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_mkdtemp_cb)
+      self->fs_mkdtemp_cb(self);
   }
 
   static void callback_mkstemp(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_mkstemp_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_mkstemp_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_mkstemp_cb)
+      self->fs_mkstemp_cb(self);
   }
 
   static void callback_rmdir(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_rmdir_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_rmdir_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_rmdir_cb)
+      self->fs_rmdir_cb(self);
   }
 
   static void callback_scandir(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_scandir_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_scandir_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_scandir_cb)
+      self->fs_scandir_cb(self);
   }
 
   static void callback_opendir(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_opendir_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_opendir_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_opendir_cb)
+      self->fs_opendir_cb(self);
   }
 
   static void callback_readdir(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_readdir_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_readdir_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_readdir_cb)
+      self->fs_readdir_cb(self);
   }
 
   static void callback_closedir(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_closedir_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_closedir_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_closedir_cb)
+      self->fs_closedir_cb(self);
   }
 
   static void callback_stat(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_stat_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_stat_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_stat_cb)
+      self->fs_stat_cb(self);
   }
 
   static void callback_fstat(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_fstat_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_fstat_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_fstat_cb)
+      self->fs_fstat_cb(self);
   }
 
   static void callback_rename(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_rename_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_rename_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_rename_cb)
+      self->fs_rename_cb(self);
   }
 
   static void callback_fsync(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_fsync_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_fsync_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_fsync_cb)
+      self->fs_fsync_cb(self);
   }
 
   static void callback_fdatasync(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_fdatasync_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_fdatasync_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_fdatasync_cb)
+      self->fs_fdatasync_cb(self);
   }
 
   static void callback_ftruncate(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_ftruncate_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_ftruncate_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_ftruncate_cb)
+      self->fs_ftruncate_cb(self);
   }
 
   static void callback_sendfile(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_sendfile_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_sendfile_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_sendfile_cb)
+      self->fs_sendfile_cb(self);
   }
 
   static void callback_access(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_access_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_access_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_access_cb)
+      self->fs_access_cb(self);
   }
 
   static void callback_chmod(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_chmod_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_chmod_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_chmod_cb)
+      self->fs_chmod_cb(self);
   }
 
   static void callback_utime(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_utime_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_utime_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_utime_cb)
+      self->fs_utime_cb(self);
   }
 
   static void callback_futime(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_futime_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_futime_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_futime_cb)
+      self->fs_futime_cb(self);
   }
 
   static void callback_lutime(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_lutime_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_lutime_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_lutime_cb)
+      self->fs_lutime_cb(self);
   }
 
   static void callback_lstat(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_lstat_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_lstat_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_lstat_cb)
+      self->fs_lstat_cb(self);
   }
 
   static void callback_link(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_link_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_link_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_link_cb)
+      self->fs_link_cb(self);
   }
 
   static void callback_symlink(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_symlink_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_symlink_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_symlink_cb)
+      self->fs_symlink_cb(self);
   }
 
   static void callback_readlink(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_readlink_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_readlink_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_readlink_cb)
+      self->fs_readlink_cb(self);
   }
 
   static void callback_realpath(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_realpath_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_realpath_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_realpath_cb)
+      self->fs_realpath_cb(self);
   }
 
   static void callback_fchmod(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_fchmod_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_fchmod_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_fchmod_cb)
+      self->fs_fchmod_cb(self);
   }
 
   static void callback_chown(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_chown_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_chown_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_chown_cb)
+      self->fs_chown_cb(self);
   }
 
   static void callback_fchown(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_fchown_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_fchown_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_fchown_cb)
+      self->fs_fchown_cb(self);
   }
 
   static void callback_lchown(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_lchown_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_lchown_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_lchown_cb)
+      self->fs_lchown_cb(self);
   }
 
   static void callback_statfs(uv_fs_t* req) {
-    if (reinterpret_cast<uvcpp_fs*>(req->data)->fs_statfs_cb)
-      reinterpret_cast<uvcpp_fs*>(req->data)->fs_statfs_cb(
-          reinterpret_cast<uvcpp_fs*>(req->data));
+    uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
+    self->async_pending_ = false;
+    self->req_cleanup();
+    if (self->fs_statfs_cb)
+      self->fs_statfs_cb(self);
   }
 
  private:

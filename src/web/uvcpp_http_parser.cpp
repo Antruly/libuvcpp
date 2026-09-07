@@ -150,7 +150,7 @@ size_t uvcpp_http_parser::execute(const char* data, size_t len) {
   if (err == HPE_OK) {
     // Check if message is complete (body fully received)
     // llhttp sets the "finish" flag internally
-    if (raw_p(raw_parser_)->finish) {
+    if (raw_p(raw_parser_)->finish != HTTP_FINISH_UNSAFE) {
       state_ = http_parser_state::COMPLETE;
     }
     return len;  // All data consumed

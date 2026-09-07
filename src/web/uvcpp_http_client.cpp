@@ -16,6 +16,11 @@
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <sstream>
+#include <cstdio>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 
 #if UVCPP_OPENSSL_ENABLE
 #include <ssl/uvcpp_ssl.h>
@@ -82,7 +87,7 @@ int uvcpp_http_client::connect(const char* host, int port,
   last_error_code_ = 0;
 
   if (cb) {
-    tcp_->connect(host, port, [this, cb](int status) {
+    int init_rc = tcp_->connect(host, port, [this, cb](int status) {
       if (status != 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = status; cb(status); return; }
 #if UVCPP_OPENSSL_ENABLE
       if (ssl_enabled_) {
@@ -97,6 +102,12 @@ int uvcpp_http_client::connect(const char* host, int port,
       clear_status(HTTP_CLIENT_ERROR);
       cb(0);
     });
+    if (init_rc != 0) {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = init_rc;
+      cb(init_rc);
+      return init_rc;
+    }
     return 0;
   }
   return connect_wait(host, port);
@@ -111,10 +122,15 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
   bool done = false;
   int result = 0;
 
-  tcp_->connect(host, port, [&done, &result](int status) {
+  int init_rc = tcp_->connect(host, port, [&done, &result](int status) {
     result = status;
     done = true;
   });
+  if (init_rc != 0) {
+    // 连接未能发起（例如主机名解析失败）——立即返回，避免空等超时
+    last_error_code_ = init_rc;
+    return init_rc;
+  }
 
   auto start = std::chrono::steady_clock::now();
   while (!done) {
@@ -226,6 +242,14 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
 int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
                                   uvcpp_http_response& resp,
                                   int timeout_ms) {
+#if UVCPP_OPENSSL_ENABLE
+  if (ssl_enabled_ && ssl_) {
+    return send_wait_ssl(req, resp, timeout_ms);
+  }
+  // 纯 HTTP 同步请求也走阻塞式 socket I/O，完全绕开 libuv 的异步 read/close
+  // 路径，规避连接关闭时析构 close-dance 引发的内存损坏。
+  return send_wait_plain(req, resp, timeout_ms);
+#else
   bool done = false;
   int result_err = 0;
 
@@ -251,6 +275,7 @@ int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
   }
 
   return result_err;
+#endif
 }
 
 // =========================================================================
@@ -404,11 +429,248 @@ void uvcpp_http_client::set_ssl_context(uvcpp_ssl_context* ctx) {
 
 bool uvcpp_http_client::is_ssl_enabled() const { return ssl_enabled_; }
 
+// 设置 socket 阻塞/非阻塞（同步 SSL 路径用）
+static void set_socket_blocking(uv_os_sock_t fd, bool blocking) {
+#ifdef _WIN32
+  u_long mode = blocking ? 0UL : 1UL;
+  ioctlsocket(fd, FIONBIO, &mode);
+#else
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (blocking) flags &= ~O_NONBLOCK; else flags |= O_NONBLOCK;
+  fcntl(fd, F_SETFL, flags);
+#endif
+}
+
+// 解析 HTTP 响应头，小写化后查找指定 header 的值（返回空串表示不存在）
+static std::string get_header_value(const std::string& head,
+                                    const std::string& name) {
+  std::string lower;
+  lower.resize(head.size());
+  std::transform(head.begin(), head.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::string needle = name + ":";
+  size_t pos = lower.find(needle);
+  if (pos == std::string::npos) return "";
+  size_t lineEnd = lower.find("\r\n", pos);
+  size_t valStart = pos + needle.size();
+  size_t valEnd = (lineEnd == std::string::npos) ? lower.size() : lineEnd;
+  std::string val = head.substr(valStart, valEnd - valStart);
+  // 去除首尾空白
+  size_t b = val.find_first_not_of(" \t");
+  size_t e = val.find_last_not_of(" \t");
+  if (b == std::string::npos) return "";
+  return val.substr(b, e - b + 1);
+}
+
+// 分块传输编码解码（RFC 7230 §4.1）
+static std::string dechunk_body(const std::string& raw) {
+  std::string out;
+  size_t pos = 0;
+  while (pos < raw.size()) {
+    // 读 chunk 大小行（十六进制，可带扩展），以 CRLF 结束
+    size_t crlf = raw.find("\r\n", pos);
+    if (crlf == std::string::npos) break;
+    std::string sizeStr = raw.substr(pos, crlf - pos);
+    size_t semi = sizeStr.find(';');
+    if (semi != std::string::npos) sizeStr = sizeStr.substr(0, semi);
+    unsigned long chunkSize = std::strtoul(sizeStr.c_str(), nullptr, 16);
+    pos = crlf + 2;
+    if (chunkSize == 0) break;  // 终止 chunk
+    if (pos + chunkSize > raw.size()) break;
+    out.append(raw, pos, chunkSize);
+    pos += chunkSize;
+    // 跳过 chunk 数据后的 CRLF
+    if (pos + 2 <= raw.size() && raw.compare(pos, 2, "\r\n") == 0) pos += 2;
+  }
+  return out;
+}
+
 int uvcpp_http_client::do_ssl_handshake(int fd) {
   if (!ssl_ctx_) return -1;
   delete ssl_;
   ssl_ = new uvcpp_ssl(ssl_ctx_, fd);
-  return ssl_->handshake();
+  // 同步路径：把 socket 设为阻塞模式，简化握手与后续 SSL 读写
+  set_socket_blocking(fd, true);
+  int rc = ssl_->handshake();
+  // 非阻塞 socket 下 handshake 可能返回 0（WANT_READ/WANT_WRITE），重试几次兜底
+  for (int i = 0; i < 4 && rc == 0; ++i) rc = ssl_->handshake();
+  return rc;
+}
+
+// ---------------------------------------------------------------------------
+// 同步 SSL 发送/接收（阻塞式，仅用于 *_wait 系列）
+// ---------------------------------------------------------------------------
+int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
+                                      uvcpp_http_response& resp,
+                                      int timeout_ms) {
+  if (!ssl_) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
+
+  // 设置 socket 收发超时，避免阻塞挂死
+  uv_os_sock_t sock;
+  if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) == 0) {
+#ifdef _WIN32
+    DWORD tv = static_cast<DWORD>(timeout_ms);
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
+  }
+
+  // 构造请求：强制 Host + Connection: close（读至 EOF 即判断响应结束）
+  uvcpp_http_request r = req;
+  if (!r.has_header("host")) r.set_header("host", host_);
+  r.set_header("connection", "close");
+  std::string raw = r.to_string();
+
+  // 阻塞式 SSL 写入
+  size_t sent = 0;
+  while (sent < raw.size()) {
+    int n = ssl_->write(raw.data() + sent, raw.size() - sent);
+    if (n < 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
+    if (n == 0) break;  // 阻塞 socket 下不应出现，防御性跳出
+    sent += static_cast<size_t>(n);
+  }
+
+  // 阻塞式 SSL 读取直到 EOF（服务器因 Connection: close 关闭连接）
+  std::string all;
+  char buf[8192];
+  while (true) {
+    int n = ssl_->read(buf, sizeof(buf));
+    if (n > 0) { all.append(buf, static_cast<size_t>(n)); continue; }
+    break;  // 0 = EOF / 需要更多数据（阻塞 socket 下 0 即 EOF）；<0 = 错误
+  }
+
+  // 解析状态行与头/体分隔
+  size_t hdrEnd = all.find("\r\n\r\n");
+  std::string head = (hdrEnd == std::string::npos) ? all : all.substr(0, hdrEnd);
+  std::string body = (hdrEnd == std::string::npos) ? std::string() : all.substr(hdrEnd + 4);
+
+  // 分块传输编码（Tencent 的 K 线/分时接口返回 chunked）需解码，
+  // 否则 body 会带上 chunk 大小前缀，导致 JSON 解析失败。
+  std::string te = get_header_value(head, "transfer-encoding");
+  std::string telower;
+  telower.resize(te.size());
+  std::transform(te.begin(), te.end(), telower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (telower.find("chunked") != std::string::npos) {
+    body = dechunk_body(body);
+  } else {
+    // 非 chunked：若存在 Content-Length，则按长度截断（防御性）
+    std::string cl = get_header_value(head, "content-length");
+    if (!cl.empty()) {
+      size_t len = static_cast<size_t>(std::strtoul(cl.c_str(), nullptr, 10));
+      if (len < body.size()) body.resize(len);
+    }
+  }
+
+  int status = 200;
+  std::istringstream iss(head);
+  std::string line;
+  if (std::getline(iss, line)) {
+    size_t s1 = line.find(' ');
+    if (s1 != std::string::npos) {
+      size_t s2 = line.find(' ', s1 + 1);
+      std::string code = line.substr(s1 + 1,
+          (s2 == std::string::npos) ? std::string::npos : (s2 - s1 - 1));
+      try { status = std::stoi(code); } catch (...) {}
+    }
+  }
+
+  resp.status_code = static_cast<http_status>(status);
+  resp.status_message = http_status_reason(resp.status_code);
+  resp.body.clear();
+  resp.body.clone_data(body.data(), body.size());
+  set_status(HTTP_CLIENT_COMPLETE);
+  clear_status(HTTP_CLIENT_ERROR);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 同步纯 HTTP 发送/接收（阻塞式 socket I/O，读至 EOF）
+// ---------------------------------------------------------------------------
+int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
+                                        uvcpp_http_response& resp,
+                                        int timeout_ms) {
+  uv_os_sock_t sock;
+  if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) != 0) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = -1;
+    return -1;
+  }
+
+  // 把 socket 设为阻塞模式，并设置收发超时，避免挂死
+  set_socket_blocking(sock, true);
+#ifdef _WIN32
+  DWORD tv = static_cast<DWORD>(timeout_ms);
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
+
+  // 构造请求：强制 Host + Connection: close（读至 EOF 即判断响应结束）
+  uvcpp_http_request r = req;
+  if (!r.has_header("host")) r.set_header("host", host_);
+  r.set_header("connection", "close");
+  std::string raw = r.to_string();
+
+  // 阻塞式写入
+  size_t sent = 0;
+  while (sent < raw.size()) {
+    int n = static_cast<int>(::send(sock, raw.data() + sent,
+                                    static_cast<int>(raw.size() - sent), 0));
+    if (n <= 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
+    sent += static_cast<size_t>(n);
+  }
+
+  // 阻塞式读取直到 EOF（服务器因 Connection: close 关闭连接）
+  std::string all;
+  char buf[8192];
+  while (true) {
+    int n = static_cast<int>(::recv(sock, buf, sizeof(buf), 0));
+    if (n > 0) { all.append(buf, static_cast<size_t>(n)); continue; }
+    break;  // 0 = EOF；<0 = 错误/超时
+  }
+
+  // 解析状态行与头/体分隔
+  size_t hdrEnd = all.find("\r\n\r\n");
+  std::string head = (hdrEnd == std::string::npos) ? all : all.substr(0, hdrEnd);
+  std::string body = (hdrEnd == std::string::npos) ? std::string() : all.substr(hdrEnd + 4);
+
+  // 分块传输编码需解码，否则 body 会带上 chunk 大小前缀导致 JSON 解析失败
+  std::string te = get_header_value(head, "transfer-encoding");
+  std::string telower;
+  telower.resize(te.size());
+  std::transform(te.begin(), te.end(), telower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (telower.find("chunked") != std::string::npos) {
+    body = dechunk_body(body);
+  } else {
+    // 非 chunked：若存在 Content-Length，则按长度截断（防御性）
+    std::string cl = get_header_value(head, "content-length");
+    if (!cl.empty()) {
+      size_t len = static_cast<size_t>(std::strtoul(cl.c_str(), nullptr, 10));
+      if (len < body.size()) body.resize(len);
+    }
+  }
+
+  int status = 200;
+  std::istringstream iss(head);
+  std::string line;
+  if (std::getline(iss, line)) {
+    size_t s1 = line.find(' ');
+    if (s1 != std::string::npos) {
+      size_t s2 = line.find(' ', s1 + 1);
+      std::string code = line.substr(s1 + 1,
+          (s2 == std::string::npos) ? std::string::npos : (s2 - s1 - 1));
+      try { status = std::stoi(code); } catch (...) {}
+    }
+  }
+
+  resp.status_code = static_cast<http_status>(status);
+  resp.status_message = http_status_reason(resp.status_code);
+  resp.body.clear();
+  resp.body.clone_data(body.data(), body.size());
+  set_status(HTTP_CLIENT_COMPLETE);
+  clear_status(HTTP_CLIENT_ERROR);
+  return 0;
 }
 
 int uvcpp_http_client::ssl_read(char* buf, size_t len) {

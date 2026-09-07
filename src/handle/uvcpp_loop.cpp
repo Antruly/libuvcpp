@@ -8,8 +8,16 @@ uvcpp_loop::uvcpp_loop() : uvcpp_handle() {
   this->init();
 }
 uvcpp_loop::~uvcpp_loop() {
-  if (!this->is_closing() && this->is_active())
-    this->close();
+  // uv_loop_t is NOT a uv_handle_t: the base free_handle() would call
+  // uv_is_closing()/uv_is_active() on the loop pointer (reading the wrong
+  // memory, UB) and could uv_close() the loop or double uv_loop_close it.
+  // The loop is closed by its owner via loop_close() before delete; here we
+  // only free the uv_loop_t storage we own, then detach so free_handle() no-ops.
+  uv_handle_t *h = this->get_handle();
+  if (h == nullptr)
+    return;
+  uvcpp_free_bytes(h);
+  this->detach_handle();
 }
 int uvcpp_loop::run(uv_run_mode md) { return uv_run(UVCPP_LOOP_HANDLE, md); }
 

@@ -164,6 +164,13 @@ protected:
     virtual void set_handle(void *hd);
     /** @brief Replace the underlying handle pointer with ownership flag. */
     virtual void set_handle(void *hd, bool owns);
+    /** @brief Detach the underlying handle pointer without running teardown.
+     *  For subclasses (uvcpp_loop) that wrap a non-handle payload (uv_loop_t)
+     *  and free it themselves, so the base free_handle() sees a null handle. */
+    void detach_handle() {
+      _handle = nullptr;
+      _owns_handle = false;
+    }
     ::std::function<void(uvcpp_handle *)> handle_close_cb;
     ::std::function<void(uvcpp_handle *, size_t, uv_buf_t*)> handle_alloc_cb;
 

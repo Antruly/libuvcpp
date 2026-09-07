@@ -311,6 +311,25 @@ class UVCPP_API uvcpp_tcp_client {
   /** @brief Internal read callback registered when using sync reads. */
   void on_internal_read(uvcpp_stream* s, ssize_t nread, const uv_buf_t* buf);
 
+  /**
+   * @brief 用已解析的 sockaddr 发起异步连接（内部辅助）。
+   *
+   * 复用 trampoline 回调机制，将用户 cb 存入 connect_fn_/connect_arg_，
+   * 随后调用 tcp_->connect。失败时清理状态并返回错误码（不触发 cb）。
+   */
+  int connect_async(const struct sockaddr* addr, std::function<void(int)> cb);
+
+  /**
+   * @brief 解析主机名（数字 IP 快速路径 + DNS 回退），阻塞等待结果。
+   *
+   * @param host 主机名或 IPv4 字符串。
+   * @param port 端口。
+   * @param[out] out 解析出的 sockaddr。
+   * @return 0 成功；非 0 为 libuv 错误码（EINVAL/ETIMEDOUT/EAI_* 等）。
+   */
+  int resolve_host_sync(const char* host, int port, sockaddr_storage& out,
+                        int timeout_ms);
+
   // -----------------------------------------------------------------
   // Member variables
   // -----------------------------------------------------------------

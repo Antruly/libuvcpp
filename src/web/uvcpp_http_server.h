@@ -156,6 +156,24 @@ class UVCPP_API uvcpp_http_server {
   bool has_status(int flags) const;
   uvcpp_tcp_server* get_tcp_server();
 
+  /**
+   * @brief Send a fully-populated response after a delay (deferred response).
+   *
+   * The handler calls this on the loop thread (e.g. from an async completion
+   * callback) instead of letting on_request_complete send immediately. The
+   * handler must have set resp.deferred = true so on_request_complete skips
+   * its automatic send. Semantics match the inline send in on_request_complete:
+   * set keep-alive/close header, serialize, write back, and close the connection
+   * when not keep-alive.
+   *
+   * @param close_after_write whether to close the connection right after the
+   *        write when not keep-alive. Default true (same as a normal request).
+   *        A streaming endpoint (writing the body in chunks AFTER the header)
+   *        must pass false and close the connection itself once the body is done.
+   */
+  void send_response(uvcpp_tcp_client* client, uvcpp_http_response& resp,
+                     bool close_after_write = true);
+
  private:
   // -------------------------------------------------------------------
   // Route matching

@@ -8,10 +8,12 @@
 #include <net/uvcpp_tcp_client.h>
 #include <req/uvcpp_connect.h>
 #include <req/uvcpp_write.h>
+#include <req/uvcpp_getaddrinfo.h>
 #include <uvcpp/uvcpp_alloc.h>
 #include <uvcpp/uvcpp_define.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -69,16 +71,25 @@ uvcpp_tcp_client::uvcpp_tcp_client(uvcpp_loop* external_loop) {
 }
 
 uvcpp_tcp_client::~uvcpp_tcp_client() {
+  // The underlying handle may already be closed and freed (_handle nulled) by
+  // an outer owner (e.g. uvcpp_http_client closes the tcp directly). Calling
+  // read_stop()/is_closing()/is_active() on a null handle dereferences null,
+  // so guard all handle access against it here.
+  const bool handle_alive =
+      (tcp_ != nullptr && tcp_->get_handle() != nullptr);
+
   // Stop any active reads
   if (read_started_) {
-    tcp_->read_stop();
+    if (handle_alive) {
+      tcp_->read_stop();
+    }
     read_started_ = false;
   }
 
   // Ensure the TCP handle is fully closed and its endgame processed
   // before we try to close the loop.  libuv asserts the handle queue is
   // empty before uv_loop_close().
-  if (tcp_ != nullptr) {
+  if (tcp_ != nullptr && handle_alive) {
     if (!tcp_->is_closing() && tcp_->is_active()) {
       // Handle is still active — close it and pump the loop.
       if (owns_loop_) {
@@ -295,51 +306,62 @@ int uvcpp_tcp_client::connect(const char* ip, int port,
     has_async_connect_cb_ = true;
     set_status(TCP_CLIENT_CONNECTING);
 
-    struct sockaddr_in addr;
-    int rc = uv_ip4_addr(ip, port, &addr);
-    if (rc != 0) {
-      set_status(TCP_CLIENT_ERROR);
-      last_error_code_ = rc;
-      clear_status(TCP_CLIENT_CONNECTING);
+    // 数字 IPv4 快速路径（无需 DNS）
+    struct sockaddr_in addr4;
+    if (uv_ip4_addr(ip, port, &addr4) == 0) {
+      int rc = connect_async(reinterpret_cast<const struct sockaddr*>(&addr4),
+                             std::move(cb));
+      if (rc != 0) has_async_connect_cb_ = false;
       return rc;
     }
 
-    // Allocate callback data on heap, pass through C-style trampoline
-    // to avoid std::function copy-chain corruption through libuv layers.
-    connect_fn_  = trampoline_connect;
-    connect_arg_ = new std::function<void(int)>(cb);
+    // 主机名：异步 DNS 解析后连接
+    uvcpp_getaddrinfo* resolver = new uvcpp_getaddrinfo();
+    char service[16];
+    snprintf(service, sizeof(service), "%d", port);
 
-    uvcpp_connect* conn = new uvcpp_connect();
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;      // 与历史行为一致，仅 IPv4
+    hints.ai_socktype = SOCK_STREAM;
 
-    rc = tcp_->connect(
-        conn, reinterpret_cast<const struct sockaddr*>(&addr),
-        [this](uvcpp_connect* r, int status) {
-          clear_status(TCP_CLIENT_CONNECTING);
-          if (status == 0) {
-            set_status(TCP_CLIENT_CONNECTED | TCP_CLIENT_READABLE |
-                       TCP_CLIENT_WRITABLE);
-          } else {
+    int rc = resolver->getaddrinfo(
+        loop_, ip, service, &hints,
+        [this, cb](uvcpp_getaddrinfo* req, int status, struct addrinfo* res) {
+          // DNS 失败或无可解析地址
+          if (status != 0 || res == nullptr) {
+            int err = (status != 0) ? status : UV_EAI_NONAME;
+            clear_status(TCP_CLIENT_CONNECTING);
             set_status(TCP_CLIENT_ERROR);
-            last_error_code_ = status;
+            last_error_code_      = err;
+            has_async_connect_cb_ = false;
+            if (res != nullptr) req->freeaddrinfo(res);
+            delete req;
+            cb(err);
+            return;
           }
-          // Call user callback BEFORE deleting r — the lambda stored in
-          // r->m_connect_cb is still alive so 'this' access is safe.
-          if (connect_fn_) {
-            connect_fn_(status, connect_arg_);
-            connect_fn_  = nullptr;
-            connect_arg_ = nullptr;
+
+          // 用第一个解析结果发起连接
+          int rc2 = connect_async(res->ai_addr, cb);
+          req->freeaddrinfo(res);
+          delete req;
+
+          if (rc2 != 0) {
+            // 连接未能发起（例如 socket 创建失败）
+            clear_status(TCP_CLIENT_CONNECTING);
+            set_status(TCP_CLIENT_ERROR);
+            last_error_code_      = rc2;
+            has_async_connect_cb_ = false;
+            cb(rc2);
           }
-          delete r;
         });
 
     if (rc != 0) {
+      delete resolver;
       clear_status(TCP_CLIENT_CONNECTING);
       set_status(TCP_CLIENT_ERROR);
-      last_error_code_ = rc;
-      delete conn;
-      delete static_cast<std::function<void(int)>*>(connect_arg_);
-      connect_fn_  = nullptr;
-      connect_arg_ = nullptr;
+      last_error_code_      = rc;
+      has_async_connect_cb_ = false;
       return rc;
     }
 
@@ -357,24 +379,25 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
         "async connect callback was registered");
   }
 
+  // 解析主机名（数字 IP 快速路径 + DNS 回退），阻塞等待
+  sockaddr_storage resolved;
+  std::memset(&resolved, 0, sizeof(resolved));
+  int rc = resolve_host_sync(ip, port, resolved, timeout_ms);
+  if (rc != 0) {
+    set_status(TCP_CLIENT_ERROR);
+    last_error_code_ = rc;
+    return rc;
+  }
+
   // Reset sync state
   sync_connect_done_   = false;
   sync_connect_result_ = 0;
 
   set_status(TCP_CLIENT_CONNECTING);
 
-  struct sockaddr_in addr;
-  int rc = uv_ip4_addr(ip, port, &addr);
-  if (rc != 0) {
-    set_status(TCP_CLIENT_ERROR);
-    last_error_code_ = rc;
-    clear_status(TCP_CLIENT_CONNECTING);
-    return rc;
-  }
-
   uvcpp_connect* conn = new uvcpp_connect();
   rc = tcp_->connect(
-      conn, reinterpret_cast<const struct sockaddr*>(&addr),
+      conn, reinterpret_cast<const struct sockaddr*>(&resolved),
       [this](uvcpp_connect* r, int status) {
         clear_status(TCP_CLIENT_CONNECTING);
         if (status == 0) {
@@ -407,6 +430,103 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
   }
 
   return sync_connect_result_;
+}
+
+// -------------------------------------------------------------------------
+// 连接辅助：已解析地址的异步连接 / 主机名同步解析
+// -------------------------------------------------------------------------
+
+int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
+                                    std::function<void(int)> cb) {
+  // Allocate callback data on heap, pass through C-style trampoline
+  // to avoid std::function copy-chain corruption through libuv layers.
+  connect_fn_  = trampoline_connect;
+  connect_arg_ = new std::function<void(int)>(std::move(cb));
+
+  uvcpp_connect* conn = new uvcpp_connect();
+
+  int rc = tcp_->connect(
+      conn, addr,
+      [this](uvcpp_connect* r, int status) {
+        clear_status(TCP_CLIENT_CONNECTING);
+        if (status == 0) {
+          set_status(TCP_CLIENT_CONNECTED | TCP_CLIENT_READABLE |
+                     TCP_CLIENT_WRITABLE);
+        } else {
+          set_status(TCP_CLIENT_ERROR);
+          last_error_code_ = status;
+        }
+        // Call user callback BEFORE deleting r — the lambda stored in
+        // r->m_connect_cb is still alive so 'this' access is safe.
+        if (connect_fn_) {
+          connect_fn_(status, connect_arg_);
+          connect_fn_  = nullptr;
+          connect_arg_ = nullptr;
+        }
+        delete r;
+      });
+
+  if (rc != 0) {
+    clear_status(TCP_CLIENT_CONNECTING);
+    set_status(TCP_CLIENT_ERROR);
+    last_error_code_ = rc;
+    delete conn;
+    if (connect_arg_ != nullptr) {
+      delete static_cast<std::function<void(int)>*>(connect_arg_);
+      connect_arg_ = nullptr;
+    }
+    connect_fn_ = nullptr;
+    return rc;
+  }
+
+  return 0;
+}
+
+int uvcpp_tcp_client::resolve_host_sync(const char* host, int port,
+                                        sockaddr_storage& out,
+                                        int timeout_ms) {
+  // 数字 IPv4 快速路径（无需 DNS）
+  struct sockaddr_in addr4;
+  if (uv_ip4_addr(host, port, &addr4) == 0) {
+    std::memcpy(&out, &addr4, sizeof(addr4));
+    return 0;
+  }
+
+  // 主机名：DNS 解析（阻塞等待完成）
+  uvcpp_getaddrinfo resolver;
+  char service[16];
+  snprintf(service, sizeof(service), "%d", port);
+
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family   = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+
+  bool done = false;
+  int  status = 0;
+  struct addrinfo* res = nullptr;
+
+  int rc = resolver.getaddrinfo(
+      loop_, host, service, &hints,
+      [&done, &status, &res](uvcpp_getaddrinfo*, int st, struct addrinfo* r) {
+        status = st;
+        res    = r;
+        done   = true;
+      });
+  if (rc != 0) return rc;
+
+  if (!wait_for_condition([&done]() { return done; }, timeout_ms)) {
+    return UV_ETIMEDOUT;
+  }
+
+  if (status != 0 || res == nullptr) {
+    if (res != nullptr) resolver.freeaddrinfo(res);
+    return (status != 0) ? status : UV_EAI_NONAME;
+  }
+
+  std::memcpy(&out, res->ai_addr, res->ai_addrlen);
+  resolver.freeaddrinfo(res);
+  return 0;
 }
 
 // =========================================================================

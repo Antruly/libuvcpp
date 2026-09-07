@@ -40,6 +40,12 @@ class UVCPP_API uvcpp_http_response {
   http_headers  headers;
   uvcpp_buf     body;
 
+  /// When true, the server does NOT send this response immediately after the
+  /// handler returns; the handler must call uvcpp_http_server::send_response
+  /// later (on the loop thread, e.g. from an async completion callback).
+  /// Used for deferred/streaming responses (large files, slow async work).
+  bool          deferred = false;
+
   // -------------------------------------------------------------------
   // Header operations
   // -------------------------------------------------------------------

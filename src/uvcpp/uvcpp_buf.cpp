@@ -177,30 +177,15 @@ void uvcpp_buf::resize(size_t sz) {
     return;
   }
 
-  if (this->buf.base != nullptr) {
-    // currently pointing to external memory; allocate new owned buffer
-    char *new_base = (char *)uvcpp::uvcpp_alloc_bytes(sz);
-    if (new_base == nullptr) {
-      throw std::bad_alloc();
-    }
-    if (this->buf.len > 0 && this->buf.base != nullptr) {
-      memcpy(new_base, this->buf.base,
-             (std::min)(static_cast<size_t>(this->buf.len), sz));
-    }
-    this->buf.base = new_base;
-    if (this->buf.len < sz) {
-      memset(this->buf.base + this->buf.len, 0, sz - this->buf.len);
-    }
-    this->buf.len = sz;
-  } else {
-    char *new_base = (char *)uvcpp_realloc_bytes(this->buf.base, sz);
-   
-    this->buf.base = new_base;
-    if (this->buf.len < sz) {
-      memset(this->buf.base + this->buf.len, 0, sz - this->buf.len);
-    }
-    this->buf.len = sz;
+  char *new_base = (char *)uvcpp_realloc_bytes(this->buf.base, sz);
+  if (new_base == nullptr) {
+    throw std::bad_alloc();
   }
+  if (this->buf.len < sz) {
+    memset(new_base + this->buf.len, 0, sz - this->buf.len);
+  }
+  this->buf.base = new_base;
+  this->buf.len = sz;
 }
 
 void uvcpp_buf::set_data(const char *bf, size_t sz) {

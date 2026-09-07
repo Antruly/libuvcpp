@@ -118,6 +118,17 @@ class UVCPP_API uvcpp_http_client {
                 int timeout_ms = 30000);
 
   /**
+   * @brief 同步纯 HTTP 发送/接收（阻塞式 socket I/O，读至 EOF）。
+   *
+   * 与 send_wait 的区别：send_wait 走 libuv 异步读 + 事件循环泵，连接关闭时
+   * 析构需做 close-dance，存在内存安全隐患；本方法直接对已连接 socket 做同步
+   * 收发，绕开 libuv 异步读路径，析构期句柄处于 inactive，安全。
+   */
+  int send_wait_plain(const uvcpp_http_request& req,
+                      uvcpp_http_response& resp,
+                      int timeout_ms = 30000);
+
+  /**
    * @brief Send an HTTP request (async).
    * @param req  Request to send.
    * @param cb   Called with (response, error) when complete.
@@ -185,6 +196,10 @@ class UVCPP_API uvcpp_http_client {
    */
   void set_ssl_context(uvcpp_ssl_context* ctx);
   bool is_ssl_enabled() const;
+  /** @brief 同步 SSL 请求路径（阻塞式握手/读写，仅 *_wait 系列使用）。 */
+  int send_wait_ssl(const uvcpp_http_request& req,
+                    uvcpp_http_response& resp,
+                    int timeout_ms);
 #endif
 
  private:

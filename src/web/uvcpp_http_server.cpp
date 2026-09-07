@@ -81,8 +81,14 @@ void uvcpp_http_server::head(const std::string& path, http_request_handler h) {
 
 http_request_handler uvcpp_http_server::find_handler(
     http_method method, const std::string& path) {
+  // Route on "method + path" (query string stripped); handlers parse the query
+  // themselves via parse_query(req.url). Without this, a request like
+  // "GET /api/x?id=1" would never match a route registered as "/api/x".
+  std::string p = path;
+  size_t q = p.find('?');
+  if (q != std::string::npos) p = p.substr(0, q);
   for (const auto& r : routes_) {
-    if (r.method == method && r.path == path) return r.handler;
+    if (r.method == method && r.path == p) return r.handler;
   }
   return default_handler_;
 }
@@ -203,11 +209,27 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   }
 #endif
 
+  // Deferred response: handler set deferred; it calls send_response later.
+  if (resp.deferred) return;
+
+  send_response(client, resp);
+}
+
+void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
+                                      uvcpp_http_response& resp,
+                                      bool close_after_write) {
+  auto it = contexts_.find(client);
+  if (it == contexts_.end()) return;
+
   // Keep-Alive logic (RFC 7230 Section 6.3):
   // HTTP/1.1 defaults to keep-alive unless Connection: close
   // HTTP/1.0 defaults to close unless Connection: keep-alive
-  bool keep_alive = ctx.parser->should_keep_alive();
-  if (keep_alive) {
+  bool keep_alive = it->second.parser->should_keep_alive();
+  // Respect an explicit connection header set by the handler (e.g. streaming
+  // endpoints force close).
+  if (resp.has_header("connection")) {
+    keep_alive = (resp.get_header("connection") != "close");
+  } else if (keep_alive) {
     resp.set_header("connection", "keep-alive");
   } else {
     resp.set_header("connection", "close");
@@ -216,8 +238,10 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   std::string wire = resp.to_string();
   client->write(wire.c_str(), wire.size());
 
-  // If not keep-alive, close after write completes
-  if (!keep_alive) {
+  // If not keep-alive, close after write completes. close_after_write=false
+  // lets a streaming handler keep the connection open to write the body after
+  // the header; it must close the connection itself once the body is done.
+  if (!keep_alive && close_after_write) {
     client->get_tcp()->close([](uvcpp_handle*) {});
   }
   // For keep-alive: ctx stays in contexts_ map, parser reset on next data
