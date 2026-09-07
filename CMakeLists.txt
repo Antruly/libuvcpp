@@ -30,6 +30,13 @@ set(OPENSSL_VERSION "openssl-3.4.0"  CACHE STRING "OpenSSL git tag to fetch")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC：源码为 UTF-8 无 BOM，显式指定 /utf-8，避免按系统代码页(936/GBK)
+# 误读源码，导致中文注释末字节吞掉换行符、把下一行代码并进注释（表现为
+# “sock/all/hdrEnd 未声明”等诡异报错）。
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
+
 message(STATUS "UVCPP version (from header will be printed at configure)")
 
 # try find system libuv first
@@ -611,6 +618,19 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:uv> "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/"
     )
     add_dependencies(copy_test_dlls uv)
+  endif()
+  # OpenSSL 运行时 DLL 位于 OPENSSL_ROOT_DIR/bin（导入库在 lib/），且文件名为版本化
+  # （libssl-3-x64.dll / libcrypto-3-x64.dll），故用 glob 定位后复制到测试目录。
+  if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+    if(OPENSSL_ROOT_DIR AND IS_DIRECTORY "${OPENSSL_ROOT_DIR}/bin")
+      file(GLOB _openssl_dlls "${OPENSSL_ROOT_DIR}/bin/libssl-*.dll" "${OPENSSL_ROOT_DIR}/bin/libcrypto-*.dll")
+      foreach(_dll ${_openssl_dlls})
+        add_custom_command(TARGET copy_test_dlls PRE_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>/"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>/"
+        )
+      endforeach()
+    endif()
   endif()
 
   add_dependencies(run_uvcpp_tests copy_test_dlls)
