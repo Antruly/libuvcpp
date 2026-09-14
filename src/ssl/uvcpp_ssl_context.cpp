@@ -179,6 +179,12 @@ bool uvcpp_ssl_context::generate_self_signed(const std::string& cn, int bits) {
 // CA / verification
 // =========================================================================
 
+bool uvcpp_ssl_context::check_private_key() {
+  if (!ctx_) return false;
+  if (SSL_CTX_check_private_key(ctx_) != 1) { clear_error(); return false; }
+  return true;
+}
+
 bool uvcpp_ssl_context::load_ca_file(const std::string& path) {
   if (!ctx_) return false;
   if (SSL_CTX_load_verify_locations(ctx_, path.c_str(), nullptr) != 1) {

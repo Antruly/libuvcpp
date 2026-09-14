@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_ws_client.cpp
  * @brief WebSocket client — HTTP Upgrade + WS connection.
  * @author zhuweiye
@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <thread>
 #include <web/uvcpp_http_parser.h>
+#include <web/uvcpp_ws_ext.h>
 
 #if UVCPP_OPENSSL_ENABLE
 #include <ssl/uvcpp_ssl.h>
@@ -20,6 +21,35 @@
 #endif
 
 namespace uvcpp {
+
+/**
+ * @brief 从 101 的**原始报文**里取一个头的值（名字大小写不敏感）。
+ *
+ * 这里没有把裸报文转成 `http_headers` 的入口可用（`http_get_header` 只吃
+ * `http_headers`），而握手只需要一个头，手扫一遍比引一个解析器划算。
+ * 复用 `token_equal` 而不是再写一遍大小写折叠：HTTP 头的比较规则只该有一处。
+ */
+static std::string grab_raw_header(const std::string& raw, const char* name) {
+  size_t pos = raw.find("\r\n");           // 跳过状态行
+  if (pos == std::string::npos) return std::string();
+  pos += 2;
+  while (pos < raw.size()) {
+    size_t eol = raw.find("\r\n", pos);
+    if (eol == std::string::npos) eol = raw.size();
+    const size_t colon = raw.find(':', pos);
+    if (colon != std::string::npos && colon < eol) {
+      if (uvcpp_ws_ext_detail::token_equal(raw.substr(pos, colon - pos), name)) {
+        size_t v  = colon + 1;
+        size_t ve = eol;
+        while (v < ve && (raw[v] == ' ' || raw[v] == '\t')) ++v;
+        while (ve > v && (raw[ve - 1] == ' ' || raw[ve - 1] == '\t')) --ve;
+        return raw.substr(v, ve - v);
+      }
+    }
+    pos = eol + 2;
+  }
+  return std::string();
+}
 
 // Simple base64 encode (for Sec-WebSocket-Key)
 static std::string base64_encode(const unsigned char* data, size_t len) {
@@ -62,6 +92,21 @@ uvcpp_ws_client::~uvcpp_ws_client() {
       for (int i = 0; i < 20; i++) { loop_->run(UV_RUN_NOWAIT); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
     }
   }
+
+  // **会话要在 loop 还活着的时候回收。** 上面的关闭流程会把关闭观察者唤醒，
+  // 会话随即终结并被记入待回收表 —— 正常情况下这里已经是空的。没走到那条路的
+  // （对端还在连、或者客户端根本没连上过）由 recycle_all() 兜底，它逐个终结，
+  // 不发 Close 帧：循环马上要关了，帧发不出去。
+  //
+  // shutdown() 顺带把延迟回收的 async 句柄释放掉，这也**必须**发生在
+  // `loop_close()` 之前 —— 在一个已经关掉的 loop 上 `uv_close` 是未定义行为。
+  sessions_.shutdown();
+  // 让 async 句柄那一次 uv_close 的完成回调跑掉（不跑就只是句柄内存留在
+  // 回收站里，直到 loop 关闭 —— 不影响正确性，但没必要留着）。
+  if (loop_ != nullptr) {
+    for (int i = 0; i < 8; ++i) loop_->run(UV_RUN_NOWAIT);
+  }
+
   if (loop_) { loop_->loop_close(); delete loop_; loop_ = nullptr; }
   delete tcp_; tcp_ = nullptr;
 #if UVCPP_OPENSSL_ENABLE
@@ -145,8 +190,16 @@ void uvcpp_ws_client::do_handshake(const std::string& host, int port,
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: " + ws_key_ + "\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n";
+        "Sec-WebSocket-Version: 13\r\n";
+#if UVCPP_ZLIB_ENABLE
+    {
+      // 提议 permessage-deflate（RFC 7692 §7.1.2）。`enabled=false` 时
+      // `ws_deflate_request_header` 返回空串，这一行就不加。
+      const std::string ext = ws_deflate_request_header(deflate_cfg_);
+      if (!ext.empty()) req += "Sec-WebSocket-Extensions: " + ext + "\r\n";
+    }
+#endif
+    req += "\r\n";
     tcp_->write(req.c_str(), req.size(), [this](int) {
       // Read the 101 response
       tcp_->read_start([this](uvcpp_buf* buf) {
@@ -163,19 +216,49 @@ void uvcpp_ws_client::on_handshake_data(uvcpp_buf* buf) {
   size_t end = handshake_buf_.find("\r\n\r\n");
   if (end == std::string::npos) return;  // more data needed
   // Check for "101 Switching Protocols" status
-  if (handshake_buf_.find(" 101 ") != std::string::npos ||
-      handshake_buf_.compare(0, 12, "HTTP/1.1 101") == 0) {
-    on_handshake_complete(0);
-  } else {
+  if (handshake_buf_.find(" 101 ") == std::string::npos &&
+      handshake_buf_.compare(0, 12, "HTTP/1.1 101") != 0) {
     on_handshake_complete(-2);
+    handshake_buf_.clear();
+    return;
   }
+
+#if UVCPP_ZLIB_ENABLE
+  // 校验服务端的扩展应答。三种结局：
+  //   accepted → 启用压缩
+  //   没应答   → 正常降级，普通 WS
+  //   invalid  → 服务端答了但答得不对，**握手失败**（见头文件里的说明）
+  {
+    const std::string ext = grab_raw_header(handshake_buf_, "sec-websocket-extensions");
+    deflate_params_ = ws_deflate_accept_client(ws_parse_extensions(ext), deflate_cfg_);
+    if (deflate_params_.invalid) {
+      handshake_buf_.clear();
+      on_handshake_complete(-3);   // 应答非法：宁可不连，也不连成一个必错的会话
+      return;
+    }
+  }
+#endif
+
   handshake_buf_.clear();
+  on_handshake_complete(0);
 }
 
 void uvcpp_ws_client::on_handshake_complete(int error) {
   if (error == 0) {
     status_ = WS_CLIENT_OPEN;
+    // 延迟回收的驱动循环。在这里（握手完成回调，也就是循环线程上）建 async
+    // 句柄是有意的：`uv_async_init` 必须在循环线程上做，而 `connect()` 可能
+    // 是从别的线程调进来的（那时候句柄还没法建）。
+    sessions_.set_loop(loop_);
     auto* conn = new uvcpp_ws_connection(tcp_);
+    // **先接管所有权再 start()**：反过来的话，对端若在我们 start() 的过程中
+    // 就断了（关闭观察者立刻回调），会话会不知道把自己交给谁。
+    sessions_.adopt(conn);
+#if UVCPP_ZLIB_ENABLE
+    // 与服务端对称：应答里谈定了什么，两边就得按那个配。is_server=false
+    // 决定窗口位数与 context takeover 的方向 —— 搞反不会报错，只会解出乱码。
+    if (deflate_params_.accepted) conn->enable_compression(false, deflate_params_);
+#endif
     // start() will be called lazily on first send_frame (avoids
     // calling read_stop from within the active read callback)
     if (connect_cb_) { auto cb = std::move(connect_cb_); connect_cb_ = nullptr; cb(conn, 0); }
@@ -191,7 +274,18 @@ void uvcpp_ws_client::stop() { loop_->stop(); }
 uvcpp_loop* uvcpp_ws_client::get_loop() { return loop_; }
 int uvcpp_ws_client::get_status() const { return status_; }
 bool uvcpp_ws_client::has_status(int flags) const { return (status_ & flags) == flags; }
+size_t uvcpp_ws_client::session_count() const { return sessions_.size(); }
+size_t uvcpp_ws_client::recycled_session_count() const { return sessions_.recycled(); }
 int uvcpp_ws_client::get_last_error() const { return last_error_; }
+
+#if UVCPP_ZLIB_ENABLE
+void uvcpp_ws_client::set_compression(const uvcpp_ws_deflate_config& cfg) {
+  deflate_cfg_ = cfg;
+}
+uvcpp_ws_deflate_config uvcpp_ws_client::get_compression() const {
+  return deflate_cfg_;
+}
+#endif
 
 #if UVCPP_OPENSSL_ENABLE
 void uvcpp_ws_client::set_ssl_context(uvcpp_ssl_context* ctx) { ssl_ctx_ = ctx; }

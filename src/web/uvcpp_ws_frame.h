@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_ws_frame.h
  * @brief WebSocket frame types per RFC 6455 Section 5.
  * @author zhuweiye

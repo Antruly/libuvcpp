@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_http_request.h
  * @brief HTTP request object — readable/writable, serializable.
  * @author zhuweiye

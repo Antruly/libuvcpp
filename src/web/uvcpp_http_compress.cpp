@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_http_compress.cpp
  * @brief HTTP Content-Encoding compression implementation.
  * @author zhuweiye

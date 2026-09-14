@@ -1,6 +1,28 @@
 ﻿#include "uvcpp_handle.h"
 namespace uvcpp {
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// 「宿主已经析构」哨兵
+// ---------------------------------------------------------------------------
+// `uv_handle_t::data` 平时指向包装它的 uvcpp_handle。但在析构路径上，
+// wrapper 会比 libuv 的关闭回调先消失 —— 如果这时还让 data 指着它，
+// callback_close 就会读到已释放的内存。
+//
+// 于是析构时把 data 换成下面这两个哨兵之一：它们保证不等同于任何真实
+// wrapper 指针（取的是静态对象的地址），同时把「底层句柄内存要不要还」
+// 这件 callback_close 本来要从 wrapper 上问的事情编码进去。
+char g_detached_handle_owned_marker = 0;   ///< 宿主已走，但底层内存仍需释放
+char g_detached_handle_borrowed_marker = 0;///< 宿主已走，底层内存不归我们
+
+inline void *detached_owned_marker() { return &g_detached_handle_owned_marker; }
+inline void *detached_borrowed_marker() {
+  return &g_detached_handle_borrowed_marker;
+}
+
+}  // namespace
+
 uvcpp_handle::uvcpp_handle()
     : handle_close_cb(), handle_alloc_cb(), _handle(nullptr), _handle_union() {
 }
@@ -39,7 +61,15 @@ void uvcpp_handle::handle_set_data(void *data) {
 
 size_t uvcpp_handle::handle_size() { return uv_handle_size(_handle->type); }
 
-int uvcpp_handle::is_active() { return uv_is_active(_handle); }
+// **句柄已经释放完了就没有"活跃"可言。** `_handle` 为空的含义是"底层
+// `uv_handle_t` 已被 `callback_close` 释放"，此时把它交给 libuv 是空指针解引用
+// （`uv_is_active` 内部先取 `handle->flags`，实测崩在 `[0x58]`）。`close()`
+// 一直是这么判的（见下），这两个查询漏了，于是"在关完的连接上问一句状态"
+// 变成了崩溃 —— `~uvcpp_ws_client` 正是这么用的。
+int uvcpp_handle::is_active() {
+  if (_handle == nullptr) return 0;
+  return uv_is_active(_handle);
+}
 
 void uvcpp_handle::set_handle_data() { _handle->data = this; }
 
@@ -53,24 +83,49 @@ void uvcpp_handle::callback_alloc(uv_handle_t *handle, size_t suggested_size,
 }
 
 void uvcpp_handle::callback_close(uv_handle_t *handle) {
-  uvcpp_handle *wrapper = nullptr;
-  if (handle && handle->data)
-    wrapper = reinterpret_cast<uvcpp_handle *>(handle->data);
+  if (handle == nullptr) return;
 
-  if (wrapper && wrapper->handle_close_cb) {
-    wrapper->handle_close_cb(wrapper);
+  void *data = handle->data;
+
+  // --- 情况一：宿主已经析构，只差把底层句柄内存还回去 -------------------
+  if (data == detached_owned_marker() || data == detached_borrowed_marker()) {
+    handle->data = nullptr;
+    if (data == detached_owned_marker()) {
+      UVCPP_VFREE(handle)
+    }
+    return;
   }
 
-  // If the wrapper still owns the underlying handle memory, free it.
-  if (wrapper) {
-    if (wrapper->_owns_handle && wrapper->_handle == handle) {
-      UVCPP_VFREE(handle)
-      wrapper->_handle = nullptr;
-    }
-    // if wrapper does not own it, do not free
+  uvcpp_handle *wrapper = reinterpret_cast<uvcpp_handle *>(data);
+
+  // --- 情况二：宿主体还在 -------------------------------------------------
+  // 顺序非常关键：凡是需要碰 wrapper 的事情，都必须在调用使用者的关闭回调
+  // **之前**做完。使用者的关闭回调里 delete 掉 wrapper（或 wrapper 的宿主
+  // 对象）是合法用法 —— 仓库里 poll_func / tcp_func / pipe_func /
+  // shutdown_func / tcp_client_func 都是这么写的。回调返回之后这里既不能
+  // 再碰 wrapper，也不能再碰 handle（handle 的内存可能已经被还回去了）。
+  ::std::function<void(uvcpp_handle *)> close_cb;
+  bool owns_handle = false;
+  if (wrapper != nullptr) {
+    close_cb = wrapper->handle_close_cb;
+    // 用掉就清掉。否则之后任何一次无参 close()（或析构里的 free_handle）
+    // 都会把这个陈旧回调再跑一遍 —— 那时它捕获的东西可能早就没了。
+    wrapper->handle_close_cb = ::std::function<void(uvcpp_handle *)>();
+    owns_handle = (wrapper->_owns_handle && wrapper->_handle == handle);
+    wrapper->_handle = nullptr;
+  }
+
+  // 在回调之前释放底层句柄内存：这样即使回调把 wrapper 一起 delete 了，
+  // 也不会留下一块没人负责的 uv_handle_t。
+  if (owns_handle) {
+    handle->data = nullptr;
+    UVCPP_VFREE(handle)
   } else {
-    // No wrapper associated: do NOT free here. Ownership is unclear and
-    // freeing an unowned handle risks double-free. Leave memory management to caller.
+    handle->data = nullptr;
+  }
+
+  if (close_cb) {
+    close_cb(wrapper);
   }
 }
 
@@ -80,7 +135,12 @@ void uvcpp_handle::close() {
   uv_close(_handle, callback_close);
 }
 
-int uvcpp_handle::is_closing() { return uv_is_closing(_handle); }
+// 同上：句柄已释放时"正在关闭"为假 —— 它早就关完了。**答"假"而不是答"崩溃"**
+// 是这个查询唯一有意义的语义，`close()` 的守卫也是这么写的。
+int uvcpp_handle::is_closing() {
+  if (_handle == nullptr) return 0;
+  return uv_is_closing(_handle);
+}
 
 uvcpp_handle::uvcpp_handle(const uvcpp_handle &obj)
     : handle_close_cb(), handle_alloc_cb(), _handle(nullptr), _handle_union() {
@@ -130,6 +190,7 @@ int uvcpp_handle::has_ref(const uvcpp_handle *vhd) {
   return uv_has_ref(vhd->_handle);
 }
 int uvcpp_handle::is_active(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return 0;
   return uv_is_active(vhd->_handle);
 }
 void uvcpp_handle::close(uvcpp_handle *vhd,
@@ -138,6 +199,7 @@ void uvcpp_handle::close(uvcpp_handle *vhd,
   uv_close(vhd->_handle, callback_close);
 }
 int uvcpp_handle::is_closing(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return 0;
   return uv_is_closing(vhd->_handle);
 }
 int uvcpp_handle::fileno(const uvcpp_handle *vhd, uv_os_sock_t &sock) {
@@ -209,6 +271,12 @@ void uvcpp_handle::free_handle() {
      close callback handle final cleanup. If it's inactive and not closing,
      it's safe to free the underlying memory. */
   if (uv_is_closing(_handle)) {
+    // 关闭回调迟早会跑，但跑到的时候本对象（wrapper）已经析构了。把 data
+    // 换成哨兵，回调就不必去找一个不存在的 wrapper，也能正确决定要不要
+    // 把底层句柄内存还回去。
+    _handle->data = _owns_handle ? detached_owned_marker()
+                                 : detached_borrowed_marker();
+    _handle = nullptr;
     return;
   }
 
@@ -216,6 +284,9 @@ void uvcpp_handle::free_handle() {
     /* If we own the handle, request close and let callback free memory.
        If we do not own it, do not issue close (owner is responsible). */
     if (_owns_handle) {
+      // 同样先断开指向本对象的引用：uv_close 是异步的，回调回来时这里
+      // 已经析构完了。留着 data 指向自己就是一枚悬垂指针。
+      _handle->data = detached_owned_marker();
       uv_close(_handle, callback_close);
     }
     _handle = nullptr;

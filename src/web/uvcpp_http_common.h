@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_http_common.h
  * @brief HTTP common types: methods, status codes, versions, headers.
  * @author zhuweiye

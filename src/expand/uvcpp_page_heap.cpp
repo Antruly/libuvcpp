@@ -1,4 +1,4 @@
-
+﻿
 #include "uvcpp_page_heap.h"
 #include <uvcpp/uvcpp_define.h>
 
@@ -217,6 +217,8 @@ size_t uvcpp_size_class_index(size_t size)
 class central_cache {
 public:
     static constexpr size_t k_num_classes = k_num_size_classes;
+    // pop() 遍历 span 链表时的防御性步数上限（链表正常长度是个位数）。
+    static constexpr size_t k_max_span_walk = 4096;
 
     central_cache() {
         for (auto& c : cache_) {
@@ -227,37 +229,48 @@ public:
     
     void* pop(size_t size_class) {
         if (size_class >= k_num_classes) return nullptr;
-        
+
         auto& c = cache_[size_class];
-        
-        // 尝试从 span 获取
+
+        // 从链表头一次走到尾，跳过 freelist 已空的 span，取第一个有空闲块的。
+        //
+        // 注意：这里曾经写成「一旦 span 不是表头就回到表头重新开始」，那不是
+        // 终止条件 —— 只要表头 span 已空且链表里还有第二个 span，就会在
+        // 「表头 -> 下一个 -> 表头」之间无限循环，永远走不到 nullptr。
+        // 4KB 以上的 size class 每个 span 只放得下一个块，所以链表长出第二个
+        // span（即第三个同类块同时在手）就必然命中（实测 8KB 响应卡死在
+        // central_cache_pop）。改为沿 next 单向走到底即可。
+        //
+        // span_list 是单向线性表，由 add_span 头插、以 nullptr 结尾
+        // （见本文件 add_span 里的 span->next = c.span_list）。
         span_header* span = c.span_list.load(std::memory_order_acquire);
+        size_t guard = 0;
         while (span) {
             void* ptr = span->free_list.load(std::memory_order_relaxed);
             while (ptr) {
                 void* next = *((void**)ptr);
-                if (span->free_list.compare_exchange_weak(ptr, next, 
+                if (span->free_list.compare_exchange_weak(ptr, next,
                     std::memory_order_release, std::memory_order_relaxed)) {
                     span->in_use.fetch_add(1, std::memory_order_relaxed);
                     return ptr;
                 }
                 // ptr 被更新为新的 free_list 头
             }
-            
+
             // 当前 span 空了，尝试下一个
             span_header* next_span = span->next;
-            if (span != c.span_list.load(std::memory_order_acquire)) {
-                span = c.span_list.load(std::memory_order_acquire);
-                continue;
-            }
-            
             if (next_span == span) {
-                // 没有更多 span 了，需要分配新的
+                // 自环 = 没有更多 span 了，需要分配新的
                 break;
             }
             span = next_span;
+
+            // next 是在 add_span/remove_span 的锁之外读取的，理论上可能读到
+            // 陈旧链表。加一个上限，保证任何情况下都会终止（走到上限只会
+            // 让本次分配回退去申请新 span，不会出错）。
+            if (++guard >= k_max_span_walk) break;
         }
-        
+
         // 需要分配新 span
         return nullptr;
     }

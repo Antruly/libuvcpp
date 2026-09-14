@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_http_response.h
  * @brief HTTP response object — readable/writable, serializable.
  * @author zhuweiye

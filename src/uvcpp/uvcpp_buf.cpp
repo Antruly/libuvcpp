@@ -177,7 +177,10 @@ void uvcpp_buf::resize(size_t sz) {
     return;
   }
 
-  char *new_base = (char *)uvcpp_realloc_bytes(this->buf.base, sz);
+  // 旧块的有效字节数是 this->buf.len —— 内存池路径靠它决定复制多少，
+  // 不能沿用「照新大小复制」的写法（会从旧块后面读越界）。
+  const size_t old_len = this->buf.len;
+  char *new_base = (char *)uvcpp_realloc_bytes(this->buf.base, old_len, sz);
   if (new_base == nullptr) {
     throw std::bad_alloc();
   }

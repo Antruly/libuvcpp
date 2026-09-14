@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/ssl/uvcpp_ssl_context.h
  * @brief SSL/TLS context — wraps OpenSSL SSL_CTX.
  * @author zhuweiye
@@ -55,6 +55,19 @@ class UVCPP_API uvcpp_ssl_context {
    * @param bits         RSA key size (default 2048).
    */
   bool generate_self_signed(const std::string& common_name, int bits = 2048);
+
+  /**
+   * @brief 检查已装入的私钥与证书是否配对（`SSL_CTX_check_private_key`）。
+   *
+   * 为什么值得有一个单独的方法：证书和私钥**不配对**（部署时把两套环境的
+   * 文件配到一起，是很常见的手误）在 OpenSSL 里不影响 `SSL_CTX_new`、
+   * 也不影响两个 `load_*` 的返回值 —— 它只在**每一次握手**时才失败。于是
+   * 表现是"服务起来了、端口在听、每条连接建完就被拒"，很难往配置上想。
+   * 在配置阶段调一次就能把它变成一个明确的启动错误。
+   *
+   * @return 配对返回 true；没装证书/私钥，或两者不配对，返回 false。
+   */
+  bool check_private_key();
 
   // -------------------------------------------------------------------
   // CA / verification

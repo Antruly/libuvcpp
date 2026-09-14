@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/net/uvcpp_tcp_client.h
  * @brief Higher-level TCP client with async/sync dual-mode API built on uvcpp_tcp.
  * @author zhuweiye
@@ -13,13 +13,22 @@
 #define SRC_NET_UVCPP_TCP_CLIENT_H
 
 #include <functional>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 #include <uv.h>
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_tcp.h>
+#include <net/uvcpp_net_read.h>
 #include <uvcpp/uvcpp_buf.h>
 
 namespace uvcpp {
+
+#if UVCPP_OPENSSL_ENABLE
+class uvcpp_ssl;          // 见 src/ssl/uvcpp_ssl.h
+class uvcpp_ssl_context;
+#endif
 
 /**
  * @brief Bitmask status flags for TCP client lifecycle.
@@ -106,8 +115,16 @@ class UVCPP_API uvcpp_tcp_client {
   /** @brief Check whether all given status flags are set. */
   bool has_status(int flags) const;
 
-  /** @brief Check whether an async read callback has been registered. */
+  /**
+   * @brief Check whether a **使用者**注册的读回调存在。
+   *
+   * 框架的自动读（`install_auto_read`，只为发现断开而存在）**不算** ——
+   * 否则"用户没设读回调"这个判断会被框架自己装的东西掩盖掉。
+   */
   bool has_read_callback() const;
+
+  /** @brief 当前跑的是不是框架的自动读（只为发现断开，数据会被丢弃）。 */
+  bool is_auto_read() const;
 
   /** @brief Check whether an async write callback has been registered. */
   bool has_write_callback() const;
@@ -123,6 +140,69 @@ class UVCPP_API uvcpp_tcp_client {
    * work correctly.
    */
   void mark_accepted();
+
+  // -----------------------------------------------------------------
+  // TLS 过滤层（UVCPP_OPENSSL_ENABLE=1 时才有实现）
+  // -----------------------------------------------------------------
+  //
+  // 装上之后，**本对象对外说的仍然是明文** —— `write()` 收明文、读回调交
+  // 明文；密文只在这层内部与 socket 之间流动。所以 http / ws 层一行都不用改。
+  //
+  // 为什么是「这一层」而不是 `SSL_set_fd`：`SSL_set_fd` 把 fd 交给 OpenSSL
+  // 持有，于是 `WANT_WRITE` 时本端无从得知"socket 何时可写"，只能 `uv_poll`
+  // （同一个 fd 上不能与 `uv_read_start` 共存）或者转圈（违反本项目的
+  // 「不在主循环做耗时操作」）。换成 memory BIO 之后 socket 始终归 libuv，
+  // `WANT_WRITE` 的含义变得精确 —— wbio 里有字节待发，而它们何时发完，
+  // libuv 的写完成回调会告知。详细论证见 `src/ssl/uvcpp_ssl.h`。
+#if UVCPP_OPENSSL_ENABLE
+  /**
+   * @brief 给这条连接装上 TLS 过滤层。
+   *
+   * 调用时机：
+   * - **客户端**：`connect()` 之前。连接建立后不立刻回调使用者，而是先把
+   *   握手跑完；握手成功才回调 —— 使用者拿到 CONNECTED 时就可以直接发
+   *   应用数据了。
+   * - **服务端**：accept 之后（`mark_accepted()` 之后）。此时连接已建立，
+   *   本函数会立即发起握手并在读事件里推进它。
+   *
+   * @param ctx 生命周期必须覆盖整条连接（`uvcpp_ssl_context` 不属于本对象）。
+   * @return 0 成功；`UV_EALREADY` 已经装过；`UV_EINVAL` ctx 不可用；
+   *         `UV_ENOMEM` 内部 SSL 对象创建失败。
+   */
+  int enable_tls(uvcpp_ssl_context* ctx);
+
+  /** @brief 本连接是否装了 TLS 过滤层。 */
+  bool is_tls() const { return tls_ssl_ != nullptr; }
+
+  /** @brief TLS 握手是否已完成（非 TLS 连接恒为 true）。 */
+  bool is_tls_handshake_done() const {
+    return tls_ssl_ == nullptr ? true : tls_handshake_done_;
+  }
+
+  /**
+   * @brief TLS 层最近一次 `SSL_ERROR_*`。
+   *
+   * 握手/读写失败时用它区分「对端干净关闭」（`SSL_ERROR_ZERO_RETURN`）、
+   * 「证书校验失败」等。0 表示没有记录。
+   */
+  int tls_last_ssl_error() const;
+
+  /**
+   * @brief 握手结束（成功或失败）时通知一次。
+   *
+   * **服务端用它把"把连接交给上层"推迟到握手之后。** accept 之后先
+   * `enable_tls()`，如果握手还没完就先不调 `on_connection` —— 否则上层会在
+   * TLS 尚未建立时就认为连接可用：此时 `write()` 必然失败（SSL_write 要求
+   * 握手已完成），而"已连接"这个语义本身就是错的。
+   *
+   * 客户端不需要它：客户端那条路径由 `connect` 回调推迟来处理。
+   *
+   * @param cb     回调；`status == 0` 为握手成功，否则为失败的错误码。
+   * @param 注意   只触发一次，触发后自动清空。失败时它在关闭回调**之前**
+   *               触发，所以回调里看到的是一个还活着的对象。
+   */
+  void set_tls_ready_callback(std::function<void(uvcpp_tcp_client*, int)> cb);
+#endif  // UVCPP_OPENSSL_ENABLE
 
   // -----------------------------------------------------------------
   // Address helpers
@@ -252,6 +332,20 @@ class UVCPP_API uvcpp_tcp_client {
   int read_start(std::function<void(uvcpp_buf*)> cb = nullptr);
 
   /**
+   * @brief 框架层读：回调带明确的语义（数据 / 对端关闭 / 读错误）。
+   *
+   * 与 `read_start(cb)` 的区别见 `uvcpp_net_read.h` 的说明 —— 简言之，
+   * 原始那版在 `nread < 0` 时**什么都不回调**，用户既分不清"对端关了"和
+   * "读挂了"，也拿不到错误码。
+   *
+   * 两者互斥：已经用过其中一个就不能再用另一个（返回 `UV_EALREADY`）。
+   *
+   * 收到 `PEER_CLOSED` / `READ_ERROR` 之后本回调不会再被调用；框架随后的
+   * 收尾（关闭回调）照常发生，所以调用方不需要在这个回调里做释放。
+   */
+  int read_start_events(const uvcpp_net_read_cb& cb);
+
+  /**
    * @brief Synchronously wait for and return received data.
    *
    * Blocks until data is available in the internal read cache or timeout.
@@ -266,15 +360,159 @@ class UVCPP_API uvcpp_tcp_client {
   int read_stop();
 
   /**
+   * @brief Pause the underlying stream read WITHOUT clearing the async read
+   *        callback. Use read_resume() to resume. Intended for backpressure
+   *        (e.g. a streaming upload whose bounded buffer is full).
+   */
+  int read_pause();
+
+  /** @brief Resume a paused read by re-arming the async read callback. */
+  int read_resume();
+
+  // -----------------------------------------------------------------
+  // 关闭：主动关闭的唯一正确入口
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief **主动关闭连接** —— 会走完整的关闭流程（含框架的释放）。
+   *
+   * 为什么必须有这个函数，而不是直接 `get_tcp()->close(...)`：
+   *
+   * 断开的发现原本只有**读回调的 `nread < 0` 分支**这一条路。对端断开时它
+   * 会跑，于是框架的释放（`uvcpp_tcp_server` 的 close manager）能收尾；但
+   * **自己主动关**的时候，`uv_close()` 只调用你传进去的那一个完成回调，读
+   * 分支永远不会来 —— 于是 close manager 不被通知，客户端对象留在服务端的
+   * 登记表里，永远不被摘除、永远不被 `delete`（句柄关了，对象和簿记还在）。
+   * 每一个 `Connection: close` 的 HTTP 响应都会漏一个。
+   *
+   * 本函数把这个通知补上：关闭完成时依次跑「调用方的收尾」和框架的关闭
+   * 回调（用户的 `set_on_close` + close manager），让**主动关闭**和**对端
+   * 断开**在下游完全一致。
+   *
+   * @param after_close 关闭完成后的调用方收尾（比如 http 层要摘掉自己的
+   *                    连接上下文）。**它排在框架的关闭回调之前**，所以那时
+   *                    客户端对象还在，可以安全地读它的状态。可以为空。
+   *
+   * @return 0 成功发起关闭（含"已经在关闭中"）；`UV_EINVAL` 句柄已不存在。
+   *
+   * @warning 已经有人在关这条连接时（`is_closing()`），本函数只跑
+   *          `after_close`，**不会**再触发关闭回调 —— 那个关闭事件的完成
+   *          回调会负责收尾。硬要在这里再触发一次就会踩到正在关闭的句柄。
+   *
+   * @warning 关掉之后**不要**再持有这个指针：框架可能在完成回调里把它
+   *          `delete` 掉（`uvcpp_tcp_server` 管理的连接就是这样）。
+   */
+  int close(const std::function<void()>& after_close = nullptr);
+
+  /**
    * @brief Register a callback to be invoked when the connection closes.
    *
    * Fires on UV_EOF (graceful peer shutdown) or read error.
-   * Used by uvcpp_tcp_server to auto-delete disconnected clients.
+   *
+   * @note 「对端断开」这件事**只有读得见**（`nread < 0` 分支）。所以这条
+   *       回调生效的前提是有人在读：`read_start` / `read_start_events` /
+   *       自动读。**一个不读的连接即使设了它也不会被触发** —— 对端关掉的
+   *       那一刻，libuv 没有任何事件可投递。只想知道连接死活而不要数据的
+   *       场合，请用 `read_start_events()` 注册一个忽略数据的回调。
+   *
+   * 这是**用户的通知回调**，纯粹只读观察：它不会、也不能影响框架对这个
+   * 客户端的释放。以前它和框架的清理用的是同一个槽，于是"用户设了自己的
+   * 回调"就会让框架放弃释放 —— 那是每连接泄漏一个 client、并且用户顺手
+   * `delete` 时演成 double free 的成因。现在两者是**两个独立的槽**：
+   * 用户的先触发（此时客户端还活着，可以读状态/对端信息），框架的后触发。
+   *
+   * @warning **不要在这里 `delete` 客户端** —— 除非你已经用
+   *          `uvcpp_tcp_server::take_client()` 把所有权取走了。删除一个
+   *          仍归框架管的客户端会让框架随后的清理二次释放它。
    */
   void set_on_close(std::function<void()> cb);
 
   /** @brief Remove any registered close callback. */
   void clear_on_close();
+
+  // -----------------------------------------------------------------
+  // 框架内部：关闭时的管理槽
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 安装框架的关闭管理回调（**框架内部使用，使用者不要调**）。
+   *
+   * 和 `set_on_close()` 分开是有意的：用户的观察回调必须永远无法取消
+   * 框架的释放，否则"设了回调就泄漏"这个缺陷会以另一种形式回来。
+   */
+  void set_close_manager(std::function<void()> cb);
+
+  /** @brief 清掉框架的管理回调（`take_client()` 取走所有权时调用）。 */
+  void clear_close_manager();
+
+  /** @brief 是否装了框架的管理回调。 */
+  bool has_close_manager() const;
+
+  // -----------------------------------------------------------------
+  // 关闭观察者：**加法式**，可以有任意多个
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 追加一个"连接关闭了"的观察者，返回它的句柄（0 = 失败）。
+   *
+   * 与 `set_on_close()` 的区别是**加法式**：`set_on_close()` 是单槽，后装的
+   * 顶掉先装的；本函数可以叠任意多个，互不影响。
+   *
+   * 为什么需要第三个槽：连接关闭有**三条**互相独立的路 —— 对端断开（读回调
+   * 的 `nread < 0` 分支）、自己主动关（`close()` 的完成回调）、以及别人替你
+   * 关（http 层的闲置超时、`uvcpp_tcp_server::stop()`）。前两条 `set_on_close`
+   * 都能收到，第三条同样能收到，但**单槽意味着只能有一个收件人**：http 层已经
+   * 占了用户槽、tcp_server 已经占了管理槽，于是上层（WebSocket 会话、静态服务
+   * 的在途请求……）想知道"这条连接还在不在"就无处可挂 —— 除非去抢槽，那就变成
+   * "谁后装谁赢"的静默失效。这跟 `install_client_manager` 当初把用户槽和管理槽
+   * 拆开是同一个道理，这里是它的推广形式。
+   *
+   * 触发时机：在**用户槽之后、管理槽之前**。所以观察者跑的时候客户端对象还活着
+   * （可以读状态、对端信息），但连接确实已经关了 —— **不要在这里写**。
+   *
+   * @warning 管理槽会 `delete` 本客户端，所以**不要在观察者里 `delete` 客户端**；
+   *          也不要在观察者里 `remove_close_observer()` 别的观察者（那一批已经
+   *          取出来了，删不掉；本次仍会跑到）。
+   */
+  int add_close_observer(std::function<void()> cb);
+
+  /**
+   * @brief 摘掉一个观察者。\p id 是 `add_close_observer()` 的返回值。
+   *
+   * 必须在**观察者自己失效之前**调：观察者通常捕获上层对象的 `this`，而上层
+   * 对象（比如一个 WebSocket 会话）可能比这条连接先结束 —— 尤其是上层**主动**
+   * 结束时（服务器停机逐个关会话就是这样），不摘掉就会在连接稍后关闭时回调到
+   * 一个已释放的对象。
+   */
+  void remove_close_observer(int id);
+
+  /** @brief 当前挂着几个关闭观察者。 */
+  size_t close_observer_count() const;
+
+  // -----------------------------------------------------------------
+  // 框架内部：自动读
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 装上框架的自动读（**框架内部使用，使用者不要调**）。
+   *
+   * 存在的唯一理由是**发现断开**：断开只有在读回调里才看得见（`nread < 0`
+   * 分支），不读的连接永远不会被回收，也不会走关闭回调。以前这件事要用户
+   * 自己记得 `read_start()`，忘了就是每连接静默泄漏一个 client —— 现在是
+   * 默认就装上。
+   *
+   * 数据**没有消费者**，所以自动读收到的数据会被丢弃；第一次丢的时候会往
+   * stderr 打一条警告（只打一次，且带客户端指针），免得"我明明发了数据对端
+   * 没反应"这种问题无声无息。
+   *
+   * 使用者随后调用 `read_start()` / `read_start_events()` 会自动把自动读顶
+   * 掉（见 `release_auto_read`），所以在 `on_connection` 里照常注册自己的读
+   * 回调即可，不需要先手动停。
+   */
+  void install_auto_read();
+
+  /** @brief 卸掉自动读（用户注册自己的读回调时自动调用）。 */
+  void release_auto_read();
 
   // -----------------------------------------------------------------
   // Loop control (async mode)
@@ -304,6 +542,9 @@ class UVCPP_API uvcpp_tcp_client {
 
   /** @brief Ensure the internal read cache buffer is allocated. */
   void ensure_read_cache();
+
+  /** @brief Arm the async read callback on the underlying stream. */
+  int arm_async_read();
 
   /** @brief Static alloc callback forwarded to the client instance. */
   static void internal_alloc_cb(uvcpp_handle* h, size_t sz, uv_buf_t* buf);
@@ -345,6 +586,12 @@ class UVCPP_API uvcpp_tcp_client {
   size_t     max_read_cache_size_ = 2 * 1024 * 1024;  // 2 MB default
   bool       read_cache_paused_   = false;
   bool       read_started_        = false;  ///< true if tcp_->read_start was called
+  /// 有调用方**真的**在走同步读（`read_start(nullptr)` / `read_wait`）。
+  ///
+  /// 不能用 `read_started_ && !has_async_read_cb_` 代替：TLS 握手阶段
+  /// `enable_tls()` 会自己 arm 一次读，于是这个组合为真而**根本没人要同步读**
+  /// —— 见 `tls_deliver_plain()` 里为什么要分清这两件事。
+  bool       sync_read_wanted_    = false;
 
   // Mode tracking — prevent mixing sync/async
   bool has_async_connect_cb_ = false;
@@ -362,16 +609,119 @@ class UVCPP_API uvcpp_tcp_client {
   void*              connect_arg_ = nullptr;
   write_callback_t   write_fn_    = nullptr;
   void*              write_arg_   = nullptr;
+
+  // -------------------------------------------------------------------
+  // 存活令牌 —— 异步完成回调不许踩已析构的对象
+  // -------------------------------------------------------------------
+  //
+  // 完成回调是 libuv **稍后**送进来的，而本对象完全可能在那一刻之前就没了：
+  // 对端断开（读回调的 `nread < 0` 分支会触发关闭回调，框架据此 delete 掉
+  // 客户端）、上层收尾、连接被淘汰，任何一条路都会。回调里读 `write_fn_` /
+  // `write_arg_` / `last_error_code_` 就是读已释放内存 —— 表现是 `call rax`
+  // 到 0xFEEEFEEE 直接段错误，而且**只在堆恰好复用了那块内存时才崩**，其余
+  // 时候静默地把别人的数据当成自己的，比崩溃更难查。
+  //
+  // 令牌按值捕进每个异步完成回调：对象活着时 `*token == 0`，析构时置 1。
+  // 用 `shared_ptr` 是为了让回调手里那份副本在对象消失后仍然有效可读 ——
+  // 回调唯一还能做的事就是把请求对象（连同它的缓冲区）还回去。
+  //
+  // 只挡「析构之后」这一种情况：对象还活着时行为与原来逐字节相同。
+  ::std::shared_ptr<char> alive_token_;
+
+  /** @brief 取存活令牌，必要时建立（每个客户端只建一次）。 */
+  ::std::shared_ptr<char> alive_token();
+
+  /** @brief 令牌是否表示「对象还活着」。空令牌视为不活着。 */
+  static bool token_alive(const ::std::shared_ptr<char>& token);
+
   read_callback_t    read_fn_     = nullptr;
   void*              read_arg_    = nullptr;
   close_callback_t   close_fn_    = nullptr;
   void*              close_arg_   = nullptr;
+
+  /// 框架层读回调（read_start_events 注册）。与 read_fn_ 互斥。
+  uvcpp_net_read_cb  net_read_cb_;
+  /// 读是否被 read_pause() 暂停（恢复时据此决定要不要重新 arm）。
+  bool               net_read_paused_ = false;
+  /// 当前 net_read_cb_ 是不是框架的自动读（见 install_auto_read）。
+  bool               auto_read_installed_ = false;
+  /// 自动读丢弃数据的警告是否已经打过（一个连接只打一次，别刷屏）。
+  bool               auto_read_warned_ = false;
+
+  /// 框架的管理槽（见 set_close_manager）。与 close_fn_ 分开存放。
+  close_callback_t   close_mgr_fn_  = nullptr;
+  void*              close_mgr_arg_ = nullptr;
+
+  /// 关闭观察者表（见 add_close_observer）。{句柄, 回调}，句柄单调递增不复用。
+  std::vector<std::pair<int, std::function<void()> > > close_observers_;
+  /// 下一个观察者句柄。从 1 开始，0 专门表示"没有/失败"。
+  int                next_close_observer_id_ = 1;
+
+  /**
+   * @brief 依次触发用户的、观察者的、框架的关闭回调。
+   *
+   * 抽成一个函数是因为有多处触发点（两个 read 回调里的 nread < 0 分支、
+   * `close()` 的完成回调），各处必须走**完全一样**的槽位处理顺序，否则其中
+   * 一个会漏掉新的置空逻辑。
+   */
+  void fire_close_callbacks();
 
   // Sync operation coordination
   bool sync_connect_done_   = false;
   int  sync_connect_result_ = 0;
   bool sync_write_done_     = false;
   int  sync_write_result_   = 0;
+
+#if UVCPP_OPENSSL_ENABLE
+  // -----------------------------------------------------------------
+  // TLS 过滤层的内部状态
+  // -----------------------------------------------------------------
+
+  /** 推进一次握手；返回 0 正常，< 0 真出错（0 返回不是错误，见 handler 说明）。 */
+  int  tls_drive_handshake();
+
+  /** 把 `tls_out_` 里的密文投出去（同一时刻只允许一个在途写）。 */
+  void tls_flush_out();
+
+  /** 把 `tls_plain_` 交给当前注册的消费者；没有消费者就先留着。 */
+  void tls_deliver_plain();
+
+  /** 喂入 socket 收到的密文，推进握手并解出明文到 `tls_plain_`。 */
+  int  tls_feed(const char* data, size_t len);
+
+  /** 把整段明文交给 SSL_write 并抽出密文；返回 0 成功，非 0 为 libuv 错误码。 */
+  int  tls_write_plain(const char* data, size_t len);
+
+  /** 握手完成后的收尾：补调被推迟的 connect 回调。 */
+  void tls_complete_connect();
+
+  /**
+   * 触发一次并清空 `tls_ready_cb_`。
+   *
+   * **调用点必须是所在回调的最后一句** —— 用户拿到这个通知后完全可能把连接
+   * 关掉/释放（服务端拒绝一条握手完成的连接就是常规用法），之后再碰任何成员
+   * 都是 use-after-free。
+   */
+  void tls_notify_ready(int status);
+
+  /** 密文全部出网之后，收尾一个在等的应用层写（async 或 sync）。 */
+  void tls_finish_write(int status);
+
+  /** 握手/读写不可恢复地失败：通知在读的一方并走关闭流程。 */
+  void tls_fail(int err, bool peer_closed);
+
+  uvcpp_ssl*  tls_ssl_            = nullptr;
+  bool        tls_handshake_done_ = false;
+  int         tls_ssl_error_      = 0;   ///< 最近一次 SSL_get_error
+  std::string tls_out_;                  ///< 待发密文（wbio 抽出来的）
+  bool        tls_out_busy_       = false;  ///< 有一个密文写在途
+  std::string tls_plain_;                ///< 已解密、尚未交付的明文
+  bool        tls_connect_pending_ = false;  ///< connect 回调推迟到握手之后
+  bool        tls_write_pending_   = false;  ///< 有应用层写在等密文出网
+  bool        tls_write_sync_      = false;  ///< 上面那个写走的是同步接口
+  int         tls_write_status_    = 0;      ///< 上面那个写的最终状态
+  std::function<void(uvcpp_tcp_client*, int)> tls_ready_cb_;  ///< 握手结束通知一次
+#endif  // UVCPP_OPENSSL_ENABLE
 };
 
 }  // namespace uvcpp

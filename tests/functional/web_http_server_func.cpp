@@ -6,6 +6,14 @@
 #if UVCPP_WEB_ENABLE
 #include <web/uvcpp_http_server.h>
 #include <web/uvcpp_http_parser.h>
+
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <future>
+#include <thread>
+#include <web/uvcpp_http_client.h>
+#include <net/uvcpp_tcp_client.h>
 using namespace uvcpp;
 
 // Test 1: Server construction, bind, listen, status
@@ -145,7 +153,518 @@ static bool test_response_header_ops() {
 }
 #endif  // UVCPP_ZLIB_ENABLE
 
-int main() {
+// =========================================================================
+// 网络测试基础设施
+//
+// 后台线程跑 http server（端口 0 由系统分配），主线程用阻塞客户端往返。
+// server 与其 loop 同在后台线程内创建/析构，避免跨线程跑 loop 的语义问题。
+// 参考 web_static_server_func.cpp 的同名模式。
+// =========================================================================
+
+using SetupFn = std::function<void(uvcpp_http_server&)>;
+
+struct TestServer {
+  std::promise<int> port_promise;
+  std::atomic<bool> stop{false};
+  std::atomic<int> closed_conns{0};
+  // 服务端登记的活连接数，每圈循环刷新一次 —— 服务器对象在后台线程里，
+  // 线程退出后外面就拿不到它了，所以用这个快照来断言"没有连接被漏在表里"。
+  std::atomic<int> live_clients{-1};
+  std::thread thread;
+
+  // setup 在后台线程内、listen 之前执行，可注册路由与配置。
+  int start(SetupFn setup) {
+    thread = std::thread([this, setup]() {
+      uvcpp_http_server server;
+      if (setup) setup(server);
+      server.bind("127.0.0.1", 0);
+
+      sockaddr_in name;
+      int namelen = sizeof(name);
+      server.get_tcp_server()->get_tcp()->getsockname(
+          reinterpret_cast<sockaddr*>(&name), &namelen);
+      const int port = ntohs(name.sin_port);
+
+      // **先 listen，再发布端口。**
+      //
+      // 反过来的话，start() 返回时套接字还没进入 LISTEN：调用方立刻 connect
+      // 会拿到 ECONNREFUSED。uv_listen 本身是同步的（就是 bind+listen 两个
+      // 系统调用），不需要 loop 在跑，所以挪到这里是安全的 —— 内核的
+      // backlog 会替我们把连接排住，直到下面 run() 开始 accept。
+      //
+      // 这个顺序问题是三条测试间歇性失败（约 4/6）的**唯一**根因：
+      // http_roundtrip 自带 40 次重连重试所以掩盖了它，而直接用
+      // uvcpp_tcp_client / raw_exchange 的那几条没有重试，一次拒绝就直接判失败。
+      server.listen();
+
+      port_promise.set_value(port);
+      while (!stop.load()) {
+        server.run(UV_RUN_NOWAIT);
+        live_clients.store(
+            static_cast<int>(server.get_tcp_server()->client_count()));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+    return port_promise.get_future().get();
+  }
+
+  void shutdown() {
+    stop.store(true);
+    if (thread.joinable()) thread.join();
+  }
+};
+
+// 阻塞式请求：连接重试以容忍 server 启动延迟。
+// 传 accept_encoding 时手动加头（客户端自动压缩默认关闭，因此不会解压响应体，
+// 便于断言线上确实是压缩过的）。
+static bool http_roundtrip(int port, const uvcpp_http_request& req,
+                           uvcpp_http_response& resp,
+                           const std::string& accept_encoding = "") {
+  for (int i = 0; i < 40; ++i) {
+    uvcpp_http_client client;
+    if (client.connect_wait("127.0.0.1", port, 2000) != 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      continue;
+    }
+    uvcpp_http_request r = req;
+    if (!accept_encoding.empty()) r.set_header("accept-encoding", accept_encoding);
+    if (client.send_wait(r, resp, 5000) == 0) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  return false;
+}
+
+static bool http_get(int port, const std::string& path, uvcpp_http_response& resp,
+                     const std::string& accept_encoding = "") {
+  return http_roundtrip(port, uvcpp_http_request::make_get(path), resp,
+                        accept_encoding);
+}
+
+// 向 server 发原始字节并读回响应；返回 false 表示读失败/超时。
+static bool raw_exchange(int port, const std::string& send,
+                         std::string& received, int read_timeout_ms = 3000) {
+  uvcpp_tcp_client c;
+  if (c.connect_wait("127.0.0.1", port, 3000) != 0) return false;
+  if (c.write_wait(send.c_str(), send.size(), 3000) != 0) return false;
+  uvcpp_buf out;
+  if (c.read_wait(out, read_timeout_ms) != 0) return false;
+  received.assign(out.get_const_data() ? out.get_const_data() : "", out.size());
+  return true;
+}
+
+// -------------------------------------------------------------------------
+// Test: 大响应体走异步写，完整送达
+//
+// 这条与下一条一起覆盖「响应写不再阻塞事件循环」：send_response 的写是异步的，
+// 因此 4MB 响应不会卡住循环，也不会被 30s 同步写超时截断。
+// -------------------------------------------------------------------------
+// 大响应体尺寸可用环境变量覆盖，便于对「多大开始出问题」做二分定位。
+static size_t big_body_size(size_t fallback) {
+  const char* env = std::getenv("UVCPP_TEST_BIG_SIZE");
+  if (env == nullptr) return fallback;
+  long v = std::atol(env);
+  return (v > 0) ? static_cast<size_t>(v) : fallback;
+}
+
+static bool test_large_response_async() {
+  const size_t kSize = big_body_size(4u * 1024 * 1024);
+  TestServer srv;
+  int port = srv.start([kSize](uvcpp_http_server& s) {
+    s.get("/big", [kSize](uvcpp_http_request&, uvcpp_http_response& resp,
+                          uvcpp_tcp_client*) {
+      std::string body(kSize, 'x');
+      // 首尾做标记，确认没有被截断或错位
+      body[0] = 'A';
+      body[kSize - 1] = 'Z';
+      resp = uvcpp_http_response::ok(body.data(), body.size(), "text/plain");
+    });
+  });
+
+  bool ok = true;
+  uvcpp_http_response resp;
+  if (!http_get(port, "/big", resp)) {
+    std::cout << "  [err] /big 请求失败\n";
+    ok = false;
+  } else if (resp.body.size() != kSize) {
+    std::cout << "  [err] /big 长度 " << resp.body.size() << " != " << kSize << "\n";
+    ok = false;
+  } else if (resp.body.get_const_data()[0] != 'A' ||
+             resp.body.get_const_data()[kSize - 1] != 'Z') {
+    std::cout << "  [err] /big 首尾标记不符（数据被截断/错位）\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: 慢客户端不阻塞事件循环
+//
+// 连接 A 请求大响应后完全不读，把它的发送窗口占满；此期间连接 B 的请求必须
+// 依然被及时处理。旧的同步写实现会在 A 上自旋泵循环最多 30s，B 只能干等。
+// -------------------------------------------------------------------------
+static bool test_slow_client_does_not_block_loop() {
+  const size_t kSize = big_body_size(8u * 1024 * 1024);
+  TestServer srv;
+  int port = srv.start([kSize](uvcpp_http_server& s) {
+    s.get("/big", [kSize](uvcpp_http_request&, uvcpp_http_response& resp,
+                          uvcpp_tcp_client*) {
+      std::string body(kSize, 'x');
+      resp = uvcpp_http_response::ok(body.data(), body.size(), "text/plain");
+    });
+    s.get("/ping", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+      resp = uvcpp_http_response::ok("pong", 4, "text/plain");
+    });
+  });
+
+  bool ok = true;
+
+  // A：请求 8MB 后一个字节都不读。用内层作用域包住，保证在 server 关闭
+  // 之前先断开 —— 否则 server 侧会带着一个永远写不完的 8MB 异步写进入
+  // 析构（这是另一种情形，见文件末尾的说明）。
+  {
+    uvcpp_tcp_client slow;
+    if (slow.connect_wait("127.0.0.1", port, 3000) != 0) {
+      srv.shutdown();
+      return false;
+    }
+    const std::string req = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n";
+    if (slow.write_wait(req.c_str(), req.size(), 3000) != 0) {
+      srv.shutdown();
+      return false;
+    }
+    // 给 server 一点时间把响应推满 A 的发送缓冲区
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // B：此时必须仍能被服务
+    auto t0 = std::chrono::steady_clock::now();
+    uvcpp_http_response resp;
+    bool got = http_get(port, "/ping", resp);
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - t0).count();
+
+    if (!got || resp.body.size() != 4) {
+      std::cout << "  [err] 慢客户端占线时 /ping 失败\n";
+      ok = false;
+    } else if (elapsed_ms > 3000) {
+      // 旧实现会阻塞到 30s 同步写超时
+      std::cout << "  [err] 慢客户端占线时 /ping 耗时 " << elapsed_ms
+                << "ms（事件循环被阻塞）\n";
+      ok = false;
+    }
+  }  // slow 析构：server 侧收到对端关闭，未完成的写随之结束
+
+  // 给 server 处理对端关闭一点时间
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: deferred 响应同样会被压缩
+//
+// 框架的异步 handler 全部走 deferred 路径。压缩原先在 on_request_complete
+// 里、deferred 提前返回之前执行，导致所有 deferred 响应静默不压缩。
+// -------------------------------------------------------------------------
+#if UVCPP_ZLIB_ENABLE
+static bool test_deferred_response_is_compressed() {
+  const std::string kBody(4096, 'c');
+  TestServer srv;
+  int port = srv.start([kBody](uvcpp_http_server& s) {
+    // handler 在 on_request_complete 返回后才发送响应 —— 这正是框架里所有
+    // 异步 handler 的形态。send_response 需要 server，故取地址捕获：
+    // server 的生存期覆盖整个后台线程。
+    uvcpp_http_server* sp = &s;
+    s.get("/deferred", [sp, kBody](uvcpp_http_request&, uvcpp_http_response& resp,
+                                   uvcpp_tcp_client* client) {
+      resp = uvcpp_http_response::ok(kBody.data(), kBody.size(), "text/plain");
+      resp.deferred = true;  // 让 on_request_complete 跳过自动发送
+      sp->send_response(client, resp);
+    });
+  });
+
+  bool ok = true;
+  uvcpp_http_response resp;
+  if (!http_get(port, "/deferred", resp, "gzip")) {
+    std::cout << "  [err] /deferred 请求失败\n";
+    ok = false;
+  } else {
+    std::string ce = resp.get_header("content-encoding");
+    if (ce != "gzip") {
+      std::cout << "  [err] deferred 响应未被压缩 (content-encoding='" << ce
+                << "')\n";
+      ok = false;
+    } else if (resp.body.size() >= kBody.size()) {
+      std::cout << "  [err] 压缩后体积未减小: " << resp.body.size()
+                << " >= " << kBody.size() << "\n";
+      ok = false;
+    } else if (resp.get_header("vary").find("accept-encoding") == std::string::npos) {
+      std::cout << "  [err] 压缩响应缺少 Vary: accept-encoding\n";
+      ok = false;
+    }
+  }
+
+  srv.shutdown();
+  return ok;
+}
+#endif
+
+// -------------------------------------------------------------------------
+// Test: 畸形请求 -> 规范 400 + 连接关闭
+// -------------------------------------------------------------------------
+static bool test_malformed_request_gets_400() {
+  TestServer srv;
+  int port = srv.start(nullptr);
+
+  bool ok = true;
+  std::string got;
+  // 非法请求行：llhttp 会报错
+  if (!raw_exchange(port, "GARBAGE !!!\r\n\r\n", got)) {
+    std::cout << "  [err] 畸形请求没有任何响应\n";
+    ok = false;
+  } else if (got.find("400") == std::string::npos) {
+    std::cout << "  [err] 畸形请求响应不是 400: '"
+              << got.substr(0, 40) << "'\n";
+    ok = false;
+  } else if (got.find("connection: close") == std::string::npos) {
+    std::cout << "  [err] 400 响应缺少 connection: close\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: 超出 body 上限 -> 413
+// -------------------------------------------------------------------------
+static bool test_body_limit_returns_413() {
+  TestServer srv;
+  int port = srv.start([](uvcpp_http_server& s) {
+    s.set_max_body_size(128);
+    s.post("/upload", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                         uvcpp_tcp_client*) {
+      resp = uvcpp_http_response::ok("should not be reached", 21, "text/plain");
+    });
+  });
+
+  bool ok = true;
+  uvcpp_http_response resp;
+  uvcpp_http_request req = uvcpp_http_request::make_post(
+      "/upload", std::string(4096, 'u').data(), 4096, "text/plain");
+  if (!http_roundtrip(port, req, resp)) {
+    std::cout << "  [err] 超限请求无响应\n";
+    ok = false;
+  } else if (resp.status_code != http_status::PAYLOAD_TOO_LARGE) {
+    std::cout << "  [err] 超限请求状态码 "
+              << static_cast<int>(resp.status_code) << " != 413\n";
+    ok = false;
+  }
+
+  // 上限内的小请求仍应正常路由
+  // 注意：不要用 `small` 作变量名 —— Windows 的 rpcndr.h 里 `#define small char`。
+  uvcpp_http_response within_limit;
+  uvcpp_http_request req2 = uvcpp_http_request::make_post(
+      "/upload", std::string(64, 's').data(), 64, "text/plain");
+  if (ok && !http_roundtrip(port, req2, within_limit)) {
+    std::cout << "  [err] 上限内的请求无响应\n";
+    ok = false;
+  } else if (ok && within_limit.status_code != http_status::OK) {
+    std::cout << "  [err] 上限内的请求状态码 "
+              << static_cast<int>(within_limit.status_code) << " != 200\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: 服务端主动关闭连接时 on_connection_close 被触发
+//
+// 旧实现只在删除 conn_ctx 的路径上回调，而服务端主动关闭走的是
+// get_tcp()->close()，其完成回调是空函数 —— 连接关闭回调永远不会触发。
+// -------------------------------------------------------------------------
+static bool test_server_close_notifies() {
+  TestServer srv;
+  int port = srv.start([&srv](uvcpp_http_server& s) {
+    s.on_request([](uvcpp_http_request&, uvcpp_http_response& resp,
+                    uvcpp_tcp_client*) {
+      resp = uvcpp_http_response::ok("bye", 3, "text/plain");
+      resp.set_header("connection", "close");  // 触发服务端主动关闭
+    });
+    s.on_connection_close([&srv](uvcpp_tcp_client*) { srv.closed_conns++; });
+  });
+
+  bool ok = true;
+  uvcpp_http_response resp;
+  if (!http_get(port, "/anything", resp)) {
+    std::cout << "  [err] 请求失败\n";
+    ok = false;
+  }
+
+  // 关闭回调在 server 线程上执行，等它落地
+  for (int i = 0; i < 100 && srv.closed_conns.load() == 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  if (srv.closed_conns.load() == 0) {
+    std::cout << "  [err] 服务端主动关闭连接未触发 on_connection_close\n";
+    ok = false;
+  }
+
+  // 关掉之后**客户端对象本身**也必须被摘除并释放。
+  //
+  // `on_connection_close` 只证明 http 层自己的连接上下文收掉了；客户端对象
+  // 归 uvcpp_tcp_server 管，服务端主动关闭时如果不通知框架的关闭回调，它就
+  // 永远留在 tcp_server 的登记表里 —— 每个 Connection: close 的响应漏一个。
+  //
+  // 这里必须**等**它归零，不能查一次就断言。两个原因：`live_clients` 是 server
+  // 线程每 ~1ms 采样一次的 `client_count()` 快照（见 `TestServer::start`）；
+  // 而 http 层的 `on_connection_close` 和 tcp_server 摘除客户端是两条独立回调，
+  // 先后没有约定。所以"等 closed_conns 落地就立刻查 live_clients"会读到摘除前
+  // 的旧快照 —— 实测约 1/20 概率误报成"漏在表里"。真漏了的实现永远归不了零，
+  // 这个用例的判别力不受影响。
+  for (int i = 0; i < 100 && srv.live_clients.load() != 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  if (srv.live_clients.load() != 0) {
+    std::cout << "  [err] 服务端主动关闭之后仍有 " << srv.live_clients.load()
+              << " 个客户端留在 tcp_server 登记表里（应为 0）\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: keep-alive 上连续两个响应不被写串行化打乱
+//
+// uvcpp_tcp_client 同时只允许一个异步写，连续响应必须在 write_queue 里排队。
+// 在一条连接上连做两次请求：两个响应体必须各自完整、按序、不交错 —— 一旦
+// 交错，客户端的解析会直接失败。
+// -------------------------------------------------------------------------
+static bool test_keepalive_sequential_responses() {
+  TestServer srv;
+  int port = srv.start([](uvcpp_http_server& s) {
+    s.get("/one", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                     uvcpp_tcp_client*) {
+      std::string b(2000, 'a');
+      resp = uvcpp_http_response::ok(b.data(), b.size(), "text/plain");
+    });
+    s.get("/two", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                     uvcpp_tcp_client*) {
+      std::string b(3000, 'b');
+      resp = uvcpp_http_response::ok(b.data(), b.size(), "text/plain");
+    });
+  });
+
+  bool ok = true;
+
+  uvcpp_http_client client;
+  if (client.connect_wait("127.0.0.1", port, 3000) != 0) {
+    srv.shutdown();
+    return false;
+  }
+
+  uvcpp_http_response r1, r2;
+  int rc1 = client.send_wait(uvcpp_http_request::make_get("/one"), r1, 5000);
+  int rc2 = client.send_wait(uvcpp_http_request::make_get("/two"), r2, 5000);
+
+  if (rc1 != 0 || rc2 != 0) {
+    std::cout << "  [err] keep-alive 复用失败 rc1=" << rc1 << " rc2=" << rc2 << "\n";
+    ok = false;
+  } else if (std::string(r1.body.get_const_data(), r1.body.size()) !=
+             std::string(2000, 'a')) {
+    std::cout << "  [err] 响应 1 的 body 不完整或内容错误 (size="
+              << r1.body.size() << ")\n";
+    ok = false;
+  } else if (std::string(r2.body.get_const_data(), r2.body.size()) !=
+             std::string(3000, 'b')) {
+    std::cout << "  [err] 响应 2 的 body 不完整或内容错误 (size="
+              << r2.body.size() << ")\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: 原始数据钩子 —— 观察模式与接管模式
+// -------------------------------------------------------------------------
+static bool test_raw_data_hook() {
+  bool ok = true;
+
+  // 观察模式：返回 true，字节照常进入解析器，同时钩子看到了原始字节。
+  {
+    std::atomic<size_t> seen{0};
+    std::atomic<int> calls{0};
+    TestServer srv;
+    int port = srv.start([&seen, &calls](uvcpp_http_server& s) {
+      s.set_raw_data_hook([&seen, &calls](uvcpp_tcp_client*, const char*, size_t len) {
+        seen += len;
+        calls++;
+        return true;  // 只观察，不接管
+      });
+      s.get("/ok", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+        resp = uvcpp_http_response::ok("yes", 3, "text/plain");
+      });
+    });
+
+    uvcpp_http_response resp;
+    if (!http_get(port, "/ok", resp)) {
+      std::cout << "  [err] 观察模式下请求失败（不应影响解析）\n";
+      ok = false;
+    } else if (resp.body.size() != 3) {
+      std::cout << "  [err] 观察模式下响应体错误\n";
+      ok = false;
+    } else if (calls.load() == 0 || seen.load() == 0) {
+      std::cout << "  [err] 观察模式下钩子未收到任何原始字节\n";
+      ok = false;
+    }
+    srv.shutdown();
+  }
+
+  // 接管模式：返回 false，字节不进解析器 -> 不会产生 HTTP 响应。
+  {
+    std::atomic<size_t> seen{0};
+    TestServer srv;
+    int port = srv.start([&seen](uvcpp_http_server& s) {
+      s.set_raw_data_hook([&seen](uvcpp_tcp_client*, const char*, size_t len) {
+        seen += len;
+        return false;  // 接管：这些字节不被解析为 HTTP
+      });
+      s.get("/ok", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+        resp = uvcpp_http_response::ok("yes", 3, "text/plain");
+      });
+    });
+
+    std::string got;
+    // 读会超时 —— 这正是期望：没有任何 HTTP 响应产生
+    bool read_ok = raw_exchange(port, "GET /ok HTTP/1.1\r\nHost: x\r\n\r\n",
+                                got, 600);
+    if (read_ok && got.find("HTTP/") != std::string::npos) {
+      std::cout << "  [err] 接管模式下解析器仍产生了 HTTP 响应\n";
+      ok = false;
+    } else if (seen.load() == 0) {
+      std::cout << "  [err] 接管模式下钩子未收到任何原始字节\n";
+      ok = false;
+    }
+    srv.shutdown();
+  }
+
+  return ok;
+}
+
+int main(int argc, char** argv) {
+  // 可选参数：测试名子串过滤，便于单条定位。
+  const std::string filter = (argc > 1) ? argv[1] : std::string();
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
     {"server_lifecycle", test_server_lifecycle},
@@ -157,15 +676,28 @@ int main() {
     {"compress_enabled", test_server_compress_enabled},
     {"mime_exclusion", test_server_mime_exclusion},
     {"header_ops", test_response_header_ops},
+    {"deferred_response_is_compressed", test_deferred_response_is_compressed},
 #endif
+    {"large_response_async", test_large_response_async},
+    {"slow_client_does_not_block_loop", test_slow_client_does_not_block_loop},
+    {"malformed_request_gets_400", test_malformed_request_gets_400},
+    {"body_limit_returns_413", test_body_limit_returns_413},
+    {"server_close_notifies", test_server_close_notifies},
+    {"keepalive_sequential_responses", test_keepalive_sequential_responses},
+    {"raw_data_hook", test_raw_data_hook},
   };
   for (const auto& t : tests) {
-    std::cout << "[web_http_server] " << t.name << "\n";
+    if (!filter.empty() && std::string(t.name).find(filter) == std::string::npos) {
+      continue;
+    }
+    // 显式 flush：这些测试会起真实网络连接，一旦挂住，缓冲住的进度输出会让人
+    // 无从判断卡在哪一条。
+    std::cout << "[web_http_server] " << t.name << std::endl;
     bool r = t.fn();
-    std::cout << "  -> " << (r ? "PASS" : "FAIL") << "\n";
+    std::cout << "  -> " << (r ? "PASS" : "FAIL") << std::endl;
     ok = r && ok;
   }
-  std::cout << "[web_http_server] " << (ok ? "ALL PASS" : "FAIL") << "\n";
+  std::cout << "[web_http_server] " << (ok ? "ALL PASS" : "FAIL") << std::endl;
   return ok ? 0 : 2;
 }
 #else

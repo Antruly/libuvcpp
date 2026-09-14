@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_http_compress.h
  * @brief HTTP Content-Encoding compression utilities (gzip / deflate).
  * @author zhuweiye
