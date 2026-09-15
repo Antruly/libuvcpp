@@ -232,6 +232,7 @@ struct static_config {
   std::string spa_url;                ///< 已归一化的 SPA 入口 URL
   bool spa_fallback;
   size_t max_file_size;
+  size_t max_cached_file_size;        ///< 超过它就改走分片读（见 options）
   bool follow_symlinks;
 };
 
@@ -241,6 +242,16 @@ enum class probe_status {
   FORBIDDEN,   ///< 存在但被策略挡下（穿越 / 符号链接）
   TOO_LARGE,   ///< 超过 max_file_size
   IO_ERROR,    ///< 打开/读取出错
+  /**
+   * 体积超过分流阈值 ⇒ **worker 一个字节都不读**，交给 loop 线程用
+   * `resp.send_file_range()` 分片下发。
+   *
+   * 它是**最像 OK 的一个**：所有元数据（final_url / fs_path / size /
+   * mtime）都齐了，ETag / Last-Modified / 条件请求 / Range 判定全部照常
+   * 走，差别只在"产出 body 的那一步"换了实现。所以 `finish_job()` 里它跟
+   * `OK` 走同一条大路，只在最后那个 if/else 链上分开。
+   */
+  STREAM,
 };
 
 struct probe_result {
@@ -699,6 +710,27 @@ void uvcpp_web_static::Impl::run_job(job* j) {
 
   if (!j->need_data) return;  // HEAD：元数据就够了
 
+  // ---- 阈值分流：大文件不整读 ----
+  //
+  // **这里才是判定的正确位置，不能在 `serve()` 里判。** `need_data` 在
+  // `serve()`（loop 线程）就定了，而文件多大只有 worker stat 完之后才知道
+  // —— 在 `serve()` 里判等于要提前 stat 一次，那正是本模块一直在避免的
+  // "每个请求多一次系统调用"。
+  //
+  // 判据用 `>` 而不是 `>=`：**恰好等于阈值仍然整读**。理由是两条路的峰值
+  // 在阈值处本来就相等（2 × 阈值），取哪边都不违反上界，而"≤ 阈值"这个
+  // 说法在文档、选项注释和用例里都好写、不用解释半天。
+  //
+  // 阈值 0 表示"一律走流式"（见 options 的说明），所以这里**不能**写成
+  // `thr > 0 && ...` —— 那样 0 就变成了"从不流式"，与文档相反。
+  const size_t thr = j->cfg->max_cached_file_size;
+  if (static_cast<uint64_t>(pr.size) > static_cast<uint64_t>(thr)) {
+    // 一个字节都不读。元数据已经全部带在 job 上了（上面那一段赋过值），
+    // 所以 ETag/Last-Modified/条件请求/Range 在 loop 线程那侧照常判定。
+    j->status = probe_status::STREAM;
+    return;
+  }
+
   // 缓存校验：拿 loop 线程给的期望快照和刚 stat 到的真实值比。
   // 对上了就**不读盘** —— 热文件的成本是一次 stat。
   for (size_t i = 0; i < j->probes.size(); ++i) {
@@ -750,7 +782,8 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
       resp.server_error();
       return;
     case probe_status::OK:
-      break;
+    case probe_status::STREAM:
+      break;  // STREAM 只换产出 body 的方式，元数据与 OK 完全一样
   }
 
   const std::string ct = content_type_for(j->fs_path);
@@ -873,6 +906,11 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     // 只有 HTTP 客户端看得见 —— 这种"将来才会致命"的标志，代价是一行、
     // 收益是免于一次静默回归，划得来。
     resp.set_head_only(true);
+  } else if (j->status == probe_status::STREAM) {
+    // 分片读下发：`count` == last-first+1，与 send_file_range 自己设的
+    // Content-Length 一致，所以 206/`Content-Range` 那两条照旧成立。
+    resp.send_file_range(j->fs_path, static_cast<uint64_t>(first),
+                         static_cast<uint64_t>(last));
   } else if (j->data) {
     resp.body(j->data->data() + static_cast<size_t>(first),
               static_cast<size_t>(count), std::string());
@@ -904,6 +942,7 @@ uvcpp_web_static_options::uvcpp_web_static_options(size_t max_file)
       cache_control(),
       cache_max_entries(256),
       cache_max_bytes(32u * 1024u * 1024u),
+      max_cached_file_size(1024u * 1024u),
       dotfiles(uvcpp_web_dotfile_policy::HIDE),
       follow_symlinks(true),
       add_charset(true),
@@ -947,6 +986,7 @@ uvcpp_web_static::uvcpp_web_static(const std::string& root_dir,
   std::shared_ptr<static_config> cfg(new static_config());
   cfg->spa_fallback = opts.spa_fallback;
   cfg->max_file_size = opts.max_file_size;
+  cfg->max_cached_file_size = opts.max_cached_file_size;
   cfg->follow_symlinks = opts.follow_symlinks;
 
   // 文档根：构造时归一化一次并缓存。之后每个请求都要拿它做包含判断，

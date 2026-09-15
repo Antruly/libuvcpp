@@ -138,6 +138,7 @@ namespace uvcpp {
 
 class uvcpp_async;
 class uvcpp_timer;
+class uvcpp_web_file_transfer;
 
 // =========================================================================
 // 配置
@@ -898,6 +899,31 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   size_t inflight_count() const { return inflight_.size(); }
 
   // -----------------------------------------------------------------
+  // 流式响应的出口（**框架内部接口**，业务代码不需要碰）
+  // -----------------------------------------------------------------
+  //
+  // 这三个是 `uvcpp_web_stream_sink` 在框架侧的落地：响应只知道"发头、
+  // 写一块、收尾"，具体落到哪条连接由这里查。
+  //
+  // 参数是 **conn id 而不是 `uvcpp_tcp_client*`** —— 用户代码永远拿不到
+  // 裸 client 指针是框架的一条硬规矩（见 uvcpp_web_context）。这不是新开
+  // 的口子：`connection(id)`（下面第 907 行）本来就返回裸指针，这里只是
+  // 不给调用方一个"能存起来"的机会。
+
+  /** @brief 发流式响应的头部（不写 body、不写终止块）。 */
+  void stream_begin(uvcpp_web_conn_id id, uvcpp_http_response& head);
+  /** @brief 写一块已经组好帧的字节。返回 0 = 已受理。 */
+  int stream_write(uvcpp_web_conn_id id, std::string bytes,
+                   std::function<void(int)> done);
+  /** @brief 收尾。`close_after` 为真表示这一块写完就关连接。 */
+  void stream_end(uvcpp_web_conn_id id, bool close_after);
+
+  /** @brief 记下一条在途的分片下发，连接断开时取消它（配对见下）。 */
+  void stream_attach_file(uvcpp_web_conn_id id, uvcpp_web_file_transfer* t);
+  /** @brief 传输结束后摘掉（无论成功、出错还是被取消）。 */
+  void stream_detach_file(uvcpp_web_conn_id id, uvcpp_web_file_transfer* t);
+
+  // -----------------------------------------------------------------
   // uvcpp_web_context_host
   // -----------------------------------------------------------------
 
@@ -1182,6 +1208,12 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
 
   uvcpp_web_connection_registry registry_;
   std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> > inflight_;
+
+  // 在途的分片下发，按连接分组。**只存裸指针**：transfer 由它自己的
+  // `shared_ptr` 自持（见 uvcpp_web_file.h），这里只是一个"断开时该取消谁"的
+  // 名册。detach 一定会配对发生，所以不会留悬垂项。
+  std::map<uvcpp_web_conn_id, std::vector<uvcpp_web_file_transfer*> >
+      file_transfers_;
 
   // 链缓存的存储。用 deque：push_back 不会让已有元素的地址失效，而上下文
   // 只存 `const std::vector<uvcpp_web_handler>*` —— 地址必须稳。

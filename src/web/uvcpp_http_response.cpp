@@ -22,12 +22,17 @@ uvcpp_http_response::uvcpp_http_response() {}
 
 uvcpp_http_response::~uvcpp_http_response() {}
 
+// `deferred` 是响应的一部分，不是可有可无的运行时标记：漏掉它会让一份
+// 拷贝看起来「没设过 deferred」，而它承载的语义是「框架不要立刻发我」。
+// 当前框架的发送路径不拷贝响应（`raw()` 返回引用），所以这条不是本轮
+// 任何用例的判据 —— 它是给「按值使用」的调用方对齐的，预防性改动。
 uvcpp_http_response::uvcpp_http_response(const uvcpp_http_response& other)
     : version(other.version),
       status_code(other.status_code),
       status_message(other.status_message),
       headers(other.headers),
-      body(other.body) {}
+      body(other.body),
+      deferred(other.deferred) {}
 
 uvcpp_http_response& uvcpp_http_response::operator=(
     const uvcpp_http_response& other) {
@@ -37,6 +42,7 @@ uvcpp_http_response& uvcpp_http_response::operator=(
     status_message = other.status_message;
     headers        = other.headers;
     body.clone(other.body);
+    deferred       = other.deferred;
   }
   return *this;
 }
@@ -80,7 +86,7 @@ void uvcpp_http_response::set_content_type(const std::string& ct) {
 // Serialization
 // =========================================================================
 
-std::string uvcpp_http_response::to_string() const {
+std::string uvcpp_http_response::to_string(bool include_body) const {
   std::ostringstream oss;
 
   // --- Status line ---
@@ -116,15 +122,27 @@ std::string uvcpp_http_response::to_string() const {
   // --- Blank line ---
   oss << "\r\n";
 
-  // --- Body ---
   std::string result = oss.str();
-  if (chunked && body.size() > 0) {
-    std::ostringstream hex_oss;
-    hex_oss << std::hex << body.size();
-    result += hex_oss.str();
-    result += "\r\n";
-    result.append(body.get_const_data(), body.size());
-    result += "\r\n";
+
+  // 只序列化头部：到这里已经是一条完整的头部块（状态行 + 各头 + 空行）。
+  if (!include_body) return result;
+
+  // --- Body ---
+  if (chunked) {
+    if (body.size() > 0) {
+      std::ostringstream hex_oss;
+      hex_oss << std::hex << body.size();
+      result += hex_oss.str();
+      result += "\r\n";
+      result.append(body.get_const_data(), body.size());
+      result += "\r\n";
+    }
+    // **空 body 也必须发终止块。** 原先这一支写成
+    // `if (chunked && body.size() > 0) { ...; result += "0\r\n\r\n"; }`，
+    // 于是 `transfer-encoding: chunked` 配空 body 时会产出**未终止**的报文：
+    // 既没有 content-length 也没有 `0\r\n\r\n`，keep-alive 上对端只能一直等
+    // 下一个块，直到自己超时。终止块是 chunked 的**帧**，不是 body 的一部分，
+    // 所以它跟 body 是否为空无关。
     result += "0\r\n\r\n";
   } else if (body.size() > 0) {
     result.append(body.get_const_data(), body.size());

@@ -82,8 +82,16 @@ class UVCPP_API uvcpp_http_response {
    *           ...
    *           \r\n
    *           body
+   *
+   * @param include_body 为 false 时**只**输出头部（状态行 + 各头 + 那个空行），
+   *        body 一个字节都不写。HEAD 响应与流式响应都走这一支 —— 前者的 body
+   *        按协议就不该发，后者的 body 由调用方随后逐块写。
+   *
+   *        **chunked 下这一支连终止块 `0\r\n\r\n` 也不发**。这不是"少发了一
+   *        段"，而是这一支的定义：它只序列化头部。流式响应结束时由调用方自己
+   *        发终止块（见 `uvcpp_http_server::end_stream`）。
    */
-  std::string to_string() const;
+  std::string to_string(bool include_body = true) const;
 
   // -------------------------------------------------------------------
   // Construction from parser

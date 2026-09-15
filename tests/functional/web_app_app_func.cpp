@@ -789,6 +789,157 @@ void test_compression_wiring() {
 }
 
 // =========================================================================
+// 9b. on_sent 的 body_bytes 必须描述**真正写上线的字节数**
+// =========================================================================
+
+/**
+ * 把一次 `on_sent` 的结果记下来。
+ *
+ * 全部走原子量：回调跑在 app 的 loop 线程上，断言跑在测试线程上。
+ */
+struct sent_probe {
+  std::atomic<int>       calls;
+  std::atomic<int>       status;
+  std::atomic<long long> bytes;
+  std::atomic<int>       ok;
+
+  sent_probe() : calls(0), status(0), bytes(-1), ok(-1) {}
+
+  void attach(uvcpp_web_response& r) {
+    r.on_sent([this](const uvcpp_web_sent_info& i) {
+      calls.fetch_add(1);
+      status.store(i.status_code);
+      bytes.store(static_cast<long long>(i.body_bytes));
+      ok.store(i.ok ? 1 : 0);
+    });
+  }
+
+  bool fired() const { return calls.load() > 0; }
+};
+
+/**
+ * HEAD 响应的 `body_bytes` 必须是 0。
+ *
+ * `uvcpp_web_sent_info::body_bytes` 的文档写的是"**实际写入连接的** body 字节
+ * 数（HEAD 时为 0）"，而 `send_response` 原先在构造 `info` **之前没调
+ * `sync_meta()`** —— 于是 HEAD 读到的是 GET 本该发的长度，一个从来没上过线的
+ * 数字。而 `web_middleware_access_log()` 正是念这个字段，所以每个 HEAD 请求
+ * 都会在访问日志里记成一个不存在的字节数。
+ *
+ * **对照组是必需的一半**：没有同一路由上的 GET，一个"body_bytes 恒为 0"的
+ * 实现能让主断言全绿。
+ *
+ * HEAD 走裸客户端：`uvcpp_http_client` 按 content-length 等 body，而 HEAD 的
+ * body 被丢掉了，走它只会等超时（见本文件开头"刻意不覆盖"那一节）。
+ */
+void test_sent_bytes_head() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+
+  sent_probe head_probe;
+  sent_probe get_probe;
+  const std::string payload = "hello world";  // 11 字节
+
+  app.get("/hello", [&](uvcpp_web_request& req, uvcpp_web_response& resp,
+                        uvcpp_web_next next) {
+    (void)next;
+    if (req.method() == http_method::HTTP_HEAD) {
+      head_probe.attach(resp);
+    } else {
+      get_probe.attach(resp);
+    }
+    resp.text(payload);
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "HEAD 探测服务启动");
+  const int port = app.bound_port();
+
+  // (a) GET：body_bytes 就是正文长度。
+  check(raw_send(port, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n", 200),
+        "裸客户端把 GET 写完了");
+  check(wait_for([&] { return get_probe.fired(); }, 3000), "GET 的 on_sent 被触发");
+  check(get_probe.status.load() == 200, "GET 的 status 是 200");
+  check(get_probe.ok.load() == 1, "GET 的 ok 为真");
+  check(get_probe.bytes.load() == static_cast<long long>(payload.size()),
+        "GET 的 body_bytes 等于正文长度");
+
+  // (b) HEAD：头部与 GET 相同，但 body 一个字节都没上线 ⇒ body_bytes == 0。
+  check(raw_send(port, "HEAD /hello HTTP/1.1\r\nHost: x\r\n\r\n", 200),
+        "裸客户端把 HEAD 写完了");
+  check(wait_for([&] { return head_probe.fired(); }, 3000),
+        "HEAD 的 on_sent 被触发");
+  check(head_probe.status.load() == 200, "HEAD 的 status 是 200");
+  check(head_probe.ok.load() == 1, "HEAD 的 ok 为真（响应确实写出去了）");
+  check(head_probe.bytes.load() == 0,
+        "HEAD 的 body_bytes 是 0 —— 没有字节写上过线");
+
+  app.stop();
+  app.join();
+}
+
+/**
+ * `body_bytes` 必须是**压缩之后**的长度。
+ *
+ * `apply_compression` 跑在 `http_->send_response` 内部，它把 `resp.body` 换成
+ * 压缩后的字节；而 `raw()` 返回的是**引用**。所以采集点必须在那个调用
+ * **之后** —— 在之前采集的话，`body_bytes` 记的是压缩前的长度，而报文里的
+ * `content-encoding: gzip` 又明说了发的是压缩体，两边自相矛盾。
+ *
+ * 同样要**对照组**：不带 accept-encoding 的同一路由，`body_bytes` 必须还是原长
+ * —— 没有它，"body_bytes 恒等于压缩后长度"（即恒为一个小数）也能蒙混过关。
+ */
+void test_sent_bytes_compressed() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.set_compression(true).set_compress_min_body_size(64);
+
+  const std::string big(4000, 'a');
+  sent_probe plain_probe;
+  sent_probe gz_probe;
+
+  app.get("/big", [&](uvcpp_web_request& req, uvcpp_web_response& resp,
+                      uvcpp_web_next next) {
+    (void)next;
+    if (req.header("accept-encoding").find("gzip") != std::string::npos) {
+      gz_probe.attach(resp);
+    } else {
+      plain_probe.attach(resp);
+    }
+    resp.text(big);
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "压缩探测服务启动");
+  const int port = app.bound_port();
+
+  // (a) 对照组：不要求压缩，body_bytes == 4000。
+  check(raw_send(port, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n", 300),
+        "裸客户端把不压缩的请求写完了");
+  check(wait_for([&] { return plain_probe.fired(); }, 3000),
+        "不压缩的 on_sent 被触发");
+  check(plain_probe.bytes.load() == static_cast<long long>(big.size()),
+        "没要求压缩时 body_bytes 是原长");
+
+  // (b) 要 gzip：body_bytes 必须是**压缩后**的长度，而且确实变小了。
+  check(raw_send(port,
+                 "GET /big HTTP/1.1\r\nHost: x\r\n"
+                 "Accept-Encoding: gzip\r\n\r\n",
+                 500),
+        "裸客户端把压缩的请求写完了");
+  check(wait_for([&] { return gz_probe.fired(); }, 3000),
+        "压缩的 on_sent 被触发");
+  check(gz_probe.status.load() == 200, "压缩响应仍是 200");
+  check(gz_probe.ok.load() == 1, "压缩响应的 ok 为真");
+  check(gz_probe.bytes.load() > 0 &&
+            gz_probe.bytes.load() < static_cast<long long>(big.size()),
+        "压缩响应的 body_bytes 是**压缩后**的长度（严格小于 4000）");
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
 // 10. 优雅关闭：请求挂着不响应
 // =========================================================================
 void test_graceful_shutdown_with_inflight() {
@@ -1148,6 +1299,8 @@ int main(int argc, char** argv) {
       {"raw_data_claim", test_raw_data_claim},
       {"disconnect_mid_request", test_disconnect_mid_request},
       {"compression_wiring", test_compression_wiring},
+      {"sent_bytes_head", test_sent_bytes_head},
+      {"sent_bytes_compressed", test_sent_bytes_compressed},
       {"graceful_shutdown", test_graceful_shutdown_with_inflight},
       {"start_failure_recoverable", test_start_failure_is_recoverable},
       {"idle_timeout", test_idle_timeout},

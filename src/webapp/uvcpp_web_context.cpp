@@ -343,7 +343,20 @@ void uvcpp_web_context::finish() {
         << "请求已 abort，不发响应，交由 host 关闭连接 " << conn_id_;
     host_.abort_request(*this);
   } else {
-    if (!resp_.ended()) {
+    if (resp_.streaming()) {
+      // **流式响应不算"没人结束它"。** 这条链结束恰恰是流式响应的**正常
+      // 样子**：handler 调过 `begin_chunked()` 就把控制权交给了后续的
+      // `write_chunk()`，而那些块多半来自异步回调（SSE 的心跳、文件读盘），
+      // 此刻当然还没 `end()`。真正发头部并挂住上下文的活由
+      // `send_response()` 的流式分支干（`ctx.hold()` + `pump_stream()`）。
+      //
+      // 不放过这一句的话，**每一条流式响应都会打一条 WARN** —— 而 WARN 是
+      // "出问题了"的信号，一条正常路径天天刷它，等于把真问题的信噪比做没。
+      //
+      // 代价照实记：一条**永远不 end()** 的流在这里也就没有提示了。那是
+      // 已知的取舍（见计划 F 节：卡住的出站流没有超时保护，运维靠应用层
+      // 心跳），要发现它得靠连接数之类的别的指标，不是靠这条日志。
+    } else if (!resp_.ended()) {
       // 链跑完了却没人结束响应。**照样发** —— 响应对象里可能已经被填好了
       // （比如 handler 只设了 body 忘了 end()），丢了它反而是更坏的结果。
       UVCPP_LOG_WARN(log_category::REQUEST)

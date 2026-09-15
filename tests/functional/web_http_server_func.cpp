@@ -74,6 +74,17 @@ static bool test_status_codes() {
   return true;
 }
 
+/** `sub` 在 `s` 里出现的次数。数"恰好一次"比数"至少一次"强，见下面几条。 */
+static size_t count_substr(const std::string& s, const std::string& sub) {
+  if (sub.empty()) return 0;
+  size_t n = 0, pos = 0;
+  while ((pos = s.find(sub, pos)) != std::string::npos) {
+    ++n;
+    pos += sub.size();
+  }
+  return n;
+}
+
 // =========================================================================
 // Test 5: Chunked transfer encoding generation (server send path)
 // =========================================================================
@@ -90,6 +101,81 @@ static bool test_chunked_response() {
   if (wire.find("\r\nc\r\nHello World!\r\n0\r\n\r\n") == std::string::npos) return false;
 
   // Verify it's still parseable
+  uvcpp_http_parser parser(http_parser_mode::PARSE_RESPONSE);
+  parser.execute(wire.c_str(), wire.size());
+  parser.finish();
+  if (!parser.is_complete() || parser.has_error()) return false;
+  if (parser.get_status_code() != http_status::OK) return false;
+
+  return true;
+}
+
+// =========================================================================
+// Test 5b: 空 body 的 chunked 响应必须发终止块
+//
+// 终止块 `0\r\n\r\n` 是 chunked 的**帧**，不是 body 的一部分，所以它跟 body
+// 是否为空无关 —— 这正是这一组存在的理由。原先的实现把终止块写在了
+// `if (chunked && body.size() > 0)` 的块里面，于是空 body 时既没有
+// content-length 也没有终止块，产出一条**未终止**的报文：keep-alive 上
+// 对端只能一直等下一个块，直到自己超时。
+//
+// 判据用 `parser.is_complete()` 而不是字符串匹配：llhttp 只在收到终止块时
+// 才报 message-complete，所以"报文完整"这件事本身就是终止块的可观测定义。
+// 字符串那几条钉的是另一半 —— 终止块**恰好一次**、且必须在报文末尾。
+// =========================================================================
+static bool test_chunked_empty_terminated() {
+  auto resp = uvcpp_http_response::ok(nullptr, 0, "text/plain");
+  resp.set_header("transfer-encoding", "chunked");
+
+  const std::string wire = resp.to_string();
+
+  if (wire.find("transfer-encoding: chunked") == std::string::npos) return false;
+  // chunked 与 content-length 互斥（RFC 7230 §3.3.2）。
+  if (wire.find("content-length:") != std::string::npos) return false;
+
+  if (count_substr(wire, "0\r\n\r\n") != 1) return false;
+  // 必须是**末尾**那几个字节，后面什么都没有。空 body 时终止块前面紧挨着
+  // 头部块末尾的空行，所以整条报文以 "\r\n0\r\n\r\n" 收尾。
+  //
+  // 长度取 `expected.size()` 而不是手写的数字：`compare(pos, len, s)` 比的是
+  // `[pos, pos+len)` 与**整条** C 串 `s`，两者必须相等才可能命中，而手数一个
+  // 转义串有几个字节错一次就是"永远不等"的恒假断言（这一版连错两次：先写 5
+  // 比 7 个字节，再写 6 比 7 个字节，两条用例一起红）。
+  const std::string tail = "\r\n0\r\n\r\n";
+  if (wire.size() < tail.size()) return false;
+  if (wire.compare(wire.size() - tail.size(), tail.size(), tail) != 0) return false;
+
+  uvcpp_http_parser parser(http_parser_mode::PARSE_RESPONSE);
+  parser.execute(wire.c_str(), wire.size());
+  parser.finish();
+  if (!parser.is_complete()) return false;  // ← 少了终止块这里就是 false
+  if (parser.has_error()) return false;
+  if (parser.get_status_code() != http_status::OK) return false;
+
+  return true;
+}
+
+// =========================================================================
+// Test 5c: 非空 body 的 chunked（对照组）
+//
+// 上面那条改了终止块的发送位置（从 `body.size() > 0` 的块里挪到块外），所以
+// 必须有一条钉住"非空那条路没被改坏"，而且钉的是**恰好一次** —— 一个把终止块
+// 发两次的实现会让上面的空 body 那条照样绿（字符串计数是 1，但报文里多一个
+// 空块），只有这里看得出来。
+// =========================================================================
+static bool test_chunked_body_terminated() {
+  auto resp = uvcpp_http_response::ok("Hello World!", 12, "text/plain");
+  resp.set_header("transfer-encoding", "chunked");
+
+  const std::string wire = resp.to_string();
+
+  // 12 字节 → 十六进制 "c"。
+  if (wire.find("\r\nc\r\nHello World!\r\n") == std::string::npos) return false;
+  if (count_substr(wire, "0\r\n\r\n") != 1) return false;
+  const std::string tail = "\r\n0\r\n\r\n";
+  if (wire.size() < tail.size()) return false;
+  if (wire.compare(wire.size() - tail.size(), tail.size(), tail) != 0) return false;
+
   uvcpp_http_parser parser(http_parser_mode::PARSE_RESPONSE);
   parser.execute(wire.c_str(), wire.size());
   parser.finish();
@@ -249,6 +335,50 @@ static bool raw_exchange(int port, const std::string& send,
   uvcpp_buf out;
   if (c.read_wait(out, read_timeout_ms) != 0) return false;
   received.assign(out.get_const_data() ? out.get_const_data() : "", out.size());
+  return true;
+}
+
+// -------------------------------------------------------------------------
+// Test: 声明了 chunked 的 HEAD 响应不得多出终止块
+//
+// 与 `test_chunked_empty_terminated` 是**同一个改动的两面**：那边加了"空 body
+// 也要发终止块"，这边就必须保证 HEAD 不会因此凭空多出一段 body。清空 body 并
+// 不足以让 HEAD 正确 —— `to_string()` 里那个终止块与 body 是否为空无关，所以
+// HEAD 必须走"只序列化头部"那一支（`to_string(false)`），而不是靠 body 为空。
+//
+// 这条必须走真服务器：`to_string(false)` 是 `send_response` 的选择，不是
+// 响应对象的属性。所以 HEAD 路由要**显式按 HEAD 方法注册** —— 路由匹配是
+// 按 `http_method` 精确比的（`find_handler`），HEAD 请求**不会**落到 GET 路由上。
+// -------------------------------------------------------------------------
+static bool test_head_no_terminator() {
+  TestServer srv;
+  const int port = srv.start([](uvcpp_http_server& s) {
+    s.head("/chunked", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                          uvcpp_tcp_client*) {
+      resp = uvcpp_http_response::ok("Hello World!", 12, "text/plain");
+      resp.set_header("transfer-encoding", "chunked");
+    });
+  });
+  if (port <= 0) return false;
+
+  std::string raw;
+  if (!raw_exchange(port, "HEAD /chunked HTTP/1.1\r\nHost: x\r\n\r\n", raw)) {
+    srv.shutdown();
+    return false;
+  }
+  srv.shutdown();
+
+  // 头部必须与 GET 的**逐字节相同** —— 含 `transfer-encoding: chunked`。
+  if (raw.find("200") == std::string::npos) return false;
+  if (raw.find("transfer-encoding: chunked") == std::string::npos) return false;
+  // 而 body 一个字节都不许有：终止块是 chunked 的帧，它一出现就是一段 body。
+  if (count_substr(raw, "0\r\n\r\n") != 0) return false;
+  if (raw.find("Hello World!") != std::string::npos) return false;
+  // 头部块必须完整收尾（不然上面两条"找不到"就是假绿）。
+  if (raw.find("\r\n\r\n") == std::string::npos) return false;
+  // 整条报文正好是头部块：空行之后不该有任何字节。
+  if (raw.size() != raw.find("\r\n\r\n") + 4) return false;
+
   return true;
 }
 
@@ -672,6 +802,9 @@ int main(int argc, char** argv) {
     {"response_format", test_response_format},
     {"status_codes", test_status_codes},
     {"chunked_response", test_chunked_response},
+    {"chunked_empty_terminated", test_chunked_empty_terminated},
+    {"chunked_body_terminated", test_chunked_body_terminated},
+    {"head_no_terminator", test_head_no_terminator},
 #if UVCPP_ZLIB_ENABLE
     {"compress_enabled", test_server_compress_enabled},
     {"mime_exclusion", test_server_mime_exclusion},

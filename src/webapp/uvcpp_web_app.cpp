@@ -42,6 +42,7 @@
 #include <net/uvcpp_tcp_client.h>
 #include <net/uvcpp_tcp_server.h>
 #include <web/uvcpp_http_common.h>
+#include <webapp/uvcpp_web_file.h>
 #include <webapp/uvcpp_web_multipart.h>
 #include <webapp/uvcpp_web_request.h>
 #include <webapp/uvcpp_web_response.h>
@@ -57,6 +58,59 @@
 namespace uvcpp {
 
 namespace {
+
+/**
+ * @brief 流式响应的字节出口 —— `uvcpp_web_stream_sink` 在本层的落地。
+ *
+ * 之所以要这一层而不是让 `uvcpp_web_response` 直接拿 `uvcpp_tcp_client*`：
+ * 响应对象是**业务可见**的，而"用户代码永远拿不到裸 client 指针"是框架的
+ * 一条硬规矩（连接随时可能被对端关掉，指针存下来就是悬垂）。出口拿的是
+ * **conn id**，每次都现查 —— 查不到就是"连接已经没了"，这正是那三个方法
+ * 各自要处理的第一个分支。
+ *
+ * 生命周期：由 `uvcpp_web_response::set_stream_sink()` 接管，随响应一起
+ * 析构；而响应活在 `uvcpp_web_context` 里，流式期间被 `hold()` 钉住。
+ */
+class app_stream_sink : public uvcpp_web_stream_sink {
+ public:
+  app_stream_sink(uvcpp_web_app* app, uvcpp_web_conn_id id)
+      : app_(app), id_(id) {}
+
+  virtual int stream_begin(uvcpp_http_response& head) {
+    if (app_ == nullptr) return UV_ECANCELED;
+    app_->stream_begin(id_, head);
+    return 0;
+  }
+
+  virtual int stream_write(const std::string& bytes,
+                           const std::function<void(int)>& done) {
+    if (app_ == nullptr) return UV_ECANCELED;
+    return app_->stream_write(id_, bytes, done);
+  }
+
+  virtual void stream_end(bool close_after) {
+    if (app_ == nullptr) return;
+    app_->stream_end(id_, close_after);
+  }
+
+  virtual void stream_attach_file(uvcpp_web_file_transfer* t) {
+    if (app_ == nullptr) return;
+    app_->stream_attach_file(id_, t);
+  }
+
+  virtual void stream_detach_file(uvcpp_web_file_transfer* t) {
+    if (app_ == nullptr) return;
+    app_->stream_detach_file(id_, t);
+  }
+
+  virtual uvcpp_loop* stream_loop() const {
+    return app_ != nullptr ? app_->loop() : nullptr;
+  }
+
+ private:
+  uvcpp_web_app* const app_;
+  const uvcpp_web_conn_id id_;
+};
 
 /** @brief 看门狗轮询间隔（毫秒）。 */
 const uint64_t kShutdownPollMs = 20;
@@ -1584,9 +1638,17 @@ uvcpp_tcp_client* uvcpp_web_app::connection(uvcpp_web_conn_id id) {
 void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   uvcpp_web_response& r = ctx.response();
 
+  // 先把 metadata 定下来（`sync_meta()` 是幂等的，发送前本来就一定要调一次）。
+  // 这一步是 `body_bytes` 那个字段的**语义**要求的，不是清洁工作：
+  // 对 HEAD 而言 `sync_meta()` 会把 body 丢掉（长度已经在丢之前按"本该发出的
+  // body"记进 `content-length` 了），所以此后读到的 0 正是"实际写上线的字节
+  // 数"。不调的话读到的是 GET 本该发的长度 —— 一个从来没上过线的数字。
+  // 放在 `info` 构造**之前**，是为了让下面那条"连接已断"的提前返回也拿到
+  // 同一个基准：那条路上 `raw()` 不会被调用（见 `:1602` 分支）。
+  r.sync_meta();
+
   uvcpp_web_sent_info info;
   info.status_code   = r.status_code();
-  info.body_bytes    = r.body_size();
   info.connection_id = ctx.connection_id();
   info.ok            = true;
 
@@ -1595,7 +1657,8 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
     // 连接在响应准备好之前断了（客户端提前走了，或者我们 abort 过）。
     // **照样通知** —— 访问日志中间件挂在这一刻上，丢掉通知就等于这次请求
     // 在日志里凭空消失。ok=false 就是给这种场合用的。
-    info.ok = false;
+    info.ok         = false;
+    info.body_bytes = r.body_size();
     UVCPP_LOG_WARN(log_category::RESPONSE)
         << "连接 " << ctx.connection_id() << " 已断开，响应被丢弃（status "
         << info.status_code << "）";
@@ -1609,11 +1672,161 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
     r.set_header("server", cfg_.server_header);
   }
 
+  // -------------------------------------------------------------------
+  // 流式（chunked）响应：走另一条出口
+  // -------------------------------------------------------------------
+  //
+  // 它不能走 `http_->send_response()`：那个函数**一次性**把整条报文
+  // （头部 + body + 终止块）序列化进一个字符串，而流式的 body 此刻还
+  // 不存在 —— 后面每一块都是异步产生的。
+  if (r.streaming()) {
+    const uvcpp_web_conn_id id = ctx.connection_id();
+
+    r.set_stream_sink(new app_stream_sink(this, id));
+
+    // **按值捕指针而不是按引用捕那两个引用参数。** `ctx` 是引用形参、`r`
+    // 是引用局部变量，"按引用捕获一个引用"在各编译器上的落地并不一致
+    // （C++11 对闭包里是否为引用实体分配存储是未指定的）。显式取地址、
+    // 按值捕指针，语义就没有第二种读法。
+    //
+    // 这两个指针的存活由 hold()/release() 保证：release() 就在这个回调
+    // 的最后一句，而它只可能被 `stream_done_` 那道闸门放行一次。
+    uvcpp_web_context* const cp = &ctx;
+    uvcpp_web_response* const rp = &r;
+
+    // 收尾回调。**这里是 notify_sent 被推迟到的时刻** —— 对整包响应而言
+    // 它在头部入队之后就触发，但流式响应那时一个 body 字节都还没出去，
+    // `body_bytes` 只能记 0、`ok` 只能记真。访问日志要的是"这条响应完整
+    // 地是 200、N 字节"，那个答案只有在这里才成立。
+    r.set_stream_finished_cb([cp, rp, id](int status) {
+      uvcpp_web_sent_info si;
+      si.status_code   = rp->status_code();
+      // HEAD 上一字节都没发（`stream_bytes_written()` 记的是"GET 本该发
+      // 多少"），而 `body_bytes` 的契约是"实际写入连接的字节数、HEAD 时
+      // 为 0"。两个口径都要维持，所以这里做一次换算。
+      si.body_bytes    = rp->head_only() ? 0 : rp->stream_bytes_written();
+      si.connection_id = id;
+      si.streamed      = true;
+      si.ok            = (status == 0);
+      rp->notify_sent(si);
+      // **这一句之后不得再碰上面任何东西。** release() 可能当场把上下文
+      // 销毁掉 —— `si`、`rp`、`cp` 指的全是它的成员。
+      cp->release();
+    });
+
+    // **钉住上下文。** 链早就收尾了（handler 返回、`finish()` 跑过），
+    // 正常情况下 context 此刻已经被回收 —— 而这条流还要用它来算
+    // "整条流什么时候结束"。hold/release 是框架既有的机制
+    // （`uvcpp_web_context::hold()`），这里第一次在生产代码里用：它为
+    // "链结束了但请求还没结束"提供了一个显式的、有配对的表达，比在
+    // 别处挂一个新的挂起标志要诚实得多。
+    ctx.hold();
+
+    // 把 handler 里同步写下的那批字节发出去（同时也发出头部）。此后新
+    // 的块由 `write_chunk` → sink → 本类的 stream_write() 继续驱动。
+    // **这一句之后不得再碰 ctx** —— 若这条流当场跑完（HEAD、或者 handler
+    // 已经调过 end() 且没有待发字节），release() 会在这一句**内部**跑，
+    // 上下文可能当场析构（见 `uvcpp_web_context::release()` 的注释：
+    // "之后不要再碰任何成员"）。
+    r.pump_stream();
+    return;
+  }
+
   // 交给 HTTP 层序列化并异步写出。压缩、keep-alive 判定、写队列串行化都在
   // 那里面（对 deferred 响应同样成立）。
   http_->send_response(client, r.raw());
 
+  // **`body_bytes` 必须在这之后采集。** 压缩跑在上面那个调用**内部**
+  // （`uvcpp_http_server::apply_compression`），它把 `resp.body` 换成了压缩后
+  // 的字节；而 `raw()` 返回的是**引用**，所以此刻读到的才是真正要上线的长度。
+  // 在压缩之前采集的话，字段就与它的契约（"实际写入连接的 body 字节数"）
+  // 对不上了：gzip 过的响应会记成压缩前的长度，而报文里的
+  // `content-encoding: gzip` 又明说了发的是压缩体 —— 两边自相矛盾。
+  info.body_bytes = r.body_size();
+
   r.notify_sent(info);
+}
+
+// =====================================================================
+// 流式响应的三个出口（`uvcpp_web_stream_sink` 在框架侧的落地）
+// =====================================================================
+//
+// 三个函数长得一样：**按 conn id 查活连接，查不到就拒绝**。拒绝的含义分工
+// 得很清楚：
+//
+//   * 返回 0 —— 受理了，`done` 由 http 层的写完成回调负责调（**恰好一次**）。
+//   * 返回非 0 —— **没受理，`done` 不会再被任何人调**。调用方
+//     （`uvcpp_web_response::flush_stream`）会据此自己结算这块字节。
+//
+// 所以这三个函数**自己绝不调 `done`**。两边都调一次是真正的 bug，不是"多算
+// 一遍"：第一次结算可能让整条流到达收尾条件，`maybe_finish_stream()` 随即
+// 跑 `ctx.release()` 把上下文连同这个响应对象一起销毁，而 `flush_stream`
+// 还没返回 —— 第二句就是对已释放对象的读。
+//
+// 这条分工必须写明，是因为它**没有写在 `uvcpp_http_server` 的头文件里**：
+// 那里 `write_stream` 的注释说"连接没了 done 仍会被调用，参数 UV_ECANCELED"，
+// 而实现（`uvcpp_http_server.cpp:570-574`）是查到 `contexts_.end()` 就直接
+// `return UV_ECANCELED`，从头到尾没碰过 `done`。以实现为准。
+
+void uvcpp_web_app::stream_begin(uvcpp_web_conn_id id,
+                                 uvcpp_http_response& head) {
+  uvcpp_tcp_client* client = registry_.client(id);
+  if (client == nullptr) {
+    // 连接已经没了。`stream_begin` 是唯一不带回调的出口，失败由
+    // `pump_stream()` 记进 `stream_status_`，收尾时体现为 ok=false。
+    UVCPP_LOG_DEBUG(log_category::RESPONSE)
+        << "stream_begin：连接 " << id << " 已断开，头部丢弃";
+    return;
+  }
+  http_->begin_stream(client, head);
+}
+
+int uvcpp_web_app::stream_write(uvcpp_web_conn_id id, std::string bytes,
+                                std::function<void(int)> done) {
+  uvcpp_tcp_client* client = registry_.client(id);
+  if (client == nullptr) {
+    UVCPP_LOG_DEBUG(log_category::RESPONSE)
+        << "stream_write：连接 " << id << " 已断开，这一块丢弃";
+    // 见上面那段分工：**不调 done**，返回非 0 让调用方去结算。
+    // （`done` 在这里被析构掉 —— 它由 std::function 按值持有，随形参一起
+    //  释放，不会有谁再去读它。）
+    (void)done;
+    return UV_ECANCELED;
+  }
+  return http_->write_stream(client, bytes, std::move(done));
+}
+
+void uvcpp_web_app::stream_end(uvcpp_web_conn_id id, bool close_after) {
+  uvcpp_tcp_client* client = registry_.client(id);
+  if (client == nullptr) {
+    // 连接已经没了，"结束"这件事已经由断开本身完成了。**这里必须是空操作**
+    // —— 收尾路径上唯一要做的事是关连接，而它已经关着了。
+    UVCPP_LOG_DEBUG(log_category::RESPONSE)
+        << "stream_end：连接 " << id << " 已断开，无需收尾";
+    return;
+  }
+  http_->end_stream(client, close_after);
+}
+
+void uvcpp_web_app::stream_attach_file(uvcpp_web_conn_id id,
+                                       uvcpp_web_file_transfer* t) {
+  if (t == nullptr) return;
+  file_transfers_[id].push_back(t);
+}
+
+void uvcpp_web_app::stream_detach_file(uvcpp_web_conn_id id,
+                                       uvcpp_web_file_transfer* t) {
+  std::map<uvcpp_web_conn_id, std::vector<uvcpp_web_file_transfer*> >::iterator
+      it = file_transfers_.find(id);
+  if (it == file_transfers_.end()) return;
+  std::vector<uvcpp_web_file_transfer*>& v = it->second;
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (v[i] == t) {
+      v.erase(v.begin() + static_cast<std::ptrdiff_t>(i));
+      break;
+    }
+  }
+  if (v.empty()) file_transfers_.erase(it);
 }
 
 void uvcpp_web_app::abort_request(uvcpp_web_context& ctx) {
@@ -1694,6 +1907,23 @@ void uvcpp_web_app::on_accept(uvcpp_tcp_client* client) {
 void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
   uvcpp_web_conn_id id = UVCPP_WEB_INVALID_CONN_ID;
   if (registry_.remove_by_client(client, &id)) {
+    // 在途的分片下发：先**把名册摘下来再逐条取消**。cancel() 会同步走到
+    // `on_done` → `stream_detach_file` → 擦这个 map 条目，边遍历边擦就是
+    // 迭代器失效。摘下来之后名册归本栈所有，谁再动 map 都不影响。
+    {
+      std::map<uvcpp_web_conn_id,
+               std::vector<uvcpp_web_file_transfer*> >::iterator ft =
+          file_transfers_.find(id);
+      if (ft != file_transfers_.end()) {
+        std::vector<uvcpp_web_file_transfer*> pending;
+        pending.swap(ft->second);
+        file_transfers_.erase(ft);
+        for (size_t i = 0; i < pending.size(); ++i) {
+          if (pending[i] != nullptr) pending[i]->cancel();
+        }
+      }
+    }
+
     UVCPP_LOG_DEBUG(log_category::CORE) << "连接 " << id << " 已断开";
     // 豁免标记跟着连接一起走。不擦的话这个集合只涨不落 —— 连接 id 永不复用，
     // 所以不会误豁免别人，但会一直占内存（长跑服务上就是一条稳定的泄漏）。

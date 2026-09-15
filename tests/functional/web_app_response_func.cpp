@@ -182,6 +182,22 @@ void test_head_only() {
   r3.no_content();
   r3.set_head_only(true);
   check(count_header(wire(r3), "content-length") == 0, "204 + HEAD 仍不带 CL");
+
+  // `body_size()` 在 sync_meta() 之后必须是 0 —— 这是 `uvcpp_web_sent_info::
+  // body_bytes` 的**语义**（"实际写入连接的 body 字节数"），框架的
+  // `send_response` 正是靠它把 HEAD 记成 0 字节而不是 GET 本该发的长度。
+  //
+  // 注意这一组钉的是**机制**（`sync_meta()` 在 head_only 下清 body），不是
+  // "框架有没有在采集之前调 sync_meta()" —— 后者只能在真服务端上验，见
+  // `web_app_app_func.cpp` 的 `sent_bytes_head`。两条互补，缺一不可。
+  uvcpp_web_response r4;
+  r4.text("hello world");
+  r4.set_head_only(true);
+  check(r4.body_size() == 11, "sync_meta 之前 body_size 还是原长度");
+  const std::string w4 = wire(r4);  // raw() 里调 sync_meta()
+  check(r4.body_size() == 0, "sync_meta 之后 HEAD 的 body_size 归零");
+  check(has(w4, "content-length: 11\r\n"),
+        "而长度已经记进 content-length 了（丢 body 不丢长度）");
 }
 
 // =========================================================================

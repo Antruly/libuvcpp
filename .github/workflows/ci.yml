@@ -83,7 +83,12 @@ jobs:
             --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func|test_memory_pool" || true
 
   # ---------------------------------------------------------------------------
-  # Web: HTTP + WebSocket (all platforms)
+  # Web: HTTP + WebSocket + webapp framework + zlib (all platforms)
+  #
+  # UVCPP_ENABLE_ZLIB must stay ON here: the webapp's compression tests assert
+  # that gzip actually happens, so with zlib OFF those groups fail and the job
+  # is testing a configuration nobody builds locally. zlib is FetchContent'd
+  # when find_package misses, so this needs no extra dep on any platform.
   # ---------------------------------------------------------------------------
   web:
     runs-on: ${{ matrix.os }}
@@ -100,17 +105,18 @@ jobs:
 
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev ninja-build
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install libuv ninja
+        run: brew install libuv zlib ninja
 
       - name: Configure & Build
         shell: bash
         run: |
           cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release \
-            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_WEB=ON
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_WEB=ON \
+            -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_ZLIB=ON
           cmake --build build-web --config Release --parallel
 
       - name: Copy runtime DLLs (Windows)
@@ -136,7 +142,11 @@ jobs:
             --timeout 30 --exclude-regex "$EXCLUDE" || true
 
   # ---------------------------------------------------------------------------
-  # SSL: Web + OpenSSL (all platforms)
+  # SSL: Web + webapp + OpenSSL + zlib (all platforms)
+  #
+  # Same reasoning as the web job: the webapp's compression tests need
+  # UVCPP_ENABLE_ZLIB=ON, and the locally validated TLS tree (build-ssl) has
+  # zlib ON.  Off, this job would fail the same two gzip groups.
   # ---------------------------------------------------------------------------
   ssl:
     runs-on: ${{ matrix.os }}
@@ -153,11 +163,11 @@ jobs:
 
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev libssl-dev ninja-build
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install libuv openssl ninja
+        run: brew install libuv openssl zlib ninja
 
       - name: Install deps (Windows)
         if: runner.os == 'Windows'
@@ -168,7 +178,8 @@ jobs:
         run: |
           cmake -S . -B build-ssl -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
-            -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_ZLIB=ON
           cmake --build build-ssl --config Release --parallel
 
       - name: Copy runtime DLLs (Windows)

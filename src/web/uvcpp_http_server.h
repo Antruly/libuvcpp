@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <deque>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -307,6 +308,55 @@ class UVCPP_API uvcpp_http_server {
                      bool close_after_write = true);
 
   /**
+   * @brief 流式响应：只把**头部**入队，body 由调用方随后分块送。
+   *
+   * 与 `send_response()` 的分工是**结构性**的，不是参数式的：本函数
+   * **不走压缩**（`apply_compression` 根本不被调用），因为此时 body 还不存在，
+   * 而按 `content_type()` 判定并打上 `content-encoding: gzip` 等于**声明了一件
+   * 没发生的事**。真正的守卫是"哪条函数在跑"，`apply_compression` 里那句
+   * `transfer-encoding` 早返回是第二道。
+   *
+   * 头部里**不补** `content-length: 0`，也**不**动 `content-length` /
+   * `transfer-encoding` —— 长度语义由调用方在两个入口之间选：
+   * 长度已知就自己设 `content-length`，未知就设 `transfer-encoding: chunked`
+   * （chunked 的组帧同样由调用方负责，本层不猜）。
+   *
+   * 调用之后这条连接进入**流式模式**：写队列排空**不会**触发关闭，直到
+   * `end_stream()` 把模式关掉。HEAD 请求走的就是 `to_string(false)`，
+   * 所以头部与 GET 逐字节相同而 body 一个字节都不发。
+   */
+  void begin_stream(uvcpp_tcp_client* client, uvcpp_http_response& resp);
+
+  /**
+   * @brief 流式写一块字节（调用方**自己组好帧**：chunked 的 hex 前缀、
+   *        CRLF、终止块都不由本层添加）。
+   *
+   * @param done 这一块**真正写完**之后调用一次，参数是写的状态（0 = 成功）。
+   *             **入队之后保证恰好一次**，包括连接在本块还排在队列里时就被关
+   *             的场合（那时状态非 0，由收尾路径统一唤醒 —— 见
+   *             `queued_done_cancelled_on_close`）。一个永远不回调的 `done`
+   *             会让等它的人（`uvcpp_web_response` 的 `pending_bytes_`）永久
+   *             挂起。
+   *             **但只有 `return 0` 才作这个保证**：见返回值那行。
+   * @return 0 = 已入队（`done` 会被调，恰好一次）；非 0 = 连接已不再受管，
+   *         **`done` 不会被调用**，调用方必须自己按失败结算这一块
+   *         （`uvcpp_web_response::flush_stream` 就是这么做的）。
+   *         **非 0 时不要指望 `done` 兜底，也不要两边都调** —— 第二次结算
+   *         可能落在响应对象已经被销毁之后。
+   */
+  int write_stream(uvcpp_tcp_client* client, std::string bytes,
+                   std::function<void(int)> done = std::function<void(int)>());
+
+  /**
+   * @brief 结束流式响应。
+   *
+   * `close_after` 为真时，队列排空后关闭连接（这也是唯一诚实的收尾方式：
+   * 中途失败时头部已经上线、状态码改不了了，只能截断 body 并关连接，
+   * 让客户端从"长度对不上"看出传输失败）。
+   */
+  void end_stream(uvcpp_tcp_client* client, bool close_after);
+
+  /**
    * @brief Register a callback fired when a connection is removed (closed).
    *        Lets a streaming handler free per-connection state (open file, queued
    *        buffers) on an abrupt disconnect where no END event will fire.
@@ -385,6 +435,44 @@ class UVCPP_API uvcpp_http_server {
   // -------------------------------------------------------------------
   // Per-connection parser context
   // -------------------------------------------------------------------
+
+  /**
+   * @brief 一块待写出的字节 + 它写完之后的回调。
+   *
+   * `done` 可空（普通响应用不上它），实现上只在**流式写**里被填。
+   */
+  struct queued_write {
+    std::string bytes;
+    std::function<void(int)> done;
+  };
+
+  /**
+   * @brief 一次性结算器：**在途**那一块的 `done` 由它持有。
+   *
+   * 排队中的块由 `write_queue` 持有，连接关掉时 `close_connection` /
+   * `remove_ctx` 能把它们逐个唤醒。**在途那一块不在队列里** —— 它的 `done`
+   * 已经交给 `uvcpp_tcp_client::write` 的完成回调了，而那个回调有一条早返回：
+   *
+   *     if (!token_alive(life)) { delete wr; return; }   // 客户端已析构
+   *
+   * 服务端连接是**被 tcp_server 的 close manager 删掉**的（`fire_close_callbacks`
+   * 里，而它由对端 EOF 直接触发），于是"对端在写入途中断开"这条最普通的路
+   * 会让在途那一块的 `done` **永远不响** —— 等它的人（`send_file` 的传输对象）
+   * 连同 fd 和缓冲一起永久挂着。
+   *
+   * 所以这一块的结算权归 `conn_ctx`：完成回调和关闭路径**都**可以唤醒它，而
+   * `fired` 保证恰好一次。谁先来谁说了算 —— 正常路径上先到的是完成回调，
+   * 于是调用方仍拿到真实的写错误（`ECONNRESET` 之类）而不是一律的
+   * `UV_ECANCELED`。
+   */
+  struct write_done {
+    std::function<void(int)> fn;
+    bool fired;
+    write_done() : fired(false) {}
+  };
+
+  /** @brief 唤醒一个结算器；已经响过就什么都不做（幂等）。 */
+  void fire_write_done(const std::shared_ptr<write_done>& d, int status);
 
   struct conn_ctx {
     uvcpp_http_parser* parser = nullptr;
@@ -494,13 +582,31 @@ class UVCPP_API uvcpp_http_server {
     // uvcpp_tcp_client permits only one async write in flight at a time, so
     // responses are queued and drained one at a time.
     bool write_pending = false;
-    std::deque<std::string> write_queue;
+    std::deque<queued_write> write_queue;
+
+    /**
+     * @brief **在途**那一块的结算器（见 @ref write_done）。队列非空或正在写
+     * 时它必然非空 —— 它是关闭路径唤醒在途那一块的唯一入口。
+     */
+    std::shared_ptr<write_done> inflight;
+
     bool close_requested = false;  // a response asked for close after its write
     bool closing = false;          // a close has already been issued
+
+    /**
+     * @brief 这条连接正处于**出站**流式响应中（`begin_stream` 到 `end_stream`）。
+     *
+     * 与入站的 @ref stream_handler 是两码事：那个是"请求体正在流进来"，
+     * 这个是"响应体正在流出去"。存在的唯一理由是让 pump_write 在队列**暂时**
+     * 排空时不要收尾 —— 头部写完到第一块 body 入队之间总有一个空窗，
+     * 没有这个标志，一个非 keep-alive 的流会在第一块 body 之前就被关掉。
+     */
+    bool out_streaming = false;
   };
 
   /** @brief Queue bytes for the connection, draining as the socket permits. */
-  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string wire);
+  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string wire,
+                     std::function<void(int)> done = std::function<void(int)>());
 
   /** @brief Start the next queued write if the connection is idle. */
   void pump_write(uvcpp_tcp_client* client);
