@@ -178,6 +178,113 @@ void test_close_without_callback() {
   check(idl.get_handle() == nullptr, "无回调关闭后 get_handle() 应为 nullptr");
 }
 
+// =========================================================================
+// 5. 句柄释放之后（get_handle() == nullptr），整族入口都必须安全
+//
+// `_handle == nullptr` 的含义是"底层 uv_handle_t 已经被 callback_close 还回
+// 去了"，不是"这个 wrapper 不能用了"。原先 `ref`/`unref`/`has_ref`/`fileno`/
+// `handle_size`/`handle_get_type`/`handle_type_name`/`handle_get_data`/
+// `handle_get_loop`/`handle_set_data` 这一族**直接把 `_handle` 交给 libuv**，
+// 于是在已释放的句柄上调用就是空指针解引用（libuv 读 `handle->flags`）。
+// 更别扭的是同一个类里 `close()` 判空而 `close(cb)` 不判 —— 前者安全后者崩。
+//
+// 判据分两半，缺一不可：
+//   (a) 已释放的句柄上，整族调用都必须安全返回"空"（而不是崩）；
+//   (b) **活句柄上这一族仍然返回真值** —— 只有 (a) 的话，"把每个入口都改成
+//       直接 return 0"也能通过，那不是修好，是把功能删掉。
+// =========================================================================
+void test_null_handle_guards() {
+  std::cout << "[handle_close] null_handle_guards" << std::endl;
+
+  uvcpp_loop loop;
+  loop.init();
+
+  uvcpp_idle idl(&loop);
+  idl.start([](uvcpp_idle*) {});
+
+  // (b) 活句柄：这一族必须给出真值，守卫生效不能以牺牲功能为代价。
+  check(idl.get_handle() != nullptr, "活句柄 get_handle() 非空");
+  check(idl.handle_size() > 0, "活句柄 handle_size() > 0");
+  check(idl.has_ref() == 1, "活句柄默认是 ref 状态");
+  check(idl.is_active() == 1, "start 之后是 active");
+#if UV_VERSION_MAJOR >= 1 && UV_VERSION_MINOR >= 18
+  check(idl.handle_get_type() == UV_IDLE, "活句柄 handle_get_type() == UV_IDLE");
+  check(idl.handle_type_name() != nullptr, "活句柄 handle_type_name() 非空");
+  check(idl.handle_get_loop() != nullptr, "活句柄 handle_get_loop() 非空");
+#endif
+
+  std::atomic<bool> closed(false);
+  idl.close([&closed](uvcpp_handle*) { closed.store(true); });
+
+  uvcpp_timer watchdog(&loop);
+  watchdog.start(
+      [&](uvcpp_timer*) {
+        watchdog.stop();
+        watchdog.close();
+        loop.stop();
+      },
+      1000, 0);
+  loop.run(UV_RUN_DEFAULT);
+
+  check(closed.load(), "关闭回调跑过了");
+  // 前提断言：没有这一条，下面测的就不是"已释放的句柄"。
+  check(idl.get_handle() == nullptr, "关闭后 get_handle() == nullptr");
+
+  // (a) 已释放：整族都必须在 nullptr 上安全返回"空"。
+  idl.ref();
+  idl.unref();
+  check(idl.has_ref() == 0, "已释放 has_ref() == 0");
+  check(idl.is_active() == 0, "已释放 is_active() == 0");
+  check(idl.is_closing() == 0, "已释放 is_closing() == 0");
+  check(idl.handle_size() == 0, "已释放 handle_size() == 0");
+  uv_os_sock_t sock = 0;
+  check(idl.fileno(sock) == UV_EBADF, "已释放 fileno() == UV_EBADF");
+#if UV_VERSION_MAJOR >= 1 && UV_VERSION_MINOR >= 18
+  check(idl.handle_get_type() == UV_UNKNOWN_HANDLE,
+        "已释放 handle_get_type() == UV_UNKNOWN_HANDLE");
+  check(idl.handle_type_name() == nullptr, "已释放 handle_type_name() == nullptr");
+  check(idl.handle_get_data() == nullptr, "已释放 handle_get_data() == nullptr");
+  check(idl.handle_get_loop() == nullptr, "已释放 handle_get_loop() == nullptr");
+  idl.handle_set_data(nullptr);
+#endif
+  // 同一族里原先最不一致的一对：无参版判空、带回调版不判。
+  idl.close();
+  idl.close([](uvcpp_handle*) {});
+
+  // 静态重载走的是另一份实现（`uvcpp_handle::ref(uvcpp_handle*)` 等），
+  // 同一个判据要各自钉一遍。
+  uvcpp_handle::ref(&idl);
+  uvcpp_handle::unref(&idl);
+  check(uvcpp_handle::has_ref(&idl) == 0, "静态 has_ref() == 0");
+  check(uvcpp_handle::is_active(&idl) == 0, "静态 is_active() == 0");
+  check(uvcpp_handle::is_closing(&idl) == 0, "静态 is_closing() == 0");
+  check(uvcpp_handle::handle_size(&idl) == 0, "静态 handle_size() == 0");
+  uv_os_sock_t sock2 = 0;
+  check(uvcpp_handle::fileno(&idl, sock2) == UV_EBADF,
+        "静态 fileno() == UV_EBADF");
+  uvcpp_handle::close(&idl, [](uvcpp_handle*) {});
+#if UV_VERSION_MAJOR >= 1 && UV_VERSION_MINOR >= 18
+  check(uvcpp_handle::handle_get_type(&idl) == UV_UNKNOWN_HANDLE,
+        "静态 handle_get_type() == UV_UNKNOWN_HANDLE");
+  check(uvcpp_handle::handle_type_name(&idl) == nullptr,
+        "静态 handle_type_name() == nullptr");
+  check(uvcpp_handle::handle_get_data(&idl) == nullptr,
+        "静态 handle_get_data() == nullptr");
+  check(uvcpp_handle::handle_get_loop(&idl) == nullptr,
+        "静态 handle_get_loop() == nullptr");
+  uvcpp_handle::handle_set_data(&idl, nullptr);
+#endif
+
+  // 空指针本身也不能崩（同一族的边界）。
+  uvcpp_handle::ref(nullptr);
+  uvcpp_handle::unref(nullptr);
+  check(uvcpp_handle::has_ref(nullptr) == 0, "nullptr has_ref() == 0");
+  check(uvcpp_handle::is_active(nullptr) == 0, "nullptr is_active() == 0");
+  check(uvcpp_handle::is_closing(nullptr) == 0, "nullptr is_closing() == 0");
+  check(uvcpp_handle::handle_size(nullptr) == 0, "nullptr handle_size() == 0");
+  uvcpp_handle::close(nullptr, [](uvcpp_handle*) {});
+}
+
 }  // namespace
 
 int main() {
@@ -185,6 +292,7 @@ int main() {
   test_close_callback_fires_once();
   test_multiple_self_deleting_handles();
   test_close_without_callback();
+  test_null_handle_guards();
 
   if (g_failures == 0) {
     std::cout << "[handle_close] ALL PASS" << std::endl;

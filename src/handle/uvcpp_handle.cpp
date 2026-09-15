@@ -36,30 +36,52 @@ int uvcpp_handle::set_data(void *pdata) {
 
 void *uvcpp_handle::get_data() { return _vdata; }
 
-void uvcpp_handle::ref() { uv_ref(_handle); }
+// 实例方法与静态重载同一套判空规则，理由见 is_active() 处那段说明。
+void uvcpp_handle::ref() {
+  if (_handle == nullptr) return;
+  uv_ref(_handle);
+}
 
-void uvcpp_handle::unref() { uv_unref(_handle); }
+void uvcpp_handle::unref() {
+  if (_handle == nullptr) return;
+  uv_unref(_handle);
+}
 
-int uvcpp_handle::has_ref() { return uv_has_ref(_handle); }
+int uvcpp_handle::has_ref() {
+  if (_handle == nullptr) return 0;
+  return uv_has_ref(_handle);
+}
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 18
 uv_handle_type uvcpp_handle::handle_get_type() {
+  if (_handle == nullptr) return UV_UNKNOWN_HANDLE;
   return uv_handle_get_type(_handle);
 }
 const char *uvcpp_handle::handle_type_name() {
+  if (_handle == nullptr) return nullptr;
   return uv_handle_type_name(_handle->type);
 }
-void *uvcpp_handle::handle_get_data() { return uv_handle_get_data(_handle); }
+void *uvcpp_handle::handle_get_data() {
+  if (_handle == nullptr) return nullptr;
+  return uv_handle_get_data(_handle);
+}
 
-void *uvcpp_handle::handle_get_loop() { return uv_handle_get_loop(_handle); }
+void *uvcpp_handle::handle_get_loop() {
+  if (_handle == nullptr) return nullptr;
+  return uv_handle_get_loop(_handle);
+}
 
 void uvcpp_handle::handle_set_data(void *data) {
+  if (_handle == nullptr) return;
   uv_handle_set_data(_handle, data);
 }
 #endif
 #endif
 
-size_t uvcpp_handle::handle_size() { return uv_handle_size(_handle->type); }
+size_t uvcpp_handle::handle_size() {
+  if (_handle == nullptr) return 0;
+  return uv_handle_size(_handle->type);
+}
 
 // **句柄已经释放完了就没有"活跃"可言。** `_handle` 为空的含义是"底层
 // `uv_handle_t` 已被 `callback_close` 释放"，此时把它交给 libuv 是空指针解引用
@@ -184,9 +206,21 @@ uvcpp_handle *uvcpp_handle::clone(uvcpp_handle *obj, int memSize) {
 }
 
 // static overloads removed during rename
-void uvcpp_handle::ref(uvcpp_handle *vhd) { uv_ref(vhd->_handle); }
-void uvcpp_handle::unref(uvcpp_handle *vhd) { uv_unref(vhd->_handle); }
+//
+// 判空规则与实例方法一致：`_handle == nullptr` 表示底层 uv_handle_t 已被
+// callback_close 释放（见 is_active 处的说明）。把空指针交给 libuv 会读
+// `handle->flags`（偏移 0x58）而崩溃，所以每个直接接触 _handle 的入口都要
+// 在**第一句**挡住它。
+void uvcpp_handle::ref(uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return;
+  uv_ref(vhd->_handle);
+}
+void uvcpp_handle::unref(uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return;
+  uv_unref(vhd->_handle);
+}
 int uvcpp_handle::has_ref(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return 0;
   return uv_has_ref(vhd->_handle);
 }
 int uvcpp_handle::is_active(const uvcpp_handle *vhd) {
@@ -195,6 +229,7 @@ int uvcpp_handle::is_active(const uvcpp_handle *vhd) {
 }
 void uvcpp_handle::close(uvcpp_handle *vhd,
                          ::std::function<void(uvcpp_handle *)> closeCallback) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return;
   vhd->handle_close_cb = closeCallback;
   uv_close(vhd->_handle, callback_close);
 }
@@ -203,9 +238,11 @@ int uvcpp_handle::is_closing(const uvcpp_handle *vhd) {
   return uv_is_closing(vhd->_handle);
 }
 int uvcpp_handle::fileno(const uvcpp_handle *vhd, uv_os_sock_t &sock) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return UV_EBADF;
   return uv_fileno(vhd->_handle, (uv_os_fd_t *)&sock);
 }
 size_t uvcpp_handle::handle_size(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return 0;
   return uv_handle_size(vhd->_handle->type);
 }
 
@@ -213,34 +250,44 @@ size_t uvcpp_handle::handle_size(const uvcpp_handle *vhd) {
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 18
 uv_handle_type uvcpp_handle::handle_get_type(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return UV_UNKNOWN_HANDLE;
   return uv_handle_get_type(vhd->_handle);
 }
 const char *uvcpp_handle::handle_type_name(uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return nullptr;
   return uv_handle_type_name(vhd->_handle->type);
 }
 
 void *uvcpp_handle::handle_get_data(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return nullptr;
   return uv_handle_get_data(vhd->_handle);
 }
 
 void *uvcpp_handle::handle_get_loop(const uvcpp_handle *vhd) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return nullptr;
   return uv_handle_get_loop(vhd->_handle);
 }
 
 void uvcpp_handle::handle_set_data(uvcpp_handle *vhd, void *data) {
+  if (vhd == nullptr || vhd->_handle == nullptr) return;
   uv_handle_set_data(vhd->_handle, data);
 }
 #endif
 #endif
 
 
+// 与无参 close() 同一判据：句柄已释放就什么都不做（也无从"关闭"）。
+// 原先这两处不一致 —— 无参版判空、带回调版不判 —— 于是同一个类里
+// `close()` 安全而 `close(cb)` 崩溃。
 void uvcpp_handle::close(::std::function<void(uvcpp_handle *)> closeCallback) {
+  if (_handle == nullptr) return;
   handle_close_cb = closeCallback;
   uv_close(_handle, callback_close);
   return;
 }
 
 int uvcpp_handle::fileno(uv_os_sock_t& sock) {
+  if (_handle == nullptr) return UV_EBADF;
   return uv_fileno(_handle, (uv_os_fd_t *)&sock);
 }
 
