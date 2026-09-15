@@ -168,11 +168,15 @@ struct tls_pair {
   uvcpp_ssl*        cli;
   bool              ok;
 
-  tls_pair()
+  /// `disable_verify=false` 保留 CLIENT 的**默认**校验（PEER）—— 第 14 组
+  /// 需要它来验证"默认就是校验的"，其余各组按回环自签的前提关掉校验。
+  explicit tls_pair(bool disable_verify = true)
       : sctx(tls_mode::SERVER, tls_version::TLS_1_2),
         cctx(tls_mode::CLIENT, tls_version::TLS_1_2),
         srv(nullptr), cli(nullptr), ok(false) {
     if (!sctx.is_ready() || !cctx.is_ready()) return;
+    // 自签证书 + 无信任锚 ⇒ 必须显式关掉校验（客户端默认是 PEER）
+    if (disable_verify) cctx.set_verify_mode(tls_verify_mode::NONE);
     if (!sctx.generate_self_signed("loopback.test", 2048)) return;
     // fd=0：不装 socket BIO，直接走内存 BIO（socket 由调用方/libuv 独占）
     srv = new uvcpp_ssl(&sctx, 0);
@@ -313,6 +317,45 @@ static bool test_take_ciphertext_drains() {
   return true;
 }
 
+// 14. CLIENT 默认**校验**对端证书 —— 对进程内自签证书必须握不上手
+//
+// 缺陷（全清单里唯一的安全级问题）：`set_default_verify()` 对 CLIENT 模式也设
+// `SSL_VERIFY_NONE`，于是 HTTPS 客户端默认接受**任何**证书 —— 中间人可以直接
+// 接管。回环自签用例需要宽松的默认值，但那是**用例**的需要，不是库的默认。
+//
+// 判据是一对，缺一条都不成立：
+//   (a) 默认（PEER）客户端对自签服务端握手**必须失败**；
+//   (b) 同一个服务端 + 显式 `set_verify_mode(NONE)` 的客户端**必须成功**。
+// 只有 (a) 的话，"把握手整个弄坏"也能通过；(b) 才是那个对照，它同时排除了
+// "失败是因为别的原因"。
+static bool test_client_default_rejects_untrusted_cert() {
+  {
+    tls_pair p(/*disable_verify=*/false);
+    if (!p.ok) { std::cout << "    pair setup failed\n"; return false; }
+    int iters = 0;
+    if (drive_handshake(*p.cli, *p.srv, iters)) {
+      std::cout << "    默认校验的客户端与自签证书握手成功了（iters=" << iters
+                << "）—— 客户端证书校验没生效\n";
+      return false;
+    }
+    if (p.cli->is_handshake_done()) {
+      std::cout << "    校验失败但客户端握手仍是完成态\n";
+      return false;
+    }
+  }
+  {
+    tls_pair p(/*disable_verify=*/true);
+    if (!p.ok) { std::cout << "    control pair setup failed\n"; return false; }
+    int iters = 0;
+    if (!drive_handshake(*p.cli, *p.srv, iters)) {
+      std::cout << "    对照组（verify=NONE）也握不上手（iters=" << iters
+                << "）—— 对照不成立，本条判据无效\n";
+      return false;
+    }
+  }
+  return true;
+}
+
 int main() {
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
@@ -330,6 +373,8 @@ int main() {
     {"plaintext_rejected_by_tls", test_plaintext_rejected_by_tls},
     {"want_read_is_not_error", test_want_read_is_not_error},
     {"take_ciphertext_drains", test_take_ciphertext_drains},
+    {"client_default_rejects_untrusted_cert",
+     test_client_default_rejects_untrusted_cert},
   };
   for (const auto& t : tests) {
     std::cout << "[web_ssl] " << t.name << "\n";

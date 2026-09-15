@@ -76,7 +76,13 @@ class UVCPP_API uvcpp_ssl_context {
   /** @brief Load trusted CA certificates from PEM file. */
   bool load_ca_file(const std::string& path);
 
-  /** @brief Set peer certificate verification mode. */
+  /**
+   * @brief Set peer certificate verification mode.
+   *
+   * 默认值：CLIENT 上下文是 `PEER`（并已装入系统信任库），SERVER 是 `NONE`。
+   * 回环自签用例要在 CLIENT 上显式设 `NONE` —— 关掉校验必须是一个看得见的
+   * 动作。
+   */
   void set_verify_mode(tls_verify_mode mode);
 
   // -------------------------------------------------------------------

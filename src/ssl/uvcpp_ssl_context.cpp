@@ -78,7 +78,16 @@ void uvcpp_ssl_context::init_server() {
 }
 
 void uvcpp_ssl_context::set_default_verify() {
-  SSL_CTX_set_verify(ctx_, SSL_VERIFY_NONE, nullptr);
+  // CLIENT 默认**校验**对端证书：一个不校验的 HTTPS 客户端会把任何中间人
+  // 当成正常服务端。回环自签用例必须显式调 set_verify_mode(NONE) 关掉它 ——
+  // 让"关掉校验"在调用点看得见，而不是靠一个全局的宽松默认值。
+  // SERVER 默认不要求客户端证书（相互认证是 opt-in，与所有主流实现一致）。
+  if (mode_ == tls_mode::CLIENT) {
+    SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
+    SSL_CTX_set_default_verify_paths(ctx_);
+  } else {
+    SSL_CTX_set_verify(ctx_, SSL_VERIFY_NONE, nullptr);
+  }
   long opts = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
   // Disable TLS < min_version
   if (static_cast<int>(min_version_) > static_cast<int>(tls_version::TLS_1_0))
