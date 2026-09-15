@@ -140,9 +140,18 @@ def gate4_ctest(tree):
             if "tests passed" in ln or "tests failed" in ln or ln.strip().startswith("The following tests FAILED")]
     for ln in tail[:4]:
         print("      " + ln.strip())
-    failed = re.search(r"(\d+) tests failed out of", out)
-    ok = rc == 0 and failed is None
-    print("  [4] ctest %s" % ("OK" if ok else "FAIL"))
+    # ctest 的汇总行**永远**是 "N tests failed out of M"，N=0 时也在。原来写的是
+    # `failed is None`，于是这一道门在 100% 全绿的运行上也报 FAIL —— 一条永远
+    # 不可能通过的门和没有门一样，区别是它还会让人去查一个并不存在的缺陷。
+    # 现在按数字判：0 失败且总数 > 0；连汇总行都没有说明 ctest 根本没跑成。
+    m = re.search(r"(\d+) tests failed out of (\d+)", out)
+    if m is None:
+        print("  [4] ctest FAIL（没有汇总行，ctest 没跑成？）")
+        return False
+    nfailed, ntotal = int(m.group(1)), int(m.group(2))
+    ok = rc == 0 and nfailed == 0 and ntotal > 0
+    print("  [4] ctest %s（failed=%d total=%d）"
+          % ("OK" if ok else "FAIL", nfailed, ntotal))
     return ok
 
 
@@ -172,10 +181,18 @@ def gate5_stability(tree, names, rounds):
             if rc != 0:
                 bad += 1
                 if bad == 1:
+                    # 证据行的写法各用例不一：有的印 "FAIL"，有的印
+                    # "success=false"，有的印 "[err]"。只认 "FAIL" 的话，非净的
+                    # 那一轮**一行证据都不出** —— 于是"失败但说不出为什么"。
+                    shown = 0
                     for ln in out.splitlines():
-                        if "FAIL" in ln:
+                        if re.search(r"FAIL|success=false|\[err\]", ln):
                             print("      " + ln.strip())
-                            break
+                            shown += 1
+                            if shown >= 3:
+                                break
+                    if shown == 0:
+                        print("      （本轮输出里没有可识别的失败行，rc=%d）" % rc)
         print("  [5] %-40s nonclean=%d/%d %s" % (n, bad, rounds, "OK" if bad == 0 else "FAIL"))
         ok = ok and bad == 0
     return ok
