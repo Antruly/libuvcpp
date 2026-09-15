@@ -19,6 +19,16 @@ _deps/
 _local_*/
 Testing/
 
+# 测试临时目录（用例按相对名在当前目录建）
+#
+# 上传用例按**相对名**建目录（web_app_upload_func.cpp:1838 的
+# uvcpp_upload_test_dir、web_app_upload_route_func.cpp:2084 的
+# uvcpp_rt_outside_uploads），每跑一次就出现一次，里面留着上一轮没被清掉的
+# 残留部件。**不写成带前导斜杠的形式** —— 用例的工作目录可能是仓库根，
+# 也可能是构建树（ctest 从哪跑取决于调用方式），锚定死一处就漏另一处。
+uvcpp_upload_test_dir/
+uvcpp_rt_outside_uploads/
+
 # Development docs / temp
 docs/
 *.txt
