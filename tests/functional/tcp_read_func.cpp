@@ -360,8 +360,18 @@ bool connect_and_reset(int port) {
   linger lg;
   lg.l_onoff  = 1;
   lg.l_linger = 0;
+  // `uv_tcp_t::socket` 只在 Windows 上存在（uv/win.h）；POSIX 的 fd 只能经
+  // `uv_fileno` 取，直接写成员名在 Linux/macOS 上编译不过。
+#ifdef _WIN32
   setsockopt(sock.socket, SOL_SOCKET, SO_LINGER,
              reinterpret_cast<const char*>(&lg), sizeof(lg));
+#else
+  uv_os_fd_t fd = -1;
+  if (uv_fileno(reinterpret_cast<uv_handle_t*>(&sock), &fd) == 0) {
+    setsockopt(fd, SOL_SOCKET, SO_LINGER,
+               reinterpret_cast<const char*>(&lg), sizeof(lg));
+  }
+#endif
 
   uv_close(reinterpret_cast<uv_handle_t*>(&sock), nullptr);
   for (int i = 0; i < 100; ++i) {

@@ -103,6 +103,7 @@ const char* k_text = "WORK-LIMIT-OK";
 #define TEST_RMDIR(p) _rmdir(p)
 #else
 #include <sys/stat.h>
+#include <unistd.h>   // rmdir（`sys/stat.h` 只给 mkdir）
 #define TEST_MKDIR(p) mkdir(p, 0755)
 #define TEST_RMDIR(p) rmdir(p)
 #endif

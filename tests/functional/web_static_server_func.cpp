@@ -51,6 +51,8 @@
 
 #ifdef _WIN32
 #include <direct.h>   // _mkdir / _rmdir
+#else
+#include <unistd.h>   // rmdir
 #endif
 
 using namespace uvcpp;

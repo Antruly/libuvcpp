@@ -88,6 +88,7 @@
 #define SRC_WEBAPP_UVCPP_WEB_MULTIPART_H
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 

@@ -65,6 +65,7 @@
 #include <direct.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>   // rmdir（`sys/stat.h` 只给 mkdir）
 #endif
 
 #include "handle/uvcpp_check.h"
