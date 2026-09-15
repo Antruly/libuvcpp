@@ -759,6 +759,9 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
       delete static_cast<std::function<void(int)>*>(write_arg_);
       write_fn_  = nullptr;
       write_arg_ = nullptr;
+      // 提交失败这条路上也必须清 —— 与成功路径同一判据。漏了它，一次失败的
+      // 异步写会把连接**永久**毒化：此后每一次异步写都拿到 UV_EALREADY。
+      has_async_write_cb_ = false;
       return rc;
     }
 
@@ -893,11 +896,14 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
             return;
           }
           if (status != 0) last_error_code_ = status;
-          if (write_fn_) {
-            write_fn_(status, write_arg_);
-            write_fn_  = nullptr;
-            write_arg_ = nullptr;
-          }
+          // 次序与 const char* 重载一致：先存后清，且 `has_async_write_cb_` 必须在
+          // 回调**之前**清 —— 否则回调里接着发起下一次写会拿到 UV_EALREADY。
+          write_callback_t fn = write_fn_;
+          void* arg = write_arg_;
+          write_fn_  = nullptr;
+          write_arg_ = nullptr;
+          has_async_write_cb_ = false;
+          if (fn) fn(status, arg);
           delete wr;
         });
 
@@ -907,6 +913,7 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
       delete static_cast<std::function<void(int)>*>(write_arg_);
       write_fn_  = nullptr;
       write_arg_ = nullptr;
+      has_async_write_cb_ = false;
       return rc;
     }
     return 0;

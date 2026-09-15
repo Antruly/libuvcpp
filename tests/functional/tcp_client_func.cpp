@@ -1,10 +1,13 @@
-#include <iostream>
-#include <thread>
-#include <future>
 #include <atomic>
+#include <chrono>
 #include <cstring>
-#include <string>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <mutex>
 #include <stdexcept>
+#include <string>
+#include <thread>
 #include <uv.h>
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_tcp.h"
@@ -67,8 +70,16 @@ static void run_echo_server(std::promise<int>& port_promise,
                       delete bufcpp;
                       delete wr;
                     });
+              } else if (nread == 0) {
+                // 空读不是 EOF。libuv 的 win/tcp.c:1076 写得很直白：缓冲区
+                // 整个是空的时侯就报一次 0 字节读，等价于 read(2) 的 EAGAIN。
+                // 以前这里把 `nread <= 0` 一律当成"对端关了"，于是一次空读
+                // 就把连接拆掉 —— 表现为偶发的"回显一个字节都没回来"。
+                if (buf->base != nullptr) {
+                  uvcpp_buf::free_buf(const_cast<uv_buf_t*>(buf));
+                }
               } else {
-                // EOF or error — close this peer, but keep server running
+                // nread < 0：UV_EOF 或真错误 —— 关掉这个 peer，服务端继续跑
                 if (buf->base != nullptr) {
                   uvcpp_buf::free_buf(const_cast<uv_buf_t*>(buf));
                 }
@@ -421,6 +432,154 @@ static bool test_status_transitions(int port) {
 }
 
 // =========================================================================
+// Test 7: 零拷贝异步写（`uvcpp_buf*` 重载）连发 —— 不能毒化连接
+//
+// 缺陷（Phase 3c「观察到但未修」第 2 条）：`write(uvcpp_buf*, cb)` 的成功
+// 回调只清 `write_fn_` / `write_arg_`，**从不清 `has_async_write_cb_`**。
+// 于是第一次异步写之后就永久毒化：此后每一次异步写都在入口被
+// `if (has_async_write_cb_) return UV_EALREADY;` 挡掉 —— 调用方收到的是一个
+// 看着像"协议错误"的返回值，不是崩溃，所以静默失效。3c 的 `send_file` 是靠
+// 改走 `const char*` 重载绕开的，这条路当时是坏的。
+//
+// 判据三条，缺一条都不成立：
+//   1. 三次连发的返回值都是 0 —— **第二次**正是缺陷版本拿 UV_EALREADY 的地方；
+//   2. 三次回调都送到（不是被入口挡掉），全部完成之后 `has_write_callback()`
+//      必须回到 false（毒化状态的直接观察点）；
+//   3. 服务端回显的字节与三次写入拼起来的**完全一致** —— 前两条只证明
+//      "接口没报错"，只有这一条证明字节真的出去了。
+//
+// 等待用墙钟上界，不靠"回调一定会来"：观测不到就按失败报出。
+// =========================================================================
+static bool test_async_buf_write_no_poison(int port) {
+  std::cout << "[functional tcp_client] async_buf_write start\n";
+
+  uvcpp_tcp_client client;
+
+  const char* parts[3] = {"alpha-", "bravo-", "charlie"};
+  const size_t lens[3] = {6, 6, 7};
+  const std::string expect = "alpha-bravo-charlie";
+
+  std::atomic<int> wrc[3];
+  std::atomic<int> callbacks(0);
+  std::atomic<int> write_status(0);
+  std::atomic<bool> connected(false);
+  /// 对端把连接关了（读回调收到空 buf）—— 与"数据没回来"是两件事，
+  /// 失败时必须分得清是哪一件。
+  std::atomic<bool> peer_closed(false);
+  std::mutex mu;
+  std::string echoed;
+
+  wrc[0].store(-1);
+  wrc[1].store(-1);
+  wrc[2].store(-1);
+
+  // 每次写都在**上一次的写回调里**发起 —— 这正是缺陷版本的死法：回调跑的时候
+  // `has_async_write_cb_` 还立着，下一次写当场被判成 UV_EALREADY。
+  std::function<void(int)> issue_next = [&](int idx) {
+    if (idx >= 3) return;
+    // 零拷贝重载：数据所有权随本次写交出去，`uvcpp_buf` 对象本身仍由调用方
+    // 销毁（`out_uv_buf()` 已经把数据摘走了，所以这里 delete 是安全的）。
+    uvcpp_buf* b = new uvcpp_buf(parts[idx], lens[idx]);
+    int wrc_now = client.write(b, [&, idx](int st) {
+      if (st != 0) write_status.store(st);
+      callbacks.fetch_add(1);
+      issue_next(idx + 1);
+    });
+    wrc[idx].store(wrc_now);
+    delete b;
+  };
+
+  int rc = client.connect("127.0.0.1", port, [&](int status) {
+    if (status != 0) {
+      std::cout << "[functional tcp_client] async_buf_write connect failed: "
+                << uv_err_name(status) << std::endl;
+      client.stop();
+      return;
+    }
+    connected.store(true);
+    // 先起读：回显可能比最后一个写回调先到。
+    client.read_start([&](uvcpp_buf* buf) {
+      if (buf == nullptr) {
+        peer_closed.store(true);
+        return;
+      }
+      std::lock_guard<std::mutex> lk(mu);
+      echoed += buf->to_string();
+    });
+    issue_next(0);
+  });
+
+  if (rc != 0) {
+    std::cout << "[functional tcp_client] async_buf_write connect start failed: "
+              << uv_err_name(rc) << std::endl;
+    return false;
+  }
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (std::chrono::steady_clock::now() < deadline) {
+    client.run(UV_RUN_NOWAIT);
+    size_t got = 0;
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      got = echoed.size();
+    }
+    if (callbacks.load() == 3 && got >= expect.size()) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  // 毒化状态的观察点必须在客户端析构（会关掉连接）之前读。
+  const bool cb_flag_left_set = client.has_write_callback();
+
+  std::string got;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    got = echoed;
+  }
+
+  bool ok = true;
+  if (!connected.load()) {
+    std::cout << "[functional tcp_client] async_buf_write never connected\n";
+    ok = false;
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (wrc[i].load() != 0) {
+      std::cout << "[functional tcp_client] async_buf_write #" << i
+                << " returned " << wrc[i].load() << " ("
+                << uv_err_name(wrc[i].load()) << ")\n";
+      ok = false;
+    }
+  }
+  if (callbacks.load() != 3) {
+    std::cout << "[functional tcp_client] async_buf_write callbacks="
+              << callbacks.load() << " (expect 3)\n";
+    ok = false;
+  }
+  if (cb_flag_left_set) {
+    std::cout << "[functional tcp_client] async_buf_write "
+                 "has_write_callback() still true after all writes\n";
+    ok = false;
+  }
+  if (write_status.load() != 0) {
+    std::cout << "[functional tcp_client] async_buf_write a write failed: "
+              << uv_err_name(write_status.load()) << std::endl;
+    ok = false;
+  }
+  if (got != expect) {
+    std::cout << "[functional tcp_client] async_buf_write echo mismatch: got '"
+              << got << "' (" << got.size() << "), expect '" << expect << "' ("
+              << expect.size() << "), peer_closed=" << (peer_closed.load() ? 1 : 0)
+              << ", client_status=0x" << std::hex << client.get_status()
+              << std::dec << ", last_error=" << client.get_last_error() << "\n";
+    ok = false;
+  }
+
+  std::cout << "[functional tcp_client] async_buf_write done success="
+            << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+// =========================================================================
 // main
 // =========================================================================
 int main() {
@@ -452,6 +611,7 @@ int main() {
   all_ok = test_sync_write_async_read(port) && all_ok;
   all_ok = test_mode_mixing_detection() && all_ok;
   all_ok = test_status_transitions(port) && all_ok;
+  all_ok = test_async_buf_write_no_poison(port) && all_ok;
 
   // Stop server
   stop_server.store(true);
