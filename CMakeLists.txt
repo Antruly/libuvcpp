@@ -529,10 +529,30 @@ if(UVCPP_BUILD_WEB)
     if(TARGET ${_tgt})
       target_link_libraries(${_tgt} PRIVATE llhttp::llhttp)
       if(UVCPP_ENABLE_ZLIB)
+        # zlib 必须 PUBLIC（不能像 llhttp 那样 PRIVATE）：公开且会被安装的
+        # `src/web/uvcpp_ws_parser.h` 在 `#if UVCPP_ZLIB_ENABLE` 里直接
+        # `#include <zlib.h>`，而该宏是 PUBLIC 编译定义，所以每个引用 uvcpp 的
+        # TU 都需要 zlib 的头与符号。PRIVATE 的后果是 Windows C1083 ×14、
+        # POSIX 链接失败（测试 TU 自己直接调 zlib）。
+        #
+        # 包 `$<BUILD_INTERFACE:>` 是必需的：PUBLIC 会写进
+        # INTERFACE_LINK_LIBRARIES，而 install(EXPORT uvcppTargets) 要求导出集里
+        # 每个非 IMPORTED 目标也在导出集里，FetchContent 的 zlibstatic 不是，
+        # generate 阶段会直接失败。包上之后本工程内照常传播，导出里被剥成空。
+        #
+        # 优先 ZLIB::ZLIB：自带 INTERFACE 包含目录，且正确处理 Debug/Release
+        # （${ZLIB_LIBRARIES} 是带 optimized/debug 关键字的裸路径）。
+        #
+        # 既有缺口（本次不动）：导出集里没有 zlib，而安装的
+        # uvcpp_ws_parser.h 会 #include <zlib.h>。补它要加
+        # find_dependency(ZLIB)，会让没装 zlib 的使用者 find_package 就失败。
         if(TARGET zlibstatic)
-          target_link_libraries(${_tgt} PRIVATE zlibstatic)
+          target_link_libraries(${_tgt} PUBLIC $<BUILD_INTERFACE:zlibstatic>)
+        elseif(TARGET ZLIB::ZLIB)
+          target_link_libraries(${_tgt} PUBLIC $<BUILD_INTERFACE:ZLIB::ZLIB>)
         elseif(ZLIB_FOUND)
-          target_link_libraries(${_tgt} PRIVATE ${ZLIB_LIBRARIES})
+          target_link_libraries(${_tgt} PUBLIC $<BUILD_INTERFACE:${ZLIB_LIBRARIES}>)
+          target_include_directories(${_tgt} PUBLIC $<BUILD_INTERFACE:${ZLIB_INCLUDE_DIRS}>)
         endif()
       endif()
     endif()
