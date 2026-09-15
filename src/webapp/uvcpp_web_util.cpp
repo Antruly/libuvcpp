@@ -264,6 +264,78 @@ const std::string* web_find_param(
 }
 
 // =========================================================================
+// Content-Type 参数
+// =========================================================================
+
+std::string web_multipart_boundary(const std::string& content_type) {
+  // 第一步：按分号切参数，但**引号里的分号不算分隔符**。
+  //
+  // 手写而不是 `web_split(content_type, ';')`：后者会把
+  // `boundary="a;b"` 切成两段，于是值变成 `"a`（连引号都没配成对）。
+  // 这条规则与部件头的解析是同一条 —— 两处必须一致，否则同一个 boundary
+  // 在"判断这是不是 multipart"和"真的去切部件"两个阶段会不一样。
+  //
+  // 转义对（`\x`）在这里原样带过，留到第二步统一反转义：在这一步吃掉反斜杠
+  // 的话，`\"` 会被当成引号本身、把引号状态弄反。
+  std::vector<std::string> parts;
+  {
+    std::string cur;
+    bool in_quotes = false;
+    for (size_t i = 0; i < content_type.size(); ++i) {
+      const char c = content_type[i];
+      if (c == '\\' && in_quotes && i + 1 < content_type.size()) {
+        cur += c;
+        cur += content_type[++i];
+        continue;
+      }
+      if (c == '"') in_quotes = !in_quotes;
+      if (c == ';' && !in_quotes) {
+        parts.push_back(cur);
+        cur.clear();
+        continue;
+      }
+      cur += c;
+    }
+    parts.push_back(cur);
+  }
+
+  // 媒体类型必须**恰好**是 multipart/form-data。其他 multipart 子类型
+  // （mixed / byteranges…）不是表单上传，拒绝而不是勉强解析。
+  if (!web_equals_ci(web_trim(parts[0]), "multipart/form-data")) {
+    return std::string();
+  }
+
+  for (size_t i = 1; i < parts.size(); ++i) {
+    const std::string p = web_trim(parts[i]);
+    const size_t eq = p.find('=');
+    if (eq == std::string::npos) continue;  // 没有值的参数（`; charset`）
+    if (!web_equals_ci(web_trim(p.substr(0, eq)), "boundary")) continue;
+
+    std::string v = web_trim(p.substr(eq + 1));
+    // 成对的引号去掉。只在**首尾都是引号**时去 —— `"abc` 这种畸形保持原样，
+    // 让 set_boundary() 去判（它才是唯一该对边界值表态的地方）。
+    if (v.size() >= 2 && v[0] == '"' && v[v.size() - 1] == '"') {
+      v = v.substr(1, v.size() - 2);
+    }
+
+    std::string out;
+    out.reserve(v.size());
+    for (size_t k = 0; k < v.size(); ++k) {
+      if (v[k] == '\\' && k + 1 < v.size()) {
+        out += v[++k];
+        continue;
+      }
+      out += v[k];
+    }
+    // 可能是空串（`boundary=""`）—— 按"没有 boundary"交给调用方，
+    // 不在这一层区分"没写"和"写了个空的"：两者都不可用。
+    return out;
+  }
+
+  return std::string();
+}
+
+// =========================================================================
 // Cookie
 // =========================================================================
 
@@ -728,6 +800,101 @@ web_path_status web_resolve_within_root(const std::string& root_real,
 
   out = real;
   return web_path_status::OK;
+}
+
+// =========================================================================
+// 上传文件名的元数据清洗
+// =========================================================================
+
+namespace {
+
+/**
+ * @brief Win32 的保留设备名判定（入参**必须已小写**）。
+ *
+ * 两个容易漏的点：
+ *   - **带扩展名也算**：`NUL.txt` 在 Win32 上仍然解析成设备，所以比较只取
+ *     第一个 `.` 之前的部分；
+ *   - **上标变体**：Windows 把 `COM¹`/`COM²`/`COM³` 与 `LPT¹`/`LPT²`/`LPT³`
+ *     也当设备名。它们在 UTF-8 里各占两字节（`C2 B9`/`C2 B2`/`C2 B3`），
+ *     所以 `stem` 的长度是 5 而不是 4 —— 这一支单列出来，不要试图用
+ *     "第 4 个字符是数字" 那种 ASCII 判据去覆盖它。
+ */
+bool is_reserved_device_name(const std::string& lower) {
+  const size_t dot = lower.find('.');
+  const std::string stem =
+      (dot == std::string::npos) ? lower : lower.substr(0, dot);
+
+  if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul") {
+    return true;
+  }
+  if (stem.size() < 4) return false;
+
+  const bool com = stem.compare(0, 3, "com") == 0;
+  const bool lpt = stem.compare(0, 3, "lpt") == 0;
+  if (!com && !lpt) return false;
+
+  if (stem.size() == 4) {
+    const char c = stem[3];
+    return c >= '1' && c <= '9';
+  }
+  if (stem.size() == 5 && static_cast<unsigned char>(stem[3]) == 0xC2) {
+    const unsigned char c = static_cast<unsigned char>(stem[4]);
+    return c == 0xB9 || c == 0xB2 || c == 0xB3;  // ¹ ² ³
+  }
+  return false;
+}
+
+}  // namespace
+
+std::string web_sanitize_filename(const std::string& raw, size_t max_len) {
+  // 1. 取叶子。**这一步必须在去掉结尾的点之前** —— 反过来 `..\..\x` 会先被
+  //    第 3 步削成 `..\..\x`（结尾没有点，削不动），然后 `..` 段就留在了
+  //    结果里。先取叶子，`..` 段天然被丢掉。
+  std::string leaf;
+  {
+    size_t start = 0;
+    for (size_t i = 0; i < raw.size(); ++i) {
+      if (raw[i] == '/' || raw[i] == '\\') start = i + 1;
+    }
+    leaf = raw.substr(start);
+  }
+
+  // 2. 去控制字符。NUL 尤其要紧：它会让任何 C 字符串 API 在这里被截断，
+  //    于是"校验的名字"和"使用的名字"变成两个不同的串。
+  std::string clean;
+  clean.reserve(leaf.size());
+  for (size_t i = 0; i < leaf.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(leaf[i]);
+    if (c < 0x20 || c == 0x7f) continue;
+    clean.push_back(leaf[i]);
+  }
+
+  // 3. 去掉结尾的 `.` 与空格（Win32 会静默截掉，不清洗就会让展示名与落盘名
+  //    不一致）。`"..."`/`".."`/`"."` 在这里一并变成空串。
+  while (!clean.empty() &&
+         (clean[clean.size() - 1] == '.' || clean[clean.size() - 1] == ' ')) {
+    clean.erase(clean.size() - 1);
+  }
+
+  // 4. 退化。空 / `.` / `..` 都取 `"file"`；后两者其实在第 3 步就已经空了，
+  //    显式写出来是为了让契约可读（用例也照这条断言）。
+  if (clean.empty() || clean == "." || clean == "..") clean = "file";
+
+  // 5. 截断，保持码点完整。UTF-8 的续字节是 `10xxxxxx`：只要截断点上不是续
+  //    字节，就没有切出半个字符。对**非法** UTF-8 输入这是尽力而为（回退到
+  //    一个不含续字节的位置），不报错 —— 元数据清洗不该因为编码不规范就失败。
+  if (max_len > 0 && clean.size() > max_len) {
+    size_t n = max_len;
+    while (n > 0 && (static_cast<unsigned char>(clean[n]) & 0xC0) == 0x80) --n;
+    clean.resize(n);
+    if (clean.empty()) clean = "file";
+  }
+
+  // 6. 设备名保护。**排在截断之后**：截断能造出设备名（`"nul.txt"` 截到 3
+  //    字节就是 `"nul"`），先判就漏了。
+  if (is_reserved_device_name(web_to_lower(clean))) clean += "_";
+
+  return clean;
 }
 
 // =========================================================================

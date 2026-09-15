@@ -93,6 +93,23 @@ struct UVCPP_API uvcpp_web_connection {
    */
   int64_t request_start_ms;
 
+  /**
+   * @brief 这条连接当前是不是**流式收体中**（body 正在按块交付给 handler）。
+   *
+   * 它改变的是「活动基准取哪一个」这一件事，但**必须存在**，因为两种计时方式
+   * 对流式请求都不成立：
+   *
+   * - 沿用 `request_start_ms`（整段预算）→ 一个 2 GB 的上传即使一直在推进，
+   *   也会在上限那一刻被当成慢速攻击杀掉；
+   * - 不豁免（按 `last_read_ms`）→ 这正是要的，但 `idle_sweep` 对在途请求
+   *   是**整体豁免**的，于是流式上传变成永远不超时。
+   *
+   * 所以流式期间的语义是「**停顿保护**」：只要还在收字节就不动它，停止推进超过
+   * `idle_timeout_ms` 就关。由框架在认领时置真、在消息结束/中止时清掉；
+   * `note_request_done()` 也会清（它是"这个请求结束了"的唯一收口）。
+   */
+  bool streaming;
+
   /// 显式构造函数，**不用 NSDMI**（那会破坏 C++11 的聚合初始化）。
   uvcpp_web_connection();
 };
@@ -150,8 +167,23 @@ class UVCPP_API uvcpp_web_connection_registry {
   bool note_request_done(uvcpp_web_conn_id id);
 
   /**
+   * @brief 标记/清除这条连接的「流式收体中」状态。
+   *
+   * 置真之后 `activity_since()` 改用 `last_read_ms`，于是超时从「整个请求的
+   * 预算」变成「**停顿**多久没进展」。`note_request_done()` 会无条件清掉，
+   * 所以即使调用方漏了清，它也不会漏到下一个请求上去。
+   *
+   * @return 记录存在。
+   */
+  bool mark_streaming(uvcpp_web_conn_id id, bool streaming);
+
+  /** @brief 这条连接是否处于「流式收体中」。记录不存在时为 false。 */
+  bool is_streaming(uvcpp_web_conn_id id) const;
+
+  /**
    * @brief 这条连接的**活动基准时刻** —— 闲置超时该从哪一刻算起。
    *
+   * - 正在流式收体 → `last_read_ms`（只要还在收字节就不算超时，停下来才超时）；
    * - 正在收一个半截请求 → `request_start_ms`（按整个请求的预算算，慢速
    *   滴字节拖不过去）；
    * - 否则 → `last_read_ms`（连接之间的空闲按最后一次收字节算）。

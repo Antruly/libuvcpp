@@ -154,6 +154,35 @@ UVCPP_API const std::string* web_find_param(
     const std::string& name);
 
 /**
+ * @brief 从 `Content-Type` 头里取出 multipart 的 `boundary` 参数。
+ *
+ * 输入形如 `multipart/form-data; boundary=----abc`，或带引号的
+ * `multipart/form-data; boundary="----a;b"`；返回 `----abc` / `----a;b`。
+ * **返回值不带前导 `--`**，也就是可以直接交给
+ * `uvcpp_web_multipart::set_boundary()`。
+ *
+ * 不满足下面任何一条就返回**空串**（调用方据此回 415 / 400）：
+ *  - 媒体类型不是 `multipart/form-data`（大小写无关）；
+ *  - 没有 `boundary` 参数，或它的值是空的。
+ *
+ * 两处容易写错、这里明确表态的地方：
+ *  - **引号里的分号不是参数分隔符**：`boundary="a;b"` 是**一个**参数而不是两个。
+ *    与部件头的解析（`uvcpp_web_multipart`）是同一条规则。
+ *  - 值两端**成对**的引号去掉，且 `\x` 反转义成 `x`（RFC 7231 §3.1.1.1 的
+ *    quoted-string）。真实客户端不会在 boundary 里放引号，但放了也不该让
+ *    反斜杠留在值里 —— 那样本端找的边界串和对端写的不是同一个。
+ *
+ * 长度上限（RFC 2046 的 70 字节）**由 `uvcpp_web_multipart::set_boundary()`
+ * 判**，这里不截断也不预判：截断会让本端与对端对"部件从哪儿切"产生分歧，
+ * 那正是请求走私的形状（见那个函数的注释）。
+ *
+ * @note 只认 `multipart/form-data`。其他 `multipart/*` 子类型（`mixed` 等）
+ *       不是表单上传，本框架不支持，返回空串让调用方拒绝 —— 而不是"先收下
+ *       再说"，那会把一个不认识的格式喂给按 form-data 写的解析器。
+ */
+UVCPP_API std::string web_multipart_boundary(const std::string& content_type);
+
+/**
  * @brief 解析 `Cookie:` 头。
  *
  * 格式是 `k1=v1; k2=v2`（分号分隔，等号右侧可含 `=`）。这是**浏览器发来的**
@@ -319,6 +348,46 @@ UVCPP_API bool web_real_path(const std::string& path, std::string& out,
 UVCPP_API web_path_status web_resolve_within_root(const std::string& root_real,
                                                   const std::string& url_path,
                                                   std::string& out);
+
+/**
+ * @brief 从客户端提供的 `filename` 里取出**安全的叶子名**。
+ *
+ * 与 `web_sanitize_path()` 的分工（**两个函数回答的是不同的问题**，不是两套
+ * 重复策略）：
+ *
+ * | | `web_sanitize_path` | 本函数 |
+ * |---|---|---|
+ * | 回答什么 | 「这个 URL 路径在文档根下安全吗」 | 「客户端给的文件名，取哪一段当元数据」 |
+ * | 越界怎么办 | **拒绝**（URL 越界就是攻击） | **取叶子**（`C:\a\b.txt` 是常态，不该 400） |
+ * | 用在哪 | 静态服务的两道边界 | 只用于生成 `original_filename()` 这类元数据 |
+ *
+ * 规则（顺序不可调换）：
+ *   1. `/` 与 `\` **都**当分隔符，取最后一段；
+ *   2. 去掉 NUL 与 `< 0x20`、`0x7f` 这些控制字符；
+ *   3. 去掉**结尾**的 `.` 与空格 —— Win32 会静默截掉它们，不清洗就会让
+ *      「展示的名字」和「落在盘上的名字」不一致；
+ *   4. 空 / `.` / `..` ⇒ 退化成 `"file"`；
+ *   5. **保留设备名**（`CON`/`PRN`/`AUX`/`NUL`/`COM1`-`9`/`LPT1`-`9`，大小写
+ *      无关、**带扩展名也算**，另含 Windows 同样当设备的上标变体 `COM¹²³`/
+ *      `LPT¹²³`）⇒ 末尾追加 `_`；
+ *   6. 截断到 `max_len` 字节，**截断时保持 UTF-8 码点完整**（不切出半个字符）。
+ *
+ * 第 5 步排在截断**之后**：截断本身能**造出**一个设备名（`"nul.txt"` 截到 3
+ * 字节就是 `"nul"`），先判就会漏掉它。代价是 `max_len` 是个**软**上限 ——
+ * 设备名保护可能让结果多出一个字节。
+ *
+ * @warning 返回值**只能当元数据**（日志、显示、写进数据库）。**永远不要**拿它
+ *          拼路径 —— 落盘名由 `uvcpp_web_upload` 自己生成，与客户端给的名字
+ *          完全无关。本函数的存在是为了让元数据可安全展示，**不是**为了让
+ *          客户端决定路径。它也不保证结果是合法文件名（`*`/`?`/`"` 等照旧
+ *          放行），因为元数据不需要满足文件系统的约束。
+ *
+ * @param max_len 结果的字节上限，默认 255（多数文件系统的单段上限）。
+ *                **0 = 不限**（与全库其它 `size_t` 上限的约定一致）。
+ *                注意它是**软**上限，见上面第 5 步。
+ */
+UVCPP_API std::string web_sanitize_filename(const std::string& raw,
+                                            size_t max_len = 255);
 
 // =========================================================================
 // MIME / 状态码 / HTTP 日期

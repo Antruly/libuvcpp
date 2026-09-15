@@ -16,7 +16,8 @@ uvcpp_web_connection::uvcpp_web_connection()
       client(nullptr),
       peer_port(0),
       last_read_ms(0),
-      request_start_ms(0) {}
+      request_start_ms(0),
+      streaming(false) {}
 
 uvcpp_web_connection_registry::uvcpp_web_connection_registry()
     // 从 1 开始：0 要留给 UVCPP_WEB_INVALID_CONN_ID，不然"没登记过"和
@@ -54,6 +55,7 @@ uvcpp_web_conn_id uvcpp_web_connection_registry::add(uvcpp_tcp_client* client,
   // 扫描器会给它补基准（见 `touch()`），而不是拿 0 当"很久以前"直接杀掉。
   conn.last_read_ms    = now_ms > 0 ? now_ms : 0;
   conn.request_start_ms = 0;
+  conn.streaming        = false;
 
   by_id_[id] = conn;
   if (client != nullptr) {
@@ -83,7 +85,26 @@ bool uvcpp_web_connection_registry::note_request_done(uvcpp_web_conn_id id) {
   if (it == by_id_.end()) return false;
 
   it->second.request_start_ms = 0;
+  // "这个请求结束了"是唯一的收口点，流式标记在这里一起清掉：调用方即使漏了
+  // mark_streaming(id, false)，也污染不到同一个连接上的下一个请求。
+  it->second.streaming = false;
   return true;
+}
+
+bool uvcpp_web_connection_registry::mark_streaming(uvcpp_web_conn_id id,
+                                                   bool streaming) {
+  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::iterator it =
+      by_id_.find(id);
+  if (it == by_id_.end()) return false;
+  it->second.streaming = streaming;
+  return true;
+}
+
+bool uvcpp_web_connection_registry::is_streaming(uvcpp_web_conn_id id) const {
+  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::const_iterator it =
+      by_id_.find(id);
+  if (it == by_id_.end()) return false;
+  return it->second.streaming;
 }
 
 int64_t uvcpp_web_connection_registry::activity_since(
@@ -92,6 +113,9 @@ int64_t uvcpp_web_connection_registry::activity_since(
       by_id_.find(id);
   if (it == by_id_.end()) return 0;
 
+  // 流式收体：按**最后一次收到字节**算，也就是"停顿多久了"。整段预算用在这里
+  // 会把一个正常推进的大文件上传杀掉（见 uvcpp_web_connection::streaming）。
+  if (it->second.streaming) return it->second.last_read_ms;
   if (it->second.request_start_ms != 0) return it->second.request_start_ms;
   return it->second.last_read_ms;
 }

@@ -18,6 +18,24 @@
 
 namespace uvcpp {
 
+namespace {
+
+/**
+ * @brief Whether the message being parsed carries a body the server will read.
+ *
+ * `get_content_length()` returns 0 both for "no body" and for "chunked", so it
+ * cannot answer this on its own — the Transfer-Encoding header is what tells
+ * the two apart.
+ */
+bool message_has_body(const uvcpp_http_parser* parser) {
+  if (parser->get_content_length() > 0) return true;
+  return http_name_equal(http_get_header(parser->get_headers(),
+                                         "transfer-encoding"),
+                         "chunked");
+}
+
+}  // namespace
+
 uvcpp_http_server::uvcpp_http_server() {
   tcp_server_ = new uvcpp_tcp_server();
 }
@@ -158,17 +176,65 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
   });
   pctx->parser->set_on_headers_complete([this, pctx, client]() {
     pctx->headers_done = true;
+
     // Resolve a streaming route now that method + url are known; when matched,
     // deliver HEADERS and hand body chunks directly to the handler.
     auto sh = find_stream_handler(pctx->parser->get_method(),
                                   pctx->parser->get_url());
-    if (sh) {
-      pctx->stream_handler = sh;
+
+    // Nothing registered for this exact method+path: give the claim hook a
+    // chance. The framework installs one to reach its own router, which has
+    // path parameters and wildcards that post_stream() cannot express.
+    bool built_view = false;
+    if (!sh && stream_claim_) {
+      // The hook needs a request view, and the hook decides from it — so unlike
+      // the stream-route path we must build it before knowing whether it is
+      // used. `stream_view_built` lets on_request_complete reuse this one
+      // instead of copying the header vector a second time.
       pctx->stream_request.method  = pctx->parser->get_method();
       pctx->stream_request.url     = pctx->parser->get_url();
       pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
       pctx->stream_request.headers = pctx->parser->get_headers();
+      pctx->stream_view_built = true;
+      built_view = true;
+      try {
+        sh = stream_claim_(pctx->stream_request, client);
+      } catch (const std::exception& e) {
+        std::fprintf(stderr,
+                     "[uvcpp_http_server] stream claim hook threw: %s\n",
+                     e.what());
+        sh = http_stream_handler();
+      } catch (...) {
+        std::fprintf(stderr,
+                     "[uvcpp_http_server] stream claim hook threw (unknown)\n");
+        sh = http_stream_handler();
+      }
+    }
+
+    if (sh) {
+      pctx->stream_handler = sh;
+      if (!built_view) {
+        pctx->stream_request.method  = pctx->parser->get_method();
+        pctx->stream_request.url     = pctx->parser->get_url();
+        pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
+        pctx->stream_request.headers = pctx->parser->get_headers();
+        pctx->stream_view_built = true;
+      }
       sh(http_stream_event::HEADERS, nullptr, 0, pctx->stream_request, client);
+      return;  // claimed: the body is no longer ours to police
+    }
+
+    // --- Nothing claimed it, so the server buffers the body itself and the
+    // --- rules below apply. Order matters: a request we are going to reject
+    // --- must not also be told to continue.
+    if (!check_expect_header(*pctx, client)) return;           // 417, answered
+    if (reject_oversized_declared(*pctx, client)) return;      // early 413
+
+    // Expect: 100-continue with a body worth waiting for — tell the client it
+    // may send. Raw bytes, not send_response(): a 1xx carries no Content-Length
+    // and send_response() would add one for the empty body.
+    if (pctx->expect_continue && message_has_body(pctx->parser)) {
+      enqueue_write(*pctx, client, "HTTP/1.1 100 Continue\r\n\r\n");
     }
   });
   pctx->parser->set_on_message_complete([this, client]() {
@@ -207,6 +273,16 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
     ctx.body_overflow = false;
     ctx.accept_encoding.clear();
     ctx.is_head = false;
+    // Headers-time state must not survive into the next message on this
+    // connection: a rejected message that somehow did not close must not
+    // suppress the next message's routing, and a leftover 100-continue flag
+    // would send a spurious interim response.
+    ctx.rejected = false;
+    ctx.close_after_message = false;
+    ctx.defer_close_to_message_end = false;
+    ctx.expect_continue = false;
+    ctx.stream_view_built = false;
+    ctx.stream_request = uvcpp_http_request();
   }
 
   ctx.parser->execute(buf->get_const_data(), buf->size());
@@ -229,11 +305,33 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   conn_ctx& ctx = it->second;
   ctx.msg_done = true;
 
+  // Already answered during the headers callback (417 unknown Expect, 413 by
+  // declared Content-Length). Everything below would answer a second time.
+  // The close was deferred to here on purpose: the client has now stopped
+  // sending, so closing no longer risks an RST that would destroy the response
+  // sitting in its receive buffer.
+  if (ctx.rejected) {
+    if (ctx.close_after_message) {
+      ctx.close_requested = true;
+      pump_write(client);  // closes now, or after the pending write completes
+    }
+    return;
+  }
+
   // Streaming route: deliver END; the handler responds asynchronously.
   if (ctx.stream_handler) {
     ctx.stream_handler(http_stream_event::END, nullptr, 0, ctx.stream_request, client);
     ctx.stream_handler = nullptr;
     ctx.stream_request = uvcpp_http_request();
+
+    // The handler answered from a BODY callback and asked for the connection to
+    // close. That close was parked by pump_write() because the peer was still
+    // sending; it is safe now.
+    if (ctx.defer_close_to_message_end) {
+      ctx.defer_close_to_message_end = false;
+      ctx.close_requested = true;
+      pump_write(client);
+    }
     return;
   }
 
@@ -248,11 +346,20 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     return;
   }
 
+  // The claim hook made us build the request view at headers time. Reuse it —
+  // rebuilding would clone the header vector a second time for every request,
+  // just to throw the first copy away.
   uvcpp_http_request req;
-  req.method  = ctx.parser->get_method();
-  req.url     = ctx.parser->get_url();
-  req.version = ctx.parser->get_uvcpp_http_version();
-  req.headers = ctx.parser->get_headers();
+  if (ctx.stream_view_built) {
+    req = std::move(ctx.stream_request);
+    ctx.stream_request = uvcpp_http_request();
+    ctx.stream_view_built = false;
+  } else {
+    req.method  = ctx.parser->get_method();
+    req.url     = ctx.parser->get_url();
+    req.version = ctx.parser->get_uvcpp_http_version();
+    req.headers = ctx.parser->get_headers();
+  }
   req.body.clone(ctx.body_buf);
 
   // Capture what send_response() needs later: for a deferred response the
@@ -292,6 +399,68 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   if (resp.deferred) return;
 
   send_response(client, resp);
+}
+
+bool uvcpp_http_server::check_expect_header(conn_ctx& ctx,
+                                            uvcpp_tcp_client* client) {
+  // Expect is an HTTP/1.1 mechanism (RFC 7231 §5.1.1): in a 1.0 message the
+  // header has no defined meaning, so it is ignored rather than failed. That
+  // matters because clients from that era send things like "Expect: 100-continue"
+  // through proxies that do not understand it.
+  if (ctx.parser->get_uvcpp_http_version() != uvcpp_http_version::HVER_11)
+    return true;
+
+  std::string expect = http_get_header(ctx.parser->get_headers(), "expect");
+  if (expect.empty()) return true;
+
+  if (http_name_equal(expect, "100-continue")) {
+    ctx.expect_continue = true;
+    return true;
+  }
+
+  // RFC 7231 §5.1.1: an expectation the server cannot meet must be answered
+  // 417 rather than silently ignored — the client is waiting for a signal that
+  // a naive implementation would never send, and would hang until its own
+  // timeout.
+  reject_early(ctx, client, http_status::EXPECTATION_FAILED);
+  return false;
+}
+
+bool uvcpp_http_server::reject_oversized_declared(conn_ctx& ctx,
+                                                  uvcpp_tcp_client* client) {
+  if (max_body_size_ == 0) return false;
+  const uint64_t declared = ctx.parser->get_content_length();
+  if (declared == 0 || declared <= max_body_size_) return false;
+
+  // Refuse on the declared length, before the body arrives. Waiting for the
+  // message to complete (the old path) means buffering up to the cap and then
+  // reading the rest to nowhere — a client streaming 10 GB at a 1 MB limit is
+  // answered immediately instead of after it has sent 10 GB.
+  reject_early(ctx, client, http_status::PAYLOAD_TOO_LARGE);
+  return true;
+}
+
+void uvcpp_http_server::reject_early(conn_ctx& ctx, uvcpp_tcp_client* client,
+                                     http_status status) {
+  const char* reason = http_status_reason(status);
+  const std::string body =
+      std::to_string(static_cast<int>(status)) + " " + reason;
+
+  uvcpp_http_response resp =
+      uvcpp_http_response::make(status, body.c_str(), body.size());
+  resp.set_header("connection", "close");
+
+  ctx.rejected = true;
+  // Not now. The client is still sending the body, and closing a socket with
+  // unread data in its receive buffer makes Windows send an RST — which throws
+  // away bytes the peer has buffered but not yet read, including this response.
+  // on_request_complete closes once the message has actually ended.
+  ctx.close_after_message = true;
+  // The body is going to arrive no matter what; don't accumulate a byte of it.
+  ctx.body_overflow = true;
+  ctx.body_buf.clear();
+
+  send_response(client, resp, /*close_after_write=*/false);
 }
 
 void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
@@ -420,7 +589,21 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   if (ctx.write_pending || ctx.closing) return;
 
   if (ctx.write_queue.empty()) {
-    if (ctx.close_requested) close_connection(client);
+    if (ctx.close_requested) {
+      // The response that requested the close may have been written while the
+      // peer was still sending its body (a claimed stream stopping an upload
+      // early). Closing here would RST, and the RST discards that response from
+      // the peer's receive buffer. Hand the close to the end of the message
+      // instead — but only when there is a stream handler that will still be
+      // alive to receive it. A malformed message never completes, and there the
+      // close must happen now or the connection hangs until the idle sweep.
+      if (ctx.stream_handler && !ctx.msg_done) {
+        ctx.defer_close_to_message_end = true;
+        ctx.close_requested = false;
+      } else {
+        close_connection(client);
+      }
+    }
     return;
   }
 
@@ -519,6 +702,16 @@ void uvcpp_http_server::clear_raw_data_hook() { raw_data_hook_ = nullptr; }
 
 bool uvcpp_http_server::has_raw_data_hook() const {
   return static_cast<bool>(raw_data_hook_);
+}
+
+void uvcpp_http_server::set_stream_claim(http_stream_claim hook) {
+  stream_claim_ = std::move(hook);
+}
+
+void uvcpp_http_server::clear_stream_claim() { stream_claim_ = nullptr; }
+
+bool uvcpp_http_server::has_stream_claim() const {
+  return static_cast<bool>(stream_claim_);
 }
 
 void uvcpp_http_server::on_connection_close(

@@ -94,7 +94,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   sockaddr_in name;
   int namelen = sizeof(name);
   server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
-  port_promise.set_value(ntohs(name.sin_port));
+  const int port = ntohs(name.sin_port);
 
   // 要在 on_connection 之后才能关它，所以先把指针存下来。
   uvcpp_tcp_client* held = nullptr;
@@ -109,6 +109,11 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
     port_promise.set_value(-1);
     return;
   }
+  // **端口必须在 listen() 成功之后才放行**：调用方拿到端口就立刻 connect，
+  // 而"已 bind、尚未 listen"的 socket 在内核里是**拒连**的（ECONNREFUSED），
+  // 不是排队等 listen。顺带：放行在前的话，listen 失败时这里会第二次
+  // set_value，那是 std::future_error —— 在服务线程里抛出去就是 terminate。
+  port_promise.set_value(port);
 
   uvcpp_loop* loop = server.get_loop();
 
@@ -307,7 +312,7 @@ void run_server_rounds(std::promise<int>& port_promise, std::atomic<bool>& stop,
   sockaddr_in name;
   int namelen = sizeof(name);
   server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
-  port_promise.set_value(ntohs(name.sin_port));
+  const int port = ntohs(name.sin_port);
 
   uvcpp_tcp_client* held = nullptr;
   rc = server.listen(
@@ -320,6 +325,11 @@ void run_server_rounds(std::promise<int>& port_promise, std::atomic<bool>& stop,
     port_promise.set_value(-1);
     return;
   }
+  // **端口必须在 listen() 成功之后才放行**：调用方拿到端口就立刻 connect，
+  // 而"已 bind、尚未 listen"的 socket 在内核里是**拒连**的（ECONNREFUSED），
+  // 不是排队等 listen。顺带：放行在前的话，listen 失败时这里会第二次
+  // set_value，那是 std::future_error —— 在服务线程里抛出去就是 terminate。
+  port_promise.set_value(port);
 
   uvcpp_loop* loop = server.get_loop();
 
@@ -441,13 +451,15 @@ void run_server_close_all(std::promise<int>& port_promise,
   sockaddr_in name;
   int namelen = sizeof(name);
   server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
-  port_promise.set_value(ntohs(name.sin_port));
+  const int port = ntohs(name.sin_port);
 
   rc = server.listen([&](uvcpp_tcp_client*) { accepted->fetch_add(1); }, 128);
   if (rc != 0) {
     port_promise.set_value(-1);
     return;
   }
+  // 见 run_server_rounds 里的同一条说明：端口只能在 listen() 之后放行。
+  port_promise.set_value(port);
 
   uvcpp_loop* loop = server.get_loop();
 

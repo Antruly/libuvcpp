@@ -394,291 +394,374 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
   // would either leak the completed op's path buffer (flags already reset) or
   // corrupt the in-flight op. get_result() survives req_cleanup(); the statbuf/
   // ptr/path accessors are cleared, so callbacks must not rely on them.
+  //
+  // The user callback must be SWAPPED OUT of its member before it is invoked.
+  // Chaining a new op of the same type from inside the callback assigns to
+  // fs_<op>_cb — the very std::function whose operator() is on the stack — and
+  // std::function::operator= destroys the old target. That frees the closure
+  // that is currently executing, so any by-value capture read after the chain
+  // call is a use-after-free. Measured, not theorised: reading a captured
+  // shared_ptr after a chained submit reports use_count() == 0 instead of 2
+  // (see tests/functional/fs_async_write_func.cpp, "capture_alive_after_chain").
+  // Swapping also avoids a copy — the closure moves into a stack local and is
+  // destroyed when the callback has actually finished running.
   static void callback_close(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_close_cb)
-      self->fs_close_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_close_cb);
+    if (cb) cb(self);
   }
   static void callback_open(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_open_cb)
-      self->fs_open_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_open_cb);
+    if (cb) cb(self);
   }
 
   static void callback_read(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_read_cb)
-      self->fs_read_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_read_cb);
+    if (cb) cb(self);
   }
 
   static void callback_unlink(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_unlink_cb)
-      self->fs_unlink_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_unlink_cb);
+    if (cb) cb(self);
   }
 
   static void callback_write(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_write_cb)
-      self->fs_write_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_write_cb);
+    if (cb) cb(self);
   }
 
   static void callback_copyfile(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_copyfile_cb)
-      self->fs_copyfile_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_copyfile_cb);
+    if (cb) cb(self);
   }
 
   static void callback_mkdir(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_mkdir_cb)
-      self->fs_mkdir_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_mkdir_cb);
+    if (cb) cb(self);
   }
 
   static void callback_mkdtemp(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_mkdtemp_cb)
-      self->fs_mkdtemp_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_mkdtemp_cb);
+    if (cb) cb(self);
   }
 
   static void callback_mkstemp(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_mkstemp_cb)
-      self->fs_mkstemp_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_mkstemp_cb);
+    if (cb) cb(self);
   }
 
   static void callback_rmdir(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_rmdir_cb)
-      self->fs_rmdir_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_rmdir_cb);
+    if (cb) cb(self);
   }
 
   static void callback_scandir(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_scandir_cb)
-      self->fs_scandir_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_scandir_cb);
+    if (cb) cb(self);
   }
 
   static void callback_opendir(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_opendir_cb)
-      self->fs_opendir_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_opendir_cb);
+    if (cb) cb(self);
   }
 
   static void callback_readdir(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_readdir_cb)
-      self->fs_readdir_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_readdir_cb);
+    if (cb) cb(self);
   }
 
   static void callback_closedir(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_closedir_cb)
-      self->fs_closedir_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_closedir_cb);
+    if (cb) cb(self);
   }
 
   static void callback_stat(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_stat_cb)
-      self->fs_stat_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_stat_cb);
+    if (cb) cb(self);
   }
 
   static void callback_fstat(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_fstat_cb)
-      self->fs_fstat_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_fstat_cb);
+    if (cb) cb(self);
   }
 
   static void callback_rename(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_rename_cb)
-      self->fs_rename_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_rename_cb);
+    if (cb) cb(self);
   }
 
   static void callback_fsync(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_fsync_cb)
-      self->fs_fsync_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_fsync_cb);
+    if (cb) cb(self);
   }
 
   static void callback_fdatasync(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_fdatasync_cb)
-      self->fs_fdatasync_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_fdatasync_cb);
+    if (cb) cb(self);
   }
 
   static void callback_ftruncate(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_ftruncate_cb)
-      self->fs_ftruncate_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_ftruncate_cb);
+    if (cb) cb(self);
   }
 
   static void callback_sendfile(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_sendfile_cb)
-      self->fs_sendfile_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_sendfile_cb);
+    if (cb) cb(self);
   }
 
   static void callback_access(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_access_cb)
-      self->fs_access_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_access_cb);
+    if (cb) cb(self);
   }
 
   static void callback_chmod(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_chmod_cb)
-      self->fs_chmod_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_chmod_cb);
+    if (cb) cb(self);
   }
 
   static void callback_utime(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_utime_cb)
-      self->fs_utime_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_utime_cb);
+    if (cb) cb(self);
   }
 
   static void callback_futime(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_futime_cb)
-      self->fs_futime_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_futime_cb);
+    if (cb) cb(self);
   }
 
   static void callback_lutime(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_lutime_cb)
-      self->fs_lutime_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_lutime_cb);
+    if (cb) cb(self);
   }
 
   static void callback_lstat(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_lstat_cb)
-      self->fs_lstat_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_lstat_cb);
+    if (cb) cb(self);
   }
 
   static void callback_link(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_link_cb)
-      self->fs_link_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_link_cb);
+    if (cb) cb(self);
   }
 
   static void callback_symlink(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_symlink_cb)
-      self->fs_symlink_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_symlink_cb);
+    if (cb) cb(self);
   }
 
   static void callback_readlink(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_readlink_cb)
-      self->fs_readlink_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_readlink_cb);
+    if (cb) cb(self);
   }
 
   static void callback_realpath(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_realpath_cb)
-      self->fs_realpath_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_realpath_cb);
+    if (cb) cb(self);
   }
 
   static void callback_fchmod(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_fchmod_cb)
-      self->fs_fchmod_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_fchmod_cb);
+    if (cb) cb(self);
   }
 
   static void callback_chown(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_chown_cb)
-      self->fs_chown_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_chown_cb);
+    if (cb) cb(self);
   }
 
   static void callback_fchown(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_fchown_cb)
-      self->fs_fchown_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_fchown_cb);
+    if (cb) cb(self);
   }
 
   static void callback_lchown(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_lchown_cb)
-      self->fs_lchown_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_lchown_cb);
+    if (cb) cb(self);
   }
 
   static void callback_statfs(uv_fs_t* req) {
     uvcpp_fs* self = reinterpret_cast<uvcpp_fs*>(req->data);
     self->async_pending_ = false;
     self->req_cleanup();
-    if (self->fs_statfs_cb)
-      self->fs_statfs_cb(self);
+    // 换到本地再调 —— 理由见上（回调里可能链下一笔）。
+    ::std::function<void(uvcpp_fs*)> cb;
+    cb.swap(self->fs_statfs_cb);
+    if (cb) cb(self);
   }
 
  private:

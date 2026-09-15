@@ -1235,6 +1235,31 @@ int uvcpp_tcp_client::read_wait(uvcpp_buf& out_buf, int timeout_ms) {
     }
   }
 
+  // **窗口里攒下的明文必须在这里补投。**
+  //
+  // `read_start(nullptr)` 内部会调 `tls_deliver_plain()`，但它在 TLS 连接上
+  // **根本不会执行** —— `enable_tls` 早就 arm 过读（没人读就等不到 ServerHello），
+  // `read_started_` 为真，于是上面那句 `if (!read_started_)` 直接跳过，
+  // `tls_plain_` 里的明文**没有任何人来取**，而本函数等的是 `read_cache_`，
+  // 两者就此永远错开。
+  //
+  // 这个窗口真的会发生，而且是最自然的次序：`write_wait()` 自带泵循环，服务端
+  // 的回声完全可能在它返回**之前**到达 —— 那一刻 `sync_read_wanted_` 还是假，
+  // 明文按设计留在 `tls_plain_` 里等消费者。消费者（本函数）进来后若不补投，
+  // 就只剩"等下一个数据块顺带带出去"这一条路；回声是唯一一块数据时，等到的
+  // 就是超时。实测（探针，确定性复现）：
+  //
+  //     read_started=1 sync_read_wanted=1 tls_plain=11 cache=0
+  //     [FAIL] sync_roundtrip: read_wait = -4039     ← UV_ETIMEDOUT
+  //
+  // 11 就是那声回声的长度 —— 数据一直在，只是没人搬。
+  //
+  // 放在 `sync_read_wanted_ = true` 之后：`tls_deliver_plain()` 靠这个标记
+  // 决定"进读缓存"还是"继续留着等真正的消费者"。
+#if UVCPP_OPENSSL_ENABLE
+  if (tls_ssl_ != nullptr) tls_deliver_plain();
+#endif
+
   // Wait for data in the cache
   bool has_data = wait_for_condition(
       [this]() {

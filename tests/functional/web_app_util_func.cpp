@@ -370,6 +370,160 @@ void test_sanitize_reject() {
 }
 
 // =========================================================================
+// 5.5 `web_sanitize_filename()` —— 客户端文件名的清洗（步骤 7）
+//
+// 与 `web_sanitize_path()` 的分工见头文件：那个**拒绝**越界（URL 越界就是
+// 攻击），这个**取叶子**（`C:\a\b.txt` 是常态，不该 400）。所以下面这些输入
+// **一条都不该失败** —— 它们全部产出某个可安全展示的元数据。
+//
+// 这张表是那个函数的可执行规格：头文件里列的 6 条规则各有一组输入，改实现时
+// 它必须仍然全绿。**规则之间的次序本身也是被测的**（第 5 步排在第 6 步之后，
+// 所以截断**造出来**的设备名也要被保护，见表末 `max_len` 那一节）。
+//
+// 有一处干扰要在读表之前说清楚：`uvcpp_web_multipart` 对引号内的值做了
+// RFC 2616 的 quoted-pair 反转义（`\X` → `X`），所以经由 multipart 走到这里的
+// `C:\a\b.txt` 其实已经是 `C:ab.txt`。**本文件直接喂字符串**，测的是函数本身
+// 的契约；端到端那一份在 `web_app_upload_func.cpp`，它按解析器真实交出来的
+// 值写期望（两边的期望值不同是**对的**，不是谁写错了）。
+// =========================================================================
+
+/// 严格校验 UTF-8：每个码点的长度与续字节都对，且**没有截断的尾巴**。
+///
+/// 用它钉"截断不切出半个码点" —— 只比长度的话，切在码点中间同样得到 255，
+/// 那样断言就退化成"长度是 255"，与要钉的性质无关。
+bool utf8_complete(const std::string& s) {
+  size_t i = 0;
+  while (i < s.size()) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t len = 0;
+    if (c < 0x80) {
+      len = 1;
+    } else if ((c & 0xE0) == 0xC0) {
+      len = 2;
+    } else if ((c & 0xF0) == 0xE0) {
+      len = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      len = 4;
+    } else {
+      return false;  // 非法首字节（含孤立续字节）
+    }
+    if (i + len > s.size()) return false;  // 截断的尾巴
+    for (size_t k = 1; k < len; ++k) {
+      if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+    }
+    i += len;
+  }
+  return true;
+}
+
+void test_sanitize_filename() {
+  std::cout << "[util] sanitize_filename" << std::endl;
+
+  struct fn_case {
+    const char* in;
+    const char* want;
+  };
+  static const fn_case k_cases[] = {
+      // --- 规则 1：`/` 与 `\` **都**当分隔符，取最后一段 ---------------
+      {"../../etc/passwd", "passwd"},
+      {"..\\..\\x.txt", "x.txt"},        // 反斜杠同样是分隔符
+      {"C:\\Users\\a\\b.txt", "b.txt"},  // 盘符不是分隔符，是路径段的一部分
+      {"/abs/x", "x"},                   // 前导斜杠
+      {"a/b", "b"},
+      {"//server/share/n.txt", "n.txt"},  // UNC 前缀不特殊，取叶子即可
+      {"..\\..\\..\\", "file"},          // 结尾分隔符之后没有叶子
+      {"/", "file"},                     // 只有一个分隔符
+
+      // --- 规则 2：C0 控制字符与 DEL --------------------------------
+      {"a\x01" "b\x7f.txt", "ab.txt"},
+      {"a\tb", "ab"},  // 制表符也 < 0x20
+      {"\x01\x02\x03", "file"},  // 整个名字都是控制字符 ⇒ 退化
+
+      // --- 规则 3：结尾的 `.` 与空格（Win32 会静默截掉） --------------
+      {"a.txt.", "a.txt"},
+      {"a.txt   ", "a.txt"},
+      {"a.txt . .", "a.txt"},  // 点与空格交替，一样削干净
+      {"   ", "file"},
+      {".hidden", ".hidden"},  // 前导点**不**动：dotfile 是合法的展示名
+
+      // --- 规则 4：空 / `.` / `..` 退化成 "file" ----------------------
+      {"", "file"},
+      {".", "file"},
+      {"..", "file"},
+      {"...", "file"},  // 先被规则 3 削空，再退化
+
+      // --- 规则 5：保留设备名（大小写无关、带扩展名也算、含上标变体）----
+      {"CON", "CON_"},
+      {"con", "con_"},
+      {"PRN", "PRN_"},
+      {"AUX", "AUX_"},
+      {"nul.txt", "nul.txt_"},   // 带扩展名**仍是**设备
+      {"aux.TXT", "aux.TXT_"},
+      {"COM1", "COM1_"},
+      {"com9.txt", "com9.txt_"},
+      {"LPT1", "LPT1_"},
+      {"LPT\xC2\xB9", "LPT\xC2\xB9_"},          // 上标 ¹
+      {"COM\xC2\xB2", "COM\xC2\xB2_"},          // 上标 ²
+      {"lpt\xC2\xB3.txt", "lpt\xC2\xB3.txt_"},  // 上标 ³ + 小写
+      // 负例：没有被误伤的那些（少了它们，"见到 com/lpt 就加下划线"也能过）
+      {"COM0", "COM0"},              // 0 不是设备编号
+      {"COM10", "COM10"},            // 只 1..9
+      {"console.txt", "console.txt"},  // 以 con 开头但不是设备名
+      {"NULL", "NULL"},              // 与 nul 无关
+
+      // --- 通过但不变形的普通名字 ------------------------------------
+      {"a.bin", "a.bin"},
+      {"报告 2026.pdf", "报告 2026.pdf"},
+      {"\xE4\xB8\xAD\xE6\x96\x87.txt", "\xE4\xB8\xAD\xE6\x96\x87.txt"},
+  };
+
+  const size_t n = sizeof(k_cases) / sizeof(k_cases[0]);
+  for (size_t i = 0; i < n; ++i) {
+    char tag[256];
+    std::snprintf(tag, sizeof(tag), "sanitize_filename[%s]", k_cases[i].in);
+    check_eq(web_sanitize_filename(k_cases[i].in), k_cases[i].want, tag);
+  }
+
+  // NUL 单独测：它没法出现在 `const char*` 表里（C 字符串到它为止）。
+  // 这一条不是凑数 —— NUL 会让任何 C 字符串 API 在这里被截断，于是"校验过的
+  // 名字"和"使用的名字"变成两个不同的串。
+  {
+    std::string with_nul("a\0b.txt", 7);
+    check_eq(web_sanitize_filename(with_nul), "ab.txt", "名字里的 NUL 必须被去掉");
+  }
+
+  // --- 规则 6：截断，且**保持 UTF-8 码点完整** -----------------------
+  {
+    std::string long_cn;
+    for (int i = 0; i < 200; ++i) long_cn += "\xE4\xB8\xAD";  // 200 × 中 = 600 字节
+    const std::string r = web_sanitize_filename(long_cn);
+    check_eq(std::to_string(r.size()), std::to_string(255),
+             "超长名字必须截断到 255 字节");
+    check(utf8_complete(r), "截断不得切出半个码点");
+  }
+
+  // 截断点上正好是续字节 ⇒ 必须**退回**到前一个码点边界，而不是切在中间。
+  // `中` 是 3 字节，`max_len = 1` 落在第二个字节（续字节）上。
+  check_eq(web_sanitize_filename("\xE4\xB8\xAD", 1), "file",
+           "截断到 0 字节 ⇒ 退化成 file");
+
+  // `max_len = 0` = **不限**（与全库其它 size_t 上限的约定一致）。
+  {
+    std::string s(400, 'a');
+    check_eq(std::to_string(web_sanitize_filename(s, 0).size()),
+             std::to_string(400), "max_len = 0 表示不限");
+  }
+
+  // --- 规则次序：**截断排在第 5 步之后** -----------------------------
+  // 这一条钉的是次序本身，不是某一条规则。`"nul.txt"` 截到 3 字节正好是
+  // `"nul"` —— 先判设备名就会漏掉它，于是盘上会多出一个叫 `nul` 的展示名。
+  check_eq(web_sanitize_filename("nul.txt", 3), "nul_",
+           "截断**造出来**的设备名也必须被保护（规则 5 排在规则 6 之后）");
+  check_eq(web_sanitize_filename("COM1xyz", 4), "COM1_",
+           "同上：截断造出的 COM1");
+}
+
+// =========================================================================
 // 6. 拼接 / 包含判断
 // =========================================================================
 void test_join_and_containment() {
@@ -629,6 +783,7 @@ int main() {
   test_cookies();
   test_sanitize_accept();
   test_sanitize_reject();
+  test_sanitize_filename();
   test_join_and_containment();
   test_resolve_within_root();
   test_mime_and_status();

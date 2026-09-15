@@ -81,6 +81,9 @@ struct server_state {
   std::atomic<int> hs_failed{0};     ///< 服务端握手中途失败的次数
   std::atomic<int> echo_sent{0};
   std::atomic<int> echo_failed{0};
+  /// 其中因为**对端主动放弃回声**（关连接时接收缓冲里还有没读走的数据 →
+  /// 内核发 RST）而失败的次数。见 `pump_echo` 与 main() 末尾那条断言。
+  std::atomic<int> echo_reset{0};
   std::atomic<int> bytes_in{0};      ///< 服务端解出的**明文**字节数
   std::atomic<int> final_count{0};
 
@@ -141,6 +144,18 @@ void pump_echo(server_state& st, uvcpp_tcp_client& c) {
       st.echo_sent.fetch_add(1);
     } else {
       st.echo_failed.fetch_add(1);
+      // **区分"回声没人要"和"回声送不出去"。**
+      //
+      // 场景 3（write_only）故意只发不收，然后在写完成之后立刻 `close()` ——
+      // 那一刻它的接收缓冲里还压着没读走的回声，于是内核发 RST，服务端在途的
+      // 那次写拿到 `UV_ECONNRESET`。这是**对端主动放弃**的正常结局，不是服务端
+      // 的回声管线坏了；把两者算在一起，会让"echo_failed == 0"这条断言在约
+      // 1/60 的轮次里假失败（实测）。
+      //
+      // 真正要挡的是"服务端漏发了一块"（在途写撞上 `UV_EALREADY` 被丢掉），
+      // 那种失败**不是** RST —— 下面的断言 `echo_failed == echo_reset` 因此仍然
+      // 抓得住它，判别力没有被削弱。
+      if (status == UV_ECONNRESET) st.echo_reset.fetch_add(1);
     }
     {
       std::lock_guard<std::mutex> lk(st.mu);
@@ -176,7 +191,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   sockaddr_in name;
   int namelen = sizeof(name);
   server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
-  port_promise.set_value(ntohs(name.sin_port));
+  const int port = ntohs(name.sin_port);
 
   rc = server.listen(
       [&st, sctx](uvcpp_tcp_client* client) {
@@ -185,7 +200,17 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
         if (client->enable_tls(sctx) == 0) st.tls_ok.fetch_add(1);
       },
       128);
-  if (rc != 0) return;
+  if (rc != 0) {
+    port_promise.set_value(-1);
+    return;
+  }
+
+  // **端口必须在 listen() 成功之后才放行。** 调用方拿到端口就立刻 connect，
+  // 而"已 bind、尚未 listen"的 socket 在内核里是**拒连**的（ECONNREFUSED），
+  // 不是排队等 listen。放行在前的话，本用例会以约 1/6 的概率假失败
+  // （实测：全量套件连跑 6 次红 1 次，单独跑则看不出）。
+  // 同一族的问题在 `web_ssl_server_func.cpp` 已经修过一次，这是第二处。
+  port_promise.set_value(port);
 
   uvcpp_loop* loop = server.get_loop();
   while (!stop.load()) {
@@ -308,8 +333,23 @@ bool run_async_tls_client(int port, uvcpp_ssl_context* cctx,
 // 场景 2：同步接口也要过过滤器（read_wait 拿到的必须是明文）
 // =========================================================================
 
+/**
+ * @param echo_first 在 `write_wait()` 与 `read_wait()` 之间先把循环泵一会儿，
+ *        让**回声在 `read_wait` 之前到达**。
+ *
+ * 为什么要专门跑这一遍：`read_wait()` 前进来的明文会按设计留在 `tls_plain_`
+ * 里等消费者，而 TLS 连接上 `read_started_` 早为真，`read_wait` 里那句
+ * `read_start(nullptr)` **根本不会执行** —— 攒下的明文没有任何人来取。
+ * 这是本文件抓到的第二个真缺陷（`read_wait` 返回 `-4039` / `UV_ETIMEDOUT`，
+ * 而数据一直在 `tls_plain_` 里）。
+ *
+ * 自然的时序下这个窗口只有约 1/40 的轮次会命中，**太弱，不足以当回归网**。
+ * 泵这一下不是把窗口藏起来，而是把它**确定性地打开**：回声在 `sync_read_wanted_`
+ * 还是假的时候到达，`read_wait()` 必须自己负责把它取出来。
+ */
 bool run_sync_tls_client(int port, uvcpp_ssl_context* cctx,
-                         const std::string& msg, const char* label) {
+                         const std::string& msg, const char* label,
+                         bool echo_first) {
   uvcpp_tcp_client client;
   check(client.enable_tls(cctx) == 0, std::string(label) + ": enable_tls");
 
@@ -321,6 +361,16 @@ bool run_sync_tls_client(int port, uvcpp_ssl_context* cctx,
 
   const int wrc = client.write_wait(msg.data(), msg.size(), 8000);
   check(wrc == 0, std::string(label) + ": write_wait = " + std::to_string(wrc));
+
+  if (echo_first) {
+    // 回环上的回声往返是微秒级、服务端循环每 1ms 一拍，所以 200 拍足够让它
+    // **必然**落在 `read_wait` 之前（实测：把修复还原之后，这一条 3/3 稳定复现）。
+    uvcpp_loop* lp = client.get_loop();
+    for (int i = 0; i < 200; ++i) {
+      lp->run(UV_RUN_NOWAIT);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
 
   uvcpp_buf buf;
   const int rrc = client.read_wait(buf, 8000);
@@ -458,6 +508,10 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
+  // 场景 1+2 的窗口到此为止：这两条都会把回声读完，两次快照之间**不允许**
+  // 出现任何一次回声失败。
+  const int echo_failed_after_readback = st.echo_failed.load();
+
   // ---- 场景 3：只发不收（写完成语义） -------------------------------
   // 上面两条都在"能收到回声"的前提下断言；这条专门看写本身的完成时机：
   // 写完回调必须发生在密文**全部出网**之后，而不是 SSL_write 接受明文之后。
@@ -496,11 +550,23 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
+  // 场景 3 的窗口到此为止。它自己的失败**不在这里断言** —— 那条路径故意放弃
+  // 回声，RST 是预期内的结局（见 `pump_echo` 里的说明）；能证明它是 RST 而不是
+  // 漏发的，是文件末尾那条 `echo_failed == echo_reset`。
+  const int echo_failed_after_write_only = st.echo_failed.load();
+
   // ---- 场景 4：同步接口（connect_wait / write_wait / read_wait） ----
+  //
+  // 两遍，唯一的区别是**回声到达的时刻**：自然的时序，以及被泵到
+  // `read_wait()` 之前的时序。后一遍是确定性的回归网，理由见
+  // `run_sync_tls_client` 的 `echo_first` 参数。
   {
     const std::string msg = "PING-sync\r\n";
-    check(run_sync_tls_client(port, &cctx, msg, "sync_roundtrip"),
+    check(run_sync_tls_client(port, &cctx, msg, "sync_roundtrip", false),
           "sync_roundtrip");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    check(run_sync_tls_client(port, &cctx, msg, "sync_roundtrip_buffered", true),
+          "sync_roundtrip_buffered");
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
@@ -533,8 +599,26 @@ int main() {
         "server enable_tls succeeded on " +
             std::to_string(st.tls_ok.load()) + "/" +
             std::to_string(st.accepted.load()) + " connections");
-  check(st.echo_failed.load() == 0,
-        "server echo failures: " + std::to_string(st.echo_failed.load()));
+  // 读回了回声的那些场景（1、2）一次失败都不许有。
+  check(echo_failed_after_readback == 0,
+        "server echo failures in the read-back scenarios: " +
+            std::to_string(echo_failed_after_readback));
+  // 场景 4（同步接口，也把回声读完了）同理。
+  check(st.echo_failed.load() == echo_failed_after_write_only,
+        "server echo failures after write_only: " +
+            std::to_string(st.echo_failed.load() - echo_failed_after_write_only));
+
+  // **每一次失败都必须是"对端主动放弃"（RST）**，一次别的都不许有。
+  //
+  // 上面两条窗口断言只覆盖读回声的场景；这一条覆盖**全部**（含场景 3）。
+  // 服务端真漏发一块（在途写撞上 `UV_EALREADY` 被丢掉）拿到的是 `UV_EALREADY`
+  // 而不是 `UV_ECONNRESET`，所以照样会被它抓住 —— 原先把两者算在一起的
+  // `echo_failed == 0` 会在这条断言上假失败（实测约 1/60），判别力却是一样的。
+  check(st.echo_failed.load() == st.echo_reset.load(),
+        "server echo failures that were NOT a peer reset: " +
+            std::to_string(st.echo_failed.load() - st.echo_reset.load()) +
+            " (failed=" + std::to_string(st.echo_failed.load()) +
+            " reset=" + std::to_string(st.echo_reset.load()) + ")");
   // 每条连接断开后都应从登记表里摘掉 —— TLS 层不该把连接的生命周期搞乱。
   check(st.final_count.load() == 0,
         "server client table not drained: " +

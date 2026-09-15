@@ -127,6 +127,7 @@
 #include <webapp/uvcpp_web_middleware.h>
 #include <webapp/uvcpp_web_router.h>
 #include <webapp/uvcpp_web_static.h>
+#include <webapp/uvcpp_web_work_limit.h>
 #include <webapp/uvcpp_web_ws.h>
 
 #if UVCPP_OPENSSL_ENABLE
@@ -314,6 +315,23 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_app& set_auto_options(bool enable);
   uvcpp_web_app& set_head_as_get(bool enable);
 
+  /**
+   * @brief 工作池在途任务上限（`uv_queue_work` 的背压闸门）。
+   *
+   * 默认是按 `UV_THREADPOOL_SIZE`（未设 → libuv 的 4）推导的 ×4、下限 16 ——
+   * 见 `uvcpp_web_work_limit`。传 **0 = 不限**（也就是不做这道保护）。
+   *
+   * 影响的是**静态文件服务**：名额满时它回 **503 + `Retry-After`**，而不是
+   * 把一个线程池任务继续堆到队尾。上传路径（3b）的分工不同 —— 那里字节还在
+   * 网上，所以它的做法是 `stream->pause()` 把压力退回去，而不是拒绝。
+   */
+  uvcpp_web_app& set_work_limit(size_t limit);
+
+  /** @brief 当前的工作池闸门。**恒非空**（默认值在构造时就装好了）。 */
+  std::shared_ptr<uvcpp_web_work_limit> work_limit() const {
+    return work_limit_;
+  }
+
 #if UVCPP_OPENSSL_ENABLE
   // -----------------------------------------------------------------
   // TLS（HTTPS）。开起来之后 WSS 自动可用（TLS 在传输层，WS 在它上面）
@@ -411,6 +429,241 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_router group(const std::string& prefix) const {
     return router_.group(prefix);
   }
+
+  // -----------------------------------------------------------------
+  // 流式请求体
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 注册一条**流式收体**路由：处理器在 body 到齐之前就运行。
+   *
+   * ```cpp
+   * app.stream_route(http_method::HTTP_PUT, "/blob/:id",
+   *                  [](uvcpp_web_request& req, uvcpp_web_response& resp,
+   *                     uvcpp_web_next) {
+   *   uvcpp_web_stream* s = req.stream();
+   *   s->on_data([](const char* d, size_t n) { ...; return true; });
+   *   s->on_end([&resp]() { resp.status(201).text("ok"); resp.end(); });
+   *   // **不要调 next()，也不要留它** —— 框架已经替你留了一份，
+   *   // 收体结束时会自己续跑。
+   * });
+   * ```
+   *
+   * 与普通路由的三点不同：
+   *
+   * | | 普通路由 | 流式路由 |
+   * |---|---|---|
+   * | handler 被调用的时机 | body **全部收完之后** | **headers 解析完、body 一个字节都还没到** |
+   * | `req.body_*()` | 完整 body | **恒为空**（一个字节都不攒） |
+   * | 怎么结束 | 当场 `resp.end()` | 在 `on_end` 里 `resp.end()` |
+   *
+   * **`next` 由框架代管。** 处理器必须**同步返回**（它返回时 body 还没到），
+   * 但链不能就此收尾 —— 所以框架替你把这个 `next` 留了起来，等 `on_end` /
+   * 中止时再续跑。处理器自己**不需要**碰 `next`（想额外留一份也行，那样
+   * 链会多挂一道，但没必要）。
+   *
+   * @warning 处理器里**同步做的任何事情都在 loop 线程上** —— 密集 IO、大块
+   *          计算必须丢给工作线程池。写盘、查库这类上传该做的事，用
+   *          `stream->pause()` 做背压，处理完再 `resume()`。
+   *
+   * @note 普通中间件照常跑（它们只看头，而头这时候是全的）。`body_limit`
+   *       这类按 `content_length()` 判断的中间件在流式请求上判的是**声明值**
+   *       ——这正是上传该被卡的地方。
+   */
+  uvcpp_web_app& stream_route(http_method method, const std::string& pattern,
+                              const uvcpp_web_handler& handler);
+
+  /** @brief `stream_route(HTTP_POST, ...)` 的便利写法。 */
+  uvcpp_web_app& post_stream(const std::string& pattern,
+                             const uvcpp_web_handler& handler);
+
+  // -----------------------------------------------------------------
+  // 上传
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 上传文件的落盘目录。
+   *
+   * **必须是一个已经存在的目录** —— 框架不替你建（建目录失败该报在哪儿、用
+   * 什么权限，是部署的事，不是框架能替使用者决定的）。目录不存在时，上传会
+   * 以 500 收场并打一条 `ERROR(UPLOAD)`。
+   *
+   * 相对路径按**进程工作目录**解析。真正参与落盘的路径由框架自己生成
+   * （`<dir>/<16 位随机十六进制>[.扩展名]`），客户端给的文件名只进元数据 ——
+   * 所以这个目录里的文件名永远是可预测形态的，不掺任何对端输入。
+   *
+   * **本函数会把目录解析成真实路径并记住**（一次有界的元数据操作，在配置期，
+   * 不在请求路径上）：那份真实路径有两个用处 —— 落盘路径的包含判断基准，
+   * 以及下面这条检查。
+   *
+   * @warning **不能把它设成静态文档根或它下面的子目录**：那等于把用户上传的
+   *          东西直接挂成静态资源（上传成功 = 立刻可被任意人 GET 到）。
+   *          这一条**是强制检查的**，见下。
+   *
+   * 「上传目录不在静态根里」这条检查在**三个时刻**各做一次 —— `set_upload_dir()`
+   * 、`serve_static()`、`start()`，因为两者谁先谁后不确定，只有三个时刻合起来
+   * 才覆盖全部配置顺序。命中时打 `ERROR(UPLOAD)` 并**拒绝启用上传**：派发时
+   * 走 500，而不是接受一个把上传物暴露成静态资源的配置。
+   */
+  uvcpp_web_app& set_upload_dir(const std::string& dir);
+
+  /**
+   * @brief 每个文件写完之后是否 `fsync`。默认**开**。
+   *
+   * 关掉更快（每个文件省一次刷盘），代价是掉电时最近写的数据可能丢。配合
+   * "handler 随后把文件 `rename` 到最终位置"才是完整的持久化序列。
+   */
+  uvcpp_web_app& set_upload_fsync(bool enable);
+
+  // -----------------------------------------------------------------
+  // 上传的尺寸上限（步骤 6）
+  // -----------------------------------------------------------------
+  //
+  // 六条上限里**只有前两条的默认值是 0（不限）**，其余四条都有出厂默认值 ——
+  // 因为"不限"这件事的代价极不对称：单文件/总长不限，吃亏的是磁盘和带宽；
+  // 而"部件头长度不限""文件数不限""字段数不限"直接就是**内存**面，默认必须
+  // 是有限的。
+  //
+  // | 限制 | 默认 | 超限行为 |
+  // |---|---|---|
+  // | `set_max_upload_size` | **0 = 不限**（启动时 WARN） | **413 + close**，临时文件全删，用户的 `on_end` 不再触发 |
+  // | `set_max_file_size` | **0 = 不限** | **截断**该部件 + `truncated()` 置位，文件**留着**交给 handler |
+  // | `set_max_upload_files` | 32 | **413 + close**，临时文件全删 |
+  // | `set_max_form_fields` | 128 | **413 + close**，临时文件全删 |
+  // | `set_max_field_size` | 1 MiB | **413 + close**，临时文件全删 |
+  // | `set_max_part_header_bytes` | 8 KiB | **400 + close**，临时文件全删 |
+  //
+  // 中间的差别不是随意的：**文件部件是流式落盘的，所以能截断**（截断的代价
+  // 是"这个文件不全"，而 `truncated()` 把它说出来了）；**字段部件是攒在内存
+  // 里的，半截的字段值是错的**，所以只能拒。同理，超长部件头是**报文畸形**
+  // （400），而不是"你要的东西太大"（413）。
+  //
+  // 全局的上限在这里设一次，**没有按路由覆盖** —— 路由级的上限要有第二张
+  // 配置表、第二处判定点，而"同一个服务上不同路由的上限不同"这个需求目前
+  // 不存在。真需要就自己用 `stream_route()` + 手动 `abort()` 写。
+
+  /**
+   * @brief 一次上传的 **body 总长**上限（字节）。默认 **0 = 不限**。
+   *
+   * @warning 默认不限意味着**默认配置下上传路径是 DoS 面**：对端可以一直发，
+   *          框架照单全收。这是刻意的取舍（见实施计划里那条锁定决策），代价是
+   *          "可发现性"必须由框架补上 —— 所以**只要注册过上传路由、而这个值
+   *          仍然是 0，启动时就会打一条 `WARN(UPLOAD)`**。
+   *
+   * 判它的是**框架自己的字节计数**（解析器那个"累计喂进来多少字节"的诚实
+   * 计数器），**不能**依赖 `body_limit` 中间件：后者对 **chunked**（没有
+   * `Content-Length`）的请求无条件放行，而 chunked 恰恰是上传最常用的编码。
+   *
+   * 判定发生在把字节喂给解析器**之前** —— 超出上限的部分一个字节都不会落盘。
+   */
+  uvcpp_web_app& set_max_upload_size(uint64_t bytes);
+
+  /** @brief 上传总长上限；0 = 不限。 */
+  uint64_t max_upload_size() const { return max_upload_size_; }
+
+  /**
+   * @brief **单个文件部件**的上限（字节）。默认 **0 = 不限**。
+   *
+   * 超限**不失败**：该部件在攒够上限字节之后转"只扫边界、不再交付"，于是
+   * 盘上留下的是**前 N 字节**，`uvcpp_web_upload_file::truncated()` 为真。
+   * 文件归 handler（"成功后归 handler"那条不变），要不要它、要不要报错，
+   * 由 handler 决定。
+   */
+  uvcpp_web_app& set_max_file_size(uint64_t bytes);
+
+  /** @brief 单文件上限；0 = 不限。 */
+  uint64_t max_file_size() const { return max_file_size_; }
+
+  /** @brief 一次上传里**文件部件**的个数上限。默认 32。超限 → 413 + close。 */
+  uvcpp_web_app& set_max_upload_files(size_t n);
+
+  /** @brief 文件部件数上限。 */
+  size_t max_upload_files() const { return max_upload_files_; }
+
+  /** @brief 一次上传里**普通字段**的个数上限。默认 128。超限 → 413 + close。 */
+  uvcpp_web_app& set_max_form_fields(size_t n);
+
+  /** @brief 字段个数上限。 */
+  size_t max_form_fields() const { return max_form_fields_; }
+
+  /** @brief **单个字段**的长度上限（字节）。默认 1 MiB。超限 → 413 + close。 */
+  uvcpp_web_app& set_max_field_size(uint64_t bytes);
+
+  /** @brief 单字段长度上限。 */
+  uint64_t max_field_size() const { return max_field_size_; }
+
+  /**
+   * @brief **单个部件头**的长度上限（字节）。默认 8 KiB。超限 → **400** + close。
+   *
+   * 为什么是 400 而不是 413：部件头超长属于**报文畸形**（正常客户端不会有几
+   * KiB 的 `Content-Disposition`），而 413 是"你要传的东西太大"。这个区分对
+   * 排障很重要 —— 前者要去查客户端拼报文的方式，后者要去调配置。
+   */
+  uvcpp_web_app& set_max_part_header_bytes(size_t n);
+
+  /** @brief 部件头上限。 */
+  size_t max_part_header_bytes() const { return max_part_header_bytes_; }
+
+  /**
+   * @brief 注册一条**上传**路由：multipart/form-data 边收边落盘，收完在
+   *        `stream()->on_end()` 里读 `req.upload()`。
+   *
+   * 它就是 `stream_route()` **加上**自动挂上去的 multipart 机制：
+   *
+   * | 框架替你做掉的 | 说明 |
+   * |---|---|
+   * | 校验 `Content-Type` | 不是 `multipart/form-data` → **415**；是但 `boundary` 缺失/畸形 → **400**。两者都在**用户 handler 之前**发生 |
+   * | 解析 multipart | 状态机按块喂，**部件 body 一个字节都不攒** |
+   * | 落盘 | 每个文件部件一个 `uvcpp_web_fs` 串行 open→write→fsync→close |
+   * | 交回结果 | `req.upload()`；失败时那些临时文件**已经删干净了** |
+   *
+   * ```cpp
+   * app.set_upload_dir("./uploads");
+   * app.upload_route(http_method::HTTP_POST, "/upload/:room",
+   *                  [](uvcpp_web_request& req, uvcpp_web_response& resp,
+   *                     uvcpp_web_next) {
+   *   req.stream()->on_end([&req, &resp]() {
+   *     const uvcpp_web_upload_result* up = req.upload();
+   *     if (up == nullptr) { resp.bad_request().end(); return; }
+   *     const uvcpp_web_upload_file* f = up->file("avatar");
+   *     resp.json_str("{\"size\":" + std::to_string(f->size()) + "}");
+   *   });
+   * });
+   * ```
+   *
+   * 三点与 `stream_route()` 不同，都是这一个 API 的存在理由：
+   *
+   * 1. **`req.upload()` 只有在这里才可能非空** —— 普通流式路由收到 multipart
+   *    也只是字节，不解析。
+   * 2. **用户的 `on_end` 会被推迟到落盘真正完成之后**（框架在流对象上装了
+   *    前置钩子，见 `uvcpp_web_stream_hooks`）—— 所以你在 `on_end` 里读到
+   *    的结果是**填好的**，不需要自己等。
+   * 3. **`req.body_*()` 依旧是空的**，`stream()->on_data()` 也照常能装 ——
+   *    想在字节层面另做点什么（算哈希、查病毒）完全可以，框架的解析器在
+   *    你的回调**之前**跑。
+   *
+   * @note **上限**（步骤 6）与**背压**（步骤 5）已经就位。六条上限的默认值与
+   *       超限行为见 `set_max_upload_size` 那一组 setter 的表格；背压是自动的
+   *       （跟不上就把读暂停，见 `uvcpp_web_upload`）。
+   *
+   * | 情形 | 谁回响应 | 状态码 |
+   * |---|---|---|
+   * | `Content-Type` 不是 multipart / `boundary` 畸形 | 框架（用户 handler 之前） | 415 / 400 |
+   * | 总长、文件数、字段数、单字段超限 | **框架**（用户的 `on_end` **不会**触发） | 413 + close |
+   * | 部件头超长 | **框架** | 400 + close |
+   * | 单文件超限 | 不失败：截断 + `truncated()`，由 handler 决定 | — |
+   * | 报文畸形 / body 被截断 | **用户**：`req.upload() == nullptr`，在 `on_end` 里自己回 | 自定义 |
+   *
+   * 最后一行的分工是有意的：**上限是框架的策略，协议错误是用户的策略**。
+   * 框架替用户回 413 是因为"谁都不该收下超限的上传"；而一份语法就错的报文该
+   * 回 400、还是记一笔告警后当空表单处理，只有业务知道。
+   */
+  uvcpp_web_app& upload_route(http_method method, const std::string& pattern,
+                              const uvcpp_web_handler& handler);
+
+  /** @brief `upload_route(HTTP_POST, ...)` 的便利写法。 */
+  uvcpp_web_app& post_upload(const std::string& pattern,
+                             const uvcpp_web_handler& handler);
 
   /**
    * @brief 把一个目录挂到 URL 前缀上（Range/ETag/304/LRU/安全边界一整套）。
@@ -688,6 +941,24 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                    uvcpp_http_request& req,
                    uvcpp_tcp_client* client);
 
+  /**
+   * @brief HTTP 层的流式认领钩子：命中 `stream_router_` 就认领这条消息。
+   *
+   * 在 headers 解析完、**body 尚未交付**时被调用。返回空 handler = 不认领，
+   * 请求走原来的"累积 body → `on_http_request`"路径（绝大多数请求都走这条）；
+   * 返回非空 = 认领，此后 `on_http_request` 不会再被调用。
+   *
+   * 命中之后立刻 `dispatch_stream()` —— 也就是**用户 handler 在这一刻就跑
+   * 起来**，它看到的是只有头、没有 body 的请求。
+   */
+  http_stream_handler claim_stream(uvcpp_http_request& req,
+                                   uvcpp_tcp_client* client);
+
+  /** @brief 认领后的派发：建上下文、挂流通道、跑链，返回接管后续事件的 handler。 */
+  http_stream_handler dispatch_stream(const web_route_match& m,
+                                      uvcpp_http_request& req,
+                                      uvcpp_tcp_client* client);
+
   /** @brief 把匹配结果变成一次链的执行。 */
   void dispatch(const std::shared_ptr<uvcpp_web_context>& ctx,
                 const web_route_match& m);
@@ -754,6 +1025,15 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   std::vector<uvcpp_web_middleware> middlewares_;
 
   /**
+   * @brief 工作池在途上限。构造时就建好（**恒非空**），所以调用方不必判空。
+   *
+   * 用 `shared_ptr` 是因为它要同时被 App 和静态服务持有：静态服务是以
+   * `shared_ptr` 交给用户的，用户完全可能让它活过 App，裸指针会在那种用法下
+   * 悬垂。
+   */
+  std::shared_ptr<uvcpp_web_work_limit> work_limit_;
+
+  /**
    * @brief WS 服务（`enable_wss()` 时惰性创建，nullptr = 没开 WS）。
    *
    * **必须比 `http_` 先销毁**（`~uvcpp_web_app` 里显式 `delete ws_server_`
@@ -776,6 +1056,118 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   uvcpp_web_router ws_router_;
   std::map<std::string, uvcpp_web_ws_handler> ws_handlers_;
+
+  /**
+   * @brief 流式路由表 —— 与 `router_` 是**两张独立的表**。
+   *
+   * 独立是必需的，不是图省事：两张表被查的**时机**差着一个 body 的距离。
+   * `router_` 在 body 收完之后查，`stream_router_` 在 headers 刚解析完、body
+   * 一个字节都还没到的时候查 —— 一次请求只可能命中其中一张。
+   *
+   * 表里存的是**包装过的** handler（框架替用户留 `next` 那一层），而不是用户
+   * 原样给的那个。所以它同时也是链缓存索引的那个指针的最终宿主。
+   *
+   * `head_as_get` / `auto_options` 都关掉：流式路由没有"HEAD 回退到 GET"的
+   * 语义（HEAD 不带 body，没什么可流），也不该被自动 OPTIONS 认领。
+   */
+  uvcpp_web_router stream_router_;
+
+  /** @brief 建链缓存时 `stream_router_` 的路由总数（失效判据用，见 `sync_chains`）。 */
+  size_t stream_routes_seen_;
+
+  /**
+   * @brief 哪些流式路由是**上传**路由，键是 `route_key(method, pattern)`。
+   *
+   * 不另建第三张路由表：上传路由与普通流式路由在**匹配**这件事上完全一样
+   * （同一条路径、同一份优先级），区别只在匹配**之后**要不要挂 multipart
+   * 机制。再建一张表就多出一份"两张表对同一个 URL 给出不同答案"的可能 ——
+   * 而这里要回答的问题只是"命中的这条是不是上传路由"，一张集合就够。
+   *
+   * 键带方法（不是裸 pattern）：同一个 pattern 上挂不同方法的流式路由是合法
+   * 的，只按 pattern 记会把它们混成一个。
+   */
+  std::set<std::string> upload_routes_;
+
+  /** @brief `upload_routes_` 的键（注册与派发两处必须用同一个函数算）。 */
+  static std::string route_key(http_method method, const std::string& pattern);
+
+  /** @brief 上传落盘目录；空 = 没配（`upload_route()` 会在派发时报 500）。 */
+  std::string upload_dir_;
+
+  /**
+   * @brief `upload_dir_` 的真实路径（`set_upload_dir()` 时解析一次并记住）。
+   *
+   * 为什么不每次请求解析：那是一次**同步**文件系统调用，跑在 loop 线程上 ——
+   * 正是本项目第一条硬要求禁止的形状。解析一次之后，请求路径上对它的使用
+   * （落盘路径的包含判断）是纯文本比较。
+   */
+  std::string upload_dir_real_;
+
+  /**
+   * @brief 已挂载的静态文档根的**真实路径**集合。
+   *
+   * `serve_static()` 每次都把根解析一遍记在这里（那一次解析本来就要做 —— 静态
+   * 服务自己需要它来判越界），顺带用于"上传目录不得落在静态根里"这条检查。
+   */
+  std::vector<std::string> static_roots_real_;
+
+  /** @brief 上一次包含检查的结论：真 = 上传目录落在某个静态根里，必须拒绝。 */
+  bool upload_dir_unsafe_;
+
+  /**
+   * @brief 在"上传目录"与"静态根"两者都已知时判一次包含关系。
+   *
+   * 三个调用点（`set_upload_dir` / `serve_static` / `start`）覆盖全部配置顺序。
+   * 命中就打 `ERROR(UPLOAD)` 并置 `upload_dir_unsafe_`（**只置位，不清位** ——
+   * 中途解除的配置不该让已经报过的错消失）。
+   */
+  void check_upload_dir_containment();
+
+  /// 每个文件写完是否 fsync。默认开（见 `uvcpp_web_upload::set_fsync`）。
+  bool upload_fsync_;
+
+  // 上传的尺寸上限（见头文件里那一组 setter 的表格）。
+  //
+  // 默认值必须与 `uvcpp_web_multipart` 的出厂默认**一致**（除了
+  // `max_field_size_`：解析器的默认也是 0 = 不限，而框架这一层把它收到 1 MiB
+  // —— 字段是攒在内存里的，默认不限说不过去）。两处不一致的话，
+  // "`wire_upload()` 有没有把值转下去"这件事就会变成一个看不出来的差异。
+  uint64_t max_upload_size_;      ///< 0 = 不限（启动时 WARN）。
+  uint64_t max_file_size_;        ///< 0 = 不限；超限截断。
+  size_t   max_upload_files_;     ///< 默认 32。
+  size_t   max_form_fields_;      ///< 默认 128。
+  uint64_t max_field_size_;       ///< 默认 1 MiB。
+  size_t   max_part_header_bytes_;///< 默认 8 KiB。
+
+  /**
+   * @brief 命中上传路由但报文不合格时的统一出口：填响应、发出去、摘掉后续。
+   *
+   * 走**空链**而不是用户链：这条路由声明了"我只收 multipart"，把别的格式交给
+   * 用户，用户唯一能做的就是自己再判一次然后自己回 415 —— 而这个判断框架
+   * 已经做过了。空链让 `advance()` 立刻收尾，把上面填好的响应发出去。
+   */
+  void reject_upload(uvcpp_web_context& ctx, int status,
+                     const std::string& message);
+
+  /**
+   * @brief 命中上传路由时的全部接线：校验 → 建解析器与会话 → 装框架钩子。
+   *
+   * @return 接线成功（`ctx->request().upload()` 已可用）为 true；已经在内部
+   *         回好了错误响应（415/400/500）为 false，调用方直接返回并停止派发。
+   */
+  bool wire_upload(uvcpp_web_context& ctx, uvcpp_web_stream& stream);
+
+  /**
+   * @brief 按连接 id 取**此刻还活着**的流对象；上下文已收场则返回 nullptr。
+   *
+   * 上传路径上的背压回调（pause/resume/abort）与落盘完成回调都**不能**捕获
+   * `&stream`：会话的异步完成回调按值捕了 `shared_from_this()`，所以
+   * `uvcpp_web_upload` 可能比流对象活得久（停机、或者连接在落盘期间被收走），
+   * 那时读一个悬垂的 `uvcpp_web_stream&` 就是 use-after-free。
+   *
+   * id 是单调递增且**永不复用**的，所以"查得到"就等于"还是那一个"。
+   */
+  uvcpp_web_stream* live_stream(uvcpp_web_conn_id id) const;
 
   /**
    * @brief 已经升级成 WS 的连接 id —— `idle_sweep()` 要跳过它们。

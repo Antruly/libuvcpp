@@ -74,6 +74,7 @@
 #include <uvcpp/uvcpp_export.h>
 #include <webapp/uvcpp_web_handler.h>
 #include <webapp/uvcpp_web_mime.h>
+#include <webapp/uvcpp_web_work_limit.h>
 
 namespace uvcpp {
 
@@ -214,6 +215,16 @@ class UVCPP_API uvcpp_web_static {
 
   const uvcpp_web_static_options& options() const;
 
+  /**
+   * @brief 构造函数解析并缓存的**真实**文档根。
+   *
+   * 空串 = 配置错误（构造时 `web_real_path()` 失败，已打过 `ERROR`）。拿它做
+   * "别的目录是不是落在本根里"这类判断 —— 典型是 `uvcpp_web_app` 拒绝把上传
+   * 目录设在文档根里。**返回的是构造时那一次解析的结果，不是重新解析**：
+   * 调用方本就需要一个稳定基准，再算一遍既浪费又可能因为目录被换掉而不一致。
+   */
+  const std::string& root_real() const;
+
   /** @brief 清空 LRU 缓存（例如部署了新版本之后）。**只能在 loop 线程调**。 */
   void clear_cache();
 
@@ -240,6 +251,29 @@ class UVCPP_API uvcpp_web_static {
    */
   void serve(uvcpp_web_request& req, uvcpp_web_response& resp,
              uvcpp_web_next next, uvcpp_loop* loop);
+
+  /**
+   * @brief 装上工作池在途上限。
+   *
+   * 装上之后，`serve()` 在**投递读盘任务之前**先要一个名额；拿不到就当场回
+   * **503 + `Retry-After`**，一个线程池任务都不投。
+   *
+   * 为什么静态路径只能拒绝、不能背压：走到这里时请求**已经整包读完**了
+   * （静态路由是普通路由，body 早收完），字节不在网上，没有"让对端慢点发"
+   * 这种退路。上传路径相反 —— 那里字节还在读，所以它的分工是
+   * `stream->pause()`，见 `uvcpp_web_work_limit` 的说明。
+   *
+   * @param limit 共享持有（App 传自己的那个）；**传空 = 不限**，也就是本类
+   *              原本的行为。直接构造 `uvcpp_web_static` 的使用者不调它，
+   *              行为与从前完全一致。
+   */
+  void set_work_limit(const std::shared_ptr<uvcpp_web_work_limit>& limit);
+
+  /** @brief 当前装着的上限对象；没装时为**空**。 */
+  std::shared_ptr<uvcpp_web_work_limit> work_limit() const;
+
+  /** @brief 因为工作池满而被回绝（503）的请求数。 */
+  unsigned long long rejected_count() const;
 
  private:
   struct Impl;

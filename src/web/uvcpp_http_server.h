@@ -77,6 +77,37 @@ using http_stream_handler = std::function<void(
     uvcpp_tcp_client* client)>;
 
 /**
+ * @brief Streaming claim hook — decides, at headers time, who owns the body.
+ *
+ * Called once per message, after the headers are parsed but **before any body
+ * byte is delivered**. Returning an **empty** handler means "not claimed": the
+ * request takes the ordinary path (body accumulated into the request, then the
+ * route handler runs). Returning a **non-empty** handler means "claimed": body
+ * bytes are handed to it as @ref http_stream_event::BODY, the message end as
+ * @ref http_stream_event::END, and **`on_request` / the route handler is never
+ * called for this message**.
+ *
+ * How it differs from @ref post_stream: that one is a convenience registration
+ * for "POST + exact path" and is matched first. This hook is consulted for
+ * every request and constrains neither the method nor the path shape, which is
+ * what a caller with its own router (patterns, params, wildcards) needs — it
+ * does the matching itself and claims selectively.
+ *
+ * @param req     Headers-only view of the request. Valid only for the duration
+ *                of the call: copy anything you need to keep.
+ * @param client  The connection, for the rare case the decision depends on it.
+ * @return The stream handler that takes over this request's body, or an empty
+ *         function to leave the request alone.
+ *
+ * @warning Runs on the event-loop thread, inside the parser's header callback.
+ *          Keep it fast — no I/O, no blocking. A claimed request's body is
+ *          **not** subject to @ref set_max_body_size (the server never buffers
+ *          it); a claimer that needs a cap enforces its own.
+ */
+using http_stream_claim = std::function<http_stream_handler(
+    uvcpp_http_request& req, uvcpp_tcp_client* client)>;
+
+/**
  * @brief Raw TCP data hook — sees every inbound chunk BEFORE the HTTP parser.
  *
  * Lets an application observe or take over a connection at the byte level,
@@ -152,6 +183,25 @@ class UVCPP_API uvcpp_http_server {
   void post(const std::string& path, http_request_handler handler);
   /** @brief Register a streaming-body handler for POST + exact path. */
   void post_stream(const std::string& path, http_stream_handler handler);
+
+  /**
+   * @brief Install the streaming claim hook (see @ref http_stream_claim).
+   *
+   * Single slot — installing a new hook replaces the previous one; passing an
+   * empty std::function is equivalent to @ref clear_stream_claim.
+   *
+   * Matching order per message: a `post_stream` route is tried first (it is a
+   * registration, not a policy); only if nothing matched is the claim hook
+   * asked. So a hook cannot accidentally shadow an explicitly registered
+   * streaming route.
+   */
+  void set_stream_claim(http_stream_claim hook);
+
+  /** @brief Remove the claim hook (no request is ever claimed). */
+  void clear_stream_claim();
+
+  /** @brief Whether a claim hook is currently installed. */
+  bool has_stream_claim() const;
   /** @brief Register a handler for PUT + exact path. */
   void put(const std::string& path, http_request_handler handler);
   /** @brief Register a handler for DELETE + exact path. */
@@ -362,9 +412,76 @@ class UVCPP_API uvcpp_http_server {
     http_stream_handler stream_handler;  // non-empty once a stream route matched
     uvcpp_http_request stream_request;   // request view handed to the stream handler
 
+    /**
+     * @brief Whether @ref stream_request was built for this message.
+     *
+     * A claim hook (the framework installs one for every connection) forces the
+     * headers to be copied at headers time even though most requests are never
+     * claimed. Without this flag, on_request_complete would rebuild the same
+     * request — paying a second full copy of the header vector per request.
+     * When set, the completion path reuses @ref stream_request instead.
+     */
+    bool stream_view_built = false;
+
     // --- Body accounting for the current message ---
     size_t body_bytes = 0;        // body bytes seen so far
     bool body_overflow = false;   // exceeded max_body_size_; buffering stopped
+
+    /**
+     * @brief A response was already sent during the headers callback.
+     *
+     * Set by the early-rejection paths (417 unknown Expect, 413 by declared
+     * Content-Length). The message is still going to be parsed to completion —
+     * we cannot make llhttp skip the body — so every later stage has to keep
+     * quiet: on_request_complete must not route it (that would send a second
+     * response, and the body_overflow branch would send a third), and the body
+     * callbacks must not accumulate anything.
+     */
+    bool rejected = false;
+
+    /**
+     * @brief Close the connection once this message ends, not right now.
+     *
+     * The early rejections answer while the client is still sending the body.
+     * Closing at that moment is a real problem on Windows: closing a socket
+     * that still has unread data in its receive buffer makes the stack send an
+     * RST, and an RST discards whatever the peer has buffered but not yet read
+     * — including the 413 we just wrote. So the write is queued, the flag is
+     * set, and the close happens in on_request_complete, once the client has
+     * stopped sending.
+     */
+    bool close_after_message = false;
+
+    /**
+     * @brief A close was decided while the body was still arriving; do it at
+     *        message end instead.
+     *
+     * @ref close_after_message is set by the headers-time rejections, which know
+     * up front that they are answering early. This flag is the *runtime*
+     * version of the same rule: a claimed stream handler is free to answer (and
+     * ask for the connection to close) from any BODY callback, since it may
+     * decide to stop reading an upload the moment it sees enough of it. That
+     * response is written while the peer is still sending, so closing right
+     * after the write hits exactly the Windows RST problem described on
+     * @ref close_after_message — the response we just wrote sits unread in the
+     * peer's receive buffer and an RST discards it.
+     *
+     * pump_write() therefore parks the close here and on_request_complete()
+     * honours it once the parser reports the message complete (the peer has
+     * stopped sending by then). Only ever set while @ref stream_handler is
+     * installed, so a malformed message — which never completes and so has no
+     * one to hand the close to — can still close immediately.
+     */
+    bool defer_close_to_message_end = false;
+
+    /**
+     * @brief The message carried `Expect: 100-continue` (HTTP/1.1 only).
+     *
+     * Recorded at headers time and acted on there — the interim response is
+     * queued before the parser returns, so the client can start sending the
+     * body without waiting for its own timer.
+     */
+    bool expect_continue = false;
 
     // --- Per-message facts captured at request completion ---
     // The parser is reset lazily on the next inbound chunk, so anything
@@ -394,6 +511,39 @@ class UVCPP_API uvcpp_http_server {
   /** @brief Apply response compression in place; returns true if applied. */
   bool apply_compression(conn_ctx& ctx, uvcpp_http_response& resp);
 
+  /**
+   * @brief Answer during the headers callback and stop caring about the rest.
+   *
+   * Queues a `Connection: close` response, marks the context rejected so no
+   * later stage answers again, and arranges for the close to happen at message
+   * end rather than now (see @ref conn_ctx::close_after_message).
+   */
+  void reject_early(conn_ctx& ctx, uvcpp_tcp_client* client, http_status status);
+
+  /**
+   * @brief Validate `Expect` and record `100-continue` if asked for.
+   *
+   * @return false if the request was answered (417) and the caller must stop;
+   *         true to carry on.
+   *
+   * HTTP/1.0 is exempt: Expect has no meaning there (RFC 7231 §5.1.1), and
+   * failing a 1.0 message over a header it never defined would break clients
+   * talking through proxies that forward it blindly.
+   */
+  bool check_expect_header(conn_ctx& ctx, uvcpp_tcp_client* client);
+
+  /**
+   * @brief Refuse, before the body arrives, a message whose declared
+   *        Content-Length is over @ref max_body_size_.
+   *
+   * Chunked messages have no declared length and cannot be refused this way;
+   * they still hit the message-complete check once the cap is exceeded.
+   *
+   * @return false if the request was answered (413) and the caller must stop;
+   *         true to carry on.
+   */
+  bool reject_oversized_declared(conn_ctx& ctx, uvcpp_tcp_client* client);
+
   void remove_ctx(uvcpp_tcp_client* client);
 
   // -------------------------------------------------------------------
@@ -410,6 +560,7 @@ class UVCPP_API uvcpp_http_server {
   /** @brief 新连接钩子（`on_connection`），早于该连接上的任何请求。 */
   std::function<void(uvcpp_tcp_client*)> connection_handler_;
   http_raw_data_hook raw_data_hook_;
+  http_stream_claim stream_claim_;
 
   /** @brief Request body cap in bytes; 0 means unlimited. */
   size_t max_body_size_ = 0;

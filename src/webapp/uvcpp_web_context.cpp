@@ -229,6 +229,66 @@ void uvcpp_web_context::advance() {
   if (chain_finished_) finish();
 }
 
+// =========================================================================
+// 流式请求体
+// =========================================================================
+
+uvcpp_web_stream* uvcpp_web_context::attach_stream(uint64_t total,
+                                                   bool has_total) {
+  if (stream_ != nullptr) return stream_.get();  // 幂等：重复挂不该换对象
+
+  stream_.reset(new uvcpp_web_stream(*this));
+  stream_->prime(total, has_total);
+  req_.set_stream(stream_.get());
+  return stream_.get();
+}
+
+void uvcpp_web_context::stream_deliver(const char* data, size_t len) {
+  if (stream_ == nullptr) return;
+  if (stream_->delivered_end() || stream_->aborted()) return;
+  stream_->deliver_data(data, len);
+}
+
+void uvcpp_web_context::stream_end() {
+  if (stream_ == nullptr) return;
+  if (stream_->delivered_end() || stream_->aborted()) return;
+
+  // 顺序不能反：先让用户把响应填好，再续跑链（链收尾会立刻把响应发出去）。
+  stream_->deliver_end();
+  if (stream_->aborted()) return;  // on_end 里 abort 了：它自己已经续过跑
+
+  // 框架槽把用户的 on_end 扣住了（上传路由的落盘还没完）：**链继续挂着**，
+  // 由 `release_end()` 收口。这里绝不能续跑 —— 链一收尾就按当前（还是空的）
+  // 响应发出去，用户后面填的那个就再也发不出来了。
+  if (stream_->end_deferred()) return;
+
+  stream_resume_chain();
+}
+
+void uvcpp_web_context::stream_abort() {
+  if (stream_ == nullptr) return;
+  if (stream_->delivered_end() || stream_->aborted()) return;
+
+  stream_->deliver_abort();
+  stream_resume_chain();
+}
+
+void uvcpp_web_context::stream_resume_chain() {
+  if (stream_ == nullptr) return;
+
+  // **取走**，不是拷一份：`resume_` 捕获着本上下文（`self`），而本上下文持有
+  // stream_ —— 留下副本就是 ctx → stream → resume_ → ctx 的环，链跑完了上下文
+  // 也永远不会析构。取走之后环断开，`finish()` 里 host 一松手就真回收了。
+  uvcpp_web_next resume;
+  if (!stream_->take_resume(&resume)) return;
+
+  // resume() 内部走的是 `post()`：在 loop 线程上就地执行 `advance()`，
+  // 于是链从挂起处续跑、发现没有下一环、收尾并发送响应。本对象的所有权在
+  // 调用方手里（HTTP 层的流式 handler 捕获着 shared_ptr），所以即便
+  // `context_finished()` 把 inflight_ 里那份摘了，这里也不会悬垂。
+  resume();
+}
+
 void uvcpp_web_context::abort() {
   if (finished_) return;
 

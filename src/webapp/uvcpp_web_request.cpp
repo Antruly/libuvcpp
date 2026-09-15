@@ -7,6 +7,11 @@
 
 #include <cstdlib>
 
+// 只为**缓冲式** multipart（普通路由上的 `form()` / `file()`，见
+// `parse_multipart_form()`）。放在 `.cpp` 里而不是头文件里：那个头不必被每个
+// 包含请求头的编译单元拖进来。
+#include <webapp/uvcpp_web_multipart.h>
+
 namespace uvcpp {
 
 namespace {
@@ -50,6 +55,73 @@ std::string mime_base(const std::string& content_type) {
                                    : content_type.substr(0, semi)));
 }
 
+/**
+ * @brief 把一份 multipart 报文收进两个内存容器：字段与文件。
+ *
+ * 用的是**和上传路径完全同一个** `uvcpp_web_multipart`，只是换了个 sink ——
+ * 解析器与"东西收到哪儿去"本来就是分开的两件事（那个头文件里写着它是纯状态机、
+ * 无 IO、不碰请求对象）。所以跨块、近似边界、quoted-pair 这些坑不需要在这里
+ * 再解一遍，也不会出现"上传路径修好了、表单路径还留着老 bug"这种分叉。
+ *
+ * 内存上界：**不额外增加**。普通路由的 body 本来就已经整包收在内存里（受
+ * `max_body_size` 约束），这里的 `data` 是那份内存的切分。所以这条路径不适合
+ * 大文件 —— 那是 `upload_route()` 的活。**上传总长上限那一套（413 + close）
+ * 在这里不适用**：请求早就整包读完了，没有"拒收"这个选项；能做的只是别在
+ * 上面再叠一份放大。
+ *
+ * 用下标而不是指针指向"当前部件"：`vector` 的 `push_back` 会让之前取到的
+ * `&back()` 失效，而"下一个部件开始时忘掉旧指针"这种事只能靠人记住。下标没有
+ * 这个问题。
+ */
+class form_sink : public uvcpp_web_multipart_sink {
+ public:
+  form_sink(std::vector<std::pair<std::string, std::string> >& fields,
+            std::vector<uvcpp_web_form_file>& files)
+      : fields_(fields), files_(files), file_index_(0), field_index_(0) {}
+
+  bool on_part_begin(const uvcpp_web_part_info& info) {
+    if (info.is_file) {
+      uvcpp_web_form_file f;
+      f.name = info.name;
+      // **清洗**：与 `uvcpp_web_upload_file::original_filename()` 同一把尺子
+      // （`web_sanitize_filename`）。两边给同一个概念两种语义是个陷阱 ——
+      // 何况这里返回的客户端原值可以直接是 `..\..\x`。
+      f.filename = web_sanitize_filename(info.filename);
+      f.content_type = info.content_type;
+      files_.push_back(f);
+      file_index_ = files_.size();
+      field_index_ = 0;
+    } else {
+      fields_.push_back(std::make_pair(info.name, std::string()));
+      field_index_ = fields_.size();
+      file_index_ = 0;
+    }
+    return true;
+  }
+
+  bool on_part_data(const char* data, size_t len) {
+    if (file_index_ > 0) {
+      files_[file_index_ - 1].data.append(data, len);
+    } else if (field_index_ > 0) {
+      fields_[field_index_ - 1].second.append(data, len);
+    }
+    return true;
+  }
+
+  void on_part_end(bool truncated) {
+    // 这个 sink **不配**任何尺寸上限（`max_file_size` / `max_field_size` 保持
+    // 默认的 0 = 不限），因为整包本来就已经在内存里了，再截断只是把一份已经在
+    // 手上的数据丢掉。所以 `truncated` 在这里构造性地恒为假。
+    (void)truncated;
+  }
+
+ private:
+  std::vector<std::pair<std::string, std::string> >& fields_;
+  std::vector<uvcpp_web_form_file>& files_;
+  size_t file_index_;   ///< 1 起；0 = 当前部件不是文件
+  size_t field_index_;  ///< 1 起；0 = 当前部件不是字段
+};
+
 }  // namespace
 
 // =========================================================================
@@ -57,7 +129,9 @@ std::string mime_base(const std::string& content_type) {
 // =========================================================================
 
 uvcpp_web_request::uvcpp_web_request()
-    : src_(),
+    : stream_(nullptr),
+      upload_(nullptr),
+      src_(),
       body_(),
       raw_url_(),
       raw_path_(),
@@ -77,6 +151,8 @@ uvcpp_web_request::uvcpp_web_request()
       query_params_(),
       cookies_(),
       form_params_(),
+      form_files_(),
+      multipart_ok_(true),
       params_() {}
 
 uvcpp_web_request::~uvcpp_web_request() {}
@@ -259,6 +335,11 @@ uvcpp_web_request::form_params() const {
       // 才付这次拷贝。表单和查询串的编码规则相同（`+` 是空格、
       // `%XX` 是字节），所以直接复用 web_parse_query。
       form_params_ = web_parse_query(body_str());
+    } else if (is_multipart()) {
+      // **这里是步骤 8 之前的一个窟窿**：multipart 请求走到这里原本什么都不做，
+      // 于是 `req.form("x")` 对一份完全合法的 multipart 表单**静默返回空** ——
+      // 不是"没这个字段"，而是"框架装作它是个空表单"。handler 分不出这两者。
+      parse_multipart_form();
     }
   }
   return form_params_;
@@ -266,6 +347,77 @@ uvcpp_web_request::form_params() const {
 
 const std::string* uvcpp_web_request::form(const std::string& name) const {
   return web_find_param(form_params(), name);
+}
+
+const std::vector<uvcpp_web_form_file>& uvcpp_web_request::files() const {
+  // 借道 `form_params()` 而不是自己判 `form_parsed_`：**同一次解析**同时填两个
+  // 容器，共用一个惰性标志。分成两个标志的话，"只问 form() 的调用方"会让文件
+  // 部件永远不被解析，而"先 form() 再 file()"会整份重解第二遍。
+  (void)form_params();
+  return form_files_;
+}
+
+const uvcpp_web_form_file* uvcpp_web_request::file(
+    const std::string& name) const {
+  const std::vector<uvcpp_web_form_file>& v = files();
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (v[i].name == name) return &v[i];
+  }
+  return nullptr;
+}
+
+bool uvcpp_web_request::multipart_ok() const {
+  // 不是 multipart 就**不适用**，不是错误 —— 返回 true。让一个 urlencoded 表单
+  // 因为"不是 multipart"而看到 false，会诱使调用方写"if (!multipart_ok())
+  // 回 400"，那会把正常的表单全拒掉。
+  if (!is_multipart()) return true;
+  (void)form_params();
+  return multipart_ok_;
+}
+
+void uvcpp_web_request::parse_multipart_form() const {
+  multipart_ok_ = true;
+
+  // boundary 缺失/畸形 ⇒ 报文本身无法划分。回 400 是**路由**该做的事，这里
+  // 只能如实报告"没解出来"（`multipart_ok() == false`），别自作主张回状态码 ——
+  // 请求对象没有响应通道。
+  const std::string boundary = web_multipart_boundary(content_type_);
+  if (boundary.empty()) {
+    multipart_ok_ = false;
+    return;
+  }
+
+  form_sink sink(form_params_, form_files_);
+  uvcpp_web_multipart mp;
+  mp.set_sink(&sink);
+  if (!mp.set_boundary(boundary)) {
+    multipart_ok_ = false;
+    return;
+  }
+
+  // 空 body 直接调 feed(nullptr, 0) 是没必要的边界情形（一份 multipart 至少
+  // 得有终边界），但 guard 一下省得依赖 feed 对 nullptr 的容忍度。
+  uvcpp_web_multipart_result r =
+      (body_size() > 0)
+          ? mp.feed(body_data(), body_size())
+          : uvcpp_web_multipart_result::OK;
+  // 只有"还没结束"才需要 finish()；feed 已经给出终态（含错误）时它的返回值
+  // 就是结论。finish() 的语义是"body 收完了"—— 对一份**已经整包**的 body，
+  // 它负责把"终边界从没出现"这件事判出来（报文被掐断）。
+  if (r == uvcpp_web_multipart_result::OK) r = mp.finish();
+
+  if (r != uvcpp_web_multipart_result::DONE) {
+    // **失败时清空**，而不是把半份结果交出去。契约写在头文件里
+    // （`files()` 的注释）：解析失败时两个容器都是空的，靠 `multipart_ok()`
+    // 区分"空表单"和"坏了"。交出半份更危险 —— handler 读到的是一个**看起来
+    // 合法**的截断值（比如金额、数量），而它没有任何迹象表明自己被截断了。
+    multipart_ok_ = false;
+    form_params_.clear();
+    form_files_.clear();
+    return;
+  }
+
+  multipart_ok_ = true;
 }
 
 const std::string* uvcpp_web_request::cookie(const std::string& name) const {

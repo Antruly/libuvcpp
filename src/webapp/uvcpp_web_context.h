@@ -78,6 +78,7 @@
 #include <webapp/uvcpp_web_handler.h>
 #include <webapp/uvcpp_web_request.h>
 #include <webapp/uvcpp_web_response.h>
+#include <webapp/uvcpp_web_stream.h>
 
 namespace uvcpp {
 
@@ -274,6 +275,46 @@ class UVCPP_API uvcpp_web_context
   const uvcpp_web_response& response() const { return resp_; }
 
   // -----------------------------------------------------------------
+  // 流式请求体
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 把这个请求变成流式收体，并返回通道。
+   *
+   * **必须在链跑起来之前调**（框架的认领钩子就是这么做的）：`run()` 之后
+   * 用户 handler 已经能看到 `req.stream()` 了，中途再挂是没有意义的。
+   *
+   * 挂上之后 `req.body_*()` 恒为空 —— body 一个字节都不会被攒起来，全部按块
+   * 送进返回的对象。
+   *
+   * @param total     声明的总长（`Content-Length`）。
+   * @param has_total 长度是否已知（chunked 上传时为假）。
+   */
+  uvcpp_web_stream* attach_stream(uint64_t total, bool has_total);
+
+  /** @brief 流式通道；非流式请求返回 nullptr。 */
+  uvcpp_web_stream* stream() { return stream_.get(); }
+  const uvcpp_web_stream* stream() const { return stream_.get(); }
+
+  /** @brief 这个请求是否流式收体。 */
+  bool streaming() const { return stream_ != nullptr; }
+
+  /**
+   * @brief 交付一块 body 数据（由 HTTP 层的流式回调调用）。
+   *
+   * 已经收尾 / 已中止的流会**直接丢弃**：链可能因为中间件短路而提前跑完，
+   * 但 HTTP 层的 body 回调还会继续来 —— 那不是错误，不该报出来。
+   */
+  void stream_deliver(const char* data, size_t len);
+
+  /** @brief 交付消息结束。 */
+  void stream_end();
+
+  /** @brief 交付中止（对端断开 / 框架掐断）。 */
+  void stream_abort();
+
+
+  // -----------------------------------------------------------------
   // 控制流
   // -----------------------------------------------------------------
 
@@ -313,6 +354,15 @@ class UVCPP_API uvcpp_web_context
   size_t chain_size() const { return chain_ != nullptr ? chain_->size() : 0; }
 
  private:
+  /**
+   * @brief 流对象要能自己收尾（`uvcpp_web_stream::abort()` 填完响应后续跑链）。
+   *
+   * 让 `uvcpp_web_stream` 直接调私有的 `stream_resume_chain()`，而不是在这里
+   * 开一个 `stream_reject(int)` 之类的公开方法：那个方法一旦公开，就多了一条
+   * "从外部改别人响应"的路径，而真正需要它的只有流对象自己。
+   */
+  friend class uvcpp_web_stream;
+
   uvcpp_web_context(uvcpp_web_context_host& host, uvcpp_web_conn_id conn_id);
   uvcpp_web_context(const uvcpp_web_context&);
   uvcpp_web_context& operator=(const uvcpp_web_context&);
@@ -328,12 +378,35 @@ class UVCPP_API uvcpp_web_context
   /** @brief 收尾：发送 / abort / 通知 host。幂等。 */
   void finish();
 
+  /**
+   * @brief 流式请求的收口：把链续跑（如果还挂得住），让它走 `finish()`。
+   *
+   * 三种收口（`on_end` 正常收完 / 用户 `abort(status)` / 对端断开）都汇到
+   * 这里，因为它们的区别只在"响应填成什么样"，而"链要动起来"是一样的。
+   *
+   * @warning 续跑凭据是**取走**的（`take_resume`），不是留着 —— 留着就是
+   *          `ctx → stream → resume_ → ctx` 的引用环，链跑完了上下文也不会
+   *          析构。取走之后链正常收尾，上下文该销毁就销毁。
+   */
+  void stream_resume_chain();
+
   uvcpp_web_context_host& host_;
   uvcpp_web_conn_id       conn_id_;
 
   // 按值持有：两者都不可拷贝不可移动，而且这样它们的生存期天然等于上下文的。
   uvcpp_web_request  req_;
   uvcpp_web_response resp_;
+
+  /**
+   * @brief 流式通道；只有被认领的请求才有（其余恒为 nullptr）。
+   *
+   * 用 `unique_ptr` 而不是按值成员：绝大多数请求不是流式的，为一个四个
+   * `std::function` 的对象付出每请求一次的构造/析构不划算。
+   *
+   * 它**先于 `req_` 之后析构**无所谓 —— `req_` 只存了它的裸指针，析构时
+   * 不会碰它（`stream()` 是纯取值）。
+   */
+  std::unique_ptr<uvcpp_web_stream> stream_;
 
   const std::vector<uvcpp_web_handler>* chain_;
   size_t chain_index_;

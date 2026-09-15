@@ -1,6 +1,17 @@
 # Build directories
+#
+# 带连字符的变体（build-ssl / build-webapp / build-nopool / build-dbg / build-test）
+# 原先**一条规则都不匹配**。它们之所以大多没有出现在 `git status` 里，是因为
+# CMake 构建树的内容恰好被下面的 `*.txt` / `*.cmake` / `CMakeFiles/` / `_deps/`
+# 兜住了 —— 那是**巧合，不是覆盖**：只要树里出现一个不匹配那些模式的产物
+# （.log / .dll / .exe / .obj / .json …），整个目录就会变成未跟踪，
+# 一次 `git add -A` 就把它整个吞进去。
+#
+# 用带尾斜杠的形式（只匹配目录）：仓库里有一个**已被跟踪**的文件
+# `build-ssl-run.sh`，写成 `build*` 会连它一起匹配上。
 build/
 build_*/
+build-*/
 build_noexpand/
 build_nopool/
 out/
@@ -11,6 +22,11 @@ Testing/
 # Development docs / temp
 docs/
 *.txt
+# tests/tools/*.py 之间有 import（upload_mutation_probe / v5_probe 会被主驱动拉起），
+# 跑一次就在 tests/tools/ 下留一个 __pycache__/。它同样是未跟踪状态，
+# 步骤 9 那轮是靠手工删掉的。
+__pycache__/
+*.pyc
 websocket_parser.h
 websocket_parser.c
 stdout.txt

@@ -509,6 +509,18 @@ struct uvcpp_web_static::Impl {
   uvcpp_web_static_options opts;
   std::shared_ptr<static_config> cfg;
 
+  /**
+   * @brief 工作池在途上限（可空 = 不限）。
+   *
+   * 共享持有而不是裸指针：App 把**自己的**那个传进来，而静态服务是
+   * `shared_ptr` 交给用户的 —— 用户完全可能拿着它活过 App。裸指针会在那种
+   * 用法下悬垂，`shared_ptr` 让"谁先死"都不成问题。
+   */
+  std::shared_ptr<uvcpp_web_work_limit> work_limit;
+
+  /** @brief 被 503 挡掉的请求数（观测用；只在 loop 线程加减）。 */
+  unsigned long long rejected;
+
   std::list<std::string> lru;  ///< 队首 = 最近使用
   std::map<std::string, cache_entry> cache;
   size_t bytes;
@@ -528,7 +540,7 @@ struct uvcpp_web_static::Impl {
    */
   std::vector<uvcpp_work*> retired;
 
-  Impl() : bytes(0), hits(0), misses(0) {}
+  Impl() : bytes(0), hits(0), misses(0), rejected(0) {}
 
   ~Impl() { drain_retired(); }
 
@@ -977,6 +989,10 @@ uvcpp_web_static::uvcpp_web_static(const std::string& root_dir,
 
 uvcpp_web_static::~uvcpp_web_static() { delete impl_; }
 
+const std::string& uvcpp_web_static::root_real() const {
+  return impl_->cfg->root_real;
+}
+
 void uvcpp_web_static::clear_cache() { impl_->clear_cache(); }
 
 size_t uvcpp_web_static::cache_entries() const {
@@ -989,6 +1005,19 @@ unsigned long long uvcpp_web_static::cache_hits() const { return impl_->hits; }
 
 unsigned long long uvcpp_web_static::cache_misses() const {
   return impl_->misses;
+}
+
+void uvcpp_web_static::set_work_limit(
+    const std::shared_ptr<uvcpp_web_work_limit>& limit) {
+  impl_->work_limit = limit;
+}
+
+std::shared_ptr<uvcpp_web_work_limit> uvcpp_web_static::work_limit() const {
+  return impl_->work_limit;
+}
+
+unsigned long long uvcpp_web_static::rejected_count() const {
+  return impl_->rejected;
 }
 
 void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
@@ -1060,6 +1089,31 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
     // ALLOW：照常往下走
   }
 
+  // 工作池名额：**投递之前**拿，拿不到就一个任务都不投。
+  //
+  // 位置在最后一条同步回绝（dotfile）之后、`new job` 之前 —— 顺序是有意的：
+  //   - 放在前面等于"为了回一个 403/404 先占一个线程池名额"，纯浪费；
+  //   - 放在 `queue_work` 之后就没有意义了，那时任务已经在队列里了。
+  //
+  // 拿不到名额时**不留 `next`**：响应当场填好，框架照常收尾并把它发出去，
+  // 与上面几条同步路径形状完全一致。
+  //
+  // 这是个**准入**而不是排队 —— 队列在这里没有任何好处：请求已经在手上，
+  // 堆着不投只是把线程池的队列换成我们自己的队列，内存照爆，还多一层延迟。
+  if (im->work_limit && !im->work_limit->acquire()) {
+    ++im->rejected;
+    UVCPP_LOG_WARN(log_category::STATIC)
+        << "工作池已满（在途 " << im->work_limit->in_flight() << " / "
+        << im->work_limit->limit() << "），拒绝静态请求 " << url;
+    resp.service_unavailable();
+    // `Retry-After` 是 503 的配套语义（RFC 9110 §10.2.3）：告诉对端"等 1 秒
+    // 再来"。**必须给这个头** —— 没有它，客户端只能靠猜，实测最常见的反应
+    // 是立刻重试，正好把已经饱和的池子压得更死。
+    resp.set_header("retry-after", "1");
+    resp.end();
+    return;
+  }
+
   Impl::job* j = new Impl::job();
   j->self = im;
   j->cfg = im->cfg;
@@ -1081,6 +1135,14 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
       loop,
       [j](uvcpp_work*) { j->self->run_job(j); },
       [j](uvcpp_work* w, int) {
+        // 这个回调**本身就是"worker 已经返回"**，所以名额在这里就该还 ——
+        // 早还一拍，排在后面的请求就早一拍被受理。
+        //
+        // 与 `serve()` 里的 `rc != 0` 分支**互斥**（libuv 的约定：
+        // `uv_queue_work` 返回 0 才会调 after_work），而且两条路都会 `delete
+        // j`，所以不存在还两次的可能。
+        if (j->self->work_limit) j->self->work_limit->release();
+
         // **绝对不能在回调里 `delete w`。**
         //
         // `w->m_after_work_cb` 就是**正在执行的这个闭包本身** —— 它的存储
@@ -1114,6 +1176,8 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
     UVCPP_LOG_ERROR(log_category::STATIC)
         << "投递静态读盘任务失败（" << rc << "）";
     delete work;
+    // 任务从来没进过池子，所以名额要还（与 after_work 回调互斥，见那里的注释）。
+    if (im->work_limit) im->work_limit->release();
     // 删掉 job 同时也就丢掉了 next 的那份副本，于是框架照常收尾、
     // 把下面这个 500 发出去。
     delete j;

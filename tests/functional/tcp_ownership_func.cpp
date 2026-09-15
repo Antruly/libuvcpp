@@ -100,7 +100,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
   sockaddr_in name;
   int namelen = sizeof(name);
   server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
-  port_promise.set_value(ntohs(name.sin_port));
+  const int port = ntohs(name.sin_port);
 
   rc = server.listen(
       [&](uvcpp_tcp_client* client) {
@@ -138,7 +138,14 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
       },
       128);
 
-  if (rc != 0) return;
+  if (rc != 0) {
+    port_promise.set_value(-1);
+    return;
+  }
+  // **端口必须在 listen() 成功之后才放行**：调用方拿到端口就立刻 connect，
+  // 而"已 bind、尚未 listen"的 socket 在内核里是**拒连**的（ECONNREFUSED），
+  // 不是排队等 listen。
+  port_promise.set_value(port);
   ready.store(true);
 
   // 跑循环直到 stop。用 UV_RUN_NOWAIT 轮转，这样能及时看到 stop 标志。
