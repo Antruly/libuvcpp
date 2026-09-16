@@ -340,7 +340,25 @@ void uvcpp_handle::free_handle() {
     return;
   }
 
-  /* Not active and not closing: free only if we own the memory */
+  /* 既不在跑也没在关 —— 这一个分支里其实藏着**两种相反的情况**，
+     原先一句 `if (_owns_handle) UVCPP_VFREE(_handle);` 把两种都当成第二种，
+     于是第一种把一块**仍然挂在 `loop->handle_queue` 上**的内存还给了分配器：
+     队列里那一格指向已释放内存，`uv_loop_close()` 从此再也关不掉那个循环。 */
+  if (_owns_handle && _handle->loop != nullptr) {
+    // (1) `uv_*_init` 过：底层是一个**活着的 libuv 句柄**，只是还没 start。
+    //     它必须走 uv_close —— 那是唯一会把句柄从 handle_queue 上摘下来的
+    //     路径（`uv__make_close_pending` 做的正是这件事）。内存留到完成回调
+    //     里还，与上面"活跃"分支同一条路。
+    _handle->data = detached_owned_marker();
+    uv_close(_handle, callback_close);
+    _handle = nullptr;
+    return;
+  }
+
+  /* (2) 从来没 `uv_*_init` 过：`loop` 还是空（`uv__handle_init` 第一件事就是
+     把它写上），这块内存只是"按句柄大小要来的一个缓冲" —— uv_close 用在这上面
+     是未定义行为（type 为 UV_UNKNOWN_HANDLE，libuv 的 switch 走到 assert(0)）。
+     直接还回去才是对的。 */
   if (_owns_handle) {
     UVCPP_VFREE(_handle)
   }

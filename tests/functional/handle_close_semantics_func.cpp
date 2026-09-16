@@ -285,6 +285,52 @@ void test_null_handle_guards() {
   uvcpp_handle::close(nullptr, [](uvcpp_handle*) {});
 }
 
+// =========================================================================
+// 6. 初始化过、但从未启动的句柄：析构必须把它从 loop 的句柄队列上摘下来
+// =========================================================================
+//
+// `free_handle()` 原来把"既不在跑也没在关"一律当成"这块内存没人要了"，
+// 直接还给分配器。但那一个分支里其实是两种东西：
+//
+//   (a) `uv_*_init` **过**的句柄 —— 底层是活着的 libuv 句柄，而且
+//       `uv__handle_init` 已经把它链进了 `loop->handle_queue`。仅有
+//       `uv_close` 会摘链。直接 free 的结果是队列里那一格指向已释放内存。
+//   (b) 从来没 init 过的裸缓冲 —— `loop` 还是空，free 才对。
+//
+// 判据用 libuv 自己的话来讲最准：`uv_loop_close()` 会遍历 handle_queue，
+// 只要还挂着一个非 internal 的句柄就返回 UV_EBUSY。也就是说 ——
+// **队列没摘干净，这个循环就永远关不掉**。这比"有没有崩"稳得多：
+// 悬垂的那一格在 Release 堆上通常还留着原字节，队列本身仍然自洽可走。
+void test_inited_but_never_started_handle() {
+  std::cout << "[handle_close] inited_but_never_started_handle" << std::endl;
+
+  uvcpp_loop loop;
+  check(loop.init() == 0, "loop.init()");
+
+  {
+    // 只构造、不 start：一个"初始化过但从未启动"的句柄。
+    // uvcpp_idle 的构造函数会 uvcpp_alloc + set_handle(owned) + uv_idle_init，
+    // 析构函数是空的 —— 于是它正好落在 free_handle() 的第三个分支上。
+    uvcpp_idle idl(&loop);
+    check(idl.get_handle() != nullptr, "前提：句柄非空");
+    check(idl.is_active() == 0, "前提：从未 start，所以不 active");
+    check(idl.is_closing() == 0, "前提：也没在关 —— 落进第三个分支");
+  }  // ← 析构
+
+  // uv_close 是异步的：完成回调（callback_close，负责还底层内存）要靠
+  // 一次循环迭代驱动。两轮保险 —— 第一轮跑完成回调，第二轮确认没有残留。
+  loop.run(UV_RUN_NOWAIT);
+  loop.run(UV_RUN_NOWAIT);
+
+  const int rc = loop.loop_close();
+  check(rc == 0,
+        "loop 关不掉：句柄没从 handle_queue 上摘下来（uv_loop_close != 0）");
+  if (rc != 0) {
+    std::cerr << "      uv_loop_close rc=" << rc
+              << "（UV_EBUSY 表示队列里还挂着句柄）" << std::endl;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -293,6 +339,7 @@ int main() {
   test_multiple_self_deleting_handles();
   test_close_without_callback();
   test_null_handle_guards();
+  test_inited_but_never_started_handle();
 
   if (g_failures == 0) {
     std::cout << "[handle_close] ALL PASS" << std::endl;
