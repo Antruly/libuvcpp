@@ -172,8 +172,20 @@ class UVCPP_API uvcpp_ws_server {
   uvcpp_ws_deflate_config get_compression() const;
 #endif
 
- private:
+  /**
+   * @brief 由客户端的 `Sec-WebSocket-Key` 算出 `Sec-WebSocket-Accept`
+   *        （RFC 6455 §4.2.2：base64(sha1(key + 固定 GUID))）。
+   *
+   * 公开是因为 `uvcpp_http_server::on_upgrade` 把升级交给使用方自己写应答 ——
+   * 而应答里唯一算不出来的就是这一个值（SHA-1 不在这层的公开面里）。自己拿
+   * `uvcpp_http_server` 手写升级、或者写测试里的裸服务端，都需要它。
+   *
+   * @param client_key 请求里 `Sec-WebSocket-Key` 的原值（**不要**自己 trim/改写）。
+   * @return 应答里该写的值；key 为空时返回空串。
+   */
   static std::string compute_accept_key(const std::string& client_key);
+
+ private:
   static std::string sha1(const std::string& input);
 
   uvcpp_http_server* http_server_ = nullptr;

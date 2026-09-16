@@ -57,6 +57,57 @@ class UVCPP_API uvcpp_ws_client {
                    int timeout_ms = 30000);
 
   // -------------------------------------------------------------------
+  // 会话 / 收发 / 关闭 —— 都是**转发给当前会话**（0 或 1 个）
+  // -------------------------------------------------------------------
+  //
+  // 这一层不自己实现 WS 语义，只是把调用转到当前会话上，省掉"用户得把会话
+  // 指针自己存起来"这一步。需要会话能力的全部（ping/pong、压缩、单条消息
+  // 上限、底下的 TCP 客户端）就用 session() 拿指针直接办。
+
+  /** @brief 当前会话；**还没连上、或者已经终结**时返回 nullptr。 */
+  uvcpp_ws_connection* session() const;
+
+  /**
+   * @brief 发送。没有会话时返回 `UV_ENOTCONN` 并**立刻**回调 `cb(UV_ENOTCONN)`。
+   *
+   * 不静默丢：调用方一定能从返回值或回调知道这一帧没出去（与连接层一致）。
+   */
+  int send_text(const char* data, size_t len,
+                std::function<void(int)> cb = nullptr);
+  int send_binary(const char* data, size_t len,
+                  std::function<void(int)> cb = nullptr);
+
+  /**
+   * @brief 收消息 / 会话结束 / 协议错误的回调。
+   *
+   * 回调**存在客户端上**，每建立一个新的会话就装一次 —— 所以 `connect()`
+   * 之前调（异步的常见写法：先把 handler 备好再连）和握手完成之后调都行；
+   * 关掉再连一次也照旧生效。签名与 `uvcpp_ws_connection` 的**完全一致**
+   * （薄转发的意义就在这里：两端同一段代码可以照抄）。
+   *
+   * 没有会话时调用只是先把回调记下来，不会报错。
+   */
+  void on_text(std::function<void(const std::string&)> cb);
+  void on_binary(std::function<void(const uint8_t*, size_t)> cb);
+  void on_close(std::function<void(ws_close_code, const std::string&)> cb);
+  void on_error(std::function<void(int, const std::string&)> cb);
+
+  /**
+   * @brief 优雅关闭：给当前会话发 Close 帧，并把状态置为 `WS_CLIENT_CLOSING`。
+   *
+   * 之后的**真正**结束（对端回 Close / 连接关掉 / 会话被回收）会把状态置成
+   * `WS_CLIENT_CLOSED`，届时 `session()` 变 nullptr、`on_close` 收到码。
+   * 可以重复调，只生效一次。
+   *
+   * **还没有会话**时（连接建立中）没有 Close 帧可发：直接关掉底层连接、状态
+   * 直接落 `WS_CLIENT_CLOSED`（连接建立中就等于取消这次连接 —— 留在 CLOSING
+   * 就是个谎：没有任何在途操作能把它推下去）。此时正在等 `connect` 回调的
+   * 调用方会**当场**收到 `cb(nullptr, UV_ECANCELED)`：取消也是结果，不悬着。
+   */
+  void close(ws_close_code code = ws_close_code::NORMAL,
+             const std::string& reason = std::string());
+
+  // -------------------------------------------------------------------
   // Loop
   // -------------------------------------------------------------------
 
@@ -109,10 +160,25 @@ class UVCPP_API uvcpp_ws_client {
   void on_handshake_data(uvcpp_buf* buf);
   void on_handshake_complete(int error);
 
+  /** @brief 把存下来的那组回调装到一个会话上（每建一个新会话调一次）。 */
+  void install_callbacks(uvcpp_ws_connection* conn);
+  /** @brief 会话终结的落点（`sessions_` 的终结观察者）。 */
+  void on_session_retired(uvcpp_ws_connection* conn);
+
   uvcpp_loop*        loop_ = nullptr;
   uvcpp_tcp_client*  tcp_  = nullptr;
   int status_ = WS_CLIENT_NONE;
   int last_error_ = 0;
+
+  /// 当前会话。**终结观察者负责清空** —— 清空之后才是 nullptr，所以拿到它
+  /// 的人只可能在会话还活着的时候拿到（回收是延迟的，指针本身不会悬垂）。
+  uvcpp_ws_connection* session_ = nullptr;
+
+  /// 用户通过本层装的回调。存着是为了"connect 之前装、建会话时装上去"。
+  std::function<void(const std::string&)>                on_text_;
+  std::function<void(const uint8_t*, size_t)>            on_bin_;
+  std::function<void(ws_close_code, const std::string&)> on_close_;
+  std::function<void(int, const std::string&)>           on_error_;
 
   /// 本客户端建立的会话（0 或 1 个）。终结时交回这里回收。
   uvcpp_ws_sessions sessions_;
@@ -121,6 +187,10 @@ class UVCPP_API uvcpp_ws_client {
   std::string ws_path_;
   std::string ws_key_;
   std::string handshake_buf_;  // accumulates partial 101 response
+
+  /// 101 头部之后、跟着同一批到达的字节（第一帧很可能就在里面）。由
+  /// `on_handshake_complete` 补投给新会话 —— 不补投就是丢首帧。
+  std::string handshake_tail_;
   bool use_tls_ = false;
 
 #if UVCPP_ZLIB_ENABLE

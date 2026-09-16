@@ -76,6 +76,22 @@ class UVCPP_API uvcpp_ws_sessions {
   void adopt(uvcpp_ws_connection* c);
 
   /**
+   * @brief 装一个「某个会话终结了」的观察者（属主可选）。
+   *
+   * 在会话**已经离开活动表、但还没被 `delete`** 的时候调用：`all()` 里不再有
+   * 它、`size()` 已经减掉，`pending()` 里能找到它。属主用它跟自己的状态对账
+   * （客户端把「当前会话」指针清空、状态置 CLOSED 之类）。
+   *
+   * **不要在这里 `delete` 会话**：回收由本类的延迟回收负责（理由见类注释），
+   * 在这里删会与 `drain()` 撞车（同一指针删两次）。也**不要**在这里发起耗时
+   * 操作 —— 它是在终结它的那个回调里**同步**调用的。
+   *
+   * 只有一个槽位（后装的覆盖先装的）。没有装的时候终结照常发生，只是没人收到
+   * 通知 —— 属主需要知道「会话没了」就必须装。
+   */
+  void set_retire_observer(std::function<void(uvcpp_ws_connection*)> cb);
+
+  /**
    * @brief 优雅关闭并交出全部会话（服务器 `stop()` 用）。
    *
    * 逐个 `close()` —— **发起**关闭、发 Close 帧，真正的回收仍由终结回调
@@ -138,6 +154,7 @@ class UVCPP_API uvcpp_ws_sessions {
   std::vector<uvcpp_ws_connection*> retired_;
   uvcpp_async* drain_async_ = nullptr;
   size_t       recycled_    = 0;
+  std::function<void(uvcpp_ws_connection*)> retire_observer_;
 };
 
 }  // namespace uvcpp

@@ -51,11 +51,31 @@ class UVCPP_API uvcpp_ws_connection {
   explicit uvcpp_ws_connection(uvcpp_tcp_client* tcp);
 
   /**
-   * @brief Start reading WS frames. Must be called once, after the
-   *        handshake is complete and the caller is no longer inside
-   *        a TCP read callback.
+   * @brief 开始读 WS 帧。握手完成后调**一次**，且调用方已经不在 TCP 读回调里。
    */
   void start();
+
+  /**
+   * @brief 补投"跟握手挤在同一批到达"的字节（**升级方专用**）。
+   *
+   * @param data  WS 字节（升级应答/请求之后剩下的那一截）。
+   * @param len   长度；0 或 @p data 为空都不做事。
+   *
+   * **为什么必须由升级方补投**：握手那一段用的是另一个读回调，它从内核缓冲
+   * 里把整批字节一次取走（含第一帧），随后 `start()` 用 `read_stop()` +
+   * `read_start()` 换成本会话的读回调 —— 已经被取走的那部分**再也读不回来**。
+   * 不补投的表现是"第一帧凭空消失"：连接好好的、后面的帧都收得到，只有第一帧
+   * 没了。而它跟"对端压根没发"长得一模一样。
+   *
+   * 必须**在 `start()` 之后**、并且**在你自己的回调装好之后**调 —— 补投是
+   * 同步派发的，装晚了那一帧就派发给了空回调（服务端是在 `on_ready` /
+   * `on_connection` 之后补投，客户端是在 `connect` 回调之后：那正是"用户装
+   * 回调"的那个点）。
+   *
+   * 会话在补投之前就结束了（对方断开 / 回调里把手上的会话关了）就**丢掉**这批
+   * 字节：连接都不在了，帧派发出去也没有意义。
+   */
+  void feed_pending(const char* data, size_t len);
 
   // -------------------------------------------------------------------
   // 生命周期 —— 属主接口

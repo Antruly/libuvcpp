@@ -91,6 +91,9 @@ std::string uvcpp_ws_server::sha1(const std::string& input) {
 static const char* WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 std::string uvcpp_ws_server::compute_accept_key(const std::string& client_key) {
+  // 没 key 就没有合法的 accept（本函数算出来的是 GUID 的哈希，写进应答只会
+  // 让对端以一个看不懂的理由拒绝）。调用方按"缺 key"处理，见 handle_upgrade。
+  if (client_key.empty()) return std::string();
   std::string combined = client_key + WS_GUID;
   std::string hash = sha1(combined);
   return base64(reinterpret_cast<const unsigned char*>(hash.c_str()), hash.size());
@@ -227,6 +230,13 @@ void uvcpp_ws_server::handle_upgrade(
     // 就得按那个配。is_server = true 决定窗口位数与 context takeover 的方向。
     if (dp.accepted) conn->enable_compression(true, dp);
 #endif
+    // 升级请求和第一帧挤在同一个 TCP 段里是常态（真实客户端就是这么发的）：
+    // 那批字节已经被 HTTP 解析器那次读取走了，只能在这里补投给新会话 —— 不补
+    // 投就是**丢首帧**，而且丢得无声无息（连接好好的，只有第一帧没了）。
+    // 必须在**这一刻**取：升级回调是在解析器 `execute()` 里面同步调的，那时
+    // 剩余字节还没算出来（见 `take_upgrade_leftover` 的说明）。
+    std::string pending;
+    if (http_server_ != nullptr) pending = http_server_->take_upgrade_leftover(client);
     conn->start();
     // on_ready 优先：它是**这一条**升级的专属闭包，而 on_conn_ 是全局单槽。
     if (on_ready) {
@@ -234,6 +244,9 @@ void uvcpp_ws_server::handle_upgrade(
     } else if (on_conn_) {
       on_conn_(conn);
     }
+    // 补投放在**用户回调之后**：用户正是在那里装 `on_text` 之类，装晚了的
+    // 话这一帧就派发给空回调了（等于又丢一次）。
+    conn->feed_pending(pending.data(), pending.size());
   });
 }
 

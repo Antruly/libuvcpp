@@ -44,6 +44,11 @@ void uvcpp_ws_sessions::adopt(uvcpp_ws_connection* c) {
   sessions_.push_back(c);
 }
 
+void uvcpp_ws_sessions::set_retire_observer(
+    std::function<void(uvcpp_ws_connection*)> cb) {
+  retire_observer_ = std::move(cb);
+}
+
 void uvcpp_ws_sessions::on_retired(uvcpp_ws_connection* c) {
   for (size_t i = 0; i < sessions_.size(); ++i) {
     if (sessions_[i] == c) {
@@ -52,6 +57,11 @@ void uvcpp_ws_sessions::on_retired(uvcpp_ws_connection* c) {
     }
   }
   retired_.push_back(c);
+
+  // 观察者在**账已经记好之后**调用：它看到的表必须是一致的（活动表里没有它、
+  // pending 里有它），否则属主按 `size()` 对账会算错。会话这时候还在（回收是
+  // 延迟的），但已经 `is_open() == false` —— 观察者只该更新自己的状态。
+  if (retire_observer_) retire_observer_(c);
 
   // 唤醒循环去回收。没有句柄（循环不可用 / 装不上）就等 recycle_all()。
   if (drain_async_ != nullptr) drain_async_->send();

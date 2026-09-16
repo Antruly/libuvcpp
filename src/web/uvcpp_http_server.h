@@ -178,6 +178,21 @@ class UVCPP_API uvcpp_http_server {
   using upgrade_handler_t = std::function<void(uvcpp_http_request&, uvcpp_tcp_client*)>;
   void on_upgrade(upgrade_handler_t handler);
 
+  /**
+   * @brief 取走"跟着升级请求一起到达的多余字节"（**升级方专用**）。
+   *
+   * 升级请求和第一帧挤在同一个 TCP 段里是常态，而那批字节在 HTTP 解析器
+   * 吃完请求之后就已经被这次读取走了 —— 升级方如果不取，重新 `read_start`
+   * 是读不回来的，表现就是"新协议的第一帧凭空消失"。
+   *
+   * **必须在升级回调之后取**（升级回调是在解析器 `execute()` 里面同步调的，
+   * 那时剩余字节还没算出来），比如在自己的应答写完成回调里 —— WS 层就是这么
+   * 用的（`uvcpp_ws_server.cpp` 的 101 写完成回调）。
+   *
+   * 取走即清空；不是升级连接 / 连接已经没了 / 没有多余字节都返回空串。
+   */
+  std::string take_upgrade_leftover(uvcpp_tcp_client* client);
+
   /** @brief Register a handler for GET + exact path. */
   void get(const std::string& path, http_request_handler handler);
   /** @brief Register a handler for POST + exact path. */
@@ -570,6 +585,23 @@ class UVCPP_API uvcpp_http_server {
      * body without waiting for its own timer.
      */
     bool expect_continue = false;
+
+    /**
+     * @brief 这条连接正在升级（`upgrade_handler_` 已经接走）。
+     *
+     * 升级请求和第一帧常常挤在同一个 TCP 段里到达：HTTP 解析器吃完请求就把
+     * 剩下的字节留给了"下一条消息"，而升级之后根本没有下一条 HTTP 消息 ——
+     * 那批字节必须交给新协议，否则升级方看到的第一个 WS 帧凭空消失。升级回调
+     * 是在 `execute()` **里面**同步调的（那时还不知道剩下多少），所以先立这个
+     * 旗标，等 `execute()` 返回后在 @ref pending 里存下来。
+     */
+    bool upgrading = false;
+
+    /**
+     * @brief 升级请求之后多余的那批字节，等升级方来取
+     *        （`uvcpp_http_server::take_upgrade_leftover`）。
+     */
+    std::string pending;
 
     // --- Per-message facts captured at request completion ---
     // The parser is reset lazily on the next inbound chunk, so anything

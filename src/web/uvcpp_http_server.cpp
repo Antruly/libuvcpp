@@ -77,6 +77,15 @@ void uvcpp_http_server::on_upgrade(upgrade_handler_t handler) {
   upgrade_handler_ = std::move(handler);
 }
 
+std::string uvcpp_http_server::take_upgrade_leftover(uvcpp_tcp_client* client) {
+  auto it = contexts_.find(client);
+  if (it == contexts_.end()) return std::string();
+  std::string out;
+  out.swap(it->second.pending);
+  it->second.upgrading = false;
+  return out;
+}
+
 void uvcpp_http_server::get(const std::string& path, http_request_handler h) {
   routes_.push_back({http_method::HTTP_GET, path, std::move(h)});
 }
@@ -285,7 +294,23 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
     ctx.stream_request = uvcpp_http_request();
   }
 
-  ctx.parser->execute(buf->get_const_data(), buf->size());
+  const size_t used = ctx.parser->execute(buf->get_const_data(), buf->size());
+
+  // 升级请求后面跟着的字节（升级请求和第一帧挤在同一个 TCP 段里到达，真实
+  // 客户端几乎总是这样）**不能丢**：它们已经被这次读取走了，重新 read_start
+  // 是读不回来的。存下来由升级方补投给新协议
+  // （`uvcpp_ws_connection::feed_pending`）。
+  //
+  // `used` 在这里是可信的：升级请求走的是 `HPE_PAUSED_UPGRADE` 分支，那个
+  // 分支按 `llhttp_get_error_pos` 算停下位置（实测"升级请求 156 + 首帧 15"
+  // 的 171 字节批次报的就是 156）。**不要**把它推广成通用的"已消费字节数"：
+  // `HPE_OK` 分支一律 `return len`（那是"消息吃完了"，不是"字节吃完了"），
+  // 流水线的下一条请求就落在那条路径上 —— 与本条无关，不在这里动。
+  //
+  // 只在升级中才存；不是升级连接的话 `pending` 永远是空的。
+  if (ctx.upgrading && used < buf->size()) {
+    ctx.pending.assign(buf->get_const_data() + used, buf->size() - used);
+  }
 
   if (ctx.parser->has_error()) {
     // A malformed request must not be answered by hand-rolled bytes: route it
@@ -378,6 +403,10 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
       for (size_t i = 0; is_ws && i < 9; i++)
         if (std::tolower(static_cast<unsigned char>(up[i])) != "websocket"[i]) is_ws = false;
       if (is_ws) {
+        // 升级之后，**同一次读**里剩下的字节属于新协议（WS 帧），不属于 HTTP。
+        // 记下"这条连接正在升级"，等 `execute()` 返回到手了再把这批字节存起来
+        // —— 升级回调是在 `execute()` **里面**同步调的，此刻还不知道剩下多少。
+        ctx.upgrading = true;
         upgrade_handler_(req, client);
         return;
       }

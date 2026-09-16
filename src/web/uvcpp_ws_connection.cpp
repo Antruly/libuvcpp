@@ -53,6 +53,14 @@ void uvcpp_ws_connection::start() {
   tcp_->read_start([this](uvcpp_buf* buf) { if (buf && buf->size() > 0) on_tcp_data(buf); });
 }
 
+void uvcpp_ws_connection::feed_pending(const char* data, size_t len) {
+  // 还没 start()（读都没 arm，谈何"补投"）、或者会话已经结束了（对方断开、
+  // 或者升级方在自己的回调里就把会话关了）—— 这批字节直接丢掉。
+  if (!started_ || retired_ || data == nullptr || len == 0) return;
+  uvcpp_buf buf(data, len);   // 拷贝构造：来源是升级方的临时缓冲
+  on_tcp_data(&buf);
+}
+
 // =========================================================================
 // 生命周期
 // =========================================================================

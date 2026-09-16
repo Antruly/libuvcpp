@@ -80,6 +80,10 @@ uvcpp_ws_client::uvcpp_ws_client() {
   loop_ = new uvcpp_loop();
   tcp_  = new uvcpp_tcp_client(loop_);
   std::srand(static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count()));
+  // 会话终结（对端关、协议错误、自己 close、析构兜底）都要把"当前会话"清掉，
+  // 否则本层会拿着一个已经终结的会话继续转发。
+  sessions_.set_retire_observer(
+      [this](uvcpp_ws_connection* c) { on_session_retired(c); });
 }
 
 uvcpp_ws_client::~uvcpp_ws_client() {
@@ -97,9 +101,27 @@ uvcpp_ws_client::~uvcpp_ws_client() {
   // 次数有界是为了**绝不卡住**：万一没放完，后面的处置与改之前"等了 5 秒也没
   // 等到"是同一条路（句柄的底层内存由 `uvcpp_handle::free_handle` 的哨兵机制
   // 接手，见那里）。
-  if (tcp_ && !has_status(WS_CLIENT_CLOSED)) {
+  // **判据只能是 `is_closing()`，不能带上 `!is_active()`。** 这一条与
+  // `uvcpp_tcp_client` 析构里那处是同一个坑（见那里的长注释），而这里是它漏
+  // 掉的一处：
+  //
+  //   "没在跑"（`is_active()` 假）**不等于**"已经关了"。刚 `uv_tcp_init` 出来、
+  //   或者 connect 失败之后的句柄正是这个样子 —— 句柄**还在** `loop->handle_queue`
+  //   上，只是没有在途 I/O。旧判据在这种状态下直接跳过关闭，于是下面
+  //   `loop_close()` 返回 `UV_EBUSY`（循环关不掉），`delete loop_` 又把
+  //   `uv_loop_t` 那块内存还给了分配器；紧接着 `delete tcp_` 走
+  //   `uvcpp_handle::free_handle` 的"(1) init 过但没启动"那一路去 `uv_close` ——
+  //   而 `uv_close` 会往 `handle->loop` 里写，那个 loop 已经释放了。
+  //
+  // 实测（2026-09-16，本文件临时插桩）：没连过 / 连失败之后析构，
+  // `is_active()=0 is_closing()=0 handle=1`，`uv_loop_close` 返回 **-4082
+  // (UV_EBUSY)**；本批的重连用例里每失败一次就复现一次。
+  //
+  // 先问 `get_handle()` 再问 `is_closing()`：句柄关完之后 `_handle` 会被置空，
+  // 而 `is_closing()` 是把它直接交给 `uv_is_closing()` —— 它解引用。
+  if (tcp_ != nullptr) {
     auto* raw = tcp_->get_tcp();
-    if (raw && !raw->is_closing() && raw->is_active()) {
+    if (raw != nullptr && raw->get_handle() != nullptr && !raw->is_closing()) {
       bool done = false;
       raw->close([&done](uvcpp_handle*) { done = true; });
       for (int i = 0; i < 64 && !done; ++i) {
@@ -254,12 +276,32 @@ void uvcpp_ws_client::on_handshake_data(uvcpp_buf* buf) {
   }
 #endif
 
+  // **头之后的字节不能丢。** 应答和第一帧常常落在同一个 TCP 段里（对端
+  // "回完 101 紧接着推一条"，在 loopback 上几乎是必然），而那批字节已经被
+  // 握手读回调整批取走了：这里 clear() 掉就等于把第一帧吃了 —— 表现是"连上
+  // 了但第一条消息永远不来"，而它跟"对端没发"长得一模一样。留下来的这段由
+  // `on_handshake_complete` 补投给新会话（`uvcpp_ws_connection::start`）。
+  handshake_tail_.assign(handshake_buf_, end + 4, std::string::npos);
   handshake_buf_.clear();
   on_handshake_complete(0);
 }
 
 void uvcpp_ws_client::on_handshake_complete(int error) {
+  // 补投用的那一段先搬出来：下面每个分支都不该再留着它（失败分支等于丢掉，
+  // 那是应该的 —— 连接都不成立了）。
+  const std::string tail = std::move(handshake_tail_);
+  handshake_tail_.clear();
+
   if (error == 0) {
+    if (has_status(WS_CLIENT_CLOSED) || has_status(WS_CLIENT_CLOSING)) {
+      // 握手完成之前调用方就 `close()` 了（取消那次已经在 `close()` 里结算
+      // 过，这里只是运输层还来不及被拆掉）。这次连接**不算成立**：会话照旧
+      // 接管（生命周期归 `sessions_`），但立刻关掉，回调不叫第二次。
+      auto* cancelled = new uvcpp_ws_connection(tcp_);
+      sessions_.adopt(cancelled);
+      cancelled->close(ws_close_code::NORMAL);
+      return;
+    }
     status_ = WS_CLIENT_OPEN;
     // 延迟回收的驱动循环。在这里（握手完成回调，也就是循环线程上）建 async
     // 句柄是有意的：`uv_async_init` 必须在循环线程上做，而 `connect()` 可能
@@ -269,18 +311,125 @@ void uvcpp_ws_client::on_handshake_complete(int error) {
     // **先接管所有权再 start()**：反过来的话，对端若在我们 start() 的过程中
     // 就断了（关闭观察者立刻回调），会话会不知道把自己交给谁。
     sessions_.adopt(conn);
+    session_ = conn;
+    // 回调要在 start() **之前**装好：对端可能一升级完就把第一帧发过来了。
+    install_callbacks(conn);
 #if UVCPP_ZLIB_ENABLE
     // 与服务端对称：应答里谈定了什么，两边就得按那个配。is_server=false
     // 决定窗口位数与 context takeover 的方向 —— 搞反不会报错，只会解出乱码。
     if (deflate_params_.accepted) conn->enable_compression(false, deflate_params_);
 #endif
-    // start() will be called lazily on first send_frame (avoids
-    // calling read_stop from within the active read callback)
+    // **这里必须 arm 读**，不能像原先那样"等第一次发帧时再懒启动"：只收不发的
+    // 客户端（订阅、推送、纯监听）从头到尾不会调 send_frame，于是一帧都读不到
+    // —— 表现是"连上了但永远没有消息"，而它跟"对端没发"长得一模一样。
+    // 服务端本来就是升级完直接 start()（`uvcpp_ws_server.cpp:230`），这里与它
+    // 对齐；`send_frame` 里那句懒启动保留，作为别的调用路径的兜底（幂等）。
+    conn->start();
     if (connect_cb_) { auto cb = std::move(connect_cb_); connect_cb_ = nullptr; cb(conn, 0); }
+    // 同一段里跟着 101 一起到达的字节（`handshake_tail_`）在这里补投 —— 它们
+    // 已经从内核缓冲里被握手读回调取走了，重新读是读不回来的。放在 connect
+    // 回调**之后**：调用方可能正是在那个回调里装收消息的回调（本层的转发回调
+    // 虽然早装好了，但转发到的是那一刻才有的那个 `std::function`）。
+    // 回调里把客户端关掉/删掉的话，`feed_pending` 自己会挡掉。
+    conn->feed_pending(tail.data(), tail.size());
   } else {
-    status_ = WS_CLIENT_ERROR;
+    // 调用方自己 `close()` 取消的那次连接**不是**"连接出错"：终态保持 CLOSED
+    // （取消时已经结算过回调了，这里叫不到第二次）。
+    if (!has_status(WS_CLIENT_CLOSED)) status_ = WS_CLIENT_ERROR;
     last_error_ = error;
     if (connect_cb_) { auto cb = std::move(connect_cb_); connect_cb_ = nullptr; cb(nullptr, error); }
+  }
+}
+
+// =========================================================================
+// 会话 / 收发 / 关闭：转发给当前会话
+// =========================================================================
+
+void uvcpp_ws_client::install_callbacks(uvcpp_ws_connection* conn) {
+  if (conn == nullptr) return;
+  // 没设过的槽跳过：装一个空的 std::function 与"没装"等价，只是白占一层。
+  if (on_text_)  conn->on_text(on_text_);
+  if (on_bin_)   conn->on_binary(on_bin_);
+  if (on_close_) conn->on_close(on_close_);
+  if (on_error_) conn->on_error(on_error_);
+}
+
+void uvcpp_ws_client::on_session_retired(uvcpp_ws_connection* conn) {
+  // 同时只可能有一个会话，这句只为让"清错对象"不可能发生。
+  if (conn != session_) return;
+  session_ = nullptr;
+  // 会话没了就是这个状态 —— 不管是本端 `close()` 发起的，还是对端走的。
+  // `WS_CLIENT_CLOSING` 只是"已经发起、还没结束"，终结观察者就是它的落点。
+  status_ = WS_CLIENT_CLOSED;
+}
+
+uvcpp_ws_connection* uvcpp_ws_client::session() const { return session_; }
+
+int uvcpp_ws_client::send_text(const char* data, size_t len,
+                               std::function<void(int)> cb) {
+  if (session_ == nullptr) {
+    if (cb) cb(UV_ENOTCONN);
+    return UV_ENOTCONN;
+  }
+  return session_->send_text(data, len, std::move(cb));
+}
+
+int uvcpp_ws_client::send_binary(const char* data, size_t len,
+                                 std::function<void(int)> cb) {
+  if (session_ == nullptr) {
+    if (cb) cb(UV_ENOTCONN);
+    return UV_ENOTCONN;
+  }
+  return session_->send_binary(data, len, std::move(cb));
+}
+
+void uvcpp_ws_client::on_text(std::function<void(const std::string&)> cb) {
+  on_text_ = std::move(cb);
+  // 已经连上了就当场装上（"connect 之后再装"和"connect 之前装"都得成立）。
+  if (session_ != nullptr) session_->on_text(on_text_);
+}
+
+void uvcpp_ws_client::on_binary(std::function<void(const uint8_t*, size_t)> cb) {
+  on_bin_ = std::move(cb);
+  if (session_ != nullptr) session_->on_binary(on_bin_);
+}
+
+void uvcpp_ws_client::on_close(
+    std::function<void(ws_close_code, const std::string&)> cb) {
+  on_close_ = std::move(cb);
+  if (session_ != nullptr) session_->on_close(on_close_);
+}
+
+void uvcpp_ws_client::on_error(std::function<void(int, const std::string&)> cb) {
+  on_error_ = std::move(cb);
+  if (session_ != nullptr) session_->on_error(on_error_);
+}
+
+void uvcpp_ws_client::close(ws_close_code code, const std::string& reason) {
+  if (status_ == WS_CLIENT_CLOSED || status_ == WS_CLIENT_CLOSING) return;
+
+  if (session_ != nullptr) {
+    session_->close(code, reason);
+    // 真正的结束由终结观察者落点（对端回 Close、或连接关掉）。
+    status_ = WS_CLIENT_CLOSING;
+    return;
+  }
+
+  // 还没有会话（连接建立中，或者从没连上过）：没有 Close 帧可发 —— 关底层
+  // 连接。建立中的话这就是**取消**这次连接，状态**直接落终态**：没有任何在途
+  // 操作能把它推到 CLOSED，留在 CLOSING 就是个谎（"还在关"而其实已经关了）。
+  if (tcp_ != nullptr) tcp_->close();
+  status_ = WS_CLIENT_CLOSED;
+
+  // 正在等 connect 回调的调用方必须收到结果，不能悬着。底层取消会不会回一个
+  // UV_ECANCELED 是实现细节（libuv 的 uv_close 会取消在途请求，但那条路依赖
+  // 句柄还没被回收），所以这里自己结算一次；底下真也回来了的话
+  // `connect_cb_` 已经被搬空，不会再叫第二次。
+  if (connect_cb_) {
+    auto cb = std::move(connect_cb_);
+    connect_cb_ = nullptr;
+    last_error_ = UV_ECANCELED;
+    cb(nullptr, UV_ECANCELED);
   }
 }
 
