@@ -45,6 +45,14 @@ public:
   static void callback_walk(uv_handle_t *handle, void *arg);
 
 private:
+  /**
+   * @brief `loop_close()` 成功过。
+   *
+   * 成功之后 `uv_loop_t` 已经被 libuv 收掉（debug 构建里还会把整块内存填成
+   * -1），**不能再碰**：连 `uv_loop_alive()` 都是读垃圾，`uv_run()` 更会去
+   * 解引用一堆野指针。析构里靠这一位决定"还能不能收尾"。
+   */
+  bool closed_ = false;
   void *walk_arg_ = nullptr;
 };
 } // namespace uvcpp
