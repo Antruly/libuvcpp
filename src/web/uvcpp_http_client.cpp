@@ -88,17 +88,36 @@ int uvcpp_http_client::connect(const char* host, int port,
   last_error_code_ = 0;
 
   if (cb) {
+#if UVCPP_OPENSSL_ENABLE
+    // TLS 必须**在 connect 之前**装上。
+    //
+    // `uvcpp_tcp_client` 的握手是 memory BIO + 读事件驱动的：装晚了没有人去
+    // 推进它，而它把握手回调压住、直到会话真的建立才调 `cb` —— 于是下面那句
+    // "回调到了就能直接发"在 TLS 上也照样成立。
+    //
+    // 以前这里是反过来的：先明文 connect，再在完成回调里**阻塞式**握手，
+    // 然后 `send()` 把明文请求写进这条已经加密的 socket。对端按畸形记录丢掉，
+    // 症状是"连上了、写成功了、永远等不到响应" —— 没有任何一处报错。
+    if (ssl_enabled_ && ssl_ctx_ != nullptr) {
+      if (tcp_->is_tls()) {
+        // 同一个 client 上第二次 connect：底层还挂着上一条会话的密钥，
+        // 复用它是"用旧密钥加密"这种静默错答案。宁可不做。
+        set_status(HTTP_CLIENT_ERROR);
+        last_error_code_ = UV_ENOTSUP;
+        cb(UV_ENOTSUP);
+        return UV_ENOTSUP;
+      }
+      const int trc = tcp_->enable_tls(ssl_ctx_);
+      if (trc != 0) {
+        set_status(HTTP_CLIENT_ERROR);
+        last_error_code_ = trc;
+        cb(trc);
+        return trc;
+      }
+    }
+#endif
     int init_rc = tcp_->connect(host, port, [this, cb](int status) {
       if (status != 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = status; cb(status); return; }
-#if UVCPP_OPENSSL_ENABLE
-      if (ssl_enabled_) {
-        uv_os_sock_t sock;
-        if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) != 0 ||
-            do_ssl_handshake(static_cast<int>(sock)) <= 0) {
-          set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; cb(-1); return;
-        }
-      }
-#endif
       set_status(HTTP_CLIENT_CONNECTED);
       clear_status(HTTP_CLIENT_ERROR);
       cb(0);
@@ -246,6 +265,16 @@ int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
 #if UVCPP_OPENSSL_ENABLE
   if (ssl_enabled_ && ssl_) {
     return send_wait_ssl(req, resp, timeout_ms);
+  }
+  if (ssl_enabled_) {
+    // 连接是**异步 TLS** 建的（`connect(host, port, cb)` + `set_ssl_context`）：
+    // 会话在 `uvcpp_tcp_client` 的 memory BIO 里，而阻塞式的 SSL_read/SSL_write
+    // 要独占 socket，接管不了它。这里必须报错，**不能**落到 send_wait_plain ——
+    // 那正是本轮在修的 #2：把明文写进一条已经加密的连接，而调用方只看到
+    // "请求发出去了、响应等不到"。换了个入口，错答案一模一样。
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
   }
   // 纯 HTTP 同步请求也走阻塞式 socket I/O，完全绕开 libuv 的异步 read/close
   // 路径，规避连接关闭时析构 close-dance 引发的内存损坏。

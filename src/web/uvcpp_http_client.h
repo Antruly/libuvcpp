@@ -31,8 +31,7 @@
 #include <web/uvcpp_http_response.h>
 
 #if UVCPP_OPENSSL_ENABLE
-#include <ssl/uvcpp_ssl.h>
-class uvcpp_ssl_context;
+#include <ssl/uvcpp_ssl.h>  // 同时也声明了 uvcpp::uvcpp_ssl_context
 #endif
 
 namespace uvcpp {
@@ -193,6 +192,16 @@ class UVCPP_API uvcpp_http_client {
    * @brief Enable SSL/TLS for subsequent connections.
    *        After calling this, connect() will perform a TLS handshake
    *        and all traffic will be encrypted.
+   *
+   * @note 两条路径各自完整，但**不能交叉**：
+   *   - 异步系列（`connect(host, port, cb)` + `send(req, cb)`）：`connect()`
+   *     在发起连接**之前**把 TLS 装到 `uvcpp_tcp_client` 上（memory BIO），
+   *     握手由读事件推进，握手完成才回调 —— 于是 `send()` 写的是明文、
+   *     出网的是密文，读回来的密文也在这里被解回明文。
+   *   - 同步系列（`connect_wait()` + `send_wait()`）：沿用阻塞式握手读写。
+   *   - 混用（异步 connect + `send_wait()`）会返回 `UV_ENOTSUP` —— 阻塞式
+   *     SSL_read/SSL_write 要独占 socket，接管不了 memory BIO 那条会话。
+   *     宁可报错，也不把明文写进一条已经加密的连接。
    */
   void set_ssl_context(uvcpp_ssl_context* ctx);
   bool is_ssl_enabled() const;
