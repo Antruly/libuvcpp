@@ -44,7 +44,12 @@ uvcpp_http_client::~uvcpp_http_client() {
   // Close TCP if still active
   if (tcp_ != nullptr && !has_status(HTTP_CLIENT_CLOSED)) {
     uvcpp_tcp* raw_tcp = tcp_->get_tcp();
-    if (raw_tcp != nullptr && !raw_tcp->is_closing() && raw_tcp->is_active()) {
+    // 判据只能是 `is_closing()`，不能带上 `is_active()`：`uv_*_init` 过、还没
+    // connect 的句柄两样都是"否"，带上去它就被判成"早就关完了"，于是 socket
+    // 不关、句柄留在 handle_queue 上 —— 紧跟着的 `loop_close()` 返回 UV_EBUSY，
+    // 循环内存被释放后 `delete tcp_` 里的 `uv_close()` 还往队列上写，
+    // 那就是 use-after-free。实测 2026-09-16：43 处 `closed=0` 全走这条。
+    if (raw_tcp != nullptr && !raw_tcp->is_closing()) {
       bool close_done = false;
       raw_tcp->close([&close_done](uvcpp_handle*) { close_done = true; });
       for (int i = 0; i < 5000 && !close_done; i++) {
