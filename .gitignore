@@ -32,6 +32,11 @@ uvcpp_rt_outside_uploads/
 # Development docs / temp
 docs/
 *.txt
+# `*.txt` 会连 CMakeLists.txt 一起吃掉。已经跟踪的那些不受影响（ignore 只作用于
+# 未跟踪文件），所以症状很隐蔽：新加的目录里那个 CMakeLists.txt 提交不上去，
+# 而本地构建一切正常（文件就在磁盘上）—— examples/CMakeLists.txt 就是这么漏掉
+# 一次的。不带斜杠写，任何层级都放行。
+!CMakeLists.txt
 # tests/tools/*.py 之间有 import（upload_mutation_probe / v5_probe 会被主驱动拉起），
 # 跑一次就在 tests/tools/ 下留一个 __pycache__/。它同样是未跟踪状态，
 # 步骤 9 那轮是靠手工删掉的。
