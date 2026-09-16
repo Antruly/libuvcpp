@@ -196,13 +196,14 @@ int uvcpp_udp_server::send(const char* ip, int port, const char* data,
     uv_buf_t* raw = bufcpp.out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     auto* user_cb = new std::function<void(int)>(cb);
     int rc = send_impl(udp_, last_error_code_, ip, port, raw, w,
                        [user_cb](uvcpp_udp_send* wr, int status) {
+                         (void)wr;  // 释放由 callback_udp_send 事后做
                          (*user_cb)(status);
                          delete user_cb;
-                         delete wr;
                        });
     if (rc != 0) { delete user_cb; return rc; }
     return 0;
@@ -220,12 +221,13 @@ int uvcpp_udp_server::send_wait(const char* ip, int port, const char* data,
   uv_buf_t* raw = bufcpp.out_uv_buf();
   uvcpp_udp_send* w = new uvcpp_udp_send();
   w->set_uv_buf(raw, true);
+  w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
   int rc = send_impl(udp_, last_error_code_, ip, port, raw, w,
                      [&done, &result](uvcpp_udp_send* wr, int status) {
+                       (void)wr;  // 释放由 callback_udp_send 事后做
                        result = status;
                        done = true;
-                       delete wr;
                      });
   if (rc != 0) return rc;
 
@@ -256,13 +258,14 @@ int uvcpp_udp_server::send(const char* ip, int port, uvcpp_buf* buf,
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     auto* user_cb = new std::function<void(int)>(cb);
     int rc = send_impl(udp_, last_error_code_, ip, port, raw, w,
                        [user_cb](uvcpp_udp_send* wr, int status) {
+                         (void)wr;  // 释放由 callback_udp_send 事后做
                          (*user_cb)(status);
                          delete user_cb;
-                         delete wr;
                        });
     if (rc != 0) { delete user_cb; return rc; }
     return 0;
@@ -274,12 +277,13 @@ int uvcpp_udp_server::send(const char* ip, int port, uvcpp_buf* buf,
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_impl(udp_, last_error_code_, ip, port, raw, w,
                        [&done, &result](uvcpp_udp_send* wr, int status) {
+                         (void)wr;  // 释放由 callback_udp_send 事后做
                          result = status;
                          done = true;
-                         delete wr;
                        });
     if (rc != 0) return rc;
 

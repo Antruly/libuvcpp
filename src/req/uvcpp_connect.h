@@ -29,12 +29,8 @@ class UVCPP_API uvcpp_connect : public uvcpp_req {
   ::std::function<void(uvcpp_connect*, int)> m_connect_cb;
  public:
   /** @brief libuv callback forwarded to m_connect_cb. */
-  static void callback_connect(uv_connect_t* req, int status) {
-    if (reinterpret_cast<uvcpp_connect*>(req->data)->m_connect_cb)
-      reinterpret_cast<uvcpp_connect*>(req->data)->m_connect_cb(
-          reinterpret_cast<uvcpp_connect*>(req->data), status);
-  }
-  
+  static void callback_connect(uv_connect_t* req, int status);
+
  protected:
   
  private:

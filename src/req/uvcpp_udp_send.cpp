@@ -47,10 +47,12 @@ const uvcpp_buf *uvcpp_udp_send::get_src_buf() { return src_buf; }
 // uv_udp_send_cb
 void uvcpp_udp_send::callback_udp_send(uv_udp_send_t* req, int status) {
   uvcpp_udp_send *s = reinterpret_cast<uvcpp_udp_send *>(req->data);
-  if (s->udp_send_cb) {
-    s->udp_send_cb(s, status);
+  if (s == nullptr) {
+    return;
   }
-  
+  // 与 uvcpp_write 同一条路（清单 #7 的同族）：回调里 `delete s` 删的就是
+  // s->udp_send_cb 里那个**正在执行**的闭包。见 uvcpp_req::invoke_completion。
+  invoke_completion(s->udp_send_cb, s, status);
 }
 
 } // namespace uvcpp

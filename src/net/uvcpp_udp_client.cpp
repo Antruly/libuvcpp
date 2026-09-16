@@ -291,23 +291,30 @@ int uvcpp_udp_client::send(const char* ip, int port, const char* data,
     uv_buf_t* raw = bufcpp.out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_to_addr_impl(
         udp_, loop_, last_error_code_, ip, port, raw, w,
         [this](uvcpp_udp_send* wr, int status) {
+          (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
-          if (send_fn_) {
-            send_fn_(status, send_arg_);
-            send_fn_  = nullptr;
-            send_arg_ = nullptr;
-          }
-          delete wr;
+          // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
+          // `has_async_send_cb_` 必须在**调用用户回调之前**清 —— 否则回调里
+          // 接着发起下一次 send 仍然拿 UV_EALREADY，连接被永久毒化。
+          auto  fn  = send_fn_;
+          void* arg = send_arg_;
+          send_fn_  = nullptr;
+          send_arg_ = nullptr;
+          has_async_send_cb_ = false;
+          if (fn) fn(status, arg);
         });
 
     if (rc != 0) {
+      // 提交失败同样会毒化连接，必须一起清（回调不会来，没人替它清）。
       delete static_cast<std::function<void(int)>*>(send_arg_);
       send_fn_  = nullptr;
       send_arg_ = nullptr;
+      has_async_send_cb_ = false;
       return rc;
     }
     return 0;
@@ -329,14 +336,15 @@ int uvcpp_udp_client::send_wait(const char* ip, int port, const char* data,
   uv_buf_t* raw = bufcpp.out_uv_buf();
   uvcpp_udp_send* w = new uvcpp_udp_send();
   w->set_uv_buf(raw, true);
+  w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
   int rc = send_to_addr_impl(
       udp_, loop_, last_error_code_, ip, port, raw, w,
       [this](uvcpp_udp_send* wr, int status) {
+        (void)wr;  // 释放由 callback_udp_send 事后做
         if (status != 0) last_error_code_ = status;
         sync_send_result_ = status;
         sync_send_done_   = true;
-        delete wr;
       });
 
   if (rc != 0) return rc;
@@ -370,23 +378,30 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_to_addr_impl(
         udp_, loop_, last_error_code_, ip, port, raw, w,
         [this](uvcpp_udp_send* wr, int status) {
+          (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
-          if (send_fn_) {
-            send_fn_(status, send_arg_);
-            send_fn_  = nullptr;
-            send_arg_ = nullptr;
-          }
-          delete wr;
+          // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
+          // `has_async_send_cb_` 必须在**调用用户回调之前**清 —— 否则回调里
+          // 接着发起下一次 send 仍然拿 UV_EALREADY，连接被永久毒化。
+          auto  fn  = send_fn_;
+          void* arg = send_arg_;
+          send_fn_  = nullptr;
+          send_arg_ = nullptr;
+          has_async_send_cb_ = false;
+          if (fn) fn(status, arg);
         });
 
     if (rc != 0) {
+      // 提交失败同样会毒化连接，必须一起清（回调不会来，没人替它清）。
       delete static_cast<std::function<void(int)>*>(send_arg_);
       send_fn_  = nullptr;
       send_arg_ = nullptr;
+      has_async_send_cb_ = false;
       return rc;
     }
     return 0;
@@ -402,14 +417,15 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
     uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_to_addr_impl(
         udp_, loop_, last_error_code_, ip, port, raw, w,
         [this](uvcpp_udp_send* wr, int status) {
+          (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           sync_send_result_ = status;
           sync_send_done_   = true;
-          delete wr;
         });
 
     if (rc != 0) return rc;
@@ -440,23 +456,30 @@ int uvcpp_udp_client::send(const char* data, size_t len,
     uv_buf_t* raw = bufcpp.out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_connected_impl(
         udp_, loop_, last_error_code_, raw, w,
         [this](uvcpp_udp_send* wr, int status) {
+          (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
-          if (send_fn_) {
-            send_fn_(status, send_arg_);
-            send_fn_  = nullptr;
-            send_arg_ = nullptr;
-          }
-          delete wr;
+          // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
+          // `has_async_send_cb_` 必须在**调用用户回调之前**清 —— 否则回调里
+          // 接着发起下一次 send 仍然拿 UV_EALREADY，连接被永久毒化。
+          auto  fn  = send_fn_;
+          void* arg = send_arg_;
+          send_fn_  = nullptr;
+          send_arg_ = nullptr;
+          has_async_send_cb_ = false;
+          if (fn) fn(status, arg);
         });
 
     if (rc != 0) {
+      // 提交失败同样会毒化连接，必须一起清（回调不会来，没人替它清）。
       delete static_cast<std::function<void(int)>*>(send_arg_);
       send_fn_  = nullptr;
       send_arg_ = nullptr;
+      has_async_send_cb_ = false;
       return rc;
     }
     return 0;
@@ -477,14 +500,15 @@ int uvcpp_udp_client::send_wait(const char* data, size_t len, int timeout_ms) {
   uv_buf_t* raw = bufcpp.out_uv_buf();
   uvcpp_udp_send* w = new uvcpp_udp_send();
   w->set_uv_buf(raw, true);
+  w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
   int rc = send_connected_impl(
       udp_, loop_, last_error_code_, raw, w,
       [this](uvcpp_udp_send* wr, int status) {
+        (void)wr;  // 释放由 callback_udp_send 事后做
         if (status != 0) last_error_code_ = status;
         sync_send_result_ = status;
         sync_send_done_   = true;
-        delete wr;
       });
 
   if (rc != 0) return rc;
@@ -518,23 +542,30 @@ int uvcpp_udp_client::send(uvcpp_buf* buf,
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_connected_impl(
         udp_, loop_, last_error_code_, raw, w,
         [this](uvcpp_udp_send* wr, int status) {
+          (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
-          if (send_fn_) {
-            send_fn_(status, send_arg_);
-            send_fn_  = nullptr;
-            send_arg_ = nullptr;
-          }
-          delete wr;
+          // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
+          // `has_async_send_cb_` 必须在**调用用户回调之前**清 —— 否则回调里
+          // 接着发起下一次 send 仍然拿 UV_EALREADY，连接被永久毒化。
+          auto  fn  = send_fn_;
+          void* arg = send_arg_;
+          send_fn_  = nullptr;
+          send_arg_ = nullptr;
+          has_async_send_cb_ = false;
+          if (fn) fn(status, arg);
         });
 
     if (rc != 0) {
+      // 提交失败同样会毒化连接，必须一起清（回调不会来，没人替它清）。
       delete static_cast<std::function<void(int)>*>(send_arg_);
       send_fn_  = nullptr;
       send_arg_ = nullptr;
+      has_async_send_cb_ = false;
       return rc;
     }
     return 0;
@@ -550,14 +581,15 @@ int uvcpp_udp_client::send(uvcpp_buf* buf,
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
     int rc = send_connected_impl(
         udp_, loop_, last_error_code_, raw, w,
         [this](uvcpp_udp_send* wr, int status) {
+          (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           sync_send_result_ = status;
           sync_send_done_   = true;
-          delete wr;
         });
 
     if (rc != 0) return rc;

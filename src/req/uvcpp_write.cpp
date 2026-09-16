@@ -47,9 +47,11 @@ const uvcpp_buf *uvcpp_write::get_src_buf() { return src_buf; }
 /** @brief libuv uv_write_cb forwarded to m_write_cb. */
 void uvcpp_write::callback_write(uv_write_t *req, int status) {
   uvcpp_write *w = reinterpret_cast<uvcpp_write *>(req->data);
-  if (w->m_write_cb) {
-    w->m_write_cb(w, status);
+  if (w == nullptr) {
+    return;
   }
+  // 搬闭包 + 事后自我释放，见 uvcpp_req::invoke_completion。
+  invoke_completion(w->m_write_cb, w, status);
 }
 
 

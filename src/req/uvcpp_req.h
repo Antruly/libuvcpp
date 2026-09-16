@@ -10,6 +10,7 @@
 #define SRC_REQ_UVCPP_REQ_H
 
 #include <functional>
+#include <utility>
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_define.h>
 
@@ -108,7 +109,39 @@ public:
 
   virtual uv_req_t *get_req() const;
 
+  /**
+   * @brief 置位后，本请求对象在自己的**完成回调返回之后**由跳板自行 `delete`；
+   *        置位者就不必（也不能）再在回调里自己删。默认关闭。
+   * @note 只对"排他持有请求对象"的用法有意义：置位后使用者不再拥有它。
+   */
+  void set_self_free(bool on) { self_free_ = on; }
+  bool is_self_free() const { return self_free_; }
+
 protected:
+  /**
+   * @brief 完成回调的统一跳板（`callback_write` / `callback_udp_send` /
+   *        `callback_connect` 共用）。
+   *
+   * 两件事，顺序都不能反：
+   *  1. **先把闭包搬出 `slot` 再调用**。回调里常见最后一句 `delete self`，
+   *     而那个闭包就存在 `slot` 里 —— 不搬走的话，删掉的是**此刻正在执行**的
+   *     这个 `std::function`，连同它的捕获一起，是未定义行为（只在"删完不再
+   *     读捕获"时才不表现为故障）；
+   *  2. 闭包返回**之后**按 `self_free_` 决定是否 `delete self`。这个标志必须在
+   *     调用**之前**读 —— 回调拿到 `self`，有权把它删掉。
+   */
+  template <typename TCb, typename TReq>
+  static void invoke_completion(TCb &slot, TReq *self, int status) {
+    TCb cb = ::std::move(slot);
+    const bool self_free = self->is_self_free();
+    if (cb) {
+      cb(self, status);
+    }
+    if (self_free) {
+      delete self;
+    }
+  }
+
   virtual void set_req(void *r);
   void set_req_data();
 
@@ -119,6 +152,7 @@ protected:
 private:
   uv_req_t *req = nullptr;
   void *vdata = nullptr;
+  bool self_free_ = false;  ///< 完成回调之后自我释放（见 set_self_free）
 };
 
 } // namespace uvcpp

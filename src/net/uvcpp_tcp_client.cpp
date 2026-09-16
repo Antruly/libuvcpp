@@ -454,13 +454,16 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
   set_status(TCP_CLIENT_CONNECTING);
 
   uvcpp_connect* conn = new uvcpp_connect();
+  // 释放交给 callback_connect 在**闭包返回之后**做：回调里 `delete r` 删的是
+  // 正在执行的闭包本身。见 uvcpp_req::invoke_completion。
+  conn->set_self_free(true);
   std::shared_ptr<char> life = alive_token();
   rc = tcp_->connect(
       conn, reinterpret_cast<const struct sockaddr*>(&resolved),
       [this, life](uvcpp_connect* r, int status) {
+        (void)r;  // 释放由 callback_connect 事后做
         if (!token_alive(life)) {
-          delete r;  // 对象已析构：只把请求对象还回去
-          return;
+          return;  // 对象已析构：请求对象由 trampoline 还回去
         }
         clear_status(TCP_CLIENT_CONNECTING);
         if (status == 0) {
@@ -472,7 +475,6 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
         }
         sync_connect_result_ = status;
         sync_connect_done_   = true;
-        delete r;
       });
 
   if (rc != 0) {
@@ -547,15 +549,17 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
   connect_arg_ = new std::function<void(int)>(std::move(cb));
 
   uvcpp_connect* conn = new uvcpp_connect();
+  // 释放交给 callback_connect 在**闭包返回之后**做（见 uvcpp_req::invoke_completion）
+  conn->set_self_free(true);
 
   std::shared_ptr<char> life = alive_token();
 
   int rc = tcp_->connect(
       conn, addr,
       [this, life](uvcpp_connect* r, int status) {
+        (void)r;  // 释放由 callback_connect 事后做
         if (!token_alive(life)) {
-          delete r;  // 对象已析构：只把请求对象还回去
-          return;
+          return;  // 对象已析构：请求对象由 trampoline 还回去
         }
         clear_status(TCP_CLIENT_CONNECTING);
         if (status == 0) {
@@ -581,22 +585,17 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
             tls_deliver_plain();  // 此阶段还没有消费者，会先攒着
             if (token_alive(life)) tls_complete_connect();
           }
-          // delete r 是最后一句。**此后不再碰 this** —— r 持有的就是正在跑的
-          // 这个闭包，释放它就是抽掉自己的存储（既有写法，见 fire_close_*
-          // 与计划文件里记的那四处 `delete wr`）。
-          delete r;
           return;
         }
 #endif
 
-        // Call user callback BEFORE deleting r — the lambda stored in
-        // r->m_connect_cb is still alive so 'this' access is safe.
+        // 用户回调在**闭包还在栈上**的时候调用（invoke_completion 已经把
+        // m_connect_cb 搬走了），所以这里碰 this 是安全的。
         if (connect_fn_) {
           connect_fn_(status, connect_arg_);
           connect_fn_  = nullptr;
           connect_arg_ = nullptr;
         }
-        delete r;
       });
 
   if (rc != 0) {
@@ -717,17 +716,19 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
 
     uvcpp_write* w = new uvcpp_write();
     w->set_uv_buf(raw_buf, true);
+    // 请求对象的释放交给 callback_write 在**回调返回之后**做。回调里 `delete wr`
+    // 删的是正在执行的闭包本身（见 uvcpp_write::callback_write）。
+    w->set_self_free(true);
 
     std::shared_ptr<char> life = alive_token();
 
     int rc = tcp_->write(
         w, w->get_uv_buf(), 1,
         [this, life](uvcpp_write* wr, int status) {
+          (void)wr;
           // 本对象已经析构：`write_fn_` / `write_arg_` / `last_error_code_`
-          // 全都不能碰了。唯一还能做的就是把请求对象（连同它持有的缓冲区）
-          // 还回去 —— 不做的话每次断连都漏一块。
+          // 全都不能碰了 —— 直接返回即可，请求对象由 trampoline 还回去。
           if (!token_alive(life)) {
-            delete wr;
             return;
           }
           if (status != 0) {
@@ -750,7 +751,6 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
           } else {
             has_async_write_cb_ = false;
           }
-          delete wr;
         });
 
     if (rc != 0) {
@@ -820,6 +820,7 @@ int uvcpp_tcp_client::write_wait(const char* data, size_t len,
 
   uvcpp_write* w = new uvcpp_write();
   w->set_uv_buf(raw_buf, true);           // w takes ownership of raw_buf and its data
+  w->set_self_free(true);                 // 释放挪到 callback_write 里，见该类说明
 
   // 同步写也可能超时返回，把完成回调留在 libuv 队列里 —— 之后对象被销毁，
   // 那个回调照样会来。所以同步路径用同一套令牌。
@@ -828,8 +829,8 @@ int uvcpp_tcp_client::write_wait(const char* data, size_t len,
   int rc = tcp_->write(
       w, w->get_uv_buf(), 1,
       [this, life](uvcpp_write* wr, int status) {
+        (void)wr;
         if (!token_alive(life)) {
-          delete wr;  // 对象没了：只把请求对象还回去
           return;
         }
         if (status != 0) {
@@ -837,7 +838,6 @@ int uvcpp_tcp_client::write_wait(const char* data, size_t len,
         }
         sync_write_result_ = status;
         sync_write_done_   = true;
-        delete wr;  // also frees raw_buf->base and raw_buf (owned)
       });
 
   if (rc != 0) {
@@ -885,15 +885,16 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
 
     uvcpp_write* w = new uvcpp_write();
     w->set_uv_buf(raw, true);
+    w->set_self_free(true);  // 释放挪到 callback_write 里，见该类说明
 
     std::shared_ptr<char> life = alive_token();
 
     int rc = tcp_->write(
         w, w->get_uv_buf(), 1,
         [this, life](uvcpp_write* wr, int status) {
+          (void)wr;
           if (!token_alive(life)) {
-            delete wr;  // 对象已析构：只把请求对象还回去
-            return;
+            return;  // 对象已析构：请求对象由 trampoline 还回去
           }
           if (status != 0) last_error_code_ = status;
           // 次序与 const char* 重载一致：先存后清，且 `has_async_write_cb_` 必须在
@@ -904,7 +905,6 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
           write_arg_ = nullptr;
           has_async_write_cb_ = false;
           if (fn) fn(status, arg);
-          delete wr;
         });
 
     if (rc != 0) {
@@ -937,20 +937,20 @@ int uvcpp_tcp_client::write_wait(uvcpp_buf* buf, int timeout_ms) {
 
   uvcpp_write* w = new uvcpp_write();
   w->set_uv_buf(raw, true);
+  w->set_self_free(true);  // 释放挪到 callback_write 里，见该类说明
 
   std::shared_ptr<char> life = alive_token();
 
   int rc = tcp_->write(
       w, w->get_uv_buf(), 1,
       [this, life](uvcpp_write* wr, int status) {
+        (void)wr;
         if (!token_alive(life)) {
-          delete wr;  // 对象已析构：只把请求对象还回去
-          return;
+          return;  // 对象已析构：请求对象由 trampoline 还回去
         }
         if (status != 0) last_error_code_ = status;
         sync_write_result_ = status;
         sync_write_done_   = true;
-        delete wr;
       });
 
   if (rc != 0) {
@@ -1680,6 +1680,7 @@ void uvcpp_tcp_client::tls_flush_out() {
 
   uvcpp_write* w = new uvcpp_write();
   w->set_uv_buf(raw, true);
+  w->set_self_free(true);  // 释放挪到 callback_write 里，见该类说明
 
   tls_out_busy_ = true;
 
@@ -1687,18 +1688,16 @@ void uvcpp_tcp_client::tls_flush_out() {
   int rc = tcp_->write(
       w, w->get_uv_buf(), 1,
       [this, life](uvcpp_write* wr, int status) {
+        (void)wr;
         if (!token_alive(life)) {
-          delete wr;  // 对象没了：只把请求对象还回去
-          return;
+          return;  // 对象没了：请求对象由 trampoline 还回去
         }
         tls_out_busy_ = false;
         if (status != 0) {
           last_error_code_ = status;
-          delete wr;
           tls_fail(status, false);
           return;
         }
-        delete wr;
         // wbio 里可能还有（比如握手过程中又产生了 Finished）。
         tls_flush_out();
         if (!token_alive(life)) return;
