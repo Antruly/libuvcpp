@@ -45,7 +45,20 @@ uvcpp_udp_client::uvcpp_udp_client() {
   status_ = UDP_CLIENT_NONE;
 }
 
+std::shared_ptr<char> uvcpp_udp_client::alive_token() {
+  if (!alive_token_) alive_token_.reset(new char(0));
+  return alive_token_;
+}
+
+bool uvcpp_udp_client::token_alive(const std::shared_ptr<char>& token) {
+  return token && *token == 0;
+}
+
 uvcpp_udp_client::~uvcpp_udp_client() {
+  // **第一件事就把令牌作废**：见头文件里的说明。此后 libuv 送进来的任何异步
+  // 完成/接收回调都直接返回（接收回调还要把已经分配出去的缓冲区还回去）。
+  if (alive_token_) *alive_token_ = 1;
+
   if (recv_started_) {
     udp_->recv_stop();
     recv_started_ = false;
@@ -53,27 +66,39 @@ uvcpp_udp_client::~uvcpp_udp_client() {
 
   // Close the UDP handle and pump the loop.
   // Delete the handle AFTER closing the loop to avoid endgame races.
+  //
+  // 析构里**不等待**：以前这里是 `while (!close_done) { run(NOWAIT); if
+  // (elapsed > 5000) break; sleep(1ms); }` 再跟 20 次带 sleep 的迭代 —— 最长 5
+  // 秒的墙钟等待，而且是在析构点上跑事件循环。析构点常常就在循环自己的回调里
+  // （会话结束时把自己一起回收），那等于让那个回调阻塞，与"不在循环线程上跑耗
+  // 时操作、不做密集等待"直接抵触（同 `~uvcpp_ws_client`，cdf785b）。
+  //
+  // 但泵不能整个去掉：`uv_close` 是延迟的，句柄要到它自己的关闭回调跑过之后才
+  // 从 `loop->handle_queue` 上摘下来，而只有循环能放那个回调。所以下面这几次
+  // NOWAIT 不是"等待"而是"把已经挂起的关闭回调放掉" —— 它不需要 I/O 也不需要
+  // 定时器，一两轮就到。次数有界是为了**绝不卡住**：万一没放完，后续处置与改
+  // 之前"等了 5 秒也没等到"是同一条路（底层内存由 `uvcpp_handle::free_handle`
+  // 的哨兵机制接手）。
   if (udp_ != nullptr) {
-    if (!udp_->is_closing() && udp_->is_active()) {
+    // **判据只能是 `is_closing()`，不能带上 `is_active()`** —— 与 tcp 侧
+    // （`uvcpp_tcp_client.cpp` 里那段同题长注）同一个坑：上面刚调过
+    // `recv_stop()`，而它会把「正在读」这个活跃计数减掉，于是"我刚把读停掉、
+    // socket 还开着"和"句柄早就关完了"落进同一个 else。后果不是少关一次那么
+    // 轻：`delete udp_` 里 `free_handle()` 会走"不活跃也没在关"那条分支，而那
+    // 时 loop 已经被删了 —— 它会在**已释放的 loop** 上调 `uv_close`（往
+    // `loop->closing_handles` 写），句柄内存与在途请求则永远没人还。
+    //
+    // 句柄真正关完之后 `_handle` 是 nullptr，`is_closing()` 答 0、`is_active()`
+    // 也答 0，走 else 里的一次 NOWAIT 收尾 —— 在"还活着"的前提下，判据带上
+    // `is_active()` 提供不了任何额外信息。
+    if (!udp_->is_closing()) {
       bool close_done = false;
       udp_->close([&close_done](uvcpp_handle*) { close_done = true; });
 
-      auto start = std::chrono::steady_clock::now();
-      while (!close_done) {
+      for (int i = 0; i < 64 && !close_done; ++i) {
         if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start)
-                .count();
-        if (elapsed > 5000) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
-      // Drain remaining endgames
-      for (int i = 0; i < 20; i++) {
-        if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-    } else if (udp_->is_closing()) {
+    } else {
       if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
     }
   }
@@ -286,6 +311,7 @@ int uvcpp_udp_client::send(const char* ip, int port, const char* data,
     has_async_send_cb_ = true;
     send_fn_  = trampoline_send;
     send_arg_ = new std::function<void(int)>(cb);
+    std::shared_ptr<char> life = alive_token();
 
     uvcpp_buf bufcpp(data, len);
     uv_buf_t* raw = bufcpp.out_uv_buf();
@@ -295,7 +321,10 @@ int uvcpp_udp_client::send(const char* ip, int port, const char* data,
 
     int rc = send_to_addr_impl(
         udp_, loop_, last_error_code_, ip, port, raw, w,
-        [this](uvcpp_udp_send* wr, int status) {
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+          }
           (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
@@ -331,6 +360,7 @@ int uvcpp_udp_client::send_wait(const char* ip, int port, const char* data,
 
   sync_send_done_   = false;
   sync_send_result_ = 0;
+  std::shared_ptr<char> life = alive_token();
 
   uvcpp_buf bufcpp(data, len);
   uv_buf_t* raw = bufcpp.out_uv_buf();
@@ -340,7 +370,10 @@ int uvcpp_udp_client::send_wait(const char* ip, int port, const char* data,
 
   int rc = send_to_addr_impl(
       udp_, loop_, last_error_code_, ip, port, raw, w,
-      [this](uvcpp_udp_send* wr, int status) {
+      [this, life](uvcpp_udp_send* wr, int status) {
+        if (!token_alive(life)) {
+          return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+        }
         (void)wr;  // 释放由 callback_udp_send 事后做
         if (status != 0) last_error_code_ = status;
         sync_send_result_ = status;
@@ -374,6 +407,7 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
     has_async_send_cb_ = true;
     send_fn_  = trampoline_send;
     send_arg_ = new std::function<void(int)>(cb);
+    std::shared_ptr<char> life = alive_token();
 
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
@@ -382,7 +416,10 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
 
     int rc = send_to_addr_impl(
         udp_, loop_, last_error_code_, ip, port, raw, w,
-        [this](uvcpp_udp_send* wr, int status) {
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+          }
           (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
@@ -413,6 +450,7 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
 
     sync_send_done_   = false;
     sync_send_result_ = 0;
+    std::shared_ptr<char> life = alive_token();
 
     uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership
     uvcpp_udp_send* w = new uvcpp_udp_send();
@@ -421,7 +459,10 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
 
     int rc = send_to_addr_impl(
         udp_, loop_, last_error_code_, ip, port, raw, w,
-        [this](uvcpp_udp_send* wr, int status) {
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+          }
           (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           sync_send_result_ = status;
@@ -451,6 +492,7 @@ int uvcpp_udp_client::send(const char* data, size_t len,
     has_async_send_cb_ = true;
     send_fn_  = trampoline_send;
     send_arg_ = new std::function<void(int)>(cb);
+    std::shared_ptr<char> life = alive_token();
 
     uvcpp_buf bufcpp(data, len);
     uv_buf_t* raw = bufcpp.out_uv_buf();
@@ -460,7 +502,10 @@ int uvcpp_udp_client::send(const char* data, size_t len,
 
     int rc = send_connected_impl(
         udp_, loop_, last_error_code_, raw, w,
-        [this](uvcpp_udp_send* wr, int status) {
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+          }
           (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
@@ -495,6 +540,7 @@ int uvcpp_udp_client::send_wait(const char* data, size_t len, int timeout_ms) {
 
   sync_send_done_   = false;
   sync_send_result_ = 0;
+  std::shared_ptr<char> life = alive_token();
 
   uvcpp_buf bufcpp(data, len);
   uv_buf_t* raw = bufcpp.out_uv_buf();
@@ -504,7 +550,10 @@ int uvcpp_udp_client::send_wait(const char* data, size_t len, int timeout_ms) {
 
   int rc = send_connected_impl(
       udp_, loop_, last_error_code_, raw, w,
-      [this](uvcpp_udp_send* wr, int status) {
+      [this, life](uvcpp_udp_send* wr, int status) {
+        if (!token_alive(life)) {
+          return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+        }
         (void)wr;  // 释放由 callback_udp_send 事后做
         if (status != 0) last_error_code_ = status;
         sync_send_result_ = status;
@@ -538,6 +587,7 @@ int uvcpp_udp_client::send(uvcpp_buf* buf,
     has_async_send_cb_ = true;
     send_fn_  = trampoline_send;
     send_arg_ = new std::function<void(int)>(cb);
+    std::shared_ptr<char> life = alive_token();
 
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
@@ -546,7 +596,10 @@ int uvcpp_udp_client::send(uvcpp_buf* buf,
 
     int rc = send_connected_impl(
         udp_, loop_, last_error_code_, raw, w,
-        [this](uvcpp_udp_send* wr, int status) {
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+          }
           (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           // 次序与 tcp 侧（a9730d3）一致：先把回调取出来再清，且
@@ -577,6 +630,7 @@ int uvcpp_udp_client::send(uvcpp_buf* buf,
 
     sync_send_done_   = false;
     sync_send_result_ = 0;
+    std::shared_ptr<char> life = alive_token();
 
     uv_buf_t* raw = buf->out_uv_buf();
     uvcpp_udp_send* w = new uvcpp_udp_send();
@@ -585,7 +639,10 @@ int uvcpp_udp_client::send(uvcpp_buf* buf,
 
     int rc = send_connected_impl(
         udp_, loop_, last_error_code_, raw, w,
-        [this](uvcpp_udp_send* wr, int status) {
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
+          }
           (void)wr;  // 释放由 callback_udp_send 事后做
           if (status != 0) last_error_code_ = status;
           sync_send_result_ = status;
@@ -615,13 +672,18 @@ int uvcpp_udp_client::recv_start(
 
     recv_fn_  = trampoline_recv;
     recv_arg_ = new std::function<void(uvcpp_buf*, const char*, int)>(cb);
+    std::shared_ptr<char> life = alive_token();
 
     ensure_read_cache();
 
     int rc = udp_->recv_start(
         internal_alloc_cb,
-        [this](uvcpp_udp* u, ssize_t nread, const uv_buf_t* buf,
+        [this, life](uvcpp_udp* u, ssize_t nread, const uv_buf_t* buf,
                const struct sockaddr* addr, unsigned int flags) {
+          if (!token_alive(life)) {
+            if (buf->base != nullptr) uvcpp_free_bytes(buf->base);
+            return;
+          }
           if (nread > 0) {
             set_status(UDP_CLIENT_READABLE);
             uvcpp_buf tmp_buf;
@@ -662,10 +724,15 @@ int uvcpp_udp_client::recv_start(
 
     ensure_read_cache();
 
+    std::shared_ptr<char> life = alive_token();
     int rc = udp_->recv_start(
         internal_alloc_cb,
-        [this](uvcpp_udp* u, ssize_t nread, const uv_buf_t* buf,
+        [this, life](uvcpp_udp* u, ssize_t nread, const uv_buf_t* buf,
                const struct sockaddr* addr, unsigned int flags) {
+          if (!token_alive(life)) {
+            if (buf->base != nullptr) uvcpp_free_bytes(buf->base);
+            return;
+          }
           on_internal_recv(u, nread, buf, addr, flags);
         });
 

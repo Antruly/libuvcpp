@@ -14,6 +14,7 @@
 #define SRC_NET_UVCPP_UDP_SERVER_H
 
 #include <functional>
+#include <memory>
 #include <uv.h>
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_udp.h>
@@ -115,17 +116,35 @@ class UVCPP_API uvcpp_udp_server {
   void set_status(int flags);
   void clear_status(int flags);
 
+  // -----------------------------------------------------------------
+  // 存活令牌（与 `uvcpp_tcp_client` / `uvcpp_udp_client` 同一套，见那里的说明）
+  // -----------------------------------------------------------------
+  //
+  // 接收回调与 `stop()` 的关闭回调原先捕获裸 `this`。析构之后 libuv 仍可能把
+  // 已经挂起的回调送进来，那时回调碰 `status_` / `recv_fn_` 就是读已释放内存。
+  // 令牌按值捕进这两个回调：对象活着时 `*token == 0`，析构时置 1。
+  //
+  // **发送路径不需要**：那几个回调捕获的是用户回调（`user_cb`）或调用方的栈
+  // 变量，一个字节的 `this` 都不碰。
+
+  /** @brief 取存活令牌，必要时建立（每个服务端只建一次）。 */
+  ::std::shared_ptr<char> alive_token();
+
+  /** @brief 令牌是否表示「对象还活着」。空令牌视为不活着。 */
+  static bool token_alive(const ::std::shared_ptr<char>& token);
+
   using recv_callback_t = void(*)(uvcpp_buf* buf, const char* ip,
                                   int port, void* arg);
 
   uvcpp_loop* loop_ = nullptr;
   uvcpp_udp*  udp_  = nullptr;
-  bool stopped_     = false;
   int status_       = UDP_SERVER_NONE;
   int last_error_code_ = 0;
 
   recv_callback_t recv_fn_  = nullptr;
   void*           recv_arg_ = nullptr;
+
+  ::std::shared_ptr<char> alive_token_;
 };
 
 }  // namespace uvcpp

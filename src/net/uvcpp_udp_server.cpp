@@ -38,22 +38,46 @@ uvcpp_udp_server::uvcpp_udp_server() {
   status_ = UDP_SERVER_NONE;
 }
 
+std::shared_ptr<char> uvcpp_udp_server::alive_token() {
+  if (!alive_token_) alive_token_.reset(new char(0));
+  return alive_token_;
+}
+
+bool uvcpp_udp_server::token_alive(const std::shared_ptr<char>& token) {
+  return token && *token == 0;
+}
+
 uvcpp_udp_server::~uvcpp_udp_server() {
+  // **第一件事就把令牌作废**：见头文件里的说明。此后 libuv 送进来的接收回调与
+  // 关闭回调都直接返回（接收回调还要把已经分配出去的缓冲区还回去）。
+  if (alive_token_) *alive_token_ = 1;
+
   // Close UDP handle (if not already closed by stop())
-  if (udp_ != nullptr && !stopped_) {
-    if (!udp_->is_closing() && udp_->is_active()) {
+  //
+  // 原先这里是 `if (udp_ != nullptr && !stopped_)`，而 `stopped_` 只在 `stop()`
+  // 里被置真且从不复位 —— 也就是说「先 stop() 再析构」这条再常见不过的路上，
+  // 析构**整段跳过**：`udp_` 这个 C++ 包装对象永远不删（`delete udp_` 只在这里
+  // 有），下面的关闭泵也不跑；而 `stop()` 里的 `uv_close` 是延迟的，句柄还挂在
+  // `loop->handle_queue` 上，紧接着的 `loop_close()` 就带着一个未收尾的句柄跑，
+  // 底层句柄内存没人还。判据换成句柄自身的状态（`is_closing()` / `is_active()`
+  // 对已释放的句柄是安全的，见 `uvcpp_handle`），与 `stopped_` 无关。
+  //
+  // 析构里**不等待**：以前这里是 5000 次带 `sleep(1ms)` 的墙钟等待，后面还接
+  // 20 次同样带 sleep 的迭代 —— 最长 5 秒，而且是在析构点上跑事件循环，与
+  // 「不在循环线程上跑耗时操作、不做密集等待」直接抵触（同 `~uvcpp_ws_client`，
+  // cdf785b）。`uv_close` 的收尾回调不需要 I/O 也不需要定时器，一两轮 NOWAIT
+  // 就到；次数有界是为了**绝不卡住**。
+  if (udp_ != nullptr) {
+    // 判据同 tcp / udp_client 两侧：只看 `is_closing()`，不带 `is_active()`
+    // —— `recv_stop()` 会把活跃计数减掉，带上它就会把"读过、还开着、已经不
+    // 在读"误判成"早就关完了"，于是 socket 不关、句柄留在队列上。
+    if (!udp_->is_closing()) {
       bool close_done = false;
       udp_->close([&close_done](uvcpp_handle*) { close_done = true; });
-      for (int i = 0; i < 5000 && !close_done; i++) {
+      for (int i = 0; i < 64 && !close_done; ++i) {
         if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
-      // Drain remaining endgames
-      for (int i = 0; i < 20; i++) {
-        if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-    } else if (udp_->is_closing()) {
+    } else {
       if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
     }
     delete udp_;
@@ -125,13 +149,21 @@ int uvcpp_udp_server::recv_start(
 
   recv_fn_  = trampoline_recv;
   recv_arg_ = new std::function<void(uvcpp_buf*, const char*, int)>(cb);
+  std::shared_ptr<char> life = alive_token();
 
   int rc = udp_->recv_start(
       [](uvcpp_handle*, size_t sz, uv_buf_t* buf) {
         uvcpp_buf::alloc_buf(buf, sz > 0 ? sz : 4096);
       },
-      [this](uvcpp_udp* /*u*/, ssize_t nread, const uv_buf_t* buf,
+      [this, life](uvcpp_udp* /*u*/, ssize_t nread, const uv_buf_t* buf,
              const struct sockaddr* addr, unsigned int /*flags*/) {
+        if (!token_alive(life)) {
+          // 对象已析构：只剩收尾这一件事 —— 把分配出去的缓冲区还回去，否则
+          // 这个提前返回就是一处泄漏。此后不再碰本对象的任何成员
+          // （`recv_fn_` / `recv_arg_` / `status_` 都可能已经析构）。
+          if (buf->base != nullptr) uvcpp_free_bytes(buf->base);
+          return;
+        }
         if (nread > 0) {
           uvcpp_buf tmp_buf;
           tmp_buf.clone_data(buf->base, static_cast<size_t>(nread));
@@ -314,10 +346,14 @@ void uvcpp_udp_server::stop(std::function<void()> on_stopped) {
 
   set_status(UDP_SERVER_STOPPING);
   clear_status(UDP_SERVER_BOUND);
-  stopped_ = true;
 
   if (udp_ != nullptr && !udp_->is_closing()) {
-    udp_->close([this, on_stopped](uvcpp_handle*) {
+    // 关闭回调原先捕获裸 `this`。`uv_close` 是延迟的：若在此期间对象被析构，
+    // 回调回来时 `status_` 已经是已释放内存。令牌按值捕进来，析构后只跳过去
+    // （`on_stopped` 一并跳过 —— 对象都没了，那个回调再去碰它就晚了）。
+    std::shared_ptr<char> life = alive_token();
+    udp_->close([this, on_stopped, life](uvcpp_handle*) {
+      if (!token_alive(life)) return;
       set_status(UDP_SERVER_STOPPED);
       clear_status(UDP_SERVER_STOPPING);
       if (on_stopped) on_stopped();

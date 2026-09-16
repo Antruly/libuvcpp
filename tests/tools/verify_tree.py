@@ -136,9 +136,16 @@ def gate3_mtime(tree, names):
 def gate4_ctest(tree):
     rc, out = run(["ctest", "--test-dir", tree, "-C", "Release",
                    "--timeout", "60", "--output-on-failure"], timeout=3600)
+    # 过滤器里必须带上**用例名**那几行：ctest 把它们印成
+    # `  65 - test_web_static_server_func (Failed)`，既不含 "tests passed/failed"、
+    # 也不以 "The following tests FAILED" 开头，原来那条过滤器正好把它们全滤掉 ——
+    # 于是门 4 报红的时候，屏幕上只有一句"下面这些用例失败了"，一个名字都没有，
+    # 只能去翻 ctest 自己的 LastTestsFailed.log。
     tail = [ln for ln in out.splitlines()
-            if "tests passed" in ln or "tests failed" in ln or ln.strip().startswith("The following tests FAILED")]
-    for ln in tail[:4]:
+            if "tests passed" in ln or "tests failed" in ln
+            or ln.strip().startswith("The following tests FAILED")
+            or re.match(r"\s*\d+ - \S+ \(", ln)]
+    for ln in tail[:12]:
         print("      " + ln.strip())
     # ctest 的汇总行**永远**是 "N tests failed out of M"，N=0 时也在。原来写的是
     # `failed is None`，于是这一道门在 100% 全绿的运行上也报 FAIL —— 一条永远

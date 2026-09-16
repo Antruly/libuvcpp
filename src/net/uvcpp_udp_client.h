@@ -13,6 +13,7 @@
 #define SRC_NET_UVCPP_UDP_CLIENT_H
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <uv.h>
 #include <handle/uvcpp_loop.h>
@@ -204,6 +205,25 @@ class UVCPP_API uvcpp_udp_client {
   static void internal_alloc_cb(uvcpp_handle* h, size_t sz, uv_buf_t* buf);
   void on_internal_recv(uvcpp_udp* u, ssize_t nread, const uv_buf_t* buf,
                         const struct sockaddr* addr, unsigned int flags);
+
+  // -----------------------------------------------------------------
+  // 存活令牌（与 `uvcpp_tcp_client` 同一套，见那里的长篇说明）
+  // -----------------------------------------------------------------
+  //
+  // 完成回调原先捕获裸 `this`：libuv 在对象析构之后仍可能把在飞的完成回调送
+  // 进来，那时回调去读 `send_fn_` / `send_arg_` / `last_error_code_` 就是读已
+  // 释放内存。令牌按值捕进每个异步完成回调：对象活着时 `*token == 0`，析构时
+  // 置 1。用 `shared_ptr` 是为了让回调手里那份副本在对象消失后仍然有效可读。
+  //
+  // 只挡「析构之后」这一种情况：对象还活着时行为与原来逐字节相同。
+
+  /** @brief 取存活令牌，必要时建立（每个客户端只建一次）。 */
+  ::std::shared_ptr<char> alive_token();
+
+  /** @brief 令牌是否表示「对象还活着」。空令牌视为不活着。 */
+  static bool token_alive(const ::std::shared_ptr<char>& token);
+
+  ::std::shared_ptr<char> alive_token_;
 
   // Trampolines (free functions in .cpp, not class members)
   using send_callback_t = void(*)(int status, void* arg);
