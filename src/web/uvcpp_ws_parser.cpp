@@ -156,13 +156,12 @@ size_t uvcpp_ws_parser::parse_payload(const uint8_t** pp, const uint8_t* end) {
       const size_t off = static_cast<size_t>(payload_received_ % 4);
       // **一次追加整段，再原地异或** —— 不要逐字节 append。
       //
-      // `uvcpp_buf::append_data` 走的是 `resize(len + sz)`，而 `resize` 是
-      // "精确大小"重新分配（没有容量翻倍）：每次都要新分配一块、把旧内容整个
-      // 搬过去、再释放旧块。逐字节调用就变成
-      //   - O(n²) 的拷贝量（512KB 的帧要搬约 130 GB）；且
-      //   - n 次分配（512KB 的帧 = 51.2 万次），每次都向内存池要新块。
-      // 实测后果：客户端发一个较大的**带掩码**帧就能让服务端在 `resize` 里
-      // 抛 `std::bad_alloc`（进程直接终止）。
+      // 当初这么写是因为 `uvcpp_buf::resize` 是"精确大小"重新分配（没有容量
+      // 翻倍）：逐字节 append 就是每次新分配一块、把旧内容整个搬过去、再释放
+      // 旧块 —— O(n²) 的拷贝量（512KB 的帧要搬约 130 GB）加 n 次分配，实测能
+      // 让服务端在一个较大的**带掩码**帧上于 `resize` 里抛 `std::bad_alloc`。
+      // 现在 `resize` 已有容量翻倍（见 `uvcpp_buf::capacity_`），O(n²) 那一半
+      // 没了；仍然整段追加，省掉的是 51.2 万次 `resize` 调用与随之的边界检查。
       //
       // 掩码本来的定义就是"负载的第 i 个字节异或 mask_key[i % 4]"（§5.3），
       // 与追加方式无关，所以拆成"追加 + 原地异或"语义完全不变。`off` 是
