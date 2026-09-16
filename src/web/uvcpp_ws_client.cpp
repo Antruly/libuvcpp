@@ -83,13 +83,28 @@ uvcpp_ws_client::uvcpp_ws_client() {
 }
 
 uvcpp_ws_client::~uvcpp_ws_client() {
+  // 析构里**不等待**。以前这里是
+  //   `for (i < 5000) { loop_->run(UV_RUN_NOWAIT); sleep(1ms); }`
+  // —— 最长 5 秒的墙钟等待，而且是在析构点上跑事件循环。析构点经常就在循环
+  // 自己的回调里（会话关闭时连自己一起回收），那等于让那个回调阻塞 5 秒，
+  // 与"不在循环线程上跑耗时操作、不做密集等待"直接抵触。
+  //
+  // 但 `uv_close` 是**延迟**的：句柄要到它自己的关闭回调跑过之后才从
+  // `loop->handle_queue` 上摘下来。所以下面这几次 NOWAIT 迭代不是"等待"，
+  // 而是"把已经挂起的关闭回调放掉" —— 关闭回调不需要 I/O 也不需要定时器，
+  // 一两轮就到。全程没有 sleep、不看墙钟。
+  //
+  // 次数有界是为了**绝不卡住**：万一没放完，后面的处置与改之前"等了 5 秒也没
+  // 等到"是同一条路（句柄的底层内存由 `uvcpp_handle::free_handle` 的哨兵机制
+  // 接手，见那里）。
   if (tcp_ && !has_status(WS_CLIENT_CLOSED)) {
     auto* raw = tcp_->get_tcp();
     if (raw && !raw->is_closing() && raw->is_active()) {
       bool done = false;
       raw->close([&done](uvcpp_handle*) { done = true; });
-      for (int i = 0; i < 5000 && !done; i++) { loop_->run(UV_RUN_NOWAIT); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-      for (int i = 0; i < 20; i++) { loop_->run(UV_RUN_NOWAIT); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+      for (int i = 0; i < 64 && !done; ++i) {
+        loop_->run(UV_RUN_NOWAIT);
+      }
     }
   }
 
