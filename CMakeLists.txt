@@ -17,6 +17,9 @@ option(UVCPP_BUILD_WEB  "Build web module (HTTP/WebSocket)"         OFF)
 # 它依赖 web，所以 web 关掉时它也会被强制关掉。
 option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/log)" OFF)
 
+# 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
+option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
+
 # =========================================================================
 # Web 子开关 — 仅在 UVCPP_BUILD_WEB=ON 时有效
 # =========================================================================
@@ -619,6 +622,12 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tests/req/CMakeLists.txt")
   add_subdirectory(tests/req)
 endif()
 
+# 示例。放在这里（而不是靠前）是因为上面那些 add_compile_definitions 是按目录
+# 生效的，示例目标得建在它们之后才拿得到 UVCPP_WEBAPP_ENABLE。
+if(UVCPP_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+
 # install and export
 include(CMakePackageConfigHelpers)
 set(CONFIG_INSTALL_DIR lib/cmake/uvcpp)
@@ -812,6 +821,11 @@ if(WIN32)
   )
   if(TARGET test_memory_pool)
     list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/tests/expand/$<CONFIG>")
+  endif()
+  # 示例的输出目录同样需要 DLL：webapp_demo.exe 直接依赖 uvcpp.dll / uv.dll /
+  # llhttp.dll，缺一个就是 0xc0000135 静默退出。
+  if(TARGET webapp_demo)
+    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/examples/$<CONFIG>")
   endif()
 
   # 各目录先建出来：`cmake -E copy_if_different` 不会创建目标目录，而全新工作区里

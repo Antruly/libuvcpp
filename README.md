@@ -1,4 +1,4 @@
-[![GitHub release](https://img.shields.io/badge/release-1.0.9--dev-blue.svg)](./)
+[![GitHub release](https://img.shields.io/badge/release-1.0.10--dev-blue.svg)](./)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.0.9-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.0.10-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -91,6 +91,60 @@ Enabled by default (`UVCPP_BUILD_EXPAND=ON`).
 - `UVCPP_ENABLE_ZLIB=ON` — Per-Message Deflate compression (RFC 7692) for WebSocket
 - `UVCPP_ENABLE_OPENSSL=ON` — HTTPS (WSS) via SSL/TLS module
 
+### Web app framework (`src/webapp/`) — `UVCPP_BUILD_WEBAPP=ON`
+
+A higher-level application layer built on the web module: **you write handlers, not
+wire formats.** Requires `UVCPP_BUILD_WEB=ON` (webapp is force-disabled when web is off,
+rather than leaving a configuration that does not compile). Pulls in
+[nlohmann/json](https://github.com/nlohmann/json) via FetchContent for its JSON backend.
+
+| Class | Description |
+|-------|-------------|
+| `uvcpp_web_app` | The application: config, routing, middleware, lifecycle (`start`/`stop`/`join`) |
+| `uvcpp_web_router` | Pattern router — `/user/:id` params, `/files/*path` wildcards, static > param > wildcard |
+| `uvcpp_web_request` / `uvcpp_web_response` | Request/response wrappers: query, form, cookies, path params, HTTP status helpers, chunked, `send_file` |
+| `uvcpp_web_context` | Per-request context: middleware chain, `post()`, `hold()`/`release()`, user data |
+| `uvcpp_web_static` | Static file service: ETag, Last-Modified, Range/206/416, LRU cache, SPA fallback, dotfile policy |
+| `uvcpp_web_upload` / `uvcpp_web_multipart` | Streaming multipart upload to disk with random leaf names and six size limits |
+| `uvcpp_web_stream` | Streaming request bodies (`on_data`/`on_end`/`pause`/`resume`) |
+| `uvcpp_web_ws` | WebSocket endpoints on the app (`app.websocket("/chat/:room", handler)`) |
+| `uvcpp_web_ws_client` | WebSocket client with callbacks on the client itself and optional **auto-reconnect** |
+| `uvcpp_web_work_limit` | Work-pool admission gate (backpressure for `uv_queue_work`) |
+| `uvcpp_log` / `uvcpp_log_console` | Two-axis logging: level + category, pluggable sink |
+| `uvcpp_web_json` | JSON helpers around nlohmann/json — no exceptions across libuv callbacks, depth pre-scan |
+
+```cpp
+#include <webapp/uvcpp_web_app.h>
+using namespace uvcpp;
+
+int main() {
+  uvcpp_web_app app;
+  app.set_port(8080)
+     .use(web_middleware_access_log())
+     .use(web_middleware_cors());
+
+  app.get("/hello", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                       uvcpp_web_next next) {
+    resp.json_str("{\"hello\":\"world\"}");
+    resp.end();
+  });
+
+  app.serve_static("/assets", "./public");
+  app.websocket("/echo", [](uvcpp_web_ws_request& ws) {
+    uvcpp_ws_connection* c = ws.connection();
+    c->on_text([c](const std::string& m) { c->send_text(m.c_str(), m.size()); });
+  });
+
+  app.start();   // binds, then runs the loop on a background thread
+  app.join();
+  return 0;
+}
+```
+
+**→ Full guide: [doc/webapp-guide.md](doc/webapp-guide.md)** — routing rules, middleware,
+static/upload/streaming, WebSocket client & reconnect, security, and known limitations.
+Runnable example: `examples/webapp_demo.cpp`.
+
 ### SSL module (`src/ssl/`) — `UVCPP_ENABLE_OPENSSL=ON`
 
 | Class | Description |
@@ -143,6 +197,18 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
 cmake --build . --config Release --parallel
 ```
 
+### With the web app framework
+
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
+  -DUVCPP_BUILD_WEB=ON \
+  -DUVCPP_BUILD_WEBAPP=ON \
+  -DUVCPP_BUILD_EXAMPLES=ON
+cmake --build . --config Release --parallel
+# runnable example (self-checking):
+./examples/Release/webapp_demo
+```
+
 ### CMake Options
 
 | Option | Default | Description |
@@ -154,6 +220,8 @@ cmake --build . --config Release --parallel
 | `UVCPP_BUILD_EXPAND` | `ON` | Build expand module (memory pool) |
 | `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
+| `UVCPP_BUILD_WEBAPP` | `OFF` | Build web app framework (router/middleware/static/upload/log). Requires `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_BUILD_EXAMPLES` | `OFF` | Build the examples in `examples/` |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
@@ -202,11 +270,13 @@ int main() {
 int main() {
     uvcpp::uvcpp_http_client client;
 
-    client.get("http://httpbin.org/get", [](uvcpp::uvcpp_http_response* rsp, int err) {
-        if (!err && rsp) {
-            std::cout << "Status: " << rsp->get_status_code() << std::endl;
-            std::cout << "Body: " << rsp->get_body() << std::endl;
-        }
+    client.get("http://httpbin.org/get",
+               [](const uvcpp::uvcpp_http_response& rsp, int err) {
+        if (err) return;
+        std::cout << "Status: " << static_cast<int>(rsp.status_code) << std::endl;
+        std::cout << "Body: "
+                  << std::string(rsp.body.get_const_data(), rsp.body.size())
+                  << std::endl;
     });
 
     client.run();
@@ -231,7 +301,8 @@ int main() {
                 std::cout << "Echo reply: " << msg << std::endl;
             });
 
-            conn->send_text("Hello WebSocket!");
+            const std::string msg = "Hello WebSocket!";
+            conn->send_text(msg.c_str(), msg.size());
         });
 
     client.run();
@@ -254,7 +325,8 @@ int main() {
 
         conn->on_text([conn](const std::string& msg) {
             std::cout << "Received: " << msg << std::endl;
-            conn->send_text("Echo: " + msg);
+            const std::string reply = "Echo: " + msg;
+            conn->send_text(reply.c_str(), reply.size());
         });
 
         conn->on_close([](uvcpp::uvcpp_ws_connection*) {
@@ -323,13 +395,17 @@ libuvcpp/
 │   ├── expand/    # Memory pool (page heap, span, enterprise allocator)
 │   ├── net/       # TCP/UDP client/server
 │   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
+│   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
 │   └── ssl/       # SSL/TLS context and connection wrapper
 ├── tests/
 │   ├── unit/      # Unit tests
 │   ├── functional/# Functional/integration tests
+│   ├── tools/     # Test tooling (e.g. mutation harnesses)
 │   └── expand/    # Memory pool tests
+├── examples/      # Runnable examples (webapp_demo)
 ├── doc/           # Documentation
-│   └── ci-guide.md   # CI maintenance guidelines
+│   ├── ci-guide.md        # CI maintenance guidelines
+│   └── webapp-guide.md    # Web app framework guide
 ├── cmake/         # CMake config templates
 ├── .github/workflows/  # CI pipeline
 ├── CMakeLists.txt

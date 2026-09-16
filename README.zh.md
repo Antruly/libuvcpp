@@ -1,4 +1,4 @@
-[![GitHub release](https://img.shields.io/badge/release-1.0.9--dev-blue.svg)](./)
+[![GitHub release](https://img.shields.io/badge/release-1.0.10--dev-blue.svg)](./)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.0.9-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.0.10-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -91,6 +91,59 @@ TCMalloc 风格的内存池：页堆、span 分配器、线程缓存、enterpris
 - `UVCPP_ENABLE_ZLIB=ON` — WebSocket 压缩扩展（RFC 7692, Per-Message Deflate）
 - `UVCPP_ENABLE_OPENSSL=ON` — HTTPS/WSS 通过 SSL/TLS 模块
 
+### Web 应用框架（`src/webapp/`）— `UVCPP_BUILD_WEBAPP=ON`
+
+建在 web 模块之上的**应用层**：**写业务 handler 就行，不用拼报文。** 需要
+`UVCPP_BUILD_WEB=ON`（web 关掉时会强制关掉 webapp，而不是留一个编译不过的配置）。
+JSON 后端用 FetchContent 拉 [nlohmann/json](https://github.com/nlohmann/json)。
+
+| 类 | 说明 |
+|-------|-------------|
+| `uvcpp_web_app` | 应用本体：配置、路由、中间件、生命周期（`start`/`stop`/`join`） |
+| `uvcpp_web_router` | 模式路由 —— `/user/:id` 参数、`/files/*path` 通配，静态 > 参数 > 通配 |
+| `uvcpp_web_request` / `uvcpp_web_response` | 请求/响应封装：查询串、表单、Cookie、路径参数、状态码 helper、chunked、`send_file` |
+| `uvcpp_web_context` | 每请求上下文：中间件链、`post()`、`hold()`/`release()`、用户数据 |
+| `uvcpp_web_static` | 静态文件服务：ETag、Last-Modified、Range/206/416、LRU 缓存、SPA 回落、dotfile 策略 |
+| `uvcpp_web_upload` / `uvcpp_web_multipart` | multipart 流式落盘，随机叶子名 + 六条大小上限 |
+| `uvcpp_web_stream` | 请求体流式接收（`on_data`/`on_end`/`pause`/`resume`） |
+| `uvcpp_web_ws` | 应用上的 WebSocket 端点（`app.websocket("/chat/:room", handler)`） |
+| `uvcpp_web_ws_client` | WebSocket 客户端：回调装在客户端上 + 可选**自动重连** |
+| `uvcpp_web_work_limit` | 工作线程池准入闸门（`uv_queue_work` 的背压） |
+| `uvcpp_log` / `uvcpp_log_console` | 两级日志：等级 + 模块，sink 可插拔 |
+| `uvcpp_web_json` | nlohmann/json 的收口层 —— 不让异常穿透 libuv 回调、深度预扫描 |
+
+```cpp
+#include <webapp/uvcpp_web_app.h>
+using namespace uvcpp;
+
+int main() {
+  uvcpp_web_app app;
+  app.set_port(8080)
+     .use(web_middleware_access_log())
+     .use(web_middleware_cors());
+
+  app.get("/hello", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                       uvcpp_web_next next) {
+    resp.json_str("{\"hello\":\"world\"}");
+    resp.end();
+  });
+
+  app.serve_static("/assets", "./public");
+  app.websocket("/echo", [](uvcpp_web_ws_request& ws) {
+    uvcpp_ws_connection* c = ws.connection();
+    c->on_text([c](const std::string& m) { c->send_text(m.c_str(), m.size()); });
+  });
+
+  app.start();   // bind 之后在后台线程跑事件循环
+  app.join();
+  return 0;
+}
+```
+
+**→ 完整指南：[doc/webapp-guide.md](doc/webapp-guide.md)** —— 路由规则、中间件、
+静态/上传/流式、WebSocket 客户端与重连、安全、已知限制。可运行示例：
+`examples/webapp_demo.cpp`。
+
 ### SSL 模块（`src/ssl/`）— `UVCPP_ENABLE_OPENSSL=ON`
 
 | 类 | 说明 |
@@ -143,6 +196,18 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
 cmake --build . --config Release --parallel
 ```
 
+### 加上 Web 应用框架
+
+```bash
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
+  -DUVCPP_BUILD_WEB=ON \
+  -DUVCPP_BUILD_WEBAPP=ON \
+  -DUVCPP_BUILD_EXAMPLES=ON
+cmake --build . --config Release --parallel
+# 可运行示例（自校验）：
+./examples/Release/webapp_demo
+```
+
 ### CMake 选项
 
 | 选项 | 默认值 | 说明 |
@@ -154,6 +219,8 @@ cmake --build . --config Release --parallel
 | `UVCPP_BUILD_EXPAND` | `ON` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |
+| `UVCPP_BUILD_WEBAPP` | `OFF` | 构建 web 应用框架（路由/中间件/静态/上传/日志）。需要 `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_BUILD_EXAMPLES` | `OFF` | 构建 `examples/` 下的示例 |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
@@ -202,11 +269,13 @@ int main() {
 int main() {
     uvcpp::uvcpp_http_client client;
 
-    client.get("http://httpbin.org/get", [](uvcpp::uvcpp_http_response* rsp, int err) {
-        if (!err && rsp) {
-            std::cout << "状态码: " << rsp->get_status_code() << std::endl;
-            std::cout << "响应体: " << rsp->get_body() << std::endl;
-        }
+    client.get("http://httpbin.org/get",
+               [](const uvcpp::uvcpp_http_response& rsp, int err) {
+        if (err) return;
+        std::cout << "状态码: " << static_cast<int>(rsp.status_code) << std::endl;
+        std::cout << "响应体: "
+                  << std::string(rsp.body.get_const_data(), rsp.body.size())
+                  << std::endl;
     });
 
     client.run();
@@ -231,7 +300,8 @@ int main() {
                 std::cout << "回显: " << msg << std::endl;
             });
 
-            conn->send_text("Hello WebSocket!");
+            const std::string msg = "Hello WebSocket!";
+            conn->send_text(msg.c_str(), msg.size());
         });
 
     client.run();
@@ -254,7 +324,8 @@ int main() {
 
         conn->on_text([conn](const std::string& msg) {
             std::cout << "收到: " << msg << std::endl;
-            conn->send_text("回显: " + msg);
+            const std::string reply = "回显: " + msg;
+            conn->send_text(reply.c_str(), reply.size());
         });
 
         conn->on_close([](uvcpp::uvcpp_ws_connection*) {
@@ -309,6 +380,7 @@ ctest --test-dir build -C Release --exclude-regex "test_shutdown_func|test_tcp_f
 - **单元测试**：`tests/unit/` — 句柄类型、请求类型、uvcpp 工具类
 - **功能测试**：`tests/functional/` — 所有模块的运行时行为
 - **Expand 测试**：`tests/expand/` — 内存池分配测试
+- **测试工具**：`tests/tools/` — 变异脚本等（例如 `mutate_ws_client.py`）
 
 ---
 
@@ -323,13 +395,17 @@ libuvcpp/
 │   ├── expand/    # 内存池（page heap, span, enterprise allocator）
 │   ├── net/       # TCP/UDP 客户端/服务端
 │   ├── web/       # HTTP 客户端/服务端, WebSocket 客户端/服务端, 帧解析器
+│   ├── webapp/    # Web 应用框架（路由、中间件、静态、上传、WS 客户端、日志）
 │   └── ssl/       # SSL/TLS 上下文和连接封装
 ├── tests/
 │   ├── unit/      # 单元测试
 │   ├── functional/# 功能/集成测试
+│   ├── tools/     # 测试工具（变异脚本等）
 │   └── expand/    # 内存池测试
+├── examples/      # 可运行示例（webapp_demo）
 ├── doc/           # 文档
-│   └── ci-guide.md   # CI 维护指南
+│   ├── ci-guide.md        # CI 维护指南
+│   └── webapp-guide.md    # web 应用框架指南
 ├── cmake/         # CMake 配置模板
 ├── .github/workflows/  # CI 流水线
 ├── CMakeLists.txt
