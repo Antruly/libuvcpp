@@ -103,7 +103,25 @@ if(UVCPP_BUILD_WEB)
         GIT_TAG         ${ZLIB_VERSION}
         GIT_SHALLOW     TRUE
       )
-      FetchContent_MakeAvailable(zlib)
+      # 这里**不能**用 FetchContent_MakeAvailable：它等价于
+      # add_subdirectory(<src> <bin>)，会把 zlib 自己的 install 规则一并登记。
+      # 而 zlib 的规则用的是**配置期**的绝对前缀（本机是
+      # `C:/Program Files (x86)/uvcpp`，与 `cmake --install --prefix` 无关），
+      # 症状有两个，都实测过：
+      #   1. `cmake --install <tree> --prefix X` 除了装到 X，还会把
+      #      zlib.h / zconf.h / zlib.lib / zlibstatic.lib / zlib1.dll 装进那个
+      #      绝对目录 —— 安装污染到请求的前缀之外；
+      #   2. 只编了 uvcpp 这一个目标（`--target uvcpp`，zlib1.dll 没被编出来）时
+      #      `file INSTALL cannot find ".../Release/zlib1.dll"`，**整个安装中断**，
+      #      连 uvcpp.lib 都装不上（前面 libuv/llhttp 已经装进去了，是个半截安装）。
+      # EXCLUDE_FROM_ALL（CMake 3.25+）会把子目录的 install 规则一起排除；目标
+      # 本身照样能被我们的链接依赖拉起来（uvcpp 显式链 zlibstatic）。3.20~3.24
+      # 上这个参数不影响 install 规则，退回旧行为，不会更糟。
+      FetchContent_GetProperties(zlib)
+      if(NOT zlib_POPULATED)
+        FetchContent_Populate(zlib)
+        add_subdirectory(${zlib_SOURCE_DIR} ${zlib_BINARY_DIR} EXCLUDE_FROM_ALL)
+      endif()
       message(STATUS "zlib integrated (tag=${ZLIB_VERSION})")
     endif()
   endif()
