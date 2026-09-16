@@ -792,6 +792,47 @@ static bool test_raw_data_hook() {
   return ok;
 }
 
+// `deferred` 是处理器与服务器之间"先别发我、我稍后自己发"的约定（服务器在
+// 处理器返回后 `if (resp.deferred) return;`）。拷贝构造/赋值是手写的，漏字段
+// 正是这类写法的通病 —— 漏掉它，一份拷贝看起来就是"没设过 deferred"，于是
+// 本该延迟发送的响应当场发出去。判据做成一对：true 要跟过去，false 不能被
+// 变成 true（只判前一半的话，"两个拷贝都恒为 true"也能过）。
+static bool test_response_copy_keeps_deferred() {
+  uvcpp_http_response src;
+  src.status_code = http_status::OK;
+  src.body.clone_data("body", 4);
+  src.deferred = true;
+
+  uvcpp_http_response by_copy(src);
+  if (!by_copy.deferred) {
+    std::cout << "  [err] 拷贝构造丢了 deferred\n";
+    return false;
+  }
+  uvcpp_http_response by_assign;
+  by_assign = src;
+  if (!by_assign.deferred) {
+    std::cout << "  [err] 拷贝赋值丢了 deferred\n";
+    return false;
+  }
+  // 同一对手写的拷贝/赋值，顺带核对别的字段没被漏掉
+  if (by_copy.status_code != http_status::OK || by_copy.body.size() != 4 ||
+      by_assign.status_code != http_status::OK || by_assign.body.size() != 4) {
+    std::cout << "  [err] 拷贝/赋值丢了别的字段\n";
+    return false;
+  }
+
+  uvcpp_http_response plain;  // deferred 默认 false
+  plain.body.clone_data("p", 1);
+  uvcpp_http_response plain_copy(plain);
+  uvcpp_http_response plain_assign;
+  plain_assign = plain;
+  if (plain_copy.deferred || plain_assign.deferred) {
+    std::cout << "  [err] 拷贝把 deferred 置成了 true\n";
+    return false;
+  }
+  return true;
+}
+
 int main(int argc, char** argv) {
   // 可选参数：测试名子串过滤，便于单条定位。
   const std::string filter = (argc > 1) ? argv[1] : std::string();
@@ -818,6 +859,7 @@ int main(int argc, char** argv) {
     {"server_close_notifies", test_server_close_notifies},
     {"keepalive_sequential_responses", test_keepalive_sequential_responses},
     {"raw_data_hook", test_raw_data_hook},
+    {"response_copy_keeps_deferred", test_response_copy_keeps_deferred},
   };
   for (const auto& t : tests) {
     if (!filter.empty() && std::string(t.name).find(filter) == std::string::npos) {
