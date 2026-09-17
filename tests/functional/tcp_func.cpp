@@ -10,7 +10,6 @@
 #include "handle/uvcpp_async.h"
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
-#include "req/uvcpp_work.h"
 #include "uvcpp/uvcpp_buf.h"
 #include "loop_drain.h"
 
@@ -128,79 +127,45 @@ int main() {
         [&server, & server_loop, &success, &start_async](uvcpp_stream *s,
                                                         int status) {
       if (status < 0) return;
-      struct new_client_data {
-        uvcpp_loop *work_loop;
-        uvcpp_tcp *client;
-      };
-      uvcpp_loop *srv_loop = new uvcpp_loop();
-      uvcpp_tcp *srv_client = new uvcpp_tcp(srv_loop);
-      new_client_data *client_data = new new_client_data();
-      client_data->work_loop = srv_loop;
-      client_data->client = srv_client;
+      // **被接受的句柄必须建在"接受它的那条循环"上。**
+      //
+      // `uv_accept()` 要求 `server->loop == client->loop`：libuv 在
+      // `unix/stream.c` 里有这条断言，Windows 的 `uv__accept` 没有 —— 所以
+      // "把连接接进另一条循环"这个错误只在 POSIX 上现形。原先这里是
+      // `new uvcpp_loop()` 造出第二条循环 `srv_loop`、再把 `srv_client` 建在它
+      // 上面，于是 Ubuntu CI 每轮都是
+      // `uv_accept: Assertion 'server->loop == client->loop' failed`。
+      //
+      // 句柄归哪条循环，它的读/写就只能在**那条循环的线程**上做：所以回显放回
+      // server_loop，不再交给工作线程（那条路本来也是跨线程操作别人的句柄）。
+      uvcpp_tcp *srv_client = new uvcpp_tcp(&server_loop);
       s->accept(srv_client);
 
-      // create work item that runs in threadpool; work_cb will run in worker thread
-
-      uvcpp_work* work = new uvcpp_work();
-      work->init();
-      work->set_data(client_data);
-
-      work->queue_work(&server_loop,
-        // work_cb: runs in worker thread, create a loop and run client loop there
-        [](uvcpp_work* w) {
-            new_client_data *client_data = (new_client_data *)w->get_data();
-            uvcpp_tcp *client = client_data->client;
-            uvcpp_loop *work_loop = client_data->work_loop;
-          client->read_start(
-            [](uvcpp_handle *h, size_t suggested_size, uv_buf_t* buf) {
-              uvcpp_buf::alloc_buf(buf, suggested_size);
-            },
-            [client](uvcpp_stream *stream, ssize_t nread,
-                                    const uv_buf_t* buf) {
-              if (nread > 0) {
-                std::string received(buf->base, (size_t)nread);
-                std::cout << "[worker client] recv: " << received << std::endl;
-                // echo back
-                uvcpp_buf bufcpp(buf->base, nread);
-                uv_buf_t* echo = bufcpp.out_uv_buf();
-                uvcpp_write *wreq = new uvcpp_write();
-                wreq->set_uv_buf(echo, true);
-                client->write(wreq, echo, 1,[](uvcpp_write* req, int stat){
-                  delete req;
-                });
-              } else if (nread == UV_EOF || nread < 0) {
-                stream->close([](uvcpp_handle * client) { 
-                std::cout << "[functional tcp] tcp src_client closed" << std::endl;
-                });
-              }
-              uvcpp_free_bytes(buf->base);
+      srv_client->read_start(
+          [](uvcpp_handle *h, size_t suggested_size, uv_buf_t *buf) {
+            uvcpp_buf::alloc_buf(buf, suggested_size);
+          },
+          [srv_client, &server, &server_loop](uvcpp_stream *stream, ssize_t nread,
+                                              const uv_buf_t *buf) {
+            if (nread > 0) {
+              std::string received(buf->base, (size_t)nread);
+              std::cout << "[functional tcp] server recv: " << received
+                        << std::endl;
+              // echo back
+              uvcpp_buf bufcpp(buf->base, nread);
+              uv_buf_t *echo = bufcpp.out_uv_buf();
+              uvcpp_write *wreq = new uvcpp_write();
+              wreq->set_uv_buf(echo, true);
+              stream->write(wreq, echo, 1,
+                            [](uvcpp_write *req, int stat) { delete req; });
+            } else if (nread == UV_EOF || nread < 0) {
+              // 对端收到回显就关了，收工：先关被接受的句柄，再关服务器、停循环
+              // （顺序与 `~uvcpp_tcp_server` 一致）。
+              stream->close([srv_client](uvcpp_handle *) { delete srv_client; });
+              server.close([&server_loop](uvcpp_handle *) { server_loop.stop(); });
             }
-          );
-
-          work_loop->run(UV_RUN_DEFAULT);
-        },
-        // after_work: runs on server loop thread, cleanup server wrapper and work data
-          [&server](uvcpp_work *w, int status) {
-            new_client_data *client_data = (new_client_data *)w->get_data();
-            uvcpp_tcp *client = client_data->client;
-            uvcpp_loop *work_loop = client_data->work_loop;
-            uvcpp_loop *service_loop = w->get_loop();
-            delete client;
-            // 工作线程那个循环是 `new` 出来的（`srv_loop`），一直没人删。
-            // 删在 `client` **之后**：`client` 是它上面的句柄，先删句柄再删
-            // 循环，与 `~uvcpp_tcp_server` / 两个 web 客户端同一条顺序。
-            // 此刻工作线程的 `UV_RUN_DEFAULT` 已经返回、循环没在跑，所以
-            // 析构里那段落尾泵不会和工作线程打架。
-            delete work_loop;
-            server.close([service_loop](uvcpp_handle *hd) {
-              std::cout << "[functional tcp] tcp service closed" << std::endl;
-              service_loop->stop();
-            });
-            delete client_data;
-            // free work request
-            delete w;
-        }
-      );
+            uvcpp_free_bytes(buf->base);
+          });
     }, 128);
     // notify client loop to start (after listen set up)
     start_async.send();
