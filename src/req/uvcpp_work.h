@@ -53,6 +53,9 @@ class UVCPP_API uvcpp_work : public uvcpp_req {
     // 这里不走 invoke_completion —— 它按 `self_free_` 删对象，而 work 回调跑在
     // **工作线程**上，对象必须活到 after_work，不该在这里被回收。
     ::std::function<void(uvcpp_work*)> cb = ::std::move(self->m_work_cb);
+    // 搬完显式清空源：移动后源只是"有效但未指定"，libc++ 的 SBO 分支不清它，
+    // 详见 uvcpp_req::invoke_completion 里的同一处说明。
+    self->m_work_cb = nullptr;
     if (cb) {
       cb(self);
     }

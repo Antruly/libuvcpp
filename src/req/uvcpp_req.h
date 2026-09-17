@@ -136,6 +136,14 @@ protected:
   static void invoke_completion(TCb &slot, TReq *self, int status,
                                 TArgs &&...args) {
     TCb cb = ::std::move(slot);
+    // **搬完显式清空源。** 移动之后源对象只是"有效但未指定"，标准不保证它空：
+    // libc++（macOS）在目标落进小对象缓冲时是**克隆**一份、源仍非空 ——
+    // `libcxx/include/__functional/function.h` 的 `__value_func` 移动构造里
+    // `__f.__f_ == &__f.__buf_` 那一支不动源的 `__f_`，只有堆上分配的才置空。
+    // 于是"搬出去之后槽就空了"这条不变量在 macOS 上不成立（libstdc++ 与 MSVC
+    // 恰好一律置空，所以两边看不出来）。上面第 1 条正是本函数存在的理由，
+    // 那就自己把它立起来，别借实现自由。
+    slot = TCb();
     const bool self_free = self->is_self_free();
     if (cb) {
       cb(self, status, ::std::forward<TArgs>(args)...);
