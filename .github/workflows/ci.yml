@@ -45,6 +45,16 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-build-static::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-static-output::${blk}"
+            fi
           fi
           exit "$rc"
 
@@ -63,6 +73,16 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-build-shared::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-shared-output::${blk}"
+            fi
           fi
           exit "$rc"
 
@@ -103,6 +123,16 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-windows-basic::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-windows-basic-output::${blk}"
+            fi
           fi
           exit "$rc"
 
@@ -200,6 +230,16 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-build-web::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-web-output::${blk}"
+            fi
           fi
           exit "$rc"
 
@@ -310,6 +350,16 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-build-ssl::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-ssl-output::${blk}"
+            fi
           fi
           exit "$rc"
 
@@ -351,6 +401,16 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-build-full::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-full-output::${blk}"
+            fi
           fi
           exit "$rc"
 
@@ -389,5 +449,15 @@ jobs:
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
             echo "::error title=ctest-build-msvc::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-msvc-output::${blk}"
+            fi
           fi
           exit "$rc"
