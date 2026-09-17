@@ -43,6 +43,8 @@
 
 #include <openssl/ssl.h>
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -139,10 +141,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   }
 
   // 让挂起的关闭事件跑完，再让 server 析构。
-  for (int i = 0; i < 400; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 400);
 }
 
 // =========================================================================
@@ -183,8 +182,19 @@ void run_http_client(int port, uvcpp_ssl_context* cctx, client_probe& p,
     return;
   }
 
+  // 上限是**墙钟毫秒**，不是圈数 —— 一圈的代价就是系统定时器粒度。
+  auto pump_ms = [&](int ms) {
+    const std::chrono::steady_clock::time_point t0 =
+        std::chrono::steady_clock::now();
+    while (uvcpp_test::elapsed_ms(t0) < ms) {
+      client.run(UV_RUN_NOWAIT);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
   auto pump_until = [&](const std::atomic<bool>& flag, int ms) {
-    for (int i = 0; i < ms && !flag.load(); ++i) {
+    const std::chrono::steady_clock::time_point t0 =
+        std::chrono::steady_clock::now();
+    while (!flag.load() && uvcpp_test::elapsed_ms(t0) < ms) {
       client.run(UV_RUN_NOWAIT);
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -196,10 +206,7 @@ void run_http_client(int port, uvcpp_ssl_context* cctx, client_probe& p,
   pump_until(p.connect_fired, 3000);
   if (p.connect_status.load() != 0) {
     // 收尾：让可能挂起的关闭事件跑完再析构。
-    for (int i = 0; i < 100; ++i) {
-      client.run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    pump_ms(100);
     return;
   }
 
@@ -217,10 +224,7 @@ void run_http_client(int port, uvcpp_ssl_context* cctx, client_probe& p,
   pump_until(p.resp_fired, resp_timeout_ms);
 
   // 关闭舞步收尾 —— 不在半途析构。
-  for (int i = 0; i < 200; ++i) {
-    client.run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  pump_ms(200);
 }
 
 }  // namespace
@@ -417,9 +421,13 @@ int main() {
       }
 
       // 关闭舞步收尾 —— 这条会话是阻塞 socket，不在半途析构。
-      for (int i = 0; i < 200; ++i) {
-        client.run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      {
+        const std::chrono::steady_clock::time_point t0 =
+            std::chrono::steady_clock::now();
+        while (uvcpp_test::elapsed_ms(t0) < 200) {
+          client.run(UV_RUN_NOWAIT);
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
       }
     }
 

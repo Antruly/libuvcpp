@@ -185,6 +185,7 @@ uvcpp_web_app_config::uvcpp_web_app_config()
       server_header("uvcpp"),
       shutdown_grace_ms(3000),
       idle_timeout_ms(60000),
+      max_pipelined_requests(8),
       auto_options(true),
       head_as_get(true) {}
 
@@ -335,6 +336,13 @@ uvcpp_web_app& uvcpp_web_app::set_idle_timeout_ms(int ms) {
   // 负数按"关掉"处理而不是夹成 1 毫秒：后者会让服务在用户笔误时把每条连接
   // 立刻杀掉，而"关掉"至少是能看出问题的（连接不断、只是不再有保护）。
   cfg_.idle_timeout_ms = ms > 0 ? ms : 0;
+  return *this;
+}
+
+uvcpp_web_app& uvcpp_web_app::set_max_pipelined_requests(size_t n) {
+  // 0 = 不限（与超时、长度上限一致：0 一律读作"关掉这个限制"）。真要"一条都
+  // 不许流水线"没有意义 —— 那等于把 HTTP/1.1 的 keep-alive 也一并禁了。
+  cfg_.max_pipelined_requests = n;
   return *this;
 }
 
@@ -667,12 +675,83 @@ std::string uvcpp_web_app::route_key(http_method method,
   return std::to_string(static_cast<int>(method)) + " " + pattern;
 }
 
+std::shared_ptr<uvcpp_web_context> uvcpp_web_app::active_body_ctx(
+    uvcpp_web_conn_id id) const {
+  std::map<uvcpp_web_conn_id, std::deque<out_entry> >::const_iterator q =
+      inflight_.find(id);
+  if (q == inflight_.end()) return std::shared_ptr<uvcpp_web_context>();
+
+  for (std::deque<out_entry>::const_iterator e = q->second.begin();
+       e != q->second.end(); ++e) {
+    // `shared_ptr` 的 const 不会穿透到被指对象，所以拿到的是可写的上下文。
+    uvcpp_web_stream* s = e->ctx->stream();
+    if (s == nullptr || s->aborted()) continue;
+    // 「body 还没彻底交完」有两种形态，见头文件里的说明：正在收（delivered_end_
+    // 还是假），以及收完了但 `on_end` 被框架扣着等异步落盘（end_deferred_）。
+    if (!s->delivered_end() || s->end_deferred()) return e->ctx;
+  }
+  return std::shared_ptr<uvcpp_web_context>();
+}
+
 uvcpp_web_stream* uvcpp_web_app::live_stream(uvcpp_web_conn_id id) const {
-  std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> >::const_iterator
-      it = inflight_.find(id);
-  if (it == inflight_.end()) return nullptr;
-  // `shared_ptr` 的 const 不会穿透到被指对象，所以这里给出的是可写的流指针。
-  return it->second->stream();
+  std::shared_ptr<uvcpp_web_context> c = active_body_ctx(id);
+  return c ? c->stream() : nullptr;
+}
+
+bool uvcpp_web_app::enqueue_inflight(
+    uvcpp_web_conn_id id, const std::shared_ptr<uvcpp_web_context>& ctx) {
+  std::deque<out_entry>& q = inflight_[id];
+  const size_t cap = cfg_.max_pipelined_requests;
+  // 0 = 不限（与超时、长度上限一处口径）。
+  const bool over = (cap != 0 && q.size() >= cap);
+  q.push_back(out_entry(ctx));
+  return over;
+}
+
+size_t uvcpp_web_app::inflight_total() const {
+  size_t n = 0;
+  for (std::map<uvcpp_web_conn_id, std::deque<out_entry> >::const_iterator q =
+           inflight_.begin();
+       q != inflight_.end(); ++q) {
+    n += q->second.size();
+  }
+  return n;
+}
+
+void uvcpp_web_app::flush_out(uvcpp_web_conn_id id) {
+  // 已经在续发了：这一层是上面某次 `release()` 追上来的，让它接着迭代就行。
+  if (flushing_) return;
+
+  // RAII 而不是"结尾手动清"：`send_response()` 会跑 `notify_sent()`，而访问日志
+  // 中间件是**用户代码**，可以抛。抛出去之后 `flushing_` 要是留在真，此后所有
+  // 连接的续发全部静默失效 —— 响应一条都发不出去，而且看不出是谁干的。
+  struct guard {
+    bool* flag;
+    explicit guard(bool* f) : flag(f) { *flag = true; }
+    ~guard() { *flag = false; }
+  } g(&flushing_);
+
+  for (;;) {
+    std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+        inflight_.find(id);
+    // 队列空了（`context_finished()` 会把空键摘掉），或者队首还没定稿 —— 停。
+    // 后一种是正常的：队首还在跑异步处理器。
+    if (q == inflight_.end() || q->second.empty()) return;
+    if (!q->second.front().response_ready) return;
+
+    // 本栈握一份：下面 `release()` 很可能还掉最后一份 shared_ptr，把我们这个
+    // 迭代器指向的元素连着销毁掉。**先清 `response_ready` 再动手** —— 它也要在
+    // 元素还可能活着的时候写。
+    std::shared_ptr<uvcpp_web_context> ctx = q->second.front().ctx;
+    q->second.front().response_ready = false;
+
+    // `send_response()` 里那道闸门现在放行了（它就是队首）。注意它是**直接**被
+    // 调的，不是走 `finish()` —— 那条路已经被 `finished_` 挡成空操作了。
+    send_response(*ctx);
+
+    // 还掉"排队时那次 hold"。之后不得再碰 ctx，所以循环顶部重新 find。
+    ctx->release();
+  }
 }
 
 uvcpp_web_app& uvcpp_web_app::upload_route(http_method method,
@@ -688,6 +767,28 @@ uvcpp_web_app& uvcpp_web_app::upload_route(http_method method,
 uvcpp_web_app& uvcpp_web_app::post_upload(const std::string& pattern,
                                           const uvcpp_web_handler& handler) {
   return upload_route(http_method::HTTP_POST, pattern, handler);
+}
+
+void uvcpp_web_app::reject_pipelining(uvcpp_web_context& ctx) {
+  const uvcpp_web_conn_id id = ctx.connection_id();
+
+  uvcpp_web_response& r = ctx.response();
+  r.status(503);
+  r.text("too many pipelined requests");
+  // 不复用这条连接：同一个读缓冲里多半还排着更多请求，而它们一个都不该被处理
+  // （正因为到上限才拒的）。`connection: close` 会被协议层的 keep-alive 判定
+  // 读到（`uvcpp_http_server.cpp` 的 `has_header("connection")` 那一支），
+  // 于是这条响应写完就关。
+  r.set_header("connection", "close");
+  r.end();
+
+  // 空链 → `advance()` 立刻收尾 → `finish()`。不跑用户的路由链是有意的：
+  // 这条请求根本没被受理，跑业务代码只会产生副作用和一个注定被丢掉的响应。
+  ctx.run(empty_chain_);
+
+  UVCPP_LOG_WARN(log_category::REQUEST)
+      << "连接 " << id << " 的在途请求已达上限 "
+      << cfg_.max_pipelined_requests << "，回 503 并关闭连接";
 }
 
 void uvcpp_web_app::reject_upload(uvcpp_web_context& ctx, int status,
@@ -840,9 +941,15 @@ bool uvcpp_web_app::wire_upload(uvcpp_web_context& ctx,
   // 还握着一份 `up`。
   up->set_done_callback([this, id](const uvcpp_web_upload_result& r, bool ok,
                                    const std::string& err) {
-    std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> >::iterator
-        it = inflight_.find(id);
-    if (it == inflight_.end()) {
+    // **按"谁在收请求体"找，不是按 conn id 一查一条。** 流水线之后一条连接上
+    // 可以同时挂着好几条上下文，按 id 取到的那条很可能是**别人** —— 那会把这次
+    // 上传的结果挂到隔壁请求头上。这一刻 `end_deferred_` 为真，`active_body_ctx()`
+    // 的判据正是照这个写的。
+    //
+    // 本栈握一份 shared_ptr：`release_end()` 会跑用户的 `on_end`，用户在里面把
+    // 响应收尾，上下文可能当场收场。
+    std::shared_ptr<uvcpp_web_context> cp = active_body_ctx(id);
+    if (!cp) {
       // 上下文已经没了（停机、或者连接在落盘期间被别的路径收走）。此时
       // **什么都不做**是对的：没有响应要发，临时文件的所有权也已经定了
       // （失败时框架删、成功时留在盘上等 handler —— 而 handler 已经不在了）。
@@ -852,7 +959,7 @@ bool uvcpp_web_app::wire_upload(uvcpp_web_context& ctx,
       return;
     }
 
-    uvcpp_web_context& c = *it->second;
+    uvcpp_web_context& c = *cp;
     c.request().set_upload(ok ? &r : nullptr);
     if (!ok) {
       UVCPP_LOG_WARN(log_category::UPLOAD)
@@ -1003,6 +1110,11 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
   //
   // 没有它，一个持续有字节的慢上传会被整段预算误杀；有了它但 `inflight_`
   // 那份豁免还在的话，卡死的上传又永远关不掉 —— 两处都要改才成立。
+  //
+  // 流水线之后这条豁免变成"**这条连接上还有任何在途请求**"（`inflight_` 的键
+  // 还在就成立），所以第二条请求也会把第一条的上传一起豁免掉。收场时由
+  // `context_finished()` 按事实重报一次（那里会连 `request_start_ms` 一起重新
+  // 起算），不在这里补。
   registry_.mark_streaming(id, true);
 
   sync_chains();
@@ -1018,13 +1130,16 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
     chain = &empty_chain_;
   }
 
-  // 与 `dispatch()` 同一个约定：**挂号必须在 `run()` 之前**。
-  if (inflight_.find(id) != inflight_.end()) {
-    UVCPP_LOG_WARN(log_category::REQUEST)
-        << "连接 " << id << " 上已有在途请求；HTTP 流水线不受支持，前一个"
-        << "请求的上下文被顶掉";
+  // 与 `dispatch()` 同一个约定：**挂号必须在 `run()` 之前**，而且挂在**队尾**
+  // —— 组内顺序就是请求到达顺序，也就是响应必须发出去的顺序。
+  if (enqueue_inflight(id, ctx)) {
+    reject_pipelining(*ctx);
+    // 连接正在关闭，但关闭完成之前还可能来几块 body：HTTP 层把这条连接认领给
+    // 我们之后，body 就必须有人消费到底（与 `wire_upload()` 失败那条路径同一
+    // 个理由）。空 handler 就是"照单收下、丢掉"。
+    return [](http_stream_event, const char*, size_t, uvcpp_http_request&,
+              uvcpp_tcp_client*) {};
   }
-  inflight_[id] = ctx;
 
   ctx->run(*chain);
 
@@ -1661,6 +1776,41 @@ uvcpp_tcp_client* uvcpp_web_app::connection(uvcpp_web_conn_id id) {
 }
 
 void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
+  // -------------------------------------------------------------------
+  // 发送闸门：**只有队首能发**
+  // -------------------------------------------------------------------
+  //
+  // 流水线要求响应按请求顺序发出（RFC 7230 §6.3.2）。协议层的写队列本来就是
+  // 按调用顺序 FIFO 的，所以顺序只要在这一层守住：前面还有别人的响应没发出去，
+  // 这一条就先排着。
+  //
+  // 排队的做法是 `hold()` 一次然后返回。`finish()` 接着会看到 `hold_count_ > 0`，
+  // 于是走"挂起收场"那一支（`pending_release_`）而**不**调 `context_finished()`
+  // —— 上下文因此仍留在 `inflight_` 里，`idle_sweep()` 的在途豁免与停机的宽限期
+  // 都不用为"排队中的响应"另做一套判断（反过来，要是把它摘出表去另外记一笔，
+  // 闲置超时就会把它当成"完全安静的连接"在 `idle_timeout_ms` 后杀掉）。
+  //
+  // 两种情况**不**排队，直接往下走：
+  //   * 上下文不在表里（例如 `wire_upload()` 内部直接回错那条路径）—— 没人会
+  //     来 flush 它，排了就是永远发不出去；
+  //   * 它已经是队首 —— 那正是要发的一条。
+  {
+    std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+        inflight_.find(ctx.connection_id());
+    if (q != inflight_.end() && !q->second.empty()) {
+      std::deque<out_entry>::iterator me = q->second.begin();
+      while (me != q->second.end() && me->ctx.get() != &ctx) ++me;
+      if (me != q->second.end() && me != q->second.begin()) {
+        // 已经排过的别再 hold 一次：`flush_out()` 只还一次。
+        if (!me->response_ready) {
+          me->response_ready = true;
+          ctx.hold();
+        }
+        return;
+      }
+    }
+  }
+
   uvcpp_web_response& r = ctx.response();
 
   // 先把 metadata 定下来（`sync_meta()` 是幂等的，发送前本来就一定要调一次）。
@@ -1873,20 +2023,27 @@ void uvcpp_web_app::abort_request(uvcpp_web_context& ctx) {
 }
 
 void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
-  // **先把 id 取到本地。** 下面 `inflight_.erase(it)` 很可能还掉 ctx 的最后
-  // 一份 shared_ptr，对象当场析构；那之后再去问 `ctx.connection_id()` 就是
+  // **先把 id 取到本地。** 下面的 `erase` 很可能还掉 ctx 的最后一份
+  // shared_ptr，对象当场析构；那之后再去问 `ctx.connection_id()` 就是
   // use-after-free —— PageHeap 下崩在 `context_finished+0xd8`（`mov rdx,
   // [rbp+18h]`，rbp 就是 &ctx），普通堆下只是静默读到已释放内存。
   // 本文件下面 `ctx.stream()` 那处早就是这么防的，这行漏了。
   const uvcpp_web_conn_id id = ctx.connection_id();
 
-  std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> >::iterator it =
+  std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
       inflight_.find(id);
-  if (it == inflight_.end()) return;
+  if (q == inflight_.end()) return;
 
-  // 比指针再摘：同一个连接上换过上下文（HTTP 流水线）时，表里那条已经是
-  // 别人了，不能替别人摘号。
-  if (it->second.get() != &ctx) return;
+  // **按上下文身份在队里找**，不是按 id 取第一条。流水线之后一条连接上同时
+  // 挂着好几条，按 id 拿到的很可能是**别人** —— 替别人摘号会让那一条永远出不了
+  // 队（它的响应再也发不出去）。找不到就什么都不做：这个上下文本来就不在这条
+  // 连接的名册上（例如 `wire_upload()` 内部直接回错那条路径）。
+  std::deque<out_entry>::iterator me = q->second.begin();
+  while (me != q->second.end() && me->ctx.get() != &ctx) ++me;
+  if (me == q->second.end()) return;
+
+  // 在 `erase` 之前记下：只有队首腾出来才谈得上续发。
+  const bool was_front = (me == q->second.begin());
 
   // **收场时必须松开背压。** `read_pause()` 作用在**连接**上，而 keep-alive 的
   // 连接会带着这个状态去服务下一个请求 —— 不松开就是那条连接**从此不再读到任何
@@ -1899,11 +2056,30 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   uvcpp_web_stream* s = ctx.stream();
   if (s != nullptr) s->resume();
 
-  inflight_.erase(it);
+  q->second.erase(me);
+  // **空队列要连键一起摘掉。** `idle_sweep()` 的豁免与停机宽限的判据都是
+  // `inflight_.find(id) != end()` / `!inflight_.empty()`，留一个空队列在表里
+  // 会让那条连接被**永久**豁免闲置超时 —— 表只涨不落，长跑服务上就是稳定的泄漏。
+  if (q->second.empty()) inflight_.erase(q);
 
   // 这个请求到此为止：半截请求的预算归零，下一次收到字节就是新请求的开头。
-  // 放在摘号之后 —— 上面那两个早返回都不该动计时。用本地 id，不要再用 ctx。
+  // 放在摘号之后 —— 上面那些早返回都不该动计时。用本地 id，不要再用 ctx。
   registry_.note_request_done(id);
+
+  // 队里还有人 = 上面那句清掉的其实是**后面那条请求**的两个标量（它们是按
+  // 连接存的，不是按请求）。按事实重报一次，否则流水线里第二条请求的
+  // 「整段预算」和「停顿保护」会一起消失：后续字节经 `note_read()` 重新起算
+  // `request_start_ms` 之后，一个正常推进的大上传会被当成慢速攻击杀掉。
+  //
+  // 只在真的还有在途请求时才走这一支 —— 所以单请求与顺序 keep-alive 的行为
+  // 与改前**逐字节相同**，这段逻辑只在流水线下生效。
+  if (inflight_.find(id) != inflight_.end()) {
+    registry_.note_read(id, loop_now_ms(loop()));
+    registry_.mark_streaming(id, active_body_ctx(id) != nullptr);
+  }
+
+  // 队首腾出来了：把后面**已经定稿**的响应按到达顺序接着发出去。
+  if (was_front) flush_out(id);
 }
 
 // =========================================================================
@@ -1963,16 +2139,37 @@ void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
 
     // 上传收到一半对端就断了：得告诉流对象（3b 的落盘要靠它删掉半截文件）。
     //
-    // **先取一份 shared_ptr 再动它**，不能 `it->second->stream_abort()` 了事：
-    // abort 会一路走到 `stream_resume_chain()` → 链收尾 → `finish()` →
-    // `context_finished()` → **`inflight_.erase(id)`**，也就是在调用过程中把
-    // 这个 map 元素（连同它持有的那份引用）销毁掉。没有本地副本的话，回溯
-    // 到 `it->second` 就已经是释放后的内存了。
-    std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> >::iterator it =
-        inflight_.find(id);
-    if (it != inflight_.end() && it->second->streaming()) {
-      std::shared_ptr<uvcpp_web_context> ctx = it->second;
-      ctx->stream_abort();
+    // **先把要动的条目摘成一份名单，再逐条动**（与上面 `file_transfers_` 同一
+    // 个套路）。原因有两层：
+    //
+    //   1. `stream_abort()` 会一路走到 `stream_resume_chain()` → 链收尾 →
+    //      `finish()` → `context_finished()` → **在队里摘掉这一条**，也就是在
+    //      调用过程中把那个元素（连同它持有的那份引用）销毁掉。边遍历边动就是
+    //      读已释放内存 —— 这也是本地必须持有 `shared_ptr` 副本的原因。
+    //   2. 流水线之后一条连接上可能挂着好几条（见 `inflight_`），所以是**名单**
+    //      而不是改前的"那一条"。
+    //
+    // **这条连接的队列不能整队摘走。** 一个"响应在流式"的上下文靠表里这份
+    // shared_ptr 活着（`web_app_stream_resp_func` 钉着"连接断开后连接计数 0、
+    // 在途计数 1"），而它的收尾回调捕的是裸指针、只靠 `hold()` 计数保活 ——
+    // 整队 erase 会让那个回调读悬垂对象。所以这里只做改前就有的那一件事。
+    //
+    // 其余条目（排队等发响应的、还在跑异步处理器的）**原样留在队里**，由它们
+    // 自己依次走完"队首查连接 → 已断开 → 丢弃 + WARN → 出队 → 续发下一条"。
+    {
+      std::vector<std::shared_ptr<uvcpp_web_context> > victims;
+      std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+          inflight_.find(id);
+      if (q != inflight_.end()) {
+        for (std::deque<out_entry>::iterator e = q->second.begin();
+             e != q->second.end(); ++e) {
+          // `streaming()` 是 `stream_ != nullptr`，它**不**区分"收请求体"和
+          // "发响应流"；后者由 `stream_abort()` 自己挡掉（请求体早已交付完，
+          // 那句 `delivered_end()` 的早返回正是这里靠的）。
+          if (e->ctx->streaming()) victims.push_back(e->ctx);
+        }
+      }
+      for (size_t i = 0; i < victims.size(); ++i) victims[i]->stream_abort();
     }
   }
 
@@ -2193,14 +2390,12 @@ void uvcpp_web_app::dispatch(
   // 那时 `context_finished()` 就来摘号了 —— 先 run 后挂号等于把一个没人
   // 认领的上下文塞进表里（泄漏），或者把后来的摘号吃掉。
   const uvcpp_web_conn_id id = ctx->connection_id();
-  if (inflight_.find(id) != inflight_.end()) {
-    // 同一个连接上还有没应答完的请求 = 客户端在用 HTTP 流水线。不支持：
-    // 前一个上下文会被顶掉，它后面的响应可能再也发不出去。
-    UVCPP_LOG_WARN(log_category::REQUEST)
-        << "连接 " << id << " 上已有在途请求；HTTP 流水线不受支持，前一个"
-        << "请求的上下文被顶掉";
+  if (enqueue_inflight(id, ctx)) {
+    // 到上限：回 503 + 关连接，不跑用户的链。响应仍然排在它该在的位置上
+    // （能走到这里说明队里已经有人，它一定不是队首）。
+    reject_pipelining(*ctx);
+    return;
   }
-  inflight_[id] = ctx;
 
   ctx->run(*chain);
 }
@@ -2358,7 +2553,7 @@ void uvcpp_web_app::begin_shutdown() {
 
   UVCPP_LOG_INFO(log_category::CORE)
       << "开始停机：先停监听，宽限 " << cfg_.shutdown_grace_ms
-      << " ms 等在途请求（当前 " << inflight_.size() << " 个，活连接 "
+      << " ms 等在途请求（当前 " << inflight_total() << " 个，活连接 "
       << registry_.size() << " 条）";
 
   // 1. 不再接受新连接。注意它**不会**关掉已经建立的连接 —— 那正是宽限期
@@ -2395,7 +2590,7 @@ void uvcpp_web_app::shutdown_step() {
 
     if (!inflight_.empty()) {
       UVCPP_LOG_WARN(log_category::CORE)
-          << "宽限期到，仍有 " << inflight_.size()
+          << "宽限期到，仍有 " << inflight_total()
           << " 个请求在途（多半卡在异步处理器里），强制关闭连接";
     }
 

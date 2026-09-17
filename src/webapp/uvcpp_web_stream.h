@@ -269,9 +269,11 @@ class UVCPP_API uvcpp_web_stream {
    * 连调两次只有第一次生效（`end_released_` 挡着），因为"放出用户的 `on_end`"
    * 这件事发生两次就是发两个响应。
    *
-   * 调用方按 **conn id** 找到上下文再进来（`inflight_` 那张表），而不是存一个
-   * `uvcpp_web_stream*`：id 单调不复用，上下文真没了就查不到、什么都不做，
-   * 于是「落盘还没完成、这条请求已经因为别的原因收场了」不会变成悬垂写。
+   * 调用方**存的是 conn id 而不是 `uvcpp_web_stream*`**，进来时再按 id 去
+   * `inflight_` 里找"正在收请求体的那条"（`uvcpp_web_app::active_body_ctx()`；
+   * 流水线之后一条连接上可能挂着好几条上下文，所以不能按 id 一查一条）：id 单调
+   * 不复用，上下文真没了就查不到、什么都不做，于是「落盘还没完成、这条请求已经
+   * 因为别的原因收场了」不会变成悬垂写。
    */
   void release_end();
 

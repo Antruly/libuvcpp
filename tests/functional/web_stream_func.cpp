@@ -46,6 +46,8 @@
 #include <web/uvcpp_http_common.h>
 #include <web/uvcpp_http_server.h>
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -106,22 +108,14 @@ class raw_conn {
   }
 
   /** @brief 泵 ms 毫秒（每毫秒一轮 NOWAIT）。 */
-  void pump(int ms) {
-    for (int i = 0; i < ms; ++i) {
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  }
+  /// 上限是**墙钟**毫秒，不是圈数：一圈的代价就是系统定时器粒度（Windows 无
+  /// 请求者时默认 15.625 ms），按圈数计时在粗粒度机器上会整体放大约 8 倍。
+  void pump(int ms) { uvcpp_test::pump_for(loop_, ms); }
 
   /** @brief 泵到条件成立或超时。 */
   template <typename Pred>
   bool pump_until(Pred pred, int timeout_ms) {
-    for (int i = 0; i < timeout_ms; ++i) {
-      if (pred()) return true;
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return pred();
+    return uvcpp_test::wait_until(loop_, pred, timeout_ms);
   }
 
   const std::string& rx() const { return rx_; }

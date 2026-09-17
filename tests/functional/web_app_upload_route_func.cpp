@@ -86,6 +86,8 @@
 // `file.path()` 用同一个基准比对（见那里的注释）。
 #include <webapp/uvcpp_web_util.h>
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -339,21 +341,13 @@ class staged_conn {
     return pump_until([this]() { return written_; }, timeout_ms);
   }
 
-  void pump(int ms) {
-    for (int i = 0; i < ms; ++i) {
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  }
+  /// 上限是**墙钟**毫秒，不是圈数：一圈的代价就是系统定时器粒度（Windows 无
+  /// 请求者时默认 15.625 ms），按圈数计时在粗粒度机器上会整体放大约 8 倍。
+  void pump(int ms) { uvcpp_test::pump_for(loop_, ms); }
 
   template <typename Pred>
   bool pump_until(Pred pred, int timeout_ms) {
-    for (int i = 0; i < timeout_ms; ++i) {
-      if (pred()) return true;
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return pred();
+    return uvcpp_test::wait_until(loop_, pred, timeout_ms);
   }
 
   const std::string& rx() const { return rx_; }
@@ -1317,8 +1311,9 @@ void test_keepalive_after_upload() {
                                    data)));
       const std::string tag = "ka[" + std::to_string(i) + "]";
 
-      // 第二次要在第一个响应回来之后才发 —— 否则测的就不是"收尾了没有"，
-      // 而是"框架支不支持流水线"（它明确不支持）。
+      // 第二次要在第一个响应回来之后才发 —— 本用例钉的是"上一次上传收尾了
+      // 没有"，流水线（两条同时在途）是另一条路径，见
+      // `web_app_pipeline_func.cpp`。
       if (i > 0) {
         c.pump_until([&]() { return count_responses(c.rx()) >= i; }, 5000);
       }

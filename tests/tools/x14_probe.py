@@ -38,10 +38,13 @@ A = "src/webapp/uvcpp_web_app.cpp"
 RUN_TIMEOUT_S = 600
 ERR_RE = re.compile(r"error C\d+|error LNK|error MSB")
 
-OLD = ('    if (it != inflight_.end() && it->second->streaming()) {\n'
-       '      std::shared_ptr<uvcpp_web_context> ctx = it->second;\n'
-       '      ctx->stream_abort();\n    }')
-NEW = ('    /* MUTATION X14: 断连时不通知流对象 */\n    (void)it;')
+# 流水线那次改动把 `on_close` 里的单槽 `it->second` 换成了"扫队列、先收名单再
+# 动手"（`inflight_` 从 `map<conn_id, shared_ptr<ctx>>` 变成了按连接分组的
+# `deque<out_entry>`），所以锚点跟着挪到队列那一行。**变异语义一模一样**：
+# 断连时一条流都不通知。
+OLD = '          if (e->ctx->streaming()) victims.push_back(e->ctx);'
+NEW = ('          /* MUTATION X14: 断连时不通知流对象 */\n'
+       '          (void)e;')
 
 # (exe 名, 单跑时的过滤参数或 None)
 SCOPED = ("test_web_app_stream_func", "abort_mid_stream")

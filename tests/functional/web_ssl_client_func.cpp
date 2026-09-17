@@ -45,6 +45,8 @@
 
 #include <openssl/ssl.h>  // SSL_ERROR_* —— 只返回值分不出「还没完」和「出错」
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -58,8 +60,8 @@ void check(bool cond, const std::string& what) {
   }
 }
 
-/// 客户端在循环里最多转这么久（每次 UV_RUN_NOWAIT + 1ms 睡眠）。
-const int kClientTicks = 4000;
+/// 客户端最多等这么多**毫秒**（墙钟）。
+const int kClientWaitMs = 4000;
 
 std::string big_message(size_t n) {
   std::string s;
@@ -219,10 +221,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   }
 
   // 让挂起的关闭事件跑完，再读登记表。
-  for (int i = 0; i < 300; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 300);
   st.final_count.store(static_cast<int>(server.client_count()));
 }
 
@@ -285,24 +284,20 @@ bool run_async_tls_client(int port, uvcpp_ssl_context* cctx,
     }
   });
 
-  // 不用阻塞的 run(DEFAULT)：卡住就是一个永远不返回的用例。转够圈数就收。
+  // 不用阻塞的 run(DEFAULT)：卡住就是一个永远不返回的用例。到点就收。
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < kClientTicks; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    {
-      std::lock_guard<std::mutex> lk(p.mu);
-      if (p.received.size() >= response_len) break;
-    }
-    if (p.connect_fired.load() && p.connect_status.load() != 0) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(
+      loop,
+      [&p, response_len] {
+        std::lock_guard<std::mutex> lk(p.mu);
+        if (p.received.size() >= response_len) return true;
+        return p.connect_fired.load() && p.connect_status.load() != 0;
+      },
+      kClientWaitMs);
 
   // 收尾：把连接关掉，让服务端那边也能走完。
   client.close();
-  for (int i = 0; i < 50; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 50);
 
   check(p.connect_fired.load(), std::string(label) + ": connect cb never fired");
   check(p.connect_status.load() == 0,
@@ -363,13 +358,11 @@ bool run_sync_tls_client(int port, uvcpp_ssl_context* cctx,
   check(wrc == 0, std::string(label) + ": write_wait = " + std::to_string(wrc));
 
   if (echo_first) {
-    // 回环上的回声往返是微秒级、服务端循环每 1ms 一拍，所以 200 拍足够让它
-    // **必然**落在 `read_wait` 之前（实测：把修复还原之后，这一条 3/3 稳定复现）。
+    // 回环上的回声往返是微秒级，服务端循环也在同一时间尺度上转，所以 200ms
+    // 足够让它**必然**落在 `read_wait` 之前（实测：把修复还原之后，这一条
+    // 3/3 稳定复现）。这里是墙钟 200ms，不是 200 圈。
     uvcpp_loop* lp = client.get_loop();
-    for (int i = 0; i < 200; ++i) {
-      lp->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::pump_for(lp, 200);
   }
 
   uvcpp_buf buf;
@@ -416,10 +409,7 @@ bool run_plaintext_against_tls(int port, const char* label) {
   check(crc == 0, std::string(label) + ": connect() start failed");
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 1500 && !fired.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&fired] { return fired.load(); }, 1500);
 
   check(fired.load(), std::string(label) + ": connect cb never fired");
 
@@ -430,15 +420,9 @@ bool run_plaintext_against_tls(int port, const char* label) {
                                [](int) {});
   (void)wrc;
 
-  for (int i = 0; i < 300; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 300);
   client.close();
-  for (int i = 0; i < 50; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 50);
   return true;
 }
 
@@ -534,19 +518,14 @@ int main() {
     });
 
     uvcpp_loop* loop = client.get_loop();
-    for (int i = 0; i < kClientTicks && !wrote.load(); ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&wrote] { return wrote.load(); },
+                           kClientWaitMs);
     check(ok, "write_only: never connected");
     check(wrote.load(), "write_only: write cb never fired");
     check(wst.load() == 0, "write_only: write status = " +
                                std::to_string(wst.load()));
     client.close();
-    for (int i = 0; i < 50; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::pump_for(loop, 50);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 

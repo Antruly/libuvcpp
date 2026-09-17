@@ -103,6 +103,7 @@ int main() {
 | `set_server_header(const std::string&)` | `"uvcpp"` | 空 = 不发这个头 |
 | `set_shutdown_grace_ms(int)` | `3000` | 优雅关闭宽限；`0` = 立刻强关 |
 | `set_idle_timeout_ms(int)` | `60000` | 闲置超时（slowloris 防御）；`0` = 关闭 |
+| `set_max_pipelined_requests(size_t)` | `8` | 同一条连接上的在途请求上限；超了回 **503 + close**；`0` = 不限 |
 | `set_auto_options(bool)` | `true` | 未命中且路径存在时自动答 OPTIONS |
 | `set_head_as_get(bool)` | `true` | HEAD 无注册时回退到 GET handler |
 | `set_work_limit(size_t)` | 见 [异步与工作池](#异步与工作池) | 工作池在途上限；`0` = 不限 |
@@ -992,7 +993,8 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
   但要不要用、用哪种是你的事。
 - **没有内建的鉴权 / 会话 / 限流**：`too_many_requests()` 只是个状态码 helper。
 - **没有请求体解压**（gzip 请求体不认识）。
-- **没有 HTTP/2、没有流水线**。
+- **没有 HTTP/2**。
+- **没有读背压**：流水线里排在后面的请求照常解析、照常跑，超上限直接拒（§17）。
 
 ---
 
@@ -1000,7 +1002,7 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 
 | 限制 | 说明 |
 |---|---|
-| **不支持 HTTP 流水线** | 框架明确不支持。 |
+| **流水线的读背压不存在** | 支持流水线：同一条连接上的响应**按请求到达顺序**发出（RFC 7230 §6.3.2），但排在后面的请求会被**照常解析、照常跑**，不因为前面的响应还没发出去就暂停收。同连接在途上限由 `set_max_pipelined_requests()` 定，默认 8；到上限的那条回 `503` + `Connection: close`，排在它前面的响应照常发完再关。 |
 | **HEAD 在客户端侧不可用** | `uvcpp_http_client` 不认 HEAD（它按 `content-length` 等 body，而 HEAD 的 body 被丢掉），走这条路径只会等超时。服务端侧的 HEAD 语义是好的。 |
 | **WS 连接没有超时保护** | 升级成功后不受 `idle_timeout_ms` 约束（§10）。 |
 | **重连能力属于框架层** | 协议层 `uvcpp_ws_client` 一个对象只能连一次（§11）。 |

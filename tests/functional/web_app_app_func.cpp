@@ -31,7 +31,8 @@
  *   - HEAD：`uvcpp_http_client` 不认 HEAD（它按 content-length 等 body，
  *     而 HEAD 的 body 是被丢掉的），走这条路径只会等超时；HEAD 的语义
  *     由 `web_app_router_func.cpp` 的 head_as_get 与响应层各自覆盖。
- *   - 流水线：框架明确不支持，见 `uvcpp_web_app.h` 的已知限制。
+ *   - 流水线：单独一个文件（`web_app_pipeline_func.cpp`）—— 它要的形状是
+ *     "一次 write 写出两条请求"，与本文件"一问一答"的骨架互不相容。
  *   - HTTPS/WSS：Phase 4。
  *
  * 崩溃时的定位手段：每个用例**先打名字再跑**（std::unitbuf），所以进程中途
@@ -47,6 +48,8 @@
 #include <thread>
 
 #include <uvcpp/uvcpp_define.h>
+
+#include "wait_util.h"
 
 #if UVCPP_WEBAPP_ENABLE
 
@@ -147,32 +150,20 @@ bool raw_send(int port, const std::string& bytes, int settle_ms) {
   if (rc != 0) return false;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 500 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
   if (!connected.load()) return false;
 
-  for (int i = 0; i < 500 && !written.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return written.load(); }, uvcpp_test::kWaitMs);
 
   // 留时间让对端把数据读走并处理完。
-  for (int i = 0; i < settle_ms; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, settle_ms);
 
   // 走裸句柄的 close：`client.close()` 在这条路径上没有对应语义，
   // tcp_read_func.cpp 用的也是这一句。
   if (client.get_tcp() != nullptr) {
     client.get_tcp()->close([&](uvcpp_handle*) { closed.store(true); });
   }
-  for (int i = 0; i < 300 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return closed.load(); }, uvcpp_test::kWaitMs);
   for (int i = 0; i < 30; ++i) loop->run(UV_RUN_NOWAIT);
   return true;
 }
@@ -217,10 +208,7 @@ raw_hold_result raw_hold(int port, const std::string& bytes, int wait_ms) {
   if (rc != 0) return res;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 1000 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
   if (!connected.load()) {
     if (client.get_tcp() != nullptr) {
       client.get_tcp()->close([](uvcpp_handle*) {});
@@ -253,10 +241,7 @@ raw_hold_result raw_hold(int port, const std::string& bytes, int wait_ms) {
   if (client.get_tcp() != nullptr) {
     client.get_tcp()->close([&](uvcpp_handle*) { done.store(true); });
   }
-  for (int i = 0; i < 300 && !done.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return done.load(); }, uvcpp_test::kWaitMs);
   for (int i = 0; i < 30; ++i) loop->run(UV_RUN_NOWAIT);
   return res;
 }
@@ -1115,10 +1100,7 @@ void test_idle_timeout() {
     });
     check(rc == 0, "慢速滴字节的客户端连上了");
     uvcpp_loop* loop = drip.get_loop();
-    for (int i = 0; i < 1000 && !connected.load(); ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
 
     drip.read_start_events([&](uvcpp_tcp_client&, const net_read_result& ev) {
       if (ev.is_end()) closed.store(true);
@@ -1182,20 +1164,14 @@ void test_idle_timeout() {
               " 个字节。滴满 10 个说明计时被最后一个字节刷新了 —— 那正是"
               "慢速攻击想要的");
     // 滴完再等一拍：确认它最后确实是被（闲置超时）关的，而不是我们放弃滴了。
-    for (int i = 0; i < 800 && !closed.load(); ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&] { return closed.load(); }, uvcpp_test::kWaitMs);
     check(closed.load(), "这条连接最终确实被服务端关掉了");
 
     std::atomic<bool> drip_done(false);
     if (drip.get_tcp() != nullptr) {
       drip.get_tcp()->close([&](uvcpp_handle*) { drip_done.store(true); });
     }
-    for (int i = 0; i < 300 && !drip_done.load(); ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&] { return drip_done.load(); }, uvcpp_test::kWaitMs);
   }
 
   // --- (e) 服务端自己在忙 ≠ 客户端在攻击 ---
@@ -1212,10 +1188,7 @@ void test_idle_timeout() {
     });
     check(rc == 0, "在途请求的客户端连上了");
     uvcpp_loop* loop = busy.get_loop();
-    for (int i = 0; i < 1000 && !busy_connected.load(); ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&] { return busy_connected.load(); }, uvcpp_test::kWaitMs);
     busy.read_start_events([&](uvcpp_tcp_client&, const net_read_result& ev) {
       if (ev.is_end()) busy_closed.store(true);
     });
@@ -1242,10 +1215,7 @@ void test_idle_timeout() {
     if (busy.get_tcp() != nullptr) {
       busy.get_tcp()->close([&](uvcpp_handle*) { busy_done.store(true); });
     }
-    for (int i = 0; i < 300 && !busy_done.load(); ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&] { return busy_done.load(); }, uvcpp_test::kWaitMs);
     *trapped = uvcpp_web_next();  // 松开扣押的 next
   }
 
@@ -1335,6 +1305,7 @@ int main(int argc, char** argv) {
 #else
 
 #include <iostream>
+
 
 int main() {
   // 这个文件只在 UVCPP_BUILD_WEBAPP=ON 时才进构建；真跑到这儿说明构建

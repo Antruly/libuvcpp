@@ -48,6 +48,8 @@
 
 #include <openssl/ssl.h>
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -61,8 +63,8 @@ void check(bool cond, const std::string& what) {
   }
 }
 
-/// 客户端最多转多少圈（每圈 UV_RUN_NOWAIT + 1ms 睡眠）。到点就收，不阻塞。
-const int kClientTicks = 4000;
+/// 客户端最多等多少**毫秒**（墙钟）。到点就收，不阻塞。
+const int kClientWaitMs = 4000;
 
 const char kRequestBody[] =
     "GET /hello HTTP/1.1\r\n"
@@ -141,23 +143,19 @@ void run_client(int port, uvcpp_ssl_context* cctx, const std::string& msg,
   check(crc == 0, std::string(label) + ": connect() start failed");
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < kClientTicks; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    {
-      std::lock_guard<std::mutex> lk(p.mu);
-      if (p.received.find(kReplyBody) != std::string::npos) break;
-    }
-    if (p.connect_fired.load() && p.connect_status.load() != 0) break;
-    // 反向场景靠这条收工：明文打 TLS 端口，服务端拒了之后会关连接。
-    if (p.connect_fired.load() && p.io_events.load() > 0) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(
+      loop,
+      [&p] {
+        std::lock_guard<std::mutex> lk(p.mu);
+        if (p.received.find(kReplyBody) != std::string::npos) return true;
+        if (p.connect_fired.load() && p.connect_status.load() != 0) return true;
+        // 反向场景靠这条收工：明文打 TLS 端口，服务端拒了之后会关连接。
+        return p.connect_fired.load() && p.io_events.load() > 0;
+      },
+      kClientWaitMs);
 
   client.close();
-  for (int i = 0; i < 60; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 60);
 }
 
 std::string probe_received(client_probe& p) {

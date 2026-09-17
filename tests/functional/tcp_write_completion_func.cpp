@@ -44,12 +44,14 @@
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_define.h>
 #include "loop_drain.h"
+#include "wait_util.h"
 
 #if UVCPP_ENABLE_MEMORY_POOL
 #include <expand/uvcpp_page_heap.h>
 #endif
 
 using namespace uvcpp;
+using namespace uvcpp_test;
 
 namespace {
 
@@ -78,6 +80,10 @@ const char kPayload[] = "0123456789abcdef";
 
 int main() {
   std::cout << "[tcp_write_completion] start" << std::endl;
+
+  auto progress = [](const char* what) {
+    std::cout << "[tcp_write_completion] " << what << std::endl;
+  };
 
   uvcpp_loop loop;
 
@@ -120,12 +126,9 @@ int main() {
   }
 
   // 连接阶段两边都要泵：accept 在服务端的 loop 上。
-  for (int i = 0; i < 3000; ++i) {
-    server.get_loop()->run(UV_RUN_NOWAIT);
-    loop.run(UV_RUN_NOWAIT);
-    if (connected.load() && accepted.load() > 0) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until_pair(server.get_loop(), &loop,
+                  [&] { return connected.load() && accepted.load() > 0; },
+                  kWaitMs);
   check(connect_status.load() == 0,
         "connect status = " + std::to_string(connect_status.load()));
   check(accepted.load() == 1,
@@ -134,17 +137,11 @@ int main() {
 
   // 此后服务端不再被泵：它的自动读会分配缓冲区。这条连接上我们只需要
   // "写得出去"（服务端不回话，`kPayload` 那么大的量内核缓冲绰绰有余）。
-  auto pump = [&](int ms) {
-    for (int i = 0; i < ms; ++i) {
-      loop.run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  };
+  // 两个名字保留（调用点不动），但上限从"圈数"换成了**墙钟**：原来那个 `ms`
+  // 只在定时器粒度细的机器上等于毫秒，见 wait_util.h。
+  auto pump = [&](int ms) { pump_for(&loop, ms); };
   auto wait_for = [&](const std::atomic<int>& c, int want, int ms) {
-    for (int i = 0; i < ms && c.load() < want; ++i) {
-      loop.run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    wait_until(&loop, [&] { return c.load() >= want; }, ms);
   };
 
   pump(200);  // 静置：让连接建立带来的一次性分配先落地
@@ -153,6 +150,7 @@ int main() {
   // 判据 1：闭包不在请求对象里执行
   // =====================================================================
   {
+    progress("判据1 闭包不在请求对象里执行");
     probe p;
     // 直接在这一层的接口上写：`uvcpp_tcp_client` 的四个重载都不把请求对象
     // 交给使用者，只有这里能看到 `wr->m_write_cb`。
@@ -197,6 +195,7 @@ int main() {
   // 那个计数根本不是"活块数"。下面这段先现场量一遍，把这个结论留在用例里，
   // 免得以后有人再拿它当漏释放的判据。
   {
+    progress("四个调用点各跑一批");
     const int kN = 16;
 #if UVCPP_ENABLE_MEMORY_POOL
     // 先热一遍缓存，再量一个"同样大小、分配与释放次数相同"的窗口。
@@ -315,6 +314,7 @@ int main() {
   // 完成回调里接着发起下一次写（热路径上真实存在的用法）
   // =====================================================================
   {
+    progress("回调里接着发起下一次写");
     probe p;
     const int kN = 32;
     std::function<void(int)> chain;
@@ -345,6 +345,7 @@ int main() {
   // 修复之后它**从"侥幸不炸"变成"确实安全"**：闭包已经在栈上，删 wr 与本次
   // 调用无关。trampoline 也不会再补一次 delete（self_free 为假）。
   {
+    progress("旧写法：不设 self_free，回调自己 delete");
     probe p;
     uvcpp_buf payload(kPayload, sizeof(kPayload) - 1);
     uvcpp_write* w = new uvcpp_write();
@@ -378,6 +379,7 @@ int main() {
   // callback_write 兜底**。这条分支最容易"改坏了还看不出来"（漏了只是慢泄漏），
   // 所以至少要确认它还能把控制权交回来、循环还能干净关掉。
   {
+    progress("令牌失效分支（客户端先析构）");
     uvcpp_loop loop2;
 
     uvcpp_test::loop_drain drain_loop2(&loop2);
@@ -388,25 +390,16 @@ int main() {
       const int crc =
           c2->connect("127.0.0.1", port, [&up](int st) { up.store(st == 0); });
       check(crc == 0, "tokendead: connect submit rc = " + std::to_string(crc));
-      for (int i = 0; i < 3000 && !up.load(); ++i) {
-        loop2.run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
+      wait_until(&loop2, [&] { return up.load(); }, kWaitMs);
       check(up.load(), "tokendead: second client never connected");
-      for (int i = 0; i < 150; ++i) {
-        loop2.run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
+      pump_for(&loop2, 150);
 
       // 写发出去，然后**在它完成之前**把客户端整个删掉。
       const int wrc = c2->write(kPayload, sizeof(kPayload) - 1, [](int) {});
       check(wrc == 0, "tokendead: submit rc = " + std::to_string(wrc));
       delete c2;
       // 把挂起的完成回调跑出来（libuv 会用 UV_ECANCELED 把在飞的写交回）。
-      for (int i = 0; i < 400; ++i) {
-        loop2.run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
+      pump_for(&loop2, 400);
     }
     // 句柄全摘干净了才可能返回 0；这不能证明写请求被释放，但能证明这条分支
     // 没有把循环搅坏（句柄悬在 handle_queue 上的话这里必然是 UV_EBUSY）。

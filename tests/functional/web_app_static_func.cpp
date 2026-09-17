@@ -36,6 +36,8 @@
 
 #include <uvcpp/uvcpp_define.h>
 
+#include "wait_util.h"
+
 #if UVCPP_WEBAPP_ENABLE
 
 #include "net/uvcpp_net_read.h"
@@ -121,6 +123,7 @@ const char* k_outside_text = "SECOND-SECRET-VIA-LINK";
 #else
 #include <sys/stat.h>
 #include <unistd.h>
+
 #define TEST_MKDIR(p) mkdir((p), 0755)
 #define TEST_RMDIR(p) rmdir(p)
 #endif
@@ -360,10 +363,7 @@ raw_result raw_exchange(int port, const std::string& request_bytes,
   if (rc != 0) return out;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 1000 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
   if (!connected.load()) {
     if (client.get_tcp() != nullptr) client.get_tcp()->close([](uvcpp_handle*) {});
     return out;
@@ -383,10 +383,7 @@ raw_result raw_exchange(int port, const std::string& request_bytes,
   if (client.get_tcp() != nullptr) {
     client.get_tcp()->close([&](uvcpp_handle*) { closed.store(true); });
   }
-  for (int i = 0; i < 300 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return closed.load(); }, uvcpp_test::kWaitMs);
   for (int i = 0; i < 30; ++i) loop->run(UV_RUN_NOWAIT);
 
   out.ok = !out.raw.empty();

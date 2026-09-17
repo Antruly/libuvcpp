@@ -40,7 +40,10 @@
 #include "net/uvcpp_tcp_client.h"
 #include "net/uvcpp_tcp_server.h"
 
+#include "wait_util.h"
+
 using namespace uvcpp;
+using namespace uvcpp_test;
 
 namespace {
 
@@ -118,10 +121,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   uvcpp_loop* loop = server.get_loop();
 
   // 等客户端连上来 —— 不能靠固定圈数，那会和客户端的连接时机赛跑。
-  for (int i = 0; i < 5000 && held == nullptr; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return held != nullptr; }, kWaitMs);
 
   if (held == nullptr) {
     st->count_after_loop.store(static_cast<int>(server.client_count()));
@@ -141,11 +141,9 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   st->closed_by_server.fetch_add(1);
   held->close();
 
-  // 转够久，让关闭的完成回调跑完。
-  for (int i = 0; i < 300; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  // 等关闭的完成回调跑完 —— 等的就是下面那条判据本身（登记表归零），
+  // 不是"转 300 圈"。
+  wait_until(loop, [&] { return server.client_count() == 0; }, kWaitMs);
 
   // 判据：连接已经关了，登记表必须回到 0。
   st->count_after_loop.store(static_cast<int>(server.client_count()));
@@ -179,17 +177,11 @@ void run_client(int port, close_observation& obs, uvcpp_tcp_client** make_done) 
 
   uvcpp_loop* loop = client.get_loop();
   // 一直转，直到关闭回调落地或者超时（服务端在另一端等着我们连上去）。
-  for (int i = 0; i < 3000 && obs.user_close_cb.load() == 0; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return obs.user_close_cb.load() > 0; }, kWaitMs);
   obs.client_saw_close.store(obs.user_close_cb.load() > 0 ? 1 : 0);
 
   // 让 close 事件彻底跑完再析构。
-  for (int i = 0; i < 50; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  pump_for(loop, 50);
 }
 
 // =========================================================================
@@ -335,19 +327,14 @@ void run_server_rounds(std::promise<int>& port_promise, std::atomic<bool>& stop,
 
   for (int round = 0; round < 3; ++round) {
     // 等这一轮的客户端连上来。
-    for (int i = 0; i < 5000 && accepted->load() <= round; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    wait_until(loop, [&] { return accepted->load() > round; }, kWaitMs);
     if (accepted->load() <= round) break;
 
     held->close();
 
-    // 转够，让关闭 + 释放跑完，然后记录这一轮结束之后的登记数。
-    for (int i = 0; i < 200; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // 等关闭 + 释放跑完，然后记录这一轮结束之后的登记数。等的是"登记表清空"；
+    // 泄漏的实现等不到，超时后读到的仍是残留值，下面的 max 判据照样抓得住。
+    wait_until(loop, [&] { return server.client_count() == 0; }, kWaitMs);
     if (server.client_count() > static_cast<size_t>(max_count_after_close->load())) {
       max_count_after_close->store(
           static_cast<int>(server.client_count()));
@@ -376,14 +363,8 @@ void connect_and_wait_close(int port) {
   }
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 3000 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  for (int i = 0; i < 50; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return closed.load(); }, kWaitMs);
+  pump_for(loop, 50);
 }
 
 void test_every_connection_is_released() {
@@ -464,34 +445,22 @@ void run_server_close_all(std::promise<int>& port_promise,
   uvcpp_loop* loop = server.get_loop();
 
   // --- 第一轮：两条连接一起送走 ---
-  for (int i = 0; i < 5000 && accepted->load() < 2; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return accepted->load() >= 2; }, kWaitMs);
 
   closed_first->store(static_cast<int>(server.close_all_clients()));
 
-  for (int i = 0; i < 300; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return server.client_count() == 0; }, kWaitMs);
   count_after_first->store(static_cast<int>(server.client_count()));
   listening_still->store(
       server.has_status(TCP_SERVER_LISTENING) ? 1 : 0);
   round_done->fetch_add(1);
 
   // --- 第二轮：监听还在，所以还能收新连接 ---
-  for (int i = 0; i < 5000 && accepted->load() < 3; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return accepted->load() >= 3; }, kWaitMs);
 
   closed_second->store(static_cast<int>(server.close_all_clients()));
 
-  for (int i = 0; i < 300; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return server.client_count() == 0; }, kWaitMs);
   round_done->fetch_add(1);
 
   while (!stop.load()) {
@@ -600,20 +569,17 @@ void test_close_all_sweeps_dead_entries() {
   std::thread client_thread(connect_and_wait_close, port);
 
   uvcpp_loop* loop = server.get_loop();
-  for (int i = 0; i < 5000 && held == nullptr; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return held != nullptr; }, kWaitMs);
   check(held != nullptr, "服务端接受了一条连接");
 
   if (held != nullptr) {
     // **故意绕过框架**：直接关句柄。这样 close manager 不会被通知，
     // 客户端对象留在登记表里，而它的句柄已经关完（get_handle() == nullptr）。
-    held->get_tcp()->close([](uvcpp_handle*) {});
-    for (int i = 0; i < 300; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // 这里**不能**等 client_count()==0 —— 本节的前提正是它不归零。要等的是
+    // "句柄关完了"，下面那句前提判据依赖这件事。
+    std::atomic<bool> handle_closed(false);
+    held->get_tcp()->close([&](uvcpp_handle*) { handle_closed.store(true); });
+    wait_until(loop, [&] { return handle_closed.load(); }, kWaitMs);
 
     check(server.client_count() == 1,
           "前提成立：这条连接被绕过框架地关掉，人还留在登记表里（实际 " +

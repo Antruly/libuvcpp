@@ -22,6 +22,7 @@
  * 事件路径上，构造对象直接调是测不到的。
  */
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -52,12 +53,19 @@
 #include "net/uvcpp_net_read.h"
 #include "net/uvcpp_tcp_client.h"
 #include "net/uvcpp_tcp_server.h"
+#include "wait_util.h"
 
 using namespace uvcpp;
+using namespace uvcpp_test;
 
 namespace {
 
 int g_failures = 0;
+
+/// 每个场景开跑前打一行。CI 上超时被杀时，这一行就是"死在哪一段"的唯一线索。
+void progress(const char* what) {
+  std::cout << "[tcp_read] " << what << std::endl;
+}
 
 void check(bool cond, const std::string& what) {
   if (!cond) {
@@ -211,17 +219,22 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
   port_promise.set_value(port);
   ready.store(true);
 
-  // 背压场景用**迭代计数**而不是时钟来定序：循环每圈大约 1ms，
-  // 150 圈足够让对端的数据到达内核缓冲区（读已经停了，数据就停在那里）。
+  // 背压场景按**墙钟**定序：暂停 150ms 足够让对端的数据到达内核缓冲区
+  //（读已经停了，数据就停在那里）。
   bool resumed = false;
-  int  ticks   = 0;
+  bool accepted_seen = false;
+  std::chrono::steady_clock::time_point accepted_at;
 
   uvcpp_loop* loop = server.get_loop();
   while (!stop.load()) {
     loop->run(UV_RUN_NOWAIT);
 
     if (mode == MODE_PAUSE_RESUME && !resumed && st->accepted.load() > 0) {
-      if (++ticks >= 150) {
+      if (!accepted_seen) {
+        accepted_seen = true;
+        accepted_at = std::chrono::steady_clock::now();
+      }
+      if (elapsed_ms(accepted_at) >= 150) {
         // 记录恢复前收到过多少 —— 判据是"暂停期间一个字节都没投递"。
         st->data_before_resume.store(st->data_events.load());
 
@@ -234,11 +247,8 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  // 再转几圈，让挂起的关闭事件跑完。
-  for (int i = 0; i < 200; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  // 再泵 200ms，让挂起的关闭事件跑完。
+  pump_for(loop, 200);
 
   // 判据：所有连接都断开之后，登记表必须回到 0。
   // 缺陷 1（没自动读）没修的话这里会等于连接数。
@@ -272,33 +282,16 @@ bool run_client(int port, const std::string& payload, int settle_ms) {
 
   uvcpp_loop* loop = client.get_loop();
 
-  for (int i = 0; i < 500 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  if (!connected.load()) return false;
-
-  for (int i = 0; i < 500 && !written.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  if (!wait_until(loop, [&] { return connected.load(); }, kWaitMs)) return false;
+  wait_until(loop, [&] { return written.load(); }, kWaitMs);
 
   // 留时间让对端把数据读走/处理完。
-  for (int i = 0; i < settle_ms; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  pump_for(loop, settle_ms);
 
   // close() 发的是 FIN —— 对端会看到 UV_EOF（PEER_CLOSED），不是错误。
   client.get_tcp()->close([&](uvcpp_handle*) { closed.store(true); });
-  for (int i = 0; i < 500 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  for (int i = 0; i < 50; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return closed.load(); }, kWaitMs);
+  pump_for(loop, 50);
   return true;
 }
 
@@ -339,11 +332,7 @@ bool connect_and_reset(int port) {
     return false;
   }
 
-  for (int i = 0; i < 500 && !connected; ++i) {
-    uv_run(&loop, UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  if (!connected) {
+  if (!wait_until(&loop, [&] { return connected; }, kWaitMs)) {
     uv_close(reinterpret_cast<uv_handle_t*>(&sock), nullptr);
     uv_run(&loop, UV_RUN_NOWAIT);
     uv_loop_close(&loop);
@@ -352,10 +341,7 @@ bool connect_and_reset(int port) {
 
   // 让服务端先 accept 完，再重置 —— 否则 RST 可能在 accept 之前就到，
   // 那时连接还没进登记表，看到的错误也就不是这个场景要测的那个。
-  for (int i = 0; i < 100; ++i) {
-    uv_run(&loop, UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  pump_for(&loop, 100);
 
   linger lg;
   lg.l_onoff  = 1;
@@ -374,10 +360,7 @@ bool connect_and_reset(int port) {
 #endif
 
   uv_close(reinterpret_cast<uv_handle_t*>(&sock), nullptr);
-  for (int i = 0; i < 100; ++i) {
-    uv_run(&loop, UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  pump_for(&loop, 100);
   uv_loop_close(&loop);
   return true;
 }
@@ -429,8 +412,9 @@ scenario_result run_scenario(int mode, const std::string& payload, int settle_ms
     return r;
   }
 
-  while (!ready.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (!wait_flag([&] { return ready.load(); }, kWaitMs)) {
+    std::cerr << "  [FAIL] 服务端没就绪" << std::endl;
+    ++g_failures;
   }
 
   if (use_reset) {
@@ -526,6 +510,7 @@ int main() {
   // 去掉自动读（或把它默认关掉）之后 final_count 就会等于连接数。
   // ---------------------------------------------------------------------
   {
+    progress("A 自动读（用户不参与）");
     const int n = 5;
     std::promise<int> port_promise;
     std::future<int> port_future = port_promise.get_future();
@@ -536,9 +521,7 @@ int main() {
                    std::ref(stop), &st, static_cast<int>(MODE_AUTO_READ));
     const int port = port_future.get();
     if (port > 0) {
-      while (!ready.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      }
+      wait_flag([&] { return ready.load(); }, kWaitMs);
       for (int i = 0; i < n; ++i) {
         run_client(port, "", 10);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -570,6 +553,7 @@ int main() {
   // char*)），长度就会在 NUL 处截断，这条会立刻失败。
   // ---------------------------------------------------------------------
   {
+    progress("B 二进制安全");
     const std::string payload("ab\0cd\0\0ef", 9);
     scenario_result r = run_scenario(MODE_SET_READ_CB, payload, 150, false);
 
@@ -591,6 +575,7 @@ int main() {
   // 场景 C：单发一条再关 —— 事件序列是 DATA 然后 PEER_CLOSED。
   // ---------------------------------------------------------------------
   {
+    progress("C 单发再关");
     const std::string payload("hello");
     scenario_result r = run_scenario(MODE_SET_READ_CB, payload, 100, false);
 
@@ -606,6 +591,7 @@ int main() {
   // 于是"对端正常收工"和"连接炸了"分不出来。
   // ---------------------------------------------------------------------
   {
+    progress("D RST");
     scenario_result r = run_scenario(MODE_SET_READ_CB, "", 0, /*use_reset=*/true);
 
     check(r.accepted == 1, "D: 连接被接受");
@@ -626,6 +612,7 @@ int main() {
   // 检查返回值），自动读继续把数据丢掉，用户则一个字节都收不到。
   // ---------------------------------------------------------------------
   {
+    progress("E 用户读顶掉自动读");
     const std::string payload("user-owned-read");
     scenario_result r = run_scenario(MODE_USER_READ_START, payload, 150, false);
 
@@ -645,6 +632,7 @@ int main() {
   // 减速）—— 这正是背压想要的效果。
   // ---------------------------------------------------------------------
   {
+    progress("F 背压");
     const std::string payload("backpressure-payload");
     scenario_result r = run_scenario(MODE_PAUSE_RESUME, payload, 400, false);
 
@@ -661,6 +649,7 @@ int main() {
   // ---------------------------------------------------------------------
   {
     uvcpp_tcp_server server;
+    progress("G API 边界");
     check(server.auto_read(), "G: 自动读默认是开的");
     check(!server.has_read_callback(), "G: 默认没有共用读回调");
 
@@ -704,6 +693,7 @@ int main() {
   // 一次就够：自动读是默认行为，每个连接、每一块数据都警告会变成噪音。
   // ---------------------------------------------------------------------
   {
+    progress("H 丢弃警告只打一次");
     const char* path = "tcp_read_stderr_capture.txt";
     std::string captured;
     int accepted = 0;
@@ -722,9 +712,7 @@ int main() {
       const int port = port_future.get();
 
       if (port > 0) {
-        while (!ready.load()) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+        wait_flag([&] { return ready.load(); }, kWaitMs);
         // 分三次发：TCP 可能把它们合并成一次读事件，也可能不合并 ——
         // 无论哪种，警告都只该有一条。
         uvcpp_tcp_client client;
@@ -735,31 +723,16 @@ int main() {
         });
         if (rc == 0) {
           uvcpp_loop* loop = client.get_loop();
-          for (int i = 0; i < 500 && !connected.load(); ++i) {
-            loop->run(UV_RUN_NOWAIT);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
+          wait_until(loop, [&] { return connected.load(); }, kWaitMs);
           const char* chunks[3] = {"AAAA", "BBBBBB", "CC"};
           for (int i = 0; i < 3; ++i) {
             client.write(chunks[i], std::strlen(chunks[i]), nullptr);
-            for (int k = 0; k < 20; ++k) {
-              loop->run(UV_RUN_NOWAIT);
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
+            pump_for(loop, 20);
           }
-          for (int i = 0; i < 100; ++i) {
-            loop->run(UV_RUN_NOWAIT);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
+          pump_for(loop, 100);
           client.get_tcp()->close([&](uvcpp_handle*) { closed.store(true); });
-          for (int i = 0; i < 500 && !closed.load(); ++i) {
-            loop->run(UV_RUN_NOWAIT);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
-          for (int i = 0; i < 50; ++i) {
-            loop->run(UV_RUN_NOWAIT);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
+          wait_until(loop, [&] { return closed.load(); }, kWaitMs);
+          pump_for(loop, 50);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(250));

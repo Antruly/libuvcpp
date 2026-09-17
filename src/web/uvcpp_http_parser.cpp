@@ -340,6 +340,37 @@ void uvcpp_http_parser::set_on_chunk_complete(std::function<void()> cb) {
 
 int uvcpp_http_parser::ll_on_message_begin(llhttp_t* p) {
   auto* self = self_from_llhttp(p);
+
+  // **每条消息都要清一次累积缓冲，不能只在 `reset()` 里清。**
+  //
+  // `reset()` 是**每次读**才被调用一次的，而且还要等上一条消息完成
+  // （`uvcpp_http_server.cpp` 的 keep-alive 分支：`if (ctx.msg_done)`）。
+  // 可一次读取里完全可能有两条消息 —— 客户端流水线，或者只是不等响应就把
+  // 下一条写出来，两条挤进同一个 TCP 段。那时第二条消息的 url / headers 会
+  // **叠在第一条上**：
+  //
+  // | 请求字节 | 第二条消息解析成 |
+  // |---|---|
+  // | `GET /a` + `GET /b` | url `/a/b`（路由 404） |
+  // | `Host: a,X-Probe: FIRST` + `Host: b,X-Probe: SECOND` | 4 个 header，第二条自己那条排在上一条后面 |
+  //
+  // 后者比 404 严重：`Host` / `Cookie` / `Authorization` / `Content-Length`
+  // 都是取第一个匹配的，于是第二条请求读到的是**上一条请求的**头。
+  //
+  // 清的范围和 `reset()` 保持一致（少一个 `llhttp_init`：llhttp 自己会处理
+  // 缓冲区内的连续消息，这正是流水线能跑通的前提）。
+  self->url_buf_.clear();
+  self->headers_.clear();
+  self->cur_header_name_.clear();
+  self->cur_header_value_.clear();
+  self->method_         = http_method::HTTP_GET;
+  self->status_code_    = http_status::OK;
+  self->version_        = static_cast<uvcpp_http_version>(1);
+  self->keep_alive_     = true;
+  self->content_length_ = 0;
+  self->upgrade_        = false;
+  self->last_chunk_size_ = 0;
+
   self->state_ = http_parser_state::HEADER;
   return 0;
 }

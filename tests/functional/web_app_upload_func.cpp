@@ -389,7 +389,7 @@ struct upload_plan {
 
   std::string body;
   size_t chunk;       ///< 0 = 整包喂；否则每块这么多字节
-  int ticks;          ///< 每喂一块之后空转循环几拍（每拍 1ms）
+  int ticks;          ///< 每喂一块之后让循环空转几圈（`UV_RUN_NOWAIT`，不睡）
   bool fsync_on;
   /// 收尾时故意喊 `notify_parse_done(false)` —— 模拟对端断开/解析失败。
   bool force_fail;
@@ -539,10 +539,20 @@ upload_outcome run_upload(upload_env& env, const std::string& dir,
                                                      : (plan.body.size() - pos);
     mp.feed(plan.body.data() + pos, n);
     pos += n;
+    // 每喂一块之后让循环推进 `plan.ticks` 圈。
+    //
+    // **这里不能睡。** 一圈的代价是系统定时器粒度：本机 1.86ms、无请求者的
+    // Windows 15.625ms。`chunked_feed` 是 37 字节一块、约 1771 块、每块 2 圈 ——
+    // 按圈数睡就是 55 秒，20s 看门狗在喂数据那一圈就烧掉了，判据于是变成
+    // "看门狗超时"而不是"内容对不对"（实测 FLOOR=15：`feed-begin` 35ms →
+    // `feed-end` 55358ms，整个 55.3 秒都在这一圈里）。
+    //
+    // 而这一段要的本来就是**循环推进**，不是墙钟：上面那句"每块之后泵 2 拍"
+    // 说的是让新块到达时上一笔写还在途（走单槽双缓冲那条路）—— 那件事只需要
+    // `UV_RUN_NOWAIT`；睡了反而让写在块间先落完，交错更少。
     for (int i = 0; i < plan.ticks; ++i) {
       env.loop()->run(UV_RUN_NOWAIT);
       sample_peak_open_files(up, sp);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
 

@@ -51,6 +51,8 @@
 
 #include <openssl/ssl.h>
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -64,8 +66,8 @@ void check(bool cond, const std::string& what) {
   }
 }
 
-/// 客户端在循环里最多转这么久（每次 UV_RUN_NOWAIT + 1ms 睡眠）。
-const int kClientTicks = 4000;
+/// 客户端最多等这么多**毫秒**（墙钟）。
+const int kClientWaitMs = 4000;
 
 /// 服务端在 `on_connection` 里当场写出去的问候语。
 ///
@@ -201,10 +203,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   }
 
   // 让挂起的关闭事件跑完，再读登记表 —— 否则读到的是还没摘除的中间态。
-  for (int i = 0; i < 400; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 400);
   st.final_count.store(static_cast<int>(server.client_count()));
   st.final_last_error.store(server.get_last_error());
 }
@@ -278,21 +277,17 @@ void run_client(int port, uvcpp_ssl_context* cctx, const std::string& msg,
   check(crc == 0, std::string(label) + ": connect() start failed");
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < kClientTicks; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    {
-      std::lock_guard<std::mutex> lk(p.mu);
-      if (p.received.size() >= want_len) break;
-    }
-    if (p.connect_fired.load() && p.connect_status.load() != 0) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(
+      loop,
+      [&p, want_len] {
+        std::lock_guard<std::mutex> lk(p.mu);
+        if (p.received.size() >= want_len) return true;
+        return p.connect_fired.load() && p.connect_status.load() != 0;
+      },
+      kClientWaitMs);
 
   client.close();
-  for (int i = 0; i < 60; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 60);
 }
 
 /// 跑一个**明文**客户端打过去：连上 → **握着一会儿不发东西** → 再发明文 → 收尾。
@@ -322,22 +317,13 @@ void run_plaintext_client(int port, const std::string& msg, client_probe& p) {
   uvcpp_loop* loop = client.get_loop();
 
   // 先连上、什么都不发，让服务端把它登记进表里。
-  for (int i = 0; i < 300; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 300);
   // 再发明文 —— 握手此刻才失败。
   p.hold_write_rc.store(client.write(msg.data(), msg.size(), [](int) {}));
-  for (int i = 0; i < 500; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 500);
 
   client.close();
-  for (int i = 0; i < 60; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::pump_for(loop, 60);
 }
 
 std::string probe_received(client_probe& p) {

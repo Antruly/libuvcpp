@@ -36,6 +36,8 @@
 #include "web/uvcpp_ws_connection.h"
 #include "web/uvcpp_ws_sessions.h"
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 static int g_pass = 0;
@@ -174,20 +176,16 @@ struct scenario {
     return pump_until([&done] { return done; }, 3000);
   }
 
-  /** @brief 把两个 loop 空推若干轮（让排队中的关闭/写完成回调落地）。 */
-  void settle(int rounds) {
-    for (int i = 0; i < rounds; ++i) {
-      server.get_loop()->run(UV_RUN_NOWAIT);
-      client.get_loop()->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+  /** @brief 把两个 loop 空推 \p ms 毫秒（让排队中的关闭/写完成回调落地）。 */
+  void settle(int ms) {
+    uvcpp_test::pump_for_pair(server.get_loop(), client.get_loop(), ms);
   }
 
   ~scenario() {
     // 让兜底回收（~uvcpp_ws_sessions → shutdown → recycle_all）之前，先把
     // 两个 loop 里还排着的关闭完成回调跑掉，尽量让"正常路径"而不是兜底路径
     // 收尾 —— 兜底路径另有专门的用例（属主停机）去覆盖。
-    settle(8);
+    settle(50);
   }
 };
 
@@ -372,10 +370,9 @@ static void t_client_side_inflight_then_close() {
       server.get_loop()->run(UV_RUN_NOWAIT);
       cli.get_loop()->run(UV_RUN_NOWAIT);
     };
-    for (int k = 0; k < 3000 && !(connected && accepted != nullptr); ++k) {
-      pump();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until_pair(server.get_loop(), cli.get_loop(),
+                                [&] { return connected && accepted != nullptr; },
+                                uvcpp_test::kWaitMs);
     if (!(connected && accepted != nullptr)) { check(false, "connect"); return; }
 
     // 客户端侧的会话 —— 它的写完成闭包由 `cli` 持有，而 `cli` 比会话活得久。
@@ -390,18 +387,14 @@ static void t_client_side_inflight_then_close() {
     // 路会跑 fire_close_callbacks，而关闭观察者正是会话终结的唯一信号。
     cli.close();
 
-    for (int k = 0; k < 3000 && sessions.recycled() == 0; ++k) {
-      pump();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until_pair(server.get_loop(), cli.get_loop(),
+                                [&] { return sessions.recycled() != 0; },
+                                uvcpp_test::kWaitMs);
     if (sessions.recycled() != 1) { check(false, "client-side session recycled"); return; }
 
     // 会话已经 **delete 了**，而 `cli` 还活着 —— 继续推进循环，让任何残留的
     // 写完成回调有机会被投递。没有存活令牌的话，这里就是 UAF。
-    for (int k = 0; k < 200; ++k) {
-      pump();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::pump_for_pair(server.get_loop(), cli.get_loop(), 200);
   }
   check(true, "12 rounds of client-side in-flight send + close survived");
 }
@@ -440,10 +433,9 @@ static void t_owner_terminate_with_inflight_write() {
       server.get_loop()->run(UV_RUN_NOWAIT);
       cli.get_loop()->run(UV_RUN_NOWAIT);
     };
-    for (int k = 0; k < 3000 && !(connected && accepted != nullptr); ++k) {
-      pump();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until_pair(server.get_loop(), cli.get_loop(),
+                                [&] { return connected && accepted != nullptr; },
+                                uvcpp_test::kWaitMs);
     if (!(connected && accepted != nullptr)) { check(false, "connect"); return; }
 
     auto* wc = new uvcpp_ws_connection(&cli);
@@ -480,10 +472,7 @@ static void t_owner_terminate_with_inflight_write() {
     // 关掉连接 —— libuv 把那次在途写以 ECANCELED 结算，写完成回调随后到达，
     // 而它捕获的 `this` 已经是一块回收过的内存。
     cli.get_tcp()->close();
-    for (int k = 0; k < 200; ++k) {
-      pump();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::pump_for_pair(server.get_loop(), cli.get_loop(), 200);
   }
   check(true, "12 rounds of owner-terminate with in-flight write survived");
 }

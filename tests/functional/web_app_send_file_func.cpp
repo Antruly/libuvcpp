@@ -51,6 +51,8 @@
 #include <webapp/uvcpp_web_static.h>
 #include "loop_drain.h"
 
+#include "wait_util.h"
+
 using namespace uvcpp;
 
 namespace {
@@ -843,12 +845,7 @@ class app_conn {
 
   template <typename Pred>
   bool pump_until(Pred pred, int timeout_ms) {
-    for (int i = 0; i < timeout_ms; ++i) {
-      if (pred()) return true;
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return pred();
+    return uvcpp_test::wait_until(loop_, pred, timeout_ms);
   }
 
   const std::string& rx() const { return rx_; }

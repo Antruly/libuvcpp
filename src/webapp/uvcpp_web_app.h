@@ -229,6 +229,19 @@ struct UVCPP_API uvcpp_web_app_config {
    */
   int idle_timeout_ms;
 
+  /**
+   * @brief 一条连接上**同时**最多允许几条在途请求（流水线深度上限）。
+   *
+   * 流水线是支持的（响应严格按请求到达顺序发出，见 `set_max_pipelined_requests`），
+   * 而支持它意味着一条连接上能挂住的上下文不再是 1 条 —— 也就意味着"一条连接
+   * 能吃掉多少内存"由**客户端**决定。这个上限把那个决定权收回来：超出之后
+   * 到来的请求直接答 `503` 并关连接，排在它前面的响应照常发完。
+   *
+   * 默认 8：真实客户端（浏览器最多也就 2~6 条并行）够用，而恶意端一次写几万条
+   * 会被挡在个位数。
+   */
+  size_t max_pipelined_requests;
+
   /** @brief 未命中任何路由但该路径支持别的方法时，自动答 OPTIONS。 */
   bool auto_options;
 
@@ -313,6 +326,15 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_app& set_server_header(const std::string& value);
   uvcpp_web_app& set_shutdown_grace_ms(int ms);
   uvcpp_web_app& set_idle_timeout_ms(int ms);
+
+  /**
+   * @brief 设一条连接上同时最多几条在途请求（`cfg_.max_pipelined_requests`）。
+   *
+   * 见字段注释。`n == 0` 当作**不限**（不是"一条都不许"）—— 0 在别处（超时、
+   * 长度上限）一律是"关掉这个限制"，这里保持一致。
+   */
+  uvcpp_web_app& set_max_pipelined_requests(size_t n);
+  size_t max_pipelined_requests() const { return cfg_.max_pipelined_requests; }
   uvcpp_web_app& set_auto_options(bool enable);
   uvcpp_web_app& set_head_as_get(bool enable);
 
@@ -923,8 +945,15 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   /** @brief 当前活连接数。 */
   size_t connection_count() const { return registry_.size(); }
 
-  /** @brief 在途请求数（上下文还挂在框架上的）。 */
-  size_t inflight_count() const { return inflight_.size(); }
+  /**
+   * @brief 在途请求数（上下文还挂在框架上的）——**请求数，不是连接数**。
+   *
+   * 这个区别是流水线带进来的：一条连接上可以同时挂好几条在途请求，所以
+   * 它必须是对每条连接的队列长度求和。写成 `inflight_.size()` 会**静默**
+   * 退化成"有几条连接上有在途请求" —— 单连接的老用例照样过，只有真去数
+   * 第二条的那天才会发现不对。
+   */
+  size_t inflight_count() const { return inflight_total(); }
 
   // -----------------------------------------------------------------
   // 流式响应的出口（**框架内部接口**，业务代码不需要碰）
@@ -1211,6 +1240,15 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                      const std::string& message);
 
   /**
+   * @brief 这条连接的在途请求到顶了：回 503，并让协议层在这条响应之后关连接。
+   *
+   * 上限见 `cfg_.max_pipelined_requests`。**响应仍然排在它该在的位置上**（走到
+   * 这里说明队里已经有人，所以它一定不是队首，会被正常地延迟到轮次）—— 不插队
+   * 是刻意的：插队等于亲手制造一次乱序，那正是流水线这套东西要防的事。
+   */
+  void reject_pipelining(uvcpp_web_context& ctx);
+
+  /**
    * @brief 命中上传路由时的全部接线：校验 → 建解析器与会话 → 装框架钩子。
    *
    * @return 接线成功（`ctx->request().upload()` 已可用）为 true；已经在内部
@@ -1231,6 +1269,53 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_stream* live_stream(uvcpp_web_conn_id id) const;
 
   /**
+   * @brief 这条连接上**正在收请求体**的那个上下文；没有就返回 nullptr。
+   *
+   * `live_stream()` 与上传的落盘完成回调原先都是"按 conn id 查那一条上下文"。
+   * 流水线之后一条连接上可以同时挂着好几条（见 `inflight_`），按 id 一查一条
+   * 不再成立，所以两条都改走这里。
+   *
+   * 判据是「有流对象 && body 还没彻底交完」，其中"彻底"要连 `end_deferred()`
+   * 一起看：`deliver_end()` 在**调框架钩子之前**就把 `delivered_end_` 置真了，
+   * 而上传路由把用户的 `on_end` 扣住（`end_deferred_` 为真）等落盘 —— 那正是
+   * 落盘完成回调要来这一支找上下文的时刻。
+   *
+   * 为什么可以只取一个：**请求体在一条连接上是串行的**（llhttp 要等上一条消息
+   * complete 才会开下一条），所以满足这个判据的至多一条。而"响应在流式"的那种
+   * 上下文不会命中它 —— 那类上下文的请求体早就交付完了。
+   *
+   * 返回 `shared_ptr` 而不是裸指针：两个调用点都要在拿到之后做可能让上下文
+   * 收场的动作（`release_end()` / `resume()`），裸指针在这个窗口里会悬垂。
+   */
+  std::shared_ptr<uvcpp_web_context> active_body_ctx(uvcpp_web_conn_id id) const;
+
+  /** @brief 所有连接的在途请求数之和（`inflight_count()` 的实现）。 */
+  size_t inflight_total() const;
+
+  /**
+   * @brief 把上下文挂在它那条连接的**队尾**（= 请求到达顺序）。
+   *
+   * **必须在 `run()` 之前调**：纯同步的链会在 `run()` 里一路跑完并 `finish()`，
+   * 那时 `context_finished()` 就来摘号了 —— 先 run 后挂号等于把一个没人认领的
+   * 上下文塞进表里（泄漏），或者把后来的摘号吃掉。
+   *
+   * @return true 表示这条连接的在途请求**已经到上限**（`cfg_.max_pipelined_requests`），
+   *         调用方应当回 503 而不是跑用户的链。挂号本身已经做完了 —— 上限是
+   *         "拒掉这一条"，不是"不登记这一条"：不登记它就没有队内位置，响应
+   *         只能插队发出去，那等于亲手制造一次乱序。
+   */
+  bool enqueue_inflight(uvcpp_web_conn_id id,
+                        const std::shared_ptr<uvcpp_web_context>& ctx);
+
+  /**
+   * @brief 队首空出来了：把后面**已经定稿**的响应按顺序接着发出去。
+   *
+   * 只在 `context_finished()` 弹掉队首之后调用。`flushing_` 为真时直接返回，
+   * 把递归压成迭代（见 `flushing_` 的注释）。
+   */
+  void flush_out(uvcpp_web_conn_id id);
+
+  /**
    * @brief 已经升级成 WS 的连接 id —— `idle_sweep()` 要跳过它们。
    *
    * **为什么不直接从登记表里摘掉**（`registry_.remove(id)`）：行为上两者等价
@@ -1242,7 +1327,49 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   std::set<uvcpp_web_conn_id> upgraded_;
 
   uvcpp_web_connection_registry registry_;
-  std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> > inflight_;
+
+  /** @brief 一条连接上的**一条**在途请求。 */
+  struct out_entry {
+    std::shared_ptr<uvcpp_web_context> ctx;
+
+    /**
+     * @brief 响应已定稿，但还没轮到它发（前面还有别人的响应没发出去）。
+     *
+     * 置真时一定配着一次 `ctx->hold()`，由 `flush_out()` 在真正发出去之后还掉。
+     * 它同时就是"这个上下文还不能收场"的表达：`hold_count_ > 0` 会让 `finish()`
+     * 走"挂起收场"那一支（`pending_release_`），于是它**仍然留在 `inflight_`
+     * 里** —— `idle_sweep()` 的在途豁免与停机的宽限期因此都不用为"排队中的
+     * 响应"另做一套判断。
+     */
+    bool response_ready;
+
+    /// 显式构造函数：`response_ready` 必须有确定的初值，而 NSDMI 会破坏
+    /// C++11 的聚合初始化（同 `uvcpp_web_connection`）。
+    explicit out_entry(const std::shared_ptr<uvcpp_web_context>& c)
+        : ctx(c), response_ready(false) {}
+  };
+
+  /**
+   * @brief 在途请求，**按连接分组、组内按到达顺序** —— 流水线的顺序靠它维持。
+   *
+   * HTTP/1.1 要求响应按请求顺序发出（RFC 7230 §6.3.2）。请求本身照常并发跑，
+   * 但 `http_->send_response()` 的**调用顺序**必须等于到达顺序：协议层的写队列
+   * 本来就是按调用顺序 FIFO 的（`uvcpp_http_server.cpp` 的 `enqueue_write` /
+   * `pump_write`），所以顺序只要在这一层守住，协议层一行都不用改。
+   *
+   * 组内空了的键会被摘掉，因此 `find(id) != end()` 仍等价于"这条连接上有在途
+   * 请求" —— `idle_sweep()` 与停机的判据都靠它，**别留空队列在表里**。
+   */
+  std::map<uvcpp_web_conn_id, std::deque<out_entry> > inflight_;
+
+  /**
+   * @brief `flush_out()` 正在跑 —— 挡住"续发 → 收场 → 又续发"的递归。
+   *
+   * 被延迟的那条响应真正发出去之后会 `release()`，于是一路走到
+   * `context_finished()`，而它接着又要续发下一条。没有这个闸门，一次 N 条的
+   * 流水线突发会退栈 N 层；有了它，递归深度恒定，循环在 `flush_out()` 里迭代着走完。
+   */
+  bool flushing_ = false;
 
   // 在途的分片下发，按连接分组。**只存裸指针**：transfer 由它自己的
   // `shared_ptr` 自持（见 uvcpp_web_file.h），这里只是一个"断开时该取消谁"的

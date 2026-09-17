@@ -38,6 +38,8 @@
 #include <vector>
 #include <uvcpp/uvcpp_define.h>
 
+#include "wait_util.h"
+
 #if UVCPP_WEB_ENABLE
 
 #include "net/uvcpp_net_read.h"
@@ -293,14 +295,8 @@ static bool raw_exchange(int port, const std::string& req, std::string& out) {
   if (rc != 0) return false;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 500 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  for (int i = 0; i < 4000 && !ended.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
+  uvcpp_test::wait_until(loop, [&] { return ended.load(); }, uvcpp_test::kWaitMs);
   out = acc;
   return ended.load();
 }
@@ -324,14 +320,8 @@ static bool fire_and_disconnect(int port, const std::string& path,
   if (rc != 0) return false;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 500 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  for (int i = 0; i < 500 && !written.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
+  uvcpp_test::wait_until(loop, [&] { return written.load(); }, uvcpp_test::kWaitMs);
   loop->run(UV_RUN_NOWAIT);
   std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
 
@@ -343,10 +333,7 @@ static bool fire_and_disconnect(int port, const std::string& path,
   // 没了"这个前提就从来没成立过，整个用例形同虚设。
   // 走 close() 才是文档里说的"主动关闭的唯一正确入口"。
   client.close([&closed]() { closed.store(true); });
-  for (int i = 0; i < 500 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return closed.load(); }, uvcpp_test::kWaitMs);
   return written.load();
 }
 
@@ -394,21 +381,12 @@ static bool fire_and_disconnect_midwrite(int port, const std::string& path) {
   if (rc != 0) return false;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 500 && !connected.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  for (int i = 0; i < 2000 && !got_first.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
+  uvcpp_test::wait_until(loop, [&] { return got_first.load(); }, uvcpp_test::kWaitMs);
   if (!got_first.load()) return false;
 
   client.close([&closed]() { closed.store(true); });
-  for (int i = 0; i < 500 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  uvcpp_test::wait_until(loop, [&] { return closed.load(); }, uvcpp_test::kWaitMs);
   return true;
 }
 
@@ -464,11 +442,9 @@ struct PoolBlocker {
 
   /// 泵到所有占位任务都收尾（after_work 回调跑了、对象删了）。
   void drain() {
-    for (int i = 0; i < 3000 && done.load() < static_cast<int>(items.size());
-         ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(
+        loop, [this] { return done.load() >= static_cast<int>(items.size()); },
+        uvcpp_test::kWaitMs);
     items.clear();
   }
 
@@ -510,13 +486,8 @@ struct PendingGet {
            }) == 0;
   }
 
-  void pump(int ms) {
-    uvcpp_loop* loop = client.get_loop();
-    for (int i = 0; i < ms; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  }
+  /// 上限是**墙钟**毫秒，不是圈数（见文件顶部 wait_util.h 的说明）。
+  void pump(int ms) { uvcpp_test::pump_for(client.get_loop(), ms); }
 
   /// 取 `\r\n\r\n` 之后的 body。
   std::string body() const {

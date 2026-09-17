@@ -204,10 +204,9 @@ MUTATIONS = [
     # （Phase 3a 就在钉「对端断开 ⇒ on_abort 恰好一次」），探针实测 scoped rc=2、
     # 失败签名 `abort: on_abort **恰好一次**（实测 0）`。
     ("X14", "web_app_stream_func", "abort_mid_stream",
-     [(A, '    if (it != inflight_.end() && it->second->streaming()) {\n'
-          '      std::shared_ptr<uvcpp_web_context> ctx = it->second;\n'
-          '      ctx->stream_abort();\n    }',
-          '    /* MUTATION X14: 断连时不通知流对象 */\n    (void)it;')],
+     [(A, '          if (e->ctx->streaming()) victims.push_back(e->ctx);',
+          '          /* MUTATION X14: 断连时不通知流对象 */\n'
+          '          (void)e;')],
      "断连时不通知流对象 —— 抓它的是**请求**流的 abort_mid_stream，"
      "而不是响应流的 client_disconnect_frees_transfer（后者断言的是相反的现状）"),
 ]

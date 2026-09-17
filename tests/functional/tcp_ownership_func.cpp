@@ -26,6 +26,7 @@
  * 真实路径上（read 回调里的 nread < 0 分支），不跑真连接根本触发不到。
  */
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <future>
 #include <iostream>
@@ -41,7 +42,10 @@
 #include "net/uvcpp_tcp_client.h"
 #include "net/uvcpp_tcp_server.h"
 
+#include "wait_util.h"
+
 using namespace uvcpp;
+using namespace uvcpp_test;
 
 namespace {
 
@@ -161,11 +165,12 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  // 再转几圈，让挂起的 close 事件跑完。
-  for (int i = 0; i < 200; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  // 等挂起的 close 事件跑完 —— 等到登记表真的空了为止（这正是下面那条判据），
+  // 不是"转 200 圈"。`accepted > 0` 是防"还没 accept 就先看到 0"的假通过。
+  wait_until(
+      loop,
+      [&] { return st->accepted.load() > 0 && server.client_count() == 0; },
+      kWaitMs);
 
   // **判据**：所有连接都断开之后，登记表必须回到 0。
   // 缺陷 1 没修的话这里会 > 0（每个连接泄漏一个 client）。
@@ -209,15 +214,9 @@ bool connect_and_drop(int port) {
   if (rc != 0) return false;
 
   uvcpp_loop* loop = client.get_loop();
-  for (int i = 0; i < 500 && !closed.load(); ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  // 再转几圈，确保 close 事件彻底跑完。
-  for (int i = 0; i < 50; ++i) {
-    loop->run(UV_RUN_NOWAIT);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  wait_until(loop, [&] { return closed.load(); }, kWaitMs);
+  // 再泵一会儿，确保 close 事件彻底跑完。
+  pump_for(loop, 50);
   return connected.load();
 }
 
@@ -259,9 +258,7 @@ scenario_result run_scenario(int connections, bool user_sets_on_close,
     return r;
   }
 
-  while (!ready.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
+  wait_flag([&] { return ready.load(); }, kWaitMs);
 
   for (int i = 0; i < connections; ++i) {
     connect_and_drop(port);
