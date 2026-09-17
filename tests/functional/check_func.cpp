@@ -3,12 +3,15 @@
 #include "handle/uvcpp_check.h"
 #include "handle/uvcpp_idle.h"
 #include <atomic>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
 int main() {
   std::cout << "[functional check] start\n";
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_check chk(&loop);

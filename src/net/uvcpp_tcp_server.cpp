@@ -9,10 +9,8 @@
 #include <uvcpp/uvcpp_alloc.h>
 #include <uvcpp/uvcpp_define.h>
 
-#include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <thread>
 #include <vector>
 
 #if UVCPP_OPENSSL_ENABLE
@@ -43,46 +41,70 @@ uvcpp_tcp_server::uvcpp_tcp_server() {
 }
 
 uvcpp_tcp_server::~uvcpp_tcp_server() {
-  // Close the server TCP handle, pumping the loop until its close
-  // endgame fires.  Then pump a few more times to drain any remaining
-  // client close endgames that may have been queued during the pump.
-  if (tcp_ != nullptr && !stopped_) {
-    if (!tcp_->is_closing() && tcp_->is_active()) {
-      bool close_done = false;
-      tcp_->close([&close_done](uvcpp_handle*) { close_done = true; });
-      for (int i = 0; i < 5000 && !close_done; i++) {
-        if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      // Drain any remaining close endgames (e.g. from clients whose
-      // close callbacks fired during the pump above).
-      for (int i = 0; i < 20; i++) {
-        if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-    }
+  // -------------------------------------------------------------------
+  // 收尾分四步，**顺序不能换**。原先那个版本在这四处各有一个缺陷，
+  // 合起来的后果是"析构完把整个循环泄漏掉"——实测 177 处（第 8 条探针
+  // `tests/tools/run_loop_leak_probe.py`，占全部泄漏循环的 57%）。
+  //
+  // 第一步必须**无条件**关监听句柄。原先的条件是
+  // `!stopped_ && !is_closing() && is_active()`，两边都能漏：
+  //
+  //   - `stop()` 已经把这个句柄 close 了（`stopped_ == true`）时整块被跳过，
+  //     而 `stop()` 只**发起**关闭、终结还没放完 —— 于是循环关不掉；
+  //   - 句柄 init 过但没 `uv_listen`（或已经停掉）时 `is_active()` 为假，
+  //     同样被跳过。这一种更隐蔽：`uv__loop_alive()` 在 Windows 上算的是
+  //     「活跃句柄 || 活跃请求 || pending_reqs_tail || endgame_handles」，
+  //     既没 close 又不活跃的句柄**哪一个都不占**，所以 `uv_run` 连 while
+  //     体都不进 —— 靠"多泵几轮"永远救不回来，只能先 `uv_close` 把它推进
+  //     `endgame_handles`（`_local_deps/libuv/src/win/core.c:401`）。
+  // -------------------------------------------------------------------
+  if (tcp_ != nullptr && tcp_->get_handle() != nullptr &&
+      !tcp_->is_closing()) {
+    tcp_->close([](uvcpp_handle*) {});
   }
 
-  // Close and delete the loop BEFORE deleting any wrapper objects.
-  // Pumping above has processed all close endgames, so the loop's
-  // handle queue should be empty.
-  if (loop_ != nullptr) {
-    loop_->loop_close();
-    delete loop_;
-    loop_ = nullptr;
-  }
-
-  // Now safe to delete all wrappers — their handles are fully closed
-  // and the loop is already destroyed.
-  if (tcp_ != nullptr) {
-    delete tcp_;
-    tcp_ = nullptr;
-  }
-
+  // 第二步：客户端也要**在循环还活着的时候**收掉 —— 它们各自的析构会关自己
+  // 的句柄、跑 token 与用户回调。原先这一步排在 `delete loop_` **之后**，
+  // 那些 `uv_close()` 是在一块已经"关闭过"的内存上写的（之所以没炸，是因为
+  // 关不掉时 `~uvcpp_loop` 有意泄漏了那块内存；那是巧合，不是设计）。
   for (auto* client : clients_) {
     delete client;
   }
   clients_.clear();
+
+  // 第三步：有界泵，把前两步排上去的终结放完，然后才关循环。**没有 sleep、
+  // 不看墙钟**（原先是 5000 轮 + 每次 1ms 睡眠，再加一段固定的 20 × 1ms
+  // "补漏"——也就是说**每一次**正常析构都至少睡 20 毫秒，而且它正是第 10 条
+  // 从 `~uvcpp_tcp_client` 里拿掉的那个形状）。
+  //
+  // 泵的判据是 `uv_loop_alive()`，**不能把 `loop_close()` 写进条件里**：
+  // `loop_close()` 内部先调 `stop()`，而 `stop()` 在循环还活着时会
+  // `uv_stop()` 把 `stop_flag` 立起来；`uv_run` 的
+  // `while (r != 0 && loop->stop_flag == 0)` 是在**进 body 之前**判的，
+  // 于是那一轮整段空转、一个终结都不放（`stop_flag` 要到 `uv_run` 返回前才
+  // 清掉）。交替调用就成了一个不推进的死循环，256 轮全烧完还是关不掉。
+  //
+  // `is_running()` 那一问是兜底：本对象若是在**自己的某个回调里**被析构的
+  // （栈上还压着一层 `uv_run`），泵循环就是重入 `uv_run`，而 `delete loop_`
+  // 是把外层那一帧脚下的 `uv_loop_t` 还回去。这时整块交给循环 —— 与
+  // `~uvcpp_tcp_client` / `~uvcpp_ws_client` 同一条策略：泄漏一块仍然有效的
+  // 内存，换掉一个必然发生的 use-after-free。（目前没有用例走这一路：测试里
+  // 的 server 都是栈对象，析构发生在泵返回之后。）
+  if (loop_ != nullptr && !loop_->is_running()) {
+    for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
+      loop_->run(UV_RUN_NOWAIT);
+    }
+    loop_->loop_close();
+    delete loop_;
+  }
+  loop_ = nullptr;
+
+  // 第四步：现在才轮到 TCP wrapper —— 它的句柄在第三步里已经终结、循环也
+  // 已经还回去了，`free_handle()` 会走"内部句柄已置空"那条路。
+  if (tcp_ != nullptr) {
+    delete tcp_;
+    tcp_ = nullptr;
+  }
 
   if (on_connection_arg_ != nullptr) {
     delete static_cast<std::function<void(uvcpp_tcp_client*)>*>(

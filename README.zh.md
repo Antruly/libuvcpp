@@ -372,15 +372,34 @@ ctest --test-dir build --output-on-failure -C Release
 # 仅运行 web 模块测试
 ctest --test-dir build -C Release -R "web_"
 
-# 排除特定测试
-ctest --test-dir build -C Release --exclude-regex "test_shutdown_func|test_tcp_func"
+# 排除特定测试（test_shutdown_func 约 1% 概率失败——是 flake 不是挂死，详见 doc/ci-guide.md §4）
+ctest --test-dir build -C Release --exclude-regex "test_shutdown_func"
 ```
+
+### 可选门禁：完整页堆（PageHeap）跑一遍全量
+
+裸跑时 `free` 掉的内存页还在、内容还是旧的，**释放后使用是静默的**。完整页堆把
+释放过的块立刻 unmap，同一个读当场变成访问违例 —— 它曾在普通构建 / 无内存池构建 /
+单元测试三层验收全绿的同时，一次抓出 8 个用例的 use-after-free。
+
+```bash
+# 需要 Windows SDK 的调试工具 gflags.exe（通常在管理员终端里跑）
+python -u tests/tools/run_pageheap_gate.py --tree build-webapp
+```
+
+它先裸跑一遍拿基线，再逐个用例「开页堆 → 回查注册表 → 跑 → 关页堆 → 回查」，
+只把「基线绿、页堆崩」算抓到。退出码 `0` 全绿、`1` 门禁不通过、`3` 门禁自身没跑成
+（基线红 / 页堆没设上 / 没关干净 / 抓到的是过期 DLL）。
+
+**它显著变慢**，所以不进 ctest 默认套件。页堆在每个用例的 `finally` 里关掉，另有
+`atexit` 与 `Ctrl-C` 兜底 —— 残留会让这台机器上后面所有测试都慢一个量级。
 
 测试覆盖：
 - **单元测试**：`tests/unit/` — 句柄类型、请求类型、uvcpp 工具类
 - **功能测试**：`tests/functional/` — 所有模块的运行时行为
 - **Expand 测试**：`tests/expand/` — 内存池分配测试
-- **测试工具**：`tests/tools/` — 变异脚本等（例如 `mutate_ws_client.py`）
+- **测试工具**：`tests/tools/` — 变异脚本与门禁（变异如 `mutate_ws_client.py`、
+  `run_tcp_client_dtor_mutation.py`；门禁如 `run_pageheap_gate.py`）
 
 ---
 

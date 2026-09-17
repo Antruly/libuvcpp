@@ -2,6 +2,7 @@
 #include <atomic>
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_timer.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -14,6 +15,8 @@ int main() {
   std::atomic<bool> restart_ok(false);
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   // Step 1: single-shot timer (50ms)

@@ -342,6 +342,91 @@ int main() {
         "server delivered " + std::to_string(st.accepted.load()) +
             " connections to the upper layer (want exactly 1: the TLS one)");
 
+  // ---- 场景 3：同步建 TLS 之后，异步 `send()` 必须**拒绝**，而不是发明文 ----
+  //
+  // `connect_wait()` + `set_ssl_context()` 建的是本层自己的 fd-based **阻塞**
+  // 会话（`do_ssl_handshake`）：密钥在 `ssl_` 里，socket 被设成阻塞模式。而这条
+  // 异步路径只调 `tcp_->write()` —— 它**不经过** `ssl_`，于是明文请求进了加密
+  // socket，调用方看到的是"写成功、响应永远不来"（正是 `ff107fe` 修掉的那个
+  // 缺陷，只是换了入口）。
+  //
+  // 三种断言要一起看，缺一条就是空断言：
+  //   ① 返回值是 `UV_ENOTSUP`（拒绝），且被拒绝的调用**不回调**；
+  //   ② **非空证明**：那些字节确实没到服务端（同场景 2 的判据）；
+  //   ③ **前提**：同一条会话换同步入口照样能用 —— 否则"拒绝"可能只是
+  //      "这个客户端本来就是死的"，那样什么都没测到。
+  //
+  // **另起一台服务端**，不共用上面那台：这一段要数"服务端收到了几个明文字节"
+  // 和"交付了几条连接"，共用的服务端会把它的计数搅进场景 1/2 的判据（实测
+  // 共用时上面那条 `accepted == 1` 会变成 2，而变异态下它数出来的是 1 ——
+  // 同一个计数在两态之间解释不通，就不能拿来当判据）。服务端代码没为这个
+  // 场景新写一行，还是同一个 `run_server`，只是各用各的实例。
+  {
+    server_state      st3;
+    std::atomic<bool> stop3{false};
+    std::promise<int> port3_promise;
+    std::future<int>  port3_future = port3_promise.get_future();
+
+    std::thread srv3_thread(run_server, std::ref(port3_promise), std::ref(stop3),
+                            std::ref(st3), &sctx);
+    const int port3 = port3_future.get();
+    check(port3 > 0,
+          "sync_connect+async_send: 第二台服务端未起 (listen_rc=" +
+              std::to_string(st3.listen_rc.load()) + ")");
+
+    if (port3 > 0) {
+      const int in_before  = st3.plain_bytes_in.load();
+      const int req_before = static_cast<int>(st3.request.size());
+
+      uvcpp_http_client client;
+      client.set_ssl_context(&cctx);
+      const int crc = client.connect_wait("127.0.0.1", port3, 5000);
+      check(crc == 0,
+            "sync_connect+async_send: connect_wait rc = " + std::to_string(crc));
+
+      if (crc == 0) {
+        bool aresp_fired = false;
+        const int src = client.get("/", [&aresp_fired](const uvcpp_http_response&, int) {
+          aresp_fired = true;
+        });
+        check(src == UV_ENOTSUP,
+              "sync_connect+async_send: async send rc = " + std::to_string(src) +
+                  " (want UV_ENOTSUP)");
+        check(!aresp_fired, "sync_connect+async_send: 被拒绝的 send 不该回调");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        check(st3.plain_bytes_in.load() == in_before,
+              "sync_connect+async_send: server accepted " +
+                  std::to_string(st3.plain_bytes_in.load() - in_before) +
+                  " bytes of PLAINTEXT as data");
+        check(static_cast<int>(st3.request.size()) == req_before,
+              "sync_connect+async_send: server request buffer grew by " +
+                  std::to_string(static_cast<int>(st3.request.size()) - req_before));
+
+        // 前提：`send_wait` 走 `send_wait_ssl`，真的用 `ssl_` 收发。这条绿了
+        // 才说明上面那个 UV_ENOTSUP 是"入口不对"，不是"客户端已经废了"。
+        uvcpp_http_response resp;
+        const int wrc = client.get_wait("/", resp, 5000);
+        check(wrc == 0,
+              "sync_connect+async_send: get_wait rc = " + std::to_string(wrc) +
+                  " (同一条会话换同步入口必须可用)");
+        check(static_cast<int>(resp.status_code) == 200,
+              "sync_connect+async_send: get_wait status = " +
+                  std::to_string(static_cast<int>(resp.status_code)));
+      }
+
+      // 关闭舞步收尾 —— 这条会话是阻塞 socket，不在半途析构。
+      for (int i = 0; i < 200; ++i) {
+        client.run(UV_RUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+
+    stop3.store(true);
+    srv3_thread.join();
+  }
+
   if (g_failures == 0) {
     std::cout << "[web_ssl_http_client] ALL PASS" << std::endl;
     return 0;

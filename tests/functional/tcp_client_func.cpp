@@ -16,6 +16,7 @@
 #include "req/uvcpp_write.h"
 #include "uvcpp/uvcpp_buf.h"
 #include "net/uvcpp_tcp_client.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -27,6 +28,8 @@ static void run_echo_server(std::promise<int>& port_promise,
                             std::atomic<bool>& server_ready,
                             std::atomic<bool>& stop_server) {
   uvcpp_loop server_loop;
+
+  uvcpp_test::loop_drain drain_server_loop(&server_loop);
   server_loop.init();
 
   uvcpp_tcp server(&server_loop);
@@ -580,6 +583,265 @@ static bool test_async_buf_write_no_poison(int port) {
 }
 
 // =========================================================================
+// Accept-then-hangup server: closes every accepted connection immediately.
+// 给"对端断开"那条腿用 —— 常驻回声服务端只在出错时才关连接，关不了。
+// =========================================================================
+static void run_hangup_server(std::promise<int>& port_promise,
+                              std::atomic<bool>& server_ready,
+                              std::atomic<bool>& stop_server) {
+  uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
+  loop.init();
+
+  uvcpp_tcp server(&loop);
+  server.bindIpv4("127.0.0.1", 0);
+
+  sockaddr_in name;
+  int namelen = sizeof(name);
+  server.getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
+  port_promise.set_value(ntohs(name.sin_port));
+
+  server.listen(
+      [&](uvcpp_stream* s, int status) {
+        if (status < 0) return;
+        uvcpp_tcp* peer = new uvcpp_tcp(&loop);
+        if (s->accept(peer) != 0) {
+          delete peer;
+          return;
+        }
+        // 立刻关：对端收到的是 EOF（干净 FIN，不是 RST）。
+        peer->close([peer](uvcpp_handle*) { delete peer; });
+      },
+      16);
+
+  server_ready.store(true);
+
+  uvcpp_timer stop_poller(&loop);
+  stop_poller.start(
+      [&stop_server, &loop](uvcpp_timer*) {
+        if (stop_server.load()) loop.stop();
+      },
+      50, 50);
+
+  loop.run(UV_RUN_DEFAULT);
+}
+
+// =========================================================================
+// 在**自己的读回调里**析构客户端
+// =========================================================================
+/**
+ * 为什么这条的区分力**完全来自 PageHeap**：
+ *
+ * `~uvcpp_tcp_client` 收尾要拨循环把挂起的关闭回调放掉、把 `uv_loop_t` 关掉、
+ * 把 `uvcpp_loop` 还回去。如果析构点**就在这个循环自己的读回调里**，那之后还
+ * 活着（还在被用）的东西至少有三样：
+ *
+ *   1. 外层那一帧 `uv_run`（以及它周围的 `uvcpp_loop::run` 计数）
+ *   2. `uvcpp_tcp` 的读回调闭包 —— 它捕获了客户端的 `this`，而且它自己就存在
+ *      那个被删掉的客户端里
+ *   3. **正在执行的那个 `std::function` 本身**（`net_read_cb_`），同理
+ *
+ * 裸跑时那些内存还好端端地在那儿，读到的还是旧值 —— 所以**不崩**；PageHeap
+ * 把释放过的块直接 unmap，同样一次读法立刻 SEGFAULT。两条腿各钉一种"回调返回
+ * 之后还剩什么"：
+ *
+ *   腿 1  收到数据时删 —— 返回之后只剩 `uvcpp_free_bytes(base)`（已经是局部）
+ *   腿 2  对端断开时删 —— 返回之后还要走 `fire_close_callbacks()`（全是成员）
+ *
+ * 两条都不许挂死：真不返回就是失败，所以等待都是有界的。
+ */
+static bool test_delete_client_in_read_cb(int port, int hangup_port) {
+  std::cout << "[functional tcp_client] delete_in_read_cb start\n";
+  bool ok = true;
+
+  // ---- 腿 1：收到数据时删（`on_read` 里 `delete`）----
+  {
+    uvcpp_tcp_client* victim = new uvcpp_tcp_client();  // 自持 loop
+    int  data_seen = 0;
+    bool deleted   = false;
+    const char* msg = "delete_probe_1";
+
+    int rc = victim->connect("127.0.0.1", port, [&](int status) {
+      if (status != 0) {
+        std::cout << "[functional tcp_client] delete_in_read_cb leg1 connect "
+                  << uv_err_name(status) << std::endl;
+        return;
+      }
+      victim->read_start_events(
+          [&](uvcpp_tcp_client& /*c*/, const net_read_result& r) {
+            if (!r.is_data()) return;
+            ++data_seen;
+            delete victim;  // <-- 就在这个循环的读回调里
+            victim = nullptr;
+            deleted = true;
+          });
+      victim->write(msg, strlen(msg), [](int) {});
+    });
+    if (rc != 0) {
+      std::cout << "[functional tcp_client] delete_in_read_cb leg1 connect "
+                   "start failed: " << uv_err_name(rc) << std::endl;
+      delete victim;
+      return false;
+    }
+
+    // 从外面一帧一帧拨：回调里已经把 client 删了，删完之后一个字节都不能再
+    // 碰它 —— `victim != nullptr` 那个判断就是这件事（它判的是本函数的局部）。
+    const auto t0 = std::chrono::steady_clock::now();
+    while (victim != nullptr && !deleted &&
+           std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0).count() < 5000) {
+      victim->run(UV_RUN_NOWAIT);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // 前置：回调必须真的跑过、也必须真的删了 —— 否则这条用例什么都没测。
+    if (data_seen != 1 || !deleted || victim != nullptr) {
+      std::cout << "[functional tcp_client] delete_in_read_cb leg1 FAIL "
+                   "data_seen=" << data_seen << " deleted=" << deleted
+                << " victim=" << static_cast<void*>(victim) << std::endl;
+      ok = false;
+    } else {
+      std::cout << "[functional tcp_client] delete_in_read_cb leg1 survived\n";
+    }
+  }
+
+  // ---- 腿 2：对端断开时删 ----
+  {
+    uvcpp_tcp_client* victim = new uvcpp_tcp_client();
+    int  end_seen = 0;
+    bool deleted  = false;
+
+    int rc = victim->connect("127.0.0.1", hangup_port, [&](int status) {
+      if (status != 0) {
+        std::cout << "[functional tcp_client] delete_in_read_cb leg2 connect "
+                  << uv_err_name(status) << std::endl;
+        return;
+      }
+      victim->read_start_events(
+          [&](uvcpp_tcp_client& /*c*/, const net_read_result& r) {
+            if (!r.is_end()) return;
+            ++end_seen;
+            delete victim;  // <-- 回调返回之后还要跑 fire_close_callbacks()
+            victim = nullptr;
+            deleted = true;
+          });
+    });
+    if (rc != 0) {
+      std::cout << "[functional tcp_client] delete_in_read_cb leg2 connect "
+                   "start failed: " << uv_err_name(rc) << std::endl;
+      delete victim;
+      return false;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    while (victim != nullptr && !deleted &&
+           std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0).count() < 5000) {
+      victim->run(UV_RUN_NOWAIT);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    if (end_seen != 1 || !deleted || victim != nullptr) {
+      std::cout << "[functional tcp_client] delete_in_read_cb leg2 FAIL "
+                   "end_seen=" << end_seen << " deleted=" << deleted
+                << " victim=" << static_cast<void*>(victim) << std::endl;
+      ok = false;
+    } else {
+      std::cout << "[functional tcp_client] delete_in_read_cb leg2 survived\n";
+    }
+  }
+
+  // 走到这里说明两次析构都从自己的回调里活了下来。再跑一次完整回显：裸跑下
+  // 这是冒烟断言，PageHeap 下前面那两段根本到不了。
+  {
+    uvcpp_tcp_client after;
+    const char* msg = "after_delete_probe";
+    if (after.connect_wait("127.0.0.1", port, 5000) != 0) {
+      std::cout << "[functional tcp_client] delete_in_read_cb after: connect "
+                   "failed\n";
+      ok = false;
+    } else if (after.write_wait(msg, strlen(msg), 5000) != 0) {
+      std::cout << "[functional tcp_client] delete_in_read_cb after: write "
+                   "failed\n";
+      ok = false;
+    } else {
+      uvcpp_buf out;
+      if (after.read_wait(out, 5000) != 0 || out.to_string() != msg) {
+        std::cout << "[functional tcp_client] delete_in_read_cb after: echo "
+                     "mismatch '" << out.to_string() << "'\n";
+        ok = false;
+      }
+    }
+  }
+
+  std::cout << "[functional tcp_client] delete_in_read_cb done success="
+            << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+// =========================================================================
+// 析构里**不许有睡眠**：判据是绝对墙钟，不是"A 比 B 快"
+// =========================================================================
+/**
+ * 改前 `~uvcpp_tcp_client` 在"句柄还开着"那条路上是
+ *
+ *     while (!close_done) { run(NOWAIT); 看墙钟; sleep(1ms); }
+ *
+ * 注意 `sleep(1ms)` 在**条件复查之前** —— 于是每一次"连着、没关就析构"都
+ * 至少花 1 毫秒，一次也躲不掉。这不是"慢一点"，是在事件循环线程上做阻塞等待
+ * （本仓库的硬约束），而且它把一次终结拖成最多 5000 次系统调用 + 5 秒墙钟。
+ *
+ * 判据就取那个 1 毫秒硬下界：**多轮里的最小值**（平均值/总和会被负载噪声和
+ * 别的东西一起抬高，最小值不会 —— 这正是抓"平坦成本"该用的量），
+ * `min < 1ms` 才算过。改后是 64 轮紧挨着的 `UV_RUN_NOWAIT`（微秒级），
+ * 留出的余量是几十倍。
+ *
+ * 计时区**只包住析构**：`connect_wait()` 自己会拨循环（那是同步 API 的本分），
+ * 不能算进来。
+ */
+static bool test_destructor_has_no_sleep(int port) {
+  std::cout << "[functional tcp_client] destructor_no_sleep start\n";
+
+  const int rounds = 30;
+  double    best_ms = 1e9;
+  bool      ok = true;
+
+  for (int i = 0; i < rounds; ++i) {
+    uvcpp_tcp_client* c = new uvcpp_tcp_client();  // 自持 loop
+    int rc = c->connect_wait("127.0.0.1", port, 5000);
+    if (rc != 0) {
+      std::cout << "[functional tcp_client] destructor_no_sleep connect failed: "
+                << uv_err_name(rc) << std::endl;
+      delete c;
+      return false;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    delete c;  // <-- 连着、没读过、没关过：走的就是那条"关闭 + 泵"的路
+    const auto t1 = std::chrono::steady_clock::now();
+
+    const double ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+            t1 - t0)
+            .count();
+    if (ms < best_ms) best_ms = ms;
+  }
+
+  std::cout << "[functional tcp_client] destructor_no_sleep best=" << best_ms
+            << "ms over " << rounds << " rounds (阈值 1ms)" << std::endl;
+  if (best_ms >= 1.0) {
+    std::cout << "[functional tcp_client] destructor_no_sleep FAIL: 析构里"
+                 "还有秒级/毫秒级的等待\n";
+    ok = false;
+  }
+
+  std::cout << "[functional tcp_client] destructor_no_sleep done success="
+            << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+// =========================================================================
 // main
 // =========================================================================
 int main() {
@@ -602,6 +864,22 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
+  // 断开用的服务端（只给 delete_in_read_cb 的腿 2 用）
+  std::promise<int> hangup_promise;
+  auto hangup_future = hangup_promise.get_future();
+  std::atomic<bool> hangup_ready(false);
+  std::atomic<bool> stop_hangup(false);
+  std::thread hangup_thread(run_hangup_server, std::ref(hangup_promise),
+                            std::ref(hangup_ready), std::ref(stop_hangup));
+
+  int hangup_port = hangup_future.get();
+  std::cout << "[functional tcp_client] hangup server on port " << hangup_port
+            << std::endl;
+
+  while (!hangup_ready.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
   bool all_ok = true;
 
   // Run all tests
@@ -612,10 +890,14 @@ int main() {
   all_ok = test_mode_mixing_detection() && all_ok;
   all_ok = test_status_transitions(port) && all_ok;
   all_ok = test_async_buf_write_no_poison(port) && all_ok;
+  all_ok = test_delete_client_in_read_cb(port, hangup_port) && all_ok;
+  all_ok = test_destructor_has_no_sleep(port) && all_ok;
 
   // Stop server
   stop_server.store(true);
   server_thread.join();
+  stop_hangup.store(true);
+  hangup_thread.join();
 
   std::cout << "[functional tcp_client] done success="
             << (all_ok ? "true" : "false") << std::endl;

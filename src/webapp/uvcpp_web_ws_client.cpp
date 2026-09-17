@@ -40,10 +40,12 @@ uvcpp_web_ws_client::~uvcpp_web_ws_client() {
   // 析构里**不等待**，也不做任何墙钟等待 —— 与协议层同一条约定。底层的
   // 析构自己会把会话回收干净（那里是有界的 NOWAIT 迭代）。
   //
-  // 注意：如果本对象是在自己的回调里被析构的，`delete inner_` 会去关一个
-  // **正在跑**的循环（`uv_run` 不可重入）。这一条写在类注释里，是使用者的
-  // 约束，不是本层能兜住的 —— 兜它需要把析构推迟到循环之外，而析构点就是
-  // 最后一刻，没有"之后"可用。
+  // 注意：如果本对象是在自己的回调里被析构的，`run()` 那一帧脚下的对象没了。
+  // `delete inner_` 本身现在兜得住（协议层会把 loop/tcp/会话整块交出去、不再
+  // 回收，见那里的注释），但**本层这一帧兜不住** —— 那是"正在跑 `run()` 的
+  // 包装对象"被删，不是底层的事。所以这一条写在类注释里，是使用者的约束，
+  // 不是本层能兜住的：兜它需要把析构推迟到循环之外，而析构点就是最后一刻，
+  // 没有"之后"可用。
   user_closed_ = true;  // 万一还有回调在途，别再排重连了
   cancel_reconnect();
   delete inner_;
@@ -125,6 +127,9 @@ void uvcpp_web_ws_client::install() {
 #if UVCPP_OPENSSL_ENABLE
   if (ssl_ctx_ != nullptr) inner_->set_ssl_context(ssl_ctx_);
 #endif
+#if UVCPP_ZLIB_ENABLE
+  inner_->set_compression(deflate_cfg_);
+#endif
 }
 
 #if UVCPP_OPENSSL_ENABLE
@@ -133,6 +138,21 @@ uvcpp_web_ws_client& uvcpp_web_ws_client::set_ssl_context(
   ssl_ctx_ = ctx;
   if (inner_ != nullptr) inner_->set_ssl_context(ctx);
   return *this;
+}
+#endif
+
+#if UVCPP_ZLIB_ENABLE
+uvcpp_web_ws_client& uvcpp_web_ws_client::set_compression(
+    const uvcpp_ws_deflate_config& cfg) {
+  deflate_cfg_ = cfg;
+  if (inner_ != nullptr) inner_->set_compression(cfg);
+  return *this;
+}
+
+uvcpp_ws_deflate_config uvcpp_web_ws_client::get_compression() const {
+  // 读底层的当前值：本层存的那份是"意图"，底层那份才是真的在用的。
+  if (inner_ != nullptr) return inner_->get_compression();
+  return deflate_cfg_;
 }
 #endif
 

@@ -20,7 +20,6 @@ static int get_port(uvcpp_ws_server& s) {
 
 int main() {
   std::cout << "[web_ws] echo" << std::endl;
-  // NOTE: uses raw new/leak to avoid dual-loop destructor issues
   auto* server = new uvcpp_ws_server();
   server->bind("127.0.0.1", 0);
   int port = get_port(*server);
@@ -50,8 +49,10 @@ int main() {
 
   bool pass = ok.load();
   std::cout << "  -> " << (pass ? "PASS" : "FAIL") << std::endl;
-  // Skip cleanup (known dual-loop issue), exit fast
-  std::_Exit(pass ? 0 : 2);
+  // 试探：两个对象各持一个循环，析构里各自做有界收尾泵（第十一/十三批的形状）。
+  delete client;
+  delete server;
+  return pass ? 0 : 2;
 }
 #else
 int main() { return 0; }

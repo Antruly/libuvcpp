@@ -14,6 +14,13 @@ uvcpp_ws_sessions::~uvcpp_ws_sessions() {
 }
 
 void uvcpp_ws_sessions::shutdown() {
+  if (abandoned_) {
+    // 属主在自己的回调里析构，会话已经交出去了（见 abandon()）。这里**连
+    // `drain_async_` 都不能删**：它挂在那个正跑着的循环上，`delete` 会去
+    // 碰一个正在执行的句柄。一起留给循环。
+    drain_async_ = nullptr;
+    return;
+  }
   recycle_all();
 
   // `delete` 一个 async 句柄只是**发起**释放（走 uv_close，底层内存在完成
@@ -21,6 +28,12 @@ void uvcpp_ws_sessions::shutdown() {
   // `std::function`。
   delete drain_async_;
   drain_async_ = nullptr;
+}
+
+void uvcpp_ws_sessions::abandon() {
+  abandoned_ = true;
+  sessions_.clear();
+  retired_.clear();
 }
 
 void uvcpp_ws_sessions::set_loop(uvcpp_loop* loop) {
@@ -32,6 +45,28 @@ void uvcpp_ws_sessions::set_loop(uvcpp_loop* loop) {
     delete a;
     return;
   }
+  // 起始状态是 **unref**：此刻退休表是空的，这个句柄没有任何事要办，而它默认
+  // 会把循环算成"还活着"（`uv_run` 的存活判据是 `active_handles > 0`，libuv
+  // `uv-common.h`）—— 于是一个**没事可做**的循环也永远不返回。
+  //
+  // 实测（2026-09-17，改前）：框架层客户端不开重连、对端走掉之后，循环上
+  // **只剩这一个** async 句柄（uv_walk 普查：`async 活跃`），
+  // `uv_run(UV_RUN_NOWAIT)` 连拨 200 轮全部返回非 0、`uv_loop_alive() == 1`，
+  // 于是 `uvcpp_web_ws_client::run(UV_RUN_DEFAULT)` 那个"只在 rc == 0 时才
+  // break"的泵循环永远出不来 —— 而它的头文件示例写着"循环在没有活句柄时自然
+  // 返回"。
+  //
+  // **不是一直 unref**：退休表里有东西时它必须重新 **ref**（见 `on_retired()`），
+  // 否则"醒来把待回收的会话删掉"这件事可能永远不再发生 —— `uv_run` 是在进
+  // while 体**之前**算存活的，存活为 0 时那一轮连 poll 都不做，挂起的唤醒请求
+  // 就没人取。实测（同一天，只 unref 不 ref 的版本）：`web_ws_ownership_func`
+  // 的「client-side session recycled」与 `web_ws_client_api_func` 的「[3] close()
+  // 之后会话必须被终结并回收」双双变红 —— 拨 3000 轮也没人回收。
+  //
+  // 所以规则是一句话：**这个句柄只在自己手上有活时才算数**。唤醒本身与 ref
+  // 无关（`uv_async_send()` 该踢还是踢，libuv 的 unref 只清 `UV_HANDLE_REF`
+  // 并减 `active_handles`）。服务器那边不受影响 —— 那个循环由监听句柄保活。
+  a->unref();
   drain_async_ = a;
 }
 
@@ -64,7 +99,14 @@ void uvcpp_ws_sessions::on_retired(uvcpp_ws_connection* c) {
   if (retire_observer_) retire_observer_(c);
 
   // 唤醒循环去回收。没有句柄（循环不可用 / 装不上）就等 recycle_all()。
-  if (drain_async_ != nullptr) drain_async_->send();
+  if (drain_async_ != nullptr) {
+    // 先 **ref** 再 send：手上有活了，这一轮必须真的转起来。只 send 不 ref
+    // 的话，循环上要是别的什么都不剩，`uv_run` 会因为存活为 0 **根本不进
+    // while 体**（它在进循环之前就算一次），挂起的唤醒请求没人取，回收就永远
+    // 不发生 —— 见 `set_loop()` 里那段实测记录。
+    drain_async_->ref();
+    drain_async_->send();
+  }
 }
 
 void uvcpp_ws_sessions::drain() {
@@ -78,6 +120,11 @@ void uvcpp_ws_sessions::drain() {
     delete batch[i];
     ++recycled_;
   }
+
+  // 活干完了就把 ref 还回去 —— 于是"这个句柄保活"与"退休表非空"是同一件事。
+  // 放在**删完之后**问，是因为上面那些 `delete` 会跑用户回调，回调里还可能
+  // 再关一个会话（那条路又 `ref()` + `send()` 了），此时就该让它继续活着。
+  if (retired_.empty() && drain_async_ != nullptr) drain_async_->unref();
 }
 
 void uvcpp_ws_sessions::close_all(ws_close_code code) {

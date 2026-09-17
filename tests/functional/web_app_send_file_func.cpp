@@ -49,6 +49,7 @@
 #include <webapp/uvcpp_web_request.h>
 #include <webapp/uvcpp_web_response.h>
 #include <webapp/uvcpp_web_static.h>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -213,6 +214,7 @@ class scenario {
   std::string name_;
   std::atomic<bool> timed_out_;
   uvcpp_loop loop_;
+  uvcpp_test::loop_drain drain_loop_{&loop_};
   std::unique_ptr<uvcpp_timer> watchdog_;
   std::unique_ptr<uvcpp_timer> poller_;
   std::thread::id loop_thread_;

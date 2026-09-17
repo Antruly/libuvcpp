@@ -371,12 +371,10 @@ endif()
 # 根据 UVCPP_BUILD_EXPAND 选项排除 expand 模块
 if(NOT UVCPP_BUILD_EXPAND)
   message(STATUS "Excluding expand module from build")
-  list(REMOVE_ITEM UVCPP_SOURCES "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_allocator.cpp")
-  list(REMOVE_ITEM UVCPP_SOURCES "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_memory_pool_span.cpp")
-  list(REMOVE_ITEM UVCPP_SOURCES "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_heap.cpp")
-  list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_allocator.h")
-  list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_memory_pool_span.h")
-  list(REMOVE_ITEM UVCPP_HEADERS "${CMAKE_SOURCE_DIR}/src/expand/uvcpp_page_heap.h")
+  # 整目录排除，别再逐文件列举：uvcpp_memory_pool.cpp 就是这么漏掉的，
+  # EXPAND=OFF 时它仍被编进库。下面的 net/web/webapp/ssl 都用 FILTER 整目录。
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/expand/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/expand/")
 else()
   message(STATUS "Including expand module in build (TCMalloc-like allocator)")
 endif()

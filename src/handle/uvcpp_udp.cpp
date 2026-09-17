@@ -25,8 +25,8 @@ uvcpp_udp::uvcpp_udp(uvcpp_loop *loop, unsigned int flags)
 #endif
 
 int uvcpp_udp::init() {
-  memset(UVCPP_UDP_HANDLE, 0, sizeof(uv_udp_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_UDP_HANDLE, sizeof(uv_udp_t));
   return 0;
 }
 
@@ -147,11 +147,17 @@ size_t uvcpp_udp::get_send_queue_count() {
 void uvcpp_udp::callback_udp_recv(uv_udp_t *handle, ssize_t nread,
                              const uv_buf_t *buf, const sockaddr *addr,
                              unsigned flags) {
-  uvcpp_udp *wrapper = reinterpret_cast<uvcpp_udp *>(handle->data);
-  if (!wrapper || !wrapper->udp_recv_cb)
+  uvcpp_udp *self = reinterpret_cast<uvcpp_udp *>(handle->data);
+  if (self == nullptr) {
     return;
-  wrapper->udp_recv_cb(wrapper, nread, buf,
-                       addr, flags);
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 收包回调会重复触发，所以是拷不是搬。
+  auto cb = self->udp_recv_cb;
+  if (cb) {
+    cb(self, nread, buf, addr, flags);
+  }
 
 }
 } // namespace uvcpp

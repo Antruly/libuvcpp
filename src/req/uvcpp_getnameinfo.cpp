@@ -23,8 +23,11 @@ int uvcpp_getnameinfo::getnameinfo(uvcpp_loop* loop, const struct sockaddr* addr
 void uvcpp_getnameinfo::callback_getnameinfo(uv_getnameinfo_t* req, int status,
                                    const char* hostname,
                                    const char* service) {
-  if (reinterpret_cast<uvcpp_getnameinfo*>(req->data)->m_getnameinfo_cb)
-    reinterpret_cast<uvcpp_getnameinfo*>(req->data)->m_getnameinfo_cb(
-        reinterpret_cast<uvcpp_getnameinfo*>(req->data), status, hostname, service);
+  uvcpp_getnameinfo* self = reinterpret_cast<uvcpp_getnameinfo*>(req->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 搬闭包再调用，理由见 uvcpp_req::invoke_completion（回调里可能 `delete self`）。
+  invoke_completion(self->m_getnameinfo_cb, self, status, hostname, service);
 }
 } // namespace uvcpp

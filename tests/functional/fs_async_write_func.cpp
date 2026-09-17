@@ -42,6 +42,7 @@
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_timer.h"
 #include "req/uvcpp_fs.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -134,6 +135,7 @@ class scenario {
   std::string name_;
   std::atomic<bool> timed_out_;
   uvcpp_loop loop_;
+  uvcpp_test::loop_drain drain_loop_{&loop_};
   std::unique_ptr<uvcpp_timer> watchdog_;
   std::thread::id loop_thread_;
 };
@@ -691,7 +693,10 @@ void test_two_objects() {
                       *fda = static_cast<uv_file>(o->get_result());
                       uv_buf_t b = uv_buf_init(&(*ba)[0],
                                                static_cast<unsigned int>(ba->size()));
-                      fa->write(loop, *fda, &b, 1, -1, [&](uvcpp_fs* w) {
+                      // fa/fda/ba 一定要按值捕进**内层**闭包：[&] 捕的是外层闭包
+                      // 的捕获体，而外层闭包是 callback_open 里的一个局部量，
+                      // cb(self) 一返回就析构了 —— 内层闭包却要活到写完成。
+                      fa->write(loop, *fda, &b, 1, -1, [&, fa, fda, ba](uvcpp_fs* w) {
                         rc_a.store(static_cast<int>(w->get_result() >= 0 ? 0 : 1));
                         fa->close(loop, *fda, [&](uvcpp_fs*) {
                           if (finished.fetch_add(1) + 1 == 2) {
@@ -714,7 +719,8 @@ void test_two_objects() {
                       *fdb = static_cast<uv_file>(o->get_result());
                       uv_buf_t b = uv_buf_init(&(*bb)[0],
                                                static_cast<unsigned int>(bb->size()));
-                      fb->write(loop, *fdb, &b, 1, -1, [&](uvcpp_fs* w) {
+                      // 同上：fb/fdb/bb 必须按值捕进内层闭包。
+                      fb->write(loop, *fdb, &b, 1, -1, [&, fb, fdb, bb](uvcpp_fs* w) {
                         rc_b.store(static_cast<int>(w->get_result() >= 0 ? 0 : 1));
                         fb->close(loop, *fdb, [&](uvcpp_fs*) {
                           if (finished.fetch_add(1) + 1 == 2) {

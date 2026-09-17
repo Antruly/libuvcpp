@@ -18,6 +18,7 @@
 #include "handle/uvcpp_signal.h"
 #include "handle/uvcpp_tty.h"
 #include "handle/uvcpp_process.h"
+#include "../functional/loop_drain.h"
 
 using namespace uvcpp;
 
@@ -33,6 +34,8 @@ int main() {
   try {
     std::cout << "constructing loop..." << std::endl;
     uvcpp_loop loop;
+
+    uvcpp_test::loop_drain drain_loop(&loop);
     std::cout << "loop.init..." << std::endl;
     loop.init();
     std::cout << "  OK: loop" << std::endl;

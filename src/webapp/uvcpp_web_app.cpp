@@ -1123,12 +1123,37 @@ uvcpp_web_app& uvcpp_web_app::enable_wss() {
   // 因为框架要按路径选处理器，而 ws_server 只能给出一条全局的 on_connection。
   ws_server_ = new uvcpp_ws_server(http_);
 
+#if UVCPP_ZLIB_ENABLE
+  // 把攒下来的压缩策略打过去。默认值就是 `uvcpp_ws_server` 自己的默认值
+  // （两边都是 `uvcpp_ws_deflate_config{}`），所以没调过 setter 时这一句是
+  // 空操作 —— 它的意义是让**调用顺序无关**：`set_ws_compression()` 在这之前
+  // 调也照样生效。
+  ws_server_->set_compression(ws_deflate_cfg_);
+#endif
+
   uvcpp_web_app* self = this;
   http_->on_upgrade([self](uvcpp_http_request& req, uvcpp_tcp_client* client) {
     self->on_ws_upgrade(req, client);
   });
   return *this;
 }
+
+#if UVCPP_ZLIB_ENABLE
+uvcpp_web_app& uvcpp_web_app::set_ws_compression(
+    const uvcpp_ws_deflate_config& cfg) {
+  ws_deflate_cfg_ = cfg;
+  // 服务已建好就直接打过去；还没建就等 `enable_wss()` 那一句。
+  if (ws_server_ != nullptr) ws_server_->set_compression(cfg);
+  return *this;
+}
+
+uvcpp_ws_deflate_config uvcpp_web_app::get_ws_compression() const {
+  // 建好了读**它**的当前值 —— 逃生口 `ws_server()->set_compression()` 改过
+  // 的话，读存下来那份就在这里说谎了。
+  if (ws_server_ != nullptr) return ws_server_->get_compression();
+  return ws_deflate_cfg_;
+}
+#endif
 
 uvcpp_web_app& uvcpp_web_app::websocket(
     const std::string& pattern, const uvcpp_web_ws_handler& handler) {
@@ -1848,8 +1873,15 @@ void uvcpp_web_app::abort_request(uvcpp_web_context& ctx) {
 }
 
 void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
+  // **先把 id 取到本地。** 下面 `inflight_.erase(it)` 很可能还掉 ctx 的最后
+  // 一份 shared_ptr，对象当场析构；那之后再去问 `ctx.connection_id()` 就是
+  // use-after-free —— PageHeap 下崩在 `context_finished+0xd8`（`mov rdx,
+  // [rbp+18h]`，rbp 就是 &ctx），普通堆下只是静默读到已释放内存。
+  // 本文件下面 `ctx.stream()` 那处早就是这么防的，这行漏了。
+  const uvcpp_web_conn_id id = ctx.connection_id();
+
   std::map<uvcpp_web_conn_id, std::shared_ptr<uvcpp_web_context> >::iterator it =
-      inflight_.find(ctx.connection_id());
+      inflight_.find(id);
   if (it == inflight_.end()) return;
 
   // 比指针再摘：同一个连接上换过上下文（HTTP 流水线）时，表里那条已经是
@@ -1870,8 +1902,8 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   inflight_.erase(it);
 
   // 这个请求到此为止：半截请求的预算归零，下一次收到字节就是新请求的开头。
-  // 放在摘号之后 —— 上面那两个早返回都不该动计时。
-  registry_.note_request_done(ctx.connection_id());
+  // 放在摘号之后 —— 上面那两个早返回都不该动计时。用本地 id，不要再用 ctx。
+  registry_.note_request_done(id);
 }
 
 // =========================================================================

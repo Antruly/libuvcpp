@@ -43,7 +43,14 @@ uvcpp_loop::~uvcpp_loop() {
   uvcpp_free_bytes(h);
   this->detach_handle();
 }
-int uvcpp_loop::run(uv_run_mode md) { return uv_run(UVCPP_LOOP_HANDLE, md); }
+int uvcpp_loop::run(uv_run_mode md) {
+  // 计数包住整段 `uv_run`：进出的路可能不止一条（见 `is_running()`），
+  // 中途任何一层里问都得答"在跑"。
+  ++run_depth_;
+  const int rc = uv_run(UVCPP_LOOP_HANDLE, md);
+  --run_depth_;
+  return rc;
+}
 
 void uvcpp_loop::walk(::std::function<void(uvcpp_handle *, void *)> walk_cb,
                       void *arg) {
@@ -53,10 +60,17 @@ void uvcpp_loop::walk(::std::function<void(uvcpp_handle *, void *)> walk_cb,
 }
 
 void uvcpp_loop::callback_walk(uv_handle_t *handle, void *arg) {
-  if (reinterpret_cast<uvcpp_loop *>(arg)->handle_walk_cb)
-    reinterpret_cast<uvcpp_loop *>(arg)->handle_walk_cb(
-        reinterpret_cast<uvcpp_handle *>(handle->data),
-        reinterpret_cast<uvcpp_loop *>(arg)->walk_arg_);
+  uvcpp_loop *self = reinterpret_cast<uvcpp_loop *>(arg);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 每次 uv_walk 会为每个句柄各触发一次，所以是拷不是搬。
+  auto cb = self->handle_walk_cb;
+  if (cb) {
+    cb(reinterpret_cast<uvcpp_handle *>(handle->data), self->walk_arg_);
+  }
 }
 
 uvcpp_loop *uvcpp_loop::default_loop() {

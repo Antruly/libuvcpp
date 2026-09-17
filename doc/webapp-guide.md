@@ -1004,7 +1004,7 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 | **HEAD 在客户端侧不可用** | `uvcpp_http_client` 不认 HEAD（它按 `content-length` 等 body，而 HEAD 的 body 被丢掉），走这条路径只会等超时。服务端侧的 HEAD 语义是好的。 |
 | **WS 连接没有超时保护** | 升级成功后不受 `idle_timeout_ms` 约束（§10）。 |
 | **重连能力属于框架层** | 协议层 `uvcpp_ws_client` 一个对象只能连一次（§11）。 |
-| **`run()` 在"没有活句柄"时才自然返回** | 客户端连着、或对端已走但循环里还有句柄（例如关掉重连之后）时，`run()` **不会自己返回**，得由使用者 `stop()`。所以用 `run()` 的形态请自己安排收场（`on_close` 里决定 `stop()`）。`uvcpp_web_ws_client::run()` 的另一条出口是 `stopping_`。 |
+| **`run()` 只在"没有活句柄"时才自然返回** | 连着、有在途收发、或有重连定时器在等的时候，`run()` **不会自己返回**，得由使用者 `stop()` —— 所以要让 `run()` 收场，要么 `on_close`/`on_text` 里调 `stop()`，要么让它在无事可等时自己结束。**"无事可等"是确切的两条**：不开重连时对端走掉、开重连时次数用尽且连不上。这正是 §11 示例那句"没有活句柄时自然返回"的意思。（`uvcpp_web_ws_client::run()` 的另一条出口是 `stopping_`。改前这一条不成立 —— 内部那个延迟回收用的 async 句柄一直把循环算成活的，实测见 `web_app_ws_client_func.cpp` 的 `run_default_returns_when_idle`。） |
 | **上传没有进度回调** | 用 `stream()->on_progress` 或 `upload()->received_bytes()`（§8）。 |
 | **`broadcast()` 不存在** | 自己维护房间表（§10）。 |
 | **路由注册失败看不见** | `app.get()` 返回 `uvcpp_web_app&`；要检查就走 `app.router()`（§3）。 |

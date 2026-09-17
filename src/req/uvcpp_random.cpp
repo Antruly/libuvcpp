@@ -23,9 +23,14 @@ int uvcpp_random::random(uvcpp_loop* loop, void* buf, size_t buflen, unsigned fl
 }
 
 void uvcpp_random::callback_random(uv_random_t* req, int status, void* buf, size_t buflen) {
-  if (reinterpret_cast<uvcpp_random*>(req->data)->m_random_cb)
-    reinterpret_cast<uvcpp_random*>(req->data)->m_random_cb(
-        reinterpret_cast<uvcpp_random*>(req->data), status, buf, buflen);
+  uvcpp_random* self = reinterpret_cast<uvcpp_random*>(req->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 搬闭包再调用：回调里常见最后一句 `delete self`，而那个闭包就存在
+  // `m_random_cb` 里 —— 不搬走的话，删掉的是**此刻正在执行**的这个
+  // std::function（连同它的捕获），是未定义行为。见 uvcpp_req::invoke_completion。
+  invoke_completion(self->m_random_cb, self, status, buf, buflen);
 }
 
 #endif

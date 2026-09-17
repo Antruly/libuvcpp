@@ -38,7 +38,7 @@ jobs:
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-static --config Release --parallel 4
           ctest --test-dir build-static --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"
 
       - name: Configure & Build & Test (shared)
         shell: bash
@@ -48,7 +48,7 @@ jobs:
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-shared --config Release --parallel 4
           ctest --test-dir build-shared --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"
 
   # ---------------------------------------------------------------------------
   # Windows basic: shared build only (static is covered by windows-static job)
@@ -80,7 +80,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build-shared --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func|test_memory_pool" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"
 
   # ---------------------------------------------------------------------------
   # Web: HTTP + WebSocket + webapp framework + zlib (all platforms)
@@ -166,11 +166,11 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          EXCLUDE="test_shutdown_func|test_tcp_func"
-          # test_memory_pool hangs on Windows (pre-existing multithread issue)
-          [[ "$RUNNER_OS" == "Windows" ]] && EXCLUDE="$EXCLUDE|test_memory_pool"
+          # Only test_shutdown_func is excluded: it is flaky (~1%), not hanging.
+          # test_tcp_func and test_memory_pool were excluded for defects that are
+          # long fixed (see doc/ci-guide.md §4) — they run, and must stay green.
           ctest --test-dir build-web --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "$EXCLUDE" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"
 
   # ---------------------------------------------------------------------------
   # SSL: Web + webapp + OpenSSL + zlib (all platforms)
@@ -270,10 +270,10 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          EXCLUDE="test_shutdown_func|test_tcp_func"
-          [[ "$RUNNER_OS" == "Windows" ]] && EXCLUDE="$EXCLUDE|test_memory_pool"
+          # Only test_shutdown_func is excluded (flaky ~1%, not hanging) — see the
+          # web job above and doc/ci-guide.md §4.
           ctest --test-dir build-ssl --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "$EXCLUDE" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"
 
   # ---------------------------------------------------------------------------
   # Full: Web + OpenSSL + zlib (Ubuntu + macOS)
@@ -306,7 +306,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
           cmake --build build-full --config Release --parallel 4
           ctest --test-dir build-full --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"
 
   # ---------------------------------------------------------------------------
   # Windows static: MSVC static build (web=OFF, no shared lib)
@@ -337,4 +337,4 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build-msvc --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func|test_tcp_func|test_memory_pool" || true
+            --timeout 30 --exclude-regex "test_shutdown_func"

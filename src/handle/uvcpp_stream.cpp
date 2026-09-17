@@ -10,8 +10,8 @@ uvcpp_stream::uvcpp_stream() {
 uvcpp_stream::~uvcpp_stream() { }
 
 int uvcpp_stream::init() {
-  memset(this->get_handle(), 0, sizeof(uv_stream_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(this->get_handle(), sizeof(uv_stream_t));
   return 0;
 }
 
@@ -102,22 +102,34 @@ int uvcpp_stream::stream_set_blocking(int blocking) {
 
 // uv_connection_cb
 void uvcpp_stream::callback_connection(uv_stream_t *handle, int status) {
-  if (reinterpret_cast<uvcpp_stream *>(handle->data)->stream_connection_cb)
-    reinterpret_cast<uvcpp_stream *>(handle->data)
-        ->stream_connection_cb(reinterpret_cast<uvcpp_stream *>(handle->data),
-                               status);
+  uvcpp_stream *self = reinterpret_cast<uvcpp_stream *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->stream_connection_cb;
+  if (cb) {
+    cb(self, status);
+  }
 }
 
 // uv_read_cb
 void uvcpp_stream::callback_read(uv_stream_t *handle, ssize_t nread,
                             const uv_buf_t *buf) {
-  uvcpp_stream *wrapper = reinterpret_cast<uvcpp_stream *>(handle->data);
-  if (!wrapper || !wrapper->stream_read_cb)
+  uvcpp_stream *self = reinterpret_cast<uvcpp_stream *>(handle->data);
+  if (self == nullptr) {
     return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 读回调会重复触发，所以是拷不是搬。
   // Pass the libuv buffer directly as uv_buf_t (no copy).
-  uv_buf_t view;
-  wrapper->stream_read_cb(wrapper, nread, (const uv_buf_t*)buf);
-  
+  auto cb = self->stream_read_cb;
+  if (cb) {
+    cb(self, nread, (const uv_buf_t*)buf);
+  }
 }
 
 

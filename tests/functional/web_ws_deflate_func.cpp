@@ -189,8 +189,21 @@ struct scenario {
   /** @brief 最近一个失败点（用例失败时打出来，省得靠猜）。 */
   const char* why = "";
 
+  /**
+   * @brief 服务端必须在 `client` 成员析构**之前**拆掉。
+   *
+   * `uvcpp_ws_server` 的析构会 `sessions_.shutdown()`，而会话的接收回调捕获了
+   * 本场景的 `this`（`on_text` 里写 `server_texts`）。放在析构体里就是"场景
+   * 还没开始拆成员、this 一定有效"的时刻 —— 与 `~uvcpp_ws_server` /
+   * `~uvcpp_web_app` 里那条「会话先于循环」是同一个约束。
+   */
+  ~scenario() {
+    delete server;
+    server = nullptr;
+  }
+
   bool start(const uvcpp_ws_deflate_config& scfg) {
-    server = new uvcpp_ws_server();      // 故意泄漏，见文件末尾说明
+    server = new uvcpp_ws_server();
     if (server->bind("127.0.0.1", 0) != 0) { why = "bind"; return false; }
     server->set_compression(scfg);
 
@@ -431,7 +444,7 @@ static bool echo_plain(scenario& s, const std::string& msg, std::string& out) {
  * `large_echo_across_reads` 的活。
  */
 static bool test_split_frame_across_reads() {
-  scenario& s = *new scenario();
+  scenario s;
   if (!started(s, uvcpp_ws_deflate_config())) return false;
   if (!upgraded(s, "permessage-deflate; client_max_window_bits")) return false;
   if (!s.setup_compression(uvcpp_ws_deflate_config())) return false;
@@ -473,7 +486,7 @@ static bool test_split_frame_across_reads() {
  * rsv=0；回显才压缩，那是另一条已经覆盖过的路径）。
  */
 static bool masked_split_phase(size_t payload_offset_in_segment) {
-  scenario& s = *new scenario();
+  scenario s;
   if (!started(s, uvcpp_ws_deflate_config())) return false;
   if (!upgraded(s, "permessage-deflate; client_max_window_bits")) return false;
 
@@ -516,7 +529,7 @@ struct masked_split_phase_thunk {
  * 一次 read 就收全了。
  */
 static bool test_large_echo_across_reads() {
-  scenario& s = *new scenario();
+  scenario s;
   if (!started(s, uvcpp_ws_deflate_config())) return false;
   if (!upgraded(s, "permessage-deflate; client_max_window_bits")) return false;
   if (!s.setup_compression(uvcpp_ws_deflate_config())) return false;
@@ -547,7 +560,7 @@ static bool test_large_echo_across_reads() {
 
 // 1. 默认配置：协商成 permessage-deflate，且两个方向都真的压了
 static bool test_negotiate_default() {
-  scenario& s = *new scenario();
+  scenario s;
   if (!started(s, uvcpp_ws_deflate_config())) return false;
   if (!upgraded(s, "permessage-deflate; client_max_window_bits")) return false;
 
@@ -586,7 +599,7 @@ static bool test_negotiate_default() {
 
 // 2. 服务端配置的参数要原样出现在 101 里
 static bool test_negotiate_with_params() {
-  scenario& s = *new scenario();
+  scenario s;
   uvcpp_ws_deflate_config scfg;
   scfg.client_max_window_bits = 12;
   scfg.server_max_window_bits = 10;
@@ -610,7 +623,7 @@ static bool test_negotiate_with_params() {
 
 // 3. 协商结果真的到达了压缩器 —— 用 context takeover 的**可观测后果**判定
 static bool context_takeover_probe(bool no_ctxt) {
-  scenario& s = *new scenario();
+  scenario s;
   uvcpp_ws_deflate_config scfg;
   scfg.server_no_context_takeover = no_ctxt;
   if (!started(s, scfg)) return false;
@@ -654,7 +667,7 @@ static bool test_server_context_takeover_reaches_compressor() {
 
 // 4. 服务端关掉压缩：101 里不能有这个头，帧必须是明文的
 static bool test_disabled_no_negotiation() {
-  scenario& s = *new scenario();
+  scenario s;
   uvcpp_ws_deflate_config scfg;
   scfg.enabled = false;
   if (!started(s, scfg)) return false;
@@ -688,7 +701,7 @@ static bool test_declined_offer_still_works() {
     "permessage-deflate; server_max_window_bits",      // 该带值却没带
   };
   for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
-    scenario& s = *new scenario();
+    scenario s;
     if (!started(s, uvcpp_ws_deflate_config())) return false;
     if (!upgraded(s, bad[i])) return false;
     // 谈崩时**连头都不能有**。只查 `ext_header().empty()` 是抓不住"回了一个
@@ -714,26 +727,30 @@ static bool test_declined_offer_still_works() {
 
 // 6. 真客户端（uvcpp_ws_client）：走完协商，大消息往返
 static bool test_real_client_roundtrip() {
-  auto* server = new uvcpp_ws_server();          // 故意泄漏（双 loop 析构问题）
-  if (server->bind("127.0.0.1", 0) != 0) return false;
+  // 两侧都改成栈上：各自持一个循环，析构里各做一次有界收尾泵。
+  // 声明顺序 = server 在前、client 在后 —— 逆序析构即「客户端先走」，
+  // 与 `~scenario` 那条约束同向（服务端的会话回调捕获了本函数的局部量，
+  // 它必须在那些局部量都还有效的时候拆完）。
+  uvcpp_ws_server server;
+  if (server.bind("127.0.0.1", 0) != 0) return false;
   struct sockaddr_in name;
   int nl = static_cast<int>(sizeof(name));
-  server->get_http_server()->get_tcp_server()->get_tcp()->getsockname(
+  server.get_http_server()->get_tcp_server()->get_tcp()->getsockname(
       reinterpret_cast<sockaddr*>(&name), &nl);
   const int port = ntohs(name.sin_port);
 
   bool server_compression = false;
-  server->on_connection([&](uvcpp_ws_connection* c) {
+  server.on_connection([&](uvcpp_ws_connection* c) {
     server_compression = c->is_compression_enabled();
     c->on_text([c](const std::string& m) { c->send_text(m.c_str(), m.size()); });
   });
-  if (server->listen() != 0) return false;
+  if (server.listen() != 0) return false;
 
-  auto* client = new uvcpp_ws_client();
+  uvcpp_ws_client client;
   const std::string big = repetitive(20000);
   bool got = false, client_compression = false;
-  int rc = client->connect("ws://127.0.0.1:" + std::to_string(port) + "/chat",
-                           [&](uvcpp_ws_connection* c, int err) {
+  int rc = client.connect("ws://127.0.0.1:" + std::to_string(port) + "/chat",
+                          [&](uvcpp_ws_connection* c, int err) {
     if (err != 0 || c == nullptr) return;
     client_compression = c->is_compression_enabled();
     c->on_text([&](const std::string& m) {
@@ -745,8 +762,8 @@ static bool test_real_client_roundtrip() {
 
   auto t0 = std::chrono::steady_clock::now();
   while (!got) {
-    server->run(UV_RUN_NOWAIT);
-    client->run(UV_RUN_NOWAIT);
+    server.run(UV_RUN_NOWAIT);
+    client.run(UV_RUN_NOWAIT);
     if (std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count() >= 10000) {
       break;
@@ -813,19 +830,21 @@ struct fake_server {
 
 /** @brief 真客户端连一个只会背台词的假服务端，返回握手结果错误码。 */
 static bool client_handshake_against(const std::string& ext_header, int& out_err) {
-  fake_server& fs = *new fake_server();          // 故意泄漏
+  // 栈上，且 `cl` 声明在 `fs` **之后** —— 逆序析构即「客户端先走、假服务端
+  // 后走」。两侧各持一个循环，各自析构里做有界收尾泵。
+  fake_server    fs;
+  uvcpp_ws_client cl;
   if (!fs.start(ext_header)) return false;
-  uvcpp_ws_client* cl = new uvcpp_ws_client();   // 故意泄漏
 
   bool done = false;
   out_err = 0;
-  if (cl->connect("ws://127.0.0.1:" + std::to_string(fs.port) + "/x",
-                  [&](uvcpp_ws_connection*, int e) { out_err = e; done = true; }) != 0) {
+  if (cl.connect("ws://127.0.0.1:" + std::to_string(fs.port) + "/x",
+                 [&](uvcpp_ws_connection*, int e) { out_err = e; done = true; }) != 0) {
     return false;
   }
   auto t0 = std::chrono::steady_clock::now();
   while (!done) {
-    cl->run(UV_RUN_NOWAIT);
+    cl.run(UV_RUN_NOWAIT);
     fs.server.get_loop()->run(UV_RUN_NOWAIT);
     if (std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count() >= 5000) {
@@ -879,7 +898,7 @@ static bool test_client_fails_on_invalid_response() {
 // 一旦压了就必须发出去（对端得吃到这条流来保持上下文同步）。所以"压完看看
 // 哪个小再决定发哪个"是**做不到**的 —— 只能发之前按大小预判。
 static bool test_compress_min_size_threshold() {
-  scenario& s = *new scenario();
+  scenario s;
   if (!started(s, uvcpp_ws_deflate_config())) return false;
   if (!upgraded(s, "permessage-deflate; client_max_window_bits")) return false;
   if (!s.conn || !s.conn->is_compression_enabled()) return false;
@@ -932,14 +951,17 @@ static bool test_compress_min_size_threshold() {
 // 是 Phase 4 才定的事）。本用例要钉死的是"失败必须被报告"，不该顺带依赖
 // 一个还没定的所有权约定。
 static bool test_send_failure_is_reported() {
-  auto* dead = new uvcpp_tcp_client();          // 故意泄漏（从不 run，无副作用）
-  auto* conn = new uvcpp_ws_connection(dead);   // 故意泄漏
+  // 栈上、且**声明顺序就是回收顺序**：`conn` 借 `dead` 的循环，所以 `conn`
+  // 必须先析构（逆序），`dead` 后析构。反过来的话 `~uvcpp_ws_connection` 会
+  // 去碰一个已经释放的循环 —— 与第十三批修掉的形状同源。
+  uvcpp_tcp_client    dead;
+  uvcpp_ws_connection conn(&dead);
 
   // 首帧：入队后立刻在 pump 里失败。错误走**回调**（`send_frame` 的返回值
   // 是"有没有排上队"，不是"有没有发出去"），所以这里断言回调。
   int  first_cb = 0;
   bool first_called = false;
-  const int rc1 = conn->send_text("a", 1, [&](int s) { first_cb = s; first_called = true; });
+  const int rc1 = conn.send_text("a", 1, [&](int s) { first_cb = s; first_called = true; });
   if (rc1 != 0) { std::cout << "    first send returned " << rc1 << "\n"; return false; }
   if (!first_called) { std::cout << "    first send never reported\n"; return false; }
   if (first_cb == 0) { std::cout << "    first send reported success\n"; return false; }
@@ -948,7 +970,7 @@ static bool test_send_failure_is_reported() {
   // 完成回调（那样调用方既拿不到错误，也永远等不到回调）。
   int  second_cb = 0;
   bool second_called = false;
-  const int rc2 = conn->send_text("b", 1, [&](int s) { second_cb = s; second_called = true; });
+  const int rc2 = conn.send_text("b", 1, [&](int s) { second_cb = s; second_called = true; });
   if (rc2 == 0) { std::cout << "    send_error_ is not sticky\n"; return false; }
   if (!second_called || second_cb != rc2) {
     std::cout << "    sticky error not reported to callback\n";
@@ -959,7 +981,7 @@ static bool test_send_failure_is_reported() {
   for (int i = 0; i < 3; ++i) {
     bool called = false;
     int  st = 0;
-    if (conn->send_text("c", 1, [&](int s) { st = s; called = true; }) == 0) return false;
+    if (conn.send_text("c", 1, [&](int s) { st = s; called = true; }) == 0) return false;
     if (!called || st == 0) return false;
   }
   return true;

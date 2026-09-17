@@ -52,28 +52,59 @@ uvcpp_http_client::~uvcpp_http_client() {
     if (raw_tcp != nullptr && !raw_tcp->is_closing()) {
       bool close_done = false;
       raw_tcp->close([&close_done](uvcpp_handle*) { close_done = true; });
-      for (int i = 0; i < 5000 && !close_done; i++) {
+      // **有界、不睡眠、不看墙钟**（与 `~uvcpp_tcp_client` 同一形状）。原先是
+      // 5000 轮 + 每次 1 毫秒睡眠，后面还跟着一段固定的 20 × 1 毫秒 ——
+      // 也就是说每一次"连着、没关就析构"都至少睡 20 毫秒，而且它正是第 10 条
+      // 从 `~uvcpp_tcp_client` 里拿掉的那个形状（析构里的 `sleep_for` 就是
+      // "在循环线程上跑耗时操作"）。
+      //
+      // 判据只能用 `close_done`，**不能**改用 `loop_alive()`：句柄 `uv_close`
+      // 之后还在 `endgame_handles` 上，而它正是 `uv__loop_alive()` 的一项，
+      // 拿它当条件等于把"关闭完成回调放了没有"和"循环还活着"混为一谈。
+      for (int i = 0; i < 256 && !close_done; ++i) {
         loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      for (int i = 0; i < 20; i++) {
-        loop_->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     } else if (raw_tcp != nullptr && raw_tcp->is_closing()) {
       loop_->run(UV_RUN_NOWAIT);
     }
   }
 
-  // Close loop before deleting wrappers
+  // 关之前再按循环自己的判据泵一遍：上面那几步只保证本客户端的 tcp 句柄收尾
+  // 了，循环上可能还挂着别人（实测同类形状：一个只关了一半的 `async`）。
+  // 判据是 `loop_alive()` 而不是 `loop_close()` —— 后者内部会 `stop()`，
+  // 而 `uv_run` 的 `while (r != 0 && loop->stop_flag == 0)` 是**进 body 之前**
+  // 判的，停标志一立那一轮就整段空转，交替调用等于原地打转。
+  if (loop_ != nullptr) {
+    for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
+      loop_->run(UV_RUN_NOWAIT);
+    }
+  }
+
+  // **`tcp_` 必须趁循环还活着删掉，顺序不能倒过来。**
+  //
+  // `tcp_` 是本对象自己 `new uvcpp_tcp_client(loop_)` 出来的 —— 借的是本对象的
+  // 循环（`owns_loop_ = false`），而 `~uvcpp_tcp_client` 的**第一件事**就是
+  // `loop_->is_running()`（`src/net/uvcpp_tcp_client.cpp:126`，读的是
+  // `uvcpp_loop::run_depth_`）。先 `delete loop_` 再 `delete tcp_`，那一次读
+  // 就是**释放后使用**：裸跑因为那块页还在、读到个"否"而活着，完整页堆把释放过
+  // 的页 unmap 掉就当场 `0xC0000005`。实测 2026-09-17（`tests/tools/run_pageheap_gate.py`）：
+  // `build-webapp` 74 个用例里 **11 个 `web_*`** 全崩在这一句，cdb 的栈是
+  // `~uvcpp_http_client+0x11a → ~uvcpp_tcp_client+0x35`（`cmp dword ptr [rax+0F8h],0`，
+  // `rax` 是那个已经删掉的循环、`rcx` 才是 `this`）。
+  //
+  // 换过来之后为什么安全：删 `tcp_` 时循环**一定还分配着**（`delete loop_` 排在
+  // 后面）；而这一步之后到 `loop_close()` 之间**不再泵任何一轮**，所以万一上面
+  // 那次收尾没跑完、`tcp_` 的析构往循环上排了一笔 `uv_close`，那笔也只会让
+  // `loop_close()` 返回 `UV_EBUSY`、由 `~uvcpp_loop` 按既有策略"泄漏而不释放"，
+  // **不会**把已删对象的关闭回调跑起来。
+  delete tcp_;
+  tcp_ = nullptr;
+
   if (loop_ != nullptr) {
     loop_->loop_close();
     delete loop_;
     loop_ = nullptr;
   }
-
-  delete tcp_;
-  tcp_ = nullptr;
   delete parser_;
   parser_ = nullptr;
 #if UVCPP_OPENSSL_ENABLE
@@ -198,6 +229,24 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
     last_error_code_ = UV_ENOTCONN;
     return UV_ENOTCONN;
   }
+
+#if UVCPP_OPENSSL_ENABLE
+  // `send_wait` 里那个守卫的**反面**，两边都要有。
+  //
+  // `connect_wait()` + `set_ssl_context()` 建的是本层自己的 fd-based **阻塞**
+  // 会话（`do_ssl_handshake`）：密钥在 `ssl_` 里，socket 被设成阻塞模式。而这条
+  // 异步路径只调 `tcp_->write()` —— 它**不经过** `ssl_`，于是明文请求进了加密
+  // socket，调用方看到的是"写成功、响应永远不来"（正是 `ff107fe` 修掉的那个
+  // 缺陷，只是换了入口）。附带一层：那条 socket 是阻塞的，从这里写会在循环
+  // 线程上挂住。
+  //
+  // 只置 `last_error_code_`、不把 status 打成 ERROR —— 与上面 `UV_ENOTCONN`
+  // 那条一致：客户端没坏，只是这个入口对它不适用（`send_wait()` 照旧能用）。
+  if (ssl_enabled_ && ssl_ != nullptr) {
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
 
   // Reset state for new request
   last_error_code_ = 0;

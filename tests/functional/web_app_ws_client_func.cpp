@@ -691,16 +691,20 @@ void test_run_default_drives_reconnect() {
                          std::to_string(got.load()) + "）");
 
   if (!reconnected) {
-    // run() 的唯一出口是使用者主动 stop()（`on_text` 里那句）。重连没发生的
-    // 时候它就一直不出来：底层循环还活着，而 `UV_RUN_ONCE` 在没有定时器时是
-    // **无超时 poll** —— 实测（2026-09-17）跨线程 `stop()` 也唤不醒它，
-    // `uv_stop` 只置标志、不踢 poll。于是 join() 会挂死。
+    // 走到这里说明重连**没发生**：要么对端没走、要么重连没排上。此时次数还
+    // 没到上限（`max_attempts = 0`），所以定时器还在、循环还活着 —— 而
+    // `UV_RUN_ONCE` 在没有定时器到期时是**无超时 poll**，`on_text` 里那句
+    // `stop()` 又永远不会来，于是 join() 会挂死。（实测 2026-09-17：跨线程
+    // `stop()` 也唤不醒它，`uv_stop` 只置标志、不踢 poll。）
     //
     // 这里**故意**既不 join 也不析构：detach 让 driver 线程随进程消失，
     // 漏掉 cli 免得在它还在跑循环的时候析构。用例已经报过 FAIL，进程随后
     // 带着失败码退出 —— 把"挂死"换成"失败"，这是本用例能给出的最诚实的
-    // 收场。（同一条性质在正式代码里也存在：关掉重连、对端走掉之后，
-    // `run()` 同样不会自己返回。）
+    // 收场。
+    //
+    // 注意这条路径与"`run()` 无事可等时自己返回"**不冲突**：这里正处在
+    // "重连定时器还在等"的状态，那是**有事可等**；`run_default_returns_when_idle`
+    // 那条用例量的是相反的两条路。
     driver.detach();
     cli.release();
     return;
@@ -714,6 +718,241 @@ void test_run_default_drives_reconnect() {
   cli->close();
   pump_for(*cli, 200);  // 把关闭握手走完再停服务端（理由同函数注释）
   srv2.stop();
+}
+
+// =========================================================================
+// 12. 压缩策略要真的落到**当前**底层客户端上
+// =========================================================================
+//
+// 默认是开的，所以只有"关掉"这个方向能证伪：`set_compression()` 没打到底层
+// 的话，本端照旧在 101 里提这个扩展、服务端照旧答应，
+// `is_compression_enabled()` 就会是 true —— 与断言相反。
+//
+// **对照组是必须的**：不加的话，"读到 false"可能只是"服务端压根不支持压缩"，
+// 那样这个用例什么都没测到。对照组用同一个 `echo_server`（它默认开着压缩）。
+void test_compression_setting_reaches_inner() {
+  echo_server srv;
+  const int port = srv.start();
+  if (port <= 0) {
+    check(false, "服务端起得来");
+    return;
+  }
+
+  // 对照组：**不调** setter → 默认开启 → 协商得上。
+  {
+    uvcpp_web_ws_client cli;
+    bool connected = false;
+    const int rc = cli.connect(url_of(port), [&](int err) {
+      connected = (err == 0);
+    });
+    check(rc == 0, "对照组：connect() 返回 0");
+    check(pump_cli(cli, [&] { return connected; }), "对照组：连接回调报成功");
+
+    uvcpp_ws_connection* s = cli.session();
+    check(s != nullptr, "对照组：连上之后有会话");
+    if (s != nullptr) {
+      check(s->is_compression_enabled(),
+            "对照组：默认应当协商上 permessage-deflate"
+            "（不然下面那条 false 是空断言）");
+    }
+
+    cli.close();
+    pump_for(cli, 100);
+  }
+
+  // 实验组：关掉 → 本端连提都不提 → 协商不上，但收发照旧。
+  {
+    uvcpp_web_ws_client cli;
+    uvcpp_ws_deflate_config off;
+    off.enabled = false;
+    cli.set_compression(off);
+    check(!cli.get_compression().enabled, "setter 之后 getter 读到关");
+
+    // 只数 `on_open`：`connect()` 的回调在**第一次**连接上也会跑，两边都数的话
+    // 第一个连接就让 opens 变成 2，下面那条重连断言就成了空断言。
+    int opens = 0;
+    int closes = 0;
+    cli.on_open([&](uvcpp_ws_connection*) { ++opens; });
+    cli.on_close([&](ws_close_code, const std::string&) { ++closes; });
+
+    uvcpp_web_ws_reconnect rc;
+    rc.enabled = true;
+    rc.delay_ms = 50;
+    rc.max_delay_ms = 200;
+    rc.backoff = true;
+    rc.max_attempts = 0;  // 不限
+    cli.set_reconnect(rc);
+
+    const int crc = cli.connect(url_of(port));
+    check(crc == 0, "实验组：connect() 返回 0");
+    check(pump_cli(cli, [&] { return opens >= 1; }), "实验组：连上（第 1 次）");
+    check(opens == 1, "第一次连接只报一次 on_open");
+
+    uvcpp_ws_connection* s = cli.session();
+    check(s != nullptr, "实验组：连上之后有会话");
+    if (s != nullptr) {
+      check(!s->is_compression_enabled(),
+            "关掉之后不该协商上（协商上了 = 配置没打到底层客户端）");
+
+      int got = 0;
+      std::string last;
+      cli.on_text([&](const std::string& m) {
+        ++got;
+        last = m;
+      });
+      check(cli.send_text("plain", 5) == 0, "关压缩之后 send_text 仍然返回 0");
+      check(pump_cli(cli, [&] { return got >= 1; }), "回显收得到");
+      check(last == "plain", "回显内容一致（实际 '" + last + "'）");
+    }
+
+    // ---- 重连那条路：策略必须在整个重建周期之后仍然在 ----
+    //
+    // `install()` 其实**每次 `connect()` 都跑**（`do_restart()` 无条件
+    // `delete inner_` + `new`，见实现），所以上面那两条已经能证伪"没装策略"
+    // 了 —— 变异验证时确实也是第一次连接先红。
+    //
+    // 这一段单独量的是另一样：**本层存的那份是配置的出处**，而不是"恰好上一
+    // 个底层实例上还留着"。重连把 `inner_` 连同它的循环整个换掉，配置还在，
+    // 才说明它存在本层、每次重建都重装 —— 也就是头文件对使用者承诺的那句
+    // "重连之后照旧生效"。
+    srv.stop();
+    check(pump_cli(cli, [&] { return closes >= 1; }), "对端走了，on_close 报了出来");
+    echo_server srv2;
+    check(srv2.start(port) == port, "同一个端口能重新监听");
+
+    check(pump_cli(cli, [&] { return opens >= 2; }, 6000),
+          "自动重连回来（第 2 次连接）");
+    check(cli.is_open(), "重连之后 is_open() 为真");
+    check(!cli.get_compression().enabled, "重连之后配置仍在");
+    uvcpp_ws_connection* s2 = cli.session();
+    check(s2 != nullptr, "重连之后有会话");
+    if (s2 != nullptr) {
+      check(!s2->is_compression_enabled(),
+            "重连之后的新会话也不该协商上（协商上了 = install() 没装策略）");
+    }
+
+    cli.close();
+    pump_for(cli, 100);
+    srv2.stop();
+  }
+}
+
+// =========================================================================
+// 13. `run(UV_RUN_DEFAULT)` 在"没事可做"时要自己返回
+// =========================================================================
+
+/**
+ * 类注释与 `doc/webapp-guide.md` §11 的示例都写着 `cli.run()` "循环在没有活
+ * 句柄时自然返回"。**改之前它不是真的**：`uvcpp_ws_sessions` 那个延迟回收用的
+ * async 句柄一直是 referenced 的，而 `uv_run` 的存活判据就是
+ * `active_handles > 0` —— 于是循环上只剩它一个时 `uv_run` 也永远不返回，
+ * 本层那个"只在 rc == 0 时才 break"的泵循环跟着出不来。
+ *
+ * 探针（2026-09-17，改前）：不开重连、对端走掉之后 `uv_walk` 普查循环上
+ * **只有** `async 活跃` 一个句柄，`UV_RUN_NOWAIT` 连拨 200 轮 rc 全非 0，
+ * `uv_loop_alive() == 1`；另起一个线程跑 `run(UV_RUN_DEFAULT)`，2 秒内不返回。
+ * 修法是给那个句柄 `unref()`（见 `uvcpp_ws_sessions::set_loop`）。
+ *
+ * 两条腿量的是**两个方向**，缺一条都不算钉住：
+ *
+ *   1. 不开重连、对端走掉 → 没有任何事在等了 → `run()` 必须**自己**返回；
+ *   2. 开了重连、次数用尽且连不上 → 也不再有定时器在等 → 同样必须自己返回。
+ *
+ * 两条都**不调 `stop()`**：这正是判据所在 —— 靠 `stop()` 收场的话，改前改后
+ * 都是绿的，等于没测。
+ */
+void test_run_default_returns_when_idle() {
+  // ---- 腿 1：不开重连，对端走掉 ----
+  {
+    echo_server srv;
+    const int port = srv.start();
+    if (port <= 0) {
+      check(false, "腿 1 服务端起得来");
+      return;
+    }
+
+    std::unique_ptr<uvcpp_web_ws_client> cli(new uvcpp_web_ws_client());
+    std::atomic<int> opens{0};
+    std::atomic<int> got{0};
+    std::atomic<int> closes{0};
+    cli->on_open([&](uvcpp_ws_connection*) {
+          opens.fetch_add(1);
+          cli->send_text("hi", 2);
+        })
+        .on_text([&](const std::string&) { got.fetch_add(1); })
+        .on_close([&](ws_close_code, const std::string&) {
+          closes.fetch_add(1);
+        });
+    // 重连不开（默认就是关的）——就是不装 set_reconnect。
+
+    cli->connect(url_of(port));
+    std::atomic<bool> returned{false};
+    std::thread driver([&] {
+      cli->run();
+      returned.store(true);
+    });
+
+    check(wait_for([&] { return got.load() >= 1; }, 5000),
+          "腿 1 run(UV_RUN_DEFAULT) 驱动了连接与回显");
+
+    srv.stop();  // 对端走掉；此后没有任何事可等
+    const bool back = wait_for([&] { return returned.load(); }, 4000);
+    check(back, "腿 1 对端走掉后 run() **自己**返回了（没调 stop()）");
+    check(closes.load() >= 1, "腿 1 返回前报过 on_close");
+
+    if (!back) {
+      // 不返回 = 驱动线程停在 uv_run 里，join 会挂死。用例已经报过 FAIL，
+      // 这里故意漏掉（同 test_run_default_drives_reconnect 的收场）。
+      driver.detach();
+      cli.release();
+    } else {
+      driver.join();
+      check(!cli->is_open(), "腿 1 run() 返回之后没有会话");
+    }
+  }
+
+  // ---- 腿 2：开重连但次数用尽 ----
+  {
+    const int dead_port = port_that_is_now_free();
+    if (dead_port <= 0) {
+      check(false, "腿 2 拿到一个空出来的端口");
+      return;
+    }
+
+    std::unique_ptr<uvcpp_web_ws_client> cli(new uvcpp_web_ws_client());
+    std::atomic<int> errors{0};
+    std::atomic<int> exhausted{0};
+    cli->on_error([&](int err, const std::string&) {
+      errors.fetch_add(1);
+      if (err == WEB_WS_ERR_RECONNECT_EXHAUSTED) exhausted.fetch_add(1);
+    });
+    uvcpp_web_ws_reconnect rc;
+    rc.enabled = true;
+    rc.delay_ms = 50;
+    rc.max_delay_ms = 50;
+    rc.max_attempts = 2;
+    cli->set_reconnect(rc);
+
+    cli->connect(url_of(dead_port));
+    std::atomic<bool> returned{false};
+    std::thread driver([&] {
+      cli->run();
+      returned.store(true);
+    });
+
+    const bool back = wait_for([&] { return returned.load(); }, 8000);
+    check(back, "腿 2 重连次数用尽后 run() **自己**返回了（没调 stop()）");
+    check(exhausted.load() == 1, "腿 2 报过「重连次数用尽」");
+    check(cli->reconnect_attempts() == 2, "腿 2 正好试了 2 次");
+
+    if (!back) {
+      driver.detach();
+      cli.release();
+    } else {
+      driver.join();
+      check(!cli->is_open(), "腿 2 run() 返回之后没连上");
+    }
+  }
 }
 
 struct test_case {
@@ -746,6 +985,10 @@ int main(int argc, char** argv) {
       {"connect_wait", test_connect_wait},
       {"close_during_connect_cancels", test_close_during_connect_cancels},
       {"run_default_drives_reconnect", test_run_default_drives_reconnect},
+      {"compression_setting_reaches_inner",
+       test_compression_setting_reaches_inner},
+      {"run_default_returns_when_idle",
+       test_run_default_returns_when_idle},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

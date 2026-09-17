@@ -26,7 +26,7 @@ Checklist before adding a job:
 
 1. **Single build per Windows job** — never run two `cmake --build` + `ctest` cycles in one Windows job.
 2. **Add `--timeout 30`** to every `ctest` invocation — prevents a single hung test from blocking the entire CI.
-3. **Add `--exclude-regex "test_shutdown_func|test_tcp_func"`** to every `ctest` invocation. On Windows, also exclude `test_memory_pool`.
+3. **Add `--exclude-regex "test_shutdown_func"`** to every `ctest` invocation. See §4 for why it is the only one still excluded.
 4. **Copy runtime DLLs on Windows** before running ctest. See §3 below.
 5. **Set `timeout-minutes`** — 90 min for multi-platform jobs, 60 min for single-platform Windows jobs.
 6. **Use `shell: bash`** for all run blocks — cross-platform compatibility.
@@ -85,9 +85,29 @@ Tests excluded from CI (`--exclude-regex`):
 
 | Test | Reason | Platforms |
 |------|--------|-----------|
-| `test_shutdown_func` | Pre-existing hang (libuv shutdown race) | All |
-| `test_tcp_func` | Pre-existing hang (dual-loop thread join) | All |
-| `test_memory_pool` | Pre-existing hang (multi-thread pool alloc on Windows) | Windows only |
+| `test_shutdown_func` | Flaky, not hanging: ~1% (2 failures in 210 runs, both trees). libuv shutdown race, still open. | All |
+
+**Only one test is excluded today.** Two others used to be listed here and were
+removed on 2026-09-17 after measuring them instead of trusting the label:
+
+| Test | Was listed as | Measured (80 runs each, both trees) |
+|------|---------------|-------------------------------------|
+| `test_tcp_func` | "Pre-existing hang (dual-loop thread join)" | 0 failures, ≤1 s per run |
+| `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
+
+Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:814`), fixed and
+left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
+likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
+calls that were joining the worker thread — that is an inference from the
+record, not something this measurement proves. What the measurement *does*
+show is the part that matters: the exclusion outlived the bug. When you touch
+this list, re-measure the entries; a reason written months ago is a hypothesis,
+not a finding.
+
+`.github/workflows/ci.yml` was updated to match on 2026-09-17: all seven `ctest`
+invocations now pass `--exclude-regex "test_shutdown_func"` and nothing else, so
+`test_tcp_func` and `test_memory_pool` run on every job and must stay green.
 
 **Rule**: excluded tests must have a tracking issue. Do not add to the exclude
 list without documenting the reason here and filing a GitHub issue.
@@ -158,9 +178,16 @@ brew install libuv ninja
    The runner's VS version changed. Remove hardcoded `-G "Visual Studio XX YYYY"` and let CMake pick.
 3. **Single test hangs**: Check if it has an internal watchdog timer. If not, add one first,
    then investigate the root cause.
-4. **`|| true` at end of ctest**: This exists because some pre-existing tests fail intermittently.
-   Do NOT remove it unless all excluded tests are fixed. Test failures are visible in the CI log
-   even with `|| true`.
+4. **`|| true` at end of ctest — removed 2026-09-17.** It had been added to tolerate the
+   intermittent failures listed in §4, but it applies to the whole `ctest` invocation, so a **real**
+   test failure was swallowed exactly like a flake and the job still went green. That is what made
+   the stale exclusions in §4 survivable for months: nothing could go red to contradict them.
+   **A failing test now fails the job.** If you are here because CI just went red, that is the
+   intended behaviour — the failure was always there, it just was not being reported.
+
+   The one remaining justification is `test_shutdown_func` (~1% flake), which stays excluded. If you
+   would rather it ran, replace the exclusion with `ctest --repeat until-pass:3` rather than
+   reinstating `|| true` — `--repeat` targets the known flake, `|| true` disables the gate.
 
 ---
 

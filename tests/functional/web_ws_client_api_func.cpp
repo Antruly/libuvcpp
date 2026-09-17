@@ -33,6 +33,13 @@
  *       小于 MSS，实际不会。）
  *   [7] [6] 的**镜像**：裸客户端把"升级请求 + 第一帧"一次写出去，服务端必须
  *       收到那一帧。
+ *   [P] **在自己的回调里 `delete` 客户端**：本层不禁这种写法，那就必须不崩。
+ *       缺陷是三层 use-after-free（见 `~uvcpp_ws_client` 的长注释）：释放
+ *       loop、当场回收会话（那等于删掉正在执行的那个 `std::function`）、
+ *       删掉活会话还引用着的 TCP 客户端。**这条用例的区分力完全来自
+ *       PageHeap** —— 裸跑时那三块内存还好端端地在，一次都不崩（这正是它
+ *       藏得住的原因）；PageHeap 把释放过的块直接 unmap，修前必然
+ *       `SEGFAULT`。裸跑时它退化成冒烟断言。
  *
  * 接 [6] 时撞出来的**第三个缺陷（两侧都有）**：握手那一段的读回调会把收到的
  * **整批**字节一次取走（升级应答/请求 + 第一帧），换成本会话的读回调之后那批
@@ -88,6 +95,7 @@
 #include <web/uvcpp_ws_frame.h>
 #include <web/uvcpp_ws_parser.h>
 #include <web/uvcpp_ws_server.h>
+#include "loop_drain.h"
 
 #if UVCPP_WEB_ENABLE
 
@@ -509,10 +517,94 @@ void test_coalesced_upgrade_and_frame_server_side() {
         "[7] 升级请求与首帧同一次到达时，服务端必须收到那一帧（收到 \"" + got + "\"）");
 
   delete cli;
+  // `cli` 是**借**循环构造的（`owns_loop_` 为假），它析构时那句 `uv_close`
+  // 只把句柄排进 `cli_loop` 的收尾队列，没有人再拨。直接 `delete cli_loop`
+  // 就带着一个 `closing=1` 的句柄走，`uv_loop_close()` 返回 `UV_EBUSY`，
+  // 整个 `uv_loop_t` 泄漏掉（实测 1 个）。
+  uvcpp_test::drain(cli_loop);
   delete cli_loop;
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// [P] 在**自己的回调里**析构客户端：本层不禁这种写法，那就必须不崩
+// ---------------------------------------------------------------------------
+/**
+ * 判据与它为什么只能靠 PageHeap 才"分得开"：
+ *
+ * `~uvcpp_ws_client` 收尾时会拨几轮循环把挂起的关闭回调放掉，然后把
+ * `uv_loop_t` 关掉、把内存还回去。如果析构点**就在本循环自己的回调里**，
+ * 外层那一帧 `uv_run` 返回之后还要接着用 `loop` —— 于是：
+ *
+ *   | | 裸跑 | PageHeap |
+ *   |---|---|---|
+ *   | 修前 | **不崩**（那块内存还好端端地在那儿） | **SEGFAULT** |
+ *   | 修后 | 不崩 | 不崩 |
+ *
+ * 也就是说这条用例的**区分力完全来自 PageHeap**（只有它会把释放过的块直接
+ * unmap）。裸跑时它退化成一条冒烟断言（进程还活着、还能再建一个客户端跑通
+ * 一次回显），但那也比没有强：真出了大范围破坏，后面的回显就跑不通。
+ */
+void test_destroy_inside_callback() {
+  uvcpp_ws_server srv;
+  if (srv.bind("127.0.0.1", 0) != 0) { check(false, "[P] bind"); return; }
+  const int port = server_port(srv);
+  srv.on_connection([&](uvcpp_ws_connection* c) {
+    c->on_text([c](const std::string& m) { c->send_text(m.c_str(), m.size()); });
+  });
+  srv.listen();
+
+  uvcpp_ws_client* victim = new uvcpp_ws_client();
+  int got = 0;
+  victim->on_text([&](const std::string&) {
+    ++got;
+    delete victim;   // <-- 在**自己的循环正跑着**的时候析构
+    victim = nullptr;
+  });
+  check(victim->connect("ws://127.0.0.1:" + std::to_string(port) + "/", nullptr) == 0,
+        "[P] connect");
+
+  const auto t0 = std::chrono::steady_clock::now();
+  while (victim != nullptr && victim->session_count() != 1 &&
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - t0).count() < 5000) {
+    srv.run(UV_RUN_NOWAIT);
+    victim->run(UV_RUN_NOWAIT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  check(victim != nullptr && victim->session_count() == 1,
+        "[P] 前置：必须真的连上（不然下面那个回调根本不会跑）");
+  if (victim == nullptr) return;
+  victim->send_text("probe", 5);
+
+  // 拨到回调跑完。**回调里已经把 client 删了**，所以删完之后一个字节都不能
+  // 再碰它 —— 循环里 `victim != nullptr` 那个判断就是这件事。
+  const auto t1 = std::chrono::steady_clock::now();
+  while (got == 0 &&
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - t1).count() < 5000) {
+    srv.run(UV_RUN_NOWAIT);
+    if (victim != nullptr) victim->run(UV_RUN_NOWAIT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  check(got == 1, "[P] 回调必须跑过（实际 " + std::to_string(got) + " 次）");
+  check(victim == nullptr, "[P] 回调里那个 delete 必须真的执行了");
+
+  // 走到这里 = 外层那一帧 `uv_run` 已经带着一个**没被释放**的 loop 返回了。
+  // 再建一个客户端跑通一次完整回显：裸跑下这是冒烟断言，PageHeap 下崩溃的
+  // 话上面那两行根本到不了。
+  auto* after = new uvcpp_ws_client();
+  std::string echoed;
+  after->on_text([&](const std::string& m) { echoed = m; });
+  after->connect("ws://127.0.0.1:" + std::to_string(port) + "/", nullptr);
+  check(pump(srv, *after, [&] { return after->session_count() == 1; }),
+        "[P] 之后还能建新客户端并连上");
+  after->send_text("after", 5);
+  check(pump(srv, *after, [&] { return !echoed.empty(); }),
+        "[P] 之后的客户端还能收发（收到 \"" + echoed + "\"）");
+  delete after;
+}
 
 int main() {
   std::cout << "[functional web_ws_client_api] start" << std::endl;
@@ -525,6 +617,7 @@ int main() {
   test_close_while_connecting();
   test_coalesced_101_and_frame();
   test_coalesced_upgrade_and_frame_server_side();
+  test_destroy_inside_callback();
 
   if (g_fail == 0) {
     std::cout << "[functional web_ws_client_api] all checks passed" << std::endl;

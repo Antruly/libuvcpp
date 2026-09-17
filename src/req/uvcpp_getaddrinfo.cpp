@@ -21,8 +21,11 @@ int uvcpp_getaddrinfo::getaddrinfo(uvcpp_loop* loop, const char* node, const cha
 }
 
 void uvcpp_getaddrinfo::callback_getaddrinfo(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
-  if (reinterpret_cast<uvcpp_getaddrinfo*>(req->data)->m_getaddrinfo_cb)
-    reinterpret_cast<uvcpp_getaddrinfo*>(req->data)->m_getaddrinfo_cb(
-        reinterpret_cast<uvcpp_getaddrinfo*>(req->data), status, res);
+  uvcpp_getaddrinfo* self = reinterpret_cast<uvcpp_getaddrinfo*>(req->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 搬闭包再调用，理由见 uvcpp_req::invoke_completion（回调里可能 `delete self`）。
+  invoke_completion(self->m_getaddrinfo_cb, self, status, res);
 }
 } // namespace uvcpp

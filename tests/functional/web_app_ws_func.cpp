@@ -323,14 +323,21 @@ struct probe {
     }
   }
 
-  /** @brief 发升级请求。`with_key=false` 用来造缺 Key 的畸形请求。 */
-  bool upgrade(const std::string& path, bool with_key = true) {
+  /**
+   * @brief 发升级请求。`with_key=false` 用来造缺 Key 的畸形请求；
+   *        `extensions` 非空时带上 `Sec-WebSocket-Extensions`（测压缩协商用）。
+   */
+  bool upgrade(const std::string& path, bool with_key = true,
+               const char* extensions = nullptr) {
     std::string req = "GET " + path + " HTTP/1.1\r\n"
                       "Host: 127.0.0.1\r\n"
                       "Upgrade: websocket\r\n"
                       "Connection: Upgrade\r\n";
     if (with_key) {
       req += "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+    }
+    if (extensions != nullptr) {
+      req += std::string("Sec-WebSocket-Extensions: ") + extensions + "\r\n";
     }
     req += "Sec-WebSocket-Version: 13\r\n\r\n";
     return write_bytes(req);
@@ -908,6 +915,87 @@ void test_real_client_roundtrip() {
   app.join();
 }
 
+// =========================================================================
+// 10. app 级 WS 压缩策略：`set_ws_compression()` 必须真的打到 `ws_server` 上
+// =========================================================================
+//
+// 判据是 **101 里有没有 `Sec-WebSocket-Extensions`** —— 这是协商结果在线上
+// 唯一可观察的痕迹。关掉之后本端"连提都不该提"，所以应答里带上它就等于配置
+// 没打过去。
+//
+// **两种调用顺序都要测**，因为 WS 服务是**惰性创建**的：`websocket()` 之前
+// `ws_server()` 还是 nullptr，逃生口 `ws_server()->set_compression()` 在那个
+// 时刻够不着 —— 这正是这个 app 级入口存在的理由，也是本用例存在的理由。
+void test_ws_compression_config() {
+  const char kExt[] = "permessage-deflate; client_max_window_bits";
+
+  std::shared_ptr<ws_sink> sink(new ws_sink());
+  uvcpp_web_app app;
+  app.set_port(0);
+
+  // ---- 顺序 A：setter 在 `websocket()` **之前**（逃生口够不着的那种）----
+  uvcpp_ws_deflate_config off;
+  off.enabled = false;
+  app.set_ws_compression(off);
+  check(app.ws_server() == nullptr,
+        "前提：此刻 WS 服务还没建 —— 逃生口够不着，只能用 app 级入口");
+  check(!app.get_ws_compression().enabled,
+        "服务还没建时，getter 读的是存下来的意图");
+
+  install_echo(app, "/echo", sink.get(), false);
+  check(app.ws_server() != nullptr, "前提：websocket() 之后服务已建");
+  check(!app.get_ws_compression().enabled,
+        "建服务时必须把存下来的策略打过去（否则这里读到的会是默认的 enabled）");
+
+  const int port = start_app(app);
+  if (port > 0) {
+    // ①a 关着：**不该**应答这个扩展，但升级本身照旧成功。
+    {
+      probe p;
+      const bool ok = p.connect(port) && p.start_reading();
+      check(ok, std::string("裸客户端准备（") + (ok ? "ok" : p.where) + "）");
+      if (ok) {
+        check(p.upgrade("/echo", /*with_key=*/true, kExt), "发带扩展的升级请求");
+        check(p.wait_response(), "关着压缩也必须有响应");
+        check(p.upgraded, "101 照旧 —— 关压缩不该影响升级本身");
+        check(p.header("Sec-WebSocket-Extensions").empty(),
+              "关掉之后**不该**应答 permessage-deflate（应答了 = 策略没打过去）");
+      }
+      p.close_transport();
+    }
+
+    // ---- 顺序 B：setter 在服务**已建之后**调（逃生口那条路）----
+    uvcpp_ws_deflate_config on;
+    on.enabled = true;
+    app.set_ws_compression(on);
+    check(app.get_ws_compression().enabled, "打开之后 getter 读到开");
+
+    {
+      probe p;
+      const bool ok = p.connect(port) && p.start_reading();
+      check(ok, std::string("裸客户端准备（") + (ok ? "ok" : p.where) + "）");
+      if (ok) {
+        check(p.upgrade("/echo", /*with_key=*/true, kExt), "发带扩展的升级请求");
+        check(p.wait_response(), "必须有响应");
+        check(p.upgraded, "升级成 WS");
+        check(!p.header("Sec-WebSocket-Extensions").empty(),
+              "打开时**必须**应答 permessage-deflate（不应答 = 策略没生效）");
+      }
+      p.close_transport();
+    }
+
+    // ---- getter 读的是**底层当前值**：走逃生口改过也要读到 ----
+    uvcpp_ws_deflate_config esc;
+    esc.enabled = false;
+    app.ws_server()->set_compression(esc);
+    check(!app.get_ws_compression().enabled,
+          "逃生口改过之后 getter 必须读到新的（读存下来那份就在这里说谎了）");
+  }
+
+  app.stop();
+  app.join();
+}
+
 struct test_case {
   const char* name;
   void (*fn)();
@@ -935,6 +1023,7 @@ int main(int argc, char** argv) {
       {"idle_timeout_exempt", test_idle_timeout_exempt},
       {"app_shutdown_closes_sessions", test_app_shutdown_closes_sessions},
       {"real_client_roundtrip", test_real_client_roundtrip},
+      {"ws_compression_config", test_ws_compression_config},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

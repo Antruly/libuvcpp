@@ -156,6 +156,22 @@ public:
 protected:
     /** @brief Update internal handle data storage after underlying changes. */
     void set_handle_data();
+    /** @brief 无参 init() 里的"清零 + 挂 data"步骤，整合到一处。
+     *
+     *  **句柄已经被 libuv 接管时这一步是空操作**，这是本函数的全部意义所在。
+     *  `uv_*_init` 会把 `handle_queue` 的前后指针和 `loop` 反向指针写进这块
+     *  内存；在它之后再 memset 等于把这些链接抹掉 —— 循环那头的
+     *  `handle_queue` 仍然指向这块内存，而 `free_handle()` 读到 `loop == nullptr`
+     *  就会判定"从没 uv_*_init 过"，走最后一条分支直接 `UVCPP_VFREE`。
+     *  于是把一块**仍挂在队列上**的内存还给了分配器，下一次 `uv_*_init` 往
+     *  队尾插入时写进已释放内存：page heap 下必崩（`tests/unit/handle_unit.cpp`
+     *  正是这么被抓住的），普通堆下只是静默破坏队列、`uv_loop_close` 从此
+     *  再也关不掉那个循环。
+     *
+     *  判据可信：底层内存来自 `uvcpp_alloc`，出生即全零（见 uvcpp_alloc.h），
+     *  所以 `loop` 非空 <=> libuv 确实初始化过它，不存在"读到垃圾值"的风险。
+     */
+    void reset_handle_state(void *handle, size_t size);
     /** @brief Internal allocation callback forwarding to wrapper. */
     static void callback_alloc(uv_handle_t *uvcpp_handle, size_t suggested_size, uv_buf_t *buf);
     /** @brief Internal close callback used to free wrapped resources. */

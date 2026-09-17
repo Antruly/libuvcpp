@@ -12,6 +12,7 @@
 #include "req/uvcpp_connect.h"
 #include "req/uvcpp_write.h"
 #include "uvcpp/uvcpp_buf.h"
+#include "loop_drain.h"
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -37,6 +38,8 @@ int main() {
   // server thread: loop created and run in the same thread
   std::thread server_thread([&](){
     uvcpp_loop server_loop;
+
+    uvcpp_test::loop_drain drain_server_loop(&server_loop);
     server_loop.init();
 
     uvcpp_async server_stop_async;
@@ -117,6 +120,8 @@ int main() {
   // client thread: loop created and run in the same thread
   std::thread client_thread([&](){
     uvcpp_loop client_loop;
+
+    uvcpp_test::loop_drain drain_client_loop(&client_loop);
     client_loop.init();
 
     // Client async: triggered when server is ready

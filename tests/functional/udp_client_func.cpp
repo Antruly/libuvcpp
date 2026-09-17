@@ -10,6 +10,7 @@
 #include "req/uvcpp_udp_send.h"
 #include "uvcpp/uvcpp_buf.h"
 #include "net/uvcpp_udp_client.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -26,6 +27,8 @@ struct UdpEchoServer {
   void start() {
     thread = std::thread([this]() {
       uvcpp_loop loop;
+
+      uvcpp_test::loop_drain drain_loop(&loop);
       loop.init();
       uvcpp_udp udp(&loop);
 

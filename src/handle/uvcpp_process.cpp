@@ -46,8 +46,8 @@ int uvcpp_process::init() {
     options = uvcpp::uvcpp_alloc<uv_process_options_t>();
   }
   memset(options, 0, sizeof(uv_process_options_t));
-  memset(UVCPP_PROCESS_HANDLE, 0, sizeof(uv_process_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_PROCESS_HANDLE, sizeof(uv_process_t));
   return 0;
 }
 
@@ -58,8 +58,8 @@ int uvcpp_process::init(uvcpp_loop *lp) {
     options = uvcpp::uvcpp_alloc<uv_process_options_t>();
   }
   memset(options, 0, sizeof(uv_process_options_t));
-  memset(UVCPP_PROCESS_HANDLE, 0, sizeof(uv_process_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_PROCESS_HANDLE, sizeof(uv_process_t));
   return 0;
 }
 
@@ -131,10 +131,17 @@ int uvcpp_process::start(std::function<void(uvcpp_process *, int64_t, int)> star
 
 void uvcpp_process::callback_start(uv_process_t *handle, int64_t exit_status,
                               int term_signal) {
-  if (reinterpret_cast<uvcpp_process *>(handle->data)->process_start_cb)
-    reinterpret_cast<uvcpp_process *>(handle->data)
-        ->process_start_cb(reinterpret_cast<uvcpp_process *>(handle->data),
-                           exit_status, term_signal);
+  uvcpp_process *self = reinterpret_cast<uvcpp_process *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->process_start_cb;
+  if (cb) {
+    cb(self, exit_status, term_signal);
+  }
 }
 
   } // namespace uvcpp

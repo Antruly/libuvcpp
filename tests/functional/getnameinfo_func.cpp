@@ -5,6 +5,7 @@
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_timer.h"
 #include "req/uvcpp_getnameinfo.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -15,6 +16,8 @@ int main() {
   std::atomic<bool> has_name(false);
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   // Use IPv4 loopback address (127.0.0.1) for reverse lookup

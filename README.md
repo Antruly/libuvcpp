@@ -373,8 +373,8 @@ ctest --test-dir build --output-on-failure -C Release
 # Run only web module tests
 ctest --test-dir build -C Release -R "web_"
 
-# Run with exclusions
-ctest --test-dir build -C Release --exclude-regex "test_shutdown_func|test_tcp_func"
+# Run with exclusions (test_shutdown_func fails ~1% of runs — flaky, not hanging; doc/ci-guide.md §4)
+ctest --test-dir build -C Release --exclude-regex "test_shutdown_func"
 ```
 
 Test coverage:

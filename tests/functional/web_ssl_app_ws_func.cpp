@@ -60,6 +60,7 @@
 #include <webapp/uvcpp_web_request.h>
 #include <webapp/uvcpp_web_response.h>
 #include <webapp/uvcpp_web_ws.h>
+#include <webapp/uvcpp_web_ws_client.h>
 
 #include <openssl/ssl.h>
 
@@ -562,8 +563,80 @@ int main() {
     app.join();
   }
 
+  // =====================================================================
+  // 场景 4：**框架层** WS 客户端（`uvcpp_web_ws_client`）用 `wss://` 打同一个
+  //         端口 —— 钉的是协议层 `uvcpp_ws_client::do_handshake()` 的 wss 分支。
+  //
+  // 为什么必须单列：上面三个场景的探针都是**自己**调 `tcp.enable_tls()` 手搓
+  // TLS（见 `probe::connect`），也就是说 `uvcpp_ws_client` 里那段 fd-based 握手
+  // **一次都没被走过** —— 这正是它那句 `if (rc <= 0) 失败` 能一直错着的原因：
+  // `uvcpp_ssl::handshake()` 的契约是「0 = 还需要更多 I/O」（`uvcpp_ssl.h:87-93`），
+  // 而非阻塞 socket 上第一次 `SSL_connect` **必然**返回 0，于是每一次 `wss://`
+  // 都在第一句被判成失败。这条走真路径。
+  //
+  // 判据是**真往返**：连上只说明握手过了，回显帧回来才说明 WS 那一层也在 TLS 上
+  // —— 与场景 1 同一个理由（101 与每一帧都是绕开 HTTP 层自己写 socket 的）。
+  // =====================================================================
+  {
+    uvcpp_web_app app;
+    configure_for_test(app);
+    app.enable_self_signed("localhost", 2048);
+    ws_sink sink;
+    install_echo(app, &sink);
+
+    const int rc = app.start_background();
+    check(rc == 0, "4: start_background failed " + std::to_string(rc));
+    if (rc != 0) {
+      std::cout << "[web_ssl_app_ws] FAIL (" << g_failures << " checks)"
+                << std::endl;
+      return 2;
+    }
+
+    uvcpp_web_ws_client wsc;
+    wsc.set_ssl_context(&cctx);   // 生命周期要覆盖整条连接（本层不持有）
+    std::vector<std::string> got;
+    wsc.on_text([&got](const std::string& m) { got.push_back(m); });
+
+    const std::string url = std::string("wss://127.0.0.1:") +
+                            std::to_string(app.bound_port()) + kPattern;
+    const int crc = wsc.connect_wait(url, 5000);
+    check(crc == 0, "4: wss:// connect_wait rc=" + std::to_string(crc) +
+                        " last_error=" + std::to_string(wsc.get_last_error()));
+    check(wsc.is_open(), "4: connect 成功但 is_open() 为假");
+    // 前提断言：不确认"确实升级成了一条 WS 会话"，下面收到的帧可能来自别处。
+    check(sink.upgrades.load() == 1,
+          "4: 服务端 WS handler 跑了 " + std::to_string(sink.upgrades.load()) +
+              " 次，want 1");
+
+    if (crc == 0) {
+      check(wsc.send_text(std::string(kEchoText)) == 0, "4: send_text 失败");
+
+      const std::chrono::steady_clock::time_point t0 =
+          std::chrono::steady_clock::now();
+      while (got.empty() &&
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - t0)
+                     .count() < 5000) {
+        wsc.run(UV_RUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      check(!got.empty(), "4: 5 秒内没有回显帧（TLS 上的收发没通）");
+      if (!got.empty()) {
+        check(got[0] == kEchoText,
+              "4: 回显 `" + got[0] + "` != `" + kEchoText + "`");
+      }
+      check(sink.text_count() == 1,
+            "4: 服务端收到 " + std::to_string(sink.text_count()) +
+                " 条，want 1");
+    }
+
+    wsc.close();
+    app.stop();
+    app.join();
+  }
+
   if (g_failures == 0) {
-    std::cout << "[web_ssl_app_ws] ALL PASS (3 cases)" << std::endl;
+    std::cout << "[web_ssl_app_ws] ALL PASS (4 cases)" << std::endl;
     return 0;
   }
   std::cout << "[web_ssl_app_ws] FAIL (" << g_failures << " checks)" << std::endl;

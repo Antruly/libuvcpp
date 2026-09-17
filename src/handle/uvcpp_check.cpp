@@ -16,8 +16,8 @@ uvcpp_check::uvcpp_check(uvcpp_loop *loop) : uvcpp_handle() {
 }
 
 int uvcpp_check::init() {
-  memset(UVCPP_CHECK_HANDLE, 0, sizeof(uv_check_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_CHECK_HANDLE, sizeof(uv_check_t));
   return 0;
 }
 
@@ -37,8 +37,16 @@ int uvcpp_check::start(::std::function<void(uvcpp_check *)> start_cb) {
 int uvcpp_check::stop() { return uv_check_stop(UVCPP_CHECK_HANDLE); }
 
 void uvcpp_check::callback_start(uv_check_t *handle) {
-  if (reinterpret_cast<uvcpp_check *>(handle->data)->check_start_cb)
-    reinterpret_cast<uvcpp_check *>(handle->data)
-        ->check_start_cb(reinterpret_cast<uvcpp_check *>(handle->data));
+  uvcpp_check *self = reinterpret_cast<uvcpp_check *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->check_start_cb;
+  if (cb) {
+    cb(self);
+  }
 }
 } // namespace uvcpp

@@ -17,8 +17,8 @@ uvcpp_tty::uvcpp_tty(uvcpp_loop *loop, uv_file fd, int readable)
 }
 
 int uvcpp_tty::init() {
-  memset(UVCPP_TTY_HANDLE, 0, sizeof(uv_tty_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_TTY_HANDLE, sizeof(uv_tty_t));
   return 0;
 }
 

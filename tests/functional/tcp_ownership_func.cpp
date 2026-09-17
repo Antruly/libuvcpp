@@ -31,6 +31,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <uv.h>
 
@@ -72,6 +73,10 @@ struct server_state {
   std::atomic<int> take_ok;
   /// take_client 取走之后，服务端是否还认得它。
   std::atomic<int> still_owns_after_take;
+  /// 被 take_client 取走所有权的客户端。取走之后服务端不管了，就得**测试自己
+  /// 收尾**：它们的 tcp 句柄还挂在 server 的循环上，不在这里关掉的话
+  /// `uv_loop_close()` 永远 EBUSY，整个 `uv_loop_t` 赔进去（实测泄漏 1 个循环）。
+  std::vector<uvcpp_tcp_client*> taken;
 
   server_state()
       : accepted(0),
@@ -130,6 +135,7 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
         if (take_ownership) {
           uvcpp_tcp_client* taken = server.take_client(client);
           st->take_ok.store(taken == client ? 1 : 0);
+          if (taken != nullptr) st->taken.push_back(taken);
           st->count_after_take.store(
               static_cast<int>(server.client_count()));
           st->still_owns_after_take.store(
@@ -164,6 +170,18 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& ready,
   // **判据**：所有连接都断开之后，登记表必须回到 0。
   // 缺陷 1 没修的话这里会 > 0（每个连接泄漏一个 client）。
   st->final_count.store(static_cast<int>(server.client_count()));
+
+  // 取走所有权的那些客户端，由本测试负责收尾 —— 而且**必须在这里**，在
+  // `server` 析构之前：它们的 tcp 句柄挂在 server 自己的循环上，等 server
+  // 析构完再删就是往一个已经没了的循环里 `uv_close`；不删则那三个句柄谁也不
+  // 关，`alive=0`（既不活跃也没在关），`uv_run` 连 while 体都不进，
+  // `uv_loop_close()` 从此永远 EBUSY。原先这里的注释写的是"进程即将退出，
+  // 所以省略"—— 省略的代价是整个 `uv_loop_t`（实测泄漏 1 个循环，句柄
+  // `tcp(active=0 closing=0)` ×3）。
+  for (uvcpp_tcp_client* c : st->taken) {
+    delete c;
+  }
+  st->taken.clear();
 }
 
 // =========================================================================

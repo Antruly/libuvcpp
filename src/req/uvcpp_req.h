@@ -120,7 +120,9 @@ public:
 protected:
   /**
    * @brief 完成回调的统一跳板（`callback_write` / `callback_udp_send` /
-   *        `callback_connect` 共用）。
+   *        `callback_connect` / `callback_random` / `callback_getaddrinfo` /
+   *        `callback_getnameinfo` 共用）。末尾的可变参数原样转发给闭包，
+   *        给"回调还带额外参数"的那几个用（`buf`/`res`/`hostname` …）。
    *
    * 两件事，顺序都不能反：
    *  1. **先把闭包搬出 `slot` 再调用**。回调里常见最后一句 `delete self`，
@@ -130,12 +132,13 @@ protected:
    *  2. 闭包返回**之后**按 `self_free_` 决定是否 `delete self`。这个标志必须在
    *     调用**之前**读 —— 回调拿到 `self`，有权把它删掉。
    */
-  template <typename TCb, typename TReq>
-  static void invoke_completion(TCb &slot, TReq *self, int status) {
+  template <typename TCb, typename TReq, typename... TArgs>
+  static void invoke_completion(TCb &slot, TReq *self, int status,
+                                TArgs &&...args) {
     TCb cb = ::std::move(slot);
     const bool self_free = self->is_self_free();
     if (cb) {
-      cb(self, status);
+      cb(self, status, ::std::forward<TArgs>(args)...);
     }
     if (self_free) {
       delete self;

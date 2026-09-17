@@ -26,6 +26,7 @@
 #include "net/uvcpp_tcp_client.h"
 #include "web/uvcpp_ws_connection.h"
 #include "web/uvcpp_ws_parser.h"
+#include "web/uvcpp_ws_sessions.h"
 
 using namespace uvcpp;
 
@@ -110,9 +111,21 @@ static std::string raw_frame_header_only(uint64_t declared_len, int opcode = 0x1
 struct scenario {
   uvcpp_tcp_server server;
   uvcpp_tcp_client client;
+  /** @brief 会话属主。建会话的一方 `adopt()` 之后不再自己 `delete`。 */
+  uvcpp_ws_sessions sessions_;
   uvcpp_ws_connection* conn = nullptr;
   int  port = 0;
   bool connected = false;
+
+  /**
+   * @brief 会话必须死在循环之前。
+   *
+   * `server` / `client` 各持一个循环，而会话注册的接收回调捕获了本场景的
+   * `this`。属主正常路径上就是在关循环之前 `shutdown()`（`~uvcpp_ws_server`
+   * 同一形状）；`recycle_all()` 是**当场**终结 + 删除，所以析构体里这一句
+   * 之后会话已经没了，后面成员析构里的有界泵不可能再回调到已死的场景。
+   */
+  ~scenario() { sessions_.shutdown(); }
 
   // 服务端观测到的事件
   std::vector<std::string>              texts;
@@ -134,7 +147,13 @@ struct scenario {
     port = ntohs(name.sin_port);
 
     int rc = server.listen([this, max_msg](uvcpp_tcp_client* c) {
+      // 走框架的所有权约定（`~uvcpp_ws_server::handle_upgrade` 同一形状）：
+      // 建会话的一方 `adopt()`，回收交给属主，自己不再 `delete`。
+      // `set_loop` 必须在循环线程、循环正跑着的时候调（`uv_async_init` 不是
+      // 线程安全的），而这里正是接入回调，两个条件都满足。
+      sessions_.set_loop(server.get_loop());
       auto* wc = new uvcpp_ws_connection(c);
+      sessions_.adopt(wc);
       if (max_msg > 0) wc->set_max_message_size(max_msg);
       wc->on_text([this](const std::string& m) { texts.push_back(m); });
       wc->on_binary([this](const uint8_t* d, size_t n) {
@@ -223,9 +242,7 @@ struct scenario {
 
 // 1. 单帧往返：重组改造之后最基本的路径不能坏
 static bool test_single_frame() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   if (!s.send(raw_frame(0x1, true, "hello"))) return false;
   s.pump_until([&] { return !s.texts.empty(); }, 2000);
@@ -234,9 +251,7 @@ static bool test_single_frame() {
 
 // 2. 一个写里塞两帧 —— 解析器一次只吃一帧，连接层必须自己 reset 并接着喂
 static bool test_two_frames_one_write() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   std::string both = raw_frame(0x1, true, "first") + raw_frame(0x1, true, "second");
   if (!s.send(both)) return false;
@@ -246,9 +261,7 @@ static bool test_two_frames_one_write() {
 
 // 3. 分成多个写、按顺序到达（跨 TCP 读回调边界）
 static bool test_sequential_frames() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   const char* words[] = {"alpha", "beta", "gamma", "delta"};
   for (int i = 0; i < 4; i++) {
@@ -264,9 +277,7 @@ static bool test_sequential_frames() {
 
 // 4. 分片文本：三段拼成一条消息，**只回调一次**
 static bool test_fragmented_text() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   std::string all = raw_frame(0x1, false, "Hel") +
                     raw_frame(0x0, false, "lo, ") +
@@ -279,9 +290,7 @@ static bool test_fragmented_text() {
 
 // 5. 分片二进制
 static bool test_fragmented_binary() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   std::string p1("\x00\x01\x02", 3), p2("\x03\x04", 2);
   std::string all = raw_frame(0x2, false, p1) + raw_frame(0x0, true, p2);
@@ -293,9 +302,7 @@ static bool test_fragmented_binary() {
 
 // 6. 控制帧穿插在分片中间：可以穿插、不参与重组、不打断消息
 static bool test_control_interleaved() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   std::string all = raw_frame(0x1, false, "frag") +
                     raw_frame(0x9, true,  "ping!") +     // PING 插在中间
@@ -308,9 +315,7 @@ static bool test_control_interleaved() {
 
 // 7. 没有消息在途却收到 CONTINUATION → 1002
 static bool test_continuation_without_start() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   if (!s.send(raw_frame(0x0, true, "orphan"))) return false;
   s.pump_until([&] { return !s.errors.empty(); }, 2000);
@@ -321,9 +326,7 @@ static bool test_continuation_without_start() {
 
 // 8. 分片未结束就插入新的数据帧 → 1002
 static bool test_new_data_frame_mid_message() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   std::string all = raw_frame(0x1, false, "part1") +
                     raw_frame(0x1, true,  "sneaky");   // 应该出现在 CONTINUATION 位置
@@ -336,9 +339,7 @@ static bool test_new_data_frame_mid_message() {
 
 // 9. RSV2/RSV3 未协商却置位 → 1002
 static bool test_rsv2_rejected() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   if (!s.send(raw_frame(0x1, true, "x", true, 0x20))) return false;   // RSV2
   s.pump_until([&] { return !s.errors.empty(); }, 2000);
@@ -349,9 +350,7 @@ static bool test_rsv2_rejected() {
 
 // 10. RSV1（压缩标志）但没有协商过 permessage-deflate → 1002
 static bool test_rsv1_without_negotiation() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   if (!s.send(raw_frame(0x1, true, "x", true, 0x40))) return false;   // RSV1
   s.pump_until([&] { return !s.errors.empty(); }, 2000);
@@ -363,9 +362,7 @@ static bool test_rsv1_without_negotiation() {
 // 11. 聚合上限：每一片都合规，合起来超限 → 1009
 //     （只卡单帧的实现会在这里放过去 —— 这正是分片绕过单帧限制的手法）
 static bool test_aggregate_cap() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start(100)) return false;                      // 消息上限 100 字节
   std::string chunk(40, 'a');
   std::string all = raw_frame(0x1, false, chunk) +      // 40
@@ -380,9 +377,7 @@ static bool test_aggregate_cap() {
 
 // 12. 单帧上限：**只发长度头**。长度一确定就该被拦，不用等数据。
 static bool test_frame_cap() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start(1000)) return false;
   if (!s.send(raw_frame_header_only(0x00000000000FFFFFULL))) return false;   // 声明 1 MiB
   s.pump_until([&] { return !s.errors.empty(); }, 2000);
@@ -394,9 +389,7 @@ static bool test_frame_cap() {
 // 13. 发送队列：一个回调里连发多条，必须**一条不少、顺序不变**
 //     （原先在同一时刻只允许一个异步写，第二条会被 UV_EALREADY 静默丢掉）
 static bool test_send_queue_order() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   s.drain_client_frames();
 
@@ -425,9 +418,7 @@ static bool test_send_queue_order() {
 // 14. Close 原因超长时截断：控制帧负载上限 125 字节，
 //     超了会拼出一个对端**必须拒绝**的帧
 static bool test_close_reason_truncated() {
-  // 故意泄漏：`uvcpp_ws_connection` 是堆分配且不释放的，它注册的回调捕获了
-  // 本场景的 this —— 场景若在这里析构，回调就指向已死对象。
-  scenario& s = *new scenario();
+  scenario s;
   if (!s.start()) return false;
   s.drain_client_frames();
   std::string long_reason(400, 'r');
@@ -471,9 +462,10 @@ int main() {
     ok = r && ok;
   }
   std::cout << "[web_ws_reasm] " << (ok ? "ALL PASS" : "FAIL") << "\n";
-  // 每个用例都建了一对 loop；正常析构在双 loop 场景下会卡住（仓库已知问题），
-  // 断言已经出完了，直接退出。
-  std::_Exit(ok ? 0 : 2);
+  // 这里曾经是 `std::_Exit(...)`：那时"每个用例都建了一对 loop、正常析构会卡住"
+  // 是仓库的已知问题，所以断言出完就直接退出、跳过收尾。现在每个 `scenario`
+  // 都是栈上对象、各自析构里做有界收尾泵（第十四批），没有要跳的东西了 ——
+  // `_Exit` 留着只会让 main 的正常返回路径永远不被走到。
   return ok ? 0 : 2;
 }
 #else

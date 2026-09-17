@@ -36,6 +36,19 @@ public:
   int close();
   /** @brief Run the loop with the specified mode (default UV_RUN_DEFAULT). */
   int run(uv_run_mode md = UV_RUN_DEFAULT);
+
+  /**
+   * @brief `run()` 正在（本线程）跑，还没返回 —— 也就是"当前就在某个回调里"。
+   *
+   * `uv_run` **不可重入**，而本库有几条析构路径要在收尾时拨几轮循环把挂起的
+   * 关闭回调放掉。那些路径如果是在**本循环自己的回调里**被调到的，就既不能
+   * 再拨一次循环，也不能把循环关掉释放 —— 外层那一帧 `uv_run` 返回之后还要
+   * 接着用它。判据就是这一个。
+   *
+   * 计数而非布尔：进来的路不止一条（拨一轮只是加上一层），退的时候要一层一层
+   * 退干净，中途任何一层里问都是"在跑"。
+   */
+  bool is_running() const { return run_depth_ > 0; }
   /** @brief Walk all handles attached to the loop and invoke \p walk_cb. */
   void walk(::std::function<void(uvcpp_handle*, void*)> walk_cb, void* arg);
 
@@ -54,6 +67,9 @@ private:
    */
   bool closed_ = false;
   void *walk_arg_ = nullptr;
+
+  /** @brief `run()` 的嵌套层数，见 `is_running()`。 */
+  int run_depth_ = 0;
 };
 } // namespace uvcpp
 

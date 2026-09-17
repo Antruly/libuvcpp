@@ -1,12 +1,15 @@
 ﻿#include <iostream>
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_tty.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
 int main() {
   std::cout << "[functional tty] start\n";
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   // init with fd 1 (stdout) if supported

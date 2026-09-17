@@ -93,15 +93,41 @@ int uvcpp_handle::is_active() {
   return uv_is_active(_handle);
 }
 
-void uvcpp_handle::set_handle_data() { _handle->data = this; }
+// 同一族里最后一个没有判空的入口（`4f4dcc3` 修那一族时漏了它）。
+// 现有调用方都在 `_handle` 赋值之后才调，所以**没有已知的可达崩溃** ——
+// 这行加的是规则一致性：本文件上面写着"每个直接接触 `_handle` 的入口都要在
+// 第一句挡住它"，留一个例外比多一行更难维护。返回空之后 `_handle->data`
+// 本来就无从谈起，任何真要用这个句柄的代码照样会在别处崩，失败模式不变。
+void uvcpp_handle::set_handle_data() {
+  if (_handle == nullptr) return;
+  _handle->data = this;
+}
+
+void uvcpp_handle::reset_handle_state(void *handle, size_t size) {
+  if (handle == nullptr)
+    return;
+  uv_handle_t *h = static_cast<uv_handle_t *>(handle);
+  // 见 uvcpp_handle.h 的说明：loop 非空 == libuv 已经接管，清不得。
+  if (h->loop != nullptr)
+    return;
+  memset(h, 0, size);
+  this->set_handle_data();
+}
 
 void uvcpp_handle::callback_alloc(uv_handle_t *handle, size_t suggested_size,
                              uv_buf_t *buf) {
-  uvcpp_handle *wrapper = reinterpret_cast<uvcpp_handle *>(handle->data);
-  if (!wrapper || !wrapper->handle_alloc_cb)
+  uvcpp_handle *self = reinterpret_cast<uvcpp_handle *>(handle->data);
+  if (self == nullptr) {
     return;
-  // Call user alloc callback with a uvcpp_buf view directly (no copy).
-  wrapper->handle_alloc_cb(wrapper, suggested_size, buf);
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见本文件 callback_close
+  // 的说明），就地调用等于在正在执行的闭包上删对象。
+  // alloc 回调每次读都触发，所以是拷不是搬。
+  // Pass user alloc callback a uv_buf_t view directly (no copy).
+  auto cb = self->handle_alloc_cb;
+  if (cb) {
+    cb(self, suggested_size, buf);
+  }
 }
 
 void uvcpp_handle::callback_close(uv_handle_t *handle) {

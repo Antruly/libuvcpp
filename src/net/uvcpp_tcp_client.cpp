@@ -92,6 +92,83 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   // （把请求对象还回去），不再碰本对象的任何成员。
   if (alive_token_) *alive_token_ = 1;
 
+  // -------------------------------------------------------------------
+  // **本对象是在它自己的某个回调里被析构的** —— 这一路上面那套收尾动作一件
+  // 都不能做，整块交出去。判据是循环还在跑（`run()` 没返回），也就是栈上还
+  // 压着某个回调。
+  //
+  // 三层悬垂，全部**实测**过（`tcp_client_func.cpp` 的 `delete_in_read_cb`，
+  // 读回调里 `delete victim`；Release 裸跑**一次都不崩** —— 那块内存还好端端
+  // 在那儿、读到的还是旧值；**PageHeap 下 SEGFAULT**，cdb 的栈是
+  // `用户读回调 → std::function 调用器 → uvcpp_stream::callback_read →
+  // uv_run → 测试的泵`，故障指令读的正是那个已经 unmap 的地址）：
+  //
+  //   1. **正在执行的那个闭包本身**：框架层读回调是成员 `net_read_cb_`，它就
+  //      存在这个被删掉的对象里 —— 回调里删完对象、**随手再碰一个按引用捕获
+  //      的变量**，读的就是已经还给分配器的闭包存储。这是**最先炸的一层**。
+  //      （原始读路径同理：`read_arg_` 指向的那个 `std::function` 就是正在
+  //      执行的闭包。）
+  //   2. **`tcp_`**：读回调闭包与整个句柄都挂在它上面，而外层那一帧
+  //      `uvcpp_stream::callback_read` 还在它里面跑。
+  //   3. **`loop_`**：外层那一帧 `uv_run` 返回之后还要用它（`uvcpp_loop::run`
+  //      的嵌套计数也要减）。
+  //
+  // 所以这一路**一个都不拆**：loop、tcp、TLS、那些 `*_arg_` 块全部留给循环。
+  // 这是**有意的泄漏**，与 `~uvcpp_ws_client` 同一处逐条列过的那条策略
+  // （"泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free"），也与
+  // `uvcpp_ws_sessions::abandon()` 同一个形状。
+  //
+  // **先停读**：句柄已经交出去了、还活着，不停读的话循环下一轮还会回头调
+  // `net_read_cb_` —— 那已经是释放过的内存。只调底层那句（`tcp_->read_stop()`），
+  // **不能**调本类的 `read_stop()`：后者会把 `net_read_cb_` / `read_arg_` 就地
+  // 清掉，那正是第 1 层。
+  // -------------------------------------------------------------------
+  if (loop_ != nullptr && loop_->is_running()) {
+    if (tcp_ != nullptr && tcp_->get_handle() != nullptr) {
+      tcp_->read_stop();
+      // **句柄本身还是要关掉**，只有包装对象留下。
+      //
+      // 上面三条说的都是"不能拆包装对象"（`tcp_` / `loop_` / 那些 `*_arg_`），
+      // 关句柄不在此列：`uv_close` 不动包装对象的生命周期，外层那一帧
+      // `uvcpp_stream::callback_read` 手里的 `uvcpp_tcp*` 照样有效，而它写的是
+      // `handle_close_cb`（包装对象的成员），不是正在执行的那个读闭包。
+      //
+      // 反过来漏掉这一句就会把**整个循环**赔进去：句柄留在队列上、既不活跃
+      // 也没在关 —— `uv__loop_alive()` 算的是「活跃句柄 || 活跃请求 ||
+      // pending_reqs_tail || endgame_handles」，这一种**一个都不占**，于是
+      // `uv_run` 连 while 体都不进，`uv_loop_close()` 从此永远 EBUSY，
+      // `~uvcpp_loop` 只能按既有策略把整块 `uv_loop_t` 泄漏掉。实测
+      // （`tests/tools/run_loop_leak_probe.py`，2026-09-17）：`tcp_server`
+      // 的析构里那些"清不掉"的 `tcp(active=0 closing=0)` 就是这里漏出去的，
+      // webapp 一族 77 个泄漏循环全走这一条。
+      //
+      // `is_closing()` 那一问不能省：本函数也可能是从**关闭回调里**被调到的
+      // （`fire_close_callbacks` 的最后一个槽会 `delete` 客户端），那时句柄已经
+      // 在关，再 `uv_close` 一次是重复入队；而且此刻正在执行的那个闭包**就是**
+      // `handle_close_cb` 自己，覆写它就是第 1 层。句柄关完之后
+      // `get_handle()` 已经是 nullptr，所以这一步与上面那句合并成同一个守卫。
+      if (!tcp_->is_closing()) tcp_->close([](uvcpp_handle*) {});
+    }
+#if UVCPP_OPENSSL_ENABLE
+    // TLS 读路径上 `tls_ssl_` 正压在栈上（`tls_feed` / `tls_flush_out` 还在
+    // 下面那几层里），不能删。
+    tls_ssl_ = nullptr;
+#endif
+    loop_          = nullptr;
+    tcp_           = nullptr;
+    read_arg_      = nullptr;
+    connect_arg_   = nullptr;
+    write_arg_     = nullptr;
+    close_arg_     = nullptr;
+    close_mgr_arg_ = nullptr;
+    // `read_cache_` 不在此列：谁都不引用它，删掉比漏掉好。
+    if (read_cache_ != nullptr) {
+      delete read_cache_;
+      read_cache_ = nullptr;
+    }
+    return;
+  }
+
 #if UVCPP_OPENSSL_ENABLE
   // TLS 对象归本客户端所有，跟着一起走。注意这里**不发 close_notify**：
   // 发它要先把 wbio 里的字节异步写出去，而析构路径上没有事件循环可等。
@@ -145,17 +222,21 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
         bool close_done = false;
         tcp_->close([&close_done](uvcpp_handle*) { close_done = true; });
 
-        auto start = std::chrono::steady_clock::now();
-        while (!close_done) {
-          if (loop_ != nullptr) {
-            loop_->run(UV_RUN_NOWAIT);
-          }
-          auto elapsed =
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now() - start)
-                  .count();
-          if (elapsed > 5000) break;
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // **有界、不睡眠、不看墙钟**（与 `~uvcpp_ws_client` 同一形状）。
+        //
+        // 原先是 `while (!close_done) { run(NOWAIT); sleep(1ms); }` 加一个
+        // 5 秒墙钟上限：析构里睡 1 毫秒本身就是"在循环线程上跑耗时操作"，
+        // 而且它把一次终结拖成最多 5000 次系统调用 + 5 秒墙钟。64 轮
+        // `UV_RUN_NOWAIT` 足够把这一次 `uv_close` 的完成回调放完 ——
+        // `closesocket()` 是在 `uv_close()` 里**同步**做的（libuv
+        // `win/tcp.c` 的 `uv__tcp_close`），所以对端看到 FIN 与这里的轮数
+        // 无关；轮数只决定"句柄的终结收尾"这一轮跑没跑完，没跑完的后果是
+        // `uv_loop_close()` 失败，由 `~uvcpp_loop` 按既有策略"泄漏而不释放"。
+        // 实测（38 次析构、同一台机）：`close_done` 全部在**第 1 轮**就为真，
+        // 而 `loop_close()` 全部返回 0（队列干净、`~uvcpp_loop` 不必走"泄漏
+        // 而不释放"那条兜底）。也就是说 64 只是余量，不是"刚好够"。
+        for (int i = 0; i < 64 && !close_done; ++i) {
+          if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
         }
       } else {
         tcp_->close([](uvcpp_handle*) {});
@@ -173,7 +254,17 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   // Close the loop BEFORE deleting the TCP handle wrapper.
   // This ensures any internal libuv clean-up queued during handle close
   // is fully drained before uv_loop_close() validates the handle queue.
+  //
+  // 上面那两处泵只保证**本客户端的 tcp 句柄**收尾了，循环上可能还挂着别人
+  // （实测 `test_web_ws_ownership_func`：一个 `async(active=0 closing=1)`，
+  // 24 个泄漏循环全是它）。所以关之前再按循环自己的判据泵一遍 ——
+  // 判据用 `loop_alive()`，**不能把 `loop_close()` 写进条件**：它内部会
+  // `stop()`，而 `uv_run` 的 `while (r != 0 && loop->stop_flag == 0)` 是在进
+  // body 之前判的，停标志一立那一轮就整段空转，交替调用等于原地打转。
   if (loop_ != nullptr && owns_loop_) {
+    for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
+      loop_->run(UV_RUN_NOWAIT);
+    }
     loop_->loop_close();
     delete loop_;
     loop_ = nullptr;
@@ -1030,8 +1121,19 @@ int uvcpp_tcp_client::arm_async_read() {
             // base 先存局部：回调里可能把这个 client 关掉/删掉，之后就再也
             // 不能碰成员了，但 libuv 的缓冲区仍然必须释放。
             char* base = buf->base;
+            // **回调先拷到栈上再调**：`net_read_cb_` 是成员，它就存在这个对象
+            // 里，而回调里最自然的两种写法（`delete` 这个 client、或者就地
+            // `read_stop()`）都会**就地销毁它们正在执行的这个闭包**。那之后
+            // 回调里再碰任何一个按引用捕获的变量，读的就是已经还给分配器的
+            // 存储 —— 实测见 `~uvcpp_tcp_client` 开头那段（PageHeap 下
+            // SEGFAULT，裸跑不崩）。执行栈上这一份就与成员死活无关了。
+            //
+            // 代价：每收到一次数据拷一个 `std::function`（闭包超过 MSVC 的
+            // 小对象缓冲时是一次分配）。读事件本身已经有一次系统调用 + 一次
+            // 缓冲区往返，这个拷贝相对可以忽略；换掉的是一条静默的 use-after-free。
+            uvcpp_net_read_cb cb = net_read_cb_;
             try {
-              net_read_cb_(*this, r);
+              cb(*this, r);
             } catch (const std::exception& e) {
               // 用户读回调抛异常不能把 libuv 的循环带崩。
               std::fprintf(stderr,
@@ -1050,7 +1152,12 @@ int uvcpp_tcp_client::arm_async_read() {
             uvcpp_free_bytes(buf->base);
 
             if (read_fn_) {
-              read_fn_(&tmp_buf, read_arg_);
+              // 同上面框架那一路：`read_arg_` 指向的**就是此刻正在执行的
+              // 那个 `std::function`**，回调里析构客户端会把它还掉。先取到
+              // 局部，再调 —— 调完之后这个 lambda 一个成员都不碰。
+              read_callback_t fn  = read_fn_;
+              void*           arg = read_arg_;
+              fn(&tmp_buf, arg);
             }
           }
         } else {
@@ -1083,8 +1190,16 @@ int uvcpp_tcp_client::arm_async_read() {
               r.data  = nullptr;
               r.size  = 0;
               r.error = (nread == UV_EOF) ? 0 : static_cast<int>(nread);
+              // 与上面那条数据路径同一件事（栈上拷一份再调），只是这里多一层：
+              // **下面还要在本对象上跑 `fire_close_callbacks()`**，而"对端断了
+              // 就收摊"的写法（回调里 `delete client`）意味着那会儿对象已经没了。
+              // 这里拿一份存活令牌（那块 `char` 由栈上这个 `shared_ptr` 保着，
+              // 与对象的死活无关），下一句先问它再动成员 —— 成员访问必须先于
+              // 任何判断，所以判据只能来自局部。
+              ::std::shared_ptr<char> life = alive_token();
+              uvcpp_net_read_cb       cb   = net_read_cb_;
               try {
-                net_read_cb_(*this, r);
+                cb(*this, r);
               } catch (const std::exception& e) {
                 std::fprintf(stderr,
                              "[uvcpp_tcp_client] read callback threw: %s\n",
@@ -1094,12 +1209,15 @@ int uvcpp_tcp_client::arm_async_read() {
                     stderr,
                     "[uvcpp_tcp_client] read callback threw (unknown)\n");
               }
+              // **不能提前 return**：下面还要把 libuv 的缓冲区还回去。
+              // 对象没了就跳过关闭回调，只补那一次释放。
+              if (token_alive(life)) fire_close_callbacks();
+            } else {
+              // Notify close callbacks on connection close or error.
+              // 走统一的触发函数：两处必须用完全一样的槽位处理
+              // （见 fire_close_callbacks 里的置空说明）。
+              fire_close_callbacks();
             }
-
-            // Notify close callbacks on connection close or error.
-            // 走统一的触发函数：两处必须用完全一样的槽位处理
-            // （见 fire_close_callbacks 里的置空说明）。
-            fire_close_callbacks();
           }
           // Free the buffer even on error/EOF
           if (buf->base != nullptr) {

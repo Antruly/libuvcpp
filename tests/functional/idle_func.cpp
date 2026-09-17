@@ -4,12 +4,15 @@
 #include "handle/uvcpp_timer.h"
 #include <atomic>
 #include <thread>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
 int main() {
   std::cout << "[functional idle] start\n";
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_idle idl(&loop);

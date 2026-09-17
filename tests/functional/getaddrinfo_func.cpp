@@ -3,6 +3,7 @@
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_timer.h"
 #include "req/uvcpp_getaddrinfo.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -13,6 +14,8 @@ int main() {
   std::atomic<bool> has_result(false);
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_getaddrinfo* req = new uvcpp_getaddrinfo();

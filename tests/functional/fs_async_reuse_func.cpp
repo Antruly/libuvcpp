@@ -28,6 +28,7 @@
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_timer.h"
 #include "req/uvcpp_fs.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -48,6 +49,8 @@ int main() {
   // ---- scenario 1: sequential reuse of ONE fs object ----
   {
     uvcpp_loop loop;
+
+    uvcpp_test::loop_drain drain_loop(&loop);
     loop.init();
 
     std::promise<int> done;
@@ -120,6 +123,8 @@ int main() {
   // ---- scenario 2: guard rejects re-submit while in flight ----
   {
     uvcpp_loop loop;
+
+    uvcpp_test::loop_drain drain_loop(&loop);
     loop.init();
 
     uvcpp_fs fs;

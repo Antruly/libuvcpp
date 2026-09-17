@@ -28,8 +28,11 @@
  *
  * 由此带来两条必须遵守的约束：
  *
- * - **不要在回调里析构本对象**：析构会连带删掉底层客户端与它正在跑的事件
- *   循环（`uv_run` 不可重入）。与协议层"不要在回调里 delete 会话"同一类约束。
+ * - **不要在回调里析构本对象**：本层的 `run()` 是自己一帧一帧驱动底层的
+ *   （`inner_->run(UV_RUN_ONCE)`），析构会把**这一帧脚下的对象**连同底层
+ *   客户端一起删掉。协议层（`~uvcpp_ws_client`）在自己的回调里被析构是兜得住
+ *   的（它整块交出去、不漏一个字节地泄漏），但**本层兜不住** —— 那说的是
+ *   "底层客户端"这一层，管不到"正在跑 `run()` 的包装对象"这一层。
  * - **不要在回调里调 `connect()`**：底层循环正在跑，换不得。本层会把它推迟
  *   到当前这一轮循环返回之后（`restart_pending_`），所以不会崩，但这一次调用
  *   只是**登记**，不是立即发起。
@@ -278,8 +281,17 @@ class UVCPP_API uvcpp_web_ws_client {
    *
    * `UV_RUN_DEFAULT` 不是简单转发给底层：本层按"一次一轮"的方式驱动，好让
    * **重连的换客户端动作落在两次循环之间**（换客户端会连带删掉正在跑的那个
-   * 循环，落在回调里就是 `uv_run` 重入）。在没有活句柄时自然返回，`stop()`
-   * 也会让它返回。
+   * 循环，落在回调里就是 `uv_run` 重入）。
+   *
+   * **出口只有两条**，别指望别的：
+   *
+   * - **没事可等了** —— 循环上一个活句柄都不剩。确切地说是两种情况：不开
+   *   重连时对端走掉；开重连时次数用尽且连不上。连着、有在途收发、或有
+   *   重连定时器在等的时候都**不算**"没事可等"，那时它不会返回。
+   * - **`stop()`** —— 从回调里调才会立刻生效（见 `stop()`）。
+   *
+   * 所以"连上了就一直不返回"是**对的**，别把 `run()` 当成"连上就返回"的
+   * 阻塞式 API —— 那个是脚本/测试用的 `connect_wait()`。
    */
   int run(uv_run_mode md = UV_RUN_DEFAULT);
 
@@ -302,6 +314,24 @@ class UVCPP_API uvcpp_web_ws_client {
    * 客户端时重新装上去。
    */
   uvcpp_web_ws_client& set_ssl_context(uvcpp_ssl_context* ctx);
+#endif
+
+#if UVCPP_ZLIB_ENABLE
+  /**
+   * @brief permessage-deflate（RFC 7692）协商策略。**默认开启**。
+   *
+   * 与 `set_ssl_context()` 同一个形状，理由也一样：存一份在本层，**每次重建
+   * 底层客户端时重新装上去**。`do_restart()` 是**每次 `connect()` 都重建**的
+   * （不只是重连），所以策略若只装在构造出来那个实例上，第一次 `connect()`
+   * 就丢了。
+   *
+   * `cfg.enabled = false` 是"本端连提都不提这个扩展"—— 服务端即便支持也协商
+   * 不上，双方退回普通 WS 帧。
+   */
+  uvcpp_web_ws_client& set_compression(const uvcpp_ws_deflate_config& cfg);
+
+  /** @brief 当前生效的策略（未调过 setter 时是默认值，`enabled == true`）。 */
+  uvcpp_ws_deflate_config get_compression() const;
 #endif
 
  private:
@@ -347,6 +377,12 @@ class UVCPP_API uvcpp_web_ws_client {
 
 #if UVCPP_OPENSSL_ENABLE
   uvcpp_ssl_context* ssl_ctx_;
+#endif
+
+#if UVCPP_ZLIB_ENABLE
+  /// permessage-deflate 策略。存一份的理由同 `ssl_ctx_`：`inner_` 每次
+  /// `connect()`（以及每次重连）都换新，装晚了就是"配置在重建时丢了"。
+  uvcpp_ws_deflate_config deflate_cfg_;
 #endif
 
   /** @brief 本次 `connect()` 的回调（一次性，报第一次尝试的结果）。 */

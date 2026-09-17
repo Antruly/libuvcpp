@@ -43,6 +43,7 @@
 #include <req/uvcpp_write.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_define.h>
+#include "loop_drain.h"
 
 #if UVCPP_ENABLE_MEMORY_POOL
 #include <expand/uvcpp_page_heap.h>
@@ -79,6 +80,8 @@ int main() {
   std::cout << "[tcp_write_completion] start" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_tcp_server server;
@@ -376,6 +379,8 @@ int main() {
   // 所以至少要确认它还能把控制权交回来、循环还能干净关掉。
   {
     uvcpp_loop loop2;
+
+    uvcpp_test::loop_drain drain_loop2(&loop2);
     loop2.init();
     {
       uvcpp_tcp_client* c2 = new uvcpp_tcp_client(&loop2);

@@ -38,6 +38,7 @@
  */
 
 #include <uvcpp/uvcpp_define.h>
+#include "loop_drain.h"
 
 #if UVCPP_WEBAPP_ENABLE
 
@@ -349,6 +350,7 @@ class upload_env {
   int timeout_ms_;
   std::atomic<bool> timed_out_;
   uvcpp_loop loop_;
+  uvcpp_test::loop_drain drain_loop_{&loop_};
   std::unique_ptr<uvcpp_timer> watchdog_;
 };
 

@@ -747,6 +747,34 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   uvcpp_ws_server* ws_server() { return ws_server_; }
 
+#if UVCPP_ZLIB_ENABLE
+  /**
+   * @brief 配置服务端 permessage-deflate（RFC 7692）协商策略。**默认开启**。
+   *
+   * 与 `ws_server()->set_compression(cfg)` 是同一件事，区别只有两点：
+   *
+   *   - **调用顺序无关。** WS 服务是 `enable_wss()` / `websocket()` 时**惰性
+   *     创建的**，在那之前 `ws_server()` 返回 nullptr，逃生口就够不着。这里
+   *     把配置存在 App 上，建服务时再打过去；已经建好之后调也立刻生效。
+   *   - 名字里带 `ws_`。本类的 `set_compression(bool)` 管的是 **HTTP 响应体
+   *     压缩**（`Content-Encoding`），与 WS 的 permessage-deflate 是两件
+   *     不相干的事 —— 别拿错那个。
+   *
+   * 默认开启是安全的：压缩只在**对端主动提**了这个扩展、且本端接受之后才
+   * 生效，本端从不单方面压缩。对端没提就退化成普通 WS。
+   */
+  uvcpp_web_app& set_ws_compression(const uvcpp_ws_deflate_config& cfg);
+
+  /**
+   * @brief 当前生效的 WS 压缩策略。
+   *
+   * 服务已经建好时读的是**它**当前的值（所以用 `ws_server()->set_compression()`
+   * 逃生口改过的也能读到），还没建时读的是存下来的意图。未调过 setter 时是
+   * 默认值（`enabled == true`）。
+   */
+  uvcpp_ws_deflate_config get_ws_compression() const;
+#endif
+
   /** @brief 是否已经打开 WS 支持。 */
   bool wss_enabled() const { return ws_server_ != nullptr; }
 
@@ -1068,6 +1096,13 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 底下的 tcp_server 所有。
    */
   uvcpp_ws_server* ws_server_;
+
+#if UVCPP_ZLIB_ENABLE
+  /// WS permessage-deflate 策略。**建 `ws_server_` 时才打过去** —— 存一份在
+  /// App 上（而不是只存在服务上）是为了让 `set_ws_compression()` 能在
+  /// `websocket()` 之前调：那时服务器还没建，`ws_server()` 还是 nullptr。
+  uvcpp_ws_deflate_config ws_deflate_cfg_;
+#endif
 
   /**
    * @brief WS 路由表。与 `router_` 是**两张独立的表**。

@@ -12,6 +12,7 @@
 #include "req/uvcpp_write.h"
 #include "req/uvcpp_work.h"
 #include "uvcpp/uvcpp_buf.h"
+#include "loop_drain.h"
 
 
 using namespace uvcpp;
@@ -27,6 +28,8 @@ int main() {
 
   // client loop + async: client loop must be running to receive async
   uvcpp_loop client_loop;
+
+  uvcpp_test::loop_drain drain_client_loop(&client_loop);
   client_loop.init();
   uvcpp_async start_async;
   start_async.init(
@@ -95,6 +98,8 @@ int main() {
   // Server thread: own loop, bind/listen, accept and echo
   std::thread server_thread([&start_async, &port_promise, &success](){
     uvcpp_loop server_loop;
+
+    uvcpp_test::loop_drain drain_server_loop(&server_loop);
     server_loop.init();
 
     uvcpp_tcp server(&server_loop);
@@ -181,6 +186,12 @@ int main() {
             uvcpp_loop *work_loop = client_data->work_loop;
             uvcpp_loop *service_loop = w->get_loop();
             delete client;
+            // 工作线程那个循环是 `new` 出来的（`srv_loop`），一直没人删。
+            // 删在 `client` **之后**：`client` 是它上面的句柄，先删句柄再删
+            // 循环，与 `~uvcpp_tcp_server` / 两个 web 客户端同一条顺序。
+            // 此刻工作线程的 `UV_RUN_DEFAULT` 已经返回、循环没在跑，所以
+            // 析构里那段落尾泵不会和工作线程打架。
+            delete work_loop;
             server.close([service_loop](uvcpp_handle *hd) {
               std::cout << "[functional tcp] tcp service closed" << std::endl;
               service_loop->stop();

@@ -6,12 +6,15 @@
 #include "uvcpp/uvcpp_buf.h"
 #include <future>
 #include <uv.h>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
 int main() {
   std::cout << "[functional fs] start\n";
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_fs fs;

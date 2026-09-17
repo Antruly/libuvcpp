@@ -16,8 +16,8 @@ uvcpp_signal::uvcpp_signal(uvcpp_loop *loop) : uvcpp_handle() {
 }
 
 int uvcpp_signal::init() {
-  memset(UVCPP_SIGNAL_HANDLE, 0, sizeof(uv_signal_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_SIGNAL_HANDLE, sizeof(uv_signal_t));
   return 0;
 }
 int uvcpp_signal::init(uvcpp_loop *loop) {
@@ -50,15 +50,30 @@ void uvcpp_signal::loadavg(double avg[3]) {
 }
 
 void uvcpp_signal::callback_start(uv_signal_t *handle, int signum) {
-  if (reinterpret_cast<uvcpp_signal *>(handle->data)->signal_start_cb)
-    reinterpret_cast<uvcpp_signal *>(handle->data)
-        ->signal_start_cb(reinterpret_cast<uvcpp_signal *>(handle->data), signum);
+  uvcpp_signal *self = reinterpret_cast<uvcpp_signal *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->signal_start_cb;
+  if (cb) {
+    cb(self, signum);
+  }
 }
 
 void uvcpp_signal::callback_start_oneshot(uv_signal_t *handle, int signum) {
-  if (reinterpret_cast<uvcpp_signal *>(handle->data)->signal_start_oneshot_cb)
-    reinterpret_cast<uvcpp_signal *>(handle->data)
-        ->signal_start_oneshot_cb(reinterpret_cast<uvcpp_signal *>(handle->data),
-                                  signum);
+  uvcpp_signal *self = reinterpret_cast<uvcpp_signal *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->signal_start_oneshot_cb;
+  if (cb) {
+    cb(self, signum);
+  }
 }
 } // namespace uvcpp

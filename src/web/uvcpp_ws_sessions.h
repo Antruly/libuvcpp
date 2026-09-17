@@ -69,6 +69,16 @@ class UVCPP_API uvcpp_ws_sessions {
    *
    * 传 nullptr 表示"暂时没有循环可用"：延迟回收退化成"等下一次
    * `recycle_all()`"，会话不会丢，但回收会推迟。
+   *
+   * 建出来的句柄是**按需保活**的：**退休表空着时 unref、有东西要删时 ref**。
+   * 它只负责"醒来把待回收的会话删掉"，不是"进程还在等的事"，所以不该让一个
+   * 没事可做的循环被它撑着（`uv_run` 的存活判据就是 `active_handles > 0`）；
+   * 但反过来，有东西要删时它**必须**算数 —— 否则 `uv_run` 会在进 while 体之前
+   * 就因为存活为 0 直接返回，挂起的唤醒请求没人取，回收永远不发生。
+   * 两边的实测都写在 `set_loop()` / `on_retired()` 的实现注释里。
+   *
+   * 属主的循环通常另有保活句柄（服务器的监听、客户端的连接与重连定时器）；
+   * 这条规则管的是"别的都没了"那一刻。
    */
   void set_loop(uvcpp_loop* loop);
 
@@ -123,6 +133,23 @@ class UVCPP_API uvcpp_ws_sessions {
    */
   void shutdown();
 
+  /**
+   * @brief 交出全部会话，**一个都不删**（只把表清空），此后本对象不再管它们。
+   *
+   * 只给一条路用：属主在**自己的某个回调里**析构（`~uvcpp_ws_client` 那一处）。
+   * 那一刻会话的某个回调正压在栈上，而它多半就地执行着会话自己的
+   * `std::function`（`uvcpp_ws_connection::deliver_message` 是就地调用）——
+   * 删会话就是删掉正在执行的那个闭包，`shutdown()` 里那句"绝不能在自己的
+   * 回调里做"说的正是这件事，只是那条路是属主从外面调进来的，这里是从里面。
+   *
+   * 会话对象连同它引用的 TCP 客户端一起留给循环。属主已经没了，所以这是
+   * **有意的泄漏**，换掉一个必然发生的 use-after-free（与 `~uvcpp_loop` 里
+   * "`uv_loop_close()` 关不掉就不释放那块内存"同一条策略）。
+   *
+   * 调过之后 `shutdown()` 变成空操作。
+   */
+  void abandon();
+
   /** @brief 当前持有的会话数（已终结待回收的**不算**）。 */
   size_t size() const;
 
@@ -155,6 +182,8 @@ class UVCPP_API uvcpp_ws_sessions {
   uvcpp_async* drain_async_ = nullptr;
   size_t       recycled_    = 0;
   std::function<void(uvcpp_ws_connection*)> retire_observer_;
+  /** @brief `abandon()` 过了：`shutdown()` 从此是空操作，别再碰那些会话。 */
+  bool abandoned_ = false;
 };
 
 }  // namespace uvcpp

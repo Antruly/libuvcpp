@@ -38,6 +38,19 @@ enum ws_client_status : int {
   WS_CLIENT_ERROR      = 0x10,
 };
 
+/**
+ * @brief 在**自己的回调里**析构本对象：允许，但会漏掉一批内部对象。
+ *
+ * 与 `uvcpp_web_ws_client`（框架层）不同，**本层不禁这种写法**：回调里
+ * `delete cli` 是"连接结束就收摊"的常见写法，所以它必须不崩。
+ *
+ * 代价是**有意的泄漏** —— 那一刻栈上压着回调，收尾动作一件都做不了（见
+ * `~uvcpp_ws_client` 的注释：释放 loop、回收会话、删 TCP 客户端，三层都是
+ * use-after-free）。于是 loop、TCP 客户端与当时的会话全部留给循环，不再回收。
+ *
+ * 这只是"不崩"的兜底，不是推荐用法：想干净收摊就在 `run()` 返回之后再
+ * `delete`，那样一个对象都不会漏。
+ */
 class UVCPP_API uvcpp_ws_client {
  public:
   UVCPP_DEFINE_FUNC(uvcpp_ws_client)
@@ -202,8 +215,9 @@ class UVCPP_API uvcpp_ws_client {
   std::function<void(uvcpp_ws_connection*, int)> connect_cb_;
 
 #if UVCPP_OPENSSL_ENABLE
+  /// TLS 上下文。握手不在这里做 —— 交给 `tcp_->enable_tls(ssl_ctx_)`
+  /// 的 memory-BIO 过滤器，理由见 `do_handshake()` 里那段说明。
   uvcpp_ssl_context* ssl_ctx_ = nullptr;
-  class uvcpp_ssl*   ssl_    = nullptr;
 #endif
 };
 

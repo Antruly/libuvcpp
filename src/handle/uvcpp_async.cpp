@@ -15,8 +15,8 @@ uvcpp_async::uvcpp_async(uvcpp_loop *loop) : uvcpp_handle() {
 }
 
 int uvcpp_async::init() {
-  memset(UVCPP_ASYNC_HANDLE, 0, sizeof(uv_async_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_ASYNC_HANDLE, sizeof(uv_async_t));
   return 0;
 }
 
@@ -33,9 +33,17 @@ int uvcpp_async::init(::std::function<void(uvcpp_async *)> init_cb, uvcpp_loop *
 }
 
 void uvcpp_async::callback_init(uv_async_t *handle) {
-  if (reinterpret_cast<uvcpp_async *>(handle->data)->async_init_cb)
-    reinterpret_cast<uvcpp_async *>(handle->data)
-        ->async_init_cb(reinterpret_cast<uvcpp_async *>(handle->data));
+  uvcpp_async *self = reinterpret_cast<uvcpp_async *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->async_init_cb;
+  if (cb) {
+    cb(self);
+  }
 }
 
 

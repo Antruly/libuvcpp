@@ -47,9 +47,17 @@ protected:
 
 private:
   static void callback_start(void *pdata) {
-    if (reinterpret_cast<uvcpp_thread *>(pdata)->thread_start_cb)
-      reinterpret_cast<uvcpp_thread *>(pdata)->thread_start_cb(
-          reinterpret_cast<uvcpp_thread *>(pdata));
+    uvcpp_thread *self = reinterpret_cast<uvcpp_thread *>(pdata);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->thread_start_cb;
+  if (cb) {
+    cb(self);
+  }
   }
 
 private:

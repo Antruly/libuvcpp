@@ -16,7 +16,6 @@
 #include <web/uvcpp_ws_ext.h>
 
 #if UVCPP_OPENSSL_ENABLE
-#include <ssl/uvcpp_ssl.h>
 #include <ssl/uvcpp_ssl_context.h>
 #endif
 
@@ -112,6 +111,9 @@ uvcpp_ws_client::~uvcpp_ws_client() {
   //   `uv_loop_t` 那块内存还给了分配器；紧接着 `delete tcp_` 走
   //   `uvcpp_handle::free_handle` 的"(1) init 过但没启动"那一路去 `uv_close` ——
   //   而 `uv_close` 会往 `handle->loop` 里写，那个 loop 已经释放了。
+  //   *（末两句是当时的顺序，今天已不成立 —— `delete tcp_` 现在排在关循环
+  //   **之前**。留着的理由是判据那条教训本身仍然成立：`is_active()` 假只说明
+  //   "没在跑"，漏关句柄照样会让 `loop_close()` 拿到 `UV_EBUSY`、循环泄漏。）*
   //
   // 实测（2026-09-16，本文件临时插桩）：没连过 / 连失败之后析构，
   // `is_active()=0 is_closing()=0 handle=1`，`uv_loop_close` 返回 **-4082
@@ -119,6 +121,35 @@ uvcpp_ws_client::~uvcpp_ws_client() {
   //
   // 先问 `get_handle()` 再问 `is_closing()`：句柄关完之后 `_handle` 会被置空，
   // 而 `is_closing()` 是把它直接交给 `uv_is_closing()` —— 它解引用。
+  // ---------------------------------------------------------------------
+  // **本对象是在它自己的某个回调里被析构的** —— 这是另一条完全不同的路，
+  // 上面那套收尾动作在这一路上一件都不能做。判据是循环还在跑（`run()` 没
+  // 返回），也就是栈上还压着某个回调。
+  //
+  // 这一路的三层悬垂，全部**实测**过（`on_text` 里 `delete cli`，
+  // `web_ws_client_api_func.cpp` 的 [P]；Release 裸跑一次都不崩，
+  // **PageHeap 下一次 SEGFAULT** —— 典型的静默破坏）：
+  //
+  //   1. **释放 loop**：重入的那几轮 `uv_run` 会把关闭回调放完，
+  //      `uv_loop_close()` 就成功了，`~uvcpp_loop` 随即把 `uv_loop_t`
+  //      还给分配器 —— 而外层那一帧 `uv_run` 返回后接着用它。**崩在这里**。
+  //   2. **回收会话**：`sessions_.shutdown()` → `recycle_all()` 当场 `delete`
+  //      会话，可会话的 `deliver_message()` 正是就地执行着它自己的
+  //      `std::function`（就是压在我们下面那一层）——删掉正在执行的闭包。
+  //   3. **`delete tcp_`**：活着的会话还引用着它。
+  //
+  // 所以这一路**整块交出去，一个都不拆**：loop、tcp、会话全部留给循环。
+  // 这是**有意的泄漏**（与 `~uvcpp_loop` 里"`uv_loop_close()` 关不掉就不释放
+  // 那块内存"同一条策略）—— 泄漏换掉三个必然发生的 use-after-free。
+  //
+  // 本层不禁这种写法，所以它必须**不崩**：这条是有用例钉着的（[P]）。
+  if (loop_ != nullptr && loop_->is_running()) {
+    sessions_.abandon();
+    loop_ = nullptr;
+    tcp_  = nullptr;
+    return;
+  }
+
   if (tcp_ != nullptr) {
     auto* raw = tcp_->get_tcp();
     if (raw != nullptr && raw->get_handle() != nullptr && !raw->is_closing()) {
@@ -140,15 +171,28 @@ uvcpp_ws_client::~uvcpp_ws_client() {
   sessions_.shutdown();
   // 让 async 句柄那一次 uv_close 的完成回调跑掉（不跑就只是句柄内存留在
   // 回收站里，直到 loop 关闭 —— 不影响正确性，但没必要留着）。
+  //
+  // 原来是固定 8 轮；改成按循环自己的判据泵（`loop_alive()`）——固定轮数是
+  // "猜够不够"，而这里要的是"确实排空了"。循环上除了这个 async 还可能有别
+  // 的收尾（本层下面还有 `delete tcp_`），一轮都排不掉就没得补了。
+  // **判据不能用 `loop_close()`**：它内部会 `stop()`，而 `uv_run` 的
+  // `while (r != 0 && loop->stop_flag == 0)` 是**进 body 之前**判的，停标志一
+  // 立那一轮就整段空转。
   if (loop_ != nullptr) {
-    for (int i = 0; i < 8; ++i) loop_->run(UV_RUN_NOWAIT);
+    for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
+      loop_->run(UV_RUN_NOWAIT);
+    }
   }
 
-  if (loop_) { loop_->loop_close(); delete loop_; loop_ = nullptr; }
+  // **`tcp_` 必须趁循环还活着删掉**（同一个形状，见 `~uvcpp_http_client` 那段
+  // 长注释）：`tcp_ = new uvcpp_tcp_client(loop_)` 借的是本对象的循环，
+  // `~uvcpp_tcp_client` 第一件事就是 `loop_->is_running()`；先删循环再删它，
+  // 那一次读就是释放后使用（完整页堆下 `0xC0000005`，裸跑看不见）。
   delete tcp_; tcp_ = nullptr;
-#if UVCPP_OPENSSL_ENABLE
-  delete ssl_; ssl_ = nullptr;
-#endif
+  // 本层不再持有 `uvcpp_ssl` —— TLS 由 `tcp_` 的过滤器持有，随它一起析构。
+  // 这一步之后到 `loop_close()` 之间不再泵，所以 `tcp_` 析构万一排进来的那笔
+  // 关闭最多让 `loop_close()` 返回 `UV_EBUSY`，不会把已删对象的回调跑起来。
+  if (loop_) { loop_->loop_close(); delete loop_; loop_ = nullptr; }
 }
 
 int uvcpp_ws_client::connect(const std::string& url,
@@ -206,20 +250,40 @@ int uvcpp_ws_client::connect_wait(const std::string& url,
 
 void uvcpp_ws_client::do_handshake(const std::string& host, int port,
                                     const std::string& path, const std::string& key) {
-  tcp_->connect(host.c_str(), port, [this](int st) {
-    if (st != 0) { on_handshake_complete(st); return; }
-
 #if UVCPP_OPENSSL_ENABLE
-    if (use_tls_) {
-      uv_os_sock_t sock;
-      if (tcp_->get_tcp() && uvcpp_handle::fileno(tcp_->get_tcp(), sock) == 0) {
-        delete ssl_; ssl_ = new uvcpp_ssl(ssl_ctx_, static_cast<int>(sock));
-        int rc = ssl_->handshake();
-        if (rc <= 0) { on_handshake_complete(-1); return; }
-      } else { on_handshake_complete(-1); return; }
-    }
+  // **TLS 交给 `uvcpp_tcp_client` 自己的过滤器，本层不要再开一个 fd-based 的
+  // `uvcpp_ssl` 握手。** 原先那段是
+  //     new uvcpp_ssl(ctx, sock) → handshake() → if (rc <= 0) 失败
+  // 两个错叠在一起：
+  //
+  //  1. `uvcpp_ssl::handshake()` 的契约是「1 = 握手完成，0 = **还需要更多 I/O**，
+  //     < 0 = 真出错」，`uvcpp_ssl.h:87-93` 专门写着"判失败要用 `< 0`，不能用
+  //     `!= 1`：0 是「还没完」，是常态"。非阻塞 socket 上第一次 `SSL_connect`
+  //     **必然**返回 0（ClientHello 得先出网、ServerHello 得先回来），于是每一次
+  //     `wss://` 连接都在这一句被判成失败。
+  //  2. 就算把判据改成 `< 0` 也还是错：fd-based BIO 下握手要跨多轮 I/O，而在同一
+  //     轮里紧接着 `tcp_->write()` 会把**明文**的 HTTP 升级请求塞进一条还没建好
+  //     的 TLS 连接。
+  //
+  // `enable_tls()` 把两件事一起解决了：过滤层走 memory BIO（socket 由 libuv
+  // 独占），握手由读事件推进，并且**客户端的 connect 回调被推迟到握手完成之后**
+  // —— 见 `uvcpp_tcp_client.h:160-172`，以及 `tests/functional/web_ssl_app_ws_func.cpp:189-192`
+  // 那段注释（它自己就在用 `tcp.enable_tls()` 手搓 wss，所以这条路径是有实测的）。
+  // 于是下面回调里发升级请求时，TLS 一定已经建立。
+  //
+  // 只在还没装过时装：`enable_tls()` 第二次返回 `UV_EALREADY`。同一个 `tcp_`
+  // 在重连时会复用（框架层 `uvcpp_web_ws_client::do_restart()` 是换一个全新的
+  // `uvcpp_ws_client`，不走这条）。
+  if (use_tls_ && !tcp_->is_tls()) {
+    const int trc = tcp_->enable_tls(ssl_ctx_);
+    if (trc != 0) { on_handshake_complete(trc); return; }
+  }
 #endif
 
+  tcp_->connect(host.c_str(), port, [this](int st) {
+    if (st != 0) { on_handshake_complete(st); return; }
+    // 走到这里时，若开了 TLS，握手已经完成（`enable_tls()` 把 connect 回调
+    // 推迟到了握手之后）。
     // Send HTTP upgrade request
     std::string req =
         "GET " + ws_path_ + " HTTP/1.1\r\n"

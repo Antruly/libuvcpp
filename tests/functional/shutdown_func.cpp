@@ -10,6 +10,7 @@
 #include "req/uvcpp_write.h"
 #include "req/uvcpp_shutdown.h"
 #include "uvcpp/uvcpp_buf.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -23,6 +24,8 @@ int main() {
   // Server thread
   std::thread server_thread([&]() {
     uvcpp_loop server_loop;
+
+    uvcpp_test::loop_drain drain_server_loop(&server_loop);
     server_loop.init();
 
     uvcpp_tcp server(&server_loop);
@@ -77,6 +80,8 @@ int main() {
   std::thread client_thread([&]() {
     int port = port_future.get();
     uvcpp_loop client_loop;
+
+    uvcpp_test::loop_drain drain_client_loop(&client_loop);
     client_loop.init();
 
     uvcpp_tcp client(&client_loop);

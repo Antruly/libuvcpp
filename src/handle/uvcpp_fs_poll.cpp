@@ -15,8 +15,8 @@ uvcpp_fs_poll::uvcpp_fs_poll(uvcpp_loop *loop) : uvcpp_handle() {
 }
 
 int uvcpp_fs_poll::init() {
-  memset(UVCPP_FSPOLL_HANDLE, 0, sizeof(uv_fs_poll_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_FSPOLL_HANDLE, sizeof(uv_fs_poll_t));
   return 0;
 }
 
@@ -46,9 +46,17 @@ int uvcpp_fs_poll::getpath(char *buffer, size_t *size) {
 
 void uvcpp_fs_poll::callback_start(uv_fs_poll_t *handle, int status,
                              const uv_stat_t *prev, const uv_stat_t *curr) {
-  if (reinterpret_cast<uvcpp_fs_poll *>(handle->data)->fs_poll_start_cb)
-    reinterpret_cast<uvcpp_fs_poll *>(handle->data)
-        ->fs_poll_start_cb(reinterpret_cast<uvcpp_fs_poll *>(handle->data), prev,
+  uvcpp_fs_poll *self = reinterpret_cast<uvcpp_fs_poll *>(handle->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 拷一份再调用：回调里 `delete self` 是合法用法（见 uvcpp_handle::
+  // callback_close 的说明），就地调用等于在正在执行的闭包上删对象。
+  // 句柄回调会重复触发，所以是拷不是搬。
+  auto cb = self->fs_poll_start_cb;
+  if (cb) {
+    cb(self, prev,
                            curr);
+  }
 }
 } // namespace uvcpp

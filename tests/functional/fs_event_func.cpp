@@ -6,6 +6,7 @@
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_fs_event.h"
 #include "handle/uvcpp_timer.h"
+#include "loop_drain.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -42,6 +43,8 @@ int main() {
   }
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_fs_event fs_event(&loop);

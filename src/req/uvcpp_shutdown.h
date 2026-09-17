@@ -42,9 +42,13 @@ public:
  private:
     
   static void callback_shutdown(uv_shutdown_t* req, int status) {
-      if (reinterpret_cast<uvcpp_shutdown*>(req->data)->m_shutdown_cb)
-        reinterpret_cast<uvcpp_shutdown*>(req->data)->m_shutdown_cb(
-            reinterpret_cast<uvcpp_shutdown*>(req->data), status);
+      uvcpp_shutdown *self = reinterpret_cast<uvcpp_shutdown *>(req->data);
+  if (self == nullptr) {
+    return;
+  }
+  // 一次性请求完成，走 invoke_completion（搬闭包再调用，随后按 is_self_free
+  // 决定要不要删 self），理由见 uvcpp_req.h。
+  invoke_completion(self->m_shutdown_cb, self, status);
     }
 
    private:

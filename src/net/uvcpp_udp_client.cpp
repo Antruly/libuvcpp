@@ -103,8 +103,17 @@ uvcpp_udp_client::~uvcpp_udp_client() {
     }
   }
 
-  // Close loop first, then delete the handle
+  // Close loop first, then delete the handle.
+  //
+  // 关之前按循环自己的判据再泵一遍：上面那几步只保证 **udp 句柄**收尾了，
+  // 循环上可能还挂着别人（`async` / `timer` 之类只关了一半的）。判据是
+  // `loop_alive()` 而不是 `loop_close()` —— 后者内部会 `stop()`，而 `uv_run`
+  // 的 `while (r != 0 && loop->stop_flag == 0)` 是**进 body 之前**判的，
+  // 停标志一立那一轮就整段空转，交替调用等于原地打转。
   if (loop_ != nullptr) {
+    for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
+      loop_->run(UV_RUN_NOWAIT);
+    }
     loop_->loop_close();
     delete loop_;
     loop_ = nullptr;

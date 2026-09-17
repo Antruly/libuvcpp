@@ -22,6 +22,7 @@
 #include "handle/uvcpp_idle.h"
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_timer.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -43,6 +44,8 @@ void test_delete_wrapper_in_close_callback() {
   std::cout << "[handle_close] delete_wrapper_in_close_callback" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   // 故意堆分配：回调里要 delete 它。
@@ -88,6 +91,8 @@ void test_close_callback_fires_once() {
   std::cout << "[handle_close] close_callback_fires_once" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_idle idl(&loop);
@@ -123,6 +128,8 @@ void test_multiple_self_deleting_handles() {
   std::cout << "[handle_close] multiple_self_deleting_handles" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   const int kCount = 16;
@@ -158,6 +165,8 @@ void test_close_without_callback() {
   std::cout << "[handle_close] close_without_callback" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_idle idl(&loop);
@@ -197,6 +206,8 @@ void test_null_handle_guards() {
   std::cout << "[handle_close] null_handle_guards" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_idle idl(&loop);
@@ -305,6 +316,8 @@ void test_inited_but_never_started_handle() {
   std::cout << "[handle_close] inited_but_never_started_handle" << std::endl;
 
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   check(loop.init() == 0, "loop.init()");
 
   {

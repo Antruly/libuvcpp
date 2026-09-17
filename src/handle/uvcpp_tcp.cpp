@@ -31,8 +31,8 @@ uvcpp_tcp::uvcpp_tcp(uvcpp_loop *loop, unsigned int flags) : uvcpp_stream() {
 #endif
 
 int uvcpp_tcp::init() {
-  memset(UVCPP_TCP_HANDLE, 0, sizeof(uv_tcp_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_TCP_HANDLE, sizeof(uv_tcp_t));
   return 0;
 }
 

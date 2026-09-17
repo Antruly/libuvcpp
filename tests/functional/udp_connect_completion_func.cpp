@@ -47,6 +47,7 @@
 #include <req/uvcpp_udp_send.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_define.h>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -151,6 +152,8 @@ int main() {
     check(rc == 0, "tcp server listen rc = " + std::to_string(rc));
 
     uvcpp_loop loop2;
+
+    uvcpp_test::loop_drain drain_loop2(&loop2);
     loop2.init();
     uvcpp_tcp tcp(&loop2);
 
@@ -391,6 +394,8 @@ int main() {
     check(rc == 0, "client connect: server listen rc = " + std::to_string(rc));
 
     uvcpp_loop loop3;
+
+    uvcpp_test::loop_drain drain_loop3(&loop3);
     loop3.init();
     uvcpp_tcp_client c(&loop3);
     std::atomic<bool> up{false};

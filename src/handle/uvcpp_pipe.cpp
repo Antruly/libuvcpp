@@ -16,8 +16,8 @@ uvcpp_pipe::uvcpp_pipe(uvcpp_loop *loop, int pic) : uvcpp_stream() {
 }
 
 int uvcpp_pipe::init() {
-  memset(UVCPP_PIPE_HANDLE, 0, sizeof(uv_pipe_t));
-  this->set_handle_data();
+  // 已接进循环的句柄不能清零，理由见 uvcpp_handle::reset_handle_state。
+  this->reset_handle_state(UVCPP_PIPE_HANDLE, sizeof(uv_pipe_t));
   return 0;
 }
 

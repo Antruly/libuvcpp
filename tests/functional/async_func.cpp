@@ -4,12 +4,15 @@
 #include <atomic>
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_async.h"
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
 int main() {
   std::cout << "[functional async] start\n";
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   uvcpp_async async;

@@ -4,12 +4,15 @@
 #include "handle/uvcpp_loop.h"
 #include "handle/uvcpp_process.h"
 #include <future>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
 int main() {
   std::cout << "[functional process] start\n";
   uvcpp_loop loop;
+
+  uvcpp_test::loop_drain drain_loop(&loop);
   loop.init();
 
   // This functional test spawns a short-lived child process and verifies the exit callback.

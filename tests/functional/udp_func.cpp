@@ -10,6 +10,7 @@
 #include "handle/uvcpp_udp.h"
 #include "req/uvcpp_udp_send.h"
 #include <chrono>
+#include "loop_drain.h"
 
 using namespace uvcpp;
 
@@ -24,6 +25,8 @@ int main() {
   auto server_ready_created_future = server_ready_created.get_future();
 
   uvcpp_loop client_loop;
+
+  uvcpp_test::loop_drain drain_client_loop(&client_loop);
   client_loop.init();
   uvcpp_udp client(&client_loop);
   uvcpp_async client_stop_async;
@@ -102,6 +105,8 @@ int main() {
   // Server thread
   std::thread server_thread([&]() {
     uvcpp_loop server_loop;
+
+    uvcpp_test::loop_drain drain_server_loop(&server_loop);
     server_loop.init();
 
     uvcpp_udp server(&server_loop);
@@ -172,6 +177,15 @@ int main() {
     }
 
     server_loop.run(UV_RUN_DEFAULT);
+
+    // `server_stop_async` 是 **main 作用域**的，却挂在**本线程的** server_loop
+    // 上（上面 init 传的就是 `&server_loop`），析构顺序是"server_loop 先走、
+    // 它后走"。句柄留在队列上还是**活跃**的，`uv_run` 一直有事可做，
+    // `loop_alive()` 永远不为 0 —— 下面的守卫拨到轮数上限也没用，
+    // `uv_loop_close()` 只能返回 `UV_EBUSY`，整个 `uv_loop_t` 泄漏
+    // （实测 1 个循环，句柄 `async(active=1 closing=0)`）。所以在这里关掉它，
+    // 交给那个守卫收尾。
+    server_stop_async.close([](uvcpp_handle*) {});
   });
 
   // Client thread
