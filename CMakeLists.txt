@@ -120,6 +120,17 @@ if(UVCPP_BUILD_WEB)
       # EXCLUDE_FROM_ALL（CMake 3.25+）会把子目录的 install 规则一起排除；目标
       # 本身照样能被我们的链接依赖拉起来（uvcpp 显式链 zlibstatic）。3.20~3.24
       # 上这个参数不影响 install 规则，退回旧行为，不会更糟。
+      # zlib 自己的 CMakeLists 把 `ZLIB_BUILD_EXAMPLES` **默认成 ON**，那一支里
+      # 除了编 example/minigzip，还有一句 `add_test(example example)`
+      # （v1.3.1 的 CMakeLists.txt:8 与 :200-203）。我们这条支路只在**没有系统
+      # zlib** 的平台上走，而 `EXCLUDE_FROM_ALL` 让 example 这个可执行文件从来
+      # 没被编出来 —— 于是 ctest 名册里多出一条永远不会 Run 的 `example`，
+      # 把 windows 的 ssl/web 两个 job 判红（Ubuntu/macOS 有系统 zlib，走的是
+      # 上面的 find_package 分支，不经过这里，所以只有 Windows 上看得见）。
+      #
+      # 必须在 `add_subdirectory` **之前**：zlib 里用的是 `option()`，缓存里
+      # 已经有这个条目时 option 不会再动它。关掉的只是它的示例程序，库照编。
+      set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "Enable Zlib Examples" FORCE)
       FetchContent_GetProperties(zlib)
       if(NOT zlib_POPULATED)
         FetchContent_Populate(zlib)

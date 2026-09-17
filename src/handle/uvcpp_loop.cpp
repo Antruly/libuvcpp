@@ -1,5 +1,53 @@
 ﻿#include "uvcpp_loop.h"
+
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
+
 namespace uvcpp {
+
+#if !defined(_WIN32)
+namespace {
+
+/**
+ * @brief 每进程做一次：把 SIGPIPE 的处置设成**忽略**。
+ *
+ * **为什么非做不可。** 往一个已被对端关掉的 socket 上写，Linux 会给本进程发
+ * SIGPIPE，而默认处置是**结束进程** —— 对端什么时候走是网络事件，不是本进程
+ * 的错，一个网络库让使用者因此丧命说不过去。libuv 只在有 `SO_NOSIGPIPE` 的
+ * 平台挡这一下（BSD/macOS，见 `_local_deps/libuv/src/unix/core.c` 里那处
+ * `setsockopt`），**Linux 的写路径用的是不带 `MSG_NOSIGNAL` 的
+ * `sendmsg`/`uv__writev`**，所以只有 Linux 上会真的把进程打死
+ * （CI 上 `test_web_ssl_client_func` / `test_web_stream_response_func` 报
+ * `(SIGPIPE)` 就是这个 —— 那两条用例都是**故意**中途丢下对端的）。
+ *
+ * 忽略之后那次写以 `EPIPE` 失败，libuv 把它变成 `UV_EPIPE` 交给写完成回调：
+ * 库本来就有这条送达路径，缺的只是"别先死"。
+ *
+ * **只在当前处置是 `SIG_DFL` 时才动。** 应用自己装过（包括它自己设成
+ * `SIG_IGN`）就说明是有意为之，不改。这是**进程级**副作用，而构造函数里那次
+ * `init()` 是每一条环路都必然走到的唯一入口，所以放在这里。
+ */
+void ignore_sigpipe_once() {
+  // 函数局部静态的初始化自 C++11 起是线程安全的，不必额外加锁。
+  static const bool done = []() {
+    struct sigaction cur;
+    if (::sigaction(SIGPIPE, nullptr, &cur) != 0) return true;
+    if (cur.sa_handler != SIG_DFL) return true;
+    struct sigaction ign;
+    ign.sa_handler = SIG_IGN;
+    ign.sa_flags = 0;
+    ::sigemptyset(&ign.sa_mask);
+    // 设不上（极罕见）也只能这样：它不是本函数的职责，不影响其余逻辑。
+    ::sigaction(SIGPIPE, &ign, nullptr);
+    return true;
+  }();
+  (void)done;
+}
+
+}  // namespace
+#endif  // !_WIN32
+
 uvcpp_loop::uvcpp_loop() : uvcpp_handle() {
   uv_loop_t *loop = uvcpp::uvcpp_alloc<uv_loop_t>();
   if (loop == nullptr)
@@ -86,6 +134,9 @@ uvcpp_loop *uvcpp_loop::default_loop() {
 }
 
 int uvcpp_loop::init() {
+#if !defined(_WIN32)
+  ignore_sigpipe_once();
+#endif
   int ret = uv_loop_init(UVCPP_LOOP_HANDLE);
   closed_ = false;
   this->set_handle_data();

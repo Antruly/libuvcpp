@@ -27,12 +27,10 @@
  * 都只把 `int status`（或 `uvcpp_udp_send*`）交给使用者，拿不到 `uvcpp_connect`。
  */
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <string>
-#include <thread>
 
 #include <uv.h>
 
@@ -48,6 +46,7 @@
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_define.h>
 #include "loop_drain.h"
+#include "wait_util.h"
 
 using namespace uvcpp;
 
@@ -120,10 +119,11 @@ int main() {
     check(wrc == 0, "udp mechanism: submit rc = " + std::to_string(wrc));
     if (wrc != 0) delete w;
 
-    for (int i = 0; i < 3000 && completed.load() == 0; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // 上限一律**墙钟**，不是圈数：`for (i < 3000) { run(); sleep(1ms); }` 里那个
+    // 3000 看着像毫秒，实际是"3000 圈"，而一圈的代价就是系统定时器粒度 ——
+    // 机器一换，等的时间跟着换。见 wait_util.h 里那张实测表。
+    uvcpp_test::wait_until(loop, [&] { return completed.load() != 0; },
+                           uvcpp_test::kWaitMs);
     check(completed.load() == 1,
           "udp mechanism: completion fired " + std::to_string(completed.load()) +
               " times");
@@ -177,11 +177,19 @@ int main() {
     check(crc == 0, "connect mechanism: submit rc = " + std::to_string(crc));
     if (crc != 0) delete conn;
 
-    for (int i = 0; i < 3000 && completed.load() == 0; ++i) {
-      tsrv.get_loop()->run(UV_RUN_NOWAIT);
-      loop2.run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // **要等的是两个条件，不是一个。** connect 的完成在客户端循环上，accept 在
+    // 服务端循环上，两者之间没有任何顺序保证：环回上三次握手是内核做的，
+    // `connect` 可以在服务端**还没 accept** 时就成功。原来只等 `completed`
+    // （客户端侧），退出循环那一圈泵的服务端是在客户端**之前**，于是紧接着的
+    // `accepted == 1` 常常读到的还是 0 —— 把"服务端还没来得及 accept"报成了
+    // "服务端一个连接都没接受"。macOS 上时序更容易落到这一侧：CI 上四个 job
+    // 全挂在这句文案上。等到两边都落地再断言。
+    uvcpp_test::wait_until_pair(tsrv.get_loop(), &loop2,
+                                [&] {
+                                  return completed.load() != 0 &&
+                                         accepted.load() != 0;
+                                },
+                                uvcpp_test::kWaitMs);
     check(completed.load() == 1,
           "connect mechanism: completion fired " +
               std::to_string(completed.load()) + " times");
@@ -197,10 +205,8 @@ int main() {
     // 收尾：把连接摘干净，别把句柄留给 loop2。
     bool closed = false;
     tcp.close([&closed](uvcpp_handle*) { closed = true; });
-    for (int i = 0; i < 200 && !closed; ++i) {
-      loop2.run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(&loop2, [&] { return closed; },
+                           uvcpp_test::kWaitMs);
     check(closed, "connect mechanism: close callback never ran");
     const int lrc = loop2.loop_close();
     check(lrc == 0,
@@ -215,11 +221,11 @@ int main() {
   {
     uvcpp_udp_client client;
     uvcpp_loop* loop = client.get_loop();
+    // 形参叫 `ms`，旧实现却拿它当**圈数**（`i < ms`）—— 调用点传的 2000 是
+    // "两秒"的意思，实际等多久取决于机器的定时器粒度。这正是 wait_util.h
+    // 那张表说的形状；按圈数扫的脚本还看不见它（循环藏在帮手肚子里）。
     auto pump_until = [&](std::atomic<int>& c, int want, int ms) {
-      for (int i = 0; i < ms && c.load() < want; ++i) {
-        loop->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
+      uvcpp_test::wait_until(loop, [&] { return c.load() >= want; }, ms);
     };
 
     const int kN = 8;
@@ -323,10 +329,9 @@ int main() {
         break;
       }
       ++submitted;
-      for (int k = 0; k < 2000 && done.load() < submitted; ++k) {
-        usrv.get_loop()->run(UV_RUN_NOWAIT);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
+      uvcpp_test::wait_until(usrv.get_loop(),
+                             [&] { return done.load() >= submitted; },
+                             uvcpp_test::kWaitMs);
     }
     check(done.load() == submitted,
           "udp server send(char*): " + std::to_string(done.load()) + "/" +
@@ -364,10 +369,8 @@ int main() {
     check(wrc == 0, "legacy udp_delete: submit rc = " + std::to_string(wrc));
     if (wrc != 0) delete w;
 
-    for (int i = 0; i < 3000 && completed.load() == 0; ++i) {
-      loop->run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until(loop, [&] { return completed.load() != 0; },
+                           uvcpp_test::kWaitMs);
     check(completed.load() == 1,
           "legacy udp_delete: completion fired " +
               std::to_string(completed.load()) + " times");
@@ -405,11 +408,9 @@ int main() {
       up.store(true);
     });
     check(crc == 0, "client connect: submit rc = " + std::to_string(crc));
-    for (int i = 0; i < 3000 && !up.load(); ++i) {
-      tsrv.get_loop()->run(UV_RUN_NOWAIT);
-      loop3.run(UV_RUN_NOWAIT);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    uvcpp_test::wait_until_pair(tsrv.get_loop(), &loop3,
+                                [&] { return up.load(); },
+                                uvcpp_test::kWaitMs);
     check(up.load(), "client connect: user callback never fired");
     check(st.load() == 0,
           "client connect: status = " + std::to_string(st.load()));
