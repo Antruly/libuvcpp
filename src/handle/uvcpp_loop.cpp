@@ -37,7 +37,13 @@ void ignore_sigpipe_once() {
     struct sigaction ign;
     ign.sa_handler = SIG_IGN;
     ign.sa_flags = 0;
-    ::sigemptyset(&ign.sa_mask);
+    // **这里不能写 `::sigemptyset`。** macOS 的 sigemptyset 是**宏**而不是函数
+    // （`Libc/include/signal.h`：`#define sigemptyset(set) (*(set) = 0, 0)`，
+    // 和 sigaction 的声明同在 `#ifndef _ANSI_SOURCE` 那一块里），加了 `::` 就会
+    // 展开成 `::(*(&ign.sa_mask) = 0, 0)` —— 语法错误。同一段东西在 MSVC 上被
+    // `#if !defined(_WIN32)` 整段跳过，本机看不见，改回 `::` 之前先看这条。
+    // `::sigaction` 可以带 `::`：它是真函数，不是宏。
+    sigemptyset(&ign.sa_mask);
     // 设不上（极罕见）也只能这样：它不是本函数的职责，不影响其余逻辑。
     ::sigaction(SIGPIPE, &ign, nullptr);
     return true;

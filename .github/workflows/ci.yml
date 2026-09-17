@@ -36,7 +36,24 @@ jobs:
           cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=ON -DUVCPP_BUILD_SHARED=OFF \
             -DUVCPP_BUILD_WEB=OFF
-          cmake --build build-static --config Release --parallel 4
+          # 构建错误也折进注解。job 日志匿名读不到（/actions/jobs/<id>/logs 是 403），
+          # `Upload build log` 的 artifact 下载同样要 token —— 剩下能读的只有注解。
+          # 这一手是被 e3c0a0d 打的：四个 mac job 全挂在编译上（macOS 的 sigemptyset
+          # 是宏，`::sigemptyset` 直接是语法错误），而本机 MSVC 整段跳过那个 `#if`，
+          # 注解里只有一句 "exit code 2"，白等一轮。`set -o pipefail` 不能省：
+          # 少了它 `cmake | tee` 的退出码是 tee 的 0，失败会被当成成功。
+          set -o pipefail
+          mkdir -p ci-logs
+          bld=0
+          cmake --build build-static --config Release --parallel 4 2>&1 \
+            | tee ci-logs/build-static.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/build-static.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-static::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
           # 失败用例名打成注解：job 日志从仓库外读不到（/actions/jobs/<id>/logs 要 token），注解匿名可读
           rc=0
           out=$(ctest --test-dir build-static --output-on-failure -C Release \
@@ -64,7 +81,19 @@ jobs:
           cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=OFF
-          cmake --build build-shared --config Release --parallel 4
+          # 构建错误折进注解（说明见 static 步）。`set -o pipefail` 不能省。
+          set -o pipefail
+          mkdir -p ci-logs
+          bld=0
+          cmake --build build-shared --config Release --parallel 4 2>&1 \
+            | tee ci-logs/build-shared.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/build-shared.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-shared::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
           # 失败用例名打成注解（同 static 步）
           rc=0
           out=$(ctest --test-dir build-shared --output-on-failure -C Release \
@@ -101,7 +130,19 @@ jobs:
           cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=OFF
-          cmake --build build-shared --config Release --parallel 4
+          # 构建错误折进注解（说明见 static 步）。`set -o pipefail` 不能省。
+          set -o pipefail
+          mkdir -p ci-logs
+          bld=0
+          cmake --build build-shared --config Release --parallel 4 2>&1 \
+            | tee ci-logs/build-shared.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/build-shared.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-shared::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
 
       - name: Copy runtime DLLs
         shell: bash
@@ -191,8 +232,17 @@ jobs:
               build-web/CMakeCache.txt || true
             echo "=== build ==="
             bld=0
-            cmake --build build-web --config Release --parallel 4 || bld=$?
+            cmake --build build-web --config Release --parallel 4 2>&1 \
+              | tee ci-logs/build-web-build.log || bld=$?
             echo "BUILD_RC=$bld"
+            # 构建错误折进注解（说明见 static 步）：这个 job 的 artifact 下载也要
+            # token，日志照样读不到，注解是唯一出口。
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/build-web-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-web::${msg:-rc=$bld (no error line matched)}"
+            fi
             exit "$bld"
           } 2>&1 | tee ci-logs/build-web.log
 
@@ -297,8 +347,17 @@ jobs:
               build-ssl/CMakeCache.txt || true
             echo "=== build ==="
             bld=0
-            cmake --build build-ssl --config Release --parallel 4 || bld=$?
+            cmake --build build-ssl --config Release --parallel 4 2>&1 \
+              | tee ci-logs/build-ssl-build.log || bld=$?
             echo "BUILD_RC=$bld"
+            # 构建错误折进注解（说明见 static 步）：artifact 下载要 token，
+            # 注解是唯一读得到的出口。
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/build-ssl-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-ssl::${msg:-rc=$bld (no error line matched)}"
+            fi
             exit "$bld"
           } 2>&1 | tee ci-logs/build-ssl.log
 
@@ -392,7 +451,19 @@ jobs:
           cmake -S . -B build-full -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
-          cmake --build build-full --config Release --parallel 4
+          # 构建错误折进注解（说明见 static 步）。`set -o pipefail` 不能省。
+          set -o pipefail
+          mkdir -p ci-logs
+          bld=0
+          cmake --build build-full --config Release --parallel 4 2>&1 \
+            | tee ci-logs/build-full.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/build-full.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-full::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
           # 失败用例名打成注解（同 basic 作业）
           rc=0
           out=$(ctest --test-dir build-full --output-on-failure -C Release \
@@ -429,7 +500,19 @@ jobs:
           cmake -S . -B build-msvc -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=ON -DUVCPP_BUILD_SHARED=OFF \
             -DUVCPP_BUILD_WEB=OFF
-          cmake --build build-msvc --config Release --parallel 4
+          # 构建错误折进注解（说明见 static 步）。`set -o pipefail` 不能省。
+          set -o pipefail
+          mkdir -p ci-logs
+          bld=0
+          cmake --build build-msvc --config Release --parallel 4 2>&1 \
+            | tee ci-logs/build-msvc.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/build-msvc.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-msvc::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
 
       - name: Copy runtime DLLs
         shell: bash
