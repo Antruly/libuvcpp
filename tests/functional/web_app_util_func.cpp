@@ -22,7 +22,8 @@
 #include <webapp/uvcpp_web_util.h>
 
 #ifdef _WIN32
-#  include <direct.h>   // _mkdir / _rmdir
+#  include <direct.h>    // _mkdir / _rmdir
+#  include <sys/stat.h>  // _stat
 #else
 #  include <sys/stat.h>
 #  include <unistd.h>
@@ -597,14 +598,53 @@ static void remove_dir(const std::string& d) {
 #endif
 }
 
-/// 建链接（Windows 用 junction —— 它不需要管理员权限，CI 上也能跑）
-static bool make_link(const std::string& link, const std::string& target) {
+/// 删链接本身。两个平台要用的系统调用**不一样**：POSIX 的 `rmdir()` 对符号链接
+/// 返回 ENOTDIR（该用 `unlink`），而 Windows 的 junction 是个目录、`_rmdir` 才对。
+/// 混用是静默失败（返回值被忽略）→ 链接残留 → 临时根目录非空、也删不掉 →
+/// 下次在同一个构建目录里复跑时 `make_link` 因"已存在"而失败，整个用例走
+/// `[skip]` 分支变绿。对应用户可见的症状就是"第一次红、复跑绿"。
+static void remove_link(const std::string& p) {
 #ifdef _WIN32
-  const std::string cmd = "cmd /c mklink /J \"" + link + "\" \"" + target +
+  _rmdir(p.c_str());
+#else
+  ::unlink(p.c_str());
+#endif
+}
+
+/// 链接能不能真的解析到目标。
+/// `symlink()` 建出**悬空**链接照样返回 0，所以"建成了"不等于"通" ——
+/// 这道检查把"链接根本没通、后面的断言全部落空"变成看得见的失败。
+static bool link_resolves(const std::string& p) {
+#ifdef _WIN32
+  struct _stat st;
+  return _stat(p.c_str(), &st) == 0;
+#else
+  struct stat st;
+  return ::stat(p.c_str(), &st) == 0;
+#endif
+}
+
+/// 建链接（Windows 用 junction —— 它不需要管理员权限，CI 上也能跑）
+///
+/// **目标要先转成绝对路径，这一步是必需的、不是保险**：
+///   - `mklink /J` 把相对目标按**当前目录**解析，落盘的是绝对路径；
+///   - POSIX 的 `symlink()` 把目标字符串**原样存下来**，解析时相对于**链接
+///     所在目录**，而且它不检查目标是否存在、照样返回 0。
+///
+/// 同一个相对名在两个平台上指的是不同地方：本机实测
+/// `mklink /J "…\root\escape" "outside"` 的 Target 字段是
+/// `D:\…\lnktest\outside`（绝对、能解析），而 POSIX 会去找 `root/outside`
+/// （不存在）。于是传相对名会建出一个"建成但悬空"的链接，失败一直推迟到断言处、
+/// 以"怎么不是 TRAVERSAL"的面目出现。这里统一按调用方的本意（相对 cwd）取绝对路径。
+static bool make_link(const std::string& link, const std::string& target) {
+  std::string abs;
+  if (!web_real_path(target, abs, /*allow_missing=*/false)) return false;
+#ifdef _WIN32
+  const std::string cmd = "cmd /c mklink /J \"" + link + "\" \"" + abs +
                           "\" >nul 2>&1";
   return std::system(cmd.c_str()) == 0;
 #else
-  return ::symlink(target.c_str(), link.c_str()) == 0;
+  return ::symlink(abs.c_str(), link.c_str()) == 0;
 #endif
 }
 
@@ -624,7 +664,7 @@ static void cleanup_link_fs() {
   std::remove(pth(kRootDir, "index.html").c_str());
   std::remove(pth(kRootDir, "sub/a.txt").c_str());
   remove_dir(pth(kRootDir, "sub"));
-  remove_dir(pth(kRootDir, "escape"));   // 删链接本身，不会跟进目标
+  remove_link(pth(kRootDir, "escape"));  // 删链接本身，不会跟进目标
   std::remove(pth(kOutDir, "secret.txt").c_str());
   remove_dir(kRootDir);
   remove_dir(kOutDir);
@@ -684,6 +724,11 @@ void test_resolve_within_root() {
     std::string norm;
     check(web_sanitize_path("/escape/secret.txt", norm) == web_path_status::OK,
           "链接路径在文本层面应当是合法的（这正是危险之处）");
+
+    // 先确认链接真的通了。悬空链接在下面那条 TRAVERSAL 断言里会以
+    // "实际 NOT_FOUND" 现身，但那时已经分不清是链接没通、还是边界判断坏了 ——
+    // 而这两种情况的修法完全相反。单列一条，让归因一眼可见。
+    check(link_resolves(link_path), "链接应能解析到目标（悬空的不算建成）");
 
     const web_path_status st =
         web_resolve_within_root(root_real, "/escape/secret.txt", out);

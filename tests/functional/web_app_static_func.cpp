@@ -46,6 +46,7 @@
 #include <web/uvcpp_http_common.h>
 #include <webapp/uvcpp_log.h>
 #include <webapp/uvcpp_web_app.h>
+#include <webapp/uvcpp_web_util.h>  // web_real_path（搭链接时要把目标转绝对）
 
 using namespace uvcpp;
 
@@ -183,12 +184,19 @@ void remove_file(const std::string& path) { std::remove(path.c_str()); }
  * 而 `DeviceIoControl` 手搓 reparse point 不值得为一个测试写。
  */
 bool make_dir_link(const std::string& link, const std::string& target) {
+  // 目标先转成绝对路径，**这一步是必需的**：`mklink /J` 把相对目标按当前目录
+  // 解析、落盘成绝对路径，而 POSIX 的 `symlink()` 把目标字符串原样存下来、
+  // 解析时相对于**链接所在目录**（且不检查目标是否存在，照样返回 0）。
+  // 传相对名在 POSIX 上会建出一个悬空链接 —— 本机实测 mklink 的 Target 字段
+  // 是绝对的，所以这条差异只在 POSIX 上现形，本机复现不了。
+  std::string abs;
+  if (!web_real_path(target, abs, /*allow_missing=*/false)) return false;
 #ifdef _WIN32
   const std::string cmd =
-      "cmd /c mklink /J \"" + link + "\" \"" + target + "\" >NUL 2>&1";
+      "cmd /c mklink /J \"" + link + "\" \"" + abs + "\" >NUL 2>&1";
   return std::system(cmd.c_str()) == 0;
 #else
-  return ::symlink(target.c_str(), link.c_str()) == 0;
+  return ::symlink(abs.c_str(), link.c_str()) == 0;
 #endif
 }
 
@@ -252,6 +260,16 @@ bool build_root() {
   //     一律拒绝"也能让逃逸断言通过 —— 那测的就不是包含判断了。
   ok = make_dir_link(r + "/escape", k_outside_dir) && ok;
   ok = make_dir_link(r + "/inside", r + "/sub") && ok;
+
+  // 「建成了」不等于「通」：`symlink()` 对悬空目标同样返回 0。链接不通的话
+  // 下面那些断言会以最难归因的方式失效 —— `/inside` 那组会红（还算诚实），
+  // 而 `/escape` 那组的**逃逸**断言会因为 404 页面里本来就没有秘密而
+  // **假装通过**，于是"安全边界"这件事在整套用例里再没有任何东西在测。
+  // 所以在这里先钉死，别让后面那组断言承担它不该承担的静默。
+  if (ok && !(dir_exists(r + "/escape") && dir_exists(r + "/inside"))) {
+    std::cerr << "  [FAIL] 目录链接建成但无法解析（悬空链接）" << std::endl;
+    ok = false;
+  }
 
   return ok;
 }
