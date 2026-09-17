@@ -37,8 +37,16 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=ON -DUVCPP_BUILD_SHARED=OFF \
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-static --config Release --parallel 4
-          ctest --test-dir build-static --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          # 失败用例名打成注解：job 日志从仓库外读不到（/actions/jobs/<id>/logs 要 token），注解匿名可读
+          rc=0
+          out=$(ctest --test-dir build-static --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-static::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
 
       - name: Configure & Build & Test (shared)
         shell: bash
@@ -47,8 +55,16 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=OFF
           cmake --build build-shared --config Release --parallel 4
-          ctest --test-dir build-shared --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          # 失败用例名打成注解（同 static 步）
+          rc=0
+          out=$(ctest --test-dir build-shared --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-shared::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
 
   # ---------------------------------------------------------------------------
   # Windows basic: shared build only (static is covered by windows-static job)
@@ -79,8 +95,16 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          ctest --test-dir build-shared --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          # 失败用例名打成注解（同 basic 作业）
+          rc=0
+          out=$(ctest --test-dir build-shared --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-windows-basic::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
 
   # ---------------------------------------------------------------------------
   # Web: HTTP + WebSocket + webapp framework + zlib (all platforms)
@@ -169,8 +193,15 @@ jobs:
           # Only test_shutdown_func is excluded: it is flaky (~1%), not hanging.
           # test_tcp_func and test_memory_pool were excluded for defects that are
           # long fixed (see doc/ci-guide.md §4) — they run, and must stay green.
-          ctest --test-dir build-web --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          rc=0
+          out=$(ctest --test-dir build-web --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-web::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
 
   # ---------------------------------------------------------------------------
   # SSL: Web + webapp + OpenSSL + zlib (all platforms)
@@ -272,8 +303,15 @@ jobs:
         run: |
           # Only test_shutdown_func is excluded (flaky ~1%, not hanging) — see the
           # web job above and doc/ci-guide.md §4.
-          ctest --test-dir build-ssl --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          rc=0
+          out=$(ctest --test-dir build-ssl --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-ssl::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
 
   # ---------------------------------------------------------------------------
   # Full: Web + OpenSSL + zlib (Ubuntu + macOS)
@@ -305,8 +343,16 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
           cmake --build build-full --config Release --parallel 4
-          ctest --test-dir build-full --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          # 失败用例名打成注解（同 basic 作业）
+          rc=0
+          out=$(ctest --test-dir build-full --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-full::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
 
   # ---------------------------------------------------------------------------
   # Windows static: MSVC static build (web=OFF, no shared lib)
@@ -336,5 +382,12 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          ctest --test-dir build-msvc --output-on-failure -C Release \
-            --timeout 30 --exclude-regex "test_shutdown_func"
+          rc=0
+          out=$(ctest --test-dir build-msvc --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-msvc::${msg:-rc=$rc (no FAILED block)}"
+          fi
+          exit "$rc"
