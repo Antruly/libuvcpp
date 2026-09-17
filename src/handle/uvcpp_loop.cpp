@@ -44,6 +44,11 @@ uvcpp_loop::~uvcpp_loop() {
   this->detach_handle();
 }
 int uvcpp_loop::run(uv_run_mode md) {
+  // 关过的 loop 不能再拨：`uv_loop_close()` 之后这块 `uv_loop_t` 已经还给 libuv
+  // （debug 构建里更是被整块填成 -1），`uv_run` 会拿 `pending_reqs_tail` 之类的
+  // 野指针去解引用 —— 这正是 Ubuntu CI 上那批 SEGFAULT 的来源：用例自己
+  // `loop_close()` 了，收尾用的 `loop_drain` 析构里还会再拨一次。
+  if (closed_) return 0;
   // 计数包住整段 `uv_run`：进出的路可能不止一条（见 `is_running()`），
   // 中途任何一层里问都得答"在跑"。
   ++run_depth_;
@@ -54,6 +59,7 @@ int uvcpp_loop::run(uv_run_mode md) {
 
 void uvcpp_loop::walk(::std::function<void(uvcpp_handle *, void *)> walk_cb,
                       void *arg) {
+  if (closed_) return;  // `uv_walk` 走的就是被投毒的 handle_queue
   this->handle_walk_cb = walk_cb;
   this->walk_arg_ = arg;
   uv_walk(UVCPP_LOOP_HANDLE, uvcpp_loop::callback_walk, this);
@@ -86,10 +92,16 @@ int uvcpp_loop::init() {
   return ret;
 }
 
-int uvcpp_loop::loop_alive() { return uv_loop_alive(UVCPP_LOOP_HANDLE); }
+int uvcpp_loop::loop_alive() {
+  // `uv_loop_close()` 不清这几个计数（debug 下反而是 -1），光问 libuv 会一直
+  // 答"活着" —— 于是任何拿它当上界的等待（`loop_drain`）都不会退出。
+  if (closed_) return 0;
+  return uv_loop_alive(UVCPP_LOOP_HANDLE);
+}
 
 void uvcpp_loop::stop() {
-  if (uv_loop_alive(UVCPP_LOOP_HANDLE)) {
+  // 经 `loop_alive()` 走，别直接问 libuv：同上，关过的 loop 那里是野计数。
+  if (this->loop_alive()) {
     uv_stop(UVCPP_LOOP_HANDLE);
   }
 }
