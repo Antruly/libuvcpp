@@ -499,13 +499,19 @@ jobs:
   #   1. **UVCPP_BUILD_EXPAND=ON 要显式写**。内存池自 v1.1.0 起默认 OFF，不写这行
   #      的话 tests/expand 一条都不跑，池就成了没人测的死代码。MinGW 恰恰是历史
   #      上唯一出过问题（emutls + thread_local 析构）的平台，更不能省。
-  #   2. **UVCPP_STATIC_RUNTIME=ON**。发布用的 libuvcpp.dll 除了 Windows 系统库
-  #      之外不能有任何依赖；这条靠开关而不是靠"记得传 -DCMAKE_*_LINKER_FLAGS"。
-  #      job 末尾还会 objdump 一遍把这条断言钉死。
-  #   3. **别手动往测试目录拷 DLL**。copy_test_dlls 已经覆盖 tests/{unit,functional,
-  #      expand}（含 Ninja 单配置树 —— 早先它把 $<CONFIG> 展开成 Release，拷进了
-  #      没人读的目录，于是"拷成功"的假象下测试全 0xc0000135），手工再拷一份只会
-  #      掩盖它再次失效。
+  #   2. **UVCPP_STATIC_RUNTIME=ON + OPENSSL_USE_STATIC_LIBS=ON**，与 release.yml
+  #      的 mingw-x64 逐字对齐 —— 这个 job 的价值就在于它是发布配置的哨兵。
+  #      发布用的 libuvcpp.dll 除了 Windows 系统库之外不能有任何依赖；这条靠开关
+  #      而不是靠"记得传 -DCMAKE_*_LINKER_FLAGS"。job 末尾还会 objdump 一遍把
+  #      这条断言钉死（白名单形式，见那段注释）。
+  #   3. **别手动往测试目录拷 DLL**。copy_test_dlls 覆盖 tests/{unit,functional,
+  #      expand} 与 examples/，含 Ninja 单配置树（早先它把 $<CONFIG> 展开成
+  #      Release，拷进了没人读的目录）。手工再拷一份只会掩盖它再次失效。
+  #
+  #      这个 job 第一次跑就是这么红的：全部 79 个用例 0.01 秒内以
+  #      STATUS_DLL_NOT_FOUND 退出 —— copy_test_dlls 当时是个**不带 ALL** 的
+  #      自定义目标，`cmake --build .` 根本不跑它。本机没暴露，是因为验证时敲的是
+  #      `--target copy_test_dlls`。已改成 ALL（CMakeLists.txt 里那段有注释）。
   # ---------------------------------------------------------------------------
   mingw64:
     runs-on: windows-latest
@@ -535,6 +541,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
             | tee ci-logs/mingw-configure.log
           bld=0
@@ -550,13 +557,17 @@ jobs:
       - name: Assert the DLL is self-contained
         run: |
           # 发布承诺是"任意 64 位 Windows 直接可用"。这条不是风格问题：一旦
-          # UVCPP_STATIC_RUNTIME 被改坏或漏传，产物在开发机上照样跑得动，
-          # 换台机器才 0xc0000135 —— 只有在这里断言才拦得住。
-          deps=$(objdump -p build-mingw/libuvcpp.dll | grep -i 'DLL Name' | awk '{print $3}')
+          # UVCPP_STATIC_RUNTIME / OPENSSL_USE_STATIC_LIBS 被改坏或漏传，产物在
+          # 开发机上照样跑得动，换台机器才 0xc0000135 —— 只有在这里断言才拦得住。
+          #
+          # 白名单，不是黑名单：黑名单原先只 grep libgcc|libstdc|libwinpthread，
+          # 而 MSYS2 同时装了 libssl.a 和 libssl.dll.a，find_library 默认挑 .dll.a
+          # ⇒ 产物会多一个 libssl-3-x64.dll 而断言照样放行。
+          deps=$(objdump -p build-mingw/libuvcpp.dll | awk '/DLL Name/ {print $3}' | sort -u)
           echo "$deps"
-          bad=$(echo "$deps" | grep -iE 'libgcc|libstdc|libwinpthread' || true)
+          bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
           if [ -n "$bad" ]; then
-            echo "::error title=mingw-not-self-contained::libuvcpp.dll 仍依赖 MinGW 运行时: $bad"
+            echo "::error title=mingw-not-self-contained::libuvcpp.dll 依赖了非 Windows 自带的模块: $bad"
             exit 1
           fi
 

@@ -73,6 +73,128 @@ def find_dir(candidates):
     return None
 
 
+# Windows 自带的模块（System32 里必有）。这张表只用来判断"要不要打进包里"，
+# 不用来判断"能不能跑" —— 表里少写一个，代价是启动时报错退出（响亮），
+# 多写一个才是静默的坏包，所以宁可写全。
+SYSTEM_DLLS = {
+    "advapi32.dll", "bcrypt.dll", "bcryptprimitives.dll", "cfgmgr32.dll",
+    "comdlg32.dll", "crypt32.dll", "cryptbase.dll", "dbghelp.dll", "dnsapi.dll",
+    "dwmapi.dll", "gdi32.dll", "gdi32full.dll", "imm32.dll", "iphlpapi.dll",
+    "kernel32.dll", "kernelbase.dll", "msvcrt.dll", "mswsock.dll",
+    "netapi32.dll", "normaliz.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll",
+    "powrprof.dll", "psapi.dll", "rpcrt4.dll", "secur32.dll", "setupapi.dll",
+    "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "usp10.dll",
+    "version.dll", "win32u.dll", "winmm.dll", "winspool.drv", "ws2_32.dll",
+    "wtsapi32.dll",
+}
+
+
+def is_system_dll(name):
+    return (name in SYSTEM_DLLS
+            or name.startswith("api-ms-win-")
+            or name.startswith("ext-ms-win-"))
+
+
+def pe_imports(path):
+    """读 PE 导入表，返回依赖的 dll 名（小写、去重、保序）；非 PE 返回 None。
+
+    为什么不用 objdump：msvc-x64 那个 job 跑在 Git Bash 里，objdump 不保证存在，
+    而这道自检要防的恰恰是"发布包在干净机器上起不来"，它在哪台 runner 上都得能跑。
+
+    为什么要有这道自检：原先靠一张手写的依赖清单（msvcp140 / vcruntime140 …），
+    清单是猜的。MSYS2 同时装了 `libssl.a` 和 `libssl.dll.a`，find_library 默认挑
+    `.dll.a` ⇒ 产物凭空多一个 `libssl-3-x64.dll`，而清单里没有、MinGW 侧的自检
+    又只 grep 了 libgcc|libstdc|libwinpthread，于是照样发布出去。
+    """
+    with open(path, "rb") as f:
+        d = f.read()
+    if d[:2] != b"MZ":
+        return None
+    e_lfanew = int.from_bytes(d[0x3C:0x40], "little")
+    if d[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        return None
+    coff = e_lfanew + 4
+    nsec = int.from_bytes(d[coff + 2:coff + 4], "little")
+    opt_size = int.from_bytes(d[coff + 16:coff + 18], "little")
+    opt = coff + 20
+    magic = int.from_bytes(d[opt:opt + 2], "little")
+    ddir = opt + (112 if magic == 0x20B else 96)   # PE32+ 的 DataDirectory 偏 112
+    imp_rva = int.from_bytes(d[ddir + 8:ddir + 12], "little")   # DataDirectory[1]
+
+    sects = []
+    for i in range(nsec):
+        b = opt + opt_size + i * 40
+        va = int.from_bytes(d[b + 12:b + 16], "little")
+        vsize = int.from_bytes(d[b + 8:b + 12], "little")
+        rsize = int.from_bytes(d[b + 16:b + 20], "little")
+        raw = int.from_bytes(d[b + 20:b + 24], "little")
+        sects.append((va, max(vsize, rsize), raw))
+
+    def rva2off(rva):
+        for va, size, raw in sects:
+            if va <= rva < va + size:
+                return raw + (rva - va)
+        return None
+
+    def cstr(off):
+        end = d.index(b"\0", off)
+        return d[off:end].decode("ascii", "replace").lower()
+
+    if not imp_rva:
+        return []
+    off = rva2off(imp_rva)
+    if off is None:
+        return []
+    names, seen = [], set()
+    while off + 20 <= len(d):
+        desc = d[off:off + 20]
+        if desc == b"\0" * 20:
+            break
+        off += 20
+        nrva = int.from_bytes(desc[12:16], "little")
+        no = rva2off(nrva) if nrva else None
+        if no is None:
+            continue
+        n = cstr(no)
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    return names
+
+
+def runtime_roots(tree, repo):
+    """运行时 dll 的搜索根。够用就行 —— 找不到会退出 2 并点名，不会静默放过。"""
+    roots = []
+    cache = os.path.join(tree, "CMakeCache.txt")
+    if os.path.exists(cache):
+        with open(cache, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("OPENSSL_ROOT_DIR:"):
+                    roots.append(os.path.join(line.split("=", 1)[1].strip(), "bin"))
+    roots += [os.environ.get("OPENSSL_ROOT_DIR", "") + "/bin",
+              os.environ.get("VCToolsRedistDir", ""),
+              os.path.join(tree, "Release"), tree, repo]
+    roots += [r"C:\Program Files\OpenSSL-Win64\bin",
+              r"C:\Program Files\OpenSSL\bin"]
+    return [r for r in roots if r and os.path.isdir(r)]
+
+
+def find_named(root, name):
+    """在 root 及其一层子目录里找 `name`（不递归到底：那会把 VS 安装目录走穿）。"""
+    p = os.path.join(root, name)
+    if os.path.isfile(p):
+        return p
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return None
+    for e in entries:
+        sub = os.path.join(root, e)
+        if os.path.isdir(sub) and os.path.isfile(os.path.join(sub, name)):
+            return os.path.join(sub, name)
+    return None
+
+
 def dep_src(tree, repo, name):
     """定位第三方依赖的源码目录。
 
@@ -161,6 +283,31 @@ def main():
             print("bin: %s" % rt)
         else:
             missing.append("MSVC 运行库 %s" % rt)
+
+    # ---- 依赖自检：bin/ 必须覆盖 dll 真实的导入表 ----
+    # 静态链接的产物在这里是空操作（导入表里只有 Windows 自带模块）；一旦哪次
+    # 构建走了导入库，多出来的依赖会被当场抓到并补进包，补不到就退出 2。
+    if dll is not None:
+        deps = pe_imports(dll)
+        if deps is not None:
+            third = [n for n in deps if not is_system_dll(n)]
+            print("imports: %s" % " ".join(sorted(deps)))
+            if third:
+                print("imports 里非 Windows 自带的: %s" % " ".join(sorted(third)))
+            roots = runtime_roots(tree, repo)
+            for n in third:
+                if n in {f.lower() for f in os.listdir(os.path.join(stage, "bin"))}:
+                    continue
+                src = None
+                for r in roots:
+                    src = find_named(r, n)
+                    if src:
+                        break
+                if src:
+                    shutil.copy2(src, os.path.join(stage, "bin"))
+                    print("bin: %s  (dll 导入表要求)" % n)
+                else:
+                    missing.append("dll 的依赖 %s（导入表里有，包里没有）" % n)
 
     # ---- 公开头 ----
     for m in MODULES:

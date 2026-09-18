@@ -956,7 +956,13 @@ if(WIN32)
     endforeach()
   endforeach()
 
-  add_custom_target(copy_test_dlls ${_copy_cmds}
+  # **必须带 ALL**：不带的话 `cmake --build .` 根本不跑这个目标（它是自定义目标，
+  # 不在默认的 `all` 里），测试目录里一个 DLL 都没有，ctest 全表以
+  # STATUS_DLL_NOT_FOUND (0xc0000135) 在 0.01 秒内退出 —— 看起来像全盘崩溃，
+  # 实际只是没拷。本机之所以没暴露，是因为验证时敲的是
+  # `cmake --build . --target copy_test_dlls`；换到 CI 上用默认目标就全军覆没。
+  # 带 ALL 之后它每次构建都跑，copy_if_different 让它基本不花时间。
+  add_custom_target(copy_test_dlls ALL ${_copy_cmds}
     DEPENDS ${_dll_deps}
     COMMENT "Copy uvcpp/libuv DLLs into test folders"
     VERBATIM

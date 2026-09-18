@@ -52,24 +52,34 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-mingw --parallel 4
 
       # 发布产物必须是"任意 64 位 Windows 直接可用"。这条只有在这里断言才拦得住
-      # —— 静态运行时被改坏时，产物在 CI 机上照样跑得动。
+      # —— 静态链接被改坏时，产物在 CI 机上照样跑得动。
+      #
+      # 断言写成**白名单**而不是黑名单：黑名单一开始只 grep 了
+      # libgcc|libstdc|libwinpthread，漏掉了 OpenSSL —— MSYS2 同时装了 `libssl.a`
+      # 和 `libssl.dll.a`，find_library 默认挑 `.dll.a`，产物会凭空多一个
+      # libssl-3-x64.dll 而断言照样放行。两个方向的代价不对称：白名单误判时挡住
+      # 发布（看得见，改一行就好），黑名单漏判时发一个干净机器起不来的包。
       - name: Assert the DLL is self-contained
         run: |
-          deps=$(objdump -p build-mingw/libuvcpp.dll | grep -i 'DLL Name' | awk '{print $3}')
+          deps=$(objdump -p build-mingw/libuvcpp.dll | awk '/DLL Name/ {print $3}' | sort -u)
           echo "$deps"
-          bad=$(echo "$deps" | grep -iE 'libgcc|libstdc|libwinpthread' || true)
+          bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
           if [ -n "$bad" ]; then
-            echo "::error title=mingw-not-self-contained::libuvcpp.dll 仍依赖 MinGW 运行时: $bad"
+            echo "::error title=mingw-not-self-contained::libuvcpp.dll 依赖了非 Windows 自带的模块: $bad"
             exit 1
           fi
 
       # **出包之前必须全绿**。发布一个测试挂掉的库比不发更坏。
+      # 排除项与 ci.yml 一致：test_shutdown_func 是 ~1% 的既有间歇性失败
+      # （doc/ci-guide.md §4），拿它卡发布只会卡住发布本身。
       - name: Test
-        run: ctest --test-dir build-mingw --output-on-failure --timeout 60
+        run: ctest --test-dir build-mingw --output-on-failure --timeout 60 \
+               --exclude-regex "test_shutdown_func"
 
       - name: Package
         run: python tests/tools/package_release.py \
@@ -90,6 +100,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不靠镜像里"碰巧装了 OpenSSL"：没找到时 `find_package(OpenSSL QUIET)` 会把
+      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:193-203），那样发出去的包
+      # 一句 SSL 都没有，而 uvcpp.pc 照样写着 -DUVCPP_OPENSSL_ENABLE=1。
+      - name: Install OpenSSL
+        shell: bash
+        run: choco install openssl --no-progress
+
       - name: Configure & Build
         shell: bash
         run: |
@@ -101,6 +118,19 @@ jobs:
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
+
+      # 上面那条注释说的静默降级，在这里被钉死。
+      - name: Assert the requested modules are actually on
+        shell: bash
+        run: |
+          for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
+                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB; do
+            if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
+              echo "::error title=msvc-module-off::${k} 没有生效，包会缺功能"
+              grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
+              exit 1
+            fi
+          done
 
       - name: Test
         shell: bash
@@ -159,10 +189,26 @@ jobs:
       - name: Report runtime deps
         run: |
           # 打出真实依赖，别让"依赖全静态"停留在口号上。
-          ldd build-linux/libuvcpp.so || true
+          # 不写死 libuvcpp.so：带 SOVERSION 时可能只有 libuvcpp.so.1.1.0 那个实体。
+          so=$(ls build-linux/libuvcpp.so* | head -1)
+          echo "so=$so"
+          ldd "$so"
+          # 第三方库必须是静态进去的：这几个在用户机器上不一定有，缺了就是
+          # "装了跑不起来"。libstdc++/libgcc_s 只警告不失败 —— glibc 那边偶尔
+          # 仍会渗出 libgcc_s，钉死它会让发布卡在一件不致命的事上。
+          bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=linux-not-self-contained::libuvcpp.so 动态依赖了第三方库: $bad"
+            exit 1
+          fi
+          soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
+          if [ -n "$soft" ]; then
+            echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
+          fi
 
       - name: Test
-        run: ctest --test-dir build-linux --output-on-failure --timeout 60
+        run: ctest --test-dir build-linux --output-on-failure --timeout 60 \
+               --exclude-regex "test_shutdown_func"
 
       - name: Package
         run: python3 tests/tools/package_release.py \

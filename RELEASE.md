@@ -61,7 +61,13 @@ MinGW 版 `libuvcpp.dll` 的依赖只有 Windows 自带系统库（`KERNEL32` / 
 
 MSVC 版 `uvcpp.dll` 用 `/MD` 构建，因此 `bin/` 里一并带了
 `msvcp140.dll` / `vcruntime140.dll` / `vcruntime140_1.dll`，
-**不需要预装 VC++ 可再发行组件**。
+**不需要预装 VC++ 可再发行组件**。若构建机上只有动态版 OpenSSL，`bin/` 里还会多出
+`libssl-3-x64.dll` / `libcrypto-3-x64.dll`（本机构建用的是静态版，因此本地这份包没有）。
+
+打包脚本不靠手写的依赖清单，而是**读产物自己的导入表**：凡是不是 Windows 自带的
+模块，包里必须有，找不到就拒绝出包（`tests/tools/package_release.py`）。早先那张手写
+清单是猜的 —— MSYS2 同时装了 `libssl.a` 和 `libssl.dll.a`，`find_library` 默认挑
+`.dll.a`，产物会凭空多一个 `libssl-3-x64.dll` 而清单里没有。
 
 > ⚠️ 两个 Windows 版互为替代、不可混用：由 MinGW-w64 编译的动态库**不能被 MSVC
 > 链接**，反之亦然（C++ ABI 不同）。用哪套工具链就用哪个 zip。
@@ -256,7 +262,7 @@ int main() {
 - `cmake --install` 在当前树上是坏的：libuv 由 `FetchContent_MakeAvailable` 引入，
   它登记的 install 规则引用了一个从未构建的 `libuv.dll`，且它的规则排在本项目的
   规则之前 —— 一失败就整体中止，本项目的头文件与库一个都装不出来。
-  本次的 zip 绕过它、照 `CMakeLists.txt:683-772` 的规则手工组装，与之有两处
+  本次的 zip 绕过它、照 `CMakeLists.txt:699-831` 的规则手工组装，与之有两处
   刻意的差异：**libuv 的头放在 `include/` 顶层**（本库的公开头写的是
   `#include <uv.h>`，放进 `include/libuv/` 会找不到），以及**补上了 `zlib.h` /
   `zconf.h`**（`web/uvcpp_ws_parser.h` 在 `UVCPP_ZLIB_ENABLE=1` 时要 include 它，
