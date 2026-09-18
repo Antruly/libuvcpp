@@ -224,9 +224,18 @@ endif()
 
 # If libuv exported a CMake target (common when using FetchContent), prefer linking to it.
 # This ensures proper linkage on Windows (uv target will provide the correct imported library).
-if (TARGET uv)
+# 发布用的动态库要把 libuv 静态链进 uvcpp.dll（最终产物只有单个 dll），所以
+# BUILD_SHARED_LIBS=OFF 时选静态的 uv_a。libuv 1.36 无条件同时建 uv 与 uv_a，
+# 1.51 起 uv 受 LIBUV_BUILD_SHARED 控制，因此必须判 TARGET 而不是假定名字。
+if (NOT BUILD_SHARED_LIBS AND TARGET uv_a)
+  message(STATUS "Using libuv CMake target 'uv_a' (static) for linking")
+  set(LIBUV_LIB uv_a)
+elseif (TARGET uv)
   message(STATUS "Using libuv CMake target 'uv' for linking")
   set(LIBUV_LIB uv)
+elseif (TARGET uv_a)
+  message(STATUS "Using libuv CMake target 'uv_a' for linking")
+  set(LIBUV_LIB uv_a)
 elseif(NOT LIBUV_LIB)
   message(FATAL_ERROR "libuv not found and no libuv target available. Set UVCPP_USE_SYSTEM_LIBUV=ON or enable UVCPP_BUILD_LIBUV_FROM_SOURCE.")
 endif()
@@ -897,7 +906,12 @@ if(WIN32)
     endif()
   endif()
 
-  add_dependencies(run_uvcpp_tests copy_test_dlls)
+  # run_uvcpp_tests 只在 UVCPP_BUILD_TESTS=ON 时建（见上方 if），而 copy_test_dlls
+  # 在 WIN32 下恒建。少了这个守卫，`-DUVCPP_BUILD_TESTS=OFF` 在 Windows/MinGW 上
+  # 会在 generate 阶段直接失败（add_dependencies 指向不存在的目标），选项等于不可用。
+  if(TARGET run_uvcpp_tests)
+    add_dependencies(run_uvcpp_tests copy_test_dlls)
+  endif()
 endif()
 
 # Ensure test executables can find uvcpp/libuv DLLs at runtime (Windows).
