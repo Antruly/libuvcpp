@@ -216,6 +216,17 @@ if(UVCPP_ENABLE_OPENSSL)
 endif()
 
 # =========================================================================
+# HTTP/2 模块源文件
+# =========================================================================
+if(UVCPP_ENABLE_NGHTTP2)
+  # CONFIGURE_DEPENDS：新加一个 .cpp 不重新 configure 就不会被编进去，而
+  # 「编过了」和「编了这个文件」在这里长得一模一样（这个坑本批已经踩过一次）。
+  file(GLOB HTTP2_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/http2/*.h" "${CMAKE_SOURCE_DIR}/src/http2/*.cpp")
+  source_group("http2" FILES ${HTTP2_SRC_FILES})
+endif()
+
+# =========================================================================
 # nghttp2 —— HTTP/2 后端
 # =========================================================================
 # 本库的 HTTP/2 **只**经 TLS 的 ALPN 协商得到,没有 h2c / 明文 h2(见 doc)。ALPN 是
@@ -225,6 +236,15 @@ if(UVCPP_ENABLE_NGHTTP2 AND NOT UVCPP_ENABLE_OPENSSL)
   message(WARNING
     "UVCPP_ENABLE_NGHTTP2=ON 需要 UVCPP_ENABLE_OPENSSL=ON(HTTP/2 只做 TLS+ALPN,"
     "不做 h2c/明文 h2)。已强制关闭 nghttp2。")
+  set(UVCPP_ENABLE_NGHTTP2 OFF)
+endif()
+
+# h2 层复用的请求/响应类型(`uvcpp_http_request` / `uvcpp_http_response`)住在 web
+# 模块里 —— 关掉 web 就不会有它们,于是 h2 连编都编不过。同样是强制关 + 出声。
+if(UVCPP_ENABLE_NGHTTP2 AND NOT UVCPP_BUILD_WEB)
+  message(WARNING
+    "UVCPP_ENABLE_NGHTTP2=ON 需要 UVCPP_BUILD_WEB=ON(HTTP/2 复用 web 模块的"
+    "请求/响应类型)。已强制关闭 nghttp2。")
   set(UVCPP_ENABLE_NGHTTP2 OFF)
 endif()
 
@@ -924,6 +944,9 @@ endif()
 # src/http2/ 的公开头是 pimpl 形状的（<nghttp2/nghttp2.h> 只出现在 .cpp 里），
 # 使用者拿到的头不依赖 nghttp2 本身，所以这里只装我们自己的头。
 file(GLOB HTTP2_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/http2/*.h")
+# `uvcpp_h2_nghttp2.h` 是**私有**头（它把 <nghttp2/nghttp2.h> 拉进来，正是为了
+# 让别的头不拉），装出去等于把"使用者不需要 nghttp2"这个结论作废。
+list(FILTER HTTP2_HEADER_FILES EXCLUDE REGEX "uvcpp_h2_nghttp2\\.h$")
 if(HTTP2_HEADER_FILES AND UVCPP_ENABLE_NGHTTP2)
   install(FILES ${HTTP2_HEADER_FILES} DESTINATION include/http2)
 endif()

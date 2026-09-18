@@ -1,0 +1,137 @@
+/**
+ * @file src/http2/uvcpp_h2_connection.h
+ * @brief 把 h2 会话接到一条**已完成 TLS 握手且 ALPN 协商出 h2** 的连接上。
+ * @author zhuweiye
+ * @version 1.1.0
+ *
+ * 分工：`uvcpp_h2_session` 只管协议（收字节 / 吐字节），本类管**字节从哪来、
+ * 往哪去**，以及"一次只有一个异步写在飞"这条约束的落地。
+ */
+
+#ifndef SRC_HTTP2_UVCPP_H2_CONNECTION_H
+#define SRC_HTTP2_UVCPP_H2_CONNECTION_H
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <string>
+
+#include <uvcpp/uvcpp_buf.h>
+#include <uvcpp/uvcpp_define.h>
+
+#include "http2/uvcpp_h2_session.h"
+
+#if UVCPP_NGHTTP2_ENABLE
+
+namespace uvcpp {
+
+class uvcpp_tcp_client;
+struct net_read_result;
+
+/**
+ * @brief 一条 h2 连接的驱动层。
+ *
+ * **不拥有** `uvcpp_tcp_client` —— 那是 `uvcpp_tcp_server` 的 close manager 的
+ * 责任。本类只在它还在的时候用它；对端断开或客户端被框架释放之前，
+ * 持有者必须先把本对象销毁（见 `on_disconnect`）。
+ *
+ * **线程**：只能在 loop 线程上用。
+ */
+class UVCPP_API uvcpp_h2_connection {
+ public:
+  struct callbacks {
+    /**
+     * @brief 底层连接结束了（对端关、读错、或我们关完了）。
+     *
+     * 回调返回后**不要**再碰本对象 —— 持有者应当在这里把它销毁。
+     */
+    std::function<void(uvcpp_h2_connection&)> on_disconnect;
+  };
+
+  /**
+   * @param client      已经握手完并且 `tls_alpn_selected() == "h2"` 的连接。
+   * @param server_side true 建服务端会话。
+   */
+  uvcpp_h2_connection(uvcpp_tcp_client* client, bool server_side);
+  ~uvcpp_h2_connection();
+
+  uvcpp_h2_connection(const uvcpp_h2_connection&)            = delete;
+  uvcpp_h2_connection& operator=(const uvcpp_h2_connection&) = delete;
+
+  /**
+   * @brief 建会话、提交初始 SETTINGS、起读、把首轮字节发出去。
+   *
+   * @param h2_cbs   协议层回调（会同步跑用户代码，见 `uvcpp_h2_session` 的重入说明）。
+   * @param conn_cbs 连接层回调。
+   */
+  int start(const uvcpp_h2_session::callbacks& h2_cbs, const callbacks& conn_cbs);
+
+  /**
+   * @brief 提交一个响应并立刻把待发字节冲出去。
+   *
+   * 是 `session().submit_response(...)` + `flush()` 的合并 —— 后者忘了调就是
+   * "响应提交了但一个字节都没发"这种最难查的静默失败。
+   */
+  int send_response(int32_t stream_id, const uvcpp_http_response& resp,
+                    bool omit_body = false);
+
+  /// `session().submit_status(...)` + `flush()`。
+  int send_status(int32_t stream_id, int status, const std::string& body);
+
+  /// 把会话里待发的字节全部写出去。可以重复调用（没东西发就是空操作）。
+  int flush();
+
+  /// 主动关：尽量把待发字节（含 GOAWAY）冲出去，再关底层连接。
+  void shutdown();
+
+  /// 立刻关，不发任何东西。
+  void close_now();
+
+  uvcpp_h2_session& session() { return *session_; }
+  uvcpp_tcp_client* client() const { return client_; }
+  /// 底层连接已经结束。
+  bool closed() const { return closed_; }
+  /// 正在关（等最后一笔写出去）。
+  bool closing() const { return closing_; }
+
+  /// 输入字节数 / 输出字节数，供测试与诊断用。
+  size_t bytes_in() const { return bytes_in_; }
+  size_t bytes_out() const { return bytes_out_; }
+
+ private:
+  void on_read(uvcpp_tcp_client& c, const net_read_result& r);
+  void on_write_done(int status);
+  void finish_close();
+  void notify_disconnect();
+
+  // 与 `uvcpp_tcp_client` 同一套存活令牌纪律（理由见那里 `alive_token_` 的注释）：
+  // 异步写完成回调是 libuv **稍后**送进来的，而本对象可能在那之前就没了。
+  std::shared_ptr<char> alive_token();
+  static bool           token_alive(const std::shared_ptr<char>& token);
+
+  uvcpp_tcp_client*                  client_ = nullptr;
+  std::shared_ptr<uvcpp_h2_session>  session_;
+  callbacks                          cbs_;
+
+  bool   closed_        = false;
+  bool   closing_       = false;
+  bool   notified_      = false;
+  bool   writing_       = false;
+  /// 写完成之后还要不要关底层连接（`shutdown()` 的最后一段）。
+  bool   close_after_flush_ = false;
+  /// 已经发过 GOAWAY。
+  bool   goaway_sent_   = false;
+
+  std::string  out_;
+  uvcpp_buf*   write_buf_ = nullptr;
+  size_t       bytes_in_  = 0;
+  size_t       bytes_out_ = 0;
+
+  std::shared_ptr<char> alive_token_;
+};
+
+}  // namespace uvcpp
+
+#endif  // UVCPP_NGHTTP2_ENABLE
+
+#endif  // SRC_HTTP2_UVCPP_H2_CONNECTION_H

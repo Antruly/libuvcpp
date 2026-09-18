@@ -33,6 +33,14 @@ if(NOT UVCPP_ENABLE_OPENSSL)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "web_ssl_.*\.cpp$")
 endif()
 
+# Exclude HTTP/2 tests when nghttp2 is not enabled.
+# 命名约定：h2 用例一律 `h2_*.cpp`。**不能**靠 `web_ssl_*` 那条顺带摘掉 ——
+# h2 会话层本身不需要 TLS（只有接 socket 的那层才要），所以用例不会带 ssl 前缀，
+# 于是「OpenSSL 开、nghttp2 关」这个组合下它会去链一个不存在的模块。
+if(NOT UVCPP_ENABLE_NGHTTP2)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "^h2_.*\.cpp$")
+endif()
+
 foreach(test_src ${FUNC_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
   string(REGEX REPLACE "[^a-zA-Z0-9_]" "_" exe_name "test_${test_name}")
