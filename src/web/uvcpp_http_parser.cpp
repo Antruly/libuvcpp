@@ -112,6 +112,18 @@ void uvcpp_http_parser::reset() {
   state_         = http_parser_state::IDLE;
 }
 
+void uvcpp_http_parser::set_request_method(http_method m) {
+  raw_p(raw_parser_)->method = static_cast<uint8_t>(m);
+  if (m == http_method::HTTP_HEAD) {
+    // llhttp 定"这条响应有没有 body"靠的是 `flags & F_SKIPBODY`，不是 `method`：
+    // `src/http.c:59` 据此直接跳 body、`:138` 据此不等到 EOF，而生成的 llhttp.c
+    // 里**一次都没查过 method**（init 是 memset 清零，message_complete 又把它清
+    // 回去，`:122`）—— 所以这个标志只能由调用方补，且必须在 reset() 之后补。
+    // 少了它，HEAD 的响应会一直等那个永远不来的 body（`content-length` 还在）。
+    raw_p(raw_parser_)->flags |= F_SKIPBODY;
+  }
+}
+
 // =========================================================================
 // Bind settings
 // =========================================================================

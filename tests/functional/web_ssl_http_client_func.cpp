@@ -70,6 +70,16 @@ const char kResponse[] =
     "\r\n"
     "hello-tls";
 
+/// HEAD 的响应：头部与上面那条**逐字节相同**（含 `Content-Length: 9`），
+/// body 一个字节都没有 —— RFC 7231 §4.3.2。客户端若按 `content-length` 去等
+/// body，就永远等不到（下面场景 2b 钉的就是这个）。
+const char kHeadResponse[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 9\r\n"
+    "Connection: close\r\n"
+    "\r\n";
+
 // =========================================================================
 // 服务端
 // =========================================================================
@@ -104,8 +114,14 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
         // 请求头收全了就回。这里刻意**不**解析 —— 这个文件考的是客户端
         // 有没有把明文送进来，服务端的 HTTP 解析能力由别的用例负责。
         if (pending.find("\r\n\r\n") != std::string::npos) {
+          // HEAD 回无 body 的那条（头部仍带 Content-Length）—— 只有这一处
+          // 按方法分流；这个文件刻意不解析请求，够用就好。
+          const bool is_head = (pending.compare(0, 5, "HEAD ") == 0);
+          const char* reply = is_head ? kHeadResponse : kResponse;
+          const size_t reply_len = is_head ? sizeof(kHeadResponse) - 1
+                                           : sizeof(kResponse) - 1;
           pending.clear();
-          const int wrc = c.write(kResponse, sizeof(kResponse) - 1,
+          const int wrc = c.write(reply, reply_len,
                                   [&st](int status) {
                                     if (status == 0) st.reply_ok.fetch_add(1);
                                     else st.reply_fail.fetch_add(1);
@@ -345,6 +361,76 @@ int main() {
   check(st.accepted.load() == 1,
         "server delivered " + std::to_string(st.accepted.load()) +
             " connections to the upper layer (want exactly 1: the TLS one)");
+
+  // ---- 场景 2b：TLS 上的同步 HEAD ------------------------------------
+  //
+  // 三处客户端调用点里剩下的那一处：`connect_wait()` + `set_ssl_context()`
+  // 之后的 `send_wait()` 走 `send_wait_ssl` —— 这是本客户端里唯一还用 `ssl_`
+  // 直接收发的路径。契约与 http 侧那条相同（body 恰好 0 字节、头部原样保留），
+  // 但**判据得靠墙钟**：它照头里的 `Content-Length: 9` 等一个按 RFC 7231
+  // §4.3.2 不会来的 body，而 `send_wait_ssl` 只在 Windows 上给 socket 设
+  // `SO_RCVTIMEO` ⇒ 改前的形态是"卡满 3 秒再回一个空 body"，`rc` 与 `body`
+  // 两态一模一样（变异实测：老判据下变异态 ALL PASS）。
+  //
+  // **另起一台服务端**：上面那条 `accepted == 1` 数的是主服务端交付的连接数，
+  // 共用会把它的计数搅成 2（同场景 3 的理由）。服务端代码没为这个场景新写，
+  // 还是同一个 `run_server`。
+  {
+    server_state      sth;
+    std::atomic<bool> stoph{false};
+    std::promise<int> porth_promise;
+    std::future<int>  porth_future = porth_promise.get_future();
+
+    std::thread srvh_thread(run_server, std::ref(porth_promise), std::ref(stoph),
+                            std::ref(sth), &sctx);
+    const int porth = porth_future.get();
+    check(porth > 0,
+          "tls_head: 服务端未起 (listen_rc=" +
+              std::to_string(sth.listen_rc.load()) + ")");
+
+    if (porth > 0) {
+      uvcpp_http_client client;
+      client.set_ssl_context(&cctx);
+      const int crc = client.connect_wait("127.0.0.1", porth, 5000);
+      check(crc == 0, "tls_head: connect_wait rc = " + std::to_string(crc));
+      if (crc == 0) {
+        uvcpp_http_response resp;
+        const std::chrono::steady_clock::time_point th0 =
+            std::chrono::steady_clock::now();
+        const int hrc = client.send_wait(uvcpp_http_request::make_head("/"), resp, 3000);
+        const long long hms = uvcpp_test::elapsed_ms(th0);
+        check(hrc == 0, "tls_head: send_wait rc = " + std::to_string(hrc) +
+                            " (want 0; UV_ETIMEDOUT 是这条缺陷在 POSIX 上的样子)");
+        // **墙钟判据，和 `client_head_request` 同一个理由**：`send_wait_ssl`
+        // 只在 Windows 上给 socket 设 `SO_RCVTIMEO`，所以"改前"在这台机器上是
+        // "卡满 3 秒再回一个空 body" —— 光看 `rc == 0` 和 `body 为空`，两种形态
+        // 都是绿的（变异实测过）。分得开的只有等了多久。
+        check(hms < 1500, "tls_head: send_wait 用了 " + std::to_string(hms) +
+                              " ms（毫秒级才正常；≥3s 就是在等那个不会来的 body）");
+        check(static_cast<int>(resp.status_code) == 200,
+              "tls_head: status = " +
+                  std::to_string(static_cast<int>(resp.status_code)));
+        check(resp.body.size() == 0, "tls_head: body = " +
+                                         std::to_string(resp.body.size()) +
+                                         " 字节 (want 0)");
+        // 头部必须原样保留 —— 抹掉 content-length 是绕过，不是修好。
+        check(resp.get_header("content-length") == "9",
+              "tls_head: content-length = '" +
+                  resp.get_header("content-length") + "'");
+
+        // 这条会话是阻塞 socket，按本文件既有的收尾方式让它跑完再析构。
+        const std::chrono::steady_clock::time_point t0 =
+            std::chrono::steady_clock::now();
+        while (uvcpp_test::elapsed_ms(t0) < 200) {
+          client.run(UV_RUN_NOWAIT);
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+    }
+
+    stoph.store(true);
+    srvh_thread.join();
+  }
 
   // ---- 场景 3：同步建 TLS 之后，异步 `send()` 必须**拒绝**，而不是发明文 ----
   //

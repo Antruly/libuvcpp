@@ -61,6 +61,23 @@ void check(bool cond, const std::string& what) {
   }
 }
 
+/// @brief 会自己记数的 `uvcpp_buf` 外壳。
+///
+/// `send(ip, port, uvcpp_buf*, cb)` 只把**载荷**搬走（`out_uv_buf()`），
+/// 对象本身仍归调用方 —— 与 tcp 侧 `uvcpp_tcp_client.h:288-298` 写的是同一条
+/// 契约。少删一个壳是**看不见的**泄漏（内存池的 `in_use` 不是活块计数），
+/// 所以自己数：构造 +1、析构 -1，两个调用点跑完必须回到 0。
+struct counted_buf : uvcpp_buf {
+  static std::atomic<int>& live() {
+    static std::atomic<int> n{0};
+    return n;
+  }
+  counted_buf(const char* p, size_t n) : uvcpp_buf(p, n) {
+    live().fetch_add(1);
+  }
+  ~counted_buf() { live().fetch_sub(1); }
+};
+
 const char kPayload[] = "udp-payload-0123456789";
 
 }  // namespace
@@ -259,10 +276,11 @@ int main() {
       std::atomic<int> done{0}, bad{0};
       int submitted = 0;
       for (int i = 0; i < kN; ++i) {
-        uvcpp_buf* buf = new uvcpp_buf(kPayload, sizeof(kPayload) - 1);
-        const int src = client.send("127.0.0.1", uport, buf, [&](int st) {
+        counted_buf* buf = new counted_buf(kPayload, sizeof(kPayload) - 1);
+        const int src = client.send("127.0.0.1", uport, buf, [&, buf](int st) {
           if (st != 0) bad.fetch_add(1);
           done.fetch_add(1);
+          delete buf;  // 载荷随这次 send 交出去了，壳仍归调用方
         });
         if (src != 0) {
           check(false, "udp client send(buf*): #" + std::to_string(i) +
@@ -293,17 +311,24 @@ int main() {
 
       bad = 0;
       for (int i = 0; i < kN; ++i) {
-        uvcpp_buf* buf = new uvcpp_buf(kPayload, sizeof(kPayload) - 1);
+        counted_buf* buf = new counted_buf(kPayload, sizeof(kPayload) - 1);
         // 没有 `send_wait(uvcpp_buf*)` 重载：cb 传 nullptr 就是"同步 + 转移
         // 所有权"那条分支。
-        if (client.send("127.0.0.1", uport, buf, nullptr) != 0) {
-          ++bad;
-          delete buf;  // 没交出去
-        }
+        const int src = client.send("127.0.0.1", uport, buf, nullptr);
+        // 同步分支同样只搬走载荷，壳在返回之后归调用方 —— 成功也要删
+        // （原来只在失败那支删，成功的那些全漏了）。
+        delete buf;
+        if (src != 0) ++bad;
       }
       check(bad == 0, "udp client sync send(buf*): " + std::to_string(bad) +
                           "/" + std::to_string(kN) + " failed");
     }
+
+    // 两个调用点跑完，壳一个都不许剩 —— 这是本文件里唯一看得见"少删一个壳"
+    // 的判据（内存池的 in_use 不是活块计数）。
+    check(counted_buf::live().load() == 0,
+          "uvcpp_buf 外壳残留 " + std::to_string(counted_buf::live().load()) +
+              " 个（=0 才说明两个调用点都没漏删）");
 
     check(!client.has_status(UDP_CLIENT_ERROR),
           "udp client: handle went bad after the batches (status=" +

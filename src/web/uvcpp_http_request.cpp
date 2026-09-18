@@ -165,6 +165,12 @@ uvcpp_http_request uvcpp_http_request::make_get(const std::string& url) {
   return req;
 }
 
+uvcpp_http_request uvcpp_http_request::make_head(const std::string& url) {
+  uvcpp_http_request req = make_get(url);
+  req.method = http_method::HTTP_HEAD;
+  return req;
+}
+
 uvcpp_http_request uvcpp_http_request::make_post(const std::string& url,
                                                    const char* body_data,
                                                    size_t len,

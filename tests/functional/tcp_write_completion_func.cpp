@@ -74,6 +74,25 @@ struct probe {
   std::atomic<int> not_self_free{0};
 };
 
+/// @brief 会自己记数的 `uvcpp_buf` 外壳。
+///
+/// `write(uvcpp_buf*, cb)` / `write_wait(uvcpp_buf*)` 只把**载荷**搬走
+/// （`out_uv_buf()`），对象本身按契约仍归调用方 —— 见
+/// `uvcpp_tcp_client.h:288-298`。少删一个壳是**看不见的**泄漏：内存池的
+/// `in_use` 根本不是活块计数（见下面那段，本文件已经量过），而壳很小，
+/// PageHeap 也只在"读已释放"时才叫。所以自己数：构造 +1、析构 -1，
+/// 下面两处带壳的调用点跑完必须回到 0。
+struct counted_buf : uvcpp_buf {
+  static std::atomic<int>& live() {
+    static std::atomic<int> n{0};
+    return n;
+  }
+  counted_buf(const char* p, size_t n) : uvcpp_buf(p, n) {
+    live().fetch_add(1);
+  }
+  ~counted_buf() { live().fetch_sub(1); }
+};
+
 const char kPayload[] = "0123456789abcdef";
 
 }  // namespace
@@ -256,10 +275,11 @@ int main() {
       probe p;
       int submitted = 0;
       for (int i = 0; i < kN; ++i) {
-        uvcpp_buf* buf = new uvcpp_buf(kPayload, sizeof(kPayload) - 1);
-        const int wrc = client.write(buf, [&p](int st) {
+        counted_buf* buf = new counted_buf(kPayload, sizeof(kPayload) - 1);
+        const int wrc = client.write(buf, [&p, buf](int st) {
           if (st != 0) p.failed.fetch_add(1);
           p.completed.fetch_add(1);
+          delete buf;  // 载荷随这次写交出去了，壳仍归调用方
         });
         if (wrc != 0) {
           check(false, "async uvcpp_buf*: submit #" + std::to_string(i) +
@@ -293,16 +313,22 @@ int main() {
     {
       int bad = 0;
       for (int i = 0; i < kN; ++i) {
-        uvcpp_buf* buf = new uvcpp_buf(kPayload, sizeof(kPayload) - 1);
+        counted_buf* buf = new counted_buf(kPayload, sizeof(kPayload) - 1);
         const int wrc = client.write_wait(buf, 5000);
-        if (wrc != 0) {
-          ++bad;
-          delete buf;  // 没交出去
-        }
+        // 同步路径的契约是"返回之后"壳还归调用方（载荷在这之前就搬走了），
+        // 所以成功失败都要删 —— 原来只在失败那支删，成功的 16 个壳全漏了。
+        delete buf;
+        if (wrc != 0) ++bad;
       }
       check(bad == 0, "sync uvcpp_buf*: " + std::to_string(bad) + "/" +
                           std::to_string(kN) + " failed");
     }
+
+    // 两处带壳的调用点跑完，壳必须一个不剩。这条是本文件里唯一能看见"少删一个
+    // 壳"的判据：漏删的实现在这里报出非 0 的残留数（改前实测 32 个）。
+    check(counted_buf::live().load() == 0,
+          "uvcpp_buf 外壳残留 " + std::to_string(counted_buf::live().load()) +
+              " 个（=0 才说明两处壳都没漏删）");
 
     // 四批跑完连接还得是活的 —— 释放改错了地方（提前放/放两次）在这里最先露头。
     check(client.has_status(TCP_CLIENT_CONNECTED),

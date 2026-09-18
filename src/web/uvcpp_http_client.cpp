@@ -259,6 +259,10 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
 
   // Reset parser and install callbacks
   parser_->reset();
+  // HEAD 的响应有 Content-Length 却没有 body（RFC 7231 §4.3.2）—— 得让解析器
+  // 知道"刚发出去的是 HEAD"，否则它会一直等那个永远不来的 body，回调永远不
+  // 落地，请求只会超时。必须在 reset() **之后**：llhttp_init 会把标志清掉。
+  parser_->set_request_method(req.method);
   parser_->set_on_body([this](const char* at, size_t len) {
     body_buf_.append_data(at, len);
   });
@@ -652,7 +656,8 @@ static bool chunked_complete(const std::string& s, size_t pos) {
 // 够了一条报文就返回，多余字节不吞、连接留给下一次请求。两者都没有时才退化
 // 为读至 EOF（此时上面的循环已经把数据收完，不会再阻塞）。
 static bool read_one_message(const std::function<int(char*, size_t)>& rd,
-                             std::string& head, std::string& body) {
+                             std::string& head, std::string& body,
+                             bool head_request) {
   std::string all;
   char buf[8192];
 
@@ -675,6 +680,17 @@ static bool read_one_message(const std::function<int(char*, size_t)>& rd,
   }
 
   head = all.substr(0, hdrEnd);
+
+  // HEAD 的响应按 RFC 7231 §4.3.2 **没有 body** —— 不论头里写着什么
+  // `Content-Length`（那描述的是对应 GET 的 body）或 `Transfer-Encoding`。
+  // 少了这一句，下面 `haveLen` 那一支会一直读到超时：服务端不会发 body，
+  // 我们却按头里的长度等它。异步路径的对应物是 `set_request_method()`
+  // （它让 llhttp 置 F_SKIPBODY），两条路都得告诉解析器"这条不领 body"。
+  if (head_request) {
+    body.clear();
+    return true;
+  }
+
   const size_t bodyStart = hdrEnd + 4;
 
   std::string te = get_header_value(head, "transfer-encoding");
@@ -765,7 +781,8 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
   }
 
   std::string head, body;
-  read_one_message([this](char* p, size_t n) { return ssl_->read(p, n); }, head, body);
+  read_one_message([this](char* p, size_t n) { return ssl_->read(p, n); }, head,
+                   body, req.method == http_method::HTTP_HEAD);
 
   // 状态行 + 全部 header 落进 resp（两条阻塞路径共用，见 parse_response_head）
   parse_response_head(head, resp);
@@ -816,7 +833,7 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
       [sock](char* p, size_t n) {
         return static_cast<int>(::recv(sock, p, static_cast<int>(n), 0));
       },
-      head, body);
+      head, body, req.method == http_method::HTTP_HEAD);
 
   // 状态行 + 全部 header 落进 resp（两条阻塞路径共用，见 parse_response_head）
   parse_response_head(head, resp);

@@ -125,6 +125,22 @@ class UVCPP_API uvcpp_http_parser {
    */
   void reset();
 
+  /**
+   * @brief Tell a response parser which method the request used.
+   *
+   * Only `HTTP_HEAD` changes anything.  A response to HEAD carries the
+   * headers of the corresponding GET — `Content-Length` included — but no
+   * body (RFC 7231 §4.3.2).  llhttp expresses "this response has no body"
+   * as `F_SKIPBODY` and **never derives it from `method` itself**
+   * (`llhttp__after_headers_complete`, `_local_deps/llhttp/src/http.c:59`
+   * and `:138`): the caller sets it.
+   *
+   * Call after reset() — reset() re-inits llhttp, which clears flags.
+   * Without it a client parsing a HEAD response waits forever for a body
+   * that the server is never going to send.
+   */
+  void set_request_method(http_method m);
+
   // -------------------------------------------------------------------
   // 流式解析
   // -------------------------------------------------------------------

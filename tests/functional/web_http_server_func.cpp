@@ -724,6 +724,142 @@ static bool test_keepalive_sequential_responses() {
 }
 
 // -------------------------------------------------------------------------
+// Test: 客户端侧 HEAD —— 有 `Content-Length` 却没有 body
+//
+// 服务端的 HEAD 语义是对的（上一条已钉：头部与 GET 逐字节相同——**包括
+// `Content-Length`**——body 一个字节不发）。坏的一直是**客户端**：它按分帧头
+// 决定还要读多少，于是照着头里那个 `Content-Length` 去等一个按 RFC 7231
+// §4.3.2 根本不会来的 body，一路等到超时。异步路径（llhttp）也一样——llhttp
+// 只认 `flags & F_SKIPBODY`，从不自己看 `method`。
+//
+// 判据分两种形态，**别只留 rc**：异步那条是硬判据（改前回调根本不落地，
+// 3 秒内必然不出来）；阻塞那条在本机（Windows）**改前也是 rc == 0** —— 阻塞
+// 路径只在 Windows 上给 socket 设 `SO_RCVTIMEO`，于是改前的形态是"卡满超时
+// 再回一个空 body"，所以阻塞那条还得加**墙钟**（毫秒级 vs ≥3 秒）。变异实测过：
+// 只断言 rc / body 的话，变异态照样 ALL PASS。其余几条防止"收是收了，收错了"：
+//   - 状态码 200、body 恰好 0 字节；
+//   - `content-length` 仍然在头里（那是 HEAD 的正当语义，不是该被抹掉的东西）；
+//   - 紧接着在**同一条连接**上发一个 GET，body 必须完整——HEAD 少读的那次
+//     不能把下一个响应的字节吃掉。
+//
+// 两条路径都在这里过一遍：`send_wait` 在 build-webapp 落异步解析器、在
+// 开 OpenSSL 的树里落 `send_wait_plain`（同为阻塞式原始 socket）；`send(cb)`
+// 两种树上都走解析器。
+// -------------------------------------------------------------------------
+static bool test_client_head_request() {
+  TestServer srv;
+  const int port = srv.start([](uvcpp_http_server& s) {
+    s.head("/h", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                    uvcpp_tcp_client*) {
+      resp = uvcpp_http_response::ok("0123456789", 10, "text/plain");
+    });
+    s.get("/g", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                   uvcpp_tcp_client*) {
+      resp = uvcpp_http_response::ok("get-body", 8, "text/plain");
+    });
+  });
+  if (port <= 0) return false;
+
+  bool ok = true;
+  uvcpp_http_client client;
+  if (client.connect_wait("127.0.0.1", port, 3000) != 0) {
+    srv.shutdown();
+    return false;
+  }
+
+  // ---- 1) 阻塞式：3 秒超时。本机改前是"卡满 3 秒 + 空 body"，判据见下面的墙钟
+  {
+    uvcpp_http_response resp;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int rc = client.send_wait(uvcpp_http_request::make_head("/h"), resp, 3000);
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+    // **墙钟判据不能省。** 两条阻塞路径（`send_wait_ssl` / `send_wait_plain`）
+    // 只在 Windows 上给 socket 设了 `SO_RCVTIMEO`，所以改前的形态是"卡满那个
+    // 超时再回一个空 body"，而 `rc == 0` / `body 为空` **两态都成立** ——
+    // 实测过：把修好的那几行变异掉、重编，光靠这两条断言照样 ALL PASS。
+    // 真正在两种形态之间分得开的是"到底等了多久"（毫秒级 vs ≥3 秒）。
+    if (ms >= 1500) {
+      std::cout << "  [err] HEAD 的 send_wait 用了 " << ms
+                << " ms（毫秒级才正常；≥3s 就是在等那个不会来的 body）\n";
+      ok = false;
+    }
+    if (rc != 0) {
+      std::cout << "  [err] HEAD send_wait rc=" << rc << "（超时就是那个缺陷）\n";
+      ok = false;
+    } else {
+      if (resp.status_code != http_status::OK) {
+        std::cout << "  [err] HEAD 状态码 = " << static_cast<int>(resp.status_code) << "\n";
+        ok = false;
+      }
+      if (resp.body.size() != 0) {
+        std::cout << "  [err] HEAD 不该有 body，实到 " << resp.body.size() << " 字节\n";
+        ok = false;
+      }
+      // 头部必须与 GET 相同 —— 抹掉 content-length 是"绕过"不是"修好"。
+      if (resp.get_header("content-length") != "10") {
+        std::cout << "  [err] HEAD 的 content-length = '"
+                  << resp.get_header("content-length") << "'（应为 10）\n";
+        ok = false;
+      }
+    }
+  }
+
+  // ---- 2) 同一条连接上紧接着 GET：HEAD 不能吃掉后续响应的字节 ----
+  {
+    uvcpp_http_response resp;
+    const int rc = client.send_wait(uvcpp_http_request::make_get("/g"), resp, 3000);
+    if (rc != 0) {
+      std::cout << "  [err] HEAD 之后的 GET rc=" << rc << "\n";
+      ok = false;
+    } else if (std::string(resp.body.get_const_data() ? resp.body.get_const_data() : "",
+                           resp.body.size()) != "get-body") {
+      std::cout << "  [err] HEAD 之后的 GET body 不对 (size=" << resp.body.size() << ")\n";
+      ok = false;
+    }
+  }
+
+  // ---- 3) 异步 send(cb) —— 走 llhttp 的那条路（两种构建都是） ----
+  {
+    std::atomic<bool> done{false};
+    int err_seen = -1;
+    int status_seen = 0;
+    size_t body_seen = 1;
+    const int rc = client.send(
+        uvcpp_http_request::make_head("/h"),
+        [&](const uvcpp_http_response& r, int err) {
+          err_seen = err;
+          status_seen = static_cast<int>(r.status_code);
+          body_seen = r.body.size();
+          done.store(true);
+        });
+    if (rc != 0) {
+      std::cout << "  [err] HEAD async send rc=" << rc << "\n";
+      ok = false;
+    } else {
+      const auto t0 = std::chrono::steady_clock::now();
+      while (!done.load() &&
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - t0).count() < 3000) {
+        client.run(UV_RUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (!done.load()) {
+        std::cout << "  [err] HEAD async 3 秒内没有回调（llhttp 在等那个不来的 body）\n";
+        ok = false;
+      } else if (err_seen != 0 || status_seen != 200 || body_seen != 0) {
+        std::cout << "  [err] HEAD async err=" << err_seen << " status=" << status_seen
+                  << " body=" << body_seen << "\n";
+        ok = false;
+      }
+    }
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
 // Test: 原始数据钩子 —— 观察模式与接管模式
 // -------------------------------------------------------------------------
 static bool test_raw_data_hook() {
@@ -858,6 +994,7 @@ int main(int argc, char** argv) {
     {"body_limit_returns_413", test_body_limit_returns_413},
     {"server_close_notifies", test_server_close_notifies},
     {"keepalive_sequential_responses", test_keepalive_sequential_responses},
+    {"client_head_request", test_client_head_request},
     {"raw_data_hook", test_raw_data_hook},
     {"response_copy_keeps_deferred", test_response_copy_keeps_deferred},
   };

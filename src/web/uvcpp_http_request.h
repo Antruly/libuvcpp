@@ -105,6 +105,14 @@ class UVCPP_API uvcpp_http_request {
   /** @brief Build a simple GET request. */
   static uvcpp_http_request make_get(const std::string& url);
 
+  /**
+   * @brief Build a HEAD request — the headers of the GET, no body back.
+   *
+   * The response carries the `Content-Length` the GET would have and no
+   * body at all; `uvcpp_http_client` handles that on every send path.
+   */
+  static uvcpp_http_request make_head(const std::string& url);
+
   /** @brief Build a simple POST request with body. */
   static uvcpp_http_request make_post(const std::string& url,
                                        const char* body, size_t len,
