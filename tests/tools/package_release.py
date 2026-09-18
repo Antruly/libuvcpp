@@ -304,6 +304,15 @@ def copytree(src, dst):
 
 
 def main():
+    # Windows 的 stdout 默认走 ANSI 代码页（CI runner 是 cp1252），下面那些中文
+    # 诊断一旦执行到就 UnicodeEncodeError 崩掉。它只在**产物依赖了第三方 dll**
+    # （于是 third 非空、真正走到那两行 print）时才触发，表现为某几条腿莫名红、
+    # 另几条全绿；本机是 UTF-8 控制台，永远看不出来。CI 实测踩过一次。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--tree", required=True, help="构建树目录")
     ap.add_argument("--platform", required=True, choices=sorted(PLATFORMS))

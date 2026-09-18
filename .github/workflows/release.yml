@@ -89,12 +89,19 @@ jobs:
       # 排除项与 ci.yml 一致：test_shutdown_func 是 ~1% 的既有间歇性失败
       # （doc/ci-guide.md §4），拿它卡发布只会卡住发布本身。
       - name: Test
-        run: ctest --test-dir build-mingw --output-on-failure --timeout 60 \
-               --exclude-regex "test_shutdown_func"
+        run: |
+          # 续行必须写在块标量里。`run: cmd \` 是 YAML 普通标量，普通标量把换行
+          # **折成空格**，`\` 于是只转义掉后面那个空格：shell 收到的是一条
+          # `... --timeout 60 \ --exclude-regex "..."`，ctest 把这两个都当裸参数
+          # 忽略 ⇒ 排除静默失效（实测过一次，80 个测试全跑了）。
+          ctest --test-dir build-mingw --output-on-failure --timeout 60 \
+            --exclude-regex "test_shutdown_func"
 
       - name: Package
-        run: python tests/tools/package_release.py \
-               --tree build-mingw --platform mingw-x64 --out dist
+        run: |
+          # 同上：普通标量会把续行折成空格，argparse 收不到 --tree 直接退出 2。
+          python tests/tools/package_release.py \
+            --tree build-mingw --platform mingw-x64 --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -217,12 +224,18 @@ jobs:
           PY
 
       - name: Test
-        run: ctest --test-dir build-mingw --output-on-failure --timeout 60 \
-               --exclude-regex "test_shutdown_func"
+        run: |
+          # 续行必须写在块标量里。`run: cmd \` 是 YAML 普通标量，普通标量把换行
+          # **折成空格**，`\` 于是只转义掉后面那个空格：shell 收到的是一条
+          # `... --timeout 60 \ --exclude-regex "..."`，ctest 把这两个都当裸参数
+          # 忽略 ⇒ 排除静默失效（实测过一次，80 个测试全跑了）。
+          ctest --test-dir build-mingw --output-on-failure --timeout 60 \
+            --exclude-regex "test_shutdown_func"
 
       - name: Package
-        run: python tests/tools/package_release.py \
-               --tree build-mingw --platform mingw-arm64 --out dist
+        run: |
+          python tests/tools/package_release.py \
+            --tree build-mingw --platform mingw-arm64 --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -346,6 +359,16 @@ jobs:
       # 用 jom 而不是 nmake：nmake 没有 -j，串行编 libcrypto 会把这条腿拖到时限
       # 边缘。jom 就是"带 -j 的 nmake"，vcpkg 在同一个平台上编 OpenSSL 用的正是
       # 它（portfile 里的 PREFER_JOM）。
+      #
+      # 但并行会撞 PDB：10-main.conf:1547 的 lib_cflags 给**所有** .obj（含 shlib）
+      # 写同一个 /Fdossl_static.pdb，多个 cl.exe 抢它就报 C1041。所以要补 /FS
+      # —— 正是那条报错自己给出的解法。写成裸 /FS 而不是 --fs：Configure 只把
+      # ^[-+] 与 ^/ 开头的参数并进 useradd{CFLAGS}，而 useradd 是**追加**语义
+      # （Configure:791 的注释与 :1505 的 push 都写明了），于是 /FS 落进 $(CFLAGS)，
+      # 再进 LIB_CFLAGS/DSO_CFLAGS/BIN_CFLAGS。本机跑 Configure 实测：
+      #   CFLAGS=/W3 /wd4090 /nologo /O2 /FS
+      # no-makedepend 同理 —— 并行的依赖生成会 race，vcpkg 也在 CONCURRENCY>1
+      # 时加它。
       - name: Build OpenSSL for arm64
         shell: cmd
         run: |
@@ -373,7 +396,7 @@ jobs:
           if errorlevel 1 exit /b 1
 
           cd /d "%GITHUB_WORKSPACE%\openssl-src"
-          perl Configure VC-WIN64-ARM no-asm no-tests no-apps ^
+          perl Configure VC-WIN64-ARM no-asm no-tests no-apps no-makedepend /FS ^
             --prefix=%GITHUB_WORKSPACE%\openssl-arm64 ^
             --openssldir=%GITHUB_WORKSPACE%\openssl-arm64\ssl
           if errorlevel 1 exit /b 1
@@ -522,12 +545,16 @@ jobs:
           fi
 
       - name: Test
-        run: ctest --test-dir build-linux --output-on-failure --timeout 60 \
-               --exclude-regex "test_shutdown_func"
+        run: |
+          # 见 mingw Test 那条的注释：普通标量折行会让 --exclude-regex 静默失效。
+          ctest --test-dir build-linux --output-on-failure --timeout 60 \
+            --exclude-regex "test_shutdown_func"
 
       - name: Package
-        run: python3 tests/tools/package_release.py \
-                --tree build-linux --platform linux-x64 --out dist
+        run: |
+          # 同上：普通标量会把续行折成空格，argparse 收不到 --tree 直接退出 2。
+          python3 tests/tools/package_release.py \
+            --tree build-linux --platform linux-x64 --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -582,12 +609,15 @@ jobs:
           fi
 
       - name: Test
-        run: ctest --test-dir build-linux --output-on-failure --timeout 60 \
-               --exclude-regex "test_shutdown_func"
+        run: |
+          # 见 mingw Test 那条的注释：普通标量折行会让 --exclude-regex 静默失效。
+          ctest --test-dir build-linux --output-on-failure --timeout 60 \
+            --exclude-regex "test_shutdown_func"
 
       - name: Package
-        run: python3 tests/tools/package_release.py \
-                --tree build-linux --platform linux-arm64 --out dist
+        run: |
+          python3 tests/tools/package_release.py \
+            --tree build-linux --platform linux-arm64 --out dist
 
       - uses: actions/upload-artifact@v4
         with:
