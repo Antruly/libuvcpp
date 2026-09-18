@@ -47,7 +47,12 @@ jobs:
       - name: Configure & Build
         run: |
           set -o pipefail
+          # BUILD_SHARED_LIBS=OFF：让 FetchContent 进来的 llhttp 与 libuv 编成静态
+          # （根 CMakeLists.txt:6 默认 ON ⇒ llhttp_shared + libuv 的 `uv`，
+          # 产物会多出 libllhttp.dll / libuv.dll 两个依赖）。uvcpp 自己是显式
+          # SHARED，不受影响。下面那条自包含断言就是用来兜住这一条的。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
@@ -111,7 +116,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # BUILD_SHARED_LIBS=OFF 同样是为了让 llhttp 与 libuv 静态链进 uvcpp.dll，
+          # 否则包里要多带 llhttp.dll / uv.dll（根 CMakeLists.txt:6 默认 ON）。
+          # 注意 zlib **不受这个开关影响**：CMakeLists.txt:633 明确链的是 zlibstatic。
+          # MSVC 侧 uvcpp 自己仍走 /MD + 包内自带 VC++ 运行库，与此无关。
           cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
+            -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \

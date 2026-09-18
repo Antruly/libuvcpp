@@ -536,7 +536,21 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p ci-logs
+          # BUILD_SHARED_LIBS=OFF 这一条**不能省**。它不管 uvcpp 自己
+          # （CMakeLists.txt:485 是显式的 `add_library(uvcpp SHARED ...)`），管的是依赖：
+          # 根 CMakeLists.txt:6 的默认值是 **ON**，于是 llhttp 建的是 llhttp_shared。
+          # 本地对同一个源码、同样这些参数做过 A/B，只切这一个开关：
+          #   ON  → `Using libuv CMake target 'uv'`，DLL 的非系统导入是
+          #         `libllhttp.dll` **和** `libuv.dll` ⇒ 下面那条断言红。
+          #   OFF → `Using libuv CMake target 'uv_a' (static)`，非系统导入为空。
+          # libuv 这一路走 CMakeLists.txt:275 —— 只有 `NOT BUILD_SHARED_LIBS` 时才挑
+          # 静态的 `uv_a`，否则挑 `uv`，而 libuv 自己的 `LIBUV_BUILD_SHARED` 默认也
+          # 是 ON（_local_deps/libuv/CMakeLists.txt:27,454）。
+          # 本机几棵树都手工传了这个 OFF，所以从没复现；release.yml 的 linux-x64
+          # 一直传着，Windows 这几条是唯一的漏网 —— 而发布承诺正是
+          # "任意 64 位 Windows 直接可用"。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
