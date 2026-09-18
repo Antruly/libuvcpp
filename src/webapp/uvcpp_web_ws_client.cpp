@@ -2,7 +2,7 @@
  * @file src/webapp/uvcpp_web_ws_client.cpp
  * @brief WebSocket 客户端（框架层）的实现。
  * @author zhuweiye
- * @version 1.0.10
+ * @version 1.1.0
  */
 
 #include <webapp/uvcpp_web_ws_client.h>

@@ -2,7 +2,7 @@
  * @file src/webapp/uvcpp_web_ws_client.h
  * @brief WebSocket 客户端（框架层）：回调装在客户端上 + 可选自动重连。
  * @author zhuweiye
- * @version 1.0.10
+ * @version 1.1.0
  *
  * 服务端在框架层是 `app.websocket("/chat/:room", handler)`；客户端这一侧原先
  * 只有协议层的 `uvcpp_ws_client` —— `connect()` 的回调里拿到会话指针，自己

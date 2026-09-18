@@ -1,4 +1,4 @@
-[![GitHub release](https://img.shields.io/badge/release-1.0.10--dev-blue.svg)](./)
+[![GitHub release](https://img.shields.io/badge/release-1.1.0-blue.svg)](./)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.0.10-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.1.0` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
