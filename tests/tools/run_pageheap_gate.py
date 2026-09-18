@@ -131,6 +131,15 @@ def find_test_exes(tree):
     return out
 
 
+def find_lib_dll(d):
+    """本库的 dll 名按工具链不同：MSVC 出 `uvcpp.dll`，MinGW 出 `libuvcpp.dll`。"""
+    files = {f.lower(): f for f in os.listdir(d)}
+    for want in ("uvcpp.dll", "libuvcpp.dll"):
+        if want in files:
+            return files[want]
+    return None
+
+
 def sync_dlls(tree, exe_dirs):
     """按 mtime 取每份 DLL 的最新来源，刷进每个测试输出目录。
 
@@ -412,10 +421,11 @@ def main():
 
     n, total = sync_dlls(tree, exe_dirs)
     print("DLL 刷新: %d 份（覆盖 %d 种）" % (n, total))
-    if not any(f.lower() == "uvcpp.dll" for f in os.listdir(exe_dirs[0])):
-        print("**输出目录里没有 uvcpp.dll** —— 先建一遍再来")
+    lib_dll = find_lib_dll(exe_dirs[0])
+    if lib_dll is None:
+        print("**输出目录里没有库 DLL** —— 先建一遍再来")
         return 3
-    print("uvcpp.dll md5: %s" % md5(os.path.join(exe_dirs[0], "uvcpp.dll")))
+    print("%s md5: %s" % (lib_dll, md5(os.path.join(exe_dirs[0], lib_dll))))
 
     # 上一个脚本崩在半路留下的页堆，先收掉
     leftovers = [e for e in all_exes if pageheap_on(os.path.basename(e[1]))]

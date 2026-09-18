@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
 #endif
 
 #include <cstring>
@@ -385,24 +386,20 @@ public:
             c.head = nullptr;
         }
     }
-    
+
     ~thread_cache() {
-        // 清理所有缓存
         for (auto& c : cache_) {
             void* p = c.head;
             while (p) {
                 void* next = *((void**)p);
-                // 归还到 central cache
                 page_block_header* header = (page_block_header*)((char*)p - k_page_block_header_size_actual);
                 span_header* span = header->span;
-                if (span) {
-                    g_central_cache.push(p, header->size_class, span);
-                }
+                if (span) g_central_cache.push(p, header->size_class, span);
                 p = next;
             }
         }
     }
-    
+
     void* pop(size_t size_class) {
         if (size_class >= k_num_classes) return nullptr;
         
@@ -558,8 +555,100 @@ private:
     cache_entry cache_[k_num_classes];
 };
 
-// 线程本地存储
-static thread_local thread_cache g_thread_cache;
+// ============================================================
+// 线程缓存的生命周期 —— 必须由 OS 的线程存储回调来管，不能用 thread_local 对象
+// 自己的析构函数。
+//
+// 为什么：MinGW-w64 下 DLL 里的 thread_local 走的是 emutls（libgcc 在堆上按线程
+// 分配的一块数组），而带非平凡析构的 thread_local 对象是用 __cxa_thread_atexit
+// 登记析构的。到线程退出时 emutls 已经把那块数组还给了堆，登记的回调才被调用 ——
+// 于是析构函数 walk 的是已释放、已被复用的内存：读出来的 span 是野指针，紧接着
+// 在 central_cache::push 里对它做 CAS，写进只读页就是访问违例，写进可写页就是
+// 堆损坏。两个症状（0xc0000005 / 0xc0000374）、崩在哪个地址，全看那块内存被谁
+// 捡走了 —— 与内存池本身的数据结构无关。
+//
+// 修法：改用 OS 提供的线程存储槽（Windows FLS / POSIX pthread key）。它的析构
+// 回调**把 cache 指针当参数传进来**，回调自身一个字节的 TLS 都不读，因此不存在
+// "读一个已经被释放的 TLS 槽"这回事。MSVC 没有 emutls，本来就是好的，这条路径
+// 对它同样成立。
+//
+// 注：槽的分配是惰性的（首个用到池的线程触发）。分配失败时退化成"没有线程缓存"
+// —— 分配走 central cache，释放直接还 span，慢但正确。
+// ============================================================
+
+static void thread_cache_shutdown(void* p);
+
+#if defined(_WIN32)
+static DWORD g_cache_slot = FLS_OUT_OF_INDEXES;
+
+static BOOL CALLBACK thread_cache_slot_init(PINIT_ONCE, PVOID, PVOID*)
+{
+    DWORD slot = FlsAlloc(&thread_cache_shutdown);
+    if (slot == FLS_OUT_OF_INDEXES) return FALSE;
+    g_cache_slot = slot;
+    return TRUE;
+}
+
+static bool thread_cache_slot_ensure()
+{
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    PVOID unused = nullptr;
+    if (!InitOnceExecuteOnce(&once, &thread_cache_slot_init, nullptr, &unused)) return false;
+    return g_cache_slot != FLS_OUT_OF_INDEXES;
+}
+#else
+static pthread_key_t g_cache_slot;
+static bool g_cache_slot_ready = false;
+
+static void thread_cache_slot_init()
+{
+    pthread_key_t k;
+    if (pthread_key_create(&k, &thread_cache_shutdown) == 0) {
+        g_cache_slot = k;
+        g_cache_slot_ready = true;
+    }
+}
+
+static bool thread_cache_slot_ensure()
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, &thread_cache_slot_init);
+    return g_cache_slot_ready;
+}
+#endif
+
+static thread_cache* thread_cache_get()
+{
+    if (!thread_cache_slot_ensure()) return nullptr;
+
+#if defined(_WIN32)
+    void* p = FlsGetValue(g_cache_slot);
+    if (p) return static_cast<thread_cache*>(p);
+    thread_cache* tc = new (std::nothrow) thread_cache();
+    if (!tc) return nullptr;
+    if (!FlsSetValue(g_cache_slot, tc)) {
+        delete tc;
+        return nullptr;
+    }
+    return tc;
+#else
+    void* p = pthread_getspecific(g_cache_slot);
+    if (p) return static_cast<thread_cache*>(p);
+    thread_cache* tc = new (std::nothrow) thread_cache();
+    if (!tc) return nullptr;
+    if (pthread_setspecific(g_cache_slot, tc) != 0) {
+        delete tc;
+        return nullptr;
+    }
+    return tc;
+#endif
+}
+
+// 线程退出时由 OS 调用。参数就是 cache 自己，所以这里不读任何 TLS。
+static void thread_cache_shutdown(void* p)
+{
+    delete static_cast<thread_cache*>(p);
+}
 
 // 全局 Central Cache
 central_cache g_central_cache;
@@ -812,7 +901,7 @@ void* uvcpp_memory_pool_enterprise::alloc(size_t size)
 void uvcpp_memory_pool_enterprise::free_mem(void* ptr)
 {
     if (!ptr) return;
-    
+
     // 获取块头
     page_block_header* header = (page_block_header*)((char*)ptr - k_page_block_header_size_actual);
     uint32_t size_class = header->size_class;
@@ -840,7 +929,8 @@ void uvcpp_memory_pool_enterprise::free_mem(void* ptr)
 void* uvcpp_memory_pool_enterprise::allocate_from_thread_cache(size_t size)
 {
     size_t size_class = uvcpp_size_class_index(size);
-    return g_thread_cache.pop(size_class);
+    thread_cache* tc = thread_cache_get();
+    return tc ? tc->pop(size_class) : nullptr;
 }
 
 void* uvcpp_memory_pool_enterprise::allocate_from_central(size_t size)
@@ -961,24 +1051,34 @@ void* uvcpp_memory_pool_enterprise::allocate_large_object(size_t size)
 
 void* uvcpp_memory_pool_enterprise::thread_cache_pop(size_t size_class)
 {
-    return g_thread_cache.pop(size_class);
+    thread_cache* tc = thread_cache_get();
+    return tc ? tc->pop(size_class) : nullptr;
 }
 
 void uvcpp_memory_pool_enterprise::thread_cache_push(void* ptr, size_t size_class)
 {
-    g_thread_cache.push(ptr, size_class);
+    thread_cache* tc = thread_cache_get();
+    if (tc) {
+        tc->push(ptr, size_class);
+        return;
+    }
+    // 拿不到线程缓存（槽分配失败或 cache 分配失败）就直接还回 span，
+    // 别把块漏在手里。
+    central_cache_push(ptr, size_class);
 }
 
 // 批量 refill - 从 central cache 获取多个块
 void uvcpp_memory_pool_enterprise::thread_cache_refill(size_t size_class)
 {
-    g_thread_cache.refill(size_class);
+    thread_cache* tc = thread_cache_get();
+    if (tc) tc->refill(size_class);
 }
 
 // 批量归还 - 将超过阈值的块归还到 central cache
 void uvcpp_memory_pool_enterprise::thread_cache_return(size_t size_class)
 {
-    g_thread_cache.return_to_central_batch(size_class);
+    thread_cache* tc = thread_cache_get();
+    if (tc) tc->return_to_central_batch(size_class);
 }
 
 void* uvcpp_memory_pool_enterprise::central_cache_pop(size_t size_class)

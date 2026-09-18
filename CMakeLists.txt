@@ -5,8 +5,41 @@ option(UVCPP_BUILD_TESTS "Build tests" ON)
 option(UVCPP_USE_SYSTEM_LIBUV "Prefer system libuv if found" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
-# 扩展模块选项（默认开启）
-option(UVCPP_BUILD_EXPAND "Build expand module (memory pool, page heap)" ON)
+# 扩展模块选项（默认关闭）
+# 内存池在 MinGW-w64 下会让 test_web_app_* 崩溃（根因未定位，见 RELEASE.md 的
+# 「已知问题」），所以默认改成就地关闭、要用得显式 -DUVCPP_BUILD_EXPAND=ON。
+# 副作用的另一面：忘了定义 UVCPP_ENABLE_MEMORY_POOL 的使用者拿到的是 0，
+# 恰好与默认关闭的 dll 一致；反过来（默认开启）忘了定义就是两套分配器，静默损坏。
+option(UVCPP_BUILD_EXPAND "Build expand module (memory pool, page heap)" OFF)
+
+# =========================================================================
+# 静态运行时
+# =========================================================================
+# 发布产物要求动态库除了系统自带库之外**不依赖任何东西** —— 使用者不该为了跑它
+# 去装 MinGW 运行时或某个 libstdc++。之前这条只靠"记得传
+# -DCMAKE_SHARED_LINKER_FLAGS=-static"维持，属于口头传承：漏了就得到一个能编、
+# 能在开发机上跑、但换台机器就起不来的 .dll/.so。这里把它变成显式开关。
+#
+# MSVC 无涉（它用 /MD，发布包里自带 vcruntime/msvcp）。
+option(UVCPP_STATIC_RUNTIME
+  "Statically link the compiler runtime (libgcc/libstdc++) into the library" OFF)
+
+if(UVCPP_STATIC_RUNTIME AND MINGW)
+  # -static 是主开关；-static-libgcc / -static-libstdc++ 再钉一遍，避免某条
+  # 链接路径上 -static 没生效时静默退化回动态。系统库（ws2_32 等）没有静态
+  # 版本，ld 会自动回落到导入库 —— 那是想要的：它们本来就是 Windows 自带的。
+  foreach(_var CMAKE_SHARED_LINKER_FLAGS CMAKE_EXE_LINKER_FLAGS)
+    string(APPEND ${_var} " -static -static-libgcc -static-libstdc++")
+  endforeach()
+  message(STATUS "MinGW static runtime: ${CMAKE_SHARED_LINKER_FLAGS}")
+elseif(UVCPP_STATIC_RUNTIME AND UNIX AND NOT APPLE)
+  # Linux 上 -static 对共享库不适用（会把 -lc 之类也静态化，多半直接链不过），
+  # 但把 libgcc/libstdc++ 静态化正是想要的：这样 .so 只依赖 libc。
+  foreach(_var CMAKE_SHARED_LINKER_FLAGS CMAKE_EXE_LINKER_FLAGS)
+    string(APPEND ${_var} " -static-libgcc -static-libstdc++")
+  endforeach()
+  message(STATUS "Static runtime: ${CMAKE_SHARED_LINKER_FLAGS}")
+endif()
 
 # =========================================================================
 # 网络模块和 Web 模块开关
@@ -81,6 +114,18 @@ if(UVCPP_BUILD_WEB)
   # -------------------------------------------------------------------
   # llhttp — HTTP 解析器, WEB=ON 时必须下载
   # -------------------------------------------------------------------
+  # llhttp 只在 `BUILD_SHARED_LIBS` 或它自己的 `BUILD_STATIC_LIBS` 为 ON 时才建
+  # `llhttp::llhttp` 这个别名（_local_deps/llhttp/CMakeLists.txt:82-100），而它的
+  # BUILD_STATIC_LIBS 默认是 OFF。少了这句，`BUILD_SHARED_LIBS=OFF` 的树上配置阶段
+  # 就会死在下面第 590 行附近的 `target_link_libraries(uvcpp ... llhttp::llhttp)`。
+  # 必须在 FetchContent_MakeAvailable 之前：llhttp 里用的是 option()，缓存里已经
+  # 有这条时 option 不会再动它。
+  # 这条以前是靠手工在缓存里设 BUILD_STATIC_LIBS=ON 绕过去的 —— 于是「静态链依赖」
+  # 这个配置从零复现不出来，发布产物成了不可复现的。
+  if(NOT BUILD_SHARED_LIBS)
+    set(BUILD_STATIC_LIBS ON CACHE BOOL "Build static libraries (.lib/.a)" FORCE)
+  endif()
+
   message(STATUS "Fetching llhttp via FetchContent (tag=${LLHTTP_VERSION})")
   FetchContent_Declare(
     llhttp
@@ -824,71 +869,60 @@ if (UVCPP_BUILD_TESTS)
 endif()
 
 if(WIN32)
-  add_custom_target(copy_test_dlls
-    COMMENT "Copy uvcpp/libuv DLLs into test folders"
-  )
-
   # 需要被拷入 DLL 的测试输出目录。**tests/expand 曾经不在这份清单里**，于是
   # `test_memory_pool` 缺少 uvcpp.dll/llhttp.dll/zlib1.dll，在打印任何东西之前就以
   # STATUS_DLL_NOT_FOUND (0xc0000135) 退出 —— 看起来像崩溃，实际是漏拷。
-  # 当时是靠在 ctest 命令里 `--exclude-regex test_memory_pool` 绕开的，但绕开不是
-  # 修复：那个 exe 单独跑仍然起不来。这里把目录抽成一个清单，拷贝只写一份。
+  #
+  # 配置子目录只在多配置生成器（VS）下存在：`$<CONFIG>` 在 Ninja 单配置树上会
+  # 展开成 `Release`，于是拷贝全部落进一个**没人读**的 tests/unit/Release/，
+  # 表面上"拷成功了"，跑起来照样 0xc0000135。这正是本机 Ninja 树上 copy_test_dlls
+  # 一直静默失效的原因（不是缺 pwsh）。
+  if(CMAKE_CONFIGURATION_TYPES)
+    set(_cfg_subdir "/$<CONFIG>")
+  else()
+    set(_cfg_subdir "")
+  endif()
+
   set(_test_dll_dirs
-    "${CMAKE_BINARY_DIR}/tests/unit/$<CONFIG>"
-    "${CMAKE_BINARY_DIR}/tests/functional/$<CONFIG>"
+    "${CMAKE_BINARY_DIR}/tests/unit${_cfg_subdir}"
+    "${CMAKE_BINARY_DIR}/tests/functional${_cfg_subdir}"
   )
   if(TARGET test_memory_pool)
-    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/tests/expand/$<CONFIG>")
+    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/tests/expand${_cfg_subdir}")
   endif()
   # 示例的输出目录同样需要 DLL：webapp_demo.exe 直接依赖 uvcpp.dll / uv.dll /
   # llhttp.dll，缺一个就是 0xc0000135 静默退出。
   if(TARGET webapp_demo)
-    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/examples/$<CONFIG>")
+    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/examples${_cfg_subdir}")
   endif()
 
-  # 各目录先建出来：`cmake -E copy_if_different` 不会创建目标目录，而全新工作区里
-  # 这些目录尚未由任何一次构建产生，直接拷会以 MSB3073 失败。
-  foreach(_dir ${_test_dll_dirs})
-    add_custom_command(TARGET copy_test_dlls PRE_BUILD
-      COMMAND ${CMAKE_COMMAND} -E make_directory "${_dir}"
-    )
-  endforeach()
-
-  # 把每个文件复制到**全部**测试目录。函数体里能读到父作用域的 _test_dll_dirs。
-  function(_copy_test_dlls_to_all_dirs)
-    foreach(_f ${ARGN})
-      foreach(_dir ${_test_dll_dirs})
-        add_custom_command(TARGET copy_test_dlls PRE_BUILD
-          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_f}" "${_dir}/"
-        )
-      endforeach()
-    endforeach()
-  endfunction()
-
+  # 收集所有要拷的 DLL 与其依赖目标
+  set(_dll_files "")
+  set(_dll_deps "")
   if(TARGET uvcpp)
-    _copy_test_dlls_to_all_dirs($<TARGET_FILE:uvcpp>)
-    add_dependencies(copy_test_dlls uvcpp)
+    list(APPEND _dll_files "$<TARGET_FILE:uvcpp>")
+    list(APPEND _dll_deps uvcpp)
   endif()
   if(TARGET uv)
-    _copy_test_dlls_to_all_dirs($<TARGET_FILE:uv>)
-    add_dependencies(copy_test_dlls uv)
+    list(APPEND _dll_files "$<TARGET_FILE:uv>")
+    list(APPEND _dll_deps uv)
   endif()
   # llhttp 与 zlib 同样是 uvcpp.dll 的运行时依赖：缺失时测试进程会以
   # STATUS_DLL_NOT_FOUND (0xc0000135) 直接退出，且不打印任何测试输出。
   if(TARGET llhttp_shared)
-    _copy_test_dlls_to_all_dirs($<TARGET_FILE:llhttp_shared>)
-    add_dependencies(copy_test_dlls llhttp_shared)
+    list(APPEND _dll_files "$<TARGET_FILE:llhttp_shared>")
+    list(APPEND _dll_deps llhttp_shared)
   endif()
   if(UVCPP_ENABLE_ZLIB)
     if(TARGET zlib AND TARGET zlib_shared)
-      _copy_test_dlls_to_all_dirs($<TARGET_FILE:zlib_shared>)
-      add_dependencies(copy_test_dlls zlib_shared)
+      list(APPEND _dll_files "$<TARGET_FILE:zlib_shared>")
+      list(APPEND _dll_deps zlib_shared)
     elseif(ZLIB_FOUND AND ZLIB_LIBRARY_RELEASE)
       # 系统 zlib：导入库在 lib/，运行时 DLL 在其同级的 bin/ 下
       get_filename_component(_zlib_lib_dir "${ZLIB_LIBRARY_RELEASE}" DIRECTORY)
       get_filename_component(_zlib_prefix "${_zlib_lib_dir}" DIRECTORY)
       file(GLOB _zlib_dlls "${_zlib_prefix}/bin/zlib*.dll" "${_zlib_lib_dir}/zlib*.dll")
-      _copy_test_dlls_to_all_dirs(${_zlib_dlls})
+      list(APPEND _dll_files ${_zlib_dlls})
       if(NOT _zlib_dlls)
         message(WARNING
           "UVCPP_ENABLE_ZLIB=ON with system zlib, but no zlib DLL was found near "
@@ -902,9 +936,31 @@ if(WIN32)
   if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     if(OPENSSL_ROOT_DIR AND IS_DIRECTORY "${OPENSSL_ROOT_DIR}/bin")
       file(GLOB _openssl_dlls "${OPENSSL_ROOT_DIR}/bin/libssl-*.dll" "${OPENSSL_ROOT_DIR}/bin/libcrypto-*.dll")
-      _copy_test_dlls_to_all_dirs(${_openssl_dlls})
+      list(APPEND _dll_files ${_openssl_dlls})
     endif()
   endif()
+
+  # 各目录先建出来：`cmake -E copy_if_different` 不会创建目标目录，而全新工作区里
+  # 这些目录尚未由任何一次构建产生，直接拷会失败。
+  #
+  # 用单个 add_custom_target 串起有序 COMMAND 列表，而不是 add_custom_command
+  # (TARGET ... PRE_BUILD)：后者在非 VS 生成器上被当成 PRE_LINK，挂在一个没有
+  # 链接步骤的自定义目标上语义不明。
+  set(_copy_cmds "")
+  foreach(_dir ${_test_dll_dirs})
+    list(APPEND _copy_cmds COMMAND ${CMAKE_COMMAND} -E make_directory "${_dir}")
+  endforeach()
+  foreach(_f ${_dll_files})
+    foreach(_dir ${_test_dll_dirs})
+      list(APPEND _copy_cmds COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_f}" "${_dir}/")
+    endforeach()
+  endforeach()
+
+  add_custom_target(copy_test_dlls ${_copy_cmds}
+    DEPENDS ${_dll_deps}
+    COMMENT "Copy uvcpp/libuv DLLs into test folders"
+    VERBATIM
+  )
 
   # run_uvcpp_tests 只在 UVCPP_BUILD_TESTS=ON 时建（见上方 if），而 copy_test_dlls
   # 在 WIN32 下恒建。少了这个守卫，`-DUVCPP_BUILD_TESTS=OFF` 在 Windows/MinGW 上

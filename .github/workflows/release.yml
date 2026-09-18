@@ -1,0 +1,212 @@
+name: Release
+
+# 推 v* 标签即出包；也可以在 Actions 页面上手动给一个已存在的 tag 重跑。
+# 重跑是**幂等**的：publish 用的是 `gh release upload --clobber`，已存在的
+# Release 会被更新而不是报错 —— 这条很重要，因为第一次跑往往就挂在某个平台上，
+# 修完只想重发那一个。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要出包的 tag（须已存在）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  UVCPP_VERSION: '1.1.0'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows x64 / MinGW-w64 —— 这是主发布产物（依赖全静态，任意 64 位 Windows 可用）
+  # ---------------------------------------------------------------------------
+  mingw-x64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-python
+
+      - name: Configure & Build
+        run: |
+          set -o pipefail
+          cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-mingw --parallel 4
+
+      # 发布产物必须是"任意 64 位 Windows 直接可用"。这条只有在这里断言才拦得住
+      # —— 静态运行时被改坏时，产物在 CI 机上照样跑得动。
+      - name: Assert the DLL is self-contained
+        run: |
+          deps=$(objdump -p build-mingw/libuvcpp.dll | grep -i 'DLL Name' | awk '{print $3}')
+          echo "$deps"
+          bad=$(echo "$deps" | grep -iE 'libgcc|libstdc|libwinpthread' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=mingw-not-self-contained::libuvcpp.dll 仍依赖 MinGW 运行时: $bad"
+            exit 1
+          fi
+
+      # **出包之前必须全绿**。发布一个测试挂掉的库比不发更坏。
+      - name: Test
+        run: ctest --test-dir build-mingw --output-on-failure --timeout 60
+
+      - name: Package
+        run: python tests/tools/package_release.py \
+               --tree build-mingw --platform mingw-x64 --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mingw-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows x64 / MSVC (VS2022) —— 给 MSVC 使用者用；/MD + 包内自带运行库
+  # ---------------------------------------------------------------------------
+  msvc-x64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-msvc --config Release --parallel 4
+
+      - name: Test
+        shell: bash
+        run: |
+          # 内存池在 Windows 上出过问题（MinGW 侧，见 RELEASE.md），
+          # 所以这里的 test_memory_pool 不是可选项。
+          ctest --test-dir build-msvc -C Release --output-on-failure \
+            --timeout 60 --exclude-regex "test_shutdown_func"
+
+      - name: Package
+        shell: bash
+        run: |
+          # MSVC 的运行库在 VCToolsRedistDir 下，packager 靠这个环境变量定位；
+          # 找不到就报错退出，而不是发一个缺 vcruntime 的包。
+          export VCToolsRedistDir
+          python tests/tools/package_release.py \
+            --tree build-msvc --platform msvc-x64 --config Release --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msvc-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux x64 —— 钉 22.04：ubuntu-latest 会滚到新版本，而这里要发的是一份
+  # 依赖（glibc 符号版本）尽量旧的产物，越旧的 glibc 能跑的新发行版越多。
+  # ---------------------------------------------------------------------------
+  linux-x64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev zlib1g-dev ninja-build
+
+      - name: Configure & Build
+        run: |
+          set -o pipefail
+          # BUILD_SHARED_LIBS=OFF 让 FetchContent 进来的 libuv/llhttp/zlib 都编成
+          # 静态库；OPENSSL_USE_STATIC_LIBS 让系统的 libssl/libcrypto 也静态链。
+          # 合起来 .so 除 libc 外没有运行时依赖。
+          cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-linux --parallel 4
+
+      - name: Report runtime deps
+        run: |
+          # 打出真实依赖，别让"依赖全静态"停留在口号上。
+          ldd build-linux/libuvcpp.so || true
+
+      - name: Test
+        run: ctest --test-dir build-linux --output-on-failure --timeout 60
+
+      - name: Package
+        run: python3 tests/tools/package_release.py \
+                --tree build-linux --platform linux-x64 --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 三个平台都过了才发布。用的是内置 GITHUB_TOKEN（permissions: contents: write），
+  # 不需要、也不该用一个长期 PAT。
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [mingw-x64, msvc-x64, linux-x64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Release 正文取 RELEASE.md 里这一版的段落，所以需要完整历史/工作区
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show assets
+        run: ls -la dist/
+
+      - name: Create / update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，更新标题与正文"
+            gh release edit "$TAG" --title "libuvcpp $TAG" --notes-file RELEASE.md
+          else
+            gh release create "$TAG" --title "libuvcpp $TAG" --notes-file RELEASE.md
+          fi
+          # --clobber：重跑时覆盖同名资产，让这条流程幂等
+          gh release upload "$TAG" dist/*.zip --clobber
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)"'

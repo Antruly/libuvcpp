@@ -59,7 +59,10 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 ### Expand 模块（`src/expand/`）
 
 TCMalloc 风格的内存池：页堆、span 分配器、线程缓存、enterprise 分配器。
-默认启用（`UVCPP_BUILD_EXPAND=ON`）。
+v1.1.0 起**默认关闭**（`UVCPP_BUILD_EXPAND=OFF`）—— 要启用需显式传
+`-DUVCPP_BUILD_EXPAND=ON`。预编译产物是**带池**发布的；CMake 默认仍关，是为了让
+忘了定义 `UVCPP_ENABLE_MEMORY_POOL` 的使用者两边都走 `malloc`/`free`，
+而不是静默的分配器错配（详见 `RELEASE.md`）。
 
 ### Net 模块（`src/net/`）— `UVCPP_BUILD_NET=ON`（默认）
 
@@ -216,7 +219,7 @@ cmake --build . --config Release --parallel
 | `BUILD_SHARED_LIBS` | `ON` | 构建动态库 |
 | `UVCPP_BUILD_STATIC` | 自动 | 构建静态 uvcpp 库 |
 | `UVCPP_BUILD_SHARED` | 自动 | 构建动态 uvcpp 库 |
-| `UVCPP_BUILD_EXPAND` | `ON` | 构建 expand 模块（内存池） |
+| `UVCPP_BUILD_EXPAND` | `OFF` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | 构建 web 应用框架（路由/中间件/静态/上传/日志）。需要 `UVCPP_BUILD_WEB=ON` |

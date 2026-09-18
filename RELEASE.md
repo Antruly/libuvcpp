@@ -36,34 +36,42 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 
 ## 预编译产物 (Prebuilt binaries)
 
-本版本提供 **Windows x64 动态库**，由 **MinGW-w64 (GCC)** 编译：
+本版本提供三个平台的 x64 预编译动态库：
+
+| 平台 | 工具链 | 产物 |
+|---|---|---|
+| Windows x64 | MinGW-w64 (GCC) | `libuvcpp.dll` + `libuvcpp.dll.a` |
+| Windows x64 | MSVC (VS2022) | `uvcpp.dll` + `uvcpp.lib` |
+| Linux x64 | GCC | `libuvcpp.so` |
+
+每个 zip 内含 `bin/`（动态库）、`lib/`（导入库）、`include/`（公开头，含 libuv、
+nlohmann/json、zlib 的头）、`lib/pkgconfig/uvcpp.pc` 与文档。
 
 | 文件 | 说明 |
 |---|---|
-| `libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL 以及 MinGW 运行时均已静态链接进去** |
-| `libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
-| `include/` | 公开头文件（含 libuv、nlohmann/json、zlib 的头） |
+| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL 以及 MinGW 运行时均已静态链接进去** |
+| `lib/libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
+| `include/` | 公开头文件，含 `expand/`（内存池） |
 
 > 命名遵循各工具链的惯例：**MinGW/GCC 产出 `libuvcpp.dll`**，MSVC 产出 `uvcpp.dll`。
 
-`libuvcpp.dll` 的依赖只有 Windows 自带系统库（`KERNEL32` / `WS2_32` / `CRYPT32` / `ADVAPI32` /
-`USER32` / `SHELL32` / `IPHLPAPI` / `USERENV` / `ole32` / `dbghelp` / `msvcrt`），
-**不需要安装 MSYS2、MinGW 运行时或 VC++ 运行库**，任意 64 位 Windows 直接可用。
+MinGW 版 `libuvcpp.dll` 的依赖只有 Windows 自带系统库（`KERNEL32` / `WS2_32` / `CRYPT32` /
+`ADVAPI32` / `USER32` / `SHELL32` / `IPHLPAPI` / `USERENV` / `ole32` / `dbghelp` / `msvcrt`），
+**不需要安装 MSYS2 或 MinGW 运行时**，任意 64 位 Windows 直接可用。
 
-> ⚠️ 由 MinGW-w64 编译的动态库**不能被 MSVC 链接**（C++ ABI 不同）。
-> MSVC 用户请从源码构建。库本身按 C++11 编写，源码可用 MSVC 编译（需自行准备 OpenSSL 等依赖）。
+MSVC 版 `uvcpp.dll` 用 `/MD` 构建，因此 `bin/` 里一并带了
+`msvcp140.dll` / `vcruntime140.dll` / `vcruntime140_1.dll`，
+**不需要预装 VC++ 可再发行组件**。
 
-> ⚠️ **本 DLL 以 `UVCPP_BUILD_EXPAND=OFF` 构建**，即 `expand` 模块（内存池 / 页堆）
-> 未编译进去，`UVCPP_ENABLE_MEMORY_POOL=0`，分配走标准 `malloc`/`free`。
-> 原因见下方「已知问题」。因此 `include/` 里**没有 `expand/` 目录**，
-> 使用者也**不要**把 `UVCPP_ENABLE_MEMORY_POOL` 定义成 1（`uvcpp.pc` 已钉成 0）。
+> ⚠️ 两个 Windows 版互为替代、不可混用：由 MinGW-w64 编译的动态库**不能被 MSVC
+> 链接**，反之亦然（C++ ABI 不同）。用哪套工具链就用哪个 zip。
 
 ### 使用方式
 
 公开头里的 `UVCPP_*_ENABLE` 宏**必须显式传给编译器**。它们不是可选的开关：
 宏未定义时 `#if` 求值为 0，`web` / `webapp` / `ssl` 的类会被整段编译掉，
 使用者看到的是「类不存在」的级联语法错误；`UVCPP_ENABLE_MEMORY_POOL`
-选错分支还会让使用者 TU 里的分配器与已编译的 dll 不是同一套（ABI 不一致）。
+选错分支还会让使用者 TU 里的分配器与已编译的 dll 不是同一套（**静默**堆损坏）。
 包内附了 `lib/pkgconfig/uvcpp.pc`，用 pkg-config 就不必记这些：
 
 ```bash
@@ -81,12 +89,16 @@ g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvc
 ```bash
 g++ -std=c++11 -I include \
     -DUVCPP_NET_ENABLE=1 -DUVCPP_WEB_ENABLE=1 -DUVCPP_WEBAPP_ENABLE=1 \
-    -DUVCPP_OPENSSL_ENABLE=1 -DUVCPP_ZLIB_ENABLE=1 -DUVCPP_ENABLE_MEMORY_POOL=0 \
+    -DUVCPP_OPENSSL_ENABLE=1 -DUVCPP_ZLIB_ENABLE=1 -DUVCPP_ENABLE_MEMORY_POOL=1 \
     your_app.cpp -L lib -luvcpp -o your_app.exe
 ```
 
 （上面两条命令都在包的根目录下执行；`-L lib` 是导入库所在处。跑的时候
 `bin/libuvcpp.dll` 要在 `PATH` 上，或直接拷到 exe 旁边。）
+
+头文件的入口是包根 `include/uvcpp.h`（聚合头，含 loop / handle / req）。
+`net` / `web` / `webapp` / `ssl` 的类**不在聚合头里**，按模块显式 include，例如
+`#include "handle/uvcpp_tcp.h"`、`#include "web/uvcpp_http_server.h"`。
 
 ## 主要特性 (Key Features)
 
@@ -133,7 +145,10 @@ g++ -std=c++11 -I include \
 ## 使用示例 (Example)
 
 ```cpp
-#include "uvcpp/uvcpp.h"
+#include "uvcpp.h"
+#include "handle/uvcpp_tcp.h"
+#include <iostream>
+#include <string>
 using namespace uvcpp;
 
 int main() {
@@ -178,7 +193,9 @@ int main() {
 - 新增 `web` 模块：HTTP/1.1（llhttp）、WebSocket（RFC 6455）、gzip/deflate 压缩、静态文件服务
 - 新增 `ssl` 模块：基于 OpenSSL 的 TLS
 - 新增 `webapp` 模块：路由、中间件、静态资源、流式响应、multipart 上传、文件下发、JSON、日志
-- Windows x64 预编译动态库（MinGW-w64，依赖全静态链接）
+- 修复内存池在 MinGW-w64 上的线程退出崩溃（根因与修法见「已知问题」），
+  `expand` 模块首次随发布产物一起提供
+- 预编译动态库：Windows x64 ×2（MinGW-w64 / MSVC）+ Linux x64，依赖全静态链接
 
 ### v1.0.0 (2026-02-02)
 
@@ -195,28 +212,44 @@ int main() {
 ## 下载 (Download)
 
 - Source code
-- `libuvcpp-1.1.0-mingw-x64.zip` — Windows x64 预编译动态库
+- `libuvcpp-1.1.0-mingw-x64.zip` — Windows x64 预编译动态库（MinGW-w64）
+- `libuvcpp-1.1.0-msvc-x64.zip` — Windows x64 预编译动态库（MSVC / VS2022）
+- `libuvcpp-1.1.0-linux-x64.zip` — Linux x64 预编译动态库
 
 ## 已知问题 (Known Issues)
 
-### MinGW 下启用内存池会让 webapp 用例崩溃
+### 内存池在 v1.1.0 里修好了；CMake 默认仍是 OFF
 
-`UVCPP_BUILD_EXPAND=ON`（**项目默认值**）时，MinGW-w64 构建出的库在
-`test_web_app_*` 上崩溃：`ctest` 80 项里 **7 项失败**（`0xc0000374` 堆损坏或 SegFault）。
-同一份源码用 MSVC 构建、同样的开关，**80 项全绿**。
+早先 MinGW-w64 打开 `UVCPP_BUILD_EXPAND=ON` 会让 `ctest` 80 项里 **7 项**崩溃
+（`0xc0000374` 堆损坏或 SegFault），而同一份源码用 MSVC 构建全绿。
+**根因已定位并修复**，两个平台现在都是 80/80。
 
-已经确认的事实：
+根因不属于内存池的数据结构，而在于**线程缓存由谁销毁**：
 
-- 崩溃点在**线程退出**的 TLS 回调里（`LdrShutdownThread` → `LdrpCallTlsInitializers`
-  → `ImageTlsCallbackCaller`），出错指令是对 `libuvcpp.dll` 的 `.rdata` 段内一个
-  typeinfo 对象做原子读改写 —— 即对只读页写入。
-- 关掉内存池后，**同一棵树、同一批用例 100% 通过**（79/79）。
-- 把 DLL 的 C++ 运行时从静态改成共享会让情况**恶化**（7 项 → 25 项失败），
-  说明问题出在内存池本身，而不是运行时链接方式。
+- MinGW-w64 下 DLL 里的 `thread_local` 走的是 **emutls**（libgcc 在堆上按线程
+  分配的数组），带非平凡析构的 `thread_local` 对象则经 `__cxa_thread_atexit`
+  登记析构。线程退出时 emutls **先**把那个数组还给了堆，登记的回调**才**被调用
+  —— 于是析构函数 walk 的是已释放、已被复用的内存：读出来的 `span` 是野指针，
+  紧接着在 `central_cache::push` 里对它做 CAS。写进只读页就是访问违例，写进
+  可写页就是堆损坏；崩在哪个地址全看那块内存被谁捡走了。
+- MSVC 没有 emutls，所以一直是对的。这解释了全部既有现象：只在 MinGW 复现、
+  只在开池时复现、崩溃点在"线程退出"、改成共享运行时会更糟（libgcc 的释放
+  时机变了）。
 
-**所以本次发布的 MinGW 产物关闭了内存池（`UVCPP_BUILD_EXPAND=OFF`）。**
-这是性能上的取舍，不影响 API 与功能：走标准 `malloc`/`free` 时全部用例通过。
-MSVC 侧不受影响，内存池照常可用。根因仍在定位。
+修法是**不再依赖 `thread_local` 对象自己的析构函数**：线程缓存改由 OS 的线程
+存储槽管理（Windows `FlsAlloc` / POSIX `pthread_key_create`），槽的析构回调
+**把缓存指针当参数收进来**，回调自身一个字节的 TLS 都不读，因此不存在
+"读一个已经被释放的 TLS 槽"这回事。
+
+因此**本版发布的两个 Windows 动态库都带内存池**（`UVCPP_BUILD_EXPAND=ON`，
+`uvcpp.pc` 里钉的是 `-DUVCPP_ENABLE_MEMORY_POOL=1`）。
+
+但 **CMake 的默认值仍然是 OFF**，这是刻意的：默认开的话，使用者的 TU 忘了定义
+`UVCPP_ENABLE_MEMORY_POOL`，宏求值为 0 ⇒ 使用者侧走 `std::malloc`，而 dll 侧走池,
+库会拿池去 free 一个 `malloc` 的指针，**静默**堆损坏。默认关时"忘了定义"拿到的是
+0，两边一致；反方向（dll 关、使用者开）则是响亮的链接错误，不会静默。
+从源码构建要用池，显式传 `-DUVCPP_BUILD_EXPAND=ON`；用预编译包则照上面的
+命令行/`pkg-config` 带上 `-DUVCPP_ENABLE_MEMORY_POOL=1`。
 
 ### 其他
 

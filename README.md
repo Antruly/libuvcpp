@@ -59,7 +59,11 @@ environment variables, buffer management (`uvcpp_buf`), metrics, and allocator i
 ### Expand module (`src/expand/`)
 
 TCMalloc-style memory pool: page heap, span allocator, thread cache, enterprise allocator.
-Enabled by default (`UVCPP_BUILD_EXPAND=ON`).
+**Off by default** (`UVCPP_BUILD_EXPAND=OFF`) since v1.1.0 — pass
+`-DUVCPP_BUILD_EXPAND=ON` to enable it. The prebuilt binaries ship **with** the pool;
+the CMake default stays off so that a consumer who forgets to define
+`UVCPP_ENABLE_MEMORY_POOL` gets `malloc`/`free` on both sides rather than a silent
+allocator mismatch (see `RELEASE.md`).
 
 ### Net module (`src/net/`) — `UVCPP_BUILD_NET=ON` (default)
 
@@ -217,7 +221,7 @@ cmake --build . --config Release --parallel
 | `BUILD_SHARED_LIBS` | `ON` | Build shared libraries |
 | `UVCPP_BUILD_STATIC` | auto | Build static uvcpp library |
 | `UVCPP_BUILD_SHARED` | auto | Build shared uvcpp library |
-| `UVCPP_BUILD_EXPAND` | `ON` | Build expand module (memory pool) |
+| `UVCPP_BUILD_EXPAND` | `OFF` | Build expand module (memory pool) |
 | `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | Build web app framework (router/middleware/static/upload/log). Requires `UVCPP_BUILD_WEB=ON` |

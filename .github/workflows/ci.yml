@@ -127,9 +127,11 @@ jobs:
       - name: Configure & Build
         shell: bash
         run: |
+          # 同 full：内存池自 v1.1.0 起默认 OFF，这里显式打开，保住 MSVC/Windows
+          # 侧的 test_memory_pool 覆盖 —— 内存池出问题的平台恰恰是 Windows。
           cmake -S . -B build-shared -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_STATIC=OFF -DUVCPP_BUILD_SHARED=ON \
-            -DUVCPP_BUILD_WEB=OFF
+            -DUVCPP_BUILD_WEB=OFF -DUVCPP_BUILD_EXPAND=ON
           # 构建错误折进注解（说明见 static 步）。`set -o pipefail` 不能省。
           set -o pipefail
           mkdir -p ci-logs
@@ -448,9 +450,14 @@ jobs:
       - name: Configure & Build & Test
         shell: bash
         run: |
+          # UVCPP_BUILD_EXPAND 自 v1.1.0 起默认 OFF（默认开时，使用者 TU 忘了定义
+          # UVCPP_ENABLE_MEMORY_POOL 会静默拿到与 dll 不同的分配器 —— 见 RELEASE.md）。
+          # 这里显式打开：不打开的话 tests/expand 那批用例在 CI 里一条都不跑，
+          # 内存池就成了没人测的死代码。别顺手把这行删掉。
           cmake -S . -B build-full -DCMAKE_BUILD_TYPE=Release \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
-            -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON \
+            -DUVCPP_BUILD_EXPAND=ON
           # 构建错误折进注解（说明见 static 步）。`set -o pipefail` 不能省。
           set -o pipefail
           mkdir -p ci-logs
@@ -484,6 +491,99 @@ jobs:
             fi
           fi
           exit "$rc"
+
+  # ---------------------------------------------------------------------------
+  # MinGW-w64: 发布产物用的正是这条工具链，所以它的测试覆盖不能只靠开发机。
+  #
+  # 三个必须守住的点：
+  #   1. **UVCPP_BUILD_EXPAND=ON 要显式写**。内存池自 v1.1.0 起默认 OFF，不写这行
+  #      的话 tests/expand 一条都不跑，池就成了没人测的死代码。MinGW 恰恰是历史
+  #      上唯一出过问题（emutls + thread_local 析构）的平台，更不能省。
+  #   2. **UVCPP_STATIC_RUNTIME=ON**。发布用的 libuvcpp.dll 除了 Windows 系统库
+  #      之外不能有任何依赖；这条靠开关而不是靠"记得传 -DCMAKE_*_LINKER_FLAGS"。
+  #      job 末尾还会 objdump 一遍把这条断言钉死。
+  #   3. **别手动往测试目录拷 DLL**。copy_test_dlls 已经覆盖 tests/{unit,functional,
+  #      expand}（含 Ninja 单配置树 —— 早先它把 $<CONFIG> 展开成 Release，拷进了
+  #      没人读的目录，于是"拷成功"的假象下测试全 0xc0000135），手工再拷一份只会
+  #      掩盖它再次失效。
+  # ---------------------------------------------------------------------------
+  mingw64:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-openssl
+
+      - name: Configure & Build
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
+            | tee ci-logs/mingw-configure.log
+          bld=0
+          cmake --build build-mingw --parallel 4 2>&1 | tee ci-logs/mingw-build.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/mingw-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-mingw::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
+
+      - name: Assert the DLL is self-contained
+        run: |
+          # 发布承诺是"任意 64 位 Windows 直接可用"。这条不是风格问题：一旦
+          # UVCPP_STATIC_RUNTIME 被改坏或漏传，产物在开发机上照样跑得动，
+          # 换台机器才 0xc0000135 —— 只有在这里断言才拦得住。
+          deps=$(objdump -p build-mingw/libuvcpp.dll | grep -i 'DLL Name' | awk '{print $3}')
+          echo "$deps"
+          bad=$(echo "$deps" | grep -iE 'libgcc|libstdc|libwinpthread' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=mingw-not-self-contained::libuvcpp.dll 仍依赖 MinGW 运行时: $bad"
+            exit 1
+          fi
+
+      - name: Test
+        run: |
+          rc=0
+          out=$(ctest --test-dir build-mingw --output-on-failure \
+            --timeout 60 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-mingw::${msg:-rc=$rc (no FAILED block)}"
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-mingw-output::${blk}"
+            fi
+          fi
+          exit "$rc"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-mingw64
+          path: ci-logs/
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
   # Windows static: MSVC static build (web=OFF, no shared lib)
