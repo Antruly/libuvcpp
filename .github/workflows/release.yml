@@ -433,12 +433,19 @@ jobs:
 
       # 镜像切到 VS2026 之后 CMake 会**静默**换生成器，用户拿到的 ABI 就从 v143
       # 变成 v144 —— 而且会和钉在 windows-2022 上的 msvc-x64 对不上。这种事必须
-      # 响亮。判据取 CMakeCache 里的 CMAKE_GENERATOR，比刮 configure 的日志稳。
+      # 响亮。判据取 CMakeCache，比刮 configure 的日志稳。
+      #
+      # 平台键是 CMAKE_GENERATOR_PLATFORM（`-A` 落的那个），**不是**
+      # CMAKE_VS_PLATFORM_NAME —— 后者是 CMake 脚本里的变量，CMakeCache.txt 里
+      # 根本没有这个键。用 grep 取它时：GitHub 的 `shell: bash` 跑的是
+      # `bash -eo pipefail`，grep 无命中 ⇒ 管道非零 ⇒ `-e` 当场终止整段，
+      # echo 与 ::error 全都不执行，只留一句 "exit code 1"。实测踩过一次。
+      # 所以这里用 sed -n 取值：无命中返回空串且退出 0，一律落到下面的 if 去报告。
       - name: Assert the arm64 ABI is the one we ship
         shell: bash
         run: |
-          gen=$(grep -m1 '^CMAKE_GENERATOR:INTERNAL=' build-msvc/CMakeCache.txt | cut -d= -f2-)
-          plat=$(grep -m1 '^CMAKE_VS_PLATFORM_NAME:INTERNAL=' build-msvc/CMakeCache.txt | cut -d= -f2-)
+          gen=$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' build-msvc/CMakeCache.txt)
+          plat=$(sed -n 's/^CMAKE_GENERATOR_PLATFORM:INTERNAL=//p' build-msvc/CMakeCache.txt)
           echo "generator=$gen  platform=$plat"
           if [ "$gen" != "Visual Studio 17 2022" ] || [ "$plat" != "arm64" ]; then
             echo "::error title=arm64-abi-drift::期望 'Visual Studio 17 2022' / arm64，实际 '$gen' / '$plat' —— 镜像换 VS 了，这一版的 ABI 会和 msvc-x64 对不上，先停下来定"
