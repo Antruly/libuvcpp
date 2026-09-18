@@ -103,10 +103,144 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Windows arm64 / MinGW-w64（MSYS2 CLANGARM64）
+  #
+  # 这条腿不是"换个架构的 MINGW64"，而是换了一整套 C++ 运行库：MSYS2 没有
+  # aarch64 的 gcc，arm64 的 MinGW 工具链只有 clang，而 CLANGARM64 是
+  # libc++ + libunwind 环境，不是 libstdc++。所以下面那条自检比 x64 那边更要紧。
+  # ---------------------------------------------------------------------------
+  mingw-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: false
+          install: >-
+            mingw-w64-clang-aarch64-clang
+            mingw-w64-clang-aarch64-cmake
+            mingw-w64-clang-aarch64-ninja
+            mingw-w64-clang-aarch64-openssl
+            mingw-w64-clang-aarch64-python
+            mingw-w64-clang-aarch64-libc++
+            mingw-w64-clang-aarch64-libunwind
+
+      # 这条腿的机器本机不存在（没有 arm64 的 Windows 开发机），三个探点只能在这里
+      # 实测。这一步**故意不设断言**：要的是数据，把关交给下面真正会拦人的白名单
+      # 自检与 ctest；第一轮 CI 的输出就是探针结果本身。
+      #
+      # 关键的是第二段 —— 它用一个真跑 libc++ 的最小 dll，直接量
+      # `-static -static-libgcc -static-libstdc++` 之后导入表里还剩什么。clang 把
+      # 这三个都当普通 Flag 收下（Options.td 里就是裸 Flag，不会报 unknown
+      # argument），所以"接受"不代表"生效"，只有真编一个出来看导入表才知道。
+      # 用的解析器就是下面那道断言用的同一个 pe_imports()。
+      - name: Probe toolchain
+        run: |
+          clang++ --version | head -1
+          echo "target: $(clang++ -dumpmachine)"
+          cat > probe_dll.cpp <<'CPP'
+          #include <string>
+          #include <stdexcept>
+          extern "C" __declspec(dllexport) int probe()
+          {
+              try { throw std::runtime_error(std::string("probe")); }
+              catch (const std::exception&) { return 1; }
+          }
+          CPP
+          clang++ -shared -static -static-libgcc -static-libstdc++ \
+            probe_dll.cpp -o probe_dll.dll
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, 'tests/tools')
+          from package_release import pe_imports
+          print('probe_dll.dll imports:', pe_imports('probe_dll.dll'))
+          PY
+          rm -f probe_dll.cpp probe_dll.dll
+
+      - name: Configure & Build
+        run: |
+          set -o pipefail
+          # 与 mingw-x64 同一个理由链：BUILD_SHARED_LIBS=OFF 管 llhttp、
+          # UVCPP_BUILD_LIBUV_FROM_SOURCE=ON 管 libuv，缺一个产物就多一个 dll 依赖。
+          #
+          # UVCPP_STATIC_RUNTIME=ON 在这里比 x64 更要紧：CLANGARM64 的 libc++.dll /
+          # libunwind.dll 是随工具链装进来的，不静态链就会出现在导入表里，产物在
+          # 没装 MSYS2 的机器上直接起不来。CMakeLists.txt:27 的 MINGW 分支给的是
+          # `-static -static-libgcc -static-libstdc++`，其中真正干活的是 -static
+          # （另两个是 GCC 的名字，clang 收下但它们指的不是 libc++）。
+          cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-mingw --parallel 4
+
+      # 与 mingw-x64 同一张白名单，但**不用 objdump**：gcc 依赖 binutils 所以
+      # MINGW64 上 objdump 一定在，而 clang 不依赖 GNU binutils，CLANG64/CLANGARM64
+      # 的 `mingw-w64-clang-aarch64-binutils` 是个虚拟包（没有可安装的包体）。
+      # 改用仓库自己的 pe_imports()：打包器的导入表自检用的就是它，于是断言和
+      # 打包共用一份解析实现，少一个"两边对同一件事各说各话"的自由度。
+      - name: Assert the DLL is self-contained
+        run: |
+          python - <<'PY'
+          import re
+          import sys
+
+          sys.path.insert(0, "tests/tools")
+          from package_release import pe_imports
+
+          deps = pe_imports("build-mingw/libuvcpp.dll")
+          if deps is None:
+              print("build-mingw/libuvcpp.dll 不是 PE，断言无从谈起，按失败处理")
+              sys.exit(1)
+          print("\n".join(deps))
+
+          system = re.compile(
+              r"^(advapi32|bcrypt|bcryptprimitives|crypt32|dbghelp|dnsapi|iphlpapi|"
+              r"kernel32|msvcrt|ntdll|ole32|psapi|rpcrt4|secur32|shell32|shlwapi|"
+              r"user32|userenv|winmm|ws2_32|api-ms-win-[a-z0-9-]+)\.dll$")
+          bad = [d for d in deps if not system.match(d)]
+          if bad:
+              print("::error title=mingw-arm64-not-self-contained::"
+                  "libuvcpp.dll 依赖了非 Windows 自带的模块: %s" % bad)
+              sys.exit(1)
+          PY
+
+      - name: Test
+        run: ctest --test-dir build-mingw --output-on-failure --timeout 60 \
+               --exclude-regex "test_shutdown_func"
+
+      - name: Package
+        run: python tests/tools/package_release.py \
+               --tree build-mingw --platform mingw-arm64 --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mingw-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Windows x64 / MSVC (VS2022) —— 给 MSVC 使用者用；/MD + 包内自带运行库
   # ---------------------------------------------------------------------------
   msvc-x64:
-    runs-on: windows-latest
+    # 钉 windows-2022 而不是 windows-latest：后者现在指向 "windows-2025-vs2026"
+    # 镜像，那张镜像里**只有 VS 2026**，下面写死的 `-G "Visual Studio 17 2022"`
+    # 会直接报 "could not find any instance of Visual Studio"（首跑就是这么挂的）。
+    # 也不改成"去掉 -G 让 CMake 自己挑"：那会把发布产物的 ABI 绑在 GitHub 换镜像
+    # 的节奏上（今天 VS2026，下次不知道）。windows-2022 上只有 VS2022，
+    # 生成器是写死还是自动挑结果相同，但写出来在日志里可核对。
+    runs-on: windows-2022
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -173,6 +307,155 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Windows arm64 / MSVC (VS2022 v143) —— 与 msvc-x64 同源，只差架构。
+  # 真正的卡点是 OpenSSL：choco 的 openssl 只有 x64/x86，arm64 那份没有现成的，
+  # 只能自己编。其余开关与 msvc-x64 逐字一致。
+  # ---------------------------------------------------------------------------
+  msvc-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch OpenSSL source
+        uses: actions/checkout@v4
+        with:
+          repository: openssl/openssl
+          ref: openssl-3.5.8
+          path: openssl-src
+
+      # vcvarsall 设的 INCLUDE/LIB/PATH 不跨 step 传递，所以"定位 VS → 进环境 →
+      # 配置 → 编译 → 安装"必须在同一个 shell 里做完。
+      #
+      # VC-WIN64-ARM 是 OpenSSL 唯一给 MSVC ARM64 的 target，定义在
+      # Configurations/50-win-onecore.conf:75 —— 不在 10-main.conf，按文件名找会漏。
+      # 它带 OPENSSL_SYS_WIN_CORE + onecore.lib + /NODEFAULTLIB:kernel32.lib，看着像
+      # "非桌面的"，其实不是：把它变成 UWP 的是 WINAPI_FAMILY=WINAPI_FAMILY_APP +
+      # /APPCONTAINER + WindowsApp.lib —— 那是 VC-WIN64-ARM-UWP 在这个 target 上再
+      # 叠三样；VC-WIN64-ARM 自己反倒显式定义了
+      # _ARM_WINAPI_PARTITION_DESKTOP_SDK_AVAILABLE（desktop 分区可用），而
+      # onecore.lib 本来就是桌面 SDK 里的 umbrella 库。另一条路
+      # VC-WIN64-CLANGASM-ARM（vcpkg 编桌面 arm64 用的正是它）带的是**完全相同**
+      # 的两个 define，只是不写死 onecore.lib，代价是白添一个 clang-cl 依赖 ——
+      # 两条路都躲不开 OPENSSL_SYS_WIN_CORE，所以取工具链更少的这条。
+      #
+      # no-asm 是刻意的：镜像没有 NASM（那是 x64 的汇编器），arm64 汇编要走
+      # armasm64，引入的变数大于收益 —— 这是发布构建，不是基准测试。
+      # no-tests / no-apps 见 INSTALL.md，省掉全部测试程序与命令行工具。
+      #
+      # 用 jom 而不是 nmake：nmake 没有 -j，串行编 libcrypto 会把这条腿拖到时限
+      # 边缘。jom 就是"带 -j 的 nmake"，vcpkg 在同一个平台上编 OpenSSL 用的正是
+      # 它（portfile 里的 PREFER_JOM）。
+      - name: Build OpenSSL for arm64
+        shell: cmd
+        run: |
+          choco install jom --no-progress -y
+          if not exist "C:\ProgramData\chocolatey\bin\jom.exe" (
+            echo ::error title=no-jom::jom 没装上，串行 nmake 会拖垮这条腿
+            exit /b 1
+          )
+          set "PATH=C:\ProgramData\chocolatey\bin;%PATH%"
+
+          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+          if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+          if not exist "%VSWHERE%" (
+            echo ::error title=no-vswhere::镜像里找不到 vswhere.exe
+            exit /b 1
+          )
+          set "VSDIR="
+          for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath`) do set "VSDIR=%%i"
+          if not defined VSDIR (
+            echo ::error title=no-arm64-toolset::镜像里没有带 ARM64 工具集的 VS
+            exit /b 1
+          )
+          echo VSDIR=%VSDIR%
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" arm64
+          if errorlevel 1 exit /b 1
+
+          cd /d "%GITHUB_WORKSPACE%\openssl-src"
+          perl Configure VC-WIN64-ARM no-asm no-tests no-apps ^
+            --prefix=%GITHUB_WORKSPACE%\openssl-arm64 ^
+            --openssldir=%GITHUB_WORKSPACE%\openssl-arm64\ssl
+          if errorlevel 1 exit /b 1
+          jom /J 4
+          if errorlevel 1 exit /b 1
+          nmake /nologo install_sw
+          if errorlevel 1 exit /b 1
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          # 不写 -G：windows-11-arm 现在有 VS2022，而公告说这张镜像 9 月起切
+          # VS2026（今天就是 9 月），写死 `-G "Visual Studio 17 2022"` 会变成第二个
+          # msvc-x64 那样的"生成器找不到"。架构用 -A 钉住，生成器交给 CMake 挑，
+          # 挑到哪个由下面那条 ABI 断言把关。
+          #
+          # 开关与 msvc-x64 逐字一致（理由见那边）：BUILD_SHARED_LIBS=OFF 管 llhttp、
+          # UVCPP_BUILD_LIBUV_FROM_SOURCE=ON 管 libuv。
+          #
+          # OPENSSL_ROOT_DIR 必须显式给：不给的话 find_package 会在镜像里乱找，
+          # 而 choco 那份是 x64 的 —— 把 x64 的 .lib 链进 arm64 是响亮失败，
+          # 但"找不到 ⇒ QUIET 静默关掉 SSL"是静默坏包，两种都不能靠运气。
+          cmake -S . -B build-msvc -A arm64 \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON \
+            -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-msvc --config Release --parallel 4
+
+      # 镜像切到 VS2026 之后 CMake 会**静默**换生成器，用户拿到的 ABI 就从 v143
+      # 变成 v144 —— 而且会和钉在 windows-2022 上的 msvc-x64 对不上。这种事必须
+      # 响亮。判据取 CMakeCache 里的 CMAKE_GENERATOR，比刮 configure 的日志稳。
+      - name: Assert the arm64 ABI is the one we ship
+        shell: bash
+        run: |
+          gen=$(grep -m1 '^CMAKE_GENERATOR:INTERNAL=' build-msvc/CMakeCache.txt | cut -d= -f2-)
+          plat=$(grep -m1 '^CMAKE_VS_PLATFORM_NAME:INTERNAL=' build-msvc/CMakeCache.txt | cut -d= -f2-)
+          echo "generator=$gen  platform=$plat"
+          if [ "$gen" != "Visual Studio 17 2022" ] || [ "$plat" != "arm64" ]; then
+            echo "::error title=arm64-abi-drift::期望 'Visual Studio 17 2022' / arm64，实际 '$gen' / '$plat' —— 镜像换 VS 了，这一版的 ABI 会和 msvc-x64 对不上，先停下来定"
+            exit 1
+          fi
+
+      - name: Assert the requested modules are actually on
+        shell: bash
+        run: |
+          for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
+                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB; do
+            if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
+              echo "::error title=msvc-arm64-module-off::${k} 没有生效，包会缺功能"
+              grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
+              exit 1
+            fi
+          done
+
+      - name: Test
+        shell: bash
+        run: |
+          ctest --test-dir build-msvc -C Release --output-on-failure \
+            --timeout 60 --exclude-regex "test_shutdown_func"
+
+      - name: Package
+        shell: bash
+        run: |
+          # arm64 那份运行库由 packager 按 msvc_arch 从 VS 树里挑（挑错架构是
+          # "静默坏包"类 —— 打包机是 x64，错的也能跑）。找不到就退出 2。
+          export VCToolsRedistDir
+          python tests/tools/package_release.py \
+            --tree build-msvc --platform msvc-arm64 --config Release --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msvc-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Linux x64 —— 钉 22.04：ubuntu-latest 会滚到新版本，而这里要发的是一份
   # 依赖（glibc 符号版本）尽量旧的产物，越旧的 glibc 能跑的新发行版越多。
   # ---------------------------------------------------------------------------
@@ -196,8 +479,19 @@ jobs:
           # UVCPP_BUILD_LIBUV_FROM_SOURCE=ON 钉死"libuv 从源码编"：22.04 现在没装
           # libuv，但只要哪天 runner 镜像带了，find_library 就会静默改成动态链
           # （cmake 那行的 `libuv1-dev` 只有 basic job 装，这里没有，但别靠这个）。
+          #
+          # CMAKE_POSITION_INDEPENDENT_CODE=ON 是这条链上唯一能解开矛盾的地方：
+          # 上面那个 BUILD_SHARED_LIBS=OFF 是"依赖静态进去"的必要条件，但它同时让
+          # CMake 把 PIC 默认值派生成 OFF（`POSITION_INDEPENDENT_CODE` 初值就是
+          # `BUILD_SHARED_LIBS`），于是 FetchContent 的 libuv/llhttp 和 add_subdirectory
+          # 的 zlib 全都不带 -fPIC —— 而 libuvcpp 是 shared，链不上：
+          #   relocation R_X86_64_PC32 against symbol 'environ@@GLIBC_2.2.5'
+          #   can not be used when making a shared object; recompile with -fPIC
+          # libuv 自己从不设 PIC（其 CMakeLists 里零命中），所以只能由我们显式打开。
+          # 用命令行 -D 而不是在 CMakeLists 里 set：缓存变量对每个子项目都可见。
           cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
@@ -242,11 +536,73 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # 三个平台都过了才发布。用的是内置 GITHUB_TOKEN（permissions: contents: write），
+  # Linux arm64 —— 与 linux-x64 逐字同构，只有两处不同：runner 标签、出包时的
+  # --platform。所有 CMake 开关都是架构无关的，包括 PIC 那条（ELF 的 PIC 与架构
+  # 无关），所以理由见 linux-x64，这里不重复。
+  # ---------------------------------------------------------------------------
+  linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev zlib1g-dev ninja-build
+
+      - name: Configure & Build
+        run: |
+          set -o pipefail
+          cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-linux --parallel 4
+
+      - name: Report runtime deps
+        run: |
+          so=$(ls build-linux/libuvcpp.so* | head -1)
+          echo "so=$so"
+          ldd "$so"
+          bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=linux-not-self-contained::libuvcpp.so 动态依赖了第三方库: $bad"
+            exit 1
+          fi
+          soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
+          if [ -n "$soft" ]; then
+            echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
+          fi
+
+      - name: Test
+        run: ctest --test-dir build-linux --output-on-failure --timeout 60 \
+               --exclude-regex "test_shutdown_func"
+
+      - name: Package
+        run: python3 tests/tools/package_release.py \
+                --tree build-linux --platform linux-arm64 --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 六条腿全绿才发布。用的是内置 GITHUB_TOKEN（permissions: contents: write），
   # 不需要、也不该用一个长期 PAT。
+  # needs 是这套流程的干跑机制：任何一条腿红了都不会产生半成品 Release ——
+  # 资产是六份，少一份就是一个"装得上但缺一半平台"的发布。
   # ---------------------------------------------------------------------------
   publish:
-    needs: [mingw-x64, msvc-x64, linux-x64]
+    needs: [mingw-x64, mingw-arm64, msvc-x64, msvc-arm64, linux-x64, linux-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

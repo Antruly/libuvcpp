@@ -41,6 +41,14 @@ PLATFORMS = {
         "runtime": [],          # 运行时已静态链进 dll
         "pc_libs": "-L${libdir} -luvcpp",
     },
+    # 与 mingw-x64 逐字同构：MSYS2 的 `lib` 前缀是工具链决定的，与架构无关
+    # （CLANGARM64 同样产出 libuvcpp.dll + libuvcpp.dll.a）。
+    "mingw-arm64": {
+        "lib_dll": ["libuvcpp.dll"],
+        "import_lib": ["libuvcpp.dll.a"],
+        "runtime": [],
+        "pc_libs": "-L${libdir} -luvcpp",
+    },
     "msvc-x64": {
         "lib_dll": ["uvcpp.dll", "Release/uvcpp.dll"],
         "import_lib": ["uvcpp.lib", "Release/uvcpp.lib"],
@@ -48,8 +56,24 @@ PLATFORMS = {
         # 没有 VC++ 可再发行组件时直接 0xc0000135。
         "runtime": ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"],
         "pc_libs": "-L${libdir} -luvcpp",
+        "msvc_arch": "x64",
     },
+    "msvc-arm64": {
+        "lib_dll": ["uvcpp.dll", "Release/uvcpp.dll"],
+        "import_lib": ["uvcpp.lib", "Release/uvcpp.lib"],
+        "runtime": ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"],
+        "pc_libs": "-L${libdir} -luvcpp",
+        "msvc_arch": "arm64",
+    },
+    # 无 SOVERSION/VERSION（根 CMakeLists 一处都没设），所以实体就叫 libuvcpp.so，
+    # 没有 `.so.1` / `.so.1.1.0` 符号链接链。x64 与 arm64 同名，只有内容不同。
     "linux-x64": {
+        "lib_dll": ["libuvcpp.so", "libuvcpp.so.1.1.0"],
+        "import_lib": [],
+        "runtime": [],
+        "pc_libs": "-L${libdir} -luvcpp",
+    },
+    "linux-arm64": {
         "lib_dll": ["libuvcpp.so", "libuvcpp.so.1.1.0"],
         "import_lib": [],
         "runtime": [],
@@ -95,8 +119,74 @@ def is_system_dll(name):
             or name.startswith("ext-ms-win-"))
 
 
+# 这些目录下的运行库是给别的目标编译的（OneCore / Spectre 缓解版 / 调试版），
+# 文件名与桌面版**逐个相同**，靠 os.walk 碰运气就会挑中它们。
+_NON_DESKTOP_RUNTIME_DIRS = {"onecore", "spectre", "debug_nonredist", "auxiliary"}
+
+
+def _msvc_runtime_rank(root, arch):
+    r"""给一份候选运行库的所在目录打分，越大越该被选中。
+
+    4 = `...\VC\Redist\MSVC\<ver>\<arch>\Microsoft.VC*.CRT`（桌面可再分发的正牌）
+    3 = 别的含 `Redist` 的路径
+    2 = 架构目录对上、既不在 Redist 下也不是非桌面变体
+    1 = onecore / spectre / debug_nonredist —— 同名，但是给别的目标编的
+    0 = 根本不是这个架构
+
+    2 与 1 必须分开：合成树（没有 Redist）里两者会同时存在，一档就退化成
+    "谁先被 os.walk 遍历到谁赢"，而 `onecore` 按字典序排在 `x64` 前面。
+    """
+    if os.sep + arch + os.sep not in root + os.sep:
+        return 0
+    parts = [p for p in root.split(os.sep) if p]
+    if any(p.lower() in _NON_DESKTOP_RUNTIME_DIRS for p in parts):
+        return 1
+    for i in range(len(parts) - 3):
+        if parts[i] == "Redist" and parts[i + 1] == "MSVC" and parts[i + 3] == arch:
+            return 4
+    return 3 if "Redist" in parts else 2
+
+
+def find_runtime_for_arch(base, name, arch):
+    """在 base 下找 name 的**桌面可再分发**运行库，且架构必须是 arch；找不到返回 None。
+
+    这个查找有三处都会被 os.walk 的遍历顺序坑掉，而每一次挑错都是**静默坏包** ——
+    打包机自己就是 x64，塞进去一份不对的文件本地照样能跑：
+
+    1. **哪一份拷贝**。同一个 vcruntime140.dll 在 VS 安装树里有近 30 份，
+       `Common7\\IDE\\`、`Common7\\IDE\\Remote Debugger\\x64\\`、`CoreCon\\...` 各带一份，
+       而且按字典序**全都排在 `VC\\Redist\\` 前面**。那些是 VS 自己运行时用的副本，
+       版本未必与编译时用的工具集一致；能再分发的只在 `VC\\Redist\\MSVC\\` 下。
+    2. **哪个变体**。`<ver>\\` 下面除了 `<arch>\\`，还有 `onecore\\<arch>\\`、
+       `spectre\\<arch>\\`、`debug_nonredist\\`，文件名逐个相同；`onecore` 按字典序
+       排在 `x64` 前面，所以"含 \\x64\\ 就算"必然挑中 OneCore 版。
+    3. **哪个架构**。`x64` / `arm64` / `x86` 三份并存，挑错就是把 x64 的运行库
+       打进 arm64 的包。
+
+    所以按打分选最优（见 `_msvc_runtime_rank`），而不是撞到第一个就返回。
+    """
+    best_rank = 0
+    best = None
+    for root, _dirs, files in os.walk(base):
+        if name not in files:
+            continue
+        rank = _msvc_runtime_rank(root, arch)
+        if rank > best_rank:
+            best_rank = rank
+            best = os.path.join(root, name)
+            if rank == 4:
+                break
+    return best
+
+
 def pe_imports(path):
     """读 PE 导入表，返回依赖的 dll 名（小写、去重、保序）；非 PE 返回 None。
+
+    **注意这个 None 的后果**：调用点（`if deps is not None:`）在非 PE 上会整段跳过，
+    也就是说下面那道"bin/ 必须覆盖 dll 真实导入表"的自检在 **ELF / Mach-O 上是空操作**。
+    Linux 侧目前靠 release.yml 里的 `ldd` 步骤兜着，macOS 侧没有兜底。
+    哪天要覆盖 ELF，在这里加 `readelf -d` / `objdump -p` 取 NEEDED 的分支，
+    并配一张 libc/libm/libpthread/ld-linux 之类的系统库白名单。
 
     为什么不用 objdump：msvc-x64 那个 job 跑在 Git Bash 里，objdump 不保证存在，
     而这道自检要防的恰恰是"发布包在干净机器上起不来"，它在哪台 runner 上都得能跑。
@@ -255,14 +345,18 @@ def main():
     # MSVC 的运行库在 `$env:VCToolsRedistDir` 下，这里按常见位置找；
     # 找不到就**报错退出**，因为缺了它这个包在干净机器上根本起不来 ——
     # 悄悄发一个"看着完整"的包比不发更坏。
+    # 要挑运行库就必须知道目标架构，缺了是配置错误：宁可在这里炸掉，
+    # 也不要让 find_runtime_for_arch 退化成"随便挑一份"。
+    if spec["runtime"] and not spec.get("msvc_arch"):
+        print("平台 %s 声明了 runtime 却没写 msvc_arch，无法判断该挑哪个架构的运行库"
+              % args.platform)
+        return 2
+
     for rt in spec["runtime"]:
         src = None
         for base in filter(None, [os.environ.get("VCToolsRedistDir"),
                                   os.environ.get("VCINSTALLDIR")]):
-            for root, _dirs, files in os.walk(base):
-                if rt in files and ("x64" in root or "x86" not in root):
-                    src = os.path.join(root, rt)
-                    break
+            src = find_runtime_for_arch(base, rt, spec["msvc_arch"])
             if src:
                 break
         if src is None:
@@ -272,10 +366,7 @@ def main():
                          r"C:\Program Files (x86)\Microsoft Visual Studio"):
                 if not os.path.isdir(base):
                     continue
-                for root, _dirs, files in os.walk(base):
-                    if rt in files and os.sep + "x64" + os.sep in root + os.sep:
-                        src = os.path.join(root, rt)
-                        break
+                src = find_runtime_for_arch(base, rt, spec["msvc_arch"])
                 if src:
                     break
         if src:
