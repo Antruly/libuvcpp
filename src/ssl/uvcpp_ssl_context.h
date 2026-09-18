@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 #include <uvcpp/uvcpp_define.h>
 #include <ssl/uvcpp_ssl_common.h>
 
@@ -97,6 +98,28 @@ class UVCPP_API uvcpp_ssl_context {
   bool set_cipher_list(const std::string& ciphers);
 
   // -------------------------------------------------------------------
+  // ALPN
+  // -------------------------------------------------------------------
+  //
+  // 两个方向分开，因为 OpenSSL 的接口本来就不一样：客户端是"宣告我支持什么"，
+  // 服务端是"从对方给的里面挑一个"。顺序都即优先级。
+
+  /**
+   * @brief 客户端：宣告本端支持的协议名，例如 {"h2", "http/1.1"}。
+   * @return 列表为空（编码后为空）返回 false；否则 true。
+   */
+  bool set_alpn_protos(const std::vector<std::string>& protos);
+
+  /**
+   * @brief 服务端：给出可选的协议名并安装选择回调。
+   *
+   * **挑不中时回调返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal。** 这正是"不带 ALPN
+   * 的 HTTP/1.1 客户端照常握手成功、由上层回落 h1"的实现方式；写成 fatal 会让
+   * 所有老客户端连握手都完不成。无扩展、有扩展但无交集都走这条路。
+   */
+  void set_alpn_select_protos(const std::vector<std::string>& protos);
+
+  // -------------------------------------------------------------------
   // Status
   // -------------------------------------------------------------------
 
@@ -121,6 +144,8 @@ class UVCPP_API uvcpp_ssl_context {
   tls_version min_version_;
   int status_ = TLS_CTX_NONE;
   std::string last_error_;
+  // 选择回调通过 arg 拿到的是这个成员的地址，所以它必须活得和 ctx_ 一样久。
+  std::string alpn_select_wire_;
 };
 
 }  // namespace uvcpp

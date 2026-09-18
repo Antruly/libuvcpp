@@ -30,7 +30,7 @@ VERSION = "1.1.0"
 
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
-MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl"]
+MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2"]
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib` 是导入库/静态库，`runtime` 是要跟着 dll 一起发的第三方运行时。

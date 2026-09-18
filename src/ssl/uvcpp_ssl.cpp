@@ -171,6 +171,34 @@ bool uvcpp_ssl::verify_peer() const {
 bool uvcpp_ssl::is_handshake_done() const { return handshake_done_; }
 std::string uvcpp_ssl::get_last_error() const { return last_error_; }
 
+// =========================================================================
+// ALPN
+// =========================================================================
+
+bool uvcpp_ssl::set_alpn_protos(const std::vector<std::string>& protos) {
+  if (!ssl_) return false;
+  const std::string wire = ssl_detail::alpn_wire_format(protos);
+  if (wire.empty()) return false;
+  // 与 SSL_CTX_set_alpn_protos 同样：**成功返回 0**。
+  if (SSL_set_alpn_protos(ssl_, reinterpret_cast<const unsigned char*>(wire.data()),
+                          static_cast<unsigned int>(wire.size())) != 0) {
+    clear_error();
+    return false;
+  }
+  return true;
+}
+
+std::string uvcpp_ssl::alpn_selected() const {
+  if (!ssl_) return std::string();
+  const unsigned char* data = nullptr;
+  unsigned int len = 0;
+  SSL_get0_alpn_selected(ssl_, &data, &len);
+  // len == 0 就是"没协商出 ALPN"（对端没给扩展，或选择回调返回了 NOACK），
+  // 不是错误 —— 上层据此回落 HTTP/1.1。
+  if (!data || len == 0) return std::string();
+  return std::string(reinterpret_cast<const char*>(data), len);
+}
+
 }  // namespace uvcpp
 
 #endif  // UVCPP_OPENSSL_ENABLE

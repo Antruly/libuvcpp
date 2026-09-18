@@ -245,6 +245,57 @@ bool uvcpp_ssl_context::set_cipher_list(const std::string& ciphers) {
 }
 
 // =========================================================================
+// ALPN
+// =========================================================================
+
+namespace {
+
+// `SSL_select_next_proto` 在**无交集**时也会写 out/outlen（让它指向服务端列表的
+// 第一项），所以返回值的语义不能想当然。只认 OPENSSL_NPN_NEGOTIATED，
+// 否则等于把第一个协议名硬塞给对端 —— 对端要的是 h2、我们答 h2、但它本不支持，
+// 后果比"没协商出 ALPN"严重得多。
+int alpn_select_cb(SSL* /*ssl*/, const unsigned char** out, unsigned char* outlen,
+                   const unsigned char* in, unsigned int inlen, void* arg) {
+  const std::string* server = static_cast<const std::string*>(arg);
+  if (!server || server->empty()) return SSL_TLSEXT_ERR_NOACK;
+  unsigned char* sel = nullptr;
+  unsigned char  sel_len = 0;
+  int rv = SSL_select_next_proto(
+      &sel, &sel_len, reinterpret_cast<const unsigned char*>(server->data()),
+      static_cast<unsigned int>(server->size()), in, inlen);
+  if (rv != OPENSSL_NPN_NEGOTIATED) return SSL_TLSEXT_ERR_NOACK;
+  *out = sel;
+  *outlen = sel_len;
+  return SSL_TLSEXT_ERR_OK;
+}
+
+}  // namespace
+
+bool uvcpp_ssl_context::set_alpn_protos(const std::vector<std::string>& protos) {
+  if (!ctx_) return false;
+  const std::string wire = ssl_detail::alpn_wire_format(protos);
+  if (wire.empty()) return false;
+  // 注意：SSL_CTX_set_alpn_protos **成功返回 0**，与 OpenSSL 大多数接口相反。
+  if (SSL_CTX_set_alpn_protos(ctx_,
+                              reinterpret_cast<const unsigned char*>(wire.data()),
+                              static_cast<unsigned int>(wire.size())) != 0) {
+    clear_error();
+    return false;
+  }
+  return true;
+}
+
+void uvcpp_ssl_context::set_alpn_select_protos(const std::vector<std::string>& protos) {
+  if (!ctx_) return;
+  alpn_select_wire_ = ssl_detail::alpn_wire_format(protos);
+  if (alpn_select_wire_.empty()) {
+    SSL_CTX_set_alpn_select_cb(ctx_, nullptr, nullptr);
+    return;
+  }
+  SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_);
+}
+
+// =========================================================================
 // Status
 // =========================================================================
 

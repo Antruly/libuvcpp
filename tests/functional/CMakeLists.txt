@@ -46,6 +46,17 @@ foreach(test_src ${FUNC_SOURCES})
   # 分不出「还没完」和「真出错」），所以需要它的头文件与库。
   if(UVCPP_ENABLE_OPENSSL AND test_name MATCHES "^web_ssl_")
     target_link_libraries(${exe_name} PRIVATE ${UVCPP_SSL_LIBS})
+    if(WIN32)
+      # 与根 CMakeLists 给库的那三条同理：静态 libcrypto 里的 winstore_store.obj
+      # 直接调 Cert* 系列（crypt32）。
+      #
+      # FindOpenSSL 只在 `OPENSSL_USE_STATIC_LIBS` 为真时才把 crypt32 挂到
+      # `OpenSSL::*` 的 INTERFACE 上，而那个开关是使用者的配置责任 —— 本机
+      # OpenSSL 恰好是静态的，于是「换个没传该开关的新树」就 6 个用例 LNK2019×72，
+      # 报错还落在 libcrypto 内部。这里自己挂上，别让一个没人写进文档的 -D
+      # 成为「测试编不编得出来」的隐藏前提。
+      target_link_libraries(${exe_name} PRIVATE crypt32)
+    endif()
   endif()
   add_test(NAME ${exe_name} COMMAND ${exe_name})
 endforeach()

@@ -174,6 +174,18 @@ class UVCPP_API uvcpp_tcp_client {
   /** @brief 本连接是否装了 TLS 过滤层。 */
   bool is_tls() const { return tls_ssl_ != nullptr; }
 
+  /**
+   * @brief 本条连接宣告支持的 ALPN 协议名（顺序即优先级）。
+   *
+   * `enable_tls()` 前后调都可以：之前调就先记下、建好 SSL 对象时再装上。
+   * 必须在**握手开始之前**生效，而客户端握手是在 connect 完成回调里才起的，
+   * 所以这两个时机都够早。
+   *
+   * 与 context 上那个 `set_alpn_protos` 的关系是"覆盖"：同一条连接只有一次
+   * 协商机会，而"要不要 h2"是每条连接各自的决定。
+   */
+  bool set_tls_alpn_protos(const std::vector<std::string>& protos);
+
   /** @brief TLS 握手是否已完成（非 TLS 连接恒为 true）。 */
   bool is_tls_handshake_done() const {
     return tls_ssl_ == nullptr ? true : tls_handshake_done_;
@@ -186,6 +198,15 @@ class UVCPP_API uvcpp_tcp_client {
    * 「证书校验失败」等。0 表示没有记录。
    */
   int tls_last_ssl_error() const;
+
+  /**
+   * @brief 握手协商出的 ALPN 协议名；没协商出来（含非 TLS 连接）返回空串。
+   *
+   * 值在握手完成那一刻就缓存进本对象，所以**在 ready 回调里、以及回调之后
+   * 任何时刻读都是安全的** —— ready 回调的契约允许对象在回调内被析构，从
+   * 那里反查 `SSL*` 是不安全的。
+   */
+  const std::string& tls_alpn_selected() const { return tls_alpn_; }
 
   /**
    * @brief 握手结束（成功或失败）时通知一次。
@@ -713,6 +734,8 @@ class UVCPP_API uvcpp_tcp_client {
   uvcpp_ssl*  tls_ssl_            = nullptr;
   bool        tls_handshake_done_ = false;
   int         tls_ssl_error_      = 0;   ///< 最近一次 SSL_get_error
+  std::string tls_alpn_;                 ///< 握手协商出的协议名（空 = 没协商出）
+  std::vector<std::string> tls_alpn_want_;  ///< 待宣告的协议名（enable_tls 时装上）
   std::string tls_out_;                  ///< 待发密文（wbio 抽出来的）
   bool        tls_out_busy_       = false;  ///< 有一个密文写在途
   std::string tls_plain_;                ///< 已解密、尚未交付的明文

@@ -21,7 +21,8 @@
         "UVCPP_BUILD_WEB": "ON",
         "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
         "FETCHCONTENT_SOURCE_DIR_LLHTTP": "${sourceDir}/_local_deps/llhttp",
-        "FETCHCONTENT_SOURCE_DIR_LIBUV": "${sourceDir}/_local_deps/libuv"
+        "FETCHCONTENT_SOURCE_DIR_LIBUV": "${sourceDir}/_local_deps/libuv",
+        "FETCHCONTENT_SOURCE_DIR_NGHTTP2": "${sourceDir}/_local_deps/nghttp2"
       }
     }
   ]

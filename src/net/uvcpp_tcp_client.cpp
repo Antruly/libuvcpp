@@ -1730,6 +1730,10 @@ int uvcpp_tcp_client::enable_tls(uvcpp_ssl_context* ctx) {
   tls_handshake_done_  = false;
   tls_ssl_error_       = 0;
   tls_connect_pending_ = false;
+  tls_alpn_.clear();
+
+  // 在 enable_tls 之前设过的宣告名单，此刻才装上。
+  if (!tls_alpn_want_.empty()) tls_ssl_->set_alpn_protos(tls_alpn_want_);
 
   // 连接已经建立（服务端 accept 之后调用的情形）：握手现在就开始。
   // 客户端此时还没连上，起手是空的 —— 等 connect 完成回调进来再发 ClientHello。
@@ -1757,6 +1761,13 @@ void uvcpp_tcp_client::set_tls_ready_callback(
 
 int uvcpp_tcp_client::tls_last_ssl_error() const { return tls_ssl_error_; }
 
+bool uvcpp_tcp_client::set_tls_alpn_protos(const std::vector<std::string>& protos) {
+  if (tls_handshake_done_) return false;  // 协商已经过去了，改不了
+  tls_alpn_want_ = protos;
+  if (tls_ssl_ != nullptr) return tls_ssl_->set_alpn_protos(tls_alpn_want_);
+  return true;  // SSL 对象还没建，enable_tls 时会装上
+}
+
 int uvcpp_tcp_client::tls_drive_handshake() {
   if (tls_ssl_ == nullptr || tls_handshake_done_) return 0;
 
@@ -1771,6 +1782,10 @@ int uvcpp_tcp_client::tls_drive_handshake() {
   if (rc == 1) {
     tls_handshake_done_ = true;
     tls_ssl_error_      = tls_ssl_->last_ssl_error();
+    // 在**这里**取 ALPN 结果，而不是等上层来问：ready 回调的契约是"回调里
+    // 对象可能已被析构"，从回调里反查 SSL* 不安全。这里是唯一置真点、被五个
+    // 调用点汇聚，且必然早于 tls_notify_ready。
+    tls_alpn_ = tls_ssl_->alpn_selected();
   }
   return 0;
 }

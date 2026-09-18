@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace uvcpp {
 
@@ -67,6 +68,29 @@ struct tls_cert_info {
   std::string not_after;     // Validity end
   std::string fingerprint;   // SHA-256 fingerprint (hex)
 };
+
+// =========================================================================
+// ALPN
+// =========================================================================
+
+// OpenSSL 的 ALPN 接口吃的是**线格式**（每个协议名前面一个长度字节），不是字符串
+// 数组。抽出来是因为它有两个使用点（SSL_CTX_set_alpn_protos 与
+// SSL_set_alpn_protos），而长度上限 255 忘了判就会静默产生一个对端解析不了的
+// 列表。超长或空的项直接跳过，不报错 —— 调用方给的多半是常量名单。
+namespace ssl_detail {
+
+inline std::string alpn_wire_format(const std::vector<std::string>& protos) {
+  std::string out;
+  for (size_t i = 0; i < protos.size(); ++i) {
+    const std::string& p = protos[i];
+    if (p.empty() || p.size() > 255) continue;
+    out.push_back(static_cast<char>(p.size()));
+    out += p;
+  }
+  return out;
+}
+
+}  // namespace ssl_detail
 
 }  // namespace uvcpp
 

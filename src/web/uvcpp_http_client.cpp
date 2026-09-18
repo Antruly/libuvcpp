@@ -22,6 +22,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <functional>
+#include <vector>
 
 #if UVCPP_OPENSSL_ENABLE
 #include <ssl/uvcpp_ssl.h>
@@ -149,6 +150,17 @@ int uvcpp_http_client::connect(const char* host, int port,
         last_error_code_ = trc;
         cb(trc);
         return trc;
+      }
+      // 本层只会说 HTTP/1.1（理由与 `do_ssl_handshake` 那条相同），所以要**显式**
+      // 钉死。靠"用户的 context 上大概没设 ALPN"是不行的：同一个 context 很可能
+      // 同时给 h2 客户端用（`set_ssl_context` 收的就是别人的 ctx），那时协商出 h2
+      // 而本层照发 HTTP/1.1 报文 —— 服务端按二进制帧解析，症状是"连上了、写成功了、
+      // 永远等不到响应"，一处报错都没有。
+      if (!tcp_->set_tls_alpn_protos({"http/1.1"})) {
+        set_status(HTTP_CLIENT_ERROR);
+        last_error_code_ = UV_EINVAL;
+        cb(UV_EINVAL);
+        return UV_EINVAL;
       }
     }
 #endif
@@ -741,6 +753,11 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
   ssl_ = new uvcpp_ssl(ssl_ctx_, fd);
   // 同步路径：把 socket 设为阻塞模式，简化握手与后续 SSL 读写
   set_socket_blocking(fd, true);
+
+  // 显式钉死 http/1.1，而不是靠"从来没设过 ALPN"。这条路是**阻塞 + 真 fd**，
+  // h2 的 TLS 层必须走内存 BIO（`uvcpp_tcp_client` 那条），两者不能混。
+  // 写出来之后，将来往 ctx 上加了客户端 ALPN 也不会意外把这条路径带进 h2。
+  ssl_->set_alpn_protos({"http/1.1"});
   int rc = ssl_->handshake();
   // 非阻塞 socket 下 handshake 可能返回 0（WANT_READ/WANT_WRITE），重试几次兜底
   for (int i = 0; i < 4 && rc == 0; ++i) rc = ssl_->handshake();

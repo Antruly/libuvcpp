@@ -58,6 +58,7 @@ option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 # =========================================================================
 option(UVCPP_ENABLE_ZLIB    "Enable zlib (gzip, WebSocket Per-Message Deflate)"  OFF)
 option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS; WSS not wired yet)"        OFF)
+option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN only, no h2c)" OFF)
 
 # =========================================================================
 # 依赖库版本覆盖
@@ -65,6 +66,7 @@ option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS; WSS not wired yet)"        O
 set(LLHTTP_VERSION  "release/v9.2.0" CACHE STRING "llhttp git tag to fetch")
 set(ZLIB_VERSION    "v1.3.1"         CACHE STRING "zlib git tag to fetch")
 set(OPENSSL_VERSION "openssl-3.4.0"  CACHE STRING "OpenSSL git tag to fetch")
+set(NGHTTP2_VERSION "v1.70.0"        CACHE STRING "nghttp2 git tag to fetch")
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -211,6 +213,78 @@ endif()
 if(UVCPP_ENABLE_OPENSSL)
   file(GLOB SSL_SRC_FILES "${CMAKE_SOURCE_DIR}/src/ssl/*.h" "${CMAKE_SOURCE_DIR}/src/ssl/*.cpp")
   source_group("ssl" FILES ${SSL_SRC_FILES})
+endif()
+
+# =========================================================================
+# nghttp2 —— HTTP/2 后端
+# =========================================================================
+# 本库的 HTTP/2 **只**经 TLS 的 ALPN 协商得到,没有 h2c / 明文 h2(见 doc)。ALPN 是
+# TLS 扩展 ⇒ 没有 OpenSSL 就没有 h2。这里强制关掉并出声,而不是留一个链得上、
+# 跑不起来的配置。
+if(UVCPP_ENABLE_NGHTTP2 AND NOT UVCPP_ENABLE_OPENSSL)
+  message(WARNING
+    "UVCPP_ENABLE_NGHTTP2=ON 需要 UVCPP_ENABLE_OPENSSL=ON(HTTP/2 只做 TLS+ALPN,"
+    "不做 h2c/明文 h2)。已强制关闭 nghttp2。")
+  set(UVCPP_ENABLE_NGHTTP2 OFF)
+endif()
+
+if(UVCPP_ENABLE_NGHTTP2)
+  # 必须用 function 造作用域:下面那批是**普通变量**,靠 CMP0077=NEW 压住 nghttp2
+  # 自己的 option() —— 同名普通变量在场时 option() 不写 cache。**没被压住的开关
+  # 仍会以默认值写进根 cache**(实测那批是 11 条),所以才要把开关名逐个点一遍;
+  # 而 cmake_dependent_option 是例外,它内部那条 `set(... CACHE ... FORCE)` 无视
+  # CMP0077,BUILD_TESTING 必然落进根 cache —— 只是值被我们压成了 OFF。
+  # 压不到的是 find_package / check_* 的内部量(PC_* / LIBXML2_* / HAVE_* / ...),
+  # 那是缓存机制本身,不是 nghttp2 的选择。本项目测试靠 enable_testing() +
+  # UVCPP_BUILD_TESTS 注册,与 BUILD_TESTING 无关(实测 h2 树 684 条 vs 对照 630 条)。
+  #
+  # 静态是刻意的:链 nghttp2_static 之后 uvcpp.dll 不新增任何运行时依赖,
+  # packager 的 DLL 清单一行都不用改。BUILD_SHARED_LIBS 是全局的、随使用者的
+  # 缓存变化,所以必须显式压 OFF;而 BUILD_STATIC_LIBS 是**另一个独立开关**
+  # (默认 OFF),两个都要设,否则一个库都不建 —— 这是现场核源码才发现的,
+  # 它并不是从 BUILD_SHARED_LIBS 派生的。
+  function(uvcpp_nghttp2_configure)
+    set(ENABLE_LIB_ONLY    ON)
+    set(ENABLE_APP         OFF)
+    set(ENABLE_HPACK_TOOLS OFF)
+    set(ENABLE_EXAMPLES    OFF)
+    set(ENABLE_FAILMALLOC  OFF)
+    set(ENABLE_DOC         OFF)
+    set(BUILD_SHARED_LIBS  OFF)
+    set(BUILD_STATIC_LIBS  ON)
+    set(BUILD_TESTING      OFF)
+    # 下面这批取值就是上游默认值,压它们纯粹是为了不让它们写进根 cache。
+    set(ENABLE_WERROR      OFF)
+    set(ENABLE_DEBUG       OFF)
+    set(ENABLE_THREADS     ON)
+    set(ENABLE_HTTP3       OFF)
+    set(ENABLE_STATIC_CRT  OFF)
+    set(WITH_LIBXML2       OFF)
+    set(WITH_JEMALLOC      OFF)
+    set(WITH_MRUBY         OFF)
+    set(WITH_NEVERBLEED    OFF)
+    set(WITH_LIBBPF        OFF)
+    set(WITH_WOLFSSL       OFF)
+
+    FetchContent_GetProperties(nghttp2)
+    if(NOT nghttp2_POPULATED)
+      FetchContent_Populate(nghttp2)
+      add_subdirectory(${nghttp2_SOURCE_DIR} ${nghttp2_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif()
+  endfunction()
+
+  # 与 zlib 同样**不能**用 FetchContent_MakeAvailable:它等价于 add_subdirectory,
+  # 会把 nghttp2 自己的 install 规则(nghttp2Config.cmake / nghttp2Targets.cmake /
+  # libnghttp2.pc)一并登记,污染 `cmake --install`。EXCLUDE_FROM_ALL 一起排除,
+  # 而目标照样能被下面的链接依赖拉起来。
+  FetchContent_Declare(
+    nghttp2
+    GIT_REPOSITORY https://github.com/nghttp2/nghttp2.git
+    GIT_TAG        ${NGHTTP2_VERSION}
+    GIT_SHALLOW    TRUE
+  )
+  uvcpp_nghttp2_configure()
+  message(STATUS "nghttp2 integrated (tag=${NGHTTP2_VERSION}, static)")
 endif()
 
 # NOTE: PATH for Windows tests is set *after* add_subdirectory(tests) below
@@ -433,6 +507,14 @@ else()
   message(STATUS "OpenSSL disabled (UVCPP_OPENSSL_ENABLE=0)")
 endif()
 
+if(UVCPP_ENABLE_NGHTTP2)
+  add_compile_definitions(UVCPP_NGHTTP2_ENABLE=1)
+  message(STATUS "HTTP/2 enabled (UVCPP_NGHTTP2_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_NGHTTP2_ENABLE=0)
+  message(STATUS "HTTP/2 disabled (UVCPP_NGHTTP2_ENABLE=0)")
+endif()
+
 # 根据 UVCPP_BUILD_EXPAND 选项排除 expand 模块
 if(NOT UVCPP_BUILD_EXPAND)
   message(STATUS "Excluding expand module from build")
@@ -477,6 +559,14 @@ if(NOT UVCPP_ENABLE_OPENSSL)
   list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/ssl/")
 else()
   message(STATUS "Including ssl module in build (OpenSSL ${OPENSSL_VERSION})")
+endif()
+
+# 根据 UVCPP_ENABLE_NGHTTP2 排除 http2 模块
+if(NOT UVCPP_ENABLE_NGHTTP2)
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/http2/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/http2/")
+else()
+  message(STATUS "Including http2 module in build (nghttp2 ${NGHTTP2_VERSION})")
 endif()
 
 # Create uvcpp targets according to user selection.
@@ -587,6 +677,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_WEBAPP_ENABLE=$<BOOL:${UVCPP_BUILD_WEBAPP}>
       UVCPP_ZLIB_ENABLE=$<BOOL:${UVCPP_ENABLE_ZLIB}>
       UVCPP_OPENSSL_ENABLE=$<BOOL:${UVCPP_ENABLE_OPENSSL}>
+      UVCPP_NGHTTP2_ENABLE=$<BOOL:${UVCPP_ENABLE_NGHTTP2}>
     )
   endif()
 endforeach()
@@ -650,6 +741,29 @@ if(UVCPP_ENABLE_OPENSSL)
       if(WIN32)
         target_link_libraries(${_tgt} PRIVATE crypt32 user32 advapi32)
       endif()
+    endif()
+  endforeach()
+endif()
+
+# =========================================================================
+# HTTP/2 依赖链接 — nghttp2
+# =========================================================================
+if(UVCPP_ENABLE_NGHTTP2)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      # 用 nghttp2 自己给的那个别名,而不是 `nghttp2_static` 这个名字:
+      # STATIC_LIB 是它内部的私有变量,漂过(1.60/1.61 那次同名缺陷);而
+      # `add_library(nghttp2 ALIAS ${LIB_SELECTED})` 是它对外承诺的稳定名字。
+      # 我们已在 function 里把 BUILD_SHARED_LIBS 压成 OFF,所以它必然指向静态那个。
+      #
+      # PRIVATE:nghttp2 只出现在 src/http2/ 的 .cpp 里(pimpl),公开头一个字都不
+      # 引用它 —— 使用者既不需要它的 include 也不需要它的 lib。
+      #
+      # 包 $<BUILD_INTERFACE:> 的理由与上面 zlib 那段逐字相同:PRIVATE 在**静态**
+      # 库上会以 $<LINK_ONLY:...> 写进 INTERFACE_LINK_LIBRARIES,而
+      # install(EXPORT uvcppTargets) 要求导出集里每个非 IMPORTED 目标也在导出集
+      # 里,nghttp2_static 不在。包上之后本工程内照常传播,导出里被剥成空。
+      target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:nghttp2>)
     endif()
   endforeach()
 endif()
@@ -807,6 +921,13 @@ if(SSL_HEADER_FILES AND UVCPP_ENABLE_OPENSSL)
   install(FILES ${SSL_HEADER_FILES} DESTINATION include/ssl)
 endif()
 
+# src/http2/ 的公开头是 pimpl 形状的（<nghttp2/nghttp2.h> 只出现在 .cpp 里），
+# 使用者拿到的头不依赖 nghttp2 本身，所以这里只装我们自己的头。
+file(GLOB HTTP2_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/http2/*.h")
+if(HTTP2_HEADER_FILES AND UVCPP_ENABLE_NGHTTP2)
+  install(FILES ${HTTP2_HEADER_FILES} DESTINATION include/http2)
+endif()
+
 # If we built libuv from source as part of this project, install its public headers too
 if(UVCPP_BUILD_LIBUV_FROM_SOURCE AND DEFINED libuv_SOURCE_DIR)
   message(STATUS "Installing libuv headers from ${libuv_SOURCE_DIR}/include into include/libuv")
@@ -931,6 +1052,9 @@ if(WIN32)
       endif()
     endif()
   endif()
+  # nghttp2 刻意不进这张表：它被压成静态（见上面 nghttp2_configure 的注释），
+  # 链进 uvcpp.dll 后不新增任何运行时依赖，所以这里**不该**出现 nghttp2.dll。
+  #
   # OpenSSL 运行时 DLL 位于 OPENSSL_ROOT_DIR/bin（导入库在 lib/），且文件名为版本化
   # （libssl-3-x64.dll / libcrypto-3-x64.dll），故用 glob 定位后复制到测试目录。
   if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)

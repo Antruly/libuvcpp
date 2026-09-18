@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 #include <uvcpp/uvcpp_define.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <ssl/uvcpp_ssl_common.h>
@@ -119,6 +120,27 @@ class UVCPP_API uvcpp_ssl {
    * `SSL_ERROR_ZERO_RETURN`（对端干净关闭）。只看返回值是分不出来的。
    */
   int last_ssl_error() const { return last_ssl_error_; }
+
+  // -------------------------------------------------------------------
+  // ALPN
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 本条连接宣告支持的协议名（覆盖 context 上的设置）。
+   *
+   * 必须在握手前调用。h2 客户端走这条而不是 context 上的那个，是因为同一条
+   * 连接上只有一次协商机会，而"要不要 h2"是**每条连接**的决定。
+   */
+  bool set_alpn_protos(const std::vector<std::string>& protos);
+
+  /**
+   * @brief 握手协商出的协议名；没协商出来返回空串。
+   *
+   * 拉取式，与 `last_ssl_error()` 同构。**只有握手完成后读才有意义**，之前恒为空。
+   * 需要它的地方要在 ready 通知**之前**把它读进自己的成员缓存：ready 回调的契约
+   * 是"回调里对象可能已被析构"，从回调里反查 SSL* 是不安全的。
+   */
+  std::string alpn_selected() const;
 
   // -------------------------------------------------------------------
   // Certificate info
