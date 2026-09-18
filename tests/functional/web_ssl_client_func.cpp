@@ -89,6 +89,19 @@ struct server_state {
   std::atomic<int> bytes_in{0};      ///< 服务端解出的**明文**字节数
   std::atomic<int> final_count{0};
 
+  /// 第一条**没被算成**"对端放弃"的回声失败：走的是哪条路、拿到的码。
+  ///
+  /// CI 上这条断言偶发红（macOS 上三次都是 `failed=1 reset=0`），而
+  /// `failed`/`reset` 两个计数**分不清**是下面哪一条：
+  ///   - 异步写完成拿到了一个不是 `UV_ECONNRESET` 的码（对端走掉在 macOS 上
+  ///     未必是 RST —— `close()` 时接收缓冲是空的就是 FIN，那可能给 `UV_EPIPE`）；
+  ///   - **同步** `c.write()` 直接返回非 0 —— 那个分支（下面的 `rc != 0`）
+  ///     原本连分类都没有，任何同步失败都注定被判成"非 reset"。
+  /// 记下第一次的路径与码，断言里打出来 —— 下次再红就知道该改哪儿。
+  std::atomic<int>  first_bad_path{0};   ///< 0=无、1=异步写完成、2=同步 write 返回
+  std::atomic<int>  first_bad_status{0};
+  std::atomic<bool> first_bad_taken{false};
+
   /// 每连接的发送队列。
   ///
   /// 第一版这里没有它，直接"一收到就读回调里 write" —— 256 KiB 那条用例当场
@@ -105,6 +118,38 @@ struct server_state {
 };
 
 void pump_echo(server_state& st, uvcpp_tcp_client& c);
+
+/// 这次回声失败算不算"对端走了"这一类（与服务端的回声管线无关的结局）。
+///
+/// 只放**确定是**对端消失这一类（连带本端句柄被拆而连累到在途写）的码：
+///   - `UV_ECONNRESET` —— 对端发了 RST（原有关口）；
+///   - `UV_ECANCELED` —— 在途的 `uv_write` 被取消。**实测**：本机 40 轮压力里
+///     第 33 轮撞到的就是它（`status=-4081`），形状与 CI 上那三次 macOS 的
+///     `failed=1 reset=0` 完全一致。libuv 只在**句柄被 `uv_close`** 时这样
+///     取消写队列，而这里对端一走服务端就会把那条连接收掉（`fire_close_callbacks`
+///     → 回收），所以它属于"对端走了"，不属于"漏发了一块"；
+///   - `UV_EPIPE` / `UV_ENOTCONN` —— 写到一个已经没了 / 没连上的 socket
+///     （`uvcpp_tcp_client::write` 在对端已走时**同步**就返回 `UV_ENOTCONN`）。
+///
+/// **`UV_EALREADY` 绝不算**：它的意思是"同一个连接上已经有在途写了"，也就是
+/// 服务端**真的漏发了一块** —— 那正是文件末尾那条断言存在的理由。为了不让人
+/// 顺手把它加进来（加了就表面全绿、断言全废），`main()` 开头有一组针脚自检。
+bool is_peer_gone(int status) {
+  return status == UV_ECONNRESET || status == UV_ECANCELED ||
+         status == UV_EPIPE || status == UV_ENOTCONN;
+}
+
+/// 记下第一条"不是对端放弃"的回声失败（只记第一次，之后的不再覆盖）。
+///
+/// 纯诊断，不参与判据 —— 加它是为了把 CI 上那条偶发失败从
+/// `failed=? reset=?` 变成"哪条路 + 哪个码"。
+void note_echo_failure(server_state& st, int path, int status) {
+  bool expected = false;
+  if (st.first_bad_taken.compare_exchange_strong(expected, true)) {
+    st.first_bad_path.store(path);
+    st.first_bad_status.store(status);
+  }
+}
 
 /// 服务端读回调：把解出来的明文原样回显。
 ///
@@ -157,7 +202,8 @@ void pump_echo(server_state& st, uvcpp_tcp_client& c) {
       // 真正要挡的是"服务端漏发了一块"（在途写撞上 `UV_EALREADY` 被丢掉），
       // 那种失败**不是** RST —— 下面的断言 `echo_failed == echo_reset` 因此仍然
       // 抓得住它，判别力没有被削弱。
-      if (status == UV_ECONNRESET) st.echo_reset.fetch_add(1);
+      if (is_peer_gone(status)) st.echo_reset.fetch_add(1);
+      else note_echo_failure(st, 1, status);
     }
     {
       std::lock_guard<std::mutex> lk(st.mu);
@@ -169,6 +215,12 @@ void pump_echo(server_state& st, uvcpp_tcp_client& c) {
 
   if (rc != 0) {
     st.echo_failed.fetch_add(1);
+    // 同步失败**同样**要分类，否则它必然落在"非 reset"那一边 —— 这一支原本
+    // 一个分类都没有（`uvcpp_tcp_client::write` 在这里只可能返回
+    // `UV_ENOTCONN`（还没连上/对端已走）、`UV_EALREADY`（有在途写）或
+    // TLS 层的码；前两者里 `UV_ENOTCONN` 与 RST 是同一类"对端没了"）。
+    if (is_peer_gone(rc)) st.echo_reset.fetch_add(1);
+    else note_echo_failure(st, 2, rc);
     std::lock_guard<std::mutex> lk(st.mu);
     auto it = st.conns.find(&c);
     if (it != st.conns.end()) it->second.busy = false;
@@ -471,6 +523,19 @@ int main() {
   }
   std::cout << "[web_ssl_client] server port " << port << std::endl;
 
+  // ---- 分类表的针脚自检（不是废话，理由见 `is_peer_gone`）-----------
+  //
+  // 文件末尾那条 `echo_failed == echo_reset` 的**分辨力全在这张表上**：
+  // 放宽它（典型是顺手把 `UV_EALREADY` 也当成"对端走了"）会让断言变恒真，
+  // 而表面上一切照绿。所以两端都钉住 —— 认的必须认，不认的必须不认。
+  check(is_peer_gone(UV_ECONNRESET) && is_peer_gone(UV_ECANCELED) &&
+            is_peer_gone(UV_EPIPE) && is_peer_gone(UV_ENOTCONN),
+        "echo classify: '对端走了'这一类必须认全（含实测到的 -4081 ECANCELED）");
+  check(!is_peer_gone(UV_EALREADY),
+        "echo classify: UV_EALREADY 必须**不**算对端走了 —— 它才是"
+        "'漏发了一块'的信号，算进去这条断言就恒真了");
+  check(!is_peer_gone(0), "echo classify: status 0 不是失败");
+
   // ---- 场景 1：小消息往返（async） ----------------------------------
   {
     const std::string msg = "GET / HTTP/1.1\r\nHost: loopback.test\r\n\r\n";
@@ -597,7 +662,16 @@ int main() {
         "server echo failures that were NOT a peer reset: " +
             std::to_string(st.echo_failed.load() - st.echo_reset.load()) +
             " (failed=" + std::to_string(st.echo_failed.load()) +
-            " reset=" + std::to_string(st.echo_reset.load()) + ")");
+            " reset=" + std::to_string(st.echo_reset.load()) + ")" +
+            // 诊断：第一条非 reset 失败的来源。没有它，CI 上这条红了只能看到
+            // `failed=1 reset=0` 两个数，分不清"哪条路 + 哪个码"。
+            (st.first_bad_taken.load()
+                 ? " first_non_reset: " +
+                       std::string(st.first_bad_path.load() == 2 ? "sync_write"
+                                                                 : "async_cb") +
+                       " status=" + std::to_string(st.first_bad_status.load()) +
+                       " (" + uv_strerror(st.first_bad_status.load()) + ")"
+                 : " first_non_reset: (none recorded)"));
   // 每条连接断开后都应从登记表里摘掉 —— TLS 层不该把连接的生命周期搞乱。
   check(st.final_count.load() == 0,
         "server client table not drained: " +
