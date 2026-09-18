@@ -536,21 +536,29 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p ci-logs
-          # BUILD_SHARED_LIBS=OFF 这一条**不能省**。它不管 uvcpp 自己
-          # （CMakeLists.txt:485 是显式的 `add_library(uvcpp SHARED ...)`），管的是依赖：
-          # 根 CMakeLists.txt:6 的默认值是 **ON**，于是 llhttp 建的是 llhttp_shared。
-          # 本地对同一个源码、同样这些参数做过 A/B，只切这一个开关：
-          #   ON  → `Using libuv CMake target 'uv'`，DLL 的非系统导入是
-          #         `libllhttp.dll` **和** `libuv.dll` ⇒ 下面那条断言红。
-          #   OFF → `Using libuv CMake target 'uv_a' (static)`，非系统导入为空。
-          # libuv 这一路走 CMakeLists.txt:275 —— 只有 `NOT BUILD_SHARED_LIBS` 时才挑
-          # 静态的 `uv_a`，否则挑 `uv`，而 libuv 自己的 `LIBUV_BUILD_SHARED` 默认也
-          # 是 ON（_local_deps/libuv/CMakeLists.txt:27,454）。
-          # 本机几棵树都手工传了这个 OFF，所以从没复现；release.yml 的 linux-x64
-          # 一直传着，Windows 这几条是唯一的漏网 —— 而发布承诺正是
-          # "任意 64 位 Windows 直接可用"。
+          # 两个都是"依赖必须静态进去"的开关，缺一个产物就多一个 dll 依赖，
+          # 和"任意 64 位 Windows 直接可用"的发布承诺冲突。下面那条断言两个都抓得到，
+          # 这条注释是让下次改的人知道该传什么、以及为什么本机看不出来。
+          #
+          # ① -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON —— 本机看不出来的真正原因在这里：
+          #   CMakePresets.json:22 有这个开关，而本机所有树都是走 preset 配置的，
+          #   所以一直链的是 FetchContent 的静态 libuv。CI 是裸 `cmake -S . -B`，
+          #   不带 preset ⇒ 这个开关默认 OFF ⇒ `find_library` 在 MSYS2 里撞上
+          #   C:/msys64/mingw64/lib/libuv.dll.a（runner 镜像自带 libuv）⇒ 链成
+          #   共享库，产物依赖 `libuv-1.dll`（MSYS2 那份的 DLL 名带 -1）。
+          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:275 判的是
+          #   `TARGET uv_a`，而 find_library 给的是一个**路径**，不是 target，
+          #   所以那个分支根本进不去。
+          #
+          # ② -DBUILD_SHARED_LIBS=OFF —— 管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
+          #   llhttp_shared ⇒ 依赖 libllhttp.dll）。它不管 uvcpp 自己
+          #   （CMakeLists.txt:485 是显式的 `add_library(uvcpp SHARED ...)`）。
+          #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
+          #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
+          #   （275 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
