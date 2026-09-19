@@ -199,6 +199,25 @@ static bool test_accept_encoding_parse() {
   // q=0 should skip
   if (http_compress::parse_accept_encoding("gzip;q=0, deflate") != http_compress_method::DEFLATE)
     return false;
+
+  // ── `*` 不得把被显式拒掉的编码选回来 ────────────────────────────────
+  // RFC 9110 §12.5.3：`*` 只匹配**没有显式列出**的编码。上面那条
+  // `gzip;q=0, deflate` 之所以通过，靠的是"deflate 显式出现且 q 更高"，
+  // 一旦两侧都只由 `*` 覆盖，原来的实现就会把 gzip 选回来 —— 也就是发一个
+  // 客户端刚声明过收不了的编码。下面四条钉住这一点。
+  if (http_compress::parse_accept_encoding("*, gzip;q=0") != http_compress_method::DEFLATE)
+    return false;
+  if (http_compress::parse_accept_encoding("gzip;q=0, *") != http_compress_method::DEFLATE)
+    return false;
+  if (http_compress::parse_accept_encoding("*, deflate;q=0") != http_compress_method::GZIP)
+    return false;
+  if (http_compress::parse_accept_encoding("*, gzip;q=0, deflate;q=0") !=
+      http_compress_method::NONE)
+    return false;
+  // 注：这里**没有**钉"显式项比 `*` 的 q 更高时该听谁的"（例如
+  // `*, gzip;q=0.5` 里 gzip 到底是 1.0 还是 0.5）。按 RFC 该由显式项说了算，
+  // 但当前实现不区分这两者 —— 那是一条独立的、尚未处理的偏差，不在这里
+  // 顺手固化下来。
   return true;
 }
 
