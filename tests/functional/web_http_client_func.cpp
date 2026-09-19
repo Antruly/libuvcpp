@@ -218,6 +218,26 @@ static bool test_accept_encoding_parse() {
   // `*, gzip;q=0.5` 里 gzip 到底是 1.0 还是 0.5）。按 RFC 该由显式项说了算，
   // 但当前实现不区分这两者 —— 那是一条独立的、尚未处理的偏差，不在这里
   // 顺手固化下来。
+
+  // ── 退回去的那个也必须"本身可接受" ──────────────────────────────────
+  // 「没被 `q=0` 拒过」不等于「被接受了」：没有 `*` 的时候，**未被列出的编码
+  // 默认不可接受**（RFC 9110 §12.5.3）。拿前者当后者用，就会给一个只列了
+  // gzip 的客户端发 `content-encoding: deflate`。
+  if (http_compress::parse_accept_encoding("gzip;q=0, gzip;q=0.5") !=
+      http_compress_method::NONE)
+    return false;  // 自相矛盾的输入：显式拒绝优先，退回"不发编码"
+  if (http_compress::parse_accept_encoding("deflate;q=0, deflate;q=0.5") !=
+      http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("gzip;q=0") != http_compress_method::NONE)
+    return false;
+  // `*;q=0`：未列出的一律不可接受 ⇒ 只剩显式列出的那些。
+  if (http_compress::parse_accept_encoding("*;q=0") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("*;q=0, gzip") != http_compress_method::GZIP)
+    return false;
+  // 反向守卫在**上面**：`gzip` / `*` / `deflate` 那三条（本函数开头）钉的是
+  // "合法输入照常选中"，收紧过头会把它们打红 —— 所以不在这里重复。
   return true;
 }
 
