@@ -348,6 +348,22 @@ class UVCPP_API uvcpp_tcp_server {
 
   /** @brief 当前的 TLS 上下文；没装 TLS 时为 nullptr。 */
   uvcpp_ssl_context* ssl_context() const { return ssl_ctx_; }
+
+  /**
+   * @brief TLS 握手的超时（毫秒）。0 = 不设。默认 10000。装 TLS 才有意义。
+   *
+   * 服务端在握手成功之前**不会**把连接交给上层（见 `uvcpp_tcp_client::
+   * set_tls_ready_callback`），所以这期间这条连接不在上层的连接表里，上层的
+   * 闲置超时看不到它。没有这道闸门时，一个「连上之后每 500 ms 发一个字节喂
+   * ClientHello、永远不把握手做完」的客户端可以让连接无限期挂着。
+   *
+   * 值会传给之后 accept 的每一条连接；已经建立的连接不受影响。
+   * @warning 必须在 loop 线程调用。
+   */
+  void set_tls_handshake_timeout_ms(int ms);
+
+  /** @brief 当前的 TLS 握手超时；0 表示不设。 */
+  int tls_handshake_timeout_ms() const { return tls_hs_timeout_ms_; }
 #endif  // UVCPP_OPENSSL_ENABLE
 
   // -----------------------------------------------------------------
@@ -423,6 +439,8 @@ class UVCPP_API uvcpp_tcp_server {
 
   /** @brief 服务端级 TLS 上下文（非拥有）。nullptr = 明文。 */
   uvcpp_ssl_context* ssl_ctx_ = nullptr;
+  /** TLS 握手超时（毫秒）；0 = 不设。accept 时传给每条新连接。 */
+  int tls_hs_timeout_ms_ = 10000;
 #endif  // UVCPP_OPENSSL_ENABLE
 
   // Trampoline — C-style fn ptr + void* to avoid MSVC std::function
