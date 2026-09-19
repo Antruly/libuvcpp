@@ -648,9 +648,20 @@ int uvcpp_h2_session::init(const callbacks& cbs, size_t max_header_list_size,
   nghttp2_session_callbacks_set_on_stream_close_callback(ncb,
                                                          &impl::cb_stream_close);
 
-  const int rv = impl_->server_side
-                     ? nghttp2_session_server_new(&impl_->session, ncb, impl_.get())
-                     : nghttp2_session_client_new(&impl_->session, ncb, impl_.get());
+  nghttp2_option* opt = nullptr;
+  if (nghttp2_option_new(&opt) != 0) {
+    nghttp2_session_callbacks_del(ncb);
+    return UV_ENOMEM;
+  }
+  // 发方向的上限显式设一次。nghttp2 的默认值（`NGHTTP2_MAX_HEADERSLEN`）恰好也
+  // 是 65536，但"恰好相等"不是一份契约 —— `header_block_fits()` 是按这个常量
+  // 在拦的，两边必须是同一个数。
+  nghttp2_option_set_max_send_header_block_length(opt, H2_MAX_SEND_HEADER_BLOCK);
+  const int rv =
+      impl_->server_side
+          ? nghttp2_session_server_new2(&impl_->session, ncb, impl_.get(), opt)
+          : nghttp2_session_client_new2(&impl_->session, ncb, impl_.get(), opt);
+  nghttp2_option_del(opt);
   nghttp2_session_callbacks_del(ncb);
   if (rv != 0) return rv;
 
@@ -823,6 +834,37 @@ bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
   return true;
 }
 
+/**
+ * @brief 这个头部块还发得出去吗。
+ *
+ * nghttp2 在发送前会拿 `nghttp2_hd_deflate_bound()` 估一个上界，超过
+ * `max_send_header_block_length` 就 `return NGHTTP2_ERR_FRAME_SIZE_ERROR`
+ * （`nghttp2_session.c:2101`）。**而这个错误码是 `is_non_fatal` 的**，于是它
+ * 在上层的 `OB_POP_ITEM` 分支里被这样处理（`nghttp2_session.c:2853-2925`）：
+ * 丢掉这一帧、把这条流按 `REFUSED_STREAM` 关掉、然后 `break` 继续跑 ——
+ * 既不通知我们（`on_frame_not_send_callback` 没注册，那个 `if` 整块被跳过），
+ * 也不发 RST_STREAM（对端根本不知道这条流存在过）。而且这是在**发**的时候才
+ * 发生的，那时 `submit_*` 早就把一个正的流号还给调用方了。
+ *
+ * 净效果：调用方拿到一个成功的返回值，然后永远等不到任何东西，对端也一样。
+ * 这是"回调永远不来"那一类里最难查的一种 —— 线上一个字节都没有，没有任何
+ * 出错的地方可以看。所以本层按同一个公式先算一遍，把它变成一个**同步**的
+ * `UV_EMSGSIZE`，而且**在动流状态之前**退掉。
+ *
+ * 公式与 `nghttp2_hd_deflate_bound()`（`nghttp2_hd.c:1596-1622`）逐字一致：
+ * 那个函数 `(void)deflater`、不看动态表状态，是 nv 数组的纯函数，所以复刻它
+ * 不会随连接状态漂。`+ 5` 是 `NGHTTP2_PRIORITY_SPECLEN`（`nghttp2_frame.h:64`），
+ * 即 nghttp2 那处传的 `additional`。**升级 nghttp2 时这三处要一起核。**
+ */
+bool header_block_fits(const std::vector<nghttp2_nv>& nv) {
+  size_t bound = 12;         // 至多两次动态表尺寸变更，每次 6 字节
+  bound += 12 * nv.size();   // 每个字段的名字与值各按 7 位前缀的最长编码计
+  for (size_t i = 0; i < nv.size(); ++i) {
+    bound += nv[i].namelen + nv[i].valuelen;
+  }
+  return bound + 5 <= H2_MAX_SEND_HEADER_BLOCK;
+}
+
 }  // namespace
 
 int uvcpp_h2_session::submit_response(int32_t stream_id,
@@ -837,7 +879,6 @@ int uvcpp_h2_session::submit_response(int32_t stream_id,
   // 一次提交 = 一条流只发一套响应。`HEADERS_SENT`（流式那条路的头部已经发过）
   // 也必须挡在这里，否则会往同一条流上再发一套 HEADERS。
   if (sit->second.state != h2_stream_state::OPEN) return UV_EALREADY;
-  sit->second.state = h2_stream_state::SENT;
 
   // 204/304/1xx 按协议就不带 body，调用方就算忘了 omit_body 也不能发出 DATA。
   if (status_is_bodyless(static_cast<int>(resp.status_code))) omit_body = true;
@@ -845,6 +886,10 @@ int uvcpp_h2_session::submit_response(int32_t stream_id,
   std::vector<std::string>  store;
   std::vector<nghttp2_nv>   nv;
   if (!build_response_nv(resp, omit_body, store, nv)) return UV_EINVAL;
+  // 两条退路都必须在**置 SENT 之前**：置了再退，这条流就停在"说过要发、其实
+  // 一个字节都没发"的状态上，而 nghttp2 那边连流都没建 —— 对端只会一直等。
+  if (!header_block_fits(nv)) return UV_EMSGSIZE;
+  sit->second.state = h2_stream_state::SENT;
 
   if (omit_body) {
     // data_prd 传 nullptr ⇒ HEADERS 自带 END_STREAM，一个 DATA 帧都不发。
@@ -875,13 +920,15 @@ int uvcpp_h2_session::submit_headers(int32_t stream_id,
   // 走错路（先 `submit_headers` 又 `submit_response`）必须当场被挡住，否则
   // 两条路会各自往同一条流上发一套 HEADERS。
   if (sit->second.state != h2_stream_state::OPEN) return UV_EALREADY;
-  sit->second.state = h2_stream_state::HEADERS_SENT;
 
   std::vector<std::string> store;
   std::vector<nghttp2_nv>  nv;
   // `omit_body = true` 走的是"不补 content-length"那一支，正是流式要的：
   // 长度此刻不知道，补一个就是在说谎。`resp` 里若已写明就原样发出。
   if (!build_response_nv(resp, /*omit_body=*/true, store, nv)) return UV_EINVAL;
+  // 同上：置位之前退，否则流停在"头部发过了"而实际没发。
+  if (!header_block_fits(nv)) return UV_EMSGSIZE;
+  sit->second.state = h2_stream_state::HEADERS_SENT;
 
   impl_->out_streams[stream_id];  // 占位，让 provider 的指针立刻有效
   return nghttp2_submit_headers(impl_->session, NGHTTP2_FLAG_NONE, stream_id,
@@ -1057,25 +1104,34 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
     nv.push_back(e);
   }
 
-  if (body.empty()) {
-    return impl_->finish_submit_request(nghttp2_submit_request2(
-        impl_->session, nullptr, nv.data(), nv.size(), nullptr, nullptr));
-  }
+  // 发不出去的头部块必须在这里退掉，理由见 `header_block_fits()`：nghttp2 会
+  // 静默丢掉这一帧，而那时我们已经把一个正的流号还给调用方了。
+  if (!header_block_fits(nv)) return UV_EMSGSIZE;
 
   // data_prd 必须在**这一次**提交里给出：`submit_request2` 收到 NULL 时
   // HEADERS 自带 END_STREAM，之后再 `submit_data2` 就是对一条已结束的流发数据。
   // 而 provider 又需要一个活到发完的地址，所以先在堆上备好，拿到 id 再登记。
-  std::unique_ptr<impl::out_body> pending(new impl::out_body());
-  pending->data = std::move(body);
-  nghttp2_data_provider2 prd;
-  prd.source.ptr    = pending.get();
-  prd.read_callback = &impl::cb_read_body;
+  std::unique_ptr<impl::out_body> pending;
+  nghttp2_data_provider2          prd;
+  const nghttp2_data_provider2*   prd_ptr = nullptr;
+  if (!body.empty()) {
+    pending.reset(new impl::out_body());
+    pending->data     = std::move(body);
+    prd.source.ptr    = pending.get();
+    prd.read_callback = &impl::cb_read_body;
+    prd_ptr           = &prd;
+  }
 
   const int32_t sid = impl_->finish_submit_request(nghttp2_submit_request2(
-      impl_->session, nullptr, nv.data(), nv.size(), &prd, nullptr));
+      impl_->session, nullptr, nv.data(), nv.size(), prd_ptr, nullptr));
   if (sid < 0) return sid;
+  if (pending.get() != nullptr) impl_->out_bodies[sid] = std::move(pending);
 
-  impl_->out_bodies[sid] = std::move(pending);
+  // **两条路都登记**这条流。不登记的话它后续的 `on_stream_close` 会在自己的
+  // `streams.find()` 那一步静默返回，`cbs.on_close` 一声不吭 —— 而对端一个
+  // RST_STREAM 打过来时，`uvcpp_http_client` 正是靠这个回调给挂起的请求结算
+  // （`on_h2_stream_close`）。空 body 那条路原先就是漏的，而它恰恰是 GET 的
+  // 常态：服务端拒掉一条 GET，调用方的回调就永远不来，两边一起等。
   uvcpp_h2_stream& s = impl_->stream_of(sid);
   s.request          = req;
   s.request.version  = uvcpp_http_version::HVER_20;

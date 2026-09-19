@@ -59,9 +59,22 @@ struct link {
   http_headers resp_headers;
   bool        resp_end = false;   ///< 整条响应收完（on_response_end）
   int         client_closed = 0;
+  /// 客户端看到的那条流的 RST 码。只数次数证明不了"为什么被拒" ——
+  /// 一次协议错误和一次超预算在只计数器的判据里长得一模一样。
+  uint32_t    last_rst_code = 0;
   /// 两边的致命错误次数。绝大多数用例要求它是 0 —— 一个"绿"的用例如果同时
   /// 触发过致命路径，那它绿的很可能不是它想测的那条路。
   int         fatal_count = 0;
+  /// 最后一次致命错误的原始码。只数次数的话，"-905 CONTINUATION 过多"和
+  /// "-902 FLOODED"在诊断里长得一样，而修法完全不同。
+  int         last_fatal = 0;
+  /// `pump()` 搬过的字节数。用它区分"帧没发出来"和"发出来了但对端没收"。
+  size_t      pumped = 0;
+  /// `drain()` 报过的错（非零即"有东西发不出来"）。
+  int         drain_err = 0;
+  /// 服务端 `submit_*` 那个返回值。本层有几条失败是**必须同步**报出来的
+  /// （而不是"给个流号然后永远等不到"），不记下来就无从断言。
+  int         last_submit_rc = 0;
 
   /// 已经回过响应的流。**一条流只许回一次** —— `submit_response` 第二次会换掉
   /// 一块正被 nghttp2 的 data provider 按地址引用的缓冲，是 use-after-free。
@@ -80,7 +93,11 @@ struct link {
   link() { probe_owner = this; }
   ~link() { if (probe_owner == this) probe_owner = nullptr; }
 
-  bool init() {
+  /// @param server_budget 服务端**愿意接收**的头部列表上限。默认与库一致
+  ///        （64 KiB）。调小它是为了在"客户端发得出去"的前提下测服务端那条防线
+  ///        —— 发方向另有 64 KiB 的上限（`H2_MAX_SEND_HEADER_BLOCK`），拿一个
+  ///        超过它的头部块去撞收方向，撞到的是发方向，根本到不了服务端。
+  bool init(size_t server_budget = 64u * 1024u) {
     uvcpp_h2_session::callbacks sc;
     sc.on_request     = [this](uvcpp_h2_session& s, uvcpp_h2_stream& st, bool end) {
       ++req_count;
@@ -101,8 +118,8 @@ struct link {
       ++body_end;
       maybe_reply(s, st.stream_id);
     };
-    sc.on_fatal = [this](uvcpp_h2_session&, int) { ++fatal_count; };
-    if (server.init(sc) != 0) return false;
+    sc.on_fatal = [this](uvcpp_h2_session&, int c) { ++fatal_count; last_fatal = c; };
+    if (server.init(sc, server_budget) != 0) return false;
 
     uvcpp_h2_session::callbacks cc;
     // 注意 `end` 是"头带了 END_STREAM"，不是"响应收完了" —— 收尾只认
@@ -121,9 +138,10 @@ struct link {
     };
     cc.on_close = [this](uvcpp_h2_session&, int32_t, uint32_t code) {
       if (code != 0) ++rst_count;
+      last_rst_code = code;
       ++client_closed;
     };
-    cc.on_fatal = [this](uvcpp_h2_session&, int) { ++fatal_count; };
+    cc.on_fatal = [this](uvcpp_h2_session&, int c) { ++fatal_count; last_fatal = c; };
     return client.init(cc) == 0;
   }
 
@@ -134,7 +152,10 @@ struct link {
               << " end=" << (last_end ? 1 : 0) << " url=" << last_url
               << " host=" << last_host << " req_body=" << last_body
               << " svr_streams=" << server.stream_count()
-              << " cli_streams=" << client.stream_count() << "\n";
+              << " cli_streams=" << client.stream_count()
+              << " pumped=" << pumped << " fatals=" << fatal_count
+              << " last_fatal=" << last_fatal << " drain_err=" << drain_err
+              << "\n";
     std::cout << "    [dump " << tag << "] resp=" << resp_count
               << " status=" << resp_status << " resp_end=" << (resp_end ? 1 : 0)
               << " resp_body=" << resp_body
@@ -156,23 +177,33 @@ struct link {
     }
     replied.push_back(sid);
     if (reply_as_status) {
-      s.submit_status(sid, reply_status, reply_status_body);
+      last_submit_rc = s.submit_status(sid, reply_status, reply_status_body);
     } else {
-      s.submit_response(sid, reply, reply_omit_body);
+      last_submit_rc = s.submit_response(sid, reply, reply_omit_body);
     }
   }
 
   /// 两边的字节来回搬，直到双方都没东西可发。
+  ///
+  /// `drain()` 的**返回值必须记下来**：它非零时一个字节都搬不动，而"搬不动"
+  /// 和"本来就没事可搬"在这里长得一模一样 —— 曾经就是这么把"客户端根本没发出
+  /// HEADERS"读成"服务端没拦住"的。
   void pump() {
     for (int i = 0; i < 256; ++i) {
       bool moved = false;
       std::string b;
-      if (client.drain(b) == 0 && !b.empty()) {
+      const int cr = client.drain(b);
+      if (cr != 0) drain_err = cr;
+      if (cr == 0 && !b.empty()) {
+        pumped += b.size();
         server.recv(b.data(), b.size());
         moved = true;
       }
       b.clear();
-      if (server.drain(b) == 0 && !b.empty()) {
+      const int sr = server.drain(b);
+      if (sr != 0) drain_err = sr;
+      if (sr == 0 && !b.empty()) {
+        pumped += b.size();
         client.recv(b.data(), b.size());
         moved = true;
       }
@@ -597,6 +628,204 @@ bool test_normal_control_traffic_passes() {
   return L.server.stream_count() == 0 && L.client.stream_count() == 0;
 }
 
+// =========================================================================
+// 头部块的两个方向
+//
+// 这是**两条独立的防线**，判据和修法都不一样，所以分开钉：
+//
+//   - **收方向**：`SETTINGS_MAX_HEADER_LIST_SIZE` 在 nghttp2 里是**零强制**的
+//     （它只把值存进 `local_settings`，接收路径从不累加、也没跟它比过），
+//     所以 `h2_header_budget` 是唯一防线。越界 ⇒ 本层发 RST(0x0b)；
+//   - **发方向**：nghttp2 自己的 `max_send_header_block_length`（64 KiB），
+//     超了它会**把整帧静默丢掉** —— 见 `uvcpp_h2_session.cpp::header_block_fits`
+//     那段注释。本层在 `submit_*` 里先拦一道，换成同步的 `UV_EMSGSIZE`。
+//
+// 两边在本文件里都一条用例都没有过。
+// =========================================================================
+
+/// 带一个超大头部值的请求。值用重复的同一个字符是**刻意的**：HPACK 会把它压到
+/// 几十字节上线，于是用例只考"解码后的字节数"（预算算的就是这个），不掺进分帧
+/// 与拥塞因素。压缩比越高越说明这条防线的意义 —— 一个几十字节的帧能在内存里
+/// 炸出上百 KB，这正是 HPACK bomb。
+uvcpp_http_request make_req_with_pad(size_t value_len) {
+  uvcpp_http_request r = make_req(http_method::HTTP_GET, "/pad");
+  r.set_header("x-pad", std::string(value_len, 'a'));
+  return r;
+}
+
+/// 服务端收方向超预算必须 RST，且**应用层一个字节都不该看见**。
+///
+/// 服务端预算压到 1 KiB、负载只用 4 KiB：这样它**远在发方向那个 64 KiB 之内**，
+/// 撞到的确实是收方向这条防线。先前拿 96 KiB 去撞，撞到的是发方向 ——
+/// 客户端因为 nghttp2 静默丢帧而一个字节都没发出去，服务端根本没收到东西。
+/// 用例红在 A 上，断言写的却是 B，这种绿/红都不说明任何事。
+///
+/// 三条判据缺一不可：
+///   - 只钉"被 RST"的话，把预算设成 0、见谁都拒的实现同样绿；
+///   - 只钉"应用没看见"的话，帧根本没发出去同样绿；
+///   - 只钉"没有致命错误"的话，越预算被当成连接级错误、整条连接被拆掉的实现
+///     会把这条一起绿掉 —— 而越预算是一条**流**的事（RFC 9113 §10.5）。
+///
+/// 这条还顺带钉住一件不相干的事（`rst_count` 那一格同时管着两边）：**客户端
+/// 必须在上面的 RST 到达之前就把这条流登记进自己的表**。请求是空 body 的 GET，
+/// 而 `submit_request` 原先只在"带 body"那条路上登记 —— 于是 `on_stream_close`
+/// 在 `streams.find()` 那一步静默返回，`cbs.on_close` 一声不吭。`uvcpp_http_client`
+/// 全靠那个回调给挂起的请求结算，所以那不是"少一个通知"，是**回调永远不来**。
+bool test_header_budget_rejects_oversize() {
+  link& L = make_link();
+  const size_t kServerBudget = 1024;
+  if (!L.init(kServerBudget)) return false;
+
+  const int32_t sid = L.client.submit_request(make_req_with_pad(4u * 1024u), "");
+  if (sid <= 0) {  // 前置：客户端自己就把请求挡了，那就测不到服务端这条防线
+    std::cerr << "  [diag] submit_request 返回 " << sid << "（前置不成立）"
+              << std::endl;
+    return false;
+  }
+  L.pump();
+  // 前置之二：那批字节**确实过去了**。握手本身不到 200 字节，所以搬过的量真
+  // 超过 1 KiB 就只能是那条带头部块的请求 —— 没过去的话，下面"应用没看见"
+  // 是必然的，整条用例会在什么都没测到的前提下变绿。
+  if (L.pumped <= kServerBudget) {
+    std::cerr << "  [diag] 只搬过 " << L.pumped << " 字节（≤" << kServerBudget
+              << "），头部块根本没发出去" << std::endl;
+    return false;
+  }
+
+  if (L.rst_count != 1) {
+    std::cerr << "  [diag] rst_count=" << L.rst_count << " (want 1)" << std::endl;
+    return false;
+  }
+  // 0x0b = ENHANCE_YOUR_CALM。用例不 include nghttp2 的头（它没被传播过来），
+  // 所以写值不写宏 —— 这个值本身也是线上契约的一部分。
+  if (L.last_rst_code != 0x0b) {
+    std::cerr << "  [diag] rst code=" << L.last_rst_code << " (want 0x0b)"
+              << std::endl;
+    return false;
+  }
+  // 越预算的请求**不许**落到应用层：`on_request` 是"头收全了"。
+  if (L.req_count != 0 || L.body_end != 0) {
+    std::cerr << "  [diag] 应用层看见了越预算的请求: req=" << L.req_count
+              << " body_end=" << L.body_end << std::endl;
+    return false;
+  }
+  // 而且它不该把连接带走。
+  return L.fatal_count == 0;
+}
+
+/// 合法但接近上限的头部列表必须放行。上面那条只证明"会拦"—— 阈值写成 0 或 1
+/// 时它照样绿；这一条把阈值从另一侧钉住，顺带证明预算**不跨流累积**（同一连接
+/// 上连发两条 32 KiB 的请求，各自都该过）。
+bool test_header_budget_normal_passes() {
+  link& L = make_link();
+  if (!L.init()) return false;
+
+  L.reply.status_code = http_status::OK;
+  L.reply.body        = mk_buf("ok");
+
+  for (int i = 0; i < 2; ++i) {
+    // 32 KiB：一半预算，仍然是个"大"头部列表。
+    if (L.client.submit_request(make_req_with_pad(32u * 1024u), "") <= 0)
+      return false;
+  }
+  L.pump();
+
+  if (L.rst_count != 0) {
+    std::cerr << "  [diag] 合法头部被 RST 了 " << L.rst_count << " 次" << std::endl;
+    return false;
+  }
+  if (L.req_count != 2 || L.resp_count != 2) {
+    std::cerr << "  [diag] req=" << L.req_count << " resp=" << L.resp_count
+              << " (want 2/2)" << std::endl;
+    return false;
+  }
+  return L.fatal_count == 0;
+}
+
+/// 发方向超上限必须在 `submit_request` 里**同步**退掉。
+///
+/// 这条钉的是 nghttp2 的静默丢帧：超限的 HEADERS 被丢掉整帧、按 REFUSED_STREAM
+/// 关掉流、然后既然继续跑 —— 既不通知我们（没注册 `on_frame_not_send`），也不发
+/// RST_STREAM（对端连这条流都不知道）。而这一切发生在**发**的时候，那时
+/// `submit_request` 早就把一个正的流号还给调用方了。改之前这里拿到的是 1，
+/// 然后两边永远等下去，线上一个字节都没有。
+bool test_oversize_submit_is_refused() {
+  link& L = make_link();
+  if (!L.init()) return false;
+
+  const int32_t sid = L.client.submit_request(make_req_with_pad(96u * 1024u), "");
+  if (sid != UV_EMSGSIZE) {
+    std::cerr << "  [diag] 超上限的 submit_request 返回 " << sid << "（want "
+              << static_cast<int>(UV_EMSGSIZE) << " = UV_EMSGSIZE）" << std::endl;
+    return false;
+  }
+  const size_t before = L.pumped;
+  L.pump();
+
+  // 失败必须是**干净**的：没有半开的流留下来……
+  if (L.client.stream_count() != 0) {
+    std::cerr << "  [diag] 客户端留下了 " << L.client.stream_count() << " 条流"
+              << std::endl;
+    return false;
+  }
+  // ……那 96 KiB 也一个字节都没上线（握手不到 200 字节）……
+  if (L.pumped - before > 1024) {
+    std::cerr << "  [diag] 被拒之后还排出去 " << (L.pumped - before)
+              << " 字节" << std::endl;
+    return false;
+  }
+  // ……对端自然什么都没看见。
+  if (L.req_count != 0 || L.resp_count != 0 || L.rst_count != 0) {
+    std::cerr << "  [diag] 对端看见了东西: req=" << L.req_count
+              << " resp=" << L.resp_count << " rst=" << L.rst_count << std::endl;
+    return false;
+  }
+  if (L.drain_err != 0) {
+    std::cerr << "  [diag] drain 报错 " << L.drain_err << std::endl;
+    return false;
+  }
+  return L.fatal_count == 0;
+}
+
+/// 服务端的响应头同样不能静默消失，而且**失败之后那条流必须还能用**。
+///
+/// 后半句是这条用例真正的价值：`submit_response`/`submit_headers` 原本一进门就
+/// 把流置成 `SENT`/`HEADERS_SENT`。若把越界检查放在置位之后，失败会留下一条
+/// "说过要发、其实一个字节没发"的流 —— 重试被 `UV_EALREADY` 挡住，对端永远等
+/// 一条不会来的响应。所以这里退掉之后**换一份正常头部重试，必须成功**。
+bool test_oversize_response_is_refused() {
+  link& L = make_link();
+  if (!L.init()) return false;
+
+  L.reply.status_code = http_status::OK;
+  L.reply.body        = mk_buf("ok");
+  L.reply.set_header("x-pad", std::string(96u * 1024u, 'a'));
+
+  if (L.client.submit_request(make_req(http_method::HTTP_GET, "/big"), "") <= 0)
+    return false;
+  L.pump();
+  if (L.last_submit_rc != UV_EMSGSIZE) {
+    std::cerr << "  [diag] 服务端的超限响应返回 " << L.last_submit_rc
+              << "（want " << static_cast<int>(UV_EMSGSIZE) << "）" << std::endl;
+    return false;
+  }
+
+  // 退得干净 ⇒ 同一块头部换掉之后，同一条流上重试必须成功。
+  L.reply.headers.clear();
+  const int rc = L.server.submit_response(L.last_stream, L.reply);
+  if (rc != 0) {
+    std::cerr << "  [diag] 换一份正常头部重试被拒: " << rc << std::endl;
+    return false;
+  }
+  L.pump();
+  if (L.resp_count != 1 || L.resp_status != 200 || L.resp_body != "ok") {
+    std::cerr << "  [diag] resp=" << L.resp_count << " status=" << L.resp_status
+              << " body=" << L.resp_body << std::endl;
+    return false;
+  }
+  return L.fatal_count == 0 && L.rst_count == 0;
+}
+
 }  // namespace
 
 int main() {
@@ -613,6 +842,10 @@ int main() {
     {"control_flood_is_capped", test_control_flood_is_capped},
     {"fatal_error_notifies_once", test_fatal_error_notifies_once},
     {"normal_control_traffic_passes", test_normal_control_traffic_passes},
+    {"header_budget_rejects_oversize", test_header_budget_rejects_oversize},
+    {"header_budget_normal_passes", test_header_budget_normal_passes},
+    {"oversize_submit_is_refused", test_oversize_submit_is_refused},
+    {"oversize_response_is_refused", test_oversize_response_is_refused},
   };
   for (const auto& t : tests) {
     std::cout << "[h2_session] " << t.name << "\n";

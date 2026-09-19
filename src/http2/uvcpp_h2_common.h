@@ -32,6 +32,19 @@ const size_t H2_DEFAULT_MAX_BODY_BYTES = 64u * 1024u * 1024u;
 /// 初始流控窗口（每流）。
 const uint32_t H2_DEFAULT_INITIAL_WINDOW_SIZE = 65535u;
 
+/**
+ * @brief 单个**待发**头部块的上限（未压缩估算值）。
+ *
+ * 与 `SETTINGS_MAX_HEADER_LIST_SIZE` 那条收方向预算同值但**不是同一件事**：
+ * 这条是 nghttp2 自己的发送上限（`max_send_header_block_length`），超了它
+ * nghttp2 会把整帧**静默丢掉**（见 `uvcpp_h2_session.cpp` 里
+ * `header_block_fits()` 的注释）。所以本层在 `submit_*` 里按同一个数先拦一道，
+ * 把"永远等不到"换成一个同步的 `UV_EMSGSIZE`。
+ *
+ * 显式写在 `init()` 里设进 nghttp2，而不是靠它的内部默认值恰好相等。
+ */
+const size_t H2_MAX_SEND_HEADER_BLOCK = 64u * 1024u;
+
 // =========================================================================
 // 错误码
 // =========================================================================

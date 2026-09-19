@@ -212,7 +212,9 @@ class UVCPP_API uvcpp_h2_session {
    *                  `content-length` 语义上等于 GET 的长度，那是调用方的责任。
    *
    * @return 0 成功；`UV_EINVAL` 表示响应里有不能进 h2 的字段（连接专属头、
-   *         名字/值非法）；其余为 nghttp2 错误码。
+   *         名字/值非法）；`UV_EMSGSIZE` 表示头部块超过
+   *         `H2_MAX_SEND_HEADER_BLOCK` —— **这两个失败都保证流状态没被改过**，
+   *         调用方换一份头部重试是安全的；其余为 nghttp2 错误码。
    *
    * 转换**完全不经过 `uvcpp_http_response::to_string()`** —— 那是纯 HTTP/1.1
    * 的序列化器（有状态行、有 reason phrase、会吐 `Transfer-Encoding`）。
@@ -235,6 +237,9 @@ class UVCPP_API uvcpp_h2_session {
    *     "直到 END_STREAM 为止"本身就是边界；
    *   - 不发 DATA 帧、不置 END_STREAM；
    *   - 不做 204/304 的 body 抑制检查 —— 那些状态码本来就不该走流式这条路。
+   *
+   * @return 0 成功；`UV_EINVAL` 字段非法、`UV_EMSGSIZE` 头部块超上限（同样保证
+   *         流状态没被改过，见 `submit_response`）；其余为 nghttp2 错误码。
    */
   int submit_headers(int32_t stream_id, const uvcpp_http_response& resp);
 
@@ -273,6 +278,10 @@ class UVCPP_API uvcpp_h2_session {
    * @brief 提交一个请求。返回新建的 stream id（负值是错误码）。
    *
    * @param body 请求体，由本层持有到发完。空则发 HEADERS + END_STREAM。
+   *
+   * @return 新流的 id；`UV_EINVAL` 表示有不能进 h2 的字段；`UV_EMSGSIZE` 表示
+   *         头部块超过 `H2_MAX_SEND_HEADER_BLOCK`。**后两者都是同步的、且什么
+   *         都没发生** —— 没有流被建、没有字节被排队、没有回调会被叫。
    */
   int32_t submit_request(const uvcpp_http_request& req, std::string body);
 
