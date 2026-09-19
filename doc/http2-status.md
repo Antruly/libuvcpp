@@ -23,10 +23,10 @@
 
 | API | 行 | 干什么 |
 |---|---|---|
-| `submit_request` | :286 | 客户端提请求；body 由本层持有到发完 |
+| `submit_request` | :288 | 客户端提请求；body 由本层持有到发完 |
 | `submit_response` / `submit_status` | :222 / :229 | 服务端一次发完整响应 / 只发状态码的极简响应 |
 | `submit_headers` + `submit_data` + `take_completed` | :244 / :257 / :271 | 流式响应。拆成"提交"与"取完成回调"两步，是为了让 `done` **绝不在调用方栈上同步跑** |
-| `submit_rst` / `submit_goaway` | :292 / :294 | 流级 / 连接级收尾 |
+| `submit_rst` / `submit_goaway` | :294 / :296 | 流级 / 连接级收尾 |
 
 ### 1.2 边界（这些是"本层自己做的"，不是 nghttp2 给的）
 
@@ -39,7 +39,11 @@
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:859`）。
+  （`src/http2/uvcpp_h2_session.cpp:875`）。
+- **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
+  错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
+  同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
+  **在飞的流一条都不动** —— GOAWAY 关的是"新流"，不是"连接"。
 - **控制帧令牌桶** `H2_CONTROL_BURST = 64` / `H2_CONTROL_REFILL_PER_SEC = 32`
   （`uvcpp_h2_session.cpp:44-45`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
   业务数据，所以给它们单独一个桶；泼出去的那次以 GOAWAY(0x0b) 收尾，而不是
@@ -47,7 +51,7 @@
 - **协议白名单**：伪头按**方向**白名单（服务端收到 `:status` 即拒）、`:scheme`
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
-  收尾的 trailer 识别成"流的结束信号"（`uvcpp_h2_session.cpp:453`）。
+  收尾的 trailer 识别成"流的结束信号"（`uvcpp_h2_session.cpp:471`）。
 
 ### 1.3 三个接入面
 
@@ -75,7 +79,7 @@
 
 | 文件 | 测什么 |
 |---|---|
-| `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、GOAWAY、洪泛、头部预算的两个方向…） |
+| `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
 | `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
 | `tests/functional/web_ssl_app_h2_func.cpp` | 框架自动协商（h2 / 退回 h1） |
@@ -93,9 +97,9 @@
 - **流状态机只用了一半。** `h2_stream_state` 有五格
   （`uvcpp_h2_common.h:127-133`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**。
-- **`on_fatal` 的文档比实现多一类触发者。** `uvcpp_h2_session.h:146` 说它有三类
+- **`on_fatal` 的文档比实现多一类触发者。** `uvcpp_h2_session.h:151` 说它有三类
   触发者，其中"`want_read`/`want_write` 双双为假"那一类**永远不会发生**：
-  这两个函数（`uvcpp_h2_session.h:297,299`）零调用方。
+  这两个函数（`uvcpp_h2_session.h:299,301`）零调用方。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
@@ -122,7 +126,9 @@
 
 ## 4. 已知缺口
 
-### 4.1 本轮已修（都有用例钉着，且都做过变异 A/B）
+### 4.1 已修（都有用例钉着，且都做过变异 A/B）
+
+批 2（发方向上限与流登记）：
 
 | 缺陷 | 症状 | 修法 |
 |---|---|---|
@@ -130,17 +136,34 @@
 | 空 body 的 `submit_request` **不登记流** | 对端一个 `RST_STREAM` 打过来时 `on_stream_close` 在 `streams.find()` 那步静默返回，`cbs.on_close` 一声不吭 —— 而 `uvcpp_http_client` 全靠它给挂起的请求结算（`on_h2_stream_close`）。**空 body 恰恰是 GET 的常态** | 两条路都登记 |
 | `submit_response` / `submit_headers` **先置位再失败** | 置了 `SENT`/`HEADERS_SENT` 之后才因头部超限退掉，于是流停在"说过要发、其实一个字节没发"：重试被 `UV_EALREADY` 挡，对端永远等一条不会来的响应 | 校验挪到置位之前，失败保证**流状态没被改过** |
 
+批 3（收到的 GOAWAY）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| `submit_goaway` 的 `last_stream_id` **写死 0** | 填 0 的含义是"我一条都没处理"，对端据此把**所有**在飞的流当成可重试的关掉（`REFUSED_STREAM`）—— 而这些请求在我们这边的副作用可能已经跑完了，对端一重试就是重复副作用 | 改填 `nghttp2_session_get_last_proc_stream_id()`（nghttp2 的文档原话：这个返回值可以直接当 `submit_goaway()` 的 `last_stream_id`） |
+| 收到 GOAWAY 后**照样发新请求** | 对端已经说"不再处理新流"，我们仍然照发，还发得出去 | `on_frame_recv` 记下三个字段；`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，同步返回 `UV_ENOTCONN`（"同步拒绝、什么都没发生"，与 `UV_EINVAL`/`UV_EMSGSIZE` 同一条契约） |
+| 对端发过 GOAWAY 这件事**本端不可查询** | 错误码是 0 正是**正常**的优雅退出，跟"什么都没收到"分不开；`uvcpp_http_client` 会继续接受 `send()` | 新增 `peer_goaway_received()` / `peer_goaway_error_code()` / `peer_goaway_last_stream_id()` |
+
 ### 4.2 还没修的（本次盘查发现，**只记录**）
 
-- **收到的 GOAWAY 不处理。** `on_frame_recv`（`uvcpp_h2_session.cpp:420`）按流处理
-  的只有 HEADERS 与 DATA，控制帧只被计数，**没有 GOAWAY 分支**。于是对端说
-  "这个连接上不会再有新流了"我们听不见：在飞的流照跑，新请求还会继续往上发，
-  只能等对端逐条 RST。
-- **对端的并发上限没接上。** `peer_max_concurrent_streams()`
-  （`uvcpp_h2_session.cpp:1168`）在 `src/` 里**没有任何生产调用方**，只有
-  `tests/functional/h2_session_func.cpp:407` 读它。也就是说本层可能提交超过对端
-  `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流，对端只能回 RST(REFUSED_STREAM)。
 - **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
+
+### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
+
+- **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
+  此处更正。** `peer_max_concurrent_streams()`（`uvcpp_h2_session.cpp:1201`）确实
+  零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
+  留在 `ob_syn`（`nghttp2_session.c:2315,2346` 上的
+  `session_is_outgoing_concurrent_streams_max()` 闸门），流一关
+  `num_outgoing_streams` 下降，下一次 `flush()` 就把它放出来 ——
+  而 `uvcpp_h2_connection::on_read` 每收下一批字节就 `flush()`。
+  所以这里缺的是"多一层保险"，不是协议违规。
+- **收到 GOAWAY 时在飞的流不会挂住。** nghttp2 的 `session_close_stream_on_goaway()`
+  把 `last_stream_id` 以外、非 idle 非 closed 的**本端**流逐条以
+  `REFUSED_STREAM(7)` 关掉（`nghttp2_session.c:2392-2446`），每条都走到本层的
+  `on_stream_close` → `cbs.on_close`，调用方拿到的是"可以重试"而不是干等。
+  **这件事依赖批 2 那条"空 body 也登记流"的修复** —— 修之前，一条被 GOAWAY
+  波及的 GET 在业务层是一声不吭的。
 
 ---
 
