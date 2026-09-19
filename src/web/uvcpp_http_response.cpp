@@ -22,17 +22,24 @@ uvcpp_http_response::uvcpp_http_response() {}
 
 uvcpp_http_response::~uvcpp_http_response() {}
 
+// 两个成员函数是手写的（`UVCPP_DEFINE_COPY_FUNC` 只声明），逐字段列一遍 ——
+// **加字段时漏掉一处没有任何编译期提示**，`stream_id` 就这么漏过一次。
+//
 // `deferred` 是响应的一部分，不是可有可无的运行时标记：漏掉它会让一份
 // 拷贝看起来「没设过 deferred」，而它承载的语义是「框架不要立刻发我」。
-// 当前框架的发送路径不拷贝响应（`raw()` 返回引用），所以这条不是本轮
-// 任何用例的判据 —— 它是给「按值使用」的调用方对齐的，预防性改动。
+// `stream_id` / `retryable` 同理，而且更隐蔽：它们是 h2 上仅有的两个**身份**
+// 字段 —— 在回调里存一份副本再据此重试是很自然的写法，副本里丢了 `retryable`
+// 就会把"这条请求没被处理过"读成"处理过了"，丢了 `stream_id` 就分不清
+// 回应的是哪条流。h1 上这两个字段恒为 0 / false，所以在 h1 用例里看不出来。
 uvcpp_http_response::uvcpp_http_response(const uvcpp_http_response& other)
     : version(other.version),
       status_code(other.status_code),
       status_message(other.status_message),
       headers(other.headers),
       body(other.body),
-      deferred(other.deferred) {}
+      deferred(other.deferred),
+      stream_id(other.stream_id),
+      retryable(other.retryable) {}
 
 uvcpp_http_response& uvcpp_http_response::operator=(
     const uvcpp_http_response& other) {
@@ -43,6 +50,8 @@ uvcpp_http_response& uvcpp_http_response::operator=(
     headers        = other.headers;
     body.clone(other.body);
     deferred       = other.deferred;
+    stream_id      = other.stream_id;
+    retryable      = other.retryable;
   }
   return *this;
 }

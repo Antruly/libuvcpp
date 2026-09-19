@@ -19,6 +19,17 @@
 #include "http2/uvcpp_h2_nghttp2.h"
 
 namespace uvcpp {
+
+// `uvcpp_h2_common.h` 里那几个具名错误码的保险丝：值必须与 nghttp2 自己的枚举
+// 逐一对齐。漂移在这里变成编译错误，而不是"线上悄悄换了语义"。
+// 这个 TU 是全仓唯一 include 了 nghttp2 的地方，所以断言只能放这儿。
+static_assert(H2_ERR_NO_ERROR == NGHTTP2_NO_ERROR, "h2 error code drift");
+static_assert(H2_ERR_REFUSED_STREAM == NGHTTP2_REFUSED_STREAM,
+              "h2 error code drift");
+static_assert(H2_ERR_CANCEL == NGHTTP2_CANCEL, "h2 error code drift");
+static_assert(H2_ERR_ENHANCE_YOUR_CALM == NGHTTP2_ENHANCE_YOUR_CALM,
+              "h2 error code drift");
+
 namespace {
 
 /// 单调毫秒。**不用 `uv_now`**：本层刻意不依赖 libuv（`uvcpp_h2_session` 也能
@@ -120,6 +131,15 @@ struct uvcpp_h2_session::impl {
   /// 通知的收益为零，代价是"调用方还没察觉连接已关"之前塞进来的每一批字节都换
   /// 一次关连接指令。
   bool fatal_reported = false;
+
+  /// 正在 nghttp2 的调用栈里（`mem_recv` 或 `mem_send`），也就是说随时可能有
+  /// 回调跑在用户代码上。
+  ///
+  /// 在**这个窗口里重入 `mem_send` 是 nghttp2 没保证过的用法**：实测完整页堆下
+  /// 会在"回调里把 RST_STREAM 冲出去"那条路上读到一块 nghttp2 自己刚释放的
+  /// `nghttp2_stream`（裸跑绿、页堆崩）。发方向唯一的收窄点是 `drain()`，所以
+  /// 调用方（`uvcpp_h2_connection::flush()`）拿它当推迟的依据。
+  bool in_nghttp2 = false;
 
   /// 收口 `submit_request2` 的返回值。
   ///
@@ -704,8 +724,12 @@ int uvcpp_h2_session::recv(const char* data, size_t len) {
   // 顺带这也是"只通知一次"能成立的前提 —— 不在这里拦住的话，每次 recv 都会
   // 在 nghttp2 里重新走一遍错误路径。
   if (impl_->fatal_reported) return impl_->last_error != 0 ? impl_->last_error : -1;
+  impl_->in_nghttp2 = true;
   const nghttp2_ssize rv = nghttp2_session_mem_recv2(
       impl_->session, reinterpret_cast<const uint8_t*>(data), len);
+  // 在派发 `on_fatal` **之前**就收掉：那两条路是特意放在 `mem_recv` 之外的，
+  // 接收方会走 `shutdown()` → `flush()` → `drain()`，那一步必须能真的发出去。
+  impl_->in_nghttp2 = false;
   if (rv < 0) {
     impl_->last_error = static_cast<int>(rv);
     // 这里之后**不许再碰 impl_** —— on_fatal 的接收方可以关掉连接，
@@ -743,8 +767,21 @@ int uvcpp_h2_session::recv(const char* data, size_t len) {
 
 uint32_t uvcpp_h2_session::goaway_code() const { return impl_->goaway_code; }
 
+bool uvcpp_h2_session::in_nghttp2() const { return impl_->in_nghttp2; }
+
 int uvcpp_h2_session::drain(std::string& out) {
   if (!impl_->session) return 0;
+
+  // 冲出去的帧会**同步**回调回来（`session_after_frame_sent1` 撞上 RST_STREAM
+  // 就地关流），那些回调一路跑到用户代码上 —— 用户代码接着提交并再冲一次是
+  // 完全正常的写法。那一下要挡住，理由见 `impl::in_nghttp2`。用 RAII 而不是
+  // 手动置位：`out.append` 抛 `bad_alloc` 时也不能把标记留在里面。
+  struct in_nghttp2_scope {
+    bool* flag;
+    explicit in_nghttp2_scope(bool* f) : flag(f) { *flag = true; }
+    ~in_nghttp2_scope() { *flag = false; }
+  } scope(&impl_->in_nghttp2);
+
   for (;;) {
     const uint8_t* data = nullptr;
     const nghttp2_ssize n = nghttp2_session_mem_send2(impl_->session, &data);

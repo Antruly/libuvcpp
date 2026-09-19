@@ -95,6 +95,10 @@ class UVCPP_API uvcpp_h2_connection {
                 bool end_stream, std::function<void(int)> done);
 
   /// 把会话里待发的字节全部写出去。可以重复调用（没东西发就是空操作）。
+  ///
+  /// **在会话回调里调用是安全的**，只是会被推迟到这一轮 `recv()` 返回之后
+  /// （理由见 `uvcpp_h2_session::in_nghttp2()`）—— 排队的字节一个都不会丢，
+  /// 不需要调用方自己再补一次。
   int flush();
 
   /**

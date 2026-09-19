@@ -1217,8 +1217,10 @@ void uvcpp_http_client::on_h2_stream_close(uvcpp_h2_session& s,
   uvcpp_http_response resp;
   resp.version   = uvcpp_http_version::HVER_20;
   resp.stream_id = stream_id;
-  // 已经解析出来的那部分照给：调用方至少能看见状态码和响应头 —— 比扔一个
-  // 默认构造的 `OK` 过去诚实。`find_stream` 在 `on_close` 里还没被 erase。
+  // 已经解析出来的那部分照给。但**"解析出来过"是少数情形**：流在响应头到达之前
+  // 就被 RST 时（`REFUSED_STREAM` 正是如此），`status_code` 是 `uvcpp_http_response`
+  // 默认构造出来的 `200`，不是对端说的任何东西 —— `err != 0` 才是主判据。
+  // `find_stream` 在 `on_close` 里还没被 erase。
   if (uvcpp_h2_stream* hs = s.find_stream(stream_id)) {
     resp.status_code    = hs->response.status_code;
     resp.status_message = http_status_reason(resp.status_code);
@@ -1229,9 +1231,18 @@ void uvcpp_http_client::on_h2_stream_close(uvcpp_h2_session& s,
       std::move(it->second.cb);
   h2_streams_.erase(it);
 
-  // `NO_ERROR` 的关闭不是对端的错（多半是我们自己在收摊），报 CANCELED；
-  // 带错误码的是对端明确拒了这条流，那是协议层面的失败。
-  const int err = (error_code == 0) ? UV_ECANCELED : UV_EPROTO;
+  // 三种"不是协议失败"的关闭（RFC 9113 §8.7）：`NO_ERROR` 多半是我们自己在
+  // 收摊，`REFUSED_STREAM` 是"这条请求没被处理过"，`CANCEL` 是"对端不要这条流
+  // 了"。三者都报 CANCELED，其余错误码才是协议失败。
+  //
+  // 但三者对调用方的含义**并不一样**，所以还要单独把"能不能重发"带出去：
+  // 只有 `REFUSED_STREAM` 是安全的 —— `CANCEL` 不保证对端没处理过，重发就是
+  // 重复副作用；`NO_ERROR` 则什么都没说。
+  const bool declined = error_code == H2_ERR_NO_ERROR ||
+                        error_code == H2_ERR_REFUSED_STREAM ||
+                        error_code == H2_ERR_CANCEL;
+  const int err    = declined ? UV_ECANCELED : UV_EPROTO;
+  resp.retryable   = (error_code == H2_ERR_REFUSED_STREAM);
   last_error_code_ = err;
   if (cb) cb(resp, err);
 }

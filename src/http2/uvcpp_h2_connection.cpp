@@ -127,6 +127,11 @@ void uvcpp_h2_connection::on_read(uvcpp_tcp_client&, const net_read_result& r) {
 
 int uvcpp_h2_connection::flush() {
   if (closed_ || writing_) return 0;
+  // 回调栈里不冲：`session_` 正跑在 nghttp2 的 `mem_recv` / `mem_send` 上，
+  // 这时候重入 `mem_send` 会读到 nghttp2 自己刚释放的 `nghttp2_stream`（完整
+  // 页堆下必崩）。推迟是**无损**的 —— `on_read()` 在 `recv()` 返回之后本来就要
+  // 冲一次，排队的东西一个都不会丢；`on_write_done()` 那条路同理。
+  if (session_->in_nghttp2()) return 0;
 
   const int rv = session_->drain(out_);
   if (rv != 0) {

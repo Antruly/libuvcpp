@@ -52,13 +52,19 @@ const size_t H2_MAX_SEND_HEADER_BLOCK = 64u * 1024u;
 /**
  * @brief h2 错误码（RFC 9113 §7）。
  *
- * 只命名本层公开面上真的会出现的两个。其余的一律以 nghttp2 的原始负值透传
+ * 只命名**有具名消费者**的几个。其余的一律以 nghttp2 的原始负值透传
  * （`last_error()` / `on_fatal` 的 `nghttp2_error`），**不在这里造一张平行表** ——
  * 那种表会和上游一起漂移，而且漂移是静默的。
  *
- * 这两个之所以要命名，是因为 `goaway_code()` 把它们交给**调用方**去判断和转发。
+ * 上面那条规矩的保险丝在 `uvcpp_h2_session.cpp`：这四个值各有一条
+ * `static_assert` 对着 nghttp2 自己的枚举。加了常量却不加断言，就等于把
+ * "平行表"从明处搬到了暗处。
  */
 const uint32_t H2_ERR_NO_ERROR          = 0x00;
+/// 对端说"这条流在被处理之前就关了" ⇒ 那条请求**重发是安全的**（§8.7）。
+const uint32_t H2_ERR_REFUSED_STREAM    = 0x07;
+/// 对端不要这条流了。**不保证**它没处理过 —— 所以不算可重试（§8.7）。
+const uint32_t H2_ERR_CANCEL            = 0x08;
 /// 被控制帧令牌桶拦下来时用它收尾：对端看得到"为什么"，而不是一个 NO_ERROR。
 const uint32_t H2_ERR_ENHANCE_YOUR_CALM = 0x0b;
 

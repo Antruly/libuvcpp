@@ -196,6 +196,18 @@ class UVCPP_API uvcpp_h2_session {
    */
   int drain(std::string& out);
 
+  /**
+   * @brief 当前是否正跑在 nghttp2 的调用栈里（`recv()` 的 `mem_recv` 或
+   * `drain()` 的 `mem_send`），也就是随时可能有回调在用户代码上。
+   *
+   * 为真时调用方**不许**再调 `drain()` —— 那等于在 nghttp2 自己的栈里重入
+   * `mem_send`，官方没保证过这种用法，实测会在"回调里把 RST_STREAM 冲出去"
+   * 那条路上读一块 nghttp2 刚释放的 `nghttp2_stream`。推迟到这两句返回之后再
+   * 冲即可：`recv()` 的调用方 `uvcpp_h2_connection::on_read()` 本来就在它返回
+   * 之后冲一次。
+   */
+  bool in_nghttp2() const;
+
   // -----------------------------------------------------------------
   // 服务端侧
   // -----------------------------------------------------------------

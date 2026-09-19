@@ -30,7 +30,7 @@
 
 ### 1.2 边界（这些是"本层自己做的"，不是 nghttp2 给的）
 
-- **收方向头部列表预算** `h2_header_budget`（`src/http2/uvcpp_h2_common.h:82`）。
+- **收方向头部列表预算** `h2_header_budget`（`src/http2/uvcpp_h2_common.h:88`）。
   已实测：nghttp2 会把我们宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 存进
   `local_settings`，但**接收路径从不累加、也没跟它比过** —— 所以本层自己按
   `namelen + valuelen + 32` 累加，越界立刻 RST(0x0b)。**这是唯一防线，不是第二道。**
@@ -39,19 +39,36 @@
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:875`）。
+  （`src/http2/uvcpp_h2_session.cpp:886`）。
 - **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
   错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
   **在飞的流一条都不动** —— GOAWAY 关的是"新流"，不是"连接"。
 - **控制帧令牌桶** `H2_CONTROL_BURST = 64` / `H2_CONTROL_REFILL_PER_SEC = 32`
-  （`uvcpp_h2_session.cpp:44-45`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
+  （`uvcpp_h2_session.cpp:55-56`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
   业务数据，所以给它们单独一个桶；泼出去的那次以 GOAWAY(0x0b) 收尾，而不是
   NO_ERROR —— 否则对端只看到一次"正常关闭"，不知道为什么。
 - **协议白名单**：伪头按**方向**白名单（服务端收到 `:status` 即拒）、`:scheme`
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
-  收尾的 trailer 识别成"流的结束信号"（`uvcpp_h2_session.cpp:471`）。
+  收尾的 trailer 识别成"流的结束信号"（`uvcpp_h2_session.cpp:482`）。
+- **流关闭的错误码分三档**（`uvcpp_http_client.cpp:1236`，RFC 9113 §8.7）：
+  `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
+  `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
+  `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
+  `uvcpp_http_response::retryable` 置真：`CANCEL` 不保证对端没处理过（重发就是
+  重复副作用），连接断开是"结果未知"，两者都为假。判据只能是"真 ⇒ 可以重试"，
+  反过来推**不成立**。`H2_ERR_*` 那几个常量在 `uvcpp_h2_session.cpp` 里各有一条
+  `static_assert` 对着 nghttp2 的枚举 —— 那是 `uvcpp_h2_common.h` 里"不在这里造
+  一张平行表"那条规矩的保险丝，加了常量却不加断言就等于把它从明处搬到暗处。
+- **回调栈里不冲字节。** `uvcpp_h2_session::in_nghttp2()` 为真（正跑在 `mem_recv`
+  或 `mem_send` 上）时，`uvcpp_h2_connection::flush()` **直接返回**，把这一冲推迟
+  到 `recv()` 返回之后由 `on_read()` 做掉。理由是实测的：在回调里 `submit_rst` +
+  `flush()` 会让 nghttp2 在 `session_after_frame_sent1` 里就地关流（释放
+  `nghttp2_stream`），而它自己的 `mem_recv` 循环还在用那个指针 —— 完整页堆下必崩
+  `0xC0000005`，裸跑却**全绿**（页堆门禁就是为这一类存在的）。推迟是无损的：
+  `on_read()` 本来就在 `recv()` 之后冲一次，`on_write_done()` 那条路同理；`drain()`
+  自己也会置这个标记，所以"发送期的回调里再冲一次"同样被挡住。
 
 ### 1.3 三个接入面
 
@@ -80,7 +97,7 @@
 | 文件 | 测什么 |
 |---|---|
 | `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
-| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**（ALPN=h2 写成显式前置） |
+| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**；场景 7 里对端的 handler **故意在 `recv()` 的栈上 `flush()`**（与 `uvcpp_http_server` 的处理函数同一形状），是"回调栈里不冲字节"那条不变式的活体判据；场景 7 用**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的 RST —— 它的 `reject()` 把码写死了）按剧本发 `REFUSED_STREAM` / `CANCEL` / `NO_ERROR` / `PROTOCOL_ERROR`，七条流串行发、每条都断言"恰好回调一次 + 流号是递增奇数"，中间夹的 `/hello` 是"连接没被流级 RST 带下水"的判据；场景 8 钉响应的拷贝构造 / 赋值（ALPN=h2 处处写成显式前置） |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
 | `tests/functional/web_http_client_selfdestroy_func.cpp` | h1：在响应回调 / connect 回调 / keep-alive 第二次请求的回调里 `delete` 客户端（三条路都不许崩） |
 | `tests/functional/web_ssl_app_h2_func.cpp` | 框架自动协商（h2 / 退回 h1）；外加**停机道别**与**拆连接时在途流的收尾**两条路 |
@@ -101,7 +118,7 @@
   本层既不暴露背压也不做自己的窗口管理。`H2_DEFAULT_INITIAL_WINDOW_SIZE`
   （`uvcpp_h2_common.h:33`）只有定义，别处不读它。
 - **流状态机只用了一半。** `h2_stream_state` 有五格
-  （`uvcpp_h2_common.h:127-133`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
+  （`uvcpp_h2_common.h:133-139`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**。
 - **`on_fatal` 的文档比实现多一类触发者。** `uvcpp_h2_session.h:151` 说它有三类
   触发者，其中"`want_read`/`want_write` 双双为假"那一类**永远不会发生**：
@@ -201,21 +218,42 @@ m3 析构不作废令牌、m4 拆掉停读与关句柄、m5 连令牌作废一�
 在路上之类），今天**没有用例走到那里**。`tests/tools/run_pageheap_gate.py` 是这一批
 配套的判据，不是可选项。
 
+批 6（h2 流关闭的错误语义）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| **`REFUSED_STREAM` / `CANCEL` 报成协议失败** | 判据是"`error_code == 0` 才当 `UV_ECANCELED`，其余一律 `UV_EPROTO`" ⇒ 对端的"这条请求没被处理过"（§8.7 明说可以安全重发；GOAWAY 牵连时 nghttp2 就是这么关的，见 4.3）和"我不要这条流了"这两种**都不是协议失败**的关闭，交付给调用方的是 `UV_EPROTO` | `on_h2_stream_close` 按 §8.7 分三档：三码 `UV_ECANCELED`、其余 `UV_EPROTO` |
+| **"可以重试"这个信号公开面上不存在** | 就算把三档分开，"没被处理过"和"这条流被取消了"在调用方看来仍然一模一样 —— 而 `CANCEL` 是**可能已经处理过**的，盲目重发就是重复副作用 | 新增 `uvcpp_http_response::retryable`。**挂在响应上而不是客户端上**：h2 一条连接同时有好几条流在飞，挂在客户端上分不清是哪一条。只有 `REFUSED_STREAM` 为真 |
+| **响应的拷贝构造 / 赋值漏字段** | 两个函数是手写的（`UVCPP_DEFINE_COPY_FUNC` 只声明），逐字段列一遍 —— `stream_id` 从加进来那天起就漏着，`retryable` 会跟着一起漏。在回调里存一份副本再据此重试是很自然的写法，副本里"这条没被处理过"就变成了"处理过了" | 两处都补齐；`scenario 8` 钉住 |
+
+批 6 的变异（只重编库，`--target uvcpp`）：**m1** 三档退回成"只认 `NO_ERROR`" ⇒
+`/refuse` 与 `/cancel` 的 `err` 两条断言同时红；**m2** 分类留着但不置 `retryable` ⇒
+只有 `/refuse` 的 `retryable` 红；**m3** 拷贝构造漏掉两个身份字段 ⇒ `scenario 8`
+的两条红。三次还原之后全绿 —— 用例不是空转。
+
 ### 4.2 还没修的（**只记录**）
 
 - **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
-- **`REFUSED_STREAM(7)` 没有映射成 `UV_ECANCELED`。** 收到 GOAWAY 时 nghttp2 会把
-  被波及的本端流逐条以 `REFUSED_STREAM` 关掉（4.3 有出处），而 `on_h2_stream_close`
-  的判据是"`error_code == 0` 才当 `UV_ECANCELED`，其余一律 `UV_EPROTO`"
-  （`uvcpp_http_client.cpp:1234`）⇒ **"这条请求没被处理过、可以安全重试"这个
-  信号没有被表达出来**，调用方看到的是 `UV_EPROTO`（协议失败）。要做对得先定下这个
-  信号从哪儿带出去（`uvcpp_http_response` 上新增字段，还是另立一个取值函数），
-  这一批不动。
+
+  **为什么停在这儿**，两条理由各自独立。一是这个开关是**全局**的
+  （`NO_AUTO_WINDOW_UPDATE`）：打开之后每一条消费路径都得自己 `consume_window`，
+  漏掉任何一条都会让上传在 64 KiB 处**永久停住** —— 半套比现状更危险。二是内存
+  今天已经有界：两个方向的 DATA 都走同一个 `on_data_chunk`，超过
+  `H2_DEFAULT_MAX_BODY_BYTES`（64 MiB）就 RST（`uvcpp_h2_session.cpp:514`）。
+  要给单条流减速，框架层现成的连接级 `read_pause()` 是眼下更合适的粒度。
+
+- **错误路径上交付的 `status_code` 可能是我们自己编的。** `on_h2_stream_close`
+  的写法是"已经解析出来的那部分照给"（`uvcpp_http_client.cpp:1222`），而流在响应头
+  到达**之前**就被 RST 掉时（批 6 的 `REFUSED_STREAM` 恰恰如此），"解析出来的那部分"
+  并不存在 —— `hs->response` 还是默认构造的，于是调用方会拿到
+  `{status: 200, retryable: true}` 再配一个非零的 `err`。那个 200 不是对端说的：
+  `err != 0` 是主判据，这条路上 `status_code` 只能当参考。要治就得给"没收到过
+  响应头"一个表示（`uvcpp_h2_stream` 今天没有这个字段），那是另一件事。
 
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`uvcpp_h2_session.cpp:1201`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`uvcpp_h2_session.cpp:1226`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关
@@ -259,3 +297,14 @@ ctest --test-dir build-h2 -C Release --timeout 60
 3. **页堆门禁是这一批的必要判据**，不是"有空再跑"：
    `python -u tests/tools/run_pageheap_gate.py --tree build-h2 --exe test_web_http_client_selfdestroy_func`
    —— 令牌守卫那一层的效力**只有它看得见**（删掉守卫后裸跑照样绿，页堆下必然违例）。
+
+批 6 再补一条，还是环境冒充代码：
+
+4. **`--parallel` 高了会以两种面目失败，两种都与代码无关。** 并行度高时是 MSBuild
+   自己的托管节点 `System.OutOfMemoryException`（`error MSB4018` / `MSB4166`），
+   日志里一个 `error C` 都没有；降到 `--parallel 1` 之后换 `cl.exe` 自己报
+   `fatal error C1002`（第 2 遍编译器的堆空间不足）。两者都会**留下一个没生成的
+   exe 而其余目标照常绿** —— "一部分红一部分绿"正是它的指纹。判据始终是
+   `grep -c "error C[0-9]\|error LNK\|error MSB"`（注意 `MSB40` 这种收窄的写法会
+   漏掉 `MSB8071`），**不能只看退出码**；把失败的那个目标单独重跑一次通常就过了
+   —— 内存压力是瞬时的，不是那份代码编不出来。

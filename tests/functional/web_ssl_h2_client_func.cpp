@@ -50,6 +50,8 @@
 #include <web/uvcpp_http_response.h>
 #include <web/uvcpp_http_server.h>
 
+#include <http2/uvcpp_h2_connection.h>
+
 #include <openssl/ssl.h>
 
 #include "wait_util.h"
@@ -72,6 +74,9 @@ const std::vector<std::string> kServerAlpn{"h2", "http/1.1"};
 const char kHelloBody[]    = "hello-over-h2";
 const char kNotFoundBody[] = "404 Not Found";
 const char kPostBody[]     = "echo-me-please";
+/// 裸对端（场景 7）的应答体。与 `kHelloBody` 不同，好让"这条响应来自哪个
+/// 服务端"在判据里也看得见。
+const char kRawBody[]      = "raw-peer-ok";
 
 /// 场景 3 的挂起应答体。**长度 ≥ `compress_min_body_`（默认 1024）**，
 /// 与 `web_ssl_h2_server_func` 保持同一份理由：太短的话"该压 / 不该压"两侧
@@ -228,6 +233,7 @@ struct resp_rec {
   int32_t            sid   = 0;   ///< 应答里的 `stream_id`
   int                status = 0;
   int                err    = 0;
+  bool               retryable = false;
   std::string        body;
   uvcpp_http_version version = uvcpp_http_version::HVER_11;
 };
@@ -253,11 +259,12 @@ struct client_obs {
   int send_keyed(const std::string& key, const uvcpp_http_request& req) {
     return client.send(req, [this, key](const uvcpp_http_response& r, int err) {
       resp_rec rec;
-      rec.sid     = r.stream_id;
-      rec.status  = static_cast<int>(r.status_code);
-      rec.err     = err;
-      rec.body    = r.body.to_string();
-      rec.version = r.version;
+      rec.sid       = r.stream_id;
+      rec.status    = static_cast<int>(r.status_code);
+      rec.err       = err;
+      rec.retryable = r.retryable;
+      rec.body      = r.body.to_string();
+      rec.version   = r.version;
       std::lock_guard<std::mutex> lk(mu);
       arrival.push_back(key);
       calls[key] += 1;
@@ -683,6 +690,269 @@ void scenario_selfdestroy(int port, uvcpp_ssl_context* cctx) {
         "selfdestroy_h2: resp.stream_id = " + std::to_string(sid.load()));
 }
 
+// =========================================================================
+// 裸 h2 对端（场景 7）
+// =========================================================================
+//
+// 场景 7 要的是"对端用**指定错误码**关掉一条流"，而 `uvcpp_http_server` 造不出
+// 这个：它的 RST 只从会话层自己的校验里出来（错误码写死在 `reject()` 里），没有
+// 对外入口。所以这里用裸 `uvcpp_tcp_server` + `uvcpp_h2_connection(server_side=
+// true)` 拼一个对端 —— 与 `web_ssl_h2_server_func.cpp` 拼裸客户端是同一个手法，
+// 方向相反。
+
+struct raw_peer_state {
+  std::atomic<int> listen_rc{-1};
+  std::atomic<int> accepted{0};
+  std::atomic<int> alpn_h2{0};
+  std::atomic<int> requests{0};
+  std::atomic<int> rsts_sent{0};
+
+  std::mutex               mu;
+  std::vector<std::string> paths;  ///< 收到的 `:path`，按到达序
+};
+
+/// 剧本：路径 → 用哪个错误码把这条流 RST 掉。`0xFFFF` = 正常应答。
+uint32_t rst_code_for(const std::string& path) {
+  if (path == "/refuse") return 7;   // REFUSED_STREAM
+  if (path == "/cancel") return 8;   // CANCEL
+  if (path == "/noerr")  return 0;   // NO_ERROR
+  if (path == "/proto")  return 1;   // PROTOCOL_ERROR
+  return 0xFFFFu;
+}
+
+void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
+                  raw_peer_state& st, uvcpp_ssl_context* sctx) {
+  uvcpp_tcp_server srv;
+  srv.set_ssl_context(sctx);  // 必须在 listen() 之前
+
+  // 活着的 h2 连接。只在本线程上碰（accept 回调、on_disconnect、收摊）。
+  std::vector<uvcpp_h2_connection*> conns;
+
+  if (srv.bindIpv4("127.0.0.1", 0) != 0) {
+    port_promise.set_value(-1);
+    return;
+  }
+  sockaddr_in name;
+  int namelen = sizeof(name);
+  srv.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name), &namelen);
+  const int bound_port = ntohs(name.sin_port);
+
+  const int lrc = srv.listen([&st, &conns](uvcpp_tcp_client* client) {
+    if (client == nullptr) return;
+    if (client->is_tls() && client->tls_alpn_selected() == "h2") {
+      st.alpn_h2.fetch_add(1);
+    }
+    st.accepted.fetch_add(1);
+
+    uvcpp_h2_connection* conn =
+        new uvcpp_h2_connection(client, /*server_side=*/true);
+    conns.push_back(conn);
+
+    uvcpp_h2_session::callbacks h2c;
+    h2c.on_request = [&st, conn](uvcpp_h2_session& s, uvcpp_h2_stream& str,
+                                 bool) {
+      st.requests.fetch_add(1);
+      {
+        std::lock_guard<std::mutex> lk(st.mu);
+        st.paths.push_back(str.request.url);
+      }
+      const uint32_t code = rst_code_for(str.request.url);
+      if (code == 0xFFFFu) {
+        uvcpp_http_response r = uvcpp_http_response::ok(
+            kRawBody, sizeof(kRawBody) - 1, "text/plain");
+        conn->send_response(str.stream_id, r);
+        return;
+      }
+      if (s.submit_rst(str.stream_id, code) == 0) st.rsts_sent.fetch_add(1);
+      // 在 `recv()` 的栈上冲字节，与 `uvcpp_http_server` 的处理函数同一形状
+      // （`send_response` 内部也是 submit + flush）。这一冲必须被推到
+      // `mem_recv` 之外 —— 见 `uvcpp_h2_connection::flush()` 里那道守卫。
+      conn->flush();
+    };
+    // 这个对端没有连接级剧本：致命错误记一笔就走，断开路径交给客户端那边。
+    h2c.on_fatal = [](uvcpp_h2_session&, int) {};
+
+    uvcpp_h2_connection::callbacks cc;
+    cc.on_disconnect = [&conns, conn](uvcpp_h2_connection&) {
+      // 契约（`uvcpp_h2_connection.h`）：持有者在这个回调里销毁本对象。
+      for (size_t i = 0; i < conns.size(); ++i) {
+        if (conns[i] == conn) {
+          conns.erase(conns.begin() + static_cast<long>(i));
+          break;
+        }
+      }
+      delete conn;
+    };
+
+    if (conn->start(h2c, cc) != 0) {
+      // `start()` 失败时 `on_disconnect` 不会来（会话根本没起来），自己收。
+      for (size_t i = 0; i < conns.size(); ++i) {
+        if (conns[i] == conn) {
+          conns.erase(conns.begin() + static_cast<long>(i));
+          break;
+        }
+      }
+      delete conn;
+    }
+  });
+
+  st.listen_rc.store(lrc);
+  port_promise.set_value(lrc != 0 ? -1 : bound_port);
+  if (lrc != 0) return;
+
+  uvcpp_loop* loop = srv.get_loop();
+  while (!stop.load()) {
+    loop->run(UV_RUN_NOWAIT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  uvcpp_test::pump_for(loop, 200);
+
+  // 收摊：先让服务端关掉手上的连接 —— 每条连接的 `on_disconnect` 会把它那份
+  // h2 层删掉（那是**唯一**保证"删在 client 被释放之前"的时点）。泵完之后如果
+  // 还有剩的（断开回调没走到），客户端已经关完并被框架释放了，这时删 h2 层
+  // 只剩"撤掉那个 nghttp2 会话"，安全。
+  srv.close_all_clients();
+  uvcpp_test::pump_for(loop, 200);
+  for (size_t i = 0; i < conns.size(); ++i) delete conns[i];
+  conns.clear();
+}
+
+struct raw_peer {
+  raw_peer_state    st;
+  std::atomic<bool> stop{false};
+  std::promise<int> port_promise;
+  std::future<int>  port_future;
+  std::thread       thread;
+  int               port = -1;
+
+  explicit raw_peer(uvcpp_ssl_context* sctx)
+      : port_future(port_promise.get_future()) {
+    thread = std::thread(run_raw_peer, std::ref(port_promise), std::ref(stop),
+                         std::ref(st), sctx);
+    port = port_future.get();
+  }
+
+  void shutdown() {
+    stop.store(true);
+    if (thread.joinable()) thread.join();
+  }
+
+  ~raw_peer() { shutdown(); }
+
+  bool ok() const { return port > 0 && st.listen_rc.load() == 0; }
+};
+
+/// `uvcpp_http_response` 的拷贝构造与赋值必须带上两个**身份字段**
+/// （`stream_id` 与 `retryable`）。
+///
+/// 这两条是手写的（`UVCPP_DEFINE_COPY_FUNC` 只声明），逐字段列一遍 —— 加字段
+/// 时漏掉一处不会有任何编译期提示。在回调里存一份副本是很常见的写法，丢了
+/// `retryable` 就等于这一批的意义全没了，所以这里钉住。
+void scenario_response_copy() {
+  std::cout << "[scenario 8] 响应的拷贝构造 / 赋值" << std::endl;
+
+  uvcpp_http_response orig;
+  orig.stream_id = 5;
+  orig.retryable = true;
+  orig.status_code = http_status::NOT_FOUND;
+
+  uvcpp_http_response cpy(orig);
+  check(cpy.stream_id == 5, "copy: 拷贝构造丢了 stream_id");
+  check(cpy.retryable, "copy: 拷贝构造丢了 retryable");
+  check(cpy.status_code == http_status::NOT_FOUND,
+        "copy: 拷贝构造丢了 status_code");
+
+  uvcpp_http_response asg;
+  asg = orig;
+  check(asg.stream_id == 5, "copy: 赋值丢了 stream_id");
+  check(asg.retryable, "copy: 赋值丢了 retryable");
+}
+
+/// 场景 7：对端**按指定错误码**关掉一条流时，本层报什么。
+///
+/// `REFUSED_STREAM` 在 RFC 9113 §8.7 里的定义就是"这条流在被处理之前就被关掉
+/// 了 ⇒ 那条请求**重发是安全的**"；`CANCEL` 是"对端不要这条流了"，**不保证**
+/// 没处理过；其它码是协议层面的失败。三者必须是三个可分辨的结果。
+///
+/// 串行发、每条都等它落地再发下一条：这样"每条流恰好回调一次"和到达序都是
+/// 确定的，不掺并发。中间的 `/hello` 是**连接仍然健康**的判据 —— RST 是流级的，
+/// 一条流被拒不许把连接或后面的流带下水。
+void scenario_peer_rst(int port, uvcpp_ssl_context* cctx, raw_peer_state& st) {
+  std::cout << "[scenario 7] 对端 RST_STREAM 的错误码语义" << std::endl;
+
+  client_obs c;
+  c.client.set_http2_enabled(true);
+  if (c.connect(port, cctx, "rst") != 0) {
+    check(false, "rst: connect 失败");
+    return;
+  }
+  check(c.client.negotiated_alpn() == "h2",
+        "rst[前置]: ALPN = \"" + c.client.negotiated_alpn() + "\"，应为 h2");
+
+  struct step {
+    const char* key;
+    const char* path;
+    int         want_err;
+    bool        want_retryable;
+    int         want_status;  ///< -1 = 不检查（被 RST 掉的流没有状态码）
+  };
+  const step kSteps[] = {
+      {"ok0",    "/hello",  0,            false, 200},
+      {"refuse", "/refuse", UV_ECANCELED, true,  -1},
+      {"ok1",    "/hello",  0,            false, 200},
+      {"cancel", "/cancel", UV_ECANCELED, false, -1},
+      {"noerr",  "/noerr",  UV_ECANCELED, false, -1},
+      {"proto",  "/proto",  UV_EPROTO,    false, -1},
+      {"ok2",    "/hello",  0,            false, 200},
+  };
+
+  int32_t last_sid = 0;
+  for (size_t i = 0; i < sizeof(kSteps) / sizeof(kSteps[0]); ++i) {
+    const step&       s   = kSteps[i];
+    const std::string key = s.key;
+    check(c.send_keyed(key, uvcpp_http_request::make_get(s.path)) == 0,
+          key + ": send 返回非 0");
+    if (!c.wait_key(key)) {
+      check(false, key + ": 回调没在墙钟上限内落地");
+      return;
+    }
+    const resp_rec r = c.at(key);
+    check(r.err == s.want_err,
+          key + ": err = " + std::to_string(r.err) + "，应为 " +
+              std::to_string(s.want_err));
+    check(r.retryable == s.want_retryable,
+          key + ": retryable = " + (r.retryable ? "true" : "false") +
+              "，应为 " + (s.want_retryable ? "true" : "false"));
+    if (s.want_status >= 0) {
+      check(r.status == s.want_status,
+            key + ": status = " + std::to_string(r.status) + "，应为 " +
+                std::to_string(s.want_status));
+    }
+    check(c.call_count(key) == 1,
+          key + ": 回调 " + std::to_string(c.call_count(key)) + " 次，应为 1");
+    check(r.sid > last_sid && (r.sid % 2) == 1,
+          key + ": stream_id = " + std::to_string(r.sid) + "（上一条是 " +
+              std::to_string(last_sid) + "），客户端流号应为递增的奇数");
+    last_sid = r.sid;
+  }
+
+  check(c.client.has_status(HTTP_CLIENT_CONNECTED),
+        "rst: 一串流级 RST 之后连接就没了 —— 流级错误被当成连接级处理了");
+
+  // 对端侧的正面证据：这七条请求到过对端，其中四条是被 RST 掉的。**等到**而不是
+  // 采一下 —— 计数长在对端线程上，与客户端的回调完成之间没有同步关系。
+  check(uvcpp_test::wait_flag([&st] { return st.requests.load() == 7; },
+                              uvcpp_test::kWaitMs),
+        "rst[前置]: 对端只收到 " + std::to_string(st.requests.load()) +
+            " 条请求，应为 7");
+  check(uvcpp_test::wait_flag([&st] { return st.rsts_sent.load() == 4; },
+                              uvcpp_test::kWaitMs),
+        "rst[前置]: 对端只发出 " + std::to_string(st.rsts_sent.load()) +
+            " 个 RST，应为 4");
+  check(st.alpn_h2.load() >= 1,
+        "rst[前置]: 对端侧 ALPN 不是 h2 —— 这条不是 h2 连接，测的是别的路");
+}
+
 }  // namespace
 
 int main() {
@@ -728,6 +998,18 @@ int main() {
 
     // 放最后：它会 `srv.shutdown()`，上面那两条服务端汇总要在收摊前读完。
     scenario_drop_on_close(srv.port, &cctx, srv);
+  }
+
+  scenario_response_copy();
+
+  // 场景 7 用的是另一个对端（裸 h2，能按剧本发 RST），所以单开一段。
+  {
+    raw_peer peer(&sctx);
+    if (!peer.ok()) {
+      std::cerr << "  [FAIL] raw peer failed to bind/listen" << std::endl;
+      return 2;
+    }
+    scenario_peer_rst(peer.port, &cctx, peer.st);
   }
 
   if (g_failures == 0) {
