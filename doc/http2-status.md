@@ -97,7 +97,7 @@
 | 文件 | 测什么 |
 |---|---|
 | `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
-| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**；场景 7 里对端的 handler **故意在 `recv()` 的栈上 `flush()`**（与 `uvcpp_http_server` 的处理函数同一形状），是"回调栈里不冲字节"那条不变式的活体判据；场景 7 用**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的 RST —— 它的 `reject()` 把码写死了）按剧本发 `REFUSED_STREAM` / `CANCEL` / `NO_ERROR` / `PROTOCOL_ERROR`，八条流串行发、每条都断言"恰好回调一次 + 流号是递增奇数"，中间夹的 `/hello` 是"连接没被流级 RST 带下水"的判据；状态码那一维**两头都钉**：`/refuse` 那几条头没到过，必须是 `HTTP_STATUS_NONE`，`/part`（对端先发一个不结束流的头、再 RST）必须把真的 `200` 交出去 —— 少了后者，一个"永远交 `HTTP_STATUS_NONE`"的实现也能过；场景 8 钉响应的拷贝构造 / 赋值（ALPN=h2 处处写成显式前置） |
+| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**；场景 7 里对端的 handler **故意在 `recv()` 的栈上 `flush()`**（与 `uvcpp_http_server` 的处理函数同一形状），是"回调栈里不冲字节"那条不变式的活体判据；场景 7 用**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的 RST —— 它的 `reject()` 把码写死了）按剧本发 `REFUSED_STREAM` / `CANCEL` / `NO_ERROR` / `PROTOCOL_ERROR`，八条流串行发、每条都断言"恰好回调一次 + 流号是递增奇数"，中间夹的 `/hello` 是"连接没被流级 RST 带下水"的判据；状态码那一维**两头都钉**：`/refuse` 那几条头没到过，必须是 `HTTP_STATUS_NONE`，`/part`（对端先发一个不结束流的头、再 RST）必须把真的 `200` 交出去 —— 少了后者，一个"永远交 `HTTP_STATUS_NONE`"的实现也能过；场景 9 钉**断开时还在飞**的流（`on_h2_disconnect` 那条兜底路）—— 对端收下请求之后既不回也不 RST、直接拆 TCP，交付的必须是"没收到过"配一个正的奇数流号，而同一条路上"头先到、连接后断"的那半边必须把真的 `200` 与 `x-mark` 交出去；场景 8 钉响应的拷贝构造 / 赋值（ALPN=h2 处处写成显式前置） |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
 | `tests/functional/web_http_client_selfdestroy_func.cpp` | h1：在响应回调 / connect 回调 / keep-alive 第二次请求的回调里 `delete` 客户端（三条路都不许崩） |
 | `tests/functional/web_http_client_close_func.cpp` | h1：对端在响应收完之前断开（回调必须落地、不许重复交付、死连接上 `send()` 报 `UV_ENOTCONN`；场景 3 钉"`404` 的头到了、正文没发完就断"时交付的状态码必须是**那个 404**） |
@@ -245,6 +245,23 @@ m3 析构不作废令牌、m4 拆掉停读与关句柄、m5 连令牌作废一�
 NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_http_client_close_func`
 场景 3 红（实际拿到的是 0，不是对端说过的 404）。三次还原之后全绿。
 
+批 8（批 7 漏掉的**同一条路**：断开时还在飞的流）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| h2：`on_h2_disconnect` 的兜底结算交付的是**默认构造**的 `uvcpp_http_response` —— 又是编出来的 `200`，而且 `stream_id` 恒为 0 | 这条路的触发条件是"断开时 `h2_streams_` 里还有没结算的流"：对端收下请求、既不回也不 RST、直接把 TCP 拆掉。此时调用方拿到 `{status: 200, stream_id: 0}` 配 `UV_ECANCELED`。`stream_id` 在 h2 上是"这条回应的是哪次请求"的**唯一**凭据（h1 那条路上它恒为 0），一条连接上同时有几条流在飞时，0 等于把失败和请求的对应关系丢了。批 7 只扫了 `on_h2_stream_close` 与 h1 两条交付路，漏了这里 —— 场景 4 虽然也走断开，但它是**先等 `/hello` 落地再拆**的，那时 `h2_streams_` 已经空了，兜底那段一行都不跑 | `delete h2_` **之前**逐条把在飞流的真响应抄进一张局部表（`find_stream()` + `hs->response`），交付时用它、并按 `kv.first` 填 `stream_id`。抄不到就退回 `h2_response_not_received()`。`retryable` 不动：连接是怎么没的、对端处理过没有都不知道，只有 `REFUSED_STREAM` 那种对端**明说了**"没处理过"的才敢标可重试 |
+
+批 8 的变异（只重编 `uvcpp_http_client.cpp`）：**N1** 抄真响应那段整个拆掉（永远交
+`HTTP_STATUS_NONE`）⇒ 场景 9 的 `/vanish-head` 那一半红（状态码 + `x-mark`）；
+**N2** 交付退回默认构造的 `uvcpp_http_response`（就是修之前那份代码）⇒ `/vanish`
+那一半红（编出来的 200）；**N3** 不填 `stream_id` ⇒ 两半的流号断言都红。三次还原
+之后全绿。
+
+场景 9 的判据是**两头钉死**的，理由与批 7 的 `/part` 同源：只有"头没到过必须是
+`HTTP_STATUS_NONE`"这半，一个"永远交 `HTTP_STATUS_NONE`"的实现也能全绿；只有另一半，
+"永远交默认的 200"也能全绿。而 `/vanish-head` 那半**不敢把判据放在状态码上** ——
+`200` 恰好就是默认值，撞上也说得通，所以钉的是一个只有对端会发的头 `x-mark`。
+
 ### 4.2 还没修的（**只记录**）
 
 - **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
@@ -287,9 +304,10 @@ ctest --test-dir build-h2 -C Release --timeout 60
 
 **本机陷阱**（踩过不止一次）：构建成功与否要看构建日志里有没有 `error C` /
 `error LNK`，不能只看退出码；而 `--target test_xxx` **不会**刷新测试目录里那份
-`uvcpp.dll`（本机没有 `pwsh.exe`，`copy_test_dlls` 静默不跑），拿旧 dll 跑出来的
-绿/红都不算数 —— 比 `build-h2/Release/uvcpp.dll` 与
-`build-h2/tests/functional/Release/uvcpp.dll` 的 md5，一致了再跑。
+`uvcpp.dll`（见下面第 5 条），拿旧 dll 跑出来的绿/红都不算数 —— 比
+`build-h2/Release/uvcpp.dll` 与 `build-h2/tests/functional/Release/uvcpp.dll` 的
+时间戳（数值 `mtime`；`cp` 不保留 `mtime`，所以判据是"目标不早于源"，比 md5 更省），
+刷新了再跑。
 
 批 5 又补了三条，性质一样（都是**产物或环境的问题冒充代码的问题**）：
 
@@ -314,3 +332,22 @@ ctest --test-dir build-h2 -C Release --timeout 60
    `grep -c "error C[0-9]\|error LNK\|error MSB"`（注意 `MSB40` 这种收窄的写法会
    漏掉 `MSB8071`），**不能只看退出码**；把失败的那个目标单独重跑一次通常就过了
    —— 内存压力是瞬时的，不是那份代码编不出来。
+
+5. **"`copy_test_dlls` 因为本机没有 `pwsh.exe` 所以静默不跑"—— 这条以前写在这里，
+   是错的，批 8 更正。** 两半都不对：
+
+   - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
+     `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
+     "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:1148`
+     的注释），与 `pwsh` 无关。
+   - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
+     `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己
+     就写了 "falling back to system PowerShell" —— 只是一条降级提示，不影响退出码。
+     它拷的是 vcpkg 侧那些 DLL（如 `zlib1.dll`），与 `uvcpp.dll` / `uv.dll` /
+     `llhttp.dll` 无关。
+
+   所以 `--target test_xxx` 之后要手工刷新的**只是那一份 `uvcpp.dll`**（目标目录里
+   那份是上一次全量构建的），判据是数值 `mtime`：目标目录里那份不早于
+   `<tree>/Release/uvcpp.dll` 即可。升级本机 `pwsh` 也好、把它加进 `PATH` 也好，
+   都不会改变这条。

@@ -1266,6 +1266,28 @@ void uvcpp_http_client::on_h2_disconnect(uvcpp_h2_connection&) {
   // 连接没了，先把 h2 这一整套摘干净 —— 下面要跑用户回调，而用户完全可以在
   // 回调里把整个 client 析构掉，那之后一个成员都不能碰。
   //
+  // 摘之前先把每条**还在飞**的流的真响应抄一份下来：`h2_` 下面几行就删了，
+  // 之后再想问会话"这条流对端回过什么"就没地方问了。抄不到（会话里没有这条流）
+  // 就保持 `h2_response_not_received()` —— 那正是"一个响应头都没收到过"。
+  //
+  // 抄这一份是**必须的**：兜底结算路交付的是"这条流结算时手上有什么"，之前直接
+  // 交付默认构造的 `uvcpp_http_response`，就是又替对端编了一个它从没说过的
+  // `200 OK`（同批 7 那个病，见 `HTTP_STATUS_NONE`）；`stream_id` 恒为 0 则让
+  // 调用方**对不上是哪次请求** —— 一条连接上同时有好几条流在飞时，那是唯一的凭据。
+  std::map<int32_t, uvcpp_http_response> inflight;
+  for (auto& kv : h2_streams_) {
+    uvcpp_http_response r = h2_response_not_received();
+    r.stream_id           = kv.first;
+    if (uvcpp_h2_stream* hs = h2_->session().find_stream(kv.first)) {
+      r.status_code    = hs->response.status_code;
+      r.status_message = http_status_reason(r.status_code);
+      r.headers        = hs->response.headers;
+    }
+    // `retryable` 不动：连接是怎么没的、对端处理过没有，这里都不知道，只有
+    // `REFUSED_STREAM` 那种对端明说了"没处理过"的才敢标可重试。
+    inflight[kv.first] = r;
+  }
+
   // 拆之前先把对端道别与否抄下来 —— 这一句正是"断开之后还查得到"的全部来源。
   peer_goaway_      = h2_->session().peer_goaway_received();
   peer_goaway_code_ = h2_->session().peer_goaway_error_code();
@@ -1291,8 +1313,11 @@ void uvcpp_http_client::on_h2_disconnect(uvcpp_h2_connection&) {
 
   for (auto& kv : pending) {
     if (!kv.second.cb) continue;
-    uvcpp_http_response resp;
-    resp.version = uvcpp_http_version::HVER_20;
+    std::map<int32_t, uvcpp_http_response>::iterator f = inflight.find(kv.first);
+    // `inflight` 与 `pending` 是同一份键（都从 `h2_streams_` 来），找不到只可能
+    // 是有人改坏了这两段的次序 —— 那就退回"没收到过"，不许退回默认构造的 200。
+    const uvcpp_http_response resp =
+        (f == inflight.end()) ? h2_response_not_received() : f->second;
     kv.second.cb(resp, UV_ECANCELED);
   }
 }

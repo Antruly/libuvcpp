@@ -237,6 +237,9 @@ struct resp_rec {
   int                err    = 0;
   bool               retryable = false;
   std::string        body;
+  /// `x-mark`。用来把"这个状态码是对端给的"与"是本层兜底编的"分开：默认构造的
+  /// 响应一个头都没有，`200` 可以靠巧合，某个只有对端会发的头不会。
+  std::string        mark;
   uvcpp_http_version version = uvcpp_http_version::HVER_11;
 };
 
@@ -266,6 +269,7 @@ struct client_obs {
       rec.err       = err;
       rec.retryable = r.retryable;
       rec.body      = r.body.to_string();
+      rec.mark      = http_get_header(r.headers, "x-mark");
       rec.version   = r.version;
       std::lock_guard<std::mutex> lk(mu);
       arrival.push_back(key);
@@ -716,11 +720,18 @@ struct raw_peer_state {
   /// 填它的是 `on_request`（跑在 `loop->run()` 的栈里），读它的是同一线程的
   /// 循环体，两者之间没有第二个线程，所以不用锁。
   std::vector<std::pair<uvcpp_h2_connection*, int32_t>> rst_later;
+
+  /// `/vanish` 要拆掉的连接。同上，只在本线程上碰。
+  std::vector<uvcpp_h2_connection*> vanish_later;
 };
 
 /// 剧本：路径 → 用哪个错误码把这条流 RST 掉。`0xFFFF` = 正常应答；
-/// `0xFFFE` = **先发一个不结束流的响应头**再 RST（状态码必须活下来）。
+/// `0xFFFE` = **先发一个不结束流的响应头**再 RST（状态码必须活下来）；
+/// `0xFFFD` = 不回也不 RST，直接把 TCP 连接拆了（流就这么烂在客户端手里）；
+/// `0xFFFC` = 先发一个不结束流的响应头，再拆连接（同上，但状态码必须活下来）。
 uint32_t rst_code_for(const std::string& path) {
+  if (path == "/vanish-head") return 0xFFFCu;
+  if (path == "/vanish") return 0xFFFDu;
   if (path == "/part")   return 0xFFFEu;
   if (path == "/refuse") return 7;   // REFUSED_STREAM
   if (path == "/cancel") return 8;   // CANCEL
@@ -766,6 +777,24 @@ void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
         st.paths.push_back(str.request.url);
       }
       const uint32_t code = rst_code_for(str.request.url);
+      if (code == 0xFFFCu) {
+        // 头先到、连接后断：客户端必须把**真的**状态码交出去，而不是"没收到过"。
+        // 没有这一支，`on_h2_disconnect` 里一个"永远交付 `HTTP_STATUS_NONE`"的
+        // 实现也能过场景 9 的另一半。拆连接同样留给循环体（见 `/vanish`）。
+        uvcpp_http_response r;
+        r.status_code = http_status::OK;
+        http_set_header(r.headers, "x-mark", "part");
+        conn->send_headers(str.stream_id, r);
+        st.vanish_later.push_back(conn);
+        return;
+      }
+      if (code == 0xFFFDu) {
+        // 收下请求、什么都不回，然后把连接拆了。客户端的这条流既没收到响应头，
+        // 也没收到 RST —— 只能由 `on_h2_disconnect` 那条兜底路结算。
+        // 拆连接不在回调栈里做（这一层正压在 `mem_recv` 上），留给循环体。
+        st.vanish_later.push_back(conn);
+        return;
+      }
       if (code == 0xFFFFu) {
         uvcpp_http_response r = uvcpp_http_response::ok(
             kRawBody, sizeof(kRawBody) - 1, "text/plain");
@@ -837,6 +866,15 @@ void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
           st.rsts_sent.fetch_add(1);
         }
         p.first->flush();
+      }
+    }
+    // `/vanish` 欠的那次拆连接。上一轮 `run()` 已经把请求收进来、也回过了
+    // （什么都没回就是什么都没回），这时候拆才确定"流是在飞的"。
+    if (!st.vanish_later.empty()) {
+      uvcpp_h2_connection* v = st.vanish_later.back();
+      st.vanish_later.pop_back();
+      if (std::find(conns.begin(), conns.end(), v) != conns.end()) {
+        v->client()->close();
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -996,6 +1034,101 @@ void scenario_peer_rst(int port, uvcpp_ssl_context* cctx, raw_peer_state& st) {
         "rst[前置]: 对端侧 ALPN 不是 h2 —— 这条不是 h2 连接，测的是别的路");
 }
 
+/// 场景 9：**断开时还有在飞的流**，那条兜底结算路交付的响应不许是编的。
+///
+/// 这是批 7 那个病的同一个形状，只是换了个口子：`on_h2_disconnect` 收尾时把
+/// `h2_streams_` 里剩下的条目逐条结算，交付的是一个**默认构造**的
+/// `uvcpp_http_response` —— 又是对端从没说过的一个 `200 OK`（见
+/// `HTTP_STATUS_NONE`）。而 `stream_id` 也是初值 0：一条连接上同时有好几条流在
+/// 飞时，调用方拿到的失败**对不上是哪次请求**，而 `stream_id` 在 h2 上正是这个
+/// 身份的唯一凭据（h1 那条路上它恒为 0，所以 0 在这里是"没填"，不是"没关系"）。
+///
+/// 触发它需要一条**真的在飞**的流：对端收下请求之后既不回也不 RST，直接拆 TCP。
+/// 之前场景 4 也走断开那条路，但它是先等 `/hello` 落地再拆的 —— 那时
+/// `h2_streams_` 已经空了，兜底那段一行都不跑。少了前置断言，这条用例同样会
+/// 退化成那样：所以"对端确实收到了请求"必须钉住。
+void scenario_drop_with_inflight(int port, uvcpp_ssl_context* cctx,
+                                 raw_peer_state& st) {
+  std::cout << "[scenario 9] 断开时在飞的流：交付的必须是「没收到过」，身份不许丢"
+            << std::endl;
+
+  const int reqs_before = st.requests.load();
+
+  client_obs c;
+  c.client.set_http2_enabled(true);
+  if (c.connect(port, cctx, "vanish") != 0) {
+    check(false, "vanish: connect 失败");
+    return;
+  }
+  check(c.client.negotiated_alpn() == "h2",
+        "vanish: ALPN 协商结果是 \"" + c.client.negotiated_alpn() +
+            "\"，应为 h2（前置）");
+
+  check(c.send_keyed("vanish", uvcpp_http_request::make_get("/vanish")) == 0,
+        "vanish: send() 失败");
+
+  // 前置：这条请求真的到了对端。没有它，对端可能压根没拆连接，客户端等来的是
+  // 别的东西 —— 那样这条用例测的就不是"在飞的流"了。
+  check(uvcpp_test::wait_flag([&st, reqs_before] {
+          return st.requests.load() > reqs_before;
+        }, uvcpp_test::kWaitMs),
+        "vanish[前置]: 对端没收到这条请求");
+
+  check(c.wait_key("vanish"),
+        "vanish: 断开之后回调没在墙钟上限内落地");
+
+  const resp_rec r = c.at("vanish");
+  check(r.err == UV_ECANCELED,
+        "vanish: err = " + std::to_string(r.err) + "，应为 UV_ECANCELED");
+  check(r.status == static_cast<int>(HTTP_STATUS_NONE),
+        "vanish: status = " + std::to_string(r.status) +
+            "，应为 " + std::to_string(static_cast<int>(HTTP_STATUS_NONE)) +
+            "（0）—— 对端一个字节的响应头都没回过，200 是本层自己编的");
+  check(r.sid > 0 && (r.sid % 2) == 1,
+        "vanish: stream_id = " + std::to_string(r.sid) +
+            "，应是一个正的奇数（客户端发起的流号）—— 0 表示身份字段丢了");
+  check(c.call_count("vanish") == 1,
+        "vanish: 回调跑了 " + std::to_string(c.call_count("vanish")) +
+            " 次，应恰好 1 次");
+
+  // ---- 另一半：头到过、连接才断。交付的必须是那个**真的** 200 ----
+  //
+  // 两半缺一不可：只有上面那半，"永远交付 `HTTP_STATUS_NONE`" 也能过；只有这半，
+  // "永远交付默认构造的 200" 也能过。判据不放在状态码上（200 恰好就是默认值，
+  // 撞上也说得通），而放在一个**只有对端会发**的头 `x-mark` 上。
+  const int reqs_before2 = st.requests.load();
+
+  client_obs d;
+  d.client.set_http2_enabled(true);
+  if (d.connect(port, cctx, "vanish-head") != 0) {
+    check(false, "vanish-head: connect 失败");
+    return;
+  }
+  check(d.client.negotiated_alpn() == "h2",
+        "vanish-head: ALPN 协商结果是 \"" + d.client.negotiated_alpn() +
+            "\"，应为 h2（前置）");
+  check(d.send_keyed("vh", uvcpp_http_request::make_get("/vanish-head")) == 0,
+        "vanish-head: send() 失败");
+  check(uvcpp_test::wait_flag([&st, reqs_before2] {
+          return st.requests.load() > reqs_before2;
+        }, uvcpp_test::kWaitMs),
+        "vanish-head[前置]: 对端没收到这条请求");
+  check(d.wait_key("vh"), "vanish-head: 断开之后回调没在墙钟上限内落地");
+
+  const resp_rec hr = d.at("vh");
+  check(hr.err == UV_ECANCELED,
+        "vanish-head: err = " + std::to_string(hr.err) + "，应为 UV_ECANCELED");
+  check(hr.status == 200,
+        "vanish-head: status = " + std::to_string(hr.status) +
+            "，应为 200 —— 头到过了，交「没收到过」就是把真的丢了");
+  check(hr.mark == "part",
+        "vanish-head: x-mark = \"" + hr.mark +
+            "\"，应为 \"part\" —— 这个头只有对端会发，拿不到就是交付的响应"
+            "根本不是对端那一份");
+  check(hr.sid > 0, "vanish-head: stream_id = " + std::to_string(hr.sid) +
+                        "，应大于 0（身份字段丢了）");
+}
+
 }  // namespace
 
 int main() {
@@ -1053,6 +1186,7 @@ int main() {
       return 2;
     }
     scenario_peer_rst(peer.port, &cctx, peer.st);
+    scenario_drop_with_inflight(peer.port, &cctx, peer.st);
   }
 
   if (g_failures == 0) {
