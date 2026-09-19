@@ -42,12 +42,19 @@ are NOT auto-copied.
 
 ### Required DLL copy list
 
-| Job | uvcpp.dll | uv.dll | llhttp.dll | OpenSSL DLLs |
-|-----|-----------|--------|------------|--------------|
-| `windows-basic` | ✓ | ✓ | — | — |
-| `windows-static` | — | ✓ | — | — |
-| `web` | ✓ | ✓ | ✓ | — |
-| `ssl` | ✓ | ✓ | ✓ | ✓ |
+| Job | uvcpp.dll | uv.dll | llhttp.dll | OpenSSL DLLs | nghttp2 DLL |
+|-----|-----------|--------|------------|--------------|-------------|
+| `windows-basic` | ✓ | ✓ | — | — | — |
+| `windows-static` | — | ✓ | — | — | — |
+| `web` | ✓ | ✓ | ✓ | — | — |
+| `ssl` | ✓ | ✓ | ✓ | ✓ | — |
+| `h2` | ✓ | ✓ | ✓ | ✓ | — |
+
+**nghttp2 has no DLL column value on purpose.** It is the one FetchContent dependency
+linked **static** (`nghttp2_static` + `NGHTTP2_STATICLIB`, see `CMakeLists.txt`), so
+`uvcpp.dll` gains no new runtime dependency and no copy step is needed. That was the
+reason for choosing static: the alternative is one more DLL to chase through every
+job, every packaging script, and every consumer's `bin/`.
 
 ### DLL copy step template
 
@@ -76,6 +83,23 @@ If you add a new library via FetchContent that builds as a shared DLL (because
 **Do NOT** try to force a FetchContent dependency to build static by setting
 `BUILD_SHARED_LIBS=OFF` — some projects (e.g., llhttp) fail to create proper
 CMake targets when built that way.
+
+**nghttp2 is the counterexample, and it does it the other way round.** Instead of
+flipping the global `BUILD_SHARED_LIBS`, it selects its own static target
+(`nghttp2_static`, aliased as `nghttp2`) inside a `function()` scope that also
+force-sets `ENABLE_LIB_ONLY` / `ENABLE_APP` / `ENABLE_HPACK_TOOLS` / `ENABLE_EXAMPLES`
+as **non-cache** variables — a plain `set(... CACHE ... FORCE)` would leak `BUILD_TESTING`
+into the root scope and knock out `tests/functional`'s registration. Two more traps
+specific to it:
+
+- `EXCLUDE_FROM_ALL` + the CMake `FetchContent_Populate` + `add_subdirectory` shape
+  (copied from zlib, **not** from llhttp's `MakeAvailable`) — the latter registers
+  install rules and would ship nghttp2's own `nghttp2Config.cmake` / `libnghttp2.pc`
+  out of `cmake --install`.
+- nghttp2 does not give consumers `ssize_t` on MSVC. `src/http2/uvcpp_h2_nghttp2.h`
+  defines it as `int` (not `SSIZE_T`) — the library is compiled with `int`, so anything
+  else is an ABI mismatch. `_CRT_DECLARE_NONSTDC_NAMES` does not help, and
+  `NGHTTP2_NO_SSIZE_T` deletes callbacks we need.
 
 ---
 
@@ -131,6 +155,27 @@ For web/ssl/full jobs, also set:
 -DUVCPP_ENABLE_ZLIB=ON|OFF
 -DUVCPP_ENABLE_OPENSSL=ON|OFF
 ```
+
+The `h2` job adds:
+```
+-DUVCPP_ENABLE_NGHTTP2=ON
+```
+
+**This option is `OFF` by default, and no other job sets it — so `h2` is the only job
+that compiles `src/http2/` at all.** Everything else builds a library without HTTP/2
+and goes green, which is correct for them and meaningless as evidence about HTTP/2.
+Two gates in that job exist purely to keep that from turning into a vacuous green,
+and they should not be "simplified" away:
+
+1. after configure, assert `UVCPP_ENABLE_NGHTTP2:BOOL=ON` in `CMakeCache.txt` **and**
+   that configure printed `nghttp2 integrated` **and** `Including http2 module in build`.
+   The first alone is not enough: the project force-disables nghttp2 when OpenSSL is
+   off, so a cache read can be stale relative to what actually got built.
+2. before ctest, assert `ctest -N` lists `test_h2_session_func`. Without nghttp2,
+   those test files compile their `#else` branch — a `main()` that prints `SKIP` and
+   **returns 0** — so "not tested" and "passed" are indistinguishable in a ctest
+   summary. Note also that `ctest` reports `100% tests passed` just as happily when
+   the tests were never registered.
 
 ---
 

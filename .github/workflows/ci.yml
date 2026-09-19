@@ -425,6 +425,160 @@ jobs:
           exit "$rc"
 
   # ---------------------------------------------------------------------------
+  # H2: Web + WebApp + OpenSSL + zlib + nghttp2
+  # ---------------------------------------------------------------------------
+  # **这个 job 存在的唯一理由是"别让它绿得没有内容"。** `UVCPP_ENABLE_NGHTTP2`
+  # 默认 OFF，所以上面每一个 job 都**不编译 `src/http2/`** —— 少了这一条，一整块
+  # HTTP/2 代码可以带着 CI 全绿推上去而从未被编译过一次。
+  #
+  # 因此下面有两处**门禁**，而不是只靠 "构建/测试没报错"：配置之后核缓存里那个
+  # 开关真的是 ON、且消息里真的出现了 "nghttp2 integrated"；测试之前核 h2 用例
+  # **真的被注册了**（`ctest -N`）。理由见 `doc/ci-guide.md`：nghttp2 关掉时
+  # `h2_*` 用例会走 `#else` 那条只打印 SKIP 的 `main()` 并且**返回 0** ——
+  # 一个"没测"的东西在 ctest 里的长相与"通过"完全一致（本仓库真的栽过一次，
+  # 那次是 `tests/functional/CMakeLists.txt` 的过滤正则写成了 `^h2_`，
+  # 而 `file(GLOB)` 给的是全路径，永远匹配不上）。
+  h2:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libuv openssl zlib ninja
+
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install openssl --no-progress
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          {
+            echo "=== toolchain ==="
+            cmake --version
+            openssl version 2>/dev/null || echo "(openssl not on PATH)"
+            echo "=== configure ==="
+            cfg=0
+            cmake -S . -B build-h2 -DCMAKE_BUILD_TYPE=Release \
+              -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+              -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_OPENSSL=ON \
+              -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_NGHTTP2=ON \
+              > ci-logs/build-h2-configure.log 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat ci-logs/build-h2-configure.log
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            # 门禁 1：nghttp2 **真的**被集成了。三条判据缺一不可 ——
+            #   ① 缓存里开关是 ON（用户传了，但可能被强制关掉：本工程有一条
+            #      "NGHTTP2=ON 但 OPENSSL=OFF 就 warn + 强制关" 的从属规则）；
+            #   ② CMakeLists 真的打出了 "nghttp2 integrated"（FetchContent 走通）；
+            #   ③ `src/http2/` 真的进了源列表。
+            # 少任何一条，这个 job 都会去编一个**不带 HTTP/2** 的库然后全绿。
+            grep -q 'UVCPP_ENABLE_NGHTTP2:BOOL=ON' build-h2/CMakeCache.txt || {
+              echo "::error title=h2::CMakeCache 里 UVCPP_ENABLE_NGHTTP2 不是 ON —— 这个 job 没在测 HTTP/2"; exit 1; }
+            grep -q 'nghttp2 integrated' ci-logs/build-h2-configure.log || {
+              echo "::error title=h2::配置消息里没有 'nghttp2 integrated' —— nghttp2 没被集成"; exit 1; }
+            grep -q 'Including http2 module in build' ci-logs/build-h2-configure.log || {
+              echo "::error title=h2::src/http2/ 没进源列表 —— 编出来的库不含 HTTP/2"; exit 1; }
+
+            echo "=== resolved toolchain (CMakeCache) ==="
+            grep -E '^(CMAKE_(GENERATOR|LINKER|CXX_COMPILER|C_COMPILER|VS_|MSVC)|MSVC_|OPENSSL_|NGHTTP2_)' \
+              build-h2/CMakeCache.txt || true
+            echo "=== build ==="
+            bld=0
+            cmake --build build-h2 --config Release --parallel 4 2>&1 \
+              | tee ci-logs/build-h2-build.log || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/build-h2-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-h2::${msg:-rc=$bld (no error line matched)}"
+            fi
+            exit "$bld"
+          } 2>&1 | tee ci-logs/build-h2.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-h2-${{ matrix.os }}
+          path: ci-logs/
+          if-no-files-found: ignore
+
+      - name: Copy runtime DLLs (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for d in tests/unit tests/functional tests/expand; do
+            mkdir -p "build-h2/$d/Release"
+            cp build-h2/Release/uvcpp.dll "build-h2/$d/Release/" 2>/dev/null || true
+            cp build-h2/_deps/libuv-build/Release/uv.dll "build-h2/$d/Release/" 2>/dev/null || true
+            cp build-h2/_deps/llhttp-build/Release/llhttp.dll "build-h2/$d/Release/" 2>/dev/null || true
+            cp build-h2/_deps/llhttp-build/llhttp.dll "build-h2/$d/Release/" 2>/dev/null || true
+          done
+          # **nghttp2 这里刻意没有 cp**：它被压成静态（`nghttp2_static` +
+          # `NGHTTP2_STATICLIB`），`uvcpp.dll` 不新增运行时依赖。所以这个 job
+          # 不只是"少拷一个 dll"，它同时是"静态链接这个决定是否真的成立"的检验 ——
+          # 哪天它变回动态，下面 OpenSSL 之后那个导入表自检就该在这里红。
+          for ssl_dir in \
+            "C:/Program Files/OpenSSL/bin" \
+            "C:/Program Files/OpenSSL-Win64/bin" \
+            "C:/Program Files (x86)/OpenSSL/bin" \
+            "C:/Program Files/OpenSSL-Win32/bin"; do
+            if [ -d "$ssl_dir" ]; then
+              echo "Found OpenSSL DLLs in: $ssl_dir"
+              for d in tests/unit tests/functional tests/expand; do
+                cp "$ssl_dir"/libssl-*.dll "build-h2/$d/Release/" 2>/dev/null || true
+                cp "$ssl_dir"/libcrypto-*.dll "build-h2/$d/Release/" 2>/dev/null || true
+              done
+              break
+            fi
+          done
+
+      - name: Test
+        shell: bash
+        run: |
+          # 门禁 2：h2 用例真的注册了。只跑 ctest 不足以发现"它们根本没被注册" ——
+          # 那种情况下总数少几个，而 ctest 照旧报 "100% tests passed"。
+          if ! ctest --test-dir build-h2 -N 2>&1 | grep -q "test_h2_session_func"; then
+            echo "::error title=h2::test_h2_session_func 没被注册 —— nghttp2 关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+            ctest --test-dir build-h2 -N 2>&1 | tail -20
+            exit 1
+          fi
+          # Only test_shutdown_func is excluded (flaky ~1%, not hanging) — see
+          # doc/ci-guide.md §4.
+          rc=0
+          out=$(ctest --test-dir build-h2 --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-h2::${msg:-rc=$rc (no FAILED block)}"
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-h2-output::${blk}"
+            fi
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
   # Full: Web + OpenSSL + zlib (Ubuntu + macOS)
   # ---------------------------------------------------------------------------
   full:
