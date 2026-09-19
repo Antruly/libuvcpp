@@ -156,6 +156,11 @@ void uvcpp_h2_connection::on_write_done(int status) {
 
   flush();  // 写的过程中可能又攒了东西（窗口更新、RST、对端的 SETTINGS ack）
 
+  // 上一笔写带走的那些流式块到这里才算"交出去了"。放在 `flush()` **之后**：
+  // 冲出去的字节里可能就含着刚结算的那一块的收尾（END_STREAM），先跑 `done`
+  // 会让发起方在最后一个字节出网之前就以为整条流结束了。
+  run_completed();
+
   if (!writing_ && close_after_flush_) finish_close();
 }
 
@@ -178,6 +183,53 @@ int uvcpp_h2_connection::send_status(int32_t stream_id, int status,
   return flush();
 }
 
+int uvcpp_h2_connection::send_headers(int32_t stream_id,
+                                      const uvcpp_http_response& resp) {
+  const int rv = session_->submit_headers(stream_id, resp);
+  if (rv != 0) return rv;
+  return flush();
+}
+
+int uvcpp_h2_connection::send_data(int32_t stream_id, const char* data,
+                                   size_t len, bool end_stream,
+                                   std::function<void(int)> done) {
+  const int rv =
+      session_->submit_data(stream_id, data, len, end_stream, std::move(done));
+  if (rv != 0) return rv;
+
+  const int frv = flush();
+  // `flush()` 没起写（没东西可发：窗口关着、或会话还在等对端）时，这一批
+  // `done` 就没人来跑了 —— 补上。起了写的话交给 `on_write_done`，
+  // 两边都跑就是重复结算。
+  run_completed();
+  return frv;
+}
+
+void uvcpp_h2_connection::run_completed() {
+  if (writing_ || in_dones_) return;
+  in_dones_ = true;
+
+  // 逐条判存活：`done` 跑的是用户代码，它完全可能把整条连接（连同本对象）
+  // 销毁掉。本地持一份令牌，每一轮都重新问一次"我还活着吗"。
+  const std::shared_ptr<char> life = alive_token();
+  // 外层是个循环，因为 `done` 里很可能又提交了一块（→ `send_data` →
+  // `run_completed`，那一层被 `in_dones_` 挡回去），新结算的那些要在这里
+  // 接着跑，否则得等下一次写完成才有机会 —— 而那时候可能已经没有下一笔写了。
+  for (;;) {
+    std::vector<std::function<void()>> dones;
+    session_->take_completed(dones);
+    if (dones.empty()) break;
+    for (size_t i = 0; i < dones.size(); ++i) {
+      dones[i]();
+      if (!token_alive(life)) {
+        in_dones_ = false;
+        return;
+      }
+    }
+  }
+  in_dones_ = false;
+}
+
 void uvcpp_h2_connection::shutdown() {
   if (closed_ || closing_) return;
   closing_ = true;
@@ -185,7 +237,9 @@ void uvcpp_h2_connection::shutdown() {
   // GOAWAY 先排进队列，再靠 flush 把它冲出去 —— 直接 close 会让对端只看到
   // 连接断了，分不清"服务端不再接新流"和"网络挂了"。
   if (!goaway_sent_) {
-    session_->submit_goaway(0, std::string());
+    // 码从会话上取，不是写死的 NO_ERROR：被控制帧令牌桶拦下来时它会是
+    // `ENHANCE_YOUR_CALM`，写死就把那个信号抹成了"我们自己正常退出"。
+    session_->submit_goaway(session_->goaway_code(), std::string());
     goaway_sent_ = true;
   }
   close_after_flush_ = true;

@@ -46,6 +46,16 @@ class UVCPP_API uvcpp_http_response {
   /// Used for deferred/streaming responses (large files, slow async work).
   bool          deferred = false;
 
+  /**
+   * @brief 这条响应回答的是哪条 h2 流；**0 表示 HTTP/1.1**。
+   *
+   * 由服务端在调处理函数**之前**填好，所以处理函数把它整个拷走再延迟发送也
+   * 带着走。处理函数若**整对象替换**（`resp = uvcpp_http_response::make(...)`）
+   * 就会把它冲掉 —— h2 连接上那种写法必须自己把它设回去，或者改用带
+   * `stream_id` 的 `uvcpp_http_server::send_response` 重载。
+   */
+  int32_t       stream_id = 0;
+
   // -------------------------------------------------------------------
   // Header operations
   // -------------------------------------------------------------------

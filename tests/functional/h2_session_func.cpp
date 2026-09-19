@@ -59,6 +59,9 @@ struct link {
   http_headers resp_headers;
   bool        resp_end = false;   ///< 整条响应收完（on_response_end）
   int         client_closed = 0;
+  /// 两边的致命错误次数。绝大多数用例要求它是 0 —— 一个"绿"的用例如果同时
+  /// 触发过致命路径，那它绿的很可能不是它想测的那条路。
+  int         fatal_count = 0;
 
   /// 已经回过响应的流。**一条流只许回一次** —— `submit_response` 第二次会换掉
   /// 一块正被 nghttp2 的 data provider 按地址引用的缓冲，是 use-after-free。
@@ -98,6 +101,7 @@ struct link {
       ++body_end;
       maybe_reply(s, st.stream_id);
     };
+    sc.on_fatal = [this](uvcpp_h2_session&, int) { ++fatal_count; };
     if (server.init(sc) != 0) return false;
 
     uvcpp_h2_session::callbacks cc;
@@ -119,6 +123,7 @@ struct link {
       if (code != 0) ++rst_count;
       ++client_closed;
     };
+    cc.on_fatal = [this](uvcpp_h2_session&, int) { ++fatal_count; };
     return client.init(cc) == 0;
   }
 
@@ -411,6 +416,187 @@ bool test_second_response_is_refused() {
   return true;
 }
 
+// =========================================================================
+// 控制帧洪泛（批 2d）
+// =========================================================================
+
+/// 空 SETTINGS 帧的线上字节（RFC 9113 §6.5：9 字节帧头 + 0 字节载荷）。
+///
+/// 洪泛用例挑它是因为它**定长、无 HPACK、无流号** —— 用例不必先学会编码头块就
+/// 能把"连接级控制帧"灌进去。它不是假想的攻击面：SETTINGS 逼着我们回 ACK，
+/// PING 同样，攻击者花一个包换我们一个包，是个放大器。
+const unsigned char kEmptySettings[9] = {0x00, 0x00, 0x00, 0x04, 0x00,
+                                         0x00, 0x00, 0x00, 0x00};
+
+/// 在一串已发出的帧里找第一个 @p type 类型的帧，返回载荷起点；没有（或被截断）
+/// 返回 -1。
+long find_frame(const std::string& buf, unsigned char type) {
+  size_t i = 0;
+  while (i + 9 <= buf.size()) {
+    const size_t len = (static_cast<size_t>(static_cast<unsigned char>(buf[i])) << 16) |
+                       (static_cast<size_t>(static_cast<unsigned char>(buf[i + 1])) << 8) |
+                       static_cast<size_t>(static_cast<unsigned char>(buf[i + 2]));
+    if (i + 9 + len > buf.size()) return -1;
+    if (static_cast<unsigned char>(buf[i + 3]) == type)
+      return static_cast<long>(i + 9);
+    i += 9 + len;
+  }
+  return -1;
+}
+
+/// 控制帧洪泛必须在**有限帧数内**被拦住，而收尾发出去的 GOAWAY 要带
+/// `ENHANCE_YOUR_CALM`。
+///
+/// 这个用例钉两件事，缺一不可：
+///   1. **有界** —— 200 个帧里必须在中途就被拦下，不能一路收到底；
+///   2. **可归因** —— 收尾的 GOAWAY 带的是 `ENHANCE_YOUR_CALM` 而不是
+///      `NO_ERROR`。少了第 2 条，一次洪泛在线上长得和"服务端自己优雅退出"
+///      一模一样，对端没有任何可归因的信号。
+bool test_control_flood_is_capped() {
+  uvcpp_h2_session server{true};
+  int fatals   = 0;
+  int last_err = 0;
+  uvcpp_h2_session::callbacks sc;
+  sc.on_fatal = [&fatals, &last_err](uvcpp_h2_session&, int code) {
+    ++fatals;
+    last_err = code;
+  };
+  if (server.init(sc) != 0) return false;
+
+  // RFC 9113 §3.4 的客户端连接前奏。**少了这 24 字节，nghttp2 对第一个字节就回
+  // BAD_CLIENT_MAGIC(-903)** —— 那时 `tripped_at` 会是 1、`fatals` 会是 200，
+  // 而"洪泛被拦住了"和"前奏根本没送对"在只看计数器的判据里长得一模一样。
+  // 这一条就是这么被抓出来的（详见 test_fatal_error_notifies_once）。
+  const char kMagic[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+  if (server.recv(kMagic, sizeof(kMagic) - 1) != 0) return false;
+
+  const int kSent = 200;
+  int tripped_at  = 0;
+  for (int i = 1; i <= kSent; ++i) {
+    const int rv = server.recv(reinterpret_cast<const char*>(kEmptySettings),
+                               sizeof(kEmptySettings));
+    if (rv != 0 && tripped_at == 0) tripped_at = i;
+  }
+
+  // 初值 64（一个 64 KiB 的连接窗口对这类帧没有任何约束，只能自己数）。
+  // 下面这个循环在微秒级跑完，而补充速率是 32/秒 ⇒ 抖动能带进来的额外帧是个位数，
+  // 所以给 ±8 的带宽。**真正的判据是"远小于 200"**，那个数字才是防线。
+  if (tripped_at < 60 || tripped_at > 72) {
+    std::cerr << "  [diag] flood: tripped_at=" << tripped_at << " (want 60..72)"
+              << " fatals=" << fatals << " last_err=" << last_err
+              << " goaway_code=" << server.goaway_code() << std::endl;
+    return false;
+  }
+  // 只通知一次：`on_fatal` 的接收方会去发 GOAWAY + 关连接，逐帧重复通知等于
+  // 让它在一次洪泛里被叫几百次。
+  if (fatals != 1 || last_err != static_cast<int>(H2_ERR_ENHANCE_YOUR_CALM) ||
+      server.goaway_code() != H2_ERR_ENHANCE_YOUR_CALM) {
+    std::cerr << "  [diag] flood: fatals=" << fatals << " (want 1)"
+              << " last_err=" << last_err
+              << " goaway_code=" << server.goaway_code() << std::endl;
+    return false;
+  }
+
+  if (server.submit_goaway(server.goaway_code(), std::string()) != 0) {
+    std::cerr << "  [diag] flood: submit_goaway rejected" << std::endl;
+    return false;
+  }
+  std::string out;
+  if (server.drain(out) != 0) {
+    std::cerr << "  [diag] flood: drain failed" << std::endl;
+    return false;
+  }
+  const long off = find_frame(out, 0x07);  // GOAWAY
+  if (off < 0 || off + 8 > static_cast<long>(out.size())) {
+    std::cerr << "  [diag] flood: GOAWAY frame not found off=" << off
+              << " drained=" << out.size() << " bytes" << std::endl;
+    return false;
+  }
+  // 载荷 = 4 字节 last-stream-id + 4 字节 error code（RFC 9113 §6.8）。
+  const uint32_t code =
+      (static_cast<uint32_t>(static_cast<unsigned char>(out[off + 4])) << 24) |
+      (static_cast<uint32_t>(static_cast<unsigned char>(out[off + 5])) << 16) |
+      (static_cast<uint32_t>(static_cast<unsigned char>(out[off + 6])) << 8) |
+      static_cast<uint32_t>(static_cast<unsigned char>(out[off + 7]));
+  if (code != H2_ERR_ENHANCE_YOUR_CALM) {
+    std::cerr << "  [diag] flood: GOAWAY error code=" << code << " (want 0x0b)"
+              << std::endl;
+    return false;
+  }
+  return true;
+}
+
+/// 致命错误**也只通知一次**（与洪泛同一条理由：接收方要关连接，那是一次性动作）。
+///
+/// 这一条同时钉住两件事，而它们是同一个根因的两面：
+///   1. 不送前奏就是致命错误（BAD_CLIENT_MAGIC），不是"什么都没发生"；
+///   2. 会话已经致命之后继续喂字节，`recv` 照旧返回错误，但**不再**重复通知。
+/// 第二条曾经是错的（200 次 recv 换来 200 次 `on_fatal`）。它暴露出来的原因很典型：
+/// 上面那个洪泛用例漏了前奏，于是它的 `fatals` 计数其实一直在数**致命错误**路径，
+/// 而不是它自己声称的洪泛路径 —— 计数对上了，理由却是错的。
+bool test_fatal_error_notifies_once() {
+  uvcpp_h2_session server{true};
+  int fatals   = 0;
+  int last_err = 0;
+  uvcpp_h2_session::callbacks sc;
+  sc.on_fatal = [&fatals, &last_err](uvcpp_h2_session&, int code) {
+    ++fatals;
+    last_err = code;
+  };
+  if (server.init(sc) != 0) return false;
+
+  // 故意跳过前奏，直接来一个 SETTINGS。
+  const int rv = server.recv(reinterpret_cast<const char*>(kEmptySettings),
+                             sizeof(kEmptySettings));
+  if (rv >= 0) {
+    std::cerr << "  [diag] fatal: 缺前奏的 SETTINGS 竟然被接受了 (rv=" << rv
+              << ")" << std::endl;
+    return false;
+  }
+  if (last_err != -903) {  // NGHTTP2_ERR_BAD_CLIENT_MAGIC
+    std::cerr << "  [diag] fatal: last_err=" << last_err << " (want -903)"
+              << std::endl;
+    return false;
+  }
+
+  // 再喂 50 次：错误照旧返回，通知**不许**再涨。
+  for (int i = 0; i < 50; ++i) {
+    const int again = server.recv(reinterpret_cast<const char*>(kEmptySettings),
+                                  sizeof(kEmptySettings));
+    if (again >= 0) return false;
+  }
+  if (fatals != 1) {
+    std::cerr << "  [diag] fatal: on_fatal 被叫了 " << fatals << " 次 (want 1)"
+              << std::endl;
+    return false;
+  }
+  return true;
+}
+
+/// 正常量的控制帧**不许**被拦下来。上面那个用例只证明"会拦"，不证明"拦得准" ——
+/// 阈值写错成 1 的话它照样绿。
+bool test_normal_control_traffic_passes() {
+  link& L = make_link();
+  if (!L.init()) return false;
+
+  // 一次完整的请求/响应会带来 SETTINGS + SETTINGS ACK + WINDOW_UPDATE 若干。
+  // 再手工叠 8 条流，把控制帧数量抬到几十 —— 仍然远低于 64 的突发额度。
+  L.reply.status_code = http_status::OK;
+  L.reply.body        = mk_buf("ok");
+  for (int i = 0; i < 8; ++i) {
+    if (L.client.submit_request(make_req(http_method::HTTP_GET, "/ok"), "") <= 0)
+      return false;
+  }
+  L.pump();
+
+  if (L.req_count != 8) return false;
+  if (L.resp_count != 8) return false;
+  // 一次都没被拦：没有 fatal、响应全都到齐、流表清空。
+  if (L.fatal_count != 0) return false;
+  if (L.resp_end != true) return false;
+  return L.server.stream_count() == 0 && L.client.stream_count() == 0;
+}
+
 }  // namespace
 
 int main() {
@@ -424,6 +610,9 @@ int main() {
     {"content_length_mismatch_is_reset", test_content_length_mismatch_is_reset},
     {"settings_visible", test_settings_visible},
     {"second_response_is_refused", test_second_response_is_refused},
+    {"control_flood_is_capped", test_control_flood_is_capped},
+    {"fatal_error_notifies_once", test_fatal_error_notifies_once},
+    {"normal_control_traffic_passes", test_normal_control_traffic_passes},
   };
   for (const auto& t : tests) {
     std::cout << "[h2_session] " << t.name << "\n";

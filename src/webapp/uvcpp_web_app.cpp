@@ -73,24 +73,27 @@ namespace {
  */
 class app_stream_sink : public uvcpp_web_stream_sink {
  public:
-  app_stream_sink(uvcpp_web_app* app, uvcpp_web_conn_id id)
-      : app_(app), id_(id) {}
+  /// `stream_id` 是 h2 的流号（0 = HTTP/1.1）。出口拿到的是**建这个 sink
+  /// 那一刻**的流号，之后不再变 —— 这是对的：一条流式响应自始至终属于同一条
+  /// 流，而 `uvcpp_web_response` 也活不到"复用给另一条流"的时候。
+  app_stream_sink(uvcpp_web_app* app, uvcpp_web_conn_id id, int32_t stream_id)
+      : app_(app), id_(id), stream_id_(stream_id) {}
 
   virtual int stream_begin(uvcpp_http_response& head) {
     if (app_ == nullptr) return UV_ECANCELED;
-    app_->stream_begin(id_, head);
+    app_->stream_begin(id_, stream_id_, head);
     return 0;
   }
 
   virtual int stream_write(const std::string& bytes,
                            const std::function<void(int)>& done) {
     if (app_ == nullptr) return UV_ECANCELED;
-    return app_->stream_write(id_, bytes, done);
+    return app_->stream_write(id_, stream_id_, bytes, done);
   }
 
   virtual void stream_end(bool close_after) {
     if (app_ == nullptr) return;
-    app_->stream_end(id_, close_after);
+    app_->stream_end(id_, stream_id_, close_after);
   }
 
   virtual void stream_attach_file(uvcpp_web_file_transfer* t) {
@@ -108,8 +111,9 @@ class app_stream_sink : public uvcpp_web_stream_sink {
   }
 
  private:
-  uvcpp_web_app* const app_;
+  uvcpp_web_app* const    app_;
   const uvcpp_web_conn_id id_;
+  const int32_t           stream_id_;
 };
 
 /** @brief 看门狗轮询间隔（毫秒）。 */
@@ -356,6 +360,19 @@ uvcpp_web_app& uvcpp_web_app::set_head_as_get(bool enable) {
   return *this;
 }
 
+uvcpp_web_app& uvcpp_web_app::set_http2_enabled(bool enable) {
+  http2_requested_ = enable;
+  return *this;
+}
+
+bool uvcpp_web_app::http2_enabled() const {
+#if UVCPP_NGHTTP2_ENABLE
+  return http2_requested_;
+#else
+  return false;
+#endif
+}
+
 uvcpp_web_app& uvcpp_web_app::set_work_limit(size_t limit) {
   work_limit_->set_limit(limit);
   return *this;
@@ -364,6 +381,17 @@ uvcpp_web_app& uvcpp_web_app::set_work_limit(size_t limit) {
 #if UVCPP_OPENSSL_ENABLE
 
 namespace {
+
+/// 框架默认宣告的 ALPN 名单，**顺序即优先级**（`h2` 在前 = 能协商就上 h2）。
+/// 用户自己设过名单时不碰它（见 `uvcpp_ssl_context::has_alpn_select` 的说明）。
+const std::vector<std::string> kDefaultAlpn{"h2", "http/1.1"};
+
+/// `set_http2_enabled(false)` 之后宣告的名单。**不是空名单** —— 理由见
+/// `start()` 里那段：空名单会让握手完全没有协商结果，与"答复你只有 1.1"
+/// 是两件事。留成单独一个常量而不是写成 `kDefaultAlpn` 的子集，是为了让
+/// "关掉 h2 之后到底宣告什么"在代码里只有一个答案。
+const std::vector<std::string> kHttp11Alpn{"http/1.1"};
+
 /// 新建 TLS 上下文时的最低协议版本。
 ///
 /// 不用库的默认值（`TLS_1_2`）以外的更松档位：TLS 1.0/1.1 早已被各大浏览器
@@ -676,7 +704,7 @@ std::string uvcpp_web_app::route_key(http_method method,
 }
 
 std::shared_ptr<uvcpp_web_context> uvcpp_web_app::active_body_ctx(
-    uvcpp_web_conn_id id) const {
+    uvcpp_web_conn_id id, int32_t stream_id) const {
   std::map<uvcpp_web_conn_id, std::deque<out_entry> >::const_iterator q =
       inflight_.find(id);
   if (q == inflight_.end()) return std::shared_ptr<uvcpp_web_context>();
@@ -684,6 +712,8 @@ std::shared_ptr<uvcpp_web_context> uvcpp_web_app::active_body_ctx(
   for (std::deque<out_entry>::const_iterator e = q->second.begin();
        e != q->second.end(); ++e) {
     // `shared_ptr` 的 const 不会穿透到被指对象，所以拿到的是可写的上下文。
+    // h2：一个连接上并存多条在收体的流，"第一条命中的"不等于"我要的那条"。
+    if (stream_id != 0 && e->ctx->response().stream_id() != stream_id) continue;
     uvcpp_web_stream* s = e->ctx->stream();
     if (s == nullptr || s->aborted()) continue;
     // 「body 还没彻底交完」有两种形态，见头文件里的说明：正在收（delivered_end_
@@ -693,8 +723,9 @@ std::shared_ptr<uvcpp_web_context> uvcpp_web_app::active_body_ctx(
   return std::shared_ptr<uvcpp_web_context>();
 }
 
-uvcpp_web_stream* uvcpp_web_app::live_stream(uvcpp_web_conn_id id) const {
-  std::shared_ptr<uvcpp_web_context> c = active_body_ctx(id);
+uvcpp_web_stream* uvcpp_web_app::live_stream(uvcpp_web_conn_id id,
+                                             int32_t        stream_id) const {
+  std::shared_ptr<uvcpp_web_context> c = active_body_ctx(id, stream_id);
   return c ? c->stream() : nullptr;
 }
 
@@ -865,7 +896,10 @@ bool uvcpp_web_app::wire_upload(uvcpp_web_context& ctx,
   }
   up->set_fsync(upload_fsync_);
 
-  const uvcpp_web_conn_id id = ctx.connection_id();
+  const uvcpp_web_conn_id id     = ctx.connection_id();
+  // 本条上传所属的 h2 流号（0 = HTTP/1.1）。下面每个按 id 找回上下文的动作都
+  // 必须带上它 —— 一条 h2 连接上可以同时有好几条流在收体。
+  const int32_t          sid = ctx.response().stream_id();
 
   // 工作池名额（**每提交一次 fs 操作取一个**，不是整个会话占一个）：会话绝大
   // 部分时间在等网络，把它算成一个长期在途任务会让闸门凭空窄掉一大截。
@@ -882,18 +916,18 @@ bool uvcpp_web_app::wire_upload(uvcpp_web_context& ctx,
   // 期间被别的路径收走），捕引用就会在那种时候读一个悬垂的流对象。见
   // `live_stream()` 的注释。
   uvcpp_web_upload_flow fl;
-  fl.pause = [this, id]() {
-    uvcpp_web_stream* s = live_stream(id);
+  fl.pause = [this, id, sid]() {
+    uvcpp_web_stream* s = live_stream(id, sid);
     if (s != nullptr) s->pause();
   };
-  fl.resume = [this, id]() {
-    uvcpp_web_stream* s = live_stream(id);
+  fl.resume = [this, id, sid]() {
+    uvcpp_web_stream* s = live_stream(id, sid);
     if (s != nullptr) s->resume();
   };
-  fl.abort = [this, id](int status) {
+  fl.abort = [this, id, sid](int status) {
     // "暂停了还在灌"导致的缓冲越界（`set_max_pending_bytes`）走到这里：会话
     // 已经判定这是不该发生的事，流层负责回状态码并关连接。
-    uvcpp_web_stream* s = live_stream(id);
+    uvcpp_web_stream* s = live_stream(id, sid);
     if (s != nullptr) s->abort(status);
   };
   up->set_flow(fl);
@@ -939,16 +973,16 @@ bool uvcpp_web_app::wire_upload(uvcpp_web_context& ctx,
   // 成了 `up → done_cb_ → up` 的引用环，会话永远不会析构。不捕获是安全的 ——
   // 回调跑的这一刻，"谁调起来的"（某个异步完成回调，或者流对象的钩子）必然
   // 还握着一份 `up`。
-  up->set_done_callback([this, id](const uvcpp_web_upload_result& r, bool ok,
-                                   const std::string& err) {
+  up->set_done_callback([this, id, sid](const uvcpp_web_upload_result& r, bool ok,
+                                        const std::string& err) {
     // **按"谁在收请求体"找，不是按 conn id 一查一条。** 流水线之后一条连接上
     // 可以同时挂着好几条上下文，按 id 取到的那条很可能是**别人** —— 那会把这次
     // 上传的结果挂到隔壁请求头上。这一刻 `end_deferred_` 为真，`active_body_ctx()`
-    // 的判据正是照这个写的。
+    // 的判据正是照这个写的；h2 上更是必须连流号一起对，否则两条并发上传会串。
     //
     // 本栈握一份 shared_ptr：`release_end()` 会跑用户的 `on_end`，用户在里面把
     // 响应收尾，上下文可能当场收场。
-    std::shared_ptr<uvcpp_web_context> cp = active_body_ctx(id);
+    std::shared_ptr<uvcpp_web_context> cp = active_body_ctx(id, sid);
     if (!cp) {
       // 上下文已经没了（停机、或者连接在落盘期间被别的路径收走）。此时
       // **什么都不做**是对的：没有响应要发，临时文件的所有权也已经定了
@@ -1641,6 +1675,27 @@ int uvcpp_web_app::init_on_loop_thread() {
           << "已请求 TLS 但上下文不可用，拒绝以明文启动：" << ssl_error_;
       return UV_EINVAL;
     }
+
+    // HTTP/2 只在 TLS 上做（不做 h2c），所以"宣告 h2"这件事**挂在这里**：
+    // 没有 TLS 就没有 ALPN，也就没有可协商的东西。
+    //
+    // 两件事必须同时做，缺一不可：
+    //   1. **宣告**这份名单 —— 让对端在握手里挑一个；用户自己设过就是他的
+    //      协议策略，比框架默认更权威，不覆盖。
+    //   2. **打开**协议层 —— 只宣告不打开，等于把一条真 h2 连接喂给 llhttp，
+    //      客户端拿到的是连接级错误而不是干净的降级；反过来只打开不宣告，
+    //      `h2` 根本协商不出来，永远走不到。
+    //
+    // 名单**永远设**，不是一个"有 h2 才设"的条件：`set_http2_enabled(false)`
+    // 的语义是"我不提供 h2"，不是"我什么协议都不宣告"。退成空名单时 OpenSSL
+    // 压根不会调我们的选择回调，客户端拿到的是一个**没有协商结果**的握手 ——
+    // 那看起来像这台服务器不支持 ALPN，与"明确答复你只有 http/1.1"是两件事。
+    if (!ssl_ctx_->has_alpn_select()) {
+      ssl_ctx_->set_alpn_select_protos(http2_enabled() ? kDefaultAlpn
+                                                        : kHttp11Alpn);
+    }
+    if (http2_enabled()) http_->set_http2_enabled(true);
+
     tcp->set_ssl_context(ssl_ctx_.get());
   }
 #endif  // UVCPP_OPENSSL_ENABLE
@@ -1794,7 +1849,15 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   //   * 上下文不在表里（例如 `wire_upload()` 内部直接回错那条路径）—— 没人会
   //     来 flush 它，排了就是永远发不出去；
   //   * 它已经是队首 —— 那正是要发的一条。
-  {
+  //
+  // **h2 上这条闸门整条不适用。** 它守的是 HTTP/1.1 的流水线顺序，而 h2 的
+  // 每条流各自独立：乱序响应不但合法，而且是必须允许的 —— 照 h1 排的话，
+  // 一条慢流（比如一个正在等异步数据的 SSE）会把同一条连接上**后面所有**流的
+  // 响应一起扣住，直到它自己超时。那是把 h2 用成了 h1。
+  //
+  // 跳过排队**不影响登记**：上下文照旧进 `inflight_`，所以闲置豁免与停机
+  // 宽限期那两处判断一行都不用改。
+  if (ctx.response().stream_id() == 0) {
     std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
         inflight_.find(ctx.connection_id());
     if (q != inflight_.end() && !q->second.empty()) {
@@ -1857,7 +1920,9 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   if (r.streaming()) {
     const uvcpp_web_conn_id id = ctx.connection_id();
 
-    r.set_stream_sink(new app_stream_sink(this, id));
+    // 流号从响应上取，不从 `ctx.request()` 取：两者此刻必然相等（派发时
+    // 一起落的），而响应身上那个才是本层真正会用的那份。
+    r.set_stream_sink(new app_stream_sink(this, id, r.stream_id()));
 
     // **按值捕指针而不是按引用捕那两个引用参数。** `ctx` 是引用形参、`r`
     // 是引用局部变量，"按引用捕获一个引用"在各编译器上的落地并不一致
@@ -1907,6 +1972,18 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
     return;
   }
 
+  // **流号已经不在这里设了** —— 它由 `on_http_request()` 在派发**之前**落到
+  // 响应上（那时还没有 body，`raw()` 的 `sync_meta()` 会写死一个
+  // `content-length: 0`，所以走的是 `set_stream_id()`）。放在这里就太晚了：
+  // 流式响应的组帧方式在 `write_chunk()` 那一刻就定下了，而那是处理函数体内的
+  // 事。
+  //
+  // 这个字段对 `uvcpp_http_server::send_response()` 同样关键：它只有
+  // `(client, resp)` 两个参数，h2 连接上靠 `resp.stream_id` 找回是哪条流
+  // （见 `send_h2_response`）；为 0 时连接被判成 h1，响应体走
+  // `to_string()` 序列化成一条 HTTP/1.1 报文，而 h2 对端在等 HEADERS/DATA 帧
+  // —— 一个字节都解析不出来，请求**静默挂死**（没有错误、没有日志，只有超时）。
+
   // 交给 HTTP 层序列化并异步写出。压缩、keep-alive 判定、写队列串行化都在
   // 那里面（对 deferred 响应同样成立）。
   http_->send_response(client, r.raw());
@@ -1943,7 +2020,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
 // 而实现（`uvcpp_http_server.cpp:570-574`）是查到 `contexts_.end()` 就直接
 // `return UV_ECANCELED`，从头到尾没碰过 `done`。以实现为准。
 
-void uvcpp_web_app::stream_begin(uvcpp_web_conn_id id,
+void uvcpp_web_app::stream_begin(uvcpp_web_conn_id id, int32_t stream_id,
                                  uvcpp_http_response& head) {
   uvcpp_tcp_client* client = registry_.client(id);
   if (client == nullptr) {
@@ -1953,10 +2030,11 @@ void uvcpp_web_app::stream_begin(uvcpp_web_conn_id id,
         << "stream_begin：连接 " << id << " 已断开，头部丢弃";
     return;
   }
-  http_->begin_stream(client, head);
+  http_->begin_stream(client, stream_id, head);
 }
 
-int uvcpp_web_app::stream_write(uvcpp_web_conn_id id, std::string bytes,
+int uvcpp_web_app::stream_write(uvcpp_web_conn_id id, int32_t stream_id,
+                                std::string bytes,
                                 std::function<void(int)> done) {
   uvcpp_tcp_client* client = registry_.client(id);
   if (client == nullptr) {
@@ -1968,10 +2046,12 @@ int uvcpp_web_app::stream_write(uvcpp_web_conn_id id, std::string bytes,
     (void)done;
     return UV_ECANCELED;
   }
-  return http_->write_stream(client, bytes, std::move(done));
+  return http_->write_stream(client, stream_id, std::move(bytes),
+                             std::move(done));
 }
 
-void uvcpp_web_app::stream_end(uvcpp_web_conn_id id, bool close_after) {
+void uvcpp_web_app::stream_end(uvcpp_web_conn_id id, int32_t stream_id,
+                               bool close_after) {
   uvcpp_tcp_client* client = registry_.client(id);
   if (client == nullptr) {
     // 连接已经没了，"结束"这件事已经由断开本身完成了。**这里必须是空操作**
@@ -1980,7 +2060,7 @@ void uvcpp_web_app::stream_end(uvcpp_web_conn_id id, bool close_after) {
         << "stream_end：连接 " << id << " 已断开，无需收尾";
     return;
   }
-  http_->end_stream(client, close_after);
+  http_->end_stream(client, stream_id, close_after);
 }
 
 void uvcpp_web_app::stream_attach_file(uvcpp_web_conn_id id,
@@ -2330,6 +2410,17 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   // 请求体是**搬**过来的（move_buf），不是拷贝 —— 上传大文件时这一步省掉
   // 一倍内存。此后 `req` 的 body 就空了，HTTP 层那边也不会再用它。
   ctx->request().take_from(req);
+
+  // **流号必须在处理函数跑之前落到响应上，这是唯一不晚的时刻。**
+  //
+  // 两件事都要它：① 流式响应的**组帧方式**由协议决定（h1 的 chunked 帧 vs
+  // h2 的裸字节），而 `write_chunk()` 出现在处理函数体内 —— 那时框架还没装
+  // sink，问不出协议；② `send_response()` 靠 `resp.stream_id` 找回这条流。
+  //
+  // 走 `set_stream_id()` 而不是 `response().raw().stream_id = ...`：`raw()`
+  // 的非 const 版会先 `sync_meta()`，此刻 body 还空着，那会写死一个
+  // `content-length: 0`，之后处理函数设的 body 长度就再也改不动了。
+  ctx->response().set_stream_id(req.stream_id);
 
   const uvcpp_web_connection* conn = registry_.find(id);
   if (conn != nullptr) {

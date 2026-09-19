@@ -9,7 +9,10 @@
 
 #if UVCPP_NGHTTP2_ENABLE
 
+#include <chrono>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -17,6 +20,29 @@
 
 namespace uvcpp {
 namespace {
+
+/// 单调毫秒。**不用 `uv_now`**：本层刻意不依赖 libuv（`uvcpp_h2_session` 也能
+/// 被非 uv 的宿主驱动），而墙钟会被系统对时往回拨 —— 令牌桶按回拨算会凭空
+/// 补出一大笔额度，正好把"洪泛"这件事放过去。
+uint64_t monotonic_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+/// 控制帧洪泛的令牌桶（RFC 9113 §10.5）。
+///
+/// SETTINGS / PING / RST_STREAM / PRIORITY / WINDOW_UPDATE 都不带业务数据，
+/// 但每一个都要花 CPU 处理，而 PING 还要我们回一个 ACK —— 攻击者花 1 个包
+/// 换我们 1 个包，**是放大器**。一个 64 KiB 的连接窗口对这类帧没有约束，
+/// 所以只能自己数。
+///
+/// 取值：正常客户端在连接建立的头一秒会发两三个 SETTINGS/PING，稳态近乎为零，
+/// 所以 64 的突发额度对任何正常客户端都够（包括同时开上百条流的）；32 个/秒
+/// 的补充速率则远低于"能让服务端忙起来"的量级。
+const double H2_CONTROL_BURST          = 64.0;
+const double H2_CONTROL_REFILL_PER_SEC = 32.0;
 
 /// 头名已经按约定是小写存储，但比较仍走大小写无关 —— 依赖"上游确实小写了"
 /// 是那种出事后很难查的假设。
@@ -72,8 +98,120 @@ struct uvcpp_h2_session::impl {
   size_t              max_header_list = 64u * 1024u;
   int                 last_error      = 0;
 
+  /// 收尾时要发的 GOAWAY 错误码。正常关闭是 NO_ERROR；被上面那个令牌桶拦下来
+  /// 时改成 ENHANCE_YOUR_CALM —— 连接层收尾时读它，否则"为什么关的"这层
+  /// 信息会在半路丢掉，对端只看到一个 NO_ERROR，像是我们自己正常退出。
+  uint32_t goaway_code = NGHTTP2_NO_ERROR;
+
+  // 控制帧令牌桶（见 `monotonic_ms` 上面那段）。
+  uint64_t ctl_last_ms    = 0;
+  double   ctl_tokens     = H2_CONTROL_BURST;
+  bool     flood_tripped  = false;  ///< 已经越界
+  bool     flood_reported = false;  ///< 已经通知过连接层（只通知一次）
+
+  /// 致命错误同样只通知一次，理由和洪泛那条**是同一个**：`on_fatal` 的接收方
+  /// 会去关连接，而关连接是一次性动作。会话一旦致命就再也回不到可用状态，重复
+  /// 通知的收益为零，代价是"调用方还没察觉连接已关"之前塞进来的每一批字节都换
+  /// 一次关连接指令。
+  bool fatal_reported = false;
+
+  /// 收口 `submit_request2` 的返回值。
+  ///
+  /// 它唯一值得单独对待的失败是**本端流号用完**（客户端每开一条流号 +2，上限
+  /// 2^31）。已核：`NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE` 在 nghttp2 源码里
+  /// **只**从 `nghttp2_submit.c` 的 `stream_id == -1` 那一支返回 —— 也就是只有
+  /// 自己发号的一方（客户端）碰得到，服务端不适用。
+  ///
+  /// 按 RFC 9113 §5.1.1，这时该发 GOAWAY(NO_ERROR)：告诉对端"这个连接上不会
+  /// 再有新流了，要开新流请重连"。不发的话调用方只拿到一个负值，对端什么都
+  /// 等不到，只能耗到超时。
+  int32_t finish_submit_request(int32_t sid) {
+    if (sid == NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE) {
+      nghttp2_submit_goaway(session, NGHTTP2_FLAG_NONE, 0, NGHTTP2_NO_ERROR,
+                            nullptr, 0);
+    }
+    return sid;
+  }
+
+  /// 控制帧是否还在预算内。返回 false 表示**已经洪泛** —— 本函数只负责置位，
+  /// 真正的收尾在 `recv()` 里做：不能在 `mem_recv` 的栈上重入 `drain`。
+  bool control_frame_ok() {
+    const uint64_t now = monotonic_ms();
+    if (ctl_last_ms == 0) ctl_last_ms = now;
+    const uint64_t dt = now - ctl_last_ms;
+    if (dt > 0) {
+      ctl_last_ms = now;
+      ctl_tokens += static_cast<double>(dt) * H2_CONTROL_REFILL_PER_SEC / 1000.0;
+      if (ctl_tokens > H2_CONTROL_BURST) ctl_tokens = H2_CONTROL_BURST;
+    }
+    if (ctl_tokens < 1.0) {
+      flood_tripped = true;
+      return false;
+    }
+    ctl_tokens -= 1.0;
+    return true;
+  }
+
   std::map<int32_t, uvcpp_h2_stream>            streams;
   std::map<int32_t, std::unique_ptr<out_body>>  out_bodies;
+
+  // -------------------------------------------------------------------
+  // 流式响应（`submit_headers` + `submit_data`）
+  //
+  // 与上面那套"一条流一块 body"的区别是**块数不定、到达时间不定**。所以每条
+  // 流一个队列，nghttp2 的 data provider 从队首取字节。
+  //
+  // `frame_pending` 是这套设计的关键：nghttp2 允许一条流上排队多个 data frame，
+  // 而它们是**按提交顺序**各自读自己的 provider 的。每块提交一次 frame，就会
+  // 有几个 frame 同时指着同一个队列，第二个 frame 会从头再读一遍已经发过的
+  // 字节。所以一条流**同时只允许一个** data frame 在飞，队列排空之前不撤，
+  // 靠它自己回头再取。
+  // -------------------------------------------------------------------
+  struct out_chunk {
+    std::string              data;
+    size_t                   offset     = 0;
+    bool                     end_stream = false;
+    std::function<void(int)> done;
+  };
+
+  struct out_stream {
+    std::deque<out_chunk> chunks;
+    bool                  frame_pending = false;
+    bool                  ended         = false;  ///< 已提交过 end_stream
+    /// 队空时 provider 返回过 `NGHTTP2_ERR_DEFERRED`，那条 data frame 现在挂在
+    /// nghttp2 的延迟队列里 —— 新数据入队时必须显式 `resume` 才叫得醒。
+    bool                  deferred      = false;
+  };
+
+  std::map<int32_t, out_stream> out_streams;
+
+  /// 已上线、等着回调的块（结果码已绑好）。由传输层在写完成之后取走。
+  std::vector<std::function<void()>> completed;
+
+  /// 把一块的 `done` 绑上结果码塞进 `completed`。
+  ///
+  /// **每一块的 `done` 都必须恰好跑一次** —— 包括"流中途没了"的场合。少了
+  /// 这一条，`uvcpp_web_response::flush_stream` 的收尾回调永远不回来，那条
+  /// 流式响应就永久挂起（这是 `uvcpp_web_stream_sink::stream_write` 写明的
+  /// 契约）。
+  void retire_chunk(out_stream& os, int code) {
+    out_chunk& c = os.chunks.front();
+    if (c.done) {
+      std::function<void(int)> f = std::move(c.done);
+      completed.push_back([f, code]() { f(code); });
+    }
+    const bool end = c.end_stream;
+    os.chunks.pop_front();
+    if (end) os.ended = true;
+  }
+
+  /// 流没了：把还没上线的块全部按 @p code 结掉。
+  void cancel_stream_out(int32_t id, int code) {
+    auto it = out_streams.find(id);
+    if (it == out_streams.end()) return;
+    while (it->second.chunks.size() > 0) retire_chunk(it->second, code);
+    out_streams.erase(it);
+  }
 
   /// 为 @p id 换一块新的 body（旧的丢弃）。返回的指针在流关闭前一直有效。
   out_body* stash_body(int32_t id, std::string body) {
@@ -280,6 +418,20 @@ struct uvcpp_h2_session::impl {
   // ---------------------------------------------------------------
 
   void on_frame_recv(const nghttp2_frame* frame) {
+    // 计数必须在按流号查表**之前** —— 这些帧的 `stream_id` 恒为 0，
+    // 落在下面那个 `streams.end()` 的早返回上，一个都数不到。
+    switch (frame->hd.type) {
+      case NGHTTP2_SETTINGS:
+      case NGHTTP2_PING:
+      case NGHTTP2_RST_STREAM:
+      case NGHTTP2_PRIORITY:
+      case NGHTTP2_WINDOW_UPDATE:
+        if (!control_frame_ok()) return;
+        break;
+      default:
+        break;
+    }
+
     const int32_t id = frame->hd.stream_id;
     auto it = streams.find(id);
     if (it == streams.end()) return;
@@ -352,6 +504,9 @@ struct uvcpp_h2_session::impl {
     if (cbs.on_close) cbs.on_close(*owner, id, error_code);
     // 回调之后流引用即失效，所以放最后。
     out_bodies.erase(id);
+    // 流式那条路的收尾：还在排队的块这辈子都发不出去了，但它们的 `done`
+    // **必须**跑 —— 否则发起方（框架的流式响应）永远等不到结算。
+    cancel_stream_out(id, UV_ECANCELED);
     streams.erase(it);
   }
 
@@ -414,6 +569,53 @@ struct uvcpp_h2_session::impl {
     if (ob->offset >= ob->data.size()) *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     return static_cast<nghttp2_ssize>(n);
   }
+
+  /// 流式响应的 data provider。`source->ptr` 是那条流的 `out_stream*`
+  /// （`out_streams` 是 `std::map`，节点地址稳定，插入别的流不会把它搬走）。
+  ///
+  /// **队列空但还没 END_STREAM 时返回 `NGHTTP2_ERR_DEFERRED`** —— 这是"以后
+  /// 还会有"的**唯一**表达方式（nghttp2.h 的 provider 契约原话：postpone 靠
+  /// 返回 DEFERRED）。返回 0 不是"稍后再来"，而是"这一帧就是 0 字节"：
+  /// `nghttp2_session_pack_data` 会照 0 的长度组一个空 DATA 帧，而 `eof` 仍是
+  /// 0 ⇒ 同一帧被反复重打包，`drain()` 的循环再也退不出来（这是实打实撞过的：
+  /// 一次卡死里 60 秒刷了 1370 万行，`out_` 无上限增长）。
+  ///
+  /// 代价是醒来必须由我们负责：`submit_data` 入队新块时叫一次
+  /// `nghttp2_session_resume_data`。延迟标记记在 `out_stream::deferred` 上。
+  static nghttp2_ssize cb_read_stream(nghttp2_session*, int32_t, uint8_t* buf,
+                                      size_t length, uint32_t* data_flags,
+                                      nghttp2_data_source* source, void* ud) {
+    impl* self = self_of(ud);
+    auto* os   = static_cast<out_stream*>(source->ptr);
+    size_t n = 0;
+    while (os->chunks.size() > 0 && n < length) {
+      out_chunk&   c    = os->chunks.front();
+      const size_t left = c.data.size() - c.offset;
+      const size_t take = (left < length - n) ? left : (length - n);
+      if (take > 0) {
+        std::memcpy(buf + n, c.data.data() + c.offset, take);
+        c.offset += take;
+        n += take;
+      }
+      if (c.offset >= c.data.size()) {
+        // 这块整块交出去了。END_STREAM 的那一块发完就到此为止，后面的块
+        // （如果有）不该存在 —— `submit_data` 已经挡住了。
+        const bool end = c.end_stream;
+        self->retire_chunk(*os, 0);
+        if (end) {
+          *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+          break;
+        }
+      } else {
+        break;  // 缓冲区满了，这块还没发完
+      }
+    }
+    if (n == 0 && (*data_flags & NGHTTP2_DATA_FLAG_EOF) == 0) {
+      os->deferred = true;
+      return NGHTTP2_ERR_DEFERRED;
+    }
+    return static_cast<nghttp2_ssize>(n);
+  }
 };
 
 // =========================================================================
@@ -470,24 +672,49 @@ int uvcpp_h2_session::init(const callbacks& cbs, size_t max_header_list_size,
 
 int uvcpp_h2_session::recv(const char* data, size_t len) {
   if (!impl_->session || len == 0) return 0;
+  // 已经致命之后**不再进 nghttp2**：`mem_recv` 一旦返回致命错误，会话就停在
+  // 未定义状态上，官方契约是不许再用。原样把它当时给的那个错误回给调用方。
+  // 顺带这也是"只通知一次"能成立的前提 —— 不在这里拦住的话，每次 recv 都会
+  // 在 nghttp2 里重新走一遍错误路径。
+  if (impl_->fatal_reported) return impl_->last_error != 0 ? impl_->last_error : -1;
   const nghttp2_ssize rv = nghttp2_session_mem_recv2(
       impl_->session, reinterpret_cast<const uint8_t*>(data), len);
   if (rv < 0) {
     impl_->last_error = static_cast<int>(rv);
     // 这里之后**不许再碰 impl_** —— on_fatal 的接收方可以关掉连接，
     // 而连接一关就可能把这个会话一起放掉。
-    if (impl_->cbs.on_fatal) impl_->cbs.on_fatal(*this, static_cast<int>(rv));
+    if (!impl_->fatal_reported) {
+      impl_->fatal_reported = true;
+      if (impl_->cbs.on_fatal) impl_->cbs.on_fatal(*this, static_cast<int>(rv));
+    }
     return static_cast<int>(rv);
   }
   // 输入必须被完整消费。没吃完而返回非负值是 nghttp2 的"pause"语义，
   // 我们没开 pause，走到这里说明状态机不对 —— 当致命处理。
   if (rv != static_cast<nghttp2_ssize>(len)) {
     impl_->last_error = -1;
-    if (impl_->cbs.on_fatal) impl_->cbs.on_fatal(*this, -1);
+    if (!impl_->fatal_reported) {
+      impl_->fatal_reported = true;
+      if (impl_->cbs.on_fatal) impl_->cbs.on_fatal(*this, -1);
+    }
     return -1;
+  }
+
+  // 控制帧洪泛。收尾**必须**放在 `mem_recv` 之外，理由与上面那条 fatal 相同：
+  // `on_fatal` 的接收方会走 `shutdown()`，那一步会 `drain()`（= `mem_send`），
+  // 而在 `mem_recv` 的栈上重入 `mem_send` 是 nghttp2 没保证过的用法。
+  if (impl_->flood_tripped && !impl_->flood_reported) {
+    impl_->flood_reported = true;
+    impl_->goaway_code    = NGHTTP2_ENHANCE_YOUR_CALM;
+    // 从这里往下**不许再碰 `impl_`**：接收方可以关掉连接，而连接一关就可能
+    // 把这个会话一起放掉。`on_fatal` 也按值先取出来。
+    if (impl_->cbs.on_fatal) impl_->cbs.on_fatal(*this, NGHTTP2_ENHANCE_YOUR_CALM);
+    return UV_ECANCELED;
   }
   return 0;
 }
+
+uint32_t uvcpp_h2_session::goaway_code() const { return impl_->goaway_code; }
 
 int uvcpp_h2_session::drain(std::string& out) {
   if (!impl_->session) return 0;
@@ -520,54 +747,79 @@ namespace {
 bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
                        std::vector<std::string>& store,
                        std::vector<nghttp2_nv>&  nv) {
-  store.reserve(resp.headers.size() + 2);
-  store.push_back(std::to_string(static_cast<int>(resp.status_code)));
+  const int status = static_cast<int>(resp.status_code);
 
-  const size_t body_len = resp.body.size();
-  bool         has_cl   = resp.has_header("content-length");
+  store.clear();
+  store.reserve(resp.headers.size() + 2);
+  store.push_back(std::to_string(status));
+
+  // `content-length` 由这里统一发**恰好一份**：`resp.headers` 里那份只提供值，
+  // 不直接上线。原写法是"循环里照发、末尾再补一份"，于是同一份长度发了两遍 ——
+  // nghttp2 收到重复的 `content-length` 一律判 -531（Invalid HTTP header field）
+  // 并 RST 整条流，客户端表现为**一条响应都收不到**。这个洞只在框架侧暴露：
+  // 服务端自己的用例响应从不带 `content-length`，而框架总会设它。
+  std::string cl_value;
+  bool        has_cl = false;
+
+  // 名字与值**成对**攒：`names[i]` 对应 `store[i]`，一次循环同时推进。
+  //
+  // 别改成"先攒值、再拿 `resp.headers` 平行走一遍取名字"：那两遍的过滤条件
+  // （连接专属头、content-length）必须**逐字相同**，改一处忘另一处就会整体
+  // 错位一格 —— 之前这里就错位成了 `content-length: uvcpp` / `server: 17`，
+  // 客户端拿到一份合法但内容错乱的头部。单遍成对攒没有这个失败模式。
+  //
+  // 名字指向 `resp.headers` 或字面量，**都比本次调用活得久**；`nghttp2_submit_*`
+  // 是在本函数返回之后才跑的，指向局部量的名字会当场变成悬垂。
+  std::vector<const char*> names;
+  names.push_back(":status");
 
   for (size_t i = 0; i < resp.headers.size(); ++i) {
     const http_header& h = resp.headers[i];
     if (is_connection_specific(h.name)) continue;  // 发出时一律剥掉
+    if (name_is(h.name, "content-length")) {
+      cl_value = h.value;
+      has_cl   = true;
+      continue;  // 值已记下，末尾统一发
+    }
     if (!nghttp2_check_header_name(
             reinterpret_cast<const uint8_t*>(h.name.data()), h.name.size()) ||
         !nghttp2_check_header_value_rfc9113(
             reinterpret_cast<const uint8_t*>(h.value.data()), h.value.size())) {
       return false;
     }
+    names.push_back(h.name.c_str());
     store.push_back(h.value);
-    // `content-length` 由下面统一补，避免出现两份。
-    if (name_is(h.name, "content-length")) has_cl = false;
   }
 
   // body 非空却没有 `content-length`：补一个。h2 里它只是参考值，
   // 但缺了它下游的"边收边判"就没依据。
-  if (!omit_body && !has_cl && body_len > 0 &&
-      !status_is_bodyless(static_cast<int>(resp.status_code))) {
-    store.push_back(std::to_string(body_len));
+  //
+  // 无实体状态不用单独判：`submit_response` 已经把它们的 `omit_body` 强制成
+  // true（见那里的注释），所以下面这个 `!omit_body` 就是那个判据。
+  if (!has_cl && !omit_body && resp.body.size() > 0) {
+    cl_value = std::to_string(resp.body.size());
+    has_cl   = true;
+  }
+  // nghttp2 自己就会拒收：1xx 一律不许有 `content-length`，204 只认 "0"。
+  // 与其让它把整条流 RST 掉，不如在这里按同一套规则裁掉。
+  if (status / 100 == 1 || (status == 204 && cl_value != "0")) has_cl = false;
+
+  if (has_cl) {
+    names.push_back("content-length");
+    store.push_back(cl_value);
   }
 
   nv.clear();
-  nv.reserve(store.size());
-  auto add = [&nv](const char* k, const std::string& v) {
+  nv.reserve(names.size());
+  for (size_t i = 0; i < names.size(); ++i) {
     nghttp2_nv e;
-    e.name     = reinterpret_cast<uint8_t*>(const_cast<char*>(k));
-    e.value    = reinterpret_cast<uint8_t*>(const_cast<char*>(v.data()));
-    e.namelen  = std::strlen(k);
-    e.valuelen = v.size();
+    e.name     = reinterpret_cast<uint8_t*>(const_cast<char*>(names[i]));
+    e.value    = reinterpret_cast<uint8_t*>(const_cast<char*>(store[i].data()));
+    e.namelen  = std::strlen(names[i]);
+    e.valuelen = store[i].size();
     e.flags    = NGHTTP2_NV_FLAG_NONE;
     nv.push_back(e);
-  };
-
-  add(":status", store[0]);
-  // store[0] 是 status，之后是各值（顺序与 push 顺序一致）。这里重建顺序：
-  size_t si = 1;
-  for (size_t i = 0; i < resp.headers.size(); ++i) {
-    const http_header& h = resp.headers[i];
-    if (is_connection_specific(h.name)) continue;
-    add(h.name.c_str(), store[si++]);
   }
-  if (si < store.size()) add("content-length", store[si]);  // 上面补的那个
   return true;
 }
 
@@ -582,7 +834,9 @@ int uvcpp_h2_session::submit_response(int32_t stream_id,
   // 一条流只提交一次完整响应。放过去的话 `stash_body` 会**换掉**那块正在被
   // nghttp2 的 data provider 引用的缓冲（它按地址记着），于是一次应用层的手误
   // 就变成 use-after-free。宁可在这里返回错误。
-  if (sit->second.state == h2_stream_state::SENT) return UV_EALREADY;
+  // 一次提交 = 一条流只发一套响应。`HEADERS_SENT`（流式那条路的头部已经发过）
+  // 也必须挡在这里，否则会往同一条流上再发一套 HEADERS。
+  if (sit->second.state != h2_stream_state::OPEN) return UV_EALREADY;
   sit->second.state = h2_stream_state::SENT;
 
   // 204/304/1xx 按协议就不带 body，调用方就算忘了 omit_body 也不能发出 DATA。
@@ -612,12 +866,113 @@ int uvcpp_h2_session::submit_response(int32_t stream_id,
                                   &prd);
 }
 
+int uvcpp_h2_session::submit_headers(int32_t stream_id,
+                                     const uvcpp_http_response& resp) {
+  if (!impl_->session) return UV_EINVAL;
+  auto sit = impl_->streams.find(stream_id);
+  if (sit == impl_->streams.end()) return UV_EINVAL;
+  // `SENT` 那格留给"整条响应一次发完"。这里用 `HEADERS_SENT` 与它区分开：
+  // 走错路（先 `submit_headers` 又 `submit_response`）必须当场被挡住，否则
+  // 两条路会各自往同一条流上发一套 HEADERS。
+  if (sit->second.state != h2_stream_state::OPEN) return UV_EALREADY;
+  sit->second.state = h2_stream_state::HEADERS_SENT;
+
+  std::vector<std::string> store;
+  std::vector<nghttp2_nv>  nv;
+  // `omit_body = true` 走的是"不补 content-length"那一支，正是流式要的：
+  // 长度此刻不知道，补一个就是在说谎。`resp` 里若已写明就原样发出。
+  if (!build_response_nv(resp, /*omit_body=*/true, store, nv)) return UV_EINVAL;
+
+  impl_->out_streams[stream_id];  // 占位，让 provider 的指针立刻有效
+  return nghttp2_submit_headers(impl_->session, NGHTTP2_FLAG_NONE, stream_id,
+                                nullptr, nv.data(), nv.size(), nullptr);
+}
+
+int uvcpp_h2_session::submit_data(int32_t stream_id, const char* data,
+                                  size_t len, bool end_stream,
+                                  std::function<void(int)> done) {
+  if (!impl_->session) return UV_EINVAL;
+  auto sit = impl_->streams.find(stream_id);
+  if (sit == impl_->streams.end()) return UV_EINVAL;
+  if (sit->second.state != h2_stream_state::HEADERS_SENT) return UV_EALREADY;
+
+  impl::out_stream& os = impl_->out_streams[stream_id];
+  // 已经宣告过 END_STREAM，不能再补字节。
+  //
+  // 判据必须**同时**看"收尾那块还在队里"这一条：`os.ended` 是 `retire_chunk`
+  // 里落的，也就是那块**发出去之后**才为真。只看它的话，在"收尾块已入队、还没
+  // 发出去"这个窗口里再提交一块是允许的 —— 而 provider 取到收尾块就置 EOF 收工，
+  // 后面那块永远没人来读，它的 `done` 也就永远不跑。调用方把整条流的收尾挂在
+  // 那个 `done` 上（见 `retire_chunk` 的注释），于是流式响应永久挂起。
+  if (os.ended) return UV_EALREADY;
+  if (!os.chunks.empty() && os.chunks.back().end_stream) return UV_EALREADY;
+
+  // **先提交 frame，再入队。** 反过来的话，提交失败就把一块（连同它的 `done`）
+  // 留在了队首 —— 没有 frame 会来读它，那个 `done` 于是永远不跑，而契约是
+  // **恰好一次**（`stream_write` 的调用方把整条流的收尾挂在它上面）。在这里
+  // 当场结算也不行：本函数的调用方（`uvcpp_http_server::write_stream`）拿到
+  // 非 0 会**自己**按失败结算那一块，两边都结就是同一个 `done` 跑两次。
+  //
+  // 所以让"块在队列里"与"frame 在飞"严格同生共死：提交不接受，块压根不入队，
+  // 形参 `done` 随本函数返回一起析构，调用方那边的返回值语义（非 0 = 未受理，
+  // `done` 不会被调）原样成立。
+  //
+  // 这个顺序是安全的：`nghttp2_submit_data2` 只是把出站项排进队列，provider
+  // 要等到 `mem_send`（也就是随后那次 `flush()`）才会被调，中间没有人读队列。
+  if (!os.frame_pending) {
+    nghttp2_data_provider2 prd;
+    prd.source.ptr    = &os;
+    prd.read_callback = &impl::cb_read_stream;
+    // `NGHTTP2_FLAG_END_STREAM` 必须在这里给（nghttp2.h：给了它，"**最后一个**
+    // DATA 帧"才带 END_STREAM）。挂在这里而不是提交时按需给，是因为提交发生在
+    // 第一块数据到的时候 —— 那时根本还不知道这条流会不会收尾。
+    //
+    // 给了它不会让中间那些帧也带上 END_STREAM：`nghttp2_session_pack_data` 只在
+    // provider 置了 EOF 的那一次才把它写进 `frame->hd.flags`。所以这个 flag 的
+    // 语义是"允许收尾"，真正收尾仍由 `end_stream` 那一块（`cb_read_stream` 里
+    // 置 EOF）决定。
+    //
+    // 少了它症状很隐蔽：帧一个不少地在线上跑，客户端也照常收到 body，只是
+    // **永远等不到 END_STREAM** —— 表现为流式响应挂到超时，而报文肉眼看不出问题。
+    const int rv = nghttp2_submit_data2(impl_->session, NGHTTP2_FLAG_END_STREAM,
+                                        stream_id, &prd);
+    if (rv != 0) return rv;
+    os.frame_pending = true;
+  }
+
+  // 队空过 ⇒ provider 已把这条 data frame 挂进 nghttp2 的延迟队列，得显式叫醒
+  // （`cb_read_stream` 的注释里写了为什么只能用这个机制）。
+  //
+  // 放在入队**之前**：`resume` 只是把出站项重新排进队列，provider 要等到下一次
+  // `mem_send` 才被调，中间没人读队列 —— 所以"先叫醒、再放数据"是安全的；反过来
+  // 一旦 `resume` 失败，这块就留在了一条没有 frame 来读它的队里，那个 `done`
+  // 永远不跑，正好是上面那段注释在防的事。
+  if (os.deferred) {
+    const int rrv = nghttp2_session_resume_data(impl_->session, stream_id);
+    if (rrv != 0) return rrv;
+    os.deferred = false;
+  }
+
+  impl::out_chunk c;
+  if (data != nullptr && len > 0) c.data.assign(data, len);
+  c.end_stream = end_stream;
+  c.done       = std::move(done);
+  os.chunks.push_back(std::move(c));
+  return 0;  // 有 frame 在飞（刚提的，或者之前那个），它会回头把这块取走
+}
+
+void uvcpp_h2_session::take_completed(std::vector<std::function<void()>>& out) {
+  out.swap(impl_->completed);
+}
+
 int uvcpp_h2_session::submit_status(int32_t stream_id, int status,
                                     const std::string& body) {
   if (!impl_->session) return UV_EINVAL;
   auto sit = impl_->streams.find(stream_id);
   if (sit == impl_->streams.end()) return UV_EINVAL;
-  if (sit->second.state == h2_stream_state::SENT) return UV_EALREADY;
+  // 一次提交 = 一条流只发一套响应。`HEADERS_SENT`（流式那条路的头部已经发过）
+  // 也必须挡在这里，否则会往同一条流上再发一套 HEADERS。
+  if (sit->second.state != h2_stream_state::OPEN) return UV_EALREADY;
   sit->second.state = h2_stream_state::SENT;
 
   const std::string code = std::to_string(status);
@@ -703,8 +1058,8 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   }
 
   if (body.empty()) {
-    return nghttp2_submit_request2(impl_->session, nullptr, nv.data(), nv.size(),
-                                   nullptr, nullptr);
+    return impl_->finish_submit_request(nghttp2_submit_request2(
+        impl_->session, nullptr, nv.data(), nv.size(), nullptr, nullptr));
   }
 
   // data_prd 必须在**这一次**提交里给出：`submit_request2` 收到 NULL 时
@@ -716,8 +1071,8 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   prd.source.ptr    = pending.get();
   prd.read_callback = &impl::cb_read_body;
 
-  const int32_t sid = nghttp2_submit_request2(
-      impl_->session, nullptr, nv.data(), nv.size(), &prd, nullptr);
+  const int32_t sid = impl_->finish_submit_request(nghttp2_submit_request2(
+      impl_->session, nullptr, nv.data(), nv.size(), &prd, nullptr));
   if (sid < 0) return sid;
 
   impl_->out_bodies[sid] = std::move(pending);

@@ -22,12 +22,18 @@ uvcpp_http_request::uvcpp_http_request() {}
 
 uvcpp_http_request::~uvcpp_http_request() {}
 
+// 拷贝必须**逐字段列全**：这两个函数是手写的，不是编译器生成的，所以新加字段
+// 时编译器一声不吭 —— 少拷一个字段的后果是静默的。`stream_id` 就是这么被漏掉的：
+// 它加得比这两个函数晚，于是 h2 请求经过 `uvcpp_web_request::take_from()`（内部是
+// `src_ = src`）之后流号归零，框架把响应按 HTTP/1.1 序列化喂给 h2 连接，请求挂死
+// 且没有任何日志。**加字段时回来改这里。**
 uvcpp_http_request::uvcpp_http_request(const uvcpp_http_request& other)
     : method(other.method),
       url(other.url),
       version(other.version),
       headers(other.headers),
-      body(other.body) {}
+      body(other.body),
+      stream_id(other.stream_id) {}
 
 uvcpp_http_request& uvcpp_http_request::operator=(const uvcpp_http_request& other) {
   if (this != &other) {
@@ -36,6 +42,7 @@ uvcpp_http_request& uvcpp_http_request::operator=(const uvcpp_http_request& othe
     version = other.version;
     headers = other.headers;
     body.clone(other.body);
+    stream_id = other.stream_id;
   }
   return *this;
 }

@@ -413,6 +413,10 @@ class UVCPP_API uvcpp_web_response {
   // 交出去 —— 少了 CRLF、长度按字符数而不是字节数算，都是只在某些负载下
   // 才暴露的错。
   //
+  // **h2 上没有那层帧。** 同一句 `write_chunk("data: 1\n\n")` 在一条 h2 流上
+  // 写出去的**恰好就是这 10 个字节**：DATA 帧由会话层组，本层给裸字节。组帧的
+  // 判据是协议（`stream_id`），不是调用方 —— 对使用者而言 API 完全一样。
+  //
   // 流开始之后 `body()` / `text()` / `json()` 这些**不再有意义**，不要再调。
 
   /**
@@ -562,6 +566,16 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_http_response& raw();
   const uvcpp_http_response& raw() const;
 
+  /**
+   * @brief 标上这条响应属于哪条 h2 流（0 = HTTP/1.1）。**由框架在派发之前调**。
+   *
+   * 刻意不走 `raw()`：那个非 const 版会先 `sync_meta()`，而在这里跑一次是在
+   * body 还空着的时候 —— 它会写死一个 `content-length: 0`，之后处理函数设的
+   * body 就再也改不动它了（`sync_meta()` 判的是"已经有长度头了吗"）。
+   */
+  void set_stream_id(int32_t stream_id) { resp_.stream_id = stream_id; }
+  int32_t stream_id() const { return resp_.stream_id; }
+
  private:
   /// 这个状态码是否不允许有 body（1xx / 204 / 304）。
   bool status_forbids_body() const;
@@ -581,6 +595,14 @@ class UVCPP_API uvcpp_web_response {
   /// 共用 —— 分成两份写必然漂移，而漂移的后果是某条路带着上一次下发的
   /// `file_started_` 起步，于是 `pump_stream()` 以为已经起步过，**一个字节都不读**。
   void reset_stream_state();
+
+  /// 这条响应挂在一条 h2 流上（`stream_id != 0`）。
+  ///
+  /// **组帧方式的判据只能是它，不能问 sink。** `write_chunk()` 完全可能出现在
+  /// 处理函数体内，而 sink 是处理函数返回之后才装上的 —— 那一刻已经晚了：
+  /// 帧已经按 h1 的形状攒进了 `pending_buf_`。所以框架在**派发之前**就把流号
+  /// 写进 `raw()`，本层只读它。
+  bool on_h2_stream() const { return resp_.stream_id != 0; }
 
   // --- 分片下发的内部动作 ---
   /// 追加一块 body，**不组帧**（与 `write_chunk` 的唯一区别就是少了 hex 帧）。

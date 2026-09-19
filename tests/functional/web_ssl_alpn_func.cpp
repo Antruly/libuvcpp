@@ -1,5 +1,5 @@
 /**
- * @file tests/functional/web_ssl_h2_alpn_func.cpp
+ * @file tests/functional/web_ssl_alpn_func.cpp
  * @brief ALPN 协商:六种「客户端宣告 × 服务端选择」组合。
  *
  * 这批是 HTTP/2 的地基,而地基里最容易错的一处是**没交集时怎么办**。
@@ -366,7 +366,7 @@ struct scenario_server {
 }  // namespace
 
 int main() {
-  std::cout << "[web_ssl_h2_alpn] OpenSSL " << OpenSSL_version(OPENSSL_VERSION_STRING)
+  std::cout << "[web_ssl_alpn] OpenSSL " << OpenSSL_version(OPENSSL_VERSION_STRING)
             << std::endl;
 
   // ---- 服务端:自签证书 + 宣告名单 --------------------------------------
@@ -468,16 +468,16 @@ int main() {
   }
 
   if (g_failures != 0) {
-    std::cerr << "[web_ssl_h2_alpn] " << g_failures << " failure(s)" << std::endl;
+    std::cerr << "[web_ssl_alpn] " << g_failures << " failure(s)" << std::endl;
     return 1;
   }
-  std::cout << "[web_ssl_h2_alpn] all scenarios OK" << std::endl;
+  std::cout << "[web_ssl_alpn] all scenarios OK" << std::endl;
   return 0;
 }
 
 #else
 int main() {
-  std::cout << "[web_ssl_h2_alpn] skipped (needs UVCPP_WEB_ENABLE && UVCPP_OPENSSL_ENABLE)"
+  std::cout << "[web_ssl_alpn] skipped (needs UVCPP_WEB_ENABLE && UVCPP_OPENSSL_ENABLE)"
             << std::endl;
   return 0;
 }

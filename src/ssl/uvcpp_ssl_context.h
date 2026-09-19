@@ -119,6 +119,16 @@ class UVCPP_API uvcpp_ssl_context {
    */
   void set_alpn_select_protos(const std::vector<std::string>& protos);
 
+  /**
+   * @brief 是否已经装过服务端 ALPN 名单。
+   *
+   * 给上层用的：`uvcpp_web_app` 默认要替用户宣告 h2，但**不能覆盖用户自己
+   * 显式设过的名单**（那是他的协议策略，比框架的默认更权威）。没有这个查询口，
+   * 框架只能二选一：要么无条件覆盖，要么一律不设 —— 前者静默改掉用户的配置，
+   * 后者让"默认支持 h2"落空。
+   */
+  bool has_alpn_select() const { return !alpn_select_wire_.empty(); }
+
   // -------------------------------------------------------------------
   // Status
   // -------------------------------------------------------------------

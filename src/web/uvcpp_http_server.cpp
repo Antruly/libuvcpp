@@ -16,6 +16,11 @@
 #include <cstring>
 #include <string>
 
+#if UVCPP_NGHTTP2_ENABLE
+#include "http2/uvcpp_h2_connection.h"
+#include "http2/uvcpp_h2_session.h"
+#endif
+
 namespace uvcpp {
 
 namespace {
@@ -139,6 +144,15 @@ http_stream_handler uvcpp_http_server::find_stream_handler(
 }
 
 void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
+#if UVCPP_NGHTTP2_ENABLE
+  // 分流点。**不需要嗅字节**：`uvcpp_tcp_server` 已经保证"握手没完不投递连接"，
+  // 走到这里 ALPN 已是终局。
+  if (http2_enabled_ && client != nullptr && client->is_tls() &&
+      client->tls_alpn_selected() == "h2") {
+    on_tcp_connection_h2(client);
+    return;
+  }
+#endif
   conn_ctx ctx;
   ctx.parser = new uvcpp_http_parser(http_parser_mode::PARSE_REQUEST);
   // 先自增再赋值：0 要留给"不在登记表里"，不然"第 0 条连接"和"没连接"就分不开了。
@@ -507,6 +521,15 @@ void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   }
   conn_ctx& ctx = it->second;
 
+#if UVCPP_NGHTTP2_ENABLE
+  // h2 连接的延迟应答也回到这里 —— 发起它的处理函数手里只有 client 和 resp，
+  // 没有流 id，所以流 id 是**随 resp 一起传下来**的（见 resp.stream_id）。
+  if (ctx.h2 != nullptr) {
+    send_h2_response(client, resp.stream_id, resp);
+    return;
+  }
+#endif
+
   // Server -> client compression. Done here so deferred responses are covered.
   apply_compression(ctx, resp);
 
@@ -569,6 +592,21 @@ void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client,
   }
   conn_ctx& ctx = it->second;
 
+#if UVCPP_NGHTTP2_ENABLE
+  // h2 上这条入口不该被走到：调用方手上没有"这条连接唯一的那条流"这个前提，
+  // 必须走带 `stream_id` 的重载。真走到了说明调用方还在按 h1 的形状调，此时
+  // 下面第一句就会解引用 `ctx.parser`（h2 连接上恒为 nullptr）。
+  //
+  // 用 stderr 而不是静默返回：调用方在 h1 上走得好好的，切到 h2 忽然少一条
+  // 响应、还没有任何提示，是最难查的一类。
+  if (ctx.h2 != nullptr) {
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] begin_stream(client, resp) 在 HTTP/2 连接"
+                 "上不能用（分不清是哪条流），请改用带 stream_id 的重载\n");
+    return;
+  }
+#endif
+
   // keep-alive 的判定与 `send_response` 同一套（RFC 7230 §6.3）：handler 自己
   // 设了 `connection` 就听它的，否则看这条请求的解析结果。这里**不**决定
   // 关不关 —— 那由 end_stream(close_after) 定，否则头部写完那一刻队列是空的，
@@ -594,19 +632,98 @@ void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client,
   enqueue_write(ctx, client, resp.to_string(/*include_body=*/false));
 }
 
+void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client, int32_t stream_id,
+                                     uvcpp_http_response& resp) {
+  auto it = contexts_.find(client);
+  if (it == contexts_.end()) {
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] Warning: stream dropped, connection is "
+                 "no longer tracked (already closed?)\n");
+    return;
+  }
+  conn_ctx& ctx = it->second;
+
+#if UVCPP_NGHTTP2_ENABLE
+  // h2 上没有"连接级流式"这回事，也没有 chunked 组帧 —— 头部折成 HEADERS、
+  // body 一块块折成 DATA，都由会话层做。长度靠 END_STREAM 划界，所以这里
+  // **不**像 h1 那样要求调用方设 `transfer-encoding`。
+  if (ctx.h2 != nullptr) {
+    if (stream_id == 0) {
+      std::fprintf(stderr,
+                   "[uvcpp_http_server] begin_stream() 在 HTTP/2 连接上收到 "
+                   "stream_id=0 —— 分不清是哪条流，本响应已丢弃\n");
+      return;
+    }
+    resp.stream_id = stream_id;
+    ctx.h2->send_headers(stream_id, resp);
+    return;
+  }
+#endif  // UVCPP_NGHTTP2_ENABLE
+
+  // 走到这里说明这是一条 h1 连接，而调用方给了一个非 0 的流号 —— 那是 h2 的
+  // 身份，在 h1 上没有意义。按 h1 继续会把 `stream_id` 静默丢掉，响应看起来
+  // 正常发出、其实挂在了错误的身份上，所以宁可在这里说清楚。
+  if (stream_id != 0) {
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] begin_stream() 收到 stream_id=%d，但这条"
+                 "连接是 HTTP/1.1（h2 未启用或 ALPN 没协商出 h2）\n",
+                 static_cast<int>(stream_id));
+    return;
+  }
+
+  begin_stream(client, resp);
+}
+
 int uvcpp_http_server::write_stream(uvcpp_tcp_client* client, std::string bytes,
+                                    std::function<void(int)> done) {
+  return write_stream(client, 0, std::move(bytes), std::move(done));
+}
+
+int uvcpp_http_server::write_stream(uvcpp_tcp_client* client, int32_t stream_id,
+                                    std::string bytes,
                                     std::function<void(int)> done) {
   auto it = contexts_.find(client);
   if (it == contexts_.end() || it->second.closing) return UV_ECANCELED;
-  enqueue_write(it->second, client, std::move(bytes), std::move(done));
+  conn_ctx& ctx = it->second;
+
+#if UVCPP_NGHTTP2_ENABLE
+  if (ctx.h2 != nullptr) {
+    if (stream_id == 0) return UV_EINVAL;  // h2 上没有"这条连接那条流"这回事
+    // 会话层收下了就一定会回调 `done`（正常上线是 0，流中途没了是
+    // UV_ECANCELED），所以这里返回 0 是**有保证**的那个 0 —— 与 h1 分支
+    // 返回值那行契约逐条对齐。
+    const int rv = ctx.h2->send_data(stream_id, bytes.data(), bytes.size(),
+                                     /*end_stream=*/false, std::move(done));
+    if (rv != 0) return UV_ECANCELED;  // 未受理，`done` 不会被调
+    return 0;
+  }
+#endif  // UVCPP_NGHTTP2_ENABLE
+
+  enqueue_write(ctx, client, std::move(bytes), std::move(done));
   return 0;
 }
 
 void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, bool close_after) {
+  end_stream(client, 0, close_after);
+}
+
+void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, int32_t stream_id,
+                                   bool close_after) {
   auto it = contexts_.find(client);
   if (it == contexts_.end()) return;
   conn_ctx& ctx = it->second;
   if (ctx.closing) return;
+
+#if UVCPP_NGHTTP2_ENABLE
+  if (ctx.h2 != nullptr) {
+    if (stream_id == 0) return;
+    // 空块 + END_STREAM：h2 里"发完了"就是一个零长度的 DATA 帧带 END_STREAM
+    // （没有 h1 那种终止块）。`close_after` 在 h2 上**不关连接** —— 见头文件。
+    ctx.h2->send_data(stream_id, nullptr, 0, /*end_stream=*/true,
+                      [](int) {});
+    return;
+  }
+#endif  // UVCPP_NGHTTP2_ENABLE
 
   ctx.out_streaming = false;
   if (close_after) ctx.close_requested = true;
@@ -907,6 +1024,12 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
     std::shared_ptr<write_done> inflight;
     inflight.swap(it->second.inflight);
     delete it->second.parser;
+#if UVCPP_NGHTTP2_ENABLE
+    // h2 层**不拥有** client（那是 tcp_server 的 close manager 的责任），
+    // 反过来 client 的上下文拥有 h2 层。对端断开与主动关闭两条路都会汇到这里。
+    delete it->second.h2;
+    it->second.h2 = nullptr;
+#endif
     contexts_.erase(it);
 
     for (size_t i = 0; i < dropped.size(); ++i) {
@@ -917,6 +1040,180 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
 
   if (close_handler_) close_handler_(client);
 }
+
+#if UVCPP_NGHTTP2_ENABLE
+
+void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
+  conn_ctx ctx;
+  ctx.parser = nullptr;  // 与 h2 互斥：h2 连接上没有 llhttp
+  ctx.generation = ++next_generation_;
+  contexts_[client] = ctx;
+
+  // 与本层 h1 那条路**次序一致**：登记之后才跑连接钩子，钩子里的
+  // `connection_generation(client)` 才拿得到身份。
+  if (connection_handler_) {
+    try {
+      connection_handler_(client);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr,
+                   "[uvcpp_http_server] on_connection callback threw: %s\n",
+                   e.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "[uvcpp_http_server] on_connection callback threw (unknown)\n");
+    }
+  }
+
+  auto it = contexts_.find(client);
+  if (it == contexts_.end()) return;  // 钩子里就把连接关了
+  uvcpp_h2_connection* h2 = new uvcpp_h2_connection(client, /*server_side=*/true);
+  it->second.h2 = h2;
+
+  // 回调里**一律重新查表**，不缓存 `conn_ctx*`：会话的回调会同步跑用户处理
+  // 函数，用户函数可以关掉连接，而 `remove_ctx` 会把那个节点连同 h2 层一起删掉。
+  uvcpp_h2_session::callbacks h2c;
+  h2c.on_body = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st,
+                               const char* d, size_t n) {
+    auto cit = contexts_.find(client);
+    if (cit == contexts_.end()) return;
+    conn_ctx::h2_stream_state& ss = cit->second.h2_streams[st.stream_id];
+    if (ss.overflow) return;  // 已经判过超限：后面的块直接丢，别再填回去
+    if (max_body_size_ != 0 && ss.body.size() + n > max_body_size_) {
+      // 超限就停止累积，但**继续收** —— 让这条流走到 on_request_end 才能
+      // 回一个 413。中途 RST 会让对端拿到连接错误而不是一个明确的答复。
+      ss.body.clear();
+      ss.overflow = true;
+      return;
+    }
+    ss.body.append(d, n);
+  };
+  h2c.on_request = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st, bool) {
+    auto cit = contexts_.find(client);
+    if (cit == contexts_.end()) return;
+    // 流 id 只增不复用，正常这里本来就是空的；复位是为了万一有残留状态，也不会
+    // 把上一条流的判定带给新流。**不能 erase** —— 无 body 的请求 `on_request` 和
+    // `on_request_end` 是背靠背的（同上），擦掉之后那条请求就没人派发了。
+    cit->second.h2_streams[st.stream_id] = conn_ctx::h2_stream_state();
+  };
+  h2c.on_request_end = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st) {
+    auto cit = contexts_.find(client);
+    if (cit == contexts_.end()) return;
+    conn_ctx& c = cit->second;
+
+    auto sit = c.h2_streams.find(st.stream_id);
+    if (sit == c.h2_streams.end()) return;
+    conn_ctx::h2_stream_state& ss = sit->second;
+
+    std::string body;
+    body.swap(ss.body);
+    const bool overflow = ss.overflow;
+    // 条目**留着**：延迟应答还要回来读 `is_head` / `accept_encoding`。
+
+    if (overflow) {
+      uvcpp_http_response resp =
+          uvcpp_http_response::make(http_status::PAYLOAD_TOO_LARGE,
+                                    "413 Payload Too Large", 23);
+      send_h2_response(client, st.stream_id, resp);
+      return;
+    }
+
+    uvcpp_http_request req = st.request;
+    req.stream_id = st.stream_id;
+    if (!body.empty()) req.body = uvcpp_buf(body.data(), body.size());
+    dispatch_h2_request(client, st.stream_id, req);
+  };
+  h2c.on_close = [this, client](uvcpp_h2_session&, int32_t sid, uint32_t) {
+    auto cit = contexts_.find(client);
+    if (cit != contexts_.end()) cit->second.h2_streams.erase(sid);
+  };
+
+  uvcpp_h2_connection::callbacks cc;
+  cc.on_disconnect = [](uvcpp_h2_connection&) {};
+
+  // 对端断开 → 框架的关闭回调 → remove_ctx；主动关走 h2 层的 close()，同样
+  // 汇到那里。两条路都负责把 h2 层删掉。
+  client->set_on_close([this, client]() { remove_ctx(client); });
+
+  const int rv = h2->start(h2c, cc);
+  if (rv != 0) {
+    std::fprintf(stderr, "[uvcpp_http_server] h2 start failed: %d\n", rv);
+    h2->close_now();
+  }
+}
+
+void uvcpp_http_server::dispatch_h2_request(uvcpp_tcp_client* client,
+                                            int32_t stream_id,
+                                            uvcpp_http_request& req) {
+  auto it = contexts_.find(client);
+  if (it == contexts_.end()) return;
+  conn_ctx& ctx = it->second;
+
+  auto sit = ctx.h2_streams.find(stream_id);
+  if (sit == ctx.h2_streams.end()) return;
+  // 按**这条流**记，不写连接级字段 —— 理由见 h2_stream_state 的说明。
+  sit->second.accept_encoding = http_get_header(req.headers, "accept-encoding");
+  sit->second.is_head = (req.method == http_method::HTTP_HEAD);
+
+  uvcpp_http_response resp;
+  resp.stream_id = stream_id;
+
+  // 与 h1 那条路同一个路由表、同一个兜底处理函数 —— h2 换的是**传输**，
+  // 不是"用哪个处理函数"。webapp 就是靠这个兜底处理函数接进来的。
+  auto handler = find_handler(req.method, req.url);
+  if (handler) {
+    handler(req, resp, client);
+  } else {
+    resp = uvcpp_http_response::not_found();
+    resp.stream_id = stream_id;
+  }
+
+  if (resp.deferred) return;  // 处理函数稍后自己调 send_response
+  send_h2_response(client, stream_id, resp);
+}
+
+int uvcpp_http_server::send_h2_response(uvcpp_tcp_client* client,
+                                        int32_t stream_id,
+                                        uvcpp_http_response& resp) {
+  auto it = contexts_.find(client);
+  if (it == contexts_.end() || it->second.h2 == nullptr) return UV_EINVAL;
+  conn_ctx& ctx = it->second;
+
+  auto sit = ctx.h2_streams.find(stream_id);
+  if (sit == ctx.h2_streams.end()) return UV_EINVAL;
+  // 先取到局部量：`send_response` 会同步跑回调，回调可以关掉流甚至关掉连接，
+  // 那之后 `sit` 就是悬垂引用了。
+  const bool head = sit->second.is_head;
+
+  // 压缩是**协议无关**的：h1 那条路做的事这里一件不能少，否则同一个处理函数
+  // 在 h2 下会拿到未压缩的响应体。
+  //
+  // 但 `apply_compression` 读的是**连接级**的 `is_head` / `accept_encoding`
+  // （那是 h1 的形状：一条连接同一时刻只有一个请求）。h2 上并发流各说各话，
+  // 所以把这条流的值临时借过去 —— 本函数同步跑完，中途没有第二方读这两个字段。
+  ctx.is_head         = head;
+  ctx.accept_encoding = sit->second.accept_encoding;
+  apply_compression(ctx, resp);
+
+  if (head) {
+    // HEAD 在 h2 里是"HEADERS 带 END_STREAM、一个 DATA 帧都不发"，但
+    // `content-length` 仍按 GET 会有多长写 —— 所以先钉长度再抑制 body。
+    if (!resp.has_header("content-length") && resp.body.size() > 0) {
+      resp.set_header("content-length",
+                      std::to_string(static_cast<unsigned long long>(
+                          resp.body.size())));
+    }
+  } else if (!resp.has_header("content-length") && resp.body.size() == 0) {
+    // h2 没有 chunked，空 body 靠 content-length: 0 说明边界。
+    resp.set_header("content-length", "0");
+  }
+
+  // 连接专属头（含 keep-alive 需要的那条 `connection`）由会话层统一剥掉 ——
+  // 这里**不调** h1 那套 keep-alive 判定：h2 的连接是长命的，没有"这条消息
+  // 之后要不要关连接"这回事。
+  return ctx.h2->send_response(stream_id, resp, /*omit_body=*/head);
+}
+
+#endif  // UVCPP_NGHTTP2_ENABLE
 
 void uvcpp_http_server::set_max_body_size(size_t max_bytes) {
   max_body_size_ = max_bytes;

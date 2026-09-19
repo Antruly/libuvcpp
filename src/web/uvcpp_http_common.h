@@ -240,15 +240,25 @@ inline const char* http_status_reason(http_status s) {
 enum class uvcpp_http_version : uint8_t {
   HVER_10 = 0,  // HTTP/1.0 (RFC 1945)
   HVER_11 = 1,  // HTTP/1.1 (RFC 7230-7235)
-  HVER_20 = 2,  // HTTP/2   (RFC 7540/9113) — reserved for future
+  HVER_20 = 2,  // HTTP/2   (RFC 7540/9113)
 };
 
-/** @brief Return the protocol string for an HTTP version. */
+/**
+ * @brief Return the protocol string for an HTTP version.
+ *
+ * h2 是 `"HTTP/2"`，**不是** `"HTTP/2.0"` —— 后者只在早期的
+ * `draft-ietf-httpbis-http2` 里出现过，RFC 7540 定稿后就没有 `.0` 了。
+ *
+ * 注意这个串在 h2 上**没有任何线上面貌**：h2 没有版本行、没有 reason phrase，
+ * 版本是 ALPN 协商出来的。它只出现在"把 h2 消息当 h1 排版"的地方（调试输出、
+ * `uvcpp_web_request::version_string()`），所以写错不会当场坏掉 —— 正因如此
+ * 才要在这里改对，而不是等它被人抄进日志再回头找。
+ */
 inline const char* uvcpp_http_version_str(uvcpp_http_version v) {
   switch (v) {
     case uvcpp_http_version::HVER_10: return "HTTP/1.0";
     case uvcpp_http_version::HVER_11: return "HTTP/1.1";
-    case uvcpp_http_version::HVER_20: return "HTTP/2.0";
+    case uvcpp_http_version::HVER_20: return "HTTP/2";
     default:                          return "HTTP/1.1";
   }
 }

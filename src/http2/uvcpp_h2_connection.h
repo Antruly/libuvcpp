@@ -78,6 +78,21 @@ class UVCPP_API uvcpp_h2_connection {
   /// `session().submit_status(...)` + `flush()`。
   int send_status(int32_t stream_id, int status, const std::string& body);
 
+  /**
+   * @brief 提交流式响应的头部（不结束流）+ `flush()`。
+   */
+  int send_headers(int32_t stream_id, const uvcpp_http_response& resp);
+
+  /**
+   * @brief 提交一块流式 body + `flush()`。
+   *
+   * @param done 这一块上线之后回调一次。**绝不在本次调用里同步跑** —— 它由
+   *             写完成路径执行，语义与 h1 那条路（libuv 写完成）一致。流中途
+   *             被 RST 或连接断了也一定会跑，参数 `UV_ECANCELED`。
+   */
+  int send_data(int32_t stream_id, const char* data, size_t len,
+                bool end_stream, std::function<void(int)> done);
+
   /// 把会话里待发的字节全部写出去。可以重复调用（没东西发就是空操作）。
   int flush();
 
@@ -104,6 +119,15 @@ class UVCPP_API uvcpp_h2_connection {
   void finish_close();
   void notify_disconnect();
 
+  /**
+   * @brief 跑掉会话里已经可以结算的 `done`。
+   *
+   * **只在没有写在飞的时候调**：有写在飞时有另一条路径（写完成）会来跑，
+   * 两边都跑就变成同一块结算两次 —— 而"第一次结算"完全可能已经把整条流式
+   * 响应收尾、把上下文销毁掉。
+   */
+  void run_completed();
+
   // 与 `uvcpp_tcp_client` 同一套存活令牌纪律（理由见那里 `alive_token_` 的注释）：
   // 异步写完成回调是 libuv **稍后**送进来的，而本对象可能在那之前就没了。
   std::shared_ptr<char> alive_token();
@@ -121,6 +145,9 @@ class UVCPP_API uvcpp_h2_connection {
   bool   close_after_flush_ = false;
   /// 已经发过 GOAWAY。
   bool   goaway_sent_   = false;
+  /// 正在跑 `done`。用户代码可以再回调进 `send_data`，那会绕回 `run_completed()` ——
+  /// 没有这个闸就是同一批 `done` 被重入地再跑一轮。
+  bool   in_dones_      = false;
 
   std::string  out_;
   uvcpp_buf*   write_buf_ = nullptr;

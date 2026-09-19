@@ -31,11 +31,12 @@
 10. [WebSocket 服务端](#10-websocket-服务端)
 11. [WebSocket 客户端（含自动重连）](#11-websocket-客户端含自动重连)
 12. [HTTPS / WSS](#12-https--wss)
-13. [异步与工作池](#13-异步与工作池)
-14. [JSON](#14-json)
-15. [日志](#15-日志)
-16. [安全](#16-安全)
-17. [已知限制](#17-已知限制)
+13. [HTTP/2](#13-http2)
+14. [异步与工作池](#14-异步与工作池)
+15. [JSON](#15-json)
+16. [日志](#16-日志)
+17. [安全](#17-安全)
+18. [已知限制](#18-已知限制)
 
 ---
 
@@ -413,7 +414,7 @@ app.serve_static("/assets", "./public");
 | `cache_control` | 空 = 不发 | 框架不替你猜 |
 | `cache_max_entries` / `cache_max_bytes` | 256 / 32 MiB | `entries` 为 0 = 关缓存 |
 | `max_cached_file_size` | 1 MiB | **`0` = 一律流式**（与别的 setter"0 = 用默认"相反） |
-| `dotfiles` | `HIDE`（404） | 见 [§16](#16-安全) |
+| `dotfiles` | `HIDE`（404） | 见 [§17](#17-安全) |
 | `follow_symlinks` | `true` | 关掉时只查**最后一段** |
 | `add_charset` | `true` | |
 | `mime` | `nullptr` = 默认表 | **不持有所有权** |
@@ -814,7 +815,88 @@ app.start();
 
 ---
 
-## 13. 异步与工作池
+## 13. HTTP/2
+
+**默认就开着，而且零配置。** 上面那段 `enable_ssl()` 的例子里的服务端，浏览器用
+HTTP/2 来访问时走的就是 h2 —— 你一行都不用改。这一节只讲**怎么关**、以及关掉之后
+还剩什么。
+
+### 唯一的一个开关
+
+```cpp
+uvcpp_web_app& set_http2_enabled(bool on);   // 默认 true
+bool http2_enabled() const;                  // 读的是**实际**能不能：内部 && UVCPP_NGHTTP2_ENABLE
+```
+
+协议协商在 TLS 握手内完成（ALPN），发生在任何 HTTP 字节被解析之前，所以框架这边的
+分流点只有一个：`uvcpp_tcp_server` 把连接交上来时读一次 `tls_alpn_selected()`。
+协商出 `h2` 就走 h2 会话，否则走 HTTP/1.1 —— 两条路共用**同一套**路由、中间件、
+静态文件、上传与流式响应。
+
+关掉它（`set_http2_enabled(false)`）的效果是服务端的 ALPN 名单里不再有 `h2`，
+客户端因此协商回 `http/1.1`。**降级是能用的**，不是"协商结果不同"而已。
+`UVCPP_ENABLE_NGHTTP2=OFF` 编出来的库 `http2_enabled()` 恒为 `false`，行为与关掉一致。
+
+### h2 上原来就成立的
+
+路由（含路径参数）、中间件、`next()`、静态服务（含 Range/ETag/304）、multipart 上传、
+chunked/SSE 流式响应 —— 全部照常，API 一个都没变。几处值得知道的差别：
+
+- **响应顺序**：HTTP/1.1 的流水线要求响应按请求到达顺序发出（RFC 7230 §6.3.2），
+  所以框架有一道"只有队首能发"的闸门。**h2 恰恰相反** —— 响应可以乱序，一道慢流
+  不会扣住同一连接上的其他流。闸门在 h2 上被绕过。
+- **并发**：h1 的 `set_max_pipelined_requests()` 是框架自定的上限；h2 换成协议内建的
+  `SETTINGS_MAX_CONCURRENT_STREAMS`。
+- **一次上传一条流**：上传结果按 (连接, 流) 二元组归位，同一条 h2 连接上的并发上传互不干扰。
+
+### h2 上还差一口气的（如实列出）
+
+- **上传背压仍是连接级的。** `stream()->pause()` / `resume()` 落在
+  `uvcpp_tcp_client::read_pause()` 上，也就是**整条连接**。h2 一条连接上有好几条流，
+  所以一条流的落盘跟不上时，同连接上其他流会跟着一起停一下 —— 等它写完 `resume()`
+  就恢复（`context_finished()` 是无条件收尾的兜底），**不会永久卡死**，但那一小段
+  延迟是真实的、会串到邻居身上。
+  正确的做法是用 h2 自己的流控（`NGHTTP2_OPT_NO_AUTO_WINDOW_UPDATE` +
+  `nghttp2_session_consume_connection` / `consume_stream`，只推迟那条流的窗口），
+  **这一版没做**。它是个全局开关：漏掉任何一条消费路径都会让上传在 64 KiB 处
+  永久停住，所以要么整套做对、要么先不动 —— 半套比现状更危险。
+
+### 非目标（如实列出）
+
+- **不做 h2c / 明文 h2**，两个方向都不做：
+  - `Upgrade: h2c` 这条**已经被移除**了 —— 它曾经在 RFC 7540 §3.2，RFC 9113 §3.1
+    明确删掉了它。不是"我们懒得做"，是协议里没有了。
+  - prior-knowledge（直接按 h2 发而不协商）也不做：本库没有明文嗅探，一个不认识的
+    明文连接按 HTTP/1.1 处理。
+  所以**h2 只在 TLS 上**。明文端口永远是 HTTP/1.1。
+- **不做 RFC 8441**（WebSocket over h2）：不宣告 `SETTINGS_ENABLE_CONNECT_PROTOCOL`，
+  收到 `:protocol` 一律拒。`app.websocket()` 继续走 HTTP/1.1 的 `Upgrade`。
+- **不做 SERVER_PUSH**（RFC 9113 已废弃它）：我们宣告 `SETTINGS_ENABLE_PUSH=0` 且从不发
+  `PUSH_PROMISE`。
+- **不做 HTTP/3**。
+- 不实现优先级树的完整语义（`PRIORITY` 帧照收，只是不据此调度）。
+
+### 安全边界
+
+| 面 | 对策 |
+|---|---|
+| 伪头畸形 / 顺序错 / 重复 | `RST_STREAM(PROTOCOL_ERROR)`（RFC 9113 §8.1.2） |
+| `:authority` 与 `host` 冲突 | RST —— 请求走私/缓存投毒的经典入口 |
+| `:scheme` 不是 `https` | RST |
+| 连接专属头（`connection` / `keep-alive` / `transfer-encoding` / `upgrade` / `proxy-connection`） | 收到即 RST；发出时一律剥掉 |
+| `content-length` 与 DATA 实长不符 | RST（h2→h1 走私的手法） |
+| 头部膨胀 / HPACK bomb | 逐字段累加 `namelen+valuelen+32` 封顶 64 KiB —— **这是唯一防线**，`SETTINGS_MAX_HEADER_LIST_SIZE` 只是宣告出去的值，nghttp2 的接收路径**不做任何强制**（对端可以不遵守，bomb 正是不遵守的那种对端） |
+| CONTINUATION 洪泛 | nghttp2 内建的 8 帧上限（越界返负值，按致命处理）+ 上面的头部预算 |
+| SETTINGS/PING/RST 帧风暴 | 令牌桶（突发 64、32/秒补充），越界 → `GOAWAY(ENHANCE_YOUR_CALM)` |
+| 请求体 cap | **按流**记，不是按连接 —— 连接级一个标量在并发流下会互相记成溢出 |
+| 静态目录穿越 | 与 h1 同一套防护；h2 上 `:path` 由对端原样送来（没有 llhttp 那层请求行解析），用例**单独实测**过 |
+
+一条 h2 连接上的响应**没有** HTTP/1.1 那种 reason phrase，也不该有 `transfer-encoding`；
+`content-length` 在 h2 里只是参考值（边界是 END_STREAM）。
+
+---
+
+## 14. 异步与工作池
 
 **handler 跑在事件循环线程上**，任何耗时的活（文件 IO、DNS、CPU 密集）都必须交给工作
 线程池，否则整个服务卡住。
@@ -864,7 +946,7 @@ std::shared_ptr<uvcpp_web_work_limit> app.work_limit() const;   // 恒非空
 
 ---
 
-## 14. JSON
+## 15. JSON
 
 后端是 **nlohmann/json**（`uvcpp_json` 就是 `nlohmann::json` 的别名），集中在
 `uvcpp_web_json.h` 一个头里。
@@ -902,7 +984,7 @@ bool        uvcpp_json_get_double(const uvcpp_json& j, const char* key, double& 
 
 ---
 
-## 15. 日志
+## 16. 日志
 
 两级结构：等级 `log_level`（多严重）+ 模块 `log_category`（来自哪个功能模块）。
 "模块决定 category，事件性质决定 level"。
@@ -949,7 +1031,7 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 
 ---
 
-## 16. 安全
+## 17. 安全
 
 框架里**确实做了**的（都是代码可核的）：
 
@@ -984,8 +1066,8 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 - **multipart 只认 CRLF**，裸 LF 判 400 —— 理由不是"RFC 这么写"而是**请求走私**。
 - `[LWSP]` 上限 128 字节，超了判 400。
 - 上传落盘名**不用客户端给的名字**，`O_EXCL` 且**不带 `O_TRUNC`**。
-- JSON 深度预扫描（§14）。
-- 工作池闸门 + 静态 503（§13）。
+- JSON 深度预扫描（§15）。
+- 工作池闸门 + 静态 503（§14）。
 
 ### 没做的（如实列出）
 
@@ -993,12 +1075,12 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
   但要不要用、用哪种是你的事。
 - **没有内建的鉴权 / 会话 / 限流**：`too_many_requests()` 只是个状态码 helper。
 - **没有请求体解压**（gzip 请求体不认识）。
-- **没有 HTTP/2**。
-- **没有读背压**：流水线里排在后面的请求照常解析、照常跑，超上限直接拒（§17）。
+- **没有读背压**：流水线里排在后面的请求照常解析、照常跑，超上限直接拒（§18）。
+- **h2 只走 TLS + ALPN**，没有 h2c（见下）。
 
 ---
 
-## 17. 已知限制
+## 18. 已知限制
 
 | 限制 | 说明 |
 |---|---|
@@ -1055,7 +1137,7 @@ cmake --build build --config Release --target webapp_demo
 | WS 服务端 | `app.websocket(pattern, handler)`（§10） |
 | WS 客户端（带重连） | `uvcpp_web_ws_client` + `set_reconnect(rc)`（§11） |
 | HTTPS / WSS | `app.enable_ssl(cert, key)`（§12） |
-| 跑阻塞的活 | `uvcpp_work` + `next` 的副本（§13） |
-| 打日志 | `UVCPP_LOG_INFO(category) << ...`（§15） |
+| 跑阻塞的活 | `uvcpp_work` + `next` 的副本（§14） |
+| 打日志 | `UVCPP_LOG_INFO(category) << ...`（§16） |
 
 相关文档：[CI 维护指南](./ci-guide.md)、[项目 README](../README.zh.md)。

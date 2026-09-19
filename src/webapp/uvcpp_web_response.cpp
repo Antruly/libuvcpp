@@ -613,9 +613,14 @@ void uvcpp_web_response::end() {
     // 只有 `file_finished()` 知道。在这里抢先发一个 `0\r\n\r\n`，对端读到的
     // 是"消息到此为止"，紧随其后的整份文件全成了下一条报文里的垃圾。
     // （`file_finished()` 自己会补终止块，所以这里少发的那一个不会丢。）
-    pending_buf_.append("0\r\n\r\n");
-    pending_bytes_ += 5;
-    if (pending_bytes_ > max_stream_bytes_) drain_armed_ = true;
+    //
+    // h2 上**没有终止块这回事**：流的终点是带 END_STREAM 的那一帧，由 http
+    // 层在 `end_stream()` 里发。这里补的 5 个字节会原样进响应体。
+    if (!on_h2_stream()) {
+      pending_buf_.append("0\r\n\r\n");
+      pending_bytes_ += 5;
+      if (pending_bytes_ > max_stream_bytes_) drain_armed_ = true;
+    }
   }
 
   if (sink_ && !pending_buf_.empty()) {
@@ -751,6 +756,11 @@ void uvcpp_web_response::begin_chunked(const std::string& content_type) {
 
   // CL 与 transfer-encoding 不得共存（RFC 7230 §3.3.2）。**先删后设**：
   // 顺序反过来的话 to_string() 会同时输出两个头。
+  //
+  // h2 上这个头**不会上线**（`build_response_nv` 把连接专属头一律剥掉），
+  // 但仍然要设：它同时是"这条响应没有 content-length"这个内部不变式的载体 ——
+  // `sync_meta()` 和 `apply_compression()` 都靠 `is_chunked()` 判它。h2 流式
+  // 响应的定界本来就是 END_STREAM，不发 CL 正是对的。
   remove_header("content-length");
   set_header("transfer-encoding", "chunked");
   if (!content_type.empty()) set_content_type(content_type);
@@ -800,12 +810,21 @@ bool uvcpp_web_response::write_chunk(const char* data, size_t len) {
     return true;
   }
 
-  const std::string hex = chunk_hex(len);
-  pending_buf_.append(hex);
-  pending_buf_.append("\r\n");
-  pending_buf_.append(data, len);
-  pending_buf_.append("\r\n");
-  pending_bytes_ += hex.size() + len + 4;
+  if (on_h2_stream()) {
+    // h2 上**没有 chunked 帧** —— 边界由 DATA 帧自己划，这一层给的是裸字节。
+    // 照 h1 组帧的话，hex 长度与那两组 CRLF 会成为响应体里实打实的内容：
+    // 一条 SSE 流的每个事件前面都挂着 `1a\r\n`，而 `\r\n\r\n` 恰好会被
+    // `EventSource` 当成事件分隔符 —— 对端不报错，只是收到一堆垃圾。
+    pending_buf_.append(data, len);
+    pending_bytes_ += len;
+  } else {
+    const std::string hex = chunk_hex(len);
+    pending_buf_.append(hex);
+    pending_buf_.append("\r\n");
+    pending_buf_.append(data, len);
+    pending_buf_.append("\r\n");
+    pending_bytes_ += hex.size() + len + 4;
+  }
 
   if (pending_bytes_ > max_stream_bytes_) drain_armed_ = true;
   // 水位判定要在 flush **之前**取 —— flush 之后就不许再读成员了。
@@ -1223,7 +1242,7 @@ void uvcpp_web_response::file_finished(int status, uint64_t bytes_sent) {
     // 第一个字节之前就失败：这条流还有救，改写成错误响应。
     fail_stream_before_head(status);
   } else {
-    if (status == 0 && !head_only_ && !file_raw_) {
+    if (status == 0 && !head_only_ && !file_raw_ && !on_h2_stream()) {
       // chunked 的终止块。**`end()` 帮不上忙** —— 它在 `stream_finished_`
       // 上提前返回，而 `send_file*` 的契约是"自足"（用户不必补一句 `end()`），
       // 所以这里必须自己补。

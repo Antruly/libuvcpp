@@ -34,6 +34,12 @@
 
 namespace uvcpp {
 
+#if UVCPP_NGHTTP2_ENABLE
+// 只前向声明。`uvcpp_h2_connection` 的头是 pimpl 形状的（nghttp2 只在 .cpp 里），
+// 这里连它的头都不引 —— 引了就把"关掉 nghttp2 也能编 web 模块"作废。
+class uvcpp_h2_connection;
+#endif
+
 class uvcpp_http_parser;
 
 // =========================================================================
@@ -169,6 +175,30 @@ class UVCPP_API uvcpp_http_server {
 
   /** @brief Default handler (called when no route matches). */
   void on_request(http_request_handler handler);
+
+  /**
+   * @brief 让 ALPN 协商出 `h2` 的连接走 HTTP/2 服务。
+   *
+   * **默认 false** —— 不显式打开就恒为 HTTP/1.1，与既有行为逐字一致。
+   * 打开之后也只对"TLS 握手协商出 h2"的连接生效：明文连接、以及 ALPN 没协商出
+   * h2 的连接，照旧走 llhttp。服务端要真的能协商出 h2，还得在
+   * `uvcpp_ssl_context` 上 `set_alpn_select_protos({"h2","http/1.1"})` ——
+   * 这一层不做代理，两条都得显式给。
+   */
+  void set_http2_enabled(bool on) { http2_enabled_ = on; }
+  bool http2_enabled() const { return http2_enabled_; }
+
+#if UVCPP_NGHTTP2_ENABLE
+  /**
+   * @brief 在指定的 h2 流上回一个响应。
+   *
+   * 处理函数**整对象替换**过 `resp` 时用这个：那种写法会把 `resp.stream_id`
+   * 冲成 0，于是普通 `send_response` 会把它当成 HTTP/1.1 的应答。
+   */
+  int send_h2_response(uvcpp_tcp_client* client, int32_t stream_id,
+                       uvcpp_http_response& resp);
+#endif
+
 
   /**
    * @brief Upgrade handler — called BEFORE routing when Upgrade: websocket
@@ -343,6 +373,22 @@ class UVCPP_API uvcpp_http_server {
   void begin_stream(uvcpp_tcp_client* client, uvcpp_http_response& resp);
 
   /**
+   * @brief 流式头部，**指名是哪条流**。h2 下的正路。
+   *
+   * h2 上一条连接上可以同时有好几条流式响应，所以"这条连接正在流"不是个
+   * 充分的身份 —— 必须带 `stream_id`。`stream_id == 0` 即 HTTP/1.1，走
+   * 上面那个两参版本。
+   *
+   * 与 h1 的三点差别（都是 h2 的协议事实，不是取舍）：
+   *   - 头部**不补** `transfer-encoding`：那个字段在 h2 里根本不合法；
+   *   - 长度由"直到 END_STREAM"表达，所以调用方**不必**设 `content-length`；
+   *     设了也照发（已知长度时那是有用信息），但不会被校验；
+   *   - 不走 `to_string()`，由会话层折成 HEADERS 帧。
+   */
+  void begin_stream(uvcpp_tcp_client* client, int32_t stream_id,
+                    uvcpp_http_response& resp);
+
+  /**
    * @brief 流式写一块字节（调用方**自己组好帧**：chunked 的 hex 前缀、
    *        CRLF、终止块都不由本层添加）。
    *
@@ -363,6 +409,19 @@ class UVCPP_API uvcpp_http_server {
                    std::function<void(int)> done = std::function<void(int)>());
 
   /**
+   * @brief 流式写一块字节，**指名是哪条流**。h2 下的正路。
+   *
+   * @param bytes 在 h2 上是**裸 body 字节**，不是 chunked 帧 —— h2 的分块由
+   *              DATA 帧本身承担，没有 hex 长度前缀那回事。调用方在两条路上
+   *              给的东西因此不一样，这一点由调用方按 `stream_id != 0` 区分。
+   * @param done  与 h1 逐条相同：**只有返回 0 才保证恰好回调一次**，而且
+   *              **绝不在本函数返回之前同步跑**（h2 侧由写完成路径执行）。
+   */
+  int write_stream(uvcpp_tcp_client* client, int32_t stream_id,
+                   std::string bytes,
+                   std::function<void(int)> done = std::function<void(int)>());
+
+  /**
    * @brief 结束流式响应。
    *
    * `close_after` 为真时，队列排空后关闭连接（这也是唯一诚实的收尾方式：
@@ -370,6 +429,15 @@ class UVCPP_API uvcpp_http_server {
    * 让客户端从"长度对不上"看出传输失败）。
    */
   void end_stream(uvcpp_tcp_client* client, bool close_after);
+
+  /**
+   * @brief 结束一条流的流式响应。h2 下的正路。
+   *
+   * h2 里 `close_after` **不关连接**而只发 END_STREAM：连接是长命的，为一条
+   * 流去关掉整条连接会把同一条连接上别的流一起打断，那不是调用方要的语义。
+   * 要关连接请用 `close_connection()`。
+   */
+  void end_stream(uvcpp_tcp_client* client, int32_t stream_id, bool close_after);
 
   /**
    * @brief Register a callback fired when a connection is removed (closed).
@@ -491,6 +559,49 @@ class UVCPP_API uvcpp_http_server {
 
   struct conn_ctx {
     uvcpp_http_parser* parser = nullptr;
+
+#if UVCPP_NGHTTP2_ENABLE
+    /**
+     * @brief 这条连接上的 h2 驱动层；非 h2 连接恒为 nullptr。
+     *
+     * 与 @ref parser **互斥**：h2 连接没有 llhttp 解析器，h1 连接没有 h2 层。
+     * 所有原先只看 `parser` 的地方都要先判这条连接走的是哪条路。
+     */
+    uvcpp_h2_connection* h2 = nullptr;
+
+    /**
+     * @brief h2 下**按流**记的状态，键是 stream_id。
+     *
+     * 不能复用 `body_buf` / `body_overflow` / `is_head` / `accept_encoding` 那四个
+     * **连接级**单槽：h2 的一条连接上并发跑着多条流，共用一个标量不是"少判一次"
+     * 而是**判错**。三类后果的触发难度不一样，分开写清楚：
+     *
+     * - **`is_head` / `accept_encoding` —— 确定性的**，只要有延迟应答就必然踩到。
+     *   `dispatch_h2_request` 按到达序写这两个字段，`send_h2_response` 按**发送**序
+     *   读它们，两者在并发流上不是一个顺序。于是"流 1 是 GET（延迟）、流 2 是
+     *   HEAD"会让流 1 的响应被当成 HEAD **掐掉 body**；同构地，流 1 带
+     *   `accept-encoding: gzip` 而流 2 不带，流 1 的响应会**不压缩**发出去。
+     *   这正是 `web_ssl_h2_server_func.cpp` 场景 7 钉的两条。
+     *
+     * - **`body_overflow` —— 需要客户端配合一个特定交织。** 旧代码里
+     *   `on_request`（**任何**流）会把标志清成 false，所以要踩到它，流 B 的请求头
+     *   必须落在"流 A 已经溢出"和"流 A 的 END_STREAM"之间，**并且** A 剩下的
+     *   数据块每一块都 ≤ `max_body_size_`（旧 `on_body` 溢出时把 body 清空，之后
+     *   每来一块都拿空 buffer 重新比，块一大就又把标志置回去）。交织本身在
+     *   `mem_recv` 里是合法的 —— 帧按线序逐帧处理，B 的 HEADERS 完全可以卡在
+     *   A 的两个 DATA 帧中间。所以它是**真缺陷**，只是不像上面两条那样随手可复现。
+     *
+     * 生命周期 = 流的生命周期：请求头到达时建立，`on_close` 时删除。**不能**在
+     * 请求收完时删 —— 延迟应答（`resp.deferred`）还要回来读 `is_head`。
+     */
+    struct h2_stream_state {
+      std::string body;             ///< 收集中；请求收完时被 swap 走
+      std::string accept_encoding;  ///< 派发时从这条流自己的请求头里取
+      bool        overflow = false; ///< 这条流超过了 max_body_size_
+      bool        is_head  = false; ///< 这条流是 HEAD
+    };
+    std::map<int32_t, h2_stream_state> h2_streams;
+#endif
 
     /**
      * @brief Connection generation — monotonic, never reused. 0 = never assigned.
@@ -687,6 +798,18 @@ class UVCPP_API uvcpp_http_server {
   // -------------------------------------------------------------------
   // Member variables
   // -------------------------------------------------------------------
+
+#if UVCPP_NGHTTP2_ENABLE
+  /// h2 连接的分流入口（`on_tcp_connection` 里判完 ALPN 后进来）。
+  void on_tcp_connection_h2(uvcpp_tcp_client* client);
+
+  /// 把一条**已收全**的 h2 请求交给路由，并在对应的流上回话。
+  void dispatch_h2_request(uvcpp_tcp_client* client, int32_t stream_id,
+                           uvcpp_http_request& req);
+#endif
+
+  /// 没有显式打开就恒 false。
+  bool http2_enabled_ = false;
 
   uvcpp_tcp_server* tcp_server_ = nullptr;
   int status_ = HTTP_SERVER_NONE;

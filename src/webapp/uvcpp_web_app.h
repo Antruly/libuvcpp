@@ -339,6 +339,31 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_app& set_head_as_get(bool enable);
 
   /**
+   * @brief 开/关 HTTP/2 —— **默认开**。
+   *
+   * 与 `uvcpp_http_server::set_http2_enabled`（**默认关**）方向相反，这是分层
+   * 决定的，不是笔误：
+   *   - 底层 `uvcpp_http_server` 是**协议实现**，"我没说要 h2"就该是 h1；
+   *   - 框架是**应用入口**，用户不该为了拿到现代协议去读 ALPN 文档。
+   * 所以这里的语义是「默认支持，只给一个关掉它的开关」：默认在 TLS 连接上把
+   * `h2` 排进 ALPN 名单，协商得成走 h2、协商不成（老客户端、不带 ALPN）照常
+   * 回落 h1.1，业务代码一行不用改。
+   *
+   * `set_http2_enabled(false)` = 退回纯 HTTP/1.1：ALPN 只报 `http/1.1`，连接层
+   * 也不接受 h2。将来有 h3 时同理，一个开关关掉"新的那层"。
+   *
+   * **只在 `start()` 之前调有效**：ALPN 是 accept 时读的，listen 之后再改等于
+   * 没改。`nghttp2` 没编进来时这是**记录意图的空操作** —— `http2_enabled()`
+   * 会如实回报 `false`，并且**一条 h2 都不会宣告**（把一条协商成 h2 的连接丢给
+   * 只会说 h1 的服务端，比不支持它坏得多）。
+   *
+   * 用户自己给 `ssl_context` 设过 ALPN 名单时**不覆盖**：那是他的协议策略，
+   * 比框架的默认更权威（见 `uvcpp_ssl_context::has_alpn_select`）。
+   */
+  uvcpp_web_app& set_http2_enabled(bool enable);
+  bool http2_enabled() const;
+
+  /**
    * @brief 工作池在途任务上限（`uv_queue_work` 的背压闸门）。
    *
    * 默认是按 `UV_THREADPOOL_SIZE`（未设 → libuv 的 4）推导的 ×4、下限 16 ——
@@ -967,13 +992,22 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   // 的口子：`connection(id)`（下面第 907 行）本来就返回裸指针，这里只是
   // 不给调用方一个"能存起来"的机会。
 
+  // `stream_id` 是**第二维身份**：h2 上一条连接同时可以有好几条流式响应，
+  // 只有 conn id 分不清是哪一条。0 = HTTP/1.1（一条连接同一时刻只有一条流，
+  // 这个维度是退化的）。
+  //
+  // `bytes` 的**内容**因此在两条路上不同：h1 要的是已经组好 chunked 帧的
+  // 字节（hex 长度 + CRLF + 终止块都由调用方拼），h2 要的是裸 body —— h2 的
+  // 分块由 DATA 帧自己承担。这不是"顺手"的区别，是协议事实。
+
   /** @brief 发流式响应的头部（不写 body、不写终止块）。 */
-  void stream_begin(uvcpp_web_conn_id id, uvcpp_http_response& head);
-  /** @brief 写一块已经组好帧的字节。返回 0 = 已受理。 */
-  int stream_write(uvcpp_web_conn_id id, std::string bytes,
+  void stream_begin(uvcpp_web_conn_id id, int32_t stream_id,
+                    uvcpp_http_response& head);
+  /** @brief 写一块字节。返回 0 = 已受理。 */
+  int stream_write(uvcpp_web_conn_id id, int32_t stream_id, std::string bytes,
                    std::function<void(int)> done);
-  /** @brief 收尾。`close_after` 为真表示这一块写完就关连接。 */
-  void stream_end(uvcpp_web_conn_id id, bool close_after);
+  /** @brief 收尾。`close_after` 为真表示这一块写完就关连接（h2 上不关）。 */
+  void stream_end(uvcpp_web_conn_id id, int32_t stream_id, bool close_after);
 
   /** @brief 记下一条在途的分片下发，连接断开时取消它（配对见下）。 */
   void stream_attach_file(uvcpp_web_conn_id id, uvcpp_web_file_transfer* t);
@@ -1104,6 +1138,17 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
 #endif  // UVCPP_OPENSSL_ENABLE
 
   uvcpp_http_server* http_;
+
+  /**
+   * @brief 用户对 HTTP/2 的意图（**默认要**）。
+   *
+   * 与 `http2_enabled()` 分开：后者答的是"这台机器上真的能开 h2 吗"，要再
+   * `&&` 一次 `UVCPP_NGHTTP2_ENABLE`。合成一个字段的后果是 nghttp2 没编进来的
+   * 树上 `set_http2_enabled(true)` 会把"用户想要"记成"已经开了"，于是 ALPN 照
+   * 报 h2 —— 那正是最坏的一种：协商成功，然后没人会说 h2。
+   */
+  bool http2_requested_ = true;
+
   uvcpp_web_router   router_;
   std::vector<uvcpp_web_middleware> middlewares_;
 
@@ -1265,8 +1310,12 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 那时读一个悬垂的 `uvcpp_web_stream&` 就是 use-after-free。
    *
    * id 是单调递增且**永不复用**的，所以"查得到"就等于"还是那一个"。
+   *
+   * @param stream_id h2 流号（0 = HTTP/1.1）。非 0 时**只**在这条流上找 ——
+   *                  h2 一条连接上可以并存多条在收体的流。
    */
-  uvcpp_web_stream* live_stream(uvcpp_web_conn_id id) const;
+  uvcpp_web_stream* live_stream(uvcpp_web_conn_id id,
+                                int32_t        stream_id = 0) const;
 
   /**
    * @brief 这条连接上**正在收请求体**的那个上下文；没有就返回 nullptr。
@@ -1280,14 +1329,20 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 而上传路由把用户的 `on_end` 扣住（`end_deferred_` 为真）等落盘 —— 那正是
    * 落盘完成回调要来这一支找上下文的时刻。
    *
-   * 为什么可以只取一个：**请求体在一条连接上是串行的**（llhttp 要等上一条消息
-   * complete 才会开下一条），所以满足这个判据的至多一条。而"响应在流式"的那种
-   * 上下文不会命中它 —— 那类上下文的请求体早就交付完了。
+   * **HTTP/1.1 下**满足这个判据的至多一条：llhttp 要等上一条消息 complete 才会
+   * 开下一条。这条不成立的地方正是 h2 —— 一条连接上可以同时有好几条流在收体，
+   * 所以 `stream_id` 非 0 时会**再按流号收一次**。不收的话，两条并发上传里先落盘
+   * 完的那条会把结果挂到另一条请求头上（结果被丢、另一条拿到不属于它的 upload）。
+   *
+   * 而"响应在流式"的那种上下文不会命中它 —— 那类上下文的请求体早就交付完了。
    *
    * 返回 `shared_ptr` 而不是裸指针：两个调用点都要在拿到之后做可能让上下文
    * 收场的动作（`release_end()` / `resume()`），裸指针在这个窗口里会悬垂。
+   *
+   * @param stream_id h2 流号（0 = HTTP/1.1＝不限流号）。
    */
-  std::shared_ptr<uvcpp_web_context> active_body_ctx(uvcpp_web_conn_id id) const;
+  std::shared_ptr<uvcpp_web_context> active_body_ctx(uvcpp_web_conn_id id,
+                                                     int32_t stream_id = 0) const;
 
   /** @brief 所有连接的在途请求数之和（`inflight_count()` 的实现）。 */
   size_t inflight_total() const;

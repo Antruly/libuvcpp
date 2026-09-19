@@ -226,6 +226,45 @@ class UVCPP_API uvcpp_h2_session {
    */
   int submit_status(int32_t stream_id, int status, const std::string& body);
 
+  /**
+   * @brief 提交流式响应的**头部**，不结束流。
+   *
+   * 与 `submit_response` 的三点差别，都是"后面还有 body"带来的：
+   *   - 不补 `content-length`：长度还不知道，补一个就是在说谎。调用方要么自己
+   *     给（已知长度），要么什么都不给 —— h2 里没有 `transfer-encoding`，
+   *     "直到 END_STREAM 为止"本身就是边界；
+   *   - 不发 DATA 帧、不置 END_STREAM；
+   *   - 不做 204/304 的 body 抑制检查 —— 那些状态码本来就不该走流式这条路。
+   */
+  int submit_headers(int32_t stream_id, const uvcpp_http_response& resp);
+
+  /**
+   * @brief 提交一块流式 body。
+   *
+   * @param end_stream 这块发完即 END_STREAM。**提交过 end_stream 之后这条流
+   *                   不再接受新的 `submit_data`**（再发就是协议违例）。
+   * @param done       这一块**真正交给传输层之后**调用一次；失败也必须调，
+   *                   参数为错误码。**本层保证它绝不在本次调用里同步跑** ——
+   *                   它由 `take_completed()` 取走、由传输层在写完成之后调，
+   *                   所以调用方（`uvcpp_web_response::flush_stream`）读到
+   *                   的语义与 h1 那条路（libuv 写完成）一致。
+   */
+  int submit_data(int32_t stream_id, const char* data, size_t len,
+                  bool end_stream, std::function<void(int)> done);
+
+  /**
+   * @brief 取走已经可以回调的那些块的 `done`（已绑好结果码）。
+   *
+   * 传输层在**写完成之后**调用它并逐个执行。分开两步是因为 `submit_data`
+   * 是在用户代码的调用栈里跑的，而 `done` 会把控制权交回同一段用户代码 ——
+   * 同步回调正是 `uvcpp_web_stream_sink::stream_write` 明令禁止的那件事。
+   *
+   * 结果码在**入队时**就绑定了：正常上线是 0，流中途被 RST / 连接断了是
+   * `UV_ECANCELED`。放进 `done` 之后再让传输层补一个码，就会出现"这块到底
+   * 是发出去了还是被取消的"两个答案。
+   */
+  void take_completed(std::vector<std::function<void()>>& out);
+
   // -----------------------------------------------------------------
   // 客户端侧
   // -----------------------------------------------------------------
@@ -261,6 +300,15 @@ class UVCPP_API uvcpp_h2_session {
 
   /// 最近一次致命错误的原始码（0 表示还没有）。
   int last_error() const;
+
+  /**
+   * @brief 收尾时该发出去的 GOAWAY 错误码。
+   *
+   * 正常关闭是 `NO_ERROR`（0）；被控制帧令牌桶拦下来时是 `ENHANCE_YOUR_CALM`。
+   * **连接层收尾时要读它并原样发给对端** —— 不读的话，一次洪泛在线上长得和
+   * "服务端自己正常退出"一模一样，对端拿不到任何可归因的信号。
+   */
+  uint32_t goaway_code() const;
 
  private:
   struct impl;
