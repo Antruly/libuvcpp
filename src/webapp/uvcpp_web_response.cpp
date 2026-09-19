@@ -571,8 +571,6 @@ void uvcpp_web_response::sync_meta() {
   const bool has_cl = http_has_header(resp_.headers, "content-length");
   const bool chunked = is_chunked(resp_);
 
-  // HEAD：长度按「本该发出的 body」算，再丢掉 body 本身。
-  // 顺序不能反 —— 先丢就算不出长度了。
   const size_t len = resp_.body.size();
 
   if (!has_cl && !chunked) {
@@ -582,9 +580,13 @@ void uvcpp_web_response::sync_meta() {
     set_header("content-length", size_to_string(len));
   }
 
-  if (head_only_) {
-    resp_.body.clear();
-  }
+  // **HEAD 不在这里丢 body**（这里曾经丢）。"HEAD 不发 body"由 HTTP 层的
+  // `resp.to_string(/*include_body=*/!ctx.is_head)` 保证，body 本身要留到那
+  // 之前 —— 因为**压缩发生在 HTTP 层**（`apply_compression`），它需要真 body
+  // 才能算出 GET 会发的那个长度。在这里丢掉的后果是一整条因果链：
+  // body 变 0 → 压缩的尺寸门直接返回 → HEAD 报的是**未压缩**的长度，而 GET
+  // 报压缩后的长度，RFC 9110 §9.3.2 要的"HEAD 与 GET 相同的头"当场不成立。
+  // 拿 HEAD 探长度再按长度读满的客户端会一直等到超时。
 }
 
 // =========================================================================

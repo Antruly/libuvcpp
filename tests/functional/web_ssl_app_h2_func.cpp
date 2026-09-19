@@ -216,6 +216,17 @@ struct app_probe {
   std::atomic<uvcpp_web_response*> held{nullptr};
   /// `/hold` 的响应真的被 `end()` 过。—— `-1` = 那个 post 压根没跑。
   std::atomic<int>                 held_ended{-1};
+
+  /// 场景 8：`/hello` 上按方法分开记 `on_sent` 的 `body_bytes`。
+  ///
+  /// "HEAD 的 `body_bytes` 为 0"在 h1 上是**服务端层**顺手满足的（`uvcpp_http_server`
+  /// 按压缩后的长度钉完 content-length 就 `resp.body.clear()`），h2 那条路
+  /// **不清** body、只把 `omit_body` 交给会话层。所以框架层那个换算只有在 h2 上
+  /// 才有可观测差别 —— 也只有在 h2 树上才验得出来。
+  std::atomic<int>       hello_sent_get{0};
+  std::atomic<int>       hello_sent_head{0};
+  std::atomic<long long> hello_bytes_get{-1};
+  std::atomic<long long> hello_bytes_head{-1};
 };
 
 /// 注册场景 3 需要的三条路由。由 `build_app()` 在 `start_background()` 之前调 ——
@@ -289,6 +300,18 @@ int build_app(uvcpp_web_app& app, app_probe& st, bool set_flag, bool enable_h2,
       std::lock_guard<std::mutex> lk(st.mu);
       st.seen.push_back(r);
     }
+    // 场景 8：HEAD 与 GET 各记一份 `on_sent`。HEAD 是被框架映射到这条 GET 路由
+    // 上的（`head_as_get_`），所以这里按方法分岔。
+    const bool head_req = (req.method() == http_method::HTTP_HEAD);
+    resp.on_sent([&st, head_req](const uvcpp_web_sent_info& i) {
+      if (head_req) {
+        st.hello_sent_head.fetch_add(1);
+        st.hello_bytes_head.store(static_cast<long long>(i.body_bytes));
+      } else {
+        st.hello_sent_get.fetch_add(1);
+        st.hello_bytes_get.store(static_cast<long long>(i.body_bytes));
+      }
+    });
     resp.text(kHelloBody);
     resp.end();
   });
@@ -1215,6 +1238,64 @@ int main() {
       }
     } else {
       check(false, "h2_drop: connect() 就没起来");
+    }
+    app.stop();
+  }
+
+  // =====================================================================
+  // 场景 8：h2 上 HEAD 的 `body_bytes` 必须是 0
+  //
+  // 这条腿**只能在 h2 上验**：h1 那条路上 `uvcpp_http_server` 自己会
+  // `resp.body.clear()`（按压缩后的长度钉完 content-length 之后），到了采集点
+  // body 已经是空的 —— 框架层那个换算写不写都一样。h2 走的是 `omit_body`，
+  // body 一直留着，只有框架层的换算能把它记成 0。
+  // =====================================================================
+  {
+    uvcpp_web_app app;
+    app_probe      st;
+    if (build_app(app, st, /*set_flag=*/false, /*enable_h2=*/true) != 0) {
+      std::cerr << "  [FAIL] 场景 8：app 起不来 (rc=" << st.start_rc.load()
+                << ")" << std::endl;
+      return 2;
+    }
+
+    h2_client c;
+    if (c.begin(st.bound_port.load(), cctx.get(), "h2_head_bytes")) {
+      check(c.wait_connect(), "h2_head_bytes: connect 回调没等到");
+      check(c.began, "h2_head_bytes: h2 层没起来");
+      if (c.began) {
+        const int32_t g = c.submit(http_method::HTTP_GET, "/hello");
+        check(g > 0,
+              "h2_head_bytes: GET 提交失败 (sid=" + std::to_string(g) + ")");
+        check(c.wait_responses(1), "h2_head_bytes: GET 的响应没到");
+
+        const int32_t h = c.submit(http_method::HTTP_HEAD, "/hello");
+        check(h > 0,
+              "h2_head_bytes: HEAD 提交失败 (sid=" + std::to_string(h) + ")");
+        check(c.wait_responses(2), "h2_head_bytes: HEAD 的响应没到");
+
+        // 前置：两个回调都真的来过。没有这两条，下面的断言在"处理函数压根没跑"
+        // 时也会绿 —— 那测的是别的东西。
+        check(st.hello_sent_get.load() == 1,
+              "h2_head_bytes: GET 的 on_sent 被触发了 " +
+                  std::to_string(st.hello_sent_get.load()) + " 次（应为 1）");
+        check(st.hello_sent_head.load() == 1,
+              "h2_head_bytes: HEAD 的 on_sent 被触发了 " +
+                  std::to_string(st.hello_sent_head.load()) + " 次（应为 1）");
+
+        check(st.hello_bytes_get.load() ==
+                  static_cast<long long>(sizeof(kHelloBody) - 1),
+              "h2_head_bytes: GET 的 body_bytes 是 " +
+                  std::to_string(st.hello_bytes_get.load()) + "，应为 " +
+                  std::to_string(sizeof(kHelloBody) - 1));
+        check(st.hello_bytes_head.load() == 0,
+              "h2_head_bytes: HEAD 的 body_bytes 是 " +
+                  std::to_string(st.hello_bytes_head.load()) +
+                  "，应为 0 —— h2 那条路不清 body，只有框架层的换算能记成 0");
+      }
+      check(c.finish(), "h2_head_bytes: client close never completed");
+    } else {
+      check(false, "h2_head_bytes: connect() 就没起来");
     }
     app.stop();
   }

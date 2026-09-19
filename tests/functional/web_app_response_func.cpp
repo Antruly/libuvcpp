@@ -161,11 +161,35 @@ void test_head_only() {
   uvcpp_web_response r;
   r.text("hello world");  // 11 字节
   r.set_head_only(true);
-  const std::string w = wire(r);
-  check(has(w, "content-length: 11\r\n"),
+  check(has(wire(r), "content-length: 11\r\n"),
         "HEAD 的 CL 反映 GET 应有的长度");
-  check(!has(w, "hello world"), "HEAD 不得发出 body 字节");
-  check(wire_body(w).empty(), "HEAD 的 body 段为空");
+
+  // **本层不丢 body** —— 这是 #11 修掉的那条因果链。
+  //
+  // 这里曾经是 `sync_meta()` 在 head_only 下直接 `body.clear()`，于是
+  // `apply_compression()`（跑在 `uvcpp_http_server` 里、**在**序列化之前）看到
+  // 的 body 是空的，尺寸门当场返回：HEAD 报的是**未压缩**的长度，而 GET 报压
+  // 缩后的长度，RFC 9110 §9.3.2 要的"HEAD 与 GET 同样的头"不成立。
+  //
+  // 所以 body 必须留到 HTTP 层 —— 那边 `apply_compression()` 算完长度，才在
+  // 序列化时以 `include_body = !ctx.is_head` 丢掉字节。
+  uvcpp_web_response r0;
+  r0.text("hello world");
+  r0.set_head_only(true);
+  const std::string w0 = wire(r0);  // raw() 里调 sync_meta()
+  check(r0.body_size() == 11,
+        "sync_meta() 之后 HEAD 的 body 还在（压缩要用它算 GET 的长度）");
+  check(has(w0, "content-length: 11\r\n"),
+        "而长度已经记进 content-length 了");
+
+  // "HEAD 不发 body 字节"落在**序列化那一支**上，也就是服务端真正调的那个重载。
+  // 这里必须显式传 false —— 光把 body 清空不足以让报文正确（见
+  // `uvcpp_http_server.cpp` 里关于 chunked 终止块的那段说明）。
+  const std::string w_nobody = r0.raw().to_string(/*include_body=*/false);
+  check(!has(w_nobody, "hello world"), "HEAD 不得发出 body 字节");
+  check(wire_body(w_nobody).empty(), "HEAD 的 body 段为空");
+  check(has(w_nobody, "content-length: 11\r\n"),
+        "丢 body 不丢长度");
 
   // 长度是在 sync_meta()（发送前）才算的，所以和调 set_head_only 的先后
   // 无关 —— 反过来写同样得到 11。把这条钉住，免得以后有人把长度计算挪到
@@ -175,7 +199,7 @@ void test_head_only() {
   r2.text("hello world");
   check(has(wire(r2), "content-length: 11\r\n"),
         "先 head_only 后设 body，长度依然正确（顺序无关）");
-  check(wire_body(wire(r2)).empty(), "先 head_only 后设 body，body 照样被丢");
+  check(r2.body_size() == 11, "先 head_only 后设 body，body 一样留着");
 
   // 204 + HEAD：仍然不带 CL。
   uvcpp_web_response r3;
@@ -183,21 +207,14 @@ void test_head_only() {
   r3.set_head_only(true);
   check(count_header(wire(r3), "content-length") == 0, "204 + HEAD 仍不带 CL");
 
-  // `body_size()` 在 sync_meta() 之后必须是 0 —— 这是 `uvcpp_web_sent_info::
-  // body_bytes` 的**语义**（"实际写入连接的 body 字节数"），框架的
-  // `send_response` 正是靠它把 HEAD 记成 0 字节而不是 GET 本该发的长度。
+  // `uvcpp_web_sent_info::body_bytes` 在 HEAD 上必须是 0（它的契约是"实际写入
+  // 连接的 body 字节数"）。**本层不再靠清 body 来满足它** —— 那是框架层
+  // `uvcpp_web_app.cpp` 里一句显式换算干的活，采集点在服务端序列化之后。
   //
-  // 注意这一组钉的是**机制**（`sync_meta()` 在 head_only 下清 body），不是
-  // "框架有没有在采集之前调 sync_meta()" —— 后者只能在真服务端上验，见
-  // `web_app_app_func.cpp` 的 `sent_bytes_head`。两条互补，缺一不可。
-  uvcpp_web_response r4;
-  r4.text("hello world");
-  r4.set_head_only(true);
-  check(r4.body_size() == 11, "sync_meta 之前 body_size 还是原长度");
-  const std::string w4 = wire(r4);  // raw() 里调 sync_meta()
-  check(r4.body_size() == 0, "sync_meta 之后 HEAD 的 body_size 归零");
-  check(has(w4, "content-length: 11\r\n"),
-        "而长度已经记进 content-length 了（丢 body 不丢长度）");
+  // 所以这条契约的判据不在这里：h1 上见 `web_app_app_func.cpp` 的
+  // `sent_bytes_head`（服务端自己会清 body），h2 上见
+  // `web_ssl_app_h2_func.cpp` 场景 8（h2 **不**清 body，只发 omit_body ——
+  // 那里才是框架层换算唯一的判据）。
 }
 
 // =========================================================================

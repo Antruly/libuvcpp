@@ -1887,12 +1887,13 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   uvcpp_web_response& r = ctx.response();
 
   // 先把 metadata 定下来（`sync_meta()` 是幂等的，发送前本来就一定要调一次）。
-  // 这一步是 `body_bytes` 那个字段的**语义**要求的，不是清洁工作：
-  // 对 HEAD 而言 `sync_meta()` 会把 body 丢掉（长度已经在丢之前按"本该发出的
-  // body"记进 `content-length` 了），所以此后读到的 0 正是"实际写上线的字节
-  // 数"。不调的话读到的是 GET 本该发的长度 —— 一个从来没上过线的数字。
   // 放在 `info` 构造**之前**，是为了让下面那条"连接已断"的提前返回也拿到
   // 同一个基准：那条路上 `raw()` 不会被调用（见 `:1602` 分支）。
+  //
+  // 注意：**`sync_meta()` 不再替我们丢掉 HEAD 的 body 了**（那正是修 HEAD 与
+  // GET 头不一致时让出去的 —— 压缩需要真 body 才能算出 GET 会发的长度）。
+  // 所以 `body_bytes` 的"HEAD 时为 0"现在是**显式换算**出来的，见下面两处
+  // `head_only() ? 0 : …`；不能再靠"读到的天然就是 0"。
   r.sync_meta();
 
   uvcpp_web_sent_info info;
@@ -1906,7 +1907,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
     // **照样通知** —— 访问日志中间件挂在这一刻上，丢掉通知就等于这次请求
     // 在日志里凭空消失。ok=false 就是给这种场合用的。
     info.ok         = false;
-    info.body_bytes = r.body_size();
+    info.body_bytes = r.head_only() ? 0 : r.body_size();
     UVCPP_LOG_WARN(log_category::RESPONSE)
         << "连接 " << ctx.connection_id() << " 已断开，响应被丢弃（status "
         << info.status_code << "）";
@@ -2004,7 +2005,11 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // 在压缩之前采集的话，字段就与它的契约（"实际写入连接的 body 字节数"）
   // 对不上了：gzip 过的响应会记成压缩前的长度，而报文里的
   // `content-encoding: gzip` 又明说了发的是压缩体 —— 两边自相矛盾。
-  info.body_bytes = r.body_size();
+  //
+  // HEAD 那一支要再换算一次：压缩算过了（那正是 HEAD 的 `content-length` 与
+  // GET 一致的原因），但字节**一个都没上线**，而契约是"实际写入连接的字节数、
+  // HEAD 时为 0"。与流式那处的 `head_only() ? 0 : stream_bytes_written()` 同形状。
+  info.body_bytes = r.head_only() ? 0 : r.body_size();
 
   r.notify_sent(info);
 }

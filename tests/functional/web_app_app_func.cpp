@@ -814,8 +814,11 @@ struct sent_probe {
  * **对照组是必需的一半**：没有同一路由上的 GET，一个"body_bytes 恒为 0"的
  * 实现能让主断言全绿。
  *
- * HEAD 走裸客户端：`uvcpp_http_client` 按 content-length 等 body，而 HEAD 的
- * body 被丢掉了，走它只会等超时（见本文件开头"刻意不覆盖"那一节）。
+ * 这里用裸客户端是因为断言看的是**服务端** `on_sent` 的回执，与客户端怎么读
+ * 无关。（早先这里写着"`uvcpp_http_client` 按 content-length 等 body，走它只会
+ * 等超时"—— **那句是错的**：`read_one_message()` 收了显式的 `head_request`
+ * 形参，HEAD 的响应按 RFC 7231 §4.3.2 本来就没有 body，客户端不会去等。
+ * `head_cl_matches_get` 那条用例就是拿 `make_head` 走客户端跑的。）
  */
 void test_sent_bytes_head() {
   uvcpp_web_app app;
@@ -919,6 +922,78 @@ void test_sent_bytes_compressed() {
   check(gz_probe.bytes.load() > 0 &&
             gz_probe.bytes.load() < static_cast<long long>(big.size()),
         "压缩响应的 body_bytes 是**压缩后**的长度（严格小于 4000）");
+
+  app.stop();
+  app.join();
+}
+
+/**
+ * 同一条路由上，HEAD 的 `content-length` 必须与 GET **逐字相同** —— 压缩开着时也一样。
+ *
+ * RFC 9110 §9.3.2：HEAD 应当发与 GET 相同的头字段。压缩开着时这条曾经不成立，
+ * 而且两头各有一处成因：
+ *
+ * - webapp 层 `sync_meta()` 按**未压缩**的体把长度钉死，随后把 body 丢掉 ——
+ *   于是到了 HTTP 层，body 已经是 0，`apply_compression` 的尺寸门先返回，
+ *   连压缩都不会发生；
+ * - HTTP 层 `apply_compression` 里还有一句 `if (ctx.is_head) return false;`，
+ *   它在上一条成立时**够不着**，但把上一条修掉之后就会接着挡住。
+ *
+ * 两处都得改，只改一处 HEAD 仍然报未压缩的长度。后果是真能跑出来的：keep-alive 上
+ * 先 HEAD 探长度、再按长度读满的客户端（下载器、缓存重建、断点续传）会一直等到超时。
+ *
+ * 三段断言缺一不可 —— 尤其最后一段"GET 这条确实压过"：少了它，一个"两边都不压缩"
+ * 的实现能让前两段全绿。
+ */
+void test_head_content_length_matches_get() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.set_compression(true).set_compress_min_body_size(64);
+
+  const std::string big(4000, 'a');
+  app.get("/big", [big](uvcpp_web_request& req, uvcpp_web_response& resp,
+                        uvcpp_web_next next) {
+    (void)req;
+    (void)next;
+    resp.text(big);
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "HEAD/GET 对照服务启动");
+  const int port = app.bound_port();
+
+  // (a) GET 带 gzip：这是被对照的参照值。
+  uvcpp_http_request gr = uvcpp_http_request::make_get("/big");
+  gr.set_header("accept-encoding", "gzip");
+  uvcpp_http_response g;
+  check(roundtrip(port, gr, g), "带 gzip 的 GET 有响应");
+  const std::string g_cl = http_get_header(g.headers, "content-length");
+  const std::string g_ce = http_get_header(g.headers, "content-encoding");
+  check(!g_cl.empty() && g_ce.find("gzip") != std::string::npos &&
+            std::strtoul(g_cl.c_str(), nullptr, 10) < big.size(),
+        "GET 这条确实压过（有 content-encoding，且长度严格小于 4000）");
+
+  // (b) HEAD 带同一个 accept-encoding：头必须与 GET 一致。
+  uvcpp_http_request hr = uvcpp_http_request::make_head("/big");
+  hr.set_header("accept-encoding", "gzip");
+  uvcpp_http_response h;
+  check(roundtrip(port, hr, h), "HEAD 有响应");
+  check(http_get_header(h.headers, "content-length") == g_cl,
+        "HEAD 的 content-length 与 GET 逐字相同");
+  check(http_get_header(h.headers, "content-encoding") == g_ce,
+        "HEAD 的 content-encoding 与 GET 相同");
+  check(h.body.size() == 0, "HEAD 一个 body 字节都没有");
+
+  // (c) 对照组：不要求压缩时不压缩，且 HEAD / GET 仍然一致 —— 免得"恒等"是靠
+  //     "两边都恒为 0"之类的方式蒙混过去的。
+  uvcpp_http_request hr2 = uvcpp_http_request::make_head("/big");
+  uvcpp_http_response h2;
+  check(roundtrip(port, hr2, h2), "不带 accept-encoding 的 HEAD 有响应");
+  check(http_get_header(h2.headers, "content-encoding").empty(),
+        "不要求压缩时 HEAD 没有 content-encoding");
+  check(http_get_header(h2.headers, "content-length") ==
+            std::to_string(big.size()),
+        "不要求压缩时 HEAD 的 content-length 是原长");
 
   app.stop();
   app.join();
@@ -1271,6 +1346,7 @@ int main(int argc, char** argv) {
       {"compression_wiring", test_compression_wiring},
       {"sent_bytes_head", test_sent_bytes_head},
       {"sent_bytes_compressed", test_sent_bytes_compressed},
+      {"head_cl_matches_get", test_head_content_length_matches_get},
       {"graceful_shutdown", test_graceful_shutdown_with_inflight},
       {"start_failure_recoverable", test_start_failure_is_recoverable},
       {"idle_timeout", test_idle_timeout},

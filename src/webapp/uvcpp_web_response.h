@@ -23,9 +23,14 @@
  *
  * 关于 HEAD
  * ---------
- * HEAD 的语义是「和 GET 一样的头，但没有 body」。所以 `set_head_only(true)`
- * 会在**保留** `Content-Length`（反映 GET 应有的长度）之后丢掉 body 字节。
- * 顺序很关键：先算长度，再丢 body。
+ * HEAD 的语义是「和 GET 一样的头，但没有 body」。`set_head_only(true)` 只是
+ * 把这个事实**标出来**，body 一路留到 HTTP 层：那边的 `to_string()` 以
+ * `include_body = !ctx.is_head` 调用，那才是不发字节的地方 —— 而
+ * `apply_compression()` 要拿真 body 才能算出 GET 会发的那个
+ * `Content-Length` 与 `Content-Encoding`（RFC 9110 §9.3.2）。
+ *
+ * 所以本层**不**替 HEAD 丢 body —— 曾经丢过，代价是 HEAD 的长度在压缩之前
+ * 就被钉死，于是 HEAD 报未压缩长度、GET 报压缩后的长度，两边必然不一致。
  *
  * 线程约定
  * --------
@@ -333,10 +338,13 @@ class UVCPP_API uvcpp_web_response {
   // -------------------------------------------------------------------
 
   /**
-   * @brief 标记这是 HEAD 请求：保留 `Content-Length`，丢弃 body。
+   * @brief 标记这是 HEAD 请求：发与 GET 相同的头，但不发 body。
    *
-   * **顺序无关** —— 长度是在 `sync_meta()`（发送前）按当时的 body 算的，
-   * 再丢 body。所以先设 body 还是先设这个标志，结果一样。
+   * **本层不丢 body**（见文件头「关于 HEAD」）。这个标志的作用有两处：让
+   * `uvcpp_web_app` 把 `body_bytes` 记成 0（HEAD 一个字节都没上线），以及
+   * 作为不变式挡住"哪天有人为省一次 stat 让 HEAD 复用缓存字节"那条路。
+   *
+   * 与 `sync_meta()` 的先后**顺序无关** —— 长度按发送前的 body 算。
    */
   void set_head_only(bool v);
   bool head_only() const;

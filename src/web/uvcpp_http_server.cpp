@@ -763,9 +763,15 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
   if (resp.has_header("transfer-encoding")) return false;
 
   if (resp.body.size() < compress_min_body_) return false;
-  // Bodies that must not be transformed: the client asked for no body, or the
-  // status has no body by definition, or the handler already encoded it.
-  if (ctx.is_head) return false;
+  // 这里**不排除 HEAD**：RFC 9110 §9.3.2 要求 HEAD 发与 GET 相同的头字段，
+  // 而 `content-length` 与 `content-encoding` 正是压缩决策的结果。对 HEAD 压
+  // 一遍只是为了**算出那个长度**，压出来的字节不会被发出去 —— 上游
+  // `send_response` 用 `to_string(include_body=false)` 序列化，body 在那里丢掉。
+  //
+  // 这里曾经有一句 `if (ctx.is_head) return false;`。它当时**够不着**（webapp
+  // 层的 `sync_meta()` 已经把 body 清空，上面那道尺寸门先返回），所以删掉它
+  // 看不出任何变化 —— 而 `sync_meta()` 那处一改，它就立刻变成真正的拦截点。
+  // 两处是同一个缺陷的两条腿，必须一起改。
   if (resp.has_header("content-encoding")) return false;
   switch (resp.status_code) {
     case http_status::NO_CONTENT:

@@ -966,15 +966,17 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     // `sync_meta()` 对"已存在的 Content-Length"不动手，所以长度是我们说了算
     // —— 也正因如此，HEAD 才**不需要读盘**（上面 need_data 已经是 false）。
     resp.set_header("content-length", u64_to_string(static_cast<uint64_t>(count)));
-    // HEAD **不返回 body 的真正原因是上面那句 `need_data = !is_head`** ——
-    // 不读盘就没有字节可发。这个标志今天是**冗余**的：它唯一的作用是在
-    // `sync_meta()` 里清空 body，而这条分支从不设 body。（变异测试实测：
-    // 删掉本行整个用例集依然全绿，说明没有任何用例能区分它。）
+    // HEAD **不返回 body 的直接原因是上面那句 `need_data = !is_head`** ——
+    // 不读盘就没有字节可发。
     //
-    // 留着它是作为**不变式**而非机制：一旦以后为了省一次 stat 让 HEAD 复用
-    // 缓存里的字节，它就会立刻变成唯一挡住 body 的东西，而届时漏掉它的后果
-    // 只有 HTTP 客户端看得见 —— 这种"将来才会致命"的标志，代价是一行、
-    // 收益是免于一次静默回归，划得来。
+    // 这个标志**不再是冗余的**：它今天是 `uvcpp_web_app` 把 `body_bytes` 记成 0
+    // 的依据（`web_app_func` 的 `sent_bytes_head` 钉着这一点）。此前它唯一的
+    // 作用是在 `sync_meta()` 里清空 body —— 那一处已经让给"HEAD 与 GET 头一致"
+    // 了（本层的 `content-length` 是显式设的，但**压缩**在 HTTP 层，那里需要
+    // 真 body 才算得出 GET 会发的长度）。
+    //
+    // 它同时还是**不变式**：一旦以后为了省一次 stat 让 HEAD 复用缓存里的字节，
+    // 它就是唯一挡住 body 的东西，而漏掉它的后果只有 HTTP 客户端看得见。
     resp.set_head_only(true);
   } else if (j->status == probe_status::STREAM) {
     // 分片读下发：`count` == last-first+1，与 send_file_range 自己设的
