@@ -201,6 +201,12 @@ def main():
     results = []
     for name, path, old, new, expect in MUTATIONS:
         src = originals[path].decode("utf-8")
+        # 跨行锚点按目标文件的换行符归一：Windows 上工作区是 CRLF（本仓库没有
+        # .gitattributes），而匹配不上会被记成"未施加"、退出码仍是 0 —— 变异静默跑不到。
+        CRLF = chr(13) + chr(10)
+        nl = CRLF if CRLF in src else chr(10)
+        old = old.replace(chr(10), nl)
+        new = new.replace(chr(10), nl)
         n = src.count(old)
         if n != 1:
             print(f"### {name}: 变异**施加失败**（锚点匹配 {n} 次）")
