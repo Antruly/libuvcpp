@@ -78,8 +78,8 @@ allocator mismatch (see `RELEASE.md`).
 
 | Class | Description |
 |-------|-------------|
-| `uvcpp_http_client` | HTTP/1.1 client with keep-alive, streaming parse, dual-mode `send()`/`send_wait()` |
-| `uvcpp_http_server` | HTTP/1.1 server with route registration, per-connection parser, upgrade detection |
+| `uvcpp_http_client` | HTTP client with keep-alive, streaming parse, dual-mode `send()`/`send_wait()`. HTTP/1.1 by default; opt into HTTP/2 with `set_http2_enabled()` |
+| `uvcpp_http_server` | HTTP server with route registration, per-connection parser, upgrade detection. HTTP/1.1 by default; opt into HTTP/2 with `set_http2_enabled()` |
 | `uvcpp_http_parser` | Streaming HTTP parser (wraps [llhttp](https://github.com/nodejs/llhttp)), PIMPL pattern |
 | `uvcpp_http_request` | Request object with `to_string()` / `from_parser()` serialization |
 | `uvcpp_http_response` | Response object with factory methods (`ok()`, `not_found()`, etc.) |
@@ -94,6 +94,14 @@ allocator mismatch (see `RELEASE.md`).
 
 - `UVCPP_ENABLE_ZLIB=ON` — Per-Message Deflate compression (RFC 7692) for WebSocket
 - `UVCPP_ENABLE_OPENSSL=ON` — HTTPS (WSS) via SSL/TLS module
+- `UVCPP_ENABLE_NGHTTP2=ON` — HTTP/2 (RFC 9113) via [nghttp2](https://github.com/nghttp2/nghttp2).
+  Requires `UVCPP_ENABLE_OPENSSL=ON` (force-disabled without it) — h2 is **TLS + ALPN
+  only**: no h2c, no prior knowledge, no RFC 8441, no `:protocol`. It is **off by
+  default and nothing upgrades automatically**: `uvcpp_http_server` needs
+  `set_http2_enabled(true)` **and** an explicit `set_alpn_select_protos({"h2","http/1.1"})`
+  on the SSL context, `uvcpp_http_client` needs `set_http2_enabled(true)` (it builds the
+  per-connection ALPN list itself), and `uvcpp_web_app` wires all of it for you. See
+  [§13 of the webapp guide](doc/webapp-guide.md#13-http2).
 
 ### Web app framework (`src/webapp/`) — `UVCPP_BUILD_WEBAPP=ON`
 
@@ -228,10 +236,13 @@ cmake --build . --config Release --parallel
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | Build the examples in `examples/` |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
+| `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
 
 **Important**: `UVCPP_ENABLE_ZLIB` and `UVCPP_ENABLE_OPENSSL` are NOT auto-enabled
-when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly.
+when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is
+**force-disabled** when `UVCPP_ENABLE_OPENSSL=OFF` (it warns rather than leaving a
+configuration that cannot work) — HTTP/2 here has no cleartext mode.
 
 ---
 

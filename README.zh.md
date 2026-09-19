@@ -77,8 +77,8 @@ v1.1.0 起**默认关闭**（`UVCPP_BUILD_EXPAND=OFF`）—— 要启用需显�
 
 | 类 | 说明 |
 |-------|-------------|
-| `uvcpp_http_client` | HTTP/1.1 客户端，支持 keep-alive、流式解析、双模式 `send()`/`send_wait()` |
-| `uvcpp_http_server` | HTTP/1.1 服务端，路由注册、每连接解析器、Upgrade 检测 |
+| `uvcpp_http_client` | HTTP 客户端，支持 keep-alive、流式解析、双模式 `send()`/`send_wait()`。默认 HTTP/1.1，`set_http2_enabled()` 显式开 h2 |
+| `uvcpp_http_server` | HTTP 服务端，路由注册、每连接解析器、Upgrade 检测。默认 HTTP/1.1，`set_http2_enabled()` 显式开 h2 |
 | `uvcpp_http_parser` | 流式 HTTP 解析器（封装 [llhttp](https://github.com/nodejs/llhttp)），PIMPL 模式 |
 | `uvcpp_http_request` | 请求对象，`to_string()` / `from_parser()` 序列化 |
 | `uvcpp_http_response` | 响应对象，工厂方法（`ok()`, `not_found()` 等） |
@@ -93,6 +93,15 @@ v1.1.0 起**默认关闭**（`UVCPP_BUILD_EXPAND=OFF`）—— 要启用需显�
 
 - `UVCPP_ENABLE_ZLIB=ON` — WebSocket 压缩扩展（RFC 7692, Per-Message Deflate）
 - `UVCPP_ENABLE_OPENSSL=ON` — HTTPS/WSS 通过 SSL/TLS 模块
+- `UVCPP_ENABLE_NGHTTP2=ON` — HTTP/2（RFC 9113），基于
+  [nghttp2](https://github.com/nghttp2/nghttp2)（静态链入）。需要
+  `UVCPP_ENABLE_OPENSSL=ON`（缺了强制关）—— 本库的 h2 **只走 TLS + ALPN**：
+  不做 h2c、不做 prior-knowledge、不做 RFC 8441、不做 `:protocol`。它**默认关，
+  且没有任何自动升级**：`uvcpp_http_server` 要 `set_http2_enabled(true)` **并且**在
+  SSL 上下文上显式 `set_alpn_select_protos({"h2","http/1.1"})`；`uvcpp_http_client`
+  只要 `set_http2_enabled(true)`（ALPN 名单由 `connect()` 每条连接现拼）；
+  `uvcpp_web_app` 那两层都已经替你接好。详见
+  [webapp 指南 §13](doc/webapp-guide.md#13-http2)。
 
 ### Web 应用框架（`src/webapp/`）— `UVCPP_BUILD_WEBAPP=ON`
 
@@ -226,10 +235,13 @@ cmake --build . --config Release --parallel
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | 构建 `examples/` 下的示例 |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
+| `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 
 **注意**：开启 `UVCPP_BUILD_WEB=ON` 不会自动启用 `UVCPP_ENABLE_ZLIB` 或 `UVCPP_ENABLE_OPENSSL`。
-这些选项需要显式手动开启。
+这些选项需要显式手动开启。`UVCPP_ENABLE_NGHTTP2` 在 `UVCPP_ENABLE_OPENSSL=OFF` 时
+**强制关闭**（给一条 warning，而不是留一个根本跑不起来的配置）—— 本库的 HTTP/2
+没有明文形态。
 
 ---
 

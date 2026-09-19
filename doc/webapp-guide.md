@@ -837,6 +837,62 @@ bool http2_enabled() const;                  // 读的是**实际**能不能：�
 客户端因此协商回 `http/1.1`。**降级是能用的**，不是"协商结果不同"而已。
 `UVCPP_ENABLE_NGHTTP2=OFF` 编出来的库 `http2_enabled()` 恒为 `false`，行为与关掉一致。
 
+### 低层那两层：手动、默认关
+
+框架的"自动"是**建在**低层之上的，低层自己一点都不自动。用 `uvcpp_http_server` /
+`uvcpp_http_client` 时要**自己说**要哪个协议，而且**每一项都得说全** —— 没有哪一层
+替你把另一层补上。
+
+**服务端**：两个开关都要，缺一个都协商不出 h2。注意 TLS 不在 `uvcpp_http_server`
+上，得挂到它下面的 `uvcpp_tcp_server`，**而且必须在 `listen()` 之前**。
+
+```cpp
+uvcpp_ssl_context ctx(tls_mode::SERVER, tls_version::TLS_1_2);
+ctx.load_certificate_file("server.crt");           // 证书/私钥，同 HTTPS 那套
+ctx.load_private_key_file("server.key");
+// ① ALPN 名单：不设就没有可协商的东西，服务端会按"没谈 ALPN"回，连接落到 h1
+ctx.set_alpn_select_protos({"h2", "http/1.1"});    // 顺序即优先级
+
+uvcpp_http_server srv;
+srv.get_tcp_server()->set_ssl_context(&ctx);       // 必须在 listen() 之前
+srv.set_http2_enabled(true);                       // ② 协议层开关，默认 false
+```
+
+那个上下文的生命周期要覆盖整个服务端（`set_ssl_context` **不接管所有权**）。
+
+服务端的选择回调**不匹配时返回 `NOACK` 而不是 fatal**，所以不带 ALPN 的
+HTTP/1.1 客户端照常握手成功 —— 这就是"关掉 h2 之后降级是能用的"的机制。
+
+**客户端**：只设协议层，ALPN 名单由 `connect()` 按开关现拼。
+
+```cpp
+uvcpp_ssl_context cctx(tls_mode::CLIENT, tls_version::TLS_1_2);
+
+uvcpp_http_client cli;
+cli.set_ssl_context(&cctx);     // 这个上下文上**不用**设 ALPN —— 见下
+cli.set_http2_enabled(true);
+cli.connect("host", 443, [&](int err) {
+  // 握手内谈完，这里已是终局；不需要嗅字节，也不需要等
+  printf("%s\n", cli.negotiated_alpn().c_str());   // "h2" / "http/1.1" / ""
+  // cli.send(req, cb)  —— 现在按实际协商结果走 h2 或 h1
+});
+```
+
+- `set_http2_enabled(false)`（默认）钉 `{"http/1.1"}`；`true` 发 `{"h2","http/1.1"}`。
+  这一对是**每条连接**现拼的（`connect()` 里算、装到那条连接的 `SSL*` 上），
+  所以上下文上设的客户端 ALPN 会被它盖掉 —— 客户端这边只有协议层这一个旋钮。
+- **协商不出 h2 不是错误** —— 名字叫"开启"不是"强制"，服务端不认就照走 h1。
+  要判到底走了哪条，读 `negotiated_alpn()`。
+- **h2 连接上 `send_wait()` 返回 `UV_ENOTSUP`**。理由与既有的"异步 `connect()` 配
+  `send_wait()`"是同一条：阻塞式 `SSL_read/SSL_write` 要独占 socket，接管不了 h2
+  那条内存 BIO 会话。宁可报错，也不把 HTTP/1.1 明文写进一条对端按二进制帧解析的
+  连接。**h2 只支持异步系列**（`connect()` + `send()`）。
+- **h2 上没有单槽状态**：一条连接上并发几条流时，应答**按 `resp.stream_id` 归位**
+  （h1 那条路上它恒为 0）。回调是逐条的，`stream_id` 是你唯一的"这条回应的是哪次
+  请求"的凭据。
+- 必须配 TLS。明文上没有 ALPN，本库也不做 h2c，所以没设 SSL 上下文时打开它只是
+  **记录意图**，连接照样是 HTTP/1.1。
+
 ### h2 上原来就成立的
 
 路由（含路径参数）、中间件、`next()`、静态服务（含 Range/ETag/304）、multipart 上传、
@@ -848,6 +904,20 @@ chunked/SSE 流式响应 —— 全部照常，API 一个都没变。几处值�
 - **并发**：h1 的 `set_max_pipelined_requests()` 是框架自定的上限；h2 换成协议内建的
   `SETTINGS_MAX_CONCURRENT_STREAMS`。
 - **一次上传一条流**：上传结果按 (连接, 流) 二元组归位，同一条 h2 连接上的并发上传互不干扰。
+
+### 这一版写死的几个值
+
+h2 会话的参数在 `uvcpp_h2_session::init()` 上是带默认值的形参，**webapp 这一层没有
+把它们开放成配置项** —— 所以下面是"实际生效的值"，不是"可调项"。要改得从
+`src/http2/` 那一层传。
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| `SETTINGS_MAX_CONCURRENT_STREAMS` | 100 | 我们宣告给对端的并发上限（`H2_DEFAULT_MAX_CONCURRENT_STREAMS`） |
+| `SETTINGS_MAX_HEADER_LIST_SIZE` | 64 KiB | **只是宣告值**，接收侧的强制靠自己的累加（见下） |
+| `SETTINGS_INITIAL_WINDOW_SIZE` | 65535 | **靠不宣告拿到**：默认参数是 0，这一项就不发，对端按 RFC 9113 的初值 65535 走 |
+| 头部列表预算 | 64 KiB | 逐字段累加 `namelen+valuelen+32`，越界即断（`h2_header_budget`） |
+| 单流 body 上限 | 64 MiB | `H2_DEFAULT_MAX_BODY_BYTES`，与 h1 的 body 上限同量级；**两个方向都算**（服务端收到的请求体、客户端收到的响应体走的是同一个 `on_data_chunk`），越界即 `RST_STREAM(ENHANCE_YOUR_CALM)` |
 
 ### h2 上还差一口气的（如实列出）
 
