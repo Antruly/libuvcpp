@@ -156,11 +156,32 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     tls_ssl_ = nullptr;
 
     // 握手超时定时器：先停掉（停是安全的，从它自己的回调里停也行）。
-    // 释放要分情况 —— 如果本对象正是在那个超时回调里被拆掉的，删除句柄等于
-    // 析构正在执行的闭包；那种情况只停不放，让句柄随循环一起走。
+    // 释放要分情况 —— 如果本对象正是在那个超时回调里被拆掉的，删除包装对象
+    // 等于析构正在执行的闭包（`uvcpp_timer::timer_start_cb` 就存在它里面）。
+    //
+    // **但底层句柄无论如何都要关。** 只 `stop()` 不 `uv_close()` 的句柄既不是
+    // 活跃也没在关，而 `uv_loop_close()` 是**遍历 `handle_queue`**、只要还有一个
+    // 非 internal 句柄就返回 `UV_EBUSY`（`_local_deps/libuv/src/uv-common.c:883`）
+    // —— 与活跃无关。于是这条路上的每一个超时都赔掉**整个 `uv_loop_t`**：属主
+    // 关不掉它，`~uvcpp_loop` 只能按既有策略"泄漏而不释放"。
+    //
+    // 这一条是实测出来的：同一套服务端 + 同一个卡住的 ClientHello，只把"销毁
+    // 发生在哪个回调里"换掉 —— 超时回调（本分支）下 `uv_loop_close()` 是
+    // -4082(EBUSY)、队列上剩下的孤儿是 `timer active=0 closing=0`；改由读回调
+    // 销毁（下面 `delete` 那支）则是 0、干净。用例见
+    // `tests/functional/web_ssl_server_hs_timeout_func.cpp`（去掉本分支这句
+    // `uv_close` 它必红）。而且走的是**框架自己**的路：`uvcpp_tcp_server` 的
+    // 管理槽就在 `tls_fail()` 第 5 步里 `delete` 客户端，不需要用户做任何特别
+    // 的事。
     if (tls_hs_timer_ != nullptr) {
       tls_hs_timer_->stop();
-      if (!tls_hs_in_cb_) {
+      if (tls_hs_in_cb_) {
+        // 包装对象留在原地（理由同上），句柄单独关掉 —— 与上面 `tcp_` 那句
+        // 同一个形状：`uv_close` 是异步的，完成回调回来时包装对象仍然有效。
+        if (!tls_hs_timer_->is_closing()) {
+          tls_hs_timer_->close([](uvcpp_handle*) {});
+        }
+      } else {
         delete tls_hs_timer_;
       }
       tls_hs_timer_ = nullptr;
