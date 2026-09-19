@@ -30,9 +30,8 @@
   M6  退回"包装对象一个都不拆"的老写法       `reclaim_paths` 两条腿 FAIL
                                           （**不开 PageHeap**）—— 计数停在
                                           原地，腿 1 的 `loop_close()` 还 EBUSY
-  M7  句柄还活着也当场 `delete`            崩（PageHeap）—— 外层
-                                          `uvcpp_stream::callback_read` 那一帧
-                                          还在包装对象里跑
+  M7  句柄还活着也当场 `delete`            没抓住 —— 判为**等价变异**（见下方
+                                          「M7 没抓住」一节），不是覆盖缺口
 
 M1/M2 为什么必须分开打：两处**长得很像但钉的不是同一件事**。M1 那条腿里，
 回调返回之后只剩 `uvcpp_free_bytes(base)`（局部量）；M2 那条腿里，回调返回
@@ -67,10 +66,11 @@ gflags 的两个坑（都踩过）：
   - 开/关之后必须**回查注册表确认**（`GlobalFlag & 0x02000000`），
     跑完必须关掉并再次回查 —— 页堆残留会让后面所有测试都慢一个量级。
 
-本机**没有 `gflags.exe`**（`Windows Kits\\10\\Debuggers\\x64` 下只有
-dbghelp/dbgcore/srcsrv 那三个可再发行件），所以 `set_pageheap()` 会走
-`set_pageheap_direct()`：直接写同一个 IFEO 键（`GlobalFlag` +
-`PageHeapFlags=0x1`，少了后者只是标准页堆、抓不住"释放后读"），写完同样回查。
+机器上有没有 `gflags.exe` 决定了走哪条路：装了完整的「Debugging Tools for
+Windows」就有（本机有，`Windows Kits\\10\\Debuggers\\x64\\gflags.exe`，走 gflags），
+只装了可再发行那部分（`dbghelp`/`dbgcore`/`srcsrv` 三个 dll）就没有，那时
+`set_pageheap()` 退到 `set_pageheap_direct()`：直接写同一个 IFEO 键（`GlobalFlag`
++ `PageHeapFlags=0x1`，少了后者只是标准页堆、抓不住"释放后读"），写完同样回查。
 两条路的判据完全一样，都是注册表里那个位。
 
 用法：python -u tests/tools/run_tcp_client_dtor_mutation.py [--tree build-webapp]
@@ -258,9 +258,10 @@ def gflags(args):
 def set_pageheap_direct(exe_path, on):
     """**不依赖 gflags**：直接写 IFEO 键，写完同样回查注册表。
 
-    给没装「Debugging Tools for Windows」的机器兜底 —— 本机
-    `Windows Kits\\10\\Debuggers\\x64` 下只有 `dbghelp.dll` / `dbgcore.dll` /
-    `srcsrv.dll`，没有 `gflags.exe`（只有调试器**可再发行**那部分）。
+    给没装「Debugging Tools for Windows」的机器兜底 —— 只有调试器**可再发行**
+    那部分时 `Windows Kits\\10\\Debuggers\\x64` 下只有 `dbghelp.dll` /
+    `dbgcore.dll` / `srcsrv.dll`，没有 `gflags.exe`。本机是完整组件包（同目录下
+    还有 `cdb.exe`），所以这一支在本机走不到，留着是给别的机器兜底。
     gflags 做的本来也就是写这两个值，所以这里等价。
 
     两个值缺一不可：
@@ -305,7 +306,7 @@ def set_pageheap_direct(exe_path, on):
 def set_pageheap(exe_path, on):
     """开/关之后**回查注册表**确认 —— gflags 静默失效过一次（见文件头）。
 
-    本机没有 `gflags.exe`，所以走 `set_pageheap_direct()`。两条路都会回查，
+    有 `gflags.exe` 就走它，没有才退到 `set_pageheap_direct()`。两条路都会回查，
     任一条只要注册表没跟上就算失败。
     """
     try:
