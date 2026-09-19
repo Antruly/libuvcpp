@@ -108,15 +108,31 @@ MUTATIONS = [
      "    /* MUTATION: 上限永不拒绝 */",
      "accounting / does_not_queue"),
 
+    # 名额的取/还在 `serve()` 里时是 S12/S13 那两条；搬进 worker 之后锚点跟着
+    # 换成了下面这三条（S12/S13 保留语义，S14 是这次搬动的判别性变异）。
     ("S12 static_no_admission", STATIC,
-     "  if (im->work_limit && !im->work_limit->acquire()) {",
+     "  if (!work_limit->acquire()) {",
      "  if (false) {  /* MUTATION: 静态路径不做准入 */",
      "static_integration(503)"),
 
     ("S13 slot_never_released", STATIC,
-     "        if (j->self->work_limit) j->self->work_limit->release();",
+     "        if (j->slot_held) j->self->work_limit->release();",
      "        /* MUTATION: 名额只拿不还 */",
-     "static_integration(连发 5 次)"),
+     "static_integration(连发 5 个冷文件)"),
+
+    # 这次改动的判据：命中缓存的那一支本来不该占名额。把它改回"命中也要占"
+    # 就等于还原了改动前的行为 —— 饱和时热文件会跟着冷文件一起被 503 掉。
+    ("S14 cache_hit_takes_slot", STATIC,
+     "      j->data = p.data;\n      j->served_from_cache = true;\n      return;",
+     "      if (!acquire_slot(j)) return;  /* MUTATION: 命中也要占名额 */\n"
+     "      j->data = p.data;\n      j->served_from_cache = true;\n      return;",
+     "static_integration(饱和-命中)"),
+
+    # 流式那一支**仍然**占名额（覆盖集合与改动前对齐）。放出去就红了。
+    ("S15 stream_not_gated", STATIC,
+     "    if (!acquire_slot(j)) return;\n    j->status = probe_status::STREAM;",
+     "    /* MUTATION: 流式不占名额 */\n    j->status = probe_status::STREAM;",
+     "stream_still_gated"),
 ]
 
 

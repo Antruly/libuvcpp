@@ -19,10 +19,23 @@
  * `app.work_limit()->acquire()` 把那个唯一的名额拿走。服务端的静态请求于是
  * 必然拿不到名额，503 是**必然**发生的，与线程调度无关。
  *
- * 代价是：这样测出来的 503 是"名额被占住时静态路径会回绝"，而"静态路径确实
- * 会 acquire"这一点由**同一条断言**保证（如果它根本不做准入，这一条会返回
- * 200 而不是 503）。而"确实会 release"由第 6 组（上限 1 连发 5 次全 200）
- * 保证。三条合起来才是完整的：**会拿、会还、拿不到会拒**。
+ * 代价是：这样测出来的 503 是"名额被占住时**要读盘的**静态路径会回绝"，而
+ * "静态路径确实会 acquire"这一点由**同一条断言**保证（如果它根本不做准入，
+ * 这一条会返回 200 而不是 503）。而"确实会 release"由第 6 组（上限 1 连发
+ * 5 个不同的冷文件全 200）保证。三条合起来才是完整的：**会拿、会还、拿不到
+ * 会拒**。
+ *
+ * ## 还有第四条：**命中缓存的那一支不占名额**
+ *
+ * 闸门卡的是"并发的磁盘读"，而它过去在 `serve()` 里、投递之前就取名额 ——
+ * 于是"命中 LRU 缓存、一次磁盘读都不需要"的请求也一起被 503 掉，而那是绝
+ * 大多数。`static_integration` 里用**同一个被占住的名额**同时钉住两侧：冷文件
+ * 必须 503、热文件必须 200。两条互为对照 —— 只测一边分不出"命中绕开闸门"和
+ * "闸门整个失效"这两种截然不同的实现。
+ *
+ * 与它配套的还有第 7 组 `stream_still_gated`：名额**只在"确实要读盘"的两条
+ * 支路上取**（整读进内存 / 超过阈值走分片流式），覆盖集合里唯一被移出去的是
+ * 缓存命中那一支 —— 流式那一支仍然占，与改动前一致。第六条钉住的就是这一点。
  *
  * ## 为什么不用真慢任务
  *
@@ -97,6 +110,18 @@ const char* k_root = "uvcpp_worklimit_test_root";
 const char* k_file = "uvcpp_worklimit_test_root/hello.txt";
 const char* k_text = "WORK-LIMIT-OK";
 
+/// 一个**从没被请求过**的文件 —— 用它来保证"这次一定要读盘"。
+///
+/// 闸门从 `serve()` 搬到 worker 之后，"要不要占名额"分成两条路：命中 LRU
+/// 缓存的一次磁盘读都不做（不该占），未命中要整读进内存（该占）。要辨出
+/// 这两条，用例就必须能**指定**是哪一条 —— 冷文件与热文件各一个，最直接。
+const char* k_cold_file = "uvcpp_worklimit_test_root/cold.txt";
+/// 还名额那一组专用的一批冷文件（每发一个都必须是未命中）。
+char k_seq_files[5][64] = {
+    "uvcpp_worklimit_test_root/seq0.txt", "uvcpp_worklimit_test_root/seq1.txt",
+    "uvcpp_worklimit_test_root/seq2.txt", "uvcpp_worklimit_test_root/seq3.txt",
+    "uvcpp_worklimit_test_root/seq4.txt"};
+
 #ifdef _WIN32
 #include <direct.h>
 #define TEST_MKDIR(p) _mkdir(p)
@@ -116,6 +141,8 @@ void write_file(const std::string& path, const std::string& text) {
 void make_root() {
   TEST_MKDIR(k_root);
   write_file(k_file, k_text);
+  write_file(k_cold_file, k_text);
+  for (int i = 0; i < 5; ++i) write_file(k_seq_files[i], k_text);
 }
 
 void cleanup_root() {
@@ -322,13 +349,17 @@ void test_static_integration() {
   //
   // 这里是**直接占位**（不是投一个慢任务）：上限是 1，测试把这个名额拿走，
   // 服务端就必然拿不到。503 是确定的，不依赖任何调度时机。
+  //
+  // 请求的是 `cold.txt` —— 一个从没被请求过的文件，所以这次**必然要读盘**。
+  // 这一点不能省：闸门现在只卡"确实要读盘"那一支，换成已缓存的 URL，这条
+  // 断言测的就不再是"闸门会不会拒"，而是"缓存会不会命中"。
   check(app.work_limit()->acquire(), "饱和：测试应当能占住唯一的名额");
   check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 1,
              "饱和：在途数应当是 1");
 
   uvcpp_http_response r503;
-  check(get(port, "/s/hello.txt", r503), "饱和：请求应当拿到响应");
-  check_eq_i(status_of(r503), 503, "饱和：名额满时应当是 503");
+  check(get(port, "/s/cold.txt", r503), "饱和：请求应当拿到响应");
+  check_eq_i(status_of(r503), 503, "饱和：名额满且要读盘时应当是 503");
 
   // `Retry-After` 是 503 的配套语义（RFC 9110 §10.2.3）。**它必须存在** ——
   // 没有它，客户端只能靠猜，最常见的反应是立刻重试，正好把已经饱和的池子
@@ -343,17 +374,36 @@ void test_static_integration() {
   check(body_of(r503).find(k_text) == std::string::npos,
         "饱和：503 的 body 里不该出现文件内容");
 
+  // ---- 同一时刻、同一个饱和的闸门：**缓存命中必须照常 200** ----
+  //
+  // 这一条就是本次改动的判据，而且它与上面那条 503 **互为对照** —— 同一个
+  // 服务、同一个上限、同一个被占住的名额，差别只在"这个 URL 有没有进过
+  // 缓存"。改之前两条都是 503（闸门在 `serve()` 里投递前就抢名额，而缓存
+  // 查找在 worker 里、根本轮不到）。只测其中一条分不出"命中绕开闸门"和
+  // "闸门整个失效"这两种截然不同的实现。
+  uvcpp_http_response rhit;
+  check(get(port, "/s/hello.txt", rhit), "饱和-命中：请求应当拿到响应");
+  check_eq_i(status_of(rhit), 200,
+             "饱和-命中：命中缓存不读盘、不占名额，必须是 200");
+  check(body_of(rhit) == k_text, "饱和-命中：内容应当正常");
+  check_eq_i(static_cast<long long>(st->rejected_count()), 1,
+             "饱和-命中：命中不该被回绝（回绝计数仍为 1）");
+
   // ---- 还回名额 → 立刻恢复 ----
   app.work_limit()->release();
   check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 0,
              "恢复：还回之后在途数应当是 0");
 
   uvcpp_http_response r2;
-  check(get(port, "/s/hello.txt", r2), "恢复：还回名额后请求应当成功");
+  check(get(port, "/s/cold.txt", r2), "恢复：还回名额后请求应当成功");
   check_eq_i(status_of(r2), 200, "恢复：还回名额之后应当回到 200");
   check(body_of(r2) == k_text, "恢复：内容应当正常");
 
-  // ---- 名额必须**每次都还**：上限 1 连发 5 次 ----
+  // ---- 名额必须**每次都还**：上限 1 连发 5 个不同的冷文件 ----
+  //
+  // 五个文件必须**互不相同、且都还没进过缓存**：连发同一个的话，第 1 次
+  // 读过之后后面全走缓存命中那一支，`release` 一次都不需要 —— 于是这条
+  // 用例会在"漏还名额"的实现上照样全绿，判据就没了。
   //
   // **这是"会 release"唯一的判据。** 只 acquire 不 release 的实现，第一次
   // 请求完全正常，从第二次起全部 503 —— 只跑一次的话根本看不出来。上限压到
@@ -361,7 +411,10 @@ void test_static_integration() {
   int ok200 = 0;
   for (int i = 0; i < 5; ++i) {
     uvcpp_http_response rr;
-    if (get(port, "/s/hello.txt", rr) && status_of(rr) == 200 &&
+    if (get(port, std::string("/s/") + (k_seq_files[i] +
+                                       std::strlen(k_root) + 1),
+            rr) &&
+        status_of(rr) == 200 &&
         body_of(rr) == k_text) {
       ++ok200;
     }
@@ -643,6 +696,64 @@ void test_wakeup_reentrant_registration_not_lost() {
 
 }  // namespace
 
+// =========================================================================
+// 7. 流式（大文件）那一支**仍然**占名额
+// =========================================================================
+//
+// 这是与 6 组配套的另一半。名额现在只在"确实要读盘"的两条支路上取：整读进
+// 内存的那一支，和超过阈值改走分片流式的那一支。前者由 6 组钉住，后者由这一
+// 组钉住 —— 两条都占，唯独"命中缓存、一次磁盘读都不做"不占。
+//
+// **为什么流式也要占**：它不整读，但确实在读盘，而闸门从一开始（`serve()`
+// 时代）就覆盖着它。这次只是把判定点从"投递之前"挪到"读盘之前"，覆盖集合
+// 里唯一被移出去的成员是缓存命中那一支 —— 其余与改动前**逐一对齐**。要是
+// 顺手把流式也放出去，那就不只是修 bug，而是放宽了闸门的语义，得单独讨论。
+//
+// 怎么让一个小文件走流式：`max_cached_file_size = 0` 就是"一律走流式"
+// （见该选项的说明），所以这里不需要真造一个大文件。
+void test_stream_path_still_gated() {
+  make_root();
+
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.set_work_limit(1);
+
+  uvcpp_web_static_options o;
+  o.max_cached_file_size = 0;  // 0 = 一律走分片流式
+  std::shared_ptr<uvcpp_web_static> st2 = app.serve_static("/raw", k_root, o);
+  check(st2->work_limit().get() == app.work_limit().get(),
+        "流式：接线，静态服务装上的应当是 App 那个闸门");
+
+  check(app.start_background() == 0, "流式：服务启动");
+  const int port = app.bound_port();
+
+  uvcpp_http_response r;
+  check(get(port, "/raw/hello.txt", r), "流式-对照：请求应当成功");
+  check_eq_i(status_of(r), 200, "流式-对照：名额空着应当是 200");
+  check(body_of(r) == k_text, "流式-对照：内容应当正常");
+
+  // 占住唯一的名额 → 走流式的请求**也**必须被回绝。
+  check(app.work_limit()->acquire(), "流式：占住唯一的名额");
+  check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 1,
+             "流式：在途数应当是 1");
+
+  uvcpp_http_response rs;
+  check(get(port, "/raw/hello.txt", rs), "流式-饱和：请求应当拿到响应");
+  check_eq_i(status_of(rs), 503, "流式-饱和：名额满时流式路径也应当是 503");
+  check(!header_of(rs, "retry-after").empty(),
+        "流式-饱和：503 必须带 Retry-After");
+
+  app.work_limit()->release();
+  uvcpp_http_response r2;
+  check(get(port, "/raw/hello.txt", r2), "流式-恢复：还回名额后请求应当成功");
+  check_eq_i(status_of(r2), 200, "流式-恢复：还回名额之后应当回到 200");
+  check(body_of(r2) == k_text, "流式-恢复：内容应当正常");
+
+  app.stop();
+  app.join();
+  cleanup_root();
+}
+
 int main(int argc, char** argv) {
   std::cout << std::unitbuf;
   const std::string only = (argc > 1) ? argv[1] : std::string();
@@ -656,6 +767,7 @@ int main(int argc, char** argv) {
       {"unlimited", test_unlimited},
       {"default_limit", test_default_limit},
       {"static_integration", test_static_integration},
+      {"stream_still_gated", test_stream_path_still_gated},
       {"does_not_queue", test_does_not_queue},
       {"wakeup_fires_on_release", test_wakeup_fires_on_release},
       {"wakeup_one_shot", test_wakeup_one_shot},
