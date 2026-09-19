@@ -180,6 +180,8 @@ struct scenario {
   std::string handshake_resp;    // 101 的原始报文
 
   std::vector<std::string>    server_texts;
+  /// 收到的 BINARY 消息。与 server_texts 分开存，判据才分得清"回没回错类型"。
+  std::vector<std::string>    server_bins;
   std::vector<uvcpp_ws_frame> cframes;   // 服务端 → 客户端方向，测试侧解析
   bool parse_error = false;
 
@@ -219,6 +221,12 @@ struct scenario {
       c->on_text([this](const std::string& m) {
         server_texts.push_back(m);
         if (conn) conn->send_text(m.c_str(), m.size());
+      });
+      // 二进制回显：**原样回 binary**。回成 text 的话，随机字节的二进制消息
+      // 根本回不过去（它不是合法 UTF-8），而"回显一致"这条判据也就失去意义了。
+      c->on_binary([this](const uint8_t* d, size_t n) {
+        server_bins.push_back(std::string(reinterpret_cast<const char*>(d), n));
+        if (conn) conn->send_binary(reinterpret_cast<const char*>(d), n);
       });
     });
 
@@ -491,7 +499,11 @@ static bool masked_split_phase(size_t payload_offset_in_segment) {
   if (!upgraded(s, "permessage-deflate; client_max_window_bits")) return false;
 
   const std::string msg = incompressible(256 * 1024);
-  const std::string frame = raw_frame(0x1, true, msg, true, 0x00);
+  // **发 BINARY 而不是 TEXT**：`incompressible()` 吐的是随机字节，**必然不是
+  // 合法 UTF-8**，而 TEXT 帧按 RFC 6455 §8.1 必须校验 UTF-8（不合法就以 1007
+  // 关连接）。这条用例要的是"载荷压不动、帧跨多次读"，与"它是不是文本"无关，
+  // 所以按它本来的样子（二进制）发才对。改回 TEXT 会让这条用例挂掉。
+  const std::string frame = raw_frame(0x2, true, msg, true, 0x00);
   // 负载 > 65535 → 帧头是 2 + 8(长度) + 4(掩码) = 14 字节。
   const size_t header = 2 + 8 + 4;
   if (frame.size() <= header + 4) return false;
@@ -500,14 +512,14 @@ static bool masked_split_phase(size_t payload_offset_in_segment) {
   if (!s.send_bytes(frame.substr(0, cut))) return false;
   s.settle(50);
   if (s.parse_error) return false;
-  if (!s.server_texts.empty()) return false;      // 半帧不算消息
+  if (!s.server_bins.empty()) return false;      // 半帧不算消息
 
   if (!s.send_bytes(frame.substr(cut))) return false;
-  if (!s.pump([&] { return !s.server_texts.empty(); }, 10000)) return false;
+  if (!s.pump([&] { return !s.server_bins.empty(); }, 10000)) return false;
   if (s.parse_error) return false;
-  if (s.server_texts.size() != 1) return false;
+  if (s.server_bins.size() != 1) return false;
   // 相位错一位，解出来的就是一堆乱码 —— 这个比较就是判据
-  return s.server_texts[0] == msg;
+  return s.server_bins[0] == msg;
 }
 
 /** @brief 把上面那条用例绑成 `bool(*)()`（用例表用的是裸函数指针，C++11 没有
@@ -535,9 +547,13 @@ static bool test_large_echo_across_reads() {
   if (!s.setup_compression(uvcpp_ws_deflate_config())) return false;
 
   const std::string msg = incompressible(512 * 1024);
-  if (!s.send_bytes(raw_frame(0x1, true, msg, true, 0x00))) return false;
-  if (!s.pump([&] { return !s.server_texts.empty(); }, 10000)) return false;
-  if (s.server_texts.size() != 1 || s.server_texts[0] != msg) return false;
+  // **发 BINARY 而不是 TEXT**：`incompressible()` 吐的是随机字节，**必然不是
+  // 合法 UTF-8**，而 TEXT 帧按 RFC 6455 §8.1 必须校验 UTF-8（不合法就以 1007
+  // 关连接）。这条用例要的是"载荷压不动、帧跨多次读"，与"它是不是文本"无关，
+  // 所以按它本来的样子（二进制）发才对。改回 TEXT 会让这条用例挂掉。
+  if (!s.send_bytes(raw_frame(0x2, true, msg, true, 0x00))) return false;
+  if (!s.pump([&] { return !s.server_bins.empty(); }, 10000)) return false;
+  if (s.server_bins.size() != 1 || s.server_bins[0] != msg) return false;
 
   // 等回显整帧解析完。载荷压不动，所以这一帧必然跨多次读。
   if (!s.pump([&] { return !s.cframes.empty(); }, 10000)) return false;
@@ -545,7 +561,7 @@ static bool test_large_echo_across_reads() {
   if (s.cframes.size() != 1) return false;     // 跨读的帧只能算**一条**
 
   const uvcpp_ws_frame& f = s.cframes[0];
-  if (f.opcode != ws_opcode::TEXT) return false;
+  if (f.opcode != ws_opcode::BINARY) return false;
   if (!f.rsv1) return false;
   // 别拿压缩后的长度和明文比：`incompressible` 的数据 deflate 之后**更大**
   // （每 16KB 一个存储块，加 5 字节块头：512KiB 的负载量出来是 524449）。
@@ -955,7 +971,7 @@ static bool test_send_failure_is_reported() {
   // 必须先析构（逆序），`dead` 后析构。反过来的话 `~uvcpp_ws_connection` 会
   // 去碰一个已经释放的循环 —— 与第十三批修掉的形状同源。
   uvcpp_tcp_client    dead;
-  uvcpp_ws_connection conn(&dead, /*is_server=*/false);
+  uvcpp_ws_connection conn(&dead, ws_role::CLIENT);
 
   // 首帧：入队后立刻在 pump 里失败。错误走**回调**（`send_frame` 的返回值
   // 是"有没有排上队"，不是"有没有发出去"），所以这里断言回调。

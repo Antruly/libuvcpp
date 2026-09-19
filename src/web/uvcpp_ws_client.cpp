@@ -361,7 +361,7 @@ void uvcpp_ws_client::on_handshake_complete(int error) {
       // 握手完成之前调用方就 `close()` 了（取消那次已经在 `close()` 里结算
       // 过，这里只是运输层还来不及被拆掉）。这次连接**不算成立**：会话照旧
       // 接管（生命周期归 `sessions_`），但立刻关掉，回调不叫第二次。
-      auto* cancelled = new uvcpp_ws_connection(tcp_, /*is_server=*/false);
+      auto* cancelled = new uvcpp_ws_connection(tcp_, ws_role::CLIENT);
       sessions_.adopt(cancelled);
       cancelled->close(ws_close_code::NORMAL);
       return;
@@ -371,7 +371,7 @@ void uvcpp_ws_client::on_handshake_complete(int error) {
     // 句柄是有意的：`uv_async_init` 必须在循环线程上做，而 `connect()` 可能
     // 是从别的线程调进来的（那时候句柄还没法建）。
     sessions_.set_loop(loop_);
-    auto* conn = new uvcpp_ws_connection(tcp_, /*is_server=*/false);
+    auto* conn = new uvcpp_ws_connection(tcp_, ws_role::CLIENT);
     // **先接管所有权再 start()**：反过来的话，对端若在我们 start() 的过程中
     // 就断了（关闭观察者立刻回调），会话会不知道把自己交给谁。
     sessions_.adopt(conn);

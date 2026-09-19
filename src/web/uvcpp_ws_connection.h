@@ -42,6 +42,20 @@
 
 namespace uvcpp {
 
+/**
+ * @brief 本端在一条 WebSocket 连接上的角色。
+ *
+ * **为什么要一个枚举而不是 `bool is_server`。** RFC 6455 对两侧的帧要求是
+ * **不对称**的：客户端发出的帧 MUST 掩码、服务端发出的 MUST NOT（§5.1）。
+ * 既然方向搞反了会直接让连接不可用，这个参数就不该有默认值（见构造函数的
+ * 说明）；而"必填"之后，剩下的问题是**光看 `true`/`false` 不知道哪边是哪边** ——
+ * 枚举正好补上这一点，而且报错信息里也会直接写出 `ws_role`。
+ */
+enum class ws_role : int {
+  SERVER = 0,   ///< 本端是服务端：发出去的帧**不**掩码，收到的帧**必须**掩码
+  CLIENT = 1    ///< 本端是客户端：发出去的帧**必须**掩码，收到的帧**不**该掩码
+};
+
 class UVCPP_API uvcpp_ws_connection {
  public:
   UVCPP_DEFINE_FUNC(uvcpp_ws_connection)
@@ -50,12 +64,18 @@ class UVCPP_API uvcpp_ws_connection {
   /**
    * @brief Wrap an already-upgraded TCP client. Call start() to begin.
    *
-   * @param is_server 本端角色。**必填、无默认值** —— RFC 6455 对两侧的帧要求是
-   *        **不对称**的：客户端发来的帧 MUST 带掩码（§5.1），服务端发来的
+   * @param role 本端角色。**必填、无默认值** —— RFC 6455 对两侧的帧要求是
+   *        **不对称**的：客户端发出的帧 MUST 掩码（§5.1），服务端发出的
    *        MUST NOT（同节）。搞反了任意一侧都会直接不可用，所以让它必须被
    *        写出来，而不是靠一个"猜多半是服务端"的默认值。
+   *
+   *        **也别给它加默认值来"省一次编译错误"。** 两个默认方向都是静默坏：
+   *        默认 SERVER 则客户端漏填会发出未掩码帧（任何合规服务端都会 1002
+   *        掉它），默认 CLIENT 则服务端漏填会发出带掩码的帧（合规客户端会关
+   *        连接）。换句话说，"搞反了框架自己的往返用例会抓到"这条**只在
+   *        框架自测自时成立**，而两侧同错恰好是最容易互相掩盖的一种。
    */
-  uvcpp_ws_connection(uvcpp_tcp_client* tcp, bool is_server);
+  uvcpp_ws_connection(uvcpp_tcp_client* tcp, ws_role role);
 
   /**
    * @brief 开始读 WS 帧。握手完成后调**一次**，且调用方已经不在 TCP 读回调里。
@@ -271,7 +291,10 @@ class UVCPP_API uvcpp_ws_connection {
   uvcpp_tcp_client* tcp_ = nullptr;
 
   /// 本端角色。决定掩码检查的方向（见构造函数的说明）。
-  bool is_server_ = true;
+  ws_role role_ = ws_role::SERVER;
+
+  /// 只在本类内部用；语义同 `role_ == ws_role::SERVER`。
+  bool is_server() const { return role_ == ws_role::SERVER; }
   uvcpp_ws_parser   parser_;
   bool started_ = false;
 

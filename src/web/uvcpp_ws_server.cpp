@@ -221,7 +221,7 @@ void uvcpp_ws_server::handle_upgrade(
       sessions_.set_loop(http_server_->get_tcp_server()->get_loop());
     }
 
-    auto* conn = new uvcpp_ws_connection(client, /*is_server=*/true);
+    auto* conn = new uvcpp_ws_connection(client, ws_role::SERVER);
     // **先接管所有权，再 start()。** 反过来的话，如果对端在我们 start() 的
     // 过程中就断了（关闭观察者立刻回调），会话会不知道把自己交给谁。
     sessions_.adopt(conn);

@@ -152,7 +152,7 @@ struct scenario {
       // `set_loop` 必须在循环线程、循环正跑着的时候调（`uv_async_init` 不是
       // 线程安全的），而这里正是接入回调，两个条件都满足。
       sessions_.set_loop(server.get_loop());
-      auto* wc = new uvcpp_ws_connection(c, /*is_server=*/true);
+      auto* wc = new uvcpp_ws_connection(c, ws_role::SERVER);
       sessions_.adopt(wc);
       if (max_msg > 0) wc->set_max_message_size(max_msg);
       wc->on_text([this](const std::string& m) { texts.push_back(m); });

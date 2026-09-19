@@ -6,8 +6,8 @@
 
 namespace uvcpp {
 
-uvcpp_ws_connection::uvcpp_ws_connection(uvcpp_tcp_client* tcp, bool is_server)
-    : tcp_(tcp), is_server_(is_server) {
+uvcpp_ws_connection::uvcpp_ws_connection(uvcpp_tcp_client* tcp, ws_role role)
+    : tcp_(tcp), role_(role) {
   // 存活令牌（见头文件）：写完成回调用它判断"会话还在不在"。
   alive_token_ = std::shared_ptr<char>(new char);
   parser_.set_on_frame([this](const uvcpp_ws_frame& f) { on_ws_frame(f); });
@@ -181,11 +181,11 @@ void uvcpp_ws_connection::on_ws_frame(const uvcpp_ws_frame& frame) {
   // 1002。掩码本来的用途是防中间代理缓存投毒（§10.3），服务端不强制等于把
   // 那条防护让掉。
   // ---------------------------------------------------------------------
-  if (is_server_ && !frame.masked) {
+  if (is_server() && !frame.masked) {
     protocol_error(ws_close_code::PROTOCOL_ERROR, "client frame must be masked");
     return;
   }
-  if (!is_server_ && frame.masked) {
+  if (!is_server() && frame.masked) {
     protocol_error(ws_close_code::PROTOCOL_ERROR, "server frame must not be masked");
     return;
   }
@@ -536,7 +536,7 @@ size_t uvcpp_ws_connection::get_compress_min_size() const { return compress_min_
 #endif
 
 void uvcpp_ws_connection::apply_mask(uvcpp_ws_frame& f) const {
-  if (is_server_) {
+  if (is_server()) {
     // 服务端发的帧**必须不掩码**（§5.1）。显式清掉而不是不管：帧是调用方
     // 造的，万一哪天有谁填了 masked，服务端发出去就成了协议错误。
     f.masked = false;
