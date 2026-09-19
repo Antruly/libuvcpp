@@ -182,6 +182,27 @@ struct UVCPP_API uvcpp_web_app_config {
    */
   size_t max_body_size;
 
+  /**
+   * @brief 请求头块上限（字节），超过直接回 431 且**不路由**。0 = 不限。
+   *
+   * 计的是整个头块在线上占的字节（每个字段的 `名字: 值\r\n`，不含请求行）。
+   * 和 `max_body_size` 一样默认给一个有限的数而不是"不限"：头是在**解析过程中**
+   * 逐字节吃进去的，没有上限时一个请求就能让服务端解析 32 MiB 的头 ——
+   * 内存不常驻，但 CPU 和带宽照付，而且没有任何开关能收紧。
+   *
+   * 16 KiB 这个数与 Node 的 `--max-http-header-size` 默认值一致 —— 不是随手取的：
+   * 它容得下又大又长的 Cookie / JWT，又是各家 HTTP 实现趋同的那个量级。
+   */
+  size_t max_header_bytes;
+
+  /**
+   * @brief 请求目标（URL）上限（字节），超过直接回 414 且**不路由**。0 = 不限。
+   *
+   * 只计请求行里的路径+查询串，不含方法名与版本。8 KiB 远大于任何正常 URL，
+   * 又能在 URL 本身变成攻击面时（超长查询串、路径爆破）把它挡住。
+   */
+  size_t max_url_bytes;
+
   /** @brief 是否自动压缩响应体（需要构建时开了 zlib）。 */
   bool compression;
 
@@ -319,6 +340,10 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_app& set_port(int port);
   uvcpp_web_app& set_backlog(int backlog);
   uvcpp_web_app& set_max_body_size(size_t bytes);
+  /** @brief 请求头块上限（字节）。0 = 不限。见 @ref uvcpp_web_app_config::max_header_bytes。 */
+  uvcpp_web_app& set_max_header_bytes(size_t bytes);
+  /** @brief 请求目标上限（字节）。0 = 不限。见 @ref uvcpp_web_app_config::max_url_bytes。 */
+  uvcpp_web_app& set_max_url_bytes(size_t bytes);
   uvcpp_web_app& set_compression(bool enable);
   uvcpp_web_app& set_compress_min_body_size(size_t bytes);
   uvcpp_web_app& set_access_log(bool enable);

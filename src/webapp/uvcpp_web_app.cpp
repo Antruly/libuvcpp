@@ -182,6 +182,8 @@ uvcpp_web_app_config::uvcpp_web_app_config()
       port(8080),
       backlog(128),
       max_body_size(16 * 1024 * 1024),
+      max_header_bytes(16 * 1024),
+      max_url_bytes(8 * 1024),
       compression(true),
       compress_min_body_size(1024),
       access_log(true),
@@ -303,6 +305,16 @@ uvcpp_web_app& uvcpp_web_app::set_backlog(int backlog) {
 
 uvcpp_web_app& uvcpp_web_app::set_max_body_size(size_t bytes) {
   cfg_.max_body_size = bytes;
+  return *this;
+}
+
+uvcpp_web_app& uvcpp_web_app::set_max_header_bytes(size_t bytes) {
+  cfg_.max_header_bytes = bytes;
+  return *this;
+}
+
+uvcpp_web_app& uvcpp_web_app::set_max_url_bytes(size_t bytes) {
+  cfg_.max_url_bytes = bytes;
   return *this;
 }
 
@@ -1620,6 +1632,8 @@ int uvcpp_web_app::init_on_loop_thread() {
   check_upload_dir_containment();
 
   http_->set_max_body_size(cfg_.max_body_size);
+  http_->set_max_header_bytes(cfg_.max_header_bytes);
+  http_->set_max_url_bytes(cfg_.max_url_bytes);
 #if UVCPP_ZLIB_ENABLE
   http_->set_compression_enabled(cfg_.compression);
   http_->set_compress_min_body_size(cfg_.compress_min_body_size);

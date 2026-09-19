@@ -246,6 +246,38 @@ class UVCPP_API uvcpp_http_parser {
   /** @brief Called when a chunk's data has been fully received. */
   void set_on_chunk_complete(std::function<void()> cb);
 
+  // -------------------------------------------------------------------
+  // 请求目标 / 头部长度的上限
+  //
+  // 在 llhttp 的头部回调里**边收边判**，超了就当场返回非 0 让解析停下 ——
+  // 放到 `headers_complete` 再判是没用的：那时候 32 MiB 已经解析完了，
+  // 挡住的只是内存，CPU 和带宽照付。llhttp 自带的版本没有
+  // `HPE_HEADER_OVERFLOW`（9.2.0 的错误枚举里没有这一项），所以这道限只能
+  // 自己记。
+  // -------------------------------------------------------------------
+
+  /** @brief 撞上的是哪一道限。用于让调用方回 414/431，而不是笼统的 400。 */
+  enum class size_limit {
+    NONE,
+    URL,     ///< 请求目标超过 `set_max_url_bytes()`
+    HEADER,  ///< 请求头超过 `set_max_header_bytes()`
+  };
+
+  /** @brief 读出撞上的限；`NONE` 表示没撞上。 */
+  size_limit limit_hit() const { return limit_hit_; }
+
+  /** @brief 请求目标上限（字节）。0 = 不设限（默认）。 */
+  void set_max_url_bytes(size_t n) { max_url_bytes_ = n; }
+
+  /** @brief 请求头上限（字节）。0 = 不设限（默认）。
+   *
+   * 计的是整个头块在线上占的字节：每个字段的 `名字: 值\r\n`（`": "` 与行尾
+   * CRLF 各按 2 字节在字段收尾时一次记入），**不含**请求行、也不含收尾那个空行。
+   * 一个字段收完时账是**精确**的；值还在到达的过程中少记了那 2 字节的 `": "`，
+   * 所以判定最多晚 2 字节 —— 方向永远是"不早判"，不会误拒一个没超的请求。
+   */
+  void set_max_header_bytes(size_t n) { max_header_bytes_ = n; }
+
  private:
   // -------------------------------------------------------------------
   // Trampoline callback types (C function pointers + void* user data)
@@ -296,6 +328,25 @@ class UVCPP_API uvcpp_http_parser {
   // Accumulated parse results
   std::string  url_buf_;
   http_headers headers_;
+
+  // 头部长度上限的账本（API 见上方 `size_limit` 那一节）
+  size_t     max_url_bytes_    = 0;
+  size_t     max_header_bytes_ = 0;
+  size_t     header_bytes_     = 0;  ///< 本条消息累计的头部字节
+  size_limit limit_hit_        = size_limit::NONE;
+
+  /** @brief 头部字节超限就置 `limit_hit_`；返回非 0 表示"该停下来了"。 */
+  int check_header_limit();
+
+  /** @brief 记一个字段收尾的 `: ` + CRLF 四个字节，再查一次限。 */
+  int note_header_done();
+
+  /** @brief 一条消息开始时清账。`reset()` 与 `ll_on_message_begin` 都要调。 */
+  void clear_size_limits() {
+    header_bytes_ = 0;
+    limit_hit_    = size_limit::NONE;
+  }
+
   http_method  method_     = http_method::HTTP_GET;
   http_status  status_code_ = http_status::OK;
   uvcpp_http_version version_    = static_cast<uvcpp_http_version>(1);

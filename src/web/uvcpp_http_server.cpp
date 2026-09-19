@@ -169,6 +169,10 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
 #endif
   conn_ctx ctx;
   ctx.parser = new uvcpp_http_parser(http_parser_mode::PARSE_REQUEST);
+  // 上限装在解析器上，而不是在这里的 `on_data` 里比大小：要挡的是"32 MiB 的
+  // 头被完整解析一遍"，那就只能在解析**过程中**停，等头收完再看已经晚了。
+  ctx.parser->set_max_header_bytes(max_header_bytes_);
+  ctx.parser->set_max_url_bytes(max_url_bytes_);
   // 先自增再赋值：0 要留给"不在登记表里"，不然"第 0 条连接"和"没连接"就分不开了。
   ctx.generation = ++next_generation_;
   contexts_[client] = ctx;
@@ -340,6 +344,22 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
     ctx.pending.assign(buf->get_const_data() + used, buf->size() - used);
   }
 
+  // **必须排在 `has_error()` 前面**：撞上限同样会让解析器进 PARSE_ERROR
+  // （回调返回非 0 就是这个效果），照 `has_error()` 那条路走会一律回 400，
+  // 把"头太大"和"请求畸形"混成一件事，客户端也就无从知道自己该缩哪一样。
+  const uvcpp_http_parser::size_limit hit = ctx.parser->limit_hit();
+  if (hit != uvcpp_http_parser::size_limit::NONE) {
+    // 消息半途被丢下了，永远不会有 `on_request_complete` —— 关闭只能搭在
+    // 这次写上（`reject_early` 的默认延迟关闭在这里会等一个不来的事件，
+    // 连接一直挂到闲置清扫）。
+    reject_early(ctx, client,
+                 hit == uvcpp_http_parser::size_limit::URL
+                     ? http_status::URI_TOO_LONG
+                     : http_status::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                 /*message_will_complete=*/false);
+    return;
+  }
+
   if (ctx.parser->has_error()) {
     // A malformed request must not be answered by hand-rolled bytes: route it
     // through the normal response path so keep-alive/close handling, HEAD
@@ -498,7 +518,8 @@ bool uvcpp_http_server::reject_oversized_declared(conn_ctx& ctx,
 }
 
 void uvcpp_http_server::reject_early(conn_ctx& ctx, uvcpp_tcp_client* client,
-                                     http_status status) {
+                                     http_status status,
+                                     bool message_will_complete) {
   const char* reason = http_status_reason(status);
   const std::string body =
       std::to_string(static_cast<int>(status)) + " " + reason;
@@ -508,16 +529,22 @@ void uvcpp_http_server::reject_early(conn_ctx& ctx, uvcpp_tcp_client* client,
   resp.set_header("connection", "close");
 
   ctx.rejected = true;
-  // Not now. The client is still sending the body, and closing a socket with
-  // unread data in its receive buffer makes Windows send an RST — which throws
-  // away bytes the peer has buffered but not yet read, including this response.
-  // on_request_complete closes once the message has actually ended.
-  ctx.close_after_message = true;
   // The body is going to arrive no matter what; don't accumulate a byte of it.
   ctx.body_overflow = true;
   ctx.body_buf.clear();
 
-  send_response(client, resp, /*close_after_write=*/false);
+  if (message_will_complete) {
+    // Not now. The client is still sending the body, and closing a socket with
+    // unread data in its receive buffer makes Windows send an RST — which throws
+    // away bytes the peer has buffered but not yet read, including this response.
+    // on_request_complete closes once the message has actually ended.
+    ctx.close_after_message = true;
+  }
+
+  // 消息半途被丢下时反过来：等 `on_request_complete` 就是永远不等。
+  // 队列写完由 `pump_write()` 收尾 —— 它认得这个形状（没有 stream handler
+  // 且消息没完成 ⇒ 当场关），所以这里只要让 `close_requested` 立起来。
+  send_response(client, resp, /*close_after_write=*/!message_will_complete);
 }
 
 void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
@@ -1270,6 +1297,18 @@ void uvcpp_http_server::set_max_body_size(size_t max_bytes) {
 }
 
 size_t uvcpp_http_server::max_body_size() const { return max_body_size_; }
+
+void uvcpp_http_server::set_max_header_bytes(size_t max_bytes) {
+  max_header_bytes_ = max_bytes;
+}
+
+size_t uvcpp_http_server::max_header_bytes() const { return max_header_bytes_; }
+
+void uvcpp_http_server::set_max_url_bytes(size_t max_bytes) {
+  max_url_bytes_ = max_bytes;
+}
+
+size_t uvcpp_http_server::max_url_bytes() const { return max_url_bytes_; }
 
 void uvcpp_http_server::set_raw_data_hook(http_raw_data_hook hook) {
   raw_data_hook_ = std::move(hook);

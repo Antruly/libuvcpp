@@ -109,6 +109,7 @@ void uvcpp_http_parser::reset() {
   content_length_ = 0;
   upgrade_       = false;
   last_chunk_size_ = 0;
+  clear_size_limits();
   state_         = http_parser_state::IDLE;
 }
 
@@ -382,14 +383,34 @@ int uvcpp_http_parser::ll_on_message_begin(llhttp_t* p) {
   self->content_length_ = 0;
   self->upgrade_        = false;
   self->last_chunk_size_ = 0;
+  // 同理：字节账与"撞上了哪道限"都必须按消息清。少清一次，
+  // 流水线里的第二条请求会**一进来就超限**，而它自己其实一个头都还没发。
+  self->clear_size_limits();
 
   self->state_ = http_parser_state::HEADER;
+  return 0;
+}
+
+int uvcpp_http_parser::note_header_done() {
+  header_bytes_ += 4;  // ": " 两字节 + 行尾 CRLF 两字节
+  return check_header_limit();
+}
+
+int uvcpp_http_parser::check_header_limit() {
+  if (max_header_bytes_ != 0 && header_bytes_ > max_header_bytes_) {
+    limit_hit_ = size_limit::HEADER;
+    return 1;  // 非 0 ⇒ llhttp 当场停下，剩下的头一个字节都不再解析
+  }
   return 0;
 }
 
 int uvcpp_http_parser::ll_on_url(llhttp_t* p, const char* at, size_t len) {
   auto* self = self_from_llhttp(p);
   self->url_buf_.append(at, len);
+  if (self->max_url_bytes_ != 0 && self->url_buf_.size() > self->max_url_bytes_) {
+    self->limit_hit_ = size_limit::URL;
+    return 1;
+  }
   if (self->url_fn_) self->url_fn_(at, len, self->url_arg_);
   return 0;
 }
@@ -407,8 +428,11 @@ int uvcpp_http_parser::ll_on_header_field(llhttp_t* p, const char* at, size_t le
     self->headers_.push_back({self->cur_header_name_, self->cur_header_value_});
     self->cur_header_name_.clear();
     self->cur_header_value_.clear();
+    if (self->note_header_done() != 0) return 1;
   }
   self->cur_header_name_.append(at, len);
+  self->header_bytes_ += len;
+  if (self->check_header_limit() != 0) return 1;
   if (self->field_fn_) self->field_fn_(at, len, self->field_arg_);
   return 0;
 }
@@ -416,6 +440,8 @@ int uvcpp_http_parser::ll_on_header_field(llhttp_t* p, const char* at, size_t le
 int uvcpp_http_parser::ll_on_header_value(llhttp_t* p, const char* at, size_t len) {
   auto* self = self_from_llhttp(p);
   self->cur_header_value_.append(at, len);
+  self->header_bytes_ += len;
+  if (self->check_header_limit() != 0) return 1;
   if (self->value_fn_) self->value_fn_(at, len, self->value_arg_);
   return 0;
 }
@@ -432,6 +458,7 @@ int uvcpp_http_parser::ll_on_header_value_complete(llhttp_t* p) {
     self->headers_.push_back({self->cur_header_name_, self->cur_header_value_});
     self->cur_header_name_.clear();
     self->cur_header_value_.clear();
+    if (self->note_header_done() != 0) return 1;
   }
   return 0;
 }

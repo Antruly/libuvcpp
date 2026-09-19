@@ -290,6 +290,31 @@ class UVCPP_API uvcpp_http_server {
   void set_max_body_size(size_t max_bytes);
   size_t max_body_size() const;
 
+  /**
+   * @brief Cap the request header block (bytes). 0 = unlimited (default).
+   *
+   * Counts the whole header block as it appears on the wire — every field's
+   * `name: value\r\n`, excluding the request line and the final empty line.
+   * Checked **while** the headers arrive, not after: the parser stops as soon as
+   * the running count passes the cap, so an oversized header block costs the
+   * server a bounded amount of CPU and bandwidth rather than all of it. The
+   * request is answered 431 with `Connection: close` and never routed.
+   *
+   * Requests claimed by a stream handler are not covered — like
+   * `max_body_size()`, the limits stop at the claim boundary.
+   */
+  void set_max_header_bytes(size_t max_bytes);
+  size_t max_header_bytes() const;
+
+  /**
+   * @brief Cap the request target / URL (bytes). 0 = unlimited (default).
+   *
+   * Same early-stop behaviour as `set_max_header_bytes()`; the request is
+   * answered 414 with `Connection: close` and never routed.
+   */
+  void set_max_url_bytes(size_t max_bytes);
+  size_t max_url_bytes() const;
+
   // -------------------------------------------------------------------
   // Raw TCP data interception
   // -------------------------------------------------------------------
@@ -783,8 +808,14 @@ class UVCPP_API uvcpp_http_server {
    * Queues a `Connection: close` response, marks the context rejected so no
    * later stage answers again, and arranges for the close to happen at message
    * end rather than now (see @ref conn_ctx::close_after_message).
+   *
+   * @param message_will_complete false when the parse was abandoned mid-message
+   *        (an oversized URL/header block), where "at message end" never comes
+   *        and the close has to ride on the write instead — otherwise the
+   *        connection sits there until the idle sweep. See @ref pump_write.
    */
-  void reject_early(conn_ctx& ctx, uvcpp_tcp_client* client, http_status status);
+  void reject_early(conn_ctx& ctx, uvcpp_tcp_client* client, http_status status,
+                    bool message_will_complete = true);
 
   /**
    * @brief Validate `Expect` and record `100-continue` if asked for.
@@ -842,6 +873,8 @@ class UVCPP_API uvcpp_http_server {
 
   /** @brief Request body cap in bytes; 0 means unlimited. */
   size_t max_body_size_ = 0;
+  size_t max_header_bytes_ = 0;
+  size_t max_url_bytes_ = 0;
 
   /**
    * @brief 下一个要发的连接代次号。
