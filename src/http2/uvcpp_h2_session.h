@@ -280,8 +280,10 @@ class UVCPP_API uvcpp_h2_session {
    * @param body 请求体，由本层持有到发完。空则发 HEADERS + END_STREAM。
    *
    * @return 新流的 id；`UV_EINVAL` 表示有不能进 h2 的字段；`UV_EMSGSIZE` 表示
-   *         头部块超过 `H2_MAX_SEND_HEADER_BLOCK`。**后两者都是同步的、且什么
-   *         都没发生** —— 没有流被建、没有字节被排队、没有回调会被叫。
+   *         头部块超过 `H2_MAX_SEND_HEADER_BLOCK`；`UV_ENOTCONN` 表示这个会话
+   *         已经开不出新流了（收到过对端的 GOAWAY，或本端流号用尽）。
+   *         **三者都是同步的、且什么都没发生** —— 没有流被建、没有字节被排队、
+   *         没有回调会被叫。
    */
   int32_t submit_request(const uvcpp_http_request& req, std::string body);
 
@@ -300,6 +302,23 @@ class UVCPP_API uvcpp_h2_session {
 
   /// 对端宣告的 `SETTINGS_MAX_CONCURRENT_STREAMS`（还没收到就是它的初值）。
   uint32_t peer_max_concurrent_streams() const;
+
+  /**
+   * @brief 对端有没有发过 GOAWAY。
+   *
+   * 收到之后本会话**不再接受新请求**（`submit_request` 一律返回 `UV_ENOTCONN`），
+   * 但连接上已有的流照跑完 —— GOAWAY 关的是"新流"，不是"连接"。持有者该做的
+   * 是另起一条连接而不是拆这条。
+   *
+   * 之所以单给一个可查询的位：`GOAWAY(NO_ERROR)` 是**正常的**优雅退出，跟
+   * 断线、超时都不该混为一谈，而"错误码是 0"这点本身分辨不出"收到过 GOAWAY"
+   * 和"什么都没收到"。
+   */
+  bool peer_goaway_received() const;
+  /// 对端 GOAWAY 里的错误码；没收到过时是 `NO_ERROR`。
+  uint32_t peer_goaway_error_code() const;
+  /// 对端 GOAWAY 里的 `last_stream_id`；没收到过时是 0。
+  int32_t peer_goaway_last_stream_id() const;
 
   /// 按 id 找流；没有返回 nullptr。
   uvcpp_h2_stream* find_stream(int32_t stream_id);

@@ -70,6 +70,12 @@ struct link {
   int         last_fatal = 0;
   /// `pump()` 搬过的字节数。用它区分"帧没发出来"和"发出来了但对端没收"。
   size_t      pumped = 0;
+  /// 服务端在**本轮** `pump()` 里 `drain()` 出来的字节。
+  ///
+  /// 有些判据只能落在线上：GOAWAY 的 `last_stream_id` 填 0 还是填 3，对端"关几条
+  /// 在飞的流"这件事在两种情况下都会发生，只是条数不同 —— 只数观测值的用例分不出
+  /// "报对了"和"报成 0 而恰好没流可误伤"。
+  std::string svr_out;
   /// `drain()` 报过的错（非零即"有东西发不出来"）。
   int         drain_err = 0;
   /// 服务端 `submit_*` 那个返回值。本层有几条失败是**必须同步**报出来的
@@ -189,6 +195,7 @@ struct link {
   /// 和"本来就没事可搬"在这里长得一模一样 —— 曾经就是这么把"客户端根本没发出
   /// HEADERS"读成"服务端没拦住"的。
   void pump() {
+    svr_out.clear();
     for (int i = 0; i < 256; ++i) {
       bool moved = false;
       std::string b;
@@ -204,6 +211,7 @@ struct link {
       if (sr != 0) drain_err = sr;
       if (sr == 0 && !b.empty()) {
         pumped += b.size();
+        svr_out.append(b);
         client.recv(b.data(), b.size());
         moved = true;
       }
@@ -826,6 +834,223 @@ bool test_oversize_response_is_refused() {
   return L.fatal_count == 0 && L.rst_count == 0;
 }
 
+// =========================================================================
+// 收到的 GOAWAY
+// =========================================================================
+
+/// 读 GOAWAY 载荷（RFC 9113 §6.8：4 字节 `last-stream-id` + 4 字节错误码）。
+/// 帧头里的流号恒为 0，两个有信息量的值都在载荷里。
+bool read_goaway(const std::string& buf, int32_t* last_id, uint32_t* code) {
+  const long off = find_frame(buf, 0x07);  // GOAWAY
+  if (off < 0 || off + 8 > static_cast<long>(buf.size())) return false;
+  *last_id = (static_cast<int32_t>(static_cast<unsigned char>(buf[off])) << 24) |
+             (static_cast<int32_t>(static_cast<unsigned char>(buf[off + 1])) << 16) |
+             (static_cast<int32_t>(static_cast<unsigned char>(buf[off + 2])) << 8) |
+             static_cast<int32_t>(static_cast<unsigned char>(buf[off + 3]));
+  *last_id &= 0x7fffffff;  // 最高位是保留位
+  *code = (static_cast<uint32_t>(static_cast<unsigned char>(buf[off + 4])) << 24) |
+          (static_cast<uint32_t>(static_cast<unsigned char>(buf[off + 5])) << 16) |
+          (static_cast<uint32_t>(static_cast<unsigned char>(buf[off + 6])) << 8) |
+          static_cast<uint32_t>(static_cast<unsigned char>(buf[off + 7]));
+  return true;
+}
+
+/// 手搓一个 GOAWAY 帧 —— 用它才能指定 `last_stream_id` 具体是几。
+///
+/// 本层自己的 `submit_goaway()` 一律填"我处理过的最后一条"，测不到"对端报了一个
+/// 比我发出去的流号更小的值"这条分支；而那条分支恰恰是**对端**在声明"你后面那几条
+/// 我没处理"，调用方必须能拿到一个可重试的结算而不是干等。
+void push_goaway(uvcpp_h2_session& s, int32_t last_id, uint32_t code) {
+  unsigned char f[17];
+  std::memset(f, 0, sizeof(f));
+  f[0] = 0x00; f[1] = 0x00; f[2] = 0x08;  // 载荷长度
+  f[3] = 0x07;                            // GOAWAY
+  f[9]  = static_cast<unsigned char>((last_id >> 24) & 0x7f);
+  f[10] = static_cast<unsigned char>((last_id >> 16) & 0xff);
+  f[11] = static_cast<unsigned char>((last_id >> 8) & 0xff);
+  f[12] = static_cast<unsigned char>(last_id & 0xff);
+  f[13] = static_cast<unsigned char>((code >> 24) & 0xff);
+  f[14] = static_cast<unsigned char>((code >> 16) & 0xff);
+  f[15] = static_cast<unsigned char>((code >> 8) & 0xff);
+  f[16] = static_cast<unsigned char>(code & 0xff);
+  s.recv(reinterpret_cast<const char*>(f), sizeof(f));
+}
+
+/// GOAWAY 的 `last_stream_id` 必须是"我处理过的最后一条"，新流被同步拒掉，
+/// 而在飞的流一条都不许被误伤。
+///
+/// 三件事钉在同一个用例里，因为它们是同一条事实的三面：
+///
+///   1. **报对**（`last_stream_id` 曾经写死 0）：填 0 的含义是"我一条都没处理"，
+///      对端据此会把**所有**在飞的流当成可重试的关掉（`REFUSED_STREAM`）—— 而
+///      这些请求在我们这边的副作用可能已经跑完了，重试就是重复副作用。所以判据
+///      必须落在**线上那四个字节**上，光看"对端关了几条流"是分不出的。
+///   2. **报对之后本端行为一致**：记住对端发过 GOAWAY，`submit_request` 一律
+///      同步拒掉 —— 原先它会照发一个正数流号（实测 3），帧在打帧那一步被丢掉，
+///      调用方拿到一个看起来完全正常的 id、零字节上线，事后才等来一个 `on_close`。
+///   3. **GOAWAY 关的是"新流"，不是"连接"**：`last_stream_id` 以内的流必须照跑完。
+bool test_goaway_reports_last_processed_stream() {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.reply.status_code = http_status::OK;
+  L.reply.body        = mk_buf("ok");
+  L.auto_reply        = false;  // 两条流停在半路，GOAWAY 到达时它们都还在飞
+
+  const int32_t s1 = L.client.submit_request(make_req(http_method::HTTP_GET, "/a"), "");
+  const int32_t s2 = L.client.submit_request(make_req(http_method::HTTP_GET, "/b"), "");
+  L.pump();
+
+  // 前置：两条流都得真到过服务端。`last_proc_stream_id` 讲的是"我处理过的最后
+  // 一条"，两条没到就无从谈起，整条用例会退化成"GOAWAY 里写 0 也算对"。
+  if (s1 != 1 || s2 != 3 || L.req_count != 2 || L.server.stream_count() != 2 ||
+      L.client.stream_count() != 2) {
+    std::cerr << "  [diag] setup: s1=" << s1 << " s2=" << s2
+              << " req=" << L.req_count << " cli=" << L.client.stream_count()
+              << " svr=" << L.server.stream_count() << std::endl;
+    return false;
+  }
+
+  const int grc = L.server.submit_goaway(H2_ERR_NO_ERROR, std::string());
+  L.pump();
+  if (grc != 0) {
+    std::cerr << "  [diag] submit_goaway rc=" << grc << std::endl;
+    return false;
+  }
+
+  int32_t  last_id = -1;
+  uint32_t code    = 0xffffffffu;
+  if (!read_goaway(L.svr_out, &last_id, &code)) {
+    std::cerr << "  [diag] GOAWAY 没找到，服务端排出 " << L.svr_out.size()
+              << " 字节" << std::endl;
+    return false;
+  }
+  if (last_id != 3 || code != H2_ERR_NO_ERROR) {
+    std::cerr << "  [diag] GOAWAY last_id=" << last_id << " (want 3) code=" << code
+              << " (want 0)" << std::endl;
+    return false;
+  }
+
+  // 本端一致地记住了它 —— `submit_request` 的守卫读的就是这三个值。
+  if (!L.client.peer_goaway_received() ||
+      L.client.peer_goaway_error_code() != H2_ERR_NO_ERROR ||
+      L.client.peer_goaway_last_stream_id() != 3) {
+    std::cerr << "  [diag] client 记录 got=" << L.client.peer_goaway_received()
+              << " code=" << L.client.peer_goaway_error_code()
+              << " last=" << L.client.peer_goaway_last_stream_id() << std::endl;
+    return false;
+  }
+  // 服务端自己没收到过 GOAWAY，三个值都得是"没有"。
+  if (L.server.peer_goaway_received()) {
+    std::cerr << "  [diag] server 以为收到了 GOAWAY" << std::endl;
+    return false;
+  }
+
+  // 在飞的流一条都没被误伤。
+  if (L.rst_count != 0 || L.client_closed != 0 || L.client.stream_count() != 2 ||
+      L.server.stream_count() != 2) {
+    std::cerr << "  [diag] GOAWAY 误伤在飞的流: rst=" << L.rst_count
+              << " last_rst=" << L.last_rst_code
+              << " cli_closed=" << L.client_closed
+              << " cli=" << L.client.stream_count()
+              << " svr=" << L.server.stream_count() << std::endl;
+    return false;
+  }
+
+  // 新流：同步拒掉，且**什么都没发生**（与 `UV_EINVAL`/`UV_EMSGSIZE` 同一条契约）。
+  const size_t  before = L.pumped;
+  const int32_t s3 =
+      L.client.submit_request(make_req(http_method::HTTP_GET, "/c"), "");
+  L.pump();
+  if (s3 != UV_ENOTCONN) {
+    std::cerr << "  [diag] 收到 GOAWAY 后 submit 返回 " << s3 << "（want "
+              << static_cast<int>(UV_ENOTCONN) << "）" << std::endl;
+    return false;
+  }
+  if (L.client.stream_count() != 2 || L.req_count != 2) {
+    std::cerr << "  [diag] 被拒的那次留下了痕迹: cli=" << L.client.stream_count()
+              << " req=" << L.req_count << std::endl;
+    return false;
+  }
+
+  // 而且那两条流还能**跑完**：GOAWAY 关的是新流，不是连接。
+  if (L.server.submit_response(s1, L.reply) != 0 ||
+      L.server.submit_response(s2, L.reply) != 0) {
+    std::cerr << "  [diag] GOAWAY 之后服务端回不了响应" << std::endl;
+    return false;
+  }
+  L.pump();
+  if (L.resp_count != 2 || L.resp_body != "okok") {
+    std::cerr << "  [diag] resp=" << L.resp_count << " body=" << L.resp_body
+              << " 被拒那次的字节数=" << (L.pumped - before) << std::endl;
+    return false;
+  }
+  return L.fatal_count == 0 && L.rst_count == 0 && L.drain_err == 0;
+}
+
+/// 对端 GOAWAY 里 `last_stream_id` **以外**的流必须被结算掉，而且结算得能重试。
+///
+/// 这是"回调不许干等"那条性质在 GOAWAY 上的样子：对端明说"你后面那几条我没处理"，
+/// 调用方就得拿到一个可归因的信号（`REFUSED_STREAM`），而不是一条静默留在
+/// `stream_count()` 里、两边一起等的半开流。
+bool test_goaway_refuses_streams_above_last_id() {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.reply.status_code = http_status::OK;
+  L.reply.body        = mk_buf("ok");
+  L.auto_reply        = false;
+
+  const int32_t s1 = L.client.submit_request(make_req(http_method::HTTP_GET, "/a"), "");
+  const int32_t s2 = L.client.submit_request(make_req(http_method::HTTP_GET, "/b"), "");
+  L.pump();
+  if (s1 != 1 || s2 != 3 || L.req_count != 2 || L.client.stream_count() != 2) {
+    std::cerr << "  [diag] setup: s1=" << s1 << " s2=" << s2
+              << " req=" << L.req_count << " cli=" << L.client.stream_count()
+              << std::endl;
+    return false;
+  }
+
+  // 对端只认到流 1：流 3 在它那边**没被处理过**。
+  push_goaway(L.client, 1, H2_ERR_ENHANCE_YOUR_CALM);
+  L.pump();
+
+  if (!L.client.peer_goaway_received() ||
+      L.client.peer_goaway_error_code() != H2_ERR_ENHANCE_YOUR_CALM ||
+      L.client.peer_goaway_last_stream_id() != 1) {
+    std::cerr << "  [diag] client 记录 got=" << L.client.peer_goaway_received()
+              << " code=" << L.client.peer_goaway_error_code()
+              << " last=" << L.client.peer_goaway_last_stream_id() << std::endl;
+    return false;
+  }
+  // 流 3 被结算：正好一次，码是 REFUSED_STREAM(7)（"可以重试"，不是别的语义）。
+  if (L.client_closed != 1 || L.last_rst_code != 7 || L.client.stream_count() != 1 ||
+      L.client.find_stream(s2) != nullptr) {
+    std::cerr << "  [diag] 流 3 没被干净地结算: closed=" << L.client_closed
+              << " code=" << L.last_rst_code
+              << " cli=" << L.client.stream_count() << std::endl;
+    return false;
+  }
+  // 流 1 在 `last_stream_id` 以内，对端说它处理过 ⇒ 不许动它。
+  if (L.client.find_stream(s1) == nullptr) {
+    std::cerr << "  [diag] 流 1 被误伤了" << std::endl;
+    return false;
+  }
+
+  // 剩下的流 1 照跑完，新流照拒。
+  if (L.server.submit_response(s1, L.reply) != 0) return false;
+  L.pump();
+  if (L.resp_count != 1 || L.resp_body != "ok") {
+    std::cerr << "  [diag] resp=" << L.resp_count << " body=" << L.resp_body
+              << std::endl;
+    return false;
+  }
+  if (L.client.submit_request(make_req(http_method::HTTP_GET, "/d"), "") !=
+      UV_ENOTCONN) {
+    std::cerr << "  [diag] 收到 GOAWAY 后还能开新流" << std::endl;
+    return false;
+  }
+  return L.fatal_count == 0 && L.drain_err == 0;
+}
+
 }  // namespace
 
 int main() {
@@ -846,6 +1071,10 @@ int main() {
     {"header_budget_normal_passes", test_header_budget_normal_passes},
     {"oversize_submit_is_refused", test_oversize_submit_is_refused},
     {"oversize_response_is_refused", test_oversize_response_is_refused},
+    {"goaway_reports_last_processed_stream",
+     test_goaway_reports_last_processed_stream},
+    {"goaway_refuses_streams_above_last_id",
+     test_goaway_refuses_streams_above_last_id},
   };
   for (const auto& t : tests) {
     std::cout << "[h2_session] " << t.name << "\n";

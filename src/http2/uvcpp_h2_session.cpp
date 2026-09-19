@@ -103,6 +103,12 @@ struct uvcpp_h2_session::impl {
   /// 信息会在半路丢掉，对端只看到一个 NO_ERROR，像是我们自己正常退出。
   uint32_t goaway_code = NGHTTP2_NO_ERROR;
 
+  /// 对端发来的 GOAWAY 三个字段。收到过没有单独记一个 bool —— `error_code`
+  /// 和 `last_stream_id` 都合法地可以是 0，用它俩当"收到过"的判据会漏。
+  bool     peer_goaway      = false;
+  uint32_t peer_goaway_code = NGHTTP2_NO_ERROR;
+  int32_t  peer_goaway_last = 0;
+
   // 控制帧令牌桶（见 `monotonic_ms` 上面那段）。
   uint64_t ctl_last_ms    = 0;
   double   ctl_tokens     = H2_CONTROL_BURST;
@@ -127,8 +133,9 @@ struct uvcpp_h2_session::impl {
   /// 等不到，只能耗到超时。
   int32_t finish_submit_request(int32_t sid) {
     if (sid == NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE) {
-      nghttp2_submit_goaway(session, NGHTTP2_FLAG_NONE, 0, NGHTTP2_NO_ERROR,
-                            nullptr, 0);
+      nghttp2_submit_goaway(session, NGHTTP2_FLAG_NONE,
+                            nghttp2_session_get_last_proc_stream_id(session),
+                            NGHTTP2_NO_ERROR, nullptr, 0);
     }
     return sid;
   }
@@ -418,6 +425,15 @@ struct uvcpp_h2_session::impl {
   // ---------------------------------------------------------------
 
   void on_frame_recv(const nghttp2_frame* frame) {
+    // 收到 GOAWAY 是**连接级**的事件：对端宣告"这个连接上不会再处理新流了"。
+    // 不记下来的话，我们照样把永远发不出去的流号还给调用方（`submit_request`
+    // 那条守卫读的就是它）。记在查表之前，理由和下面那个 switch 一样。
+    if (frame->hd.type == NGHTTP2_GOAWAY) {
+      peer_goaway      = true;
+      peer_goaway_code = frame->goaway.error_code;
+      peer_goaway_last = frame->goaway.last_stream_id;
+    }
+
     // 计数必须在按流号查表**之前** —— 这些帧的 `stream_id` 恒为 0，
     // 落在下面那个 `streams.end()` 的早返回上，一个都数不到。
     switch (frame->hd.type) {
@@ -1064,6 +1080,17 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
                                          std::string body) {
   if (!impl_->session) return UV_EINVAL;
 
+  // 对端已经发过 GOAWAY（或本端流号用尽、会话已在收口）时**不能**再开流。
+  //
+  // 不做这道检查的后果不是"提交失败"，而是**提交成功**：nghttp2 会照发一个
+  // 流号（实测返回 3），把这条 HEADERS 推进 `ob_syn`，然后在打帧那一步才发现
+  // 开不了流 —— 于是帧被丢掉、流被**以 `REFUSED_STREAM` 关掉**，调用方拿到的
+  // 是一个正数流号、零个字节上线、外加一个事后才到的 `on_close`。
+  // `nghttp2_session_check_request_allowed()` 的文档把两条路都写明，这是那条
+  // "提前问"的路。`UV_ENOTCONN` 与 `UV_EINVAL`/`UV_EMSGSIZE` 同属"同步拒绝、
+  // 什么都没发生"。
+  if (!nghttp2_session_check_request_allowed(impl_->session)) return UV_ENOTCONN;
+
   std::vector<std::string> store;
   std::vector<nghttp2_nv>  nv;
   std::vector<std::string> names;
@@ -1151,8 +1178,14 @@ int uvcpp_h2_session::submit_rst(int32_t stream_id, uint32_t error_code) {
 int uvcpp_h2_session::submit_goaway(uint32_t error_code,
                                     const std::string& debug) {
   if (!impl_->session) return UV_EINVAL;
+  // `last_stream_id` 是"我可能已经处理过的最后一条流"，不是随便填的 0。
+  // 填 0 等于告诉对端"我一条都没处理"，于是对端把**所有**在飞的流都当成可
+  // 重试的 —— 包括我们这边副作用已经跑过的那些，重试就是重复副作用。
+  // `nghttp2_session_get_last_proc_stream_id()` 就是干这个的（文档原话：这个
+  // 返回值可以直接当 `nghttp2_submit_goaway()` 的 `last_stream_id`）。
   return nghttp2_submit_goaway(
-      impl_->session, NGHTTP2_FLAG_NONE, 0, error_code,
+      impl_->session, NGHTTP2_FLAG_NONE,
+      nghttp2_session_get_last_proc_stream_id(impl_->session), error_code,
       reinterpret_cast<const uint8_t*>(debug.empty() ? nullptr : debug.data()),
       debug.size());
 }
@@ -1169,6 +1202,18 @@ uint32_t uvcpp_h2_session::peer_max_concurrent_streams() const {
   if (!impl_->session) return 0;
   return nghttp2_session_get_remote_settings(
       impl_->session, NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS);
+}
+
+bool uvcpp_h2_session::peer_goaway_received() const {
+  return impl_->peer_goaway;
+}
+
+uint32_t uvcpp_h2_session::peer_goaway_error_code() const {
+  return impl_->peer_goaway_code;
+}
+
+int32_t uvcpp_h2_session::peer_goaway_last_stream_id() const {
+  return impl_->peer_goaway_last;
 }
 
 uvcpp_h2_stream* uvcpp_h2_session::find_stream(int32_t stream_id) {
