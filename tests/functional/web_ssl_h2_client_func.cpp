@@ -24,6 +24,7 @@
  * 会盖掉 `/defer` 的槽位，于是 defer 的回调一次都不跑。所以断言里"每个键恰好
  * 回调一次"比"body 对得上"更关键：body 对得上可以靠巧合，回调次数对不上不能。
  */
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -34,6 +35,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <uvcpp/uvcpp_define.h>
@@ -709,10 +711,17 @@ struct raw_peer_state {
 
   std::mutex               mu;
   std::vector<std::string> paths;  ///< 收到的 `:path`，按到达序
+
+  /// `/part` 要补发的那笔 RST（连接，流号）。**只在 peer 线程上碰** ——
+  /// 填它的是 `on_request`（跑在 `loop->run()` 的栈里），读它的是同一线程的
+  /// 循环体，两者之间没有第二个线程，所以不用锁。
+  std::vector<std::pair<uvcpp_h2_connection*, int32_t>> rst_later;
 };
 
-/// 剧本：路径 → 用哪个错误码把这条流 RST 掉。`0xFFFF` = 正常应答。
+/// 剧本：路径 → 用哪个错误码把这条流 RST 掉。`0xFFFF` = 正常应答；
+/// `0xFFFE` = **先发一个不结束流的响应头**再 RST（状态码必须活下来）。
 uint32_t rst_code_for(const std::string& path) {
+  if (path == "/part")   return 0xFFFEu;
   if (path == "/refuse") return 7;   // REFUSED_STREAM
   if (path == "/cancel") return 8;   // CANCEL
   if (path == "/noerr")  return 0;   // NO_ERROR
@@ -763,6 +772,20 @@ void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
         conn->send_response(str.stream_id, r);
         return;
       }
+      if (code == 0xFFFEu) {
+        // 头先到、流后断：客户端必须把**真的**状态码交出去，而不是"没状态码"。
+        // 没有这一支，把 `response` 永远抹成 `HTTP_STATUS_NONE` 也能过测试。
+        //
+        // RST **不在这里发**：头这会儿还躺在 nghttp2 的出队里没序列化，同一批
+        // 里再 `submit_rst`，两条帧谁先出网由 nghttp2 的队列次序决定 —— 实测
+        // RST 会抢在 HEADERS 前面，客户端一个头都收不到，这条用例就变成了它的
+        // 反面。留给循环体：那一轮 `run()` 的收尾 flush 已经把头写出去，再补 RST。
+        uvcpp_http_response r;
+        r.status_code = http_status::OK;
+        conn->send_headers(str.stream_id, r);
+        st.rst_later.push_back({conn, str.stream_id});
+        return;
+      }
       if (s.submit_rst(str.stream_id, code) == 0) st.rsts_sent.fetch_add(1);
       // 在 `recv()` 的栈上冲字节，与 `uvcpp_http_server` 的处理函数同一形状
       // （`send_response` 内部也是 submit + flush）。这一冲必须被推到
@@ -803,6 +826,19 @@ void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
   uvcpp_loop* loop = srv.get_loop();
   while (!stop.load()) {
     loop->run(UV_RUN_NOWAIT);
+    // `/part` 欠的那笔 RST。上一轮 `run()` 的收尾 flush 已经把响应头写进
+    // libuv 的写队列，这里补的 RST 只能排在它后面 —— 客户端看到的就是
+    // "头先到、流后断"。连接可能已经没了（断开回调会删掉它），先确认还在表里。
+    if (!st.rst_later.empty()) {
+      std::pair<uvcpp_h2_connection*, int32_t> p = st.rst_later.back();
+      st.rst_later.pop_back();
+      if (std::find(conns.begin(), conns.end(), p.first) != conns.end()) {
+        if (p.first->session().submit_rst(p.second, /*CANCEL=*/8) == 0) {
+          st.rsts_sent.fetch_add(1);
+        }
+        p.first->flush();
+      }
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   uvcpp_test::pump_for(loop, 200);
@@ -877,6 +913,11 @@ void scenario_response_copy() {
 /// 串行发、每条都等它落地再发下一条：这样"每条流恰好回调一次"和到达序都是
 /// 确定的，不掺并发。中间的 `/hello` 是**连接仍然健康**的判据 —— RST 是流级的，
 /// 一条流被拒不许把连接或后面的流带下水。
+///
+/// 状态码这一维是两头都要钉的：响应头**没到过**的（`/refuse` 那几条）必须是
+/// `HTTP_STATUS_NONE`，而不是 `uvcpp_http_response` 默认构造的那个 `200`；
+/// 头到过、流才断的（`/part`）必须把真的 `200` 交出去 —— 少了后者，一个"永远
+/// 交 `HTTP_STATUS_NONE`"的实现也能过。
 void scenario_peer_rst(int port, uvcpp_ssl_context* cctx, raw_peer_state& st) {
   std::cout << "[scenario 7] 对端 RST_STREAM 的错误码语义" << std::endl;
 
@@ -894,15 +935,19 @@ void scenario_peer_rst(int port, uvcpp_ssl_context* cctx, raw_peer_state& st) {
     const char* path;
     int         want_err;
     bool        want_retryable;
-    int         want_status;  ///< -1 = 不检查（被 RST 掉的流没有状态码）
+    /// 交付给调用方的状态码。被 RST 掉的流**没收到过响应头**，所以是
+    /// `HTTP_STATUS_NONE`（0）—— 一个对端从没说过的 `200` 是不许出现的。
+    int         want_status;
   };
   const step kSteps[] = {
       {"ok0",    "/hello",  0,            false, 200},
-      {"refuse", "/refuse", UV_ECANCELED, true,  -1},
+      {"refuse", "/refuse", UV_ECANCELED, true,  static_cast<int>(HTTP_STATUS_NONE)},
       {"ok1",    "/hello",  0,            false, 200},
-      {"cancel", "/cancel", UV_ECANCELED, false, -1},
-      {"noerr",  "/noerr",  UV_ECANCELED, false, -1},
-      {"proto",  "/proto",  UV_EPROTO,    false, -1},
+      {"cancel", "/cancel", UV_ECANCELED, false, static_cast<int>(HTTP_STATUS_NONE)},
+      // 头到过、流才断：状态码必须是真的 200，不是"没有状态码"。
+      {"part",   "/part",   UV_ECANCELED, false, 200},
+      {"noerr",  "/noerr",  UV_ECANCELED, false, static_cast<int>(HTTP_STATUS_NONE)},
+      {"proto",  "/proto",  UV_EPROTO,    false, static_cast<int>(HTTP_STATUS_NONE)},
       {"ok2",    "/hello",  0,            false, 200},
   };
 
@@ -923,11 +968,9 @@ void scenario_peer_rst(int port, uvcpp_ssl_context* cctx, raw_peer_state& st) {
     check(r.retryable == s.want_retryable,
           key + ": retryable = " + (r.retryable ? "true" : "false") +
               "，应为 " + (s.want_retryable ? "true" : "false"));
-    if (s.want_status >= 0) {
-      check(r.status == s.want_status,
-            key + ": status = " + std::to_string(r.status) + "，应为 " +
-                std::to_string(s.want_status));
-    }
+    check(r.status == s.want_status,
+          key + ": status = " + std::to_string(r.status) + "，应为 " +
+              std::to_string(s.want_status));
     check(c.call_count(key) == 1,
           key + ": 回调 " + std::to_string(c.call_count(key)) + " 次，应为 1");
     check(r.sid > last_sid && (r.sid % 2) == 1,
@@ -939,16 +982,16 @@ void scenario_peer_rst(int port, uvcpp_ssl_context* cctx, raw_peer_state& st) {
   check(c.client.has_status(HTTP_CLIENT_CONNECTED),
         "rst: 一串流级 RST 之后连接就没了 —— 流级错误被当成连接级处理了");
 
-  // 对端侧的正面证据：这七条请求到过对端，其中四条是被 RST 掉的。**等到**而不是
+  // 对端侧的正面证据：这八条请求到过对端，其中五条是被 RST 掉的。**等到**而不是
   // 采一下 —— 计数长在对端线程上，与客户端的回调完成之间没有同步关系。
-  check(uvcpp_test::wait_flag([&st] { return st.requests.load() == 7; },
+  check(uvcpp_test::wait_flag([&st] { return st.requests.load() == 8; },
                               uvcpp_test::kWaitMs),
         "rst[前置]: 对端只收到 " + std::to_string(st.requests.load()) +
-            " 条请求，应为 7");
-  check(uvcpp_test::wait_flag([&st] { return st.rsts_sent.load() == 4; },
+            " 条请求，应为 8");
+  check(uvcpp_test::wait_flag([&st] { return st.rsts_sent.load() == 5; },
                               uvcpp_test::kWaitMs),
         "rst[前置]: 对端只发出 " + std::to_string(st.rsts_sent.load()) +
-            " 个 RST，应为 4");
+            " 个 RST，应为 5");
   check(st.alpn_h2.load() >= 1,
         "rst[前置]: 对端侧 ALPN 不是 h2 —— 这条不是 h2 连接，测的是别的路");
 }

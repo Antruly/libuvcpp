@@ -97,9 +97,10 @@
 | 文件 | 测什么 |
 |---|---|
 | `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
-| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**；场景 7 里对端的 handler **故意在 `recv()` 的栈上 `flush()`**（与 `uvcpp_http_server` 的处理函数同一形状），是"回调栈里不冲字节"那条不变式的活体判据；场景 7 用**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的 RST —— 它的 `reject()` 把码写死了）按剧本发 `REFUSED_STREAM` / `CANCEL` / `NO_ERROR` / `PROTOCOL_ERROR`，七条流串行发、每条都断言"恰好回调一次 + 流号是递增奇数"，中间夹的 `/hello` 是"连接没被流级 RST 带下水"的判据；场景 8 钉响应的拷贝构造 / 赋值（ALPN=h2 处处写成显式前置） |
+| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**；场景 7 里对端的 handler **故意在 `recv()` 的栈上 `flush()`**（与 `uvcpp_http_server` 的处理函数同一形状），是"回调栈里不冲字节"那条不变式的活体判据；场景 7 用**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的 RST —— 它的 `reject()` 把码写死了）按剧本发 `REFUSED_STREAM` / `CANCEL` / `NO_ERROR` / `PROTOCOL_ERROR`，八条流串行发、每条都断言"恰好回调一次 + 流号是递增奇数"，中间夹的 `/hello` 是"连接没被流级 RST 带下水"的判据；状态码那一维**两头都钉**：`/refuse` 那几条头没到过，必须是 `HTTP_STATUS_NONE`，`/part`（对端先发一个不结束流的头、再 RST）必须把真的 `200` 交出去 —— 少了后者，一个"永远交 `HTTP_STATUS_NONE`"的实现也能过；场景 8 钉响应的拷贝构造 / 赋值（ALPN=h2 处处写成显式前置） |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
 | `tests/functional/web_http_client_selfdestroy_func.cpp` | h1：在响应回调 / connect 回调 / keep-alive 第二次请求的回调里 `delete` 客户端（三条路都不许崩） |
+| `tests/functional/web_http_client_close_func.cpp` | h1：对端在响应收完之前断开（回调必须落地、不许重复交付、死连接上 `send()` 报 `UV_ENOTCONN`；场景 3 钉"`404` 的头到了、正文没发完就断"时交付的状态码必须是**那个 404**） |
 | `tests/functional/web_ssl_app_h2_func.cpp` | 框架自动协商（h2 / 退回 h1）；外加**停机道别**与**拆连接时在途流的收尾**两条路 |
 
 `/big`（1 MiB 流式响应）是后两条路共用的那根杠杆：它比默认流控窗口（65535）长
@@ -231,6 +232,19 @@ m3 析构不作废令牌、m4 拆掉停读与关句柄、m5 连令牌作废一�
 只有 `/refuse` 的 `retryable` 红；**m3** 拷贝构造漏掉两个身份字段 ⇒ `scenario 8`
 的两条红。三次还原之后全绿 —— 用例不是空转。
 
+批 7（错误路径上交付的状态码**是编出来的**）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| h2：流在响应头到达**之前**被 RST 时，交付的是默认构造的 `200` | `uvcpp_h2_stream::response` 的初值是 `uvcpp_http_response()`，而它的默认构造是 `200 OK`。`on_h2_stream_close` 把"已经解析出来的那部分照给"，可这种流**什么都没有** —— 调用方于是拿到 `{status: 200, retryable: true}` 配一个非零的 `err`：日志里就是"请求失败了，但状态码 200"，而那个 200 对端从没说过 | 新增 `HTTP_STATUS_NONE`（0，不是任何合法状态码，`http_status_reason()` 给它 `"Unknown"`）；`uvcpp_h2_stream::response` 的初值换成 `h2_response_not_received()`。**做成函数而不是在成员上写初始化**：流有三条创建路径（`stream_of()` 建流、`on_begin_headers` 收到头、`submit_request` 发出去），漏掉任何一条就是一个编出来的 200 —— 第一次就是这么漏的（`stream_of()` 那条） |
+| h1：同样的编造，而且**连真到过的状态码也丢** | `pending_resp_` 只在 `on_response_complete()`（整条响应收完）里填，而错误路径（`on_tcp_close` / 写失败）交付的正是它 ⇒ 对端明明回过 `404 Not Found`、正文发一半才断，调用方拿到的还是 `200 OK`。请求开始时那个 `pending_resp_ = uvcpp_http_response()` 就是 200 的来源 | 请求起点把状态码显式置成 `HTTP_STATUS_NONE`；`on_headers_complete`（`extract_metadata()` 排在它**之前**，所以那时状态行与头部都已经齐了）就把**真的**状态码、原因短语、头部记进 `pending_resp_` |
+
+批 7 的变异（只重编一个 .cpp，不动头文件）：**m1** `stream_of()` 建流时把状态码摆回
+默认的 200 ⇒ 场景 7 的 `/refuse` 四条 RST 断言红；**m2** 流关闭路永远交付
+`HTTP_STATUS_NONE` ⇒ `/part`（头到过、流才断）那条红 —— 少了它，一个"永远交
+NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_http_client_close_func`
+场景 3 红（实际拿到的是 0，不是对端说过的 404）。三次还原之后全绿。
+
 ### 4.2 还没修的（**只记录**）
 
 - **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
@@ -241,14 +255,6 @@ m3 析构不作废令牌、m4 拆掉停读与关句柄、m5 连令牌作废一�
   今天已经有界：两个方向的 DATA 都走同一个 `on_data_chunk`，超过
   `H2_DEFAULT_MAX_BODY_BYTES`（64 MiB）就 RST（`uvcpp_h2_session.cpp:514`）。
   要给单条流减速，框架层现成的连接级 `read_pause()` 是眼下更合适的粒度。
-
-- **错误路径上交付的 `status_code` 可能是我们自己编的。** `on_h2_stream_close`
-  的写法是"已经解析出来的那部分照给"（`uvcpp_http_client.cpp:1222`），而流在响应头
-  到达**之前**就被 RST 掉时（批 6 的 `REFUSED_STREAM` 恰恰如此），"解析出来的那部分"
-  并不存在 —— `hs->response` 还是默认构造的，于是调用方会拿到
-  `{status: 200, retryable: true}` 再配一个非零的 `err`。那个 200 不是对端说的：
-  `err != 0` 是主判据，这条路上 `status_code` 只能当参考。要治就得给"没收到过
-  响应头"一个表示（`uvcpp_h2_stream` 今天没有这个字段），那是另一件事。
 
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 

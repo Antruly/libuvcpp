@@ -288,8 +288,7 @@ struct uvcpp_h2_session::impl {
       s.request         = uvcpp_http_request();
       s.request.version = uvcpp_http_version::HVER_20;
     } else {
-      s.response         = uvcpp_http_response();
-      s.response.version = uvcpp_http_version::HVER_20;
+      s.response = h2_response_not_received();
     }
   }
 

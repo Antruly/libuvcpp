@@ -15,8 +15,9 @@
  *   - S1 服务端收下请求就关连接、不应答 → 回调必须来，`UV_ECONNRESET`；
  *   - S2 正常收完响应之后服务端再关 → 已经交付过的回调**不许**被叫第二次，
  *     且此后的 `send()` 拿到 `UV_ENOTCONN`（此前是写进一条死 socket、写"成功"）；
- *   - S3 在 `web_ssl_h2_client_func.cpp` 里（h2 上同一次断开会被两个口子看到，
- *     见那边场景 4）。
+ *   - S3 对端回了 404 的头、正文发一半就断 → 交付的状态码必须是**404**，
+ *     不是本层默认构造的 200，也不是 `HTTP_STATUS_NONE`。
+ *     （h2 上同一次断开会被两个口子看到，见 `web_ssl_h2_client_func.cpp` 场景 4。）
  */
 #include <atomic>
 #include <chrono>
@@ -66,7 +67,17 @@ const char kResponse[] =
 enum class srv_mode {
   DROP_AFTER_HEAD,   ///< 收全请求头就拆连接，一个字节都不回
   REPLY_THEN_CLOSE,  ///< 回一个完整响应，写完再拆
+  HALF_REPLY_THEN_CLOSE,  ///< 回 `404` 的头 + 半个正文就拆（S3）
 };
+
+/// S3 用的半截响应：头说 `Content-Length: 4`，正文只给 2 个字节。客户端会一直
+/// 等剩下的 2 个字节，等来的是断开 —— 正是"响应没收完"的形状。
+const char kHalfResponse[] =
+    "HTTP/1.1 404 Not Found\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 4\r\n"
+    "\r\n"
+    "no";
 
 struct server_state {
   std::atomic<int> listen_rc{-1};
@@ -98,13 +109,18 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
           c.close();
           return;
         }
-        const int wrc = c.write(kResponse, sizeof(kResponse) - 1,
-                                [&st, &c](int status) {
-                                  if (status != 0) return;
-                                  st.reply_ok.fetch_add(1);
-                                  // 写完再拆：响应得真的发出去。
-                                  c.close();
-                                });
+        const char*      body = kResponse;
+        std::size_t      blen = sizeof(kResponse) - 1;
+        if (mode == srv_mode::HALF_REPLY_THEN_CLOSE) {
+          body = kHalfResponse;
+          blen = sizeof(kHalfResponse) - 1;
+        }
+        const int wrc = c.write(body, blen, [&st, &c](int status) {
+          if (status != 0) return;
+          st.reply_ok.fetch_add(1);
+          // 写完再拆：响应得真的发出去。
+          c.close();
+        });
         if (wrc != 0) c.close();
       });
 
@@ -292,6 +308,62 @@ void scenario_close_after_reply() {
   check(rc == UV_ENOTCONN, "死连接上的 send() 返回 UV_ENOTCONN");
 }
 
+// =========================================================================
+// S3 —— 错误路径上交付的状态码必须是**对端真的说过的**那个
+// =========================================================================
+
+/// 缺陷（与 h2 侧同一个，见 `HTTP_STATUS_NONE`）：`pending_resp_` 只在
+/// `on_response_complete()` 里填，而错误路径交付的正是它 —— 于是"对端回了 404、
+/// 正文发一半就断"这种情况，调用方拿到的是 `200 OK` 配一个 `UV_ECONNRESET`。
+/// 对端从没说过 200，那是本层默认构造出来的。
+///
+/// 判据反过来更难伪造：**必须是 404**，不是 0（没收到过）也不是 200（默认值）。
+void scenario_half_reply_then_close() {
+  std::cout << "[scenario 3] 404 的头到了、正文没发完就断：状态码必须是 404"
+            << std::endl;
+
+  test_server srv(srv_mode::HALF_REPLY_THEN_CLOSE);
+  check(srv.ok(), "服务端 listen 成功");
+  if (!srv.ok()) return;
+
+  uvcpp_http_client client;
+  client_probe      p;
+
+  client.connect("127.0.0.1", srv.port, [&p](int err) {
+    p.connect_status.store(err);
+    p.connect_fired.store(true);
+  });
+  check(uvcpp_test::wait_until(loop_of(client),
+                               [&p] { return p.connect_fired.load(); },
+                               uvcpp_test::kWaitMs),
+        "connect 回调在墙钟上限内落地");
+  check(p.connect_status.load() == 0, "connect 成功（前置）");
+  if (p.connect_status.load() != 0) return;
+
+  async_get(client, p, [&p](const uvcpp_http_response& r, int err) {
+    p.resp_err.store(err);
+    p.resp_status_code.store(static_cast<int>(r.status_code));
+    p.resp_count.fetch_add(1);
+  });
+  check(p.send_rc.load() == 0, "send() 受理了这次请求（前置）");
+
+  check(uvcpp_test::wait_until(loop_of(client),
+                               [&p] { return p.resp_count.load() > 0; },
+                               uvcpp_test::kWaitMs),
+        "半截响应 + 断开之后回调在墙钟上限内落地");
+
+  // 前置：服务端确实把那个 404 的头写出去过。少了这条，"拿到 404"可能只是
+  // 客户端自己编了另一个数 —— 上下文里根本没有 404 这个值。
+  check(srv.st.reply_ok.load() == 1, "服务端确实把半截响应写出去了（前置）");
+
+  check(p.resp_count.load() == 1, "回调恰好一次");
+  check(p.resp_err.load() == UV_ECONNRESET,
+        "错误码是 UV_ECONNRESET（响应没收完）");
+  check(p.resp_status_code.load() == 404,
+        "状态码是对端说过的那一个（404），既不是默认的 200 也不是 0 —— 实际是 " +
+            std::to_string(p.resp_status_code.load()));
+}
+
 }  // namespace
 
 int main() {
@@ -299,6 +371,7 @@ int main() {
 
   scenario_drop_before_reply();
   scenario_close_after_reply();
+  scenario_half_reply_then_close();
 
   if (g_failures == 0) {
     std::cout << "ALL PASS" << std::endl;

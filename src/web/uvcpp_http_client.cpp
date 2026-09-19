@@ -389,6 +389,11 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   body_buf_.clear();
   response_headers_done_ = false;
   pending_resp_ = uvcpp_http_response();
+  // 默认构造是 `200 OK`，而现在**一个字节的响应都还没来**。留一个编出来的
+  // 200 在这儿，等到 `on_tcp_close` 那条路把它交付出去，日志里就是"请求失败
+  // 了，但状态码 200" —— 而那个 200 对端从没说过（见 `HTTP_STATUS_NONE`）。
+  pending_resp_.status_code    = HTTP_STATUS_NONE;
+  pending_resp_.status_message = http_status_reason(HTTP_STATUS_NONE);
   user_cb_ = std::move(cb);
 
   // Reset parser and install callbacks
@@ -409,6 +414,15 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   parser_->set_on_headers_complete([this, tok]() {
     if (tok.expired()) return;
     response_headers_done_ = true;
+    // 头一到就把**真的**状态行与头部记进 `pending_resp_`：对端在这条响应收完
+    // 之前断开（`on_tcp_close` / 写错那两条路）时，交付给调用方的就是这些。
+    // 拖到 `on_response_complete()` 才填，错误路径上交出去的会是初值 ——
+    // 一个对端从没说过的 `200 OK`，即使它已经明明白白回过 404。
+    // （`extract_metadata()` 排在本回调**之前**，所以这两句读到的是本块的结果。）
+    pending_resp_.version        = parser_->get_uvcpp_http_version();
+    pending_resp_.status_code    = parser_->get_status_code();
+    pending_resp_.status_message = http_status_reason(pending_resp_.status_code);
+    pending_resp_.headers        = parser_->get_headers();
   });
   parser_->set_on_message_complete([this, tok]() {
     if (tok.expired()) return;
@@ -1217,9 +1231,10 @@ void uvcpp_http_client::on_h2_stream_close(uvcpp_h2_session& s,
   uvcpp_http_response resp;
   resp.version   = uvcpp_http_version::HVER_20;
   resp.stream_id = stream_id;
-  // 已经解析出来的那部分照给。但**"解析出来过"是少数情形**：流在响应头到达之前
-  // 就被 RST 时（`REFUSED_STREAM` 正是如此），`status_code` 是 `uvcpp_http_response`
-  // 默认构造出来的 `200`，不是对端说的任何东西 —— `err != 0` 才是主判据。
+  // 已经解析出来的那部分照给：对端发过头了就是真的头（状态码、头部都在），
+  // 一条字节都没发就是 `HTTP_STATUS_NONE` —— **会话层不会给它一个编出来的 200**
+  // （见 `uvcpp_h2_stream::response` 的初始化）。`err != 0` 仍然是主判据，
+  // 这个字段只负责别在日志里把"失败了"写成"200 OK"。
   // `find_stream` 在 `on_close` 里还没被 erase。
   if (uvcpp_h2_stream* hs = s.find_stream(stream_id)) {
     resp.status_code    = hs->response.status_code;

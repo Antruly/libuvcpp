@@ -37,6 +37,25 @@ namespace uvcpp {
 // =========================================================================
 
 /**
+ * @brief 一条流在**对端响应头到达之前**该有的那个响应对象。
+ *
+ * 不能直接用 `uvcpp_http_response()`：它的默认构造是 `200 OK`，那是本层替对端
+ * 说了一句它从没说过的话 —— 流在响应头之前被 RST_STREAM 掉（`REFUSED_STREAM`
+ * 正是如此）时，这个 200 会一路交付到业务层。`HTTP_STATUS_NONE` 才是实话。
+ *
+ * 做成一个函数而不是在成员上写初始化列表，是因为流有三条创建路径
+ * （`stream_of()` 建流、`on_begin_headers` 收到头、`submit_request` 发出去），
+ * 漏掉任何一条就是一个编出来的 200。
+ */
+inline uvcpp_http_response h2_response_not_received() {
+  uvcpp_http_response r;
+  r.version        = uvcpp_http_version::HVER_20;
+  r.status_code    = HTTP_STATUS_NONE;
+  r.status_message = http_status_reason(HTTP_STATUS_NONE);
+  return r;
+}
+
+/**
  * @brief 本层记的一条 h2 流。
  *
  * 只在会话存活期间有效；`on_close` 之后指针即失效。
@@ -47,8 +66,13 @@ struct UVCPP_API uvcpp_h2_stream {
 
   /// 请求头收全后填好（服务端：来自对端；客户端：我们自己提交的那份）。
   uvcpp_http_request request;
-  /// 客户端侧才有：响应头收全后填好。
-  uvcpp_http_response response;
+  /**
+   * @brief 客户端侧才有：对端发来的响应。
+   *
+   * 对端的响应头到达**之前** `status_code` 是 `HTTP_STATUS_NONE`，不是默认构造
+   * 的那个 `200` —— 流在这之前被 RST 时，业务层拿到的必须是"没有状态码"。
+   */
+  uvcpp_http_response response = h2_response_not_received();
 
   /// 已经收到的请求体字节数。**必须按流记** —— 连接级一个标量在并发流下
   /// 会互相记成溢出（计划批 2d 点名的那条）。

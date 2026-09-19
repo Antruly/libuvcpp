@@ -230,6 +230,22 @@ inline const char* http_status_reason(http_status s) {
   }
 }
 
+/**
+ * @brief 对端**从来没有给过**状态码。
+ *
+ * 只在错误路径上出现：h2 上一条流在响应头到达**之前**就被 RST_STREAM 掉
+ * （`REFUSED_STREAM` 正是这种），此时交付给调用方的 `status_code` 就是它。
+ *
+ * 它存在的理由是**不许编**：`uvcpp_http_response` 的默认构造是 `200 OK`，直接
+ * 把默认值交出去，调用方会看到一个对端从没说过的 200 配一个非零的 `err` ——
+ * 日志里就是"请求失败了，但状态码 200"。0 不是任何合法状态码，
+ * `http_status_reason()` 对它返回 `"Unknown"`，看不出歧义。
+ *
+ * **判据仍然是 `err != 0`**：这个常量只是让"我们没收到过"与"对端说了 200"
+ * 在值上分得开，不是让调用方改判据。
+ */
+const http_status HTTP_STATUS_NONE = static_cast<http_status>(0);
+
 // =========================================================================
 // HTTP 版本 — 预埋 HTTP/2 枚举值，当前只实现 1.0 和 1.1
 //
