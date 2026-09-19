@@ -18,6 +18,13 @@ if(NOT UVCPP_BUILD_WEBAPP)
   # 那条 SSL 过滤器才能被正确摘掉，所以这里补一条 —— 否则「web 开、OpenSSL 开、
   # webapp 关」这个组合下它会去编译一个不存在的模块。
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "web_ssl_app_.*\.cpp$")
+  # 需要「webapp + OpenSSL + nghttp2」三样的用例，文件名**必须**写成
+  # `web_ssl_app_h2_*` —— 也就是同时含 `web_ssl_` 与 `web_ssl_app_` 两个字面
+  # 前缀。它原本叫 `web_ssl_h2_app_func.cpp`，两条正则都匹配不上（`web_app_` 要
+  # 连续出现，`web_ssl_app_` 也被中间那个 `h2_` 打断），于是「WEBAPP=关、
+  # NGHTTP2=开」下它既不在这条里、也不在下面 nghttp2 那条里，直接落到 `#else`
+  # 的 SKIP main 上：**注册、通过、一个断言都没跑**。
+  # 判据是"每一条相关的过滤器都能命中它"，不是"名字里带了个 webapp 的词"。
 endif()
 
 # Exclude SSL tests when OpenSSL is not enabled.

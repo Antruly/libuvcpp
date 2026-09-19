@@ -1,5 +1,5 @@
 /**
- * @file tests/functional/web_ssl_h2_app_func.cpp
+ * @file tests/functional/web_ssl_app_h2_func.cpp
  * @brief 框架层 HTTP/2：`uvcpp_web_app` **默认**就该支持 h2，零配置。
  *
  * 分工与前两个 h2 文件不同，缺一不可：
@@ -560,7 +560,7 @@ void run_h2_requests(h2_client& c, app_probe& st, const char* tag) {
 }  // namespace
 
 int main() {
-  std::cout << "[web_ssl_h2_app] OpenSSL "
+  std::cout << "[web_ssl_app_h2] OpenSSL "
             << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
 
   std::shared_ptr<uvcpp_ssl_context> cctx = make_client_ctx();
@@ -899,17 +899,17 @@ int main() {
   }
 
   if (g_failures != 0) {
-    std::cerr << "[web_ssl_h2_app] " << g_failures << " failure(s)" << std::endl;
+    std::cerr << "[web_ssl_app_h2] " << g_failures << " failure(s)" << std::endl;
     return 1;
   }
-  std::cout << "[web_ssl_h2_app] all scenarios OK" << std::endl;
+  std::cout << "[web_ssl_app_h2] all scenarios OK" << std::endl;
   return 0;
 }
 
 #else
 
 int main() {
-  std::cout << "[web_ssl_h2_app] skipped (needs UVCPP_WEBAPP_ENABLE && "
+  std::cout << "[web_ssl_app_h2] skipped (needs UVCPP_WEBAPP_ENABLE && "
                "UVCPP_OPENSSL_ENABLE && UVCPP_NGHTTP2_ENABLE)"
             << std::endl;
   return 0;
