@@ -444,55 +444,66 @@ static bool test_certificate_chain_loaded() {
 // =========================================================================
 // 回归：`set_min_version()` / `set_max_version()` 必须**双向**生效
 //
-// 原来的 set_min_version 只置 NO_TLSv1 然后逐个清标志 —— 那个写法只能把下限
-// 往下放，不能往上抬：设成 TLS_1_3 时 NO_TLSv1_2 从构造到现在就没被置过，
-// TLS 1.2 客户端照样能协商。而构造时给的默认下限恰好是 TLS_1_2，所以
-// "抬到 1.3"（最常见的那个用法）正是失效的那一个。
+// 原来的实现用 `SSL_OP_NO_TLSv1*` 这一组选项位，两个问题叠在一起：
 //
-// set_max_version 有对称的问题：只置不清，先压低再放宽就做不到。
+//   1. `SSL_CTX_set_options(ctx, op)` 是「**加上** op 里的位」，**不清**没给的位
+//      —— 想清必须另调 `SSL_CTX_clear_options()`。原来那几处
+//      `opts &= ~SSL_OP_NO_TLSv1_x` 之后再 `set_options(ctx, opts)`，清位是白清的。
+//      于是 `set_min_version(TLS_1_3)` 想禁掉 1.2 的那一步**没有任何一行代码
+//      真正执行**，而构造时给的默认下限恰好就是 TLS_1_2 —— "抬到 1.3" 这个最
+//      常见的用法正是失效的那一个。
+//   2. OpenSSL 3.0 起这一组选项已废弃，官方指定用 proto version API。
 //
-// 判据是 SSL_CTX 上的实际选项位，不起网络。
+// 修法是改用 `SSL_CTX_set_min_proto_version()` / `set_max_proto_version()`，
+// 断言也相应读 `SSL_CTX_get_min_proto_version()` / `get_max_proto_version()`
+// —— 读版本号而不是读选项位，判据与实现用的是同一个量，不会各说各话。
+//
+// 判据不起网络：只问上下文"你现在允许的区间是什么"。
 // =========================================================================
 static bool test_version_bounds_settable() {
   uvcpp_ssl_context ctx(tls_mode::SERVER, tls_version::TLS_1_2);
 
-  // 抬下限：TLS_1_3 → 必须真的禁掉 1.2
+  // 抬下限：TLS_1_3 → 1.2 必须被拒
   ctx.set_min_version(tls_version::TLS_1_3);
-  long o = SSL_CTX_get_options(ctx.raw_ctx());
-  if ((o & SSL_OP_NO_TLSv1_2) == 0) {
-    std::cout << "    set_min_version(TLS_1_3) 之后 TLS 1.2 仍然可协商\n";
+  if (SSL_CTX_get_min_proto_version(ctx.raw_ctx()) != TLS1_3_VERSION) {
+    std::cout << "    set_min_version(TLS_1_3) 之后下限不是 TLS 1.3（读到 "
+              << SSL_CTX_get_min_proto_version(ctx.raw_ctx()) << "）
+";
     return false;
   }
 
-  // 放回来：TLS_1_2 → 1.2 必须重新可用，而 1.0/1.1 仍然被禁
+  // 放回来：TLS_1_2 → 1.2 必须重新可用（原实现这一步就是失效的）
   ctx.set_min_version(tls_version::TLS_1_2);
-  o = SSL_CTX_get_options(ctx.raw_ctx());
-  if ((o & SSL_OP_NO_TLSv1_2) != 0) {
-    std::cout << "    set_min_version(TLS_1_2) 之后 TLS 1.2 仍然被禁\n";
-    return false;
-  }
-  if ((o & SSL_OP_NO_TLSv1) == 0 || (o & SSL_OP_NO_TLSv1_1) == 0) {
-    std::cout << "    TLS 1.2 下限之下 TLS 1.0/1.1 必须保持禁用\n";
+  if (SSL_CTX_get_min_proto_version(ctx.raw_ctx()) != TLS1_2_VERSION) {
+    std::cout << "    set_min_version(TLS_1_2) 之后下限不是 TLS 1.2 —— "
+                 "下限只能抬、不能放
+";
     return false;
   }
 
-  // 压上限：TLS_1_2 → 1.3 必须被禁
+  // 压上限
   ctx.set_max_version(tls_version::TLS_1_2);
-  o = SSL_CTX_get_options(ctx.raw_ctx());
-  if ((o & SSL_OP_NO_TLSv1_3) == 0) {
-    std::cout << "    set_max_version(TLS_1_2) 之后 TLS 1.3 仍然可协商\n";
+  if (SSL_CTX_get_max_proto_version(ctx.raw_ctx()) != TLS1_2_VERSION) {
+    std::cout << "    set_max_version(TLS_1_2) 之后上限不是 TLS 1.2
+";
     return false;
   }
 
-  // 放宽上限：TLS_1_3 → 1.3 必须重新可用
+  // 放宽上限（原实现同样做不到：位一旦置上就再也去不掉）
   ctx.set_max_version(tls_version::TLS_1_3);
-  o = SSL_CTX_get_options(ctx.raw_ctx());
-  if ((o & SSL_OP_NO_TLSv1_3) != 0) {
-    std::cout << "    set_max_version(TLS_1_3) 之后 TLS 1.3 仍然被禁\n";
-    return false;
+  {
+    const int mx = SSL_CTX_get_max_proto_version(ctx.raw_ctx());
+    // 0 = 不限，语义上等价于"最高到本端支持的最高版本"
+    if (mx != 0 && mx < TLS1_3_VERSION) {
+      std::cout << "    set_max_version(TLS_1_3) 之后上限仍被压在 " << mx
+                << " —— 上限只能压、不能放
+";
+      return false;
+    }
   }
   return true;
 }
+
 
 int main() {
   bool ok = true;
