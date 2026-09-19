@@ -261,8 +261,8 @@ class UVCPP_API uvcpp_http_client {
   /** @brief TCP "data arrived" handler — feeds data to HTTP parser. */
   void on_tcp_data(uvcpp_buf* buf);
 
-  /** @brief TCP "connection closed" handler. */
-  void on_tcp_close(uvcpp_tcp_client* client);
+  /** @brief TCP "connection closed" handler — 注册成 `tcp_` 的关闭观察者。 */
+  void on_tcp_close();
 
   void on_response_complete();
 
@@ -298,6 +298,9 @@ class UVCPP_API uvcpp_http_client {
   int status_ = HTTP_CLIENT_NONE;
   int last_error_code_ = 0;
   bool keep_alive_ = true;
+
+  /// `add_close_observer()` 的句柄，0 表示没注册（那个 API 的保留值）。
+  int close_observer_id_ = 0;
 
   std::string host_;
   int port_ = 0;

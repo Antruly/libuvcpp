@@ -45,9 +45,25 @@ uvcpp_http_client::uvcpp_http_client() {
   loop_   = new uvcpp_loop();
   tcp_    = new uvcpp_tcp_client(loop_);
   parser_ = new uvcpp_http_parser(http_parser_mode::PARSE_RESPONSE);
+  // **对端在响应收完之前断开，只有这条路看得见。** 本层注册的是传统
+  // `read_start`（`send()` 里那条），而传统式在 `nread < 0` 时**不调数据回调**，
+  // 只跑 `fire_close_callbacks()`（`uvcpp_tcp_client.cpp:1280`）—— 不装观察者
+  // 就是"连接没了、`send()` 的回调永远不来、调用方无限等"（异步路径没有超时）。
+  // 观察者是**叠加**的，不碰数据通路；这也是 `uvcpp_ws_connection` 的做法。
+  //
+  // 不改成 `read_start_events`：它与传统式互斥（`UV_EALREADY`），而 h2 层在
+  // 同一个 `tcp_` 上装的正是事件式 —— 换了会让 `start_h2()` 当场自毁。
+  close_observer_id_ = tcp_->add_close_observer([this]() { on_tcp_close(); });
 }
 
 uvcpp_http_client::~uvcpp_http_client() {
+  // 第一件事就摘掉：下面关 `tcp_` 那段 dance 会 `loop_->run(UV_RUN_NOWAIT)`
+  // 泵若干轮，不摘掉的话观察者有机会在**本对象析构到一半**时被叫起来。
+  if (tcp_ != nullptr && close_observer_id_ != 0) {
+    tcp_->remove_close_observer(close_observer_id_);
+  }
+  close_observer_id_ = 0;
+
 #if UVCPP_NGHTTP2_ENABLE
   // 次序在拆 `tcp_` **之前**：h2 层往 `tcp_` 上注册过读回调（捕的是它自己的
   // `this`），而 `tcp_` 反过来不拥有它。倒了就是"回调指向已经释放的对象"。
@@ -458,18 +474,31 @@ void uvcpp_http_client::on_tcp_data(uvcpp_buf* buf) {
   }
 }
 
-void uvcpp_http_client::on_tcp_close(uvcpp_tcp_client* /*client*/) {
-  set_status(HTTP_CLIENT_CLOSED);
+void uvcpp_http_client::on_tcp_close() {
+  // 只会被叫一次：`fire_close_callbacks()` 是把观察者表整个 swap 出去再跑的
+  // （`uvcpp_tcp_client.cpp:1735`），跑过的观察者不会再被叫第二遍。
+  //
+  // **不置 `HTTP_CLIENT_CLOSED`** —— 见 `on_h2_disconnect` 那段：那个标志在本类里
+  // 是"`tcp_` 的句柄已经关完了"，而这条路上句柄**还开着**（`uvcpp_tcp_client.cpp`
+  // 的 `nread < 0` 分支只通知、不 `uv_close`）。置上会让析构跳过关闭那一段，
+  // 句柄留在 loop 上，`loop_close()` 拿到 `UV_EBUSY`、循环内存被泄漏。
+  // 清 `CONNECTED` 才是这条路上该说的话：连接没了，后面的 `send()` 应当
+  // 拿到 `UV_ENOTCONN`，而不是写进一条死 socket。
   clear_status(HTTP_CLIENT_CONNECTED);
 
-  // If we have a pending callback and response isn't complete,
-  // this is an unexpected close → report error
-  if (user_cb_ && !has_status(HTTP_CLIENT_COMPLETE)) {
-    set_status(HTTP_CLIENT_ERROR);
-    last_error_code_ = UV_ECONNRESET;
-    user_cb_(pending_resp_, UV_ECONNRESET);
-    user_cb_ = nullptr;
-  }
+  // h2 连接上这条观察者也会响（h2 层用的是 `read_start_events`，`nread < 0`
+  // 分支照样往下走 `fire_close_callbacks()`），但断开已经由 `on_h2_disconnect`
+  // 结算过了，而那条路上 `user_cb_` 恒为空 —— 这里什么都不做才是对的。
+  // 把错误码提到这道门外面就会把 `UV_ECANCELED` 覆盖成 h1 那套 `UV_ECONNRESET`。
+  if (!user_cb_ || has_status(HTTP_CLIENT_COMPLETE)) return;
+
+  set_status(HTTP_CLIENT_ERROR);
+  last_error_code_ = UV_ECONNRESET;
+  // **先挪走再调**（与 `on_response_complete` 同形状）：用户回调里可以析构本
+  // 对象，调完再碰 `user_cb_` 就是往已释放的内存上写。
+  std::function<void(const uvcpp_http_response&, int)> cb = std::move(user_cb_);
+  user_cb_ = nullptr;
+  cb(pending_resp_, UV_ECONNRESET);
 }
 
 void uvcpp_http_client::on_response_complete() {

@@ -1164,6 +1164,7 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 | **路由注册失败看不见** | `app.get()` 返回 `uvcpp_web_app&`；要检查就走 `app.router()`（§3）。 |
 | **静态 dotfile 默认值是 404（`HIDE`）** | 头文件注释误写成 `IGNORE`（§7）。 |
 | **上传上限全 App 一份** | 没有按路由覆盖（§8）。 |
+| **`uvcpp_http_client` 只在"有请求在飞"时才看得见对端断开** | 异步路径上对端在响应收完之前断开，`send()` 的回调会**落地**并以 `UV_ECONNRESET` 交付（本层写死的值，与传输层看到 EOF 还是 RST 无关），`HTTP_CLIENT_CONNECTED` 同时被清掉，此后的 `send()` 直接回 `UV_ENOTCONN` 而不是写进一条死 socket。**但只 `connect()` 过、从没 `send()` 过的客户端仍然不知道** —— 关闭通知只能搭在读路径上，而读是在第一次 `send()` 里才装的（`uvcpp_http_client.cpp:353-360`）。 |
 
 ---
 

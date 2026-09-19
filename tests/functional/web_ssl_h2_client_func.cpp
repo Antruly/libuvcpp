@@ -474,6 +474,53 @@ void scenario_concurrent(int port, uvcpp_ssl_context* cctx, server_state& st) {
             std::to_string(di) + "，hello 应在前");
 }
 
+/// 场景 4：h2 连接上的"对端断开"**只能结算一次**。
+///
+/// h2 层用的是 `read_start_events`，那条路在 `nread < 0` 时先回调会话
+/// （→ `on_h2_disconnect`，把在飞的流按 `UV_ECANCELED` 结算、并写下这个错误码），
+/// **紧接着**同一个读回调里还会跑 `fire_close_callbacks()` —— 也就是本类的关闭
+/// 观察者。观察者里那道 `if (!user_cb_ ...) return` 是唯一的拦阻：挡住它的正是
+/// "h2 的 send 从不设 `user_cb_`"。少了那道门，第二次就会把错误码覆盖成 h1 那套
+/// `UV_ECONNRESET`，`get_last_error()` 开始对 h2 的断开说谎。
+///
+/// 这个场景排在最后：它要把服务端收摊，而那正是断开的来源。
+void scenario_drop_on_close(int port, uvcpp_ssl_context* cctx,
+                            scenario_server& srv) {
+  std::cout << "[scenario 4] h2 上断开只结算一次" << std::endl;
+
+  client_obs c;
+  c.client.set_http2_enabled(true);
+  if (c.connect(port, cctx, "drop") != 0) {
+    check(false, "drop: connect 失败");
+    return;
+  }
+  // 前置：这条连接必须是 h2。落到 h1 就是另一个场景在做断言了。
+  check(c.client.negotiated_alpn() == "h2",
+        "drop: ALPN 协商结果是 \"" + c.client.negotiated_alpn() +
+            "\"，应为 h2（前置）");
+
+  check(c.send_keyed("hello", uvcpp_http_request::make_get("/hello")) == 0,
+        "drop: /hello send 失败");
+  check(c.wait_key("hello"), "drop: /hello 的响应没来（前置）");
+  check(c.at("hello").err == 0, "drop: 断开之前那次响应是成功的（前置）");
+  check(c.client.get_last_error() == 0, "drop: 断开之前 last_error 应为 0（前置）");
+  const int calls_before = c.call_count("hello");
+
+  srv.shutdown();
+
+  check(uvcpp_test::wait_until(
+            c.loop(), [&c] { return !c.client.has_status(HTTP_CLIENT_CONNECTED); },
+            uvcpp_test::kWaitMs),
+        "drop: 客户端在墙钟上限内观察到断开（前置）");
+  uvcpp_test::pump_for(c.loop(), 50);
+
+  check(c.call_count("hello") == calls_before,
+        "drop: 断开让已经交付过的回调又跑了一次");
+  check(c.client.get_last_error() == UV_ECANCELED,
+        "drop: last_error = " + std::to_string(c.client.get_last_error()) +
+            "，应为 UV_ECANCELED（被覆盖成 UV_ECONNRESET 就是报了第二遍）");
+}
+
 }  // namespace
 
 int main() {
@@ -514,6 +561,9 @@ int main() {
               std::to_string(srv.st.alpn_h2_at_delivery.load()) + "，应 ≥ 2");
     check(srv.st.connections.load() >= 3,
           "server: 连接数 = " + std::to_string(srv.st.connections.load()));
+
+    // 放最后：它会 `srv.shutdown()`，上面那两条服务端汇总要在收摊前读完。
+    scenario_drop_on_close(srv.port, &cctx, srv);
   }
 
   if (g_failures == 0) {
