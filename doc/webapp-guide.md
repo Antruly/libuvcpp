@@ -97,6 +97,8 @@ int main() {
 | `set_port(int)` | `8080` | `0` = 系统分配，从 `bound_port()` 取 |
 | `set_backlog(int)` | `128` | `<= 0` 被夹成 128 |
 | `set_max_body_size(size_t)` | 16 MiB | 超过回 **413 且不路由**；`0` = 不限 |
+| `set_max_header_bytes(size_t)` | 16 KiB | 整个头块的上限，超过回 **431 且不路由**；**边收边判**，不等头块收完；`0` = 不限 |
+| `set_max_url_bytes(size_t)` | 8 KiB | 请求行的目标（URL）上限，超过回 **414 且不路由**；同样边收边判；`0` = 不限 |
 | `set_compression(bool)` | `true` | 自动压缩（需 zlib） |
 | `set_compress_min_body_size(size_t)` | `1024` | 触发压缩的最小 body |
 | `set_access_log(bool)` | `true` | 自动装访问日志中间件 |
@@ -921,6 +923,13 @@ h2 会话的参数在 `uvcpp_h2_session::init()` 上是带默认值的形参，*
 | 头部列表预算 | 64 KiB | 逐字段累加 `namelen+valuelen+32`，越界即断（`h2_header_budget`） |
 | 单流 body 上限 | 64 MiB | `H2_DEFAULT_MAX_BODY_BYTES`，与 h1 的 body 上限同量级；**两个方向都算**（服务端收到的请求体、客户端收到的响应体走的是同一个 `on_data_chunk`），越界即 `RST_STREAM(ENHANCE_YOUR_CALM)` |
 
+> **上面那格"头部列表预算"和 h1 的 `set_max_header_bytes` 不是一回事**，
+> 别当成同一个旋钮的两处配置。h1 数的是**线上字节**（字段名、`": "`、CRLF 全都算），
+> h2 数的是 **HPACK 解出来的**字节（`namelen+valuelen+32`，RFC 9113 §6.5.2 的定义）
+> —— 同一个数字在两边含义不同，而"同一个名字两处含义"正是这一版在修的那类 bug，
+> 所以**没有**把 webapp 的 `set_max_header_bytes` 接到 h2 上。h2 侧本来就有一道
+> 64 KiB 的预算，缺的是"把它开放成配置项"，不是"没有上限"。
+
 ### h2 上还差一口气的（如实列出）
 
 - **上传背压仍是连接级的。** `stream()->pause()` / `resume()` 落在
@@ -1135,6 +1144,15 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 ### 请求
 
 - **请求体上限** `set_max_body_size`：超过回 413 且**不路由**。
+- **请求头上限** `set_max_header_bytes`（默认 16 KiB）：整个头块超了回 431；
+  **请求行上限** `set_max_url_bytes`（默认 8 KiB）：超了回 414。两条都**边收边判** ——
+  在 llhttp 的头回调里就累加、超了当场停，不是等头块收完再看，所以一个
+  "声明了很长、但一直不结束"的头不会让连接把内存吃满再被拒。
+  这是 `set_idle_timeout_ms` 之外的另一道 slowloris 防线：闲置超时管的是**慢**，
+  这两条管的是**大**。
+- **这两个上限只管 h1**。h2 的头部预算是另一套（逐字段累加 HPACK **解码后**的
+  `namelen+valuelen+32`，见 [§13](#13-http2)）—— 同一个数字在两边含义不同，
+  所以没有把 webapp 的这两个旋钮接到 h2 上。
 - **闲置超时** `set_idle_timeout_ms`（默认 60s，slowloris 防御）：半截请求、连上不说话、
   慢速滴字节都被关掉；**在途请求不被误杀**。
 - **multipart 只认 CRLF**，裸 LF 判 400 —— 理由不是"RFC 这么写"而是**请求走私**。
