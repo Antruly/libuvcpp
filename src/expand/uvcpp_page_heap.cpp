@@ -1044,6 +1044,11 @@ void* uvcpp_memory_pool_enterprise::allocate_large_object(size_t size)
     void* ptr = (char*)span->base_addr + k_span_header_size_actual + k_page_block_header_size_actual;
     span->free_list.store(ptr, std::memory_order_relaxed);
     
+    // 这一段的 in_use 必须记上：free_mem() / return_large_object() 靠
+    // `span->in_use.fetch_sub(1) == 1` 判断"这是最后一个使用者，可整段归还"。
+    // 少了这一句，fetch_sub 永远从 0 开始、返回值永远不是 1，
+    // release_span_to_system() 一次都不会被调用 —— 每次大块分配整段泄漏。
+    span->in_use.fetch_add(1, std::memory_order_relaxed);
     g_in_use.fetch_add(1, std::memory_order_relaxed);
     
     return ptr;
