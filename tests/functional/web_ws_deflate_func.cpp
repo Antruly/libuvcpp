@@ -563,6 +563,16 @@ static bool test_large_echo_across_reads() {
   const uvcpp_ws_frame& f = s.cframes[0];
   if (f.opcode != ws_opcode::BINARY) return false;
   if (!f.rsv1) return false;
+
+  // **把"必然跨多次读"从注释变成判据。**
+  //
+  // 上面那句「载荷压不动，所以这一帧必然跨多次读」原来只是注释，**没有任何
+  // 断言** —— 哪天有人把负载换成可压缩的内容，压缩后的回显会缩到一次读完，
+  // 这条用例就**静默地**退化成"不跨读也算过"，而它整条存在的意义就是打跨读
+  // 那条路径。这比挂掉难查得多：测试还是绿的。
+  //
+  // 256 KiB 对上 libuv 每次 ≤64 KiB 的读是 4 倍余量。
+  if (f.payload.size() < 256 * 1024) return false;
   // 别拿压缩后的长度和明文比：`incompressible` 的数据 deflate 之后**更大**
   // （每 16KB 一个存储块，加 5 字节块头：512KiB 的负载量出来是 524449）。
   // 只断言"解出来一样"。
