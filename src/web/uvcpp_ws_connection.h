@@ -47,8 +47,15 @@ class UVCPP_API uvcpp_ws_connection {
   UVCPP_DEFINE_FUNC(uvcpp_ws_connection)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_ws_connection)
 
-  /** @brief Wrap an already-upgraded TCP client. Call start() to begin. */
-  explicit uvcpp_ws_connection(uvcpp_tcp_client* tcp);
+  /**
+   * @brief Wrap an already-upgraded TCP client. Call start() to begin.
+   *
+   * @param is_server 本端角色。**必填、无默认值** —— RFC 6455 对两侧的帧要求是
+   *        **不对称**的：客户端发来的帧 MUST 带掩码（§5.1），服务端发来的
+   *        MUST NOT（同节）。搞反了任意一侧都会直接不可用，所以让它必须被
+   *        写出来，而不是靠一个"猜多半是服务端"的默认值。
+   */
+  uvcpp_ws_connection(uvcpp_tcp_client* tcp, bool is_server);
 
   /**
    * @brief 开始读 WS 帧。握手完成后调**一次**，且调用方已经不在 TCP 读回调里。
@@ -233,6 +240,15 @@ class UVCPP_API uvcpp_ws_connection {
   /** @return 0 已入队/已发出；非 0 表示这一帧没能发出去（错误码）。 */
   int  send_frame(const uvcpp_ws_frame& frame, std::function<void(int)> cb);
 
+  /**
+   * @brief 按本端角色给帧盖上掩码（RFC 6455 §5.1：客户端发出的帧 MUST 掩码、
+   *        服务端发出的 MUST NOT）。
+   *
+   * **四个发送出口都要过这一手** —— 数据帧、PING、PONG、CLOSE。控制帧同样是
+   * "本端发出的帧"，§5.5 把 §5.1 的要求一并罩住了，只盖数据帧等于漏一半。
+   */
+  void apply_mask(uvcpp_ws_frame& f) const;
+
   // --- 发送队列 ---
   // `uvcpp_tcp_client::write()` 同一时刻只允许一个异步写：已有在途写时它直接
   // 返回 UV_EALREADY，**并且在返回之前不保存回调**。原先的 send_frame 对非 0
@@ -253,6 +269,9 @@ class UVCPP_API uvcpp_ws_connection {
   void protocol_error(ws_close_code code, const std::string& reason);
 
   uvcpp_tcp_client* tcp_ = nullptr;
+
+  /// 本端角色。决定掩码检查的方向（见构造函数的说明）。
+  bool is_server_ = true;
   uvcpp_ws_parser   parser_;
   bool started_ = false;
 

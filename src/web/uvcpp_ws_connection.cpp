@@ -1,10 +1,13 @@
 #include <web/uvcpp_ws_connection.h>
+
+#include <random>
 #if UVCPP_WEB_ENABLE
 #include <cstring>
 
 namespace uvcpp {
 
-uvcpp_ws_connection::uvcpp_ws_connection(uvcpp_tcp_client* tcp) : tcp_(tcp) {
+uvcpp_ws_connection::uvcpp_ws_connection(uvcpp_tcp_client* tcp, bool is_server)
+    : tcp_(tcp), is_server_(is_server) {
   // 存活令牌（见头文件）：写完成回调用它判断"会话还在不在"。
   alive_token_ = std::shared_ptr<char>(new char);
   parser_.set_on_frame([this](const uvcpp_ws_frame& f) { on_ws_frame(f); });
@@ -168,6 +171,26 @@ void uvcpp_ws_connection::on_ws_frame(const uvcpp_ws_frame& frame) {
   if (protocol_failed_) return;
 
   // ---------------------------------------------------------------------
+  // 掩码的方向性要求（RFC 6455 §5.1）。
+  //
+  // 这一条对**所有帧**都成立，控制帧也不例外（§5.5），所以放在控制帧/数据帧
+  // 分叉之前 —— 放进去就只能盖住一半。
+  //
+  // 规范原文是两侧各一条 MUST："The server MUST close the connection upon
+  // receiving a frame that is not masked" 与客户端侧的镜像要求；两个方向都用
+  // 1002。掩码本来的用途是防中间代理缓存投毒（§10.3），服务端不强制等于把
+  // 那条防护让掉。
+  // ---------------------------------------------------------------------
+  if (is_server_ && !frame.masked) {
+    protocol_error(ws_close_code::PROTOCOL_ERROR, "client frame must be masked");
+    return;
+  }
+  if (!is_server_ && frame.masked) {
+    protocol_error(ws_close_code::PROTOCOL_ERROR, "server frame must not be masked");
+    return;
+  }
+
+  // ---------------------------------------------------------------------
   // 控制帧：可以穿插在分片消息中间，但**不参与重组**，也不影响 in_message_
   // （RFC 6455 §5.4）。控制帧自身不得分片、负载不得 >125 字节 —— 这两条已经
   // 在 parser 的 finish_frame() 里拦掉了。
@@ -259,6 +282,52 @@ void uvcpp_ws_connection::on_ws_frame(const uvcpp_ws_frame& frame) {
   deliver_message();
 }
 
+namespace {
+
+/**
+ * @brief UTF-8 合法性校验（RFC 3629）。
+ *
+ * RFC 6455 §8.1：文本帧的负载必须是合法 UTF-8，不是就 MUST Fail the
+ * WebSocket Connection。库此前**一处校验都没有** —— 非法字节会被原样交给
+ * `on_text`，一个把它转给浏览器的应用（聊天室这类）会在客户端那边才炸。
+ *
+ * 覆盖的不只是"形状不对"，还有三处**语法合法但语义非法**的：
+ *   - overlong 编码（`0xC0 0x80` 这种"用两个字节写 ASCII"）；
+ *   - UTF-16 代理区 U+D800–U+DFFF（CESU-8 那种编码不该出现在 UTF-8 里）；
+ *   - 超出 U+10FFFF 的范围（`0xF4 0x90` 以上）。
+ * 只判首字节与续字节的形状会让这三类漏过去 —— 而它们正是"能过校验却仍不是
+ * 合法 UTF-8"的全部来源。
+ */
+bool ws_is_valid_utf8(const uint8_t* p, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    const uint8_t c = p[i];
+    if (c <= 0x7F) { ++i; continue; }            // ASCII
+
+    size_t need;
+    if (c >= 0xC2 && c <= 0xDF)      need = 1;   // 2 字节（0xC0/0xC1 是 overlong）
+    else if (c >= 0xE0 && c <= 0xEF) need = 2;   // 3 字节
+    else if (c >= 0xF0 && c <= 0xF4) need = 3;   // 4 字节（>0xF4 超出 U+10FFFF）
+    else return false;                           // 孤立续字节 / 非法首字节
+
+    if (n - i < need + 1) return false;          // 尾部不够
+    for (size_t k = 1; k <= need; ++k) {
+      if ((p[i + k] & 0xC0) != 0x80) return false;   // 续字节必须是 10xxxxxx
+    }
+    if (need == 2) {
+      if (c == 0xE0 && p[i + 1] < 0xA0) return false;   // overlong
+      if (c == 0xED && p[i + 1] > 0x9F) return false;   // 代理区
+    } else if (need == 3) {
+      if (c == 0xF0 && p[i + 1] < 0x90) return false;   // overlong
+      if (c == 0xF4 && p[i + 1] > 0x8F) return false;   // > U+10FFFF
+    }
+    i += need + 1;
+  }
+  return true;
+}
+
+}  // namespace
+
 void uvcpp_ws_connection::deliver_message() {
   const ws_opcode op         = message_opcode_;
   const bool      compressed = message_compressed_;
@@ -286,6 +355,19 @@ void uvcpp_ws_connection::deliver_message() {
 #endif
 
   if (op == ws_opcode::TEXT) {
+    // RFC 6455 §8.1：文本消息必须是合法 UTF-8，否则以 1007 失败。
+    //
+    // **位置在解压之后**：应用看到的是解压后的字节，校验就必须落在同一份字节
+    // 上 —— 在上游验压缩过的数据既无意义（那是二进制），也会让带 permessage-
+    // deflate 的连接永远通不过。
+    //
+    // `data` 在空消息时可能是 nullptr，校验器对 (nullptr, 0) 返回 true。
+    if (!ws_is_valid_utf8(data, len)) {
+      message_payload_.clear();
+      protocol_error(ws_close_code::INVALID_PAYLOAD,
+                     "text message is not valid UTF-8");
+      return;
+    }
     // 空消息时 data 可能是 nullptr，`std::string(nullptr, 0)` 是 UB，单独走一条。
     if (on_text_) {
       on_text_(len ? std::string(reinterpret_cast<const char*>(data), len) : std::string());
@@ -425,6 +507,7 @@ int uvcpp_ws_connection::send_data(ws_opcode op, const char* d, size_t n,
     f.payload.clone_data(d, n);
 #endif
   }
+  apply_mask(f);
   return send_frame(f, cb);
 }
 
@@ -452,15 +535,39 @@ void uvcpp_ws_connection::set_compress_min_size(size_t n) { compress_min_size_ =
 size_t uvcpp_ws_connection::get_compress_min_size() const { return compress_min_size_; }
 #endif
 
+void uvcpp_ws_connection::apply_mask(uvcpp_ws_frame& f) const {
+  if (is_server_) {
+    // 服务端发的帧**必须不掩码**（§5.1）。显式清掉而不是不管：帧是调用方
+    // 造的，万一哪天有谁填了 masked，服务端发出去就成了协议错误。
+    f.masked = false;
+    return;
+  }
+  f.masked = true;
+  // 掩码密钥要"来自强熵源"（§5.3）—— 它防的是中间代理按**可预测**的字节模式
+  // 缓存投毒，用 rand()/时间戳这类源等于把这条防护让掉。
+  //
+  // 实现取「线程本地的 mt19937_64，种子来自 random_device」：一次种子来自强熵源，
+  // 之后由 PRNG 展开。**这不是密码学强度**，但对"不可预测"这个要求是够的
+  // （每帧的密钥不会被同一连接内的前序字节推出来），而且避免了在每帧的发送路径上
+  // 做 4 次系统调用 —— 逐帧调 random_device 在 Linux 上就是每帧 4 次读 /dev/urandom。
+  static thread_local std::mt19937_64 rng(std::random_device{}());
+  const uint64_t r = rng();
+  for (int i = 0; i < 4; ++i) {
+    f.mask_key[i] = static_cast<uint8_t>((r >> (i * 8)) & 0xFF);
+  }
+}
+
 int uvcpp_ws_connection::send_ping(const char* d, size_t n) {
   uvcpp_ws_frame f; f.opcode = ws_opcode::PING;
   if (d && n > 0) f.payload.clone_data(d, n);
+  apply_mask(f);
   return send_frame(f, nullptr);
 }
 
 int uvcpp_ws_connection::send_pong(const char* d, size_t n) {
   uvcpp_ws_frame f; f.opcode = ws_opcode::PONG;
   if (d && n > 0) f.payload.clone_data(d, n);
+  apply_mask(f);
   return send_frame(f, nullptr);
 }
 
@@ -469,6 +576,7 @@ int uvcpp_ws_connection::send_close(ws_close_code cd, const std::string& rs) {
   // 控制帧负载上限 125 字节（RFC 6455 §5.5）；扣掉 2 字节状态码，原因最多 123。
   // 超了会拼出一个对端**必须拒绝**的帧，所以在这里截断，而不是让它发出去。
   f.set_close_payload(cd, rs.size() > 123 ? rs.substr(0, 123) : rs);
+  apply_mask(f);
   return send_frame(f, [this](int) {
     // 走 client->close()：直接关句柄会绕过框架的关闭回调，服务端的客户端对象
     // 会被漏在登记表里。关完之后不能再用 tcp_（框架可能已经把它 delete 掉）。

@@ -53,7 +53,7 @@ class uvcpp_async;
  *
  * 典型用法（服务器、客户端都一样）：
  * @code
- *   uvcpp_ws_connection* c = new uvcpp_ws_connection(tcp);
+ *   uvcpp_ws_connection* c = new uvcpp_ws_connection(tcp, true);   // is_server
  *   sessions_.adopt(c);          // 接管所有权 + 装终结回调
  *   c->start();
  * @endcode

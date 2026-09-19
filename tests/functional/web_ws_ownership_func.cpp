@@ -134,7 +134,7 @@ struct scenario {
     sessions.set_loop(server.get_loop());
 
     int rc = server.listen([this](uvcpp_tcp_client* c) {
-      auto* wc = new uvcpp_ws_connection(c);
+      auto* wc = new uvcpp_ws_connection(c, /*is_server=*/true);
       wc->on_close([this](ws_close_code cd, const std::string&) {
         closes.push_back(static_cast<int>(cd));
       });
@@ -376,7 +376,7 @@ static void t_client_side_inflight_then_close() {
     if (!(connected && accepted != nullptr)) { check(false, "connect"); return; }
 
     // 客户端侧的会话 —— 它的写完成闭包由 `cli` 持有，而 `cli` 比会话活得久。
-    auto* wc = new uvcpp_ws_connection(&cli);
+    auto* wc = new uvcpp_ws_connection(&cli, /*is_server=*/false);
     sessions.adopt(wc);
     wc->start();
 
@@ -438,7 +438,7 @@ static void t_owner_terminate_with_inflight_write() {
                                 uvcpp_test::kWaitMs);
     if (!(connected && accepted != nullptr)) { check(false, "connect"); return; }
 
-    auto* wc = new uvcpp_ws_connection(&cli);
+    auto* wc = new uvcpp_ws_connection(&cli, /*is_server=*/false);
     sessions.adopt(wc);
     wc->start();
 
