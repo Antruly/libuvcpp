@@ -46,6 +46,10 @@ endif()
 # =========================================================================
 option(UVCPP_BUILD_NET  "Build net module (TCP/UDP client/server)"  ON)
 option(UVCPP_BUILD_WEB  "Build web module (HTTP/WebSocket)"         OFF)
+
+# uv_try_write 快速路径：套接字一次吃得下整条待发字节时，省掉"拷进自有缓冲"
+# 那一份用户态拷贝（吃不下就退回原路径，最坏等于不开）。默认开。
+option(UVCPP_ENABLE_TRY_WRITE "Try uv_try_write before copying into a write buffer" ON)
 # webapp 是建在 web 之上的应用框架层（路由/中间件/请求响应封装/日志）。
 # 它依赖 web，所以 web 关掉时它也会被强制关掉。
 option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/log)" OFF)
@@ -573,6 +577,14 @@ else()
   message(STATUS "HTTP/2 disabled (UVCPP_NGHTTP2_ENABLE=0)")
 endif()
 
+if(UVCPP_ENABLE_TRY_WRITE)
+  add_compile_definitions(UVCPP_TRY_WRITE_ENABLE=1)
+  message(STATUS "try_write fast path enabled (UVCPP_TRY_WRITE_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_TRY_WRITE_ENABLE=0)
+  message(STATUS "try_write fast path disabled (UVCPP_TRY_WRITE_ENABLE=0)")
+endif()
+
 # 根据 UVCPP_BUILD_EXPAND 选项排除 expand 模块
 if(NOT UVCPP_BUILD_EXPAND)
   message(STATUS "Excluding expand module from build")
@@ -736,6 +748,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_ZLIB_ENABLE=$<BOOL:${UVCPP_ENABLE_ZLIB}>
       UVCPP_OPENSSL_ENABLE=$<BOOL:${UVCPP_ENABLE_OPENSSL}>
       UVCPP_NGHTTP2_ENABLE=$<BOOL:${UVCPP_ENABLE_NGHTTP2}>
+      UVCPP_TRY_WRITE_ENABLE=$<BOOL:${UVCPP_ENABLE_TRY_WRITE}>
     )
   endif()
 endforeach()
