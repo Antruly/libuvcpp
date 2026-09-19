@@ -488,9 +488,11 @@ void test_path_prefix_auth() {
 
   std::atomic<int> api_hits(0);
   std::atomic<int> pub_hits(0);
+  std::atomic<int> mw_hits(0);
 
-  app.use([](uvcpp_web_request& req, uvcpp_web_response& resp,
-             uvcpp_web_next next) {
+  app.use([&](uvcpp_web_request& req, uvcpp_web_response& resp,
+              uvcpp_web_next next) {
+    mw_hits.fetch_add(1);
     if (req.path().rfind("/api/", 0) == 0) {
       resp.status(401);
       resp.text("denied");
@@ -517,13 +519,19 @@ void test_path_prefix_auth() {
   check(app.start_background() == 0, "前缀鉴权服务启动");
   const int port = app.bound_port();
 
+  // 只收线上**真能出现**的形态。试过再加一个连前导斜杠都没有的 `api/me`，
+  // 结果它压根没走到中间件 —— llhttp 不收这种请求目标 —— 于是那一格看着像
+  // "被拦住了"，实际是"什么都没跑"。下面那句 mw_hits 前置断言就是为了不让
+  // 这种空格子混进来，它当时确实当场把这一条顶红了。
   const char* const variants[] = {
       "/api/me",    // 正形：本来就该拦住
       "//api/me",   // 前导双斜杠（issue 里那个复现）
       "///api/me",  // 三斜杠
       "/api//me",   // 中间双斜杠
   };
-  for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); ++i) {
+  const size_t kVariants = sizeof(variants) / sizeof(variants[0]);
+
+  for (size_t i = 0; i < kVariants; ++i) {
     const std::string req = std::string("GET ") + variants[i] +
                             " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
     check(raw_send(port, req, 200),
@@ -537,6 +545,14 @@ void test_path_prefix_auth() {
         "裸客户端把 /public 写完了");
   check(wait_for([&] { return pub_hits.load() == 1; }, 3000),
         "对照组 /public 的处理器被跑到了一次（服务确实在处理请求）");
+
+  // 前置断言：每一个变体都**真的走到了中间件**。少了这句，"处理器计数为 0"
+  // 还有一种蒙混过关的方式 —— 请求压根没被解析出来（比如 llhttp 直接把这个
+  // 请求目标判成非法），于是什么都没跑，看起来和"被拦住了"一模一样。
+  check(mw_hits.load() == static_cast<int>(kVariants) + 1,
+        "每个变体都走到了中间件（实测 " + std::to_string(mw_hits.load()) +
+            " 次，应为 " + std::to_string(kVariants + 1) +
+            "）—— 否则下面的 0 可能只是请求没被解析出来");
 
   check(api_hits.load() == 0,
         "没有任何变体绕过前缀鉴权（实测处理器被跑了 " +

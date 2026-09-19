@@ -264,6 +264,15 @@ void test_path_and_query() {
     uvcpp_web_request dot;
     make_web_req(dot, http_method::HTTP_GET, "/api/../me");
     check_eq(dot.path(), "/api/../me", "`.` / `..` 不在这里处理");
+
+    // 连前导斜杠都没有的目标也**补成绝对路径**：路由切段只看段，
+    // `api/me` 与 `/api/me` 的段完全一样、命中同一条路由，可前缀判据
+    // `rfind("/api/", 0)` 只认带斜杠的那个 —— 不补就是在 API 上留个不一致。
+    // 线上到不了这里（llhttp 不收这种请求目标，见 `path_prefix_auth` 的
+    // 记录），但 `path()` 是公开 API，按构造出来的请求走这条路是可能的。
+    uvcpp_web_request bare;
+    make_web_req(bare, http_method::HTTP_GET, "api/me");
+    check_eq(bare.path(), "/api/me", "没有前导斜杠时补成绝对路径");
   }
 }
 
