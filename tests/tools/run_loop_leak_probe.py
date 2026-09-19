@@ -231,7 +231,7 @@ def build(tree):
 
 
 def sync_dll(tree):
-    """`copy_test_dlls` 在本机因为 `pwsh.exe` 找不到而静默失效。"""
+    """同步测试侧的 uvcpp.dll（`copy_test_dlls` 是 ALL 目标，单 target 构建不跑它）。"""
     src = os.path.join(tree, "Release", "uvcpp.dll")
     with open(src, "rb") as f:
         data = f.read()

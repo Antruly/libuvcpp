@@ -120,9 +120,15 @@ def build(tree):
 
 
 def sync_dll(tree):
-    """`copy_test_dlls` 这一步在本机因为 `pwsh.exe` 找不到而**静默失效**：
-    测试侧那份 uvcpp.dll 会停在上一版。不手动同步就会拿旧库跑变异，结果整体
-    错位一格（这条踩过）。"""
+    """把测试侧那份 uvcpp.dll 同步成 `Release/` 里刚编出来的。
+
+    `copy_test_dlls` 是 `add_custom_target(... ALL)`，只有**默认构建**会跑它；
+    本脚本走的是 `--target <单个测试>`，那条依赖链里没有它，于是测试侧的 DLL
+    会停在上一版。不手动同步就会拿旧库跑变异，结果整体错位一格（这条踩过）。
+
+    注意日志里那句 `'pwsh.exe' 不是内部或外部命令` **与本步骤无关** —— 那是
+    CMake 自己的编译器探测留下的，全仓构建系统里没有任何一处引用 pwsh。
+    """
     src = os.path.join(tree, "Release", "uvcpp.dll")
     n = 0
     with open(src, "rb") as f:

@@ -31,8 +31,8 @@
 退出码 3 停下 —— 免得把普通断言失败读成"页堆抓到了"。
 
 `0xC0000139`（入口点找不到）与 `0xC0000135`（找不到 DLL）单独归类并且**算门禁
-自身失败**：那是 DLL 没刷新，不是缺陷。本机 `copy_test_dlls` 因为没有 `pwsh.exe`
-而静默失效，所以开跑前自己按 mtime 刷一遍 DLL。
+自身失败**：那是 DLL 没刷新，不是缺陷。`copy_test_dlls` 是个 `ALL` 目标，只有默认
+构建会跑它；凡是走 `--target` 的构建路径都不会，所以开跑前自己按 mtime 刷一遍 DLL。
 
 本门禁自己的效力由 `run_tcp_client_dtor_mutation.py` 证明（它的 M1/M2/M3 三个
 变异全靠页堆才抓得住），`--self-test` 就是转调它。
@@ -143,8 +143,8 @@ def find_lib_dll(d):
 def sync_dlls(tree, exe_dirs):
     """按 mtime 取每份 DLL 的最新来源，刷进每个测试输出目录。
 
-    `copy_test_dlls` 在本机因为找不到 `pwsh.exe` 而**静默失效**，DLL 不刷新
-    的表现是 `0xC0000139` —— 看着像崩溃，其实是过期。
+    `copy_test_dlls` 只在默认构建里跑（它是 `ALL` 目标，单 target 构建的依赖链
+    里没有它），DLL 不刷新的表现是 `0xC0000139` —— 看着像崩溃，其实是过期。
     """
     names = set()
     for d in exe_dirs:
