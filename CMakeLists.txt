@@ -286,6 +286,11 @@ if(UVCPP_ENABLE_NGHTTP2)
     set(WITH_LIBBPF        OFF)
     set(WITH_WOLFSSL       OFF)
 
+    # PIC 必须在**建目标之前**定好 —— 属性是 add_library 那一刻初始化的。
+    # 设在这里而不是根作用域:function 作用域只罩住 nghttp2 子树,
+    # 我们自己的静态库不受影响。理由见下面那段。
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
     FetchContent_GetProperties(nghttp2)
     if(NOT nghttp2_POPULATED)
       FetchContent_Populate(nghttp2)
@@ -304,6 +309,39 @@ if(UVCPP_ENABLE_NGHTTP2)
     GIT_SHALLOW    TRUE
   )
   uvcpp_nghttp2_configure()
+
+  # nghttp2 是本工程里**唯一被强制静态**的依赖（见上面那个 function 里的
+  # `BUILD_SHARED_LIBS OFF` + `BUILD_STATIC_LIBS ON`），而 CMake 给静态库初始化
+  # 的 PIC 默认值是 OFF ⇒ 在 Linux 上编出来的 libuvcpp.so 链不上它：
+  #
+  #   /usr/bin/ld: libnghttp2.a(nghttp2_session.c.o): relocation R_X86_64_PC32
+  #   against symbol `nghttp2_enable_strict_preface' can not be used when making
+  #   a shared object; recompile with -fPIC
+  #
+  # 另外两个依赖看不出这条：llhttp 是 **shared**（所以 CI 要拷 llhttp.dll），
+  # libuv 在 CI 上走系统包。而 PE 与 Mach-O 根本没有这个约束 —— 所以它**只在
+  # Linux 上红**，本机 Windows 复现不了，macOS 那条腿实测也是绿的。
+  #
+  # 用 `CMAKE_POSITION_INDEPENDENT_CODE` 而不是事后 `set_target_properties`:
+  # 前者按名字无关的方式给子树里每个目标初始化属性,上游改库目标名也不会静默失效
+  # (库目标名漂移过 —— `lib/CMakeLists.txt:128` 是 `add_library(nghttp2 ALIAS
+  # ${LIB_SELECTED})`,而 `release.yml` 对整棵树用的就是这个变量)。
+  #
+  # 下面这条不是仪式:属性在 MSVC 上照样读得回来(只是生成器不吐 /fPIC),
+  # 所以它**在本机就能验**;真失效时会在 configure 阶段响亮地停下来,
+  # 而不是等 Linux 的链接器来说话。
+  if(NOT TARGET nghttp2_static)
+    message(FATAL_ERROR
+      "nghttp2 没建出 nghttp2_static —— BUILD_SHARED_LIBS/BUILD_STATIC_LIBS 没压住,"
+      "或者上游改了库目标名")
+  endif()
+  get_target_property(_uvcpp_nghttp2_pic nghttp2_static POSITION_INDEPENDENT_CODE)
+  if(NOT _uvcpp_nghttp2_pic)
+    message(FATAL_ERROR
+      "nghttp2_static 的 POSITION_INDEPENDENT_CODE 没生效(=${_uvcpp_nghttp2_pic}) —— "
+      "Linux 上 libuvcpp.so 会链不上它")
+  endif()
+
   message(STATUS "nghttp2 integrated (tag=${NGHTTP2_VERSION}, static)")
 endif()
 
