@@ -976,6 +976,83 @@ static bool test_reclaim_paths(int port, int hangup_port) {
     }
   }
 
+  // ---- 腿 3：传统 `read_start` 上析构（`read_arg_` 非空 ⇒ 释放必须推迟）----
+  //
+  // 腿 1/2 走的都是 `read_start_events` —— 那条路的数据由成员 `net_read_cb_`
+  // 交付，`read_arg_` **恒为空**。而传统 `read_start` 才是 `read_arg_` 非空的
+  // 那条路：它存的就是**此刻正在执行的那个 `std::function`**（见
+  // `uvcpp_tcp_client.cpp` 原始读路径那段注释）。于是"把 `read_arg_` 的释放
+  // 推迟到关闭完成回调"这件事只有这条腿才测得到 —— 而 webapp 那条 churn
+  // 复现（读回调里析构、`read_arg_ != nullptr`）走的正是它。
+  //
+  // 判据与腿 1 相同，但**抓的不是同一个东西**：这条腿上"当场删 `read_arg_`"
+  // 是删一个正在执行的对象，PageHeap 下必崩（腿 1 上则完全看不见）。
+  {
+    uvcpp_loop loop;
+
+    uvcpp_test::loop_drain drain_loop(&loop);
+    loop.init();
+
+    const uvcpp_tcp_client::reclaim_stat before =
+        uvcpp_tcp_client::reclaim_stats();
+
+    uvcpp_tcp_client* victim  = new uvcpp_tcp_client(&loop);
+    bool              deleted = false;
+
+    victim->set_close_manager([&victim, &deleted]() {
+      delete victim;
+      victim  = nullptr;
+      deleted = true;
+    });
+
+    int rc = victim->connect("127.0.0.1", hangup_port, [&](int status) {
+      if (status != 0) {
+        std::cout << "[functional tcp_client] reclaim_paths leg3 connect "
+                  << uv_err_name(status) << std::endl;
+        return;
+      }
+      // 传统读注册：这一句就是让 `read_arg_` 变成非空的那件事。
+      victim->read_start([](uvcpp_buf* /*b*/) {});
+    });
+    if (rc != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg3 connect start "
+                   "failed: " << uv_err_name(rc) << std::endl;
+      delete victim;
+      return false;
+    }
+
+    pump_until(&loop, [&] { return deleted; }, 5000);
+    uvcpp_test::drain(&loop);
+
+    const uvcpp_tcp_client::reclaim_stat after =
+        uvcpp_tcp_client::reclaim_stats();
+    const uint64_t d_deferred = after.deferred - before.deferred;
+    const uint64_t d_released = after.released - before.released;
+    const uint64_t d_skipped  = after.skipped - before.skipped;
+
+    if (victim != nullptr || !deleted) {
+      std::cout << "[functional tcp_client] reclaim_paths leg3 FAIL "
+                   "链路没走完：deleted=" << deleted
+                << " victim=" << static_cast<void*>(victim) << std::endl;
+      ok = false;
+    } else if (d_deferred != 1 || d_released != 0 || d_skipped != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg3 FAIL 支路不对："
+                   "deferred+=" << d_deferred << " released+=" << d_released
+                << " skipped+=" << d_skipped << "（应 1/0/0）" << std::endl;
+      ok = false;
+    } else {
+      std::cout << "[functional tcp_client] reclaim_paths leg3 deferred "
+                   "survived (raw read_start)\n";
+    }
+
+    const int lrc = loop.loop_close();
+    if (lrc != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg3 FAIL "
+                   "loop_close rc=" << lrc << std::endl;
+      ok = false;
+    }
+  }
+
   std::cout << "[functional tcp_client] reclaim_paths done success="
             << (ok ? "true" : "false") << std::endl;
   return ok;

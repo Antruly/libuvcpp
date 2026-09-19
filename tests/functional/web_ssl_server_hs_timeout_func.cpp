@@ -104,6 +104,19 @@ int main() {
 
   uvcpp_loop* loop = server.get_loop();
 
+  // 回收计数：本场景恰好把 `~uvcpp_tcp_client` 的**两条延迟支路**都走一遍
+  // ——tcp_ 包装对象（句柄还活着 ⇒ 交给关闭完成回调）与握手超时定时器的包装
+  // 对象（析构正跑在那个定时器自己的回调里 ⇒ 同样只能交给关闭完成回调）。
+  // 两条各自的 `delete` 都记在 `deferred` 里，所以这条超时路径的期望是
+  // **deferred += 2**，而不是 1。
+  //
+  // 这条断言是唯一能把"定时器那半"钉住的判据：另外两条判据（handle_queue、
+  // uv_loop_alive）对"包装对象漏没漏"完全不敏感 —— 句柄本身关得掉，漏的是
+  // C++ 对象。去掉定时器那一支的延迟释放（改回 `close([](uvcpp_handle*){})`）
+  // 会让这个数掉回 1。
+  const uvcpp_tcp_client::reclaim_stat reclaim_before =
+      uvcpp_tcp_client::reclaim_stats();
+
   // 对端故意**不开 TLS**：本用例要的就是"线上字节凑不成一次完整握手"这个状态，
   // 对服务端来说与一个真 TLS 客户端发到一半卡住完全一样。
   uvcpp_tcp_client peer(loop);
@@ -155,6 +168,19 @@ int main() {
   server.close_all_clients();
   server.stop([] {});
   uvcpp_test::pump_for(loop, 300);
+
+  // 收尾队列拨干净之后再读计数：`deferred` 记在那个延迟的 `delete` 里面，
+  // 没拨完就还是 0（那不是漏，是还没到）。
+  const uvcpp_tcp_client::reclaim_stat reclaim_after =
+      uvcpp_tcp_client::reclaim_stats();
+  const uint64_t d_released = reclaim_after.released - reclaim_before.released;
+  const uint64_t d_deferred = reclaim_after.deferred - reclaim_before.deferred;
+  const uint64_t d_skipped  = reclaim_after.skipped - reclaim_before.skipped;
+  check(d_deferred == 2 && d_released == 0 && d_skipped == 0,
+        "包装对象回收支路不对：deferred+=" + std::to_string(d_deferred) +
+            " released+=" + std::to_string(d_released) +
+            " skipped+=" + std::to_string(d_skipped) +
+            "（这条路上 tcp_ 与握手超时定时器各延迟释放一次，应 2/0/0）");
 
   // 判据一：`handle_queue` 上没有非 internal 句柄。
   uv_loop_t* raw = reinterpret_cast<uv_loop_t*>(loop->get_handle());
