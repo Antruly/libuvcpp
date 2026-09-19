@@ -313,6 +313,11 @@ class UVCPP_API uvcpp_tcp_client {
    * The caller still owns the uvcpp_buf object itself (e.g. must delete
    * it if heap-allocated) — only the data payload is transferred.
    *
+   * **TLS 连接上是例外**：加密要求明文经过 `SSL_write`，而它会把明文**拷**进
+   * 自己的缓冲，所以没有"零拷贝"可做，`out_uv_buf()` 也不调用 —— 调用之后
+   * `uvcpp_buf` **仍然是满的**，数据仍归它（它析构时释放）。两种连接下
+   * "回调触发时这次写已完成、可以安全释放缓冲"这一点是一样的。
+   *
    * NOTE: do NOT pass the address of a temporary; the pointer must remain
    * valid until the write callback fires (for async) or the call returns
    * (for sync).

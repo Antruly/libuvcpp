@@ -959,6 +959,9 @@ int uvcpp_tcp_client::write_wait(const uvcpp_buf& buf, int timeout_ms) {
 }
 
 // uvcpp_buf* overload (zero-copy, transfers ownership of buffer data)
+//
+// TLS 连接上"零拷贝"不成立：明文要经 SSL_write 加密，它是**拷**进去的。所以
+// TLS 分支既不走 `out_uv_buf()` 也不碰调用方的缓冲，见下面两个函数里的分支。
 int uvcpp_tcp_client::write(uvcpp_buf* buf,
                              std::function<void(int)> cb) {
   if (buf == nullptr) return UV_EINVAL;
@@ -971,6 +974,37 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
     has_async_write_cb_ = true;
     write_fn_  = trampoline_write;
     write_arg_ = new std::function<void(int)>(cb);
+
+#if UVCPP_OPENSSL_ENABLE
+    if (tls_ssl_ != nullptr) {
+      // TLS 下**不能**像下面那样把 buf 的数据挪走。密文归 SSL 所有，明文是被
+      // **拷**进它的 wbio 的（见 `tls_write_plain`），所以这块内存在本函数返回
+      // 之后仍然归调用方 —— 挪走了，调用方回调里那次 delete 就会悬垂。
+      if (!tls_handshake_done_) {
+        has_async_write_cb_ = false;
+        delete static_cast<std::function<void(int)>*>(write_arg_);
+        write_fn_  = nullptr;
+        write_arg_ = nullptr;
+        return UV_ENOTCONN;
+      }
+
+      const int trc = tls_write_plain(buf->get_const_data(), buf->size());
+      if (trc != 0) {
+        last_error_code_ = trc;
+        has_async_write_cb_ = false;
+        delete static_cast<std::function<void(int)>*>(write_arg_);
+        write_fn_  = nullptr;
+        write_arg_ = nullptr;
+        return trc;
+      }
+
+      // 明文已经全交给 SSL 了，密文还在 wbio 里 —— 等它出网才算完成。
+      tls_write_pending_ = true;
+      tls_write_sync_    = false;
+      tls_flush_out();
+      return 0;
+    }
+#endif
 
     uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership from buf
 
@@ -1023,6 +1057,33 @@ int uvcpp_tcp_client::write_wait(uvcpp_buf* buf, int timeout_ms) {
 
   sync_write_done_   = false;
   sync_write_result_ = 0;
+
+#if UVCPP_OPENSSL_ENABLE
+  if (tls_ssl_ != nullptr) {
+    // 与异步重载同一个理由：TLS 下 buf 的数据不被挪走，仍归调用方。
+    if (!tls_handshake_done_) return UV_ENOTCONN;
+
+    const int trc = tls_write_plain(buf->get_const_data(), buf->size());
+    if (trc != 0) {
+      last_error_code_ = trc;
+      return trc;
+    }
+    tls_write_pending_ = true;
+    tls_write_sync_    = true;
+    tls_flush_out();
+
+    const bool ok = wait_for_condition(
+        [this]() { return sync_write_done_; }, timeout_ms);
+    if (!ok) {
+      // 超时不代表密文没出去 —— 它可能已经出网、只是完成回调还没送到。
+      tls_write_pending_ = false;
+      tls_write_sync_    = false;
+      last_error_code_   = UV_ETIMEDOUT;
+      return UV_ETIMEDOUT;
+    }
+    return sync_write_result_;
+  }
+#endif
 
   uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership from buf
 

@@ -193,7 +193,7 @@ void pump_echo(server_state& st, uvcpp_tcp_client& c) {
       st.echo_failed.fetch_add(1);
       // **区分"回声没人要"和"回声送不出去"。**
       //
-      // 场景 3（write_only）故意只发不收，然后在写完成之后立刻 `close()` ——
+      // 场景 4（write_only）故意只发不收，然后在写完成之后立刻 `close()` ——
       // 那一刻它的接收缓冲里还压着没读走的回声，于是内核发 RST，服务端在途的
       // 那次写拿到 `UV_ECONNRESET`。这是**对端主动放弃**的正常结局，不是服务端
       // 的回声管线坏了；把两者算在一起，会让"echo_failed == 0"这条断言在约
@@ -289,15 +289,24 @@ struct client_probe {
   std::atomic<bool> write_fired{false};
   std::atomic<int>  peer_closed{0};
   std::atomic<int>  read_error{0};
+  /// 写完成时调用方的 `uvcpp_buf` 是否**仍然满着**（TLS 路径的契约，见下面
+  /// `via_buf` 那段）。没走 buf 重载的轮次保持 -1。
+  std::atomic<int>  buf_size_at_cb{-1};
 
   std::mutex        mu;
   std::string       received;
 };
 
 /// 跑一个异步 TLS 客户端：连上 → 发 msg → 收 response_len 字节 → 返回是否一致。
+///
+/// @param via_buf 用 `write(uvcpp_buf*, cb)` 而不是 `write(const char*, len, cb)`。
+///        这条重载曾经**没有 TLS 分支**，于是明文被直接写进 TLS socket ——
+///        两端都发不出东西，看起来像 ALPN/nghttp2 的问题。见文件末尾
+///        「场景 3」的说明。
 bool run_async_tls_client(int port, uvcpp_ssl_context* cctx,
                           const std::string& msg, size_t response_len,
-                          client_probe& p, const char* label) {
+                          client_probe& p, const char* label,
+                          bool via_buf = false) {
   uvcpp_tcp_client client;
 
   const int trc = client.enable_tls(cctx);
@@ -305,13 +314,34 @@ bool run_async_tls_client(int port, uvcpp_ssl_context* cctx,
                       std::to_string(trc));
 
   const int crc = client.connect("127.0.0.1", port,
-                                 [&client, &p, msg](int status) {
+                                 [&client, &p, msg, via_buf](int status) {
                                    p.connect_status.store(status);
                                    p.hs_done_at_connect.store(
                                        client.is_tls_handshake_done());
                                    p.connect_fired.store(true);
                                    if (status != 0) return;
                                    // 契约：拿到成功就应当能直接发明文。
+                                   if (via_buf) {
+                                     // 堆上的 buf：所有权在**回调**里交还。
+                                     // TLS 下它的数据不会被挪走，所以那次 delete
+                                     // 能安全地读 size()；真挪走了这里就是 UAF。
+                                     uvcpp_buf* b =
+                                         new uvcpp_buf(msg.data(), msg.size());
+                                     const int wrc = client.write(
+                                         b, [&p, b](int ws) {
+                                           p.buf_size_at_cb.store(
+                                               static_cast<int>(b->size()));
+                                           p.write_status.store(ws);
+                                           p.write_fired.store(true);
+                                           delete b;
+                                         });
+                                     if (wrc != 0) {
+                                       delete b;
+                                       p.write_status.store(wrc);
+                                       p.write_fired.store(true);
+                                     }
+                                     return;
+                                   }
                                    const int wrc = client.write(
                                        msg.data(), msg.size(),
                                        [&p](int ws) {
@@ -396,7 +426,7 @@ bool run_async_tls_client(int port, uvcpp_ssl_context* cctx,
  */
 bool run_sync_tls_client(int port, uvcpp_ssl_context* cctx,
                          const std::string& msg, const char* label,
-                         bool echo_first) {
+                         bool echo_first, bool via_buf = false) {
   uvcpp_tcp_client client;
   check(client.enable_tls(cctx) == 0, std::string(label) + ": enable_tls");
 
@@ -406,8 +436,20 @@ bool run_sync_tls_client(int port, uvcpp_ssl_context* cctx,
   check(client.is_tls_handshake_done(),
         std::string(label) + ": connect_wait returned before handshake done");
 
-  const int wrc = client.write_wait(msg.data(), msg.size(), 8000);
+  uvcpp_buf wbuf(msg.data(), msg.size());
+  const int wrc = via_buf ? client.write_wait(&wbuf, 8000)
+                          : client.write_wait(msg.data(), msg.size(), 8000);
   check(wrc == 0, std::string(label) + ": write_wait = " + std::to_string(wrc));
+  if (via_buf) {
+    // TLS 上**没有**零拷贝可做（`SSL_write` 把明文拷进 wbio），所以这条重载
+    // 不调 `out_uv_buf()` —— 调用之后缓冲仍然是满的。这条断言就是在钉这个
+    // 契约：谁哪天"顺手"把 `out_uv_buf()` 加回 TLS 分支前面，这里会红。
+    check(wbuf.size() == msg.size(),
+          std::string(label) + ": TLS write_wait(uvcpp_buf*) emptied the "
+                               "caller's buffer (" +
+              std::to_string(wbuf.size()) + " of " + std::to_string(msg.size()) +
+              ")");
+  }
 
   if (echo_first) {
     // 回环上的回声往返是微秒级，服务端循环也在同一时间尺度上转，所以 200ms
@@ -440,11 +482,14 @@ bool run_sync_tls_client(int port, uvcpp_ssl_context* cctx,
 }
 
 // =========================================================================
-// 场景 3：反向对照 —— 明文客户端打 TLS 服务端**必须失败**
+// （场景 6 用）反向对照 —— 明文客户端打 TLS 服务端**必须失败**
 //
 // 这是钉死「过滤器真的接上了」的那一条。一个"enable_tls 只是把对象建出来、
 // 但没接进出入口"的实现，在正向用例里可能蒙混过关（因为两边都没加密、
 // 往返照样逐字节相等），唯独在这里会表现成"连接成功"。
+//
+// 与场景 3（buf 重载）是同一族的两个方向：那条抓"某个入口漏接过滤器"，
+// 这条抓"整个过滤器是摆设"。
 // =========================================================================
 
 bool run_plaintext_against_tls(int port, const char* label) {
@@ -557,11 +602,45 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  // 场景 1+2 的窗口到此为止：这两条都会把回声读完，两次快照之间**不允许**
+  // ---- 场景 3：`uvcpp_buf*` 重载也必须过过滤器 ----------------------
+  //
+  // 这条重载**曾经没有 TLS 分支**：它把 `out_uv_buf()` 的结果直接交给
+  // `tcp_->write()`，于是明文原样进了 TLS socket。成因是顺序 —— buf 重载先加
+  // （`7aedfd7`），TLS 后加（`c304a4c`）时只补了 `const char*` 那一族。
+  //
+  // 正向用例抓得住它：服务端是**真 TLS**，解不出明文的字节一律不计入
+  // `bytes_in`，回声也就永远不来，下面的往返比对必然不等。所以这条不是
+  // "接口能编译"的冒烟，而是场景 1 的同一条判据换了个入口。
+  //
+  // 大小两条都要：小消息可能整个装进一个 TLS 记录、一次 `uv_write` 发完，
+  // 照不出"密文没发完就回调完成"这一类；256 KiB 会跨很多次。
+  {
+    const std::string msg = "GET /buf HTTP/1.1\r\nHost: loopback.test\r\n\r\n";
+    client_probe p;
+    check(run_async_tls_client(port, &cctx, msg, msg.size(), p, "async_buf_small",
+                               /*via_buf=*/true),
+          "async_buf_small: roundtrip");
+    check(p.buf_size_at_cb.load() == static_cast<int>(msg.size()),
+          "async_buf_small: 回调时调用方的 buf 应当仍是满的（实测 " +
+              std::to_string(p.buf_size_at_cb.load()) + " of " +
+              std::to_string(msg.size()) +
+              "）—— TLS 上不挪走数据，见 write(uvcpp_buf*) 的说明");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  {
+    const std::string msg = big_message(256 * 1024);
+    client_probe p;
+    check(run_async_tls_client(port, &cctx, msg, msg.size(), p, "async_buf_large",
+                               /*via_buf=*/true),
+          "async_buf_large: roundtrip");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  // 场景 1+2+3 的窗口到此为止：这三条都会把回声读完，两次快照之间**不允许**
   // 出现任何一次回声失败。
   const int echo_failed_after_readback = st.echo_failed.load();
 
-  // ---- 场景 3：只发不收（写完成语义） -------------------------------
+  // ---- 场景 4：只发不收（写完成语义） -------------------------------
   // 上面两条都在"能收到回声"的前提下断言；这条专门看写本身的完成时机：
   // 写完回调必须发生在密文**全部出网**之后，而不是 SSL_write 接受明文之后。
   {
@@ -594,16 +673,17 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  // 场景 3 的窗口到此为止。它自己的失败**不在这里断言** —— 那条路径故意放弃
+  // 场景 4 的窗口到此为止。它自己的失败**不在这里断言** —— 那条路径故意放弃
   // 回声，RST 是预期内的结局（见 `pump_echo` 里的说明）；能证明它是 RST 而不是
   // 漏发的，是文件末尾那条 `echo_failed == echo_reset`。
   const int echo_failed_after_write_only = st.echo_failed.load();
 
-  // ---- 场景 4：同步接口（connect_wait / write_wait / read_wait） ----
+  // ---- 场景 5：同步接口（connect_wait / write_wait / read_wait） ----
   //
   // 两遍，唯一的区别是**回声到达的时刻**：自然的时序，以及被泵到
   // `read_wait()` 之前的时序。后一遍是确定性的回归网，理由见
-  // `run_sync_tls_client` 的 `echo_first` 参数。
+  // `run_sync_tls_client` 的 `echo_first` 参数。第三遍换 `uvcpp_buf*` 入口，
+  // 理由同场景 3（同步那一族的 `write_wait(uvcpp_buf*)` 当时一起漏了）。
   {
     const std::string msg = "PING-sync\r\n";
     check(run_sync_tls_client(port, &cctx, msg, "sync_roundtrip", false),
@@ -612,10 +692,14 @@ int main() {
     check(run_sync_tls_client(port, &cctx, msg, "sync_roundtrip_buffered", true),
           "sync_roundtrip_buffered");
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    check(run_sync_tls_client(port, &cctx, msg, "sync_buf", /*echo_first=*/true,
+                              /*via_buf=*/true),
+          "sync_buf");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
 
-  // ---- 场景 5：反向对照（明文客户端打 TLS 服务端） ------------------
+  // ---- 场景 6：反向对照（明文客户端打 TLS 服务端） ------------------
   {
     const int hs_before = st.hs_failed.load();
     const int in_before = st.bytes_in.load();
@@ -636,9 +720,10 @@ int main() {
   stop.store(true);
   srv_thread.join();
 
-  check(st.accepted.load() >= 5,
+  // 场景 1/2/3 各 1 条、场景 4 一条、场景 5 三条、场景 6 一条 = 9。
+  check(st.accepted.load() >= 8,
         "server accepted " + std::to_string(st.accepted.load()) +
-            " connections (expect >= 5)");
+            " connections (expect >= 8)");
   check(st.tls_ok.load() == st.accepted.load(),
         "server enable_tls succeeded on " +
             std::to_string(st.tls_ok.load()) + "/" +
@@ -647,14 +732,14 @@ int main() {
   check(echo_failed_after_readback == 0,
         "server echo failures in the read-back scenarios: " +
             std::to_string(echo_failed_after_readback));
-  // 场景 4（同步接口，也把回声读完了）同理。
+  // 场景 5（同步接口，也把回声读完了）同理。
   check(st.echo_failed.load() == echo_failed_after_write_only,
         "server echo failures after write_only: " +
             std::to_string(st.echo_failed.load() - echo_failed_after_write_only));
 
   // **每一次失败都必须是"对端主动放弃"（RST）**，一次别的都不许有。
   //
-  // 上面两条窗口断言只覆盖读回声的场景；这一条覆盖**全部**（含场景 3）。
+  // 上面两条窗口断言只覆盖读回声的场景；这一条覆盖**全部**（含场景 4）。
   // 服务端真漏发一块（在途写撞上 `UV_EALREADY` 被丢掉）拿到的是 `UV_EALREADY`
   // 而不是 `UV_ECONNRESET`，所以照样会被它抓住 —— 原先把两者算在一起的
   // `echo_failed == 0` 会在这条断言上假失败（实测约 1/60），判别力却是一样的。
