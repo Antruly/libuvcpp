@@ -181,6 +181,72 @@ void add_hello_route(uvcpp_web_app& app) {
   });
 }
 
+/// 连上去、发一段**永远凑不完整**的 ClientHello，然后看服务端会不会主动关掉它。
+///
+/// 返回 true = 在观察窗口内被服务端关闭。
+///
+/// 为什么这条必须存在：服务端在握手成功之前**不会**把连接交给框架层，于是这
+/// 条连接既不在框架层的连接登记表里，也就碰不到 `idle_timeout_ms` —— 一个
+/// 连上之后只发半个 ClientHello 的客户端，原本可以让连接连同它的 SSL 对象与
+/// 读写缓冲区无限期挂着。这个用例钉的就是"握手阶段也有闸门"。
+///
+/// 故意**不开 TLS** 地用 `uvcpp_tcp_client`：本用例要的恰恰是"线上字节凑不成
+/// 一次完整握手"这个状态，用明文 socket 发 TLS 记录头的前几个字节，对服务端
+/// 来说与一个真正的 TLS 客户端发到一半卡住完全一样。
+bool probe_stalled_handshake(int port, int observe_ms, const char* label) {
+  // 一条真实 ClientHello 的开头：记录头 + 握手类型 + 长度 + 版本 + 随机数前几位。
+  // 到这里就断掉 —— 长度字段声明的 0x0200 字节永远收不满。
+  static const unsigned char kPartialHello[] = {
+      0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03};
+
+  std::atomic<bool> closed{false};
+  std::atomic<bool> connect_fired{false};
+  std::atomic<int>  connect_status{-99};
+  std::atomic<int>  read_arm_rc{-999};
+  std::atomic<int>  write_rc{-999};
+
+  uvcpp_tcp_client client;
+  const int crc = client.connect("127.0.0.1", port, [&](int st) {
+    connect_fired.store(true);
+    connect_status.store(st);
+    if (st != 0) return;
+    read_arm_rc.store(client.read_start_events(
+        [&closed](uvcpp_tcp_client&, const net_read_result& r) {
+          if (!r.is_data()) closed.store(true);  // 对端关闭 / 读错误
+        }));
+    write_rc.store(client.write(
+        reinterpret_cast<const char*>(kPartialHello), sizeof(kPartialHello),
+        [](int) {}));
+  });
+  check(crc == 0, std::string(label) + ": connect() start failed");
+
+  uvcpp_loop* loop = client.get_loop();
+  uvcpp_test::wait_until(
+      loop,
+      [&connect_fired, &connect_status, &closed] {
+        if (!connect_fired.load()) return false;
+        if (connect_status.load() != 0) return true;
+        return closed.load();
+      },
+      observe_ms);
+
+  check(connect_fired.load(), std::string(label) + ": connect cb never fired");
+  check(connect_status.load() == 0,
+        std::string(label) + ": connect status = " +
+            std::to_string(connect_status.load()));
+  check(read_arm_rc.load() == 0,
+        std::string(label) + ": read_start_events returned " +
+            std::to_string(read_arm_rc.load()));
+  check(write_rc.load() == 0,
+        std::string(label) + ": write() returned " +
+            std::to_string(write_rc.load()));
+
+  const bool was_closed = closed.load();
+  client.close();
+  uvcpp_test::pump_for(loop, 60);
+  return was_closed;
+}
+
 }  // namespace
 
 int main() {
@@ -351,6 +417,68 @@ int main() {
       run_client(app.bound_port(), &cctx, request, p, "recovered_after_failure");
       check(probe_received(p).find(kReplyBody) != std::string::npos,
             "scenario 3: the recovered app did not serve the request over TLS");
+    }
+    app.stop();
+    app.join();
+  }
+
+  // =====================================================================
+  // 场景 4：TLS 握手阶段的超时（`set_tls_handshake_timeout_ms`）
+  //
+  // 服务端在握手成功之前不把连接交给框架层，所以这期间它在框架层的连接表里
+  // **不存在** —— `idle_timeout_ms` 遍历的是那张表，因此管不到它。一个只发
+  // 半个 ClientHello 的客户端原本可以让连接无限期挂着。本场景钉两件事：
+  //
+  //   1. 设了握手超时 → 卡住的握手会被关掉；
+  //   2. 关掉这道闸门（0）→ 同样的连接**不会**在同一个窗口内被关掉。
+  //
+  // 第 2 条是对照。没有它的话，"被关掉"可能来自别的路径（比如 idle 超时），
+  // 那样这条用例证明不了是握手超时干的 —— `idle_timeout_ms` 故意留得远大于
+  // 观察窗口，把这条路排除掉。
+  // =====================================================================
+  {
+    uvcpp_web_app app;
+    configure_for_test(app);
+    app.enable_self_signed("localhost", 2048);
+    app.set_idle_timeout_ms(30000);          // 远大于下面的观察窗口
+    app.set_tls_handshake_timeout_ms(300);
+    add_hello_route(app);
+
+    check(app.tls_handshake_timeout_ms() == 300,
+          "scenario 4: set_tls_handshake_timeout_ms(300) did not take effect "
+          "(got " + std::to_string(app.tls_handshake_timeout_ms()) + ")");
+
+    const int rc = app.start_background();
+    check(rc == 0, "scenario 4: start_background failed with " +
+                       std::to_string(rc) + " (" + app.ssl_error() + ")");
+    if (rc == 0) {
+      check(probe_stalled_handshake(app.bound_port(), 3000,
+                                    "handshake_timeout"),
+            "scenario 4: a connection stalled in the TLS handshake was NOT "
+            "closed within 3 s despite a 300 ms handshake timeout "
+            "(idle timeout was 30 s, so nothing else could have closed it)");
+    }
+    app.stop();
+    app.join();
+  }
+
+  {
+    uvcpp_web_app app;
+    configure_for_test(app);
+    app.enable_self_signed("localhost", 2048);
+    app.set_idle_timeout_ms(30000);
+    app.set_tls_handshake_timeout_ms(0);     // 关掉这道闸门
+    add_hello_route(app);
+
+    const int rc = app.start_background();
+    check(rc == 0, "scenario 4-control: start_background failed with " +
+                       std::to_string(rc));
+    if (rc == 0) {
+      check(!probe_stalled_handshake(app.bound_port(), 2000,
+                                     "handshake_timeout_disabled"),
+            "scenario 4-control: with the handshake timeout DISABLED the "
+            "connection was still closed — this case no longer isolates the "
+            "handshake timeout, so scenario 4 proves nothing");
     }
     app.stop();
     app.join();
