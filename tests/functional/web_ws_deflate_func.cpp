@@ -955,7 +955,7 @@ static bool test_send_failure_is_reported() {
   // 必须先析构（逆序），`dead` 后析构。反过来的话 `~uvcpp_ws_connection` 会
   // 去碰一个已经释放的循环 —— 与第十三批修掉的形状同源。
   uvcpp_tcp_client    dead;
-  uvcpp_ws_connection conn(&dead);
+  uvcpp_ws_connection conn(&dead, /*is_server=*/false);
 
   // 首帧：入队后立刻在 pump 里失败。错误走**回调**（`send_frame` 的返回值
   // 是"有没有排上队"，不是"有没有发出去"），所以这里断言回调。
