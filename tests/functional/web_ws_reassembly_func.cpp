@@ -152,7 +152,7 @@ struct scenario {
       // `set_loop` 必须在循环线程、循环正跑着的时候调（`uv_async_init` 不是
       // 线程安全的），而这里正是接入回调，两个条件都满足。
       sessions_.set_loop(server.get_loop());
-      auto* wc = new uvcpp_ws_connection(c);
+      auto* wc = new uvcpp_ws_connection(c, ws_role::SERVER);
       sessions_.adopt(wc);
       if (max_msg > 0) wc->set_max_message_size(max_msg);
       wc->on_text([this](const std::string& m) { texts.push_back(m); });
@@ -437,6 +437,66 @@ static bool test_close_reason_truncated() {
 // 驱动
 // =========================================================================
 
+// =========================================================================
+// 掩码的方向性与文本帧的 UTF-8 —— 两条 RFC 6455 的 MUST
+//
+// 这两条以前都没实现：服务端把**未掩码**的客户端帧当正常消息收下（§5.1 要求
+// 以 1002 关连接）；文本帧里的**非法 UTF-8** 被原样交给 on_text（§8.1 要求
+// 关连接）。两条都不会崩、不会报错，只是"照单全收"，所以能一直躺着。
+//
+// 补上之后必须有用例盯着：否则哪天动了 on_ws_frame 里的判断顺序，它们会静悄悄
+// 回到老样子，而 CI 一片绿。
+// =========================================================================
+
+/** @brief 服务端收到未掩码的客户端帧：§5.1 要求以 1002 关闭。 */
+static bool test_unmasked_frame_rejected() {
+  scenario s;
+  if (!s.start()) return false;
+  // mask=false：客户端**必须**掩码（§5.1），这里故意违反
+  if (!s.send(raw_frame(0x1, true, "unmasked", false))) return false;
+  s.pump_until([&] { return !s.errors.empty(); }, 2000);
+  return s.errors.size() == 1 &&
+         s.errors[0] == static_cast<int>(ws_close_code::PROTOCOL_ERROR) &&
+         s.texts.empty();               // 不该被当成正常消息交付
+}
+
+/** @brief 文本帧的负载不是合法 UTF-8：§8.1 要求关连接（1007）。 */
+static bool test_invalid_utf8_rejected() {
+  scenario s;
+  if (!s.start()) return false;
+  std::string bad;                      // 0xFF 0xFE 0xFD 不是合法 UTF-8
+  bad.push_back(static_cast<char>(0xFF));
+  bad.push_back(static_cast<char>(0xFE));
+  bad.push_back(static_cast<char>(0xFD));
+  if (!s.send(raw_frame(0x1, true, bad))) return false;
+  s.pump_until([&] { return !s.errors.empty(); }, 2000);
+  return s.errors.size() == 1 &&
+         s.errors[0] == static_cast<int>(ws_close_code::INVALID_PAYLOAD) &&
+         s.texts.empty();
+}
+
+/**
+ * @brief 反向对照：**合法**的多字节 UTF-8 必须照常交付。
+ *
+ * 补 UTF-8 校验最容易的错法是规则写严了 —— 于是中文、emoji 全被拒掉，而一般
+ * 用例只发 ASCII，根本发现不了。这条同时覆盖三字节与四字节两种长度。
+ */
+static bool test_valid_utf8_still_delivered() {
+  scenario s;
+  if (!s.start()) return false;
+  std::string ok;
+  ok.push_back(static_cast<char>(0xE4));   // 「中」= U+4E2D，三字节
+  ok.push_back(static_cast<char>(0xB8));
+  ok.push_back(static_cast<char>(0xAD));
+  ok.push_back(static_cast<char>(0xF0));   // 😀 = U+1F600，四字节
+  ok.push_back(static_cast<char>(0x9F));
+  ok.push_back(static_cast<char>(0x98));
+  ok.push_back(static_cast<char>(0x80));
+  if (!s.send(raw_frame(0x1, true, ok))) return false;
+  s.pump_until([&] { return !s.texts.empty() || !s.errors.empty(); }, 2000);
+  return s.errors.empty() && s.texts.size() == 1 && s.texts[0] == ok;
+}
+
 int main() {
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
@@ -454,6 +514,10 @@ int main() {
     {"frame_cap",                 test_frame_cap},
     {"send_queue_order",          test_send_queue_order},
     {"close_reason_truncated",    test_close_reason_truncated},
+    // 两条 RFC 6455 MUST + 一条反向对照（见上面的说明）
+    {"unmasked_frame_rejected",   test_unmasked_frame_rejected},
+    {"invalid_utf8_rejected",     test_invalid_utf8_rejected},
+    {"valid_utf8_still_delivered",test_valid_utf8_still_delivered},
   };
   for (const auto& t : tests) {
     std::cout << "[web_ws_reasm] " << t.name << "\n";
