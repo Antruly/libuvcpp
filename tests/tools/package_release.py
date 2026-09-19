@@ -19,6 +19,7 @@
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -26,11 +27,38 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
-VERSION = "1.1.0"
+def _header_version():
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:472-480`
+    在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
+    zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
+    不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
+    """
+    p = os.path.join(ROOT, "src", "uvcpp", "uvcpp_version.h")
+    with open(p, encoding="utf-8") as f:
+        s = f.read()
+
+    def num(macro):
+        m = re.search(r"^#define\s+%s\s+(\d+)\s*$" % macro, s, re.M)
+        if not m:
+            raise SystemExit("读不到 %s（%s）—— 版本号来源变了，先修这里" % (macro, p))
+        return m.group(1)
+
+    return "%s.%s.%s" % (num("UVCPP_VERSION_MAJOR"),
+                         num("UVCPP_VERSION_MINOR"),
+                         num("UVCPP_VERSION_PATCH"))
+
+
+VERSION = _header_version()
 
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
 MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2"]
+
+# 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
+# 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
+# 而且使用者根本没装 nghttp2 的头，一 include 就是硬编译错误。
+# CMakeLists.txt:985-986 的 install 规则里同一条排除，两处必须一起改。
+PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib` 是导入库/静态库，`runtime` 是要跟着 dll 一起发的第三方运行时。
@@ -416,7 +444,7 @@ def main():
             dst = os.path.join(stage, "include", m)
             os.makedirs(dst, exist_ok=True)
             for f in os.listdir(d):
-                if f.endswith(".h"):
+                if f.endswith(".h") and f not in PRIVATE_HEADERS:
                     shutil.copy2(os.path.join(d, f), dst)
     shutil.copy2(os.path.join(repo, "src", "uvcpp.h"), os.path.join(stage, "include"))
     print("include: %d 个模块" % len([m for m in MODULES
@@ -477,7 +505,8 @@ def main():
             "Version: %s\n"
             "Cflags: -I${includedir} -DUVCPP_NET_ENABLE=1 -DUVCPP_WEB_ENABLE=1"
             " -DUVCPP_WEBAPP_ENABLE=1 -DUVCPP_OPENSSL_ENABLE=1"
-            " -DUVCPP_ZLIB_ENABLE=1 -DUVCPP_ENABLE_MEMORY_POOL=1\n"
+            " -DUVCPP_ZLIB_ENABLE=1 -DUVCPP_ENABLE_MEMORY_POOL=1"
+            " -DUVCPP_NGHTTP2_ENABLE=1\n"
             "Libs: %s\n" % (args.platform, args.version, spec["pc_libs"]))
 
     # ---- 文档 ----

@@ -17,8 +17,10 @@ on:
 permissions:
   contents: write
 
-env:
-  UVCPP_VERSION: '1.1.0'
+# 版本号不在这里写死：出包的 zip 名与 uvcpp.pc 的 Version 由
+# `package_release.py` 从 `src/uvcpp/uvcpp_version.h` 读（`_header_version()`）。
+# 这里原本有一条 `env: UVCPP_VERSION: '1.1.0'`，全文件零引用，且标签打到 v1.1.5
+# 时它仍然写着 1.1.0 —— 删掉，免得下次有人拿它当"版本来源"。
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -56,12 +58,19 @@ jobs:
           #    llhttp_shared ⇒ 依赖 libllhttp.dll）。zlib 不受影响，
           #    CMakeLists.txt:633 明确链 zlibstatic。
           # 本机所有树都走 CMakePresets（它有 ①），所以这两条从来没在本机复现过。
+          #
+          # ③ UVCPP_ENABLE_NGHTTP2=ON：这个开关**默认 OFF**（CMakeLists.txt:61），
+          #    而这几个打包装的 job 一直没传它 —— 于是包里根本没有 h2，README 却在
+          #    介绍它。nghttp2 是唯一被强制静态的依赖（CMakeLists.txt:268-280），
+          #    所以开它不会给产物添任何 dll。六个打包 job 都必须传，任何一个漏了
+          #    就会发一个"同版本号但少一半功能"的包。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -187,6 +196,7 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -279,6 +289,7 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -288,7 +299,8 @@ jobs:
         shell: bash
         run: |
           for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
-                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB; do
+                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB \
+                   UVCPP_ENABLE_NGHTTP2; do
             if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
               echo "::error title=msvc-module-off::${k} 没有生效，包会缺功能"
               grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
@@ -426,6 +438,7 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -456,7 +469,8 @@ jobs:
         shell: bash
         run: |
           for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
-                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB; do
+                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB \
+                   UVCPP_ENABLE_NGHTTP2; do
             if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
               echo "::error title=msvc-arm64-module-off::${k} 没有生效，包会缺功能"
               grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
@@ -526,6 +540,7 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -595,6 +610,7 @@ jobs:
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
