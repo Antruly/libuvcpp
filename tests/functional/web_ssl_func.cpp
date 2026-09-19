@@ -12,6 +12,8 @@
 #include <ssl/uvcpp_ssl_context.h>
 #include <ssl/uvcpp_ssl.h>
 #include <openssl/ssl.h>   // SSL_ERROR_* 常量：光看返回值分不出「还没完」和「出错」
+#include <openssl/pem.h>   // PEM_write_bio_X509：回写证书，用于拼多张证书的 PEM
+#include <cstdio>          // std::remove
 using namespace uvcpp;
 
 // =========================================================================
@@ -356,6 +358,142 @@ static bool test_client_default_rejects_untrusted_cert() {
   return true;
 }
 
+// =========================================================================
+// 回归：`load_certificate_file()` 必须把 PEM 里的**整条链**读进来
+//
+// 原来的实现用的是 `SSL_CTX_use_certificate_file()`，它只读第一张证书 ——
+// 于是中间证书永远发不到对端，只信任根 CA 的客户端（浏览器、curl 的默认状态）
+// 补不全链，握手直接失败：
+//     verify error:num=20: unable to get local issuer certificate
+// 现实中几乎每张证书都挂在中间 CA 下面，所以这个差别直接决定 HTTPS 能不能用。
+//
+// 判据选在 **SSL_CTX 里挂了几张额外证书**，而不是"能不能握手"：握手要真起
+// 一个 TCP 服务，而这里要验的是加载器读没读链上除叶子之外的部分，一个进程内
+// 就能问清楚。
+// =========================================================================
+static int extra_chain_count(uvcpp_ssl_context& ctx) {
+  STACK_OF(X509)* chain = nullptr;
+  SSL_CTX_get_extra_chain_certs(ctx.raw_ctx(), &chain);
+  return chain == nullptr ? 0 : sk_X509_num(chain);
+}
+
+static bool write_cert_pem(const char* path, X509* first, X509* second) {
+  BIO* out = BIO_new_file(path, "w");
+  if (out == nullptr) return false;
+  bool ok = PEM_write_bio_X509(out, first) == 1;
+  if (ok && second != nullptr) ok = PEM_write_bio_X509(out, second) == 1;
+  BIO_free(out);
+  return ok;
+}
+
+static bool test_certificate_chain_loaded() {
+  // 造一张自签证书当作"叶子"，再往同一个 PEM 里追加一份当作"中间证书"。
+  // 真实世界里第二张由中间 CA 签，但这里要验的是**加载器读不读叶子之后的
+  // 部分**，与两张证书之间实际的签发关系无关 —— 用同一张就够了。
+  uvcpp_ssl_context gen(tls_mode::SERVER, tls_version::TLS_1_2);
+  if (!gen.generate_self_signed("chain.test", 2048)) {
+    std::cout << "    自签证书生成失败：" << gen.get_last_error() << "\n";
+    return false;
+  }
+  X509* leaf = SSL_CTX_get0_certificate(gen.raw_ctx());
+  if (leaf == nullptr) { std::cout << "    取不到叶子证书\n"; return false; }
+
+  const char* kChainPath = "uvcpp_ssl_chain_test.pem";
+  const char* kLeafPath = "uvcpp_ssl_leaf_test.pem";
+  if (!write_cert_pem(kChainPath, leaf, leaf) ||
+      !write_cert_pem(kLeafPath, leaf, nullptr)) {
+    std::cout << "    写临时 PEM 失败\n";
+    return false;
+  }
+
+  int chain_extra = -1, leaf_extra = -1;
+  {
+    uvcpp_ssl_context c(tls_mode::SERVER, tls_version::TLS_1_2);
+    if (!c.load_certificate_file(kChainPath)) {
+      std::cout << "    两张证书的 PEM 加载失败：" << c.get_last_error() << "\n";
+      std::remove(kChainPath); std::remove(kLeafPath);
+      return false;
+    }
+    chain_extra = extra_chain_count(c);
+  }
+  {
+    uvcpp_ssl_context c(tls_mode::SERVER, tls_version::TLS_1_2);
+    if (!c.load_certificate_file(kLeafPath)) {
+      std::cout << "    单张证书的 PEM 加载失败：" << c.get_last_error() << "\n";
+      std::remove(kChainPath); std::remove(kLeafPath);
+      return false;
+    }
+    leaf_extra = extra_chain_count(c);
+  }
+  std::remove(kChainPath);
+  std::remove(kLeafPath);
+
+  if (chain_extra != 1) {
+    std::cout << "    两张证书的 PEM 只加载到 " << chain_extra
+              << " 张额外证书（应为 1）—— 链被截断了，中间证书不会发给对端\n";
+    return false;
+  }
+  if (leaf_extra != 0) {
+    std::cout << "    单张证书的 PEM 却加载到 " << leaf_extra
+              << " 张额外证书（应为 0）\n";
+    return false;
+  }
+  return true;
+}
+
+// =========================================================================
+// 回归：`set_min_version()` / `set_max_version()` 必须**双向**生效
+//
+// 原来的 set_min_version 只置 NO_TLSv1 然后逐个清标志 —— 那个写法只能把下限
+// 往下放，不能往上抬：设成 TLS_1_3 时 NO_TLSv1_2 从构造到现在就没被置过，
+// TLS 1.2 客户端照样能协商。而构造时给的默认下限恰好是 TLS_1_2，所以
+// "抬到 1.3"（最常见的那个用法）正是失效的那一个。
+//
+// set_max_version 有对称的问题：只置不清，先压低再放宽就做不到。
+//
+// 判据是 SSL_CTX 上的实际选项位，不起网络。
+// =========================================================================
+static bool test_version_bounds_settable() {
+  uvcpp_ssl_context ctx(tls_mode::SERVER, tls_version::TLS_1_2);
+
+  // 抬下限：TLS_1_3 → 必须真的禁掉 1.2
+  ctx.set_min_version(tls_version::TLS_1_3);
+  long o = SSL_CTX_get_options(ctx.raw_ctx());
+  if ((o & SSL_OP_NO_TLSv1_2) == 0) {
+    std::cout << "    set_min_version(TLS_1_3) 之后 TLS 1.2 仍然可协商\n";
+    return false;
+  }
+
+  // 放回来：TLS_1_2 → 1.2 必须重新可用，而 1.0/1.1 仍然被禁
+  ctx.set_min_version(tls_version::TLS_1_2);
+  o = SSL_CTX_get_options(ctx.raw_ctx());
+  if ((o & SSL_OP_NO_TLSv1_2) != 0) {
+    std::cout << "    set_min_version(TLS_1_2) 之后 TLS 1.2 仍然被禁\n";
+    return false;
+  }
+  if ((o & SSL_OP_NO_TLSv1) == 0 || (o & SSL_OP_NO_TLSv1_1) == 0) {
+    std::cout << "    TLS 1.2 下限之下 TLS 1.0/1.1 必须保持禁用\n";
+    return false;
+  }
+
+  // 压上限：TLS_1_2 → 1.3 必须被禁
+  ctx.set_max_version(tls_version::TLS_1_2);
+  o = SSL_CTX_get_options(ctx.raw_ctx());
+  if ((o & SSL_OP_NO_TLSv1_3) == 0) {
+    std::cout << "    set_max_version(TLS_1_2) 之后 TLS 1.3 仍然可协商\n";
+    return false;
+  }
+
+  // 放宽上限：TLS_1_3 → 1.3 必须重新可用
+  ctx.set_max_version(tls_version::TLS_1_3);
+  o = SSL_CTX_get_options(ctx.raw_ctx());
+  if ((o & SSL_OP_NO_TLSv1_3) != 0) {
+    std::cout << "    set_max_version(TLS_1_3) 之后 TLS 1.3 仍然被禁\n";
+    return false;
+  }
+  return true;
+}
+
 int main() {
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
@@ -375,6 +513,9 @@ int main() {
     {"take_ciphertext_drains", test_take_ciphertext_drains},
     {"client_default_rejects_untrusted_cert",
      test_client_default_rejects_untrusted_cert},
+    // 下面两组是本次修复带的回归：链被截断 / 版本上下限只能单向生效
+    {"certificate_chain_loaded", test_certificate_chain_loaded},
+    {"version_bounds_settable", test_version_bounds_settable},
   };
   for (const auto& t : tests) {
     std::cout << "[web_ssl] " << t.name << "\n";
