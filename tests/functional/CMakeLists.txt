@@ -34,11 +34,17 @@ if(NOT UVCPP_ENABLE_OPENSSL)
 endif()
 
 # Exclude HTTP/2 tests when nghttp2 is not enabled.
-# 命名约定：h2 用例一律 `h2_*.cpp`。**不能**靠 `web_ssl_*` 那条顺带摘掉 ——
-# h2 会话层本身不需要 TLS（只有接 socket 的那层才要），所以用例不会带 ssl 前缀，
-# 于是「OpenSSL 开、nghttp2 关」这个组合下它会去链一个不存在的模块。
+# 命名约定：**文件名里含 `h2_` 的用例就需要 nghttp2**（`h2_session_func.cpp`、
+# `web_ssl_h2_server_func.cpp`）。**不能**靠 `web_ssl_*` 那条顺带摘掉 —— h2 会话层
+# 本身不需要 TLS（只有接 socket 的那层才要），所以用例不会都带 ssl 前缀，于是
+# 「OpenSSL 开、nghttp2 关」这个组合下它会去链一个不存在的模块。
+#
+# `[^/]*` 这个前缀是**必须的**：`file(GLOB)` 给的是**全路径**，写 `^h2_` 永远匹配
+# 不上（这条曾经真的写在仓库里，于是 `test_h2_session_func` 在 nghttp2 关掉的树里
+# 照常注册、照常 PASS —— 它的 `#else` 分支就是个打印 SKIP 的 main()，正好是上面
+# 那段注释警告的"没测表现为通过"）。
 if(NOT UVCPP_ENABLE_NGHTTP2)
-  list(FILTER FUNC_SOURCES EXCLUDE REGEX "^h2_.*\.cpp$")
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*h2_[^/]*\.cpp$")
 endif()
 
 foreach(test_src ${FUNC_SOURCES})
