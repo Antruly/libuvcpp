@@ -22,6 +22,9 @@
 #include <uvcpp/uvcpp_define.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_alloc.h>
+#if UVCPP_ENABLE_MEMORY_POOL
+#include <expand/uvcpp_page_heap.h>   // get_stats：向系统要了多少字节
+#endif
 
 using namespace uvcpp;
 
@@ -200,6 +203,54 @@ static bool test_buf_doubling_growth() {
   return true;
 }
 
+#if UVCPP_ENABLE_MEMORY_POOL
+// =========================================================================
+// Test: 大块（> 256 KiB）分配之后必须整段归还
+//
+// 回归的是一个**只漏不崩**的缺陷，所以它比前面那些死循环/崩溃的活得更久：
+// `allocate_large_object()` 建好 span 之后没有给 `span->in_use` 记账，而
+// `free_mem()` / `return_large_object()` 判断"这是不是最后一个使用者"用的正是
+// `span->in_use.fetch_sub(1) == 1` —— 从 0 开始减，返回值永远不是 1，
+// `release_span_to_system()` 一次都不会被调用。于是**每一次大块分配都整段泄漏**，
+// 且永不归还。
+//
+// 为什么既有用例没抓到：上面 `test_many_large_blocks()` 的尺寸数组最大是
+// **262144**，而大块路径的门槛是 `size > k_large_size_threshold`(= 262144)
+// —— 差一个字节。再加一档就能撞上。
+//
+// 判据用 `get_stats()` 的 `total_allocated`（向系统要的总字节数，
+// `release_span_to_system()` 里会减回去），它比 RSS 干净：不受分配器与
+// 页面回收策略影响。
+// =========================================================================
+static bool test_large_object_returned() {
+  uvcpp_memory_pool_enterprise& pool = uvcpp_memory_pool_enterprise::instance();
+
+  size_t before_total = 0, before_in_use = 0, before_free = 0;
+  pool.get_stats(before_total, before_in_use, before_free);
+
+  const size_t kBig = 300 * 1024;   // > 256 KiB ⇒ 走大块路径
+  const int kRounds = 8;
+  for (int i = 0; i < kRounds; ++i) {
+    void* p = uvcpp_alloc_bytes(kBig);
+    if (p == nullptr) return false;
+    std::memset(p, 0xA5, kBig);
+    uvcpp_free_bytes(p);
+  }
+
+  size_t after_total = 0, after_in_use = 0, after_free = 0;
+  pool.get_stats(after_total, after_in_use, after_free);
+
+  const size_t growth = after_total > before_total ? after_total - before_total : 0;
+  // 留 1 MiB 余量给 span 管理与线程缓存；有缺陷时这里会是 kRounds * 300+ KiB。
+  if (growth > 1024 * 1024) {
+    std::cout << "    大块释放后没有归还：" << growth << " 字节仍挂在本进程上（"
+              << kRounds << " 轮 × " << kBig << " 字节）" << std::endl;
+    return false;
+  }
+  return true;
+}
+#endif
+
 int main() {
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
@@ -208,6 +259,9 @@ int main() {
     {"buf_growth", test_buf_growth},
     {"buf_doubling_growth", test_buf_doubling_growth},
     {"raw_alloc", test_raw_alloc},
+#if UVCPP_ENABLE_MEMORY_POOL
+    {"large_object_returned", test_large_object_returned},
+#endif
   };
   for (const auto& t : tests) {
     std::cout << "[expand_memory_pool] " << t.name << std::endl;
