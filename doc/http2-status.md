@@ -139,9 +139,18 @@
   （`src/net/uvcpp_tcp_client.cpp:126`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
-- **两处已死的成员**（只报告，不影响行为）：`HTTP_CLIENT_CLOSING = 0x10`
-  （`src/web/uvcpp_http_client.h:62`）全仓零引用；`keep_alive_` 只在
-  `uvcpp_http_client.cpp:602,687` 被写、从没被读。
+- **两处已死的成员**（只报告，本批没动）：
+  - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:62`）全仓零引用 ——
+    这一处**确实不影响行为**，它只是个没接线的状态位。
+  - `keep_alive_` 只在 `uvcpp_http_client.cpp:616,701` 被写、**从没被读**
+    （`h:324` 声明，初值 `true`）。这一处的后果**是真的**，与上一条不同：
+    `on_response_complete()` 见到 `Connection: close` 就把标志置假，可没有任何人
+    问过它 —— 于是调用方在**对端已经声明要关**的连接上接着 `send()`，写进一个
+    正在收摊的 socket，拿到的是一条"连接被重置"的失败（状态码 `HTTP_STATUS_NONE`）。
+    正确做法是同步拒掉（`UV_ENOTCONN`，与 h2 那条 `peer_goaway_received()` 的
+    提前拦截同一形状），让人去重连；`set_keep_alive(false)` 同理，今天**一个字节
+    都不影响发出去的请求**（既不拒发、也不加 `Connection: close` 头）。
+    两条都属于 h1，与本页的 h2 无关，留在这儿只为了让下次盘查的人不必再核一遍。
 
 ---
 
