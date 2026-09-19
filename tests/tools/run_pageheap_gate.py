@@ -34,6 +34,11 @@
 自身失败**：那是 DLL 没刷新，不是缺陷。`copy_test_dlls` 是个 `ALL` 目标，只有默认
 构建会跑它；凡是走 `--target` 的构建路径都不会，所以开跑前自己按 mtime 刷一遍 DLL。
 
+  3. **用例清单取自 `CTestTestfile.cmake`，不是"磁盘上有哪些 exe"。** 删掉一个
+     测试源文件之后 CMake 会把它摘出清单，但**不会删掉已生成的 exe** —— 按磁盘
+     枚举就会去跑一个没有源码、还链着上一版库的二进制，用例数虚高，而那个"绿"
+     什么都证明不了。清单外的 exe 现在会被**列出来并跳过**（见 `ctest_tests`）。
+
 本门禁自己的效力由 `run_tcp_client_dtor_mutation.py` 证明（它的 M1/M2/M3 三个
 变异全靠页堆才抓得住），`--self-test` 就是转调它。
 
@@ -115,18 +120,52 @@ def run(cmd, timeout=120, cwd=None):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def find_test_exes(tree):
-    """全部测试可执行文件，(名字, 路径, ctest 用的工作目录)。
+def ctest_tests(tree, config="Release"):
+    """ctest 真正会跑的用例，(名字, exe 路径, ctest 用的工作目录)。
 
-    工作目录按 `add_test` 的默认值取 —— `CMAKE_CURRENT_BINARY_DIR`，也就是
-    装 exe 的那层 Release 的**上一级**（`tests/functional` 等）。
+    判据是 `CTestTestfile.cmake` 里那份 `config` 分支的 `add_test`，**不是**
+    "磁盘上有哪些 `test_*.exe`"。这两者会分叉，而且分叉是静默的：删掉一个测试
+    源文件之后，CMake 会把它从测试清单里摘掉，但**不会删掉已经生成的那个 exe**。
+    按磁盘枚举就会去跑一个没有源码、还链着上一版库的二进制 —— 用例数虚高，而
+    那一个"绿"什么都证明不了（真崩了还会被读成"页堆抓到了"）。ctest 不跑它，
+    门禁也就不该跑它。
+
+    工作目录取装 `CTestTestfile.cmake` 的那一层，也就是 `add_test` 的默认值
+    `CMAKE_CURRENT_BINARY_DIR` —— 多配置生成器下它是 `Release` 的上一级。
     """
+    want = config.upper()
+    out = []
+    for base, _dirs, files in os.walk(os.path.join(tree, "tests")):
+        if "CTestTestfile.cmake" not in files:
+            continue
+        cur = None
+        with open(os.path.join(base, "CTestTestfile.cmake"),
+                  "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                m = re.match(r'^(?:else)?if\(CTEST_CONFIGURATION_TYPE MATCHES '
+                             r'"\^\((.*)\)\$"\)', s)
+                if m:
+                    # `[Rr][Ee][Ll][Ee][Aa][Ss][Ee]` → "RELEASE"：每对括号取首字母
+                    cur = "".join(p[0].upper()
+                                  for p in re.findall(r"\[(.)(.)\]", m.group(1)))
+                    continue
+                if cur != want:
+                    continue
+                a = re.match(r'^add_test\(\[=\[(.*?)\]=\]\s+"(.*?)"\)', s)
+                if a:
+                    out.append((a.group(1), a.group(2).replace("/", os.sep), base))
+    out.sort()
+    return out
+
+
+def on_disk_exes(tree):
+    """磁盘上的 `test_*.exe`，只用来报"清单里没有的那些"。"""
     out = []
     for base, _dirs, files in os.walk(os.path.join(tree, "tests")):
         for f in files:
             if f.startswith("test_") and f.lower().endswith(".exe"):
-                path = os.path.join(base, f)
-                out.append((f[:-4], path, os.path.dirname(base)))
+                out.append((f[:-4], os.path.join(base, f)))
     out.sort()
     return out
 
@@ -399,10 +438,18 @@ def main():
         if rc != 0:
             return 3
 
-    all_exes = find_test_exes(tree)
+    all_exes = ctest_tests(tree)
     if not all_exes:
-        print("在 %s/tests 下没找到 test_*.exe —— 先建一遍" % tree)
+        print("在 %s/tests 下没找到 ctest 登记的 Release 用例（看 "
+              "CTestTestfile.cmake）—— 先建一遍" % tree)
         return 3
+    known = {e[1] for e in all_exes}
+    stray = [e for e in on_disk_exes(tree) if e[1] not in known]
+    if stray:
+        print("**磁盘上有 %d 个 ctest 没登记的 exe**（源码删掉后 exe 会留在原地，"
+              "跑它证明不了任何事）—— 本次不跑：" % len(stray))
+        for name, _p in stray:
+            print("    %s" % name)
     if args.exe:
         want = set()
         for tok in args.exe.split(","):
