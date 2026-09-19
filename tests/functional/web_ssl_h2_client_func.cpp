@@ -23,6 +23,11 @@
  * 与"应答序"确定性地掰开。单槽状态在这里的失败方式是确定的 —— `/hello` 的提交
  * 会盖掉 `/defer` 的槽位，于是 defer 的回调一次都不跑。所以断言里"每个键恰好
  * 回调一次"比"body 对得上"更关键：body 对得上可以靠巧合，回调次数对不上不能。
+ *
+ * 场景 7 与场景 9 用的是**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的
+ * RST，也造不出"收下请求什么都不回就把 TCP 拆了"）。这两条钉的都是**错误路径上
+ * 交付了什么**：前者是流级 RST，后者是断开时还在飞的流 —— 两条路的共同病是
+ * "交付一个本层默认构造的 `200 OK`"，那是替对端说了一句它从没说过的话。
  */
 #include <algorithm>
 #include <atomic>
@@ -45,6 +50,7 @@
 #include <net/uvcpp_net_read.h>
 #include <net/uvcpp_tcp_client.h>
 #include <net/uvcpp_tcp_server.h>
+#include <handle/uvcpp_tcp.h>
 #include <ssl/uvcpp_ssl_context.h>
 #include <web/uvcpp_http_client.h>
 #include <web/uvcpp_http_common.h>
@@ -740,6 +746,16 @@ uint32_t rst_code_for(const std::string& path) {
   return 0xFFFFu;
 }
 
+/// 对端这条连接自己那侧的出队还剩多少字节没写进内核
+/// （`uv_stream_t::write_queue_size`）。句柄已经没了就返回 0 —— 那说明连接本来
+/// 就在关，等不到更空的状态。
+size_t peer_pending_out(uvcpp_h2_connection* v) {
+  if (v == nullptr || v->client() == nullptr) return 0;
+  uvcpp_tcp* t = v->client()->get_tcp();
+  if (t == nullptr || t->get_handle() == nullptr) return 0;
+  return OBJ_UVCPP_STREAM_HANDLE(*t)->write_queue_size;
+}
+
 void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
                   raw_peer_state& st, uvcpp_ssl_context* sctx) {
   uvcpp_tcp_server srv;
@@ -852,6 +868,8 @@ void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
   port_promise.set_value(lrc != 0 ? -1 : bound_port);
   if (lrc != 0) return;
 
+  // `/vanish` 那一批要拆的连接。**隔一轮**才动手，见循环体里的说明。
+  std::vector<uvcpp_h2_connection*> vanish_ready;
   uvcpp_loop* loop = srv.get_loop();
   while (!stop.load()) {
     loop->run(UV_RUN_NOWAIT);
@@ -868,15 +886,34 @@ void run_raw_peer(std::promise<int>& port_promise, std::atomic<bool>& stop,
         p.first->flush();
       }
     }
-    // `/vanish` 欠的那次拆连接。上一轮 `run()` 已经把请求收进来、也回过了
-    // （什么都没回就是什么都没回），这时候拆才确定"流是在飞的"。
-    if (!st.vanish_later.empty()) {
-      uvcpp_h2_connection* v = st.vanish_later.back();
-      st.vanish_later.pop_back();
-      if (std::find(conns.begin(), conns.end(), v) != conns.end()) {
-        v->client()->close();
+    // `/vanish` 欠的那次拆连接。
+    //
+    // **不能收下请求的这一轮就拆**，两个理由各自独立：
+    //   1. 响应头这会儿可能还躺在出队里没进内核（`send_headers` 只做 submit，
+    //      真正的 flush 在这一轮 `run()` 的收尾）—— 出队没空就 `uv_close`，
+    //      排队的字节会被一起扔掉，客户端看到的是"头没到过"，用例于是偶发地
+    //      测成它自己的反面（实测 1/10）。所以等 `write_queue_size == 0`。
+    //      这是**判据不是保险**：出队空了就说明头已经在网上。
+    //   2. 隔一轮，让对端的读把客户端发来的字节收干净：接收缓冲里还有没读的数据
+    //      时 `uv_close` 发的是 RST，而 RST 会让客户端丢掉**已经收到但还没处理**
+    //      的字节 —— 那恰恰是这条用例要交付的东西。
+    for (size_t i = 0; i < vanish_ready.size();) {
+      uvcpp_h2_connection* v = vanish_ready[i];
+      if (std::find(conns.begin(), conns.end(), v) == conns.end()) {
+        vanish_ready.erase(vanish_ready.begin() + static_cast<long>(i));
+        continue;
       }
+      if (peer_pending_out(v) != 0) {
+        ++i;
+        continue;
+      }
+      vanish_ready.erase(vanish_ready.begin() + static_cast<long>(i));
+      v->client()->close();
     }
+    vanish_ready.insert(vanish_ready.end(), st.vanish_later.begin(),
+                        st.vanish_later.end());
+    st.vanish_later.clear();
+
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   uvcpp_test::pump_for(loop, 200);
