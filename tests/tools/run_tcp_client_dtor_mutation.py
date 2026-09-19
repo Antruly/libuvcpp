@@ -15,7 +15,7 @@
       （收数据时删 / 对端断开时删）。判据只能靠 **PageHeap**（把释放过的块
       直接 unmap）—— 裸跑时那块内存还在、读到的还是旧值，所以不崩。
 
-三个动作各钉一处，所以打五个变异：
+三个动作各钉一处，所以打七个变异：
 
   变异                              预期
   --------------------------------  --------------------------------------------
@@ -27,10 +27,38 @@
                                           证明这条判据自己不依赖 PageHeap）
   M5  开头的 `is_running()` 守卫关掉        崩（PageHeap）—— 重入 `uv_run`、
                                           当场 `delete loop_` / `delete tcp_`
+  M6  退回"包装对象一个都不拆"的老写法       `reclaim_paths` 两条腿 FAIL
+                                          （**不开 PageHeap**）—— 计数停在
+                                          原地，腿 1 的 `loop_close()` 还 EBUSY
+  M7  句柄还活着也当场 `delete`            崩（PageHeap）—— 外层
+                                          `uvcpp_stream::callback_read` 那一帧
+                                          还在包装对象里跑
 
 M1/M2 为什么必须分开打：两处**长得很像但钉的不是同一件事**。M1 那条腿里，
 回调返回之后只剩 `uvcpp_free_bytes(base)`（局部量）；M2 那条腿里，回调返回
 之后还有 `fire_close_callbacks()`（全是成员）。
+
+M6/M7 钉的是第 10 条之后新修的**包装对象回收**（连接频繁建立/断开时的线性
+累积）：M6 就是那个缺陷本身（老代码里"循环还在跑 ⇒ 一个都不拆"），M7 是修它
+时最容易踩的新坑（把判据放宽成"能删就删"）。M6 特意**不开页堆** —— 它抓住的
+是计数与 `uv_loop_close()`，两条判据都不依赖 PageHeap。
+
+**M7 没抓住，判为等价变异**（不是覆盖缺口 —— 写在这里，免得下次把它当成功效
+证据）：把"交给关闭完成回调去删"换成"当场 `delete`"之后，6 条腿在整页堆下全绿。
+读过一遍就明白为什么不崩：
+
+  - 包装对象自己的那几个 trampoline（`uvcpp_stream::callback_read`、
+    `uvcpp_handle::callback_alloc`、`uvcpp_connect::callback_connect`）**都是先
+    把闭包拷到局部再调**（源码里写明了"回调里 `delete self` 是合法用法"），
+    回调返回之后一个字节都不再碰 wrapper；
+  - `delete tcp_` 落到 `uvcpp_handle::free_handle()`，它按句柄**当时的状态**分派：
+    正在关 → 塞个 detached 哨兵就返回（底层内存留给已经排队的 `callback_close`）、
+    活跃或"init 过但没 start" → 自己补一次 `uv_close`、从没 init 过 → 才直接还内存。
+    三条路都不会把"还挂在 `loop->handle_queue` 上"的内存还掉。
+
+所以"当场删"与"交给关闭回调删"在**这几条腿**上行为一致，这一条不区分两者。
+留着它的理由不是这几条腿，而是**构造不出来的那些帧**（见 PR 正文末节）——
+这一支要不要简化成无条件 `delete`，请作者定。
 
 gflags 的两个坑（都踩过）：
   - 在 Git Bash 里直接写 `gflags -p /enable …` 会被 MSYS 的路径转换把
@@ -38,6 +66,12 @@ gflags 的两个坑（都踩过）：
     所以这里用 `subprocess` 的列表形式调，不经 shell。
   - 开/关之后必须**回查注册表确认**（`GlobalFlag & 0x02000000`），
     跑完必须关掉并再次回查 —— 页堆残留会让后面所有测试都慢一个量级。
+
+本机**没有 `gflags.exe`**（`Windows Kits\\10\\Debuggers\\x64` 下只有
+dbghelp/dbgcore/srcsrv 那三个可再发行件），所以 `set_pageheap()` 会走
+`set_pageheap_direct()`：直接写同一个 IFEO 键（`GlobalFlag` +
+`PageHeapFlags=0x1`，少了后者只是标准页堆、抓不住"释放后读"），写完同样回查。
+两条路的判据完全一样，都是注册表里那个位。
 
 用法：python -u tests/tools/run_tcp_client_dtor_mutation.py [--tree build-webapp]
 """
@@ -105,6 +139,31 @@ MUTATIONS = [
      "  if (loop_ != nullptr && loop_->is_running()) {\n",
      "  if (false && loop_ != nullptr && loop_->is_running()) { /* MUTATION */\n",
      True),
+    ("M6 退回不拆包装对象",
+     CLIENT_CPP,
+     "  if (loop_ != nullptr && loop_->is_running()) {\n"
+     "    if (tcp_ != nullptr) {\n",
+     "  if (loop_ != nullptr && loop_->is_running()) {\n"
+     "    if (false && tcp_ != nullptr) { /* MUTATION: 一个都不拆，退回老写法 */\n",
+     False),
+    ("M7 句柄还活着就当场删",
+     CLIENT_CPP,
+     "          void* ra = read_arg_;\n"
+     "          read_arg_ = nullptr;\n"
+     "          tcp_->close([ra](uvcpp_handle* wrapper) {\n"
+     "            delete static_cast<std::function<void(uvcpp_buf*)>*>(ra);\n"
+     "            delete wrapper;\n"
+     "            g_reclaim_deferred.fetch_add(1, std::memory_order_relaxed);\n"
+     "          });\n",
+     "          void* ra = read_arg_;\n"
+     "          read_arg_ = nullptr;\n"
+     "          /* MUTATION: 不看句柄死活，当场删 */\n"
+     "          delete tcp_;\n"
+     "          if (ra != nullptr) {\n"
+     "            delete static_cast<std::function<void(uvcpp_buf*)>*>(ra);\n"
+     "          }\n"
+     "          g_reclaim_deferred.fetch_add(1, std::memory_order_relaxed);\n",
+     True),
 ]
 
 RUN_TIMEOUT_S = 300
@@ -160,6 +219,19 @@ def sync_dll(tree):
     return n
 
 
+def find_gflags():
+    for env in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(env)
+        if not root:
+            continue
+        for kits in ("10", "8.1"):
+            p = os.path.join(root, "Windows Kits", kits, "Debuggers", "x64",
+                             "gflags.exe")
+            if os.path.exists(p):
+                return p
+    return None
+
+
 def pageheap_on(exe_path):
     if winreg is None:
         return None
@@ -183,8 +255,66 @@ def gflags(args):
     return run([exe] + args, timeout=60)
 
 
+def set_pageheap_direct(exe_path, on):
+    """**不依赖 gflags**：直接写 IFEO 键，写完同样回查注册表。
+
+    给没装「Debugging Tools for Windows」的机器兜底 —— 本机
+    `Windows Kits\\10\\Debuggers\\x64` 下只有 `dbghelp.dll` / `dbgcore.dll` /
+    `srcsrv.dll`，没有 `gflags.exe`（只有调试器**可再发行**那部分）。
+    gflags 做的本来也就是写这两个值，所以这里等价。
+
+    两个值缺一不可：
+      - `GlobalFlag` = `0x02000000`（`FLG_HEAP_PAGE_ALLOCS`）—— 打开页堆；
+      - `PageHeapFlags` = `0x1`（full）—— **整页堆**：释放即 unmap。
+        少了它只是标准页堆，释放过的块填 `0xFEEEFEEE` 但**页还在**，
+        于是"释放后读"读得到、不崩 —— 这个门禁要抓的恰恰就是读。
+
+    机制单独验过（`malloc(64) → free → 读` 的探针）：裸跑 rc=0，这样设上之后
+    直接 `SIGSEGV`（rc=139），删掉键又回到 rc=0。
+    """
+    if winreg is None:
+        return False, "winreg 不可用（非 Windows）"
+    name = os.path.basename(exe_path)
+    key = IFEO + "\\" + name
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key, 0,
+                                winreg.KEY_ALL_ACCESS) as k:
+            if on:
+                winreg.SetValueEx(k, "GlobalFlag", 0, winreg.REG_SZ,
+                                  "0x%08x" % FLG_HEAP_PAGE_ALLOCS)
+                winreg.SetValueEx(k, "PageHeapFlags", 0, winreg.REG_SZ, "0x1")
+            else:
+                for v in ("GlobalFlag", "PageHeapFlags"):
+                    try:
+                        winreg.DeleteValue(k, v)
+                    except FileNotFoundError:
+                        pass
+    except OSError as e:  # 需要管理员权限
+        return False, "写注册表失败：%s" % e
+    if not on:
+        # 值都删完了就把空键也收掉，别在 IFEO 里留垃圾
+        try:
+            winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, key,
+                               winreg.KEY_WOW64_64KEY, 0)
+        except OSError:
+            pass
+    state = pageheap_on(name)
+    return (state == on), "直接写注册表，page heap=%s" % state
+
+
 def set_pageheap(exe_path, on):
-    """开/关之后**回查注册表**确认 —— gflags 静默失效过一次（见文件头）。"""
+    """开/关之后**回查注册表**确认 —— gflags 静默失效过一次（见文件头）。
+
+    本机没有 `gflags.exe`，所以走 `set_pageheap_direct()`。两条路都会回查，
+    任一条只要注册表没跟上就算失败。
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, IFEO) as k:
+            pass
+    except OSError:
+        return False, "IFEO 键打不开"
+    if find_gflags() is None:
+        return set_pageheap_direct(exe_path, on)
     args = ["-p", "/enable" if on else "/disable", exe_path]
     if on:
         args.append("/full")
@@ -240,14 +370,17 @@ def main():
             n = sync_dll(tree)
 
             erc, eout = run([exe_path], cwd=exe_dir)
+            # 别用 `(\S+ FAIL.*)`：用例名里带空格的（`reclaim_paths leg1 FAIL …`、
+            # `delete_in_read_cb leg1 FAIL …`）匹配不上，报出来是空的 —— 判据本来
+            # 就只看退出码，这一列只是明细，静默为空会让人以为"没红"。
             fails = [s.strip() for s in
-                     re.findall(r"\[functional tcp_client\] (\S+ FAIL.*)", eout)]
+                     re.findall(r"\[functional tcp_client\] (.*FAIL.*)", eout)]
             timed = [s.strip() for s in
                      re.findall(r"(destructor_no_sleep best=.*)", eout)]
             if heap:
                 verdict = "**崩了**（抓）" if erc != 0 else "没崩 —— 没抓住！"
             else:
-                verdict = ("**计时腿红了**（抓）" if erc != 0
+                verdict = ("**有腿红了**（抓）" if erc != 0
                            else "全绿 —— 没抓住！")
             summary.append((label, "rc=%s %s" % (erc, verdict)))
             print(f"\n[{label}] dll 同步 {n} 处；{'PageHeap 开' if heap else '裸跑'}"

@@ -13,6 +13,7 @@
 #include <uvcpp/uvcpp_define.h>
 #include <handle/uvcpp_timer.h>   // 握手超时（见 tls_arm_handshake_timer）
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -59,6 +60,22 @@ static void trampoline_close(void* arg) {
 }
 
 // =========================================================================
+// 回收支路计数（诊断用，见 uvcpp_tcp_client::reclaim_stat）
+// =========================================================================
+
+static std::atomic<uint64_t> g_reclaim_released{0};
+static std::atomic<uint64_t> g_reclaim_deferred{0};
+static std::atomic<uint64_t> g_reclaim_skipped{0};
+
+uvcpp_tcp_client::reclaim_stat uvcpp_tcp_client::reclaim_stats() {
+  reclaim_stat s;
+  s.released = g_reclaim_released.load(std::memory_order_relaxed);
+  s.deferred = g_reclaim_deferred.load(std::memory_order_relaxed);
+  s.skipped  = g_reclaim_skipped.load(std::memory_order_relaxed);
+  return s;
+}
+
+// =========================================================================
 // Construction / Destruction
 // =========================================================================
 
@@ -94,9 +111,9 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   if (alive_token_) *alive_token_ = 1;
 
   // -------------------------------------------------------------------
-  // **本对象是在它自己的某个回调里被析构的** —— 这一路上面那套收尾动作一件
-  // 都不能做，整块交出去。判据是循环还在跑（`run()` 没返回），也就是栈上还
-  // 压着某个回调。
+  // **本对象可能是在它自己的某个回调里被析构的**（服务端最常见：读回调里
+  // "对端断了" → 关闭回调 → 关闭管理器 `delete client`）。这一路上面那套
+  // 收尾动作一件都不能做，`loop_` 与那几个 `*_arg_` 堆块只能留给事件循环。
   //
   // 三层悬垂，全部**实测**过（`tcp_client_func.cpp` 的 `delete_in_read_cb`，
   // 读回调里 `delete victim`；Release 裸跑**一次都不崩** —— 那块内存还好端端
@@ -114,41 +131,87 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   //   3. **`loop_`**：外层那一帧 `uv_run` 返回之后还要用它（`uvcpp_loop::run`
   //      的嵌套计数也要减）。
   //
-  // 所以这一路**一个都不拆**：loop、tcp、TLS、那些 `*_arg_` 块全部留给循环。
-  // 这是**有意的泄漏**，与 `~uvcpp_ws_client` 同一处逐条列过的那条策略
-  // （"泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free"），也与
-  // `uvcpp_ws_sessions::abandon()` 同一个形状。
+  // **先停读**：句柄还活着、不停读的话循环下一轮还会回头调 `net_read_cb_`
+  // —— 那已经是释放过的内存。只调底层那句（`tcp_->read_stop()`），**不能**调
+  // 本类的 `read_stop()`：后者会把 `net_read_cb_` / `read_arg_` 就地清掉，
+  // 那正是第 1 层。
   //
-  // **先停读**：句柄已经交出去了、还活着，不停读的话循环下一轮还会回头调
-  // `net_read_cb_` —— 那已经是释放过的内存。只调底层那句（`tcp_->read_stop()`），
-  // **不能**调本类的 `read_stop()`：后者会把 `net_read_cb_` / `read_arg_` 就地
-  // 清掉，那正是第 1 层。
+  // -------------------------------------------------------------------
+  // **但包装对象本身不必跟着一起漏** —— 什么时候能删，取决于句柄处在哪一步
+  // 而不是"循环是不是在跑"。判据是**句柄还在不在**：
+  //
+  //   - **句柄已摘**（`get_handle() == nullptr`）⇒ 此刻栈上唯一可能压着的本
+  //     客户端回调是 `callback_close` 手里那份**栈上拷贝**的关闭回调
+  //     （`uvcpp_handle::callback_close` 先把 `handle_close_cb` 拷到局部、
+  //     再把成员清空，然后才调用），而它返回之后**不再碰 wrapper**。读 / 写 /
+  //     连接那几条都不可能：它们的闭包要 `uv_read_start` 之类活着才开得起来，
+  //     而句柄摘掉正是 `callback_close` 干的、那之后循环里已经没有本句柄。
+  //     所以这一支可以**当场 `delete`**。
+  //
+  //   - **句柄还活着** ⇒ 栈上可能就是本客户端自己的读 / 写 / 连接回调，而那个
+  //     闭包（`net_read_cb_` / `stream_read_cb` / `write_arg_`）就存在 `tcp_`
+  //     里面，外层还压着 `uvcpp_stream::callback_read` 那一帧。这时不能删，
+  //     但**也不必漏**：把包装对象交给**它自己的关闭完成回调**去删。
+  //     `uv_close` 的完成回调在**本轮 `uv_run` 的收尾阶段**
+  //     （`uv__run_closing_handles`）跑 —— 那时当前这一帧早已解开；而
+  //     `callback_close` 保证调用之后不再碰 wrapper（见上）。
+  //     顺带：这一句仍然必须发，它不只是"顺手回收" —— 句柄留在队列上、既不
+  //     活跃也没在关，`uv__loop_alive()` 一个条件都不占，`uv_run` 连 while 体
+  //     都不进，`uv_loop_close()` 从此永远 EBUSY，`~uvcpp_loop` 只能把整块
+  //     `uv_loop_t` 泄漏掉（实测 `tests/tools/run_loop_leak_probe.py`：
+  //     `tcp_server` 析构里那些"清不掉"的 `tcp(active=0 closing=0)`、以及
+  //     webapp 一族 77 个泄漏循环，全走这一条）。
+  //
+  //   - **句柄正在关**（别人已经 `uv_close` 过）⇒ 关闭回调那个槽被占了
+  //     （`handle_close_cb` 只有一个），插不进去，这一支只能留下 —— 这是**唯一
+  //     剩下的、真正的泄漏**，而它在实测的两条 churn 路径上都没出现过
+  //     （`tests/tools` 的探针：net 层 2000 次、webapp 1000 次，`is_closing`
+  //     全为假）。
+  //
+  // `is_closing()` 那一问不能省：覆写正在执行的那个闭包本身就是第 1 层悬垂。
+  //
+  // **这一支原先是一个都不删的**，理由是"判据是循环还在跑"。那个判据区分不了
+  // "我在自己的回调里"和"循环只是恰好跑着"，而服务运行期间后者恒成立 ——
+  // 于是 `tcp_` 按连接数线性累积（实测 net 层 0.55–0.71 MB/min、webapp
+  // 0.74–1.17 MB/min，都不收敛）。
   // -------------------------------------------------------------------
   if (loop_ != nullptr && loop_->is_running()) {
-    if (tcp_ != nullptr && tcp_->get_handle() != nullptr) {
-      tcp_->read_stop();
-      // **句柄本身还是要关掉**，只有包装对象留下。
-      //
-      // 上面三条说的都是"不能拆包装对象"（`tcp_` / `loop_` / 那些 `*_arg_`），
-      // 关句柄不在此列：`uv_close` 不动包装对象的生命周期，外层那一帧
-      // `uvcpp_stream::callback_read` 手里的 `uvcpp_tcp*` 照样有效，而它写的是
-      // `handle_close_cb`（包装对象的成员），不是正在执行的那个读闭包。
-      //
-      // 反过来漏掉这一句就会把**整个循环**赔进去：句柄留在队列上、既不活跃
-      // 也没在关 —— `uv__loop_alive()` 算的是「活跃句柄 || 活跃请求 ||
-      // pending_reqs_tail || endgame_handles」，这一种**一个都不占**，于是
-      // `uv_run` 连 while 体都不进，`uv_loop_close()` 从此永远 EBUSY，
-      // `~uvcpp_loop` 只能按既有策略把整块 `uv_loop_t` 泄漏掉。实测
-      // （`tests/tools/run_loop_leak_probe.py`，2026-09-17）：`tcp_server`
-      // 的析构里那些"清不掉"的 `tcp(active=0 closing=0)` 就是这里漏出去的，
-      // webapp 一族 77 个泄漏循环全走这一条。
-      //
-      // `is_closing()` 那一问不能省：本函数也可能是从**关闭回调里**被调到的
-      // （`fire_close_callbacks` 的最后一个槽会 `delete` 客户端），那时句柄已经
-      // 在关，再 `uv_close` 一次是重复入队；而且此刻正在执行的那个闭包**就是**
-      // `handle_close_cb` 自己，覆写它就是第 1 层。句柄关完之后
-      // `get_handle()` 已经是 nullptr，所以这一步与上面那句合并成同一个守卫。
-      if (!tcp_->is_closing()) tcp_->close([](uvcpp_handle*) {});
+    if (tcp_ != nullptr) {
+      const bool handle_detached = (tcp_->get_handle() == nullptr);
+      if (handle_detached) {
+        // 见上：句柄摘掉之后，没有谁的帧还压着这个包装对象。
+        delete tcp_;
+        g_reclaim_released.fetch_add(1, std::memory_order_relaxed);
+        if (read_arg_ != nullptr) {
+          delete static_cast<std::function<void(uvcpp_buf*)>*>(read_arg_);
+          read_arg_ = nullptr;
+        }
+      } else {
+        tcp_->read_stop();
+        if (!tcp_->is_closing()) {
+          // 交给自己的关闭完成回调 —— 那时这一帧已经解开（见上）。
+          //
+          // `read_arg_` 那块也一并交出去：它**不由任何 libuv 请求持有**
+          // （`trampoline_read` 明确不删它 —— 读回调是长期注册，会反复进来；
+          // 写/连接那几块则由各自的完成回调 `delete`），而读注册上面刚
+          // `read_stop` 掉，所以"这一帧解开之后再删"是安全的。漏掉它就是
+          // 每次连接漏一个 `std::function` 块 —— 实测那是剩下的大头。
+          void* ra = read_arg_;
+          read_arg_ = nullptr;
+          tcp_->close([ra](uvcpp_handle* wrapper) {
+            delete static_cast<std::function<void(uvcpp_buf*)>*>(ra);
+            delete wrapper;
+            g_reclaim_deferred.fetch_add(1, std::memory_order_relaxed);
+          });
+        } else {
+          // 槽被占，只能留下（见上）。
+          g_reclaim_skipped.fetch_add(1, std::memory_order_relaxed);
+          std::fprintf(stderr,
+                       "[uvcpp_tcp_client] 析构时句柄正在关闭：包装对象的"
+                       "关闭回调槽已被占用，只能留在事件循环里\n");
+        }
+      }
+      tcp_ = nullptr;
     }
 #if UVCPP_OPENSSL_ENABLE
     // TLS 读路径上 `tls_ssl_` 正压在栈上（`tls_feed` / `tls_flush_out` 还在
@@ -188,7 +251,6 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     }
 #endif
     loop_          = nullptr;
-    tcp_           = nullptr;
     read_arg_      = nullptr;
     connect_arg_   = nullptr;
     write_arg_     = nullptr;

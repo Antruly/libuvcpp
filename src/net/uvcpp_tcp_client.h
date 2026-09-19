@@ -12,6 +12,7 @@
 #ifndef SRC_NET_UVCPP_TCP_CLIENT_H
 #define SRC_NET_UVCPP_TCP_CLIENT_H
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -542,6 +543,37 @@ class UVCPP_API uvcpp_tcp_client {
 
   /** @brief 当前挂着几个关闭观察者。 */
   size_t close_observer_count() const;
+
+  /**
+   * @brief 析构时**包装对象最终归宿**的三条支路各走了多少次（诊断用）。
+   *
+   * 析构发生在事件循环的回调里时，"包装对象"（`uvcpp_tcp` 那个 wrapper）
+   * 什么时候能释放取决于句柄处在哪一步，三条支路**对外行为完全一样** ——
+   * 从外面看只是连接断了，看不出走的是哪一条，也看不出有没有走。这个计数
+   * 把它变成可观测量，回归用例才有判据：
+   *
+   *   - `released`：句柄已摘（`get_handle() == nullptr`），当场释放；
+   *   - `deferred`：句柄还活着，交给它自己的关闭完成回调去释放；
+   *   - `skipped` ：句柄正在关闭、关闭回调槽被占，只能留下（唯一的真泄漏）。
+   *
+   * 计的是**释放真的做成了**，不是"打算这么做"：`released` 记在 `delete`
+   * 之后、`deferred` 记在那个延迟的 `delete` 里面。所以把释放动作删掉（或退
+   * 回不释放的老写法）会让计数**停在原地**，用例当场红 —— 不必等内存涨到能
+   * 测出来。
+   *
+   * 判据是 `released + deferred` 随断开次数一起涨（`deferred` 要等收尾拨完
+   * 才记上），且 `skipped` 恒为 0。
+   *
+   * 进程级累计，不随单个客户端归零。
+   */
+  struct reclaim_stat {
+    uint64_t released;  ///< 句柄已摘：当场释放
+    uint64_t deferred;  ///< 句柄还在：交给关闭完成回调，在那里释放
+    uint64_t skipped;   ///< 关闭回调槽被占：只能留下（应当恒为 0）
+  };
+
+  /** @brief 读一次回收支路计数。见 `reclaim_stat`。 */
+  static reclaim_stat reclaim_stats();
 
   // -----------------------------------------------------------------
   // 框架内部：自动读
