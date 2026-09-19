@@ -58,8 +58,18 @@ int uvcpp_h2_connection::start(const uvcpp_h2_session::callbacks& h2_cbs,
   // `read_start_events` 而不是 `read_start`：只有前者会在对端关闭 / 读出错时
   // 给出明确的 PEER_CLOSED / READ_ERROR。用后者的话"连接没了"是**没有回调**的，
   // 表现为连接对象永远留在表里。
+  // 读回调也要存活令牌 —— 与 `flush()` / `finish_close()` / `run_completed()`
+  // 同一套。`on_disconnect` 的契约是"持有者在这里销毁本对象"，而持有者**未必**
+  // 顺手把底层连接也关掉（`uvcpp_http_client` 就是：它只想让 h2 层消失，
+  // 没理由替框架关 `tcp_`）。那种情况下这条闭包还挂在 `tcp_` 上，而它捕的是
+  // 已经释放的 `this`；下一次读事件（写错之后 socket 往往还能再投递一次读错）
+  // 就是一次 use-after-free。
+  const std::shared_ptr<char> life = alive_token();
   const int rrv = client_->read_start_events(
-      [this](uvcpp_tcp_client& c, const net_read_result& r) { on_read(c, r); });
+      [this, life](uvcpp_tcp_client& c, const net_read_result& r) {
+        if (!token_alive(life)) return;
+        on_read(c, r);
+      });
   if (rrv != 0) return rrv;
 
   return flush();  // 把初始 SETTINGS 发出去

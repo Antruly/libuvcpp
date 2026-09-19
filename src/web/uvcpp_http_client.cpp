@@ -29,6 +29,12 @@
 #include <ssl/uvcpp_ssl_context.h>
 #endif
 
+// h2 的头只在这一层出现。公开头里只有前置声明 —— 见 uvcpp_http_client.h 那段。
+#if UVCPP_NGHTTP2_ENABLE
+#include <http2/uvcpp_h2_connection.h>
+#include <http2/uvcpp_h2_session.h>
+#endif
+
 namespace uvcpp {
 
 // =========================================================================
@@ -42,6 +48,12 @@ uvcpp_http_client::uvcpp_http_client() {
 }
 
 uvcpp_http_client::~uvcpp_http_client() {
+#if UVCPP_NGHTTP2_ENABLE
+  // 次序在拆 `tcp_` **之前**：h2 层往 `tcp_` 上注册过读回调（捕的是它自己的
+  // `this`），而 `tcp_` 反过来不拥有它。倒了就是"回调指向已经释放的对象"。
+  delete h2_;
+  h2_ = nullptr;
+#endif
   // Close TCP if still active
   if (tcp_ != nullptr && !has_status(HTTP_CLIENT_CLOSED)) {
     uvcpp_tcp* raw_tcp = tcp_->get_tcp();
@@ -151,12 +163,21 @@ int uvcpp_http_client::connect(const char* host, int port,
         cb(trc);
         return trc;
       }
-      // 本层只会说 HTTP/1.1（理由与 `do_ssl_handshake` 那条相同），所以要**显式**
-      // 钉死。靠"用户的 context 上大概没设 ALPN"是不行的：同一个 context 很可能
-      // 同时给 h2 客户端用（`set_ssl_context` 收的就是别人的 ctx），那时协商出 h2
-      // 而本层照发 HTTP/1.1 报文 —— 服务端按二进制帧解析，症状是"连上了、写成功了、
+      // 说 HTTP/1.1，还是允许协商 h2，由 `set_http2_enabled()` 决定；**默认钉死
+      // http/1.1**（理由与 `do_ssl_handshake` 那条相同）。靠"用户的 context 上
+      // 大概没设 ALPN"是不行的：同一个 context 很可能同时给别的用途
+      // （`set_ssl_context` 收的就是别人的 ctx），那时协商出 h2 而本层照发
+      // HTTP/1.1 报文 —— 服务端按二进制帧解析，症状是"连上了、写成功了、
       // 永远等不到响应"，一处报错都没有。
-      if (!tcp_->set_tls_alpn_protos({"http/1.1"})) {
+      //
+      // 开了 h2 也**仍然把 `http/1.1` 留在名单里**：这是协商不是强制，服务端不认
+      // h2 就照常走 h1，那不是错误。
+      std::vector<std::string> alpn;
+#if UVCPP_NGHTTP2_ENABLE
+      if (http2_enabled_) alpn.push_back("h2");
+#endif
+      alpn.push_back("http/1.1");
+      if (!tcp_->set_tls_alpn_protos(alpn)) {
         set_status(HTTP_CLIENT_ERROR);
         last_error_code_ = UV_EINVAL;
         cb(UV_EINVAL);
@@ -168,6 +189,26 @@ int uvcpp_http_client::connect(const char* host, int port,
       if (status != 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = status; cb(status); return; }
       set_status(HTTP_CLIENT_CONNECTED);
       clear_status(HTTP_CLIENT_ERROR);
+#if UVCPP_NGHTTP2_ENABLE
+      // ALPN 是握手内谈完的，走到这里已是终局 —— 不需要嗅字节，也不需要等。
+      negotiated_alpn_ = tcp_->tls_alpn_selected();
+      if (negotiated_alpn_ == "h2") {
+        // h2 层必须在**socket 可用之后**才建：它的 `start()` 会调
+        // `read_start_events()`，而那个在没连上的 client 上返回 UV_ENOTCONN。
+        const int hrc = start_h2();
+        if (hrc != 0) {
+          // **连 CONNECTED 一起摘掉。** 协商出来的就是 h2，只是我们起不来 ——
+          // 留着 CONNECTED，后面的 `send()` 会走 h1 那条路，把 HTTP/1.1 明文写进
+          // 一条对端按二进制帧解析的连接。那正是本文件反复交代过的"写成功了、
+          // 响应等不到，一处报错都没有"。
+          clear_status(HTTP_CLIENT_CONNECTED);
+          set_status(HTTP_CLIENT_ERROR);
+          last_error_code_ = hrc;
+          cb(hrc);
+          return;
+        }
+      }
+#endif
       cb(0);
     });
     if (init_rc != 0) {
@@ -260,6 +301,13 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   }
 #endif
 
+#if UVCPP_NGHTTP2_ENABLE
+  // 协商成 h2 的连接走另一条路：`parser_` / `pending_resp_` / `user_cb_` 这套
+  // 是 llhttp 的附属品，在 h2 上全是空的。响应按流 id 归位（`h2_streams_`），
+  // 所以这里**不能**碰下面那些状态复位 —— 那些是按"一条连接一个在飞请求"写的。
+  if (h2_active_) return send_h2(req, std::move(cb));
+#endif
+
   // Reset state for new request
   last_error_code_ = 0;
   clear_status(HTTP_CLIENT_COMPLETE);
@@ -332,6 +380,17 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
 int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
                                   uvcpp_http_response& resp,
                                   int timeout_ms) {
+#if UVCPP_NGHTTP2_ENABLE
+  // 与"异步 connect + send_wait"是**同一条纪律**：阻塞式 socket I/O 要独占
+  // socket，驱动不了 h2 那条内存 BIO 会话。这里必须报错，**不能**落到
+  // `send_wait_plain` —— 那会往一条正跑着二进制帧的连接里写 HTTP/1.1 明文，
+  // 症状同样是"写成功了、响应等不到"，一处报错都没有。
+  if (h2_active_) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
 #if UVCPP_OPENSSL_ENABLE
   if (ssl_enabled_ && ssl_) {
     return send_wait_ssl(req, resp, timeout_ms);
@@ -885,6 +944,185 @@ bool uvcpp_http_client::is_compression_enabled() const {
   return compress_enabled_;
 }
 #endif
+
+// =========================================================================
+// HTTP/2（低层手动那一层）
+// =========================================================================
+
+#if UVCPP_NGHTTP2_ENABLE
+
+void uvcpp_http_client::set_http2_enabled(bool on) { http2_enabled_ = on; }
+
+bool uvcpp_http_client::http2_enabled() const { return http2_enabled_; }
+
+const std::string& uvcpp_http_client::negotiated_alpn() const {
+  return negotiated_alpn_;
+}
+
+int uvcpp_http_client::start_h2() {
+  h2_ = new uvcpp_h2_connection(tcp_, /*server_side=*/false);
+
+  uvcpp_h2_session::callbacks sc;
+  // 只装收响应要用的三个。`on_request` / `on_request_end` 是服务端侧的槽
+  // （`uvcpp_h2_session` 按 `server_side` 分流），客户端会话不会调它们。
+  sc.on_body = [this](uvcpp_h2_session& s, uvcpp_h2_stream& st,
+                      const char* d, size_t n) { on_h2_body(s, st, d, n); };
+  // 交付用户的动作**只能**放这里。带 body 的响应里 `on_response` 的
+  // `end_stream` 恒为 false，而 DATA 的 END_STREAM 不经过它 —— 装在那边就是
+  // "有 body 的响应永远等不到回调"。没有 body 的响应（HEAD、204、304）里
+  // HEADERS 自带 END_STREAM，会话会把两个回调背靠背地跑，走这条也一样。
+  sc.on_response_end = [this](uvcpp_h2_session& s, uvcpp_h2_stream& st) {
+    on_h2_response_end(s, st);
+  };
+  sc.on_close = [this](uvcpp_h2_session& s, int32_t id, uint32_t ec) {
+    on_h2_stream_close(s, id, ec);
+  };
+  // 连接级致命错误由 `uvcpp_h2_connection::start` 包一层转成 `shutdown()`；
+  // 连接真的没了会走下面的 `on_disconnect`，这里不需要另做动作。
+  sc.on_fatal = [](uvcpp_h2_session&, int) {};
+
+  uvcpp_h2_connection::callbacks cc;
+  cc.on_disconnect = [this](uvcpp_h2_connection& c) { on_h2_disconnect(c); };
+
+  const int rv = h2_->start(sc, cc);
+  if (rv != 0) {
+    delete h2_;
+    h2_ = nullptr;
+    return rv;
+  }
+  h2_active_ = true;
+  return 0;
+}
+
+int uvcpp_http_client::send_h2(
+    const uvcpp_http_request& req,
+    std::function<void(const uvcpp_http_response&, int)> cb) {
+  if (h2_ == nullptr) {
+    last_error_code_ = UV_ENOTCONN;
+    return UV_ENOTCONN;
+  }
+
+  // `:authority` 取自 `host` 头，而 h1 那条 `to_string()` 在缺 host 时会自己
+  // 补一个（从 URL 里抠，抠不到就写 localhost）。h2 这条没有那层兜底，缺了
+  // 就是**空** `:authority`，服务端一律判畸形。我们手上正好有权威来源 ——
+  // `connect()` 的 host。
+  uvcpp_http_request out = req;
+  if (!out.has_header("host")) out.set_header("host", host_);
+
+  const int32_t sid = h2_->session().submit_request(out, req.body.to_string());
+  if (sid < 0) {
+    last_error_code_ = sid;
+    return sid;
+  }
+
+  h2_streams_[sid].cb = std::move(cb);
+
+  const int frv = h2_->flush();
+  if (frv != 0) {
+    // **不在这里把这条流抹掉。** `flush()` 真出错时它内部已经 `shutdown()` 了，
+    // 结算会由 `on_h2_disconnect` 带着错误码跑掉；在这里 erase 等于让发起方
+    // 永远等不到回调。
+    last_error_code_ = frv;
+    return frv;
+  }
+  return 0;
+}
+
+void uvcpp_http_client::on_h2_body(uvcpp_h2_session&, uvcpp_h2_stream& st,
+                                   const char* data, size_t len) {
+  auto it = h2_streams_.find(st.stream_id);
+  if (it == h2_streams_.end()) return;
+  it->second.body.append_data(data, len);
+}
+
+void uvcpp_http_client::on_h2_response_end(uvcpp_h2_session&,
+                                           uvcpp_h2_stream& st) {
+  auto it = h2_streams_.find(st.stream_id);
+  if (it == h2_streams_.end()) return;
+
+  // 先把要交付的东西全部攒齐、把条目摘走，**再**碰用户代码：用户回调里完全
+  // 可以把整个 client 析构掉，那之后 `h2_streams_` 与 `st` 都不该再被读到。
+  uvcpp_http_response resp;
+  resp.version        = uvcpp_http_version::HVER_20;
+  // 一条连接上同时有好几条流在飞，回调又是**逐条**的，所以这个身份字段是
+  // 调用方唯一的"这条回应的是哪次请求"的凭据（h1 那条路上它恒为 0）。
+  resp.stream_id      = st.stream_id;
+  resp.status_code    = st.response.status_code;
+  resp.status_message = http_status_reason(resp.status_code);
+  resp.headers        = st.response.headers;
+  resp.body.clone(it->second.body);
+  std::function<void(const uvcpp_http_response&, int)> cb =
+      std::move(it->second.cb);
+  h2_streams_.erase(it);
+
+  set_status(HTTP_CLIENT_COMPLETE);
+  clear_status(HTTP_CLIENT_RECEIVING);
+  clear_status(HTTP_CLIENT_ERROR);
+
+  if (cb) cb(resp, 0);
+}
+
+void uvcpp_http_client::on_h2_stream_close(uvcpp_h2_session& s,
+                                           int32_t stream_id,
+                                           uint32_t error_code) {
+  // 正常收尾的那条流在 `on_h2_response_end` 里已经被摘走了 —— 能在这里找到
+  // 条目，就说明它**没有**收尾（RST_STREAM / 协议错误 / 连接断）。
+  auto it = h2_streams_.find(stream_id);
+  if (it == h2_streams_.end()) return;
+
+  uvcpp_http_response resp;
+  resp.version   = uvcpp_http_version::HVER_20;
+  resp.stream_id = stream_id;
+  // 已经解析出来的那部分照给：调用方至少能看见状态码和响应头 —— 比扔一个
+  // 默认构造的 `OK` 过去诚实。`find_stream` 在 `on_close` 里还没被 erase。
+  if (uvcpp_h2_stream* hs = s.find_stream(stream_id)) {
+    resp.status_code    = hs->response.status_code;
+    resp.status_message = http_status_reason(resp.status_code);
+    resp.headers        = hs->response.headers;
+  }
+
+  std::function<void(const uvcpp_http_response&, int)> cb =
+      std::move(it->second.cb);
+  h2_streams_.erase(it);
+
+  // `NO_ERROR` 的关闭不是对端的错（多半是我们自己在收摊），报 CANCELED；
+  // 带错误码的是对端明确拒了这条流，那是协议层面的失败。
+  const int err = (error_code == 0) ? UV_ECANCELED : UV_EPROTO;
+  last_error_code_ = err;
+  if (cb) cb(resp, err);
+}
+
+void uvcpp_http_client::on_h2_disconnect(uvcpp_h2_connection&) {
+  // 连接没了，先把 h2 这一整套摘干净 —— 下面要跑用户回调，而用户完全可以在
+  // 回调里把整个 client 析构掉，那之后一个成员都不能碰。
+  //
+  // `delete h2_` 是**被允许**的：`on_disconnect` 的契约就是"持有者在这里销毁
+  // 本对象"，它返回后 `uvcpp_h2_connection` 不再碰自己任何一个成员。
+  delete h2_;
+  h2_ = nullptr;
+  h2_active_ = false;
+
+  // 摘掉 CONNECTED：`send()` 的头一道守卫就是它，于是断开之后的发送拿到的是
+  // `UV_ENOTCONN` 而不是"往一条死连接上写明文"。**不置 `HTTP_CLIENT_CLOSED`**
+  // —— 那个标志在本类里是"`tcp_` 的句柄已经关完了"，析构靠它决定要不要走关闭
+  // 那一套；在这儿置上会让 socket 不关、句柄留在 loop 上，`loop_close()` 就
+  // 返回 `UV_EBUSY`。
+  clear_status(HTTP_CLIENT_CONNECTED);
+  set_status(HTTP_CLIENT_ERROR);
+  last_error_code_ = UV_ECANCELED;
+
+  std::map<int32_t, h2_stream_state> pending;
+  pending.swap(h2_streams_);
+
+  for (auto& kv : pending) {
+    if (!kv.second.cb) continue;
+    uvcpp_http_response resp;
+    resp.version = uvcpp_http_version::HVER_20;
+    kv.second.cb(resp, UV_ECANCELED);
+  }
+}
+
+#endif  // UVCPP_NGHTTP2_ENABLE
 
 }  // namespace uvcpp
 
