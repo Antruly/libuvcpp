@@ -430,6 +430,26 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
 
   /** @brief TLS 配置失败的原因（空 = 没出错）。 */
   const std::string& ssl_error() const { return ssl_error_; }
+
+  /**
+   * @brief TLS 握手的超时（毫秒）。0 = 不设。默认 10000。
+   *
+   * **为什么 webapp 这一层需要它**：框架在握手成功之前不会把连接交给应用
+   * （所以 `on_connection` 与连接登记表都晚于握手），而闲置扫描遍历的正是
+   * 那张登记表 —— 于是**握手期的连接对 `idle_timeout_ms` 完全不可见**。
+   * 一个「连上之后每 500 ms 发一个字节喂 ClientHello、永远不把握手做完」的
+   * 客户端，可以让连接连同它的 SSL 对象与读写缓冲区无限期挂着，带宽占用近乎
+   * 为零。这一条补的就是 `idle_timeout_ms` 覆盖不到的那一段。
+   *
+   * 必须在 `start()` 之前调用（值会传给之后 accept 的每条连接）。
+   */
+  uvcpp_web_app& set_tls_handshake_timeout_ms(int ms);
+
+  /** @brief 当前的 TLS 握手超时；0 表示不设。 */
+  int tls_handshake_timeout_ms() {
+    uvcpp_tcp_server* ts = tcp_server();
+    return ts != nullptr ? ts->tls_handshake_timeout_ms() : 0;
+  }
 #endif  // UVCPP_OPENSSL_ENABLE
 
   // -----------------------------------------------------------------

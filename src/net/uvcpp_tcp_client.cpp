@@ -11,6 +11,7 @@
 #include <req/uvcpp_getaddrinfo.h>
 #include <uvcpp/uvcpp_alloc.h>
 #include <uvcpp/uvcpp_define.h>
+#include <handle/uvcpp_timer.h>   // 握手超时（见 tls_arm_handshake_timer）
 
 #include <chrono>
 #include <cstdio>
@@ -153,6 +154,17 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     // TLS 读路径上 `tls_ssl_` 正压在栈上（`tls_feed` / `tls_flush_out` 还在
     // 下面那几层里），不能删。
     tls_ssl_ = nullptr;
+
+    // 握手超时定时器：先停掉（停是安全的，从它自己的回调里停也行）。
+    // 释放要分情况 —— 如果本对象正是在那个超时回调里被拆掉的，删除句柄等于
+    // 析构正在执行的闭包；那种情况只停不放，让句柄随循环一起走。
+    if (tls_hs_timer_ != nullptr) {
+      tls_hs_timer_->stop();
+      if (!tls_hs_in_cb_) {
+        delete tls_hs_timer_;
+      }
+      tls_hs_timer_ = nullptr;
+    }
 #endif
     loop_          = nullptr;
     tcp_           = nullptr;
@@ -170,6 +182,10 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   }
 
 #if UVCPP_OPENSSL_ENABLE
+  // 握手超时定时器（惰性创建，握手成功即释放；只有超时那一条路上会活到
+  // 这里）。这条分支不在任何回调栈上，可以安全释放。
+  tls_disarm_handshake_timer();
+
   // TLS 对象归本客户端所有，跟着一起走。注意这里**不发 close_notify**：
   // 发它要先把 wbio 里的字节异步写出去，而析构路径上没有事件循环可等。
   // 所以对端看到的是 TCP 层的断开（`SSL_ERROR_SYSCALL` / 提前 EOF）而不是
@@ -1822,6 +1838,52 @@ void uvcpp_tcp_client::set_tls_ready_callback(
 
 int uvcpp_tcp_client::tls_last_ssl_error() const { return tls_ssl_error_; }
 
+void uvcpp_tcp_client::set_tls_handshake_timeout_ms(int ms) {
+  tls_hs_timeout_ms_ = ms > 0 ? ms : 0;
+}
+
+void uvcpp_tcp_client::tls_arm_handshake_timer() {
+  // 只有"握手已经开始、且还没结束"才需要计时。tls_drive_handshake() 每次读
+  // 事件都会调进来，所以这里必须廉价且幂等。
+  if (tls_hs_timeout_ms_ <= 0) return;
+  if (tls_handshake_done_ || tls_ssl_ == nullptr) return;
+  if (tls_hs_timer_ != nullptr) return;   // 已经在计了，不重起
+  if (loop_ == nullptr) return;
+
+  tls_hs_timer_ = new uvcpp_timer(loop_);
+  tls_hs_timer_->start(
+      [this](uvcpp_timer*) {
+        // 记下"此刻正跑在超时回调里"。析构要用它判断能不能安全释放这个句柄：
+        // 本回调下面的 tls_fail() 会把整条连接拆掉、把本对象释放掉，而那一切
+        // 都发生在**这个回调的栈帧还在**的时候 —— 那时析构它就是在踩正在执行
+        // 的闭包。
+        tls_hs_in_cb_ = true;
+
+        // **回调里只 stop，不 delete**，理由同上。
+        if (tls_hs_timer_ != nullptr) tls_hs_timer_->stop();
+        if (tls_handshake_done_) return;
+
+        std::fprintf(stderr,
+                     "[uvcpp_tcp_client] TLS handshake timed out after %d ms, "
+                     "closing connection\n",
+                     tls_hs_timeout_ms_);
+        // 走与"握手失败"完全相同的那条路：通知上层（绝不把连接交付出去）
+        // → 读侧收尾 → 关闭回调 → 服务端摘表并释放本对象。
+        //
+        // **必须是本回调的最后一句**：tls_fail 会一路走到释放本对象，
+        // 之后再碰任何成员都是 use-after-free。
+        tls_fail(UV_ETIMEDOUT, false);
+      },
+      static_cast<uint64_t>(tls_hs_timeout_ms_), 0);   // repeat=0：一次性
+}
+
+void uvcpp_tcp_client::tls_disarm_handshake_timer() {
+  if (tls_hs_timer_ == nullptr) return;
+  tls_hs_timer_->stop();
+  delete tls_hs_timer_;
+  tls_hs_timer_ = nullptr;
+}
+
 bool uvcpp_tcp_client::set_tls_alpn_protos(const std::vector<std::string>& protos) {
   if (tls_handshake_done_) return false;  // 协商已经过去了，改不了
   tls_alpn_want_ = protos;
@@ -1831,6 +1893,10 @@ bool uvcpp_tcp_client::set_tls_alpn_protos(const std::vector<std::string>& proto
 
 int uvcpp_tcp_client::tls_drive_handshake() {
   if (tls_ssl_ == nullptr || tls_handshake_done_) return 0;
+
+  // 握手从这一刻起算超时（幂等）。放在这里而不是 enable_tls() 里，是因为
+  // 服务端与客户端两条路都汇聚到本函数推进握手 —— 一处起算，两处生效。
+  tls_arm_handshake_timer();
 
   const int rc = tls_ssl_->handshake();
   if (rc < 0) {
@@ -1842,6 +1908,8 @@ int uvcpp_tcp_client::tls_drive_handshake() {
   }
   if (rc == 1) {
     tls_handshake_done_ = true;
+    // 握手结束了，这条连接不再需要那道闸门。正常路径上定时器只活了几十微秒。
+    tls_disarm_handshake_timer();
     tls_ssl_error_      = tls_ssl_->last_ssl_error();
     // 在**这里**取 ALPN 结果，而不是等上层来问：ready 回调的契约是"回调里
     // 对象可能已被析构"，从回调里反查 SSL* 不安全。这里是唯一置真点、被五个
@@ -2090,6 +2158,15 @@ void uvcpp_tcp_client::tls_finish_write(int status) {
 }
 
 void uvcpp_tcp_client::tls_fail(int err, bool peer_closed) {
+  // 任何一条失败路径上都不再需要握手超时。**放在最前面**：下面每一条分支都
+  // 可能把本对象释放掉，之后再碰成员就是 use-after-free。
+  //
+  // 这里**只 stop、不 delete**：本函数可能是从定时器回调里被调用的（超时那
+  // 一条路），而在回调压栈期间析构这个句柄就是踩正在执行的闭包 —— 与析构里
+  // 那段"三层悬垂"记的是同一件事。释放留给析构（正常路径）或"析构时发现
+  // 自己在回调里"那一支（只停不放，见 ~uvcpp_tcp_client）。
+  if (tls_hs_timer_ != nullptr) tls_hs_timer_->stop();
+
   const int code = (err != 0) ? err : (peer_closed ? UV_EOF : UV_EPROTO);
   if (err != 0) {
     last_error_code_ = err;

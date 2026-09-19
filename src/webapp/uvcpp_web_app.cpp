@@ -497,6 +497,16 @@ bool uvcpp_web_app::ssl_enabled() const {
   return ssl_requested_ && static_cast<bool>(ssl_ctx_);
 }
 
+uvcpp_web_app& uvcpp_web_app::set_tls_handshake_timeout_ms(int ms) {
+  // `http_` 在构造时就建好了，所以这里拿得到 tcp_server —— 与
+  // `set_max_pipelined_requests` 那类"只改配置、等 start() 生效"的 setter
+  // 不同，这一条是**立刻写进 tcp_server** 的：tcp_server 在 accept 时才读它，
+  // 只要在 start() 之前调就来得及。
+  uvcpp_tcp_server* ts = tcp_server();
+  if (ts != nullptr) ts->set_tls_handshake_timeout_ms(ms);
+  return *this;
+}
+
 #endif  // UVCPP_OPENSSL_ENABLE
 
 // =========================================================================

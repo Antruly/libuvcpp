@@ -29,6 +29,7 @@ namespace uvcpp {
 class uvcpp_ssl;          // 见 src/ssl/uvcpp_ssl.h
 class uvcpp_ssl_context;
 #endif
+class uvcpp_timer;        // 见 src/handle/uvcpp_timer.h（握手超时用，只存指针）
 
 /**
  * @brief Bitmask status flags for TCP client lifecycle.
@@ -223,6 +224,33 @@ class UVCPP_API uvcpp_tcp_client {
    *               触发，所以回调里看到的是一个还活着的对象。
    */
   void set_tls_ready_callback(std::function<void(uvcpp_tcp_client*, int)> cb);
+
+  /**
+   * @brief TLS **握手阶段**的超时（毫秒）。**0 = 不设超时**。默认 10000。
+   *
+   * 为什么必须有它
+   * --------------
+   * 服务端 accept 之后要等握手成功才把连接交给上层（见 `set_tls_ready_callback`
+   * 的说明），而**在这之前这条连接不在上层任何登记表里** —— webapp 那一层的
+   * 闲置扫描遍历的是自己的连接表，握手期的连接根本不在里面，`idle_timeout_ms`
+   * 因此管不到它。
+   *
+   * 于是有一条明文的 slowloris 覆盖不到的路：客户端连上之后，每 500 ms 发一个
+   * 字节去喂 ClientHello，握手永远差一点不完成。这条连接会连同它的 SSL 对象、
+   * 读写缓冲区**无限期挂着**，而占用的带宽近乎为零。明文那条路有
+   * `idle_timeout_ms` 兜着（判据是"从请求的第一个字节起算"），但那条规则的前提
+   * 是"连接已经在登记表里" —— 握手期的连接不满足这个前提。
+   *
+   * 所以这不是 `idle_timeout_ms` 的替代品，而是它**覆盖不到的那一段**的补位：
+   * 上限从握手开始（第一次 `tls_drive_handshake()`）起算，握手一结束（无论成功
+   * 还是失败）就撤销。
+   *
+   * @note 客户端一侧同样生效 —— "连上了但对端永远不把握手走完"也是同一种占用。
+   */
+  void set_tls_handshake_timeout_ms(int ms);
+
+  /** @brief 当前的握手超时；0 表示不设。 */
+  int tls_handshake_timeout_ms() const { return tls_hs_timeout_ms_; }
 #endif  // UVCPP_OPENSSL_ENABLE
 
   // -----------------------------------------------------------------
@@ -749,6 +777,36 @@ class UVCPP_API uvcpp_tcp_client {
   bool        tls_write_sync_      = false;  ///< 上面那个写走的是同步接口
   int         tls_write_status_    = 0;      ///< 上面那个写的最终状态
   std::function<void(uvcpp_tcp_client*, int)> tls_ready_cb_;  ///< 握手结束通知一次
+
+  /** 起算握手超时。幂等：已经起过就不重起（每次读事件都会调一次）。 */
+  void tls_arm_handshake_timer();
+  /**
+   * @brief 停掉握手超时**并释放句柄**。
+   *
+   * @warning **绝不能在定时器自己的回调里调它** —— 那等于在回调压栈期间把
+   *          正在执行的那个闭包析构掉（与本文件析构注释里记的"三层悬垂"是
+   *          同一类）。要停就从回调里直接 `tls_hs_timer_->stop()`，或者走
+   *          `tls_fail()`（它只 stop、不释放）。
+   */
+  void tls_disarm_handshake_timer();
+
+  /**
+   * @brief 握手超时用的定时器。
+   *
+   * 惰性创建（第一次推进握手时），握手成功即释放 —— 正常路径上它只活几十
+   * 微秒。只有"真的超时了"这一条路上它会活到连接被拆掉为止，那时析构会收掉。
+   */
+  uvcpp_timer* tls_hs_timer_      = nullptr;
+  /** 握手超时毫秒数；0 = 不设。 */
+  int          tls_hs_timeout_ms_ = 10000;
+  /**
+   * @brief 此刻是否正跑在握手超时的回调里。
+   *
+   * 只给析构看：超时回调会一路走到 `tls_fail()` → 拆连接 → 释放本对象，而
+   * 那一切都在**这个回调的栈帧还在**的时候发生。析构据此决定 `tls_hs_timer_`
+   * 是能安全 delete，还是只能 stop 之后留着（否则就是析构一个正在执行的回调）。
+   */
+  bool         tls_hs_in_cb_      = false;
 #endif  // UVCPP_OPENSSL_ENABLE
 };
 

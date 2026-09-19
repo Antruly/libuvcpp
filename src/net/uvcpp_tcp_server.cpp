@@ -235,12 +235,17 @@ int uvcpp_tcp_server::listen(
         // `delete`：此刻句柄是活的，且已经进了登记表。
         bool tls_handshake_pending = false;
         if (ssl_ctx_ != nullptr) {
+          // 握手超时**必须在 enable_tls 之前设**：`enable_tls()` 里就会推进
+          // 一次握手，而超时是从"第一次推进"起算的 —— 设晚了对这一步不生效。
+          client->set_tls_handshake_timeout_ms(tls_hs_timeout_ms_);
+
           const int tls_rc = client->enable_tls(ssl_ctx_);
           if (tls_rc != 0) {
             last_error_code_ = tls_rc;
             close_client_on_callback_error(client);
             return;
           }
+
           tls_handshake_pending = !client->is_tls_handshake_done();
           if (tls_handshake_pending) {
             // 通知只是把 `on_connection` 挂到"握手成功"那一刻。
@@ -423,6 +428,10 @@ void uvcpp_tcp_server::deliver_connection(uvcpp_tcp_client* client) {
 #if UVCPP_OPENSSL_ENABLE
 void uvcpp_tcp_server::set_ssl_context(uvcpp_ssl_context* ctx) {
   ssl_ctx_ = ctx;
+}
+
+void uvcpp_tcp_server::set_tls_handshake_timeout_ms(int ms) {
+  tls_hs_timeout_ms_ = ms > 0 ? ms : 0;
 }
 
 void uvcpp_tcp_server::on_tls_handshake_done(uvcpp_tcp_client* client,
