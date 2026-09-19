@@ -2,7 +2,7 @@
  * @file src/uvcpp/uvcpp_version.h
  * @brief Library version macros and helpers.
  * @author zhuweiye
- * @version 1.1.11
+ * @version 1.1.12
  */
 
 #pragma once
@@ -14,7 +14,7 @@
 
 #define UVCPP_VERSION_MAJOR 1
 #define UVCPP_VERSION_MINOR 1
-#define UVCPP_VERSION_PATCH 11
+#define UVCPP_VERSION_PATCH 12
 
 // 0 = 非发布版；1 = 发布版
 #define UVCPP_VERSION_IS_RELEASE 0
