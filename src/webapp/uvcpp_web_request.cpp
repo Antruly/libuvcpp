@@ -181,6 +181,14 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   // 让 `%2F` 变成一个隐形的、只有攻击者会用的第三态。
   path_ = web_url_decode(raw_path_, /*plus_as_space=*/false);
 
+  // 折叠连续斜杠，与路由切段（`split_path()`）看齐 —— 否则路由会把
+  // `//api/me` 匹配到 `/api/me` 那条，而中间件从 `path()` 拿到的是
+  // `//api/me`，按前缀写的鉴权（`p.rfind("/api/", 0) == 0`）当场被绕过。
+  //
+  // 必须在**解码之后**做：`%2F` 解出来就是 `/`，先折叠会让 `/a%2F%2Fb` 与
+  // `/a%2Fb` 得到不同的段划分，而文档写明解码后的 `/` 充当分隔符。
+  path_ = web_collapse_slashes(path_);
+
   // 关心的几个头解析一次缓存下来。http_headers 是线性表，每次 get_header
   // 都是 O(头数) 次大小写不敏感比较，而 content_type 在 is_json()/is_form()
   // 里会被反复问到。

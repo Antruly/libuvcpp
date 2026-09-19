@@ -28,9 +28,10 @@
  *      关掉；在途请求不被误杀；关掉的连接从登记表里摘干净
  *
  * 刻意**不覆盖**的三件事（都是已知限制，不是漏测）：
- *   - HEAD：`uvcpp_http_client` 不认 HEAD（它按 content-length 等 body，
- *     而 HEAD 的 body 是被丢掉的），走这条路径只会等超时；HEAD 的语义
- *     由 `web_app_router_func.cpp` 的 head_as_get 与响应层各自覆盖。
+ *   - HEAD 的**裸协议细节**（比如"响应里真的一个字节 body 都没有"）：那几条用
+ *     `raw_send()` 逐字发。`uvcpp_http_client` 走 `make_head()` 是能跑 HEAD 的
+ *     （`head_cl_matches_get` 就是拿它跑的），只是在"等不到 body 会不会挂住"
+ *     这类形状上不如裸客户端确定。
  *   - 流水线：单独一个文件（`web_app_pipeline_func.cpp`）—— 它要的形状是
  *     "一次 write 写出两条请求"，与本文件"一问一答"的骨架互不相容。
  *   - HTTPS/WSS：Phase 4。
@@ -461,6 +462,86 @@ void test_middleware_order() {
   // 账本再补一刀：拦截器**之前**的 a 在（请求进得来），**之后**的 b 不在。
   check(http_get_header(r.headers, "x-order") == "a",
         "短路之后链上后面的中间件一个都没跑");
+
+  app.stop();
+  app.join();
+}
+
+/**
+ * `//api/me` 不得绕过按**前缀**写的鉴权（issue #6 第 1 条）。
+ *
+ * 路由切段会折叠连续斜杠，所以 `//api/me` 命中的就是 `/api/me` 那条路由。
+ * 如果 `req.path()` 原样返回 `//api/me`，那么最自然的那种前缀判据
+ * （`p.rfind("/api/", 0) == 0`）就拦不住它 —— 中间件放行、处理器照常执行，
+ * `curl --path-as-is http://host//api/me` 一次就绕过去。
+ *
+ * 判据是**处理器有没有被跑到**，不是状态码：状态码只说明"有个响应"，
+ * 而这条缺陷的要害恰恰是"处理器跑了"。所以两边都用计数器，
+ * 另加一条不在前缀里的路由当对照组，证明这套请求确实能走到处理器。
+ *
+ * 请求一律用 `raw_send()` 逐字写出去 —— `get()` 走 `uvcpp_http_client`，
+ * 那条路自己会不会顺手规范化是另一件事，不能让它当代言人。
+ */
+void test_path_prefix_auth() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+
+  std::atomic<int> api_hits(0);
+  std::atomic<int> pub_hits(0);
+
+  app.use([](uvcpp_web_request& req, uvcpp_web_response& resp,
+             uvcpp_web_next next) {
+    if (req.path().rfind("/api/", 0) == 0) {
+      resp.status(401);
+      resp.text("denied");
+      resp.end();
+      return;  // 不放行
+    }
+    next();
+  });
+
+  app.get("/api/me", [&](uvcpp_web_request&, uvcpp_web_response& resp,
+                         uvcpp_web_next) {
+    api_hits.fetch_add(1);
+    resp.text("me");
+    resp.end();
+  });
+
+  app.get("/public", [&](uvcpp_web_request&, uvcpp_web_response& resp,
+                         uvcpp_web_next) {
+    pub_hits.fetch_add(1);
+    resp.text("public");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "前缀鉴权服务启动");
+  const int port = app.bound_port();
+
+  const char* const variants[] = {
+      "/api/me",    // 正形：本来就该拦住
+      "//api/me",   // 前导双斜杠（issue 里那个复现）
+      "///api/me",  // 三斜杠
+      "/api//me",   // 中间双斜杠
+  };
+  for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); ++i) {
+    const std::string req = std::string("GET ") + variants[i] +
+                            " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    check(raw_send(port, req, 200),
+          std::string("裸客户端把 ") + variants[i] + " 写完了");
+  }
+
+  // 对照组**故意排在这些变体之后**：它跑到了处理器，就说明服务端已经把这之前
+  // 收下的连接都处理过了。否则"处理器计数为 0"是无法证伪的 —— 一个根本没起来的
+  // 服务同样能让它一直是 0。这样就不需要拿一个拍脑袋的 sleep 当论据。
+  check(raw_send(port, "GET /public HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 200),
+        "裸客户端把 /public 写完了");
+  check(wait_for([&] { return pub_hits.load() == 1; }, 3000),
+        "对照组 /public 的处理器被跑到了一次（服务确实在处理请求）");
+
+  check(api_hits.load() == 0,
+        "没有任何变体绕过前缀鉴权（实测处理器被跑了 " +
+            std::to_string(api_hits.load()) + " 次，应为 0）—— "
+            "`req.path()` 必须和路由一样折叠连续斜杠");
 
   app.stop();
   app.join();
@@ -1339,6 +1420,7 @@ int main(int argc, char** argv) {
       {"params_wildcard", test_params_and_wildcard},
       {"404_405_options", test_404_405_options},
       {"middleware_order", test_middleware_order},
+      {"path_prefix_auth", test_path_prefix_auth},
       {"async_from_worker", test_async_from_worker_thread},
       {"connection_hooks", test_connection_hooks},
       {"raw_data_claim", test_raw_data_claim},

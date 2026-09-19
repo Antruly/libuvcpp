@@ -17,10 +17,9 @@
  * `/capped`……）。这样一次 `start_background()` 就能覆盖全部选项组合，
  * 也顺带验证了"多个静态挂载互不干扰"。
  *
- * HEAD 走裸客户端：`uvcpp_http_client` 按 content-length 等 body，而 HEAD
- * 的 body 是被丢掉的 —— 用它测 HEAD 只会等超时（这一点在
- * `web_app_app_func.cpp` 的文件头也记着）。裸路径顺便能验证"响应里真的
- * 一个 body 字节都没有"，这恰恰是 HEAD 唯一容易错的地方。
+ * HEAD 走裸客户端：`uvcpp_http_client` 的 `make_head()` 是能跑 HEAD 的，但
+ * 这里要验的是"响应里真的一个 body 字节都没有"，裸路径能逐字看到线上字节，
+ * 比隔着客户端猜更确定。
  */
 #include <atomic>
 #include <chrono>

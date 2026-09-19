@@ -1082,7 +1082,8 @@ http_stream_handler uvcpp_web_app::claim_stream(uvcpp_http_request& req,
   std::string raw_path;
   std::string query_string;
   web_split_path_query(req.url, raw_path, query_string);
-  const std::string path = web_url_decode(raw_path, /*plus_as_space=*/false);
+  const std::string path =
+      web_collapse_slashes(web_url_decode(raw_path, /*plus_as_space=*/false));
 
   web_route_match m = stream_router_.match(req.method, path);
   if (m.result != web_route_result::MATCHED || m.handler == nullptr) {
@@ -1352,7 +1353,8 @@ void uvcpp_web_app::on_ws_upgrade(uvcpp_http_request& req,
   std::string raw_path;
   std::string query_string;
   web_split_path_query(req.url, raw_path, query_string);
-  const std::string path = web_url_decode(raw_path, /*plus_as_space=*/false);
+  const std::string path =
+      web_collapse_slashes(web_url_decode(raw_path, /*plus_as_space=*/false));
 
   bool hit = false;
   if (ws_server_ != nullptr && !ws_handlers_.empty()) {

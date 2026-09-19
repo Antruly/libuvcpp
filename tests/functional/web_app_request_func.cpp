@@ -224,6 +224,47 @@ void test_path_and_query() {
     check(w.query_params().empty(), "无查询串时参数列表为空");
     check(w.query("nope") == nullptr, "查不到的参数返回 nullptr");
   }
+
+  {
+    // 连续斜杠要折叠，**和路由切段看齐**（`uvcpp_web_router.cpp` 的
+    // `split_path()`）。这条不是整洁问题：路由本来就会把 `//api/me` 匹配到
+    // `/api/me` 那条路由，如果 `path()` 原样返回 `//api/me`，那么按前缀写的
+    // 鉴权中间件（`p.rfind("/api/", 0) == 0`）会被
+    // `curl --path-as-is http://host//api/me` 直接绕过 —— 处理器照常执行。
+    //
+    // 三个变体都钉住，因为绕过只需要其中一个漏掉。
+    const char* const variants[] = {"//api/me", "///api/me", "/api//me"};
+    for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); ++i) {
+      uvcpp_web_request w;
+      make_web_req(w, http_method::HTTP_GET, variants[i]);
+      check_eq(w.path(), "/api/me",
+               (std::string("连续斜杠折叠（") + variants[i] + "）").c_str());
+      // 原始形态仍然拿得到 —— 折叠只发生在 `path()` 这个视图上。
+      check_eq(w.raw_path(), variants[i], "raw_path 不受折叠影响");
+    }
+
+    // 结尾斜杠同样忽略（`split_path()` 也忽略），所以 `/a//b/` == `/a/b`。
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/a//b/");
+    check_eq(w.path(), "/a/b", "连续斜杠 + 结尾斜杠一起折叠");
+
+    // 全是斜杠 → 根。不能变成空串（空串会让"哪里都不匹配"，包括静态层的根）。
+    uvcpp_web_request root;
+    make_web_req(root, http_method::HTTP_GET, "///");
+    check_eq(root.path(), "/", "全是斜杠时归一化成根");
+
+    // 折叠要在**解码之后**做：`%2F` 解出来就是 `/`，所以 `%2F%2F` 与 `//` 等价。
+    // 反过来（先折叠再解码）会得到 `/a//b`，段划分与路由对不上。
+    uvcpp_web_request enc;
+    make_web_req(enc, http_method::HTTP_GET, "/a%2F%2Fb");
+    check_eq(enc.path(), "/a/b", "%2F%2F 解码后同样折叠");
+
+    // `.` / `..` **不归这里管** —— 路由切段也不处理它们，两边保持一致；
+    // 挡目录穿越是 `web_sanitize_path()` 的活（它会拒绝，不是静默改写）。
+    uvcpp_web_request dot;
+    make_web_req(dot, http_method::HTTP_GET, "/api/../me");
+    check_eq(dot.path(), "/api/../me", "`.` / `..` 不在这里处理");
+  }
 }
 
 // =========================================================================

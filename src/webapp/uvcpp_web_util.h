@@ -138,6 +138,24 @@ UVCPP_API void web_split_path_query(const std::string& raw_url,
                                     std::string& path, std::string& query);
 
 /**
+ * @brief 折叠路径里连续的 `/`，并去掉结尾的 `/`。
+ *
+ * 语义**与路由切段的 `split_path()` 完全一致**，存在的理由就是让
+ * `req.path()` 和路由匹配看到同一个字符串：路由按段匹配时会跳过连续斜杠，
+ * 所以 `//api/me` 与 `/api/me` 命中同一条路由；如果 `req.path()` 原样返回
+ * `//api/me`，那么按前缀写鉴权的中间件（`p.rfind("/api/", 0) == 0`）就会被
+ * `curl --path-as-is http://host//api/me` 直接绕过。
+ *
+ * **不做**（这是刻意的，别顺手加）：
+ *   - 不解码 —— 调用方先用 `plus_as_space=false` 解过再调这里；
+ *   - 不处理 `.` / `..` —— 路由切段同样不处理，保持两边一致；
+ *     要挡目录穿越请用 `web_sanitize_path()`（它会拒绝，而不是静默改写）。
+ *
+ * 结果保证以 `/` 开头；全部是斜杠时返回 `/`。
+ */
+UVCPP_API std::string web_collapse_slashes(const std::string& path);
+
+/**
  * @brief 解析查询串为有序键值对。
  *
  * 保序、允许重复键、允许空值。键与值都做百分号解码（`+` → 空格）。

@@ -221,6 +221,29 @@ void web_split_path_query(const std::string& raw_url, std::string& path,
   }
 }
 
+std::string web_collapse_slashes(const std::string& path) {
+  if (path.empty()) return "/";
+
+  std::string out;
+  out.reserve(path.size());
+  out.push_back('/');
+
+  size_t i = 0;
+  while (i < path.size()) {
+    while (i < path.size() && path[i] == '/') ++i;  // 跳过任意长度的斜杠串
+    if (i >= path.size()) break;
+    size_t j = i;
+    while (j < path.size() && path[j] != '/') ++j;
+    if (out.size() > 1) out.push_back('/');
+    out.append(path, i, j - i);
+    i = j;
+  }
+
+  // 不合 `/` 开头的输入（不该出现，`web_split_path_query()` 总会给出 `/` 开头的）
+  // 也照样把它当绝对路径处理 —— 与其返回一个可疑的串，不如给出确定的形式。
+  return out;
+}
+
 std::vector<std::pair<std::string, std::string> > web_parse_query(
     const std::string& query) {
   std::vector<std::pair<std::string, std::string> > out;
