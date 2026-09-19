@@ -781,6 +781,207 @@ static bool test_delete_client_in_read_cb(int port, int hangup_port) {
 }
 
 // =========================================================================
+// 析构时**包装对象到底有没有被回收** —— 连接频繁建立/断开那条路
+// =========================================================================
+/**
+ * 形状：服务跑着，连接不停地来、不停地断。**每一次断开都会析构一个
+ * `uvcpp_tcp_client`**，而析构的位置几乎总在某个回调里（对端断开的读回调、
+ * 关闭的完成回调）—— 也就是 `loop_->is_running()` 恒为真的地方。
+ *
+ * 改前那条判据是"循环还在跑 ⇒ 一个都不拆"，它区分不了"我正踩在自己的回调
+ * 里"和"循环只是恰好跑着"。后者在服务运行期间永远成立，于是 `tcp_` 那个
+ * 包装对象**一次也没被拆过**：实测 net 层 371 字节/连接（20000 次连接
+ * +7.07 MB，斜率不收敛），webapp 0.74–1.17 MB/min。
+ *
+ * 判据为什么不取 RSS：那是**间接**量，慢、噪声大、CI 上没法当断言（涨到能
+ * 测出来要几千次连接）。改后的判据是**三条支路各走了多少次**
+ * （`uvcpp_tcp_client::reclaim_stats()`）—— 析构里那三条支路对外行为完全
+ * 一样（连接都断了），从外面看不出来走了哪一条，所以把它记成计数。一次断开
+ * 必须让 `released + deferred` 涨 1、且 `skipped` 恒为 0。这样"把回收改回
+ * 不回收"就是**确定性**的失败，不用等内存涨起来。
+ *
+ * 另有一道独立判据：收起尾来 `uv_loop_close()` 必须返回 0。漏掉包装对象时
+ * 它的 `uv_handle_t` 还挂在 handle_queue 上（既不活跃也没在关 —— `uv_run`
+ * 连 while 体都不进），`uv_loop_close()` 只能 EBUSY。这条**不需要新计数**
+ * 就能抓住老写法，是计数器之外的独立证人。
+ *
+ * 两条腿各钉一种"回调返回之后还剩什么"（用**外部循环**，这样析构不会连循环
+ * 一起漏掉，收尾后还能问 `uv_loop_close()`）：
+ *
+ *   腿 1  对端断开，框架管理槽删客户端 —— 句柄还活着 ⇒ `deferred`
+ *   腿 2  自己 `close()`，完成回调里删  —— 句柄已摘 ⇒ `released`
+ */
+static bool test_reclaim_paths(int port, int hangup_port) {
+  std::cout << "[functional tcp_client] reclaim_paths start\n";
+  bool ok = true;
+
+  auto pump_until = [](uvcpp_loop* loop, const std::function<bool()>& done,
+                       int timeout_ms) {
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!done() &&
+           std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0).count() < timeout_ms) {
+      loop->run(UV_RUN_NOWAIT);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+
+  // ---- 腿 1：对端断开时删（句柄还活着 ⇒ deferred）----
+  {
+    uvcpp_loop loop;
+
+    uvcpp_test::loop_drain drain_loop(&loop);
+    loop.init();
+
+    const uvcpp_tcp_client::reclaim_stat before =
+        uvcpp_tcp_client::reclaim_stats();
+
+    uvcpp_tcp_client* victim  = new uvcpp_tcp_client(&loop);
+    bool              deleted = false;
+
+    // 框架的管理槽 = "连接一关就把这个客户端删掉"，服务端（`uvcpp_tcp_server`）
+    // 用的正是这一条。它在**读回调里**跑（`fire_close_callbacks()` 的第 1337 行
+    // 那一路），此刻句柄还活着。
+    victim->set_close_manager([&victim, &deleted]() {
+      delete victim;
+      victim  = nullptr;
+      deleted = true;
+    });
+
+    int rc = victim->connect("127.0.0.1", hangup_port, [&](int status) {
+      if (status != 0) {
+        std::cout << "[functional tcp_client] reclaim_paths leg1 connect "
+                  << uv_err_name(status) << std::endl;
+        return;
+      }
+      // 对端 accept 完立刻 FIN：要读到它才走得到断开那一支。
+      victim->read_start_events(
+          [](uvcpp_tcp_client& /*c*/, const net_read_result& /*r*/) {});
+    });
+    if (rc != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg1 connect start "
+                   "failed: " << uv_err_name(rc) << std::endl;
+      delete victim;
+      return false;
+    }
+
+    pump_until(&loop, [&] { return deleted; }, 5000);
+
+    // 先把收尾队列拨干净**再读计数**：`deferred` 那一条是记在延迟的
+    // `delete` 里的，没拨完就还是 0（那不是漏，是还没到）。
+    uvcpp_test::drain(&loop);
+
+    const uvcpp_tcp_client::reclaim_stat after =
+        uvcpp_tcp_client::reclaim_stats();
+    const uint64_t d_deferred = after.deferred - before.deferred;
+    const uint64_t d_released = after.released - before.released;
+    const uint64_t d_skipped  = after.skipped - before.skipped;
+
+    if (victim != nullptr || !deleted) {
+      std::cout << "[functional tcp_client] reclaim_paths leg1 FAIL "
+                   "链路没走完：deleted=" << deleted
+                << " victim=" << static_cast<void*>(victim) << std::endl;
+      ok = false;
+    } else if (d_deferred != 1 || d_released != 0 || d_skipped != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg1 FAIL 支路不对："
+                   "deferred+=" << d_deferred << " released+=" << d_released
+                << " skipped+=" << d_skipped << "（应 1/0/0）" << std::endl;
+      ok = false;
+    } else {
+      std::cout << "[functional tcp_client] reclaim_paths leg1 deferred "
+                   "survived\n";
+    }
+
+    // 独立证人：包装对象真被拆干净了，handle_queue 才是空的。老写法（一个
+    // 都不拆）漏掉的那个 `uv_handle_t` 会一直挂在队列上 —— 既不活跃也没在
+    // 关，`uv_run` 连 while 体都不进，这里只能 EBUSY。
+    const int lrc = loop.loop_close();
+    if (lrc != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg1 FAIL "
+                   "loop_close rc=" << lrc << "（UV_EBUSY = 还有句柄挂在 "
+                   "handle_queue 上）" << std::endl;
+      ok = false;
+    }
+  }
+
+  // ---- 腿 2：自己关，完成回调里删（句柄已摘 ⇒ released）----
+  {
+    uvcpp_loop loop;
+
+    uvcpp_test::loop_drain drain_loop(&loop);
+    loop.init();
+
+    const uvcpp_tcp_client::reclaim_stat before =
+        uvcpp_tcp_client::reclaim_stats();
+
+    uvcpp_tcp_client* victim    = new uvcpp_tcp_client(&loop);
+    bool              deleted   = false;
+    bool              connected = false;
+
+    victim->set_close_manager([&victim, &deleted]() {
+      delete victim;
+      victim  = nullptr;
+      deleted = true;
+    });
+
+    int rc = victim->connect("127.0.0.1", port,
+                             [&](int status) { connected = (status == 0); });
+    if (rc != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg2 connect start "
+                   "failed: " << uv_err_name(rc) << std::endl;
+      delete victim;
+      return false;
+    }
+    pump_until(&loop, [&] { return connected || deleted; }, 5000);
+
+    if (!connected || victim == nullptr) {
+      std::cout << "[functional tcp_client] reclaim_paths leg2 FAIL 没连上："
+                   "connected=" << connected << std::endl;
+      ok = false;
+    } else {
+      // 主动关：完成回调里 `fire_close_callbacks()` 会跑管理槽，而那一刻
+      // `uvcpp_handle::callback_close` 已经把 `_handle` 置空了。
+      victim->close();
+      pump_until(&loop, [&] { return deleted; }, 5000);
+
+      uvcpp_test::drain(&loop);
+
+      const uvcpp_tcp_client::reclaim_stat after =
+          uvcpp_tcp_client::reclaim_stats();
+      const uint64_t d_released = after.released - before.released;
+      const uint64_t d_deferred = after.deferred - before.deferred;
+      const uint64_t d_skipped  = after.skipped - before.skipped;
+
+      if (victim != nullptr || !deleted) {
+        std::cout << "[functional tcp_client] reclaim_paths leg2 FAIL "
+                     "链路没走完：deleted=" << deleted
+                  << " victim=" << static_cast<void*>(victim) << std::endl;
+        ok = false;
+      } else if (d_released != 1 || d_deferred != 0 || d_skipped != 0) {
+        std::cout << "[functional tcp_client] reclaim_paths leg2 FAIL 支路不对："
+                     "released+=" << d_released << " deferred+=" << d_deferred
+                  << " skipped+=" << d_skipped << "（应 1/0/0）" << std::endl;
+        ok = false;
+      } else {
+        std::cout << "[functional tcp_client] reclaim_paths leg2 released "
+                     "survived\n";
+      }
+    }
+
+    const int lrc = loop.loop_close();
+    if (lrc != 0) {
+      std::cout << "[functional tcp_client] reclaim_paths leg2 FAIL "
+                   "loop_close rc=" << lrc << std::endl;
+      ok = false;
+    }
+  }
+
+  std::cout << "[functional tcp_client] reclaim_paths done success="
+            << (ok ? "true" : "false") << std::endl;
+  return ok;
+}
+
+// =========================================================================
 // 析构里**不许有睡眠**：判据是绝对墙钟，不是"A 比 B 快"
 // =========================================================================
 /**
@@ -891,6 +1092,7 @@ int main() {
   all_ok = test_status_transitions(port) && all_ok;
   all_ok = test_async_buf_write_no_poison(port) && all_ok;
   all_ok = test_delete_client_in_read_cb(port, hangup_port) && all_ok;
+  all_ok = test_reclaim_paths(port, hangup_port) && all_ok;
   all_ok = test_destructor_has_no_sleep(port) && all_ok;
 
   // Stop server
