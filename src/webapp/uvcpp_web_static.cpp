@@ -252,6 +252,16 @@ enum class probe_status {
    * `OK` 走同一条大路，只在最后那个 if/else 链上分开。
    */
   STREAM,
+  /**
+   * 工作池名额没抢到 ⇒ 503。
+   *
+   * 与其余几种的差别在于：它是**唯一一种在 worker 里才判出来的状态**。
+   * 名额过去是在 `serve()` 里（投递之前）取的，于是"命中 LRU 缓存、一次
+   * 磁盘读都不需要"的请求也要先抢名额，抢不到就 503 —— 而那正是绝大多数
+   * 请求。现在名额只在**确实要读盘**的两条支路上取（见 `run_job`），所以
+   * 它的判定点跟着搬到了 worker 里。
+   */
+  REJECTED,
 };
 
 struct probe_result {
@@ -490,6 +500,15 @@ struct uvcpp_web_static::Impl {
     bool need_data;                          ///< HEAD 不需要字节，只要元数据
     std::vector<cache_probe> probes;
 
+    /**
+     * @brief 本 job 当前**持有一个工作池名额**吗。
+     *
+     * 名额从 `serve()` 搬进 `run_job()` 之后，"拿过"不再是一条必走的路
+     * （命中缓存、HEAD、404 都不拿），所以归还侧必须有个凭据 —— 否则
+     * `release()` 会把别人的名额还掉，闸门自己就成了漏洞。
+     */
+    bool slot_held;
+
     // worker 产出
     probe_status status;
     bool policy_rejected;
@@ -509,6 +528,7 @@ struct uvcpp_web_static::Impl {
           next(),
           is_head(false),
           need_data(true),
+          slot_held(false),
           status(probe_status::NOT_FOUND),
           policy_rejected(false),
           served_from_cache(false),
@@ -664,11 +684,35 @@ struct uvcpp_web_static::Impl {
 
   void run_job(job* j);     ///< worker 线程
   void finish_job(job* j);  ///< loop 线程
+
+  /**
+   * @brief 为一次**确实要读盘的** job 取工作池名额。
+   *
+   * @return true  = 可以继续（要么没设闸门，要么名额已到手，`j->slot_held` 为真）；
+   *         false = 没抢到，`j->status` 已写成 `REJECTED`，调用方立即返回。
+   *
+   * 取的时机从 `serve()`（投递之前）搬到了这里 —— **这是本模块唯一被搬过
+   * 位置的东西**，取名额这件事本身没变。原因见 `run_job()` 里缓存校验那一段。
+   */
+  bool acquire_slot(job* j);
 };
 
 // =========================================================================
 // worker 线程
 // =========================================================================
+
+bool uvcpp_web_static::Impl::acquire_slot(job* j) {
+  if (!work_limit) return true;  // 没设闸门 = 一律放行
+
+  if (!work_limit->acquire()) {
+    // `rejected` 的成员注释写着"只在 loop 线程加减"，而这里在 worker 上，
+    // 所以计数不在这里加 —— 交给 `finish_job()`（同样只写状态，不动共享计数）。
+    j->status = probe_status::REJECTED;
+    return false;
+  }
+  j->slot_held = true;
+  return true;
+}
 
 void uvcpp_web_static::Impl::run_job(job* j) {
   probe_result pr;
@@ -727,12 +771,21 @@ void uvcpp_web_static::Impl::run_job(job* j) {
   if (static_cast<uint64_t>(pr.size) > static_cast<uint64_t>(thr)) {
     // 一个字节都不读。元数据已经全部带在 job 上了（上面那一段赋过值），
     // 所以 ETag/Last-Modified/条件请求/Range 在 loop 线程那侧照常判定。
+    //
+    // **流式也要占名额**：它不整读，但确实在读盘 —— 闸门在这条路上的意义
+    // 与整读路径完全一样（见 acquire_slot）。
+    if (!acquire_slot(j)) return;
     j->status = probe_status::STREAM;
     return;
   }
 
   // 缓存校验：拿 loop 线程给的期望快照和刚 stat 到的真实值比。
   // 对上了就**不读盘** —— 热文件的成本是一次 stat。
+  //
+  // **命中路径不占名额**，这是本模块最关键的一条：命中时 worker 只做了一次
+  // `stat`（几微秒），一个字节的磁盘读都没有，内存面也早就有 `max_cached_file_size`
+  // 封着。让这样一次请求去抢名额，代价是**并发一过闸门就大面积 503**，而收益
+  // 是零 —— 实测并发 64 时 71.7% 的请求被拒，其中 99.97% 本来能命中缓存。
   for (size_t i = 0; i < j->probes.size(); ++i) {
     const cache_probe& p = j->probes[i];
     if (p.key == pr.final_url && p.size == pr.size &&
@@ -742,6 +795,9 @@ void uvcpp_web_static::Impl::run_job(job* j) {
       return;
     }
   }
+
+  // 走到这里只剩一条路：**把文件整读进内存**。这才是闸门要卡的那件事。
+  if (!acquire_slot(j)) return;
 
   std::shared_ptr<std::string> buf(new std::string());
   if (!read_file(j->loop, pr.fs_path, pr.size, *buf)) {
@@ -780,6 +836,20 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
       return;
     case probe_status::IO_ERROR:
       resp.server_error();
+      return;
+    case probe_status::REJECTED:
+      // 名额没抢到。形状与原先 `serve()` 里那一支**逐字一致** —— 只是判定的
+      // 位置从"投递之前"挪到了"真要读盘之前"（见 `run_job`）。
+      ++rejected;  // 观测用计数，只在本（loop）线程上加
+      UVCPP_LOG_WARN(log_category::STATIC)
+          << "工作池已满（在途 " << (work_limit ? work_limit->in_flight() : 0)
+          << " / " << (work_limit ? work_limit->limit() : 0)
+          << "），拒绝静态请求 " << j->final_url;
+      resp.service_unavailable();
+      // `Retry-After` 是 503 的配套语义（RFC 9110 §10.2.3）：告诉对端"等 1 秒
+      // 再来"。**必须给这个头** —— 没有它，客户端只能靠猜，实测最常见的反应
+      // 是立刻重试，正好把已经饱和的池子压得更死。
+      resp.set_header("retry-after", "1");
       return;
     case probe_status::OK:
     case probe_status::STREAM:
@@ -1129,31 +1199,14 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
     // ALLOW：照常往下走
   }
 
-  // 工作池名额：**投递之前**拿，拿不到就一个任务都不投。
+  // **工作池名额不在这里取**（曾经在这里）。闸门想限制的是"并发的磁盘读"，
+  // 而它的计数单位过去是"请求" —— 这两者在缓存未命中时重合、在命中时不重合，
+  // 而命中是绝大多数。于是并发一过闸门，连"只做了一次 stat、一个字节都没读"
+  // 的请求也一起被 503 掉。取名额的时机因此搬到了 `run_job()` 里真正要读盘
+  // 那一句之前，那里才是"确实要占一份 IO"的判定点。
   //
-  // 位置在最后一条同步回绝（dotfile）之后、`new job` 之前 —— 顺序是有意的：
-  //   - 放在前面等于"为了回一个 403/404 先占一个线程池名额"，纯浪费；
-  //   - 放在 `queue_work` 之后就没有意义了，那时任务已经在队列里了。
-  //
-  // 拿不到名额时**不留 `next`**：响应当场填好，框架照常收尾并把它发出去，
-  // 与上面几条同步路径形状完全一致。
-  //
-  // 这是个**准入**而不是排队 —— 队列在这里没有任何好处：请求已经在手上，
-  // 堆着不投只是把线程池的队列换成我们自己的队列，内存照爆，还多一层延迟。
-  if (im->work_limit && !im->work_limit->acquire()) {
-    ++im->rejected;
-    UVCPP_LOG_WARN(log_category::STATIC)
-        << "工作池已满（在途 " << im->work_limit->in_flight() << " / "
-        << im->work_limit->limit() << "），拒绝静态请求 " << url;
-    resp.service_unavailable();
-    // `Retry-After` 是 503 的配套语义（RFC 9110 §10.2.3）：告诉对端"等 1 秒
-    // 再来"。**必须给这个头** —— 没有它，客户端只能靠猜，实测最常见的反应
-    // 是立刻重试，正好把已经饱和的池子压得更死。
-    resp.set_header("retry-after", "1");
-    resp.end();
-    return;
-  }
-
+  // 随之改变的只有 503 的产出位置：从这里的同步回绝变成 `finish_job()` 里的
+  // 一个 `probe_status::REJECTED` 分支，响应内容（503 + Retry-After）不变。
   Impl::job* j = new Impl::job();
   j->self = im;
   j->cfg = im->cfg;
@@ -1178,10 +1231,14 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
         // 这个回调**本身就是"worker 已经返回"**，所以名额在这里就该还 ——
         // 早还一拍，排在后面的请求就早一拍被受理。
         //
+        // **只能还自己拿过的那一份**：名额搬进 worker 之后，"拿过"不再是必走
+        // 的路（命中缓存 / HEAD / 404 都不拿），无条件 release 会把别人的名额
+        // 还掉 —— 闸门自己就成了漏洞。凭据是 `j->slot_held`。
+        //
         // 与 `serve()` 里的 `rc != 0` 分支**互斥**（libuv 的约定：
         // `uv_queue_work` 返回 0 才会调 after_work），而且两条路都会 `delete
         // j`，所以不存在还两次的可能。
-        if (j->self->work_limit) j->self->work_limit->release();
+        if (j->slot_held) j->self->work_limit->release();
 
         // **绝对不能在回调里 `delete w`。**
         //
@@ -1216,8 +1273,9 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
     UVCPP_LOG_ERROR(log_category::STATIC)
         << "投递静态读盘任务失败（" << rc << "）";
     delete work;
-    // 任务从来没进过池子，所以名额要还（与 after_work 回调互斥，见那里的注释）。
-    if (im->work_limit) im->work_limit->release();
+    // 任务从来没进过池子 —— 而名额现在是在 worker 里才取的（见 `run_job`），
+    // 所以这一支**根本没有名额可还**。原先那句 `release()` 在今天会凭空把
+    // 别人的名额还掉。
     // 删掉 job 同时也就丢掉了 next 的那份副本，于是框架照常收尾、
     // 把下面这个 500 发出去。
     delete j;
