@@ -28,6 +28,10 @@ http_compress_method http_compress::parse_accept_encoding(
   struct candidate { http_compress_method method; double q; };
   candidate best = { http_compress_method::NONE, 0.0 };
 
+  // `q=0` 是"明确不可接受"。这两个标志记住哪些编码被显式拒过 —— 因为它们
+  // 必须能挡住 `*`（见下面 wildcard 那一支的注释）。
+  bool gzip_ok = true, deflate_ok = true;
+
   std::string tok;
   std::istringstream ss(header);
   while (std::getline(ss, tok, ',')) {
@@ -50,15 +54,26 @@ http_compress_method http_compress::parse_accept_encoding(
       while (!enc.empty() && enc.back() == ' ') enc.pop_back();
     }
 
-    if (q == 0.0) continue;  // "not acceptable"
+    if (q == 0.0) {
+      // "not acceptable" —— 记下来，别只是跳过这一项。
+      if (enc == "gzip" || enc == "x-gzip") gzip_ok = false;
+      else if (enc == "deflate" || enc == "x-deflate") deflate_ok = false;
+      continue;
+    }
 
     http_compress_method method = http_compress_method::NONE;
     if (enc == "gzip" || enc == "x-gzip")
       method = http_compress_method::GZIP;
     else if (enc == "deflate" || enc == "x-deflate")
       method = http_compress_method::DEFLATE;
-    else if (enc == "*")
-      method = http_compress_method::GZIP;  // wildcard → prefer gzip
+    else if (enc == "*") {
+      // RFC 9110 §12.5.3：`*` 只匹配**没有显式列出**的编码。所以选择时要把
+      // 被 `q=0` 显式拒掉的排掉 —— 否则 `*, gzip;q=0` 会选回 gzip，服务端
+      // 于是发了一个客户端刚刚声明过收不了的编码。
+      method = gzip_ok ? http_compress_method::GZIP
+                       : (deflate_ok ? http_compress_method::DEFLATE
+                                     : http_compress_method::NONE);
+    }
 
     if (method != http_compress_method::NONE) {
       if (q > best.q ||
@@ -66,6 +81,22 @@ http_compress_method http_compress::parse_accept_encoding(
         best.method = method;
         best.q = q;
       }
+    }
+  }
+
+  // 收尾一道：上面按 q 值取最大值，而 `q=0` 那支是"直接跳过"，所以一条
+  // `gzip;q=0, gzip;q=0.5` 这种自相矛盾的输入仍会把 gzip 选回来。显式拒绝
+  // 优先 —— 少发一层编码只是没优化，发错一层编码是客户端解不开。
+  if ((best.method == http_compress_method::GZIP && !gzip_ok) ||
+      (best.method == http_compress_method::DEFLATE && !deflate_ok)) {
+    const bool was_gzip = (best.method == http_compress_method::GZIP);
+    if (was_gzip && deflate_ok) {
+      best.method = http_compress_method::DEFLATE;
+    } else if (!was_gzip && gzip_ok) {
+      best.method = http_compress_method::GZIP;
+    } else {
+      // 两条路都被拒（或另一条 q 更低但可用）—— 退回未压缩。
+      best.method = http_compress_method::NONE;
     }
   }
 
