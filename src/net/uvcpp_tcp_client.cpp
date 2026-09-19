@@ -239,13 +239,22 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     if (tls_hs_timer_ != nullptr) {
       tls_hs_timer_->stop();
       if (tls_hs_in_cb_) {
-        // 包装对象留在原地（理由同上），句柄单独关掉 —— 与上面 `tcp_` 那句
-        // 同一个形状：`uv_close` 是异步的，完成回调回来时包装对象仍然有效。
+        // 与上面 `tcp_` 同一处理：句柄单独关掉，**包装对象交给它的关闭完成
+        // 回调去删**。原先这里是"包装对象留在原地"，理由是"同上" —— 而上面
+        // 那句现在不算在"原地"了，所以这里是照同一个理由改过来，不是新加
+        // 的依赖：`uv_close` 是异步的，完成回调跑在本轮 `uv_run` 的收尾阶段，
+        // 那时定时器自己的回调帧早就解开了。
         if (!tls_hs_timer_->is_closing()) {
-          tls_hs_timer_->close([](uvcpp_handle*) {});
+          tls_hs_timer_->close([](uvcpp_handle* wrapper) {
+            delete wrapper;
+            g_reclaim_deferred.fetch_add(1, std::memory_order_relaxed);
+          });
+        } else {
+          g_reclaim_skipped.fetch_add(1, std::memory_order_relaxed);
         }
       } else {
         delete tls_hs_timer_;
+        g_reclaim_released.fetch_add(1, std::memory_order_relaxed);
       }
       tls_hs_timer_ = nullptr;
     }
