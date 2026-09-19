@@ -42,9 +42,10 @@ namespace uvcpp {
 // =========================================================================
 
 uvcpp_http_client::uvcpp_http_client() {
-  loop_   = new uvcpp_loop();
-  tcp_    = new uvcpp_tcp_client(loop_);
-  parser_ = new uvcpp_http_parser(http_parser_mode::PARSE_RESPONSE);
+  loop_        = new uvcpp_loop();
+  tcp_         = new uvcpp_tcp_client(loop_);
+  parser_      = new uvcpp_http_parser(http_parser_mode::PARSE_RESPONSE);
+  alive_token_ = std::make_shared<char>(0);
   // **对端在响应收完之前断开，只有这条路看得见。** 本层注册的是传统
   // `read_start`（`send()` 里那条），而传统式在 `nread < 0` 时**不调数据回调**，
   // 只跑 `fire_close_callbacks()`（`uvcpp_tcp_client.cpp:1280`）—— 不装观察者
@@ -53,16 +54,62 @@ uvcpp_http_client::uvcpp_http_client() {
   //
   // 不改成 `read_start_events`：它与传统式互斥（`UV_EALREADY`），而 h2 层在
   // 同一个 `tcp_` 上装的正是事件式 —— 换了会让 `start_h2()` 当场自毁。
-  close_observer_id_ = tcp_->add_close_observer([this]() { on_tcp_close(); });
+  std::weak_ptr<char> tok = alive_token_;
+  close_observer_id_ =
+      tcp_->add_close_observer([this, tok]() {
+        if (tok.expired()) return;
+        on_tcp_close();
+      });
 }
 
 uvcpp_http_client::~uvcpp_http_client() {
-  // 第一件事就摘掉：下面关 `tcp_` 那段 dance 会 `loop_->run(UV_RUN_NOWAIT)`
+  // **第一件事就把令牌作废**，排在摘观察者之前：下面每一处都可能把用户代码
+  // 叫起来（关闭观察者、h2 的 on_disconnect、关闭 dance 里泵的每一轮），而
+  // 用户代码可以把本对象删掉 —— 这一句之后那些闭包一律提前返回。
+  alive_token_.reset();
+
+  // 摘掉观察者：下面关 `tcp_` 那段 dance 会 `loop_->run(UV_RUN_NOWAIT)`
   // 泵若干轮，不摘掉的话观察者有机会在**本对象析构到一半**时被叫起来。
   if (tcp_ != nullptr && close_observer_id_ != 0) {
     tcp_->remove_close_observer(close_observer_id_);
   }
   close_observer_id_ = 0;
+
+  // **本对象是在它自己的某个回调里被析构的。**
+  //
+  // 那一摞栈帧各自还在用本对象的成员，而且**都不归我们收尾**：
+  //
+  //   `parser_->execute()`          → `parser_`（还在往里写解析状态）
+  //   `uvcpp_stream::callback_read` → `tcp_`（正在执行的那个读闭包就存在它里面）
+  //   `uvcpp_h2_connection::on_read`/`uvcpp_h2_session::drain` → `h2_`
+  //   `uvcpp_loop::run` / `uv_run`  → `loop_`（嵌套计数要在返回之后才减）
+  //
+  // 所以这一路**一个都不拆**：`tcp_`、`loop_`、`parser_`、`h2_`、`ssl_` 全部留给
+  // 循环 —— 这是**有意的泄漏**，换掉一个必然发生的 use-after-free。与
+  // `~uvcpp_tcp_client`（`src/net/uvcpp_tcp_client.cpp:126`，同一句
+  // `loop_->is_running()` 判据）和 `~uvcpp_ws_client` 是同一条策略。
+  //
+  // 唯一必须做的是**把读停掉**（而且只能停底层那个）：不停的话循环下一轮还会
+  // 从 `uv__read` 回来，一路走到那个捕着 `this` 的闭包上。停的是裸句柄的
+  // `read_stop()`，**不是** `tcp_->read_stop()` —— 后者会把 `read_fn_`/`read_arg_`
+  // 清掉，而那正是**此刻压在栈上、还没返回**的那个闭包的家。与
+  // `~uvcpp_tcp_client` 逐字同形。
+  if (loop_ != nullptr && loop_->is_running()) {
+    if (tcp_ != nullptr) {
+      uvcpp_tcp* raw = tcp_->get_tcp();
+      // 句柄还是要关掉，只有**包装对象**留下。上面那句 `is_closing()` 不能省：
+      // 这条析构也可能是从**关闭回调里**被调到的（观察者已经摘了，但 h2 那条
+      // `on_disconnect` 会 `delete` 本对象），那时句柄已经在关，再关一次是重复入队。
+      // 关完之后 `get_handle()` 已经是 nullptr，所以两件事并进同一个守卫。
+      if (raw != nullptr && raw->get_handle() != nullptr) {
+        raw->read_stop();
+        if (!raw->is_closing()) {
+          raw->close([](uvcpp_handle*) {});
+        }
+      }
+    }
+    return;
+  }
 
 #if UVCPP_NGHTTP2_ENABLE
   // 次序在拆 `tcp_` **之前**：h2 层往 `tcp_` 上注册过读回调（捕的是它自己的
@@ -350,21 +397,33 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   // 知道"刚发出去的是 HEAD"，否则它会一直等那个永远不来的 body，回调永远不
   // 落地，请求只会超时。必须在 reset() **之后**：llhttp_init 会把标志清掉。
   parser_->set_request_method(req.method);
-  parser_->set_on_body([this](const char* at, size_t len) {
+  // 下面这一组连同读、写那两个闭包都捕 `tok`：**本类最自然的用法就是在响应
+  // 回调里 `delete` 客户端**，而那时这些闭包还挂在 `tcp_` / `parser_` 上，
+  // 析构之后必须自己知道"别碰"。（`parser_` 由本层持有，析构那条路会把它
+  // 一并交出去 —— 见 `~uvcpp_http_client`。）
+  std::weak_ptr<char> tok = alive_token_;
+  parser_->set_on_body([this, tok](const char* at, size_t len) {
+    if (tok.expired()) return;
     body_buf_.append_data(at, len);
   });
-  parser_->set_on_headers_complete([this]() {
+  parser_->set_on_headers_complete([this, tok]() {
+    if (tok.expired()) return;
     response_headers_done_ = true;
   });
-  parser_->set_on_message_complete([this]() {
+  parser_->set_on_message_complete([this, tok]() {
+    if (tok.expired()) return;
     on_response_complete();
   });
 
   // Read handler — only set on first request; keep-alive reuses existing
   if (!has_status(HTTP_CLIENT_RECEIVING)) {
-    tcp_->read_start([this](uvcpp_buf* buf) {
+    tcp_->read_start([this, tok](uvcpp_buf* buf) {
+      if (tok.expired()) return;
       if (buf && buf->size() > 0) {
-        on_tcp_data(buf);
+        // 令牌要**传进去**：`execute()` 会同步跑用户回调，用户在那里删掉本
+        // 对象之后，`on_tcp_data` 剩下的那几句还在用 `this`。它自己读不到
+        // 任何成员（内存已经还了），只能读这个由闭包带来的局部副本。
+        on_tcp_data(buf, tok);
       }
     });
   }
@@ -383,13 +442,18 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   std::string raw = req.to_string();
 #endif
 
-  tcp_->write(raw.c_str(), raw.size(), [this](int status) {
+  tcp_->write(raw.c_str(), raw.size(), [this, tok](int status) {
+    if (tok.expired()) return;
     if (status != 0) {
       set_status(HTTP_CLIENT_ERROR);
       last_error_code_ = status;
       if (user_cb_) {
-        user_cb_(pending_resp_, status);
+        // **先挪走再调**（与 `on_response_complete` 同形状）：用户回调里可以
+        // 析构本对象，调完再碰 `user_cb_` 就是往已释放的内存上写。
+        std::function<void(const uvcpp_http_response&, int)> cb =
+            std::move(user_cb_);
         user_cb_ = nullptr;
+        cb(pending_resp_, status);
       }
       return;
     }
@@ -468,19 +532,29 @@ int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
 // TCP data handler
 // =========================================================================
 
-void uvcpp_http_client::on_tcp_data(uvcpp_buf* buf) {
+void uvcpp_http_client::on_tcp_data(uvcpp_buf* buf,
+                                    const std::weak_ptr<char>& tok) {
   if (buf == nullptr || buf->size() == 0) return;
 
   const char* data = buf->get_const_data();
   size_t len = buf->size();
   parser_->execute(data, len);
 
+  // **这一句之前不能碰本对象的任何成员。** `execute()` 会同步跑到用户的
+  // `send()` 回调里（响应收全时走 `set_on_message_complete`），而用户完全
+  // 可以在那里 `delete this` —— 那时 `this` 的内存已经还了，下面每一句
+  // （包括 `parser_->has_error()` 里的 `parser_`）都是释放后使用。
+  // 令牌是闭包带来的、独立于本对象的那一块，是这里唯一读得的东西。
+  if (tok.expired()) return;
+
   if (parser_->has_error()) {
     set_status(HTTP_CLIENT_ERROR);
     last_error_code_ = UV_EINVAL;
     if (user_cb_) {
-      user_cb_(pending_resp_, last_error_code_);
+      std::function<void(const uvcpp_http_response&, int)> cb =
+          std::move(user_cb_);
       user_cb_ = nullptr;
+      cb(pending_resp_, last_error_code_);
     }
   }
 }
@@ -1021,18 +1095,27 @@ int uvcpp_http_client::start_h2() {
   h2_ = new uvcpp_h2_connection(tcp_, /*server_side=*/false);
 
   uvcpp_h2_session::callbacks sc;
+  // 与 h1 那条路同一套令牌：h2 的回调也是在 `mem_recv`/`drain` 里**同步**跑进
+  // 用户回调的，用户在那里 `delete` 客户端之后，这些闭包和 `h2_` 都还挂在
+  // `tcp_` 上（h2 那条析构路会把它们一并交出去）。
+  std::weak_ptr<char> tok = alive_token_;
   // 只装收响应要用的三个。`on_request` / `on_request_end` 是服务端侧的槽
   // （`uvcpp_h2_session` 按 `server_side` 分流），客户端会话不会调它们。
-  sc.on_body = [this](uvcpp_h2_session& s, uvcpp_h2_stream& st,
-                      const char* d, size_t n) { on_h2_body(s, st, d, n); };
+  sc.on_body = [this, tok](uvcpp_h2_session& s, uvcpp_h2_stream& st,
+                           const char* d, size_t n) {
+    if (tok.expired()) return;
+    on_h2_body(s, st, d, n);
+  };
   // 交付用户的动作**只能**放这里。带 body 的响应里 `on_response` 的
   // `end_stream` 恒为 false，而 DATA 的 END_STREAM 不经过它 —— 装在那边就是
   // "有 body 的响应永远等不到回调"。没有 body 的响应（HEAD、204、304）里
   // HEADERS 自带 END_STREAM，会话会把两个回调背靠背地跑，走这条也一样。
-  sc.on_response_end = [this](uvcpp_h2_session& s, uvcpp_h2_stream& st) {
+  sc.on_response_end = [this, tok](uvcpp_h2_session& s, uvcpp_h2_stream& st) {
+    if (tok.expired()) return;
     on_h2_response_end(s, st);
   };
-  sc.on_close = [this](uvcpp_h2_session& s, int32_t id, uint32_t ec) {
+  sc.on_close = [this, tok](uvcpp_h2_session& s, int32_t id, uint32_t ec) {
+    if (tok.expired()) return;
     on_h2_stream_close(s, id, ec);
   };
   // 连接级致命错误由 `uvcpp_h2_connection::start` 包一层转成 `shutdown()`；
@@ -1040,7 +1123,10 @@ int uvcpp_http_client::start_h2() {
   sc.on_fatal = [](uvcpp_h2_session&, int) {};
 
   uvcpp_h2_connection::callbacks cc;
-  cc.on_disconnect = [this](uvcpp_h2_connection& c) { on_h2_disconnect(c); };
+  cc.on_disconnect = [this, tok](uvcpp_h2_connection& c) {
+    if (tok.expired()) return;
+    on_h2_disconnect(c);
+  };
 
   const int rv = h2_->start(sc, cc);
   if (rv != 0) {

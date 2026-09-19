@@ -1164,7 +1164,8 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 | **路由注册失败看不见** | `app.get()` 返回 `uvcpp_web_app&`；要检查就走 `app.router()`（§3）。 |
 | **静态 dotfile 默认值是 404（`HIDE`）** | 头文件注释误写成 `IGNORE`（§7）。 |
 | **上传上限全 App 一份** | 没有按路由覆盖（§8）。 |
-| **`uvcpp_http_client` 只在"有请求在飞"时才看得见对端断开** | 异步路径上对端在响应收完之前断开，`send()` 的回调会**落地**并以 `UV_ECONNRESET` 交付（本层写死的值，与传输层看到 EOF 还是 RST 无关），`HTTP_CLIENT_CONNECTED` 同时被清掉，此后的 `send()` 直接回 `UV_ENOTCONN` 而不是写进一条死 socket。**但只 `connect()` 过、从没 `send()` 过的客户端仍然不知道** —— 关闭通知只能搭在读路径上，而读是在第一次 `send()` 里才装的（`uvcpp_http_client.cpp:353-360`）。 |
+| **在回调里 `delete` 客户端：能用，但那份内存不回收** | 在 `connect()` / `send()` 的回调里 `delete` 掉 `uvcpp_http_client` 是**支持**的（"响应回来就把客户端扔了"是本类最自然的用法），删掉之后不许再碰、也不许再 `send()`。代价是那一次析构**故意不拆内部对象**：`uvcpp_loop` + `uvcpp_tcp_client` + 解析器（h2 上再加一个 nghttp2 会话）留在循环上不释放 —— 换掉一个必然发生的 use-after-free（析构里那段"泵到句柄关完"会把**还压在栈上**的那条读路径再叫一遍，实测 `0xC0000005`）。要让内存回归，就别在回调里删：回调里置一个标志，循环退出之后再删。 |
+| **`uvcpp_http_client` 只在"有请求在飞"时才看得见对端断开** | 异步路径上对端在响应收完之前断开，`send()` 的回调会**落地**并以 `UV_ECONNRESET` 交付（本层写死的值，与传输层看到 EOF 还是 RST 无关），`HTTP_CLIENT_CONNECTED` 同时被清掉，此后的 `send()` 直接回 `UV_ENOTCONN` 而不是写进一条死 socket。**但只 `connect()` 过、从没 `send()` 过的客户端仍然不知道** —— 关闭通知只能搭在读路径上，而读是在第一次 `send()` 里才装的（`uvcpp_http_client.cpp:418-429`）。 |
 
 ---
 

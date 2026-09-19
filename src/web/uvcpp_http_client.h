@@ -21,6 +21,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <uv.h>
 #include <uvcpp/uvcpp_define.h>
@@ -274,8 +275,15 @@ class UVCPP_API uvcpp_http_client {
   void set_status(int flags);
   void clear_status(int flags);
 
-  /** @brief TCP "data arrived" handler — feeds data to HTTP parser. */
-  void on_tcp_data(uvcpp_buf* buf);
+  /** @brief TCP "data arrived" handler — feeds data to HTTP parser.
+   *
+   * `tok` 由**调用方**（那条捕了它的读闭包）传进来，本函数只把它当成一个
+   * 局部的、不随本对象释放而失效的东西来读。原因见 `alive_token_` 那段：
+   * `parser_->execute()` 会同步跑用户回调，用户可以在那里 `delete this`，
+   * 而 `execute()` 返回后本函数**还要接着用成员** —— 那时 `this` 已经没了，
+   * 唯一还能读的就是这个局部令牌。
+   */
+  void on_tcp_data(uvcpp_buf* buf, const std::weak_ptr<char>& tok);
 
   /** @brief TCP "connection closed" handler — 注册成 `tcp_` 的关闭观察者。 */
   void on_tcp_close();
@@ -317,6 +325,19 @@ class UVCPP_API uvcpp_http_client {
 
   /// `add_close_observer()` 的句柄，0 表示没注册（那个 API 的保留值）。
   int close_observer_id_ = 0;
+
+  /// 存活令牌。凡是"由别人持有、指回本对象"的闭包都捕它的 `weak_ptr`。
+  ///
+  /// 本对象可以被**从它自己的回调里** `delete` —— 在响应回调里删掉客户端是最
+  /// 自然的用法，而这正是本类此前会崩的那条路（`~uvcpp_http_client` 里的泵会
+  /// 回头再叫一次 `on_tcp_data`，栈上是
+  /// `on_tcp_data → parser::execute → llhttp`）。析构函数**第一件事**就 reset
+  /// 它，此后那些闭包一律提前返回。
+  ///
+  /// 之所以必须是令牌而不是一个 `bool` 成员：闭包跑起来时本对象的内存**已经
+  /// 还了**，读任何成员都是往释放过的内存上读。令牌是闭包自己的、独立于本对象
+  /// 生命周期的一块内存。手法与 `uvcpp_ws_connection::alive_token_` 相同。
+  std::shared_ptr<char> alive_token_;
 
   std::string host_;
   int port_ = 0;

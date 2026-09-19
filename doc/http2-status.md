@@ -80,8 +80,9 @@
 | 文件 | 测什么 |
 |---|---|
 | `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
-| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN |
+| `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**（ALPN=h2 写成显式前置） |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
+| `tests/functional/web_http_client_selfdestroy_func.cpp` | h1：在响应回调 / connect 回调 / keep-alive 第二次请求的回调里 `delete` 客户端（三条路都不许崩） |
 | `tests/functional/web_ssl_app_h2_func.cpp` | 框架自动协商（h2 / 退回 h1）；外加**停机道别**与**拆连接时在途流的收尾**两条路 |
 
 `/big`（1 MiB 流式响应）是后两条路共用的那根杠杆：它比默认流控窗口（65535）长
@@ -110,9 +111,19 @@
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
   **升级 nghttp2 时这几处要一起核。**
 - **没有发 trailer 的 API。** 收方向认 trailer，发方向只能"HEADERS 带 END_STREAM"。
+- **"在回调里被析构"走的是有意泄漏。** `~uvcpp_http_client` 判到 `loop_->is_running()`
+  —— 也就是本对象正压在它自己的某个回调栈上被删 —— 就**一个都不拆**：`tcp_` /
+  `loop_` / `parser_` / `h2_` / `ssl_` 全留给循环，只把**底层**读停掉、把裸句柄关掉。
+  那一摞栈帧各自还在用这些成员（`execute()` 在用 `parser_`、正在执行的读闭包就住在
+  `tcp_` 里、`uv_run` 的嵌套计数要在 `uv_run` 返回之后才减），谁来拆都是往栈上还在用的
+  内存里写。代价是**每个这样被删掉的客户端漏一份**（`uvcpp_loop` + `uvcpp_tcp_client`
+  + 解析器，h2 上再加一个 nghttp2 会话）。这与 `~uvcpp_tcp_client`
+  （`src/net/uvcpp_tcp_client.cpp:126`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
+  **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
+  "析构可以从回调里被调到"这件事本身消失。
 - **两处已死的成员**（只报告，不影响行为）：`HTTP_CLIENT_CLOSING = 0x10`
   （`src/web/uvcpp_http_client.h:62`）全仓零引用；`keep_alive_` 只在
-  `uvcpp_http_client.cpp:517,602` 被写、从没被读。
+  `uvcpp_http_client.cpp:602,687` 被写、从没被读。
 
 ---
 
@@ -164,13 +175,39 @@
 不留任何可观察的痕迹，为它造一个计数器超出这一批的范围。所以这一条是**读代码核
 出来的**，不是跑出来的；别把"没有用例"读成"没有缺陷"。
 
+批 5（客户端在**它自己的回调里**被 `delete`）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| **在它自己的回调里 `delete` 客户端会崩** | "响应回来就把客户端扔了"是本类最自然的用法，而它此前**必然崩**。析构里那段关闭 dance 会 `loop_->run(UV_RUN_NOWAIT)` 泵若干轮，把**还压在栈上**的那条读路径再叫一遍。cdb 实测栈：`llhttp → uvcpp_http_parser::execute → on_tcp_data → ~uvcpp_http_client+0x45e → callback_read → uv_run`，`0xC0000005` | 判到 `loop_->is_running()`（= 本对象正压在自己的回调栈上）就**一个都不拆**，只把**底层**读停掉、把裸句柄关掉。停的是裸句柄的 `read_stop()`，不是包装对象的 —— 后者会把 `read_fn_`/`read_arg_` 清掉，而那正是此刻压在栈上还没返回的那个闭包的家 |
+| 析构之后**仍然挂在别人身上**的闭包 | 上一条修完，对象"死"了但内存还在（泄漏换的），而读闭包、解析器那三个回调、h2 的 `on_body`/`on_response_end`/`on_close`/`on_disconnect` 都还捕着 `this` —— 下一次被叫起来就是往释放过的内存上写 | 一枚 `alive_token_`（`std::shared_ptr<char>`）：析构**第一件事** `reset()`，所有捕回本对象的闭包都捕它的 `weak_ptr` 并自查 `expired()`。**必须是令牌而不是 `bool` 成员** —— 闭包跑起来时对象内存已经还了，读任何成员都是释放后使用。`on_tcp_data` 因此多收一个形参，令牌由那条读闭包带进来 |
+| 两处"**调完再置空**" | `write` 失败那条与 `on_tcp_data` 里报错那条都是先 `user_cb_(...)` 再 `user_cb_ = nullptr` —— 用户回调里 `delete this` 的话，第二句就是往已释放的内存上写 | 先把 `std::function` **挪出来**再调（与既有的 `on_response_complete` 同形状） |
+
+**批 5 的变异覆盖要分两半说，差别很大。**
+
+被**直接**钉住的只有析构里那个重入判据：把它改成恒假（m1），新用例当场
+`0xC0000005`（rc=`3221225477`）—— 那正是它修之前的样子，所以用例**不是空转**。
+
+而那 11 处 `tok.expired()` 守卫**单跑一个都钉不住**：逐条删（m2 读闭包不查令牌、
+m3 析构不作废令牌、m4 拆掉停读与关句柄、m5 连令牌作废一起拆）两棵树都是绿的。
+裸跑看不出毛病是有原因的 —— `free` 掉的那块内存还在、内容还是旧的，读它读不出错。
+**换成完整页堆就现原形**：11 处全删（m6）之后裸跑**依旧绿**，页堆下**必然**
+`0xC0000005`，cdb 顶帧是 `uvcpp_http_client::on_tcp_data+0x63` ——
+`parser_->execute()` 返回之后那句 `parser_->has_error()`，它要从**已释放的对象**里
+读 `parser_` 这个成员。守卫都在时，同一道门禁两遍都绿。
+
+所以这两条防线性质不同：**"停读 + 不拆"是裸跑就看得见的**，**令牌守卫是只有页堆
+看得见的**，而且它防的是"在响应回调里析构"之外的路径（同一条连接上还有第二个响应
+在路上之类），今天**没有用例走到那里**。`tests/tools/run_pageheap_gate.py` 是这一批
+配套的判据，不是可选项。
+
 ### 4.2 还没修的（**只记录**）
 
 - **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
 - **`REFUSED_STREAM(7)` 没有映射成 `UV_ECANCELED`。** 收到 GOAWAY 时 nghttp2 会把
   被波及的本端流逐条以 `REFUSED_STREAM` 关掉（4.3 有出处），而 `on_h2_stream_close`
   的判据是"`error_code == 0` 才当 `UV_ECANCELED`，其余一律 `UV_EPROTO`"
-  （`uvcpp_http_client.cpp:1148`）⇒ **"这条请求没被处理过、可以安全重试"这个
+  （`uvcpp_http_client.cpp:1234`）⇒ **"这条请求没被处理过、可以安全重试"这个
   信号没有被表达出来**，调用方看到的是 `UV_EPROTO`（协议失败）。要做对得先定下这个
   信号从哪儿带出去（`uvcpp_http_response` 上新增字段，还是另立一个取值函数），
   这一批不动。
@@ -209,3 +246,16 @@ ctest --test-dir build-h2 -C Release --timeout 60
 `uvcpp.dll`（本机没有 `pwsh.exe`，`copy_test_dlls` 静默不跑），拿旧 dll 跑出来的
 绿/红都不算数 —— 比 `build-h2/Release/uvcpp.dll` 与
 `build-h2/tests/functional/Release/uvcpp.dll` 的 md5，一致了再跑。
+
+批 5 又补了三条，性质一样（都是**产物或环境的问题冒充代码的问题**）：
+
+1. **动过任何头文件就必须不带 `--target` 全量构建。** 往 `uvcpp_http_client` 里加
+   一个私有成员之后，那批**按值**在栈上持有它的测试 exe（旧 `sizeof`）会在 `main`
+   之前 `0xC0000409` 死掉、**一个字节都不输出**；用 `new` 的用例和刚重链过的用例
+   全绿 —— "一部分红一部分绿"正是它的指纹。只建 `--target uvcpp` 不重链任何 exe。
+   纯 `.cpp` 变异不受影响。
+2. **自毁那条路要量重复率，单跑一次绿不算数。** 它是不是崩取决于释放掉的内存有没有
+   被复用 —— 同一份代码两棵树可以一次绿一次红。这一批修完是两棵树各 60 次全绿。
+3. **页堆门禁是这一批的必要判据**，不是"有空再跑"：
+   `python -u tests/tools/run_pageheap_gate.py --tree build-h2 --exe test_web_http_client_selfdestroy_func`
+   —— 令牌守卫那一层的效力**只有它看得见**（删掉守卫后裸跑照样绿，页堆下必然违例）。

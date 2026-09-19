@@ -82,6 +82,7 @@ std::string make_defer_body() {
   s.resize(2048);
   return s;
 }
+
 const std::string kDeferBody = make_defer_body();
 
 // =========================================================================
@@ -607,6 +608,81 @@ void scenario_peer_goaway(int port, uvcpp_ssl_context* cctx, server_state& st) {
         "bye: 上面那次 send 把道别状态弄丢了");
 }
 
+/// 场景 6：**在它自己的回调里** `delete` 客户端（h2 这条路上）。
+///
+/// h1 那条同形状的用例在 `web_http_client_selfdestroy_func.cpp`，那条是真崩过的
+/// （析构里泵的那几轮会回头再叫一次读路径，cdb 的栈是
+/// `on_tcp_data → parser::execute → llhttp`）。这里补的是 h2 的那一半：回调是从
+/// `uvcpp_h2_session::drain` 里**同步**跑出来的，上面还压着 nghttp2 的帧循环与
+/// h2 连接的读写回调 —— 析构那条"一个都不拆"的路要把它们一路放回去。
+void scenario_selfdestroy(int port, uvcpp_ssl_context* cctx) {
+  std::cout << "[scenario 6] 在 h2 回调里 delete 客户端" << std::endl;
+
+  uvcpp_http_client* pc = new uvcpp_http_client();
+  pc->set_http2_enabled(true);
+  pc->set_ssl_context(cctx);
+  uvcpp_loop* loop = pc->get_tcp_client()->get_loop();
+
+  std::atomic<bool> connected{false};
+  const int crc = pc->connect("127.0.0.1", port, [&connected](int status) {
+    if (status == 0) connected.store(true);
+  });
+  check(crc == 0, "selfdestroy_h2: connect() 返回 " + std::to_string(crc));
+  if (crc != 0) {
+    delete pc;
+    return;
+  }
+  if (!uvcpp_test::wait_until(loop, [&] { return connected.load(); },
+                              uvcpp_test::kWaitMs)) {
+    check(false, "selfdestroy_h2: connect 没在墙钟上限内成功");
+    delete pc;
+    return;
+  }
+  // **前置**：这条必须是 h2。协商退回 h1 的话，这条用例测的是另一条路，
+  // 而它会照常"通过"。
+  check(pc->negotiated_alpn() == "h2",
+        "selfdestroy_h2[前置]: ALPN = \"" + pc->negotiated_alpn() +
+            "\"，应为 h2");
+
+  std::atomic<bool> fired{false};
+  std::atomic<bool> deleted{false};
+  std::atomic<int>  err{-99};
+  std::atomic<int>  code{0};
+  std::atomic<int>  sid{0};
+
+  const int src = pc->send(
+      uvcpp_http_request::make_get("/hello"),
+      [pc, &fired, &deleted, &err, &code, &sid](
+          const uvcpp_http_response& r, int e) {
+        err.store(e);
+        code.store(static_cast<int>(r.status_code));
+        sid.store(r.stream_id);
+        delete pc;
+        deleted.store(true);
+        fired.store(true);
+      });
+  check(src == 0, "selfdestroy_h2: send() 返回 " + std::to_string(src));
+  if (src != 0) {
+    delete pc;
+    return;
+  }
+
+  check(uvcpp_test::wait_until(loop, [&] { return fired.load(); },
+                               uvcpp_test::kWaitMs),
+        "selfdestroy_h2: 响应回调没在墙钟上限内落地");
+  check(deleted.load(),
+        "selfdestroy_h2[前置]: 回调执行到了 delete 之后的那一句");
+  check(err.load() == 0,
+        "selfdestroy_h2: err = " + std::to_string(err.load()));
+  check(code.load() == 200,
+        "selfdestroy_h2: status = " + std::to_string(code.load()));
+  // 上面那次 `delete` 的栈是**在 `loop->run()` 里面**退的，这里再泵几轮，
+  // 让 nghttp2 的帧循环与 h2 连接的读写回调也走完各自的收尾。
+  uvcpp_test::pump_for(loop, 50);
+  check(sid.load() > 0 && (sid.load() % 2) == 1,
+        "selfdestroy_h2: resp.stream_id = " + std::to_string(sid.load()));
+}
+
 }  // namespace
 
 int main() {
@@ -640,6 +716,7 @@ int main() {
     scenario_on(srv.port, &cctx);
     scenario_concurrent(srv.port, &cctx, srv.st);
     scenario_peer_goaway(srv.port, &cctx, srv.st);
+    scenario_selfdestroy(srv.port, &cctx);
 
     // 服务端侧的正面证据：确实有一条 ALPN=h2 的连接被交付过。（场景 1 那条
     // 是 h1，所以这里不能断言等于用例数。）
