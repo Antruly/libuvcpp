@@ -467,25 +467,22 @@ static bool test_version_bounds_settable() {
   ctx.set_min_version(tls_version::TLS_1_3);
   if (SSL_CTX_get_min_proto_version(ctx.raw_ctx()) != TLS1_3_VERSION) {
     std::cout << "    set_min_version(TLS_1_3) 之后下限不是 TLS 1.3（读到 "
-              << SSL_CTX_get_min_proto_version(ctx.raw_ctx()) << "）
-";
+              << SSL_CTX_get_min_proto_version(ctx.raw_ctx()) << "）" << std::endl;
     return false;
   }
 
-  // 放回来：TLS_1_2 → 1.2 必须重新可用（原实现这一步就是失效的）
+  // 放回来：TLS_1_2 → 1.2 必须重新可用（原实现这一步是失效的）
   ctx.set_min_version(tls_version::TLS_1_2);
   if (SSL_CTX_get_min_proto_version(ctx.raw_ctx()) != TLS1_2_VERSION) {
-    std::cout << "    set_min_version(TLS_1_2) 之后下限不是 TLS 1.2 —— "
-                 "下限只能抬、不能放
-";
+    std::cout << "    set_min_version(TLS_1_2) 之后下限不是 TLS 1.2 —— 下限只能抬、不能放"
+              << std::endl;
     return false;
   }
 
   // 压上限
   ctx.set_max_version(tls_version::TLS_1_2);
   if (SSL_CTX_get_max_proto_version(ctx.raw_ctx()) != TLS1_2_VERSION) {
-    std::cout << "    set_max_version(TLS_1_2) 之后上限不是 TLS 1.2
-";
+    std::cout << "    set_max_version(TLS_1_2) 之后上限不是 TLS 1.2" << std::endl;
     return false;
   }
 
@@ -496,14 +493,12 @@ static bool test_version_bounds_settable() {
     // 0 = 不限，语义上等价于"最高到本端支持的最高版本"
     if (mx != 0 && mx < TLS1_3_VERSION) {
       std::cout << "    set_max_version(TLS_1_3) 之后上限仍被压在 " << mx
-                << " —— 上限只能压、不能放
-";
+                << " —— 上限只能压、不能放" << std::endl;
       return false;
     }
   }
   return true;
 }
-
 
 int main() {
   bool ok = true;
