@@ -613,6 +613,93 @@ static bool test_body_limit_returns_413() {
 }
 
 // -------------------------------------------------------------------------
+// Test: 超出请求头上限 -> 431（而且是在**收到完整头块之前**就回）
+// -------------------------------------------------------------------------
+static bool test_header_limit_returns_431() {
+  TestServer srv;
+  int port = srv.start([](uvcpp_http_server& s) {
+    s.set_max_header_bytes(1024);
+    s.get("/x", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                   uvcpp_tcp_client*) { resp = uvcpp_http_response::ok("x", 1); });
+  });
+
+  bool ok = true;
+
+  // 关键的一条：这一段**没有**结尾的空行，头块还没收完。能收到 431 就说明
+  // 服务端是边收边判、超了当场停 —— 若改成等 `headers_complete` 再看，
+  // 这里会一直等一个永远不来的 CRLF，`raw_exchange` 直接读超时。
+  const std::string unterminated =
+      "GET /x HTTP/1.1\r\nHost: a\r\nX-Big: " + std::string(2000, 'b');
+  std::string got;
+  if (!raw_exchange(port, unterminated, got)) {
+    std::cout << "  [err] 超长头部没有在头块收完之前得到响应（说明是等收完才判的）\n";
+    ok = false;
+  } else if (got.find("431") == std::string::npos) {
+    std::cout << "  [err] 超长头部的响应不是 431，收到："
+              << got.substr(0, 40) << "\n";
+    ok = false;
+  } else if (got.find("400") != std::string::npos) {
+    // 撞上限也让解析器进 PARSE_ERROR，所以 `has_error()` 那条路是抢得到的 ——
+    // 判据的顺序错了就会回 400（"请求畸形"），把两件事混成一件。
+    std::cout << "  [err] 回成了 400：撞上限被当成解析错误了\n";
+    ok = false;
+  }
+
+  // 上限内的正常请求照常路由 —— 否则上面那条可能只是"什么请求都拒"。
+  uvcpp_http_response within;
+  if (ok && !http_get(port, "/x", within)) {
+    std::cout << "  [err] 上限内的请求无响应\n";
+    ok = false;
+  } else if (ok && within.status_code != http_status::OK) {
+    std::cout << "  [err] 上限内的请求状态码 "
+              << static_cast<int>(within.status_code) << " != 200\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: 超出 URL 上限 -> 414（同样在请求行收完之前就回）
+// -------------------------------------------------------------------------
+static bool test_url_limit_returns_414() {
+  TestServer srv;
+  int port = srv.start([](uvcpp_http_server& s) {
+    s.set_max_url_bytes(64);
+    s.get("/x", [](uvcpp_http_request&, uvcpp_http_response& resp,
+                   uvcpp_tcp_client*) { resp = uvcpp_http_response::ok("x", 1); });
+  });
+
+  bool ok = true;
+
+  // 只有 "GET /" + 一长串，连 " HTTP/1.1" 都还没发出去。
+  const std::string unterminated = "GET /" + std::string(200, 'c');
+  std::string got;
+  if (!raw_exchange(port, unterminated, got)) {
+    std::cout << "  [err] 超长 URL 没有在请求行收完之前得到响应\n";
+    ok = false;
+  } else if (got.find("414") == std::string::npos) {
+    std::cout << "  [err] 超长 URL 的响应不是 414，收到："
+              << got.substr(0, 40) << "\n";
+    ok = false;
+  }
+
+  uvcpp_http_response within;
+  if (ok && !http_get(port, "/x", within)) {
+    std::cout << "  [err] 上限内的请求无响应\n";
+    ok = false;
+  } else if (ok && within.status_code != http_status::OK) {
+    std::cout << "  [err] 上限内的请求状态码 "
+              << static_cast<int>(within.status_code) << " != 200\n";
+    ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
 // Test: 服务端主动关闭连接时 on_connection_close 被触发
 //
 // 旧实现只在删除 conn_ctx 的路径上回调，而服务端主动关闭走的是
@@ -992,6 +1079,8 @@ int main(int argc, char** argv) {
     {"slow_client_does_not_block_loop", test_slow_client_does_not_block_loop},
     {"malformed_request_gets_400", test_malformed_request_gets_400},
     {"body_limit_returns_413", test_body_limit_returns_413},
+    {"header_limit_returns_431", test_header_limit_returns_431},
+    {"url_limit_returns_414", test_url_limit_returns_414},
     {"server_close_notifies", test_server_close_notifies},
     {"keepalive_sequential_responses", test_keepalive_sequential_responses},
     {"client_head_request", test_client_head_request},

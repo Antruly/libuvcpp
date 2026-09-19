@@ -563,6 +563,51 @@ void test_path_prefix_auth() {
   app.join();
 }
 
+/**
+ * webapp 的 `set_max_header_bytes()` 得**真的落到解析器上**（接线用例）。
+ *
+ * 与 `web_http_server_func.cpp` 里那条 431 用例分工不同：那一条把限直接装在
+ * `uvcpp_http_server` 上，证明的是"服务器层支持这个限"；这一条走整个
+ * `uvcpp_web_app`，证明 `init_on_loop_thread()` 里那次 push-down 被接上了。
+ * 漏接的表现是"配置项存在、设了完全没反应"，而服务器层那条用例照样是绿的
+ * —— 本仓在 TLS 那类"过滤器"上已经栽过两次同样的形状，所以单独立一条。
+ */
+void test_app_header_limit_is_wired() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.set_max_header_bytes(1024);
+
+  std::atomic<int> hits(0);
+  app.get("/x", [&](uvcpp_web_request&, uvcpp_web_response& resp,
+                    uvcpp_web_next) {
+    hits.fetch_add(1);
+    resp.text("x");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "限头服务启动");
+  const int port = app.bound_port();
+
+  uvcpp_http_request req = uvcpp_http_request::make_get("/x");
+  req.set_header("x-big", std::string(4096, 'b'));
+  uvcpp_http_response r;
+  check(roundtrip(port, req, r), "超长头部有响应");
+  check(status_of(r) == 431, "超长头部回 431（实测 " +
+                                 std::to_string(status_of(r)) +
+                                 "）—— 漏接 push-down 时这里会是 200");
+  check(hits.load() == 0, "超长头部不路由");
+
+  // 同进程同端口，正常请求照常走完 —— 否则上面那条可能只是"服务坏了"。
+  uvcpp_http_response normal;
+  check(get(port, "/x", normal), "正常请求有响应");
+  check(status_of(normal) == 200, "正常请求是 200");
+  check(hits.load() == 1, "正常请求确实走到了处理器（实测 " +
+                              std::to_string(hits.load()) + " 次）");
+
+  app.stop();
+  app.join();
+}
+
 // =========================================================================
 // 5. 异步 handler：从工作线程恢复
 // =========================================================================
@@ -1437,6 +1482,7 @@ int main(int argc, char** argv) {
       {"404_405_options", test_404_405_options},
       {"middleware_order", test_middleware_order},
       {"path_prefix_auth", test_path_prefix_auth},
+      {"app_header_limit_is_wired", test_app_header_limit_is_wired},
       {"async_from_worker", test_async_from_worker_thread},
       {"connection_hooks", test_connection_hooks},
       {"raw_data_claim", test_raw_data_claim},
