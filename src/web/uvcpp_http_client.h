@@ -248,6 +248,22 @@ class UVCPP_API uvcpp_http_client {
    *        `""`（未连接或没走 TLS）。连接前恒为空。
    */
   const std::string& negotiated_alpn() const;
+
+  /**
+   * @brief 对端在这个连接上发过 GOAWAY 没有。
+   *
+   * **这是"优雅告别"与"网络挂了"之间唯一的区分手段。** 两者在 `send()` 的
+   * 回调上长得一样（都是 `UV_ECANCELED`），而含义完全不同：收到过 GOAWAY 时，
+   * 对端明确说了它处理到了哪个流号，`stream_id` 大于那个的请求**没被处理**，
+   * 重试是安全的；没收到就是"结果未知"。
+   *
+   * 连接已经拆掉之后仍然可查 —— 那个问题恰恰是断开之后才问的。
+   */
+  bool peer_goaway_received() const;
+  /// 对端 GOAWAY 里的错误码；`0` 是正常的优雅退出。没收到过时是 0。
+  uint32_t peer_goaway_error_code() const;
+  /// 对端 GOAWAY 里的 `last_stream_id`；没收到过时是 0。
+  int32_t peer_goaway_last_stream_id() const;
 #endif
 
  private:
@@ -334,6 +350,13 @@ class UVCPP_API uvcpp_http_client {
   bool http2_enabled_ = false;   // 用户意图（该不该谈 h2）
   bool h2_active_ = false;       // 谈成了没有（本次连接真的在跑 h2）
   uvcpp_h2_connection* h2_ = nullptr;
+
+  /// 对端 GOAWAY 的三个字段。断开时 `h2_` 就被删了，而"对端道别了没有"正是
+  /// 断开**之后**才要问的问题，所以在拆之前抄一份下来。
+  bool     peer_goaway_      = false;
+  uint32_t peer_goaway_code_ = 0;
+  int32_t  peer_goaway_last_ = 0;
+
   std::string negotiated_alpn_;
   std::map<int32_t, h2_stream_state> h2_streams_;
 #endif

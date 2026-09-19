@@ -1028,6 +1028,20 @@ void uvcpp_h2_session::take_completed(std::vector<std::function<void()>>& out) {
   out.swap(impl_->completed);
 }
 
+void uvcpp_h2_session::cancel_pending_out() {
+  if (!impl_) return;
+  // 先收键再逐条作废：`cancel_stream_out()` 会 erase，边遍历边删是另一回事。
+  std::vector<int32_t> ids;
+  ids.reserve(impl_->out_streams.size());
+  for (auto it = impl_->out_streams.begin(); it != impl_->out_streams.end();
+       ++it) {
+    ids.push_back(it->first);
+  }
+  for (size_t i = 0; i < ids.size(); ++i) {
+    impl_->cancel_stream_out(ids[i], UV_ECANCELED);
+  }
+}
+
 int uvcpp_h2_session::submit_status(int32_t stream_id, int status,
                                     const std::string& body) {
   if (!impl_->session) return UV_EINVAL;

@@ -151,6 +151,12 @@ int uvcpp_http_client::connect(const char* host, int port,
   host_ = host;
   port_ = port;
   last_error_code_ = 0;
+#if UVCPP_NGHTTP2_ENABLE
+  // 对端道别与否是**每连接**的事实，不能跨连接留着。
+  peer_goaway_      = false;
+  peer_goaway_code_ = 0;
+  peer_goaway_last_ = 0;
+#endif
 
   if (cb) {
 #if UVCPP_OPENSSL_ENABLE
@@ -243,6 +249,11 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
   host_ = host;
   port_ = port;
   last_error_code_ = 0;
+#if UVCPP_NGHTTP2_ENABLE
+  peer_goaway_      = false;
+  peer_goaway_code_ = 0;
+  peer_goaway_last_ = 0;
+#endif
 
   bool done = false;
   int result = 0;
@@ -988,6 +999,24 @@ const std::string& uvcpp_http_client::negotiated_alpn() const {
   return negotiated_alpn_;
 }
 
+// `h2_` 还在时问活的那一份，拆了之后答抄下来的那一份 —— 两个时机都得对：
+// 连接还开着的时候调用方要能**提前**知道对端在收摊（好把请求挪走），
+// 断开之后要能**回头**分辨这次断开是告别还是断线。
+bool uvcpp_http_client::peer_goaway_received() const {
+  if (h2_ != nullptr) return h2_->session().peer_goaway_received();
+  return peer_goaway_;
+}
+
+uint32_t uvcpp_http_client::peer_goaway_error_code() const {
+  if (h2_ != nullptr) return h2_->session().peer_goaway_error_code();
+  return peer_goaway_code_;
+}
+
+int32_t uvcpp_http_client::peer_goaway_last_stream_id() const {
+  if (h2_ != nullptr) return h2_->session().peer_goaway_last_stream_id();
+  return peer_goaway_last_;
+}
+
 int uvcpp_http_client::start_h2() {
   h2_ = new uvcpp_h2_connection(tcp_, /*server_side=*/false);
 
@@ -1125,6 +1154,11 @@ void uvcpp_http_client::on_h2_disconnect(uvcpp_h2_connection&) {
   // 连接没了，先把 h2 这一整套摘干净 —— 下面要跑用户回调，而用户完全可以在
   // 回调里把整个 client 析构掉，那之后一个成员都不能碰。
   //
+  // 拆之前先把对端道别与否抄下来 —— 这一句正是"断开之后还查得到"的全部来源。
+  peer_goaway_      = h2_->session().peer_goaway_received();
+  peer_goaway_code_ = h2_->session().peer_goaway_error_code();
+  peer_goaway_last_ = h2_->session().peer_goaway_last_stream_id();
+
   // `delete h2_` 是**被允许**的：`on_disconnect` 的契约就是"持有者在这里销毁
   // 本对象"，它返回后 `uvcpp_h2_connection` 不再碰自己任何一个成员。
   delete h2_;

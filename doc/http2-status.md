@@ -82,7 +82,12 @@
 | `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
 | `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
-| `tests/functional/web_ssl_app_h2_func.cpp` | 框架自动协商（h2 / 退回 h1） |
+| `tests/functional/web_ssl_app_h2_func.cpp` | 框架自动协商（h2 / 退回 h1）；外加**停机道别**与**拆连接时在途流的收尾**两条路 |
+
+`/big`（1 MiB 流式响应）是后两条路共用的那根杠杆：它比默认流控窗口（65535）长
+16 倍，所以服务端队列里**一定**还压着"没上线的块"，而客户端那边又不可能在一圈
+循环里把它读完 —— 这正是"被作废的块有没有人来收尾"能被观察到的前提。用例因此
+把"还没整条收完"也写成显式前置：少了它，一条已经跑完的流会让判据照样通过。
 
 ---
 
@@ -126,7 +131,7 @@
 
 ## 4. 已知缺口
 
-### 4.1 已修（都有用例钉着，且都做过变异 A/B）
+### 4.1 已修（除下面注明的一条外，都有用例钉着，且都做过变异 A/B）
 
 批 2（发方向上限与流登记）：
 
@@ -144,9 +149,31 @@
 | 收到 GOAWAY 后**照样发新请求** | 对端已经说"不再处理新流"，我们仍然照发，还发得出去 | `on_frame_recv` 记下三个字段；`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，同步返回 `UV_ENOTCONN`（"同步拒绝、什么都没发生"，与 `UV_EINVAL`/`UV_EMSGSIZE` 同一条契约） |
 | 对端发过 GOAWAY 这件事**本端不可查询** | 错误码是 0 正是**正常**的优雅退出，跟"什么都没收到"分不开；`uvcpp_http_client` 会继续接受 `send()` | 新增 `peer_goaway_received()` / `peer_goaway_error_code()` / `peer_goaway_last_stream_id()` |
 
-### 4.2 还没修的（本次盘查发现，**只记录**）
+批 4（收尾：道别 + 拆连接）：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| 服务端停机**不道别** | 停机时直接关连接，对端只看到连接断了，分不清"服务端在收摊"和"网络挂了" | 新增 `uvcpp_http_server::begin_h2_goaway()` 与 `uvcpp_h2_connection::begin_goaway()`；webapp 停机的第 0 拍只发 GOAWAY，**隔一拍**才关连接 —— 挤在同一拍里对端拿到的仍然是"断了" |
+| `on_read` 里结算出来的 `done` **没人跑** | 对端一个 `RST_STREAM` 打过来，会话会把那条流还没上线的块整体作废并塞进 `completed` —— 而一个字节都不用回，`flush()` 起不了写，`on_write_done` 就不来，那批 `done` 永远躺在队列里；等它的人（框架流式响应的 `pending_bytes_`）永远等不到 ⇒ 那条流的上下文永远不释放，停机时宽限期白等满 | `on_read()` 收尾补一次 `run_completed()`（`uvcpp_h2_connection.cpp:110-121`） |
+| 拆连接时**丢掉**在飞的 `done` | 同一条路的另一半：连接被整个丢掉（对端 `close()`、不发 RST）时 `remove_ctx` 直接 `delete` 掉 h2 层，队列里那些块一声不吭 —— 与 h1 那边"队列里的写一律以 `UV_ECANCELED` 唤醒"的既定契约不一致 | 新增 `take_cancelled_dones()`：会话层 `cancel_pending_out()` 把待发块整体作废并**取走**，由 `remove_ctx` 在 `contexts_.erase(it)` **之后**才逐个跑 —— 跑早了 `write_stream()` 会掉进 h1 分支，把收尾时补的那笔写挂到一条根本不是 h1 的连接上（`stream_id` 被静默丢掉） |
+| `run_completed()` 里两处 **use-after-free** | 令牌已死那一支还去写 `in_dones_ = false`；`on_write_done` 里 `flush()` 可能同步走到 `finish_close()` → `c->close(cb)` → `notify_disconnect()`，而持有者的契约正是"在这里销毁本对象" ⇒ 之后每一句都在往释放过的内存上写 | 令牌在每一句之前重新问一次；令牌真死了**连收尾都不做**（要收尾的对象已经不存在，没什么可收的） |
+| 服务端析构**漏掉** h2 层 | `~uvcpp_http_server()` 只 `delete parser`，而 h2 层是连接上下文 `new` 出来的、没有任何别的表登记它 ⇒ 每条还活着的 h2 连接漏一个 nghttp2 会话和它的缓冲区 | 析构里一并 `delete`。走得到这里的只有"客户端先于服务端被释放"那条路：`close_all_clients()` 在句柄已关完时走 `release_client()`，只 `delete`、一个回调都不发 ⇒ `remove_ctx` 从没跑过 |
+
+**最后那条（析构漏 h2 层）没有变异覆盖，如实记一笔。** 它漏的是内存，而本仓没有
+任何能数 nghttp2 对象的地方 —— `~uvcpp_h2_session()` 只做一次 `nghttp2_session_del`，
+不留任何可观察的痕迹，为它造一个计数器超出这一批的范围。所以这一条是**读代码核
+出来的**，不是跑出来的；别把"没有用例"读成"没有缺陷"。
+
+### 4.2 还没修的（**只记录**）
 
 - **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
+- **`REFUSED_STREAM(7)` 没有映射成 `UV_ECANCELED`。** 收到 GOAWAY 时 nghttp2 会把
+  被波及的本端流逐条以 `REFUSED_STREAM` 关掉（4.3 有出处），而 `on_h2_stream_close`
+  的判据是"`error_code == 0` 才当 `UV_ECANCELED`，其余一律 `UV_EPROTO`"
+  （`uvcpp_http_client.cpp:1148`）⇒ **"这条请求没被处理过、可以安全重试"这个
+  信号没有被表达出来**，调用方看到的是 `UV_EPROTO`（协议失败）。要做对得先定下这个
+  信号从哪儿带出去（`uvcpp_http_response` 上新增字段，还是另立一个取值函数），
+  这一批不动。
 
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 

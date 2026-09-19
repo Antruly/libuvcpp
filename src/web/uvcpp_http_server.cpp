@@ -48,6 +48,20 @@ uvcpp_http_server::uvcpp_http_server() {
 uvcpp_http_server::~uvcpp_http_server() {
   for (auto& kv : contexts_) {
     delete kv.second.parser;
+#if UVCPP_NGHTTP2_ENABLE
+    // h2 层是连接上下文 new 出来的，反过来**没有任何别的表登记它** ⇒ 少了这
+    // 一句就是每条还活着的 h2 连接漏一个 nghttp2 会话和它的缓冲区。
+    //
+    // 能走到这里说明 `remove_ctx` 没跑过：正常收尾（`close_all_clients()`）
+    // 会经由客户端的关闭回调跑它，剩下的是"客户端先于服务端被释放"这种路
+    // （`release_client` 只 `delete`，一个回调都不发）。
+    //
+    // 这里**不**唤醒队列里的 `done`：此刻持有者的上下文（webapp 那套）多半
+    // 已经在拆，唤醒了也没有接收方。h1 那半同样是丢下队列直接走的 —— 与它
+    // 对齐，而不是单独给 h2 编一套。
+    delete kv.second.h2;
+    kv.second.h2 = nullptr;
+#endif
   }
   contexts_.clear();
   delete tcp_server_;
@@ -1027,6 +1041,16 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
 #if UVCPP_NGHTTP2_ENABLE
     // h2 层**不拥有** client（那是 tcp_server 的 close manager 的责任），
     // 反过来 client 的上下文拥有 h2 层。对端断开与主动关闭两条路都会汇到这里。
+    //
+    // h2 这边还没上线的块也要跟上面的 h1 队列一样被唤醒，但**不能就地唤醒**：
+    // `done` 跑的是框架流式响应的收尾，它可能再补一笔写，而此刻 ctx 还在、
+    // `h2` 却已经没了 ⇒ `write_stream` 会掉进 h1 那条分支，把这笔写挂到一条
+    // 根本不是 h1 的连接上（`stream_id` 被静默丢掉）。所以先取走，等 `erase`
+    // 之后再跑 —— 那时 `write_stream` 找不到 ctx，如实返回 `UV_ECANCELED`。
+    std::vector<std::function<void()>> h2_dropped;
+    if (it->second.h2 != nullptr) {
+      it->second.h2->take_cancelled_dones(h2_dropped);
+    }
     delete it->second.h2;
     it->second.h2 = nullptr;
 #endif
@@ -1036,9 +1060,29 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
       if (dropped[i].done) dropped[i].done(UV_ECANCELED);
     }
     fire_write_done(inflight, UV_ECANCELED);
+#if UVCPP_NGHTTP2_ENABLE
+    for (size_t i = 0; i < h2_dropped.size(); ++i) h2_dropped[i]();
+#endif
   }
 
   if (close_handler_) close_handler_(client);
+}
+
+size_t uvcpp_http_server::begin_h2_goaway() {
+#if UVCPP_NGHTTP2_ENABLE
+  // 这里**不关连接**，只打招呼。关是立刻生效的（`uv_close`），而 GOAWAY 得先
+  // 排进队列再等几轮循环才出网 —— 两件事挤在一起做，对端拿到的就是"连接断了"，
+  // 正好是这一句想避免的那个歧义。
+  size_t n = 0;
+  for (auto it = contexts_.begin(); it != contexts_.end(); ++it) {
+    uvcpp_h2_connection* h2 = it->second.h2;
+    if (h2 == nullptr || h2->closed()) continue;
+    if (h2->begin_goaway() == 0) ++n;
+  }
+  return n;
+#else
+  return 0;
+#endif
 }
 
 #if UVCPP_NGHTTP2_ENABLE

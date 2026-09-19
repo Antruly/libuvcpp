@@ -93,6 +93,8 @@ struct server_state {
   std::atomic<int>  connections{0};
   std::atomic<int>  alpn_h2_at_delivery{0};
   std::atomic<bool> saw_defer{false};
+  /// 场景 5：`/bye` 里 `begin_h2_goaway()` 的返回值（-1 = 那条路由没跑到）。
+  std::atomic<int>  goaway_count{-1};
 
   std::mutex                                        pend_mu;
   std::vector<std::pair<uvcpp_tcp_client*, int32_t>> pending;
@@ -148,6 +150,21 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
       http.send_response(pend[i].first, r, /*close_after_write=*/false);
     }
     resp = uvcpp_http_response::ok("released", 8, "text/plain");
+  });
+
+  // ---- 场景 5 的触发口：服务端主动道别 ----------------------------------
+  //
+  // 用一条路由当触发口，而不是让测试线程直接调 `begin_h2_goaway()`：后者是在
+  // **另一个线程**上碰服务端的连接表，而那张表归服务端的循环线程所有。
+  //
+  // 处理函数**自己就是那条在飞的流**：GOAWAY 排在它的响应之前发出去，于是
+  // "GOAWAY 说的 last_stream_id 就是它"和"它的响应照常到达"钉在一条流上。
+  http.get("/bye", [&http, &st](uvcpp_http_request& req, uvcpp_http_response& resp,
+                                uvcpp_tcp_client*) {
+    st.goaway_count.store(static_cast<int>(http.begin_h2_goaway()));
+    resp = uvcpp_http_response::ok(kHelloBody, sizeof(kHelloBody) - 1,
+                                   "text/plain");
+    resp.stream_id = req.stream_id;
   });
 
   // 必须在 listen() 之前装：accept 时读不到就是这个原因。
@@ -521,6 +538,75 @@ void scenario_drop_on_close(int port, uvcpp_ssl_context* cctx,
             "，应为 UV_ECANCELED（被覆盖成 UV_ECONNRESET 就是报了第二遍）");
 }
 
+/// 场景 5：`uvcpp_http_client` 要能回答"对端道别了没有"。
+///
+/// 这一层存在的理由：GOAWAY 和断线在 `send()` 的回调上长得一模一样（都是
+/// `UV_ECANCELED`），含义却完全相反 —— 前者对端明说了处理到哪个流号，比它大的
+/// 请求**没被处理**、重试安全；后者是"结果未知"。少了这个可查询的位，调用方
+/// 只能一律当断线处理。
+///
+/// 判据里有三条是**互相咬合**的：GOAWAY 里的 `last_stream_id` 必须恰好是 `/bye`
+/// 那条流（证明填的是"已处理的最大流号"而不是随便一个数），`/bye` 自己的响应
+/// 必须照常到达（证明 GOAWAY 关的是新流、不是连接），而连接必须**还开着**
+/// （证明 `begin_h2_goaway()` 只管道别、不管关 —— 关是停机后面的拍子）。
+void scenario_peer_goaway(int port, uvcpp_ssl_context* cctx, server_state& st) {
+  std::cout << "[scenario 5] 对端 GOAWAY 可查询，且不是断开" << std::endl;
+
+  client_obs c;
+  c.client.set_http2_enabled(true);
+  if (c.connect(port, cctx, "bye") != 0) {
+    check(false, "bye: connect 失败");
+    return;
+  }
+  check(c.client.negotiated_alpn() == "h2",
+        "bye: ALPN 协商结果是 \"" + c.client.negotiated_alpn() +
+            "\"，应为 h2（前置）");
+
+  // 前置：先跑完一条正常的流，`last_stream_id` 才有基准，"还没道别"也才有
+  // 观察点 —— 一个恒真的 `peer_goaway_received()` 在这个场景里是看不出来的。
+  check(c.client.peer_goaway_received() == false,
+        "bye[前置]: 还没发 /bye 就报对端道别了");
+  check(c.send_keyed("hello", uvcpp_http_request::make_get("/hello")) == 0,
+        "bye: /hello send 失败");
+  check(c.wait_key("hello"), "bye[前置]: /hello 的响应没来");
+  check(c.at("hello").err == 0, "bye[前置]: /hello 出错了");
+
+  check(c.send_keyed("bye", uvcpp_http_request::make_get("/bye")) == 0,
+        "bye: /bye send 失败");
+  check(c.wait_key("bye"), "bye: /bye 的响应没来（GOAWAY 不该掐掉已有的流）");
+  check(c.at("bye").err == 0,
+        "bye: /bye 的回调 err = " + std::to_string(c.at("bye").err));
+  uvcpp_test::pump_for(c.loop(), 30);
+
+  check(st.goaway_count.load() == 1,
+        "bye[前置]: 服务端 /bye 里 begin_h2_goaway() 返回 " +
+            std::to_string(st.goaway_count.load()) + "，应为 1");
+
+  check(c.client.peer_goaway_received(),
+        "bye: 服务端发了 GOAWAY，客户端却不知道 —— 对端只能按断线处理");
+  check(c.client.peer_goaway_error_code() == 0,
+        "bye: GOAWAY 错误码 = " +
+            std::to_string(c.client.peer_goaway_error_code()) +
+            "，正常道别该是 0");
+  check(c.client.peer_goaway_last_stream_id() == c.at("bye").sid,
+        "bye: GOAWAY 的 last_stream_id = " +
+            std::to_string(c.client.peer_goaway_last_stream_id()) +
+            "，而 /bye 那条流是 " + std::to_string(c.at("bye").sid));
+
+  // GOAWAY 之后不能再开新流 —— 这一条把"收到了"和"进到会话状态里了"分开。
+  const int rc = c.client.send(uvcpp_http_request::make_get("/hello"),
+                               [](const uvcpp_http_response&, int) {});
+  check(rc == UV_ENOTCONN,
+        "bye: GOAWAY 之后 send() 返回 " + std::to_string(rc) +
+            "，应为 UV_ENOTCONN");
+
+  // 但连接本身还在：道别 ≠ 关连接。
+  check(c.client.has_status(HTTP_CLIENT_CONNECTED),
+        "bye: GOAWAY 之后连接就没了 —— 道别被当成关闭了");
+  check(c.client.peer_goaway_received(),
+        "bye: 上面那次 send 把道别状态弄丢了");
+}
+
 }  // namespace
 
 int main() {
@@ -553,6 +639,7 @@ int main() {
     scenario_default_off(srv.port, &cctx, srv.st);
     scenario_on(srv.port, &cctx);
     scenario_concurrent(srv.port, &cctx, srv.st);
+    scenario_peer_goaway(srv.port, &cctx, srv.st);
 
     // 服务端侧的正面证据：确实有一条 ALPN=h2 的连接被交付过。（场景 1 那条
     // 是 h1，所以这里不能断言等于用例数。）

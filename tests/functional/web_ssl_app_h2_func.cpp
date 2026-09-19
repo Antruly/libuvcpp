@@ -92,6 +92,17 @@ const char kSse1[] = "data: 1\n\n";
 const char kSse2[] = "data: 2\n\n";
 const char kSse3[] = "data: 3\n\n";
 
+/// 场景 5/7：一块的大小与块数。**总和必须显著大于 65535** —— 那是 h2 默认的
+/// 连接级流控窗口，超出窗口的部分会一直排在服务端的发送队列里，这正是这条
+/// 用例要的那种"还没上线的块"。
+///
+/// 倍数还得**够多**：客户端读一次就是一轮"发 WINDOW_UPDATE → 服务端再发一个
+/// 窗口 → 客户端把它们全读掉"，而 `uv__read` 是循环到 EAGAIN 的，这一整轮可以
+/// 落在同一个 `uv_run(NOWAIT)` 里。16 个窗口（1 MiB）才让"一遍读完全部"成为
+/// 可以忽略的概率 —— 2 个窗口时实测能偶发整条收完，用例于是什么也没测到。
+const size_t kBigChunkSize = 16 * 1024;
+const int    kBigChunks    = 64;  // 1 MiB ≈ 16 个流控窗口
+
 /// 场景 4：文档根里那个**该**取得出来的文件，以及根目录**外面**那个**绝不该**
 /// 取得出来的文件。后者是"h2 上静态服务的目录穿越防护还灵不灵"的唯一判据。
 const char kStaticBody[] = "static-over-h2-ok";
@@ -197,6 +208,9 @@ struct app_probe {
   std::mutex                mu;
   std::vector<seen_request> seen;
 
+  /// 场景 5/7：`/big` 的处理函数被跑到过几次（-1 不用，0 就是"没跑到"）。
+  std::atomic<int> big_count{0};
+
   /// 场景 3：`/hold` 把自己那个响应对象存这里（由 `ctx.hold()` 钉着，活得比
   /// 处理函数久），收尾的 `end()` 由测试线程 `post()` 回去跑。
   std::atomic<uvcpp_web_response*> held{nullptr};
@@ -231,6 +245,18 @@ void add_stream_routes(uvcpp_web_app& app, app_probe& st) {
   app.get("/plain", [](uvcpp_web_request&, uvcpp_web_response& resp,
                        uvcpp_web_next) {
     resp.text(kHelloBody);
+    resp.end();
+  });
+
+  // 场景 5/7：一次写出**超过默认流控窗口**（65535）的流式 body。超出窗口的那部分
+  // 会一直排在服务端的发送队列里 —— 对端一 RST（场景 5）或把整条连接扔掉
+  // （场景 7），它们就再也发不出去了，而它们的 `done` 必须照样跑（那是"每一块
+  // 恰好结算一次"的契约）。
+  app.get("/big", [&st](uvcpp_web_request&, uvcpp_web_response& resp,
+                        uvcpp_web_next) {
+    st.big_count.fetch_add(1);
+    resp.begin_chunked("application/octet-stream");
+    for (int i = 0; i < kBigChunks; ++i) resp.write_chunk(std::string(kBigChunkSize, 'x'));
     resp.end();
   });
 }
@@ -495,6 +521,84 @@ std::shared_ptr<uvcpp_ssl_context> make_client_ctx() {
       new uvcpp_ssl_context(tls_mode::CLIENT, tls_version::TLS_1_2));
   ctx->set_verify_mode(tls_verify_mode::NONE);
   return ctx->is_ready() ? ctx : std::shared_ptr<uvcpp_ssl_context>();
+}
+
+/// `/big` 的两条前置，缺一不可：
+///
+///   - **第一批字节到了**：少了它，"上下文归零"与"这条流压根没起来"在判据上
+///     长得一模一样 —— 而后者永远归零；
+///   - **还没整条收完**：少了它，一条已经跑完的流也会让判据通过，而那时服务端
+///     队列里一个字节都没有，这条用例什么也没测到。
+///
+/// 第二半不是洁癖，是实测踩出来的：客户端这边 `uv__read` 是**循环读到 EAGAIN
+/// 为止**的，而服务端在另一个线程上全速跑 —— 每开一次窗口就是一次完整的往返
+/// （几十微秒），body 只有两个窗口那么长时，两次往返可以整个塞进**同一个**
+/// `uv_run(NOWAIT)` 里。于是 `partial` 从填上到被 `on_response_end` 清掉，中间
+/// 没有任何一次判据求值的机会 —— 用例静默地测了个寂寞。所以 body 做成 16 个
+/// 窗口那么长（16 次往返塞进一圈的概率可以忽略），并且把"没收完"明写出来。
+void dump_big_diag(const char* tag, h2_client& c, app_probe& st, int32_t sid);
+
+/// `/big` 的两条前置，缺一不可：
+///
+///   - **第一批字节到了**：少了它，"上下文归零"与"这条流压根没起来"在判据上
+///     长得一模一样 —— 而后者永远归零；
+///   - **还没整条收完**：少了它，一条已经跑完的流也会让判据通过，而那时服务端
+///     队列里一个字节都没有，这条用例什么也没测到。
+///
+/// 第二半不是洁癖，是实测踩出来的：客户端这边 `uv__read` 是**循环读到 EAGAIN
+/// 为止**的，而服务端在另一个线程上全速跑 —— 每开一次窗口就是一次完整的往返
+/// （几十微秒），body 只有两个窗口那么长时，两次往返可以整个塞进**同一个**
+/// `uv_run(NOWAIT)` 里。于是 `partial` 从填上到被 `on_response_end` 清掉，中间
+/// 没有任何一次判据求值的机会 —— 用例静默地测了个寂寞。所以 body 做成 16 个
+/// 窗口那么长（16 次往返塞进一圈的概率可以忽略），并且把"没收完"明写出来。
+bool big_started_and_open(h2_client& c, app_probe& st, int32_t sid,
+                          const char* tag) {
+  const bool started = uvcpp_test::wait_until(
+      c.loop(),
+      [&c, sid] {
+        std::lock_guard<std::mutex> lk(c.p.mu);
+        std::map<int32_t, std::string>::iterator it = c.p.partial.find(sid);
+        return it != c.p.partial.end() && !it->second.empty();
+      },
+      kWaitMs);
+  if (!started) {
+    check(false, std::string(tag) + "[前置]: /big 的第一批字节在 " +
+                     std::to_string(kWaitMs) + "ms 内没到");
+    dump_big_diag(tag, c, st, sid);
+    return false;
+  }
+  seen_response r;
+  if (c.find_response(sid, r) && r.end) {
+    check(false, std::string(tag) +
+                     "[前置]: /big 在作废之前就整条收完了 —— 服务端队列里已经"
+                     "没有可作废的块，这条用例什么也没测到");
+    dump_big_diag(tag, c, st, sid);
+    return false;
+  }
+  return true;
+}
+
+/// "第一批字节没到"这条前置失败时，把两侧的状态各自报一遍 —— 否则"服务端没跑
+/// 那条路由"和"跑了但字节没出去"在判据上长得一模一样。
+void dump_big_diag(const char* tag, h2_client& c, app_probe& st, int32_t sid) {
+  std::cerr << "  [diag] " << tag << ": /big 处理函数跑了 " << st.big_count.load()
+            << " 次；客户端 ALPN=\"" << c.alpn() << "\" start_rc="
+            << c.p.start_rc.load() << " fatal=" << c.p.fatal_count.load()
+            << " 响应条数=" << c.response_count() << std::endl;
+  seen_response rd;
+  if (c.find_response(sid, rd)) {
+    std::cerr << "  [diag] " << tag << ": 流 " << sid << " status=" << rd.status
+              << " end=" << rd.end << " body=" << rd.body.size() << " 字节"
+              << std::endl;
+  } else {
+    std::cerr << "  [diag] " << tag << ": 流 " << sid << " 没有任何响应"
+              << std::endl;
+  }
+  {
+    std::lock_guard<std::mutex> lk(c.p.mu);
+    std::cerr << "  [diag] " << tag << ": 已提交流数=" << c.p.submitted.size()
+              << " partial 条目=" << c.p.partial.size() << std::endl;
+  }
 }
 
 /// h2 上跑两条请求（一条精确匹配、一条带路径参数），两条都要对号入座。
@@ -896,6 +1000,223 @@ int main() {
     }
     std::remove(fx.secret.c_str());
     std::remove((fx.root + "/ok.txt").c_str());
+  }
+
+  // =====================================================================
+  // 场景 5：被 RST 掉的流式响应，框架的上下文必须照样放干净
+  // =====================================================================
+  //
+  // 这是"每一块的 `done` 恰好跑一次"那条契约在**收方向**上的落点。
+  //
+  // 服务端一次写出 128 KiB，而 h2 默认的连接级流控窗口只有 65535 —— 超出的
+  // 部分排在服务端的发送队列里，客户端不发 WINDOW_UPDATE 就永远发不出去。
+  // 客户端这时 RST 掉这条流，那些排队的块就整体作废，它们的 `done` 必须被
+  // 结算（`UV_ECANCELED`）。不结算的话 `uvcpp_web_response::pending_bytes_`
+  // 永远减不回 0，`stream_finish_ready()` 恒假，这条流的上下文**永远不释放**
+  // —— 停机时 `inflight_` 排不空，宽限期白等满。
+  //
+  // 判据只有一条，但它是端到端的：`inflight_count()` 必须归零。
+  {
+    uvcpp_web_app app;
+    app_probe      st;
+    if (build_app(app, st, /*set_flag=*/false, /*enable_h2=*/true) != 0) {
+      std::cerr << "  [FAIL] 场景 5：app 起不来 (rc=" << st.start_rc.load()
+                << ")" << std::endl;
+      return 2;
+    }
+
+    h2_client c;
+    if (c.begin(st.bound_port.load(), cctx.get(), "h2_rst")) {
+      check(c.wait_connect(), "h2_rst: connect 回调没等到");
+      check(c.began, "h2_rst: h2 层没起来");
+
+      if (c.began) {
+        const int32_t sid = c.submit(http_method::HTTP_GET, "/big");
+        check(sid > 0, "h2_rst: /big 没提交上");
+
+        // **前置**：这条流起来了、**而且还没收完**。见 `big_started_and_open`
+        // 上面那段 —— 少了它，"上下文归零"与"这条流压根没起来 / 早就跑完了"
+        // 在下面的判据里长得一模一样，而后者永远归零。
+        if (big_started_and_open(c, st, sid, "h2_rst")) {
+          // 8 = CANCEL。此刻服务端至少还有 64 KiB 被窗口挡在队列里。
+          const int rrc = c.conn->session().submit_rst(sid, 8 /* CANCEL */);
+          check(rrc == 0, "h2_rst: submit_rst returned " + std::to_string(rrc));
+          c.conn->flush();
+
+          // 服务端在**另一个线程**上跑，所以这里只等不泵（传空循环）。
+          uvcpp_loop* const none = nullptr;
+          const bool drained = uvcpp_test::wait_until(
+              none, [&app] { return app.inflight_count() == 0; }, kWaitMs);
+          check(drained,
+                "h2_rst: RST 之后在途上下文没有归零（实测 " +
+                    std::to_string(app.inflight_count()) +
+                    "）—— 被作废的那些块的 done 没人跑，"
+                    "`pending_bytes_` 减不回 0，这条流永远不收尾");
+        }
+      }
+      c.finish();
+    } else {
+      check(false, "h2_rst: connect() 就没起来");
+    }
+    app.stop();
+  }
+
+  // =====================================================================
+  // 场景 6：框架停机时，h2 连接必须**道别**，不能只看到连接断了
+  // =====================================================================
+  //
+  // 停机时"发 GOAWAY"和"关连接"的分工是场景的全部内容：前者排在停机第 0 拍，
+  // 后者在第 1 拍（中间隔一拍排水）。少了第 0 拍，对端拿到的就是一条被断开的
+  // 连接 —— 与拔网线长得一模一样，在飞的请求只能一律按"结果未知"处理，而
+  // GOAWAY 里的 `last_stream_id` 本来能告诉它哪几条可以安全重试。
+  //
+  // 判据落在客户端侧：**收到了 GOAWAY**（而不是"连接断了"）+ 三个字段都对 +
+  // 新流被拒。第三条尤其重要 —— 它证明 GOAWAY 是被**解析**过的，而不是仅仅
+  // 有几个字节到过。
+  {
+    uvcpp_web_app app;
+    app_probe      st;
+    if (build_app(app, st, /*set_flag=*/false, /*enable_h2=*/true) != 0) {
+      std::cerr << "  [FAIL] 场景 6：app 起不来 (rc=" << st.start_rc.load()
+                << ")" << std::endl;
+      return 2;
+    }
+
+    h2_client c;
+    if (c.begin(st.bound_port.load(), cctx.get(), "h2_bye")) {
+      check(c.wait_connect(), "h2_bye: connect 回调没等到");
+      check(c.began, "h2_bye: h2 层没起来");
+
+      if (c.began) {
+        const int32_t s1 = c.submit(http_method::HTTP_GET, "/hello");
+        check(s1 > 0, "h2_bye: /hello 没提交上");
+
+        // **前置**：先有一条真正跑完的流。没有它，`last_stream_id` 该是多少
+        // 就没有基准，而"连接空着时收到 GOAWAY"和"跑过一条之后收到"在下面
+        // 的判据里长得一样。
+        seen_response r1;
+        const bool done1 = uvcpp_test::wait_until(
+            c.loop(), [&c, s1, &r1] { return c.find_response(s1, r1) && r1.end; },
+            kWaitMs);
+        check(done1, "h2_bye[前置]: /hello 在 " + std::to_string(kWaitMs) +
+                         "ms 内没跑完");
+        if (done1) {
+          check(r1.status == 200, "h2_bye[前置]: /hello 回了 " +
+                                      std::to_string(r1.status));
+        }
+
+        // 停机是**另一个线程**上的事，这里只等不碰它的状态。
+        app.stop();
+
+        // GOAWAY 在第 0 拍发出，第 1 拍（隔 10ms）就关连接 —— 所以这个等待
+        // 窗口很短，等到就必须是"数据先到"，不能靠重试。
+        const bool goodbye = uvcpp_test::wait_until(
+            c.loop(),
+            [&c] {
+              return c.conn != nullptr &&
+                     c.conn->session().peer_goaway_received();
+            },
+            kWaitMs);
+        check(goodbye,
+              "h2_bye: 停机后没收到 GOAWAY —— 对端只看到连接断了，"
+              "分不清这是停机还是断线");
+
+        if (goodbye) {
+          check(c.conn->session().peer_goaway_error_code() == 0,
+                "h2_bye: GOAWAY 错误码是 " +
+                    std::to_string(c.conn->session().peer_goaway_error_code()) +
+                    "（正常停机该是 0/NO_ERROR）");
+          // 这一条同时钉住"服务端填的是**已处理**的最大流号"：填 0 或者
+          // 填一条我们没发过的号，对端就没法区分"没处理"和"处理完了"。
+          check(c.conn->session().peer_goaway_last_stream_id() == s1,
+                "h2_bye: GOAWAY 的 last_stream_id 是 " +
+                    std::to_string(
+                        c.conn->session().peer_goaway_last_stream_id()) +
+                    "，期望 " + std::to_string(s1));
+          check(static_cast<int32_t>(c.submit(http_method::HTTP_GET, "/hello")) ==
+                    UV_ENOTCONN,
+                "h2_bye: GOAWAY 之后还能开新流 —— 说明它只是被收到了，"
+                "没进到会话状态里");
+        }
+
+        // 连接随后要真的被服务端关掉（第 1 拍）。这一条是"排水那一拍真的存在"
+        // 的落点：如果服务端把 GOAWAY 和 `uv_close` 挤在同一拍里，上面那条
+        // 断言就会在**某些机器上**偶尔失败 —— 而现在它是确定的。
+        const bool closed = uvcpp_test::wait_until(
+            c.loop(), [&c] { return c.conn != nullptr && c.conn->closed(); },
+            kWaitMs);
+        check(closed, "h2_bye: 服务端停机后连接没有关掉");
+      }
+      c.finish();
+    } else {
+      check(false, "h2_bye: connect() 就没起来");
+    }
+    app.stop();
+  }
+
+  // =====================================================================
+  // 场景 7：**整条连接**被丢掉（不是 RST 单条流），队列里的块照样要结算
+  // =====================================================================
+  //
+  // 场景 5 走的是"对端 RST 掉这条流"这条路 —— 会话层收到 RST 就会把那条流
+  // 还没上线的块整体作废。这一条走**另一条路**：对端什么都不说，直接把连接
+  // 扔掉。此时会话层收不到任何帧（`recv()` 压根不会被叫到），那些块是
+  // **传输层**拆掉的 —— 结算它们的责任在 `remove_ctx`。
+  //
+  // 少了那一句，`done` 一辈子不响：`pending_bytes_` 减不回 0，上下文永远扣在
+  // `inflight_` 里，停机时要白等满整个宽限期（场景 5 的注释里说的同一件事，
+  // 只是触发口不同）。所以判据还是那一条：`inflight_count()` 必须归零。
+  {
+    uvcpp_web_app app;
+    app_probe      st;
+    if (build_app(app, st, /*set_flag=*/false, /*enable_h2=*/true) != 0) {
+      std::cerr << "  [FAIL] 场景 7：app 起不来 (rc=" << st.start_rc.load()
+                << ")" << std::endl;
+      return 2;
+    }
+
+    h2_client c;
+    if (c.begin(st.bound_port.load(), cctx.get(), "h2_drop")) {
+      check(c.wait_connect(), "h2_drop: connect 回调没等到");
+      check(c.began, "h2_drop: h2 层没起来");
+
+      if (c.began) {
+        const int32_t sid = c.submit(http_method::HTTP_GET, "/big");
+        check(sid > 0, "h2_drop: /big 没提交上");
+
+        // **前置**：这条流起来了、**而且还没收完**（见 `big_started_and_open`）。
+        // 少了后半句，一条已经跑完的流同样能让下面"归零"的判据通过 —— 而那时
+        // 服务端队列里一个字节都没有，这条用例什么也没测到。
+        const bool open = big_started_and_open(c, st, sid, "h2_drop");
+        if (open) {
+          // 再钉一层：此刻这条流确实还扣在框架的 `inflight_` 里。
+          check(app.inflight_count() >= 1,
+                "h2_drop[前置]: /big 还没跑完，inflight_count() 却是 " +
+                    std::to_string(app.inflight_count()));
+        }
+
+        // 整个连接扔掉：不发 RST、不说再见。**前置没成立也一样扔** —— 留着
+        // 这条连接只会让后面那次 `app.stop()` 白等满宽限期。
+        check(c.finish(), "h2_drop: client close never completed");
+
+        if (open) {
+          // 服务端在**另一个线程**上跑，所以这里只等不泵（传空循环）。
+          uvcpp_loop* const none = nullptr;
+          const bool drained = uvcpp_test::wait_until(
+              none, [&app] { return app.inflight_count() == 0; }, kWaitMs);
+          check(drained,
+                "h2_drop: 连接被丢掉之后在途上下文没有归零（实测 " +
+                    std::to_string(app.inflight_count()) +
+                    "）—— 队列里那些块的 done 没人跑，`pending_bytes_` "
+                    "减不回 0，这条流永远不收尾");
+        }
+      } else {
+        c.finish();
+      }
+    } else {
+      check(false, "h2_drop: connect() 就没起来");
+    }
+    app.stop();
   }
 
   if (g_failures != 0) {

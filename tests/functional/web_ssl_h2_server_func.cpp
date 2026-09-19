@@ -138,6 +138,9 @@ struct server_state {
   /// 按发送序应答"这个错位是**确定性**造出来的，不靠抢时序。
   std::mutex                                        pend_mu;
   std::vector<std::pair<uvcpp_tcp_client*, int32_t>> pending;
+
+  /// 场景 8：`/bye` 里 `begin_h2_goaway()` 的返回值（-1 = 那条路由没跑到）。
+  std::atomic<int> goaway_count{-1};
 };
 
 void record_request(server_state& st, uvcpp_http_request& req,
@@ -252,6 +255,23 @@ void run_server(std::promise<int>& port_promise, std::atomic<bool>& stop,
   // HEAD **必须**也注册：场景 7 子用例 A 就是靠"放行那条流自己是 HEAD"把
   // 连接级 `is_head` 留成 true 的（理由见那里的说明）。
   http.head("/release", release_handler);
+
+  // ---- 场景 8 的触发口：服务端主动道别 ------------------------------
+  //
+  // 用一条路由当触发口，而不是让测试线程直接调 `begin_h2_goaway()`：后者是在
+  // **另一个线程**上碰 `contexts_`，而那张表归服务端的循环线程所有。走路由等于
+  // 把这次调用排进服务端自己的循环 —— 和场景 7 拿 `/release` 当放行口同一个道理。
+  //
+  // 处理函数**自己就是那条在飞的流**：道别排在它的响应之前发出去，于是"GOAWAY
+  // 说了 last_stream_id 是它、它的响应也照常到达"这两件事被钉在一条流上。
+  http.get("/bye", [&http, &st](uvcpp_http_request& req, uvcpp_http_response& resp,
+                                uvcpp_tcp_client*) {
+    record_request(st, req, http_method::HTTP_GET);
+    st.goaway_count.store(static_cast<int>(http.begin_h2_goaway()));
+    resp = uvcpp_http_response::ok(kHelloBody, sizeof(kHelloBody) - 1,
+                                   "text/plain");
+    resp.stream_id = req.stream_id;
+  });
 
   // 必须在 listen() 之前装：accept 时读不到就是这个原因
   // （见 `web_ssl_server_func.cpp` 场景 2 的说明）。
@@ -1017,6 +1037,97 @@ int main() {
     check(srv.st.final_count.load() == 0,
           "per_stream: client_count() after shutdown = " +
               std::to_string(srv.st.final_count.load()));
+  }
+
+  // =====================================================================
+  // 场景 8：服务端主动关闭前先道别（GOAWAY），且不打断在飞的流
+  // =====================================================================
+  //
+  // 前七个场景里连接**全是**客户端关的。于是"服务端在停机"和"网络挂了"在
+  // 客户端看来完全一样，在飞的请求只能一律当成"结果未知"处理。这一条钉的是
+  // 补上的那一半：GOAWAY 带着**本端已处理到的流号**发出去，对端据此能把
+  // "我发过、你没处理"的那几条挑出来安全重试。
+  //
+  // 判据分两层，缺一不可：
+  //   - 客户端会话确实解析出了一帧 GOAWAY，且三个字段都对；
+  //   - **触发道别的那条流自己照常收完** —— 少了这条，一个"发完 GOAWAY 立刻
+  //     关连接"的实现也能让第一层全绿。
+  {
+    scenario_server srv(&sctx, /*enable_h2=*/true);
+    check(srv.ok(), "goaway: 服务端起不来");
+    if (srv.ok()) {
+      h2_client c;
+      if (c.begin(srv.port, &cctx, "goaway") && wait_connected(c, "goaway")) {
+        verify_connected(c, "goaway");
+
+        if (c.began) {
+          // 前置：先跑完一条普通请求。没有它，下面"收到 GOAWAY"可能只是
+          // 一条从没工作过的连接上顺带发生的事。
+          const int32_t s1 = c.submit(http_method::HTTP_GET, "/hello", "");
+          check(s1 > 0, "goaway: /hello 没提交上");
+          check(c.wait_responses(1), "goaway[前置]: /hello 的响应没等到");
+          uvcpp_test::pump_for(c.loop(), 60);
+
+          // 触发道别。`/bye` 的处理函数**自己就是那条在飞的流** ——
+          // GOAWAY 排在它的响应之前发出去。
+          const int32_t s2 = c.submit(http_method::HTTP_GET, "/bye", "");
+          check(s2 > 0, "goaway: /bye 没提交上");
+          check(c.wait_responses(2), "goaway: /bye 的响应没等到");
+          uvcpp_test::pump_for(c.loop(), 60);
+
+          // ---- 服务端侧：那条路由确实跑了，且数到了一条连接 ----
+          const int gc = srv.st.goaway_count.load();
+          check(gc == 1,
+                "goaway: 服务端 `begin_h2_goaway()` 返回 " + std::to_string(gc) +
+                    "（期望 1 —— 路由没跑到，或者一条连接都没数到）");
+
+          // ---- 客户端侧：会话确实解析出了一帧 GOAWAY ----
+          uvcpp_h2_session& cs = c.conn->session();
+          check(cs.peer_goaway_received(),
+                "goaway: 服务端主动关闭前没发 GOAWAY —— 对端分不清"
+                "'服务端停机'和'网络挂了'");
+          check(cs.peer_goaway_error_code() == 0,
+                "goaway: GOAWAY 的错误码是 " +
+                    std::to_string(cs.peer_goaway_error_code()) +
+                    "（优雅关闭该是 NO_ERROR(0)）");
+          // **这一条才是把"填了"和"没填"分开的判据。** `last_stream_id` 恒 0
+          // 时"收到过 GOAWAY"照样成立，只是那个 0 的含义恰好相反 —— 它说
+          // "我一条都没处理"，对端据此会把**所有**在飞的流当成可重试的关掉。
+          // `/bye` 是这条连接上第二条流，服务端在派发它的那一刻已经把它算进
+          // "处理过"了。
+          check(cs.peer_goaway_last_stream_id() == s2,
+                "goaway: GOAWAY 说 last_stream_id=" +
+                    std::to_string(cs.peer_goaway_last_stream_id()) +
+                    "，服务端实际处理到 " + std::to_string(s2));
+
+          // ---- 在飞的流不许被道别打断 ----
+          seen_response r2;
+          const bool has2 = c.find_response(s2, r2);
+          check(has2, "goaway: /bye 那条流没有响应");
+          if (has2) {
+            check(r2.end, "goaway: /bye 的响应没收完");
+            check(r2.status == 200,
+                  "goaway: /bye 状态 " + std::to_string(r2.status));
+            check(r2.body == kHelloBody, "goaway: /bye body = \"" + r2.body + "\"");
+          }
+
+          // ---- 道别之后不许再开新流：这才是 GOAWAY 的用处 ----
+          const int32_t s3 = c.submit(http_method::HTTP_GET, "/hello", "");
+          check(s3 == UV_ENOTCONN,
+                "goaway: 收到 GOAWAY 之后还能开新流（返回 " +
+                    std::to_string(s3) + "，期望 UV_ENOTCONN）");
+
+          // 连接本身还活着。GOAWAY 关的是"新流"，不是连接 —— 少了这条，
+          // "发完 GOAWAY 就拆连接"也能让上面几条全绿。
+          check(c.p.disconnect_count.load() == 0,
+                "goaway: 道别之后连接就没了（对端在飞的响应会跟着一起没）");
+        }
+        check(c.finish(), "goaway: client close never completed");
+      } else {
+        check(false, "goaway: connect() 就没起来");
+      }
+      srv.shutdown();
+    }
   }
 
   if (g_failures != 0) {

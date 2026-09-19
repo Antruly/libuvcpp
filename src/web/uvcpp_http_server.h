@@ -188,6 +188,23 @@ class UVCPP_API uvcpp_http_server {
   void set_http2_enabled(bool on) { http2_enabled_ = on; }
   bool http2_enabled() const { return http2_enabled_; }
 
+  /**
+   * @brief 给**所有** h2 连接发 GOAWAY，但一条都不关。
+   *
+   * 停机前该先调它，再走关连接那一套：GOAWAY 排进队列之后要几轮循环才出网，
+   * 而关连接是立刻生效的 —— 顺序反了，对端只看到"连接断了"，分不清服务端在
+   * 停机还是网络挂了，也就没法把在飞的请求安全地挪到别的连接上。
+   *
+   * `last_stream_id` 是本端已处理的最大流号，所以对端能据此分辨哪几条它发过、
+   * 我们**没处理**（那些可以安全重试）。已有的流一条都不受影响，照跑完。
+   *
+   * @return 真的把 GOAWAY 排出去（且成功冲网）的连接条数。h2 没开时恒为 0。
+   *
+   * @note 不关连接是**有意的**：调用方还得留出时间让字节出网，之后自己走
+   *       `close_connection()` / `uvcpp_tcp_server::close_all_clients()`。
+   */
+  size_t begin_h2_goaway();
+
 #if UVCPP_NGHTTP2_ENABLE
   /**
    * @brief 在指定的 h2 流上回一个响应。

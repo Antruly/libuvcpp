@@ -2704,6 +2704,24 @@ void uvcpp_web_app::shutdown_step() {
       ws_server_->close_all_sessions(ws_close_code::GOING_AWAY);
     }
 
+    // ---- h2 同理，只是道别的形状不同：一条 GOAWAY。 ----
+    //
+    // 它在 `close_all_clients()` **之前**发，理由与上面 WS 那段逐字相同；
+    // 不同之处在于 GOAWAY 还多带一个信息：`last_stream_id` 是本端已处理的最大
+    // 流号，对端据此能分辨"我发过但你没处理"的那几条 —— 那些可以安全重试，
+    // 而其余的不能（RFC 7540 §6.8）。没有它，一次停机在客户端看起来和拔网线
+    // 完全一样，在飞的请求只能一律按"结果未知"处理。
+    //
+    // 这一句同样**不关**连接（见 `begin_h2_goaway()` 的说明），关是下面
+    // phase 1 的事。
+    if (http_ != nullptr) {
+      const size_t n = http_->begin_h2_goaway();
+      if (n != 0) {
+        UVCPP_LOG_DEBUG(log_category::CORE)
+            << "停机：给 " << n << " 条 h2 连接发 GOAWAY";
+      }
+    }
+
     // 排水一拍：Close 帧出网 → 会话收到写完成 → 自己关掉底层连接 → 终结
     // 回调把它们从会话表和连接登记表里摘掉。这一步做完，下面那句
     // `close_all_clients()` 要处理的就只剩**普通 HTTP** 连接了。

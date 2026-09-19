@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_define.h>
@@ -96,11 +97,38 @@ class UVCPP_API uvcpp_h2_connection {
   /// 把会话里待发的字节全部写出去。可以重复调用（没东西发就是空操作）。
   int flush();
 
+  /**
+   * @brief 只发 GOAWAY，**不关连接** —— 告诉对端"这个连接上不会再接新流了"，
+   *        已有的流照跑完。
+   *
+   * 与 `shutdown()` 的分工：这个是**提前**打招呼的那一半。两者都会把
+   * `last_stream_id` 填成本端已处理的最大流号 —— 对端据此能把"我还没处理的
+   * 那些"和"已经处理完的那些"分开，前者可以安全重试。
+   *
+   * 发过一次就不再发第二次（`shutdown()` 之后也不会补发）。**关连接是调用方
+   * 的事** —— 本函数只把字节冲出去。
+   */
+  int begin_goaway();
+
   /// 主动关：尽量把待发字节（含 GOAWAY）冲出去，再关底层连接。
   void shutdown();
 
   /// 立刻关，不发任何东西。
   void close_now();
+
+  /**
+   * @brief 把还没上线的块的 `done` 全部作废（`UV_ECANCELED`）并**取走**，不跑。
+   *
+   * 这是"传输层要拆了"这条收尾路的正确顺序：调用方先把 `done` 拿到手，再销毁
+   * 本对象，最后在自己的上下文已经拆干净之后逐个跑。**不是**在本函数里跑 ——
+   * `done` 跑的是用户代码（框架的流式响应收尾），它完全可能再补一笔写，而那时
+   * 调用方的上下文正处在"连接已经没了、表还没摘"的中间态，那笔写会挂到错误的
+   * 通路上去。
+   *
+   * `done` 一律以 `UV_ECANCELED` 为参数（连接没了，这些块这辈子发不出去）。
+   * 结果**追加**到 @p out，所以传进来的既有内容会保留。
+   */
+  void take_cancelled_dones(std::vector<std::function<void()>>& out);
 
   uvcpp_h2_session& session() { return *session_; }
   uvcpp_tcp_client* client() const { return client_; }

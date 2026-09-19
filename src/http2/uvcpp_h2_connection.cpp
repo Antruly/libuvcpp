@@ -108,6 +108,17 @@ void uvcpp_h2_connection::on_read(uvcpp_tcp_client&, const net_read_result& r) {
     return;
   }
   flush();
+
+  // `recv()` 里就能结算掉一批 `done`：对端一个 RST_STREAM / GOAWAY 打过来，
+  // 会话会把那条流还没上线的块整体作废（`cancel_stream_out`），而**一个字节都
+  // 不需要回**。少了这一句，`flush()` 没起写 → `on_write_done` 不会来 →
+  // 那批 `done` 就永远躺在 `completed` 里，等它的人（框架流式响应的
+  // `pending_bytes_`）永远等不到，那条流的上下文也就永远不释放。
+  //
+  // 次序与 `on_write_done` 一致，而且**安全**：`flush()` 真起了写的话
+  // `run_completed()` 会因为 `writing_` 直接返回，结算留给写完成那条路 ——
+  // 两边都跑就是同一块结算两次。
+  run_completed();
 }
 
 // =========================================================================
@@ -164,12 +175,19 @@ void uvcpp_h2_connection::on_write_done(int status) {
   }
   if (closed_) return;
 
+  // `flush()` 可能一路走到 `finish_close()`，而那里的 `c->close(cb)` 在
+  // "句柄已经没了"和"已经在关"两个分支上是**同步**跑 `after_close` 的 ——
+  // 它一转手就是 `notify_disconnect()`，而持有者（`uvcpp_http_client`）的
+  // 契约正是"在这里把本对象销毁"。所以后面每一句都得先问一次令牌。
+  const std::shared_ptr<char> life = alive_token();
   flush();  // 写的过程中可能又攒了东西（窗口更新、RST、对端的 SETTINGS ack）
+  if (!token_alive(life)) return;
 
   // 上一笔写带走的那些流式块到这里才算"交出去了"。放在 `flush()` **之后**：
   // 冲出去的字节里可能就含着刚结算的那一块的收尾（END_STREAM），先跑 `done`
   // 会让发起方在最后一个字节出网之前就以为整条流结束了。
   run_completed();
+  if (!token_alive(life)) return;
 
   if (!writing_ && close_after_flush_) finish_close();
 }
@@ -231,13 +249,23 @@ void uvcpp_h2_connection::run_completed() {
     if (dones.empty()) break;
     for (size_t i = 0; i < dones.size(); ++i) {
       dones[i]();
-      if (!token_alive(life)) {
-        in_dones_ = false;
-        return;
-      }
+      // **这里一个字都不能写。** `alive_token_` 只在析构里被置 1，所以令牌
+      // 死了就等于本对象已经没了 —— 连"收个尾"（比如复位 `in_dones_`）都是往
+      // 释放过的内存上写。要收尾的那个对象已经不存在了，没什么可收的。
+      if (!token_alive(life)) return;
     }
   }
   in_dones_ = false;
+}
+
+int uvcpp_h2_connection::begin_goaway() {
+  // 只看 `closed_`，不看 `closing_`：`closing_` 为真时 GOAWAY 是不是已经发过，
+  // 由 `goaway_sent_` 说了算 —— 而 `close_now()` 那种"立刻关"是 `closed_`。
+  if (closed_ || goaway_sent_) return 0;
+  goaway_sent_ = true;
+  const int rv = session_->submit_goaway(session_->goaway_code(), std::string());
+  if (rv != 0) return rv;
+  return flush();
 }
 
 void uvcpp_h2_connection::shutdown() {
@@ -268,6 +296,18 @@ void uvcpp_h2_connection::close_now() {
   writing_   = false;
   out_.clear();
   notify_disconnect();
+}
+
+void uvcpp_h2_connection::take_cancelled_dones(
+    std::vector<std::function<void()>>& out) {
+  if (!session_) return;
+  session_->cancel_pending_out();
+
+  // 走 `take_completed` 而不是自己跑：这一步之后本对象的 `completed` 必须是空的，
+  // 否则那些 `done` 会同时挂在调用方手里和这里，谁先跑到就是另一回事。
+  std::vector<std::function<void()>> taken;
+  session_->take_completed(taken);
+  for (size_t i = 0; i < taken.size(); ++i) out.push_back(std::move(taken[i]));
 }
 
 void uvcpp_h2_connection::finish_close() {
