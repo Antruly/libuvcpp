@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_stream.h
  * @brief 流式请求体：按块交付、可暂停、可中止。
  * @author zhuweiye

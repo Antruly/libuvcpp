@@ -163,6 +163,36 @@ def check_no_handwritten_copy():
         ok("源码树里没有同名手写副本")
 
 
+def check_header_encoding():
+    """含非 ASCII 的公开头必须有 UTF-8 BOM。
+
+    MSVC 读无 BOM 的源文件时按系统 ANSI 代码页解码（简中 936/GBK），一个三字节汉字被
+    当成两个双字节字符吃掉，字节边界整体错位：该在注释里的 `*` 变成运算符、`*/` 落到
+    注释外，于是其后每个头都在"注释外"被解析，级联到 `<algorithm>` 为止 —— 报错地点与
+    病因完全无关。仓内看不见，因为顶层 CMakeLists 的 `add_compile_options(/utf-8)` 是
+    **目录作用域**的，既进不了导出集，也到不了源码树那条消费路径。
+
+    只判**有害的那一侧**（含非 ASCII 却无 BOM）：反向（纯 ASCII 带 BOM）对消费者无害，
+    为一个无害的不一致去红一条门禁，只会把人训练成忽略它。
+    """
+    bom = b"\xef\xbb\xbf"
+    n = 0
+    bad = 0
+    for path in public_headers():
+        n += 1
+        data = open(path, "rb").read()
+        if data.startswith(bom):
+            continue
+        try:
+            data.decode("ascii")
+        except UnicodeDecodeError:
+            bad += 1
+            fail("%s 含非 ASCII 却没有 BOM —— MSVC 消费者不带 /utf-8 时会级联报错"
+                 % os.path.relpath(path, ROOT).replace("\\", "/"))
+    if not bad:
+        ok("编码：%d 个公开头，含非 ASCII 的都带 BOM" % n)
+
+
 def read_values(path):
     with open(path, "rb") as fh:
         raw = fh.read()
@@ -433,6 +463,7 @@ def main():
     print("[3] 静态判据")
     check_positions()
     check_no_handwritten_copy()
+    check_header_encoding()
     check_pc_linkable(pkg)
     vals = check_generated_vs_tree(tree, pkg)
     if vals is None:

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_static.h
  * @brief 框架原生的静态文件服务：Range/断点续传、ETag/304、LRU 缓存、安全边界。
  * @author zhuweiye

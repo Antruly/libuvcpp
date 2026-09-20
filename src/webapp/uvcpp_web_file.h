@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_file.h
  * @brief 分片异步读 + 有界滑动窗口的文件下发载体。
  * @author zhuweiye

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_ws_client.h
  * @brief WebSocket 客户端（框架层）：回调装在客户端上 + 可选自动重连。
  * @author zhuweiye

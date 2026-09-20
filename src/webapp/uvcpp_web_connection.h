@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_connection.h
  * @brief 连接的身份与登记表：把「裸 client 指针」换成「永不复用的 id」。
  * @author zhuweiye

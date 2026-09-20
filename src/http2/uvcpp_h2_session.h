@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http2/uvcpp_h2_session.h
  * @brief h2 会话：nghttp2 的 mem-API 包装 + 请求/响应转换。
  * @author zhuweiye

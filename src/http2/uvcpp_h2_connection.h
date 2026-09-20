@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http2/uvcpp_h2_connection.h
  * @brief 把 h2 会话接到一条**已完成 TLS 握手且 ALPN 协商出 h2** 的连接上。
  * @author zhuweiye

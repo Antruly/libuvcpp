@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_ws_ext.h
  * @brief WebSocket 扩展协商（RFC 6455 §9.1、RFC 7692 §7）。
  * @author zhuweiye

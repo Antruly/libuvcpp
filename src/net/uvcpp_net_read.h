@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/net/uvcpp_net_read.h
  * @brief 框架层的读事件接口：把原始 read 回调包成有语义的事件。
  * @author zhuweiye

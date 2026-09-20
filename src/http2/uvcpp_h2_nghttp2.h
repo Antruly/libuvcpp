@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http2/uvcpp_h2_nghttp2.h
  * @brief 私有头：唯一一处把 `<nghttp2/nghttp2.h>` 拉进来的地方。
  * @author zhuweiye

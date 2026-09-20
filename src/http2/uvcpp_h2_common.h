@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http2/uvcpp_h2_common.h
  * @brief HTTP/2 层的公开小件：调参默认值、头部预算、以及不依赖 nghttp2 的枚举。
  * @author zhuweiye

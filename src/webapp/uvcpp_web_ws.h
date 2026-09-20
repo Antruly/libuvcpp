@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_ws.h
  * @brief WebSocket 处理器拿到的东西：一次升级请求 + 建立起来的连接。
  * @author zhuweiye

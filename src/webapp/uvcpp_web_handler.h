@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_handler.h
  * @brief 框架里那几种回调的签名。
  * @author zhuweiye
