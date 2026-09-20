@@ -184,7 +184,19 @@ struct memory_pool_config {
     size_t extra_large_block_size = EXTRA_LARGE_BLOCK_SIZE;
 
     /// 最大总内存限制（0 = 无限制），单位：字节。
-    /// @warning **当前不生效** —— 分配路径不读这个字段，设了也不会因此被拒。
+    ///
+    /// 口径是**池当前持有的实占字节**（含每块的 `BLOCK_HEADER_SIZE` 头部），不是
+    /// 「历史上累计分配过多少」：从线程缓存 / 全局池**命中**的复用不占额度，归还
+    /// 之后额度**会还回来**。所以它挡的是池的驻留内存，不是分配次数。
+    ///
+    /// 触顶时 `allocate()` 返回 `nullptr` 并计一次 `failed_allocations` —— 与
+    /// `malloc` 失败同一个表现，调用方本来就要判空。
+    ///
+    /// 两处不在这个上限的口径里：
+    ///   - `MEMORY_TYPE_SUPER`（>256 KiB）释放时走 `thread_local_cache::push()` 的
+    ///     `idx >= 7` 分支，块被**丢弃**而不归还（见那里的 @warning），所以它的额度
+    ///     只增不减；
+    ///   - `shutdown()` 与本池重新 `init()` 都会把额度清零。
     size_t max_total_memory = 0;
 
     /// @brief 获取指定类型对应的块大小
@@ -952,6 +964,15 @@ private:
         stats_.freed_bytes.fetch_add(alloc_size, std::memory_order_relaxed);
         stats_.total_deallocations.fetch_add(1, std::memory_order_relaxed);
     }
+    /// @brief 为一块 `total_size` 字节的内存申请额度（`max_total_memory`）。
+    /// @return 准许返回 true；触顶返回 false。
+    /// @note 上限为 0 时**恒真且不碰计数器** —— 「不设上限」的路径只多一次分支。
+    ///       用 CAS 而不是「先读后加」：并发分配下后者会**超发**，而这个字段就是上限本身。
+    bool try_reserve_bytes(size_t total_size);
+
+    /// @brief 归还额度。上限为 0 时是空操作。
+    void release_bytes(size_t total_size);
+
     pool_block_header* allocate_block(memory_block_type type, size_t size);
     pool_block_header* pop_from_global_pool(memory_block_type type);
     void push_to_global_pool(memory_block_type type, pool_block_header* block);
@@ -1003,6 +1024,11 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> shutdown_{false};
     std::atomic<bool> destroying_{false};  // 防止 thread_local 缓存析构时访问已销毁的 pool
+
+    // 池**当前持有**的实占字节，`max_total_memory` 就是拿它比的。
+    // 只在 `allocate_block()` 增长、只在真正把块还给系统时缩减（见 `release_bytes`）。
+    // **上限为 0 时全程不碰它**。
+    std::atomic<uint64_t> held_bytes_{0};
 };
 
 // ============================================================

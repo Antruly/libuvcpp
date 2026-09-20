@@ -122,6 +122,8 @@ uvcpp_memory_pool::uvcpp_memory_pool(uvcpp_memory_pool&& other) noexcept
 
     initialized_.store(other.initialized_.load(std::memory_order_relaxed));
     shutdown_.store(other.shutdown_.load(std::memory_order_relaxed));
+    held_bytes_.store(other.held_bytes_.load(std::memory_order_relaxed),
+                      std::memory_order_relaxed);
 
     other.global_tiny_pool_ = nullptr;
     other.global_small_pool_ = nullptr;
@@ -132,6 +134,7 @@ uvcpp_memory_pool::uvcpp_memory_pool(uvcpp_memory_pool&& other) noexcept
     other.global_extra_large_pool_ = nullptr;
     other.initialized_ = false;
     other.shutdown_ = true;
+    other.held_bytes_.store(0, std::memory_order_relaxed);
 }
 
 uvcpp_memory_pool& uvcpp_memory_pool::operator=(uvcpp_memory_pool&& other) noexcept {
@@ -167,6 +170,8 @@ uvcpp_memory_pool& uvcpp_memory_pool::operator=(uvcpp_memory_pool&& other) noexc
 
         initialized_.store(other.initialized_.load(std::memory_order_relaxed));
         shutdown_.store(other.shutdown_.load(std::memory_order_relaxed));
+        held_bytes_.store(other.held_bytes_.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
 
         other.global_tiny_pool_ = nullptr;
         other.global_small_pool_ = nullptr;
@@ -177,6 +182,7 @@ uvcpp_memory_pool& uvcpp_memory_pool::operator=(uvcpp_memory_pool&& other) noexc
         other.global_extra_large_pool_ = nullptr;
         other.initialized_ = false;
         other.shutdown_ = true;
+        other.held_bytes_.store(0, std::memory_order_relaxed);
     }
     return *this;
 }
@@ -240,6 +246,11 @@ void uvcpp_memory_pool::shutdown() {
     }
 
     initialized_.store(false, std::memory_order_release);
+
+    // 池不再持有任何东西（全局队列刚被 `shutdown()` 逐块释放）。不清零的话，
+    // 同一个对象重新 `init()` 会**带着上一次的额度**开局，上限一上来就是满的。
+    // 还挂在别人手上的块本进程已经追不回来了，同样不该继续占额度。
+    held_bytes_.store(0, std::memory_order_relaxed);
 }
 
 void uvcpp_memory_pool::reset() {
@@ -284,13 +295,58 @@ void uvcpp_memory_pool::reset_stats() {
 // 内存分配（核心实现）
 // ============================================================
 
+bool uvcpp_memory_pool::try_reserve_bytes(size_t total_size) {
+    const size_t cap = config_.max_total_memory;
+    if (cap == 0) return true;   // 无上限：不记账，也不碰计数器
+
+    uint64_t cur = held_bytes_.load(std::memory_order_relaxed);
+    for (;;) {
+        // 用减法而不是加法判溢出：`cur + total_size` 在极端值下会回绕，
+        // 而 `cur > cap` 已经先排除了 cur 越界的情形。
+        if (cur > static_cast<uint64_t>(cap) ||
+            total_size > static_cast<uint64_t>(cap) - cur) {
+            return false;
+        }
+        if (held_bytes_.compare_exchange_weak(cur, cur + total_size,
+                                              std::memory_order_relaxed,
+                                              std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+}
+
+void uvcpp_memory_pool::release_bytes(size_t total_size) {
+    if (config_.max_total_memory == 0) return;   // 没记账就不用还
+
+    // **饱和**减，不减到 0 以下：`shutdown()` 已经把额度清零，而它之后仍可能有块
+    // 经 `push_to_global_pool()` 的「池已关闭」分支归还过来。无符号下溢会把这个
+    // 计数顶成 1.8e19，此后**每一次分配都被拒**，而且没有任何出参能看出来
+    // （`held_bytes_` 没有公开读法）—— 宁可少记，不可记成这样。
+    uint64_t cur = held_bytes_.load(std::memory_order_relaxed);
+    for (;;) {
+        uint64_t next = (cur > static_cast<uint64_t>(total_size))
+                            ? cur - static_cast<uint64_t>(total_size)
+                            : 0;
+        if (held_bytes_.compare_exchange_weak(cur, next,
+                                              std::memory_order_relaxed,
+                                              std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
+
 pool_block_header* uvcpp_memory_pool::allocate_block(memory_block_type type, size_t request_size) {
     // SUPER类型直接malloc（带header），不缓存
     if (type == memory_block_type::MEMORY_TYPE_SUPER) {
         // 计算总大小（header + 用户请求大小）
         size_t total_size = BLOCK_HEADER_SIZE + request_size;
+        if (!try_reserve_bytes(total_size)) {
+            stats_.failed_allocations.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
         void *raw_ptr = uvcpp::uvcpp_alloc_bytes(total_size);
         if (!raw_ptr) {
+            release_bytes(total_size);   // 额度拿了但没花出去，还回去
             stats_.failed_allocations.fetch_add(1, std::memory_order_relaxed);
             return nullptr;
         }
@@ -317,9 +373,15 @@ pool_block_header* uvcpp_memory_pool::allocate_block(memory_block_type type, siz
     size_t total_size = BLOCK_HEADER_SIZE + block_size;
     size_t align = config_.align;
 
+    if (!try_reserve_bytes(total_size)) {
+        stats_.failed_allocations.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+
     // 分配内存（包含 header）
     void* raw_ptr = detail::aligned_alloc_wrapper(align, total_size);
     if (!raw_ptr) {
+        release_bytes(total_size);   // 额度拿了但没花出去，还回去
         stats_.failed_allocations.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
     }
@@ -402,10 +464,12 @@ void uvcpp_memory_pool::push_to_global_pool(memory_block_type type, pool_block_h
       // 池已关闭，直接释放
       if (type == memory_block_type::MEMORY_TYPE_SUPER) {
         uvcpp_free_bytes(block);
+        release_bytes(block->size);
         return;
       }
 
       detail::aligned_free_wrapper(block);
+      release_bytes(block->size);
       return;
     }
 
@@ -445,6 +509,7 @@ void uvcpp_memory_pool::push_to_global_pool(memory_block_type type, pool_block_h
         default:
             // SUPER 类型直接释放
             uvcpp::uvcpp_free_bytes(block);
+            release_bytes(block->size);
             return;
     }
 
@@ -551,6 +616,9 @@ bool uvcpp_memory_pool::init_internal(const memory_pool_config& config) {
     }
 
     config_ = config;
+
+    // 额度从这里起算（`max_total_memory` 可能与本对象上一次的生命周期不同）。
+    held_bytes_.store(0, std::memory_order_relaxed);
 
     // 初始化全局队列（传入释放回调，由内存池控制释放方式）
     global_tiny_pool_ = new mpsc_queue([](pool_block_header *p) {

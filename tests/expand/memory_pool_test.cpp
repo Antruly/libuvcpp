@@ -198,6 +198,74 @@ static void test_pool_reuse()
     TEST_PASS();
 }
 
+// `max_total_memory` 必须真的限额。
+//
+// 缺陷形状：这个字段全仓**只有声明那一处**出现（`grep -rn max_total_memory src/`
+// 命中一行，就是声明本身），分配路径从来不读它 —— 设了上限照样分配到进程 OOM。
+//
+// 判据分两条，合起来才钉得住：
+//
+//   1. **上限真的拦住了** —— 申请量远超上限时必须出现被拒的分配（返回 nullptr）。
+//      只判「持有量没超上限」是不够的：上限设得很大、或者压根没申请够，都能绿。
+//   2. **持有量真的没超上限** —— 用池自己报的 `allocated_bytes` 量。这条**与线程
+//      缓存无关**（从缓存命中不增加 `allocated_bytes`），所以不会被别的用例留在
+//      缓存里的块带偏；反过来，第 1 条也不受缓存影响 —— 本用例持有全部指针不放，
+//      缓存里那几块用完之后每次分配都必然要新块。
+//
+// 上限按**实占**算，不是请求大小：小块每块的实占是
+// `BLOCK_HEADER_SIZE + TINY_BLOCK_SIZE` = 32 + 64 = 96 字节（含头部）。
+//
+// 跑完把块还回去（`deallocate` → `release_thread_cache` → `shutdown`），
+// 别把状态留给后面的用例。
+static void test_pool_max_total_memory_enforced()
+{
+    const size_t kCap      = (32 + 64) * 64;  // 64 个小块的容量
+    const size_t kAsk      = 32;              // ⇒ 落在 TINY 档
+    const size_t kPerBlock = 32 + 64;         // 每块实占（头部 + tiny 块）
+    const int    kRounds   = 400;             // 远高于上限
+
+    uvcpp::memory_pool_config cfg;
+    cfg.max_total_memory = kCap;
+
+    uvcpp::uvcpp_memory_pool pool;
+    TEST_ASSERT(pool.init(cfg), "init(config) should succeed");
+    pool.init_thread_cache();
+
+    std::vector<void*> held;
+    held.reserve(kRounds);
+    int refused = 0;
+    for (int i = 0; i < kRounds; ++i) {
+        void* p = pool.allocate(kAsk);
+        if (p == nullptr) { ++refused; continue; }
+        std::memset(p, 0x5A, kAsk);   // 真写一下，别让优化器把分配抹掉
+        held.push_back(p);
+    }
+
+    const uint64_t carved   = pool.get_stats().allocated_bytes;
+    const uint64_t failed   = pool.get_stats().failed_allocations;
+
+    // 先还回去再断言，失败退出时不留悬挂指针
+    for (size_t i = 0; i < held.size(); ++i) pool.deallocate(held[i]);
+    pool.release_thread_cache();
+    pool.shutdown();
+
+    if (refused == 0) {
+        std::string msg = "上限形同虚设：设了 " + std::to_string(kCap) +
+            " 字节，申请 " + std::to_string(kRounds) + " × " + std::to_string(kAsk) +
+            " 字节（实占约 " + std::to_string(static_cast<size_t>(kRounds) * kPerBlock) +
+            " 字节）却一个都没被拒（failed_allocations=" +
+            std::to_string(failed) + "）";
+        TEST_ASSERT(false, msg.c_str());
+    }
+    if (carved > kCap + kPerBlock) {
+        std::string msg = "持有量超了上限：" + std::to_string(carved) +
+            " 字节 > " + std::to_string(kCap) + "（+1 块余量）";
+        TEST_ASSERT(false, msg.c_str());
+    }
+
+    TEST_PASS();
+}
+
 static void test_pool_thread_cache()
 {
     uvcpp::uvcpp_memory_pool pool;
@@ -577,6 +645,7 @@ int main()
     test_pool_stats();
     test_pool_nullptr_free();
     test_pool_reuse();
+    test_pool_max_total_memory_enforced();
     test_pool_thread_cache();
     test_pool_multithread();
     test_pool_make_shared_from_pool();
