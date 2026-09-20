@@ -1,3 +1,5 @@
+<!-- doc-snippets: fragments-default — 本页的例子是摘录，不是完整翻译单元；要编的逐条标 `// doc-snippet: compile`。约定见 CONTRIBUTING.md。 -->
+
 # webapp 应用框架开发者指南
 
 `src/webapp/` 是建在 web 层（HTTP / WebSocket 协议）之上的**应用框架**：路由、中间件、
@@ -43,6 +45,8 @@
 ## 1. 最小可运行程序
 
 ```cpp
+// doc-snippet: compile — 本页其余片段是摘录（见文件头上的页面级标记），这一条是
+// 自足的完整翻译单元，留着它这条门禁在本页就还有牙。
 #include <webapp/uvcpp_web_app.h>
 using namespace uvcpp;
 

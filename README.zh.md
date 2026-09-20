@@ -271,17 +271,25 @@ int main() {
     uvcpp::uvcpp_tcp_server server;
     server.bind("127.0.0.1", 8080);
 
-    server.on_connection([](uvcpp::uvcpp_tcp_client* client) {
-        client->on_data([](uvcpp::uvcpp_tcp_client* c, const char* data, size_t len) {
-            std::cout << "收到: " << std::string(data, len) << std::endl;
-            c->write(data, len);  // 回显
-        });
-        client->on_close([](uvcpp::uvcpp_tcp_client* c) {
+    // 所有连接共用这一个读回调：数据、对端关闭、读错误是三个明确的事件，
+    // 不用再去猜"数据怎么不来了"。
+    server.set_read_callback([](uvcpp::uvcpp_tcp_client& client,
+                                const uvcpp::net_read_result& r) {
+        if (r.is_data()) {
+            std::cout << "收到: " << std::string(r.data, r.size) << std::endl;
+            // 传了回调才是异步写；不传等价于 write_wait()，会在 loop 线程上等死。
+            client.write(r.data, r.size, [](int) {});
+        } else {
             std::cout << "客户端断开" << std::endl;
-        });
+        }
     });
 
-    server.listen();
+    // 连接回调是 listen() 的第一个参数，不是另一个 on_connection()。
+    // 读回调要在 listen() 之前设好。
+    server.listen([](uvcpp::uvcpp_tcp_client* client) {
+        std::cout << "客户端已连接" << std::endl;
+    });
+
     std::cout << "Echo 服务运行在 :8080" << std::endl;
     server.run();
     return 0;
@@ -356,8 +364,10 @@ int main() {
             conn->send_text(reply.c_str(), reply.size());
         });
 
-        conn->on_close([](uvcpp::uvcpp_ws_connection*) {
-            std::cout << "WS 客户端断开" << std::endl;
+        // 会话结束是 (关闭码, 原因) 两个参数，不是"一个连接指针"。
+        conn->on_close([](uvcpp::ws_close_code code, const std::string& reason) {
+            std::cout << "WS 客户端断开: "
+                      << static_cast<int>(code) << " " << reason << std::endl;
         });
     });
 
@@ -381,7 +391,7 @@ int main() {
     uvcpp::uvcpp_tcp_server server;
     server.set_ssl_context(&ssl_ctx);
     server.bind("127.0.0.1", 8443);
-    // ... on_connection, listen, run
+    // ... set_read_callback, listen, run
 }
 ```
 

@@ -272,17 +272,27 @@ int main() {
     uvcpp::uvcpp_tcp_server server;
     server.bind("127.0.0.1", 8080);
 
-    server.on_connection([](uvcpp::uvcpp_tcp_client* client) {
-        client->on_data([](uvcpp::uvcpp_tcp_client* c, const char* data, size_t len) {
-            std::cout << "Received: " << std::string(data, len) << std::endl;
-            c->write(data, len);  // echo back
-        });
-        client->on_close([](uvcpp::uvcpp_tcp_client* c) {
+    // One shared read callback for every connection: data, peer-close and
+    // read-error arrive as three distinct events, so you never have to work
+    // out why the data stopped coming.
+    server.set_read_callback([](uvcpp::uvcpp_tcp_client& client,
+                                const uvcpp::net_read_result& r) {
+        if (r.is_data()) {
+            std::cout << "Received: " << std::string(r.data, r.size) << std::endl;
+            // Passing the callback is what makes this an async write; with no
+            // callback it degrades to write_wait() and waits on the loop thread.
+            client.write(r.data, r.size, [](int) {});
+        } else {
             std::cout << "Client disconnected" << std::endl;
-        });
+        }
     });
 
-    server.listen();
+    // The connection callback is listen()'s first argument, not a separate
+    // on_connection(). Set the read callback before listen().
+    server.listen([](uvcpp::uvcpp_tcp_client* client) {
+        std::cout << "Client connected" << std::endl;
+    });
+
     std::cout << "Echo server on :8080" << std::endl;
     server.run();
     return 0;
@@ -357,8 +367,10 @@ int main() {
             conn->send_text(reply.c_str(), reply.size());
         });
 
-        conn->on_close([](uvcpp::uvcpp_ws_connection*) {
-            std::cout << "WS client disconnected" << std::endl;
+        // Session end is (close code, reason) — not the connection pointer.
+        conn->on_close([](uvcpp::ws_close_code code, const std::string& reason) {
+            std::cout << "WS client disconnected: "
+                      << static_cast<int>(code) << " " << reason << std::endl;
         });
     });
 
@@ -382,7 +394,7 @@ int main() {
     uvcpp::uvcpp_tcp_server server;
     server.set_ssl_context(&ssl_ctx);
     server.bind("127.0.0.1", 8443);
-    // ... on_connection, listen, run
+    // ... set_read_callback, listen, run
 }
 ```
 

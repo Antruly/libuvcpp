@@ -1097,6 +1097,38 @@ jobs:
           fi
           exit "$rc"
 
+      # 挂在**这一档**的理由：它是唯一同时满足"六个模块全 ON、真的产出一个包、
+      # 有 python、且 matrix 里同时有 g++ 与 cl 两条腿"的 job。门禁要的就是一个
+      # 全开的包 —— 关着模块的包只会让它把大半片段判成"跳过"（退 3），判不出东西。
+      #
+      # 两条腿都开：MSVC 是本库的一等使用者平台，只跑 Linux 会漏掉正是 MSVC 才有的
+      # 那类腐烂（编码、`/utf-8`、`/std:c++14` 与 C++11 的差）。本机没有 `cl`，
+      # 所以那半条腿**只能靠 CI 验**；万一首跑因编码红，退路是先把这一步收到
+      # `if: runner.os == 'Linux'`，把 MSVC 那条腿留到编码路径验通再开 ——
+      # 退路要写在这里，不许悄悄降级。
+      - name: Doc snippets must compile
+        shell: bash
+        run: |
+          pkg=$(ls -d dist/libuvcpp-*-${{ matrix.platform }} 2>/dev/null | head -1)
+          if [ -z "$pkg" ]; then
+            echo "::error title=doc-snippets::没找到 ${{ matrix.platform }} 的包（出包那步没产出？）"
+            exit 1
+          fi
+          echo "pkg=$pkg"
+          rc=0
+          out=$(${{ matrix.py }} tests/tools/check_doc_snippets.py \
+            --pkg "$pkg" --cxx ${{ matrix.cxx }} 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            # `前提` 也进匹配：rc=3（片段因为包里缺模块而**没判**）与 rc=1（判红了）
+            # 是两件事，注解里必须分得开，否则"没判成"会被读成"红了"。
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '\[红\]|\[停\]|红 [0-9]+ 条|前提|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=doc-snippets::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
       - name: Upload build log
         if: failure()
         uses: actions/upload-artifact@v4

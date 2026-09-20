@@ -170,12 +170,49 @@ reference material (RFC texts, an early development plan) that is deliberately k
 repository; do not reference those paths from tracked documentation, because they will not
 resolve for anyone who clones.
 
-Run `python tests/tools/check_docs.py` before pushing documentation changes: it checks that the
-CMake option tables in both READMEs match the options the build actually defines, that every
-relative link and repo path mentioned in a document resolves, and that no document is orphaned.
-CI runs it too, on every push. Note its exit codes — `0` passed, `1` a criterion is red, and
-`3` a criterion **never ran** because its premise was missing. `3` is not a failure; read the
-summary block rather than the exit code.
+Two gates run on documentation changes, both from CI as well as by hand:
+
+| Command | Checks |
+|---|---|
+| `python tests/tools/check_docs.py` | The CMake option tables in both READMEs match the options the build actually defines, every relative link and repo path resolves, and no document is orphaned. |
+| `python tests/tools/check_doc_snippets.py --pkg <package dir>` | Every ```` ```cpp ```` block in a tracked document actually **compiles** against the packaged headers. |
+
+Both use the same three exit codes, which are worth reading carefully: `0` every criterion ran
+and passed, `1` a criterion ran and is **red**, and `3` a criterion's **premise was missing, so
+it never ran**. `3` is not a failure — a red criterion also outranks an unjudged one — so read
+the summary block rather than the exit code. See
+[`testing-guide.md`](doc/testing-guide.md#gate-exit-codes-3-is-not-a-failure) for why the
+distinction is worth a convention.
+
+### Code blocks in documentation
+
+A ```` ```cpp ```` block is a **complete translation unit**, and the snippet gate compiles it. It
+does not have to be a whole program — the gate compiles with `-c`, so a self-contained function
+or class is enough, and giving one a real signature is the point: a changed callback signature
+then fails the build instead of quietly going stale in the docs. (The two READMEs each shipped a
+"quick start" example that had not compiled for months; nothing breaks when documentation rots,
+so nothing reported it.)
+
+| Written as | Means |
+|---|---|
+| ```` ```cpp ```` | Self-contained: it carries its own `#include`s and must compile. |
+| ```` ```cpp ```` + first line `// doc-snippet: fragment — <why>` | Not compiled. **The reason is mandatory** — an unexplained exemption is an exemption nobody can review. |
+| `<!-- doc-snippets: fragments-default -->` near the top of a page | Every block on that page is an excerpt; the ones that are self-contained opt back in with `// doc-snippet: compile`. At least one must. |
+
+Write the block the way a reader would use it. A block that includes nothing from this library
+is **red**: the gate infers which module a snippet needs from its own `#include`s, so a snippet
+with no library header has opted out of that check.
+
+**The gate compiles against an installed package, not the source tree**, and it defines nothing:
+`-I <pkg>/include`, zero `-D`. That is not a shortcut, it is the contract — `uvcpp_config.h` is
+generated so that a consumer who defines nothing is correct, and an externally defined value that
+disagrees with the build is a hard `#error`. Do not add per-page macro tables to make a snippet
+compile; a package without the module reports that snippet as **skipped** (`3`), which is the
+honest answer.
+
+One habit this repository has had to learn twice: **verify header dependencies with the compiler,
+not with `grep`.** A `grep '<openssl/'` over the public headers matches a *comment*, and the
+conclusion drawn from it — "the public headers need OpenSSL headers" — was simply wrong.
 
 ### Security-sensitive changes
 
