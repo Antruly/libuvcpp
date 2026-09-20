@@ -11,6 +11,7 @@ sharp edge lives in the linked pages, not here.
 | add or run a test, or find out what a script in `tests/tools/` does | [`doc/testing-guide.md`](doc/testing-guide.md) |
 | cut a release | [`doc/release-process.md`](doc/release-process.md) |
 | fix or extend CI | [`doc/ci-guide.md`](doc/ci-guide.md) |
+| measure throughput on this machine | [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |
 | use the library, not develop it | [`README.md`](README.md) / [`README.zh.md`](README.zh.md) |
 
 ## Prerequisites

@@ -67,6 +67,11 @@ option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/lo
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 
+# 压测靶场（bench/）。默认关，且**不进库、不进 CI**：它是量具，不是功能。
+# 单开它的理由见 doc/benchmark-rig.md —— 简言之，样例里的服务每个请求都写访问日志，
+# 拿它当靶场量到的是日志的价钱；这个靶场默认一个中间件都不装。
+option(UVCPP_BUILD_BENCH "Build the benchmark range (bench/)" OFF)
+
 # =========================================================================
 # Web 子开关 — 仅在 UVCPP_BUILD_WEB=ON 时有效
 # =========================================================================
@@ -947,6 +952,11 @@ if(UVCPP_BUILD_EXAMPLES)
   add_subdirectory(examples)
 endif()
 
+# 压测靶场。和示例同样放在这里（要拿上面的按目录生效的 add_compile_definitions）。
+if(UVCPP_BUILD_BENCH)
+  add_subdirectory(bench)
+endif()
+
 # install and export
 include(CMakePackageConfigHelpers)
 set(CONFIG_INSTALL_DIR lib/cmake/uvcpp)
@@ -1166,6 +1176,12 @@ if(WIN32)
   # llhttp.dll，缺一个就是 0xc0000135 静默退出。
   if(TARGET webapp_demo)
     list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/examples${_cfg_subdir}")
+  endif()
+  # 压测靶场同理：uvcpp_bench_server.exe 也直接依赖 uvcpp.dll / uv.dll /
+  # llhttp.dll，缺一个就是那个 0xc0000135 的静默退出 —— 而静默退出的靶场
+  # 在压测脚本眼里和"服务起不来"是同一件事，会被误读成服务端的锅。
+  if(TARGET uvcpp_bench_server)
+    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/bench${_cfg_subdir}")
   endif()
 
   # 收集所有要拷的 DLL 与其依赖目标

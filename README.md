@@ -269,6 +269,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | Build web app framework (router/middleware/static/upload/log). Requires `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | Build the examples in `examples/` |
+| `UVCPP_BUILD_BENCH` | `OFF` | Build the benchmark range in `bench/` — see [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
