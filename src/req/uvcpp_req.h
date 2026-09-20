@@ -45,19 +45,29 @@ namespace uvcpp {
 #define OBJ_UVCPP_WORK_REQ(obj) reinterpret_cast<uv_work_t *>((obj).get_req())
 #define OBJ_UVCPP_WRITE_REQ(obj) reinterpret_cast<uv_write_t *>((obj).get_req())
 
+// 生成 `<type>` 的默认构造与析构定义。要求 `<type>` 自己声明 `int init();`
+// —— 就是 `uvcpp_connect` / `uvcpp_fs` 那些类手写的那三句（分配 `uvname`、
+// `set_req`、调 `init()`），本宏只是把它们生成出来。
+//
+// 本宏此前有**三处**编不过，全仓零展开点所以一直没暴露，这里一并修掉：
+//   1. 同一个默认构造被定义了两次（ODR 违规，任何展开都是 redefinition）；
+//   2. 基类写成 `uvcpp_req(nullptr)` —— 基类只声明了 `explicit uvcpp_req();`
+//      这一个构造，没有接受指针的重载；
+//   3. 分配器写成 `uvcpp::uv_alloc<T>()` —— 项目里叫 `uvcpp_alloc<T>()`
+//      （见 `uvcpp/uvcpp_alloc.h`），`uv_alloc` 这个名字全仓不存在。
+// 第 2、3 条以 `uvcpp_connect` / `uvcpp_fs` / `uvcpp_random` 等六个手写类为准。
 #define DEFINE_FUNC_REQ_CPP(type, uvname)                                      \
-  type::type() : uvcpp_req(nullptr) {                                          \
-    uvname *r = uvcpp::uv_alloc<uvname>();                                     \
+  type::type() : uvcpp_req() {                                                 \
+    uvname *r = uvcpp::uvcpp_alloc<uvname>();                                  \
     this->set_req(r);                                                          \
     this->init();                                                              \
   }                                                                            \
-  type::type() : uvcpp_req(nullptr) {}                                         \
   type::~type() {}
 
 #define DEFINE_COPY_FUNC_REQ_CPP(type, uvname)                                 \
   type::type(const type &obj) {                                                \
     if (obj.get_req() != nullptr) {                                            \
-      uvname *hd = uvcpp::uv_alloc<uvname>();                                  \
+      uvname *hd = uvcpp::uvcpp_alloc<uvname>();                               \
       memcpy(hd, obj.get_req(), sizeof(uvname));                               \
       this->set_req(hd);                                                       \
     } else {                                                                   \
@@ -66,7 +76,7 @@ namespace uvcpp {
   }                                                                            \
   type &type::operator=(const type &obj) {                                     \
     if (obj.get_req() != nullptr) {                                            \
-      uvname *hd = uvcpp::uv_alloc<uvname>();                                  \
+      uvname *hd = uvcpp::uvcpp_alloc<uvname>();                               \
       memcpy(hd, obj.get_req(), sizeof(uvname));                               \
       this->set_req(hd);                                                       \
     } else {                                                                   \

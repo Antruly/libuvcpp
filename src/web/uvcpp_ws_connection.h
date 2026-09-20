@@ -60,9 +60,12 @@ enum class ws_role : int {
 
 class UVCPP_API uvcpp_ws_connection {
  public:
-  // 注意：这个宏展开出 `explicit uvcpp_ws_connection();` **和析构函数**。析构有定义，
-  // **默认构造没有** —— `.cpp` 里只定义了下面那个两参构造。所以 `uvcpp_ws_connection c;`
-  // 编得过、**链接不过**（LNK2019 / undefined reference）。本类只能按两参构造建。
+  // 这个宏同时声明默认构造与析构，两者在 `.cpp` 里都有定义：析构正常清理；默认
+  // 构造**不带传输层**（`tcp_` 留空，`role_` 为 `SERVER`），建出来是个合法但惰性
+  // 的对象 —— `start()` 见 `tcp_ == nullptr` 直接返回，不会有任何 I/O，本类也没有
+  // 之后再挂传输层的接口。要真正收发帧，用下面那个两参构造（`role` 必填）。
+  // 注意别把 `is_open()` 当"有传输层"用：它只回 `!retired_`，所以这种对象上它是
+  // **true**。
   UVCPP_DEFINE_FUNC(uvcpp_ws_connection)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_ws_connection)
 

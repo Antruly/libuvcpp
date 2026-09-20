@@ -1099,10 +1099,11 @@ std::unique_ptr<T, pool_deleter<T>> make_unique_from_pool(uvcpp_memory_pool& poo
 template<typename T, typename... Args>
 std::shared_ptr<T> make_shared_from_pool(uvcpp_memory_pool& pool, Args&&... args) {
     T* ptr = make_from_pool<T>(pool, std::forward<Args>(args)...);
-    return std::shared_ptr<T>(ptr, [pool = &pool](T* p) {
-        p->~T();
-        pool->deallocate(p);
-    });
+    // 删除器复用 pool_deleter<T>：它的 operator() 与这里原来那个 lambda 逐句相同
+    // （`ptr->~T()` 后 `deallocate(ptr)`），顺带多一个空指针检查。原来写的是
+    // C++14 的 init-capture（`[pool = &pool]`），而构建声明的是 C++11 —— 消费者
+    // 用 `-std=c++11 -pedantic-errors` 编到这里就失败。
+    return std::shared_ptr<T>(ptr, pool_deleter<T>(pool));
 }
 
 } // namespace uvcpp

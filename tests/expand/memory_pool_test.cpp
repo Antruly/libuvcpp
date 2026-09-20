@@ -506,6 +506,62 @@ static void test_uvcpp_alloc_integration()
     TEST_PASS();
 }
 
+// `make_shared_from_pool()` 在全仓**零实例化** —— 模板没被实例化过，它的删除器
+// （`~T()` 后 `deallocate(ptr)`）一次都没跑过，改坏了也没人知道。这条用例把它钉住：
+// 构造走池、持有期计数为 1、离开作用域后 `~T()` 被调到且内存回池。
+namespace {
+std::atomic<int> g_msfp_ctor{0};
+std::atomic<int> g_msfp_dtor{0};
+
+struct msfp_probe {
+    int v;
+    explicit msfp_probe(int x) : v(x) { g_msfp_ctor.fetch_add(1, std::memory_order_relaxed); }
+    ~msfp_probe() { g_msfp_dtor.fetch_add(1, std::memory_order_relaxed); }
+    msfp_probe(const msfp_probe&) = delete;
+    msfp_probe& operator=(const msfp_probe&) = delete;
+};
+}  // namespace
+
+static void test_pool_make_shared_from_pool()
+{
+    uvcpp::uvcpp_memory_pool pool;
+    pool.init();
+
+    // 线程缓存是 `thread_local` 的**单例**，它只记一个 `pool_ptr_`：最后一次调
+    // `init_thread_cache()` 的那个池。本文件前面的 `test_pool_thread_cache()` 绑的
+    // 是它自己的局部池，函数一返回那个栈对象就没了。
+    //
+    // 所以这里**必须先重绑到本池**：`deallocate()` 会把块压进这条 TLS 链，
+    // 而链要活到线程退出；那时 `release_all()` 拿着已经销毁的 `pool_ptr_` 去调
+    // `release_func_` —— 实测直接 `0xC0000374`（堆损坏），而且是在**进程退出阶段**
+    // 才报，现场离真凶很远。先 `init_thread_cache()` 绑本池、销毁前
+    // `release_thread_cache()` 把块还回来，链就是空的，退出时不会碰那个指针。
+    pool.init_thread_cache();
+
+    g_msfp_ctor.store(0);
+    g_msfp_dtor.store(0);
+    // 前置断言：起点必须是干净的，否则下面的 1 / 0 都说明不了问题。
+    TEST_ASSERT(pool.active_allocations() == 0, "前置：起点没有在用块");
+
+    {
+        std::shared_ptr<msfp_probe> sp = uvcpp::make_shared_from_pool<msfp_probe>(pool, 7);
+        TEST_ASSERT(sp != nullptr, "make_shared_from_pool 应返回非空");
+        TEST_ASSERT(sp->v == 7, "构造参数应转发给 T");
+        TEST_ASSERT(g_msfp_ctor.load() == 1, "前置：T 的构造应恰好跑一次");
+        TEST_ASSERT(g_msfp_dtor.load() == 0, "前置：持有期间不该析构");
+        TEST_ASSERT(pool.active_allocations() == 1, "在用块数应跟着走到 1");
+    }
+
+    TEST_ASSERT(g_msfp_dtor.load() == 1, "删除器应调用 ~T()");
+    TEST_ASSERT(pool.active_allocations() == 0,
+                "归还后在用块数应回到 0（删除器必须 deallocate 回池）");
+
+    // 趁本池还活着，把 TLS 链上那个块还回本池（见上面的说明）。
+    pool.release_thread_cache();
+    pool.shutdown();
+    TEST_PASS();
+}
+
 // ==================== Main ====================
 
 int main()
@@ -523,6 +579,7 @@ int main()
     test_pool_reuse();
     test_pool_thread_cache();
     test_pool_multithread();
+    test_pool_make_shared_from_pool();
 
     // uvcpp_memory_pool_span tests
     test_span_alloc_free_basic();

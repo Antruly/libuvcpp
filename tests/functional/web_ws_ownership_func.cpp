@@ -477,9 +477,24 @@ static void t_owner_terminate_with_inflight_write() {
   check(true, "12 rounds of owner-terminate with in-flight write survived");
 }
 
+// 默认构造此前**只有声明、没有定义**（`UVCPP_DEFINE_FUNC` 声明了它，而 `.cpp` 里
+// 只有那个两参构造）⇒ `uvcpp_ws_connection c;` 编得过、**链接不过**。所以这条用例
+// 的价值首先在**链接**：它能出现在这里，就说明定义在了。顺带钉住「建出来是惰性的」
+// 这个契约 —— 没有传输层时 `start()` 必须安全返回，不注册任何 I/O。
+static void t_default_construct_is_inert() {
+  uvcpp_ws_connection c;   // 编得过**且链接得过** —— 这就是本用例的主要断言
+  c.start();               // 见 tcp_ == nullptr，应直接返回，不注册任何 I/O
+  c.start();               // 幂等：再来一次也不该有副作用
+  // 没有传输层时这些公开访问器也不能崩（它们都不碰 tcp_）。
+  check(c.get_max_message_size() > 0, "默认构造也带上了消息上限");
+  check(!c.is_compression_enabled(), "默认构造不启用压缩");
+  check(true, "默认构造的对象可安全 start() 与析构");
+}
+
 // =========================================================================
 
 int main() {
+  t_default_construct_is_inert();
   t_peer_disconnect();
   t_peer_close_frame();
   t_protocol_error();

@@ -55,7 +55,7 @@ HTTP 的服务端与 WS 的服务端会在同一个 `uvcpp_http_server` 上碰�
 （`src/web/uvcpp_ws_connection.h:56`）：服务端 `new uvcpp_ws_connection(client, ws_role::SERVER)`
 （`src/web/uvcpp_ws_server.cpp:224`），客户端
 `new uvcpp_ws_connection(tcp_, ws_role::CLIENT)`（`src/web/uvcpp_ws_client.cpp:374`）。
-两侧唯一的差别是掩码方向（`src/web/uvcpp_ws_connection.cpp:184`）与压缩窗口方向
+两侧唯一的差别是掩码方向（`src/web/uvcpp_ws_connection.cpp:194`）与压缩窗口方向
 （`src/web/uvcpp_ws_parser.cpp:278`）。
 
 ---
@@ -160,12 +160,12 @@ size_t session_count() const;                        // :151
 
 ```cpp
 // doc-snippet: fragment — 两行签名摘录，不是完整翻译单元
-bool is_open() const;                 // src/web/uvcpp_ws_connection.h:133
-uvcpp_tcp_client* get_tcp_client();   // src/web/uvcpp_ws_connection.h:246，终结后返回 nullptr
+bool is_open() const;                 // src/web/uvcpp_ws_connection.h:136
+uvcpp_tcp_client* get_tcp_client();   // src/web/uvcpp_ws_connection.h:249，终结后返回 nullptr
 ```
 
 所有回调都在**跑 `run()` 的那个线程**上同步调用（解析器帧回调 → `on_ws_frame` →
-用户回调，`src/web/uvcpp_ws_parser.cpp:193` → `src/web/uvcpp_ws_connection.cpp:170`）。
+用户回调，`src/web/uvcpp_ws_parser.cpp:193` → `src/web/uvcpp_ws_connection.cpp:180`）。
 
 ### 在回调里装回调是正常写法
 
@@ -189,32 +189,32 @@ void doc_install(uvcpp::uvcpp_ws_connection* c) {
 }
 ```
 
-`on_close` 的触发条件只有两种（`src/web/uvcpp_ws_connection.h:173`）：
+`on_close` 的触发条件只有两种（`src/web/uvcpp_ws_connection.h:176`）：
 
 - 对端发了 Close 帧 → 帧里的码与原因；
 - 对端**没发** Close 就断 → `ABNORMAL_CLOSE`（1006）加空原因。
 
 **本端自己发起的结束不会再触发它** —— `close()` 里第一句就是
-`close_notified_ = true`（`src/web/uvcpp_ws_connection.cpp:94`）。
+`close_notified_ = true`（`src/web/uvcpp_ws_connection.cpp:104`）。
 
 ---
 
 ## 6. 收
 
 `on_text` / `on_binary` **每条完整消息各一次**，分片已经在层内重组好了
-（`src/web/uvcpp_ws_connection.h:166`）。`data` 指针只在回调期间有效 ——
-实现里 `message_payload_.clear()` 紧跟在回调之后（`src/web/uvcpp_ws_connection.cpp:379`），
+（`src/web/uvcpp_ws_connection.h:169`）。`data` 指针只在回调期间有效 ——
+实现里 `message_payload_.clear()` 紧跟在回调之后（`src/web/uvcpp_ws_connection.cpp:389`），
 存下来就是悬垂。
 
-**控制帧与数据帧可以交错**：`src/web/uvcpp_ws_connection.cpp:198` 的控制帧分支不碰
+**控制帧与数据帧可以交错**：`src/web/uvcpp_ws_connection.cpp:208` 的控制帧分支不碰
 `in_message_` 那几个状态，所以一条长分片消息中间夹一个 ping 是合法的、也是正常的。
-反过来，**数据帧插在分片消息中间是协议错误**（`src/web/uvcpp_ws_connection.cpp:247`）。
+反过来，**数据帧插在分片消息中间是协议错误**（`src/web/uvcpp_ws_connection.cpp:257`）。
 
 两条"层内自动做掉"的事，使用者不用管：
 
 - **掩码**：接收侧在解析器里就地 XOR，且**跨多次 read 的相位是对的**
   （`off = payload_received_ % 4`，`src/web/uvcpp_ws_parser.cpp:166`）；
-- **收 ping 自动回 pong**（`src/web/uvcpp_ws_connection.cpp:200`）—— 注意这是**被动**回，
+- **收 ping 自动回 pong**（`src/web/uvcpp_ws_connection.cpp:210`）—— 注意这是**被动**回，
   这一层没有主动发心跳的定时器（§14）。
 
 ---
@@ -224,31 +224,31 @@ void doc_install(uvcpp::uvcpp_ws_connection* c) {
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
 int send_text(const char* data, size_t len,
-              std::function<void(int)> cb = nullptr);     // src/web/uvcpp_ws_connection.h:155
+              std::function<void(int)> cb = nullptr);     // src/web/uvcpp_ws_connection.h:158
 int send_binary(const char* data, size_t len,
-                std::function<void(int)> cb = nullptr);   // src/web/uvcpp_ws_connection.h:156
-int send_ping(const char* data = nullptr, size_t len = 0);  // :157
-int send_pong(const char* data = nullptr, size_t len = 0);  // :158
+                std::function<void(int)> cb = nullptr);   // src/web/uvcpp_ws_connection.h:159
+int send_ping(const char* data = nullptr, size_t len = 0);  // :160
+int send_pong(const char* data = nullptr, size_t len = 0);  // :161
 int send_close(ws_close_code code = ws_close_code::NORMAL,
-               const std::string& reason = "");           // src/web/uvcpp_ws_connection.h:159
+               const std::string& reason = "");           // src/web/uvcpp_ws_connection.h:162
 ```
 
 **没有分片发送 API。** 每次 `send_data` 造一个 `uvcpp_ws_frame`（默认 `fin = true`，
-`src/web/uvcpp_ws_frame.h:60`），永远单帧发出（`src/web/uvcpp_ws_connection.cpp:482`）
+`src/web/uvcpp_ws_frame.h:60`），永远单帧发出（`src/web/uvcpp_ws_connection.cpp:492`）
 —— 分片只在**接收**方向被重组。
 
 **`send_ping` / `send_pong` 没有完成回调**（对比 `send_text` / `send_binary`），
 失败只能看返回值。
 
 **连接已经终结时**，`send_frame` 第一句是
-`if (!tcp_) { if (cb) cb(-1); return -1; }`（`src/web/uvcpp_ws_connection.cpp:402`）：
+`if (!tcp_) { if (cb) cb(-1); return -1; }`（`src/web/uvcpp_ws_connection.cpp:412`）：
 
 - 返回**裸 `-1`**，**不是** `UV_ENOTCONN` 之类的 libuv 码 —— 别拿 `uv_strerror()` 解释它；
 - 传了回调的话，回调**同步**被叫 `cb(-1)`；
 - 不传回调就是静默丢弃。
 
 如果发送通道此前已经坏过，走的是粘性错误 `send_error_`
-（`src/web/uvcpp_ws_connection.cpp:408`）：所有排队的帧都以同一个错误结算。
+（`src/web/uvcpp_ws_connection.cpp:418`）：所有排队的帧都以同一个错误结算。
 
 ---
 
@@ -310,7 +310,7 @@ void doc_run_client() {
 ### 客户端没有 `on_ping` / `on_pong` 转发
 
 `cli.on_*` 只有 text / binary / close / error 四个（`src/web/uvcpp_ws_client.h:105-108`），
-而连接层有 ping / pong（`src/web/uvcpp_ws_connection.h:171`）。要观测 ping/pong 得
+而连接层有 ping / pong（`src/web/uvcpp_ws_connection.h:174`）。要观测 ping/pong 得
 `cli.session()->on_ping(...)` 自己拿指针装 —— 注意 `session()` 终结后返回 `nullptr`
 （`src/web/uvcpp_ws_client.cpp:424`）。连接层仍会自动回 pong，不受影响。
 
@@ -344,24 +344,24 @@ TLS 本身由 `tcp_->enable_tls(ssl_ctx_)` 的 memory-BIO 过滤器做（`:277`�
 ```cpp
 // doc-snippet: fragment — 两行签名摘录，不是完整翻译单元
 void close(ws_close_code code = ws_close_code::NORMAL,
-           const std::string& reason = std::string());   // src/web/uvcpp_ws_connection.h:141
-void terminate();                                        // src/web/uvcpp_ws_connection.h:150
+           const std::string& reason = std::string());   // src/web/uvcpp_ws_connection.h:144
+void terminate();                                        // src/web/uvcpp_ws_connection.h:153
 ```
 
-`close()` 的实现只有两句（`src/web/uvcpp_ws_connection.cpp:90`）：
+`close()` 的实现只有两句（`src/web/uvcpp_ws_connection.cpp:100`）：
 置 `close_notified_`，然后 `send_close(code, reason)`。而 `send_close` 的完成回调是
 "自己的 Close 帧一写进 TCP，就立刻关底层连接"
-（`src/web/uvcpp_ws_connection.cpp:580`）。
+（`src/web/uvcpp_ws_connection.cpp:590`）。
 
 **也就是说它不等对端回 Close 帧。** RFC 6455 §7.1.1 的关闭握手在这一层只做了一半，
-而且**没有任何超时或定时器**兜底。头文件 `src/web/uvcpp_ws_connection.h:135` 的措辞与实现
+而且**没有任何超时或定时器**兜底。头文件 `src/web/uvcpp_ws_connection.h:138` 的措辞与实现
 是相符的，但 `src/web/uvcpp_ws_sessions.h:106` 与 `src/web/uvcpp_ws_server.h:120` 把它称作
 "优雅关闭" —— 那是**名义上的优雅**，不是 RFC 的完整语义。
 
-`terminate()` 是立即终结、**不发** Close 帧（`src/web/uvcpp_ws_connection.cpp:99`）。
+`terminate()` 是立即终结、**不发** Close 帧（`src/web/uvcpp_ws_connection.cpp:109`）。
 两个别混。
 
-`send_close` 会把 reason **静默截断到 123 字节**（`src/web/uvcpp_ws_connection.cpp:578`）——
+`send_close` 会把 reason **静默截断到 123 字节**（`src/web/uvcpp_ws_connection.cpp:588`）——
 控制帧负载上限 125，扣掉 2 字节状态码。截断是有意的：不截就会拼出一个对端
 **必须拒绝**的帧。
 
@@ -389,7 +389,7 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 上表里的含义是按 RFC 补的。缺 1004、1012 / 1013 / 1014。
 
 **没有"1005 / 1006 不能发"的保护**：`send_close(NO_STATUS)` 会照发一个含 1005 的帧
-—— `send_close` 只截断长度，不校验码（`src/web/uvcpp_ws_connection.cpp:574`）。
+—— `send_close` 只截断长度，不校验码（`src/web/uvcpp_ws_connection.cpp:584`）。
 
 ---
 
@@ -417,7 +417,7 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 **只支持 `permessage-deflate`（RFC 7692），没有别的扩展。**
 `rsv2` / `rsv3` 在帧结构里标着"保留给 RFC 8441（HTTP/2 上的 WebSocket）"，
 但**没有实现** —— 收到 rsv2/rsv3 一律回 1002
-（`src/web/uvcpp_ws_connection.cpp:228`，理由串写的是
+（`src/web/uvcpp_ws_connection.cpp:238`，理由串写的是
 `"RSV2/RSV3 set but no extension negotiated"`）。
 
 **用 `uvcpp_ws_server` / `uvcpp_ws_client` 的人什么都不用做**：两侧默认**开启**协商
@@ -429,12 +429,12 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 `UVCPP_ZLIB_ENABLE=1` 时编译**）。
 
 阈值 `set_compress_min_size(size_t n)` 默认 `0`，也就是**都压**
-（`src/web/uvcpp_ws_connection.h:239`）。
+（`src/web/uvcpp_ws_connection.h:242`）。
 
 只有"自己手搓握手"的路线才需要手动调
 `conn->enable_compression(bool is_server, const uvcpp_ws_deflate_params& p)`
-（`src/web/uvcpp_ws_connection.h:227`）—— 注意 `is_server` **必填、无默认值**，
-理由写在 `src/web/uvcpp_ws_connection.h:219`。
+（`src/web/uvcpp_ws_connection.h:230`）—— 注意 `is_server` **必填、无默认值**，
+理由写在 `src/web/uvcpp_ws_connection.h:222`。
 
 **如实记一条边界**：解压**不检测截断**（`src/web/uvcpp_ws_parser.h:179-187` 自己写明了）。
 
@@ -442,23 +442,23 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 
 ## 12. 上限与解析器
 
-**两级上限，都必须卡**（`src/web/uvcpp_ws_connection.h:201`、`src/web/uvcpp_ws_parser.h:96`）：
+**两级上限，都必须卡**（`src/web/uvcpp_ws_connection.h:204`、`src/web/uvcpp_ws_parser.h:96`）：
 
 ```cpp
 // doc-snippet: fragment — 两个 setter 的签名摘录，展示"两级都要设"这件事；
 // 单独包成 TU 也编不出什么，它们要连着 §12 的说明读。
 void set_max_frame_size(uint64_t n);    // src/web/uvcpp_ws_parser.h:100，默认 0 = 不限
-void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:210，默认 16 MiB
+void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:213，默认 16 MiB
 ```
 
 - 解析器的**单帧**上限默认 `0`，就是**不限**（`src/web/uvcpp_ws_parser.h:238`，
   检查点在长度字段解析完成那一刻，`src/web/uvcpp_ws_parser.cpp:201`）；
 - 连接层的**单条消息**上限默认 `16u * 1024u * 1024u` = 16 MiB
-  （`src/web/uvcpp_ws_connection.h:340`）。
+  （`src/web/uvcpp_ws_connection.h:343`）。
 
 两条都要设的理由是**它们互相绕得过**：分片绕得过单帧（每条分片都合法但合起来巨大），
 单帧绕得过消息（一个声明了 1 GiB 长度的帧根本不进聚合）。连接层构造时会把消息上限
-同步给解析器当单帧上限（`src/web/uvcpp_ws_connection.cpp:22`）。
+同步给解析器当单帧上限（`src/web/uvcpp_ws_connection.cpp:32`）。
 
 解析器本身使用者正常不用碰。要用的时候记两条：`execute()` 一次只吃一帧、
 完成后停在 `COMPLETE` 且**不自己 reset**（`src/web/uvcpp_ws_parser.cpp:62`）；
@@ -473,13 +473,13 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:210，�
 
 | 场景 | 表达 | 位置 |
 |---|---|---|
-| 收到非法帧 | 先发对应 Close 帧再关连接，然后 `on_error(code, reason)` | `src/web/uvcpp_ws_connection.cpp:382` |
-| 消息聚合超限 | 1009 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:273` |
-| 文本消息不是合法 UTF-8 | 1007 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:365` |
-| 解压失败 | 1007 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:349` |
-| 掩码方向不对 | 1002 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:185` |
-| 对端没发 Close 就断 | `on_close(ABNORMAL_CLOSE, "")` | `src/web/uvcpp_ws_connection.cpp:82` |
-| 终结时队列里还有帧 | 逐条以 `-1` 结算回调 | `src/web/uvcpp_ws_connection.cpp:126` |
+| 收到非法帧 | 先发对应 Close 帧再关连接，然后 `on_error(code, reason)` | `src/web/uvcpp_ws_connection.cpp:392` |
+| 消息聚合超限 | 1009 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:283` |
+| 文本消息不是合法 UTF-8 | 1007 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:375` |
+| 解压失败 | 1007 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:359` |
+| 掩码方向不对 | 1002 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:195` |
+| 对端没发 Close 就断 | `on_close(ABNORMAL_CLOSE, "")` | `src/web/uvcpp_ws_connection.cpp:92` |
+| 终结时队列里还有帧 | 逐条以 `-1` 结算回调 | `src/web/uvcpp_ws_connection.cpp:136` |
 | 客户端无会话时 send | 返回 `UV_ENOTCONN` 并**立刻**回调 | `src/web/uvcpp_ws_client.cpp:434` |
 | 握手响应不是 101 | `on_handshake_complete(-2)` | `src/web/uvcpp_ws_client.cpp:320` |
 | 扩展应答非法 | `on_handshake_complete(-3)` | `src/web/uvcpp_ws_client.cpp:335` |
@@ -498,13 +498,6 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:210，�
 `src/web/uvcpp_ws_server.h:11-20` 的原样照抄会得到一个收不到连接的服务端。
 
 **`close()` 不等对端回帧，也没有超时。** 见 [§9](#9-关闭)。
-
-**`uvcpp_ws_connection` 的默认构造函数声明了但没定义。**
-`UVCPP_DEFINE_FUNC` 展开出 `explicit uvcpp_ws_connection();`
-（`src/web/uvcpp_ws_connection.h:66`），而 `.cpp` 里只有两参数那个
-（`src/web/uvcpp_ws_connection.cpp:9`）。写 `uvcpp_ws_connection c;` **编得过、链接不过**。
-其余四个类的默认构造都有定义（`src/web/uvcpp_ws_server.cpp:106`、
-`src/web/uvcpp_ws_client.cpp:78`、`src/web/uvcpp_ws_parser.cpp:24`、`src/web/uvcpp_ws_sessions.cpp:9`）。
 
 **客户端 `wss://` 撞上没有 OpenSSL 的构建时会"哑掉"。**
 `src/web/uvcpp_ws_client.cpp:210` 是 `#if !UVCPP_OPENSSL_ENABLE` 下的
@@ -530,9 +523,9 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:210，�
 else if (on_conn_) { on_conn_(conn); }` —— 用带 `on_ready` 的那个重载时，
 **不会**再走 `on_connection`。
 
-**单帧超限被映射成 1002，消息超限是 1009。** `src/web/uvcpp_ws_connection.cpp:161`
+**单帧超限被映射成 1002，消息超限是 1009。** `src/web/uvcpp_ws_connection.cpp:171`
 把**任何**解析错误一律转成 `PROTOCOL_ERROR`，包括解析器的 `-6`（单帧超限）；
-而消息聚合超限走的是 `MESSAGE_TOO_BIG`（`:273`）。同一份 `max_message_size_`
+而消息聚合超限走的是 `MESSAGE_TOO_BIG`（`:283`）。同一份 `max_message_size_`
 值下达的两级限制，对端看到的码不同 —— 对端按 RFC 会把 1009 当"我扩容量重试"、
 把 1002 当"你实现错了"。
 
@@ -553,7 +546,7 @@ PageHeap 下实测 SEGFAULT（`src/web/uvcpp_ws_client.cpp:124-145`）。
 
 - **没有 `Sec-WebSocket-Protocol` 子协议协商**（[§4](#4-握手)）。
 - **没有主动心跳、没有闲置超时、没有任何默认的定时器。** 唯一的 ping 相关行为是
-  收到 ping 自动回 pong（`src/web/uvcpp_ws_connection.cpp:200`）。
+  收到 ping 自动回 pong（`src/web/uvcpp_ws_connection.cpp:210`）。
 - **`uvcpp_ws_client` 没有自动重连** —— 那是 `webapp/` 框架层的事（[§8](#8-客户端)）。
 - **没有分片发送 API**（[§7](#7-发)）；分片只在接收方向重组。
 - **没有广播 API、没有会话 id**（[§10](#10-会话表)）。

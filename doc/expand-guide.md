@@ -209,13 +209,13 @@ void doc_pool_object(uvcpp::uvcpp_memory_pool& pool) {
 }
 ```
 
-三个工厂函数（`src/expand/uvcpp_memory_pool.h:1069-1106`）：
+三个工厂函数（`src/expand/uvcpp_memory_pool.h:1069-1107`）：
 
 | 函数 | 返回 | 说明 |
 |---|---|---|
 | `make_from_pool<T>(pool, args...)` | `T*` | 裸指针，失败抛 `std::bad_alloc` |
 | `make_unique_from_pool<T>(pool, args...)` | `std::unique_ptr<T, pool_deleter<T>>` | 销毁时先 `~T()` 再 `deallocate` |
-| `make_shared_from_pool<T>(pool, args...)` | `std::shared_ptr<T>` | **在 C++11 严格模式下编不过**，见 §9 |
+| `make_shared_from_pool<T>(pool, args...)` | `std::shared_ptr<T>` | 删除器就是 `pool_deleter<T>`，与上一条同语义 |
 
 第一次调用某个池的分配路径时，**记得先 `init_thread_cache()`** —— 不做的话这个线程
 归还的块不会回到池里（见 §7 与 §9）。
@@ -455,31 +455,6 @@ double memory_usage_ratio() const {
 缓存命中的分配不进 `allocated_bytes`，但它的释放照样进 `freed_bytes`。自由块一多，
 `freed > allocated`，`uint64_t` 减法**回绕成天文数字**，比值算出来是个荒谬的大数
 （或 `inf`）。这个读数是"分配了多少 / 又还了多少"的混合口径，不是使用率。
-
-### `make_shared_from_pool` 用的是 C++14 语法，而构建声明 C++11
-
-```cpp
-// doc-snippet: fragment — make_shared_from_pool() 里那条 return 的摘录
-return std::shared_ptr<T>(ptr, [pool = &pool](T* p) {
-    p->~T();
-    pool->deallocate(p);
-});
-```
-
-（`src/expand/uvcpp_memory_pool.h:1102`）lambda 初始化捕获是 C++14 特性，而
-`CMakeLists.txt:85-86` 写的是 `set(CMAKE_CXX_STANDARD 11)` +
-`CMAKE_CXX_STANDARD_REQUIRED ON`。实测：
-
-| 编译方式 | 结果 |
-|---|---|
-| `g++ -std=c++11` | `warning: lambda capture initializers only available with '-std=c++14'`，rc=0 |
-| `g++ -std=c++11 -pedantic-errors` | **error**，rc=1 |
-| MSVC `/std:c++14` | 通过 |
-
-库自己编得过（GCC 默认给的是 `gnu++11`，只警告；MSVC 那侧 CMake 把 C++11 映射成
-`/std:c++14`），所以一直没被发现。**开了 `-pedantic-errors` / `-Werror` 的消费者会
-编不过**，而你自己的代码只是包含这个头、并不调用这个模板也可能中招 —— GCC 报错
-落在头文件里，不是你的调用点。
 
 ### 这一模块里**诚实**的头注释
 

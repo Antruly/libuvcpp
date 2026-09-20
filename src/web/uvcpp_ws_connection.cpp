@@ -6,6 +6,16 @@
 
 namespace uvcpp {
 
+// 默认构造：转交给两参构造，只是不带传输层（`tcp_` 留空）。
+// 类成员本来就有默认值（`tcp_ = nullptr`、`role_ = ws_role::SERVER`），`start()`
+// 也早就写了 `if (tcp_ == nullptr || started_) return;`，所以这样建出来的对象是
+// **合法且惰性的**：可以安全地构造、析构、调 `start()`，只是不会有任何 I/O。
+// 声明来自 `UVCPP_DEFINE_FUNC`（它同时声明默认构造与析构），而此前只有析构有
+// 定义 ⇒ `uvcpp_ws_connection c;` 编得过、链接不过。转交是这里唯一不丢初始化
+// 的写法：`alive_token_` 的分配与解析器回调的挂接都在两参构造体里。
+uvcpp_ws_connection::uvcpp_ws_connection()
+    : uvcpp_ws_connection(nullptr, ws_role::SERVER) {}
+
 uvcpp_ws_connection::uvcpp_ws_connection(uvcpp_tcp_client* tcp, ws_role role)
     : tcp_(tcp), role_(role) {
   // 存活令牌（见头文件）：写完成回调用它判断"会话还在不在"。

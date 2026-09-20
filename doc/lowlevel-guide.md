@@ -229,7 +229,7 @@ libuv 那边会解引用。所以**关闭回调跑完之后再 `stop()` 是空�
 
 ## 5. 请求
 
-`uvcpp_req`（`src/req/uvcpp_req.h:78`）是所有 req 的基类。**回调签名没有统一约定**，
+`uvcpp_req`（`src/req/uvcpp_req.h:88`）是所有 req 的基类。**回调签名没有统一约定**，
 每个类自己的成员：
 
 | 类 | 回调签名 |
@@ -245,13 +245,13 @@ libuv 那边会解引用。所以**关闭回调跑完之后再 `stop()` 是空�
 
 规律是"**先自己，再 status**"，`uvcpp_fs` 是唯一的例外。
 
-**`set_self_free(true)`**（`src/req/uvcpp_req.h:117`）让 req 在完成回调返回后自己
+**`set_self_free(true)`**（`src/req/uvcpp_req.h:127`）让 req 在完成回调返回后自己
 `delete`，默认关。开了之后调用方不能再删。
 
-**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:135-154`）
+**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:145-164`）
 **先把闭包从槽位里 move 出来、再清空源槽、然后才调用**。顺序反过来的话，删掉的就是
 "此刻正在执行的那个 `std::function`"，连同它的捕获一起——是未定义行为。
-`src/req/uvcpp_req.h:139-146` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
+`src/req/uvcpp_req.h:149-156` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
 move 不会把源置空（libstdc++/MSVC 会），所以这个 bug 只在 macOS 上显形。
 
 **`uvcpp_random` 在旧 libuv 上不存在**——它整段套在 `#if UV_VERSION_MINOR >= 33` 里。
@@ -364,8 +364,6 @@ int main() {
 - **线程契约没有成文。** 除了 `uvcpp_async::send()`，头文件里没有任何一句话说哪个
   线程能调哪个函数。实现注释暗示是循环线程，但那是从代码推的，不是承诺。
 - **`default_loop()` 的重复 `init()` 行为未定义。** 见 §3。
-- **`DEFINE_FUNC_REQ_CPP` 这个宏有重复定义的默认构造函数**（`src/req/uvcpp_req.h:49,54`
-  两行一模一样），**全仓没有任何展开点**——目前是死代码，谁用谁编译不过。本页不改它。
 
 ---
 
