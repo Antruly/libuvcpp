@@ -831,7 +831,7 @@ void uvcpp_http_server::compress_variant_evict() {
          ++it) {
       if (it->second.last_used < victim->second.last_used) victim = it;
     }
-    compress_variants_bytes_ -= victim->second.data.size();
+    compress_variants_bytes_ -= victim->second.bytes();
     compress_variants_.erase(victim);
   }
 }
@@ -958,8 +958,9 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
     if (it != compress_variants_.end()) {
       ++compress_variant_hits_;
       it->second.last_used = ++compress_variant_clock_;
-      resp.body.clear();
-      resp.body.clone(it->second.data);
+      // 递句柄，一个字节都不拷（第 ④ 步）。`share()` 顺手把旧的那份放掉 ——
+      // 静态层借来的那份就这么还回去，既不物化、也不多一次拷贝。
+      resp.body.share(it->second.data);
       finish_headers();
       return true;
     }
@@ -971,23 +972,30 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
                                         resp.body.size(), best);
   if (!result.success) return false;
 
-  resp.body.clear();
-  resp.body.clone(result.data);
+  // 压出来的那份字节**只存在一份**：响应与表共用同一个句柄（第 ④ 步）。
+  // 这一份拷贝仍在 —— 它是 deflate 的产出落进那个共享串（冷路径一次性的事）；
+  // ④ 去掉的是另外两份：存表那份，以及每次命中拷回来的那份。
+  const size_t out_n = result.data.size();
+  const char *out_p = result.data.get_const_data();
+  ::std::shared_ptr<const ::std::string> made =
+      (out_p != nullptr && out_n > 0)
+          ? ::std::make_shared<const ::std::string>(out_p, out_n)
+          : ::std::make_shared<const ::std::string>();
+  resp.body.share(made);
   finish_headers();
 
-  // 存进表要**再拷一份**（响应自己那份还要发出去，不能 move 走）—— 但"不能
-  // move"**不等于**"只能拷"：#17 之后两份可以**共用**同一块字节
-  // （`uvcpp_buf::share()` 接一个 `shared_ptr<const std::string>`），表里存
-  // 句柄、命中时把句柄递出去，这一份拷贝就不必付 —— 那是第 ④ 步（变体表按
-  // 句柄存/取），单独一个 PR：它要动 `compress_variant` 的持有形状，比前三步
-  // 更容易踩到"共享出去之后被人改了"。今天仍然照拷：形状没变，而这一份拷贝
-  // 换来的是之后每次重复请求都省掉整个 deflate —— 两个数量级的差价。
+  // 存进表**不再拷**：存的就是上面那个 `made` —— 响应与表共用同一个句柄。
+  // 以前这里要 clone 一份，理由是"响应自己那份还要发出去，不能 move 走"；
+  // 句柄把"不能 move"换成了"不必拷"：`shared_ptr<const std::string>` 让两边
+  // 同时活着，各持一个引用计数而已。这一份拷贝换来的是之后每次重复请求都省掉
+  // 整个 deflate（两个数量级的差价），而现在连这一份也不用付了。
+  //
   // 压完不比原文小就不存：那种 body 本来就压不动，存了也只是占地方。
   if (cacheable && resp.body.size() < src_size) {
     compress_variant v;
-    v.data.clone(resp.body);
+    v.data = made;
     v.last_used = ++compress_variant_clock_;
-    compress_variants_bytes_ += v.data.size();
+    compress_variants_bytes_ += v.bytes();
     compress_variants_[vkey] = std::move(v);
     ++compress_variant_stored_;
     compress_variant_evict();

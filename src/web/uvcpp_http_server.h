@@ -956,8 +956,18 @@ class UVCPP_API uvcpp_http_server {
   // `(编码, tag) -> 键` 单射，后缀则不然（tag 自己含分隔符时会撞成同一个键）。
   // -------------------------------------------------------------------
   struct compress_variant {
-    uvcpp_buf data;
+    /// 压缩产物**只有这一份**：表与响应共用同一个句柄（`uvcpp_buf::share()`）。
+    /// 命中时把句柄递出去、不再拷一份回来；存表时也只是存同一个句柄。表这边
+    /// 是 `shared_ptr<const std::string>` —— 拿不到可写指针，那个 `const` 就是
+    /// 「共享出去之后被人改了」的防线（有人要写，`uvcpp_buf` 会先物化出私有的
+    /// 一份，表里这份纹丝不动）。
+    ::std::shared_ptr<const ::std::string> data;
     uint64_t  last_used = 0;
+    /// 这一条占多少字节。淘汰与上限都按它算（以前是 `uvcpp_buf::size()`）——
+    /// 换成句柄之后**必须**换过来，否则字节账恒为 0、淘汰只剩条数那一条腿。
+    size_t bytes() const {
+      return this->data != nullptr ? this->data->size() : 0;
+    }
   };
   std::map<std::string, compress_variant> compress_variants_;
   size_t   compress_variants_bytes_ = 0;
