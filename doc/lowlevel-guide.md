@@ -220,7 +220,7 @@ int main() {
 | `uvcpp_timer` `uvcpp_check` `uvcpp_prepare` `uvcpp_poll` `uvcpp_signal` `uvcpp_fs_event` `uvcpp_fs_poll` | 只调 `uv_*_stop()`，句柄还能再 `start()` |
 | `uvcpp_idle` | **调 `close()`** —— 句柄被消费掉，不能重启（`src/handle/uvcpp_idle.cpp:38-43`） |
 
-而且那七个"只 stop"的实现**都不判空指针**（`uvcpp_timer.cpp:36`、`uvcpp_check.cpp:37`
+而且那七个"只 stop"的实现**都不判空指针**（`src/handle/uvcpp_timer.cpp:36`、`src/handle/uvcpp_check.cpp:37`
 等），展开就是 `reinterpret_cast<...>(this->get_handle())` 直接交给 `uv_*_stop`。
 libuv 那边会解引用。所以**关闭回调跑完之后再 `stop()` 是空指针解引用**，而同样情况下
 `close()` 是安全的。这个不对称头文件里没写。
@@ -324,8 +324,8 @@ int main() {
 
 - **`int` 返回值：0 成功，失败是 libuv 的负错误码**（`UV_EINVAL`、`UV_EALREADY`…）。
   最后一个是粘性的，`get_last_error()` 拿得到。
-- **内存不足抛 `std::bad_alloc`**：`uvcpp_alloc.h:94-99`、`uvcpp_loop` 的构造
-  （`uvcpp_loop.cpp:59-60`）、`uvcpp_handle`/`uvcpp_req` 的拷贝构造与赋值。
+- **内存不足抛 `std::bad_alloc`**：`src/uvcpp/uvcpp_alloc.h:94-99`、`uvcpp_loop` 的构造
+  （`src/handle/uvcpp_loop.cpp:59-60`）、`uvcpp_handle`/`uvcpp_req` 的拷贝构造与赋值。
 - **`queue_work` 抛的是 `const char*`，不是 `std::exception`**（`src/req/uvcpp_work.cpp:20`）。
   单元测试统一的 `catch (const std::exception&)` **接不住它**。
 - 这一层除此之外基本不抛异常——错误都走返回值。

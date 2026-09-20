@@ -45,6 +45,33 @@ jobs:
       - name: Check docs
         run: python3 tests/tools/check_docs.py
 
+      # 第四条文档判据：文档里写的 `文件:行号` 必须还指着它当初指的东西。
+      #
+      # 为什么非要有它：`check_docs.py` 判据 2 的 `LINE_SUFFIX_RE` 是**先把 `:NNN`
+      # 剥掉再判文件存在** —— 行号那半从来没有工具校验。于是
+      # 「改一行注释 -> 引用撞飞 -> 六道门禁全绿」是一条真实路径，而这批文档里
+      # 有 674 条引用、其中上百条整条落在注释行上。
+      #
+      # 放**这一档**而不是 config-contract：它只读仓库本身（`doc/`、`src/`、
+      # 锁文件），不需要包、不需要编译器，和上面那条同前提。而这一档有
+      # ubuntu 这条**大小写敏感**的腿 —— 判据 1 要按真实文件系统解析路径，
+      # 在 Windows/macOS 上拼错的路径也能命中（见 testing-guide 里那条）。
+      - name: Check doc line references
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/check_doc_lines.py 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            # `空转`（一条引用都没扫到）与 `前提`（退 3、没判）都要进注解：
+            # 它们和「判红了」是三件事，挤在一个 rc 里，只有注解能分开。
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '\[红\]|\[停\]|红 [0-9]+ 条|前提|空转|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=doc-lines::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
       - name: Configure & Build & Test (static)
         shell: bash
         run: |

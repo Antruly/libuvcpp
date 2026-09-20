@@ -4,10 +4,10 @@
 
 | 类型 | 头 | 定位 |
 |---|---|---|
-| `uvcpp_memory_pool_enterprise` | `expand/uvcpp_page_heap.h:162` | **主分配器**（TCMalloc 风格，线程缓存 → 中央 span → 页） |
-| `uvcpp_memory_pool` | `expand/uvcpp_memory_pool.h:777` | 另一套独立的内存池（7 档块 + MPSC 全局队列 + 线程缓存） |
-| `uvcpp_memory_pool_span` | `expand/uvcpp_memory_pool_span.h:59` | 实验性 span 分配器，头注释自标 WIP |
-| `uvcpp_page_allocator` | `expand/uvcpp_page_allocator.h:27` | 裸页分配（`mmap` / `VirtualAlloc`），上面几个的地基 |
+| `uvcpp_memory_pool_enterprise` | `src/expand/uvcpp_page_heap.h:162` | **主分配器**（TCMalloc 风格，线程缓存 → 中央 span → 页） |
+| `uvcpp_memory_pool` | `src/expand/uvcpp_memory_pool.h:777` | 另一套独立的内存池（7 档块 + MPSC 全局队列 + 线程缓存） |
+| `uvcpp_memory_pool_span` | `src/expand/uvcpp_memory_pool_span.h:59` | 实验性 span 分配器，头注释自标 WIP |
+| `uvcpp_page_allocator` | `src/expand/uvcpp_page_allocator.h:27` | 裸页分配（`mmap` / `VirtualAlloc`），上面几个的地基 |
 
 **只有第一个接进了库。** 全仓 `uvcpp_enterprise_alloc` / `uvcpp_memory_pool_enterprise`
 的调用者只有 `src/uvcpp/uvcpp_alloc.h` 一处（含自身 `.cpp`），而
@@ -77,7 +77,7 @@ void doc_alloc_facade() {
 | `uvcpp_free<T>(p)` | 同上，带类型的写法 |
 
 `uvcpp_realloc_bytes` 的第二问不是装饰：内存池路径下**旧块的真实大小无法由指针反查**
-（只有调用方知道自己要过多少字节）。传大了会读越界 —— `uvcpp_alloc.h:56-59` 记着这正是
+（只有调用方知道自己要过多少字节）。传大了会读越界 —— `src/uvcpp/uvcpp_alloc.h:56-59` 记着这正是
 "128KB 以上的 HTTP 响应会崩溃"的成因。传小了则静默截断已搬的数据。
 
 ---
@@ -104,7 +104,7 @@ cmake -S . -B build -DUVCPP_BUILD_EXPAND=ON
 
 | 你怎么构建 | `#include <expand/uvcpp_memory_pool.h>` 的结果 |
 |---|---|
-| 源码树自己构建 | **编得过，链接失败** —— 头还在 `src/expand/` 下，且四个头里**没有任何一个用宏守卫自己**（唯一提到这个宏的地方是 `uvcpp_page_heap.h:8` 的一句注释），没有 `#error` 兜底；但符号一个都没编进库 |
+| 源码树自己构建 | **编得过，链接失败** —— 头还在 `src/expand/` 下，且四个头里**没有任何一个用宏守卫自己**（唯一提到这个宏的地方是 `src/expand/uvcpp_page_heap.h:8` 的一句注释），没有 `#error` 兜底；但符号一个都没编进库 |
 | 用预编译包 | **编译期就报找不到头** —— `include/expand/` 根本不在包里 |
 
 链接失败那一路报的是 `undefined reference to uvcpp::uvcpp_memory_pool::allocate(unsigned long long)`，
@@ -131,8 +131,8 @@ void doc_enterprise_basic() {
 ```
 
 `uvcpp_enterprise_alloc` / `uvcpp_enterprise_free` 是一对自由函数
-（`uvcpp_page_heap.h:336`、`:342`），内部走 `uvcpp_memory_pool_enterprise::instance()`
-这个函数内静态单例（`uvcpp_page_heap.cpp:1281-1285`），**不需要 `init()`**。这是库内
+（`src/expand/uvcpp_page_heap.h:336`、`:342`），内部走 `uvcpp_memory_pool_enterprise::instance()`
+这个函数内静态单例（`src/expand/uvcpp_page_heap.cpp:1281-1285`），**不需要 `init()`**。这是库内
 唯一在用的那套。
 
 另一个池 `uvcpp_memory_pool` 要显式构造和 `init()`：
@@ -209,7 +209,7 @@ void doc_pool_object(uvcpp::uvcpp_memory_pool& pool) {
 }
 ```
 
-三个工厂函数（`uvcpp_memory_pool.h:1049-1086`）：
+三个工厂函数（`src/expand/uvcpp_memory_pool.h:1049-1086`）：
 
 | 函数 | 返回 | 说明 |
 |---|---|---|
@@ -224,7 +224,7 @@ void doc_pool_object(uvcpp::uvcpp_memory_pool& pool) {
 
 ## 5. 块大小档位
 
-默认七档，每档一个上限（`uvcpp_memory_pool.h:165-184`）：
+默认七档，每档一个上限（`src/expand/uvcpp_memory_pool.h:165-184`）：
 
 | 档 | 默认上限 | 类型名 |
 |---|---|---|
@@ -252,12 +252,12 @@ size_t doc_capacity_of(uvcpp::memory_block_type t) {
 ```
 
 档位边界是**闭区间**：`size <= tiny_block_size` 才是 TINY，所以 `allocate(64)`
-落 TINY、`allocate(65)` 落 SMALL（`uvcpp_memory_pool.h:216-240`）。
+落 TINY、`allocate(65)` 落 SMALL（`src/expand/uvcpp_memory_pool.h:216-240`）。
 
 每块有 **32 字节固定头**（`pool_block_header`，`BLOCK_HEADER_SIZE = 32`，
-`uvcpp_memory_pool.h:79`）。小对象上这个开销要算进去 —— 分配 8 字节，实际占 96 字节
+`src/expand/uvcpp_memory_pool.h:79`）。小对象上这个开销要算进去 —— 分配 8 字节，实际占 96 字节
 （64 档 + 32 头）。头里塞着 `size`、`flags`（类型 + in-use）与 `next`
-（`uvcpp_memory_pool.h:103-152`）。
+（`src/expand/uvcpp_memory_pool.h:103-152`）。
 
 改档位就是改 `memory_pool_config` 的成员，构造时传进 `pool.init(cfg)`。
 
@@ -280,7 +280,7 @@ void doc_pool_stats(uvcpp::uvcpp_memory_pool& pool) {
 }
 ```
 
-`memory_pool_stats` 一共 11 个字段（`uvcpp_memory_pool.h:277-295`），其中
+`memory_pool_stats` 一共 11 个字段（`src/expand/uvcpp_memory_pool.h:277-295`），其中
 `active_allocations`、`total_allocations`、`freed_bytes` 这些是**进程级累计**，
 判增量要自己前后相减。`detect_leaks()` 不是扫描器，就是
 `active_allocations() > 0`（`:842-844`）—— 拿它当泄漏判据的前提是你先知道自己本次
@@ -300,14 +300,14 @@ void doc_enterprise_stats() {
 ```
 
 第三个出参**不叫它的名字**：`free_spans` 与 `total_spans` 在建/销毁 span 时同增同减，
-两者是同一个数（`uvcpp_page_heap.h:209-211` 自己写明了）。判"整段有没有归还"要看
+两者是同一个数（`src/expand/uvcpp_page_heap.h:209-211` 自己写明了）。判"整段有没有归还"要看
 `total_allocated`。
 
 ---
 
 ## 7. 线程本地缓存
 
-两级缓存：**线程缓存**（无锁，7 条链，容量见 `uvcpp_memory_pool.h:465-471`）→
+两级缓存：**线程缓存**（无锁，7 条链，容量见 `src/expand/uvcpp_memory_pool.h:465-471`）→
 **全局池**（每个档位一个 MPSC 队列，`:947-953`）→ **新建块**。`allocate()` 三条路径
 依次是缓存命中、全局池、新建（`:992-1013`）。
 
@@ -324,12 +324,12 @@ void doc_pool_thread_cache(uvcpp::uvcpp_memory_pool& pool) {
 }
 ```
 
-三个公开方法都在 `uvcpp_memory_pool.h:859-872`：`init_thread_cache()`、
+三个公开方法都在 `src/expand/uvcpp_memory_pool.h:859-872`：`init_thread_cache()`、
 `release_thread_cache()`、`thread_cache_size()`。
 
 **这一节最重要的一句：线程缓存是函数内静态的**
 （`inline static thread_local_cache &get_thread_cache() { static thread_local thread_local_cache cache; return cache; }`，
-`uvcpp_memory_pool.h:852-855`）—— 它是**全进程一个**，不是每池一个。同一个线程里
+`src/expand/uvcpp_memory_pool.h:852-855`）—— 它是**全进程一个**，不是每池一个。同一个线程里
 两个池交替分配/释放，块会在同一个缓存里混起来；档位相同就**看不出来**，档位不同时
 `pop()` 拿到的是别的类型的块。`deallocate` 按块头里的类型（`:1024-1025`）走，所以
 不会崩，但"这个指针是哪个池给的"只有调用方知道。**别在线程里混用两个池。**
@@ -355,18 +355,18 @@ void doc_pool_lifecycle() {
 
 | 方法 | 做什么 |
 |---|---|
-| `init()` / `init(cfg)` | 建 7 个全局队列、校验配置；重复调用是幂等的（`uvcpp_memory_pool.cpp:549-551` 直接 `return true`） |
+| `init()` / `init(cfg)` | 建 7 个全局队列、校验配置；重复调用是幂等的（`src/expand/uvcpp_memory_pool.cpp:549-551` 直接 `return true`） |
 | `warmup()` | 预填本线程缓存 |
 | `reset()` | **只清计数**，与 `reset_stats()` 逐行相同 |
 | `shutdown()` | 关队列、换出节点、调 `dealloc_func_` |
-| `is_initialized()` | 读一个原子标志（`:800-802`） |
+| `is_initialized()` | 读一个原子标志（`src/expand/uvcpp_memory_pool.h:800-802`） |
 
-**`reset()` 不还内存。** 它的实现（`uvcpp_memory_pool.cpp:245-262`）就是 15 个
+**`reset()` 不还内存。** 它的实现（`src/expand/uvcpp_memory_pool.cpp:245-262`）就是 15 个
 `.store(0)`，和 `reset_stats()`（`:264-281`）**逐行相同** —— 两个名字一个行为。
 真正归还内存的是 `shutdown()`，以及线程缓存析构那条路（需 §7 的回调设好）。
 
 **销毁一个池最少 7 ms。** 7 个 `mpsc_queue` 每个的析构都调 `shutdown()`
-（`uvcpp_memory_pool.h:326-328`），而 `shutdown()` 里有一句**无条件**的
+（`src/expand/uvcpp_memory_pool.h:326-328`），而 `shutdown()` 里有一句**无条件**的
 `sleep_for(1ms)`（`:404`）。别在热路径上反复建销池 —— 这是固定开销，不是偶发。
 
 ---
@@ -377,7 +377,7 @@ void doc_pool_lifecycle() {
 
 ### `reset()` 与 `reset_stats()` 是同一个函数
 
-`uvcpp_memory_pool.cpp:245-262` 与 `:264-281` 两段函数体**逐行相同**，都是把 8 个
+`src/expand/uvcpp_memory_pool.cpp:245-262` 与 `:264-281` 两段函数体**逐行相同**，都是把 8 个
 `stats_` 字段 + 7 个 `global_*_count_` 置 0。名字承诺 `reset()` 重置池，实际只清读数。
 
 ### `allocate_aligned()` 不按 `align` 对齐地址
@@ -391,13 +391,13 @@ inline void* uvcpp_memory_pool::allocate_aligned(size_t size, size_t align) {
 }
 ```
 
-`uvcpp_memory_pool.h:1015-1019`。`align` **只用来把 `size` 向上取整**，返回值来自
+`src/expand/uvcpp_memory_pool.h:1015-1019`。`align` **只用来把 `size` 向上取整**，返回值来自
 `allocate()`，地址是否对齐取决于块头偏移，**与 `align` 无关**。要真对齐得自己再
 `std::align` 一次，或者用 `uvcpp_page_allocator`（它的页天然对齐）。
 
 ### `push()` 对 SUPER 档说谎
 
-链尾注释写 `/// @return true=放入本地缓存，false=满了放到全局池`（`uvcpp_memory_pool.h:666`），
+链尾注释写 `/// @return true=放入本地缓存，false=满了放到全局池`（`src/expand/uvcpp_memory_pool.h:666`），
 但函数体第一件事是：
 
 ```cpp
@@ -410,7 +410,7 @@ size_t idx = static_cast<size_t>(type);
 if (idx >= 7) return true;
 ```
 
-（`uvcpp_memory_pool.h:670-675`）—— `idx >= 7` 就是 SUPER 档，**返回 true 却没放进
+（`src/expand/uvcpp_memory_pool.h:670-675`）—— `idx >= 7` 就是 SUPER 档，**返回 true 却没放进
 任何链表**（`next` 刚被清成 `nullptr`，块从此无人引用）。而 `deallocate()` 只在
 `push()` 返回 `false` 时才走 `push_to_global_pool`（`:1032-1035`）⇒
 **超过 256 KB 的块在 `free` 时被静默丢掉**。没有返回值、没有计数、没有日志。
@@ -418,14 +418,14 @@ if (idx >= 7) return true;
 ### 线程缓存的"析构自动归还"有个前提
 
 `thread_local_cache` 的注释两处写"析构时自动将缓存归还到全局池"
-（`uvcpp_memory_pool.h:427`、`:492`），而 `release_all()` 第一句就是：
+（`src/expand/uvcpp_memory_pool.h:427`、`:492`），而 `release_all()` 第一句就是：
 
 ```cpp
 // doc-snippet: fragment — release_all() 的首句摘录，单行
 if (!pool_ptr_ || !release_func_) return;
 ```
 
-（`uvcpp_memory_pool.h:538-539`）默认构造的 `thread_local_cache` 两个成员都是
+（`src/expand/uvcpp_memory_pool.h:538-539`）默认构造的 `thread_local_cache` 两个成员都是
 `nullptr`（`:478`、`:482`），**所以没调过 `init_thread_cache()` 就什么都不还** ——
 `release_all()` 连链表头和计数都不清就直接返回了。这是个静默泄漏，不是延迟归还。
 
@@ -440,10 +440,10 @@ double memory_usage_ratio() const {
 }
 ```
 
-（`uvcpp_memory_pool.h:290-294`）两个操作数都是 `uint64_t`。而这两个计数器**口径不同**：
+（`src/expand/uvcpp_memory_pool.h:290-294`）两个操作数都是 `uint64_t`。而这两个计数器**口径不同**：
 
-- `allocated_bytes` 只在**新建块**时加（`uvcpp_memory_pool.cpp:305`、`:338` 两处）
-- `freed_bytes` 在**每次** `deallocate` 时加（`uvcpp_memory_pool.h:930-934`）
+- `allocated_bytes` 只在**新建块**时加（`src/expand/uvcpp_memory_pool.cpp:305`、`:338` 两处）
+- `freed_bytes` 在**每次** `deallocate` 时加（`src/expand/uvcpp_memory_pool.h:930-934`）
 
 缓存命中的分配不进 `allocated_bytes`，但它的释放照样进 `freed_bytes`。自由块一多，
 `freed > allocated`，`uint64_t` 减法**回绕成天文数字**，比值算出来是个荒谬的大数
@@ -459,7 +459,7 @@ return std::shared_ptr<T>(ptr, [pool = &pool](T* p) {
 });
 ```
 
-（`uvcpp_memory_pool.h:1082`）lambda 初始化捕获是 C++14 特性，而
+（`src/expand/uvcpp_memory_pool.h:1082`）lambda 初始化捕获是 C++14 特性，而
 `CMakeLists.txt:85-86` 写的是 `set(CMAKE_CXX_STANDARD 11)` +
 `CMAKE_CXX_STANDARD_REQUIRED ON`。实测：
 
@@ -478,9 +478,9 @@ return std::shared_ptr<T>(ptr, [pool = &pool](T* p) {
 
 对照上面几条，下面这些注释是准确的、值得信：
 
-- `uvcpp_memory_pool_span.h:3` 自标 `WIP/Experimental`
+- `src/expand/uvcpp_memory_pool_span.h:3` 自标 `WIP/Experimental`
 - `get_pressure_level()` 写明了"恒为 `none`，而这个 `none` 不表示没有压力"
-  （`uvcpp_page_heap.h:226-233`）
+  （`src/expand/uvcpp_page_heap.h:226-233`）
 - `trigger_gc()` 写明是空操作、`g_span_free_list` 全仓没有写入点（`:235-241`）
 - `set_pressure_callback()` 写明"存下来但永不调用"（`:248-255`）
 - `enable_huge_page()` 写明 Windows 分支忽略这个标志（`:257-265`）
@@ -495,7 +495,7 @@ return std::shared_ptr<T>(ptr, [pool = &pool](T* p) {
 不回到池里。
 
 **SUPER 档的自由块直接消失。** 见 §9。默认档位下 `> 256 KB` 就走这条路
-（`extra_large_block_size` 默认 `262144`，`uvcpp_memory_pool.h:184`）。想避开就把
+（`extra_large_block_size` 默认 `262144`，`src/expand/uvcpp_memory_pool.h:184`）。想避开就把
 `extra_large_block_size` 调到你的最大对象之上 —— 但那一档也就此不再缓存了。
 
 **线程缓存是全进程共享的**，所以同一个线程里混用两个池会串。见 §7。
@@ -518,20 +518,20 @@ return std::shared_ptr<T>(ptr, [pool = &pool](T* p) {
 ## 11. 没做的（如实列出）
 
 - **`max_total_memory` 是空壳。** 结构体里有这个字段、注释写着"0 = 无限制"
-  （`uvcpp_memory_pool.h:187`），但**全仓没有一处读它** —— 那一行就是它唯一的出现。
+  （`src/expand/uvcpp_memory_pool.h:187`），但**全仓没有一处读它** —— 那一行就是它唯一的出现。
   设了不会生效，也不会报警告。
 - **压力检测整套是保留接口。** `get_pressure_level()` 恒返回 `none`，
   `trigger_gc()` 是空函数，`set_pressure_callback()` 存下的指针永不调用。
-  三者头注释都自己标注了 `reserved interface`（`uvcpp_page_heap.h:226-255`）——
+  三者头注释都自己标注了 `reserved interface`（`src/expand/uvcpp_page_heap.h:226-255`）——
   **别把它们当可用的旋钮**。
 - **大页只在 Linux 上真的试。** `enable_huge_page(true)` 给 `mmap` 加 `MAP_HUGETLB`，
   还需系统预先预留 hugetlb 页，否则 `mmap` 直接失败；Windows 分支的 `VirtualAlloc`
   不带 `MEM_LARGE_PAGES`，这个标志被忽略。返回 `true` 只表示"标志记下了"
-  （`uvcpp_page_heap.h:257-265`）。
+  （`src/expand/uvcpp_page_heap.h:257-265`）。
 - **NUMA 只有 `set_numa_node()` / `get_numa_node()` 两个存取器**，没有任何分配路径
-  读它（`:277`、`uvcpp_page_heap.cpp:1276-1279`）。
+  读它（`:277`、`src/expand/uvcpp_page_heap.cpp:1276-1279`）。
 - **`uvcpp_memory_pool_span` 是实验品**，`try_merge()` 是空函数
- （`uvcpp_memory_pool_span.cpp:145-148`）。除 `alloc` / `free_mem` 之外的能力都没实现。
+ （`src/expand/uvcpp_memory_pool_span.cpp:145-148`）。除 `alloc` / `free_mem` 之外的能力都没实现。
 - **`allocate_aligned()` 不做地址对齐。** 见 §9。
 - **没有跨池检查。** 块里没有归属标记，把 A 池的指针交给 B 池的 `deallocate`
   不会当场发现；档位不同时行为不可预期。

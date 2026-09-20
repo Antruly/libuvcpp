@@ -37,13 +37,13 @@
 
 | 类 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_tcp_server` | `net/uvcpp_tcp_server.h:110` | `bind` / `listen`，**拥有**每一条 accept 出来的连接，给所有连接共用一份读回调 |
-| `uvcpp_tcp_client` | `net/uvcpp_tcp_client.h:99` | 双模式（异步回调 / 同步 `*_wait`）TCP 连接；服务端交给你的那条连接也是它 |
-| `uvcpp_udp_server` | `net/uvcpp_udp_server.h:51` | 绑定的 UDP 套接字，交付数据报时带来源 ip/port；没有"连接对象" |
-| `uvcpp_udp_client` | `net/uvcpp_udp_client.h:72` | UDP 客户端，`bind`/`connect`、异步与同步发送、内部接收缓存 |
-| `net_read_result` | `net/uvcpp_net_read.h:68` | 一次读事件的载体：数据 / 对端关闭 / 读错误 |
+| `uvcpp_tcp_server` | `src/net/uvcpp_tcp_server.h:110` | `bind` / `listen`，**拥有**每一条 accept 出来的连接，给所有连接共用一份读回调 |
+| `uvcpp_tcp_client` | `src/net/uvcpp_tcp_client.h:99` | 双模式（异步回调 / 同步 `*_wait`）TCP 连接；服务端交给你的那条连接也是它 |
+| `uvcpp_udp_server` | `src/net/uvcpp_udp_server.h:51` | 绑定的 UDP 套接字，交付数据报时带来源 ip/port；没有"连接对象" |
+| `uvcpp_udp_client` | `src/net/uvcpp_udp_client.h:72` | UDP 客户端，`bind`/`connect`、异步与同步发送、内部接收缓存 |
+| `net_read_result` | `src/net/uvcpp_net_read.h:68` | 一次读事件的载体：数据 / 对端关闭 / 读错误 |
 
-`uvcpp_tcp_server.h:24` include 了 `net/uvcpp_tcp_client.h`，后者又 include 了
+`src/net/uvcpp_tcp_server.h:24` include 了 `net/uvcpp_tcp_client.h`，后者又 include 了
 `net/uvcpp_net_read.h`。所以**只写一句 `#include <net/uvcpp_tcp_server.h>` 就够**。
 
 ---
@@ -174,16 +174,16 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`net/uvcpp_tcp_server.h:230`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`net/uvcpp_tcp_server.h:346-347`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:230`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:346-347`） |
 
-`set_read_callback` 的实现就是一句赋值（`net/uvcpp_tcp_server.cpp:466-468`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:466-468`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
 
-> 头里有一处自相矛盾：`net/uvcpp_tcp_server.h:84` 写着 "Do NOT use sync
+> 头里有一处自相矛盾：`src/net/uvcpp_tcp_server.h:84` 写着 "Do NOT use sync
 > write_wait/read_wait inside any callback"，而同文件 `:95` 的官方示例回显写的是
-> `c.write(r.data, r.size(), nullptr)` —— 按 `net/uvcpp_tcp_client.h:337`，
+> `c.write(r.data, r.size(), nullptr)` —— 按 `src/net/uvcpp_tcp_client.h:337`，
 > `cb == nullptr` **正是** `write_wait(data, len, 30000)`。本页的例子传了显式的空
 > 回调来避开它。
 
@@ -199,7 +199,7 @@ size_t close_all_clients();
 | `set_read_callback(cb)` | 服务端 `:232` | 同上 | 一份回调覆盖所有连接 |
 
 **`read_start` 与 `read_start_events` 互斥。** 用过其中一个再用另一个，拿到
-`UV_EALREADY`。挡在前面的理由写在实现里（`net/uvcpp_tcp_client.cpp:1818-1826`）：
+`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:1818-1826`）：
 两条路共用同一个底层 stream，同时注册的话底层 `read_start` 会把先注册的那个
 **静默覆盖**掉——用户以为两个回调都在收数据，实际只有一个。
 
@@ -214,7 +214,7 @@ size_t close_all_clients();
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`net/uvcpp_tcp_server.h:226-228`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:226-228`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -260,14 +260,14 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 三条必须知道的：
 
-- **`data` 只在本次回调期间有效**（`net/uvcpp_net_read.h:64-66`）：缓冲区回调返回后
+- **`data` 只在本次回调期间有效**（`src/net/uvcpp_net_read.h:64-66`）：缓冲区回调返回后
   就被复用/释放。要留着就自己拷走。
 - **回调跑在事件循环线程上**（`:95`）。别在里面做重活，用 `uvcpp_work`。
 - **枚举名故意不叫 `ERROR` / `EOF`**（`:49-51`）：`<windows.h>`（经 `<uv.h>`）会
   `#define ERROR 0`，`EOF` 是 `<cstdio>` 的宏。所以是 `READ_ERROR` / `PEER_CLOSED`。
 
 收到 `PEER_CLOSED` / `READ_ERROR` 之后**这个回调不会再被调用**，框架随后的收尾
-（关闭回调）照常发生，所以**不要在回调里做释放**（`net/uvcpp_tcp_client.h:443-444`）。
+（关闭回调）照常发生，所以**不要在回调里做释放**（`src/net/uvcpp_tcp_client.h:443-444`）。
 
 ---
 
@@ -275,25 +275,25 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 **默认服务端全包**：每条新连接被登记、并配一个关闭管理器，连接关闭时把它从服务端
 摘除并 `delete`。这件事**无条件发生**——你自己 `set_on_close()` 的那个槽位纯观察，
-取消不了它（`net/uvcpp_tcp_server.h:46-49`）。
+取消不了它（`src/net/uvcpp_tcp_server.h:46-49`）。
 
 所以：
 
 - **不要在关闭回调里 `delete` 客户端**，除非你已经用 `take_client()` 把所有权取走。
-  删一个仍归框架管的客户端会让框架随后二次释放（`net/uvcpp_tcp_client.h:524-526`）。
+  删一个仍归框架管的客户端会让框架随后二次释放（`src/net/uvcpp_tcp_client.h:524-526`）。
 - 想自己管，用 `take_client()` 取走、`return_client()` 交回。两个都**必须在 loop
   线程调用**；交回之后**不要再持有那个指针**。
 - 关掉一条连接之后也别再留指针：框架可能在完成回调里把它删掉。
 
 **"对端断开了"这件事只有读得见。** `nread < 0` 那条分支是唯一能发现它的地方
-（`net/uvcpp_tcp_server.h:50-56`）——不读的连接，即使设了 `set_on_close()` 也
+（`src/net/uvcpp_tcp_server.h:50-56`）——不读的连接，即使设了 `set_on_close()` 也
 **永远不会被触发**，而且这条连接不会被释放，等于每条一个静默泄漏。只想知道死活、
 不要数据的话，就用 `read_start_events()` 注册一个忽略数据的回调
-（`net/uvcpp_tcp_client.h:512-516`）。
+（`src/net/uvcpp_tcp_client.h:512-516`）。
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`net/uvcpp_tcp_server.cpp:399-406`）。
+（`src/net/uvcpp_tcp_server.cpp:399-406`）。
 
 ---
 
@@ -330,7 +330,7 @@ int write_wait(uvcpp_buf* buf, int timeout_ms = 30000);
 ## 8. 同步与异步
 
 **同一个操作上同步与异步不能混用**，混了就抛 `std::runtime_error`
-（`net/uvcpp_tcp_client.h:76-78`）。具体是：
+（`src/net/uvcpp_tcp_client.h:76-78`）。具体是：
 
 | 情况 | 结果 |
 |---|---|
@@ -339,7 +339,7 @@ int write_wait(uvcpp_buf* buf, int timeout_ms = 30000);
 | 已经有异步写在飞，再调异步 `write` | 返回 `UV_EALREADY` |
 | 没连上就写 | 返回 `UV_ENOTCONN` |
 
-**异步/同步其实是由 `cb` 是不是空决定的**（`net/uvcpp_tcp_client.cpp:1083-1086`）：
+**异步/同步其实是由 `cb` 是不是空决定的**（`src/net/uvcpp_tcp_client.cpp:1083-1086`）：
 `cb` 非空 ⇒ 立即返回 0，完成时回调；`cb` 为空 ⇒ 退化成 `write_wait(data, len, 30000)`。
 
 **这就是为什么回调里必须传 cb。** 事件循环回调里禁止同步等待，而三参数的
@@ -384,7 +384,7 @@ int main() {
 ```
 
 - `recv_start` 的回调里那个 `uvcpp_buf*` 是**栈上的临时量**，负载是克隆出来的，
-  底层读缓冲回调一返回就释放（`net/uvcpp_udp_server.cpp:177-201`）。**不要留那个指针。**
+  底层读缓冲回调一返回就释放（`src/net/uvcpp_udp_server.cpp:177-201`）。**不要留那个指针。**
 - `send(ip, port, data, len, cb = nullptr)` 有**同一个 nullptr 陷阱**：省略 `cb` 就是
   同步发送。
 - 客户端侧另有 `recv_wait(out_buf, timeout_ms)` 和 `set_max_read_cache_size()`，
@@ -434,15 +434,15 @@ int main() {
 ```
 
 装上之后**对外说的仍然是明文**：`write()` 收明文、读回调交明文，密文只在内部与
-socket 之间流动（`net/uvcpp_tcp_client.h:161-173`）。所以 `web/` 那层一行都不用改。
+socket 之间流动（`src/net/uvcpp_tcp_client.h:161-173`）。所以 `web/` 那层一行都不用改。
 
 三个例外：
 
 - **`uvcpp_buf*` 的零拷贝在 TLS 上不成立**——加密要求明文过 `SSL_write`，它会拷一份，
-  所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`net/uvcpp_tcp_client.h:360-363`）。
+  所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:360-363`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`net/uvcpp_tcp_server.h:333-341`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:333-341`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`
@@ -454,7 +454,7 @@ socket 之间流动（`net/uvcpp_tcp_client.h:161-173`）。所以 `web/` 那层
 
 ## 11. 错误处理
 
-- **`int` 返回：0 成功，失败是 libuv 的负错误码**（`net/uvcpp_tcp_server.h:142-143`）。
+- **`int` 返回：0 成功，失败是 libuv 的负错误码**（`src/net/uvcpp_tcp_server.h:142-143`）。
   最后一个是粘性的，`get_last_error()` 拿。
 - 失败同时会置状态位（`TCP_SERVER_ERROR` / `TCP_CLIENT_ERROR`），`has_status()` 查。
 - **同步/异步混用是抛异常**，不是错误码——见 §8。这是本模块唯一会抛的地方。

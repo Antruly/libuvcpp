@@ -179,6 +179,22 @@ nothing is the failure mode worth spending a rule on: it looks green forever.
 | `ctest_list.py` | Answers "which executables should run" **from the ctest manifest, not the disk**. |
 | `check_docs.py` | Documentation gate — the CMake option tables in both READMEs match the options the build actually defines (both directions), every relative link and repo path resolves, and no `doc/*.md` is orphaned. Runs on every push. |
 | `check_doc_snippets.py` | Documentation gate — every ```` ```cpp ```` block in a tracked document actually compiles against a packaged header set. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#code-blocks-in-documentation) for the block conventions. |
+| `check_doc_lines.py` | Documentation gate — every `file:line` reference in a tracked document still points where it did. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#line-references-in-documentation) for the citation conventions. |
+
+**Why `check_doc_lines.py` exists.** `check_docs.py`'s path criterion strips the `:NNN`
+suffix (`LINE_SUFFIX_RE`) *before* testing whether the file exists — the line number half was
+deliberately discarded, and nothing else looked at it. So the tree carried hundreds of
+citations that no criterion could falsify: an editor could reflow a header comment and every
+gate would stay green while the surrounding prose quietly pointed at the wrong thing. The
+gate closes that path, and the first run of it found real drift that had been shipping —
+`recv()` cited at a line that had been blank for some time, two citations to a header that
+had been reformatted, and 34 references to file names that do not exist at all (`client.h`,
+`req.h`, `h2_session.h`).
+
+Its third criterion is a **lockfile** (`tests/tools/doc_line_refs.lock`) holding a content
+hash of every cited range, so a citation cannot rot silently even when the author wrote no
+quotation next to it. Editing a cited line therefore requires re-reading the citation and
+re-running `--update` to re-affirm it; that is the point, not an inconvenience.
 
 **`verify_tree.py`'s five gates.** Any one alone is insufficient; all five must pass.
 

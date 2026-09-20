@@ -34,7 +34,7 @@
   已实测：nghttp2 会把我们宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 存进
   `local_settings`，但**接收路径从不累加、也没跟它比过** —— 所以本层自己按
   `namelen + valuelen + 32` 累加，越界立刻 RST(0x0b)。**这是唯一防线，不是第二道。**
-- **发方向头部块上限** `H2_MAX_SEND_HEADER_BLOCK`（`uvcpp_h2_common.h:46`）。
+- **发方向头部块上限** `H2_MAX_SEND_HEADER_BLOCK`（`src/http2/uvcpp_h2_common.h:46`）。
   nghttp2 送帧前会拿 `nghttp2_hd_deflate_bound()` 估一个上界，超了它 `return
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
@@ -45,14 +45,14 @@
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
   **在飞的流一条都不动** —— GOAWAY 关的是"新流"，不是"连接"。
 - **控制帧令牌桶** `H2_CONTROL_BURST = 64` / `H2_CONTROL_REFILL_PER_SEC = 32`
-  （`uvcpp_h2_session.cpp:55-56`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
+  （`src/http2/uvcpp_h2_session.cpp:55-56`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
   业务数据，所以给它们单独一个桶；泼出去的那次以 GOAWAY(0x0b) 收尾，而不是
   NO_ERROR —— 否则对端只看到一次"正常关闭"，不知道为什么。
 - **协议白名单**：伪头按**方向**白名单（服务端收到 `:status` 即拒）、`:scheme`
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
-  收尾的 trailer 识别成"流的结束信号"（`uvcpp_h2_session.cpp:482`）。
-- **流关闭的错误码分三档**（`uvcpp_http_client.cpp:1236`，RFC 9113 §8.7）：
+  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:482`）。
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1236`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
@@ -79,7 +79,7 @@
   （`src/webapp/uvcpp_web_app.cpp:385-386`），用户只能关掉它
   （`set_http2_enabled(false)`，`src/webapp/uvcpp_web_app.h:352`），或者自己设
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
-- **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`uvcpp_http_client.h:43-45`
+- **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
   写明了理由（引了就把 nghttp2 的 include 路径扩散给每个使用者与测试 TU）。
   `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:61`），缺 OpenSSL 或缺 web
   模块时还会被强制置 OFF 并告警。
@@ -118,13 +118,13 @@
 - **流控没有自己的策略。** 全 `src/` 零命中 `consume_window` /
   `NO_AUTO_WINDOW_UPDATE` —— 窗口更新完全交给 nghttp2 的自动行为，
   本层既不暴露背压也不做自己的窗口管理。`H2_DEFAULT_INITIAL_WINDOW_SIZE`
-  （`uvcpp_h2_common.h:33`）只有定义，别处不读它。
+  （`src/http2/uvcpp_h2_common.h:35`）只有定义，别处不读它。
 - **流状态机只用了一半。** `h2_stream_state` 有五格
-  （`uvcpp_h2_common.h:133-139`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
+  （`src/http2/uvcpp_h2_common.h:133-139`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**。
-- **`on_fatal` 的文档比实现多一类触发者。** `uvcpp_h2_session.h:151` 说它有三类
+- **`on_fatal` 的文档比实现多一类触发者。** `src/http2/uvcpp_h2_session.h:151` 说它有三类
   触发者，其中"`want_read`/`want_write` 双双为假"那一类**永远不会发生**：
-  这两个函数（`uvcpp_h2_session.h:299,301`）零调用方。
+  这两个函数（`src/http2/uvcpp_h2_session.h:299,301`）零调用方。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
@@ -143,7 +143,7 @@
 - **两处已死的成员**（只报告，本批没动）：
   - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:62`）全仓零引用 ——
     这一处**确实不影响行为**，它只是个没接线的状态位。
-  - `keep_alive_` 只在 `uvcpp_http_client.cpp:616,701` 被写、**从没被读**
+  - `keep_alive_` 只在 `src/web/uvcpp_http_client.cpp:616,701` 被写、**从没被读**
     （`h:324` 声明，初值 `true`）。这一处的后果**是真的**，与上一条不同：
     `on_response_complete()` 见到 `Connection: close` 就把标志置假，可没有任何人
     问过它 —— 于是调用方在**对端已经声明要关**的连接上接着 `send()`，写进一个
@@ -193,7 +193,7 @@
 | 缺陷 | 症状 | 修法 |
 |---|---|---|
 | 服务端停机**不道别** | 停机时直接关连接，对端只看到连接断了，分不清"服务端在收摊"和"网络挂了" | 新增 `uvcpp_http_server::begin_h2_goaway()` 与 `uvcpp_h2_connection::begin_goaway()`；webapp 停机的第 0 拍只发 GOAWAY，**隔一拍**才关连接 —— 挤在同一拍里对端拿到的仍然是"断了" |
-| `on_read` 里结算出来的 `done` **没人跑** | 对端一个 `RST_STREAM` 打过来，会话会把那条流还没上线的块整体作废并塞进 `completed` —— 而一个字节都不用回，`flush()` 起不了写，`on_write_done` 就不来，那批 `done` 永远躺在队列里；等它的人（框架流式响应的 `pending_bytes_`）永远等不到 ⇒ 那条流的上下文永远不释放，停机时宽限期白等满 | `on_read()` 收尾补一次 `run_completed()`（`uvcpp_h2_connection.cpp:110-121`） |
+| `on_read` 里结算出来的 `done` **没人跑** | 对端一个 `RST_STREAM` 打过来，会话会把那条流还没上线的块整体作废并塞进 `completed` —— 而一个字节都不用回，`flush()` 起不了写，`on_write_done` 就不来，那批 `done` 永远躺在队列里；等它的人（框架流式响应的 `pending_bytes_`）永远等不到 ⇒ 那条流的上下文永远不释放，停机时宽限期白等满 | `on_read()` 收尾补一次 `run_completed()`（`src/http2/uvcpp_h2_connection.cpp:110-121`） |
 | 拆连接时**丢掉**在飞的 `done` | 同一条路的另一半：连接被整个丢掉（对端 `close()`、不发 RST）时 `remove_ctx` 直接 `delete` 掉 h2 层，队列里那些块一声不吭 —— 与 h1 那边"队列里的写一律以 `UV_ECANCELED` 唤醒"的既定契约不一致 | 新增 `take_cancelled_dones()`：会话层 `cancel_pending_out()` 把待发块整体作废并**取走**，由 `remove_ctx` 在 `contexts_.erase(it)` **之后**才逐个跑 —— 跑早了 `write_stream()` 会掉进 h1 分支，把收尾时补的那笔写挂到一条根本不是 h1 的连接上（`stream_id` 被静默丢掉） |
 | `run_completed()` 里两处 **use-after-free** | 令牌已死那一支还去写 `in_dones_ = false`；`on_write_done` 里 `flush()` 可能同步走到 `finish_close()` → `c->close(cb)` → `notify_disconnect()`，而持有者的契约正是"在这里销毁本对象" ⇒ 之后每一句都在往释放过的内存上写 | 令牌在每一句之前重新问一次；令牌真死了**连收尾都不做**（要收尾的对象已经不存在，没什么可收的） |
 | 服务端析构**漏掉** h2 层 | `~uvcpp_http_server()` 只 `delete parser`，而 h2 层是连接上下文 `new` 出来的、没有任何别的表登记它 ⇒ 每条还活着的 h2 连接漏一个 nghttp2 会话和它的缓冲区 | 析构里一并 `delete`。走得到这里的只有"客户端先于服务端被释放"那条路：`close_all_clients()` 在句柄已关完时走 `release_client()`，只 `delete`、一个回调都不发 ⇒ `remove_ctx` 从没跑过 |
@@ -280,22 +280,22 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
   （`NO_AUTO_WINDOW_UPDATE`）：打开之后每一条消费路径都得自己 `consume_window`，
   漏掉任何一条都会让上传在 64 KiB 处**永久停住** —— 半套比现状更危险。二是内存
   今天已经有界：两个方向的 DATA 都走同一个 `on_data_chunk`，超过
-  `H2_DEFAULT_MAX_BODY_BYTES`（64 MiB）就 RST（`uvcpp_h2_session.cpp:514`）。
+  `H2_DEFAULT_MAX_BODY_BYTES`（64 MiB）就 RST（`src/http2/uvcpp_h2_session.cpp:522`）。
   要给单条流减速，框架层现成的连接级 `read_pause()` 是眼下更合适的粒度。
 
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`uvcpp_h2_session.cpp:1226`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1226`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
-  留在 `ob_syn`（`nghttp2_session.c:2315,2346` 上的
+  留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关
   `num_outgoing_streams` 下降，下一次 `flush()` 就把它放出来 ——
   而 `uvcpp_h2_connection::on_read` 每收下一批字节就 `flush()`。
   所以这里缺的是"多一层保险"，不是协议违规。
 - **收到 GOAWAY 时在飞的流不会挂住。** nghttp2 的 `session_close_stream_on_goaway()`
   把 `last_stream_id` 以外、非 idle 非 closed 的**本端**流逐条以
-  `REFUSED_STREAM(7)` 关掉（`nghttp2_session.c:2392-2446`），每条都走到本层的
+  `REFUSED_STREAM(7)` 关掉（`nghttp2:nghttp2_session.c:2392-2446`），每条都走到本层的
   `on_stream_close` → `cbs.on_close`，调用方拿到的是"可以重试"而不是干等。
   **这件事依赖批 2 那条"空 body 也登记流"的修复** —— 修之前，一条被 GOAWAY
   波及的 GET 在业务层是一声不吭的。

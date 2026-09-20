@@ -14,7 +14,7 @@
 `<web/uvcpp_http_common.h>` 里的枚举与工具函数。
 
 **这一层是自足的：它完全不依赖 `webapp/`。** `src/web/` 里没有任何
-`#include <webapp/...>`。反过来 `webapp/` 大量包含 `web/`（`uvcpp_web_app.h:124-125`
+`#include <webapp/...>`。反过来 `webapp/` 大量包含 `web/`（`src/webapp/uvcpp_web_app.h:124-125`
 拿的就是 `web/uvcpp_http_server.h` 与 `web/uvcpp_ws_server.h`）。
 
 > 本页讲 `web/` 的 **HTTP** 半边。WebSocket 在 [web WS 指南](./web-ws-guide.md)，
@@ -182,7 +182,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
 **匹配规则（`src/web/uvcpp_http_server.cpp:133-145`）：剥掉 query 再逐字节比路径，
 线性扫描，首次命中即返回。** 于是：
 
-- **没有参数、没有通配、没有正则、没有中间件**（`webapp/uvcpp_web_router.h:9-14`
+- **没有参数、没有通配、没有正则、没有中间件**（`src/webapp/uvcpp_web_router.h:9-14`
   也是这么描述它的）。
 - **重复注册同一路径时先注册的赢，后面的永远不可达** —— 而 API 返回 `void`，
   没有任何提示。
@@ -241,10 +241,10 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
 void doc_req_resp_fields(uvcpp::uvcpp_http_request& req,
                          uvcpp::uvcpp_http_response& resp) {
   // 请求：全是公开字段
-  uvcpp::http_method m = req.method;          // 默认 HTTP_GET     req.h:39
-  std::string        u = req.url;             // 默认 "/"，含 query  req.h:40
-  uvcpp::http_headers h = req.headers;        // name 已转小写      req.h:42
-  uvcpp::uvcpp_buf   b = req.body;            // 公开字段，不是方法  req.h:43
+  uvcpp::http_method m = req.method;          // 默认 HTTP_GET     src/web/uvcpp_http_request.h:39
+  std::string        u = req.url;             // 默认 "/"，含 query  src/web/uvcpp_http_request.h:40
+  uvcpp::http_headers h = req.headers;        // name 已转小写      src/web/uvcpp_http_request.h:42
+  uvcpp::uvcpp_buf   b = req.body;            // 公开字段，不是方法  src/web/uvcpp_http_request.h:43
   (void)m; (void)u; (void)h; (void)b;
 
   // 这三个是**按值返回**的，别写成 req.get_header("host")[0]
@@ -263,7 +263,7 @@ void doc_req_resp_fields(uvcpp::uvcpp_http_request& req,
 
 ### 三个必踩的点
 
-**一、`status_code` 默认就是 `200 OK`。** `uvcpp_http_response.h:40` 的初值是
+**一、`status_code` 默认就是 `200 OK`。** `src/web/uvcpp_http_response.h:40` 的初值是
 `http_status::OK`，不是"未设置"。所以**用 `err != 0` 判失败，别用 `status_code`**
 （`src/web/uvcpp_http_common.h:246-247` 也是这么写的）。
 

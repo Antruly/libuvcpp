@@ -47,13 +47,13 @@
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-explicit uvcpp_h2_session(bool server_side);                      // h2_session.h:183
+explicit uvcpp_h2_session(bool server_side);                      // src/http2/uvcpp_h2_session.h:183
 int init(const callbacks& cbs,
          size_t max_header_list_size = 64u * 1024u,
          uint32_t max_concurrent_streams = H2_DEFAULT_MAX_CONCURRENT_STREAMS,
-         uint32_t initial_window_size = 0);                       // h2_session.h:197
-int recv(const char* data, size_t len);                           // h2_session.h:224
-int drain(std::string& out);                                      // h2_session.h:224 附近
+         uint32_t initial_window_size = 0);                       // src/http2/uvcpp_h2_session.h:197
+int recv(const char* data, size_t len);                           // src/http2/uvcpp_h2_session.h:213
+int drain(std::string& out);                                      // src/http2/uvcpp_h2_session.h:223
 ```
 
 **服务端还是客户端由构造参数一次性决定，构造后改不了。** 也没有 `is_server()` 之类的读法
@@ -73,7 +73,7 @@ int drain(std::string& out);                                      // h2_session.
 
 `UVCPP_NGHTTP2_ENABLE` **在任何构建里都有定义**，只是值不同：ON ⇒ `1`，OFF ⇒ `0`
 （`CMakeLists.txt:589`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
-（`uvcpp_h2_common.h:19`、`uvcpp_h2_session.h:33`、`uvcpp_h2_connection.h:27`）。
+（`src/http2/uvcpp_h2_common.h:19`、`src/http2/uvcpp_h2_session.h:33`、`src/http2/uvcpp_h2_connection.h:27`）。
 
 为 0 时：头**还在**（源码树里能 include、也编得过），但里面**一个类型都不声明** ——
 写 `uvcpp_h2_session s(true);` 会"未定义类型"。安装出来的包里则**根本没有这几个头**
@@ -152,11 +152,11 @@ void doc_h2_memory_pair() {
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-uvcpp_h2_connection(uvcpp_tcp_client* client, bool server_side);  // h2_connection.h:58
+uvcpp_h2_connection(uvcpp_tcp_client* client, bool server_side);  // src/http2/uvcpp_h2_connection.h:58
 int start(const uvcpp_h2_session::callbacks& h2_cbs,
-          const callbacks& conn_cbs);                             // h2_connection.h:70
+          const callbacks& conn_cbs);                             // src/http2/uvcpp_h2_connection.h:70
 int send_response(int32_t stream_id, const uvcpp_http_response& resp,
-                  bool omit_body = false);                        // h2_connection.h:78
+                  bool omit_body = false);                        // src/http2/uvcpp_h2_connection.h:78
 int send_status(int32_t stream_id, int status, const std::string& body);  // :82
 int send_headers(int32_t stream_id, const uvcpp_http_response& resp);     // :87
 int send_data(int32_t stream_id, const char* data, size_t len,
@@ -178,7 +178,7 @@ void close_now();                                                         // :12
 ```cpp
 // doc-snippet: fragment — 结构体定义摘录，不是完整翻译单元
 struct callbacks {
-  std::function<void(uvcpp_h2_connection&)> on_disconnect;   // h2_connection.h:46
+  std::function<void(uvcpp_h2_connection&)> on_disconnect;   // src/http2/uvcpp_h2_connection.h:46
 };
 ```
 
@@ -329,7 +329,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 
 | 回调 | 服务端 | 客户端 | 触发点 |
 |---|---|---|---|
-| `on_request(session, stream, end_stream)` | ✅ | ✗ | 请求头收全（`h2_session.cpp:481`） |
+| `on_request(session, stream, end_stream)` | ✅ | ✗ | 请求头收全（`src/http2/uvcpp_h2_session.cpp:481`） |
 | `on_request_end(session, stream)` | ✅ | ✗ | 请求体收完（`:482`、`:505`） |
 | `on_response(session, stream, end_stream)` | ✗ | ✅ | 响应头收全（`:484`） |
 | `on_response_end(session, stream)` | ✗ | ✅ | 响应全收完（`:486`、`:512`） |
@@ -384,16 +384,16 @@ HEADERS 自带 END_STREAM 的请求（也就是绝大多数 GET）**也会触发
 
 | 项 | 值 | 位置 |
 |---|---|---|
-| 单个待发头部块 | 64 KiB（`H2_MAX_SEND_HEADER_BLOCK`） | `h2_common.h:48`、设置点 `h2_session.cpp:694`、自查 `:917` |
-| 单流 body | 64 MiB（`H2_DEFAULT_MAX_BODY_BYTES`）→ RST | `h2_common.h:32`、`h2_session.cpp:522` |
-| `content-length` 荒谬值 | `> 1<<40` 判非法 | `h2_session.cpp:386` |
-| 控制帧令牌桶 | burst 64、补充 32 个/秒 | `h2_session.cpp:55-56`、`control_frame_ok()` `:165` |
-| `:scheme` 白名单 | 只接受 `https` | `h2_session.cpp:311` |
+| 单个待发头部块 | 64 KiB（`H2_MAX_SEND_HEADER_BLOCK`） | `src/http2/uvcpp_h2_common.h:48`、设置点 `src/http2/uvcpp_h2_session.cpp:694`、自查 `:917` |
+| 单流 body | 64 MiB（`H2_DEFAULT_MAX_BODY_BYTES`）→ RST | `src/http2/uvcpp_h2_common.h:32`、`src/http2/uvcpp_h2_session.cpp:522` |
+| `content-length` 荒谬值 | `> 1<<40` 判非法 | `src/http2/uvcpp_h2_session.cpp:386` |
+| 控制帧令牌桶 | burst 64、补充 32 个/秒 | `src/http2/uvcpp_h2_session.cpp:55-56`、`control_frame_ok()` `:165` |
+| `:scheme` 白名单 | 只接受 `https` | `src/http2/uvcpp_h2_session.cpp:311` |
 
 **没有闲置超时**（`src/http2/` 里 grep `idle|timeout|keepalive` 零命中）。
 `src/web/uvcpp_http_server.h:866` 那个 idle sweep 是 **h1 侧**的，不覆盖 h2 连接。
 
-对端的观测口：`peer_max_concurrent_streams()`（`h2_session.h:355`）、
+对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:355`）、
 `peer_goaway_received()` / `peer_goaway_error_code()` / `peer_goaway_last_stream_id()`
 （`:368` / `:370` / `:372`）、`goaway_code()`（`:390`）、`stream_count()`。
 
@@ -436,7 +436,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:732
 | 事件 | 归类 |
 |---|---|
 | `mem_recv` 返回负值 / 输入没吃完 / 控制帧洪泛 | **致命**：`on_fatal` 加会话作废 |
-| 头部块超预算 | **流级**：RST(`ENHANCE_YOUR_CALM`)，连接照用（`h2_session.cpp:416`） |
+| 头部块超预算 | **流级**：RST(`ENHANCE_YOUR_CALM`)，连接照用（`src/http2/uvcpp_h2_session.cpp:416`） |
 | 单流 body 超 64 MiB | **流级**：RST(`ENHANCE_YOUR_CALM`)（`:522`） |
 | 伪头顺序 / 白名单 / 走私 | **流级**：RST(`PROTOCOL_ERROR`) |
 | 发方向头部块超上限 | **同步返回** `UV_EMSGSIZE`，且流状态没被改过 |

@@ -7,7 +7,7 @@ ALPN 名单）。另一个 `uvcpp_ssl` 是**每连接**的包装，由 `uvcpp_tc
 
 TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_tcp_client` 之后，
 `write()` 收明文、读回调交明文，密文只在内部与 socket 之间流动
-（`net/uvcpp_tcp_client.h:161-173`）。所以 `web/` / `webapp/` 那条线一行都不用改。
+（`src/net/uvcpp_tcp_client.h:161-173`）。所以 `web/` / `webapp/` 那条线一行都不用改。
 
 - 打开方式：`-DUVCPP_ENABLE_OPENSSL=ON`
 - 包含方式：`<ssl/uvcpp_ssl_context.h>`（构造上下文必须）；只声明变量的话
@@ -39,9 +39,9 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 
 | 类型 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_ssl_context` | `ssl/uvcpp_ssl_context.h:31` | **主类型**。一个上下文可以共享给多条连接（`:8-9`） |
-| `uvcpp_ssl` | `ssl/uvcpp_ssl.h:33` | 每连接包装（一个 `SSL*`），`uvcpp_tcp_client` 内部持有 |
-| `ssl_detail::alpn_wire_format` | `ssl/uvcpp_ssl_common.h:84` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
+| `uvcpp_ssl_context` | `src/ssl/uvcpp_ssl_context.h:31` | **主类型**。一个上下文可以共享给多条连接（`:8-9`） |
+| `uvcpp_ssl` | `src/ssl/uvcpp_ssl.h:33` | 每连接包装（一个 `SSL*`），`uvcpp_tcp_client` 内部持有 |
+| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:84` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
 
 值类型在 `ssl/uvcpp_ssl_common.h`：`tls_version`、`tls_mode`、`tls_verify_mode`、
 `tls_ctx_status`、`tls_cert_info`。
@@ -49,8 +49,8 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 **没有 `uvcpp_ssl_server` 这种类。** 服务端 TLS 的落点是
 `uvcpp_tcp_server::set_ssl_context()`。
 
-三个头**整段**套在 `#if UVCPP_OPENSSL_ENABLE` 里（`uvcpp_ssl.h:17`、
-`uvcpp_ssl_common.h:14`、`uvcpp_ssl_context.h:18`）。
+三个头**整段**套在 `#if UVCPP_OPENSSL_ENABLE` 里（`src/ssl/uvcpp_ssl.h:17`、
+`src/ssl/uvcpp_ssl_common.h:14`、`src/ssl/uvcpp_ssl_context.h:18`）。
 
 ---
 
@@ -127,7 +127,7 @@ int main() {
 #include <ssl/uvcpp_ssl_context.h>
 
 std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
-  // 上下文删了拷贝构造（ssl/uvcpp_ssl_context.h:34），而用户声明了拷贝构造就会
+  // 上下文删了拷贝构造（src/ssl/uvcpp_ssl_context.h:34），而用户声明了拷贝构造就会
   // 抑制移动构造 —— 所以它既不能拷贝也不能按值返回，交给 unique_ptr 持有。
   std::unique_ptr<uvcpp::uvcpp_ssl_context> ctx(
       new uvcpp::uvcpp_ssl_context(uvcpp::tls_mode::CLIENT,
@@ -144,7 +144,7 @@ std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
 
 | 方法 | 返回 | 要点 |
 |---|---|---|
-| `load_certificate_file(path)` | `bool` | 内部用 `SSL_CTX_use_certificate_chain_file` —— **必须是链**，否则中间证书不发，只信根 CA 的客户端握手失败（`uvcpp_ssl_context.cpp:133-147`） |
+| `load_certificate_file(path)` | `bool` | 内部用 `SSL_CTX_use_certificate_chain_file` —— **必须是链**，否则中间证书不发，只信根 CA 的客户端握手失败（`src/ssl/uvcpp_ssl_context.cpp:133-147`） |
 | `load_private_key_file(path)` | `bool` | 见下面的**顺序陷阱** |
 | `load_certificate_data(pem)` | `bool` | 支持多证书 PEM：叶子 + 逐个 `extra_chain_cert` |
 | `load_private_key_data(pem)` | `bool` | 同样附带配对检查 |
@@ -153,14 +153,14 @@ std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
 | `check_private_key()` | `bool` | 显式配对检查 |
 
 **顺序陷阱：先装证书，再装私钥。** `load_private_key_file` / `load_private_key_data`
-**内部都会调 `SSL_CTX_check_private_key`**（`uvcpp_ssl_context.cpp:159`、`:212`）。
+**内部都会调 `SSL_CTX_check_private_key`**（`src/ssl/uvcpp_ssl_context.cpp:159`、`:212`）。
 OpenSSL 在"尚无证书"时该调用返回 0，于是**先装私钥会返回 `false`**——而私钥其实已经
 装进上下文了，属于"报了错但状态已改"。头注释只写了 "Load … from PEM"，没提这回事。
 
 为什么值得单独调 `check_private_key()`：证书和私钥不配对**在 OpenSSL 里既不影响
 `SSL_CTX_new`、也不影响两个 `load_*` 的返回值**——它只在**每一次握手**时才失败。
 表现是"服务起来了、端口在听、每条连接建完就被拒"，很难往配置上想
-（`ssl/uvcpp_ssl_context.h:66-69`）。
+（`src/ssl/uvcpp_ssl_context.h:66-69`）。
 
 ```cpp
 #include <ssl/uvcpp_ssl_context.h>
@@ -176,7 +176,7 @@ bool doc_load_server_cert(uvcpp::uvcpp_ssl_context& ctx,
 }
 ```
 
-`generate_self_signed` **只用于测试和受控内网**（`webapp/uvcpp_web_app.h:441-444`）。
+`generate_self_signed` **只用于测试和受控内网**（`src/webapp/uvcpp_web_app.h:441-444`）。
 
 ---
 
@@ -231,7 +231,7 @@ bool has_alpn_select() const;
 - 名单里**空串或长度超过 255 字节的项会被静默丢掉**，不报错；全部丢完导致编码为空时
   `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:78-81`）。
 - 服务端**挑不中时返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal**
-  （`ssl/uvcpp_ssl_context.h:118-120`）——写成 fatal 会让所有老客户端连握手都完不成。
+  （`src/ssl/uvcpp_ssl_context.h:118-120`）——写成 fatal 会让所有老客户端连握手都完不成。
 - `has_alpn_select()` 存在的理由是框架默认值与用户策略的冲突：`uvcpp_web_app` 默认要
   替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:126-130`）。
 - 每连接的覆盖在 `uvcpp_ssl::set_alpn_protos`，**必须在握手前**调。
@@ -244,9 +244,9 @@ bool has_alpn_select() const;
 
 | 落点 | 声明 | 所有权说明 |
 |---|---|---|
-| `uvcpp_tcp_server::set_ssl_context` | `net/uvcpp_tcp_server.h:349` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:342-344`） |
-| `uvcpp_tcp_client::enable_tls` | `net/uvcpp_tcp_client.h:189` | "生命周期必须覆盖**整条连接**"（`:185`） |
-| `uvcpp_web_app` | `webapp/uvcpp_web_app.cpp:1725` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
+| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:349` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:342-344`） |
+| `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:189` | "生命周期必须覆盖**整条连接**"（`:185`） |
+| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1725` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
 顺序：`set_ssl_context` **必须在 `listen()` 之前**（`:346-347`），清空用
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。
@@ -256,7 +256,7 @@ bool has_alpn_select() const;
 `SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_)`）。
 **所以不要移动它、不要提前析构它。**
 
-`uvcpp_ssl::use_memory_bio()` **必须在任何握手/IO 之前**调（`ssl/uvcpp_ssl.h:100`）。
+`uvcpp_ssl::use_memory_bio()` **必须在任何握手/IO 之前**调（`src/ssl/uvcpp_ssl.h:100`）。
 
 ---
 
@@ -267,7 +267,7 @@ bool has_alpn_select() const;
 串起来，`"; "` 分隔）。`set_verify_mode` / `set_min_version` / `set_max_version` /
 `set_alpn_select_protos` 返回 **`void`**——没有错误通道，只可能静默无效。
 
-**握手返回值契约（最易踩，`ssl/uvcpp_ssl.h:90-98` 原文）：**
+**握手返回值契约（最易踩，`src/ssl/uvcpp_ssl.h:90-98` 原文）：**
 
 ```
 handshake(): 1 = 握手完成，0 = 需要更多 I/O，< 0 = 真出错
@@ -288,7 +288,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **握手失败怎么知道：**
 
 - 服务端：握手成功才 `deliver_connection()`；失败**只记账**，`on_connection`
-  **一次都不被调用**（`net/uvcpp_tcp_server.h:333-341`）。
+  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:333-341`）。
 - 客户端：`set_tls_ready_callback(cb)`，`status == 0` 成功；**只触发一次**，失败时在
   关闭回调**之前**触发（那时对象还活着）。
 - 握手期连接不在上层登记表里，`idle_timeout_ms` 覆盖不到——所以有
@@ -304,9 +304,9 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 必须传 `tls_mode`。`uvcpp_ssl` 同理。
 
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
-（`uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
+（`src/ssl/uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
-（`net/uvcpp_tcp_client.cpp:2109`）——所以**必须看各 `load_*` 的返回值**，
+（`src/net/uvcpp_tcp_client.cpp:2109`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
 
 **先装私钥后装证书会返回 `false`**，见 §4。
@@ -314,7 +314,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`PEER_STRICT` 不校验主机名**，见 §5。
 
 **TLS 上 `uvcpp_buf*` 的零拷贝不成立**：调用之后那个 buf **仍然是满的**，
-（`net/uvcpp_tcp_client.h:360-363`）。
+（`src/net/uvcpp_tcp_client.h:360-363`）。
 
 **握手完成前写必然失败**（`UV_ENOTCONN`），`SSL_write` 要求握手已完成。
 
@@ -336,8 +336,8 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 - **服务端默认没有信任库**，且**不强制**客户端证书，见 §5。
 - **没有 OCSP、没有 session ticket 配置、没有会话复用开关。**
 - **默认 TLS 版本的头注释与实现对不上**：枚举把 `TLS_1_3` 标成 `(default)`
-  （`ssl/uvcpp_ssl_common.h:30`），但构造函数默认值是 `tls_version::TLS_1_2`
-  （`ssl/uvcpp_ssl_context.h:37`），而它**只被当作下限**（`min_proto_version`），
+  （`src/ssl/uvcpp_ssl_common.h:30`），但构造函数默认值是 `tls_version::TLS_1_2`
+  （`src/ssl/uvcpp_ssl_context.h:37`），而它**只被当作下限**（`min_proto_version`），
   上限不设。实际是"min = TLS1.2，max = OpenSSL 默认"。**建议显式传版本。**
 - **线程安全没有承诺。** 上下文可以共享给多条连接（`SSL_CTX` 本身线程安全），但
   setter 的线程安全头里**没有说明**。按"配置阶段调完再 listen/connect"写。
