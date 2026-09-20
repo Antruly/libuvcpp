@@ -82,4 +82,21 @@ foreach(test_src ${FUNC_SOURCES})
   add_test(NAME ${exe_name} COMMAND ${exe_name})
 endforeach()
 
+# `test_web_app_static_func` 是整棵树里最重的一条（CI 上 ubuntu 16.5 s、Windows
+# `web` 21.4 s），而 workflow 给的默认上限是 `--timeout 30`。它的量级由被测面本身
+# 决定 —— 每个请求一条连接、串行走完整条响应链 —— 不是哪条用例写慢了，想减负只能
+# 改被测代码。余量只剩 9 s 的时候，它在 runner 上就是**时红时绿**的（同一个 SHA
+# 换个 runner 就过），这比稳定红更难查：它会训练人「重跑一遍当没事」。
+#
+# 所以给**这一条**单独一份预算。命令行那个 `--timeout 30` 只是**默认值**，会被这里
+# 的属性盖过（两头都实测过：带属性 + `ctest --timeout 1` 照样跑满并通过；撤掉属性、
+# 同参数当场 `Timeout`），于是其余每条用例的挂死检出时间一点没松 —— 这也比把整个
+# job 的 `--timeout` 抬到 60 诚实，那是把每一条的检出时间一起抬了。
+#
+# `if(TARGET ...)` 不是装饰：`UVCPP_BUILD_WEBAPP` 默认 OFF，那种配置下这个目标已被
+# 上面的过滤器摘掉，直接 `set_tests_properties` 会报「找不到这个测试」。
+if(TARGET test_web_app_static_func)
+  set_tests_properties(test_web_app_static_func PROPERTIES TIMEOUT 90)
+endif()
+
 
