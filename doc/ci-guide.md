@@ -218,8 +218,9 @@ silently degrades into a no-op.
    tree's exported `INTERFACE_COMPILE_DEFINITIONS`.
 
 It is **not** compared against `CMakeCache.txt`: OpenSSL/nghttp2/webapp are silently
-downgraded to OFF when their dependency is missing (`CMakeLists.txt:223,257,266,535` —
-plain `set()` calls, so the cache still reads ON). The export file holds the
+downgraded to OFF when their dependency is missing (the `set(UVCPP_ENABLE_OPENSSL OFF)`
+/ `set(UVCPP_ENABLE_NGHTTP2 OFF)` / `set(UVCPP_BUILD_WEBAPP OFF)` lines in the top-level
+`CMakeLists.txt` — plain `set()` calls, so the cache still reads ON). The export file holds the
 post-downgrade values, generated from the same literals as the header.
 
 Toolchains covered: `ubuntu` (gcc/ELF), `config-contract`'s `windows` leg (MSVC/PE — it

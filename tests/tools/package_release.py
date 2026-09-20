@@ -335,9 +335,10 @@ def copy_header(src, dst):
     """拷公开头；含非 ASCII 又没 BOM 的，补一个 UTF-8 BOM。
 
     仓里的约定本来就是「UTF-8 带 BOM」（src/ 下 99 个头里 75 个有），另有 22 个
-    跑偏成了无 BOM。仓内编译看不出来：`add_compile_options(/utf-8)`
-    （CMakeLists.txt:95-97）替它们兜着。但那个开关是**目录作用域**的 —— 它既不进
-    导出集，更到不了预编译包的消费者。于是 MSVC 使用者按系统代码页 936 读这些头，
+    跑偏成了无 BOM。仓内编译看不出来：顶层 `CMakeLists.txt` 里
+    `if(MSVC) add_compile_options(/utf-8) endif()` 那一段替它们兜着。但那个开关是
+    **目录作用域**的 —— 它既不进导出集，更到不了预编译包的消费者。于是 MSVC 使用者
+    按系统代码页 936 读这些头，
     中文注释的末字节吞掉换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>`
     里。实测：`cl /nologo /std:c++14 /EHsc /I<包>/include /c consumer.cpp` 编不过；
     给这 22 个补上 BOM 之后同一条命令 rc=0（g++ 也照过 —— 前导 BOM 它接受并忽略，

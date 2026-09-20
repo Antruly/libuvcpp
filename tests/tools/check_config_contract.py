@@ -23,8 +23,10 @@
      `INTERFACE_COMPILE_DEFINITIONS` 取值一致。
 
 判据 ③ 不拿 `CMakeCache.txt` 对：OpenSSL/nghttp2/webapp 在依赖缺失时会被**静默
-降级为 OFF**（`CMakeLists.txt:223,257,266,535`，那是 set() 一个普通变量，cache 里
-仍是 ON），拿 cache 对会造出假失败。导出文件是降级**之后**的值，与生成头同源。
+降级为 OFF**（`CMakeLists.txt` 里 `set(UVCPP_ENABLE_OPENSSL OFF)` /
+`set(UVCPP_ENABLE_NGHTTP2 OFF)` / `set(UVCPP_BUILD_WEBAPP OFF)` 那几处 —— 都是
+set() 一个普通变量，cache 里仍是 ON），拿 cache 对会造出假失败。导出文件是降级
+**之后**的值，与生成头同源。
 
 用法：
     python tests/tools/check_config_contract.py --pkg dist/uvcpp-...-msvc-x64 --tree build-msvc

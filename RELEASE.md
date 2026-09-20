@@ -284,6 +284,23 @@ int main() {
   `zconf.h`**（`web/uvcpp_ws_parser.h` 在 `UVCPP_ZLIB_ENABLE=1` 时要 include 它，
   但 install 规则里没有这一条）。
 
+### MSVC 从源码树 / 安装树取头时，要自己加 `/utf-8`
+
+**预编译包的消费者不受影响**（打包脚本给含非 ASCII 的头补了 BOM，见上面「使用方式」），
+受影响的是 `find_package(uvcpp)` 与直接把 `src/` 加进 `-I` 的那条路：
+
+- 实测 `src/` 下 99 个公开头：75 个带 BOM，24 个不带，**其中 22 个含非 ASCII** ——
+  会坏的就是这 22 个。
+- MSVC 读无 BOM 的 UTF-8 源码时按系统代码页（936/GBK）解码，中文注释的末字节吞掉
+  换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>` 里。`C4819` 是唯一的线索
+  （`warning C4819: 该文件包含不能在当前代码页(936)中表示的字符`）。
+- 仓内编译看不出来，有两个原因叠加：顶层 `CMakeLists.txt` 里
+  `if(MSVC) add_compile_options(/utf-8) endif()` 是**目录作用域**的 —— 导出集里
+  `INTERFACE_COMPILE_OPTIONS` 是**空**的，`find_package` 的消费者拿不到它；而
+  `install(FILES ...)` 是把源码树那几个头**原样**拷出去，BOM 不会凭空多出来。
+- 绕行：给自己的目标加 `/utf-8`（或 `/source-charset:utf-8`）。根因是那 22 个头自己
+  没 BOM，会在后续版本修。
+
 ## 感谢 (Credits)
 
 感谢所有为这个项目做出贡献的人！
