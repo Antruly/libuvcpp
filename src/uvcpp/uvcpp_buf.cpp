@@ -388,7 +388,9 @@ void uvcpp_buf::in_uv_buf(uv_buf_t *bf) {
 }
 
 void uvcpp_buf::alloc_buf(uv_buf_t *bf, size_t len) {
-  bf->base = uvcpp_alloc_arry<char>(len);
+  // 不清零：这块是交给 libuv 的 alloc 回调去**接数据**的，紧接着就被读满，
+  // 清它是纯白付。见 uvcpp_alloc_bytes_raw 的说明。
+  bf->base = static_cast<char*>(uvcpp_alloc_bytes_raw(len));
   bf->len = len;
 }
 
