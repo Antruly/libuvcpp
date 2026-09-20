@@ -221,11 +221,17 @@ static bool test_sync_connect_failure() {
               << "succeeded\n";
     return false;
   }
-  // 钉住"被拒"这个具体理由：别的错误码（端口非法、地址不可用…）都说明
-  // 前置条件没立住，而不是被测路径生效了。
-  if (rc != UV_ECONNREFUSED) {
-    std::cout << "[functional tcp_client] connect_failure expected ECONNREFUSED,"
-              << " got " << uv_err_name(rc) << std::endl;
+  // 收紧到"对端没在听"这一族信号，但**不钉死具体码**：绑定未监听时
+  // Linux/Windows 回 `ECONNREFUSED`，而 macOS 上实测**拿不到拒绝**，一路
+  // 等到 `connect_wait` 的超时才回 `ETIMEDOUT`（CI 报的就是这个 —— 本机
+  // 复现不了，所以内核那边到底为什么不回 RST 只是推测，不当结论写）。
+  // 钉死某一个码，就是把这条用例绑死在那个平台的行为上。
+  //
+  // 收紧本身是必要的：端口非法（`EADDRNOTAVAIL`）、地址不可用之类的错误码
+  // 说明**前置条件没立住**，而不是被测路径生效了。
+  if (rc != UV_ECONNREFUSED && rc != UV_ETIMEDOUT) {
+    std::cout << "[functional tcp_client] connect_failure expected a"
+              << " no-listener error, got " << uv_err_name(rc) << std::endl;
     return false;
   }
 
