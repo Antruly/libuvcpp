@@ -16,6 +16,7 @@
 #include "req/uvcpp_write.h"
 #include "uvcpp/uvcpp_buf.h"
 #include "net/uvcpp_tcp_client.h"
+#include "net/uvcpp_tcp_server.h"
 #include "loop_drain.h"
 
 using namespace uvcpp;
@@ -193,12 +194,38 @@ static bool test_sync_echo(int port) {
 static bool test_sync_connect_failure() {
   std::cout << "[functional tcp_client] connect_failure start\n";
 
+  // 占住一个端口但**不 listen**：内核对该端口的连接回 RST，于是"被拒"是确定性的；
+  // 而端口在守卫存活期间不会被别的用例抢走。原先写死 19999，取拒绝靠的是
+  // "这个端口是空的"这个**没有任何断言**的前提，而 tcp_server_func 恰好也要绑它。
+  uvcpp_tcp_server guard;
+  if (guard.bind("127.0.0.1", 0) != 0) return false;
+  sockaddr_in bound;
+  int bound_len = sizeof(bound);
+  if (guard.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&bound),
+                                   &bound_len) != 0) {
+    return false;
+  }
+  int port = ntohs(bound.sin_port);
+  // 守卫必须真的拿到了一个端口：拿到 0 的话下面照样会失败，但失败的理由是
+  // "端口非法"而不是"被拒"，用例就白跑了。
+  if (port == 0) {
+    std::cout << "[functional tcp_client] connect_failure guard got no port\n";
+    return false;
+  }
+
   uvcpp_tcp_client client;
 
-  int rc = client.connect_wait("127.0.0.1", 19999, 2000);
+  int rc = client.connect_wait("127.0.0.1", port, 2000);
   if (rc == 0) {
     std::cout << "[functional tcp_client] connect_failure unexpectedly "
               << "succeeded\n";
+    return false;
+  }
+  // 钉住"被拒"这个具体理由：别的错误码（端口非法、地址不可用…）都说明
+  // 前置条件没立住，而不是被测路径生效了。
+  if (rc != UV_ECONNREFUSED) {
+    std::cout << "[functional tcp_client] connect_failure expected ECONNREFUSED,"
+              << " got " << uv_err_name(rc) << std::endl;
     return false;
   }
 

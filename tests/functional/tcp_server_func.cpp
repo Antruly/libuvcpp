@@ -244,7 +244,9 @@ static bool test_write_buf_move_async(int port) {
 static bool test_server_status() {
   uvcpp_tcp_server server;
   if (server.get_status() != TCP_SERVER_NONE) return false;
-  if (server.bind("127.0.0.1", 19999) != 0) return false;
+  // 端口随便给：本用例只看状态迁移。原先写死 19999 会与
+  // `tcp_client_func` 那条"连 19999 必须失败"的用例抢同一个端口。
+  if (server.bind("127.0.0.1", 0) != 0) return false;
   if (!server.has_status(TCP_SERVER_LISTENING)) return false;
   if (server.listen([](uvcpp_tcp_client*) {}, 128) != 0) return false;
 
