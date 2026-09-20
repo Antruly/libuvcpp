@@ -24,6 +24,18 @@
 #include <net/uvcpp_net_read.h>
 #include <uvcpp/uvcpp_buf.h>
 
+/**
+ * @brief 试发快速路径的**最小长度**（字节，默认 32 KiB；可由构建系统覆盖）。
+ *
+ * 低于它的写不试发、直接走原来的路径。为什么是 32 KiB 见
+ * `src/net/uvcpp_tcp_client.cpp` 里那段账 —— 一句话：快路径每笔写固定多一次
+ * 系统调用（整条吃下时那次 `uv_write` 走 0 长度，libuv 两个平台上都不对它
+ * 短路），换来的是省掉一份 `len` 字节的拷贝，小报文上这笔是亏的。
+ */
+#ifndef UVCPP_TRY_WRITE_MIN_BYTES
+#define UVCPP_TRY_WRITE_MIN_BYTES 32768
+#endif
+
 namespace uvcpp {
 
 #if UVCPP_OPENSSL_ENABLE
@@ -578,6 +590,42 @@ class UVCPP_API uvcpp_tcp_client {
 
   /** @brief 读一次回收支路计数。见 `reclaim_stat`。 */
   static reclaim_stat reclaim_stats();
+
+  /**
+   * @brief `uv_try_write` 快速路径的诊断计数（诊断用）。
+   *
+   * 快速路径是**纯粹的性能改动**：打开它与关掉它，对外可观察行为**按设计**
+   * 完全一样，所以黑盒用例本来就分不出二者 —— "快路径到底有没有被走到"因此
+   * 没法用行为断言锁住，只能把它变成可观测量。这个计数就是那个抓手：
+   *
+   *   - `attempted`：长度过了门槛、真的试发了多少次；
+   *   - `consumed` ：其中套接字**直接吃下 > 0 字节**的次数（真省下了拷贝）；
+   *   - `skipped`  ：长度没过门槛、按设计没试发的次数；
+   *   - `bytes`    ：直接吃下的字节总数（= 省掉的用户态拷贝字节数）。
+   *
+   * 判据是"小报文走 `skipped`、大报文走 `attempted`"（见
+   * `tests/functional/tcp_try_write_fastpath_func.cpp` 判据 1c），开关关掉时
+   * 四个计数**恒为 0**。只增不减。
+   *
+   * 进程级累计，不随单个客户端归零 —— 与 `reclaim_stat` 同一形状。
+   */
+  struct try_write_stat {
+    uint64_t attempted;  ///< 过了门槛、真的试发过几次
+    uint64_t consumed;   ///< 其中套接字直接吃下 > 0 字节的次数
+    uint64_t skipped;    ///< 没过门槛、按设计没试发的次数
+    uint64_t bytes;      ///< 直接吃下的字节总数（= 省掉的拷贝字节数）
+  };
+
+  /** @brief 读一次快速路径计数。见 `try_write_stat`。 */
+  static try_write_stat try_write_stats();
+
+  /**
+   * @brief 试发快速路径的最小长度，见文件开头 `UVCPP_TRY_WRITE_MIN_BYTES`。
+   *
+   * 用例拿它来选"该落 `skipped` 的报文"和"该落 `attempted` 的报文"，这样
+   * 改门槛时用例不用跟着改。
+   */
+  static const size_t kTryWriteMinBytes = UVCPP_TRY_WRITE_MIN_BYTES;
 
   // -----------------------------------------------------------------
   // 框架内部：自动读
