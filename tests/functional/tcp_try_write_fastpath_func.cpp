@@ -30,29 +30,42 @@
  * 只能部分接受。
  *
  * ---------------------------------------------------------------------------
+ * 长度门槛（`UVCPP_TRY_WRITE_MIN_BYTES`，默认 32 KiB）：
+ *
+ * 快路径不是"报文越短越该用"。它每笔写固定**多**一次系统调用（整条吃下时
+ * 那次 `uv_write` 走 0 长度，而 libuv 在两个平台上都不对 0 长度短路），换来
+ * 的是省掉一份 `len` 字节的拷贝 —— 两项相抵的零点在 16 KiB 附近（详细的账见
+ * `.cpp` 里那段注释），所以长度没过门槛的报文**连试都不试**。本用例里 16 字节
+ * 那几笔走的就是这条"不试发"支路，4 MiB 那一档走试发支路，两条都有判据看着。
+ * ---------------------------------------------------------------------------
+ *
+ * ---------------------------------------------------------------------------
  * 关于"变异撞红"：本文件里每条判据都能被一次**定向**的改坏撞红。下表的每一行
  * 都在本机**真跑过**（改一处、重编、跑全量用例，跑完还原）：
  *
  * | 改坏点什么 | 撞红的判据 | 实测结果 |
  * |---|---|---|
- * | 快路径里内联交付（自己同步调 `fn(0, arg)`） | 判据 1、判据 3 | **进程死亡**（rc=127）：判据 1 的 4000 层链式写递归爆栈，连判据 1 的结论都打不出来 |
- * | 余量算成整条 `data, len` | 判据 1 收尾、2、3 | 红：4 MiB 那档对端收到 8388608 字节，正好是 4194304 的两倍；16 字节那档收到 32 |
- * | 负返回从 `write()` 漏出去 | 判据 1、1b、2、4 | 红：`write()` 直接返回 `-4084`（`UV_EAGAIN`），连接当场被毒化，后面全崩 |
- * | 快路径整个去掉（等价于 `UVCPP_ENABLE_TRY_WRITE=OFF`） | —— | **全绿，这是对的**，见下 |
+ * | 快路径里内联交付（自己同步调 `fn(0, arg)`） | 判据 1b、1e、1 收尾 | 红：第二笔写拿到 rc=0（在途标志被提前清掉）、链式写深度涨到 43、字节总数多出 16 |
+ * | 余量算成整条 `data, len` | 判据 1 收尾、2 | 红：4 MiB 那档对端收到 8388608 字节，正好是 4194304 的两倍（重发前缀） |
+ * | 负返回从 `write()` 漏出去 | 判据 1e、1 收尾、2、3、4 | 红：`write()` 直接返回 `-4084`（`UV_EALREADY`，客户端状态被毒化），一共 20 条判据连锁红 |
+ * | 门槛写反（小报文反而试发、大报文不试发） | 判据 1c | 红：4000 笔 16 字节报文 attempted=4000、skipped=0 |
+ * | 快路径整个去掉（源码里改成 `#if 0`） | 判据 1c、1d | 红：skipped=0 且 attempted=0 —— 覆盖率判据把它抓住了 |
+ * | 用开关关掉（`UVCPP_ENABLE_TRY_WRITE=OFF`，不是改坏） | —— | 全绿，这是对的，见下 |
  *
- * **"把快路径整个去掉"不会撞红本用例的任何一条 —— 这是对的，不是漏了。**
+ * **"用开关把快路径整个关掉"撞不红任何行为判据 —— 这是对的，不是漏了。**
  * 快速路径是纯粹的性能改动，可观察语义**按设计**与关掉时完全一致；黑盒用例
  * 本来就分不出二者（真能分出来，说明有别的行为差异，那才是缺陷）。所以
- * "快路径真的被走过"这件事不能靠这里锁，只能靠**运行期覆盖率**：
+ * "快路径真的被走过"不能靠行为断言锁，只能靠**运行期覆盖率**。
  *
- * ⚠️ **现在这个覆盖率断言在上游是死的**。判据 1c 的 `trywrite_full > 0` 断言
- * 整段在 `#ifdef UVCPP_TEST_COPYPROBE` 里，而 `UVCPP_TEST_COPYPROBE` 只有带
- * 拷贝探针的本机构建才定义（探针 `src/uvcpp/uvcpp_copyprobe.*` 不在上游，见
- * 仓外装置）。也就是说**上游 CI 上"快路径失效"这件事没有任何一条判据看着**。
- * 要补的话只有两条路：(a) 把探针连同它的接线一起提上来；(b) 给 `write()` 加一个
- * 只读的"这次走了快路径"计数（`uvcpp_tcp_client` 的一个 `size_t` 静态/成员，
- * 加一个 getter），由本用例在两种开关下各断言一次 —— 语义测试不该依赖探针。
- * (b) 更小，但它是**为测试而改产品接口**，所以没有擅自加，留待取舍。
+ * 覆盖率用产品侧的只读计数 `uvcpp_tcp_client::try_write_stats()`
+ * （`attempted` / `consumed` / `skipped` / `bytes`，进程级累计）：判据 1c 断言
+ * "小报文一律不试发"，判据 1d 断言"大报文真的试发过、且真的吃下过字节"。开关
+ * 关掉时四个计数**恒为 0**，两种开关下各断言一次。
+ *
+ * （曾经有过一版覆盖率断言是死的：它挂在 `#ifdef UVCPP_TEST_COPYPROBE` 里，
+ * 而那个宏只有带拷贝探针的本机构建才定义、探针不在上游 —— 于是上游 CI 上
+ * "快路径失效"没有任何一条判据看着。作者在 PR #15 里选了"给产品加只读计数"
+ * 这条更小的路，(b) 而不是把探针提上来 (a)。）
  * ---------------------------------------------------------------------------
  *
  * ---------------------------------------------------------------------------
@@ -90,12 +103,6 @@
 #include "loop_drain.h"
 #include "wait_util.h"
 
-#ifdef UVCPP_TEST_COPYPROBE
-// 只有带探针的本机构建会定义这个宏（见本文件结尾那段说明）。上游没有这个
-// 头文件，所以这一段在上游永远不编译。
-#include <uvcpp/uvcpp_copyprobe.h>
-#endif
-
 using namespace uvcpp;
 using namespace uvcpp_test;
 
@@ -113,6 +120,13 @@ void check(bool cond, const std::string& what) {
 const char kMsg[] = "0123456789abcdef";
 const size_t kMsgLen = sizeof(kMsg) - 1;
 
+/// "大报文"的长度：必须**过门槛**才会走试发支路，所以由门槛本身派生出来，
+/// 改 `UVCPP_TRY_WRITE_MIN_BYTES` 时用例不用跟着改。默认 64 KiB。
+const size_t kBigLen = uvcpp_tcp_client::kTryWriteMinBytes * 2;
+
+/// 判据 1e 那条大报文链的链长（写在整个链的回调里接着发起下一笔）。
+const int kDeepChain = 64;
+
 /// FNV-1a 64 位。用一个**位置相关**的图案，于是"重复了一段前缀"和"少了一段"
 /// 这两种错都会改变哈希，不只是字节数对不上。
 const uint64_t kFnvBasis = 14695981039346656037ULL;
@@ -128,6 +142,13 @@ inline uint64_t fnv1a(uint64_t h, const char* p, size_t n) {
 
 inline char pattern_at(size_t i) {
   return static_cast<char>((i * 131u) ^ (i >> 7) ^ (i >> 19));
+}
+
+/// 造一段 `len` 字节的位置相关图案（重发前缀、少发一段都会改变哈希）。
+inline std::vector<char> make_pattern(size_t len, size_t salt) {
+  std::vector<char> v(len);
+  for (size_t i = 0; i < len; ++i) v[i] = pattern_at(i + salt);
+  return v;
 }
 
 /**
@@ -163,10 +184,6 @@ int main() {
   auto progress = [](const char* what) {
     std::cout << "[tcp_try_write_fastpath] " << what << std::endl;
   };
-
-#ifdef UVCPP_TEST_COPYPROBE
-  copy_probe_reset();
-#endif
 
   uvcpp_loop loop;
 
@@ -301,6 +318,41 @@ int main() {
     }
 
     // ---------------------------------------------------------------------
+    // 判据 1c：门槛 —— 小于门槛的报文**连试都不试**
+    // ---------------------------------------------------------------------
+    //
+    // 跑到这里只发过 16 字节的报文（判据 1 的那 kN 笔），全都小于门槛。所以
+    // 此刻的账必须是"试发次数一次都没动过、跳过的次数至少 kN 次"。
+    //
+    // 这条**不是**行为契约（快路径怎么走外面看不出来），它是覆盖率断言：产品侧
+    // 的只读计数是这件事在上游唯一能自动断言的抓手。开关关掉时四个计数恒为 0
+    // ——两种开关下各断言一次，"开着不改变语义"那句话才有证据。
+    {
+      const uvcpp_tcp_client::try_write_stat tw =
+          uvcpp_tcp_client::try_write_stats();
+      std::cout << "  [note] 小报文段之后的计数：attempted=" << tw.attempted
+                << " consumed=" << tw.consumed << " skipped=" << tw.skipped
+                << " bytes=" << tw.bytes << "（门槛 "
+                << uvcpp_tcp_client::kTryWriteMinBytes << " 字节）" << std::endl;
+#if UVCPP_TRY_WRITE_ENABLE
+      check(tw.attempted == 0,
+            "判据1c: 门槛失效 —— " + std::to_string(kN) + " 笔 " +
+                std::to_string(kMsgLen) + " 字节的报文，试发被走了 " +
+                std::to_string(tw.attempted) + " 次");
+      check(tw.skipped >= static_cast<uint64_t>(kN),
+            "判据1c: 小于门槛的报文没走'不试发'支路，skipped=" +
+                std::to_string(tw.skipped) + "（应 ≥ " + std::to_string(kN) +
+                "）");
+#else
+      check(tw.attempted == 0 && tw.consumed == 0 && tw.skipped == 0 &&
+                tw.bytes == 0,
+            "判据1c: 开关关掉了，四个计数应当恒为 0（attempted=" +
+                std::to_string(tw.attempted) + " skipped=" +
+                std::to_string(tw.skipped) + "）");
+#endif
+    }
+
+    // ---------------------------------------------------------------------
     // 判据 1b：在途的那一笔不许被后一笔顶掉
     // ---------------------------------------------------------------------
     //
@@ -308,10 +360,16 @@ int main() {
     // `has_async_write_cb_` 立起来，第二笔写会**覆盖**第一笔的闭包 —— 丢的是
     // **回调**而不是数据，所以平时完全看不出来（对端收到的字节照样对）。
     // 也正因为它不可见，才要单独钉一条。
+    //
+    // 第一笔用**过门槛的大报文**：门槛之下根本不进快路径，用 16 字节钉这条就
+    // 等于没钉（第二笔拿到 UV_EALREADY 只是因为普通路径的在途标志）。第二笔的
+    // 长度无所谓 —— 它在任何路径逻辑之前就被标志挡下了。
+    const std::vector<char> big = make_pattern(kBigLen, 7);
     {
       std::atomic<int> a{0};
       std::atomic<int> b{0};
-      const int rc1 = client.write(kMsg, kMsgLen, [&a](int) { a.fetch_add(1); });
+      const int rc1 = client.write(big.data(), big.size(),
+                                   [&a](int) { a.fetch_add(1); });
       const int rc2 = client.write(kMsg, kMsgLen, [&b](int) { b.fetch_add(1); });
       check(rc1 == 0, "判据1b: 第一笔在途写提交失败 rc=" + std::to_string(rc1));
       check(rc2 == UV_EALREADY,
@@ -327,34 +385,93 @@ int main() {
                 " 次）");
     }
 
-#ifdef UVCPP_TEST_COPYPROBE
     // ---------------------------------------------------------------------
-    // 判据 1c：快路径**真的被走过**（只在本机探针构建里存在）
+    // 判据 1d：快路径**真的被走过**（覆盖率断言，两种开关下各来一次）
     // ---------------------------------------------------------------------
     //
-    // 这一段是"变异撞红"的落点：把快路径去掉/短路掉，`trywrite_full` 就是 0，
-    // 判据立刻红。上游没有 `uvcpp_copyprobe.h`，整段不编译 —— 交付出去的用例
-    // 只断言行为契约，覆盖率这件事由本机负责。
-    const bool expect_fastpath = (std::getenv("UVCPP_TEST_EXPECT_FASTPATH") != nullptr);
-    if (expect_fastpath) {
-      const copy_probe_stats ps = copy_probe_snapshot();
-      std::cout << "  [probe] trywrite_calls=" << ps.trywrite_calls
-                << " full=" << ps.trywrite_full
-                << " partial=" << ps.trywrite_partial
-                << " none=" << ps.trywrite_none
-                << " bytes=" << ps.trywrite_bytes << std::endl;
-      check(ps.trywrite_full > 0,
-            "判据1c（仅探针构建）: 4000 笔小报文一笔都没被快路径整条吃下 —— "
-            "快路径被去掉或被短路了");
-    }
+    // 上面判据 1b 那笔是过门槛的大报文，所以试发支路此刻**必然**被走过一次
+    // ——不管套接字收下了多少。这一条替换掉的是原先那个挂在 `#ifdef
+    // UVCPP_TEST_COPYPROBE` 里、在上游永远不编译的覆盖率断言（探针不在上游）。
+    //
+    // `consumed` / `bytes` 只记数、**不断言**：吃下多少取决于内核缓冲此刻有多
+    // 空，那是平台相关的（Windows 上"整条吃下"之外的那一半根本到不了，见下面
+    // 判据 2 那段）。"有没有被你走到"是可判的，"省了多少"不是。
+    {
+      const uvcpp_tcp_client::try_write_stat tw =
+          uvcpp_tcp_client::try_write_stats();
+      std::cout << "  [note] 大报文之后的计数：attempted=" << tw.attempted
+                << " consumed=" << tw.consumed << " skipped=" << tw.skipped
+                << " bytes=" << tw.bytes << std::endl;
+#if UVCPP_TRY_WRITE_ENABLE
+      check(tw.attempted > 0,
+            "判据1d: 过门槛的大报文一笔都没试发 —— 快路径被去掉或被短路了");
+#else
+      check(tw.attempted == 0 && tw.consumed == 0 && tw.skipped == 0 &&
+                tw.bytes == 0,
+            "判据1d: 开关关掉了，四个计数应当恒为 0（attempted=" +
+                std::to_string(tw.attempted) + "）");
 #endif
+    }
+
+    // ---------------------------------------------------------------------
+    // 判据 1e：**大报文**的链式写也不许递归（内联同步交付的落点）
+    // ---------------------------------------------------------------------
+    //
+    // 判据 1 用 16 字节报文钉"回调里接着写下一笔"这种最自然的用法；门槛引入
+    // 之后那几笔根本不进快路径，所以这里用大报文再钉一遍：把交付做成同步
+    // （在快路径里自己调 `fn(0, arg)`）时，深度会等于链长，`max_live` 当场红。
+    {
+      progress("判据1e 大报文链式写：交付不得同步");
+      const int kDeep = kDeepChain;
+      int live = 0;
+      int max_live = 0;
+      int done = 0;
+      std::atomic<int> bad_status{0};
+      std::function<void(int)> step = [&](int i) {
+        if (i >= kDeep) return;
+        // `i` **必须按值捕获**：回调是在 `step(i)` 返回之后才响的，按引用捕获
+        // 拿到的是已经出栈的形参 —— 那是悬垂引用，链会跑飞（实测 done 冲到 72）。
+        const int wrc = client.write(big.data(), big.size(), [&, i](int st) {
+          ++live;
+          if (live > max_live) max_live = live;
+          if (st != 0) bad_status.fetch_add(1);
+          ++done;
+          step(i + 1);
+          --live;
+        });
+        if (wrc != 0) bad_status.fetch_add(1);
+      };
+      step(0);
+      check(live == 0, "判据1e: 起步调用返回后 live=" + std::to_string(live));
+
+      for (int i = 0; i < 200000 && done < kDeep; ++i) {
+        sloop->run(UV_RUN_NOWAIT);
+        loop.run(UV_RUN_NOWAIT);
+      }
+      std::cout << "  [note] 大报文链式写 max_live=" << max_live
+                << "（链长 " << kDeep << "；同步交付会等于链长）" << std::endl;
+      check(done == kDeep, "判据1e: 链式写没跑完，done=" + std::to_string(done) +
+                               "/" + std::to_string(kDeep));
+      check(max_live <= 2,
+            "判据1e: 完成回调被**同步交付**了 —— 回调栈深度涨到 " +
+                std::to_string(max_live) +
+                "（正确的实现里每次交付都是新的一帧）");
+      check(bad_status.load() == 0,
+            "判据1e: 有 " + std::to_string(bad_status.load()) +
+                " 笔写的状态非 0");
+    }
 
     // 判据 2 之前先把判据 1 那几笔的字节在对端收干净，这样后面开 capture 之后
     // 收到的字节就**只**属于当前这一段。
     // 上限一律是**墙钟**且留足余量：整个用例要能在 `ctest --timeout 30` 里跑完，
     // 所以各处失败上限之和必须明显小于 30 秒（详见 wait_util.h 那段表）。
-    const size_t kAfterS1 = static_cast<size_t>(kN + 1) * kMsgLen;
-    wait_until_pair(sloop, &loop, [&] { return rec.total >= kAfterS1; }, 3000);
+    //
+    // 这个总数的断言同时是"余量算错"的落点：把余量写成整条 `data, len` 会把
+    // 前 n 字节发两遍，总数直接对不上（判据 1b 那笔大报文、判据 1e 那 64 笔
+    // 都在里面）。
+    const size_t kAfterS1 = static_cast<size_t>(kN) * kMsgLen +
+                            static_cast<size_t>(1 + kDeepChain) * kBigLen;
+    wait_until_pair(sloop, &loop, [&] { return rec.total >= kAfterS1; }, 5000);
     check(rec.total == kAfterS1,
           "判据1 收尾: 对端收到 " + std::to_string(rec.total) + " 字节，应为 " +
               std::to_string(kAfterS1));
@@ -517,8 +634,10 @@ int main() {
     // 不是它等于几 —— 把 0 或 1 写进断言，换个发起点或换个平台就翻。
     //
     // 快速路径**不改变这个数**：交付仍然由那次 `uv_write` 交（见 .cpp 里的
-    // 说明），所以开/关快速路径量到的是同一个数 —— 这也正是"没有动时序"这句
-    // 话的证据。这里把数记到 stdout，供人看趋势。
+    // 说明），所以开/关快速路径量到的是同一个数。这一段用的是 16 字节报文，
+    // 在门槛之下 —— 它量到的是**原路径**的轮数；试发支路那边的时序由判据 1b
+    // 与 1e 钉（那两处用大报文，且断言的是"交付不在 write() 里、也不递归"）。
+    // 这里把数记到 stdout，供人看趋势。
     {
       progress("判据3 交付在 write() 返回之后");
 
@@ -604,9 +723,12 @@ int main() {
       if (hrc != 0) delete w;
 
       // 一轮都没泵 —— 上面那笔此刻必然还挂在 `write_reqs_pending` 里。
+      //
+      // 这笔的报文**必须过门槛**：门槛之下根本不进快路径，负返回那条路也就
+      // 测不到（实测过，用 16 字节钉这条时它仍然全绿）。
       std::atomic<int> fired{0};
       std::atomic<int> status{99};
-      const int wrc = client.write(kMsg, kMsgLen, [&](int st) {
+      const int wrc = client.write(big.data(), big.size(), [&](int st) {
         status.store(st);
         fired.fetch_add(1);
       });
@@ -631,18 +753,19 @@ int main() {
       check(hold_done.load() == 1,
             "判据4: 占位写的回调响了 " + std::to_string(hold_done.load()) + " 次");
 
-      // 内容：占位的 2 MiB 后面**紧跟**那 16 字节，一个不多一个不少。
+      // 内容：占位的 2 MiB 后面**紧跟**那笔大报文，一个不多一个不少。
       // 余量算错或"负返回也当成功"都会在这里露出来。
+      const size_t kBackLen = big.size();
       const uint64_t want = fnv1a(fnv1a(kFnvBasis, hold.data(), hold.size()),
-                                  kMsg, kMsgLen);
-      check(rec.total - base_total == kHoldLen + kMsgLen,
+                                  big.data(), big.size());
+      check(rec.total - base_total == kHoldLen + kBackLen,
             "判据4: 对端共收到 " + std::to_string(rec.total - base_total) +
-                " 字节，应为 " + std::to_string(kHoldLen + kMsgLen));
-      check(got.size() == kHoldLen + kMsgLen,
+                " 字节，应为 " + std::to_string(kHoldLen + kBackLen));
+      check(got.size() == kHoldLen + kBackLen,
             "判据4: 攒下来的字节流长度为 " + std::to_string(got.size()) +
-                "，应为 " + std::to_string(kHoldLen + kMsgLen));
+                "，应为 " + std::to_string(kHoldLen + kBackLen));
       check(fnv1a(kFnvBasis, got.data(), got.size()) == want,
-            "判据4: 对端收到的字节流与「占位块 + 小报文」的拼接不一致");
+            "判据4: 对端收到的字节流与「占位块 + 回退那笔」的拼接不一致");
     }
 
     // ---------------------------------------------------------------------

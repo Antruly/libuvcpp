@@ -76,6 +76,24 @@ uvcpp_tcp_client::reclaim_stat uvcpp_tcp_client::reclaim_stats() {
 }
 
 // =========================================================================
+// 快速路径计数（诊断用，见 uvcpp_tcp_client::try_write_stat）
+// =========================================================================
+
+static std::atomic<uint64_t> g_trywrite_attempted{0};
+static std::atomic<uint64_t> g_trywrite_consumed{0};
+static std::atomic<uint64_t> g_trywrite_skipped{0};
+static std::atomic<uint64_t> g_trywrite_bytes{0};
+
+uvcpp_tcp_client::try_write_stat uvcpp_tcp_client::try_write_stats() {
+  try_write_stat s;
+  s.attempted = g_trywrite_attempted.load(std::memory_order_relaxed);
+  s.consumed  = g_trywrite_consumed.load(std::memory_order_relaxed);
+  s.skipped   = g_trywrite_skipped.load(std::memory_order_relaxed);
+  s.bytes     = g_trywrite_bytes.load(std::memory_order_relaxed);
+  return s;
+}
+
+// =========================================================================
 // Construction / Destruction
 // =========================================================================
 
@@ -946,17 +964,57 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
     //     不能再进待发缓冲；余量只能是 `data + n, len - n`。今天的代码是把整条
     //     `data, len` 拷进去，直接套过来就会把前 n 字节发两遍 —— 对端收到重复
     //     字节，而且是"缓冲不紧时看不出、一紧就错"的形状。
+    //
+    // ---------------------------------------------------------------------
+    // 为什么有个长度门槛（`UVCPP_TRY_WRITE_MIN_BYTES`）
+    // ---------------------------------------------------------------------
+    // 拷贝放大比**看不见每笔写的固定成本**：快路径每笔写恰好多一次系统调用
+    // —— 整条吃下时那次 `uv_write` 走的是 0 长度，而 libuv 在两个平台上都
+    // **不对 0 长度短路**（Unix `uv_try_write2` 过掉 guard 直接进 `writev`；
+    // Windows `uv__tcp_try_write` → `WSASend`）。于是每笔写的账是：
+    //
+    //   基线   = memcpy(len) + malloc(uvcpp_buf) + 一次带数据的系统调用
+    //   快路径 = 一次带数据的系统调用 + 一次 0 长度系统调用（整条吃下时不分配）
+    //   Δ      = t_syscall(0) − t_memcpy(len) − t_malloc
+    //
+    // 三项分别实测（Windows / MSVC / Release / loopback，20 万次取分布）：
+    // 0 长度那次系统调用 311~365 ns、memcpy 4 KiB 163~165 ns、16 KiB
+    // 220~398 ns、64 KiB 1275~1397 ns、4 MiB 135~138 µs、省掉的 malloc 24.8 ns。
+    // 代进去：4 KiB 约 **+148 ns（亏）**、16 KiB 在 ±90 ns 之间**来回翻**、
+    // 64 KiB 起净赚（−963 ns 到 −135 µs，随长度线性长）。
+    //
+    // 也就是说**零点在 16 KiB 附近**，低于它每笔写净亏几十到三百纳秒 —— 而
+    // Web 响应最常见的 4 KiB 恰好落在净亏区（那一档拷贝放大比从 3.11× 降到
+    // 2.05×，墙钟却是每响应多约 150 ns）。门槛取 32 KiB：零点在 16 KiB 附近
+    // **而且就在那儿来回翻**，取高一点更稳；64 KiB 以上那些档（真正值钱的）
+    // 一分不少，小报文回到今天的行为 —— 它们本来也省不下什么。
+    //
+    // 量级说清楚：4 KiB 上那 ~150 ns 放在一条几十微秒的请求上约 0.2%，不是
+    // 事故。门槛的意义是让这个改动**严格更好**，不是修 bug。绝对值随机器与
+    // libuv 版本会变，但小尺寸那一侧的方向是稳的（十几纳秒的 memcpy 对三百
+    // 多纳秒的一次 `WSASend`，差一个数量级，不是调度噪声能翻过来的）；真实
+    // 网络里 socket 缓冲更容易满、试发更容易退化成 EAGAIN，那只会让快路径
+    // **更少**被走到，不改变"走到了也是亏"这一侧。
     const char* wp = data;
     size_t      wl = len;
-    if (len > 0) {
+    if (len >= UVCPP_TRY_WRITE_MIN_BYTES) {
+      g_trywrite_attempted.fetch_add(1, std::memory_order_relaxed);
+      // 长度超过 `UINT_MAX` 时 `uv_buf_init` 会把 `len` 截断 —— 不影响正确性：
+      // 试发的**实际**字节数是返回值 `n`，余量一律由 `len - n` 算。
       uv_buf_t probe = uv_buf_init(const_cast<char*>(data),
                                    static_cast<unsigned int>(len));
       const int n = tcp_->try_write(&probe, 1);
       if (n > 0) {
         wp = data + static_cast<size_t>(n);
         wl = len - static_cast<size_t>(n);
+        g_trywrite_consumed.fetch_add(1, std::memory_order_relaxed);
+        g_trywrite_bytes.fetch_add(static_cast<uint64_t>(n),
+                                   std::memory_order_relaxed);
       }
       // 负返回走这里：`wl` 还是 `len`，整条照旧入队，负返回不外泄。
+    } else {
+      // 没过门槛：连试都不试，直接走今天的路径。
+      g_trywrite_skipped.fetch_add(1, std::memory_order_relaxed);
     }
 
     // 整条吃下时 `wl == 0`：这一份是空块（`uvcpp_buf` 对 0 长度不分配也不拷，
