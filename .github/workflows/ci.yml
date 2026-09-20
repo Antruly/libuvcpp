@@ -685,6 +685,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-python
 
       - name: Configure & Build
         run: |
@@ -764,6 +765,47 @@ jobs:
           fi
           exit "$rc"
 
+      # 出包 → 装 → 消费方（issue #6 第 3 条）。这条腿是 MinGW/PE 那一档：
+      # 这棵树本来就是按发布规格配的（OPENSSL=ON / LIBUV_FROM_SOURCE=ON），
+      # 成员布局错位那一档在这里是活的。
+      # 路径一律用**相对**的：MSYS2 bash 把 `/d/...` 形状的实参喂给原生 python 时
+      # 会做路径转换，相对路径不经过那一步。
+      - name: Package & config contract (issue #6 item 3)
+        env:
+          # 两个脚本都打印中文。原生 python 写管道时按 locale 选编码
+          # （runner 上是 cp1252）⇒ UnicodeEncodeError 直接在打印那行崩掉，
+          # 看着像脚本 bug。MSYS2 是否默认 UTF-8 不在我们控制之内，显式钉住。
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          rc=0
+          out=$(python tests/tools/package_release.py \
+            --tree build-mingw --platform mingw-x64 --out dist 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" \
+              | grep -E 'error|Error|缺少|失败|Traceback' | head -20 \
+              | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=package-mingw::${msg:-rc=$rc (no error line matched)}"
+            exit "$rc"
+          fi
+          pkg=$(ls -d dist/libuvcpp-*-mingw-x64 2>/dev/null | head -1)
+          if [ -z "$pkg" ]; then
+            echo "::error title=config-contract::出包那步没产出 mingw-x64 的包"
+            exit 1
+          fi
+          echo "pkg=$pkg"
+          rc=0
+          out=$(python tests/tools/check_config_contract.py \
+            --pkg "$pkg" --tree build-mingw --cxx g++ 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|红 [0-9]+ 条|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=config-contract::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
       - name: Upload build log
         if: failure()
         uses: actions/upload-artifact@v4
@@ -831,3 +873,157 @@ jobs:
             fi
           fi
           exit "$rc"
+
+  # ---------------------------------------------------------------------------
+  # 使能宏契约（issue #6 第 3 条）：出包 → 装 → 消费方
+  #
+  # 为什么单开一个 job 而不挂在 web/h2 的腿上：那两条腿在 ubuntu 上装的是
+  # `libuv1-dev`（系统 libuv），而 package_release.py 要求 libuv 在构建树的
+  # `_deps/` 里，否则按设计判"缺少必需文件"退 2、不产包。这里照 release.yml 的
+  # 配置来（LIBUV_FROM_SOURCE=ON），且 **OPENSSL 也开着** —— 成员布局错位那一档
+  # （`ssl_ctx_` 声明在 `http_`/`registry_` 之前）只有 UVCPP_OPENSSL_ENABLE=1 时
+  # 才真的会咬人，关着编出来的包会把判据 1 退化成空转。
+  #
+  # 三档工具链覆盖的是**头契约本身**，不是某个平台的运行时：
+  #   ubuntu -> gcc/ELF     windows -> MSVC/PE      mingw64 -> MinGW/PE（在那个 job 里）
+  #
+  # macOS **跑不了这条链**：package_release.py 的 PLATFORMS 里没有 macOS 的 key。
+  # 这是已知缺口，记在 doc/ci-guide.md。
+  # ---------------------------------------------------------------------------
+  config-contract:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # 脚本打印中文。python 写管道时按 locale 选编码（ubuntu 的 C locale 是
+    # ASCII、windows runner 是 cp1252）⇒ 在 print 那行 UnicodeEncodeError，
+    # 看着像脚本 bug。显式钉成 UTF-8，两个平台一视同仁。
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            cxx: g++
+            py: python3
+          # 钉 windows-2022 与 release.yml 的 msvc-x64 一致：windows-latest 现在
+          # 指向只有 VS2026 的镜像，而 ilammy/msvc-dev-cmd 是按 vswhere -latest
+          # 找工具链的 —— 让这个 job 的 MSVC 基线跟发布产物那条链不同源，
+  # 出问题时没人能说清是哪一边的性质。
+          - os: windows-2022
+            platform: msvc-x64
+            cxx: cl
+            py: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
+
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install openssl --no-progress
+
+      # cl.exe 不在 windows runner 的默认 PATH 上：CMake 自己找得到它，但 bash
+      # 里没有。而下面的正例/反例**必须**是裸编译器调用 —— 走 CMake 的话
+      # target_compile_definitions 发在 CMAKE_CXX_FLAGS 之后，冲突的那个 -D 会被
+      # 盖掉（MSVC 只给 C4005 警告），生成头的 #error 根本不触发，判据 2 就成了摆设。
+      - name: MSVC env (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          {
+            # 这两档**不是**同一套开关，照抄 release.yml 里各自那份（它已经在
+            # 真实发版里跑通了）：
+            #   linux  -> 依赖全静态（PIC + OPENSSL_USE_STATIC_LIBS + STATIC_RUNTIME）
+            #   msvc   -> **不加**后两个：choco 那份 OpenSSL 没有静态库，
+            #             OPENSSL_USE_STATIC_LIBS=ON 会让 find_package 落空、
+            #             UVCPP_ENABLE_OPENSSL 被静默降级成 OFF —— 于是判据 1
+            #             抓不到成员布局错位，而且下面那条断言会把这个 job 判红
+            #             （红得对，但红在开关抄错，不是红在被测对象）。
+            #             MSVC 侧 uvcpp 自己走 /MD + 包内自带 VC++ 运行库，
+            #             不需要 STATIC_RUNTIME。
+            echo "=== configure ==="
+            cfg=0
+            extra=()
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              extra+=(-DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                      -DOPENSSL_USE_STATIC_LIBS=ON -DUVCPP_STATIC_RUNTIME=ON)
+            fi
+            cmake -S . -B build-cfg -DCMAKE_BUILD_TYPE=Release "${extra[@]}" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+              -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+              -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+              -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+              -DUVCPP_ENABLE_NGHTTP2=ON \
+              -DUVCPP_BUILD_EXPAND=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat ci-logs/cfg-configure.log
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            # 这个 job 的全部意义是"出包→装→消费方"那条链，所以先钉死包里
+            # OPENSSL 真的是 1：不是 1 的话判据 1 抓不到布局错位，整条门禁
+            # 会绿得毫无内容（而它自己看不出来）。
+            grep -q '^#  define UVCPP_OPENSSL_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_OPENSSL_ENABLE 不是 1，判据 1 会退化成空转"; exit 1; }
+
+            echo "=== build ==="
+            bld=0
+            cmake --build build-cfg --config Release --parallel 4 2>&1 \
+              | tee ci-logs/cfg-build.log || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/cfg-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-cfg::${msg:-rc=$bld (no error line matched)}"
+            fi
+            exit "$bld"
+          } 2>&1 | tee ci-logs/cfg.log
+
+      # 多行一律 `run: |`：普通标量会把续行折成空格，argparse 收不到 --tree 直接
+      # 退 2，而且**退出码还是 0**（release.yml 里踩过一次，见 doc/ci-guide.md）。
+      - name: Package
+        shell: bash
+        run: |
+          ${{ matrix.py }} tests/tools/package_release.py \
+            --tree build-cfg --platform ${{ matrix.platform }} \
+            --config Release --out dist
+
+      - name: Config contract (issue #6 item 3)
+        shell: bash
+        run: |
+          pkg=$(ls -d dist/libuvcpp-*-${{ matrix.platform }} 2>/dev/null | head -1)
+          if [ -z "$pkg" ]; then
+            echo "::error title=config-contract::没找到 ${{ matrix.platform }} 的包（出包那步没产出？）"
+            exit 1
+          fi
+          echo "pkg=$pkg"
+          rc=0
+          out=$(${{ matrix.py }} tests/tools/check_config_contract.py \
+            --pkg "$pkg" --tree build-cfg --cxx ${{ matrix.cxx }} 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|红 [0-9]+ 条|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=config-contract::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-config-contract-${{ matrix.os }}
+          path: ci-logs/
+          if-no-files-found: ignore

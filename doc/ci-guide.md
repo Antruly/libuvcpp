@@ -14,7 +14,10 @@ This document defines the rules and best practices for maintaining CI in this pr
 | `windows-static` | Windows | static only, web=OFF, MSVC gen | Windows static + MSVC coverage |
 | `web` | Ubuntu, macOS, Windows | shared, web=ON | HTTP/WebSocket module |
 | `ssl` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON | SSL/TLS module |
+| `h2` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON, nghttp2=ON | HTTP/2 coverage; the only job asserting `NGHTTP2=ON` |
 | `full` | Ubuntu, macOS | shared, web=ON, OpenSSL=ON, zlib=ON | All features enabled |
+| `mingw64` | Windows (MSYS2 MinGW64) | shared, self-contained DLL | MinGW release shape + import-table assertion |
+| `config-contract` | Ubuntu, Windows | package → install → consumer | The `UVCPP_*_ENABLE` macro contract (see §5) |
 
 **Rationale**: Windows MSVC compilation is slow. Basic builds are split into two separate jobs (`windows-basic` shared + `windows-static` static) so each job has only ONE build cycle.
 
@@ -176,6 +179,56 @@ and they should not be "simplified" away:
    **returns 0** — so "not tested" and "passed" are indistinguishable in a ctest
    summary. Note also that `ctest` reports `100% tests passed` just as happily when
    the tests were never registered.
+
+---
+
+### The macro contract: `config-contract` (and the `mingw64` tail)
+
+Consumer-visible `UVCPP_*_ENABLE` macros come from a **generated**
+`include/uvcpp/uvcpp_config.h` (`cmake/uvcpp_config.h.in` via `configure_file`), and
+every public header includes it **before its first module guard**. A consumer passes no
+`-D` at all; a conflicting `-D` from the consumer is a hard `#error` naming this build's
+value.
+
+Why a separate job rather than a step on `web`/`h2`: on Ubuntu those legs install
+`libuv1-dev`, and `package_release.py` requires libuv to live under the tree's `_deps/`
+— otherwise it deliberately exits 2 and produces no package. This job configures the way
+`release.yml` does (`UVCPP_BUILD_LIBUV_FROM_SOURCE=ON`) and **with OpenSSL ON**, because
+the member-layout shift being guarded against (`ssl_ctx_` is declared before
+`http_`/`registry_` in `uvcpp_web_app`) only bites when `UVCPP_OPENSSL_ENABLE=1`. The job
+asserts that value in the generated header *before* building: with it off, criterion 1
+silently degrades into a no-op.
+
+`tests/tools/check_config_contract.py` runs three criteria:
+
+1. **ABI-shaped positive** — compile a consumer with a **raw compiler invocation** (`-I`
+   only, zero `-D`), construct a `uvcpp_web_app`, assert `connection_count() == 0`,
+   against the packaged DLL. "It compiles and runs" would be vacuous: the header is
+   self-consistent either way, while a wrong macro set compiles, links, and returns a
+   garbage count (`1073741824`) — the original symptom.
+2. **Negative** — the same raw invocation plus one conflicting `-D` must fail to compile,
+   with the generated header's `#error` text in the output. It must stay a raw
+   invocation: through CMake `target_compile_definitions` is emitted after
+   `CMAKE_CXX_FLAGS` and both compilers take the **last** `-D` (MSVC only warns C4005),
+   so the `#error` never fires and the check becomes vacuous.
+3. **Static** — the include's position relative to the first *real* module guard in every
+   public header (checking only "is it present" passes a version nested inside its own
+   `#if`, where the macro is not yet defined); no handwritten `uvcpp_config.h` under
+   `src/`; the packaged header byte-identical to the build tree's and agreeing with that
+   tree's exported `INTERFACE_COMPILE_DEFINITIONS`.
+
+It is **not** compared against `CMakeCache.txt`: OpenSSL/nghttp2/webapp are silently
+downgraded to OFF when their dependency is missing (`CMakeLists.txt:223,257,266,535` —
+plain `set()` calls, so the cache still reads ON). The export file holds the
+post-downgrade values, generated from the same literals as the header.
+
+Toolchains covered: `ubuntu` (gcc/ELF), `config-contract`'s `windows` leg (MSVC/PE — it
+needs `ilammy/msvc-dev-cmd` because `cl.exe` is not on the Windows runner's default
+PATH), and `mingw64` (MinGW/PE; that job gained `mingw-w64-x86_64-python` for this).
+
+**Known gap:** the chain cannot run on macOS — `package_release.py`'s `PLATFORMS` has no
+macOS key (`mingw-x64/arm64`, `msvc-x64/arm64`, `linux-x64/arm64` only). So the macro
+contract is never verified against a clang/macOS toolchain.
 
 ---
 
