@@ -199,7 +199,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
 **web 层不提供任何 query / cookie / form / URL 解码工具，`req.url` 就是原始请求目标
 （含 `?query`）。** 路由匹配时会把 query 剥掉再去比（`src/web/uvcpp_http_server.cpp:135-138`），
 但**解析 query 是 handler 自己的事** —— 这一层没有这个函数。要用就在 `webapp/` 的
-`web_parse_query()`（`src/webapp/uvcpp_web_util.h:166`）或者自己写一个。
+`web_parse_query()`（`src/webapp/uvcpp_web_util.h:179`）或者自己写一个。
 
 ### 流式与认领两条旁路
 

@@ -22,8 +22,8 @@ namespace uvcpp {
 /**
  * @brief 控制台输出的外观选项。
  *
- * 用显式构造函数而不是成员初始化器 —— C++11 下 NSDMI 会破坏聚合初始化，
- * `uvcpp_console_log_options{false, true}` 这种写法会编译不过。
+ * 用显式构造函数而不是聚合初始化：C++11 下**只要有用户声明的构造函数，这个类型就
+ * 不再是聚合体**，`uvcpp_console_log_options{false, true}` 这种写法编译不过。
  */
 struct uvcpp_console_log_options {
   bool color;           ///< 用 ANSI 颜色区分等级。**本字段默认 `true`**；最终上不上色

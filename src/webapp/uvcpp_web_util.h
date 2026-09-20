@@ -111,6 +111,11 @@ UVCPP_API std::string web_url_decode(const std::string& s, bool plus_as_space,
  * 这是最保守也最安全的做法。额外的 `keep` 参数用于放行某几个字符
  * （例如构造路径时想保留 `/`）。
  *
+ * @warning **`keep` 优先于 `plus_for_space`**：命中 `keep` 的字符**原样输出**，
+ *          不再走任何编码分支。所以 `keep = " "` 得到的是**裸空格**（既不是 `+`
+ *          也不是 `%20`），`keep = "+"` 得到裸 `+` —— 后者放进查询串里会被对端
+ *          解码回空格。放行集合里别出现空格与 `+`。
+ *
  * @param plus_for_space 空格编码成 `+` 还是 `%20`。查询串常用前者，
  *        路径/表单值用后者。
  */
@@ -132,7 +137,11 @@ UVCPP_API int web_hex_value(char c);
  * `plus_as_space=false`，查询串用 `true`，两者不能共用一次解码）。
  * 查询串不含前导 `?`；没有查询串时 `query` 为空。
  *
- * 同时剥离 `#fragment`：虽然 HTTP 请求目标里不该有它，但客户端库时常带。
+ * 拆分之前先做两种归一化：
+ *   - **绝对形式**（代理风格的 `GET http://host/path?q`）：先把 `scheme://authority`
+ *     整段剥掉，`path` 从第一个 `/` 起算；整串没有 `/` 时 `path` 就是 `/`。
+ *     不剥的话 authority 里的内容会混进路径（`http://x/../y` 之类）；
+ *   - 剥离 `#fragment`：虽然 HTTP 请求目标里不该有它，但客户端库时常带。
  */
 UVCPP_API void web_split_path_query(const std::string& raw_url,
                                     std::string& path, std::string& query);
@@ -162,6 +171,10 @@ UVCPP_API std::string web_collapse_slashes(const std::string& path);
  * 形如 `a=1&b&c=&=d` 的输入会被解析成：
  * `("a","1") ("b","") ("c","") ("","d")` —— 不丢信息是刻意的，
  * 由调用方决定要不要拒绝。
+ *
+ * **只按 `&` 切**：`;` 不是分隔符，`a=1;b=2` 会被解析成一个键为 `a`、值为
+ * `1;b=2` 的项（RFC 3986 只把 `&` 定为子分隔符，用 `;` 是会构成参数走私的
+ * 过时历史建议 —— 别为了"兼容"把它加回来）。
  */
 UVCPP_API std::vector<std::pair<std::string, std::string> > web_parse_query(
     const std::string& query);
@@ -227,8 +240,13 @@ UVCPP_API const std::string* web_find_cookie(
  *                   `SameSite=None` 会被自动补上 `Secure` —— 现代浏览器
  *                   要求两者同时出现，否则整条 cookie 被丢弃。
  *
- * 名字与值都会被校验并编码：值里的分号、逗号、空白会被百分号编码，
- * 避免使用者拼出能注入额外属性的 cookie。
+ * 名字与值都会被校验并编码：名字只允许 RFC 6265 的 token 字符（含非法字符直接返回
+ * 空串），值里的分号、逗号、空白会被百分号编码。
+ *
+ * @warning **`path` 与 `same_site` 是原样拼接的，不设防。** 传
+ *          `path = "/; Domain=evil.example"` 或 `same_site = "Lax; Domain=evil.example"`
+ *          进来，拼出的就是一条能注入额外属性的 `Set-Cookie`。这两个参数只接
+ *          **调用方自己写死的常量**；要放用户输入，请先按白名单自己校验。
  */
 UVCPP_API std::string web_build_cookie(
     const std::string& name, const std::string& value,

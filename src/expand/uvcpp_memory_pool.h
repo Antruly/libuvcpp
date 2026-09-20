@@ -300,6 +300,15 @@ struct memory_pool_stats {
     double cache_hit_rate = 0.0;
     uint64_t growth_count = 0;
 
+    /// @brief `(allocated_bytes - freed_bytes) / allocated_bytes`。
+    /// @warning **两个计数器口径不同，这个读数不是使用率。** `allocated_bytes` 只在
+    ///          **新建块**时累加，`freed_bytes` 却在**每次** `deallocate()` 时累加 ——
+    ///          缓存命中的分配不进前者、它的释放照样进后者。自由块一多就出现
+    ///          `freed_bytes > allocated_bytes`，而两个操作数都是 `uint64_t`，
+    ///          减法**回绕成天文数字**，比值于是是垃圾（或 `inf`）。
+    ///          要判"这个池现在占了多少"，用 `active_allocations` 配自己的块大小算，
+    ///          或者拿 `failed_allocations` 判有没有触到 `max_total_memory` ——
+    ///          池把额度记在一个**私有**的 `held_bytes_` 上，没有公开读法。
     double memory_usage_ratio() const {
         if (allocated_bytes == 0) return 0.0;
         return static_cast<double>(allocated_bytes - freed_bytes)

@@ -230,15 +230,42 @@ class UVCPP_API uvcpp_web_multipart {
    *
    * 超长/为空的 boundary 必须**拒绝**而不是截断：截断会让本端与对端对
    * "边界是什么"产生不同理解，那正是切错报文的起点。
+   *
+   * @warning **失败一次就不可挽回。** 不合法时内部把整个对象置成
+   *          `ERROR_STATE`（首错胜出），而**成功路径并不清除它** —— 失败之后
+   *          再传一个完全合法的 boundary 会返回 `true`，对象却仍然停在
+   *          `ERROR_STATE`，此后 `feed()` 一律返回最初那个错误码。光查返回值
+   *          查不出这一点：要么一次给对，要么换一个解析器对象。
    */
   bool set_boundary(const std::string& boundary);
 
+  /**
+   * @brief 部件头（每个 part 自己的头部块）字节上限。**默认 8 KiB。**
+   *
+   * @warning **0 在这里不是"不限"，是"全部拒绝"。** 另外四个上限都写成
+   *          「上限 > 0 && 实际 > 上限」，0 落在判断外等于关掉；这一条没有
+   *          那层守卫，0 会让任何非空部件头当场超限（`ERROR_HEADER_TOO_LONG`）。
+   */
   void set_max_part_header_bytes(size_t n);
+
+  /** @brief 文件部件数上限。**默认 32**。超限**拒绝**
+   *         （`ERROR_TOO_MANY_FILES`）。0 = 不限。 */
   void set_max_file_count(size_t n);
+
+  /** @brief 字段部件数上限。**默认 128**。超限**拒绝**
+   *         （`ERROR_TOO_MANY_FIELDS`）。0 = 不限。 */
   void set_max_field_count(size_t n);
-  /** @brief 0 = 不限。超限则**截断**该部件并置 truncated。 */
+
+  /** @brief 单个文件的字节上限，**默认 0 = 不限**。超限则**截断**该部件、置
+   *         `truncated`，并转入 SKIP 继续扫边界（不继续扫，后面所有部件都会
+   *         被这一块吃掉）。 */
   void set_max_file_size(uint64_t n);
-  /** @brief 0 = 不限。超限则**拒绝**（字段不截断 —— 半截的字段值是错的）。 */
+
+  /** @brief 单个字段的字节上限，**默认 0 = 不限**。超限则**拒绝**
+   *         （`ERROR_FIELD_TOO_LARGE`）—— 字段不截断：半截的字段值是错的。
+   *
+   *         文件截断、字段拒绝，这个不对称是故意的：被截断的文件仍是一份
+   *         "小一点的文件"，半截的字段值只是一个**错的**值。 */
   void set_max_field_size(uint64_t n);
 
   // -----------------------------------------------------------------------
@@ -250,6 +277,10 @@ class UVCPP_API uvcpp_web_multipart {
    *
    * 到达终边界之后（或进入 ERROR_STATE 之后）再喂是**无害的空操作**，
    * 返回值保持不变 —— 调用方不必在每次 feed 之前查状态。
+   *
+   * 注意"无害"只修饰返回值：`received()` 在终态下**照常累加**（累加发生在
+   * 状态判断之前）。它是「累计喂进来多少字节」的诚实计数器，终态停住会让
+   * 上层靠它算的"上传总长"变成错的。
    */
   uvcpp_web_multipart_result feed(const char* data, size_t len);
 

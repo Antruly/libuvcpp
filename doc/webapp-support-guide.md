@@ -156,9 +156,9 @@ void doc_query(const std::string& query) {
 }
 ```
 
-`web_sanitize_path()` 是**纯文本、不碰文件系统**（`src/webapp/uvcpp_web_util.h:299-302`），
+`web_sanitize_path()` 是**纯文本、不碰文件系统**（`src/webapp/uvcpp_web_util.h:317-320`），
 挡不住符号链接；`web_resolve_within_root()` 才真的去解析真实路径
-（`:354-368`，`TRAVERSAL` 对 403、`NOT_FOUND` 对 404）。只用第一个是不够的。
+（`:372-386`，`TRAVERSAL` 对 403、`NOT_FOUND` 对 404）。只用第一个是不够的。
 
 其余分组：
 
@@ -174,7 +174,7 @@ void doc_query(const std::string& query) {
 
 `web_path_options` 是这一族里**唯一**用对了构造方式的：
 `web_path_options(size_t max_length = 4096, size_t max_depth = 64, bool decode = true)`
-（`src/webapp/uvcpp_web_util.h:276-277` 带默认实参的 explicit 构造函数），所以
+（`src/webapp/uvcpp_web_util.h:294-295` 带默认实参的 explicit 构造函数），所以
 `web_path_options{1024}` 与 `web_path_options(4096, 64, false)` 两种写法都行。
 
 ---
@@ -199,7 +199,7 @@ void doc_mime_override() {
 }
 ```
 
-内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:438`，实现
+内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:456`，实现
 `src/webapp/uvcpp_web_util.cpp:979-982`），`builtin_size()` 也转调它
 （`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
@@ -405,10 +405,9 @@ void doc_console_sink() {
 uvcpp_console_log_options opt{false, true};
 ```
 
-`src/webapp/uvcpp_log_console.h:25-26` 的注释说"用显式构造函数而不是成员初始化器 …… 
-`uvcpp_console_log_options{false, true}` 这种写法会编译不过"。**这句话把自己说反了**：
-声明的构造函数是 `uvcpp_console_log_options();`（`:38`，**无参**），于是那个花括号
-写法恰恰**真的编不过** —— 实测 g++ 的原话是
+`src/webapp/uvcpp_log_console.h:25-26` 的注释现在写的是**真正的成因**：让花括号写法
+失效的是那个**用户声明的构造函数**（`uvcpp_console_log_options();`，`:38`），不是
+NSDMI —— "避开 NSDMI"并不能让花括号写法变得可用。实测 g++ 的原话是
 
 ```
 error: no matching function for call to
@@ -418,7 +417,7 @@ error: no matching function for call to
 正确写法是"先默认构造，再逐字段赋值"（§9 那段）。同类问题还有
 `src/webapp/uvcpp_web_app.h:151-154`：注释声称支持 `uvcpp_web_app_config cfg{8080}`，
 而声明在 `:274` 只有 `uvcpp_web_app_config();`。
-**对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:276-277`）是这一族里唯一写对的
+**对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:294-295`）是这一族里唯一写对的
 —— 它的构造函数带默认实参，所以花括号写法可用。
 
 ### 上不上色是两个条件
@@ -454,7 +453,7 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 
 ### `web_split_path_query()` 比头文件说的做得多
 
-`src/webapp/uvcpp_web_util.h:128-138` 只说"拆 path/query + 剥 `#fragment`"，实现还会**先剥掉
+`src/webapp/uvcpp_web_util.h:133-147` 只说"拆 path/query + 剥 `#fragment`"，实现还会**先剥掉
 绝对形式（代理风格）的 `http://host`**（`src/webapp/uvcpp_web_util.cpp:204-208`）——
 `GET http://x/../y HTTP/1.1` 这种请求目标。头文件没写这一条。
 
@@ -563,8 +562,8 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 设计：`SameSite=None` 会自动补 `Secure`（`:484-487`）。
 
 **`web_sanitize_filename()` 只能当元数据。** 它不保证是合法文件名（`*` `?` `"`
-照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:397-401`）；`max_len` 是**软**
-上限（设备名保护会让结果多一字节，`:393-395`）。
+照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:415-419`）；`max_len` 是**软**
+上限（设备名保护会让结果多一字节，`:411-413`）。
 
 **`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:252-282`）—— `;` 会被当成
 值的一部分。头 `:158-167` 没写分隔符。
@@ -580,11 +579,11 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   （全是自由函数）、**也没有 `std::string_view` 版本** —— 头 `:42-44` 解释了原因：
   C++11 没有，所以全部吃 `const std::string&`。
 - **`web_collapse_slashes()` 刻意不做**：不解码、不处理 `.` / `..`（与路由切段保持
-  一致，挡目录穿越要用 `web_sanitize_path()`，`src/webapp/uvcpp_web_util.h:149-152`）。
-- **`web_join_root()` 不做安全判断**（`src/webapp/uvcpp_web_util.h:324`），判断在
-  `web_is_within_root()`（`:329-339`，实现用"前缀 + 分隔符"而不是裸前缀比较）。
+  一致，挡目录穿越要用 `web_sanitize_path()`，`src/webapp/uvcpp_web_util.h:158-161`）。
+- **`web_join_root()` 不做安全判断**（`src/webapp/uvcpp_web_util.h:342`），判断在
+  `web_is_within_root()`（`:347-357`，实现用"前缀 + 分隔符"而不是裸前缀比较）。
 - **其他 `multipart/*` 子类型不支持**（`mixed` 等）：`web_multipart_boundary()` 返回
-  空串让调用方拒绝（`src/webapp/uvcpp_web_util.h:196-199`）。
+  空串让调用方拒绝（`src/webapp/uvcpp_web_util.h:209-212`）。
 - **multipart 只认 CRLF**（`src/webapp/uvcpp_web_multipart.h:69-73`）：裸 LF 在边界处不接受、
   在部件头里直接 400 —— 理由是请求走私。`[LWSP]` 上限 128 字节
   （`src/webapp/uvcpp_web_multipart.h:60-62`），超了明确失败而不是当 body。
