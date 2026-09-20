@@ -41,7 +41,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 |---|---|---|
 | `uvcpp_ssl_context` | `src/ssl/uvcpp_ssl_context.h:31` | **主类型**。一个上下文可以共享给多条连接（`:8-9`） |
 | `uvcpp_ssl` | `src/ssl/uvcpp_ssl.h:33` | 每连接包装（一个 `SSL*`），`uvcpp_tcp_client` 内部持有 |
-| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:84` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
+| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:93` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
 
 值类型在 `ssl/uvcpp_ssl_common.h`：`tls_version`、`tls_mode`、`tls_verify_mode`、
 `tls_ctx_status`、`tls_cert_info`。
@@ -229,7 +229,7 @@ bool has_alpn_select() const;
 其他要点：
 
 - 名单里**空串或长度超过 255 字节的项会被静默丢掉**，不报错；全部丢完导致编码为空时
-  `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:78-81`）。
+  `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:87-90`）。
 - 服务端**挑不中时返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal**
   （`src/ssl/uvcpp_ssl_context.h:118-120`）——写成 fatal 会让所有老客户端连握手都完不成。
 - `has_alpn_select()` 存在的理由是框架默认值与用户策略的冲突：`uvcpp_web_app` 默认要
@@ -244,7 +244,7 @@ bool has_alpn_select() const;
 
 | 落点 | 声明 | 所有权说明 |
 |---|---|---|
-| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:349` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:342-344`） |
+| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:353` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:346-348`） |
 | `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:189` | "生命周期必须覆盖**整条连接**"（`:185`） |
 | `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1725` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
@@ -288,7 +288,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **握手失败怎么知道：**
 
 - 服务端：握手成功才 `deliver_connection()`；失败**只记账**，`on_connection`
-  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:333-341`）。
+  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:337-345`）。
 - 客户端：`set_tls_ready_callback(cb)`，`status == 0` 成功；**只触发一次**，失败时在
   关闭回调**之前**触发（那时对象还活着）。
 - 握手期连接不在上层登记表里，`idle_timeout_ms` 覆盖不到——所以有
@@ -319,7 +319,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **握手完成前写必然失败**（`UV_ENOTCONN`），`SSL_write` 要求握手已完成。
 
 **同步/异步混用返回 `UV_ENOTSUP`**，而不是把明文写进一条已加密的连接
-（`src/web/uvcpp_http_client.h:216-225`）。
+（`src/web/uvcpp_http_client.h:221-230`）。
 
 **怎么确认过滤器真的接上了：** 在连接回调里断言 `is_tls_handshake_done()`，并对收到的
 字节按预期**明文**内容比对。测试就是这么做的——`tests/functional/web_ssl_server_func.cpp:131-135`
@@ -335,10 +335,11 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
   不了**，服务端也无法据 SNI 选证书。
 - **服务端默认没有信任库**，且**不强制**客户端证书，见 §5。
 - **没有 OCSP、没有 session ticket 配置、没有会话复用开关。**
-- **默认 TLS 版本的头注释与实现对不上**：枚举把 `TLS_1_3` 标成 `(default)`
-  （`src/ssl/uvcpp_ssl_common.h:30`），但构造函数默认值是 `tls_version::TLS_1_2`
-  （`src/ssl/uvcpp_ssl_context.h:37`），而它**只被当作下限**（`min_proto_version`），
-  上限不设。实际是"min = TLS1.2，max = OpenSSL 默认"。**建议显式传版本。**
+- **`tls_version` 的值是"下限"，不是"默认版本"。** 枚举（`src/ssl/uvcpp_ssl_common.h:30-35`）
+  的这些值都只被当作协议下界（头注释现在也这么写）；构造函数的默认值是
+  `tls_version::TLS_1_2`（`src/ssl/uvcpp_ssl_context.h:37`），它**只被送进
+  `SSL_CTX_set_min_proto_version()`**，上限不设。实际是"min = TLS1.2，max = OpenSSL 默认"。
+  **建议显式传版本。**
 - **线程安全没有承诺。** 上下文可以共享给多条连接（`SSL_CTX` 本身线程安全），但
   setter 的线程安全头里**没有说明**。按"配置阶段调完再 listen/connect"写。
 - **`uvcpp_ssl` 不是给使用者的门面。** 它的 `handshake()`/`feed_ciphertext()` 那一套

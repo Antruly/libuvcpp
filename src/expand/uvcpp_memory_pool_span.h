@@ -78,7 +78,13 @@ public:
     void free_mem(void* ptr);
 
     /**
-     * @brief Try to merge adjacent free spans (reserved for future).
+     * @brief Try to merge adjacent free spans.
+     * @warning **Not implemented** — the body is empty (see
+     *          `src/expand/uvcpp_memory_pool_span.cpp`), so calling this merges
+     *          nothing and changes no state. It exists as a placeholder, not as a
+     *          working compaction step; do not rely on fragmentation being reduced
+     *          after a call. (The similarly named `try_merge_spans()` on
+     *          `uvcpp_page_heap` is a different class and *is* implemented.)
      */
     void try_merge();
 

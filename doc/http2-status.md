@@ -15,7 +15,7 @@
 ### 1.1 会话层（`uvcpp_h2_session`）
 
 建在 `nghttp2` 上，**不含任何 socket、不含任何 libuv 调用** —— 收发就是一对
-字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:187,197`）。
+字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:191,197`）。
 所以这一层既不依赖 TLS 也不依赖事件循环，用例可以拿两个对象面对面地喂字节
 （`tests/functional/h2_session_func.cpp`）。
 
@@ -30,11 +30,11 @@
 
 ### 1.2 边界（这些是"本层自己做的"，不是 nghttp2 给的）
 
-- **收方向头部列表预算** `h2_header_budget`（`src/http2/uvcpp_h2_common.h:88`）。
+- **收方向头部列表预算** `h2_header_budget`（`src/http2/uvcpp_h2_common.h:93`）。
   已实测：nghttp2 会把我们宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 存进
   `local_settings`，但**接收路径从不累加、也没跟它比过** —— 所以本层自己按
   `namelen + valuelen + 32` 累加，越界立刻 RST(0x0b)。**这是唯一防线，不是第二道。**
-- **发方向头部块上限** `H2_MAX_SEND_HEADER_BLOCK`（`src/http2/uvcpp_h2_common.h:46`）。
+- **发方向头部块上限** `H2_MAX_SEND_HEADER_BLOCK`（`src/http2/uvcpp_h2_common.h:51`）。
   nghttp2 送帧前会拿 `nghttp2_hd_deflate_bound()` 估一个上界，超了它 `return
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
@@ -72,7 +72,7 @@
 
 ### 1.3 三个接入面
 
-- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:250`）
+- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:255`）
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:188`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
@@ -118,13 +118,13 @@
 - **流控没有自己的策略。** 全 `src/` 零命中 `consume_window` /
   `NO_AUTO_WINDOW_UPDATE` —— 窗口更新完全交给 nghttp2 的自动行为，
   本层既不暴露背压也不做自己的窗口管理。`H2_DEFAULT_INITIAL_WINDOW_SIZE`
-  （`src/http2/uvcpp_h2_common.h:35`）只有定义，别处不读它。
+  （`src/http2/uvcpp_h2_common.h:40`）只有定义，别处不读它。
 - **流状态机只用了一半。** `h2_stream_state` 有五格
-  （`src/http2/uvcpp_h2_common.h:133-139`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
-  `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**。
-- **`on_fatal` 的文档比实现多一类触发者。** `src/http2/uvcpp_h2_session.h:151` 说它有三类
-  触发者，其中"`want_read`/`want_write` 双双为假"那一类**永远不会发生**：
-  这两个函数（`src/http2/uvcpp_h2_session.h:299,301`）零调用方。
+  （`src/http2/uvcpp_h2_common.h:140-147`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
+  `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**（两个枚举值上也标了这一点）。
+- **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:168-180`）：
+  三类里的"`want_read`/`want_write` 双双为假"那一类**不可达** —— 这两个是公开成员
+  （`src/http2/uvcpp_h2_session.h:354,356`），但本层没有任何一处拿它们判定致命。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。

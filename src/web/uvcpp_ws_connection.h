@@ -60,6 +60,9 @@ enum class ws_role : int {
 
 class UVCPP_API uvcpp_ws_connection {
  public:
+  // 注意：这个宏展开出 `explicit uvcpp_ws_connection();` **和析构函数**。析构有定义，
+  // **默认构造没有** —— `.cpp` 里只定义了下面那个两参构造。所以 `uvcpp_ws_connection c;`
+  // 编得过、**链接不过**（LNK2019 / undefined reference）。本类只能按两参构造建。
   UVCPP_DEFINE_FUNC(uvcpp_ws_connection)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_ws_connection)
 

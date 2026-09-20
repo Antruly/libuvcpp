@@ -23,11 +23,15 @@ namespace uvcpp {
 // TLS protocol versions
 // =========================================================================
 
+/// 这些值是**协议下界**，不是「默认版本」—— 用哪个由 `uvcpp_ssl_context` 的构造参数
+/// 决定，那边的默认是 `TLS_1_2`（`src/ssl/uvcpp_ssl_context.h`）。选定后只往
+/// `SSL_CTX_set_min_proto_version()` 送（`src/ssl/uvcpp_ssl_context.cpp`），也就是
+/// 「不低于它」，实际协商出来的版本由对端与握手决定。
 enum class tls_version : uint8_t {
   TLS_1_0 = 0,   // Deprecated — insecure
   TLS_1_1 = 1,   // Deprecated — insecure
   TLS_1_2 = 2,   // Minimum recommended
-  TLS_1_3 = 3,   // Latest (default)
+  TLS_1_3 = 3,   // Latest
 };
 
 // =========================================================================
@@ -43,10 +47,15 @@ enum class tls_mode : uint8_t {
 // Certificate verification mode
 // =========================================================================
 
+/// @warning `PEER_STRICT` **目前与 `PEER` 完全等价**：`set_verify_mode()` 把两者都映射
+///          到同一个 `SSL_VERIFY_PEER` 位，主机名那一半**从未实现**（全仓没有一处
+///          `SSL_set1_host` / `X509_VERIFY_PARAM_set1_host`，也没有把 SNI 主机名递给
+///          校验的管道）。所以靠它**挡不住**「证书链可信、但签发给别的域名」的对端 ——
+///          需要这个保证的调用方得自己在握手后校验对端证书。
 enum class tls_verify_mode : uint8_t {
   NONE     = 0,  // Don't verify peer certificate
   PEER     = 1,  // Verify peer certificate
-  PEER_STRICT = 2,  // Verify peer + hostname
+  PEER_STRICT = 2,  // Verify peer + hostname（**主机名这一半尚未实现**，见上）
 };
 
 // =========================================================================

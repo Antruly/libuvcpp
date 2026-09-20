@@ -81,7 +81,11 @@ enum uvcpp_tcp_server_status : int {
  * @endcode
  *
  * Simple data checks and async writes are fine inline. Do NOT use
- * sync write_wait/read_wait inside any callback.
+ * sync write_wait/read_wait inside any callback: they block the loop thread, so one
+ * slow peer stalls *every* connection on it. Mind the trap — these take an optional
+ * completion callback, and **omitting it is precisely what makes them synchronous**
+ * (`uvcpp_tcp_client.h`: a null callback behaves like `write_wait(data, len, 30000)`).
+ * Inside a callback always pass one, as the example below does.
  *
  * Usage:
  * @code
@@ -92,7 +96,7 @@ enum uvcpp_tcp_server_status : int {
  *   server.set_read_callback([](uvcpp_tcp_client& c, const net_read_result& r) {
  *     if (r.is_data()) {
  *       // 收到数据（keep this fast!）
- *       c.write(r.data, r.size(), nullptr);   // 回显
+ *       c.write(r.data, r.size(), [](int) {});   // 回显；传回调才是异步，别传 nullptr
  *     } else if (r.event == net_read_event::PEER_CLOSED) {
  *       // 对端正常收工
  *     } else {

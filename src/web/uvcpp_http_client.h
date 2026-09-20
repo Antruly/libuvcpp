@@ -62,8 +62,13 @@ enum uvcpp_http_client_status : int {
   HTTP_CLIENT_SENDING   = 0x02,  ///< Request being sent
   HTTP_CLIENT_RECEIVING = 0x04,  ///< Response being received/parsed
   HTTP_CLIENT_COMPLETE  = 0x08,  ///< Response fully received
-  HTTP_CLIENT_CLOSING   = 0x10,  ///< Closing connection
-  HTTP_CLIENT_CLOSED    = 0x20,  ///< Connection closed
+  HTTP_CLIENT_CLOSING   = 0x10,  ///< Closing connection. **从不置位**：`set_status()` 只被
+                                 ///< CONNECTED / SENDING / RECEIVING / COMPLETE / ERROR
+                                 ///< 调用，全仓也没有第二处写 `status_` 的地方
+  HTTP_CLIENT_CLOSED    = 0x20,  ///< Connection closed. **从不置位** —— 于是
+                                 ///< `uvcpp_http_client.cpp:121` 那处 `!has_status(
+                                 ///< HTTP_CLIENT_CLOSED)` 恒为真（那里实际只判 `tcp_`）；
+                                 ///< `:580`、`:1306` 两处的注释也明写了「不置这个标志」
   HTTP_CLIENT_ERROR     = 0x40,  ///< An error occurred
 };
 

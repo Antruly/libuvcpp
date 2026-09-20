@@ -32,6 +32,11 @@ const uint32_t H2_DEFAULT_MAX_CONCURRENT_STREAMS = 100;
 const size_t H2_DEFAULT_MAX_BODY_BYTES = 64u * 1024u * 1024u;
 
 /// 初始流控窗口（每流）。
+/// @warning **零引用** —— 本库当前没有任何流控策略，没有代码读这个常量，也不会把它
+///          发进 `SETTINGS`。真正的每流窗口来自 `uvcpp_h2_session::init()` 的
+///          `initial_window_size` 参数（默认 `0`，表示**不发**这一项 `SETTINGS`，
+///          于是对端按 RFC 9113 的缺省值 65535 走）。这里保留它只是给调用方一个
+///          可以自己传进去的字面量，别以为改了它就会生效。
 const uint32_t H2_DEFAULT_INITIAL_WINDOW_SIZE = 65535u;
 
 /**
@@ -136,8 +141,9 @@ enum class h2_stream_state {
   OPEN,          ///< 请求头已收全，业务处理中（可能正在收 body）
   HEADERS_SENT,  ///< 流式响应：头部已发，body 还要靠 `submit_data` 一块块补
   SENT,          ///< 响应已一次提交完（HEADERS + 可能的 DATA 都交出去了）
-  CLOSED,        ///< 本端与对端都已结束
-  REJECTED,      ///< 我们在协议层拒了它（已发 RST_STREAM），业务层不该再看到
+  CLOSED,        ///< 本端与对端都已结束。**当前从不进入** —— 全仓没有一处给它赋值
+  REJECTED,      ///< 我们在协议层拒了它（已发 RST_STREAM），业务层不该再看到。
+                 ///< **当前从不进入** —— 全仓没有一处给它赋值
 };
 
 }  // namespace uvcpp

@@ -47,17 +47,17 @@
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-explicit uvcpp_h2_session(bool server_side);                      // src/http2/uvcpp_h2_session.h:183
+explicit uvcpp_h2_session(bool server_side);                      // src/http2/uvcpp_h2_session.h:187
 int init(const callbacks& cbs,
          size_t max_header_list_size = 64u * 1024u,
          uint32_t max_concurrent_streams = H2_DEFAULT_MAX_CONCURRENT_STREAMS,
-         uint32_t initial_window_size = 0);                       // src/http2/uvcpp_h2_session.h:197
-int recv(const char* data, size_t len);                           // src/http2/uvcpp_h2_session.h:213
-int drain(std::string& out);                                      // src/http2/uvcpp_h2_session.h:223
+         uint32_t initial_window_size = 0);                       // src/http2/uvcpp_h2_session.h:201
+int recv(const char* data, size_t len);                           // src/http2/uvcpp_h2_session.h:217
+int drain(std::string& out);                                      // src/http2/uvcpp_h2_session.h:227
 ```
 
 **服务端还是客户端由构造参数一次性决定，构造后改不了。** 也没有 `is_server()` 之类的读法
-（`src/http2/uvcpp_h2_session.h:183` 是唯一一处）—— 外部要问侧只能自己记。
+（`src/http2/uvcpp_h2_session.h:187` 是唯一一处）—— 外部要问侧只能自己记。
 `server_side` 影响三件事：伪头白名单（`src/http2/uvcpp_h2_session.cpp:300`）、
 常规头分流（`:431`）、body 收尾分派（`:508`）。
 
@@ -265,7 +265,7 @@ void doc_h2_server_wiring(uvcpp::uvcpp_tcp_client* tcp) {
 done)` → 最后一块 `end_stream = true`。三处要点：
 
 - **提交过 `end_stream` 之后这条流不再接受新的 `submit_data`**，再发就是协议违例
-  （`src/http2/uvcpp_h2_session.h:287`）；
+  （`src/http2/uvcpp_h2_session.h:291`）；
 - **每一块的 `done` 必须恰好跑一次**，流中途被 RST 或连接断了也会跑，参数是
   `UV_ECANCELED`（`src/http2/uvcpp_h2_connection.h:99-102`）；
 - **拆传输的正确顺序**是 `take_cancelled_dones(out)` → 销毁对象 → 在**自己的上下文
@@ -291,7 +291,7 @@ conn->flush();              // ← 少了这一句，请求就停在队列里
 `submit_request` 的三个同步失败码都是有保证的"什么都没发生"：
 `UV_EINVAL`（字段非法）、`UV_EMSGSIZE`（头部块超限）、`UV_ENOTCONN`
 （收到过对端 GOAWAY，或本端流号用尽）—— 没有流被建、没有字节被排队、
-没有回调会被叫（`src/http2/uvcpp_h2_session.h:328-337`）。
+没有回调会被叫（`src/http2/uvcpp_h2_session.h:332-341`）。
 
 ```cpp
 #include <cstdint>
@@ -319,7 +319,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 `tls_alpn_selected()`（`:263`）→ `start_h2()`（`:267` → `:1112`）→ 装回调（`:1114`）
 → `h2_->start(sc, cc)`（`:1148`）→ `send()` 分流到 `send_h2`（`:382`）。
 
-**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:380`、
+**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:385`、
 `src/web/uvcpp_http_server.h:190`）—— 低层的两条线都要显式打开，
 只有 `webapp/` 框架层是零配置自动协商。
 
@@ -360,7 +360,7 @@ HEADERS 自带 END_STREAM 的请求（也就是绝大多数 GET）**也会触发
 
 ## 8. 上限与旋钮
 
-`init()` 有三个参数，**默认值就是全部旋钮**（`src/http2/uvcpp_h2_session.h:197`）：
+`init()` 有三个参数，**默认值就是全部旋钮**（`src/http2/uvcpp_h2_session.h:201`）：
 
 | 旋钮 | 默认 | 含义 |
 |---|---|---|
@@ -369,12 +369,12 @@ HEADERS 自带 END_STREAM 的请求（也就是绝大多数 GET）**也会触发
 | `initial_window_size` | `0` | **0 = 这条 SETTINGS 不发** |
 
 **`max_header_list_size` 只是宣告出去的礼貌值** —— 收方向的强制由 `h2_header_budget`
-自己做（`src/http2/uvcpp_h2_common.h:90`）。头文件把这一点写明了，别以为设了就防住了。
+自己做（`src/http2/uvcpp_h2_common.h:95`）。头文件把这一点写明了，别以为设了就防住了。
 
 **`initial_window_size = 0` 不是"窗口为 0"**，是"这一条 SETTINGS 不 push 进去"
 （`src/http2/uvcpp_h2_session.cpp:708`）。于是实际用的是 nghttp2 的初值 65535 ——
 数值上与 `H2_DEFAULT_INITIAL_WINDOW_SIZE` 恰好相等，但**路径完全不同**，
-而那个常量全仓**零引用**（`src/http2/uvcpp_h2_common.h:35` 是它唯一出现的地方）。
+而那个常量全仓**零引用**（`src/http2/uvcpp_h2_common.h:40` 是它唯一出现的地方）。
 
 实际发出去的 SETTINGS（`src/http2/uvcpp_h2_session.cpp:703`）：
 `ENABLE_PUSH = 0`（我们不收也绝不发 PUSH_PROMISE）、`MAX_CONCURRENT_STREAMS`、
@@ -384,7 +384,7 @@ HEADERS 自带 END_STREAM 的请求（也就是绝大多数 GET）**也会触发
 
 | 项 | 值 | 位置 |
 |---|---|---|
-| 单个待发头部块 | 64 KiB（`H2_MAX_SEND_HEADER_BLOCK`） | `src/http2/uvcpp_h2_common.h:48`、设置点 `src/http2/uvcpp_h2_session.cpp:694`、自查 `:917` |
+| 单个待发头部块 | 64 KiB（`H2_MAX_SEND_HEADER_BLOCK`） | `src/http2/uvcpp_h2_common.h:53`、设置点 `src/http2/uvcpp_h2_session.cpp:694`、自查 `:917` |
 | 单流 body | 64 MiB（`H2_DEFAULT_MAX_BODY_BYTES`）→ RST | `src/http2/uvcpp_h2_common.h:32`、`src/http2/uvcpp_h2_session.cpp:522` |
 | `content-length` 荒谬值 | `> 1<<40` 判非法 | `src/http2/uvcpp_h2_session.cpp:386` |
 | 控制帧令牌桶 | burst 64、补充 32 个/秒 | `src/http2/uvcpp_h2_session.cpp:55-56`、`control_frame_ok()` `:165` |
@@ -394,16 +394,16 @@ HEADERS 自带 END_STREAM 的请求（也就是绝大多数 GET）**也会触发
 `src/web/uvcpp_http_server.h:868-871` 提到的那个 idle sweep 属于 **webapp 层**
 （默认 60 s），既不是 h1 服务器自带的，也不覆盖 h2 连接。
 
-对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:355`）、
+对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:359`）、
 `peer_goaway_received()` / `peer_goaway_error_code()` / `peer_goaway_last_stream_id()`
-（`:368` / `:370` / `:372`）、`goaway_code()`（`:390`）、`stream_count()`。
+（`:372` / `:374` / `:376`）、`goaway_code()`（`:394`）、`stream_count()`。
 
 ---
 
 ## 9. 错误处理
 
 **同步返回 `int`（0 成功）加回调带码，不用异常。** 唯一的例外是 `submit_request`：
-它返回**新流号**（正数）或负的错误码（`src/http2/uvcpp_h2_session.h:339`）。
+它返回**新流号**（正数）或负的错误码（`src/http2/uvcpp_h2_session.h:343`）。
 
 ### nghttp2 的错误码一律收紧成致命，不逐码判
 
@@ -417,7 +417,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:732
 }
 ```
 
-理由写在 `src/http2/uvcpp_h2_session.h:206-211`：`nghttp2_session_mem_recv2` 有若干返回值
+理由写在 `src/http2/uvcpp_h2_session.h:210-215`：`nghttp2_session_mem_recv2` 有若干返回值
 只表示"这条流有问题"，但 `-905`（CONTINUATION 过多）这种是**连接级**的，而它偏偏不在
 返回值上区分 —— 既不发 RST 也不发 GOAWAY。把"看起来像流级"的错误当流级处理，
 就会留下一条状态已经错乱的连接继续用。所以**负值 ⇒ 会话作废**。
@@ -464,7 +464,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:732
 
 **回调栈里不许 `drain()`。** 那等于在 nghttp2 自己的栈里重入 `mem_send`，
 实测会在"回调里把 RST_STREAM 冲出去"那条路上读一块 nghttp2 刚释放的
-`nghttp2_stream`（`src/http2/uvcpp_h2_session.h:225`）。用 `in_nghttp2()` 判自己是不是
+`nghttp2_stream`（`src/http2/uvcpp_h2_session.h:229`）。用 `in_nghttp2()` 判自己是不是
 在回调里；推迟到 `recv()` 返回之后再冲即可，连接层本来就在返回之后冲一次。
 **注意 `flush()` 在回调里调用是安全的** —— 它自己会推迟，排队的字节一个都不会丢
 （`src/http2/uvcpp_h2_connection.h:104-108`）。
@@ -475,11 +475,11 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:732
 
 **收到对端 GOAWAY 之后不要拆这条连接，要另起一条。** GOAWAY 关的是"新流"，
 不是"连接" —— 已有的流照跑完，新流会被 `submit_request` 拦成 `UV_ENOTCONN`
-（`src/http2/uvcpp_h2_session.h:357`）。
+（`src/http2/uvcpp_h2_session.h:361`）。
 
 **每一块流式 body 的 `done` 必须恰好跑一次。** 传输层要在断开时整体作废
 （`cancel_pending_out()` + `take_cancelled_dones()`），少了这一步，
-框架的流式响应会等一个永远不来的回调（`src/http2/uvcpp_h2_session.h:322`）。
+框架的流式响应会等一个永远不来的回调（`src/http2/uvcpp_h2_session.h:326`）。
 
 **`run_completed()` 只在没有写在飞的时候调**，而且 `done` 跑起来之后**一个字都不能
 写成员** —— `done` 跑的是用户代码，它可能再补一笔写

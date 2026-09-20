@@ -168,9 +168,13 @@ class UVCPP_API uvcpp_h2_session {
     /**
      * @brief 连接级致命错误：本层已经无法继续处理这条连接。
      *
-     * 触发者有三类：`mem_recv` 返回负值（含 `-905` 过量的 CONTINUATION、
-     * `-902` FLOODED）、nghttp2 判定会话必须终止、以及 `want_read`/`want_write`
-     * 双双为假。**收到它就只有一个正确动作：发 GOAWAY（能发就发）然后关连接。**
+     * 当前实际触发它的只有两类：`mem_recv` 返回负值（含 `-905` 过量的
+     * CONTINUATION、`-902` FLOODED），以及 nghttp2 判定会话必须终止。
+     *
+     * `want_read`/`want_write` **双双为假**这一类**不可达** —— 那两个是公开成员，
+     * 但本层没有任何一处拿它们判定致命（`src/http2/uvcpp_h2_session.cpp` 里三处
+     * 触发点都不看它们），别照这条去构造用例。**收到它就只有一个正确动作：
+     * 发 GOAWAY（能发就发）然后关连接。**
      *
      * @param nghttp2_error 原始的负值错误码，直接透传便于日志定位。
      */

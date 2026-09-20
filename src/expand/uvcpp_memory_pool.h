@@ -183,7 +183,8 @@ struct memory_pool_config {
     /// 特大块大小（64KB - 256KB），默认262144B
     size_t extra_large_block_size = EXTRA_LARGE_BLOCK_SIZE;
 
-    /// 最大总内存限制（0 = 无限制），单位：字节
+    /// 最大总内存限制（0 = 无限制），单位：字节。
+    /// @warning **当前不生效** —— 分配路径不读这个字段，设了也不会因此被拒。
     size_t max_total_memory = 0;
 
     /// @brief 获取指定类型对应的块大小
@@ -424,7 +425,10 @@ private:
 // ============================================================
 
 /// @brief 线程本地缓存结构
-/// @note 单线程使用，不需要任何锁，析构时自动将缓存归还到全局池
+/// @note 单线程使用，不需要任何锁。析构时**会**把缓存归还全局池 —— 但前提是这个缓存
+///       被 `uvcpp_memory_pool::init_thread_cache()` 配过释放回调。默认构造的缓存
+///       `pool_ptr_`/`release_func_` 都是空，`release_all()` 第一句就返回，挂在链上的
+///       块随之**泄漏**（不报错、不计数、`detect_leaks()` 也看不出来）。
 struct thread_local_cache {
     // 最小块缓存（<= 64B）
     pool_block_header* tiny_head = nullptr;
@@ -489,7 +493,9 @@ public:
     thread_local_cache(void* pool, release_func_type func)
         : pool_ptr_(pool), release_func_(func) {}
 
-    /// @brief 析构函数 - 自动将缓存的块释放到全局池
+    /// @brief 析构函数 - 归还缓存的块到全局池
+    /// @warning 「归还」只在**配过释放回调**时发生（见 @ref set_release_func）。
+    ///          默认构造的缓存回调为空，`release_all()` 直接返回 —— 挂着的块**泄漏**。
     ~thread_local_cache() {
         release_all();
     }
@@ -663,7 +669,12 @@ private:
     }
 
     /// @brief 将块归还到缓存
-    /// @return true=放入本地缓存，false=满了放到全局池
+    /// @return true=已接手（放进本地缓存，或类型不归缓存管），false=缓存满了，请调用方放全局池
+    /// @warning **`true` 有两种含义，第二种是「丢掉了」**：类型索引 `>= 7`（`SUPER`，
+    ///          >256 KiB）时本函数先把 `next` 置空、再直接 `return true`，块**不挂到任何
+    ///          链上**；而唯一调用方 `deallocate()` 见 `true` 就不去放全局池 ⇒ 这块内存
+    ///          **再也找不回来**。它同时照常记一次「已释放」，所以 `stats()` 与
+    ///          `detect_leaks()` 都显示正常。调用方不能把 `true` 当「已安全接管」。
     inline bool push(pool_block_header* block) {
         if (!block) return true;
 
@@ -795,6 +806,10 @@ public:
     bool init();
     bool init(const memory_pool_config& config);
     void shutdown();
+    /// @brief 把**统计计数**清零。
+    /// @warning 名字与行为不符：当前实现与 `reset_stats()` 逐行相同（只差函数名），
+    ///          既不释放也不重排池里的块 —— 调用它不会归还一个字节。要真回收用
+    ///          `shutdown()`（或 `release_thread_cache()` 推回本线程缓存）。
     void reset();
     void warmup();
     bool is_initialized() const {
@@ -806,6 +821,11 @@ public:
     // ============================================================
 
     void* allocate(size_t size);
+    /// @brief 申请 `size` 字节，并把 `size` 向上凑整到 `align` 的倍数。
+    /// @warning **返回的指针不保证按 `align` 对齐** —— `align` 只参与凑整，真正的
+    ///          对齐由 `config_.align` 决定（默认 `DEFAULT_MEMORY_ALIGNMENT = 16`）。
+    ///          传 `align = 64` 拿到的仍是 16 对齐的指针（`tests/expand/memory_pool_test.cpp`
+    ///          里有断言钉着这个行为）。要真按 `align` 对齐，得自己配 `config_.align`。
     void* allocate_aligned(size_t size, size_t align);
     void deallocate(void* ptr);
 

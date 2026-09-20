@@ -64,7 +64,7 @@
 
 **三、`web/` 有 h2，但入口只有两条。** 服务端 `set_http2_enabled(true)`
 （`src/web/uvcpp_http_server.h:190`）加 TLS+ALPN，客户端
-`set_http2_enabled(true)`（`src/web/uvcpp_http_client.h:380`）。
+`set_http2_enabled(true)`（`src/web/uvcpp_http_client.h:385`）。
 两条都**默认关**；只有 `webapp/` 框架层默认开、零配置自动协商。
 **不做 h2c** —— 明文升级在 `src/` 里零实现。
 
@@ -87,7 +87,7 @@
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
 （`tests/functional/web_ssl_h2_client_func.cpp:185`）。握手超时归
-`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:445`）。
+`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:449`）。
 
 ---
 
@@ -128,7 +128,7 @@ int main() {
 
 **`uvcpp_http_server` 的公开 API 里没有 `close()`。** 唯一能"关服"的是 `stop()`
 （`:385`），而它 = `tcp_server_->stop()`：**只关监听句柄，不动已建立的连接**
-（`src/net/uvcpp_tcp_server.h:186-199`）。已经在处理的请求照跑。
+（`src/net/uvcpp_tcp_server.h:190-203`）。已经在处理的请求照跑。
 
 ```cpp
 #include <net/uvcpp_tcp_server.h>
@@ -441,8 +441,8 @@ int doc_client_async() {
 ```
 
 `send` / `get` / `post` 的回调签名逐字是
-`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:157-172`）。
-交付的 `resp` 是成员 `pending_resp_`（`:355`）的 const 引用 —— **存到下次 `send()`
+`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:162-177`）。
+交付的 `resp` 是成员 `pending_resp_`（`:360`）的 const 引用 —— **存到下次 `send()`
 就被覆写**。
 
 **异步路径没有超时，`connect()` 也不设**（`src/web/uvcpp_http_client.cpp:49-53`）。
@@ -452,7 +452,7 @@ int doc_client_async() {
 "对端在响应收完前断开"时 `send()` 的回调永远不来。
 
 **在响应回调里 `delete` 客户端是预期的用法。** 所有闭包都捕一个 `alive_token_`
-弱引用（`src/web/uvcpp_http_client.h:338-349`），析构第一件事就 reset
+弱引用（`src/web/uvcpp_http_client.h:343-354`），析构第一件事就 reset
 （`.cpp:69`）—— 你不需要为它做任何额外的事。
 
 ### 同步
@@ -497,7 +497,7 @@ int doc_client_sync() {
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 两处都被 `#ifdef _WIN32` 包着
 （`src/web/uvcpp_http_client.cpp:967-971`、`:1018-1022`），POSIX 上**不设**，
 `send_wait()` / `send_wait_plain()` 在 Linux/macOS 上可以无限阻塞。头文件现在把这个
-缺口写在参数说明里（`src/web/uvcpp_http_client.h:126-128`、`:142-146`），
+缺口写在参数说明里（`src/web/uvcpp_http_client.h:131-133`、`:147-151`），
 不再让读者以为有超时兜底。
 
 **四、阻塞路径读不到任何字节时返回 0，而 `resp` 是默认的 200 OK。**
@@ -512,7 +512,7 @@ int doc_client_sync() {
 `redirect|30[1238]` 零命中 —— 3xx 只是一个状态码交给你。
 
 **压缩默认关，且门槛改不了。** `set_compression_enabled(true)`
-（`src/web/uvcpp_http_client.h:201-206`）之后请求会补
+（`src/web/uvcpp_http_client.h:206-211`）之后请求会补
 `accept-encoding: gzip, deflate`、响应收全后自动解压；但门槛硬编码
 `compress_min_body_ = 1024`（`h:389`），**客户端没有 `set_compress_min_body_size()`**。
 于是 **< 1024 字节的 gzip 响应不会被解压，`content-encoding: gzip` 也照样留着** ——
