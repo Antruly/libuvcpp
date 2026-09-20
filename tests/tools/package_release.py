@@ -21,6 +21,7 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -392,6 +393,24 @@ def main():
 
     tree = os.path.abspath(args.tree)
     repo = os.path.abspath(args.repo)
+
+    # ---- 发布前校验：README 顶上那几个版本号必须是**正在出的这一版** ----
+    # 放在建 stage 之前：README 是 `shutil.copy2` 原样进包的，没有任何一步会看
+    # 一眼里面的版本号 —— 于是切 1.1.34 时会产出 `uvcpp-1.1.34-<platform>.zip`
+    # 里装着一份自称 1.1.0 的 README。与 `_header_version()` 同一个道理：
+    # 一个名字说谎的包比不出包更坏，所以这里也是**停**，不是警告。
+    #
+    # 比的是 `args.version` 而不是头文件版本：`--version` 能覆盖头文件，那时
+    # "正在出的那一版"就是命令行给的那个。
+    rc = subprocess.call([sys.executable,
+                          os.path.join(repo, "tests", "tools",
+                                       "check_doc_versions.py"),
+                          "--root", repo, "--expect", args.version])
+    if rc != 0:
+        print("\n**README 的版本号与要出的版本（%s）不一致，停在这里** —— "
+              "修好上面那几条红再出包。" % args.version)
+        return 2
+
     spec = PLATFORMS[args.platform]
     name = "libuvcpp-%s-%s" % (args.version, args.platform)
     stage = os.path.join(os.path.abspath(args.out), name)
