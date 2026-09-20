@@ -23,10 +23,9 @@
   multipart 的，**住在 `uvcpp_web_util.h` 里** —— `uvcpp_web_multipart.h` 不含它
 - 不需要 OpenSSL 头：`webapp/` 的公开头一律前置声明 + PIMPL
 
-> 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一层没做"、或者
-> **头注释与实现不一致**的地方都明确标出来 —— 后者是这份文档里最值得看的部分。
-> 这一批类型的注释里，**契约类**（内存上界、行尾必须 CRLF、`start()` 不同步回调）
-> 都准；**默认值与构造方式**那两类普遍缺项或写错，默认值请以 `.cpp` 为准。
+> 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一层没做"的地方都明确
+> 标出来。**头文件里的契约与默认值也已经对着实现校正过一轮** —— 所以下面给的是
+> 当前的行为，不是"注释说 A、实现是 B"的对照表；要确认某一条，头文件本身就是依据。
 
 ---
 
@@ -276,7 +275,7 @@ void doc_multipart_feed(const std::string& content_type) {
 `uvcpp_web_file_transfer` 把文件的 `[first, last]`（**闭区间**）分片读出来交给
 sink，用有界滑动窗口把静态下发的峰值内存从 2N 降到
 `high_water + 2*slice`（默认 ≈ 1.5 MiB，**与文件大小无关**，
-`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:324`）。
+`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:335`）。
 
 ```cpp
 #include <webapp/uvcpp_web_file.h>
@@ -489,7 +488,8 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 
 - `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:165`）。
 - `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:116-123`）。
-- `uvcpp_web_context::run()` **只存链的指针**（`:323-329`）：那张
+- `uvcpp_web_context::run()` **只存链的指针**
+  （`src/webapp/uvcpp_web_context.h:329`、`:411`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
   **别传一个临时 vector**。
 - `uvcpp_web_connection_registry::find()` 返回内部 `std::map` 里的指针
@@ -529,21 +529,27 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 
 **`feed()` 在终态后是空操作，但 `received()` 照常累加。**
 `src/webapp/uvcpp_web_multipart.cpp:648` 那句 `received_ += len` 在终态判断**之前**。
-头 `:248-254` 只说返回值保持不变。上层若用 `received()` 判上传总长，这一点必须知道。
+头里那句"无害"只修饰返回值（`src/webapp/uvcpp_web_multipart.h:281-283`）。上层若用
+`received()` 判上传总长，这一点必须知道。
 
 **`set_stop_at_eof(true)` 时 `last` 要传 `UINT64_MAX - 1`，不是 `UINT64_MAX`。**
 后者 `remain = last_ - offset_ + 1u` 在第一个切片上就溢出成 0，于是当场收尾、
-一个字节都不读（`src/webapp/uvcpp_web_file.h:210-212`）。
+一个字节都不读（`src/webapp/uvcpp_web_file.h:218-220`）。
 
-**所有 setter 都在 `start()` 之前调。** `set_stop_at_eof` 头里写了"必须在 `start()`
-之前设"（`src/webapp/uvcpp_web_file.h:214-215`）但 setter 无守卫；`set_slice_bytes()` 更危险
-—— 它内部 `slice_buf_.resize()`（`src/webapp/uvcpp_web_file.cpp:101`），在途读期间调用会让
-`uv_fs_read` 写进已释放的缓冲。
+**只有 `set_slice_bytes()` 是"必须在 `start()` 之前调"。** 它内部会
+`slice_buf_.resize()`（`src/webapp/uvcpp_web_file.cpp:101`），而 `submit_read()` 把
+`&slice_buf_[0]` 交给 libuv 当接收目标 —— 在途读期间调它，扩容会重新分配那块缓冲，
+那一笔 `uv_fs_read` 就写进**已释放**的内存。**两个 setter 都没有运行时守卫**，也不改
+返回值，顺序错了查不出来。
+
+`set_stop_at_eof` 没有这条限制（`src/webapp/uvcpp_web_file.h:222-226`）：全类只有一个
+读取点，就是"早于 `[first, last]` 撞上 EOF"的那一刻，在那之前设上都算数。提前设是
+习惯，不是要求 —— 那一刻何时到取决于文件实际多长。
 
 **`cancel()` 在"因背压停读"这一支上不能省。** 那时**没有任何 fs 操作在途**，
 `cancel()` 必须自己推进状态机，否则 `on_done` 永远不来、fd 一直开着
 （`src/webapp/uvcpp_web_file.cpp:197-203`）。`start()` 之前 `cancel()` 是空操作且**不触发
-`on_done`**（`src/webapp/uvcpp_web_file.h:251-254`）。
+`on_done`**（`src/webapp/uvcpp_web_file.h:262-265`）。
 
 **`backlog()` 是唯一的背压信号。** 恒返回 0 的 sink 只是让背压失效，
 窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:126-131`）—— 允许，但不是有界的了。

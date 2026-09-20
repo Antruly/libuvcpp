@@ -188,7 +188,15 @@ class UVCPP_API uvcpp_web_file_transfer
   uvcpp_web_file_transfer(const uvcpp_web_file_transfer&) = delete;
   uvcpp_web_file_transfer& operator=(const uvcpp_web_file_transfer&) = delete;
 
-  /// 切片大小；0 表示用默认值。
+  /// 切片大小；0 表示用默认值（256 KiB）。
+  ///
+  /// @warning **必须在 `start()` 之前调。** 这个 setter 会 `resize()` 那块切片缓冲，
+  ///          而每一笔在途的 `uv_fs_read` 都是**写进这块缓冲**的 —— `submit_read()`
+  ///          把 `&slice_buf_[0]` 交给 libuv 当接收目标。中途调它，扩容会重新分配
+  ///          ⇒ 那一笔写落在**已经释放**的内存上；缩容倒不会越界（`submit_read()`
+  ///          里那道 `want <= slice_buf_.size()` 的夹取挡着），但那是纵深防御，
+  ///          不是"可以中途调"的许可。构造函数里那句"永不重分配"说的就是
+  ///          `start()` 之后。
   void set_slice_bytes(size_t n);
   /// 高水位；0 表示用默认值。
   void set_high_water_bytes(size_t n);
@@ -211,8 +219,11 @@ class UVCPP_API uvcpp_web_file_transfer
    * —— `submit_read()` 里的 `remain = last_ - offset_ + 1u` 在后者的第一个
    * 切片上就溢出成 0，于是当场收尾、一个字节都不读。
    *
-   * **必须在 `start()` 之前设** —— 状态机一开始跑，这个标志就只是给已经
-   * 提交出去的那些读当判据用了。
+   * **建议在 `start()` 之前设**，但它并不是"只能在 `start()` 之前设"：这个标志
+   * 全类只有**一个读取点** —— **早于 `[first, last]` 就撞上 EOF 的那一刻**
+   * （`nread == 0` 那一支），在此之前设上都算数。在途的读不会去读它，`start()`
+   * 也不会。之所以仍建议提前设，是因为那一刻什么时候到取决于文件实际多长，
+   * 中途设等于把结果交给时序。
    */
   void set_stop_at_eof(bool on);
   bool stop_at_eof() const;
