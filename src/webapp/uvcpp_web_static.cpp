@@ -959,8 +959,34 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     resp.send_file_range(j->fs_path, static_cast<uint64_t>(first),
                          static_cast<uint64_t>(last));
   } else if (j->data) {
-    resp.body(j->data->data() + static_cast<size_t>(first),
-              static_cast<size_t>(count), std::string());
+    // **整份文件走共享**：`j->data` 本来就是一份 `shared_ptr<std::string>`，
+    // 把引用递给响应体 = 一次引用计数加一，**一个字节都不拷**。
+    //
+    // 这一份拷贝原先是真的白付：命中压缩变体缓存时，`uvcpp_http_server` 拿到
+    // 响应后下一句就是 `resp.body.clear()` + 换成压缩产物（见那边命中那一支），
+    // 中间没有任何一处读过这份拷贝。
+    //
+    // 为什么不是 `body_move()`：那份内容归**静态层的 LRU** 所有，之后还要靠它
+    // 服务重复请求。move 会把条目掏空，等于每次缓存命中都要重读一次盘 —— 那是
+    // 用一次拷贝换一次磁盘 IO，方向反了。
+    //
+    // 为什么 Range 不能共享：`partial` 发的是文件中间的一段，而共享视图指的是
+    // **整份**内容，共享出去就会把整个文件当切片发（头还声明着那一段）。这里
+    // 保持原来的拷贝语义。
+    //
+    // 长度对不上也回退到拷贝：一旦 `j->data` 比 `j->size` 短，共享会让
+    // `content-length` 声明得比实际发出去的字节多 —— "少发一段"会变成"对端一直
+    // 等"，宁可多拷这一次。
+    const bool share_whole =
+        !partial && j->data->size() == static_cast<size_t>(j->size);
+    if (share_whole) {
+      // 引用递出去之后，这份内容由**响应**（以及写出队列）一起保着 ——
+      // 静态层的 LRU 此刻把它淘汰掉，也不会让响应手里的指针悬空。
+      resp.body_share(j->data);
+    } else {
+      resp.body(j->data->data() + static_cast<size_t>(first),
+                static_cast<size_t>(count), std::string());
+    }
 
     // 压缩变体缓存的键（见 `uvcpp_http_response::cache_tag`）。
     //

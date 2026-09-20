@@ -39,6 +39,35 @@ uvcpp_buf &uvcpp_buf::operator=(const uvcpp_buf &bf) {
   return *this;
 }
 
+// 移动构造/赋值（见头文件里"必须显式写"那一段）。
+//
+// 三个成员是一套状态，必须一起搬；搬完把源**归零**——尤其是 `capacity_`：
+// 只搬 buf 不搬容量的话源会变成"有指针、容量 0"的外部视图形状，而它明明拥有
+// 那块内存，之后既不会复用也会被 free_own 释放一次 —— 接收方那次释放就成了
+// 二次释放。共享手柄也要搬走（不是拷一份）：这里要的是"这块字节现在归你了"。
+uvcpp_buf::uvcpp_buf(uvcpp_buf &&obj) noexcept : uvcpp_buf() {
+  this->buf       = obj.buf;
+  this->capacity_ = obj.capacity_;
+  this->shared_   = ::std::move(obj.shared_);
+  obj.buf.base    = nullptr;
+  obj.buf.len     = 0;
+  obj.capacity_   = 0;
+}
+
+uvcpp_buf &uvcpp_buf::operator=(uvcpp_buf &&obj) noexcept {
+  if (this == &obj) {
+    return *this;
+  }
+  this->free_own();
+  this->buf       = obj.buf;
+  this->capacity_ = obj.capacity_;
+  this->shared_   = ::std::move(obj.shared_);
+  obj.buf.base    = nullptr;
+  obj.buf.len     = 0;
+  obj.capacity_   = 0;
+  return *this;
+}
+
 uvcpp_buf::uvcpp_buf(const char *bf, size_t sz) : uvcpp_buf() {
   if (sz > 0) {
     if (bf == nullptr) {
@@ -152,6 +181,9 @@ void uvcpp_buf::set_zero() {
     throw std::logic_error("Buffer state inconsistency: null pointer with non-zero length");
   }
   if (this->buf.base != nullptr && this->buf.len > 0) {
+    // 这一支是直接 memset 的、不经过 resize()，所以物化得自己来 ——
+    // 少了这一句，set_zero() 会把别人（可能只读）的共享串清零。
+    this->materialize();
     memset(this->buf.base, 0, this->buf.len);
   }
 }
@@ -163,13 +195,61 @@ void uvcpp_buf::free_own() {
   this->buf.base = nullptr;
   this->buf.len = 0;
   this->capacity_ = 0;
+  // 共享视图那条路没有块可 free（capacity_ 恒为 0），但**引用要放掉** ——
+  // 漏了这一句，引用计数就只涨不落，那份缓冲再也回收不了。
+  this->shared_.reset();
+}
+
+void uvcpp_buf::materialize() const {
+  if (this->shared_ == nullptr) {
+    return;
+  }
+  const size_t n = this->buf.len;
+  char *p = nullptr;
+  if (n > 0) {
+    p = static_cast<char *>(uvcpp_alloc_bytes(n));
+    if (p == nullptr) {
+      throw std::bad_alloc();
+    }
+    // **先拷、后放引用**：buf.base 指向的就是 *shared_ 的内容，先把引用放掉
+    // 就可能把那个 string 析构掉，接着这一句 memcpy 读的就是已释放的内存
+    // （只在"本对象是最后一份引用"时发生，所以它同时是"偶尔崩"和"偶尔读脏"）。
+    memcpy(p, this->buf.base, n);
+  }
+  this->shared_.reset();
+  this->buf.base = p;
+  this->buf.len = n;
+  this->capacity_ = n;
+}
+
+void uvcpp_buf::share(::std::shared_ptr<const ::std::string> src) {
+  this->free_own();  // 旧的块 + 旧的共享引用一起放掉，buf 归零
+  if (src == nullptr || src->empty()) {
+    return;  // 空共享与 clear() 之后的状态一致
+  }
+  this->shared_ = ::std::move(src);
+  // 只读地指过去：capacity_ 留 0，于是它按"外部视图"被对待 ——
+  // 不能 free、不能就地写，写操作必须先 materialize()。
+  this->buf.base = const_cast<char *>(this->shared_->data());
+  this->buf.len = this->shared_->size();
+  this->capacity_ = 0;
+}
+
+bool uvcpp_buf::is_shared() const { return this->shared_ != nullptr; }
+
+::std::shared_ptr<const ::std::string> uvcpp_buf::shared_ref() const {
+  return this->shared_;
 }
 
 void uvcpp_buf::resize(size_t sz) {
   if (sz == 0) {
     this->free_own();
     return;
-  } else if (this->buf.len == sz) {
+  }
+  // 共享视图先物化成自有的块：resize 的调用方拿到的必然是一块可写内存。
+  // 不放在 sz == 0 那一支之前是因为那一支根本不要写（free_own 自己会放引用）。
+  this->materialize();
+  if (this->buf.len == sz) {
     return;
   }
 
@@ -232,11 +312,19 @@ void uvcpp_buf::set_data(const char *bf, size_t sz) {
     this->capacity_ = 0;
 }
 
-char *uvcpp_buf::get_data() const { return this->buf.base; }
+char *uvcpp_buf::get_data() const {
+  // 交回可写指针，所以共享视图必须先物化 —— 否则调用方写的是别人（可能只读）
+  // 的内存。不是共享视图时这是空操作，热路径一分钱不付。
+  this->materialize();
+  return this->buf.base;
+}
 
 const char *uvcpp_buf::get_const_data() const { return this->buf.base; }
 
-unsigned char *uvcpp_buf::get_udata() const { return (unsigned char *)this->buf.base; }
+unsigned char *uvcpp_buf::get_udata() const {
+  this->materialize();  // 同 get_data()：可写指针
+  return (unsigned char *)this->buf.base;
+}
 
 const unsigned char *uvcpp_buf::get_const_udata() const {
   return (unsigned char *)this->buf.base;
@@ -262,6 +350,10 @@ void uvcpp_buf::clone(const uvcpp_buf &srcBuf) {
 }
 
 uv_buf_t *uvcpp_buf::out_uv_buf() {
+  // 这条入口把块**连同所有权**交出去，而共享视图的所有权在一份 shared_ptr 上
+  // —— 它没法通过裸 uv_buf_t 转移（接手方拿到的就是一个要自己 free 的指针）。
+  // 所以先物化成自有的块，交出去的才真的是"这块归你了"。
+  this->materialize();
   uv_buf_t *bf = uvcpp_alloc<uv_buf_t>();
   bf->base = buf.base;
   bf->len = buf.len;
@@ -327,6 +419,10 @@ void uvcpp_buf::append_data(const char *bf, size_t sz) {
 
 void uvcpp_buf::move_buf(uvcpp_buf &src_buf) {
   this->free_own();
+  // 共享视图的**引用**也要跟着块一起走，和 capacity_ 同理：留在源上，
+  // 接手方就只是拿到了一个指向"别人的 string"的裸指针，源一旦被析构或
+  // 被改写，这边立刻悬空。
+  this->shared_ = ::std::move(src_buf.shared_);
   this->buf.base = src_buf.buf.base;
   this->buf.len = src_buf.buf.len;
   // 容量跟着块一起走：留在源上会让它在下次 append 时就地写进已经不属于它的块。

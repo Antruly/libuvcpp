@@ -367,6 +367,36 @@ class UVCPP_API uvcpp_tcp_client {
             std::function<void(int)> cb = nullptr);
 
   /**
+   * @brief 头 + 体两块分开写（`uv_write` 的 `nbufs = 2`），体那块不拷。
+   *
+   * 与 `write(const char*, size_t, cb)` 的差别只有一个：那一支要求调用方先把
+   * "头部 + 体"合并成一条，而合并那一步会把体整份拷一遍。这里体是**第二块**，
+   * 一个字节都不拷；头仍然照旧拷进自有块（几百字节量级，是这条路上剩下的唯一
+   * 一份拷贝）。
+   *
+   * **不走 `uv_try_write` 快路径**，这是有意的：快路径存在的唯一理由是那一支
+   * 已经拷了一份、所以"已经出去的前缀不必再拷"能省下一次 memcpy。这条路上体
+   * 根本没有拷贝，试发省不下任何东西，只会平白多一次系统调用。
+   *
+   * `body` 的内容**被消费**，与 `write(uvcpp_buf*)` 同一条契约：
+   *   - 共享视图（`is_shared()`）—— 把引用计数接走，那块字节原地不动，`*body`
+   *     自己仍是同一份视图；
+   *   - 自有块 —— 把块的所有权接走（`out_uv_buf()`），`*body` 之后是空的。
+   * 两种情况下**都不许**在回调之前改写 `*body`。
+   *
+   * **TLS 连接上是例外**（与 `write(uvcpp_buf*)` 同一个理由）：`SSL_write` 要求
+   * 明文经它加密，那是**拷**进去的，所以那一条支路退回"合并成一条再写"。
+   *
+   * @param head     头部字节（状态行 + 各头 + 空行）。
+   * @param head_len 头部长度。
+   * @param body     响应体。**不能**是临时对象的地址：异步写要等到完成回调
+   *                 才用完它（数据本身由请求对象持有，见上面的消费语义）。
+   * @param cb       完成回调；传 nullptr 会退化成"合并成一条的同步写"。
+   */
+  int write(const char* head, size_t head_len, uvcpp_buf* body,
+            std::function<void(int)> cb);
+
+  /**
    * @brief Synchronous write with explicit timeout (raw pointer).
    * @throws std::runtime_error if an async write callback was already
    *         registered.

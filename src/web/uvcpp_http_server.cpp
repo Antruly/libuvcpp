@@ -547,9 +547,9 @@ void uvcpp_http_server::reject_early(conn_ctx& ctx, uvcpp_tcp_client* client,
   send_response(client, resp, /*close_after_write=*/!message_will_complete);
 }
 
-void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
-                                      uvcpp_http_response& resp,
-                                      bool close_after_write) {
+size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
+                                        uvcpp_http_response& resp,
+                                        bool close_after_write) {
   auto it = contexts_.find(client);
   if (it == contexts_.end()) {
     // The connection is already gone. Callers reach this by responding after
@@ -558,7 +558,7 @@ void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
     std::fprintf(stderr,
                  "[uvcpp_http_server] Warning: response dropped, connection "
                  "is no longer tracked (already closed?)\n");
-    return;
+    return 0;
   }
   conn_ctx& ctx = it->second;
 
@@ -567,7 +567,8 @@ void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   // 没有流 id，所以流 id 是**随 resp 一起传下来**的（见 resp.stream_id）。
   if (ctx.h2 != nullptr) {
     send_h2_response(client, resp.stream_id, resp);
-    return;
+    // h2 那条路上体一个字节都没动（帧由 h2 会话自己切），所以这里如实报长度。
+    return resp.body.size();
   }
 #endif
 
@@ -607,19 +608,49 @@ void uvcpp_http_server::send_response(uvcpp_tcp_client* client,
     resp.set_header("content-length", "0");
   }
 
+  // 体是否**单独**作为第二块写出去（#17 的 `nbufs = 2`）。
+  //
+  // 判据是一条**逐字节相同**的等价关系：`to_string(false)` 接上 `resp.body`
+  // 必须与 `to_string(true)` 一字不差。什么时候成立，看
+  // `uvcpp_http_response::to_string` 就清楚 —— 非 chunked（chunked 会补十六进制
+  // 帧与终止块，体不是裸字节接在头部后面）且体非空。
+  //
+  // 这里用 `has_header("transfer-encoding")` 而不是逐字照搬那边"扫到 chunked"
+  // 那句：本库只发 chunked 这一种 transfer-encoding，而这个判据只可能**更保守**
+  // （判错时退回合并那条路，多一次拷贝），不会悄悄走成"第二块不是那条报文的后半
+  // 段"。方向选对了，两边就不会因为将来加一种编码而分叉。
+  const bool two_bufs = !ctx.is_head && resp.body.size() > 0 &&
+                        !resp.has_header("transfer-encoding");
+
   // HEAD 走「只序列化头部」那一支，**必须显式传 false**：清空 body 并不足以
   // 让报文正确 —— 一个声明了 `transfer-encoding: chunked` 的 HEAD 响应在
   // `to_string()` 里会照样补出终止块 `0\r\n\r\n`（那是 chunked 的**帧**，
   // 与 body 是否为空无关），于是 HEAD 凭空多出一段 body。这条与
   // `uvcpp_http_response.cpp` 里「空 body 也要发终止块」是同一个改动的两面：
   // 只改那边不改这里，就是修完一个缺陷立刻制造一个新缺陷。
-  std::string wire = resp.to_string(/*include_body=*/!ctx.is_head);
+  //
+  // 两块那条路上序列化的正是同一个头部块（`to_string(false)` 返回的就是
+  // `to_string(true)` 去掉末尾体之后的部分），所以 `two_bufs` 与 HEAD 这一条
+  // 不冲突：HEAD 永远走"只序列化头部"。
+  std::string wire = resp.to_string(/*include_body=*/!ctx.is_head && !two_bufs);
 
   // close_after_write=false lets a streaming handler keep the connection open
   // to write the body after the header; it must close the connection itself.
   if (!keep_alive && close_after_write) ctx.close_requested = true;
 
-  enqueue_write(ctx, client, std::move(wire));
+  // **体的长度必须在这里取走。** 两块那条路会把 `resp.body` 移动出去（移动的
+  // 是句柄不是字节），之后 `resp.body.size()` 是 0 —— 而"这次上线了多少 body"
+  // 正是调用方（`uvcpp_web_app::send_response` 的访问日志）要记的那个数。以前
+  // 它是**在这之后**回头读 `resp.body` 拿到的，那条耦合到这里断了，所以改成
+  // 由本函数返回。返回值就是取代那次回头读的东西。
+  const size_t body_bytes = resp.body.size();
+
+  if (two_bufs) {
+    enqueue_write(ctx, client, std::move(wire), std::move(resp.body));
+  } else {
+    enqueue_write(ctx, client, std::move(wire));
+  }
+  return body_bytes;
 }
 
 void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client,
@@ -967,6 +998,21 @@ void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
   pump_write(client);
 }
 
+void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
+                                      std::string head, uvcpp_buf body,
+                                      std::function<void(int)> done) {
+  queued_write qw;
+  qw.bytes = std::move(head);
+  // 移动的是**句柄**（共享视图转引用计数、自有块转所有权），不是字节 ——
+  // 这条队列本身就是"零拷贝"能不能成立的地方：这里如果拷了，后面两块写得再
+  // 干净也白搭。见 `uvcpp_buf` 里"必须显式写移动"那段。
+  qw.body     = std::move(body);
+  qw.has_body = true;
+  qw.done     = std::move(done);
+  ctx.write_queue.push_back(std::move(qw));
+  pump_write(client);
+}
+
 void uvcpp_http_server::fire_write_done(const std::shared_ptr<write_done>& d,
                                         int status) {
   if (!d || d->fired) return;
@@ -1025,8 +1071,10 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   wd->fn = std::move(qw.done);
   ctx.inflight = wd;
 
-  // The write copies the bytes into its own buffer, so `wire` need not outlive
-  // this call.
+  // 1 块时那次写会把字节拷进自己的缓冲，所以 `wire` 不必活过这一句。
+  // **2 块时不是**：那边体不拷，写请求持有它（共享视图接引用计数、自有块接
+  // 所有权）直到完成回调 —— 所以 `qw.body` 在 `write()` 返回之后即便析构也安全，
+  // 前提是它的内容已经被交出去了（见 `uvcpp_tcp_client::write` 的消费语义）。
   //
   // ---------------------------------------------------------------------
   // 重入次序铁律（本仓已踩过三次同族：`delete wr`、`delete w`、
@@ -1040,57 +1088,62 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   //
   // 回调之后**不许再碰 cc**。
   // ---------------------------------------------------------------------
-  int rc = client->write(
-      wire.c_str(), wire.size(), [this, client, wd](int status) {
-        bool gone_from_table = false;
-        bool peer_gone      = false;
-        {
-          auto c = contexts_.find(client);
-          if (c == contexts_.end()) {
-            gone_from_table = true;
-          } else {
-            conn_ctx& cc = c->second;
-            cc.write_pending = false;
-            // **先把在途这一块摘下来，再关连接。** 反过来的话
-            // close_connection 会把它当成"还没结算的在途块"用 UV_ECANCELED
-            // 唤醒，而这里明明拿到了真实结果（ECONNRESET 之类）—— 调用方
-            // 就再也分不清"对端在写的时候走了"和"框架自己取消的"。
-            cc.inflight.reset();
-            if (status != 0) {
-              // The peer is gone: nothing still queued can be delivered, and
-              // the connection needs retiring. Any `done` still parked in the
-              // queue is woken by close_connection() with UV_ECANCELED.
-              peer_gone = true;
-              close_connection(client);
-            }
-          }
+  // 回调提到两个重载外面来：两块那条路与一块那条路是**同一个**结算逻辑，
+  // 抄成两份就是给"以后只改了一份"留口子（本仓的 ws 那族就是这么来的）。
+  auto on_written = [this, client, wd](int status) {
+    bool gone_from_table = false;
+    bool peer_gone      = false;
+    {
+      auto c = contexts_.find(client);
+      if (c == contexts_.end()) {
+        gone_from_table = true;
+      } else {
+        conn_ctx& cc = c->second;
+        cc.write_pending = false;
+        // **先把在途这一块摘下来，再关连接。** 反过来的话
+        // close_connection 会把它当成"还没结算的在途块"用 UV_ECANCELED
+        // 唤醒，而这里明明拿到了真实结果（ECONNRESET 之类）—— 调用方
+        // 就再也分不清"对端在写的时候走了"和"框架自己取消的"。
+        cc.inflight.reset();
+        if (status != 0) {
+          // The peer is gone: nothing still queued can be delivered, and
+          // the connection needs retiring. Any `done` still parked in the
+          // queue is woken by close_connection() with UV_ECANCELED.
+          peer_gone = true;
+          close_connection(client);
         }
+      }
+    }
 
-        if (gone_from_table) {
-          // 连接已经从表里消失；这一块的下场仍然是"不会写出去了"。
-          fire_write_done(wd, status != 0 ? status : UV_ECANCELED);
-          return;
-        }
-        fire_write_done(wd, peer_gone ? status : 0);
-        if (peer_gone) return;
+    if (gone_from_table) {
+      // 连接已经从表里消失；这一块的下场仍然是"不会写出去了"。
+      fire_write_done(wd, status != 0 ? status : UV_ECANCELED);
+      return;
+    }
+    fire_write_done(wd, peer_gone ? status : 0);
+    if (peer_gone) return;
 
-        auto c2 = contexts_.find(client);
-        if (c2 == contexts_.end() || c2->second.closing) return;
+    auto c2 = contexts_.find(client);
+    if (c2 == contexts_.end() || c2->second.closing) return;
 
-        // **不在这里判 `close_requested`。** 这里是"某一块写完了"，而
-        // `close_requested` 的语义是"**我排的队写完**之后关"，不是"下一个写
-        // 完成时关"。一个 handler 完全可能（而且流式响应里就是常态）在**头部
-        // 还在途**的时候就把整条响应写完并调 `end_stream(close_after=true)`：
-        // 那时队列里还压着 body 的每一块，而本次写完成的是**头部**。早先在这里
-        // 判它，等于把整个 body 当成"写完头部之后的余量"丢掉 —— 线上症状是
-        // 只剩一个头部块、连接随即关闭（`web_stream_response_func` 的
-        // `stream_roundtrip` 就是这么红的）。
-        //
-        // 交给 pump_write 的空队列分支去收尾：它只在**队列真的空了**时才看
-        // `close_requested`，而且那条分支还带着"对端还在发 → 把关闭推迟到
-        // 消息结束"的判定（上传路径需要），在这里重写一遍必然漏掉那个判定。
-        pump_write(client);
-      });
+    // **不在这里判 `close_requested`。** 这里是"某一块写完了"，而
+    // `close_requested` 的语义是"**我排的队写完**之后关"，不是"下一个写
+    // 完成时关"。一个 handler 完全可能（而且流式响应里就是常态）在**头部
+    // 还在途**的时候就把整条响应写完并调 `end_stream(close_after=true)`：
+    // 那时队列里还压着 body 的每一块，而本次写完成的是**头部**。早先在这里
+    // 判它，等于把整个 body 当成"写完头部之后的余量"丢掉 —— 线上症状是
+    // 只剩一个头部块、连接随即关闭（`web_stream_response_func` 的
+    // `stream_roundtrip` 就是这么红的）。
+    //
+    // 交给 pump_write 的空队列分支去收尾：它只在**队列真的空了**时才看
+    // `close_requested`，而且那条分支还带着"对端还在发 → 把关闭推迟到
+    // 消息结束"的判定（上传路径需要），在这里重写一遍必然漏掉那个判定。
+    pump_write(client);
+  };
+
+  int rc = qw.has_body
+      ? client->write(wire.c_str(), wire.size(), &qw.body, on_written)
+      : client->write(wire.c_str(), wire.size(), on_written);
 
   if (rc != 0) {
     // The write never started, so its completion callback will never fire.

@@ -280,6 +280,21 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_web_response& body_move(uvcpp_buf& src,
                                 const std::string& ct = std::string());
 
+  /**
+   * @brief **共享**一份已有的缓冲，不拷贝字节；源仍然持有它。
+   *
+   * 与上面两条的区别是"谁还留着它"：
+   *   - `body()`      拷进来，两份互不相干；
+   *   - `body_move()` 所有权**转移**，源变空；
+   *   - `body_share()` 两边**共用**同一份字节，靠引用计数共同保活 —— 源（比如
+   *     静态层的 LRU 条目）之后被淘汰、被析构，本响应手里的这份仍然有效。
+   *
+   * 所以"源还要继续复用这块内容"时只能用这一条（`body_move()` 会把源掏空，
+   * 对缓存条目而言等于每次命中都要重读一次盘）。
+   */
+  uvcpp_web_response& body_share(const std::shared_ptr<const std::string>& src,
+                                 const std::string& ct = std::string());
+
   /// 设置 `text/plain` body。
   uvcpp_web_response& text(const std::string& s);
   /// 设置 `text/html; charset=utf-8` body。

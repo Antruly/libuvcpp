@@ -401,17 +401,23 @@ class UVCPP_API uvcpp_http_server {
    *
    * The write is asynchronous and returns immediately — the caller must not
    * assume the bytes have left by the time this returns, and must keep @p resp
-   * alive only until the call returns (it is fully serialized here). When the
-   * response is not keep-alive the connection is closed once its write
-   * completes.
+   * alive only until the call returns. When the response is not keep-alive the
+   * connection is closed once its write completes.
+   *
+   * **`resp` 的内容在这一句之后不保证还在**：头/体分开走（`nbufs = 2`，见
+   * `enqueue_write`）时体会被**移动**出去 —— 移动的是句柄不是字节，所以不产生
+   * 拷贝，但 `resp.body` 之后是空的。要记"上线了多少 body"就用本函数的返回值，
+   * **不要**回头读 `resp.body.size()`（那正是返回值取代掉的那次读）。
    *
    * @param close_after_write whether to close the connection after the write
    *        when not keep-alive. Default true (same as a normal request).
    *        A streaming endpoint (writing the body in chunks AFTER the header)
    *        must pass false and close the connection itself once the body is done.
+   * @return 这次交给写路径的 body 字节数（压缩之后、HEAD 时 `resp.body` 已在
+   *         序列化前清空所以为 0），或早退时为 0。
    */
-  void send_response(uvcpp_tcp_client* client, uvcpp_http_response& resp,
-                     bool close_after_write = true);
+  size_t send_response(uvcpp_tcp_client* client, uvcpp_http_response& resp,
+                       bool close_after_write = true);
 
   /**
    * @brief 流式响应：只把**头部**入队，body 由调用方随后分块送。
@@ -584,9 +590,21 @@ class UVCPP_API uvcpp_http_server {
    * @brief 一块待写出的字节 + 它写完之后的回调。
    *
    * `done` 可空（普通响应用不上它），实现上只在**流式写**里被填。
+   *
+   * `body` 是 #17 加的**第二块**：非空时 `bytes` 只是**头部**，体在 `body` 里
+   * 且**不拷**，两块一起交给 `uv_write`（`nbufs = 2`）。为什么要分成两块：一条
+   * 响应天然是两段，先合并成一条再发就要把体拷一遍；分开写则由写请求持有第二块
+   * 直到完成回调（libuv 的契约是缓冲要活到回调）。
+   *
+   * 用 `uvcpp_buf` 装而不是裸指针：它既能装**共享视图**（静态层整份命中那份），
+   * 也能装**自有块**（压缩产出那份），两种都由写请求按同一条契约接手。能用
+   * `uvcpp_buf` 按值放进队列，前提是它**有移动语义**（见 `uvcpp_buf` 里的说明：
+   * 少了移动构造，`std::move` 会静默退化成深拷贝，那正是这里要消掉的一份）。
    */
   struct queued_write {
     std::string bytes;
+    uvcpp_buf body;
+    bool has_body = false;
     std::function<void(int)> done;
   };
 
@@ -810,6 +828,18 @@ class UVCPP_API uvcpp_http_server {
 
   /** @brief Queue bytes for the connection, draining as the socket permits. */
   void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string wire,
+                     std::function<void(int)> done = std::function<void(int)>());
+
+  /**
+   * @brief 头部与体**分开**入队（体不拷），出队时按 `nbufs = 2` 写出去。
+   *
+   * `head` 必须与 `body` 拼起来正好是那条报文 —— 这个前提由调用方保证
+   * （今天只有 `send_response` 用，判据写在那里：`to_string(false)` 接上 body
+   * 与 `to_string(true)` 逐字节相同）。`body` 按值收，调用方用 `std::move` 交
+   * 出来即可 —— 移动的是句柄，不是字节。
+   */
+  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string head,
+                     uvcpp_buf body,
                      std::function<void(int)> done = std::function<void(int)>());
 
   /** @brief Start the next queued write if the connection is idle. */

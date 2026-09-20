@@ -1181,6 +1181,117 @@ int uvcpp_tcp_client::write_wait(const uvcpp_buf& buf, int timeout_ms) {
   return write_wait(buf.get_const_data(), buf.size(), timeout_ms);
 }
 
+// 头 + 体两块（`nbufs = 2`）：体不拷。见头文件里那段说明。
+//
+// 这里**不**做 `uv_try_write` 试发（上面 `const char*` 重载里那一套）。理由写
+// 在头文件里，一句话：那一支试发是为了省下"本层自己拷的那一份"里已经出去的
+// 前缀，这条路上体那份拷贝根本不存在，试发就只剩一次多余的系统调用。
+int uvcpp_tcp_client::write(const char* head, size_t head_len,
+                            uvcpp_buf* body, std::function<void(int)> cb) {
+  if (body == nullptr) return UV_EINVAL;
+  if (!has_status(TCP_CLIENT_CONNECTED)) return UV_ENOTCONN;
+
+  if (cb == nullptr) {
+    // 同步分支没有"等回调"这回事，两块就地合并一次走原路 —— 这次的拷贝换到
+    // 的是一个简单可靠的语义：`write_wait` 返回时写已经完成。
+    ::std::string merged(head, head_len);
+    merged.append(body->get_const_data(), body->size());
+    return write_wait(merged.data(), merged.size(), 30000);
+  }
+
+  if (has_async_write_cb_) return UV_EALREADY;
+
+  has_async_write_cb_ = true;
+  write_fn_  = trampoline_write;
+  write_arg_ = new std::function<void(int)>(cb);
+
+#if UVCPP_OPENSSL_ENABLE
+  if (tls_ssl_ != nullptr) {
+    // 与 `write(uvcpp_buf*)` 同一个理由：TLS 下明文要经 `SSL_write`（它**拷**
+    // 进去），所以"两块"在这里没有意义，退回合并成一条。回滚也与那两个重载
+    // 逐字一致。
+    if (!tls_handshake_done_) {
+      has_async_write_cb_ = false;
+      delete static_cast<std::function<void(int)>*>(write_arg_);
+      write_fn_  = nullptr;
+      write_arg_ = nullptr;
+      return UV_ENOTCONN;
+    }
+
+    ::std::string merged(head, head_len);
+    merged.append(body->get_const_data(), body->size());
+    const int trc = tls_write_plain(merged.data(), merged.size());
+    if (trc != 0) {
+      last_error_code_ = trc;
+      has_async_write_cb_ = false;
+      delete static_cast<std::function<void(int)>*>(write_arg_);
+      write_fn_  = nullptr;
+      write_arg_ = nullptr;
+      return trc;
+    }
+
+    tls_write_pending_ = true;
+    tls_write_sync_    = false;
+    tls_flush_out();
+    return 0;
+  }
+#endif
+
+  // 第 1 块：头。仍然照旧拷进一个自有块 —— 这条路上剩下的唯一一份拷贝。
+  uvcpp_buf headbuf(head, head_len);
+  uv_buf_t* hb = headbuf.out_uv_buf();
+
+  uvcpp_write* w = new uvcpp_write();
+  w->set_uv_buf(hb, true);
+
+  // 第 2 块：体。两种形状都**不拷字节**，差别只在谁负责让它活着。
+  // 注意判据是 `is_shared()` 而不是"有没有引用计数"：
+  //   * 共享视图 —— 引用计数接过来（`hold` 由请求对象持有到析构）；
+  //   * 自有块 —— `out_uv_buf()` 把块连同所有权交出来（**会先 materialize**，
+  //     共享视图走错这一支就会当场拷一份，所以顺序不能反）。
+  if (body->is_shared()) {
+    uv_buf_t vb = uv_buf_init(const_cast<char*>(body->get_const_data()),
+                              static_cast<unsigned int>(body->size()));
+    w->append_uv_buf_view(vb, body->shared_ref());
+  } else if (body->size() > 0) {
+    w->append_uv_buf_owned(body->out_uv_buf());
+  }
+  // body 为空（且不是共享视图）时不追加第 2 块 —— 这时整条报文就是头部那块，
+  // 与 `write(uvcpp_buf*)` 传一个空块是同一形状。
+  w->set_self_free(true);
+
+  std::shared_ptr<char> life = alive_token();
+
+  int rc = tcp_->write(w, w->get_uv_bufs(),
+                       static_cast<unsigned int>(w->get_uv_nbufs()),
+                       [this, life](uvcpp_write* wr, int status) {
+    (void)wr;
+    if (!token_alive(life)) {
+      return;  // 对象已析构：请求对象由 trampoline 还回去
+    }
+    if (status != 0) last_error_code_ = status;
+    // 次序与另外两个重载一致：先存后清，且 `has_async_write_cb_` 必须在回调
+    // **之前**清 —— 否则回调里接着发起下一次写会拿到 UV_EALREADY。
+    write_callback_t fn = write_fn_;
+    void* arg = write_arg_;
+    write_fn_  = nullptr;
+    write_arg_ = nullptr;
+    has_async_write_cb_ = false;
+    if (fn) fn(status, arg);
+  });
+
+  if (rc != 0) {
+    last_error_code_ = rc;
+    delete w;
+    delete static_cast<std::function<void(int)>*>(write_arg_);
+    write_fn_  = nullptr;
+    write_arg_ = nullptr;
+    has_async_write_cb_ = false;
+    return rc;
+  }
+  return 0;
+}
+
 // uvcpp_buf* overload (zero-copy, transfers ownership of buffer data)
 //
 // TLS 连接上"零拷贝"不成立：明文要经 SSL_write 加密，它是**拷**进去的。所以
