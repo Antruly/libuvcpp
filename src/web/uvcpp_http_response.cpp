@@ -95,16 +95,39 @@ void uvcpp_http_response::set_content_type(const std::string& ct) {
 // Serialization
 // =========================================================================
 
-std::string uvcpp_http_response::to_string(bool include_body) const {
-  std::ostringstream oss;
+namespace {
 
-  // --- Status line ---
-  std::string reason = status_message.empty()
-                           ? http_status_reason(status_code)
-                           : status_message;
-  oss << uvcpp_http_version_str(version) << " "
-      << static_cast<int>(status_code) << " "
-      << reason << "\r\n";
+// 十进制/十六进制追加。等价于 `oss << v`，但绕开 num_put 面 —— 后者要经过
+// locale、sentry 与虚调用，一个整数上百纳秒，而这里每个响应都要格式化
+// 状态码与 content-length 两个数。
+void append_dec(std::string& out, unsigned long long v) {
+  char tmp[24];
+  char* p = tmp + sizeof(tmp);
+  do {
+    *--p = static_cast<char>('0' + (v % 10));
+    v /= 10;
+  } while (v != 0);
+  out.append(p, static_cast<size_t>(tmp + sizeof(tmp) - p));
+}
+
+void append_hex(std::string& out, unsigned long long v) {
+  static const char* d = "0123456789abcdef";
+  char tmp[20];
+  char* p = tmp + sizeof(tmp);
+  do {
+    *--p = d[v & 0xF];
+    v >>= 4;
+  } while (v != 0);
+  out.append(p, static_cast<size_t>(tmp + sizeof(tmp) - p));
+}
+
+}  // namespace
+
+std::string uvcpp_http_response::to_string(bool include_body) const {
+  const std::string version_str = uvcpp_http_version_str(version);
+  const std::string reason = status_message.empty()
+                                 ? http_status_reason(status_code)
+                                 : status_message;
 
   // Detect chunked transfer encoding
   bool chunked = false;
@@ -118,20 +141,52 @@ std::string uvcpp_http_response::to_string(bool include_body) const {
   // --- Headers ---
   bool has_cl = has_header("content-length");
 
+  // 先算一遍长度直接 reserve：拼的过程中不再增长，整条响应只有一次分配。
+  // 估算是上界而非精确值 —— 估大了只是多占一点，估小了也只会多一次增长。
+  size_t est = 32 + version_str.size() + reason.size();
   for (const auto& h : headers) {
-    oss << h.name << ": " << h.value << "\r\n";
+    est += h.name.size() + h.value.size() + 4;
+  }
+  if (include_body) est += body.size() + 24;
+
+  std::string result;
+  result.reserve(est);
+
+  // --- Status line ---
+  result += version_str;
+  result += ' ';
+  // 状态码按 **int** 打印，与原实现 `oss << static_cast<int>(status_code)` 逐字一致。
+  // `append_dec` 收的是无符号，直接传下去的话 `static_cast<http_status>(-1)`
+  // 那种非法值会被印成 18446744073709551615，而不是原来的 -1 —— 都是坏报文，
+  // 但"这次改动不改字节"这句话就没法无条件成立了。多一个分支换那句话成立。
+  const int code = static_cast<int>(status_code);
+  if (code < 0) {
+    result += '-';
+    append_dec(result, static_cast<unsigned long long>(-static_cast<long long>(code)));
+  } else {
+    append_dec(result, static_cast<unsigned long long>(code));
+  }
+  result += ' ';
+  result += reason;
+  result += "\r\n";
+
+  for (const auto& h : headers) {
+    result += h.name;
+    result += ": ";
+    result += h.value;
+    result += "\r\n";
   }
 
   if (chunked) {
     // Chunked: no Content-Length (included)
   } else if (!has_cl && body.size() > 0) {
-    oss << "content-length: " << body.size() << "\r\n";
+    result += "content-length: ";
+    append_dec(result, static_cast<unsigned long long>(body.size()));
+    result += "\r\n";
   }
 
   // --- Blank line ---
-  oss << "\r\n";
-
-  std::string result = oss.str();
+  result += "\r\n";
 
   // 只序列化头部：到这里已经是一条完整的头部块（状态行 + 各头 + 空行）。
   if (!include_body) return result;
@@ -139,9 +194,7 @@ std::string uvcpp_http_response::to_string(bool include_body) const {
   // --- Body ---
   if (chunked) {
     if (body.size() > 0) {
-      std::ostringstream hex_oss;
-      hex_oss << std::hex << body.size();
-      result += hex_oss.str();
+      append_hex(result, static_cast<unsigned long long>(body.size()));
       result += "\r\n";
       result.append(body.get_const_data(), body.size());
       result += "\r\n";
