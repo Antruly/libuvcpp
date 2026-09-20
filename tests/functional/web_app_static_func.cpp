@@ -212,6 +212,9 @@ void cleanup_root();  // 定义在下面，build_root() 要先拿它清残骸
 
 std::string big_content() { return std::string(256 * 1024, 'x'); }
 
+/// 超过 `max_cached_file_size`（默认 1 MiB）⇒ 走 `send_file_range()` 流式下发。
+constexpr size_t k_huge_txt_size = 1024u * 1024u + 1u;
+
 /**
  * 搭出文档根。**秘密文件放在根的旁边**（兄弟路径）—— 穿越用例断言"读不到
  * 它"，前提是它确实存在、而且确实在根外面，所以这个文件必须在。
@@ -233,6 +236,12 @@ bool build_root() {
   ok = write_file(r + "/noext", "no extension here") && ok;
   ok = write_file(r + "/empty.txt", "") && ok;
   ok = write_file(r + "/big.bin", big_content()) && ok;
+  // 压缩用例的靶子。**MIME 必须落在压缩器的允许名单里**：`/big.bin` 的
+  // `application/octet-stream` 在 `http_compress::default_excluded_mime_types()`
+  // 里，拿它测压缩只会得到"两边都等于原始长度"的假绿 —— 那正是这组用例此前
+  // 一直绿着的一半原因（另一半是不带 `Accept-Encoding`）。
+  ok = write_file(r + "/big.txt", big_content()) && ok;
+  ok = write_file(r + "/huge.txt", std::string(k_huge_txt_size, 'y')) && ok;
   ok = write_file(r + "/.env", "SECRET=in-dotfile") && ok;
   ok = write_file(r + "/.hash.txt", "d41d8cd9") && ok;
   ok = write_file(r + "/a..b.txt", "double dot is fine") && ok;
@@ -795,6 +804,84 @@ void test_head() {
   check_eq_i(static_cast<long long>(raw_body(rr.raw).size()), 0, "304 不能有 body");
 }
 
+// ---- 6b. 压缩开着时 HEAD 必须报与 GET **逐字节相同**的头 ----
+//
+// 静态层最隐蔽的一条：HEAD 曾经**不读盘**，`content-length` 按文件原始长度
+// 显式钉死；而 GET 的长度是 HTTP 层压缩**之后**才算出来的。两边必然不等，
+// 于是拿 HEAD 探长度、再按那个长度读满的客户端**一直等到超时**（不是报错，
+// 所以很难查）。
+//
+// 判据**必须带 `Accept-Encoding: gzip`**：不带的话压缩根本不发生、两边都
+// 等于文件长度，旧代码照样全绿。上面那组 HEAD 用例就是这么绿着的 —— 除了
+// 不带这个头，它的靶子 `/big.bin` 还落在压缩器的排除表里。
+void test_head_compressed() {
+  std::cout << "[static] 压缩下的 HEAD/GET 头一致性" << std::endl;
+
+  const std::string enc = "Accept-Encoding: gzip\r\n";
+
+  // `/plain` 关了缓存（`cache_max_entries = 0`），两个请求都**从头读盘** ——
+  // 这条用例于是不依赖"谁先跑"的时序。
+  raw_result g = raw_exchange(
+      g_port,
+      "GET /plain/big.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n" +
+          enc + "\r\n",
+      3000);
+  check(g.ok, "带 gzip 的 GET 应当有响应");
+  check_eq_i(raw_status(g.raw), 200, "带 gzip 的 GET 状态码");
+
+  // **前置断言**：GET 必须**真的**被压缩了。没有它，哪天一改挂载或改 MIME，
+  // 下面两条"HEAD == GET"会双双退化成"两头都等于原始长度"而**假绿** ——
+  // 这正是这个缺陷能一直藏着的原因，别让新用例重复同一个失败模式。
+  check_eq(raw_header(g.raw, "content-encoding"), "gzip",
+           "前置：GET 必须真的带上 content-encoding: gzip");
+  const std::string gcl = raw_header(g.raw, "content-length");
+  check_ne(gcl, std::to_string(big_content().size()),
+           "前置：压缩后的 Content-Length 必须**不等于**原始长度");
+
+  // 报出来的长度必须真的读得满那么多字节 —— 原缺陷下客户端卡住的就是这一步。
+  check_eq_i(static_cast<long long>(raw_body(g.raw).size()),
+             std::stoll(gcl), "GET 的 body 长度应当与它自己报的长度相等");
+
+  raw_result h = raw_exchange(
+      g_port,
+      "HEAD /plain/big.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n" +
+          enc + "\r\n",
+      3000);
+  check(h.ok, "带 gzip 的 HEAD 应当有响应");
+  check_eq_i(raw_status(h.raw), 200, "带 gzip 的 HEAD 状态码");
+  check_eq_i(static_cast<long long>(raw_body(h.raw).size()), 0,
+             "HEAD 仍然一个 body 字节都不能有");
+  check_eq(raw_header(h.raw, "content-encoding"),
+           raw_header(g.raw, "content-encoding"),
+           "HEAD 的 Content-Encoding 必须与 GET 一致");
+  check_eq(raw_header(h.raw, "content-length"), gcl,
+           "HEAD 的 Content-Length 必须与 GET 一致");
+
+  // 大文件（超 `max_cached_file_size`）：两边都不读盘、都不压缩，头也得一致。
+  // 这一支是本轮**新**覆盖的 —— HEAD 以前在 `finish_job()` 里走"显式设长度、
+  // 不发文件"那一支，现在与 GET 一起走 `send_file_range()`。
+  raw_result hg = raw_exchange(
+      g_port,
+      "GET /plain/huge.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n" +
+          enc + "\r\n",
+      8000);
+  check(hg.ok, "大文件的 GET 应当有响应");
+  raw_result hh = raw_exchange(
+      g_port,
+      "HEAD /plain/huge.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n" +
+          enc + "\r\n",
+      8000);
+  check(hh.ok, "大文件的 HEAD 应当有响应");
+  check_eq(raw_header(hh.raw, "content-length"),
+           raw_header(hg.raw, "content-length"),
+           "大文件：HEAD 与 GET 的 Content-Length 必须一致");
+  check_eq(raw_header(hh.raw, "content-encoding"),
+           raw_header(hg.raw, "content-encoding"),
+           "大文件：HEAD 与 GET 的 Content-Encoding 必须一致");
+  check_eq_i(static_cast<long long>(raw_body(hh.raw).size()), 0,
+             "大文件的 HEAD 也不能有 body");
+}
+
 // ---- 7. 尺寸闸门 ----
 
 void test_size_gate() {
@@ -1110,6 +1197,7 @@ int main() {
     if (want("range")) test_range();
     if (want("ifrange")) test_if_range();
     if (want("head")) test_head();
+    if (want("head-compressed")) test_head_compressed();
     if (want("size")) test_size_gate();
     if (want("dotfiles")) test_dotfiles();
     if (want("traversal")) test_traversal();

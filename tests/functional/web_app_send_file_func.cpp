@@ -1156,9 +1156,18 @@ void test_head_no_read() {
   check_eq_i(h.content_length, g.content_length, "HEAD：CL 与 GET 一致");
   check(h.body.empty(), "HEAD：body 一个字节都没有");
 
-  // 「不读盘」的可观测形态只有上面那条（CL 照给、body 全无）—— 真正不发传输
-  // 的是 `need_data = !is_head`，从外面看不见。缺失文件的 404 就是它与 GET
-  // 共用的那道 stat 闸门，一并钉在这里。
+  // 这里的 32768 字节超过本用例的 `max_cached_file_size`（4096），走的是
+  // `send_file_range()` 那条**流式**路 —— 那条路上 HEAD 确实不读盘
+  // （`start_file_transfer()` 见到 `head_only_` 就只发头、一个字节不读）。
+  //
+  // **别把这句读成"HEAD 一律不读盘"**：可缓存的小文件那条路上，HEAD 与 GET
+  // 走的是同一条路（一样读盘、一样进缓存），因为 `Content-Length` 与
+  // `Content-Encoding` 都是 HTTP 层压缩**之后**才算出来的，不读盘就算不出来
+  // —— 报错了长度，拿 HEAD 探长度再按长度读满的客户端会一直等到超时
+  // （`web_app_static_func.cpp` 的 `head-compressed` 钉着这一点）。
+  //
+  // 「不读盘」的可观测形态仍然只有上面那条（CL 照给、body 全无）。缺失文件的
+  // 404 就是它与 GET 共用的那道 stat 闸门，一并钉在这里。
   app_reply m;
   check(do_request(port, get_request("/assets/nope.bin"), false, 8000, &m),
         "缺失文件：有响应");

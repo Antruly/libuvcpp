@@ -432,7 +432,12 @@ app.serve_static("/assets", "./public");
 - `bytes=9999-` 这类**语法对但越界**的必须回 **416**（空文件补 `content-range: bytes */0`）。
 - `If-Range` 不匹配时**忽略 Range 回全量**，不是 412。
 - 命中 → **206** + `content-range`。
-- **HEAD 根本不读盘**，`Content-Length` 仍按 GET 长度显式给出。
+- **HEAD 与 GET 走同一条路**（一样读盘、一样进缓存），`Content-Length` 与
+  `Content-Encoding` 因此与 GET 逐字节相同 —— 它们是 HTTP 层压缩决策的结果，
+  不给真 body 就算不出来。**旧的"HEAD 不读盘、按文件原始长度报 CL"是错的**：
+  开了压缩之后 GET 报的是压缩后的长度，HEAD 报原始长度，拿 HEAD 探长度再按
+  长度读满的客户端会一直等到超时。大文件（超 `max_cached_file_size`）两边都
+  不读、都不压缩，本来就没有这个问题。
 - 超过 `max_cached_file_size` 走 `send_file_range(...)` 分片下发，峰值 ≈ 1.5 MiB
   且**与文件大小无关**。
 
@@ -1017,7 +1022,7 @@ std::shared_ptr<uvcpp_web_work_limit> app.work_limit() const;   // 恒非空
 - **超限时的行为：既不排队也不拒绝** —— 它只回答"有没有名额"（`acquire()` 返回 bool），
   怎么处理由调用方按自己的退路决定：
   - **静态文件**：`acquire()` 拿不到就回 **503 + `Retry-After`**。取名额发生在 worker 里
-    **真正要读盘的那一步之前**，所以不读盘的分支（LRU 命中、HEAD / 404 / 403）**不占名额**、
+    **真正要读盘的那一步之前**，所以不读盘的分支（LRU 命中 / 404 / 403）**不占名额**、
     也不会被回绝；反过来说超限的请求**已经进了线程池**了，这道闸门不是投递前的准入
     （被回绝的那些只做了一次 `stat`，代价与卡住线程池队列的那点排队是两回事）。
   - **上传**：`pause()` 把压力退回给对端，并向 `work_limit` 注册唤醒（`add_wakeup()`）；

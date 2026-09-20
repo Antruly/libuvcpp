@@ -341,8 +341,9 @@ class UVCPP_API uvcpp_web_response {
    * @brief 标记这是 HEAD 请求：发与 GET 相同的头，但不发 body。
    *
    * **本层不丢 body**（见文件头「关于 HEAD」）。这个标志的作用有两处：让
-   * `uvcpp_web_app` 把 `body_bytes` 记成 0（HEAD 一个字节都没上线），以及
-   * 作为不变式挡住"哪天有人为省一次 stat 让 HEAD 复用缓存字节"那条路。
+   * `uvcpp_web_app` 把 `body_bytes` 记成 0（HEAD 一个字节都没上线），以及让
+   * HTTP 层在序列化时走"只发头"那一支（h1 的 `include_body=false`、h2 的
+   * `omit_body=true`）—— body 正是靠它挡住、不上去的。
    *
    * 与 `sync_meta()` 的先后**顺序无关** —— 长度按发送前的 body 算。
    */

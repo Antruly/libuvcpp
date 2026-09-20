@@ -51,12 +51,6 @@ namespace {
 /// 任务插进来。1 MiB 是「系统调用次数」和「单次阻塞时长」的折中。
 const size_t k_read_chunk = 1024u * 1024u;
 
-std::string u64_to_string(uint64_t v) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
-  return std::string(buf);
-}
-
 std::string i64_to_hex(int64_t v) {
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%llx", (unsigned long long)v);
@@ -497,14 +491,13 @@ struct uvcpp_web_static::Impl {
 
     std::string url;                         ///< 已归一化的请求 URL
     bool is_head;
-    bool need_data;                          ///< HEAD 不需要字节，只要元数据
     std::vector<cache_probe> probes;
 
     /**
      * @brief 本 job 当前**持有一个工作池名额**吗。
      *
      * 名额从 `serve()` 搬进 `run_job()` 之后，"拿过"不再是一条必走的路
-     * （命中缓存、HEAD、404 都不拿），所以归还侧必须有个凭据 —— 否则
+     * （命中缓存、404 都不拿），所以归还侧必须有个凭据 —— 否则
      * `release()` 会把别人的名额还掉，闸门自己就成了漏洞。
      */
     bool slot_held;
@@ -527,7 +520,6 @@ struct uvcpp_web_static::Impl {
           resp(nullptr),
           next(),
           is_head(false),
-          need_data(true),
           slot_held(false),
           status(probe_status::NOT_FOUND),
           policy_rejected(false),
@@ -752,14 +744,11 @@ void uvcpp_web_static::Impl::run_job(job* j) {
     return;
   }
 
-  if (!j->need_data) return;  // HEAD：元数据就够了
-
   // ---- 阈值分流：大文件不整读 ----
   //
-  // **这里才是判定的正确位置，不能在 `serve()` 里判。** `need_data` 在
-  // `serve()`（loop 线程）就定了，而文件多大只有 worker stat 完之后才知道
-  // —— 在 `serve()` 里判等于要提前 stat 一次，那正是本模块一直在避免的
-  // "每个请求多一次系统调用"。
+  // **这里才是判定的正确位置，不能在 `serve()` 里判。** 文件多大只有 worker
+  // stat 完之后才知道 —— 在 `serve()` 里判等于要提前 stat 一次，那正是本模块
+  // 一直在避免的"每个请求多一次系统调用"。
   //
   // 判据用 `>` 而不是 `>=`：**恰好等于阈值仍然整读**。理由是两条路的峰值
   // 在阈值处本来就相等（2 × 阈值），取哪边都不违反上界，而"≤ 阈值"这个
@@ -961,26 +950,12 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     resp.set_header("content-range", buf);
   }
 
-  if (j->is_head) {
-    // HEAD 不回 body，但 `Content-Length` 必须和 GET 一模一样。这里显式设：
-    // `sync_meta()` 对"已存在的 Content-Length"不动手，所以长度是我们说了算
-    // —— 也正因如此，HEAD 才**不需要读盘**（上面 need_data 已经是 false）。
-    resp.set_header("content-length", u64_to_string(static_cast<uint64_t>(count)));
-    // HEAD **不返回 body 的直接原因是上面那句 `need_data = !is_head`** ——
-    // 不读盘就没有字节可发。
-    //
-    // 这个标志**不再是冗余的**：它今天是 `uvcpp_web_app` 把 `body_bytes` 记成 0
-    // 的依据（`web_app_func` 的 `sent_bytes_head` 钉着这一点）。此前它唯一的
-    // 作用是在 `sync_meta()` 里清空 body —— 那一处已经让给"HEAD 与 GET 头一致"
-    // 了（本层的 `content-length` 是显式设的，但**压缩**在 HTTP 层，那里需要
-    // 真 body 才算得出 GET 会发的长度）。
-    //
-    // 它同时还是**不变式**：一旦以后为了省一次 stat 让 HEAD 复用缓存里的字节，
-    // 它就是唯一挡住 body 的东西，而漏掉它的后果只有 HTTP 客户端看得见。
-    resp.set_head_only(true);
-  } else if (j->status == probe_status::STREAM) {
+  if (j->status == probe_status::STREAM) {
     // 分片读下发：`count` == last-first+1，与 send_file_range 自己设的
     // Content-Length 一致，所以 206/`Content-Range` 那两条照旧成立。
+    //
+    // HEAD 也走这一支：`start_file_transfer()` 见到 `head_only_` 会自己短路成
+    // "只发头、不读盘"，而 `arm_file_transfer()` 设的长度与 GET 那份逐字节相同。
     resp.send_file_range(j->fs_path, static_cast<uint64_t>(first),
                          static_cast<uint64_t>(last));
   } else if (j->data) {
@@ -988,8 +963,25 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
               static_cast<size_t>(count), std::string());
   }
 
-  // 缓存只在真的读到了字节时更新。HEAD 不进缓存（它没数据），
-  // 静态统计也相应只数 GET。
+  // **HEAD 的次序是"先把 body 装好，再让序列化把 body 丢掉"。**
+  //
+  // 装进来的这份 body 不是发给对端的，是**给 HTTP 层的压缩器算长度用的**：
+  // `content-length` 与 `content-encoding` 都是压缩决策的结果，不给真 body
+  // 就会被 `apply_compression()` 的尺寸门直接挡掉，HEAD 于是报**未压缩**的
+  // 长度、GET 报压缩后的长度 —— RFC 9110 §9.3.2 要的"HEAD 与 GET 相同的头
+  // 字段"当场不成立，而**拿 HEAD 探长度、再按那个长度读满的客户端会一直等到
+  // 超时**（本层原来就是这个行为，`resp.set_header("content-length", size)`
+  // 显式钉的是文件原始长度）。
+  //
+  // 代价：HEAD 与 GET 一样要读一次盘、一样进缓存、一样计命中/未命中。超过
+  // `max_cached_file_size` 的大文件两边都不读，头本来就一致，不受影响。
+  //
+  // 丢掉 body 分别发生在 `to_string(include_body=false)`（h1）与
+  // `send_h2_response` 的 `omit_body=true`（h2）—— 见 `sync_meta()` 里那段。
+  if (j->is_head) resp.set_head_only(true);
+
+  // 缓存只在真的读到了字节时更新。HEAD 现在与 GET 同路，所以它也进缓存、
+  // 也计进命中/未命中。
   if (j->data) {
     if (j->served_from_cache) {
       ++hits;
@@ -1217,7 +1209,6 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
   j->resp = &resp;
   j->url = url;
   j->is_head = (req.method() == http_method::HTTP_HEAD);
-  j->need_data = !j->is_head;
 
   // 留住 next。**赋值必须发生在 `serve()` 返回之前**（也就是 handler 调用
   // 返回之前）—— 框架是在 handler 返回的那一刻量引用数来判断"留没留"的。
@@ -1234,7 +1225,7 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
         // 早还一拍，排在后面的请求就早一拍被受理。
         //
         // **只能还自己拿过的那一份**：名额搬进 worker 之后，"拿过"不再是必走
-        // 的路（命中缓存 / HEAD / 404 都不拿），无条件 release 会把别人的名额
+        // 的路（命中缓存 / 404 都不拿），无条件 release 会把别人的名额
         // 还掉 —— 闸门自己就成了漏洞。凭据是 `j->slot_held`。
         //
         // 与 `serve()` 里的 `rc != 0` 分支**互斥**（libuv 的约定：
