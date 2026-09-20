@@ -241,6 +241,10 @@ class UVCPP_API uvcpp_http_parser {
   /** @brief Called when the complete message has been parsed. */
   void set_on_message_complete(std::function<void()> cb);
 
+  /** @brief Called at the start of each message (once per message, including
+   *         the ones that begin mid-buffer behind a completed message). */
+  void set_on_message_begin(std::function<void()> cb);
+
   /** @brief Called at the start of each chunk (parser->content_length
    *         holds the chunk size in bytes). */
   void set_on_chunk_header(std::function<void(size_t)> cb);
@@ -384,6 +388,9 @@ class UVCPP_API uvcpp_http_parser {
 
   void_cb_t msg_done_fn_  = nullptr;
   void*     msg_done_arg_ = nullptr;
+
+  void_cb_t msg_begin_fn_  = nullptr;
+  void*     msg_begin_arg_ = nullptr;
 
   sz_cb_t   chunk_hdr_fn_  = nullptr;
   void*     chunk_hdr_arg_ = nullptr;

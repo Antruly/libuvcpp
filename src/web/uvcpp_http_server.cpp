@@ -197,6 +197,30 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
   }
 
   conn_ctx* pctx = &contexts_[client];
+
+  // 单消息暂存按**消息**清，不按读清。
+  //
+  // 两者不是一回事：一次读里完全可能有两条消息（流水线，或者只是不等响应就把
+  // 下一条写出来），而"读在哪结束"由 TCP 分片决定。按读清的话，同一个读里的
+  // 第二条请求会**带着上一条的 body**（`body_buf` 是累加的）与上一条的状态
+  // （`rejected` / `expect_continue` …）—— 症状是第二条请求收到上一条的 body，
+  // 且随着分片位置变化。
+  pctx->parser->set_on_message_begin([pctx]() {
+    pctx->msg_done = false;
+    pctx->headers_done = false;
+    pctx->body_buf.clear();
+    pctx->body_bytes = 0;
+    pctx->body_overflow = false;
+    pctx->accept_encoding.clear();
+    pctx->is_head = false;
+    pctx->rejected = false;
+    pctx->close_after_message = false;
+    pctx->defer_close_to_message_end = false;
+    pctx->expect_continue = false;
+    pctx->stream_view_built = false;
+    pctx->stream_request = uvcpp_http_request();
+  });
+
   pctx->parser->set_on_body([this, pctx, client](const char* at, size_t len) {
     if (pctx->stream_handler) {
       pctx->stream_handler(http_stream_event::BODY, at, len,
@@ -303,27 +327,20 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
     }
   }
 
-  // For keep-alive: if previous request was completed, reset parser and the
-  // per-message state that goes with it.
-  if (ctx.msg_done) {
+  // Keep-alive: 上一条消息收完了就重置解析器，好让这次读里的下一条报文能解析。
+  //
+  // 判据必须是**解析器**收没收到消息尾（`COMPLETE`），不能是"上一次读走完了"——
+  // 后者是 `msg_done`，它在 `on_request_complete` 里置位，语义是"这一读处理完了一条
+  // 请求"。读在消息中间结束时它也来不及置位，于是下一条读开头就会对一条解析到一半
+  // 的报文 `llhttp_init`：断在报文末尾的空行上那条请求**静默消失**，断在头部中间则
+  // 回 400 并把连接关掉。
+  //
+  // `msg_done` 本身由 message-begin 那个钩子清（与单消息暂存共用一个清账点）；
+  // 这里再清一次只是为了"reset 过就一定干净"，免得哪天 `execute()` 一个字节都
+  // 没吃（零长读）时钩子不响，`msg_done` 卡在 true 挡住收尾路径（`:1070`）。
+  if (ctx.msg_done && ctx.parser->get_state() == http_parser_state::COMPLETE) {
     ctx.parser->reset();
     ctx.msg_done = false;
-    ctx.headers_done = false;
-    ctx.body_buf.clear();
-    ctx.body_bytes = 0;
-    ctx.body_overflow = false;
-    ctx.accept_encoding.clear();
-    ctx.is_head = false;
-    // Headers-time state must not survive into the next message on this
-    // connection: a rejected message that somehow did not close must not
-    // suppress the next message's routing, and a leftover 100-continue flag
-    // would send a spurious interim response.
-    ctx.rejected = false;
-    ctx.close_after_message = false;
-    ctx.defer_close_to_message_end = false;
-    ctx.expect_continue = false;
-    ctx.stream_view_built = false;
-    ctx.stream_request = uvcpp_http_request();
   }
 
   const size_t used = ctx.parser->execute(buf->get_const_data(), buf->size());

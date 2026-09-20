@@ -78,10 +78,12 @@ uvcpp_http_parser::~uvcpp_http_parser() {
   delete static_cast<std::function<void()>*>(headers_done_arg_);
   delete static_cast<std::function<void(const char*, size_t)>*>(body_arg_);
   delete static_cast<std::function<void()>*>(msg_done_arg_);
+  delete static_cast<std::function<void()>*>(msg_begin_arg_);
   delete static_cast<std::function<void(size_t)>*>(chunk_hdr_arg_);
   delete static_cast<std::function<void()>*>(chunk_done_arg_);
   url_arg_ = status_arg_ = field_arg_ = value_arg_ = nullptr;
-  headers_done_arg_ = body_arg_ = msg_done_arg_ = chunk_hdr_arg_ = chunk_done_arg_ = nullptr;
+  headers_done_arg_ = body_arg_ = msg_done_arg_ = msg_begin_arg_ = nullptr;
+  chunk_hdr_arg_ = chunk_done_arg_ = nullptr;
 }
 
 // =========================================================================
@@ -329,6 +331,15 @@ void uvcpp_http_parser::set_on_message_complete(std::function<void()> cb) {
   } else { msg_done_fn_ = nullptr; msg_done_arg_ = nullptr; }
 }
 
+void uvcpp_http_parser::set_on_message_begin(std::function<void()> cb) {
+  delete static_cast<std::function<void()>*>(msg_begin_arg_);
+  if (cb) {
+    auto* p = new std::function<void()>(std::move(cb));
+    msg_begin_fn_  = [](void* a) { (*static_cast<std::function<void()>*>(a))(); };
+    msg_begin_arg_ = p;
+  } else { msg_begin_fn_ = nullptr; msg_begin_arg_ = nullptr; }
+}
+
 void uvcpp_http_parser::set_on_chunk_header(std::function<void(size_t)> cb) {
   delete static_cast<std::function<void(size_t)>*>(chunk_hdr_arg_);
   if (cb) {
@@ -356,8 +367,8 @@ int uvcpp_http_parser::ll_on_message_begin(llhttp_t* p) {
 
   // **每条消息都要清一次累积缓冲，不能只在 `reset()` 里清。**
   //
-  // `reset()` 是**每次读**才被调用一次的，而且还要等上一条消息完成
-  // （`uvcpp_http_server.cpp` 的 keep-alive 分支：`if (ctx.msg_done)`）。
+  // `reset()` 只在**读的开头**才被调用一次，而且只在解析器确认上一条消息已经收尾
+  // 时（`uvcpp_http_server.cpp` 的 keep-alive 分支：`get_state() == COMPLETE`）。
   // 可一次读取里完全可能有两条消息 —— 客户端流水线，或者只是不等响应就把
   // 下一条写出来，两条挤进同一个 TCP 段。那时第二条消息的 url / headers 会
   // **叠在第一条上**：
@@ -388,6 +399,7 @@ int uvcpp_http_parser::ll_on_message_begin(llhttp_t* p) {
   self->clear_size_limits();
 
   self->state_ = http_parser_state::HEADER;
+  if (self->msg_begin_fn_) self->msg_begin_fn_(self->msg_begin_arg_);
   return 0;
 }
 
