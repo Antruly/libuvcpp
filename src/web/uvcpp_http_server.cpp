@@ -850,9 +850,23 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
   // 看不出任何变化 —— 而 `sync_meta()` 那处一改，它就立刻变成真正的拦截点。
   // 两处是同一个缺陷的两条腿，必须一起改。
   if (resp.has_header("content-encoding")) return false;
+  // 206 一律不编码。一旦带上 `content-encoding`，`content-range` 的字节坐标
+  // 就该按**编码后**的流来算（RFC 9110 §8.4 把内容编码算作表示的一部分），
+  // 而今天那条范围是在**原文件**上切的 —— 于是
+  // `content-range: bytes 0-4095/253952` 与 `content-length: 1305` 描述的是
+  // 两个不同的东西，续传方按前者推后者会接不上。206 **必须**带
+  // `content-range`（§15.3.7），躲不开；要自洽就只能先压整个文件再切片，
+  // 那正好把范围请求的意义抵消掉。所以与 nginx 同策：**有范围就不编码**。
+  // 附带的好处是请求方拿到的正是它要的原始字节（续传到文件、seek 都要原字节，
+  // 半路插进来的 gzip 帧只会让"先 200 后 206"的续传拼出坏文件）。
+  //
+  // 这也把两条路对齐了：流式那条（`send_file_range` → `begin_stream()`）压根
+  // 不调用本函数，大文件的 206 本来就不压 —— 同一个状态码在两条路上行为不同
+  // 本身就是缺陷，这一句让两边都变成"206 不编码"。
   switch (resp.status_code) {
     case http_status::NO_CONTENT:
     case http_status::NOT_MODIFIED:
+    case http_status::PARTIAL_CONTENT:
       return false;
     default:
       break;

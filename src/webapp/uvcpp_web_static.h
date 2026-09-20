@@ -189,6 +189,16 @@ struct UVCPP_API uvcpp_web_static_options {
    * **0 = 一律走流式**（"没有文件小到值得缓存"），与 `cache_max_entries = 0`
    * （关掉缓存）是同一种读法。注意这跟本仓多数 setter 的"0 = 用默认值"
    * **相反** —— 阈值没有"未配置"这个状态，不配就是 1 MiB。
+   *
+   * **超过阈值不只是"缓存够不着"，是整条路都不压。** 大文件走
+   * `send_file_range()` → `begin_stream()`，那条入口压根不调用
+   * `apply_compression()`，所以它既没有 `content-encoding` 也没有 `vary` ——
+   * 与"客户端根本没发 `Accept-Encoding`"**逐字节相同**。想让大文件也压，
+   * 得改成流式 deflate（每块一个上下文），那是另一个特性。
+   *
+   * 所以本选项实际的含义是"**从哪个大小起不压缩**"。调大它买到的是"这个
+   * 尺寸以下的资源走整读 + 变体缓存"，**买不到**大文件的压缩率：调多大都
+   * 不会让 2 MiB 的那个文件变小。
    */
   size_t max_cached_file_size;
 

@@ -935,12 +935,11 @@ void test_compress_variant() {
     return rr.ok ? rr.raw : std::string();
   };
 
-  // (1) Range **先发**：206 不设 tag，它既不进表也不受表影响。
+  // 这个次序（Range 先、全量夹中间、Range 再来一次）是为了让"区间"与"全量"
+  // 在同一条路上相遇两次，两边的体都不许串到对面去。
   const std::string q1 = gz("/vcv/vcv_range.txt", "Range: bytes=0-4095\r\n");
-  // (2)(3) 全量跟在同一文件后面：206 要是也设了 tag，这次就会命中 (1) 存的切片。
   const std::string a1 = gz("/vcv/vcv_range.txt", "");
   const std::string a2 = gz("/vcv/vcv_range.txt", "");
-  // (4) 同一段 Range 再来一次：这次会命中 (2) 存的整份文件（如果 206 设了 tag）。
   const std::string q2 = gz("/vcv/vcv_range.txt", "Range: bytes=0-4095\r\n");
   // (5) 同一路径、**同一尺寸**、内容不同 ⇒ 只有 mtime 能把两者分开
   const std::string m1 = gz("/vcv/vcv_mtime.txt", "");
@@ -981,23 +980,43 @@ void test_compress_variant() {
            "第二次的 Content-Length 与第一次相同");
   check(raw_body(a1) == raw_body(a2), "第二次的字节与第一次逐字相同");
 
-  // (1)(4) 206 的体必须是**那段切片自己**压出来的，不能是整份文件的。两种错序
-  // 各由一条抓住：
+  // (1)(4) 206 **一律不编码**（`apply_compression` 里 206 那条直接返回）。
+  // 判据是"体就是那一段原始字节、且三个头互相自洽"：一旦 206 带上
+  // `content-encoding: gzip`，`content-range` 的原文件坐标与 `content-length`
+  // 的编码字节数就在描述两个不同的东西，续传方接不上。
   check_eq_i(raw_status(q1), 206, "区间请求应当 206");
   check_eq_i(raw_status(q2), 206, "重复的区间请求应当 206");
+  check_eq(raw_header(q1, "content-encoding"), "",
+           "206 不编码：不能带 content-encoding");
+  check_eq(raw_header(q2, "content-encoding"), "",
+           "206 不编码：重复的区间请求也不能带");
+  check_eq(raw_header(q1, "content-range"), "bytes 0-4095/8192",
+           "206 的 Content-Range 用原文件坐标");
+  check_eq(raw_header(q1, "content-length"), "4096",
+           "206 的 Content-Length 必须与 Content-Range 自洽（切片本身）");
+  check_eq_i(static_cast<long long>(raw_body(q1).size()), 4096,
+             "206 的体就是那 4096 个字节");
+  check(raw_body(q1) == std::string(4096, 'r'),
+        "206 的体必须是原始字节（这一段是 4096 个 'r'）");
+  // 切片与全量的字节本来就不同，这两条钉的是"区间与全量互不串味"。
   check(raw_body(a1) != raw_body(q1),
-        "先 Range 后全量：全量不能拿到那段切片的变体");
+        "全量不能发出那段切片的体");
   check(raw_body(a1) != raw_body(q2),
-        "先全量后 Range：区间不能拿到整份文件的变体");
+        "区间不能发出整份文件的体");
   check(raw_body(q1) == raw_body(q2),
-        "同一段区间两次都该现压，结果逐字相同");
+        "同一段区间两次结果逐字相同");
 
   // (5) 内容变了（尺寸没变）必须重新压：发旧变体出去就是**陈旧内容**。
   check(raw_body(m1) != raw_body(m2),
         "同尺寸改写后必须重新压，不能发旧变体的字节");
 
   // 计数：三次全量各存一次、第二次全量是唯一一次命中；两次 Range **一次都不算**
-  // —— 这正是"206 不设 tag"的判据。若 206 也设了 tag，这里会多出两次未命中。
+  // —— 206 在 `apply_compression` 入口就返回了，既不查表也不计数。
+  //
+  // 注意 `web_static` 侧那个 `!partial` 现在是**第二道**：单看它已经测不出来了
+  // （206 根本到不了查表那一步），但它是 `cache_tag` 的契约本身 —— 那四个字段
+  // 标识整个文件，切片不能拿它当键。谁哪天改回"206 也压"，它就是拦住串味的
+  // 那一道。
   check_eq_i(static_cast<long long>(s.misses), 3, "应当三次未命中");
   check_eq_i(static_cast<long long>(s.stored), 3, "应当三次存入");
   check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
