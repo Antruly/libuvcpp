@@ -387,10 +387,36 @@ void uvcpp_buf::in_uv_buf(uv_buf_t *bf) {
   capacity_ = bf->len;
 }
 
+namespace {
+
+/// 只分配、**不清零**的一块裸字节。
+///
+/// 与 `uvcpp_alloc_*`（`uvcpp_alloc.h`）的区别只有一条：那一族全是 calloc 语义，
+/// 这一个不是。所以它**故意**待在本文件的匿名命名空间里，不进公开头 —— 同前缀、
+/// 同形状、唯独不保证清零的兄弟放在一起，是个迟早会被误用的陷阱。真要给它
+/// 公开的位置，得先让那一族的名字能一眼区分开。
+///
+/// 不清零为什么值钱：libuv 对 TCP 流给的 `suggested_size` 是 **64 KiB**，而一条
+/// 连接在**一次请求**里会让 alloc 回调跑**两趟** ⇒ 每请求白清 **128 KiB**，而请求
+/// 本身只有百来字节。实测合计 −13.66%（见 `doc/benchmark.md` §4.1）。
+///
+/// 契约：拿到之后、读之前，**不能假设它是 0**。
+void* alloc_raw(size_t sz) {
+#if UVCPP_ENABLE_MEMORY_POOL
+  void* p = uvcpp_enterprise_alloc(sz);
+#else
+  void* p = std::malloc(sz);
+#endif
+  if (p == nullptr) throw std::bad_alloc();
+  return p;
+}
+
+}  // namespace
+
 void uvcpp_buf::alloc_buf(uv_buf_t *bf, size_t len) {
   // 不清零：这块是交给 libuv 的 alloc 回调去**接数据**的，紧接着就被读满，
-  // 清它是纯白付。见 uvcpp_alloc_bytes_raw 的说明。
-  bf->base = static_cast<char*>(uvcpp_alloc_bytes_raw(len));
+  // 清它是纯白付。见上面 alloc_raw() 的说明。
+  bf->base = static_cast<char*>(alloc_raw(len));
   bf->len = len;
 }
 
