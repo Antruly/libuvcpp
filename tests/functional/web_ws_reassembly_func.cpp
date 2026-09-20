@@ -460,6 +460,23 @@ static bool test_unmasked_frame_rejected() {
          s.texts.empty();               // 不该被当成正常消息交付
 }
 
+/**
+ * @brief 未掩码的**控制帧**同样必须被拒（§5.1 对**所有帧**成立，§5.5）。
+ *
+ * 与上一条钉的是**两个不同的位置**：掩码检查要是被放进"数据帧"那一支，
+ * 数据帧照样被抓、上一条仍然是绿的，漏掉的正是控制帧。这条就是钉住它的。
+ * 帧本身完全合法 —— 不分片、负载 4 字节（<125），唯一的违规点只有"没掩码"。
+ */
+static bool test_unmasked_control_frame_rejected() {
+  scenario s;
+  if (!s.start()) return false;
+  if (!s.send(raw_frame(0x9, true, "ping", false))) return false;
+  s.pump_until([&] { return !s.errors.empty(); }, 2000);
+  return s.errors.size() == 1 &&
+         s.errors[0] == static_cast<int>(ws_close_code::PROTOCOL_ERROR) &&
+         s.texts.empty();
+}
+
 /** @brief 文本帧的负载不是合法 UTF-8：§8.1 要求关连接（1007）。 */
 static bool test_invalid_utf8_rejected() {
   scenario s;
@@ -516,6 +533,7 @@ int main() {
     {"close_reason_truncated",    test_close_reason_truncated},
     // 两条 RFC 6455 MUST + 一条反向对照（见上面的说明）
     {"unmasked_frame_rejected",   test_unmasked_frame_rejected},
+    {"unmasked_control_frame_rejected", test_unmasked_control_frame_rejected},
     {"invalid_utf8_rejected",     test_invalid_utf8_rejected},
     {"valid_utf8_still_delivered",test_valid_utf8_still_delivered},
   };
