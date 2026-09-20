@@ -168,11 +168,34 @@ struct sink {
   std::vector<char>* capture = nullptr;
 };
 
-/// @brief 泵 \p rounds 轮，两边都泵（服务端不读时客户端会写不动）。
-inline void pump_both(uvcpp_loop* a, uvcpp_loop* b, int rounds) {
-  for (int i = 0; i < rounds; ++i) {
-    if (a != nullptr) a->run(UV_RUN_NOWAIT);
-    if (b != nullptr) b->run(UV_RUN_NOWAIT);
+/// @brief 把两边泵到「对端账本静置」：连续 \p settle_ms 毫秒 \p s.total 不再涨。
+///
+/// **"排干"要用这一条。** 本文件原来那个 `pump_both(n)`（本次删除）收的是
+/// **圈数**不是毫秒，它只保证"泵了 n 圈"，而"对端把已经发出去的字节收完"是
+/// **另一件事** —— 完成包的投递与对端读出都比圈数慢。没排干的字节会窜进
+/// **下一段的 capture 窗口**，报出来的形状与被测缺陷**逐字相同**。本文件因此
+/// 假红过两次：判据 4 那次**当场抓到了输出**（对端只收到 458465/2162688）；
+/// 判据 2 那次是对端**多**收 131072 = 2 × 64 KiB，成因当时只是推断 —— 两次
+/// 的共同点都是"等的是本地、量的是对端"。
+///
+/// 上限是**墙钟**（`wait_util.h` 那条约定）。返回值就是"前提有没有成立"，
+/// 调用点可以把它断言出来。
+inline bool drain_pair(uvcpp_loop* a, uvcpp_loop* b, const sink& s,
+                       int settle_ms = 150, int limit_ms = 8000) {
+  const std::chrono::steady_clock::time_point t0 =
+      std::chrono::steady_clock::now();
+  size_t last = s.total;
+  long long last_change = 0;
+  for (;;) {
+    const long long now = elapsed_ms(t0);
+    if (now >= limit_ms) return false;
+    if (s.total != last) {
+      last = s.total;
+      last_change = now;
+    } else if (now - last_change >= settle_ms) {
+      return true;
+    }
+    pump_for_pair(a, b, 5);
   }
 }
 
@@ -377,12 +400,16 @@ int main() {
                 std::to_string(rc2) +
                 "（0 说明第一笔的待交付闭包被顶掉了，那一笔的回调永远不会响）");
 
-      pump_both(sloop, &loop, 40000);
+      // 等的是**本地**那个回调（`a`），所以这里用条件等待而不是圈数。
+      wait_until_pair(sloop, &loop, [&] { return a.load() != 0; }, 2000);
       check(a.load() == 1,
             "判据1b: 第一笔在途写的回调响了 " + std::to_string(a.load()) + " 次");
       check(b.load() == 0,
             "判据1b: 被拒的第二笔写居然交付了回调（" + std::to_string(b.load()) +
                 " 次）");
+      // 这笔 64 KiB 也要在对端收干净再往下走 —— 它落在判据 2 那条探测窗口
+      // 之前，漏下去就会伪装成"重发的前缀"。
+      drain_pair(sloop, &loop, rec);
     }
 
     // ---------------------------------------------------------------------
@@ -551,10 +578,29 @@ int main() {
         std::cout << std::endl;
 
         scratch_cli.close();
-        pump_both(sloop, &loop, 2000);
+        pump_for_pair(sloop, &loop, 200);
       }
-      // 探测这几笔也落在对端账本里，收干净再开 capture。
-      pump_both(sloop, &loop, 20000);
+      // 探测这几笔（最多 7 × 64 KiB，对端一次都没读）也落在对端账本里，
+      // **必须收干净**再开 capture。
+      //
+      // 收不干净的后果是判据 2 **假红**：漏下的字节会在 capture 窗口里到账，
+      // 判据 2 于是以"对端多收了若干字节"的形状报出来 —— 与"余量算成整条
+      // `data, len`"**一模一样**。全量 ctest 里撞到过一次：多出 131072 字节，
+      // 正好是 2 × 64 KiB —— 探测块大小与 libuv 在 Windows 上单次读的大小
+      // 都是 64 KiB，所以这是**推断**的成因（下面那条前提断言就是为了把它
+      // 从推断变成当场可判：真凶若在库侧，前提是绿的、判据 2 仍然红）。
+      //
+      // 这里原来用的是 `pump_both`：它收的是**圈数**不是毫秒（本文件头那条
+      // "上限一律墙钟"的约定），圈数会在完成包投递之前先跑完。改成 `drain_pair`
+      // （静置判据），并且**把前提断言出来** —— 静置之后总数还在涨，说明是
+      // 探测没排干，而不是被测的那件事错了。
+      drain_pair(sloop, &loop, rec);
+      const size_t after_probe = rec.total;
+      pump_for_pair(sloop, &loop, 200);
+      check(rec.total == after_probe,
+            "判据2 前提: 探测那几笔没收干净 —— 静置 200ms 后又到账 " +
+                std::to_string(rec.total - after_probe) +
+                " 字节；它们会窜进判据 2 的窗口，把「余量算错」的形状借给它");
 
       const size_t kBigLen = 4u * 1024u * 1024u;
       std::vector<char> big(kBigLen);
@@ -584,7 +630,7 @@ int main() {
                       [&] { return (rec.total - base_total) >= big.size(); },
                       5000);
       wait_until_pair(sloop, &loop, [&] { return fired.load() != 0; }, 2000);
-      pump_both(sloop, &loop, 20000);
+      pump_for_pair(sloop, &loop, 50);  // 上面那条已经钉住"到齐"，这里只是静置
       rec.capture = nullptr;
 
       std::cout << "  [note] 4 MiB 一次写：交付状态=" << status.load()
@@ -602,11 +648,18 @@ int main() {
       //
       // 余量算成 `data, len` 的写法在这里必红：前 n 个字节被发了两遍，对端
       // 收到 `len + n` 字节。
+      //
+      // 失败信息要能自己说清"多出来那部分是谁的"：探测那几笔灌的是 'x'，
+      // 4 MiB 那份是 `pattern_at()`，两者的头长得完全不同 —— 所以把开头
+      // 连续 'x' 的个数打出来，两种成因当场分得开。
+      size_t lead_x = 0;
+      while (lead_x < got.size() && got[lead_x] == 'x') ++lead_x;
       check(rec.total - base_total == big.size(),
             "判据2: 对端收到 " + std::to_string(rec.total - base_total) +
                 " 字节，应为 " + std::to_string(big.size()) +
-                " —— 多出来那部分就是被**重发的前缀**（余量算成整条 `data, len`"
-                " 正是这个形状）");
+                " —— 多出来那部分是被**重发的前缀**（余量算成整条 `data, len`"
+                " 正是这个形状）；收上来那串开头有 " + std::to_string(lead_x) +
+                " 个 'x' 则是探测那几笔没排干（见上面那条前提断言）");
       check(got.size() == big.size(),
             "判据2: 攒下来的字节流长度为 " + std::to_string(got.size()) +
                 "，应为 " + std::to_string(big.size()));
@@ -618,8 +671,9 @@ int main() {
             "判据2: 完成状态 = " + std::to_string(status.load()));
     }
 
-    // 把判据 2 的尾巴收干净
-    pump_both(sloop, &loop, 20000);
+    // 把判据 2 的尾巴收干净。**必须真收干净**：判据 3 的 `base_total` 是在这
+    // 之后采样的，漏下去的字节会算进判据 3 的窗口。
+    drain_pair(sloop, &loop, rec);
 
     // =====================================================================
     // 判据 3：交付确实在 write() 返回**之后**（不是同步交付）
@@ -673,7 +727,7 @@ int main() {
 
       wait_until_pair(sloop, &loop,
                       [&] { return (rec.total - base_total) >= kMsgLen; }, 2000);
-      pump_both(sloop, &loop, 4000);
+      pump_for_pair(sloop, &loop, 50);  // 同上：到齐已由上面那条钉住
       rec.capture = nullptr;
       check(got.size() == kMsgLen, "判据3: 对端收到 " + std::to_string(got.size()) +
                                        " 字节，应为 " + std::to_string(kMsgLen));
@@ -681,7 +735,9 @@ int main() {
             "判据3: 对端收到的那 " + std::to_string(kMsgLen) + " 字节内容不符");
     }
 
-    pump_both(sloop, &loop, 40000);
+    // 判据 3 那 16 字节也要收干净：判据 4 的 `base_total` 采在这之后，漏下去
+    // 就是"多收了若干字节"——与本判据要抓的"重发前缀"是同一个形状。
+    drain_pair(sloop, &loop, rec);
 
     // =====================================================================
     // 判据 4：`uv_try_write` 的负返回不许从 `write()` 漏出去
@@ -743,7 +799,21 @@ int main() {
 
       wait_until_pair(sloop, &loop, [&] { return fired.load() != 0; }, 4000);
       wait_until_pair(sloop, &loop, [&] { return hold_done.load() != 0; }, 4000);
-      pump_both(sloop, &loop, 40000);
+
+      // **下面那条判据量的是对端账本，所以这里等的必须是对端。** 上面两条等的
+      // 是**本地**完成回调 —— libuv 收下这笔写就响，它响了不等于对端收完了。
+      // 从前这里接着一个 `pump_both(..., 40000)`（≈ 80 ms），实测撞到过对端才
+      // 收到 458465/2162688 就断言，报出来像"字节丢了"，而写路径一个字节没错。
+      const size_t want_len = kHoldLen + big.size();
+      const bool arrived =
+          wait_until_pair(sloop, &loop,
+                          [&] { return (rec.total - base_total) >= want_len; },
+                          8000);
+      check(arrived,
+            "判据4 前提: 对端 8s 内只收到 " +
+                std::to_string(rec.total - base_total) + "/" +
+                std::to_string(want_len) +
+                " 字节 —— 下面那条判据量的是对端账本，等的是对端、不是本地回调");
       rec.capture = nullptr;
 
       check(fired.load() == 1,
