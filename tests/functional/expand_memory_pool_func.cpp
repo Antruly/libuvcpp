@@ -14,6 +14,14 @@
  *
  * 这里只走公开接口（uvcpp_buf / uvcpp_alloc），所以内存池关闭时同样有效：
  * 那时用的是 malloc/realloc，逻辑上就该通过。
+ *
+ * 池**语义**的两条（在用块数记账、大块整段归还）不在这里：它们量的是 `get_stats()`，
+ * 池关掉就没有读数，包在 `#if UVCPP_ENABLE_MEMORY_POOL` 里只会让它们从 stdout 里
+ * 静默少掉两行、而 ctest 照旧报这个文件 PASS。按 `tests/functional/CMakeLists.txt`
+ * 里"关掉某模块就把它的用例从目标列表里摘掉"的口径，它们挪去了
+ * `tests/expand/memory_pool_test.cpp`（那个目录由 UVCPP_BUILD_EXPAND 门控，
+ * 池关 ⇒ 目标不存在）。于是这个文件里**一条 `#if` 都不剩**，上面那句
+ * 「开/关都跑」才是句实话。
  */
 #include <iostream>
 #include <string>
@@ -22,9 +30,6 @@
 #include <uvcpp/uvcpp_define.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <uvcpp/uvcpp_alloc.h>
-#if UVCPP_ENABLE_MEMORY_POOL
-#include <expand/uvcpp_page_heap.h>   // get_stats：向系统要了多少字节
-#endif
 
 using namespace uvcpp;
 
@@ -203,151 +208,14 @@ static bool test_buf_doubling_growth() {
   return true;
 }
 
-#if UVCPP_ENABLE_MEMORY_POOL
-// =========================================================================
-// Test: 大块（> 256 KiB）分配之后必须整段归还
-//
-// 回归的是一个**只漏不崩**的缺陷，所以它比前面那些死循环/崩溃的活得更久：
-// `allocate_large_object()` 建好 span 之后没有给 `span->in_use` 记账，而
-// `free_mem()` / `return_large_object()` 判断"这是不是最后一个使用者"用的正是
-// `span->in_use.fetch_sub(1) == 1` —— 从 0 开始减，返回值永远不是 1，
-// `release_span_to_system()` 一次都不会被调用。于是**每一次大块分配都整段泄漏**，
-// 且永不归还。
-//
-// 为什么既有用例没抓到：上面 `test_many_large_blocks()` 的尺寸数组最大是
-// **262144**，而大块路径的门槛是 `size > k_large_size_threshold`(= 262144)
-// —— 差一个字节。再加一档就能撞上。
-//
-// 判据用 `get_stats()` 的 `total_allocated`（向系统要的总字节数，
-// `release_span_to_system()` 里会减回去），它比 RSS 干净：不受分配器与
-// 页面回收策略影响。
-// =========================================================================
-static bool test_large_object_returned() {
-  uvcpp_memory_pool_enterprise& pool = uvcpp_memory_pool_enterprise::instance();
-
-  size_t before_total = 0, before_in_use = 0, before_free = 0;
-  pool.get_stats(before_total, before_in_use, before_free);
-
-  const size_t kBig = 300 * 1024;   // > 256 KiB ⇒ 走大块路径
-  const int kRounds = 8;
-  for (int i = 0; i < kRounds; ++i) {
-    void* p = uvcpp_alloc_bytes(kBig);
-    if (p == nullptr) return false;
-    std::memset(p, 0xA5, kBig);
-    uvcpp_free_bytes(p);
-  }
-
-  size_t after_total = 0, after_in_use = 0, after_free = 0;
-  pool.get_stats(after_total, after_in_use, after_free);
-
-  const size_t growth = after_total > before_total ? after_total - before_total : 0;
-  // 留 1 MiB 余量给 span 管理与线程缓存；有缺陷时这里会是 kRounds * 300+ KiB。
-  if (growth > 1024 * 1024) {
-    std::cout << "    大块释放后没有归还：" << growth << " 字节仍挂在本进程上（"
-              << kRounds << " 轮 × " << kBig << " 字节）" << std::endl;
-    return false;
-  }
-  return true;
-}
-
-// =========================================================================
-// Test: `get_stats()` 的「在用块数」必须跟着分配/释放走
-//
-// 缺陷形状：`g_in_use` 只在两条**冷路径**上 +1（span 路径 `allocate_from_span`、
-// 大对象路径 `allocate_large_object`），而从 thread cache / central cache **命中**
-// 的分配一个计数都不动；`free_mem()` 却**每次释放都 -1**。稳态下块都从缓存里出，
-// 于是这个计数只减不增、往负数漂 —— 本判据在未修的库上实测到 `-75`（读数
-// `18446744073709551541`），对 64 字节的分配「根本不响应」：持有 32 块只涨 0。
-//
-// 判据量的是**增量**：这两个计数是**进程级**累计（`g_in_use` 是文件作用域 atomic），
-// 别的用例早就动过它，绝对值没有意义。
-//
-// 分配之前先**热身**（分配并释放一轮），让 thread cache 备好块 —— 缺陷正在
-// "缓存命中"这条路上，不热身就量不到它。
-// =========================================================================
-static bool test_stats_in_use_follows_alloc() {
-  uvcpp_memory_pool_enterprise& pool = uvcpp_memory_pool_enterprise::instance();
-
-  const size_t kSmall = 64;          // 小块：稳态下由 thread cache 供块
-  const int    kCount = 32;
-  const size_t kBig   = 300 * 1024;  // > 256 KiB ⇒ 走大对象路径
-
-  for (int i = 0; i < kCount; ++i) {  // 热身
-    void* p = uvcpp_alloc_bytes(kSmall);
-    if (p == nullptr) return false;
-    uvcpp_free_bytes(p);
-  }
-
-  size_t t0 = 0, before = 0, f0 = 0;
-  pool.get_stats(t0, before, f0);
-
-  void* blocks[kCount];
-  int held = 0;
-  for (; held < kCount; ++held) {
-    blocks[held] = uvcpp_alloc_bytes(kSmall);
-    if (blocks[held] == nullptr) break;
-  }
-  size_t t1 = 0, during = 0, f1 = 0;
-  pool.get_stats(t1, during, f1);
-  const long long grew = static_cast<long long>(during) - static_cast<long long>(before);
-  if (held != kCount || grew != kCount) {
-    std::cout << "    持有 " << held << " 个 " << kSmall << " 字节块，在用块数只涨了 "
-              << grew << "（期望 " << kCount << "）；读数 " << before << " -> "
-              << during << std::endl;
-    for (int i = 0; i < held; ++i) uvcpp_free_bytes(blocks[i]);
-    return false;
-  }
-
-  // 大对象路径是另一条路：同一条判据，换一条路再量一次。
-  void* big = uvcpp_alloc_bytes(kBig);
-  if (big == nullptr) {
-    for (int i = 0; i < held; ++i) uvcpp_free_bytes(blocks[i]);
-    return false;
-  }
-  size_t t2 = 0, with_big = 0, f2 = 0;
-  pool.get_stats(t2, with_big, f2);
-  const long long big_grew = static_cast<long long>(with_big) - static_cast<long long>(during);
-
-  uvcpp_free_bytes(big);
-  for (int i = 0; i < held; ++i) uvcpp_free_bytes(blocks[i]);
-
-  size_t t3 = 0, after = 0, f3 = 0;
-  pool.get_stats(t3, after, f3);
-
-  if (big_grew != 1) {
-    std::cout << "    一个 " << kBig << " 字节的大对象只让在用块数涨了 " << big_grew
-              << "（期望 1）；读数 " << during << " -> " << with_big << std::endl;
-    return false;
-  }
-  if (after != before) {
-    std::cout << "    全部释放之后在用块数没回到原读数：" << before << " -> " << after
-              << "（差 " << static_cast<long long>(after) - static_cast<long long>(before)
-              << "）" << std::endl;
-    return false;
-  }
-  return true;
-}
-#endif
-
 int main() {
   bool ok = true;
-#if !UVCPP_ENABLE_MEMORY_POOL
-  // 池关掉时这两条没有读数可看。明确打印，不冒充通过 —— `#else` 悄悄跳过会让
-  // "没测过"长得和"通过"一样（`web_ssl_*` 吃过这个亏）。
-  std::cout << "[skip] large_object_returned / stats_in_use_follows_alloc 需要内存池的 "
-               "get_stats() —— 本构建 UVCPP_ENABLE_MEMORY_POOL=0，这两条没跑"
-            << std::endl;
-#endif
   struct { const char* name; bool (*fn)(); } tests[] = {
     {"many_large_blocks", test_many_large_blocks},
     {"large_block_churn", test_large_block_churn},
     {"buf_growth", test_buf_growth},
     {"buf_doubling_growth", test_buf_doubling_growth},
     {"raw_alloc", test_raw_alloc},
-#if UVCPP_ENABLE_MEMORY_POOL
-    {"large_object_returned", test_large_object_returned},
-    {"stats_in_use_follows_alloc", test_stats_in_use_follows_alloc},
-#endif
   };
   for (const auto& t : tests) {
     std::cout << "[expand_memory_pool] " << t.name << std::endl;

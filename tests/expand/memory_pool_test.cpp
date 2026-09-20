@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 #include <atomic>
@@ -355,6 +356,131 @@ static void test_enterprise_stats()
     TEST_PASS();
 }
 
+// ==================== 池语义：统计量必须真的跟着分配走 ====================
+//
+// 下面两条是池**语义**的用例（量的是 `get_stats()`），原来住在
+// tests/functional/expand_memory_pool_func.cpp 里、包在 `#if UVCPP_ENABLE_MEMORY_POOL`
+// 里 —— 池关掉时它们从 stdout 里**静默少掉两行**，而 ctest 照旧报那个文件 PASS。
+// 按 tests/functional/CMakeLists.txt:38-40 的口径（"关掉某模块就把它的用例从目标
+// 列表里摘掉，让「没测」表现为用例不存在，而不是表现为通过"），它们该待在这个由
+// UVCPP_BUILD_EXPAND 门控的目录里：池关 ⇒ 整个目录不建，"没测"表现为**目标不存在**。
+
+// 回归的是**只漏不崩**的缺陷，所以它比死循环/崩溃的活得更久：`allocate_large_object()`
+// 建好 span 之后没给 `span->in_use` 记账，而判断"这是不是最后一个使用者"用的正是
+// `span->in_use.fetch_sub(1) == 1` —— 从 0 开始减，返回值永远不是 1，
+// `release_span_to_system()` 一次都不被调用，于是**每一次大块分配都整段泄漏**。
+// 既有用例抓不到它，是因为它们的尺寸数组最大是 262144，而大块路径的门槛是
+// `size > k_large_size_threshold`(= 262144) —— 差一个字节。
+static void test_enterprise_large_object_returned()
+{
+    auto& pool = uvcpp::uvcpp_memory_pool_enterprise::instance();
+
+    size_t before_total = 0, before_in_use = 0, before_free = 0;
+    pool.get_stats(before_total, before_in_use, before_free);
+
+    const size_t kBig = 300 * 1024;   // > 256 KiB ⇒ 走大块路径
+    const int kRounds = 8;
+    for (int i = 0; i < kRounds; ++i) {
+        void* p = uvcpp::uvcpp_alloc_bytes(kBig);
+        TEST_ASSERT(p != nullptr, "300 KiB alloc should succeed");
+        std::memset(p, 0xA5, kBig);
+        uvcpp::uvcpp_free_bytes(p);
+    }
+
+    size_t after_total = 0, after_in_use = 0, after_free = 0;
+    pool.get_stats(after_total, after_in_use, after_free);
+
+    // 留 1 MiB 余量给 span 管理与线程缓存；有缺陷时这里会是 kRounds * 300+ KiB。
+    const size_t growth = after_total > before_total ? after_total - before_total : 0;
+    if (growth > 1024 * 1024) {
+        std::string msg = "大块释放后没有归还：" + std::to_string(growth) +
+                          " 字节仍挂在本进程上（" + std::to_string(kRounds) + " 轮 × " +
+                          std::to_string(kBig) + " 字节）";
+        TEST_ASSERT(false, msg.c_str());
+    }
+
+    TEST_PASS();
+}
+
+// 「在用块数」必须跟着分配/释放走。
+//
+// 缺陷形状：`g_in_use` 只在两条**冷路径**上 +1（`allocate_from_span`、
+// `allocate_large_object`），而从 thread cache / central cache **命中**的分配一个计数
+// 都不动；`free_mem()` 却**每次释放都 -1**。稳态下块都从缓存里出，于是这个计数只减不增、
+// 往负数漂 —— 未修的库上实测 `-75`（读数 `18446744073709551541`），对 64 字节的分配
+// 「根本不响应」：持有 32 块只涨 0。
+//
+// 判据量的是**增量**：`g_in_use` 是文件作用域 atomic、进程级累计，别的用例早就动过它，
+// 绝对值没有意义。
+//
+// 两次读数之间**不能插入任何分配** —— 这个量具量的就是本进程的分配数，自己构造一次
+// `std::string` 就等于把读数顶偏。所以下面的诊断串只在失败分支里造。
+static void test_enterprise_stats_in_use_follows_alloc()
+{
+    auto& pool = uvcpp::uvcpp_memory_pool_enterprise::instance();
+
+    const size_t kSmall = 64;          // 小块：稳态下由 thread cache 供块
+    const int    kCount = 32;
+    const size_t kBig   = 300 * 1024;  // > 256 KiB ⇒ 走大对象路径
+
+    // 先热身，让 thread cache 备好块 —— 缺陷正在"缓存命中"这条路上，不热身量不到它。
+    for (int i = 0; i < kCount; ++i) {
+        void* p = uvcpp::uvcpp_alloc_bytes(kSmall);
+        TEST_ASSERT(p != nullptr, "warm-up alloc should succeed");
+        uvcpp::uvcpp_free_bytes(p);
+    }
+
+    size_t t0 = 0, before = 0, f0 = 0;
+    pool.get_stats(t0, before, f0);
+
+    void* blocks[kCount];
+    int held = 0;
+    for (; held < kCount; ++held) {
+        blocks[held] = uvcpp::uvcpp_alloc_bytes(kSmall);
+        if (blocks[held] == nullptr) break;
+    }
+    size_t t1 = 0, during = 0, f1 = 0;
+    pool.get_stats(t1, during, f1);
+    const long long grew = static_cast<long long>(during) - static_cast<long long>(before);
+
+    // 大对象路径是另一条路：同一条判据，换一条路再量一次。
+    void* big = uvcpp::uvcpp_alloc_bytes(kBig);
+    size_t t2 = 0, with_big = 0, f2 = 0;
+    pool.get_stats(t2, with_big, f2);
+    const long long big_grew = static_cast<long long>(with_big) - static_cast<long long>(during);
+
+    // 先把块全还回去，再判 —— 这几条都是量增量的用例，留着残块会把后面的量偏。
+    if (big) uvcpp::uvcpp_free_bytes(big);
+    for (int i = 0; i < held; ++i) uvcpp::uvcpp_free_bytes(blocks[i]);
+
+    size_t t3 = 0, after = 0, f3 = 0;
+    pool.get_stats(t3, after, f3);
+
+    if (held != kCount || grew != kCount) {
+        std::string msg = "持有 " + std::to_string(held) + " 个 " + std::to_string(kSmall) +
+                          " 字节块，在用块数只涨了 " + std::to_string(grew) + "（期望 " +
+                          std::to_string(kCount) + "）；读数 " + std::to_string(before) +
+                          " -> " + std::to_string(during);
+        TEST_ASSERT(false, msg.c_str());
+    }
+    TEST_ASSERT(big != nullptr, "300 KiB alloc should succeed");
+    if (big_grew != 1) {
+        std::string msg = "一个 " + std::to_string(kBig) + " 字节的大对象只让在用块数涨了 " +
+                          std::to_string(big_grew) + "（期望 1）；读数 " +
+                          std::to_string(during) + " -> " + std::to_string(with_big);
+        TEST_ASSERT(false, msg.c_str());
+    }
+    if (after != before) {
+        std::string msg = "全部释放之后在用块数没回到原读数：" + std::to_string(before) +
+                          " -> " + std::to_string(after) + "（差 " +
+                          std::to_string(static_cast<long long>(after) -
+                                         static_cast<long long>(before)) + "）";
+        TEST_ASSERT(false, msg.c_str());
+    }
+
+    TEST_PASS();
+}
+
 // ==================== uvcpp_alloc integration test ====================
 
 static void test_uvcpp_alloc_integration()
@@ -407,6 +533,8 @@ int main()
     test_enterprise_alloc_free();
     test_enterprise_get_block_size();
     test_enterprise_stats();
+    test_enterprise_large_object_returned();
+    test_enterprise_stats_in_use_follows_alloc();
 
     // Integration tests
     test_uvcpp_alloc_integration();
