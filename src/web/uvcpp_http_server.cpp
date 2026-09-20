@@ -921,6 +921,13 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
   // 配置一变，要么在门前就 early-return（压根不查表），要么查不到（miss）——
   // 不存在"配置改了、表里还发旧结果"这回事。**谁要把查表提到门前，这条就破了。**
   //
+  // 另外半句（这一条是量出来的）：**提前查表也换不到你要的东西。** 热路径上曾经
+  // 有过一次**纯白付**的拷贝 —— 静态层先把整份文件拷进 `resp.body`（248 KB 那
+  // 档是 253952 B/响应），而命中那一支下一句 `clear()` 就把它丢掉了。消掉它的
+  // 方向是让身体**不拷贝地就位**（`uvcpp_buf` 的共享手柄，见 #17 的 ①），不是把
+  // 查表提前：查表再早，只要身体已经拷进来，那次拷贝照样白付。而且它**早不了**：
+  // 键里的 `cache_tag` 与门槛要看的 `body.size()` 都是身体就位之后才有的。
+  //
   // 键 = `编码字符 + cache_tag`，编码在前（理由见头文件）。今天
   // `http_compress::compress` 没有 level 参数、档位写死 `Z_DEFAULT_COMPRESSION`，
   // 所以 `(编码, tag)` 就是完整的键；**哪天加了档位旋钮，档位也必须进键**，
@@ -968,7 +975,12 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
   resp.body.clone(result.data);
   finish_headers();
 
-  // 存进表要**再拷一份**（响应自己那份还要发出去，不能 move 走）。这一份拷贝
+  // 存进表要**再拷一份**（响应自己那份还要发出去，不能 move 走）—— 但"不能
+  // move"**不等于**"只能拷"：#17 之后两份可以**共用**同一块字节
+  // （`uvcpp_buf::share()` 接一个 `shared_ptr<const std::string>`），表里存
+  // 句柄、命中时把句柄递出去，这一份拷贝就不必付 —— 那是第 ④ 步（变体表按
+  // 句柄存/取），单独一个 PR：它要动 `compress_variant` 的持有形状，比前三步
+  // 更容易踩到"共享出去之后被人改了"。今天仍然照拷：形状没变，而这一份拷贝
   // 换来的是之后每次重复请求都省掉整个 deflate —— 两个数量级的差价。
   // 压完不比原文小就不存：那种 body 本来就压不动，存了也只是占地方。
   if (cacheable && resp.body.size() < src_size) {
