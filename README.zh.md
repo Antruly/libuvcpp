@@ -443,7 +443,9 @@ libuvcpp/
 │   └── expand/    # 内存池测试
 ├── examples/      # 可运行示例（webapp_demo）
 ├── doc/           # 文档
+│   ├── benchmark.md       # 每连接内存、吞吐与稳定性实测
 │   ├── ci-guide.md        # CI 维护指南
+│   ├── http2-status.md    # HTTP/2 支持现状
 │   └── webapp-guide.md    # web 应用框架指南
 ├── cmake/         # CMake 配置模板
 ├── .github/workflows/  # CI 流水线
@@ -516,6 +518,11 @@ libuvcpp/
 - 静态响应带上压缩变体缓存（`1.1.24`）
 - 响应体零拷贝接管，并与头一起作为两块写出去（`nbufs = 2`）（`1.1.28`）；
   变体表按句柄存/取，不再整份拷体（`1.1.31`）
+
+**实测数据（不是估算）** —— 见 [doc/benchmark.md](doc/benchmark.md)：每条空闲连接
+**4.62 KiB**（4 734 B，八档最小二乘，R² = 0.999987，外推 100 万连接 ≈ 4.42 GiB）、单事件循环
+75 k RPS、10 分钟长跑 3 840 万请求 0 错误。那一页还把每连接这个数与
+[Hical](https://github.com/Hical61/Hical) 自己的报告做了对照，并写明了该对照带的口径问题。
 
 ### 配置、打包与 CI
 
