@@ -417,6 +417,65 @@ raw_result raw_exchange(int port, const std::string& request_bytes,
   return out;
 }
 
+/// 在**一条**连接上灌一小批请求，等连接关掉，返回读到的全部字节。
+///
+/// `all` 的**最后一条**必须带 `Connection: close`（前面的保持 keep-alive）：靠
+/// "服务端把连接关掉"来判定"这一批都处理完了"。
+///
+/// 为什么是"一小批"而不是"一口气上千条"：一口气灌的时候服务端的读缓冲会逼近它的
+/// 64 KiB 上限（`internal_alloc_cb` 用的是 libuv 建议的尺寸），而**跨在那个边界上的
+/// 请求会被服务端丢掉**。本机 100% 复现：1100 条里固定丢第 745 条，它的字节区间
+/// 65450..65538 正好盖住 65536；给每条加 19 字节填充，丢的就变成新的跨界那条
+/// （586）。那是**另一个**问题，不该混进这条判据里 —— 每批只灌两三 KB，服务端从空
+/// 缓冲开始读，永远碰不到那个边界。
+///
+/// 为什么不一request 一连接：Windows 上每条连接的开销约 4 ms，1100 条就是 4.5 秒；
+/// 本文件其余用例本来就要十几秒，加起来会顶穿 CI 那条 `--timeout 30`。
+std::string raw_batch(int port, const std::string& all, int wait_ms) {
+  uvcpp_tcp_client client;
+  std::atomic<bool> connected(false);
+  std::atomic<bool> ended(false);
+  std::string got;
+
+  int rc = client.connect("127.0.0.1", port, [&](int st) {
+    if (st != 0) return;
+    connected.store(true);
+    client.read_start_events([&](uvcpp_tcp_client&, const net_read_result& r) {
+      if (r.is_data()) {
+        got.append(r.data, r.size);
+      } else {
+        ended.store(true);
+      }
+    });
+    client.write(all.data(), all.size(), [](int) {});
+  });
+  if (rc != 0) return got;
+
+  uvcpp_loop* loop = client.get_loop();
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); }, uvcpp_test::kWaitMs);
+  if (!connected.load()) return got;
+
+  const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  while (!ended.load()) {
+    loop->run(UV_RUN_NOWAIT);
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+    if (ms >= wait_ms) break;
+    // yield 而不是 sleep：这里每轮都可能已经能推进，睡下去就白等一个定时器周期。
+    std::this_thread::yield();
+  }
+
+  std::atomic<bool> closed(false);
+  if (client.get_tcp() != nullptr) {
+    client.get_tcp()->close([&](uvcpp_handle*) { closed.store(true); });
+  }
+  uvcpp_test::wait_until(loop, [&] { return closed.load(); }, uvcpp_test::kWaitMs);
+  for (int i = 0; i < 30; ++i) loop->run(UV_RUN_NOWAIT);
+
+  return got;
+}
+
 /// 把 `/x HTTP/1.1` 拼成一条完整的头 `Connection: close` 的请求。
 std::string raw_head_request(const std::string& method, const std::string& path) {
   return method + " " + path +
@@ -1025,7 +1084,16 @@ void test_compress_variant() {
   check_eq_i(static_cast<long long>(s.stored), 3, "应当三次存入");
   check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
   check_eq_i(static_cast<long long>(s.entries), 3, "表里应当三条");
-  check(s.bytes > 0, "表内字节数应当 > 0");
+  // 表内字节账：变体表按**句柄**存之后（#17 第 ④ 步），账必须跟着换成 `bytes()`
+  // —— 忘了换的话 `compress_variants_bytes_` 恒为 0，字节那条淘汰腿就**静默**
+  // 瘸了（条数那条还在，所以"能淘汰"这件事不会立刻露馅，只在大文件上悄悄失效）。
+  // 所以这里把账**算死**：三条 entry 的大小之和必须正好等于那三次响应的
+  // Content-Length 之和（a1 / m1 / m2 各存了一条）。
+  const long long sum_cl = std::stoll(raw_header(a1, "content-length")) +
+                           std::stoll(raw_header(m1, "content-length")) +
+                           std::stoll(raw_header(m2, "content-length"));
+  check_eq_i(static_cast<long long>(s.bytes), sum_cl,
+             "表内字节数 == 三条变体的压缩长度之和（换句柄之后账还得对）");
 
   // ---- 零拷贝的账单：这条路上**一次物化都不该发生** ----
   //
@@ -1062,6 +1130,109 @@ void test_compress_variant() {
   }
   check_eq_i(static_cast<long long>(discarded), 0,
              "共享进来的文件体在整条响应链上被物化了若干次（见上面那段说明）");
+}
+
+// ---- 6b. 字节账必须**随淘汰**降（#17 第 ④ 步那条静默腿）----
+
+// 上面那条把字节账算死了，但它只有三条 entry、**一次淘汰都没发生** —— 于是
+// "淘汰时忘了减"这条腿仍然没有判据。而这条腿瘸掉是**静默**的：
+// `compress_variants_bytes_` 只涨不减，条数那条腿还在照常淘汰，所以"能淘汰"
+// 这件事照样是绿的，只有大文件会因为字节上限永远触发不了而悄悄不再命中 ——
+// 这正是"旁路判据把主判据的失效盖住"的形状。
+//
+// 所以这里专门把**条数上限**跑满：条数与字节两条腿共用一个淘汰循环，条数那腿
+// 触发时走的**就是**字节账该被减掉的那一句。造键不同、**体完全一样**的变体
+// （8 KiB 的 'x'），于是每条压缩后的长度都是同一个 C：
+//   * 条数腿：表里稳定在条数上限（1024）条；
+//   * 字节腿：账必须正好等于**剩下那些条**的长度和 = 条数 × C。
+// 少了淘汰那一次 `-=`，账会是"总存入条数 × C" —— 字节那条红，而条数那条**仍然绿**。
+void test_variant_byte_account_on_evict() {
+  std::cout << "[static] 变体表字节账随淘汰降" << std::endl;
+
+  // 必须**大于** `kCompressVariantMaxEntries`（uvcpp_http_server.cpp 里的 1024，
+  // 那条注释写的是"条数封碎片"）。刻意写死这个值：常量哪天真被改了，这条测试
+  // 就该红一次让人回来看 —— 它钉的是那个上限**存在**，不是一个恰好相等的数。
+  const int kWantEntries = 1024;
+  const int kStored = kWantEntries + 76;   // 真的淘汰起来，别卡在边界上
+
+  uvcpp_web_app app;
+  app.set_port(0);
+  app.set_log_level(log_level::WARN);
+  app.set_compression(true);
+  app.set_compress_min_body_size(64);
+
+  // 体一样、键不一样：`cache_tag` 决定变体的键，所以每条压出来都一样长 ——
+  // 字节账才能**算死**，而不是"看着差不多"。
+  app.get("/vb/:i", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                       uvcpp_web_next) {
+    const std::string* i = req.param("i");
+    resp.raw().cache_tag = (i != nullptr) ? *i : std::string();
+    resp.text(std::string(8 * 1024, 'x'));
+    resp.end();
+  });
+
+  if (app.start_background() != 0) {
+    check(false, "字节账随淘汰降：服务启动失败");
+    return;
+  }
+  const int port = app.bound_port();
+  check(port > 0, "字节账随淘汰降：端口有效");
+
+  // 一条连接灌完（流水线）：见 raw_pipeline 的函数头 —— 逐条 raw_exchange 会被
+  // Windows 上 15.6ms 的定时器粒度拖到 17 秒，正好顶穿 ctest 给这个 target 的 30s。
+  // 小批灌入（见 `raw_batch` 的函数头：为什么不一口气灌、也不一请求一连接）。
+  const int kBatch = 20;
+  std::string first_cl;
+  int ok_count = 0;
+  for (int base = 0; base < kStored; base += kBatch) {
+    // 括号不是装饰：windows.h 把 `min` 定义成宏，`std::min(...)` 会被它拆开。
+    const int end = (std::min)(kStored, base + kBatch);
+    std::string chunk;
+    chunk.reserve(static_cast<size_t>(end - base) * 96);
+    for (int i = base; i < end; ++i) {
+      chunk += "GET /vb/" + std::to_string(i) + " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+      // 一批里的最后一条让服务端关连接 —— 我们靠那次关闭判定"这批都处理完了"。
+      chunk += (i + 1 == end) ? "Connection: close\r\n"
+                              : "Connection: keep-alive\r\n";
+      chunk += "Accept-Encoding: gzip\r\n\r\n";
+    }
+    const std::string got = raw_batch(port, chunk, 5000);
+    if (got.empty()) continue;
+    // 数这一批回了几条：每条响应的头里恰好一个 `content-length`（gzip 体里不可能
+    // 出现这个字面量）。这只是**进度/前置**，判据在下面计数器的账上。
+    size_t n = 0, p = 0;
+    while ((p = got.find("content-length", p)) != std::string::npos) { ++n; ++p; }
+    ok_count += static_cast<int>(n);
+    if (first_cl.empty()) first_cl = raw_header(got, "content-length");
+  }
+  check_eq_i(ok_count, kStored, "前置：每一条请求都要有响应");
+
+  app.stop();
+  app.join();
+
+  // 停干净之后才读表：loop 线程已退出，`std::map` 不再有并发写。
+  const uvcpp_http_server::compress_variant_stat s =
+      app.http_server()->compress_variant_stats();
+
+  check_eq_i(static_cast<long long>(s.stored),
+             static_cast<long long>(kStored),
+             "前置：每一条都要真的**存进表里**（没压 / 304 都会让这条先红）");
+  const long long c = std::stoll(first_cl);
+  check(c > 0 && c < 8 * 1024,
+        "前置：压缩后的长度必须真的小于原文（8 KiB 压不动就不该存）");
+
+  check_eq_i(static_cast<long long>(s.entries),
+             static_cast<long long>(kWantEntries),
+             "条数腿：表里稳定在条数上限那条线上");
+  // 这条是主判据。淘汰那句 `-=` 少了、或者账没换到 `bytes()`，"存入条数 × C"
+  // 与"剩余条数 × C"就会差出 76 条 —— 而上面那条**仍然是绿的**。
+  check_eq_i(static_cast<long long>(s.bytes),
+             static_cast<long long>(s.entries) * c,
+             "字节腿：表内字节账 == 剩余条数 × 每条压缩长度"
+             "（淘汰时少减一次，账就会是总存入条数 × C）");
+  std::cout << "[static] 字节账随淘汰降: stored=" << s.stored
+            << " entries=" << s.entries << " bytes=" << s.bytes
+            << " C=" << c << std::endl;
 }
 
 // ---- 7. 尺寸闸门 ----
@@ -1433,6 +1604,7 @@ int main() {
 
   // 自带一个 App 的一条用例，放在共享 App 停掉之后跑（理由见函数上方）。
   test_compress_variant();
+  test_variant_byte_account_on_evict();
 
   cleanup_root();
 
