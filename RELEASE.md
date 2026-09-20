@@ -240,6 +240,10 @@ int main() {
 
 ## 变更日志 (Changelog)
 
+这里只列**已发布**的 tag。`1.1.1` 起的开发版线（当前 `1.1.34-dev`，尚未发布）按主题
+汇总在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
+里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
+
 ### v1.1.0 (2026-09-19)
 
 **新增**:网络层、HTTP/1.1 与 WebSocket、TLS、Web 应用框架

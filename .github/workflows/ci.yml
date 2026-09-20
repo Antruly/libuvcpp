@@ -30,10 +30,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libuv ninja
 
-      # 只跑 master 口径（两份 README 必须说同一个版本），**不**要求等于头文件版本：
-      # README 的版本号语义是「最新发布」，而 1.1.1 起每一档都是开发版、从未发布，
-      # 所以 master 上「README 写着 1.1.0 而版本头是 1.1.34」是**对的**。
-      # 与头文件相等那一条只在出包时判（`package_release.py` 调它）。
+      # README 顶上那几个版本号显示的是**当前源码树**的版本（`UVCPP_VERSION_STRING`，
+      # 开发版带 `-dev`），所以这条在每次 push 上都真判，不分开发版/发布版：
+      # 两条 README 必须一致 + 命中恰好 4 处 + 4 处都等于版本头。
+      # 出包时 `package_release.py` 用 `--expect` 再调一次（`--version` 能覆盖头文件）。
+      # rc=3 是「前提不满足、**没判**」，别读成「不一致」。
       - name: Check doc versions
         run: python3 tests/tools/check_doc_versions.py
 

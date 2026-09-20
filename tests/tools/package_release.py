@@ -405,17 +405,17 @@ def main():
 
     # ---- 发布前校验：README 顶上那几个版本号必须是**正在出的这一版** ----
     # 放在建 stage 之前：README 是 `shutil.copy2` 原样进包的，没有任何一步会看
-    # 一眼里面的版本号 —— 于是切 1.1.34 时会产出 `uvcpp-1.1.34-<platform>.zip`
-    # 里装着一份自称 1.1.0 的 README。与 `_header_version()` 同一个道理：
+    # 一眼里面的版本号 —— 于是切 1.1.35 时会产出 `uvcpp-1.1.35-<platform>.zip`
+    # 里装着一份自称 1.1.34 的 README。与 `_header_version()` 同一个道理：
     # 一个名字说谎的包比不出包更坏，所以这里也是**停**，不是警告。
     #
-    # 这一条**只在 `UVCPP_VERSION_IS_RELEASE = 1`（真发布）时真判**，开发版上
-    # 被校验脚本自己标 `[跳过]`：本脚本也是 CI 的 `config-contract` 档每次 push
-    # 出开发版包用的，而开发版的包与 README **本该不一致** —— README 跟的是
-    # 「最新发布」（今天 1.1.0），包是 1.1.34。第一版没这条区分，那一档直接红。
+    # README 顶上写的是**当前源码树**的版本（与头文件同源，开发版带 `-dev`），
+    # 所以这一条**不分开发版/发布版、每次都能真判**：本脚本也是 CI 的
+    # `config-contract` 档每次 push 出开发版包用的，那一档上 README 与正在出的
+    # 版本本来就该一致（`1.1.34-dev`）。
     #
     # 比的是 `args.version` 而不是头文件版本：`--version` 能覆盖头文件，那时
-    # "正在出的那一版"就是命令行给的那个。
+    # "正在出的那一版"就是命令行给的那个；带不带 `-dev` 仍由头文件里那个宏决定。
     rc = subprocess.call([sys.executable,
                           os.path.join(repo, "tests", "tools",
                                        "check_doc_versions.py"),

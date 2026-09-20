@@ -1,4 +1,4 @@
-[![GitHub release](https://img.shields.io/badge/release-1.1.0-blue.svg)](./)
+[![version](https://img.shields.io/badge/version-1.1.34--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.1.0` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.1.34-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -437,6 +437,82 @@ the CI maintenance guidelines — contributors modifying the CI must read it fir
 
 Contributions are welcome. Please open an issue or PR, keep changes focused, and follow
 the existing code style.
+
+---
+
+## Changelog
+
+The current source tree is **1.1.34-dev** — that is what `UVCPP_VERSION_STRING`
+(`src/uvcpp/uvcpp_version.h`) reports. Only `v1.0.0` and `v1.1.0` were ever tagged; every
+`1.1.x` since is a development version (`UVCPP_VERSION_IS_RELEASE = 0`) that has not been
+released. Release notes for the tagged versions are in [RELEASE.md](./RELEASE.md); below is
+everything that landed in the `1.1.x` line, by theme, with the version each change first
+appeared in. Several of the fixes came from issue reports by the project's first external
+contributor, [@sercebr](https://github.com/sercebr).
+
+### HTTP/2
+
+- [nghttp2](https://github.com/nghttp2/nghttp2) integration, ALPN plumbing, and the h2
+  session/connection layers (`1.1.1`), wired into the request layer and the web app
+  framework (`1.1.2`)
+- `uvcpp_http_client` and `uvcpp_http_server` stay on HTTP/1.1 unless you call
+  `set_http2_enabled()`; `uvcpp_web_app` negotiates the version itself (`1.1.3`)
+- GOAWAY is no longer treated as a no-op, and shutdown says goodbye before tearing a
+  connection down (`1.1.6`, `1.1.7`)
+- Sending past the peer's advertised limit no longer drops frames silently (`1.1.5`)
+- Teardown fixes: two use-after-frees and a leak (`1.1.7`), and no re-entrant `mem_send()`
+  from inside a callback (`1.1.9`)
+
+### HTTP & WebSocket semantics
+
+- Error paths no longer invent a status code, and a connection that drops mid-stream no
+  longer delivers a fabricated `200` (`1.1.10`, `1.1.11`)
+- An explicit `q=0` in `Accept-Encoding` is no longer overridden by `*` (`1.1.17`)
+- `HEAD` and `GET` produce identical headers, compressed responses included (`1.1.18`, `1.1.21`)
+- `206 Partial Content` responses are never compressed — `Content-Range` and
+  `Content-Encoding` contradict each other (`1.1.26`)
+- WebSocket: the server enforces client masking and validates UTF-8 in text frames, and the
+  client actually masks (`1.1.25`)
+- A request straddling a read boundary is no longer swallowed (`1.1.32`)
+- `req.path()` folds repeated slashes, matching how routes are split (`1.1.19`); request
+  header and URL lengths are capped while receiving (`431` / `414`) (`1.1.20`)
+- Static file serving no longer returns `503` on a cache hit (`1.1.15`)
+
+### TLS & networking
+
+- The full certificate chain is loaded, and the TLS version floor and ceiling both apply (`1.1.13`)
+- TLS handshakes have a timeout, with no orphaned timer left behind (`1.1.14`)
+- Destroying a `tcp_client` from inside its own callback no longer accumulates wrappers (`1.1.16`)
+- A dropped peer fires the HTTP client's close observer instead of leaving the callback
+  silent forever (`1.1.4`)
+
+### Memory & buffers
+
+- Large allocations count towards `span->in_use` again — they leaked a whole span each time (`1.1.12`)
+- The second write slot of `uvcpp_write` no longer leaks when its occupant is replaced (`1.1.29`)
+- The memory pool's in-use block count follows allocation again (`1.1.33`)
+- The compression variant table's byte account is derived from the table rather than kept in
+  a counter that could drift, and the byte cap finally has a test (`1.1.34`)
+
+### Performance
+
+- `write()` tries `uv_try_write()` first, so what fits is not copied into the pending buffer (`1.1.22`)
+- `uvcpp_stream::try_write()` no longer copies the `uv_buf_t` array (`1.1.23`)
+- Static responses get a compressed-variant cache (`1.1.24`)
+- Response bodies are taken over without a copy and go out with the headers as two write
+  blocks (`nbufs = 2`) (`1.1.28`); the variant table stores and returns handles instead of
+  whole bodies (`1.1.31`)
+
+### Configuration, packaging & CI
+
+- Enable macros ship with the package, and a macro set that disagrees with the DLL is now a
+  compile-time failure instead of a silently wrong value (`1.1.27`)
+- 22 public headers carry a UTF-8 BOM, so consumers that do not pass `/utf-8` no longer fail
+  in a cascade (`1.1.30`)
+- The Linux package's `libuvcpp.so` moved from `bin/` to `lib/`, where the docs point (`1.1.28`)
+- Six packaging jobs pass `UVCPP_ENABLE_NGHTTP2`, so h2 packages no longer lack it (`1.1.6`)
+- ABI note for consumers: the layout of `uvcpp_buf` (`1.1.28`) and `uvcpp_http_server`
+  (`1.1.34`) changed — **rebuild, do not just swap the binary** (see [RELEASE.md](./RELEASE.md))
 
 ---
 

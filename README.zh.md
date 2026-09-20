@@ -1,4 +1,4 @@
-[![GitHub release](https://img.shields.io/badge/release-1.1.0-blue.svg)](./)
+[![版本](https://img.shields.io/badge/version-1.1.34--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.1.0` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.1.34-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -455,6 +455,72 @@ libuvcpp/
 了解 CI 维护规范 — 修改 CI 的贡献者务必先阅读。
 
 欢迎贡献！请提交 issue 或 PR，保持修改小而专注，并遵循现有代码风格。
+
+---
+
+## 变更日志
+
+当前源码树是 **1.1.34-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+报告的那个串。本仓只打过 `v1.0.0` 与 `v1.1.0` 两个 tag，`1.1.x` 起的每一档都是开发版
+（`UVCPP_VERSION_IS_RELEASE = 0`），**尚未发布**。已发布版本的说明在
+[RELEASE.md](./RELEASE.md)；下面是 `1.1.x` 这条线上落地的全部改动，按主题分组，
+括号里是它**首次出现**的那一档。其中若干条来自本仓第一位外部贡献者
+[@sercebr](https://github.com/sercebr) 报的 issue。
+
+### HTTP/2
+
+- 接入 [nghttp2](https://github.com/nghttp2/nghttp2)、ALPN 基础设施、h2 会话层与连接层
+  （`1.1.1`），并接进请求层与 Web 应用框架（`1.1.2`）
+- `uvcpp_http_client` 与 `uvcpp_http_server` 默认仍是 HTTP/1.1，要显式
+  `set_http2_enabled()`；`uvcpp_web_app` 自己协商版本（`1.1.3`）
+- 不再把 GOAWAY 当没发生；停机时先道别再拆连接（`1.1.6`、`1.1.7`）
+- 发方向超出对端公布的上限时不再静默丢帧（`1.1.5`）
+- 拆连接路上的两个 use-after-free 与一处泄漏（`1.1.7`），回调栈里不再重入
+  `mem_send()`（`1.1.9`）
+
+### HTTP 与 WebSocket 语义
+
+- 错误路径不再编造状态码；连接中途断开时不再交付编出来的 `200`（`1.1.10`、`1.1.11`）
+- `Accept-Encoding` 里显式写出的 `q=0` 不再被 `*` 覆盖（`1.1.17`）
+- `HEAD` 与 `GET` 的头完全一致，压缩响应也一样（`1.1.18`、`1.1.21`）
+- `206 Partial Content` 一律不压缩 —— `Content-Range` 与 `Content-Encoding` 自相矛盾（`1.1.26`）
+- WebSocket：服务端强制客户端掩码、校验文本帧的 UTF-8，客户端也真的掩码了（`1.1.25`）
+- 跨读边界的请求不再被吃掉（`1.1.32`）
+- `req.path()` 折叠连续斜杠，与路由切段看齐（`1.1.19`）；请求头与 URL 长度在收的过程中
+  就被卡住（`431` / `414`）（`1.1.20`）
+- 静态文件服务在缓存命中时不再返回 `503`（`1.1.15`）
+
+### TLS 与网络
+
+- 加载完整证书链，TLS 版本上下限双向生效（`1.1.13`）
+- TLS 握手有超时，且不在超时那条路上留下孤儿定时器（`1.1.14`）
+- 在自己的回调里析构 `tcp_client` 不再按连接数累积包装对象（`1.1.16`）
+- 对端断开时会触发 HTTP 客户端的关闭观察者，而不是让回调永远不来（`1.1.4`）
+
+### 内存与缓冲
+
+- 大块分配重新计入 `span->in_use` —— 在那之前每次分配都整段泄漏（`1.1.12`）
+- `uvcpp_write` 第 2 块槽位换占用者时不再漏一块（`1.1.29`）
+- 内存池的「在用块数」重新跟着分配走（`1.1.33`）
+- 压缩变体表的字节账改成从表里算出来的派生量（不再存一个会漂移的计数器），
+  字节上限那条腿也终于有了判据（`1.1.34`）
+
+### 性能
+
+- `write()` 先试 `uv_try_write()`，吃得下的部分不再拷进待发缓冲（`1.1.22`）
+- `uvcpp_stream::try_write()` 不再白拷一份 `uv_buf_t` 数组（`1.1.23`）
+- 静态响应带上压缩变体缓存（`1.1.24`）
+- 响应体零拷贝接管，并与头一起作为两块写出去（`nbufs = 2`）（`1.1.28`）；
+  变体表按句柄存/取，不再整份拷体（`1.1.31`）
+
+### 配置、打包与 CI
+
+- 使能宏随包发出；宏集与 DLL 不一致从静默垃圾值改为编译期硬失败（`1.1.27`）
+- 22 个公开头带上 UTF-8 BOM，消费者不传 `/utf-8` 时不再级联报错（`1.1.30`）
+- Linux 包里的 `libuvcpp.so` 从 `bin/` 挪到 `lib/`，也就是文档里指的那个位置（`1.1.28`）
+- 六个打包 job 补上 `UVCPP_ENABLE_NGHTTP2`，h2 不再从包里缺席（`1.1.6`）
+- 给消费者的 ABI 提示：`uvcpp_buf`（`1.1.28`）与 `uvcpp_http_server`（`1.1.34`）的布局
+  变过 —— **必须重编，别只换二进制**（见 [RELEASE.md](./RELEASE.md)）
 
 ---
 
