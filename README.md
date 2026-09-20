@@ -1,4 +1,4 @@
-[![version](https://img.shields.io/badge/version-1.1.35--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.2.0-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.1.35-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.2.0` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -447,13 +447,13 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.1.35-dev** — that is what `UVCPP_VERSION_STRING`
-(`src/uvcpp/uvcpp_version.h`) reports. Only `v1.0.0` and `v1.1.0` were ever tagged; every
-`1.1.x` since is a development version (`UVCPP_VERSION_IS_RELEASE = 0`) that has not been
-released. Release notes for the tagged versions are in [RELEASE.md](./RELEASE.md); below is
-everything that landed in the `1.1.x` line, by theme, with the version each change first
-appeared in. Several of the fixes came from issue reports by the project's first external
-contributor, [@sercebr](https://github.com/sercebr).
+The current source tree is **1.2.0** — that is what `UVCPP_VERSION_STRING`
+(`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0` and `v1.2.0` are the tagged
+releases. Everything the `1.1.x` development line accumulated between `v1.1.0` and `v1.2.0`
+is below, by theme, with the version each change first appeared in; release notes for the
+tagged versions are in [RELEASE.md](./RELEASE.md). Several of the fixes came from issue
+reports by the project's first external contributor,
+[@sercebr](https://github.com/sercebr).
 
 ### HTTP/2
 

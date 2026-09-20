@@ -9,10 +9,70 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
-v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 WebSocket、TLS、以及一套 Web 应用框架**，
-并首次提供**预编译的 Windows x64 动态库**。全部为向后兼容的增量。
+## v1.2.0 重点 (Highlights)
+
+`1.1.1` → `1.1.35` 这 35 个开发档全部收进这一版。**无破坏性改动**，但有两处 ABI
+变化（见本节末）。
+
+### 新增
+
+| 新增 | 说明 |
+|---|---|
+| **HTTP/2** | nghttp2 集成、ALPN、h2 会话与连接层。`uvcpp_web_app` **零配置自动协商**（ALPN 挑 h2 / h1.1）；低层的 `uvcpp_http_client` / `uvcpp_http_server` 仍默认 HTTP/1.1，要 h2 得显式 `set_http2_enabled()`。明文上**不做 h2c**：没有 ALPN 就没有协商，自动"升级"只能是猜。 |
+| **发布包里的调试档** | 每个 zip 同时有发布档与调试档（`uvcppd.dll` / `libuvcppd.dll` / `libuvcppd.so`），MSVC 那份另带 `uvcppd.pdb`。**它是用来调试的，不是用来发布的** —— 前提见下面「调试档」一节。 |
+| **性能** | 静态响应的压缩变体缓存（命中时不再重复 deflate）；`write()` 先试 `uv_try_write()`，装得下的部分不进待写缓冲；响应体零拷贝、与响应头合成两个 write block（`nbufs = 2`）一次发出。 |
+
+### 实测数据
+
+[`doc/benchmark.md`](doc/benchmark.md) 是在**用本库构建出的一个真实 webapp**（静态文件 +
+动态路由 + 上传下载 + WebSocket + TLS）上跑出来的读数，不是估算：
+
+- **每条空闲连接 4.62 KiB**（4 734 B）—— 八档最小二乘、**R² = 0.9999869**、除原点外每点
+  残差 ≤ 0.51%，外推 100 万连接 ≈ **4.42 GiB**；
+- 单事件循环 **75 k RPS**（流水线 10–50 深可到 88 k）；静态 **44 k RPS / 107 MB/s**；
+- 10 分钟长跑 **3 840 万请求 / 0 错误**，RSS 漂移 0.2%。
+
+那一页还把这个数与 [Hical](https://github.com/Hical61/Hical) 的自报数据做了对照：单位口径
+是**查实**的（Hical 标 `KB`/`GB`，但它那两个数只在二进读法下自洽 —— `17.44 × 1024 × 10⁶ B
+= 16.63 GiB` 正好对上它自己写的 `~16.6 GB` —— 两边本来就同口径，不必折算），剩下的口径
+问题（内核 TCP 缓冲计不计入、平台不同）逐条写明，**没有单选对本库有利的读法**；归因未
+闭合的那组（TLS 稳态代价）同样说明了为什么不放进去。读数测于 `1.1.33`，该页 §1 逐个
+commit 说明为什么它对 1.2.0 仍然成立。
+
+### 修复
+
+四类问题一并收掉。逐条的一档号在
+[README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
+里 —— 那边是唯一的清单，这边不抄第二份（两份手写的清单正是本仓已经栽过的形状）。
+
+- **协议正确性** —— 错误路径伪造状态码、中途断流送出假的 `200`、`206` 被压缩
+  （`Content-Range` 与 `Content-Encoding` 本就互斥）、`HEAD` 与 `GET` 响应头不一致、
+  `Accept-Encoding` 里显式的 `q=0` 被 `*` 覆盖、跨读边界的请求被吞、请求头/URL
+  超长在接收时就按 `431` / `414` 拒掉；WebSocket 侧服务端强制客户端掩码并校验
+  文本帧 UTF-8，客户端也真的掩码了。
+- **内存** —— 大块分配重新计入 `span->in_use`（此前每块漏掉一整个 span）、
+  `uvcpp_write` 第二个写槽被顶替时泄漏、内存池在用块数不跟分配走、压缩变体表的
+  字节账与表内容脱节。
+- **生命周期** —— h2 拆解的两处 use-after-free 与一处泄漏、TLS 握手留下孤儿定时器、
+  从自己的回调里销毁 `tcp_client` 累积包装对象、对端断开时 HTTP 客户端的关闭
+  观察者永不触发。
+- **打包与消费方契约** —— 模块使能宏随包发布，宏集合与 dll 不一致从"静默读错偏移"
+  改成**编译期硬失败**；22 个公开头补 UTF-8 BOM，消费方不传 `/utf-8` 不再级联报错；
+  Linux 包的 `libuvcpp.so` 从 `bin/` 挪到 `lib/`；六个打包 job 漏传
+  `UVCPP_ENABLE_NGHTTP2` 导致 h2 包缺模块。
+- **发布门槛（本版新加）** —— 包里的两档库各自**自报家门**（Windows 看导入表与
+  `RSDS`，MinGW/Linux 看调试节里的本库源文件名），staging 把两档装反时**拒绝出包**，
+  而不是发一份文件名全对、内容错了的包。
+
+### 换二进制之前
+
+两处 **ABI 变化**：`uvcpp_buf`（`1.1.28`）与 `uvcpp_http_server`（`1.1.34`）的布局
+变了。**要重编，不能只换二进制** —— 旧头文件配新库会读到错的偏移。
 
 ## 新增模块 (New in v1.1.0)
+
+v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 WebSocket、TLS、
+以及一套 Web 应用框架**，并首次提供预编译的动态库。全部为向后兼容的增量。
 
 ### net — 面向对象的网络层
 - `uvcpp_tcp_server` / `uvcpp_tcp_client` — TCP 服务端与客户端
@@ -41,13 +101,18 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 
 ## 预编译产物 (Prebuilt binaries)
 
-本版本提供三个平台的 x64 预编译动态库，**每档都含发布版与调试版两份**：
+本版本提供 **6 个平台**（x64 与 arm64 × MinGW-w64 / MSVC / GCC）的预编译动态库，
+**每档都含发布版与调试版两份**（`v1.1.0` 起就是 6 份，此前这里只列了 3 个 x64 ——
+是这段写漏了，不是少发了包）：
 
 | 平台 | 工具链 | 发布档 | 调试档 |
 |---|---|---|---|
 | Windows x64 | MinGW-w64 (GCC) | `libuvcpp.dll` + `libuvcpp.dll.a` | `libuvcppd.dll` + `libuvcppd.dll.a` |
+| Windows arm64 | MinGW-w64 (GCC) | 同上 | 同上 |
 | Windows x64 | MSVC (VS2022) | `uvcpp.dll` + `uvcpp.lib` | `uvcppd.dll` + `uvcppd.lib` + `uvcppd.pdb` |
+| Windows arm64 | MSVC (VS2022) | 同上 | 同上 |
 | Linux x64 | GCC | `libuvcpp.so` | `libuvcppd.so` |
+| Linux arm64 | GCC | 同上 | 同上 |
 
 每个 zip 内含 `bin/`（动态库）、`lib/`（导入库）、`include/`（公开头，含 libuv、
 nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.pc`）与文档。
@@ -120,7 +185,7 @@ PE 里有没有 `RSDS` 指向自己的 `.pdb`；MinGW / Linux 上比对调试节
 包含它，所以只要 `-I` 指对，宏就自动与这个 dll 一致：
 
 ```bash
-export PKG_CONFIG_PATH=/path/to/libuvcpp-1.1.0-mingw-x64/lib/pkgconfig
+export PKG_CONFIG_PATH=/path/to/libuvcpp-1.2.0-mingw-x64/lib/pkgconfig
 g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvcpp) -o your_app.exe
 ```
 
@@ -282,9 +347,22 @@ int main() {
 
 ## 变更日志 (Changelog)
 
-这里只列**已发布**的 tag。`1.1.1` 起的开发版线（当前 `1.1.35-dev`，尚未发布）按主题
-汇总在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
+这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`；按主题
+汇总的清单在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
+
+### v1.2.0 (2026-09-20)
+
+**新增**:HTTP/2（nghttp2）、发布包里的调试档
+
+- 集成 HTTP/2：nghttp2、ALPN 协商、h2 会话与连接层；`uvcpp_web_app` 零配置自动
+  协商版本，低层 `http_client` / `http_server` 要 h2 得显式打开
+- 每个预编译包同时提供发布档与调试档（`uvcppd.dll` / `libuvcppd.so`），MSVC 那份
+  带 `uvcppd.pdb`
+- 打包器改为让产物**自报家门**：两档装反、`.pdb` 对不上源，都拒绝出包
+- 其余是 `1.1.1` → `1.1.35` 线上的修复与性能改动，按主题见 README 的变更日志
+- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
+  依赖全静态链接
 
 ### v1.1.0 (2026-09-19)
 
@@ -296,7 +374,8 @@ int main() {
 - 新增 `webapp` 模块：路由、中间件、静态资源、流式响应、multipart 上传、文件下发、JSON、日志
 - 修复内存池在 MinGW-w64 上的线程退出崩溃（根因与修法见「已知问题」），
   `expand` 模块首次随发布产物一起提供
-- 预编译动态库：Windows x64 ×2（MinGW-w64 / MSVC）+ Linux x64，依赖全静态链接
+- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
+  依赖全静态链接
 
 ### v1.0.0 (2026-02-02)
 
@@ -313,9 +392,16 @@ int main() {
 ## 下载 (Download)
 
 - Source code
-- `libuvcpp-1.1.0-mingw-x64.zip` — Windows x64 预编译动态库（MinGW-w64，含调试档）
-- `libuvcpp-1.1.0-msvc-x64.zip` — Windows x64 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
-- `libuvcpp-1.1.0-linux-x64.zip` — Linux x64 预编译动态库（含调试档）
+- `libuvcpp-1.2.0-mingw-x64.zip` / `libuvcpp-1.2.0-mingw-arm64.zip`
+  — Windows 预编译动态库（MinGW-w64，含调试档）
+- `libuvcpp-1.2.0-msvc-x64.zip` / `libuvcpp-1.2.0-msvc-arm64.zip`
+  — Windows 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
+- `libuvcpp-1.2.0-linux-x64.zip` / `libuvcpp-1.2.0-linux-arm64.zip`
+  — Linux 预编译动态库（含调试档）
+
+> ⚠️ 两个 Windows 版**互为替代、不可混用**：MinGW-w64 编出来的动态库不能被 MSVC
+> 链接，反之亦然（C++ ABI 不同）。用哪套工具链就下哪个 zip；arm64 同理，别拿 x64 的
+> 包去链 arm64 的程序。
 
 ## 已知问题 (Known Issues)
 

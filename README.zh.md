@@ -1,4 +1,4 @@
-[![版本](https://img.shields.io/badge/version-1.1.35--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.2.0-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.1.35-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.2.0` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -465,12 +465,11 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.1.35-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
-报告的那个串。本仓只打过 `v1.0.0` 与 `v1.1.0` 两个 tag，`1.1.x` 起的每一档都是开发版
-（`UVCPP_VERSION_IS_RELEASE = 0`），**尚未发布**。已发布版本的说明在
-[RELEASE.md](./RELEASE.md)；下面是 `1.1.x` 这条线上落地的全部改动，按主题分组，
-括号里是它**首次出现**的那一档。其中若干条来自本仓第一位外部贡献者
-[@sercebr](https://github.com/sercebr) 报的 issue。
+当前源码树是 **1.2.0** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0` 三个 tag。下面是 `1.1.x` 这条
+开发线从 `v1.1.0` 到 `v1.2.0` 之间落地的全部改动，按主题分组，括号里是它
+**首次出现**的那一档；已发布版本的说明在 [RELEASE.md](./RELEASE.md)。其中若干条
+来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ### HTTP/2
 
