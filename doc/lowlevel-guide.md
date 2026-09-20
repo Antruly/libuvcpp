@@ -324,7 +324,7 @@ int main() {
 
 - **`int` 返回值：0 成功，失败是 libuv 的负错误码**（`UV_EINVAL`、`UV_EALREADY`…）。
   最后一个是粘性的，`get_last_error()` 拿得到。
-- **内存不足抛 `std::bad_alloc`**：`src/uvcpp/uvcpp_alloc.h:94-99`、`uvcpp_loop` 的构造
+- **内存不足抛 `std::bad_alloc`**：`src/uvcpp/uvcpp_alloc.h:121-126`、`uvcpp_loop` 的构造
   （`src/handle/uvcpp_loop.cpp:59-60`）、`uvcpp_handle`/`uvcpp_req` 的拷贝构造与赋值。
 - **`queue_work` 抛的是 `const char*`，不是 `std::exception`**（`src/req/uvcpp_work.cpp:20`）。
   单元测试统一的 `catch (const std::exception&)` **接不住它**。

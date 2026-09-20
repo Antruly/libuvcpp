@@ -88,6 +88,15 @@ void test_status_line() {
   uvcpp_web_response d;
   d.status(200).status_message("Totally Fine");
   check(has(wire(d), "200 Totally Fine\r\n"), "可以覆盖 reason phrase");
+
+  // 非法（负）状态码必须按 **int** 打印。这条断言是**变异测出来的**：把
+  // 序列化里那个 `code < 0` 分支删掉，整个套件一条都不红 —— 格式化状态码的
+  // `append_dec` 收的是无符号，`-1` 会被印成 `18446744073709551615`，
+  // 与重构前 `oss << static_cast<int>(status_code)` 不再逐字一致。
+  uvcpp_web_response e;
+  e.status(-1);
+  check(has(wire(e), "HTTP/1.1 -1 Unknown\r\n"),
+        "非法负状态码按 int 打印，不是 18446744073709551615");
 }
 
 // =========================================================================
