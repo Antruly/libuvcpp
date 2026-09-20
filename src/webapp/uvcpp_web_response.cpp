@@ -373,6 +373,16 @@ uvcpp_web_response& uvcpp_web_response::body_move(uvcpp_buf& src,
   return *this;
 }
 
+uvcpp_web_response& uvcpp_web_response::body_share(
+    const std::shared_ptr<const std::string>& src, const std::string& ct) {
+  // share() 自己会先把旧的放掉（块 + 引用），等价于 body() 里那句 clear()。
+  resp_.body.share(src);
+  if (!ct.empty()) {
+    set_content_type(ct);
+  }
+  return *this;
+}
+
 uvcpp_web_response& uvcpp_web_response::text(const std::string& s) {
   return body(s, "text/plain; charset=utf-8");
 }

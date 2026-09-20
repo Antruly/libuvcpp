@@ -2013,19 +2013,21 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
 
   // 交给 HTTP 层序列化并异步写出。压缩、keep-alive 判定、写队列串行化都在
   // 那里面（对 deferred 响应同样成立）。
-  http_->send_response(client, r.raw());
-
-  // **`body_bytes` 必须在这之后采集。** 压缩跑在上面那个调用**内部**
-  // （`uvcpp_http_server::apply_compression`），它把 `resp.body` 换成了压缩后
-  // 的字节；而 `raw()` 返回的是**引用**，所以此刻读到的才是真正要上线的长度。
-  // 在压缩之前采集的话，字段就与它的契约（"实际写入连接的 body 字节数"）
-  // 对不上了：gzip 过的响应会记成压缩前的长度，而报文里的
-  // `content-encoding: gzip` 又明说了发的是压缩体 —— 两边自相矛盾。
+  // **`body_bytes` 取的是 `send_response` 的返回值，不再回头读 `resp.body`。**
+  // 压缩跑在上面那个调用**内部**（`uvcpp_http_server::apply_compression`），它把
+  // `resp.body` 换成了压缩后的字节，所以"上线多少"只有那一刻知道 —— 以前是靠
+  // "`raw()` 返回引用、之后再读一次"拿到的。那条耦合现在断了：头/体分开走
+  // （`nbufs = 2`）时体会被**移动**出去，函数返回后 `resp.body` 是空的，再读
+  // 一次会静默得到 0（gzip 过的响应会记成 0 字节，而报文里明写着发的是压缩体
+  // —— 比"记成压缩前的长度"更难看）。返回值就是为此取代那次读的。
+  //
+  // 在压缩之前采集当然也不行，理由同上：那时读到的是压缩前的长度。
   //
   // HEAD 那一支要再换算一次：压缩算过了（那正是 HEAD 的 `content-length` 与
   // GET 一致的原因），但字节**一个都没上线**，而契约是"实际写入连接的字节数、
   // HEAD 时为 0"。与流式那处的 `head_only() ? 0 : stream_bytes_written()` 同形状。
-  info.body_bytes = r.head_only() ? 0 : r.body_size();
+  const size_t sent_body_bytes = http_->send_response(client, r.raw());
+  info.body_bytes = r.head_only() ? 0 : sent_body_bytes;
 
   r.notify_sent(info);
 }
