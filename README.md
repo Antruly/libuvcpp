@@ -424,6 +424,7 @@ libuvcpp/
 │   └── expand/    # Memory pool tests
 ├── examples/      # Runnable examples (webapp_demo)
 ├── doc/           # Documentation
+│   ├── benchmark.md       # Measured per-connection memory, throughput, stability
 │   ├── ci-guide.md        # CI maintenance guidelines
 │   └── webapp-guide.md    # Web app framework guide
 ├── cmake/         # CMake config templates
@@ -507,6 +508,12 @@ contributor, [@sercebr](https://github.com/sercebr).
 - Response bodies are taken over without a copy and go out with the headers as two write
   blocks (`nbufs = 2`) (`1.1.28`); the variant table stores and returns handles instead of
   whole bodies (`1.1.31`)
+
+**Measured, not estimated** — see [doc/benchmark.md](doc/benchmark.md): **4.62 KB per idle
+connection** (least squares over eight tiers, R² = 0.999987 → 1 M connections ≈ 4.42 GiB),
+75 k RPS on a single event loop, and a 10-minute soak at 38 M requests / 0 errors. That page
+also compares the per-connection figure against [Hical](https://github.com/Hical61/Hical)'s
+own report, and states the caveats that comparison carries.
 
 ### Configuration, packaging & CI
 
