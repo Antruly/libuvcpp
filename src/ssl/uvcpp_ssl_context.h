@@ -40,16 +40,23 @@ class UVCPP_API uvcpp_ssl_context {
   // Certificate configuration
   // -------------------------------------------------------------------
 
-  /** @brief Load certificate chain from PEM file. */
+  /**
+   * @brief Load certificate chain from PEM file.
+   *
+   * **调用顺序：先装证书，再装私钥。** 两个 `load_private_key_*` 内部都会调
+   * `SSL_CTX_check_private_key`，而 OpenSSL 在「尚无证书」时该调用返回 0 ——
+   * 于是先装私钥**会返回 `false`，但私钥其实已经装进上下文了**：报的是配对检查
+   * 失败，状态却已经改了。补装证书之后不用重装私钥。
+   */
   bool load_certificate_file(const std::string& path);
 
-  /** @brief Load private key from PEM file. */
+  /** @brief Load private key from PEM file. **先装证书再调它**，见上。 */
   bool load_private_key_file(const std::string& path);
 
   /** @brief Load certificate chain from PEM string. */
   bool load_certificate_data(const std::string& pem);
 
-  /** @brief Load private key from PEM string. */
+  /** @brief Load private key from PEM string. **先装证书再调它**，见上。 */
   bool load_private_key_data(const std::string& pem);
 
   /**

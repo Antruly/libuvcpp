@@ -119,7 +119,6 @@ src/http2/uvcpp_h2_session.cpp:416-416 63cfd3e7d0ad3ae5
 src/http2/uvcpp_h2_session.cpp:431-431 b25731b531c240a7
 src/http2/uvcpp_h2_session.cpp:434-434 803916df6e3cc784
 src/http2/uvcpp_h2_session.cpp:481-481 0a71e0fbac3380c6
-src/http2/uvcpp_h2_session.cpp:481-482 c5d066788b54f7ea
 src/http2/uvcpp_h2_session.cpp:482-482 382c8db4b149919a
 src/http2/uvcpp_h2_session.cpp:484-484 2fef97b1cdf27409
 src/http2/uvcpp_h2_session.cpp:486-486 c2d8fe534702df78
@@ -141,7 +140,6 @@ src/http2/uvcpp_h2_session.cpp:761-761 8a9f9b8835829f00
 src/http2/uvcpp_h2_session.cpp:886-886 db4c42e332721502
 src/http2/uvcpp_h2_session.cpp:917-917 9ec3f4c602e73a0a
 src/http2/uvcpp_h2_session.h:108-112 8259e3e59851b3c7
-src/http2/uvcpp_h2_session.h:132-132 35d55de43c6204ce
 src/http2/uvcpp_h2_session.h:141-147 4114d12aeaa34eaa
 src/http2/uvcpp_h2_session.h:168-180 a6b688718f5ac0c1
 src/http2/uvcpp_h2_session.h:187-187 86a5a1a8cb9c6759
@@ -226,6 +224,7 @@ src/ssl/uvcpp_ssl.h:33-33 a9f32c9d1b61bbbe
 src/ssl/uvcpp_ssl.h:90-98 d78c76cac382603d
 src/ssl/uvcpp_ssl_common.h:14-14 e3afebbc8dd690a0
 src/ssl/uvcpp_ssl_common.h:30-35 b92f221e204e8180
+src/ssl/uvcpp_ssl_common.h:50-54 abbb849fa3523a84
 src/ssl/uvcpp_ssl_common.h:87-90 196597d4de2abce3
 src/ssl/uvcpp_ssl_common.h:93-93 99a6434ade443687
 src/ssl/uvcpp_ssl_context.cpp:109-125 79317847de6f1cef
@@ -237,15 +236,16 @@ src/ssl/uvcpp_ssl_context.cpp:278-279 f6ecb2fe3b697647
 src/ssl/uvcpp_ssl_context.cpp:338-338 0f8396b6aa75e591
 src/ssl/uvcpp_ssl_context.cpp:54-54 619a3124e826b0b2
 src/ssl/uvcpp_ssl_context.cpp:68-68 be1132262181b1b7
-src/ssl/uvcpp_ssl_context.h:118-120 ea01d8f31f0fac9a
-src/ssl/uvcpp_ssl_context.h:126-130 9703345ef781a991
-src/ssl/uvcpp_ssl_context.h:159-159 1ceb8023f9545958
+src/ssl/uvcpp_ssl_context.h:125-127 ea01d8f31f0fac9a
+src/ssl/uvcpp_ssl_context.h:131-137 a2d2d7f96ec41aef
+src/ssl/uvcpp_ssl_context.h:166-166 1ceb8023f9545958
 src/ssl/uvcpp_ssl_context.h:18-18 e3afebbc8dd690a0
 src/ssl/uvcpp_ssl_context.h:26-26 e10309625eca914e
 src/ssl/uvcpp_ssl_context.h:31-31 80f59c83737c4642
 src/ssl/uvcpp_ssl_context.h:34-34 84f1b71ee2308b4c
 src/ssl/uvcpp_ssl_context.h:37-37 6c2e2d0ddc8a2ded
-src/ssl/uvcpp_ssl_context.h:66-69 843742827c2d1556
+src/ssl/uvcpp_ssl_context.h:43-49 fc671cd6991d726e
+src/ssl/uvcpp_ssl_context.h:73-76 843742827c2d1556
 src/ssl/uvcpp_ssl_context.h:8-9 3e5c374555875e42
 src/uvcpp.h:22-24 ad320ed9710bf37f
 src/uvcpp/uvcpp_alloc.h:102-105 77239dc8a49a41fa
@@ -308,6 +308,7 @@ src/web/uvcpp_http_request.h:43-43 0dfe63509c9a942f
 src/web/uvcpp_http_response.cpp:25-42 6f93444f1838a050
 src/web/uvcpp_http_response.h:136-136 97e67d4e228ea020
 src/web/uvcpp_http_response.h:40-40 5d21b46f18af0b31
+src/web/uvcpp_http_response.h:45-49 4ce66406b67bf547
 src/web/uvcpp_http_response.h:52-58 69c517704603643e
 src/web/uvcpp_http_server.cpp:108-131 c1cb095526a071cb
 src/web/uvcpp_http_server.cpp:1100-1102 ff86d405a49a1611
@@ -315,7 +316,7 @@ src/web/uvcpp_http_server.cpp:133-146 64883389b798ac8c
 src/web/uvcpp_http_server.cpp:135-138 d0192b315ebc354a
 src/web/uvcpp_http_server.cpp:1368-1368 26cff103a420234e
 src/web/uvcpp_http_server.cpp:1373-1373 e652a9b02282fedb
-src/web/uvcpp_http_server.cpp:1393-1393 7da7fb86e2d402c5
+src/web/uvcpp_http_server.cpp:1393-1394 c2decf99cf2c665d
 src/web/uvcpp_http_server.cpp:1429-1429 21871b8cf1bf3fae
 src/web/uvcpp_http_server.cpp:1434-1434 a3ac561236f1ef02
 src/web/uvcpp_http_server.cpp:1436-1436 3519b99c8268f5e2

@@ -359,8 +359,9 @@ bool ended() const;
 - 不调不会丢响应，但会打一条 WARN 并按现状发送。
 - 一旦 `resp.ended()` 为真，**后面的处理器不再执行**。
 - 流式响应上 `end()` 的语义变成"结束这条流"。
-- 类里**没有** `send()` 成员（`deferred()` 的注释里出现"handler 稍后自己 `send()`"
-  是历史措辞）。
+- 类里**没有** `send()` 成员，`deferred()` / `set_deferred()` 只是本层一枚**没人读**的
+  记录标志；真正决定"框架替不替你发"的是 `uvcpp_http_response::deferred`
+  （`src/web/uvcpp_http_response.h:45-49`）。
 
 ### elsewhere
 

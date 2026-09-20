@@ -340,12 +340,11 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 两条不看源码一定会写错的地方：
 
 **一、无 body 的请求上 `on_request` 与 `on_request_end` 是背靠背的。**
-`src/http2/uvcpp_h2_session.h:132` 的注释写的是"请求体收完……**只在有 body 时触发**"，
-而实现是"只要 `end_stream` 为真就调"（`src/http2/uvcpp_h2_session.cpp:481-482`）——
-HEADERS 自带 END_STREAM 的请求（也就是绝大多数 GET）**也会触发**，而且是紧接着
-`on_request` 同步来的。库内自己就是这么依赖的：
-`src/web/uvcpp_http_server.cpp:1393` 明确写着"无 body 的请求 `on_request` 和
-`on_request_end` 是背靠背的"。**头文件那句注释是错的**，别照抄。
+`on_request_end` 的触发条件是**「这条流的 END_STREAM 到了」**，不是"有请求体才算"
+（`src/http2/uvcpp_h2_session.cpp:482`）。HEADERS 自带 END_STREAM 的请求（也就是
+绝大多数 GET）**也会触发**，而且是紧接着 `on_request` 同步来的 —— 库内自己就依赖
+这一点：`src/web/uvcpp_http_server.cpp:1393-1394` 明说那里**不能** `erase` 流状态，
+无 body 的请求这两下是背靠背的，擦掉之后那条请求就没人派发了。
 
 **二、客户端交付响应只能放 `on_response_end`。** 带 body 的响应里 `on_response` 的
 `end_stream` **恒为 false**，而 DATA 的 END_STREAM 不经过任何回调 ——
@@ -503,7 +502,8 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:732
   [现状 §2](./http2-status.md#2-做了但有折衷写死了)。
 - **不做 h2c**（明文升级）：没有 ALPN 就没有 h2。
 - **服务端不推 PUSH_PROMISE**，`ENABLE_PUSH` 恒为 0，而且也没有发 PUSH 的 API。
-- **`on_fatal` 的头注释比实现多一类触发者** —— 详见
+- **`want_read`/`want_write` 不参与致命判定**：`on_fatal` 只有两类触发者，这两个公开
+  成员本层一处都没读（`src/http2/uvcpp_h2_session.h:168-180`）—— 详见
   [现状 §2](./http2-status.md#2-做了但有折衷写死了)。
 
 ---

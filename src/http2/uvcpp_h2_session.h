@@ -129,7 +129,7 @@ class UVCPP_API uvcpp_h2_session {
     std::function<void(uvcpp_h2_session&, uvcpp_h2_stream&, bool end_stream)>
         on_request;
 
-    /// 请求体收完（服务端侧的 END_STREAM 到了）。只在有 body 时触发。
+    /// 请求体收完（服务端侧的 END_STREAM 到了）。**只要 `end_stream` 为真就触发** —— 裸 GET 也来，且紧跟 `on_request`。
     std::function<void(uvcpp_h2_session&, uvcpp_h2_stream&)> on_request_end;
 
     /// 响应头收全（客户端侧）。

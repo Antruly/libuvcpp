@@ -80,8 +80,8 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 #include <ssl/uvcpp_ssl_context.h>
 
 int main() {
-  // 一个服务端一个上下文。TLS 版本显式给：默认值是 1.2，而枚举注释里写的是 1.3
-  // （见 §10），别靠默认值。
+  // 一个服务端一个上下文。TLS 版本显式给：枚举那几档是**协议下界**，构造函数默认
+  // TLS_1_2（见 §10），别靠默认值。
   uvcpp::uvcpp_ssl_context ssl_ctx(uvcpp::tls_mode::SERVER,
                                    uvcpp::tls_version::TLS_1_2);
   if (!ssl_ctx.is_ready()) return 1;
@@ -155,12 +155,13 @@ std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
 **顺序陷阱：先装证书，再装私钥。** `load_private_key_file` / `load_private_key_data`
 **内部都会调 `SSL_CTX_check_private_key`**（`src/ssl/uvcpp_ssl_context.cpp:159`、`:212`）。
 OpenSSL 在"尚无证书"时该调用返回 0，于是**先装私钥会返回 `false`**——而私钥其实已经
-装进上下文了，属于"报了错但状态已改"。头注释只写了 "Load … from PEM"，没提这回事。
+装进上下文了，属于"报了错但状态已改"——**补装证书之后不用重装私钥**。这个顺序头注释
+现在也写明了（`src/ssl/uvcpp_ssl_context.h:43-49`）。
 
 为什么值得单独调 `check_private_key()`：证书和私钥不配对**在 OpenSSL 里既不影响
 `SSL_CTX_new`、也不影响两个 `load_*` 的返回值**——它只在**每一次握手**时才失败。
 表现是"服务起来了、端口在听、每条连接建完就被拒"，很难往配置上想
-（`src/ssl/uvcpp_ssl_context.h:66-69`）。
+（`src/ssl/uvcpp_ssl_context.h:73-76`）。
 
 ```cpp
 #include <ssl/uvcpp_ssl_context.h>
@@ -183,20 +184,21 @@ bool doc_load_server_cert(uvcpp::uvcpp_ssl_context& ctx,
 ## 5. 校验模式
 
 ```cpp
-// doc-snippet: fragment — 枚举定义摘录，本页要展示的是"注释说校验主机名、实现不校验"
-// 这个对照，注释本身就是内容，不能挪走。
+// doc-snippet: fragment — 枚举定义摘录，本页要讲的是后面那句"两个值目前等价"，
+// 摘的是真注释，不能挪走。
 enum class tls_verify_mode : uint8_t {
   NONE        = 0,   // 不校验对端证书
   PEER        = 1,   // 校验对端证书
-  PEER_STRICT = 2,   // 注释写的是"校验对端 + 主机名" —— 但实现里没有主机名校验
+  PEER_STRICT = 2,   // 校验对端 + 主机名 —— **主机名这一半尚未实现**
 };
 ```
 
-**`PEER` 与 `PEER_STRICT` 行为完全相同。** `set_verify_mode` 把两个值都映射成
+**`PEER` 与 `PEER_STRICT` 目前行为完全相同。** `set_verify_mode` 把两个值都映射成
 `SSL_VERIFY_PEER`（`src/ssl/uvcpp_ssl_context.cpp:278-279`），全仓 grep
 `SSL_set1_host` / `X509_VERIFY_PARAM_set1_host` / `X509_VERIFY_PARAM_set1_ip`
-**零命中**。枚举注释里那句 "Verify peer + hostname" 是**空承诺**——写了 `PEER_STRICT`
-不会让主机名被校验。
+**零命中** —— 主机名那一半从未实现，头注释已如实写明
+（`src/ssl/uvcpp_ssl_common.h:50-54`）。所以 `PEER_STRICT` **挡不住**「证书链可信、
+但签发给别的域名」的对端；需要这个保证的调用方得自己在握手后校验对端证书。
 
 默认值（`src/ssl/uvcpp_ssl_context.cpp:109-125`）：
 
@@ -231,9 +233,9 @@ bool has_alpn_select() const;
 - 名单里**空串或长度超过 255 字节的项会被静默丢掉**，不报错；全部丢完导致编码为空时
   `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:87-90`）。
 - 服务端**挑不中时返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal**
-  （`src/ssl/uvcpp_ssl_context.h:118-120`）——写成 fatal 会让所有老客户端连握手都完不成。
+  （`src/ssl/uvcpp_ssl_context.h:125-127`）——写成 fatal 会让所有老客户端连握手都完不成。
 - `has_alpn_select()` 存在的理由是框架默认值与用户策略的冲突：`uvcpp_web_app` 默认要
-  替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:126-130`）。
+  替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:131-137`）。
 - 每连接的覆盖在 `uvcpp_ssl::set_alpn_protos`，**必须在握手前**调。
 
 ---
@@ -252,7 +254,7 @@ bool has_alpn_select() const;
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。
 
 上下文对象本身的地址被 OpenSSL 长期持有——ALPN 选择回调通过 `arg` 拿到的就是成员
-`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:159`，实现
+`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:166`，实现
 `SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_)`）。
 **所以不要移动它、不要提前析构它。**
 
@@ -329,14 +331,15 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 
 ## 10. 没做的（如实列出）
 
-- **没有主机名校验。** `PEER_STRICT` 是空承诺，见 §5。要校验主机名得自己做。
+- **没有主机名校验。** `PEER_STRICT` 的主机名那一半未实现（头注释已如实标明），见 §5。
+  要校验主机名得自己在握手后做。
 - **完全没有 SNI。** 全仓 grep `SSL_set_tlsext_host_name` / `servername` **零命中**：
   客户端不发 SNI，服务端也不读。一个 IP 上挂多张证书的虚拟主机式 TLS 服务端**服务
   不了**，服务端也无法据 SNI 选证书。
 - **服务端默认没有信任库**，且**不强制**客户端证书，见 §5。
 - **没有 OCSP、没有 session ticket 配置、没有会话复用开关。**
 - **`tls_version` 的值是"下限"，不是"默认版本"。** 枚举（`src/ssl/uvcpp_ssl_common.h:30-35`）
-  的这些值都只被当作协议下界（头注释现在也这么写）；构造函数的默认值是
+  的这些值都只被当作协议下界；构造函数的默认值是
   `tls_version::TLS_1_2`（`src/ssl/uvcpp_ssl_context.h:37`），它**只被送进
   `SSL_CTX_set_min_proto_version()`**，上限不设。实际是"min = TLS1.2，max = OpenSSL 默认"。
   **建议显式传版本。**
