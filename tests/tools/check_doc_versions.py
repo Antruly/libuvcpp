@@ -47,13 +47,12 @@ README 的版本号语义是「**最新发布**」，不是「源码树的开发
     python tests/tools/check_doc_versions.py                  # push 上跑（判据 1+2）
     python tests/tools/check_doc_versions.py --expect-header  # 出包前跑（发布版上 +判据 3）
 
-退出码 0 全过；1 有判据红了；3 前提不满足（git 列不出文件 / 读不到版本头）。
+退出码 0 全过；1 有判据红了；3 前提不满足（列不出根目录 / 读不到版本头）。
 """
 
 import argparse
 import os
 import re
-import subprocess
 import sys
 
 failures = []
@@ -127,20 +126,32 @@ def header_is_release(root):
     return int(m.group(1)) == 1
 
 
-def tracked_markdown(root):
-    """只扫**被 git 跟踪**的 md。
+def scan_files(root):
+    """要扫的文件：**仓库根这一层的 `*.md`**，不递归、不查 git。
 
-    用 `git ls-files` 而不是遍历目录：出包时 `package_release.py` 会在仓库里落下
-    暂存副本（README 也在其中），遍历会把那些副本一起数进来，判据 2 的"恰好 4 处"
-    立刻变成假失败。
+    两条都是踩出来的：
+
+    * **不查 git**：CI 的 `mingw64` 档在 MSYS2 的 MINGW64 环境里跑 python，那套 PATH
+      上**没有 git**（脚本报 `[WinError 2]`，而 runner 自己的 git 在
+      `C:\\Program Files\\Git\\bin`，不在这条 PATH 上）。原来那版用 `git ls-files`，
+      于是那条档上一条判据都没跑就退出 3 —— **判据的前置依赖一个与判据无关的外部
+      命令**，就是一个会静默空转的洞。（`git ls-files` 的部署探测同理：未部署的
+      Linux 档上一次都没跑过它。）
+    * **不递归**：`package_release.py` 出包时会在仓库里落下暂存副本
+      （`dist/libuvcpp-<版本>-<平台>/README.md`），递归会把副本一起数进来，判据 2 的
+      "恰好 4 处"立刻变假失败；`_backup_*/` 也是同样形状。构建树里的三方 README 更
+      麻烦 —— 那里出现 shields 徽章并不罕见，会造出真假难辨的红。
+
+    **边界（写出来是因为它是静默的）**：往里层加的版本串，这条判据看不见。真加了
+    就把它一起挪进来。下面会把实际扫到的文件逐个印出来，让扫描范围可见。
     """
     try:
-        out = subprocess.check_output(["git", "ls-files", "*.md"],
-                                      cwd=root, stderr=subprocess.STDOUT)
-    except (OSError, subprocess.CalledProcessError) as e:
-        return None, "git ls-files 失败：%s" % e
-    files = [l for l in out.decode("utf-8", "replace").splitlines() if l.strip()]
-    return files, None
+        names = sorted(n for n in os.listdir(root) if n.lower().endswith(".md"))
+    except (IOError, OSError) as e:
+        return None, "列不出 %s 下的 md：%s" % (root, e)
+    if not names:
+        return None, "%s 下一个 md 都没有 —— 仓库根传错了？" % root
+    return names, None
 
 
 def main():
@@ -165,12 +176,13 @@ def main():
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     print("仓库根: %s" % root)
 
-    files, err = tracked_markdown(root)
+    files, err = scan_files(root)
     if files is None:
         print("  [红] %s" % err)
         print("\n==== 汇总 ====")
         print("前提不满足，退出 3")
         return 3
+    print("  扫了仓库根下 %d 个 md：%s" % (len(files), " ".join(files)))
 
     hits = []          # [(file, lineno, label, version)]
     for rel in files:

@@ -420,9 +420,17 @@ def main():
                           os.path.join(repo, "tests", "tools",
                                        "check_doc_versions.py"),
                           "--root", repo, "--expect", args.version])
-    if rc != 0:
+    # 只有 rc=1 才是「判据红了」。其余非零（3 = 前提不满足：列不出根目录 / 读不到
+    # 版本头；2 = argparse 把参数判错了）都是「**判据根本没跑**」，必须分开说 ——
+    # 第一版这里一律印成「版本号不一致」，而 mingw64 那档的真实原因是它那条 PATH 上
+    # 没有 git（判据当时依赖 `git ls-files`），报错把人指到了完全另一个方向。
+    if rc == 1:
         print("\n**README 的版本号与要出的版本（%s）不一致，停在这里** —— "
               "修好上面那几条红再出包。" % args.version)
+        return 2
+    if rc != 0:
+        print("\n**版本校验没跑成（rc=%d），所以这一条今天没判 —— 它不等于不一致。**"
+              "上面那几行说了缺什么，修好它再出包。" % rc)
         return 2
 
     spec = PLATFORMS[args.platform]
