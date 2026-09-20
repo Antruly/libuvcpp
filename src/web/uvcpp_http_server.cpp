@@ -774,6 +774,56 @@ void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, int32_t stream_id,
   pump_write(client);
 }
 
+// 压缩变体表的总字节上限。#11 第 3 条量出来的是"重复 deflate"这一项，
+// 而 deflate 的产物通常比原文小，所以按**压缩后**字节记账真正占的内存只会更少。
+#if UVCPP_ZLIB_ENABLE
+static constexpr size_t kCompressVariantMaxBytes = 32u * 1024u * 1024u;
+
+// 单条上限。没有它，一个大文件（静态路径可以到 MiB 级）的变体进来就能把整张表
+// 冲干净 —— 于是"缓存"在最需要它的大文件上反而永远命中不了，典型的最坏组合。
+static constexpr size_t kCompressVariantMaxEntry = 4u * 1024u * 1024u;
+
+// 条数上限。和上面那条**不是一回事**：`compress_variants_bytes_` 只记 body 字节，
+// 而每条另外还挂着一个键串（含着整条路径）和一个 map 节点 —— 一个满是**小文件**的
+// 静态根能造出大量"压完只剩几十字节"的条目，字节数永远涨不到上限、开销却全在键和
+// 节点上。两个上限各封一件事：字节封大文件，条数封碎片。
+static constexpr size_t kCompressVariantMaxEntries = 1024;
+
+void uvcpp_http_server::compress_variant_evict() {
+  while ((compress_variants_bytes_ > kCompressVariantMaxBytes ||
+          compress_variants_.size() > kCompressVariantMaxEntries) &&
+         !compress_variants_.empty()) {
+    // 条数很少（上限数量级是"几十"），线性找最久未用的那次够用，且不必维护
+    // 第二个容器与随之而来的迭代器失效问题。
+    auto victim = compress_variants_.begin();
+    for (auto it = compress_variants_.begin(); it != compress_variants_.end();
+         ++it) {
+      if (it->second.last_used < victim->second.last_used) victim = it;
+    }
+    compress_variants_bytes_ -= victim->second.data.size();
+    compress_variants_.erase(victim);
+  }
+}
+#endif  // UVCPP_ZLIB_ENABLE
+
+uvcpp_http_server::compress_variant_stat
+uvcpp_http_server::compress_variant_stats() const {
+#if UVCPP_ZLIB_ENABLE
+  compress_variant_stat s;
+  s.hits    = compress_variant_hits_;
+  s.misses  = compress_variant_misses_;
+  s.stored  = compress_variant_stored_;
+  s.entries = compress_variants_.size();
+  s.bytes   = compress_variants_bytes_;
+  return s;
+#else
+  // 头文件里明写了"zlib 关掉时返回全零、调用方不必跟着条件编译"，而成员本身
+  // 在 `#if` 里 —— 少了这条分支，zlib 一关整个文件就编不过。本机默认树恰好是
+  // 开的（CMakeLists 默认 OFF，webapp 树一律 ON），所以只在别的树/CI 上看得见。
+  return compress_variant_stat();
+#endif
+}
+
 bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
                                           uvcpp_http_response& resp) {
 #if UVCPP_ZLIB_ENABLE
@@ -818,21 +868,73 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
                                        : compress_excluded_types_;
   if (!http_compress::should_compress(resp.content_type(), excluded)) return false;
 
+  // 到这里"要压"已经定了。缓存只在**这之后**介入 —— 它记的是"同一份输入算过
+  // 没有"，不参与上面任何一个判断。
+  //
+  // 这也是四个运行时旋钮（`set_compression_enabled` / `set_compress_min_body_size`
+  // / `set_compress_excluded_types` / `add_compress_excluded_type`）天然安全的原因：
+  // 配置一变，要么在门前就 early-return（压根不查表），要么查不到（miss）——
+  // 不存在"配置改了、表里还发旧结果"这回事。**谁要把查表提到门前，这条就破了。**
+  //
+  // 键 = `编码字符 + cache_tag`，编码在前（理由见头文件）。今天
+  // `http_compress::compress` 没有 level 参数、档位写死 `Z_DEFAULT_COMPRESSION`，
+  // 所以 `(编码, tag)` 就是完整的键；**哪天加了档位旋钮，档位也必须进键**，
+  // 否则表里会静默发出旧档位压出来的字节。
+  const bool cacheable = !resp.cache_tag.empty() &&
+                         resp.body.size() <= kCompressVariantMaxEntry;
+  const std::string vkey =
+      cacheable ? std::string(1, best == http_compress_method::GZIP ? 'g' : 'd') +
+                      resp.cache_tag
+                : std::string();
+
+  // 头这三件事命中与未命中都要做，且**必须逐字一样** —— 命中路径与现算是同一个
+  // 响应形状，差别只在字节从哪来。
+  const auto finish_headers = [&resp, best]() {
+    resp.set_header("content-encoding",
+                    best == http_compress_method::GZIP ? "gzip" : "deflate");
+    // Remove any stale Content-Length — to_string() re-adds it from the new
+    // (compressed) body size.
+    resp.remove_header("content-length");
+    // Vary for CDN/proxy cache correctness (RFC 7231 §7.1.4). Set whenever we
+    // made an encoding decision, so a cache never serves a compressed body to a
+    // client that cannot decode it.
+    if (!resp.has_header("vary")) resp.set_header("vary", "accept-encoding");
+  };
+
+  if (cacheable) {
+    auto it = compress_variants_.find(vkey);
+    if (it != compress_variants_.end()) {
+      ++compress_variant_hits_;
+      it->second.last_used = ++compress_variant_clock_;
+      resp.body.clear();
+      resp.body.clone(it->second.data);
+      finish_headers();
+      return true;
+    }
+    ++compress_variant_misses_;
+  }
+
+  const size_t src_size = resp.body.size();
   auto result = http_compress::compress(resp.body.get_const_data(),
                                         resp.body.size(), best);
   if (!result.success) return false;
 
   resp.body.clear();
   resp.body.clone(result.data);
-  resp.set_header("content-encoding",
-                  best == http_compress_method::GZIP ? "gzip" : "deflate");
-  // Remove any stale Content-Length — to_string() re-adds it from the new
-  // (compressed) body size.
-  resp.remove_header("content-length");
-  // Vary for CDN/proxy cache correctness (RFC 7231 §7.1.4). Set whenever we
-  // made an encoding decision, so a cache never serves a compressed body to a
-  // client that cannot decode it.
-  if (!resp.has_header("vary")) resp.set_header("vary", "accept-encoding");
+  finish_headers();
+
+  // 存进表要**再拷一份**（响应自己那份还要发出去，不能 move 走）。这一份拷贝
+  // 换来的是之后每次重复请求都省掉整个 deflate —— 两个数量级的差价。
+  // 压完不比原文小就不存：那种 body 本来就压不动，存了也只是占地方。
+  if (cacheable && resp.body.size() < src_size) {
+    compress_variant v;
+    v.data.clone(resp.body);
+    v.last_used = ++compress_variant_clock_;
+    compress_variants_bytes_ += v.data.size();
+    compress_variants_[vkey] = std::move(v);
+    ++compress_variant_stored_;
+    compress_variant_evict();
+  }
   return true;
 #else
   (void)ctx;

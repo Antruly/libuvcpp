@@ -356,6 +356,25 @@ class UVCPP_API uvcpp_http_server {
   void add_compress_excluded_type(const std::string& mime_type);
 #endif
 
+  /**
+   * @brief 压缩变体缓存的只读计数。
+   *
+   * 存在的理由与 `uvcpp_tcp_client::try_write_stats()` 逐字相同：没有它，
+   * "缓存根本没被用上"与"缓存命中了"在用例里**完全同形** —— 两种情况发出去
+   * 的字节一模一样（那正是缓存的定义），只比响应体的话，把缓存整个拆掉也全绿。
+   *
+   * 与 `apply_compression` 一样声明上不设 `UVCPP_ZLIB_ENABLE` 条件（zlib 关掉
+   * 时返回全零），这样调用方不必跟着条件编译。
+   */
+  struct compress_variant_stat {
+    uint64_t hits   = 0;  ///< 查表命中，省掉了一次 deflate
+    uint64_t misses = 0;  ///< 带 cache_tag 但表里没有（压完后按需存入）
+    uint64_t stored = 0;  ///< 实际存进表的次数（不可压、压完更大时不存）
+    size_t   entries = 0; ///< 当前表内条数
+    size_t   bytes   = 0; ///< 当前表内字节
+  };
+  compress_variant_stat compress_variant_stats() const;
+
   // -------------------------------------------------------------------
   // Loop control
   // -------------------------------------------------------------------
@@ -890,6 +909,33 @@ class UVCPP_API uvcpp_http_server {
   bool compress_enabled_ = true;
   size_t compress_min_body_ = 1024;
   std::vector<std::string> compress_excluded_types_;
+
+  // -------------------------------------------------------------------
+  // 压缩变体缓存（#11 第 3 条）：`(cache_tag, 编码) -> 压好的字节`
+  //
+  // **只记"算过的"，不决定"要不要算"**：门槛、MIME 表、accept-encoding 协商
+  // 仍然只在 `apply_compression` 一处判，而且永远是**先判完、确定要压**才来
+  // 查表。所以本缓存没有可能与配置打架 —— 它不参与任何决策。
+  //
+  // 只有填了 `cache_tag` 的响应有资格进来（今天只有静态文件那条路填），
+  // 于是动态响应的行为与本缓存逐字无关，爆炸半径圈死在一个路由族。
+  //
+  // 键是 `编码字符 + cache_tag`，**编码在前**是有意的：单字符前缀使
+  // `(编码, tag) -> 键` 单射，后缀则不然（tag 自己含分隔符时会撞成同一个键）。
+  // -------------------------------------------------------------------
+  struct compress_variant {
+    uvcpp_buf data;
+    uint64_t  last_used = 0;
+  };
+  std::map<std::string, compress_variant> compress_variants_;
+  size_t   compress_variants_bytes_ = 0;
+  uint64_t compress_variant_clock_  = 0;
+  uint64_t compress_variant_hits_   = 0;
+  uint64_t compress_variant_misses_ = 0;
+  uint64_t compress_variant_stored_ = 0;
+
+  /// 按字节淘汰最久未用的若干条；单条可能很大，条数上限卡不住内存。
+  void compress_variant_evict();
 #endif
 };
 

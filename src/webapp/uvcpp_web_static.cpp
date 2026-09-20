@@ -961,6 +961,28 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
   } else if (j->data) {
     resp.body(j->data->data() + static_cast<size_t>(first),
               static_cast<size_t>(count), std::string());
+
+    // 压缩变体缓存的键（见 `uvcpp_http_response::cache_tag`）。
+    //
+    // 用**文件身份**而不是 URL：两个 URL 落到同一个文件（`/` 与 `/index.html`）
+    // 应当共用同一份压缩结果。这四个字段就是 LRU 校验原始条目用的那一组
+    // （`:780-781` 的 `key/size/mtime_sec/mtime_nsec`），所以"文件变了"必然
+    // 导致键变，不需要任何额外的失效逻辑。
+    //
+    // **`partial` 一律不设 tag。** 这四个字段标识的是**整个文件**，而 body 是
+    // `first` 起的 `count` 个字节 —— 同一个文件的全量请求与任意一段 Range 会
+    // 算出**同一个键**，body 却完全不同。两种次序都错、都不报错：先全量后 Range
+    // 时 206 会拿到整个文件的 gzip（头声明 206、体是整个文件）；先 Range 后全量
+    // 更贵 —— 一个正常的 200 会静默收到那段切片的 gzip，调用方无从分辨。
+    //
+    // 也可以把 `first`/`count` 编进键、让每段 Range 各自成条，但那样 Range 就能
+    // 用任意多的键把"整个文件的变体"挤出去（淘汰只看最近使用），而换来的只是
+    // "同一段 Range 重复请求"这一个边角收益。不值。
+    if (!partial) {
+      resp.raw().cache_tag = j->fs_path + "\x1f" + std::to_string(j->size) +
+                             "\x1f" + std::to_string(j->mtime_sec) + "\x1f" +
+                             std::to_string(j->mtime_nsec);
+    }
   }
 
   // **HEAD 的次序是"先把 body 装好，再让序列化把 body 丢掉"。**

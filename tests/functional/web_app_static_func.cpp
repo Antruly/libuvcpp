@@ -43,6 +43,7 @@
 #include "net/uvcpp_tcp_client.h"
 #include <web/uvcpp_http_client.h>
 #include <web/uvcpp_http_common.h>
+#include <web/uvcpp_http_server.h>
 #include <webapp/uvcpp_log.h>
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_util.h>  // web_real_path（搭链接时要把目标转绝对）
@@ -882,6 +883,128 @@ void test_head_compressed() {
              "大文件的 HEAD 也不能有 body");
 }
 
+// ---- 6c. 压缩变体缓存（#11 第 3 条）----
+//
+// **判据不能只看响应体**：命中与未命中发出去的字节**逐字相同**（那正是缓存的定义），
+// 所以只比响应的话，把整张表拆掉也照样全绿。唯一看得见它的是只读计数器
+// `compress_variant_stats()` —— 与 `try_write_stats()` 存在的理由逐字相同。
+//
+// 自己起一个 App 而不是复用 main 里那个：计数断言要钉死具体数字（"恰好一次命中"），
+// 而复用共享 App 的话，前面任何一条带 gzip 的用例都会把数字改掉
+// （`test_head_compressed` 的 GET 与 HEAD 就共用同一个变体键 —— 两边都是全量、
+// 路径又相同），判据于是随执行顺序漂移。
+//
+// 挂载点 `cache_max_entries = 0` **关掉静态层 LRU**：于是每次请求都重新读盘，
+// 量到的命中只可能来自压缩变体缓存本身，不会与静态层缓存混淆。Range 保持默认
+// （开）—— 有一段用例专门验"206 不设 tag"，它得真发 Range 才有意义。
+void test_compress_variant() {
+  std::cout << "[static] 压缩变体缓存" << std::endl;
+
+  const std::string r(k_root);
+  // 两半**内容必须不同**，而且区间取的是**第一半**（不是整个文件）：切片与全量
+  // 压出来的字节必须本来就不同，否则下面"切片 ≠ 全量"那两条判据自己就把自己
+  // 废掉了 —— 区间要是正好覆盖整个文件，两者压出来逐字节相同。
+  check(write_file(r + "/vcv_range.txt", std::string(4096, 'r') +
+                                              std::string(4096, 's')),
+        "前置：写入 vcv_range.txt（两半内容不同，区间只取第一半）");
+  check(write_file(r + "/vcv_mtime.txt", std::string(4096, 'a')),
+        "前置：写入 vcv_mtime.txt");
+
+  uvcpp_web_app app;
+  app.set_port(0);
+  app.set_log_level(log_level::WARN);
+  uvcpp_web_static_options nolru;
+  nolru.cache_max_entries = 0;
+  app.serve_static("/vcv", k_root, nolru);
+
+  if (app.start_background() != 0) {
+    check(false, "压缩变体：服务启动失败");
+    return;
+  }
+  const int port = app.bound_port();
+  check(port > 0, "压缩变体：端口有效");
+
+  auto gz = [port](const std::string& path, const std::string& extra) {
+    raw_result rr = raw_exchange(
+        port,
+        "GET " + path +
+            " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+            "Accept-Encoding: gzip\r\n" +
+            extra + "\r\n",
+        3000);
+    return rr.ok ? rr.raw : std::string();
+  };
+
+  // (1) Range **先发**：206 不设 tag，它既不进表也不受表影响。
+  const std::string q1 = gz("/vcv/vcv_range.txt", "Range: bytes=0-4095\r\n");
+  // (2)(3) 全量跟在同一文件后面：206 要是也设了 tag，这次就会命中 (1) 存的切片。
+  const std::string a1 = gz("/vcv/vcv_range.txt", "");
+  const std::string a2 = gz("/vcv/vcv_range.txt", "");
+  // (4) 同一段 Range 再来一次：这次会命中 (2) 存的整份文件（如果 206 设了 tag）。
+  const std::string q2 = gz("/vcv/vcv_range.txt", "Range: bytes=0-4095\r\n");
+  // (5) 同一路径、**同一尺寸**、内容不同 ⇒ 只有 mtime 能把两者分开
+  const std::string m1 = gz("/vcv/vcv_mtime.txt", "");
+  check(write_file(r + "/vcv_mtime.txt", std::string(4096, 'b')),
+        "前置：改写 vcv_mtime.txt（尺寸不变）");
+  const std::string m2 = gz("/vcv/vcv_mtime.txt", "");
+
+  app.stop();
+  app.join();
+
+  // 计数**只能在 App 停干净之后读**：loop 线程已退出，变体表不再有并发写。
+  // （与上面 cache 那组同一个理由 —— 表是 `std::map`，并发读不是安全的。）
+  const uvcpp_http_server::compress_variant_stat s =
+      app.http_server()->compress_variant_stats();
+  std::cout << "[static] compress_variant: hits=" << s.hits
+            << " misses=" << s.misses << " stored=" << s.stored
+            << " entries=" << s.entries << " bytes=" << s.bytes << std::endl;
+
+  check(!a1.empty() && !a2.empty() && !q1.empty() && !q2.empty() &&
+            !m1.empty() && !m2.empty(),
+        "压缩变体：六个请求都要有响应");
+
+  // **前置断言**：这条路由必须**真的**被压了。没有它，下面"两次字节相同"会退化成
+  // "两次都没压、都等于原始长度"而假绿 —— 与 `test_head_compressed` 同一个坑。
+  check_eq(raw_header(a1, "content-encoding"), "gzip",
+           "前置：第一次确实带 content-encoding: gzip");
+  check_ne(raw_header(a1, "content-length"), "8192",
+           "前置：压缩后的 Content-Length 必须不等于原始长度");
+  check_eq_i(static_cast<long long>(raw_body(a1).size()),
+             std::stoll(raw_header(a1, "content-length")),
+             "前置：第一次报的长度必须真的读得满");
+
+  // 命中与未命中发出去的**形状必须逐字相同** —— 差别只在字节从哪来。
+  check_eq(raw_header(a2, "content-encoding"),
+           raw_header(a1, "content-encoding"),
+           "第二次的 Content-Encoding 与第一次相同");
+  check_eq(raw_header(a2, "content-length"), raw_header(a1, "content-length"),
+           "第二次的 Content-Length 与第一次相同");
+  check(raw_body(a1) == raw_body(a2), "第二次的字节与第一次逐字相同");
+
+  // (1)(4) 206 的体必须是**那段切片自己**压出来的，不能是整份文件的。两种错序
+  // 各由一条抓住：
+  check_eq_i(raw_status(q1), 206, "区间请求应当 206");
+  check_eq_i(raw_status(q2), 206, "重复的区间请求应当 206");
+  check(raw_body(a1) != raw_body(q1),
+        "先 Range 后全量：全量不能拿到那段切片的变体");
+  check(raw_body(a1) != raw_body(q2),
+        "先全量后 Range：区间不能拿到整份文件的变体");
+  check(raw_body(q1) == raw_body(q2),
+        "同一段区间两次都该现压，结果逐字相同");
+
+  // (5) 内容变了（尺寸没变）必须重新压：发旧变体出去就是**陈旧内容**。
+  check(raw_body(m1) != raw_body(m2),
+        "同尺寸改写后必须重新压，不能发旧变体的字节");
+
+  // 计数：三次全量各存一次、第二次全量是唯一一次命中；两次 Range **一次都不算**
+  // —— 这正是"206 不设 tag"的判据。若 206 也设了 tag，这里会多出两次未命中。
+  check_eq_i(static_cast<long long>(s.misses), 3, "应当三次未命中");
+  check_eq_i(static_cast<long long>(s.stored), 3, "应当三次存入");
+  check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
+  check_eq_i(static_cast<long long>(s.entries), 3, "表里应当三条");
+  check(s.bytes > 0, "表内字节数应当 > 0");
+}
+
 // ---- 7. 尺寸闸门 ----
 
 void test_size_gate() {
@@ -1248,6 +1371,9 @@ int main() {
 
     (void)dflt;
   }
+
+  // 自带一个 App 的一条用例，放在共享 App 停掉之后跑（理由见函数上方）。
+  test_compress_variant();
 
   cleanup_root();
 
