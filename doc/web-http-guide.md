@@ -477,25 +477,31 @@ int doc_client_sync() {
 ```
 
 **同一个 client 上同步与异步不能交叉**，越界一律 `UV_ENOTSUP`
-（`src/web/uvcpp_http_client.cpp:224`、`:373`、`:496`、`:510`）。
+（`src/web/uvcpp_http_client.cpp:224`、`:373`、`:510`、`:524`）。
 
 ### 三个容易写错的地方
 
-**一、`set_keep_alive()` 是死代码。** `keep_alive_` 只被写、从不被读
-（`src/web/uvcpp_http_client.cpp:616` 写、`:701` setter、`h:326` 初值，
-**没有任何读点**），而请求报文里的 `connection: keep-alive` 是
-`uvcpp_http_request::to_string()` 无条件补的（`src/web/uvcpp_http_request.cpp:130-133`）。
-响应说 `Connection: close` 时客户端会把标志置 false，**但没人在意** ——
-第二次 `send()` 照样往一条服务端已决定关闭的连接上写。
+**一、keep-alive 有两个方向：请求那头听调用方的，响应那头听对端的。**
+`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:338` 初值 `true`、
+`:200` 声明、`src/web/uvcpp_http_client.cpp:740` setter）。`set_keep_alive(false)`
+会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:452-467`）；
+默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是
+`uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:130-133`）。
+**响应**说的同样作数：`on_response_complete()` 按 llhttp 算出的
+`should_keep_alive()`（HTTP 版本默认值 + `Connection` 的**逗号列表**）判断这条连接
+还能不能再用，不能就当场清掉 `HTTP_CLIENT_CONNECTED`
+（`src/web/uvcpp_http_client.cpp:636-656`）—— 此后第二次 `send()` 拿到
+`UV_ENOTCONN`，而不是往一条服务端已决定关闭的连接上写。
+`tests/functional/web_http_client_keepalive_func.cpp` 把这三条都钉住了。
 
 **二、开了 OpenSSL 的构建里 `send_wait()` 走的是阻塞 fd，不是事件循环。**
-`src/web/uvcpp_http_client.cpp:499-516` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
+`src/web/uvcpp_http_client.cpp:513-530` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
 有 TLS 就走阻塞路径，没有才走"轮询 loop + 1ms sleep"的异步实现。
 后果是**同一个程序的 keep-alive 行为会随构建而变**（`.cpp:849-852` 把这段历史写下来了）。
 
 **三、阻塞路径的 `timeout_ms` 只有 Windows 生效。**
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 两处都被 `#ifdef _WIN32` 包着
-（`src/web/uvcpp_http_client.cpp:967-971`、`:1018-1022`），POSIX 上**不设**，
+（`src/web/uvcpp_http_client.cpp:1006-1010`、`:1057-1061`），POSIX 上**不设**，
 `send_wait()` / `send_wait_plain()` 在 Linux/macOS 上可以无限阻塞。头文件现在把这个
 缺口写在参数说明里（`src/web/uvcpp_http_client.h:131-133`、`:147-151`），
 不再让读者以为有超时兜底。

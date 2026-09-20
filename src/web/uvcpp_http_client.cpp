@@ -445,15 +445,29 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   // Serialize request and write
   set_status(HTTP_CLIENT_SENDING);
 
+  // `set_keep_alive(false)` 要在**线上**兑现，否则这个 setter 的效果是零：报文里
+  // 永远是 `uvcpp_http_request.cpp:131-132` 兜底加的那条 `connection: keep-alive`。
+  // 调用方自己设过 `connection` 就不覆盖。默认 `keep_alive_` 为真，所以常规路径
+  // 上一次额外拷贝都不做。
+  const bool add_conn_close = !keep_alive_ && !req.has_header("connection");
+
 #if UVCPP_ZLIB_ENABLE
   // If compression enabled, add Accept-Encoding (on a mutable copy)
   uvcpp_http_request req_copy = req;
   if (compress_enabled_ && !req_copy.has_header("accept-encoding")) {
     req_copy.set_header("accept-encoding", "gzip, deflate");
   }
+  if (add_conn_close) req_copy.set_header("connection", "close");
   std::string raw = req_copy.to_string();
 #else
-  std::string raw = req.to_string();
+  std::string raw;
+  if (add_conn_close) {
+    uvcpp_http_request req_copy = req;
+    req_copy.set_header("connection", "close");
+    raw = req_copy.to_string();
+  } else {
+    raw = req.to_string();
+  }
 #endif
 
   tcp_->write(raw.c_str(), raw.size(), [this, tok](int status) {
@@ -610,10 +624,35 @@ void uvcpp_http_client::on_response_complete() {
   pending_resp_.headers        = parser_->get_headers();
   pending_resp_.body.clone(body_buf_);
 
-  // Detect keep-alive from response header
-  std::string conn = http_get_header(pending_resp_.headers, "connection");
-  if (http_name_equal(conn, "close")) {
-    keep_alive_ = false;
+  // 这条连接**还能不能再用**。
+  //
+  // `parser_->should_keep_alive()` 是 llhttp 按 RFC 9112 §9.6 算出来的：HTTP
+  // 版本默认值（1.0 默认关、1.1 默认开）与 `Connection` 的**逗号列表**都在里面。
+  // 别退回成 `http_get_header(..., "connection") == "close"` 那种整串比较 ——
+  // `Connection: keep-alive, close` 会漏判，而这个判断是**承重**的。
+  //
+  // 调用方自己 `set_keep_alive(false)` 过也走同一条路：那条偏好已经由 `send()`
+  // 兑现成线上的 `connection: close`，对端回不回这个头都一样不该复用。
+  if (!keep_alive_ || !parser_->should_keep_alive()) {
+    // 交付完就不许再声称"连着"。
+    //
+    // 此前这里写的是 `keep_alive_ = false` —— 而这个字段**全仓零读取点**，
+    // 于是本层继续置着 `HTTP_CLIENT_CONNECTED`：调用方按常规写法"收完响应接着
+    // 发第二个请求"，那一发就写进一条对端正要关掉的连接，`write()` 报成功、
+    // 响应永远不来，而**异步路径上没有任何超时**（`timeout_ms` 全在 `*_wait`
+    // 系列里），只能等到对端 FIN 才拿到错误。清掉 CONNECTED 之后第二个 `send()`
+    // 会拿到 `UV_ENOTCONN`，调用方当场知道要重连。
+    //
+    // `keep_alive_` 本身**不动**：那是调用方的偏好，不是这一次连接的结论。按对端
+    // 的说法把它清掉的话，调用方下次用同一个对象 `connect()` 时会莫名其妙地不再
+    // 发 `keep-alive`。
+    //
+    // 只清状态、**不在这里 `tcp_->close()`**：这一段跑在
+    // `on_tcp_data → parser_->execute → llhttp` 的栈上，关句柄等于新开一条"从读
+    // 回调里拆连接"的路径；而对端既然说了 `close` 就会 FIN，那条收尾已经由
+    // `on_tcp_close` 走通（见 `tests/functional/web_http_client_close_func.cpp` 的
+    // S2）。socket 由本对象析构时统一关。
+    clear_status(HTTP_CLIENT_CONNECTED);
   }
 
 #if UVCPP_ZLIB_ENABLE

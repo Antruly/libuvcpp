@@ -52,7 +52,7 @@
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
   收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:482`）。
-- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1239`，RFC 9113 §8.7）：
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1278`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
@@ -140,18 +140,22 @@
   （`src/net/uvcpp_tcp_client.cpp:126`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
-- **两处已死的成员**（只报告，本批没动）：
+- **一处已死的成员**（只报告，本批没动）：
   - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:62`）全仓零引用 ——
     这一处**确实不影响行为**，它只是个没接线的状态位。
-  - `keep_alive_` 只在 `src/web/uvcpp_http_client.cpp:616,701` 被写、**从没被读**
-    （`h:324` 声明，初值 `true`）。这一处的后果**是真的**，与上一条不同：
-    `on_response_complete()` 见到 `Connection: close` 就把标志置假，可没有任何人
-    问过它 —— 于是调用方在**对端已经声明要关**的连接上接着 `send()`，写进一个
-    正在收摊的 socket，拿到的是一条"连接被重置"的失败（状态码 `HTTP_STATUS_NONE`）。
-    正确做法是同步拒掉（`UV_ENOTCONN`，与 h2 那条 `peer_goaway_received()` 的
-    提前拦截同一形状），让人去重连；`set_keep_alive(false)` 同理，今天**一个字节
-    都不影响发出去的请求**（既不拒发、也不加 `Connection: close` 头）。
-    两条都属于 h1，与本页的 h2 无关，留在这儿只为了让下次盘查的人不必再核一遍。
+- **`keep_alive_` 那一处已经修掉了**（原先列在上面这条清单里，因为后果是真的）。
+  当时的形状是：它只在 `on_response_complete()` 里被写、**从没被读**，于是调用方
+  在**对端已经声明要关**的连接上接着 `send()`，写进一个正在收摊的 socket，拿到的
+  是一条"连接被重置"的失败（状态码 `HTTP_STATUS_NONE`）；`set_keep_alive(false)`
+  也是空的，一个字节都不影响发出去的请求。
+  现在两个方向都兑现了：响应说 `close`（含 `Connection` 逗号列表里不在首项的
+  `close`）就在交付回调之前清掉 `HTTP_CLIENT_CONNECTED`
+  （`src/web/uvcpp_http_client.cpp:636-656`），第二次 `send()` 同步拒成
+  `UV_ENOTCONN` —— 与 h2 那条 `peer_goaway_received()` 的提前拦截同一形状；
+  `set_keep_alive(false)` 则让请求真的带上 `connection: close`
+  （`src/web/uvcpp_http_client.cpp:452-467`）。
+  用例：`tests/functional/web_http_client_keepalive_func.cpp`。
+  两件事都属于 h1，与本页的 h2 无关，留在这儿只为了让下次盘查的人不必再核一遍。
 
 ---
 
