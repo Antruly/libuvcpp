@@ -118,6 +118,22 @@ g++ -std=c++11 -I include your_app.cpp -L lib -luvcpp -o your_app.exe
 > （与包实际怎么编无关）。升级到本版时把那些 `-D` **删掉**即可；
 > 留着它们只有在与包冲突时才会报错，值相同时无害。
 
+> ⚠️ **1.1.28 起 `uvcpp_buf` 的布局变了：换 dll 而不重编消费者会崩。**
+> 本版给它加了共享视图（多一个 `shared_ptr` 成员）与移动构造/移动赋值。
+> 现有消费者**源码一行都不用改**，但必须**重新编译** —— 拿新的 `uvcpp.dll`
+> 配旧的 exe / obj，会在启动或首次用到 `uvcpp_buf` 时崩：`0xC0000409`
+> （栈缓冲溢出）或 `0xC0000374`（堆损坏），在 ctest 里表现为**0.01 秒、
+> 一行输出都没有**。这个形状最容易被当成环境问题查很久，所以写在最前面。
+>
+> 同版两条**行为**变化（不崩，但要知道）：
+>
+> - `uvcpp_buf` 从前**没有**移动构造（本类有用户声明的拷贝构造与析构，编译器
+>   因此不会隐式生成），`uvcpp_buf b = std::move(a);` 一直是静默的深拷贝、
+>   `a` 原封不动；现在 `a` 会被搬空。对"move 之后接着用 `a`"的调用点，
+>   这是行为变化（虽然那几乎肯定是写错了）。
+> - `uvcpp_http_server::send_response` 的返回类型从 `void` 变成 `size_t`
+>   （实际发出去的字节数）。返回类型不进名字修饰，**不会**造成链接错误。
+
 头文件的入口是包根 `include/uvcpp.h`（聚合头，含 loop / handle / req）。
 `net` / `web` / `webapp` / `ssl` 的类**不在聚合头里**，按模块显式 include，例如
 `#include "handle/uvcpp_tcp.h"`、`#include "web/uvcpp_http_server.h"`。
