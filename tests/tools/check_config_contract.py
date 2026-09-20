@@ -362,6 +362,59 @@ def check_abi(tree_vals, pkg, work, cxx):
     return 0
 
 
+def check_pc_linkable(pkg):
+    """包里 `.pc` 指的那个目录，必须真有**它自己那份**可链接的库。
+
+    为什么要单独一条：`-luvcpp` 只要求链接器**找得到**这个名字，找不到才报错 ——
+    "能链上"与"链的是包里那份"是两件事。ELF 平台曾把 `libuvcpp.so` 放进 `bin/`，
+    于是包里的 `lib/` 是空的；此时**如果构建机上恰好装了一个系统 libuvcpp**，
+    `-luvcpp` 会悄悄链上系统那份，正例照跑照绿，而这一档要验的东西（包里那个
+    动态库）一个字节都没碰到。所以必须钉住"包里的 `lib/` 有它"。
+
+    这个洞是 Linux 那一档第一次跑出来的（`ld: cannot find -luvcpp`），本机
+    MSVC 永远看不见 —— MSVC/MinGW 各有一份导入库落在 `lib/`。
+    """
+    pc = os.path.join(pkg, "lib", "pkgconfig", "uvcpp.pc")
+    if not os.path.exists(pc):
+        fail("包里没有 lib/pkgconfig/uvcpp.pc")
+        return
+    with open(pc, encoding="utf-8") as fh:
+        text = fh.read()
+    libs = next((ln for ln in text.splitlines() if ln.startswith("Libs:")), "")
+    # 我们自己在 package_release.py 里生成这个 .pc，形状是已知的；按它用到的
+    # 变量逐个展开即可，不必写一个通用的 .pc 求值器。
+    for k, v in {"${pcfiledir}": os.path.join(pkg, "lib", "pkgconfig"),
+                 "${prefix}": pkg, "${exec_prefix}": pkg,
+                 "${libdir}": os.path.join(pkg, "lib"),
+                 "${includedir}": os.path.join(pkg, "include")}.items():
+        libs = libs.replace(k, v)
+    dirs = [t[2:] for t in libs.split() if t.startswith("-L")]
+    names = [t[2:] for t in libs.split() if t.startswith("-l")]
+    if not dirs or not names:
+        fail(".pc 的 Libs 行里没有 -L/-l：%r" % libs.strip())
+        return
+
+    missing = []
+    for d in dirs:
+        for n in names:
+            cands = [n + ".lib", n + ".a", "lib" + n + ".a", "lib" + n + ".dll.a",
+                     "lib" + n + ".so", "lib" + n + ".dylib"]
+            cands += [os.path.basename(p)
+                      for p in glob.glob(os.path.join(d, "lib" + n + ".so.*"))]
+            if any(os.path.exists(os.path.join(d, c)) for c in cands):
+                break
+        else:
+            seen = sorted(os.listdir(d)) if os.path.isdir(d) else ["（目录不存在）"]
+            missing.append("%s -> %s" % (d, seen[:6]))
+
+    if missing:
+        fail(".pc 写的是 -L%s -l%s，但那个目录里没有包自己那份库：%s\n"
+             "      链接器这时会去系统目录找同名库 —— 正例照绿，链的却不是包里的"
+             % (dirs[0], "/".join(names), "; ".join(missing)))
+        return
+    ok(".pc 的 -L%s -l%s 指得到包里那份库" % (dirs[0], names[0]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pkg", required=True, help="package_release.py 的 stage 目录")
@@ -380,6 +433,7 @@ def main():
     print("[3] 静态判据")
     check_positions()
     check_no_handwritten_copy()
+    check_pc_linkable(pkg)
     vals = check_generated_vs_tree(tree, pkg)
     if vals is None:
         print("\n判据 ③ 拿不到生成头的值，后两条无从跑起")
