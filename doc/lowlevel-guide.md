@@ -175,7 +175,7 @@ uvcpp_handle
 `uvcpp_loop::close()` 是**隐藏**基类那个同名函数，不是覆盖——通过 `uvcpp_handle*` 调
 `close()` 会走到基类版本，而两个 `close()` 返回类型还不一样（`void` vs `int`）。
 
-关闭只有两个入口（`src/handle/uvcpp_handle.h:106,110`）：
+关闭只有两个入口（`src/handle/uvcpp_handle.h:119,123`）：
 
 ```cpp
 // doc-snippet: fragment — 重载形状的摘录，不是完整翻译单元；这里要展示的是"两个

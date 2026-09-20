@@ -275,7 +275,7 @@ void doc_multipart_feed(const std::string& content_type) {
 `uvcpp_web_file_transfer` 把文件的 `[first, last]`（**闭区间**）分片读出来交给
 sink，用有界滑动窗口把静态下发的峰值内存从 2N 降到
 `high_water + 2*slice`（默认 ≈ 1.5 MiB，**与文件大小无关**，
-`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:335`）。
+`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:341`）。
 
 ```cpp
 #include <webapp/uvcpp_web_file.h>
@@ -474,7 +474,7 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 |---|---|---|
 | `uvcpp_web_connection_registry` | **只能 loop 线程**（内部 `std::map` 无锁） | `src/webapp/uvcpp_web_connection.h:30-31`、`:120` |
 | `uvcpp_web_context` | 除 `post()` 外都在 loop 线程 | `src/webapp/uvcpp_web_context.h:98-99` |
-| `uvcpp_web_file_transfer` | loop 线程驱动，回调都在 loop 线程 | 头里**没写**这条 |
+| `uvcpp_web_file_transfer` | loop 线程驱动，回调都在 loop 线程 | `src/webapp/uvcpp_web_file.h:167-171` |
 | `uvcpp_web_util` | 纯函数，无状态、线程安全 | — |
 | `uvcpp_web_mime_map` | 注册期配置、运行期只读；`default_map()` 是全局的 | `src/webapp/uvcpp_web_mime.h:31-34` |
 | `uvcpp_web_multipart` | **无线程设施**，由调用方决定在哪条线程跑 | `src/webapp/uvcpp_web_multipart.h:13-16` |
@@ -534,7 +534,7 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 
 **`set_stop_at_eof(true)` 时 `last` 要传 `UINT64_MAX - 1`，不是 `UINT64_MAX`。**
 后者 `remain = last_ - offset_ + 1u` 在第一个切片上就溢出成 0，于是当场收尾、
-一个字节都不读（`src/webapp/uvcpp_web_file.h:218-220`）。
+一个字节都不读（`src/webapp/uvcpp_web_file.h:224-226`）。
 
 **只有 `set_slice_bytes()` 是"必须在 `start()` 之前调"。** 它内部会
 `slice_buf_.resize()`（`src/webapp/uvcpp_web_file.cpp:101`），而 `submit_read()` 把
@@ -542,14 +542,14 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 那一笔 `uv_fs_read` 就写进**已释放**的内存。**两个 setter 都没有运行时守卫**，也不改
 返回值，顺序错了查不出来。
 
-`set_stop_at_eof` 没有这条限制（`src/webapp/uvcpp_web_file.h:222-226`）：全类只有一个
+`set_stop_at_eof` 没有这条限制（`src/webapp/uvcpp_web_file.h:228-232`）：全类只有一个
 读取点，就是"早于 `[first, last]` 撞上 EOF"的那一刻，在那之前设上都算数。提前设是
 习惯，不是要求 —— 那一刻何时到取决于文件实际多长。
 
 **`cancel()` 在"因背压停读"这一支上不能省。** 那时**没有任何 fs 操作在途**，
 `cancel()` 必须自己推进状态机，否则 `on_done` 永远不来、fd 一直开着
 （`src/webapp/uvcpp_web_file.cpp:197-203`）。`start()` 之前 `cancel()` 是空操作且**不触发
-`on_done`**（`src/webapp/uvcpp_web_file.h:262-265`）。
+`on_done`**（`src/webapp/uvcpp_web_file.h:268-271`）。
 
 **`backlog()` 是唯一的背压信号。** 恒返回 0 的 sink 只是让背压失效，
 窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:126-131`）—— 允许，但不是有界的了。

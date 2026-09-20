@@ -102,7 +102,20 @@ public:
     int has_ref();
     /** @brief Return whether handle is active. */
     int is_active();
-    /** @brief Close the handle asynchronously. */
+    /**
+     * @brief Close the handle asynchronously.
+     *
+     * @warning **`close()` 之后不要再调子类的 `stop()`。** 这两者不对称：`close()`
+     *          自己判了空（`_handle == nullptr` 直接返回），而七个"只有 stop"的
+     *          子类 —— `uvcpp_timer` / `uvcpp_check` / `uvcpp_prepare` /
+     *          `uvcpp_signal` / `uvcpp_poll` / `uvcpp_fs_event` / `uvcpp_fs_poll`
+     *          —— 的 `stop()` 都是**直接把 `_handle` 递给 libuv**，一个守卫都没有。
+     *          关闭完成时 `callback_close` 会把 `_handle` 置空，此后 `stop()` 就是
+     *          把空指针交给 `uv_*_stop()` ⇒ 空指针解引用。
+     *          （`uvcpp_idle::stop()` 是例外：它走 `is_closing()` 判断后转调
+     *          `close()`。）关之前也不必先 `stop()` —— `uv_close()` 自己会停掉
+     *          活动，之后不再有回调。
+     */
     void close();
     /** @brief Returns whether the handle is closing. */
     int is_closing();

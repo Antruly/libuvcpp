@@ -163,6 +163,12 @@ class UVCPP_API uvcpp_web_file_sink {
  * @endcode
  *
  * **必须由 `shared_ptr` 持有**（内部用 `shared_from_this()`）。
+ *
+ * **整条链路都在持有 `loop` 的那个线程上跑**：`start()` / `cancel()` / `resume()`
+ * 以及 `uvcpp_web_file_sink` 的每一个回调，都必须从那个线程调用。类里**没有任何
+ * 线程同步**（无锁、无原子、无 `tid` 断言）—— 从别的线程调不是"可能有问题"，是
+ * 并发改同一个状态机。异步的部分只发生在**文件 I/O 委派给 libuv 线程池**这一段，
+ * 结果照样回到 loop 线程再交付给 sink。
  */
 class UVCPP_API uvcpp_web_file_transfer
     : public std::enable_shared_from_this<uvcpp_web_file_transfer> {
