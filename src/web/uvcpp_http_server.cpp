@@ -132,9 +132,10 @@ void uvcpp_http_server::head(const std::string& path, http_request_handler h) {
 
 http_request_handler uvcpp_http_server::find_handler(
     http_method method, const std::string& path) {
-  // Route on "method + path" (query string stripped); handlers parse the query
-  // themselves via parse_query(req.url). Without this, a request like
-  // "GET /api/x?id=1" would never match a route registered as "/api/x".
+  // Route on "method + path" (query string stripped); parsing the query is left
+  // to the handler (this layer has no query parser of its own — the webapp
+  // layer's is `web_parse_query()`). Without this, "GET /api/x?id=1" would
+  // never match a route registered as "/api/x".
   std::string p = path;
   size_t q = p.find('?');
   if (q != std::string::npos) p = p.substr(0, q);
@@ -369,8 +370,8 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
   const uvcpp_http_parser::size_limit hit = ctx.parser->limit_hit();
   if (hit != uvcpp_http_parser::size_limit::NONE) {
     // 消息半途被丢下了，永远不会有 `on_request_complete` —— 关闭只能搭在
-    // 这次写上（`reject_early` 的默认延迟关闭在这里会等一个不来的事件，
-    // 连接一直挂到闲置清扫）。
+    // 这次写上（`reject_early` 的默认延迟关闭在这里会等一个不来的事件，连接
+    // 就一直挂着：**本层没有闲置清扫**，会来收的是 webapp 层那个，默认 60 s）。
     reject_early(ctx, client,
                  hit == uvcpp_http_parser::size_limit::URL
                      ? http_status::URI_TOO_LONG
@@ -1096,7 +1097,9 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
       // the peer's receive buffer. Hand the close to the end of the message
       // instead — but only when there is a stream handler that will still be
       // alive to receive it. A malformed message never completes, and there the
-      // close must happen now or the connection hangs until the idle sweep.
+      // close must happen now: **this layer has no idle sweep of its own**, so a
+      // bare uvcpp_http_server (nothing above it) would hang for good — the
+      // sweep that gets named elsewhere belongs to the webapp layer (60 s).
       if (ctx.stream_handler && !ctx.msg_done) {
         ctx.defer_close_to_message_end = true;
         ctx.close_requested = false;

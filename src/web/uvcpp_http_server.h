@@ -302,8 +302,10 @@ class UVCPP_API uvcpp_http_server {
    * server a bounded amount of CPU and bandwidth rather than all of it. The
    * request is answered 431 with `Connection: close` and never routed.
    *
-   * Requests claimed by a stream handler are not covered — like
-   * `max_body_size()`, the limits stop at the claim boundary.
+   * **Unlike `max_body_size()`, a claimed request is not exempt**: the running
+   * count is enforced by the parser as the headers arrive, so an oversized block
+   * is rejected 431 with `Connection: close` before `headers_complete` — and the
+   * claim hook is therefore never asked about it.
    */
   void set_max_header_bytes(size_t max_bytes);
   size_t max_header_bytes() const;
@@ -863,7 +865,10 @@ class UVCPP_API uvcpp_http_server {
    * @param message_will_complete false when the parse was abandoned mid-message
    *        (an oversized URL/header block), where "at message end" never comes
    *        and the close has to ride on the write instead — otherwise the
-   *        connection sits there until the idle sweep. See @ref pump_write.
+   *        connection sits there for good, because **this layer has no idle
+   *        sweep**: the one named elsewhere is the webapp layer's (60 s default)
+   *        and only exists when a webapp sits above this server.
+   *        See @ref pump_write.
    */
   void reject_early(conn_ctx& ctx, uvcpp_tcp_client* client, http_status status,
                     bool message_will_complete = true);

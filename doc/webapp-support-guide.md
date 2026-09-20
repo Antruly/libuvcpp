@@ -132,10 +132,9 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 ## 4. Web 工具函数
 
 `webapp/uvcpp_web_util.h` 是**纯函数模块，没有类**，39 个公开声明。
-它的头注释（`:10-11`）说"现有 web 层完全没有这些工具（`uvcpp_http_server.cpp`
-的注释提到 `parse_query`，但那个函数根本不存在）" —— 这句是在解释**为什么要新开
-这个模块**，不是"这一页里的东西不存在"。`src/web/uvcpp_http_server.cpp:136` 确实
-只在注释里提过 `parse_query`，`src/web/` 下也确实没有任何 query / cookie / URL 解码
+它的头注释（`:10-11`）解释的是**为什么要新开这个模块** —— web 层连一个 query
+解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:135-138`），
+不是"这一页里的东西不存在"。`src/web/` 下也确实没有任何 query / cookie / URL 解码
 helper。
 
 路径安全要**两道一起用**：
@@ -202,7 +201,7 @@ void doc_mime_override() {
 
 内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:438`，实现
 `src/webapp/uvcpp_web_util.cpp:979-982`），`builtin_size()` 也转调它
-（`src/webapp/uvcpp_web_mime.cpp:134-138`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
+（`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
 
 `default_map()`（`src/webapp/uvcpp_web_mime.h:126`）是**进程级共享**的静态表，静态服务没显式
@@ -277,7 +276,7 @@ void doc_multipart_feed(const std::string& content_type) {
 `uvcpp_web_file_transfer` 把文件的 `[first, last]`（**闭区间**）分片读出来交给
 sink，用有界滑动窗口把静态下发的峰值内存从 2N 降到
 `high_water + 2*slice`（默认 ≈ 1.5 MiB，**与文件大小无关**，
-`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:323`）。
+`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:324`）。
 
 ```cpp
 #include <webapp/uvcpp_web_file.h>
@@ -408,7 +407,7 @@ uvcpp_console_log_options opt{false, true};
 
 `src/webapp/uvcpp_log_console.h:25-26` 的注释说"用显式构造函数而不是成员初始化器 …… 
 `uvcpp_console_log_options{false, true}` 这种写法会编译不过"。**这句话把自己说反了**：
-声明的构造函数是 `uvcpp_console_log_options();`（`:36`，**无参**），于是那个花括号
+声明的构造函数是 `uvcpp_console_log_options();`（`:38`，**无参**），于是那个花括号
 写法恰恰**真的编不过** —— 实测 g++ 的原话是
 
 ```
@@ -422,36 +421,36 @@ error: no matching function for call to
 **对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:276-277`）是这一族里唯一写对的
 —— 它的构造函数带默认实参，所以花括号写法可用。
 
-### `color` 的默认值不是"自动判断"
+### 上不上色是两个条件
 
-`src/webapp/uvcpp_log_console.h:29` 写 `color` 的默认是"按终端能力自动判断"，
-而结构体的实际默认值是 **`true`**（`src/webapp/uvcpp_log_console.cpp:124`）。能力探测在 sink 的
-`color_supported_` 里（`:135`、`:142`，探测逻辑 `:67-85`：`NO_COLOR`、`isatty`、
-Windows 的 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`），而 `color_enabled()` 是
-`color_supported_ && options_.color`（`:171-173`）。所以"自动判断"这件事**由
-`color_supported_` 承担**，不是 `color` 的默认值；而且 `color_supported_` **只在构造
-时算一次** —— 构造之后再把 stdout 重定向，上色状态不会跟着更新。
+`color` 这个字段的默认值是 **`true`**（`src/webapp/uvcpp_log_console.cpp:124`），真正
+决定上不上色的是 `color_enabled()` = `color_supported_ && options_.color`
+（`:171-173`）。终端能力那一半在 sink 构造时探测一次（`:135`、`:142`，探测逻辑
+`:67-85`：`NO_COLOR`、`isatty`、Windows 的 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`）。
+所以**默认构造下的有效行为就是"按终端能力判断"**，但那是 `color_supported_` 给的，
+不是 `color` 的默认值 —— 而且它**只在构造时算一次**，构造之后再把 stdout 重定向，
+上色状态不会跟着更新。
 
-### 默认输出比头里的样例多一列
+### 真实输出的一行长什么样
 
-头里的样例（`src/webapp/uvcpp_log_console.h:43-45`）只画了格式，末尾那段是 `<调用点文件>:<行>`。
-真实的一行长这样（末尾取自 `tests/functional/web_app_log_func.cpp:84` 那次调用）：
+头里的样例（`src/webapp/uvcpp_log_console.h:45-47`）画的就是**全默认**形状：时间戳、
+等级、模块标签、`(tid:N)`、message，末尾是 `<调用点文件>:<行>`。真实的一行长这样
+（末尾取自 `tests/functional/web_app_log_func.cpp:84` 那次调用）：
 
 ```
-2026-09-13 12:34:56.789 [INFO ] [REQUEST] GET /index.html  (tests/functional/web_app_log_func.cpp:84)
+2026-09-13 12:34:56.789 [INFO ] [REQUEST] (tid:14028) GET /index.html  (tests/functional/web_app_log_func.cpp:84)
 ```
 
-而 `show_thread` 默认 **true**（`src/webapp/uvcpp_log_console.cpp:126`）⇒ 真实输出在 message
-之前还有一个 ` (tid:N)`（`:209-214`）。要复现头里那种形状得显式
-`opt.show_thread = false`。
+那一列由 `show_thread` 拼出，默认 **true**（`src/webapp/uvcpp_log_console.cpp:126`、
+`:209-214`）；不想要就 `opt.show_thread = false`。
 
 ### `on_done` 不一定来自 `uv_fs_close`
 
-`src/webapp/uvcpp_web_file.h:140-141` 说 on_done「由 `uv_fs_close` 的完成回调调用」。
-实际有三条**没有 close 回调**的路径直接调 `finish()`：open 失败
+有三条**没有 close 回调**的路径直接调 `finish()`：open 失败
 （`src/webapp/uvcpp_web_file.cpp:210-216` → `finish()`；`fd_ < 0` 时 `:333-337` 直接收尾）、
 close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-270`）。
-结论"在这里销毁 transfer 是安全的"**仍然成立**，"由 `uv_fs_close` 回调调用"是错的。
+走到 `on_done` 时 fd 「**已经关完，或者根本没打开过**」（`src/webapp/uvcpp_web_file.h:140-142`），
+所以"在这里销毁 transfer 是安全的"成立，但**别把"回调已返回"当成前置条件**去依赖。
 
 ### `web_split_path_query()` 比头文件说的做得多
 
@@ -459,12 +458,13 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 绝对形式（代理风格）的 `http://host`**（`src/webapp/uvcpp_web_util.cpp:204-208`）——
 `GET http://x/../y HTTP/1.1` 这种请求目标。头文件没写这一条。
 
-### `.cpp` 里那条注释是错的
+### 点落在目录名里时会取错
 
-`src/webapp/uvcpp_web_mime.cpp:113` 的注释声称 `lookup("a.b/c")` 看的是 `c`，实测得到 `b`：
-实现先取**最后一个点**再截到第一个分隔符（`:110-124`），而 `a.b/c` 里最后一个点在
-目录名中。头 `src/webapp/uvcpp_web_mime.h:103-104` 举的 `archive.tar.gz` 与 `lib..min.js`
-两个例子是**对的**，错的是 `.cpp` 那句。
+`lookup("a.b/c")` 得到的是 **`b`**，不是 `c`：实现先取**最后一个点**再截到第一个
+分隔符（`src/webapp/uvcpp_web_mime.cpp:110-125`），而 `a.b/c` 里最后一个点在目录名中。
+所以传进来的应当是**文件名本身**，这一层不替上游剥目录。头
+`src/webapp/uvcpp_web_mime.h:103-104` 举的 `archive.tar.gz` 与 `lib..min.js` 两个例子
+不受影响；这条限制写在 `.cpp` 那句注释里（`:111-113`）。
 
 ---
 
@@ -488,9 +488,9 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 
 ### 所有权
 
-- `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:164`）。
+- `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:165`）。
 - `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:116-123`）。
-- `uvcpp_web_context::run()` **只存链的指针**（`:322-328`）：那张
+- `uvcpp_web_context::run()` **只存链的指针**（`:323-329`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
   **别传一个临时 vector**。
 - `uvcpp_web_connection_registry::find()` 返回内部 `std::map` 里的指针
@@ -534,17 +534,17 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 
 **`set_stop_at_eof(true)` 时 `last` 要传 `UINT64_MAX - 1`，不是 `UINT64_MAX`。**
 后者 `remain = last_ - offset_ + 1u` 在第一个切片上就溢出成 0，于是当场收尾、
-一个字节都不读（`src/webapp/uvcpp_web_file.h:209-211`）。
+一个字节都不读（`src/webapp/uvcpp_web_file.h:210-212`）。
 
 **所有 setter 都在 `start()` 之前调。** `set_stop_at_eof` 头里写了"必须在 `start()`
-之前设"（`src/webapp/uvcpp_web_file.h:213-214`）但 setter 无守卫；`set_slice_bytes()` 更危险
+之前设"（`src/webapp/uvcpp_web_file.h:214-215`）但 setter 无守卫；`set_slice_bytes()` 更危险
 —— 它内部 `slice_buf_.resize()`（`src/webapp/uvcpp_web_file.cpp:101`），在途读期间调用会让
 `uv_fs_read` 写进已释放的缓冲。
 
 **`cancel()` 在"因背压停读"这一支上不能省。** 那时**没有任何 fs 操作在途**，
 `cancel()` 必须自己推进状态机，否则 `on_done` 永远不来、fd 一直开着
 （`src/webapp/uvcpp_web_file.cpp:197-203`）。`start()` 之前 `cancel()` 是空操作且**不触发
-`on_done`**（`src/webapp/uvcpp_web_file.h:250-253`）。
+`on_done`**（`src/webapp/uvcpp_web_file.h:251-254`）。
 
 **`backlog()` 是唯一的背压信号。** 恒返回 0 的 sink 只是让背压失效，
 窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:126-131`）—— 允许，但不是有界的了。

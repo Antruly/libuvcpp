@@ -386,7 +386,14 @@ class UVCPP_API uvcpp_web_response {
   void end();
   bool ended() const;
 
-  /** @brief 是否要延迟发送（handler 稍后自己 `send()`）。 */
+  /**
+   * @brief 本响应上的一枚**只做记录**的标志，框架里没有任何读取点。
+   *
+   * 别与 `uvcpp_http_response::deferred` 混为一谈 —— 真正决定"框架替不替你发"
+   * 的是**后者**（`src/web/uvcpp_http_response.h:48-49` 那个公开成员）：HTTP 层
+   * 在兜底 handler 返回后检查它，置真就不再自行发送，发送权交给框架。
+   * 这一枚没有消费者，`set_deferred(true)` 不改变任何发送行为。
+   */
   bool deferred() const;
   void set_deferred(bool v);
 

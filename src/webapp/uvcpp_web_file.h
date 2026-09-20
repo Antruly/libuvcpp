@@ -137,8 +137,9 @@ class UVCPP_API uvcpp_web_file_sink {
    * `status == 0` 表示 `[first, last]` 全部交付完毕；非 0 表示出错或被取消
    * （`UV_ECANCELED`），`bytes_sent` 是**已经交付出去**的字节数。
    *
-   * 走到这里时 fd 已经关完（本方法由 `uv_fs_close` 的完成回调调用），所以在这一
-   * 句里销毁 transfer 是安全的。
+   * 走到这里时 fd **已经关完，或者根本没打开过**，所以在这一句里销毁 transfer 是
+   * 安全的。但不都是走 close 的完成回调：打开失败、close **提交**失败这两条路是
+   * 直接收尾的 —— 别把"回调已返回"当成前置条件去依赖。
    *
    * **这一句之后不得再碰 transfer 的任何成员** —— 最后一次 `shared_ptr` 很可能
    * 就在这里释放，成员已经不存在了。

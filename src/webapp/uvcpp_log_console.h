@@ -26,7 +26,9 @@ namespace uvcpp {
  * `uvcpp_console_log_options{false, true}` 这种写法会编译不过。
  */
 struct uvcpp_console_log_options {
-  bool color;           ///< 用 ANSI 颜色区分等级（默认按终端能力自动判断）
+  bool color;           ///< 用 ANSI 颜色区分等级。**本字段默认 `true`**；最终上不上色
+                        ///< 还要看终端能力，两个都为真才上色 —— 而终端能力只在
+                        ///< **sink 构造时**探测一次，中途换终端不会重新判断
   bool show_timestamp;  ///< 输出时间戳（含毫秒）
   bool show_thread;     ///< 输出线程 id
   bool show_category;   ///< 输出模块标签，如 [REQUEST]
@@ -41,7 +43,7 @@ struct uvcpp_console_log_options {
  *
  * 格式：
  * @code
- *   2026-09-13 12:34:56.789 [INFO ] [REQUEST] GET /index.html  (server.cpp:88)
+ *   2026-09-13 12:34:56.789 [INFO ] [REQUEST] (tid:14028) GET /index.html  (server.cpp:88)
  * @endcode
  *
  * 线程安全：`write()` 内部持锁，来自工作线程池的日志不会互相穿插。

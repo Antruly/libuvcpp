@@ -44,7 +44,7 @@ HTTP 的服务端与 WS 的服务端会在同一个 `uvcpp_http_server` 上碰�
 
 | 类 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_ws_server` | `src/web/uvcpp_ws_server.h:42` | 挂在 HTTP 服务器上做**握手**（识别升级 → 算 Accept → 回 101 → 建会话）。自己不管帧收发 |
+| `uvcpp_ws_server` | `src/web/uvcpp_ws_server.h:43` | 挂在 HTTP 服务器上做**握手**（识别升级 → 算 Accept → 回 101 → 建会话）。自己不管帧收发 |
 | `uvcpp_ws_client` | `src/web/uvcpp_ws_client.h:56` | 解析 `ws://` / `wss://`、发升级请求、校验 101、建会话。**同时持有自己的 loop** |
 | `uvcpp_ws_connection` | `src/web/uvcpp_ws_connection.h:61` | 真正的 WS 语义：帧解析与序列化、掩码、分片重组、压缩、Close 握手、发送队列 |
 | `uvcpp_ws_sessions` | `src/web/uvcpp_ws_sessions.h:36` | 会话归属表 + **延迟回收器**。不是广播器 |
@@ -85,7 +85,7 @@ void doc_run_echo_server() {
 }
 ```
 
-**`listen()` 是独立的一步，头文件里的官方示例漏了它。** `src/web/uvcpp_ws_server.h:11-19`
+**`listen()` 是独立的一步，头文件里的官方示例漏了它。** `src/web/uvcpp_ws_server.h:11-20`
 的 "Standalone usage" 是 `bind` → `on_connection` → `run`，**没有 `listen()`** ——
 照抄那段代码的服务端会 bind 成功、跑起来、然后一条连接都收不到。
 `bind()` 只转发 `http_server_->bind`（`src/web/uvcpp_ws_server.cpp:145`），
@@ -98,16 +98,16 @@ void doc_run_echo_server() {
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-explicit uvcpp_ws_server();                          // src/web/uvcpp_ws_server.h:44
-explicit uvcpp_ws_server(uvcpp_http_server* http);   // src/web/uvcpp_ws_server.h:59
-int  bind(const char* ip, int port);                 // src/web/uvcpp_ws_server.h:65
-int  listen(int backlog = 128);                      // src/web/uvcpp_ws_server.h:66
-void attach(uvcpp_http_server* http);                // src/web/uvcpp_ws_server.h:73
-void on_connection(std::function<void(uvcpp_ws_connection*)> cb);  // :111
-int  run(uv_run_mode md = UV_RUN_DEFAULT);           // :117
-void stop(std::function<void()> on_stopped = nullptr);  // :125
-void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);  // :140
-size_t session_count() const;                        // :149
+explicit uvcpp_ws_server();                          // src/web/uvcpp_ws_server.h:45
+explicit uvcpp_ws_server(uvcpp_http_server* http);   // src/web/uvcpp_ws_server.h:60
+int  bind(const char* ip, int port);                 // src/web/uvcpp_ws_server.h:66
+int  listen(int backlog = 128);                      // src/web/uvcpp_ws_server.h:67
+void attach(uvcpp_http_server* http);                // src/web/uvcpp_ws_server.h:74
+void on_connection(std::function<void(uvcpp_ws_connection*)> cb);  // :112
+int  run(uv_run_mode md = UV_RUN_DEFAULT);           // :118
+void stop(std::function<void()> on_stopped = nullptr);  // :126
+void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);  // :142
+size_t session_count() const;                        // :151
 ```
 
 **没有 `close()`。** 停机只有两条路：`stop()` 和 `close_all_sessions()`。
@@ -138,14 +138,14 @@ size_t session_count() const;                        // :149
 客户端请求里只写 `Host` / `Upgrade` / `Connection` / `Sec-WebSocket-Key` /
 `Sec-WebSocket-Version: 13` / 可选扩展（`src/web/uvcpp_ws_client.cpp:288`）。
 要协商子协议得在 HTTP 层自己做：用 `handle_upgrade` 的重载
-（`src/web/uvcpp_ws_server.h:104`）或者自持 `uvcpp_http_server::on_upgrade` 槽，
+（`src/web/uvcpp_ws_server.h:105`）或者自持 `uvcpp_http_server::on_upgrade` 槽，
 读请求头、自己回 101。
 
 ### 缺 `Sec-WebSocket-Key` 时是**静默**的
 
 `src/web/uvcpp_ws_server.cpp:180` 是 `if (ws_key.empty()) return;` —— 不建会话、不应答，
 连接既不断也不回，就哑在那里。自己拿 `on_upgrade` 槽分派的人**必须自己先校验**
-（头文件 `src/web/uvcpp_ws_server.h:82` 如实写明了这一点）。
+（头文件 `src/web/uvcpp_ws_server.h:83` 如实写明了这一点）。
 
 ---
 
@@ -355,7 +355,7 @@ void terminate();                                        // src/web/uvcpp_ws_con
 
 **也就是说它不等对端回 Close 帧。** RFC 6455 §7.1.1 的关闭握手在这一层只做了一半，
 而且**没有任何超时或定时器**兜底。头文件 `src/web/uvcpp_ws_connection.h:132` 的措辞与实现
-是相符的，但 `src/web/uvcpp_ws_sessions.h:106` 与 `src/web/uvcpp_ws_server.h:119` 把它称作
+是相符的，但 `src/web/uvcpp_ws_sessions.h:106` 与 `src/web/uvcpp_ws_server.h:120` 把它称作
 "优雅关闭" —— 那是**名义上的优雅**，不是 RFC 的完整语义。
 
 `terminate()` 是立即终结、**不发** Close 帧（`src/web/uvcpp_ws_connection.cpp:99`）。
@@ -425,7 +425,7 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 `conn->enable_compression(true, dp)`（`src/web/uvcpp_ws_server.cpp:231`），
 客户端自动 `conn->enable_compression(false, deflate_params_)`
 （`src/web/uvcpp_ws_client.cpp:384`）。要关掉就 `set_compression(cfg)` 把 `enabled` 置 false
-（`src/web/uvcpp_ws_server.h:173` / `src/web/uvcpp_ws_client.h:164`，**只在
+（`src/web/uvcpp_ws_server.h:175` / `src/web/uvcpp_ws_client.h:164`，**只在
 `UVCPP_ZLIB_ENABLE=1` 时编译**）。
 
 阈值 `set_compress_min_size(size_t n)` 默认 `0`，也就是**都压**
@@ -495,7 +495,7 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:207，�
 ## 14. 典型坑
 
 **头文件里的服务端示例漏了 `listen()`。** 见 [§2](#2-最小可运行程序)。
-`src/web/uvcpp_ws_server.h:11-19` 的原样照抄会得到一个收不到连接的服务端。
+`src/web/uvcpp_ws_server.h:11-20` 的原样照抄会得到一个收不到连接的服务端。
 
 **`close()` 不等对端回帧，也没有超时。** 见 [§9](#9-关闭)。
 

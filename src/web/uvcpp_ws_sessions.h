@@ -104,7 +104,9 @@ class UVCPP_API uvcpp_ws_sessions {
   void set_retire_observer(std::function<void(uvcpp_ws_connection*)> cb);
 
   /**
-   * @brief 优雅关闭并交出全部会话（服务器 `stop()` 用）。
+   * @brief 关闭并交出全部会话（服务器 `stop()` 用）。这里的「优雅」只到
+   *        RFC 6455 §7.1.1 关闭握手的**前半**：发 Close 帧、随后就关底层连接，
+   *        **不等对端回 Close，也没有等待超时**。
    *
    * 逐个 `close()` —— **发起**关闭、发 Close 帧，真正的回收仍由终结回调
    * 送回。循环如果随后就停了，那些会话留在表里，等 `recycle_all()` 兜底。

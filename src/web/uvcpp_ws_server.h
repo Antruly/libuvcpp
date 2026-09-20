@@ -12,6 +12,7 @@
  * @code
  *   uvcpp_ws_server ws;
  *   ws.bind("0.0.0.0", 9000);
+ *   ws.listen();                       // 少了这句一个连接都收不到
  *   ws.on_connection([](uvcpp_ws_connection* c) {
  *     c->on_text([](const std::string& msg) { ... });
  *   });
@@ -128,8 +129,9 @@ class UVCPP_API uvcpp_ws_server {
    * @brief 只给所有活动会话发 Close 帧，**不碰** HTTP 服务与循环。
    *
    * `stop()` 拆出来的前半。分派权自持时（框架层），停机流程由框架自己编排：
-   * 它要先让 WS 会话优雅关闭、再停 HTTP —— 而它**不能**调 `stop()`，因为那会
-   * 把 HTTP 服务一并停掉，框架自己还有收尾要做。
+   * 它要先让 WS 会话发 Close 帧（只做关闭握手的**前半**：不等对端回执，也没有
+   * 等待超时）、再停 HTTP —— 而它**不能**调 `stop()`，因为那会把 HTTP 服务一并
+   * 停掉，框架自己还有收尾要做。
    *
    * 与 `stop()` 一样，这一步只是**发起**关闭：帧要几轮循环才发得出去，回收
    * 由会话终结回调完成。

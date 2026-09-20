@@ -108,8 +108,9 @@ const char* uvcpp_web_mime_map::lookup_ext(const std::string& ext) const {
 }
 
 const char* uvcpp_web_mime_map::lookup(const std::string& path) const {
-  // 取**最后一个**点：`archive.tar.gz` 看 `gz`，`lib..min.js` 看 `js`
-  // （中间那个空段不影响），`a.b/c` 看 `c`。
+  // 取**最后一个**点：`archive.tar.gz` 看 `gz`，`lib..min.js` 看 `js`（中间那个
+  // 空段不影响）。点在整条路径上找，所以**点落在目录名里时会取到目录那一段** ——
+  // `a.b/c` 得到 `b`，不是 `c`；这里不替上游兜底，传进来的应当是文件名本身。
   const size_t dot = path.find_last_of('.');
   if (dot == std::string::npos || dot + 1 >= path.size()) return k_fallback;
 

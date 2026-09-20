@@ -123,7 +123,9 @@ class UVCPP_API uvcpp_http_client {
    * @brief Send an HTTP request and wait for the full response (sync).
    * @param req        Request to send.
    * @param resp       [out] Populated response.
-   * @param timeout_ms Timeout in milliseconds.
+   * @param timeout_ms Timeout in milliseconds. **仅 Windows 生效** —— 这一支的超时
+   *                   靠 `SO_RCVTIMEO`/`SO_SNDTIMEO`，POSIX 上没有对应实现（见
+   *                   `send_wait_plain` 的说明），那里传入的值会被忽略。
    * @return 0 on success, libuv error code on failure.
    */
   int send_wait(const uvcpp_http_request& req,
@@ -136,6 +138,11 @@ class UVCPP_API uvcpp_http_client {
    * 与 send_wait 的区别：send_wait 走 libuv 异步读 + 事件循环泵，连接关闭时
    * 析构需做 close-dance，存在内存安全隐患；本方法直接对已连接 socket 做同步
    * 收发，绕开 libuv 异步读路径，析构期句柄处于 inactive，安全。
+   *
+   * @note `timeout_ms` **只有 Windows 支生效**：实现里那段
+   *       `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 包在 `#ifdef _WIN32` 中，POSIX
+   *       既没有等价写法也没有别处兜底，所以 Linux/macOS 上对端不响应时本方法
+   *       仍可能**无限阻塞**。这是已知缺口，让调用方误以为有超时会很难查。
    */
   int send_wait_plain(const uvcpp_http_request& req,
                       uvcpp_http_response& resp,

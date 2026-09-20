@@ -959,7 +959,9 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
                                       int timeout_ms) {
   if (!ssl_) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
 
-  // 设置 socket 收发超时，避免阻塞挂死
+  // 设置 socket 收发超时，避免阻塞挂死。**只有 Windows 这一支设了** —— POSIX 上
+  // 既没有 `SO_RCVTIMEO` 的等价写法也没有别处兜底，`timeout_ms` 在那里被忽略
+  // ⇒ `send_wait*` 在 Linux/macOS 上仍可能无限阻塞。这是**已知缺口**，不是双保险。
   uv_os_sock_t sock;
   if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) == 0) {
 #ifdef _WIN32
@@ -1010,7 +1012,8 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
     return -1;
   }
 
-  // 把 socket 设为阻塞模式，并设置收发超时，避免挂死
+  // 把 socket 设为阻塞模式，并设置收发超时，避免挂死。超时同样是**仅 Windows**
+  // 生效（见 `send_wait_ssl` 同处的说明）—— POSIX 上这一支同样有无限阻塞的缺口。
   set_socket_blocking(sock, true);
 #ifdef _WIN32
   DWORD tv = static_cast<DWORD>(timeout_ms);
