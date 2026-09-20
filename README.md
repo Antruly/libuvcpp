@@ -77,7 +77,7 @@ in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
 | Class | Description |
 |-------|-------------|
 | `uvcpp_tcp_client` | High-level TCP client with dual-mode API (async callback / sync `wait()` with timeout) |
-| `uvcpp_tcp_server` | TCP server with `bind()`/`listen()`/`on_connection()` |
+| `uvcpp_tcp_server` | TCP server, `bind()` + `listen(connection_cb, backlog)` (the connection callback is `listen()`'s first argument; there is no separate `on_connection()`) |
 | `uvcpp_udp_client` | UDP client with dual-mode send/recv |
 | `uvcpp_udp_server` | UDP server with `bind()`/`recv_start()` |
 
@@ -171,6 +171,32 @@ Runnable example: `examples/webapp_demo.cpp`.
 | `uvcpp_ssl_context` | SSL/TLS context (wraps `SSL_CTX*`), cert/key loading, self-signed cert generation |
 | `uvcpp_ssl` | Per-connection SSL wrapper, `handshake()`/`read()`/`write()`/`shutdown()` |
 | `uvcpp_ssl_common` | `tls_version`, `tls_mode`, `tls_verify_mode`, `tls_cert_info` enums/structs |
+
+### Module guides
+
+The tables above list **what exists**; the pages below explain **how to use it** —
+typical flows, error handling, and the places where the header comments disagree with
+the implementation. All of them live in `doc/`, and **every code example in them is
+compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy.
+
+| Module | Guide | What it covers |
+|---|---|---|
+| Low level (handle + req) | [doc/lowlevel-guide.md](doc/lowlevel-guide.md) | The event loop, handle/request lifetimes, and what `<uvcpp.h>` actually aggregates |
+| net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP clients and servers; the async and sync modes, and where they must not be mixed |
+| web (HTTP half) | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP server/client/parser/static server; why shutdown takes two calls |
+| web (WS half) | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket handshake, frames, close codes |
+| webapp (framework) | [doc/webapp-guide.md](doc/webapp-guide.md) | Routing, middleware, request/response, upload, static, WebSocket, logging |
+| webapp (support types) | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | The seven types under the framework: connection identity, web utilities, MIME, multipart, file transfer, per-request context, console logging |
+| ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS context and per-connection wrapper — the shortest header set and the easiest to get wrong |
+| http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer; for progress and trade-offs see [doc/http2-status.md](doc/http2-status.md) |
+| expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
+
+Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
+performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
+tree, [doc/testing-guide.md](doc/testing-guide.md) for the test layers,
+[doc/ci-guide.md](doc/ci-guide.md) for CI maintenance, and
+[doc/release-process.md](doc/release-process.md) for how a release is cut and what that
+pipeline does not check.
 
 ---
 
@@ -470,10 +496,18 @@ libuvcpp/
 │   ├── benchmark.md       # Measured per-connection memory, throughput, stability
 │   ├── build-guide.md     # Every CMake switch, build trees, platform deps
 │   ├── ci-guide.md        # CI maintenance guidelines
+│   ├── expand-guide.md    # Memory pool / page heap / span usage
+│   ├── http2-guide.md     # Using the low-level HTTP/2 session and connection layers
 │   ├── http2-status.md    # HTTP/2 support status
+│   ├── lowlevel-guide.md  # Event loop, handles and requests (the foundation)
+│   ├── net-guide.md       # TCP/UDP clients and servers
 │   ├── release-process.md # How a release is cut, and what it does not check
+│   ├── ssl-guide.md       # TLS context and per-connection wrapper
 │   ├── testing-guide.md   # Test layers, filename filters, tests/tools index
-│   └── webapp-guide.md    # Web app framework guide
+│   ├── web-http-guide.md  # The HTTP half of the web layer
+│   ├── web-ws-guide.md    # The WebSocket half of the web layer
+│   ├── webapp-guide.md    # Web app framework guide
+│   └── webapp-support-guide.md # Types under webapp not covered by the framework guide
 ├── cmake/         # CMake config templates
 ├── .github/workflows/  # CI pipeline
 ├── CMakeLists.txt

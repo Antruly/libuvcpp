@@ -76,7 +76,7 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
 | 类 | 说明 |
 |-------|-------------|
 | `uvcpp_tcp_client` | 高级 TCP 客户端，双模式 API（异步回调 / 同步 `wait()` 带超时） |
-| `uvcpp_tcp_server` | TCP 服务端，`bind()`/`listen()`/`on_connection()` |
+| `uvcpp_tcp_server` | TCP 服务端，`bind()` + `listen(连接回调, backlog)`（连接回调是 `listen()` 的第一个参数，没有单独的 `on_connection()`） |
 | `uvcpp_udp_client` | UDP 客户端，双模式发送/接收 |
 | `uvcpp_udp_server` | UDP 服务端，`bind()`/`recv_start()` |
 
@@ -170,6 +170,30 @@ int main() {
 | `uvcpp_ssl_context` | SSL/TLS 上下文（封装 `SSL_CTX*`），证书/密钥加载，自签名证书生成 |
 | `uvcpp_ssl` | 每连接 SSL 封装，`handshake()`/`read()`/`write()`/`shutdown()` |
 | `uvcpp_ssl_common` | `tls_version`, `tls_mode`, `tls_verify_mode`, `tls_cert_info` 枚举/结构体 |
+
+### 模块指南
+
+上面每张表是**有什么类**；下面这几篇讲**怎么用** —— 典型流程、错误处理、以及
+头注释与实现对不上的地方。全部在 `doc/` 下，**每一段的示例都被 CI 逐条编译过**
+（`tests/tools/check_doc_snippets.py`），可以照抄。
+
+| 模块 | 指南 | 讲什么 |
+|---|---|---|
+| 低层（handle + req） | [doc/lowlevel-guide.md](doc/lowlevel-guide.md) | 事件循环、句柄与请求的生命周期、`<uvcpp.h>` 到底聚合了什么 |
+| net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP 客户端与服务端；异步与同步双模式，以及两者不能混用的地方 |
+| web（HTTP 半边） | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP 服务端/客户端/解析器/静态服务；关服为什么是两步 |
+| web（WS 半边） | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket 握手、帧、关闭码 |
+| webapp（框架） | [doc/webapp-guide.md](doc/webapp-guide.md) | 路由、中间件、请求响应、上传、静态服务、WebSocket、日志 |
+| webapp（支撑类型） | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | 框架底下那七个类型：连接身份、web 工具函数、MIME、multipart、文件下发、每请求上下文、控制台日志 |
+| ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS 上下文与每连接封装 —— 头文件最短、最容易写错的一层 |
+| http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法；实现进度与折衷另见 [doc/http2-status.md](doc/http2-status.md) |
+| expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
+
+模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
+[doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
+[doc/testing-guide.md](doc/testing-guide.md) 测试分层、
+[doc/ci-guide.md](doc/ci-guide.md) CI 维护、
+[doc/release-process.md](doc/release-process.md) 发布流程与它不检查什么。
 
 ---
 
@@ -465,10 +489,18 @@ libuvcpp/
 │   ├── benchmark.md       # 每连接内存、吞吐与稳定性实测
 │   ├── build-guide.md     # 各个 CMake 开关、构建树、平台依赖
 │   ├── ci-guide.md        # CI 维护指南
+│   ├── expand-guide.md    # 内存池 / 页堆 / span 的功能说明
+│   ├── http2-guide.md     # HTTP/2 低层会话与连接层的用法
 │   ├── http2-status.md    # HTTP/2 支持现状
+│   ├── lowlevel-guide.md  # 事件循环、句柄与请求（地基）
+│   ├── net-guide.md       # TCP/UDP 客户端与服务端
 │   ├── release-process.md # 发布怎么出，以及这条链**没有**检查什么
+│   ├── ssl-guide.md       # TLS 上下文与每连接封装
 │   ├── testing-guide.md   # 测试分层、文件名即过滤键、tests/tools 索引
-│   └── webapp-guide.md    # web 应用框架指南
+│   ├── web-http-guide.md  # web 层的 HTTP 半边
+│   ├── web-ws-guide.md    # web 层的 WebSocket 半边
+│   ├── webapp-guide.md    # web 应用框架指南
+│   └── webapp-support-guide.md # webapp 底下那些没被框架指南覆盖的类型
 ├── cmake/         # CMake 配置模板
 ├── .github/workflows/  # CI 流水线
 ├── CMakeLists.txt

@@ -184,6 +184,26 @@ the summary block rather than the exit code. See
 [`testing-guide.md`](doc/testing-guide.md#gate-exit-codes-3-is-not-a-failure) for why the
 distinction is worth a convention.
 
+User-facing prose is **one page per module**, and that is where new module prose belongs —
+not in the READMEs, which carry the class tables. These pages are also what the snippet gate
+mostly operates on, so a new module page is a page CI will compile:
+
+| Page | Module |
+|---|---|
+| [`doc/lowlevel-guide.md`](doc/lowlevel-guide.md) | the event loop, handles and requests (the foundation) |
+| [`doc/net-guide.md`](doc/net-guide.md) | TCP/UDP clients and servers |
+| [`doc/web-http-guide.md`](doc/web-http-guide.md) | the HTTP half of the web layer |
+| [`doc/web-ws-guide.md`](doc/web-ws-guide.md) | the WebSocket half of the web layer |
+| [`doc/webapp-guide.md`](doc/webapp-guide.md) | the web app framework |
+| [`doc/webapp-support-guide.md`](doc/webapp-support-guide.md) | the types under webapp the framework guide does not cover |
+| [`doc/ssl-guide.md`](doc/ssl-guide.md) | TLS context and per-connection wrapper |
+| [`doc/http2-guide.md`](doc/http2-guide.md) | the low-level HTTP/2 session and connection layers |
+| [`doc/expand-guide.md`](doc/expand-guide.md) | memory pool, page heap and span |
+
+`doc/<module>/` subdirectories do not exist and should not be created: both gates scan
+`*.md` at the root plus `doc/*.md` **non-recursively**, so a page in a subdirectory is
+invisible to every criterion and, worse, reported by none of them.
+
 ### Code blocks in documentation
 
 A ```` ```cpp ```` block is a **complete translation unit**, and the snippet gate compiles it. It
