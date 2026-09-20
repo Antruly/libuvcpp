@@ -37,6 +37,9 @@ import re
 import subprocess
 import sys
 
+# 同目录模块：`python tests/tools/xxx.py` 会把脚本所在目录放进 sys.path[0]
+import ctest_list  # noqa: E402
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -276,7 +279,6 @@ def main():
     args = ap.parse_args()
 
     tree = os.path.join(ROOT, args.tree)
-    tests_dir = os.path.join(tree, "tests")
 
     before = read_text(LOOP_CPP)
     sum0 = md5(LOOP_CPP)
@@ -292,15 +294,21 @@ def main():
             raise SystemExit(3)
         sync_dll(tree)
 
-        exes = []
-        for base, _dirs, files in os.walk(tests_dir):
-            if os.path.basename(base) != "Release":
-                continue
-            for f in files:
-                if f.endswith(".exe") and (args.exe is None
-                                           or f == args.exe + ".exe"):
-                    exes.append(os.path.join(base, f))
-        exes.sort()
+        # 清单取自 ctest，不是"磁盘上有哪些 exe" —— 源码删掉后 exe 会留在原地，
+        # 跑它得到的泄漏数字是假的（见 ctest_list）。报 stray 要在 --exe 过滤**之前**，
+        # 否则过滤剩下的那些会把被滤掉的正常用例全报成 stray。
+        all_tests = ctest_list.ctest_tests(tree)
+        if not all_tests:
+            print(f"在 {args.tree}/tests 下没找到 ctest 登记的 Release 用例 —— 先建一遍")
+            raise SystemExit(3)
+        ctest_list.report_stray(tree, {t[1] for t in all_tests})
+        tests = all_tests
+        if args.exe is not None:
+            tests = [t for t in all_tests if t[0] == args.exe]
+            if not tests:
+                print(f"--exe {args.exe} 一个都没匹配上")
+                raise SystemExit(3)
+        exes = [t[1] for t in tests]
         print(f"跑 {len(exes)} 个 exe（{args.tree}）\n")
 
         for exe in exes:
