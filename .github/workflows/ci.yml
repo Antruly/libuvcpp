@@ -910,7 +910,7 @@ jobs:
           # 钉 windows-2022 与 release.yml 的 msvc-x64 一致：windows-latest 现在
           # 指向只有 VS2026 的镜像，而 ilammy/msvc-dev-cmd 是按 vswhere -latest
           # 找工具链的 —— 让这个 job 的 MSVC 基线跟发布产物那条链不同源，
-  # 出问题时没人能说清是哪一边的性质。
+          # 出问题时没人能说清是哪一边的性质。
           - os: windows-2022
             platform: msvc-x64
             cxx: cl
