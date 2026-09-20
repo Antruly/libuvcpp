@@ -724,7 +724,13 @@ memory_pressure_level get_memory_pressure() {
     size_t total = g_total_allocated.load(std::memory_order_relaxed);
     size_t in_use_count = g_in_use.load(std::memory_order_relaxed);
     size_t free = g_free_spans.load(std::memory_order_relaxed);
-    
+
+    // 下面两条判据都到不了，于是这个函数实际恒返回 none —— 别靠调阈值来"修"它：
+    //  · `free == 0 && in_use > 0`：`g_free_spans` 与 `g_total_spans` 在建/销毁
+    //    span 时同增同减（各自唯一那两处 add/sub），两者是同一个数；而 in_use > 0
+    //    必须有 span 存在，于是这个合取式在一致状态下不可达。
+    //  · 剩下的比值把**块数**除以**字节数**（`in_use` 是块数、`total` 是字节），
+    //    量级 1e-5，0.6/0.8/0.95 三档跨不到。
     if (free == 0 && in_use_count > 0) {
         return memory_pressure_level::critical;
     }

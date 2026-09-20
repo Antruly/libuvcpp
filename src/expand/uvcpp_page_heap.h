@@ -14,7 +14,7 @@
  * - Lock-free fast path for small allocations
  * - Page-aligned memory from system (mmap/VirtualAlloc)
  * - Support for huge pages and NUMA (reserved interfaces)
- * - Memory pressure detection and response
+ * - Memory pressure detection and response (reserved interface，见类内逐条注释)
  */
 
 #pragma once
@@ -206,7 +206,9 @@ public:
      * @brief Get memory pool statistics.
      * @param total_allocated Total bytes allocated from system.
      * @param in_use Number of blocks currently in use.
-     * @param free_spans Number of free spans.
+     * @param free_spans Number of spans —— **不是**"空闲 span 数"。它和 `total_spans`
+     *                   在建/销毁 span 时同增同减，两者是同一个数（见 `.cpp` 里
+     *                   唯一那两处 add/sub）。判"整段有没有归还"要看 `total_allocated`。
      */
     void get_stats(size_t& total_allocated, size_t& in_use, size_t& free_spans);
 
@@ -222,13 +224,19 @@ public:
     };
 
     /**
-     * @brief Get current memory pressure level.
-     * @return Current pressure level.
+     * @brief Get current memory pressure level (reserved interface).
+     * @return Current pressure level —— 现在**恒为 `none`**，而这个 `none` 并不表示
+     *         "当前没有压力"：两条判据都不成立，`critical` 在一致的进程状态下不可达
+     *         （`free_spans` 与 `total_spans` 是同一个数），比值那条的单位是混的
+     *         （块数 ÷ 字节数），于是 `low`/`medium`/`high` 三档到不了。
      */
     pressure_level get_pressure_level() const;
 
     /**
-     * @brief Trigger garbage collection / span merging.
+     * @brief Trigger garbage collection / span merging (reserved interface).
+     *
+     * 当前是**空操作**：它调到的 `try_coalesce_spans()` 遍历 `g_span_free_list`，
+     * 而那个链表全仓**没有一处写入过**（只有读），恒为 `nullptr`。
      */
     void trigger_gc();
 
@@ -238,14 +246,21 @@ public:
     using memory_pressure_callback = void(*)();
 
     /**
-     * @brief Set memory pressure callback.
+     * @brief Set memory pressure callback (reserved interface).
      * @param cb Callback function to invoke on memory pressure.
+     *
+     * 当前**存下来但永不调用** —— 那个指针只在 setter 里被写过，全仓没有一处读它。
+     * 想让"压力回调"真的发生，得先有能算出来的压力档位（见 `get_pressure_level()`）。
      */
     void set_pressure_callback(memory_pressure_callback cb);
 
     /**
      * @brief Enable huge page support (reserved interface).
      * @param enable Whether to enable huge pages.
+     *
+     * 只在 Linux 上真的给 `mmap` 加 `MAP_HUGETLB`（还需系统预先预留 hugetlb 页，
+     * 否则 mmap 直接失败）；**Windows 分支忽略这个标志** —— 那里的 `VirtualAlloc`
+     * 不带 `MEM_LARGE_PAGES`。返回 true 只表示"标志记下了"，与平台无关。
      */
     void enable_huge_page(bool enable);
 
@@ -258,6 +273,8 @@ public:
     /**
      * @brief Set NUMA node (reserved interface).
      * @param node NUMA node index.
+     *
+     * 只存进一个全局变量，**分配路径从不读它** —— 设了等于没设。
      */
     void set_numa_node(int node);
 
