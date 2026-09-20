@@ -122,7 +122,7 @@ enum class uvcpp_web_dotfile_policy : int {
   ALLOW,
 };
 
-/** @brief `.well-known` 这类目录即使开了 IGNORE 也应当放行的白名单。 */
+/** @brief `.well-known` 这类目录即使策略是 `HIDE` 也应当放行的白名单。 */
 struct UVCPP_API uvcpp_web_static_options {
   /** @brief 目录请求时按顺序尝试的索引文件名。默认 `{"index.html"}`。 */
   std::vector<std::string> index_files;
@@ -202,7 +202,7 @@ struct UVCPP_API uvcpp_web_static_options {
    */
   size_t max_cached_file_size;
 
-  /** @brief dotfile 策略。默认 `IGNORE`（404）。 */
+  /** @brief dotfile 策略。默认 `HIDE`（404）。 */
   uvcpp_web_dotfile_policy dotfiles;
 
   /**

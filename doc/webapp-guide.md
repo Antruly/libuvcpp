@@ -10,7 +10,7 @@
   强制关掉 webapp，而不是留一个编译不过的配置）
 - 依赖：webapp 会 `FetchContent` 拉 **nlohmann/json**（`UVCPP_BUILD_WEBAPP=OFF` 时完全不碰）
 - 全程异步 IO：**handler 跑在事件循环线程上**，耗时的活要交给工作线程池（见
-  [异步与工作池](#异步与工作池)）
+  [异步与工作池](#14-异步与工作池)）
 
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"框架没做"的地方都明确标出来
 > ——那些地方比 API 更容易踩。
@@ -109,7 +109,7 @@ int main() {
 | `set_max_pipelined_requests(size_t)` | `8` | 同一条连接上的在途请求上限；超了回 **503 + close**；`0` = 不限 |
 | `set_auto_options(bool)` | `true` | 未命中且路径存在时自动答 OPTIONS |
 | `set_head_as_get(bool)` | `true` | HEAD 无注册时回退到 GET handler |
-| `set_work_limit(size_t)` | 见 [异步与工作池](#异步与工作池) | 工作池在途上限；`0` = 不限 |
+| `set_work_limit(size_t)` | 见 [异步与工作池](#14-异步与工作池) | 工作池在途上限；`0` = 不限 |
 
 **工作线程数没有配置项**：线程池大小是 libuv 的 `UV_THREADPOOL_SIZE`，且**只在进程
 启动前设置才生效**（libuv 只读一次，没有运行时扩容 API）。没设时 `start()` 会打一条 WARN。
@@ -422,9 +422,6 @@ app.serve_static("/assets", "./public");
 | `follow_symlinks` | `true` | 关掉时只查**最后一段** |
 | `add_charset` | `true` | |
 | `mime` | `nullptr` = 默认表 | **不持有所有权** |
-
-> 文档小坑：`uvcpp_web_static.h` 里 dotfile 默认值的注释写成 `IGNORE`，实际枚举成员
-> 叫 `HIDE`（不叫 `IGNORE` 是因为 `winnt.h` 有 `#define IGNORE 0`）。
 
 ### Range / 条件请求
 
@@ -1189,7 +1186,7 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 | **上传没有进度回调** | 用 `stream()->on_progress` 或 `upload()->received_bytes()`（§8）。 |
 | **`broadcast()` 不存在** | 自己维护房间表（§10）。 |
 | **路由注册失败看不见** | `app.get()` 返回 `uvcpp_web_app&`；要检查就走 `app.router()`（§3）。 |
-| **静态 dotfile 默认值是 404（`HIDE`）** | 头文件注释误写成 `IGNORE`（§7）。 |
+| **静态 dotfile 默认值是 404（`HIDE`）** | 枚举成员刻意**不**叫 `IGNORE` —— `winnt.h` 有 `#define IGNORE 0`，而枚举类的作用域挡不住宏（§7）。 |
 | **上传上限全 App 一份** | 没有按路由覆盖（§8）。 |
 | **在回调里 `delete` 客户端：能用，但那份内存不回收** | 在 `connect()` / `send()` 的回调里 `delete` 掉 `uvcpp_http_client` 是**支持**的（"响应回来就把客户端扔了"是本类最自然的用法），删掉之后不许再碰、也不许再 `send()`。代价是那一次析构**故意不拆内部对象**：`uvcpp_loop` + `uvcpp_tcp_client` + 解析器（h2 上再加一个 nghttp2 会话）留在循环上不释放 —— 换掉一个必然发生的 use-after-free（析构里那段"泵到句柄关完"会把**还压在栈上**的那条读路径再叫一遍，实测 `0xC0000005`）。要让内存回归，就别在回调里删：回调里置一个标志，循环退出之后再删。 |
 | **`uvcpp_http_client` 只在"有请求在飞"时才看得见对端断开** | 异步路径上对端在响应收完之前断开，`send()` 的回调会**落地**并以 `UV_ECONNRESET` 交付（本层写死的值，与传输层看到 EOF 还是 RST 无关），`HTTP_CLIENT_CONNECTED` 同时被清掉，此后的 `send()` 直接回 `UV_ENOTCONN` 而不是写进一条死 socket。**但只 `connect()` 过、从没 `send()` 过的客户端仍然不知道** —— 关闭通知只能搭在读路径上，而读是在第一次 `send()` 里才装的（`uvcpp_http_client.cpp:418-429`）。 |

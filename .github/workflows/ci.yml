@@ -38,6 +38,13 @@ jobs:
       - name: Check doc versions
         run: python3 tests/tools/check_doc_versions.py
 
+      # 另外三条文档判据：① CMake 旋钮与两版 README 的选项表双向相等；
+      # ② 文档里的相对链接与仓库路径都解析得到；③ doc/ 下没有被正文孤立的一篇。
+      # 不碰构建、不调 git（MSYS2 那条 PATH 上没有 git），所以放这一档就够。
+      # 同样：rc=3 是「前提不满足、**没判**」，别读成判红了。
+      - name: Check docs
+        run: python3 tests/tools/check_docs.py
+
       - name: Configure & Build & Test (static)
         shell: bash
         run: |

@@ -302,7 +302,7 @@ g++ -std=c++11 -g -I include your_app.cpp -L lib -luvcppd -o your_app.exe
 ## 构建要求 (Requirements)
 
 - C++11 或更高版本
-- CMake 3.16+
+- CMake 3.20+
 - libuv 1.0.0+
 - 支持 Windows / Linux / macOS
 - 可选：OpenSSL（TLS）、zlib（压缩）、llhttp 与 nlohmann/json（HTTP/Web 框架，可由 FetchContent 自动获取）
@@ -452,22 +452,29 @@ int main() {
   `zconf.h`**（`web/uvcpp_ws_parser.h` 在 `UVCPP_ZLIB_ENABLE=1` 时要 include 它，
   但 install 规则里没有这一条）。
 
-### MSVC 从源码树 / 安装树取头时，要自己加 `/utf-8`
+### MSVC 从源码树 / 安装树取头时要加 `/utf-8` —— 头文件侧已修（1.2.0）
 
-**预编译包的消费者不受影响**（打包脚本给含非 ASCII 的头补了 BOM，见上面「使用方式」），
-受影响的是 `find_package(uvcpp)` 与直接把 `src/` 加进 `-I` 的那条路：
+**这条曾经是个真问题，现在只剩一半。** 预编译包的消费者从来不受影响
+（打包脚本给含非 ASCII 的头补了 BOM），受影响的一直是 `find_package(uvcpp)`
+与直接把 `src/` 加进 `-I` 的那条路。
 
-- 实测 `src/` 下 99 个公开头：75 个带 BOM，24 个不带，**其中 22 个含非 ASCII** ——
-  会坏的就是这 22 个。
-- MSVC 读无 BOM 的 UTF-8 源码时按系统代码页（936/GBK）解码，中文注释的末字节吞掉
-  换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>` 里。`C4819` 是唯一的线索
-  （`warning C4819: 该文件包含不能在当前代码页(936)中表示的字符`）。
-- 仓内编译看不出来，有两个原因叠加：顶层 `CMakeLists.txt` 里
-  `if(MSVC) add_compile_options(/utf-8) endif()` 是**目录作用域**的 —— 导出集里
-  `INTERFACE_COMPILE_OPTIONS` 是**空**的，`find_package` 的消费者拿不到它；而
-  `install(FILES ...)` 是把源码树那几个头**原样**拷出去，BOM 不会凭空多出来。
-- 绕行：给自己的目标加 `/utf-8`（或 `/source-charset:utf-8`）。根因是那 22 个头自己
-  没 BOM，会在后续版本修。
+**当时**：`src/` 下有一批公开头是**无 BOM 的 UTF-8**。MSVC 按系统代码页（936/GBK）解码，
+中文注释的末字节吞掉换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>` 里；
+`C4819` 是唯一的线索（`warning C4819: 该文件包含不能在当前代码页(936)中表示的字符`）。
+仓内编译看不出来，有两个原因叠加：顶层 `CMakeLists.txt` 里
+`if(MSVC) add_compile_options(/utf-8) endif()` 是**目录作用域**的 —— 导出集里
+`INTERFACE_COMPILE_OPTIONS` 是**空**的，`find_package` 的消费者拿不到它；而
+`install(FILES ...)` 是把源码树那几个头**原样**拷出去，BOM 不会凭空多出来。
+
+**现在**（2026-09-21 实测）：`src/` 下 99 个 `.h` 里 **97 个带 BOM**，剩下 2 个
+（`expand/uvcpp_memory_pool_span.h`、`expand/uvcpp_page_allocator.h`）**是纯 ASCII**、
+不含非 ASCII ⇒ **没有一个头还会踩这个坑**。`package_release.py` 里那道"含非 ASCII
+又没 BOM 就补一个"的下限仍在，但它现在不会命中任何东西。
+
+**仍未修的那一半**：`add_compile_options(/utf-8)` 依旧不进导出集，
+`INTERFACE_COMPILE_OPTIONS` 依然是空的。所以**你自己写的头**若含非 ASCII 又没 BOM，
+照样会中招 —— 给自己的目标加 `/utf-8`（或 `/source-charset:utf-8`），
+或者把源文件存成带 BOM 的 UTF-8（这也是本仓的约定）。
 
 ## 感谢 (Credits)
 

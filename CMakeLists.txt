@@ -6,8 +6,9 @@ option(UVCPP_USE_SYSTEM_LIBUV "Prefer system libuv if found" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
 # 扩展模块选项（默认关闭）
-# 内存池在 MinGW-w64 下会让 test_web_app_* 崩溃（根因未定位，见 RELEASE.md 的
-# 「已知问题」），所以默认改成就地关闭、要用得显式 -DUVCPP_BUILD_EXPAND=ON。
+# 内存池在 MinGW-w64 下曾让 test_web_app_* 崩溃，那个根因（emutls 下 TLS 析构的
+# 次序，见 RELEASE.md §「内存池在 v1.1.0 里修好了」）**已定位并修复**，两个平台
+# 现在都全绿；默认仍是就地关闭，要用得显式 -DUVCPP_BUILD_EXPAND=ON。
 #
 # "使用者忘了定义 UVCPP_ENABLE_MEMORY_POOL ⇒ 两套分配器静默损坏"那个隐患，
 # 现在由生成的 uvcpp_config.h 兜住（见下）：预编译包的使用者不传宏就拿包的值，
@@ -70,7 +71,7 @@ option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 # Web 子开关 — 仅在 UVCPP_BUILD_WEB=ON 时有效
 # =========================================================================
 option(UVCPP_ENABLE_ZLIB    "Enable zlib (gzip, WebSocket Per-Message Deflate)"  OFF)
-option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS; WSS not wired yet)"        OFF)
+option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS + WSS)"                     OFF)
 option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN only, no h2c)" OFF)
 
 # =========================================================================
@@ -87,12 +88,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # MSVC：显式指定 /utf-8，避免按系统代码页(936/GBK)误读源码，导致中文注释末字节
 # 吞掉换行符、把下一行代码并进注释（表现为“sock/all/hdrEnd 未声明”等诡异报错）。
 #
-# 实测 src/ 下 99 个公开头里 75 个带 BOM、24 个不带 —— 不是"全都无 BOM"；那不带的
-# 24 个里真正会坏的只有 22 个（含非 ASCII），另 2 个是纯 ASCII。
+# 实测（2026-09-21）src/ 下 99 个 .h 里 97 个带 BOM，另 2 个是**纯 ASCII**
+# （expand/uvcpp_memory_pool_span.h、expand/uvcpp_page_allocator.h）—— 也就是说
+# "含非 ASCII 又没 BOM"的头现在是 **0 个**，当年那 22 个已经全部补上了。
 # 带 BOM 的那些本来就不靠这个开关。但这个开关是**目录作用域**的，
-# 既不进导出集，也到不了预编译包的消费者，所以 22 个无 BOM 的头对 MSVC 使用者
-# 依然是坏的：只能由打包脚本补 BOM 兜住（tests/tools/package_release.py 的
-# copy_header）。根因（源码树里那 22 个自己没 BOM）另记。
+# 既不进导出集，也到不了预编译包的消费者，所以**新加的**头若含非 ASCII 又忘了
+# BOM，MSVC 使用者依然会中招：那道下限只能由打包脚本兜住
+# （tests/tools/package_release.py 的 copy_header）。
 if(MSVC)
   add_compile_options(/utf-8)
 endif()

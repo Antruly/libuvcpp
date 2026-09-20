@@ -521,19 +521,20 @@ def copytree(src, dst):
 def copy_header(src, dst):
     """拷公开头；含非 ASCII 又没 BOM 的，补一个 UTF-8 BOM。
 
-    仓里的约定本来就是「UTF-8 带 BOM」（src/ 下 99 个头里 75 个有），另有 22 个
-    跑偏成了无 BOM。仓内编译看不出来：顶层 `CMakeLists.txt` 里
-    `if(MSVC) add_compile_options(/utf-8) endif()` 那一段替它们兜着。但那个开关是
-    **目录作用域**的 —— 它既不进导出集，更到不了预编译包的消费者。于是 MSVC 使用者
-    按系统代码页 936 读这些头，
-    中文注释的末字节吞掉换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>`
-    里。实测：`cl /nologo /std:c++14 /EHsc /I<包>/include /c consumer.cpp` 编不过；
-    给这 22 个补上 BOM 之后同一条命令 rc=0（g++ 也照过 —— 前导 BOM 它接受并忽略，
-    所以这里不按平台分叉，各平台的包保持同一份字节）。
+    仓里的约定本来就是「UTF-8 带 BOM」。**这条兜底现在不会命中任何东西**：
+    2026-09-21 实测 src/ 下 99 个公开头里 97 个带 BOM，剩下 2 个
+    （`expand/uvcpp_memory_pool_span.h`、`expand/uvcpp_page_allocator.h`）是纯 ASCII
+    —— 当年那 22 个"含非 ASCII 又没 BOM"的头已经全部补上了。
 
-    这是**下限**不是根因：根因在 src/ 那 22 个头自己没 BOM，走 `find_package`
-    的消费者一样中招（那条路不经过本脚本）。这里兜住的是"新加的头忘了 BOM 也不会
-    再把发出去的包弄坏"。纯 ASCII 的头不加 BOM。
+    留着它的理由是**下限**而不是根因：根因是头文件自己有没有 BOM，走
+    `find_package(uvcpp)` 的消费者不经过本脚本（顶层 `CMakeLists.txt` 里
+    `if(MSVC) add_compile_options(/utf-8) endif()` 是**目录作用域**的，既不进导出集、
+    也到不了预编译包的消费者）。这里兜住的是"新加的头忘了 BOM 也不会再把发出去的包
+    弄坏"—— 而 MSVC 按系统代码页 936 读无 BOM 的头时，中文注释的末字节会吞掉换行、
+    把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>` 里。实测：
+    `cl /nologo /std:c++14 /EHsc /I<包>/include /c consumer.cpp` 编不过；补上 BOM
+    之后同一条命令 rc=0（g++ 也照过 —— 前导 BOM 它接受并忽略，所以这里不按平台分叉，
+    各平台的包保持同一份字节）。纯 ASCII 的头不加 BOM。
     """
     with open(src, "rb") as f:
         data = f.read()

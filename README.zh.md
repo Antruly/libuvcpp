@@ -25,6 +25,8 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 ┌────────────┐
 │ web (HTTP/WS) │  ← uvcpp_http_client/server, uvcpp_ws_client/server
 ├────────────┤
+│ http2        │  ← h2 会话/连接层、nghttp2 胶水（`UVCPP_ENABLE_NGHTTP2=ON`）
+├────────────┤
 │ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL 封装)
 ├────────────┤
 │ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
@@ -230,9 +232,11 @@ cmake --build . --config Release --parallel
 | 选项 | 默认值 | 说明 |
 |--------|---------|-------------|
 | `UVCPP_BUILD_TESTS` | `ON` | 构建测试可执行文件 |
+| `UVCPP_BUILD_FUNCTIONAL` | `ON` | 构建功能测试套件（只在 `UVCPP_BUILD_TESTS=ON` 时被读） |
 | `BUILD_SHARED_LIBS` | `ON` | 构建动态库 |
 | `UVCPP_BUILD_STATIC` | 自动 | 构建静态 uvcpp 库 |
 | `UVCPP_BUILD_SHARED` | 自动 | 构建动态 uvcpp 库 |
+| `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` 保持「自动」，跟随 libuv 自己的 `BUILD_SHARED_LIBS` |
 | `UVCPP_BUILD_EXPAND` | `OFF` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |
@@ -242,6 +246,10 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
+| `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
+| `UVCPP_STATIC_RUNTIME` | `OFF` | 把编译器运行时（`libgcc`/`libstdc++`）静态链进库。**仅 MinGW 与 Linux 有效，MSVC 上是空操作** —— MSVC 用 `/MD`，发布包里自带 `vcruntime`/`msvcp` |
+| `UVCPP_ENABLE_TRY_WRITE` | `ON` | 拷贝进写缓冲之前先试一次 `uv_try_write` |
+| `UVCPP_TRY_WRITE_MIN_BYTES` | `32768` | 值得尝试 `uv_try_write` 的最小载荷（是 `CACHE STRING`，不是 `option()`） |
 
 **注意**：开启 `UVCPP_BUILD_WEB=ON` 不会自动启用 `UVCPP_ENABLE_ZLIB` 或 `UVCPP_ENABLE_OPENSSL`。
 这些选项需要显式手动开启。`UVCPP_ENABLE_NGHTTP2` 在 `UVCPP_ENABLE_OPENSSL=OFF` 时
@@ -435,6 +443,7 @@ libuvcpp/
 │   ├── net/       # TCP/UDP 客户端/服务端
 │   ├── web/       # HTTP 客户端/服务端, WebSocket 客户端/服务端, 帧解析器
 │   ├── webapp/    # Web 应用框架（路由、中间件、静态、上传、WS 客户端、日志）
+│   ├── http2/     # HTTP/2 会话/连接层、nghttp2 胶水、ALPN（uvcpp_h2_nghttp2.h 是私有头）
 │   └── ssl/       # SSL/TLS 上下文和连接封装
 ├── tests/
 │   ├── unit/      # 单元测试
@@ -444,14 +453,19 @@ libuvcpp/
 ├── examples/      # 可运行示例（webapp_demo）
 ├── doc/           # 文档
 │   ├── benchmark.md       # 每连接内存、吞吐与稳定性实测
+│   ├── build-guide.md     # 各个 CMake 开关、构建树、平台依赖
 │   ├── ci-guide.md        # CI 维护指南
 │   ├── http2-status.md    # HTTP/2 支持现状
+│   ├── release-process.md # 发布怎么出，以及这条链**没有**检查什么
+│   ├── testing-guide.md   # 测试分层、文件名即过滤键、tests/tools 索引
 │   └── webapp-guide.md    # web 应用框架指南
 ├── cmake/         # CMake 配置模板
 ├── .github/workflows/  # CI 流水线
 ├── CMakeLists.txt
+├── CONTRIBUTING.md     # 从 clone 到跑通测试，以及本仓的开发约定
 ├── README.md
-└── README.zh.md
+├── README.zh.md
+└── RELEASE.md          # 发布说明 / 历史
 ```
 
 ---
@@ -474,6 +488,9 @@ libuvcpp/
 来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ### HTTP/2
+
+实现现状 —— 强制了什么、默认值是什么、哪些是刻意不支持的 —— 见
+[`doc/http2-status.md`](doc/http2-status.md)。
 
 - 接入 [nghttp2](https://github.com/nghttp2/nghttp2)、ALPN 基础设施、h2 会话层与连接层
   （`1.1.1`），并接进请求层与 Web 应用框架（`1.1.2`）

@@ -112,8 +112,9 @@
 
 ## 2. 做了但有折衷（"写死了"）
 
-- **不自实现帧层与 HPACK，直接用 `nghttp2`。** 这与 `docs/web-module-development-plan.md`
-  当初的设想不同，§1.3 已如实记了一笔。
+- **不自实现帧层与 HPACK，直接用 `nghttp2`。** 这与最初那份模块开发计划里的设想不同
+  —— 那份计划是 `docs/web-module-development-plan.md`，而 `docs/` 在 `.gitignore` 里，
+  **只存在于开发机上**（clone 下来没有这个文件），§1.3 已如实记了一笔。
 - **流控没有自己的策略。** 全 `src/` 零命中 `consume_window` /
   `NO_AUTO_WINDOW_UPDATE` —— 窗口更新完全交给 nghttp2 的自动行为，
   本层既不暴露背压也不做自己的窗口管理。`H2_DEFAULT_INITIAL_WINDOW_SIZE`

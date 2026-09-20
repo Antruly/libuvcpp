@@ -25,6 +25,8 @@ application
 ┌────────────┐
 │ web (HTTP/WS) │  ← uvcpp_http_client/server, uvcpp_ws_client/server
 ├────────────┤
+│ http2        │  ← h2 session/connection layers, nghttp2 glue (`UVCPP_ENABLE_NGHTTP2=ON`)
+├────────────┤
 │ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL wrapper)
 ├────────────┤
 │ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
@@ -231,9 +233,11 @@ cmake --build . --config Release --parallel
 | Option | Default | Description |
 |--------|---------|-------------|
 | `UVCPP_BUILD_TESTS` | `ON` | Build test executables |
+| `UVCPP_BUILD_FUNCTIONAL` | `ON` | Build the functional test suite (only read when `UVCPP_BUILD_TESTS=ON`) |
 | `BUILD_SHARED_LIBS` | `ON` | Build shared libraries |
 | `UVCPP_BUILD_STATIC` | auto | Build static uvcpp library |
 | `UVCPP_BUILD_SHARED` | auto | Build shared uvcpp library |
+| `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | Keep `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` at `auto`, following libuv's own `BUILD_SHARED_LIBS` |
 | `UVCPP_BUILD_EXPAND` | `OFF` | Build expand module (memory pool) |
 | `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
@@ -243,6 +247,10 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
+| `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | Fetch and build libuv from source via `FetchContent` |
+| `UVCPP_STATIC_RUNTIME` | `OFF` | Statically link the compiler runtime (`libgcc`/`libstdc++`) into the library. **MinGW and Linux only — a no-op on MSVC**, which uses `/MD` and ships `vcruntime`/`msvcp` in the package |
+| `UVCPP_ENABLE_TRY_WRITE` | `ON` | Try `uv_try_write` before copying into a write buffer |
+| `UVCPP_TRY_WRITE_MIN_BYTES` | `32768` | Smallest payload worth attempting `uv_try_write` for (a `CACHE STRING`, not an `option()`) |
 
 **Important**: `UVCPP_ENABLE_ZLIB` and `UVCPP_ENABLE_OPENSSL` are NOT auto-enabled
 when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is
@@ -397,6 +405,28 @@ ctest --test-dir build -C Release -R "web_"
 ctest --test-dir build -C Release --exclude-regex "test_shutdown_func"
 ```
 
+### Optional gate: run the whole suite under PageHeap
+
+On a plain run a freed page is still mapped and still holds the old bytes — **use-after-free is
+silent**. Full PageHeap unmaps a freed block immediately, turning the same read into an access
+violation on the spot. It once caught 8 use-after-free cases while the normal build, the
+no-memory-pool build and the unit-test layer were all green.
+
+```bash
+# Needs gflags.exe from the Windows SDK debugging tools (usually an elevated shell)
+python -u tests/tools/run_pageheap_gate.py --tree build-webapp
+```
+
+It takes a baseline by running the suite plainly first, then goes case by case
+"enable PageHeap → re-read the registry → run → disable → re-read", and only counts
+"green baseline, crashed under PageHeap" as a catch. Exit codes: `0` all green,
+`1` the gate failed, `3` the gate itself could not run (baseline red / PageHeap never took
+effect / did not clean up / it was exercising a stale DLL).
+
+**It is markedly slower**, which is why it is not in the default ctest suite. PageHeap is
+switched off in each case's `finally`, with `atexit` and `Ctrl-C` as backstops — leftovers make
+every later test on the machine an order of magnitude slower.
+
 Test coverage:
 - **Unit tests**: `tests/unit/` — handle types, request types, uvcpp utilities
 - **Functional tests**: `tests/functional/` — runtime behavior for all modules
@@ -416,6 +446,7 @@ libuvcpp/
 │   ├── net/       # TCP/UDP client/server
 │   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
 │   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
+│   ├── http2/     # HTTP/2 session/connection layers, nghttp2 glue, ALPN (uvcpp_h2_nghttp2.h is private)
 │   └── ssl/       # SSL/TLS context and connection wrapper
 ├── tests/
 │   ├── unit/      # Unit tests
@@ -425,14 +456,19 @@ libuvcpp/
 ├── examples/      # Runnable examples (webapp_demo)
 ├── doc/           # Documentation
 │   ├── benchmark.md       # Measured per-connection memory, throughput, stability
+│   ├── build-guide.md     # Every CMake switch, build trees, platform deps
 │   ├── ci-guide.md        # CI maintenance guidelines
 │   ├── http2-status.md    # HTTP/2 support status
+│   ├── release-process.md # How a release is cut, and what it does not check
+│   ├── testing-guide.md   # Test layers, filename filters, tests/tools index
 │   └── webapp-guide.md    # Web app framework guide
 ├── cmake/         # CMake config templates
 ├── .github/workflows/  # CI pipeline
 ├── CMakeLists.txt
+├── CONTRIBUTING.md     # Clone -> build -> test, plus the repo's conventions
 ├── README.md
-└── README.zh.md
+├── README.zh.md
+└── RELEASE.md          # Release notes / history
 ```
 
 ---
@@ -458,6 +494,9 @@ reports by the project's first external contributor,
 [@sercebr](https://github.com/sercebr).
 
 ### HTTP/2
+
+For the current state of the implementation — what is enforced, what the defaults are, and
+what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-status.md).
 
 - [nghttp2](https://github.com/nghttp2/nghttp2) integration, ALPN plumbing, and the h2
   session/connection layers (`1.1.1`), wired into the request layer and the web app
