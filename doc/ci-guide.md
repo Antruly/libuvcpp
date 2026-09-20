@@ -204,8 +204,12 @@ silently degrades into a no-op.
 1. **ABI-shaped positive** — compile a consumer with a **raw compiler invocation** (`-I`
    only, zero `-D`), construct a `uvcpp_web_app`, assert `connection_count() == 0`,
    against the packaged DLL. "It compiles and runs" would be vacuous: the header is
-   self-consistent either way, while a wrong macro set compiles, links, and returns a
-   garbage count (`1073741824`) — the original symptom.
+   self-consistent either way, while a wrong macro set compiles, links, and then lands in
+   one of two places — an inline accessor reading the wrong offset and returning a
+   garbage count (`1073741824`, the original symptom), or a **hard crash**
+   (`0xC0000409` on MSVC, empty stdout). Asserting "the count must be a weird value"
+   would hang forever on the crashing landing; the criterion asserts `== 0`, so both
+   landings go red.
 2. **Negative** — the same raw invocation plus one conflicting `-D` must fail to compile,
    with the generated header's `#error` text in the output. It must stay a raw
    invocation: through CMake `target_compile_definitions` is emitted after

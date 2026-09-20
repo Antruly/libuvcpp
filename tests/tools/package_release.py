@@ -325,16 +325,25 @@ def find_named(root, name):
     return None
 
 
+def dep_src_paths(tree, repo, name):
+    """`dep_src()` 会去找的那两个路径，按顺序。"""
+    return [
+        os.path.join(tree, "_deps", name + "-src"),
+        os.path.join(repo, "_local_deps", name),
+    ]
+
+
 def dep_src(tree, repo, name):
     """定位第三方依赖的源码目录。
 
     本机用 `_local_deps/`（FETCHCONTENT_SOURCE_DIR_* 指过去），CI 上
     FetchContent 自己下到 `<tree>/_deps/<name>-src`。两处都要找。
+
+    **只找这两处**：`FETCHCONTENT_SOURCE_DIR_*` 指向别处（不算少见）时这里找不到，
+    而失败长得像"包坏了"（`缺少必需的文件`）而不是"源码目录没在约定位置" ——
+    所以报错文案里把找过的路径印出来。
     """
-    return find_dir([
-        os.path.join(tree, "_deps", name + "-src"),
-        os.path.join(repo, "_local_deps", name),
-    ])
+    return find_dir(dep_src_paths(tree, repo, name))
 
 
 def copytree(src, dst):
@@ -551,7 +560,8 @@ def main():
             elif os.path.isdir(s):
                 copytree(s, os.path.join(stage, "include", f))
     else:
-        missing.append("libuv 头文件目录")
+        missing.append("libuv 头文件目录（找过 %s）"
+                       % " 与 ".join(dep_src_paths(tree, repo, "libuv")))
 
     for jname, jsub in (("json-3113", "nlohmann"), ("nlohmann_json", "nlohmann")):
         j = dep_src(tree, repo, jname)
