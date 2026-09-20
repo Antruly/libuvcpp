@@ -249,10 +249,95 @@ static bool test_large_object_returned() {
   }
   return true;
 }
+
+// =========================================================================
+// Test: `get_stats()` 的「在用块数」必须跟着分配/释放走
+//
+// 缺陷形状：`g_in_use` 只在两条**冷路径**上 +1（span 路径 `allocate_from_span`、
+// 大对象路径 `allocate_large_object`），而从 thread cache / central cache **命中**
+// 的分配一个计数都不动；`free_mem()` 却**每次释放都 -1**。稳态下块都从缓存里出，
+// 于是这个计数只减不增、往负数漂 —— 本判据在未修的库上实测到 `-75`（读数
+// `18446744073709551541`），对 64 字节的分配「根本不响应」：持有 32 块只涨 0。
+//
+// 判据量的是**增量**：这两个计数是**进程级**累计（`g_in_use` 是文件作用域 atomic），
+// 别的用例早就动过它，绝对值没有意义。
+//
+// 分配之前先**热身**（分配并释放一轮），让 thread cache 备好块 —— 缺陷正在
+// "缓存命中"这条路上，不热身就量不到它。
+// =========================================================================
+static bool test_stats_in_use_follows_alloc() {
+  uvcpp_memory_pool_enterprise& pool = uvcpp_memory_pool_enterprise::instance();
+
+  const size_t kSmall = 64;          // 小块：稳态下由 thread cache 供块
+  const int    kCount = 32;
+  const size_t kBig   = 300 * 1024;  // > 256 KiB ⇒ 走大对象路径
+
+  for (int i = 0; i < kCount; ++i) {  // 热身
+    void* p = uvcpp_alloc_bytes(kSmall);
+    if (p == nullptr) return false;
+    uvcpp_free_bytes(p);
+  }
+
+  size_t t0 = 0, before = 0, f0 = 0;
+  pool.get_stats(t0, before, f0);
+
+  void* blocks[kCount];
+  int held = 0;
+  for (; held < kCount; ++held) {
+    blocks[held] = uvcpp_alloc_bytes(kSmall);
+    if (blocks[held] == nullptr) break;
+  }
+  size_t t1 = 0, during = 0, f1 = 0;
+  pool.get_stats(t1, during, f1);
+  const long long grew = static_cast<long long>(during) - static_cast<long long>(before);
+  if (held != kCount || grew != kCount) {
+    std::cout << "    持有 " << held << " 个 " << kSmall << " 字节块，在用块数只涨了 "
+              << grew << "（期望 " << kCount << "）；读数 " << before << " -> "
+              << during << std::endl;
+    for (int i = 0; i < held; ++i) uvcpp_free_bytes(blocks[i]);
+    return false;
+  }
+
+  // 大对象路径是另一条路：同一条判据，换一条路再量一次。
+  void* big = uvcpp_alloc_bytes(kBig);
+  if (big == nullptr) {
+    for (int i = 0; i < held; ++i) uvcpp_free_bytes(blocks[i]);
+    return false;
+  }
+  size_t t2 = 0, with_big = 0, f2 = 0;
+  pool.get_stats(t2, with_big, f2);
+  const long long big_grew = static_cast<long long>(with_big) - static_cast<long long>(during);
+
+  uvcpp_free_bytes(big);
+  for (int i = 0; i < held; ++i) uvcpp_free_bytes(blocks[i]);
+
+  size_t t3 = 0, after = 0, f3 = 0;
+  pool.get_stats(t3, after, f3);
+
+  if (big_grew != 1) {
+    std::cout << "    一个 " << kBig << " 字节的大对象只让在用块数涨了 " << big_grew
+              << "（期望 1）；读数 " << during << " -> " << with_big << std::endl;
+    return false;
+  }
+  if (after != before) {
+    std::cout << "    全部释放之后在用块数没回到原读数：" << before << " -> " << after
+              << "（差 " << static_cast<long long>(after) - static_cast<long long>(before)
+              << "）" << std::endl;
+    return false;
+  }
+  return true;
+}
 #endif
 
 int main() {
   bool ok = true;
+#if !UVCPP_ENABLE_MEMORY_POOL
+  // 池关掉时这两条没有读数可看。明确打印，不冒充通过 —— `#else` 悄悄跳过会让
+  // "没测过"长得和"通过"一样（`web_ssl_*` 吃过这个亏）。
+  std::cout << "[skip] large_object_returned / stats_in_use_follows_alloc 需要内存池的 "
+               "get_stats() —— 本构建 UVCPP_ENABLE_MEMORY_POOL=0，这两条没跑"
+            << std::endl;
+#endif
   struct { const char* name; bool (*fn)(); } tests[] = {
     {"many_large_blocks", test_many_large_blocks},
     {"large_block_churn", test_large_block_churn},
@@ -261,6 +346,7 @@ int main() {
     {"raw_alloc", test_raw_alloc},
 #if UVCPP_ENABLE_MEMORY_POOL
     {"large_object_returned", test_large_object_returned},
+    {"stats_in_use_follows_alloc", test_stats_in_use_follows_alloc},
 #endif
   };
   for (const auto& t : tests) {

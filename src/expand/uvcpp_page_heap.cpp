@@ -857,45 +857,34 @@ void* uvcpp_memory_pool_enterprise::alloc(size_t size)
     
     // 大块直接分配
     if (size > k_large_size_threshold) {
-        return allocate_large_object(size);
+        void* big = allocate_large_object(size);
+        if (big) g_in_use.fetch_add(1, std::memory_order_relaxed);
+        return big;
     }
-    
+
     // 查找 size class
     size_t size_class = uvcpp_size_class_index(size);
     size_t block_size = k_size_classes[size_class].block_size;
-    
-    // 先尝试 thread cache
+
+    // 三条路：thread cache -> central cache -> 新 span。三者的块头形状相同，
+    // 所以出口收敛成一个 —— 「交出一块」这件事只在下面记一次。
     void* ptr = thread_cache_pop(size_class);
-    if (ptr) {
-        // 设置块头
-        page_block_header* header = (page_block_header*)((char*)ptr - k_page_block_header_size_actual);
-        header->size_class = (uint32_t)size_class;
-        header->requested_size = size;
-        header->flags = 0;
-        return ptr;
-    }
-    
-    // thread cache miss，尝试 central cache
-    ptr = central_cache_pop(size_class);
-    if (ptr) {
-        // 设置块头
-        page_block_header* header = (page_block_header*)((char*)ptr - k_page_block_header_size_actual);
-        header->size_class = (uint32_t)size_class;
-        header->requested_size = size;
-        header->flags = 0;
-        return ptr;
-    }
-    
-    // central cache miss，从 span 分配
-    void* result = allocate_from_span(block_size);
-    if (result) {
-        // 设置块头
-        page_block_header* header = (page_block_header*)((char*)result - k_page_block_header_size_actual);
-        header->size_class = (uint32_t)size_class;
-        header->requested_size = size;
-        header->flags = 0;
-    }
-    return result;
+    if (!ptr) ptr = central_cache_pop(size_class);
+    if (!ptr) ptr = allocate_from_span(block_size);
+    if (!ptr) return nullptr;
+
+    // 设置块头
+    page_block_header* header = (page_block_header*)((char*)ptr - k_page_block_header_size_actual);
+    header->size_class = (uint32_t)size_class;
+    header->requested_size = size;
+    header->flags = 0;
+
+    // 这个计数必须与 free_mem() 的那次 -1 **逐块配对**：原先只在 span 路径与大
+    // 对象路径上 +1，而从两条缓存**命中**的分配一个都不记，free_mem() 却每次释
+    // 放都减 —— 稳态下块都从缓存里出，计数于是只减不增、往负数漂（实测 -75），
+    // 让 get_stats() 的「在用块数」对所有小块分配完全不响应。
+    g_in_use.fetch_add(1, std::memory_order_relaxed);
+    return ptr;
 }
 
 void uvcpp_memory_pool_enterprise::free_mem(void* ptr)
@@ -955,7 +944,6 @@ void* uvcpp_memory_pool_enterprise::allocate_from_span(size_t size)
             if (span->free_list.compare_exchange_weak(ptr, next,
                 std::memory_order_release, std::memory_order_relaxed)) {
                 span->in_use.fetch_add(1, std::memory_order_relaxed);
-                g_in_use.fetch_add(1, std::memory_order_relaxed);
                 // Re-add the span to central cache so other threads can
                 // use its remaining blocks.
                 g_central_cache.add_span(span, size_class);
@@ -1012,7 +1000,6 @@ void* uvcpp_memory_pool_enterprise::allocate_from_span(size_t size)
         if (span->free_list.compare_exchange_weak(ptr, next,
             std::memory_order_release, std::memory_order_relaxed)) {
             span->in_use.fetch_add(1, std::memory_order_relaxed);
-            g_in_use.fetch_add(1, std::memory_order_relaxed);
             return ptr;
         }
     }
@@ -1049,8 +1036,7 @@ void* uvcpp_memory_pool_enterprise::allocate_large_object(size_t size)
     // 少了这一句，fetch_sub 永远从 0 开始、返回值永远不是 1，
     // release_span_to_system() 一次都不会被调用 —— 每次大块分配整段泄漏。
     span->in_use.fetch_add(1, std::memory_order_relaxed);
-    g_in_use.fetch_add(1, std::memory_order_relaxed);
-    
+
     return ptr;
 }
 
