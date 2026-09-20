@@ -833,24 +833,36 @@ static constexpr size_t kCompressVariantMaxBytes = 32u * 1024u * 1024u;
 // 冲干净 —— 于是"缓存"在最需要它的大文件上反而永远命中不了，典型的最坏组合。
 static constexpr size_t kCompressVariantMaxEntry = 4u * 1024u * 1024u;
 
-// 条数上限。和上面那条**不是一回事**：`compress_variants_bytes_` 只记 body 字节，
-// 而每条另外还挂着一个键串（含着整条路径）和一个 map 节点 —— 一个满是**小文件**的
-// 静态根能造出大量"压完只剩几十字节"的条目，字节数永远涨不到上限、开销却全在键和
-// 节点上。两个上限各封一件事：字节封大文件，条数封碎片。
+// 条数上限。和上面那条**不是一回事**：字节那条只按 body 字节算，而每条另外还挂着
+// 一个键串（含着整条路径）和一个 map 节点 —— 一个满是**小文件**的静态根能造出大量
+// "压完只剩几十字节"的条目，字节数永远涨不到上限、开销却全在键和节点上。两个上限
+// 各封一件事：字节封大文件，条数封碎片。
 static constexpr size_t kCompressVariantMaxEntries = 1024;
 
+size_t uvcpp_http_server::compress_variant_total_bytes() const {
+  size_t n = 0;
+  for (std::map<std::string, compress_variant>::const_iterator it =
+           compress_variants_.begin();
+       it != compress_variants_.end(); ++it) {
+    n += it->second.bytes();
+  }
+  return n;
+}
+
 void uvcpp_http_server::compress_variant_evict() {
-  while ((compress_variants_bytes_ > kCompressVariantMaxBytes ||
+  while ((compress_variant_total_bytes() > kCompressVariantMaxBytes ||
           compress_variants_.size() > kCompressVariantMaxEntries) &&
          !compress_variants_.empty()) {
-    // 条数很少（上限数量级是"几十"），线性找最久未用的那次够用，且不必维护
-    // 第二个容器与随之而来的迭代器失效问题。
+    // 线性找最久未用的那次够用，且不必维护第二个容器与随之而来的迭代器失效问题。
+    // 条数上限是 1024，所以最坏情况下这一趟是 O(n²)（每轮 O(n) 找 LRU，而字节那条
+    // 腿可能要求删掉上千条才降到线下）—— 但触发它需要"几条接近单条上限的大条目 +
+    // 上千条几十字节的小条目"这种混合表，且只在**存入**时进这个循环（deflate 之后
+    // 的冷路径），不在请求路径上。
     auto victim = compress_variants_.begin();
     for (auto it = compress_variants_.begin(); it != compress_variants_.end();
          ++it) {
       if (it->second.last_used < victim->second.last_used) victim = it;
     }
-    compress_variants_bytes_ -= victim->second.bytes();
     compress_variants_.erase(victim);
   }
 }
@@ -864,7 +876,7 @@ uvcpp_http_server::compress_variant_stats() const {
   s.misses  = compress_variant_misses_;
   s.stored  = compress_variant_stored_;
   s.entries = compress_variants_.size();
-  s.bytes   = compress_variants_bytes_;
+  s.bytes   = compress_variant_total_bytes();
   return s;
 #else
   // 头文件里明写了"zlib 关掉时返回全零、调用方不必跟着条件编译"，而成员本身
@@ -1014,7 +1026,6 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
     compress_variant v;
     v.data = made;
     v.last_used = ++compress_variant_clock_;
-    compress_variants_bytes_ += v.bytes();
     compress_variants_[vkey] = std::move(v);
     ++compress_variant_stored_;
     compress_variant_evict();

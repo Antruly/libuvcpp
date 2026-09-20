@@ -970,11 +970,19 @@ class UVCPP_API uvcpp_http_server {
     }
   };
   std::map<std::string, compress_variant> compress_variants_;
-  size_t   compress_variants_bytes_ = 0;
   uint64_t compress_variant_clock_  = 0;
   uint64_t compress_variant_hits_   = 0;
   uint64_t compress_variant_misses_ = 0;
   uint64_t compress_variant_stored_ = 0;
+
+  /// 表内字节总量。**从表里算出来，不存**：以前有一个 `compress_variants_bytes_`
+  /// 计数字段，加在存入那条路上、减在淘汰那条路上 —— 而淘汰那句 `-=` 是要被删掉
+  /// 也照样编得过、且**静默**失效的（条数那条腿还在照常淘汰，只有大文件会因为字节
+  /// 上限永远触发不了而悄悄不再命中）。账一旦不存在，这种漂移就写不出来了。
+  ///
+  /// 代价：淘汰循环每轮都要重算一次（`compress_variant_evict()`），而每轮只删一条。
+  /// 原来那句线性找 LRU 本来就是每轮 O(n)，所以这里没有换复杂度类，只是常数翻倍。
+  size_t compress_variant_total_bytes() const;
 
   /// 按字节淘汰最久未用的若干条；单条可能很大，条数上限卡不住内存。
   void compress_variant_evict();

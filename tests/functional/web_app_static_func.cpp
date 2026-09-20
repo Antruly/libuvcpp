@@ -23,6 +23,7 @@
  */
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1088,11 +1089,17 @@ void test_compress_variant() {
   check_eq_i(static_cast<long long>(s.stored), 3, "应当三次存入");
   check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
   check_eq_i(static_cast<long long>(s.entries), 3, "表里应当三条");
-  // 表内字节账：变体表按**句柄**存之后（#17 第 ④ 步），账必须跟着换成 `bytes()`
-  // —— 忘了换的话 `compress_variants_bytes_` 恒为 0，字节那条淘汰腿就**静默**
-  // 瘸了（条数那条还在，所以"能淘汰"这件事不会立刻露馅，只在大文件上悄悄失效）。
-  // 所以这里把账**算死**：三条 entry 的大小之和必须正好等于那三次响应的
-  // Content-Length 之和（a1 / m1 / m2 各存了一条）。
+  // 表内字节总量：它现在是**从表里算出来**的（`compress_variant_total_bytes()`），
+  // 所以这条钉的是那个求和表达式本身 —— 度量错对象（拿源长度 / 拿 `uvcpp_buf::size()`）、
+  // 累加写成赋值、返回常量，都会红。
+  //
+  // 两边**来源不同**才有意义：左边来自表里的句柄，右边是**线上**实测的 Content-Length。
+  // 于是"表里存的是另一个句柄"（源那份、别的响应的、键写错的）也会红。
+  // 别把右边换成任何由 `s.bytes` / 表内数据推出来的量 —— 那样它就成恒等式了。
+  //
+  // 三条长度**互不相同**是这条的前提（赋值型错误必红）。
+  //
+  // 表里就是这三条（上面 `stored == 3` / `entries == 3` 钉过），a1 / m1 / m2 各存一条。
   const long long sum_cl = std::stoll(raw_header(a1, "content-length")) +
                            std::stoll(raw_header(m1, "content-length")) +
                            std::stoll(raw_header(m2, "content-length"));
@@ -1136,20 +1143,29 @@ void test_compress_variant() {
              "共享进来的文件体在整条响应链上被物化了若干次（见上面那段说明）");
 }
 
-// ---- 6b. 字节账必须**随淘汰**降（#17 第 ④ 步那条静默腿）----
+// ---- 6b. 字节总量必须**随淘汰**降（#17 第 ④ 步那条静默腿）----
 
-// 上面那条把字节账算死了，但它只有三条 entry、**一次淘汰都没发生** —— 于是
-// "淘汰时忘了减"这条腿仍然没有判据。而这条腿瘸掉是**静默**的：
-// `compress_variants_bytes_` 只涨不减，条数那条腿还在照常淘汰，所以"能淘汰"
-// 这件事照样是绿的，只有大文件会因为字节上限永远触发不了而悄悄不再命中 ——
-// 这正是"旁路判据把主判据的失效盖住"的形状。
+// 上面那条把字节总量算死了，但它只有三条 entry、**一次淘汰都没发生** —— 于是
+// "淘汰之后总量还得对"这条腿仍然没有判据。而这条腿瘸掉是**静默**的：条数那条腿
+// 还在照常淘汰，所以"能淘汰"这件事照样是绿的，只有大文件会因为字节上限永远触发
+// 不了而悄悄不再命中 —— 这正是"旁路判据把主判据的失效盖住"的形状。
 //
-// 所以这里专门把**条数上限**跑满：条数与字节两条腿共用一个淘汰循环，条数那腿
-// 触发时走的**就是**字节账该被减掉的那一句。造键不同、**体完全一样**的变体
-// （8 KiB 的 'x'），于是每条压缩后的长度都是同一个 C：
+// 这里专门把**条数上限**跑满：条数与字节两条腿共用一个淘汰循环。造键不同、
+// **体完全一样**的变体（8 KiB 的 'x'），于是每条压缩后的长度都是同一个 C：
 //   * 条数腿：表里稳定在条数上限（1024）条；
-//   * 字节腿：账必须正好等于**剩下那些条**的长度和 = 条数 × C。
-// 少了淘汰那一次 `-=`，账会是"总存入条数 × C" —— 字节那条红，而条数那条**仍然绿**。
+//   * 字节腿：总量必须正好等于**剩下那些条**的长度和 = 条数 × C。
+//
+// 为什么"总量"现在是从表里求和的、还要单开一条：旧写法是一个 `compress_variants_bytes_`
+// 计数字段（存入时 `+=`、淘汰时 `-=`）。**把 `-=` 那行删掉**这个变异既编得过、
+// 又只让字节腿静默失效（条数那条腿照常淘汰，所以"能淘汰"照样是绿的），而当年
+// 上面两条判据都盖不住它 —— 这是外部贡献者在真实服务上实测出来的（他把两态都
+// 跑了一遍）。账改成派生量之后那个变异**写不出来**了（没有那一行），但**求和
+// 表达式本身**仍然可以写坏（返回常量、累加写成赋值、度量错对象）—— 那就是这条
+// 现在钉的东西。
+//
+// 顺带一条**没有**被这段覆盖的腿：字节上限（32 MiB）本身。8 KiB 的 'x' 压完约 43 B，
+// 存 1100 条也只有约 44 KB —— 是上限的 0.13%，**一次都没触发过**。字节上限另有一条
+// 用例（`test_variant_byte_cap_on_evict`）。
 void test_variant_byte_account_on_evict() {
   std::cout << "[static] 变体表字节账随淘汰降" << std::endl;
 
@@ -1228,13 +1244,126 @@ void test_variant_byte_account_on_evict() {
   check_eq_i(static_cast<long long>(s.entries),
              static_cast<long long>(kWantEntries),
              "条数腿：表里稳定在条数上限那条线上");
-  // 这条是主判据。淘汰那句 `-=` 少了、或者账没换到 `bytes()`，"存入条数 × C"
-  // 与"剩余条数 × C"就会差出 76 条 —— 而上面那条**仍然是绿的**。
+  // 这条是主判据，两边来源不同：左边是表里那些句柄长度**求和**出来的，右边是
+  // **线上**实测的 C 乘上条数。求和表达式写坏（返回常量 / 累加写成赋值 / 度量错
+  // 对象）就会差出 76 条 —— 而上面那条条数腿**仍然是绿的**。
+  //
+  // `c` 必须继续来自线上字节：一旦换成由 `s.bytes` 推出来的量，这条就成恒等式了。
   check_eq_i(static_cast<long long>(s.bytes),
              static_cast<long long>(s.entries) * c,
-             "字节腿：表内字节账 == 剩余条数 × 每条压缩长度"
-             "（淘汰时少减一次，账就会是总存入条数 × C）");
+             "字节腿：表内字节总量 == 剩余条数 × 每条压缩长度"
+             "（求和写坏 / 度量错对象，账就会是总存入条数 × C）");
   std::cout << "[static] 字节账随淘汰降: stored=" << s.stored
+            << " entries=" << s.entries << " bytes=" << s.bytes
+            << " C=" << c << std::endl;
+}
+
+// ---- 6c. 字节上限本身必须真的会把表压下来 ----
+
+// 6b 那条把**条数**上限跑满了，于是字节上限那条腿**一次都没触发过**：它的条目是
+// 8 KiB 的 'x'，压完约 43 B，存 1100 条也只有约 44 KB —— 上限 32 MiB 的 0.13%。
+// 实测确认过：把 `kCompressVariantMaxBytes` 那一条腿从淘汰循环的 while 条件里删掉，
+// 6b（以及上面那条）**照样全绿**。
+//
+// 这条专门去摸字节上限，且**完全不碰条数腿**（只发 12 条，远在 1024 以下）：
+//   * 单条体 4 MiB —— 正好等于 `kCompressVariantMaxEntry`（那头是 `<=`），再大就
+//     进不了表，所以这就是能造出来的最大条目；
+//   * 体是**近不可压**的（94 个可打印 ASCII 上等概率取字符，约剩 82%），于是
+//     12 条约 40 MiB > 32 MiB ⇒ 字节腿必触发，而 12 < 1024 ⇒ 条数腿一声不响。
+//
+// "压不动"是这条用例的**关键前置，不是随手写的**：换成 `std::string(4MiB, 'x')`
+// 的话单条只压出几 KB，永远摸不到 32 MiB，这条就退化成一条恒绿的装饰。
+// 反过来说，字节上限也**不是**死代码 —— 它只在"大文件 + 压不动"时才是主角，
+// 而那正是它被设计出来要封的那件事（`kCompressVariantMaxBytes` 上面那段注释）。
+//
+// 内存：体只造**一份**（12 条只有 `cache_tag` 不同，键就不同，内容可以共用），
+// 峰值 ≈ 源 4 MiB + 表 32 MiB + 在途 ≈ 45 MiB。本机 pagefile 只有 101 MB，
+// 所以这条用例跑起来时**别和另一套 ctest 或构建并行**，否则会以
+// `0xc000012d` / `0xC0000409` 的形状假红。
+void test_variant_byte_cap_on_evict() {
+  std::cout << "[static] 变体表字节上限触发淘汰" << std::endl;
+
+  const size_t kEntryBytes = 4u * 1024u * 1024u;   // == kCompressVariantMaxEntry
+  const size_t kCap        = 32u * 1024u * 1024u;  // == kCompressVariantMaxBytes
+  const int    kStored     = 12;                   // 12 × ≈0.82 × 4 MiB ≈ 40 MiB > 32 MiB
+
+  // 手写 LCG 而不是 <random>：固定种子的 mt19937 也是确定的，但这条用例压出来
+  // 的**长短**直接决定它能不能摸到上限，宁可把生成器逐位钉死、不依赖库实现。
+  std::string big;
+  big.reserve(kEntryBytes);
+  uint32_t seed = 0x9e3779b9u;
+  for (size_t i = 0; i < kEntryBytes; ++i) {
+    seed = seed * 1664525u + 1013904223u;
+    big.push_back(static_cast<char>(32 + (seed >> 16) % 94));
+  }
+
+  uvcpp_web_app app;
+  app.set_port(0);
+  app.set_log_level(log_level::WARN);
+  app.set_compression(true);
+
+  // 体一样、键不一样：`cache_tag` 决定变体的键 ⇒ 每条压出来**一样长**，
+  // 字节总量才能算死（和 6b 同一个手法）。
+  app.get("/vb2/:i", [&big](uvcpp_web_request& req, uvcpp_web_response& resp,
+                            uvcpp_web_next) {
+    const std::string* i = req.param("i");
+    resp.raw().cache_tag = (i != nullptr) ? *i : std::string();
+    resp.text(big);
+    resp.end();
+  });
+
+  if (app.start_background() != 0) {
+    check(false, "字节上限触发淘汰：服务启动失败");
+    return;
+  }
+  const int port = app.bound_port();
+  check(port > 0, "字节上限触发淘汰：端口有效");
+
+  std::string first_cl;
+  int ok_count = 0;
+  for (int i = 0; i < kStored; ++i) {
+    const std::string req = "GET /vb2/" + std::to_string(i) +
+                            " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            "Accept-Encoding: gzip\r\nConnection: close\r\n\r\n";
+    // 一条一连接：这里只有 12 条，而每条响应 3 MiB+，一次性灌完会让整份响应
+    // 攒在一个 string 里（见 `raw_batch` 的函数头，它解决的正是另一头的毛病）。
+    const raw_result rr = raw_exchange(port, req, 20000);
+    if (!rr.ok || rr.raw.empty()) continue;
+    ++ok_count;
+    if (first_cl.empty()) first_cl = raw_header(rr.raw, "content-length");
+  }
+  check_eq_i(ok_count, kStored, "前置：每一条请求都要有响应");
+
+  app.stop();
+  app.join();
+
+  // 停干净之后才读表：loop 线程已退出，`std::map` 不再有并发写。
+  const uvcpp_http_server::compress_variant_stat s =
+      app.http_server()->compress_variant_stats();
+
+  check_eq_i(static_cast<long long>(s.stored),
+             static_cast<long long>(kStored),
+             "前置：每一条都要真的**存进表里**（压不动就不存，那样这条先红）");
+  const long long c = std::stoll(first_cl);
+  // 这条前置同时锁住两侧：太小说明压得动了（那就顶不到上限），太接近 4 MiB
+  // 说明几乎没压动 —— 但压完不比原文小就不存，`stored` 那条会先红。
+  check(c > 0 && c < static_cast<long long>(kEntryBytes),
+        "前置：压缩后的长度必须真的小于原文（4 MiB）");
+
+  // 主判据。条数上限是 1024 而这里只存了 12 条 ⇒ **只有字节腿能让表降下来**。
+  // 少了字节腿，这里会是 entries == 12、bytes ≈ 40 MiB > 32 MiB，两条同时红。
+  check(s.entries < static_cast<size_t>(kStored),
+        "字节上限没触发：存了 12 条、一条都没被淘汰（条数只 12 条，够不着 1024 "
+        "那条腿，所以能淘汰的只有字节腿）");
+  check(s.bytes <= kCap,
+        "表内字节总量必须被 32 MiB 这条上限压住（写死这个数：常量哪天真被改了，"
+        "这条就该红一次让人回来看 —— 和 6b 写死 1024 同一个理由）");
+  // 两边来源不同：左边是表里那些句柄长度**求和**出来的，右边是**线上**实测的 C
+  // 乘上条数。求和写坏 / 度量错对象都会红，而上面那条条数腿抓不到这些。
+  check_eq_i(static_cast<long long>(s.bytes),
+             static_cast<long long>(s.entries) * c,
+             "字节腿：表内字节总量 == 剩余条数 × 每条压缩长度");
+  std::cout << "[static] 字节上限触发淘汰: stored=" << s.stored
             << " entries=" << s.entries << " bytes=" << s.bytes
             << " C=" << c << std::endl;
 }
@@ -1609,6 +1738,7 @@ int main() {
   // 自带一个 App 的一条用例，放在共享 App 停掉之后跑（理由见函数上方）。
   test_compress_variant();
   test_variant_byte_account_on_evict();
+  test_variant_byte_cap_on_evict();
 
   cleanup_root();
 
