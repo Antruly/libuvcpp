@@ -1355,9 +1355,19 @@ void test_variant_byte_cap_on_evict() {
   check(s.entries < static_cast<size_t>(kStored),
         "字节上限没触发：存了 12 条、一条都没被淘汰（条数只 12 条，够不着 1024 "
         "那条腿，所以能淘汰的只有字节腿）");
-  check(s.bytes <= kCap,
+  check(static_cast<long long>(s.bytes) <= static_cast<long long>(kCap),
         "表内字节总量必须被 32 MiB 这条上限压住（写死这个数：常量哪天真被改了，"
         "这条就该红一次让人回来看 —— 和 6b 写死 1024 同一个理由）");
+  // 下界。上面那条**只从上方约束**，而右边的 kCap 是**本用例自己的**硬编码副本，
+  // 不是从库里读回来的 ⇒ 把常量往下调它照样绿：实测 cap 32→16 MiB，读数变成
+  // entries=4 bytes=13929968，全绿 —— 等于"上限被人改小"这件事整个没判。
+  // 下界是循环形状给的，不是拍脑袋：最后一次 erase 发生在 total 还 > cap 的时候，
+  // 抹掉 c 字节之后才落的线内 ⇒ 剩下的量必然 > cap - c。所以淘汰**正好停在线上**，
+  // 区间是 (cap - c, cap]。左边界用的是线上实测的 C（上面前置已锁住 c < 4 MiB），
+  // 和 bytes 那条一样是"表内求和"对着"线上实测"两个来源互校。
+  check(static_cast<long long>(s.bytes) > static_cast<long long>(kCap) - c,
+        "淘汰必须正好停在线上：bytes 必须落在 (cap - c, cap] 里（下界证明它是被"
+        "上限逼停的，不是碰巧存得少；常量被调小到这条下界以下就红）");
   // 两边来源不同：左边是表里那些句柄长度**求和**出来的，右边是**线上**实测的 C
   // 乘上条数。求和写坏 / 度量错对象都会红，而上面那条条数腿抓不到这些。
   check_eq_i(static_cast<long long>(s.bytes),

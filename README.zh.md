@@ -1,4 +1,4 @@
-[![版本](https://img.shields.io/badge/version-1.1.34--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.1.35--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.1.34-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.1.35-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -63,6 +63,11 @@ v1.1.0 起**默认关闭**（`UVCPP_BUILD_EXPAND=OFF`）—— 要启用需显�
 `-DUVCPP_BUILD_EXPAND=ON`。预编译产物是**带池**发布的；使用者**什么都不用传**
 —— 包里的 `uvcpp/uvcpp_config.h` 给出这个包实际用的值，自己再定义成别的值会直接
 `#error`，而不是静默的分配器错配（详见 `RELEASE.md`）。
+
+每份预编译包里还多一档**调试版**动态库（`uvcppd.dll` / `libuvcppd.so`，用
+`-luvcppd` 链，MSVC 那份还带 `uvcppd.pdb`），方便单步进库内部。它的前提 —— 主要是
+MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
+[`RELEASE.md`](./RELEASE.md#调试档debug-版) 里。
 
 ### Net 模块（`src/net/`）— `UVCPP_BUILD_NET=ON`（默认）
 
@@ -460,7 +465,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.1.34-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.1.35-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓只打过 `v1.0.0` 与 `v1.1.0` 两个 tag，`1.1.x` 起的每一档都是开发版
 （`UVCPP_VERSION_IS_RELEASE = 0`），**尚未发布**。已发布版本的说明在
 [RELEASE.md](./RELEASE.md)；下面是 `1.1.x` 这条线上落地的全部改动，按主题分组，
@@ -519,6 +524,8 @@ libuvcpp/
 - 22 个公开头带上 UTF-8 BOM，消费者不传 `/utf-8` 时不再级联报错（`1.1.30`）
 - Linux 包里的 `libuvcpp.so` 从 `bin/` 挪到 `lib/`，也就是文档里指的那个位置（`1.1.28`）
 - 六个打包 job 补上 `UVCPP_ENABLE_NGHTTP2`，h2 不再从包里缺席（`1.1.6`）
+- 每份包里多了一档**调试版**动态库（`uvcppd.dll` / `libuvcppd.so`，`-luvcppd`，
+  MSVC 那份还带 `uvcppd.pdb`），方便单步进库内部（`1.1.35`）
 - 给消费者的 ABI 提示：`uvcpp_buf`（`1.1.28`）与 `uvcpp_http_server`（`1.1.34`）的布局
   变过 —— **必须重编，别只换二进制**（见 [RELEASE.md](./RELEASE.md)）
 

@@ -16,8 +16,14 @@ This document defines the rules and best practices for maintaining CI in this pr
 | `ssl` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON | SSL/TLS module |
 | `h2` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON, nghttp2=ON | HTTP/2 coverage; the only job asserting `NGHTTP2=ON` |
 | `full` | Ubuntu, macOS | shared, web=ON, OpenSSL=ON, zlib=ON | All features enabled |
-| `mingw64` | Windows (MSYS2 MinGW64) | shared, self-contained DLL | MinGW release shape + import-table assertion |
-| `config-contract` | Ubuntu, Windows | package → install → consumer | The `UVCPP_*_ENABLE` macro contract (see §5) |
+| `mingw64` | Windows (MSYS2 MinGW64) | shared, self-contained DLL, **+ Debug artifact** | MinGW release shape + import-table assertion |
+| `config-contract` | Ubuntu, Windows | package → install → consumer, **+ Debug artifact** | The `UVCPP_*_ENABLE` macro contract (see §5) |
+
+The two rows marked **+ Debug artifact** build a second, `UVCPP_BUILD_TESTS=OFF` tree
+(`build-mingw-dbg` / `build-cfg-dbg`) and pass `--debug-tree` to `package_release.py`.
+That is what puts the Debug staging, the `.pdb`, and `uvcpp-debug.pc` under a per-push
+gate — the release chain only runs on tags, so without this the whole Debug path would
+first execute on the day of a release.
 
 **Rationale**: Windows MSVC compilation is slow. Basic builds are split into two separate jobs (`windows-basic` shared + `windows-static` static) so each job has only ONE build cycle.
 
@@ -27,7 +33,10 @@ This document defines the rules and best practices for maintaining CI in this pr
 
 Checklist before adding a job:
 
-1. **Single build per Windows job** — never run two `cmake --build` + `ctest` cycles in one Windows job.
+1. **Single *test* cycle per Windows job** — never run two `cmake --build` + `ctest`
+   cycles in one Windows job. An extra **artifact-only** build (no tests, no ctest) is
+   allowed when the job's deliverable needs a second configuration — see the Debug
+   artifact above — but it still costs compile time, so raise `timeout-minutes` to cover it.
 2. **Add `--timeout 30`** to every `ctest` invocation — prevents a single hung test from blocking the entire CI.
 3. **Add `--exclude-regex "test_shutdown_func"`** to every `ctest` invocation. See §4 for why it is the only one still excluded.
 4. **Copy runtime DLLs on Windows** before running ctest. See §3 below.
@@ -219,7 +228,12 @@ silently degrades into a no-op.
    public header (checking only "is it present" passes a version nested inside its own
    `#if`, where the macro is not yet defined); no handwritten `uvcpp_config.h` under
    `src/`; the packaged header byte-identical to the build tree's and agreeing with that
-   tree's exported `INTERFACE_COMPILE_DEFINITIONS`.
+   tree's exported `INTERFACE_COMPILE_DEFINITIONS`; and **every** `.pc` in the package
+   (`uvcpp.pc` *and* `uvcpp-debug.pc`) points at a library that is actually in the
+   package's own `lib/`. That last one iterates a `glob` rather than naming `uvcpp.pc`:
+   with a hardcoded name the debug `.pc` was checked zero times, and it is the one whose
+   `-luvcppd` exists nowhere else in the package — measured, not assumed: mutating it to
+   `-luvcppdx` used to leave the gate green (`1.1.35`).
 
 It is **not** compared against `CMakeCache.txt`: OpenSSL/nghttp2/webapp are silently
 downgraded to OFF when their dependency is missing (the `set(UVCPP_ENABLE_OPENSSL OFF)`
@@ -302,4 +316,4 @@ brew install libuv ninja
 
 ---
 
-*Last updated: 2026-08-09. This document should be updated whenever CI rules change.*
+*Last updated: 2026-09-20. This document should be updated whenever CI rules change.*

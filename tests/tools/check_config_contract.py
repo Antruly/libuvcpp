@@ -398,7 +398,7 @@ def check_abi(tree_vals, pkg, work, cxx):
     return 0
 
 
-def check_pc_linkable(pkg):
+def check_pc_linkable(pkg, pc):
     """包里 `.pc` 指的那个目录，必须真有**它自己那份**可链接的库。
 
     为什么要单独一条：`-luvcpp` 只要求链接器**找得到**这个名字，找不到才报错 ——
@@ -409,10 +409,12 @@ def check_pc_linkable(pkg):
 
     这个洞是 Linux 那一档第一次跑出来的（`ld: cannot find -luvcpp`），本机
     MSVC 永远看不见 —— MSVC/MinGW 各有一份导入库落在 `lib/`。
+
+    收的是**某一份** `.pc` 的路径，不是包目录：带调试档的包里有两份
+    （`uvcpp.pc` 与 `uvcpp-debug.pc`），由调用点遍历，见那里的注释。
     """
-    pc = os.path.join(pkg, "lib", "pkgconfig", "uvcpp.pc")
     if not os.path.exists(pc):
-        fail("包里没有 lib/pkgconfig/uvcpp.pc")
+        fail("包里没有 %s" % os.path.relpath(pc, pkg))
         return
     with open(pc, encoding="utf-8") as fh:
         text = fh.read()
@@ -444,11 +446,12 @@ def check_pc_linkable(pkg):
             missing.append("%s -> %s" % (d, seen[:6]))
 
     if missing:
-        fail(".pc 写的是 -L%s -l%s，但那个目录里没有包自己那份库：%s\n"
+        fail("%s 写的是 -L%s -l%s，但那个目录里没有包自己那份库：%s\n"
              "      链接器这时会去系统目录找同名库 —— 正例照绿，链的却不是包里的"
-             % (dirs[0], "/".join(names), "; ".join(missing)))
+             % (os.path.basename(pc), dirs[0], "/".join(names), "; ".join(missing)))
         return
-    ok(".pc 的 -L%s -l%s 指得到包里那份库" % (dirs[0], names[0]))
+    ok("%s 的 -L%s -l%s 指得到包里那份库"
+       % (os.path.basename(pc), dirs[0], names[0]))
 
 
 def main():
@@ -470,7 +473,15 @@ def main():
     check_positions()
     check_no_handwritten_copy()
     check_header_encoding()
-    check_pc_linkable(pkg)
+    # 遍历而不是写死 `uvcpp.pc`：带调试档的包里**两份**（`uvcpp.pc` /
+    # `uvcpp-debug.pc`），写死名字的话新那份恒绿 —— 而它恰恰指着一个只在
+    # 调试档里存在的名字（`-luvcppd`），写错了没有任何别的地方会出声。
+    pcs = sorted(glob.glob(os.path.join(pkg, "lib", "pkgconfig", "*.pc")))
+    if not pcs:
+        # 防空转：glob 没扫到就等于这条判据一次都没跑，不能算绿。
+        fail("包里 lib/pkgconfig/ 下一份 .pc 都没有")
+    for _pc in pcs:
+        check_pc_linkable(pkg, _pc)
     vals = check_generated_vs_tree(tree, pkg)
     if vals is None:
         print("\n判据 ③ 拿不到生成头的值，后两条无从跑起")

@@ -739,6 +739,31 @@ jobs:
             exit "$bld"
           fi
 
+          # 调试档：另开一棵单配置树，开关与上面**逐字相同** —— 这里最容易漏的是
+          # 上面①②那两条依赖静态的开关，漏了就只有调试档多出 dll 依赖，而它恰恰
+          # 是使用者拿去调试时才会撞上的那份。`-DUVCPP_BUILD_TESTS=OFF`：这条腿要
+          # 的是**产物**，调试档的测试不在这里跑（理由见 RELEASE.md「Debug 版前提」）。
+          cmake -S . -B build-mingw-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
+            | tee ci-logs/mingw-dbg-configure.log
+          bld=0
+          cmake --build build-mingw-dbg --parallel 4 2>&1 \
+            | tee ci-logs/mingw-dbg-build.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/mingw-dbg-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-mingw-dbg::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
+
       - name: Assert the DLL is self-contained
         run: |
           # 发布承诺是"任意 64 位 Windows 直接可用"。这条不是风格问题：一旦
@@ -748,13 +773,20 @@ jobs:
           # 白名单，不是黑名单：黑名单原先只 grep libgcc|libstdc|libwinpthread，
           # 而 MSYS2 同时装了 libssl.a 和 libssl.dll.a，find_library 默认挑 .dll.a
           # ⇒ 产物会多一个 libssl-3-x64.dll 而断言照样放行。
-          deps=$(objdump -p build-mingw/libuvcpp.dll | awk '/DLL Name/ {print $3}' | sort -u)
-          echo "$deps"
-          bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
-          if [ -n "$bad" ]; then
-            echo "::error title=mingw-not-self-contained::libuvcpp.dll 依赖了非 Windows 自带的模块: $bad"
-            exit 1
-          fi
+          # 两份都要过：调试档是**另一次 configure**，上面①②任何一条漏传，
+          # 就只有那一份多出 dll 依赖 —— 只查发布档会把它放过去。
+          rc=0
+          for d in build-mingw/libuvcpp.dll build-mingw-dbg/libuvcppd.dll; do
+            echo "--- $d"
+            deps=$(objdump -p "$d" | awk '/DLL Name/ {print $3}' | sort -u)
+            echo "$deps"
+            bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
+            if [ -n "$bad" ]; then
+              echo "::error title=mingw-not-self-contained::$d 依赖了非 Windows 自带的模块: $bad"
+              rc=1
+            fi
+          done
+          exit $rc
 
       - name: Test
         run: |
@@ -788,7 +820,8 @@ jobs:
         run: |
           rc=0
           out=$(python tests/tools/package_release.py \
-            --tree build-mingw --platform mingw-x64 --out dist 2>&1) || rc=$?
+            --tree build-mingw --platform mingw-x64 \
+            --debug-tree build-mingw-dbg --out dist 2>&1) || rc=$?
           printf '%s\n' "$out"
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" \
@@ -996,6 +1029,35 @@ jobs:
                 | head -c 6000 || true)
               echo "::error title=build-cfg::${msg:-rc=$bld (no error line matched)}"
             fi
+
+            # 调试档：另开一棵树，开关与上面**逐字相同**（含 Linux 那三个 extra）。
+            # Windows 上是 VS 多配置生成器 ⇒ 落在 build-cfg-dbg/Debug/；Linux 上是
+            # 单配置 ⇒ `-DCMAKE_BUILD_TYPE=Debug` 生效。两种都传，哪个起作用由
+            # 生成器决定（MSVC 的 `-DCMAKE_BUILD_TYPE` 被忽略，多配置不看它）。
+            echo "=== debug configure + build ==="
+            dbg=0
+            cmake -S . -B build-cfg-dbg -DCMAKE_BUILD_TYPE=Debug "${extra[@]}" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+              -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+              -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+              -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+              -DUVCPP_ENABLE_NGHTTP2=ON \
+              -DUVCPP_BUILD_EXPAND=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
+            echo "DEBUG_CONFIGURE_RC=$dbg"
+            if [ "$dbg" = "0" ]; then
+              cmake --build build-cfg-dbg --config Debug --parallel 4 2>&1 \
+                | tee ci-logs/cfg-dbg-build.log || dbg=$?
+              echo "DEBUG_BUILD_RC=$dbg"
+            fi
+            if [ "$dbg" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/cfg-dbg-build.log ci-logs/cfg-dbg-configure.log 2>/dev/null \
+                | head -40 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+              echo "::error title=build-cfg-dbg::${msg:-rc=$dbg (no error line matched)}"
+            fi
+            if [ "$bld" = "0" ]; then bld=$dbg; fi
             exit "$bld"
           } 2>&1 | tee ci-logs/cfg.log
 
@@ -1006,7 +1068,7 @@ jobs:
         run: |
           ${{ matrix.py }} tests/tools/package_release.py \
             --tree build-cfg --platform ${{ matrix.platform }} \
-            --config Release --out dist
+            --config Release --debug-tree build-cfg-dbg --out dist
 
       - name: Config contract (issue #6 item 3)
         shell: bash

@@ -1,4 +1,4 @@
-[![version](https://img.shields.io/badge/version-1.1.34--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.1.35--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -7,7 +7,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.1.34-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.1.35-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -64,6 +64,11 @@ TCMalloc-style memory pool: page heap, span allocator, thread cache, enterprise 
 consumers define nothing — the package's `uvcpp/uvcpp_config.h` carries the value this
 build actually used, and defining a conflicting one yourself is a hard compile error
 instead of a silent allocator mismatch (see `RELEASE.md`).
+
+Each prebuilt package also carries a **Debug** build of the library (`uvcppd.dll` /
+`libuvcppd.so`, link with `-luvcppd`, plus `uvcppd.pdb` on MSVC) for stepping into the
+library. Its prerequisites — chiefly that MSVC's non-redistributable Debug CRT is *not*
+in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
 
 ### Net module (`src/net/`) — `UVCPP_BUILD_NET=ON` (default)
 
@@ -442,7 +447,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.1.34-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.1.35-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. Only `v1.0.0` and `v1.1.0` were ever tagged; every
 `1.1.x` since is a development version (`UVCPP_VERSION_IS_RELEASE = 0`) that has not been
 released. Release notes for the tagged versions are in [RELEASE.md](./RELEASE.md); below is
@@ -511,6 +516,8 @@ contributor, [@sercebr](https://github.com/sercebr).
   in a cascade (`1.1.30`)
 - The Linux package's `libuvcpp.so` moved from `bin/` to `lib/`, where the docs point (`1.1.28`)
 - Six packaging jobs pass `UVCPP_ENABLE_NGHTTP2`, so h2 packages no longer lack it (`1.1.6`)
+- Every package now also carries a **Debug** build of the library (`uvcppd.dll` / `libuvcppd.so`,
+  `-luvcppd`, plus `uvcppd.pdb` on MSVC) for stepping through library internals (`1.1.35`)
 - ABI note for consumers: the layout of `uvcpp_buf` (`1.1.28`) and `uvcpp_http_server`
   (`1.1.34`) changed — **rebuild, do not just swap the binary** (see [RELEASE.md](./RELEASE.md))
 

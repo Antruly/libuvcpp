@@ -41,21 +41,24 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 
 ## 预编译产物 (Prebuilt binaries)
 
-本版本提供三个平台的 x64 预编译动态库：
+本版本提供三个平台的 x64 预编译动态库，**每档都含发布版与调试版两份**：
 
-| 平台 | 工具链 | 产物 |
-|---|---|---|
-| Windows x64 | MinGW-w64 (GCC) | `libuvcpp.dll` + `libuvcpp.dll.a` |
-| Windows x64 | MSVC (VS2022) | `uvcpp.dll` + `uvcpp.lib` |
-| Linux x64 | GCC | `libuvcpp.so` |
+| 平台 | 工具链 | 发布档 | 调试档 |
+|---|---|---|---|
+| Windows x64 | MinGW-w64 (GCC) | `libuvcpp.dll` + `libuvcpp.dll.a` | `libuvcppd.dll` + `libuvcppd.dll.a` |
+| Windows x64 | MSVC (VS2022) | `uvcpp.dll` + `uvcpp.lib` | `uvcppd.dll` + `uvcppd.lib` + `uvcppd.pdb` |
+| Linux x64 | GCC | `libuvcpp.so` | `libuvcppd.so` |
 
 每个 zip 内含 `bin/`（动态库）、`lib/`（导入库）、`include/`（公开头，含 libuv、
-nlohmann/json、zlib 的头）、`lib/pkgconfig/uvcpp.pc` 与文档。
+nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.pc`）与文档。
 
 | 文件 | 说明 |
 |---|---|
 | `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL 以及 MinGW 运行时均已静态链接进去** |
 | `lib/libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
+| `bin/libuvcppd.dll` | **调试档**动态库（MSVC 那份叫 `uvcppd.dll`）。用法与前提见下面「调试档」一节 |
+| `lib/libuvcppd.dll.a` | 调试档导入库（`-luvcppd`）；MSVC 那份是 `uvcppd.lib` |
+| `bin/uvcppd.pdb` | **仅 MSVC**：调试档的符号文件，与 `uvcppd.dll` 同目录 |
 | `include/` | 公开头文件，含 `expand/`（内存池） |
 | `include/uvcpp/uvcpp_config.h` | **生成的**模块使能宏。每个公开头自己包含它，使用者**不必再传任何 `-D`**（见下） |
 
@@ -75,8 +78,40 @@ MSVC 版 `uvcpp.dll` 用 `/MD` 构建，因此 `bin/` 里一并带了
 清单是猜的 —— MSYS2 同时装了 `libssl.a` 和 `libssl.dll.a`，`find_library` 默认挑
 `.dll.a`，产物会凭空多一个 `libssl-3-x64.dll` 而清单里没有。
 
+它也不靠文件名认那两份库：文件名是给人看的，staging 把调试档拷成发布档的名字（或
+反过来）时，**所有**基于名字的判据都会全绿而包是错的。所以两档各自**要自报家门**，
+而且**两个方向都判**：Windows 上比对导入表里有没有 `/MDd` 那几份调试版 CRT、以及
+PE 里有没有 `RSDS` 指向自己的 `.pdb`；MinGW / Linux 上比对调试节里有没有本库自己的
+源文件名（发布档按 `-O3 -DNDEBUG` 编，一个都不该有 —— 而"有没有 `.debug_*` 节"
+**不是**判据：静态链进去的依赖本身就带着 355 KB 调试节）。
+
+`.pdb` 还会与 `.dll` **对源**：比 PE 里 CodeView 记录的 GUID+age 与 PDB 里 stream 1
+的 GUID+age，对不上就拒绝出包 —— 一个配错符号的 `.pdb` 比没有 `.pdb` 更坏，它会让
+调试器停在一份不相干的源码上。
+
 > ⚠️ 两个 Windows 版互为替代、不可混用：由 MinGW-w64 编译的动态库**不能被 MSVC
 > 链接**，反之亦然（C++ ABI 不同）。用哪套工具链就用哪个 zip。
+
+### 调试档（Debug 版）
+
+每个 zip 里除了发布档，还有一份**调试档**：文件名多一个 `d`（`libuvcppd.dll` /
+`uvcppd.dll` / `libuvcppd.so`），与发布档同放在 `bin/`（Linux 是 `lib/`），导入库同在
+`lib/`，`.pc` 是 `uvcpp-debug`（`-luvcppd`）。MSVC 那份还带 `bin/uvcppd.pdb`。
+
+**它是用来调试的，不是用来发布的**，四条前提：
+
+1. **MSVC 的调试档用 `/MDd` 链**，所以包里**没有**、也不会带 `msvcp140d.dll` /
+   `vcruntime140d.dll` / `ucrtbased.dll` —— 微软的调试版运行库**不可再分发**，
+   只在 VS 安装树里。要跑调试档，机器上得装了 Visual Studio，或者把那几个目录挂到
+   `PATH` 上（`…\VC\Redist\MSVC\<版本>\debug_nonredist\x64\Microsoft.VC143.DebugCRT\`
+   与 `…\Windows Kits\10\bin\<版本>\x64\ucrt\`）。**不挂的话每个程序都以
+   `0xc0000135`（找不到 DLL）退出，看起来像库坏了**，实际是缺那三份不可再分发的运行库。
+   打包脚本刻意不发它们，并且按**成品**再扫一遍确认没混进去。
+2. **两档不能混链**：调试档只能链进 `/MDd`（MSVC）或带 `-g` 的程序，发布档只能链进
+   `/MD` 的程序。混着链是未定义行为，不是"能跑但慢一点"。
+3. **不要拿调试档做性能测量**（`-O0`，且带各种调试期检查）。
+4. **MinGW / Linux 没有独立的符号文件**：调试信息（DWARF）**内嵌在动态库里**，
+   包里没有、也不会有 `.pdb` 之类的东西。发布档不带 `-g`，要调试就用调试档。
 
 ### 使用方式
 
@@ -98,6 +133,13 @@ g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvc
 
 ```bash
 g++ -std=c++11 -I include your_app.cpp -L lib -luvcpp -o your_app.exe
+```
+
+要**链调试档**就把包名与库名都换成带 `d` 的那个（`-luvcppd`）；头文件是同一份，
+一个字节都不差：
+
+```bash
+g++ -std=c++11 -g -I include your_app.cpp -L lib -luvcppd -o your_app.exe
 ```
 
 （上面两条命令都在包的根目录下执行；`-L lib` 是库所在处。跑的时候
@@ -240,7 +282,7 @@ int main() {
 
 ## 变更日志 (Changelog)
 
-这里只列**已发布**的 tag。`1.1.1` 起的开发版线（当前 `1.1.34-dev`，尚未发布）按主题
+这里只列**已发布**的 tag。`1.1.1` 起的开发版线（当前 `1.1.35-dev`，尚未发布）按主题
 汇总在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
 
@@ -271,9 +313,9 @@ int main() {
 ## 下载 (Download)
 
 - Source code
-- `libuvcpp-1.1.0-mingw-x64.zip` — Windows x64 预编译动态库（MinGW-w64）
-- `libuvcpp-1.1.0-msvc-x64.zip` — Windows x64 预编译动态库（MSVC / VS2022）
-- `libuvcpp-1.1.0-linux-x64.zip` — Linux x64 预编译动态库
+- `libuvcpp-1.1.0-mingw-x64.zip` — Windows x64 预编译动态库（MinGW-w64，含调试档）
+- `libuvcpp-1.1.0-msvc-x64.zip` — Windows x64 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
+- `libuvcpp-1.1.0-linux-x64.zip` — Linux x64 预编译动态库（含调试档）
 
 ## 已知问题 (Known Issues)
 

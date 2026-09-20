@@ -13,6 +13,11 @@ on:
         description: '要出包的 tag（须已存在）'
         required: true
         type: string
+      dry_run:
+        description: '只跑构建与打包，不创建/更新 Release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -76,6 +81,24 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-mingw --parallel 4
 
+          # 调试档：**另开一棵**单配置树（`CMAKE_BUILD_TYPE=Debug`），开关列表与上面
+          # 逐字相同 —— 上面那三条注释（依赖静态）对调试档**一样**成立，少传任何一个
+          # 就等于发一份"能调但起不来"的调试库。
+          # 不换成 Ninja Multi-Config：那会把 Release 产物从 build-mingw/ 挪到
+          # build-mingw/Release/，上面那条 objdump 自检与 --tree 实参全要跟着动。
+          # `-DUVCPP_BUILD_TESTS=OFF`：这条腿要的是**产物**，调试档的测试不在这里跑。
+          cmake -S . -B build-mingw-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-mingw-dbg --parallel 4
+
       # 发布产物必须是"任意 64 位 Windows 直接可用"。这条只有在这里断言才拦得住
       # —— 静态链接被改坏时，产物在 CI 机上照样跑得动。
       #
@@ -86,13 +109,21 @@ jobs:
       # 发布（看得见，改一行就好），黑名单漏判时发一个干净机器起不来的包。
       - name: Assert the DLL is self-contained
         run: |
-          deps=$(objdump -p build-mingw/libuvcpp.dll | awk '/DLL Name/ {print $3}' | sort -u)
-          echo "$deps"
-          bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
-          if [ -n "$bad" ]; then
-            echo "::error title=mingw-not-self-contained::libuvcpp.dll 依赖了非 Windows 自带的模块: $bad"
-            exit 1
-          fi
+          # 两份都要过：调试档与发布档是**两次独立的 configure**，上面那三个开关
+          # 任何一份漏传，就只有那一份多出 dll 依赖 —— 只查发布档会把它放过去，
+          # 而那恰恰是使用者拿去调试时才会撞上的那份。`-g` 本身不改导入表。
+          rc=0
+          for d in build-mingw/libuvcpp.dll build-mingw-dbg/libuvcppd.dll; do
+            echo "--- $d"
+            deps=$(objdump -p "$d" | awk '/DLL Name/ {print $3}' | sort -u)
+            echo "$deps"
+            bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
+            if [ -n "$bad" ]; then
+              echo "::error title=mingw-not-self-contained::$d 依赖了非 Windows 自带的模块: $bad"
+              rc=1
+            fi
+          done
+          exit $rc
 
       # **出包之前必须全绿**。发布一个测试挂掉的库比不发更坏。
       # 排除项与 ci.yml 一致：test_shutdown_func 是 ~1% 的既有间歇性失败
@@ -110,7 +141,8 @@ jobs:
         run: |
           # 同上：普通标量会把续行折成空格，argparse 收不到 --tree 直接退出 2。
           python tests/tools/package_release.py \
-            --tree build-mingw --platform mingw-x64 --out dist
+            --tree build-mingw --platform mingw-x64 \
+            --debug-tree build-mingw-dbg --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -202,6 +234,21 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-mingw --parallel 4
 
+          # 调试档：另开一棵单配置树，开关与上面逐字相同（理由链同 mingw-x64）。
+          # 这一条腿的 `-static` 尤其要跟着传：CLANGARM64 的 libc++.dll /
+          # libunwind.dll 不静态链就会出现在导入表里。
+          cmake -S . -B build-mingw-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-mingw-dbg --parallel 4
+
       # 与 mingw-x64 同一张白名单，但**不用 objdump**：gcc 依赖 binutils 所以
       # MINGW64 上 objdump 一定在，而 clang 不依赖 GNU binutils，CLANG64/CLANGARM64
       # 的 `mingw-w64-clang-aarch64-binutils` 是个虚拟包（没有可安装的包体）。
@@ -216,21 +263,28 @@ jobs:
           sys.path.insert(0, "tests/tools")
           from package_release import pe_imports
 
-          deps = pe_imports("build-mingw/libuvcpp.dll")
-          if deps is None:
-              print("build-mingw/libuvcpp.dll 不是 PE，断言无从谈起，按失败处理")
-              sys.exit(1)
-          print("\n".join(deps))
-
           system = re.compile(
               r"^(advapi32|bcrypt|bcryptprimitives|crypt32|dbghelp|dnsapi|iphlpapi|"
               r"kernel32|msvcrt|ntdll|ole32|psapi|rpcrt4|secur32|shell32|shlwapi|"
               r"user32|userenv|winmm|ws2_32|api-ms-win-[a-z0-9-]+)\.dll$")
-          bad = [d for d in deps if not system.match(d)]
-          if bad:
-              print("::error title=mingw-arm64-not-self-contained::"
-                  "libuvcpp.dll 依赖了非 Windows 自带的模块: %s" % bad)
-              sys.exit(1)
+
+          # 两份都要过：调试档与发布档是两次独立的 configure，开关漏传只会让
+          # **那一份**多出 dll 依赖。见 mingw-x64 那边的同一段注释。
+          rc = 0
+          for dll in ("build-mingw/libuvcpp.dll", "build-mingw-dbg/libuvcppd.dll"):
+              print("--- %s" % dll)
+              deps = pe_imports(dll)
+              if deps is None:
+                  print("%s 不是 PE，断言无从谈起，按失败处理" % dll)
+                  rc = 1
+                  continue
+              print("\n".join(deps))
+              bad = [d for d in deps if not system.match(d)]
+              if bad:
+                  print("::error title=mingw-arm64-not-self-contained::"
+                      "%s 依赖了非 Windows 自带的模块: %s" % (dll, bad))
+                  rc = 1
+          sys.exit(rc)
           PY
 
       - name: Test
@@ -245,7 +299,8 @@ jobs:
       - name: Package
         run: |
           python tests/tools/package_release.py \
-            --tree build-mingw --platform mingw-arm64 --out dist
+            --tree build-mingw --platform mingw-arm64 \
+            --debug-tree build-mingw-dbg --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -294,6 +349,13 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
 
+          # 调试档：同一棵树换配置，产物落在 build-msvc/Debug/（含 uvcppd.pdb）。
+          # 只建 `uvcpp` 这一个目标，不建 Debug 的测试 —— 这条腿要的是**产物**，
+          # 而 Debug 全套测试会把这一步的墙钟翻倍（Release 那份测试在上面已经跑过）。
+          # 必须**显式**建 Debug，不能指望 `--config Release` 顺带产出：DEBUG_POSTFIX
+          # 只在 Debug 配置下加那个 `d`。
+          cmake --build build-msvc --config Debug --target uvcpp --parallel 4
+
       # 上面那条注释说的静默降级，在这里被钉死。
       - name: Assert the requested modules are actually on
         shell: bash
@@ -323,7 +385,8 @@ jobs:
           # 找不到就报错退出，而不是发一个缺 vcruntime 的包。
           export VCToolsRedistDir
           python tests/tools/package_release.py \
-            --tree build-msvc --platform msvc-x64 --config Release --out dist
+            --tree build-msvc --platform msvc-x64 --config Release \
+            --debug-tree build-msvc --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -444,6 +507,9 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
 
+          # 调试档：同 msvc-x64，只建 `uvcpp` 这一个目标（见那边的注释）。
+          cmake --build build-msvc --config Debug --target uvcpp --parallel 4
+
       # 镜像切到 VS2026 之后 CMake 会**静默**换生成器，用户拿到的 ABI 就从 v143
       # 变成 v144 —— 而且会和钉在 windows-2022 上的 msvc-x64 对不上。这种事必须
       # 响亮。判据取 CMakeCache，比刮 configure 的日志稳。
@@ -491,7 +557,8 @@ jobs:
           # "静默坏包"类 —— 打包机是 x64，错的也能跑）。找不到就退出 2。
           export VCToolsRedistDir
           python tests/tools/package_release.py \
-            --tree build-msvc --platform msvc-arm64 --config Release --out dist
+            --tree build-msvc --platform msvc-arm64 --config Release \
+            --debug-tree build-msvc --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -546,25 +613,54 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux --parallel 4
 
+          # 调试档：另开一棵单配置树，开关与上面逐字相同。PIC 那条（上面那一大段）
+          # 对调试档**一样**成立 —— 少了它，调试档在这里链不上。
+          cmake -S . -B build-linux-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-linux-dbg --parallel 4
+
       - name: Report runtime deps
         run: |
           # 打出真实依赖，别让"依赖全静态"停留在口号上。
           # 不写死 libuvcpp.so：带 SOVERSION 时可能只有 libuvcpp.so.1.1.0 那个实体。
-          so=$(ls build-linux/libuvcpp.so* | head -1)
-          echo "so=$so"
-          ldd "$so"
-          # 第三方库必须是静态进去的：这几个在用户机器上不一定有，缺了就是
-          # "装了跑不起来"。libstdc++/libgcc_s 只警告不失败 —— glibc 那边偶尔
-          # 仍会渗出 libgcc_s，钉死它会让发布卡在一件不致命的事上。
-          bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
-          if [ -n "$bad" ]; then
-            echo "::error title=linux-not-self-contained::libuvcpp.so 动态依赖了第三方库: $bad"
-            exit 1
-          fi
-          soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
-          if [ -n "$soft" ]; then
-            echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
-          fi
+          # 两份都量：调试档与发布档是两次独立的 configure，开关漏传只会让那一份
+          # 多出动态依赖（见 mingw-x64 那边同一段注释）。
+          rc=0
+          for d in build-linux build-linux-dbg; do
+            # 逐个目录取**第一个**命中：写成 `ls A* B* | head -2` 的话，`ls` 会
+            # 先把第一个 glob 列完，于是两行可能都是同一棵树的 SOVERSION 软链，
+            # 另一棵树根本没被量到（而它照样算"跑过了"）。
+            so=$(ls "$d"/libuvcpp*.so* 2>/dev/null | head -1)
+            if [ -z "$so" ]; then
+              echo "::error title=linux-so-missing::$d 下没有 libuvcpp*.so* —— 这一档没编出来"
+              rc=1
+              continue
+            fi
+            echo "--- so=$so"
+            ldd "$so"
+            # 第三方库必须是静态进去的：这几个在用户机器上不一定有，缺了就是
+            # "装了跑不起来"。libstdc++/libgcc_s 只警告不失败 —— glibc 那边偶尔
+            # 仍会渗出 libgcc_s，钉死它会让发布卡在一件不致命的事上。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
+            if [ -n "$bad" ]; then
+              echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
+              rc=1
+            fi
+            soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
+            if [ -n "$soft" ]; then
+              echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
+            fi
+          done
+          exit $rc
 
       - name: Test
         run: |
@@ -576,7 +672,8 @@ jobs:
         run: |
           # 同上：普通标量会把续行折成空格，argparse 收不到 --tree 直接退出 2。
           python3 tests/tools/package_release.py \
-            --tree build-linux --platform linux-x64 --out dist
+            --tree build-linux --platform linux-x64 \
+            --debug-tree build-linux-dbg --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -616,20 +713,44 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux --parallel 4
 
+          # 调试档：另开一棵单配置树，开关与上面逐字相同（理由链见 linux-x64）。
+          cmake -S . -B build-linux-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
+          cmake --build build-linux-dbg --parallel 4
+
       - name: Report runtime deps
         run: |
-          so=$(ls build-linux/libuvcpp.so* | head -1)
-          echo "so=$so"
-          ldd "$so"
-          bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
-          if [ -n "$bad" ]; then
-            echo "::error title=linux-not-self-contained::libuvcpp.so 动态依赖了第三方库: $bad"
-            exit 1
-          fi
-          soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
-          if [ -n "$soft" ]; then
-            echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
-          fi
+          # 两份都量，逐个目录取第一个命中 —— 见 linux-x64 那边的两条注释。
+          rc=0
+          for d in build-linux build-linux-dbg; do
+            so=$(ls "$d"/libuvcpp*.so* 2>/dev/null | head -1)
+            if [ -z "$so" ]; then
+              echo "::error title=linux-so-missing::$d 下没有 libuvcpp*.so* —— 这一档没编出来"
+              rc=1
+              continue
+            fi
+            echo "--- so=$so"
+            ldd "$so"
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
+            if [ -n "$bad" ]; then
+              echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
+              rc=1
+            fi
+            soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
+            if [ -n "$soft" ]; then
+              echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
+            fi
+          done
+          exit $rc
 
       - name: Test
         run: |
@@ -640,7 +761,8 @@ jobs:
       - name: Package
         run: |
           python3 tests/tools/package_release.py \
-            --tree build-linux --platform linux-arm64 --out dist
+            --tree build-linux --platform linux-arm64 \
+            --debug-tree build-linux-dbg --out dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -671,7 +793,38 @@ jobs:
       - name: Show assets
         run: ls -la dist/
 
+      # 这条是**跨腿**判据，打包器自己给不了：某条腿漏传 `--debug-tree` 时，
+      # 打包器只会打一行"本次包不含调试档"然后**照常成功** —— 于是发布出去的是
+      # "五个平台有调试档、一个没有"。每份包在各自那条腿上都验过自己，只有这里
+      # 能看出有一份跟别的不一样。
+      - name: Assert every zip carries the debug artifacts
+        run: |
+          python3 - <<'PY'
+          import glob, sys, zipfile
+
+          bad = []
+          zips = sorted(glob.glob("dist/*.zip"))
+          for z in zips:
+              base = [n.rsplit("/", 1)[-1] for n in zipfile.ZipFile(z).namelist()]
+              if not [n for n in base if n.startswith(("uvcppd.", "libuvcppd."))]:
+                  bad.append("%s 里没有任何调试档动态库（这条腿少了 --debug-tree？）" % z)
+              if "uvcpp-debug.pc" not in base:
+                  bad.append("%s 里没有 uvcpp-debug.pc（有调试档却没它的 .pc，"
+                             "使用者没法用 pkg-config 链上）" % z)
+              # MSVC 的符号是外置的 .pdb；MinGW/Linux 的调试信息内嵌在动态库里，
+              # 本来就没有独立符号文件，别按同一个形状去要。
+              if "-msvc-" in z and "uvcppd.pdb" not in base:
+                  bad.append("%s 是 MSVC 的包，却没有 uvcppd.pdb" % z)
+          print("扫了 %d 份包：%s" % (len(zips), ", ".join(zips)))
+          if bad:
+              print("::error title=debug-artifacts-missing::不是每份包都带了调试档")
+              for b in bad:
+                  print("  - " + b)
+              sys.exit(1)
+          PY
+
       - name: Create / update release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -686,3 +839,12 @@ jobs:
           # --clobber：重跑时覆盖同名资产，让这条流程幂等
           gh release upload "$TAG" dist/*.zip --clobber
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)"'
+
+      # 空转也要**说出来**发的是什么：否则 dry_run 的日志里最后一步是空的，
+      # 看不出这条链到底会不会发东西。
+      - name: Dry run —— 只报告会发什么
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "dry_run=true：跳过 gh release create/edit/upload（不碰任何已公开的 ref）"
+          echo "真发布时会发到 tag ${{ inputs.tag }} 的资产："
+          ls -la dist/*.zip

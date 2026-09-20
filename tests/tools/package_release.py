@@ -65,10 +65,23 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h"}
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），
 # `import_lib` 是链接时用的导入库/静态库（进 `lib/`），
 # `runtime` 是要跟着 dll 一起发的第三方运行时。
+#
+# `*_debug` 是同名的调试档（`CMakeLists.txt` 的 `DEBUG_POSTFIX "d"` 产出
+# `uvcppd.*` / `libuvcppd.*`）。**必须先有 `--debug-tree` 才会用到**，见 main()。
+#
+# **调试档的候选表与发布档是两张独立的表，绝不互相 fallback。** 把两档混进一张
+# 候选表是致命的：`find_first` 返回第一个存在的路径，发布档缺失时会**静默**取到
+# 调试档的文件，再以 `uvcpp.dll` 的名字发出去 —— 判据全绿而包是错的。
+# 同理不要给 find_first 加"猜 Debug/ 前缀"的行为。
+# `pdb_debug` 只有 MSVC 非空：它的符号是**外置**的 `.pdb`。GCC/Clang 的调试信息
+# 内嵌在动态库自己的 `.debug_*` 节里，没有独立符号文件可发。
 PLATFORMS = {
     "mingw-x64": {
         "lib_dll": ["libuvcpp.dll"],
         "import_lib": ["libuvcpp.dll.a"],
+        "lib_dll_debug": ["libuvcppd.dll"],
+        "import_lib_debug": ["libuvcppd.dll.a"],
+        "pdb_debug": [],
         "runtime": [],          # 运行时已静态链进 dll
         "pc_libs": "-L${libdir} -luvcpp",
     },
@@ -77,14 +90,24 @@ PLATFORMS = {
     "mingw-arm64": {
         "lib_dll": ["libuvcpp.dll"],
         "import_lib": ["libuvcpp.dll.a"],
+        "lib_dll_debug": ["libuvcppd.dll"],
+        "import_lib_debug": ["libuvcppd.dll.a"],
+        "pdb_debug": [],
         "runtime": [],
         "pc_libs": "-L${libdir} -luvcpp",
     },
     "msvc-x64": {
         "lib_dll": ["uvcpp.dll", "Release/uvcpp.dll"],
         "import_lib": ["uvcpp.lib", "Release/uvcpp.lib"],
+        "lib_dll_debug": ["Debug/uvcppd.dll", "uvcppd.dll"],
+        "import_lib_debug": ["Debug/uvcppd.lib", "uvcppd.lib"],
+        "pdb_debug": ["Debug/uvcppd.pdb", "uvcppd.pdb"],
         # MSVC 用 /MD：发布包里必须自带运行库 dll，否则使用者机器上
         # 没有 VC++ 可再发行组件时直接 0xc0000135。
+        #
+        # **这张表只管发布档。** 调试档链的是 /MDd（msvcp140d / vcruntime140d /
+        # ucrtbased），那几份微软不允许再分发、只在 VS 安装树里，所以**刻意不发**
+        # —— 见 DEBUG_CRT_NAMES 与 RELEASE.md 里"Debug 版前提"那段。
         "runtime": ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"],
         "pc_libs": "-L${libdir} -luvcpp",
         "msvc_arch": "x64",
@@ -92,6 +115,9 @@ PLATFORMS = {
     "msvc-arm64": {
         "lib_dll": ["uvcpp.dll", "Release/uvcpp.dll"],
         "import_lib": ["uvcpp.lib", "Release/uvcpp.lib"],
+        "lib_dll_debug": ["Debug/uvcppd.dll", "uvcppd.dll"],
+        "import_lib_debug": ["Debug/uvcppd.lib", "uvcppd.lib"],
+        "pdb_debug": ["Debug/uvcppd.pdb", "uvcppd.pdb"],
         "runtime": ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"],
         "pc_libs": "-L${libdir} -luvcpp",
         "msvc_arch": "arm64",
@@ -109,6 +135,9 @@ PLATFORMS = {
         "lib_dll": ["libuvcpp.so"],
         "lib_dest": "lib",
         "import_lib": [],
+        "lib_dll_debug": ["libuvcppd.so"],
+        "import_lib_debug": [],
+        "pdb_debug": [],
         "runtime": [],
         "pc_libs": "-L${libdir} -luvcpp",
     },
@@ -116,10 +145,20 @@ PLATFORMS = {
         "lib_dll": ["libuvcpp.so"],
         "lib_dest": "lib",
         "import_lib": [],
+        "lib_dll_debug": ["libuvcppd.so"],
+        "import_lib_debug": [],
+        "pdb_debug": [],
         "runtime": [],
         "pc_libs": "-L${libdir} -luvcpp",
     },
 }
+
+# 调试档的链接行。六个平台**逐字相同**（`--config Debug` 下 CMake 的
+# `DEBUG_POSTFIX "d"` 给三个平台的产物都加了同一个 `d`），所以只有一份常量，
+# 不按平台重复写六遍。写错的话 `check_config_contract.py` 会红：它拿这行的
+# `-L`/`-l` 去包里找**同名**的可链接库（`libuvcppd.dll.a` / `uvcppd.lib` /
+# `libuvcppd.so`），指不到就报"那个目录里没有包自己那份库"。
+PC_LIBS_DEBUG = "-L${libdir} -luvcppd"
 
 
 def find_first(tree, rels):
@@ -150,6 +189,24 @@ SYSTEM_DLLS = {
     "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "usp10.dll",
     "version.dll", "win32u.dll", "winmm.dll", "winspool.drv", "ws2_32.dll",
     "wtsapi32.dll",
+}
+
+# 调试版 CRT（`/MDd` 链的那几份）。**微软不允许再分发**，只在 VS 安装树里
+# （`VC\Redist\MSVC\<ver>\debug_nonredist\<arch>\Microsoft.VC*.DebugCRT\`），
+# 所以包里**刻意不发** —— 拿了调试档的人必须本机装 VS 才跑得起来（RELEASE.md
+# "Debug 版前提"那段）。
+#
+# 用途一：`:502` 那段"bin/ 必须覆盖 dll 真实导入表"的自动补依赖，对这张表里的
+# 名字**只打印、不查找、不拷贝**。调试档的导入表里必然有它们（`/MDd` 就是这么
+# 链的），照原样去 runtime_roots 里捞只会捞不到、然后把包判死（rc=2）。
+# 用途二：打包完再断言**整棵 stage 里一个都不许有** —— 防的是"哪次改动真把它们
+# 拷进来了"。
+#
+# **必须逐名列举，绝不能用 `*d.dll` 通配**：包里自己就有 uvcppd.dll /
+# libuvcppd.dll，通配会把自己的产物判红。
+DEBUG_CRT_NAMES = {
+    "concrt140d.dll", "msvcp140_1d.dll", "msvcp140_2d.dll", "msvcp140d.dll",
+    "ucrtbased.dll", "vccorlib140d.dll", "vcruntime140_1d.dll", "vcruntime140d.dll",
 }
 
 
@@ -219,6 +276,127 @@ def find_runtime_for_arch(base, name, arch):
     return best
 
 
+def _pe_layout(d):
+    """PE 的节表。返回 `(sections, opts_off, opt_size)`；sections 每项是
+    `(name, va, size, raw_off, raw_size)`，`size` 取 `max(virtual, raw)`。
+
+    **名字必须走 COFF 的长名机制**：节头里只有 8 字节放名字，超过就写
+    `/NNN`（相对字符串表的偏移，字符串表跟在符号表后面）。`.debug_info` 是
+    11 个字符，正是这种 —— 直接读那 8 字节会读成 `/4`，于是"这个产物有没有
+    调试节"**永远**数出 0 个。这个坑实测踩过一次：MinGW 的 Release dll 明明
+    有 9 个 `.debug_*` 节，按 8 字节读却是 0。
+    """
+    e_lfanew = int.from_bytes(d[0x3C:0x40], "little")
+    coff = e_lfanew + 4
+    nsec = int.from_bytes(d[coff + 2:coff + 4], "little")
+    opt_size = int.from_bytes(d[coff + 16:coff + 18], "little")
+    sym_off = int.from_bytes(d[coff + 8:coff + 12], "little")
+    n_sym = int.from_bytes(d[coff + 12:coff + 16], "little")
+    str_off = sym_off + n_sym * 18
+    opt = coff + 20
+    sects = []
+    for i in range(nsec):
+        b = opt + opt_size + i * 40
+        raw8 = d[b:b + 8]
+        if raw8[:1] == b"/":
+            o = int(raw8[1:].split(b"\0")[0] or b"0")
+            end = d.find(b"\0", str_off + o)
+            name = d[str_off + o:end if end > 0 else str_off + o + 64].decode(
+                "ascii", "replace")
+        else:
+            name = raw8.rstrip(b"\0").decode("ascii", "replace")
+        vsize = int.from_bytes(d[b + 8:b + 12], "little")
+        va = int.from_bytes(d[b + 12:b + 16], "little")
+        rsize = int.from_bytes(d[b + 16:b + 20], "little")
+        raw = int.from_bytes(d[b + 20:b + 24], "little")
+        sects.append((name, va, max(vsize, rsize), raw, rsize))
+    return sects, opt, opt_size
+
+
+def _elf_debug_sections(d):
+    """ELF 里所有 `.debug*` 节的内容（按节头表找）；不是 ELF 返回 None。"""
+    if d[:4] != b"\x7fELF":
+        return None
+    is64 = d[4] == 2
+    if is64:
+        sh_off = int.from_bytes(d[0x28:0x30], "little")
+        entsize = int.from_bytes(d[0x3A:0x3C], "little")
+        shnum = int.from_bytes(d[0x3C:0x3E], "little")
+        shstrndx = int.from_bytes(d[0x3E:0x40], "little")
+    else:
+        sh_off = int.from_bytes(d[0x20:0x24], "little")
+        entsize = int.from_bytes(d[0x2E:0x30], "little")
+        shnum = int.from_bytes(d[0x30:0x32], "little")
+        shstrndx = int.from_bytes(d[0x32:0x34], "little")
+    if not sh_off or not shnum or entsize == 0:
+        return []
+
+    def sh(i):
+        b = sh_off + i * entsize
+        name = int.from_bytes(d[b:b + 4], "little")
+        if is64:
+            off = int.from_bytes(d[b + 24:b + 32], "little")
+            size = int.from_bytes(d[b + 32:b + 40], "little")
+        else:
+            off = int.from_bytes(d[b + 16:b + 20], "little")
+            size = int.from_bytes(d[b + 20:b + 24], "little")
+        return name, off, size
+
+    if shstrndx >= shnum:
+        return []
+    _n, strtab_off, strtab_size = sh(shstrndx)
+    strtab = d[strtab_off:strtab_off + strtab_size]
+    out = []
+    for i in range(shnum):
+        name_off, off, size = sh(i)
+        end = strtab.find(b"\0", name_off)
+        name = strtab[name_off:end if end > 0 else name_off + 32]
+        if name.startswith(b".debug") or name.startswith(b".zdebug"):
+            out.append(d[off:off + size])
+    return out
+
+
+def debug_section_bytes(path):
+    """把产物里所有调试节的内容拼起来；一个都没有、或格式不认识，返回 None。
+
+    - PE（MinGW / GCC）走 `.debug_*` 节，`_pe_layout` 解长名。
+    - ELF（Linux）走节头表。
+    - **MSVC 在这里必然返回 None** —— 它的调试信息外置在 `.pdb` 里，动态库自己
+      没有调试节。所以 MSVC 那条路的"是不是调试档"要靠导入表与 RSDS 判，
+      见 `check_msvc_debug_identity`。
+    """
+    with open(path, "rb") as f:
+        d = f.read()
+    if d[:2] == b"MZ":
+        e_lfanew = int.from_bytes(d[0x3C:0x40], "little")
+        if d[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+            return None
+        sects, _opt, _osz = _pe_layout(d)
+        parts = [d[raw:raw + rs] for n, _va, _sz, raw, rs in sects
+                 if n.startswith(".debug") or n.startswith(".zdebug")]
+    else:
+        parts = _elf_debug_sections(d)
+        if parts is None:
+            return None
+    return b"".join(parts) if parts else None
+
+
+def own_source_names(repo):
+    """本库自己的源文件名（`src/**`）。**只收 src/**，不收 tests/ 与 examples/**
+    —— 那两个目录不编进动态库，拿它们的名字去认产物等于凭空放宽判据。
+    """
+    names = set()
+    srcroot = os.path.join(repo, "src")
+    for root, _dirs, files in os.walk(srcroot):
+        for f in files:
+            if f.endswith((".cpp", ".cc", ".cxx")):
+                names.add(f)
+    if not names:
+        raise SystemExit("在 %s 下一个源文件都没找到 —— 判据的前提没了，先修这里"
+                         % srcroot)
+    return names
+
+
 def pe_imports(path):
     """读 PE 导入表，返回依赖的 dll 名（小写、去重、保序）；非 PE 返回 None。
 
@@ -243,25 +421,13 @@ def pe_imports(path):
     e_lfanew = int.from_bytes(d[0x3C:0x40], "little")
     if d[e_lfanew:e_lfanew + 4] != b"PE\0\0":
         return None
-    coff = e_lfanew + 4
-    nsec = int.from_bytes(d[coff + 2:coff + 4], "little")
-    opt_size = int.from_bytes(d[coff + 16:coff + 18], "little")
-    opt = coff + 20
+    sects, opt, _opt_size = _pe_layout(d)
     magic = int.from_bytes(d[opt:opt + 2], "little")
     ddir = opt + (112 if magic == 0x20B else 96)   # PE32+ 的 DataDirectory 偏 112
     imp_rva = int.from_bytes(d[ddir + 8:ddir + 12], "little")   # DataDirectory[1]
 
-    sects = []
-    for i in range(nsec):
-        b = opt + opt_size + i * 40
-        va = int.from_bytes(d[b + 12:b + 16], "little")
-        vsize = int.from_bytes(d[b + 8:b + 12], "little")
-        rsize = int.from_bytes(d[b + 16:b + 20], "little")
-        raw = int.from_bytes(d[b + 20:b + 24], "little")
-        sects.append((va, max(vsize, rsize), raw))
-
     def rva2off(rva):
-        for va, size, raw in sects:
+        for _n, va, size, raw, _rs in sects:
             if va <= rva < va + size:
                 return raw + (rva - va)
         return None
@@ -381,6 +547,235 @@ def copy_header(src, dst):
     shutil.copystat(src, dst)
 
 
+def check_debug_identity(rel_dll, dbg_dll, pdb_path, pdb_name, own_names):
+    """断言两个动态库确实**一档一个**，且各自身份与文件名相符。返回问题清单。
+
+    为什么不能只靠文件名：文件名是给人看的，staging 把调试档拷成 `uvcpp.dll`
+    的名字、或反过来，**所有**基于名字的判据都会全绿而包是错的。所以这里一律
+    看产物自己说了什么，而且**两个方向都判**（调试档必须像调试档，发布档必须
+    像发布档）—— 只判一个方向的话，另一个方向被顶替不会被发现。
+
+    两条路按产物内容分派，不按平台名分派：
+
+    - **有 `.debug_*` 节**（MinGW / Linux，GCC/Clang 把 DWARF 内嵌在库里）：
+      判据是"调试档的调试节里出现本库自己的源文件名，发布档一个都没有"。
+      这条的对照实测过：MinGW 的 Release dll **也有** 355 KB 调试节（静态链进去
+      的依赖带 `-g`），所以"有没有 `.debug_*`"**不是**判据（那样会在每个正确
+      构建上恒红）；能分辨的是**调试节里有没有我们自己的源文件**。
+      顺带记一笔：那两个名字在 Release 的 `.rdata` 里**是有的**（`__FILE__`
+      字符串），所以这条判据必须**只看调试节**，看整个文件会失去分辨力。
+    - **没有调试节**（MSVC，符号外置在 `.pdb`）：判据是导入表 + RSDS。
+      调试档必须导入 `/MDd` 的那几份 CRTD，发布档必须一份都不导入；
+      调试档必须带 CodeView 调试目录（`RSDS`）且里面写着自己的 `.pdb` 名，
+      发布档必须一个 `RSDS` 都没有（Release 配置的
+      `GenerateDebugInformation=false`，实测命中 0 次）。
+    """
+    probs = []
+    dbg_blob = debug_section_bytes(dbg_dll)
+
+    if dbg_blob is not None:
+        rel_blob = debug_section_bytes(rel_dll) or b""
+        hit_dbg = sorted(n for n in own_names if n.encode() in dbg_blob)
+        hit_rel = sorted(n for n in own_names if n.encode() in rel_blob)
+        # 至少 3 个不同的源文件才算数：单个字符串可能是别处漏进来的同名串，
+        # 而一个真的按 -g 编出来的库**每个** TU 都会留下自己的名字（实测
+        # 86 个源文件里命中一大片，不是一两个）。
+        if len(hit_dbg) < 3:
+            probs.append(
+                "调试档 %s 的调试节里只有 %d 个本库源文件名（要 >=3）—— "
+                "它多半不是按 -g 编出来的那份（或 staging 指到了发布档）"
+                % (os.path.basename(dbg_dll), len(hit_dbg)))
+        if hit_rel:
+            probs.append(
+                "发布档 %s 的调试节里有 %d 个本库源文件名（%s…）—— "
+                "发布档是按 -O3 -DNDEBUG 编的，不该带自己的调试信息，"
+                "staging 多半指到了调试档"
+                % (os.path.basename(rel_dll), len(hit_rel), ", ".join(hit_rel[:3])))
+        return probs
+
+    # ---- MSVC 路线 ----
+    d_rel = pe_imports(rel_dll)
+    d_dbg = pe_imports(dbg_dll)
+    if d_dbg is None or d_rel is None:
+        probs.append("读不到 %s / %s 的导入表，没法判身份"
+                     % (os.path.basename(dbg_dll), os.path.basename(rel_dll)))
+    else:
+        hit_dbg = sorted(set(d_dbg) & DEBUG_CRT_NAMES)
+        hit_rel = sorted(set(d_rel) & DEBUG_CRT_NAMES)
+        if not hit_dbg:
+            probs.append(
+                "调试档 %s 的导入表里没有任何调试版 CRT（%s 一个都没有）—— "
+                "它其实不是 /MDd 链的，不是调试档"
+                % (os.path.basename(dbg_dll), "/".join(sorted(DEBUG_CRT_NAMES))))
+        if hit_rel:
+            probs.append(
+                "发布档 %s 导入了调试版 CRT（%s）—— 它其实是 /MDd 链的，"
+                "不是发布档" % (os.path.basename(rel_dll), ", ".join(hit_rel)))
+
+    for path, want, label in ((dbg_dll, True, "调试档"), (rel_dll, False, "发布档")):
+        with open(path, "rb") as f:
+            data = f.read()
+        n_rsds = data.count(b"RSDS")
+        if want and n_rsds == 0:
+            probs.append(
+                "%s %s 里没有 CodeView 调试目录（RSDS 命中 0）—— /DEBUG 没生效，"
+                "或者它既不是 MSVC 产物、也不是带 -g 编出来的"
+                % (label, os.path.basename(path)))
+        if not want and n_rsds:
+            probs.append(
+                "%s %s 里有 %d 处 RSDS —— 发布档的 GenerateDebugInformation "
+                "是 false，不该有" % (label, os.path.basename(path), n_rsds))
+
+    if pdb_path is None:
+        probs.append("声明的平台要有 .pdb，但没找到（%s）" % pdb_name)
+    else:
+        with open(dbg_dll, "rb") as f:
+            data = f.read()
+        if pdb_name.encode() not in data:
+            probs.append(
+                "调试档 %s 里找不到符号文件名 %s —— 发出去的 .pdb 不是它的"
+                % (os.path.basename(dbg_dll), pdb_name))
+        probs += check_pdb_matches_dll(dbg_dll, pdb_path)
+    return probs
+
+
+def check_pdb_matches_dll(dll_path, pdb_path):
+    """`.pdb` 与动态库必须**同源** —— 这是 PDB 唯一真正的不变量。
+
+    文件名对得上、mtime 对得上都不够：一个对不上符号的 PDB 比没有 PDB 更坏，
+    调试器会拿着错的符号安安静静地显示错的行号与错的变量。
+
+    靠的是 CodeView 记录里的 `GUID` + `age`，两头各写一份：
+    - PE 侧在 debug directory 的第 4 项（CodeView），指向一个 `RSDS` 块，
+      里面是 GUID(16) + age(4) + 路径。
+    - PDB 侧在 MSF 目录的 stream 1（PDB info stream），第 0 项就是同样的
+      GUID(16) + age(4)。
+    两边逐字节相同才算同源。实测：`build/Debug/uvcppd.dll` 与
+    `build/Debug/uvcppd.pdb` 相配，与同目录 `uvcpp_sd.pdb` 不相配。
+    """
+    probs = []
+    with open(dll_path, "rb") as f:
+        d = open(dll_path, "rb").read()
+    guid = _pe_codeview_guid(d)
+    if guid is None:
+        return ["%s 的 debug directory 里没有 CodeView(RSDS) 记录，"
+                "没法与 PDB 对源" % os.path.basename(dll_path)]
+    with open(pdb_path, "rb") as f:
+        p = f.read()
+    pdb_guid = _pdb_guid_age(p)
+    if pdb_guid is None:
+        return ["%s 不是认得的 MSF/PDB（读不出 stream 1 的 GUID）"
+                % os.path.basename(pdb_path)]
+    if guid != pdb_guid:
+        probs.append(
+            "%s 的 GUID+age 与 %s 对不上（dll %s / pdb %s）—— 这份 .pdb 不是"
+            "这个 dll 的符号，发出去只会让人调试到错的行号"
+            % (os.path.basename(dll_path), os.path.basename(pdb_path),
+               guid.hex(), pdb_guid.hex()))
+    return probs
+
+
+def _pe_codeview_guid(d):
+    """PE 里 CodeView(RSDS) 记录的 GUID+age（20 字节）；找不到返回 None。"""
+    if d[:2] != b"MZ":
+        return None
+    e_lfanew = int.from_bytes(d[0x3C:0x40], "little")
+    if d[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        return None
+    sects, opt, _osz = _pe_layout(d)
+    magic = int.from_bytes(d[opt:opt + 2], "little")
+    ddir = opt + (112 if magic == 0x20B else 96)
+    dbg_rva = int.from_bytes(d[ddir + 48:ddir + 52], "little")   # DataDirectory[6]
+    dbg_size = int.from_bytes(d[ddir + 52:ddir + 56], "little")
+
+    def rva2off(rva):
+        for _n, va, size, raw, _rs in sects:
+            if va <= rva < va + size:
+                return raw + (rva - va)
+        return None
+
+    off = rva2off(dbg_rva)
+    if off is None:
+        return None
+    for i in range(dbg_size // 28):
+        b = off + i * 28
+        typ = int.from_bytes(d[b + 12:b + 16], "little")
+        size = int.from_bytes(d[b + 16:b + 20], "little")
+        addr = int.from_bytes(d[b + 20:b + 24], "little")
+        if typ != 2:          # IMAGE_DEBUG_TYPE_CODEVIEW
+            continue
+        p = rva2off(addr)
+        if p is None or d[p:p + 4] != b"RSDS" or size < 24:
+            continue
+        return d[p + 4:p + 24]        # GUID(16) + age(4)
+    return None
+
+
+def _pdb_guid_age(p):
+    """PDB（MSF 容器）里 stream 1 头部的 GUID+age（20 字节）；不认得返回 None。
+
+    MSF 的布局（字段名同 LLVM 的 `MSFCommon.h`），全部小端：
+
+        superblock（64 字节）
+          0   char Magic[32]   "Microsoft C/C++ MSF 7.00\\r\\n\\x1aDS\\0\\0\\0"
+          32  u32 BlockSize
+          36  u32 FreeBlockMapBlock
+          40  u32 NumBlocks
+          44  u32 NumDirectoryBytes
+          48  u32 Unknown
+          52  u32 BlockMapAddr   ← 目录块号数组**所在**的块号
+
+        ceil(NumDirectoryBytes / BlockSize) 个 u32 的"目录块号"数组，
+        就存在第 BlockMapAddr 块里；按它拼出 directory：
+
+          u32 NumStreams
+          u32 StreamSizes[NumStreams]                  （0xFFFFFFFF = 空流）
+          之后每个 stream 一段 u32 块号数组，
+          长度是 ceil(该 stream 大小 / BlockSize) 项，按 stream 顺序紧挨着排。
+
+        stream 1（PDB info）的开头是
+            u32 Version, u32 Signature, u32 Age, Guid UniqueId(16), ... = 28 字节
+        **字段顺序与 PE 那边相反**：RSDS 记录是 GUID(16) + Age(4)，这里是
+        Age 在前、GUID 在后。所以要比的是 `stream1[12:28]`（GUID）与
+        `stream1[8:12]`（Age）两个字段，**不是**把 stream1 的头 20 字节直接
+        拿去比 —— 那样比出来永远是"对不上"，这条判据就会红在每一个正确构建上。
+        实测踩过两次（都是拿正例 `uvcppd.dll` + `uvcppd.pdb` 当对照量出来的）：
+        GUID 先是读到 `[8:24]`，再量才对到 `[12:28]`。
+    """
+    MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0"
+    if len(p) < 64 or p[:32] != MAGIC:
+        return None
+    block_size = int.from_bytes(p[32:36], "little")
+    dir_bytes = int.from_bytes(p[44:48], "little")
+    block_map = int.from_bytes(p[52:56], "little")
+    if block_size == 0 or dir_bytes == 0:
+        return None
+    n_dir_blocks = (dir_bytes + block_size - 1) // block_size
+    bm = p[block_map * block_size:(block_map + 1) * block_size]
+    if len(bm) < n_dir_blocks * 4:
+        return None
+    dir_blocks = [int.from_bytes(bm[i * 4:i * 4 + 4], "little")
+                  for i in range(n_dir_blocks)]
+    directory = b"".join(p[b * block_size:(b + 1) * block_size]
+                         for b in dir_blocks)[:dir_bytes]
+    if len(directory) < 4:
+        return None
+    n_streams = int.from_bytes(directory[0:4], "little")
+    if n_streams < 2 or len(directory) < 4 + n_streams * 4:
+        return None
+    sizes = [int.from_bytes(directory[4 + i * 4:8 + i * 4], "little")
+             for i in range(n_streams)]
+    # stream 1 的块号数组排在 stream 0 的后面
+    off = 4 + n_streams * 4 + ((sizes[0] + block_size - 1) // block_size) * 4
+    if off + 4 > len(directory) or sizes[1] < 28:
+        return None
+    first_block = int.from_bytes(directory[off:off + 4], "little")
+    start = first_block * block_size
+    if start + 28 > len(p):
+        return None
+    return p[start + 12:start + 28] + p[start + 8:start + 12]   # GUID + Age
+
+
 def main():
     # Windows 的 stdout 默认走 ANSI 代码页（CI runner 是 cp1252），下面那些中文
     # 诊断一旦执行到就 UnicodeEncodeError 崩掉。它只在**产物依赖了第三方 dll**
@@ -398,6 +793,18 @@ def main():
     ap.add_argument("--config", default="", help="多配置生成器的配置名（MSVC 传 Release）")
     ap.add_argument("--out", default="dist", help="stage 与 zip 的输出目录")
     ap.add_argument("--repo", default=ROOT)
+    # 调试档的来源树。**给了就必须有**（缺一个就 rc=2，不产出残缺的包）；
+    # 不给就是"这个包不带调试档"，并会印一行说明 —— 让"没跑"看得见。
+    #
+    # 多配置生成器（MSVC）传与 `--tree` 同一个目录即可：调试档在 `Debug/` 子目录，
+    # 靠 PLATFORMS 里候选名的 `Debug/` 前缀命中。单配置生成器（Ninja）要给另一棵
+    # 树（`-DCMAKE_BUILD_TYPE=Debug`），因为 `CMAKE_BUILD_TYPE` 是 cache 变量，
+    # 在同一棵树里翻它会把发布档整棵重编、并把两档产物混在一个目录里。
+    #
+    # **别把这个接到 `--config` 上**：那个参数在下面一次都没被引用过（候选名表里
+    # 的 `Release/` 是写死的），是个空转旋钮，接上去只会让人以为它有用。
+    ap.add_argument("--debug-tree", default="",
+                    help="调试档的构建树；不给则本包不含调试档")
     args = ap.parse_args()
 
     tree = os.path.abspath(args.tree)
@@ -465,6 +872,46 @@ def main():
         shutil.copy2(imp, os.path.join(stage, "lib"))
         print("lib: %s" % os.path.basename(imp))
 
+    # ---- 调试档（只有给了 --debug-tree 才收） ----
+    # 调试档进**同一个** bin/（ELF 平台是 lib/），与发布档并排 —— 使用者的调试器
+    # 按同目录找符号，PDB 也就落在动态库旁边。文件名**原样保留**、绝不改名：
+    # MSVC 的导入库里写死了被导入的 dll 名，MinGW 的 `libuvcppd.dll.a` 与 ELF 的
+    # `NEEDED` 同理 —— 改名等于发一个"链得上、跑不起来"的包。
+    dll_dbg = imp_dbg = pdb_dbg = None
+    if args.debug_tree:
+        dtree = os.path.abspath(args.debug_tree)
+        if not os.path.isdir(dtree):
+            print("--debug-tree 指的不是一个目录：%s" % dtree)
+            return 2
+        if not spec.get("lib_dll_debug"):
+            print("平台 %s 没声明调试档的候选名（PLATFORMS 里缺 lib_dll_debug），"
+                  "却给了 --debug-tree —— 这是配置错误" % args.platform)
+            return 2
+        dll_dbg = find_first(dtree, spec["lib_dll_debug"])
+        if dll_dbg is None:
+            missing.append("调试档 dll (%s)" % " / ".join(spec["lib_dll_debug"]))
+        else:
+            shutil.copy2(dll_dbg, os.path.join(stage, dll_dest))
+            print("%s: %s  (调试档)" % (dll_dest, os.path.basename(dll_dbg)))
+        if spec["import_lib_debug"]:
+            imp_dbg = find_first(dtree, spec["import_lib_debug"])
+            if imp_dbg is None:
+                missing.append("调试档导入库 (%s)"
+                               % " / ".join(spec["import_lib_debug"]))
+            else:
+                shutil.copy2(imp_dbg, os.path.join(stage, "lib"))
+                print("lib: %s  (调试档)" % os.path.basename(imp_dbg))
+        if spec["pdb_debug"]:
+            pdb_dbg = find_first(dtree, spec["pdb_debug"])
+            if pdb_dbg is None:
+                missing.append("调试档符号 (%s)" % " / ".join(spec["pdb_debug"]))
+            else:
+                shutil.copy2(pdb_dbg, os.path.join(stage, dll_dest))
+                print("%s: %s  (调试档符号)" % (dll_dest,
+                                              os.path.basename(pdb_dbg)))
+    else:
+        print("本次包不含调试档（未给 --debug-tree）")
+
     # ---- 第三方运行时 dll ----
     # MSVC 的运行库在 `$env:VCToolsRedistDir` 下，这里按常见位置找；
     # 找不到就**报错退出**，因为缺了它这个包在干净机器上根本起不来 ——
@@ -494,6 +941,16 @@ def main():
                 if src:
                     break
         if src:
+            # 发布档的运行库**绝不能**来自 `debug_nonredist`：那底下放的是同名的
+            # 调试版 CRT（一条 `debug_nonredist\<arch>\Microsoft.VC*.DebugCRT\`），
+            # 微软不允许再分发。`_msvc_runtime_rank` 给那个目录打的是 1 分而不是
+            # 0 分，所以"正牌 Redist 恰好缺席"（比如只装了某些工作负载的机器）时
+            # 它会胜出 —— 挑错一次就是往发布包里塞一份不可再分发的二进制。
+            # 这里钉死，别让"找不到正牌"变成"那就用调试版"。
+            if "debug_nonredist" in src.lower():
+                print("找 %s 只找到调试版的那一份（%s）—— 这张表只管发布档，"
+                      "停在这里" % (rt, src))
+                return 2
             shutil.copy2(src, os.path.join(stage, "bin"))
             print("bin: %s" % rt)
         else:
@@ -510,7 +967,20 @@ def main():
             if third:
                 print("imports 里非 Windows 自带的: %s" % " ".join(sorted(third)))
             roots = runtime_roots(tree, repo)
+            skip_dbg = []
             for n in third:
+                # 调试档（`/MDd`）的导入表里必然有 msvcp140d / vcruntime140d /
+                # ucrtbased 这几份。它们**不可再分发**（只在 VS 安装树里），包里
+                # 刻意不发 —— 所以既不去找、也不记进 missing[]：记了就等于把每个
+                # 带调试档的包都判死。
+                #
+                # 这一格必须**显式**写出来，不能指望"反正找不到"。`find_named`
+                # 只走 root 加一层，而它们在 `VC\Redist\MSVC\<ver>\debug_nonredist\
+                # <arch>\` 里是两层，现在确实捞不到 —— 但那是**巧合**，不是设计：
+                # 哪天 find_named 改成递归，调试版 CRT 就会被静默拷进 bin/。
+                if n in DEBUG_CRT_NAMES:
+                    skip_dbg.append(n)
+                    continue
                 if n in {f.lower() for f in os.listdir(os.path.join(stage, "bin"))}:
                     continue
                 src = None
@@ -523,6 +993,9 @@ def main():
                     print("bin: %s  (dll 导入表要求)" % n)
                 else:
                     missing.append("dll 的依赖 %s（导入表里有，包里没有）" % n)
+            if skip_dbg:
+                print("bin: %s —— 调试版 CRT，不可再分发，**刻意不打包**"
+                      % " ".join(sorted(skip_dbg)))
 
     # ---- 公开头 ----
     # 每个模块目录**至少**要发出一个头。模块名写错（或目录空了）时，包会"成功"
@@ -616,6 +1089,62 @@ def main():
             "Version: %s\n"
             "Cflags: -I${includedir}\n"
             "Libs: %s\n" % (args.platform, args.version, spec["pc_libs"]))
+
+    # 调试档的那份 .pc。不发它就等于包里放了一份**谁也没法链**的库：`uvcpp.pc`
+    # 指的是 `-luvcpp`，而调试档的库叫 `libuvcppd.*` / `uvcppd.lib` 之类，名字
+    # 逐个不同（`check_config_contract.py` 的候选名是**精确名**匹配，`-luvcpp`
+    # 不会误命中 `libuvcppd.dll.a`，反方向也不会静默）。
+    #
+    # 加了第二个 .pc 就必须同时把门禁改成**遍历** `lib/pkgconfig/*.pc` ——
+    # `check_config_contract.py:413` 原来写死 `uvcpp.pc`，不遍历的话这一份
+    # 就是"恒绿，因为根本没跑"。
+    if dll_dbg is not None:
+        pc_dbg = os.path.join(stage, "lib", "pkgconfig", "uvcpp-debug.pc")
+        with open(pc_dbg, "w", encoding="utf-8", newline="\n") as f:
+            f.write(
+                "prefix=${pcfiledir}/../..\n"
+                "exec_prefix=${prefix}\n"
+                "libdir=${prefix}/lib\n"
+                "includedir=${prefix}/include\n"
+                "\n"
+                "Name: uvcpp-debug\n"
+                "Description: Modern C++ wrapper for libuv "
+                "(prebuilt Debug, %s)\n"
+                "Version: %s\n"
+                "Cflags: -I${includedir}\n"
+                "Libs: %s\n" % (args.platform, args.version, PC_LIBS_DEBUG))
+
+    # ---- 两个动态库必须各自身份自洽（看产物，不看文件名） ----
+    if dll is not None and dll_dbg is not None:
+        pdb_name = os.path.basename(spec["pdb_debug"][0]) if spec["pdb_debug"] else ""
+        probs = check_debug_identity(dll, dll_dbg, pdb_dbg, pdb_name,
+                                     own_source_names(repo))
+        for p in probs:
+            print("  ! %s" % p)
+        # 通过时**也要说话**。这条判据拦的是"两档装反了"——只在发布之后才被发现
+        # 的那种错，而它平时一声不响：日志里没有 `!` 既可能是"跑了且过了"，也可能
+        # 是"根本没跑到这一段"。绿字挂在 `probs` 为空上（不是"没记过 fail"那种
+        # 会跟着别处读数跑的写法），所以它只会在这两条判据真的比过之后才出现。
+        if not probs:
+            print("  身份判据：%s（发布档）与 %s（调试档）各自自洽，凭 %s"
+                  % (os.path.basename(dll), os.path.basename(dll_dbg),
+                     "调试节里的本库源文件名" if debug_section_bytes(dll_dbg) is not None
+                     else "导入表 + RSDS"))
+        missing += probs
+
+    # ---- 不可再分发的调试版 CRT 一个都不许进包 ----
+    # 上面那条自动补依赖已经不收它们了，这里再按**成品**扫一遍：防的是"哪次改动
+    # 又从别的路径把它们拷了进来"，以及"哪台机器的 runtime_roots 恰好捞得到"。
+    # 扫整棵 stage 而不是只看 bin/：ELF 平台根本没有 bin/（动态库在 lib/），
+    # 而且这样顺带把"有人手工往里塞"也盖住了。
+    leaked = []
+    for root, _dirs, files in os.walk(stage):
+        for f in files:
+            if f.lower() in DEBUG_CRT_NAMES:
+                leaked.append(os.path.relpath(os.path.join(root, f), stage))
+    if leaked:
+        missing.append("包里出现了不可再分发的调试版 CRT：%s"
+                       % ", ".join(sorted(leaked)))
 
     # ---- 文档 ----
     for f in ("README.md", "RELEASE.md", "LICENSE"):
