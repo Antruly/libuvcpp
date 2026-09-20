@@ -136,7 +136,10 @@ MinGW 版 `libuvcpp.dll` 的依赖只有 Windows 自带系统库（`KERNEL32` / 
 MSVC 版 `uvcpp.dll` 用 `/MD` 构建，因此 `bin/` 里一并带了
 `msvcp140.dll` / `vcruntime140.dll` / `vcruntime140_1.dll`，
 **不需要预装 VC++ 可再发行组件**。若构建机上只有动态版 OpenSSL，`bin/` 里还会多出
-`libssl-3-x64.dll` / `libcrypto-3-x64.dll`（本机构建用的是静态版，因此本地这份包没有）。
+`libcrypto-<主版本>-<架构>.dll` 与 `libssl-<主版本>-<架构>.dll` —— **两个占位都随构建机上
+那份 OpenSSL 变**，所以不同平台包里的名字不同：已发布的包里 x64 是 `libcrypto-4-x64.dll` /
+`libssl-4-x64.dll`，arm64 是 `libcrypto-3-arm64.dll` / `libssl-3-arm64.dll`。
+（本机构建用的是静态版，因此本地这份包没有这两份。）
 
 打包脚本不靠手写的依赖清单，而是**读产物自己的导入表**：凡是不是 Windows 自带的
 模块，包里必须有，找不到就拒绝出包（`tests/tools/package_release.py`）。早先那张手写
