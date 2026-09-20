@@ -59,7 +59,9 @@ public:
             uvcpp_stream* send_handle,
             ::std::function<void(uvcpp_write*, int)> write_cb);
 
-  /** @brief Try to write immediately without queuing. */
+  /**@brief Try to write immediately without queuing.
+   * @note `bufs` is borrowed for the duration of this call only — it is passed
+   *       straight to `uv_try_write(2)`, never copied and never retained. */
   int try_write(const uv_buf_t bufs[], unsigned int nbufs);
   int try_write(const uv_buf_t bufs[], unsigned int nbufs,
                uvcpp_stream *send_handle);
