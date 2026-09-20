@@ -204,6 +204,9 @@ void uvcpp_buf::materialize() const {
   if (this->shared_ == nullptr) {
     return;
   }
+  // 走到这里 = 一次"先共享又丢"。静默（不断言、不抛，理由见头文件），但要能
+  // 看见 —— 这是本类里**唯一**动这个计数的地方。
+  share_discard_count_.fetch_add(1, ::std::memory_order_relaxed);
   const size_t n = this->buf.len;
   char *p = nullptr;
   if (n > 0) {
@@ -239,6 +242,16 @@ bool uvcpp_buf::is_shared() const { return this->shared_ != nullptr; }
 
 ::std::shared_ptr<const ::std::string> uvcpp_buf::shared_ref() const {
   return this->shared_;
+}
+
+::std::atomic<uint64_t> uvcpp_buf::share_discard_count_{0};
+
+uint64_t uvcpp_buf::share_discard_count() {
+  return share_discard_count_.load(::std::memory_order_relaxed);
+}
+
+void uvcpp_buf::reset_share_discard_count() {
+  share_discard_count_.store(0, ::std::memory_order_relaxed);
 }
 
 void uvcpp_buf::resize(size_t sz) {

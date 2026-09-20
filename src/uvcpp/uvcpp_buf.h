@@ -10,6 +10,8 @@
 #define SRC_UVCPP_UVCPP_BUF_H
 
 #include <uvcpp/uvcpp_define.h>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -113,6 +115,26 @@ public:
    */
   ::std::shared_ptr<const ::std::string> shared_ref() const;
 
+  /**
+   * @brief "先共享又丢"的累计次数（进程内，跨对象）。
+   *
+   * 计数的是这一个事件：本对象是共享视图，而调用方**要写**，于是共享让位 ——
+   * 物化成一份自有的块（见 `materialize()`）。它**不是错误**，是一次白拷贝：
+   * 共享出去的那份内容没能被用上，还是拷了一遍。
+   *
+   * 为什么不在这里断言 / 抛：`clear()` 紧接 `clone()` 是**响应对象复用的正常
+   * 序列**（keep-alive 上同一个响应对象被反复填），硬断言会把一段合法用法变成
+   * 崩溃；而"写坏别人的缓冲"这件事已经被 `shared_ptr<const std::string>` 自己
+   * 挡住了 —— **那个 `const` 就是防线**，不需要第二道。
+   *
+   * 所以要能**看见**而不是要拦住：这个读数在整条热路径上应当是 0（共享之后
+   * 只读地发出去，一次都不物化）；非零就说明某处"先共享又丢"，值得逐处解释。
+   */
+  static uint64_t share_discard_count();
+
+  /** @brief 把上面那个计数清零（给测试用，好让一句判据只覆盖它自己那一段）。 */
+  static void reset_share_discard_count();
+
   ::std::string to_string() const;
 
   uv_buf_t *out_uv_buf();
@@ -151,6 +173,10 @@ private:
   //
   // 为什么是 mutable：见上面 buf 那一段（本类的 const 不保护字节）。
   mutable ::std::shared_ptr<const ::std::string> shared_;
+
+  // 见 share_discard_count()。**只**在"共享又丢"那一支里动它，所以非共享的
+  // 路上（绝大多数）一个原子操作都不付。
+  static ::std::atomic<uint64_t> share_discard_count_;
 };
 } // namespace uvcpp
 

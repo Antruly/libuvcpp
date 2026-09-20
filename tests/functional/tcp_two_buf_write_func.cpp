@@ -29,6 +29,7 @@
  */
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <future>
 #include <iostream>
@@ -409,10 +410,16 @@ void case_buf_move() {
         std::make_shared<const std::string>("original");
     uvcpp_buf a;
     a.share(sp);
+    // 这一次改写就是所谓的"先共享又丢"：共享让位、拷一份自有的块。库**静默**
+    // 处理（不断言、不抛 —— `clear()` 紧接 `clone()` 是响应对象复用的正常
+    // 序列），但把它计进 `share_discard_count()`，所以我们这里能钉住"恰好一次"。
+    const uint64_t before = uvcpp_buf::share_discard_count();
     a.clone_data("replaced!", 9);
     check(*sp == "original", "E5: 共享视图被改写不会动到那份串");
     check(a.to_string() == "replaced!", "E5: 改写之后是自有块");
     check(!a.is_shared(), "E5: 改写之后不再是共享视图");
+    check(uvcpp_buf::share_discard_count() == before + 1,
+          "E5: 这次改写被记成一次「共享又丢」（多一次少一次都是计数器自己错了）");
   }
 }
 
@@ -437,10 +444,16 @@ int main() {
 
   std::cout << "[tcp_two_buf_write] server port=" << port << std::endl;
 
+  // "先共享又丢"的计数器：**热路径上必须是 0**。这四条都是"共享出去、只读地
+  // 发走"，一次都不该物化 —— 物化意味着那块字节又被拷了一遍，共享白做了。
+  uvcpp_buf::reset_share_discard_count();
   case_shared_view(port, &sk);
   case_owned_block(port, &sk);
   case_empty_body(port, &sk);
   case_sync_fallback(port, &sk);
+  check(uvcpp_buf::share_discard_count() == 0,
+        "写路径（含共享视图那两条）一次都没「共享又丢」");
+
   case_buf_move();
 
   stop_server.store(true);
