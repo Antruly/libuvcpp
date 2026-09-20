@@ -426,6 +426,7 @@ libuvcpp/
 ├── doc/           # Documentation
 │   ├── benchmark.md       # Measured per-connection memory, throughput, stability
 │   ├── ci-guide.md        # CI maintenance guidelines
+│   ├── http2-status.md    # HTTP/2 support status
 │   └── webapp-guide.md    # Web app framework guide
 ├── cmake/         # CMake config templates
 ├── .github/workflows/  # CI pipeline
@@ -509,7 +510,7 @@ contributor, [@sercebr](https://github.com/sercebr).
   blocks (`nbufs = 2`) (`1.1.28`); the variant table stores and returns handles instead of
   whole bodies (`1.1.31`)
 
-**Measured, not estimated** — see [doc/benchmark.md](doc/benchmark.md): **4.62 KB per idle
+**Measured, not estimated** — see [doc/benchmark.md](doc/benchmark.md): **4.62 KiB per idle
 connection** (least squares over eight tiers, R² = 0.999987 → 1 M connections ≈ 4.42 GiB),
 75 k RPS on a single event loop, and a 10-minute soak at 38 M requests / 0 errors. That page
 also compares the per-connection figure against [Hical](https://github.com/Hical61/Hical)'s
