@@ -1025,7 +1025,16 @@ void test_compress_variant() {
   check_eq_i(static_cast<long long>(s.stored), 3, "应当三次存入");
   check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
   check_eq_i(static_cast<long long>(s.entries), 3, "表里应当三条");
-  check(s.bytes > 0, "表内字节数应当 > 0");
+  // 表内字节账：变体表按**句柄**存之后（#17 第 ④ 步），账必须跟着换成 `bytes()`
+  // —— 忘了换的话 `compress_variants_bytes_` 恒为 0，字节那条淘汰腿就**静默**
+  // 瘸了（条数那条还在，所以"能淘汰"这件事不会立刻露馅，只在大文件上悄悄失效）。
+  // 所以这里把账**算死**：三条 entry 的大小之和必须正好等于那三次响应的
+  // Content-Length 之和（a1 / m1 / m2 各存了一条）。
+  const long long sum_cl = std::stoll(raw_header(a1, "content-length")) +
+                           std::stoll(raw_header(m1, "content-length")) +
+                           std::stoll(raw_header(m2, "content-length"));
+  check_eq_i(static_cast<long long>(s.bytes), sum_cl,
+             "表内字节数 == 三条变体的压缩长度之和（换句柄之后账还得对）");
 
   // ---- 零拷贝的账单：这条路上**一次物化都不该发生** ----
   //
@@ -1062,6 +1071,17 @@ void test_compress_variant() {
   }
   check_eq_i(static_cast<long long>(discarded), 0,
              "共享进来的文件体在整条响应链上被物化了若干次（见上面那段说明）");
+=======
+  // 表内字节账：变体表按**句柄**存之后（#17 第 ④ 步），账必须跟着换成 `bytes()`
+  // —— 忘了换的话 `compress_variants_bytes_` 恒为 0，字节那条淘汰腿就**静默**
+  // 瘸了（条数那条还在，所以"能淘汰"这件事不会立刻露馅，只在大文件上悄悄失效）。
+  // 所以这里把账**算死**：三条 entry 的大小之和必须正好等于那三次响应的
+  // Content-Length 之和（a1 / m1 / m2 各存了一条）。
+  const long long sum_cl = std::stoll(raw_header(a1, "content-length")) +
+                           std::stoll(raw_header(m1, "content-length")) +
+                           std::stoll(raw_header(m2, "content-length"));
+  check_eq_i(static_cast<long long>(s.bytes), sum_cl,
+             "表内字节数 == 三条变体的压缩长度之和（换句柄之后账还得对）");
 }
 
 // ---- 7. 尺寸闸门 ----
