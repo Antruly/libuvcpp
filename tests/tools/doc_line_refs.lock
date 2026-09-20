@@ -204,7 +204,9 @@ src/net/uvcpp_tcp_server.h:449-449 cdbc26b28b6467b5
 src/net/uvcpp_tcp_server.h:46-49 7f04a8b3fb14a766
 src/net/uvcpp_tcp_server.h:50-56 6c4934b261a9cc89
 src/net/uvcpp_tcp_server.h:83-88 451a810cbb9be70b
+src/net/uvcpp_udp_client.cpp:828-828 a0f156405122d91e
 src/net/uvcpp_udp_client.h:72-72 25bf4d22cd8306d1
+src/net/uvcpp_udp_server.cpp:165-165 f756f35ae790d904
 src/net/uvcpp_udp_server.cpp:177-201 b7593379f0bb1cb9
 src/net/uvcpp_udp_server.h:51-51 e1e48a6f8b9b57b8
 src/req/uvcpp_req.h:127-127 07d18821893c9abc
@@ -252,8 +254,11 @@ src/uvcpp/uvcpp_alloc.h:102-105 ac850380e57d7d89
 src/uvcpp/uvcpp_alloc.h:121-126 61e6a7862b14f585
 src/uvcpp/uvcpp_alloc.h:19-21 ad3a027337602da7
 src/uvcpp/uvcpp_alloc.h:25-87 1b8d37d010627b0a
+src/uvcpp/uvcpp_alloc.h:42-42 10af371c354613b3
 src/uvcpp/uvcpp_alloc.h:56-59 e4808e3605faf02d
+src/uvcpp/uvcpp_alloc.h:68-68 3afa60e6cd9e00a4
 src/uvcpp/uvcpp_alloc.h:89-89 c4d2345910e45855
+src/uvcpp/uvcpp_buf.cpp:390-390 02130caa8255b0a2
 src/uvcpp/uvcpp_buf.h:20-20 207569d6c55f2b31
 src/web/uvcpp_http_client.cpp:1006-1010 8c5d2999a4425ab8
 src/web/uvcpp_http_client.cpp:1057-1061 17bfaecd38ef9b3e
