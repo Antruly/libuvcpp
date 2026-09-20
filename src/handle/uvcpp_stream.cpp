@@ -60,14 +60,11 @@ int uvcpp_stream::write(uvcpp_write *req, const uv_buf_t bufs[], unsigned int nb
 
 #if UV_VERSION_MAJOR >= 1
 int uvcpp_stream::try_write(const uv_buf_t bufs[], unsigned int nbufs) {
-  uv_buf_t *uvbufs = uvcpp::uvcpp_alloc_arry<uv_buf_t>(nbufs);
-  for (int i = 0; i < nbufs; i++){
-    uvbufs[i].base = bufs[i].base;
-    uvbufs[i].len = bufs[i].len;
-  }
-  int ret = uv_try_write(UVCPP_STREAM_HANDLE, uvbufs, nbufs);
-  UVCPP_VFREE(uvbufs);
-  return ret;
+  // `uv_try_write` 收的就是 `const uv_buf_t bufs[]`，直接透传即可：试发不持有
+  // 这些 buffer（要么当场写进内核、要么一个字节都不动），调用方的数组本来就得
+  // 活过这次调用，所以那份"拷一份自己的"既保不住什么，也白付一次
+  // malloc + memset + free（`uvcpp_alloc_arry` 失败还会抛 `std::bad_alloc`）。
+  return uv_try_write(UVCPP_STREAM_HANDLE, bufs, nbufs);
 }
 #else
 int uvcpp_stream::try_write(const uv_buf_t bufs[], unsigned int nbufs) {
@@ -79,15 +76,9 @@ int uvcpp_stream::try_write(const uv_buf_t bufs[], unsigned int nbufs) {
 #if UV_VERSION_MINOR >= 42
 int uvcpp_stream::try_write(const uv_buf_t bufs[], unsigned int nbufs,
                       uvcpp_stream *send_handle) {
-  uv_buf_t *uvbufs = uvcpp::uvcpp_alloc_arry<uv_buf_t>(nbufs);
-  for (int i = 0; i < nbufs; i++){
-    uvbufs[i].base = bufs[i].base;
-    uvbufs[i].len = bufs[i].len;
-  }
-  int ret = uv_try_write2(UVCPP_STREAM_HANDLE, uvbufs, nbufs,
+  // 同上：`uv_try_write2` 的 `bufs` 也是 `const uv_buf_t[]`。
+  return uv_try_write2(UVCPP_STREAM_HANDLE, bufs, nbufs,
                        OBJ_UVCPP_STREAM_HANDLE(*send_handle));
-  UVCPP_VFREE(uvbufs);
-  return ret;
 }
 #endif
 #endif
