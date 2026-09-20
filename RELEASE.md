@@ -95,8 +95,14 @@ g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvc
 g++ -std=c++11 -I include your_app.cpp -L lib -luvcpp -o your_app.exe
 ```
 
-（上面两条命令都在包的根目录下执行；`-L lib` 是导入库所在处。跑的时候
-`bin/libuvcpp.dll` 要在 `PATH` 上，或直接拷到 exe 旁边。）
+（上面两条命令都在包的根目录下执行；`-L lib` 是库所在处。跑的时候
+`bin/libuvcpp.dll` 要在 `PATH` 上，或直接拷到 exe 旁边；Linux 那份 `.so` 就在
+`lib/` 里，用 `LD_LIBRARY_PATH=$(pkg-config --variable=libdir uvcpp)` 或 rpath 指过去。）
+
+> Linux 包里的 `libuvcpp.so` **从 1.1.28 起放在 `lib/`**。在那之前它放在 `bin/`，
+> 而 `.pc` 里写的是 `-L${libdir} -luvcpp`、`lib/` 是空的 —— 也就是说照本文档在
+> Linux 上**根本链不上**（`ld: cannot find -luvcpp`）。Windows 两套不受影响，
+> 仍是 `bin/*.dll` 配 `lib/` 里的导入库。
 
 > MSVC 消费者**不需要额外传 `/utf-8`**。仓内头文件里含中文注释的那批本来靠
 > `add_compile_options(/utf-8)` 兜着，而那个开关是**目录作用域**的 —— 既不进导出集，

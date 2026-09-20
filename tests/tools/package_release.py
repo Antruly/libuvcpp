@@ -61,7 +61,9 @@ MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "h
 PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
-# `lib` 是导入库/静态库，`runtime` 是要跟着 dll 一起发的第三方运行时。
+# `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），
+# `import_lib` 是链接时用的导入库/静态库（进 `lib/`），
+# `runtime` 是要跟着 dll 一起发的第三方运行时。
 PLATFORMS = {
     "mingw-x64": {
         "lib_dll": ["libuvcpp.dll"],
@@ -95,14 +97,23 @@ PLATFORMS = {
     },
     # 无 SOVERSION/VERSION（根 CMakeLists 一处都没设），所以实体就叫 libuvcpp.so，
     # 没有 `.so.1` / `.so.1.1.0` 符号链接链。x64 与 arm64 同名，只有内容不同。
+    #
+    # **这个 .so 必须落 `lib/`，不能像 Windows 那样放 `bin/`。** ELF 没有"导入库"
+    # 这回事：同一个 libuvcpp.so 既是要链的、也是运行时要装的。放 `bin/` 的话，
+    # 包自己的 `uvcpp.pc`（`-L${libdir} -luvcpp`）与 RELEASE.md 那条
+    # `-L lib -luvcpp` 在 Linux 上**全都链不上**（`ld: cannot find -luvcpp`）。
+    # MinGW/MSVC 各有一份导入库落在 `lib/`，所以这个洞一直没露出来 ——
+    # config-contract 门禁的 ubuntu 那一档第一次撞到它。
     "linux-x64": {
         "lib_dll": ["libuvcpp.so", "libuvcpp.so.1.1.0"],
+        "lib_dest": "lib",
         "import_lib": [],
         "runtime": [],
         "pc_libs": "-L${libdir} -luvcpp",
     },
     "linux-arm64": {
         "lib_dll": ["libuvcpp.so", "libuvcpp.so.1.1.0"],
+        "lib_dest": "lib",
         "import_lib": [],
         "runtime": [],
         "pc_libs": "-L${libdir} -luvcpp",
@@ -387,8 +398,14 @@ def main():
 
     if os.path.isdir(stage):
         shutil.rmtree(stage)
-    os.makedirs(os.path.join(stage, "bin"))
+    # ELF 平台的动态库直接落 lib/（见 PLATFORMS 里 linux-* 那段），所以 bin/ 不再
+    # 无条件建：留一个空的 bin/ 会让人以为库放错了地方。只有真的要往里放运行库
+    # （MSVC 那三份）时才建。
+    dll_dest = spec.get("lib_dest", "bin")
+    os.makedirs(os.path.join(stage, dll_dest))
     os.makedirs(os.path.join(stage, "lib", "pkgconfig"))
+    if spec["runtime"]:
+        os.makedirs(os.path.join(stage, "bin"), exist_ok=True)
 
     missing = []
 
@@ -397,8 +414,8 @@ def main():
     if dll is None:
         missing.append("库 dll (%s)" % " / ".join(spec["lib_dll"]))
     else:
-        shutil.copy2(dll, os.path.join(stage, "bin"))
-        print("bin: %s" % os.path.basename(dll))
+        shutil.copy2(dll, os.path.join(stage, dll_dest))
+        print("%s: %s" % (dll_dest, os.path.basename(dll)))
 
     imp = find_first(tree, spec["import_lib"]) if spec["import_lib"] else None
     if spec["import_lib"] and imp is None:
