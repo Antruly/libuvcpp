@@ -61,9 +61,9 @@ environment variables, buffer management (`uvcpp_buf`), metrics, and allocator i
 TCMalloc-style memory pool: page heap, span allocator, thread cache, enterprise allocator.
 **Off by default** (`UVCPP_BUILD_EXPAND=OFF`) since v1.1.0 — pass
 `-DUVCPP_BUILD_EXPAND=ON` to enable it. The prebuilt binaries ship **with** the pool;
-the CMake default stays off so that a consumer who forgets to define
-`UVCPP_ENABLE_MEMORY_POOL` gets `malloc`/`free` on both sides rather than a silent
-allocator mismatch (see `RELEASE.md`).
+consumers define nothing — the package's `uvcpp/uvcpp_config.h` carries the value this
+build actually used, and defining a conflicting one yourself is a hard compile error
+instead of a silent allocator mismatch (see `RELEASE.md`).
 
 ### Net module (`src/net/`) — `UVCPP_BUILD_NET=ON` (default)
 

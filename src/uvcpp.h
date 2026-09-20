@@ -12,6 +12,8 @@
 #ifndef SRC_UVCPP_H
 #define SRC_UVCPP_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include "uvcpp/uvcpp_define.h"
 #include "uvcpp/uvcpp_version.h"
 #include "uvcpp/uvcpp_export.h"

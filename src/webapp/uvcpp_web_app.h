@@ -106,6 +106,8 @@
 #ifndef SRC_WEBAPP_UVCPP_WEB_APP_H
 #define SRC_WEBAPP_UVCPP_WEB_APP_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <atomic>
 #include <deque>
 #include <functional>

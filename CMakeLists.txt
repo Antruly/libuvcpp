@@ -8,8 +8,10 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 # 扩展模块选项（默认关闭）
 # 内存池在 MinGW-w64 下会让 test_web_app_* 崩溃（根因未定位，见 RELEASE.md 的
 # 「已知问题」），所以默认改成就地关闭、要用得显式 -DUVCPP_BUILD_EXPAND=ON。
-# 副作用的另一面：忘了定义 UVCPP_ENABLE_MEMORY_POOL 的使用者拿到的是 0，
-# 恰好与默认关闭的 dll 一致；反过来（默认开启）忘了定义就是两套分配器，静默损坏。
+#
+# "使用者忘了定义 UVCPP_ENABLE_MEMORY_POOL ⇒ 两套分配器静默损坏"那个隐患，
+# 现在由生成的 uvcpp_config.h 兜住（见下）：预编译包的使用者不传宏就拿包的值，
+# 传了冲突的值直接 #error。所以默认关这件事与那个隐患不再有关系了。
 option(UVCPP_BUILD_EXPAND "Build expand module (memory pool, page heap)" OFF)
 
 # =========================================================================
@@ -82,9 +84,14 @@ set(NGHTTP2_VERSION "v1.70.0"        CACHE STRING "nghttp2 git tag to fetch")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# MSVC：源码为 UTF-8 无 BOM，显式指定 /utf-8，避免按系统代码页(936/GBK)
-# 误读源码，导致中文注释末字节吞掉换行符、把下一行代码并进注释（表现为
-# “sock/all/hdrEnd 未声明”等诡异报错）。
+# MSVC：显式指定 /utf-8，避免按系统代码页(936/GBK)误读源码，导致中文注释末字节
+# 吞掉换行符、把下一行代码并进注释（表现为“sock/all/hdrEnd 未声明”等诡异报错）。
+#
+# 实测 src/ 下 99 个公开头里 75 个带 BOM、22 个不带（另有 2 个纯 ASCII）—— 不是
+# "全都无 BOM"。带 BOM 的那些本来就不靠这个开关。但这个开关是**目录作用域**的，
+# 既不进导出集，也到不了预编译包的消费者，所以 22 个无 BOM 的头对 MSVC 使用者
+# 依然是坏的：只能由打包脚本补 BOM 兜住（tests/tools/package_release.py 的
+# copy_header）。根因（源码树里那 22 个自己没 BOM）另记。
 if(MSVC)
   add_compile_options(/utf-8)
 endif()
@@ -687,28 +694,81 @@ endif()
 # directory; when installed consumers should use the installed "include".
 if (TARGET uvcpp)
   target_include_directories(uvcpp PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
   )
 endif()
 if (TARGET uvcpp_a)
   target_include_directories(uvcpp_a PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
   )
 endif()
 if (TARGET uvcpp_s)
   target_include_directories(uvcpp_s PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
   )
 endif()
 if (TARGET uvcpp_a_s)
   target_include_directories(uvcpp_a_s PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
   )
 endif()
+
+# ---------------------------------------------------------------------------
+# 生成 uvcpp_config.h —— 让「宏集与 DLL 不一致」从运行时垃圾值变成编译期硬失败
+# ---------------------------------------------------------------------------
+# 下面那批 PUBLIC 编译定义只覆盖 `find_package(uvcpp)` 这条路径。走**预编译包 +
+# pkg-config** 的消费者不经过 CMake，一个宏都拿不到：宏未定义 ⇒ 公开头里的
+# `#if UVCPP_XXX_ENABLE` 求值为 0 ⇒ 被它守卫的**成员布局**与 DLL 不一致，
+# 内联访问器按错误偏移读成员，**静默**返回垃圾值（无编译错误、无链接错误、
+# 无运行时告警）。所以把这份宏集再落成一个头，由每个公开头在**自己的模块守卫
+# 之前**包含：
+#     外部已定义且与本包不同 -> #error（硬失败）
+#     外部未定义             -> 取本包的构建值
+# 后一半才是让"一个宏都不写"的消费者**正确**的那一半。
+#
+# 位置必须在**所有静默降级之后**（UVCPP_ENABLE_OPENSSL/_NGHTTP2/_BUILD_WEBAPP
+# 在依赖缺失时会被改成 OFF，见上面）：放在选项区会生成一份说 1、而编译定义说 0
+# 的头，默认构建的第一个 TU 就 #error。
+#
+# 值先落成字面量，**同时**喂给 configure_file 与 target_compile_definitions：
+# 两处从结构上不可能漂移 —— 这份头存在的理由就是消掉"多份真相源"，它自己不能
+# 变成新的一份。
+function(_uvcpp_literal01 _out _var)
+  if(${_var})
+    set(${_out} 1 PARENT_SCOPE)
+  else()
+    set(${_out} 0 PARENT_SCOPE)
+  endif()
+endfunction()
+
+# 注意：宏叫 UVCPP_ENABLE_MEMORY_POOL，但开关选项是 UVCPP_BUILD_EXPAND。
+_uvcpp_literal01(UVCPP_ENABLE_MEMORY_POOL UVCPP_BUILD_EXPAND)
+_uvcpp_literal01(UVCPP_NET_ENABLE       UVCPP_BUILD_NET)
+_uvcpp_literal01(UVCPP_WEB_ENABLE       UVCPP_BUILD_WEB)
+_uvcpp_literal01(UVCPP_WEBAPP_ENABLE    UVCPP_BUILD_WEBAPP)
+_uvcpp_literal01(UVCPP_ZLIB_ENABLE      UVCPP_ENABLE_ZLIB)
+_uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
+_uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
+_uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
+
+# 值宏：空字面量会让 `#if X != ` 变成语法错误，宁可在 configure 期就停下。
+if("${UVCPP_TRY_WRITE_MIN_BYTES}" STREQUAL "")
+  message(FATAL_ERROR "UVCPP_TRY_WRITE_MIN_BYTES 为空，生成头会产出空字面量")
+endif()
+
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/include/uvcpp")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uvcpp_config.h.in"
+  "${CMAKE_BINARY_DIR}/include/uvcpp/uvcpp_config.h"
+  @ONLY)
 
 # nlohmann/json 必须 **PUBLIC** 链接：webapp 的公开头（uvcpp_web_json.h、
 # uvcpp_web_request.h、uvcpp_web_response.h）里出现了 uvcpp_json（即
@@ -746,17 +806,16 @@ endif()
 # 目录作用域下，宏永远是有定义的，所以怎么测都是绿的。
 foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
   if (TARGET ${_uvcpp_t})
+    # 值取自上面 `_uvcpp_literal01` 算出的那一份，与 uvcpp_config.h 同源。
     target_compile_definitions(${_uvcpp_t} PUBLIC
-      # 注意：宏叫 UVCPP_ENABLE_MEMORY_POOL，但开关选项是 UVCPP_BUILD_EXPAND
-      # （见上面 add_compile_definitions 那段的条件）。
-      UVCPP_ENABLE_MEMORY_POOL=$<BOOL:${UVCPP_BUILD_EXPAND}>
-      UVCPP_NET_ENABLE=$<BOOL:${UVCPP_BUILD_NET}>
-      UVCPP_WEB_ENABLE=$<BOOL:${UVCPP_BUILD_WEB}>
-      UVCPP_WEBAPP_ENABLE=$<BOOL:${UVCPP_BUILD_WEBAPP}>
-      UVCPP_ZLIB_ENABLE=$<BOOL:${UVCPP_ENABLE_ZLIB}>
-      UVCPP_OPENSSL_ENABLE=$<BOOL:${UVCPP_ENABLE_OPENSSL}>
-      UVCPP_NGHTTP2_ENABLE=$<BOOL:${UVCPP_ENABLE_NGHTTP2}>
-      UVCPP_TRY_WRITE_ENABLE=$<BOOL:${UVCPP_ENABLE_TRY_WRITE}>
+      UVCPP_ENABLE_MEMORY_POOL=${UVCPP_ENABLE_MEMORY_POOL}
+      UVCPP_NET_ENABLE=${UVCPP_NET_ENABLE}
+      UVCPP_WEB_ENABLE=${UVCPP_WEB_ENABLE}
+      UVCPP_WEBAPP_ENABLE=${UVCPP_WEBAPP_ENABLE}
+      UVCPP_ZLIB_ENABLE=${UVCPP_ZLIB_ENABLE}
+      UVCPP_OPENSSL_ENABLE=${UVCPP_OPENSSL_ENABLE}
+      UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
+      UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
     )
   endif()
@@ -923,6 +982,12 @@ file(GLOB UVCPP_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/uvcpp/*.h")
 if(UVCPP_HEADER_FILES)
   install(FILES ${UVCPP_HEADER_FILES} DESTINATION include/uvcpp)
 endif()
+
+# configure_file 生成的使能宏头（见上面那个 configure_file）。它**刻意**不落在
+# src/uvcpp/ 下 —— 落那儿就会被上面这个 glob 收进去，跟手写头混作一谈，而且哪天
+# 有人往源码树里放一份手写副本就会静默遮蔽生成的那份。
+install(FILES "${CMAKE_BINARY_DIR}/include/uvcpp/uvcpp_config.h"
+        DESTINATION include/uvcpp)
 
 file(GLOB HANDLE_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/handle/*.h")
 if(HANDLE_HEADER_FILES)

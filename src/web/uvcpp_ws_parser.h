@@ -17,6 +17,8 @@
 #ifndef SRC_WEB_UVCPP_WS_PARSER_H
 #define SRC_WEB_UVCPP_WS_PARSER_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_WEB_ENABLE
 
 #include <functional>

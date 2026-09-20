@@ -44,6 +44,8 @@
 #ifndef SRC_WEBAPP_UVCPP_WEB_WS_CLIENT_H
 #define SRC_WEBAPP_UVCPP_WEB_WS_CLIENT_H
 
+#include <uvcpp/uvcpp_config.h>
+
 // 这一层是 webapp 的零件，判据就用 webapp 那个宏。写成 UVCPP_WEB_ENABLE 是错的：
 // 两个宏在"web 开、webapp 关"的构建里取值不同，那样本头文件会在一个不编译
 // webapp 的配置里被放行，而它的实现（src/webapp/*.cpp）根本不在库里。

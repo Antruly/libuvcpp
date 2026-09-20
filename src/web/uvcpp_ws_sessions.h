@@ -36,6 +36,8 @@
 #ifndef SRC_WEB_UVCPP_WS_SESSIONS_H
 #define SRC_WEB_UVCPP_WS_SESSIONS_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_WEB_ENABLE
 
 #include <cstddef>

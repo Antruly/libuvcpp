@@ -16,6 +16,8 @@
 #ifndef SRC_HTTP2_UVCPP_H2_SESSION_H
 #define SRC_HTTP2_UVCPP_H2_SESSION_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <cstdint>
 #include <functional>
 #include <map>

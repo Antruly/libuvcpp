@@ -60,9 +60,9 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 
 TCMalloc 风格的内存池：页堆、span 分配器、线程缓存、enterprise 分配器。
 v1.1.0 起**默认关闭**（`UVCPP_BUILD_EXPAND=OFF`）—— 要启用需显式传
-`-DUVCPP_BUILD_EXPAND=ON`。预编译产物是**带池**发布的；CMake 默认仍关，是为了让
-忘了定义 `UVCPP_ENABLE_MEMORY_POOL` 的使用者两边都走 `malloc`/`free`，
-而不是静默的分配器错配（详见 `RELEASE.md`）。
+`-DUVCPP_BUILD_EXPAND=ON`。预编译产物是**带池**发布的；使用者**什么都不用传**
+—— 包里的 `uvcpp/uvcpp_config.h` 给出这个包实际用的值，自己再定义成别的值会直接
+`#error`，而不是静默的分配器错配（详见 `RELEASE.md`）。
 
 ### Net 模块（`src/net/`）— `UVCPP_BUILD_NET=ON`（默认）
 

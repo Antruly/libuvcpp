@@ -10,6 +10,8 @@
 #ifndef SRC_HTTP2_UVCPP_H2_COMMON_H
 #define SRC_HTTP2_UVCPP_H2_COMMON_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <uvcpp/uvcpp_define.h>

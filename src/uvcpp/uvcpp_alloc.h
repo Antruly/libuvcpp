@@ -9,6 +9,8 @@
 #ifndef SRC_UVCPP_UVCPP_ALLOC_H
 #define SRC_UVCPP_UVCPP_ALLOC_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <new>

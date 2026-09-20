@@ -14,6 +14,8 @@
 #ifndef SRC_NET_UVCPP_TCP_SERVER_H
 #define SRC_NET_UVCPP_TCP_SERVER_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <functional>
 #include <list>
 #include <uv.h>

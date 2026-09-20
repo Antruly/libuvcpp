@@ -9,6 +9,8 @@
 #ifndef SRC_SSL_UVCPP_SSL_COMMON_H
 #define SRC_SSL_UVCPP_SSL_COMMON_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_OPENSSL_ENABLE
 
 #include <cstdint>

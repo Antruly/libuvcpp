@@ -47,6 +47,8 @@
 #ifndef SRC_WEB_UVCPP_STATIC_SERVER_H
 #define SRC_WEB_UVCPP_STATIC_SERVER_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_WEB_ENABLE
 
 #include <cstdint>

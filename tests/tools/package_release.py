@@ -331,6 +331,34 @@ def copytree(src, dst):
     shutil.copytree(src, dst)
 
 
+def copy_header(src, dst):
+    """拷公开头；含非 ASCII 又没 BOM 的，补一个 UTF-8 BOM。
+
+    仓里的约定本来就是「UTF-8 带 BOM」（src/ 下 99 个头里 75 个有），另有 22 个
+    跑偏成了无 BOM。仓内编译看不出来：`add_compile_options(/utf-8)`
+    （CMakeLists.txt:95-97）替它们兜着。但那个开关是**目录作用域**的 —— 它既不进
+    导出集，更到不了预编译包的消费者。于是 MSVC 使用者按系统代码页 936 读这些头，
+    中文注释的末字节吞掉换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>`
+    里。实测：`cl /nologo /std:c++14 /EHsc /I<包>/include /c consumer.cpp` 编不过；
+    给这 22 个补上 BOM 之后同一条命令 rc=0（g++ 也照过 —— 前导 BOM 它接受并忽略，
+    所以这里不按平台分叉，各平台的包保持同一份字节）。
+
+    这是**下限**不是根因：根因在 src/ 那 22 个头自己没 BOM，走 `find_package`
+    的消费者一样中招（那条路不经过本脚本）。这里兜住的是"新加的头忘了 BOM 也不会
+    再把发出去的包弄坏"。纯 ASCII 的头不加 BOM。
+    """
+    with open(src, "rb") as f:
+        data = f.read()
+    if not data.startswith(b"\xef\xbb\xbf"):
+        try:
+            data.decode("ascii")
+        except UnicodeDecodeError:
+            data = b"\xef\xbb\xbf" + data
+    with open(dst, "wb") as f:
+        f.write(data)
+    shutil.copystat(src, dst)
+
+
 def main():
     # Windows 的 stdout 默认走 ANSI 代码页（CI runner 是 cp1252），下面那些中文
     # 诊断一旦执行到就 UnicodeEncodeError 崩掉。它只在**产物依赖了第三方 dll**
@@ -438,17 +466,39 @@ def main():
                     missing.append("dll 的依赖 %s（导入表里有，包里没有）" % n)
 
     # ---- 公开头 ----
+    # 每个模块目录**至少**要发出一个头。模块名写错（或目录空了）时，包会"成功"
+    # 产出，而使用者一 include 就是找不到文件 —— 让它在这里失败，别在消费方炸。
     for m in MODULES:
         d = os.path.join(repo, "src", m)
-        if os.path.isdir(d):
-            dst = os.path.join(stage, "include", m)
-            os.makedirs(dst, exist_ok=True)
-            for f in os.listdir(d):
-                if f.endswith(".h") and f not in PRIVATE_HEADERS:
-                    shutil.copy2(os.path.join(d, f), dst)
-    shutil.copy2(os.path.join(repo, "src", "uvcpp.h"), os.path.join(stage, "include"))
+        if not os.path.isdir(d):
+            missing.append("模块目录 src/%s 不存在（MODULES 写错了？）" % m)
+            continue
+        dst = os.path.join(stage, "include", m)
+        os.makedirs(dst, exist_ok=True)
+        n = 0
+        for f in os.listdir(d):
+            if f.endswith(".h") and f not in PRIVATE_HEADERS:
+                copy_header(os.path.join(d, f), os.path.join(dst, f))
+                n += 1
+        if n == 0:
+            missing.append("模块 %s 一个头都没发出" % m)
+    # 注意给的是**完整目标文件名**：`copy_header` 收文件路径，不是 `copy2` 那种
+    # "dst 是目录就放进去"的语义。
+    copy_header(os.path.join(repo, "src", "uvcpp.h"),
+                os.path.join(stage, "include", "uvcpp.h"))
     print("include: %d 个模块" % len([m for m in MODULES
                                       if os.path.isdir(os.path.join(repo, "src", m))]))
+
+    # ---- 生成的使能宏头 ----
+    # CMakeLists.txt 的 configure_file 把它产出在**构建树**里（刻意不落 src/，
+    # 否则会被 src/uvcpp/*.h 的 glob 当手写头收走）。每个公开头都包含它，缺了它
+    # 整包编不过 —— 所以它进 missing[]，不是"拷不到就算了"。
+    gen = os.path.join(tree, "include", "uvcpp", "uvcpp_config.h")
+    if os.path.exists(gen):
+        shutil.copy2(gen, os.path.join(stage, "include", "uvcpp"))
+        print("include/uvcpp: uvcpp_config.h（生成）")
+    else:
+        missing.append("生成的宏头 %s —— 先在 %s 上跑一次 cmake" % (gen, tree))
 
     # ---- 第三方头 ----
     # 差异 1：libuv 的头放 include/ **顶层**。本库的公开头写的是 `#include <uv.h>`，
@@ -488,13 +538,14 @@ def main():
             shutil.copy2(p, os.path.join(stage, "include"))
 
     # ---- pkg-config ----
-    # 宏必须以编译定义的形式传给使用者：公开头里的 #if UVCPP_*_ENABLE 在宏未定义
-    # 时求值为 0，会把 web/webapp/ssl 的类整段编译掉；而 UVCPP_ENABLE_MEMORY_POOL
-    # 选错分支会让使用者 TU 的分配器与已编译的 dll 不是同一套（静默堆损坏）。
+    # **不在这里传使能宏**：它们由包里的 <uvcpp/uvcpp_config.h> 给出，公开头自己
+    # 包含它（见 RELEASE.md）。这里以前写死一整套 `-DUVCPP_*_ENABLE=1`，与包实际
+    # 怎么编毫无关系 —— 一个 OPENSSL 关着编出来的包也会被喂
+    # `-DUVCPP_OPENSSL_ENABLE=1`，正好把生成头要根治的那个病（宏集与 dll 不一致
+    # ⇒ 成员布局错位 ⇒ 内联访问器静默读错偏移）从另一头放回来。
     pc = os.path.join(stage, "lib", "pkgconfig", "uvcpp.pc")
     with open(pc, "w", encoding="utf-8", newline="\n") as f:
         f.write(
-            "# uvcpp 的模块使能宏必须显式传给编译器（见 RELEASE.md）。\n"
             "prefix=${pcfiledir}/../..\n"
             "exec_prefix=${prefix}\n"
             "libdir=${prefix}/lib\n"
@@ -503,10 +554,7 @@ def main():
             "Name: uvcpp\n"
             "Description: Modern C++ wrapper for libuv (prebuilt, %s)\n"
             "Version: %s\n"
-            "Cflags: -I${includedir} -DUVCPP_NET_ENABLE=1 -DUVCPP_WEB_ENABLE=1"
-            " -DUVCPP_WEBAPP_ENABLE=1 -DUVCPP_OPENSSL_ENABLE=1"
-            " -DUVCPP_ZLIB_ENABLE=1 -DUVCPP_ENABLE_MEMORY_POOL=1"
-            " -DUVCPP_NGHTTP2_ENABLE=1\n"
+            "Cflags: -I${includedir}\n"
             "Libs: %s\n" % (args.platform, args.version, spec["pc_libs"]))
 
     # ---- 文档 ----

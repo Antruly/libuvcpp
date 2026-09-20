@@ -1,0 +1,92 @@
+/**
+ * @file uvcpp_config.h
+ * @brief Module enable macros of THIS build. Generated at configure time.
+ *
+ * DO NOT EDIT, and DO NOT define these macros yourself. Rebuild uvcpp instead.
+ *
+ * Several public headers guard *member layout* with these macros -- e.g.
+ * `uvcpp_web_app` declares `ssl_ctx_` under `#if UVCPP_OPENSSL_ENABLE`, and that
+ * member sits BEFORE `http_` / `registry_`. An undefined macro makes `#if`
+ * evaluate to 0, so a consumer TU lays the class out differently than the DLL
+ * did; an inline accessor then reads at the wrong offset and returns garbage
+ * with no compile error, no link error and no runtime warning.
+ *
+ * Rule enforced below:
+ *   externally defined AND different  ->  #error (hard compile failure)
+ *   not defined                       ->  take this build's value
+ *
+ * The second half is what makes a consumer that defines nothing correct. The
+ * first half is what turns a silent bad value into a build break.
+ *
+ * This file is deliberately ASCII-only: it is compiled by consumers whose
+ * toolchain and locale we do not control.
+ */
+
+#ifndef UVCPP_GENERATED_CONFIG_H
+#define UVCPP_GENERATED_CONFIG_H
+
+#if defined(UVCPP_NET_ENABLE) && (UVCPP_NET_ENABLE != @UVCPP_NET_ENABLE@)
+#  error "UVCPP_NET_ENABLE=@UVCPP_NET_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_NET_ENABLE
+#  define UVCPP_NET_ENABLE @UVCPP_NET_ENABLE@
+#endif
+
+#if defined(UVCPP_WEB_ENABLE) && (UVCPP_WEB_ENABLE != @UVCPP_WEB_ENABLE@)
+#  error "UVCPP_WEB_ENABLE=@UVCPP_WEB_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WEB_ENABLE
+#  define UVCPP_WEB_ENABLE @UVCPP_WEB_ENABLE@
+#endif
+
+#if defined(UVCPP_WEBAPP_ENABLE) && (UVCPP_WEBAPP_ENABLE != @UVCPP_WEBAPP_ENABLE@)
+#  error "UVCPP_WEBAPP_ENABLE=@UVCPP_WEBAPP_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WEBAPP_ENABLE
+#  define UVCPP_WEBAPP_ENABLE @UVCPP_WEBAPP_ENABLE@
+#endif
+
+#if defined(UVCPP_ZLIB_ENABLE) && (UVCPP_ZLIB_ENABLE != @UVCPP_ZLIB_ENABLE@)
+#  error "UVCPP_ZLIB_ENABLE=@UVCPP_ZLIB_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_ZLIB_ENABLE
+#  define UVCPP_ZLIB_ENABLE @UVCPP_ZLIB_ENABLE@
+#endif
+
+#if defined(UVCPP_OPENSSL_ENABLE) && (UVCPP_OPENSSL_ENABLE != @UVCPP_OPENSSL_ENABLE@)
+#  error "UVCPP_OPENSSL_ENABLE=@UVCPP_OPENSSL_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_OPENSSL_ENABLE
+#  define UVCPP_OPENSSL_ENABLE @UVCPP_OPENSSL_ENABLE@
+#endif
+
+#if defined(UVCPP_NGHTTP2_ENABLE) && (UVCPP_NGHTTP2_ENABLE != @UVCPP_NGHTTP2_ENABLE@)
+#  error "UVCPP_NGHTTP2_ENABLE=@UVCPP_NGHTTP2_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_NGHTTP2_ENABLE
+#  define UVCPP_NGHTTP2_ENABLE @UVCPP_NGHTTP2_ENABLE@
+#endif
+
+#if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
+#  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_ENABLE_MEMORY_POOL
+#  define UVCPP_ENABLE_MEMORY_POOL @UVCPP_ENABLE_MEMORY_POOL@
+#endif
+
+#if defined(UVCPP_TRY_WRITE_ENABLE) && (UVCPP_TRY_WRITE_ENABLE != @UVCPP_TRY_WRITE_ENABLE@)
+#  error "UVCPP_TRY_WRITE_ENABLE=@UVCPP_TRY_WRITE_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_TRY_WRITE_ENABLE
+#  define UVCPP_TRY_WRITE_ENABLE @UVCPP_TRY_WRITE_ENABLE@
+#endif
+
+/* A value macro, not a 0/1 switch -- compared against its own literal. */
+#if defined(UVCPP_TRY_WRITE_MIN_BYTES) && (UVCPP_TRY_WRITE_MIN_BYTES != @UVCPP_TRY_WRITE_MIN_BYTES@)
+#  error "UVCPP_TRY_WRITE_MIN_BYTES=@UVCPP_TRY_WRITE_MIN_BYTES@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_TRY_WRITE_MIN_BYTES
+#  define UVCPP_TRY_WRITE_MIN_BYTES @UVCPP_TRY_WRITE_MIN_BYTES@
+#endif
+
+#endif /* UVCPP_GENERATED_CONFIG_H */

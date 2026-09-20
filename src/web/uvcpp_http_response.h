@@ -14,6 +14,8 @@
 #ifndef SRC_WEB_UVCPP_HTTP_RESPONSE_H
 #define SRC_WEB_UVCPP_HTTP_RESPONSE_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_WEB_ENABLE
 
 #include <string>

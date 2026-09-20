@@ -52,6 +52,7 @@ nlohmann/json、zlib 的头）、`lib/pkgconfig/uvcpp.pc` 与文档。
 | `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL 以及 MinGW 运行时均已静态链接进去** |
 | `lib/libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
 | `include/` | 公开头文件，含 `expand/`（内存池） |
+| `include/uvcpp/uvcpp_config.h` | **生成的**模块使能宏。每个公开头自己包含它，使用者**不必再传任何 `-D`**（见下） |
 
 > 命名遵循各工具链的惯例：**MinGW/GCC 产出 `libuvcpp.dll`**，MSVC 产出 `uvcpp.dll`。
 
@@ -74,11 +75,9 @@ MSVC 版 `uvcpp.dll` 用 `/MD` 构建，因此 `bin/` 里一并带了
 
 ### 使用方式
 
-公开头里的 `UVCPP_*_ENABLE` 宏**必须显式传给编译器**。它们不是可选的开关：
-宏未定义时 `#if` 求值为 0，`web` / `webapp` / `ssl` 的类会被整段编译掉，
-使用者看到的是「类不存在」的级联语法错误；`UVCPP_ENABLE_MEMORY_POOL`
-选错分支还会让使用者 TU 里的分配器与已编译的 dll 不是同一套（**静默**堆损坏）。
-包内附了 `lib/pkgconfig/uvcpp.pc`，用 pkg-config 就不必记这些：
+**使用者不需要传任何 `-D`。** 模块使能宏由包里的
+`include/uvcpp/uvcpp_config.h` 给出，每个公开头都会在自己第一个模块守卫**之前**
+包含它，所以只要 `-I` 指对，宏就自动与这个 dll 一致：
 
 ```bash
 export PKG_CONFIG_PATH=/path/to/libuvcpp-1.1.0-mingw-x64/lib/pkgconfig
@@ -93,14 +92,31 @@ g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvc
 不用 pkg-config 时，等价的命令行是：
 
 ```bash
-g++ -std=c++11 -I include \
-    -DUVCPP_NET_ENABLE=1 -DUVCPP_WEB_ENABLE=1 -DUVCPP_WEBAPP_ENABLE=1 \
-    -DUVCPP_OPENSSL_ENABLE=1 -DUVCPP_ZLIB_ENABLE=1 -DUVCPP_ENABLE_MEMORY_POOL=1 \
-    your_app.cpp -L lib -luvcpp -o your_app.exe
+g++ -std=c++11 -I include your_app.cpp -L lib -luvcpp -o your_app.exe
 ```
 
 （上面两条命令都在包的根目录下执行；`-L lib` 是导入库所在处。跑的时候
 `bin/libuvcpp.dll` 要在 `PATH` 上，或直接拷到 exe 旁边。）
+
+> MSVC 消费者**不需要额外传 `/utf-8`**。仓内头文件里含中文注释的那批本来靠
+> `add_compile_options(/utf-8)` 兜着，而那个开关是**目录作用域**的 —— 既不进导出集，
+> 也到不了预编译包的消费者。按系统代码页（936）读这些头时，中文注释的末字节会吞掉
+> 换行、把 `*/` 吃掉，注释不闭合，报错却落在 `<algorithm>` 里（`C4819` 是唯一的线索）。
+> 因此 1.1.27 起，**打包脚本给所有含非 ASCII 的头补了 UTF-8 BOM**，MSVC 会据此自动
+> 按 UTF-8 读，什么开关都不用加。包里的头因此与源码树里的**不逐字节相同**（多一个 BOM），
+> gcc/clang 前导 BOM 一样接受，各平台包保持同一份字节。
+
+> ⚠️ **不要自己定义这些宏。** 如果你显式传了一个与包**不一致**的值
+> （`-DUVCPP_OPENSSL_ENABLE=0` 拿到一个开着 OpenSSL 编的包），
+> `uvcpp_config.h` 会**直接 `#error` 停编译**，并指出包里那个值。
+> 这是刻意的：宏不一致时公开头里的**成员布局**会与 dll 不同，
+> 内联访问器按错误偏移读成员，拿到的是一个天文数字，
+> **没有编译错误、没有链接错误、没有运行时告警** —— 比编不过危险得多。
+> 需要别的宏集就重新构建 uvcpp，不要从这一侧改。
+>
+> 1.1.26 及更早的包需要你手工传一串 `-D`，且那份清单是**写死**的
+> （与包实际怎么编无关）。升级到本版时把那些 `-D` **删掉**即可；
+> 留着它们只有在与包冲突时才会报错，值相同时无害。
 
 头文件的入口是包根 `include/uvcpp.h`（聚合头，含 loop / handle / req）。
 `net` / `web` / `webapp` / `ssl` 的类**不在聚合头里**，按模块显式 include，例如
@@ -248,14 +264,14 @@ int main() {
 "读一个已经被释放的 TLS 槽"这回事。
 
 因此**本版发布的两个 Windows 动态库都带内存池**（`UVCPP_BUILD_EXPAND=ON`，
-`uvcpp.pc` 里钉的是 `-DUVCPP_ENABLE_MEMORY_POOL=1`）。
+产物里 `UVCPP_ENABLE_MEMORY_POOL=1`，由 `include/uvcpp/uvcpp_config.h` 带出来）。
 
 但 **CMake 的默认值仍然是 OFF**，这是刻意的：默认开的话，使用者的 TU 忘了定义
 `UVCPP_ENABLE_MEMORY_POOL`，宏求值为 0 ⇒ 使用者侧走 `std::malloc`，而 dll 侧走池,
 库会拿池去 free 一个 `malloc` 的指针，**静默**堆损坏。默认关时"忘了定义"拿到的是
 0，两边一致；反方向（dll 关、使用者开）则是响亮的链接错误，不会静默。
-从源码构建要用池，显式传 `-DUVCPP_BUILD_EXPAND=ON`；用预编译包则照上面的
-命令行/`pkg-config` 带上 `-DUVCPP_ENABLE_MEMORY_POOL=1`。
+从源码构建要用池，显式传 `-DUVCPP_BUILD_EXPAND=ON`；用预编译包则**什么都不用传**
+—— 包里的生成头会给出这个包实际用的值，不一致时直接 `#error`。
 
 ### 其他
 

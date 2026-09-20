@@ -269,8 +269,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # 不靠镜像里"碰巧装了 OpenSSL"：没找到时 `find_package(OpenSSL QUIET)` 会把
-      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:193-203），那样发出去的包
-      # 一句 SSL 都没有，而 uvcpp.pc 照样写着 -DUVCPP_OPENSSL_ENABLE=1。
+      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:223），那样发出去的包
+      # 一句 SSL 都没有 —— 而它的生成头会**如实**说 0，使用者照配也拿不到 SSL。
       - name: Install OpenSSL
         shell: bash
         run: choco install openssl --no-progress

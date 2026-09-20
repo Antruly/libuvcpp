@@ -26,6 +26,8 @@
 #ifndef SRC_WEB_UVCPP_WS_CONNECTION_H
 #define SRC_WEB_UVCPP_WS_CONNECTION_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_WEB_ENABLE
 
 #include <cstddef>

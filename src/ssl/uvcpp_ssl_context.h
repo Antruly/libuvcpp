@@ -13,6 +13,8 @@
 #ifndef SRC_SSL_UVCPP_SSL_CONTEXT_H
 #define SRC_SSL_UVCPP_SSL_CONTEXT_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_OPENSSL_ENABLE
 
 #include <functional>

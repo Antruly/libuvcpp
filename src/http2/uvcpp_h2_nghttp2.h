@@ -22,6 +22,8 @@
 #ifndef SRC_HTTP2_UVCPP_H2_NGHTTP2_H
 #define SRC_HTTP2_UVCPP_H2_NGHTTP2_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #if UVCPP_NGHTTP2_ENABLE
 
 // nghttp2 是拿 `int` 编的（它自己的 `check_type_size("ssize_t")` 在 MSVC 上失败，

@@ -12,6 +12,8 @@
 #ifndef SRC_NET_UVCPP_TCP_CLIENT_H
 #define SRC_NET_UVCPP_TCP_CLIENT_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -25,16 +27,17 @@
 #include <uvcpp/uvcpp_buf.h>
 
 /**
- * @brief 试发快速路径的**最小长度**（字节，默认 32 KiB；可由构建系统覆盖）。
+ * @brief 试发快速路径的**最小长度**（字节，构建值，默认 32 KiB）。
  *
  * 低于它的写不试发、直接走原来的路径。为什么是 32 KiB 见
  * `src/net/uvcpp_tcp_client.cpp` 里那段账 —— 一句话：快路径每笔写固定多一次
  * 系统调用（整条吃下时那次 `uv_write` 走 0 长度，libuv 两个平台上都不对它
  * 短路），换来的是省掉一份 `len` 字节的拷贝，小报文上这笔是亏的。
+ *
+ * 值**不能**在这里由使用者覆盖：它决定的是客户端对象的大小/行为，而这个类会
+ * 被链接进 uvcpp.dll，两边不一致就是 ABI 不一致。要改就重编库。
+ * 这个宏由 <uvcpp/uvcpp_config.h> 给出，本文件开头已包含它。
  */
-#ifndef UVCPP_TRY_WRITE_MIN_BYTES
-#define UVCPP_TRY_WRITE_MIN_BYTES 32768
-#endif
 
 namespace uvcpp {
 

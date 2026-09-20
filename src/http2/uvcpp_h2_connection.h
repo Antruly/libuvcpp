@@ -11,6 +11,8 @@
 #ifndef SRC_HTTP2_UVCPP_H2_CONNECTION_H
 #define SRC_HTTP2_UVCPP_H2_CONNECTION_H
 
+#include <uvcpp/uvcpp_config.h>
+
 #include <cstddef>
 #include <functional>
 #include <memory>
