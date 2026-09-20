@@ -106,14 +106,14 @@ PLATFORMS = {
     # MinGW/MSVC 各有一份导入库落在 `lib/`，所以这个洞一直没露出来 ——
     # config-contract 门禁的 ubuntu 那一档第一次撞到它。
     "linux-x64": {
-        "lib_dll": ["libuvcpp.so", "libuvcpp.so.1.1.0"],
+        "lib_dll": ["libuvcpp.so"],
         "lib_dest": "lib",
         "import_lib": [],
         "runtime": [],
         "pc_libs": "-L${libdir} -luvcpp",
     },
     "linux-arm64": {
-        "lib_dll": ["libuvcpp.so", "libuvcpp.so.1.1.0"],
+        "lib_dll": ["libuvcpp.so"],
         "lib_dest": "lib",
         "import_lib": [],
         "runtime": [],
