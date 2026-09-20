@@ -12,15 +12,21 @@ uvcpp_write::~uvcpp_write() {
     uvcpp::uvcpp_free(uv_buf);
     uv_buf = nullptr;
   }
+  release_second();
+  if (src_buf_owner && src_buf != nullptr) {
+    UVCPP_VFREE(src_buf);
+  }
+}
+
+void uvcpp_write::release_second() {
+  // 第 2 块只有一个槽位，两种形状共用它 —— 换占用者必须先放掉旧的，
+  // 否则 owned 那块的头被覆盖掉就再也没人释放（析构只看 second_owner）。
   if (second_owner != nullptr) {
     uvcpp_buf::free_buf(second_owner);
     uvcpp::uvcpp_free(second_owner);
     second_owner = nullptr;
   }
-  // hold_ 自己会放（第 2 块靠它活着）。
-  if (src_buf_owner && src_buf != nullptr) {
-    UVCPP_VFREE(src_buf);
-  }
+  hold_.reset();
 }
  
 int uvcpp_write::init() {
@@ -45,6 +51,7 @@ uv_buf_t *uvcpp_write::get_uv_buf() { return uv_buf; }
 
 void uvcpp_write::append_uv_buf_view(
     uv_buf_t bf, const ::std::shared_ptr<const ::std::string> &hold) {
+  release_second();
   pair_[0] = (uv_buf != nullptr) ? *uv_buf : uv_buf_init(nullptr, 0);
   pair_[1] = bf;
   hold_    = hold;
@@ -52,10 +59,15 @@ void uvcpp_write::append_uv_buf_view(
 }
 
 void uvcpp_write::append_uv_buf_owned(uv_buf_t *bf) {
+  // 同一个头交接两次是调用方的错（所有权只能交一次），但**别把它变成
+  // double free** —— 那比泄漏严重得多。先比一下指针再决定放不放。
+  if (bf != second_owner) {
+    release_second();
+    second_owner = bf;
+  }
   pair_[0] = (uv_buf != nullptr) ? *uv_buf : uv_buf_init(nullptr, 0);
   pair_[1] = (bf != nullptr) ? *bf : uv_buf_init(nullptr, 0);
-  second_owner = bf;
-  nbufs_       = 2;
+  nbufs_   = 2;
 }
 
 uv_buf_t *uvcpp_write::get_uv_bufs() { return (nbufs_ < 2) ? uv_buf : pair_; }

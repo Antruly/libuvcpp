@@ -54,6 +54,9 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
    *             （等价于本请求不负责第二块的存活，调用方自己保证）。
    *
    * 必须在 `set_uv_buf` **之后**调用（第 1 块是在这一刻被快照进数组的）。
+   *
+   * 第 2 块**只有一个**：再调一次（两种入口混着调也算）会把上一个占用者换掉，
+   * 旧的按它自己的所有权放掉（owned 的释放、view 的放引用）。
    */
   void append_uv_buf_view(uv_buf_t bf,
                           const ::std::shared_ptr<const ::std::string> &hold);
@@ -65,6 +68,9 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
    *           本请求析构时按 `uvcpp_buf::free_buf` + `uvcpp_free` 放掉。
    *           注意释放用的是**这个原指针**，所以调用方不要先给 `bf->base`
    *           加偏移再传进来（`free_buf` 释放的正是 `bf->base`）。
+   *
+   * 第 2 块**只有一个**：再调一次会把上一个占用者换掉（见 `append_uv_buf_view`）。
+   * 同一个 `bf` 交两次不会双释放，但那是调用方的错 —— 所有权只能交一次。
    */
   void append_uv_buf_owned(uv_buf_t *bf);
 
@@ -100,6 +106,10 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
   // 返回（libuv 会把 uv_buf_t 数组拷进请求里），但**数据**要活到完成回调。
   size_t nbufs_ = 1;
   uv_buf_t pair_[2];
+  // 第 2 块只有一个槽位，两种占用形状共用它；换占用者（含析构）一律走这里，
+  // 否则被覆盖掉的那个再也没人放。
+  void release_second();
+
   // 第 2 块若是自有块，这里记着它的**原始**头：释放必须用原指针（free_buf 释放
   // 的是 base），所以接收方不许先把 base 加偏移再传进来。
   uv_buf_t *second_owner = nullptr;

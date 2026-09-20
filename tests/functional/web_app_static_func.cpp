@@ -935,6 +935,10 @@ void test_compress_variant() {
     return rr.ok ? rr.raw : std::string();
   };
 
+  // 从这一刻起记"共享视图被物化过几次"（见下面那段判据）。放在请求序列**之前**，
+  // 因为要量的正是这条路上有没有为了写而把共享内容白拷一遍。
+  uvcpp_buf::reset_share_discard_count();
+
   // 这个次序（Range 先、全量夹中间、Range 再来一次）是为了让"区间"与"全量"
   // 在同一条路上相遇两次，两边的体都不许串到对面去。
   const std::string q1 = gz("/vcv/vcv_range.txt", "Range: bytes=0-4095\r\n");
@@ -1022,6 +1026,42 @@ void test_compress_variant() {
   check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
   check_eq_i(static_cast<long long>(s.entries), 3, "表里应当三条");
   check(s.bytes > 0, "表内字节数应当 > 0");
+
+  // ---- 零拷贝的账单：这条路上**一次物化都不该发生** ----
+  //
+  // `web_static` 把整份文件 `body_share` 进响应（一字节不拷），理由是**那份拷贝
+  // 没人读过** —— 命中变体缓存时 `apply_compression` 下一句就是 `clear()` 再换成
+  // 压缩产物。但"共享视图"只是记账方式的改变，一旦有人**写**它，`materialize()`
+  // 就会先按旧长度分配 + 整份 memcpy —— 于是同一份拷贝会换个地方重新出现
+  // （从 `body()` 那一刻挪到 `clone()` 那一刻），净收益为零。
+  //
+  // 上面四个全量请求（`a1/a2/m1/m2`）走的正是"共享 + 变体缓存"这条路，
+  // `q1/q2` 走的是拷贝那条（206 不编码），两种形状都过了一遍。
+  //
+  // `share_discard_count()` 是这件事唯一的读数：它**只**在 `materialize()` 里加一，
+  // 而 `clear()`（`resize(0)`）走的是 `free_own()`，放引用不加计数 —— 所以"0"
+  // 的准确含义是"那份共享内容从头到尾没被为写而拷过"，不是"计数器没接上"。
+  // 后半句由下面那条对照证明。
+  const unsigned long long discarded = uvcpp_buf::share_discard_count();
+  {
+    // 对照：先在**同一个进程、同一个计数器**上制造一次真的物化。少了这一条，
+    // 上面那个 0 在"计数器根本没接上/被别处重置了"时也照样绿。
+    //
+    // 量的是**增量**不是绝对值：计数器是进程级的，被测那段（不管测出几）已经
+    // 累加在上面了，拿绝对值比会在"被测那段本来就非 0"（也就是判据红的那个
+    // 版本）时把对照一起带红 —— 对照就跟着被测走了，不再是独立的。
+    const unsigned long long probe_before = uvcpp_buf::share_discard_count();
+    std::shared_ptr<const std::string> sp =
+        std::make_shared<const std::string>(std::string(4096, 'c'));
+    uvcpp_buf probe;
+    probe.share(sp);
+    probe.append_data("x", 1);
+    check_eq_i(static_cast<long long>(uvcpp_buf::share_discard_count() -
+                                      probe_before),
+               1, "对照：共享视图上写一笔之后计数应当涨 1");
+  }
+  check_eq_i(static_cast<long long>(discarded), 0,
+             "共享进来的文件体在整条响应链上被物化了若干次（见上面那段说明）");
 }
 
 // ---- 7. 尺寸闸门 ----
