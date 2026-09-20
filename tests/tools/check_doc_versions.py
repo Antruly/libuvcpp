@@ -25,9 +25,17 @@ README 的版本号语义是「**最新发布**」，不是「源码树的开发
   2. **命中总数必须恰好 4**。防的是判据 1 空转：只留判据 1 的话，把 README 的版本行
      **删掉**、或者把写法改掉，它一声不响地全绿。一个恒绿的判据比没有判据更坏 ——
      它会训练人忽略它。
-  3. **（只在 `--expect-header` 时）** 所有命中必须等于 `src/uvcpp/uvcpp_version.h`
-     里的版本。这是"**发布前**校验"：出包脚本在拷 README **之前**调它，不相等就
-     停下来。读不到头文件也停 —— 一个名字说谎的包比不出包更坏。
+  3. **（只在 `--expect` / `--expect-header` 时，且只在真发布时）** 所有命中必须等于
+     `src/uvcpp/uvcpp_version.h`（或 `--expect` 给的那个）版本。这是"**发布前**校验"：
+     出包脚本在拷 README **之前**调它，不相等就停下来。读不到头文件也停 ——
+     一个名字说谎的包比不出包更坏。
+
+     **这条默认只在发布版上真判**：头文件说 `UVCPP_VERSION_IS_RELEASE = 0`（开发版）时
+     它标 `[跳过]`，因为**开发版包与 README 本来就不该一致** —— README 跟的是「最新
+     发布」，而每次 push 出的都是 1.1.34 这种开发版包。第一版判据没这条区分，于是在
+     CI 的 `config-contract` 档上（每次 push 都出开发版包）直接红 —— 判据本身写错了
+     前提，不是树错了。要在这个前提下强制判它（自家对照、或从一棵没翻
+     `IS_RELEASE` 的树上裁发布），传 `--this-is-a-release`。
 
 扫两种写法：shields 徽章的 `badge/release-<X.Y.Z>`，以及加粗的 Version / 版本 行
 （值在反引号里）。两种写法、两个 README 各两处，一共 4 处。
@@ -37,7 +45,7 @@ README 的版本号语义是「**最新发布**」，不是「源码树的开发
 
 用法：
     python tests/tools/check_doc_versions.py                  # push 上跑（判据 1+2）
-    python tests/tools/check_doc_versions.py --expect-header  # 出包前跑（+判据 3）
+    python tests/tools/check_doc_versions.py --expect-header  # 出包前跑（发布版上 +判据 3）
 
 退出码 0 全过；1 有判据红了；3 前提不满足（git 列不出文件 / 读不到版本头）。
 """
@@ -101,6 +109,24 @@ def header_version(root):
     return ".".join(nums), None
 
 
+def header_is_release(root):
+    """头文件说这是不是发布版（`UVCPP_VERSION_IS_RELEASE`）。
+
+    读不到就返回 `None` —— 调用方当"不是发布版"处理（判据 3 跳过），**不当红**：
+    这个宏在 1.1.26 之前不存在，且它是判断据 3 要不要跑的依据，不是判据本身；
+    把头文件整个读不到的情况另论（`header_version()` 会以 rc=3 停）。
+    """
+    p = os.path.join(root, VERSION_HEADER)
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        s = f.read()
+    m = re.search(r"^#define\s+UVCPP_VERSION_IS_RELEASE\s+(\d+)\s*$", s, re.M)
+    if not m:
+        return None
+    return int(m.group(1)) == 1
+
+
 def tracked_markdown(root):
     """只扫**被 git 跟踪**的 md。
 
@@ -127,6 +153,10 @@ def main():
     g.add_argument("--expect", default=None, metavar="X.Y.Z",
                    help="额外要求版本串等于这个版本（出包脚本传它 —— 它才是"
                         "「正在出的那一版」，`--version` 时可以覆盖头文件）")
+    ap.add_argument("--this-is-a-release", action="store_true",
+                    help="即使版本头说这是开发版，也真判判据 3。给两处用："
+                         "① 从一棵忘了翻 IS_RELEASE 的树上裁发布；"
+                         "② 判据 3 自己的对照（换一个版本必须红）。")
     args = ap.parse_args()
     want = args.expect
 
@@ -192,7 +222,18 @@ def main():
             print("前提不满足，退出 3")
             return 3
 
-    if want is not None:
+    # 判据 3 只在发布版上真判：开发版包与 README 本该不一致（README 跟「最新发布」）。
+    # `--this-is-a-release` 兜两种"头文件没翻但确实在出正式版"的情况。
+    want_checked = want is not None and (args.this_is_a_release
+                                         or header_is_release(root) is True)
+
+    if want is not None and not want_checked:
+        print("\n---- 判据 3：版本串必须等于正在出的那一版 ----")
+        print("  [跳过] 版本头里 UVCPP_VERSION_IS_RELEASE = 0（开发版）：README 跟的是"
+              "「最新发布」，本次要出的 %s 是开发版，两者**本该不一致**。" % want)
+        print("         要真判（自家对照 / 裁发布），加 --this-is-a-release。")
+
+    if want_checked:
         print("\n---- 判据 3：版本串必须等于正在出的那一版（%s）----" % want)
         bad = 0
         for rel, lineno, label, v in hits:
@@ -211,8 +252,13 @@ def main():
         for f in failures:
             print("  - %s" % f)
         return 1
-    if want is not None:
-        print("全过（出包口径：版本 %s）" % want)
+    if want_checked:
+        print("全过（发布口径：版本串 == %s）" % want)
+    elif want is not None:
+        # 「跳过」不能只靠上面那一行 —— 汇总里必须能看出**这条判据没跑**，
+        # 否则"绿"和"没判"在报告末尾长得一样。
+        print("全过（master 口径：只要求两份 README 一致；判据 3 **已跳过**，"
+              "本次没判版本串）")
     else:
         print("全过（master 口径：只要求两份 README 一致）")
     return 0

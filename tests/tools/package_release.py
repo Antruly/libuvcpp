@@ -409,6 +409,11 @@ def main():
     # 里装着一份自称 1.1.0 的 README。与 `_header_version()` 同一个道理：
     # 一个名字说谎的包比不出包更坏，所以这里也是**停**，不是警告。
     #
+    # 这一条**只在 `UVCPP_VERSION_IS_RELEASE = 1`（真发布）时真判**，开发版上
+    # 被校验脚本自己标 `[跳过]`：本脚本也是 CI 的 `config-contract` 档每次 push
+    # 出开发版包用的，而开发版的包与 README **本该不一致** —— README 跟的是
+    # 「最新发布」（今天 1.1.0），包是 1.1.34。第一版没这条区分，那一档直接红。
+    #
     # 比的是 `args.version` 而不是头文件版本：`--version` 能覆盖头文件，那时
     # "正在出的那一版"就是命令行给的那个。
     rc = subprocess.call([sys.executable,
