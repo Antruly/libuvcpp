@@ -266,6 +266,82 @@ static void test_pool_max_total_memory_enforced()
     TEST_PASS();
 }
 
+// SUPER 档（>256 KiB）的块释放后必须**真的还回去**。
+//
+// 缺陷形状（实测出来的，不是推的）：`thread_local_cache::push()` 对 `idx >= 7`
+// 直接 `return true`，而它唯一的调用方 `deallocate()` 见 `true` 就**不**去放全局池
+// ⇒ `push_to_global_pool()` 里那两条明确写着「SUPER 类型直接释放」的
+// `uvcpp_free_bytes()` 分支**一条都走不到**。结果是分配一个 512 KiB 的块再释放，
+// 内存不还、`held_bytes_` 额度也不还。
+//
+// 判据拿**额度**量：它是这条路径唯一的公开可观察后果 —— `held_bytes_` 是私有的，
+// 而 `allocated_bytes` 只在 carve 新块时累加、释放时不减，量不出"还回去"。
+// 做法是上限刚好够一个 SUPER 块，然后分配 → 释放 → 再分配：缺陷在时第二次必然被
+// 拒（额度没还），修好之后必然成功。
+//
+// 前置要断言：第一次分配得成功、且没被拒。否则"第二次被拒"可能只是上限压根不够，
+// 什么也说明不了（本仓"前置要断言"那条）。
+static void test_pool_super_block_quota_returned()
+{
+    const size_t kSize  = 1024 * 1024;                         // > 256 KiB ⇒ SUPER
+    const size_t kTotal = uvcpp::BLOCK_HEADER_SIZE + kSize;    // 实占 = 头部 + 请求
+
+    uvcpp::memory_pool_config cfg;
+    // 上限取「两个 SUPER 块」。**这里必须给 `warmup()` 留出空间**：`init()` 会预分配
+    // 七档共约 512 KiB 到全局池并**占用额度**（实测 524256 字节），所以按「正好一个块」
+    // 设上限时第一个 SUPER 分配就会被拒 —— 那不是缺陷，是预热先花掉了额度。
+    // 把 kSize 取到 1 MiB（大于预热总量）之后，「两倍 kTotal」就自动落在需要的夹缝里：
+    // 放得下「预热 + 一个 SUPER 块」，放不下第二个。
+    cfg.max_total_memory = kTotal * 2;
+
+    uvcpp::uvcpp_memory_pool pool;
+    TEST_ASSERT(pool.init(cfg), "init(config) should succeed");
+    pool.init_thread_cache();
+
+    void* p1 = pool.allocate(kSize);
+    TEST_ASSERT(p1 != nullptr, "前置：第一个 SUPER 块必须分配成功");
+    TEST_ASSERT(pool.get_stats().failed_allocations == 0,
+                "前置：第一次分配不该被拒（否则上限本身就设小了）");
+    std::memset(p1, 0x5A, kSize);
+
+    pool.deallocate(p1);
+
+    void* p2 = pool.allocate(kSize);
+    TEST_ASSERT(p2 != nullptr,
+                "SUPER 块释放后额度必须还回来 —— 第二次分配被拒说明块被丢弃了");
+    std::memset(p2, 0x5A, kSize);
+
+    pool.deallocate(p2);
+    pool.release_thread_cache();
+    pool.shutdown();
+    TEST_PASS();
+}
+
+// `shutdown()` 之后线程缓存析构时释放块的那条路（`static_release_callback` →
+// `push_to_global_pool()` 的 `shutdown_` 分支）能不能真的释放。
+//
+// 这条路的释放器**必须与非 SUPER 块配对**（`detail::aligned_free_wrapper`）。历史上
+// 这里曾按「池正在销毁」走一个自己的分支、用 `::operator delete` 还 —— 那不是这些块的
+// 来源分配器，实测 `0xC0000374`（STATUS_HEAP_CORRUPTION）。
+static void test_pool_release_cache_after_shutdown()
+{
+    uvcpp::uvcpp_memory_pool pool;
+    pool.init();
+    pool.init_thread_cache();
+
+    std::vector<void*> held;
+    for (int i = 0; i < 200; ++i) {
+        void* p = pool.allocate(64);            // TINY
+        TEST_ASSERT(p != nullptr, "前置：200 个 TINY 块都得分配成功");
+        held.push_back(p);
+    }
+    for (size_t i = 0; i < held.size(); ++i) pool.deallocate(held[i]);  // 回线程缓存
+
+    pool.shutdown();                            // shutdown_ = true，缓存里还挂着 200 块
+    pool.release_thread_cache();                // 走 shutdown_ 分支逐个释放
+    TEST_PASS();
+}
+
 static void test_pool_thread_cache()
 {
     uvcpp::uvcpp_memory_pool pool;
@@ -646,6 +722,8 @@ int main()
     test_pool_nullptr_free();
     test_pool_reuse();
     test_pool_max_total_memory_enforced();
+    test_pool_super_block_quota_returned();
+    test_pool_release_cache_after_shutdown();
     test_pool_thread_cache();
     test_pool_multithread();
     test_pool_make_shared_from_pool();

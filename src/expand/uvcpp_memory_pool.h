@@ -192,11 +192,11 @@ struct memory_pool_config {
     /// 触顶时 `allocate()` 返回 `nullptr` 并计一次 `failed_allocations` —— 与
     /// `malloc` 失败同一个表现，调用方本来就要判空。
     ///
-    /// 两处不在这个上限的口径里：
-    ///   - `MEMORY_TYPE_SUPER`（>256 KiB）释放时走 `thread_local_cache::push()` 的
-    ///     `idx >= 7` 分支，块被**丢弃**而不归还（见那里的 @warning），所以它的额度
-    ///     只增不减；
-    ///   - `shutdown()` 与本池重新 `init()` 都会把额度清零。
+    /// `MEMORY_TYPE_SUPER`（>256 KiB）也在口径内：它不进任何缓存，释放时由
+    /// `push_to_global_pool()` 直接释放并把额度还回来，所以并发持有一个大块同样受
+    /// 这个上限约束（只是它不占缓存的驻留内存，因为压根不缓存）。
+    ///
+    /// 一处不在这个口径里：`shutdown()` 与本池重新 `init()` 都会把额度清零。
     size_t max_total_memory = 0;
 
     /// @brief 获取指定类型对应的块大小
@@ -690,12 +690,16 @@ private:
     }
 
     /// @brief 将块归还到缓存
-    /// @return true=已接手（放进本地缓存，或类型不归缓存管），false=缓存满了，请调用方放全局池
-    /// @warning **`true` 有两种含义，第二种是「丢掉了」**：类型索引 `>= 7`（`SUPER`，
-    ///          >256 KiB）时本函数先把 `next` 置空、再直接 `return true`，块**不挂到任何
-    ///          链上**；而唯一调用方 `deallocate()` 见 `true` 就不去放全局池 ⇒ 这块内存
-    ///          **再也找不回来**。它同时照常记一次「已释放」，所以 `stats()` 与
-    ///          `detect_leaks()` 都显示正常。调用方不能把 `true` 当「已安全接管」。
+    /// @return true=本缓存已接手（放进了本地缓存）；false=本缓存不管，请调用方放全局池
+    /// @note `SUPER`（>256 KiB）**不归本地缓存管**，这里返回 `false` —— 唯一调用方
+    ///       `deallocate()` 随即走 `push_to_global_pool()`，那条路的 `default:` 分支
+    ///       把它 `uvcpp_free_bytes()` 掉、并经 `release_bytes()` 把额度还回去。
+    /// @warning 这个分支**必须**返回 `false`。返回 `true`（历史实现如此）时调用方见
+    ///          `true` 就不去放全局池，`push_to_global_pool()` 里那两条写着「SUPER
+    ///          直接释放」的分支**一条都走不到**：每块 >256 KiB 的内存在释放时既不
+    ///          还给系统、额度也不退，而 `update_dealloc_stats()` 照常记一次「已释放」，
+    ///          `stats()` 与 `detect_leaks()` 都看不出来。回归用例：
+    ///          `tests/expand/memory_pool_test.cpp` 的 `test_pool_super_block_quota_returned`。
     inline bool push(pool_block_header* block) {
         if (!block) return true;
 
@@ -704,7 +708,7 @@ private:
         block->next = nullptr;
 
         size_t idx = static_cast<size_t>(type);
-        if (idx >= 7) return true;
+        if (idx >= 7) return false;   // SUPER：交给 push_to_global_pool() 真正释放
 
         size_t* count_ptr = nullptr;
         size_t capacity;
@@ -913,20 +917,18 @@ public:
     }
 
     /// @brief 静态释放回调函数（供 thread_local_cache 析构时调用）
+    /// @note **一律转交 `push_to_global_pool()`，不要在这里自己判状态再释放。**
+    ///       那个函数第一件事就是查 `shutdown_`：池已关闭时按类型用**各自的分配器**
+    ///       释放（`SUPER` → `uvcpp_free_bytes()`，其余 → `aligned_free_wrapper()`），
+    ///       未关闭时正常入队。所以这里既不需要额外的状态分支，也不能自己动手。
+    /// @warning 自己写 `::operator delete(block)` 是**堆损坏**：块来自
+    ///          `aligned_alloc_wrapper()`（Windows 上是 `_aligned_malloc`）或
+    ///          `uvcpp_alloc_bytes()`，**都不是 `operator new` 分配的**。实测在
+    ///          「`shutdown()` 之后线程缓存里还挂着块」时直接
+    ///          `0xC0000374 STATUS_HEAP_CORRUPTION`。
     static void static_release_callback(void* pool, pool_block_header* block) {
         if (!pool || !block) return;
         auto* self = static_cast<uvcpp_memory_pool*>(pool);
-        // 如果 pool 已进入销毁流程，直接释放内存块到系统，避免访问已销毁的队列
-        if (self->destroying_.load(std::memory_order_acquire)) {
-            // SUPER 类型和普通类型的释放方式不同
-            if (block->get_type() == memory_block_type::MEMORY_TYPE_SUPER) {
-                ::operator delete(block);
-            } else {
-                // 直接释放到系统（绕过已销毁的 MPSC 队列）
-                ::operator delete(block);
-            }
-            return;
-        }
         self->push_to_cache(block);
     }
 
@@ -1032,7 +1034,6 @@ private:
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> shutdown_{false};
-    std::atomic<bool> destroying_{false};  // 防止 thread_local 缓存析构时访问已销毁的 pool
 
     // 池**当前持有**的实占字节，`max_total_memory` 就是拿它比的。
     // 只在 `allocate_block()` 增长、只在真正把块还给系统时缩减（见 `release_bytes`）。

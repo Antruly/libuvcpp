@@ -204,8 +204,8 @@ void uvcpp_memory_pool::shutdown() {
         return;
     }
 
-    // 先标记为销毁中，防止 thread_local 缓存析构时访问已销毁的队列
-    destroying_.store(true, std::memory_order_release);
+    // 先置 `shutdown_`：线程缓存析构时仍可能把块交回来，`push_to_global_pool()`
+    // 靠这一位判断该直接释放而不是去碰已经销毁的队列。
     shutdown_.store(true, std::memory_order_release);
 
     // 清理全局队列（手动管理）
@@ -463,13 +463,17 @@ void uvcpp_memory_pool::push_to_global_pool(memory_block_type type, pool_block_h
     if (shutdown_.load(std::memory_order_acquire)) {
       // 池已关闭，直接释放
       if (type == memory_block_type::MEMORY_TYPE_SUPER) {
+        const size_t block_size = block->size;
         uvcpp_free_bytes(block);
-        release_bytes(block->size);
+        release_bytes(block_size);
         return;
       }
 
+      // 同样是「先取 size 再 free」：`release_bytes(block->size)` 写在 free 之后
+      // 就是一次 use-after-free，池关闭后再 `deallocate()` 就会走到这里。
+      const size_t block_size = block->size;
       detail::aligned_free_wrapper(block);
-      release_bytes(block->size);
+      release_bytes(block_size);
       return;
     }
 
@@ -506,11 +510,15 @@ void uvcpp_memory_pool::push_to_global_pool(memory_block_type type, pool_block_h
             queue = global_extra_large_pool_;
             count = &global_extra_large_count_;
             break;
-        default:
-            // SUPER 类型直接释放
+        default: {
+            // SUPER 类型直接释放。**先把 size 取出来再 free**：free 之后
+            // `block->size` 就是一次 use-after-free —— 这条分支以前走不到，
+            // 一接通就必崩（1 MiB 的块 free 之后读头部直接吃访问违例）。
+            const size_t block_size = block->size;
             uvcpp::uvcpp_free_bytes(block);
-            release_bytes(block->size);
+            release_bytes(block_size);
             return;
+        }
     }
 
     if (queue) {

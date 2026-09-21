@@ -5,7 +5,7 @@
 | 类型 | 头 | 定位 |
 |---|---|---|
 | `uvcpp_memory_pool_enterprise` | `src/expand/uvcpp_page_heap.h:162` | **主分配器**（TCMalloc 风格，线程缓存 → 中央 span → 页） |
-| `uvcpp_memory_pool` | `src/expand/uvcpp_memory_pool.h:809` | 另一套独立的内存池（7 档块 + MPSC 全局队列 + 线程缓存） |
+| `uvcpp_memory_pool` | `src/expand/uvcpp_memory_pool.h:813` | 另一套独立的内存池（7 档块 + MPSC 全局队列 + 线程缓存） |
 | `uvcpp_memory_pool_span` | `src/expand/uvcpp_memory_pool_span.h:59` | 实验性 span 分配器，头注释自标 WIP |
 | `uvcpp_page_allocator` | `src/expand/uvcpp_page_allocator.h:27` | 裸页分配（`mmap` / `VirtualAlloc`），上面几个的地基 |
 
@@ -209,7 +209,7 @@ void doc_pool_object(uvcpp::uvcpp_memory_pool& pool) {
 }
 ```
 
-三个工厂函数（`src/expand/uvcpp_memory_pool.h:1104-1142`）：
+三个工厂函数（`src/expand/uvcpp_memory_pool.h:1105-1143`）：
 
 | 函数 | 返回 | 说明 |
 |---|---|---|
@@ -267,13 +267,12 @@ size_t doc_capacity_of(uvcpp::memory_block_type t) {
 把 `size` 取整后转调 `allocate()`。上限为 `0` 时分配路径**不碰这个计数器**，
 只多一次分支判断。
 
-两处不在这条口径里：
+`MEMORY_TYPE_SUPER`（> 256 KB）也在这条口径里：它不进任何缓存，释放时由
+`push_to_global_pool()` 直接还给系统、并经 `release_bytes()` 把额度还回来，所以
+并发持有一个大块同样受这个上限约束。
 
-- **`MEMORY_TYPE_SUPER` 的额度只增不减。** 它释放时走 `thread_local_cache::push()`
-  的 `idx >= 7` 分支 —— 那里 `return true` 却**不把块挂到任何链上**（见 §10），
-  块被丢弃，归还点根本到不了。
-- **`shutdown()` 与重新 `init()` 会把额度清零**，同一个对象重新开局不会带着
-  上一次的额度。
+只有一处不在口径里：**`shutdown()` 与重新 `init()` 会把额度清零**，同一个对象重新
+开局不会带着上一次的额度。
 
 用例：`tests/expand/memory_pool_test.cpp` 的 `test_pool_max_total_memory_enforced()`。
 
@@ -306,7 +305,7 @@ void doc_pool_stats(uvcpp::uvcpp_memory_pool& pool) {
 `memory_pool_stats` 一共 11 个字段（`src/expand/uvcpp_memory_pool.h:290-317`），其中
 `active_allocations`、`total_allocations`、`freed_bytes` 这些是**进程级累计**，
 判增量要自己前后相减。`detect_leaks()` 不是扫描器，就是
-`active_allocations() > 0`（`:883-885`）—— 拿它当泄漏判据的前提是你先知道自己本次
+`active_allocations() > 0`（`:887-889`）—— 拿它当泄漏判据的前提是你先知道自己本次
 分配了几次。
 
 `uvcpp_memory_pool_enterprise` 那边是另一套出参：
@@ -331,8 +330,8 @@ void doc_enterprise_stats() {
 ## 7. 线程本地缓存
 
 两级缓存：**线程缓存**（无锁，7 条链，容量见 `src/expand/uvcpp_memory_pool.h:490-496`）→
-**全局池**（每个档位一个 MPSC 队列，`:997-1003`）→ **新建块**。`allocate()` 三条路径
-依次是缓存命中、全局池、新建（`:1047-1068`）。
+**全局池**（每个档位一个 MPSC 队列，`:999-1005`）→ **新建块**。`allocate()` 三条路径
+依次是缓存命中、全局池、新建（`:1048-1069`）。
 
 ```cpp
 #include <expand/uvcpp_memory_pool.h>
@@ -347,14 +346,14 @@ void doc_pool_thread_cache(uvcpp::uvcpp_memory_pool& pool) {
 }
 ```
 
-三个公开方法都在 `src/expand/uvcpp_memory_pool.h:900-913`：`init_thread_cache()`、
+三个公开方法都在 `src/expand/uvcpp_memory_pool.h:904-917`：`init_thread_cache()`、
 `release_thread_cache()`、`thread_cache_size()`。
 
 **这一节最重要的一句：线程缓存是函数内静态的**
 （`inline static thread_local_cache &get_thread_cache() { static thread_local thread_local_cache cache; return cache; }`，
-`src/expand/uvcpp_memory_pool.h:893-896`）—— 它是**全进程一个**，不是每池一个。同一个线程里
+`src/expand/uvcpp_memory_pool.h:897-900`）—— 它是**全进程一个**，不是每池一个。同一个线程里
 两个池交替分配/释放，块会在同一个缓存里混起来；档位相同就**看不出来**，档位不同时
-`pop()` 拿到的是别的类型的块。`deallocate` 按块头里的类型（`:1079-1080`）走，所以
+`pop()` 拿到的是别的类型的块。`deallocate` 按块头里的类型（`:1080-1081`）走，所以
 不会崩，但"这个指针是哪个池给的"只有调用方知道。**别在线程里混用两个池。**
 
 ---
@@ -378,11 +377,11 @@ void doc_pool_lifecycle() {
 
 | 方法 | 做什么 |
 |---|---|
-| `init()` / `init(cfg)` | 建 7 个全局队列、校验配置；重复调用是幂等的（`src/expand/uvcpp_memory_pool.cpp:614-616` 直接 `return true`） |
+| `init()` / `init(cfg)` | 建 7 个全局队列、校验配置；重复调用是幂等的（`src/expand/uvcpp_memory_pool.cpp:622-624` 直接 `return true`） |
 | `warmup()` | 预填本线程缓存 |
 | `reset()` | **只清计数**，与 `reset_stats()` 逐行相同 |
 | `shutdown()` | 关队列、换出节点、调 `dealloc_func_` |
-| `is_initialized()` | 读一个原子标志（`src/expand/uvcpp_memory_pool.h:836-838`） |
+| `is_initialized()` | 读一个原子标志（`src/expand/uvcpp_memory_pool.h:840-842`） |
 
 **`reset()` 不还内存。** 它的实现（`src/expand/uvcpp_memory_pool.cpp:256-273`）就是 15 个
 `.store(0)`，和 `reset_stats()`（`:275-292`）**逐行相同** —— 两个名字一个行为。
@@ -415,35 +414,36 @@ inline void* uvcpp_memory_pool::allocate_aligned(size_t size, size_t align) {
 }
 ```
 
-`src/expand/uvcpp_memory_pool.h:1070-1074`。`align` **只用来把 `size` 向上取整**，返回值来自
+`src/expand/uvcpp_memory_pool.h:1071-1075`。`align` **只用来把 `size` 向上取整**，返回值来自
 `allocate()`，地址是否对齐取决于块头偏移，**与 `align` 无关**。要真对齐得自己再
 `std::align` 一次，或者用 `uvcpp_page_allocator`（它的页天然对齐）。
 
-### `push()` 返回 `true` 时，SUPER 档的块被丢掉
+### `push()` 的 `false` 是承重的 —— SUPER 档就靠它
 
-`push()` 的返回值有两种含义，第二种是「丢掉了」（`src/expand/uvcpp_memory_pool.h:692-698`）。
-函数体第一件事是：
+`push()` 的返回值只有两种含义：`true` = 本地缓存已接手，`false` = 本缓存不管这类块、
+调用方自己放全局池。判档位那几行是：
 
 ```cpp
-// doc-snippet: fragment — uvcpp_memory_pool.h 里 push() 的前几行摘录
+// doc-snippet: fragment — uvcpp_memory_pool.h 里 push() 的判档摘录
 memory_block_type type = block->get_type();
 block->set_in_use(false);
 block->next = nullptr;
 
 size_t idx = static_cast<size_t>(type);
-if (idx >= 7) return true;
+if (idx >= 7) return false;   // SUPER：交给 push_to_global_pool() 真正释放
 ```
 
-（`src/expand/uvcpp_memory_pool.h:702-707`）—— `idx >= 7` 就是 SUPER 档，**返回 true 却没放进
-任何链表**（`next` 刚被清成 `nullptr`，块从此无人引用）。而 `deallocate()` 只在
-`push()` 返回 `false` 时才走 `push_to_global_pool`（`:1087-1090`）⇒
-**超过 256 KB 的块在 `deallocate` 时被静默丢掉**。
+（`src/expand/uvcpp_memory_pool.h:706-711`）—— `idx >= 7` 就是 SUPER 档（>256 KiB，
+`MEMORY_TYPE_SUPER`）。它**不进任何缓存**，所以这里**必须**返回 `false`：`deallocate()`
+只在 `push()` 返回 `false` 时才走 `push_to_global_pool()`（`:1088-1091`），而那条路的
+`default:` 分支负责把这块 `uvcpp_free_bytes()` 掉、并经 `release_bytes()` 退额度。
 
-要紧的是**同一时刻它还被记成"已释放"**：`deallocate()` 随后无条件调
-`update_dealloc_stats()`（`src/expand/uvcpp_memory_pool.h:1092`），把 `active_allocations`
-减一、`freed_bytes` 加上这块大小、`total_deallocations` 加一（`:972-974`）。所以
-`stats()` 与 `detect_leaks()` **都显示正常** —— 这块内存既没还回池、也再找不回来，而账面
-上它是干净的。查这类问题不能信计数器。
+**写成 `true` 就是一个静默泄漏**：调用方不再兜底，块既不还给系统、额度也不退，而
+`update_dealloc_stats()` 照常把它记成"已释放"（`src/expand/uvcpp_memory_pool.h:1093` 把
+`active_allocations` 减一、`freed_bytes` 加上这块大小、`total_deallocations` 加一，
+见 `:974-976`）⇒ `stats()` 与 `detect_leaks()` **都显示正常**。所以这条路径不能靠计数器
+守，回归用例是 `tests/expand/memory_pool_test.cpp` 的
+`test_pool_super_block_quota_returned()`。
 
 ### 线程缓存的"析构自动归还"有个前提
 
@@ -474,7 +474,7 @@ double memory_usage_ratio() const {
 （`src/expand/uvcpp_memory_pool.h:312-316`）两个操作数都是 `uint64_t`。而这两个计数器**口径不同**：
 
 - `allocated_bytes` 只在**新建块**时加（`src/expand/uvcpp_memory_pool.cpp:361`、`:400` 两处）
-- `freed_bytes` 在**每次** `deallocate` 时加（`src/expand/uvcpp_memory_pool.h:971-975`）
+- `freed_bytes` 在**每次** `deallocate` 时加（`src/expand/uvcpp_memory_pool.h:973-977`）
 
 缓存命中的分配不进 `allocated_bytes`，但它的释放照样进 `freed_bytes`。自由块一多，
 `freed > allocated`，`uint64_t` 减法**回绕成天文数字**，比值算出来是个荒谬的大数
@@ -500,13 +500,23 @@ double memory_usage_ratio() const {
 "没调"这件事**不会报错** —— `allocate` / `deallocate` 一切正常，只有进程退出时那些块
 不回到池里。
 
-**SUPER 档的自由块直接消失。** 见 §9。默认档位下 `> 256 KB` 就走这条路
-（`extra_large_block_size` 默认 `262144`，`src/expand/uvcpp_memory_pool.h:184`）。想避开就把
-`extra_large_block_size` 调到你的最大对象之上 —— 但那一档也就此不再缓存了。
+**SUPER 档释放路径上「先取 size 再 free」是承重的，写反就是 use-after-free。**
+默认档位下 `> 256 KB` 就走这条路（`extra_large_block_size` 默认 `262144`，
+`src/expand/uvcpp_memory_pool.h:184`）。SUPER 块不进任何缓存，释放时直接还给系统，
+而额度要到 `release_bytes()` 里退 —— 所以**必须先把 `block->size` 存进局部变量，再
+`uvcpp_free_bytes(block)`**（`src/expand/uvcpp_memory_pool.cpp:513-521`）。池
+`shutdown()` 之后的收尾路径同理（`:465-477`）。改这三处时别顺手"化简"成
+`release_bytes(block->size)`，那是 free 之后读头部。
+
+**两块内存、两套释放器，混用就是堆损坏。** 非 SUPER 块来自 `detail::aligned_alloc_wrapper()`，
+只能用 `detail::aligned_free_wrapper()` 还；SUPER 块来自 `uvcpp::uvcpp_alloc_bytes()`，
+只能用 `uvcpp_free_bytes()` 还。**两套都不是 `operator new` / `operator delete`** ——
+拿 `::operator delete` 去还其中任何一个，实测是 `0xC0000374`（STATUS_HEAP_CORRUPTION）。
+要避开整个问题：把 `extra_large_block_size` 调到你的最大对象之上，代价是那一档不再缓存。
 
 **线程缓存是全进程共享的**，所以同一个线程里混用两个池会串。见 §7。
 
-**`allocate()` 不检查状态。** `uvcpp_memory_pool::allocate()`（`:992-1013`）里没有
+**`allocate()` 不检查状态。** `uvcpp_memory_pool::allocate()`（`:1048-1069`）里没有
 `is_initialized()` 这一句，也没有 `shutdown()` 之后的守卫。忘了 `init()` 不会报错，
 按默认配置照常分配；`shutdown()` 之后再分配同样不报错。`is_initialized()` 得你自己问。
 
