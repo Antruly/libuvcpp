@@ -1120,8 +1120,18 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   // 回调在"客户端已被析构"时会直接早返回（`if (!token_alive(life))`），而服务端
   // 连接恰恰是被 tcp_server 的 close manager 删掉的 —— 没有 ctx 这一份兜底，
   // 对端在写入途中断开时这一块的 `done` 就永远不响了。见 write_done 的注释。
-  std::shared_ptr<write_done> wd(new write_done());
-  wd->fn = std::move(qw.done);
+  // **`done` 为空时一个堆分配都不做。** `enqueue_write` 的五个调用点里有四个不传
+  // `done`，而普通响应走的正是其中那条 —— 结算器的**全部**作用就是把那个闭包唤醒
+  // 一次，而空闭包唤醒了什么都不做。`fire_write_done` 第一句是
+  // `if (!d || d->fired) return;`，所以 `wd` 与 `ctx.inflight` 双双留空时，
+  // 完成回调、`close_connection`、`remove_ctx` 三条路都走同一条"什么都不做"的早
+  // 返回 —— 语义逐条相同。省下的是**每个响应两个堆分配**（`new write_done` 一个、
+  // `shared_ptr` 控制块一个，这里没走 `make_shared`）外加两次原子引用计数。
+  std::shared_ptr<write_done> wd;
+  if (qw.done) {
+    wd.reset(new write_done());
+    wd->fn = std::move(qw.done);
+  }
   ctx.inflight = wd;
 
   // 1 块时那次写会把字节拷进自己的缓冲，所以 `wire` 不必活过这一句。
