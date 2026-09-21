@@ -273,7 +273,7 @@ h2 连接上要么自己设回去，要么改用带 `stream_id` 的 `send_respon
 
 **三、`uvcpp_http_request` 与 `uvcpp_http_response` 的拷贝构造/赋值是手写的、
 逐字段列举的。** 加字段时编译器一声不吭 —— `stream_id` 就漏过一次
-（`src/web/uvcpp_http_request.cpp:25-36`、`src/web/uvcpp_http_response.cpp:29-46`）。
+（`src/web/uvcpp_http_request.cpp:25-36`、`src/web/uvcpp_http_response.cpp:38-55`）。
 
 ---
 
@@ -497,17 +497,17 @@ int doc_client_sync() {
 **二、开了 OpenSSL 的构建里 `send_wait()` 走的是阻塞 fd，不是事件循环。**
 `src/web/uvcpp_http_client.cpp:513-530` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
 有 TLS 就走阻塞路径，没有才走"轮询 loop + 1ms sleep"的异步实现。
-后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:888-891` 把这段历史写下来了）。
+后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:889-892` 把这段历史写下来了）。
 
 **三、阻塞路径的 `timeout_ms` 只有 Windows 生效。**
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 两处都被 `#ifdef _WIN32` 包着
-（`src/web/uvcpp_http_client.cpp:1006-1010`、`:1057-1061`），POSIX 上**不设**，
+（`src/web/uvcpp_http_client.cpp:1007-1011`、`:1058-1062`），POSIX 上**不设**，
 `send_wait()` / `send_wait_plain()` 在 Linux/macOS 上可以无限阻塞。头文件现在把这个
 缺口写在参数说明里（`src/web/uvcpp_http_client.h:131-133`、`:147-151`），
 不再让读者以为有超时兜底。
 
 **四、阻塞路径读不到任何字节时返回 0，而 `resp` 是默认的 200 OK。**
-`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1077-1090`），空头交给
+`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1078-1091`），空头交给
 `parse_response_head()` 之后什么都不改，`status_code` 保持初值 200。
 **判据只能是返回值**。（异步 h1 路径相反：错误时会把 `status_code` 设成
 `HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:394-396`。）

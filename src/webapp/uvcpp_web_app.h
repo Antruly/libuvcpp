@@ -1456,6 +1456,26 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   };
 
   /**
+   * @brief 一条连接上的在途队列（见 `inflight_`）。
+   *
+   * **`std::vector` 而不是 `std::deque`。** 直觉是 deque（两端都 O(1)），但
+   * 这里只有两个操作：尾部 `push_back`、以及按迭代器 `erase`（队首）—— 而
+   * libstdc++ 建一个**空** deque 就要两次分配（映射数组 64 B + 节点块
+   * 512/sizeof(out_entry)×sizeof = 504 B），加 `std::map` 自己的节点 120 B，
+   * 每请求三笔、688 B，而队列长度一直是 1（不流水线时）。
+   *
+   * 向量只有一笔分配、大小正好是"待发响应个数 × 24 B"。前端 `erase` 要
+   * memmove 剩下的元素，而流水线深度就是队列长度 —— 真实用量是个位数，
+   * 24 字节一个元素，这条 memmove 比它替掉的那两次分配便宜得多。
+   *
+   * ★ 与 deque 的**语义差别**：`push_back` 会让向量的**全部**迭代器与元素
+   * 引用失效（deque 只失效迭代器、引用仍有效）。所以这里不许在持有
+   * `front()` 的引用/迭代器时插队 —— 现有代码一律先取 `shared_ptr` 副本
+   * （`flush_out()` / `context_finished()` 里都写着为什么），这个约束是满足的。
+   */
+  typedef std::vector<out_entry> out_queue;
+
+  /**
    * @brief 在途请求，**按连接分组、组内按到达顺序** —— 流水线的顺序靠它维持。
    *
    * HTTP/1.1 要求响应按请求顺序发出（RFC 7230 §6.3.2）。请求本身照常并发跑，
@@ -1466,7 +1486,7 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 组内空了的键会被摘掉，因此 `find(id) != end()` 仍等价于"这条连接上有在途
    * 请求" —— `idle_sweep()` 与停机的判据都靠它，**别留空队列在表里**。
    */
-  std::map<uvcpp_web_conn_id, std::deque<out_entry> > inflight_;
+  std::map<uvcpp_web_conn_id, out_queue> inflight_;
 
   /**
    * @brief `flush_out()` 正在跑 —— 挡住"续发 → 收场 → 又续发"的递归。

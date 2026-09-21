@@ -727,11 +727,11 @@ std::string uvcpp_web_app::route_key(http_method method,
 
 std::shared_ptr<uvcpp_web_context> uvcpp_web_app::active_body_ctx(
     uvcpp_web_conn_id id, int32_t stream_id) const {
-  std::map<uvcpp_web_conn_id, std::deque<out_entry> >::const_iterator q =
+  std::map<uvcpp_web_conn_id, out_queue >::const_iterator q =
       inflight_.find(id);
   if (q == inflight_.end()) return std::shared_ptr<uvcpp_web_context>();
 
-  for (std::deque<out_entry>::const_iterator e = q->second.begin();
+  for (out_queue::const_iterator e = q->second.begin();
        e != q->second.end(); ++e) {
     // `shared_ptr` 的 const 不会穿透到被指对象，所以拿到的是可写的上下文。
     // h2：一个连接上并存多条在收体的流，"第一条命中的"不等于"我要的那条"。
@@ -753,7 +753,7 @@ uvcpp_web_stream* uvcpp_web_app::live_stream(uvcpp_web_conn_id id,
 
 bool uvcpp_web_app::enqueue_inflight(
     uvcpp_web_conn_id id, const std::shared_ptr<uvcpp_web_context>& ctx) {
-  std::deque<out_entry>& q = inflight_[id];
+  out_queue& q = inflight_[id];
   const size_t cap = cfg_.max_pipelined_requests;
   // 0 = 不限（与超时、长度上限一处口径）。
   const bool over = (cap != 0 && q.size() >= cap);
@@ -763,7 +763,7 @@ bool uvcpp_web_app::enqueue_inflight(
 
 size_t uvcpp_web_app::inflight_total() const {
   size_t n = 0;
-  for (std::map<uvcpp_web_conn_id, std::deque<out_entry> >::const_iterator q =
+  for (std::map<uvcpp_web_conn_id, out_queue >::const_iterator q =
            inflight_.begin();
        q != inflight_.end(); ++q) {
     n += q->second.size();
@@ -785,7 +785,7 @@ void uvcpp_web_app::flush_out(uvcpp_web_conn_id id) {
   } g(&flushing_);
 
   for (;;) {
-    std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+    std::map<uvcpp_web_conn_id, out_queue >::iterator q =
         inflight_.find(id);
     // 队列空了（`context_finished()` 会把空键摘掉），或者队首还没定稿 —— 停。
     // 后一种是正常的：队首还在跑异步处理器。
@@ -1897,10 +1897,10 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // 跳过排队**不影响登记**：上下文照旧进 `inflight_`，所以闲置豁免与停机
   // 宽限期那两处判断一行都不用改。
   if (ctx.response().stream_id() == 0) {
-    std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+    std::map<uvcpp_web_conn_id, out_queue >::iterator q =
         inflight_.find(ctx.connection_id());
     if (q != inflight_.end() && !q->second.empty()) {
-      std::deque<out_entry>::iterator me = q->second.begin();
+      out_queue::iterator me = q->second.begin();
       while (me != q->second.end() && me->ctx.get() != &ctx) ++me;
       if (me != q->second.end() && me != q->second.begin()) {
         // 已经排过的别再 hold 一次：`flush_out()` 只还一次。
@@ -2156,7 +2156,7 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   // 本文件下面 `ctx.stream()` 那处早就是这么防的，这行漏了。
   const uvcpp_web_conn_id id = ctx.connection_id();
 
-  std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+  std::map<uvcpp_web_conn_id, out_queue >::iterator q =
       inflight_.find(id);
   if (q == inflight_.end()) return;
 
@@ -2164,7 +2164,7 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   // 挂着好几条，按 id 拿到的很可能是**别人** —— 替别人摘号会让那一条永远出不了
   // 队（它的响应再也发不出去）。找不到就什么都不做：这个上下文本来就不在这条
   // 连接的名册上（例如 `wire_upload()` 内部直接回错那条路径）。
-  std::deque<out_entry>::iterator me = q->second.begin();
+  out_queue::iterator me = q->second.begin();
   while (me != q->second.end() && me->ctx.get() != &ctx) ++me;
   if (me == q->second.end()) return;
 
@@ -2284,10 +2284,10 @@ void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
     // 自己依次走完"队首查连接 → 已断开 → 丢弃 + WARN → 出队 → 续发下一条"。
     {
       std::vector<std::shared_ptr<uvcpp_web_context> > victims;
-      std::map<uvcpp_web_conn_id, std::deque<out_entry> >::iterator q =
+      std::map<uvcpp_web_conn_id, out_queue >::iterator q =
           inflight_.find(id);
       if (q != inflight_.end()) {
-        for (std::deque<out_entry>::iterator e = q->second.begin();
+        for (out_queue::iterator e = q->second.begin();
              e != q->second.end(); ++e) {
           // `streaming()` 是 `stream_ != nullptr`，它**不**区分"收请求体"和
           // "发响应流"；后者由 `stream_abort()` 自己挡掉（请求体早已交付完，

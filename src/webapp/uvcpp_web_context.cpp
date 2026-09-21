@@ -15,7 +15,8 @@ namespace uvcpp {
 
 uvcpp_web_context_host::~uvcpp_web_context_host() {}
 
-uvcpp_web_context::uvcpp_web_context(uvcpp_web_context_host& host,
+uvcpp_web_context::uvcpp_web_context(uvcpp_web_context_key,
+                                     uvcpp_web_context_host& host,
                                      uvcpp_web_conn_id conn_id)
     : host_(host),
       conn_id_(conn_id),
@@ -32,11 +33,14 @@ uvcpp_web_context::uvcpp_web_context(uvcpp_web_context_host& host,
 
 std::shared_ptr<uvcpp_web_context> uvcpp_web_context::create(
     uvcpp_web_context_host& host, uvcpp_web_conn_id conn_id) {
-  // 不能用 std::make_shared：构造函数是私有的，而 create() 是成员所以能 new。
-  // （试过给 `make_shared` 开友元 —— MSVC 上不成立：真正 new 对象的是它内部的
-  // `_Ref_count_obj2`，友元给了 `make_shared` 也够不着私有构造，C2248。）
-  return std::shared_ptr<uvcpp_web_context>(
-      new uvcpp_web_context(host, conn_id));
+  // `make_shared` 而不是 `shared_ptr(new …)`：后者是**两次**分配（对象 1192 B
+  // + 控制块 24 B），合并之后只剩一次 —— 普查里那是 1.00 次/请求。
+  //
+  // 构造函数是私有的，而 `make_shared` 够不着私有构造（它内部 new 的是
+  // `_Sp_counted_ptr_inplace` / `_Ref_count_obj2`，`friend` 给 `make_shared`
+  // 也没用，MSVC 上直接 C2248）。所以构造函数公开、用凭证参数锁住类外调用。
+  return std::make_shared<uvcpp_web_context>(uvcpp_web_context_key(), host,
+                                             conn_id);
 }
 
 // =========================================================================
