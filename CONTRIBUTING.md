@@ -177,7 +177,7 @@ Two gates run on documentation changes, both from CI as well as by hand:
 |---|---|
 | `python tests/tools/check_docs.py` | The CMake option tables in both READMEs match the options the build actually defines, every relative link and repo path resolves, and no document is orphaned. |
 | `python tests/tools/check_doc_snippets.py --pkg <package dir>` | Every ```` ```cpp ```` block in a tracked document actually **compiles** against the packaged headers. |
-| `python tests/tools/check_doc_lines.py` | Every `file:line` reference in a tracked document still resolves, still lands on a non-blank line, and still points at the same content it did when the lockfile was written. |
+| `python tests/tools/check_doc_lines.py` | Every `file:line` reference in a tracked document still resolves, still lands on a non-blank line, still points at the same content it did when the lockfile was written, and is not written in the extension-only shorthand (`<file>.cpp:123`). |
 
 Both use the same three exit codes, which are worth reading carefully: `0` every criterion ran
 and passed, `1` a criterion ran and is **red**, and `3` a criterion's **premise was missing, so
@@ -248,6 +248,16 @@ module grows a file with the same name, and truncated names (`client.h`, `req.h`
 `h2_session.h`) are how the tree accumulated 34 references to files that never existed. The
 gate still *accepts* the loose shapes so that old prose fails loudly rather than silently
 going unscanned, but write the qualified form.
+
+**One shape is refused outright, not merely discouraged: the extension-only shorthand
+(`<file>.cpp:123`).** Both of the gate's citation regexes miss it — one requires a leading
+alphanumeric, the other's lookbehind rejects a `:` that follows a word character — so it was
+the one kind of citation no criterion could falsify and no lockfile entry covered. That is
+exactly where the rot collected: of the 22 in `doc/web-http-guide.md`, 17 were already
+pointing at the wrong lines. Their line numbers had been frozen since the page was written
+while the files grew around them, and the paragraph nearest one of them named a different
+file than the one the shorthand actually meant. The gate reports each occurrence as red
+rather than guessing which file `.cpp` refers to, because guessing is how it went wrong.
 
 Placeholders are written with angle brackets (`<file>`, `src/<module>/<file>`) and are **not**
 read as citations — the gate skips them, the same way `check_docs.py` does. That matters for

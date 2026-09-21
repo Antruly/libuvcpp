@@ -28,6 +28,16 @@
      更说明问题。带省略号（`…` / `...`）的引述是删节，不判。
   5. **反空转**：解析成功的引用数 == 0 就是红。一个"一条都没查"的门禁是最坏的一种
      绿 —— 它长得和"全过"一模一样。
+  6. **没有 `.ext:行号` 简写**：`.cpp:123` 这种省掉文件名的写法**直接判红**。
+     它是这个门禁自己的一处盲区：`CITE_RE` 要求首字符是字母数字，`BARE_RE` 的
+     前视断言又挡住紧跟在词字符后面的 `:`，**两条都匹配不上** —— 于是这种引用
+     从来没有被校验过一次，锁文件里也没有它们的条目。而它恰恰是最危险的一种：
+     `.cpp` 到底指哪个文件要靠上下文猜。实测就猜错过 —— 文档里"压缩变体缓存
+     三道限（`.cpp:830-840`）"那一句，同段落最近的一条完整引用是
+     `uvcpp_http_compress.cpp`（全文 284 行），而三道限其实在
+     `uvcpp_http_server.cpp:831-841`。约定只有一种形状（`CONTRIBUTING.md`
+     「Line references in documentation」：「Fully qualified, always.」），所以
+     这里不按上下文猜归属，直接判红。
 
 ## 引用的写法（本批规范化后只有一种形状）
 
@@ -41,6 +51,11 @@
 **裸 `:NNN`**（`web/uvcpp_ws_connection.h:23` 之后再写 `:31`）按**同一段落**里
 最近一条可解析的引用归属。段落里没有文件名可归属时**不算引用**、直接忽略 ——
 否则 `localhost:8080` 会被读成一条引用，而假红会训练人忽略门禁。
+
+**`.ext:行号` 简写不在容忍之列**：它不按上下文猜归属，而是**判据 6 直接判红**。
+裸 `:NNN` 至少还带着"同一段落"这个可预期的归属范围，`.cpp` 连这个都没有 ——
+它要读者自己回想这一段在讲哪个文件，而猜正是它出错的方式。`<file>.h:88` 那种
+占位符（`CONTRIBUTING.md` 讲引用写法时用的）带 `>`，被同一个前视断言放过。
 
 ## 约定
 
@@ -120,6 +135,18 @@ EXT_RE = re.compile(
 # `见 :31` 这种带空格的写法，那正是我们要的。
 BARE_RE = re.compile(r"(?<![\w./:-])(?<!:\d):(\d+)(?:-(\d+))?")
 
+# `.ext:NNN` 简写（`.cpp:123`、`.h:12-34`）—— 省了文件名，只留扩展名。
+#
+# 这个形状**下面两条正则都匹配不上**：`CITE_RE` 要求文件名首字符是 `[A-Za-z0-9_]`
+# （`.` 不是），`BARE_RE` 的 `(?<![\w./:-])` 又挡住紧跟在词字符后面的 `:`（`.cpp`
+# 的 `p` 就是词字符）。所以它既没被解析过、也没进过锁文件 —— 判据 6 补上这一格。
+#
+# 前视断言里的 `>` 是给占位符留的：`CONTRIBUTING.md` 讲引用写法时写
+# `<file>.h:88`，那是在说"这个形状"，不是指着某个真文件（与 `CITE_RE` 用 `<`
+# 放过 `<file>.h:88` 是同一条约定）。`>` 不会出现在真引用的左边。
+SHORTHAND_RE = re.compile(
+    r"(?<![\w./:-<>])\.(%s):(\d+)(?:-(\d+))?" % "|".join(SRC_EXTS))
+
 TRAIL_WS_RE = re.compile(r"[ \t]+$")
 
 
@@ -181,10 +208,15 @@ def resolve(root, index, tok):
 
 
 def collect_cites(root, docs):
-    """按文档顺序取出全部引用，裸 `:NNN` 就地归属。"""
+    """按文档顺序取出全部引用，裸 `:NNN` 就地归属。
+
+    另返回 `.ext:行号` 简写（判据 6 用）—— 它们**不是引用**：解析不了、也没有
+    归属，所以进不了 `cites`，但那正是要判红的东西，得单独收一份。
+    """
     index = load_src_index(root)
     cites = []
     external = []
+    shorthands = []
     unattributed = 0
     unreadable = []
 
@@ -233,7 +265,11 @@ def collect_cites(root, docs):
                 c.why = None
                 cites.append(c)
 
-    return cites, unattributed, unreadable, external
+            for m in SHORTHAND_RE.finditer(ln):
+                shorthands.append("%s 第 %d 行 `%s`"
+                                  % (doc, i + 1, m.group(0)))
+
+    return cites, unattributed, unreadable, external, shorthands
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +444,8 @@ def main():
         return 3
     print("  扫了 %d 个 md：%s" % (len(docs), " ".join(docs)))
 
-    cites, unattributed, unreadable, external = collect_cites(root, docs)
+    cites, unattributed, unreadable, external, shorthands = \
+        collect_cites(root, docs)
     for u in unreadable:
         fail("文档读不了：%s" % u)
 
@@ -426,6 +463,8 @@ def main():
         for c in cites:
             print("    %-28s %-6s %s%s" % (c.doc, "第%d行" % c.lineno, c.raw,
                                            "" if c.path else "   <-- 解析不了"))
+        for s in shorthands:
+            print("    [简写] %s   <-- 判据 6 判红" % s)
         return 0
 
     if not cites:
@@ -494,6 +533,20 @@ def main():
     else:
         ok("判据 4：%d 条引述在被引区间里找到" % n_quotes)
 
+    # ---- 判据 6：没有 `.ext:行号` 简写 ----
+    #
+    # 与上面四条不同，这条判的是**形状**，不是目标：这种写法解析不了、也没有
+    # 归属，所以它从来没进过判据 1/2/3 —— 锁文件里根本没有它的条目。理由见
+    # 文件头：省掉文件名之后，"这是哪个文件"只能靠读者猜，而实测就猜错过。
+    if shorthands:
+        for s in shorthands[:40]:
+            fail("`.ext:行号` 简写：%s —— 补全成 `src/<module>/<file>:<行号>`"
+                 % s)
+        if len(shorthands) > 40:
+            fail("…另有 %d 处同类" % (len(shorthands) - 40))
+    else:
+        ok("判据 6：%d 个 md 里没有 `.ext:行号` 简写" % len(docs))
+
     print("\n==== 汇总 ====")
     if args.update:
         n = write_lock(root, good)
@@ -511,10 +564,10 @@ def main():
     if n_quotes == 0:
         # 汇总行必须自己说清"少判了一条"。退出码只有一个数，报不了这件事，
         # 而"全过"三个字如果盖住了没跑的那条，就是最坏的那种假绿。
-        print("全过（判据 1/2/3 判过；判据 4 **没判** —— 一条引述都没有，"
+        print("全过（判据 1/2/3/6 判过；判据 4 **没判** —— 一条引述都没有，"
               "不是判绿了）")
     else:
-        print("全过（4 条判据）")
+        print("全过（5 条判据）")
     return 0
 
 

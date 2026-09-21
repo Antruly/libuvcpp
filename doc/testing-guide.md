@@ -179,7 +179,7 @@ nothing is the failure mode worth spending a rule on: it looks green forever.
 | `ctest_list.py` | Answers "which executables should run" **from the ctest manifest, not the disk**. |
 | `check_docs.py` | Documentation gate — the CMake option tables in both READMEs match the options the build actually defines (both directions), every relative link and repo path resolves, and no `doc/*.md` is orphaned. Runs on every push. |
 | `check_doc_snippets.py` | Documentation gate — every ```` ```cpp ```` block in a tracked document actually compiles against a packaged header set. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#code-blocks-in-documentation) for the block conventions. |
-| `check_doc_lines.py` | Documentation gate — every `file:line` reference in a tracked document still points where it did. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#line-references-in-documentation) for the citation conventions. |
+| `check_doc_lines.py` | Documentation gate — every `file:line` reference in a tracked document still points where it did, and none is written in the extension-only shorthand (`<file>.cpp:123`). Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#line-references-in-documentation) for the citation conventions. |
 
 **Why `check_doc_lines.py` exists.** `check_docs.py`'s path criterion strips the `:NNN`
 suffix (`LINE_SUFFIX_RE`) *before* testing whether the file exists — the line number half was
@@ -195,6 +195,17 @@ Its third criterion is a **lockfile** (`tests/tools/doc_line_refs.lock`) holding
 hash of every cited range, so a citation cannot rot silently even when the author wrote no
 quotation next to it. Editing a cited line therefore requires re-reading the citation and
 re-running `--update` to re-affirm it; that is the point, not an inconvenience.
+
+A sixth criterion closes the gate's own blind spot. The extension-only shorthand (`<file>.cpp:123`)
+matched **neither** citation regex — one requires a leading alphanumeric, the other's
+lookbehind rejects a `:` after a word character — so it was never resolved, never checked
+against a line range, and never covered by a lockfile entry. It is also the shape with the
+most room to be wrong, since the reader has to infer which file `.cpp` means. All 22
+occurrences lived in `doc/web-http-guide.md`, and 17 of them had already rotted: their line
+numbers were frozen at the revision the page was written against while the cited files grew,
+and one pointed past the end of the file the paragraph's nearest full reference named. The
+criterion now reports each occurrence as red instead of resolving it, because resolving it
+means guessing — and guessing is what produced the 17.
 
 **`verify_tree.py`'s five gates.** Any one alone is insufficient; all five must pass.
 
