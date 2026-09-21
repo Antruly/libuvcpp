@@ -390,7 +390,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 | `:scheme` 白名单 | 只接受 `https` | `src/http2/uvcpp_h2_session.cpp:311` |
 
 **没有闲置超时**（`src/http2/` 里 grep `idle|timeout|keepalive` 零命中）。
-`src/web/uvcpp_http_server.h:868-871` 提到的那个 idle sweep 属于 **webapp 层**
+`src/web/uvcpp_http_server.h:877-880` 提到的那个 idle sweep 属于 **webapp 层**
 （默认 60 s），既不是 h1 服务器自带的，也不覆盖 h2 连接。
 
 对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:359`）、

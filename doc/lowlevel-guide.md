@@ -157,7 +157,7 @@ debug 构建里还会把整块内存填成 `-1`（`src/handle/uvcpp_loop.h:61-67
 
 ## 4. 句柄
 
-基类是 `uvcpp_handle`（`src/handle/uvcpp_handle.h:86`）：
+基类是 `uvcpp_handle`（`src/handle/uvcpp_handle.h:90`）：
 
 ```
 uvcpp_handle
@@ -175,7 +175,7 @@ uvcpp_handle
 `uvcpp_loop::close()` 是**隐藏**基类那个同名函数，不是覆盖——通过 `uvcpp_handle*` 调
 `close()` 会走到基类版本，而两个 `close()` 返回类型还不一样（`void` vs `int`）。
 
-关闭只有两个入口（`src/handle/uvcpp_handle.h:119,123`）：
+关闭只有两个入口（`src/handle/uvcpp_handle.h:123,127`）：
 
 ```cpp
 // doc-snippet: fragment — 重载形状的摘录，不是完整翻译单元；这里要展示的是"两个
@@ -245,13 +245,13 @@ libuv 那边会解引用。所以**关闭回调跑完之后再 `stop()` 是空�
 
 规律是"**先自己，再 status**"，`uvcpp_fs` 是唯一的例外。
 
-**`set_self_free(true)`**（`src/req/uvcpp_req.h:127`）让 req 在完成回调返回后自己
+**`set_self_free(true)`**（`src/req/uvcpp_req.h:141`）让 req 在完成回调返回后自己
 `delete`，默认关。开了之后调用方不能再删。
 
-**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:145-164`）
+**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:159-178`）
 **先把闭包从槽位里 move 出来、再清空源槽、然后才调用**。顺序反过来的话，删掉的就是
 "此刻正在执行的那个 `std::function`"，连同它的捕获一起——是未定义行为。
-`src/req/uvcpp_req.h:149-156` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
+`src/req/uvcpp_req.h:163-170` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
 move 不会把源置空（libstdc++/MSVC 会），所以这个 bug 只在 macOS 上显形。
 
 **`uvcpp_random` 在旧 libuv 上不存在**——它整段套在 `#if UV_VERSION_MINOR >= 33` 里。

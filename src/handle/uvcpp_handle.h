@@ -55,10 +55,14 @@
 #define OBJ_UVCPP_TTY_HANDLE(obj)       reinterpret_cast<uv_tty_t *>((obj).get_handle())
 
 // ================= 拷贝辅助宏 =================
+// 本宏此前**编不过**：分配器写成 `uvcpp::uv_alloc<T>()`，而项目里叫
+// `uvcpp_alloc<T>()`（见 `uvcpp/uvcpp_alloc.h`）—— `uv_alloc` 这个名字全仓不存在。
+// 全仓零展开点，所以一直没暴露（与 `uvcpp_req.h` 的 `DEFINE_FUNC_REQ_CPP` 同一类，
+// 那个已修）。以同形状的 `DEFINE_COPY_FUNC_REQ_CPP` 为准。
 #define DEFINE_COPY_FUNC_HANDLE_CPP(type, uvname)                              \
   type::type(const type &obj) {                                                \
     if (obj.get_handle() != nullptr) {                                         \
-      uvname *hd = uvcpp::uv_alloc<uvname>();                                  \
+      uvname *hd = uvcpp::uvcpp_alloc<uvname>();                               \
       memcpy(hd, obj.get_handle(), sizeof(uvname));                            \
       this->set_handle(hd, true);                                              \
     } else {                                                                   \
@@ -67,7 +71,7 @@
   }                                                                            \
   type &type::operator=(const type &obj) {                                     \
     if (obj.get_handle() != nullptr) {                                         \
-      uvname *hd = uvcpp::uv_alloc<uvname>();                                  \
+      uvname *hd = uvcpp::uvcpp_alloc<uvname>();                               \
       memcpy(hd, obj.get_handle(), sizeof(uvname));                            \
       this->set_handle(hd, true);                                              \
     } else {                                                                   \
@@ -144,7 +148,22 @@ public:
 #endif
 
     // 静态工具
-    /** @brief Clone a handle wrapper copying underlying memory. */
+    /** @brief 按字节克隆一个句柄包装对象（**全仓零调用点；按现在的实现调用是错的**）。
+     *
+     *  - 实现是 `new char[memSize]` + `memcpy`（`src/handle/uvcpp_handle.cpp:227`）。
+     *    `new char[]` **不清零**，所以函数里第二句 `newObj->set_handle_data()`
+     *    会先读一块未初始化的 `_handle`（垃圾值），判空判不掉就顺着它写
+     *    `data = this` —— 这是一次**野指针写**，不是"多余的调用"；
+     *  - 紧接着的 `memcpy` 又把这句的效果整个覆盖掉，所以侥幸没崩也等于白做；
+     *  - `memcpy` 会把两个 `::std::function` 成员（`handle_close_cb` /
+     *    `handle_alloc_cb`）连同 `_owns_handle` 一起按字节复制 ⇒ 两份对象同时
+     *    持有同一份闭包、同一个 `_handle`；两边析构时 `free_handle()` 会去还
+     *    同一块内存 ⇒ 双重释放；
+     *  - 内存来自 `new[]`，而对象是按 `delete` 用的 ⇒ 分配/释放形式不配对。
+     *
+     *  声明保留只为不破坏已公开的接口，**不要调用**；要复制句柄用本类自己那个
+     *  手写的拷贝构造 / 赋值（`src/handle/uvcpp_handle.cpp:193`、`:209`）。
+     */
     static uvcpp_handle *clone(uvcpp_handle *obj, int memSize);
 
     static void ref(uvcpp_handle *vhd);

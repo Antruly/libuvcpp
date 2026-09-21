@@ -288,6 +288,10 @@ class UVCPP_API uvcpp_http_server {
    * Without a cap, a single large (or malicious) upload is buffered in full
    * in memory. When a body exceeds the cap the server stops buffering it and
    * answers 413 with `Connection: close` without routing the request.
+   *
+   * **Read live.** Unlike the two limits below, this one is compared against
+   * every body chunk as it arrives, so changing it takes effect on connections
+   * that are already open.
    */
   void set_max_body_size(size_t max_bytes);
   size_t max_body_size() const;
@@ -306,6 +310,10 @@ class UVCPP_API uvcpp_http_server {
    * count is enforced by the parser as the headers arrive, so an oversized block
    * is rejected 431 with `Connection: close` before `headers_complete` — and the
    * claim hook is therefore never asked about it.
+   *
+   * **Takes effect for new connections only.** The value is copied into each
+   * connection's parser when that connection is accepted, so changing it here
+   * does not affect a connection that is already open.
    */
   void set_max_header_bytes(size_t max_bytes);
   size_t max_header_bytes() const;
@@ -313,8 +321,9 @@ class UVCPP_API uvcpp_http_server {
   /**
    * @brief Cap the request target / URL (bytes). 0 = unlimited (default).
    *
-   * Same early-stop behaviour as `set_max_header_bytes()`; the request is
-   * answered 414 with `Connection: close` and never routed.
+   * Same early-stop behaviour and the same per-connection timing as
+   * `set_max_header_bytes()`; the request is answered 414 with
+   * `Connection: close` and never routed.
    */
   void set_max_url_bytes(size_t max_bytes);
   size_t max_url_bytes() const;

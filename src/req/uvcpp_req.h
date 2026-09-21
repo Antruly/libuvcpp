@@ -115,6 +115,20 @@ public:
   static uv_req_type req_get_type(const uvcpp_req *vReq);
 
   static int cancel(uvcpp_req *vReq);
+  /** @brief 按字节克隆一个请求对象（**全仓零调用点；按现在的实现调用是错的**）。
+   *
+   *  - 实现是 `new char[memSize]` + `memcpy`（`src/req/uvcpp_req.cpp:104`）。`memSize`
+   *    得由调用者保证**恰好是派生类的 `sizeof`** —— 函数只拿到基类指针，没有
+   *    `sizeof` 可用；给大给小都是未定义行为；
+   *  - `memcpy` 把 `uv_req_t *req` 原样复制 ⇒ 两个对象指向**同一个** `uv_req_t`，
+   *    各自析构都走 `free_req()`（`src/req/uvcpp_req.cpp:96`）⇒ 双重释放；
+   *  - 内存来自 `new[]`，回收却按对象指针做（`set_self_free(true)` 时跳板里的
+   *    `delete self`，否则调用者自己 `delete`）⇒ 分配/释放形式不配对。
+   *
+   *  声明保留只为不破坏已公开的接口，**不要调用**；要复制一个请求就新建一个。
+   *
+   *  @note 本函数**不是静态的**，调用点得写成 `obj->clone(obj, n)` 这种别扭形状。
+   */
   uvcpp_req *clone(uvcpp_req *obj, int memSize);
 
   virtual uv_req_t *get_req() const;

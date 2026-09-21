@@ -6,7 +6,7 @@
  *
  * **定位：** 这是 expand 模块的**主分配器**，通过 uvcpp_enterprise_alloc/free
  * 接入全局分配接口（uvcpp_alloc.h）。当 UVCPP_ENABLE_MEMORY_POOL=1 时，
- * 所有 uvcpp::uv_alloc<T>() 等调用最终路由到此分配器。
+ * 所有 uvcpp::uvcpp_alloc<T>() 等调用最终路由到此分配器。
  *
  * A high-performance, enterprise-grade memory allocator inspired by TCMalloc.
  * Features:
