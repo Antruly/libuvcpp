@@ -258,11 +258,11 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
       // used. `stream_view_built` lets on_request_complete reuse this one
       // instead of copying the header vector a second time.
       //
-      // 头表是**搬**过来的（`take_headers()`），不是拷的：拷一份头向量是
-      // 2×头数 次分配，而这条路上它紧接着还要被搬进 `uvcpp_web_request`，
-      // 整条链路（解析器 → 视图 → web 请求）一个字节都不需要复制。搬走的
-      // 后果是**解析器上这条消息的头空了**，所以下面 `check_expect_header`
-      // 与 `message_has_body` 都改成读这份视图（见 `msg_headers`）。
+      // 头表是**搬**过来的（`take_headers()`），不是拷的：一个字符串都不复制，
+      // 代价是每请求一次**向量**分配（换来解析器上那块缓冲不再逐请求重长）。
+      // 这条路上它紧接着还要被搬进 `uvcpp_web_request`。搬走的后果是**解析器上
+      // 这条消息的头空了**，所以下面 `check_expect_header` 与 `message_has_body`
+      // 都改成读这份视图（见 `msg_headers`）。
       pctx->stream_request.method  = pctx->parser->get_method();
       pctx->stream_request.url     = pctx->parser->get_url();
       pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();

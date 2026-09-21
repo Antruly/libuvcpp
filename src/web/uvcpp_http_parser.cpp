@@ -253,7 +253,12 @@ const http_headers& uvcpp_http_parser::get_headers() const {
 }
 
 http_headers uvcpp_http_parser::take_headers() {
-  return std::move(headers_);
+  // 搬元素、不搬容量：搬完 clear()，那块长好的缓冲留在解析器上给下一条消息用。
+  http_headers out;
+  out.assign(std::make_move_iterator(headers_.begin()),
+             std::make_move_iterator(headers_.end()));
+  headers_.clear();
+  return out;
 }
 
 bool uvcpp_http_parser::should_keep_alive() const {
