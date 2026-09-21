@@ -199,7 +199,7 @@ size_t close_all_clients();
 | `set_read_callback(cb)` | 服务端 `:232` | 同上 | 一份回调覆盖所有连接 |
 
 **`read_start` 与 `read_start_events` 互斥。** 用过其中一个再用另一个，拿到
-`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:1818-1826`）：
+`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:1827-1835`）：
 两条路共用同一个底层 stream，同时注册的话底层 `read_start` 会把先注册的那个
 **静默覆盖**掉——用户以为两个回调都在收数据，实际只有一个。
 
@@ -339,7 +339,7 @@ int write_wait(uvcpp_buf* buf, int timeout_ms = 30000);
 | 已经有异步写在飞，再调异步 `write` | 返回 `UV_EALREADY` |
 | 没连上就写 | 返回 `UV_ENOTCONN` |
 
-**异步/同步其实是由 `cb` 是不是空决定的**（`src/net/uvcpp_tcp_client.cpp:1083-1086`）：
+**异步/同步其实是由 `cb` 是不是空决定的**（`src/net/uvcpp_tcp_client.cpp:1086-1089`）：
 `cb` 非空 ⇒ 立即返回 0，完成时回调；`cb` 为空 ⇒ 退化成 `write_wait(data, len, 30000)`。
 
 **这就是为什么回调里必须传 cb。** 事件循环回调里禁止同步等待，而三参数的

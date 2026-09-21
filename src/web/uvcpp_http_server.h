@@ -858,6 +858,31 @@ class UVCPP_API uvcpp_http_server {
   /** @brief Start the next queued write if the connection is idle. */
   void pump_write(uvcpp_tcp_client* client);
 
+  /**
+   * @brief @ref pump_write 的**已知上下文**版本 —— 省掉一次 `contexts_` 查找。
+   *
+   * `ctx` 必须就是 `contexts_` 里 `client` 那一项。调用方必须保证**从拿到 `ctx`
+   * 到这一句之间没有跑过用户代码**：`close_connection` 会把表项摘掉，之后这个引用
+   * 就悬垂了。`on_written` 尾部的调用处是现查现用，`end_stream` 与
+   * `enqueue_write` 的调用处中间只有赋值。
+   */
+  void pump_write(conn_ctx& ctx, uvcpp_tcp_client* client);
+
+  /**
+   * @brief 把**已经拿在手上**的这一块立刻发出去（不经过 `write_queue`）。
+   *
+   * 前置条件：`ctx.write_pending == false && ctx.closing == false`。这两条成立时
+   * 队列**必然**是空的 —— 往队列里放的只有 @ref enqueue_write，而它放完必定泵
+   * 一次，于是"队列非空"永远蕴含"有一次写在途"。所以这条路与"入队再泵"逐字等价，
+   * 省下的是每个响应一次 `queued_write` 构造 + 一次入队 + 一次出队 + 两次移动。
+   *
+   * `body` 为 `nullptr` 时走单块写；非空时那块的内容按 @ref uvcpp_tcp_client::write
+   * 的消费语义交出去（共享视图接引用计数、自有块接所有权），**返回后 `*body` 即
+   * 可析构**。
+   */
+  void start_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string wire,
+                   uvcpp_buf* body, bool has_body, std::function<void(int)> done);
+
   /** @brief Close a connection exactly once and release its context. */
   void close_connection(uvcpp_tcp_client* client);
 

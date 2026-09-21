@@ -897,7 +897,10 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
     has_async_write_cb_ = true;
 
     write_fn_  = trampoline_write;
-    write_arg_ = new std::function<void(int)>(cb);
+    // **`std::move` 是承重的**：按值收下的 `cb` 到这里已经没人要了，而
+    // 拷贝一个 `std::function` 会把它捕获的东西整份复制一遍（捕获里有
+    // `shared_ptr` 时还多两次原子引用计数）。移动只是把内部指针接过来。
+    write_arg_ = new std::function<void(int)>(std::move(cb));
 
 #if UVCPP_OPENSSL_ENABLE
     if (tls_ssl_ != nullptr) {
@@ -1203,7 +1206,10 @@ int uvcpp_tcp_client::write(const char* head, size_t head_len,
 
   has_async_write_cb_ = true;
   write_fn_  = trampoline_write;
-  write_arg_ = new std::function<void(int)>(cb);
+  // **`std::move` 是承重的**：按值收下的 `cb` 到这里已经没人要了，而
+  // 拷贝一个 `std::function` 会把它捕获的东西整份复制一遍（捕获里有
+  // `shared_ptr` 时还多两次原子引用计数）。移动只是把内部指针接过来。
+  write_arg_ = new std::function<void(int)>(std::move(cb));
 
 #if UVCPP_OPENSSL_ENABLE
   if (tls_ssl_ != nullptr) {
@@ -1307,7 +1313,10 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
 
     has_async_write_cb_ = true;
     write_fn_  = trampoline_write;
-    write_arg_ = new std::function<void(int)>(cb);
+    // **`std::move` 是承重的**：按值收下的 `cb` 到这里已经没人要了，而
+    // 拷贝一个 `std::function` 会把它捕获的东西整份复制一遍（捕获里有
+    // `shared_ptr` 时还多两次原子引用计数）。移动只是把内部指针接过来。
+    write_arg_ = new std::function<void(int)>(std::move(cb));
 
 #if UVCPP_OPENSSL_ENABLE
     if (tls_ssl_ != nullptr) {

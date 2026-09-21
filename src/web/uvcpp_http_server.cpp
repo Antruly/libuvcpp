@@ -419,7 +419,8 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   if (ctx.rejected) {
     if (ctx.close_after_message) {
       ctx.close_requested = true;
-      pump_write(client);  // closes now, or after the pending write completes
+      // 这一句与上面那次 `find` 之间没有用户代码，直接用 `ctx`。
+      pump_write(ctx, client);  // closes now, or after the pending write completes
     }
     return;
   }
@@ -840,7 +841,7 @@ void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, int32_t stream_id,
 
   // 队列可能已经空了（最后一块写完了），所以必须主动泵一次：pump_write 会在
   // 空队列 + close_requested 两条同时成立时收尾。
-  pump_write(client);
+  pump_write(ctx, client);
 }
 
 // 压缩变体表的总字节上限。#11 第 3 条量出来的是"重复 deflate"这一项，
@@ -1060,16 +1061,30 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
 void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
                                       std::string wire,
                                       std::function<void(int)> done) {
+  // **空闲时直接发，不绕队列。** 这是每个响应都走的那条路：一次 `queued_write`
+  // 构造、一次入队、一次出队、两次移动、两次析构，换来的只是"下一条才轮到它"
+  // 这个此时并不存在的约束。判据与 `pump_write` 的早返回逐字相同 —— 它见到
+  // 这两个标志也是直接返回。见 `start_write` 的前置条件说明。
+  if (!ctx.write_pending && !ctx.closing) {
+    start_write(ctx, client, std::move(wire), nullptr, false, std::move(done));
+    return;
+  }
+
   queued_write qw;
   qw.bytes = std::move(wire);
   qw.done = std::move(done);
   ctx.write_queue.push_back(std::move(qw));
-  pump_write(client);
+  pump_write(ctx, client);
 }
 
 void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
                                       std::string head, uvcpp_buf body,
                                       std::function<void(int)> done) {
+  if (!ctx.write_pending && !ctx.closing) {
+    start_write(ctx, client, std::move(head), &body, true, std::move(done));
+    return;
+  }
+
   queued_write qw;
   qw.bytes = std::move(head);
   // 移动的是**句柄**（共享视图转引用计数、自有块转所有权），不是字节 ——
@@ -1079,7 +1094,7 @@ void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
   qw.has_body = true;
   qw.done     = std::move(done);
   ctx.write_queue.push_back(std::move(qw));
-  pump_write(client);
+  pump_write(ctx, client);
 }
 
 void uvcpp_http_server::fire_write_done(const std::shared_ptr<write_done>& d,
@@ -1099,8 +1114,10 @@ void uvcpp_http_server::fire_write_done(const std::shared_ptr<write_done>& d,
 void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   auto it = contexts_.find(client);
   if (it == contexts_.end()) return;
-  conn_ctx& ctx = it->second;
+  pump_write(it->second, client);
+}
 
+void uvcpp_http_server::pump_write(conn_ctx& ctx, uvcpp_tcp_client* client) {
   // uvcpp_tcp_client holds at most one async write at a time; the queue is
   // what makes back-to-back keep-alive responses safe.
   if (ctx.write_pending || ctx.closing) return;
@@ -1128,11 +1145,17 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
     return;
   }
 
-  ctx.write_pending = true;
   queued_write qw = std::move(ctx.write_queue.front());
   ctx.write_queue.pop_front();
+  start_write(ctx, client, std::move(qw.bytes), &qw.body, qw.has_body,
+              std::move(qw.done));
+}
 
-  std::string wire = std::move(qw.bytes);
+void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
+                                    std::string wire, uvcpp_buf* body,
+                                    bool has_body,
+                                    std::function<void(int)> done) {
+  ctx.write_pending = true;
 
   // 在途这一块的 `done` 装进一次性结算器，并且 **ctx 也留一份**：网络层的完成
   // 回调在"客户端已被析构"时会直接早返回（`if (!token_alive(life))`），而服务端
@@ -1146,16 +1169,18 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   // 返回 —— 语义逐条相同。省下的是**每个响应两个堆分配**（`new write_done` 一个、
   // `shared_ptr` 控制块一个，这里没走 `make_shared`）外加两次原子引用计数。
   std::shared_ptr<write_done> wd;
-  if (qw.done) {
+  if (done) {
     wd.reset(new write_done());
-    wd->fn = std::move(qw.done);
+    wd->fn = std::move(done);
   }
   ctx.inflight = wd;
 
   // 1 块时那次写会把字节拷进自己的缓冲，所以 `wire` 不必活过这一句。
   // **2 块时不是**：那边体不拷，写请求持有它（共享视图接引用计数、自有块接
-  // 所有权）直到完成回调 —— 所以 `qw.body` 在 `write()` 返回之后即便析构也安全，
+  // 所有权）直到完成回调 —— 所以 `*body` 在 `write()` 返回之后即便析构也安全，
   // 前提是它的内容已经被交出去了（见 `uvcpp_tcp_client::write` 的消费语义）。
+  // 队列那条路上这个指针指着 `pump_write` 的局部 `qw.body`；`start_write` 的
+  // 直发那条路上指着 `enqueue_write` 的按值参数 —— 两条一样，都在调用方的栈上。
   //
   // ---------------------------------------------------------------------
   // 重入次序铁律（本仓已踩过三次同族：`delete wr`、`delete w`、
@@ -1172,40 +1197,41 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   // 回调提到两个重载外面来：两块那条路与一块那条路是**同一个**结算逻辑，
   // 抄成两份就是给"以后只改了一份"留口子（本仓的 ws 那族就是这么来的）。
   auto on_written = [this, client, wd](int status) {
-    bool gone_from_table = false;
-    bool peer_gone      = false;
-    {
-      auto c = contexts_.find(client);
-      if (c == contexts_.end()) {
-        gone_from_table = true;
-      } else {
-        conn_ctx& cc = c->second;
-        cc.write_pending = false;
-        // **先把在途这一块摘下来，再关连接。** 反过来的话
-        // close_connection 会把它当成"还没结算的在途块"用 UV_ECANCELED
-        // 唤醒，而这里明明拿到了真实结果（ECONNRESET 之类）—— 调用方
-        // 就再也分不清"对端在写的时候走了"和"框架自己取消的"。
-        cc.inflight.reset();
-        if (status != 0) {
-          // The peer is gone: nothing still queued can be delivered, and
-          // the connection needs retiring. Any `done` still parked in the
-          // queue is woken by close_connection() with UV_ECANCELED.
-          peer_gone = true;
-          close_connection(client);
-        }
-      }
-    }
-
-    if (gone_from_table) {
+    auto c = contexts_.find(client);
+    if (c == contexts_.end()) {
       // 连接已经从表里消失；这一块的下场仍然是"不会写出去了"。
       fire_write_done(wd, status != 0 ? status : UV_ECANCELED);
       return;
     }
-    fire_write_done(wd, peer_gone ? status : 0);
-    if (peer_gone) return;
 
-    auto c2 = contexts_.find(client);
-    if (c2 == contexts_.end() || c2->second.closing) return;
+    conn_ctx& cc = c->second;
+    cc.write_pending = false;
+    // **先把在途这一块摘下来，再关连接。** 反过来的话
+    // close_connection 会把它当成"还没结算的在途块"用 UV_ECANCELED
+    // 唤醒，而这里明明拿到了真实结果（ECONNRESET 之类）—— 调用方
+    // 就再也分不清"对端在写的时候走了"和"框架自己取消的"。
+    cc.inflight.reset();
+    if (status != 0) {
+      // The peer is gone: nothing still queued can be delivered, and
+      // the connection needs retiring. Any `done` still parked in the
+      // queue is woken by close_connection() with UV_ECANCELED.
+      close_connection(client);
+      fire_write_done(wd, status);
+      return;  // `cc` 已经被 close_connection 抹掉，后面一个字都不能碰
+    }
+
+    fire_write_done(wd, 0);
+
+    // **`wd` 为空时上面那句什么用户代码都没跑**（`fire_write_done` 第一句就是
+    // `if (!d || d->fired) return;`），`contexts_` 必然还是刚才那个样子 —— 所以
+    // `c` 仍然有效，这一次 find 直接省掉。有 `wd` 时才必须重查：闭包最自然的
+    // 动作就是关连接或再写一块，两者都可能把表项摘掉。普通响应走的正是省掉
+    // 这一查的那条（`enqueue_write` 的五个调用点里四个不传 `done`）。
+    if (wd) {
+      c = contexts_.find(client);
+      if (c == contexts_.end()) return;
+    }
+    if (c->second.closing) return;
 
     // **不在这里判 `close_requested`。** 这里是"某一块写完了"，而
     // `close_requested` 的语义是"**我排的队写完**之后关"，不是"下一个写
@@ -1219,12 +1245,11 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
     // 交给 pump_write 的空队列分支去收尾：它只在**队列真的空了**时才看
     // `close_requested`，而且那条分支还带着"对端还在发 → 把关闭推迟到
     // 消息结束"的判定（上传路径需要），在这里重写一遍必然漏掉那个判定。
-    pump_write(client);
+    pump_write(c->second, client);
   };
 
-  int rc = qw.has_body
-      ? client->write(wire.c_str(), wire.size(), &qw.body, on_written)
-      : client->write(wire.c_str(), wire.size(), on_written);
+  int rc = has_body ? client->write(wire.c_str(), wire.size(), body, on_written)
+                    : client->write(wire.c_str(), wire.size(), on_written);
 
   if (rc != 0) {
     // The write never started, so its completion callback will never fire.
