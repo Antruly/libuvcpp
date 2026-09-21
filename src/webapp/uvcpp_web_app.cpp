@@ -1124,9 +1124,13 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
 
   // 此刻的 `req` 只有 method/url/version/headers —— body 一个字节都还没到，
   // 而且**永远不会**进 `ctx->request().body_*()`（HTTP 层不会再累积它）。
-  // 这一次 `take_from` 会拷一份 headers 向量，比普通请求多一次拷贝：普通
-  // 请求复用 `stream_view_built`，而流式认领发生在 headers 回调里，那时
-  // HTTP 层刚把 view 建好、正要交给钩子，没有可复用的一份。
+  //
+  // 这一次 `take_from` 是**搬**（头向量与 URL 都换手），所以认领之后 HTTP 层
+  // 那份 `stream_request` 的头与 URL 就空了。本 App 侧没有读它的地方：返回给
+  // HTTP 层的接管 handler **三个都只捕获 `ctx`**，形参 `uvcpp_http_request&`
+  // 连名字都没写。**用户自己的流式处理函数不一样** —— 它拿到的就是那个对象，
+  // 要读头/URL 就得在 HEADERS 那一次的事件里读完（见 `uvcpp_web_request.h`
+  // 的「关于拷贝」一节）。
   ctx->request().take_from(req);
 
   const uvcpp_web_connection* conn = registry_.find(id);
@@ -1421,7 +1425,16 @@ void uvcpp_web_app::dispatch_ws(const web_route_match& m,
   // 会话是**异步**建起来的（101 的写完成回调里），所以请求视图得活到那一刻。
   // 用 shared_ptr 挂着，由那个回调持有 —— 闭包销毁时它自然释放，不需要
   // 任何清理路径（包括"101 写失败、回调根本没被调用"那条）。
-  std::shared_ptr<uvcpp_web_ws_request> ws(new uvcpp_web_ws_request(req));
+  //
+  // **视图从一份副本上建，不从 `req` 本身建。** `uvcpp_web_ws_request` 的构造
+  // 走的是 `req_.take_from(raw)`，而 take_from 是**搬**：它会把 `headers` 与
+  // `url` 从源请求上换手。可下面 `ws_server_->handle_upgrade(req, ...)` 还要从
+  // **同一个** `req` 上读 `Sec-WebSocket-Key` 与 `Sec-WebSocket-Extensions`
+  // —— 缺 key 时 `handle_upgrade` 第一句就 `return`，对端一个字节都收不到
+  // （症状是"升级请求没有响应，连接也不断"）。升级是每条连接一次的事，这一次
+  // 拷贝不在热路径上。
+  uvcpp_http_request ws_src(req);
+  std::shared_ptr<uvcpp_web_ws_request> ws(new uvcpp_web_ws_request(ws_src));
   ws->set_route(*m.pattern);
   for (size_t i = 0; i < m.params.size(); ++i) {
     ws->request().set_param(m.params[i].first, m.params[i].second);

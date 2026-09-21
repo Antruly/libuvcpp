@@ -32,10 +32,10 @@ namespace {
  * cannot answer this on its own — the Transfer-Encoding header is what tells
  * the two apart.
  */
-bool message_has_body(const uvcpp_http_parser* parser) {
+bool message_has_body(const uvcpp_http_parser* parser,
+                      const http_headers& msg_headers) {
   if (parser->get_content_length() > 0) return true;
-  return http_name_equal(http_get_header(parser->get_headers(),
-                                         "transfer-encoding"),
+  return http_name_equal(http_get_header(msg_headers, "transfer-encoding"),
                          "chunked");
 }
 
@@ -257,10 +257,16 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
       // the stream-route path we must build it before knowing whether it is
       // used. `stream_view_built` lets on_request_complete reuse this one
       // instead of copying the header vector a second time.
+      //
+      // 头表是**搬**过来的（`take_headers()`），不是拷的：拷一份头向量是
+      // 2×头数 次分配，而这条路上它紧接着还要被搬进 `uvcpp_web_request`，
+      // 整条链路（解析器 → 视图 → web 请求）一个字节都不需要复制。搬走的
+      // 后果是**解析器上这条消息的头空了**，所以下面 `check_expect_header`
+      // 与 `message_has_body` 都改成读这份视图（见 `msg_headers`）。
       pctx->stream_request.method  = pctx->parser->get_method();
       pctx->stream_request.url     = pctx->parser->get_url();
       pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
-      pctx->stream_request.headers = pctx->parser->get_headers();
+      pctx->stream_request.headers = pctx->parser->take_headers();
       pctx->stream_view_built = true;
       built_view = true;
       try {
@@ -283,7 +289,7 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
         pctx->stream_request.method  = pctx->parser->get_method();
         pctx->stream_request.url     = pctx->parser->get_url();
         pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
-        pctx->stream_request.headers = pctx->parser->get_headers();
+        pctx->stream_request.headers = pctx->parser->take_headers();
         pctx->stream_view_built = true;
       }
       sh(http_stream_event::HEADERS, nullptr, 0, pctx->stream_request, client);
@@ -293,13 +299,20 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
     // --- Nothing claimed it, so the server buffers the body itself and the
     // --- rules below apply. Order matters: a request we are going to reject
     // --- must not also be told to continue.
-    if (!check_expect_header(*pctx, client)) return;           // 417, answered
-    if (reject_oversized_declared(*pctx, client)) return;      // early 413
+    //
+    // 这两条判据读的都是**这条消息的头**，而头表在上面两条建视图的路上已经
+    // 被 `take_headers()` 搬进 `stream_request` 了 —— 搬过就只剩那一份。
+    const http_headers& msg_headers = pctx->stream_view_built
+                                          ? pctx->stream_request.headers
+                                          : pctx->parser->get_headers();
+
+    if (!check_expect_header(*pctx, client, msg_headers)) return;  // 417, answered
+    if (reject_oversized_declared(*pctx, client)) return;          // early 413
 
     // Expect: 100-continue with a body worth waiting for — tell the client it
     // may send. Raw bytes, not send_response(): a 1xx carries no Content-Length
     // and send_response() would add one for the empty body.
-    if (pctx->expect_continue && message_has_body(pctx->parser)) {
+    if (pctx->expect_continue && message_has_body(pctx->parser, msg_headers)) {
       enqueue_write(*pctx, client, "HTTP/1.1 100 Continue\r\n\r\n");
     }
   });
@@ -499,7 +512,8 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
 }
 
 bool uvcpp_http_server::check_expect_header(conn_ctx& ctx,
-                                            uvcpp_tcp_client* client) {
+                                            uvcpp_tcp_client* client,
+                                            const http_headers& msg_headers) {
   // Expect is an HTTP/1.1 mechanism (RFC 7231 §5.1.1): in a 1.0 message the
   // header has no defined meaning, so it is ignored rather than failed. That
   // matters because clients from that era send things like "Expect: 100-continue"
@@ -507,7 +521,7 @@ bool uvcpp_http_server::check_expect_header(conn_ctx& ctx,
   if (ctx.parser->get_uvcpp_http_version() != uvcpp_http_version::HVER_11)
     return true;
 
-  std::string expect = http_get_header(ctx.parser->get_headers(), "expect");
+  std::string expect = http_get_header(msg_headers, "expect");
   if (expect.empty()) return true;
 
   if (http_name_equal(expect, "100-continue")) {

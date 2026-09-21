@@ -15,12 +15,19 @@
  *
  * 关于拷贝
  * --------
- * 构造函数会**接管**源请求的 body（`uvcpp_buf::move_buf`，真正的所有权转移，
- * 不复制字节），其余字段（method/url/headers）走正常拷贝 —— 它们是小的、
- * 有界的。大 body（上传的文件、大 JSON）因此只被搬一次，不会被复制。
+ * `take_from()` 一律**搬**，不拷：body 走 `uvcpp_buf::move_buf`，`url` 与
+ * `headers` 走移动赋值。所以源请求里那几样大的（body、URL 字符串、整条头向量）
+ * 一个字节都不会被复制 —— 这也是**唯一**一条能不复制它们的路。
  *
- * **代价**：`take_from()` 之后源 `uvcpp_http_request` 的 body 会是空的。
- * 调用方在交出请求之后不得再读它的 body。
+ * 头向量为什么值得单说：它是 `std::vector<http_header>`，而 `http_header` 是
+ * 两个 `std::string`，拷一份的价钱是 **2×头数** 次分配加同样多次 memcpy。搬一次
+ * 只是把内部指针换手，于是整条链路上（解析器 → HTTP 层视图 → 这里）头只被**构造**
+ * 一次，后面每一跳都是搬家。
+ *
+ * **代价**：`take_from()` 之后源 `uvcpp_http_request` 的 `body`、`url`、`headers`
+ * 全是空的，调用方在交出请求之后不得再读这三样。**三个标量刻意留原值**
+ * （`method` / `version` / `stream_id`）—— HTTP 层的 h2 路径正是靠 `take_from()`
+ * 之后读 `stream_id` 回填流号的。
  *
  * 线程约定
  * --------
@@ -389,7 +396,7 @@ class UVCPP_API uvcpp_web_request {
    */
   const uvcpp_web_upload_result* upload_;
 
-  uvcpp_http_request src_;   ///< 源请求的副本（body 已被搬走）
+  uvcpp_http_request src_;   ///< 源请求里**搬**过来的那几个字段（见 take_from）
   uvcpp_buf          body_;  ///< 从 src_ 搬过来的 body，真正持有
   std::string        raw_url_;
   std::string        raw_path_;

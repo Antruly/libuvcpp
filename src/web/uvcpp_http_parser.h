@@ -203,6 +203,22 @@ class UVCPP_API uvcpp_http_parser {
   /** @brief Parsed headers. */
   const http_headers& get_headers() const;
 
+  /**
+   * @brief 把整条头表**搬走**，本解析器上这条消息的头就空了。
+   *
+   * 与 `get_headers()` 的差别只在"搬"还是"拷"。`http_headers` 是
+   * `std::vector<http_header>` 而 `http_header` 是两个 `std::string`，所以拷一份
+   * 的价钱是 **2×头数** 次分配、同样多次 memcpy，再加同样多次释放 —— 搬一次只是
+   * 把那个向量的内部指针换手。
+   *
+   * 只能在这条消息**解析完之后**用（`headers_complete` 回调起）。流水线的下一条
+   * 不受影响：`ll_on_message_begin` 本来就会清空 `headers_`，清一张空表同样是空表。
+   * 但**本解析器上这条消息的头就再也读不到了** —— 谁还需要它们，谁就要自己留一份
+   * （`uvcpp_http_server` 的做法是让 `message_has_body` 与 `check_expect_header`
+   * 改读搬过去的那一份）。
+   */
+  http_headers take_headers();
+
   /** @brief Whether the message has Connection: keep-alive semantics. */
   bool should_keep_alive() const;
 

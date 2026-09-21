@@ -252,6 +252,10 @@ const http_headers& uvcpp_http_parser::get_headers() const {
   return headers_;
 }
 
+http_headers uvcpp_http_parser::take_headers() {
+  return std::move(headers_);
+}
+
 bool uvcpp_http_parser::should_keep_alive() const {
   return keep_alive_;
 }

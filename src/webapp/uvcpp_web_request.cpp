@@ -158,18 +158,31 @@ uvcpp_web_request::uvcpp_web_request()
 uvcpp_web_request::~uvcpp_web_request() {}
 
 void uvcpp_web_request::take_from(uvcpp_http_request& src) {
-  // 顺序是关键：先把 body 搬出来，再拷其余字段。
+  // 顺序是关键：先把 body 搬出来，再搬其余字段。
   //
-  // 反过来的话，`src_ = src` 会先把 body **深拷贝**一份（uvcpp_buf 的拷贝
-  // 构造是真的分配 + memcpy），然后我们再从 src 把 body 搬走 —— 等于为一次
-  // 上传同时持有两份完整数据。大文件上传时这就是白扔一倍内存。
+  // 反过来的话，赋值会先把 body **深拷贝**一份（uvcpp_buf 的拷贝构造是真的
+  // 分配 + memcpy），然后我们再从 src 把 body 搬走 —— 等于为一次上传同时持有
+  // 两份完整数据。大文件上传时这就是白扔一倍内存。
   body_.move_buf(src.body);
 
-  src_ = src;  // 此刻 src.body 已经空了，这次赋值不搬大块
+  // 其余字段**逐个搬**，不再走 `src_ = src`：那个赋值会把头向量整条拷一份，
+  // 而它是 `std::vector<http_header>`、每个 `http_header` 又是两个
+  // `std::string` —— 拷一份就是 **2×头数** 次分配加同样多次 memcpy。搬一次只是
+  // 把内部指针换手，于是这条链路上（解析器 → HTTP 层视图 → 这里）头只被**构造**
+  // 一次，后面每一跳都是搬家。
+  //
+  // 代价与 body 那条同源，一并写进契约：`take_from()` 之后源请求的 `headers`
+  // 与 `url` 也空了。**三个标量（`method` / `version` / `stream_id`）刻意留
+  // 原值**：HTTP 层的 h2 路径正是靠 `take_from()` 之后读 `stream_id` 回填流号的。
+  src_.method    = src.method;
+  src_.version   = src.version;
+  src_.stream_id = src.stream_id;
+  src_.url       = std::move(src.url);
+  src_.headers   = std::move(src.headers);
 
-  method_  = src.method;
-  version_ = src.version;
-  raw_url_ = src.url;
+  method_  = src_.method;
+  version_ = src_.version;
+  raw_url_ = src_.url;
 
   web_split_path_query(raw_url_, raw_path_, query_string_);
 

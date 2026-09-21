@@ -9,6 +9,8 @@
  * - `take_from()` 必须真的**搬走** body（源 buf 变空），而不是深拷一份。
  *   写成 clone 的话功能上完全正常，只是每次上传白扔一倍内存 —— 只有断言
  *   源 buf 已经空了才能把这种退化钉住。
+ * - 同理，`url` 与 `headers` 也必须**搬**：头向量上多一次拷贝就是 2×头数 次
+ *   分配，而它在整条链路上本来要被拷两遍。这条同样只有"源上已经空了"钉得住。
  * - body 是**二进制安全**的：内嵌 NUL、非 UTF-8 字节都要原样保留。
  *   任何走 `strlen`/`c_str()` 的实现都会在这里露馅。
  * - `Accept-Encoding` 的 q 值：`gzip;q=0` 是**明确拒绝**，不是"没提过"。
@@ -113,8 +115,10 @@ void test_take_from_zero_copy() {
 
   uvcpp_http_request src = make_http_req(http_method::HTTP_POST, "/upload",
                                          payload);
+  src.set_header("x-probe", "1");
   // 前置条件：源确实有数据，否则下面的断言会因为"本来就是空的"而假通过
   check_eq_i(static_cast<long long>(src.body.size()), 4096, "前置：源有 body");
+  check_eq_i(static_cast<long long>(src.headers.size()), 1, "前置：源有 1 个头");
 
   // 记下源缓冲区地址 —— 接管之后，web 层应当持有**同一块**内存。
   const char* src_base = src.body.get_const_data();
@@ -140,12 +144,28 @@ void test_take_from_zero_copy() {
   check(w.body_data() == src_base,
         "接管后应指向原来那块内存（所有权转移，不是重新分配）");
 
-  // method / url / headers 是拷贝，源仍然完好
+  // **url 与 headers 也是搬，不是拷。** 装成"只搬 body、其余拷一份"功能上
+  // 完全正常，价钱却藏在看不见的地方：headers 是 `std::vector<http_header>`、
+  // 每个 `http_header` 又是两个 `std::string`，拷一份就是 2×头数 次分配加
+  // 同样多次 memcpy —— 而这条链路上它本来要被拷两遍（解析器 → HTTP 层视图 →
+  // 这里）。所以下面两条断言与 body 那两条同性质：钉住"没有多付那份拷贝"。
+  //
+  // 前置已经由上面那两条断言钉死（源有 4096 字节 body、1 个头），否则这里的
+  // "搬空了"会因为源本来就是空的而假通过。
   check_eq_i(static_cast<int>(w.method()), static_cast<int>(http_method::HTTP_POST),
              "method 正确");
   check_eq(w.raw_url(), "/upload", "raw_url 正确");
-  check_eq_i(static_cast<long long>(src.url.size()), 7,
-             "源请求的 url 不受影响（只有 body 被搬走）");
+  check_eq_i(static_cast<long long>(src.url.size()), 0,
+             "源请求的 url 已被搬走（不是拷一份另存）");
+  check_eq_i(static_cast<long long>(src.headers.size()), 0,
+             "源请求的 headers 已被搬走（不是拷一份另存）");
+  check_eq(w.header("x-probe"), "1", "头搬过来了，web 层读得到");
+
+  // 三个标量**刻意留原值**：HTTP 层的 h2 路径正是靠 `take_from()` 之后读
+  // `stream_id` 回填流号的，把它也搬空就是那条路当场崩。
+  check_eq_i(static_cast<int>(src.method), static_cast<int>(http_method::HTTP_POST),
+             "源的 method 是标量，搬完仍是原值");
+  check_eq_i(static_cast<int>(src.stream_id), 0, "源的 stream_id 原值可读");
 }
 
 // =========================================================================

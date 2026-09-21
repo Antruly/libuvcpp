@@ -891,8 +891,13 @@ class UVCPP_API uvcpp_http_server {
    * HTTP/1.0 is exempt: Expect has no meaning there (RFC 7231 §5.1.1), and
    * failing a 1.0 message over a header it never defined would break clients
    * talking through proxies that forward it blindly.
+   *
+   * @param msg_headers 这条消息的头表。**必须是调用方手上那一份**：建请求视图
+   *        的那两条路会把头从解析器上搬走（`take_headers()`），搬过之后
+   *        `parser->get_headers()` 就是空表了。
    */
-  bool check_expect_header(conn_ctx& ctx, uvcpp_tcp_client* client);
+  bool check_expect_header(conn_ctx& ctx, uvcpp_tcp_client* client,
+                           const http_headers& msg_headers);
 
   /**
    * @brief Refuse, before the body arrives, a message whose declared
