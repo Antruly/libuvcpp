@@ -59,6 +59,29 @@ public:
   // （见 capacity_），所以 append/append_data 的均摊代价是 O(1) 而不是 O(n)。
   // 新露出来的那一段仍然清零，与旧行为一致。
   void resize(size_t sz);
+  // `resize` 的"不保证新露出那段是 0"版本。
+  //
+  // 只给**紧接着会把新露出的那一段整段写满**的调用方用。`resize_impl` 清的是
+  // 且仅是 `[old_len, sz)`（原地复用支清 `[len, sz)`，换块支清 `[old_len, sz)`），
+  // 所以只要紧随其后的写操作恰好覆盖这一段，那次清零写的每个字节都会被下一行
+  // 原样盖掉。本文件里这类形状都是 `resize(sz); memcpy(base(+off), src, n);`。
+  //
+  // 实测（服务端装置，**全量**普查：`--wrap=memset`，每调用一次就落一次盘，
+  // 所以那份 dump 是完整清单而不是抽样）：
+  //   * 100 B 的 GET   —— 每请求  3.4 次 / ~200 B
+  //   * 1 MiB 的 POST  —— 每请求 38.0 次 / **3.00 MiB**（2 720 个请求的**全量**落盘：
+  //                        103 384 次调用 / 8 557 089 392 字节），全部来自 `resize` 这个清零
+  //   * 换成 `resize_uninitialized` 之后，**整个进程**（跑了 6 826 个 1 MiB 请求）
+  //     的 memset 调用数是 **24**，全在启动期 —— 每请求 0 次 / 0 字节
+  //   * 端到端 CPU：100 B 请求不可分辨（无回归）；1 MiB 请求 −18.7 µs/请求
+  //     （−2.45%，4 轮交错可分辨）；8 MiB 请求在合计上不可分辨
+  //
+  // 契约：返回后 `[0, size())` 的内容**未定义**，调用方必须自己写满。
+  //
+  // ★ 有一处**刻意不用**它：`insert_data` 的"中间插入"支。那里 memmove 覆盖的是
+  //   `[point+sz, old_len+sz)`，而 `point` 可以小于 `old_len-sz`，于是 `resize`
+  //   清掉的 `[old_len, old_len+sz)` 未必被覆盖 —— 那一支留着 `resize`。
+  void resize_uninitialized(size_t sz);
   // set_data 存的是**外部视图**：不持有这块内存，析构不 free 它，后续扩容
   // 会先把内容拷进自有的块（不会去 free 外部指针）。
   void set_data(const char *bf, size_t sz);
@@ -144,6 +167,10 @@ public:
   static void free_buf(uv_buf_t *bf);
 
 private:
+  // resize 与 resize_uninitialized 的共同实现（zero_tail 只决定"新露出那段
+  // 要不要清零"这一件事，其余逻辑必须完全一致 —— 分成两份迟早会漂）。
+  void resize_impl(size_t sz, bool zero_tail);
+
   // 释放自有块并回到"空"。（外部视图不会被释放；共享视图只是解除引用。）
   void free_own();
 
