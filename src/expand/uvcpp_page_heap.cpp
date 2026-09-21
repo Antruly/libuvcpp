@@ -617,6 +617,39 @@ static bool thread_cache_slot_ensure()
 }
 #endif
 
+// ========================
+// 池自己的元数据
+// ========================
+//
+// **池的元数据不能走全局 `operator new`。** 否则只要有人把全局 new 接到池上
+// （这是使用一个分配器最自然的写法），就会递归回池自己：
+//
+//   * `thread_cache` 是**每个工作线程第一次分配时**才新建的；
+//   * `span_header` 是**每次向系统扩 span 时**才新建的（运行时反复发生，
+//     不是只在启动期）；
+//   * `impl` 是池第一次被用到时新建的。
+//
+// 三处都在"池正在初始化/正在分配"的中途发生，所以重入会撞上函数局部静态的
+// 初始化守卫 —— 同一线程重入不递归，表现为**卡死**（CPU 0、单线程、日志空、
+// 进程还在），不是崩溃，很难查。实测复现：一个 9 行覆盖全局 new 的 TU 就能
+// 让 `uvcpp_enterprise_alloc` 永远不返回。
+//
+// 走 `malloc` 而不是 `operator new`，池就不再依赖它自己要替换的那个东西。
+template <typename T>
+static T* meta_new()
+{
+    void* p = std::malloc(sizeof(T));
+    return p ? new (p) T() : nullptr;
+}
+
+template <typename T>
+static void meta_delete(T* p)
+{
+    if (!p) return;
+    p->~T();
+    std::free(p);
+}
+
 static thread_cache* thread_cache_get()
 {
     if (!thread_cache_slot_ensure()) return nullptr;
@@ -624,20 +657,20 @@ static thread_cache* thread_cache_get()
 #if defined(_WIN32)
     void* p = FlsGetValue(g_cache_slot);
     if (p) return static_cast<thread_cache*>(p);
-    thread_cache* tc = new (std::nothrow) thread_cache();
+    thread_cache* tc = meta_new<thread_cache>();
     if (!tc) return nullptr;
     if (!FlsSetValue(g_cache_slot, tc)) {
-        delete tc;
+        meta_delete(tc);
         return nullptr;
     }
     return tc;
 #else
     void* p = pthread_getspecific(g_cache_slot);
     if (p) return static_cast<thread_cache*>(p);
-    thread_cache* tc = new (std::nothrow) thread_cache();
+    thread_cache* tc = meta_new<thread_cache>();
     if (!tc) return nullptr;
     if (pthread_setspecific(g_cache_slot, tc) != 0) {
-        delete tc;
+        meta_delete(tc);
         return nullptr;
     }
     return tc;
@@ -647,7 +680,7 @@ static thread_cache* thread_cache_get()
 // 线程退出时由 OS 调用。参数就是 cache 自己，所以这里不读任何 TLS。
 static void thread_cache_shutdown(void* p)
 {
-    delete static_cast<thread_cache*>(p);
+    meta_delete(static_cast<thread_cache*>(p));
 }
 
 // 全局 Central Cache
@@ -678,7 +711,7 @@ bool try_merge_spans(span_header* span1, span_header* span2) {
     span1->next = span2->next;
     
     // 释放 span2
-    delete span2;
+    meta_delete(span2);
     g_total_spans.fetch_sub(1, std::memory_order_relaxed);
     
     return true;
@@ -772,7 +805,7 @@ span_header* allocate_span_from_system(uint64_t pages, size_t block_size = 0)
     g_total_allocated.fetch_add(total_size, std::memory_order_relaxed);
 
     // 分配 span header
-    span_header* span = new (std::nothrow) span_header();
+    span_header* span = meta_new<span_header>();
     if (!span) {
         uvcpp_virtual_free(mem, total_size);
         return nullptr;
@@ -834,7 +867,7 @@ void release_span_to_system(span_header* span)
     g_free_spans.fetch_sub(1, std::memory_order_relaxed);
     g_total_spans.fetch_sub(1, std::memory_order_relaxed);
     
-    delete span;
+    meta_delete(span);
 }
 
 // ========================
@@ -848,13 +881,13 @@ public:
 };
 
 uvcpp_memory_pool_enterprise::uvcpp_memory_pool_enterprise()
-    : impl_(new impl())
+    : impl_(meta_new<impl>())
 {
 }
 
 uvcpp_memory_pool_enterprise::~uvcpp_memory_pool_enterprise()
 {
-    delete static_cast<impl*>(impl_);
+    meta_delete(static_cast<impl*>(impl_));
 }
 
 void* uvcpp_memory_pool_enterprise::alloc(size_t size)

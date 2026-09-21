@@ -132,8 +132,13 @@ void doc_enterprise_basic() {
 
 `uvcpp_enterprise_alloc` / `uvcpp_enterprise_free` 是一对自由函数
 （`src/expand/uvcpp_page_heap.h:336`、`:342`），内部走 `uvcpp_memory_pool_enterprise::instance()`
-这个函数内静态单例（`src/expand/uvcpp_page_heap.cpp:1281-1285`），**不需要 `init()`**。这是库内
+这个函数内静态单例（`src/expand/uvcpp_page_heap.cpp:1314-1318`），**不需要 `init()`**。这是库内
 唯一在用的那套。
+
+这套池可以**直接接到全局 `operator new` 上**：池自己的元数据（线程缓存、span 头、
+`impl`）走的是 `malloc` 而不是全局 new，所以不存在"进池 → 要元数据 → 又回池"的递归。
+（1.2.13 之前这条会**卡死**而不是报错 —— 函数局部静态的初始化守卫在同一线程里重入
+不递归，症状是 CPU 0、单线程、日志空、进程还在。所以老版本上别这么接。）
 
 另一个池 `uvcpp_memory_pool` 要显式构造和 `init()`：
 
@@ -542,7 +547,7 @@ double memory_usage_ratio() const {
   不带 `MEM_LARGE_PAGES`，这个标志被忽略。返回 `true` 只表示"标志记下了"
   （`src/expand/uvcpp_page_heap.h:257-265`）。
 - **NUMA 只有 `set_numa_node()` / `get_numa_node()` 两个存取器**，没有任何分配路径
-  读它（`:277`、`src/expand/uvcpp_page_heap.cpp:1276-1279`）。
+  读它（`:277`、`src/expand/uvcpp_page_heap.cpp:1309-1312`）。
 - **`uvcpp_memory_pool_span` 是实验品**，`try_merge()` 是空函数
  （`src/expand/uvcpp_memory_pool_span.cpp:145-148`）。除 `alloc` / `free_mem` 之外的能力都没实现。
 - **`allocate_aligned()` 不做地址对齐。** 见 §9。
