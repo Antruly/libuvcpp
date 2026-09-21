@@ -434,12 +434,16 @@ int main() {
 因此**本版发布的两个 Windows 动态库都带内存池**（`UVCPP_BUILD_EXPAND=ON`，
 产物里 `UVCPP_ENABLE_MEMORY_POOL=1`，由 `include/uvcpp/uvcpp_config.h` 带出来）。
 
-但 **CMake 的默认值仍然是 OFF**，这是刻意的：默认开的话，使用者的 TU 忘了定义
-`UVCPP_ENABLE_MEMORY_POOL`，宏求值为 0 ⇒ 使用者侧走 `std::malloc`，而 dll 侧走池,
-库会拿池去 free 一个 `malloc` 的指针，**静默**堆损坏。默认关时"忘了定义"拿到的是
-0，两边一致；反方向（dll 关、使用者开）则是响亮的链接错误，不会静默。
-从源码构建要用池，显式传 `-DUVCPP_BUILD_EXPAND=ON`；用预编译包则**什么都不用传**
-—— 包里的生成头会给出这个包实际用的值，不一致时直接 `#error`。
+但 **CMake 的默认值仍然是 OFF** —— 从源码构建要用池，得显式传
+`-DUVCPP_BUILD_EXPAND=ON`。
+
+这里原来给的理由是「默认开的话，使用者的 TU 忘了定义 `UVCPP_ENABLE_MEMORY_POOL`，
+宏求值为 0 ⇒ 使用者侧走 `std::malloc`、dll 侧走池，库会拿池去 free 一个 `malloc`
+的指针，**静默**堆损坏」。**这条与现在的实际行为对不上**：`uvcpp_config.h` 生成之后
+它经 `uvcpp_alloc.h` 等公开头带进来，规则是「外部定义过且与本包不同 ⇒ `#error`；
+**没定义 ⇒ 取本包的值**」。所以"忘了定义"拿到的是**包的值**，两边一致；定义成别的
+值是编译期硬失败。默认关因此只是"从源码构建时默认拿到哪套分配器"的选择，不再是
+安全守卫 —— 用预编译包则**什么都不用传**。
 
 ### 其他
 
