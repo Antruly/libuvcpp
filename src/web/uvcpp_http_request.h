@@ -67,6 +67,23 @@ class UVCPP_API uvcpp_http_request {
   /** @brief Remove a header by name (case-insensitive). */
   void remove_header(const std::string& key);
 
+  // 上面四个各有一个收 `const char*` 头名的对应形态：`const std::string&` 形参
+  // 会让每个 > 15 字符的字面量在调用点构造一个堆串（MSVC SSO 上限 15）。
+  // 详述与覆盖面见 `src/web/uvcpp_http_common.h` 里那族重载的注释。
+
+  /** @copydoc set_header(const std::string&, const std::string&) */
+  void set_header(const char* key, const std::string& value);
+
+  /** @copydoc get_header(const std::string&, const std::string&) const */
+  std::string get_header(const char* key,
+                         const std::string& default_val = "") const;
+
+  /** @copydoc has_header(const std::string&) const */
+  bool has_header(const char* key) const;
+
+  /** @copydoc remove_header(const std::string&) */
+  void remove_header(const char* key);
+
   // -------------------------------------------------------------------
   // Content-Type shortcut
   // -------------------------------------------------------------------

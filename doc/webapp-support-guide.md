@@ -311,7 +311,7 @@ void doc_send_file(uvcpp::uvcpp_loop* loop, doc_file_sink& sink,
   调用方丢掉自己的 `shared_ptr` 即可。
 - **`on_done` 恰好一次**（`:134-146`），`status` 是 **libuv 码**（0 / `UV_ECANCELED` /
   `UV_EINVAL` 之类），不是 HTTP 码 —— 响应层自己会翻
-  （`src/webapp/uvcpp_web_response.cpp:1133-1153`）。
+  （`src/webapp/uvcpp_web_response.cpp:1164-1184`）。
 
 **必须由 `shared_ptr` 持有**（`:164`，内部用 `shared_from_this()`）。放栈上会在
 `start()` 里抛 `std::bad_weak_ptr`，而且**不是编译错误**。

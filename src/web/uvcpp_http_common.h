@@ -303,17 +303,76 @@ using http_headers = std::vector<http_header>;
 // =========================================================================
 
 /**
- * @brief Case-insensitive string equality for header names.
- *        RFC 7230 Section 3.2: header field names are case-insensitive.
+ * @brief 编译期可求长的 C 串长度。
+ *
+ * C++11 的 constexpr 只能单 return，所以写成递归。**对字面量它折成常量**，
+ * 运行期连 strlen 都不剩；对真正的运行期指针它就是一次 strlen。
+ *
+ * 存在的理由见下面那族 `const char*` 重载：没有它，`"transfer-encoding"`
+ * 这种 17 字符的字面量会在每个调用点构造一个堆串。
  */
-inline bool http_name_equal(const std::string& a, const std::string& b) {
-  if (a.size() != b.size()) return false;
-  for (size_t i = 0; i < a.size(); ++i) {
+inline constexpr size_t http_name_len(const char* s, size_t n = 0) {
+  return (s != nullptr && *s != '\0') ? http_name_len(s + 1, n + 1) : n;
+}
+
+/**
+ * @brief 按 (指针, 长度) 比头名，大小写不敏感。**零分配。**
+ *
+ * 这是这族函数唯一的比较原语，`const std::string&` 那侧也走它 —— 免得同一套
+ * `tolower` 逻辑存在两份、日后只改一边。
+ *
+ * RFC 7230 Section 3.2: header field names are case-insensitive.
+ */
+inline bool http_name_iequal(const char* a, size_t an,
+                             const char* b, size_t bn) {
+  if (an != bn) return false;
+  for (size_t i = 0; i < an; ++i) {
     if (std::tolower(static_cast<unsigned char>(a[i])) !=
         std::tolower(static_cast<unsigned char>(b[i])))
       return false;
   }
   return true;
+}
+
+// -------------------------------------------------------------------------
+// 下面四个函数各有两个形态：一个收 `const std::string&`（既有，一行未动），
+// 一个收 `const char*`。
+//
+// **为什么必须有 `const char*` 那个**：形参是 `const std::string&` 时，字面量
+// 在**调用点**就要构造一个 `std::string`；而 MSVC 的 SSO 上限是 15
+// （`xstring`: `_BUF_SIZE = 16/sizeof(char)`、`_Small_string_capacity = _BUF_SIZE-1`），
+// 于是 `"transfer-encoding"`(17)、`"content-encoding"`(16)、
+// `"access-control-allow-origin"`(27) 这些**每一次调用都是一次堆分配 + 一次释放**，
+// 而那个串马上就被扔掉。热路径上每请求 6~8 次。
+//
+// **调用点一行都不用改**：字面量在重载解析里对 `const char*` 是精确匹配，对
+// `const std::string&` 要走一次用户定义转换 ⇒ 前者胜出。`std::string` 实参则
+// 只能绑既有那个（没有 `std::string` → `const char*` 的隐式转换）。两边都不含糊。
+//
+// 值那一侧**故意不加重载**：全仓扫过，这族调用里的长字面量全部落在**名字**位置，
+// 值位置一个都没有（短值走 SSO，本来就免费）。
+// -------------------------------------------------------------------------
+
+/**
+ * @brief Case-insensitive string equality for header names.
+ */
+inline bool http_name_equal(const std::string& a, const std::string& b) {
+  return http_name_iequal(a.data(), a.size(), b.data(), b.size());
+}
+
+/** @copydoc http_name_equal(const std::string&, const std::string&) */
+inline bool http_name_equal(const std::string& a, const char* b) {
+  return http_name_iequal(a.data(), a.size(), b, http_name_len(b));
+}
+
+/** @copydoc http_name_equal(const std::string&, const std::string&) */
+inline bool http_name_equal(const char* a, const std::string& b) {
+  return http_name_iequal(a, http_name_len(a), b.data(), b.size());
+}
+
+/** @copydoc http_name_equal(const std::string&, const std::string&) */
+inline bool http_name_equal(const char* a, const char* b) {
+  return http_name_iequal(a, http_name_len(a), b, http_name_len(b));
 }
 
 /**
@@ -332,12 +391,32 @@ inline std::string http_get_header(const http_headers& hdrs,
   return def;
 }
 
+/** @copydoc http_get_header(const http_headers&, const std::string&, const std::string&) */
+inline std::string http_get_header(const http_headers& hdrs,
+                                    const char* name,
+                                    const std::string& def = "") {
+  const size_t n = http_name_len(name);
+  for (const auto& h : hdrs) {
+    if (http_name_iequal(h.name.data(), h.name.size(), name, n)) return h.value;
+  }
+  return def;
+}
+
 /**
  * @brief Check whether a header exists (case-insensitive).
  */
 inline bool http_has_header(const http_headers& hdrs, const std::string& name) {
   for (const auto& h : hdrs) {
     if (http_name_equal(h.name, name)) return true;
+  }
+  return false;
+}
+
+/** @copydoc http_has_header(const http_headers&, const std::string&) */
+inline bool http_has_header(const http_headers& hdrs, const char* name) {
+  const size_t n = http_name_len(name);
+  for (const auto& h : hdrs) {
+    if (http_name_iequal(h.name.data(), h.name.size(), name, n)) return true;
   }
   return false;
 }
@@ -354,6 +433,20 @@ inline void http_set_header(http_headers& hdrs, const std::string& name,
     }
   }
   hdrs.push_back({name, value});
+}
+
+/** @copydoc http_set_header(http_headers&, const std::string&, const std::string&) */
+inline void http_set_header(http_headers& hdrs, const char* name,
+                             const std::string& value) {
+  const size_t n = http_name_len(name);
+  for (auto& h : hdrs) {
+    if (http_name_iequal(h.name.data(), h.name.size(), name, n)) {
+      h.value = value;
+      return;
+    }
+  }
+  // 走到这里才真的插入，头名这时候必须被拷下来（外面那个字面量不归我们管）。
+  hdrs.push_back({std::string(name, n), value});
 }
 
 }  // namespace uvcpp

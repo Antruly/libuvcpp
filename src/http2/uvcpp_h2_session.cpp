@@ -58,7 +58,11 @@ const double H2_CONTROL_REFILL_PER_SEC = 32.0;
 /// 头名已经按约定是小写存储，但比较仍走大小写无关 —— 依赖"上游确实小写了"
 /// 是那种出事后很难查的假设。
 bool name_is(const std::string& n, const char* lit) {
-  return http_name_equal(n, std::string(lit));
+  // 别写回 `std::string(lit)`：那是有意的形状，不是笔误的反面。字面量一旦过
+  // 15 字符（`"transfer-encoding"` 是 17），这样写就是**每次调用构造一个堆串**，
+  // 而 `is_connection_specific` 每个响应头都要过一遍。`http_name_equal` 有
+  // `const char*` 重载，直接比，零分配。
+  return http_name_equal(n, lit);
 }
 
 /// 连接专属头（RFC 9113 §8.2.2）：h2 里**不该存在**的字段。收到即拒、发出即剥。
@@ -834,6 +838,7 @@ bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
   // 名字指向 `resp.headers` 或字面量，**都比本次调用活得久**；`nghttp2_submit_*`
   // 是在本函数返回之后才跑的，指向局部量的名字会当场变成悬垂。
   std::vector<const char*> names;
+  names.reserve(resp.headers.size() + 2);  // :status + 可能补的 content-length
   names.push_back(":status");
 
   for (size_t i = 0; i < resp.headers.size(); ++i) {

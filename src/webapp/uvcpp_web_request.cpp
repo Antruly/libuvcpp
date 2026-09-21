@@ -250,6 +250,15 @@ bool uvcpp_web_request::has_header(const std::string& name) const {
   return http_has_header(src_.headers, name);
 }
 
+bool uvcpp_web_request::has_header(const char* name) const {
+  return http_has_header(src_.headers, name);
+}
+
+std::string uvcpp_web_request::header(const char* name,
+                                      const std::string& def) const {
+  return http_get_header(src_.headers, name, def);
+}
+
 bool uvcpp_web_request::accepts_encoding(const std::string& encoding) const {
   const double q = encoding_qvalue(encoding);
   if (q >= 0.0) return q > 0.0;  // 出现了就用它的 q 值（0 表示明确拒绝）

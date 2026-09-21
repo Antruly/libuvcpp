@@ -65,6 +65,32 @@ bool uvcpp_http_request::has_header(const std::string& key) const {
   return http_has_header(headers, key);
 }
 
+// --- `const char*` 形态：一行转发，逻辑全在 http_common 里 ---
+
+void uvcpp_http_request::set_header(const char* key,
+                                     const std::string& value) {
+  http_set_header(headers, key, value);
+}
+
+std::string uvcpp_http_request::get_header(
+    const char* key, const std::string& default_val) const {
+  return http_get_header(headers, key, default_val);
+}
+
+bool uvcpp_http_request::has_header(const char* key) const {
+  return http_has_header(headers, key);
+}
+
+void uvcpp_http_request::remove_header(const char* key) {
+  const size_t n = http_name_len(key);
+  for (auto it = headers.begin(); it != headers.end(); ++it) {
+    if (http_name_iequal(it->name.data(), it->name.size(), key, n)) {
+      headers.erase(it);
+      return;
+    }
+  }
+}
+
 void uvcpp_http_request::remove_header(const std::string& key) {
   for (auto it = headers.begin(); it != headers.end(); ++it) {
     if (http_name_equal(it->name, key)) {

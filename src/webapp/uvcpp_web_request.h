@@ -164,6 +164,11 @@ class UVCPP_API uvcpp_web_request {
                      const std::string& def = std::string()) const;
   /** @brief 头是否存在（大小写不敏感）。 */
   bool has_header(const std::string& name) const;
+  /** @brief 同上，但头名收 `const char*`（省掉一次临时 `std::string`）。 */
+  bool has_header(const char* name) const;
+  /** @copydoc has_header(const char*) const */
+  std::string header(const char* name,
+                     const std::string& def = std::string()) const;
 
   /** @brief 全部头，按收到的顺序。 */
   const http_headers& headers() const { return src_.headers; }

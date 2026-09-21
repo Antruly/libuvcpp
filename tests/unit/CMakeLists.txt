@@ -30,4 +30,18 @@ if(WIN32)
 endif()
 add_test(NAME test_uvcpp_unit COMMAND test_uvcpp_unit)
 
+# 头名查找的分配数门禁。**故意不链 ${UVCPP_LIB_TARGET}**：判据要靠覆盖全局
+# operator new 计数，而 DLL 里的分配走它自己那份 CRT，exe 里覆盖接不到 —— 链库
+# 会让这个用例在"库根本没改"的情况下也跑绿。要证的四个函数全是头内 inline，
+# 编进本 exe 才看得见（同一个坑见 tests/expand/pool_self_sufficiency_test.cpp）。
+# uvcpp_http_common.h 整个落在 #if UVCPP_WEB_ENABLE 内，所以跟着 WEB 开关走。
+if(UVCPP_BUILD_WEB)
+  add_executable(test_http_name_alloc_unit ${CMAKE_CURRENT_SOURCE_DIR}/http_name_alloc_unit.cpp)
+  target_include_directories(test_http_name_alloc_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/include)
+  add_test(NAME test_http_name_alloc_unit COMMAND test_http_name_alloc_unit)
+  set_tests_properties(test_http_name_alloc_unit PROPERTIES TIMEOUT 30)
+endif()
+
 

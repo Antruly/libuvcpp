@@ -226,7 +226,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
 | `uvcpp_http_response` | 待发送报文（handler 填） | 解析结果（回调的入参） |
 
 两侧都有 `static from_parser(const uvcpp_http_parser&, const uvcpp_buf& body)`
-（`src/web/uvcpp_http_request.h:108`、`src/web/uvcpp_http_response.h:136`）。
+（`src/web/uvcpp_http_request.h:125`、`src/web/uvcpp_http_response.h:155`）。
 
 两边**都是公开字段 + 少量方法**，不是 getter/setter 墙：
 
@@ -486,7 +486,7 @@ int doc_client_sync() {
 `:200` 声明、`src/web/uvcpp_http_client.cpp:740` setter）。`set_keep_alive(false)`
 会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:452-467`）；
 默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是
-`uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:130-133`）。
+`uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:156-159`）。
 **响应**说的同样作数：`on_response_complete()` 按 llhttp 算出的
 `should_keep_alive()`（HTTP 版本默认值 + `Connection` 的**逗号列表**）判断这条连接
 还能不能再用，不能就当场清掉 `HTTP_CLIENT_CONNECTED`

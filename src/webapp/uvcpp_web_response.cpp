@@ -319,6 +319,37 @@ bool uvcpp_web_response::has_header(const std::string& name) const {
   return http_has_header(resp_.headers, name);
 }
 
+// --- `const char*` 形态：一行转发，逻辑全在 http_common 里 ---
+
+uvcpp_web_response& uvcpp_web_response::set_header(const char* name,
+                                                   const std::string& value) {
+  http_set_header(resp_.headers, name, value);
+  return *this;
+}
+
+std::string uvcpp_web_response::get_header(const char* name,
+                                           const std::string& def) const {
+  return http_get_header(resp_.headers, name, def);
+}
+
+bool uvcpp_web_response::has_header(const char* name) const {
+  return http_has_header(resp_.headers, name);
+}
+
+uvcpp_web_response& uvcpp_web_response::remove_header(const char* name) {
+  const size_t n = http_name_len(name);
+  for (size_t i = 0; i < resp_.headers.size();) {
+    if (http_name_iequal(resp_.headers[i].name.data(),
+                         resp_.headers[i].name.size(), name, n)) {
+      resp_.headers.erase(resp_.headers.begin() +
+                          static_cast<std::ptrdiff_t>(i));
+    } else {
+      ++i;
+    }
+  }
+  return *this;
+}
+
 uvcpp_web_response& uvcpp_web_response::remove_header(const std::string& name) {
   for (size_t i = 0; i < resp_.headers.size();) {
     if (http_name_equal(resp_.headers[i].name, name)) {

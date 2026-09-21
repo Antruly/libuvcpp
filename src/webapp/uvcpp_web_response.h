@@ -229,6 +229,15 @@ class UVCPP_API uvcpp_web_response {
                                  const std::string& value);
 
   /**
+   * @brief 同上，但头名收 `const char*`。
+   *
+   * `"transfer-encoding"`、`"access-control-allow-origin"` 这类 > 15 字符的
+   * 字面量走 `const std::string&` 会在调用点各构造一个堆串（MSVC SSO 上限 15）。
+   * 理由与覆盖面见 `src/web/uvcpp_http_common.h`。
+   */
+  uvcpp_web_response& set_header(const char* name, const std::string& value);
+
+  /**
    * @brief 追加一个头（**不覆盖**同名头）。
    *
    * 这是 `Set-Cookie` 唯一正确的发法。普通单值头请用 `set_header()`，
@@ -254,7 +263,15 @@ class UVCPP_API uvcpp_web_response {
   std::string get_header(const std::string& name,
                          const std::string& def = std::string()) const;
   bool has_header(const std::string& name) const;
+
+  /** @copydoc set_header(const char*, const std::string&) */
+  std::string get_header(const char* name,
+                         const std::string& def = std::string()) const;
+  /** @copydoc set_header(const char*, const std::string&) */
+  bool has_header(const char* name) const;
   uvcpp_web_response& remove_header(const std::string& name);
+  /** @copydoc set_header(const char*, const std::string&) */
+  uvcpp_web_response& remove_header(const char* name);
 
   uvcpp_web_response& set_content_type(const std::string& ct);
   std::string content_type() const;

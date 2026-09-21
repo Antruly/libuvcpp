@@ -89,15 +89,34 @@ class UVCPP_API uvcpp_http_response {
   /** @brief Set a header (case-insensitive overwrite). */
   void set_header(const std::string& key, const std::string& value);
 
+  /**
+   * @brief 同上，但头名收 `const char*`（字面量、`c_str()`）。
+   *
+   * 存在的理由：`const std::string&` 形参会让每个 > 15 字符的字面量在调用点
+   * 构造一个堆串（MSVC SSO 上限 15），而 `"transfer-encoding"` 是 17。详见
+   * `uvcpp_http_common.h` 里那族重载的注释。
+   */
+  void set_header(const char* key, const std::string& value);
+
   /** @brief Get a header value by name (case-insensitive). */
   std::string get_header(const std::string& key,
+                         const std::string& default_val = "") const;
+
+  /** @copydoc set_header(const char*, const std::string&) */
+  std::string get_header(const char* key,
                          const std::string& default_val = "") const;
 
   /** @brief Check if a header exists (case-insensitive). */
   bool has_header(const std::string& key) const;
 
+  /** @copydoc set_header(const char*, const std::string&) */
+  bool has_header(const char* key) const;
+
   /** @brief Remove a header by name (case-insensitive). */
   void remove_header(const std::string& key);
+
+  /** @copydoc set_header(const char*, const std::string&) */
+  void remove_header(const char* key);
 
   // -------------------------------------------------------------------
   // Content-Type shortcut
