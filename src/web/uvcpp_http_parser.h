@@ -206,16 +206,25 @@ class UVCPP_API uvcpp_http_parser {
   /**
    * @brief 把整条头表**搬走**，本解析器上这条消息的头就空了。
    *
-   * 与 `get_headers()` 的差别只在"搬"还是"拷"。`http_headers` 是
-   * `std::vector<http_header>` 而 `http_header` 是两个 `std::string`，所以拷一份
-   * 的价钱是 **2×头数** 次分配、同样多次 memcpy，再加同样多次释放 —— 搬一次只是
-   * 把那个向量的内部指针换手。
+   * 与 `get_headers()` 的差别不只是"搬还是拷"：`http_headers` 是
+   * `std::vector<http_header>`、`http_header` 是两个 `std::string`，所以
+   * **拷一份** = 一次向量分配（n 个元素）**外加每个非 SSO 的值各一次**；
+   * **搬**（本函数）= 同样一次向量分配、n 个元素搬过去，**一个字符串都不分配**。
+   * 也就是说"拷"多花的钱在**值的字符串**上，不在向量缓冲 —— 短值（SSO）上两者打平。
+   *
+   * 搬的是**元素，容量留在解析器上**：`clear()` 之后那块已经长好的缓冲归下一条消息
+   * 用，steady state 每请求只有这一次分配。`clear()` 不是装饰 —— `std::move()`
+   * 之后"表是空的"只是 moved-from 向量的**通常**行为，标准并不保证；显式清空才是。
    *
    * 只能在这条消息**解析完之后**用（`headers_complete` 回调起）。流水线的下一条
-   * 不受影响：`ll_on_message_begin` 本来就会清空 `headers_`，清一张空表同样是空表。
+   * 不受影响：`ll_on_message_begin` 本来就会清空 `headers_`。
    * 但**本解析器上这条消息的头就再也读不到了** —— 谁还需要它们，谁就要自己留一份
    * （`uvcpp_http_server` 的做法是让 `message_has_body` 与 `check_expect_header`
    * 改读搬过去的那一份）。
+   *
+   * ★这块缓冲按**连接**钉住 high-water：它现在活在解析器对象上（旧形状跟着请求对象
+   * 一起释放），所以头最多的那条请求决定该连接之后每请求的常驻占用。上限是
+   * `set_max_header_bytes()`，但那个值**默认 0 = 不限**。
    */
   http_headers take_headers();
 
