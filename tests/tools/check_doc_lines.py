@@ -39,6 +39,24 @@
      「Line references in documentation」：「Fully qualified, always.」），所以
      这里不按上下文猜归属，直接判红。
 
+## `--update` 先找"内容整体挪走了"，而不是原地重哈希
+
+旧形状是"按引用的位置重算一遍哈希"。**上方插了几行**时这就错了，而且是静默的：
+
+    src/web/uvcpp_http_parser.cpp:415-463  36c72595b65f436f     <- 上方插 5 行之前
+
+插 5 行之后，旧形状写出来的还是 `415-463`，只是哈希换成了现在装在 `415-463` 里的
+那份内容的 —— 于是这条**本来正确**的引用变成"指向前 5 行"的错引用，而从此全绿。
+实测这一次是被外部贡献者复核时抓到的，不是门禁抓到的。
+
+现在的形状：旧哈希在新位置上对不上时，先在 ±`SHIFT_SCAN` 行、**行数不变**的区间里
+找内容与旧哈希逐字节相同的那一段。找得到就跟着挪、**哈希保持不变**，并且在报告里
+指名道姓地说"文档里那条引用的行号也要一起改" —— 锁里的行号挪了而文档里的没挪，
+下一次判据 3 就会报"锁文件里没有这一条"，那不是门禁抽风，是它在提醒这件事。
+
+找不到才当成内容真的改了（`[刷]`），一样逐条印出来。附近有不止一段内容相同时报
+`[歧]`、不自动挪；平移的目标键上已经记着别的内容时报 `[撞]`、不覆盖。
+
 ## 引用的写法（本批规范化后只有一种形状）
 
     src/<module>/<file>:<line>
@@ -70,7 +88,7 @@
 用法：
     python tests/tools/check_doc_lines.py
     python tests/tools/check_doc_lines.py --list      # 列出全部引用（规范化时用）
-    python tests/tools/check_doc_lines.py --update    # 复核后刷新锁文件
+    python tests/tools/check_doc_lines.py --update    # 复核后刷新锁文件，并打印平移/重刷报告
 """
 
 import argparse
@@ -315,8 +333,48 @@ def content_hash(root, path, start, end):
         lines = f.read().splitlines()
     if lines:
         lines[0] = lines[0].lstrip("﻿")
+    return hash_lines(lines, start, end)
+
+
+def hash_lines(lines, start, end):
+    """算行表里某个区间的锁哈希（`content_hash` 与平移扫描共用同一套）。"""
     body = "\n".join(TRAIL_WS_RE.sub("", x) for x in lines[start - 1:end])
     return hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+
+
+# `--update` 找"这条引用的内容整体挪走了几行"时的扫描半径。
+# 上方插几行注释是最常见的形状（实测是一次 5 行的插入），400 行足够宽，
+# 又让一次扫描是 O(400) 次区间哈希而不是 O(文件行数)。
+SHIFT_SCAN = 400
+
+
+def find_shift_candidates(root, path, start, end, want, scan=SHIFT_SCAN):
+    """旧哈希在新位置上对不上时，附近有没有一段内容和它**逐字节相同**。
+
+    只在 ±`scan` 行、**行数不变**的区间里找，返回全部候选（不是第一个）——
+    候选多于一个意味着"内容变了"和"内容挪了"分不开，调用方必须拒绝自动跟着挪。
+    """
+    full = os.path.join(root, path)
+    try:
+        with open(full, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return []
+    if lines:
+        # 与 `content_hash` 同一套 BOM 处理：不一致的话这里算出来的哈希
+        # 永远对不上锁里的那个，平移检测会静默失效（退化成原地重哈希）。
+        lines[0] = lines[0].lstrip("﻿")
+    n = len(lines)
+    span = end - start
+    hits = []
+    for k in range(1, scan + 1):
+        for ns in (start + k, start - k):
+            ne = ns + span
+            if ns < 1 or ne > n:
+                continue
+            if hash_lines(lines, ns, ne) == want:
+                hits.append((ns, ne))
+    return hits
 
 
 # ---------------------------------------------------------------------------
@@ -392,13 +450,59 @@ def read_lock(root):
     return out
 
 
-def write_lock(root, cites):
-    """按目标区间去重后写出。同一区间被多篇引用时共用一个条目。"""
-    seen = {}
+def write_lock(root, cites, old_lock=None):
+    """按目标区间去重后写出。返回 `(条目数, 报告)`。
+
+    旧形状是"按现在的位置重算一遍哈希"，那在**上方插了几行**时是错的：原地重哈希
+    会把一条本来正确的引用盖成"指向别处"的错引用，而且从此全绿。所以现在对不上时
+    先找平移（见 `find_shift_candidates`），找得到就**跟着挪、哈希保持不变**。
+
+    报告里四样都是**要人看见**的 —— `--update` 的产出只有被人读过才有意义：
+
+      * `moved`：内容逐字节没变，只是整体挪了。锁跟着挪了，**而文档里那条引用
+        自己写的行号没跟着挪** ⇒ 下一次门禁会报"锁文件里没有这一条"。那不是
+        门禁抽风，是它在说"文档里那条 `文件:行号` 也要一起改"。
+      * `restamped`：同一位置的内容真的改了，哈希重刷，人工核引述还对不对。
+      * `ambiguous`：附近有不止一段内容与旧哈希相同，分不清该跟哪一个 ⇒ 不自动
+        挪（按"内容变了"处理），交给人定。
+      * `conflicts`：平移的目标键上已经有一条**不同**内容的记录 ⇒ 不覆盖。
+    """
+    by_key = {}
     for c in cites:
-        if not c.path:
+        if c.path:
+            by_key.setdefault(c.key(), []).append(c)
+
+    seen = {}
+    moved, restamped, ambiguous, conflicts = [], [], [], []
+
+    for key in sorted(by_key):
+        cs = by_key[key]
+        path, start, end = cs[0].path, cs[0].start, cs[0].end
+        got = content_hash(root, path, start, end)
+        want = (old_lock or {}).get(key)
+
+        if want is None or got == want:
+            seen[key] = got
             continue
-        seen[c.key()] = content_hash(root, c.path, c.start, c.end)
+
+        cands = find_shift_candidates(root, path, start, end, want)
+        if len(cands) > 1:
+            ambiguous.append((key, cands, cs))
+            seen[key] = got
+            continue
+        if len(cands) == 1:
+            ns, ne = cands[0]
+            new_key = "%s:%d-%d" % (path, ns, ne)
+            if new_key in seen and seen[new_key] != want:
+                conflicts.append((key, new_key, seen[new_key], want, cs))
+                seen[key] = got
+                continue
+            seen[new_key] = want
+            moved.append((key, new_key, ns - start, cs))
+            continue
+        restamped.append((key, want, got, cs))
+        seen[key] = got
+
     p = lock_path(root)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
@@ -408,7 +512,43 @@ def write_lock(root, cites):
         for k in sorted(seen):
             f.write("%s %s\n" % (k, seen[k]))
     os.replace(tmp, p)
-    return len(seen)
+    return len(seen), {"moved": moved, "restamped": restamped,
+                       "ambiguous": ambiguous, "conflicts": conflicts}
+
+
+def print_update_report(rep):
+    """把 `--update` 干了什么逐条印出来。**不判红**：刷新锁文件本身没出错，
+    出错的是"刷新完之后没人知道文档里还有行号要改"这件事。"""
+    moved, restamped = rep["moved"], rep["restamped"]
+    ambiguous, conflicts = rep["ambiguous"], rep["conflicts"]
+    print("  复核报告：平移 %d / 重刷 %d / 歧义 %d / 撞键 %d"
+          % (len(moved), len(restamped), len(ambiguous), len(conflicts)))
+
+    for old, new, delta, cs in moved:
+        print("  [移] %s -> %s（内容逐字节没变，整体挪了 %+d 行）"
+              % (old, new, delta))
+        for c in cs:
+            print("       **%s 第 %d 行写的 `%s` 也要一起改成 %s**"
+                  % (c.doc, c.lineno, c.raw, new))
+
+    for key, want, got, cs in restamped:
+        print("  [刷] %s 的内容真的改了（锁 %s，实际 %s）" % (key, want, got))
+        for c in cs:
+            print("       %s 第 %d 行 `%s` —— 人工核一遍引述还对不对"
+                  % (c.doc, c.lineno, c.raw))
+
+    for key, cands, cs in ambiguous:
+        print("  [歧] %s 附近有 %d 段内容和旧哈希一样（%s），不自动跟着挪"
+              % (key, len(cands),
+                 ", ".join("%d-%d" % (a, b) for a, b in cands)))
+        for c in cs:
+            print("       %s 第 %d 行 `%s`" % (c.doc, c.lineno, c.raw))
+
+    for key, new_key, there, want, cs in conflicts:
+        print("  [撞] %s 想挪到 %s，但那上面已经记着 %s（这次要写的是 %s），"
+              "没覆盖" % (key, new_key, there, want))
+        for c in cs:
+            print("       %s 第 %d 行 `%s`" % (c.doc, c.lineno, c.raw))
 
 
 # ---------------------------------------------------------------------------
@@ -549,8 +689,9 @@ def main():
 
     print("\n==== 汇总 ====")
     if args.update:
-        n = write_lock(root, good)
+        n, rep = write_lock(root, good, lock)
         print("锁文件已刷新：%s（%d 条目标区间）" % (LOCK_REL, n))
+        print_update_report(rep)
         return 0
     if failures:
         print("红 %d 条：" % len(failures))
