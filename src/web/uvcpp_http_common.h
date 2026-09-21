@@ -349,8 +349,12 @@ inline bool http_name_iequal(const char* a, size_t an,
 // `const std::string&` 要走一次用户定义转换 ⇒ 前者胜出。`std::string` 实参则
 // 只能绑既有那个（没有 `std::string` → `const char*` 的隐式转换）。两边都不含糊。
 //
-// 值那一侧**故意不加重载**：全仓扫过，这族调用里的长字面量全部落在**名字**位置，
-// 值位置一个都没有（短值走 SSO，本来就免费）。
+// 值那一侧**同样要**。这里原先写着「全仓扫过，这族调用里的长字面量全部落在
+// **名字**位置，值位置一个都没有」—— 那句是错的：值位置确实有，只是不在
+// `set_header` 的调用点上，而在 `uvcpp_web_response::body()` 的 `ct` 实参上
+// （`text()` 传 25 字符、`html()` 24、`json()` / `json_str()` 31，见
+// `uvcpp_web_response.cpp`）。所以这族里 `http_set_header` 有**三个**形态，
+// 第三个就在下面。
 // -------------------------------------------------------------------------
 
 /**
@@ -447,6 +451,35 @@ inline void http_set_header(http_headers& hdrs, const char* name,
   }
   // 走到这里才真的插入，头名这时候必须被拷下来（外面那个字面量不归我们管）。
   hdrs.push_back({std::string(name, n), value});
+}
+
+/**
+ * @brief 名字与**值**都是字面量时的版本。
+ *
+ * 上面那段末尾说的"值那一侧也有"，落点就在这——长字面量在 `uvcpp_web_response`
+ * 的 `text()`(25) / `html()`(24) / `json()`(31) / `json_str()`(31) 里被传给
+ * `body()` 的 `ct` 形参，而那一版 `ct` 收的是 `const std::string&`：
+ *
+ *   `resp.text("ok")` → `body("ok", 2, "text/plain; charset=utf-8")`
+ *                       ↑ 调用点先建一个 25 字符的临时串（第 1 次分配）
+ *                       → `push_back` 把值拷进 `http_header.value`（第 2 次）
+ *
+ * **那是 benchmark 自己在跑的两条路由**（`GET /text`、`GET /json`）。
+ *
+ * 这一版让两个成员各自从 C 串**就地构造**，再移动进向量 ⇒ 两次分配降到一次
+ * （留下的那一次是头表必须持有的那份值，省不掉）。`std::string` 实参照旧绑
+ * 上面那两条，行为不变。
+ */
+inline void http_set_header(http_headers& hdrs, const char* name,
+                            const char* value) {
+  const size_t n = http_name_len(name);
+  for (auto& h : hdrs) {
+    if (http_name_iequal(h.name.data(), h.name.size(), name, n)) {
+      h.value = value;
+      return;
+    }
+  }
+  hdrs.push_back(http_header{std::string(name, n), value});
 }
 
 }  // namespace uvcpp

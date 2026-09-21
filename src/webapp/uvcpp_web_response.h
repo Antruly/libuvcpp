@@ -276,6 +276,16 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_web_response& set_content_type(const std::string& ct);
   std::string content_type() const;
 
+  /*
+   * 名字与值**都是**字面量时的那一组：省掉临时 `std::string`，值那一侧还多省
+   * 一次拷贝（就地构造再移动，而不是"建临时 `http_header` 再搬"）。
+   * 字面量调用点由重载决议自动选中，**调用点零改动**。
+   * 详见 `uvcpp_http_common.h` 里同名重载的注释。
+   */
+  uvcpp_web_response& set_header(const char* name, const char* value);
+  uvcpp_web_response& add_header(const char* name, const char* value);
+  uvcpp_web_response& set_content_type(const char* ct);
+
   // -------------------------------------------------------------------
   // 报文体
   // -------------------------------------------------------------------
@@ -287,6 +297,19 @@ class UVCPP_API uvcpp_web_response {
   /** @brief 设置 body（二进制安全）。 */
   uvcpp_web_response& body(const std::string& s,
                            const std::string& ct = std::string());
+
+  /*
+   * `ct` 走 C 串的两个版本，**刻意不给默认值** —— 给了就和上面两个的默认实参
+   * 撞成歧义（`body(s)` 会有两个同样可行的候选）。
+   *
+   * 为什么要这一对：`text()` / `html()` / `json()` / `json_str()` 都是往
+   * `ct` 位置传**长字面量**（25 / 24 / 31 / 31 字符，全在 MSVC 的 15 字符 SSO
+   * 之外），而上面两个版本的 `ct` 是 `const std::string&` ⇒ 每个 `resp.text("ok")`
+   * 都要先建一个临时串，再被 `set_content_type` 拷进头表。**那是 benchmark
+   * 自己在跑的两条路由**（`GET /text`、`GET /json`）。这一对把它们降到一次分配。
+   */
+  uvcpp_web_response& body(const char* data, size_t len, const char* ct);
+  uvcpp_web_response& body(const std::string& s, const char* ct);
 
   /**
    * @brief 接管一块已有 buf 的所有权，**不拷贝字节**。

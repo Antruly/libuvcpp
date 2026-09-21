@@ -117,6 +117,14 @@ std::string uvcpp_http_response::content_type() const {
   return get_header("content-type");
 }
 
+void uvcpp_http_response::set_header(const char* key, const char* value) {
+  http_set_header(headers, key, value);
+}
+
+void uvcpp_http_response::set_content_type(const char* ct) {
+  set_header("content-type", ct);
+}
+
 void uvcpp_http_response::set_content_type(const std::string& ct) {
   set_header("content-type", ct);
 }

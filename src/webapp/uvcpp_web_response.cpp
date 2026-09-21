@@ -395,6 +395,42 @@ uvcpp_web_response& uvcpp_web_response::body(const std::string& s,
   return body(s.data(), s.size(), ct);
 }
 
+uvcpp_web_response& uvcpp_web_response::body(const char* data, size_t len,
+                                             const char* ct) {
+  resp_.body.clear();
+  if (data && len > 0) {
+    resp_.body.clone_data(data, len);
+  }
+  // `ct` 为空指针与空串一视同仁 —— 上面那版的判据是 `!ct.empty()`。
+  if (ct != nullptr && *ct != '\0') {
+    set_content_type(ct);
+  }
+  return *this;
+}
+
+uvcpp_web_response& uvcpp_web_response::body(const std::string& s,
+                                             const char* ct) {
+  return body(s.data(), s.size(), ct);
+}
+
+uvcpp_web_response& uvcpp_web_response::set_header(const char* name,
+                                                   const char* value) {
+  http_set_header(resp_.headers, name, value);
+  return *this;
+}
+
+uvcpp_web_response& uvcpp_web_response::add_header(const char* name,
+                                                   const char* value) {
+  // 同 `add_header(const std::string&, const std::string&)`：追加语义，
+  // 不是覆盖语义 —— Set-Cookie 这类多值头必须原样追加。
+  resp_.headers.push_back(http_header{name, value});
+  return *this;
+}
+
+uvcpp_web_response& uvcpp_web_response::set_content_type(const char* ct) {
+  return set_header("content-type", ct);
+}
+
 uvcpp_web_response& uvcpp_web_response::body_move(uvcpp_buf& src,
                                                   const std::string& ct) {
   resp_.body.move_buf(src);  // 所有权转移，src 之后为空

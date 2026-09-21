@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/http_name_alloc_unit.cpp
- * @brief 头部查找**不能为头名构造临时 `std::string`**。
+ * @brief 头部查找**不能为头名构造临时 `std::string`**；值位置同理。
  *
  * ## 这个用例在钉什么
  *
@@ -44,6 +44,23 @@
  * 库里 ⇒ 本用例**证不到成员那一层**。承重的是"自由函数不再构造临时串"；
  * 成员那层靠这层转发 + 行为用例（`web_http_server_func` 等）覆盖。别把这里
  * 读成"整条链都验过了"。
+ *
+ * ## 值那一侧（名字侧的门禁挡不住它）
+ *
+ * 长字面量**也**落在值位置，只是不在 `set_header` 的调用点上，而在
+ * `uvcpp_web_response::body(...)` 的 `ct` 实参上 —— `text()` 传 25 字符、
+ * `html()` 24、`json()` / `json_str()` 31，全由 `body(const std::string& s,
+ * const std::string& ct)` 收下。仓库自己的 bench 走的就是这两条路
+ * （`bench/bench_server.cpp` 的 `/json` 与 `/text`）。
+ *
+ * 所以下半段给值侧也立了门禁。它的**判据形状与名字侧不同**：值的字节必须被
+ * 存下来，所以"插入"的判据是**恰好 1**（只付值自己那一份存储），名字侧才是 0。
+ * 改前的形状是 2 —— 一个调用点上的临时串，加一次 `push_back` 的拷贝。
+ * **要比的是这条 2 → 1，不是绝对数。**
+ *
+ * 它自带的对照：改前形状逐字重演必须恰好 2；覆写那条的初值铺了远超 31 的
+ * 容量，所以覆写对照是 1（只剩那个临时串）—— 这一条同时钉住了"初值确实够宽"
+ * 这个前提，前提若不成立它会自己变红。
  *
  * ## 对照组（没有它们，"0 次分配"什么也证明不了）
  *
@@ -111,6 +128,41 @@ const char* const kLongName = "access-control-allow-origin";
 
 /// 17 字符：MSVC/libstdc++ 超，**libc++ 不超**（见文件头那张表）。
 const char* const kMidName = "transfer-encoding";
+
+// --- 值侧的两个前提，用 `static_assert` 钉在编译期 ---
+//
+// 写成数组（而不是 `const char* const`）就是为了拿得到 `sizeof`。这两条是
+// "值侧判据在什么情况下会是错的"的答案：值要是没超过上限，整段就是空过的。
+// 数字对不上时**编译**就红，不用等哪条 CI 腿跑出个说不清的结果。
+
+/// 31 字符，仓库自己那条 json 路径用的字面量（`uvcpp_web_response::json()`）。
+const char kLongValue[] = "application/json; charset=utf-8";
+
+/// 69 字符，只用来给"覆写"那条判据铺一个容量足够宽的初值。
+const char kSlackValue[] =
+    "application/json; charset=utf-8; padding=0123456789012345678901234567";
+
+static_assert(sizeof(kLongValue) - 1 > 22u,
+              "值侧判据要求判据值超过**三个标准库中最大**的 SSO 上限 22");
+static_assert(sizeof(kSlackValue) - 1 > sizeof(kLongValue) - 1,
+              "覆写对照要求初值比判据值宽，否则那条会因重分配而红，"
+              "与被测代码无关");
+
+// --- 注释里报的那几个长度，也钉在这里 ---
+//
+// 「印出来的数与算出来的数对不上」是这个仓库里**已经出现过两次**的错法。上面
+// 那两条判的是**判据值**的长度，对注释里报的数一个都管不着 —— 我自己上一版就把
+// `text()` 报成 24、`html()` 报成 23，实测是 **25 / 24**。所以这三条只管一件事：
+// 下面几句注释里报的数不许写错。
+//
+// 它们**不**保证库里的 `ct` 字面量没被换成别的（换了两边一起变，这里不会红）——
+// 那是行为用例的事，不是本文件的事。
+static_assert(sizeof("text/plain; charset=utf-8") - 1 == 25u,
+              "`text()` 的 ct 是 25 字符，注释里别写成 24");
+static_assert(sizeof("text/html; charset=utf-8") - 1 == 24u,
+              "`html()` 的 ct 是 24 字符，注释里别写成 23");
+static_assert(sizeof("application/json; charset=utf-8") - 1 == 31u,
+              "`json()` 的 ct 是 31 字符");
 
 /// 跑一段东西并返回它分配了几次。窗口内**不能**有本用例自己的分配。
 template <typename Fn>
@@ -203,13 +255,72 @@ int main() {
   expect("http_has_header(h, long_name_str)  [既有 std::string 路径]",
          allocs_of([&] { (void)http_has_header(h, long_name_str); }), 0);
 
+  // ---------------------------------------------------------------------
+  // 值侧 —— 判据形状与名字侧不同（见文件头）：**插入 want=1**（值那几字节
+  // 必须被存下来），覆写 want=0。每条都用一个**窗口外新建**的头表，免得
+  // 上一条的插入把下一条悄悄变成覆写。
+  //
+  // 两个表都 `reserve(4)` —— 不是随手写的：向量自己的扩容是噪声，而库那边
+  // 正是靠 `uvcpp_http_response` 构造里的 `headers.reserve(4)` 把它免掉的。
+  // 这里跟着做，窗口里剩下的分配才只有"值那几字节"这一项。
+  // ---------------------------------------------------------------------
+  std::printf("-- 值侧（长字面量落在值位置）\n");
+
+  const auto fresh_table = [] {
+    http_headers t;
+    t.reserve(4);
+    t.push_back(http_header{"host", "a"});
+    return t;
+  };
+  const auto with_slack = [] {
+    http_headers t;
+    t.reserve(4);
+    t.push_back(http_header{"host", "a"});
+    t.push_back(http_header{"content-type", kSlackValue});
+    return t;
+  };
+
+  // 对照组 3 —— 值侧承重的那条。改前的形状逐字重演：调用点上一个**值位置**的
+  // 临时串（1 次），加 `push_back` 把值拷进向量（1 次）。它同时钉住两个前提：
+  // 计数器看得见值位置、`kLongValue` 确实超过本平台上限。
+  {
+    http_headers hv = fresh_table();
+    expect("http_set_header(hv, \"content-type\", std::string(kLongValue))  [改前·插入]",
+           allocs_of([&] {
+             http_set_header(hv, "content-type", std::string(kLongValue));
+           }),
+           2);
+  }
+  {
+    http_headers hv = fresh_table();
+    expect("http_set_header(hv, \"content-type\", kLongValue)  [新形状·插入]",
+           allocs_of([&] { http_set_header(hv, "content-type", kLongValue); }), 1);
+  }
+
+  // 覆写才是热路径上真正发生的事（响应对象设过 content-type 之后又改一次）。
+  // 初值 69 字符 ⇒ 容量远超 31 ⇒ 改前形状只剩那个临时串，新形状一次都不该有。
+  // 对照那条同时钉住"初值确实够宽"这个前提：不成立它会自己变红。
+  {
+    http_headers hv = with_slack();
+    expect("http_set_header(hv, \"content-type\", std::string(kLongValue))  [改前·覆写]",
+           allocs_of([&] {
+             http_set_header(hv, "content-type", std::string(kLongValue));
+           }),
+           1);
+  }
+  {
+    http_headers hv = with_slack();
+    expect("http_set_header(hv, \"content-type\", kLongValue)  [新形状·覆写]",
+           allocs_of([&] { http_set_header(hv, "content-type", kLongValue); }), 0);
+  }
+
   if (g_failures != 0) {
-    std::printf("FAIL: %d 条判据没过 —— 头名仍在构造临时 std::string\n",
+    std::printf("FAIL: %d 条判据没过 —— 字面量仍在构造临时 std::string\n",
                 g_failures);
     std::fflush(stdout);
     return 1;
   }
-  std::printf("PASS: 头名字面量没有产生任何堆分配\n");
+  std::printf("PASS: 头名零分配；字面量值只付它自己那一份存储\n");
   std::fflush(stdout);
   return 0;
 }

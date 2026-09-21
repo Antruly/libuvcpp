@@ -98,6 +98,16 @@ class UVCPP_API uvcpp_http_response {
    */
   void set_header(const char* key, const std::string& value);
 
+  /**
+   * @brief 名字与值**都是**字面量。
+   *
+   * 除了省掉头名的临时串，还省掉**值**的一次拷贝：`push_back({name, value})`
+   * 是先构造临时 `http_header`（值的 `std::string` 在这里分配一次）再搬进向量，
+   * 这里让两个成员各自从 C 串就地构造再移动 ⇒ 长值从两次分配降到一次。
+   * 详见 `uvcpp_http_common.h` 里同名重载的注释。
+   */
+  void set_header(const char* key, const char* value);
+
   /** @brief Get a header value by name (case-insensitive). */
   std::string get_header(const std::string& key,
                          const std::string& default_val = "") const;
@@ -124,6 +134,9 @@ class UVCPP_API uvcpp_http_response {
 
   std::string content_type() const;
   void set_content_type(const std::string& ct);
+
+  /** @copydoc set_header(const char*, const char*) */
+  void set_content_type(const char* ct);
 
   // -------------------------------------------------------------------
   // Serialization
