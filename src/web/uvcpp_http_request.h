@@ -127,6 +127,36 @@ class UVCPP_API uvcpp_http_request {
   static uvcpp_http_request make_post(const std::string& url,
                                        const char* body, size_t len,
                                        const std::string& content_type = "application/octet-stream");
+
+  // -------------------------------------------------------------------
+  // 移动语义
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 真正的移动构造 / 移动赋值 —— **不是**深拷贝。
+   *
+   * 为什么必须显式写出来：`UVCPP_DEFINE_COPY_FUNC` 只声明了拷贝那一对，而在
+   * C++ 里**用户声明了拷贝赋值运算符就会抑制隐式移动赋值运算符的生成**。于是
+   * `b = std::move(a)` 会静默地绑到 `operator=(const uvcpp_http_request&)`，
+   * 把 `headers` 深拷一遍（1 次 vector 分配 + 每个头 2 个 `std::string`）。
+   * 代码里写着 `std::move`、跑起来是拷贝，是最难查的一类"性能没问题"。
+   * `uvcpp_buf` 的头注释里记过同一个坑，这里是它的第二例。
+   *
+   * **契约**：移动之后 `obj` 处于「已搬空」状态 —— `url` 为空串、`headers`
+   * 为空、`body` 长度为 0（`uvcpp_buf` 的移动语义保证这一点）。`method` /
+   * `version` / `stream_id` 是标量，默认移动赋值按值搬，**保留原值**；不要依赖
+   * 它们，需要就在移动前取走。
+   *
+   * 这两条写成 `= default`，但**不是**"不新增导出符号"：本类是 `UVCPP_API`
+   * （dllexport），MSVC 会把内联的 `= default` 成员一并导出。
+   *
+   * 实测（`dumpbin -exports` 比对改动前后那份 DLL）本类的导出符号 **28 → 30**：
+   * 新增的正好是 `??0uvcpp_http_request@uvcpp@@QEAA@$$QEAV01@@Z`（移动构造）与
+   * `??4uvcpp_http_request@uvcpp@@QEAAAEAV01@$$QEAV01@@Z`（移动赋值），**删除 0 个**。
+   * 所以这是一次只增不减的 ABI 变化：用旧头文件编出来的消费者照样链接得上。
+   */
+  uvcpp_http_request(uvcpp_http_request &&obj) noexcept = default;
+  uvcpp_http_request &operator=(uvcpp_http_request &&obj) noexcept = default;
 };
 
 }  // namespace uvcpp

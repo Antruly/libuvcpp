@@ -452,9 +452,13 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     return;
   }
 
-  // The claim hook made us build the request view at headers time. Reuse it —
-  // rebuilding would clone the header vector a second time for every request,
-  // just to throw the first copy away.
+  // The claim hook made us build the request view at headers time. Take it over
+  // by **move** — rebuilding it from the parser would mean a second pass over
+  // the header vector for every request. The move is a real move:
+  // `uvcpp_http_request` declares move operations, so this hands the vector over
+  // instead of cloning it (without them, `std::move` silently degrades to the
+  // copy assignment — that was the behaviour here until the move ops were
+  // added; see the contract in `uvcpp_http_request.h`).
   uvcpp_http_request req;
   if (ctx.stream_view_built) {
     req = std::move(ctx.stream_request);
