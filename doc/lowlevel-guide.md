@@ -245,13 +245,13 @@ libuv 那边会解引用。所以**关闭回调跑完之后再 `stop()` 是空�
 
 规律是"**先自己，再 status**"，`uvcpp_fs` 是唯一的例外。
 
-**`set_self_free(true)`**（`src/req/uvcpp_req.h:141`）让 req 在完成回调返回后自己
+**`set_self_free(true)`**（`src/req/uvcpp_req.h:137`）让 req 在完成回调返回后自己
 `delete`，默认关。开了之后调用方不能再删。
 
-**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:159-178`）
+**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:155-174`）
 **先把闭包从槽位里 move 出来、再清空源槽、然后才调用**。顺序反过来的话，删掉的就是
 "此刻正在执行的那个 `std::function`"，连同它的捕获一起——是未定义行为。
-`src/req/uvcpp_req.h:163-170` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
+`src/req/uvcpp_req.h:159-166` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
 move 不会把源置空（libstdc++/MSVC 会），所以这个 bug 只在 macOS 上显形。
 
 **`uvcpp_random` 在旧 libuv 上不存在**——它整段套在 `#if UV_VERSION_MINOR >= 33` 里。
@@ -325,7 +325,8 @@ int main() {
 - **`int` 返回值：0 成功，失败是 libuv 的负错误码**（`UV_EINVAL`、`UV_EALREADY`…）。
   最后一个是粘性的，`get_last_error()` 拿得到。
 - **内存不足抛 `std::bad_alloc`**：`src/uvcpp/uvcpp_alloc.h:121-126`、`uvcpp_loop` 的构造
-  （`src/handle/uvcpp_loop.cpp:59-60`）、`uvcpp_handle`/`uvcpp_req` 的拷贝构造与赋值。
+  （`src/handle/uvcpp_loop.cpp:59-60`）、`uvcpp_req` 的拷贝构造与赋值。（`uvcpp_handle`
+  的拷贝构造/赋值曾经也在这一列，但它们已删 —— 见 §10。）
 - **`queue_work` 抛的是 `const char*`，不是 `std::exception`**（`src/req/uvcpp_work.cpp:20`）。
   单元测试统一的 `catch (const std::exception&)` **接不住它**。
 - 这一层除此之外基本不抛异常——错误都走返回值。
@@ -358,9 +359,17 @@ int main() {
 ## 10. 没做的（如实列出）
 
 - **没有逐成员的 API 参考。** 全仓没有 Doxygen 生成步骤，本页讲的是"典型流程 + 坑"。
-- **`uvcpp_handle::clone()` / `uvcpp_req::clone()` 没有文档。** 它们和基类的拷贝构造
-  都是 `memcpy` 整个 libuv 结构体（`src/handle/uvcpp_handle.cpp:193-225`）。头里没说
-  该拿它干什么，本页也就不推荐——**别拷贝活着的句柄**。
+- **不支持拷贝句柄，也不支持"克隆" —— 而且是编译期拒绝，不是文档警告。**
+  基类 `uvcpp_handle` 与 16 个派生类的拷贝构造 / 拷贝赋值全部是 `= delete`
+  （`src/handle/uvcpp_handle.h:94`），`uvcpp_handle::clone()` 与 `uvcpp_req::clone()`
+  同样 `= delete`，任一调用都是编译错误。理由是这几个操作**不可能有正确实现**：
+  `uv_handle_t` 不是一个值，它是挂在某个 `uv_loop_t` 的 `handle_queue` 上的一个
+  节点。`memcpy` 一个**活着的**它，拷出来的那份会带走源的 `loop` 指针与队列邻居，
+  却从来没被插进任何队列 —— 于是"那块内存要不要还"怎么答都不对：不还就是纯泄漏
+  （原先的实况），还了则会走 `uv_close`，顺着**源句柄邻居**的地址把**还活着的源
+  句柄**从它自己的队列上静默摘掉。判据是编译期断言，见 `tests/unit/handle_unit.cpp`。
+  `uvcpp_req` 的**拷贝**是另一回事，不受这批影响：它没有所有权标志，拷出来的那块
+  在析构里会被 `free_req()` 还掉。
 - **线程契约没有成文。** 除了 `uvcpp_async::send()`，头文件里没有任何一句话说哪个
   线程能调哪个函数。实现注释暗示是循环线程，但那是从代码推的，不是承诺。
 - **`default_loop()` 的重复 `init()` 行为未定义。** 见 §3。

@@ -101,9 +101,6 @@ void uvcpp_req::free_req() {
 
 int uvcpp_req::cancel(uvcpp_req *vReq) { return uv_cancel(vReq->req); }
 
-uvcpp_req *uvcpp_req::clone(uvcpp_req *obj, int memSize) {
-  uvcpp_req *newObj = (uvcpp_req *)new char[memSize];
-  memcpy(newObj, obj, memSize);
-  return newObj;
-}
+// `clone()` 的声明在头文件里是 `= delete`，所以这里没有定义 —— 两个对象共享同一个
+// `uv_req_t`、析构各还一次就是双重释放，这个操作同样没有正确实现。
 } // namespace uvcpp

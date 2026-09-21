@@ -190,46 +190,23 @@ int uvcpp_handle::is_closing() {
   return uv_is_closing(_handle);
 }
 
-uvcpp_handle::uvcpp_handle(const uvcpp_handle &obj)
-    : handle_close_cb(), handle_alloc_cb(), _handle(nullptr), _handle_union() {
-  if (obj._handle != nullptr) {
-    size_t sz = uv_handle_size(obj._handle->type);
-    _handle = (uv_handle_t *)uvcpp::uvcpp_alloc_bytes(sz);
-    if (_handle == nullptr)
-      throw std::bad_alloc();
-    memcpy(this->_handle, obj._handle, sz);
-    this->set_handle_data();
-    _vdata = obj._vdata;
-    _handle_union.uvcpp_handle = _handle;
-  } else {
-    _handle = nullptr;
-  }
-}
+// 拷贝构造 / 拷贝赋值 / `clone()` 的**声明**在头文件里都是 `= delete`，所以这里
+// 没有定义 —— 不是漏了，是这三个操作没有正确实现。
+//
+// 它们原先都是 `memcpy` 一个**活着的** `uv_handle_t`。而它不是一个值：它是挂在某个
+// `uv_loop_t` 的 `handle_queue` 上的一个节点。拷出来的那份带走了源的 `loop` 指针和
+// 队列邻居，却**从来没被插进任何队列**。于是 `_owns_handle` 置不置位都不对 ——
+//
+//   · 不置位（原状）：`free_handle()` 的四条释放路径全部由这个标志把门，一条都
+//     走不到 ⇒ 那份分配永远没人还，纯泄漏；
+//   · 置位：析构会走 `_owns_handle && _handle->loop != nullptr` 那条分支去
+//     `uv_close`，而 libuv 的 `uv_close` 会 `QUEUE_REMOVE(&handle->handle_queue)`
+//     —— 顺着**源句柄邻居**的地址往回调，把**还活着的源句柄**从它自己的队列上
+//     静默摘掉（从此没有回调、`uv_loop_close()` 也关不掉那个循环）。
+//
+// 泄漏是有界的、安静的；后者是破坏一个活句柄。所以处置不是"补上漏掉的那次赋值"，
+// 而是让这个操作不存在。完整推理见 doc/lowlevel-guide.md §10。
 
-uvcpp_handle &uvcpp_handle::operator=(const uvcpp_handle &obj) {
-  this->free_handle();
-
-  if (obj._handle != nullptr) {
-    size_t sz = uv_handle_size(obj._handle->type);
-    _handle = (uv_handle_t *)uvcpp::uvcpp_alloc_bytes(sz);
-    if (_handle == nullptr)
-      throw std::bad_alloc();
-    memcpy(this->_handle, obj._handle, sz);
-    this->set_handle_data();
-    _vdata = obj._vdata;
-  } else {
-    _handle = nullptr;
-  }
-
-  return *this;
-}
-
-uvcpp_handle *uvcpp_handle::clone(uvcpp_handle *obj, int memSize) {
-  uvcpp_handle *newObj = (uvcpp_handle *)new char[memSize];
-  newObj->set_handle_data();
-  memcpy(newObj, obj, memSize);
-  return newObj;
-}
 
 // static overloads removed during rename
 //

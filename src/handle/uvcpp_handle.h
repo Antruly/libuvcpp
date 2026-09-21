@@ -89,9 +89,9 @@ namespace uvcpp {
  */
 class UVCPP_API uvcpp_handle {
 public:
-    // 构造/析构/拷贝/赋值
+    // 构造/析构/拷贝/赋值（拷贝 **删除** —— 理由见 doc/lowlevel-guide.md §10）
     UVCPP_DEFINE_FUNC(uvcpp_handle)
-    UVCPP_DEFINE_COPY_FUNC(uvcpp_handle)
+    UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_handle)
 
     // 基本操作
     /** @brief Set user data pointer associated with the handle. */
@@ -148,23 +148,15 @@ public:
 #endif
 
     // 静态工具
-    /** @brief 按字节克隆一个句柄包装对象（**全仓零调用点；按现在的实现调用是错的**）。
+    /** @brief 按字节克隆一个句柄包装对象 —— **已删除（`= delete`）**。
      *
-     *  - 实现是 `new char[memSize]` + `memcpy`（`src/handle/uvcpp_handle.cpp:227`）。
-     *    `new char[]` **不清零**，所以函数里第二句 `newObj->set_handle_data()`
-     *    会先读一块未初始化的 `_handle`（垃圾值），判空判不掉就顺着它写
-     *    `data = this` —— 这是一次**野指针写**，不是"多余的调用"；
-     *  - 紧接着的 `memcpy` 又把这句的效果整个覆盖掉，所以侥幸没崩也等于白做；
-     *  - `memcpy` 会把两个 `::std::function` 成员（`handle_close_cb` /
-     *    `handle_alloc_cb`）连同 `_owns_handle` 一起按字节复制 ⇒ 两份对象同时
-     *    持有同一份闭包、同一个 `_handle`；两边析构时 `free_handle()` 会去还
-     *    同一块内存 ⇒ 双重释放；
-     *  - 内存来自 `new[]`，而对象是按 `delete` 用的 ⇒ 分配/释放形式不配对。
-     *
-     *  声明保留只为不破坏已公开的接口，**不要调用**；要复制句柄用本类自己那个
-     *  手写的拷贝构造 / 赋值（`src/handle/uvcpp_handle.cpp:193`、`:209`）。
+     *  这个操作不可能有正确实现，所以留着声明是为了让任何调用变成**编译错误**，
+     *  而不是留一个只在运行期咬人的陷阱：`memcpy` 出的那份外壳与源对象共享同一个
+     *  `_handle`，而 `_owns_handle` 也按字节复制 ⇒ **两个所有者、一块内存**，
+     *  两边析构时 `free_handle()` 会去还同一块 —— 双重释放。没有任何赋值方式能
+     *  把这两者分开，因为「要不要还」这件事本身就该是单数的。
      */
-    static uvcpp_handle *clone(uvcpp_handle *obj, int memSize);
+    static uvcpp_handle *clone(uvcpp_handle *obj, int memSize) = delete;
 
     static void ref(uvcpp_handle *vhd);
     static void unref(uvcpp_handle *vhd);
