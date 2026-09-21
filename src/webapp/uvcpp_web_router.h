@@ -124,10 +124,26 @@ struct UVCPP_API web_route_match {
   /** @brief 路径参数（`:id` / `*path` 绑定的值），保序。 */
   std::vector<std::pair<std::string, std::string> > params;
 
-  /** @brief 该路径实际支持的方法（405/OPTIONS 时有意义），已排序去重。 */
+  /**
+   * @brief 该路径实际支持的方法，已排序去重。
+   *
+   * **只在 `METHOD_NOT_ALLOWED` 与 `AUTO_OPTIONS` 两种结果里填**；
+   * `MATCHED` 与 `NOT_FOUND` 时是空的。命中路径上一次读者都没有，所以匹配
+   * 那一趟根本不去收集它 —— 这两条是 405 和自动 OPTIONS 各自再调一次
+   * `match()` 时才算的。
+   */
   std::vector<http_method> allowed_methods;
 
-  /** @brief `allowed_methods` 拼好的 `Allow` 头值，如 `"GET, HEAD"`。 */
+  /**
+   * @brief `allowed_methods` 拼好的 `Allow` 头值，如 `"GET, HEAD"`。
+   *
+   * 与 `allowed_methods` **同一条契约**：只在 405 / `AUTO_OPTIONS` 时填，
+   * `MATCHED` 时是空串。想在命中的处理器里回头问「这个路径还支持哪些方法」，
+   * 不能指望这个字段（它是空的），得自己查路由表。
+   *
+   * @note 405 与自动 OPTIONS 的应答就是拿它当 `Allow` 头的值发出去的，
+   *       所以它非空这件事本身是给客户端看的契约，不是内部实现细节。
+   */
   std::string allow;
 
   /// 显式构造函数，**不用 NSDMI**（那会破坏聚合初始化）。

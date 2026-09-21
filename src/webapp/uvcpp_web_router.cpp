@@ -553,7 +553,6 @@ web_route_match uvcpp_web_router::match(http_method method,
   table_->collect_candidates(segs, cand);
 
   std::vector<std::pair<std::string, std::string> > params;
-  std::vector<http_method> allowed;
   std::vector<std::pair<std::string, std::string> > best_params;
 
   const router_table::route_entry* best = nullptr;
@@ -565,11 +564,6 @@ web_route_match uvcpp_web_router::match(http_method method,
   for (size_t ci = 0; ci < cand.size(); ++ci) {
     const router_table::route_entry& e = table_->routes[cand[ci]];
     if (!match_pattern(e.segments, segs, params)) continue;
-
-    // 路径是匹配的，记下这个路径支持哪些方法（405/OPTIONS 要用）。
-    if (!e.any_method) {
-      push_method_unique(allowed, e.method);
-    }
 
     bool hit = e.any_method || (e.method == method);
     bool head_of_get = false;
@@ -599,7 +593,11 @@ web_route_match uvcpp_web_router::match(http_method method,
     }
     if (take) {
       best = &e;
-      best_params = params;
+      // 换而不是拷：`match_pattern` 进来第一句就是 `params.clear()`，
+      // 所以把旧缓冲留给 `best_params` 去持有、下一轮由 `clear()` 复用，
+      // 语义不变。有参数的路径上这一下省掉的是一次 vector 分配 + N 个
+      // pair<string,string> 的深拷贝。
+      best_params.swap(params);
       best_head_of_get = head_of_get;
     }
   }
@@ -609,11 +607,36 @@ web_route_match uvcpp_web_router::match(http_method method,
     r.handler = &best->handler;
     r.pattern = &best->pattern;
     r.head_of_get = best_head_of_get;
-    r.params = best_params;
-    // build_allow 会就地排序，所以先算它再拷贝，两边顺序才一致。
-    r.allow = build_allow(allowed);
-    r.allowed_methods = allowed;
+    // 同样换而不是拷（`r.params` 是刚构造出来的空 vector）。
+    r.params.swap(best_params);
+    // `allow` / `allowed_methods` 在这条路径上**一个读者都没有**：
+    // `uvcpp_web_app::dispatch()` 命中后只用 `params` / `head_of_get` /
+    // `handler`，而 405 与自动 OPTIONS 是**各自再调一次 `match()`** 拿这两个
+    // 字段的（那两次分别落在 `best == nullptr` 的两个分支上，见下）。
+    // 所以这里不填 —— 填了就是每请求白白多一次 sort、一次字符串拼接、
+    // 两次分配。契约已写进头文件：这两个字段只在 405 / AUTO_OPTIONS 时有意义。
     return r;
+  }
+
+  // ---------------------------------------------------------------------
+  // 没命中。**只有走到这里才需要** `Allow` —— 405 与自动 OPTIONS 都要把它
+  // 发给客户端，命中路径不要。所以收集动作从主循环里挪到了这里。
+  //
+  // 代价是这条路要把「路径是否匹配」重跑一遍（主循环里那个 `hit` 判据不参与）。
+  // 这是刻意的：这条是**错误路径**，每请求一次的冷代码；而命中路径是热代码。
+  // 拿冷路径多一次循环，换热路径少一次分配，方向是对的。
+  // ---------------------------------------------------------------------
+  std::vector<http_method> allowed;
+  {
+    // 收集用的临时容器，值本身不参与判定（只看路径是否匹配），所以复用一个。
+    std::vector<std::pair<std::string, std::string> > scratch;
+    for (size_t ci = 0; ci < cand.size(); ++ci) {
+      const router_table::route_entry& e = table_->routes[cand[ci]];
+      if (!match_pattern(e.segments, segs, scratch)) continue;
+      if (!e.any_method) {
+        push_method_unique(allowed, e.method);
+      }
+    }
   }
 
   if (!allowed.empty()) {
