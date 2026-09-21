@@ -17,6 +17,7 @@
 
 #include <llhttp.h>
 #include <cstring>
+#include <iterator>  // std::make_move_iterator 的声明处（take_headers 用）
 #include <new>
 
 namespace uvcpp {

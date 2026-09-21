@@ -593,7 +593,7 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 三处头文件注释一个字都没提这个区别。
 
 **头/URL 上限对"被 claim 的请求"照样生效。** 这两道是在 llhttp 的头部回调里边收边判的
-（`src/web/uvcpp_parser` 侧 `src/web/uvcpp_http_parser.cpp:420-468`），而 claim hook
+（`src/web/uvcpp_parser` 侧 `src/web/uvcpp_http_parser.cpp:421-469`），而 claim hook
 是在 `headers_complete` 才被问的（`src/web/uvcpp_http_server.cpp:243-297`）。
 所以被认领的请求**照样会被 414/431 拒掉并直接关连接**，认领者连 `HEADERS` 事件
 都收不到。**只有 `max_body_size` 真正停在认领边界**（`src/web/uvcpp_http_server.cpp:226-242`）——
