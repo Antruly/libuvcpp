@@ -323,6 +323,24 @@ static void test_pool_super_block_quota_returned()
 // 这条路的释放器**必须与非 SUPER 块配对**（`detail::aligned_free_wrapper`）。历史上
 // 这里曾按「池正在销毁」走一个自己的分支、用 `::operator delete` 还 —— 那不是这些块的
 // 来源分配器，实测 `0xC0000374`（STATUS_HEAP_CORRUPTION）。
+//
+// **它证的是这一点（释放器配对），不是那段代码里的 use-after-free。**
+// `push_to_global_pool()` 的 `shutdown_` 分支里曾把 `release_bytes(block->size)` 写在
+// `free` 之后（issue #25 的 M3），那是一次释放后使用 —— 但**这条用例看不见它**：
+//
+//   1. 这里用的是默认配置，`max_total_memory == 0`，而 `release_bytes()` 第一句就是
+//      `if (config_.max_total_memory == 0) return;` ⇒ 额度那一侧根本量不到；
+//   2. 即便量得到，`release_bytes(96)` 与 `release_bytes(96)` 也没有差别 —— 读到的那
+//      个值恰好还对（实测 `free 前=96 free 后读到=96`）。
+//
+// 它**会**崩，但不是每次都崩：实测把下面那条 SUPER 用例摘掉、光跑它自己，变异体
+// 20 次里崩 11 次（约一半）；修复后 20 次全绿。
+// 所以「跑绿了」不能当作那两处没问题的证据 —— **那两处的判据是页面堆门禁**：
+//
+//     python -u tests/tools/run_pageheap_gate.py --tree <tree> --exe test_memory_pool
+//
+// 判据形状是「基线绿 + 页堆红」，实测变异体在完整页堆下稳定 `0xC0000005`（页堆把释放过的
+// 块立刻 unmap，同一个读当场变成访问违例），修复后绿。
 static void test_pool_release_cache_after_shutdown()
 {
     uvcpp::uvcpp_memory_pool pool;
@@ -339,6 +357,35 @@ static void test_pool_release_cache_after_shutdown()
 
     pool.shutdown();                            // shutdown_ = true，缓存里还挂着 200 块
     pool.release_thread_cache();                // 走 shutdown_ 分支逐个释放
+    TEST_PASS();
+}
+
+// `shutdown()` 之后**直接**释放一个 SUPER 大块所走的那条路。
+//
+// 上面那条用例够不到这半边：它用的是 64 字节 TINY 块，只走 `shutdown_` 分支里的
+// **非 SUPER** 那一支。SUPER 块又**根本不进线程缓存**（`thread_local_cache::push()`
+// 对 `idx >= 7` 返回 false，块当场交给 `push_to_global_pool()`），所以它只能由
+// 「`shutdown()` 之后直接 `deallocate()` 一个大块」走到 —— 全仓此前没有用例走过。
+//
+// 这条分支里曾把 `release_bytes(block->size)` 写在 `free` 之后（issue #25 的 M3），
+// 那是释放后使用。**大块比小块更容易把这条读变成硬崩**：512 KiB 的块 free 之后
+// CRT 往往真的把页还给系统，同一个读当场变成访问违例，不像 64 字节块那样约一半
+// 的次数能蒙混过去。实测（cdb 把崩点分别定位到 `push_to_global_pool+0x7e` 与
+// `+0x3b`，两条分支各崩各的）：只留上面那条 → 20 次崩 11；加上本条 → 10 次崩 10。
+static void test_pool_super_release_after_shutdown()
+{
+    const size_t kSize = 512 * 1024;            // > 256 KiB ⇒ SUPER
+    uvcpp::uvcpp_memory_pool pool;
+    pool.init();
+    pool.init_thread_cache();
+
+    void* p = pool.allocate(kSize);
+    TEST_ASSERT(p != nullptr, "前置：SUPER 块必须分配成功");
+    std::memset(p, 0x5A, kSize);
+
+    pool.shutdown();
+    pool.deallocate(p);                         // shutdown_ 为真 ⇒ SUPER 那一支
+
     TEST_PASS();
 }
 
@@ -724,6 +771,7 @@ int main()
     test_pool_max_total_memory_enforced();
     test_pool_super_block_quota_returned();
     test_pool_release_cache_after_shutdown();
+    test_pool_super_release_after_shutdown();
     test_pool_thread_cache();
     test_pool_multithread();
     test_pool_make_shared_from_pool();

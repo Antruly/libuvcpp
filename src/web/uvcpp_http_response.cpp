@@ -18,7 +18,11 @@ namespace uvcpp {
 // Construction
 // =========================================================================
 
-uvcpp_http_response::uvcpp_http_response() {}
+// 预留四个头的位置。响应对象**每个请求新建一个**（webapp 侧由
+// `uvcpp_web_context` 按值持有，上下文不池化），所以 `headers` 每次都从空开始 ——
+// 不留这一手，一条最普通的响应（content-type + content-length + connection）
+// 就要连撞三次 `push_back` 的扩容（1→2→4），三次分配、两次搬运。
+uvcpp_http_response::uvcpp_http_response() { headers.reserve(4); }
 
 uvcpp_http_response::~uvcpp_http_response() {}
 

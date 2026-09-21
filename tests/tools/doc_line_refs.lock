@@ -315,7 +315,7 @@ src/web/uvcpp_http_request.h:39-39 0e65b3329f91061b
 src/web/uvcpp_http_request.h:40-40 f3931ecc5d178b01
 src/web/uvcpp_http_request.h:42-42 8a9b3a81439de360
 src/web/uvcpp_http_request.h:43-43 0dfe63509c9a942f
-src/web/uvcpp_http_response.cpp:25-42 6f93444f1838a050
+src/web/uvcpp_http_response.cpp:29-46 6f93444f1838a050
 src/web/uvcpp_http_response.h:136-136 97e67d4e228ea020
 src/web/uvcpp_http_response.h:40-40 5d21b46f18af0b31
 src/web/uvcpp_http_response.h:45-49 4ce66406b67bf547
@@ -579,8 +579,8 @@ src/webapp/uvcpp_web_connection.h:30-31 beb28851a639e702
 src/webapp/uvcpp_web_connection.h:31-31 4e74112f380a23b5
 src/webapp/uvcpp_web_connection.h:57-57 6a08d309d35b1ff3
 src/webapp/uvcpp_web_connection.h:60-60 11f07995e8c9885e
-src/webapp/uvcpp_web_context.cpp:353-358 29063e0cffa90988
-src/webapp/uvcpp_web_context.cpp:60-70 bf25714579840f30
+src/webapp/uvcpp_web_context.cpp:355-360 29063e0cffa90988
+src/webapp/uvcpp_web_context.cpp:62-72 bf25714579840f30
 src/webapp/uvcpp_web_context.h:281-293 7ab1858015fa1b61
 src/webapp/uvcpp_web_context.h:329-329 704f1375f8a9d92a
 src/webapp/uvcpp_web_context.h:356-358 1538afd55b66e196

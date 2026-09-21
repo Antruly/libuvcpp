@@ -33,6 +33,8 @@ uvcpp_web_context::uvcpp_web_context(uvcpp_web_context_host& host,
 std::shared_ptr<uvcpp_web_context> uvcpp_web_context::create(
     uvcpp_web_context_host& host, uvcpp_web_conn_id conn_id) {
   // 不能用 std::make_shared：构造函数是私有的，而 create() 是成员所以能 new。
+  // （试过给 `make_shared` 开友元 —— MSVC 上不成立：真正 new 对象的是它内部的
+  // `_Ref_count_obj2`，友元给了 `make_shared` 也够不着私有构造，C2248。）
   return std::shared_ptr<uvcpp_web_context>(
       new uvcpp_web_context(host, conn_id));
 }

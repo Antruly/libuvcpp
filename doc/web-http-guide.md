@@ -273,7 +273,7 @@ h2 连接上要么自己设回去，要么改用带 `stream_id` 的 `send_respon
 
 **三、`uvcpp_http_request` 与 `uvcpp_http_response` 的拷贝构造/赋值是手写的、
 逐字段列举的。** 加字段时编译器一声不吭 —— `stream_id` 就漏过一次
-（`src/web/uvcpp_http_request.cpp:25-36`、`src/web/uvcpp_http_response.cpp:25-42`）。
+（`src/web/uvcpp_http_request.cpp:25-36`、`src/web/uvcpp_http_response.cpp:29-46`）。
 
 ---
 
