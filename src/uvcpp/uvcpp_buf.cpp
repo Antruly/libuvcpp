@@ -17,7 +17,8 @@ uvcpp_buf::~uvcpp_buf() {
 uvcpp_buf::uvcpp_buf(const uvcpp_buf &bf) : uvcpp_buf (){
 
   if (bf.buf.len > 0 && bf.buf.base != nullptr) {
-    this->resize(bf.buf.len);
+    // 紧接着整段覆盖 —— 不要那次清零（resize_uninitialized 的契约）。
+    this->resize_uninitialized(bf.buf.len);
     memcpy(this->buf.base, bf.buf.base, bf.buf.len);
   }
 }
@@ -30,7 +31,8 @@ uvcpp_buf &uvcpp_buf::operator=(const uvcpp_buf &bf) {
   this->free_own();
 
   if (bf.buf.len > 0 && bf.buf.base != nullptr) {
-    this->resize(bf.buf.len);
+    // 上面刚 free_own，old_len = 0，整段会被覆盖。
+    this->resize_uninitialized(bf.buf.len);
     if (this->buf.base != nullptr)
     memcpy(this->buf.base, bf.buf.base, bf.buf.len);
   } else {
@@ -73,14 +75,16 @@ uvcpp_buf::uvcpp_buf(const char *bf, size_t sz) : uvcpp_buf() {
     if (bf == nullptr) {
       throw std::invalid_argument("Input buffer pointer is null");
     }
-    this->resize(sz);
+    // 同 clone_data：紧接着整段覆盖，白清一次。
+    this->resize_uninitialized(sz);
     memcpy(this->buf.base, bf, sz);
   }
 }
 
 uvcpp_buf::uvcpp_buf(const ::std::string &str) : uvcpp_buf() {
   if (!str.empty()) {
-    this->resize(str.size());
+    // 紧接着整段覆盖 —— 不要那次清零（resize_uninitialized 的契约）。
+    this->resize_uninitialized(str.size());
     memcpy(this->buf.base, str.c_str(), str.size());
   }
 }
@@ -102,7 +106,8 @@ uvcpp_buf::uvcpp_buf(const uv_buf_t &bf) {
   this->buf.len = 0;
   this->capacity_ = 0;
   if (bf.len > 0 && bf.base != nullptr) {
-    this->resize(bf.len);
+    // 紧接着整段覆盖 —— 不要那次清零（resize_uninitialized 的契约）。
+    this->resize_uninitialized(bf.len);
     if (this->buf.base != nullptr)
     memcpy(this->buf.base, bf.base, bf.len);
   }
@@ -115,7 +120,8 @@ uvcpp_buf &uvcpp_buf::operator=(const uv_buf_t &bf) {
 
   this->free_own();
   if (bf.len > 0 && bf.base != nullptr) {
-    this->resize(bf.len);
+    // 上面刚 free_own，old_len = 0，整段会被覆盖。
+    this->resize_uninitialized(bf.len);
     if (this->buf.base != nullptr)
     memcpy(this->buf.base, bf.base, bf.len);
   }
@@ -126,7 +132,8 @@ uvcpp_buf uvcpp_buf::operator+(const uvcpp_buf &bf) const {
   size_t total_size = this->buf.len + bf.buf.len;
 
   if (total_size > 0) {
-    vbf.resize(total_size);
+    // vbf 是刚构造的空 buf，[0, total_size) 会被下面两段 memcpy 填满。
+    vbf.resize_uninitialized(total_size);
     if (this->buf.len > 0 && this->buf.base != nullptr) {
       memcpy(vbf.buf.base, this->buf.base, this->buf.len);
     }
@@ -254,7 +261,13 @@ void uvcpp_buf::reset_share_discard_count() {
   share_discard_count_.store(0, ::std::memory_order_relaxed);
 }
 
-void uvcpp_buf::resize(size_t sz) {
+void uvcpp_buf::resize(size_t sz) { resize_impl(sz, /*zero_tail=*/true); }
+
+void uvcpp_buf::resize_uninitialized(size_t sz) {
+  resize_impl(sz, /*zero_tail=*/false);
+}
+
+void uvcpp_buf::resize_impl(size_t sz, bool zero_tail) {
   if (sz == 0) {
     this->free_own();
     return;
@@ -268,7 +281,7 @@ void uvcpp_buf::resize(size_t sz) {
 
   if (this->buf.base != nullptr && sz <= this->capacity_) {
     // 容量够：原地复用，只改可见长度。新露出来的那段仍然清零。
-    if (this->buf.len < sz) {
+    if (zero_tail && this->buf.len < sz) {
       memset(this->buf.base + this->buf.len, 0, sz - this->buf.len);
     }
     this->buf.len = sz;
@@ -305,7 +318,7 @@ void uvcpp_buf::resize(size_t sz) {
   if (new_base == nullptr) {
     throw std::bad_alloc();
   }
-  if (old_len < sz) {
+  if (zero_tail && old_len < sz) {
     memset(new_base + old_len, 0, sz - old_len);
   }
   this->buf.base = new_base;
@@ -349,7 +362,9 @@ void uvcpp_buf::clear() { this->resize(0); }
 
 void uvcpp_buf::clone(const uvcpp_buf &srcBuf) {
 
-  this->resize(srcBuf.size());
+  // 注意「缩小」那一支：old_len > sz 时 resize_impl 本来就不清，这里只是把
+  // 「放大」那一支的那次清零也去掉，而它照样被整段覆盖。
+  this->resize_uninitialized(srcBuf.size());
   if (srcBuf.size() > 0) {
     memcpy(this->buf.base, srcBuf.get_data(), srcBuf.size());
   }
@@ -429,7 +444,8 @@ void uvcpp_buf::clone_data(const char *bf, size_t sz) {
   if (bf == nullptr && sz > 0) {
     throw std::invalid_argument("Cannot clone null buffer pointer with non-zero size");
   }
-  this->resize(sz);
+  // 下面紧跟着整段覆盖 -> 不要那次清零（见 resize_uninitialized 的契约）。
+  this->resize_uninitialized(sz);
   if (sz > 0) {
     memcpy(this->buf.base, bf, sz);
   }
@@ -441,7 +457,9 @@ void uvcpp_buf::append(const uvcpp_buf &srcBuf) {
     return;
   }
   const size_t old_len = buf.len;
-  this->resize(old_len + n);
+  // 下面那次 memcpy 恰好覆盖新露出来的 [old_len, old_len+n) —— 自追加也一样
+  // （源取的是搬完之后的 buf.base + 0，长度 n 落在 [0, old_len) 内）。
+  this->resize_uninitialized(old_len + n);
   // 自追加时源就是自己：resize 可能已经把块搬走，源指针必须搬完再取，
   // 而且取的是**原内容**（还在 [0, old_len)），否则拷到的是刚清零的那一段。
   const char *src = (&srcBuf == this) ? this->buf.base : srcBuf.buf.base;
@@ -452,7 +470,9 @@ void uvcpp_buf::append_data(const char *bf, size_t sz) {
   if (bf == nullptr && sz > 0) {
     throw std::invalid_argument("Cannot append null buffer pointer with non-zero size");
   }
-  this->resize(this->buf.len + sz);
+  // memcpy 写在 base + (新长度 - sz) = base + 旧长度，长度 sz —— 恰好就是
+  // resize 刚清掉的那一段。[old_len, old_len+sz) 是**满覆盖**。
+  this->resize_uninitialized(this->buf.len + sz);
   if (sz > 0) {
     memcpy(this->buf.base + this->buf.len - sz, bf, sz);
   }
@@ -480,7 +500,9 @@ void uvcpp_buf::clone_buf(const uvcpp_buf &src_buf) {
   if (&src_buf == this) {
     return;
   }
-  this->resize(src_buf.buf.len);
+  // 本函数**不**先 free_own：old_len 可能是旧内容。放大时清的是
+  // [old_len, L)，而 memcpy 从 0 起写 L 字节，把那段包住了。
+  this->resize_uninitialized(src_buf.buf.len);
   if (src_buf.buf.len > 0) {
     memcpy(this->buf.base, src_buf.buf.base, src_buf.buf.len);
   }
@@ -488,7 +510,8 @@ void uvcpp_buf::clone_buf(const uvcpp_buf &src_buf) {
 
 void uvcpp_buf::clone_data(const uv_buf_t &src_buf) {
   if (src_buf.len > 0 && src_buf.base != nullptr) {
-    this->resize(src_buf.len);
+    // 同 clone_buf：memcpy 从 0 起写满 len，把 resize 清的那段包住。
+    this->resize_uninitialized(src_buf.len);
     memcpy(this->buf.base, src_buf.base, src_buf.len);
   }
 }
@@ -520,7 +543,9 @@ void uvcpp_buf::rewrite_data(uint64_t point, const char *bf, size_t sz) {
   }
 
   if (point + sz > this->buf.len) {
-    this->resize(point + sz);
+    // point <= buf.len = old_len，而 memcpy 写 [point, point+sz)，
+    // 因此它把 resize 清的 [old_len, point+sz) 整个包住。
+    this->resize_uninitialized(point + sz);
   }
   if (sz > 0) {
     memcpy(this->buf.base + point, bf, sz);
