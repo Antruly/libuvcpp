@@ -258,8 +258,8 @@ src/uvcpp/uvcpp_alloc.h:25-87 2479761512ea727a
 src/uvcpp/uvcpp_alloc.h:45-45 3afa60e6cd9e00a4
 src/uvcpp/uvcpp_alloc.h:56-59 331816aea18a058d
 src/uvcpp/uvcpp_alloc.h:89-89 8efceaec612de61b
-src/uvcpp/uvcpp_buf.cpp:404-404 a6c1afb1ce89b68c
-src/uvcpp/uvcpp_buf.cpp:416-416 02130caa8255b0a2
+src/uvcpp/uvcpp_buf.cpp:419-419 a6c1afb1ce89b68c
+src/uvcpp/uvcpp_buf.cpp:431-431 02130caa8255b0a2
 src/uvcpp/uvcpp_buf.h:20-20 207569d6c55f2b31
 src/web/uvcpp_http_client.cpp:1006-1010 8c5d2999a4425ab8
 src/web/uvcpp_http_client.cpp:1057-1061 17bfaecd38ef9b3e
