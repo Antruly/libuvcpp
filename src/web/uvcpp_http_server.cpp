@@ -1117,6 +1117,21 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   pump_write(it->second, client);
 }
 
+// 一次写最多带走多少字节。**这个上限是给"攒批会拷贝"留的后路**，不是给系统调用
+// 留的 —— 攒批的理由恰恰是字节不值钱、系统调用才值钱：
+//
+//   回环上一次 send 的内核开销是**每报文**的固定成本。改前实测（25 连接 × 流水线
+//   10）服务端 23.6 µs/请求，其中约 74% 在内核里；而一个响应才 100 多字节 —— 按字
+//   节摊就是 100 ns/B 上下，那个数不可能是拷贝成本。所以把 10 个响应攒成一次
+//   `WSASend` 省下的是 9 次固定成本，代价是这 1000 多字节的一次 memcpy，量级差三
+//   个数量级：同一装置上改完 15.8–16.8 µs/请求，段/请求 3.43 → 1.99。
+//
+// 但**体是零拷贝交下来的**（`uvcpp_buf` 要么是共享视图要么是自有块，见
+// `enqueue_write` 那段"这里如果拷了，后面两块写得再干净也白搭"）。攒批会把体
+// 拷进这条串里，所以大块不能攒：那等于用一整份 memcpy 去换一次系统调用，方向就
+// 反了。上限之外的那些照旧单独走（`batch_n == 1` 那条路），行为与改动前一致。
+static constexpr size_t kCoalesceMaxBytes = 64u * 1024u;
+
 void uvcpp_http_server::pump_write(conn_ctx& ctx, uvcpp_tcp_client* client) {
   // uvcpp_tcp_client holds at most one async write at a time; the queue is
   // what makes back-to-back keep-alive responses safe.
@@ -1145,10 +1160,65 @@ void uvcpp_http_server::pump_write(conn_ctx& ctx, uvcpp_tcp_client* client) {
     return;
   }
 
-  queued_write qw = std::move(ctx.write_queue.front());
-  ctx.write_queue.pop_front();
-  start_write(ctx, client, std::move(qw.bytes), &qw.body, qw.has_body,
-              std::move(qw.done));
+  // 队首那一块永远收下（`batch_n > 0` 这个前提），所以它自己就超限时是**单独
+  // 发**，不会被饿死。
+  size_t batch_bytes = 0;
+  size_t batch_n     = 0;
+  for (std::deque<queued_write>::const_iterator it = ctx.write_queue.begin();
+       it != ctx.write_queue.end(); ++it) {
+    const size_t one =
+        it->bytes.size() + (it->has_body ? it->body.size() : 0);
+    if (batch_n > 0 && batch_bytes + one > kCoalesceMaxBytes) break;
+    batch_bytes += one;
+    ++batch_n;
+  }
+
+  if (batch_n == 1) {
+    queued_write qw = std::move(ctx.write_queue.front());
+    ctx.write_queue.pop_front();
+    start_write(ctx, client, std::move(qw.bytes), &qw.body, qw.has_body,
+                std::move(qw.done));
+    return;
+  }
+
+  // 攒批：把前 `batch_n` 项**按队列次序**拼进一条串，体也拷进来 —— 这一份拷贝
+  // 就是上面那个上限要挡的东西。各块的 `done` 收进一个结算器，整批完成时按次序
+  // 一起唤醒（今天只有 `write_stream` 那一个调用点传 `done`）。
+  //
+  // 整批只算**一次**在途块：`ctx.inflight` 只有一个槽位，而 `start_write` 这次
+  // 只发一次 `uv_write` —— 两边的"一次"是对齐的。所以对端在中途断开时
+  // `close_connection` 把这一批的 done 一起唤醒成 `UV_ECANCELED`，与逐块发时
+  // "在途那块拿真实错误、排队那些拿 ECANCELED"结算的是**同一组**闭包。
+  std::string wire;
+  wire.reserve(batch_bytes);
+  std::vector<std::function<void(int)> > dones;
+  for (size_t i = 0; i < batch_n; ++i) {
+    queued_write qw = std::move(ctx.write_queue.front());
+    ctx.write_queue.pop_front();
+    wire.append(qw.bytes);
+    if (qw.has_body && qw.body.size() > 0) {
+      wire.append(qw.body.get_const_data(), qw.body.size());
+    }
+    if (qw.done) dones.push_back(std::move(qw.done));
+  }
+
+  std::function<void(int)> done;
+  if (dones.size() == 1) {
+    done = std::move(dones[0]);
+  } else if (dones.size() > 1) {
+    // C++11 有意：`[ds = std::move(dones)]` 是 C++14 的 init-capture，而本仓是
+    // `CMAKE_CXX_STANDARD 11` + `REQUIRED ON`（见 `uvcpp_memory_pool.h` 里那处
+    // 同族的修法）。这里多一个 `shared_ptr` 是因为闭包必须是可拷贝的。
+    std::shared_ptr<std::vector<std::function<void(int)> > > ds(
+        new std::vector<std::function<void(int)> >(std::move(dones)));
+    done = [ds](int status) {
+      for (size_t i = 0; i < ds->size(); ++i) {
+        if ((*ds)[i]) (*ds)[i](status);
+      }
+    };
+  }
+
+  start_write(ctx, client, std::move(wire), nullptr, false, std::move(done));
 }
 
 void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,

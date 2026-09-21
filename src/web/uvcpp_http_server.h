@@ -815,7 +815,10 @@ class UVCPP_API uvcpp_http_server {
 
     // --- Outbound write serialization ---
     // uvcpp_tcp_client permits only one async write in flight at a time, so
-    // responses are queued and drained one at a time.
+    // responses are queued. Draining one queued write at a time would make a
+    // pipelined burst cost one syscall (and one packet) per response, so
+    // pump_write() gathers a batch of them into a single write instead — see
+    // kCoalesceMaxBytes in the .cpp for why that is a per-syscall win.
     bool write_pending = false;
     std::deque<queued_write> write_queue;
 
@@ -855,7 +858,10 @@ class UVCPP_API uvcpp_http_server {
                      uvcpp_buf body,
                      std::function<void(int)> done = std::function<void(int)>());
 
-  /** @brief Start the next queued write if the connection is idle. */
+  /**
+   * @brief Drain the queue if the connection is idle: **the whole queue in one
+   * write** when it fits, otherwise the front block alone.
+   */
   void pump_write(uvcpp_tcp_client* client);
 
   /**
