@@ -392,7 +392,7 @@ void doc_stream(uvcpp::uvcpp_http_server& server) {
 **`is_head` 与 `accept_encoding` 是连接级单槽，h2 上必须按流记。**
 `src/web/uvcpp_http_server.h:664-694` 把三类后果写得很细；`send_h2_response` 里
 是临时把"这条流的值借到连接级字段"再调压缩的
-（`src/web/uvcpp_http_server.cpp:1486-1494`）。
+（`src/web/uvcpp_http_server.cpp:1496-1504`）。
 
 ### 升级到别的协议
 
@@ -644,7 +644,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:955`），�
    （`src/web/uvcpp_http_server.cpp:678-684`）—— 但它是 `void`，你**无从判断**。
 
 **异常只在一处被接住**：`on_connection` / `stream_claim` / h2 连接钩子三个钩子
-里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:187-198`、`:266-277`、`:1354-1363`）。
+里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:187-198`、`:266-277`、`:1364-1373`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:484-489`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
 （`src/webapp/uvcpp_web_app.cpp:2216-2222`）。
