@@ -426,6 +426,30 @@ inline bool http_has_header(const http_headers& hdrs, const char* name) {
 }
 
 /**
+ * @brief 头表的容量提示：**头一次真往里放东西之前**调一次，一次要到 4 个位置。
+ *
+ * 为什么是"懒"的、而不是在 `uvcpp_http_response` 的构造函数里预留：
+ * 响应对象每个请求都要造一个（webapp 侧那个是 `uvcpp_web_context` 按值持有的
+ * 成员），但其中**有一份只当控制位用** —— HTTP 层的 `dispatch_h1_request()` /
+ * `dispatch_h2_request()` 造一个栈上的 `resp` 传给兜底 handler，而 webapp 的
+ * 兜底 handler 只写它的 `deferred` 一个字段、头表一个字节都不放
+ * （响应由它自己那份 `uvcpp_web_context::resp_` 出）。构造函数里预留的话，
+ * 那一份每请求白付一次 256 B 分配（分配普查里那是 2.00 次/请求里的一次）。
+ *
+ * 放在"第一次真的插入"这一刻，对**会放头**的对象语义与预留 4 个完全一样
+ * （一条最普通的响应是 content-type + content-length + connection，三次
+ * `push_back` 的扩容 1→2→4 正是它要避开的），而对不放头的对象是零成本。
+ *
+ * ★ 直接 `push_back` 的地方要自己调一次 —— 漏了**不会出错**，只是那个对象
+ * 退化成"1→2→4 三次扩容"。目前只有三处：`uvcpp_web_response::add_header()`
+ * 的两个重载（追加语义，Set-Cookie 这类多值头）、`uvcpp_h2_session.cpp` 里
+ * 从 h2 帧填响应头的那一处、以及 `uvcpp_http_client.cpp` 填请求头的那一处。
+ */
+inline void http_reserve_headers(http_headers& hdrs) {
+  if (hdrs.capacity() == 0) hdrs.reserve(4);
+}
+
+/**
  * @brief Set or overwrite a header (case-insensitive match on name).
  */
 inline void http_set_header(http_headers& hdrs, const std::string& name,
@@ -436,6 +460,7 @@ inline void http_set_header(http_headers& hdrs, const std::string& name,
       return;
     }
   }
+  http_reserve_headers(hdrs);
   hdrs.push_back({name, value});
 }
 
@@ -450,6 +475,7 @@ inline void http_set_header(http_headers& hdrs, const char* name,
     }
   }
   // 走到这里才真的插入，头名这时候必须被拷下来（外面那个字面量不归我们管）。
+  http_reserve_headers(hdrs);
   hdrs.push_back({std::string(name, n), value});
 }
 
@@ -479,6 +505,7 @@ inline void http_set_header(http_headers& hdrs, const char* name,
       return;
     }
   }
+  http_reserve_headers(hdrs);
   hdrs.push_back(http_header{std::string(name, n), value});
 }
 

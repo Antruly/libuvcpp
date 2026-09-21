@@ -18,11 +18,20 @@ namespace uvcpp {
 // Construction
 // =========================================================================
 
-// 预留四个头的位置。响应对象**每个请求新建一个**（webapp 侧由
-// `uvcpp_web_context` 按值持有，上下文不池化），所以 `headers` 每次都从空开始 ——
-// 不留这一手，一条最普通的响应（content-type + content-length + connection）
-// 就要连撞三次 `push_back` 的扩容（1→2→4），三次分配、两次搬运。
-uvcpp_http_response::uvcpp_http_response() { headers.reserve(4); }
+// **构造函数里不再预留头表容量**（改在 `http_reserve_headers()`：头一次真插入
+// 时才一次要到 4 个位置，见 `uvcpp_http_common.h`）。
+//
+// 原来在这里 `headers.reserve(4)`，理由是"响应对象每个请求新建一个，头表每次
+// 都从空开始，不预留就要连撞三次 `push_back` 的 1→2→4 扩容"。那个理由对
+// **会放头**的响应仍然成立 —— 而那正是懒预留保留的语义（第一次插入时仍然
+// 只要一次 256 B）。
+//
+// 改的原因是有**一份响应从不放头**：HTTP 层的 `dispatch_h1_request()` /
+// `dispatch_h2_request()` 造的栈上那个 `resp`，只是给兜底 handler 写
+// `deferred` 一个字段用的（webapp 的响应走自己的 `uvcpp_web_context::resp_`）。
+// 构造函数里预留 ⇒ 每请求白付一次 256 B 分配。分配普查里
+// `uvcpp_http_response::uvcpp_http_response` 那 2.00 次/请求，有一次就是它。
+uvcpp_http_response::uvcpp_http_response() {}
 
 uvcpp_http_response::~uvcpp_http_response() {}
 

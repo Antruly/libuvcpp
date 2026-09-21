@@ -311,7 +311,7 @@ void doc_send_file(uvcpp::uvcpp_loop* loop, doc_file_sink& sink,
   调用方丢掉自己的 `shared_ptr` 即可。
 - **`on_done` 恰好一次**（`:134-146`），`status` 是 **libuv 码**（0 / `UV_ECANCELED` /
   `UV_EINVAL` 之类），不是 HTTP 码 —— 响应层自己会翻
-  （`src/webapp/uvcpp_web_response.cpp:1200-1220`）。
+  （`src/webapp/uvcpp_web_response.cpp:1202-1222`）。
 
 **必须由 `shared_ptr` 持有**（`:164`，内部用 `shared_from_this()`）。放栈上会在
 `start()` 里抛 `std::bad_weak_ptr`，而且**不是编译错误**。
@@ -346,7 +346,7 @@ void doc_ctx_async(uvcpp::uvcpp_web_context& ctx) {
 恢复"的承诺，框架会自己投回 loop 线程。`post()` 那条路要自己 `hold()`。两条都不走
 就是"这个请求永远没有响应"，一直挂到闲置超时 —— 这是这个框架最容易踩的一条。
 
-`post()` 在 loop 线程上**就地同步执行**（`src/webapp/uvcpp_web_context.cpp:62-72`），不能假设
+`post()` 在 loop 线程上**就地同步执行**（`src/webapp/uvcpp_web_context.cpp:66-76`），不能假设
 fn 在"下一个循环迭代"跑。
 
 其余入口：`request()` / `response()`（`:271-275`）、`user_data_as<T>()`
@@ -489,7 +489,7 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 - `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:165`）。
 - `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:116-123`）。
 - `uvcpp_web_context::run()` **只存链的指针**
-  （`src/webapp/uvcpp_web_context.h:329`、`:411`）：那张
+  （`src/webapp/uvcpp_web_context.h:366`、`:447`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
   **别传一个临时 vector**。
 - `uvcpp_web_connection_registry::find()` 返回内部 `std::map` 里的指针
@@ -597,10 +597,10 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   拼路径。
 - **`uvcpp_web_file` 不知道 HTTP 的存在**：断连即释放**不在这里**，接线层调
   `cancel()`（`src/webapp/uvcpp_web_file.h:70-71`）。
-- **卡住的出站流没有超时保护**（`src/webapp/uvcpp_web_context.h:356-358`，代价照实记在
-  `src/webapp/uvcpp_web_context.cpp:355-360`）。
+- **卡住的出站流没有超时保护**（`src/webapp/uvcpp_web_context.h:393-395`，代价照实记在
+  `src/webapp/uvcpp_web_context.cpp:359-364`）。
 - **`attach_stream()` 的"必须在链跑起来之前调"没有运行时守卫**
-  （`src/webapp/uvcpp_web_context.h:281-293`）：中途挂只会得到一个**永远收不到数据**的 stream，
+  （`src/webapp/uvcpp_web_context.h:318-330`）：中途挂只会得到一个**永远收不到数据**的 stream，
   静默。
 - **如实记一处代价**：`src/webapp/uvcpp_web_file.cpp:173-179` 承认同步失败路径会漏一份
   `shared_ptr`（成环），作者判断"实际走不到"。

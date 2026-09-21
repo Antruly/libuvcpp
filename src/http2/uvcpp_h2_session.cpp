@@ -439,6 +439,7 @@ struct uvcpp_h2_session::impl {
         reject(id, NGHTTP2_PROTOCOL_ERROR);  // 响应里也不许有
         return;
       }
+      http_reserve_headers(s.response.headers);
       s.response.headers.push_back(http_header{n, v});
     }
   }

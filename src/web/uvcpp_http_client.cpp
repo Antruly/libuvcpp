@@ -836,6 +836,7 @@ static void parse_response_head(const std::string& head,
     size_t b = value.find_first_not_of(" \t");
     size_t e = value.find_last_not_of(" \t");
     value = (b == std::string::npos) ? std::string() : value.substr(b, e - b + 1);
+    http_reserve_headers(resp.headers);
     resp.headers.push_back({name, value});
   }
 }

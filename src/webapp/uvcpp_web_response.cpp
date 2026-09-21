@@ -288,6 +288,7 @@ uvcpp_web_response& uvcpp_web_response::add_header(const std::string& name,
   http_header h;
   h.name = name;
   h.value = value;
+  http_reserve_headers(resp_.headers);
   resp_.headers.push_back(h);
   return *this;
 }
@@ -423,6 +424,7 @@ uvcpp_web_response& uvcpp_web_response::add_header(const char* name,
                                                    const char* value) {
   // 同 `add_header(const std::string&, const std::string&)`：追加语义，
   // 不是覆盖语义 —— Set-Cookie 这类多值头必须原样追加。
+  http_reserve_headers(resp_.headers);
   resp_.headers.push_back(http_header{name, value});
   return *this;
 }

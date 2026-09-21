@@ -142,6 +142,31 @@ class UVCPP_API uvcpp_web_context_host {
 };
 
 /**
+ * @brief 造 `uvcpp_web_context` 的**凭证**，只有 `uvcpp_web_context` 自己造得出。
+ *
+ * 存在的唯一理由：让 `std::make_shared` 够得着构造函数，从而把**对象与控制块
+ * 合并成一次分配**。构造函数不能公开（见 `create()`：直接 `new` 或放栈上会让
+ * `shared_from_this()` 抛），而 `make_shared` 又够不着私有构造 —— 它内部 new 的
+ * 是 `_Ref_count_obj2`（libstdc++ 里叫 `_Sp_counted_ptr_inplace`），`friend`
+ * 给 `make_shared` 也没用，MSVC 上直接 C2248。
+ *
+ * 于是把构造函数**公开**，用一个外部造不出来的参数把它锁住：凭证的默认构造
+ * 私有、只有 `uvcpp_web_context` 是友元。谁要能造出凭证，谁就已经是
+ * `uvcpp_web_context` 的成员了。
+ */
+struct UVCPP_API uvcpp_web_context_key {
+  // 拷贝构造是公开的 default：`make_shared` 是**按值**把参数转发给构造函数
+  // 的，那次拷贝发生在库内部的帧里（所以没声明移动构造，转发落在拷贝上）。
+  uvcpp_web_context_key(const uvcpp_web_context_key&) = default;
+  // 析构也必须是公开的 —— 上面那次拷贝的临时对象在**库内部**析构。
+  ~uvcpp_web_context_key() = default;
+
+ private:
+  uvcpp_web_context_key() {}
+  friend class uvcpp_web_context;
+};
+
+/**
  * @brief 一次请求的全部状态。
  */
 class UVCPP_API uvcpp_web_context
@@ -151,10 +176,22 @@ class UVCPP_API uvcpp_web_context
    * @brief 造一个上下文。
    *
    * **只能这样造** —— 直接 `new` 或者放栈上会让 `shared_from_this()`
-   * 抛异常（`advance()` 依赖它把自己续住），构造函数因此是私有的。
+   * 抛异常（`advance()` 依赖它把自己续住）。
+   *
+   * 走 `make_shared` 而不是 `shared_ptr(new …)`：后者每请求**两次**分配
+   * （1192 B 的对象 + 24 B 的控制块），合并之后只剩一次。构造函数是公开的，
+   * 但要一个凭证参数（见 `uvcpp_web_context_key`），外部造不出来。
    */
   static std::shared_ptr<uvcpp_web_context> create(uvcpp_web_context_host& host,
                                                    uvcpp_web_conn_id conn_id);
+
+  /**
+   * @brief 只给 `create()` / `make_shared` 用的构造函数 —— **别直接调**。
+   *
+   * 第一个参数是凭证：它让这个公开的构造函数在**类外**不可调用。
+   */
+  uvcpp_web_context(uvcpp_web_context_key, uvcpp_web_context_host& host,
+                    uvcpp_web_conn_id conn_id);
 
   // -----------------------------------------------------------------
   // 连接
@@ -363,7 +400,6 @@ class UVCPP_API uvcpp_web_context
    */
   friend class uvcpp_web_stream;
 
-  uvcpp_web_context(uvcpp_web_context_host& host, uvcpp_web_conn_id conn_id);
   uvcpp_web_context(const uvcpp_web_context&);
   uvcpp_web_context& operator=(const uvcpp_web_context&);
 
