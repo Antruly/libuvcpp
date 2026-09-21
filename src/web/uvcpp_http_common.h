@@ -352,7 +352,7 @@ inline bool http_name_iequal(const char* a, size_t an,
 // 值那一侧**同样要**。这里原先写着「全仓扫过，这族调用里的长字面量全部落在
 // **名字**位置，值位置一个都没有」—— 那句是错的：值位置确实有，只是不在
 // `set_header` 的调用点上，而在 `uvcpp_web_response::body()` 的 `ct` 实参上
-// （`text()` 传 24 字符、`html()` 23、`json()` / `json_str()` 31，见
+// （`text()` 传 25 字符、`html()` 24、`json()` / `json_str()` 31，见
 // `uvcpp_web_response.cpp`）。所以这族里 `http_set_header` 有**三个**形态，
 // 第三个就在下面。
 // -------------------------------------------------------------------------
@@ -457,11 +457,11 @@ inline void http_set_header(http_headers& hdrs, const char* name,
  * @brief 名字与**值**都是字面量时的版本。
  *
  * 上面那段末尾说的"值那一侧也有"，落点就在这——长字面量在 `uvcpp_web_response`
- * 的 `text()`(24) / `html()`(23) / `json()`(31) / `json_str()`(31) 里被传给
+ * 的 `text()`(25) / `html()`(24) / `json()`(31) / `json_str()`(31) 里被传给
  * `body()` 的 `ct` 形参，而那一版 `ct` 收的是 `const std::string&`：
  *
  *   `resp.text("ok")` → `body("ok", 2, "text/plain; charset=utf-8")`
- *                       ↑ 调用点先建一个 24 字符的临时串（第 1 次分配）
+ *                       ↑ 调用点先建一个 25 字符的临时串（第 1 次分配）
  *                       → `push_back` 把值拷进 `http_header.value`（第 2 次）
  *
  * **那是 benchmark 自己在跑的两条路由**（`GET /text`、`GET /json`）。

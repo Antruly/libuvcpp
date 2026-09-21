@@ -303,7 +303,7 @@ class UVCPP_API uvcpp_web_response {
    * 撞成歧义（`body(s)` 会有两个同样可行的候选）。
    *
    * 为什么要这一对：`text()` / `html()` / `json()` / `json_str()` 都是往
-   * `ct` 位置传**长字面量**（24 / 23 / 31 / 31 字符，全在 MSVC 的 15 字符 SSO
+   * `ct` 位置传**长字面量**（25 / 24 / 31 / 31 字符，全在 MSVC 的 15 字符 SSO
    * 之外），而上面两个版本的 `ct` 是 `const std::string&` ⇒ 每个 `resp.text("ok")`
    * 都要先建一个临时串，再被 `set_content_type` 拷进头表。**那是 benchmark
    * 自己在跑的两条路由**（`GET /text`、`GET /json`）。这一对把它们降到一次分配。

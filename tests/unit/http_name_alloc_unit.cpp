@@ -48,8 +48,8 @@
  * ## 值那一侧（名字侧的门禁挡不住它）
  *
  * 长字面量**也**落在值位置，只是不在 `set_header` 的调用点上，而在
- * `uvcpp_web_response::body(...)` 的 `ct` 实参上 —— `text()` 传 24 字符、
- * `html()` 23、`json()` / `json_str()` 31，全由 `body(const std::string& s,
+ * `uvcpp_web_response::body(...)` 的 `ct` 实参上 —— `text()` 传 25 字符、
+ * `html()` 24、`json()` / `json_str()` 31，全由 `body(const std::string& s,
  * const std::string& ct)` 收下。仓库自己的 bench 走的就是这两条路
  * （`bench/bench_server.cpp` 的 `/json` 与 `/text`）。
  *
@@ -147,6 +147,22 @@ static_assert(sizeof(kLongValue) - 1 > 22u,
 static_assert(sizeof(kSlackValue) - 1 > sizeof(kLongValue) - 1,
               "覆写对照要求初值比判据值宽，否则那条会因重分配而红，"
               "与被测代码无关");
+
+// --- 注释里报的那几个长度，也钉在这里 ---
+//
+// 「印出来的数与算出来的数对不上」是这个仓库里**已经出现过两次**的错法。上面
+// 那两条判的是**判据值**的长度，对注释里报的数一个都管不着 —— 我自己上一版就把
+// `text()` 报成 24、`html()` 报成 23，实测是 **25 / 24**。所以这三条只管一件事：
+// 下面几句注释里报的数不许写错。
+//
+// 它们**不**保证库里的 `ct` 字面量没被换成别的（换了两边一起变，这里不会红）——
+// 那是行为用例的事，不是本文件的事。
+static_assert(sizeof("text/plain; charset=utf-8") - 1 == 25u,
+              "`text()` 的 ct 是 25 字符，注释里别写成 24");
+static_assert(sizeof("text/html; charset=utf-8") - 1 == 24u,
+              "`html()` 的 ct 是 24 字符，注释里别写成 23");
+static_assert(sizeof("application/json; charset=utf-8") - 1 == 31u,
+              "`json()` 的 ct 是 31 字符");
 
 /// 跑一段东西并返回它分配了几次。窗口内**不能**有本用例自己的分配。
 template <typename Fn>
