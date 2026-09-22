@@ -133,6 +133,26 @@ class UVCPP_API uvcpp_tcp_client {
   uvcpp_loop* get_loop();
 
   /**
+   * @brief 这条连接跑在**几号**循环上（0 = 接受者 / 单循环）。
+   *
+   * 多循环下"这条连接属于哪条循环"是上层按循环切容器的**唯一**依据
+   * （`uvcpp_http_server::contexts_` 就是一例）：光有 `get_loop()` 不够 ——
+   * 上层要的是可以当数组下标的东西，而循环指针不是。
+   *
+   * 单循环（`set_loops` 没调过）恒 0。不负责这条连接的对象恒 0：
+   * `uvcpp_tcp_client()` 自建循环那条路上没有"第几号"这个概念。
+   */
+  int loop_index() const;
+
+  /**
+   * @brief 由 @ref uvcpp_tcp_server 在转手时置位；**使用者不要调**。
+   *
+   * 与 @ref mark_accepted 同一类：公开是因为服务端要用，不是 API 的一部分。
+   * 负数当 0 收下（见实现里的理由）。
+   */
+  void set_loop_index(int index);
+
+  /**
    * @brief Return the current status bitmask.
    * @see uvcpp_tcp_client_status
    */
@@ -772,6 +792,8 @@ class UVCPP_API uvcpp_tcp_client {
   uvcpp_loop* loop_ = nullptr;
   uvcpp_tcp*  tcp_  = nullptr;
   bool owns_loop_   = true;  ///< false for server-managed clients
+  /// 这条连接属于几号循环（0 = 接受者 / 单循环）。只有服务端的转手路径会置它。
+  int loop_index_   = 0;
   int status_       = TCP_CLIENT_NONE;
   int last_error_code_ = 0;
 

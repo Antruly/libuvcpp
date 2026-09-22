@@ -135,6 +135,14 @@ uvcpp_tcp_client::uvcpp_tcp_client(uvcpp_loop* external_loop,
   }
 }
 
+int uvcpp_tcp_client::loop_index() const { return loop_index_; }
+
+void uvcpp_tcp_client::set_loop_index(int index) {
+  // 只有 0 与正数是合法的循环号；负数当 0（**不是**"没设过"）—— 取值只要落在
+  // 任何一张按循环切的表外面都会变成越界，静默容错比报错更难查。
+  loop_index_ = index > 0 ? index : 0;
+}
+
 std::shared_ptr<char> uvcpp_tcp_client::alive_token() {
   if (!alive_token_) alive_token_.reset(new char(0));
   return alive_token_;

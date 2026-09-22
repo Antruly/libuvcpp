@@ -21,7 +21,20 @@ namespace {
 /** @brief 退出前把挂起的关闭回调放掉的有界轮数（抄 `~uvcpp_tcp_server` 第三步）。 */
 const int kExitPumpRounds = 256;
 
+/**
+ * @brief 线程本地的"我在几号循环上"。
+ *
+ * 用 `thread_local` 而不是查表：问这个问题的位置**全在热路径上**（每来一条
+ * 连接、每收一个请求都要按循环切容器），而查表要么带锁、要么按线程身份线性
+ * 扫。线程本地量是一次 TLS 读。
+ */
+thread_local int t_loop_index = -1;
+
 }  // namespace
+
+int uvcpp_loop_index_of_this_thread() { return t_loop_index; }
+
+void uvcpp_set_loop_index_of_this_thread(int index) { t_loop_index = index; }
 
 uvcpp_loop_worker::uvcpp_loop_worker() {}
 
@@ -57,6 +70,11 @@ int uvcpp_loop_worker::start() {
 }
 
 void uvcpp_loop_worker::thread_main(std::promise<int>* ready) {
+  // 第一件事就自报家门：下面每一句（包括 `on_start_` 钩子）都可能在问
+  // "我在哪条循环上"。放在这里而不是 `on_start_` 里，是因为钩子是**可选**的
+  // （没装就没有），而线程身份不是。
+  t_loop_index = loop_index_;
+
   // **必须走无参构造 + `init(cb, loop)`**：`callback_init` 是从 `handle->data`
   // 里把自己取回来的，而无参构造那次 `init()` 才会把 data 指到 this 上
   // （见 `uvcpp_handle::reset_handle_state`）。
@@ -144,6 +162,12 @@ void uvcpp_loop_worker::thread_main(std::promise<int>* ready) {
     delete loop_;
     loop_ = nullptr;
   }
+
+  // 5. 最后一次自报家门。**这一步今天不是必需的**：线程本地量随线程结束一起
+  //    销毁，而这条线程体就是线程的入口。留着是因为"循环没了，我就不在几号
+  //    循环上了"这条不变式值得显式写出来 —— 真出现"同一线程跑完一条循环再跑
+  //    别的东西"的那天（比如线程体被搬到复用线程的池子里），它才不会静默说谎。
+  t_loop_index = -1;
 }
 
 bool uvcpp_loop_worker::post(std::function<void()> fn) {

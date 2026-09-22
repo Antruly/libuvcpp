@@ -73,7 +73,7 @@
 ### 1.3 三个接入面
 
 - **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:255`）
-  与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:189`），
+  与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:190-190`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
   （`src/webapp/uvcpp_web_app.cpp:385-386`），用户只能关掉它
@@ -137,7 +137,7 @@
   `tcp_` 里、`uv_run` 的嵌套计数要在 `uv_run` 返回之后才减），谁来拆都是往栈上还在用的
   内存里写。代价是**每个这样被删掉的客户端漏一份**（`uvcpp_loop` + `uvcpp_tcp_client`
   + 解析器，h2 上再加一个 nghttp2 会话）。这与 `~uvcpp_tcp_client`
-  （`src/net/uvcpp_tcp_client.cpp:147`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
+  （`src/net/uvcpp_tcp_client.cpp:155-155`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
 - **一处已死的成员**（只报告，本批没动）：

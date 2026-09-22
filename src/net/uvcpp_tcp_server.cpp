@@ -311,6 +311,11 @@ int uvcpp_tcp_server::set_loops(int n) {
   for (int i = 0; i < n - 1; ++i) {
     uvcpp_loop_worker* w = new uvcpp_loop_worker();
 
+    // 循环号**必须在 `start()` 之前装**：线程体开跑第一件事就是把它写进线程
+    // 本地量，晚一步那条线程就会一直自称 0 号（接受者的号）。0 号是接受者，
+    // 工作循环从 1 起 —— 与 `loop_at(i)` 的下标是同一个编号。
+    w->set_loop_index(i + 1);
+
     // **必须在 `start()` 之前装**：这个钩子在 worker 线程上跑，写它的人和读
     // 它的人之间靠 `start()` 的交握手建立先后关系。它干的是"退出前把挂在我
     // 这条循环上的连接关掉" —— 那些连接的关闭收尾必须在它们自己的循环线程上。
@@ -436,6 +441,10 @@ void uvcpp_tcp_server::on_handoff_task(int worker_index, uv_os_sock_t sock) {
   }
 
   uvcpp_tcp_client* client = new uvcpp_tcp_client(wl, sock);
+  // **循环号就是 `worker_index + 1`**：0 号留给接受者那条循环（转手路径下它
+  // 自己一条连接都不留），工作循环从 1 号起。上层按循环切容器时拿它当数组下标，
+  // 所以这里必须是**全局**号而不是 worker 自己的序号。
+  client->set_loop_index(worker_index + 1);
   if ((client->get_status() & TCP_CLIENT_ERROR) != 0) {
     // `uv_tcp_open` 没收下 ⇒ 构造里压根没接管这个 socket，**它还归我们**。
     // 这条失败路径只有这里能收尾：libuv 不会替我们关它。
@@ -626,6 +635,14 @@ void uvcpp_tcp_server::stop(std::function<void()> on_stopped) {
 // =========================================================================
 
 int uvcpp_tcp_server::run(uv_run_mode md) {
+  // **接受者那条循环的线程是调用者的**，服务端没法在别的时刻认识它：`run()`
+  // 是那条线程踏进本服务端的入口，所以"我是 0 号循环"在这里认领。
+  //
+  // 只在没人认领过时写（`< 0`）：同一线程上跑两条服务端时，后一条的 `run()`
+  // 不该把前一条的号改掉 —— 两条都是 0 号，值一样，但这个判断更贴原意。
+  if (uvcpp_loop_index_of_this_thread() < 0) {
+    uvcpp_set_loop_index_of_this_thread(0);
+  }
   return loop_->run(md);
 }
 

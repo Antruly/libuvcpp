@@ -18,6 +18,7 @@
 
 #if UVCPP_WEB_ENABLE
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <deque>
@@ -192,7 +193,7 @@ class UVCPP_API uvcpp_http_server {
   bool http2_enabled() const { return http2_enabled_; }
 
   /**
-   * @brief 给**所有** h2 连接发 GOAWAY，但一条都不关。
+   * @brief 给**本循环上**的 h2 连接发 GOAWAY，但一条都不关。
    *
    * 停机前该先调它，再走关连接那一套：GOAWAY 排进队列之后要几轮循环才出网，
    * 而关连接是立刻生效的 —— 顺序反了，对端只看到"连接断了"，分不清服务端在
@@ -202,6 +203,11 @@ class UVCPP_API uvcpp_http_server {
    * 我们**没处理**（那些可以安全重试）。已有的流一条都不受影响，照跑完。
    *
    * @return 真的把 GOAWAY 排出去（且成功冲网）的连接条数。h2 没开时恒为 0。
+   *
+   * @note **"本循环上"是刻意的**（多循环）：连接上下文是按循环切的，从一条循环
+   *       上去翻另一条循环的表就是数据竞争。所以调用方要在**每条**循环上各调
+   *       一次（webapp 的停机就是这样按循环推进的），而不是在 0 号循环上指望
+   *       一句管全进程。单循环下"本循环"就是"全部"，行为与从前逐字相同。
    *
    * @note 不关连接是**有意的**：调用方还得留出时间让字节出网，之后自己走
    *       `close_connection()` / `uvcpp_tcp_server::close_all_clients()`。
@@ -983,10 +989,50 @@ class UVCPP_API uvcpp_http_server {
    *
    * **先自增再赋值**，且**永不复位** —— 0 留给"没这条连接"，复位就等于允许
    * 旧代次复活，那这个机制就失去意义了（见 `conn_ctx::generation`）。
+   *
+   * **原子**：多循环下每一条工作循环都在自己线程上给新连接发号（代次号是
+   * **全服务**一个序列，不按循环切 —— 调用方拿它当"这条连接的身份"比对，
+   * 两条循环各自从 1 数起的话身份就不唯一了）。
    */
-  uint64_t next_generation_ = 0;
+  std::atomic<uint64_t> next_generation_{0};
 
-  std::map<uvcpp_tcp_client*, conn_ctx> contexts_;
+  /**
+   * @brief 连接上下文登记表，**按循环切**（下标 = `uvcpp_tcp_client::loop_index()`）。
+   *
+   * 这正是多循环的闸门：一条连接的全部回调都在它自己那条循环的线程上跑，
+   * 而这张表是**每请求**都要碰的（53 处引用），所以它必须是 per-loop 的 ——
+   * 一张全局表在两条循环上并发 insert/erase 是 UB，不是"慢一点"。
+   *
+   * 尺寸在 @ref listen 里定死（`uvcpp_tcp_server::loop_count()`），此后
+   * **只读**，所以取表这一路不需要锁，也没有扩容。单循环下恒为一个元素。
+   */
+  std::vector<std::map<uvcpp_tcp_client*, conn_ctx> > contexts_;
+
+  /**
+   * @brief 取 \p client 那条连接所在的登记表。
+   *
+   * **必须在这条连接自己的循环线程上调用** —— 它返回的是一张别的线程可能正在
+   * 动的表的引用；跨循环调用等于把它交出去给竞争。调用点全是连接自己的回调，
+   * 所以这条约束天然成立。
+   */
+  std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_of(uvcpp_tcp_client* client);
+
+  /**
+   * @brief 取**本线程**所在循环的登记表。
+   *
+   * 给手上没有连接对象的入口用（停机时"把本循环上的 h2 连接都道别"）。
+   * 判"我在几号"用 `uvcpp_loop_index_of_this_thread()`，所以它同样只能在
+   * 循环线程上调。
+   */
+  std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_here();
+
+  /// @ref ctxs_of / @ref ctxs_here 共用的取值 + 越界兜底。
+  std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_at(int loop_index);
+
+  /// @brief @ref ctxs_of 的 const 版（`connection_generation()` 这类只读入口用）。
+  const std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_of(
+      uvcpp_tcp_client* client) const;
+  const std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_at(int loop_index) const;
 
 #if UVCPP_ZLIB_ENABLE
   bool compress_enabled_ = true;

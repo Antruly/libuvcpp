@@ -43,6 +43,26 @@ namespace uvcpp {
 class uvcpp_async;
 class uvcpp_loop;
 
+/**
+ * @brief 本线程正在跑的是**几号循环**；不在任何一条上时返回 -1。
+ *
+ * 为什么要这个线程本地量：多循环下上层要按循环切容器（`uvcpp_http_server` 的
+ * `contexts_`、webapp 的 `inflight_` 都是），而"我该动哪一份"这个问题只有
+ * **当前在哪条循环上**答得了。拿连接对象去问是另一条路（`uvcpp_tcp_client::
+ * loop_index()`），但有些入口手上根本没有连接 —— 比如停机时"把本循环上的
+ * h2 连接都道别"。
+ *
+ * 谁写它：每条工作循环的线程体在开跑前自报家门（`uvcpp_loop_worker`）；
+ * 接受者那条循环由 `uvcpp_tcp_server::run()` 在入口处认领为 0（那条线程是
+ * 调用者的，服务端只能在自己被调用的那一刻写）。
+ *
+ * 线程退出时会被清回 -1，所以"线程复用后读到上一条循环的号"不会发生。
+ */
+int uvcpp_loop_index_of_this_thread();
+
+/** @brief 由循环线程自己写 @ref uvcpp_loop_index_of_this_thread。 */
+void uvcpp_set_loop_index_of_this_thread(int index);
+
 class uvcpp_loop_worker {
  public:
   uvcpp_loop_worker();
@@ -104,12 +124,24 @@ class uvcpp_loop_worker {
   /** @brief 循环指针。**只在 worker 线程上有意义**（线程退出后会被置空）。 */
   uvcpp_loop* loop() const { return loop_; }
 
+  /**
+   * @brief 这条工作循环是**几号**（0 号留给接受者，所以 worker 从 1 起）。
+   *
+   * 必须在 `start()` 之前装。线程体开跑的第一件事就是把它写进线程本地的
+   * "我在几号循环上"（见 @ref uvcpp_loop_index_of_this_thread），于是这条线程
+   * 上任何位置的代码都能问出自己在哪条循环上 —— 上层按循环切容器全靠它。
+   */
+  void set_loop_index(int index) { loop_index_ = index; }
+  int loop_index() const { return loop_index_; }
+
  private:
   void thread_main(std::promise<int>* ready);
+
   /** @brief 把邮箱 swap 出来逐条跑。worker 线程调用。 */
   void drain();
 
   uvcpp_loop* loop_ = nullptr;
+  int loop_index_ = 0;
   std::thread thread_;
   /** @brief 邮箱入口；**在 worker 线程上**建。nullptr = 不再受理投递。 */
   uvcpp_async* async_ = nullptr;

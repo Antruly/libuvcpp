@@ -11,6 +11,8 @@
 
 #include <web/uvcpp_http_parser.h>
 #include <web/uvcpp_http_compress.h>
+// `uvcpp_loop_index_of_this_thread()`：按循环切容器要问"我在哪条循环上"。
+#include <net/uvcpp_loop_worker.h>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -46,26 +48,71 @@ uvcpp_http_server::uvcpp_http_server() {
 }
 
 uvcpp_http_server::~uvcpp_http_server() {
-  for (auto& kv : contexts_) {
-    delete kv.second.parser;
+  // 按循环走一遍。析构发生在**所有**循环线程都已经停了之后（调用方的责任，
+  // 见 `uvcpp_tcp_server` 的停机次序），所以这里逐张表翻是安全的。
+  for (size_t li = 0; li < contexts_.size(); ++li) {
+    std::map<uvcpp_tcp_client*, conn_ctx>& tbl = contexts_[li];
+    for (auto& kv : tbl) {
+      delete kv.second.parser;
 #if UVCPP_NGHTTP2_ENABLE
-    // h2 层是连接上下文 new 出来的，反过来**没有任何别的表登记它** ⇒ 少了这
-    // 一句就是每条还活着的 h2 连接漏一个 nghttp2 会话和它的缓冲区。
-    //
-    // 能走到这里说明 `remove_ctx` 没跑过：正常收尾（`close_all_clients()`）
-    // 会经由客户端的关闭回调跑它，剩下的是"客户端先于服务端被释放"这种路
-    // （`release_client` 只 `delete`，一个回调都不发）。
-    //
-    // 这里**不**唤醒队列里的 `done`：此刻持有者的上下文（webapp 那套）多半
-    // 已经在拆，唤醒了也没有接收方。h1 那半同样是丢下队列直接走的 —— 与它
-    // 对齐，而不是单独给 h2 编一套。
-    delete kv.second.h2;
-    kv.second.h2 = nullptr;
+      // h2 层是连接上下文 new 出来的，反过来**没有任何别的表登记它** ⇒ 少了这
+      // 一句就是每条还活着的 h2 连接漏一个 nghttp2 会话和它的缓冲区。
+      //
+      // 能走到这里说明 `remove_ctx` 没跑过：正常收尾（`close_all_clients()`）
+      // 会经由客户端的关闭回调跑它，剩下的是"客户端先于服务端被释放"这种路
+      // （`release_client` 只 `delete`，一个回调都不发）。
+      //
+      // 这里**不**唤醒队列里的 `done`：此刻持有者的上下文（webapp 那套）多半
+      // 已经在拆，唤醒了也没有接收方。h1 那半同样是丢下队列直接走的 —— 与它
+      // 对齐，而不是单独给 h2 编一套。
+      delete kv.second.h2;
+      kv.second.h2 = nullptr;
 #endif
+    }
+    tbl.clear();
   }
-  contexts_.clear();
   delete tcp_server_;
   tcp_server_ = nullptr;
+}
+
+std::map<uvcpp_tcp_client*, uvcpp_http_server::conn_ctx>&
+uvcpp_http_server::ctxs_of(uvcpp_tcp_client* client) {
+  // **单循环的快路径**：表只有一张，就不去读 `client` 了。多循环 §7 要求
+  // 单循环的热路径不被这套东西改形状，而 `contexts_` 是本层最热的一次查找。
+  if (contexts_.size() == 1) return contexts_[0];
+
+  return ctxs_at((client != nullptr) ? client->loop_index() : 0);
+}
+
+std::map<uvcpp_tcp_client*, uvcpp_http_server::conn_ctx>&
+uvcpp_http_server::ctxs_here() {
+  return ctxs_at(uvcpp_loop_index_of_this_thread());
+}
+
+const std::map<uvcpp_tcp_client*, uvcpp_http_server::conn_ctx>&
+uvcpp_http_server::ctxs_of(uvcpp_tcp_client* client) const {
+  if (contexts_.size() == 1) return contexts_[0];
+  return ctxs_at((client != nullptr) ? client->loop_index() : 0);
+}
+
+const std::map<uvcpp_tcp_client*, uvcpp_http_server::conn_ctx>&
+uvcpp_http_server::ctxs_at(int loop_index) const {
+  if (loop_index < 0 || static_cast<size_t>(loop_index) >= contexts_.size()) {
+    return contexts_[0];
+  }
+  return contexts_[static_cast<size_t>(loop_index)];
+}
+
+std::map<uvcpp_tcp_client*, uvcpp_http_server::conn_ctx>&
+uvcpp_http_server::ctxs_at(int loop_index) {
+  if (loop_index < 0 || static_cast<size_t>(loop_index) >= contexts_.size()) {
+    // 到不了这儿：`listen()` 之后每条连接的循环号都落在表内，而 -1
+    // （"不在任何循环线程上"）只可能出现在误用里 —— 比如从一条空转的线程上
+    // 调 `begin_h2_goaway()`。退到 0 号，**不是**越界：单循环下这正是唯一
+    // 那张表，行为与从前逐字相同。
+    return contexts_[0];
+  }
+  return contexts_[static_cast<size_t>(loop_index)];
 }
 
 int uvcpp_http_server::bind(const char* ip, int port) {
@@ -81,6 +128,15 @@ int uvcpp_http_server::bindIpv6(const char* ip, int port) {
 }
 
 int uvcpp_http_server::listen(int backlog) {
+  // **表要在 acceptor 起来之前就定好尺寸。** 多循环下 `uvcpp_tcp_server::listen()`
+  // 里会把工作循环的线程放行，那些线程一旦接手连接就会走 `on_tcp_connection()`
+  // → `ctxs_of()`；表还是空的话那一步就是越界取表。`set_loops()` 必须在
+  // `listen()` 之前调，"几条循环"在这一刻已经是定局，所以问得到。
+  //
+  // 尺寸此后**只读**：`set_loops()` 在 listen 之后返回 `UV_EBUSY`，循环数不会
+  // 再变，扩容也就无从谈起 —— 取表那一路不需要锁，靠的就是这一句。
+  contexts_.resize(static_cast<size_t>(tcp_server_->loop_count()));
+
   int rc = tcp_server_->listen(
       [this](uvcpp_tcp_client* client) { on_tcp_connection(client); },
       backlog);
@@ -97,8 +153,8 @@ void uvcpp_http_server::on_upgrade(upgrade_handler_t handler) {
 }
 
 std::string uvcpp_http_server::take_upgrade_leftover(uvcpp_tcp_client* client) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return std::string();
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return std::string();
   std::string out;
   out.swap(it->second.pending);
   it->second.upgrading = false;
@@ -176,7 +232,7 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
   ctx.parser->set_max_url_bytes(max_url_bytes_);
   // 先自增再赋值：0 要留给"不在登记表里"，不然"第 0 条连接"和"没连接"就分不开了。
   ctx.generation = ++next_generation_;
-  contexts_[client] = ctx;
+  ctxs_of(client)[client] = ctx;
 
   // 连接级钩子在**登记之后**才跑：钩子的用途就是"给这条连接做簿记"，而簿记
   // 的第一步是拿到它的身份 —— `connection_generation(client)` 得先有效。
@@ -197,7 +253,7 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
     }
   }
 
-  conn_ctx* pctx = &contexts_[client];
+  conn_ctx* pctx = &ctxs_of(client)[client];
 
   // 单消息暂存按**消息**清，不按读清。
   //
@@ -328,8 +384,8 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
 
 void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
                                             uvcpp_buf* buf) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;
   conn_ctx& ctx = it->second;
 
   // Raw-data hook: fires ahead of parsing, so a hook can observe the bytes
@@ -406,8 +462,8 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
 }
 
 void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;
   conn_ctx& ctx = it->second;
   ctx.msg_done = true;
 
@@ -589,8 +645,8 @@ void uvcpp_http_server::reject_early(conn_ctx& ctx, uvcpp_tcp_client* client,
 size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
                                         uvcpp_http_response& resp,
                                         bool close_after_write) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) {
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) {
     // The connection is already gone. Callers reach this by responding after
     // the client disconnected, or twice for one request — a real bug worth
     // hearing about rather than a silently vanished response.
@@ -694,8 +750,8 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
 
 void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client,
                                      uvcpp_http_response& resp) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) {
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) {
     std::fprintf(stderr,
                  "[uvcpp_http_server] Warning: stream dropped, connection is "
                  "no longer tracked (already closed?)\n");
@@ -745,8 +801,8 @@ void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client,
 
 void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client, int32_t stream_id,
                                      uvcpp_http_response& resp) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) {
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) {
     std::fprintf(stderr,
                  "[uvcpp_http_server] Warning: stream dropped, connection is "
                  "no longer tracked (already closed?)\n");
@@ -793,8 +849,8 @@ int uvcpp_http_server::write_stream(uvcpp_tcp_client* client, std::string bytes,
 int uvcpp_http_server::write_stream(uvcpp_tcp_client* client, int32_t stream_id,
                                     std::string bytes,
                                     std::function<void(int)> done) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end() || it->second.closing) return UV_ECANCELED;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end() || it->second.closing) return UV_ECANCELED;
   conn_ctx& ctx = it->second;
 
 #if UVCPP_NGHTTP2_ENABLE
@@ -820,8 +876,8 @@ void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, bool close_after) {
 
 void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, int32_t stream_id,
                                    bool close_after) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;
   conn_ctx& ctx = it->second;
   if (ctx.closing) return;
 
@@ -1135,8 +1191,8 @@ void uvcpp_http_server::fire_write_done(const std::shared_ptr<write_done>& d,
 }
 
 void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;
   pump_write(it->second, client);
 }
 
@@ -1290,8 +1346,8 @@ void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
   // 回调提到两个重载外面来：两块那条路与一块那条路是**同一个**结算逻辑，
   // 抄成两份就是给"以后只改了一份"留口子（本仓的 ws 那族就是这么来的）。
   auto on_written = [this, client, wd](int status) {
-    auto c = contexts_.find(client);
-    if (c == contexts_.end()) {
+    auto c = ctxs_of(client).find(client);
+    if (c == ctxs_here().end()) {
       // 连接已经从表里消失；这一块的下场仍然是"不会写出去了"。
       fire_write_done(wd, status != 0 ? status : UV_ECANCELED);
       return;
@@ -1321,8 +1377,8 @@ void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
     // 动作就是关连接或再写一块，两者都可能把表项摘掉。普通响应走的正是省掉
     // 这一查的那条（`enqueue_write` 的五个调用点里四个不传 `done`）。
     if (wd) {
-      c = contexts_.find(client);
-      if (c == contexts_.end()) return;
+      c = ctxs_of(client).find(client);
+      if (c == ctxs_here().end()) return;
     }
     if (c->second.closing) return;
 
@@ -1359,8 +1415,8 @@ void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
 }
 
 void uvcpp_http_server::close_connection(uvcpp_tcp_client* client) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;
   conn_ctx& ctx = it->second;
   if (ctx.closing) return;  // close is issued exactly once
   ctx.closing = true;
@@ -1409,8 +1465,10 @@ void uvcpp_http_server::close_connection(uvcpp_tcp_client* client) {
 uint64_t uvcpp_http_server::connection_generation(
     uvcpp_tcp_client* client) const {
   if (client == nullptr) return 0;
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return 0;
+  // 这是个 const 成员，走 `ctxs_of()` 的 const 重载（越界兜底是同一份实现）。
+  const std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+  std::map<uvcpp_tcp_client*, conn_ctx>::const_iterator it = tbl.find(client);
+  if (it == tbl.end()) return 0;
   return it->second.generation;
 }
 
@@ -1430,8 +1488,9 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
   // 不到 ctx，直接返回）都安全，不会踩到正在被销毁的 `conn_ctx`；而
   // `close_handler_`（框架的断连通知）排在最后，与"先唤醒、后通知框架"的既有
   // 次序一致 —— 否则 done 可能在框架已经拆掉这条连接的上下文之后才跑。
-  auto it = contexts_.find(client);
-  if (it != contexts_.end()) {
+  std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+  auto it = tbl.find(client);
+  if (it != tbl.end()) {
     std::deque<queued_write> dropped;
     dropped.swap(it->second.write_queue);
     // 在途那一块跟着一起摘（理由见 write_done 的注释）：网络层的写完成回调
@@ -1455,7 +1514,7 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
     delete it->second.h2;
     it->second.h2 = nullptr;
 #endif
-    contexts_.erase(it);
+    tbl.erase(it);
 
     for (size_t i = 0; i < dropped.size(); ++i) {
       if (dropped[i].done) dropped[i].done(UV_ECANCELED);
@@ -1474,8 +1533,13 @@ size_t uvcpp_http_server::begin_h2_goaway() {
   // 这里**不关连接**，只打招呼。关是立刻生效的（`uv_close`），而 GOAWAY 得先
   // 排进队列再等几轮循环才出网 —— 两件事挤在一起做，对端拿到的就是"连接断了"，
   // 正好是这一句想避免的那个歧义。
+  //
+  // **只翻本循环那张表**（多循环）：表是按循环切的，从一条循环上去翻另一条
+  // 循环的表就是数据竞争。所以调用方要在**每条**循环上各道一次别（webapp 的
+  // 停机正是按循环推进的）；单循环下"本循环"就是"全部"，行为与从前逐字相同。
+  std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_here();
   size_t n = 0;
-  for (auto it = contexts_.begin(); it != contexts_.end(); ++it) {
+  for (auto it = tbl.begin(); it != tbl.end(); ++it) {
     uvcpp_h2_connection* h2 = it->second.h2;
     if (h2 == nullptr || h2->closed()) continue;
     if (h2->begin_goaway() == 0) ++n;
@@ -1492,7 +1556,7 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
   conn_ctx ctx;
   ctx.parser = nullptr;  // 与 h2 互斥：h2 连接上没有 llhttp
   ctx.generation = ++next_generation_;
-  contexts_[client] = ctx;
+  ctxs_of(client)[client] = ctx;
 
   // 与本层 h1 那条路**次序一致**：登记之后才跑连接钩子，钩子里的
   // `connection_generation(client)` 才拿得到身份。
@@ -1509,8 +1573,8 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
     }
   }
 
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;  // 钩子里就把连接关了
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;  // 钩子里就把连接关了
   uvcpp_h2_connection* h2 = new uvcpp_h2_connection(client, /*server_side=*/true);
   it->second.h2 = h2;
 
@@ -1519,8 +1583,8 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
   uvcpp_h2_session::callbacks h2c;
   h2c.on_body = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st,
                                const char* d, size_t n) {
-    auto cit = contexts_.find(client);
-    if (cit == contexts_.end()) return;
+    auto cit = ctxs_of(client).find(client);
+    if (cit == ctxs_here().end()) return;
     conn_ctx::h2_stream_state& ss = cit->second.h2_streams[st.stream_id];
     if (ss.overflow) return;  // 已经判过超限：后面的块直接丢，别再填回去
     if (max_body_size_ != 0 && ss.body.size() + n > max_body_size_) {
@@ -1533,16 +1597,16 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
     ss.body.append(d, n);
   };
   h2c.on_request = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st, bool) {
-    auto cit = contexts_.find(client);
-    if (cit == contexts_.end()) return;
+    auto cit = ctxs_of(client).find(client);
+    if (cit == ctxs_here().end()) return;
     // 流 id 只增不复用，正常这里本来就是空的；复位是为了万一有残留状态，也不会
     // 把上一条流的判定带给新流。**不能 erase** —— 无 body 的请求 `on_request` 和
     // `on_request_end` 是背靠背的（同上），擦掉之后那条请求就没人派发了。
     cit->second.h2_streams[st.stream_id] = conn_ctx::h2_stream_state();
   };
   h2c.on_request_end = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st) {
-    auto cit = contexts_.find(client);
-    if (cit == contexts_.end()) return;
+    auto cit = ctxs_of(client).find(client);
+    if (cit == ctxs_here().end()) return;
     conn_ctx& c = cit->second;
 
     auto sit = c.h2_streams.find(st.stream_id);
@@ -1568,8 +1632,8 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
     dispatch_h2_request(client, st.stream_id, req);
   };
   h2c.on_close = [this, client](uvcpp_h2_session&, int32_t sid, uint32_t) {
-    auto cit = contexts_.find(client);
-    if (cit != contexts_.end()) cit->second.h2_streams.erase(sid);
+    auto cit = ctxs_of(client).find(client);
+    if (cit != ctxs_here().end()) cit->second.h2_streams.erase(sid);
   };
 
   uvcpp_h2_connection::callbacks cc;
@@ -1589,8 +1653,8 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
 void uvcpp_http_server::dispatch_h2_request(uvcpp_tcp_client* client,
                                             int32_t stream_id,
                                             uvcpp_http_request& req) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end()) return;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end()) return;
   conn_ctx& ctx = it->second;
 
   auto sit = ctx.h2_streams.find(stream_id);
@@ -1619,8 +1683,8 @@ void uvcpp_http_server::dispatch_h2_request(uvcpp_tcp_client* client,
 int uvcpp_http_server::send_h2_response(uvcpp_tcp_client* client,
                                         int32_t stream_id,
                                         uvcpp_http_response& resp) {
-  auto it = contexts_.find(client);
-  if (it == contexts_.end() || it->second.h2 == nullptr) return UV_EINVAL;
+  auto it = ctxs_of(client).find(client);
+  if (it == ctxs_here().end() || it->second.h2 == nullptr) return UV_EINVAL;
   conn_ctx& ctx = it->second;
 
   auto sit = ctx.h2_streams.find(stream_id);

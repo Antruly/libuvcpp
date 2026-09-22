@@ -1,7 +1,11 @@
 # 多循环横向扩展设计（`set_loops`）
 
-> **状态：对半分。** **net 层已落地**（`uvcpp_tcp_server::set_loops(n)`，1.2.21-dev，
-> 见 §1.1）；**webapp 层仍是设计稿**（`uvcpp_web_app::set_loops()` 还不存在，§4 起是它）。
+> **状态：net 层已落地；webapp 层做完了它的第一块。**
+> net 层是 `uvcpp_tcp_server::set_loops(n)`（1.2.21-dev，见 §1.1）；webapp 层这一批
+> 落的是 **§4.1 的 `contexts_` 按循环切 + §4.2 的前置**（`uvcpp_tcp_client::loop_index()`、
+> 循环号线程本地、`next_generation_` 原子化、`begin_h2_goaway()` 收窄到本循环，
+> 1.2.22-dev，见 §4.1 的更正块与 §4.2）。**`uvcpp_web_app::set_loops()` 还不存在**
+> —— `post()`、`inflight_`/`upgraded_`、停机看门狗那几件仍是设计稿（§4.3 起、§5.2/§5.3）。
 > 文里的 `src/...:行号` 引用由 `check_doc_lines.py` 锁着 —— 改代码时门禁会把该一起改的地方顶红。
 
 这一篇讲**已经落地了什么**（§1.1）与**打算怎么做**（webapp 那一半），以及
@@ -50,7 +54,7 @@ int main() {
 
 **已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:254`）
 把"一条循环"变成「**一条接受者 + n−1 条工作循环**」，每条工作循环一条**专用
-`std::thread`**（`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:46` —— 不是
+`std::thread`**（`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:66-66` —— 不是
 `uv_queue_work` 那条线程池）。配套读法：`loop_count()`
 （`src/net/uvcpp_tcp_server.h:280-281`）、`client_count_at(i)`
 （`src/net/uvcpp_tcp_server.h:290`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
@@ -61,15 +65,15 @@ acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
   └─ uv_connection_cb
        ├─ n == 1：今天那条路，逐字不动（src/net/uvcpp_tcp_server.cpp:266）
        └─ n > 1 ：accept 进一个**临时句柄**
-                  （src/net/uvcpp_tcp_server.cpp:381 accept_and_handoff）
+                  （src/net/uvcpp_tcp_server.cpp:386-386 accept_and_handoff）
                   → 取出 socket → 平台转手 → post 给 worker[k]，k = i % (n-1)
                   → 立刻关掉自己那份
 worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
-  └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:110 起）
+  └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:141-141 起）
        └─ 在**这条循环的线程**上：new uvcpp_tcp_client(worker_loop) 装转手来的 socket
-          （src/net/uvcpp_tcp_server.cpp:429 on_handoff_task）→ mark_accepted() → 登记
+          （src/net/uvcpp_tcp_server.cpp:434-434 on_handoff_task）→ mark_accepted() → 登记
           → setup_client_callbacks() → TLS 块 → deliver_connection()
-          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:452 finish_accept）
+          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:461-461 finish_accept）
 ```
 
 **去向是显式轮转，不是内核散列**，所以分布是**确定性**的（第 i 条必然落在
@@ -79,7 +83,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
 
 - **转手必须在 `mark_accepted()` 之前**，也就是整条尾巴（登记、`setup_client_callbacks`、
   TLS、`deliver_connection`）都必须在**目标循环的线程**上跑 —— `enable_tls()` 会当场在这条
-  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:485`）。
+  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:494-494`）。
 - **POSIX 的 `uv_accept` 硬断言同循环**（`libuv:unix/stream.c:539`），所以转手靠
   `dup()` + `uv_tcp_open`（后者"已存在"的检查是**按循环**做的，跨循环共用一个 fd 不会被拒、
   只会 double close）。
@@ -239,7 +243,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 | 容器 | 位置 | 触碰频率 |
 |---|---|---|
-| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:989` | **每请求**（`.cpp` 里 52 处引用） |
+| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1009` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | `uvcpp_web_app::inflight_` | `src/webapp/uvcpp_web_app.h:1489` | **每请求** |
 | `uvcpp_web_app::upgraded_` | `src/webapp/uvcpp_web_app.h:1433` | 每次 WS 升级 |
 | `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:670` | 接受 / 关闭 / 计数 |
@@ -251,14 +255,32 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 ### 4.1 好消息：大部分切分是"多建几个对象"，不是"给容器加锁"
 
-`uvcpp_http_server` 在自己的构造函数里 `new uvcpp_tcp_server`（`src/web/uvcpp_http_server.cpp:44-46`），
+`uvcpp_http_server` 在自己的构造函数里 `new uvcpp_tcp_server`（`src/web/uvcpp_http_server.cpp:46-48`），
 而 `uvcpp_tcp_server` 在自己的构造函数里 `new uvcpp_loop`（`src/net/uvcpp_tcp_server.cpp:79-83`）。
 ⇒ **n 个 `uvcpp_http_server` 实例 = n 份 `contexts_` + n 份 `clients_` + n 条循环/线程。**
 
+> **更正（2026-09-22，net 批落地后）：上面这条"多建几个实例"的路没有被采用。**
+> 落地的是**一个实例、内部按循环切表**：`contexts_` 从一张
+> `std::map<uvcpp_tcp_client*, conn_ctx>` 变成
+> `std::vector<std::map<uvcpp_tcp_client*, conn_ctx> >`
+> （`src/web/uvcpp_http_server.h:1009`），索引 = `uvcpp_tcp_client::loop_index()`；
+> 取表只有三个入口 —— `ctxs_of(client)`（有连接时）、`ctxs_here()`（没有连接、
+> 靠线程本地的循环号，`src/net/uvcpp_loop_worker.h` 那对
+> `uvcpp_loop_index_of_this_thread()`）、`ctxs_at(i)`；`n == 1` 时
+> `ctxs_of()` 直接回 `contexts_[0]`，不读 `client`。
+> **理由是 §4.2 那条**：连接 id 由登记表自己发，切成 n 份之后"是不是我发的号"
+> 这条判据会对别的循环的号返回真 —— 一个实例内部切表才能让 id 的高位编码循环号
+> 这条修法（`e538ea5`）成立。n 个实例那条路要求每个实例自己一套 id 空间，
+> 而 id 是**服务全局**的。
+> 连带的一处：`next_generation_` 变成 `std::atomic<uint64_t>`（代次号也是全局序列，
+> 不按循环切），`listen()` 里在 `tcp_server_->listen()` **之前**
+> `contexts_.resize(loop_count())` —— worker 线程是在那个调用里放行的，
+> 放行后它们会立刻走 `on_tcp_connection()` → `ctxs_of()`。
+
 **但"接受者就是这个循环"在那条路上不再成立 —— 这正是 net 层要转手的原因。**
 `:266` 的 `new uvcpp_tcp_client(loop_)` 与 `:269` 的 `s->accept(...)` 今天是 **n==1 那条分支**；
-n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:381` 的 `accept_and_handoff`），
-客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:429` 的 `on_handoff_task`）。
+n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:386-386` 的 `accept_and_handoff`），
+客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:434-434` 的 `on_handoff_task`）。
 ⇒ webapp 层要接的话，**每个 `uvcpp_http_server` 的 `tcp_server` 各自 `set_loops(n)`**
 仍然成立（每个 app 一份循环组），但"接受者即本循环"这条直觉要换成 §1.1 那张图。
 
@@ -277,20 +299,20 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 多线程只读，**不需要锁**。
 
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
-> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1023`）是
+> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1069-1069`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
-> （`src/web/uvcpp_http_server.cpp:1017`），未命中时插入并可能触发 LRU 淘汰
-> （`src/web/uvcpp_http_server.cpp:1070`、`src/web/uvcpp_http_server.cpp:872`）。
+> （`src/web/uvcpp_http_server.cpp:1073-1073`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:1126-1126`、`src/web/uvcpp_http_server.cpp:928-928`）。
 > 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
-> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1024-1027`）一起加锁；
+> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1070-1073`）一起加锁；
 > **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
 >
-> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1041`）
+> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1087-1087`）
 > 一把**非递归**锁护住那张表与四个计数。加锁点只有三个**外层入口** —— 命中
-> （`src/web/uvcpp_http_server.cpp:1017`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
+> （`src/web/uvcpp_http_server.cpp:1073-1073`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
 > 整张表的字节总量，拆成两次加锁会让别的循环插在中间按一个已不成立的总量做决定）、
 > `compress_variant_stats()`。两个帮手改名成 `..._locked()`
-> （`src/web/uvcpp_http_server.h:1052` / `:1056`），意思就是"调用方已持锁" ——
+> （`src/web/uvcpp_http_server.h:1098-1098` / `:1102`），意思就是"调用方已持锁" ——
 > 淘汰要算字节总量，所以这两个互相调用，同一条非递归锁不能进两次。
 > 临界区里只碰表与计数：命中那条路把共享句柄**拷出锁外**再 `share()`，
 > `finish_headers()` 也在锁外（它改的是响应，不碰表）。
