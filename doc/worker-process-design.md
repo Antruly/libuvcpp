@@ -318,10 +318,14 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
   `DECREASE_PENDING_REQ_COUNT(handle)`（`:1154`）—— 而那个宏第一步就是
   `assert(handle->reqs_pending > 0)`（`libuv:win/handle-inl.h:51-60`）。⇒ 重复派发把**句柄级的两个
   计数器打成负数**：Debug 构建下当场断言，Release 下 `reqs_pending` 再也回不到 0 ⇒
-  `uv__tcp_endgame`（`libuv:win/tcp.c:232-239`，四条 assert 之一是 `reqs_pending == 0`）**永远不会
+  `uv__tcp_endgame`（`libuv:win/tcp.c:233-239`，四条 assert 之一是 `reqs_pending == 0`）**永远不会
   为这个句柄跑**。**推迟释放救不了，把 `cb` 清空也救不了 —— 两次派发打的是同一份句柄记账。**
-- **(乙) libuv 侧：让派发幂等**（`uv_write_t.coalesced` 在 TCP 写路径上是死字段，可当"已派发"标记）。
-  这条要提上游，不是本仓的事。
+- **(乙) libuv 侧：别让派发重复。** 两个候选形状（读数见 §9.7；都是上游的事，不是本仓的）：
+  **(乙1) 对 imported 句柄不拿同步快路径** —— 不调 `SetFileCompletionNotificationModes`
+  （`libuv:win/tcp.c:79` / `:122-124`），代价是这类连接每次写多一个 IOCP 往返，收益是不变式
+  重新变成"单源完成"；**(乙2) 真做幂等派发** —— 但"这条包是重复的"只能从 req 内存判断，
+  而那份内存应用已经交还（§9.7 的次序读数）⇒ 它不能只加一个 `dispatched` 位，
+  得连内存生命周期一起设计。
 - **(丙) 结构上别用 master 已经关联过的句柄**：让 worker 走"自己建、自己关联"的接受路径。
   两个形状 —— (a) **监听**句柄在**首次关联之前**就复制给各 worker、各自 `uv_listen`；
   (b) 监听只归 master，但 worker 用**自建**的接受句柄 `AcceptEx` 接进来（§9.6 第三条）。
@@ -351,7 +355,7 @@ vs **worker 侧自建接受句柄**（丙臂），看"已派发又插包"是否�
 `write_reqs_pending--` 归零 + `UV_HANDLE_CLOSING` ⇒ `closesocket(handle->socket); handle->socket =
 INVALID_SOCKET;`（`libuv:win/tcp.c:1143-1147`）。**第二次**派发随后才读到它，于是打包成完成包
 的 `req-socket` 字段送出。⇒ **这条读数只能说明包"迟到"**（连接已经关了才被取走），
-**说明不了它迟到到 `uv__tcp_endgame`（`:232-239`）之后** —— 次序恰好相反：endgame 要等
+**说明不了它迟到到 `uv__tcp_endgame`（`:233-239`）之后** —— 次序恰好相反：endgame 要等
 `reqs_pending == 0`，而重复派发把那个数打负了（§9.6），所以 endgame 根本不会跑。
 
 **读数仍然值得留**（上游报告里"包迟到"是要给的一份证据），**但它不再是判据** —— (甲) 的存废
@@ -405,5 +409,56 @@ INVALID_SOCKET;`（`libuv:win/tcp.c:1143-1147`）。**第二次**派发随后才
    ⇒ 判定实验要加**第三臂**：worker 侧 `WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
    WSA_FLAG_OVERLAPPED)` 自建接受句柄，`AcceptEx` + `SO_UPDATE_ACCEPT_CONTEXT` 接进来，再
    `uv_tcp_open`。**只有这一臂决定 Windows 上还剩不剩一条既免转手、也免得改上游的路。**
+
+### 9.7 §5 判定实验的收尾读数（外部装置，2026-09-22）
+
+**装置臂：17 次命中 / ~3.3×10⁶ 条成功连接 ⇒ ≈1/1.9×10⁵**，而 17 次的计数**逐字同形**
+（`sync == sends == procs`、`pend=0 fail=0 bad=0`、`insW = sends+1`、`iSync = sends`、
+`iPkt=1`、`iAfter=1`、`iRedun=0`）。读法：
+
+- `pend = 0` ⇒ 那条包**不是**"它自己 pending 写的合法完成"（否则 `pend ≥ 1`）；
+- `insW = sends+1` 且 `iAfter = 1` ⇒ 同一条 req 被插了两次，第二次发生在**它已经被派发过之后**；
+- 派发侧独立计数 `procs = sends + 1`（`uv__process_tcp_write_req` 入口）⇒ **不只是插进队列，
+  应用的回调真的被调了第二次**。
+- 包的字段这次取对了：`status=0` + `bytes=117` ⇒ **一次成功的发送完成**，不是取消
+  （取消会是 `0xC0000120`、bytes=0）。（他上一版那条"包字段"取自 req 自己的 overlapped，
+  已自行更正。）
+
+**微观臂（进程内 adopt 同形探针，4×10⁶ 轮）：0 命中**，上界 1/1.3×10⁶（rule of three）
+—— 比装置里的速率还低 6 倍 ⇒ **光"adopt"这一件事解释不了它**。阳性对照是有牙的：去掉 modes
+的 2000 轮 = 2000/2000，且包在 `WSASend` 返回时**已经躺在队列里**（所以"返回后立刻零超时取一次"
+是完备探测，不是抽样）。
+
+> **他同时撤回了自己上一轮那句"假设被证伪"**：当时那 1600 轮阴性只排除快于 1/533 的速率，
+> 而装置里的速率是 1/2×10⁵ —— **没有功率的阴性结果不是反证**。这条单记，它正是
+> "判据要有牙"的一个实例（本仓的规矩：判据要对着对照组跑一遍）。
+
+**次序读数（§9.4 缺的那一半，他重做了）**：他原来的事件环**按 socket 号认人，而 socket 号会回收**
+（64 K 事件窗口里约 10 代）⇒ 上一版那个"取走时刻"取错了人。改成按 req/handle 认人后两次命中同形：
+
+```
+S 提交 → D 派发进入 → C uv__tcp_close 进入 → Z 应用写回调返回
+      → W write_reqs_pending-- → X closesocket() → P 重复包出队
+```
+
+⇒ **P 在 Z 之后**（应用已经把写对象交还），**P 在 X 之后而 endgame 还没跑**。
+这与 §9.4 的更正一致（`INVALID_SOCKET` 是第一次派发自己置的），并且补上了那一半：
+包确实**迟到**，迟到到"对象已释放"之后。
+
+**一条待验的预测（是我的，不是结论）**：第二次派发会再走一遍 `DECREASE_PENDING_REQ_COUNT`
+（`libuv:win/handle-inl.h:51-60`）⇒ 那个句柄的 `reqs_pending` 变负 ⇒ `uv__tcp_endgame`
+永不跑、句柄永远停在 `CLOSING`（Debug 构建下当场断言）。判据很便宜：**在 P 之后读
+`handle->reqs_pending`（预期 −1），以及跑完之后那个句柄是否到达 `CLOSED`。**
+
+**他的头号假设（未证）**：差异在"**真的跨进程**"那一步 —— blob 过管道交给另一个进程打开、
+且 master 那份副本在 worker 调 modes 时**还开着**。验证实验（子进程 + blob 走管道，其余不变）
+他下一轮能做。
+
+**⇒ 第三臂（§9.6 第三条）现在同时是两件事的判据，而第二件比第一件重要：**
+
+1. 本设计在 Windows 上还留不留一条免转手的路；
+2. **本库 `uvcpp_tcp::open` 这个已经发出去的公开入口安不安全**（同进程里自建句柄走
+   `uv_tcp_open`）—— 若连它也在射程里，(乙1) 那个"每次写多一个 IOCP 往返"的代价就落到
+   所有 adopt 用户身上，而不只是转手路径。
 
 相关文档：[webapp 应用框架开发者指南](./webapp-guide.md)、[压测靶场](./benchmark-rig.md)。
