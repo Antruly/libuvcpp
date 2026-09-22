@@ -522,11 +522,222 @@ static bool test_api_guards() {
 }
 
 // =========================================================================
+// 就绪钩子：`set_loop_start_hook()` 在每条工作循环上、开跑之前各调一次
+//
+// 这条 API 是给 webapp 那半边的每循环容器用的：per-loop 的 `uv_async` /
+// `uv_timer` 只能建在循环线程上，而 `set_loops()` 返回时线程已经在跑了。
+// 这里量的是它的**时序契约**，因为契约错了就是"配了却没生效"那种最难查的形状。
+// =========================================================================
+
+/** @brief 钩子观察到的事实（worker 线程写、主线程读，用锁护）。 */
+struct HookLog {
+  mutable std::mutex mu;
+  std::map<int, std::thread::id> tid;  ///< 循环号 -> 钩子所在地线程
+  int calls = 0;
+  /** @brief 第一次钩子跑时已接受的连接数 —— 时序判据，恒 0。 */
+  int accepted_at_hook = -1;
+  /** @brief `set_loops()` 返回那一刻已经调过几次。 */
+  int calls_at_return = -1;
+  std::thread::id acceptor;
+  std::set<std::thread::id> conn_tids;  ///< `on_connection` 里看到的线程
+};
+
+static bool test_loop_start_hook() {
+  bool ok = true;
+
+  HookLog log;
+  std::atomic<int> accepted{0};
+  std::atomic<int> stop{0};
+  std::atomic<int> exited{0};
+  std::atomic<int> loops_rc{-999};
+  std::promise<int> port_p;
+  std::future<int> port_f = port_p.get_future();
+
+  std::thread srv([&]() {
+    log.acceptor = std::this_thread::get_id();
+    {
+      uvcpp_tcp_server server;
+
+      // **装的顺序就是被测物**：钩子必须在 `set_loops()` 之前装。
+      server.set_loop_start_hook([&log, &accepted](int idx, uvcpp_loop* lp) {
+        if (lp == nullptr) return;  // 钩子不该拿到空循环
+        std::lock_guard<std::mutex> lk(log.mu);
+        log.tid[idx] = std::this_thread::get_id();
+        ++log.calls;
+        // 只看第一次：`listen()` 排在 `set_loops()` 之后，所以钩子跑的时候
+        // **一条连接都不该被接受过**。
+        if (log.accepted_at_hook < 0) log.accepted_at_hook = accepted.load();
+      });
+
+      loops_rc.store(server.set_loops(4));
+      {
+        std::lock_guard<std::mutex> lk(log.mu);
+        log.calls_at_return = log.calls;
+      }
+
+      if (server.bind("127.0.0.1", 0) != 0) {
+        port_p.set_value(-1);
+        return;
+      }
+      sockaddr_in name;
+      int namelen = static_cast<int>(sizeof(name));
+      server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name),
+                                    &namelen);
+
+      // 连接回调只记账、**不装读回调**：本段要的是"连接稳住别掉"，好让
+      // `client_count_at()` 读得到分布。
+      const int lrc = server.listen(
+          [&log, &accepted](uvcpp_tcp_client*) {
+            std::lock_guard<std::mutex> lk(log.mu);
+            log.conn_tids.insert(std::this_thread::get_id());
+            accepted.fetch_add(1);
+          },
+          128);
+      port_p.set_value(lrc == 0 ? ntohs(name.sin_port) : -2);
+
+      while (!stop.load()) {
+        server.run(UV_RUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    }
+    exited.store(1);
+  });
+
+  const int port = port_f.get();
+  if (port <= 0) {
+    std::cout << "  [hook] 服务端起不来（port=" << port << "）\n";
+    stop.store(1);
+    if (srv.joinable()) srv.join();
+    return false;
+  }
+
+  // --- 判据 1：调了几次、调在哪几条循环上 ---------------------------------
+  {
+    std::lock_guard<std::mutex> lk(log.mu);
+    if (loops_rc.load() != 0) {
+      std::cout << "  [hook] set_loops(4) 失败：" << loops_rc.load() << "\n";
+      ok = false;
+    }
+    if (log.calls != 3) {
+      std::cout << "  [hook] 钩子调了 " << log.calls << " 次（该 3 次）\n";
+      ok = false;
+    }
+    if (log.tid.size() != 3 || log.tid.find(1) == log.tid.end() ||
+        log.tid.find(2) == log.tid.end() || log.tid.find(3) == log.tid.end()) {
+      std::cout << "  [hook] 循环号不是 {1,2,3}（0 号是接受者，不该走钩子）\n";
+      ok = false;
+    }
+    // --- 判据 2：`set_loops()` 返回时，钩子必须都已经跑完 ------------------
+    // 这条是全部时序保证的落点：它成立，才谈得上"连接到达时钩子已经跑过"。
+    if (log.calls_at_return != 3) {
+      std::cout << "  [hook] set_loops() 返回时只调了 " << log.calls_at_return
+                << " 次（该 3 次）—— 钩子跑在放行之前这条契约破了\n";
+      ok = false;
+    }
+    // --- 判据 3：钩子跑的时候还没有任何连接 ---------------------------------
+    if (log.accepted_at_hook != 0) {
+      std::cout << "  [hook] 第一次钩子跑时已经有 " << log.accepted_at_hook
+                << " 条连接被接受\n";
+      ok = false;
+    }
+    // --- 判据 4：每条工作循环一个**独立**线程，且都不是接受者 ---------------
+    std::set<std::thread::id> tids;
+    for (std::map<int, std::thread::id>::const_iterator it = log.tid.begin();
+         it != log.tid.end(); ++it) {
+      tids.insert(it->second);
+    }
+    if (tids.size() != 3) {
+      std::cout << "  [hook] 三条工作循环只落在 " << tids.size()
+                << " 个线程上\n";
+      ok = false;
+    }
+    if (tids.count(log.acceptor) != 0) {
+      std::cout << "  [hook] 有一条钩子跑在**接受者**线程上\n";
+      ok = false;
+    }
+  }
+
+  // --- 判据 5：连接真的落在钩子记下的那些线程上 ---------------------------
+  {
+    std::vector<uvcpp_tcp_client*> clients;
+    for (int i = 0; i < 6; ++i) {
+      uvcpp_tcp_client* c = new uvcpp_tcp_client();
+      if (c->connect_wait("127.0.0.1", port, 5000) != 0) {
+        std::cout << "  [hook] 第 " << i << " 条客户端连不上\n";
+        delete c;
+        ok = false;
+        break;
+      }
+      clients.push_back(c);
+    }
+
+    if (ok) {
+      require_within([&accepted]() { return accepted.load() == 6; }, 10000,
+                     "6 条连接全部被接受");
+
+      std::lock_guard<std::mutex> lk(log.mu);
+      // 6 条连接分给 3 条工作循环，轮转是显式的 ⇒ {2,2,2}。
+      if (log.conn_tids.size() != 3) {
+        std::cout << "  [hook] 6 条连接的 on_connection 只出现在 "
+                  << log.conn_tids.size() << " 个线程上（该 3 个）\n";
+        ok = false;
+      }
+      for (std::set<std::thread::id>::const_iterator it = log.conn_tids.begin();
+           it != log.conn_tids.end(); ++it) {
+        bool found = false;
+        for (std::map<int, std::thread::id>::const_iterator h = log.tid.begin();
+             h != log.tid.end(); ++h) {
+          if (h->second == *it) { found = true; break; }
+        }
+        if (!found) {
+          std::cout << "  [hook] 有连接跑在一个**没有跑过钩子**的线程上\n";
+          ok = false;
+          break;
+        }
+      }
+    }
+
+    // 析构即关闭（自建循环那个构造函数本来就是这个契约）。这一段的目的是
+    // 让 6 条连接掉干净，好让服务端那条线程收尾时不欠账。
+    for (size_t i = 0; i < clients.size(); ++i) {
+      clients[i]->close();
+      delete clients[i];
+    }
+  }
+
+  stop.store(1);
+  require_within([&exited]() { return exited.load() != 0; }, 15000,
+                 "服务端析构返回");
+  if (srv.joinable()) srv.join();
+
+  // --- API 边界：装晚了不生效（且不崩） -----------------------------------
+  {
+    uvcpp_tcp_server late;
+    if (late.set_loops(2) != 0) {
+      std::cout << "  [hook] 边界：set_loops(2) 失败\n";
+      ok = false;
+    }
+    int after = 0;
+    late.set_loop_start_hook([&after](int, uvcpp_loop*) { ++after; });
+    if (after != 0) {
+      std::cout << "  [hook] 边界：装晚了居然也被调用了\n";
+      ok = false;
+    }
+  }
+
+  std::cout << "  [loop_start_hook] " << (ok ? "PASS" : "FAIL") << "\n";
+  return ok;
+}
+
+// =========================================================================
 int main() {
   bool ok = true;
 
   std::cout << "[tcp_multiloop] api_guards\n";
   ok = test_api_guards() && ok;
+
+  std::cout << "[tcp_multiloop] loop_start_hook\n";
+  ok = test_loop_start_hook() && ok;
 
   std::cout << "[tcp_multiloop] control_n1\n";
   ok = run_phase(1, 4, "n=1") && ok;

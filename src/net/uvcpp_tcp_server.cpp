@@ -316,6 +316,14 @@ int uvcpp_tcp_server::set_loops(int n) {
     // 这条循环上的连接关掉" —— 那些连接的关闭收尾必须在它们自己的循环线程上。
     w->set_on_exit([this, w]() { close_clients_of_loop(w->loop()); });
 
+    // 属主的就绪钩子（见 `set_loop_start_hook()`）。循环号是 `i + 1` —— 0 号是
+    // 接受者，不走这个钩子。同样**必须在 `start()` 之前装**。
+    if (loop_start_hook_) {
+      // 捕获 `w` 而**不是** `workers_[i]`：钩子跑在 `start()` 里面，而
+      // `push_back(w)` 在它之后 —— 那时候下标 i 还越界。
+      w->set_on_start([this, w, i]() { loop_start_hook_(i + 1, w->loop()); });
+    }
+
     const int src = w->start();
     if (src != 0) {
       delete w;
@@ -328,6 +336,23 @@ int uvcpp_tcp_server::set_loops(int n) {
   }
 
   return 0;
+}
+
+void uvcpp_tcp_server::set_loop_start_hook(
+    std::function<void(int, uvcpp_loop*)> fn) {
+  // 已经起过 worker 了就没法再装 —— 线程早跑过了，装进去也不会被调用。这里
+  // **不报错也不静默**：写一条 ERROR 说清楚，因为"配了却没生效"正是最难查的
+  // 那种形状（同 `set_ssl_context()` 装晚了的表现）。
+  // 这里用 `fprintf` 而不是 `UVCPP_LOG_*`：net 层**不依赖 webapp 层**（`uvcpp_log`
+  // 在 `src/webapp/`），本层的诊断一律走 stderr + 模块前缀，与
+  // `uvcpp_loop_worker.cpp` / `uvcpp_tcp_client.cpp` 同一套写法。
+  if (!workers_.empty()) {
+    std::fprintf(stderr,
+                 "[uvcpp_tcp_server] set_loop_start_hook() 在工作线程已启动"
+                 "之后才调用，本次不生效（它必须在 set_loops() 之前设）\n");
+    return;
+  }
+  loop_start_hook_ = std::move(fn);
 }
 
 int uvcpp_tcp_server::loop_count() const {

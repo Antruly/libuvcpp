@@ -74,6 +74,35 @@ void uvcpp_loop_worker::thread_main(std::promise<int>* ready) {
     return;
   }
 
+  // 属主的"就绪"钩子：跑在放行 `start()` **之前**，所以 `start()` 返回时它已经
+  // 跑完，属主可以立刻依赖它建好的东西（per-loop 的 async / timer）。
+  //
+  // 抛异常不能让 promise 悬着 —— 那会把 `start()` 永久挂住，而"挂住"看起来跟
+  // "慢"一模一样。所以接住、翻成一个确定的错误码放行；异常本身跨线程没法安全
+  // 重抛，只能吞掉（这点写在 `set_on_start()` 的契约里）。
+  if (on_start_) {
+    int hrc = 0;
+    try {
+      on_start_();
+    } catch (...) {
+      hrc = UV_ECANCELED;
+    }
+    if (hrc != 0) {
+      // 与上面 async 建失败那条路**同一套收尾**：钩子可能已经建了东西，但它
+      // 自己最清楚怎么收（属主的收尾在 `on_exit_` 里），所以这里只保证循环
+      // 与邮箱不泄漏，然后走人。
+      delete async_;
+      async_ = nullptr;
+      if (loop_ != nullptr) {
+        loop_->loop_close();
+        delete loop_;
+        loop_ = nullptr;
+      }
+      ready->set_value(hrc);
+      return;
+    }
+  }
+
   ready->set_value(0);
   loop_->run(UV_RUN_DEFAULT);
 

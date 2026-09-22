@@ -86,6 +86,21 @@ class uvcpp_loop_worker {
    */
   void set_on_exit(std::function<void()> fn) { on_exit_ = std::move(fn); }
 
+  /**
+   * @brief 循环就绪后、**开始跑之前**，在 worker 线程上跑一次（`start()` 里跑）。
+   *
+   * 同 `set_on_exit`：必须**在 `start()` 之前**设好（靠 `start()` 的交握手建立
+   * 先后关系）。区别是时机 —— 这个跑在 `ready->set_value()` **之前**，所以
+   * `start()` 返回时它已经跑完了；属主因此可以在返回前就依赖它留下的状态。
+   *
+   * 用途：属主在这条循环上建自己的句柄（`uv_async` / `uv_timer`）。那些只能在
+   * 循环线程上建，而 `start()` 返回时循环已经在跑了 —— 这是唯一插得进去的地方。
+   *
+   * **钩子里抛异常 = `start()` 拿到 `UV_ECANCELED`**（不会静默挂住，也不会被
+   * 当成成功）。异常本身不外传，因为跨线程没法安全地重抛。
+   */
+  void set_on_start(std::function<void()> fn) { on_start_ = std::move(fn); }
+
   /** @brief 循环指针。**只在 worker 线程上有意义**（线程退出后会被置空）。 */
   uvcpp_loop* loop() const { return loop_; }
 
@@ -99,6 +114,8 @@ class uvcpp_loop_worker {
   /** @brief 邮箱入口；**在 worker 线程上**建。nullptr = 不再受理投递。 */
   uvcpp_async* async_ = nullptr;
   std::function<void()> on_exit_;
+  /** @brief 见 `set_on_start()`。与 `on_exit_` 相反的一头：跑在开跑之前。 */
+  std::function<void()> on_start_;
 
   /** @brief 护 `q_`、`async_`。 */
   mutable std::mutex mu_;

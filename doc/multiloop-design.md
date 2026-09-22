@@ -52,8 +52,8 @@ int main() {
 把"一条循环"变成「**一条接受者 + n−1 条工作循环**」，每条工作循环一条**专用
 `std::thread`**（`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:46` —— 不是
 `uv_queue_work` 那条线程池）。配套读法：`loop_count()`
-（`src/net/uvcpp_tcp_server.h:256-257`）、`client_count_at(i)`
-（`src/net/uvcpp_tcp_server.h:266`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
+（`src/net/uvcpp_tcp_server.h:280-281`）、`client_count_at(i)`
+（`src/net/uvcpp_tcp_server.h:290`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
 （`src/net/uvcpp_tcp_server.h:196` 起是完整的对外说明）。
 
 ```
@@ -61,15 +61,15 @@ acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
   └─ uv_connection_cb
        ├─ n == 1：今天那条路，逐字不动（src/net/uvcpp_tcp_server.cpp:266）
        └─ n > 1 ：accept 进一个**临时句柄**
-                  （src/net/uvcpp_tcp_server.cpp:356 accept_and_handoff）
+                  （src/net/uvcpp_tcp_server.cpp:381 accept_and_handoff）
                   → 取出 socket → 平台转手 → post 给 worker[k]，k = i % (n-1)
                   → 立刻关掉自己那份
 worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
-  └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:95 起）
+  └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:110 起）
        └─ 在**这条循环的线程**上：new uvcpp_tcp_client(worker_loop) 装转手来的 socket
-          （src/net/uvcpp_tcp_server.cpp:404 on_handoff_task）→ mark_accepted() → 登记
+          （src/net/uvcpp_tcp_server.cpp:429 on_handoff_task）→ mark_accepted() → 登记
           → setup_client_callbacks() → TLS 块 → deliver_connection()
-          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:427 finish_accept）
+          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:452 finish_accept）
 ```
 
 **去向是显式轮转，不是内核散列**，所以分布是**确定性**的（第 i 条必然落在
@@ -79,7 +79,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
 
 - **转手必须在 `mark_accepted()` 之前**，也就是整条尾巴（登记、`setup_client_callbacks`、
   TLS、`deliver_connection`）都必须在**目标循环的线程**上跑 —— `enable_tls()` 会当场在这条
-  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:460`）。
+  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:485`）。
 - **POSIX 的 `uv_accept` 硬断言同循环**（`libuv:unix/stream.c:539`），所以转手靠
   `dup()` + `uv_tcp_open`（后者"已存在"的检查是**按循环**做的，跨循环共用一个 fd 不会被拒、
   只会 double close）。
@@ -242,7 +242,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:988` | **每请求**（`.cpp` 里 52 处引用） |
 | `uvcpp_web_app::inflight_` | `src/webapp/uvcpp_web_app.h:1489` | **每请求** |
 | `uvcpp_web_app::upgraded_` | `src/webapp/uvcpp_web_app.h:1433` | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:646` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:670` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** `src/webapp/uvcpp_web_app.cpp:1842-1862`
 里只有一份 `loop_tid_`/`post_queue_`（成员在 `src/webapp/uvcpp_web_app.h:1548-1556`），
@@ -257,8 +257,8 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 **但"接受者就是这个循环"在那条路上不再成立 —— 这正是 net 层要转手的原因。**
 `:266` 的 `new uvcpp_tcp_client(loop_)` 与 `:269` 的 `s->accept(...)` 今天是 **n==1 那条分支**；
-n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:356` 的 `accept_and_handoff`），
-客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:404` 的 `on_handoff_task`）。
+n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:381` 的 `accept_and_handoff`），
+客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:429` 的 `on_handoff_task`）。
 ⇒ webapp 层要接的话，**每个 `uvcpp_http_server` 的 `tcp_server` 各自 `set_loops(n)`**
 仍然成立（每个 app 一份循环组），但"接受者即本循环"这条直觉要换成 §1.1 那张图。
 
@@ -272,19 +272,29 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 
 共享冻结的那份装：`router_`（`src/webapp/uvcpp_web_app.h:1203`）、`middlewares_`（`:1204`）、
 `ws_router_`/`ws_handlers_`（`:1243-1244`）、`stream_router_`（`:1259`）、`upload_routes_`
-（`:1275`）、压缩变体表。它们**只在注册期与 `start()` 期间写** —— `chain_storage_` 的全部
+（`:1275`）。它们**只在注册期与 `start()` 期间写** —— `chain_storage_` 的全部
 写点集中在 `src/webapp/uvcpp_web_app.cpp:2592-2652`，而它就在 `start()` 里。冻结期之后
 多线程只读，**不需要锁**。
+
+> **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
+> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1022`）是
+> **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
+> （`src/web/uvcpp_http_server.cpp:1011`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:1049`、`src/web/uvcpp_http_server.cpp:872`）。
+> 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
+> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1023-1026`）一起加锁；
+> **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
 
 ### 4.2 一处必须跟着改的判据：连接 id 的"是不是我发的号"
 
 `uvcpp_web_conn_id` 是 `uint64_t`（`src/webapp/uvcpp_web_connection.h:57`），由**登记表自己的**
-计数器发（`src/webapp/uvcpp_web_connection.h:268` 的 `next_id_`，
-`src/webapp/uvcpp_web_connection.cpp:47` 的 `next_id_++`），而 `issued()` 的判据是
+计数器发（`src/webapp/uvcpp_web_connection.h:333` 的 `next_id_`，
+`src/webapp/uvcpp_web_connection.cpp:52` 的 `next_id_++`），而 `issued()` 的判据是
 
 ```cpp
-// doc-snippet: fragment — 引述现状，不是待实现的形状。
-return id != UVCPP_WEB_INVALID_CONN_ID && id < next_id_;   // uvcpp_web_connection.cpp:192
+// doc-snippet: fragment — 已落地的判据（§4.2 的结论就是 `loop_of(id)` 那半）。
+return id != UVCPP_WEB_INVALID_CONN_ID && loop_of(id) == loop_index_ &&
+       seq_of(id) < next_id_;   // uvcpp_web_connection.cpp:200-201
 ```
 
 把登记表切成 n 份之后，**这条判据会对别的循环发的号返回真**。所以不能只是"多建 n 份登记表"：

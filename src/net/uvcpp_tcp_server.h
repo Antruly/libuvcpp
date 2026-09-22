@@ -253,6 +253,30 @@ class UVCPP_API uvcpp_tcp_server {
    */
   int set_loops(int n);
 
+  /**
+   * @brief 给每条工作循环装一个"就绪"钩子：**在 worker 线程上、那条循环开始跑
+   *        之前**各调一次，参数是循环号与那条循环。
+   *
+   * **只对 1..n-1 号调**。0 号是接受者，它就是 `get_loop()`，由调用方在自己的
+   * 线程上初始化 —— 那里没有"就绪"可言，调用方本来就掌握时机。
+   *
+   * 用途：属主要在每条工作循环上建**只能建在循环线程上的**句柄（`uv_async` /
+   * `uv_timer`），并且要保证在**任何连接落上来之前**建好。`set_loops()` 返回时
+   * 工作线程已经在跑了，所以这是唯一插得进去的地方。
+   *
+   * 时序保证：钩子跑在 worker 放行 `start()` 之前 ⇒ **`set_loops()` 返回时，
+   * 所有钩子都已经跑完**。所以"先 `set_loops()` 再 `listen()`"这个顺序本身就
+   * 保证了"连接到达时钩子已经跑过"。
+   *
+   * @param fn 钩子；传空函数则等同于没装（不产生额外开销 —— `n == 1` 时本来
+   *           也没有工作线程可挂钩子）。
+   *
+   * @warning 必须在 `set_loops()` 之前设。装晚了（工作线程已经在跑）它不会
+   *          被调用，也不会报错 —— 那正是"配了却没生效"这种最难查的形状，
+   *          所以这条约束与 `set_ssl_context()` 那条同级。
+   */
+  void set_loop_start_hook(std::function<void(int, uvcpp_loop*)> fn);
+
   /** @brief 循环总数（1 + 工作循环数）。没调过 `set_loops()` 就是 1。 */
   int loop_count() const;
 
@@ -650,6 +674,15 @@ class UVCPP_API uvcpp_tcp_server {
   std::vector<uvcpp_loop_worker*> workers_;
   /** @brief 轮转计数：第 i 条连接给 `1 + (i % (n-1))`。 */
   std::atomic<uint64_t> rr_{0};
+
+  /**
+   * @brief `set_loop_start_hook()` 装进来的钩子。
+   *
+   * **必须在 `set_loops()` 之前写、之后只读** —— 它在 worker 线程上被读，写它
+   * 的人和读它的人之间靠 `start()` 的交握手建立先后关系（与 `ssl_ctx_` 同一套）。
+   * 装晚了不会报错也不会生效，见那条 `@warning`。
+   */
+  std::function<void(int, uvcpp_loop*)> loop_start_hook_;
 
   /** @brief User connection callback stored as trampoline pair. */
   connection_callback_t on_connection_fn_ = nullptr;
