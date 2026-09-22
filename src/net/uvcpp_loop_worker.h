@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/net/uvcpp_loop_worker.h
  * @brief 一条工作循环：循环 + 专用线程 + 跨线程邮箱。
  * @author zhuweiye
