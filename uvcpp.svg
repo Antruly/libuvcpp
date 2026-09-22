@@ -1,0 +1,49 @@
+<?xml version="1.0" standalone="no"?>
+<svg width="512" height="512" viewBox="-10 -10 532 532" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="libuvcpp logo">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="75%">
+      <stop offset="0%" stop-color="#1D2454"/>
+      <stop offset="100%" stop-color="#0B0F2A"/>
+    </radialGradient>
+    <filter id="glow" x="-150%" y="-150%" width="400%" height="400%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景：深海军蓝圆角方形 -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- 事件循环：两段咬合的六边形箭头 -->
+  <g stroke-linejoin="round" stroke-linecap="round">
+    <path d="M 219 107 L 256 86 L 403 171 L 403 341 L 366 362" fill="none" stroke="#5B4BC4" stroke-width="30"/>
+    <path d="M 293 405 L 256 426 L 109 341 L 109 171 L 146 150" fill="none" stroke="#39309E" stroke-width="30"/>
+    <polygon points="324,386 377,381 355,343" fill="#6E5EE0"/>
+    <polygon points="188,126 157,169 135,131" fill="#4A41C4"/>
+  </g>
+
+  <!-- 轨道参考虚线 -->
+  <circle cx="256" cy="256" r="98" fill="none" stroke="#3AE8E0" stroke-opacity="0.14" stroke-width="2" stroke-dasharray="3 12"/>
+
+  <!-- 数据流彗核 + 拖尾光带 -->
+  <path d="M 231 161 A 98 98 0 0 1 305 171" fill="none" stroke="#3AE8E0" stroke-width="7" stroke-linecap="round" opacity="0.85"/>
+  <circle cx="305" cy="171" r="8.5" fill="#8FF9F3" filter="url(#glow)"/>
+
+  <!-- 尾迹粒子（异步回调被循环调度） -->
+  <g fill="#3AE8E0">
+    <circle cx="187" cy="187" r="7" opacity="0.95"/>
+    <circle cx="161" cy="231" r="6.3" opacity="0.87"/>
+    <circle cx="161" cy="281" r="5.6" opacity="0.79"/>
+    <circle cx="187" cy="325" r="5" opacity="0.71"/>
+    <circle cx="231" cy="351" r="4.4" opacity="0.63"/>
+    <circle cx="281" cy="351" r="3.8" opacity="0.55"/>
+    <circle cx="325" cy="325" r="3.2" opacity="0.47"/>
+    <circle cx="351" cy="281" r="2.6" opacity="0.39"/>
+  </g>
+
+  <!-- 中心事件核心 -->
+  <circle cx="256" cy="256" r="9" fill="#CFFCF9" filter="url(#glow)"/>
+</svg>

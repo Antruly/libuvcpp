@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
+</p>
+
 [![版本](https://img.shields.io/badge/version-1.2.21--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
