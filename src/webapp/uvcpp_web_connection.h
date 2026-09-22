@@ -60,6 +60,26 @@ typedef uint64_t uvcpp_web_conn_id;
 const uvcpp_web_conn_id UVCPP_WEB_INVALID_CONN_ID = 0;
 
 /**
+ * @brief 连接 id 的位布局：**高 20 位是循环号，低 44 位是该登记表自己的递增号**。
+ *
+ * 多循环之前 id 就是那份递增号本身，也就是"高段恒 0"。所以**单循环下的取值
+ * 逐字节不变**（`id == seq`，从 1 开始），下面这两个常量只在循环号非 0 时才
+ * 参与运算。
+ *
+ * 为什么必须编码：`issued()` 的判据原是 `id < next_id_`（"比下一个要发的号小
+ * ⇒ 曾经发过"），而把登记表切成 per-loop 的 n 份之后，**每份都有自己的
+ * `next_id_`** ⇒ 那条判据会对**别的循环发出去的号**返回真。加上"高段与我相同"
+ * 之后，`issued()`/`alive()`/`find()` 都只认自己的号，而且"这个 id 归哪条循环"
+ * 是一次位运算，不需要全 app 搜索。
+ *
+ * 20 位循环号 = 每进程最多 1 048 576 条循环（远超任何真实配置）；44 位递增号
+ * = 每条循环 1.7×10^13 条连接，"永不复用"的语义因此不受影响。
+ */
+const int UVCPP_WEB_CONN_LOOP_SHIFT = 44;
+/** @brief 取递增号那一段的掩码（`UVCPP_WEB_CONN_LOOP_SHIFT` 位全 1）。 */
+const uvcpp_web_conn_id UVCPP_WEB_CONN_SEQ_MASK = (1ULL << 44) - 1;
+
+/**
  * @brief 登记表里的一条连接记录。
  *
  * 只在 `uvcpp_web_connection_registry` 存活期内有效，且 `client` 只在
@@ -121,10 +141,39 @@ struct UVCPP_API uvcpp_web_connection {
  */
 class UVCPP_API uvcpp_web_connection_registry {
  public:
-  uvcpp_web_connection_registry();
+  /**
+   * @param loop_index 这份登记表归哪条循环管（多循环时用来给 id 打高段）。
+   *                   **单循环用默认值 0**，此时发出去的 id 与多循环之前逐字节
+   *                   相同（就是 1、2、3…）。越界（<0 或 ≥2^20）时按 0 处理。
+   */
+  explicit uvcpp_web_connection_registry(int loop_index = 0);
   ~uvcpp_web_connection_registry();
 
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_web_connection_registry)
+
+  /** @brief 这份登记表管的循环号（构造时给的）。 */
+  int loop_index() const { return loop_index_; }
+
+  /**
+   * @brief 从任意 id 里取循环号 —— **不需要这份 id 属于哪份登记表**。
+   *
+   * 这就是"按 id 找循环"的那一次位运算：跨循环的调用方（比如"这个 id 该由
+   * 谁处理"）先用它定位，再去找那份登记表。
+   */
+  static int loop_of(uvcpp_web_conn_id id) {
+    return static_cast<int>(id >> UVCPP_WEB_CONN_LOOP_SHIFT);
+  }
+
+  /** @brief 从任意 id 里取递增号那一段（不含循环号）。 */
+  static uvcpp_web_conn_id seq_of(uvcpp_web_conn_id id) {
+    return id & UVCPP_WEB_CONN_SEQ_MASK;
+  }
+
+  /** @brief 把 `(循环号, 递增号)` 拼回一个 id。`loop_of`/`seq_of` 的逆运算。 */
+  static uvcpp_web_conn_id make_id(int loop_index, uvcpp_web_conn_id seq) {
+    return (static_cast<uvcpp_web_conn_id>(loop_index) << UVCPP_WEB_CONN_LOOP_SHIFT) |
+           (seq & UVCPP_WEB_CONN_SEQ_MASK);
+  }
 
   /**
    * @brief 登记一条新连接，返回它的 id。
@@ -239,11 +288,16 @@ class UVCPP_API uvcpp_web_connection_registry {
   bool alive(uvcpp_web_conn_id id) const;
 
   /**
-   * @brief 这个 id 是否**曾经**发出过（不管现在是不是还活着）。
+   * @brief 这个 id 是不是**本登记表**曾经发出去的（不管现在是不是还活着）。
    *
    * 用来区分两种 `client() == nullptr`：「连接已经断了」（正常，记一条
    * debug 就够了）和「这个 id 根本不存在」（框架自己的 bug，要报 error）。
-   * 靠 id 单调递增实现，不需要额外存一张"死 id 表"。
+   * 靠递增号单调实现，不需要额外存一张"死 id 表"。
+   *
+   * **两个条件缺一不可**：递增号比本表的下一个号小，**并且**循环号就是本表的
+   * 循环号。少了后一条，切分登记表之后这条判据会对**别的循环**发的号返回真
+   * —— 而那些号在本表里一个都查不到，`client()`/`find()` 会同时给出"曾经发过"
+   * 和"查不到任何记录"这对矛盾答案，调用方只能二选一地误判。
    */
   bool issued(uvcpp_web_conn_id id) const;
 
@@ -256,7 +310,12 @@ class UVCPP_API uvcpp_web_connection_registry {
   /** @brief 当前所有活连接的 id（顺序按 id 升序）。 */
   std::vector<uvcpp_web_conn_id> ids() const;
 
-  /** @brief 历史上分配过的 id 总数（含已断开的）。 */
+  /**
+   * @brief 本登记表历史上分配过的 id 总数（含已断开的）。
+   *
+   * **是每份登记表各自的计数，不是全进程的**：多循环下 app 级的"累计连接数"
+   * 要把各循环的读数加起来（各 `loop_index` 统一后不重复计数）。
+   */
   uint64_t issued_count() const;
 
   /** @brief 清空登记表。**已经发出去的 id 不会被回收**，下一个 id 接着涨。 */
@@ -265,7 +324,15 @@ class UVCPP_API uvcpp_web_connection_registry {
  private:
   std::map<uvcpp_web_conn_id, uvcpp_web_connection> by_id_;
   std::map<uvcpp_tcp_client*, uvcpp_web_conn_id>    by_client_;
+  /**
+   * @brief 下一个要发的**递增号**（不含循环号的那一段）。
+   *
+   * 从 1 开始：0 要留给 `UVCPP_WEB_INVALID_CONN_ID`，不然"没登记过"和"第 0 条
+   * 连接"就分不开了。它**永不复位**（`clear()` 也不动它），"永不复用"全靠这一条。
+   */
   uvcpp_web_conn_id next_id_;
+  /** @brief 本登记表的循环号，组装 id 时放进高段。 */
+  int loop_index_;
 };
 
 }  // namespace uvcpp

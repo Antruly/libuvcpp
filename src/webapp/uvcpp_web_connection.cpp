@@ -19,10 +19,14 @@ uvcpp_web_connection::uvcpp_web_connection()
       request_start_ms(0),
       streaming(false) {}
 
-uvcpp_web_connection_registry::uvcpp_web_connection_registry()
+uvcpp_web_connection_registry::uvcpp_web_connection_registry(int loop_index)
     // 从 1 开始：0 要留给 UVCPP_WEB_INVALID_CONN_ID，不然"没登记过"和
     // "第 0 条连接"就分不开了。
-    : next_id_(1) {}
+    : next_id_(1),
+      // 越界的循环号按 0 处理，而不是带着一个会溢进递增号那一段的值继续跑 ——
+      // 溢进去就成了"发出去的 id 在递增号上倒退"，那会同时破坏 issued() 与
+      // 单调性。夹一次比让调用方拿到静默错乱的值好。
+      loop_index_(loop_index >= 0 && loop_index < (1 << 20) ? loop_index : 0) {}
 
 uvcpp_web_connection_registry::~uvcpp_web_connection_registry() {}
 
@@ -42,9 +46,10 @@ uvcpp_web_conn_id uvcpp_web_connection_registry::add(uvcpp_tcp_client* client,
     }
   }
 
-  // **先自增再赋值**：保证 id 单调且永远不等于 next_id_ 之后的任何值，
-  // issued() 的 `id < next_id_` 判据才成立。
-  const uvcpp_web_conn_id id = next_id_++;
+  // **先自增再赋值**：保证递增号单调且永远不等于 next_id_ 之后的任何值，
+  // issued() 的 `seq_of(id) < next_id_` 判据才成立。id 再把循环号放进高段 ——
+  // 单循环（loop_index_ == 0）时这一句就是恒等变换，取值与多循环之前逐字节相同。
+  const uvcpp_web_conn_id id = make_id(loop_index_, next_id_++);
 
   uvcpp_web_connection conn;
   conn.id        = id;
@@ -189,7 +194,11 @@ bool uvcpp_web_connection_registry::alive(uvcpp_web_conn_id id) const {
 }
 
 bool uvcpp_web_connection_registry::issued(uvcpp_web_conn_id id) const {
-  return id != UVCPP_WEB_INVALID_CONN_ID && id < next_id_;
+  // 两个条件缺一不可：高段必须是**本表的**循环号（否则这是别的循环发的号，本表
+  // 一个记录都没有），低段必须比本表的下一个号小（"曾经发出过"）。用 seq_of()
+  // 而不是直接比 id，是因为 id 带着高段 —— 直接比会把别的循环的号算进来。
+  return id != UVCPP_WEB_INVALID_CONN_ID && loop_of(id) == loop_index_ &&
+         seq_of(id) < next_id_;
 }
 
 const uvcpp_web_connection* uvcpp_web_connection_registry::find(

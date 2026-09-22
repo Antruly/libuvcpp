@@ -916,6 +916,73 @@ void test_registry_duplicate_add() {
   check(reg.size() == 0, "表空了");
 }
 
+// =========================================================================
+// 18d. 多循环：每份登记表只认自己的号（id 的高段是循环号）
+// =========================================================================
+void test_registry_ids_are_scoped_to_their_loop() {
+  std::cout << "[18d] 多循环下 id 归哪条循环" << std::endl;
+
+  // 单循环时 id 就是递增号本身 —— 这一条是"默认逐字节不变"的判据：
+  // 高段恒 0，编码是恒等变换。
+  uvcpp_web_connection_registry solo;  // loop_index 默认 0
+  check(solo.loop_index() == 0, "默认循环号是 0");
+  const uvcpp_web_conn_id s1 = solo.add(fake_client(0));
+  const uvcpp_web_conn_id s2 = solo.add(fake_client(1));
+  check(s1 == 1 && s2 == 2, "循环 0 发出来的 id 就是 1、2（与多循环之前相同）");
+
+  // 两份登记表 = 两条循环，各自发号。**同一个 fake client 指针**分别登记进
+  // 两份表：两张 by_client_ 是各自独立的，所以这不算重复登记。
+  uvcpp_web_connection_registry r0(0);
+  uvcpp_web_connection_registry r1(1);
+  uvcpp_tcp_client* c0 = fake_client(2);
+  uvcpp_tcp_client* c1 = fake_client(3);
+  const uvcpp_web_conn_id ia = r0.add(c0, "1.1.1.1", 1000);
+  const uvcpp_web_conn_id ib = r1.add(c1, "1.1.1.1", 1000);
+
+  check(ia != ib, "两条循环发出来的号不同");
+  check(uvcpp_web_connection_registry::loop_of(ia) == 0, "ia 归循环 0");
+  check(uvcpp_web_connection_registry::loop_of(ib) == 1, "ib 归循环 1");
+  // 低段各自从 1 开始 ⇒ **两条循环会发出低段完全相同的号**。这正是"只比低段"
+  // （也就是只比 `id < next_id_`）会误判的地方。
+  check(uvcpp_web_connection_registry::seq_of(ia) ==
+            uvcpp_web_connection_registry::seq_of(ib),
+        "两条循环的低段相同（都从 1 开始）");
+
+  // 核心判据：issued() **不能**对别的循环发出来的号返回真。
+  check(r0.issued(ia), "r0 认自己的号");
+  check(!r0.issued(ib), "**r0 不认循环 1 发出来的号**");
+  check(!r1.issued(ia), "**r1 不认循环 0 发出来的号**");
+  check(r1.issued(ib), "r1 认自己的号");
+
+  // 配套的两条：那个号在本表里既查不到、也不活。少了高段那一条，"曾经发过"
+  // 与"查不到任何记录"会同时为真 —— 调用方只能二选一地误判（把框架自己的 bug
+  // 当正常断开，或者反过来把正常断开报成 bug）。
+  check(r0.client(ib) == nullptr, "r0 查不到别的循环的连接");
+  check(!r0.alive(ib), "r0 里它不是活的");
+  check(r0.find(ib) == nullptr, "r0 的 find 也是空");
+  check(r1.client(ia) == nullptr && !r1.alive(ia), "反向同理");
+
+  // 越界的循环号夹回 0，而不是带着一个会溢进递增号那一段的值继续跑。
+  uvcpp_web_connection_registry neg(-1);
+  check(neg.loop_index() == 0, "负的循环号夹回 0");
+  uvcpp_web_connection_registry over(1 << 20);
+  check(over.loop_index() == 0, "超上界的循环号也夹回 0");
+  check(uvcpp_web_connection_registry::loop_of(over.add(nullptr)) == 0,
+        "夹回之后发出来的号高段为 0");
+
+  // make_id / loop_of / seq_of 是一组互逆的拆装 —— 跨循环定位就靠它。
+  const uvcpp_web_conn_id made = uvcpp_web_connection_registry::make_id(3, 7);
+  check(made == (static_cast<uvcpp_web_conn_id>(3) << 44) + 7, "make_id 拼得对");
+  check(uvcpp_web_connection_registry::loop_of(made) == 3 &&
+            uvcpp_web_connection_registry::seq_of(made) == 7,
+        "loop_of/seq_of 是 make_id 的逆运算");
+
+  // 高段满了会溢进递增号那一段 —— 这条断言把上界钉住（20 位循环号 = 1048575）。
+  check(uvcpp_web_connection_registry::loop_of(
+            static_cast<uvcpp_web_conn_id>((1 << 20) - 1) << 44) == (1 << 20) - 1,
+        "循环号上界 (2^20)-1 不溢出");
+}
+
 void test_registry_remove_paths() {
   std::cout << "[18c] 登记表的摘除路径" << std::endl;
 
@@ -1030,6 +1097,7 @@ int main() {
   test_conn_id_never_resolves_to_reused_address();
   test_registry_clear_keeps_ids_monotonic();
   test_registry_duplicate_add();
+  test_registry_ids_are_scoped_to_their_loop();
   test_registry_remove_paths();
   test_async_handler_survives_disconnect();
 
