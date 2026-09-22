@@ -1080,7 +1080,25 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
  private:
   // --- 组装 ------------------------------------------------------
 
-  /** @brief 在 loop 线程上建句柄、装钩子、bind、listen。 */
+  /**
+   * @brief **每进程一次**的启动：配置、中间件、钩子、bind、listen。
+   *
+   * 与 `init_on_loop_thread()` 的分界是「**这个状态该有几份**」，不是「在哪条
+   * 线程上跑」—— 这条分界在 n>1 之后才看得见后果（见设计稿 §4.1.1）：
+   *
+   *   * 放这里的是**每进程一份**的东西：日志级别、`middlewares_`、
+   *     `router_` 的几个开关、连接/请求钩子、TLS 上下文、`bind`/`listen`、
+   *     `bound_port_`。它们**必须在放行任何一条工作循环之前**跑完 ——
+   *     `listen()` 正是放行点（`set_loops(n)` 的 worker 是在那里面起来的）。
+   *   * 放 `init_on_loop_thread()` 的是**每循环一份**的东西：线程身份、
+   *     `async_`、两个定时器。
+   *
+   * n == 1 时两半的先后与拆分前**逐字相同**：调用方在 `init_on_loop_thread()`
+   * 之前调本函数，合起来就是原来那一条直线。
+   */
+  int init_process_once();
+
+  /** @brief **每循环一次**：记线程身份，在**本循环**上建 `async_` 与两个定时器。 */
   int init_on_loop_thread();
 
   /** @brief 新连接被接受（HTTP 层的 accept 钩子）：发 id、登记、跑用户钩子。 */

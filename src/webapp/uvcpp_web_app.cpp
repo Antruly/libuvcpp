@@ -1528,7 +1528,9 @@ int uvcpp_web_app::start_background() {
   std::future<int> fut = ready->get_future();
 
   thread_ = std::thread([this, ready]() {
-    const int rc = init_on_loop_thread();
+    // 与 `run()` 同一个次序，理由见那里（每进程那半里有 `listen()` 这个放行点）。
+    int rc = init_process_once();
+    if (rc == 0) rc = init_on_loop_thread();
     // `running_` 必须和 `loop_started_`/`bound_port_` 一样，在**放行调用方之前**
     // 置位。它们三个是同一批"已经就绪"的标志（前两个在 init_on_loop_thread()
     // 里就置好了），而 `running()` 的契约写的是"`start()` 之后、循环退出之前" ——
@@ -1569,7 +1571,12 @@ int uvcpp_web_app::run(uv_run_mode md) {
   if (thread_started_ || loop_started_.load() || started_once_) return UV_EBUSY;
 
   threading_ = false;
-  const int rc = init_on_loop_thread();
+
+  // 两半的先后是**语义要求**，不是随手排的：每进程那半里有 `listen()`，而
+  // `set_loops(n)` 的工作循环正是在那里面被放行的 —— 放行之后它们立刻就会
+  // 走到请求路径上，读的必须已经是冻结好的那份配置（设计稿 §4.1.1 甲）。
+  int rc = init_process_once();
+  if (rc == 0) rc = init_on_loop_thread();
   if (rc != 0) {
     std::lock_guard<std::mutex> lk(tid_mutex_);
     tid_known_ = false;
@@ -1583,15 +1590,7 @@ int uvcpp_web_app::run(uv_run_mode md) {
   return r;
 }
 
-int uvcpp_web_app::init_on_loop_thread() {
-  // 循环线程身份必须最先记下来：下面任何一步失败都不会有回调进来，而这个
-  // 标记决定了 `post()` 是就地执行还是投递。
-  {
-    std::lock_guard<std::mutex> lk(tid_mutex_);
-    loop_tid_ = std::this_thread::get_id();
-    tid_known_ = true;
-  }
-
+int uvcpp_web_app::init_process_once() {
   uvcpp_tcp_server* tcp = http_->get_tcp_server();
   uvcpp_loop* loop = tcp->get_loop();
   if (loop == nullptr || tcp->get_tcp() == nullptr) return UV_EINVAL;
@@ -1763,10 +1762,34 @@ int uvcpp_web_app::init_on_loop_thread() {
     }
   }
 
+  // 每进程的那半到这里为止。下面全是"每循环一份"的，换到另一个函数里 ——
+  // 分界是「这个状态该有几份」，理由写在 `init_process_once()` 的声明处。
+  return 0;
+}
+
+int uvcpp_web_app::init_on_loop_thread() {
+  // 循环线程身份必须最先记下来：下面任何一步失败都不会有回调进来，而这个
+  // 标记决定了 `post()` 是就地执行还是投递。
+  //
+  // **它现在落在 `listen()` 之后**（那一步在上面的每进程那半里）。这是安全的：
+  // 循环要到调用方接着调 `http_->run()` 才跑起来，在那之前不会有任何回调进来，
+  // 所以"标记晚了一小段"没有可观察后果。n>1 时也是同一个道理 —— 工作循环在
+  // `listen()` 里被放行，但它们记的是**自己那条线程**的身份。
+  {
+    std::lock_guard<std::mutex> lk(tid_mutex_);
+    loop_tid_ = std::this_thread::get_id();
+    tid_known_ = true;
+  }
+
+  uvcpp_tcp_server* tcp = http_->get_tcp_server();
+  uvcpp_loop* loop = tcp->get_loop();
+  if (loop == nullptr || tcp->get_tcp() == nullptr) return UV_EINVAL;
+
   // --- loop 亲和的句柄 ---------------------------------------------
   //
   // 放在最后：这两个句柄必须在 loop 线程上建，而前面任何一步失败都不该
   // 留下需要回收的句柄。
+  int rc = 0;
   async_ = new uvcpp_async();
   rc = async_->init([this](uvcpp_async*) { drain_posts(); }, loop);
   if (rc != 0) {
