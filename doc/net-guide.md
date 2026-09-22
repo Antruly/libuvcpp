@@ -51,15 +51,61 @@
 
 ## 2. 最小可运行程序
 
-一个回显服务端：
+一个回显服务端。
+
+比"读回调里直接 `write` 回去"多了十几行，是因为**写这一侧有一条在途契约**：
+一条连接上同时只允许一笔异步写在途，上一笔没完成时再写返回 `UV_EALREADY` 且
+**那一笔的字节不会被发出**（§9）。负载一上来（同一连接的两次读先后脚到）就会撞上，
+撞上的形状是"回显偶尔少一截"，而单条连接手工测是看不出来的。所以回显自己攒一层。
 
 ```cpp
 #include <cstdio>
+#include <map>
+#include <string>
 
 #include <uv.h>
 #include <net/uvcpp_net_read.h>
 #include <net/uvcpp_tcp_client.h>
 #include <net/uvcpp_tcp_server.h>
+
+namespace {
+
+// 每条连接一份待发字节。示例用 map 记账；挂在自己的连接结构上等价。
+struct Pending {
+  std::string bytes;
+  bool in_flight = false;
+};
+std::map<uvcpp::uvcpp_tcp_client*, Pending> g_pending;
+
+void flush(uvcpp::uvcpp_tcp_client& client) {
+  Pending& p = g_pending[&client];
+  if (p.in_flight || p.bytes.empty()) return;
+
+  std::string out;
+  out.swap(p.bytes);            // `write` 返回前会把字节拷进自有缓冲，所以 out 可以就地析构
+  p.in_flight = true;
+
+  const int rc = client.write(out.data(), out.size(), [&client](int status) {
+    if (status != 0) {
+      std::fprintf(stderr, "write failed: %d\n", status);
+    }
+    // 能在这里接着写：框架是在把在途标志清掉**之后**才调这个回调的。
+    // 用 find 不用 []：这一笔在飞的时候对端可能已经关了、待发被扔掉了。
+    auto it = g_pending.find(&client);
+    if (it == g_pending.end()) return;
+    it->second.in_flight = false;
+    flush(client);
+  });
+
+  if (rc != 0) {                // 非 0 = 这一笔没提交，字节还在手上，放回队首
+    Pending& q = g_pending[&client];
+    q.in_flight = false;
+    q.bytes.insert(0, out);
+    std::fprintf(stderr, "write: %d\n", rc);
+  }
+}
+
+}  // namespace
 
 int main() {
   uvcpp::uvcpp_tcp_server server;
@@ -68,14 +114,10 @@ int main() {
   server.set_read_callback(
       [](uvcpp::uvcpp_tcp_client& client, const uvcpp::net_read_result& r) {
         if (r.is_data()) {
-          // 注意第三个参数不是可省的：cb == nullptr 会退化成同步 write_wait
-          // （30 秒超时），而回调里禁止同步写。
-          client.write(r.data, r.size, [](int status) {
-            if (status != 0) {
-              std::fprintf(stderr, "write failed: %d\n", status);
-            }
-          });
+          g_pending[&client].bytes.append(r.data, r.size);
+          flush(client);
         } else if (r.event == uvcpp::net_read_event::PEER_CLOSED) {
+          g_pending.erase(&client);   // 连接没了，它那份待发也扔掉
           std::fprintf(stderr, "peer closed\n");
         } else {
           std::fprintf(stderr, "read error: %d\n", r.error);
@@ -251,9 +293,10 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 | inline | libuv `uv_accept` | **无** | 正常 IOCP | 145 534 / 141 893 |
 | accept（**本库的形状**） | libuv `uv_accept` | 有 | **EMULATE** | 111 810 / 110 977 |
 
-`inline` 与 `raw` 差 2~4% ⇒ **接受者用哪一套不值钱，转手本身也不贵**；而 `accept` 比另外两臂
-低 **25~27%**，它和 `inline` 之间只差"句柄有没有被翻成 EMULATE"一件事 ⇒ **那 25% 是那个翻转的
-价格，不是转手的价格**（`inline` 这一臂就是为把这两件事拆开才加的）。
+`inline` 与 `raw` 差 3~4% ⇒ **接受者用哪一套不值钱，转手本身也不贵**；而 `accept` 比 `raw`
+低 **25~26%**、比 `inline` 低 **22~23%** —— 它和 `inline` 之间只差"句柄有没有被翻成 EMULATE"
+一件事 ⇒ **那 22~23% 是那个翻转的价格，不是转手的价格**（`inline` 这一臂就是为把这两件事
+拆开才加的；翻转的独立单价另见 §4.3 的 `l2`）。
 
 端到端的 **2.5% rps** 是**另一个量程**：库在那套端到端台架上只占服务端 CPU 约 13%，
 0.25 × 13% ≈ 3%，与 2.5% 同量级、可以对上 —— 所以**不要**把 2.5% 单独读成"这个缺陷的代价很小"。
@@ -290,13 +333,14 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 三条读法：
 
 1. **税单独量出来了**：`l2` 是"同样只有一条循环做 I/O，但每条连接都走转手 + 被翻成 EMULATE"
-   ⇒ 它相对 `l1` 的 **0.71~0.76×** 就是上面那个 25% 折扣，**在本库这套形状上直接量到**，
-   不必再靠推断（与他 libuv 层装置上的 0.735~0.764× 同值）。
-2. **收益压过税**：`l4` 在 `inline` 之上（199–206k vs 141–150k，≈1.36×）⇒ `l4/l1` 的
-   1.45~1.64× 里既有 `n−1` 条循环的扩展、也有全部连接那 25% 的折扣，**精确归因做不到**
+   ⇒ 它相对 `l1` 的 **0.71~0.76×**（低 24~29%）落在 §4.2 那条翻转折扣的邻域，**在本库这套
+   形状上直接量到**，不必再靠推断（与他 libuv 层装置上的 0.735~0.764× 同值）。
+2. **收益压过税**：`l4` 在 `inline` 之上（199–206k vs 141–150k，四个交叉比值 1.33~1.46、
+   中位 ≈1.4×）⇒ `l4/l1` 的
+   1.45~1.64× 里既有 `n−1` 条循环的扩展、也有全部连接那份翻转折扣，**精确归因做不到**
    （两者同时在动），能做的是边界：`l4` 高于"没有翻转税的天花板" ⇒ 收益压过税。
 3. `l8` 在 c=64 上 = **3.21× `l1`** —— 与本库早先那对 3.29× / 3.45× 落在同一邻域，
-   但**这次是自己的形状、另一台装置**。上面那条"25% 不要乘进 3.29×"照旧。
+   但**这次是自己的形状、另一台装置**。上面那条"折扣不要乘进 3.29×"照旧。
 
 **边界（照他的原文）**：8 条连接那几档是**延迟受限**的（`l4` ≈ `l8`，多出来的循环买不到东西），
 要谈扩展只能看 c=64 那列；c=64 那列里客户端与服务端**同进程抢核**，**只可横着比**（各臂同一个
@@ -388,7 +432,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
   `#define ERROR 0`，`EOF` 是 `<cstdio>` 的宏。所以是 `READ_ERROR` / `PEER_CLOSED`。
 
 收到 `PEER_CLOSED` / `READ_ERROR` 之后**这个回调不会再被调用**，框架随后的收尾
-（关闭回调）照常发生，所以**不要在回调里做释放**（`src/net/uvcpp_tcp_client.h:455-456`）。
+（关闭回调）照常发生，所以**不要在回调里做释放**（`src/net/uvcpp_tcp_client.h:466-467`）。
 
 ---
 
@@ -401,7 +445,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 所以：
 
 - **不要在关闭回调里 `delete` 客户端**，除非你已经用 `take_client()` 把所有权取走。
-  删一个仍归框架管的客户端会让框架随后二次释放（`src/net/uvcpp_tcp_client.h:536-538`）。
+  删一个仍归框架管的客户端会让框架随后二次释放（`src/net/uvcpp_tcp_client.h:547-549`）。
 - 想自己管，用 `take_client()` 取走、`return_client()` 交回。两个都**必须在 loop
   线程调用**；交回之后**不要再持有那个指针**。
 - 关掉一条连接之后也别再留指针：框架可能在完成回调里把它删掉。
@@ -410,7 +454,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 （`src/net/uvcpp_tcp_server.h:57-63`）——不读的连接，即使设了 `set_on_close()` 也
 **永远不会被触发**，而且这条连接不会被释放，等于每条一个静默泄漏。只想知道死活、
 不要数据的话，就用 `read_start_events()` 注册一个忽略数据的回调
-（`src/net/uvcpp_tcp_client.h:524-528`）。
+（`src/net/uvcpp_tcp_client.h:535-539`）。
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
@@ -560,7 +604,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:173-185`）。所以 `web/` �
 三个例外：
 
 - **`uvcpp_buf*` 的零拷贝在 TLS 上不成立**——加密要求明文过 `SSL_write`，它会拷一份，
-  所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:372-375`）。
+  所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:379-382`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
   `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:430-438`）。所以明文直连 TLS 端口时，

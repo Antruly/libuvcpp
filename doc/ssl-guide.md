@@ -317,7 +317,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`PEER_STRICT` 不校验主机名**，见 §5。
 
 **TLS 上 `uvcpp_buf*` 的零拷贝不成立**：调用之后那个 buf **仍然是满的**，
-（`src/net/uvcpp_tcp_client.h:372-375`）。
+（`src/net/uvcpp_tcp_client.h:379-382`）。
 
 **握手完成前写必然失败**（`UV_ENOTCONN`），`SSL_write` 要求握手已完成。
 

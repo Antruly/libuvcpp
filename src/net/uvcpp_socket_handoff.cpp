@@ -44,9 +44,18 @@ int uvcpp_handoff_extract(uvcpp_tcp* accepted, uv_os_sock_t& out_sock) {
     return uv_translate_sys_error(::WSAGetLastError());
   }
 
-  // 拿协议信息造一个**新的 socket 对象**。此时它还没有绑定任何完成端口 ——
-  // 绑定发生在目标循环上那次 `uv_tcp_open` 里（这才是"转手必须在首次关联
-  // 之前"能成立的原因）。
+  // 拿协议信息造一个**新的 socket 对象**。注意：**完成端口的关联跟着端点走、
+  // 不跟着句柄走** —— 源 socket 已经挂在接受者那条端口上的话（`uv_accept` 接出来
+  // 的就是：`win/tcp.c:662` 传 `imported=0`，关联成功），这份新对象**也一样挂着
+  // 同一条端口**。本机实测：对已关联的源 socket 复制出来的新对象调
+  // `CreateIoCompletionPort` 报 `87`（ALREADY），而从没关联过的源 socket 复制
+  // 出来的则关联成功 —— 所以别在这里假设"目标循环是首次关联"。
+  // 后果在目标循环上：`uv_tcp_open`（`win/tcp.c:1506`，`imported=1`）必然走
+  // `CreateIoCompletionPort` **失败**的那一支 ⇒ libuv 置 `UV_HANDLE_EMULATE_IOCP`
+  // （`:102-108`）并**跳过** `SetFileCompletionNotificationModes`（`:119-124` 的
+  // `if (!EMULATE_IOCP && ...)`）⇒ 这条句柄上 `UV_HANDLE_SYNC_BYPASS_IOCP`
+  // **不会**置位，完成走事件 + APC 合成回本循环（两台装置的读数见
+  // `doc/net-guide.md` §4.2/§4.3）。
   SOCKET s = ::WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
                           FROM_PROTOCOL_INFO, &info, 0, WSA_FLAG_OVERLAPPED);
   if (s == INVALID_SOCKET) {

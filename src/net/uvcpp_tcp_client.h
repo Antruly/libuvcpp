@@ -348,6 +348,13 @@ class UVCPP_API uvcpp_tcp_client {
    *             fires when the write completes.
    *             If null, behaves like write_wait(data, len, 30000).
    * @return 0 on async start, or the write result for sync mode.
+   *
+   * @note 一条连接上**同时只允许一笔异步写在途**（这条对下面每个带 `cb` 的重载
+   *       都成立，标志是每连接一个）。上一笔的完成回调还没跑时再发起，返回
+   *       `UV_EALREADY`，而且**这一笔的字节不会被发出、也不会有回调** ——
+   *       它不是排队，是拒收。要连着写就在回调里续投（`cb` 是在标志清掉
+   *       **之后**才调的，所以回调里直接再写是合法的）。这一层不做写队列，
+   *       见 `doc/net-guide.md` §9、§14。
    */
   int write(const char* data, size_t len,
             std::function<void(int)> cb = nullptr);
@@ -377,6 +384,10 @@ class UVCPP_API uvcpp_tcp_client {
    * NOTE: do NOT pass the address of a temporary; the pointer must remain
    * valid until the write callback fires (for async) or the call returns
    * (for sync).
+   *
+   * 在途契约同 `write(const char*, size_t, cb)`：已经有异步写在飞时返回
+   * `UV_EALREADY`。这一支上拒收是**安全**的 —— 返回时缓冲一个字节没动、
+   * 仍归调用方（`out_uv_buf()` 还没被调用），可以直接重投。
    */
   int write(uvcpp_buf* buf,
             std::function<void(int)> cb = nullptr);
