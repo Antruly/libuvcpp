@@ -85,7 +85,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
   只会 double close）。
 - **Windows 上接受者必须立刻关掉自己那份副本**：重复句柄的 FIN 只在"最后一个句柄关闭"时
   才发 —— 这不是优化，是这条机制的工作条件。转手原语在
-  `src/net/uvcpp_socket_handoff.h:68`（`UV_TCP_REUSEPORT` 那条 POSIX 免转手路**没有**用上，
+  `src/net/uvcpp_socket_handoff.h:73`（`UV_TCP_REUSEPORT` 那条 POSIX 免转手路**没有**用上，
   降级成以后 Linux 侧的优化，§3）。
 
 **验收状态（如实）**：全量构建 + ctest 97/97 绿 + 页面堆门禁过；用例

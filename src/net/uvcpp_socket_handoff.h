@@ -33,6 +33,11 @@
  *          `SetFileCompletionNotificationModes` **被跳过** ⇒ BYPASS **恒 0**
  *          （外部贡献者的仪器在这条腿上读到 worker 句柄 `flags=0x8e088`）。
  *
+ *          失败点是**转手腿自己**那次 `uv__tcp_set_socket`（`uv_tcp_open`，
+ *          `imported=1`）；`uv_accept` 那次 `imported=0` 只负责让**源**被关联上。
+ *          之所以是"静默降级成 EMULATE"而不是硬报错，正是因为那一次是
+ *          `imported=1` —— `imported=0` 那条路上同样失败会直接 `return`。
+ *
  *          BYPASS=1 的是**另一条血统**：源是 **master 裸 `accept()`** 拿到的
  *          （全程不碰 IOCP）⇒ dup 出来的对象也没关联 ⇒ worker 侧关联**成功**
  *          （实测 `flags=0x6f08c`）。`libuv/libuv#5282` 观测到的那一族在这条血统上。

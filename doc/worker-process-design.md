@@ -303,9 +303,11 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
 `uvcpp_tcp::open`（`src/handle/uvcpp_tcp.cpp:53`）正是踩在这一步上的那个入口。**
 
 **但这条链有个前提**（2026-09-22 才量清楚，见 §9.9）：worker 侧那次 `CreateIoCompletionPort`
-得**成功** —— 也就是**源 socket 从没被关联过**。源是 `uv_accept` 出来的那种（本库
-`set_loops` 那条路）在这一步就失败 `87`、落进 EMULATE 分支，BYPASS 永远不置 ⇒ 进不了本条
-说的那一族。上面那句"本库的 `uvcpp_tcp::open` 踩在这一步上"，说的是**多进程那条血统**。
+得**成功** —— 也就是**源 socket 从没被关联过**。源是 `uv_accept` 出来的那种、且走了**转手**的
+（本库 `set_loops(n>1)` 那条路）在这一步就失败 `87`、落进 EMULATE 分支，BYPASS 永远不置 ⇒
+进不了本条说的那一族。**`set_loops(1)`（= 不调用，也就是默认）根本没有"这一步"** ——
+不转手就没有 worker 侧那次关联，所以也没有那次 87。上面那句"本库的 `uvcpp_tcp::open` 踩在
+这一步上"，说的是**多进程那条血统**。
 
 ### 9.2 uvcpp 侧为什么变成 UAF，而不是"多跑一次回调"
 
@@ -603,8 +605,17 @@ IOCP），最小跨进程形状是 **0/1×10⁶** ⇒ "跨进程"跟"血统"、"
 
 | 血统（socket 从哪来） | 源 socket | worker 侧 `CreateIoCompletionPort` | EMULATE | BYPASS | 在 `#5282` 一族上 |
 |---|---|---|---|---|---|
-| `uv_accept`（**本库 `set_loops`**，`libuv:win/tcp.c:662` 那次 `imported=0`） | **已关联** | **失败 `87`** | **1** | **0** | **否：没有入口** |
+| **本库 `set_loops(n>1)`**（被收养句柄） | **已关联** | **失败 `87`** | **1** | **0** | **否：没有入口** |
+| **本库 `set_loops(1)`**（= 不调用，**默认**；同循环 `uv_accept`） | **已关联** | **没有这一步** | **0** | **1** | **否：不是入口** |
 | **master 裸 `accept()`**（多进程那条形状，也是 rig 的形状） | 未关联 | **成功** | 0 | **1** | **是** |
+
+- **`imported` 的两个调用点各管一件事，别互相顶替**（2026-09-22 逐参复核）：87 与"失败被
+  静默吞成 EMULATE"这两个后果都发生在**转手腿自己**那次 `uv__tcp_set_socket(..., 1)`
+  （`uv_tcp_open` 那个调用点）；而 `imported=0` 那次（`uv__tcp_accept`）只负责让**源 socket
+  被关联上**，它**不是** 87 发生的地点。⇒ **EMULATE 这个后果的作者是 `imported=1`。**
+  行号请按**函数名 + 实参**核：`imported` 实参在 `uv_tcp_init_ex` / `uv__tcp_try_bind` /
+  `uv__tcp_accept` 是 `0`，在 `uv__tcp_xfer_import` / `uv_tcp_open` 是 `1`（外部贡献者那份
+  `libuv-clean` 与本仓引用的修订行号不等差，所以本文只说函数与实参）。
 
 - **闸只有 BYPASS 一个位。** `UV_SUCCEEDED_WITHOUT_IOCP`（`libuv:win/req-inl.h:69-70`）
   = `(result) && (handle->flags & UV_HANDLE_SYNC_BYPASS_IOCP)`；BYPASS 只在
@@ -612,10 +623,17 @@ IOCP），最小跨进程形状是 **0/1×10⁶** ⇒ "跨进程"跟"血统"、"
   `!(handle->flags & UV_HANDLE_EMULATE_IOCP)` 挡着 ⇒ **EMULATE 与 BYPASS 互斥**，
   EMULATE 一旦置上就永远进不了那一支。
 - **实测 worker 句柄的 flags 恰好差在这一对上**（外部装置，仪器打在 `uv__tcp_set_socket`
-  出口；位值见 `libuv:src/uv-common.h:102` 与 `:104`）：本库这条腿 **`0x8e088`**
+  出口；位值见 `libuv:src/uv-common.h:102` 与 `:104`）：`set_loops(n>1)` 那条腿 **`0x8e088`**
   （`EMULATE_IOCP` = 1、`SYNC_BYPASS_IOCP` = 0），裸 `accept()` 那条腿 **`0x6f08c`**（反之）。
-  ⇒ **§9.6 第 1 条那段"返回真但不生效"的推理，只属于后一行**（源未关联那一支），
-  它不是本库这条路的解释。
+  ⇒ **§9.6 第 1 条那段"返回真但不生效"的推理，只属于最后一行**（源未关联那一支），
+  它不是本库这条转手路的解释。
+- **`set_loops(1)` 的读数把它放在"同档、不同入口"上**（2026-09-22 加：一个二进制、一次跑动、
+  只翻 `set_loops` 的实参）：arm 了读时 **`0x0007f08c`**（`SYNC_BYPASS_IOCP` = 1、
+  `EMULATE_IOCP` = 0）、未 arm 时 **`0x6f08c`** —— 与上面最后一行**同值**。所以第 2 行与
+  第 3 行**同一档**（都走同步腿），**但不是同一个入口**：第 2 行那个 socket 是 libuv 自己
+  `accept` 出来的（`imported=0`）。两栏要分开写，只写 BYPASS 会把这两行读成一行。
+  顺带：**(乙1) 那笔候选修复在 `set_loops(1)` 上按构造是空操作**（`&& !imported` 碰不到
+  `imported=0` 的句柄），上面那个 `0x0007f08c` 就是**没打补丁**的树。
 - **旁证：仪器计数三条全 0**（`SETSOCKET-EMULATE` / `SETSOCKET-STALE-BYPASS` /
   `SETSOCKET-NOBYPASS`）⇒ 整个跑动里"关联失败 ⇒ EMULATE"那一支**一次都没进过**，
   因为 rig 那条腿上是关联成功的。
@@ -627,12 +645,13 @@ IOCP），最小跨进程形状是 **0/1×10⁶** ⇒ "跨进程"跟"血统"、"
 
 **归口结论**：`#5282` 的暴露面在「**master 裸 `accept()` + 转手**」那条血统上 ——
 也就是**本设计（多进程）**的那条路，所以 §6 的「Windows `n>1` 报错」不受影响、更站得住。
-**进程内的 `set_loops` 落在另一条腿**（EMULATE），它付的是那一档折扣（§9.7 三臂表里的
-`accept` 臂），**不是**这条内存安全缺陷。这一条同时改掉了 `doc/multiloop-design.md` §2
-与 `src/net/uvcpp_socket_handoff.h`、`src/net/uvcpp_tcp_server.h` 里"默认开 = 走进 `#5282`"
-的写法。
+**进程内的 `set_loops(n>1)` 落在另一条腿**（EMULATE），它付的是那一档折扣（§9.7 三臂表里的
+`accept` 臂），**不是**这条内存安全缺陷；而**默认那一档（`set_loops(1)` / 不调用）连转手
+这一步都没有**，与 master 裸 `accept()` 同档、但不是那一族的入口（上表第 2 行）。这一条同时
+改掉了 `doc/multiloop-design.md` §2 与 `src/net/uvcpp_socket_handoff.h`、
+`src/net/uvcpp_tcp_server.h` 里"默认开 = 走进 `#5282`"的写法。
 
-> **边界。"没有入口"是结构判断**（那一族唯一的闸恒假），**不是**"`set_loops` 这条转手
+> **边界。"没有入口"是结构判断**（那一族唯一的闸恒假），**不是**"`set_loops(n>1)` 这条转手
 > 已经验过没有别的问题"。§9.1 的机制**本身仍未定** —— §9.8 那批实验是把候选一个个排除，
 > 没有一个是"已证实的原因"。把它写成"多循环那条路是安全的"就是又一次拿"没观察到"当"不存在"。
 
