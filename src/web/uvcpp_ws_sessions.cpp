@@ -34,6 +34,7 @@ void uvcpp_ws_sessions::abandon() {
   abandoned_ = true;
   sessions_.clear();
   retired_.clear();
+  live_.store(0);
 }
 
 void uvcpp_ws_sessions::set_loop(uvcpp_loop* loop) {
@@ -77,6 +78,7 @@ void uvcpp_ws_sessions::adopt(uvcpp_ws_connection* c) {
   // 自己交给谁。
   c->set_retire_callback([this](uvcpp_ws_connection* s) { on_retired(s); });
   sessions_.push_back(c);
+  live_.store(sessions_.size());
 }
 
 void uvcpp_ws_sessions::set_retire_observer(
@@ -92,6 +94,7 @@ void uvcpp_ws_sessions::on_retired(uvcpp_ws_connection* c) {
     }
   }
   retired_.push_back(c);
+  live_.store(sessions_.size());
 
   // 观察者在**账已经记好之后**调用：它看到的表必须是一致的（活动表里没有它、
   // pending 里有它），否则属主按 `size()` 对账会算错。会话这时候还在（回收是
@@ -118,7 +121,8 @@ void uvcpp_ws_sessions::drain() {
   batch.swap(retired_);
   for (size_t i = 0; i < batch.size(); ++i) {
     delete batch[i];
-    ++recycled_;
+    // 原子自增：`recycled()` 是跨线程读数（与 `live_` 同一条边界）。
+    recycled_.fetch_add(1);
   }
 
   // 活干完了就把 ref 还回去 —— 于是"这个句柄保活"与"退休表非空"是同一件事。
@@ -136,6 +140,7 @@ void uvcpp_ws_sessions::close_all(ws_close_code code) {
     // 还没终结的放回表里 —— 放回去才不会漏，等终结回调或 recycle_all()。
     if (live[i]->is_open()) sessions_.push_back(live[i]);
   }
+  live_.store(sessions_.size());
 }
 
 void uvcpp_ws_sessions::recycle_all() {
@@ -144,12 +149,13 @@ void uvcpp_ws_sessions::recycle_all() {
   std::vector<uvcpp_ws_connection*> live;
   live.swap(sessions_);
   for (size_t i = 0; i < live.size(); ++i) live[i]->terminate();
+  live_.store(sessions_.size());
   drain();
 }
 
-size_t uvcpp_ws_sessions::size() const { return sessions_.size(); }
+size_t uvcpp_ws_sessions::size() const { return live_.load(); }
 size_t uvcpp_ws_sessions::pending() const { return retired_.size(); }
-size_t uvcpp_ws_sessions::recycled() const { return recycled_; }
+size_t uvcpp_ws_sessions::recycled() const { return recycled_.load(); }
 
 const std::vector<uvcpp_ws_connection*>& uvcpp_ws_sessions::all() const {
   return sessions_;

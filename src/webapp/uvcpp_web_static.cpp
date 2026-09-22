@@ -21,11 +21,17 @@
  *
  * 于是「连接在读盘期间断开」这件事不需要任何额外处理：响应最后是 loop 线程
  * 按**连接 id** 找活连接发的，找不到就丢弃（框架层保证），中间层没有裸指针。
+ *
+ * 多循环下要补一条：上面那个「loop 线程」不再只有一条。同一个 `uvcpp_web_static`
+ * 对象被所有循环共用，于是**落在它身上的共享状态**（LRU/计数/待回收的
+ * `uvcpp_work`）成了跨线程的。处理见 `Impl::mu_` 与 `Impl::retired` ——
+ * 前者是把整份缓存锁起来（不分片），后者按循环分桶。
  */
 
 #include "uvcpp_web_static.h"
 
 #include <cstdio>
+#include <mutex>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -541,39 +547,92 @@ struct uvcpp_web_static::Impl {
    */
   std::shared_ptr<uvcpp_web_work_limit> work_limit;
 
-  /** @brief 被 503 挡掉的请求数（观测用；只在 loop 线程加减）。 */
+  /**
+   * @brief 护 `lru`/`cache`/`bytes`/`hits`/`misses`/`rejected`，外加
+   *        `retired` 那张**表本身**（不含表里的指针指向的东西）。
+   *
+   * 为什么要锁：多循环下 `serve()`（读缓存）与 `finish_job()`（写缓存、
+   * 计数）分别跑在**不同的循环线程**上，而这几个成员从前是按"loop 线程只有
+   * 一条"写的（`rejected` 的旧注释就写着"只在 loop 线程加减"）。
+   *
+   * **锁，不是分片。** 分片会让每片各有一份 LRU：内存成倍、命中率还掉
+   * （同一条路径的请求落到不同片上就互相看不见）。这正是 `compress_mu_`
+   * 那条先例里的取舍（`src/web/uvcpp_http_server.h:1098-1110`：「这里要的是
+   * 互斥，不是分片」）。单循环下这把锁没有可争用的对象，代价是一次未争用的
+   * `lock`/`unlock`。
+   *
+   * `mutable`：`add_probe()`/只读访问器都是 const 成员函数。
+   */
+  mutable std::mutex mu_;
+
+  /** @brief 被 503 挡掉的请求数（观测用；受 `mu_` 护）。 */
   unsigned long long rejected;
 
-  std::list<std::string> lru;  ///< 队首 = 最近使用
-  std::map<std::string, cache_entry> cache;
-  size_t bytes;
-  unsigned long long hits;
-  unsigned long long misses;
+  std::list<std::string> lru;  ///< 队首 = 最近使用（受 `mu_` 护）
+  std::map<std::string, cache_entry> cache;  ///< 受 `mu_` 护
+  size_t bytes;                 ///< 受 `mu_` 护
+  unsigned long long hits;      ///< 受 `mu_` 护
+  unsigned long long misses;    ///< 受 `mu_` 护
 
   /**
-   * @brief 用完待回收的 `uvcpp_work`。
+   * @brief 用完待回收的 `uvcpp_work`，**按循环分桶**。
    *
    * 为什么不是用完就地 `delete`：`uvcpp_work` 把 after_work 回调**存在自己
    * 身上**，所以在那个回调里删掉它就等于把当前正在执行的那一帧的捕获变量
    * 还回堆 —— 详见 `serve()` 里 `retire()` 处的长注释。攒到这里，等下次
    * `serve()` 进来（早已退出所有回调）再统一删。
    *
-   * 只在 loop 线程上访问，所以没有锁。数量级：两次请求之间完成的活儿，
-   * 通常就是 1 个。
+   * **为什么多循环下必须分桶**：`delete w` 的时机是"这条循环下次进 `serve()`"，
+   * 而 `w` 的 after_work 排在**投递它的那条循环**上。合成一个桶的话，循环 0
+   * 的 `serve()` 会把循环 1 还没回调进来的 `w` 一起删掉 —— 循环 1 随后在那个
+   * 已释放的对象上执行回调（正是上面那段长注释记的同一类危险，只是换了个
+   * 触发者）。分桶之后每条循环只删自己投出去的。
+   *
+   * **表本身**（增删桶）受 `mu_` 护 —— 两条循环同时 `retired[l]` 就是往
+   * 同一个 `std::map` 上并发写。桶里的 `delete` 在锁外做。
+   *
+   * 数量级：两次请求之间完成的活儿，通常就是 1 个。
    */
-  std::vector<uvcpp_work*> retired;
+  std::map<uvcpp_loop*, std::vector<uvcpp_work*> > retired;
 
   Impl() : bytes(0), hits(0), misses(0), rejected(0) {}
 
-  ~Impl() { drain_retired(); }
+  ~Impl() { drain_all_retired(); }
 
-  /// 记下一个用完的 work 请求（**只能在 after_work 回调里调**）。
-  void retire(uvcpp_work* w) { retired.push_back(w); }
+  /// 记下一个用完的 work 请求（**只能在 after_work 回调里调**，传**投递它的
+  /// 那条循环**）。
+  void retire(uvcpp_loop* l, uvcpp_work* w) {
+    std::lock_guard<std::mutex> lk(mu_);
+    retired[l].push_back(w);
+  }
 
-  /// 真正释放。**绝不能在任何回调里调。**
-  void drain_retired() {
-    for (size_t i = 0; i < retired.size(); ++i) delete retired[i];
-    retired.clear();
+  /// 真正释放 \p l 那一条循环攒下的。**绝不能在任何回调里调。**
+  void drain_retired(uvcpp_loop* l) {
+    std::vector<uvcpp_work*> mine;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      const std::map<uvcpp_loop*, std::vector<uvcpp_work*> >::iterator it =
+          retired.find(l);
+      if (it == retired.end()) return;
+      mine.swap(it->second);
+      retired.erase(it);
+    }
+    // 锁外删：`~uvcpp_work` 里会发生什么不该由这把锁兜着。
+    for (size_t i = 0; i < mine.size(); ++i) delete mine[i];
+  }
+
+  /// 析构用：所有桶一起排空。到这里已经没有别的线程会往里放了。
+  void drain_all_retired() {
+    std::map<uvcpp_loop*, std::vector<uvcpp_work*> > all;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      all.swap(retired);
+    }
+    for (std::map<uvcpp_loop*, std::vector<uvcpp_work*> >::iterator it =
+             all.begin();
+         it != all.end(); ++it) {
+      for (size_t i = 0; i < it->second.size(); ++i) delete it->second[i];
+    }
   }
 
   bool cache_enabled() const { return opts.cache_max_entries > 0; }
@@ -592,7 +651,7 @@ struct uvcpp_web_static::Impl {
     return ct;
   }
 
-  // ---- LRU（全部只在 loop 线程调用，所以没有锁）----
+  // ---- LRU（共享一份，受 mu_ 护；`evict()` 例外，见它自己的注释）----
   void collect_probes(const std::string& url,
                       std::vector<cache_probe>& out) const {
     add_probe(url, out);
@@ -606,6 +665,10 @@ struct uvcpp_web_static::Impl {
     for (size_t i = 0; i < out.size(); ++i) {
       if (out[i].key == key) return;  // 去重：候选键可能撞车
     }
+    // 整段都在锁里：探针是**快照**（拷的是 mtime/size 和一个 shared_ptr 引用
+    // 计数），拷完这一次就与 `cache` 无关了，worker 拿它去和磁盘上的
+    // mtime/size 比对 —— 语义与从前逐字相同。
+    std::lock_guard<std::mutex> lk(mu_);
     const std::map<std::string, cache_entry>::const_iterator it =
         cache.find(key);
     if (it == cache.end()) return;
@@ -631,6 +694,8 @@ struct uvcpp_web_static::Impl {
       return;
     }
 
+    std::lock_guard<std::mutex> lk(mu_);
+
     const std::map<std::string, cache_entry>::iterator old = cache.find(key);
     if (old != cache.end()) {
       bytes -= old->second.data->size();
@@ -648,10 +713,12 @@ struct uvcpp_web_static::Impl {
     cache[key] = e;
     bytes += data->size();
 
-    evict();
+    evict_locked();
   }
 
-  void evict() {
+  /// **要求已持有 `mu_`**（只从 `put()` 里调）。名字带后缀是为了让"光看调用点
+  /// 就知道它不自己拿锁"这件事成立 —— 从前它叫 `evict()`，是私有的、单线程的。
+  void evict_locked() {
     while (!lru.empty() &&
            (cache.size() > opts.cache_max_entries ||
             (opts.cache_max_bytes > 0 && bytes > opts.cache_max_bytes))) {
@@ -667,9 +734,54 @@ struct uvcpp_web_static::Impl {
   }
 
   void clear_cache() {
+    std::lock_guard<std::mutex> lk(mu_);
     lru.clear();
     cache.clear();
     bytes = 0;
+  }
+
+  // ---- 计数（受 mu_ 护；`finish_job()` / `finish_job()` 的 REJECTED 分支
+  //      都在循环线程上，但多循环下不止一条）----
+  void note_hit() {
+    std::lock_guard<std::mutex> lk(mu_);
+    ++hits;
+  }
+
+  void note_miss() {
+    std::lock_guard<std::mutex> lk(mu_);
+    ++misses;
+  }
+
+  void note_rejected() {
+    std::lock_guard<std::mutex> lk(mu_);
+    ++rejected;
+  }
+
+  // ---- 只读访问器（外面那几个 public 的就转发到这里）----
+
+  size_t entries() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return cache.size();
+  }
+
+  size_t bytes_used() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return bytes;
+  }
+
+  unsigned long long hit_count() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return hits;
+  }
+
+  unsigned long long miss_count() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return misses;
+  }
+
+  unsigned long long rejected_count() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return rejected;
   }
 
   // ---- 跨线程两侧 ----
@@ -697,8 +809,10 @@ bool uvcpp_web_static::Impl::acquire_slot(job* j) {
   if (!work_limit) return true;  // 没设闸门 = 一律放行
 
   if (!work_limit->acquire()) {
-    // `rejected` 的成员注释写着"只在 loop 线程加减"，而这里在 worker 上，
-    // 所以计数不在这里加 —— 交给 `finish_job()`（同样只写状态，不动共享计数）。
+    // `rejected` 是**循环线程**那一侧的计数（`note_rejected()` 在 `finish_job()`
+    // 里），而这里在 worker 上，所以计数不在这里加 —— 这一支只写 job 自己的
+    // 状态，不碰任何共享量。（`mu_` 能护住它，但那会让 worker 去抢一把本该
+    // 只属于循环线程的锁；把写点留在业主那侧更省事，也少一处跨线程的锁。）
     j->status = probe_status::REJECTED;
     return false;
   }
@@ -829,7 +943,7 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     case probe_status::REJECTED:
       // 名额没抢到。形状与原先 `serve()` 里那一支**逐字一致** —— 只是判定的
       // 位置从"投递之前"挪到了"真要读盘之前"（见 `run_job`）。
-      ++rejected;  // 观测用计数，只在本（loop）线程上加
+      note_rejected();  // 观测用计数；多循环下不止一条循环线程会加减，故走锁
       UVCPP_LOG_WARN(log_category::STATIC)
           << "工作池已满（在途 " << (work_limit ? work_limit->in_flight() : 0)
           << " / " << (work_limit ? work_limit->limit() : 0)
@@ -1032,9 +1146,9 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
   // 也计进命中/未命中。
   if (j->data) {
     if (j->served_from_cache) {
-      ++hits;
+      note_hit();
     } else {
-      ++misses;
+      note_miss();
       put(j->final_url, j->data, j->mtime_sec, j->mtime_nsec, j->size);
     }
   }
@@ -1147,16 +1261,16 @@ const std::string& uvcpp_web_static::root_real() const {
 
 void uvcpp_web_static::clear_cache() { impl_->clear_cache(); }
 
-size_t uvcpp_web_static::cache_entries() const {
-  return impl_->cache.size();
+size_t uvcpp_web_static::cache_entries() const { return impl_->entries(); }
+
+size_t uvcpp_web_static::cache_bytes() const { return impl_->bytes_used(); }
+
+unsigned long long uvcpp_web_static::cache_hits() const {
+  return impl_->hit_count();
 }
 
-size_t uvcpp_web_static::cache_bytes() const { return impl_->bytes; }
-
-unsigned long long uvcpp_web_static::cache_hits() const { return impl_->hits; }
-
 unsigned long long uvcpp_web_static::cache_misses() const {
-  return impl_->misses;
+  return impl_->miss_count();
 }
 
 void uvcpp_web_static::set_work_limit(
@@ -1169,18 +1283,19 @@ std::shared_ptr<uvcpp_web_work_limit> uvcpp_web_static::work_limit() const {
 }
 
 unsigned long long uvcpp_web_static::rejected_count() const {
-  return impl_->rejected;
+  return impl_->rejected_count();
 }
 
 void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
                              uvcpp_web_next next, uvcpp_loop* loop) {
   Impl* im = impl_;
 
-  // 先把上一批用完的 `uvcpp_work` 真正删掉。**这里才是安全的删除点**：
-  // `serve()` 是 loop 线程上的普通调用，不在任何 libuv 回调里面（尤其不在
-  // `uvcpp_work` 的 after_work 里），所以没有"删掉正在执行的那个闭包"的
-  // 问题。详见 Impl::retired 的注释。
-  im->drain_retired();
+  // 先把**本条循环**上一批用完的 `uvcpp_work` 真正删掉。**这里才是安全的
+  // 删除点**：`serve()` 是 loop 线程上的普通调用，不在任何 libuv 回调里面
+  // （尤其不在 `uvcpp_work` 的 after_work 里），所以没有"删掉正在执行的那个
+  // 闭包"的问题。详见 Impl::retired 的注释 —— 传 `loop` 是因为多循环下只能
+  // 删自己投出去的那些。
+  im->drain_retired(loop);
 
   // 文档根没解析出来是部署错误，不是"文件不存在"。500 让它立刻可见 ——
   // 静默 404 只会让人以为是自己 URL 写错了。
@@ -1295,7 +1410,9 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
         // 就换个位置，看着完全不像同一个 bug。
         //
         // 交给 `serve()` 下次进来时统一回收：那时早已不在任何回调里。
-        j->self->retire(w);
+        // 键取 `j->loop` —— 就是投递这次 work 的那条循环，也就是**正在跑本
+        // 回调**的这一条；下次它自己进来 `serve()` 时才会删掉。
+        j->self->retire(j->loop, w);
 
         j->self->finish_job(j);
 

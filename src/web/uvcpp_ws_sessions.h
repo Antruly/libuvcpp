@@ -40,6 +40,7 @@
 
 #if UVCPP_WEB_ENABLE
 
+#include <atomic>
 #include <cstddef>
 #include <vector>
 #include <uvcpp/uvcpp_define.h>
@@ -154,7 +155,13 @@ class UVCPP_API uvcpp_ws_sessions {
    */
   void abandon();
 
-  /** @brief 当前持有的会话数（已终结待回收的**不算**）。 */
+  /**
+   * @brief 当前持有的会话数（已终结待回收的**不算**）。
+   *
+   * 读的是**原子量**（`live_`），所以它是本类里唯一允许跨线程读的口 ——
+   * `uvcpp_ws_server::session_count()` 就是"把各分片加起来"，而那会从别的
+   * 循环的线程上发生（用例更是从测试线程轮询它）。
+   */
   size_t size() const;
 
   /** @brief 已经终结、等待下一轮循环回收的会话数。 */
@@ -166,6 +173,8 @@ class UVCPP_API uvcpp_ws_sessions {
    * 这是"会话到底有没有被回收"的唯一直接证据：`size()` 归零加
    * `pending()` 归零只说明表里空了，而会话可能是被漏掉、永远没终结
    * （那就还留在表里）。计数对上才说明对象确实被销毁过。
+   *
+   * 与 `size()` 一样是**原子读**，可以从任何线程调。
    */
   size_t recycled() const;
 
@@ -184,7 +193,20 @@ class UVCPP_API uvcpp_ws_sessions {
   std::vector<uvcpp_ws_connection*> sessions_;
   std::vector<uvcpp_ws_connection*> retired_;
   uvcpp_async* drain_async_ = nullptr;
-  size_t       recycled_    = 0;
+
+  /**
+   * @brief `sessions_.size()` 的镜像，**只在改动表的函数末尾按 size 赋值**。
+   *
+   * 与 `uvcpp_web_connection_registry::live_` 同一个形状、同一条理由：那几张表
+   * 只归**一条循环的线程**（本类在 server 侧按循环分片，键就是连接的循环号），
+   * 而"现在有几个会话"这个读数要能从别的线程问 —— 用例就是在测试线程上轮询
+   * 它的。按 size 赋值而不是 ±1，是因为 `close_all()` 那种"换出来再挑着放回"
+   * 的分支不好用加减描述。
+   */
+  std::atomic<size_t> live_{0};
+
+  /** @brief 累计回收数（单调递增）。同样是跨线程读数，所以也走原子。 */
+  std::atomic<size_t> recycled_{0};
   std::function<void(uvcpp_ws_connection*)> retire_observer_;
   /** @brief `abandon()` 过了：`shutdown()` 从此是空操作，别再碰那些会话。 */
   bool abandoned_ = false;

@@ -90,6 +90,10 @@
  *
  * **四、注册路由要在 `start()` 之前。** 路由表本身不是线程安全的；运行中
  * 注册会打乱链缓存（框架有路由数量校验兜底，但那是安全网不是用法）。
+ * **`set_loops(n > 1)` 之后这条从"会跑错业务"升级成 UB** —— 链缓存
+ * （`chain_cache_` / `chain_storage_`）是**全进程共享**的一张表，n 条循环会
+ * 同时往里写、同时读，那是 `std::map` 上的数据竞争。单循环时"打乱"最坏是
+ * 命中一条过期链，多循环时没有"最坏"，只有未定义。
  *
  * 线程模型
  * --------
@@ -958,6 +962,37 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_app& clear_raw_data_claim();
 
   // -----------------------------------------------------------------
+  // 横向扩展
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 设定事件循环数：1 条接受者 + n-1 条工作循环。**不调用 = 1**。
+   *
+   * 必须在 `start()` / `run()` **之前**调。`n == 1` 时本函数立即返回 0，
+   * 整个对象的行为与没有这个 API 时逐字节相同（设计稿 §7）。
+   *
+   * **返回值刻意不是 `uvcpp_web_app&`** —— 与上面那一串链式 setter 不同。
+   * 链式 setter 只能返回 `*this`，于是报不了错；而这里有两个真实的失败：
+   * 参数越界、以及"装晚了"。多循环是**结构性**的开关（要开 n-1 条线程、
+   * 每格建自己的句柄），静默退化成一个不像样的配置比启动失败坏得多。
+   * net 层的同名 API(`uvcpp_tcp_server::set_loops()`)也是这个形状。
+   *
+   * @param n 1..64（含）。上限是**刻意的**：每一条工作循环都是一个真线程
+   *          + 一套 loop 亲和的句柄，超配只会把调度开销叠上去。
+   *
+   * @return 0 成功；`UV_EINVAL` 参数越界；`UV_EBUSY` 已经启动过、或底层
+   *         `uvcpp_tcp_server` 已经在 `set_loops()` 之后（那样本框架装不上
+   *         "每循环就绪钩子"，工作循环那几格会永远空着 —— 见实现处的长注释）。
+   *
+   * @note **`run(md)` 不接受 n > 1**：它是在调用者线程上就地跑 0 号循环，
+   *       那 n-1 条工作循环的归属就不成立了。多循环请走 `start()` + `join()`。
+   */
+  int set_loops(int n);
+
+  /** @brief 已经设定的循环数（未调用 `set_loops()` = 1）。 */
+  int loop_count() const;
+
+  // -----------------------------------------------------------------
   // 生命周期
   // -----------------------------------------------------------------
 
@@ -1039,13 +1074,9 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 都只是某一条循环的局部读数，拿它当 app 级读数就会静默少报。
    * `n == 1`（默认）时它与拆分前逐字节相同。
    *
-   * @warning **这是个"把每一格的表加起来"的读数，所以它只在①本进程只有一条
-   *          循环、或者②所有循环都已经停下来之后才安全。** `n > 1` 且循环在
-   *          跑的时候，从**任何**线程调它（包括 0 号循环自己的线程）都会读到
-   *          别的线程正在改的 `std::map` —— 拆前只有一张表，所以从前不存在这
-   *          一条。要能在跑的时候读，得给每格配一个原子计数（net 层
-   *          `live_clients_` 就是那个形状），那是公开 `set_loops(n)` 那一批的
-   *          事；在那之前 `uvcpp_web_app` 的循环数恒为 1，这条只是边界。
+   * **可以从任何线程调**（含循环跑着的时候）：求和的是每格登记表的那个
+   * 原子计数（`uvcpp_web_connection_registry::size()`），不是遍历别人的表。
+   * 多循环落地前这里遍历的是 `std::map`，那条边界已经不存在了。
    */
   size_t connection_count() const;
 
@@ -1055,8 +1086,7 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 与 net 层 `uvcpp_tcp_server::client_count_at()` 同一套口径（包括越界
    * 返回 0）—— 设计稿 §6 第 4 条要的"看得见分布"就是这两个读数。
    *
-   * @warning `loop_index` 不是本线程那条循环时，读的是**别人**的表 ——
-   *          同 `connection_count()` 的那条边界，别在循环跑着的时候跨线程调。
+   * 与 `connection_count()` 同一条边界：读的是那一格的原子计数，跨线程安全。
    */
   size_t connection_count_at(int loop_index) const;
 
@@ -1068,8 +1098,8 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 退化成"有几条连接上有在途请求" —— 单连接的老用例照样过，只有真去数
    * 第二条的那天才会发现不对。
    *
-   * @warning 与 `connection_count()` 同一条边界：它遍历每一格的在途队列表，
-   *          循环跑着的时候跨线程读是数据竞争（含从 0 号循环读别的格）。
+   * 与 `connection_count()` 同一条边界：求和的是每格的原子计数
+   * （`loop_slot::inflight_entries`），可以从任何线程调。
    */
   size_t inflight_count() const { return inflight_total(); }
 
@@ -1113,6 +1143,21 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
 
   virtual bool on_loop_thread() const;
   virtual void post(std::function<void()> fn);
+
+  /**
+   * @brief 把任务投给**指定的**那条循环（0 号 = 接受者那条）。
+   *
+   * 下面那个 `post(fn)` 投的是**发起者所在**的那条循环（设计稿 §5.2），
+   * 从非循环线程投时落到 0 号 —— 那对"请求路径上的续作"是对的，但停机这种
+   * "我明知道该投给谁"的场合不够用：`stop()` 要逐个槽位都送到，而不是全
+   * 挤进 0 号那一格的队列。
+   *
+   * @param loop_index 0..n-1。越界或那一格还没起来（`async == nullptr`）时
+   *        **丢弃并记一条 WARN**，与 `post(fn)` 同一条口径 —— 静默丢弃投递
+   *        任务会让"异步处理器永远不回来"变成悬案。
+   */
+  void post(std::function<void()> fn, int loop_index);
+
   virtual uvcpp_loop* loop() const;
   virtual uvcpp_tcp_client* connection(uvcpp_web_conn_id id);
   virtual void send_response(uvcpp_web_context& ctx);
@@ -1144,6 +1189,25 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
 
   /** @brief **每循环一次**：记线程身份，在**本循环**上建投递句柄与两个定时器。 */
   int init_on_loop_thread();
+
+  /**
+   * @brief **每循环一次**，按**显式下标**：0 号那条与工作循环那几条**共用**这一份。
+   *
+   * 为什么不能继续用 `slot_here()`：钩子跑在**工作循环的线程**上、而那时那一格
+   * 的 `loop_tid` **还没记**（要等本函数第一段才记）⇒ `slot_here()` 找不到它，
+   * 按"不在任何循环线程上"的规则回落到 0 号 —— 于是工作循环那句话柄全建到
+   * 接受者那条循环上，只有一台机器上真跑多循环才会现形。所以下标**传进来**，
+   * 不猜。
+   *
+   * 同理**不许用 `tcp->get_loop()`**（那是接受者那条）；`loop` 也传进来。
+   *
+   * @param index 0..n-1；越界或 `loop == nullptr` 返回 `UV_EINVAL`。
+   */
+  int init_loop_state(int index, uvcpp_loop* loop);
+
+  /// 记下一条循环开跑 / 收尾，维护 `loops_running_` 与 `loop_started_`。
+  void note_loop_started(int index);
+  void note_loop_stopped(int index);
 
   /** @brief 新连接被接受（HTTP 层的 accept 钩子）：发 id、登记、跑用户钩子。 */
   void on_accept(uvcpp_tcp_client* client);
@@ -1507,12 +1571,33 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   // `stream_*()` 的，`abort_request()` 可能从异步处理器的线程进来）。用
   // `reg_of()` 之后"哪条循环"由 id 决定，与调用者是哪条线程无关。
   //
+  // ★★ **不变量：「按线程找格」与「按 id 找格」必须同源。**
+  //
+  // 上面两条路（`reg_here()` 与 `reg_of(id)`）之所以能混着用，靠的是一条**没有
+  // 写在别处**的前提：**id 是由「跑这条连接回调的那条循环」自己那份登记表发出的**
+  // （`id_of` / `add` 走 `reg_here()`），而 id 的高段就是那条循环的号。于是
+  // "写的时候落在哪一格"与"读的时候按 id 找到哪一格"必然指向同一个对象。
+  //
+  // 它今天只由两件事撑着，**两件都不在类型里**：
+  //
+  //   1. id 由该槽位自己的 `registry` 发（高段 = 该槽位的 `index`）；
+  //   2. 循环的身份（tid 表）在**任何用户回调之前**就写好了 —— 否则
+  //      `reg_here()` 会在一条还没被认领的循环上答出一个错的格。
+  //
+  // **任何一件被放松，写就落在 A 格、读却去 B 格找，而且两种失败都是静默的**
+  // —— 不是崩溃、不是断言，是"这条连接的操作没生效"或者"生效在别人身上"。
+  // 所以别把这条当成"显然"而绕过：要动 id 的分配点、或者动 `init_loop_state()`
+  // 里 tid 那一步的次序时，先回来看这一句。（外部复核 sercebr 在 `0bf090e` 上
+  // 指出这条值得显式写出来 —— 它当时只在代码里成立，不在任何注释里。）
+  //
   // ★ **但"哪一份"不是"能不能读"。** 上面这条只解决**定位**，不解决**跨线程
   // 访问** —— 那一份里的 `std::map` 仍然不是线程安全的（`uvcpp_web_connection.h`
   // 里那个类自己的 `@warning`），而这一点**拆分前后一样**：拆前也只有同一个
   // `std::map`、同一条 `@warning`。真要跨线程读公开的 `connection(id)` /
-  // `find(id)`，得投递到那份所在的循环再回话，或者给那一份自带锁 —— 那是公开
-  // `set_loops(n)` 那一批要定的事，本批只是把"哪一份"这件事做对。
+  // `find(id)`，得投递到那份所在的循环再回话，或者给那一份自带锁。
+  // **`set_loops(n)` 落地（1.2.23-dev）没有解决这一条**，它只是把"哪一份"做对
+  // 了 —— 跨线程读登记表仍是未做的（**聚合量**那边另说：`connection_count()` /
+  // `inflight_count()` 走的是每格的原子计数，可以从任何线程读）。
   //
   // `n == 1` 下所有 id 的高段都是 0 ⇒ `reg_of()` 恒返回 0 号那一份 ⇒ 上面
   // 这一整段与拆分前**逐字节相同**。
@@ -1621,13 +1706,38 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   std::thread thread_;
   bool        thread_started_;   ///< thread_ 能不能 join
   bool        threading_;        ///< true = start() 起的线程，false = run() 就地跑
-  bool        started_once_;     ///< 已经成功启动过（实例只能起一次）
+
+  /**
+   * @brief 启动那两半都跑完了（实例只能起一次）。**跨线程读**，所以是原子。
+   *
+   * `stop()` 的门就是它、不是 `loop_started_`：后者在多循环下语义是"至少还有
+   * 一条在跑"，而工作循环在 `init_process_once()` 里就被放行 ⇒ 它会在 0 号还
+   * 没建好自己的 `async` 时变真，那时 `begin_shutdown()` 会在一条没有 `async`
+   * 的槽位上干活。`started_once_` 要等 `init_on_loop_thread()` 收尾才置位。
+   */
+  std::atomic<bool> started_once_;
 
   // 这几个跨线程读写（`stop()` 可能来自任何线程），所以是原子而不是 bool
   // —— 声明成 volatile 只能保证"不被优化掉"，保证不了可见性和原子性。
+  /**
+   * @brief **至少还有一条**循环在跑（句柄已建、未收尾）。n == 1 时就是
+   *        "那条循环在跑"，与拆分前逐字同义。
+   *
+   * 多循环下语义必须写成"至少一条"，由 `loops_running_` 撑着 —— 否则会
+   * **饿死**：0 号先走到收尾就把这个标志清掉，而工作循环里那一次
+   * `begin_shutdown()` 还在队列里没跑，它一进来就看到假、直接早退，那条循环
+   * 于是永远不停（它的 `async`/`timer` 没人删 ⇒ `uv_loop_close` 撞 `UV_EBUSY`
+   * ⇒ 整块循环泄漏）。见 `note_loop_stopped()`。
+   */
   std::atomic<bool> loop_started_;  ///< 事件循环已经在跑（句柄已建）
   std::atomic<bool> running_;       ///< 正在服务
   std::atomic<bool> stopping_;      ///< 停机流程已启动（幂等用）
+
+  /// `set_loops()` 定下的循环数（未调用 = 1）。`loops_` 的**期望**长度就是它。
+  int requested_loops_ = 1;
+
+  /// 还没收尾的循环条数。`loop_started_` 的判据是 `loops_running_ > 0`。
+  std::atomic<int> loops_running_;
 
   /**
    * @brief **一条循环自己**的那份状态（多循环设计稿 §4.1.1 丙那一族）。
@@ -1645,7 +1755,9 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                                 async(nullptr), idle_timer(nullptr),
                                 shutdown_timer(nullptr),
                                 shutdown_deadline_ms(0), shutdown_phase(0),
-                                registry(i), flushing(false) {}
+                                registry(i), flushing(false),
+                                inflight_entries(0), finished(false),
+                                orphaned(false) {}
 
     /// 循环号。0 号就是调用 `run()` / `start()` 的那个线程跑的那条。
     int index;
@@ -1740,6 +1852,40 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
     /// 在途的分片下发名册（断开时该取消谁）。只存裸指针，每格一份。
     std::map<uvcpp_web_conn_id, std::vector<uvcpp_web_file_transfer*> >
         file_transfers;
+
+    /**
+     * @brief 本格的**在途上下文条数**（`inflight` 里所有队长的和）。
+     *
+     * 为什么要单独记一笔：`inflight_total()` 要对外的聚合量求和，而它是
+     * **遍历每一格的 `std::map`** —— 循环跑着的时候从别的线程读那份 map 就是
+     * 数据竞争。有了这个原子，聚合读数就只是几条 `load()`。
+     *
+     * **不能拿 `inflight.size()` 推**：那是**连接的条数**，一条连接上可以按
+     * 流水线挂好几条在途请求（`max_pipelined_requests`）。所以计的是上下文
+     * 条数，入队/出队各一处（`enqueue_inflight()` / `context_finished()`）。
+     */
+    std::atomic<size_t> inflight_entries;
+
+    /**
+     * @brief 本格已经**收尾完毕**（`finish_shutdown()` 跑到底、循环已停）。
+     *
+     * `join()` 靠它等每一条循环都退干净；`begin_shutdown()` 也靠它幂等 ——
+     * 停机是逐槽位扇出的，而 `stop()` 可以被重复调（虽然 `stopping_` 已经
+     * 挡了一层，那把闸是**每进程**的，挡不住"某格被投了两次"）。
+     */
+    std::atomic<bool> finished;
+
+    /**
+     * @brief 这一格的句柄**已经没主了**（底层 `set_loops()` 失败把循环拆了）。
+     *
+     * 只在"转发 `tcp_server()->set_loops(n)` 失败"那条路上置真。那时
+     * `stop_workers()` 已经把工作循环关掉并释放，而钩子早就把 `async` /
+     * `shutdown_timer` / `idle_timer` 建在那些循环上了 ⇒ 此时 `delete` 它们
+     * 是**在一条已经不存在的循环上动句柄**。本仓的取舍一贯是**泄漏好过 UAF**，
+     * 所以这些格子标记之后不再碰，析构时也不回收（进程马上就要失败了，
+     * 调用方拿到的是错误码）。
+     */
+    bool orphaned;
   };
 
   /**

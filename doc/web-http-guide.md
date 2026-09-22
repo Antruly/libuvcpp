@@ -14,7 +14,7 @@
 `<web/uvcpp_http_common.h>` 里的枚举与工具函数。
 
 **这一层是自足的：它完全不依赖 `webapp/`。** `src/web/` 里没有任何
-`#include <webapp/...>`。反过来 `webapp/` 大量包含 `web/`（`src/webapp/uvcpp_web_app.h:124-125`
+`#include <webapp/...>`。反过来 `webapp/` 大量包含 `web/`（`src/webapp/uvcpp_web_app.h:128-129`
 拿的就是 `web/uvcpp_http_server.h` 与 `web/uvcpp_ws_server.h`）。
 
 > 本页讲 `web/` 的 **HTTP** 半边。WebSocket 在 [web WS 指南](./web-ws-guide.md)，
@@ -89,7 +89,7 @@
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
 （`tests/functional/web_ssl_h2_client_func.cpp:185`）。握手超时归
-`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:577`）。
+`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:600`）。
 
 ---
 
@@ -213,7 +213,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
   body 不再被服务器缓冲，直接以 `HEADERS` / `BODY` / `END` 三个事件交给你。
 - `set_stream_claim(hook)`（`:263`）：`post_stream` 没中时问它。它返回一个
   `http_stream_handler`（认领）或空（不认领）。`webapp/` 正是靠它把自己的路由器
-  接进来的（`src/webapp/uvcpp_web_app.cpp:1724-1724`）。
+  接进来的（`src/webapp/uvcpp_web_app.cpp:1814-1814`）。
 
 `stream_handler` 拿到的 `req` 是 `ctx.stream_request`，**头部视图只在当次调用内有效，
 要留就自己拷**（`src/web/uvcpp_http_server.h:107-109`）。
@@ -553,12 +553,12 @@ int doc_static() {
 ```
 
 **`files` 必须活得比 `server` 长。** `handler()` 捕获的是 `this` 裸指针
-（`src/web/uvcpp_static_server.h:88-89`）—— 上面那个写法（`files` 先于 `server` 声明、
+（`src/web/uvcpp_static_server.h:100-101`）—— 上面那个写法（`files` 先于 `server` 声明、
 后于它析构）是对的。
 
-默认值（构造参数 `src/web/uvcpp_static_server.h:81-83`、成员初值 `:178-179`）：
+默认值（构造参数 `src/web/uvcpp_static_server.h:93-95`、成员初值 `:190-191`）：
 `url_root = "/"`、`index_file = "index.html"`、`spa_fallback = true`、`cache_enabled = true`。
-后两个**有 setter**（`set_spa_fallback()` `:96`、`set_cache_enabled()` `:99`），
+后两个**有 setter**（`set_spa_fallback()` `:108`、`set_cache_enabled()` `:111`），
 前两个只能走构造函数。
 构造函数还会把 `local_dir` 去掉尾斜杠、把 `url_root` 规范成 `"/"` 或 `"/xxx"`
 （`src/web/uvcpp_static_server.cpp:165-183`）。
@@ -651,7 +651,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1061-1061`�
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:268-279`、`src/web/uvcpp_http_server.cpp:353-364`、`src/web/uvcpp_http_server.cpp:1599-1608`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:585-590`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:2418-2424`）。
+（`src/webapp/uvcpp_web_app.cpp:2675-2681`）。
 
 ### 静默失败清单
 
@@ -677,9 +677,9 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1061-1061`�
 `src/web/uvcpp_http_server.cpp:468-469`、`src/web/uvcpp_http_server.cpp:1262-1264` 与头文件
 `src/web/uvcpp_http_server.h:915-918` 现在都明写这一点。
 **真实的闲置清扫在 webapp 层**：`idle_timeout_ms` 默认 **60000**
-（`src/webapp/uvcpp_web_app.cpp:193`），而且为 0 时连扫描句柄都不建
-（`src/webapp/uvcpp_web_app.cpp:1838-1843`）。升级成 WebSocket 的连接被排除在闲置超时之外
-（`src/webapp/uvcpp_web_app.h:807`）。
+（`src/webapp/uvcpp_web_app.cpp:203`），而且为 0 时连扫描句柄都不建
+（`src/webapp/uvcpp_web_app.cpp:1977-1982`）。升级成 WebSocket 的连接被排除在闲置超时之外
+（`src/webapp/uvcpp_web_app.h:811`）。
 
 **二、`req` 与 `resp` 只在本次调用期间有效。**
 它们是 `on_request_complete` 的局部对象（`src/web/uvcpp_http_server.cpp:546-546`、`src/web/uvcpp_http_server.cpp:565-565`），

@@ -598,6 +598,13 @@ size_t uvcpp_tcp_server::close_all_clients() {
   return closed;
 }
 
+size_t uvcpp_tcp_server::close_clients_on_loop(uvcpp_loop* l) {
+  // 逐字就是 `close_all_clients()` 的第一步 —— 公开它、而不是让上层自己筛，
+  // 是为了让"关本循环那一份"只有一份实现（`snapshot_clients()` 那套快照 +
+  // 重判的细节很容易复制出第二个版本）。
+  return close_clients_of_loop(l);
+}
+
 void uvcpp_tcp_server::release_client(uvcpp_tcp_client* client) {
   if (client == nullptr) return;
   unregister_client(client);

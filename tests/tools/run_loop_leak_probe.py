@@ -169,9 +169,15 @@ LEAK_BODY = """\
 
 # 每一处都是 (原文, 替换)；按文件自己的行尾对齐后再比对，且必须唯一命中。
 PATCHES = [
+    # 锚点只圈 `namespace uvcpp {`，**不要**连上面前一行一起写。原先写的是
+    # `#include "uvcpp_loop.h"\nnamespace uvcpp {`，而 `f4f264c`（macOS 的
+    # `sigemptyset` 是宏）在两者之间插了一段 `#if !defined(_WIN32) /
+    # #include <signal.h> / #endif`，于是这条锚点一处都命中不了 —— 探针从那
+    # 一笔起就再也跑不起来（`PROBE_HEAD` 自己以 `namespace uvcpp {` 收尾，
+    # 插在它前面即可，插桩位置与原先完全一致）。
     (
-        "#include \"uvcpp_loop.h\"\nnamespace uvcpp {\n",
-        "#include \"uvcpp_loop.h\"\n\n" + PROBE_HEAD,
+        "\nnamespace uvcpp {\n",
+        "\n" + PROBE_HEAD,
     ),
     (
         "uvcpp_loop::uvcpp_loop() : uvcpp_handle() {\n",

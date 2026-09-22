@@ -32,7 +32,13 @@
  * 缓存
  * ----
  * LRU，同时受「条目数」和「总字节数」两个上限约束（只限条目数的话，256 个
- * 大文件就能把内存吃光）。缓存**只在 loop 线程上访问**，因此内部没有锁。
+ * 大文件就能把内存吃光）。
+ *
+ * **缓存是共享一份的，不是每循环一份**，因此内部有一把锁（多循环下
+ * `serve()` 与完成回调会跑在**不同的循环线程**上）。之所以不分片：分片会让
+ * 每片各攒一份 LRU，内存成倍、命中率还掉 —— 同一条路径的请求落到不同片上
+ * 就互相看不见。单循环下这把锁没有可争用的对象。实现见
+ * `uvcpp_web_static.cpp` 里 `Impl::mu_` 的注释。
  *
  * 校验方式是把缓存条目的 `(mtime, size)` 作为"期望值"快照带进 work job：
  * worker stat 之后先比这个快照 —— 对上了就**不读盘**，直接告诉调用方"用你
@@ -279,13 +285,19 @@ class UVCPP_API uvcpp_web_static {
    */
   const std::string& root_real() const;
 
-  /** @brief 清空 LRU 缓存（例如部署了新版本之后）。**只能在 loop 线程调**。 */
+  /**
+   * @brief 清空 LRU 缓存（例如部署了新版本之后）。
+   *
+   * 可以从**任何线程**调：它与服务路径共享的那几个成员都在 `Impl::mu_` 里
+   * （从前这里写着"只能在 loop 线程调"，那是"缓存没有锁"年代的约束）。
+   */
   void clear_cache();
 
+  /** @brief 缓存条目数/占用字节数。跨线程可读（走 `Impl::mu_`）。 */
   size_t cache_entries() const;
   size_t cache_bytes() const;
 
-  /** @brief 缓存命中/未命中计数，便于确认缓存真的在工作。 */
+  /** @brief 缓存命中/未命中计数，便于确认缓存真的在工作。跨线程可读。 */
   unsigned long long cache_hits() const;
   unsigned long long cache_misses() const;
 
@@ -294,6 +306,8 @@ class UVCPP_API uvcpp_web_static {
    *        `uvcpp_web_app::serve_static()`。
    *
    * @param loop 投递读盘任务用的循环，**必须是请求所在的那个循环**。
+   *             多循环下它还是**待回收 `uvcpp_work` 的桶键**（每条循环只删
+   *             自己投出去的那些）—— 传错不会崩，但会把回收时机拖到析构。
    *
    * 为什么要显式传 loop：handler 的签名是 `(req, resp, next)`，里面既没有
    * 上下文也没有 App，**拿不到循环**。而循环要到 `start()` 之后才存在，

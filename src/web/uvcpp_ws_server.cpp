@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cstdint>
 #include <sstream>
+#include <net/uvcpp_loop_worker.h>
 #include <web/uvcpp_http_parser.h>
 
 namespace uvcpp {
@@ -130,7 +131,12 @@ uvcpp_ws_server::~uvcpp_ws_server() {
   // 用 shutdown()（而不只是 recycle_all()）：它顺带把延迟回收用的 async
   // 句柄释放掉，而这件事必须发生在**销毁 loop 之前** —— loop 归下面的
   // http 层所有，`delete http_server_` 就会把它关掉。
-  sessions_.shutdown();
+  // 每循环那几片：正常路径上框架已经在每一格收尾时各调过一次
+  // `shutdown_sessions_of_loop()`（那些片剩下的是空表 + 空句柄，这次是空操作）。
+  // 这里兜的是"没人走过停机状态机"那条路 —— 单循环下它由 `delete http_` 之前
+  // 的这一句负责，与从前逐字相同。
+  std::vector<uvcpp_ws_sessions*> shards = shard_snapshot();
+  for (size_t i = 0; i < shards.size(); ++i) shards[i]->shutdown();
 
   if (owns_http_ && http_server_) {
     delete http_server_;
@@ -217,14 +223,20 @@ void uvcpp_ws_server::handle_upgrade(
     // 延迟回收的驱动循环。这里（而不是构造函数里）建 async 句柄是有意的：
     // `uv_async_init` 必须在**循环线程**上做，而本函数是升级回调，正好在
     // 循环线程、且循环正在跑。构造函数里可能在别的线程、循环也可能还没起来。
-    if (http_server_ != nullptr && http_server_->get_tcp_server() != nullptr) {
-      sessions_.set_loop(http_server_->get_tcp_server()->get_loop());
+    // 这一片就是**这条连接所属**的那条循环。句柄也必须建在它上面 ——
+    // 从前这里取的是 `http_server_->get_tcp_server()->get_loop()`，也就是
+    // **接受者**那条：多循环下连接是转手到工作循环上的，那个句柄会建在别人的
+    // 循环上，于是"唤醒回收"踢的是另一条循环，而挂在它上面的会话永远等不到
+    // 回收。`client->get_loop()` 才是这条连接自己的循环。
+    uvcpp_ws_sessions* shard = shard_for(client->loop_index());
+    if (shard != nullptr && client->get_loop() != nullptr) {
+      shard->set_loop(client->get_loop());
     }
 
     auto* conn = new uvcpp_ws_connection(client, ws_role::SERVER);
     // **先接管所有权，再 start()。** 反过来的话，如果对端在我们 start() 的
     // 过程中就断了（关闭观察者立刻回调），会话会不知道把自己交给谁。
-    sessions_.adopt(conn);
+    if (shard != nullptr) shard->adopt(conn);
 #if UVCPP_ZLIB_ENABLE
     // 双侧**必须**用同一份协商结果：应答里写了什么，本端的压缩器和解压器
     // 就得按那个配。is_server = true 决定窗口位数与 context takeover 的方向。
@@ -274,7 +286,81 @@ void uvcpp_ws_server::on_connection(std::function<void(uvcpp_ws_connection*)> cb
 int uvcpp_ws_server::run(uv_run_mode md) { return http_server_->run(md); }
 
 void uvcpp_ws_server::close_all_sessions(ws_close_code code) {
-  sessions_.close_all(code);
+  // **本线程所在循环那一片**（不在循环线程上时是 0 号，与全仓"答 0 号"那条
+  // 回落一致）。多循环下这条 API 不再是"全进程"的意思，要每条循环各调一次 ——
+  // 理由与 `uvcpp_http_server::begin_h2_goaway()` 逐字相同（关闭是循环亲和的）。
+  // 框架自己的停机不走这里，它逐格调 `close_sessions_of_loop()`。
+  close_sessions_of_loop(shard_index_here(), code);
+}
+
+void uvcpp_ws_server::close_sessions_of_loop(int loop_index,
+                                             ws_close_code code) {
+  uvcpp_ws_sessions* shard = shard_if_exists(loop_index);
+  if (shard == nullptr) return;
+  shard->close_all(code);
+}
+
+void uvcpp_ws_server::shutdown_sessions_of_loop(int loop_index) {
+  uvcpp_ws_sessions* shard = shard_if_exists(loop_index);
+  if (shard == nullptr) return;
+  shard->shutdown();
+}
+
+void uvcpp_ws_server::abandon_sessions_of_loop(int loop_index) {
+  uvcpp_ws_sessions* shard = shard_if_exists(loop_index);
+  if (shard == nullptr) return;
+  shard->abandon();
+}
+
+int uvcpp_ws_server::shard_index_here() {
+  // `-1` ＝ "不在任何循环线程上"，与全仓"不在循环线程上就答 0 号"那条回落
+  // 一致（0 号是接受者；单循环下它就是唯一那一片 ⇒ 与拆分前逐字相同）。
+  const int idx = uvcpp_loop_index_of_this_thread();
+  return idx > 0 ? idx : 0;
+}
+
+uvcpp_ws_sessions* uvcpp_ws_server::shard_for(int loop_index) {
+  if (loop_index < 0) return nullptr;
+  std::lock_guard<std::mutex> lk(shards_mu_);
+  const size_t i = static_cast<size_t>(loop_index);
+  if (i >= shards_.size()) {
+    shards_.resize(i + 1);
+  }
+  if (shards_[i] == nullptr) {
+    shards_[i].reset(new uvcpp_ws_sessions());
+  }
+  return shards_[i].get();
+}
+
+uvcpp_ws_sessions* uvcpp_ws_server::shard_if_exists(int loop_index) const {
+  if (loop_index < 0) return nullptr;
+  std::lock_guard<std::mutex> lk(shards_mu_);
+  const size_t i = static_cast<size_t>(loop_index);
+  if (i >= shards_.size()) return nullptr;
+  return shards_[i].get();
+}
+
+std::vector<uvcpp_ws_sessions*> uvcpp_ws_server::shard_snapshot() const {
+  // 加锁只护 `shards_` 这个 vector：已经建好的片在 `~uvcpp_ws_server` 之前
+  // 不会消失，所以把裸指针拷出来之后再逐个操作是安全的（并发新建只会让快照
+  // 少看见一片，那是"读数少算一片"而不是悬垂）。
+  //
+  // **空洞必须滤掉，不能原样返回。** `shard_for()` 是按需 `resize()` 的：建
+  // 1 号片会顺带把 0 号那一格也造出来留在 `nullptr`（多循环下 0 号是接受者，
+  // 一条连接都不留，所以它**永远**不会被建）。把这些空指针放进快照，调用方
+  // （`session_count()` / `recycled_session_count()` / 析构里的逐个
+  // `shutdown()`）就会对着 `nullptr` 解引用 —— 实测就是 n=2 下建第一条 WS
+  // 会话时 `mov rax,[rcx+38h]` 打在 `rcx = 0` 上。
+  //
+  // 滤掉是**正确**的语义而不只是防崩：空的那些格本来就等于"这片不存在"，
+  // 与 `shard_if_exists()` 对越界下标答 `nullptr` 是同一条读法。
+  std::lock_guard<std::mutex> lk(shards_mu_);
+  std::vector<uvcpp_ws_sessions*> out;
+  out.reserve(shards_.size());
+  for (size_t i = 0; i < shards_.size(); ++i) {
+    if (shards_[i] != nullptr) out.push_back(shards_[i].get());
+  }
+  return out;
 }
 
 void uvcpp_ws_server::stop(std::function<void()> on_stopped) {
@@ -290,8 +376,27 @@ void uvcpp_ws_server::stop(std::function<void()> on_stopped) {
 
 uvcpp_http_server* uvcpp_ws_server::get_http_server() { return http_server_; }
 
-size_t uvcpp_ws_server::session_count() const { return sessions_.size(); }
-size_t uvcpp_ws_server::recycled_session_count() const { return sessions_.recycled(); }
+size_t uvcpp_ws_server::session_count() const {
+  // **所有分片求和**：任何一片的 `size()` 都只是某一条循环的局部读数。
+  // 求和的是原子量，所以可以从任何线程调（用例就是这么轮询它的）。
+  std::vector<uvcpp_ws_sessions*> shards = shard_snapshot();
+  size_t n = 0;
+  for (size_t i = 0; i < shards.size(); ++i) n += shards[i]->size();
+  return n;
+}
+
+size_t uvcpp_ws_server::session_count_at(int loop_index) const {
+  uvcpp_ws_sessions* shard = shard_if_exists(loop_index);
+  return shard != nullptr ? shard->size() : 0;
+}
+
+size_t uvcpp_ws_server::recycled_session_count() const {
+  // 同上：求和，不是取某一片。
+  std::vector<uvcpp_ws_sessions*> shards = shard_snapshot();
+  size_t n = 0;
+  for (size_t i = 0; i < shards.size(); ++i) n += shards[i]->recycled();
+  return n;
+}
 
 }  // namespace uvcpp
 #endif  // UVCPP_WEB_ENABLE

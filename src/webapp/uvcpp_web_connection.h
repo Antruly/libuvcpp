@@ -35,6 +35,8 @@
 #ifndef SRC_WEBAPP_UVCPP_WEB_CONNECTION_H
 #define SRC_WEBAPP_UVCPP_WEB_CONNECTION_H
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -304,7 +306,16 @@ class UVCPP_API uvcpp_web_connection_registry {
   /** @brief 取一条记录的副本。不存在返回 nullptr。 */
   const uvcpp_web_connection* find(uvcpp_web_conn_id id) const;
 
-  /** @brief 当前活连接数。 */
+  /**
+   * @brief 当前活连接数。
+   *
+   * **这是本表唯一的跨线程读数口**：它读的是一个原子量，不是 `by_id_.size()`。
+   * 多循环下 `connection_count()` 要把各格加起来，而"加起来"这件事会在别的
+   * 线程正在改那张 `std::map` 的时候发生 —— 遍历它是数据竞争，读原子不是。
+   *
+   * 这是本仓**唯一**允许从非循环线程读的成员，其余一概不行（见类头的
+   * `@warning`）。
+   */
   size_t size() const;
 
   /** @brief 当前所有活连接的 id（顺序按 id 升序）。 */
@@ -333,6 +344,19 @@ class UVCPP_API uvcpp_web_connection_registry {
   uvcpp_web_conn_id next_id_;
   /** @brief 本登记表的循环号，组装 id 时放进高段。 */
   int loop_index_;
+
+  /**
+   * @brief `by_id_.size()` 的镜像，**只在四个改动函数末尾按 size 赋值**。
+   *
+   * 为什么不写成 `++` / `--`：`add()` 开头那次"重复登记先摘旧的"会让一次
+   * `add` 同时产生一次减和一次加，`remove()` 里也有"反向索引指着的不是我"
+   * 那种不加不减的分支 —— 按 `size()` 赋值是把"最终该是多少"交给唯一知道
+   * 答案的那张表，而不是让每一个分支各自记着该加还是该减。
+   *
+   * 也正因为"按 size 赋值"，它**只在循环线程上被写**（那四个函数都只从本
+   * 循环的回调里进），读它的人可以在任何线程上 —— 这正是它存在的理由。
+   */
+  mutable std::atomic<size_t> live_;
 };
 
 }  // namespace uvcpp

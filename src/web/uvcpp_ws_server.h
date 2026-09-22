@@ -29,7 +29,10 @@
 #if UVCPP_WEB_ENABLE
 
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 #include <uvcpp/uvcpp_define.h>
 #include <net/uvcpp_tcp_client.h>
 #include <web/uvcpp_ws_ext.h>
@@ -141,14 +144,58 @@ class UVCPP_API uvcpp_ws_server {
    */
   void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);
 
+  /**
+   * @brief 只给**某一条循环**名下的会话发 Close 帧。
+   *
+   * 多循环下 WS 会话表按循环分片（键是连接的循环号，见 `sessions_` 的说明），
+   * 而 `close()` 打在活会话上要碰它那条连接 —— 那是**循环亲和**的操作。所以
+   * 关闭只能由会话自己那条循环来发：框架停机时每一格在**自己**的线程上各调
+   * 一次（`slot.index` 就是它）。
+   *
+   * @param loop_index 目标分片的循环号。那一片还不存在（这条循环上从没有过
+   *                   会话）时是空操作。
+   */
+  void close_sessions_of_loop(int loop_index,
+                              ws_close_code code = ws_close_code::NORMAL);
+
+  /**
+   * @brief 释放某一条循环的会话分片：回收剩下的会话 + 释放延迟回收的 async
+   *        句柄。**必须在该循环关闭之前、在该循环的线程上调**。
+   *
+   * 这是每循环那一片的 `shutdown()`。它和 `~uvcpp_ws_server` 里那次的关系是
+   * "谁先谁后"而不是"二选一"：多循环下工作循环是由各自的线程 `delete` 掉的，
+   * 等到本对象析构时那个循环**已经没了** —— 那时再去 `delete` 挂在它上面的
+   * async 句柄就是 use-after-free。所以框架在每一格收尾时各调一次，析构里
+   * 那次退化成对空表兜底。
+   *
+   * 幂等：同一片调两次，第二次是空操作（`drain_async_` 已经置空、表已空）。
+   */
+  void shutdown_sessions_of_loop(int loop_index);
+
+  /**
+   * @brief 交出一条循环的会话分片，**一个都不删**（只清表 + 让后续操作空转）。
+   *
+   * 给"那条循环已经没了 / 可能没了"这条兜底路径用：此时会话的连接对象随时
+   * 可能是悬垂的，删它们就是 use-after-free。与 `uvcpp_ws_sessions::abandon()`
+   * 同一条取舍 —— **有意的泄漏**换掉一个必然的 UAF。
+   */
+  void abandon_sessions_of_loop(int loop_index);
+
   // -------------------------------------------------------------------
   // Accessors
   // -------------------------------------------------------------------
 
   uvcpp_http_server* get_http_server();
 
-  /** @brief 当前活动的 WebSocket 会话数。 */
+  /** @brief 当前活动的 WebSocket 会话数 —— **所有循环之和**。 */
   size_t session_count() const;
+
+  /**
+   * @brief 某一条循环名下的活动会话数（越界/没有分片时为 0）。
+   *
+   * 与 `session_count()` 同一套口径，就是"分布看得见"的那个读数。
+   */
+  size_t session_count_at(int loop_index) const;
 
   /**
    * @brief 累计已回收（真正 `delete`）的会话数。**单调递增**。
@@ -195,8 +242,34 @@ class UVCPP_API uvcpp_ws_server {
   uvcpp_http_server* http_server_ = nullptr;
   bool owns_http_ = false;
 
-  /// 本服务器创建的全部会话。会话终结时把自身交回这里回收。
-  uvcpp_ws_sessions sessions_;
+  /**
+   * @brief 本服务器创建的全部会话，**按循环分片**（下标就是循环号）。
+   *
+   * 为什么是"每循环一片"而不是"一片 + 加锁"：`uvcpp_ws_sessions` 持有一个
+   * 延迟回收用的 `uv_async` 句柄，而 `uv_async` 天然是"每循环一个"；更重要的
+   * 是会话的三个操作（`close()` / `terminate()` / `ref()`+`unref()`）都会碰
+   * 挂在**某一条循环**上的句柄，加锁解决不了"改错线程"。
+   *
+   * 分片键是 `client->loop_index()`（连接的循环号，转手路径下也是全局号）。
+   * 下标稀疏：哪条循环上真来过升级连接，哪一片才存在。
+   *
+   * 只在**那一片所属循环的线程**上创建（`shard_for()`），别的线程只读指针
+   * （`shard_snapshot()`）—— 已经建好的片在 `~uvcpp_ws_server` 之前不会消失，
+   * 所以读到的裸指针在整个使用期间有效。
+   */
+  std::vector<std::unique_ptr<uvcpp_ws_sessions> > shards_;
+  /** @brief 护 `shards_` 这个 vector 本身（创建 / 快照）。 */
+  mutable std::mutex shards_mu_;
+
+  /** @brief 本线程所在循环的号（不在循环线程上时是 0）。 */
+  static int shard_index_here();
+
+  /** @brief 取（没有就建）某条循环那一片。**只在该循环的线程上调。** */
+  uvcpp_ws_sessions* shard_for(int loop_index);
+  /** @brief 只查不建（聚合量与关闭路径都不许凭空造出一个片）。 */
+  uvcpp_ws_sessions* shard_if_exists(int loop_index) const;
+  /** @brief 现有的全部分片（加锁取快照）。 */
+  std::vector<uvcpp_ws_sessions*> shard_snapshot() const;
 
   std::function<void(uvcpp_ws_connection*)> on_conn_;
 

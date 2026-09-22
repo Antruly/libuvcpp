@@ -99,4 +99,14 @@ if(TARGET test_web_app_static_func)
   set_tests_properties(test_web_app_static_func PROPERTIES TIMEOUT 90)
 endif()
 
+# `test_web_app_multiloop_func` 起停好几轮 App（每轮 n 条循环 = n 条线程 + 一次
+# 优雅停机），量级由被测面本身决定。它**自己**的每条等待都带墙钟兜底并会
+# `_Exit(2)` 自报家门（见文件里的 `require_within` / `stop_and_join_within`），
+# 所以这里的 TIMEOUT 只是**兜底中的兜底** —— 兜那些不经过那两个帮手的挂死
+# （例如 App 析构里）。给 120 是因为它比默认的 30 宽，但比"抬整个 job 的
+# `--timeout`"窄：其余每一条用例的挂死检出时间一点没松。
+if(TARGET test_web_app_multiloop_func)
+  set_tests_properties(test_web_app_multiloop_func PROPERTIES TIMEOUT 120)
+endif()
+
 

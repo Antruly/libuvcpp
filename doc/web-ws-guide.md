@@ -44,7 +44,7 @@ HTTP 的服务端与 WS 的服务端会在同一个 `uvcpp_http_server` 上碰�
 
 | 类 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_ws_server` | `src/web/uvcpp_ws_server.h:43` | 挂在 HTTP 服务器上做**握手**（识别升级 → 算 Accept → 回 101 → 建会话）。自己不管帧收发 |
+| `uvcpp_ws_server` | `src/web/uvcpp_ws_server.h:46` | 挂在 HTTP 服务器上做**握手**（识别升级 → 算 Accept → 回 101 → 建会话）。自己不管帧收发 |
 | `uvcpp_ws_client` | `src/web/uvcpp_ws_client.h:56` | 解析 `ws://` / `wss://`、发升级请求、校验 101、建会话。**同时持有自己的 loop** |
 | `uvcpp_ws_connection` | `src/web/uvcpp_ws_connection.h:61` | 真正的 WS 语义：帧解析与序列化、掩码、分片重组、压缩、Close 握手、发送队列 |
 | `uvcpp_ws_sessions` | `src/web/uvcpp_ws_sessions.h:36` | 会话归属表 + **延迟回收器**。不是广播器 |
@@ -53,7 +53,7 @@ HTTP 的服务端与 WS 的服务端会在同一个 `uvcpp_http_server` 上碰�
 
 **服务端与客户端拿到的是同一个类**（`uvcpp_ws_connection`），靠 `ws_role` 区分方向
 （`src/web/uvcpp_ws_connection.h:56`）：服务端 `new uvcpp_ws_connection(client, ws_role::SERVER)`
-（`src/web/uvcpp_ws_server.cpp:224`），客户端
+（`src/web/uvcpp_ws_server.cpp:236`），客户端
 `new uvcpp_ws_connection(tcp_, ws_role::CLIENT)`（`src/web/uvcpp_ws_client.cpp:374`）。
 两侧唯一的差别是掩码方向（`src/web/uvcpp_ws_connection.cpp:194`）与压缩窗口方向
 （`src/web/uvcpp_ws_parser.cpp:278`）。
@@ -88,8 +88,8 @@ void doc_run_echo_server() {
 **`listen()` 是独立的一步，头文件里的官方示例漏了它。** `src/web/uvcpp_ws_server.h:11-20`
 的 "Standalone usage" 是 `bind` → `on_connection` → `run`，**没有 `listen()`** ——
 照抄那段代码的服务端会 bind 成功、跑起来、然后一条连接都收不到。
-`bind()` 只转发 `http_server_->bind`（`src/web/uvcpp_ws_server.cpp:145`），
-`listen()` 才转发 `http_server_->listen`（`src/web/uvcpp_ws_server.cpp:149`）。
+`bind()` 只转发 `http_server_->bind`（`src/web/uvcpp_ws_server.cpp:151`），
+`listen()` 才转发 `http_server_->listen`（`src/web/uvcpp_ws_server.cpp:155`）。
 完整顺序照 `tests/functional/web_ws_func.cpp:24`。
 
 ---
@@ -98,25 +98,25 @@ void doc_run_echo_server() {
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-explicit uvcpp_ws_server();                          // src/web/uvcpp_ws_server.h:45
-explicit uvcpp_ws_server(uvcpp_http_server* http);   // src/web/uvcpp_ws_server.h:60
-int  bind(const char* ip, int port);                 // src/web/uvcpp_ws_server.h:66
-int  listen(int backlog = 128);                      // src/web/uvcpp_ws_server.h:67
-void attach(uvcpp_http_server* http);                // src/web/uvcpp_ws_server.h:74
-void on_connection(std::function<void(uvcpp_ws_connection*)> cb);  // :112
-int  run(uv_run_mode md = UV_RUN_DEFAULT);           // :118
-void stop(std::function<void()> on_stopped = nullptr);  // :126
-void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);  // :142
-size_t session_count() const;                        // :151
+explicit uvcpp_ws_server();                          // src/web/uvcpp_ws_server.h:48
+explicit uvcpp_ws_server(uvcpp_http_server* http);   // src/web/uvcpp_ws_server.h:63
+int  bind(const char* ip, int port);                 // src/web/uvcpp_ws_server.h:69
+int  listen(int backlog = 128);                      // src/web/uvcpp_ws_server.h:70
+void attach(uvcpp_http_server* http);                // src/web/uvcpp_ws_server.h:77
+void on_connection(std::function<void(uvcpp_ws_connection*)> cb);  // :115
+int  run(uv_run_mode md = UV_RUN_DEFAULT);           // :121
+void stop(std::function<void()> on_stopped = nullptr);  // :129
+void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);  // :145
+size_t session_count() const;                        // :191
 ```
 
 **没有 `close()`。** 停机只有两条路：`stop()` 和 `close_all_sessions()`。
 `stop()` 先 `close_all_sessions(GOING_AWAY)` 再停底下的 HTTP 服务器
-（`src/web/uvcpp_ws_server.cpp:280`）—— 也就是说正常停机**会**给每条连接发 1001。
+（`src/web/uvcpp_ws_server.cpp:366`）—— 也就是说正常停机**会**给每条连接发 1001。
 
 **服务端只有 `on_connection` 一个回调。** 没有 `on_message`、没有 `on_close`、
 没有 `on_error` —— 那些全部在 `uvcpp_ws_connection` 上装（§5）。
-`on_connection` 是**单槽**（`on_conn_ = std::move(cb)`，`src/web/uvcpp_ws_server.cpp:267`），
+`on_connection` 是**单槽**（`on_conn_ = std::move(cb)`，`src/web/uvcpp_ws_server.cpp:279`），
 后装的覆盖先装的，不会报错。
 
 ---
@@ -124,28 +124,28 @@ size_t session_count() const;                        // :151
 ## 4. 握手
 
 用户**什么都不用写**。`handle_upgrade` 一条龙包办：算 `Sec-WebSocket-Accept`
-（`src/web/uvcpp_ws_server.cpp:194`）→ 拼 101 应答 → `write` 出去 → 在**写完成回调**里
-建会话（`src/web/uvcpp_ws_server.cpp:211-250`）。顺序上有三处做对了，写文档时值得知道：
+（`src/web/uvcpp_ws_server.cpp:200`）→ 拼 101 应答 → `write` 出去 → 在**写完成回调**里
+建会话（`src/web/uvcpp_ws_server.cpp:217-262`）。顺序上有三处做对了，写文档时值得知道：
 
-- 101 写失败（`status != 0`）直接返回，**不建会话也不回调**（`src/web/uvcpp_ws_server.cpp:215`）；
-- `sessions_.adopt(conn)` 在 `conn->start()` **之前**（`:227`）—— 会话先归表，再开始收帧；
-- 升级请求里多读出来的字节在用户回调**之前**取走、在用户回调**之后**补投（`:238`）。
+- 101 写失败（`status != 0`）直接返回，**不建会话也不回调**（`src/web/uvcpp_ws_server.cpp:221`）；
+- `shard->adopt(conn)` 在 `conn->start()` **之前**（`:239`）—— 会话先归表，再开始收帧；
+- 升级请求里多读出来的字节在用户回调**之前**取走、在用户回调**之后**补投（`:250`）。
 
 ### 子协议完全没有
 
 `Sec-WebSocket-Protocol` 在两侧都**不存在**：服务端应答里只写 `Upgrade` / `Connection` /
-`Sec-WebSocket-Accept` / 可选 `Sec-WebSocket-Extensions`（`src/web/uvcpp_ws_server.cpp:196`），
+`Sec-WebSocket-Accept` / 可选 `Sec-WebSocket-Extensions`（`src/web/uvcpp_ws_server.cpp:202`），
 客户端请求里只写 `Host` / `Upgrade` / `Connection` / `Sec-WebSocket-Key` /
 `Sec-WebSocket-Version: 13` / 可选扩展（`src/web/uvcpp_ws_client.cpp:288`）。
 要协商子协议得在 HTTP 层自己做：用 `handle_upgrade` 的重载
-（`src/web/uvcpp_ws_server.h:105`）或者自持 `uvcpp_http_server::on_upgrade` 槽，
+（`src/web/uvcpp_ws_server.h:108`）或者自持 `uvcpp_http_server::on_upgrade` 槽，
 读请求头、自己回 101。
 
 ### 缺 `Sec-WebSocket-Key` 时是**静默**的
 
-`src/web/uvcpp_ws_server.cpp:180` 是 `if (ws_key.empty()) return;` —— 不建会话、不应答，
+`src/web/uvcpp_ws_server.cpp:186` 是 `if (ws_key.empty()) return;` —— 不建会话、不应答，
 连接既不断也不回，就哑在那里。自己拿 `on_upgrade` 槽分派的人**必须自己先校验**
-（头文件 `src/web/uvcpp_ws_server.h:83` 如实写明了这一点）。
+（头文件 `src/web/uvcpp_ws_server.h:86` 如实写明了这一点）。
 
 ---
 
@@ -155,7 +155,7 @@ size_t session_count() const;                        // :151
 它的分配与释放都在 `web/uvcpp_ws_sessions` 手里（`src/web/uvcpp_ws_connection.h:10-23`）。
 
 回调里拿到的那个指针**不能缓存**。终结之后属主会在**下一轮循环**里 `delete` 它
-（`src/web/uvcpp_ws_sessions.cpp:112`）—— 延迟一轮是为了让"写完成回调里还握着会话指针"
+（`src/web/uvcpp_ws_sessions.cpp:115`）—— 延迟一轮是为了让"写完成回调里还握着会话指针"
 这类在途引用先跑完。要判它还在不在，只有两个判据：
 
 ```cpp
@@ -355,7 +355,7 @@ void terminate();                                        // src/web/uvcpp_ws_con
 
 **也就是说它不等对端回 Close 帧。** RFC 6455 §7.1.1 的关闭握手在这一层只做了一半，
 而且**没有任何超时或定时器**兜底。头文件 `src/web/uvcpp_ws_connection.h:138` 的措辞与实现
-是相符的，但 `src/web/uvcpp_ws_sessions.h:106` 与 `src/web/uvcpp_ws_server.h:120` 把它称作
+是相符的，但 `src/web/uvcpp_ws_sessions.h:107` 与 `src/web/uvcpp_ws_server.h:123` 把它称作
 "优雅关闭" —— 那是**名义上的优雅**，不是 RFC 的完整语义。
 
 `terminate()` 是立即终结、**不发** Close 帧（`src/web/uvcpp_ws_connection.cpp:109`）。
@@ -403,9 +403,9 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
   `on_connection` 里建映射。
 - **零线程安全。** 没有 mutex、没有原子量。`set_loop` 的注释明确要求必须在
   **该循环的线程上、且循环正在跑的时候**调用（`uv_init` 系列不是线程安全的，
-  `src/web/uvcpp_ws_sessions.h:69`）；`adopt` / `close_all` / `recycle_all` 同理。
+  `src/web/uvcpp_ws_sessions.h:70`）；`adopt` / `close_all` / `recycle_all` 同理。
 
-还有一条是**给你写代码时的约束**（`src/web/uvcpp_ws_sessions.h:96`）：
+还有一条是**给你写代码时的约束**（`src/web/uvcpp_ws_sessions.h:97`）：
 
 - 在终结观察者里**不要 `delete` 会话** —— 会和 `drain()` 双删；
 - 也**不要做耗时操作**，那是循环线程。
@@ -422,10 +422,10 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 
 **用 `uvcpp_ws_server` / `uvcpp_ws_client` 的人什么都不用做**：两侧默认**开启**协商
 （`src/web/uvcpp_ws_ext.h:126` 的 `bool enabled = true;`），服务端建会话时自动
-`conn->enable_compression(true, dp)`（`src/web/uvcpp_ws_server.cpp:231`），
+`conn->enable_compression(true, dp)`（`src/web/uvcpp_ws_server.cpp:243`），
 客户端自动 `conn->enable_compression(false, deflate_params_)`
 （`src/web/uvcpp_ws_client.cpp:384`）。要关掉就 `set_compression(cfg)` 把 `enabled` 置 false
-（`src/web/uvcpp_ws_server.h:175` / `src/web/uvcpp_ws_client.h:164`，**只在
+（`src/web/uvcpp_ws_server.h:222` / `src/web/uvcpp_ws_client.h:164`，**只在
 `UVCPP_ZLIB_ENABLE=1` 时编译**）。
 
 阈值 `set_compress_min_size(size_t n)` 默认 `0`，也就是**都压**
@@ -514,12 +514,12 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:213，�
 不回收旧会话。
 
 **`attach()` 会静默顶掉别人装的升级处理器。**
-`src/web/uvcpp_ws_server.cpp:158` 先 `delete` 掉自己拥有的 http server，然后
+`src/web/uvcpp_ws_server.cpp:164` 先 `delete` 掉自己拥有的 http server，然后
 `http->on_upgrade(...)` —— 而 `on_upgrade` 在 HTTP 层是**单槽**
 （`src/web/uvcpp_http_server.cpp:175-175`）。谁后 `attach()` 谁赢。
 
 **`on_connection` 是单槽，而且会被 `handle_upgrade` 的 `on_ready` 顶掉。**
-`src/web/uvcpp_ws_server.cpp:242` 是 `if (on_ready) { on_ready(conn); }
+`src/web/uvcpp_ws_server.cpp:254` 是 `if (on_ready) { on_ready(conn); }
 else if (on_conn_) { on_conn_(conn); }` —— 用带 `on_ready` 的那个重载时，
 **不会**再走 `on_connection`。
 
@@ -537,7 +537,7 @@ PageHeap 下实测 SEGFAULT（`src/web/uvcpp_ws_client.cpp:124-145`）。
 "回调里 `delete cli` 不崩"是承诺，但代价是漏对象。
 
 **析构不会发 GOING_AWAY。** `~uvcpp_ws_server` 先 `sessions_.shutdown()` 再
-`delete http_server_`（`src/web/uvcpp_ws_server.cpp:122`），**不调 `stop()`** ——
+`delete http_server_`（`src/web/uvcpp_ws_server.cpp:123`），**不调 `stop()`** ——
 析构路径上对端只会看到连接消失。要 1001 就显式 `stop()`。
 
 ---

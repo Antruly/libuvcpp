@@ -67,6 +67,18 @@ class uvcpp_work;
 
 /**
  * @brief 静态文件服务：懒加载 + mtime 校验缓存 + 线程池异步读盘。
+ *
+ * @warning **多循环（`n > 1`）下尚不安全，别拿它当 `uvcpp_web_static` 用。**
+ *
+ * 这一份的 `cache_` / `retired_` 与从前的 `uvcpp_web_static` 是同一个形状：
+ * 按"循环线程只有一条"写的，既没有锁也没有按循环分桶。请求路径上真正活着的
+ * 那个是 `uvcpp_web_static`（`uvcpp_web_app::serve_static()` 造的就是它），
+ * 它已经修好了；**本类在本仓库里没有任何生产调用点**（只有用例构造它），
+ * 所以行为改动推迟到有调用方时再做 —— 现在改就是改一段没人跑、也验不了的
+ * 代码。
+ *
+ * 多循环下要用它，先按 `uvcpp_web_static.cpp` 里 `Impl::mu_` 与
+ * `Impl::retired` 的注释把这两处补齐。
  */
 class UVCPP_API uvcpp_static_server {
 public:

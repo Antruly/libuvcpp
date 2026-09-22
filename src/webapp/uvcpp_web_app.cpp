@@ -50,6 +50,7 @@
 #include <webapp/uvcpp_web_util.h>
 #include <webapp/uvcpp_web_ws.h>
 
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <future>
@@ -121,6 +122,15 @@ const uint64_t kShutdownPollMs = 20;
 
 /** @brief 关掉连接之后，留给关闭完成回调跑完的时间（毫秒）。 */
 const uint64_t kShutdownDrainMs = 10;
+
+/**
+ * @brief `join()` 等工作循环退出的富余时间（毫秒），加在宽限期之上。
+ *
+ * 一条工作循环自己那条停机状态机最长就是"宽限期 + 两拍排水"，而它们与接受者
+ * 是**并行**跑的，所以宽限期之上再加这段就够。它的用途不是"等够久"，而是
+ * 给"卡住"划一条能报出来的线。
+ */
+const int64_t kJoinSlackMs = 5000;
 
 /**
  * @brief 闲置超时扫描的间隔（毫秒）。
@@ -264,6 +274,11 @@ uvcpp_web_app::~uvcpp_web_app() {
   // 销毁 loop，之后任何 `uv_close`/`uv_timer_stop` 都是在用一个不存在的
   // 循环。
   for (size_t i = 0; i < loops_.size(); ++i) {
+    // `orphaned` 那几格**故意泄漏**：`set_loops()` 失败时 net 层自己调
+    // `stop_workers()`，把装着这些句柄的那几条循环连内存一起放掉了 ⇒ 在这里
+    // `delete` 就是往一块已经不属于我们的内存上写 `uv_close`。本仓的取舍一贯
+    // 是"泄漏好过 UAF"，而这条路只在启动失败时走到。
+    if (loops_[i]->orphaned) continue;
     delete loops_[i]->async;
     loops_[i]->async = nullptr;
     delete loops_[i]->idle_timer;
@@ -767,19 +782,23 @@ bool uvcpp_web_app::enqueue_inflight(
   // 0 = 不限（与超时、长度上限一处口径）。
   const bool over = (cap != 0 && q.size() >= cap);
   q.push_back(out_entry(ctx));
+  // 这是**唯一**的入队点，所以记账就放在这里（出队那笔在 `context_finished()`）。
+  // 计的是上下文条数而不是 map 键数：一条连接上可以同时挂好几条请求。
+  s->inflight_entries.fetch_add(1);
   return over;
 }
 
 size_t uvcpp_web_app::inflight_total() const {
   // **所有格子求和**（设计稿 §6 第 2 条）：`inflight_count()` 是对外的聚合量，
   // 读某一格的 `size()` 会静默少报别的循环上的在途请求。
+  //
+  // 求和的是每格那个**原子计数**，不是遍历那几张 `std::map`：后者只在"循环
+  // 都停了"或"只有一条循环"时才对（拆前只有一张表，所以从前不存在这条边界）。
+  // 计的是**在途上下文条数**，所以推不出 `inflight.size()`（那是连接数）——
+  // 这就是为什么要单独记一笔，见头文件里 `inflight_entries` 的说明。
   size_t n = 0;
   for (size_t i = 0; i < loops_.size(); ++i) {
-    const std::map<uvcpp_web_conn_id, out_queue >& m = loops_[i]->inflight;
-    for (std::map<uvcpp_web_conn_id, out_queue >::const_iterator q = m.begin();
-         q != m.end(); ++q) {
-      n += q->second.size();
-    }
+    n += loops_[i]->inflight_entries.load();
   }
   return n;
 }
@@ -1540,7 +1559,7 @@ uvcpp_web_app& uvcpp_web_app::clear_raw_data_claim() {
 int uvcpp_web_app::start() { return start_background(); }
 
 int uvcpp_web_app::start_background() {
-  if (thread_started_ || loop_started_.load() || started_once_) return UV_EBUSY;
+  if (thread_started_ || loop_started_.load() || started_once_.load()) return UV_EBUSY;
 
   threading_ = true;
 
@@ -1576,7 +1595,9 @@ int uvcpp_web_app::start_background() {
         << "开始服务 http://" << cfg_.host << ":" << bound_port_;
     http_->run(UV_RUN_DEFAULT);
     running_ = false;
-    loop_started_ = false;
+    // 同 `run(md)` 的尾巴：本线程只管 0 号那一格。n > 1 时这里"退出"的只是
+    // 接受者那条，工作循环还各有各的一格要减。
+    note_loop_stopped(0);
     UVCPP_LOG_INFO(log_category::CORE) << "事件循环已退出";
   });
 
@@ -1593,8 +1614,73 @@ int uvcpp_web_app::start_background() {
   return rc;
 }
 
+int uvcpp_web_app::set_loops(int n) {
+  // 上限 64 是刻意的：每条工作循环是一个真线程 + 一整套 loop 亲和的句柄。
+  // 这不是"性能调优的旋钮"，超配只会把调度开销叠上去。
+  if (n < 1 || n > 64) {
+    UVCPP_LOG_ERROR(log_category::CORE)
+        << "set_loops(" << n << ") 越界：允许 1..64";
+    return UV_EINVAL;
+  }
+
+  // 已经起来过 / 正在跑 ⇒ 拒绝。**幂等重设也拒绝**：格子是按 n 一次长成的，
+  // 中途改 n 等于让已经建好的句柄没了归属。
+  if (started_once_.load() || loop_started_.load() || thread_started_) {
+    return UV_EBUSY;
+  }
+  if (requested_loops_ > 1) return UV_EBUSY;
+
+  uvcpp_tcp_server* tcp = tcp_server();
+
+  // 反向也要挡：调用者若先自己调了 `tcp_server()->set_loops(n>1)`，工作循环
+  // 那时就已经起来了，而 `set_loop_start_hook()` 在 `workers_` 非空时**只打
+  // 一条 stderr 然后不装**（`src/net/uvcpp_tcp_server.cpp:346-363`）—— 于是
+  // 1..n-1 那几格永远空着（`async` 为 nullptr），而 `slot_here()` 会把它们
+  // 全部回落到 0 号：**静默退化**。本仓对这种形状一贯是"宁可启动失败"。
+  if (tcp != nullptr && tcp->loop_count() > 1) {
+    UVCPP_LOG_ERROR(log_category::CORE)
+        << "底层 uvcpp_tcp_server 已经是 set_loops(" << tcp->loop_count()
+        << ") 的状态：工作循环在本框架之前就起来了，每循环就绪钩子装不上，"
+        << "那几格会永远空着。循环数只在这一个入口设。";
+    return UV_EBUSY;
+  }
+
+  requested_loops_ = n;
+  // n == 1：不建格、不装钩子、不转发 —— 逐字节就是"没有这个 API"的行为。
+  if (n == 1) return 0;
+
+  // 先把格子长出来（**在任何 worker 存在之前**），再装钩子。顺序反了的话
+  // 钩子会跑在一个 `loops_` 还没长到的下标上。
+  while (loops_.size() < static_cast<size_t>(n)) {
+    const int i = static_cast<int>(loops_.size());
+    loops_.push_back(std::unique_ptr<loop_slot>(new loop_slot(i)));
+  }
+
+  if (tcp != nullptr) {
+    // 钩子的下标是 `i + 1`（0 号是接受者，不走钩子），与 `loop_at()` 同一套
+    // 编号 —— 所以这里收到的 index 直接就是本对象的格号。
+    tcp->set_loop_start_hook([this](int index, uvcpp_loop* loop) {
+      init_loop_state(index, loop);
+    });
+  }
+  return 0;
+}
+
+int uvcpp_web_app::loop_count() const { return requested_loops_; }
+
 int uvcpp_web_app::run(uv_run_mode md) {
-  if (thread_started_ || loop_started_.load() || started_once_) return UV_EBUSY;
+  if (thread_started_ || loop_started_.load() || started_once_.load()) return UV_EBUSY;
+
+  // n > 1 时 `run()` 不成立：它是在**调用者线程**上就地跑一条循环，而工作
+  // 循环那几条要各自有主（每条一个线程）。就地跑的话它们要么没人管、要么
+  // 得反过来借用调用者的线程 —— 两条路都是新语义。多循环请走
+  // `start()` + `join()`（那才是"起 n 条线程"的形状）。
+  if (requested_loops_ > 1) {
+    UVCPP_LOG_ERROR(log_category::CORE)
+        << "run() 不支持多循环（当前 set_loops(" << requested_loops_
+        << ")）：它是在调用者线程上就地跑 0 号循环。请改用 start()。";
+    return UV_EINVAL;
+  }
 
   threading_ = false;
 
@@ -1615,7 +1701,11 @@ int uvcpp_web_app::run(uv_run_mode md) {
   running_ = true;
   const int r = http_->run(md);
   running_ = false;
-  loop_started_ = false;
+  // 走的是同一个记账口，不是直接置 `loop_started_ = false`：这条线程只拥有
+  // 0 号那一格，直接置假会替别人把"至少还有一条在跑"说死。`run(md)` 只可能
+  // 跑 0 号（n > 1 在上面就拒了），所以要减的就是它。与 `finish_shutdown()`
+  // 里那次是同一个幂等口，重复调用无害。
+  note_loop_stopped(0);
   return r;
 }
 
@@ -1767,6 +1857,35 @@ int uvcpp_web_app::init_process_once() {
   }
 #endif  // UVCPP_OPENSSL_ENABLE
 
+  // --- 放行工作循环 ---------------------------------------------------
+  //
+  // **位置**：每进程那半的最后一步、`bind()`/`listen()` 之前。约束是"在任何
+  // 连接落上来之前"（`src/net/uvcpp_tcp_server.h:264-268`）—— 而这一步会启动
+  // n-1 条线程，它们放行之后立刻就能走到请求路径上，读的必须已经是冻结好的
+  // 配置。`listen()` 只是队列深度，放行点在这里。
+  //
+  // 与本函数上面 TLS 那几行的**先后无关**：`set_ssl_context()` 的约束是
+  // "在 `listen()` 之前"，两者互不约束。
+  //
+  // `n == 1` 时**一个字都不发**：这不是优化，是等价性要求。net 层的
+  // `set_loops(1)` 虽然也是恒等，但它会让 `workers_` 之外多走一遍"校验 + 设
+  // 状态"的路径，而"不调用这个 API"与"调用它"必须在 n==1 下逐字节相同
+  // （设计稿 §7）—— 最省事的保证就是根本不进那一支。
+  if (requested_loops_ > 1) {
+    const int src = tcp->set_loops(requested_loops_);
+    if (src != 0) {
+      // 失败路径：`set_loops()` 内部已经把自己放行过的工作循环停掉并释放了
+      // （`src/net/uvcpp_tcp_server.cpp:332-339` 的 `stop_workers()`）。而钩子
+      // 早一步已经把 `async` / 两个定时器**建在那些循环上**了 ⇒ 这里再去
+      // `delete` 它们就是在一个已经不存在的循环上动句柄。
+      //
+      // 取舍：**泄漏好过 UAF**（本仓一贯），所以只做标记，析构时跳过。
+      // 这条路只在启动失败时走到，进程随即把错误码交给调用方。
+      for (size_t i = 1; i < loops_.size(); ++i) loops_[i]->orphaned = true;
+      return src;
+    }
+  }
+
   int rc = http_->bind(cfg_.host.c_str(), cfg_.port);
   if (rc != 0) return rc;
 
@@ -1796,29 +1915,50 @@ int uvcpp_web_app::init_process_once() {
   return 0;
 }
 
-int uvcpp_web_app::init_on_loop_thread() {
+void uvcpp_web_app::note_loop_started(int index) {
+  (void)index;
+  loops_running_.fetch_add(1);
+  loop_started_ = true;
+}
+
+void uvcpp_web_app::note_loop_stopped(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= loops_.size()) return;
+  loop_slot& slot = *loops_[static_cast<size_t>(index)];
+
+  // **每格只记一次**：`finish_shutdown()` 会记，而循环真正退出之后
+  // `start()` 的线程尾巴还会再记一次 —— 那次必须是空操作，否则
+  // `loops_running_` 会被多减一次，"至少还有一条在跑"就提前变假。
+  bool expected = false;
+  if (!slot.finished.compare_exchange_strong(expected, true)) return;
+
+  if (loops_running_.fetch_sub(1) == 1) loop_started_ = false;
+}
+
+int uvcpp_web_app::init_loop_state(int index, uvcpp_loop* loop) {
+  if (loop == nullptr) return UV_EINVAL;
+  if (index < 0 || static_cast<size_t>(index) >= loops_.size()) return UV_EINVAL;
+  loop_slot& slot = *loops_[static_cast<size_t>(index)];
+  if (slot.index != index) return UV_EINVAL;
+
   // 循环线程身份必须最先记下来：下面任何一步失败都不会有回调进来，而这个
   // 标记决定了 `post()` 是就地执行还是投递。
   //
-  // **它现在落在 `listen()` 之后**（那一步在上面的每进程那半里）。这是安全的：
-  // 循环要到调用方接着调 `http_->run()` 才跑起来，在那之前不会有任何回调进来，
-  // 所以"标记晚了一小段"没有可观察后果。n>1 时也是同一个道理 —— 工作循环在
-  // `set_loops()` 里就被放行了（`w->start()`，`src/net/uvcpp_tcp_server.cpp:332`），
-  // 但它们记的是**自己那条线程**的身份。
-  loop_slot& slot = slot_here();
+  // **它落在 `listen()` 之后**（每进程那半里）。这是安全的：循环要到调用方
+  // 接着调 `http_->run()` 才跑起来，在那之前不会有任何回调进来，所以"标记晚
+  // 了一小段"没有可观察后果。
+  //
+  // 工作循环那几条走的是本函数的**钩子**入口，它们在这里记的是**自己那条
+  // 线程**的身份 —— 也就是这一点决定了"下标必须传进来"：钩子跑的那一刻
+  // `tid_known` 还是假，`slot_here()` 会回落到 0 号。
   {
     std::lock_guard<std::mutex> lk(slot.tid_mutex);
     slot.loop_tid = std::this_thread::get_id();
     slot.tid_known = true;
   }
 
-  uvcpp_tcp_server* tcp = http_->get_tcp_server();
-  uvcpp_loop* loop = tcp->get_loop();
-  if (loop == nullptr || tcp->get_tcp() == nullptr) return UV_EINVAL;
-
   // --- loop 亲和的句柄 ---------------------------------------------
   //
-  // 放在最后：这两个句柄必须在 loop 线程上建，而前面任何一步失败都不该
+  // 放在最后：这几个句柄必须在 loop 线程上建，而前面任何一步失败都不该
   // 留下需要回收的句柄。
   int rc = 0;
   slot.async = new uvcpp_async();
@@ -1829,8 +1969,7 @@ int uvcpp_web_app::init_on_loop_thread() {
     return rc;
   }
   // 这一格归属的那条循环。0 号在构造函数里就装过了（同一个指针），这里再
-  // 写一次是为了让"`init_on_loop_thread()` 之后这格是完整的"这条成立 ——
-  // 工作循环那几格没有构造函数这一步，全靠这里。
+  // 写一次是为了让"`init_loop_state()` 之后这格是完整的"这条成立。
   slot.loop = loop;
 
   slot.shutdown_timer = new uvcpp_timer(loop);
@@ -1844,28 +1983,68 @@ int uvcpp_web_app::init_on_loop_thread() {
     slot.idle_timer->start([this](uvcpp_timer*) { idle_sweep(); }, iv, iv);
   }
 
-  started_once_ = true;
-  loop_started_ = true;
-  stopping_ = false;
   slot.shutdown_phase = 0;
+  note_loop_started(index);
+  return 0;
+}
+
+int uvcpp_web_app::init_on_loop_thread() {
+  uvcpp_tcp_server* tcp = http_->get_tcp_server();
+  uvcpp_loop* loop = tcp->get_loop();
+  if (loop == nullptr || tcp->get_tcp() == nullptr) return UV_EINVAL;
+
+  const int rc = init_loop_state(0, loop);
+  if (rc != 0) return rc;
+
+  // 这三个是**每进程**的标志，不属于上面那份"每循环一份"的状态。
+  started_once_ = true;
+  stopping_ = false;
   return 0;
 }
 
 void uvcpp_web_app::stop() {
-  if (!loop_started_.load()) return;  // 没起来 / 已经停了
+  // 判据是 `started_once_`（每进程那一份 = "启动这段跑完了"），**不是**
+  // `loop_started_`。后者现在是"至少还有一条循环在跑"：工作循环在
+  // `init_process_once()` 里就被放行了，于是它会在 0 号还没建好自己的
+  // `async` 时就把这句话变真 —— 那时 `begin_shutdown()` 会在一条没有
+  // `async` 的槽位上干活。`started_once_` 要等 `init_on_loop_thread()` 收尾
+  // 才置位，正好保住"没完全起来之前 stop() 是空操作"这条既有语义。
+  if (!started_once_.load()) return;  // 没起来 / 已经停了
 
   // 幂等：只认第一个进来的。用 exchange 而不是 load+store，否则两个线程
   // 同时调 stop() 会各投递一次。
   if (stopping_.exchange(true)) return;
 
-  if (on_loop_thread()) {
-    begin_shutdown();
+  if (loops_.size() == 1) {
+    // n == 1：与"没有这个 API"时逐字节相同（就地调 / 投给 0 号）。
+    if (on_loop_thread()) {
+      begin_shutdown();
+      return;
+    }
+    post([this]() { begin_shutdown(); });
     return;
   }
 
-  // 跨线程：唯一的 libuv 线程安全入口是 uv_async_send，所以包成一个任务
-  // 投过去。（这也顺便说明 `post()` 是线程安全的。）
-  post([this]() { begin_shutdown(); });
+  // --- 多循环：逐槽位扇出 -------------------------------------------
+  //
+  // **这是本批真正的主判据所在。** 只投 0 号的话（今天的行为），工作循环
+  // 既不进停机状态机、也不会被停（`finish_shutdown()` 收尾停的是本格那条
+  // 循环）⇒ 那几格里 `async`/`timer` 没人删 ⇒ `uv_loop_close` 撞上未关句柄
+  // 返 `UV_EBUSY` ⇒ 整块循环内存泄漏。
+  //
+  // 发起者那条循环**就地跑**（与 n == 1 同形，不为多循环多绕一次异步），
+  // 其余各投各的。注意"就地"的判据是 `on_loop_thread()` **加**指针相等，
+  // 不能只看指针：从非循环线程调时 `slot_here()` 也答 0 号那一格，而
+  // `begin_shutdown()` 绝不能在别人线程上跑。
+  const bool here = on_loop_thread();
+  loop_slot& mine = slot_here();
+  for (size_t i = 0; i < loops_.size(); ++i) {
+    if (here && &mine == loops_[i].get()) {
+      begin_shutdown();
+      continue;
+    }
+    post([this]() { begin_shutdown(); }, static_cast<int>(i));
+  }
 }
 
 void uvcpp_web_app::join() {
@@ -1878,9 +2057,63 @@ void uvcpp_web_app::join() {
           << "join() 在事件循环线程上被调用，会死锁；已忽略";
       return;
     }
+    // 这条 join 等的是**接受者**那条线程。
     thread_.join();
   }
   thread_started_ = false;
+
+  if (loops_.size() == 1) return;
+
+  // ---- 工作循环那几条 ------------------------------------------------
+  //
+  // 它们不归 `thread_` 管（各有各的 `std::thread`，在 `uvcpp_tcp_server`
+  // 里），所以上面那句 join 返回**不代表**它们也停了。正常路径上停机扇出
+  // 已经逐格停过它们了，这里等的是"确实收尾了"。
+  //
+  // **有界**，而且是刻意有界：本仓对"挂住"和"泄漏"的取舍一贯是报出来 +
+  // 泄漏好过挂住 —— 调用方（以及 `~uvcpp_web_app`）不该有任何一条能无限期
+  // 卡住的路径。
+  int64_t budget = cfg_.shutdown_grace_ms;
+  if (budget < 0) budget = 0;
+  budget += kJoinSlackMs;
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
+
+  size_t pending = 0;
+  for (;;) {
+    pending = 0;
+    for (size_t i = 0; i < loops_.size(); ++i) {
+      if (!loops_[i]->finished.load()) ++pending;
+    }
+    if (pending == 0) return;
+    if (std::chrono::steady_clock::now() >= deadline) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  UVCPP_LOG_ERROR(log_category::CORE)
+      << "join() 已等 " << budget << " ms，仍有 " << pending
+      << " 条循环没退出（停机扇出或某条循环的收尾没走到）。这几格的句柄**不再"
+      << "回收**（宁可泄漏，见下），它们自己的线程会在析构底层服务器时才被 join。";
+
+  // **到点之后不做强停。** 曾经想过"超时就来一句 `uv_stop()`"（`uv_stop` 是
+  // libuv 少数几个能从别的线程调的入口，技术上调得动），但它换来的不是安全：
+  // 被强停的那条循环**没走完自己的停机状态机**，函数返回之后 `join()` 的调用方
+  // 会接着析构本对象 —— 而本对象的析构会 `delete` 那些还挂在它上面的句柄
+  // （`async` / 两个 timer），同时那条循环的线程正在 `uv_run` 之外把整条循环
+  // 拆掉。那不是"泄漏"，是 use-after-free。
+  //
+  // 所以这里只把话说清楚，并把这几格标成 `orphaned`（与"`set_loops()` 失败"
+  // 同一个标记、同一条取舍）：析构时跳过它们持有的句柄，泄漏换掉 UAF。它们的
+  // 循环由底层服务器在析构时收（那一层必须等，是它的契约，不是我们能绕过的）。
+  for (size_t i = 0; i < loops_.size(); ++i) {
+    if (loops_[i]->finished.load()) continue;
+    loops_[i]->orphaned = true;
+    if (ws_server_ != nullptr) {
+      // 那一片的会话挂在一条随时可能消失的循环上，删它们就是 UAF —— 交出去、
+      // 一个都不删（`abandon()` 的既有取舍）。
+      ws_server_->abandon_sessions_of_loop(static_cast<int>(i));
+    }
+  }
 }
 
 int uvcpp_web_app::bound_port() const { return bound_port_; }
@@ -1909,13 +2142,35 @@ void uvcpp_web_app::post(std::function<void()> fn) {
   // 投给**发起者所在的那条循环**（设计稿 §5.2）。请求路径上那就是这条连接
   // 自己的循环；从非循环线程投递时 `slot_here()` 给的是 0 号，与今天"只有
   // 一条循环"时的行为逐字相同。
-  loop_slot& s = slot_here();
+  //
+  // 用 `slot_here().index` 转成"投给几号"再走下面那个重载，是为了让"投递"
+  // 这件事只有一份实现 —— 两处各写一份，改了一处忘了另一处就是本仓最怕的
+  // 那种沉默分叉。`index` 一定落在界内（它就是这一格自己的号），所以这次
+  // 转发不会碰到越界那条分支。
+  post(std::move(fn), slot_here().index);
+}
+
+void uvcpp_web_app::post(std::function<void()> fn, int loop_index) {
+  if (!fn) return;
+  if (loop_index < 0 || static_cast<size_t>(loop_index) >= loops_.size()) {
+    UVCPP_LOG_WARN(log_category::CORE)
+        << "投递目标循环 " << loop_index << " 不在 0.." << (loops_.size() - 1)
+        << " 之内，投递的任务被丢弃";
+    return;
+  }
+
+  loop_slot& s = *loops_[static_cast<size_t>(loop_index)];
   std::lock_guard<std::mutex> lk(s.post_mutex);
   if (s.async == nullptr) {
     // 循环没起来（或者已经收尾了）。**说出来** —— 静默丢弃投递任务会让
     // "异步处理器永远不回来"变成一桩悬案。
+    //
+    // 停机扇出会撞上这一支，而且**是预期内的**：某条循环已经收完尾（`async`
+    // 在 `finish_shutdown()` 里被删掉了），此时再往它那儿投 `begin_shutdown()`
+    // 已经没有意义 —— 它那一格早就是 `finished` 了。所以这条 WARN 不算故障。
     UVCPP_LOG_WARN(log_category::CORE)
-        << "事件循环不可用（未启动或已停止），投递的任务被丢弃";
+        << "事件循环 " << loop_index
+        << " 不可用（未启动或已停止），投递的任务被丢弃";
     return;
   }
   s.post_queue.push_back(fn);
@@ -2372,6 +2627,8 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   if (s != nullptr) s->resume();
 
   q->second.erase(me);
+  // 与 `enqueue_inflight()` 那一笔配对（唯一出队点）。
+  slot->inflight_entries.fetch_sub(1);
   // **空队列要连键一起摘掉。** `idle_sweep()` 的豁免与停机宽限的判据都是
   // `inflight.find(id) != end()` / `!inflight.empty()`，留一个空队列在表里
   // 会让那条连接被**永久**豁免闲置超时 —— 表只涨不落，长跑服务上就是稳定的泄漏。
@@ -2889,17 +3146,46 @@ void uvcpp_web_app::drain_posts() {
 
 void uvcpp_web_app::begin_shutdown() {
   loop_slot& slot = slot_here();
+
+  // 这一格已经收完尾了 ⇒ 空操作。停机现在是**逐个槽位扇出**的，而扇出与
+  // "某条循环自己先跑完"之间必然有窗口：那条循环退出之后，投给它的任务被丢
+  // 掉，但已经进了 `post_queue`（还没被 `drain_posts()` 换出去）的那一份会
+  // 在退出前的最后一轮里跑 —— 那时它必须什么都不做。
+  if (slot.finished.load()) return;
+
   if (!loop_started_.load()) return;
 
-  UVCPP_LOG_INFO(log_category::CORE)
-      << "开始停机：先停监听，宽限 " << cfg_.shutdown_grace_ms
-      << " ms 等在途请求（当前 " << inflight_total() << " 个，活连接 "
-      << connection_count() << " 条）";
+  // 这条 INFO 是**每进程**的一句话，只有 0 号说 —— 否则 n 条循环各报一轮，
+  // 读者会以为停机发生了 n 次。计数是聚合量（跨全部槽位），所以从哪一号说
+  // 都是同一个数。
+  if (slot.index == 0) {
+    UVCPP_LOG_INFO(log_category::CORE)
+        << "开始停机：先停监听，宽限 " << cfg_.shutdown_grace_ms
+        << " ms 等在途请求（当前 " << inflight_total() << " 个，活连接 "
+        << connection_count() << " 条）";
+  }
 
   // 1. 不再接受新连接。注意它**不会**关掉已经建立的连接 —— 那正是宽限期
   //    存在的意义。
+  //
+  //    **只能 0 号发。** `uvcpp_tcp_server::stop()` 逐字就是 `tcp_->close(...)`，
+  //    而 `uvcpp_handle::close()` 是**直接** `uv_close()`、不投递给句柄属主
+  //    （`src/handle/uvcpp_handle.cpp:180-184`）。那个 listener 句柄属于**接受者**
+  //    那条循环 ⇒ 从工作循环调它就是**跨循环 `uv_close`**：它要改
+  //    `loop->closing_handles` 队列、改句柄的 flags，而 0 号循环此刻正在跑。
+  //
+  //    停机是**逐个槽位扇出**的，所以"谁先跑到这一句"是竞态 —— 胜出的完全可能
+  //    是某条工作循环。`stop()` 自己确实真幂等（`has_status(TCP_SERVER_LISTENING)`
+  //    早退，且 `set_status`/`clear_status` 是原子读-改-写），所以"每格都发"与
+  //    "只 0 号发"在**最终结果**上等价；但那条早退**挡不住跨循环那次 `uv_close`**
+  //    —— 它是"第一个到的人执行"，不是"0 号执行"。设计稿 §5 那条规则就为这个。
+  //
+  //    诚实行：这一条**没有确定性红**。它是"谁的线程调了 `uv_close`"这种形状，
+  //    本仓构建里没有 sanitizer，跑 N 遍也不会有一次可断言的失败。与静态缓存
+  //    那把锁（`tests/tools/multiloop_mutation.py` 的 M6）同一类，只按单写者
+  //    论证记着，别在结论里升级成"验过了"。
   uvcpp_tcp_server* tcp = tcp_server();
-  if (tcp != nullptr) tcp->stop();
+  if (tcp != nullptr && slot.index == 0) tcp->stop();
 
   slot.shutdown_deadline_ms =
       loop_now_ms(loop()) + static_cast<int64_t>(cfg_.shutdown_grace_ms);
@@ -2941,30 +3227,43 @@ void uvcpp_web_app::shutdown_step() {
 
     // ---- 1. **先让 WS 会话道别，再关任何连接。** ----
     //
-    // 顺序在这里是**行为性的**，不是风格问题。`close_all_sessions()` 只是
-    // 把 Close 帧排进各会话的发送队列，帧真正出网要几轮循环；而下面那句
-    // `close_all_clients()` 会**立刻**把底层连接全部关掉 —— 先关连接的话，
-    // 那些帧一个字节都发不出去，对端只看到一条被断开的连接（1006），
-    // RFC 6455 §7.1.4 的优雅关闭就成了一句空话。
+    // 顺序在这里是**行为性的**，不是风格问题。发 Close 只是把帧排进各会话的
+    // 发送队列，帧真正出网要几轮循环；而关连接会**立刻**把底层连接关掉 ——
+    // 先关连接的话，那些帧一个字节都发不出去，对端只看到一条被断开的连接
+    // （1006），RFC 6455 §7.1.4 的优雅关闭就成了一句空话。
     //
-    // 这一步必须早于 `close_all_clients()`，而且中间要留出一拍排水时间
-    // （见下面 phase 1 → phase 2 的过渡）。
+    // 这一步必须早于关连接，而且中间要留出一拍排水时间（见下面
+    // phase 1 → phase 2 的过渡）。
+    //
+    // **逐格各发各的**，不是"0 号发一轮管全进程"：多循环下 WS 会话表按循环
+    // 分片（`uvcpp_ws_server::close_sessions_of_loop()`），而且 `close()` 打在
+    // 活会话上要碰它的连接 —— 那是**循环亲和**的操作，只能由它自己那条循环
+    // 来发。所以这里既不进门、也不扇出，`slot.index` 就是这一格。
     //
     // 1001 GOING_AWAY：对端据此能分辨"服务器在停机"和"对方正常告别"，
     // RFC 6455 §7.4.1 对它的定义正是前者。
     if (ws_server_ != nullptr) {
-      UVCPP_LOG_DEBUG(log_category::WEBSOCKET)
-          << "停机：给 " << ws_server_->session_count() << " 个 WS 会话发 Close";
-      ws_server_->close_all_sessions(ws_close_code::GOING_AWAY);
+      const size_t n = ws_server_->session_count_at(slot.index);
+      if (n != 0) {
+        UVCPP_LOG_DEBUG(log_category::WEBSOCKET)
+            << "停机：给循环 " << slot.index << " 上的 " << n
+            << " 个 WS 会话发 Close";
+      }
+      ws_server_->close_sessions_of_loop(slot.index,
+                                        ws_close_code::GOING_AWAY);
     }
 
     // ---- h2 同理，只是道别的形状不同：一条 GOAWAY。 ----
     //
-    // 它在 `close_all_clients()` **之前**发，理由与上面 WS 那段逐字相同；
-    // 不同之处在于 GOAWAY 还多带一个信息：`last_stream_id` 是本端已处理的最大
-    // 流号，对端据此能分辨"我发过但你没处理"的那几条 —— 那些可以安全重试，
-    // 而其余的不能（RFC 7540 §6.8）。没有它，一次停机在客户端看起来和拔网线
-    // 完全一样，在飞的请求只能一律按"结果未知"处理。
+    // 它在关连接**之前**发，理由与上面 WS 那段逐字相同；不同之处在于 GOAWAY
+    // 还多带一个信息：`last_stream_id` 是本端已处理的最大流号，对端据此能分辨
+    // "我发过但你没处理"的那几条 —— 那些可以安全重试，而其余的不能
+    // （RFC 7540 §6.8）。没有它，一次停机在客户端看起来和拔网线完全一样，在
+    // 飞的请求只能一律按"结果未知"处理。
+    //
+    // **也是逐格各发各的**：`begin_h2_goaway()` 的契约就是"每条循环各调一次"
+    // （连接上下文按循环切，翻别人的表就是数据竞争，见它的 `@note`）。这里
+    // 恰好每条循环都会走到，所以直接调就是对的 —— 不许加"只在 0 号发"的门。
     //
     // 这一句同样**不关**连接（见 `begin_h2_goaway()` 的说明），关是下面
     // phase 1 的事。
@@ -2972,13 +3271,14 @@ void uvcpp_web_app::shutdown_step() {
       const size_t n = http_->begin_h2_goaway();
       if (n != 0) {
         UVCPP_LOG_DEBUG(log_category::CORE)
-            << "停机：给 " << n << " 条 h2 连接发 GOAWAY";
+            << "停机：给循环 " << slot.index << " 上的 " << n
+            << " 条 h2 连接发 GOAWAY";
       }
     }
 
     // 排水一拍：Close 帧出网 → 会话收到写完成 → 自己关掉底层连接 → 终结
-    // 回调把它们从会话表和连接登记表里摘掉。这一步做完，下面那句
-    // `close_all_clients()` 要处理的就只剩**普通 HTTP** 连接了。
+    // 回调把它们从会话表和连接登记表里摘掉。这一步做完，下面 phase 1 要处理的
+    // 就只剩**普通 HTTP** 连接了。
     schedule_shutdown_step(kShutdownDrainMs);
     return;
   }
@@ -2989,10 +3289,23 @@ void uvcpp_web_app::shutdown_step() {
 
     // 在途请求的上下文**不动**：它们可能还在等工作线程的结果。连接关了
     // 之后它们再发响应会查到"连接已断开"，走丢弃路径并记一条警告。
+    //
+    // **每一格关自己名下那一份**（`close_clients_on_loop()`），不用
+    // `close_all_clients()`：
+    //
+    // - 前者是**循环亲和**的，必须在本格线程上跑。`close_all_clients()`
+    //   （`src/net/uvcpp_tcp_server.cpp:600-620`）会先就地关**接受者**那一份、
+    //   再把其余投递给各 worker —— 从工作循环上调它，前半段就是隔着线程动
+    //   接受者的连接，那是数据竞争，不只是"多投了几次"。
+    // - 而且只有"各关各的"才守得住上面那条次序：`close_all_clients()` 会让
+    //   0 号在别的循环**还没道完别**的时候就把它们的连接关掉（那些帧上一拍
+    //   才排队，一个字节都发不出去）。按循环各关各的，这条次序在每一格内部
+    //   各自成立，与 `n == 1` 同形。
     uvcpp_tcp_server* tcp = tcp_server();
-    if (tcp != nullptr) {
-      const size_t n = tcp->close_all_clients();
-      UVCPP_LOG_DEBUG(log_category::CORE) << "已发起关闭 " << n << " 条连接";
+    if (tcp != nullptr && slot.loop != nullptr) {
+      const size_t n = tcp->close_clients_on_loop(slot.loop);
+      UVCPP_LOG_DEBUG(log_category::CORE)
+          << "循环 " << slot.index << "：已发起关闭 " << n << " 条连接";
     }
 
     // 再等一拍：`uv_close` 的完成回调排在本次迭代末尾，立刻停循环的话它们
@@ -3042,6 +3355,19 @@ void uvcpp_web_app::finish_shutdown() {
     slot.shutdown_timer = nullptr;
   }
 
+  // WS 会话分片：回收本格剩下的会话 + 释放它那片延迟回收用的 async 句柄。
+  //
+  // **必须在这里做，不能留给 `~uvcpp_ws_server`**：多循环下工作循环是各自的
+  // 线程 `delete` 掉的，等本对象析构时那条循环**已经没了** —— 那时再去
+  // `delete` 挂在它上面的 async 句柄就是 use-after-free。所以每一格在自己
+  // 收尾时把自己那一片释放掉（析构里那次退化成对空表兜底）。
+  //
+  // 位置在删本格 `async` **之前**：`recycle_all()` 会跑会话的终结回调，那些
+  // 回调里 `post()` 进本格队列仍然应该被接受（队列还是活的）。
+  if (ws_server_ != nullptr) {
+    ws_server_->shutdown_sessions_of_loop(slot.index);
+  }
+
   // 投递句柄：`delete` 会走 free_handle → uv_close(哨兵)，完成回调在本次
   // 迭代末尾把底层内存还回去。**必须在定时器回调里做，不能在 async 自己的
   // 回调里做**（那会析构正在执行的 std::function）。
@@ -3065,13 +3391,27 @@ void uvcpp_web_app::finish_shutdown() {
   // 走到这里时 WS 会话已经道别并自行关闭，所以只需兜底回收：循环马上要停，
   // 终结回调可能来不及跑。
 
-  loop_started_ = false;
+  // `loop_started_` 是"至少还有一条循环在跑"⇒ 这里只能减本格那一份，**不能
+  // 直接置假**：0 号先收完就把整句话变假的话，工作循环迟到的那次
+  // `begin_shutdown()` 会在上面那句早退，它那条循环于是永远不会被停
+  // （`loop_started_` 是真假判据，不是"我这一格"判据）。
+  note_loop_stopped(slot.index);
 
-  UVCPP_LOG_INFO(log_category::CORE) << "停机完成，事件循环即将退出";
+  // 每循环一句（带号）、每进程一句 —— 与 `begin_shutdown()` 那两条对称。
+  UVCPP_LOG_DEBUG(log_category::CORE)
+      << "停机完成：循环 " << slot.index << " 即将退出";
+  if (slot.index == 0) {
+    UVCPP_LOG_INFO(log_category::CORE) << "停机完成，事件循环即将退出";
+  }
 
-  // 停循环。`uv_stop` 在**下一次**迭代开头生效，所以本次迭代的收尾（包括
-  // 上面那些 uv_close 的完成回调）会正常跑完。
-  if (http_ != nullptr) http_->get_tcp_server()->stop_loop();
+  // 停**本格**那条循环。`uv_stop` 在**下一次**迭代开头生效，所以本次迭代的
+  // 收尾（包括上面那些 uv_close 的完成回调）会正常跑完。
+  //
+  // 这里原来是 `http_->get_tcp_server()->stop_loop()`（逐字就是
+  // `loop_->stop()`，那条是**接受者**的循环）。n == 1 时 `slot.loop` 与它
+  // 是同一个指针 ⇒ 逐字节相同；n > 1 时它只停 0 号，工作循环那几条永远
+  // 回到不了 `uv_run` 之外，槽位里的句柄没人删、循环也没人关。
+  if (slot.loop != nullptr) slot.loop->stop();
 }
 
 }  // namespace uvcpp

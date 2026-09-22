@@ -26,7 +26,8 @@ uvcpp_web_connection_registry::uvcpp_web_connection_registry(int loop_index)
       // 越界的循环号按 0 处理，而不是带着一个会溢进递增号那一段的值继续跑 ——
       // 溢进去就成了"发出去的 id 在递增号上倒退"，那会同时破坏 issued() 与
       // 单调性。夹一次比让调用方拿到静默错乱的值好。
-      loop_index_(loop_index >= 0 && loop_index < (1 << 20) ? loop_index : 0) {}
+      loop_index_(loop_index >= 0 && loop_index < (1 << 20) ? loop_index : 0),
+      live_(0) {}
 
 uvcpp_web_connection_registry::~uvcpp_web_connection_registry() {}
 
@@ -66,6 +67,9 @@ uvcpp_web_conn_id uvcpp_web_connection_registry::add(uvcpp_tcp_client* client,
   if (client != nullptr) {
     by_client_[client] = id;
   }
+  // 镜像按 size 赋值，理由见头文件里 `live_` 的说明（一次 add 可能同时
+  // 摘掉一条旧记录，±1 那条路要记住的分支太多）。
+  live_.store(by_id_.size());
   return id;
 }
 
@@ -153,6 +157,7 @@ bool uvcpp_web_connection_registry::remove(uvcpp_web_conn_id id) {
   }
 
   by_id_.erase(it);
+  live_.store(by_id_.size());
   return true;
 }
 
@@ -167,6 +172,7 @@ bool uvcpp_web_connection_registry::remove_by_client(
   const uvcpp_web_conn_id id = it->second;
   by_id_.erase(id);
   by_client_.erase(it);
+  live_.store(by_id_.size());
 
   if (out_id != nullptr) *out_id = id;
   return true;
@@ -209,7 +215,11 @@ const uvcpp_web_connection* uvcpp_web_connection_registry::find(
   return &it->second;
 }
 
-size_t uvcpp_web_connection_registry::size() const { return by_id_.size(); }
+size_t uvcpp_web_connection_registry::size() const {
+  // 读原子量而不是 `by_id_.size()`：这个口是允许跨线程调的（多循环下
+  // `connection_count()` 要把各格加起来）。
+  return live_.load();
+}
 
 std::vector<uvcpp_web_conn_id> uvcpp_web_connection_registry::ids() const {
   std::vector<uvcpp_web_conn_id> out;
@@ -231,6 +241,7 @@ uint64_t uvcpp_web_connection_registry::issued_count() const {
 void uvcpp_web_connection_registry::clear() {
   by_id_.clear();
   by_client_.clear();
+  live_.store(0);
   // **不动 next_id_** —— 这是"永不复用"的全部意义所在。清空登记表不等于
   // 允许旧 id 复活。
 }

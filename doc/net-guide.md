@@ -217,10 +217,10 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:346`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:478-479`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:369`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:501-502`） |
 
-`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:766-768`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:773-775`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
 
@@ -461,7 +461,7 @@ void set_loop_start_hook(std::function<void(int, uvcpp_loop*)> fn);
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:342-344`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:365-367`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -540,7 +540,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`src/net/uvcpp_tcp_server.cpp:699-706`）。
+（`src/net/uvcpp_tcp_server.cpp:706-713`）。
 
 ---
 
@@ -689,7 +689,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:399-402`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:465-473`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:488-496`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`
