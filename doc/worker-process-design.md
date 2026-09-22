@@ -175,7 +175,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
   n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:988`）、
   `uvcpp_web_app` 的 `upgraded_` / `inflight_`（`src/webapp/uvcpp_web_app.h:1433` / `:1489`）、
-  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:635`）都不需要切成 per-loop。
+  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:646`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。
 - **日志那条闸门在进程内照样存在。** `src/webapp/uvcpp_log.cpp:338-352` 持锁到
   `target->write(record)` 返回 ⇒ 用户 sink 在全局锁里跑。多进程不改变这一点。
@@ -302,6 +302,11 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
 （`libuv:win/tcp.c:1489`），转手那一步在 `libuv:win/tcp.c:1506-1510` ⇒ **本库的
 `uvcpp_tcp::open`（`src/handle/uvcpp_tcp.cpp:53`）正是踩在这一步上的那个入口。**
 
+**但这条链有个前提**（2026-09-22 才量清楚，见 §9.9）：worker 侧那次 `CreateIoCompletionPort`
+得**成功** —— 也就是**源 socket 从没被关联过**。源是 `uv_accept` 出来的那种（本库
+`set_loops` 那条路）在这一步就失败 `87`、落进 EMULATE 分支，BYPASS 永远不置 ⇒ 进不了本条
+说的那一族。上面那句"本库的 `uvcpp_tcp::open` 踩在这一步上"，说的是**多进程那条血统**。
+
 ### 9.2 uvcpp 侧为什么变成 UAF，而不是"多跑一次回调"
 
 `callback_write`（`src/req/uvcpp_write.cpp:88`）取出闭包后走 `invoke_completion`
@@ -380,14 +385,18 @@ INVALID_SOCKET;`（`libuv:win/tcp.c:1143-1147`）。**第二次**派发随后才
   "报错"就不是保守，是当前唯一诚实的默认。
 - **别和 §6 那条恒 0 的机制混起来**：那条是"完成端口关联只能做一次"，这条是"BYPASS 标志在
   adopted 句柄上不生效"（**假设，待判定**；§9.6 第一条把它的竞争解释挤到只剩它一个）。
-- 顺带把 §6 那条恒 0 的**根因**补上，并说清两条为什么是同一族的：两个 worker 各对同一个继承
-  socket 发 `uv_listen`，而关联**只在句柄还有在途 I/O 时**被拒（第二次 `CreateIoCompletionPort`
-  报 `87`）—— 监听句柄有 32 个预投的 AcceptEx ⇒ 必然被拒 ⇒ 第二个 worker 预投的包**永远回不来**，
-  `uv_listen` 照样返回 0。反过来，**一条刚接受、还没有在途 I/O 的连接 socket 是可以被重新关联的**
-  —— 这正是"每连接转手"这套东西之所以还能跑起来的原因。**"静默"（§6）与"崩溃"（§9）是同一个
-  约束的两面：一条句柄的完成端口，只在它闲着的时候归你。**
+  **这条假设只适用于「源 socket 未被关联过」那条血统**（§9.9）：源已关联时 worker 侧那次
+  关联根本不成功，BYPASS 压根没置，谈不上"置了不生效"。
+- 顺带把 §6 那条恒 0 的**根因**补上：两个 worker 各对同一个继承
+  socket 发 `uv_listen`，第二次 `CreateIoCompletionPort` 报 `87` ⇒ 第二个 worker 预投的包
+  **永远回不来**，`uv_listen` 照样返回 0。**但根因不是"还有在途 I/O"** —— 这一句在 2026-09-22
+  被实测推翻（与 §2 那四条情形是同一条事实，归口见 §9.9）：**关联是一次性的、绑在端点上**，
+  一个 socket 对象只能属于一个完成端口，与有没有在途 I/O **无关**。所以「一条刚接受、还没有
+  在途 I/O 的连接 socket 可以被重新关联」是**反的**：`uv_accept` 交出来的连接 socket
+  **返回时就已经关联过了**（`libuv:win/tcp.c:662` 那次 `imported=0` 的调用），再关联一律 `87`。
+  **"静默"（§6）与"崩溃"（§9）是同一个约束的两面：一条 socket 的完成端口，一关联就定终身。**
 - 顺带记一条：**"把 master 那条监听句柄直接转给 worker"在 Windows 上不是"还没设计"，是今天做不到**
-  —— 它已经被 master 关联过，而关联**只在句柄还有在途 I/O 时**被拒（上一条）⇒ 监听句柄恒有在途 I/O
+  —— 它已经被 master 关联过，而关联是**一次性的**（上一条；不是"因为有在途 I/O 才被拒"）
   ⇒ 一律被拒（这就是 §6 那条恒 0）。要让它成立，worker 得在**首次关联之前**拿到它，或者改用自建的
   接受句柄（§9.6 第三条）。
 
@@ -586,5 +595,45 @@ IOCP），最小跨进程形状是 **0/1×10⁶** ⇒ "跨进程"跟"血统"、"
 **5. 包的状态。** 补丁 + 用例（4 文件 / +178−1）在**私有 gist** 里，`git apply --check` 过了全新的
 `5152db2` 检出，在干净检出上 apply → 编译 → 跑用例 = 绿。**不往上推**：(乙) 提上游仍是我先问
 维护者那件事，**还没有回音** ⇒ 包停在"知道在哪"的状态。
+
+### 9.9 归口：**哪条血统在 `#5282` 上**（外部装置 + 本机探针，2026-09-22）
+
+§9 通篇讲的是**一条**缺陷，但"哪条腿会走到它"直到这一天才有实测答案。判据是
+**源 socket 有没有被关联过** —— 不是"谁造的句柄"，也不是"那笔 I/O 在不在途"。
+
+| 血统（socket 从哪来） | 源 socket | worker 侧 `CreateIoCompletionPort` | EMULATE | BYPASS | 在 `#5282` 一族上 |
+|---|---|---|---|---|---|
+| `uv_accept`（**本库 `set_loops`**，`libuv:win/tcp.c:662` 那次 `imported=0`） | **已关联** | **失败 `87`** | **1** | **0** | **否：没有入口** |
+| **master 裸 `accept()`**（多进程那条形状，也是 rig 的形状） | 未关联 | **成功** | 0 | **1** | **是** |
+
+- **闸只有 BYPASS 一个位。** `UV_SUCCEEDED_WITHOUT_IOCP`（`libuv:win/req-inl.h:69-70`）
+  = `(result) && (handle->flags & UV_HANDLE_SYNC_BYPASS_IOCP)`；BYPASS 只在
+  `libuv:win/tcp.c:117-124` 那段里置，而那段被 `:119` 的
+  `!(handle->flags & UV_HANDLE_EMULATE_IOCP)` 挡着 ⇒ **EMULATE 与 BYPASS 互斥**，
+  EMULATE 一旦置上就永远进不了那一支。
+- **实测 worker 句柄的 flags 恰好差在这一对上**（外部装置，仪器打在 `uv__tcp_set_socket`
+  出口；位值见 `libuv:src/uv-common.h:102` 与 `:104`）：本库这条腿 **`0x8e088`**
+  （`EMULATE_IOCP` = 1、`SYNC_BYPASS_IOCP` = 0），裸 `accept()` 那条腿 **`0x6f08c`**（反之）。
+  ⇒ **§9.6 第 1 条那段"返回真但不生效"的推理，只属于后一行**（源未关联那一支），
+  它不是本库这条路的解释。
+- **旁证：仪器计数三条全 0**（`SETSOCKET-EMULATE` / `SETSOCKET-STALE-BYPASS` /
+  `SETSOCKET-NOBYPASS`）⇒ 整个跑动里"关联失败 ⇒ EMULATE"那一支**一次都没进过**，
+  因为 rig 那条腿上是关联成功的。
+- **本机侧的独立证据**（纯 Win32 2×2 探针，两个正对照）：对一个**已关联**的 socket 做
+  `WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)`，造出的新对象再关联报 `87`；
+  对**未关联**的源做同样的事，关联**成功**。两头都翻 ⇒ 关联跟着**端点**走，而
+  `WSADuplicateSocketW` 复制的是同一个端点。⇒ 这也正是 §9.5 第一条那句"关联是一次性的"
+  的依据（原写法"只在还有在途 I/O 时被拒"已改）。
+
+**归口结论**：`#5282` 的暴露面在「**master 裸 `accept()` + 转手**」那条血统上 ——
+也就是**本设计（多进程）**的那条路，所以 §6 的「Windows `n>1` 报错」不受影响、更站得住。
+**进程内的 `set_loops` 落在另一条腿**（EMULATE），它付的是那一档折扣（§9.7 三臂表里的
+`accept` 臂），**不是**这条内存安全缺陷。这一条同时改掉了 `doc/multiloop-design.md` §2
+与 `src/net/uvcpp_socket_handoff.h`、`src/net/uvcpp_tcp_server.h` 里"默认开 = 走进 `#5282`"
+的写法。
+
+> **边界。"没有入口"是结构判断**（那一族唯一的闸恒假），**不是**"`set_loops` 这条转手
+> 已经验过没有别的问题"。§9.1 的机制**本身仍未定** —— §9.8 那批实验是把候选一个个排除，
+> 没有一个是"已证实的原因"。把它写成"多循环那条路是安全的"就是又一次拿"没观察到"当"不存在"。
 
 相关文档：[webapp 应用框架开发者指南](./webapp-guide.md)、[压测靶场](./benchmark-rig.md)。

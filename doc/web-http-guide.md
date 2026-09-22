@@ -87,7 +87,7 @@
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
 （`tests/functional/web_ssl_h2_client_func.cpp:185`）。握手超时归
-`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:542`）。
+`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:553`）。
 
 ---
 
@@ -128,7 +128,7 @@ int main() {
 
 **`uvcpp_http_server` 的公开 API 里没有 `close()`。** 唯一能"关服"的是 `stop()`
 （`:385`），而它 = `tcp_server_->stop()`：**只关监听句柄，不动已建立的连接**
-（`src/net/uvcpp_tcp_server.h:263-276`）。已经在处理的请求照跑。
+（`src/net/uvcpp_tcp_server.h:274-287`）。已经在处理的请求照跑。
 
 ```cpp
 #include <net/uvcpp_tcp_server.h>

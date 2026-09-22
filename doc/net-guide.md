@@ -217,8 +217,8 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:311`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:443-444`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:322`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:454-455`） |
 
 `set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:724-726`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
@@ -267,17 +267,33 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 **你的回调要按"可能并发"写**：连接回调、数据回调都可能同时从几条工作线程进来。
 每条连接自身的状态不用锁（一条连接永远在同一条线程上），**跨连接的共享状态要自己护**。
 
-### 4.2 Windows：默认开着，走的是上游那条已知缺陷的路
+### 4.2 Windows：默认开着，代价是 EMULATE 那一档
 
-**这一段要读。** Windows 上没有 `REUSEPORT`、`SO_REUSEADDR` 也当不了它的替代品
-（依据见[多循环设计](./multiloop-design.md) §2），所以两个平台用的是同一条形状：
-**一个接受者 + 把连接转手**。Windows 上的转手只能靠 `WSADuplicateSocketW` +
-`WSASocketW(FROM_PROTOCOL_INFO)` + `uv_tcp_open`（`src/net/uvcpp_socket_handoff.h`），
-而这样造出来的 socket 在 libuv 眼里是 **imported** 的 —— 落在上游
-**libuv/libuv#5282** 那条**内存安全缺陷**上（"写请求被派发两次 ⇒ use-after-free"）。
+**这一段要读，而且是 2026-09-22 改过的一段。** Windows 上没有 `REUSEPORT`、
+`SO_REUSEADDR` 也当不了它的替代品（依据见[多循环设计](./multiloop-design.md) §2），
+所以两个平台用的是同一条形状：**一个接受者 + 把连接转手**。Windows 上的转手只能靠
+`WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)` + `uv_tcp_open`
+（`src/net/uvcpp_socket_handoff.h`）。
 
-外部贡献者的台架上实测：**87 次死亡 / 2 170 885 条连接**；把那个开关关掉（= 预期修复）之后是
-**3 462 684 条连接 / 0 / 0**（`doc/worker-process-design.md` §9.8）。
+**"这样造出来的 socket 是 imported 的，所以落在 `libuv/libuv#5282` 上"是错的。**
+闸是 `UV_HANDLE_SYNC_BYPASS_IOCP`：它只在 worker 侧那次 `CreateIoCompletionPort`
+**成功**时才置（`libuv:win/tcp.c:103-110` 与 `:117-124`），而成功与否取决于**源 socket
+有没有被关联过**，不取决于谁造的句柄。两条血统的实测（外部贡献者仪器里的 worker 句柄
+标志位，位值见 `libuv:src/uv-common.h:102`/`:104`）：
+
+| 血统 | 源 socket | worker 侧关联 | EMULATE | BYPASS | `#5282` 那一族 |
+|---|---|---|---|---|---|
+| **本库 `set_loops`**（源是 `uv_accept`） | **已关联** | 失败 `87` | **1** | **0** | **没有入口** |
+| master 裸 `accept()` 再 dup | 未关联 | 成功 | 0 | **1** | 在（`87 次死亡` 是它的） |
+
+实测 `flags`：本库这条腿 **`0x8e088`**（EMULATE=1 / BYPASS=0），裸 `accept()` 那条
+**`0x6f08c`**（BYPASS=1）。`UV_SUCCEEDED_WITHOUT_IOCP`（`libuv:win/req-inl.h:69`）
+**只查 BYPASS 这一个位** ⇒ 本库这条路按构造进不了那一族。
+
+**所以 87/55 那两组死亡读数属于「master 裸 `accept()` + 转手」那条血统 ——
+多进程那条形状（以及外部贡献者台架上的同名装置），不是 `set_loops` 的。**
+那一组的读数是：**87 次死亡 / 2 170 885 条连接**；把那个开关关掉（= 预期修复）之后是
+**3 462 684 条连接 / 0 / 0**（`doc/worker-process-design.md` §9.8、§9.9）。
 
 > **这里是两组不同的数，别接错。** 上面那一对来自同一台 rig 的两大批。另有**一组单变量 A/B**
 > （同一份 `uv.dll`、只翻那一个开关，§9.7）：Release **55 → 0**（581 955 / 578 296 条连接）、
@@ -305,8 +321,13 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 > 但"EMULATE 下会不会真的出现杂包 / 错派发"**仍然是留白** —— 别拿它当缺陷不存在的证据。
 
 **本库这一版在 Windows 上默认就走这条路**（维护者知情并选择默认开：拒绝启动等于把 Windows
-用户直接挡在多循环门外，而"静默退化"在这里是更坏的那个选项）。要避开它，就在 Windows 上
-`set_loops(1)` 或干脆不调 —— 单循环那条路不碰转手。
+用户直接挡在多循环门外，而"静默退化"在这里是更坏的那个选项）。代价不是崩溃风险，而是上面
+那条 EMULATE 折扣；要避开它就在 Windows 上 `set_loops(1)` 或干脆不调 —— 单循环那条路
+不碰转手。
+
+> **边界："没有入口"是结构判断**（那一族唯一的闸恒假），不等于"这条路已经验过没有别的
+> 问题"。`#5282` 的机制本身仍未定（`doc/worker-process-design.md` §9.1、§9.8），
+> 把它写成"多循环这条路是安全的"就是拿"没观察到"当"不存在"。
 
 > **判据别读错**：`imported` 是**观测到的相关性，不是已定的机制** —— 上游那段
 > `SetFileCompletionNotificationModes` 两种血统都会走到。证据包与复现装置见
@@ -379,7 +400,7 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:307-309`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:318-320`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -607,7 +628,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:173-185`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:379-382`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:430-438`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:441-449`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`

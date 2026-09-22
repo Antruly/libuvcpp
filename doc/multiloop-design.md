@@ -39,7 +39,7 @@ int main() {
 |---|---|---|
 | 单位 | 一个进程内的**线程**（每循环一条） | 一个 master 下的**进程** |
 | 共享监听 | **不是**：一个接受者 + 转手（两端同一条路，§1.1） | 是（`fork` 继承 fd） |
-| 平台支持 | **两端都有**；Windows 默认开，走的是 `libuv/libuv#5282` 那条路（§2 更正块） | 同样 Windows `m>1` 报错 |
+| 平台支持 | **两端都有**；Windows 默认开，代价是 EMULATE 那一档（§2 末；**不是** `#5282`） | 同样 Windows `m>1` 报错 |
 | 叠加 | `set_worker_processes(4)` + `set_loops(4)` = 4 进程 × 4 循环，互不干扰 | 同左 |
 
 **名字已定（维护者）**：`set_loops(n)`。备选 `set_worker_loops(n)`（与
@@ -48,12 +48,12 @@ int main() {
 
 ### 1.1 已经落地的那一半：net 层的 `set_loops(n)`
 
-**已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:243`）
+**已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:254`）
 把"一条循环"变成「**一条接受者 + n−1 条工作循环**」，每条工作循环一条**专用
 `std::thread`**（`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:46` —— 不是
 `uv_queue_work` 那条线程池）。配套读法：`loop_count()`
-（`src/net/uvcpp_tcp_server.h:245-246`）、`client_count_at(i)`
-（`src/net/uvcpp_tcp_server.h:255`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
+（`src/net/uvcpp_tcp_server.h:256-257`）、`client_count_at(i)`
+（`src/net/uvcpp_tcp_server.h:266`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
 （`src/net/uvcpp_tcp_server.h:196` 起是完整的对外说明）。
 
 ```
@@ -85,7 +85,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
   只会 double close）。
 - **Windows 上接受者必须立刻关掉自己那份副本**：重复句柄的 FIN 只在"最后一个句柄关闭"时
   才发 —— 这不是优化，是这条机制的工作条件。转手原语在
-  `src/net/uvcpp_socket_handoff.h:57`（`UV_TCP_REUSEPORT` 那条 POSIX 免转手路**没有**用上，
+  `src/net/uvcpp_socket_handoff.h:68`（`UV_TCP_REUSEPORT` 那条 POSIX 免转手路**没有**用上，
   降级成以后 Linux 侧的优化，§3）。
 
 **验收状态（如实）**：全量构建 + ctest 97/97 绿 + 页面堆门禁过；用例
@@ -138,19 +138,34 @@ Windows 上一条监听句柄**绑死在一个循环的完成端口上**，而�
   但连接 **100% 归先绑者**（分布 `[8,0]`，把 accept 顺序反过来仍是 `[8,0]`），
   原主一关才全接手 ⇒ **它不是 `SO_REUSEPORT` 的替代品**。
 
-⇒ Windows 上唯一剩下的形状是「**一个接受者 accept + 把连接交给别的循环**」，而那条路今天
-挂着一条 libuv 层的内存安全缺陷（上游 issue **libuv/libuv#5282**，机制与判据见姊妹篇 §9）。
+⇒ Windows 上唯一剩下的形状是「**一个接受者 accept + 把连接交给别的循环**」。
 
-**所以 Windows 上落地的是「一个接受者 accept + 把连接交给别的循环」这一条**（§1.1），
-而它**默认开着** —— 例外只有 `set_loops(1)`。它的暴露面是一条上游的已知缺陷：
-`WSADuplicateSocketW` 造出来的 socket 在 libuv 眼里是 imported 的，落进
-`libuv/libuv#5282`；外部贡献者的装置上**87 次死亡 / 2 170 885 次请求**，把那个开关关掉之后是
-**3 462 684 条 / 0 / 0**（姊妹篇 §9.8；另有**单变量 A/B** 那组的 **55 → 0**，§9.7），
-代价约 **2.5% RPS**。这是**维护者知情后的选择**，不是"没看见"。
+**落地的是这一条**（§1.1），而且**默认开着** —— 例外只有 `set_loops(1)`。但它的暴露面
+**不是**上游那条缺陷。`WSADuplicateSocketW` 造出来的 socket 在 libuv 眼里是 imported 的，
+而 **imported 本身不是闸**：闸是 `UV_HANDLE_SYNC_BYPASS_IOCP`，只在 worker 侧那次
+`CreateIoCompletionPort` **成功**时才置（`libuv:win/tcp.c:103-110`、`:117-124`），
+而那次能不能成功取决于**源 socket 有没有被关联过**：
+
+- **本库 `set_loops`**：源是 `uv_accept` 出来的（**已关联**）⇒ worker 侧关联失败 `87`
+  ⇒ EMULATE=1 / BYPASS=0（实测 `flags=0x8e088`）⇒ `UV_SUCCEEDED_WITHOUT_IOCP`
+  （`libuv:win/req-inl.h:69`，只查 BYPASS 这一个位）恒假 ⇒ 上游那一族**没有入口**。
+- **master 裸 `accept()` 再 dup**（多进程那条形状，也是外部贡献者台架的形状）：源从未关联
+  ⇒ worker 侧关联成功 ⇒ BYPASS=1（实测 `flags=0x6f08c`）⇒ **在那一族上**：装置上
+  **87 次死亡 / 2 170 885 次请求**，把那个开关关掉之后是 **3 462 684 条 / 0 / 0**
+  （姊妹篇 §9.8；另有**单变量 A/B** 那组的 **55 → 0**，§9.7）。
+
+⇒ **那两组死亡读数是多进程那条血统的，不是 `set_loops` 的**（2026-09-22 按"源 socket
+关联过没有"这条判据分臂实测确认，归口见姊妹篇 §9.9）。本版 `set_loops` 的代价换成 EMULATE
+那一档：**库侧约 25~27%**（单循环 / 8 连接），端到端台架上只值约 2.5% ——
+**两个数量程不同，见 `doc/net-guide.md` §4.2，别单独引任何一个**。
+这是**维护者知情后的选择**，不是"没看见"。
 
 **次序不是"多循环能替代多进程"。** 多循环省掉的是 IPC 那一层（管道、ack、master 监督、
-重跑 `main()`），**省不掉转手那一条** —— 只要还在"把接受的连接交给另一个循环"，Windows 上
-就是同一个洞。**所以本版等于把那个洞先在进程内打开了**：多进程那一支仍然排在 `#5282` 之后。
+重跑 `main()`）；**多进程那一支仍然排在 `#5282` 之后** —— 这次实测把"两条腿共用同一个洞"
+这个前提拆掉了：挡住多进程的是那条缺陷，挡住多循环的是 EMULATE 的折扣。
+
+> **边界**："没有入口"是**结构**判断（那一族的闸恒假），不等于"这条路已经验过没别的问题"。
+> `#5282` 的机制仍未定。
 
 **上限量过了，"值得开着"这件事有数可依。** 单接受者 + 显式轮转在外部贡献者的机器上实测
 （探针写死 149 B 响应、并发 100、非 2xx 请求数 0）：N=1 142 635 / N=2 336 006 /
@@ -163,7 +178,8 @@ N=4 469 175 / N=8 492 267，即 **3.29× / 3.45×**，每循环连接数逐轮�
 
 > **本版没走这两条。** 落地的 `set_loops(n)` 在**两个平台上是同一条形状**：一个接受者 +
 > `dup()`/`WSADuplicateSocketW` 转手（§1.1）。这一节留下的是"**以后可以把 POSIX 那半边
-> 的转手省掉**"的候选 —— 它省掉的是转手与那条 `#5282` 暴露面，所以 POSIX 侧值钱；
+> 的转手省掉**"的候选 —— 它省掉的是转手本身（连同 EMULATE 那一档折扣；`#5282` 不在本版
+> 这条路上，见 §2 末），所以 POSIX 侧值钱；
 > 前提仍然是本节那条硬约束。
 
 两条路都满足同一条硬约束 —— **接受者就是这个循环自己**，所以完全不碰 libuv 的
@@ -226,7 +242,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:988` | **每请求**（`.cpp` 里 52 处引用） |
 | `uvcpp_web_app::inflight_` | `src/webapp/uvcpp_web_app.h:1489` | **每请求** |
 | `uvcpp_web_app::upgraded_` | `src/webapp/uvcpp_web_app.h:1433` | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:635` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:646` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** `src/webapp/uvcpp_web_app.cpp:1842-1862`
 里只有一份 `loop_tid_`/`post_queue_`（成员在 `src/webapp/uvcpp_web_app.h:1548-1556`），

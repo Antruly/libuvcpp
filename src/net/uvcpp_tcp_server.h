@@ -219,18 +219,29 @@ class UVCPP_API uvcpp_tcp_server {
    *   `listen()` **之前**设好，之后再改就是数据竞争。
    * - `close_all_clients()` 在 n>1 时对别的循环是**异步发起**的（见该函数的说明）。
    *
-   * ## 已知风险（Windows，维护者已知情并选择默认开）
+   * ## Windows 上这条路的代价与边界
    *
-   * Windows 上的转手走 `WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)`
-   * + `uv_tcp_open`，也就是 libuv 眼里 **imported** 的那条血统
-   * （`_local_deps/libuv/src/win/tcp.c` 的 `uv__tcp_set_socket(..., imported=1)`）。
-   * `libuv/libuv#5282` 观测到的"写请求被派发两次 ⇒ use-after-free"就在这条血统上：
-   * 外部贡献者的台架上 87 次死亡 / 2 170 885 条连接，打上预期修复（不对这种句柄设
-   * `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`）之后 55 → 0，代价约 2.5% rps。
+   * 转手走 `WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)` + `uv_tcp_open`
+   * —— libuv 眼里 **imported** 的一条血统。**"imported 才是问题所在"是错的**：
+   * 闸是 `UV_HANDLE_SYNC_BYPASS_IOCP`，而它只在 worker 侧那次
+   * `CreateIoCompletionPort` **成功**时才置（`libuv:win/tcp.c:103-110`、`:117-124`），
+   * 那取决于**源 socket 有没有被关联过**。
    *
-   * **别把"imported 才是问题所在"当结论**：那段 `SetFileCompletionNotificationModes`
-   * 只看 `UV_HANDLE_EMULATE_IOCP` 与 LSP 两项（`win/tcp.c:120-124`），两种血统都
-   * 会走到。证据包与复现装置见 `doc/worker-process-design.md` §9。
+   * 本库这条转手的源是 `uv_accept` 出来的（**已关联**，`win/tcp.c:662` 那次
+   * `imported=0` 的关联）⇒ worker 侧关联必然 `ERROR_INVALID_PARAMETER`（87）
+   * ⇒ `UV_HANDLE_EMULATE_IOCP` ⇒ BYPASS **恒 0** ⇒
+   * `UV_SUCCEEDED_WITHOUT_IOCP`（`libuv:win/req-inl.h:69`，**只查这一个位**）恒假
+   * ⇒ `libuv/libuv#5282` 那一族在**这条**路上没有入口。外部贡献者的仪器在这条腿上
+   * 读到 worker 句柄 `flags=0x8e088`；`0x6f08c`（BYPASS=1）是**另一条血统**
+   * ——「master 裸 `accept()` 拿到再 dup」，也就是多进程那条形状。
+   *
+   * **代价是真的，只是落在别处**：EMULATE 意味着这条连接上每一笔 I/O 都走事件句柄
+   * 那条模拟路。实测**库侧**约 **25~27%**（单循环 / 8 连接），端到端台架上只值
+   * 约 2.5% —— 两个数**量程不同，别单独引**，见 `doc/net-guide.md` §4.2/§4.3。
+   *
+   * 上面那句"没有入口"是**结构**判断（那一族唯一的闸恒假），**不是**"这条路已经
+   * 验过没有别的问题"。机制本身仍未定，证据包与复现装置见
+   * `doc/worker-process-design.md` §9。
    *
    * @param n 循环总数，取 1..64。
    * @return 0 成功；`UV_EINVAL` n 越界；`UV_EBUSY` 已经 `listen()` 过，或者

@@ -20,12 +20,23 @@
  *     路不存在，只能拿一份**新的 socket 对象**。
  *
  * @warning Windows 这条路造出来的 socket 在 libuv 眼里是 **imported** 的
- *          （`uv_tcp_open` → `uv__tcp_set_socket(..., imported=1)`），而
- *          `libuv/libuv#5282` 那条待修缺陷就在这条血统上被观测到。**注意别把
- *          "imported 才是问题所在"当结论**：`uv__tcp_set_socket` 里那个
- *          `SetFileCompletionNotificationModes(...SYNC_BYPASS_IOCP...)`
- *          （`_local_deps/libuv/src/win/tcp.c:120-124`）只看
- *          `UV_HANDLE_EMULATE_IOCP` 与 LSP 两项，**两种血统都会走到**。
+ *          （`uv_tcp_open` → `uv__tcp_set_socket(..., imported=1)`）。
+ *          **"imported 才是问题所在"是错的**：闸是 `UV_HANDLE_SYNC_BYPASS_IOCP`，
+ *          而它只在 worker 侧那次 `CreateIoCompletionPort` **成功**时才置
+ *          （`libuv:win/tcp.c:103-110`），成功与否取决于**源 socket 有没有被关联
+ *          过**，不取决于谁造的句柄。
+ *
+ *          本库这条转手的源是 `uv_accept` 出来的 —— **已经关联**，所以
+ *          `WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)` 造出的新对象
+ *          仍然挂在同一条端口上，worker 侧必然 `ERROR_INVALID_PARAMETER`（87）
+ *          ⇒ 置 `UV_HANDLE_EMULATE_IOCP` ⇒ `libuv:win/tcp.c:117-124` 那段
+ *          `SetFileCompletionNotificationModes` **被跳过** ⇒ BYPASS **恒 0**
+ *          （外部贡献者的仪器在这条腿上读到 worker 句柄 `flags=0x8e088`）。
+ *
+ *          BYPASS=1 的是**另一条血统**：源是 **master 裸 `accept()`** 拿到的
+ *          （全程不碰 IOCP）⇒ dup 出来的对象也没关联 ⇒ worker 侧关联**成功**
+ *          （实测 `flags=0x6f08c`）。`libuv/libuv#5282` 观测到的那一族在这条血统上。
+ *          两条血统的判据与读数见 `doc/worker-process-design.md` §9.9。
  */
 
 #pragma once
