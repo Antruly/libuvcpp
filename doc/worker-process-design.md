@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
 
 **master 只做一件事：把端口占住。** 它走今天已有的 bind 链
 （`src/webapp/uvcpp_web_app.cpp:1742` → `src/web/uvcpp_http_server.cpp:71-72` →
-`src/net/uvcpp_tcp_server.cpp:152-153` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
+`src/net/uvcpp_tcp_server.cpp:208-209` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
 **然后不跑循环** —— `uv_listen` 会在 `listen(fd, backlog)` 那一步就把端口占住，
 而 master 的 loop 从不 `uv_run`，所以它永远不会 accept。于是"master 不接请求"是天然的，
 不需要额外机制。
@@ -175,7 +175,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
   n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:988`）、
   `uvcpp_web_app` 的 `upgraded_` / `inflight_`（`src/webapp/uvcpp_web_app.h:1433` / `:1489`）、
-  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:468`）都不需要切成 per-loop。
+  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:635`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。
 - **日志那条闸门在进程内照样存在。** `src/webapp/uvcpp_log.cpp:338-352` 持锁到
   `target->write(record)` 返回 ⇒ 用户 sink 在全局锁里跑。多进程不改变这一点。
@@ -184,7 +184,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   要写进文档的是另一件事：**n 个 worker × 每进程 4 条池线程 = 4n 条**，调
   `UV_THREADPOOL_SIZE` 时按每进程算。
 - **统计要跨进程聚合。** `uvcpp_tcp_client` 的 `reclaim_stats()` / `try_write_stats()`
-  （`src/net/uvcpp_tcp_client.h:625` / `:653`）本来就是 `static` 的进程级聚合，
+  （`src/net/uvcpp_tcp_client.h:637` / `:665`）本来就是 `static` 的进程级聚合，
   多进程下变成"每进程一份"，要看总数得自己聚合。
 - **那个突发探针不进仓库、不进 CI。** 它要断言的失败模式（"队列满了会拒连接"）在这台机器上
   **基本不出现**（§8），而且"满了之后是被拒还是挂住"**本身随平台变**（POSIX 给 RST、
@@ -262,7 +262,7 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
   烧 CPU 多的那条臂看起来更慢。再加上回环上那笔随负载伸缩的税 ⇒ 这个装置的 `WALL_MS`
   **分辨不了接入路径的开销**。要真比，得把服务端与客户端拆成两个进程、逐轮配对同号。
 - **没测每连接的应用层工作量。** 客户端只 connect 就关，**不发请求** ⇒ 量的是接入与关闭，
-  `enable_tls`（`src/net/uvcpp_tcp_server.cpp:242`）那次 arm 之后的请求处理没进这条路径。
+  `enable_tls`（`src/net/uvcpp_tcp_server.cpp:460`）那次 arm 之后的请求处理没进这条路径。
 - **没测"master 自己 accept + IPC 转手"那条路**（§7 的机制本身还没实现）。
   外部贡献者的拒连接读数在他的装置上，本探针**没有**复现它、也**没有**否证它 ——
   只否证了"本库单进程的接入路径在突发下会拒"这个具体担忧。

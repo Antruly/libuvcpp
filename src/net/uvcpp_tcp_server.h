@@ -6,8 +6,10 @@
  *
  * Wraps uvcpp_tcp to provide a simple bind+listen API with automatic
  * callback setup for accepted clients (default write/close handlers,
- * missing-read-callback warnings). Designed for single-threaded event-loop
- * usage — IO-intensive work should be offloaded via uvcpp_work.
+ * missing-read-callback warnings). By default (or with `set_loops(1)`) it is a
+ * single-threaded event-loop object — IO-intensive work should be offloaded via
+ * uvcpp_work. `set_loops(n > 1)` turns it into one acceptor loop plus n-1
+ * dedicated worker threads (see that method's docs).
  */
 
 #pragma once
@@ -16,14 +18,19 @@
 
 #include <uvcpp/uvcpp_config.h>
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
-#include <list>
+#include <mutex>
 #include <uv.h>
+#include <vector>
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_tcp.h>
 #include <net/uvcpp_tcp_client.h>
 
 namespace uvcpp {
+
+class uvcpp_loop_worker;
 
 /**
  * @brief Bitmask status flags for TCP server lifecycle.
@@ -182,6 +189,72 @@ class UVCPP_API uvcpp_tcp_server {
              int backlog = 128);
 
   // -----------------------------------------------------------------
+  // 多循环（接受者 + 工作线程）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 设定工作循环数。**不调用（或 `set_loops(1)`）= 今天的行为**。
+   *
+   * n 是**循环总数**，含调用线程跑的那一条：0 号是接受者（就是 `get_loop()`），
+   * 1..n-1 号各有一条**专用 `std::thread`** 跑自己的循环（不是 libuv 线程池）。
+   * 每条被接受的连接按**显式轮转**交给 `1..n-1` 号，一条不留在接受者上 ——
+   * 接受者只接受和分发，不跑连接的业务回调。
+   *
+   * 轮转是显式的、确定的：第 i 条连接必然落到 `1 + (i % (n-1))` 号循环，
+   * 所以连接数的分布是确定的、不会偶发（`client_count_at()` 看得见它）。
+   *
+   * 转手怎么做的（每个平台各自的机制）见 `net/uvcpp_socket_handoff.h`。
+   *
+   * ## 装上之后，谁在哪个线程上
+   *
+   * - `on_connection`、读/写/关闭回调都在**那条连接自己的循环线程**上跑；
+   *   n>1 时它们**会并发**（不同连接在不同线程），共享状态要自己加锁。
+   * - `take_client()` / `return_client()` / `owns_client()` / `pause_read()` /
+   *   `resume_read()` 管的是**登记**，登记表是加锁的，所以从任何线程调都对；
+   *   但**驱动一条连接**（`write` / `read_start` / `close`）仍然只能在它自己
+   *   那条循环的线程上 —— 也就是在它自己的回调里，或者用工作循环的邮箱把活儿
+   *   挪过去。跨线程直接驱动一条连接是未定义行为。
+   * - `set_read_callback()` / `set_auto_read()` / `set_ssl_context()` /
+   *   `set_tls_handshake_timeout_ms()` 写的东西是**工作线程读**的，所以必须在
+   *   `listen()` **之前**设好，之后再改就是数据竞争。
+   * - `close_all_clients()` 在 n>1 时对别的循环是**异步发起**的（见该函数的说明）。
+   *
+   * ## 已知风险（Windows，维护者已知情并选择默认开）
+   *
+   * Windows 上的转手走 `WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)`
+   * + `uv_tcp_open`，也就是 libuv 眼里 **imported** 的那条血统
+   * （`_local_deps/libuv/src/win/tcp.c` 的 `uv__tcp_set_socket(..., imported=1)`）。
+   * `libuv/libuv#5282` 观测到的"写请求被派发两次 ⇒ use-after-free"就在这条血统上：
+   * 外部贡献者的台架上 87 次死亡 / 2 170 885 条连接，打上预期修复（不对这种句柄设
+   * `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`）之后 55 → 0，代价约 2.5% rps。
+   *
+   * **别把"imported 才是问题所在"当结论**：那段 `SetFileCompletionNotificationModes`
+   * 只看 `UV_HANDLE_EMULATE_IOCP` 与 LSP 两项（`win/tcp.c:120-124`），两种血统都
+   * 会走到。证据包与复现装置见 `doc/worker-process-design.md` §9。
+   *
+   * @param n 循环总数，取 1..64。
+   * @return 0 成功；`UV_EINVAL` n 越界；`UV_EBUSY` 已经 `listen()` 过，或者
+   *         已经用 `n > 1` 装过一遍（装好之后不能再改）。`n == 1` 是幂等的
+   *         空操作 —— 它什么都不建，所以随时返回 0。
+   *
+   * @warning 必须在 `listen()` 之前调用。工作线程是在**本函数里**起的，所以
+   *          调用之后（哪怕还没 `listen()`）就已经有 n−1 条线程在跑了。
+   */
+  int set_loops(int n);
+
+  /** @brief 循环总数（1 + 工作循环数）。没调过 `set_loops()` 就是 1。 */
+  int loop_count() const;
+
+  /**
+   * @brief 第 \p loop_index 条循环名下**当前登记着**的连接数。
+   *
+   * 0 号是接受者（`set_loops(n>1)` 时它一条都不留，恒为 0）。越界返回 0。
+   * 它就是"分布看得见"的那个读数：轮转是显式的，所以这个数在连接数固定时
+   * 是确定的。
+   */
+  size_t client_count_at(int loop_index) const;
+
+  // -----------------------------------------------------------------
   // Stop
   // -----------------------------------------------------------------
 
@@ -212,7 +285,11 @@ class UVCPP_API uvcpp_tcp_server {
    * @return 本次**发起关闭**的连接数。已经死掉被顺手归还的、所有权被
    *         `take_client()` 取走的都不计入。
    *
-   * @warning 必须在 loop 线程调用。
+   * @note `set_loops(n>1)` 时：本循环名下的就地关（计入返回值），**别的循环是
+   *       投递过去异步发起的**（不计入返回值）。所以 n>1 时这个数**不表示
+   *       "已经关掉多少"** —— 要看关没关干净，看 `client_count()` 回零。
+   *
+   * @warning 必须在 loop 线程调用（n>1 时是**接受者**那条循环的线程）。
    */
   size_t close_all_clients();
 
@@ -265,6 +342,10 @@ class UVCPP_API uvcpp_tcp_server {
    *
    * @return 0 成功；非 0 为 libuv 错误码。客户端不归本服务端管时返回
    *         `UV_EINVAL`（不能对别人的连接动手）。
+   *
+   * @note `set_loops(n>1)` 时这条连接只可能在**它自己那条循环的线程**上被
+   *       暂停/恢复 —— 从别的线程调是未定义行为（`owns_client` 那一问是加锁
+   *       的、跨线程安全，但真正动句柄那一步不是）。
    */
   int pause_read(uvcpp_tcp_client* client);
 
@@ -276,15 +357,18 @@ class UVCPP_API uvcpp_tcp_server {
   // -----------------------------------------------------------------
 
   /**
-   * @brief 本服务端当前登记的客户端数量。
+   * @brief 本服务端当前登记的客户端数量（**所有循环的合计**）。
    *
    * 取走所有权（`take_client`）的客户端**不计入**这里 —— 它们已经不归
    * 服务端管了。可以用它来断言"没有泄漏"：连接关掉一批之后这个数应该
    * 回到基线。
+   *
+   * 登记表是加锁的，所以**从任何线程调都对**。n>1 时它是一份快照：读数的那一
+   * 刻别的线程可能正在增删，所以"回到 0"这件事要**重试着看**，不要只看一次。
    */
   size_t client_count() const;
 
-  /** @brief 这个客户端当前是否归本服务端管理。 */
+  /** @brief 这个客户端当前是否归本服务端管理。可跨线程调用（登记表加锁）。 */
   bool owns_client(const uvcpp_tcp_client* client) const;
 
   /**
@@ -306,6 +390,11 @@ class UVCPP_API uvcpp_tcp_server {
    *         已经交还过、或者压根不是这里的客户端）返回 nullptr。
    *         返回 nullptr 时**所有权没有变化**，不要据此去 delete。
    *
+   * @note 取走的是**管理权**，不是"这条连接从今往后归你随便驱动"。`set_loops(n>1)`
+   *       时它的事件仍然只在**它自己那条循环的线程**上到达，你也只能在那个线程上
+   *       驱动它（在自己的回调里，或者把活儿投到那条循环的邮箱上）。在别的线程上
+   *       对它 `write`/`close` 是未定义行为。
+   *
    * @warning 必须在 loop 线程上调用。
    */
   uvcpp_tcp_client* take_client(uvcpp_tcp_client* client);
@@ -321,6 +410,10 @@ class UVCPP_API uvcpp_tcp_server {
    *
    * @return 交还成功返回 true。客户端本来就归服务端管（重复交还）返回
    *         false，此时什么都没发生。
+   *
+   * @note `set_loops(n>1)` 时它回到**它自己那条循环**名下（登记表里记的是
+   *       客户端自己的 `get_loop()`，不是"你现在所在的这条"），所以交还必须
+   *       在它自己那条循环的线程上做。
    *
    * @warning 必须在 loop 线程上调用。交还之后**不要**再持有那个指针。
    */
@@ -449,6 +542,61 @@ class UVCPP_API uvcpp_tcp_server {
   int tls_hs_timeout_ms_ = 10000;
 #endif  // UVCPP_OPENSSL_ENABLE
 
+  // -----------------------------------------------------------------
+  // 多循环（`set_loops(n > 1)` 时才用得上）
+  // -----------------------------------------------------------------
+
+  /** @brief 第 \p index 条循环。0 = acceptor 循环（`loop_`）；越界返回 nullptr。 */
+  uvcpp_loop* loop_at(int index) const;
+
+  /**
+   * @brief acceptor 侧：把刚接受的连接取出来转手给某个 worker。
+   *
+   * 只在 `workers_` 非空时被调。**必须在关掉 acceptor 侧那个临时句柄之前**
+   * 把 socket 取出来（`uv_close` 会同步关掉它那份 fd），所以顺序是
+   * 取 fd → 转手 → 关临时句柄。
+   *
+   * 任何一步失败都只记账（`last_error_code_` / `TCP_SERVER_ERROR`）并放掉
+   * 已经造出来的东西 —— **不**让一条坏连接把整个 accept 回调掀掉。
+   */
+  void accept_and_handoff(uvcpp_stream* s);
+
+  /**
+   * @brief worker 线程侧：认领转手过来的 socket，跑完整条接受尾巴。
+   *
+   * \p sock 一进来就归本函数；无论走哪条失败路径，它都会被恰好关一次。
+   */
+  void on_handoff_task(int worker_index, uv_os_sock_t sock);
+
+  /**
+   * @brief 接受尾巴：登记 → 装读 → TLS → 交付。
+   *
+   * **必须在目标循环的线程上跑**（`enable_tls` 会当场在这条循环上 arm 一次
+   * 读）。`n == 1` 时就是 accept 回调里那段；`n > 1` 时由 worker 线程调 ——
+   * 两条路共用这一份，免得以后改一处忘一处。
+   */
+  void finish_accept(uvcpp_tcp_client* client);
+
+  /** @brief 登记（加锁）。任何线程可调。 */
+  void register_client(uvcpp_tcp_client* client);
+  /** @brief 摘除（加锁）。任何线程可调；**不**释放对象。 */
+  void unregister_client(uvcpp_tcp_client* client);
+  /** @brief 取登记表快照（加锁）。在锁外逐个动手，别跨用户代码持锁。 */
+  std::vector<uvcpp_tcp_client*> snapshot_clients() const;
+
+  /**
+   * @brief 关掉挂在 \p l 这条循环上的全部登记连接。**在 \p l 的线程上跑。**
+   *
+   * `close_all_clients()` 的每循环那一份：`n > 1` 时 acceptor 自己那份直接调，
+   * 其余各 worker 那份由 `post()` 投进去。worker 退出前的收尾也用它。
+   *
+   * @return 本次**发起关闭**的条数（顺手归还的死连接不计）。
+   */
+  size_t close_clients_of_loop(uvcpp_loop* l);
+
+  /** @brief 停掉并 join 全部 worker（幂等）。**必须在既有四步收尾之前**调。 */
+  void stop_workers();
+
   // Trampoline — C-style fn ptr + void* to avoid MSVC std::function
   // copy-chain corruption through libuv's callback layers.
   using connection_callback_t = void(*)(uvcpp_tcp_client* client,
@@ -461,11 +609,36 @@ class UVCPP_API uvcpp_tcp_server {
   uvcpp_loop* loop_ = nullptr;
   uvcpp_tcp*  tcp_  = nullptr;
   bool stopped_     = false;  ///< true if stop() already closed the handle
-  int status_       = TCP_SERVER_NONE;
-  int last_error_code_ = 0;
 
-  /** @brief Tracked connected clients (for cleanup on stop). */
-  std::list<uvcpp_tcp_client*> clients_;
+  /**
+   * @brief 状态位。
+   *
+   * `n > 1` 时 **worker 线程上也会写**（转手失败要记账），而用户随时可能从
+   * 别的线程 `get_status()` —— 所以是原子。读-改-写在 `set_status` 里用
+   * `fetch_or`/`fetch_and`，不是"读出来再写回去"。
+   */
+  std::atomic<int> status_{TCP_SERVER_NONE};
+  /** @brief 最近一次错误码。同上：worker 线程可能写。 */
+  std::atomic<int> last_error_code_{0};
+
+  /**
+   * @brief 全服务端的连接登记表 + 它的锁。
+   *
+   * **一张表，不是每循环一张。** `n > 1` 时这张表被多个线程碰：worker 线程
+   * 在收尾时摘除、用户可能从任何线程 `client_count()` / `owns_client()`。
+   * 锁只护"读表 / 改表"这一步 —— 绝不跨 `client->close()`、也绝不跨用户代码
+   * 持有（用户回调里再进 `client_count()` 就是死锁）。
+   *
+   * `n == 1` 时它仍然只有 acceptor 线程碰，锁是白拿的（`std::mutex` 未竞争
+   * 时就是一条原子指令）。
+   */
+  std::vector<uvcpp_tcp_client*> clients_;
+  mutable std::mutex clients_mu_;
+
+  /** @brief 工作循环（n−1 条；`n == 1` 时为空 = 今天那条路）。 */
+  std::vector<uvcpp_loop_worker*> workers_;
+  /** @brief 轮转计数：第 i 条连接给 `1 + (i % (n-1))`。 */
+  std::atomic<uint64_t> rr_{0};
 
   /** @brief User connection callback stored as trampoline pair. */
   connection_callback_t on_connection_fn_ = nullptr;

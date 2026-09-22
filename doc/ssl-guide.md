@@ -7,7 +7,7 @@ ALPN 名单）。另一个 `uvcpp_ssl` 是**每连接**的包装，由 `uvcpp_tc
 
 TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_tcp_client` 之后，
 `write()` 收明文、读回调交明文，密文只在内部与 socket 之间流动
-（`src/net/uvcpp_tcp_client.h:161-173`）。所以 `web/` / `webapp/` 那条线一行都不用改。
+（`src/net/uvcpp_tcp_client.h:173-185`）。所以 `web/` / `webapp/` 那条线一行都不用改。
 
 - 打开方式：`-DUVCPP_ENABLE_OPENSSL=ON`
 - 包含方式：`<ssl/uvcpp_ssl_context.h>`（构造上下文必须）；只声明变量的话
@@ -247,8 +247,8 @@ bool has_alpn_select() const;
 
 | 落点 | 声明 | 所有权说明 |
 |---|---|---|
-| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:353` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:346-348`） |
-| `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:189` | "生命周期必须覆盖**整条连接**"（`:185`） |
+| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:446` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:439-441`） |
+| `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:201` | "生命周期必须覆盖**整条连接**"（`:197`） |
 | `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1738` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
 顺序：`set_ssl_context` **必须在 `listen()` 之前**（`:346-347`），清空用
@@ -291,7 +291,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **握手失败怎么知道：**
 
 - 服务端：握手成功才 `deliver_connection()`；失败**只记账**，`on_connection`
-  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:337-345`）。
+  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:430-438`）。
 - 客户端：`set_tls_ready_callback(cb)`，`status == 0` 成功；**只触发一次**，失败时在
   关闭回调**之前**触发（那时对象还活着）。
 - 握手期连接不在上层登记表里，`idle_timeout_ms` 覆盖不到——所以有
@@ -309,7 +309,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
 （`src/ssl/uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
-（`src/net/uvcpp_tcp_client.cpp:2118`）——所以**必须看各 `load_*` 的返回值**，
+（`src/net/uvcpp_tcp_client.cpp:2139`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
 
 **先装私钥后装证书会返回 `false`**，见 §4。
@@ -317,7 +317,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`PEER_STRICT` 不校验主机名**，见 §5。
 
 **TLS 上 `uvcpp_buf*` 的零拷贝不成立**：调用之后那个 buf **仍然是满的**，
-（`src/net/uvcpp_tcp_client.h:360-363`）。
+（`src/net/uvcpp_tcp_client.h:372-375`）。
 
 **握手完成前写必然失败**（`UV_ENOTCONN`），`SSL_write` 要求握手已完成。
 

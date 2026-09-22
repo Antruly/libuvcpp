@@ -110,6 +110,18 @@ class UVCPP_API uvcpp_tcp_client {
    */
   explicit uvcpp_tcp_client(uvcpp_loop* external_loop);
 
+  /**
+   * @brief 认领一个**已经属于** \p external_loop 的 socket，在它上面建客户端。
+   *
+   * 给多循环的转手路径用：socket 是在别的循环上接受下来的，取出来之后到目标
+   * 循环的线程上装成句柄。**调用者必须保证这个 socket 与目标循环的关联还没
+   * 发生过**（Windows 的完成端口关联是一次性的，见 `uvcpp_socket_handoff.h`）。
+   *
+   * 失败（`uv_tcp_open` 没收下）时对象仍可构造，但状态是 `TCP_CLIENT_ERROR`、
+   * `get_last_error()` 给出原因 —— 而且**socket 仍归调用方**，要自己关掉。
+   */
+  uvcpp_tcp_client(uvcpp_loop* external_loop, uv_os_sock_t adopted_sock);
+
   // -----------------------------------------------------------------
   // Accessors
   // -----------------------------------------------------------------

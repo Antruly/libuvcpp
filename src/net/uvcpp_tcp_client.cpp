@@ -114,6 +114,27 @@ uvcpp_tcp_client::uvcpp_tcp_client(uvcpp_loop* external_loop) {
   status_ = TCP_CLIENT_NONE;
 }
 
+uvcpp_tcp_client::uvcpp_tcp_client(uvcpp_loop* external_loop,
+                                   uv_os_sock_t adopted_sock) {
+  owns_loop_ = false;
+  loop_ = external_loop;
+
+  tcp_ = new uvcpp_tcp(loop_);
+
+  status_ = TCP_CLIENT_NONE;
+
+  // 认领一个**已经属于 external_loop 这条循环**的 socket（转手过来的那种）。
+  //
+  // 失败（`uv_tcp_open` 不接管）时只留一个失败码 + ERROR 态，**不留半个对象**
+  // —— 但 socket 仍归调用方：libuv 在 `uv_tcp_open` 失败时不会关掉它，
+  // 调用方必须自己收尾（见 `uvcpp_socket_handoff.h` 的 `uvcpp_handoff_close_raw`）。
+  const int rc = tcp_->open(adopted_sock);
+  if (rc != 0) {
+    last_error_code_ = rc;
+    status_ = TCP_CLIENT_ERROR;
+  }
+}
+
 std::shared_ptr<char> uvcpp_tcp_client::alive_token() {
   if (!alive_token_) alive_token_.reset(new char(0));
   return alive_token_;

@@ -9,8 +9,12 @@
 #include <uvcpp/uvcpp_alloc.h>
 #include <uvcpp/uvcpp_define.h>
 
+#include <net/uvcpp_loop_worker.h>
+#include <net/uvcpp_socket_handoff.h>
+
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #if UVCPP_OPENSSL_ENABLE
@@ -30,6 +34,44 @@ static void trampoline_connection(uvcpp_tcp_client* client, void* arg) {
   // cb is NOT deleted — persists for multiple connections
 }
 
+namespace {
+
+/**
+ * @brief 转手中途那个 socket 的 RAII 持有者：**恰好关一次**。
+ *
+ * 为什么需要它：socket 从 acceptor 线程上取出来之后，要经过一次跨线程投递
+ * 才到得了目标循环。这条路上有三处"到不了"：投递被拒（worker 正在停机）、
+ * 任务被丢掉（闸关了之后 `drain()` 剩下的整批一起析构）、以及任务跑了但
+ * `uv_tcp_open` 不收货。前两处我们**没有机会写清理代码** —— 唯一的落点就是
+ * 析构函数，所以持有者本身得是个对象，而不是一个裸整数。
+ *
+ * 投递失败/任务被丢时它随 lambda 一起析构，把 fd 关掉；成功交出去时用
+ * `release()` 摘掉所有权（此后归那个连接，不归我们）。
+ */
+class handed_socket {
+ public:
+  explicit handed_socket(uv_os_sock_t s) : sock_(s) {}
+
+  ~handed_socket() { uvcpp_handoff_close_raw(sock_); }
+
+  handed_socket(const handed_socket&) = delete;
+  handed_socket& operator=(const handed_socket&) = delete;
+
+  uv_os_sock_t get() const { return sock_; }
+
+  /** @brief 交出所有权：返回那个 socket，并且此后本对象不再关它。 */
+  uv_os_sock_t release() {
+    const uv_os_sock_t s = sock_;
+    sock_ = uvcpp_handoff_invalid_socket();
+    return s;
+  }
+
+ private:
+  uv_os_sock_t sock_;
+};
+
+}  // namespace
+
 // =========================================================================
 // Construction / Destruction
 // =========================================================================
@@ -41,6 +83,20 @@ uvcpp_tcp_server::uvcpp_tcp_server() {
 }
 
 uvcpp_tcp_server::~uvcpp_tcp_server() {
+  // -------------------------------------------------------------------
+  // 第零步：**先**把工作线程停掉、join 完，再走下面那四步。
+  //
+  // 为什么必须在最前面：工作线程名下的连接，它们的句柄是挂在**工作循环**
+  // 上的，而工作循环的关与释放由工作线程自己负责（退出路径里做）。顺序反过来
+  // ——先 `delete loop_`（acceptor 的循环）不影响它们，但先删连接就会让那些
+  // 句柄在一条已经被还回去的循环上 `uv_close`。
+  //
+  // 每个 worker 的退出路径里有一步 `on_exit` 钩子（装的是
+  // `close_clients_of_loop`），所以 join 返回时它名下的连接已经关完、登记表
+  // 里也不再有人 —— 下面第二步、第三步于是只管 acceptor 自己那一份。
+  // -------------------------------------------------------------------
+  stop_workers();
+
   // -------------------------------------------------------------------
   // 收尾分四步，**顺序不能换**。原先那个版本在这四处各有一个缺陷，
   // 合起来的后果是"析构完把整个循环泄漏掉"——实测 177 处（第 8 条探针
@@ -126,15 +182,15 @@ uvcpp_loop* uvcpp_tcp_server::get_loop() {
 }
 
 int uvcpp_tcp_server::get_status() const {
-  return status_;
+  return status_.load();
 }
 
 bool uvcpp_tcp_server::has_status(int flags) const {
-  return (status_ & flags) == flags;
+  return (status_.load() & flags) == flags;
 }
 
 int uvcpp_tcp_server::get_last_error() const {
-  return last_error_code_;
+  return last_error_code_.load();
 }
 
 // =========================================================================
@@ -152,7 +208,7 @@ int uvcpp_tcp_server::bind(const char* ip, int port) {
 int uvcpp_tcp_server::bindIpv4(const char* ip, int port) {
   int rc = tcp_->bindIpv4(ip, port);
   if (rc != 0) {
-    last_error_code_ = rc;
+    last_error_code_.store(rc);
     set_status(TCP_SERVER_ERROR);
     return rc;
   }
@@ -163,7 +219,7 @@ int uvcpp_tcp_server::bindIpv4(const char* ip, int port) {
 int uvcpp_tcp_server::bindIpv6(const char* ip, int port) {
   int rc = tcp_->bindIpv6(ip, port);
   if (rc != 0) {
-    last_error_code_ = rc;
+    last_error_code_.store(rc);
     set_status(TCP_SERVER_ERROR);
     return rc;
   }
@@ -178,7 +234,7 @@ int uvcpp_tcp_server::bindIpv6(const char* ip, int port) {
 int uvcpp_tcp_server::listen(
     std::function<void(uvcpp_tcp_client*)> connection_cb, int backlog) {
   if (connection_cb == nullptr) {
-    last_error_code_ = UV_EINVAL;
+    last_error_code_.store(UV_EINVAL);
     return UV_EINVAL;
   }
 
@@ -191,10 +247,20 @@ int uvcpp_tcp_server::listen(
   int rc = tcp_->listen(
       [this](uvcpp_stream* s, int status) {
         if (status < 0) {
-          last_error_code_ = status;
+          last_error_code_.store(status);
           set_status(TCP_SERVER_ERROR);
           return;
         }
+
+        // ---- 多循环：转手给工作线程，本循环一条都不留。 ----
+        //
+        // `workers_` 非空 ⟺ 装过 `set_loops(n>1)`（且线程已经在跑）。
+        if (!workers_.empty()) {
+          accept_and_handoff(s);
+          return;
+        }
+
+        // ---- 以下 n == 1 那条路（今天的行为）----
 
         // Create a new client sharing the server's loop
         uvcpp_tcp_client* client = new uvcpp_tcp_client(loop_);
@@ -202,68 +268,17 @@ int uvcpp_tcp_server::listen(
         // Accept the pending connection into the client's TCP handle
         int accept_rc = s->accept(client->get_tcp());
         if (accept_rc != 0) {
-          last_error_code_ = accept_rc;
+          last_error_code_.store(accept_rc);
           delete client;
           return;
         }
 
-        // Mark the client as connected — sets CONNECTED | READABLE |
-        // WRITABLE so that write() and read_start() work correctly.
-        client->mark_accepted();
-
-        // **登记 + 装管理回调要排在用户回调之前。**
-        //
-        // 原来是反过来的，于是用户在 on_connection 里立刻关掉这个连接
-        // （比如鉴权不过要拒绝它）时：关事件先于 push_back 发生，客户端
-        // 要么没被登记、要么登记了一个已经关闭的；用户回调抛异常则两步
-        // 都不执行，直接泄漏。先登记就先受管，后面怎么走都不会漏。
-        clients_.push_back(client);
-        setup_client_callbacks(client);
-
-#if UVCPP_OPENSSL_ENABLE
-        // --- TLS：装过滤器，并且**不把握手没完的连接交给上层**。 ---
-        //
-        // **必须排在 `setup_client_callbacks` 之后。** `enable_tls()` 在连接
-        // 已建立时会顺手 `arm_async_read()` 来推进握手，而那个函数装的是
-        // **原始**读回调并置上 `read_started_`；先调它的话，后面
-        // `setup_client_callbacks` 想给框架层读（`read_start_events`）就会被
-        // 两条读路径互斥的检查挡住 —— 上层的读回调永远装不上，HTTPS 请求
-        // 到了也没人解析。反过来先装读则没有这个问题：握手靠读事件推进，
-        // 而两种读路径都会把入站字节喂给过滤器（见 `arm_async_read`）。
-        //
-        // 失败时走 `close_client_on_callback_error`（关闭 + 回收）而不是
-        // `delete`：此刻句柄是活的，且已经进了登记表。
-        bool tls_handshake_pending = false;
-        if (ssl_ctx_ != nullptr) {
-          // 握手超时**必须在 enable_tls 之前设**：`enable_tls()` 里就会推进
-          // 一次握手，而超时是从"第一次推进"起算的 —— 设晚了对这一步不生效。
-          client->set_tls_handshake_timeout_ms(tls_hs_timeout_ms_);
-
-          const int tls_rc = client->enable_tls(ssl_ctx_);
-          if (tls_rc != 0) {
-            last_error_code_ = tls_rc;
-            close_client_on_callback_error(client);
-            return;
-          }
-
-          tls_handshake_pending = !client->is_tls_handshake_done();
-          if (tls_handshake_pending) {
-            // 通知只是把 `on_connection` 挂到"握手成功"那一刻。
-            client->set_tls_ready_callback(
-                [this](uvcpp_tcp_client* c, int st) {
-                  on_tls_handshake_done(c, st);
-                });
-          }
-        }
-        if (tls_handshake_pending) return;  // 握手完成时再交付
-#endif
-
-        deliver_connection(client);
+        finish_accept(client);
       },
       backlog);
 
   if (rc != 0) {
-    last_error_code_ = rc;
+    last_error_code_.store(rc);
     set_status(TCP_SERVER_ERROR);
     // Clean up the heap-allocated callback
     delete static_cast<std::function<void(uvcpp_tcp_client*)>*>(
@@ -277,19 +292,226 @@ int uvcpp_tcp_server::listen(
 }
 
 // =========================================================================
-// Stop
+// 多循环：接受者 + 工作线程
 // =========================================================================
 
-size_t uvcpp_tcp_server::close_all_clients() {
+int uvcpp_tcp_server::set_loops(int n) {
+  if (n < 1 || n > 64) return UV_EINVAL;
+  if (has_status(TCP_SERVER_LISTENING)) return UV_EBUSY;  // 已经跑起来了
+
+  // `n == 1` = 今天的行为，**什么都不建**：不建 worker、不建线程、不建邮箱。
+  // 幂等，因为"什么都不做"重复多少次都一样。
+  if (n == 1) return 0;
+
+  if (!workers_.empty()) return UV_EBUSY;  // 已经装过一遍了（n>1 不能再改）
+
+  // 先全建出来再 start：任何一条起不来就把已经起了的收干净、返回错误码，
+  // 不留下"workers_ 非空但线程没起"这种半成品状态 —— accept 回调是拿
+  // `workers_.empty()` 当分叉判据的。
+  for (int i = 0; i < n - 1; ++i) {
+    uvcpp_loop_worker* w = new uvcpp_loop_worker();
+
+    // **必须在 `start()` 之前装**：这个钩子在 worker 线程上跑，写它的人和读
+    // 它的人之间靠 `start()` 的交握手建立先后关系。它干的是"退出前把挂在我
+    // 这条循环上的连接关掉" —— 那些连接的关闭收尾必须在它们自己的循环线程上。
+    w->set_on_exit([this, w]() { close_clients_of_loop(w->loop()); });
+
+    const int src = w->start();
+    if (src != 0) {
+      delete w;
+      stop_workers();
+      last_error_code_.store(src);
+      set_status(TCP_SERVER_ERROR);
+      return src;
+    }
+    workers_.push_back(w);
+  }
+
+  return 0;
+}
+
+int uvcpp_tcp_server::loop_count() const {
+  return 1 + static_cast<int>(workers_.size());
+}
+
+uvcpp_loop* uvcpp_tcp_server::loop_at(int index) const {
+  if (index == 0) return loop_;
+  const size_t i = static_cast<size_t>(index - 1);
+  if (i >= workers_.size()) return nullptr;
+  return workers_[i]->loop();
+}
+
+size_t uvcpp_tcp_server::client_count_at(int loop_index) const {
+  uvcpp_loop* want = loop_at(loop_index);
+  if (want == nullptr) return 0;
+
+  std::vector<uvcpp_tcp_client*> snap = snapshot_clients();
+  size_t n = 0;
+  for (size_t i = 0; i < snap.size(); ++i) {
+    if (snap[i] != nullptr && snap[i]->get_loop() == want) ++n;
+  }
+  return n;
+}
+
+void uvcpp_tcp_server::accept_and_handoff(uvcpp_stream* s) {
+  // 临时句柄**必须建在接受者这条循环上**：POSIX 的 `uv_accept` 硬断言要求
+  // server 与 client 同循环（`libuv:unix/stream.c`）。它只用来到手 fd，
+  // 之后立刻关掉。
+  uvcpp_tcp* tmp = new uvcpp_tcp(loop_);
+
+  const int accept_rc = s->accept(tmp);
+  if (accept_rc != 0) {
+    last_error_code_.store(accept_rc);
+    delete tmp;  // 走 free_handle 的 uv_close 路，句柄自己收干净
+    return;
+  }
+
+  // **取 socket 必须在关掉 tmp 之前**：`uv_close` 会**同步**关掉它那份 fd，
+  // 关完再取就是 EBADF / WSAENOTSOCK。
+  uv_os_sock_t raw = uvcpp_handoff_invalid_socket();
+  const int ex_rc = uvcpp_handoff_extract(tmp, raw);
+  if (ex_rc != 0) {
+    last_error_code_.store(ex_rc);
+    set_status(TCP_SERVER_ERROR);
+    delete tmp;
+    return;
+  }
+
+  // 取出去了就**立刻**关掉自己这份。这不是优化：Windows 上重复句柄的 FIN 只在
+  // **最后一个**句柄关闭时才发出去，拖着不关会让对端一直等不到关闭
+  // （`doc/worker-process-design.md` §9.7 实测把吞吐打到 63 连接/s）。
+  delete tmp;
+
+  // 显式轮转：第 i 条连接必然落到 1 + (i % (n-1)) 号。确定性的，不偶发。
+  const size_t nw = workers_.size();
+  const size_t k = static_cast<size_t>(rr_.fetch_add(1) % nw);
+
+  // 持有者随 lambda 一起走：投递被拒、或者任务在停机时被丢掉，socket 都会
+  // 随它析构而被关掉 —— 那两条路上我们没有别的地方写清理代码。
+  std::shared_ptr<handed_socket> hs(new handed_socket(raw));
+  const int wi = static_cast<int>(k);
+  if (!workers_[k]->post([this, wi, hs]() {
+        on_handoff_task(wi, hs->get());
+        // 交出去了（无论 `uv_tcp_open` 收没收下，收尾都已经在那边做过），
+        // 所以这里必须摘掉所有权，否则析构时又关一次。
+        hs->release();
+      })) {
+    // 受理失败 = 任务已经析构 = socket 已经关掉了。什么都不用做。
+    return;
+  }
+}
+
+void uvcpp_tcp_server::on_handoff_task(int worker_index, uv_os_sock_t sock) {
+  // **这一段跑在 worker 线程上。** 下面碰的全是这条循环的东西。
+  uvcpp_loop* wl = loop_at(worker_index + 1);
+  if (wl == nullptr) {
+    // 到不了这儿（线程退干净之后不会再受理投递），真到了就放掉这条连接。
+    uvcpp_handoff_close_raw(sock);
+    return;
+  }
+
+  uvcpp_tcp_client* client = new uvcpp_tcp_client(wl, sock);
+  if ((client->get_status() & TCP_CLIENT_ERROR) != 0) {
+    // `uv_tcp_open` 没收下 ⇒ 构造里压根没接管这个 socket，**它还归我们**。
+    // 这条失败路径只有这里能收尾：libuv 不会替我们关它。
+    last_error_code_.store(client->get_last_error());
+    set_status(TCP_SERVER_ERROR);
+    uvcpp_handoff_close_raw(sock);
+    delete client;
+    return;
+  }
+
+  finish_accept(client);
+}
+
+void uvcpp_tcp_server::finish_accept(uvcpp_tcp_client* client) {
+  // Mark the client as connected — sets CONNECTED | READABLE |
+  // WRITABLE so that write() and read_start() work correctly.
+  client->mark_accepted();
+
+  // **登记 + 装管理回调要排在用户回调之前。**
+  //
+  // 原来是反过来的，于是用户在 on_connection 里立刻关掉这个连接
+  // （比如鉴权不过要拒绝它）时：关事件先于 push_back 发生，客户端
+  // 要么没被登记、要么登记了一个已经关闭的；用户回调抛异常则两步
+  // 都不执行，直接泄漏。先登记就先受管，后面怎么走都不会漏。
+  register_client(client);
+  setup_client_callbacks(client);
+
+#if UVCPP_OPENSSL_ENABLE
+  // --- TLS：装过滤器，并且**不把握手没完的连接交给上层**。 ---
+  //
+  // **必须排在 `setup_client_callbacks` 之后。** `enable_tls()` 在连接
+  // 已建立时会顺手 `arm_async_read()` 来推进握手，而那个函数装的是
+  // **原始**读回调并置上 `read_started_`；先调它的话，后面
+  // `setup_client_callbacks` 想给框架层读（`read_start_events`）就会被
+  // 两条读路径互斥的检查挡住 —— 上层的读回调永远装不上，HTTPS 请求
+  // 到了也没人解析。反过来先装读则没有这个问题：握手靠读事件推进，
+  // 而两种读路径都会把入站字节喂给过滤器（见 `arm_async_read`）。
+  //
+  // 失败时走 `close_client_on_callback_error`（关闭 + 回收）而不是
+  // `delete`：此刻句柄是活的，且已经进了登记表。
+  bool tls_handshake_pending = false;
+  if (ssl_ctx_ != nullptr) {
+    // 握手超时**必须在 enable_tls 之前设**：`enable_tls()` 里就会推进
+    // 一次握手，而超时是从"第一次推进"起算的 —— 设晚了对这一步不生效。
+    client->set_tls_handshake_timeout_ms(tls_hs_timeout_ms_);
+
+    const int tls_rc = client->enable_tls(ssl_ctx_);
+    if (tls_rc != 0) {
+      last_error_code_.store(tls_rc);
+      close_client_on_callback_error(client);
+      return;
+    }
+
+    tls_handshake_pending = !client->is_tls_handshake_done();
+    if (tls_handshake_pending) {
+      // 通知只是把 `on_connection` 挂到"握手成功"那一刻。
+      client->set_tls_ready_callback([this](uvcpp_tcp_client* c, int st) {
+        on_tls_handshake_done(c, st);
+      });
+    }
+  }
+  if (tls_handshake_pending) return;  // 握手完成时再交付
+#endif
+
+  // `n > 1` 时这一步跑在 worker 线程上 ⇒ 用户的 `on_connection` **会并发**。
+  deliver_connection(client);
+}
+
+void uvcpp_tcp_server::register_client(uvcpp_tcp_client* client) {
+  if (client == nullptr) return;
+  std::lock_guard<std::mutex> lk(clients_mu_);
+  clients_.push_back(client);
+}
+
+void uvcpp_tcp_server::unregister_client(uvcpp_tcp_client* client) {
+  std::lock_guard<std::mutex> lk(clients_mu_);
+  for (std::vector<uvcpp_tcp_client*>::iterator it = clients_.begin();
+       it != clients_.end(); ++it) {
+    if (*it == client) {
+      clients_.erase(it);
+      return;
+    }
+  }
+}
+
+std::vector<uvcpp_tcp_client*> uvcpp_tcp_server::snapshot_clients() const {
+  std::lock_guard<std::mutex> lk(clients_mu_);
+  return clients_;
+}
+
+size_t uvcpp_tcp_server::close_clients_of_loop(uvcpp_loop* l) {
   // 先取快照：`client->close()` 的收尾是**异步**的（等循环转到关闭完成回调），
-  // 所以这一轮里 clients_ 不会被改；但用户的 on_close 回调可能重入到这里，
-  // 快照 + 逐个 owns_client 判断能挡住那种情况。
-  std::vector<uvcpp_tcp_client*> snapshot(clients_.begin(), clients_.end());
+  // 所以这一轮里登记表不会被改；但用户的 on_close 回调可能重入到这里，
+  // 快照 + 逐个重判能挡住那种情况。
+  std::vector<uvcpp_tcp_client*> snapshot = snapshot_clients();
 
   size_t closed = 0;
   for (size_t i = 0; i < snapshot.size(); ++i) {
     uvcpp_tcp_client* c = snapshot[i];
-    if (c == nullptr || !owns_client(c)) continue;  // 途中被 take 走的不动
+    if (c == nullptr || c->get_loop() != l) continue;  // 别的循环的，不归我们
+    if (!owns_client(c)) continue;                     // 途中被 take 走的不动
 
     uvcpp_tcp* t = c->get_tcp();
     if (t == nullptr || t->get_handle() == nullptr) {
@@ -310,9 +532,43 @@ size_t uvcpp_tcp_server::close_all_clients() {
   return closed;
 }
 
+void uvcpp_tcp_server::stop_workers() {
+  // `~uvcpp_loop_worker` 就是 `stop_and_join()`：线程退出路径里会排空邮箱、
+  // 跑 `on_exit`（关掉它名下的连接）、泵完挂起的关闭回调、关掉并释放循环。
+  // 所以 delete 一返回，那条循环上就什么都不剩了。
+  for (size_t i = 0; i < workers_.size(); ++i) {
+    delete workers_[i];
+    workers_[i] = nullptr;
+  }
+  workers_.clear();
+}
+
+// =========================================================================
+// Stop
+// =========================================================================
+
+size_t uvcpp_tcp_server::close_all_clients() {
+  // 本循环那一份：就地关，**计入返回值**。
+  size_t closed = close_clients_of_loop(loop_);
+
+  // 别的循环那一份：各投一条任务过去，由那条循环的线程关它自己名下的连接。
+  // 投递是异步的，所以**不计入返回值** —— 头文件里写明了 n>1 时这个返回值的
+  // 语义是"本循环发起关闭的条数"，不是"已经关掉多少"。
+  //
+  // 循环指针在**任务里**取（`loop_at`），不在投递线程上取：`loop_` 是 worker
+  // 线程自己的东西，停机时会被它置空。
+  for (size_t i = 0; i < workers_.size(); ++i) {
+    const int idx = static_cast<int>(i);
+    workers_[i]->post([this, idx]() { close_clients_of_loop(loop_at(idx + 1)); });
+  }
+  return closed;
+}
+
 void uvcpp_tcp_server::release_client(uvcpp_tcp_client* client) {
   if (client == nullptr) return;
-  clients_.remove(client);
+  unregister_client(client);
+  // 在锁外 delete：`~uvcpp_tcp_client` 会跑用户回调，而用户回调里再进
+  // `client_count()` / `owns_client()` 是合法用法 —— 持着锁就死锁了。
   delete client;
 }
 
@@ -357,11 +613,13 @@ void uvcpp_tcp_server::stop_loop() {
 // =========================================================================
 
 void uvcpp_tcp_server::set_status(int flags) {
-  status_ |= flags;
+  // 读-改-写必须是原子的那一步：`n > 1` 时 worker 线程也会置位，两边各写回
+  // 自己那份旧快照就会互相抹掉。
+  status_.fetch_or(flags);
 }
 
 void uvcpp_tcp_server::clear_status(int flags) {
-  status_ &= ~flags;
+  status_.fetch_and(~flags);
 }
 
 void uvcpp_tcp_server::install_client_manager(uvcpp_tcp_client* client) {
@@ -451,7 +709,7 @@ void uvcpp_tcp_server::on_tls_handshake_done(uvcpp_tcp_client* client,
     // 在 `tls_last_ssl_error()` 里 —— 但那个得在客户端还活着时读，这里
     // 已经晚了（通知之后 tls_fail 还会继续，但不保证原样返回）。所以只
     // 记错误码，需要细节请在客户端的读回调里看。
-    last_error_code_ = status;
+    last_error_code_.store(status);
     return;
   }
 
@@ -501,7 +759,7 @@ void uvcpp_tcp_server::close_client_on_callback_error(
 
   uvcpp_tcp* tcp = client->get_tcp();
   if (tcp == nullptr) {
-    clients_.remove(client);
+    unregister_client(client);
     delete client;
     return;
   }
@@ -509,7 +767,7 @@ void uvcpp_tcp_server::close_client_on_callback_error(
   // 不在这里同步 delete：此刻句柄还是活的，而我们在 libuv 的 accept 回调
   // 里。交给关闭流程收尾。
   tcp->close([this, client](uvcpp_handle*) {
-    clients_.remove(client);
+    unregister_client(client);
     delete client;
   });
 }
@@ -518,11 +776,15 @@ void uvcpp_tcp_server::close_client_on_callback_error(
 // 客户端所有权
 // =========================================================================
 
-size_t uvcpp_tcp_server::client_count() const { return clients_.size(); }
+size_t uvcpp_tcp_server::client_count() const {
+  std::lock_guard<std::mutex> lk(clients_mu_);
+  return clients_.size();
+}
 
 bool uvcpp_tcp_server::owns_client(const uvcpp_tcp_client* client) const {
   if (client == nullptr) return false;
-  for (std::list<uvcpp_tcp_client*>::const_iterator it = clients_.begin();
+  std::lock_guard<std::mutex> lk(clients_mu_);
+  for (std::vector<uvcpp_tcp_client*>::const_iterator it = clients_.begin();
        it != clients_.end(); ++it) {
     if (*it == client) return true;
   }
@@ -531,10 +793,24 @@ bool uvcpp_tcp_server::owns_client(const uvcpp_tcp_client* client) const {
 
 uvcpp_tcp_client* uvcpp_tcp_server::take_client(uvcpp_tcp_client* client) {
   if (client == nullptr) return nullptr;
-  if (!owns_client(client)) return nullptr;  // 不归我们管 —— 所有权不变
 
-  // 摘出登记表，再清掉管理槽。两步都做完之后，服务端就真的不再碰它了。
-  clients_.remove(client);
+  // 摘出登记表（加锁，且**只在这一段里**持锁）——
+  // 不归我们管时直接返回，所有权不变。
+  {
+    std::lock_guard<std::mutex> lk(clients_mu_);
+    bool found = false;
+    for (std::vector<uvcpp_tcp_client*>::iterator it = clients_.begin();
+         it != clients_.end(); ++it) {
+      if (*it == client) {
+        clients_.erase(it);
+        found = true;
+        break;
+      }
+    }
+    if (!found) return nullptr;
+  }
+
+  // 再清掉管理槽。两步都做完之后，服务端就真的不再碰它了。
   client->clear_close_manager();
   return client;
 }
@@ -558,7 +834,10 @@ bool uvcpp_tcp_server::return_client(uvcpp_tcp_client* client) {
     return true;
   }
 
-  clients_.push_back(client);
+  // 登记回去用 `register_client`（加锁）：`n > 1` 时它回到的是**它自己那条
+  // 循环**名下 —— 登记表里没有"哪条循环"这一列，`client_count_at()` 是靠
+  // `client->get_loop()` 现算的，所以这里不需要额外记。
+  register_client(client);
   install_client_manager(client);
   return true;
 }

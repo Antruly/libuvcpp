@@ -137,7 +137,7 @@
   `tcp_` 里、`uv_run` 的嵌套计数要在 `uv_run` 返回之后才减），谁来拆都是往栈上还在用的
   内存里写。代价是**每个这样被删掉的客户端漏一份**（`uvcpp_loop` + `uvcpp_tcp_client`
   + 解析器，h2 上再加一个 nghttp2 会话）。这与 `~uvcpp_tcp_client`
-  （`src/net/uvcpp_tcp_client.cpp:126`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
+  （`src/net/uvcpp_tcp_client.cpp:147`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
 - **一处已死的成员**（只报告，本批没动）：
