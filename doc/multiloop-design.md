@@ -255,7 +255,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 ### 4.1 好消息：大部分切分是"多建几个对象"，不是"给容器加锁"
 
-`uvcpp_http_server` 在自己的构造函数里 `new uvcpp_tcp_server`（`src/web/uvcpp_http_server.cpp:46-48`），
+`uvcpp_http_server` 在自己的构造函数里 `new uvcpp_tcp_server`（`src/web/uvcpp_http_server.cpp:47-49`），
 而 `uvcpp_tcp_server` 在自己的构造函数里 `new uvcpp_loop`（`src/net/uvcpp_tcp_server.cpp:79-83`）。
 ⇒ **n 个 `uvcpp_http_server` 实例 = n 份 `contexts_` + n 份 `clients_` + n 条循环/线程。**
 
@@ -397,7 +397,7 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 | `inflight_` / `flushing_` | `src/webapp/uvcpp_web_app.h:1507-1507` / `src/webapp/uvcpp_web_app.h:1516-1516` |
 | `upgraded_` | `src/webapp/uvcpp_web_app.h:1451-1451` |
 | `registry_` | `src/webapp/uvcpp_web_app.h:1453-1453` |
-| `file_transfers_` | `src/webapp/uvcpp_web_app.h:1521-1521` |
+| `file_transfers_` | `src/webapp/uvcpp_web_app.h:1521-1522` |
 
 **丁、一份、但内部已经按循环切好了**：`http_`（`src/webapp/uvcpp_web_app.h:1209-1209`）
 —— `contexts_` 已切成 `vector<map>`（§4.1），net 层的 `clients_` 已按 worker 切。
@@ -436,20 +436,20 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 **这两条是这次重过一遍的产出，之前设计稿与外部复核都没提到它们。**
 
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
-> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1069-1069`）是
+> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1092-1092`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
-> （`src/web/uvcpp_http_server.cpp:1073-1073`），未命中时插入并可能触发 LRU 淘汰
-> （`src/web/uvcpp_http_server.cpp:1126-1126`、`src/web/uvcpp_http_server.cpp:928-928`）。
+> （`src/web/uvcpp_http_server.cpp:1103-1103`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:1156-1156`、`src/web/uvcpp_http_server.cpp:958-958`）。
 > 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
-> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1070-1073`）一起加锁；
+> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1093-1096`）一起加锁；
 > **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
 >
-> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1087-1087`）
+> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1110-1110`）
 > 一把**非递归**锁护住那张表与四个计数。加锁点只有三个**外层入口** —— 命中
-> （`src/web/uvcpp_http_server.cpp:1073-1073`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
+> （`src/web/uvcpp_http_server.cpp:1103-1103`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
 > 整张表的字节总量，拆成两次加锁会让别的循环插在中间按一个已不成立的总量做决定）、
 > `compress_variant_stats()`。两个帮手改名成 `..._locked()`
-> （`src/web/uvcpp_http_server.h:1098-1098` / `:1102`），意思就是"调用方已持锁" ——
+> （`src/web/uvcpp_http_server.h:1121-1121` / `src/web/uvcpp_http_server.h:1125-1125`），意思就是"调用方已持锁" ——
 > 淘汰要算字节总量，所以这两个互相调用，同一条非递归锁不能进两次。
 > 临界区里只碰表与计数：命中那条路把共享句柄**拷出锁外**再 `share()`，
 > `finish_headers()` 也在锁外（它改的是响应，不碰表）。
@@ -532,6 +532,37 @@ n 个循环之后变成跨核缓存行打架**：
 §4 这几张表还没有。**行号那一半在 net 批里被门禁逼着复核过一遍**：`clients_` 那张表的
 引用跟着声明从 `std::list` 变成 `std::vector` + 互斥（§4.1 的切分判据因此更该重看 ——
 今天它**不是** per-loop，而是**一把锁护一个全局表**）。
+
+### 4.5 取表那一族的纪律：`find()` 跟谁比、`-1` 怎么办（2026-09-22）
+
+`contexts_` 切成 n 张之后，"取表"这一步本身多出两条必须写下来的纪律。两条都不是新 bug，
+而是**已经写在树上的形状**在多循环下换了含义。
+
+**（一）`find()` 的结果必须拿这张表自己的 `end()` 比。** 树上有 19 处原来是
+
+```cpp
+auto it = ctxs_of(client).find(client);
+if (it == ctxs_here().end()) return;   // 两个容器的 end() 相比
+```
+
+`n == 1` 时这两张是同一条表，行为对；但它依赖一条**没写出来的**不变量：当前线程就是这条
+连接所属的那条循环。§4.1.1 己 那条（工作项投错循环）与"不在任何循环线程上"恰好破坏它 ——
+那时比较的是**两个不同容器**的迭代器（标准上是 UB；`std::map` 的 `end()` 是各自表头节点的
+地址，于是"找不到"这条早退**恒不成立**），后面紧跟着的 `it->second` 就解引用了 `end()`。
+⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:1573`
+那处 `ctxs_here()` 是**有意的**（`begin_h2_goaway()` 要的就是本循环那张表），不动。
+
+**（二）`ctxs_at(-1)` 在多循环下直接终止，不再夹回 0 号。** `-1` 不是越界，它的含义是
+"不在任何循环线程上"（`uvcpp_loop_index_of_this_thread()` 的初值）。单循环下夹回 0 号
+与从前逐字相同，那条路原样保留；n > 1 时 0 号只是 n 张里的一张，夹回去会让"漏调了一条循环"
+看着正常 —— `begin_h2_goaway()` 的契约是每条循环各调一次（`src/web/uvcpp_http_server.h:207-210`），
+夹回 0 号时它只向 0 号循环道别，却返回一个像样的条数。错得比崩安静，所以选崩：libuv 对
+API 误用也是直接终止（先例见 `src/handle/uvcpp_handle.cpp:363` 引的那句）。
+
+**这两条都没有新用例**，理由是同一个：要走到它们，得在**不是**这条连接的循环的线程上调
+这一族访问器，而树上没有这样的调用点（§4.1.1 己 那条今天也够不着 —— webapp 层还没有
+`set_loops`）。按"先证明缺口是真的再补用例"的老规矩，这里记的是**形状与决策**，
+不是一条可红的判据。
 
 ## 5. 对外约束
 

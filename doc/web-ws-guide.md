@@ -516,7 +516,7 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:213，�
 **`attach()` 会静默顶掉别人装的升级处理器。**
 `src/web/uvcpp_ws_server.cpp:158` 先 `delete` 掉自己拥有的 http server，然后
 `http->on_upgrade(...)` —— 而 `on_upgrade` 在 HTTP 层是**单槽**
-（`src/web/uvcpp_http_server.cpp:151-151`）。谁后 `attach()` 谁赢。
+（`src/web/uvcpp_http_server.cpp:173-173`）。谁后 `attach()` 谁赢。
 
 **`on_connection` 是单槽，而且会被 `handle_upgrade` 的 `on_ready` 顶掉。**
 `src/web/uvcpp_ws_server.cpp:242` 是 `if (on_ready) { on_ready(conn); }

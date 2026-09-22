@@ -1014,6 +1014,19 @@ class UVCPP_API uvcpp_http_server {
    * **必须在这条连接自己的循环线程上调用** —— 它返回的是一张别的线程可能正在
    * 动的表的引用；跨循环调用等于把它交出去给竞争。调用点全是连接自己的回调，
    * 所以这条约束天然成立。
+   *
+   * @warning **查完之后要拿这张表自己的 `end()` 比**，不要把 `find()` 的结果去和
+   *          `ctxs_here().end()` 比：两张表不是同一个容器时，跨容器比较迭代器是
+   *          未定义行为（`std::map` 的 `end()` 是各自表头节点的地址，于是"找不到"
+   *          这条早退**不生效**，后面紧跟着的 `it->second` 就解引用了 `end()`）。
+   *          n > 1 时两张表不同这件事，正是 `-1`（不在循环线程上）与"回调跑在
+   *          别的循环的线程上"这两条路会造出来的。
+   *
+   *          ```cpp
+   *          std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+   *          auto it = tbl.find(client);
+   *          if (it == tbl.end()) return;
+   *          ```
    */
   std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_of(uvcpp_tcp_client* client);
 
@@ -1022,11 +1035,21 @@ class UVCPP_API uvcpp_http_server {
    *
    * 给手上没有连接对象的入口用（停机时"把本循环上的 h2 连接都道别"）。
    * 判"我在几号"用 `uvcpp_loop_index_of_this_thread()`，所以它同样只能在
-   * 循环线程上调。
+   * 循环线程上调（n > 1 时在别的线程上调会 `abort`，见 @ref ctxs_at）。
    */
   std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_here();
 
-  /// @ref ctxs_of / @ref ctxs_here 共用的取值 + 越界兜底。
+  /**
+   * @brief @ref ctxs_of / @ref ctxs_here 共用的取值。
+   *
+   * 越界（表外的循环号）夹回 0 号 —— 它至少是越界安全的，而按循环号取表的唯一
+   * 来源就是连接自己的循环号与线程自己的循环号，两者都落在表内。
+   *
+   * @note **`-1` 不是越界，是"不在任何循环线程上"**，在多循环下直接 `abort`：
+   *       夹回 0 号只处理 n 张表里的一张，却让调用方（`begin_h2_goaway()` 那类
+   *       "每条循环各调一次"的入口）拿到一个看着正常的返回值 —— 错得比崩还安静。
+   *       单循环下表只有一张，夹回 0 号与从前逐字相同，那条路原样保留。
+   */
   std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_at(int loop_index);
 
   /// @brief @ref ctxs_of 的 const 版（`connection_generation()` 这类只读入口用）。
