@@ -435,6 +435,9 @@ src/web/uvcpp_http_server.h:981-987 d294db1d7bfb2ef0
 src/web/uvcpp_http_server.h:983-985 ddac3066694e5baa
 src/web/uvcpp_static_server.cpp:165-183 406850a9c0be727f
 src/web/uvcpp_static_server.cpp:195-196 1b4e922521e7dfe8
+src/web/uvcpp_static_server.cpp:265-266 d91bcfbef0137d9f
+src/web/uvcpp_static_server.cpp:267-267 5092b7cb5a35e858
+src/web/uvcpp_static_server.cpp:272-280 611cfd4cfd963a5a
 src/web/uvcpp_static_server.cpp:302-303 8951fa342989082c
 src/web/uvcpp_static_server.cpp:336-341 b2a7af75bea10cf6
 src/web/uvcpp_static_server.cpp:39-76 bd9f4d351d9cfb46

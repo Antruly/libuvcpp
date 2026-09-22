@@ -410,8 +410,17 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 （`src/webapp/uvcpp_web_context.h:101-142`），今天都用**唯一那条**循环作答。其中
 `loop()` 有个不在显然处的调用点：`serve_static()` 的 handler 在**请求时**才要它
 （`src/webapp/uvcpp_web_app.cpp:1271` 那行 `st->serve(req, resp, next, self->loop())`，
-注释就写着"循环要到请求时才取"）⇒ n>1 之后它必须回答**这条连接所在的那条**循环，
-否则静态文件的工作项会被投到别的循环上去等。`post()` 的"发起者循环"怎么定，见 §5。
+注释就写着"循环要到请求时才取"）⇒ n>1 之后它必须回答**这条连接所在的那条**循环。
+
+> **答错循环的后果不是"等"，是数据竞争**（外部复核 2026-09-22 更正）。`work->queue_work()`
+> 拿的就是这个 `task->loop`（`src/web/uvcpp_static_server.cpp:265-266`），它的 **after-work
+> 回调在 `task->loop` 的线程上**跑 `stat_step()`（`src/web/uvcpp_static_server.cpp:272-280`），
+> 而 `stat_step()` 里的 `send_response(task->client, resp)` 走的是 `ctxs_of(client)` ——
+> **这条连接自己那张表**。于是 `loop()` 答错循环时，是在**别的循环的线程上改这张连接的
+> ctx 与它下面的句柄**；同一段代码里那句"worker 线程：只做元数据，不碰 client / server"
+> （`src/web/uvcpp_static_server.cpp:267`）能成立，前提正是 `task->loop` == 连接的循环。
+
+`post()` 的"发起者循环"怎么定，见 §5。
 
 ##### 重过一遍**新发现的两张表**：§4 那张闸门表漏了它们
 
