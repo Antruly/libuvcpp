@@ -294,9 +294,45 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 
 共享冻结的那份装：`router_`（`src/webapp/uvcpp_web_app.h:1203`）、`middlewares_`（`:1204`）、
 `ws_router_`/`ws_handlers_`（`:1243-1244`）、`stream_router_`（`:1259`）、`upload_routes_`
-（`:1275`）。它们**只在注册期与 `start()` 期间写** —— `chain_storage_` 的全部
-写点集中在 `src/webapp/uvcpp_web_app.cpp:2592-2652`，而它就在 `start()` 里。冻结期之后
-多线程只读，**不需要锁**。
+（`:1275`）。冻结期之后多线程只读，**不需要锁**。
+
+> **理由更正（2026-09-22，外部复核）：这条的理由**不是**"写点都在 `start()` 里"。**
+> `chain_storage_.push_back`（`src/webapp/uvcpp_web_app.cpp:2592`）与
+> `chain_cache_[...]`（`:2594`）确实在 `start()` 里，但**那两个函数在请求路径上可达**：
+> `sync_chains()`（`:2544`）被 `:1181`（流式那条路）与 `:2477`（派发前）调用，
+> `build_chain()`（`:2570`）被 `:1183` 与 `:2499` 调用。让这些写**离开**请求路径的是
+> 两件事叠起来：① `start()` 之后缓存已热；② `src/webapp/uvcpp_web_app.h:91` 那条
+> **成文契约**「**四、注册路由要在 `start()` 之前**」。按"写点在 `start()` 里"写，
+> 会被读成"运行中注册也无害" —— 而那正是契约里说的**安全网，不是用法**。
+>
+> **n>1 之后同一个违反的后果变了，这一条要抄进 `set_loops()` 的 doc block：
+> 今天它退化成的正是那张安全网（同一线程重建 + 路由数量校验挡住指针复用），最坏是
+> 跑错业务这一类*结果*错；n 条循环之后它变成对 `chain_cache_`（`std::map`）的并发
+> `clear`/`find`、对 `chain_storage_`（`std::deque`）的并发 `push_back` ⇒ **UB
+> （内存安全）**，不是结果错。**（deque 那条"旧元素地址不变"仍成立：在途请求手里
+> 的 `const std::vector<...>*` 不会因 `push_back` 悬垂，形状是对的。）
+
+> **更正二（2026-09-22，外部复核）：上面这句"只在注册期与 `start()` 期间写"对
+> `middlewares_` 不成立 —— 它是"每循环一次"，而"每循环一次"本身就是错的。**
+> `init_on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1586`）是**循环线程的入口**，
+> 而它在 `:1667` 做 `middlewares_.insert(middlewares_.begin(), web_middleware_access_log())`、
+> `:1668` 做 `++middleware_gen_`。n>1 时这个函数**每条循环各跑一次** ⇒
+> ① 插进 **n 份**访问日志中间件（每请求记 n 次。本库对这一档有读数：`off → info`
+> 是 +17~19% rps、每请求 19 → 25 次分配）；
+> ② 更要紧的是**竞态** —— `middlewares_` / `middleware_gen_` 在请求路径上被**读**
+> （`:2559`、`:2583-2585`、`:2604`/`:2619`/`:2638`），而 n 条循环**不同时起跑**：
+> A 循环已经在服务（首命中某路由 ⇒ `build_chain()` 读 `middlewares_`）时，B 循环的
+> 初始化正在 `insert` ⇒ 对 `std::vector<uvcpp_web_middleware>` 与那个 `size_t` 的
+> **未同步读写**。
+>
+> ⇒ **`init_on_loop_thread()` 要拆成两半**：「**每进程一次**、且必须在放行任何循环
+> **之前**做完」（路由 / 中间件 / 日志级别）与「**每循环一次**」（`loop_tid_`、钩子、
+> `http_->run()`）。今天这两半在同一个函数里，而那个函数恰好是循环线程入口 ——
+> 上面那份 per-loop 清单是**按"在不在 `start()` 里"分的类，那个分类标准是错的**，
+> 得按**"每进程一次"还是"每循环一次"**重过一遍。同族里另外几笔（`uvcpp_logger::
+> set_level`、`router_.set_auto_options` / `set_head_as_get`）是**同值重写**，值层面
+> 无害，但"每进程一份的状态放在每循环一次的初始化里"这个形状本身要一起收口
+> —— 哪天各循环各 bind，`bound_port_` / `loop_started_` 就是后写覆盖。
 
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
 > —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1069-1069`）是
@@ -341,6 +377,30 @@ return id != UVCPP_WEB_INVALID_CONN_ID && loop_of(id) == loop_index_ &&
 
 这一条是**设计里最容易漏的地方**，所以单列。
 
+> **核验状态（2026-09-22，外部复核）：这一节已经从设计变成落地，而且有判据。**
+> 位布局 20/44 在 `src/webapp/uvcpp_web_connection.h:62-80`（`UVCPP_WEB_CONN_LOOP_SHIFT`
+> 在 `:78`、`UVCPP_WEB_CONN_SEQ_MASK` 在 `:80`），
+> `make_id`（`:173`）/ `loop_of`（`:163`）/ `seq_of`（`:168`）互为逆运算，
+> 发号点是 `make_id(loop_index_, next_id_++)`（`src/webapp/uvcpp_web_connection.cpp:52`）；
+> `issued()` 上面那段 `doc-snippet` 与代码**逐字一致**。
+> **n=1 逐字节不变**也有判据：`loop_index_ == 0` 时 `make_id` 是恒等变换，
+> 用例直接断言 `s1 == 1 && s2 == 2`。
+> 判据在 `tests/functional/web_app_context_func.cpp:920` 起（`[18d]`）：
+> 两条循环低段相同、`r0.issued(ib)` 为假、`r1.issued(ia)` 为假、跨表
+> `client`/`alive`/`find` 全空，连 `-1` 与 `1<<20` 的夹回都断言了。
+> ⇒ 这一节**不用再审**。
+
+> **剩一个口子，留给下一批（外部复核提的）**：`uvcpp_web_connection_registry(int loop_index = 0)`
+> （`src/webapp/uvcpp_web_connection.h:149`）**有默认实参**，而 `registry_`
+> （`src/webapp/uvcpp_web_app.h:1435`）今天正是默认构造的。n>1 那天，哪条循环忘了传
+> 自己的号就会拿到 `loop_index_ == 0` —— 而**越界夹回的目标也是 0**
+> （`src/webapp/uvcpp_web_connection.cpp:29`），也就是那个会**撞号**的值：
+> 两份表都发 `(0,1) (0,2) …`，于是本节要防的误判**原样回来，而且是静默的**
+> （`loop_of(id) == loop_index_` 恰好成立）。**下一批加一条廉价的一致性断言**：
+> 每循环初始化时断言 `registry_.loop_index() == 本循环号`（这个读口已经有了）
+> —— 比去掉默认实参省事，还能同时盖住"夹回 0"那条路。这条与上面那条
+> `init_on_loop_thread()` 拆分一起，是 webapp 那一批的**入口条件**。
+
 ### 4.3 进程级那族：今天同核、之后变跨核，会变贵
 
 不是闸门（它们本来就是 atomic / 带锁），但值得单独收口，因为**今天它们是同核命中、
@@ -379,6 +439,11 @@ n 个循环之后变成跨核缓存行打架**：
 > `close_all_clients()` 在 `n>1` 时是异步发起、`pause_read()` 只在自己循环的线程上调。
 > **面向使用者的版本在 [net 层指南](./net-guide.md) 的多循环那一节**
 > （含 Windows 那条风险的完整交代）。下面 §5.2/§5.3 是**webapp 层**还没定的部分。
+>
+> **webapp 层已经定了的一条（2026-09-22，外部复核）**：`uvcpp_web_app.h:91` 那条
+> 「注册路由要在 `start()` 之前」的契约，在 `n>1` 之后从"打乱链缓存（安全网兜底、
+> 最坏是跑错业务）"**升级成对 `chain_cache_` / `chain_storage_` 的并发读写 ⇒ UB**。
+> 这条要写进 `uvcpp_web_app::set_loops()` 的 doc block（理由与出处见 §4.1 的理由更正块）。
 
 ### 5.1 `set_loops(1)`（或不调用）＝ 今天逐字节相同
 
