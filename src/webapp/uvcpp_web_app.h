@@ -1091,14 +1091,14 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    *     `bound_port_`。它们**必须在放行任何一条工作循环之前**跑完 ——
    *     `listen()` 正是放行点（`set_loops(n)` 的 worker 是在那里面起来的）。
    *   * 放 `init_on_loop_thread()` 的是**每循环一份**的东西：线程身份、
-   *     `async_`、两个定时器。
+   *     本循环那格（`async_`、两个定时器）。
    *
    * n == 1 时两半的先后与拆分前**逐字相同**：调用方在 `init_on_loop_thread()`
    * 之前调本函数，合起来就是原来那一条直线。
    */
   int init_process_once();
 
-  /** @brief **每循环一次**：记线程身份，在**本循环**上建 `async_` 与两个定时器。 */
+  /** @brief **每循环一次**：记线程身份，在**本循环**上建投递句柄与两个定时器。 */
   int init_on_loop_thread();
 
   /** @brief 新连接被接受（HTTP 层的 accept 钩子）：发 id、登记、跑用户钩子。 */
@@ -1563,15 +1563,54 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   std::atomic<bool> running_;       ///< 正在服务
   std::atomic<bool> stopping_;      ///< 停机流程已启动（幂等用）
 
-  /** 循环线程 id。只有 loop 线程会写，别的线程读 —— 所以用 mutex 护住。 */
-  mutable std::mutex tid_mutex_;
-  std::thread::id    loop_tid_;
-  bool               tid_known_;
+  /**
+   * @brief **一条循环自己**的那份状态（多循环设计稿 §4.1.1 丙那一族）。
+   *
+   * 今天只有一条循环（0 号），所以这层间接在 `n == 1` 下是**恒等**的：
+   * `loops_` 恒有且只有一格，`slot_here()` 恒返回它 —— 行为与拆分前逐字节
+   * 相同，也不多付任何锁（见 `slot_here()` 的 n == 1 快路）。
+   *
+   * 每格归**自己那条线程**所有：只有它会写 `loop_tid` / `async` / `post_queue`，
+   * 别的线程读 —— 所以那两个字段各有一把 mutex 护住。`uv_async` 只能服务它
+   * 注册的那条循环，这条最硬：一份状态一格，不能共用。
+   */
+  struct loop_slot {
+    explicit loop_slot(int i) : index(i), loop(nullptr), tid_known(false),
+                                async(nullptr) {}
 
-  /** 跨线程投递用的 async 句柄（**只在 loop 线程上建**）。 */
-  uvcpp_async* async_;
-  mutable std::mutex  post_mutex_;
-  std::deque<std::function<void()> > post_queue_;
+    /// 循环号。0 号就是调用 `run()` / `start()` 的那个线程跑的那条。
+    int index;
+
+    /// 这条循环的句柄。0 号在构造函数里就装好（`loop()` 在 `start()` 之前
+    /// 也必须答得出东西 —— 今天的语义），1..n-1 号由工作循环的启动钩子装。
+    uvcpp_loop* loop;
+
+    /** 循环线程 id。只有它自己写，别的线程读 —— 所以用 mutex 护住。 */
+    mutable std::mutex tid_mutex;
+    std::thread::id    loop_tid;
+    bool               tid_known;
+
+    /** 跨线程投递用的 async 句柄（**只在这条循环的线程上建**）。 */
+    uvcpp_async* async;
+    mutable std::mutex  post_mutex;
+    std::deque<std::function<void()> > post_queue;
+  };
+
+  /**
+   * @brief 本线程所在的那条循环。
+   *
+   * **不在任何循环线程上时返回 0 号**（多循环设计稿 §5.2 定下的语义：
+   * 非循环线程投递的活儿归 0 号）。`n == 1` 下那条路与今天逐字相同 ——
+   * 今天 `post()` 也是把非循环线程的任务投进唯一那个队列。
+   */
+  loop_slot& slot_here();
+  const loop_slot& slot_here() const;
+
+  /**
+   * @brief 每循环一格。**0 号在构造函数里就建好**，n == 1 时永远只有这一格
+   *        （所以 `slot_here()` 的快路不查线程 id、也不加锁）。
+   */
+  std::vector<std::unique_ptr<loop_slot> > loops_;
 
   /**
    * @brief 闲置超时扫描器（只在 loop 线程上建）。

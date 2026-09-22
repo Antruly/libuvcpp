@@ -228,8 +228,6 @@ uvcpp_web_app::uvcpp_web_app()
       running_(false),
       stopping_(false),
       shutdown_phase_(0),
-      tid_known_(false),
-      async_(nullptr),
       idle_timer_(nullptr),
       shutdown_timer_(nullptr),
       shutdown_deadline_ms_(0),
@@ -244,6 +242,12 @@ uvcpp_web_app::uvcpp_web_app()
   //     交给普通路由去决定。
   stream_router_.set_head_as_get(false);
   stream_router_.set_auto_options(false);
+
+  // 0 号那格现在就有：`loop()` 在 `start()` 之前也要答得出东西（它今天直接
+  // 返回 tcp_server 那条循环），而 `slot_here()` 的 n == 1 快路假设它非空。
+  // 在**构造函数体**里建而不是初始化列表里，是因为它要读 `http_`。
+  loops_.push_back(std::unique_ptr<loop_slot>(new loop_slot(0)));
+  loops_[0]->loop = http_->get_tcp_server()->get_loop();
 }
 
 uvcpp_web_app::uvcpp_web_app(const uvcpp_web_app_config& cfg)
@@ -263,8 +267,10 @@ uvcpp_web_app::~uvcpp_web_app() {
   // 顺序不能反：**先删句柄包装对象，再删 http_ 层** —— 后者的析构会关掉并
   // 销毁 loop，之后任何 `uv_close`/`uv_timer_stop` 都是在用一个不存在的
   // 循环。
-  delete async_;
-  async_ = nullptr;
+  for (size_t i = 0; i < loops_.size(); ++i) {
+    delete loops_[i]->async;
+    loops_[i]->async = nullptr;
+  }
   delete idle_timer_;
   idle_timer_ = nullptr;
   delete shutdown_timer_;
@@ -1541,8 +1547,9 @@ int uvcpp_web_app::start_background() {
     if (rc != 0) {
       // 失败路径上循环还没跑过，没有任何回调会来收尾；把线程身份标记清掉，
       // 这个对象就回到"没启动"的状态，调用方改完配置还能重试。
-      std::lock_guard<std::mutex> lk(tid_mutex_);
-      tid_known_ = false;
+      loop_slot& s = slot_here();
+      std::lock_guard<std::mutex> lk(s.tid_mutex);
+      s.tid_known = false;
       return;
     }
 
@@ -1578,8 +1585,9 @@ int uvcpp_web_app::run(uv_run_mode md) {
   int rc = init_process_once();
   if (rc == 0) rc = init_on_loop_thread();
   if (rc != 0) {
-    std::lock_guard<std::mutex> lk(tid_mutex_);
-    tid_known_ = false;
+    loop_slot& s = slot_here();
+    std::lock_guard<std::mutex> lk(s.tid_mutex);
+    s.tid_known = false;
     return rc;
   }
 
@@ -1775,10 +1783,11 @@ int uvcpp_web_app::init_on_loop_thread() {
   // 循环要到调用方接着调 `http_->run()` 才跑起来，在那之前不会有任何回调进来，
   // 所以"标记晚了一小段"没有可观察后果。n>1 时也是同一个道理 —— 工作循环在
   // `listen()` 里被放行，但它们记的是**自己那条线程**的身份。
+  loop_slot& slot = slot_here();
   {
-    std::lock_guard<std::mutex> lk(tid_mutex_);
-    loop_tid_ = std::this_thread::get_id();
-    tid_known_ = true;
+    std::lock_guard<std::mutex> lk(slot.tid_mutex);
+    slot.loop_tid = std::this_thread::get_id();
+    slot.tid_known = true;
   }
 
   uvcpp_tcp_server* tcp = http_->get_tcp_server();
@@ -1790,13 +1799,17 @@ int uvcpp_web_app::init_on_loop_thread() {
   // 放在最后：这两个句柄必须在 loop 线程上建，而前面任何一步失败都不该
   // 留下需要回收的句柄。
   int rc = 0;
-  async_ = new uvcpp_async();
-  rc = async_->init([this](uvcpp_async*) { drain_posts(); }, loop);
+  slot.async = new uvcpp_async();
+  rc = slot.async->init([this](uvcpp_async*) { drain_posts(); }, loop);
   if (rc != 0) {
-    delete async_;
-    async_ = nullptr;
+    delete slot.async;
+    slot.async = nullptr;
     return rc;
   }
+  // 这一格归属的那条循环。0 号在构造函数里就装过了（同一个指针），这里再
+  // 写一次是为了让"`init_on_loop_thread()` 之后这格是完整的"这条成立 ——
+  // 工作循环那几格没有构造函数这一步，全靠这里。
+  slot.loop = loop;
 
   shutdown_timer_ = new uvcpp_timer(loop);
 
@@ -1863,29 +1876,56 @@ uvcpp_tcp_server* uvcpp_web_app::tcp_server() {
 // =========================================================================
 
 bool uvcpp_web_app::on_loop_thread() const {
-  std::lock_guard<std::mutex> lk(tid_mutex_);
-  return tid_known_ && loop_tid_ == std::this_thread::get_id();
+  const loop_slot& s = slot_here();
+  std::lock_guard<std::mutex> lk(s.tid_mutex);
+  return s.tid_known && s.loop_tid == std::this_thread::get_id();
 }
 
 void uvcpp_web_app::post(std::function<void()> fn) {
   if (!fn) return;
 
-  std::lock_guard<std::mutex> lk(post_mutex_);
-  if (async_ == nullptr) {
+  // 投给**发起者所在的那条循环**（设计稿 §5.2）。请求路径上那就是这条连接
+  // 自己的循环；从非循环线程投递时 `slot_here()` 给的是 0 号，与今天"只有
+  // 一条循环"时的行为逐字相同。
+  loop_slot& s = slot_here();
+  std::lock_guard<std::mutex> lk(s.post_mutex);
+  if (s.async == nullptr) {
     // 循环没起来（或者已经收尾了）。**说出来** —— 静默丢弃投递任务会让
     // "异步处理器永远不回来"变成一桩悬案。
     UVCPP_LOG_WARN(log_category::CORE)
         << "事件循环不可用（未启动或已停止），投递的任务被丢弃";
     return;
   }
-  post_queue_.push_back(fn);
+  s.post_queue.push_back(fn);
   // uv_async_send 是异步信号安全的，且不会阻塞 —— 握着锁调没问题，loop
   // 线程那边的 drain_posts 也要抢这把锁，但它不会回头等我们。
-  async_->send();
+  s.async->send();
 }
 
 uvcpp_loop* uvcpp_web_app::loop() const {
-  return http_ != nullptr ? http_->get_tcp_server()->get_loop() : nullptr;
+  // **本线程那条循环**，不是"唯一那条"。请求路径上调用者就跑在这条连接的
+  // 循环线程上，所以这就是连接自己那条（`serve_static()` 的 handler 要它，
+  // 见设计稿 §4.1.1 己）。不在循环线程上时 `slot_here()` 给 0 号 —— 与今天
+  // 逐字相同。`loop` 在构造函数里就装好了，所以 `start()` 之前也答得出。
+  return slot_here().loop;
+}
+
+uvcpp_web_app::loop_slot& uvcpp_web_app::slot_here() {
+  // n == 1：恒等，而且**一次锁都不多加**（§7："n=1 时不许出现多循环的
+  // 残留"）。这一格在构造函数里就建好了，所以 `loops_` 恒非空。
+  if (loops_.size() == 1) return *loops_[0];
+
+  const std::thread::id me = std::this_thread::get_id();
+  for (size_t i = 0; i < loops_.size(); ++i) {
+    loop_slot& s = *loops_[i];
+    std::lock_guard<std::mutex> lk(s.tid_mutex);
+    if (s.tid_known && s.loop_tid == me) return s;
+  }
+  return *loops_[0];  // 不在任何循环线程上 ⇒ 0 号（§5.2）
+}
+
+const uvcpp_web_app::loop_slot& uvcpp_web_app::slot_here() const {
+  return const_cast<uvcpp_web_app*>(this)->slot_here();
 }
 
 uvcpp_tcp_client* uvcpp_web_app::connection(uvcpp_web_conn_id id) {
@@ -2688,8 +2728,11 @@ void uvcpp_web_app::drain_posts() {
   // 这个循环永远转下去，把事件循环饿死。
   std::deque<std::function<void()> > batch;
   {
-    std::lock_guard<std::mutex> lk(post_mutex_);
-    batch.swap(post_queue_);
+    // 这个回调是**这条循环的 async** 唤起来的，所以就地取本线程那格 ——
+    // 与投递方（`post()`）取的是同一格。
+    loop_slot& s = slot_here();
+    std::lock_guard<std::mutex> lk(s.post_mutex);
+    batch.swap(s.post_queue);
   }
 
   for (size_t i = 0; i < batch.size(); ++i) {
@@ -2859,12 +2902,13 @@ void uvcpp_web_app::finish_shutdown() {
   // 迭代末尾把底层内存还回去。**必须在定时器回调里做，不能在 async 自己的
   // 回调里做**（那会析构正在执行的 std::function）。
   {
-    std::lock_guard<std::mutex> lk(post_mutex_);
-    delete async_;
-    async_ = nullptr;
+    loop_slot& s = slot_here();
+    std::lock_guard<std::mutex> lk(s.post_mutex);
+    delete s.async;
+    s.async = nullptr;
     // 顺带把还没跑的任务丢掉：循环要停了，它们永远不会被执行，留着只会
-    // 让 post_queue_ 的析构去销毁一堆捕获了上下文的闭包。
-    post_queue_.clear();
+    // 让 post_queue 的析构去销毁一堆捕获了上下文的闭包。
+    s.post_queue.clear();
   }
 
   // WS 的 Close 帧**不在这里发** —— 见 `shutdown_step()` 的第 0 拍。

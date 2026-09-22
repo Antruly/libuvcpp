@@ -248,10 +248,19 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_web_app::upgraded_` | `src/webapp/uvcpp_web_app.h:1451-1451` | 每次 WS 升级 |
 | `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:670` | 接受 / 关闭 / 计数 |
 
-**比上面几条都靠前的一条：`post()` 本身是单循环的。** `src/webapp/uvcpp_web_app.cpp:1865-1885`
-里只有一份 `loop_tid_`/`post_queue_`（成员在 `src/webapp/uvcpp_web_app.h:1566-1574`），
-投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。而 `post()` 正是"把活儿挪到循环
-线程上"的**原语** —— 框架自己到处在用它，**它得先变成 per-loop**，别的一切才好谈。
+**比上面几条都靠前的一条：`post()` 本身是单循环的。** 它原来只有一份
+`loop_tid_`/`post_queue_`，投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。
+而 `post()` 正是"把活儿挪到循环线程上"的**原语** —— 框架自己到处在用它，
+**它得先变成 per-loop**，别的一切才好谈。
+
+> **已落地（W4 / 2a，2026-09-22）**：这一族成员现在装在 `loop_slot`
+> （`src/webapp/uvcpp_web_app.h:1577-1597`）里，`loops_`（`src/webapp/uvcpp_web_app.h:1613-1613`）
+> 是"每循环一格"的向量，`slot_here()`（`src/webapp/uvcpp_web_app.cpp:1913-1929`）
+> 按**调用线程**取格 —— 认不出是哪条循环的线程时给 0 号（§5.2）。
+> `n == 1` 走快路直接回 `loops_[0]`，**一次锁都不多加**，与今天逐字相同。
+> `post()` 现在是 `src/webapp/uvcpp_web_app.cpp:1884-1903`，`loop()` 是
+> `src/webapp/uvcpp_web_app.cpp:1905-1911`，`on_loop_thread()` 是
+> `src/webapp/uvcpp_web_app.cpp:1878-1882`。
 
 ### 4.1 好消息：大部分切分是"多建几个对象"，不是"给容器加锁"
 
@@ -288,7 +297,7 @@ n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server
 
 > **一个 app = n 份 per-loop 工作状态 + 一份注册之后冻结的共享表。**
 
-per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同它里面的 `contexts_`
+per-loop 那份装：`loop`、循环线程 id、`post_queue_`（**这三样已进 `loop_slot`**，见 §4.1.1 丙）、`http_`（连同它里面的 `contexts_`
 与 `clients_`）、`inflight_`、`upgraded_`、连接登记表、文件传输登记表、`idle_timer_`、
 `shutdown_timer_`。
 
@@ -297,10 +306,10 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 （`src/webapp/uvcpp_web_app.h:1293-1293`）。冻结期之后多线程只读，**不需要锁**。
 
 > **理由更正（2026-09-22，外部复核）：这条的理由**不是**"写点都在 `start()` 里"。**
-> `chain_storage_.push_back`（`src/webapp/uvcpp_web_app.cpp:2615-2615`）与
-> `chain_cache_[...]`（`src/webapp/uvcpp_web_app.cpp:2617-2617`）确实在 `start()` 里，但**那两个函数在请求路径上可达**：
-> `sync_chains()`（`src/webapp/uvcpp_web_app.cpp:2567-2567`）被 `:1181`（流式那条路）与 `src/webapp/uvcpp_web_app.cpp:2500-2500`（派发前）调用，
-> `build_chain()`（`src/webapp/uvcpp_web_app.cpp:2593-2593`）被 `:1183` 与 `src/webapp/uvcpp_web_app.cpp:2522-2522` 调用。让这些写**离开**请求路径的是
+> `chain_storage_.push_back`（`src/webapp/uvcpp_web_app.cpp:2655-2655`）与
+> `chain_cache_[...]`（`src/webapp/uvcpp_web_app.cpp:2657-2657`）确实在 `start()` 里，但**那两个函数在请求路径上可达**：
+> `sync_chains()`（`src/webapp/uvcpp_web_app.cpp:2607-2607`）被 `src/webapp/uvcpp_web_app.cpp:1187-1187`（流式那条路）与 `src/webapp/uvcpp_web_app.cpp:2540-2540`（派发前）调用，
+> `build_chain()`（`src/webapp/uvcpp_web_app.cpp:2633-2633`）被 `src/webapp/uvcpp_web_app.cpp:1189-1189` 与 `src/webapp/uvcpp_web_app.cpp:2562-2562` 调用。让这些写**离开**请求路径的是
 > 两件事叠起来：① `start()` 之后缓存已热；② `src/webapp/uvcpp_web_app.h:91` 那条
 > **成文契约**「**四、注册路由要在 `start()` 之前**」。按"写点在 `start()` 里"写，
 > 会被读成"运行中注册也无害" —— 而那正是契约里说的**安全网，不是用法**。
@@ -314,15 +323,15 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 
 > **更正二（2026-09-22，外部复核）：上面这句"只在注册期与 `start()` 期间写"对
 > `middlewares_` 不成立 —— 它是"每循环一次"，而"每循环一次"本身就是错的。**
-> `init_on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1770-1770`）是**循环线程的入口**，
+> `init_on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1778-1778`）是**循环线程的入口**，
 > 而访问日志那句 `middlewares_.insert(middlewares_.begin(), web_middleware_access_log())`
-> （`src/webapp/uvcpp_web_app.cpp:1666-1666`）与 `++middleware_gen_`
-> （`src/webapp/uvcpp_web_app.cpp:1667-1667`）**当天就在这个入口里**（今天已经搬走，见下面的已落地）。
+> （`src/webapp/uvcpp_web_app.cpp:1674-1674`）与 `++middleware_gen_`
+> （`src/webapp/uvcpp_web_app.cpp:1675-1675`）**当天就在这个入口里**（今天已经搬走，见下面的已落地）。
 > n>1 时这个函数**每条循环各跑一次** ⇒
 > ① 插进 **n 份**访问日志中间件（每请求记 n 次。本库对这一档有读数：`off → info`
 > 是 +17~19% rps、每请求 19 → 25 次分配）；
 > ② 更要紧的是**竞态** —— `middlewares_` / `middleware_gen_` 在请求路径上被**读**
-> （`src/webapp/uvcpp_web_app.cpp:2582-2582`、`src/webapp/uvcpp_web_app.cpp:2606-2608`、`src/webapp/uvcpp_web_app.cpp:2627-2627`/`src/webapp/uvcpp_web_app.cpp:2642-2642`/`src/webapp/uvcpp_web_app.cpp:2661-2661`），而 n 条循环**不同时起跑**：
+> （`src/webapp/uvcpp_web_app.cpp:2622-2622`、`src/webapp/uvcpp_web_app.cpp:2646-2648`、`src/webapp/uvcpp_web_app.cpp:2667-2667`/`src/webapp/uvcpp_web_app.cpp:2682-2682`/`src/webapp/uvcpp_web_app.cpp:2701-2701`），而 n 条循环**不同时起跑**：
 > A 循环已经在服务（首命中某路由 ⇒ `build_chain()` 读 `middlewares_`）时，B 循环的
 > 初始化正在 `insert` ⇒ 对 `std::vector<uvcpp_web_middleware>` 与那个 `size_t` 的
 > **未同步读写**。
@@ -337,10 +346,10 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 > —— 哪天各循环各 bind，`bound_port_` / `loop_started_` 就是后写覆盖。
 
 **已落地（2026-09-22）**：这一半已经拆开了 —— 每进程那半是
-`init_process_once()`（`src/webapp/uvcpp_web_app.cpp:1593`），每循环那半仍是
-`init_on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1770`）。两处调用点都按
-**先每进程、后每循环**的次序调它们（`src/webapp/uvcpp_web_app.cpp:1518-1568` 与
-`src/webapp/uvcpp_web_app.cpp:1570-1591`，理由见 §4.1.1 甲）。上面 ①② 两条后果随之消失：
+`init_process_once()`（`src/webapp/uvcpp_web_app.cpp:1601-1601`），每循环那半仍是
+`init_on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1778-1778`）。两处调用点都按
+**先每进程、后每循环**的次序调它们（`src/webapp/uvcpp_web_app.cpp:1524-1575` 与
+`src/webapp/uvcpp_web_app.cpp:1577-1599`，理由见 §4.1.1 甲）。上面 ①② 两条后果随之消失：
 那两句现在**只跑一次**，而且跑在 `listen()` 之前 —— n>1 时工作循环正是从 `listen()`
 里面被放行的，放行那一刻这份配置已经冻结。
 
@@ -369,31 +378,40 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 | `work_limit_` | `src/webapp/uvcpp_web_app.h:1231-1231` |
 
 **其中 `middlewares_` 原本是这一格里唯一在错误的位置被写的**：写点
-（`src/webapp/uvcpp_web_app.cpp:1666-1666` 与 `src/webapp/uvcpp_web_app.cpp:1667-1667`）
+（`src/webapp/uvcpp_web_app.cpp:1674-1674` 与 `src/webapp/uvcpp_web_app.cpp:1675-1675`）
 当时落在循环线程的入口里，而所有者是**进程**（上面那条更正二）。
 **2026-09-22 已落地**：这两句所属的函数现在是 `init_process_once()`
-（`src/webapp/uvcpp_web_app.cpp:1593`）—— **行号没动，换的是函数**。甲这一格其余各笔
+（`src/webapp/uvcpp_web_app.cpp:1601-1601`）—— **行号没动，换的是函数**。甲这一格其余各笔
 （`uvcpp_logger::set_level`、`router_.set_auto_options` / `set_head_as_get`）也一并搬了过来。
 
 **乙、每进程一份的可变量**
 
 | 成员 | 位置 | 为什么是进程级 |
 |---|---|---|
-| `bound_port_` | `src/webapp/uvcpp_web_app.h:1600-1600` | 一个 app 一个监听端口（`bind()` 只调一次）。 |
+| `bound_port_` | `src/webapp/uvcpp_web_app.h:1639-1639` | 一个 app 一个监听端口（`bind()` 只调一次）。 |
 | `started_once_` | `src/webapp/uvcpp_web_app.h:1558-1558` | "这个 app 起过了"，与几条循环无关。 |
-| `stopping_` | `src/webapp/uvcpp_web_app.h:1564-1564` | 它答的是"这次停机请求受理过了没有"（幂等用 `exchange`，`src/webapp/uvcpp_web_app.cpp:1824-1824`）。`shutdown_phase_` 才是"我这条循环走到第几步" —— **两者今天挨着写，很容易被一起搬**。 |
-| `running_` / `loop_started_` | `src/webapp/uvcpp_web_app.h:1563-1563` / `src/webapp/uvcpp_web_app.h:1562-1562` | 它们是**聚合量**："有没有任何一条循环在跑"。`stop()` 的早退判据（`src/webapp/uvcpp_web_app.cpp:1820-1820`）在 n>1 时要读这个语义，不是"我这条循环"。 |
-| `thread_` / `thread_started_` / `threading_` | `src/webapp/uvcpp_web_app.h:1555-1557` | 单数 ⇒ 向量。`join()`（`src/webapp/uvcpp_web_app.cpp:1836-1848`）、`start_background()`（`src/webapp/uvcpp_web_app.cpp:1518-1568`）、析构三处都按"一个线程"写。 |
+| `stopping_` | `src/webapp/uvcpp_web_app.h:1564-1564` | 它答的是"这次停机请求受理过了没有"（幂等用 `exchange`，`src/webapp/uvcpp_web_app.cpp:1837-1837`）。`shutdown_phase_` 才是"我这条循环走到第几步" —— **两者今天挨着写，很容易被一起搬**。 |
+| `running_` / `loop_started_` | `src/webapp/uvcpp_web_app.h:1563-1563` / `src/webapp/uvcpp_web_app.h:1562-1562` | 它们是**聚合量**："有没有任何一条循环在跑"。`stop()` 的早退判据（`src/webapp/uvcpp_web_app.cpp:1833-1833`）在 n>1 时要读这个语义，不是"我这条循环"。 |
+| `thread_` / `thread_started_` / `threading_` | `src/webapp/uvcpp_web_app.h:1555-1557` | 单数 ⇒ 向量。`join()`（`src/webapp/uvcpp_web_app.cpp:1849-1862`）、`start_background()`（`src/webapp/uvcpp_web_app.cpp:1524-1575`）、析构三处都按"一个线程"写。 |
 
 **丙、每循环一份 —— 今天**全部**是单数成员**
 
+前两条（身份与投递）**已搬进 `loop_slot`**（`src/webapp/uvcpp_web_app.h:1577-1597`，
+W4 / 2a 已落地）。注意成员名去掉了尾下划线 —— 它们在结构体里，不再是类的直接成员：
+
 | 成员 | 位置 |
 |---|---|
-| `loop_tid_` / `tid_known_` / `tid_mutex_` | `src/webapp/uvcpp_web_app.h:1568-1568` / `src/webapp/uvcpp_web_app.h:1569-1569` / `src/webapp/uvcpp_web_app.h:1567-1567` |
-| `async_` | `src/webapp/uvcpp_web_app.h:1572-1572` —— **一个 `uv_async` 只能服务它注册的那条循环**，这条最硬 |
-| `post_queue_` / `post_mutex_` | `src/webapp/uvcpp_web_app.h:1574-1574` / `src/webapp/uvcpp_web_app.h:1573-1573` |
-| `idle_timer_` | `src/webapp/uvcpp_web_app.h:1582-1582` |
-| `shutdown_timer_` / `shutdown_deadline_ms_` / `shutdown_phase_` | `src/webapp/uvcpp_web_app.h:1585-1585` / `src/webapp/uvcpp_web_app.h:1586-1586` / `src/webapp/uvcpp_web_app.h:1598-1598` |
+| `loop_tid` / `tid_known` / `tid_mutex` | `src/webapp/uvcpp_web_app.h:1590-1590` / `src/webapp/uvcpp_web_app.h:1591-1591` / `src/webapp/uvcpp_web_app.h:1589-1589` |
+| `async` | `src/webapp/uvcpp_web_app.h:1594-1594` —— **一个 `uv_async` 只能服务它注册的那条循环**，这条最硬 |
+| `post_queue` / `post_mutex` | `src/webapp/uvcpp_web_app.h:1596-1596` / `src/webapp/uvcpp_web_app.h:1595-1595` |
+| `loop` / `index` | `src/webapp/uvcpp_web_app.h:1586-1586` / `src/webapp/uvcpp_web_app.h:1582-1582` |
+
+下面这些**还是类的单数成员**（2b / 2c 才搬）：
+
+| 成员 | 位置 |
+|---|---|
+| `idle_timer_` | `src/webapp/uvcpp_web_app.h:1621-1621` |
+| `shutdown_timer_` / `shutdown_deadline_ms_` / `shutdown_phase_` | `src/webapp/uvcpp_web_app.h:1624-1624` / `src/webapp/uvcpp_web_app.h:1625-1625` / `src/webapp/uvcpp_web_app.h:1637-1637` |
 | `inflight_` / `flushing_` | `src/webapp/uvcpp_web_app.h:1507-1507` / `src/webapp/uvcpp_web_app.h:1516-1516` |
 | `upgraded_` | `src/webapp/uvcpp_web_app.h:1451-1451` |
 | `registry_` | `src/webapp/uvcpp_web_app.h:1453-1453` |
@@ -405,11 +423,11 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 **戊、只读常量，不分类**：`empty_chain_`（`src/webapp/uvcpp_web_app.h:1543-1543`）。
 
 **己、三个"每循环"的访问器**（不是成员，所以上面几张表都装不下，但同一类）：
-`on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1865-1865`）、`post()`（`src/webapp/uvcpp_web_app.cpp:1870-1870`）、
-`loop()`（`src/webapp/uvcpp_web_app.cpp:1887-1887`）—— 三个都在 `uvcpp_web_context_host` 接口上
+`on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1878-1878`）、`post()`（`src/webapp/uvcpp_web_app.cpp:1884-1884`）、
+`loop()`（`src/webapp/uvcpp_web_app.cpp:1905-1905`）—— 三个都在 `uvcpp_web_context_host` 接口上
 （`src/webapp/uvcpp_web_context.h:101-142`），今天都用**唯一那条**循环作答。其中
 `loop()` 有个不在显然处的调用点：`serve_static()` 的 handler 在**请求时**才要它
-（`src/webapp/uvcpp_web_app.cpp:1271` 那行 `st->serve(req, resp, next, self->loop())`，
+（`src/webapp/uvcpp_web_app.cpp:1277-1277` 那行 `st->serve(req, resp, next, self->loop())`，
 注释就写着"循环要到请求时才取"）⇒ n>1 之后它必须回答**这条连接所在的那条**循环。
 
 > **答错循环的后果不是"等"，是数据竞争**（外部复核 2026-09-22 更正）。`work->queue_work()`
@@ -531,7 +549,7 @@ n 个循环之后变成跨核缓存行打架**：
 
 ### 4.4 TLS：CTX 共享、SSL 对象不共享
 
-`SSL_CTX` 是 per-app 的，`start()` 里交给每个 tcp_server（`src/webapp/uvcpp_web_app.cpp:1737-1737`）。
+`SSL_CTX` 是 per-app 的，`start()` 里交给每个 tcp_server（`src/webapp/uvcpp_web_app.cpp:1745-1745`）。
 注册期建好、之后只读 ⇒ n 个循环共享同一份是对的；但**每个循环的 `SSL` 对象必须是这个循环
 自己的**，跨循环复用 SSL 对象是 UB。这条要按"新加 I/O 入口逐个重载核"的老规矩走一遍
 （本库已经在 TLS 上漏接过两次）。
@@ -606,7 +624,7 @@ API 误用也是直接终止（先例见 `src/handle/uvcpp_handle.cpp:363` 引�
 
 ### 5.3 `stop()` / `join()` 从"一条"变成"n 条"
 
-`stop()`（`src/webapp/uvcpp_web_app.cpp:1819-1819`）与 `join()`（`src/webapp/uvcpp_web_app.cpp:1836-1836`）今天按一条线程写。
+`stop()`（`src/webapp/uvcpp_web_app.cpp:1832-1832`）与 `join()`（`src/webapp/uvcpp_web_app.cpp:1849-1849`）今天按一条线程写。
 n 条之后：`stop()` 必须**幂等且覆盖全部**，`join()` 必须 join n 条；停机看门狗的推进
 （`shutdown_step()`）要按**循环**而不是按 app 记账，否则"某一个循环卡住"会被别的循环的
 进展掩盖掉。
