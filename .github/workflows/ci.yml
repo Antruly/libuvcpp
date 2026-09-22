@@ -72,6 +72,26 @@ jobs:
           fi
           exit "$rc"
 
+      # 上面那条门禁**自己的**回归表：八种"引用被撞飞"的形状各造一遍，逐格
+      # 对期望。为什么非要有它：那个门禁的判据是"前提 A 成立则判 B"，前提不
+      # 成立时它不报错、只是**安静地走了另一条分支** —— 而"走了另一条分支"和
+      # "判过了"在输出里长得一模一样。没有这张表，任何人把某个分支改成恒假都
+      # 不会有人发现（实测：拆掉 `[胀]` 那条判据，门禁照样全绿）。
+      # 只在临时目录里现造样例，不碰真仓库，和上面那条同前提。
+      - name: Check doc line scenes (self-test of the gate above)
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/check_doc_lines_scenes.py 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '不符|Traceback|Error' | head -20 | tr '\n' ' ' \
+              | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=doc-lines-scenes::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
       - name: Configure & Build & Test (static)
         shell: bash
         run: |

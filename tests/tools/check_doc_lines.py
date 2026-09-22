@@ -57,6 +57,42 @@
 找不到才当成内容真的改了（`[刷]`），一样逐条印出来。附近有不止一段内容相同时报
 `[歧]`、不自动挪；平移的目标键上已经记着别的内容时报 `[撞]`、不覆盖。
 
+## 判"区间被内部插/删了行"（`[胀]`）：靠**尾部锚点**
+
+上面那套只有"同宽平移"一种几何：`find_shift_candidates` 只变 offset、
+**不变宽度**。于是在区间**内部**插/删行时（"改注释把引用撞飞"最常见的形状就是它），
+同宽候选**永远不存在** —— 判据落进 `[刷]`、锁被原地重刷，而那条引用从此罩着的
+是"前几行 + 插进来的行"，不是作者当初圈的那个块。**全绿。**
+
+几何事实：在区间内部第 `ins` 行插入 k 行（`start < ins <= end`）之后，老区间的
+各行要么原地不动（`ins` 之前）、要么后移 k 行（`ins` 之后）—— 而**老末行一定
+属于后者**（因为 `ins <= end`）。所以"老末行现在在哪"就足以算出 k。锁里因此
+多存**尾部锚点**（末行、倒数第二行）的哈希，判据是：
+
+  * 锚点都还在原位（k = 0）⇒ 内容在区间内部原地改了 ⇒ `[刷]`（照旧，不红）；
+  * 锚点**一致地**给出同一个 k != 0 ⇒ `[胀]`：**判红，且这一次不写锁**；
+  * 定位不了 / 几个锚点互相矛盾 ⇒ `[刷]`，并**如实印出"判不了"的条数**。
+
+**为什么没有首行锚点**（外部复核建议的原话是"首/末行文本哈希"）：插入点在区间
+内部时老首行**不动**，它给不出 k；只有插入点恰好落在 `start` 上时它才动，而那时
+老末行照样动（尾部锚点已经覆盖到了）。所以首行锚点**一分覆盖都买不到**，
+只多一次"恰好在附近唯一"的误定位机会。这条是照着几何推的，也照着场景表验的。
+
+**存几个尾部锚点是量出来的，不是估的**（本仓 847 条锁条目、±`SHIFT_SCAN` 窗口内
+唯一才可定位）：1 个 77.7%、**2 个 90.4%**、3 个 93.5%。取 2 个 —— 第三个只买
+3 个百分点，却要多一列、多一次误定位机会。
+
+**剩下的 9.6% 是明知判不了的**（末两行都是 `}` 那种满文件都有的行），报告里按
+`[记]` 印出条数 —— "判不了"必须能看见，不然它和"判过了"在输出里长得一样。
+
+## `[新]` / `[撤]`：锁的**集合**变了
+
+原来只有 `[刷]` 那一族在说"已有条目的内容变了"，而引用**新增/消失**是静默的：
+`want is None` 直接写进锁，文档里删掉的引用则随重写无声消失。两条现在都印出来
+（带文档行号、引用原文、被引区间的首/末行），并各自给一个计数。报告末尾另有一行
+**自检**，把"清单里有几条"和"实际印了几条"对一遍 —— 印漏一条是打印机的 bug、
+不是数据问题，所以自检不过也判红。
+
 ## 引用的写法（本批规范化后只有一种形状）
 
     src/<module>/<file>:<line>
@@ -335,13 +371,28 @@ def read_range(root, path, start, end):
     return norm(raw), raw, None
 
 
-def content_hash(root, path, start, end):
-    """锁文件用的哈希。逐行去尾空白，避免一次格式化就全网飘红。"""
-    full = os.path.join(root, path)
-    with open(full, encoding="utf-8") as f:
-        lines = f.read().splitlines()
+def read_lines(root, path):
+    """读一个源文件的行表，按**同一套** BOM 规矩处理。读不了返回 None。
+
+    这套规矩以前抄了三份（`content_hash` / `find_shift_candidates`，现在再加
+    尾部锚点那份）：任一份不一致，算出来的哈希就永远对不上锁里的那个，
+    对应那半检测会**静默失效**（退化成原地重哈希）而不是报错。
+    """
+    try:
+        with open(os.path.join(root, path), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
     if lines:
         lines[0] = lines[0].lstrip("﻿")
+    return lines
+
+
+def content_hash(root, path, start, end):
+    """锁文件用的哈希。逐行去尾空白，避免一次格式化就全网飘红。"""
+    lines = read_lines(root, path)
+    if lines is None:
+        return None
     return hash_lines(lines, start, end)
 
 
@@ -349,6 +400,24 @@ def hash_lines(lines, start, end):
     """算行表里某个区间的锁哈希（`content_hash` 与平移扫描共用同一套）。"""
     body = "\n".join(TRAIL_WS_RE.sub("", x) for x in lines[start - 1:end])
     return hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+
+
+# 锁里每条引用另存几个**尾部锚点**的哈希（末行、倒数第二行……）。
+# 用途与取值理由见文件头「判『区间被内部插/删了行』」。1 个覆盖 77.7%、
+# 2 个 90.4%、3 个 93.5%（本仓 847 条实测），取 2。
+TAIL_ANCHORS = 2
+
+# 区间太短（只有一行）时那个锚点不存在，锁里写 `-`。
+ANCHOR_NONE = "-"
+
+
+def range_hashes(lines, start, end, tails=TAIL_ANCHORS):
+    """`(整段哈希, [尾部锚点哈希...])`。锚点从末行往前数，超出区间写 None。"""
+    out = []
+    for j in range(tails):
+        pos = end - j
+        out.append(hash_lines(lines, pos, pos) if pos >= start else None)
+    return hash_lines(lines, start, end), out
 
 
 # `--update` 找"这条引用的内容整体挪走了几行"时的扫描半径。
@@ -363,16 +432,9 @@ def find_shift_candidates(root, path, start, end, want, scan=SHIFT_SCAN):
     只在 ±`scan` 行、**行数不变**的区间里找，返回全部候选（不是第一个）——
     候选多于一个意味着"内容变了"和"内容挪了"分不开，调用方必须拒绝自动跟着挪。
     """
-    full = os.path.join(root, path)
-    try:
-        with open(full, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except (IOError, OSError, UnicodeDecodeError):
+    lines = read_lines(root, path)
+    if lines is None:
         return []
-    if lines:
-        # 与 `content_hash` 同一套 BOM 处理：不一致的话这里算出来的哈希
-        # 永远对不上锁里的那个，平移检测会静默失效（退化成原地重哈希）。
-        lines[0] = lines[0].lstrip("﻿")
     n = len(lines)
     span = end - start
     hits = []
@@ -384,6 +446,39 @@ def find_shift_candidates(root, path, start, end, want, scan=SHIFT_SCAN):
             if hash_lines(lines, ns, ne) == want:
                 hits.append((ns, ne))
     return hits
+
+
+def tail_shifts(lines, start, end, want_tails, scan=SHIFT_SCAN):
+    """区间**内部**被插/删了几行 —— 用尾部锚点各算一个 k。
+
+    返回 `(ks, unplaced)`：`ks` 是能定位的锚点给出的全部 k（去重前的原样，
+    调用方要判它们**一致**），`unplaced` 是定位不了的锚点个数。
+
+    "能定位"= 这个锚点的哈希在 ±`scan` 内**只有一处**（就是它自己那个位置，
+    或者在附近另一处）。附近有不止一处同样内容的行时**不算定位** ——
+    `}` 那种满文件都有的行定位不了，宁可说"判不了"，也不能猜一处。
+    """
+    n = len(lines)
+    ks = []
+    unplaced = 0
+    for j, want in enumerate(want_tails or []):
+        if want is None:
+            continue
+        pos = end - j
+        if pos < start:
+            break
+        if hash_lines(lines, pos, pos) == want:
+            ks.append(0)          # 还在原位
+            continue
+        lo, hi = max(1, pos - scan), min(n, pos + scan)
+        hits = [i for i in range(lo, hi + 1)
+                if i != pos and hash_lines(lines, i, i) == want]
+        if len(hits) == 1:
+            # 老位置 `end-j` 那一行现在在 `hits[0]` ⇒ 老末行在 `hits[0] + j`。
+            ks.append((hits[0] + j) - end)
+        else:
+            unplaced += 1
+    return ks, unplaced
 
 
 # ---------------------------------------------------------------------------
@@ -443,39 +538,43 @@ def lock_path(root):
 
 
 def read_lock(root):
+    """读锁文件。返回 `(hashes, tails)`；锁文件不存在返回 `(None, None)`。
+
+    `hashes[key]` = 区间内容哈希；`tails[key]` = 尾部锚点表。旧格式的条目没有
+    锚点那一列 ⇒ 它在 `tails` 里是 `None`，"内部插删"那条判据对**它**不生效，
+    报告里会印出这类条目的条数（"判不了"要能看见）。
+    """
     p = lock_path(root)
     if not os.path.isfile(p):
-        return None
-    out = {}
+        return None, None
+    hashes, tails = {}, {}
     with open(p, encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
             if not ln or ln.startswith("#"):
                 continue
             parts = ln.split()
-            if len(parts) != 2:
+            if len(parts) < 2:
                 continue
-            out[parts[0]] = parts[1]
-    return out
+            hashes[parts[0]] = parts[1]
+            if len(parts) >= 2 + TAIL_ANCHORS:
+                tails[parts[0]] = [None if x == ANCHOR_NONE else x
+                                   for x in parts[2:2 + TAIL_ANCHORS]]
+    return hashes, tails
 
 
-def write_lock(root, cites, old_lock=None):
-    """按目标区间去重后写出。返回 `(条目数, 报告)`。
+def plan_lock(root, cites, old_hashes, old_tails, force=False):
+    """算一遍新锁该是什么样，以及 `--update` 这次干了什么。**不写文件。**
 
-    旧形状是"按现在的位置重算一遍哈希"，那在**上方插了几行**时是错的：原地重哈希
-    会把一条本来正确的引用盖成"指向别处"的错引用，而且从此全绿。所以现在对不上时
-    先找平移（见 `find_shift_candidates`），找得到就**跟着挪、哈希保持不变**。
+    返回 `(seen, rep)`：`seen[key] = (整段哈希, 尾部锚点表)`；`rep` 的每一类
+    都对应报告里的一种标记，见 `print_update_report`。
 
-    报告里四样都是**要人看见**的 —— `--update` 的产出只有被人读过才有意义：
-
-      * `moved`：内容逐字节没变，只是整体挪了。锁跟着挪了，**而文档里那条引用
-        自己写的行号没跟着挪** ⇒ 下一次门禁会报"锁文件里没有这一条"。那不是
-        门禁抽风，是它在说"文档里那条 `文件:行号` 也要一起改"。
-      * `restamped`：同一位置的内容真的改了，哈希重刷，人工核引述还对不对。
-      * `ambiguous`：附近有不止一段内容与旧哈希相同，分不清该跟哪一个 ⇒ 不自动
-        挪（按"内容变了"处理），交给人定。
-      * `conflicts`：平移的目标键上已经有一条**不同**内容的记录 ⇒ 不覆盖。
+    对不上时先找平移（见 `find_shift_candidates`），找得到就**跟着挪、
+    哈希保持不变**；同宽候选一个都没有时再用尾部锚点判"是不是被内部插/删了"
+    （见文件头）。**`[胀]` 那一条不写进新锁** —— 它是判红，不许盖章。
     """
+    old_hashes = old_hashes or {}
+    old_tails = old_tails or {}
     by_key = {}
     for c in cites:
         if c.path:
@@ -483,81 +582,233 @@ def write_lock(root, cites, old_lock=None):
 
     seen = {}
     moved, restamped, ambiguous, conflicts = [], [], [], []
+    added, grown, undecided = [], [], []
+    legacy = 0
 
     for key in sorted(by_key):
         cs = by_key[key]
         path, start, end = cs[0].path, cs[0].start, cs[0].end
-        got = content_hash(root, path, start, end)
-        want = (old_lock or {}).get(key)
+        lines = read_lines(root, path)
+        if lines is None:
+            continue                      # 判据 1/2 已经报过这一格了
+        got, got_tails = range_hashes(lines, start, end)
+        want = old_hashes.get(key)
+        if want is not None and (old_tails or {}).get(key) is None:
+            legacy += 1
 
-        if want is None or got == want:
-            seen[key] = got
+        if want is None:
+            added.append((key, cs))
+            seen[key] = (got, got_tails)
+            continue
+        if got == want:
+            seen[key] = (got, got_tails)
             continue
 
         cands = find_shift_candidates(root, path, start, end, want)
         if len(cands) > 1:
             ambiguous.append((key, cands, cs))
-            seen[key] = got
+            seen[key] = (got, got_tails)
             continue
         if len(cands) == 1:
             ns, ne = cands[0]
             new_key = "%s:%d-%d" % (path, ns, ne)
-            if new_key in seen and seen[new_key] != want:
-                conflicts.append((key, new_key, seen[new_key], want, cs))
-                seen[key] = got
+            if new_key in seen and seen[new_key][0] != want:
+                conflicts.append((key, new_key, seen[new_key][0], want, cs))
+                seen[key] = (got, got_tails)
                 continue
-            seen[new_key] = want
+            _h, new_tails = range_hashes(lines, ns, ne)
+            seen[new_key] = (want, new_tails)
             moved.append((key, new_key, ns - start, cs))
             continue
-        restamped.append((key, want, got, cs))
-        seen[key] = got
 
+        # 同宽候选一个都没有 ⇒ 要么原地改了内容，要么区间被内部插/删撑动了。
+        # 后者正是"改注释把引用撞飞"最常见的形状，而上面那套几何（只变 offset、
+        # 不变宽度）**永远找不到同宽候选** ⇒ 靠尾部锚点算 k。
+        ks, unplaced = tail_shifts(lines, start, end, (old_tails or {}).get(key))
+        if ks and len(set(ks)) == 1 and ks[0] != 0:
+            grown.append((key, ks[0], ks, cs))
+            if force:
+                # `--force` 是"我核过了，这条是误报" ⇒ 按**现在**的内容盖章。
+                # 不写进 seen 而不是"跳过"：跳过等于把这条引用从锁里**删掉**，
+                # 之后普通门禁会永远报"锁文件里没有这一条" —— 比盖章更糟。
+                seen[key] = (got, got_tails)
+            continue                      # 默认**不写进 seen**：判红，不盖章
+        if len(set(ks)) > 1:
+            undecided.append(("split", key, sorted(set(ks)), [], cs))
+        else:
+            undecided.append(("unplaced", key, [], unplaced, cs))
+        restamped.append((key, want, got, cs))
+        seen[key] = (got, got_tails)
+
+    # `[胀]` 那几条**故意**没进 `seen`，但它们在文档里**还在** —— 不能顺手报成
+    # `[撤]`（那条写的是"文档里已经找不到了"）。两件事分开报，各自都得能看见。
+    skip = set(old for old, _n, _d, _cs in moved)
+    skip |= set(key for key, _k, _ks, _cs in grown)
+    dropped = [(k, old_hashes[k]) for k in sorted(old_hashes)
+               if k not in seen and k not in skip]
+    return seen, {"moved": moved, "restamped": restamped, "ambiguous": ambiguous,
+                  "conflicts": conflicts, "added": added, "dropped": dropped,
+                  "grown": grown, "undecided": undecided, "legacy": legacy}
+
+
+def write_lock_file(root, seen):
+    """把算好的锁写出去。格式与理由见文件头。"""
     p = lock_path(root)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write("# 行号引用锁文件 —— 由 tests/tools/check_doc_lines.py --update 生成。\n")
         f.write("# 不要手改：这个文件的作用是让「源码被引用处改了字」必须被人重新确认一次。\n")
-        f.write("# 格式：<文件>:<起>-<止> <sha1_16(区间内容, 逐行去尾空白)>\n")
+        f.write("# 格式：<文件>:<起>-<止> <sha1_16(区间内容, 逐行去尾空白)>"
+                " <sha1_16(末行)> <sha1_16(倒数第二行)>\n")
+        f.write("# 后两列是**尾部锚点**（`%s` = 区间只有一行、没有这个锚点）："
+                "用来判「区间被内部插/删了行」，理由见脚本文件头。\n" % ANCHOR_NONE)
         for k in sorted(seen):
-            f.write("%s %s\n" % (k, seen[k]))
+            h, tails = seen[k]
+            f.write("%s %s %s\n"
+                    % (k, h, " ".join(ANCHOR_NONE if t is None else t
+                                      for t in tails)))
     os.replace(tmp, p)
-    return len(seen), {"moved": moved, "restamped": restamped,
-                       "ambiguous": ambiguous, "conflicts": conflicts}
 
 
-def print_update_report(rep):
-    """把 `--update` 干了什么逐条印出来。**不判红**：刷新锁文件本身没出错，
-    出错的是"刷新完之后没人知道文档里还有行号要改"这件事。"""
+def clip(s, n=72):
+    """报告里回显一行源码时截断 —— 长行会把报告的骨架冲掉。"""
+    s = s.strip()
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def print_edges(root, key, cs):
+    """印一条引用的落点：文档行号 + 原文 + 被引区间的首/末行。"""
+    path, rng = key.rsplit(":", 1)
+    start, end = (int(x) for x in rng.split("-"))
+    for c in cs:
+        print("       %s 第 %d 行写的 `%s`" % (c.doc, c.lineno, c.raw))
+    lines = read_lines(root, path)
+    if lines is None or end > len(lines) or start < 1:
+        return
+    print("       被引区间首行 `%s`" % clip(lines[start - 1]))
+    print("       被引区间末行 `%s`" % clip(lines[end - 1]))
+
+
+def print_update_report(root, rep):
+    """把 `--update` 干了什么逐条印出来，返回报告自检过没过。
+
+    **默认不判红**：刷新锁文件本身没出错，出错的是"刷新完之后没人知道文档里
+    还有行号要改"这件事。两个例外：`[胀]`（那一条根本没写进锁）与报告自检
+    （印漏一条是打印机的 bug，不是数据问题）。
+
+    每一类都**逐条印**、并**各自报一个计数**，末尾那行自检把"清单里有几条"和
+    "实际印了几条"对一遍 —— 只报数不印条目，或者只印不报数，都会让"这一条
+    没被看见"这件事变得不可判。
+    """
     moved, restamped = rep["moved"], rep["restamped"]
     ambiguous, conflicts = rep["ambiguous"], rep["conflicts"]
-    print("  复核报告：平移 %d / 重刷 %d / 歧义 %d / 撞键 %d"
-          % (len(moved), len(restamped), len(ambiguous), len(conflicts)))
+    added, dropped = rep["added"], rep["dropped"]
+    grown, undecided = rep["grown"], rep["undecided"]
 
+    print("  复核报告：平移 %d / 重刷 %d / 新增 %d / 撤销 %d / 撑长 %d / "
+          "歧义 %d / 撞键 %d"
+          % (len(moved), len(restamped), len(added), len(dropped), len(grown),
+             len(ambiguous), len(conflicts)))
+
+    printed = {}
+
+    n = 0
     for old, new, delta, cs in moved:
+        n += 1
         print("  [移] %s -> %s（内容逐字节没变，整体挪了 %+d 行）"
               % (old, new, delta))
         for c in cs:
             print("       **%s 第 %d 行写的 `%s` 也要一起改成 %s**"
                   % (c.doc, c.lineno, c.raw, new))
+    printed["平移"] = (n, len(moved))
 
+    n = 0
     for key, want, got, cs in restamped:
+        n += 1
         print("  [刷] %s 的内容真的改了（锁 %s，实际 %s）" % (key, want, got))
         for c in cs:
             print("       %s 第 %d 行 `%s` —— 人工核一遍引述还对不对"
                   % (c.doc, c.lineno, c.raw))
+    printed["重刷"] = (n, len(restamped))
 
+    n = 0
+    for key, cs in added:
+        n += 1
+        print("  [新] %s —— 锁里没有这一条，本次记进锁" % key)
+        print_edges(root, key, cs)
+    printed["新增"] = (n, len(added))
+
+    n = 0
+    for key, h in dropped:
+        n += 1
+        print("  [撤] %s —— 锁里原本有、文档里已经找不到了（旧哈希 %s）"
+              % (key, h))
+    printed["撤销"] = (n, len(dropped))
+
+    n = 0
+    for key, k, ks, cs in grown:
+        n += 1
+        print("  [胀] %s —— 区间**内部**%s了 %d 行（尾部锚点一致地给出 k=%s），"
+              "锁里**没有**这一条" % (key, "插进" if k > 0 else "删掉", abs(k), ks))
+        for c in cs:
+            print("       %s 第 %d 行 `%s` —— 这条引用罩着的已经不是当初那个块了"
+                  % (c.doc, c.lineno, c.raw))
+    printed["撑长"] = (n, len(grown))
+
+    n = 0
     for key, cands, cs in ambiguous:
+        n += 1
         print("  [歧] %s 附近有 %d 段内容和旧哈希一样（%s），不自动跟着挪"
               % (key, len(cands),
                  ", ".join("%d-%d" % (a, b) for a, b in cands)))
         for c in cs:
             print("       %s 第 %d 行 `%s`" % (c.doc, c.lineno, c.raw))
+    printed["歧义"] = (n, len(ambiguous))
 
+    n = 0
     for key, new_key, there, want, cs in conflicts:
+        n += 1
         print("  [撞] %s 想挪到 %s，但那上面已经记着 %s（这次要写的是 %s），"
               "没覆盖" % (key, new_key, there, want))
         for c in cs:
             print("       %s 第 %d 行 `%s`" % (c.doc, c.lineno, c.raw))
+    printed["撞键"] = (n, len(conflicts))
+
+    # "判不了"必须自己报数并逐条印：这一格判据的牙只在"锚点附近唯一"时才咬得动，
+    # 报成静默的话，它和"判过了"在输出里长得一模一样。
+    n_split = 0
+    n_unplaced = 0
+    for kind, key, ks, unplaced, cs in undecided:
+        if kind == "split":
+            n_split += 1
+            print("  [记] 判不了（锚点互相矛盾，给出 k=%s）：%s —— 可能正好插在"
+                  "区间最末尾那两行之间" % (ks, key))
+        else:
+            n_unplaced += 1
+            print("  [记] 判不了（尾部锚点在附近不唯一，%d 个都定位不了）：%s"
+                  % (unplaced, key))
+        for c in cs:
+            print("       %s 第 %d 行 `%s`" % (c.doc, c.lineno, c.raw))
+    if n_split:
+        print("  [记] 判不了 %d 条：尾部锚点互相矛盾" % n_split)
+    if n_unplaced:
+        print("  [记] 判不了 %d 条：尾部锚点在 ±%d 行内不唯一（`}` 那种到处都有的"
+              "末行）—— 判据只在末行/倒数第二行附近唯一时判得出「区间被撑长」"
+              % (n_unplaced, SHIFT_SCAN))
+    printed["判不了"] = (n_split + n_unplaced, len(undecided))
+
+    if rep["legacy"]:
+        print("  [记] 锁里有 %d 条**旧格式**条目（没有尾部锚点那一列），"
+              "「区间被撑长」这条判据对它们不生效；刷新一次就都补上了"
+              % rep["legacy"])
+
+    bad = [k for k, (a, b) in printed.items() if a != b]
+    print("  报告自检：%s" % " ".join("%s %d/%d" % (k, a, b)
+                                     for k, (a, b) in printed.items()))
+    if bad:
+        print("  [红] 报告自检不过：%s —— 清单里有、却没印出来。这是"
+              "`print_update_report` 的 bug，不是数据问题。" % ", ".join(bad))
+    return not bad
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +830,9 @@ def main():
                     help="只列出扫到的引用，不判（规范化时用）")
     ap.add_argument("--update", action="store_true",
                     help="复核后刷新锁文件")
+    ap.add_argument("--force", action="store_true",
+                    help="只在 --update 时有意义：强行给「区间被内部插/删了行」"
+                         "那几条盖章。**逐条核过、确认是漏报**时才用。")
     args = ap.parse_args()
     root = args.root or os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -647,7 +901,7 @@ def main():
         ok("判据 2：%d 条引用的行号都落在文件里，且不是空行" % len(good))
 
     # ---- 判据 3：锁文件 ----
-    lock = read_lock(root)
+    lock, lock_tails = read_lock(root)
     if lock is None:
         fail("%s 不在 —— 删掉锁文件不能绕过判据 3" % LOCK_REL)
     else:
@@ -698,9 +952,31 @@ def main():
 
     print("\n==== 汇总 ====")
     if args.update:
-        n, rep = write_lock(root, good, lock)
-        print("锁文件已刷新：%s（%d 条目标区间）" % (LOCK_REL, n))
-        print_update_report(rep)
+        seen, rep = plan_lock(root, good, lock, lock_tails, args.force)
+        ok_rep = print_update_report(root, rep)
+        # `[胀]` 那几条**没有**进 `seen` —— 它们不是"重刷一下就算了"，
+        # 而是"这条引用罩着的已经不是当初那个块了"。盖章就等于把这个错误
+        # 固化进锁里，从此全绿（本仓已经在别的门禁上吃过一次这个亏）。
+        if rep["grown"] and not args.force:
+            print("  锁文件**没有**被改写（`%s` 原样）。" % LOCK_REL)
+            print("  上面那 %d 条「撑长」得先把**文档里**写的行号改对，再跑一次"
+                  " `--update`。确实是误报（比如那两行内容恰好和别处重了）"
+                  "才用 `--force`。" % len(rep["grown"]))
+            print("\n==== 汇总 ====")
+            print("红 %d 条：区间被内部插/删了行，锁里不许盖章" % len(rep["grown"]))
+            return 1
+        if rep["grown"]:
+            print("  [记] --force：%d 条「撑长」被强行盖章了 —— 请确认你逐条核过"
+                  "（这是个**没判红**，不是判绿）。" % len(rep["grown"]))
+        write_lock_file(root, seen)
+        print("锁文件已刷新：%s（%d 条目标区间）" % (LOCK_REL, len(seen)))
+        if not ok_rep:
+            print("  [红] 上面那行报告自检不过 ⇒ 退出 1。"
+                  "这不是数据问题，是打印机漏印了 —— 但「漏印」和「本来就没有」"
+                  "在日志里长得一样，所以照样算红。")
+            print("\n==== 汇总 ====")
+            print("红 1 条：`--update` 的报告自检不过（打印机漏印）")
+            return 1
         return 0
     if failures:
         print("红 %d 条：" % len(failures))
