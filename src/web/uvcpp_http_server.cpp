@@ -150,8 +150,10 @@ int uvcpp_http_server::bindIpv6(const char* ip, int port) {
 }
 
 int uvcpp_http_server::listen(int backlog) {
-  // **表要在 acceptor 起来之前就定好尺寸。** 多循环下 `uvcpp_tcp_server::listen()`
-  // 里会把工作循环的线程放行，那些线程一旦接手连接就会走 `on_tcp_connection()`
+  // **表要在 acceptor 起来之前就定好尺寸。** 多循环下工作循环的线程是在
+  // `uvcpp_tcp_server::set_loops()` 里被放行的（那句 `w->start()`，
+  // `src/net/uvcpp_tcp_server.cpp:332`）—— **不是**在 `listen()` 里，`listen()`
+  // 只做 bind + `uv_listen()`。那些线程一旦接手连接就会走 `on_tcp_connection()`
   // → `ctxs_of()`；表还是空的话那一步就是越界取表。`set_loops()` 必须在
   // `listen()` 之前调，"几条循环"在这一刻已经是定局，所以问得到。
   //

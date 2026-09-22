@@ -1015,11 +1015,50 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_http_server* http_server() { return http_; }
   uvcpp_tcp_server* tcp_server();
 
-  /** @brief 连接登记表（只读）。 */
-  const uvcpp_web_connection_registry& connections() const { return registry_; }
+  /**
+   * @brief **本线程所在循环**那一份连接登记表（只读）。
+   *
+   * 与 `loop()` 同一条语义：**不是"全 app 那份"**。多循环下登记表每格一份
+   * （设计稿 §4.1.1 丙），不在任何循环线程上时给 0 号（接受者）那一份。
+   *
+   * 所以这个引用**只看得见一条循环的连接**。要看总数用 `connection_count()`，
+   * 要逐循环看用 `connection_count_at()` —— 别拿它当"全部连接"遍历。
+   *
+   * 它给的是"**哪一份**"：那一份自己的线程边界不变（`uvcpp_web_connection_registry`
+   * 的 `@warning`：只在循环线程上用）。不在循环线程上时它给的是 0 号那一份，
+   * **不代表**从那个线程读它安全。
+   */
+  const uvcpp_web_connection_registry& connections() const {
+    return slot_here().registry;
+  }
 
-  /** @brief 当前活连接数。 */
-  size_t connection_count() const { return registry_.size(); }
+  /**
+   * @brief 当前活连接数 —— **所有循环之和**。
+   *
+   * 多循环下必须是和（设计稿 §6 第 2 条）：任何**一份**登记表的 `size()`
+   * 都只是某一条循环的局部读数，拿它当 app 级读数就会静默少报。
+   * `n == 1`（默认）时它与拆分前逐字节相同。
+   *
+   * @warning **这是个"把每一格的表加起来"的读数，所以它只在①本进程只有一条
+   *          循环、或者②所有循环都已经停下来之后才安全。** `n > 1` 且循环在
+   *          跑的时候，从**任何**线程调它（包括 0 号循环自己的线程）都会读到
+   *          别的线程正在改的 `std::map` —— 拆前只有一张表，所以从前不存在这
+   *          一条。要能在跑的时候读，得给每格配一个原子计数（net 层
+   *          `live_clients_` 就是那个形状），那是公开 `set_loops(n)` 那一批的
+   *          事；在那之前 `uvcpp_web_app` 的循环数恒为 1，这条只是边界。
+   */
+  size_t connection_count() const;
+
+  /**
+   * @brief 某一条循环名下的活连接数；0 号是接受者那一份。
+   *
+   * 与 net 层 `uvcpp_tcp_server::client_count_at()` 同一套口径（包括越界
+   * 返回 0）—— 设计稿 §6 第 4 条要的"看得见分布"就是这两个读数。
+   *
+   * @warning `loop_index` 不是本线程那条循环时，读的是**别人**的表 ——
+   *          同 `connection_count()` 的那条边界，别在循环跑着的时候跨线程调。
+   */
+  size_t connection_count_at(int loop_index) const;
 
   /**
    * @brief 在途请求数（上下文还挂在框架上的）——**请求数，不是连接数**。
@@ -1028,6 +1067,9 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 它必须是对每条连接的队列长度求和。写成 `inflight_.size()` 会**静默**
    * 退化成"有几条连接上有在途请求" —— 单连接的老用例照样过，只有真去数
    * 第二条的那天才会发现不对。
+   *
+   * @warning 与 `connection_count()` 同一条边界：它遍历每一格的在途队列表，
+   *          循环跑着的时候跨线程读是数据竞争（含从 0 号循环读别的格）。
    */
   size_t inflight_count() const { return inflight_total(); }
 
@@ -1089,7 +1131,9 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    *   * 放这里的是**每进程一份**的东西：日志级别、`middlewares_`、
    *     `router_` 的几个开关、连接/请求钩子、TLS 上下文、`bind`/`listen`、
    *     `bound_port_`。它们**必须在放行任何一条工作循环之前**跑完 ——
-   *     `listen()` 正是放行点（`set_loops(n)` 的 worker 是在那里面起来的）。
+   *     放行点是 `set_loops(n)`，具体是 `uvcpp_tcp_server::set_loops()` 里那句
+   *     `w->start()`（`src/net/uvcpp_tcp_server.cpp:332`）。**不是 `listen()`**：
+   *     `listen()` 只做 bind + `uv_listen()`，线程在它之前就已经起来了。
    *   * 放 `init_on_loop_thread()` 的是**每循环一份**的东西：线程身份、
    *     本循环那格（`async_`、两个定时器）。
    *
@@ -1434,23 +1478,69 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   /**
    * @brief 队首空出来了：把后面**已经定稿**的响应按顺序接着发出去。
    *
-   * 只在 `context_finished()` 弹掉队首之后调用。`flushing_` 为真时直接返回，
-   * 把递归压成迭代（见 `flushing_` 的注释）。
+   * 只在 `context_finished()` 弹掉队首之后调用。那一格的 `flushing` 为真时直接
+   * 返回，把递归压成迭代（见 `loop_slot::flushing` 的注释）。
    */
   void flush_out(uvcpp_web_conn_id id);
 
-  /**
-   * @brief 已经升级成 WS 的连接 id —— `idle_sweep()` 要跳过它们。
-   *
-   * **为什么不直接从登记表里摘掉**（`registry_.remove(id)`）：行为上两者等价
-   * （`idle_sweep` 都不再扫它），但摘掉会让 `on_connection_close` 拿到的 id
-   * 变成 0（`remove_by_client` 那时返回 false，关闭回调只能报 0），而用户
-   * 钩子的契约是"拿到这条连接的 id"。留着真实 id 还让 `connection_count()`
-   * 如实包含这些**开着的**连接。
-   */
-  std::set<uvcpp_web_conn_id> upgraded_;
+  // `upgraded_`（已升级成 WS 的 id，`idle_sweep()` 跳过它们）搬进了 `loop_slot`。
+  // **为什么不直接从登记表里摘掉**（`reg_of(id)->remove(id)`）：行为上两者等价
+  // （`idle_sweep` 都不再扫它），但摘掉会让 `on_connection_close` 拿到的 id
+  // 变成 0（`remove_by_client` 那时返回 false，关闭回调只能报 0），而用户
+  // 钩子的契约是"拿到这条连接的 id"。留着真实 id 还让 `connection_count()`
+  // 如实包含这些**开着的**连接。
 
-  uvcpp_web_connection_registry registry_;
+  // -----------------------------------------------------------------
+  // 登记表：本循环那一份，与"按 id 找份"
+  // -----------------------------------------------------------------
+  //
+  // 规则就一条：**id 自己带着循环号，所以按 id 走的操作先定位份，再动手。**
+  //
+  //   * 手上是 `uvcpp_tcp_client*` 或者正在**分配** id（`id_of` / `add` /
+  //     `remove_by_client`）⇒ 本循环那一份（`reg_here()`）—— 这条连接就是在
+  //     本循环的线程上被接受、被登记的。
+  //   * 手上是一个**id**（`find` / `client` / `note_*` / `mark_streaming` /
+  //     `activity_since` / `touch` / `is_streaming`）⇒ `reg_of(id)`。
+  //
+  // 为什么 id 那一路不图省事直接用本循环那份：这些入口的调用者**不保证**在
+  // 连接自己那条循环的线程上（`uvcpp_web_stream_sink` 是持 id 转发给
+  // `stream_*()` 的，`abort_request()` 可能从异步处理器的线程进来）。用
+  // `reg_of()` 之后"哪条循环"由 id 决定，与调用者是哪条线程无关。
+  //
+  // ★ **但"哪一份"不是"能不能读"。** 上面这条只解决**定位**，不解决**跨线程
+  // 访问** —— 那一份里的 `std::map` 仍然不是线程安全的（`uvcpp_web_connection.h`
+  // 里那个类自己的 `@warning`），而这一点**拆分前后一样**：拆前也只有同一个
+  // `std::map`、同一条 `@warning`。真要跨线程读公开的 `connection(id)` /
+  // `find(id)`，得投递到那份所在的循环再回话，或者给那一份自带锁 —— 那是公开
+  // `set_loops(n)` 那一批要定的事，本批只是把"哪一份"这件事做对。
+  //
+  // `n == 1` 下所有 id 的高段都是 0 ⇒ `reg_of()` 恒返回 0 号那一份 ⇒ 上面
+  // 这一整段与拆分前**逐字节相同**。
+
+  /** @brief 本线程所在循环那一份登记表（不可为空）。 */
+  uvcpp_web_connection_registry& reg_here();
+  const uvcpp_web_connection_registry& reg_here() const;
+
+  /**
+   * @brief 按 id 高段的循环号定位那一份登记表。
+   *
+   * @return 该份登记表；id 无效（0）或者循环号越界时返回 `nullptr` —— 调用方
+   *         按"这条连接不存在"处理。越界在正常运行时不可达（`set_loops()`
+   *         之后循环数只读），留着是因为 `nullptr` 比"越界取表"便宜。
+   */
+  uvcpp_web_connection_registry* reg_of(uvcpp_web_conn_id id);
+  const uvcpp_web_connection_registry* reg_of(uvcpp_web_conn_id id) const;
+
+  // 按 id 走的那几个操作的薄包装：定位不到那一份时给出与"这条连接不存在"
+  // 一致的返回值（`nullptr` / `false` / `0`），于是调用点不必各写一遍判空。
+  uvcpp_tcp_client* reg_client(uvcpp_web_conn_id id) const;
+  const uvcpp_web_connection* reg_find(uvcpp_web_conn_id id) const;
+  bool reg_note_read(uvcpp_web_conn_id id, int64_t now_ms);
+  bool reg_note_request_done(uvcpp_web_conn_id id);
+  bool reg_mark_streaming(uvcpp_web_conn_id id, bool streaming);
+  bool reg_is_streaming(uvcpp_web_conn_id id) const;
+  bool reg_touch(uvcpp_web_conn_id id, int64_t now_ms);
+  int64_t reg_activity_since(uvcpp_web_conn_id id) const;
 
   /** @brief 一条连接上的**一条**在途请求。 */
   struct out_entry {
@@ -1493,33 +1583,9 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   typedef std::vector<out_entry> out_queue;
 
-  /**
-   * @brief 在途请求，**按连接分组、组内按到达顺序** —— 流水线的顺序靠它维持。
-   *
-   * HTTP/1.1 要求响应按请求顺序发出（RFC 7230 §6.3.2）。请求本身照常并发跑，
-   * 但 `http_->send_response()` 的**调用顺序**必须等于到达顺序：协议层的写队列
-   * 本来就是按调用顺序 FIFO 的（`uvcpp_http_server.cpp` 的 `enqueue_write` /
-   * `pump_write`），所以顺序只要在这一层守住，协议层一行都不用改。
-   *
-   * 组内空了的键会被摘掉，因此 `find(id) != end()` 仍等价于"这条连接上有在途
-   * 请求" —— `idle_sweep()` 与停机的判据都靠它，**别留空队列在表里**。
-   */
-  std::map<uvcpp_web_conn_id, out_queue> inflight_;
-
-  /**
-   * @brief `flush_out()` 正在跑 —— 挡住"续发 → 收场 → 又续发"的递归。
-   *
-   * 被延迟的那条响应真正发出去之后会 `release()`，于是一路走到
-   * `context_finished()`，而它接着又要续发下一条。没有这个闸门，一次 N 条的
-   * 流水线突发会退栈 N 层；有了它，递归深度恒定，循环在 `flush_out()` 里迭代着走完。
-   */
-  bool flushing_ = false;
-
-  // 在途的分片下发，按连接分组。**只存裸指针**：transfer 由它自己的
-  // `shared_ptr` 自持（见 uvcpp_web_file.h），这里只是一个"断开时该取消谁"的
-  // 名册。detach 一定会配对发生，所以不会留悬垂项。
-  std::map<uvcpp_web_conn_id, std::vector<uvcpp_web_file_transfer*> >
-      file_transfers_;
+  // 上面四张按 id 索引的表（在途队列 / `flushing` / WS 豁免 / 文件传输名册）
+  // 都挂在 `loop_slot` 上，见 `slot_of()`。**不要按"本线程那一格"去找它们** ——
+  // 与登记表同一条理由（头文件上面那一节）。
 
   // 链缓存的存储。用 deque：push_back 不会让已有元素的地址失效，而上下文
   // 只存 `const std::vector<uvcpp_web_handler>*` —— 地址必须稳。
@@ -1576,7 +1642,10 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   struct loop_slot {
     explicit loop_slot(int i) : index(i), loop(nullptr), tid_known(false),
-                                async(nullptr) {}
+                                async(nullptr), idle_timer(nullptr),
+                                shutdown_timer(nullptr),
+                                shutdown_deadline_ms(0), shutdown_phase(0),
+                                registry(i), flushing(false) {}
 
     /// 循环号。0 号就是调用 `run()` / `start()` 的那个线程跑的那条。
     int index;
@@ -1594,6 +1663,83 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
     uvcpp_async* async;
     mutable std::mutex  post_mutex;
     std::deque<std::function<void()> > post_queue;
+
+    /**
+     * @brief 本格的闲置超时扫描器 / 停机看门狗（都**只在这条循环的线程上建**）。
+     *
+     * 与 `async` 同一条理由：`uv_timer` 是循环亲和的，一份状态一格。
+     * `idle_timeout_ms == 0` 时 `idle_timer` 压根不建 —— 关掉的功能在运行时
+     * 不该有任何开销（哪怕只是一拍一次的空转）。
+     */
+    uvcpp_timer* idle_timer;
+    uvcpp_timer* shutdown_timer;
+
+    /**
+     * @brief 本格的停机进度：宽限期截止时刻，与进行到第几拍。
+     *
+     * 每格各推各的 —— `shutdown_step()` 是这条循环自己的看门狗回调，它等的
+     * 是**这条循环上**的在途请求。合成一份的话，先推完的那条循环会把还没
+     * 轮到的那条的进度直接跳过去。
+     *
+     * `shutdown_phase` 的取值（看门狗每拍调一次 `shutdown_step()`）：
+     *
+     * | 值 | 含义 |
+     * |---|---|
+     * | 0 | 等在途请求跑完 / 宽限期到 |
+     * | 1 | WS Close 帧已排队，**排水期**（等它们真出网、会话自行关闭） |
+     * | 2 | 其余连接已发起关闭，**排水期**（等 `uv_close` 完成回调） |
+     * | 3 | 收尾（`finish_shutdown()`） |
+     */
+    int64_t shutdown_deadline_ms;
+    int     shutdown_phase;
+
+    /**
+     * @brief 本格名下的连接登记表。
+     *
+     * 与定时器同一族的理由，只是没有"句柄亲和"那么硬：表的 `std::map`
+     * 只在**本循环的线程**上被改（accept / close / 活动时间），而 `idle_sweep()`
+     * 又要按表遍历。合成一份的话，n 条循环就是在同时改同一个 `std::map`
+     * —— 而 `idle_timer` 进格之后这件事是**必然**发生的，不是理论风险。
+     *
+     * 用 `loop_index` 构造：发出去的 id 高段就是本格的号，于是"这个 id 归谁"
+     * 是一次位运算（`loop_of()`），不需要全 app 搜索。
+     */
+    uvcpp_web_connection_registry registry;
+
+    /**
+     * @brief 在途请求，**按连接分组、组内按到达顺序** —— 流水线的顺序靠它维持。
+     *
+     * HTTP/1.1 要求响应按请求顺序发出（RFC 7230 §6.3.2）。请求本身照常并发跑，
+     * 但 `http_->send_response()` 的**调用顺序**必须等于到达顺序：协议层的写队列
+     * 本来就是按调用顺序 FIFO 的（`uvcpp_http_server.cpp` 的 `enqueue_write` /
+     * `pump_write`），所以顺序只要在这一层守住，协议层一行都不用改。
+     *
+     * 组内空了的键会被摘掉，因此 `find(id) != end()` 仍等价于"这条连接上有在途
+     * 请求" —— `idle_sweep()` 与停机的判据都靠它，**别留空队列在表里**。
+     *
+     * 与登记表同一族的理由：两个改动点（请求到达时入队、响应发完时出队）都在
+     * **这条循环的线程**上，而 `idle_sweep()` 与停机看门狗要按它遍历/判空。
+     * 合成一份的话，n 条循环就是同时改同一个 `std::map`。
+     */
+    std::map<uvcpp_web_conn_id, out_queue> inflight;
+
+    /**
+     * @brief `flush_out()` 正在跑 —— 挡住"续发 → 收场 → 又续发"的递归。
+     *
+     * **每格一个**：它护的是"这一格的队"的递归深度，不是全进程的。合成一个
+     * `bool` 的话，A 循环在续发时会把 B 循环的续发一起挡掉 —— 而 B 那一次的
+     * `flush_out()` 是**直接返回**，它名下的响应就永远躺在队里没人推。
+     * 同一格内的重入仍被挡住，所以深度恒定的那条性质不变。
+     */
+    bool flushing;
+
+    /// 已经升级成 WS 的连接 id（`idle_sweep()` 跳过、`connection_count()`
+    /// 仍计入）。每格一份，同登记表。
+    std::set<uvcpp_web_conn_id> upgraded;
+
+    /// 在途的分片下发名册（断开时该取消谁）。只存裸指针，每格一份。
+    std::map<uvcpp_web_conn_id, std::vector<uvcpp_web_file_transfer*> >
+        file_transfers;
   };
 
   /**
@@ -1607,34 +1753,27 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   const loop_slot& slot_here() const;
 
   /**
+   * @brief 按 id 高段的循环号定位那**一整格**。
+   *
+   * 一格上挂的是：登记表、在途队列（`inflight`）、WS 豁免（`upgraded`）、
+   * 文件传输名册（`file_transfers`）、`flushing` 闸门。所以"按 id 找份"这件事
+   * 只有一个入口 —— 上面那几个 `reg_*` 包装也都是从它派生的。
+   *
+   * 与 `slot_here()` 的分工：**`slot_here()` 答"我在哪条循环上"，`slot_of()`
+   * 答"这个 id 归哪条循环"**。请求路径上两者应当一致；`reg_of()` 那一段注释
+   * 说了为什么按 id 的那一路不该直接用 `slot_here()`。
+   *
+   * @return 该格；id 无效（0）或循环号越界时 `nullptr` —— 调用方按"这条连接
+   *         不存在"处理。`n == 1` 下恒返回 0 号那一格（与拆分前相同）。
+   */
+  loop_slot* slot_of(uvcpp_web_conn_id id);
+  const loop_slot* slot_of(uvcpp_web_conn_id id) const;
+
+  /**
    * @brief 每循环一格。**0 号在构造函数里就建好**，n == 1 时永远只有这一格
    *        （所以 `slot_here()` 的快路不查线程 id、也不加锁）。
    */
   std::vector<std::unique_ptr<loop_slot> > loops_;
-
-  /**
-   * @brief 闲置超时扫描器（只在 loop 线程上建）。
-   *
-   * 循环跑（间隔见 `idle_sweep_interval_ms()`）；`idle_timeout_ms` 为 0 时
-   * 压根不建 —— 关掉的功能在运行时不该有任何开销。
-   */
-  uvcpp_timer* idle_timer_;
-
-  /** 停机看门狗（只在 loop 线程上建）。 */
-  uvcpp_timer* shutdown_timer_;
-  int64_t      shutdown_deadline_ms_;
-
-  /**
-   * @brief 停机进行到第几拍（看门狗每拍调一次 `shutdown_step()`）。
-   *
-   * | 值 | 含义 |
-   * |---|---|
-   * | 0 | 等在途请求跑完 / 宽限期到 |
-   * | 1 | WS Close 帧已排队，**排水期**（等它们真出网、会话自行关闭） |
-   * | 2 | 其余连接已发起关闭，**排水期**（等 `uv_close` 完成回调） |
-   * | 3 | 收尾（`finish_shutdown()`） |
-   */
-  int          shutdown_phase_;
 
   int bound_port_;
 };

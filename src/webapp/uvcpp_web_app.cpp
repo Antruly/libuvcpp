@@ -227,10 +227,6 @@ uvcpp_web_app::uvcpp_web_app()
       loop_started_(false),
       running_(false),
       stopping_(false),
-      shutdown_phase_(0),
-      idle_timer_(nullptr),
-      shutdown_timer_(nullptr),
-      shutdown_deadline_ms_(0),
       bound_port_(0) {
   // 流式路由表用**普通路由的语义**（参数、通配、静态优先），但关掉两个
   // "为一个完整请求做决定"的开关：
@@ -270,11 +266,11 @@ uvcpp_web_app::~uvcpp_web_app() {
   for (size_t i = 0; i < loops_.size(); ++i) {
     delete loops_[i]->async;
     loops_[i]->async = nullptr;
+    delete loops_[i]->idle_timer;
+    loops_[i]->idle_timer = nullptr;
+    delete loops_[i]->shutdown_timer;
+    loops_[i]->shutdown_timer = nullptr;
   }
-  delete idle_timer_;
-  idle_timer_ = nullptr;
-  delete shutdown_timer_;
-  shutdown_timer_ = nullptr;
 
   // **WS 必须先于 http_ 拆。** `~uvcpp_ws_server` 会 `sessions_.shutdown()`，
   // 那一步要释放延迟回收用的 async 句柄（走 `uv_close`）—— 而 loop 归
@@ -733,9 +729,11 @@ std::string uvcpp_web_app::route_key(http_method method,
 
 std::shared_ptr<uvcpp_web_context> uvcpp_web_app::active_body_ctx(
     uvcpp_web_conn_id id, int32_t stream_id) const {
+  const loop_slot* s = slot_of(id);
+  if (s == nullptr) return std::shared_ptr<uvcpp_web_context>();
   std::map<uvcpp_web_conn_id, out_queue >::const_iterator q =
-      inflight_.find(id);
-  if (q == inflight_.end()) return std::shared_ptr<uvcpp_web_context>();
+      s->inflight.find(id);
+  if (q == s->inflight.end()) return std::shared_ptr<uvcpp_web_context>();
 
   for (out_queue::const_iterator e = q->second.begin();
        e != q->second.end(); ++e) {
@@ -759,7 +757,12 @@ uvcpp_web_stream* uvcpp_web_app::live_stream(uvcpp_web_conn_id id,
 
 bool uvcpp_web_app::enqueue_inflight(
     uvcpp_web_conn_id id, const std::shared_ptr<uvcpp_web_context>& ctx) {
-  out_queue& q = inflight_[id];
+  loop_slot* s = slot_of(id);
+  // id 无效 ⇒ 不登记。正常路径不可达：两个调用点（`on_http_request` 与
+  // `dispatch_stream`）都先保证 id 是有效的（没登记就先补登记）。返回 false
+  // 是"没超上限"那一支，走这一支不会把上下文扣住不发。
+  if (s == nullptr) return false;
+  out_queue& q = s->inflight[id];
   const size_t cap = cfg_.max_pipelined_requests;
   // 0 = 不限（与超时、长度上限一处口径）。
   const bool over = (cap != 0 && q.size() >= cap);
@@ -768,34 +771,45 @@ bool uvcpp_web_app::enqueue_inflight(
 }
 
 size_t uvcpp_web_app::inflight_total() const {
+  // **所有格子求和**（设计稿 §6 第 2 条）：`inflight_count()` 是对外的聚合量，
+  // 读某一格的 `size()` 会静默少报别的循环上的在途请求。
   size_t n = 0;
-  for (std::map<uvcpp_web_conn_id, out_queue >::const_iterator q =
-           inflight_.begin();
-       q != inflight_.end(); ++q) {
-    n += q->second.size();
+  for (size_t i = 0; i < loops_.size(); ++i) {
+    const std::map<uvcpp_web_conn_id, out_queue >& m = loops_[i]->inflight;
+    for (std::map<uvcpp_web_conn_id, out_queue >::const_iterator q = m.begin();
+         q != m.end(); ++q) {
+      n += q->second.size();
+    }
   }
   return n;
 }
 
 void uvcpp_web_app::flush_out(uvcpp_web_conn_id id) {
+  loop_slot* s = slot_of(id);
+  if (s == nullptr) return;
+
   // 已经在续发了：这一层是上面某次 `release()` 追上来的，让它接着迭代就行。
-  if (flushing_) return;
+  if (s->flushing) return;
 
   // RAII 而不是"结尾手动清"：`send_response()` 会跑 `notify_sent()`，而访问日志
-  // 中间件是**用户代码**，可以抛。抛出去之后 `flushing_` 要是留在真，此后所有
-  // 连接的续发全部静默失效 —— 响应一条都发不出去，而且看不出是谁干的。
+  // 中间件是**用户代码**，可以抛。抛出去之后 `flushing` 要是留在真，此后**这一格**
+  // 的续发全部静默失效 —— 响应一条都发不出去，而且看不出是谁干的。
+  //
+  // 闸门与队必须同格（都用 `slot_of(id)`）：闸门的作用域是"这一格的队"的递归
+  // 深度。取本线程那一格的话，跨循环调用时会在**别人的队**上跑迭代，而闸门
+  // 却记在自己头上。
   struct guard {
     bool* flag;
     explicit guard(bool* f) : flag(f) { *flag = true; }
     ~guard() { *flag = false; }
-  } g(&flushing_);
+  } g(&s->flushing);
 
   for (;;) {
     std::map<uvcpp_web_conn_id, out_queue >::iterator q =
-        inflight_.find(id);
+        s->inflight.find(id);
     // 队列空了（`context_finished()` 会把空键摘掉），或者队首还没定稿 —— 停。
     // 后一种是正常的：队首还在跑异步处理器。
-    if (q == inflight_.end() || q->second.empty()) return;
+    if (q == s->inflight.end() || q->second.empty()) return;
     if (!q->second.front().response_ready) return;
 
     // 本栈握一份：下面 `release()` 很可能还掉最后一份 shared_ptr，把我们这个
@@ -1114,14 +1128,14 @@ http_stream_handler uvcpp_web_app::claim_stream(uvcpp_http_request& req,
 http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
                                                    uvcpp_http_request& req,
                                                    uvcpp_tcp_client* client) {
-  uvcpp_web_conn_id id = registry_.id_of(client);
+  uvcpp_web_conn_id id = reg_here().id_of(client);
   if (id == UVCPP_WEB_INVALID_CONN_ID) {
     // 与 `on_http_request` 同一条兜底：正常路径到不了（连接在 accept 时就
     // 登记了），真到了说明有人绕过 App 的 accept 钩子直接用了 HTTP 层。
     std::string ip;
     int port = 0;
     if (client != nullptr) client->getPeerAddrs(ip, port);
-    id = registry_.add(client, ip, port, loop_now_ms(loop()));
+    id = reg_here().add(client, ip, port, loop_now_ms(loop()));
     UVCPP_LOG_WARN(log_category::CORE)
         << "流式请求来自未登记的连接，已补登记为 " << id;
   }
@@ -1139,7 +1153,7 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
   // 的「关于拷贝」一节）。
   ctx->request().take_from(req);
 
-  const uvcpp_web_connection* conn = registry_.find(id);
+  const uvcpp_web_connection* conn = reg_find(id);
   if (conn != nullptr) {
     ctx->request().set_peer(conn->peer_ip,
                             static_cast<unsigned int>(conn->peer_port));
@@ -1175,14 +1189,14 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
   // 这一标记让闲置扫描改按 `last_read_ms` 计时，于是 `idle_timeout_ms` 对
   // 上传的含义变成"**停顿**多久算死"，而不是"整个上传必须在多久内传完"。
   //
-  // 没有它，一个持续有字节的慢上传会被整段预算误杀；有了它但 `inflight_`
+  // 没有它，一个持续有字节的慢上传会被整段预算误杀；有了它但 `inflight`
   // 那份豁免还在的话，卡死的上传又永远关不掉 —— 两处都要改才成立。
   //
-  // 流水线之后这条豁免变成"**这条连接上还有任何在途请求**"（`inflight_` 的键
+  // 流水线之后这条豁免变成"**这条连接上还有任何在途请求**"（`inflight` 的键
   // 还在就成立），所以第二条请求也会把第一条的上传一起豁免掉。收场时由
   // `context_finished()` 按事实重报一次（那里会连 `request_start_ms` 一起重新
   // 起算），不在这里补。
-  registry_.mark_streaming(id, true);
+  reg_mark_streaming(id, true);
 
   sync_chains();
 
@@ -1447,8 +1461,8 @@ void uvcpp_web_app::dispatch_ws(const web_route_match& m,
   }
 
   // 对端地址与 HTTP 请求走**同一个来源**（连接登记表）。
-  uvcpp_web_conn_id id = registry_.id_of(client);
-  const uvcpp_web_connection* conn = registry_.find(id);
+  uvcpp_web_conn_id id = reg_here().id_of(client);
+  const uvcpp_web_connection* conn = reg_find(id);
   if (conn != nullptr) {
     ws->set_peer(conn->peer_ip, static_cast<unsigned int>(conn->peer_port));
   }
@@ -1461,11 +1475,15 @@ void uvcpp_web_app::dispatch_ws(const web_route_match& m,
 
         // **豁免闲置超时要在这里登记，不能在外面登记。**
         // 外面登记的话，101 写失败（对端提前断开）时这个 id 会永远留在
-        // `upgraded_` 里 —— 而那条连接随后就断了，登记表里也没了它，
+        // `upgraded` 里 —— 而那条连接随后就断了，登记表里也没了它，
         // 这个集合就成了一个只涨不落的泄漏。而这个回调**只在真建了会话时**
         // 才被调用，所以它是唯一正确的登记点。
-        uvcpp_web_conn_id cid = self->registry_.id_of(client);
-        if (cid != UVCPP_WEB_INVALID_CONN_ID) self->upgraded_.insert(cid);
+        uvcpp_web_conn_id cid = self->reg_here().id_of(client);
+        // 按 **id** 找格，不按本线程 —— 与下面 `idle_sweep()` / `on_close()`
+        // 那两处读它的地方同一把钥匙（三者必须落在同一份集合上）。id 无效
+        // 时 `slot_of()` 给 nullptr，登记自然也跳过。
+        loop_slot* up = self->slot_of(cid);
+        if (up != nullptr) up->upgraded.insert(cid);
 
         UVCPP_LOG_INFO(log_category::WEBSOCKET)
             << "WS 升级成功 " << ws->route() << " (" << ws->peer_ip() << ")";
@@ -1534,7 +1552,8 @@ int uvcpp_web_app::start_background() {
   std::future<int> fut = ready->get_future();
 
   thread_ = std::thread([this, ready]() {
-    // 与 `run()` 同一个次序，理由见那里（每进程那半里有 `listen()` 这个放行点）。
+    // 与 `run()` 同一个次序，理由见那里（每进程那半里有 `set_loops(n)`
+    // 这个放行点）。
     int rc = init_process_once();
     if (rc == 0) rc = init_on_loop_thread();
     // `running_` 必须和 `loop_started_`/`bound_port_` 一样，在**放行调用方之前**
@@ -1579,9 +1598,11 @@ int uvcpp_web_app::run(uv_run_mode md) {
 
   threading_ = false;
 
-  // 两半的先后是**语义要求**，不是随手排的：每进程那半里有 `listen()`，而
-  // `set_loops(n)` 的工作循环正是在那里面被放行的 —— 放行之后它们立刻就会
-  // 走到请求路径上，读的必须已经是冻结好的那份配置（设计稿 §4.1.1 甲）。
+  // 两半的先后是**语义要求**，不是随手排的：每进程那半里有 `set_loops(n)`
+  // 这一步，而工作循环的线程正是在 `set_loops()` 里被放行的（`w->start()`，
+  // `src/net/uvcpp_tcp_server.cpp:332`；`listen()` 在它之后，只管 bind +
+  // `uv_listen()`）—— 放行之后它们立刻就会走到请求路径上，读的必须已经是
+  // 冻结好的那份配置（设计稿 §4.1.1 甲）。
   int rc = init_process_once();
   if (rc == 0) rc = init_on_loop_thread();
   if (rc != 0) {
@@ -1782,7 +1803,8 @@ int uvcpp_web_app::init_on_loop_thread() {
   // **它现在落在 `listen()` 之后**（那一步在上面的每进程那半里）。这是安全的：
   // 循环要到调用方接着调 `http_->run()` 才跑起来，在那之前不会有任何回调进来，
   // 所以"标记晚了一小段"没有可观察后果。n>1 时也是同一个道理 —— 工作循环在
-  // `listen()` 里被放行，但它们记的是**自己那条线程**的身份。
+  // `set_loops()` 里就被放行了（`w->start()`，`src/net/uvcpp_tcp_server.cpp:332`），
+  // 但它们记的是**自己那条线程**的身份。
   loop_slot& slot = slot_here();
   {
     std::lock_guard<std::mutex> lk(slot.tid_mutex);
@@ -1811,21 +1833,21 @@ int uvcpp_web_app::init_on_loop_thread() {
   // 工作循环那几格没有构造函数这一步，全靠这里。
   slot.loop = loop;
 
-  shutdown_timer_ = new uvcpp_timer(loop);
+  slot.shutdown_timer = new uvcpp_timer(loop);
 
   // 闲置超时扫描器。`idle_timeout_ms == 0` 时**不建句柄** —— 关掉的功能
   // 不该在运行时留下任何开销，哪怕只是一拍一次的空转。
   if (cfg_.idle_timeout_ms > 0) {
-    idle_timer_ = new uvcpp_timer(loop);
+    slot.idle_timer = new uvcpp_timer(loop);
     const uint64_t iv =
         idle_sweep_interval_ms(cfg_.idle_timeout_ms);
-    idle_timer_->start([this](uvcpp_timer*) { idle_sweep(); }, iv, iv);
+    slot.idle_timer->start([this](uvcpp_timer*) { idle_sweep(); }, iv, iv);
   }
 
   started_once_ = true;
   loop_started_ = true;
   stopping_ = false;
-  shutdown_phase_ = 0;
+  slot.shutdown_phase = 0;
   return 0;
 }
 
@@ -1928,8 +1950,98 @@ const uvcpp_web_app::loop_slot& uvcpp_web_app::slot_here() const {
   return const_cast<uvcpp_web_app*>(this)->slot_here();
 }
 
+// =========================================================================
+// 登记表：本循环那一份，与"按 id 找份"（规则见头文件那一节）
+// =========================================================================
+
+uvcpp_web_connection_registry& uvcpp_web_app::reg_here() {
+  return slot_here().registry;
+}
+
+const uvcpp_web_connection_registry& uvcpp_web_app::reg_here() const {
+  return slot_here().registry;
+}
+
+uvcpp_web_app::loop_slot* uvcpp_web_app::slot_of(uvcpp_web_conn_id id) {
+  // 0 是 `UVCPP_WEB_INVALID_CONN_ID`，它的高段也是 0 —— 不能让它落进 0 号
+  // 那一格去查（那一格里查不到 0 这条记录，白跑一趟事小，"没登记过"与
+  // "0 号循环的连接"混成一件事是错的语义）。
+  if (id == UVCPP_WEB_INVALID_CONN_ID) return nullptr;
+  const int idx = uvcpp_web_connection_registry::loop_of(id);
+  if (idx < 0 || static_cast<size_t>(idx) >= loops_.size()) return nullptr;
+  return loops_[static_cast<size_t>(idx)].get();
+}
+
+const uvcpp_web_app::loop_slot* uvcpp_web_app::slot_of(
+    uvcpp_web_conn_id id) const {
+  return const_cast<uvcpp_web_app*>(this)->slot_of(id);
+}
+
+uvcpp_web_connection_registry* uvcpp_web_app::reg_of(uvcpp_web_conn_id id) {
+  loop_slot* s = slot_of(id);
+  return s != nullptr ? &s->registry : nullptr;
+}
+
+const uvcpp_web_connection_registry* uvcpp_web_app::reg_of(
+    uvcpp_web_conn_id id) const {
+  return const_cast<uvcpp_web_app*>(this)->reg_of(id);
+}
+
+uvcpp_tcp_client* uvcpp_web_app::reg_client(uvcpp_web_conn_id id) const {
+  const uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr ? r->client(id) : nullptr;
+}
+
+const uvcpp_web_connection* uvcpp_web_app::reg_find(uvcpp_web_conn_id id) const {
+  const uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr ? r->find(id) : nullptr;
+}
+
+bool uvcpp_web_app::reg_note_read(uvcpp_web_conn_id id, int64_t now_ms) {
+  uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr && r->note_read(id, now_ms);
+}
+
+bool uvcpp_web_app::reg_note_request_done(uvcpp_web_conn_id id) {
+  uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr && r->note_request_done(id);
+}
+
+bool uvcpp_web_app::reg_mark_streaming(uvcpp_web_conn_id id, bool streaming) {
+  uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr && r->mark_streaming(id, streaming);
+}
+
+bool uvcpp_web_app::reg_is_streaming(uvcpp_web_conn_id id) const {
+  const uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr && r->is_streaming(id);
+}
+
+bool uvcpp_web_app::reg_touch(uvcpp_web_conn_id id, int64_t now_ms) {
+  uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr && r->touch(id, now_ms);
+}
+
+int64_t uvcpp_web_app::reg_activity_since(uvcpp_web_conn_id id) const {
+  const uvcpp_web_connection_registry* r = reg_of(id);
+  return r != nullptr ? r->activity_since(id) : 0;
+}
+
+size_t uvcpp_web_app::connection_count() const {
+  size_t n = 0;
+  for (size_t i = 0; i < loops_.size(); ++i) n += loops_[i]->registry.size();
+  return n;
+}
+
+size_t uvcpp_web_app::connection_count_at(int loop_index) const {
+  if (loop_index < 0 || static_cast<size_t>(loop_index) >= loops_.size()) {
+    return 0;
+  }
+  return loops_[static_cast<size_t>(loop_index)]->registry.size();
+}
+
 uvcpp_tcp_client* uvcpp_web_app::connection(uvcpp_web_conn_id id) {
-  return registry_.client(id);
+  return reg_client(id);
 }
 
 void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
@@ -1943,7 +2055,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   //
   // 排队的做法是 `hold()` 一次然后返回。`finish()` 接着会看到 `hold_count_ > 0`，
   // 于是走"挂起收场"那一支（`pending_release_`）而**不**调 `context_finished()`
-  // —— 上下文因此仍留在 `inflight_` 里，`idle_sweep()` 的在途豁免与停机的宽限期
+  // —— 上下文因此仍留在 `inflight` 里，`idle_sweep()` 的在途豁免与停机的宽限期
   // 都不用为"排队中的响应"另做一套判断（反过来，要是把它摘出表去另外记一笔，
   // 闲置超时就会把它当成"完全安静的连接"在 `idle_timeout_ms` 后杀掉）。
   //
@@ -1957,21 +2069,26 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // 一条慢流（比如一个正在等异步数据的 SSE）会把同一条连接上**后面所有**流的
   // 响应一起扣住，直到它自己超时。那是把 h2 用成了 h1。
   //
-  // 跳过排队**不影响登记**：上下文照旧进 `inflight_`，所以闲置豁免与停机
+  // 跳过排队**不影响登记**：上下文照旧进 `inflight`，所以闲置豁免与停机
   // 宽限期那两处判断一行都不用改。
   if (ctx.response().stream_id() == 0) {
-    std::map<uvcpp_web_conn_id, out_queue >::iterator q =
-        inflight_.find(ctx.connection_id());
-    if (q != inflight_.end() && !q->second.empty()) {
-      out_queue::iterator me = q->second.begin();
-      while (me != q->second.end() && me->ctx.get() != &ctx) ++me;
-      if (me != q->second.end() && me != q->second.begin()) {
-        // 已经排过的别再 hold 一次：`flush_out()` 只还一次。
-        if (!me->response_ready) {
-          me->response_ready = true;
-          ctx.hold();
+    // 队那一格与闸门同源（都问 id）。id 无效时 `slot_of()` 给 nullptr ⇒
+    // 没有可排的队，与"它不在表里"是同一支：直接往下走。
+    loop_slot* s = slot_of(ctx.connection_id());
+    if (s != nullptr) {
+      std::map<uvcpp_web_conn_id, out_queue >::iterator q =
+          s->inflight.find(ctx.connection_id());
+      if (q != s->inflight.end() && !q->second.empty()) {
+        out_queue::iterator me = q->second.begin();
+        while (me != q->second.end() && me->ctx.get() != &ctx) ++me;
+        if (me != q->second.end() && me != q->second.begin()) {
+          // 已经排过的别再 hold 一次：`flush_out()` 只还一次。
+          if (!me->response_ready) {
+            me->response_ready = true;
+            ctx.hold();
+          }
+          return;
         }
-        return;
       }
     }
   }
@@ -1993,7 +2110,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   info.connection_id = ctx.connection_id();
   info.ok            = true;
 
-  uvcpp_tcp_client* client = registry_.client(ctx.connection_id());
+  uvcpp_tcp_client* client = reg_client(ctx.connection_id());
   if (client == nullptr) {
     // 连接在响应准备好之前断了（客户端提前走了，或者我们 abort 过）。
     // **照样通知** —— 访问日志中间件挂在这一刻上，丢掉通知就等于这次请求
@@ -2131,7 +2248,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
 
 void uvcpp_web_app::stream_begin(uvcpp_web_conn_id id, int32_t stream_id,
                                  uvcpp_http_response& head) {
-  uvcpp_tcp_client* client = registry_.client(id);
+  uvcpp_tcp_client* client = reg_client(id);
   if (client == nullptr) {
     // 连接已经没了。`stream_begin` 是唯一不带回调的出口，失败由
     // `pump_stream()` 记进 `stream_status_`，收尾时体现为 ok=false。
@@ -2145,7 +2262,7 @@ void uvcpp_web_app::stream_begin(uvcpp_web_conn_id id, int32_t stream_id,
 int uvcpp_web_app::stream_write(uvcpp_web_conn_id id, int32_t stream_id,
                                 std::string bytes,
                                 std::function<void(int)> done) {
-  uvcpp_tcp_client* client = registry_.client(id);
+  uvcpp_tcp_client* client = reg_client(id);
   if (client == nullptr) {
     UVCPP_LOG_DEBUG(log_category::RESPONSE)
         << "stream_write：连接 " << id << " 已断开，这一块丢弃";
@@ -2161,7 +2278,7 @@ int uvcpp_web_app::stream_write(uvcpp_web_conn_id id, int32_t stream_id,
 
 void uvcpp_web_app::stream_end(uvcpp_web_conn_id id, int32_t stream_id,
                                bool close_after) {
-  uvcpp_tcp_client* client = registry_.client(id);
+  uvcpp_tcp_client* client = reg_client(id);
   if (client == nullptr) {
     // 连接已经没了，"结束"这件事已经由断开本身完成了。**这里必须是空操作**
     // —— 收尾路径上唯一要做的事是关连接，而它已经关着了。
@@ -2175,14 +2292,18 @@ void uvcpp_web_app::stream_end(uvcpp_web_conn_id id, int32_t stream_id,
 void uvcpp_web_app::stream_attach_file(uvcpp_web_conn_id id,
                                        uvcpp_web_file_transfer* t) {
   if (t == nullptr) return;
-  file_transfers_[id].push_back(t);
+  loop_slot* s = slot_of(id);
+  if (s == nullptr) return;
+  s->file_transfers[id].push_back(t);
 }
 
 void uvcpp_web_app::stream_detach_file(uvcpp_web_conn_id id,
                                        uvcpp_web_file_transfer* t) {
+  loop_slot* s = slot_of(id);
+  if (s == nullptr) return;
   std::map<uvcpp_web_conn_id, std::vector<uvcpp_web_file_transfer*> >::iterator
-      it = file_transfers_.find(id);
-  if (it == file_transfers_.end()) return;
+      it = s->file_transfers.find(id);
+  if (it == s->file_transfers.end()) return;
   std::vector<uvcpp_web_file_transfer*>& v = it->second;
   for (size_t i = 0; i < v.size(); ++i) {
     if (v[i] == t) {
@@ -2190,11 +2311,11 @@ void uvcpp_web_app::stream_detach_file(uvcpp_web_conn_id id,
       break;
     }
   }
-  if (v.empty()) file_transfers_.erase(it);
+  if (v.empty()) s->file_transfers.erase(it);
 }
 
 void uvcpp_web_app::abort_request(uvcpp_web_context& ctx) {
-  uvcpp_tcp_client* client = registry_.client(ctx.connection_id());
+  uvcpp_tcp_client* client = reg_client(ctx.connection_id());
   if (client == nullptr) {
     UVCPP_LOG_DEBUG(log_category::REQUEST)
         << "abort：连接 " << ctx.connection_id() << " 已经断开，无需处理";
@@ -2219,9 +2340,14 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   // 本文件下面 `ctx.stream()` 那处早就是这么防的，这行漏了。
   const uvcpp_web_conn_id id = ctx.connection_id();
 
+  // 队那一格按 **id** 定位（与入队的 `enqueue_inflight()` 同一把钥匙）。
+  // id 无效 ⇒ 没登记过 ⇒ 与"不在表里"同一支。
+  loop_slot* slot = slot_of(id);
+  if (slot == nullptr) return;
+
   std::map<uvcpp_web_conn_id, out_queue >::iterator q =
-      inflight_.find(id);
-  if (q == inflight_.end()) return;
+      slot->inflight.find(id);
+  if (q == slot->inflight.end()) return;
 
   // **按上下文身份在队里找**，不是按 id 取第一条。流水线之后一条连接上同时
   // 挂着好几条，按 id 拿到的很可能是**别人** —— 替别人摘号会让那一条永远出不了
@@ -2247,13 +2373,13 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
 
   q->second.erase(me);
   // **空队列要连键一起摘掉。** `idle_sweep()` 的豁免与停机宽限的判据都是
-  // `inflight_.find(id) != end()` / `!inflight_.empty()`，留一个空队列在表里
+  // `inflight.find(id) != end()` / `!inflight.empty()`，留一个空队列在表里
   // 会让那条连接被**永久**豁免闲置超时 —— 表只涨不落，长跑服务上就是稳定的泄漏。
-  if (q->second.empty()) inflight_.erase(q);
+  if (q->second.empty()) slot->inflight.erase(q);
 
   // 这个请求到此为止：半截请求的预算归零，下一次收到字节就是新请求的开头。
   // 放在摘号之后 —— 上面那些早返回都不该动计时。用本地 id，不要再用 ctx。
-  registry_.note_request_done(id);
+  reg_note_request_done(id);
 
   // 队里还有人 = 上面那句清掉的其实是**后面那条请求**的两个标量（它们是按
   // 连接存的，不是按请求）。按事实重报一次，否则流水线里第二条请求的
@@ -2262,9 +2388,9 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   //
   // 只在真的还有在途请求时才走这一支 —— 所以单请求与顺序 keep-alive 的行为
   // 与改前**逐字节相同**，这段逻辑只在流水线下生效。
-  if (inflight_.find(id) != inflight_.end()) {
-    registry_.note_read(id, loop_now_ms(loop()));
-    registry_.mark_streaming(id, active_body_ctx(id) != nullptr);
+  if (slot->inflight.find(id) != slot->inflight.end()) {
+    reg_note_read(id, loop_now_ms(loop()));
+    reg_mark_streaming(id, active_body_ctx(id) != nullptr);
   }
 
   // 队首腾出来了：把后面**已经定稿**的响应按到达顺序接着发出去。
@@ -2283,7 +2409,7 @@ void uvcpp_web_app::on_accept(uvcpp_tcp_client* client) {
   // 建立时刻就是这条连接的第一个活动基准：连上就再也不发字节的客户端，
   // 从这一刻起算闲置（否则它永远不超时，白占一个连接槽）。
   const uvcpp_web_conn_id id =
-      registry_.add(client, ip, port, loop_now_ms(loop()));
+      reg_here().add(client, ip, port, loop_now_ms(loop()));
 
   UVCPP_LOG_DEBUG(log_category::CORE)
       << "新连接 " << id << " ← " << ip << ":" << port;
@@ -2303,18 +2429,23 @@ void uvcpp_web_app::on_accept(uvcpp_tcp_client* client) {
 
 void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
   uvcpp_web_conn_id id = UVCPP_WEB_INVALID_CONN_ID;
-  if (registry_.remove_by_client(client, &id)) {
+  // 这条连接是在**本循环**的登记表上摘下来的（`reg_here()`），所以这一格
+  // 就是它的格子 —— 下面四张按 id 索引的表全在这一格上，与 `reg_here()`
+  // 同一把钥匙。用 `slot_of(id)` 也行（id 高段就是本循环号），这里取本线程
+  // 那格是因为"摘表"这件事已经证明了这个 id 归本循环。
+  loop_slot& slot = slot_here();
+  if (reg_here().remove_by_client(client, &id)) {
     // 在途的分片下发：先**把名册摘下来再逐条取消**。cancel() 会同步走到
     // `on_done` → `stream_detach_file` → 擦这个 map 条目，边遍历边擦就是
     // 迭代器失效。摘下来之后名册归本栈所有，谁再动 map 都不影响。
     {
       std::map<uvcpp_web_conn_id,
                std::vector<uvcpp_web_file_transfer*> >::iterator ft =
-          file_transfers_.find(id);
-      if (ft != file_transfers_.end()) {
+          slot.file_transfers.find(id);
+      if (ft != slot.file_transfers.end()) {
         std::vector<uvcpp_web_file_transfer*> pending;
         pending.swap(ft->second);
-        file_transfers_.erase(ft);
+        slot.file_transfers.erase(ft);
         for (size_t i = 0; i < pending.size(); ++i) {
           if (pending[i] != nullptr) pending[i]->cancel();
         }
@@ -2324,18 +2455,18 @@ void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
     UVCPP_LOG_DEBUG(log_category::CORE) << "连接 " << id << " 已断开";
     // 豁免标记跟着连接一起走。不擦的话这个集合只涨不落 —— 连接 id 永不复用，
     // 所以不会误豁免别人，但会一直占内存（长跑服务上就是一条稳定的泄漏）。
-    upgraded_.erase(id);
+    slot.upgraded.erase(id);
 
     // 上传收到一半对端就断了：得告诉流对象（3b 的落盘要靠它删掉半截文件）。
     //
-    // **先把要动的条目摘成一份名单，再逐条动**（与上面 `file_transfers_` 同一
+    // **先把要动的条目摘成一份名单，再逐条动**（与上面 `file_transfers` 同一
     // 个套路）。原因有两层：
     //
     //   1. `stream_abort()` 会一路走到 `stream_resume_chain()` → 链收尾 →
     //      `finish()` → `context_finished()` → **在队里摘掉这一条**，也就是在
     //      调用过程中把那个元素（连同它持有的那份引用）销毁掉。边遍历边动就是
     //      读已释放内存 —— 这也是本地必须持有 `shared_ptr` 副本的原因。
-    //   2. 流水线之后一条连接上可能挂着好几条（见 `inflight_`），所以是**名单**
+    //   2. 流水线之后一条连接上可能挂着好几条（见 `inflight`），所以是**名单**
     //      而不是改前的"那一条"。
     //
     // **这条连接的队列不能整队摘走。** 一个"响应在流式"的上下文靠表里这份
@@ -2348,8 +2479,8 @@ void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
     {
       std::vector<std::shared_ptr<uvcpp_web_context> > victims;
       std::map<uvcpp_web_conn_id, out_queue >::iterator q =
-          inflight_.find(id);
-      if (q != inflight_.end()) {
+          slot.inflight.find(id);
+      if (q != slot.inflight.end()) {
         for (out_queue::iterator e = q->second.begin();
              e != q->second.end(); ++e) {
           // `streaming()` 是 `stream_ != nullptr`，它**不**区分"收请求体"和
@@ -2379,11 +2510,11 @@ void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
 
 bool uvcpp_web_app::handle_raw_data(uvcpp_tcp_client* client, const char* data,
                                     size_t len) {
-  const uvcpp_web_conn_id id = registry_.id_of(client);
+  const uvcpp_web_conn_id id = reg_here().id_of(client);
 
   // 记活跃**必须在早返回之前**。放在后面的话，"没注册任何钩子"的服务就永远
   // 不记活跃，闲置超时形同虚设 —— 而那样的服务恰恰是最多的。
-  if (len > 0) registry_.note_read(id, loop_now_ms(loop()));
+  if (len > 0) reg_note_read(id, loop_now_ms(loop()));
 
   if (raw_data_cbs_.empty() && !raw_data_claim_) return true;
 
@@ -2441,7 +2572,12 @@ void uvcpp_web_app::idle_sweep() {
 
   // 取一份 id 快照再遍历：下面的 `close()` 是异步的（真正摘表在关闭完成
   // 回调里），但**不依赖这一点** —— 快照让"遍历中表被改"这件事根本不可能。
-  const std::vector<uvcpp_web_conn_id> ids = registry_.ids();
+  const std::vector<uvcpp_web_conn_id> ids = reg_here().ids();
+
+  // 扫的是**本循环**的登记表（上面那句），所以下面两张按 id 索引的表也取
+  // **本循环那一格** —— 与本线程同一把钥匙，而不是 `slot_of(id)`。这也是
+  // 每格各挂一个 `idle_timer` 的原因：一拍只扫自己的表。
+  loop_slot& slot = slot_here();
 
   for (size_t i = 0; i < ids.size(); ++i) {
     const uvcpp_web_conn_id id = ids[i];
@@ -2449,12 +2585,12 @@ void uvcpp_web_app::idle_sweep() {
     // 在途请求不受影响：客户端在等我们，不是在攻击我们。关掉它只会让一个
     // 正确发起的请求失败 —— 那比慢速攻击更难查。
     //
-    // **例外是流式收体。** 一个正在上传的请求也在 inflight_ 里，但它不是在
+    // **例外是流式收体。** 一个正在上传的请求也在 `inflight` 里，但它不是在
     // "等我们"，而是在"往我们这儿送"——整体豁免等于让一个卡住的上传永远挂着
     // （连接、缓冲、context 全部不回收）。流式连接改按"停顿多久没进展"判定：
     // 持续有字节就活得下去，停下来才关。判据从登记表读，不另设集合，
     // 免得两处状态对不上。
-    if (inflight_.find(id) != inflight_.end() && !registry_.is_streaming(id))
+    if (slot.inflight.find(id) != slot.inflight.end() && !reg_is_streaming(id))
       continue;
 
     // **已升级成 WS 的连接也豁免。** 60 秒没有消息对 WS 是常态（聊天室、
@@ -2462,20 +2598,20 @@ void uvcpp_web_app::idle_sweep() {
     //
     // 代价照实说：WS 连接从此没有任何超时保护 —— 框架不会关掉一条安静但
     // 已经死掉的 WS 连接。要保活得应用层自己发 ping/pong。
-    if (upgraded_.find(id) != upgraded_.end()) continue;
+    if (slot.upgraded.find(id) != slot.upgraded.end()) continue;
 
-    const int64_t since = registry_.activity_since(id);
+    const int64_t since = reg_activity_since(id);
     if (since == 0) {
       // 登记时没给时间戳。补一个基准，让它从这一刻开始算 —— 而不是拿 0
       // 当"上古时刻"，把每一条刚建立的连接在第一次扫描时就杀掉。
-      registry_.touch(id, now);
+      reg_touch(id, now);
       continue;
     }
 
     const int64_t idle_ms = now - since;
     if (idle_ms <= cfg_.idle_timeout_ms) continue;
 
-    uvcpp_tcp_client* client = registry_.client(id);
+    uvcpp_tcp_client* client = reg_client(id);
     if (client == nullptr) continue;
 
     UVCPP_LOG_WARN(log_category::CORE)
@@ -2502,14 +2638,14 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   // "这个响应由我负责"。
   resp.deferred = true;
 
-  uvcpp_web_conn_id id = registry_.id_of(client);
+  uvcpp_web_conn_id id = reg_here().id_of(client);
   if (id == UVCPP_WEB_INVALID_CONN_ID) {
     // 正常路径到不了这里：连接在 accept 时就登记了。真到了说明有人绕过
     // App 的 accept 钩子直接用了 HTTP 层 —— 现场补一条，比回 500 有用。
     std::string ip;
     int port = 0;
     if (client != nullptr) client->getPeerAddrs(ip, port);
-    id = registry_.add(client, ip, port, loop_now_ms(loop()));
+    id = reg_here().add(client, ip, port, loop_now_ms(loop()));
     UVCPP_LOG_WARN(log_category::CORE)
         << "请求来自未登记的连接，已补登记为 " << id;
   }
@@ -2531,7 +2667,7 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   // `content-length: 0`，之后处理函数设的 body 长度就再也改不动了。
   ctx->response().set_stream_id(req.stream_id);
 
-  const uvcpp_web_connection* conn = registry_.find(id);
+  const uvcpp_web_connection* conn = reg_find(id);
   if (conn != nullptr) {
     ctx->request().set_peer(conn->peer_ip,
                             static_cast<unsigned int>(conn->peer_port));
@@ -2752,19 +2888,20 @@ void uvcpp_web_app::drain_posts() {
 // =========================================================================
 
 void uvcpp_web_app::begin_shutdown() {
+  loop_slot& slot = slot_here();
   if (!loop_started_.load()) return;
 
   UVCPP_LOG_INFO(log_category::CORE)
       << "开始停机：先停监听，宽限 " << cfg_.shutdown_grace_ms
       << " ms 等在途请求（当前 " << inflight_total() << " 个，活连接 "
-      << registry_.size() << " 条）";
+      << connection_count() << " 条）";
 
   // 1. 不再接受新连接。注意它**不会**关掉已经建立的连接 —— 那正是宽限期
   //    存在的意义。
   uvcpp_tcp_server* tcp = tcp_server();
   if (tcp != nullptr) tcp->stop();
 
-  shutdown_deadline_ms_ =
+  slot.shutdown_deadline_ms =
       loop_now_ms(loop()) + static_cast<int64_t>(cfg_.shutdown_grace_ms);
 
   // 2. 后面的动作全部交给看门狗定时器。
@@ -2773,25 +2910,30 @@ void uvcpp_web_app::begin_shutdown() {
   //    正在 async 句柄的回调里跑。在这一帧里删 async 句柄就是把它自己正在
   //    执行的 `std::function` 连着析构掉。跳到一个定时器回调上，这个隐患
   //    就不存在了。
-  if (shutdown_timer_ == nullptr) {
+  if (slot.shutdown_timer == nullptr) {
     finish_shutdown();
     return;
   }
-  shutdown_timer_->start([this](uvcpp_timer*) { shutdown_step(); }, 0,
-                         kShutdownPollMs);
+  slot.shutdown_timer->start([this](uvcpp_timer*) { shutdown_step(); }, 0,
+                             kShutdownPollMs);
 }
 
 void uvcpp_web_app::shutdown_step() {
+  loop_slot& slot = slot_here();
   // ---- 第 0 拍：等在途请求跑完，或者宽限期到 ----
-  if (shutdown_phase_ == 0) {
-    if (!inflight_.empty() && loop_now_ms(loop()) < shutdown_deadline_ms_) {
+  if (slot.shutdown_phase == 0) {
+    // 等的判据是**本格**的在途队列：这个看门狗是本循环的，等待与放行都只
+    // 覆盖本循环的连接。日志里那个数则是**全进程**聚合（`inflight_total()`）
+    // —— 运维要看的是"还剩多少活儿"，不是"本循环还剩多少"。
+    if (!slot.inflight.empty() &&
+        loop_now_ms(loop()) < slot.shutdown_deadline_ms) {
       return;  // 继续等，看门狗下一拍再看
     }
 
-    shutdown_phase_ = 1;
-    if (shutdown_timer_ != nullptr) shutdown_timer_->stop();
+    slot.shutdown_phase = 1;
+    if (slot.shutdown_timer != nullptr) slot.shutdown_timer->stop();
 
-    if (!inflight_.empty()) {
+    if (!slot.inflight.empty()) {
       UVCPP_LOG_WARN(log_category::CORE)
           << "宽限期到，仍有 " << inflight_total()
           << " 个请求在途（多半卡在异步处理器里），强制关闭连接";
@@ -2842,8 +2984,8 @@ void uvcpp_web_app::shutdown_step() {
   }
 
   // ---- 第 1 拍：关掉剩下的连接（这时 WS 的已经自己走完了） ----
-  if (shutdown_phase_ == 1) {
-    shutdown_phase_ = 2;
+  if (slot.shutdown_phase == 1) {
+    slot.shutdown_phase = 2;
 
     // 在途请求的上下文**不动**：它们可能还在等工作线程的结果。连接关了
     // 之后它们再发响应会查到"连接已断开"，走丢弃路径并记一条警告。
@@ -2870,15 +3012,17 @@ void uvcpp_web_app::shutdown_step() {
  * 免得停机停在一半。
  */
 void uvcpp_web_app::schedule_shutdown_step(int delay_ms) {
-  if (shutdown_timer_ == nullptr) {
+  loop_slot& slot = slot_here();
+  if (slot.shutdown_timer == nullptr) {
     shutdown_step();
     return;
   }
-  shutdown_timer_->start([this](uvcpp_timer*) { shutdown_step(); },
-                         static_cast<uint64_t>(delay_ms), 0);
+  slot.shutdown_timer->start([this](uvcpp_timer*) { shutdown_step(); },
+                             static_cast<uint64_t>(delay_ms), 0);
 }
 
 void uvcpp_web_app::finish_shutdown() {
+  loop_slot& slot = slot_here();
   const uvcpp_tcp_server* tcp = tcp_server();
   if (tcp != nullptr && tcp->client_count() != 0) {
     UVCPP_LOG_WARN(log_category::CORE)
@@ -2886,16 +3030,16 @@ void uvcpp_web_app::finish_shutdown() {
         << " 条连接留在登记表里（预期为 0）";
   }
 
-  if (idle_timer_ != nullptr) {
-    idle_timer_->stop();
-    delete idle_timer_;
-    idle_timer_ = nullptr;
+  if (slot.idle_timer != nullptr) {
+    slot.idle_timer->stop();
+    delete slot.idle_timer;
+    slot.idle_timer = nullptr;
   }
 
-  if (shutdown_timer_ != nullptr) {
-    shutdown_timer_->stop();
-    delete shutdown_timer_;
-    shutdown_timer_ = nullptr;
+  if (slot.shutdown_timer != nullptr) {
+    slot.shutdown_timer->stop();
+    delete slot.shutdown_timer;
+    slot.shutdown_timer = nullptr;
   }
 
   // 投递句柄：`delete` 会走 free_handle → uv_close(哨兵)，完成回调在本次
