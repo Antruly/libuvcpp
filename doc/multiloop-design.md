@@ -631,6 +631,8 @@ n 个循环之后变成跨核缓存行打架**：
 **（一）`find()` 的结果必须拿这张表自己的 `end()` 比。** 树上有 19 处原来是
 
 ```cpp
+// doc-snippet: fragment — 改前形态的两句摘录，正文讲的就是这两句的错处；凑成完整
+// 翻译单元得先造一个带 ctxs_of()/ctxs_here() 的假类，反而把要看的形状淹了。
 auto it = ctxs_of(client).find(client);
 if (it == ctxs_here().end()) return;   // 两个容器的 end() 相比
 ```
