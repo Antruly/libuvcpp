@@ -10,13 +10,13 @@
 接入成本是 `main()` 里的**一条语句**，外加一个 setter：
 
 ```cpp
-// doc-snippet: fragment — 目标形状，不是可用代码：uvcpp_worker_guard 与
+// doc-snippet: fragment — 目标形状，不是可用代码：uvcpp_worker_process 与
 // set_worker_processes() 都还不存在（本页状态是"设计稿，未实现"），handler 也是占位。
 #include <webapp/uvcpp_web_app.h>
 using namespace uvcpp;
 
 int main(int argc, char** argv) {
-  uvcpp_worker_guard::run(argc, argv);      // ← 必须是 main 的第一条语句
+  uvcpp_worker_process::split(argc, argv);  // ← 必须是 main 的第一条语句
 
   uvcpp_web_app app;
   app.set_host("0.0.0.0").set_port(8080)
@@ -33,24 +33,34 @@ int main(int argc, char** argv) {
 
 角色的自动判定发生在两处，用户都不用管：
 
-| | `worker_guard::run()` | `start()` / `join()` |
+| | `worker_process::split()` | `start()` / `join()` |
 |---|---|---|
 | **master** | 认出"我不是 worker"，返回 | bind+listen 持住端口；`join()` 起 worker 并监督 |
 | **worker** | 认出"我是第 k 个"，记下身份，返回 | 接住继承来的 fd；`join()` 跑完就 `_exit(0)` |
 | **不启用**（默认） | 一个分支都不走 | 今天的行为，逐字节相同 |
 
-`uvcpp_worker_guard` 由库提供全局实例。它是全局的，有两个硬理由：身份必须在 `app.start()`
+`uvcpp_worker_process` 由库提供全局实例。它是全局的，有两个硬理由：身份必须在 `app.start()`
 处可见；分裂点必须早于任何用户线程。
 
-> **名字是暂定的。** 上面这三个名字（`uvcpp_worker_guard` / `set_worker_processes()` /
-> `worker_index()`）是形状的占位，最终叫法由维护者拍板 —— 它同时决定"多进程横向扩展"
-> 进不进 README 的性能口径那一行。本文只定形状与判据，不定名字。
+**三个名字已定：`uvcpp_worker_process` / `split()` / `index()`，setter 是
+`set_worker_processes(n)`。** 两处取舍写在这里，省得以后有人问"为什么不是别的"：
+
+- **不叫 `run()`** —— `uvcpp_web_app::run(uv_run_mode)` 已经有别的意思了，同一个库里两个
+  `run` 含义不同会混。`split` 说的是它真正干的事。
+- **class 不叫 `guard`** —— 它同时管 master 与 worker 两个角色，不只是"守卫"。
+  叫"工作进程类"是按使用者的说法来的。
+- **不需要用户自己声明全局变量**：库内部持有那份全局实例。用户声明会多一处可以写错的地方，
+  而"必须在 `main()` 第一条语句"这条纪律已经够容易违反了。
+
+还有一条**没定**：多进程横向扩展**进不进 README 的性能口径那一行**。我的判断是**先不进** ——
+它是尚未实现的设计，而 README 顶上那个数是和 hical 做对比的口径，扩进来会把"单核比单核"
+这个前提弄糊。实现之后单开一节写扩展性，单核那行不动。
 
 ## 2. 为什么是重跑 `main()`，不是"在那个方法里把服务跑完"
 
 这一条决定了整套机制的形态，而且它是从"路由注册写在哪"推出来的，不是选出来的：
 
-**路由是在 `worker_guard::run()` 那一句**之后**注册的。** 所以 worker 进程必须**把用户的
+**路由是在 `worker_process::split()` 那一句**之后**注册的。** 所以 worker 进程必须**把用户的
 `main()` 走完**才拿得到路由表 —— `run()` 那一刻它还不知道有哪些路由，没法替用户把服务跑起来。
 
 于是只有两种做法：
@@ -62,7 +72,7 @@ int main(int argc, char** argv) {
 
 由此推出两条对用户可见的语义：
 
-1. `worker_guard::run()` 在 worker 里**必须返回**（否则后面那段注册代码不跑）。
+1. `worker_process::split()` 在 worker 里**必须返回**（否则后面那段注册代码不跑）。
 2. 「worker 跑完就退进程」落在 **`join()`** 上：worker 的 `join()` 永不正常返回，直接退进程。
 
 > 注意是 `join()` 而不是 `start()` —— `start()` 按今天的语义是"起后台线程、阻塞到 bind
@@ -94,7 +104,7 @@ accept 队列**上，内核叫醒一个 —— worker 之间**零通讯、零共
 全局状态），而 re-exec 会让全局构造也跑 n+1 遍。
 
 `fork()` 的代价是一条必须写进文档的约束：**fork 点必须在任何用户线程起来之前。**
-`worker_guard::run()` 已经在 `main` 的第一条语句，处在最安全的位置；但如果用户的**全局
+`worker_process::split()` 已经在 `main` 的第一条语句，处在最安全的位置；但如果用户的**全局
 构造器**起了线程或连了库，这条就破了（`fork` 之后子进程里只有调用线程活着，别的线程持有的
 锁在子进程里永远不释放）。这是用 `fork` 必须付的账，nginx 也是同一条规矩。
 
@@ -115,13 +125,13 @@ master 不接请求、不进请求路径。它的 `join()` 是一个监督循环
 
 ### 5.2 用户的 `main()` 会跑 n 遍
 
-worker 从 `worker_guard::run()` 那一句继续往下跑（§2），所以用户写在 `main()` 里的一切
+worker 从 `worker_process::split()` 那一句继续往下跑（§2），所以用户写在 `main()` 里的一切
 **每进程一次**的初始化 —— 连数据库、开日志文件、读配置、建线程池 —— 会**在每个 worker
 里各跑一遍**。逃生口是
 
 ```cpp
 // doc-snippet: fragment — 同样是目标形状：这个静态方法还没实现。
-uvcpp_worker_guard::worker_index();   // -1 = master，0..n-1 = worker
+uvcpp_worker_process::index();   // -1 = master，0..n-1 = worker
 ```
 
 **这是这个形状唯一要用户操心的点**，必须写进使用文档。它也是这条路线相对"单进程多循环"
