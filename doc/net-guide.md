@@ -289,13 +289,23 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 
 实测 `flags`：`set_loops(n>1)` 那条腿（worker 侧 `uv_tcp_open` 收养之后）**`0x8e088`**
 （EMULATE=1 / BYPASS=0）；`set_loops(1)` 在同循环 `uv_accept` 之后 arm 了读时是
-**`0x0007f08c`**、未 arm 时 **`0x6f08c`** —— 与第 3 行**同值**，这就是"同档"的读数。
+**`0x0007f08c`**。**未 arm 时那个 `0x6f08c` 是推得的，不是测的** —— 它是
+`0x0007f08c` 减掉 `READ_PENDING`（`0x10000`）那一位算出来的（外部贡献者交这个数时
+自己标了）；它等于第 3 行 rig 那条腿**独立测到**的同值，而"同档"这条论断本来就
+依赖这个等式成立，所以照旧列在这里，**但量程要跟着写**（他自己的原话：需要的话可以
+在 uvcpp arm 读**之前**挂钩子把它变成实测，本仓没有要那台仪器 —— 等式两边已有一边是实测）。
 `UV_SUCCEEDED_WITHOUT_IOCP`（`libuv:win/req-inl.h:69`）**只查 BYPASS 这一个位**。
 
 > **"同一档"与"同一个入口"是两件事 —— 别把上面三行压成一行。** 第 1 行与第 2 行是**档不同**
 > （第 1 行那位没置上，同步腿根本不触发）；第 2 行与第 3 行是**档相同、入口不同** ——
-> `set_loops(1)` 那个 socket 是 libuv 自己 `accept` 出来的（`libuv:win/tcp.c:663` 那次
-> `imported=0`）⇒ 不是那一族的入口。**默认配置落在第 2 行**，所以"本库默认走进 `#5282`"是错的。
+> `set_loops(1)` 那个 socket 是 libuv 自己 `accept` 出来的（`uv__tcp_accept` 里那次
+> `uv__tcp_set_socket(..., 0)`，`imported=0`）⇒ 不是那一族的入口。**默认配置落在第 2 行**，
+> 所以"本库默认走进 `#5282`"是错的。
+>
+> **引 libuv 时只说函数名 + 实参，不给修订行号**（规矩与理由见
+> `doc/worker-process-design.md` §9.9 开头那句：外部贡献者那份 `libuv-clean` 与本仓引用的
+> 修订行号**不等差**）。本节原先在这里写过 `libuv:win/tcp.c:663` —— 那个号是他那份修订的，
+> 在上游 `v1.x` 上不是同一处，2026-09-22 按他的复核改成上面的写法。
 
 **所以 87/55 那两组死亡读数属于「master 裸 `accept()` + 转手」那条血统 ——
 多进程那条形状（以及外部贡献者台架上的同名装置），不是本库任何 `set_loops` 档的。**
@@ -339,10 +349,21 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 不碰转手。
 
 > **那个代价只在 `n>1` 上付**，这一点现在有读数（不再只是推导）：上游那笔候选修复
-> （(乙1)，`ChainLen == 1 && !imported` 才拿同步快路径）在 `set_loops(1)` 上**按构造是空操作**
+> （(乙1)）就是往 TCP 那条守卫 `if (!(handle->flags & UV_HANDLE_EMULATE_IOCP) && !non_ifs_lsp)`
+> 后面再补一个 `&& !imported`，而它在 `set_loops(1)` 上**按构造是空操作**
 > —— `&& !imported` 碰不到 `imported=0` 的句柄，实测那条路的 flags 与补丁无关（上面第 2 行
 > 的 `0x0007f08c` 就是**没打补丁**的树）。⇒ 采纳它**不会**让默认配置变慢；25~26% 那一档
 > 只落在主动开多循环的人身上。
+>
+> ⚠️ **别把 `ProtocolChain.ChainLen == 1` 接到这条 TCP 守卫上**（2026-09-22 按他的复核改正；
+> 本节原先就写成 `ChainLen == 1 && !imported`）。TCP 这条里**没有 `ChainLen`**，那两个词
+> 说的是两件事：`!(flags & EMULATE_IOCP)` 是**每句柄**的位，`!non_ifs_lsp` 是**进程级一次
+> 探测**的结果（`win/winsock.c` 建一个 dummy socket、读 `SO_PROTOCOL_INFOW` 的
+> `dwServiceFlags1 & XP1_IFS_HANDLES`，写进两个全局量 `uv_tcp_non_ifs_lsp_ipv4/ipv6`；
+> `win/tcp.c` 那里只是**读**那两个全局量，自己不做任何探测）。`ChainLen == 1` 确实存在，
+> 但在**另一条路**上、形状也不同：UDP 侧是**每 socket 一次** `getsockopt`，判据就是它
+> （`win/udp.c` 的 `uv__udp_set_socket` 一族 —— 那正是他自己另开的那个 UDP 同族 issue）。
+> **两者不能互相代替着引**：TCP 是"启动时一次 ⇒ 全局量"，UDP 是"每 socket 一次"。
 
 > **边界："没有入口"是结构判断**（那一族唯一的闸恒假），不等于"这条路已经验过没有别的
 > 问题"。`#5282` 的机制本身仍未定（`doc/worker-process-design.md` §9.1、§9.8），
