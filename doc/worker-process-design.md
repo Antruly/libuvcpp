@@ -170,7 +170,8 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
 - **Windows 的转手机制**（master 接受 + `WSADuplicateSocketW` + 管道 + ack）。它的代价是
   **master 变成单接受者**（它死了整个服务就停）、每条连接多一次 IPC 与 ack 往返，
   并且 master 必须**排空 backlog**（一次唤醒 accept 到 `WSAEWOULDBLOCK`）并把转手
-  pipelined 化。上它之前要先查清的两件事**已经查完了**，结论在 §8。
+  pipelined 化。上它之前要先查清的两件事**已经查完了**，结论在 §8；但这条路上后来又冒出
+  **第三件事，而且是拦路的** —— 见 §9。
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
   n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:988`）、
   `uvcpp_web_app` 的 `upgraded_` / `inflight_`（`src/webapp/uvcpp_web_app.h:1433` / `:1489`）、
@@ -270,5 +271,81 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
 在这台机器上突发**几乎不**拒连接，而排空仍然值得做，理由从"防拒连接"变成**降接入延迟**
 （队列深了，客户端的 connect 要等排空才有归宿）。`WSAEWOULDBLOCK` 那条仍是正确写法，
 但它保的是延迟不是可用性。
+
+## 9. Windows 转手路径挂着一条 libuv 层的内存安全缺陷
+
+§7 那条「master 接受 + `WSADuplicateSocketW` 每连接转手」有人搭出来跑了：**能跑，但会崩，崩的是
+内存安全** —— `0xC0000374` / ASan `heap-use-after-free`。不是延迟、不是吞吐、不是优雅退出。
+频率按落盘日志重算是 **每 ~94 480 条 worker 连接一次**（12 次事件 / 1 133 759 条连接，两次完整
+跑动）⇒ **不是"CI 恒绿"那种稀有，几轮 churn 就中**。
+
+**读数来自外部贡献者的装置**（本机没有 adopt 路径，复现不了，按他的读数引用）；**下面引的源码
+位置是我在 vendored 树里逐条核过的**。注意他最初给的行号取自他加了仪器的树，与干净树有偏移，
+这里一律用干净树的号。
+
+### 9.1 机制：libuv 在 Windows 写路径上依赖的一条不变式，在转手 socket 上破了
+
+- `libuv:win/tcp.c:120-125` —— 只有**不是** `UV_HANDLE_EMULATE_IOCP` **且**没有非 IFS LSP 时，
+  libuv 才调 `SetFileCompletionNotificationModes(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)`
+  （`:122`）并置 `UV_HANDLE_SYNC_BYPASS_IOCP`（`:124`）；
+- `libuv:win/req-inl.h:70` —— `UV_SUCCEEDED_WITHOUT_IOCP(r)` = `r && (flags & SYNC_BYPASS_IOCP)`；
+- `libuv:win/tcp.c:921-929` —— `WSASend` 同步成功 + 这个标志 ⇒ libuv 判定"内核不会投包"，于是
+  **自己**把 req 插进 pending 队列（注释原话 `Request completed immediately.`，`:924`）。
+
+**不变式 =「标志在 ⇒ skip-on-success 生效 ⇒ 同步成功不会来包」。它在转手过来的 socket 上破了**
+⇒ 同一个写请求被派发两次：一次来自 libuv 自己的插入，一次来自内核真的投来的完成包。
+
+**洞的形状**（这一处是拼上他读数之后才清楚的）：`libuv:win/tcp.c:102-111` 里，
+`CreateIoCompletionPort` **失败**且句柄是 imported 才置 `UV_HANDLE_EMULATE_IOCP` —— 而那个标志
+会正确关掉上面那个 BYPASS 分支。**关联成功的 imported 句柄不置它** ⇒ `:120` 的
+`if (!EMULATE_IOCP && !non_ifs_lsp)` 照进 ⇒ BYPASS 照设。而 `uv_tcp_open` 恰恰走 `imported=1`
+（`libuv:win/tcp.c:1489`），转手那一步在 `libuv:win/tcp.c:1506-1510` ⇒ **本库的
+`uvcpp_tcp::open`（`src/handle/uvcpp_tcp.cpp:53`）正是踩在这一步上的那个入口。**
+
+### 9.2 uvcpp 侧为什么变成 UAF，而不是"多跑一次回调"
+
+`callback_write`（`src/req/uvcpp_write.cpp:88`）取出闭包后走 `invoke_completion`
+（`src/req/uvcpp_req.h:156`）——**回调返回之后 `delete self`**。所以重复的那次完成打在已释放对象上。
+⇒ 「在自己的完成回调里释放自己」这个形状，**活不过一次重复投递**，与内核为什么多投无关。
+
+### 9.3 三条候选修法，与先做哪一条
+
+- **(甲) uvcpp 侧：写对象别在自己的完成回调里释放**，推迟到之后。**唯一不依赖 libuv 上游的防线。**
+- **(乙) libuv 侧：让派发幂等**（`uv_write_t.coalesced` 在 TCP 写路径上是死字段，可当"已派发"标记）。
+  这条要提上游，不是本仓的事。
+- **(丙) 结构上别每连接转手**：把**监听**句柄转给各 worker、各自 accept。§6 实测那条腿现在恒 0，
+  原因（完成端口关联是**一次性**的，第二次报 `87`）也查清了 ⇒ 它要成立，前提是 worker 必须在
+  **首次关联之前**拿到监听句柄并在自己的 IOCP 上关联。**这是设计问题，不是补丁问题。**
+
+**定的顺序是：先做判定实验，再谈 (甲)。** 三条理由：① (甲) 的缺口**在 CI 里复现不出来**（库今天
+没有任何用例走 adopt）⇒ 它会是一行**没人能证伪**的防御代码，还挂在**每次响应写**的热路径上，
+而本仓的规矩是**先证明缺口是真的再改**；② 判定实验决定后面走 (乙) 还是 (丙)，(甲) 不决定；
+③ 实验在对方装置上，不碰本仓。
+
+**判定实验（假设，可证伪）**：`SetFileCompletionNotificationModes` 在一个由
+`WSASocketW(FROM_PROTOCOL_INFO)` 从 `WSADuplicateSocketW` blob 造出来的句柄上**返回 TRUE 但不生效**。
+两臂：走 adopt（甲臂）vs 同一 socket 显式补一次该调用（乙臂），看"已派发又插包"是否只在甲臂出现。
+
+### 9.4 (甲) 若要做，它的"界"还没定
+
+他自己的读数里有一条**把最自然的那个界否掉**：取包时 `req-socket=INVALID_SOCKET` ⇒ 重复包是在
+**连接已经关掉之后**才被取走的。而 libuv 关 socket、`reqs_pending` 归零之后才跑 `uv__tcp_endgame`
+（`libuv:win/tcp.c:235-239`，那四条 assert 里就有 `reqs_pending == 0` 与 `socket == INVALID_SOCKET`）
+并调 close callback ⇒ **包的取走可能发生在 endgame 之后**，那"推迟到 close callback 之后"也还是早，
+"推迟到本轮循环之后"更只是把窗口挪窄。
+
+**所以 (甲) 要成立，得先量清那个重复包的取走时刻在 endgame 之前还是之后。** 在之前 ⇒ 可以用句柄
+生命周期当界；在之后 ⇒ **任何 uvcpp 侧的生存期都不足以兜住一个到达时刻无界的包**，只能靠 (乙) 或 (丙)。
+
+### 9.5 这件事对本设计的意义
+
+- §7 那条转手是**这条路上 Windows 唯一的一条**，而它现在挂着一条内存安全缺陷 ⇒ **§6 那条
+  「Windows `n>1` 直接报错」的决定不变，而且更站得住了**：既然唯一那条真能用的路有拦路的缺陷，
+  "报错"就不是保守，是当前唯一诚实的默认。
+- **别和 §6 那条恒 0 的机制混起来**：那条是"完成端口关联只能做一次"（有文档的 Windows 事实），
+  这条是"BYPASS 标志在 adopted 句柄上不生效"（**假设，待判定**）。两条不是同一个判定。
+- 顺带把 §6 那条恒 0 的**根因**补上：两个 worker 各对同一个继承 socket 发 `uv_listen`，而关联是
+  一次性的 ⇒ 第二个 worker 预投的 AcceptEx 包**永远回不来**，`uv_listen` 照样返回 0。**"静默"和
+  "崩溃"是同一族约束的两面。**
 
 相关文档：[webapp 应用框架开发者指南](./webapp-guide.md)、[压测靶场](./benchmark-rig.md)。
