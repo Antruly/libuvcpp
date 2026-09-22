@@ -859,7 +859,7 @@ static constexpr size_t kCompressVariantMaxEntry = 4u * 1024u * 1024u;
 // 各封一件事：字节封大文件，条数封碎片。
 static constexpr size_t kCompressVariantMaxEntries = 1024;
 
-size_t uvcpp_http_server::compress_variant_total_bytes() const {
+size_t uvcpp_http_server::compress_variant_total_bytes_locked() const {
   size_t n = 0;
   for (std::map<std::string, compress_variant>::const_iterator it =
            compress_variants_.begin();
@@ -869,8 +869,8 @@ size_t uvcpp_http_server::compress_variant_total_bytes() const {
   return n;
 }
 
-void uvcpp_http_server::compress_variant_evict() {
-  while ((compress_variant_total_bytes() > kCompressVariantMaxBytes ||
+void uvcpp_http_server::compress_variant_evict_locked() {
+  while ((compress_variant_total_bytes_locked() > kCompressVariantMaxBytes ||
           compress_variants_.size() > kCompressVariantMaxEntries) &&
          !compress_variants_.empty()) {
     // 线性找最久未用的那次够用，且不必维护第二个容器与随之而来的迭代器失效问题。
@@ -891,12 +891,15 @@ void uvcpp_http_server::compress_variant_evict() {
 uvcpp_http_server::compress_variant_stat
 uvcpp_http_server::compress_variant_stats() const {
 #if UVCPP_ZLIB_ENABLE
+  // 三条外层入口之一：这里独占地读四个计数 + 整张表（`entries` 与 `bytes` 都从表里
+  // 算），读一半就有别的循环写进去的话，`entries`/`bytes` 会与计数对不上。
+  std::lock_guard<std::mutex> lk(compress_mu_);
   compress_variant_stat s;
   s.hits    = compress_variant_hits_;
   s.misses  = compress_variant_misses_;
   s.stored  = compress_variant_stored_;
   s.entries = compress_variants_.size();
-  s.bytes   = compress_variant_total_bytes();
+  s.bytes   = compress_variant_total_bytes_locked();
   return s;
 #else
   // 头文件里明写了"zlib 关掉时返回全零、调用方不必跟着条件编译"，而成员本身
@@ -1005,17 +1008,33 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
   };
 
   if (cacheable) {
-    auto it = compress_variants_.find(vkey);
-    if (it != compress_variants_.end()) {
-      ++compress_variant_hits_;
-      it->second.last_used = ++compress_variant_clock_;
-      // 递句柄，一个字节都不拷（第 ④ 步）。`share()` 顺手把旧的那份放掉 ——
-      // 静态层借来的那份就这么还回去，既不物化、也不多一次拷贝。
-      resp.body.share(it->second.data);
+    // 三条外层入口之一。锁里**只做查表与记账**：`finish_headers()` 改的是响应、
+    // 不碰表，所以留在锁外 —— 临界区不许嵌进任何"会改动别的共享状态"的代码。
+    ::std::shared_ptr<const ::std::string> hit;
+    bool found = false;
+    {
+      std::lock_guard<std::mutex> lk(compress_mu_);
+      auto it = compress_variants_.find(vkey);
+      if (it != compress_variants_.end()) {
+        ++compress_variant_hits_;
+        it->second.last_used = ++compress_variant_clock_;
+        // 递句柄，一个字节都不拷（第 ④ 步）。`share()` 顺手把旧的那份放掉 ——
+        // 静态层借来的那份就这么还回去，既不物化、也不多一次拷贝。
+        //
+        // 句柄在锁里拷出来、`share()` 在锁外调：`share()` 要放掉响应原来那份，
+        // 那是 `uvcpp_buf` 的事，与本表无关，没有理由把它圈进临界区（那条路
+        // 一旦沾上用户侧的 `uvcpp_buf`，临界区就开始随别处的改动而变长）。
+        hit = it->second.data;
+        found = true;
+      } else {
+        ++compress_variant_misses_;
+      }
+    }
+    if (found) {
+      resp.body.share(hit);
       finish_headers();
       return true;
     }
-    ++compress_variant_misses_;
   }
 
   const size_t src_size = resp.body.size();
@@ -1043,12 +1062,16 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
   //
   // 压完不比原文小就不存：那种 body 本来就压不动，存了也只是占地方。
   if (cacheable && resp.body.size() < src_size) {
+    // 三条外层入口之二：存入 + 淘汰**同一次临界区**。淘汰那句要读整张表的字节
+    // 总量，与这次存入是同一个"表的状态" —— 拆成两次加锁会让别的循环插在中间，
+    // 淘汰就可能按一个已经不成立的总量做决定（多删或少删）。
+    std::lock_guard<std::mutex> lk(compress_mu_);
     compress_variant v;
     v.data = made;
     v.last_used = ++compress_variant_clock_;
     compress_variants_[vkey] = std::move(v);
     ++compress_variant_stored_;
-    compress_variant_evict();
+    compress_variant_evict_locked();
   }
   return true;
 #else

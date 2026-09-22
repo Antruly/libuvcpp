@@ -22,6 +22,7 @@
 #include <map>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -1025,17 +1026,34 @@ class UVCPP_API uvcpp_http_server {
   uint64_t compress_variant_misses_ = 0;
   uint64_t compress_variant_stored_ = 0;
 
+  /// 护 `compress_variants_` 与上面那四个计数 —— **多循环下本表不是按循环切的**。
+  ///
+  /// 它是**跨循环共用的缓存**：切了就退回"每条循环各自 deflate 一遍同一个静态
+  /// 文件"，命中率按循环数目线性掉（n 条循环 ⇒ 同一个文件被压 n 次、各存一份、
+  /// 各占一份字节）。所以这里要的是**互斥**，不是分片。
+  ///
+  /// 加锁点只有三个**外层入口**（`..._locked()` 那几个帮手不自已加锁，
+  /// 因为它们互相调用：淘汰要算字节总量，同一条非递归锁不能进两次）：
+  /// 命中那条路、存入（含淘汰）那条路、`compress_variant_stats()`。
+  /// 临界区里只碰表与计数，不调任何用户代码 —— `finish_headers()` 在锁外。
+  ///
+  /// `mutable`：`compress_variant_stats()` 是 const。
+  mutable std::mutex compress_mu_;
+
   /// 表内字节总量。**从表里算出来，不存**：以前有一个 `compress_variants_bytes_`
   /// 计数字段，加在存入那条路上、减在淘汰那条路上 —— 而淘汰那句 `-=` 是要被删掉
   /// 也照样编得过、且**静默**失效的（条数那条腿还在照常淘汰，只有大文件会因为字节
   /// 上限永远触发不了而悄悄不再命中）。账一旦不存在，这种漂移就写不出来了。
   ///
-  /// 代价：淘汰循环每轮都要重算一次（`compress_variant_evict()`），而每轮只删一条。
+  /// 代价：淘汰循环每轮都要重算一次（`compress_variant_evict_locked()`），而每轮只删一条。
   /// 原来那句线性找 LRU 本来就是每轮 O(n)，所以这里没有换复杂度类，只是常数翻倍。
-  size_t compress_variant_total_bytes() const;
+  ///
+  /// 调用方**必须已持有 `compress_mu_`**。
+  size_t compress_variant_total_bytes_locked() const;
 
   /// 按字节淘汰最久未用的若干条；单条可能很大，条数上限卡不住内存。
-  void compress_variant_evict();
+  /// 调用方**必须已持有 `compress_mu_`**。
+  void compress_variant_evict_locked();
 #endif
 };
 

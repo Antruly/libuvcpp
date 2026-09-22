@@ -239,7 +239,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 | 容器 | 位置 | 触碰频率 |
 |---|---|---|
-| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:988` | **每请求**（`.cpp` 里 52 处引用） |
+| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:989` | **每请求**（`.cpp` 里 52 处引用） |
 | `uvcpp_web_app::inflight_` | `src/webapp/uvcpp_web_app.h:1489` | **每请求** |
 | `uvcpp_web_app::upgraded_` | `src/webapp/uvcpp_web_app.h:1433` | 每次 WS 升级 |
 | `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:670` | 接受 / 关闭 / 计数 |
@@ -277,13 +277,28 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 多线程只读，**不需要锁**。
 
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
-> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1022`）是
+> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1023`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
-> （`src/web/uvcpp_http_server.cpp:1011`），未命中时插入并可能触发 LRU 淘汰
-> （`src/web/uvcpp_http_server.cpp:1049`、`src/web/uvcpp_http_server.cpp:872`）。
+> （`src/web/uvcpp_http_server.cpp:1017`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:1070`、`src/web/uvcpp_http_server.cpp:872`）。
 > 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
-> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1023-1026`）一起加锁；
+> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1024-1027`）一起加锁；
 > **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
+>
+> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1041`）
+> 一把**非递归**锁护住那张表与四个计数。加锁点只有三个**外层入口** —— 命中
+> （`src/web/uvcpp_http_server.cpp:1017`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
+> 整张表的字节总量，拆成两次加锁会让别的循环插在中间按一个已不成立的总量做决定）、
+> `compress_variant_stats()`。两个帮手改名成 `..._locked()`
+> （`src/web/uvcpp_http_server.h:1052` / `:1056`），意思就是"调用方已持锁" ——
+> 淘汰要算字节总量，所以这两个互相调用，同一条非递归锁不能进两次。
+> 临界区里只碰表与计数：命中那条路把共享句柄**拷出锁外**再 `share()`，
+> `finish_headers()` 也在锁外（它改的是响应，不碰表）。
+>
+> 说不改单循环热路径是**假话**：`n == 1` 时这把锁也照加。理由是"只在你真开了多循环
+> 时才加的开关"今天根本不存在（webapp 还没有 `set_loops`，见 §5），写一个恒假的分支
+> 就是死代码；等 §5 落地时那个开关自然有了，再回来按它分流。当前价格是**一次无竞争
+> 的 lock/unlock**，在这条路上（字符串键的 map 查找 + `shared_ptr` 计数）本就量不出来。
 
 ### 4.2 一处必须跟着改的判据：连接 id 的"是不是我发的号"
 

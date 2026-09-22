@@ -1089,7 +1089,7 @@ void test_compress_variant() {
   check_eq_i(static_cast<long long>(s.stored), 3, "应当三次存入");
   check_eq_i(static_cast<long long>(s.hits), 1, "应当恰好一次命中");
   check_eq_i(static_cast<long long>(s.entries), 3, "表里应当三条");
-  // 表内字节总量：它现在是**从表里算出来**的（`compress_variant_total_bytes()`），
+  // 表内字节总量：它现在是**从表里算出来**的（`compress_variant_total_bytes_locked()`），
   // 所以这条钉的是那个求和表达式本身 —— 度量错对象（拿源长度 / 拿 `uvcpp_buf::size()`）、
   // 累加写成赋值、返回常量，都会红。
   //
