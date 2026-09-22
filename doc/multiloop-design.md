@@ -334,6 +334,91 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、`http_`（连同
 > 无害，但"每进程一份的状态放在每循环一次的初始化里"这个形状本身要一起收口
 > —— 哪天各循环各 bind，`bound_port_` / `loop_started_` 就是后写覆盖。
 
+#### 4.1.1 按「每进程一次 / 每循环一次」重过一遍（2026-09-22）
+
+`uvcpp_web_app` 的**全部成员**逐个过了一遍（判据是"这个状态该有几份"，不是"今天在哪个函数里写"）。
+四类。**下面的引用一律写全路径** —— 不是啰嗦：裸 `:NNN` 只在"同一段落里另有一条完整引用"
+时才被门禁解析，整张表里一条完整引用都没有的话，**表里每一条引用都会被静默忽略**。
+
+**甲、每进程一份的配置（注册期或启动前写，冻结后只读 ⇒ 必须在放行任何循环之前做完）**
+
+| 成员 | 位置 |
+|---|---|
+| `router_` | `src/webapp/uvcpp_web_app.h:1203` |
+| `middlewares_` + `middleware_gen_` | `src/webapp/uvcpp_web_app.h:1204` / `src/webapp/uvcpp_web_app.h:1517` |
+| `ws_router_` / `ws_handlers_` | `src/webapp/uvcpp_web_app.h:1243` / `src/webapp/uvcpp_web_app.h:1244` |
+| `stream_router_` / `stream_routes_seen_` | `src/webapp/uvcpp_web_app.h:1259` / `src/webapp/uvcpp_web_app.h:1262` |
+| `upload_routes_` | `src/webapp/uvcpp_web_app.h:1275` |
+| `upload_dir_` / `upload_dir_real_` / `upload_dir_unsafe_` | `src/webapp/uvcpp_web_app.h:1281` / `src/webapp/uvcpp_web_app.h:1290` / `src/webapp/uvcpp_web_app.h:1301` |
+| `static_roots_real_` | `src/webapp/uvcpp_web_app.h:1298` |
+| 上传上限族（6 个） | `src/webapp/uvcpp_web_app.h:1321-1326` |
+| 连接钩子族（4 个） | `src/webapp/uvcpp_web_app.h:1528-1534` |
+| `work_limit_` | `src/webapp/uvcpp_web_app.h:1213` |
+
+**其中 `middlewares_` 是今天唯一在错误的位置被写的**：写点在
+`src/webapp/uvcpp_web_app.cpp:1667` 与 `src/webapp/uvcpp_web_app.cpp:1668`，
+而所有者是**进程**（上面那条更正二）。
+
+**乙、每进程一份的可变量**
+
+| 成员 | 位置 | 为什么是进程级 |
+|---|---|---|
+| `bound_port_` | `src/webapp/uvcpp_web_app.h:1582` | 一个 app 一个监听端口（`bind()` 只调一次）。 |
+| `started_once_` | `src/webapp/uvcpp_web_app.h:1540` | "这个 app 起过了"，与几条循环无关。 |
+| `stopping_` | `src/webapp/uvcpp_web_app.h:1546` | 它答的是"这次停机请求受理过了没有"（幂等用 `exchange`，`src/webapp/uvcpp_web_app.cpp:1801`）。`shutdown_phase_` 才是"我这条循环走到第几步" —— **两者今天挨着写，很容易被一起搬**。 |
+| `running_` / `loop_started_` | `src/webapp/uvcpp_web_app.h:1545` / `src/webapp/uvcpp_web_app.h:1544` | 它们是**聚合量**："有没有任何一条循环在跑"。`stop()` 的早退判据（`src/webapp/uvcpp_web_app.cpp:1797`）在 n>1 时要读这个语义，不是"我这条循环"。 |
+| `thread_` / `thread_started_` / `threading_` | `src/webapp/uvcpp_web_app.h:1537-1539` | 单数 ⇒ 向量。`join()`（`src/webapp/uvcpp_web_app.cpp:1813-1825`）、`start_background()`（`src/webapp/uvcpp_web_app.cpp:1518-1557`）、析构三处都按"一个线程"写。 |
+
+**丙、每循环一份 —— 今天**全部**是单数成员**
+
+| 成员 | 位置 |
+|---|---|
+| `loop_tid_` / `tid_known_` / `tid_mutex_` | `src/webapp/uvcpp_web_app.h:1550` / `src/webapp/uvcpp_web_app.h:1551` / `src/webapp/uvcpp_web_app.h:1549` |
+| `async_` | `src/webapp/uvcpp_web_app.h:1554` —— **一个 `uv_async` 只能服务它注册的那条循环**，这条最硬 |
+| `post_queue_` / `post_mutex_` | `src/webapp/uvcpp_web_app.h:1556` / `src/webapp/uvcpp_web_app.h:1555` |
+| `idle_timer_` | `src/webapp/uvcpp_web_app.h:1564` |
+| `shutdown_timer_` / `shutdown_deadline_ms_` / `shutdown_phase_` | `src/webapp/uvcpp_web_app.h:1567` / `src/webapp/uvcpp_web_app.h:1568` / `src/webapp/uvcpp_web_app.h:1580` |
+| `inflight_` / `flushing_` | `src/webapp/uvcpp_web_app.h:1489` / `src/webapp/uvcpp_web_app.h:1498` |
+| `upgraded_` | `src/webapp/uvcpp_web_app.h:1433` |
+| `registry_` | `src/webapp/uvcpp_web_app.h:1435` |
+| `file_transfers_` | `src/webapp/uvcpp_web_app.h:1503` |
+
+**丁、一份、但内部已经按循环切好了**：`http_`（`src/webapp/uvcpp_web_app.h:1191`）
+—— `contexts_` 已切成 `vector<map>`（§4.1），net 层的 `clients_` 已按 worker 切。
+
+**戊、只读常量，不分类**：`empty_chain_`（`src/webapp/uvcpp_web_app.h:1525`）。
+
+**己、三个"每循环"的访问器**（不是成员，所以上面几张表都装不下，但同一类）：
+`on_loop_thread()`（`src/webapp/uvcpp_web_app.cpp:1842`）、`post()`（`src/webapp/uvcpp_web_app.cpp:1847`）、
+`loop()`（`src/webapp/uvcpp_web_app.cpp:1864`）—— 三个都在 `uvcpp_web_context_host` 接口上
+（`src/webapp/uvcpp_web_context.h:101-142`），今天都用**唯一那条**循环作答。其中
+`loop()` 有个不在显然处的调用点：`serve_static()` 的 handler 在**请求时**才要它
+（`src/webapp/uvcpp_web_app.cpp:1271` 那行 `st->serve(req, resp, next, self->loop())`，
+注释就写着"循环要到请求时才取"）⇒ n>1 之后它必须回答**这条连接所在的那条**循环，
+否则静态文件的工作项会被投到别的循环上去等。`post()` 的"发起者循环"怎么定，见 §5。
+
+##### 重过一遍**新发现的两张表**：§4 那张闸门表漏了它们
+
+按"容器是不是 per-object"这个判据（§4 的判据）扫 `src/web/*.h` + `src/webapp/*.h` 的成员容器，
+**除 §4 已列的四条外还有两张**，都在**请求路径上被写**：
+
+| 容器 | 位置 | 写点 | 谁持有 |
+|---|---|---|---|
+| `uvcpp_ws_sessions::sessions_` / `retired_` | `src/web/uvcpp_ws_sessions.h:184-185` | 每次 WS 接管 `push_back`、每次终结搬进 `retired_`、async 回调里 `delete` | `uvcpp_ws_server::sessions_`（`src/web/uvcpp_ws_server.h:199`） |
+| `uvcpp_static_server::cache_` / `retired_` | `src/web/uvcpp_static_server.h:180-181` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:394`），读在 `:302-303`；`retired_` 在 `:195-196` 清扫 | `uvcpp_web_static`（`serve_static()` 一份） |
+
+**`ws_sessions` 那一张比"并发 `vector::push_back`"更重**：它自己还带一个 `drain_async_`
+（`src/web/uvcpp_ws_sessions.h:186`），而那个 async 是 `set_loop(http_server_->get_tcp_server()->get_loop())`
+装上的（`src/web/uvcpp_ws_server.cpp:221`）—— **今天装的是接受者那条循环**。n>1 之后 WS 连接落在
+工作循环上，而在**别的循环的线程**上 `delete` 一个持有那条循环句柄的 `uvcpp_ws_connection`
+是 libuv 层面就不成立的（`uv_async_send` 本身跨线程合法，所以问题不在投递，在**回收动作跑错了线程**）。
+⇒ 这一张不能只加锁，要么按循环切、要么把回收挪回连接自己那条循环。
+
+`uvcpp_static_server` 那一张形状简单（一个 `std::map` 缓存 + 一个 `retired_` 向量，都只该由持有它的
+循环动），但它今天**是 app 一份、被所有循环共用** —— 加锁或按循环切都行，得选一个。
+
+**这两条是这次重过一遍的产出，之前设计稿与外部复核都没提到它们。**
+
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
 > —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1069-1069`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
