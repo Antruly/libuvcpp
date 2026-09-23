@@ -143,11 +143,15 @@ int uvcpp_h2_connection::flush() {
     return 0;
   }
 
-  bytes_out_ += out_.size();
-  // `uvcpp_buf(const char*, size_t)` 是**拷贝**构造，所以 `out_` 可以立刻清空 ——
-  // 缓冲区在写完成回调里才被释放。
-  write_buf_ = new uvcpp_buf(out_.data(), out_.size());
-  out_.clear();
+  // 这一批帧从连接缓冲里**取走**（`swap` 是 O(1)）。`uvcpp_buf(const char*, size_t)`
+  // 是**拷贝**构造，所以本地这份 `pending` 出了本函数就可以放掉。
+  //
+  // **不留在 `out_` 里**是刻意的：留下的那段时间 `out_` 装的是"已经 serialize、
+  // 只等上线"的帧，任何一次重入 `flush()` 都会把它们再 `drain` 一遍、再发一遍。
+  // 取走之后这个类别**结构上**不存在 —— 不必去论证"回调会不会同步跑"。
+  std::string pending;
+  pending.swap(out_);
+  write_buf_ = new uvcpp_buf(pending.data(), pending.size());
 
   writing_              = true;
   const std::shared_ptr<char> life = alive_token();
@@ -161,10 +165,37 @@ int uvcpp_h2_connection::flush() {
     writing_ = false;
     delete write_buf_;
     write_buf_ = nullptr;
-    if (wr == UV_EALREADY) return wr;  // 有别的写在飞，等它的完成回调再冲
+    if (wr == UV_EALREADY) {
+      // 有别的写在飞，等它的完成回调再冲。**这一批必须放回去**：`drain()` 是
+      // 消费式的（`nghttp2_session_mem_send2` 取走即从出站队列消失），
+      // `pending` 就是这些帧**唯一**的副本。丢掉 = 这些帧再也发不出去，而它们
+      // 的 `done` 已经带着 0（成功）躺在会话的 `completed` 里了 —— 线上一个
+      // 字节都没有，发起方却收到"发出去了"。放回**前面**（`pending` 在前、
+      // 这段时间里 `out_` 新攒的帧在后），字节顺序天然保住。
+      pending.append(out_);
+      out_.swap(pending);
+      return wr;
+    }
+    // 硬失败：这条连接没救了，`pending` 里这些帧这辈子都上不了线，就地丢掉
+    // （它出了本函数就没了）。**不能放回 `out_`**：`shutdown()` 里那次
+    // `flush()` 会拿它们再写一遍（注定失败的重试），而且失败了 `out_` 仍非空
+    // ⇒ 顶上的 `finish_close()` 分支进不去 ⇒ 连接卡在 `closing_` 上永远关不掉。
     shutdown();
     return wr;
   }
+
+  // 到这里 `wr == 0`，但**本对象未必还活着**：TLS 那条路上 `client_->write()`
+  // 能**同步**把回调跑完 —— 它的 `tls_flush_out()` 里 `tcp_->write()` 被拒就走
+  // `tls_fail` → `tls_finish_write`，后者直接调 `write_fn_`
+  // （`src/net/uvcpp_tcp_client.cpp`）。那条路**一定**带非 0 状态，于是
+  // `on_write_done` 走 `notify_disconnect()`，而持有者的契约正是在那里销毁本
+  // 对象。原始代码 write 之后不碰任何成员，所以没事；这里要记账，就得先问一次
+  // 令牌。
+  if (!token_alive(life)) return 0;
+
+  // 受理了才记账。`out_` 此刻装的是**这段时间里新攒的**帧（通常为空），不动它。
+  // 上面那条同步失败的路上连接已经 `closed_`，字节一个都没出网，不记。
+  if (!closed_) bytes_out_ += pending.size();
   return 0;
 }
 
@@ -230,12 +261,20 @@ int uvcpp_h2_connection::send_data(int32_t stream_id, const char* data,
       session_->submit_data(stream_id, data, len, end_stream, std::move(done));
   if (rv != 0) return rv;
 
-  const int frv = flush();
+  // 到这里这块**已经受理**了，所以本函数只能是"受没受理"的那个 0。
+  //
+  // **不能把 `flush()` 的 rc 传出去。** 调用方（`uvcpp_http_server::write_stream`
+  // 的 h2 分支）把非 0 读作"未受理、`done` 不会被调"，于是自己再结算一次 ——
+  // 而这时块已进 nghttp2 的出站队列、`done` 也已经带着 0 躺在 `completed` 里
+  // （`run_completed()` 就在下面），同一块会被结算两遍。发送真失败的下场由
+  // `done` 的码或拆连接那条路（`cancel_pending_out` → `UV_ECANCELED`）承载，
+  // 不该冒充"没受理"。
+  flush();
   // `flush()` 没起写（没东西可发：窗口关着、或会话还在等对端）时，这一批
   // `done` 就没人来跑了 —— 补上。起了写的话交给 `on_write_done`，
   // 两边都跑就是重复结算。
   run_completed();
-  return frv;
+  return 0;
 }
 
 void uvcpp_h2_connection::run_completed() {

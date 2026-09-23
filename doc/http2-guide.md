@@ -208,7 +208,7 @@ TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字�
 ### 唯一的那个连接级回调
 
 `on_disconnect` 在三种情况下触发：对端关了、读错了、我们自己关完了
-（`src/http2/uvcpp_h2_connection.cpp:176`、`:332`）。它**排在框架自己的关闭回调之前**，
+（`src/http2/uvcpp_h2_connection.cpp:207`、`:371`）。它**排在框架自己的关闭回调之前**，
 所以那是你最后一次能安全碰这条连接的机会。
 
 ---

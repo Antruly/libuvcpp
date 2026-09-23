@@ -88,10 +88,10 @@ class UVCPP_API uvcpp_h2_connection {
 
   /**
    * @brief 提交一块流式 body + `flush()`。
-   *
-   * @param done 这一块上线之后回调一次。**绝不在本次调用里同步跑** —— 它由
-   *             写完成路径执行，语义与 h1 那条路（libuv 写完成）一致。流中途
-   *             被 RST 或连接断了也一定会跑，参数 `UV_ECANCELED`。
+   * @param done 这块上线后回调一次，**绝不在本次调用里同步跑**（由写完成路径执行，
+   *             语义同 h1 那条路；流被 RST 或断了也一定跑，参数 `UV_ECANCELED`）。
+   * @return 只表示"受没受理"（**不是 `flush()` 的 rc**）：0 = 已受理，`done` 必跑
+   *         一次；非 0 = 没受理，`done` 不会被调，调用方自己收尾。
    */
   int send_data(int32_t stream_id, const char* data, size_t len,
                 bool end_stream, std::function<void(int)> done);
