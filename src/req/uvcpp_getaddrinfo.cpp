@@ -1,5 +1,6 @@
 ﻿#include "uvcpp_getaddrinfo.h"
 #include <uvcpp/uvcpp_alloc.h>
+#include <uvcpp/uvcpp_threadpool.h>
 namespace uvcpp {
 uvcpp_getaddrinfo::uvcpp_getaddrinfo() : uvcpp_req() {
   uv_getaddrinfo_t* req = uvcpp::uvcpp_alloc<uv_getaddrinfo_t>();
@@ -17,6 +18,8 @@ int uvcpp_getaddrinfo::init() {
 int uvcpp_getaddrinfo::getaddrinfo(uvcpp_loop* loop, const char* node, const char* service, const struct addrinfo* hints,
                   ::std::function<void(uvcpp_getaddrinfo*, int, struct addrinfo*)> getaddrinfo_cb) {
   m_getaddrinfo_cb = getaddrinfo_cb;
+  // 本库的池账：这一笔会把活儿送进 libuv 线程池（见 uvcpp_threadpool.h）
+  uvcpp_threadpool_note_use();
   return uv_getaddrinfo(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_GETADDRINFO_REQ, callback_getaddrinfo, node, service, hints);
 }
 

@@ -1,5 +1,6 @@
 ﻿#include "uvcpp_random.h"
 #include <uvcpp/uvcpp_alloc.h>
+#include <uvcpp/uvcpp_threadpool.h>
 namespace uvcpp {
 #if UV_VERSION_MAJOR >= 1
 #if UV_VERSION_MINOR >= 33
@@ -19,6 +20,8 @@ int uvcpp_random::init() {
 int uvcpp_random::random(uvcpp_loop* loop, void* buf, size_t buflen, unsigned flags,
              ::std::function<void(uvcpp_random*, int, void*, size_t)> random_cb) {
   m_random_cb = random_cb;
+  // 本库的池账：这一笔会把活儿送进 libuv 线程池（见 uvcpp_threadpool.h）
+  uvcpp_threadpool_note_use();
   return uv_random(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_RANDOM_REQ, buf, buflen, flags, callback_random);
 }
 

@@ -1,5 +1,6 @@
 ﻿#include "uvcpp_getnameinfo.h"
 #include <uvcpp/uvcpp_alloc.h>
+#include <uvcpp/uvcpp_threadpool.h>
 namespace uvcpp {
 uvcpp_getnameinfo::uvcpp_getnameinfo() : uvcpp_req() {
   uv_getnameinfo_t* req = uvcpp::uvcpp_alloc<uv_getnameinfo_t>();
@@ -17,6 +18,8 @@ int uvcpp_getnameinfo::init() {
 int uvcpp_getnameinfo::getnameinfo(uvcpp_loop* loop, const struct sockaddr* addr, int flags,
                   ::std::function<void(uvcpp_getnameinfo*, int, const char*, const char*)> getnameinfo_cb) {
   m_getnameinfo_cb = getnameinfo_cb;
+  // 本库的池账：这一笔会把活儿送进 libuv 线程池（见 uvcpp_threadpool.h）
+  uvcpp_threadpool_note_use();
   return uv_getnameinfo(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_GETNAMEINFO_REQ, callback_getnameinfo, addr, flags);
 }
 

@@ -34,7 +34,8 @@
 
 #include <webapp/uvcpp_web_app.h>
 
-#include <uvcpp/uvcpp_version.h>  // UVCPP_SERVER_TOKEN
+#include <uvcpp/uvcpp_threadpool.h>  // uvcpp_set_threadpool_size / 池账
+#include <uvcpp/uvcpp_version.h>     // UVCPP_SERVER_TOKEN
 
 #include <uv.h>
 
@@ -214,6 +215,7 @@ uvcpp_web_app_config::uvcpp_web_app_config()
 uvcpp_web_app::uvcpp_web_app()
     : http_(new uvcpp_http_server()),
       work_limit_(new uvcpp_web_work_limit()),
+      work_limit_explicit_(false),
       ws_server_(nullptr),
       stream_routes_seen_(0),
       upload_dir_(),
@@ -415,6 +417,9 @@ bool uvcpp_web_app::http2_enabled() const {
 
 uvcpp_web_app& uvcpp_web_app::set_work_limit(size_t limit) {
   work_limit_->set_limit(limit);
+  // 记下"用户明确给过数"：`start()` 只会对**没给过**的情形重算上限（见
+  // `set_work_limit()` 的注释）。`0` = 明确要不限，也算给过。
+  work_limit_explicit_ = true;
   return *this;
 }
 
@@ -1759,12 +1764,37 @@ int uvcpp_web_app::init_process_once() {
   // --- 配置 --------------------------------------------------------
   uvcpp_logger::instance().set_level(cfg_.min_log_level);
 
-  // `UV_THREADPOOL_SIZE` 必须在**进程启动之前**设好 —— libuv 第一次用到线程池
-  // 时读一次就缓存住了，之后改环境变量毫无效果，也没有运行时的扩容 API。
-  // 所以"现在"是最后一个还能提醒的时机：等业务跑起来再说就已经晚了。
+  // 工作池在途上限：**没被用户显式设过就按此刻的线程池大小重算**。
   //
-  // 这条 WARN 就是计划风险表里那句一直没落地的"不提供假的
-  // set_threadpool_size()，改为启动时提醒"。
+  // 构造时 `work_limit_` 就是按 `default_limit()` 建的，但那是**快照**。而
+  // "在 `main()` 开头调 `uvcpp_set_threadpool_size()`、之后才 `app.start()`"
+  // 是最自然的写法 —— 中间这段时间池子变了、上限没跟着变，闸门就会按一个
+  // 过时的数字放行（池子被调大时表现为白白留出余量，调小时表现为限得太松，
+  // 后者才是真问题：限太松等于闸门没装）。
+  //
+  // 位置必须在 `bind()` / 放行循环之前：静态服务是在它自己的构造里
+  // `set_work_limit(work_limit_.get())` 拿到同一份对象的（共享 `shared_ptr`），
+  // 这里改的是那个对象自己的原子数，所以之后什么时候改都生效 —— 但"启动前
+  // 定好"才让人读得明白。
+  if (!work_limit_explicit_) {
+    work_limit_->set_limit(uvcpp_web_work_limit::default_limit());
+  }
+
+  // 线程池大小这条提醒。**libuv 是惰性读的**：`init_threads()` 由第一次
+  // `uv__work_submit()` 经 `uv_once` 触发（`_local_deps/libuv/src/threadpool.c:271`），
+  // 线程数就是在那里面读的（`_local_deps/libuv/src/threadpool.c:200-207`），所以真正的
+  // 先决条件是"**本进程第一次往线程池
+  // 投递之前**"，**不是**"进程启动之前" —— 这条以前写严了。
+  //
+  // 说严了不只是不准：它让这条 WARN 劝用户去做一件**已经没用的事**（"请去
+  // 环境里设 UV_THREADPOOL_SIZE"），而正确做法（进程内 `uvcpp_set_threadpool_
+  // size()`）在那段时间里其实还来得及。所以这里不但要报"池子多大"，还要报
+  // **现在改还来不来得及** —— 判据就是本库的池账（`uvcpp_threadpool_used()`）。
+  //
+  // 以前那句"例如 UV_THREADPOOL_SIZE=pool*4"是个**实打实的错**：`pool * 4`
+  // 正是本类算出来的**在途上限**（`default_limit()`），不是并行度建议 —— 照
+  // 它设，池子会真的开成 16 条线程，那是四倍于核数的线程在抢文件 IO。改成
+  // 报出**核数**那条依据（`uvcpp_default_threadpool_size()`）。
   //
   // **位置在 `set_level` 之后**：用户把等级调到 ERR/OFF 是在说"只告诉我出错
   // 了"，那这条配置建议就该跟着闭嘴 —— 放在 set_level 前面的话它永远按上一档
@@ -1772,12 +1802,15 @@ int uvcpp_web_app::init_process_once() {
   if (!uvcpp_web_work_limit::threadpool_size_is_set()) {
     const size_t pool = uvcpp_web_work_limit::threadpool_size();
     UVCPP_LOG_WARN(log_category::CORE)
-        << "UV_THREADPOOL_SIZE 未设置：libuv 线程池只有 " << pool
+        << "UV_THREADPOOL_SIZE 未设置，libuv 线程池是默认的 " << pool
         << " 个线程，所有异步文件 IO / DNS 都排在它后面（当前工作池在途上限 "
-        << work_limit_->limit() << "）。它**只在进程启动前设置才生效**"
-        << "（libuv 只读一次，没有运行时扩容 API），现在改本进程已无效 —— "
-        << "请在启动环境里设置，例如 UV_THREADPOOL_SIZE=" << (pool * 4)
-        << "。";
+        << work_limit_->limit() << "）。进程内设它用 "
+        << "uvcpp_set_threadpool_size(n)（n <= 0 = 按 CPU 核数，本机 "
+        << uvcpp_default_threadpool_size() << "），**要在本进程第一次往线程池"
+        << "投递之前调**："
+        << (uvcpp_threadpool_used()
+                ? "本进程已经投过活儿了，现在这一调只对子进程和下次启动生效。"
+                : "现在还没投过，这一调还来得及。");
   }
 
   // 上传总长没设上限的提醒。**位置同样是 `set_level` 之后**，理由与上面那条

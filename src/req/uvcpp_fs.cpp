@@ -1,5 +1,11 @@
 ﻿#include "uvcpp_fs.h"
 #include <uvcpp/uvcpp_alloc.h>
+#include <uvcpp/uvcpp_threadpool.h>
+// 本文件里每个**异步**重载（带回调的那些，共 36 个）都在投递前记一笔
+// `uvcpp_threadpool_note_use()`：这些活儿进的是 libuv 的线程池，而池子的线程数
+// 就是**在这条路上第一次被读进缓存的**（`src/threadpool.c:200`，外面包着
+// `uv_once`）。有了这笔账，`uvcpp_set_threadpool_size()` 才答得出"现在改还来得及
+// 吗"。同步重载（传 `nullptr` 的那些）不过池子，所以不记。详见 uvcpp_threadpool.h。
 namespace uvcpp {
 uvcpp_fs::uvcpp_fs() : uvcpp_req() {
   uv_fs_t* req = uvcpp::uvcpp_alloc<uv_fs_t>();
@@ -241,6 +247,7 @@ int uvcpp_fs::close(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_close_cb = close_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_close(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, callback_close);
   if (rc != 0)
     async_pending_ = false;
@@ -256,6 +263,7 @@ int uvcpp_fs::open(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_open_cb = open_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_open(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, flags, mode,
                     callback_open);
   if (rc != 0)
@@ -272,6 +280,7 @@ int uvcpp_fs::read(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_read_cb = read_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_read(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                     reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
                     callback_read);
@@ -287,6 +296,7 @@ int uvcpp_fs::unlink(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_unlink_cb = unlink_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_unlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_unlink);
   if (rc != 0)
     async_pending_ = false;
@@ -302,6 +312,7 @@ int uvcpp_fs::write(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_write_cb = write_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                      reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
                      callback_write);
@@ -320,6 +331,7 @@ int uvcpp_fs::copyfile(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_copyfile_cb = copyfile_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_copyfile(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path, flags,
                         callback_copyfile);
   if (rc != 0)
@@ -338,6 +350,7 @@ int uvcpp_fs::mkdir(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_mkdir_cb = mkdir_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_mkdir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, mode,
                      callback_mkdir);
   if (rc != 0)
@@ -352,6 +365,7 @@ int uvcpp_fs::mkdtemp(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_mkdtemp_cb = mkdtemp_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_mkdtemp(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, tpl, callback_mkdtemp);
   if (rc != 0)
     async_pending_ = false;
@@ -367,6 +381,7 @@ int uvcpp_fs::mkstemp(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_mkstemp_cb = mkstemp_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_mkstemp(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, tpl, callback_mkstemp);
   if (rc != 0)
     async_pending_ = false;
@@ -383,6 +398,7 @@ int uvcpp_fs::rmdir(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_rmdir_cb = rmdir_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_rmdir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_rmdir);
   if (rc != 0)
     async_pending_ = false;
@@ -397,6 +413,7 @@ int uvcpp_fs::scandir(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_scandir_cb = scandir_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_scandir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, flags,
                        callback_scandir);
   if (rc != 0)
@@ -412,6 +429,7 @@ int uvcpp_fs::opendir(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_opendir_cb = opendir_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_opendir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path,
                        callback_opendir);
   if (rc != 0)
@@ -426,6 +444,7 @@ int uvcpp_fs::readdir(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_readdir_cb = readdir_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_readdir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ,
                        (uv_dir_t*)dir->get_dir(), callback_readdir);
   if (rc != 0)
@@ -440,6 +459,7 @@ int uvcpp_fs::closedir(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_closedir_cb = closedir_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_closedir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ,
                         (uv_dir_t*)dir->get_dir(), callback_closedir);
   if (rc != 0)
@@ -457,6 +477,7 @@ int uvcpp_fs::stat(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_stat_cb = stat_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_stat(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_stat);
   if (rc != 0)
     async_pending_ = false;
@@ -470,6 +491,7 @@ int uvcpp_fs::fstat(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_fstat_cb = fstat_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_fstat(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, callback_fstat);
   if (rc != 0)
     async_pending_ = false;
@@ -484,6 +506,7 @@ int uvcpp_fs::rename(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_rename_cb = rename_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_rename(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path,
                       callback_rename);
   if (rc != 0)
@@ -498,6 +521,7 @@ int uvcpp_fs::fsync(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_fsync_cb = fsync_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_fsync(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, callback_fsync);
   if (rc != 0)
     async_pending_ = false;
@@ -511,6 +535,7 @@ int uvcpp_fs::fdatasync(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_fdatasync_cb = fdatasync_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_fdatasync(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                          callback_fdatasync);
   if (rc != 0)
@@ -526,6 +551,7 @@ int uvcpp_fs::ftruncate(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_ftruncate_cb = ftruncate_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_ftruncate(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, offset,
                          callback_ftruncate);
   if (rc != 0)
@@ -543,6 +569,7 @@ int uvcpp_fs::sendfile(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_sendfile_cb = sendfile_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_sendfile(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, out_fd, in_fd,
                         in_offset, length, callback_sendfile);
   if (rc != 0)
@@ -558,6 +585,7 @@ int uvcpp_fs::access(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_access_cb = access_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_access(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, mode,
                       callback_access);
   if (rc != 0)
@@ -573,6 +601,7 @@ int uvcpp_fs::chmod(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_chmod_cb = chmod_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_chmod(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, mode,
                      callback_chmod);
   if (rc != 0)
@@ -589,6 +618,7 @@ int uvcpp_fs::utime(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_utime_cb = utime_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_utime(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, atime, mtime,
                      callback_utime);
   if (rc != 0)
@@ -605,6 +635,7 @@ int uvcpp_fs::futime(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_futime_cb = futime_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_futime(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, atime, mtime,
                       callback_futime);
   if (rc != 0)
@@ -623,6 +654,7 @@ int uvcpp_fs::lutime(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_lutime_cb = lutime_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_lutime(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, atime, mtime,
                       callback_lutime);
   if (rc != 0)
@@ -640,6 +672,7 @@ int uvcpp_fs::lstat(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_lstat_cb = lstat_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_lstat(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_lstat);
   if (rc != 0)
     async_pending_ = false;
@@ -654,6 +687,7 @@ int uvcpp_fs::link(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_link_cb = link_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_link(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path,
                     callback_link);
   if (rc != 0)
@@ -670,6 +704,7 @@ int uvcpp_fs::symlink(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_symlink_cb = symlink_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_symlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path, flags,
                        callback_symlink);
   if (rc != 0)
@@ -684,6 +719,7 @@ int uvcpp_fs::readlink(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_readlink_cb = readlink_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_readlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path,
                         callback_readlink);
   if (rc != 0)
@@ -699,6 +735,7 @@ int uvcpp_fs::realpath(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_realpath_cb = realpath_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_realpath(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path,
                         callback_realpath);
   if (rc != 0)
@@ -717,6 +754,7 @@ int uvcpp_fs::fchmod(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_fchmod_cb = fchmod_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_fchmod(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, mode,
                       callback_fchmod);
   if (rc != 0)
@@ -733,6 +771,7 @@ int uvcpp_fs::chown(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_chown_cb = chown_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_chown(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, uid, gid,
                      callback_chown);
   if (rc != 0)
@@ -749,6 +788,7 @@ int uvcpp_fs::fchown(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_fchown_cb = fchown_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_fchown(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, uid, gid,
                       callback_fchown);
   if (rc != 0)
@@ -766,6 +806,7 @@ int uvcpp_fs::lchown(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_lchown_cb = lchown_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_lchown(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, uid, gid,
                       callback_lchown);
   if (rc != 0)
@@ -784,6 +825,7 @@ int uvcpp_fs::statfs(uvcpp_loop* loop,
     return UV_EALREADY;
   fs_statfs_cb = statfs_cb;
   async_pending_ = true;
+  uvcpp_threadpool_note_use();
   int rc = uv_fs_statfs(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_statfs);
   if (rc != 0)
     async_pending_ = false;

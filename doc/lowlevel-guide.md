@@ -295,7 +295,7 @@ int main() {
 }
 ```
 
-**`queue_work` 是一次性的**：第二次调会抛（`src/req/uvcpp_work.cpp:20-23`），因为
+**`queue_work` 是一次性的**：第二次调会抛（`src/req/uvcpp_work.cpp:24-27`），因为
 `loop` 已经设过了。
 
 **跨线程唤醒循环用 `uvcpp_async`**。`send()` 就是 `uv_async_send`，头里明说它用于
@@ -327,7 +327,7 @@ int main() {
 - **内存不足抛 `std::bad_alloc`**：`src/uvcpp/uvcpp_alloc.h:121-126`、`uvcpp_loop` 的构造
   （`src/handle/uvcpp_loop.cpp:59-60`）、`uvcpp_req` 的拷贝构造与赋值。（`uvcpp_handle`
   的拷贝构造/赋值曾经也在这一列，但它们已删 —— 见 §10。）
-- **`queue_work` 抛的是 `const char*`，不是 `std::exception`**（`src/req/uvcpp_work.cpp:20`）。
+- **`queue_work` 抛的是 `const char*`，不是 `std::exception`**（`src/req/uvcpp_work.cpp:24`）。
   单元测试统一的 `catch (const std::exception&)` **接不住它**。
 - 这一层除此之外基本不抛异常——错误都走返回值。
 

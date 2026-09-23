@@ -17,14 +17,23 @@
  *
  * 默认上限
  * --------
- * `UV_THREADPOOL_SIZE`（未设时按 libuv 默认的 4）× 4，下限 16。乘 4 的理由：
- * 线程池的线程数决定**并行度**，而队列允许略长一些才不会让每一次抖动都变成
- * 拒绝；但必须有界。下限 16 是为了让小池子（默认 4 线程 → 16）不至于因为
- * 一两个慢请求就把服务打成 503。
+ * 线程池线程数 × 4，下限 16。乘 4 的理由：线程池的线程数决定**并行度**，而队列
+ * 允许略长一些才不会让每一次抖动都变成拒绝；但必须有界。下限 16 是为了让小池子
+ * （默认 4 线程 → 16）不至于因为一两个慢请求就把服务打成 503。
  *
- * `UV_THREADPOOL_SIZE` **必须在进程启动前设置**（libuv 只读一次并缓存，没有
- * 运行时扩容 API），所以 `uvcpp_web_app::start()` 在它未被设置时会打一条
- * WARN —— 见 `threadpool_size_is_set()`。
+ * 那个"线程池线程数"取自 `uvcpp_threadpool.h` 的 `uvcpp_threadpool_size()`——
+ * 本类**不再自己重读一遍环境变量**。那边多记了两样这里答不出来的事：
+ *
+ * - libuv 1.51 是**惰性**读的（第一次 `uv__work_submit` 才读，见该头文件），
+ *   所以真正的先决条件是"**在本进程第一次往线程池投递之前**"设好，比"进程启动
+ *   之前"松；
+ * - 投过之后环境变量说什么都不算数了，那时它报的是**投递那一刻钉住**的数 ——
+ *   也就是 libuv 真正在跑的那个数。
+ *
+ * 于是 `uvcpp_web_app::start()` 在"用户没显式设过上限"时会按**当时**的值重算
+ * 一遍（`set_work_limit()` 之外另有一个标记）：`default_limit()` 若只在构造时
+ * 快照一次，`uvcpp_set_threadpool_size()` 在构造与启动之间被调用就反映不到上限
+ * 上。要提醒用户设池子，也在那同一个点上说 —— 见 `threadpool_size_is_set()`。
  *
  * 拿不到名额时怎么办，**按路径分工**（这不是一个可以统一的选择）
  * --------------------------------------------------------------
@@ -175,18 +184,33 @@ class UVCPP_API uvcpp_web_work_limit {
   /** @brief `add_wakeup()` 失败的返回值，也表示"没有注册"。 */
   static const size_t INVALID_WAKEUP = 0;
 
-  /** @brief 按 `UV_THREADPOOL_SIZE` 推导的默认上限（未设时按 4 算）。 */
+  /**
+   * @brief 按当前线程池大小推导的默认上限：`threadpool_size() * 4`，下限 16。
+   *
+   * **每次调用都现算**（不是构造时算好存着）—— 所以 `uvcpp_web_app::start()`
+   * 在用户没显式设过上限时能靠重算一次把"构造之后才调的
+   * `uvcpp_set_threadpool_size()`"接上。
+   */
   static size_t default_limit();
 
-  /** @brief libuv 的线程池线程数，按 `UV_THREADPOOL_SIZE` 推导（未设 → 4）。 */
+  /**
+   * @brief libuv 的线程池线程数。
+   *
+   * 直通 `uvcpp_threadpool.h` 的 `uvcpp_threadpool_size()`（那条路会**逐字重演
+   * libuv 的夹法**，并在投过活儿之后报**钉住**的实测值）。本类不另做一套。
+   */
   static size_t threadpool_size();
 
   /**
-   * @brief `UV_THREADPOOL_SIZE` 有没有被显式设置。
+   * @brief `UV_THREADPOOL_SIZE` 有没有被显式设成**一个 libuv 会原样采用的数**。
    *
-   * 给 `uvcpp_web_app::start()` 判断要不要打那条 WARN 用：这个变量**必须在
-   * 进程启动前设好**（libuv 只读一次），启动之后再说就晚了 —— 所以只有在
-   * 启动的这一刻提醒才有意义。
+   * 直通 `uvcpp_threadpool.h` 的 `uvcpp_threadpool_size_is_set()`：空串 / `abc` /
+   * `0`（libuv 会给 1）、负数与超上限（会给 1024）都算没设好。比
+   * `threadpool_size() != 4` 严格 —— 那个分不出"没设"与"设成了 4"。
+   *
+   * 给 `uvcpp_web_app::start()` 判断要不要打那条 WARN 用。那条 WARN 的时机是
+   * 有意义的：libuv 是**惰性**读的，启动了但还没投过活儿时提醒**仍然来得及**
+   * （真正过了那个村的是第一次往池子里投递，见 `uvcpp_threadpool.h`）。
    */
   static bool threadpool_size_is_set();
 

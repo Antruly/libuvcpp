@@ -37,6 +37,23 @@
  * 支路上取**（整读进内存 / 超过阈值走分片流式），覆盖集合里唯一被移出去的是
  * 缓存命中那一支 —— 流式那一支仍然占，与改动前一致。第六条钉住的就是这一点。
  *
+ * ## 第五条：**上限这个数字是从哪来的**
+ *
+ * 闸门的上限是"线程池线程数 × 4"，所以"线程池线程数"从哪来是它的地基。这里
+ * 有两条判据，分别在两组里：
+ *
+ *   - **第 3 组 `default_limit`**：还没投过池子活儿时，那个数就是"环境变量现在
+ *     说什么"（libuv 是**惰性**读的，第一次 `uv__work_submit` 才读）。所以这
+ *     一组自带一条**前提断言**："本用例必须在任何池子活儿之前跑" —— 投过之后
+ *     读数是"钉住"的那个，这一组每条"改了立刻可见"都会红，而红的是前提没了。
+ *   - **第 9 组 `limit_source`**：本类那两条静态函数是 `uvcpp_threadpool.h` 的
+ *     **转发**（自己不再重读环境变量），以及用户显式给过的上限**不许被
+ *     `start()` 的重算覆盖**（`set_work_limit(0)` = 明确要不限，最承重的一格）。
+ *
+ * 池子大小被"钉住"之后的行为（环境变量改不动它、`uvcpp_set_threadpool_size()`
+ * 回 `UV_EALREADY`）不在本文件里 —— 那是核心模块自己的契约，装置放在
+ * `tests/functional/threadpool_func.cpp`，那边能自己控制进程里的先后次序。
+ *
  * ## 为什么不用真慢任务
  *
  * 静态读盘是 `stat` + 读一个小文件，耗时可忽略。要让它"慢"，只能往根里放一
@@ -61,6 +78,7 @@
 
 #include "net/uvcpp_net_read.h"
 #include "net/uvcpp_tcp_client.h"
+#include <uvcpp/uvcpp_threadpool.h>  // 上限那个数从哪来（第 3、9 组）
 #include <web/uvcpp_http_client.h>
 #include <web/uvcpp_http_common.h>
 #include <webapp/uvcpp_log.h>
@@ -247,6 +265,16 @@ void test_unlimited() {
 // 3. 默认值由 UV_THREADPOOL_SIZE 推导
 // =========================================================================
 void test_default_limit() {
+  // **前提**：本用例断言的是"**还没投过**池子活儿时，池子大小跟着环境变量走"。
+  // 一旦本进程已经投过（`uvcpp_threadpool_used()`），libuv 那边早把线程数读进
+  // 缓存、本库也把它钉住了（见 `src/uvcpp/uvcpp_threadpool.h`）—— 那时下面每条
+  // "改了立刻可见"的断言都会红，而红的**不是代码坏了，是这个前提没了**。
+  // 所以先把它说出来：万一以后有人把本用例挪到某个会投池子的用例后面，这里报
+  // 的是"前提不成立"，而不是让人对着几个数字发呆。钉住之后的行为由最后一组
+  // `pool_size_pins` 正面覆盖。
+  check(!uvcpp_threadpool_used(),
+        "默认值：前提 —— 本用例必须在**任何**池子活儿之前跑");
+
   // 本进程默认**没有**设这个变量（ctest 不会替我们设），所以先按未设计算。
   // 但如果外部环境恰好设了，就不能拿"未设"的期望值去断言 —— 那样在别人
   // 机器上会红，而且看起来像代码坏了。先查再断言。
@@ -278,8 +306,9 @@ void test_default_limit() {
               << "，跳过「未设」分支)" << std::endl;
   }
 
-  // 显式设成别的值 → 上限跟着走（查的是环境变量**本身**，不是 libuv 缓存
-  // 的那个 —— 所以这里改了立刻可见，即使 libuv 那边早就定死了）。
+  // 显式设成别的值 → 上限跟着走。之所以能"立刻可见"，是因为**本进程还没投过
+  // 池子活儿**（上面那条前提断言）：没投过时池子大小就是"环境变量现在说什么"。
+  // 投过之后就改成"libuv 真正在用几条"了 —— 那是 `pool_size_pins` 那一组。
   const size_t kProbe = 7;
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(kProbe));
@@ -754,6 +783,71 @@ void test_stream_path_still_gated() {
   cleanup_root();
 }
 
+// =========================================================================
+// 9. 上限的**来源**：直通核心模块 + 用户显式给过的数不会被 `start()` 改掉
+// =========================================================================
+//
+// 两件互相独立的事，放在一组里因为它们都是"上限这个数字从哪来"：
+//
+// **① 直通。** 本类的 `threadpool_size()` / `threadpool_size_is_set()` 现在
+// 是 `src/uvcpp/uvcpp_threadpool.h` 那两个同名函数的转发，**不再自己重读一遍
+// 环境变量**。那一份多记了两件事：libuv 是惰性读的（先决条件比"进程启动前"
+// 松），以及投过之后环境变量说什么都不算了（读数是**钉住**的那个）。这里自己
+// 再读一遍只会得到"两个答案里更旧的那个"。断言取等，是因为**它就是转发** ——
+// 将来谁再在本地实现一遍，这条会红。
+//
+// **② 显式给过的数不许被 `start()` 覆盖。** `uvcpp_web_app::start()` 在用户
+// **没调过** `set_work_limit()` 时会按当时的线程池大小重算一次上限（构造与
+// 启动之间池子可能变了）。那个"调过没有"的标记就是为这条设的 —— 判据里最
+// 承重的一格是 `set_work_limit(0)`（**明确要不限**）：重算若不分情形地做，
+// 结果是把用户**关掉**的闸门又装回去，而且悄无声息。
+//
+// 这一组**不断言**那条重算本身（"构造时快照"与"启动时重算"在这里给出的数
+// 往往相同，分辨不了）；它断言的是重算**不能越过用户**。分辨重算是否真的发生
+// 要在**构造与启动之间换一个池子大小**，而池子大小在第一次投递之后就钉住了、
+// 换不动了 —— 所以那条只能靠代码读，不能靠用例。
+void test_limit_source() {
+  // ① 直通
+  check_eq_i(static_cast<long long>(uvcpp_web_work_limit::threadpool_size()),
+             static_cast<long long>(uvcpp_threadpool_size()),
+             "来源：threadpool_size() 应当就是核心模块那个数");
+  check(uvcpp_web_work_limit::threadpool_size_is_set() ==
+            uvcpp_threadpool_size_is_set(),
+        "来源：threadpool_size_is_set() 应当就是核心模块那个判断");
+  const long long pool =
+      static_cast<long long>(uvcpp_web_work_limit::threadpool_size());
+  check_eq_i(static_cast<long long>(uvcpp_web_work_limit::default_limit()),
+             pool * 4 < 16 ? 16 : pool * 4, "来源：默认上限 = 池子 × 4（下限 16）");
+
+  // ② 显式给过的数活过 `start()`
+  make_root();
+
+  {
+    uvcpp_web_app app;
+    configure_for_test(app);
+    app.set_work_limit(0);  // 明确"不限"
+    check(app.start_background() == 0, "来源：显式 0 —— 服务应当启动");
+    check_eq_i(static_cast<long long>(app.work_limit()->limit()), 0,
+               "来源：显式 0 必须活过 start()（重算不许把它装回去）");
+    app.stop();
+    app.join();
+  }
+
+  {
+    uvcpp_web_app app;
+    configure_for_test(app);
+    const size_t default_now = uvcpp_web_work_limit::default_limit();
+    check(app.start_background() == 0, "来源：没设过 —— 服务应当启动");
+    check_eq_i(static_cast<long long>(app.work_limit()->limit()),
+               static_cast<long long>(default_now),
+               "来源：没设过时上限应当就是 default_limit()");
+    app.stop();
+    app.join();
+  }
+
+  cleanup_root();
+}
+
 int main(int argc, char** argv) {
   std::cout << std::unitbuf;
   const std::string only = (argc > 1) ? argv[1] : std::string();
@@ -777,6 +871,7 @@ int main(int argc, char** argv) {
       {"wakeup_cross_remove", test_wakeup_cross_remove},
       {"wakeup_reentrant_registration_not_lost",
        test_wakeup_reentrant_registration_not_lost},
+      {"limit_source", test_limit_source},
   };
 
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {

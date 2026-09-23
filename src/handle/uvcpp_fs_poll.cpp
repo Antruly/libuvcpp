@@ -1,5 +1,6 @@
 ﻿#include "uvcpp_fs_poll.h"
 #include <uvcpp/uvcpp_alloc.h>
+#include <uvcpp/uvcpp_threadpool.h>
 namespace uvcpp {
 uvcpp_fs_poll::uvcpp_fs_poll() : uvcpp_handle() {
   uv_fs_poll_t *fs_poll = uvcpp::uvcpp_alloc<uv_fs_poll_t>();
@@ -27,6 +28,8 @@ int uvcpp_fs_poll::init(uvcpp_loop *loop) {
 }
 
 int uvcpp_fs_poll::start(const char *path, unsigned int interval) {
+  // 本库的池账：这一笔会把活儿送进 libuv 线程池（见 uvcpp_threadpool.h）
+  uvcpp_threadpool_note_use();
   return uv_fs_poll_start(UVCPP_FSPOLL_HANDLE, nullptr, path, interval);
 }
 
@@ -35,6 +38,8 @@ int uvcpp_fs_poll::start(
         start_cb,
     const char *path, unsigned int interval) {
   fs_poll_start_cb = start_cb;
+  // 本库的池账：见 uvcpp_threadpool.h（`uv_fs_poll` 内部那次 stat 走池子）
+  uvcpp_threadpool_note_use();
   return uv_fs_poll_start(UVCPP_FSPOLL_HANDLE, callback_start, path, interval);
 }
 

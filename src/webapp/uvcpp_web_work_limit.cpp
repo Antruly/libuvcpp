@@ -7,7 +7,8 @@
 
 #include <webapp/uvcpp_web_work_limit.h>
 
-#include <cstdlib>
+#include <uvcpp/uvcpp_threadpool.h>
+
 #include <vector>
 
 namespace uvcpp {
@@ -16,38 +17,8 @@ const size_t uvcpp_web_work_limit::INVALID_WAKEUP;
 
 namespace {
 
-/** @brief libuv 线程池的默认线程数（`UV_THREADPOOL_SIZE` 未设时就是它）。 */
-const size_t kDefaultPoolSize = 4;
-
 /** @brief 在途上限的下限：小池子也不至于被一两个慢请求打成 503。 */
 const size_t kMinLimit = 16;
-
-/** @brief 解析出来的池子大小多于这个数就不用信了（明显是笔误，不是配置）。 */
-const size_t kMaxPoolSize = 1024;
-
-/**
- * @brief 读 `UV_THREADPOOL_SIZE`。
- *
- * @param out 解析成功时写入线程数。
- * @return 环境变量**存在且解析成一个像样的值**。
- *
- * 用 `std::getenv` 而不是 `uv_os_getenv`：这里只要一个"有没有 + 多大"，
- * 不需要 libuv 的错误码语义，而且 `uvcpp_log_console.cpp` 读 `NO_COLOR`
- * 用的也是 `std::getenv`，保持一致。
- */
-bool read_pool_size(size_t* out) {
-  const char* s = std::getenv("UV_THREADPOOL_SIZE");
-  if (s == nullptr || *s == '\0') return false;
-
-  char* end = nullptr;
-  const long v = std::strtol(s, &end, 10);
-  // `end == s` 表示一个数字都没解析出来（例如值就是 "abc"）。
-  if (end == s) return false;
-  if (v <= 0 || static_cast<size_t>(v) > kMaxPoolSize) return false;
-
-  if (out != nullptr) *out = static_cast<size_t>(v);
-  return true;
-}
 
 }  // namespace
 
@@ -222,13 +193,14 @@ void uvcpp_web_work_limit::reset() {
 }
 
 size_t uvcpp_web_work_limit::threadpool_size() {
-  size_t pool = kDefaultPoolSize;
-  read_pool_size(&pool);
-  return pool;
+  // 直通核心模块，**不再自己重读环境变量**：那边多记了"libuv 是惰性读的"与
+  // "投过之后环境变量不算数"这两件事（见 uvcpp_threadpool.h），本类重读一遍
+  // 只会得到两个答案里更旧的那个。
+  return static_cast<size_t>(uvcpp_threadpool_size());
 }
 
 bool uvcpp_web_work_limit::threadpool_size_is_set() {
-  return read_pool_size(nullptr);
+  return uvcpp_threadpool_size_is_set();
 }
 
 size_t uvcpp_web_work_limit::default_limit() {

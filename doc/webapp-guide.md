@@ -120,8 +120,21 @@ int main() {
 都在内），按秒缓存、不是每响应一次格式化。格式、以及 1xx 那两条为什么不带，见
 [`web-http-guide.md`](web-http-guide.md) 的「协议行为」一节。
 
-**工作线程数没有配置项**：线程池大小是 libuv 的 `UV_THREADPOOL_SIZE`，且**只在进程
-启动前设置才生效**（libuv 只读一次，没有运行时扩容 API）。没设时 `start()` 会打一条 WARN。
+**线程池大小在进程内设**：`uvcpp_set_threadpool_size(n)`（`n <= 0` = 按 CPU 核数），
+摆在 `main()` 开头。用它而不是去环境里设 `UV_THREADPOOL_SIZE` —— 那个变量在 Windows
+上还有个静默陷阱：libuv 读的是 **CRT 的 `getenv`**，而 `uv_os_setenv()` 写的是 **Win32
+进程环境块**，只写后者等于没写（详见 `src/uvcpp/uvcpp_threadpool.h` 里那张实测表）。
+
+**时机的正确说法是「本进程第一次往线程池投递之前」**，不是「进程启动之前」：libuv 是
+**惰性**读的 —— `uv__work_submit()` 里那句 `uv_once`（`libuv:src/threadpool.c:271`）
+才第一次跑 `init_threads()`，线程数就是在那里面读的（`libuv:src/threadpool.c:200-207`）。
+来晚了 `uvcpp_set_threadpool_size()` 会回 `UV_EALREADY`（**环境变量照样会被写上**，那对
+子进程和下次启动仍有意义）。没设时 `start()` 会打一条 WARN，并说明**现在改还来不来得及**。
+
+因为 libuv 没有「池子起没起」的查询接口，上面那个判断靠本库自己记账：所有会往线程池
+投递的入口（`uvcpp_work::queue_work`、`uvcpp_fs` 的异步重载、`uvcpp_fs_poll::start`、
+`uvcpp_getaddrinfo`、`uvcpp_getnameinfo`、`uvcpp_random`）都会打一笔。**你绕过本库直接用
+libuv 投递的话它看不见** —— 那种情况下它可能说"来得及"而其实已经晚了。
 
 其他配置族：上传（`set_upload_dir` / `set_upload_fsync` / 六条上限，见 §8）、
 TLS（`enable_ssl` 等，见 §12）。
@@ -1025,7 +1038,13 @@ app.set_work_limit(size_t limit);                 // 0 = 不限
 std::shared_ptr<uvcpp_web_work_limit> app.work_limit() const;   // 恒非空
 ```
 
-- **默认并发数** = `UV_THREADPOOL_SIZE * 4`，下限 16。
+- **默认并发数** = 线程池线程数 × 4，下限 16。线程池线程数取自
+  `uvcpp_threadpool_size()`（`src/uvcpp/uvcpp_threadpool.h`）：还没投过池子活儿时它就是
+  `UV_THREADPOOL_SIZE` 现在说的值，投过之后是**那一刻钉住**的实测值（libuv 读过即缓存，
+  之后改环境变量不影响本进程）。
+- **没调过 `set_work_limit()` 时，`start()` 会按当时的线程池大小重算一次**（构造与启动
+  之间池子可能变了）。调过之后不再重算 —— 所以 `set_work_limit(0)` 不会在 `start()` 里
+  被悄悄装回去。
 - **超限时的行为：既不排队也不拒绝** —— 它只回答"有没有名额"（`acquire()` 返回 bool），
   怎么处理由调用方按自己的退路决定：
   - **静态文件**：`acquire()` 拿不到就回 **503 + `Retry-After`**。取名额发生在 worker 里

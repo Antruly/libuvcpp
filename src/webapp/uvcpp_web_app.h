@@ -400,6 +400,12 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 默认是按 `UV_THREADPOOL_SIZE`（未设 → libuv 的 4）推导的 ×4、下限 16 ——
    * 见 `uvcpp_web_work_limit`。传 **0 = 不限**（也就是不做这道保护）。
    *
+   * **没调过这个方法时，上限在 `start()` 里会重算一次**（按那一刻的线程池大小）。
+   * 理由：`default_limit()` 若只在 App 构造时快照一次，那么在构造与 `start()`
+   * 之间调用的 `uvcpp_set_threadpool_size()` 就反映不到上限上 —— 而"在 `main()`
+   * 开头设池子、之后才 `app.start()`"恰恰是最自然的写法。调过本方法之后不再
+   * 重算：那时上限是用户明确给的数，重算等于把它改掉。
+   *
    * 影响的是**静态文件服务**：名额满时它回 **503 + `Retry-After`**，而不是
    * 把一个线程池任务继续堆到队尾。上传路径（3b）的分工不同 —— 那里字节还在
    * 网上，所以它的做法是 `stream->pause()` 把压力退回去，而不是拒绝。
@@ -1393,6 +1399,17 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 悬垂。
    */
   std::shared_ptr<uvcpp_web_work_limit> work_limit_;
+
+  /**
+   * @brief `set_work_limit()` 被调过没有。
+   *
+   * 只用来决定 `start()` 里要不要**重算**上限（`false` = 重算成
+   * `uvcpp_web_work_limit::default_limit()`）。见 `set_work_limit()` 的注释。
+   *
+   * 置真之后不再置回：`set_work_limit(0)` 是"用户明确要不限"，与"没设过"必须
+   * 分得开，否则那次重算会把用户关掉的闸门又装回去。
+   */
+  bool work_limit_explicit_;
 
   /**
    * @brief WS 服务（`enable_wss()` 时惰性创建，nullptr = 没开 WS）。
