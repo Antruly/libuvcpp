@@ -1066,10 +1066,28 @@ int main() {
           check(rrc == 0, "h2_rst: submit_rst returned " + std::to_string(rrc));
           c.conn->flush();
 
-          // 服务端在**另一个线程**上跑，所以这里只等不泵（传空循环）。
-          uvcpp_loop* const none = nullptr;
+          // **必须泵客户端这条循环，不能传空。** 服务端确实在另一个线程上跑，
+          // 但**客户端就在本线程** —— 它的字节全靠这条循环搬。`flush()` 只保证
+          // "能发就发"：有一笔写还在飞（`writing_` 为真）时它**什么都不做就返回
+          // 0**，刚提交的 RST_STREAM 帧留在 nghttp2 里，得等
+          // `on_write_done()` → `flush()` 那条链把它带走。不泵循环，那条链就断在
+          // "在飞的写永远完不成"上：RST 一个字节都出不去，服务端自然什么都不知道，
+          // 在途上下文一直挂到 `c.finish()` 拆连接才被顺手放掉 —— 于是这条判据
+          // 测的其实是"拆连接收不收得干净"，而不是它想测的 RST 路径。
+          //
+          // 这不是理论。客户端每读完一批就发一笔 WINDOW_UPDATE，而
+          // `uvcpp_tcp_client` 同一时刻只收一笔在飞的写（`uvcpp_h2_connection::
+          // flush()` 的 `writing_` 就是它）。body 越长、客户端一次读得越多，
+          // "停手那一刻恰好有笔写在飞"的概率越大 —— CI 那台 15.6 ms 的定时器粒度
+          // 让客户端每次 `uv_run` 都吞下一大把，所以它比本机（1.86 ms）容易得多。
+          // 实测：body 放大到 16 MiB、让客户端先收满 512 KiB 再停手，本机也能复现
+          // （诊断打出 `flush 未发出去 conn=... writing=1 outq=0`，随后那 6 秒里
+          // 服务端的在途上下文一直是 1）。
+          //
+          // 场景 3 与场景 7 那两处同样是"只等不泵"，那里是**对的** —— 它们在这
+          // 一句之前就 `c.finish()` 了，客户端连接已经不在，没什么可泵的。
           const bool drained = uvcpp_test::wait_until(
-              none, [&app] { return app.inflight_count() == 0; }, kWaitMs);
+              c.loop(), [&app] { return app.inflight_count() == 0; }, kWaitMs);
           check(drained,
                 "h2_rst: RST 之后在途上下文没有归零（实测 " +
                     std::to_string(app.inflight_count()) +
