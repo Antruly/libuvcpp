@@ -55,7 +55,8 @@
 下一次判据 3 就会报"锁文件里没有这一条"，那不是门禁抽风，是它在提醒这件事。
 
 找不到才当成内容真的改了（`[刷]`），一样逐条印出来。附近有不止一段内容相同时报
-`[歧]`、不自动挪；平移的目标键上已经记着别的内容时报 `[撞]`、不覆盖。
+`[歧]`、**这一次连锁文件都不改写**（照 `[胀]` 那条：下一次判据 3 会报"锁文件里
+没有这一条"）；平移的目标键上已经记着别的内容时报 `[撞]`、不覆盖。
 
 ## 判"区间被内部插/删了行"（`[胀]`）：靠**尾部锚点**
 
@@ -78,11 +79,17 @@
 老末行照样动（尾部锚点已经覆盖到了）。所以首行锚点**一分覆盖都买不到**，
 只多一次"恰好在附近唯一"的误定位机会。这条是照着几何推的，也照着场景表验的。
 
-**存几个尾部锚点是量出来的，不是估的**（本仓 847 条锁条目、±`SHIFT_SCAN` 窗口内
-唯一才可定位）：1 个 77.7%、**2 个 90.4%**、3 个 93.5%。取 2 个 —— 第三个只买
-3 个百分点，却要多一列、多一次误定位机会。
+**存几个尾部锚点是量出来的，不是估的**（本仓 860 条锁条目、±`SHIFT_SCAN` 窗口内
+唯一才可定位；重测 `tests/tools/doc_line_anchor_stats.py`）：1 个 77.6%、
+**2 个 90.5%**、3 个 93.5%。取 2 个 —— 第三个只买 3 个百分点，却要多一列、多一次
+误定位机会。
 
-**剩下的 9.6% 是明知判不了的**（末两行都是 `}` 那种满文件都有的行），报告里按
+分层看才是全貌（同一份读数）：**单行**区间 529 条（61%，压根没有倒数第二行），
+第 1 个锚点就覆盖 91.7%，第 2 个对它**一分不买**；真正买不到的是**多行**那 331 条
+—— 1 个 55.0%、2 个 88.5%、3 个 96.4%。只看总数会读成"2 个锚点普遍更准"，其实是
+"六成条目没得选，另外四成里有一半靠第 2 个锚点才咬得动"。
+
+**剩下的 9.5% 是明知判不了的**（末两行都是 `}` 那种满文件都有的行），报告里按
 `[记]` 印出条数 —— "判不了"必须能看见，不然它和"判过了"在输出里长得一样。
 
 ## `[新]` / `[撤]`：锁的**集合**变了
@@ -403,8 +410,9 @@ def hash_lines(lines, start, end):
 
 
 # 锁里每条引用另存几个**尾部锚点**的哈希（末行、倒数第二行……）。
-# 用途与取值理由见文件头「判『区间被内部插/删了行』」。1 个覆盖 77.7%、
-# 2 个 90.4%、3 个 93.5%（本仓 847 条实测），取 2。
+# 用途与取值理由见文件头「判『区间被内部插/删了行』」。1 个覆盖 77.6%、
+# 2 个 90.5%、3 个 93.5%（本仓 860 条实测；重测 `tests/tools/doc_line_anchor_stats.py`），
+# 取 2。
 TAIL_ANCHORS = 2
 
 # 区间太短（只有一行）时那个锚点不存在，锁里写 `-`。
@@ -571,7 +579,8 @@ def plan_lock(root, cites, old_hashes, old_tails, force=False):
 
     对不上时先找平移（见 `find_shift_candidates`），找得到就**跟着挪、
     哈希保持不变**；同宽候选一个都没有时再用尾部锚点判"是不是被内部插/删了"
-    （见文件头）。**`[胀]` 那一条不写进新锁** —— 它是判红，不许盖章。
+    （见文件头）。**`[胀]` 与 `[歧]` 那两条不写进新锁** —— 它们是判红，
+    不许盖章（`--force` 才按现在的内容盖）。
     """
     old_hashes = old_hashes or {}
     old_tails = old_tails or {}
@@ -607,7 +616,22 @@ def plan_lock(root, cites, old_hashes, old_tails, force=False):
         cands = find_shift_candidates(root, path, start, end, want)
         if len(cands) > 1:
             ambiguous.append((key, cands, cs))
-            seen[key] = (got, got_tails)
+            # 照 `[胀]` 那条的收尾：默认**不写进 `seen`**（`main()` 那边这次连
+            # 锁文件都不改写）。走到这里的前提是 `got != want` —— 旧键上的内容
+            # **已经**对不上了，所以下一次判据 3 必定红（"锁文件里没有这一条"），
+            # 人工必须来定"到底该指哪一段"。
+            #
+            # 这里原来是 `seen[key] = (got, got_tails)`：把**现在**装在旧位置上的
+            # 内容盖到**旧键**上，锁里从此记着"旧键 == 新内容"，判据 3 比对一致
+            # ⇒ 全绿。实测吃过一次：`uvcpp_http_server.cpp:781-788` 被盖成
+            # `}` / `return body_bytes;` / 签名那几行、`uvcpp_web_app.cpp:3169`
+            # 被盖成一句 `// --- 404 ---` 注释 —— 两条都"全过"。这是本仓最忌讳
+            # 的那个形状：**处方把证据吃掉**。
+            if force:
+                # `--force` = "我核过了，这条是误报" ⇒ 按**现在**的内容盖章，
+                # 与 `[胀]` 那条同义。（不写 `seen` 会让旧键从锁里消失，那是
+                # **默认**行为，不是 `--force` 的。）
+                seen[key] = (got, got_tails)
             continue
         if len(cands) == 1:
             ns, ne = cands[0]
@@ -640,10 +664,12 @@ def plan_lock(root, cites, old_hashes, old_tails, force=False):
         restamped.append((key, want, got, cs))
         seen[key] = (got, got_tails)
 
-    # `[胀]` 那几条**故意**没进 `seen`，但它们在文档里**还在** —— 不能顺手报成
-    # `[撤]`（那条写的是"文档里已经找不到了"）。两件事分开报，各自都得能看见。
+    # `[胀]` 与 `[歧]` 那几条**故意**没进 `seen`，但它们在文档里**还在** —— 不能
+    # 顺手报成 `[撤]`（那条写的是"文档里已经找不到了"）。两件事分开报，各自都得
+    # 能看见。
     skip = set(old for old, _n, _d, _cs in moved)
     skip |= set(key for key, _k, _ks, _cs in grown)
+    skip |= set(key for key, _c, _cs in ambiguous)
     dropped = [(k, old_hashes[k]) for k in sorted(old_hashes)
                if k not in seen and k not in skip]
     return seen, {"moved": moved, "restamped": restamped, "ambiguous": ambiguous,
@@ -758,7 +784,9 @@ def print_update_report(root, rep):
     n = 0
     for key, cands, cs in ambiguous:
         n += 1
-        print("  [歧] %s 附近有 %d 段内容和旧哈希一样（%s），不自动跟着挪"
+        print("  [歧] %s 附近有 %d 段内容和旧哈希一样（%s），**不自动跟着挪、"
+              "锁里也不写这一条** —— 下一次判据 3 会报「锁文件里没有这一条」，"
+              "人工定完该指哪一段再跑 `--update`"
               % (key, len(cands),
                  ", ".join("%d-%d" % (a, b) for a, b in cands)))
         for c in cs:
@@ -968,6 +996,21 @@ def main():
         if rep["grown"]:
             print("  [记] --force：%d 条「撑长」被强行盖章了 —— 请确认你逐条核过"
                   "（这是个**没判红**，不是判绿）。" % len(rep["grown"]))
+        if rep["ambiguous"] and not args.force:
+            print("  锁文件**没有**被改写（`%s` 原样）。" % LOCK_REL)
+            print("  上面那 %d 条「歧义」得**人工**定它该指哪一段（候选都印在上面"
+                  "那几行了；判据是「哪一段才是作者当初圈的那个块」）。定完把"
+                  "**文档里**的行号改对，再跑一次 `--update`。确实是误报（比如那"
+                  "几段内容本来就一模一样、指哪段都对）才用 `--force`。"
+                  % len(rep["ambiguous"]))
+            print("\n==== 汇总 ====")
+            print("红 %d 条：附近有不止一段和旧哈希逐字节相同的内容，锁里不许猜一个"
+                  "盖章" % len(rep["ambiguous"]))
+            return 1
+        if rep["ambiguous"]:
+            print("  [记] --force：%d 条「歧义」被强行按**现在的内容**盖了章 —— "
+                  "请确认你逐条核过（这是个**没判红**，不是判绿）。"
+                  % len(rep["ambiguous"]))
         write_lock_file(root, seen)
         print("锁文件已刷新：%s（%d 条目标区间）" % (LOCK_REL, len(seen)))
         if not ok_rep:
