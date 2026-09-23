@@ -118,6 +118,9 @@ class ServerRig {
           port_promise.set_value(-1);
           return;
         }
+        // 分流还是转手是**绑定时探出来的**（不是编译期常量），所以判据要问这次
+        // 的结果，别拿 `#ifdef` 猜平台。
+        fanout_.store(server.is_fanout());
 
         sockaddr_in name;
         int namelen = static_cast<int>(sizeof(name));
@@ -182,6 +185,9 @@ class ServerRig {
 
   bool exited() const { return exited_.load(); }
   std::thread::id acceptor_tid() const { return acceptor_tid_; }
+  /** @brief 这次绑定走的是内核分流还是接受者+转手（`n>1` 才有意义）。 */
+  bool fanout() const { return fanout_.load(); }
+
   int loops_rc() const { return loops_rc_.load(); }
   int listen_rc() const { return listen_rc_.load(); }
 
@@ -210,6 +216,7 @@ class ServerRig {
   std::atomic<int> loops_rc_{-999};
   std::atomic<int> listen_rc_{-999};
   std::atomic<int> loop_count_{-1};
+  std::atomic<bool> fanout_{false};
   std::atomic<int> accepted_{0};
 
   mutable std::mutex mu_;
@@ -369,6 +376,25 @@ static bool run_phase(int loops, int nconn, const char* tag) {
                 << per_loop[0] << "/" << nconn << "）\n";
       ok = false;
     }
+  } else if (rig.fanout()) {
+    // ---- 内核分流：0 号**自己也在收**，分布由内核哈希定。 ----
+    //
+    // 能当判据的只有"守恒"：每条连接只落一处，一条不多、一条不少。**不在
+    // Linux 上断言分布均匀**，也不断言"每条循环都分到过" —— 内核哈希两样都
+    // 不保证（实测 16 条在 n=4 下拿到过 {5,3,3,5} 这类形状），拿它当判据就是
+    // 给 flaky 留门。转手那条路的精确轮转判据整体降级到下面那一支。
+    size_t sum = 0;
+    std::string shown;
+    for (int i = 0; i < nloops; ++i) {
+      shown += " " + std::to_string(per_loop[static_cast<size_t>(i)]);
+      sum += per_loop[static_cast<size_t>(i)];
+    }
+    std::cout << "  [" << tag << "] 分流分布（含 0 号）:" << shown << "，合计 "
+              << sum << "\n";
+    if (sum != static_cast<size_t>(nconn)) {
+      std::cout << "  [" << tag << "] 合计不等于连接数（有连接被记了两处或没记）\n";
+      ok = false;
+    }
   } else {
     if (per_loop[0] != 0) {
       std::cout << "  [" << tag << "] 接受者循环留了 " << per_loop[0]
@@ -434,6 +460,15 @@ static bool run_phase(int loops, int nconn, const char* tag) {
     // --- 判据 5：对照组 ---
     if (used.size() != 1 || used.count(acceptor) == 0) {
       std::cout << "  [" << tag << "] n==1 时 on_connection 必须就在接受者线程上\n";
+      ok = false;
+    }
+  } else if (rig.fanout()) {
+    // 分流：**0 号也会承载连接**，所以"接受者线程上一条都不该有"不成立；能断
+    // 言的只有"回调没有超出这台服务端自己的循环数"。至于"每条连接的回调都在
+    // 它自己那条循环的线程上"，由下面判据 3 逐连接比对。
+    if (used.size() > static_cast<size_t>(loops)) {
+      std::cout << "  [" << tag << "] on_connection 出现在 " << used.size()
+                << " 个线程上，超过循环总数 " << loops << "\n";
       ok = false;
     }
   } else {
@@ -550,6 +585,7 @@ static bool test_loop_start_hook() {
   std::atomic<int> stop{0};
   std::atomic<int> exited{0};
   std::atomic<int> loops_rc{-999};
+  std::atomic<bool> fanout{false};
   std::promise<int> port_p;
   std::future<int> port_f = port_p.get_future();
 
@@ -579,6 +615,7 @@ static bool test_loop_start_hook() {
         port_p.set_value(-1);
         return;
       }
+      fanout.store(server.is_fanout());
       sockaddr_in name;
       int namelen = static_cast<int>(sizeof(name));
       server.get_tcp()->getsockname(reinterpret_cast<sockaddr*>(&name),
@@ -676,23 +713,50 @@ static bool test_loop_start_hook() {
                      "6 条连接全部被接受");
 
       std::lock_guard<std::mutex> lk(log.mu);
-      // 6 条连接分给 3 条工作循环，轮转是显式的 ⇒ {2,2,2}。
-      if (log.conn_tids.size() != 3) {
-        std::cout << "  [hook] 6 条连接的 on_connection 只出现在 "
-                  << log.conn_tids.size() << " 个线程上（该 3 个）\n";
+      std::set<std::thread::id> hook_tids;
+      for (std::map<int, std::thread::id>::const_iterator h = log.tid.begin();
+           h != log.tid.end(); ++h) {
+        hook_tids.insert(h->second);
+      }
+      if (log.conn_tids.empty()) {
+        std::cout << "  [hook] 6 条连接一条都没回调\n";
         ok = false;
       }
-      for (std::set<std::thread::id>::const_iterator it = log.conn_tids.begin();
-           it != log.conn_tids.end(); ++it) {
-        bool found = false;
-        for (std::map<int, std::thread::id>::const_iterator h = log.tid.begin();
-             h != log.tid.end(); ++h) {
-          if (h->second == *it) { found = true; break; }
+      if (fanout.load()) {
+        // **分流：0 号自己也在收，而 0 号本来就不走钩子**（`set_loop_start_hook`
+        // 只对 1..n-1 调）⇒ "没跑过钩子的线程"不再等于"不属于本服务端的线程"，
+        // 那条判据在这条路上必然为假。能断言的确定性判据是"每条连接都落在本
+        // 服务端自己的循环线程上"：要么是某条钩子线程，要么就是接受者。
+        for (std::set<std::thread::id>::const_iterator it =
+                 log.conn_tids.begin();
+             it != log.conn_tids.end(); ++it) {
+          if (hook_tids.count(*it) == 0 && *it != log.acceptor) {
+            std::cout << "  [hook] 有连接跑在一条**不属于本服务端**的线程上\n";
+            ok = false;
+            break;
+          }
         }
-        if (!found) {
-          std::cout << "  [hook] 有连接跑在一个**没有跑过钩子**的线程上\n";
+      } else {
+        // 6 条连接分给 3 条工作循环，轮转是显式的 ⇒ {2,2,2}。
+        if (log.conn_tids.size() != 3) {
+          std::cout << "  [hook] 6 条连接的 on_connection 只出现在 "
+                    << log.conn_tids.size() << " 个线程上（该 3 个）\n";
           ok = false;
-          break;
+        }
+        for (std::set<std::thread::id>::const_iterator it =
+                 log.conn_tids.begin();
+             it != log.conn_tids.end(); ++it) {
+          bool found = false;
+          for (std::map<int, std::thread::id>::const_iterator h =
+                   log.tid.begin();
+               h != log.tid.end(); ++h) {
+            if (h->second == *it) { found = true; break; }
+          }
+          if (!found) {
+            std::cout << "  [hook] 有连接跑在一个**没有跑过钩子**的线程上\n";
+            ok = false;
+            break;
+          }
         }
       }
     }

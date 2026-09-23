@@ -594,6 +594,8 @@ void uvcpp_tcp_server::set_loop_exit_hook(
   loop_exit_hook_ = std::move(fn);
 }
 
+bool uvcpp_tcp_server::is_fanout() const { return fanout_; }
+
 int uvcpp_tcp_server::loop_count() const {
   return 1 + static_cast<int>(workers_.size());
 }
