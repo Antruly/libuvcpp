@@ -21,7 +21,9 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <uv.h>
 #include <vector>
 #include <handle/uvcpp_loop.h>
@@ -677,6 +679,40 @@ class UVCPP_API uvcpp_tcp_server {
   void accept_and_handoff(uvcpp_stream* s);
 
   /**
+   * @brief 这次绑定要不要带 `UV_TCP_REUSEPORT`（= 要不要走内核分流）。
+   *
+   * `n == 1`（含从没调过 `set_loops()`）一律返回 0：与今天逐字节相同，也没有
+   * 平台差异。`n > 1` 时 Windows 上返回 0（libuv 那边看到这个标志是无条件
+   * 拒绝，试都不用试），其余平台先返回标志 —— **真伪由 `bind_on_loops()` 里
+   * 那次绑定的返回码定**，见那条注释。
+   */
+  int bind_flags_for_loops() const;
+
+  /**
+   * @brief `bindIpv4()`/`bindIpv6()` 的公共正文：绑一次，必要时回落到转手。
+   *
+   * 地址要留下来（分流时每条工作循环都得拿同一个地址各绑一个句柄）。
+   */
+  int bind_on_loops(const char* ip, int port, bool ipv6);
+
+  /**
+   * @brief 给每条工作循环各建一个监听句柄，等它们全绑上才返回。
+   *
+   * 只在分流（`fanout_`）且 `0` 号那次 `listen()` 成功之后调，跑在
+   * **acceptor 的线程**上；句柄本身在各自的工作循环线程上建。
+   * 任一条起不来就把已经起来的收回去并返回第一个错（整体失败）。
+   */
+  int start_worker_listeners(int backlog);
+
+  /**
+   * @brief 关掉第 \p worker_index 条工作循环的监听句柄。
+   *
+   * **必须在它自己的那条循环线程上跑** —— 两个调用点都在 worker 线程上：
+   * 退出钩子、以及失败回滚时的投递。幂等。
+   */
+  void close_worker_listener(size_t worker_index);
+
+  /**
    * @brief 在 \p l 这条循环上收下 \p s 递来的连接，并跑完整条接受尾巴。
    *
    * `n == 1` 时是 accept 回调里那段（`l` == `loop_`、\p loop_index == 0）；
@@ -775,6 +811,26 @@ class UVCPP_API uvcpp_tcp_server {
   std::vector<uvcpp_loop_worker*> workers_;
   /** @brief 轮转计数：第 i 条连接给 `1 + (i % (n-1))`。 */
   std::atomic<uint64_t> rr_{0};
+
+  /**
+   * @brief 分流用：绑定时记下的地址，以及"这次绑定到底分流成没成"。
+   *
+   * `fanout_` 只在 `bindIpv4()`/`bindIpv6()` 里写一次（那时工作线程还没起），
+   * 之后只读 —— 读它的人包括 accept 回调（acceptor 线程）。
+   */
+  std::string bind_ip_;
+  int bind_port_ = 0;
+  bool bind_is_ipv6_ = false;
+  bool fanout_ = false;
+
+  /**
+   * @brief 每条工作循环自己的那个监听句柄（只有 `fanout_` 时非空）。
+   *
+   * **`resize` 必须在投递之前做**：尺寸定死之后第 i 格只由 i 号工作循环的
+   * 线程写（建也是它、关也是它），谁都不与谁并发，所以不需要锁 —— 投递那
+   * 一下的交手本身就是先后关系。`n == 1` 时它恒为空。
+   */
+  std::vector<std::shared_ptr<uvcpp_tcp> > worker_listeners_;
 
   /**
    * @brief `set_loop_start_hook()` 装进来的钩子。

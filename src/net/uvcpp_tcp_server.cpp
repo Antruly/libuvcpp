@@ -12,8 +12,10 @@
 #include <net/uvcpp_loop_worker.h>
 #include <net/uvcpp_socket_handoff.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -198,6 +200,168 @@ int uvcpp_tcp_server::get_last_error() const {
 // Bind
 // =========================================================================
 
+int uvcpp_tcp_server::bind_flags_for_loops() const {
+  // 只有 `n > 1` 才谈得上"每条循环各绑一个"：`n == 1` 时一个标志都不带 ——
+  // 与今天逐字节相同，也没有平台差异。
+  if (workers_.empty()) return 0;
+#if defined(_WIN32)
+  // libuv 在 Windows 上**无条件拒绝**这个标志（`src/win/tcp.c` 见到就
+  // `return ERROR_NOT_SUPPORTED`），试都不用试：那边的 `n > 1` 只有
+  // 「一条接受者 + 转手」这一条形状。
+  return 0;
+#else
+  // 别的平台**不能靠编译期分叉**：`uv__sock_reuseport()` 的实现清单是
+  // Linux 3.9+ / DragonFly / FreeBSD 12+ / Solaris 11.4+ / AIX 7.2.5+，
+  // **不含 macOS**，而那是 CI 的一条腿。所以这里只是"先带着标志试一次"，
+  // 真伪由下面那次绑定的返回码来定（运行时探测）。
+  return UV_TCP_REUSEPORT;
+#endif
+}
+
+int uvcpp_tcp_server::bind_on_loops(const char* ip, int port, bool ipv6) {
+  // 分流时每条工作循环都要拿同一个地址各绑一个句柄，所以先把地址留下来。
+  bind_ip_      = (ip != nullptr ? ip : "");
+  bind_port_    = port;
+  bind_is_ipv6_ = ipv6;
+
+  const int flags = bind_flags_for_loops();
+  int rc =
+      ipv6 ? tcp_->bindIpv6(ip, port, flags) : tcp_->bindIpv4(ip, port, flags);
+
+  if (rc != 0 && flags != 0) {
+    // 平台不支持分流 ⇒ **回落**到「一条接受者 + 转手」（Windows 上今天就是
+    // 这条形状）。回落是安全的：`uv__tcp_bind()` 是在 `bind(2)` **之前**设那
+    // 些 socket 选项的，失败时这个句柄还没绑上，所以同一个句柄重来一次不带
+    // 标志就行 —— 代价只是那次 `uv_ip4_addr` 分出来的地址（`uvcpp_tcp` 那边
+    // 已经在失败路径上把它还回去了）。
+    rc = ipv6 ? tcp_->bindIpv6(ip, port, 0) : tcp_->bindIpv4(ip, port, 0);
+    fanout_ = false;
+    if (rc == 0) {
+      std::fprintf(stderr,
+                   "[uvcpp_tcp_server] 本平台不支持 UV_TCP_REUSEPORT："
+                   "set_loops(n>1) 回落到「一条接受者 + 转手」\n");
+    }
+  } else {
+    fanout_ = (flags != 0);
+  }
+
+  if (rc != 0) {
+    last_error_code_.store(rc);
+    set_status(TCP_SERVER_ERROR);
+    return rc;
+  }
+
+  // ---- 端口 0 必须在这里就解析成真号。 ----
+  //
+  // 分流时每条工作循环都要绑到**同一个**端口上（内核那个 REUSEPORT 组是按
+  // `(地址, 端口)` 找的）。绑 0 号端口是"随便挑一个空闲的"——各自再绑一次 0
+  // 就各挑各的，几个句柄落在几个不同端口上，组根本不存在，内核分流永远不
+  // 发生（这一条是把三个 multiloop 用例跑红之后读出来的）。所以真号在这里读
+  // 回来一次，工作循环拿它去绑。
+  if (fanout_ && bind_port_ == 0) {
+    struct sockaddr_storage ss;
+    int sslen = static_cast<int>(sizeof(ss));
+    std::memset(&ss, 0, sizeof(ss));
+    if (tcp_->getsockname(reinterpret_cast<struct sockaddr*>(&ss), &sslen) ==
+        0) {
+      bind_port_ = bind_is_ipv6_
+                       ? static_cast<int>(ntohs(
+                             reinterpret_cast<struct sockaddr_in6*>(&ss)
+                                 ->sin6_port))
+                       : static_cast<int>(
+                             ntohs(reinterpret_cast<struct sockaddr_in*>(&ss)
+                                       ->sin_port));
+    }
+    // 读不回来就照旧让工作循环绑 0 号：那是"几个组各自听各自的口"，不会崩，
+    // 只是不分流 —— 不在这里把整台服务端判死。
+  }
+
+  set_status(TCP_SERVER_LISTENING);
+  return 0;
+}
+
+int uvcpp_tcp_server::start_worker_listeners(int backlog) {
+  const size_t nw = workers_.size();
+  // 尺寸**必须在投递之前**定死（理由见头文件里那条注释）。
+  worker_listeners_.assign(nw, std::shared_ptr<uvcpp_tcp>());
+
+  int first_err = 0;
+  for (size_t wi = 0; wi < nw; ++wi) {
+    // 投递跑在别的线程上，任务何时开跑说不准 ⇒ 拿一个 promise 把结果交回来。
+    // `start_worker_listeners()` 返回时"n 条监听都在了"才是上层能依赖的状态。
+    std::shared_ptr<std::promise<int> > done(new std::promise<int>());
+    const int idx = static_cast<int>(wi) + 1;
+    uvcpp_loop* const wl = workers_[wi]->loop();
+
+    const bool queued = workers_[wi]->post([this, wi, idx, backlog, wl, done]() {
+      // **这一段跑在 `wl` 这条工作循环的线程上。** 句柄只能在它自己的循环上
+      // 建、也只能在那条循环上关（`close_worker_listener()`）。
+      uvcpp_tcp* l = new uvcpp_tcp(wl);
+      int rc = bind_is_ipv6_ ? l->bindIpv6(bind_ip_.c_str(), bind_port_,
+                                           UV_TCP_REUSEPORT)
+                             : l->bindIpv4(bind_ip_.c_str(), bind_port_,
+                                           UV_TCP_REUSEPORT);
+      if (rc == 0) {
+        rc = l->listen(
+            [this, idx, wl](uvcpp_stream* s, int status) {
+              if (status < 0) {
+                last_error_code_.store(status);
+                set_status(TCP_SERVER_ERROR);
+                return;
+              }
+              // 自收：与 `n == 1` 那条路同一个形状，只有循环号不同。
+              accept_on_loop(wl, idx, s);
+            },
+            backlog);
+      }
+      if (rc != 0) {
+        delete l;  // 没建起来 / 没听上 ⇒ 析构里自己收干净
+      } else {
+        worker_listeners_[wi].reset(l);
+      }
+      done->set_value(rc);
+    });
+
+    if (!queued) {
+      // 拒收 ⇒ 这条循环已经在收尾了（邮箱关了）。当失败记 —— 不去等一个永远
+      // 不会到来的结果。
+      if (first_err == 0) first_err = UV_ECANCELED;
+      continue;
+    }
+
+    std::future<int> f = done->get_future();
+    // **有界等待**：万一有另一个线程正在拆这台服务端，"永远不返回"会把调用方
+    // 钉死在这里。超时按失败算 —— 与"没起来"是同一个后果。
+    if (f.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+      if (first_err == 0) first_err = UV_ETIMEDOUT;
+      continue;
+    }
+    const int wrc = f.get();
+    if (wrc != 0 && first_err == 0) first_err = wrc;
+  }
+
+  if (first_err == 0) return 0;
+
+  // 半成品：把已经绑起来的那些收回去（**在各自的循环线程上**收）。邮箱是先
+  // 进先出的，所以这一条一定排在上面那个任务之后跑 —— 超时那条路上也不会与
+  // 它并发。收的是空 shared_ptr 时是空操作。
+  for (size_t wi = 0; wi < nw; ++wi) {
+    workers_[wi]->post([this, wi]() { close_worker_listener(wi); });
+  }
+  last_error_code_.store(first_err);
+  set_status(TCP_SERVER_ERROR);
+  return first_err;
+}
+
+void uvcpp_tcp_server::close_worker_listener(size_t worker_index) {
+  if (worker_index >= worker_listeners_.size()) return;
+  // 交给 `uvcpp_tcp` 的析构：里面那句 `uv_close()` 是异步的，而退出钩子后面
+  // 还留着一轮关闭回调的泵（`kExitPumpRounds`），所以句柄内存会在
+  // `loop_close()` 之前还清。幂等：空的那格直接返回。
+  worker_listeners_[worker_index].reset();
+}
+
+
 int uvcpp_tcp_server::bind(const char* ip, int port) {
   // Auto-detect IPv4 vs IPv6: if the IP string contains ':', it's IPv6
   if (std::strchr(ip, ':') != nullptr) {
@@ -207,25 +371,11 @@ int uvcpp_tcp_server::bind(const char* ip, int port) {
 }
 
 int uvcpp_tcp_server::bindIpv4(const char* ip, int port) {
-  int rc = tcp_->bindIpv4(ip, port);
-  if (rc != 0) {
-    last_error_code_.store(rc);
-    set_status(TCP_SERVER_ERROR);
-    return rc;
-  }
-  set_status(TCP_SERVER_LISTENING);
-  return 0;
+  return bind_on_loops(ip, port, false);
 }
 
 int uvcpp_tcp_server::bindIpv6(const char* ip, int port) {
-  int rc = tcp_->bindIpv6(ip, port);
-  if (rc != 0) {
-    last_error_code_.store(rc);
-    set_status(TCP_SERVER_ERROR);
-    return rc;
-  }
-  set_status(TCP_SERVER_LISTENING);
-  return 0;
+  return bind_on_loops(ip, port, true);
 }
 
 // =========================================================================
@@ -253,11 +403,19 @@ int uvcpp_tcp_server::listen(
           return;
         }
 
-        // ---- 多循环：转手给工作线程，本循环一条都不留。 ----
+        // ---- 多循环：两种去向，看绑的时候分流成没成。 ----
         //
         // `workers_` 非空 ⟺ 装过 `set_loops(n>1)`（且线程已经在跑）。
         if (!workers_.empty()) {
-          accept_and_handoff(s);
+          if (fanout_) {
+            // 分流：内核按四元组把新连接分给 n 个监听句柄之一，**0 号自己也会
+            // 收到属于它的那一份** ⇒ 就地收下（与 `n == 1` 同形），不转手。
+            accept_on_loop(loop_, 0, s);
+          } else {
+            // 转手：内核那条路走不通（Windows，或平台不支持这个标志），
+            // 本循环一条都不留。
+            accept_and_handoff(s);
+          }
           return;
         }
 
@@ -275,6 +433,26 @@ int uvcpp_tcp_server::listen(
     on_connection_fn_  = nullptr;
     on_connection_arg_ = nullptr;
     return rc;
+  }
+
+  // ---- 分流：现在才轮到工作循环那 n−1 个监听句柄。 ----
+  //
+  // **必须在 0 号那次 `listen()` 成功之后**：那一步才是"这个端口到底能不能
+  // 听"的判据，它失败时上面已经返回了，不该在这里留下一堆半开的句柄。
+  if (fanout_) {
+    const int wrc = start_worker_listeners(backlog);
+    if (wrc != 0) {
+      // 工作循环那条腿没起来 ⇒ 整体失败。**这条路上服务端不可重试**：0 号
+      // 那个句柄已经能收连接了，留着它就是个"回调已经被收走、一来连接就崩"
+      // 的陷阱，所以关掉它 —— 关了之后 `tcp_` 这个句柄就判死了，要重来只能
+      // 由调用方销毁重建。这是这条新路上唯一安全的选择。
+      delete static_cast<std::function<void(uvcpp_tcp_client*)>*>(
+          on_connection_arg_);
+      on_connection_fn_  = nullptr;
+      on_connection_arg_ = nullptr;
+      if (!tcp_->is_closing()) tcp_->close();
+      return wrc;
+    }
   }
 
   // 到了这儿才置：`rollback_loops()` 那道门放行的正是"bind 成功、listen 还没
@@ -357,6 +535,9 @@ int uvcpp_tcp_server::set_loops(int n) {
     // 语义的一部分 —— 钩子见到的是"本循环的连接已经关完"的状态。捕获 `w` 与
     // `i` 的理由同下面那个就绪钩子。
     w->set_on_exit([this, w, i]() {
+      // **先关监听、再关连接。** 顺序是语义的一部分：监听句柄一关，内核就不会
+      // 再往这条循环上派新连接（分流那条路），"这条循环上还有什么"才是闭合的。
+      close_worker_listener(static_cast<size_t>(i));
       close_clients_of_loop(w->loop());
       if (loop_exit_hook_) loop_exit_hook_(i + 1, w->loop());
     });

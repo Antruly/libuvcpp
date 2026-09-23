@@ -79,10 +79,15 @@ int uvcpp_tcp::bindIpv4(const char *addripv4, int port, int flags) {
   sockaddr_in *addr_in = new sockaddr_in();
   ret = uv_ip4_addr(addripv4, port, addr_in);
   if (ret) {
+    // 失败也必须把这块还回去：任务 3 的分流探测**故意**会走到下面那条失败
+    // 路径（带着 `UV_TCP_REUSEPORT` 绑一次，不支持就重来），留着就是每次
+    // 探测漏一块。
+    UVCPP_VDELETE(addr_in);
     return ret;
   }
   ret = this->bind((sockaddr *)addr_in, flags);
   if (ret) {
+    UVCPP_VDELETE(addr_in);
     return ret;
   }
   addrs.push_back((sockaddr *)addr_in);
@@ -94,10 +99,12 @@ int uvcpp_tcp::bindIpv6(const char *addripv6, int port, int flags) {
   sockaddr_in6 *addr_in6 = new sockaddr_in6();
   ret = uv_ip6_addr(addripv6, port, addr_in6);
   if (ret) {
+    UVCPP_VDELETE(addr_in6);
     return ret;
   }
   ret = this->bind((sockaddr *)addr_in6, flags);
   if (ret) {
+    UVCPP_VDELETE(addr_in6);
     return ret;
   }
   addrs.push_back((sockaddr *)addr_in6);
