@@ -23,7 +23,8 @@
  * 判据的分子 ⇒ 假"到顶"。这条是 `doc/benchmark.md` 里记着的坑（第 5 节），
  * 本仓为此吃过一次 19.52 MB/min 的假泄漏。没给 --pid 时按名字查，**匹配数 ≠ 1 直接退 3**。
  *
- * 依赖：`npm install autocannon`（本仓不 vendor 它）。
+ * 依赖：先在 `bench/` 里跑 `npm install`（声明在同目录 package.json，钉精确 8.0.0；
+ * 本仓不 vendor 它）。
  *
  * 用法:
  *   node bench/driver.js --url http://127.0.0.1:8080/json --proc uvcpp_bench_server \

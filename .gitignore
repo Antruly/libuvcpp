@@ -42,6 +42,10 @@ docs/
 # 步骤 9 那轮是靠手工删掉的。
 __pycache__/
 *.pyc
+# bench/ 的生成器依赖（autocannon，声明在 bench/package.json）。按文档敲一次
+# npm install 就会在 bench/ 下留一个 node_modules/。带尾斜杠只匹配目录，
+# 与上面 build-*/ 同理；不带斜杠会连同名文件一起匹配。
+node_modules/
 websocket_parser.h
 websocket_parser.c
 stdout.txt

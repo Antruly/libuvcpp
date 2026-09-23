@@ -1,0 +1,11 @@
+{
+  "name": "uvcpp-bench-rig",
+  "version": "1.0.0",
+  "private": true,
+  "description": "靶场生成器进程（gen.js / driver.js）的依赖。autocannon 钉精确版本，不写 ^ —— 读数的可比性靠版本固定，见 doc/benchmark-rig.md。",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "autocannon": "8.0.0"
+  }
+}

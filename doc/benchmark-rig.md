@@ -68,10 +68,16 @@ uvcpp_bench_server --port 8080
 ## 驱动器：为什么是多个生成器进程
 
 ```bash
-npm install autocannon          # 本仓不 vendor 它
+cd bench && npm install         # 依赖声明在 bench/package.json；本仓不 vendor 它
 node bench/driver.js --url http://127.0.0.1:8080/json --proc uvcpp_bench_server \
      --nproc 4 --duration 15 --connections 25
 ```
+
+`bench/package.json` 把 `autocannon` 钉在**精确** `8.0.0`（不写 `^`）：现有全部读数是
+这个版本跑出来的，换版本就换了量具，旧数不能比。`package-lock.json` 一并入库
+（钉传递依赖，对量具比对应用更要紧）。锁里的 `resolved` **一律指向 `registry.npmjs.org`**，
+不带本机 npm 配置里的镜像 —— 否则等于把某一面镜像钉进仓库。装出来的 `node_modules/`
+已在 `.gitignore` 里。
 
 单个 `autocannon` 是单线程 JS，**它自己会先到顶**。本机实测：单进程时生成器吃满一个核、
 服务端也吃满一个核，两边同时到顶 —— 这种读数是**没有分辨力**的，既说明不了服务端能跑多少，
