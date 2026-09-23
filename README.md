@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.2--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.3--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.2-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.3-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -60,7 +60,8 @@ application
 ### Utilities (`src/uvcpp/`)
 
 Thread pool, RW locks, barriers, CPU info, network interfaces, passwd/group, directory traversal,
-environment variables, buffer management (`uvcpp_buf`), metrics, and allocator integration.
+environment variables, buffer management (`uvcpp_buf`), metrics, allocator integration,
+and JSON construction (`uvcpp_json_writer`).
 
 ### Expand module (`src/expand/`)
 
@@ -186,6 +187,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | Module | Guide | What it covers |
 |---|---|---|
 | Low level (handle + req) | [doc/lowlevel-guide.md](doc/lowlevel-guide.md) | The event loop, handle/request lifetimes, and what `<uvcpp.h>` actually aggregates |
+| JSON (core) | [doc/json-guide.md](doc/json-guide.md) | Building a JSON response by hand: the escape contract, sticky failures, limits, and how it meets the response layer |
 | net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP clients and servers; the async and sync modes, and where they must not be mixed |
 | web (HTTP half) | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP server/client/parser/static server; why shutdown takes two calls |
 | web (WS half) | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket handshake, frames, close codes |
@@ -554,6 +556,7 @@ libuvcpp/
 │   ├── expand-guide.md    # Memory pool / page heap / span usage
 │   ├── http2-guide.md     # Using the low-level HTTP/2 session and connection layers
 │   ├── http2-status.md    # HTTP/2 support status
+│   ├── json-guide.md      # Building JSON by hand: the escape contract and its limits
 │   ├── lowlevel-guide.md  # Event loop, handles and requests (the foundation)
 │   ├── net-guide.md       # TCP/UDP clients and servers
 │   ├── release-process.md # How a release is cut, and what it does not check
@@ -586,7 +589,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.2-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.3-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;

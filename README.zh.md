@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.2--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.3--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.2-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.3-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -60,7 +60,8 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 ### 工具类（`src/uvcpp/`）
 
 线程池、读写锁、屏障、CPU 信息、网络接口、用户/组信息、目录遍历、
-环境变量、缓冲区管理（`uvcpp_buf`）、性能指标和分配器集成。
+环境变量、缓冲区管理（`uvcpp_buf`）、性能指标、分配器集成，
+以及 JSON 构造（`uvcpp_json_writer`）。
 
 ### Expand 模块（`src/expand/`）
 
@@ -184,6 +185,7 @@ int main() {
 | 模块 | 指南 | 讲什么 |
 |---|---|---|
 | 低层（handle + req） | [doc/lowlevel-guide.md](doc/lowlevel-guide.md) | 事件循环、句柄与请求的生命周期、`<uvcpp.h>` 到底聚合了什么 |
+| JSON（核心） | [doc/json-guide.md](doc/json-guide.md) | 手写 JSON 响应：转义契约、失败语义、各种上限，以及怎么接到响应层 |
 | net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP 客户端与服务端；异步与同步双模式，以及两者不能混用的地方 |
 | web（HTTP 半边） | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP 服务端/客户端/解析器/静态服务；关服为什么是两步 |
 | web（WS 半边） | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket 握手、帧、关闭码 |
@@ -545,6 +547,7 @@ libuvcpp/
 │   ├── expand-guide.md    # 内存池 / 页堆 / span 的功能说明
 │   ├── http2-guide.md     # HTTP/2 低层会话与连接层的用法
 │   ├── http2-status.md    # HTTP/2 支持现状
+│   ├── json-guide.md      # 手写 JSON 构造：转义契约与它的边界
 │   ├── lowlevel-guide.md  # 事件循环、句柄与请求（地基）
 │   ├── net-guide.md       # TCP/UDP 客户端与服务端
 │   ├── release-process.md # 发布怎么出，以及这条链**没有**检查什么
@@ -576,7 +579,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.2-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.3-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
