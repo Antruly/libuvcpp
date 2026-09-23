@@ -247,9 +247,9 @@ bool has_alpn_select() const;
 
 | 落点 | 声明 | 所有权说明 |
 |---|---|---|
-| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:504` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:497-499`） |
+| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:561` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:554-556`） |
 | `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:221-221` | "生命周期必须覆盖**整条连接**"（`:217`） |
-| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1856-1856` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
+| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1896-1896` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
 顺序：`set_ssl_context` **必须在 `listen()` 之前**（`:346-347`），清空用
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。
@@ -291,7 +291,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **握手失败怎么知道：**
 
 - 服务端：握手成功才 `deliver_connection()`；失败**只记账**，`on_connection`
-  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:488-496`）。
+  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:545-553`）。
 - 客户端：`set_tls_ready_callback(cb)`，`status == 0` 成功；**只触发一次**，失败时在
   关闭回调**之前**触发（那时对象还活着）。
 - 握手期连接不在上层登记表里，`idle_timeout_ms` 覆盖不到——所以有

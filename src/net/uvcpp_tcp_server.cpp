@@ -92,8 +92,9 @@ uvcpp_tcp_server::~uvcpp_tcp_server() {
   // 句柄在一条已经被还回去的循环上 `uv_close`。
   //
   // 每个 worker 的退出路径里有一步 `on_exit` 钩子（装的是
-  // `close_clients_of_loop`），所以 join 返回时它名下的连接已经关完、登记表
-  // 里也不再有人 —— 下面第二步、第三步于是只管 acceptor 自己那一份。
+  // `close_clients_of_loop`，之后接属主的 `set_loop_exit_hook()`），所以 join
+  // 返回时它名下的连接已经关完、登记表里也不再有人，属主建在那条循环上的句柄
+  // 也已经由属主自己收掉 —— 下面第二步、第三步于是只管 acceptor 自己那一份。
   // -------------------------------------------------------------------
   stop_workers();
 
@@ -288,6 +289,23 @@ int uvcpp_tcp_server::listen(
     return rc;
   }
 
+  // 到了这儿才置：`rollback_loops()` 那道门放行的正是"bind 成功、listen 还没
+  // 成功"这段窗口，所以判据必须只在这一条路上翻真 —— 失败那条路上不置，
+  // 回滚才走得通。
+  listen_called_ = true;
+  return 0;
+}
+
+int uvcpp_tcp_server::rollback_loops() {
+  // 门只在 `listen()` 成功之后关：那时工作循环可能已经持有连接，把循环从
+  // 底下抽掉就是让那些连接凭空消失。`n == 1`（没有工作循环）时本函数本来就
+  // 是空操作，但门照挡 —— 语义上"listen 过了就别撤循环"更清楚。
+  if (listen_called_) return UV_EBUSY;
+
+  // `stop_workers()` 自己幂等（没有 worker 时就是空循环），所以"`set_loops()`
+  // 内部已经收过一次"那条路再调一遍无害 —— 那正是属主把失败路径写成一条的
+  // 前提。
+  stop_workers();
   return 0;
 }
 
@@ -319,7 +337,14 @@ int uvcpp_tcp_server::set_loops(int n) {
     // **必须在 `start()` 之前装**：这个钩子在 worker 线程上跑，写它的人和读
     // 它的人之间靠 `start()` 的交握手建立先后关系。它干的是"退出前把挂在我
     // 这条循环上的连接关掉" —— 那些连接的关闭收尾必须在它们自己的循环线程上。
-    w->set_on_exit([this, w]() { close_clients_of_loop(w->loop()); });
+    //
+    // 属主的退出钩子（见 `set_loop_exit_hook()`）**排在这一句之后**：顺序是
+    // 语义的一部分 —— 钩子见到的是"本循环的连接已经关完"的状态。捕获 `w` 与
+    // `i` 的理由同下面那个就绪钩子。
+    w->set_on_exit([this, w, i]() {
+      close_clients_of_loop(w->loop());
+      if (loop_exit_hook_) loop_exit_hook_(i + 1, w->loop());
+    });
 
     // 属主的就绪钩子（见 `set_loop_start_hook()`）。循环号是 `i + 1` —— 0 号是
     // 接受者，不走这个钩子。同样**必须在 `start()` 之前装**。
@@ -358,6 +383,19 @@ void uvcpp_tcp_server::set_loop_start_hook(
     return;
   }
   loop_start_hook_ = std::move(fn);
+}
+
+void uvcpp_tcp_server::set_loop_exit_hook(
+    std::function<void(int, uvcpp_loop*)> fn) {
+  // 与 `set_loop_start_hook()` 同一道门、同一条理由（"配了却没生效"是最难查
+  // 的形状），也同一套诊断写法（net 层不依赖 webapp 层，一律 stderr）。
+  if (!workers_.empty()) {
+    std::fprintf(stderr,
+                 "[uvcpp_tcp_server] set_loop_exit_hook() 在工作线程已启动"
+                 "之后才调用，本次不生效（它必须在 set_loops() 之前设）\n");
+    return;
+  }
+  loop_exit_hook_ = std::move(fn);
 }
 
 int uvcpp_tcp_server::loop_count() const {

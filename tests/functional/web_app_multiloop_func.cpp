@@ -1280,6 +1280,113 @@ void test_id_high_bits_from_loop() {
 
 }  // namespace
 
+/**
+ * @brief 一个**绑不上**的地址：TEST-NET-1，永远不会配在网卡上。
+ *
+ * 失败用"地址绑不上"制造，**不用"端口被占"** —— 本仓实测 Windows 上
+ * `SO_REUSEADDR` 两边都设时会**共存**（见 testing-guide 那条），拿端口占用
+ * 去逼一个 bind 失败在这条腿上根本逼不出来，用例会假绿。
+ */
+static const char* kUnbindableHost = "192.0.2.1";
+
+void test_start_failure_reclaims_workers() {
+  // 判据 7：n>1 启动失败之后**不许留下在跑的工作循环**。
+  //
+  // 未改的代码怎么红：n-1 条工作循环在 `init_process_once()` 里就被放行了，
+  // 钩子里已经 `note_loop_started()` 过；而 `bind()`/`listen()` 的失败分支
+  // **只 `return rc`**，一条收尾都没有。于是 `loop_started_` 停在"真"、
+  // 工作线程还在跑 —— 而 `start()` 的注释写着"失败时不会有线程残留，可以
+  // 直接改配置重试"。用户手上剩下的是一句空话。
+  {
+    uvcpp_web_app app;
+    configure_for_test(app);
+    app.set_host(kUnbindableHost);
+    check(app.set_loops(2) == 0, "n=2 被接受");
+
+    const int rc = app.start();
+    check(rc != 0, "绑不上的地址 ⇒ start() 返回非 0");
+    check(rc != UV_EBUSY, "失败码是 bind 那个，不是 UV_EBUSY");
+    std::cout << "     （bind 失败码 " << rc << "：" << uv_strerror(rc) << "）"
+              << std::endl;
+
+    // **本条用例真正的红面是下面这一句**：`loop_started_` 正是
+    // `teardown_failed_start()` 回滚的那个量，未收尾的实现在这里为真。
+    check(!app.loop_started(),
+          "启动失败之后 loop_started() 为假 —— 工作循环已经收回");
+
+    // 这一句在**改与不改上都绿**（`running_` 只在 `rc == 0` 之后才置位，见
+    // `start_background()` 的线程尾巴），所以它不是判据，只是把"这个对象现在
+    // 不该自称在服务"写下来。别把它的绿当成收尾生效的证据。
+    check(!app.running(), "启动失败之后 running() 为假");
+
+    // 终态契约：再 `start()` 要被**挡下来**，而不是"看起来能起来、实际把新
+    // 句柄泄漏一路"。注意这一句**单独不足以**证明回滚做了事 —— 不回滚的实现
+    // 同样返 `UV_EBUSY`（撞在 `loop_started_` 上，理由是"还在跑"）；上面那句
+    // 才是把两条路分开的判据，这一句钉的是**报出来的原因**别退化成另一种。
+    check(app.start() == UV_EBUSY, "失败之后本实例不能再 start()（终态）");
+  }  // 析构在这里跑。收尾没做的话，它就是在几条**还活着**的循环上动句柄
+     // （`delete slot.async` 会走 `uv_close`）—— 那正是 `tcp->stop()` 被钉在
+     // 0 号时列出的同一条理由，只是从析构这条门进来。
+
+  // 进程级不许有残留：同样 n=2 的新实例，换个能绑的地址必须起得来、停得掉。
+  // 没有这一条的话，"失败之后什么都没坏"就只能靠上面那两条断言去代表，
+  // 而它们只看得到这一个对象自己的账。
+  uvcpp_web_app app2;
+  configure_for_test(app2);
+  app2.set_loops(2);
+  app2.get("/hi", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                     uvcpp_web_next) { resp.text("hi"); resp.end(); });
+  check(app2.start() == 0, "失败一次之后，新实例照常起得来");
+  const int port = app2.bound_port();
+  check(port > 0, "新实例的 bound_port() 是真端口");
+  uvcpp_http_response r;
+  check(get(port, "/hi", r) && status_of(r) == 200, "新实例照常答 200");
+  check(stop_and_join_within(app2, 15000, "失败一次之后新实例仍停得掉"),
+        "新实例 stop()+join() 在有界墙钟内返回");
+}
+
+void test_worker_init_failure_is_not_silent() {
+  // 判据 8（不变量）：**`start()` 返回 0 ⇒ 停机必须干净**。
+  //
+  // 它守的是"钩子把 `init_loop_state()` 的返回码丢了"那一条：某一格建 `async`
+  // 失败时，那一格身份记了、`loop_started_` 也置真，但它的 `post()` 全被丢弃
+  // （WARN，不是就地执行）⇒ 它**永远进不了停机状态机** ⇒ 停机会退化成 `join()`
+  // 那条有界兜底：等满 grace+slack 之后报「仍有 N 条循环没退出」。而启动
+  // **返回 0**，用户看不出任何异常。
+  //
+  // **诚实说明**：这条路径在进程内**没有自然触发器**（`uv_async_init` 只在
+  // OOM / 非法循环上失败），所以本用例在**未变异**的树上恒真 —— 它是给变异用
+  // 的观测面，不是"验过了"的证据。红面由 `multiloop_mutation.py` 的 M8
+  // （注入 1 号格初始化失败 **+** 拿掉 `init_rc` 那道检查）制造，M7（只注入）
+  // 是它的对照组：那时 `start()` 如实返非 0，本条走下面那条早退支。
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.set_loops(2);
+  app.get("/hi", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                    uvcpp_web_next) { resp.text("hi"); resp.end(); });
+
+  g_sink.clear();
+  const int rc = app.start();
+  if (rc != 0) {
+    // 初始化失败（注入的或真的）⇒ 如实报出来 + 收尾。这一支的正面判据在
+    // `test_start_failure_reclaims_workers()` 里，这里只核收尾。
+    check(!app.loop_started(), "某一格初始化失败 ⇒ start() 报错且循环已收回");
+    return;
+  }
+
+  const int port = app.bound_port();
+  uvcpp_http_response r;
+  check(get(port, "/hi", r) && status_of(r) == 200, "n=2 下 GET /hi 是 200");
+  check(stop_and_join_within(app, 15000, "启动成功的实例必须停得掉"),
+        "start() 返 0 之后 stop()+join() 在有界墙钟内返回");
+
+  // **有牙的是这一条**：`join()` 那条有界兜底只在"有循环没退出"时打，而
+  // "join 在 15 秒内返回"在坏实现上照样绿（8 秒 < 15 秒上限）—— 与 M1 的红法
+  // 是同一个道理。没有这一句，上面那句就是本仓最反对的"跑了但恒绿"。
+  check(g_sink.count_containing(kJoinIncomplete) == 0,
+        "启动成功 ⇒ 停机干净（日志里没有「条循环没退出」）");
+}
+
 int main() {
   std::cout << std::unitbuf;  // 崩溃时也能从最后一行看出死在哪一条
   std::cout << "== web_app_multiloop_func ==" << std::endl;
@@ -1303,6 +1410,10 @@ int main() {
   test_static_cache_two_loops();
   std::cout << "-- 静态缓存：重插同一个键时的字节账 --" << std::endl;
   test_static_cache_reput_bytes();
+  std::cout << "-- 启动失败要收回工作循环 --" << std::endl;
+  test_start_failure_reclaims_workers();
+  std::cout << "-- 启动成功 ⇒ 停机干净（初始化失败的观测面）--" << std::endl;
+  test_worker_init_failure_is_not_silent();
   std::cout << "-- 对照组 n == 1 --" << std::endl;
   test_control_group_n1();
 

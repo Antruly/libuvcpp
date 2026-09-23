@@ -20,6 +20,26 @@ webapp 多循环（`uvcpp_web_app::set_loops(n)`）那批判据的变异验证�
                                    一样成立 —— 恒真的判据。已把采样点挪进处理
                                    函数（连接活着的时刻），前提 `at1 >= 1` 自
                                    己先断言。补齐判据之后重跑本表才把它抓住。
+  M7  注入"1 号格 `init_loop_state()` 失败"（**对照组，带故障**）
+                                → **判别式**：那条"有循环没退出"的判据**不响**
+  M8  M7 + 拿掉 `init_rc` 那道检查
+                                → **判别式**：同一条判据**响**（`start()` 返 0，
+                                   而那一格没有 `async` ⇒ 停机退化成 `join()` 的
+                                   有界兜底 ⇒「条循环没退出」那条 ERROR）
+                                   这条路上**没有自然触发器**（`uv_async_init`
+                                   只在 OOM / 非法循环上失败）⇒ 故障必须先注入；
+                                   M7/M8 在**那条判据响不响**上的差就是 `init_rc`
+                                   那道检查的牙。
+
+  **M7/M8 看的是"哪条判据响了"，不是"红不红"**（2026-09-23 实测改的判据）
+  -------------------------------------------------------------------
+  原先这里写的是"M7 应绿、M8 应红"，**这条判据本身是坏的**：注入的故障是"1 号格
+  初始化失败"，而 1 号格是**同 exe 里每一个 n=2 用例**都要用的 ⇒ 注入之后
+  `start()` 对**每一条** n=2 用例都返非 0，其它用例成片红（实测 8 条）。
+  于是 M7 与 M8 在"红不红"上分不开 —— 而"分不开的对照组"等于没有对照组。
+  （附带损伤里**没有**「有循环没退出」，因为没有任何一条 n=2 的循环真正跑起来过；
+  这正是判别式能立住的原因，也是它必须显式判一遍的理由：别再让"红绿之差"
+  这种看着像判据的东西回来。）
   M5  静态缓存 `put()` 里"同一个键重插时先扣掉旧字节"那句去掉
                                 → `test_static_cache_reput_bytes` 红
                                    （**这条用例是补出来的**：只有"12 次请求"那条
@@ -110,7 +130,44 @@ MUTATIONS = [
      "    const std::map<std::string, cache_entry>::iterator old = cache.find(key);",
      "    /* MUTATION: 不拿锁 */\n\n"
      "    const std::map<std::string, cache_entry>::iterator old = cache.find(key);"),
+
+    # M7 / M8：钩子丢 `init_loop_state()` 返回码那条路**没有自然触发器**
+    # （`uv_async_init` 只在 OOM / 非法循环上失败），所以这里得**先把故障注进去**
+    # 才谈得上判据。两段式的写法就在这儿：`old`/`new` 是列表时按顺序逐段替换。
+    #
+    # M7 是**对照组（带故障）**：只注入、不改实现 ⇒ 修好的代码如实返非 0。
+    # M8 = M7 + 拿掉 `init_rc` 那道检查 ⇒ `start()` 返 0 而那一格没有 `async`，
+    # 停机退化成 `join()` 的有界兜底 ⇒ 「有循环没退出」那条 ERROR 出现。
+    #
+    # **这一对看的是判别式（`MUTATION_SIGNATURES`），不是红绿**：注入的故障把
+    # 同 exe 里每一条 n=2 用例都打红了，红绿分不开这两条 —— 理由见文件头。
+    ("M7 注入一格初始化失败（对照组：目标判据应**不响**）",
+     APP_CPP,
+     "      s.init_rc = init_loop_state(index, loop);",
+     "      s.init_rc = (index == 1) ? UV_ENOMEM  /* MUTATION: 注入故障 */\n"
+     "                                : init_loop_state(index, loop);"),
+
+    ("M8 注入 + 拿掉 init_rc 检查（目标判据应**响**）",
+     APP_CPP,
+     ["      s.init_rc = init_loop_state(index, loop);",
+      "        return teardown_failed_start(loops_[i]->init_rc);"],
+     ["      s.init_rc = (index == 1) ? UV_ENOMEM  /* MUTATION: 注入故障 */\n"
+      "                                : init_loop_state(index, loop);",
+      "        (void)0;  /* MUTATION: 丢掉 init_rc，启动照常返 0 */"]),
 ]
+
+# 有牙的判据 vs 附带损伤：M7/M8 的**判别式**是"目标判据响没响"，不是"红不红"。
+#
+# 关键词取自用例里那几句判据的原文（`tests/functional/web_app_multiloop_func.cpp`
+# 里 `count_containing(kJoinIncomplete)` 旁边），措辞几处不同，但都带这六个字。
+JOIN_INCOMPLETE_SIG = "有循环没退出"
+
+# 标签前缀 -> {"must"/"must_not": [子串]}。没登记的就是老规矩："红 == 抓住"。
+# 登记了的：红不红**不判**（附带损伤是多条 n=2 用例一起红），只判目标判据。
+MUTATION_SIGNATURES = {
+    "M7": {"must_not": [JOIN_INCOMPLETE_SIG]},
+    "M8": {"must": [JOIN_INCOMPLETE_SIG]},
+}
 
 # 每个变异只跑这一条用例：它就是这个批次的判据文件。
 RUN_TIMEOUT_S = 300
@@ -266,13 +323,18 @@ def main():
     summary = []
     restored_ok = False
     tail_rc = 1
+    sig_bad = False
 
     # 锚点先就地全核对一遍：**在动构建之前**。有一个对不上就没有必要开始跑
     # （每个变异一次构建，白跑一轮是分钟级的）。
+    #
+    # `old` 是列表时是**分段变异**（注入故障 + 拆守卫那种，见 M8）：列表里每一段
+    # 各自都要在本文件里唯一。路径仍只有一个（`m[1]`），所以 `files` 不用改。
     for label, path, old, _new in picks:
-        n = before[path].count(old)
-        assert n == 1, ("锚点必须**唯一**：%s 里 %r 命中 %d 次"
-                        % (os.path.basename(path), old[:60], n))
+        for o in (old if isinstance(old, list) else [old]):
+            n = before[path].count(o)
+            assert n == 1, ("锚点必须**唯一**：%s 里 %r 命中 %d 次"
+                            % (os.path.basename(path), o[:60], n))
 
     for p in files:
         save_good(p)
@@ -285,9 +347,14 @@ def main():
                 restore_good(p)
             if mut is not None:
                 path, old, new = mut[0], mut[1], mut[2]
+                olds = old if isinstance(old, list) else [old]
+                news = new if isinstance(new, list) else [new]
+                assert len(olds) == len(news), label
                 cur, _c = read_text(path)
-                assert cur.count(old) == 1, label
-                write_text(path, cur.replace(old, new, 1), crlf[path])
+                for o, nn in zip(olds, news):
+                    assert cur.count(o) == 1, label
+                    cur = cur.replace(o, nn, 1)
+                write_text(path, cur, crlf[path])
 
             rc, nerr, out = build(args.tree)
             if rc != 0 or nerr:
@@ -299,8 +366,29 @@ def main():
             crc, fails, cout = run_case(exe_dir)
             verdict = ("**没抓住**" if not fails
                        else "抓（%d 条）" % len(fails))
-            summary.append((label, verdict))
-            print("\n[%s] 同步 dll %d 处 → %s" % (label, n, verdict), flush=True)
+
+            # 判别式：只对登记过的变异判，而且**不判红绿**（理由见文件头 ——
+            # 注入的故障把同 exe 里每一条 n=2 用例都打红了，红绿分不开 M7/M8）。
+            sig = MUTATION_SIGNATURES.get(label.split()[0])
+            sig_note = ""
+            if sig:
+                bad = []
+                for s in sig.get("must", []):
+                    if not any(s in f for f in fails):
+                        bad.append("该响的没响（`%s`）" % s)
+                for s in sig.get("must_not", []):
+                    if any(s in f for f in fails):
+                        bad.append("不该响的响了（`%s`）" % s)
+                if bad:
+                    sig_bad = True
+                    sig_note = "；判别式 **✘ %s**" % "；".join(bad)
+                else:
+                    sig_note = "；判别式 ✔（目标判据%s，%d 条是附带损伤）" % (
+                        "响了" if sig.get("must") else "没响", len(fails))
+
+            summary.append((label, verdict + sig_note))
+            print("\n[%s] 同步 dll %d 处 → %s%s"
+                  % (label, n, verdict, sig_note), flush=True)
             print("    用例 rc=%d" % crc)
             for f in fails:
                 print("        %s" % f)
@@ -330,8 +418,10 @@ def main():
 
     print("\n==== 汇总 ====")
     for label, verdict in summary:
-        print("  %-34s %s" % (label, verdict))
-    return 0 if (restored_ok and tail_rc == 0) else 1
+        print("  %-48s %s" % (label, verdict))
+    if sig_bad:
+        print("  !! 有判别式没过：把它当判据看，别只看红绿")
+    return 0 if (restored_ok and tail_rc == 0 and not sig_bad) else 1
 
 
 if __name__ == "__main__":

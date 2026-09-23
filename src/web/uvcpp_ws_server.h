@@ -121,7 +121,12 @@ class UVCPP_API uvcpp_ws_server {
   int run(uv_run_mode md = UV_RUN_DEFAULT);
 
   /**
-   * @brief 停止服务：先给所有活动会话发 Close 帧，再停底层 HTTP 服务。
+   * @brief 停止服务：先给**本分片**的活动会话发 Close 帧，再停底层 HTTP 服务。
+   *
+   * @warning 与 `close_all_sessions()` 同一条限制：多循环下"发 Close 帧"那一步
+   *          只覆盖**本线程所在循环那一片分片**（不在循环线程上时是 0 号）。
+   *          要全关就每条循环各调一次 `stop()`，或者逐格点名
+   *          `close_sessions_of_loop(i, code)`。理由与那条一样：关闭是循环亲和的。
    *
    * 会话的**回收**不在这里完成：Close 帧发出去要几轮循环，那些会话随后由
    * 终结回调送回并回收。循环如果立刻停了，剩下的由析构兜底 —— 不会漏。
@@ -129,7 +134,14 @@ class UVCPP_API uvcpp_ws_server {
   void stop(std::function<void()> on_stopped = nullptr);
 
   /**
-   * @brief 只给所有活动会话发 Close 帧，**不碰** HTTP 服务与循环。
+   * @brief 只给活动会话发 Close 帧，**不碰** HTTP 服务与循环。
+   *
+   * @warning 多循环下这条 API 只覆盖**本线程所在循环那一片分片**（不在任何
+   *          循环线程上时是 0 号，与全仓"答 0 号"那条回落一致）—— **不是**
+   *          "全进程所有会话"。要全关就每条循环各调一次，或者用
+   *          `close_sessions_of_loop(i, code)` 逐格点名。理由与
+   *          `uvcpp_http_server::begin_h2_goaway()` 逐字相同：关闭是循环亲和的。
+   *          框架自己的停机不走这里（它逐格调 `close_sessions_of_loop()`）。
    *
    * `stop()` 拆出来的前半。分派权自持时（框架层），停机流程由框架自己编排：
    * 它要先让 WS 会话发 Close 帧（只做关闭握手的**前半**：不等对端回执，也没有

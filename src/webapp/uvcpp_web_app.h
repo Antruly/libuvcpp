@@ -999,8 +999,18 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   /**
    * @brief 起后台线程并开始服务。**阻塞到 bind 有结果为止**。
    *
-   * @return 0 成功；否则 bind/listen 的 libuv 错误码（负数）。失败时不会有
-   *         线程残留，可以直接改配置重试。
+   * @return 0 成功；否则 `set_loops()`/bind/listen 的 libuv 错误码（负数）。
+   *         **失败时不会有线程残留** —— 已经放行的工作循环由
+   *         `teardown_failed_start()` 收掉（`rollback_loops()` 停并释放那几条
+   *         循环、逐格回滚记账），三条失败路径共用。
+   *
+   * @note `n == 1` 失败之后可以直接改配置重试（那是既有语义，一个字节没动）。
+   *       **`n > 1` 时这次失败对本实例是终态**，而且**挡得住**：失败路径会置
+   *       `start_terminal_`，再 `start()` 拿到 `UV_EBUSY` 和一条说明原因的
+   *       ERROR。原因是重试会复用旧格子 —— `set_loops(n)` 已经把那 n-1 格建好、
+   *       钩子也跑过了，而它们指向的循环已经被 `rollback_loops()` 释放；真要
+   *       支持重试得把整格复位（另一笔）。要重新起服务请构造一个新的
+   *       `uvcpp_web_app` —— 与下面那条"一个实例只能启动一次"同源。
    *
    * @note **一个实例只能启动一次。** 停掉之后不能再 `start()`（监听句柄、
    *       loop 亲和的句柄在停机时都释放了）。再传 `UV_EBUSY`。要重新起服务
@@ -1208,6 +1218,52 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   /// 记下一条循环开跑 / 收尾，维护 `loops_running_` 与 `loop_started_`。
   void note_loop_started(int index);
   void note_loop_stopped(int index);
+
+  /**
+   * @brief 在**本格那条循环的线程上**收掉本格建在循环上的东西。
+   *
+   * 两条路调它，所以它必须**幂等**（每项删完置空，第二次进来看到的都是空表）：
+   *
+   *   - 正常停机：`finish_shutdown()` 跑在自己那条循环的线程上；
+   *   - 循环退出：`tcp_server()->set_loop_exit_hook()` 装在 net 的工作循环上，
+   *     worker 线程走完退出路径时调（那时循环还在，但 `uv_run` 已经返回）。
+   *
+   * 第二条是**启动失败那条路**的收尾：`teardown_failed_start()` 接着就
+   * `rollback_loops()` 把工作循环连内存一起放掉，句柄必须在**那之前、且在那条
+   * 循环自己的线程上**关掉 —— 留到析构里 `delete` 是往一块已经还回去的内存上
+   * 写 `uv_close`（UAF），一个都不删则 `uv_loop_close()` 撞 `UV_EBUSY`、整块循环
+   * 内存泄漏（`run_loop_leak_probe.py` 看的就是这一条）。
+   *
+   * **顺序不能换**：WS 分片排在删 `async` 之前 —— `recycle_all()` 会跑会话的
+   * 终结回调，那些回调里 `post()` 进本格队列仍然应该被接受（队列还是活的）。
+   */
+  void release_loop_handles(int index);
+
+  /**
+   * @brief 「工作循环已经放行、但这次启动最终失败了」的统一收尾。
+   *
+   * 四条失败路径共用（`set_loops` 返回非 0 / 钩子里的 `init_loop_state()` 返回
+   * 非 0 / `bind()` / `listen()`）。它们共同的前提是：n-1 条工作循环**已经在跑
+   * 了**，槽位里的 `async`/`timer` 已经建在它们上面。
+   *
+   * 做两件事：① `tcp->rollback_loops()` 把线程 join 掉、循环释放（`stop_workers()`
+   * 是私有的那个，`rollback_loops()` 是它带门的外壳 —— 门挡的是"`listen()` 成功
+   * 之后"，而这条路径**全都在 `listen()` 之前**）；② 回滚 `loops_running_` /
+   * `loop_started_`。
+   *
+   * ① **不需要**先把那几格标 `orphaned`：句柄由 `release_loop_handles()` 挂在
+   * net 的循环退出钩子上收 —— 收在循环内存被释放**之前**、且在那条循环自己的
+   * 线程上，所以既不是 UAF，也不会漏掉整块循环内存。（`orphaned` 只剩 `join()`
+   * 超时那条路在用：那条路上循环**没有**走完退出路径，钩子不会响。）
+   *
+   * ② 不能省：工作循环在钩子里已经把 `loop_started_` 置真了，不回滚的话
+   * `start()` / `set_loops()` 的 `UV_EBUSY` 门会永远命中 —— 调用方手上剩一个
+   * 「循环在转、起不来也停不掉」的对象（`start()` 的注释里那条"可以改配置重试"
+   * 是多循环**之前**的承诺，本笔把它改成了"`n > 1` 失败即终态"）。
+   *
+   * @return 原样返回 \p rc（方便 `return teardown_failed_start(rc);`）。
+   */
+  int teardown_failed_start(int rc);
 
   /** @brief 新连接被接受（HTTP 层的 accept 钩子）：发 id、登记、跑用户钩子。 */
   void on_accept(uvcpp_tcp_client* client);
@@ -1740,6 +1796,22 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   std::atomic<int> loops_running_;
 
   /**
+   * @brief **本实例已经废了**：`n > 1` 的启动失败过一次，不能再 `start()`。
+   *
+   * 只在 `teardown_failed_start()` 里置位，而它对 `n == 1` 是早退的 ⇒ **单循环
+   * 那条路一个字都不受影响**：`bind()` 失败照旧可以直接改配置重试（那是既有
+   * 语义，`start()` 的注释写着）。
+   *
+   * 为什么多循环下必须挡：重试等于把整条启动路径再走一遍，而这条路径上"每进程
+   * 那半"（`http_` / `tcp_` 的 bind/listen 状态、`started_once_` 这类一次性标记）
+   * **不是为复用设计的** —— 失败时它停在半截上，而"半截状态上重走一遍会怎样"没有
+   * 验过，也不该在一条错误路径上现推。要支持重试得先定义"复位到什么状态"，那是
+   * 另一笔。本仓对这种形状一贯是宁可启动失败：用户看到的是一条**说明原因**的
+   * `UV_EBUSY`，而不是一次"看起来成功了"的启动。
+   */
+  std::atomic<bool> start_terminal_;
+
+  /**
    * @brief **一条循环自己**的那份状态（多循环设计稿 §4.1.1 丙那一族）。
    *
    * 今天只有一条循环（0 号），所以这层间接在 `n == 1` 下是**恒等**的：
@@ -1756,8 +1828,8 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                                 shutdown_timer(nullptr),
                                 shutdown_deadline_ms(0), shutdown_phase(0),
                                 registry(i), flushing(false),
-                                inflight_entries(0), finished(false),
-                                orphaned(false) {}
+                                inflight_entries(0), started(false),
+                                finished(false), orphaned(false), init_rc(0) {}
 
     /// 循环号。0 号就是调用 `run()` / `start()` 的那个线程跑的那条。
     int index;
@@ -1876,6 +1948,25 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
     std::atomic<bool> finished;
 
     /**
+     * @brief 本格已经**记过"在跑"**（`note_loop_started()` 只自增一次）。
+     *
+     * 与 `finished` 是一对：`loops_running_` 记"有几格在跑"，而它两个增减点
+     * 各由这两个按格 CAS 把门 —— 于是"自增几次就减几次"是**结构**保证，不再是
+     * "谁记得别调两次"。
+     *
+     * 为什么非要这一道（今天它是**偶然**安全的）：`init_loop_state()` 里唯一
+     * 可能失败的一步是 `slot.async->init()`，而它紧挨在 `note_loop_started(index)`
+     * **前一句** ⇒ 今天"没自增"与"`async == nullptr`"是同一件事，而
+     * `async == nullptr` 的格子进不了停机状态机（那条 `post()` 支是丢弃 + WARN，
+     * 不是就地执行）⇒ `note_loop_stopped()` 不会替它多减一次。配对成立，但靠的
+     * 是"自增是最后一句"。以后谁在 `init_loop_state()` 里再加一句**可能失败**的
+     * 调用，那格就会"没自增却会减" ⇒ `loops_running_` 提前归零 ⇒ 另一条循环
+     * 迟到的 `begin_shutdown()` 早退 —— 正是这一批刚消掉的那个形状换了个门。
+     * 有了这个 CAS，那种改法**减不动**。
+     */
+    std::atomic<bool> started;
+
+    /**
      * @brief 这一格的句柄**已经没主了**（底层 `set_loops()` 失败把循环拆了）。
      *
      * 只在"转发 `tcp_server()->set_loops(n)` 失败"那条路上置真。那时
@@ -1886,6 +1977,19 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
      * 调用方拿到的是错误码）。
      */
     bool orphaned;
+
+    /**
+     * @brief 本格钩子里 `init_loop_state()` 的返回值（0 = 建成功）。
+     *
+     * **为什么要有它**：钩子的签名是 `std::function<void(int, uvcpp_loop*)>`
+     * （net 层不给返回值），而那一步是会失败的（`slot.async->init()`）。
+     * 不收这个码，失败的那格就会"身份记了、`loop_started_` 也置真、却永远进
+     * 不了停机状态机"（它的 `post()` 全被丢弃），于是 `start()` 照常返回 0，
+     * 用户看不出任何异常 —— 正是 `set_loops()` 那段要拦的"静默退化"。
+     *
+     * 钩子在 `set_loops()` 返回时**全部跑完**，所以在那里扫一遍就够。
+     */
+    int init_rc;
   };
 
   /**

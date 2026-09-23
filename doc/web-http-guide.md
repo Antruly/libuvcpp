@@ -57,7 +57,7 @@
 
 **一、连接的生死归 `uvcpp_tcp_server`，不归 http 层。** 新连接在业务回调**之前**
 就被登记并装好收尾（`src/net/uvcpp_tcp_server.h:51-56`），关闭时框架摘除并 `delete`
-（`src/net/uvcpp_tcp_server.cpp:126-128`）。http 层那张 `contexts_` 表**不拥有**
+（`src/net/uvcpp_tcp_server.cpp:127-129`）。http 层那张 `contexts_` 表**不拥有**
 `uvcpp_tcp_client`。所以地址会被复用 —— 判"还是不是原来那条连接"要用
 `connection_generation()`（[§6](#6-异步响应)），不能比指针。
 
@@ -89,7 +89,7 @@
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
 （`tests/functional/web_ssl_h2_client_func.cpp:185`）。握手超时归
-`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:600`）。
+`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:657`）。
 
 ---
 
@@ -132,7 +132,7 @@ int main() {
 
 **`uvcpp_http_server` 的公开 API 里没有 `close()`。** 唯一能"关服"的是 `stop()`
 （`:385`），而它 = `tcp_server_->stop()`：**只关监听句柄，不动已建立的连接**
-（`src/net/uvcpp_tcp_server.h:298-311`）。已经在处理的请求照跑。
+（`src/net/uvcpp_tcp_server.h:355-368`）。已经在处理的请求照跑。
 
 ```cpp
 #include <net/uvcpp_tcp_server.h>
@@ -213,7 +213,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
   body 不再被服务器缓冲，直接以 `HEADERS` / `BODY` / `END` 三个事件交给你。
 - `set_stream_claim(hook)`（`:263`）：`post_stream` 没中时问它。它返回一个
   `http_stream_handler`（认领）或空（不认领）。`webapp/` 正是靠它把自己的路由器
-  接进来的（`src/webapp/uvcpp_web_app.cpp:1814-1814`）。
+  接进来的（`src/webapp/uvcpp_web_app.cpp:1854-1854`）。
 
 `stream_handler` 拿到的 `req` 是 `ctx.stream_request`，**头部视图只在当次调用内有效，
 要留就自己拷**（`src/web/uvcpp_http_server.h:107-109`）。
@@ -651,7 +651,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1061-1061`�
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:268-279`、`src/web/uvcpp_http_server.cpp:353-364`、`src/web/uvcpp_http_server.cpp:1599-1608`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:585-590`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:2675-2681`）。
+（`src/webapp/uvcpp_web_app.cpp:2784-2790`）。
 
 ### 静默失败清单
 
@@ -678,7 +678,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1061-1061`�
 `src/web/uvcpp_http_server.h:915-918` 现在都明写这一点。
 **真实的闲置清扫在 webapp 层**：`idle_timeout_ms` 默认 **60000**
 （`src/webapp/uvcpp_web_app.cpp:203`），而且为 0 时连扫描句柄都不建
-（`src/webapp/uvcpp_web_app.cpp:1977-1982`）。升级成 WebSocket 的连接被排除在闲置超时之外
+（`src/webapp/uvcpp_web_app.cpp:2086-2091`）。升级成 WebSocket 的连接被排除在闲置超时之外
 （`src/webapp/uvcpp_web_app.h:811`）。
 
 **二、`req` 与 `resp` 只在本次调用期间有效。**

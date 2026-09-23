@@ -604,9 +604,29 @@ int main() {
                         " last_error=" + std::to_string(wsc.get_last_error()));
     check(wsc.is_open(), "4: connect 成功但 is_open() 为假");
     // 前提断言：不确认"确实升级成了一条 WS 会话"，下面收到的帧可能来自别处。
+    //
+    // **这一句必须先等，不能一返回就采样。** 服务端是**先把 101 写出去**、
+    // App 的 `websocket()` handler 在**写完成回调里**才跑的
+    // （`src/web/uvcpp_ws_server.cpp:214-259`：`client->write(101, cb)` 里才
+    // `new uvcpp_ws_connection` 并调 `on_ready`）。所以"客户端已经收到 101"
+    // 与"handler 已经跑过"之间隔着服务端循环的一拍 —— `connect_wait` 返回只
+    // 证明前者。这里不等待就是拿一个还没被写到的变量当判据：场景 1 之所以没
+    // 这个问题，是因为它在同一个断言之前先跑了 `p.wait_texts(1)`。
+    //
+    // 采样点挪到"状态必然成立"的地方，而不是把断言删掉 / 放宽：真没跑的
+    // 话这里一样会超时并红，只是红得准确。
+    const std::chrono::steady_clock::time_point tu =
+        std::chrono::steady_clock::now();
+    while (sink.upgrades.load() != 1 &&
+           std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - tu)
+                   .count() < 5000) {
+      wsc.run(UV_RUN_NOWAIT);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     check(sink.upgrades.load() == 1,
           "4: 服务端 WS handler 跑了 " + std::to_string(sink.upgrades.load()) +
-              " 次，want 1");
+              " 次，want 1（已等 5 秒）");
 
     if (crc == 0) {
       check(wsc.send_text(std::string(kEchoText)) == 0, "4: send_text 失败");

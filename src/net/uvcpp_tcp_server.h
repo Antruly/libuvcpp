@@ -277,8 +277,65 @@ class UVCPP_API uvcpp_tcp_server {
    */
   void set_loop_start_hook(std::function<void(int, uvcpp_loop*)> fn);
 
+  /**
+   * @brief 给每条工作循环装一个"退出前"的钩子：**在 worker 线程上、那条循环
+   *        已经跑完、内存还没释放的时候**各调一次，参数是循环号与那条循环。
+   *
+   * 与 `set_loop_start_hook()` 对称 —— 那个管"循环起来时要有的东西"，这个管
+   * "循环走之前必须由它自己收掉的东西"。同样**只对 1..n-1 号调**：0 号是接受者，
+   * 它的循环归调用方自己。
+   *
+   * 为什么必须有它：工作循环的退出路径是 net 自己走完的（排空邮箱 → 关本循环
+   * 的连接 → 泵完挂起的关闭回调 → `uv_loop_close()` + 释放）。属主建在那条循环
+   * 上的句柄（`uv_async` / `uv_timer`）不归 net 管，而它们**必须在循环内存被
+   * 释放之前**关掉：关晚了是往一块已经还回去的内存上写 `uv_close`（UAF），不关
+   * 则 `uv_loop_close()` 撞 `UV_EBUSY`、**整块循环内存泄漏**（`~uvcpp_loop` 那条
+   * 有意泄漏）。两者之间没有第三条路，所以属主得有一处能收。
+   *
+   * 顺序是定的：**net 自己那份（关本循环的连接）先跑完，属主的钩子后跑** ——
+   * 钩子看到的登记表已经是空的，"连接都没了"这条前提不需要它自己去确认。
+   *
+   * 钩子里该做的只有"关句柄 / 放掉只属于这条循环的资源"。**不要停循环、不要
+   * 投递新任务、不要阻塞**：那时 `uv_run` 已经返回，循环只剩"把挂起的关闭回调
+   * 放完"这一件事，线程体会接着泵几轮 `UV_RUN_NOWAIT` 然后关闭循环。
+   *
+   * @param fn 钩子；传空函数则等同于没装。
+   *
+   * @warning 必须在 `set_loops()` 之前设（同 `set_loop_start_hook()`：工作线程
+   *          已经起来之后再装不会被调用，也不会报错）。
+   */
+  void set_loop_exit_hook(std::function<void(int, uvcpp_loop*)> fn);
+
   /** @brief 循环总数（1 + 工作循环数）。没调过 `set_loops()` 就是 1。 */
   int loop_count() const;
+
+  /**
+   * @brief 撤销 `set_loops(n > 1)`：停掉并释放全部工作循环，回到单循环状态。
+   *
+   * **给属主在启动失败时回滚用。** `set_loops(n)` 一返回，n−1 条工作循环就已经
+   * 在跑了；而属主接着多半还要做几件**会失败**的事（`bind()` 是其中最常失败的
+   * 那件 —— 端口被占）。这一段窗口里属主必须能把工作循环收掉，否则它手上会剩
+   * 一个"循环在转、起不来也停不掉"的对象：
+   *
+   *   ① 它建在那些循环上的句柄（`uv_async` / `uv_timer`）得有人收 —— 在析构里
+   *      `delete` 是往一块已经被释放的循环上写 `uv_close`（UAF）。收的地方是
+   *      `set_loop_exit_hook()`：循环停下来的那条线程上、内存还在的时候；
+   *   ② 再想 `set_loops(n)` 会因 `workers_` 非空而永远返 `UV_EBUSY`。
+   *
+   * 与 `stop()` 的分工：`stop()` 是"关服"（不再收新连接，已建立的自生自灭），
+   * 本函数撤的是"多循环这件事本身" —— 它直接 join 工作线程，那些线程名下的
+   * 连接由各自的退出路径关掉（`on_exit` → `close_clients_of_loop`）。所以它
+   * **只属于 `listen()` 之前的那段窗口**，这正是下面那道门挡的东西。
+   *
+   * @return 0 成功（没有工作循环时是空操作，所以"`set_loops()` 自己失败时已经
+   *         收过一次"那条路再调一遍无害）；`UV_EBUSY` **`listen()` 已经成功
+   *         过** —— 那时工作循环可能已经持有连接，该走 `stop()` / 析构，而不是
+   *         把循环从底下抽掉。这道门是**精确**的（`listen_called_` 只在
+   *         `listen()` 成功那一条路上置位），不是拿 `TCP_SERVER_LISTENING`
+   *         凑的 —— 那个标志是 `bind()` 成功时置的，在 `listen()` 失败那条
+   *         路上它已经是真，用它会**反过来挡住本该放行的回滚**。
+   */
+  int rollback_loops();
 
   /**
    * @brief 第 \p loop_index 条循环名下**当前登记着**的连接数。
@@ -669,6 +726,15 @@ class UVCPP_API uvcpp_tcp_server {
   bool stopped_     = false;  ///< true if stop() already closed the handle
 
   /**
+   * @brief `listen()` **成功**过没有 —— `rollback_loops()` 那道门的判据。
+   *
+   * 与 `TCP_SERVER_LISTENING` 不是一回事：那个标志在 `bind()` 成功时就置了，
+   * 而 `bind()` 与 `listen()` 之间正是 `rollback_loops()` 唯一该被放行的窗口。
+   * 拿状态位去挡会把它反着挡掉（见 `rollback_loops()` 的注释）。
+   */
+  bool listen_called_ = false;
+
+  /**
    * @brief 状态位。
    *
    * `n > 1` 时 **worker 线程上也会写**（转手失败要记账），而用户随时可能从
@@ -706,6 +772,15 @@ class UVCPP_API uvcpp_tcp_server {
    * 装晚了不会报错也不会生效，见那条 `@warning`。
    */
   std::function<void(int, uvcpp_loop*)> loop_start_hook_;
+
+  /**
+   * @brief `set_loop_exit_hook()` 装进来的钩子。
+   *
+   * **必须在 `set_loops()` 之前写、之后只读**（同 `loop_start_hook_`）。读它的
+   * 那条线程就是 `start()` 起的那一条，先后关系由那次调用里的交握手建立；
+   * 与就绪钩子的差别只是读的时机 —— 它在**线程退出路径**上，不在开跑时。
+   */
+  std::function<void(int, uvcpp_loop*)> loop_exit_hook_;
 
   /** @brief User connection callback stored as trampoline pair. */
   connection_callback_t on_connection_fn_ = nullptr;

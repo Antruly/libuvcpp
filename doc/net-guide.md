@@ -217,10 +217,10 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:369`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:501-502`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:426`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:558-559`） |
 
-`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:773-775`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:811-813`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
 
@@ -434,6 +434,40 @@ void set_loop_start_hook(std::function<void(int, uvcpp_loop*)> fn);
   但**不会**返回错误码，所以别把它当可查的失败路径。
 - `n == 1`（或不调）时它**一次都不被调用**，也不产生任何开销：没有工作线程可挂。
 
+### 4.5 收尾那两件事：`set_loop_exit_hook()` 与 `rollback_loops()`
+
+```cpp
+// doc-snippet: fragment — 接口签名摘录（同上）。
+void set_loop_exit_hook(std::function<void(int, uvcpp_loop*)> fn);
+int  rollback_loops();                 // 0 = 收干净了；UV_EBUSY = 已经 listen() 过
+```
+
+`set_loop_exit_hook()` 是 §4.4 那个钩子的**对称面**：每条工作循环的线程在自己的
+`uv_run` 返回之后调一次，参数同样是循环号与那条循环。**必须有它，理由不是"对称好看"** ——
+属主在 §4.4 钩子里建的那些句柄（`uv_async`、`uv_timer`）如果没人收，
+`uv_loop_close()` 会撞上 `UV_EBUSY`，而本库在那种情况下**把整块循环内存记成泄漏**
+（`src/net/uvcpp_loop_worker.cpp` 里那段注释记的就是这一族）。所以属主**必须**在这个
+钩子里把建在那条循环上的句柄关掉。
+
+- **只对 1..n−1 号调**；0 号那条是调用方自己的循环，收尾也归调用方。
+- **顺序**：先本库自己的清场（`close_clients_of_loop()`），再是你的钩子，最后才
+  `uv_loop_close()`。⇒ 钩子跑的时候**循环还活着、内存还没释放**，可以安全 `uv_close()`。
+- **钩子里只关句柄**：别停循环、别 `post()`、别阻塞（那是循环自己的线程，堵住它
+  就再也退不出来了）。
+- **必须在 `set_loops()` 之前设**，装晚了只打一条 stderr（同 §4.4，不静默、也没有返回码）。
+- `n == 1` 时同样一次都不调。
+
+`rollback_loops()` 是**给 `listen()` 失败那条路用的**：`set_loops()` 一返回就把
+n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()` 还会失败 —— 失败时调它，
+把那几条循环连内存一起收掉。**带门、只属于 `listen()` 之前那段窗口**：`listen()` 已经
+成功过就返 `UV_EBUSY`（那时工作循环可能已经持有连接，该走 `stop()` / 析构，不能把循环
+从底下抽掉）。没有工作循环时它是空操作，所以"`set_loops()` 自己失败时已经收过一次"
+那条路再调一遍无害 —— 属主可以把失败路径写成一条。
+
+> **属主要在 `set_loop_exit_hook()` 里收句柄，`rollback_loops()` 只负责停循环。**
+> 这两件事分开是刻意的：本库不认识属主的句柄，硬关一遍只能靠 `uv_walk()`，那会把属主
+> 的包装对象一起请走（UAF）。
+
 ---
 
 ## 5. 读的三条路
@@ -461,7 +495,7 @@ void set_loop_start_hook(std::function<void(int, uvcpp_loop*)> fn);
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:365-367`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:422-424`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -540,7 +574,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`src/net/uvcpp_tcp_server.cpp:706-713`）。
+（`src/net/uvcpp_tcp_server.cpp:744-751`）。
 
 ---
 
@@ -689,7 +723,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:399-402`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:488-496`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:545-553`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`

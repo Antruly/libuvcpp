@@ -105,9 +105,9 @@ int  listen(int backlog = 128);                      // src/web/uvcpp_ws_server.
 void attach(uvcpp_http_server* http);                // src/web/uvcpp_ws_server.h:77
 void on_connection(std::function<void(uvcpp_ws_connection*)> cb);  // :115
 int  run(uv_run_mode md = UV_RUN_DEFAULT);           // :121
-void stop(std::function<void()> on_stopped = nullptr);  // :129
-void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);  // :145
-size_t session_count() const;                        // :191
+void stop(std::function<void()> on_stopped = nullptr);  // :134
+void close_all_sessions(ws_close_code code = ws_close_code::NORMAL);  // :157
+size_t session_count() const;                        // :203
 ```
 
 **没有 `close()`。** 停机只有两条路：`stop()` 和 `close_all_sessions()`。
@@ -425,7 +425,7 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 `conn->enable_compression(true, dp)`（`src/web/uvcpp_ws_server.cpp:243`），
 客户端自动 `conn->enable_compression(false, deflate_params_)`
 （`src/web/uvcpp_ws_client.cpp:384`）。要关掉就 `set_compression(cfg)` 把 `enabled` 置 false
-（`src/web/uvcpp_ws_server.h:222` / `src/web/uvcpp_ws_client.h:164`，**只在
+（`src/web/uvcpp_ws_server.h:234` / `src/web/uvcpp_ws_client.h:164`，**只在
 `UVCPP_ZLIB_ENABLE=1` 时编译**）。
 
 阈值 `set_compress_min_size(size_t n)` 默认 `0`，也就是**都压**

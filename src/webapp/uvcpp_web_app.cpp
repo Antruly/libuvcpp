@@ -237,6 +237,12 @@ uvcpp_web_app::uvcpp_web_app()
       loop_started_(false),
       running_(false),
       stopping_(false),
+      // 这两个必须有初值：`uvcpp_web_app` 是 `new` 出来的，`std::atomic` 的
+      // 默认构造不清零。`loops_running_` 漏了的话它从一个**不定值**起步，
+      // 于是 `note_loop_stopped()` 里那句 `fetch_sub(1) == 1` 永远不成立 ⇒
+      // `loop_started_` 白置真一次之后再也归不了假。
+      loops_running_(0),
+      start_terminal_(false),
       bound_port_(0) {
   // 流式路由表用**普通路由的语义**（参数、通配、静态优先），但关掉两个
   // "为一个完整请求做决定"的开关：
@@ -274,10 +280,13 @@ uvcpp_web_app::~uvcpp_web_app() {
   // 销毁 loop，之后任何 `uv_close`/`uv_timer_stop` 都是在用一个不存在的
   // 循环。
   for (size_t i = 0; i < loops_.size(); ++i) {
-    // `orphaned` 那几格**故意泄漏**：`set_loops()` 失败时 net 层自己调
-    // `stop_workers()`，把装着这些句柄的那几条循环连内存一起放掉了 ⇒ 在这里
-    // `delete` 就是往一块已经不属于我们的内存上写 `uv_close`。本仓的取舍一贯
-    // 是"泄漏好过 UAF"，而这条路只在启动失败时走到。
+    // `orphaned` 那几格**故意泄漏**：它们只在 `join()` 等超时那条路上被标上
+    // ——那时那条循环**没有**走完自己的退出路径（退出钩子因此不会响），句柄
+    // 还挂在一条随时可能消失的循环上，在这里 `delete` 就是往一块不属于我们的
+    // 内存上写 `uv_close`。本仓的取舍一贯是"泄漏好过 UAF"。
+    //
+    // 正常停机与启动失败这两条路都不会走到这儿：前者在 `finish_shutdown()` 里
+    // 收过、后者在 net 的循环退出钩子里收过，两次都把指针置空 ⇒ 这里是空操作。
     if (loops_[i]->orphaned) continue;
     delete loops_[i]->async;
     loops_[i]->async = nullptr;
@@ -1561,6 +1570,18 @@ int uvcpp_web_app::start() { return start_background(); }
 int uvcpp_web_app::start_background() {
   if (thread_started_ || loop_started_.load() || started_once_.load()) return UV_EBUSY;
 
+  // `n > 1` 的启动失败过一次 ⇒ 本实例已废（理由见 `start_terminal_` 的注释）。
+  // 这条与上面那条分开写，是因为它报的是**不同的原因**：上面是"正在跑/跑过"，
+  // 这里是"起过一次没起来，重试会复用旧格子"。合成一句的话，用户按 UV_EBUSY
+  // 去排查会往"是不是还没停干净"上找，而真正该做的是重建一个实例。
+  if (start_terminal_.load()) {
+    UVCPP_LOG_ERROR(log_category::CORE)
+        << "本实例的多循环启动失败过一次，不能再 start()（1..n-1 那几格的句柄"
+        << "指针还指着已经释放的循环，重试会一路泄漏）。请析构后重建一个新的 "
+        << "uvcpp_web_app。";
+    return UV_EBUSY;
+  }
+
   threading_ = true;
 
   // promise 交到线程手里：`set_value` 之后调用方才能解除阻塞，而 promise
@@ -1659,9 +1680,28 @@ int uvcpp_web_app::set_loops(int n) {
   if (tcp != nullptr) {
     // 钩子的下标是 `i + 1`（0 号是接受者，不走钩子），与 `loop_at()` 同一套
     // 编号 —— 所以这里收到的 index 直接就是本对象的格号。
+    //
+    // **返回值必须存下来**：net 层那个签名是 `void`，`init_loop_state()` 失败
+    // 时丢掉它，那一格就会"照常跑、却永远进不了停机状态机"而启动返回 0
+    // （见 `loop_slot::init_rc`）。存在格子上，等 `set_loops()` 返回（钩子全部
+    // 跑完）之后由 `init_process_once()` 统一判。
     tcp->set_loop_start_hook([this](int index, uvcpp_loop* loop) {
-      init_loop_state(index, loop);
+      if (index < 0 || static_cast<size_t>(index) >= loops_.size()) return;
+      loop_slot& s = *loops_[static_cast<size_t>(index)];
+      if (s.index != index) return;
+      s.init_rc = init_loop_state(index, loop);
     });
+
+    // 退出钩子：**必须装**，不是可选加固。上面那个钩子建在那几条循环上的句柄
+    // （`async` + 两个 timer）只由它收得掉 —— 工作循环的退出路径是 net 走的，
+    // 属主在别处（析构）去 `delete` 那些句柄时循环内存已经没了（UAF），而一个
+    // 都不删则 `uv_loop_close()` 撞 `UV_EBUSY`、整块循环内存泄漏。启动失败那条
+    // 路会直接 `rollback_loops()`，句柄只能在这条钩子里收。
+    //
+    // 幂等由 `release_loop_handles()` 保证：正常停机时 `finish_shutdown()` 已经
+    // 收过一遍，这里看到的是空表。
+    tcp->set_loop_exit_hook(
+        [this](int index, uvcpp_loop*) { release_loop_handles(index); });
   }
   return 0;
 }
@@ -1874,23 +1914,34 @@ int uvcpp_web_app::init_process_once() {
   if (requested_loops_ > 1) {
     const int src = tcp->set_loops(requested_loops_);
     if (src != 0) {
-      // 失败路径：`set_loops()` 内部已经把自己放行过的工作循环停掉并释放了
-      // （`src/net/uvcpp_tcp_server.cpp:332-339` 的 `stop_workers()`）。而钩子
-      // 早一步已经把 `async` / 两个定时器**建在那些循环上**了 ⇒ 这里再去
-      // `delete` 它们就是在一个已经不存在的循环上动句柄。
-      //
-      // 取舍：**泄漏好过 UAF**（本仓一贯），所以只做标记，析构时跳过。
-      // 这条路只在启动失败时走到，进程随即把错误码交给调用方。
-      for (size_t i = 1; i < loops_.size(); ++i) loops_[i]->orphaned = true;
-      return src;
+      // `set_loops()` 内部已经把自己放行过的工作循环停掉并释放了
+      // （`src/net/uvcpp_tcp_server.cpp:332-339` 的 `stop_workers()`），所以
+      // 这里只需要标记 + 回滚记账（`stop_workers()` 幂等，再调一次无害）。
+      return teardown_failed_start(src);
+    }
+
+    // 钩子跑完了（`set_loops()` 的时序保证），逐格核一遍它们建句柄的结果。
+    //
+    // **不收这个码就是一个静默退化**：某一格 `async` 建失败时它照样 `uv_run`，
+    // 但 `post()` 全被丢弃 ⇒ 它永远进不了停机状态机，`stop()` 也停不掉它 ⇒
+    // `join()` 只能在有界等待耗尽之后报"仍有 N 条循环没退出"。而启动**返回 0**，
+    // 调用方看不出任何异常。
+    for (size_t i = 1; i < loops_.size(); ++i) {
+      if (loops_[i]->init_rc != 0) {
+        UVCPP_LOG_ERROR(log_category::CORE)
+            << "工作循环 " << i << " 初始化失败，libuv 错误码 "
+            << loops_[i]->init_rc << "（" << uv_strerror(loops_[i]->init_rc)
+            << "）—— 启动中止";
+        return teardown_failed_start(loops_[i]->init_rc);
+      }
     }
   }
 
   int rc = http_->bind(cfg_.host.c_str(), cfg_.port);
-  if (rc != 0) return rc;
+  if (rc != 0) return teardown_failed_start(rc);
 
   rc = http_->listen(cfg_.backlog);
-  if (rc != 0) return rc;
+  if (rc != 0) return teardown_failed_start(rc);
 
   // 端口填 0 时由系统分配，实际端口只有 bind 之后才知道 —— 从监听句柄上
   // 读回来，调用方（`start()` 的等待方）拿到的是真实端口。
@@ -1916,7 +1967,15 @@ int uvcpp_web_app::init_process_once() {
 }
 
 void uvcpp_web_app::note_loop_started(int index) {
-  (void)index;
+  if (index < 0 || static_cast<size_t>(index) >= loops_.size()) return;
+  loop_slot& slot = *loops_[static_cast<size_t>(index)];
+
+  // **每格只记一次**，与 `note_loop_stopped()` 的 `finished` 那把 CAS 对称。
+  // 两侧都幂等之后，"减"就只可能发生在"加过"的格子上 —— 理由见
+  // `loop_slot::started` 那段（今天这一条是**偶然**成立的）。
+  bool expected = false;
+  if (!slot.started.compare_exchange_strong(expected, true)) return;
+
   loops_running_.fetch_add(1);
   loop_started_ = true;
 }
@@ -1931,7 +1990,57 @@ void uvcpp_web_app::note_loop_stopped(int index) {
   bool expected = false;
   if (!slot.finished.compare_exchange_strong(expected, true)) return;
 
+  // `started` 那把 CAS 的反面：**没自增过就不许减**。有了它，`loops_running_`
+  // 恒等于"记过在跑、还没记过收尾的格子数"，不会为负；也让"只起来了一部分"
+  // 的那些路（`set_loops()` 中途失败）能靠同一圈逐格记账抵平。
+  if (!slot.started.load()) return;
+
   if (loops_running_.fetch_sub(1) == 1) loop_started_ = false;
+}
+
+int uvcpp_web_app::teardown_failed_start(int rc) {
+  // `n == 1` 必须**逐字节不动**：这条路上没有工作循环，一个线程都没起过，
+  // 今天 `bind()` 失败就是原样返回那个码。这里多碰任何一个量都违反等价性
+  // （设计稿 §7），所以直接早退。
+  if (loops_.size() <= 1) return rc;
+
+  uvcpp_tcp_server* tcp = http_ ? http_->get_tcp_server() : nullptr;
+
+  // ① 收线程、释放循环（`rollback_loops()` 就是 `stop_workers()` 加一道门）。
+  // 幂等，所以 `set_loops()` 内部已经收过一次的那条路再走一遍无害。
+  //
+  // 那几格建在循环上的句柄**不用在这里特别处理**：它们挂在 net 的循环退出
+  // 钩子上（`set_loop_exit_hook()` → `release_loop_handles()`），worker 线程走
+  // 自己的退出路径时就把自己那一格收干净了 —— 收在循环内存被释放**之前**、
+  // 且在那条循环自己的线程上。所以这里既不用标 `orphaned`、也不会留下"整块
+  // 循环内存泄漏"（回收前不关句柄就是 `uv_loop_close()` 撞 `UV_EBUSY`）。
+  //
+  // 为什么不做"投一条任务过去、等它关完再回滚"：那要在 `start()` 里等一个每格
+  // 的闩，而等待是这条路径上唯一能变成挂死的地方（一条 worker 卡住，`start()`
+  // 就跟着不回）。退出钩子不需要**额外**的等待 —— 那份等待已经在
+  // `stop_workers()` 的 join 里付过了。
+  if (tcp != nullptr) tcp->rollback_loops();
+
+  // ② 回滚记账。工作循环在钩子里已经把 `loop_started_` 置真了，不回滚的话
+  // `start()` / `set_loops()` 的 `UV_EBUSY` 门会永远命中 —— 调用方手上剩一个
+  // "循环在转、起不来也停不掉"的对象（而 `start()` 的注释里那条"可以改配置
+  // 重试"是多循环**之前**的承诺，本笔把它改成了"`n > 1` 失败即终态"）。
+  //
+  // 逐格记而不是 `loops_running_.store(0)`：那个 CAS 只在**记过在跑**的格子上
+  // 减，所以这一圈正好把工作循环在钩子里记的那笔账一一抵掉 —— 而且它对"只起来
+  // 了一部分"也成立（`set_loops()` 中途失败那条路上，失败点之后的格子没跑过
+  // 钩子，`started` 还是假，它们一个都不会被多减）。`store(0)` 是拿"我猜是
+  // n−1 笔"去盖，猜错就把别的账一起抹了。
+  for (size_t i = 1; i < loops_.size(); ++i)
+    note_loop_stopped(static_cast<int>(i));
+
+  // 终态：本实例不能再 `start()`。重试意味着把整条启动路径再走一遍，而这条
+  // 路径上"每进程那半"（`http_` / `tcp_` 的 bind/listen 状态、`started_once_`）
+  // 不是为复用设计的；真要做重试得把整格复位（那是另一笔）。挡在这儿比让它
+  // "看起来能起来、实际在半截状态上继续跑"好：本仓对"配了却没生效"一贯是
+  // 宁可启动失败。
+  start_terminal_ = true;
+  return rc;
 }
 
 int uvcpp_web_app::init_loop_state(int index, uvcpp_loop* loop) {
@@ -3334,25 +3443,20 @@ void uvcpp_web_app::schedule_shutdown_step(int delay_ms) {
                              static_cast<uint64_t>(delay_ms), 0);
 }
 
-void uvcpp_web_app::finish_shutdown() {
-  loop_slot& slot = slot_here();
-  const uvcpp_tcp_server* tcp = tcp_server();
-  if (tcp != nullptr && tcp->client_count() != 0) {
-    UVCPP_LOG_WARN(log_category::CORE)
-        << "停机收尾时仍有 " << tcp->client_count()
-        << " 条连接留在登记表里（预期为 0）";
+void uvcpp_web_app::release_loop_handles(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= loops_.size()) return;
+  loop_slot& s = *loops_[static_cast<size_t>(index)];
+
+  if (s.idle_timer != nullptr) {
+    s.idle_timer->stop();
+    delete s.idle_timer;
+    s.idle_timer = nullptr;
   }
 
-  if (slot.idle_timer != nullptr) {
-    slot.idle_timer->stop();
-    delete slot.idle_timer;
-    slot.idle_timer = nullptr;
-  }
-
-  if (slot.shutdown_timer != nullptr) {
-    slot.shutdown_timer->stop();
-    delete slot.shutdown_timer;
-    slot.shutdown_timer = nullptr;
+  if (s.shutdown_timer != nullptr) {
+    s.shutdown_timer->stop();
+    delete s.shutdown_timer;
+    s.shutdown_timer = nullptr;
   }
 
   // WS 会话分片：回收本格剩下的会话 + 释放它那片延迟回收用的 async 句柄。
@@ -3364,15 +3468,20 @@ void uvcpp_web_app::finish_shutdown() {
   //
   // 位置在删本格 `async` **之前**：`recycle_all()` 会跑会话的终结回调，那些
   // 回调里 `post()` 进本格队列仍然应该被接受（队列还是活的）。
+  //
+  // 退出钩子那条路上这一句是**空操作**：启动失败时一条连接都还没进来过，
+  // `shards_` 是按需长的（`shard_for()` 只在连接升级时被调），那一片压根不存在。
+  // 留着是因为"这一格的东西由这一格收"这条不该按调用者分叉；`shutdown()` 本身
+  // 对空表幂等。
   if (ws_server_ != nullptr) {
-    ws_server_->shutdown_sessions_of_loop(slot.index);
+    ws_server_->shutdown_sessions_of_loop(index);
   }
 
   // 投递句柄：`delete` 会走 free_handle → uv_close(哨兵)，完成回调在本次
-  // 迭代末尾把底层内存还回去。**必须在定时器回调里做，不能在 async 自己的
-  // 回调里做**（那会析构正在执行的 std::function）。
+  // 迭代末尾把底层内存还回去。**必须在一个不是它自己的回调里做**（在 async
+  // 自己的回调里 `delete` 会析构正在执行的 `std::function`）—— 停机路上这里是
+  // 定时器回调，退出钩子上这里是线程退出路径。
   {
-    loop_slot& s = slot_here();
     std::lock_guard<std::mutex> lk(s.post_mutex);
     delete s.async;
     s.async = nullptr;
@@ -3380,6 +3489,22 @@ void uvcpp_web_app::finish_shutdown() {
     // 让 post_queue 的析构去销毁一堆捕获了上下文的闭包。
     s.post_queue.clear();
   }
+}
+
+void uvcpp_web_app::finish_shutdown() {
+  loop_slot& slot = slot_here();
+  const uvcpp_tcp_server* tcp = tcp_server();
+  // **读本格那一份，不是全进程那一份。** 停机是逐格扇出的，0 号先收完时别
+  // 的格还各有各的连接在收尾 —— 用 `client_count()` 读总数的话，**正常停机
+  // 也会打这条"预期为 0"的 WARN**。假红会训练人忽略警告，那比不报还糟。
+  if (tcp != nullptr && tcp->client_count_at(slot.index) != 0) {
+    UVCPP_LOG_WARN(log_category::CORE)
+        << "停机收尾时本循环（" << slot.index << " 号）仍有 "
+        << tcp->client_count_at(slot.index)
+        << " 条连接留在登记表里（预期为 0）";
+  }
+
+  release_loop_handles(slot.index);
 
   // WS 的 Close 帧**不在这里发** —— 见 `shutdown_step()` 的第 0 拍。
   //
