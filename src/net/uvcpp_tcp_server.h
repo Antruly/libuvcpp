@@ -677,6 +677,18 @@ class UVCPP_API uvcpp_tcp_server {
   void accept_and_handoff(uvcpp_stream* s);
 
   /**
+   * @brief 在 \p l 这条循环上收下 \p s 递来的连接，并跑完整条接受尾巴。
+   *
+   * `n == 1` 时是 accept 回调里那段（`l` == `loop_`、\p loop_index == 0）；
+   * 多循环下"每条循环自收"走同一个形状，只有循环号不同。抽出来是为了让两条路
+   * **只差一个循环号**（`finish_accept()` 当初就是按同一条理由抽的）。
+   *
+   * **必须在 \p l 的线程上跑**（`uv_accept` 与 `enable_tls` 都要求）。
+   * \p loop_index 在交付之前写进客户端 —— 上层按它索引每循环表。
+   */
+  void accept_on_loop(uvcpp_loop* l, int loop_index, uvcpp_stream* s);
+
+  /**
    * @brief worker 线程侧：认领转手过来的 socket，跑完整条接受尾巴。
    *
    * \p sock 一进来就归本函数；无论走哪条失败路径，它都会被恰好关一次。

@@ -262,19 +262,7 @@ int uvcpp_tcp_server::listen(
         }
 
         // ---- 以下 n == 1 那条路（今天的行为）----
-
-        // Create a new client sharing the server's loop
-        uvcpp_tcp_client* client = new uvcpp_tcp_client(loop_);
-
-        // Accept the pending connection into the client's TCP handle
-        int accept_rc = s->accept(client->get_tcp());
-        if (accept_rc != 0) {
-          last_error_code_.store(accept_rc);
-          delete client;
-          return;
-        }
-
-        finish_accept(client);
+        accept_on_loop(loop_, 0, s);
       },
       backlog);
 
@@ -307,6 +295,33 @@ int uvcpp_tcp_server::rollback_loops() {
   // 前提。
   stop_workers();
   return 0;
+}
+
+// =========================================================================
+// 收下一条连接（在指定的那条循环上）
+// =========================================================================
+
+void uvcpp_tcp_server::accept_on_loop(uvcpp_loop* l, int loop_index,
+                                      uvcpp_stream* s) {
+  // 新客户端**必须**建在 `l` 上：`uv_accept` 要求 server 与 client 同循环
+  // （POSIX 侧是硬断言，理由同 `accept_and_handoff()` 里那条）。
+  uvcpp_tcp_client* client = new uvcpp_tcp_client(l);
+
+  // 循环号**必须在 `finish_accept()` 之前写进去**：登记 → 装读 → TLS → 交付
+  // 那条路会一路把它带到用户的 `on_connection`，而上层（`uvcpp_http_server`
+  // 的 `ctxs_of()`、webapp 的每循环表）全靠它找自己那一份。0 号是接受者那条，
+  // 所以 `n == 1` 时这一步写的就是客户端的默认值 —— 显式写是为了让两条路
+  // **只有循环号不同**。
+  client->set_loop_index(loop_index);
+
+  const int accept_rc = s->accept(client->get_tcp());
+  if (accept_rc != 0) {
+    last_error_code_.store(accept_rc);
+    delete client;
+    return;
+  }
+
+  finish_accept(client);
 }
 
 // =========================================================================
