@@ -601,13 +601,19 @@ void uvcpp_tcp_client::ensure_read_cache() {
 
 int uvcpp_tcp_client::connect(const char* ip, int port,
                                std::function<void(int)> cb) {
+#if UVCPP_OPENSSL_ENABLE
   // 形参名叫 `ip`，但它**同时是**主机名与数字 IP 两条路的入口（下面就在按
   // `uv_ip4_addr` 分流）。`PEER_STRICT` 下证书要对的正是这个名字，所以在分流转成
   // `sockaddr` **之前**先留一份 —— 转完那个字符串就没了。
+  //
+  // 整个块都在 `UVCPP_OPENSSL_ENABLE` 里：`tls_host_want_` 与 `apply_tls_hostname()`
+  // 都只在这个开关下存在（见头文件里同一道守卫）。**关掉 SSL 的档位里
+  // `connect()` 照样要编**，漏了这道守卫就是"本机开着 SSL 编得过、CI 的 basic 档全表红"。
   if (ip != nullptr) {
     tls_host_want_ = ip;
     apply_tls_hostname();
   }
+#endif  // UVCPP_OPENSSL_ENABLE
 
   if (cb != nullptr) {
     // --- Async mode ---
@@ -685,11 +691,13 @@ int uvcpp_tcp_client::connect(const char* ip, int port,
 }
 
 int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
+#if UVCPP_OPENSSL_ENABLE
   // 同 `connect()`：主机名要在 `resolve_host_sync()` 之前留一份。
   if (ip != nullptr) {
     tls_host_want_ = ip;
     apply_tls_hostname();
   }
+#endif  // UVCPP_OPENSSL_ENABLE
 
   if (has_async_connect_cb_) {
     throw std::runtime_error(
