@@ -14,6 +14,10 @@ const char* json_status_name(json_status status) {
     case json_status::SYNTAX:    return "SYNTAX";
     case json_status::TOO_DEEP:  return "TOO_DEEP";
     case json_status::TOO_LARGE: return "TOO_LARGE";
+    case json_status::MISMATCH:  return "MISMATCH";
+    case json_status::MISSING:   return "MISSING";
+    case json_status::UNKNOWN:   return "UNKNOWN";
+    case json_status::NO_MEMORY: return "NO_MEMORY";
   }
   return "?";
 }

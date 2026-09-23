@@ -65,6 +65,15 @@ enum class json_status : int {
   SYNTAX,     ///< 语法错误
   TOO_DEEP,   ///< 嵌套超过 max_depth（防爆栈）
   TOO_LARGE,  ///< 超过 max_bytes
+
+  // 下面四个**不来自解析**，来自**反射读入**（webapp/uvcpp_web_json_reflect.h）：
+  // 解析成功之后把 DOM 填进结构体时才会出现。放在同一个枚举里，是为了让
+  // "解析 + 填结构体"这一条链只返回一个状态类型 —— 使用者一个 switch 就能覆盖
+  // 全部失败形状（而"解析失败"与"字段不符"的处理方式往往一样：回 400）。
+  MISMATCH,   ///< 反射读入：根不是对象，或某个字段的类型/值域不符合目标
+  MISSING,    ///< 反射读入：开了 missing_is_error，而有字段没给（或值为 null）
+  UNKNOWN,    ///< 反射读入：开了 unknown_is_error，而有多出来的成员
+  NO_MEMORY,  ///< 反射读入：分配失败（std::bad_alloc）
 };
 
 /** @brief 状态的可读名称，可直接写日志。 */

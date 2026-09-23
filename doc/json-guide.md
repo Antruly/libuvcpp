@@ -336,4 +336,5 @@ bool doc_round_trip(const std::string& text, long long& out_size) {
 - **不做美化输出**（没有缩进开关）。要人读的 JSON 请用别处。
 - **失败之后产出不作保证**，也不支持"失败后继续"（§6）。
 - **不认识任何"对象/结构体"**：本页只讲"手写字段"，把结构体整个写成 JSON 是**反射那一层**
-  的事（它接在本模块的 writer 上，产出这一侧因此仍然是"无 DOM"的）。
+  的事（它接在本模块的 writer 上，产出这一侧因此仍然是"无 DOM"的）—— 那一层有
+  自己的一页：[`json-reflect-guide.md`](json-reflect-guide.md)。

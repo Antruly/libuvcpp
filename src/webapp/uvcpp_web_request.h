@@ -49,6 +49,7 @@
 #include <web/uvcpp_http_common.h>
 #include <web/uvcpp_http_request.h>
 #include <webapp/uvcpp_web_json.h>
+#include <webapp/uvcpp_web_json_reflect.h>
 #include <webapp/uvcpp_web_upload.h>
 #include <webapp/uvcpp_web_util.h>
 
@@ -351,6 +352,48 @@ class UVCPP_API uvcpp_web_request {
 
   /** @brief 便捷版：失败时返回 `null`。 */
   uvcpp_json json() const;
+
+  /**
+   * @brief 解析 body **并直接填进一个结构体**（`UVCPP_JSON_FIELDS` 标注过的）。
+   *
+   * 一步做完"解析 + 按字段表取值"：
+   *
+   *     struct user { std::string name; int age; UVCPP_JSON_FIELDS(user, name, age) };
+   *
+   *     user u;
+   *     json_status st;
+   *     const char* field = nullptr;
+   *     if (!req.json(u, &st, &field)) {
+   *       // st 说清是哪一类失败：EMPTY/SYNTAX 是报文的问题，
+   *       // MISMATCH/MISSING/UNKNOWN 是字段的问题（field 给出字段名）
+   *       resp.bad_request().text(json_status_name(st)).end();
+   *       return;
+   *     }
+   *
+   * 语义见 `webapp/uvcpp_web_json_reflect.h`：缺字段**不动**结构体里的原值、
+   * 类型不符报错而不做隐式转换、多出来的成员默认忽略。
+   *
+   * 注意 DOM 是本函数里的**临时对象**：所有值都**拷进** `out` 了，没有指向
+   * DOM 的视图，所以 `out` 里不会有悬垂引用。
+   *
+   * @warning 返回 false 时 `out` 可能已经被改了**一部分**（前几个字段），
+   *          与 `uvcpp_from_json` 的规矩一样：非成功就丢弃 `out`。
+   */
+  template <typename T>
+  typename std::enable_if<uvcpp::json_detail::uvcpp_has_json_fields<typename std::decay<T>::type>::value,
+                          bool>::type
+  json(T& out, json_status* status = nullptr, const char** where = nullptr,
+       const uvcpp_from_json_options& opts = uvcpp_from_json_options()) const {
+    uvcpp_json dom;
+    const json_status parse_st = uvcpp_json_parse(body_data(), body_size(), dom);
+    if (parse_st != json_status::OK) {
+      if (status != nullptr) *status = parse_st;
+      return false;
+    }
+    const json_status read_st = uvcpp_from_json(dom, out, opts, where);
+    if (status != nullptr) *status = read_st;
+    return read_st == json_status::OK;
+  }
 
   // -------------------------------------------------------------------
   // 逃生口
