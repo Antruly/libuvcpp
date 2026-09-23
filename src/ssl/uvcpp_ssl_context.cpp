@@ -112,9 +112,11 @@ void uvcpp_ssl_context::set_default_verify() {
   // 让"关掉校验"在调用点看得见，而不是靠一个全局的宽松默认值。
   // SERVER 默认不要求客户端证书（相互认证是 opt-in，与所有主流实现一致）。
   if (mode_ == tls_mode::CLIENT) {
+    verify_mode_ = tls_verify_mode::PEER;
     SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
     SSL_CTX_set_default_verify_paths(ctx_);
   } else {
+    verify_mode_ = tls_verify_mode::NONE;
     SSL_CTX_set_verify(ctx_, SSL_VERIFY_NONE, nullptr);
   }
   SSL_CTX_set_options(ctx_, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
@@ -273,6 +275,11 @@ bool uvcpp_ssl_context::load_ca_file(const std::string& path) {
 }
 
 void uvcpp_ssl_context::set_verify_mode(tls_verify_mode mode) {
+  // 先记档位，再谈 `ctx_`：`verify_mode()` 是"这条连接要不要钉主机名"的唯一依据，
+  // 而建连接那一层读的是**记下来的档位**，不是 `SSL_CTX` 上的 verify 位（后者表达
+  // 不出 `PEER_STRICT` 与 `PEER` 的区别）。`ctx_` 为空时早退会让档位悄悄留在旧值，
+  // 所以这句必须在早退之前。
+  verify_mode_ = mode;
   if (!ctx_) return;
   int mode_flags = SSL_VERIFY_NONE;
   if (mode == tls_verify_mode::PEER || mode == tls_verify_mode::PEER_STRICT)

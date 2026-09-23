@@ -42,7 +42,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 |---|---|---|
 | `uvcpp_ssl_context` | `src/ssl/uvcpp_ssl_context.h:31` | **主类型**。一个上下文可以共享给多条连接（`:8-9`） |
 | `uvcpp_ssl` | `src/ssl/uvcpp_ssl.h:33` | 每连接包装（一个 `SSL*`），`uvcpp_tcp_client` 内部持有 |
-| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:93` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
+| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:98` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
 
 值类型在 `ssl/uvcpp_ssl_common.h`：`tls_version`、`tls_mode`、`tls_verify_mode`、
 `tls_ctx_status`、`tls_cert_info`。
@@ -145,7 +145,7 @@ std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
 
 | 方法 | 返回 | 要点 |
 |---|---|---|
-| `load_certificate_file(path)` | `bool` | 内部用 `SSL_CTX_use_certificate_chain_file` —— **必须是链**，否则中间证书不发，只信根 CA 的客户端握手失败（`src/ssl/uvcpp_ssl_context.cpp:133-147`） |
+| `load_certificate_file(path)` | `bool` | 内部用 `SSL_CTX_use_certificate_chain_file` —— **必须是链**，否则中间证书不发，只信根 CA 的客户端握手失败（`src/ssl/uvcpp_ssl_context.cpp:135-149`） |
 | `load_private_key_file(path)` | `bool` | 见下面的**顺序陷阱** |
 | `load_certificate_data(pem)` | `bool` | 支持多证书 PEM：叶子 + 逐个 `extra_chain_cert` |
 | `load_private_key_data(pem)` | `bool` | 同样附带配对检查 |
@@ -154,7 +154,7 @@ std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
 | `check_private_key()` | `bool` | 显式配对检查 |
 
 **顺序陷阱：先装证书，再装私钥。** `load_private_key_file` / `load_private_key_data`
-**内部都会调 `SSL_CTX_check_private_key`**（`src/ssl/uvcpp_ssl_context.cpp:159`、`:212`）。
+**内部都会调 `SSL_CTX_check_private_key`**（`src/ssl/uvcpp_ssl_context.cpp:161`、`:214`）。
 OpenSSL 在"尚无证书"时该调用返回 0，于是**先装私钥会返回 `false`**——而私钥其实已经
 装进上下文了，属于"报了错但状态已改"——**补装证书之后不用重装私钥**。这个顺序头注释
 现在也写明了（`src/ssl/uvcpp_ssl_context.h:43-49`）。
@@ -185,23 +185,34 @@ bool doc_load_server_cert(uvcpp::uvcpp_ssl_context& ctx,
 ## 5. 校验模式
 
 ```cpp
-// doc-snippet: fragment — 枚举定义摘录，本页要讲的是后面那句"两个值目前等价"，
-// 摘的是真注释，不能挪走。
+// doc-snippet: fragment — 枚举定义摘录，本页要讲的是后面那句"服务端上两个值仍
+// 等价"，摘的是真注释，不能挪走。
 enum class tls_verify_mode : uint8_t {
   NONE        = 0,   // 不校验对端证书
-  PEER        = 1,   // 校验对端证书
-  PEER_STRICT = 2,   // 校验对端 + 主机名 —— **主机名这一半尚未实现**
+  PEER        = 1,   // 校验对端证书（**不含主机名**）
+  PEER_STRICT = 2,   // 校验对端 + 主机名（服务端上等价于 PEER，见下）
 };
 ```
 
-**`PEER` 与 `PEER_STRICT` 目前行为完全相同。** `set_verify_mode` 把两个值都映射成
-`SSL_VERIFY_PEER`（`src/ssl/uvcpp_ssl_context.cpp:278-279`），全仓 grep
-`SSL_set1_host` / `X509_VERIFY_PARAM_set1_host` / `X509_VERIFY_PARAM_set1_ip`
-**零命中** —— 主机名那一半从未实现，头注释已如实写明
-（`src/ssl/uvcpp_ssl_common.h:50-54`）。所以 `PEER_STRICT` **挡不住**「证书链可信、
-但签发给别的域名」的对端；需要这个保证的调用方得自己在握手后校验对端证书。
+**客户端上 `PEER_STRICT` 真的会校验主机名。** 建立连接时，`uvcpp_tcp_client` 与
+`uvcpp_http_client` 把 `connect()` 收到的那个主机名钉给这张证书的校验
+（`src/ssl/uvcpp_ssl.cpp:192-215`）：数字 IP 字面量走 `iPAddress` 匹配，其余走
+`dNSName` 匹配。于是「证书链可信、但签发给别的域名」的对端**建立不起来** ——
+这正是 `PEER` 挡不住的那一类。头注释见 `src/ssl/uvcpp_ssl_common.h:50-63`。
 
-默认值（`src/ssl/uvcpp_ssl_context.cpp:109-125`）：
+**服务端上 `PEER_STRICT` 仍与 `PEER` 等价。** 本库的服务端不发 SNI、也不要求客户端
+证书，没有可校验的名字，所以那一半只对客户端有意义。
+
+**只有 `PEER_STRICT` 才钉主机名**，判据是 `uvcpp_ssl_context::verify_mode()`
+（`src/ssl/uvcpp_ssl_context.h:106`）。设了主机名之后，无论 `SSL_CTX` 上的 verify 位
+是什么，OpenSSL 都会在握手末尾做这次检查，而 `SSL_VERIFY_NONE` 下**检查失败也不中止
+握手** —— 对 `NONE` / `PEER` 也钉的话，`PEER` 会凭空多出一层从没承诺过的校验，
+`NONE` 则静默什么都不发生。所以 `NONE` / `PEER` 两条路的行为逐字节不变。
+
+**绕开 `uvcpp_tcp_client` / `uvcpp_http_client` 直接用 `uvcpp_ssl` 的调用方拿不到这层
+校验** —— 自动通路只覆盖那两个入口，得自己调 `uvcpp_ssl::set_verify_hostname()`。
+
+默认值（`src/ssl/uvcpp_ssl_context.cpp:109-127`）：
 
 | 模式 | 默认 |
 |---|---|
@@ -209,9 +220,9 @@ enum class tls_verify_mode : uint8_t {
 | `SERVER` | `SSL_VERIFY_NONE` |
 
 **服务端默认没有信任库。** `set_default_verify_paths()` 只在 CLIENT 分支调
-（`:116`）。所以服务端想做客户端证书认证时，必须自己 `load_ca_file(...)`。而且代码
+（`:117`）。所以服务端想做客户端证书认证时，必须自己 `load_ca_file(...)`。而且代码
 只设 `SSL_VERIFY_PEER`，**从不设 `SSL_VERIFY_FAIL_IF_NO_PEER_CERT`**
-（`:277-280`）——服务端是"请求但非强制"要证书，要强制得在应用层用
+（`:277-288`）——服务端是"请求但非强制"要证书，要强制得在应用层用
 `uvcpp_ssl::verify_peer()` 兜。
 
 ---
@@ -226,17 +237,17 @@ bool has_alpn_select() const;
 ```
 
 **这里有一个反过来的返回值约定：`SSL_CTX_set_alpn_protos` 成功返回 0**，与 OpenSSL
-大多数接口相反（`src/ssl/uvcpp_ssl_context.cpp:338` 专门写了注释）。本库的包装把它
+大多数接口相反（`src/ssl/uvcpp_ssl_context.cpp:345` 专门写了注释）。本库的包装把它
 翻正成 `bool`，但如果绕到 `raw_ctx()` 自己调，记住这条。
 
 其他要点：
 
 - 名单里**空串或长度超过 255 字节的项会被静默丢掉**，不报错；全部丢完导致编码为空时
-  `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:87-90`）。
+  `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:92-95`）。
 - 服务端**挑不中时返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal**
-  （`src/ssl/uvcpp_ssl_context.h:125-127`）——写成 fatal 会让所有老客户端连握手都完不成。
+  （`src/ssl/uvcpp_ssl_context.h:135-137`）——写成 fatal 会让所有老客户端连握手都完不成。
 - `has_alpn_select()` 存在的理由是框架默认值与用户策略的冲突：`uvcpp_web_app` 默认要
-  替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:131-137`）。
+  替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:141-147`）。
 - 每连接的覆盖在 `uvcpp_ssl::set_alpn_protos`，**必须在握手前**调。
 
 ---
@@ -255,7 +266,7 @@ bool has_alpn_select() const;
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。
 
 上下文对象本身的地址被 OpenSSL 长期持有——ALPN 选择回调通过 `arg` 拿到的就是成员
-`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:166`，实现
+`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:180`，实现
 `SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_)`）。
 **所以不要移动它、不要提前析构它。**
 
@@ -309,12 +320,12 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
 （`src/ssl/uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
-（`src/net/uvcpp_tcp_client.cpp:2147-2147`）——所以**必须看各 `load_*` 的返回值**，
+（`src/net/uvcpp_tcp_client.cpp:2161-2161`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
 
 **先装私钥后装证书会返回 `false`**，见 §4。
 
-**`PEER_STRICT` 不校验主机名**，见 §5。
+**服务端上 `PEER_STRICT` 不校验主机名**（客户端上会），见 §5。
 
 **TLS 上 `uvcpp_buf*` 的零拷贝不成立**：调用之后那个 buf **仍然是满的**，
 （`src/net/uvcpp_tcp_client.h:399-402`）。
@@ -332,8 +343,12 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 
 ## 10. 没做的（如实列出）
 
-- **没有主机名校验。** `PEER_STRICT` 的主机名那一半未实现（头注释已如实标明），见 §5。
-  要校验主机名得自己在握手后做。
+- **主机名校验只覆盖客户端，且只覆盖两个自动入口。** `PEER_STRICT` 的主机名那一半
+  在 `uvcpp_tcp_client` / `uvcpp_http_client` 上生效，见 §5；服务端上没有可校验的
+  名字，仍是 `PEER`；直接用 `uvcpp_ssl` 的调用方要自己调
+  `uvcpp_ssl::set_verify_hostname()`。**正向的数字 IP 用例未覆盖** ——
+  `generate_self_signed()` 只产 CN、不产 `subjectAltName`，造不出带 `iPAddress` SAN
+  的证书；反向（无 IP SAN 的证书连 IP 必须失败）已覆盖。
 - **完全没有 SNI。** 全仓 grep `SSL_set_tlsext_host_name` / `servername` **零命中**：
   客户端不发 SNI，服务端也不读。一个 IP 上挂多张证书的虚拟主机式 TLS 服务端**服务
   不了**，服务端也无法据 SNI 选证书。

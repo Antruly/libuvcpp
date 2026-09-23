@@ -47,15 +47,20 @@ enum class tls_mode : uint8_t {
 // Certificate verification mode
 // =========================================================================
 
-/// @warning `PEER_STRICT` **目前与 `PEER` 完全等价**：`set_verify_mode()` 把两者都映射
-///          到同一个 `SSL_VERIFY_PEER` 位，主机名那一半**从未实现**（全仓没有一处
-///          `SSL_set1_host` / `X509_VERIFY_PARAM_set1_host`，也没有把 SNI 主机名递给
-///          校验的管道）。所以靠它**挡不住**「证书链可信、但签发给别的域名」的对端 ——
-///          需要这个保证的调用方得自己在握手后校验对端证书。
+/// **客户端**上 `PEER_STRICT` = 校验对端证书 **+ 主机名**：`uvcpp_tcp_client` 与
+/// `uvcpp_http_client` 在建立连接时，会把 `connect()` 收到的那个主机名钉给这张证书的
+/// 校验（数字 IP 字面量走 iPAddress 匹配，其余走 DNS 名匹配）。于是「证书链可信、
+/// 但签发给别的域名」的对端**建立不起来** —— 这正是 `PEER` 挡不住的那一类。
+///
+/// @warning **服务端上 `PEER_STRICT` 仍与 `PEER` 等价。** 本库的服务端不发 SNI 扩展、
+///          也不要求客户端证书，没有可校验的名字，所以那一半只对客户端有意义。
+/// @warning 绕开 `uvcpp_tcp_client` / `uvcpp_http_client` 直接用 `uvcpp_ssl` 的调用方
+///          **拿不到这层校验** —— 自动通路只覆盖这两个入口，得自己调
+///          `uvcpp_ssl::set_verify_hostname()`。
 enum class tls_verify_mode : uint8_t {
   NONE     = 0,  // Don't verify peer certificate
-  PEER     = 1,  // Verify peer certificate
-  PEER_STRICT = 2,  // Verify peer + hostname（**主机名这一半尚未实现**，见上）
+  PEER     = 1,  // Verify peer certificate（**不含主机名**）
+  PEER_STRICT = 2,  // Verify peer + hostname（服务端上等价于 PEER，见上）
 };
 
 // =========================================================================

@@ -52,7 +52,7 @@
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
   收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:487`）。
-- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1279`，RFC 9113 §8.7）：
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1290`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把

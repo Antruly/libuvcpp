@@ -601,6 +601,14 @@ void uvcpp_tcp_client::ensure_read_cache() {
 
 int uvcpp_tcp_client::connect(const char* ip, int port,
                                std::function<void(int)> cb) {
+  // 形参名叫 `ip`，但它**同时是**主机名与数字 IP 两条路的入口（下面就在按
+  // `uv_ip4_addr` 分流）。`PEER_STRICT` 下证书要对的正是这个名字，所以在分流转成
+  // `sockaddr` **之前**先留一份 —— 转完那个字符串就没了。
+  if (ip != nullptr) {
+    tls_host_want_ = ip;
+    apply_tls_hostname();
+  }
+
   if (cb != nullptr) {
     // --- Async mode ---
     if (has_async_connect_cb_) {
@@ -677,6 +685,12 @@ int uvcpp_tcp_client::connect(const char* ip, int port,
 }
 
 int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
+  // 同 `connect()`：主机名要在 `resolve_host_sync()` 之前留一份。
+  if (ip != nullptr) {
+    tls_host_want_ = ip;
+    apply_tls_hostname();
+  }
+
   if (has_async_connect_cb_) {
     throw std::runtime_error(
         "uvcpp_tcp_client::connect_wait: cannot use sync connect after "
@@ -2168,6 +2182,10 @@ int uvcpp_tcp_client::enable_tls(uvcpp_ssl_context* ctx) {
   // 在 enable_tls 之前设过的宣告名单，此刻才装上。
   if (!tls_alpn_want_.empty()) tls_ssl_->set_alpn_protos(tls_alpn_want_);
 
+  // 同理：`connect()` 在 `enable_tls()` **之前**调过的话，主机名那时没处可钉，
+  // 记在了 `tls_host_want_` 里 —— 现在补上。
+  apply_tls_hostname();
+
   // 连接已经建立（服务端 accept 之后调用的情形）：握手现在就开始。
   // 客户端此时还没连上，起手是空的 —— 等 connect 完成回调进来再发 ClientHello。
   if (has_status(TCP_CLIENT_CONNECTED)) {
@@ -2245,6 +2263,21 @@ bool uvcpp_tcp_client::set_tls_alpn_protos(const std::vector<std::string>& proto
   tls_alpn_want_ = protos;
   if (tls_ssl_ != nullptr) return tls_ssl_->set_alpn_protos(tls_alpn_want_);
   return true;  // SSL 对象还没建，enable_tls 时会装上
+}
+
+void uvcpp_tcp_client::apply_tls_hostname() {
+  if (tls_ssl_ == nullptr || tls_host_want_.empty()) return;
+
+  // **只有 `PEER_STRICT` 才钉。** 设了主机名之后，无论 `SSL_CTX` 上的 verify 位是
+  // 什么，OpenSSL 都会在握手末尾做这次检查；而 `SSL_VERIFY_NONE` 下**检查失败也
+  // 不中止握手**。于是对 `NONE` / `PEER` 也钉上去的话：`PEER` 会凭空多出一层
+  // 从没承诺过的校验（名字对不上的对端从此连不上），`NONE` 则什么都不会发生 ——
+  // 两种都是"悄悄改掉既有行为"。本档位的定义就是"校验对端 **+ 主机名**"，所以
+  // 钉与不钉**只**看这一个档位。
+  uvcpp_ssl_context* ctx = tls_ssl_->context();
+  if (ctx == nullptr || ctx->verify_mode() != tls_verify_mode::PEER_STRICT) return;
+
+  tls_ssl_->set_verify_hostname(tls_host_want_.c_str(), tls_host_want_.size());
 }
 
 int uvcpp_tcp_client::tls_drive_handshake() {

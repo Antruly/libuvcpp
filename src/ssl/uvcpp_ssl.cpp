@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
+#include <openssl/x509_vfy.h>  // X509_VERIFY_PARAM_set1_host / _ip_asc
 #include <openssl/bio.h>   // BIO_s_mem / BIO_ctrl（内存 BIO 模式）
 #include <cstring>
 
@@ -182,6 +183,31 @@ bool uvcpp_ssl::set_alpn_protos(const std::vector<std::string>& protos) {
   // 与 SSL_CTX_set_alpn_protos 同样：**成功返回 0**。
   if (SSL_set_alpn_protos(ssl_, reinterpret_cast<const unsigned char*>(wire.data()),
                           static_cast<unsigned int>(wire.size())) != 0) {
+    clear_error();
+    return false;
+  }
+  return true;
+}
+
+bool uvcpp_ssl::set_verify_hostname(const char* host, size_t len) {
+  if (!ssl_ || host == nullptr || len == 0) return false;
+  X509_VERIFY_PARAM* param = SSL_get0_param(ssl_);
+  if (param == nullptr) { clear_error(); return false; }
+
+  const std::string name(host, len);
+
+  // 数字 IP 与域名是**两套匹配规则**：IP 比的是 `iPAddress` 类型的 subjectAltName，
+  // 域名比的是 `dNSName`。拿 `192.0.2.1` 交给 `set1_host()` 永远不中 —— 而
+  // `uvcpp_tcp_client::connect()` 的形参名叫 `ip`、实际却两者都可能是，所以这里
+  // 必须先分流。
+  //
+  // 用 `_ip_asc` 而不是先 `a2i_IPADDRESS()` 再 `set1_ip()`：前者自己解析，**不是
+  // IP 就返回 0 且什么都不改**，于是可以直接往下当域名处理，不必再引
+  // `<openssl/x509v3.h>`，也不必在 1.0.2 与 1.1.0 之间挑 `ASN1_STRING_get0_data`
+  // 那类只在 1.1.0+ 存在的取数宏（`find_package(OpenSSL)` 没有版本下限）。
+  if (X509_VERIFY_PARAM_set1_ip_asc(param, name.c_str()) == 1) return true;
+
+  if (X509_VERIFY_PARAM_set1_host(param, name.c_str(), name.size()) != 1) {
     clear_error();
     return false;
   }

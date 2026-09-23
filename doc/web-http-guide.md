@@ -505,13 +505,13 @@ int doc_client_sync() {
 
 **三、阻塞路径的 `timeout_ms` 只有 Windows 生效。**
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 两处都被 `#ifdef _WIN32` 包着
-（`src/web/uvcpp_http_client.cpp:1007-1011`、`:1058-1062`），POSIX 上**不设**，
+（`src/web/uvcpp_http_client.cpp:1018-1022`、`:1069-1073`），POSIX 上**不设**，
 `send_wait()` / `send_wait_plain()` 在 Linux/macOS 上可以无限阻塞。头文件现在把这个
 缺口写在参数说明里（`src/web/uvcpp_http_client.h:131-133`、`:147-151`），
 不再让读者以为有超时兜底。
 
 **四、阻塞路径读不到任何字节时返回 0，而 `resp` 是默认的 200 OK。**
-`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1078-1091`），空头交给
+`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1089-1102`），空头交给
 `parse_response_head()` 之后什么都不改，`status_code` 保持初值 200。
 **判据只能是返回值**。（异步 h1 路径相反：错误时会把 `status_code` 设成
 `HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:394-396`。）

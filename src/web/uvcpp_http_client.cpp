@@ -985,6 +985,17 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
   // h2 的 TLS 层必须走内存 BIO（`uvcpp_tcp_client` 那条），两者不能混。
   // 写出来之后，将来往 ctx 上加了客户端 ALPN 也不会意外把这条路径带进 h2。
   ssl_->set_alpn_protos({"http/1.1"});
+
+  // 主机名校验**必须在这里单独接一次**。这条路是 `*_wait` 系列专用的：它自己
+  // `new uvcpp_ssl(ssl_ctx_, fd)`，**根本不经过 `uvcpp_tcp_client::connect()`**，
+  // 所以那边钉的主机名到不了这里。漏了这一句，同步 API 上的 `PEER_STRICT` 就退回
+  // 成 `PEER` —— 而且不会有任何报错，只是名字不对的对端也能连上。
+  // 判据（`host_`）与异步那条路同源：都是 `connect()` / `connect_wait()` 收到的
+  // 那个字符串。
+  if (ssl_ctx_->verify_mode() == tls_verify_mode::PEER_STRICT) {
+    ssl_->set_verify_hostname(host_.c_str(), host_.size());
+  }
+
   int rc = ssl_->handshake();
   // 非阻塞 socket 下 handshake 可能返回 0（WANT_READ/WANT_WRITE），重试几次兜底
   for (int i = 0; i < 4 && rc == 0; ++i) rc = ssl_->handshake();

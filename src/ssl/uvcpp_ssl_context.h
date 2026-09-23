@@ -95,6 +95,16 @@ class UVCPP_API uvcpp_ssl_context {
    */
   void set_verify_mode(tls_verify_mode mode);
 
+  /**
+   * @brief 当前的对端证书校验档位。
+   *
+   * 存在的理由：`PEER_STRICT` 那**多出来的一半**（主机名校验）不落在 `SSL_CTX` 上，
+   * 而是每条连接各自钉在它的 `SSL*` 上，所以"要不要钉"得由**建连接的那一层**去问
+   * 上下文当前的档位。构造期的默认值也走这条路（CLIENT = `PEER`，SERVER = `NONE`，
+   * 与 `set_default_verify()` 一致）。
+   */
+  tls_verify_mode verify_mode() const { return verify_mode_; }
+
   // -------------------------------------------------------------------
   // Protocol
   // -------------------------------------------------------------------
@@ -161,6 +171,10 @@ class UVCPP_API uvcpp_ssl_context {
   ssl_ctx_st* ctx_ = nullptr;
   tls_mode    mode_;
   tls_version min_version_;
+  // 与 `mode_`（CLIENT/SERVER）是两件事，名字相近但别混。`SSL_CTX_set_verify` 只
+  // 表达得了一半（`PEER_STRICT` 的主机名那一半在每条连接的 `SSL*` 上），所以这里
+  // 记的是**原始档位**，供 `verify_mode()` 查。
+  tls_verify_mode verify_mode_ = tls_verify_mode::NONE;
   int status_ = TLS_CTX_NONE;
   std::string last_error_;
   // 选择回调通过 arg 拿到的是这个成员的地址，所以它必须活得和 ctx_ 一样久。

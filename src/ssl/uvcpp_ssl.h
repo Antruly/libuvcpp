@@ -135,6 +135,36 @@ class UVCPP_API uvcpp_ssl {
    */
   bool set_alpn_protos(const std::vector<std::string>& protos);
 
+  // -------------------------------------------------------------------
+  // Hostname verification
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 把 `host` 钉给本条连接的证书校验（**必须在握手前调**）。
+   *
+   * 落在 **per-connection 的 `SSL*`** 上（`SSL_get0_param()`），不是 context ——
+   * 同一张证书在不同连接上要对的名字不同。
+   *
+   * @param host 主机名或数字 IP 字面量。两者走**不同的匹配规则**（RFC 6125）：
+   *             数字 IP 按 `iPAddress` 类型的 subjectAltName 比，域名按 `dNSName`
+   *             比 —— 拿 IP 当域名去比**永远不中**。这里自己分流。
+   * @return 钉上了返回 true。
+   *
+   * @warning **这个调用本身不带档位判断。** 设了主机名之后，无论 `SSL_CTX` 上的
+   *          verify 位是什么，OpenSSL 在握手末尾都会做这次检查；而 `SSL_VERIFY_NONE`
+   *          下**检查失败也不中止握手**。所以调用方要自己按上下文档位决定要不要调
+   *          （自动通路见 `uvcpp_ssl_context::verify_mode()`）。直接调它就等于
+   *          "我确实要校验这个名字"。
+   */
+  bool set_verify_hostname(const char* host, size_t len);
+
+  /**
+   * @brief 本连接所属的上下文；没有返回 nullptr。
+   *
+   * 给"要不要钉主机名"这类**依赖上下文档位**的决定用。
+   */
+  uvcpp_ssl_context* context() const { return ctx_; }
+
   /**
    * @brief 握手协商出的协议名；没协商出来返回空串。
    *

@@ -912,6 +912,15 @@ class UVCPP_API uvcpp_tcp_client {
   void tls_complete_connect();
 
   /**
+   * 把 `tls_host_want_` 钉到这条连接的证书校验上。
+   *
+   * **只有 context 处于 `PEER_STRICT` 时才真的钉**（理由写在实现里）。在
+   * `enable_tls()` 与 `connect()` / `connect_wait()` 三处都调一次：前两者谁先谁后
+   * 都合法，谁后到谁负责装。
+   */
+  void apply_tls_hostname();
+
+  /**
    * 触发一次并清空 `tls_ready_cb_`。
    *
    * **调用点必须是所在回调的最后一句** —— 用户拿到这个通知后完全可能把连接
@@ -931,6 +940,10 @@ class UVCPP_API uvcpp_tcp_client {
   int         tls_ssl_error_      = 0;   ///< 最近一次 SSL_get_error
   std::string tls_alpn_;                 ///< 握手协商出的协议名（空 = 没协商出）
   std::vector<std::string> tls_alpn_want_;  ///< 待宣告的协议名（enable_tls 时装上）
+  /// `connect()` / `connect_wait()` 收到的那个主机名，留给 `PEER_STRICT` 的证书
+  /// 主机名校验用。**先记下来、能装就装**（与 `tls_alpn_want_` 同一套延迟装配）：
+  /// 两条路都合法 —— 先 `enable_tls()` 再 `connect()`，或反过来。
+  std::string tls_host_want_;
   std::string tls_out_;                  ///< 待发密文（wbio 抽出来的）
   bool        tls_out_busy_       = false;  ///< 有一个密文写在途
   std::string tls_plain_;                ///< 已解密、尚未交付的明文
