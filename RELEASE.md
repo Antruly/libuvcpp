@@ -9,6 +9,86 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.3.0 重点 (Highlights)
+
+`1.2.1` → `1.2.25` 这 25 个开发档全部收进这一版。**这一版有破坏性改动**：3 个公开符号
+被删除，另有 7 处布局或导出符号变过 —— **必须重编，不能只换二进制**（逐条见本节末
+「换二进制之前」）。这也是 `1.2.x` 这条线的收口。
+
+### 新增
+
+| 新增 | 说明 |
+|---|---|
+| **多循环横向扩展** | `uvcpp_tcp_server::set_loops(n)`（`1.2.21`）与 `uvcpp_web_app::set_loops(n)`（`1.2.23`）：**一个接受者 + n−1 条专用线程的工作循环**，配套两个新公开头（`net/uvcpp_loop_worker.h`、`net/uvcpp_socket_handoff.h`）与 socket 转手机制。Windows 上没有 `SO_REUSEPORT`，走的是「单接受者 + 无锁转手」，**默认开着**（只有 `set_loops(1)` 例外）；那条路上有一笔量过的吞吐代价，口径与数字见 [`doc/multiloop-design.md`](doc/multiloop-design.md)。 |
+| **HTTP/2 流级背压** | 收方向的 `pause_stream()` / `resume_stream()`、发方向单流待发队列的上界（默认 4 MiB）、以及 `peer_window_size()`（`1.2.25`）。**这是协议层机件，仓内没有应用层调用方** —— 框架侧不驱动它，所以 h2 上「边收边给」的流式请求体**仍不可达**，见 [`doc/http2-status.md`](doc/http2-status.md)。 |
+| **TLS 主机名校验** | `uvcpp_ssl::set_verify_hostname()`（`1.2.24`）—— 见下面「修复」的第一条。 |
+
+### 修复
+
+`1.2.x` 修掉的问题里，三类值得单列：
+
+- **安全** —— `tls_verify_mode::PEER_STRICT` 此前与 `PEER` **完全等价**：两个值映射到
+  同一个 `SSL_VERIFY_PEER` 位，头注释自己也如实写着"主机名那一半从未实现"。于是它
+  挡不住「证书链可信、但签发给别的域名」的对端 —— 而那正是中间人最省事的一种做法。
+  现在客户端把 `connect()` 收到的那个名字钉给证书（数字 IP 字面量走
+  `X509_VERIFY_PARAM_set1_ip_asc()`，其余走 `set1_host()`），名字对不上的对端
+  **建立不起来**（`1.2.24`）。服务端仍与 `PEER` 等价：本库的服务端不发 SNI、也不要求
+  客户端证书，没有可校验的名字。
+- **内存** —— 内存池四条释放路径的缺陷（SUPER 静默泄漏、**三处 use-after-free**、
+  两块内存两套释放器混用）；`max_total_memory` 从假限额改成**按实占字节记账**；
+  池的元数据不再走全局 `operator new`（在那之前，接上池会**卡死**）。
+- **公开契约** —— 三个**从来没有编过、也从来没有链过**的公开 API 修好并各自配上用例
+  （`DEFINE_FUNC_REQ_CPP` 宏里一处重复定义、两处写错的名字）；`uvcpp_handle` 的拷贝
+  构造、拷贝赋值与 `clone()` 从「静默泄漏 / 破坏活句柄」改成**编译期拒绝**。
+
+### 实测数据
+
+`1.2.x` 期间有三笔性能改动，各自带读数。**三组来自不同装置与不同轮次，不能互相加减，
+也不能与 [`doc/benchmark.md`](doc/benchmark.md) 那页的 75 k 单循环口径混引**：
+
+- 队列里攒着的响应**合成一次写** —— 段/请求从 **3.43 降到 2.0**，同装置配对跑
+  **RPS +46%**（对照 38 839 RPS / 服务端 23.57 µs 每请求，其中约 74% 花在内核）；
+- 每请求分配次数 **16.00 → 13.00**（2 848.2 B → 1 984.2 B）；
+- 读缓冲不再清零 —— 此前**每请求白清 128 KiB**；交错 A/B 读数 QPS 101 251 → 115 085。
+
+### 换二进制之前
+
+相对上一次发布（`v1.2.0`），这一版动过的东西分两类。
+
+**一、导出符号被删除 —— 旧代码会编不过**（删的理由见
+[`doc/lowlevel-guide.md`](doc/lowlevel-guide.md) §10；删的两个 `clone()` 全仓零调用点，
+而拷贝句柄本来就是泄漏或破坏活句柄）
+
+| 删掉的符号 | 档 |
+|---|---|
+| `uvcpp_handle` 的**拷贝构造**与**拷贝赋值** | `1.2.5` |
+| `uvcpp_handle::clone()` | `1.2.5` |
+| `uvcpp_req::clone()`（`uvcpp_req` 的拷贝本身**保留**） | `1.2.5` |
+
+还有一处**只是导出符号变了、布局没变**：`uvcpp_web_context` 的构造函数多了一个前置的
+凭证参数（`1.2.20`）。它不构成实际破坏 —— 那个构造函数在此之前是**私有**的，类外既没有
+也不可能有调用点 —— 写在这里只是让这份清单完整。
+
+**二、布局变了 —— 旧头文件配新库会读到错的偏移**
+
+| 类 | 变的是什么 | 档 |
+|---|---|---|
+| `uvcpp_h2_stream` | 新增 `paused` / `paused_owed` 两个成员，`sizeof` 变了 | `1.2.25` |
+| `uvcpp_ssl_context` | 新增私有成员 `verify_mode_` | `1.2.24` |
+| `uvcpp_memory_pool` | 私有成员换过（`destroying_` → `held_bytes_`） | `1.2.x` |
+| `uvcpp_http_server`、`uvcpp_ws_server`、`uvcpp_ws_sessions`、`uvcpp_tcp_server`、`uvcpp_web_app` | 私有布局重排（每循环一格容器、状态位改原子量），多循环那一批 | `1.2.21`–`1.2.23` |
+
+**三、还有一条编得过、单循环下也对，只有多循环才会读到错的数据**
+
+`uvcpp_web_app::connections()` 与 `connection_count()` **同名同签名，语义变了**：
+`connections()` 现在返回**本循环**那一份登记表，`connection_count()` 变成**所有循环求和**，
+逐循环要用 `connection_count_at(int)`。单循环（`n == 1`）下行为与旧版等价，
+只有 `set_loops(n > 1)` 时才不同 —— 旧代码会**编过**，然后读到错的那一份。
+
+**另有两处行为变化，不改代码也能观察到**：`uvcpp_h2_session` 的 `on_request_end` 现在
+**只要 `end_stream` 为真就触发**（裸 GET 也来，且紧跟 `on_request`），原先只在有 body
+时触发；`submit_data()` 新增返回码 `UV_ENOBUFS`（待发队列超上界）。
+
 ## v1.2.0 重点 (Highlights)
 
 `1.1.1` → `1.1.35` 这 35 个开发档全部收进这一版。**无破坏性改动**，但有两处 ABI
@@ -66,15 +146,11 @@ commit 说明为什么它对 1.2.0 仍然成立。
 
 ### 换二进制之前
 
-四处 **ABI 变化**：`uvcpp_buf`（`1.1.28`）与 `uvcpp_http_server`（`1.1.34`）的布局
-变了；`uvcpp_handle` / `uvcpp_req` 的**拷贝构造、拷贝赋值与 `clone()` 已从公开接口
-删除**（`1.2.5`，删的是导出符号，两个类的布局都没变）；`uvcpp_web_context` 的构造函数
-多了一个前置的凭证参数（`1.2.20`，同样只是导出符号变了、布局没变，而那个构造函数
-在此之前是**私有**的，类外既没有也不可能有调用点）。**要重编，不能只换二进制** ——
-旧头文件配新库会读到错的偏移，而调过被删符号的旧二进制会在链接期报缺符号。
-删掉的理由（这几个操作没有正确实现，见 `doc/lowlevel-guide.md` §10）不影响任何
-"本就正确"的用法：删的两个 `clone()` 全仓零调用点，而拷贝句柄本来就是泄漏或破坏
-活句柄。
+两处 **ABI 变化**：`uvcpp_buf`（`1.1.28`）与 `uvcpp_http_server`（`1.1.34`）的布局
+变了。**要重编，不能只换二进制** —— 旧头文件配新库会读到错的偏移。
+
+（`1.2.x` 期间追加的 ABI 变化不记在这里，它们属于下一版 —— 见上面
+`v1.3.0` 的「换二进制之前」。）
 
 ## 新增模块 (New in v1.1.0)
 
@@ -195,7 +271,7 @@ PE 里有没有 `RSDS` 指向自己的 `.pdb`；MinGW / Linux 上比对调试节
 包含它，所以只要 `-I` 指对，宏就自动与这个 dll 一致：
 
 ```bash
-export PKG_CONFIG_PATH=/path/to/libuvcpp-1.2.0-mingw-x64/lib/pkgconfig
+export PKG_CONFIG_PATH=/path/to/libuvcpp-1.3.0-mingw-x64/lib/pkgconfig
 g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvcpp) -o your_app.exe
 ```
 
@@ -357,9 +433,29 @@ int main() {
 
 ## 变更日志 (Changelog)
 
-这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`；按主题
+这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`，
+`1.2.1` → `1.2.25` 收进 `v1.3.0`；按主题
 汇总的清单在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
+
+### v1.3.0 (2026-09-23)
+
+**新增**:多循环横向扩展、HTTP/2 流级背压、TLS 主机名校验
+
+- `uvcpp_tcp_server::set_loops(n)`（`1.2.21`）与 `uvcpp_web_app::set_loops(n)`（`1.2.23`）：
+  一条接受者 + n−1 条专用线程的工作循环，配套 socket 转手原语与两个新公开头
+  （`net/uvcpp_loop_worker.h`、`net/uvcpp_socket_handoff.h`）
+- HTTP/2 流级背压：收方向 `pause_stream()` / `resume_stream()`、发方向单流待发队列
+  上界（默认 4 MiB）、`peer_window_size()`（`1.2.25`）。**这是协议层机件，仓内没有
+  应用层调用方** —— 框架侧不驱动它，h2 上「边收边给」的流式请求体仍不可达
+- `tls_verify_mode::PEER_STRICT` 在客户端侧真的校验主机名（`1.2.24`）——
+  此前它与 `PEER` 完全等价
+- 其余是 `1.2.1` → `1.2.25` 线上的修复与性能改动，按主题见 README 的变更日志
+- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
+  依赖全静态链接
+
+**破坏性**:删了 3 个公开符号、改了 7 处布局或导出符号 —— **必须重编，不能只换二进制**，
+逐条见上面「`v1.3.0` 重点」的「换二进制之前」。
 
 ### v1.2.0 (2026-09-20)
 
@@ -402,11 +498,11 @@ int main() {
 ## 下载 (Download)
 
 - Source code
-- `libuvcpp-1.2.0-mingw-x64.zip` / `libuvcpp-1.2.0-mingw-arm64.zip`
+- `libuvcpp-1.3.0-mingw-x64.zip` / `libuvcpp-1.3.0-mingw-arm64.zip`
   — Windows 预编译动态库（MinGW-w64，含调试档）
-- `libuvcpp-1.2.0-msvc-x64.zip` / `libuvcpp-1.2.0-msvc-arm64.zip`
+- `libuvcpp-1.3.0-msvc-x64.zip` / `libuvcpp-1.3.0-msvc-arm64.zip`
   — Windows 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
-- `libuvcpp-1.2.0-linux-x64.zip` / `libuvcpp-1.2.0-linux-arm64.zip`
+- `libuvcpp-1.3.0-linux-x64.zip` / `libuvcpp-1.3.0-linux-arm64.zip`
   — Linux 预编译动态库（含调试档）
 
 > ⚠️ 两个 Windows 版**互为替代、不可混用**：MinGW-w64 编出来的动态库不能被 MSVC

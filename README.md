@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.2.25--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.0-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.2.25-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.0` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -586,12 +586,12 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.2.0** — that is what `UVCPP_VERSION_STRING`
-(`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0` and `v1.2.0` are the tagged
-releases. Everything the `1.1.x` development line accumulated between `v1.1.0` and `v1.2.0`
-is below, by theme, with the version each change first appeared in; release notes for the
-tagged versions are in [RELEASE.md](./RELEASE.md). Several of the fixes came from issue
-reports by the project's first external contributor,
+The current source tree is **1.3.0** — that is what `UVCPP_VERSION_STRING`
+(`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
+tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
+`v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
+release notes for the tagged versions are in [RELEASE.md](./RELEASE.md). Several of the
+fixes came from issue reports by the project's first external contributor,
 [@sercebr](https://github.com/sercebr).
 
 ### HTTP/2
@@ -614,6 +614,30 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   **protocol-layer machinery only — no application-layer caller exists yet**; nothing in
   the web framework drives it, so streamed h2 request bodies remain unavailable
 
+### Horizontal scaling (multiple event loops)
+
+- `uvcpp_tcp_server::set_loops(n)` spreads accepted connections over `n` event loops — one
+  acceptor loop plus `n-1` worker loops, each on its own dedicated `std::thread` (not a
+  libuv threadpool thread). Not calling it, or `set_loops(1)`, is byte-for-byte the old
+  behaviour (`1.2.21`)
+- Sockets move between loops through a handoff primitive of their own
+  (`net/uvcpp_socket_handoff.h`): `WSADuplicateSocketW` + `WSASocketW` on Windows, `dup()`
+  elsewhere. **On Windows this rides a known libuv defect** — read
+  [doc/net-guide.md](doc/net-guide.md) §4 and [RELEASE.md](./RELEASE.md) before enabling it
+- `set_loop_start_hook()` (`1.2.22`) and `set_loop_exit_hook()` (`1.2.24`) run on each
+  worker loop, so an owner can create and tear down handles there; a throwing start hook
+  becomes `UV_ECANCELED` instead of a promise that never resolves
+- Connection ids encode the loop index in their high 20 bits, so ids stay unique across
+  loops; at `n == 1` the encoding is the identity and ids are unchanged (`1.2.22`)
+- `uvcpp_web_app::set_loops(n)` (`1.2.23`) brings the same to the framework, with
+  `loop_count()` and `connection_count_at()`. Shutdown now fans out per loop slot — the
+  earlier path posted to loop 0 only, so worker loops never entered shutdown, their handles
+  were never freed, and `uv_loop_close` failed with `UV_EBUSY`, leaking the loop
+- `uvcpp_web_app::connections()` now returns **this loop's** registry and
+  `connection_count()` sums **all** loops (`1.2.23`) — use `connection_count_at(int)` per
+  loop. Same names, same signatures: old code compiles and reads the wrong table once
+  `set_loops(n > 1)` is in play
+
 ### HTTP & WebSocket semantics
 
 - Error paths no longer invent a status code, and a connection that drops mid-stream no
@@ -628,6 +652,13 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
 - `req.path()` folds repeated slashes, matching how routes are split (`1.1.19`); request
   header and URL lengths are capped while receiving (`431` / `414`) (`1.1.20`)
 - Static file serving no longer returns `503` on a cache hit (`1.1.15`)
+- `set_keep_alive(false)` actually sends `connection: close` when the caller has not set the
+  header itself, and a response arriving on a connection the peer is closing no longer
+  reports a write that can never complete (`1.2.2`)
+- `uvcpp_web_request::take_from()` empties the source request's `url` and `headers` as well
+  as its `body`; the contract is in the header and asserted up front (`1.2.7`)
+- `uvcpp_web_router::match()` no longer fills in `allow` / `allowed_methods` on a successful
+  match — those fields are empty when the result is `MATCHED` (`1.2.12`)
 
 ### TLS & networking
 
@@ -636,6 +667,13 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
 - Destroying a `tcp_client` from inside its own callback no longer accumulates wrappers (`1.1.16`)
 - A dropped peer fires the HTTP client's close observer instead of leaving the callback
   silent forever (`1.1.4`)
+- `tls_verify_mode::PEER_STRICT` verifies the hostname on the client: the name passed to
+  `connect()` is pinned to the certificate (`X509_VERIFY_PARAM_set1_host()`, or
+  `set1_ip_asc()` for an IP literal), so a peer whose certificate names something else never
+  establishes (`1.2.24`). It used to be exactly equivalent to `PEER` — it still is on the
+  server side, which sends no SNI and asks for no client certificate, leaving no name to check
+- Callers that use `uvcpp_ssl` directly, bypassing `tcp_client` / `http_client`, do not get
+  that check; call `uvcpp_ssl::set_verify_hostname()` yourself
 
 ### Memory & buffers
 
@@ -644,6 +682,29 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
 - The memory pool's in-use block count follows allocation again (`1.1.33`)
 - The compression variant table's byte account is derived from the table rather than kept in
   a counter that could drift, and the byte cap finally has a test (`1.1.34`)
+- `memory_pool_config::max_total_memory` is enforced: the pool accounts the bytes it really
+  holds, block headers included, and refuses allocations past the cap, counting them in
+  `failed_allocations` (`1.2.3`). The default of `0` means no cap and changes nothing
+- The pool's SUPER tier (>256 KiB) no longer leaks — its push to the thread-local cache
+  claimed success and dropped the block, so the memory never reached the global pool and the
+  quota never came back, while the stats still recorded a release (`1.2.9`)
+- Three release paths read a block header after `free()` (use-after-free), and
+  `static_release_callback`'s teardown branch returned an `_aligned_malloc`'d block with
+  `::operator delete` (`STATUS_HEAP_CORRUPTION`) — both fixed (`1.2.9`)
+- The pool can be wired to the global `operator new`: its own metadata went through `new`,
+  which re-entered a function-local static's initialisation guard and deadlocked (`1.2.13`)
+
+### API contracts & safety
+
+- `uvcpp_handle`'s copy constructor, copy assignment and `clone()` are **deleted** from the
+  public interface — they `memcpy`'d a live `uv_handle_t`, loop and neighbour pointers
+  included, which double-frees or unlinks a running handle from its loop (`1.2.5`).
+  `uvcpp_req`'s copy operations stay, since a `uv_req_t` has no intrusive queue and no loop
+  pointer; only its `clone()` is gone (`1.2.5`)
+- `DEFINE_FUNC_REQ_CPP` / `DEFINE_COPY_FUNC_REQ_CPP` compile again — two public macros that
+  had never been compiled carried three hard errors, and their tests now cover them (`1.2.2`)
+- `uvcpp_ws_connection`'s default constructor has a definition; `uvcpp_ws_connection c;` used
+  to compile and fail at link time (`1.2.2`)
 
 ### Performance
 
@@ -653,12 +714,41 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
 - Response bodies are taken over without a copy and go out with the headers as two write
   blocks (`nbufs = 2`) (`1.1.28`); the variant table stores and returns handles instead of
   whole bodies (`1.1.31`)
+- Responses are serialized without `std::ostringstream`: −2.52% total CPU, −10.19% user,
+  91,330 → 93,688 RPS, with all nine endpoints' bytes unchanged (`1.2.4`)
+- The read buffer is no longer zeroed — libuv hands a TCP stream 64 KiB and a request takes
+  two trips, so every request wiped 128 KiB for nothing: −13.66% total, −22.88% user,
+  +12.02% RPS (`1.2.4`)
+- The response header table reserves on first insert, and `uvcpp_web_context`'s object and
+  control block became a single allocation — 16.00 → 13.00 allocations per request (`1.2.20`)
+- Header lookups take a non-owning `const char*` overload (14 class members, four free
+  functions), so a literal longer than the SSO limit stops constructing a temporary
+  `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /
+  `json_str()` (`1.2.17`)
+- `uvcpp_http_parser::take_headers()` moves elements rather than the vector, so the parser
+  keeps its header high-water mark across requests — 19.00 → 18.00 allocations per request
+  (`1.2.18`)
+- `uvcpp_http_request` has real move operations again: a user-declared copy assignment had
+  suppressed the implicit move assignment, so `req = std::move(...)` on the claim path
+  silently deep-copied the whole header table (`1.2.8`)
+- The 14 `uvcpp_buf` entry points that resized and then `memcpy`'d no longer zero bytes they
+  are about to overwrite — a 100 B GET went from 3.4 `memset`s / ~200 B to 0, and a 1 MiB
+  POST from 38 / 3.00 MiB to 0 (`1.2.15`)
+- The write queue coalesces what it can carry into one write instead of one per completed
+  block — segments per request 3.43 → 2.06 (−40%), server CPU per request about −30%,
+  RPS 38,839 → 57,067 (`1.2.14`)
+- A response on an idle connection skips the write queue (`1.2.10`), a plain response no
+  longer pays two heap allocations for its completion callback (`1.2.6`), and the router
+  stops computing `allow` on a hit (`1.2.12`)
 
 **Measured, not estimated** — see [doc/benchmark.md](doc/benchmark.md): **4.62 KiB per idle
 connection** (least squares over eight tiers, R² = 0.999987 → 1 M connections ≈ 4.42 GiB),
 75 k RPS on a single event loop, and a 10-minute soak at 38 M requests / 0 errors. That page
 also compares the per-connection figure against [Hical](https://github.com/Hical61/Hical)'s
-own report, and states the caveats that comparison carries.
+own report, and states the caveats that comparison carries. The `1.2.x` figures above come
+from different rigs and different runs and do not add up with these. A load rig of its own
+ships in `bench/` behind `UVCPP_BUILD_BENCH` (off by default, not built in CI) and is
+described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
 
 ### Configuration, packaging & CI
 
@@ -670,8 +760,22 @@ own report, and states the caveats that comparison carries.
 - Six packaging jobs pass `UVCPP_ENABLE_NGHTTP2`, so h2 packages no longer lack it (`1.1.6`)
 - Every package now also carries a **Debug** build of the library (`uvcppd.dll` / `libuvcppd.so`,
   `-luvcppd`, plus `uvcppd.pdb` on MSVC) for stepping through library internals (`1.1.35`)
+- Twelve guides were added: eight for users (`lowlevel-guide.md`, `net-guide.md`,
+  `ssl-guide.md`, `web-http-guide.md`, `web-ws-guide.md`, `http2-guide.md`,
+  `expand-guide.md`, `webapp-support-guide.md`) and four for contributors (`CONTRIBUTING.md`,
+  `build-guide.md`, `testing-guide.md`, `release-process.md`) (`1.2.1`)
+- Three documentation gates run in CI: the build system's options and the README option
+  table close both ways, every link, path and anchor resolves, and each guide is referenced
+  from prose (`check_docs.py`); the `file:line` references across 22 documents resolve and
+  match a content lock (`check_doc_lines.py`); every `cpp` snippet compiles against a staged
+  package with no `-D` flags (`check_doc_snippets.py`) (`1.2.1`)
+- Four examples in the two READMEs did not compile and were fixed (`1.2.1`)
 - ABI note for consumers: the layout of `uvcpp_buf` (`1.1.28`) and `uvcpp_http_server`
-  (`1.1.34`) changed — **rebuild, do not just swap the binary** (see [RELEASE.md](./RELEASE.md))
+  (`1.1.34`) changed, and the `1.2.x` line changed more — `uvcpp_h2_stream` (`1.2.25`),
+  `uvcpp_ssl_context` (`1.2.24`), `uvcpp_memory_pool` (`1.2.x`) and the five multi-loop
+  classes (`1.2.21`–`1.2.23`) all have new layouts, and `uvcpp_handle`'s copy constructor,
+  copy assignment and `clone()`, plus `uvcpp_req::clone()`, were **removed** (`1.2.5`) —
+  **rebuild, do not just swap the binary** (see [RELEASE.md](./RELEASE.md))
 
 ---
 

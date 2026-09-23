@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.2.25--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.0-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.2.25-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.0` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -576,11 +576,12 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.2.0** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
-报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0` 三个 tag。下面是 `1.1.x` 这条
-开发线从 `v1.1.0` 到 `v1.2.0` 之间落地的全部改动，按主题分组，括号里是它
-**首次出现**的那一档；已发布版本的说明在 [RELEASE.md](./RELEASE.md)。其中若干条
-来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
+当前源码树是 **1.3.0** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
+`1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
+分组，括号里是它**首次出现**的那一档；已发布版本的说明在
+[RELEASE.md](./RELEASE.md)。其中若干条来自本仓第一位外部贡献者
+[@sercebr](https://github.com/sercebr) 报的 issue。
 
 ### HTTP/2
 
@@ -599,6 +600,28 @@ libuvcpp/
   以及 `peer_window_size()`（`1.2.25`）。这是**协议层机件，暂无应用层调用方** ——
   框架侧没有任何调用点，h2 上"边收边给"的流式请求体因此仍不可达
 
+### 横向扩展（多事件循环）
+
+- `uvcpp_tcp_server::set_loops(n)`：把接受的连接摊到 `n` 条事件循环上 —— 一条接受者
+  加 `n-1` 条工作循环，每条一个**专用 `std::thread`**（不是 libuv 线程池的线程）。
+  不调用它、或 `set_loops(1)`，与旧行为逐字节相同（`1.2.21`）
+- socket 转手有自己的一套原语（`net/uvcpp_socket_handoff.h`）：Windows 走
+  `WSADuplicateSocketW` + `WSASocketW`，其余走 `dup()`。**Windows 上这条腿压着一个
+  已知的 libuv 缺陷** —— 开之前先读 [doc/net-guide.md](doc/net-guide.md) §4 与
+  [RELEASE.md](./RELEASE.md)
+- `set_loop_start_hook()`（`1.2.22`）与 `set_loop_exit_hook()`（`1.2.24`）在每条工作
+  循环上跑，属主可以就地在上面建/拆句柄；启动钩子抛异常会翻成 `UV_ECANCELED`，
+  而不是留下一个永远不兑现的承诺
+- 连接 id 的高 20 位编码循环号，多循环下 id 仍唯一；`n == 1` 时这个编码是恒等变换，
+  id 与旧版逐字节相同（`1.2.22`）
+- `uvcpp_web_app::set_loops(n)`（`1.2.23`）把同一件事带到框架层，配套 `loop_count()`
+  与 `connection_count_at()`。停机改成**逐槽位扇出** —— 此前那条路只投到 0 号循环，
+  工作循环压根不进停机状态机、句柄没人删，`uv_loop_close` 于是撞 `UV_EBUSY`，
+  整块循环内存泄漏
+- `uvcpp_web_app::connections()` 现在返回**本循环**那一份登记表，`connection_count()`
+  变成**所有循环求和**（`1.2.23`）—— 逐循环请用 `connection_count_at(int)`。同名同
+  签名：旧代码**编得过**，只有在 `set_loops(n > 1)` 之后才会读到错的那一份
+
 ### HTTP 与 WebSocket 语义
 
 - 错误路径不再编造状态码；连接中途断开时不再交付编出来的 `200`（`1.1.10`、`1.1.11`）
@@ -610,6 +633,12 @@ libuvcpp/
 - `req.path()` 折叠连续斜杠，与路由切段看齐（`1.1.19`）；请求头与 URL 长度在收的过程中
   就被卡住（`431` / `414`）（`1.1.20`）
 - 静态文件服务在缓存命中时不再返回 `503`（`1.1.15`）
+- `set_keep_alive(false)` 真的发 `connection: close` 了（调用方自己没设那个头时）；
+  并且在「对端正关的连接」上收到响应时，不再报一笔永远兑现不了的写（`1.2.2`）
+- `uvcpp_web_request::take_from()` 之后源请求的 `url` 与 `headers` 也空了（原先只承诺
+  `body`）；契约写进了头文件，并配了前置断言（`1.2.7`）
+- `uvcpp_web_router::match()` 命中路径上不再收集 `allow` / `allowed_methods` ——
+  结果是 `MATCHED` 时这两个字段是空的（`1.2.12`）
 
 ### TLS 与网络
 
@@ -617,6 +646,13 @@ libuvcpp/
 - TLS 握手有超时，且不在超时那条路上留下孤儿定时器（`1.1.14`）
 - 在自己的回调里析构 `tcp_client` 不再按连接数累积包装对象（`1.1.16`）
 - 对端断开时会触发 HTTP 客户端的关闭观察者，而不是让回调永远不来（`1.1.4`）
+- `tls_verify_mode::PEER_STRICT` 在客户端侧真的校验主机名：`connect()` 收到的那个名字
+  被钉给证书（数字 IP 字面量走 `X509_VERIFY_PARAM_set1_ip_asc()`，其余走
+  `set1_host()`），名字对不上的对端**建立不起来**（`1.2.24`）。它此前与 `PEER`
+  **完全等价** —— 服务端侧至今仍然等价：本库的服务端不发 SNI、也不要求客户端证书，
+  没有可校验的名字
+- 绕开 `tcp_client` / `http_client` 直接用 `uvcpp_ssl` 的调用方**拿不到**这层校验，
+  得自己调 `uvcpp_ssl::set_verify_hostname()`
 
 ### 内存与缓冲
 
@@ -625,6 +661,27 @@ libuvcpp/
 - 内存池的「在用块数」重新跟着分配走（`1.1.33`）
 - 压缩变体表的字节账改成从表里算出来的派生量（不再存一个会漂移的计数器），
   字节上限那条腿也终于有了判据（`1.1.34`）
+- `memory_pool_config::max_total_memory` 真的限额了：池按**实占**字节记账（含每块的
+  块头），超额拒绝分配并计入 `failed_allocations`（`1.2.3`）。默认值 `0` 表示不限额，
+  行为零变化
+- 池的 SUPER 档（>256 KiB）不再静默泄漏 —— 它那次进线程本地缓存的 push 谎报成功、
+  把块丢了，内存回不到全局池、额度也不退，而统计照常记一次「已释放」（`1.2.9`）
+- 三条释放路径在 `free` 之后读块头（use-after-free），以及 `static_release_callback`
+  的拆除分支拿 `::operator delete` 去还 `_aligned_malloc` 来的块
+  （`STATUS_HEAP_CORRUPTION`）—— 两处都已修（`1.2.9`）
+- 池可以接全局 `operator new` 了：它的元数据此前自己走 `new`，重入撞上函数局部静态的
+  初始化守卫，会**卡死**（`1.2.13`）
+
+### 公开契约与安全
+
+- `uvcpp_handle` 的拷贝构造、拷贝赋值与 `clone()` **从公开接口删除** —— 它们的实现是
+  `memcpy` 一个活着的 `uv_handle_t`（连着 loop 指针与邻居指针），结果是双重释放，或把
+  活句柄从自己的循环队列里摘掉（`1.2.5`）。`uvcpp_req` 的拷贝操作**保留**（`uv_req_t`
+  没有侵入式队列、也没有 loop 指针），只删它的 `clone()`（`1.2.5`）
+- `DEFINE_FUNC_REQ_CPP` / `DEFINE_COPY_FUNC_REQ_CPP` 编得过了 —— 这两个公开宏从来没被
+  编译过，里面压着三处硬错误；现在它们各自有用例盖住（`1.2.2`）
+- `uvcpp_ws_connection` 的默认构造从此**有定义**：`uvcpp_ws_connection c;` 此前编得过、
+  **链接不过**（`1.2.2`）
 
 ### 性能
 
@@ -633,11 +690,34 @@ libuvcpp/
 - 静态响应带上压缩变体缓存（`1.1.24`）
 - 响应体零拷贝接管，并与头一起作为两块写出去（`nbufs = 2`）（`1.1.28`）；
   变体表按句柄存/取，不再整份拷体（`1.1.31`）
+- 响应序列化不再走 `std::ostringstream`：合计 −2.52%、用户态 −10.19%、
+  91 330 → 93 688 RPS，九个端点报文逐字节不变（`1.2.4`）
+- 读缓冲不再清零 —— libuv 对 TCP 流给 64 KiB、一次请求跑两趟，所以每请求白清
+  128 KiB：合计 −13.66%、用户态 −22.88%、QPS +12.02%（`1.2.4`）
+- 响应头表改成**按需**预留，`uvcpp_web_context` 的对象与控制块并成一次分配 ——
+  每请求 16.00 → 13.00 次分配（`1.2.20`）
+- 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
+  超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
+  `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）
+- `uvcpp_http_parser::take_headers()` 改成搬元素而不是搬 vector，解析器的头表
+  high-water 因此按连接钉住 —— 每请求 19.00 → 18.00 次分配（`1.2.18`）
+- `uvcpp_http_request` 重新有了真正的移动操作：用户声明的拷贝赋值会抑制隐式移动赋值，
+  于是 claim 路径上那句 `req = std::move(...)` 在静默地深拷整张头表（`1.2.8`）
+- `uvcpp_buf` 那 14 个「先 resize 再 memcpy」的入口不再清零马上要被盖掉的那段 ——
+  100 B GET 从 3.4 次 `memset` / 约 200 B 变成 0，1 MiB POST 从 38 次 / 3.00 MiB 变成 0
+  （`1.2.15`）
+- 写队列把能带走的整批拼成**一次**写，不再每完成一块发一块 —— 段/请求
+  3.43 → 2.06（−40%）、同装置服务端每请求 CPU 约 −30%、RPS 38 839 → 57 067（`1.2.14`）
+- 空闲连接上的响应不再绕写队列（`1.2.10`）；普通响应不再为完成回调付两次堆分配
+  （`1.2.6`）；路由命中路径不再算 `allow`（`1.2.12`）
 
 **实测数据（不是估算）** —— 见 [doc/benchmark.md](doc/benchmark.md)：每条空闲连接
 **4.62 KiB**（4 734 B，八档最小二乘，R² = 0.999987，外推 100 万连接 ≈ 4.42 GiB）、单事件循环
 75 k RPS、10 分钟长跑 3 840 万请求 0 错误。那一页还把每连接这个数与
 [Hical](https://github.com/Hical61/Hical) 自己的报告做了对照，并写明了该对照带的口径问题。
+上面 `1.2.x` 那几笔读数来自**别的装置、别的轮次**，不能与这些相加。本仓另有一套压测靶场，
+在 `bench/` 下、由 `UVCPP_BUILD_BENCH` 开关控制（默认 OFF，不进 CI），说明见
+[doc/benchmark-rig.md](doc/benchmark-rig.md)。
 
 ### 配置、打包与 CI
 
@@ -647,8 +727,20 @@ libuvcpp/
 - 六个打包 job 补上 `UVCPP_ENABLE_NGHTTP2`，h2 不再从包里缺席（`1.1.6`）
 - 每份包里多了一档**调试版**动态库（`uvcppd.dll` / `libuvcppd.so`，`-luvcppd`，
   MSVC 那份还带 `uvcppd.pdb`），方便单步进库内部（`1.1.35`）
+- 新增十二篇指南：使用者向八篇（`lowlevel-guide.md`、`net-guide.md`、`ssl-guide.md`、
+  `web-http-guide.md`、`web-ws-guide.md`、`http2-guide.md`、`expand-guide.md`、
+  `webapp-support-guide.md`）与贡献者向四篇（`CONTRIBUTING.md`、`build-guide.md`、
+  `testing-guide.md`、`release-process.md`）（`1.2.1`）
+- 三道文档门禁进 CI：构建系统的选项与 README 选项表双向闭合、链接/路径/锚点可解析、
+  每篇指南都被正文提到（`check_docs.py`）；22 篇文档里的 `文件:行号` 引用能解析且与
+  内容哈希锁一致（`check_doc_lines.py`）；每个 `cpp` 片段都对着一个已 stage 的包、
+  不加任何 `-D` 真编译（`check_doc_snippets.py`）（`1.2.1`）
+- 两版 README 里 4 处**编不过**的示例已修（`1.2.1`）
 - 给消费者的 ABI 提示：`uvcpp_buf`（`1.1.28`）与 `uvcpp_http_server`（`1.1.34`）的布局
-  变过 —— **必须重编，别只换二进制**（见 [RELEASE.md](./RELEASE.md)）
+  变过，`1.2.x` 这条线改得更多 —— `uvcpp_h2_stream`（`1.2.25`）、`uvcpp_ssl_context`
+  （`1.2.24`）、`uvcpp_memory_pool`（`1.2.x`）与五个多循环类（`1.2.21`–`1.2.23`）布局
+  都变了；`uvcpp_handle` 的拷贝构造、拷贝赋值与 `clone()`，以及 `uvcpp_req::clone()`
+  则被**删除**（`1.2.5`）—— **必须重编，别只换二进制**（见 [RELEASE.md](./RELEASE.md)）
 
 ---
 

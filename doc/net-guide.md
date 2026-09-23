@@ -778,10 +778,10 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
 - **TLS 的 `PEER_STRICT` 只在客户端上多做事**：它会拿 `connect()` 收到的那个名字去
   校验对端证书的主机名，`PEER` 不会（见 [TLS 与证书指南](./ssl-guide.md)）。服务端上
   两者仍等价 —— 服务端没有可校验的名字。
-- **多循环只做到 net 层的 TCP 服务端**：`uvcpp_tcp_server::set_loops()` 有了（§4），
-  **`uvcpp_web_app` 上的同名 API 还没有** —— webapp 那一半（per-loop 容器、连接 id 编码
-  循环号、每循环 `post()`/停机）仍是设计稿，见[多循环设计](./multiloop-design.md)。
-  客户端与 UDP 两侧都没有多循环。
+- **多循环两端都已落地**：net 层 `uvcpp_tcp_server::set_loops()`（§4）与框架层
+  `uvcpp_web_app::set_loops(n)` 都有了，后者配套 `loop_count()` /
+  `connection_count_at(int)`；注意 `connections()` 只返回**本循环**那一份。客户端与
+  UDP 两侧都没有多循环，细节见[多循环设计](./multiloop-design.md)。
 
 ---
 

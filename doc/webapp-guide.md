@@ -1346,4 +1346,5 @@ cmake --build build --config Release --target webapp_demo
 | 打日志 | `UVCPP_LOG_INFO(category) << ...`（§16） |
 
 相关文档：[CI 维护指南](./ci-guide.md)、[项目 README](../README.zh.md)、
-[多进程横向扩展设计](./worker-process-design.md)、[多循环横向扩展设计](./multiloop-design.md)（两篇都是设计稿，未实现）。
+[多进程横向扩展设计](./worker-process-design.md)（仍是设计稿，未实现）、
+[多循环横向扩展设计](./multiloop-design.md)（`net` 层与 `webapp` 层都已落地）。
