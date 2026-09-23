@@ -1,7 +1,10 @@
 // 单个生成器进程：跑一轮 autocannon，打印一行 JSON。
-// 被 run_multi.js 拉起 N 份，用来判断"服务端到顶"还是"生成器到顶"。
+// 被同目录的 driver.js 拉起 N 份，用来判断"服务端到顶"还是"生成器到顶"。
 //
 // 用法: node gen.js --url ... --duration 10 --connections 10 --pipelining 1
+//
+// 注：仓库外的 `_bench/` 另有一个同名但**不同**的 gen.js（多了 --amount / --cpu
+// 两个开关，供交错 A/B 用）。两者互不引用，改的时候别看错了。
 const autocannon = require('autocannon');
 
 function arg(name, dflt) {

@@ -477,6 +477,56 @@ Test coverage:
 
 ---
 
+## Multi-loop scaling (`set_loops`)
+
+One event loop can only ever occupy one core. Once that core is saturated, `set_loops(n)`
+runs **1 acceptor loop + n−1 worker loops** inside a single process: the accept path stays
+on one thread, and connection I/O is spread across the workers.
+
+```cpp
+#include <webapp/uvcpp_web_app.h>
+using namespace uvcpp;
+
+int main() {
+  uvcpp_web_app app;
+  app.set_host("0.0.0.0").set_port(8080).set_access_log(false);
+
+  // 1 acceptor + 3 worker loops. Not chainable, and must precede start()/run().
+  const int rc = app.set_loops(4);
+  if (rc != 0) return 1;
+
+  app.get("/json", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                      uvcpp_web_next) {
+    resp.json_str("{\"hello\":\"world\"}");
+    resp.end();
+  });
+
+  app.start();   // n > 1 needs start()/start_background(); run(md) is rejected
+  app.join();
+  return 0;
+}
+```
+
+Worth knowing before you turn it on:
+
+- **Call it before `start()` / `run()`.** Register your routes before `start()` as well —
+  with `n > 1` that stops being advice and becomes a requirement.
+- **`set_loops` returns `int`, so it cannot be chained** onto the
+  `set_host(...).set_port(...)` builder. It returns `0` on success, `UV_EINVAL` when `n`
+  is outside `1..64`, and `UV_EBUSY` if the runtime has already started.
+- **`n == 1` is byte-for-byte the behaviour of never calling it** — no slots, no hooks, no
+  extra thread. Switching the knob on at 1 costs nothing.
+- **With `n > 1`, `run(md)` is rejected with `UV_EINVAL`.** Use `start()` /
+  `start_background()`, then `stop()` and `join()`.
+- **The acceptor loop carries no connections.** `loop_count()` reports how many loops
+  exist and `connection_count_at(i)` how many each holds — index `0` is the acceptor and
+  stays at zero while the workers share the load.
+
+**→ Sizing, core pinning, and what makes a scaling reading valid or invalid:
+[doc/benchmark-rig.md](doc/benchmark-rig.md).**
+
+---
+
 ## Project Structure
 
 ```

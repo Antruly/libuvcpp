@@ -470,6 +470,54 @@ python -u tests/tools/run_pageheap_gate.py --tree build-webapp
 
 ---
 
+## 多循环横向扩展（`set_loops`）
+
+一条事件循环最多只能占满一个核。那个核吃满之后，`set_loops(n)` 会在**同一个进程内**起
+**1 条接受者循环 + n−1 条工作循环**：接受这条路留在一个线程上，连接的 I/O 摊到各条工作循环。
+
+```cpp
+#include <webapp/uvcpp_web_app.h>
+using namespace uvcpp;
+
+int main() {
+  uvcpp_web_app app;
+  app.set_host("0.0.0.0").set_port(8080).set_access_log(false);
+
+  // 1 条接受者 + 3 条工作循环。不能链式，且必须在 start()/run() 之前。
+  const int rc = app.set_loops(4);
+  if (rc != 0) return 1;
+
+  app.get("/json", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                      uvcpp_web_next) {
+    resp.json_str("{\"hello\":\"world\"}");
+    resp.end();
+  });
+
+  app.start();   // n > 1 只能 start()/start_background()，run(md) 会被拒
+  app.join();
+  return 0;
+}
+```
+
+打开它之前值得知道这几条：
+
+- **在 `start()` / `run()` 之前调用。** 路由注册也要在 `start()` 之前 —— `n > 1` 时这条
+  从「建议」变成「必须」。
+- **`set_loops` 返回 `int`，所以不能接在 `set_host(...).set_port(...)` 这条链上。**
+  成功返 `0`；`n` 不在 `1..64` 内返 `UV_EINVAL`；运行时已经起来过返 `UV_EBUSY`。
+- **`n == 1` 与「从不调用它」逐字节相同** —— 不建格子、不装钩子、不多起线程。
+  档位拧到 1 不付任何代价。
+- **`n > 1` 时 `run(md)` 会被 `UV_EINVAL` 拒掉。** 用 `start()` / `start_background()`，
+  收尾用 `stop()` 与 `join()`。
+- **接受者那条循环不承载任何连接。** `loop_count()` 报一共有几条循环，
+  `connection_count_at(i)` 报每格各有多少 —— 下标 `0` 是接受者，它恒为 0，
+  负载由各条工作循环分担。
+
+**→ 档位怎么选、核怎么钉、以及什么样的扩展性读数算数或不算数：
+[doc/benchmark-rig.md](doc/benchmark-rig.md)。**
+
+---
+
 ## 项目结构
 
 ```

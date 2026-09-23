@@ -373,8 +373,10 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 > `SetFileCompletionNotificationModes` 两种血统都会走到。证据包与复现装置见
 > [多进程横向扩展设计](./worker-process-design.md) §9。
 
-> **口径**：多循环**不进** README 那个 15 万 RPS 的单循环口径，也不与 hical 的单 acceptor
-> 数并列。扩展性读数只在同一台机器上可比。
+> **口径**：多循环**不进** README 那个 **75 k RPS**（流水线档 88 k）的单循环口径，也不与
+> hical 的单 acceptor 数并列。扩展性读数只在同一台机器上可比 —— README 的多循环一节讲用法
+> 与契约，读数的**装置、门槛与前提**单开在 [benchmark-rig.md](./benchmark-rig.md)，
+> 与上面这个口径是两回事。
 
 ### 4.3 在本库这套形状上量到的扩展与税（外部装置，2026-09-22）
 
