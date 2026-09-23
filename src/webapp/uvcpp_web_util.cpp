@@ -5,6 +5,8 @@
 
 #include <webapp/uvcpp_web_util.h>
 
+#include <web/uvcpp_http_date.h>  // 日期格式化的唯一实现
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -1090,8 +1092,9 @@ const char* web_status_text(int code) {
 
 namespace {
 
-const char* const k_wday_names[] = {"Sun", "Mon", "Tue", "Wed",
-                                    "Thu", "Fri", "Sat"};
+// 只有月份名留在这边 —— 解析那一侧（`month_from_name`）要用。格式化那一侧
+// 连同星期名一起搬到 `src/web/uvcpp_http_date.cpp` 了：`Date` 头要在 HTTP 层
+// 按秒缓存，两份日期表并存迟早会走散。
 const char* const k_mon_names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
@@ -1156,25 +1159,16 @@ long long days_from_civil(long long y, unsigned m, unsigned d) {
 
 }  // namespace
 
-std::string web_http_date(time_t t) {
-  struct tm tmv;
-#if defined(_WIN32)
-  if (::gmtime_s(&tmv, &t) != 0) return std::string();
-#else
-  if (::gmtime_r(&t, &tmv) == NULL) return std::string();
-#endif
+// 格式化搬到 `src/web/uvcpp_http_date.*` 了 —— `Date` 响应头要在那边按秒
+// 缓存，而"两台机器各存一份日期表"迟早会走散。名字保留并转发：它们是公开
+// API（`uvcpp_web_util.h`），改名是另一件事。
+//
+// 输出与原实现**逐字节相同**（同一张表、同一条格式串）。唯一的差别是年份
+// 超出 4 位时：原实现会拼出一个 5 位年的串，新实现返回空串（那不是合法的
+// IMF-fixdate，发出去对端只会解析出一个错的日期）。
+std::string web_http_date(time_t t) { return http_date(t); }
 
-  char buf[64];
-  // 必须是 GMT。用本地时间格式化是这块最经典的历史 bug（缓存因此全乱）。
-  const int n = std::snprintf(buf, sizeof(buf), "%s, %02d %s %04d %02d:%02d:%02d GMT",
-                              k_wday_names[tmv.tm_wday % 7], tmv.tm_mday,
-                              k_mon_names[tmv.tm_mon % 12], tmv.tm_year + 1900,
-                              tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-  if (n <= 0) return std::string();
-  return std::string(buf, static_cast<size_t>(n));
-}
-
-std::string web_http_date_now() { return web_http_date(::time(NULL)); }
+std::string web_http_date_now() { return http_date_now(); }
 
 time_t web_parse_http_date(const std::string& s) {
   const std::string t = web_trim(s);

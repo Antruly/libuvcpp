@@ -193,7 +193,7 @@ struct callbacks {
    （`src/http2/uvcpp_h2_connection.cpp:18` 只存指针），但头文件的参数说明要求它
    （`src/http2/uvcpp_h2_connection.h:54`）。谁建谁自己判：
    `client->is_tls() && client->tls_alpn_selected() == "h2"`
-   （照 `src/web/uvcpp_http_server.cpp:246-246`）。
+   （照 `src/web/uvcpp_http_server.cpp:247-247`）。
 3. **`on_disconnect` 里必须销毁这个对象。** 头文件写得很直白：
    "回调返回后**不要**再碰本对象 —— 持有者应当在这里把它销毁"
    （`src/http2/uvcpp_h2_connection.h:46-51`）。
@@ -219,14 +219,14 @@ TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字�
 那四个 `send_*` 是"`submit_*` + `flush()`"的合并 —— 忘了 `flush()` 就是
 "响应提交了但一个字节都没发"这种最难查的静默失败（`src/http2/uvcpp_h2_connection.h:74`）。
 
-库内那份接好的实现（`src/web/uvcpp_http_server.cpp:1614-1614` 起）的调用序列：
+库内那份接好的实现（`src/web/uvcpp_http_server.cpp:1628-1628` 起）的调用序列：
 
-1. 分流点判 ALPN，是 h2 就走另一条路（`src/web/uvcpp_http_server.cpp:246-246`）；
-2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:1614-1614`）；
-3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:1619-1619`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:1679-1679`）；
-4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:1684-1684`）；
-5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:1686-1686`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:1687-1687`）；
-6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:1724-1724` 起）。
+1. 分流点判 ALPN，是 h2 就走另一条路（`src/web/uvcpp_http_server.cpp:247-247`）；
+2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:1628-1628`）；
+3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:1633-1633`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:1693-1693`）；
+4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:1698-1698`）；
+5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:1700-1700`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:1701-1701`）；
+6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:1738-1738` 起）。
 
 一个能编的最小响应侧写法：
 
@@ -278,7 +278,7 @@ done)` → 最后一块 `end_stream = true`。三处要点：
 
 **低层没有请求侧的合并入口** —— `uvcpp_h2_connection` 上的四个 `send_*` 全是响应侧的。
 客户端提交完请求**必须自己调 `flush()`**。这一点在
-`tests/functional/web_ssl_h2_server_func.cpp:457` 有一段专门的告诫，
+`tests/functional/web_ssl_h2_server_func.cpp:460` 有一段专门的告诫，
 库内正解在 `src/web/uvcpp_http_client.cpp:1224`：
 
 ```cpp
@@ -343,7 +343,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 `on_request_end` 的触发条件是**「这条流的 END_STREAM 到了」**，不是"有请求体才算"
 （`src/http2/uvcpp_h2_session.cpp:499`）。HEADERS 自带 END_STREAM 的请求（也就是
 绝大多数 GET）**也会触发**，而且是紧接着 `on_request` 同步来的 —— 库内自己就依赖
-这一点：`src/web/uvcpp_http_server.cpp:1641-1642` 明说那里**不能** `erase` 流状态，
+这一点：`src/web/uvcpp_http_server.cpp:1655-1656` 明说那里**不能** `erase` 流状态，
 无 body 的请求这两下是背靠背的，擦掉之后那条请求就没人派发了。
 
 **二、客户端交付响应只能放 `on_response_end`。** 带 body 的响应里 `on_response` 的
@@ -484,7 +484,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:798
 
 **`uvcpp_h2_connection` 必须在 socket 连上之后才建。** 它自己装读回调，
 而没连上的 client 上 `read_start_events` 返回 `UV_ENOTCONN` —— 那个失败没人会再 arm
-（`src/web/uvcpp_http_client.cpp:265`、`tests/functional/web_ssl_h2_server_func.cpp:407`）。
+（`src/web/uvcpp_http_client.cpp:265`、`tests/functional/web_ssl_h2_server_func.cpp:409`）。
 
 **ALPN 要自己确认。** 构造函数不校验 `tls_alpn_selected() == "h2"`，但头文件的参数
 说明要求它已经协商好（`src/http2/uvcpp_h2_connection.h:54`）。谁建谁判。

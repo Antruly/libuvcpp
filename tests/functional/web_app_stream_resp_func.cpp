@@ -8,7 +8,9 @@
  *
  * 为什么单独一个文件：步骤 3 的 `web_stream_response_func.cpp` 打的是 **http
  * 层**（`begin_stream` / `write_stream` / `end_stream` 三个入口的字节契约），
- * 本文件打的是**框架层** —— 组帧、HEAD 的逐字节一致性、压缩闸门、`on_drain`
+ * 本文件打的是**框架层** —— 组帧、HEAD 的头部一致性（摘掉挂钟字段 `Date` 之后
+ * 逐字节一致 —— 直比整块会让这条每秒约 15% 概率红，理由见 `drop_header_line`
+ * 的注释）、压缩闸门、`on_drain`
  * 的边沿触发、`on_sent` 的推迟与 `streamed` 字段、闲置超时对流式响应的豁免、
  * 以及对端断开时这条流被结算**恰好一次**。这些机制只在真端口上存在（没有
  * 服务器时根本没有 `uvcpp_web_response` 的流式分支）。
@@ -43,6 +45,7 @@
 #include <webapp/uvcpp_web_response.h>
 #include <webapp/uvcpp_web_router.h>
 
+#include "http_date_check.h"
 #include "wait_util.h"
 
 using namespace uvcpp;
@@ -107,6 +110,39 @@ bool split_wire(const std::string& wire, std::string& head, std::string& body) {
 
 bool head_has(const std::string& head, const std::string& needle) {
   return head.find(needle) != std::string::npos;
+}
+
+/**
+ * @brief 把头部块里名为 `name` 的那**一整行**摘掉，其余原样保留（含结尾空行）。
+ *
+ * 用途只有一处，但那一处非它不可：下面第 3 组要断言"HEAD 的头部与 GET **逐字节
+ * 相同**"，而 `date` 是**挂钟**值、不是响应对象的属性 —— 两次独立请求在两个时刻
+ * 发出去，跨过一次秒边界，两条的 `Date` 就**必须**不同（RFC 9110 §6.6.1 要的正是
+ * "报文发出去那一刻"）。不摘的话那条判据每秒有约 15% 的概率红，而那种红**不是
+ * 缺陷**（实测：`ctest -j4` 连跑十几次红了三次，red 就是这一条子用例）。
+ *
+ * 头名按**小写**比 —— 本框架线上发出来的头名一律小写（同文件 `head_has` 的用法也
+ * 依赖这一点）。找不到那一行就原样返回：调用方另有"这条必须存在"的断言兜着，
+ * 不在这里静默补一个空行（那会把"没发"变成"发了空的"）。
+ */
+std::string drop_header_line(const std::string& head, const std::string& name) {
+  const std::string lower = name + ":";
+  std::string out;
+  size_t pos = 0;
+  while (pos < head.size()) {
+    const size_t eol = head.find("\r\n", pos);
+    const std::string line =
+        (eol == std::string::npos) ? head.substr(pos) : head.substr(pos, eol - pos);
+    // 第 0 行是状态行，永远保留。
+    if (pos == 0 || line.size() < lower.size() ||
+        line.compare(0, lower.size(), lower) != 0) {
+      out += line;
+      out += "\r\n";
+    }
+    if (eol == std::string::npos) break;
+    pos = eol + 2;
+  }
+  return out;
 }
 
 /**
@@ -490,7 +526,32 @@ void test_head_no_chunks() {
   std::string gh, gb, hh, hb;
   check(split_wire(get_wire, gh, gb), "head: GET 头体可分");
   check(split_wire(head_wire, hh, hb), "head: HEAD 头体可分");
-  check(gh == hh, "head: HEAD 的头部与 GET 逐字节相同（含 transfer-encoding）");
+  // ---- `Date` 必须先摘掉再比逐字节 ---------------------------------------
+  // 这条判据原来是 `check(gh == hh, ...)`，直比两条响应的**整个头部块**。
+  // 加了 `Date` 之后它就变成一条**依赖挂钟**的判据：GET 与 HEAD 是两次独立
+  // 请求、两个时刻，跨过秒边界时两条的 `Date` 必然不同 —— 而那是**对的**
+  // （RFC 9110 §6.6.1 要的就是"报文发出去那一刻"），不该判红。
+  // 实测：`ctest -j4` 下这条每秒约 15% 的概率红；单独跑因为间隔只有几毫秒，
+  // 永远绿 —— 所以它曾经被误当成抖动。
+  //
+  // 但**摘掉不等于不管**：先钉住"两边都得有，而且都是刚生成的"。少了这两条，
+  // "HEAD 忘了发 Date"会被这次剔除顺手掩盖成绿 —— 那正是本仓最忌讳的假绿。
+  std::string why_g, why_h;
+  const bool gd_ok =
+      uvcpp_test::date_is_fresh_imf(uvcpp_test::raw_header_value(gh, "date"), &why_g);
+  const bool hd_ok =
+      uvcpp_test::date_is_fresh_imf(uvcpp_test::raw_header_value(hh, "date"), &why_h);
+  // 条件先落进具名变量再调 `check`：实参求值次序未指定，GCC 从右往左会让
+  // 消息串赶在 `why_*` 被填之前拼好（本仓踩过，见 date_mutation.py 的 M9/M10）。
+  check(gd_ok, "head: GET 的头部里有合格的 Date —— " + why_g);
+  check(hd_ok, "head: HEAD 的头部里有合格的 Date —— " + why_h);
+
+  check(drop_header_line(gh, "date") == drop_header_line(hh, "date"),
+        "head: 摘掉 Date 之后，HEAD 的头部与 GET 逐字节相同（含 transfer-encoding）");
+  // 反向对照：摘除**确实**动了东西。少了它，`drop_header_line` 哪天退化成恒等
+  // 函数（或那句 `compare` 写反成恒真），上面那条就退化成"什么都没判"。
+  check(drop_header_line(gh, "date") != gh,
+        "head: 对照 —— 摘除确实起作用（摘掉 Date 那一行后与原文不同）");
   check(hb.empty(), "head: HEAD 的 body 一个字节都没有（实测 " +
                         std::to_string(hb.size()) + "）");
 

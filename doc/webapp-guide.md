@@ -108,13 +108,17 @@ int main() {
 | `set_compress_min_body_size(size_t)` | `1024` | 触发压缩的最小 body |
 | `set_access_log(bool)` | `true` | 自动装访问日志中间件 |
 | `set_log_level(log_level)` | `INFO` | 全局最低日志等级 |
-| `set_server_header(const std::string&)` | `"uvcpp"` | 空 = 不发这个头 |
+| `set_server_header(const std::string&)` | `UVCPP_SERVER_TOKEN`（`"uvcpp"`） | 空 = 不发这个头。默认值**刻意不带版本号**（理由见 `src/webapp/uvcpp_web_app.h:224-229` 那条 @warning）；想发版本号自己取 `uvcpp::version_string()`（`src/uvcpp/uvcpp_version.h:69-69`） |
 | `set_shutdown_grace_ms(int)` | `3000` | 优雅关闭宽限；`0` = 立刻强关 |
 | `set_idle_timeout_ms(int)` | `60000` | 闲置超时（slowloris 防御）；`0` = 关闭 |
 | `set_max_pipelined_requests(size_t)` | `8` | 同一条连接上的在途请求上限；超了回 **503 + close**；`0` = 不限 |
 | `set_auto_options(bool)` | `true` | 未命中且路径存在时自动答 OPTIONS |
 | `set_head_as_get(bool)` | `true` | HEAD 无注册时回退到 GET handler |
 | `set_work_limit(size_t)` | 见 [异步与工作池](#14-异步与工作池) | 工作池在途上限；`0` = 不限 |
+
+**响应头由框架补的还有一条 `Date`**（web 层的收口打的，h1/h2 × 整包/流式四条出口
+都在内），按秒缓存、不是每响应一次格式化。格式、以及 1xx 那两条为什么不带，见
+[`web-http-guide.md`](web-http-guide.md) 的「协议行为」一节。
 
 **工作线程数没有配置项**：线程池大小是 libuv 的 `UV_THREADPOOL_SIZE`，且**只在进程
 启动前设置才生效**（libuv 只读一次，没有运行时扩容 API）。没设时 `start()` 会打一条 WARN。

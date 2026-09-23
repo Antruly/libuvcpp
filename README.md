@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.0-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.0` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.1-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -586,7 +586,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.0** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.1-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -659,6 +659,15 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   as its `body`; the contract is in the header and asserted up front (`1.2.7`)
 - `uvcpp_web_router::match()` no longer fills in `allow` / `allowed_methods` on a successful
   match — those fields are empty when the result is `MATCHED` (`1.2.12`)
+- Every response the framework serialises carries a `Date` (both HTTP/1.1 and HTTP/2, whole
+  and streamed), formatted once per second instead of once per response. The two messages it
+  does *not* serialise — the raw `100 Continue` and the WebSocket `101 Switching Protocols`
+  handshake, both written as literal byte strings rather than routed through the response
+  sink — carry no `Date`. RFC 9110 §6.6.1 requires `Date` on 2xx/3xx/4xx and only *permits*
+  it on 1xx/5xx, so leaving those two without one is conformant rather than a deliberate
+  exclusion. `UVCPP_SERVER_TOKEN` / `uvcpp::server_token()` name the default `Server` value
+  (still without a version, on purpose), and `uvcpp::version_string()` finally exposes
+  `UVCPP_VERSION_STRING`, which had no reader anywhere in the tree (`1.3.1`)
 
 ### TLS & networking
 

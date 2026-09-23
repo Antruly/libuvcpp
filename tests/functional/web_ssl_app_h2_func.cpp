@@ -64,6 +64,7 @@
 
 #include <openssl/ssl.h>
 
+#include "http_date_check.h"
 #include "loop_drain.h"
 #include "wait_util.h"
 
@@ -361,6 +362,7 @@ struct seen_response {
   bool        end_stream_at_headers = false;
   bool        end                   = false;
   std::string body;
+  std::string date;  ///< 响应必须带 `Date`（判据见 http_date_check.h）
 };
 
 struct client_probe {
@@ -426,6 +428,7 @@ struct h2_client {
         seen_response& r        = open_response(st.stream_id);
         r.status                = static_cast<int>(st.response.status_code);
         r.end_stream_at_headers = end_stream;
+        r.date = http_get_header(st.response.headers, "date");
       };
       h2c.on_body = [this](uvcpp_h2_session&, uvcpp_h2_stream& st, const char* d,
                            size_t n) {
@@ -846,6 +849,14 @@ int main() {
           // 两件可读的事。
           check(rs.body.find("0\r\n\r\n") == std::string::npos,
                 "h2_stream: /sse 的 body 里出现了 chunked 终止块");
+
+          // 流式那条出口是**另一个**函数（`begin_stream` 的 h2 重载 →
+          // `send_headers`）。整包那条（`send_h2_response`）覆盖不到它 ——
+          // 这正是"两处各补一次"那句话的判据。
+          std::string why;
+          // 同上：条件先落进具名变量，别让消息串赶在 `why` 被填之前拼出来。
+          const bool date_ok = uvcpp_test::date_is_fresh_imf(rs.date, &why);
+          check(date_ok, "h2_stream: /sse 的 Date 不合格 —— " + why);
         }
 
         // --- 3b：慢流不许扣住别的流 ---

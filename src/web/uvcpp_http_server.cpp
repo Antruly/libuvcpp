@@ -11,6 +11,7 @@
 
 #include <web/uvcpp_http_parser.h>
 #include <web/uvcpp_http_compress.h>
+#include <web/uvcpp_http_date.h>
 // `uvcpp_loop_index_of_this_thread()`：按循环切容器要问"我在哪条循环上"。
 #include <net/uvcpp_loop_worker.h>
 #include <cctype>
@@ -685,6 +686,11 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   }
   conn_ctx& ctx = it->second;
 
+  // `Date` 是源服务器**必须**发的（RFC 9110 §6.6.1：有可靠的钟就必须发），
+  // 而这里是 h1 整包响应与"延迟应答回到这里"那一支的唯一收口。
+  // 必须补在 h2 分支**之前** —— 延迟应答也从下面那一句拐走。
+  http_ensure_date(resp);
+
 #if UVCPP_NGHTTP2_ENABLE
   // h2 连接的延迟应答也回到这里 —— 发起它的处理函数手里只有 client 和 resp，
   // 没有流 id，所以流 id 是**随 resp 一起传下来**的（见 resp.stream_id）。
@@ -823,6 +829,11 @@ void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client,
   // HEAD 走的就是"只序列化头部"那一支：头部与 GET 逐字节相同，body 一个
   // 字节都不发。`out_streaming` 仍然置位，好让 write_stream 的调用方拿到
   // 一致的语义（HEAD 上框架层会把 write_chunk 变成空操作，见 uvcpp_web_response）。
+  // 流式响应的头部不走 `send_response`（它一次性拼整条报文，而流式的 body
+  // 此刻还不存在），`Date` 在这条路上得单独补 —— 且必须在 `to_string()`
+  // **之前**：序列化就发生在那一句里。
+  http_ensure_date(resp);
+
   ctx.out_streaming = true;
 
   enqueue_write(ctx, client, resp.to_string(/*include_body=*/false));
@@ -852,6 +863,9 @@ void uvcpp_http_server::begin_stream(uvcpp_tcp_client* client, int32_t stream_id
       return;
     }
     resp.stream_id = stream_id;
+    // h2 的流式头部走 `send_headers()`，与整包那条（`send_h2_response`）是
+    // 两个不同的出口 —— 这里也得补。
+    http_ensure_date(resp);
     ctx.h2->send_headers(stream_id, resp);
     return;
   }
@@ -1728,6 +1742,11 @@ int uvcpp_http_server::send_h2_response(uvcpp_tcp_client* client,
   auto it = tbl.find(client);
   if (it == tbl.end() || it->second.h2 == nullptr) return UV_EINVAL;
   conn_ctx& ctx = it->second;
+
+  // h2 的**主派发路径**（`on_request_end` 里那句 `send_h2_response`）与 413
+  // 那一条都直接调本函数、整条绕过 `send_response`，所以这一处不是保险而是必需。
+  // 重复调用是空操作 —— `http_ensure_date` 先查有没有。
+  http_ensure_date(resp);
 
   auto sit = ctx.h2_streams.find(stream_id);
   if (sit == ctx.h2_streams.end()) return UV_EINVAL;

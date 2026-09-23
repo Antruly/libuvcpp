@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
 ## 3. POSIX（Linux / macOS）：零通讯
 
 **master 只做一件事：把端口占住。** 它走今天已有的 bind 链
-（`src/webapp/uvcpp_web_app.cpp:1940-1940` → `src/web/uvcpp_http_server.cpp:140-141` →
+（`src/webapp/uvcpp_web_app.cpp:1942-1942` → `src/web/uvcpp_http_server.cpp:141-142` →
 `src/net/uvcpp_tcp_server.cpp:209-210` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
 **然后不跑循环** —— `uv_listen` 会在 `listen(fd, backlog)` 那一步就把端口占住，
 而 master 的 loop 从不 `uv_run`，所以它永远不会 accept。于是"master 不接请求"是天然的，

@@ -34,6 +34,8 @@
 
 #include <webapp/uvcpp_web_app.h>
 
+#include <uvcpp/uvcpp_version.h>  // UVCPP_SERVER_TOKEN
+
 #include <uv.h>
 
 #include <handle/uvcpp_async.h>
@@ -198,7 +200,7 @@ uvcpp_web_app_config::uvcpp_web_app_config()
       compress_min_body_size(1024),
       access_log(true),
       min_log_level(log_level::INFO),
-      server_header("uvcpp"),
+      server_header(UVCPP_SERVER_TOKEN),
       shutdown_grace_ms(3000),
       idle_timeout_ms(60000),
       max_pipelined_requests(8),

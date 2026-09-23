@@ -61,6 +61,7 @@
 
 #include <openssl/ssl.h>
 
+#include "http_date_check.h"
 #include "loop_drain.h"
 #include "wait_util.h"
 
@@ -346,6 +347,7 @@ struct seen_response {
   std::string content_type;
   std::string content_length;
   std::string content_encoding;  ///< 场景 7 的 gzip 判据落在这上面
+  std::string date;              ///< 响应必须带 `Date`（判据见 http_date_check.h）
 };
 
 struct client_probe {
@@ -420,6 +422,7 @@ struct h2_client {
             http_get_header(st.response.headers, "content-length");
         r.content_encoding =
             http_get_header(st.response.headers, "content-encoding");
+        r.date = http_get_header(st.response.headers, "date");
       };
       h2c.on_body = [this](uvcpp_h2_session&, uvcpp_h2_stream& st,
                            const char* d, size_t n) {
@@ -699,6 +702,22 @@ int main() {
       check(resp[0].end, "get_hello: response never completed");
       check(resp[0].content_length == std::to_string(sizeof(kHelloBody) - 1),
             "get_hello: content-length = \"" + resp[0].content_length + "\"");
+
+      // ---- `Date`：h2 的**主派发路径**就是 `send_h2_response` --------------
+      // **五条一条一条查**，不是抽查第一条。这五条覆盖了四种不同的合成方式：
+      // 三条走路由处理函数（`/hello` `/echo` `HEAD /hello`），一条是框架自己
+      // 合的 404（`/nope` 不进路由）—— 而"某一条出口忘了补"正是这里要抓的形态，
+      // 只查第一条会让它全绿地漏过去。
+      for (size_t i = 0; i < resp.size(); ++i) {
+        std::string why;
+        // 条件必须先落进具名变量：`check(cond, "…" + why)` 的实参求值次序
+        // 未指定，GCC 从右往左 ⇒ 消息先拼好、`why` 还是空的（实测过，
+        // 见 `tests/tools/date_mutation.py` 的 M9/M10）。
+        const bool date_ok = uvcpp_test::date_is_fresh_imf(resp[i].date, &why);
+        check(date_ok,
+              "场景 1 第 " + std::to_string(i) + " 条响应（流 " +
+                  std::to_string(resp[i].sid) + "）的 Date 不合格 —— " + why);
+      }
       if (seen.size() >= 1) {
         check(seen[0].url == "/hello" &&
                   seen[0].method == http_method::HTTP_GET,

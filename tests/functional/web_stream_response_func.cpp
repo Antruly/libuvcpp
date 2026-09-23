@@ -32,6 +32,8 @@
 #include <net/uvcpp_tcp_client.h>
 #include <req/uvcpp_shutdown.h>
 
+#include "http_date_check.h"
+
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -229,6 +231,19 @@ static bool test_stream_head_only() {
   if (raw.find("content-length:") != std::string::npos) {
     std::cout << "  [err] 流式响应里不该出现 content-length\n";
     return false;
+  }
+
+  // 流式头部走的是 `to_string(/*include_body=*/false)` 那条出口，与 `send_response`
+  // 是两个不同的函数 —— 所以"整包响应有 Date"完全不能推出"这里也有"。
+  // 取值判据与 h2 那两条共用（`http_date_check.h`），格式本身由新用例的 7 组
+  // 硬编码向量钉住。
+  {
+    std::string why;
+    if (!uvcpp_test::date_is_fresh_imf(uvcpp_test::raw_header_value(raw, "date"),
+                                       &why)) {
+      std::cout << "  [err] 流式头部里的 Date 不合格 —— " << why << "\n";
+      return false;
+    }
   }
   return true;
 }

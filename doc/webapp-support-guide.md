@@ -132,7 +132,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 
 `webapp/uvcpp_web_util.h` 是**纯函数模块，没有类**，39 个公开声明。
 它的头注释（`:10-11`）解释的是**为什么要新开这个模块** —— web 层连一个 query
-解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:216-219`），
+解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:217-220`），
 不是"这一页里的东西不存在"。`src/web/` 下也确实没有任何 query / cookie / URL 解码
 helper。
 
@@ -199,7 +199,7 @@ void doc_mime_override() {
 ```
 
 内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:456`，实现
-`src/webapp/uvcpp_web_util.cpp:979-982`），`builtin_size()` 也转调它
+`src/webapp/uvcpp_web_util.cpp:981-984`），`builtin_size()` 也转调它
 （`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
 
@@ -453,7 +453,7 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 ### `web_split_path_query()` 比头文件说的做得多
 
 `src/webapp/uvcpp_web_util.h:133-147` 只说"拆 path/query + 剥 `#fragment`"，实现还会**先剥掉
-绝对形式（代理风格）的 `http://host`**（`src/webapp/uvcpp_web_util.cpp:204-208`）——
+绝对形式（代理风格）的 `http://host`**（`src/webapp/uvcpp_web_util.cpp:206-210`）——
 `GET http://x/../y HTTP/1.1` 这种请求目标。头文件没写这一条。
 
 ### 点落在目录名里时会取错
@@ -506,8 +506,8 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 （含 `UV_EINVAL` / `UV_EALREADY` / `UV_EOF` / `UV_ECANCELED`）。
 
 而 `uvcpp_web_util` 里另有**两个哨兵值**：`web_hex_value()` 失败返回 `-1`
-（`src/webapp/uvcpp_web_util.cpp:125-130`），`web_parse_http_date()` 失败返回 `(time_t)-1`
-（`:1179-1180`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
+（`src/webapp/uvcpp_web_util.cpp:127-132`），`web_parse_http_date()` 失败返回 `(time_t)-1`
+（`:1173-1174`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
 **这几种码一个都不要喂给 `uv_strerror()`**，会得到看似合理的垃圾。
 
 ---
@@ -555,24 +555,24 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:126-131`）—— 允许，但不是有界的了。
 
 **`web_url_encode()` 的 `keep` 优先于 `plus_for_space`。**
-`src/webapp/uvcpp_web_util.cpp:177` 先判 `unreserved || keep.find(c) != npos`，**再**判
+`src/webapp/uvcpp_web_util.cpp:179` 先判 `unreserved || keep.find(c) != npos`，**再**判
 `c == ' ' && plus_for_space`。所以 `keep` 里放空格或 `+` 会让它们**原样输出** ——
-查询串里一个原样输出的 `+` 会被对端解成空格。头 `:107-119` 没提这个优先级。
+查询串里一个原样输出的 `+` 会被对端解成空格。头 `:109-121` 没提这个优先级。
 只放行 `/` 是安全的。
 
 **`web_build_cookie()` 只校验 name 与 value。**
-`path`（`src/webapp/uvcpp_web_util.cpp:469-472`）与 `same_site`（`:481-486`）是**原样拼接**的
-—— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:226-228` 只描述了取值
-集合，没声明"会校验"。`name` 是校验的（`:459-462`，非 token 字符直接返回空串），
-`value` 也是编码的（`:467`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
-设计：`SameSite=None` 会自动补 `Secure`（`:484-487`）。
+`path`（`src/webapp/uvcpp_web_util.cpp:471-474`）与 `same_site`（`:483-488`）是**原样拼接**的
+—— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:228-230` 只描述了取值
+集合，没声明"会校验"。`name` 是校验的（`:461-464`，非 token 字符直接返回空串），
+`value` 也是编码的（`:469`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
+设计：`SameSite=None` 会自动补 `Secure`（`:486-489`）。
 
 **`web_sanitize_filename()` 只能当元数据。** 它不保证是合法文件名（`*` `?` `"`
 照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:415-419`）；`max_len` 是**软**
 上限（设备名保护会让结果多一字节，`:411-413`）。
 
-**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:252-282`）—— `;` 会被当成
-值的一部分。头 `:158-167` 没写分隔符。
+**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:254-284`）—— `;` 会被当成
+值的一部分。头 `:160-169` 没写分隔符。
 
 **连接身份有三套，不要混。** 见 §3。
 
