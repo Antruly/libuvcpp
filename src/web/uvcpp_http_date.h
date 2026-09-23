@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_http_date.h
  * @brief HTTP 日期（IMF-fixdate）格式化，以及 `Date` 响应头的按秒缓存。
  * @author zhuweiye
