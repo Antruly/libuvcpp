@@ -15,7 +15,7 @@
 ### 1.1 会话层（`uvcpp_h2_session`）
 
 建在 `nghttp2` 上，**不含任何 socket、不含任何 libuv 调用** —— 收发就是一对
-字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:191,197`）。
+字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:231`、`:241`）。
 所以这一层既不依赖 TLS 也不依赖事件循环，用例可以拿两个对象面对面地喂字节
 （`tests/functional/h2_session_func.cpp`）。
 
@@ -30,16 +30,16 @@
 
 ### 1.2 边界（这些是"本层自己做的"，不是 nghttp2 给的）
 
-- **收方向头部列表预算** `h2_header_budget`（`src/http2/uvcpp_h2_common.h:93`）。
+- **收方向头部列表预算** `h2_header_budget`（`src/http2/uvcpp_h2_common.h:119`）。
   已实测：nghttp2 会把我们宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 存进
   `local_settings`，但**接收路径从不累加、也没跟它比过** —— 所以本层自己按
   `namelen + valuelen + 32` 累加，越界立刻 RST(0x0b)。**这是唯一防线，不是第二道。**
-- **发方向头部块上限** `H2_MAX_SEND_HEADER_BLOCK`（`src/http2/uvcpp_h2_common.h:51`）。
+- **发方向头部块上限** `H2_MAX_SEND_HEADER_BLOCK`（`src/http2/uvcpp_h2_common.h:55`）。
   nghttp2 送帧前会拿 `nghttp2_hd_deflate_bound()` 估一个上界，超了它 `return
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:892`）。
+  （`src/http2/uvcpp_h2_session.cpp:953`）。
 - **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
   错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
@@ -51,7 +51,7 @@
 - **协议白名单**：伪头按**方向**白名单（服务端收到 `:status` 即拒）、`:scheme`
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
-  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:487`）。
+  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:499`）。
 - **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1290`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
@@ -98,6 +98,8 @@
 |---|---|
 | `tests/functional/h2_session_func.cpp` | 会话层面对面（自定义头部往返、流式、RST、洪泛、头部预算的两个方向、GOAWAY 的两个方向…） |
 | `tests/functional/web_ssl_h2_client_func.cpp` | 客户端走真 TLS + ALPN；场景 6 是**在 h2 回调里 `delete` 客户端**；场景 7 里对端的 handler **故意在 `recv()` 的栈上 `flush()`**（与 `uvcpp_http_server` 的处理函数同一形状），是"回调栈里不冲字节"那条不变式的活体判据；场景 7 用**裸 h2 对端**（`uvcpp_http_server` 造不出指定错误码的 RST —— 它的 `reject()` 把码写死了）按剧本发 `REFUSED_STREAM` / `CANCEL` / `NO_ERROR` / `PROTOCOL_ERROR`，八条流串行发、每条都断言"恰好回调一次 + 流号是递增奇数"，中间夹的 `/hello` 是"连接没被流级 RST 带下水"的判据；状态码那一维**两头都钉**：`/refuse` 那几条头没到过，必须是 `HTTP_STATUS_NONE`，`/part`（对端先发一个不结束流的头、再 RST）必须把真的 `200` 交出去 —— 少了后者，一个"永远交 `HTTP_STATUS_NONE`"的实现也能过；场景 9 钉**断开时还在飞**的流（`on_h2_disconnect` 那条兜底路）—— 对端收下请求之后既不回也不 RST、直接拆 TCP，交付的必须是"没收到过"配一个正的奇数流号，而同一条路上"头先到、连接后断"的那半边必须把真的 `200` 与 `x-mark` 交出去；场景 8 钉响应的拷贝构造 / 赋值（ALPN=h2 处处写成显式前置） |
+| `tests/functional/h2_backpressure_func.cpp` | 收方向背压（面对面内存装置，无 socket 无 TLS）。场景 1 用**4096** 的每流窗口只钉流级（暂停的流恰好收到一个窗口就停住、暂停期一个该流的 WINDOW_UPDATE 都没有、恢复后欠账**恰好**还 4096 且余下字节到齐）；场景 2 用 **131072** 的窗口只钉连接级 —— 暂停的流推进到**超过 65535** 而同一连接上另一条流照样收满 393216，这是"真流级背压"与"连接级误伤"唯一的区分点，`server_window > 65535` 是硬要求（窗口 ≤ 65535 时"连接级也扣住"的坏实现照样绿）；场景 3 钉 `UV_EINVAL` 与幂等 |
+| `tests/functional/h2_backpressure_flush_func.cpp` | 恢复必须**真的把字节冲出去**（真 socket，手搓帧的裸对端）。会话层的 `resume_stream()` 只排队，应用最自然的调用时机（自己的定时器里）**没有任何人会替你 flush** —— 漏掉它的表现是"对端永远等不到窗口、流挂死"且**不报错**。本用例把 `conn->resume_stream(1)` 换成 `conn->session().resume_stream(1)` 就必须变红 |
 | `tests/functional/web_ssl_h2_server_func.cpp` | 服务端走真 TLS + ALPN |
 | `tests/functional/web_http_client_selfdestroy_func.cpp` | h1：在响应回调 / connect 回调 / keep-alive 第二次请求的回调里 `delete` 客户端（三条路都不许崩） |
 | `tests/functional/web_http_client_close_func.cpp` | h1：对端在响应收完之前断开（回调必须落地、不许重复交付、死连接上 `send()` 报 `UV_ENOTCONN`；场景 3 钉"`404` 的头到了、正文没发完就断"时交付的状态码必须是**那个 404**） |
@@ -115,16 +117,22 @@
 - **不自实现帧层与 HPACK，直接用 `nghttp2`。** 这与最初那份模块开发计划里的设想不同
   —— 那份计划是 `docs/web-module-development-plan.md`，而 `docs/` 在 `.gitignore` 里，
   **只存在于开发机上**（clone 下来没有这个文件），§1.3 已如实记了一笔。
-- **流控没有自己的策略。** 全 `src/` 零命中 `consume_window` /
-  `NO_AUTO_WINDOW_UPDATE` —— 窗口更新完全交给 nghttp2 的自动行为，
-  本层既不暴露背压也不做自己的窗口管理。`H2_DEFAULT_INITIAL_WINDOW_SIZE`
-  （`src/http2/uvcpp_h2_common.h:40`）只有定义，别处不读它。
+- **流控有自己的策略，但只有**协议层**那一半。** 会话层打开
+  `nghttp2_option_set_no_auto_window_update()` 并自己归还窗口
+  （`src/http2/uvcpp_h2_session.cpp` 的 `on_data_chunk`），对外给出
+  `pause_stream()` / `resume_stream()`（会话层、连接层各一对）、
+  `set_max_out_stream_bytes()` 那道出站上界、`peer_window_size()`。
+  **框架侧一个调用点都没有** —— `uvcpp_web_response` / `uvcpp_http_server`
+  全仓零命中 `pause_stream`，所以今天它只对**直接用低层会话/连接**的调用方可达。
+  详见 §4.2。`H2_DEFAULT_INITIAL_WINDOW_SIZE`
+  （`src/http2/uvcpp_h2_common.h:44`）**仍然**只有定义、别处不读它：那套策略拿
+  "已经宣告出去的窗口"当尺子记账，不改这个常量的取值。
 - **流状态机只用了一半。** `h2_stream_state` 有五格
-  （`src/http2/uvcpp_h2_common.h:140-147`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
+  （`src/http2/uvcpp_h2_common.h:166-173`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**（两个枚举值上也标了这一点）。
-- **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:168-180`）：
+- **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:182-194`）：
   三类里的"`want_read`/`want_write` 双双为假"那一类**不可达** —— 这两个是公开成员
-  （`src/http2/uvcpp_h2_session.h:354,356`），但本层没有任何一处拿它们判定致命。
+  （`src/http2/uvcpp_h2_session.h:373`、`:375`），但本层没有任何一处拿它们判定致命。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
@@ -278,19 +286,33 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
 
 ### 4.2 还没修的（**只记录**）
 
-- **收方向没有自己的背压**（见 2 节流控那条）：窗口完全由 nghttp2 自动更新。
+- **收方向的框架级背压**：协议层机件已落地（§2 流控那条、§1.5 的两个新用例），
+  但框架侧**没有调用点**。h2 上"边收边给"的流式 body 今天仍不可达：流式认领钩子
+  `stream_claim_` 全仓只有一处调用点，在 **llhttp(h1)** 的解析器里
+  （`src/web/uvcpp_http_server.cpp`），h2 请求走 `dispatch_h2_request` →
+  `find_handler`，从不碰它。
 
-  **为什么停在这儿**，两条理由各自独立。一是这个开关是**全局**的
-  （`NO_AUTO_WINDOW_UPDATE`）：打开之后每一条消费路径都得自己 `consume_window`，
-  漏掉任何一条都会让上传在 64 KiB 处**永久停住** —— 半套比现状更危险。二是内存
-  今天已经有界：两个方向的 DATA 都走同一个 `on_data_chunk`，超过
-  `H2_DEFAULT_MAX_BODY_BYTES`（64 MiB）就 RST（`src/http2/uvcpp_h2_session.cpp:527`）。
-  要给单条流减速，框架层现成的连接级 `read_pause()` 是眼下更合适的粒度。
+**此处更正（`1.2.25-dev`）—— 本文件此前在这里写过两条判断，都撤回。**
+
+1. 「这个开关是**全局**的（`NO_AUTO_WINDOW_UPDATE`）：打开之后每一条消费路径都得
+   自己 `consume_window`，漏掉任何一条都会让上传在 64 KiB 处**永久停住** ——
+   半套比现状更危险。」**方向说反了。** 凡到不了我们回调的字节，nghttp2 自己会把
+   连接窗口还掉：被忽略的 DATA 走 `nghttp2:nghttp2_session.c:6948-6950`、messaging
+   判违规的走 `:6854-6857`、Pad Length / Padding 走 `:6726` / `:6837`。要我们负责的
+   只有**从 `on_data_chunk` 进来的那些字节** —— 一条路径，不是一套。而"漏掉"的真实
+   后果也不是停住：`adjust_recv_window_size` 一旦失败就
+   `nghttp2_session_terminate_session(FLOW_CONTROL_ERROR)`（`:5092` / `:5121`），
+   **整条连接当场死**。比停住更响，也更好判。
+2. 「要给单条流减速，框架层现成的连接级 `read_pause()` 是眼下更合适的粒度。」
+   **两者不是一个粒度。** 连接窗口是全连接共享的 65535，连接级暂停会连带停掉同一条
+   连接上**别的流**；这不是理论问题 —— 本笔为此专门把连接级归还做成无条件的，并在
+   §1.5 那个场景 2 里把它钉死（窗口取 131072 > 65535 正是为了让"连接级也扣住"的坏
+   实现没法蒙混过去）。
 
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1232`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1329`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关

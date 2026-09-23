@@ -113,6 +113,14 @@ struct uvcpp_h2_session::impl {
   size_t              max_header_list = 64u * 1024u;
   int                 last_error      = 0;
 
+  /// 单条流待发队列的字节上界（见 `uvcpp_h2_common.h` 那个常量的注释）。
+  size_t max_out_stream = H2_DEFAULT_MAX_OUT_STREAM_BYTES;
+
+  /// `nghttp2_session_consume_*` 归还失败过。**不就地吞掉** —— 由 `cb_data_chunk`
+  /// 转成 `CALLBACK_FAILURE` 交给 nghttp2，让 `recv()` 按既定的"任何负值都致命"
+  /// 收尾。半死的账目比断掉的连接危险得多。
+  bool consume_failed = false;
+
   /// 收尾时要发的 GOAWAY 错误码。正常关闭是 NO_ERROR；被上面那个令牌桶拦下来
   /// 时改成 ENHANCE_YOUR_CALM —— 连接层收尾时读它，否则"为什么关的"这层
   /// 信息会在半路丢掉，对端只看到一个 NO_ERROR，像是我们自己正常退出。
@@ -212,6 +220,10 @@ struct uvcpp_h2_session::impl {
     /// 队空时 provider 返回过 `NGHTTP2_ERR_DEFERRED`，那条 data frame 现在挂在
     /// nghttp2 的延迟队列里 —— 新数据入队时必须显式 `resume` 才叫得醒。
     bool                  deferred      = false;
+    /// Σ 还没交给 nghttp2 的字节（`chunks` 里那些 `data.size() - offset` 之和）。
+    /// 维护成运行计数是为了让 `submit_data` 的上界判断是 O(1)，不必遍历队列。
+    /// 入队在 `submit_data`、出账在 `cb_read_stream` —— **两处必须成对**。
+    size_t                queued_bytes  = 0;
   };
 
   std::map<int32_t, out_stream> out_streams;
@@ -517,11 +529,31 @@ struct uvcpp_h2_session::impl {
     }
   }
 
+  /// 收方向 DATA 的**唯一**入口（进出站调试时先看这里）。两条额度的规则是：
+  ///   连接级 —— **无条件、且在任何早退之前**（连接窗口是全连接共享的）
+  ///   流级   —— 只有"这条流还在正常收"才还；暂停则记账欠着，这就是背压
+  ///
+  /// 为什么"只有这一条路要还"：nghttp2 自己会把**到不了本回调**的字节在连接级
+  /// 消费掉（被忽略的 DATA `nghttp2_session.c:6948-6950`、messaging 判违规的 DATA
+  /// `:6854-6857`、Pad Length `:6726`），而本回调只在 `data_readlen > 0` 时触发
+  /// （`:6890`）；连接窗口在回调**之前**就被扣了（`:6804`）。这个开关打开之后
+  /// nghttp2 的自动 WINDOW_UPDATE 被抑制（`:5100`/`:5124`），于是**只有**下面这两
+  /// 次 `consume` 能把 `recv_window_size` 降回来 —— 降不回来会走
+  /// `nghttp2_session_terminate_session(FLOW_CONTROL_ERROR)`（`:5121`），
+  /// 那是**整条会话**死掉，不是"上传停住"。
   void on_data_chunk(int32_t id, const uint8_t* data, size_t len) {
+    // ① 连接级：位置是判据，不是风格。一条暂停（或刚被 RST）的流如果把连接级也
+    //    扣住，攒够一个连接窗口（65535）就能把同一条连接上**别的流**一起饿死 ——
+    //    那是连接级误伤，不是背压。
+    if (nghttp2_session_consume_connection(session, len) != 0) {
+      consume_failed = true;
+      return;
+    }
+
     auto it = streams.find(id);
-    if (it == streams.end()) return;
+    if (it == streams.end()) return;  // 连接级已还；没有流对象可还流级
     uvcpp_h2_stream& s = it->second;
-    if (s.rejected) return;
+    if (s.rejected) return;           // 流要没了：欠额随流消失，不再还
 
     s.body_bytes += len;
     if (s.body_bytes > H2_DEFAULT_MAX_BODY_BYTES) {
@@ -533,6 +565,16 @@ struct uvcpp_h2_session::impl {
       reject(id, NGHTTP2_PROTOCOL_ERROR);
       return;
     }
+
+    // ② 流级：这才是背压本身。暂停期间**不**归还，攒着 —— 对端把当前剩余的窗口
+    //    发完就自己停下来（它无法再发），于是欠额天然有界（≤ 一个每流窗口）。
+    if (s.paused) {
+      s.paused_owed += len;
+    } else if (nghttp2_session_consume_stream(session, id, len) != 0) {
+      consume_failed = true;
+      return;
+    }
+
     if (cbs.on_body) {
       cbs.on_body(*owner, s, reinterpret_cast<const char*>(data), len);
     }
@@ -584,8 +626,14 @@ struct uvcpp_h2_session::impl {
 
   static int cb_data_chunk(nghttp2_session*, uint8_t, int32_t stream_id,
                            const uint8_t* data, size_t len, void* ud) {
-    self_of(ud)->on_data_chunk(stream_id, data, len);
-    return 0;
+    impl* self = self_of(ud);
+    self->on_data_chunk(stream_id, data, len);
+    // 额度归还失败**不吞**：账目坏掉的会话继续跑，症状正好是"某条流在 64 KiB 处
+    // 永久停住" —— 本笔要消灭的那个形状。实际只有 NOMEM 那一格够得着（开着这个
+    // 开关时 INVALID_STATE 不可能）。必须返回 CALLBACK_FAILURE 本身：
+    // `nghttp2_session.c:6894` 只在 `nghttp2_is_fatal(rv)` 时才转成它，
+    // 返回 INVALID_STATE 那种非致命码等于什么也没说。
+    return self->consume_failed ? NGHTTP2_ERR_CALLBACK_FAILURE : 0;
   }
 
   static int cb_stream_close(nghttp2_session*, int32_t stream_id,
@@ -636,6 +684,9 @@ struct uvcpp_h2_session::impl {
         std::memcpy(buf + n, c.data.data() + c.offset, take);
         c.offset += take;
         n += take;
+        // 记账点**必须**跟着字节走：`out_stream::queued_bytes` 是 `submit_data`
+        // 那道上界的输入，只增不减的话跑久了会把一条正常的流误拒。
+        os->queued_bytes -= take;
       }
       if (c.offset >= c.data.size()) {
         // 这块整块交出去了。END_STREAM 的那一块发完就到此为止，后面的块
@@ -697,6 +748,16 @@ int uvcpp_h2_session::init(const callbacks& cbs, size_t max_header_list_size,
   // 是 65536，但"恰好相等"不是一份契约 —— `header_block_fits()` 是按这个常量
   // 在拦的，两边必须是同一个数。
   nghttp2_option_set_max_send_header_block_length(opt, H2_MAX_SEND_HEADER_BLOCK);
+  // 收方向背压的前提：nghttp2 不再自己补窗口，改由我们在 `on_data_chunk` 里按
+  // `paused` 归还。**无条件对所有会话打开**，不做"第二个模式" —— 两个模式的账
+  // 就是半套，而半套在这里的下场是整条连接在 65535 字节处被 FLOW_CONTROL_ERROR
+  // 终止（`nghttp2_session.c:5121`），不是"慢一点"。
+  //
+  // 不暂停时与开关关掉**帧集合与阈值逐帧相同**（两边用的是同一个
+  // `nghttp2_should_send_window_update`，只是驱动量从"收到量"换成"消费量"），
+  // 只有同一批 `drain` 之内的**次序**可能不同 —— WINDOW_UPDATE 从 `on_body`
+  // **之前**入队变成**之后**。RFC 9113 §6.9 对它与其他帧没有次序约束。
+  nghttp2_option_set_no_auto_window_update(opt, 1);
   const int rv =
       impl_->server_side
           ? nghttp2_session_server_new2(&impl_->session, ncb, impl_.get(), opt)
@@ -1012,6 +1073,15 @@ int uvcpp_h2_session::submit_data(int32_t stream_id, const char* data,
   if (os.ended) return UV_EALREADY;
   if (!os.chunks.empty() && os.chunks.back().end_stream) return UV_EALREADY;
 
+  // 待发队列的字节上界。**它是最后一道拒绝，不是水位** —— 框架那套 1 MiB 的软水位
+  // （`uvcpp_web_response::pending_bytes_`）先起作用，走到这里说明调用方压根没看
+  // `done`。零字节的提交（终止块）**永不**因它被拒，否则一条流永远收不了尾。
+  //
+  // 位置必须在 `nghttp2_submit_data2` **之前**：契约是"非 0 ⇒ 什么都没发生"。
+  // 一旦 frame 提了而块没入队，那条 data frame 就会去读一个空队列并把 provider
+  // 挂成 DEFERRED —— 正是下面那段注释在防的事。
+  if (len > 0 && os.queued_bytes + len > impl_->max_out_stream) return UV_ENOBUFS;
+
   // **先提交 frame，再入队。** 反过来的话，提交失败就把一块（连同它的 `done`）
   // 留在了队首 —— 没有 frame 会来读它，那个 `done` 于是永远不跑，而契约是
   // **恰好一次**（`stream_write` 的调用方把整条流的收尾挂在它上面）。在这里
@@ -1062,6 +1132,8 @@ int uvcpp_h2_session::submit_data(int32_t stream_id, const char* data,
   if (data != nullptr && len > 0) c.data.assign(data, len);
   c.end_stream = end_stream;
   c.done       = std::move(done);
+  // 入账与 `cb_read_stream` 里的出账**必须成对** —— 这是那道上界的唯一输入。
+  os.queued_bytes += c.data.size();
   os.chunks.push_back(std::move(c));
   return 0;  // 有 frame 在飞（刚提的，或者之前那个），它会回头把这块取走
 }
@@ -1280,6 +1352,53 @@ uvcpp_h2_stream* uvcpp_h2_session::find_stream(int32_t stream_id) {
 size_t uvcpp_h2_session::stream_count() const { return impl_->streams.size(); }
 
 int uvcpp_h2_session::last_error() const { return impl_->last_error; }
+
+// =========================================================================
+// 收方向背压
+// =========================================================================
+
+int uvcpp_h2_session::pause_stream(int32_t stream_id) {
+  auto it = impl_->streams.find(stream_id);
+  if (it == impl_->streams.end()) return UV_EINVAL;
+  // 幂等：已在暂停中的流再暂停一次**不是**错误 —— 它只是继续欠账。
+  it->second.paused = true;
+  return 0;
+}
+
+int uvcpp_h2_session::resume_stream(int32_t stream_id) {
+  auto it = impl_->streams.find(stream_id);
+  if (it == impl_->streams.end()) return UV_EINVAL;
+  uvcpp_h2_stream& s = it->second;
+  s.paused           = false;
+
+  const size_t owed = s.paused_owed;
+  s.paused_owed     = 0;
+  if (owed == 0 || !impl_->session) return 0;
+
+  // 已经决定要扔掉的流**不还** —— 还了等于告诉对端"继续发"，紧接着我们就要 RST
+  // 它。这是 `on_data_chunk` 顶部那条不变式的第三处落地（另两处是它的两条早退）：
+  // 进 `on_data_chunk` 的每个字节，连接级恰好还一次，流级只在"这条流还在正常收"
+  // 时才还。
+  if (s.rejected) return 0;
+
+  // 一次还清。`consume_stream` 对**已经关掉的**流是静默空操作（返回 0，见
+  // `nghttp2_session.c:8005-8007`），所以这里不必先查流还在不在。非 0 只可能是
+  // NOMEM / 流号 0 这类调用方错误；原样透传，不在这里吞。
+  return nghttp2_session_consume_stream(impl_->session, stream_id, owed);
+}
+
+void uvcpp_h2_session::set_max_out_stream_bytes(size_t n) { impl_->max_out_stream = n; }
+
+size_t uvcpp_h2_session::max_out_stream_bytes() const { return impl_->max_out_stream; }
+
+int32_t uvcpp_h2_session::peer_window_size(int32_t stream_id) const {
+  if (!impl_->session) return 0;
+  const int32_t w =
+      nghttp2_session_get_stream_remote_window_size(impl_->session, stream_id);
+  // nghttp2 用 -1 表示"没这条流"。本访问器的口径是 0 —— 于是"没有这条流"与
+  // "窗口恰好用尽"同形，想区分先用 `find_stream()`。
+  return w < 0 ? 0 : w;
+}
 
 }  // namespace uvcpp
 

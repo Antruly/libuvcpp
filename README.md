@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.2.24--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.2.25--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.2.24-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.2.25-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -609,6 +609,10 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
 - Sending past the peer's advertised limit no longer drops frames silently (`1.1.5`)
 - Teardown fixes: two use-after-frees and a leak (`1.1.7`), and no re-entrant `mem_send()`
   from inside a callback (`1.1.9`)
+- Stream-level backpressure: `pause_stream()` / `resume_stream()` for the receive
+  direction, an outbound per-stream queue cap, and `peer_window_size()` (`1.2.25`). This is
+  **protocol-layer machinery only — no application-layer caller exists yet**; nothing in
+  the web framework drives it, so streamed h2 request bodies remain unavailable
 
 ### HTTP & WebSocket semantics
 

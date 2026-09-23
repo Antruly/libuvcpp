@@ -254,6 +254,20 @@ int uvcpp_h2_connection::send_headers(int32_t stream_id,
   return flush();
 }
 
+int uvcpp_h2_connection::pause_stream(int32_t stream_id) {
+  // 不 flush：暂停不产生字节。
+  return session_->pause_stream(stream_id);
+}
+
+int uvcpp_h2_connection::resume_stream(int32_t stream_id) {
+  const int rv = session_->resume_stream(stream_id);
+  if (rv != 0) return rv;
+  // 这一步是**这条 API 存在的理由**：会话层只把 WINDOW_UPDATE 排进 nghttp2 的
+  // 出站队列，而调用方最常从"没有人在冲"的地方调它（自己的定时器、下游腾空之后）。
+  // 漏掉这一句的症状是流挂死且不报错（见头注释）。
+  return flush();
+}
+
 int uvcpp_h2_connection::send_data(int32_t stream_id, const char* data,
                                    size_t len, bool end_stream,
                                    std::function<void(int)> done) {

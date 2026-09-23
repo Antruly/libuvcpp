@@ -1051,6 +1051,126 @@ bool test_goaway_refuses_streams_above_last_id() {
   return L.fatal_count == 0 && L.drain_err == 0;
 }
 
+/// 丙：出方向上界 —— `submit_data` 在待发队列超过 `max_out_stream_bytes()` 时
+/// 必须**同步拒绝**（`UV_ENOBUFS`），而且拒绝得"什么都没发生"：无 frame、无入队、
+/// `done` **不被调**（调用方自己结算）。
+///
+/// 为什么拿**服务端**会话做：`submit_data` 要的状态是 `HEADERS_SENT`，而客户端
+/// `submit_request` 建出来的流是 `OPEN`，走不通 —— `57d5338` 的提交信息里点名过
+/// 这个困难。服务端在 `submit_headers()` 之后正好落在那个状态上。
+///
+/// @param cap          给会话装的上界。
+/// @param expect_r3    第三块期望的返回码（对照组是 0，被测组是 `UV_ENOBUFS`）。
+/// @param expect_body  客户端最终应当收到的字节数。
+///
+/// **对照组不是可选项**：单看被测组，"第三块被拒"完全可能是"这里的
+/// `submit_data` 本来就吃不消连发三块"，那种实现下被测组照样绿。两组走的是
+/// 同一段代码、同一个形状，只有 `cap` 一个变量不同。
+static bool cap_group(size_t cap, int expect_r3, size_t expect_body) {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.auto_reply = false;
+
+  const int32_t sid = L.client.submit_request(
+      make_req(http_method::HTTP_POST, "/cap"), "");
+  if (sid <= 0) return false;
+  L.pump();
+  if (L.req_count != 1) return false;
+
+  uvcpp_http_response head;
+  head.status_code = http_status::OK;
+  if (L.server.submit_headers(sid, head) != 0) {
+    std::cerr << "  [diag] submit_headers 失败" << std::endl;
+    return false;
+  }
+
+  L.server.set_max_out_stream_bytes(cap);
+  // ---- 前提：这个旋钮真的读得回来 ----
+  // 少了它，`UV_ENOBUFS` 可能压根不是这道上界造成的（比如旋钮没接上、
+  // 或者被别的地方覆盖了）。
+  if (L.server.max_out_stream_bytes() != cap) {
+    std::cerr << "  [diag] max_out_stream_bytes 读回 "
+              << L.server.max_out_stream_bytes() << "，期望 " << cap << std::endl;
+    return false;
+  }
+
+  int  done_runs = 0;
+  auto done      = [&done_runs](int) { ++done_runs; };
+
+  // 2048 + 2048 = 4096 正好用满：判据是**严格大于**，所以第三块才越界。
+  // （写成 `>=` 会让"刚好填满"也被拒 —— 那正是变异 M3 要抓的形状。）
+  const std::string blk(2048, 'a');
+  const int r1 = L.server.submit_data(sid, blk.data(), blk.size(), false, done);
+  const int r2 = L.server.submit_data(sid, blk.data(), blk.size(), false, done);
+  const int r3 = L.server.submit_data(sid, blk.data(), blk.size(), false, done);
+
+  if (r1 != 0 || r2 != 0 || r3 != expect_r3) {
+    std::cerr << "  [diag] cap=" << cap << " r1=" << r1 << " r2=" << r2
+              << " r3=" << r3 << "，期望 0/0/" << expect_r3 << std::endl;
+    return false;
+  }
+  // 被拒那一块连 `done` 都不许跑 —— 它保证"什么都没发生"，调用方自己结算。
+  // 这一步必须在 `take_completed()` **之前**看：那之后计数器本来就会涨。
+  if (r3 != 0 && done_runs != 0) {
+    std::cerr << "  [diag] 被拒的块跑了 done × " << done_runs << std::endl;
+    return false;
+  }
+
+  L.pump();
+  if (L.drain_err != 0) {
+    std::cerr << "  [diag] drain_err=" << L.drain_err << std::endl;
+    return false;
+  }
+  if (done_runs != 0) {
+    std::cerr << "  [diag] 没人调 take_completed，done 却跑了 × " << done_runs
+              << std::endl;
+    return false;
+  }
+
+  // 上界随"上线"松开：`pump()` 之后队列已经空出来，同样大小的一块又受理了。
+  // 这一条把"上界"钉成**在飞字节数**，而不是"这条流一辈子只能发 4096"。
+  const int r4 = L.server.submit_data(sid, blk.data(), blk.size(), false, done);
+  if (r4 != 0) {
+    std::cerr << "  [diag] pump 之后再提交被拒 r4=" << r4 << std::endl;
+    return false;
+  }
+  L.pump();
+
+  std::vector<std::function<void()> > cbs;
+  L.server.take_completed(cbs);
+  for (size_t i = 0; i < cbs.size(); ++i) cbs[i]();
+
+  const size_t expect_done = (expect_r3 == 0) ? 4u : 3u;
+  if (done_runs != static_cast<int>(expect_done)) {
+    std::cerr << "  [diag] done 跑了 " << done_runs << " 次，期望 " << expect_done
+              << std::endl;
+    return false;
+  }
+  if (L.resp_body.size() != expect_body) {
+    std::cerr << "  [diag] 客户端收到的 body=" << L.resp_body.size()
+              << "，期望 " << expect_body << std::endl;
+    return false;
+  }
+  if (L.resp_body.find_first_not_of('a') != std::string::npos) {
+    std::cerr << "  [diag] 客户端收到的 body 内容不对" << std::endl;
+    return false;
+  }
+  if (L.fatal_count != 0) {
+    std::cerr << "  [diag] fatals=" << L.fatal_count
+              << " last=" << L.last_fatal << std::endl;
+    return false;
+  }
+  return true;
+}
+
+/// 被测组：4096 的上界，第三块必须被拒。
+static bool test_out_stream_cap() { return cap_group(4096, UV_ENOBUFS, 6144); }
+
+/// 对照组：上界放到 1 MiB，同样三块必须全收。
+static bool test_out_stream_cap_control() {
+  return cap_group(1u << 20, 0, 8192);
+}
+
 }  // namespace
 
 int main() {
@@ -1070,6 +1190,8 @@ int main() {
     {"header_budget_rejects_oversize", test_header_budget_rejects_oversize},
     {"header_budget_normal_passes", test_header_budget_normal_passes},
     {"oversize_submit_is_refused", test_oversize_submit_is_refused},
+    {"out_stream_cap_rejects", test_out_stream_cap},
+    {"out_stream_cap_control", test_out_stream_cap_control},
     {"oversize_response_is_refused", test_oversize_response_is_refused},
     {"goaway_reports_last_processed_stream",
      test_goaway_reports_last_processed_stream},

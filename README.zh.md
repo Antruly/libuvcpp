@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.2.24--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.2.25--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.2.24-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.2.25-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -595,6 +595,9 @@ libuvcpp/
 - 发方向超出对端公布的上限时不再静默丢帧（`1.1.5`）
 - 拆连接路上的两个 use-after-free 与一处泄漏（`1.1.7`），回调栈里不再重入
   `mem_send()`（`1.1.9`）
+- 流级背压：收方向的 `pause_stream()` / `resume_stream()`、发方向的单流待发队列上界、
+  以及 `peer_window_size()`（`1.2.25`）。这是**协议层机件，暂无应用层调用方** ——
+  框架侧没有任何调用点，h2 上"边收边给"的流式请求体因此仍不可达
 
 ### HTTP 与 WebSocket 语义
 

@@ -96,6 +96,29 @@ class UVCPP_API uvcpp_h2_connection {
   int send_data(int32_t stream_id, const char* data, size_t len,
                 bool end_stream, std::function<void(int)> done);
 
+  /**
+   * @brief `session().pause_stream(...)` —— **不** `flush()`。
+   *
+   * 暂停不产生任何字节，冲一次只会把无关的帧顺手发出去、让判据变浑。语义边界
+   * （"生效点是下一个进 `on_body` 的字节"、"只管收方向"、幂等、不存在返
+   * `UV_EINVAL`）全在 `uvcpp_h2_session::pause_stream()` 的注释里。
+   */
+  int pause_stream(int32_t stream_id);
+
+  /**
+   * @brief `session().resume_stream(...)` + `flush()`。
+   *
+   * **必须用这个，不要用 `session().resume_stream()`**：后者只把 WINDOW_UPDATE
+   * 排进 nghttp2 的出站队列，而应用侧最常见的调用时机（自己的定时器里、下游腾空
+   * 之后）**没有任何人会替你冲一次** —— 表现是"对端永远等不到窗口、那条流挂死"，
+   * 且不报任何错。两个入口并存是刻意的（会话层不该知道传输层的存在），但那是给
+   * "已经在 nghttp2 回调栈里、马上会有人冲"的场景用的。
+   *
+   * @return 暂停期间的欠额没能还回去时非 0（见会话层同名函数）。未暂停的流返回
+   *         `flush()` 的结果（通常是 0）。
+   */
+  int resume_stream(int32_t stream_id);
+
   /// 把会话里待发的字节全部写出去。可以重复调用（没东西发就是空操作）。
   ///
   /// **在会话回调里调用是安全的**，只是会被推迟到这一轮 `recv()` 返回之后

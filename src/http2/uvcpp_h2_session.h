@@ -88,6 +88,20 @@ struct UVCPP_API uvcpp_h2_stream {
   bool   seen_regular_header = false;
   /// 头部预算，`on_begin_headers` 时重置（CONTINUATION 属同一块，不重置）。
   h2_header_budget budget;
+
+  /**
+   * @brief 这条流的**收方向**被应用层暂停了（`pause_stream()`）。
+   *
+   * 暂停期间到达的 DATA **照常交付** `on_body`（已经解出来的字节收不回来），但
+   * **不归还流级窗口** —— 对端把当前剩余的窗口发完就自己停下来。这就是背压本身。
+   */
+  bool paused = false;
+  /**
+   * @brief 暂停期间收到、还没归还给对端的字节数；`resume_stream()` 一次还清。
+   *
+   * 流一关这笔欠账随流消失 —— 对端的每流窗口也只对那条流有意义。
+   */
+  size_t paused_owed = 0;
 };
 
 // =========================================================================
@@ -295,6 +309,11 @@ class UVCPP_API uvcpp_h2_session {
    *                   它由 `take_completed()` 取走、由传输层在写完成之后调，
    *                   所以调用方（`uvcpp_web_response::flush_stream`）读到
    *                   的语义与 h1 那条路（libuv 写完成）一致。
+   *
+   * @return 0 受理；`UV_EINVAL` / `UV_EALREADY` 见函数体；**`UV_ENOBUFS` 表示这条流
+   *         的待发队列超过 `max_out_stream_bytes()`** —— 它与前两者一样保证
+   *         "什么都没发生"（无 frame、无入队，`done` **不会被调**，调用方自己结算）。
+   *         零字节的提交（终止块）永不因它被拒，否则一条流永远收不了尾。
    */
   int submit_data(int32_t stream_id, const char* data, size_t len,
                   bool end_stream, std::function<void(int)> done);
@@ -392,6 +411,72 @@ class UVCPP_API uvcpp_h2_session {
    * "服务端自己正常退出"一模一样，对端拿不到任何可归因的信号。
    */
   uint32_t goaway_code() const;
+
+  // -------------------------------------------------------------------
+  // 收方向背压
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 暂停一条流的**收方向**（协议层背压）。
+   *
+   * **语义边界（写死，别指望更细）**：
+   *   - **生效点**是"下一个进 `on_body` 的字节"。nghttp2 已经解出来的字节收不回来，
+   *     所以暂停之后**最多**还会有"对端剩余窗口"那么多 `on_body` 到来，上界是我们
+   *     宣告的 `initial_window_size`（默认不发这条 `SETTINGS`，即 RFC 9113 缺省的
+   *     65535）。说成"立刻停"是错的。
+   *   - **只管收方向**：不影响我们发出的响应，也不影响同一条连接上别的流。
+   *     （h1 的 `uvcpp_web_stream::pause()` 走的是整条连接的 `read_pause()`，
+   *     h2 上做不到那个粒度 —— 那正是有这个 API 的原因。）
+   *   - 幂等；对**不存在或已关闭**的流返回 `UV_EINVAL`。
+   *
+   * **为什么必须连连接级一起做**：连接窗口是全连接**共享**的 65535。一条暂停的流
+   * 如果把连接级额度也扣住，攒够一个连接窗口就能停掉同一条连接上**所有**别的流 ——
+   * 那是连接级误伤，不是背压，而且长得和"对端挂了"一样难查。所以连接级额度无论
+   * 暂停与否都**无条件**归还，只有每流窗口才是背压。
+   */
+  int pause_stream(int32_t stream_id);
+
+  /**
+   * @brief 恢复一条流：把暂停期间欠下的**流级**窗口一次还给对端。
+   *
+   * @warning **本函数只是把 WINDOW_UPDATE 排进 nghttp2 的出站队列** —— 字节要有人
+   *          `drain()` 才出网。传输层那一侧请用
+   *          `uvcpp_h2_connection::resume_stream()`（它带了 `flush()`）。
+   *          直接调这个而忘了 `drain()` 的表现是"对端永远等不到窗口、那条流挂死"，
+   *          **而且不报任何错**。
+   *
+   * 未暂停的流调用它是空操作（返回 0）。
+   */
+  int resume_stream(int32_t stream_id);
+
+  /**
+   * @brief 单条流**待发**队列的字节上界（默认 `H2_DEFAULT_MAX_OUT_STREAM_BYTES`）。
+   *
+   * 见 `uvcpp_h2_common.h` 里那个常量的注释：这是"最后一道拒绝"，不是水位；
+   * 与框架层 `uvcpp_web_response::max_stream_buffer_bytes()` 不是同一层。
+   *
+   * **传 0 不是"无限"** —— 它让任何带字节的 `submit_data` 当场 `UV_ENOBUFS`
+   * （零字节的收尾块仍然放行）。要放开就传一个足够大的数。
+   */
+  void   set_max_out_stream_bytes(size_t n);
+  size_t max_out_stream_bytes() const;
+
+  /**
+   * @brief 对端在**发送方向**给这条流留的窗口：我们还能往它发多少字节。
+   *
+   * 名字里的 `peer` 与 `peer_max_concurrent_streams()` 同义 —— 都是"对端给我们设的
+   * 限制"。取的是 nghttp2 的 *remote* window，**不是**我们还能收多少。
+   *
+   * **这里只有流级那一半**：真正发得出去的量还受连接级窗口限制，两者取小
+   * （nghttp2 自己的原话：`min(get_stream_remote_window_size(),
+   * get_remote_window_size())`）。只报流级，因为流级才是 `pause_stream()` 与出站
+   * 上界管的那一层。
+   *
+   * 流不存在、或对端恰好把窗口用尽，**都**返回 0 —— 想区分就先用 `find_stream()`。
+   * 流式响应的发起方可以拿它决定下一块提交多大，但那只是**建议**：
+   * 真正的上界由 `set_max_out_stream_bytes()` 那道拒绝兜。
+   */
+  int32_t peer_window_size(int32_t stream_id) const;
 
  private:
   struct impl;

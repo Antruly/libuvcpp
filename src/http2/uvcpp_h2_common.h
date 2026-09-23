@@ -32,11 +32,15 @@ const uint32_t H2_DEFAULT_MAX_CONCURRENT_STREAMS = 100;
 const size_t H2_DEFAULT_MAX_BODY_BYTES = 64u * 1024u * 1024u;
 
 /// 初始流控窗口（每流）。
-/// @warning **零引用** —— 本库当前没有任何流控策略，没有代码读这个常量，也不会把它
-///          发进 `SETTINGS`。真正的每流窗口来自 `uvcpp_h2_session::init()` 的
-///          `initial_window_size` 参数（默认 `0`，表示**不发**这一项 `SETTINGS`，
-///          于是对端按 RFC 9113 的缺省值 65535 走）。这里保留它只是给调用方一个
-///          可以自己传进去的字面量，别以为改了它就会生效。
+/// @warning **零引用** —— 没有代码读这个常量，也不会把它发进 `SETTINGS`。真正的每流
+///          窗口来自 `uvcpp_h2_session::init()` 的 `initial_window_size` 参数
+///          （默认 `0`，表示**不发**这一项 `SETTINGS`，于是对端按 RFC 9113 的缺省值
+///          65535 走）。这里保留它只是给调用方一个可以自己传进去的字面量，别以为
+///          改了它就会生效。
+///
+///          （收方向**现在**有自己的流控策略了 —— 见
+///          `uvcpp_h2_session::pause_stream()`。但那套是拿"已经宣告出去的窗口"当
+///          尺子记账的，**不改**这个常量的取值，所以上面那句仍然成立。）
 const uint32_t H2_DEFAULT_INITIAL_WINDOW_SIZE = 65535u;
 
 /**
@@ -51,6 +55,28 @@ const uint32_t H2_DEFAULT_INITIAL_WINDOW_SIZE = 65535u;
  * 显式写在 `init()` 里设进 nghttp2，而不是靠它的内部默认值恰好相等。
  */
 const size_t H2_MAX_SEND_HEADER_BLOCK = 64u * 1024u;
+
+/**
+ * @brief 单条流**待发**队列（流式响应那条路）的字节上界。
+ *
+ * 这是**最后一道拒绝**，不是水位 —— 框架层 `uvcpp_web_response` 已经有一套水位
+ * （`pending_bytes_` / `max_stream_bytes_`，默认 1 MiB），但它是**软**的：越过水位
+ * 只是 arm 一次 `on_drain` 并把 `room` 返给调用方，应用不看它，`pending_bytes_`
+ * 照样涨。会话层这一道是"提交得太靠前就当场拒"（`submit_data` 返 `UV_ENOBUFS`）。
+ *
+ * 取 4× 框架默认水位是**刻意的**：让协作式那一层先起作用，这一道只兜住"调用方完全
+ * 不看 `done`"的情形。**会话层不做半水位唤醒、不做回调、不做减速** —— 否则就是把
+ * 框架那套水位重复实现一遍。
+ *
+ * 触发之后的形状要知道：`uvcpp_http_server::write_stream` 把所有非 0 折成
+ * `UV_ECANCELED`，`uvcpp_web_response::flush_stream` 于是把那一笔按**失败**结算 ——
+ * 框架侧看到的是"这条流失败了"，**不是**"等一会儿再试"。所以谁把框架水位抬到这个数
+ * 以上，先到的就会是拒绝那一道。
+ *
+ * 只覆盖 `submit_data` 那条流式路：`submit_request` / `submit_response` 那份 body
+ * 由调用方**一次**给出，反复提交也长不出第二份。
+ */
+const size_t H2_DEFAULT_MAX_OUT_STREAM_BYTES = 4u * 1024u * 1024u;
 
 // =========================================================================
 // 错误码
