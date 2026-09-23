@@ -7,7 +7,7 @@
 
 ## 1. 形状
 
-接入成本是 `main()` 里的**一条语句**，外加一个 setter：
+接入成本是 `main()` 里的**一条语句**，外加一个 setter（它的返回码要接，见下）：
 
 ```cpp
 // doc-snippet: fragment — 目标形状，不是可用代码：uvcpp_worker_process 与
@@ -19,8 +19,11 @@ int main(int argc, char** argv) {
   uvcpp_worker_process::split(argc, argv);  // ← 必须是 main 的第一条语句
 
   uvcpp_web_app app;
-  app.set_host("0.0.0.0").set_port(8080)
-     .set_worker_processes(4);              // 不调用 = 1 = 今天的行为
+  app.set_host("0.0.0.0").set_port(8080);
+  // **不能链式**：`set_worker_processes()` 返的是错误码，与 `set_loops(n)` 同形状
+  // （理由见 §1 末）。Windows 上 n > 1 就在这里拿到非 0，服务根本不会起（§6）。
+  int rc = app.set_worker_processes(4);     // 不调用 = 1 = 今天的行为
+  if (rc != 0) return rc;
 
   app.get("/hello", handler);
 
@@ -51,6 +54,10 @@ int main(int argc, char** argv) {
   叫"工作进程类"是按使用者的说法来的。
 - **不需要用户自己声明全局变量**：库内部持有那份全局实例。用户声明会多一处可以写错的地方，
   而"必须在 `main()` 第一条语句"这条纪律已经够容易违反了。
+- **`set_worker_processes()` 返 `int`（0 成功，非 0 是错误码），所以不能链式。** 与
+  `set_loops(n)` 同形状（`doc/multiloop-design.md:58-59` 已为同名 setter 定过这条）。
+  §6 那条"Windows 上 `n>1` 返回错误"**要有地方报** —— 链起来写就没有地方接错误码，
+  两处自相矛盾时以 §6 为准。
 
 还有一条**没定**：多进程横向扩展**进不进 README 的性能口径那一行**。我的判断是**先不进** ——
 它是尚未实现的设计，而 README 顶上那个数是和 hical 做对比的口径，扩进来会把"单核比单核"
