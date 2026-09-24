@@ -235,15 +235,25 @@ struct route_bucket {
     }
   }
 
-  /// 收集首段为 `first` 的候选下标（含动态首段的）。
-  void collect(const std::string& first, std::vector<size_t>& out) const {
-    if (!dynamic_first.empty()) {
-      out.insert(out.end(), dynamic_first.begin(), dynamic_first.end());
+  /// 遍历首段为 `first` 的候选下标（含动态首段的）。次序与收集时逐条一致。
+  ///
+  /// **为什么是遍历而不是先收进一个 `std::vector<size_t>`**：那张临时表每次请求
+  /// 都要从 0 容量长起来、请求结束又散掉（普查里
+  /// `vector<unsigned long>::_M_range_insert` 1.0045 次/请求），而"看一遍候选"
+  /// 这件事本身一次分配都不需要。这里把调用方的主循环原样搬进 `fn`，元素与次序
+  /// 逐条不变，少掉的是**每请求一对分配/释放**。
+  template <typename TFn>
+  void for_each(const std::string& first, TFn fn) const {
+    for (size_t i = 0; i < dynamic_first.size(); ++i) {
+      fn(dynamic_first[i]);
     }
     std::map<std::string, std::vector<size_t> >::const_iterator it =
         by_first.find(first);
     if (it != by_first.end()) {
-      out.insert(out.end(), it->second.begin(), it->second.end());
+      const std::vector<size_t>& v = it->second;
+      for (size_t i = 0; i < v.size(); ++i) {
+        fn(v[i]);
+      }
     }
   }
 };
@@ -279,20 +289,24 @@ struct uvcpp_web_router::router_table {
     }
   }
 
-  void collect_candidates(const std::vector<std::string>& segs,
-                          std::vector<size_t>& out) const {
-    out.clear();
+  /// 遍历所有候选下标（次序：先精确段数那一桶，再 k = 0..n-1 的通配桶）。
+  ///
+  /// 与 `route_bucket::for_each` 同一条理由：调用方要的是"逐个看一遍"，不是
+  /// "先攥着一张表"。`out` 这个出参就此消失，那个 `out.clear()` 也随之消失 ——
+  /// 空表 + `insert` 正是每请求那次分配。
+  template <typename TFn>
+  void for_each_candidate(const std::vector<std::string>& segs, TFn fn) const {
     const size_t n = segs.size();
     const std::string first = n > 0 ? segs[0] : std::string();
 
     std::map<size_t, route_bucket>::const_iterator it = exact_index.find(n);
-    if (it != exact_index.end()) it->second.collect(first, out);
+    if (it != exact_index.end()) it->second.for_each(first, fn);
 
     // 带 k 个前缀段的通配模式能匹配所有 N >= k+1 的路径。
     for (size_t k = 0; k + 1 <= n; ++k) {
       std::map<size_t, route_bucket>::const_iterator wit =
           wildcard_index.find(k);
-      if (wit != wildcard_index.end()) wit->second.collect(first, out);
+      if (wit != wildcard_index.end()) wit->second.for_each(first, fn);
     }
   }
 
@@ -549,8 +563,6 @@ web_route_match uvcpp_web_router::match(http_method method,
   if (!table_ || table_->routes.empty()) return r;  // NOT_FOUND
 
   const std::vector<std::string> segs = split_path(path);
-  std::vector<size_t> cand;
-  table_->collect_candidates(segs, cand);
 
   std::vector<std::pair<std::string, std::string> > params;
   std::vector<std::pair<std::string, std::string> > best_params;
@@ -561,9 +573,11 @@ web_route_match uvcpp_web_router::match(http_method method,
   // HEAD 没有专门注册时回退到 GET。
   const bool head_fallback = (method == http_method::HTTP_HEAD) && head_as_get_;
 
-  for (size_t ci = 0; ci < cand.size(); ++ci) {
-    const router_table::route_entry& e = table_->routes[cand[ci]];
-    if (!match_pattern(e.segments, segs, params)) continue;
+  // 候选**边走边判**，不再先落进一张临时表。闭包按引用捕获，主循环里的
+  // `continue` 就地变 `return` —— 都是"跳过这个候选"，语义逐条相同。
+  table_->for_each_candidate(segs, [&](size_t ci) {
+    const router_table::route_entry& e = table_->routes[ci];
+    if (!match_pattern(e.segments, segs, params)) return;
 
     bool hit = e.any_method || (e.method == method);
     bool head_of_get = false;
@@ -571,7 +585,7 @@ web_route_match uvcpp_web_router::match(http_method method,
       hit = true;
       head_of_get = true;
     }
-    if (!hit) continue;
+    if (!hit) return;
 
     // 取最具体的那条。compare_specificity 是全序，所以结果与注册顺序无关。
     bool take = false;
@@ -600,7 +614,7 @@ web_route_match uvcpp_web_router::match(http_method method,
       best_params.swap(params);
       best_head_of_get = head_of_get;
     }
-  }
+  });
 
   if (best != nullptr) {
     r.result = web_route_result::MATCHED;
@@ -630,13 +644,13 @@ web_route_match uvcpp_web_router::match(http_method method,
   {
     // 收集用的临时容器，值本身不参与判定（只看路径是否匹配），所以复用一个。
     std::vector<std::pair<std::string, std::string> > scratch;
-    for (size_t ci = 0; ci < cand.size(); ++ci) {
-      const router_table::route_entry& e = table_->routes[cand[ci]];
-      if (!match_pattern(e.segments, segs, scratch)) continue;
+    table_->for_each_candidate(segs, [&](size_t ci) {
+      const router_table::route_entry& e = table_->routes[ci];
+      if (!match_pattern(e.segments, segs, scratch)) return;
       if (!e.any_method) {
         push_method_unique(allowed, e.method);
       }
-    }
+    });
   }
 
   if (!allowed.empty()) {
