@@ -145,8 +145,8 @@ worker 0 ⇒ 分布判据红（`[n=4] 分布 0 0 16`）；绕开转手（让 acc
 这条边界要带着看。
 
 > **本机只有 Windows，而这条 POSIX `dup()` 腿在 Windows 上根本"编不到"** —— 它在
-> `uvcpp_socket_handoff.cpp:65-75` 的 `#else` 里，本机跑的是同一函数的 Windows 支；CI 上只有
-> **macOS** 腿会因 `uv__sock_reuseport()` 没实现而**回落**到它。**09-24 补**：`set_handoff_forced(true)`
+> `uvcpp_socket_handoff.cpp:65-75` 的 `#else` 里，本机跑的是同一函数的 Windows 支；macOS 腿按同
+> 一份平台清单**也应**回落到它（**没被任何一条腿见证过**）。**09-24 补**：`set_handoff_forced(true)`
 > （必须在 `set_loops()` 之前调）让 Linux 上也能把它真跑一遍（判据与读数见 [net 指南](./net-guide.md)
 > 的多循环那一节）⇒ "两端都验过"这句**在 Linux 上如今也成立**；Windows 支仍只有本机验，别写反。
 
