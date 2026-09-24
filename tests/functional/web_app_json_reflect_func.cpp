@@ -217,15 +217,29 @@ struct one_str {
 // 辅助
 // =========================================================================
 
-/// 解析 + 读入，一步到位。解析失败时**读入那一步根本没跑**（`out` 不动）。
+/// 解析 + 读入，一步到位（借调用方的 DOM）。解析失败时**读入那一步根本没跑**
+/// （`out` 不动）。
+///
+/// **要 `where` 就得用这个重载**：`where` 在"多出来的成员"那条路上指到的是 DOM
+/// 里的键（契约见 `webapp/uvcpp_web_json_reflect.h` 的 `uvcpp_from_json`），DOM
+/// 必须活到调用方把它读完为止。下面那个便利重载的 DOM 是**局部量**，一返回
+/// `where` 就悬空 —— macOS 那条腿红过的正是这里（libstdc++ 上释放后的字节常常
+/// 还留着原样，libc++ 才把它照出来）。
 template <typename T>
-json_status read_json(const std::string& text, T& out,
-                      const uvcpp_from_json_options& opts = uvcpp_from_json_options(),
+json_status read_json(const std::string& text, T& out, uvcpp_json& dom,
+                      const uvcpp_from_json_options& opts,
                       const char** where = nullptr) {
-  uvcpp_json dom;
   const json_status st = uvcpp_json_parse(text, dom);
   if (st != json_status::OK) return st;
   return uvcpp_from_json(dom, out, opts, where);
+}
+
+/// 不带 `where` 的那条路：DOM 是本函数的局部量，够用（没有指针逃出去）。
+template <typename T>
+json_status read_json(const std::string& text, T& out,
+                      const uvcpp_from_json_options& opts = uvcpp_from_json_options()) {
+  uvcpp_json dom;
+  return read_json(text, out, dom, opts, nullptr);
 }
 
 // =========================================================================
@@ -266,7 +280,8 @@ void group_roundtrip() {
   // 故意先塞个残留值：成功时 where 必须被清成 nullptr，否则调用方会把上一次
   // 失败的字段名当成这一次的（这是个"只在第二次调用才现身"的坑）。
   const char* where = "leftover";
-  check_st(read_json(w.str(), q, uvcpp_from_json_options(), &where), json_status::OK,
+  uvcpp_json dom;  // where 可能指进它（"多成员"那条路）⇒ 得活到 check_where 之后
+  check_st(read_json(w.str(), q, dom, uvcpp_from_json_options(), &where), json_status::OK,
            "1.4 读回成功");
   check_where(where, nullptr, "1.5 成功时 where 被清成 nullptr（上一轮的残留不留下）");
 
@@ -437,9 +452,10 @@ void group_mismatch() {
 
   // 值是字符串 ⇒ 不解析成数字。
   const char* where = nullptr;
+  uvcpp_json dom;  // 同上：这一处虽然走的是字面量那条路，API 也只收带 dom 的形式
   one_int si;
   si.v = 7;
-  check_st(read_json("{\"v\":\"30\"}", si, def, &where), json_status::MISMATCH,
+  check_st(read_json("{\"v\":\"30\"}", si, dom, def, &where), json_status::MISMATCH,
            "4.6 \"30\" 不读进 int");
   check_i(si.v, 7, "4.7 保持哨兵");
   check_where(where, "v", "4.8 where 给出字段名");
@@ -467,10 +483,15 @@ void group_mismatch() {
   // 标量进嵌套结构体、数组进 vector：都是两个方向。
   profile pf;
   pf.name = "SENTINEL";
+  // 哨兵：4.20 要断言"嵌套结构体没被改"，那就得先给它一个**确定**的值 ——
+  // `point` 没有初值，默认构造出来的 `pf.pos.x` 是不确定值，拿它当期望值是 UB
+  // （本机恰好是 0 才没咬到；换一条栈布局就不一定）。
+  pf.pos.x = -7;
+  pf.pos.y = -8;
   check_st(read_json("{\"name\":\"n\",\"pos\":5}", pf, def), json_status::MISMATCH,
            "4.18 标量不读进嵌套结构体");
   check_s(pf.name, "n", "4.19 它前面那个字段已经被写了（见文件头的诚实边界）");
-  check_i(pf.pos.x, 0, "4.20 嵌套结构体没被改");
+  check_i(pf.pos.x, -7, "4.20 嵌套结构体没被改（哨兵 x 还在）");
   with_vec wv;
   wv.xs.push_back(9);
   check_st(read_json("{\"xs\":5}", wv, def), json_status::MISMATCH, "4.21 标量不读进 vector");
@@ -501,9 +522,11 @@ void group_missing() {
 
   // 严格：缺字段报 MISSING 并给出名字。
   const char* where = nullptr;
+  uvcpp_json dom;  // 同上；这个函数里 where 被复用三次，一个 dom 全程够用
   p.a = -1;
   p.b = -2;
-  check_st(read_json("{}", p, strict, &where), json_status::MISSING, "5.7 严格模式缺字段报 MISSING");
+  check_st(read_json("{}", p, dom, strict, &where), json_status::MISSING,
+           "5.7 严格模式缺字段报 MISSING");
   check_where(where, "a", "5.8 where 是**第一个**缺的字段（按宏里的字段顺序）");
   check_i(p.a, -1, "5.9 缺字段时原值没动");
   check_i(p.b, -2, "5.10 缺字段时原值没动（b）");
@@ -512,7 +535,8 @@ void group_missing() {
   p.a = -1;
   p.b = -2;
   where = nullptr;
-  check_st(read_json("{\"a\":1}", p, strict, &where), json_status::MISSING, "5.11 只给 a ⇒ MISSING");
+  check_st(read_json("{\"a\":1}", p, dom, strict, &where), json_status::MISSING,
+           "5.11 只给 a ⇒ MISSING");
   check_where(where, "b", "5.12 where 指出缺的是 b");
   check_i(p.a, 1, "5.13 a 已经写进去了（失败**不是**原子回滚，见文件头）");
   check_i(p.b, -2, "5.14 b 保持原值");
@@ -528,7 +552,7 @@ void group_missing() {
   p.a = -1;
   p.b = -2;
   where = nullptr;
-  check_st(read_json("{\"a\":null,\"b\":2}", p, strict, &where), json_status::MISSING,
+  check_st(read_json("{\"a\":null,\"b\":2}", p, dom, strict, &where), json_status::MISSING,
            "5.18 严格模式下 null 也算缺");
   check_where(where, "a", "5.19 where 是 a");
   // 粘性：第一个字段就报了 MISSING ⇒ 字段展开**当场停**，`b` 根本没被读。
@@ -552,10 +576,11 @@ void group_unknown() {
   check_i(p.b, 2, "6.3 已知字段照读（b）");
 
   const char* where = nullptr;
+  uvcpp_json dom;  // where 在"多成员"那条路上指进它 ⇒ 它得活到 check_where 之后
   p.a = -1;
   p.b = -2;
-  check_st(read_json("{\"a\":1,\"b\":2,\"c\":3}", p, strict, &where), json_status::UNKNOWN,
-           "6.4 开了 unknown_is_error 才报 UNKNOWN");
+  check_st(read_json("{\"a\":1,\"b\":2,\"c\":3}", p, dom, strict, &where),
+           json_status::UNKNOWN, "6.4 开了 unknown_is_error 才报 UNKNOWN");
   check_where(where, "c", "6.5 where 指出是哪个成员多出来了");
   check_i(p.a, 1, "6.6 字段那一步先跑完了（部分写入）");
 
@@ -567,14 +592,16 @@ void group_unknown() {
   profile pf;
   pf.name = "SENTINEL";
   where = nullptr;
-  check_st(read_json("{\"name\":\"n\",\"pos\":{\"x\":1,\"y\":2,\"z\":3}}", pf, strict, &where),
+  check_st(read_json("{\"name\":\"n\",\"pos\":{\"x\":1,\"y\":2,\"z\":3}}", pf, dom,
+                     strict, &where),
            json_status::UNKNOWN, "6.8 嵌套里的多成员也报 UNKNOWN");
   check_where(where, "z", "6.9 where 指里层的 z（不是外层的 pos）");
 
   // vector 元素里的多成员。
   with_pts wp;
   where = nullptr;
-  check_st(read_json("{\"pts\":[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4,\"z\":5}]}", wp, strict, &where),
+  check_st(read_json("{\"pts\":[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4,\"z\":5}]}", wp,
+                     dom, strict, &where),
            json_status::UNKNOWN, "6.10 vector 元素里的多成员也报 UNKNOWN");
   check_where(where, "z", "6.11 where 指 z");
   check_u(wp.pts.size(), 1, "6.12 第一个元素已经进去了，第二个失败（部分写入）");

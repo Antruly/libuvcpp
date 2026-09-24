@@ -218,7 +218,7 @@ int uvcpp_tcp_server::bind_flags_for_loops() const {
   // Linux 3.9+ / DragonFly / FreeBSD 12+ / Solaris 11.4+ / AIX 7.2.5+，
   // **不含 macOS**，而那是 CI 的一条腿。所以这里只是"先带着标志试一次"，
   // 真伪由下面那次绑定的返回码来定（运行时探测）。
-  return UV_TCP_REUSEPORT;
+  return UVCPP_TCP_REUSEPORT_FLAG;  // 有没有这个标志由版本定，见 handle/uvcpp_tcp.h
 #endif
 }
 
@@ -242,7 +242,7 @@ int uvcpp_tcp_server::bind_on_loops(const char* ip, int port, bool ipv6) {
     fanout_ = false;
     if (rc == 0) {
       std::fprintf(stderr,
-                   "[uvcpp_tcp_server] 本平台不支持 UV_TCP_REUSEPORT："
+                   "[uvcpp_tcp_server] 这份 libuv/平台绑不上 REUSEPORT（Linux 要 1.49+）："
                    "set_loops(n>1) 回落到「一条接受者 + 转手」\n");
     }
   } else {
@@ -302,9 +302,9 @@ int uvcpp_tcp_server::start_worker_listeners(int backlog) {
       // 建、也只能在那条循环上关（`close_worker_listener()`）。
       uvcpp_tcp* l = new uvcpp_tcp(wl);
       int rc = bind_is_ipv6_ ? l->bindIpv6(bind_ip_.c_str(), bind_port_,
-                                           UV_TCP_REUSEPORT)
+                                           UVCPP_TCP_REUSEPORT_FLAG)
                              : l->bindIpv4(bind_ip_.c_str(), bind_port_,
-                                           UV_TCP_REUSEPORT);
+                                           UVCPP_TCP_REUSEPORT_FLAG);
       if (rc == 0) {
         rc = l->listen(
             [this, idx, wl](uvcpp_stream* s, int status) {

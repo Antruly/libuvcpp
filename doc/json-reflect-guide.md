@@ -101,6 +101,13 @@ struct doc_thing {
 - **C++11**，所以没有 `if constexpr`、没有 `std::void_t`、没有 `std::make_index_sequence`。
 - 导出的东西：写出侧 `uvcpp_to_json`、`uvcpp_json_field`、`uvcpp_make_field`、
   `UVCPP_JSON_FIELDS`；读入侧 `uvcpp_from_json`、`uvcpp_from_json_options`。
+- **MSVC 使用者要 `/Zc:preprocessor`**（只有 MSVC，GCC / Clang / clang-cl 都不需要）。
+  `UVCPP_JSON_FIELDS` 得把 `__VA_ARGS__` 转发两层（→ `UVCPP_JSON_MAP_` → 再数参数），
+  而 cl 的**传统**预处理器 —— 也就是不开这个开关时的默认值 —— 根本不做可变参数转发，
+  报出来是一串 `C4003`，与真正的原因毫无关系。走 CMake 的消费者**不用管**：
+  `CMakeLists.txt` 给四个导出目标挂了 INTERFACE 选项，本仓的用例/示例/bench 也是这么
+  拿到的；只有手写 `cl` 命令行的人会撞上，那就加 `/Zc:preprocessor`。真不加也不会看到
+  天书 —— 头里有一句说人话的 `static_assert` 拦着。
 
 ## 3. 五分钟上手
 
@@ -340,9 +347,15 @@ uvcpp::json_status doc_strict_unknown(const uvcpp::uvcpp_json& dom, doc_pair& ou
 1. **返回码**：第一个出错的那一步的 `json_status`。字段展开是**粘性**的：错一次就停，
    后面的字段**根本不再读**（所以"第一个缺的字段"报的就是字段表里最靠前的那个，
    而不是"缺的里面最严重的那个"）。
-2. **`where`**：出错字段的名字。静态字符串（宏给的就是字面量 `#字段`），**可以直接
-   交出去，不必拷贝、不会悬垂**。嵌套结构体里出错给的是**最深那一层**的名字，
-   不是外层那个：
+2. **`where`**：出错字段的名字。**两种来源、两种生存期，别混**：
+   - 缺字段 / 类型不符 / 值域不符那几条路上，它指向宏里的字面量 `#字段` —— 静态存储，
+     **可以直接交出去，不必拷贝、不会悬垂**；
+   - **多成员**那条路上它指向 **DOM 里的那个键**（字段表里没有的名字），所以**只活到
+     那棵 DOM 还在为止**。裸用 `uvcpp_from_json(dom, ...)` 时 DOM 是你自己的；走
+     `req.json()` 时 DOM 是**请求自己的**（§10），于是活到请求还在为止 ——
+     处理函数里够用，出了请求别留。
+
+   嵌套结构体里出错给的是**最深那一层**的名字，不是外层那个：
 
 ```cpp
 #include <uvcpp/uvcpp_json_reflect.h>
@@ -499,16 +512,22 @@ void doc_handle(const uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& 
 }
 ```
 
-`req.json(u, ...)` 里的 DOM 是**那个函数里的临时对象**：所有值都**拷进** `u` 了，
-没有指向 DOM 的视图，所以 `u` 里不会有悬垂引用。（`const char*` 字段读不进来，
+`req.json(u, ...)` 里的 DOM 挂在**请求自己身上**（`uvcpp_web_request::json_dom_`），不是那个函数的局部量。
+没有指向 DOM 的视图 —— 但 **`bad_field` 可能是**：多成员那条路上它指进 DOM（§7），所以 `req.json()` 出来的 `where` 活到**请求还在为止**。（`const char*` 字段读不进来，
 所以不存在"指向临时 DOM 的指针"这种形状 —— 见 §12。）
+
+`json()` 出来的 `where` 能活到请求还在，这个形状是**修出来的**、不是一开始就对：
+DOM 原本是 `json()` 里的局部量，`bad_field` 一返回就悬空。而这件事在 Linux / mingw
+（libstdc++）上**看不出来** —— 释放后的那几个字节常常还留着原样，读出来是对的；
+只有 libc++（macOS arm64）读出来是空串。同一条用例在两条腿上判的不是同一件事，
+一直是 CI 那条 macOS 腿在替所有人兜着。详见 §11。
 
 ## 11. 这份代码的判据
 
 | 用例 | 它判什么 |
 |---|---|
 | `tests/functional/json_reflect_func.cpp` | 序列化侧：手写 `index_sequence` 的升序、字段顺序来自宏（用"声明顺序与宏顺序相反"的结构体）、产出逐字节、八个整型宽度、`float`/`double` 分路、C 字符串 `nullptr`、vector（空 / 嵌套 / 套结构体）、错误码的传递 |
-| `tests/functional/web_app_json_reflect_func.cpp` | 读入侧：writer→读回的往返（期望串手写）、每个类别的值（含内嵌 NUL 与 `\uXXXX`）、逐宽度的值域两侧、类型不符的每个方向、缺失 / `null`、多成员、容器（含空数组必须清空）、四个新状态名、`req.json()` 入口 |
+| `tests/functional/web_app_json_reflect_func.cpp` | 读入侧：writer→读回的往返（期望串手写）、每个类别的值（含内嵌 NUL 与 `\uXXXX`）、逐宽度的值域两侧、类型不符的每个方向、缺失 / `null`、多成员、容器（含空数组必须清空）、四个新状态名、`req.json()` 入口，以及 `where` 的**生存期**（`req.json()` 那条路上它必须活到请求还在 —— 9.25 那条判的就是这个）|
 
 两个文件的**命名**是有讲究的：写出侧那条**不带** `web_` / `web_app_` / `web_ssl_` / `h2_`
 任何前缀（它只用核心模块，与四个开关都无关）；读入侧那条**必须**带 `web_app_`，而且

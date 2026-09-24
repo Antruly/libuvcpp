@@ -521,6 +521,28 @@ json_write_status uvcpp_to_json(const T&, uvcpp_json_writer&, std::false_type) {
  * 想要换一个 JSON 名字怎么办？这一版没有别名（见文档"没做的"），成员名就是
  * 键名。要改键名就把成员名改掉，或者在写出之后另行处理 —— 不要指望它猜。
  */
+// -------------------------------------------------------------------------
+// MSVC 的**传统预处理器**过不去下面这个宏 —— 这里就地拦住，报一句人话。
+//
+// 为什么：这个宏要把 `__VA_ARGS__` 转给 `UVCPP_JSON_MAP_`、再由它转给
+// `UVCPP_JSON_ARG16_`，而 cl 的传统预处理器（没开 `/Zc:preprocessor` 时的
+// 默认值）**根本不做可变参数的转发** —— 使用者看到的是一串
+// `C4003: not enough arguments for function-like macro invocation`，跟真正的
+// 原因（预处理器模式）毫无关系。实测 2026-09-24：cl 14.44 与 14.51 两套工具集
+// 上传统模式全红，同一批最小复现加 `/Zc:preprocessor` 全绿。
+//
+// 走 CMake 的消费者不用管这件事（导出目标上的 INTERFACE 选项会自动带上，
+// 见 `CMakeLists.txt`），本仓自己的用例也是这么拿到的。**只有手写 cl 命令行的
+// 人**会撞上，那就加 `/Zc:preprocessor`。
+// -------------------------------------------------------------------------
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_MSVC_TRADITIONAL) && \
+    _MSVC_TRADITIONAL
+#define UVCPP_JSON_FIELDS(Type, ...)                                          \
+  static_assert(false,                                                        \
+                "UVCPP_JSON_FIELDS 需要 MSVC 的符合标准预处理器：请加 "       \
+                "/Zc:preprocessor（本仓 CMake 导出的目标已自动带上）");       \
+  static_assert(true, "");
+#else
 #define UVCPP_JSON_FIELDS(Type, ...)                                                          \
   typedef decltype(::std::make_tuple(UVCPP_JSON_MAP_(UVCPP_JSON_FIELD_, Type, __VA_ARGS__)))   \
       uvcpp_json_fields_tuple;                                                                 \
@@ -529,5 +551,6 @@ json_write_status uvcpp_to_json(const T&, uvcpp_json_writer&, std::false_type) {
         ::std::make_tuple(UVCPP_JSON_MAP_(UVCPP_JSON_FIELD_, Type, __VA_ARGS__));               \
     return fields;                                                                             \
   }
+#endif
 
 #endif  // SRC_UVCPP_UVCPP_JSON_REFLECT_H

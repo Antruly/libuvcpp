@@ -373,8 +373,8 @@ class UVCPP_API uvcpp_web_request {
    * 语义见 `webapp/uvcpp_web_json_reflect.h`：缺字段**不动**结构体里的原值、
    * 类型不符报错而不做隐式转换、多出来的成员默认忽略。
    *
-   * 注意 DOM 是本函数里的**临时对象**：所有值都**拷进** `out` 了，没有指向
-   * DOM 的视图，所以 `out` 里不会有悬垂引用。
+   * DOM 挂在**本请求对象上**（`json_dom_`），不是这个函数的局部量：所有值都**拷进**
+   * `out` 了，但 `where` 在多成员那条路上指进 DOM，生存期是**这个请求还在为止**。
    *
    * @warning 返回 false 时 `out` 可能已经被改了**一部分**（前几个字段），
    *          与 `uvcpp_from_json` 的规矩一样：非成功就丢弃 `out`。
@@ -384,13 +384,12 @@ class UVCPP_API uvcpp_web_request {
                           bool>::type
   json(T& out, json_status* status = nullptr, const char** where = nullptr,
        const uvcpp_from_json_options& opts = uvcpp_from_json_options()) const {
-    uvcpp_json dom;
-    const json_status parse_st = uvcpp_json_parse(body_data(), body_size(), dom);
+    const json_status parse_st = uvcpp_json_parse(body_data(), body_size(), json_dom_);
     if (parse_st != json_status::OK) {
       if (status != nullptr) *status = parse_st;
       return false;
     }
-    const json_status read_st = uvcpp_from_json(dom, out, opts, where);
+    const json_status read_st = uvcpp_from_json(json_dom_, out, opts, where);
     if (status != nullptr) *status = read_st;
     return read_st == json_status::OK;
   }
@@ -478,6 +477,21 @@ class UVCPP_API uvcpp_web_request {
   // 漏掉文件、再问 file() 时又整份重解一遍。
   mutable std::vector<uvcpp_web_form_file> form_files_;
   mutable bool multipart_ok_;
+
+  // `json()` 那次解析出来的 DOM。**必须是成员、不能是那个函数里的局部量**：
+  // `where` 在"多出来的成员"那条路上指到的就是 DOM 里的键（契约见
+  // `webapp/uvcpp_web_json_reflect.h` 的 `uvcpp_from_json`），局部量一返回就把
+  // 那个指针悬空了 —— libstdc++ 上释放后的那几个字节常常还留着原样（看着是对的），
+  // libc++（macOS 那条 CI 腿）读出来就是空串。有了这个成员，`where` 对使用者的
+  // 生存期就是"这个请求还在为止"。
+  //
+  // 每次 `json()` 都整份重新解析（`uvcpp_json_parse` 内部是 `out = parsed`，
+  // 不复用旧 DOM）：body 可能被管线里的中间件改过，留住旧 DOM 会跟
+  // `body_data()` 说的不是一回事。
+  //
+  // 代价如实说：本类因此**大了一个 `nlohmann::json`**（16 字节），堆分配只在
+  // 真正调 `json()` 时发生。
+  mutable uvcpp_json json_dom_;
 
   /// 缓冲式 multipart 的解析（`form_params()` 在 `is_multipart()` 时调它）。
   /// 单独一个函数是因为它要 include `uvcpp_web_multipart.h`，而那个头不该

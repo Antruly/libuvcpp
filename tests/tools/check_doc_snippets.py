@@ -281,11 +281,18 @@ def compile_cmd(cxx, pkg, src, obj):
         中文注释的片段在 MSVC 上都会红，压力会变成"中文文档用英文写注释"。
       * 只编到 `.o`，**不链接**。文档腐烂的形态是签名/名字/枚举/头路径漂移，
         `-c` 全能抓；链接还要牵扯 `-L/-luvcpp`、rpath 与运行时 dll 搜索路径。
+      * MSVC 侧再加 `/Zc:preprocessor`。**这一条不是"让红变绿"**：文档里
+        `UVCPP_JSON_FIELDS` 那批片段在 cl 的传统预处理器下**真的**编不过
+        （见 `src/uvcpp/uvcpp_json_reflect.h` 里那个宏上面那段），而本门的判断轴
+        是"签名/名字/枚举/头路径有没有漂移"，不是"MSVC 默认是哪个预处理器"。
+        MSVC 那条硬要求由三处各自兜住：头里那句 `static_assert`（说人话）、
+        `CMakeLists.txt` 给导出目标挂的 INTERFACE 选项、以及 `doc/json-reflect-
+        guide.md` 里那段说明。要测"默认消费条件"是 `check_config_contract.py` 的事。
     """
     inc = os.path.join(pkg, "include")
     if is_msvc(cxx):
-        return [cxx, "/nologo", "/std:c++14", "/EHsc", "/utf-8", "/I" + inc,
-                "/c", src, "/Fo:" + obj]
+        return [cxx, "/nologo", "/std:c++14", "/EHsc", "/utf-8",
+                "/Zc:preprocessor", "/I" + inc, "/c", src, "/Fo:" + obj]
     return [cxx, "-std=c++11", "-I" + inc, "-c", src, "-o", obj]
 
 

@@ -842,6 +842,31 @@ if (TARGET uvcpp_a_s)
   )
 endif()
 
+# MSVC：`/Zc:preprocessor`（符合标准的预处理器）必须**跟着导出的目标走**。
+#
+# 理由见 `src/uvcpp/uvcpp_json_reflect.h` 里 `UVCPP_JSON_FIELDS` 上面那段：
+# 传统预处理器转发不了 `__VA_ARGS__`，那个宏在传统模式下编不过。上面 `/utf-8`
+# 那处用的是 `add_compile_options`，而它是**目录作用域**的、进不了导出集
+# （那段注释里已经写明这条）—— 所以这里按目标挂 INTERFACE：`find_package(uvcpp)`
+# 的消费者自动继承，本仓的测试/示例/bench 也走同一条路（它们都 link 这四个
+# 目标之一，INTERFACE 选项会跟着传下去）。
+#
+# **故意不用 `add_compile_options`**：那会顺着 `add_subdirectory` 连 zlib / libuv
+# 的 **C 源**一起带上（`/utf-8` 带上无妨，替别人的构建改预处理器不是本仓的事）。
+# `clang-cl` 不认这个开关，所以只给 cl —— 而且**判的是消费者的编译器**：
+# 生成器表达式在拿到这个目标的工程里求值，`find_package(uvcpp)` 的人是 clang-cl
+# 就一个字节都收不到。
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  foreach(_uvcpp_tgt uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
+    if(TARGET ${_uvcpp_tgt})
+      # 生成器表达式！`INTERFACE` 选项会被原样写进导出集、在**消费者**那边
+      # 求值，写死字面量的话 clang-cl 的消费者会白挨一个它不认的开关。
+      target_compile_options(${_uvcpp_tgt} INTERFACE
+                             $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/Zc:preprocessor>)
+    endif()
+  endforeach()
+endif()
+
 # ---------------------------------------------------------------------------
 # 生成 uvcpp_config.h —— 让「宏集与 DLL 不一致」从运行时垃圾值变成编译期硬失败
 # ---------------------------------------------------------------------------

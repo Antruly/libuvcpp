@@ -84,4 +84,27 @@ class UVCPP_API uvcpp_tcp : public uvcpp_stream {
 
 } // namespace uvcpp
 
+// ---------------------------------------------------------------------------
+// REUSEPORT 的**版本分叉**：这份 libuv 认得这个标志就给真值，不认得就是 0。
+//
+// `UV_TCP_REUSEPORT` 是 libuv **1.49** 才加进来的，而且它是 `enum uv_tcp_flags`
+// 的枚举量、**不是宏** —— 所以老版本上 `#ifdef UV_TCP_REUSEPORT` 判不出来，
+// 只能按版本号分叉。这不是纸面上的讲究：本仓 CI 的 ubuntu 腿装的是**系统
+// libuv**（`apt-get install libuv1-dev`，ubuntu-24.04 给的是 1.48），直接用那个
+// 名字在那里是**编不过**的（`error: 'UV_TCP_REUSEPORT' was not declared in
+// this scope`），而其它腿用的是自带的 1.51 —— 这个差异只有一种腿看得见。
+//
+// 取 0 的含义是"这个标志用不上，退回既有退路"：`uvcpp_tcp_server::bind_flags_
+// for_loops()` 拿到 0 之后，`set_loops(n>1)` 走的就是本仓原本就有的那条形状
+// （一条接受者 + socket 转手），不会少开线程、也不会静默改语义。
+//
+// 这一段放在文件**最末尾**是有意的：本头在 `tests/tools/doc_line_refs.lock`
+// 里有一条 59-60 的引用，插在它下面才不会让那条引用位移。
+// ---------------------------------------------------------------------------
+#if defined(UV_VERSION_HEX) && UV_VERSION_HEX >= 0x013100
+#define UVCPP_TCP_REUSEPORT_FLAG UV_TCP_REUSEPORT
+#else
+#define UVCPP_TCP_REUSEPORT_FLAG 0
+#endif
+
 #endif // SRC_HANDLE_UVCPP_TCP_H
