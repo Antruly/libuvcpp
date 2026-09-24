@@ -138,6 +138,23 @@ public:
   ::std::string to_string() const;
 
   uv_buf_t *out_uv_buf();
+
+  /**
+   * @brief `out_uv_buf()` 的**无包装**版本：把块连同所有权填进调用方给的
+   *        `uv_buf_t`，不再分配那个 `uv_buf_t` 包装。
+   *
+   * `out_uv_buf()` 返回的包装是 `uvcpp_alloc<uv_buf_t>()` 出来的，接收方还回来
+   * 时要 `free_buf` + `uvcpp_free` **两步**。可接收方往往本来就把 `uv_buf_t`
+   * 按值存着（`uvcpp_write` 的 `pair_[]` 就是），那个包装纯属中转 —— 于是每次
+   * 发送白付两次分配。这条入口把包装省掉。
+   *
+   * 块的归属一字不改：交出去的那块归调用方。**但 `out` 不在堆上**，所以调用方
+   * 只 `free_buf(out)`（或按自己的方式放 `out->base`），**不要** `uvcpp_free(out)`。
+   *
+   * 与 `out_uv_buf()` 一样会先 `materialize()`（共享视图要交出去得先物化）。
+   */
+  void release_uv_buf(uv_buf_t *out);
+
   void in_uv_buf(uv_buf_t* bf);
 
   static void alloc_buf(uv_buf_t *bf, size_t len);

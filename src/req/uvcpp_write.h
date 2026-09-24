@@ -75,6 +75,27 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
   void append_uv_buf_owned(uv_buf_t *bf);
 
   /**
+   * @brief 第 1 块的**值形态**：块归本请求，但不经过堆上的 `uv_buf_t`。
+   *
+   * @param bf 必须来自 `uvcpp_buf::release_uv_buf()`（它把块连同所有权填进一个
+   *           调用方给的 `uv_buf_t`，且**不分配包装**）。本请求析构时放掉
+   *           `bf.base`。
+   *
+   * 与 `set_uv_buf()` 的差别只在包装：那个收的是 `uvcpp_alloc` 出来的指针，
+   * 释放要 `free_buf` + `uvcpp_free` 两步；这个收的是值，释放只有放块这一步。
+   * 两种形态**择一使用**（后设的会把先设的按它自己的归属放掉）。
+   */
+  void set_uv_buf_block(uv_buf_t bf);
+
+  /**
+   * @brief 第 2 块的**值形态**：块归本请求，同样不经过包装。
+   *
+   * @param bf 同 `set_uv_buf_block`，必须来自 `uvcpp_buf::release_uv_buf()`。
+   *           第 2 块同样只有一个槽位，换占用者按 `append_uv_buf_owned` 的规矩来。
+   */
+  void append_uv_buf_block(uv_buf_t bf);
+
+  /**
    * @brief 本次写要交给 `uv_write` 的缓冲数组。
    *
    * 只有 1 块时返回 `get_uv_buf()`（与既有形状逐字一致）；有 2 块时返回内部
@@ -113,6 +134,17 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
   // 第 2 块若是自有块，这里记着它的**原始**头：释放必须用原指针（free_buf 释放
   // 的是 base），所以接收方不许先把 base 加偏移再传进来。
   uv_buf_t *second_owner = nullptr;
+
+  // ---- 值形态（set_uv_buf_block / append_uv_buf_block）----
+  //
+  // 块按值存在这里，`uv_buf` 指向第 1 块的槽（于是 `pair_[]` 快照、`get_uv_bufs`
+  // 这些既有逻辑一个字都不用改）。要释放的**只有块**，所以另记 base：`uv_buf`
+  // 指向的是成员，`uvcpp_free` 它就是在 free 栈上/成员地址。
+  uv_buf_t first_block_;
+  void *first_block_base_ = nullptr;
+  uv_buf_t second_block_;
+  void *second_block_base_ = nullptr;
+
   // 第 2 块若是共享视图，靠它活着 —— 见 append_uv_buf_view。
   ::std::shared_ptr<const ::std::string> hold_;
 };

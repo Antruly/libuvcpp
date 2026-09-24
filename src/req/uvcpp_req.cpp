@@ -6,6 +6,15 @@ uvcpp_req::uvcpp_req(): req(nullptr) ,vdata(nullptr){
   this->set_req_data();
 }
 
+uvcpp_req::uvcpp_req(void *prealloc)
+    : req(static_cast<uv_req_t *>(prealloc)), vdata(nullptr) {
+  // 与默认构造的唯一差别：那个 uv_req_t 不是在这里分的。后面该做的一步不少
+  // —— 派生类 set_req() 时照样要 `req->data` 已指回本对象。
+  if (req != nullptr) {
+    this->set_req_data();
+  }
+}
+
 int uvcpp_req::set_data(void *pdata) {
   vdata = pdata;
   return 0;

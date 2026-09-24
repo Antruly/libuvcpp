@@ -139,6 +139,25 @@ public:
 
 protected:
   /**
+   * @brief **预分配**形态：`req` 由调用方（派生类的成员初始化列表）先分好，
+   *        本基类不再自己分一个。
+   *
+   * 为什么要有：派生类（如 `uvcpp_write`）在构造体里一定会 `set_req()` 换成
+   * **自己的** `uv_xxx_t`，而 `set_req()` 第一件事就是 `free_req()` —— 于是
+   * 默认构造分出来的那个 `uv_req_t` **一分配就被释放**，白付一次 malloc+free，
+   * 而且正好在最热的写路径上每次发送一次（普查读数 1.0051 次/请求）。
+   *
+   * 归属不变：交进来的那个指针照样由本对象在 `free_req()` 里释放。`nullptr`
+   * 也收（那时行为与默认构造分失败等价，`set_req_data()` 会跳过）。
+   *
+   * 参数是 `void*` 而不是 `uv_req_t*`，与 `set_req(void*)` **同形**：libuv 里
+   * `uv_write_t` / `uv_connect_t` 这些与 `uv_req_t` 是**互不相干的结构体**
+   * （`UV_REQ_FIELDS` 是宏展开，不是继承），`uv_write_t*` 转不成 `uv_req_t*`。
+   * 而 `free_req()` 放的是裸指针、不带尺寸，所以这个转换与今天逐字一致。
+   */
+  explicit uvcpp_req(void *prealloc);
+
+  /**
    * @brief 完成回调的统一跳板（`callback_write` / `callback_udp_send` /
    *        `callback_connect` / `callback_random` / `callback_getaddrinfo` /
    *        `callback_getnameinfo` 共用）。末尾的可变参数原样转发给闭包，

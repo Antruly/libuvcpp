@@ -188,13 +188,13 @@ RSS(MiB) = 0.0008870 × N + 10.120     R² = 0.9997352
 两处都是"纯白付"：
 
 1. **读缓冲不再清零 —— 每请求 128 KiB。** `uvcpp_buf::alloc_buf()`
-   （`src/uvcpp/uvcpp_buf.cpp:431`）原先走 `uvcpp_alloc_arry<char>()`，而
+   （`src/uvcpp/uvcpp_buf.cpp:444-444`）原先走 `uvcpp_alloc_arry<char>()`，而
    `uvcpp_alloc_*` 全是 **calloc 语义**（分配后整块 `memset` 0，
    `src/uvcpp/uvcpp_alloc.h:45,109`）。这块内存是交给 libuv 的 alloc 回调**接数据**
    的，紧接着就被 `WSARecv` 整块覆盖 —— 清的字节一个都留不下。代价是**量出来的**：
    libuv 对 TCP 流给的 `suggested_size` 是 **64 KiB**，而一条连接在**一次请求**里会让
    alloc 回调跑**两趟** ⇒ 每个请求 **128 KiB**，而请求本身只有百来字节。现在改走
-   `uvcpp_buf.cpp` 匿名命名空间里的 `alloc_raw()`（`src/uvcpp/uvcpp_buf.cpp:419`，
+   `uvcpp_buf.cpp` 匿名命名空间里的 `alloc_raw()`（`src/uvcpp/uvcpp_buf.cpp:432-432`，
    契约是"读之前不能假设它是 0"）
    —— **不给它公开的位置**：`uvcpp_alloc_*` 那一族的约定就是"全部清零"，同前缀、
    同形状、唯独不清零的兄弟放进去是个陷阱。它不是公开 API，这是有意的。

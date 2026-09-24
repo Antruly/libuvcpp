@@ -248,10 +248,10 @@ libuv 那边会解引用。所以**关闭回调跑完之后再 `stop()` 是空�
 **`set_self_free(true)`**（`src/req/uvcpp_req.h:137`）让 req 在完成回调返回后自己
 `delete`，默认关。开了之后调用方不能再删。
 
-**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:155-174`）
+**为什么能在完成回调里 `delete` 自己**：`invoke_completion()`（`src/req/uvcpp_req.h:174-193`）
 **先把闭包从槽位里 move 出来、再清空源槽、然后才调用**。顺序反过来的话，删掉的就是
 "此刻正在执行的那个 `std::function`"，连同它的捕获一起——是未定义行为。
-`src/req/uvcpp_req.h:159-166` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
+`src/req/uvcpp_req.h:178-185` 还专门写了"为什么一定要显式清空源"：libc++ 的小对象
 move 不会把源置空（libstdc++/MSVC 会），所以这个 bug 只在 macOS 上显形。
 
 **`uvcpp_random` 在旧 libuv 上不存在**——它整段套在 `#if UV_VERSION_MINOR >= 33` 里。
@@ -310,7 +310,7 @@ int main() {
 互转。和它相关的契约都是**生命周期**：
 
 - **libuv 要求写缓冲活到完成回调**，它不会替你拷一份（`src/req/uvcpp_write.h:36-46`）。
-  `uv_write` 会把 `uv_buf_t` **数组本身**拷走，但**不拷数据**（`:77-83`）。
+  `uv_write` 会把 `uv_buf_t` **数组本身**拷走，但**不拷数据**（`:98-104`）。
 - `append_uv_buf_view()` **必须在 `set_uv_buf()` 之后**调（`src/req/uvcpp_write.h:56`），
   而且第 2 块**只有一个**：再调一次（两种入口混着调也算）会把上一个占用者换掉。
 - `append_uv_buf_owned()` 传的必须是 `uvcpp_buf::out_uv_buf()` 返回的**原指针**

@@ -320,8 +320,8 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
 
 ### 9.2 uvcpp 侧为什么变成 UAF，而不是"多跑一次回调"
 
-`callback_write`（`src/req/uvcpp_write.cpp:88`）取出闭包后走 `invoke_completion`
-（`src/req/uvcpp_req.h:156`）——**回调返回之后 `delete self`**。所以重复的那次完成打在已释放对象上。
+`callback_write`（`src/req/uvcpp_write.cpp:136-136`）取出闭包后走 `invoke_completion`
+（`src/req/uvcpp_req.h:175-175`）——**回调返回之后 `delete self`**。所以重复的那次完成打在已释放对象上。
 ⇒ 「在自己的完成回调里释放自己」这个形状，**活不过一次重复投递**，与内核为什么多投无关。
 
 ### 9.3 三条候选修法，与先做哪一条
@@ -424,8 +424,8 @@ INVALID_SOCKET;`（`libuv:win/tcp.c:1143-1147`）。**第二次**派发随后才
    `uv__insert_pending_req(loop, req);`。**不看 `lpCompletionKey`、不看句柄状态、不看这个 req
    是不是已经被派发过。** ⇒ libuv 在 Windows 上**没有任何一层**能吸收一个多余的完成包；
    唯一的不变式就是"内核不会投"。**这同时说明 (甲) 为什么救不了**（§9.3）：包会先被写进
-   `req->next_req` —— 而本库的 `uv_req_t` 是**独立分配**的（`src/req/uvcpp_req.h:184` 那个成员），
-   `delete self` 经 `~uvcpp_req()`（`src/req/uvcpp_req.cpp:16`）走 `free_req()`（`:96`）把它一起还掉
+   `req->next_req` —— 而本库的 `uv_req_t` 是**独立分配**的（`src/req/uvcpp_req.h:203-203` 那个成员），
+   `delete self` 经 `~uvcpp_req()`（`src/req/uvcpp_req.cpp:25-25`）走 `free_req()`（`:105-105`）把它一起还掉
    ⇒ **那一写就已经落在已释放内存上，比派发更早**。
 
    **顺带把 (甲) 的成色说准**（这是我第一版说糊的地方）：推迟释放**能**挡掉"打在已释放对象上"

@@ -393,6 +393,19 @@ uv_buf_t *uvcpp_buf::out_uv_buf() {
   return bf;
 }
 
+void uvcpp_buf::release_uv_buf(uv_buf_t *out) {
+  // 与 out_uv_buf() 逐字同形，只少那个 uv_buf_t 包装的分配 —— 于是"交出去"
+  // 这件事在这里不产生任何分配，只有块本身（那个由 clone_data/resize 那边分）。
+  this->materialize();
+  out->base = buf.base;
+  out->len  = buf.len;
+  // 整块交出去：连同容量。理由与 out_uv_buf() 那一段相同 —— 留下 capacity_
+  // 的话，之后再 append 会就地写进已经交出去的那块内存。
+  buf.base = nullptr;
+  buf.len = 0;
+  capacity_ = 0;
+}
+
 void uvcpp_buf::in_uv_buf(uv_buf_t *bf) {
   this->free_own();
   // 收下这块内存并**持有**它（与 out_uv_buf 对称）。bf->len 是可见长度，

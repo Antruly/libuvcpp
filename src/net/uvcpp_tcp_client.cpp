@@ -1295,23 +1295,30 @@ int uvcpp_tcp_client::write(const char* head, size_t head_len,
 #endif
 
   // 第 1 块：头。仍然照旧拷进一个自有块 —— 这条路上剩下的唯一一份拷贝。
+  // 交接走 `release_uv_buf()`（值形态）而不是 `out_uv_buf()`：后者会多分一个
+  // `uv_buf_t` 包装，而这个包装只是中转 —— `uvcpp_write` 本来就把 `uv_buf_t`
+  // 按值存着。块的所有权一字不改。
   uvcpp_buf headbuf(head, head_len);
-  uv_buf_t* hb = headbuf.out_uv_buf();
+  uv_buf_t  hb;
+  headbuf.release_uv_buf(&hb);
 
   uvcpp_write* w = new uvcpp_write();
-  w->set_uv_buf(hb, true);
+  w->set_uv_buf_block(hb);
 
   // 第 2 块：体。两种形状都**不拷字节**，差别只在谁负责让它活着。
   // 注意判据是 `is_shared()` 而不是"有没有引用计数"：
   //   * 共享视图 —— 引用计数接过来（`hold` 由请求对象持有到析构）；
-  //   * 自有块 —— `out_uv_buf()` 把块连同所有权交出来（**会先 materialize**，
-  //     共享视图走错这一支就会当场拷一份，所以顺序不能反）。
+  //   * 自有块 —— `release_uv_buf()` 把块连同所有权交出来（**会先 materialize**，
+  //     共享视图走错这一支就会当场拷一份，所以顺序不能反）。同样走值形态：
+  //     这里也不需要一个堆上的 `uv_buf_t`。
   if (body->is_shared()) {
     uv_buf_t vb = uv_buf_init(const_cast<char*>(body->get_const_data()),
                               static_cast<unsigned int>(body->size()));
     w->append_uv_buf_view(vb, body->shared_ref());
   } else if (body->size() > 0) {
-    w->append_uv_buf_owned(body->out_uv_buf());
+    uv_buf_t vb;
+    body->release_uv_buf(&vb);
+    w->append_uv_buf_block(vb);
   }
   // body 为空（且不是共享视图）时不追加第 2 块 —— 这时整条报文就是头部那块，
   // 与 `write(uvcpp_buf*)` 传一个空块是同一形状。

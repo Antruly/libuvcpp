@@ -553,7 +553,16 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     req.method  = ctx.parser->get_method();
     req.url     = ctx.parser->get_url();
     req.version = ctx.parser->get_uvcpp_http_version();
-    req.headers = ctx.parser->get_headers();
+    // 与上面那两条建视图的路**同一个形状**：头表是**搬**过来的，不是拷的。
+    // 拷一份 = 一次向量分配**外加每个非 SSO 的值各一次**（libstdc++ 的界是
+    // 15 字节，`Host: 127.0.0.1:8081` 这种就超了）；搬 = 一次向量分配、
+    // 一个字符串都不分配 —— 契约在 `uvcpp_http_parser.h` 的 `take_headers()`。
+    //
+    // 搬走的后果是**解析器上这条消息的头空了**。这一条在本函数里已经吃透过：
+    // 下面读 `accept-encoding` 与 `is_head` 用的都是 `req`，不是解析器；而延迟
+    // 应答那条路更不可能回头读解析器 —— 它发响应时解析器早被复位了，所以那两样
+    // 必须在下面缓存（见紧随其后的注释）。整条消息对解析器头表的读，到这一行为止。
+    req.headers = ctx.parser->take_headers();
   }
   req.body.clone(ctx.body_buf);
 
