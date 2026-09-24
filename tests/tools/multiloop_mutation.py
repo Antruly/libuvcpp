@@ -109,6 +109,23 @@ MUTATIONS = [
      "  (void)loop_index;\n"
      "  return loops_[0]->registry.size();  /* MUTATION */"),
 
+    # **写侧自洽错格**：登记表一律回 0 号那一份 —— 登记与查找**一起**错，所以
+    # App 照样能用、`connection_count()` 那个**和式照样是绿的**（它的实现就是逐格
+    # 求和），只有"每条连接在**它自己那一格**上读得到"这条能抓。
+    # 两个重载**都得改**：只改一个＝登记错、查找对，App 直接坏掉，判断归属就糊了。
+    # 这条在 VM 上手工验过（和式绿 / 自己那一格红），见
+    # `D:\test\webtest\t1\conn_criterion_ab.py`。
+    ("M9 登记表一律写 0 号那一格（自洽）",
+     APP_CPP,
+     ["uvcpp_web_connection_registry& uvcpp_web_app::reg_here() {\n"
+      "  return slot_here().registry;\n}",
+      "const uvcpp_web_connection_registry& uvcpp_web_app::reg_here() const {\n"
+      "  return slot_here().registry;\n}"],
+     ["uvcpp_web_connection_registry& uvcpp_web_app::reg_here() {\n"
+      "  return loops_[0]->registry;  /* MUTATION */\n}",
+      "const uvcpp_web_connection_registry& uvcpp_web_app::reg_here() const {\n"
+      "  return loops_[0]->registry;  /* MUTATION */\n}"]),
+
     ("M5 缓存重插不扣旧字节",
      STATIC_CPP,
      "      bytes -= old->second.data->size();\n",

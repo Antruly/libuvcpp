@@ -695,6 +695,20 @@ void test_loop_identity_and_ids() {
   std::vector<int> client_loop;  ///< `client->loop_index()`
   std::map<int, std::thread::id> conn_tid;  ///< 循环号 → 该连接的回调所在线程
 
+  // 每条连接各查一次"它自己那一格"（**确定的**，与内核把它放在哪号循环无关）：
+  // `on_accept()` 先 `reg_here().add(...)` 再回调本钩子，而本钩子就跑在这条连接
+  // 自己的循环上 ⇒ 此刻 `connection_count_at(它自己那号)` 一定读得到它自己。
+  // 登记被写进**别的格**（自洽的坏实现：登记与查找一起错，App 照样能用）就在
+  // 这一格上露出 0。
+  //
+  // **这一格必须取自 `client->loop_index()`，不能取 `loop_of(id)`**：id 的高段是
+  // **登记表自己发的**（按循环分段分配那一套），登记表错格 ⇒ 号跟着错 ⇒
+  // "拿号去查登记表"是**自证**的。实测：把登记一律改回 0 号那一份（`reg_here()`
+  // 两个重载都改，登记与查找一起错、App 照样能用）之后，用 `loop_of(id)` 写的
+  // 那版**照样绿**，反倒是既有的"id 高段 == `client->loop_index()`"把它抓住了。
+  // `client->loop_index()` 来自**网层**、与登记表无关，才是独立证人。
+  std::vector<bool> cell_ok;
+
   app.on_connection([&](uvcpp_web_conn_id id, uvcpp_tcp_client* client) {
     const int a = uvcpp_web_connection_registry::loop_of(id);
     const int b = client != nullptr ? client->loop_index() : -1;
@@ -702,6 +716,8 @@ void test_loop_identity_and_ids() {
     id_loop.push_back(a);
     client_loop.push_back(b);
     conn_tid[b] = std::this_thread::get_id();
+    // 用 `b`（`client->loop_index()`）而不是 `a`（`loop_of(id)`）—— 理由见上面那段。
+    cell_ok.push_back(b >= 0 && app.connection_count_at(b) >= 1);
   });
 
   // 处理函数里记下自己的线程身份（判据 3 的正面）。
@@ -769,6 +785,18 @@ void test_loop_identity_and_ids() {
     check(id_loop.size() == static_cast<size_t>(kConns),
           "16 条连接都进了 on_connection（" + std::to_string(id_loop.size()) +
               "）");
+
+    // **登记错格**的判据（确定的那条）：每条连接在它**自己那一格**上都得读得到。
+    // 与下面那条和式不同 —— `connection_count()` 本身就是逐格求和，和式恒真。
+    {
+      int missed = 0;
+      for (size_t i = 0; i < cell_ok.size(); ++i) {
+        if (!cell_ok[i]) ++missed;
+      }
+      check(missed == 0 && cell_ok.size() == static_cast<size_t>(kConns),
+            "每条连接都记在**它自己那一格**上（对不上 " + std::to_string(missed) +
+                " / " + std::to_string(cell_ok.size()) + "）");
+    }
 
     int n1 = 0, n2 = 0, n0 = 0, nbad = 0;
     for (size_t i = 0; i < id_loop.size(); ++i) {
@@ -889,17 +917,35 @@ void test_aggregates_while_running() {
   // 是硬前提，那个和式于是不再恒真。
   std::mutex cmu;
   size_t c_total = 0, c_at0 = 0, c_at1 = 0;
+  size_t c_net = 0, c_leak = 0;   // 网层读数与"两层对不上的格数"
   bool c_got = false;
   app.get("/counts", [&](uvcpp_web_request&, uvcpp_web_response& resp,
                          uvcpp_web_next) {
     const size_t t = app.connection_count();
     const size_t a0 = app.connection_count_at(0);
     const size_t a1 = app.connection_count_at(1);
+    // **两层当场比**：网层是"平表按 client->get_loop() 现数"，注册表是"逐格求和"
+    // —— 两套独立的账，所以这个比对**不是恒真的**。`leak` ＝ 网层说有连接、
+    // 注册表在那一格却是空的格数（"连接被登记到别的格上"这种坏实现就露在这儿）。
+    //
+    // 在这里读而不是在主线程读：处理函数跑着 ⇒ 本条连接一定已登记、一定活着，
+    // 主线程事后读会碰上"采样时还在、读的时候已经回收了"那种时红时绿。
+    size_t n_net = 0;
+    size_t leak = 0;
+    if (app.tcp_server() != nullptr) {
+      for (int i = 0; i < app.tcp_server()->loop_count(); ++i) {
+        const size_t k = app.tcp_server()->client_count_at(i);
+        n_net += k;
+        if (k >= 1 && app.connection_count_at(i) < 1) ++leak;
+      }
+    }
     {
       std::lock_guard<std::mutex> lk(cmu);
       c_total = t;
       c_at0 = a0;
       c_at1 = a1;
+      c_net = n_net;
+      c_leak = leak;
       c_got = true;
     }
     resp.text("counts");
@@ -949,16 +995,31 @@ void test_aggregates_while_running() {
                             std::to_string(c_total) + "）");
     if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
       // 分流：**采样那条连接自己可能就在 0 号**（0 号也承载连接）⇒ "一定记在
-      // 1 号分片"不成立。承重的判据是"它被记进了**一**格"：逐格之和 == 总数，
-      // 记两处（每格都回落 0 号那种）或漏记都会红 —— 下面那条。
-      check(c_at0 + c_at1 == c_total && c_total >= 1,
-            "采样的那条连接只被记在一格（0 号 " + std::to_string(c_at0) +
-                " + 1 号 " + std::to_string(c_at1) + " == 总数 " +
-                std::to_string(c_total) + "）");
+      // 1 号分片"不成立。承重的是**两层结构逐格对得上**（下面两条）。
+      //
+      // **别拿"逐格之和 == `connection_count()`"承重**：`connection_count()` 的
+      // 实现就是逐格求和（`src/webapp/uvcpp_web_app.cpp:2429-2432`）⇒ n=2 时它
+      // 恒等于 `c_at0 + c_at1`，连接被登记到**哪一格**都满足 —— 是恒真的，
+      // `multiloop_mutation.py` 的 M4 之流只能靠别的巧合露头。它留着管"记两处/
+      // 漏记"，**不单独承重**。
+      //
+      // 残留（不藏）：网层与注册表**本就可能读在不同时刻**，而且 `leak` 只有在
+      // "采样那条连接不在 0 号"时才非零（分流下由内核哈希定）⇒ 这条抓坏实现的
+      // 概率约一半。**跨形状确定的那条在转手支**（`c_at1 >= 1`）。
+      check(c_net == c_total,
+            "网层的活连接数 == 注册表的（平表按循环现数 " + std::to_string(c_net) +
+                " vs 逐格求和 " + std::to_string(c_total) + "）");
+      check(c_leak == 0,
+            "网层说有连接的格，注册表在那一格也有（对不上的格数 " +
+                std::to_string(c_leak) + "）");
+      check(c_total >= 1, "采样时至少有 1 条连接活着（总数 " +
+                              std::to_string(c_total) + "）");
     } else {
       check(c_at1 >= 1, "活着的连接记在 1 号分片上（实际 " +
                             std::to_string(c_at1) + "）");
     }
+    // 非承重（理由见分流支那段注释）：`connection_count()` 就是逐格求和，
+    // 这条恒真。留着只当"记两处 / 漏记"的哨兵。
     check(c_at0 + c_at1 == c_total,
           "逐格之和 == 总数（" + std::to_string(c_at0) + "+" +
               std::to_string(c_at1) + " vs " + std::to_string(c_total) + "）");
@@ -1018,8 +1079,26 @@ void test_ws_session_and_close_frame() {
                    "服务端看到 1 个 WS 会话");
     if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
       // 分流：WS 那条连接**可能落在 0 号** ⇒ "一定记在 1 号、0 号必须是空的"
-      // 必然为假。承重的是"**只记在一格**"：逐格之和 == session_count()
-      // （记两处、漏记都会红）。
+      // 必然为假。承重的是"**会话记在连接自己那一格**" —— 与连接侧那条
+      // `loop_of(id) == client->loop_index()` 是**同一条不变量**，两条形状都成立，
+      // 而且抓得住"分片键钉成 0 号"那种坏实现（连接在 1 号、会话记到 0 号
+      // ⇒ 会话那一格是空的）。
+      //
+      // **别只判"逐格之和 == session_count()"**：`session_count()` 的实现就是逐片
+      // 求和（`src/web/uvcpp_ws_server.cpp:375-377`），所以会话被钉到哪一片，那条
+      // 等式都成立 —— 是**恒真的**，`multiloop_mutation.py` 的 M3 从它下面走掉。
+      // 它留着管"记两处 / 漏记"，但不单独承重。
+      int conn_loop = -1;
+      for (int i = 0; i < app.tcp_server()->loop_count(); ++i) {
+        if (app.tcp_server()->client_count_at(i) == 1) conn_loop = i;
+      }
+      check(conn_loop >= 0, "这条 WS 连接被记在某一格上（分布看得见）");
+      if (conn_loop >= 0) {
+        check(wss->session_count_at(conn_loop) == 1,
+              "WS 会话记在**连接自己那一格**上（连接在 " +
+                  std::to_string(conn_loop) + " 号；该格会话数 = " +
+                  std::to_string(wss->session_count_at(conn_loop)) + "）");
+      }
       check(wss->session_count_at(0) + wss->session_count_at(1) ==
                 wss->session_count(),
             "会话只记在一格（0 号 " + std::to_string(wss->session_count_at(0)) +
