@@ -232,7 +232,7 @@ class UVCPP_API uvcpp_web_stream {
   /**
    * @brief 留住链的续跑凭据。
    *
-   * 这一句就是"框架替用户留 next"的全部实现：存下这份 `std::function` 等于
+   * 这一句就是「框架替用户留 next」的全部实现：存下这份 `uvcpp_web_next` 等于
    * 多持有一份上下文引用，`advance()` 据此判定链挂起。
    */
   void bind_resume(const uvcpp_web_next& next);

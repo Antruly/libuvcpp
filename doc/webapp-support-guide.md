@@ -489,7 +489,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 - `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:166`）。
 - `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:117-124`）。
 - `uvcpp_web_context::run()` **只存链的指针**
-  （`src/webapp/uvcpp_web_context.h:366`、`:447`）：那张
+  （`src/webapp/uvcpp_web_context.h:366`、`:468`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
   **别传一个临时 vector**。
 - `uvcpp_web_connection_registry::find()` 返回内部 `std::map` 里的指针
@@ -619,7 +619,7 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 - **`uvcpp_web_file` 不知道 HTTP 的存在**：断连即释放**不在这里**，接线层调
   `cancel()`（`src/webapp/uvcpp_web_file.h:70-71`）。
 - **卡住的出站流没有超时保护**（`src/webapp/uvcpp_web_context.h:393-395`，代价照实记在
-  `src/webapp/uvcpp_web_context.cpp:374-379`）。
+  `src/webapp/uvcpp_web_context.cpp:385-390`）。
 - **`attach_stream()` 的"必须在链跑起来之前调"没有运行时守卫**
   （`src/webapp/uvcpp_web_context.h:318-330`）：中途挂只会得到一个**永远收不到数据**的 stream，
   静默。

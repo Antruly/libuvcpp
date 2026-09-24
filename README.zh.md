@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.22--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.23--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.22-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.23-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.22-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.23-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -739,6 +739,14 @@ libuvcpp/
 - HTTP 服务器的读路径改走框架层的事件式读回调，不再每次读先 `clone_data()` 白拷
   一份（`data` 只在本次回调期间有效，正是解析器就地吃字节的用法；事件粒度与
   `nread < 0` 的语义一字未变）。每请求 13.02 → 12.02 次分配（`1.3.22`）
+- `uvcpp_web_next` 不再是 `std::function<void()>`，而是一个只持一份上下文引用的类：
+  `std::function` 只在可调用对象**平凡可拷贝**时才用内联存储（GCC 的
+  `__is_location_invariant` = `is_trivially_copyable`，**与 sizeof 无关**），而「闭包
+  持一份 `shared_ptr`」天生不是 ⇒ 每处理一环要两次堆分配（造一次 + 按值传参再拷一次），
+  本仓每请求跑两环。换类型后这两笔没了。语义一字未改（留副本 = 挂起、按值拷贝**不能**
+  移动 —— 判据就是靠拷贝把引用数抬起来、空 next 调用照旧抛）。代价照实说：
+  `sizeof(uvcpp_web_next)` **32 → 48**、`uvcpp_web_stream` **288 → 304**，其余公开类型
+  逐项不变 ⇒ 这是**源码 + ABI 双重断点**。每请求 12.02 → 8.02 次分配（`1.3.23`）
 - 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
   超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
   `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）

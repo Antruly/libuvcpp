@@ -226,12 +226,30 @@ if (!app.router().get("/x", handler)) { /* 没注册上 */ }
 **中间件就是"会调 `next()` 的 handler"**，类型完全相同：
 
 ```cpp
-using uvcpp_web_next     = std::function<void()>;
 using uvcpp_web_handler  = std::function<void(uvcpp_web_request&, uvcpp_web_response&, uvcpp_web_next)>;
 using uvcpp_web_middleware = uvcpp_web_handler;
 
 app.use(mw);            // 顺序 = 执行顺序，先注册的在最外层
 ```
+
+**`uvcpp_web_next` 不是 `std::function` 的别名**（`1.3.23` 起）：它是
+`src/webapp/uvcpp_web_handler.h` 里的一个类，只持一份上下文引用 —— 框架给的 `next`
+因此**零堆分配**。原来的形状每处理一环要两次堆分配：`std::function` 只在可调用对象
+**平凡可拷贝**时才用内联存储（GCC 的 `__is_location_invariant` = `is_trivially_copyable`，
+**与 `sizeof` 无关**），而「闭包持一份 `shared_ptr`」天生不是，于是造一次、按值传参再
+拷一次。
+
+**用法一字未变**：`next()` 照调、把它按值捕获进工作线程的完成回调照留、
+`if (next) next();` 照判、`uvcpp_web_next saved;` 之后再 `saved = next;` 照样可以；
+自己造一个（`uvcpp_web_next n = [&] { /* ... */ };`）也照样可以 —— 那条路内部仍走
+`std::function`。空 `next` 调用仍然抛 `std::bad_function_call`。
+
+★ 有件事**不能**顺手改：那条按值传参**不能**换成移动。框架判断「这一环会不会异步
+恢复」靠的就是这次拷贝把上下文引用数抬起来 —— 移动会把「handler 留了副本」与
+「局部被搬空」精确抵消，于是留了 `next` 的 handler 被误判成没留，**响应被抢先发出去**。
+
+**代价**：`sizeof(uvcpp_web_next)` 从 **32** 变 **48**（`uvcpp_web_stream` 288 → 304，
+其余公开类型逐项不变）⇒ 这是**源码 + ABI 双重断点**，拿旧头编译的调用方必须重编。
 
 **洋葱模型**：链 = 全局中间件（按注册序）+ 路由 handler。`next()` 之前的代码按注册序
 执行，`next()` 之后的代码**逆序**执行。

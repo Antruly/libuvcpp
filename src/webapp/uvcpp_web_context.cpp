@@ -170,41 +170,35 @@ void uvcpp_web_context::advance() {
     try {
       // 「handler 留没留 next」= 这次调用**前后** `self` 的引用数有没有变多。
       //
-      // 留了 next 就等于留了一份 `self`（闭包里捕获着它），所以"变多"就是
-      // "留了"。两个测量点的持有者集合完全一致（调用方自己的引用、局部
-      // self、局部 next 闭包里那份），handler 的**按值参数**副本在它返回时
+      // 留了 next 就等于留了一份 `self`（`uvcpp_web_next` 自己持着它），所以
+      // 「变多」就是「留了」。两个测量点的持有者集合完全一致（调用方自己的引用、
+      // 局部 self、局部 next 里那份），handler 的**按值参数**副本在它返回时
       // 就销毁了，不在任何一个测量点里 —— 所以差值只来自 handler 留下的副本。
       //
       // 为什么是**差值**而不是绝对数：留了 next 的 handler 恢复时**仍然握着**
-      // 那份副本（它就是靠它恢复的），绝对数里一直含着它，于是"恢复之后的
-      // 这一环"会被永远误判成"又留了一份"，链再也走不到收尾。差值把它抵消掉。
+      // 那份副本（它就是靠它恢复的），绝对数里一直含着它，于是「恢复之后的
+      // 这一环」会被永远误判成「又留了一份」，链再也走不到收尾。差值把它抵消掉。
       //
       // next 走 `post()` 而不是直接 `advance()`：这样**从工作线程调也成立**。
-      // loop 线程上那条快路径如今是**直接调 `advance()`**（省掉一次
-      // `std::function` 的堆分配），跨线程才回到 `post()` 投回去 —— 少了它，
-      // "从线程池回调里调 next()"就是跨线程跑链，轻则数据竞争，重则在别的
-      // 线程上把响应写出去。异步续跑是本框架的核心用法，这条不该是个坑。
-      // ★ 成本（1.3.13）：loop 线程上**就地**续跑，不造一个 `std::function`
-      // 再让它立刻同步执行 —— 那一圈是一次实打实的堆分配（GCC 的
-      // `std::function` 只在可调用对象**平凡可拷贝**时才用内联存储，而捕获
-      // `shared_ptr` 的 lambda 不是，于是构造与拷贝都落堆）。跨线程那条路
-      // 仍走 `post()`：那里闭包**必须**先存下来，分配是必需的。
-      // 捕获 `this` 是安全的：同一个闭包里的 `self` 就保着这个对象的命。
-      uvcpp_web_next next = uvcpp_web_next([this, self]() {
-        if (host_.on_loop_thread()) {
-          advance();
-          return;
-        }
-        self->post([self]() { self->advance(); });
-      });
+      // loop 线程上那条快路径是**直接 `advance()`**（见 `next_resume_chain()`）
+      // ——少了它，「从线程池回调里调 next()」就是跨线程跑链，轻则数据竞争，
+      // 重则在别的线程上把响应写出去。异步续跑是本框架的核心用法。
+      // ★ 成本（1.3.x M4）：这一段以前就地造一个捕获 `[this, self]` 的闭包，
+      // 而 GCC 的 `std::function` 只在可调用对象**平凡可拷贝**时才用内联存储
+      // （`__is_location_invariant`，**与 sizeof 无关**），捕获 `shared_ptr` 的
+      // lambda 不是 ⇒ 造一次、按值传参再拷一次，每处理一环两次堆分配。现在
+      // `next` 是只持一份 `shared_ptr` 的类：构造与拷贝都不碰堆（跨线程那条路
+      // 仍要 `post()` 存一个闭包，那是必需的）。
+      uvcpp_web_next next = uvcpp_web_next::bind(self);
 
       const long   before = self.use_count();
       const size_t idx    = chain_index_++;
-      // ★ 这里**必须按值拷贝，不能移动**：下面的 `kept_next` 判据是"调用前后的
-      // 引用计数差"，它靠的正是局部 `next` 在调用后仍持着自己那一份引用。
-      // 移动进去会把"处理器留了副本"与"局部被搬空"精确抵消，差值归零，
+      // ★ 这里**必须按值拷贝，不能移动**：下面的 `kept_next` 判据是「调用前后的
+      // 引用计数差」，它靠的正是局部 `next` 在调用后仍持着自己那一份引用。
+      // 移动进去会把「处理器留了副本」与「局部被搬空」精确抵消，差值归零，
       // 于是**留了 next 的处理器被误判成没留，响应被抢先发出去**。
-      // （1.3.13 试过移动：第 5/6/11 条用例当场红。）这一次分配是判据的代价。
+      // （1.3.13 试过移动：第 5/6/11 条用例当场红。M4 换了类型之后这条仍然
+      // 成立 —— `t1/ci_fix/m4_mut_move.py` 把同一处变异成移动，照样红。）
       (*chain_)[idx](req_, resp_, next);
       const long after = self.use_count();
 
@@ -248,6 +242,23 @@ void uvcpp_web_context::advance() {
 
   // finish() 放在最后：它可能触发 host 松手，而 self 还在我们手里兜着。
   if (chain_finished_) finish();
+}
+
+void uvcpp_web_context::next_resume_chain() {
+  // 逐字来自 M4 之前 `advance()` 里那个闭包的体，只是把「就地造的闭包」换成了
+  // 上下文的一个成员函数：loop 线程上就地续跑（不造 `std::function`、不
+  // `post()`）；跨线程才投回去 —— 那里闭包必须先存下来，分配是必需的。
+  //
+  // 捕获 `this` 是安全的：调用方手里那份 `uvcpp_web_next` 就持着本对象的
+  // `shared_ptr`（`operator()` 正是从它过来的），所以这里的 `shared_from_this()`
+  // 一定拿得到，本对象在整个调用期间活着。
+  if (host_.on_loop_thread()) {
+    advance();
+    return;
+  }
+
+  std::shared_ptr<uvcpp_web_context> self = shared_from_this();
+  post([self]() { self->advance(); });
 }
 
 // =========================================================================

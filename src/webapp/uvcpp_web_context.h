@@ -400,6 +400,14 @@ class UVCPP_API uvcpp_web_context
    */
   friend class uvcpp_web_stream;
 
+  /**
+   * @brief `uvcpp_web_next` 要能续跑链（`operator()` → `next_resume_chain()`）。
+   *
+   * 同上：公开出去就多了一条「从框架外推进别人的请求」的路径，而真正需要它的
+   * 只有 `uvcpp_web_next` 自己。
+   */
+  friend class uvcpp_web_next;
+
   uvcpp_web_context(const uvcpp_web_context&);
   uvcpp_web_context& operator=(const uvcpp_web_context&);
 
@@ -413,6 +421,19 @@ class UVCPP_API uvcpp_web_context
 
   /** @brief 收尾：发送 / abort / 通知 host。幂等。 */
   void finish();
+
+  /**
+   * @brief `uvcpp_web_next::operator()` 的实现体：续跑链。
+   *
+   * **逐字等于 `1.3.x` M4 之前 `advance()` 里那个闭包的体**，只是从「就地造的
+   * 闭包」改成了上下文的一个成员函数 —— loop 线程上就地 `advance()`，跨线程才
+   * `post()` 投回去。换掉闭包的收益见 `uvcpp_web_handler.h` 里的类注释。
+   *
+   * @warning 调用方（`operator()`）手里那份 `uvcpp_web_next` 持着本对象的
+   *          `shared_ptr`，所以这里 `shared_from_this()` 一定拿得到 ——
+   *          这也正是它不会在跨线程那条路上悬垂的原因。
+   */
+  void next_resume_chain();
 
   /**
    * @brief 流式请求的收口：把链续跑（如果还挂得住），让它走 `finish()`。
