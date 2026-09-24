@@ -47,6 +47,7 @@
 #define SRC_WSDL_UVCPP_WSDL_SERVE_H
 
 #include <uvcpp/uvcpp_config.h>
+#include <uvcpp/uvcpp_export.h>
 
 #if UVCPP_WSDL_ENABLE
 
@@ -62,14 +63,14 @@
 namespace uvcpp {
 
 /** @return `"text/xml; charset=utf-8"` —— WSDL 的老约定，兼容面最大。 */
-const char* uvcpp_wsdl_content_type();
+UVCPP_API const char* uvcpp_wsdl_content_type();
 
 /**
  * @brief 一份**已序列化**的 WSDL 文本。
  *
  * 拷贝这个对象不拷贝字节（内部是 `shared_ptr`）。
  */
-class uvcpp_wsdl_source {
+class UVCPP_API uvcpp_wsdl_source {
  public:
   /** 空源（还没装内容）。 */
   uvcpp_wsdl_source() {}
@@ -107,7 +108,7 @@ class uvcpp_wsdl_source {
 };
 
 /** @brief 把这个 WSDL 作为响应发出去：200 + `text/xml; charset=utf-8`。 */
-void uvcpp_wsdl_send(const uvcpp_wsdl_source& src, uvcpp_web_response& resp);
+UVCPP_API void uvcpp_wsdl_send(const uvcpp_wsdl_source& src, uvcpp_web_response& resp);
 
 /**
  * @brief 在 app 上装一条 GET 路由。
@@ -116,12 +117,12 @@ void uvcpp_wsdl_send(const uvcpp_wsdl_source& src, uvcpp_web_response& resp);
  * @note **重复注册同一路径不会生效**（路由表打平时先注册的赢，见文件头那一段）
  *       —— 所以这个函数是"一次性的"，别拿它当"重新装载"用。
  */
-void uvcpp_wsdl_serve(uvcpp_web_app& app, const std::string& path,
-                      const uvcpp_wsdl_source& src);
+UVCPP_API void uvcpp_wsdl_serve(uvcpp_web_app& app, const std::string& path,
+                                const uvcpp_wsdl_source& src);
 
 /** @brief 同上，但先把模型 dump 一次再装（省掉显式造 source 的那一步）。 */
-void uvcpp_wsdl_serve(uvcpp_web_app& app, const std::string& path,
-                      const uvcpp_wsdl_document& doc);
+UVCPP_API void uvcpp_wsdl_serve(uvcpp_web_app& app, const std::string& path,
+                                const uvcpp_wsdl_document& doc);
 
 }  // namespace uvcpp
 

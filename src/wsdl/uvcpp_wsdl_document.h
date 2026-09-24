@@ -59,6 +59,7 @@
 #define SRC_WSDL_UVCPP_WSDL_DOCUMENT_H
 
 #include <uvcpp/uvcpp_config.h>
+#include <uvcpp/uvcpp_export.h>
 
 #if UVCPP_WSDL_ENABLE
 
@@ -144,7 +145,7 @@ enum class wsdl_status : int {
 };
 
 /** @brief 给使用者看的一句话（判据里直接印它，比印数字好查）。 */
-const char* wsdl_status_name(wsdl_status s);
+UVCPP_API const char* wsdl_status_name(wsdl_status s);
 
 // =========================================================================
 // 模型
@@ -156,7 +157,7 @@ const char* wsdl_status_name(wsdl_status s);
  * `space` 为空 = **没有命名空间**（不是"默认命名空间"—— 解析时默认命名空间
  * 已经被解析成具体的 URI 填进来了）。
  */
-struct uvcpp_qname {
+struct UVCPP_API uvcpp_qname {
   std::string space;
   std::string local;
 
@@ -181,10 +182,10 @@ struct uvcpp_qname {
  * 依次剥掉两种写法：`{http://x}Foo`（`str()` 的形状）与 `tns:Foo`（XML 里的
  * 形状）。`find_*` 用它，所以传 `"Add"`、`"tns:Add"`、`"{…}Add"` 都查得到。
  */
-std::string uvcpp_qname_local(const std::string& text);
+UVCPP_API std::string uvcpp_qname_local(const std::string& text);
 
 /** @brief `wsdl:part`。`element` 与 `type` 至多有一个非空（规范如此）。 */
-struct uvcpp_wsdl_part {
+struct UVCPP_API uvcpp_wsdl_part {
   std::string name;
   uvcpp_qname element;  ///< `@element`（一个**元素**声明）
   uvcpp_qname type;     ///< `@type`（一个**类型**）
@@ -192,7 +193,7 @@ struct uvcpp_wsdl_part {
 };
 
 /** @brief `wsdl:message`。 */
-struct uvcpp_wsdl_message {
+struct UVCPP_API uvcpp_wsdl_message {
   std::string name;
   std::vector<uvcpp_wsdl_part> parts;
   std::string documentation;
@@ -201,14 +202,14 @@ struct uvcpp_wsdl_message {
 };
 
 /** @brief `portType/operation` 里 `input` / `output` / `fault` 的一个引用。 */
-struct uvcpp_wsdl_op_ref {
+struct UVCPP_API uvcpp_wsdl_op_ref {
   std::string name;     ///< `@name`（可空；WSDL 允许匿名）
   uvcpp_qname message;  ///< `@message`
   std::string documentation;
 };
 
 /** @brief `wsdl:portType/wsdl:operation`。 */
-struct uvcpp_wsdl_operation {
+struct UVCPP_API uvcpp_wsdl_operation {
   std::string name;
   /**
    * `input` / `output` **在不在**（而不是"名字是不是空"）。
@@ -229,7 +230,7 @@ struct uvcpp_wsdl_operation {
 };
 
 /** @brief `wsdl:portType`。 */
-struct uvcpp_wsdl_port_type {
+struct UVCPP_API uvcpp_wsdl_port_type {
   std::string name;
   std::vector<uvcpp_wsdl_operation> operations;
   std::string documentation;
@@ -243,7 +244,7 @@ struct uvcpp_wsdl_port_type {
  * 1.1 与 1.2 的差别在**命名空间**上，元素名一样，所以这一份结构两边共用，
  * 用 `is_soap12` 区分。`transport` 只有 1.1 写（1.2 的 `soap:binding` 不带它）。
  */
-struct uvcpp_wsdl_soap_binding {
+struct UVCPP_API uvcpp_wsdl_soap_binding {
   bool present = false;
   bool is_soap12 = false;
   std::string style;      ///< `"document"` / `"rpc"`（空 = 没写）
@@ -251,7 +252,7 @@ struct uvcpp_wsdl_soap_binding {
 };
 
 /** @brief `wsdl:binding/wsdl:operation`，含它那一对 `soap:operation`/`soap:body`。 */
-struct uvcpp_wsdl_binding_operation {
+struct UVCPP_API uvcpp_wsdl_binding_operation {
   std::string name;
   std::string soap_action;  ///< `soap:operation/@soapAction`（1.1）；1.2 里可空
   std::string style;        ///< `soap:operation/@style`（空 = 继承 binding 的）
@@ -276,7 +277,7 @@ struct uvcpp_wsdl_binding_operation {
 };
 
 /** @brief `wsdl:binding`。 */
-struct uvcpp_wsdl_binding {
+struct UVCPP_API uvcpp_wsdl_binding {
   std::string name;
   uvcpp_qname port_type;  ///< `@type`
   uvcpp_wsdl_soap_binding soap;
@@ -288,7 +289,7 @@ struct uvcpp_wsdl_binding {
 };
 
 /** @brief `wsdl:service/wsdl:port`。 */
-struct uvcpp_wsdl_port {
+struct UVCPP_API uvcpp_wsdl_port {
   std::string name;
   uvcpp_qname binding;  ///< `@binding`
   std::string address;  ///< `soap:address` / `soap12:address` 的 `@location`
@@ -297,7 +298,7 @@ struct uvcpp_wsdl_port {
 };
 
 /** @brief `wsdl:service`。 */
-struct uvcpp_wsdl_service {
+struct UVCPP_API uvcpp_wsdl_service {
   std::string name;
   std::vector<uvcpp_wsdl_port> ports;
   std::string documentation;
@@ -312,7 +313,7 @@ struct uvcpp_wsdl_service {
  * "引用指到别的文档去了"而拒（那种严法会把合法文档拒掉），要判引用是否闭合
  * 就显式调 `uvcpp_wsdl_check_references`，并知道它**只查本文档内**。
  */
-struct uvcpp_wsdl_import {
+struct UVCPP_API uvcpp_wsdl_import {
   std::string namespace_uri;  ///< `@namespace`
   std::string location;       ///< `@location`
 };
@@ -322,7 +323,7 @@ struct uvcpp_wsdl_import {
 // =========================================================================
 
 /** @brief 一份 WSDL 的解析上限。四个数都是"超过就拒"，不是"截断"。 */
-struct uvcpp_wsdl_limits {
+struct UVCPP_API uvcpp_wsdl_limits {
   /** 输入字节数上限，**解析之前**判。默认 4 MiB（一份 WSDL 通常几 KB）。 */
   size_t max_bytes;
   /** 元素嵌套深度上限。默认 64。 */
@@ -349,7 +350,7 @@ struct uvcpp_wsdl_limits {
  * getter/setter 只会让"按模型生成 WSDL"那条路（见 `uvcpp_wsdl_dump`）难写。
  * `find_*` 那组只提供"按键查一条"，不提供修改。
  */
-struct uvcpp_wsdl_document {
+struct UVCPP_API uvcpp_wsdl_document {
   std::string target_namespace;
   std::string name;              ///< `definitions/@name`（可选）
   std::string documentation;     ///< `definitions` 下第一个 `wsdl:documentation`
@@ -398,15 +399,15 @@ struct uvcpp_wsdl_document {
  * @param why 非空时接收一句**指向静态缓冲或常量串**的说明（不接收时不写）。
  *            返回 `SYNTAX`/`TOO_*` 时那句说明来自 XML 层。
  */
-wsdl_status uvcpp_wsdl_parse(const char* data, size_t len,
-                             uvcpp_wsdl_document& out,
-                             const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
-                             const char** why = nullptr);
+UVCPP_API wsdl_status uvcpp_wsdl_parse(const char* data, size_t len,
+                                       uvcpp_wsdl_document& out,
+                                       const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
+                                       const char** why = nullptr);
 
 /** @copydoc uvcpp_wsdl_parse(const char*, size_t, uvcpp_wsdl_document&, const uvcpp_wsdl_limits&, const char**) */
-wsdl_status uvcpp_wsdl_parse(const std::string& xml, uvcpp_wsdl_document& out,
-                             const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
-                             const char** why = nullptr);
+UVCPP_API wsdl_status uvcpp_wsdl_parse(const std::string& xml, uvcpp_wsdl_document& out,
+                                       const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
+                                       const char** why = nullptr);
 
 /**
  * @brief 把模型序列化成一份 WSDL 1.1 文档。**不需要 pugixml**（纯字符串拼接）。
@@ -414,10 +415,10 @@ wsdl_status uvcpp_wsdl_parse(const std::string& xml, uvcpp_wsdl_document& out,
  * 命名空间策略与"不是字节级往返"这两条写在文件头。产出是**确定性的**：同一个
  * 模型永远产出逐字节相同的文本（缩进固定两空格、行尾 LF、结尾一个换行）。
  */
-std::string uvcpp_wsdl_dump(const uvcpp_wsdl_document& doc);
+UVCPP_API std::string uvcpp_wsdl_dump(const uvcpp_wsdl_document& doc);
 
 /** @copydoc uvcpp_wsdl_dump */
-void uvcpp_wsdl_dump_to(const uvcpp_wsdl_document& doc, std::string& out);
+UVCPP_API void uvcpp_wsdl_dump_to(const uvcpp_wsdl_document& doc, std::string& out);
 
 /**
  * @brief 检查**文档内**的引用是否闭合。
@@ -433,18 +434,18 @@ void uvcpp_wsdl_dump_to(const uvcpp_wsdl_document& doc, std::string& out);
  *
  * @param why 失败时接收一句说明（静态串）。
  */
-bool uvcpp_wsdl_check_references(const uvcpp_wsdl_document& doc,
-                                std::string* why);
+UVCPP_API bool uvcpp_wsdl_check_references(const uvcpp_wsdl_document& doc,
+                                           std::string* why);
 
 // =========================================================================
 // XML 转义（dump 与 7b 的响应序列化共用）
 // =========================================================================
 
 /** @brief 文本节点转义：`&` `<` `>`（引号在文本里不必转，但转了无害）。 */
-std::string uvcpp_xml_escape_text(const std::string& s);
+UVCPP_API std::string uvcpp_xml_escape_text(const std::string& s);
 
 /** @brief 属性值转义：在上面基础上再加 `"`。 */
-std::string uvcpp_xml_escape_attr(const std::string& s);
+UVCPP_API std::string uvcpp_xml_escape_attr(const std::string& s);
 
 }  // namespace uvcpp
 
