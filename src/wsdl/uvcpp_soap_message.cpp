@@ -144,7 +144,10 @@ std::string uvcpp_soap_action_of_content_type(const std::string& ct) {
 std::string uvcpp_soap_normalize_action(const std::string& raw) {
   const std::string s = trim_ws(raw);
   if (s.size() >= 2 && s[0] == '"' && s[s.size() - 1] == '"') {
-    return s.substr(1, s.size() - 2);
+    // ★ 引号**里面**的空白也要剥。少这一步，`" urn:x "` 与 `"urn:x"` 会归一成两个
+    //   不同的值，于是同一份 WSDL 对前一种客户端回 200、对后一种回 Fault —— 而
+    //   两边看起来一模一样。引号里多出来的空白不可能是动作 URI 的一部分。
+    return trim_ws(s.substr(1, s.size() - 2));
   }
   return s;
 }
