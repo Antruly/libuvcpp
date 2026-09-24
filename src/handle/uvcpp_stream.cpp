@@ -35,7 +35,13 @@ int uvcpp_stream::read_start(
 
 int uvcpp_stream::write(uvcpp_write *req, const uv_buf_t bufs[], unsigned int nbufs,
                    std::function<void(uvcpp_write *, int)> write_cb) {
-  req->m_write_cb = write_cb;
+  // **`std::move` 是承重的**（同 `uvcpp_tcp_client::write` 里那条注释）：
+  // 按值收下的 `write_cb` 到这一句已经没人要了，而拷贝一个 `std::function`
+  // 会把它捕获的东西整份复制一遍 —— 那是一次实打实的堆分配（GCC 的判据是
+  // `__is_location_invariant`，即 `is_trivially_copyable`，**与 sizeof 无关**：
+  // 捕获 `shared_ptr` 的 lambda 只占 16 字节也照样走堆）。移动只是把内部
+  // 指针接过来。每响应一次写，所以这是每请求一笔。
+  req->m_write_cb = std::move(write_cb);
  
   return uv_write(OBJ_UVCPP_WRITE_REQ(*req), UVCPP_STREAM_HANDLE,
                   reinterpret_cast<const uv_buf_t *>(bufs),
@@ -48,7 +54,13 @@ int uvcpp_stream::write(uvcpp_write *req, const uv_buf_t bufs[], unsigned int nb
 int uvcpp_stream::write(uvcpp_write *req, const uv_buf_t bufs[], unsigned int nbufs,
                    uvcpp_stream *send_handle,
                    std::function<void(uvcpp_write *, int)> write_cb) {
-  req->m_write_cb = write_cb;
+  // **`std::move` 是承重的**（同 `uvcpp_tcp_client::write` 里那条注释）：
+  // 按值收下的 `write_cb` 到这一句已经没人要了，而拷贝一个 `std::function`
+  // 会把它捕获的东西整份复制一遍 —— 那是一次实打实的堆分配（GCC 的判据是
+  // `__is_location_invariant`，即 `is_trivially_copyable`，**与 sizeof 无关**：
+  // 捕获 `shared_ptr` 的 lambda 只占 16 字节也照样走堆）。移动只是把内部
+  // 指针接过来。每响应一次写，所以这是每请求一笔。
+  req->m_write_cb = std::move(write_cb);
 
   return uv_write2(OBJ_UVCPP_WRITE_REQ(*req), UVCPP_STREAM_HANDLE,
                    reinterpret_cast<const uv_buf_t *>(bufs),
