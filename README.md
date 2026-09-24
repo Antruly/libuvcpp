@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.14--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.15--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.14-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.15-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -534,7 +534,9 @@ Worth knowing before you turn it on:
   connection is counted in exactly one slot" is promised; on Windows (and anywhere the
   flag is rejected) index `0` is a pure acceptor that hands every connection to `1..n-1`
   by explicit rotation, so it stays at zero. `loop_count()` reports how many loops exist
-  and `connection_count_at(i)` how many each holds.
+  and `connection_count_at(i)` how many each holds. **To exercise the other leg on
+  Linux**, `set_handoff_forced(true)` (call it **before** `set_loops()`) forces the handoff
+  shape — a **test-only** hook that trades kernel fan-out for user-space handoff; don't ship it.
 
 **→ Sizing, core pinning, and what makes a scaling reading valid or invalid:
 [doc/benchmark-rig.md](doc/benchmark-rig.md).**
@@ -604,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.14-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.15-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -642,6 +644,8 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   (`net/uvcpp_socket_handoff.h`): `WSADuplicateSocketW` + `WSASocketW` on Windows, `dup()`
   elsewhere. **On Windows this rides a known libuv defect** — read
   [doc/net-guide.md](doc/net-guide.md) §4 and [RELEASE.md](./RELEASE.md) before enabling it
+- `set_handoff_forced(true)` (`1.3.15`) forces the acceptor + handoff shape so the POSIX
+  `dup()` leg can be exercised on Linux too (**a test hook**; don't ship it)
 - `set_loop_start_hook()` (`1.2.22`) and `set_loop_exit_hook()` (`1.2.24`) run on each
   worker loop, so an owner can create and tear down handles there; a throwing start hook
   becomes `UV_ECANCELED` instead of a promise that never resolves

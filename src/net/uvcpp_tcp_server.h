@@ -341,6 +341,31 @@ class UVCPP_API uvcpp_tcp_server {
   bool is_fanout() const;
 
   /**
+   * @brief **强制**走「接受者 + 转手」，即使本平台支持 `UV_TCP_REUSEPORT`。
+   *
+   * 为什么要有它：POSIX 那条转手路（`uvcpp_socket_handoff.cpp` 的 `::dup()` 支）
+   * 在本仓**没有任何一条腿留下过正证据** —— Windows 开发机上它根本编不到
+   * （在 `#else` 里）；Linux（本机 VM 与 CI）上 `UV_TCP_REUSEPORT` 绑得上 ⇒
+   * `is_fanout()` 恒为真 ⇒ 永不走转手；只有 macOS 会因 `uv__sock_reuseport()`
+   * 没实现而**回落**到它，而"macOS 真的回落了吗"本身没人验过。开了这个开关，
+   * 同一条用例就能把**两条腿各跑一遍**：`set_handoff_forced(true)` ⇒
+   * `is_fanout()` 必为 `false`，而那几套分布 / 线程归属 / 收尾判据在转手形状下
+   * 本来就成立 ⇒ 它们同时成了那条腿的证据。
+   *
+   * 不新增运行路径：它只让 `bind_flags_for_loops()` 返回 0（= 不带那个标志去
+   * 绑），于是走的是与 Windows / macOS **同一条**回落路径（`bind_on_loops()`
+   * 里 `fanout_ = false` 那一步）。
+   *
+   * @warning 必须在 `set_loops()` 之前调（同 `set_loop_start_hook()`：
+   * `is_fanout()` 是**绑定时**探出来的，绑完再改这个标志不会改变已经绑好的
+   * 形状）。装晚了会被忽略并打一条 stderr 诊断。
+   *
+   * @note 这是**测试用的口子**，不是生产用的性能开关 —— 它把内核分流换成用户态
+   * 转手，代价更高（见 `doc/multiloop-design.md` §1）。
+   */
+  void set_handoff_forced(bool on);
+
+  /**
    * @brief 撤销 `set_loops(n > 1)`：停掉并释放全部工作循环，回到单循环状态。
    *
    * **给属主在启动失败时回滚用。** `set_loops(n)` 一返回，n−1 条工作循环就已经
@@ -855,6 +880,14 @@ class UVCPP_API uvcpp_tcp_server {
   int bind_port_ = 0;
   bool bind_is_ipv6_ = false;
   bool fanout_ = false;
+  /**
+   * @brief `set_handoff_forced(true)` 记下来的请求。
+   *
+   * 与 `fanout_` 并列（两个 `bool` 之后就是 8 字节对齐的 `worker_listeners_`）
+   * ⇒ 它落进既有 padding，**`sizeof` 不变**（实测：改动前后都是 336）。
+   * 与 `fanout_` 一样：在 `set_loops()` 之前写、之后只读。
+   */
+  bool handoff_forced_ = false;
 
   /**
    * @brief 每条工作循环自己的那个监听句柄（只有 `fanout_` 时非空）。

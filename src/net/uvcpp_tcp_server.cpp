@@ -204,6 +204,10 @@ int uvcpp_tcp_server::bind_flags_for_loops() const {
   // 只有 `n > 1` 才谈得上"每条循环各绑一个"：`n == 1` 时一个标志都不带 ——
   // 与今天逐字节相同，也没有平台差异。
   if (workers_.empty()) return 0;
+  // 测试口子：强制走转手（= 不带标志去绑 ⇒ 落到下面那条运行时回落上）。
+  // 放在平台分叉**之前**，这样它在每个平台上都同义 —— 转手那条腿在 Linux 上
+  // 否则永远跑不到（见 `set_handoff_forced()` 的说明）。
+  if (handoff_forced_) return 0;
 #if defined(_WIN32)
   // libuv 在 Windows 上**无条件拒绝**这个标志（`src/win/tcp.c` 见到就
   // `return ERROR_NOT_SUPPORTED`），试都不用试：那边的 `n > 1` 只有
@@ -595,6 +599,19 @@ void uvcpp_tcp_server::set_loop_exit_hook(
 }
 
 bool uvcpp_tcp_server::is_fanout() const { return fanout_; }
+
+void uvcpp_tcp_server::set_handoff_forced(bool on) {
+  // 与 `set_loop_start_hook()` 同一条时序规则：工作线程一跑起来，`is_fanout()`
+  // 那一刻的值就已经定了（绑定发生在 `set_loops()` 之后、`listen()` 之前），
+  // 这时候再改只会得到一个"配了却没生效"的假象 —— 所以忽略 + 说明，不静默。
+  if (!workers_.empty()) {
+    std::fprintf(stderr,
+                 "[uvcpp_tcp_server] set_handoff_forced() 在工作线程已启动"
+                 "之后才调用，本次不生效（它必须在 set_loops() 之前设）\n");
+    return;
+  }
+  handoff_forced_ = on;
+}
 
 int uvcpp_tcp_server::loop_count() const {
   return 1 + static_cast<int>(workers_.size());

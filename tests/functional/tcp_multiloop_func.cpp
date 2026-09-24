@@ -100,11 +100,11 @@ class ServerRig {
    *
    * @param loops 传给 `set_loops()` 的值；1 = 对照组。
    */
-  bool start(int loops) {
+  bool start(int loops, bool force_handoff = false) {
     std::promise<int> port_promise;
     std::future<int> port_fut = port_promise.get_future();
 
-    thread_ = std::thread([this, loops, &port_promise]() {
+    thread_ = std::thread([this, loops, force_handoff, &port_promise]() {
       acceptor_tid_ = std::this_thread::get_id();
 
       // 内层作用域是**故意的**：`exited_` 要在服务端析构返回**之后**才置位，
@@ -113,6 +113,8 @@ class ServerRig {
         uvcpp_tcp_server server;
         live_.store(&server);
 
+        // **必须在 `set_loops()` 之前**（同 `set_loop_start_hook()` 的时序规则）。
+        server.set_handoff_forced(force_handoff);
         loops_rc_.store(server.set_loops(loops));
         loop_count_.store(server.loop_count());
 
@@ -271,10 +273,11 @@ static bool client_echo(uvcpp_tcp_client& client, int port, int idx,
 // 一条完整相位：n 条循环、nconn 条连接
 // =========================================================================
 
-static bool run_phase(int loops, int nconn, const char* tag) {
+static bool run_phase(int loops, int nconn, const char* tag,
+                      bool force_handoff = false) {
   bool ok = true;
   ServerRig rig;
-  if (!rig.start(loops)) {
+  if (!rig.start(loops, force_handoff)) {
     std::cout << "  [" << tag << "] 服务端起不来\n";
     return false;
   }
@@ -282,6 +285,19 @@ static bool run_phase(int loops, int nconn, const char* tag) {
   if (rig.loops_rc() != 0 || rig.listen_rc() != 0) {
     std::cout << "  [" << tag << "] set_loops=" << rig.loops_rc()
               << " listen=" << rig.listen_rc() << "（都不是 0）\n";
+    rig.request_stop();
+    return false;
+  }
+
+  // 这次跑的是**哪条腿**：`is_fanout()` 是绑定时探出来的（不是编译期常量），
+  // 所以这里印的是本次的真实结果。
+  std::cout << "  [" << tag << "] 腿 = "
+            << (rig.fanout() ? "REUSEPORT 内核分流" : "接受者 + 转手") << "\n";
+  // 强制档的判据是**运行时探测的结果**，不是"我调过那个 setter 了" —— 否则
+  // 这个新开关自己就是个静默失效的装置（调了、没生效、用例照样全绿）。
+  if (force_handoff && rig.fanout()) {
+    std::cout << "  [" << tag << "] [FAIL] 调过 set_handoff_forced(true)"
+                 "之后 is_fanout() 仍为真\n";
     rig.request_stop();
     return false;
   }
@@ -816,6 +832,15 @@ int main() {
   // 那一档由 n=4 那条负责，这里只补"n 很小时也走同一套收尾"。
   std::cout << "[tcp_multiloop] multi_n2\n";
   ok = run_phase(2, 6, "n=2") && ok;
+
+  // **转手腿（强制）**：`dup()` 那条 POSIX 路在 Linux 上永不被选中（REUSEPORT
+  // 绑得上），在本机更编不到（在 `#else` 里）⇒ 不加这一档，它就只在 macOS 的
+  // CI 腿上跑到，且"macOS 是否真的回落"无人验过。这一档把它拉到 Linux 上跑：
+  // `set_handoff_forced(true)` ⇒ `is_fanout()` 必为假 ⇒ 下面那套分布 / 线程
+  // 归属 / 收尾判据同时成了**转手路**的证据（连接必须真的被 dup+open 到别的
+  // 循环上去，否则一条都收不到）。
+  std::cout << "[tcp_multiloop] handoff_forced_n4\n";
+  ok = run_phase(4, 16, "转手(强制 n=4)", true) && ok;
 
   std::cout << "[tcp_multiloop] " << (ok ? "ALL PASS" : "FAIL") << "\n";
   return ok ? 0 : 2;

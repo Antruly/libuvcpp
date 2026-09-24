@@ -217,10 +217,10 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:461`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:593-594`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:486`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:618-619`） |
 
-`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1009-1011`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1026-1028`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
 
@@ -252,6 +252,17 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 - **接受者 + 转手**（Windows，以及那个标志被拒时的回落）：0 号（就是 `get_loop()` 那条、
   由调用者的线程跑）accept 到连接之后把 socket **转手**给 `1 + (i % (n-1))` 号循环 ——
   **显式轮转**决定去向，所以分布是确定的、不会偶发，0 号一条都不留。
+
+**两条腿各有一份正证据**：Windows / macOS 上转手是**唯一**形状（前者 libuv 无条件
+拒绝那个标志，后者 `uv__sock_reuseport()` 没有实现 ⇒ 绑定失败 ⇒ 回落），那两边的
+用例跑的就是转手；但 Linux 上 `UV_TCP_REUSEPORT` 恒绑得上 ⇒ 转手那条腿**本来永远
+跑不到**。补的测试口子是 `set_handoff_forced(true)`（**必须在 `set_loops()` 之前
+调**）：它只让 `bind_flags_for_loops()` 返回 0，于是走的是与 Windows / macOS
+**同一条**回落路径，**不新增运行分支**。判据在 `tests/functional/tcp_multiloop_func.cpp`
+的"转手(强制 n=4)"那一档：回显 16/16、分布落满全部 n−1 条工作循环、**接受者线程
+一条连接回调都不跑** —— 连接**能落到别的线程上**这件事，只有 `dup()` 转手这一条路
+解释得了，这就是那条腿的正证据。**生产上别用它**：它是把内核分流换成用户态转手，
+代价更高。
 
 `client_count_at()` 两条路上都看得见分布，但**别把两端写进同一套判据**。
 
@@ -516,7 +527,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:457-459`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:482-484`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -595,7 +606,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`src/net/uvcpp_tcp_server.cpp:942-949`）。
+（`src/net/uvcpp_tcp_server.cpp:959-966`）。
 
 ---
 
@@ -744,7 +755,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:399-402`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:580-588`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:605-613`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`
