@@ -512,7 +512,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 | `set_read_callback(cb)` | 服务端 `:232` | 同上 | 一份回调覆盖所有连接 |
 
 **`read_start` 与 `read_start_events` 互斥。** 用过其中一个再用另一个，拿到
-`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:1885-1893`）：
+`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:2101-2109`）：
 两条路共用同一个底层 stream，同时注册的话底层 `read_start` 会把先注册的那个
 **静默覆盖**掉——用户以为两个回调都在收数据，实际只有一个。
 
@@ -580,7 +580,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
   `#define ERROR 0`，`EOF` 是 `<cstdio>` 的宏。所以是 `READ_ERROR` / `PEER_CLOSED`。
 
 收到 `PEER_CLOSED` / `READ_ERROR` 之后**这个回调不会再被调用**，框架随后的收尾
-（关闭回调）照常发生，所以**不要在回调里做释放**（`src/net/uvcpp_tcp_client.h:486-487`）。
+（关闭回调）照常发生，所以**不要在回调里做释放**（`src/net/uvcpp_tcp_client.h:530-531`）。
 
 ---
 
@@ -593,7 +593,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 所以：
 
 - **不要在关闭回调里 `delete` 客户端**，除非你已经用 `take_client()` 把所有权取走。
-  删一个仍归框架管的客户端会让框架随后二次释放（`src/net/uvcpp_tcp_client.h:567-569`）。
+  删一个仍归框架管的客户端会让框架随后二次释放（`src/net/uvcpp_tcp_client.h:611-613`）。
 - 想自己管，用 `take_client()` 取走、`return_client()` 交回。两个都**必须在 loop
   线程调用**；交回之后**不要再持有那个指针**。
 - 关掉一条连接之后也别再留指针：框架可能在完成回调里把它删掉。
@@ -602,7 +602,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 （`src/net/uvcpp_tcp_server.h:59-65`）——不读的连接，即使设了 `set_on_close()` 也
 **永远不会被触发**，而且这条连接不会被释放，等于每条一个静默泄漏。只想知道死活、
 不要数据的话，就用 `read_start_events()` 注册一个忽略数据的回调
-（`src/net/uvcpp_tcp_client.h:555-559`）。
+（`src/net/uvcpp_tcp_client.h:599-603`）。
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
@@ -652,7 +652,7 @@ int write_wait(uvcpp_buf* buf, int timeout_ms = 30000);
 | 已经有异步写在飞，再调异步 `write` | 返回 `UV_EALREADY` |
 | 没连上就写 | 返回 `UV_ENOTCONN` |
 
-**异步/同步其实是由 `cb` 是不是空决定的**（`src/net/uvcpp_tcp_client.cpp:1137-1140`）：
+**异步/同步其实是由 `cb` 是不是空决定的**（`src/net/uvcpp_tcp_client.cpp:1178-1181`）：
 `cb` 非空 ⇒ 立即返回 0，完成时回调；`cb` 为空 ⇒ 退化成 `write_wait(data, len, 30000)`。
 
 **这就是为什么回调里必须传 cb。** 事件循环回调里禁止同步等待，而三参数的

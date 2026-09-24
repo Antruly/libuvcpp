@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
 ## 3. POSIX（Linux / macOS）：零通讯
 
 **master 只做一件事：把端口占住。** 它走今天已有的 bind 链
-（`src/webapp/uvcpp_web_app.cpp:2012-2012` → `src/web/uvcpp_http_server.cpp:141-142` →
+（`src/webapp/uvcpp_web_app.cpp:2012-2012` → `src/web/uvcpp_http_server.cpp:150-151` →
 `src/net/uvcpp_tcp_server.cpp:377-382` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
 **然后不跑循环** —— `uv_listen` 会在 `listen(fd, backlog)` 那一步就把端口占住，
 而 master 的 loop 从不 `uv_run`，所以它永远不会 accept。于是"master 不接请求"是天然的，
@@ -180,7 +180,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   pipelined 化。上它之前要先查清的两件事**已经查完了**，结论在 §8；但这条路上后来又冒出
   **第三件事，而且是拦路的** —— 见 §9。
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
-  n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:1009`）、
+  n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:1054`）、
   `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:1982-1982` /
   `src/webapp/uvcpp_web_app.h:1925-1925`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
@@ -193,7 +193,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   要写进文档的是另一件事：**n 个 worker × 每进程 4 条池线程 = 4n 条**，调
   `UV_THREADPOOL_SIZE` 时按每进程算。
 - **统计要跨进程聚合。** `uvcpp_tcp_client` 的 `reclaim_stats()` / `try_write_stats()`
-  （`src/net/uvcpp_tcp_client.h:668-668` / `:696`）本来就是 `static` 的进程级聚合，
+  （`src/net/uvcpp_tcp_client.h:712-712` / `:740`）本来就是 `static` 的进程级聚合，
   多进程下变成"每进程一份"，要看总数得自己聚合。
 - **那个突发探针不进仓库、不进 CI。** 它要断言的失败模式（"队列满了会拒连接"）在这台机器上
   **基本不出现**（§8），而且"满了之后是被拒还是挂住"**本身随平台变**（POSIX 给 RST、
@@ -320,7 +320,7 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
 
 ### 9.2 uvcpp 侧为什么变成 UAF，而不是"多跑一次回调"
 
-`callback_write`（`src/req/uvcpp_write.cpp:136-136`）取出闭包后走 `invoke_completion`
+`callback_write`（`src/req/uvcpp_write.cpp:164-164`）取出闭包后走 `invoke_completion`
 （`src/req/uvcpp_req.h:175-175`）——**回调返回之后 `delete self`**。所以重复的那次完成打在已释放对象上。
 ⇒ 「在自己的完成回调里释放自己」这个形状，**活不过一次重复投递**，与内核为什么多投无关。
 

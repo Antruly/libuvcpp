@@ -596,8 +596,13 @@ class UVCPP_API uvcpp_http_server {
   /** @brief Called when a TCP connection is accepted. */
   void on_tcp_connection(uvcpp_tcp_client* client);
 
-  /** @brief Called when data arrives on a connection. */
-  void on_connection_data(uvcpp_tcp_client* client, uvcpp_buf* buf);
+  /**
+   * @brief Called when data arrives on a connection.
+   *
+   * `data` 只在**本次调用期间**有效（框架层读的契约，见 `uvcpp_net_read.h`）：
+   * 解析器就地吃、升级残留当场拷走，本函数返回之后一个字节都不能再用。
+   */
+  void on_connection_data(uvcpp_tcp_client* client, const char* data, size_t len);
 
   /** @brief Called when a full HTTP request has been parsed. */
   void on_request_complete(uvcpp_tcp_client* client);

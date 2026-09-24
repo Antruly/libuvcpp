@@ -807,7 +807,7 @@ void set_ssl_context(uvcpp_ssl_context* ctx);   // 仅 UVCPP_OPENSSL_ENABLE
 
 协议层的 `uvcpp_ws_client` **不承诺可重连**：它内部那个 `uvcpp_tcp_client` 的句柄关掉
 之后 `uvcpp_tcp` 会把底层指针置空，且 `has_async_connect_cb_` 在明文成功路径上从不清除
-（`src/net/uvcpp_tcp_client.cpp:637-641`）——**同一个协议层客户端对象根本连不了第二次**。
+（`src/net/uvcpp_tcp_client.cpp:678-682`）——**同一个协议层客户端对象根本连不了第二次**。
 
 所以本层的做法是：每次连接尝试都换一个协议层客户端，新客户端带一个新的事件循环，在
 `connect()` 之前把本层存下的回调重新装一遍。对使用者不可见。重连定时器挂在 `inner_` 的

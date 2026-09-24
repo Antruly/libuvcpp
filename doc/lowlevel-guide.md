@@ -310,7 +310,7 @@ int main() {
 互转。和它相关的契约都是**生命周期**：
 
 - **libuv 要求写缓冲活到完成回调**，它不会替你拷一份（`src/req/uvcpp_write.h:36-46`）。
-  `uv_write` 会把 `uv_buf_t` **数组本身**拷走，但**不拷数据**（`:98-104`）。
+  `uv_write` 会把 `uv_buf_t` **数组本身**拷走，但**不拷数据**（`:122-128`）。
 - `append_uv_buf_view()` **必须在 `set_uv_buf()` 之后**调（`src/req/uvcpp_write.h:56`），
   而且第 2 块**只有一个**：再调一次（两种入口混着调也算）会把上一个占用者换掉。
 - `append_uv_buf_owned()` 传的必须是 `uvcpp_buf::out_uv_buf()` 返回的**原指针**

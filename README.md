@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.21--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.22--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.21-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.22-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.21-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.22-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -764,6 +764,18 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   steady state. The price is that what is handed to the next request must be an **empty**
   table, so neither `clear()` may be dropped. 22.02 → 19.02 allocations per request
   (`1.3.21`)
+- The write path's five per-response heap allocations became one: the new
+  `uvcpp_tcp_client::write_owned()` lets the caller bring its own write request, so the
+  `uv_write_t`, the `uvcpp_write`, and both `std::function` closures are no longer
+  constructed per response, and the head no longer goes through a temporary
+  `uvcpp_buf` (the body keeps travelling as an iovec view — still zero-copy). A
+  per-connection recycle slot holds the request while it is not in flight. 19.02 →
+  13.02 allocations per request (`1.3.22`)
+- The HTTP server's read path now uses the framework's event-style read callback, so
+  each read no longer `clone_data()`s a throwaway copy first (`data` is valid only for
+  the duration of the callback, which is exactly what the parser needs). Event
+  granularity and the `nread < 0` semantics are unchanged. 13.02 → 12.02 allocations
+  per request (`1.3.22`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

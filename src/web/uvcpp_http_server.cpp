@@ -411,14 +411,28 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
     on_request_complete(client);
   });
 
-  client->read_start([this, client](uvcpp_buf* buf) {
-    if (buf && buf->size() > 0) on_connection_data(client, buf);
+  // ★ 走**框架层**读（`read_start_events`），不走原始那版 `read_start(cb)`。
+  //   原始那版要求回调吃一个 `uvcpp_buf*`，于是 `uvcpp_tcp_client` 每次读都得先
+  //   `clone_data()` 一份（见它的原始读路径）—— 而本层要的只是
+  //   `(const char*, size_t)` 去喂解析器，那份拷贝与随之而来的每请求一次 malloc
+  //   是白做的。`uvcpp_net_read.h` 写明 `data` **只在本次回调期间有效**，正是
+  //   本层的用法：解析器就地吃字节，升级请求后面的残留当场 `assign` 走。
+  //
+  //   语义差异只有一处，且对本层是净收益：原始那版在 `nread < 0` 时**什么都不
+  //   回调**（对端断开与读错误都只能靠 close 回调猜），框架版给出
+  //   DATA / PEER_CLOSED / READ_ERROR；而收尾（close 回调 → `remove_ctx`）照旧，
+  //   本层不需要在回调里做任何释放。
+  client->read_start_events([this, client](uvcpp_tcp_client&,
+                                           const net_read_result& r) {
+    if (r.event == net_read_event::DATA && r.data != nullptr && r.size > 0) {
+      on_connection_data(client, r.data, r.size);
+    }
   });
   client->set_on_close([this, client]() { remove_ctx(client); });
 }
 
 void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
-                                            uvcpp_buf* buf) {
+                                            const char* data, size_t len) {
   std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
   auto it = tbl.find(client);
   if (it == tbl.end()) return;
@@ -428,7 +442,7 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
   // (return true) or take the connection over (return false). This is the only
   // place outside the parser that sees a connection's raw bytes.
   if (raw_data_hook_) {
-    if (!raw_data_hook_(client, buf->get_const_data(), buf->size())) {
+    if (!raw_data_hook_(client, data, len)) {
       return;  // consumed by the hook; the parser never sees this chunk
     }
   }
@@ -451,7 +465,7 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
     ctx.msg_done = false;
   }
 
-  const size_t used = ctx.parser->execute(buf->get_const_data(), buf->size());
+  const size_t used = ctx.parser->execute(data, len);
 
   // 升级请求后面跟着的字节（升级请求和第一帧挤在同一个 TCP 段里到达，真实
   // 客户端几乎总是这样）**不能丢**：它们已经被这次读取走了，重新 read_start
@@ -465,8 +479,8 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
   // 流水线的下一条请求就落在那条路径上 —— 与本条无关，不在这里动。
   //
   // 只在升级中才存；不是升级连接的话 `pending` 永远是空的。
-  if (ctx.upgrading && used < buf->size()) {
-    ctx.pending.assign(buf->get_const_data() + used, buf->size() - used);
+  if (ctx.upgrading && used < len) {
+    ctx.pending.assign(data + used, len - used);
   }
 
   // **必须排在 `has_error()` 前面**：撞上限同样会让解析器进 PARSE_ERROR
