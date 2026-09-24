@@ -218,7 +218,8 @@ uvcpp_web_response::uvcpp_web_response()
       file_first_(0),
       file_last_(0),
       file_to_eof_(false),
-      file_status_(0) {
+      file_status_(0),
+      file_gate_(nullptr) {
   // 默认给 200，且 reason phrase 与状态码一致。
   resp_.status_code = http_status::OK;
   resp_.status_message = web_status_text(200);
@@ -1281,6 +1282,9 @@ int uvcpp_web_response::start_file_transfer() {
 
   std::shared_ptr<uvcpp_web_file_transfer> t(
       new uvcpp_web_file_transfer(sink_->stream_loop(), file_sink_.get()));
+  // 必须在 `start()` **之前**挂（`set_chunk_gate` 在起跑后拒绝换闸门 ——
+  // 那时手里可能正攥着旧闸门的名额，换掉就没对象可还了）。
+  if (file_gate_ != nullptr) t->set_chunk_gate(file_gate_);
   // 必须在 `start()` **之前**设：状态机一开始跑这个标志就只是给已经提交
   // 出去的那些读当判据用了。
   t->set_stop_at_eof(file_to_eof_);
@@ -1386,6 +1390,13 @@ void uvcpp_web_response::send_file(
   }
   arm_file_transfer(path, 0, static_cast<uint64_t>(known_size) - 1u, false, true,
                     done);
+}
+
+void uvcpp_web_response::set_file_chunk_gate(uvcpp_web_work_limit* limit) {
+  // 只是记下来 —— 真正的接线在 `start_file_transfer()` 里（那时才有传输对象
+  // 可挂）。放在这里而不是让调用方直接够到传输，是因为传输是响应自己 `new`
+  // 的，调用方（静态模块）手上没有它。
+  file_gate_ = limit;
 }
 
 void uvcpp_web_response::send_file_range(

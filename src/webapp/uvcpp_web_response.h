@@ -63,6 +63,7 @@ namespace uvcpp {
 // （删除器存在控制块里），所以成员声明也不需要完整类型。
 class uvcpp_loop;
 class uvcpp_web_file_transfer;
+class uvcpp_web_work_limit;
 
 // =========================================================================
 // 发送结果
@@ -590,6 +591,22 @@ class UVCPP_API uvcpp_web_response {
                      std::function<void(int, uint64_t)>());
 
   /**
+   * @brief 给**分片下发**挂一个块级名额闸门（可选）。
+   *
+   * 只影响 `send_file*` 走的那条分片路：传输每读一块之前向闸门要一个名额，
+   * 读完立刻还；要不到就**停在块边界上等**（不产生 503）。不调本函数时
+   * 行为与从前逐字节相同。
+   *
+   * 为什么闸门挂在响应上而不是传输上：传输对象是 `start_file_transfer()` 里
+   * `new` 出来的，调用方（静态模块）手上没有它 —— 而它有闸门。所以在**发起
+   * 之前**把闸门交给响应，由响应转交给它建出来的那个传输。
+   *
+   * @param limit 闸门；`nullptr` = 不限。**必须在 `pump_stream()` 之前调**
+   *              （即与 `send_file_range()` 同一次调用里、在它之前）。
+   */
+  void set_file_chunk_gate(uvcpp_web_work_limit* limit);
+
+  /**
    * @brief 下发 `[first, last]`（**闭区间**）—— 供静态服务的 Range/206 复用。
    *
    * `first > last` 是合法的空区间（仍会 open，见上）。`Content-Length`
@@ -774,6 +791,8 @@ class UVCPP_API uvcpp_web_response {
   bool        file_to_eof_;
   int         file_status_;
   std::function<void(int, uint64_t)> file_done_cb_;
+  /// 分片下发的块级闸门（`set_file_chunk_gate()`）；`nullptr` = 不限。
+  uvcpp_web_work_limit* file_gate_;
 };
 
 }  // namespace uvcpp

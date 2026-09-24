@@ -93,6 +93,7 @@ namespace uvcpp {
 // `uv_file`。
 class uvcpp_fs;
 class uvcpp_loop;
+class uvcpp_web_work_limit;
 
 // =========================================================================
 // 接收方
@@ -252,10 +253,40 @@ class UVCPP_API uvcpp_web_file_transfer
   int start(const std::string& path, uint64_t first, uint64_t last);
 
   /**
+   * @brief 挂一个**块级名额闸门**：每读一块之前问一次，读完立刻还。
+   *
+   * 与"整条传输占一个名额"的差别是**停顿的粒度**。整条占的话，一条 8 MiB 的
+   * 传输在整个传输期间把名额攥在手里，并发一上来一部分请求就是 503（实测
+   * `ab -c 1000` 打 8 MiB 文件：4000 个请求里 267 个是 503，约 6.7%）。块级占的话，
+   * 一次读盘只占零点几毫秒，拿不到名额就**停在块边界上等**，于是 1000 条并发
+   * 大文件可以**全都在跑**，而真正并行读盘的条数仍被名额封着。
+   *
+   * **拿不到名额不是失败**：这条路上不产生任何错误码、不产生 503。停下的位置
+   * 在块边界，本来就有 `resume()` 这条续做路径（与背压共用）。
+   *
+   * 谁负责叫醒：本类在停下时向闸门登记一次唤醒；名额变松时那次回调转成
+   * `resume()`。`uvcpp_web_work_limit` 的唤醒是**一次性**的，所以每次停下都
+   * 重新登记（回调里先清 id 再续做）。
+   *
+   * **@warning 闸门必须在 `start()` 之前挂上（起跑后拒绝更换），且必须在本
+   * 传输**所在循环的线程**上归还名额。** 后一条不是洁癖：唤醒回调是在
+   * `release()` 的那条栈上**同步**跑的，而回调里的 `resume()` 会碰本对象的
+   * 状态；从别的线程归还，就会和同一时刻循环线程上的 `cancel()` 抢同一个
+   * 对象。本库自己的两处归还点（`after_work` 里的整读路径、`on_read_done`
+   * 里的块级路径）都在循环线程上。
+   *
+   * @param limit 闸门；`nullptr` = 不限（默认）。**不调本函数时行为与从前逐字节
+   *              相同** —— 直接 `new` 本类的那些用法（用例、`uvcpp_web_upload`
+   *              之外的调用点）不受影响。
+   */
+  void set_chunk_gate(uvcpp_web_work_limit* limit);
+
+  /**
    * @brief 接收方腾出空间了，恢复被背压停下的读。
    *
-   * 只在"因背压停下"时有意义，其余情况是空操作（幂等）。被 `cancel()` 之后
-   * 也是空操作 —— 已经决定不发了，再读就是白读。
+   * "因背压停下"与"因名额停下"两条都走这里 —— 两条的续做动作是同一个
+   * （`submit_read()`），而且都幂等：没停下时是空操作，续做时若名额还是满的，
+   * `submit_read()` 会**再停一次并重新登记唤醒**。被 `cancel()` 之后也是空操作。
    */
   void resume();
 
@@ -285,14 +316,21 @@ class UVCPP_API uvcpp_web_file_transfer
   /// 提交过多少笔 `uv_fs_read`（观测口：短读会让它比"片数"多）。
   size_t read_submits() const;
   /// 因为背压停读的次数（观测口：钉"背压真的起过作用"）。
+  ///
+  /// **不含因名额停下的次数** —— 那笔账在 @ref gate_waits 里。两笔分开记是
+  /// 刻意的：合成的读数分不出"背压生效"与"闸门生效"，而这两件事的判据不同。
   size_t pause_events() const;
+  /// 因为**名额**（@ref set_chunk_gate）停下等待的次数（观测口）。
+  size_t gate_waits() const;
+  /// 当前是否正持着一个名额（观测口；在途读的那一小段为真）。
+  bool chunk_slot_held() const;
 
  private:
   enum state {
     st_idle,     ///< `start()` 之前
     st_opening,  ///< `uv_fs_open` 在途
     st_reading,  ///< `uv_fs_read` 在途
-    st_paused,   ///< 因背压停读，没有 fs 操作在途
+    st_paused,   ///< 因背压或**名额**停读，没有 fs 操作在途
     st_closing,  ///< `uv_fs_close` 在途
     st_done      ///< `on_done` 已经跑过
   };
@@ -311,6 +349,13 @@ class UVCPP_API uvcpp_web_file_transfer
 
   /// 采样窗口占用（每次状态跳变时调用）。
   void note_window();
+
+  /// 还掉块级名额（幂等），并注销那条一次性唤醒。**每一条离开"有读在途"的
+  /// 路径都要经过它** —— 漏一处就是名额泄漏，症状是闸门越来越紧、最后全 503。
+  ///
+  /// 先注销唤醒再 `release()`：`release()` 可能**同步**叫醒别的传输（它们会在
+  /// 这一栈上 `acquire` + 起读），而不该把已经收尾的这条自己也叫起来。
+  void release_chunk_slot();
 
   uvcpp_loop* loop_;
   uvcpp_web_file_sink* sink_;
@@ -339,6 +384,16 @@ class UVCPP_API uvcpp_web_file_transfer
   int close_status_;
   /// 打开成功后的 fd；负数表示没有可关的。
   int fd_;
+
+  /// 块级名额闸门；`nullptr` = 不限（默认）。
+  uvcpp_web_work_limit* gate_;
+  /// 当前持着一个名额（"有读在途"的那一小段）。
+  bool gate_held_;
+  /// 登记在闸门上的唤醒 id；`0` = 没登记。唤醒是一次性的，所以停下就登记、
+  /// 被叫醒（或自己续做成功）就清零。
+  size_t gate_wakeup_;
+  /// 因名额停下的次数（观测口）。
+  size_t gate_waits_;
 };
 
 }  // namespace uvcpp

@@ -278,7 +278,7 @@ void doc_into_response(uvcpp::uvcpp_web_response& resp, std::size_t size) {
 这也是本模块"不吃 webapp 门禁"的另一面 —— 顺序永远是核心模块在下面。
 
 **为什么不做"零拷贝把那串交给 body"的入口**：`json_str()` 收 `const std::string&`
-（`src/webapp/uvcpp_web_response.h:345`），一份小 JSON 的拷贝在这个尺度上量不出来，而多一个
+（`src/webapp/uvcpp_web_response.h:346`），一份小 JSON 的拷贝在这个尺度上量不出来，而多一个
 入口就多一处能在失败路径上漏掉检查的地方。真在意那一次拷贝，用**外部缓冲**（§8）：把
 每个连接自己那份 `std::string` 攒下来复用，省的是分配不是拷贝。
 

@@ -33,9 +33,10 @@
  * 必须 503、热文件必须 200。两条互为对照 —— 只测一边分不出"命中绕开闸门"和
  * "闸门整个失效"这两种截然不同的实现。
  *
- * 与它配套的还有第 7 组 `stream_still_gated`：名额**只在"确实要读盘"的两条
- * 支路上取**（整读进内存 / 超过阈值走分片流式），覆盖集合里唯一被移出去的是
- * 缓存命中那一支 —— 流式那一支仍然占，与改动前一致。第六条钉住的就是这一点。
+ * 与它配套的还有第 7 组 `stream_pauses_not_rejects`：名额**只在"确实要读盘"
+ * 的两条支路上取**（整读进内存 / 超过阈值走分片流式），覆盖集合里唯一被移出
+ * 去的是缓存命中那一支 —— 这一点与改动前一致。**但流式那一支的"拿不到名额
+ * 怎么办"在 2026-09-24 反了过来**：不是回绝，是**停下等**（详见那一组的说明）。
  *
  * ## 第五条：**上限这个数字是从哪来的**
  *
@@ -726,21 +727,45 @@ void test_wakeup_reentrant_registration_not_lost() {
 }  // namespace
 
 // =========================================================================
-// 7. 流式（大文件）那一支**仍然**占名额
+// 7. 流式（大文件）那一支：名额满时**停**，不**拒**
 // =========================================================================
 //
-// 这是与 6 组配套的另一半。名额现在只在"确实要读盘"的两条支路上取：整读进
-// 内存的那一支，和超过阈值改走分片流式的那一支。前者由 6 组钉住，后者由这一
-// 组钉住 —— 两条都占，唯独"命中缓存、一次磁盘读都不做"不占。
+// 这一组 2026-09-24 反向重写过。原来钉的是"流式也占名额、也 503"，现在钉的
+// 是"流式**不** 503"。
 //
-// **为什么流式也要占**：它不整读，但确实在读盘，而闸门从一开始（`serve()`
-// 时代）就覆盖着它。这次只是把判定点从"投递之前"挪到"读盘之前"，覆盖集合
-// 里唯一被移出去的成员是缓存命中那一支 —— 其余与改动前**逐一对齐**。要是
-// 顺手把流式也放出去，那就不只是修 bug，而是放宽了闸门的语义，得单独讨论。
+// **为什么反**：名额的语义是"并发的磁盘读"，可原来分片那条路把一个名额从
+// worker 一直攥到 `after_work` —— 而 `after_work` 跑在**循环线程**上。1000 条
+// 并发大文件时循环线程搬运不过来、`after_work` 排不上队，名额就被"一个字节都
+// 还没读"的请求占着。实测 `ab -c 1000` 打 8 MiB 文件：4000 个请求里 **267 个
+// 503（约 6.7%）**，服务端日志是
+//
+//     工作池已满（在途 0 / 16），拒绝静态请求 /big.bin
+//
+// **在途 0 却拒绝** —— 那一行就是病灶的现场（日志是事后在循环线程上读的，
+// 那时名额早还光了）。同一个装置打 4 KiB 小文件（整读路径，一个都没拒）是
+// **0 个 503**，所以"503 主要来自整读路径"这个原本的猜测不成立。
+//
+// ★ **这个 267 是服务端日志里"拒绝静态请求"的行数，不是 `ab` 的
+// `Failed requests`。** 早先记成 3735 是把 `ab` 读错了：它把期望的
+// `Document Length` 钉在**第一条**响应上，而那一跑的第一条恰好就是 503
+// （body 23 字节）—— 于是后面那些**正常**的 200（8 MiB）反被它算成
+// `Failed requests: Length`。三个数要一起看：
+//
+//     Document Length:    23 bytes
+//     Failed requests:    3733   (Length: 3733)
+//     Non-2xx responses:   267
+//
+// 真被拒的是 `Non-2xx responses` / 服务端那 267 行日志；"失败 3733"里装着的
+// 是成功。**`ab` 的 `Failed requests` 在这个形状下不是拒绝计数。**
+//
+// 现在分片路改成**按块借还**：读一块之前拿、读完立刻还；拿不到就停在块边界上
+// 等唤醒（走的是与背压同一条 `resume()` 续做路径）。于是名额封的是"真正并行
+// 的读盘数"，而 1000 条传输可以**全都在跑** —— 对外的表现是"慢一点"，不再是
+// "失败"。
 //
 // 怎么让一个小文件走流式：`max_cached_file_size = 0` 就是"一律走流式"
 // （见该选项的说明），所以这里不需要真造一个大文件。
-void test_stream_path_still_gated() {
+void test_stream_path_pauses_not_rejects() {
   make_root();
 
   uvcpp_web_app app;
@@ -761,22 +786,64 @@ void test_stream_path_still_gated() {
   check_eq_i(status_of(r), 200, "流式-对照：名额空着应当是 200");
   check(body_of(r) == k_text, "流式-对照：内容应当正常");
 
-  // 占住唯一的名额 → 走流式的请求**也**必须被回绝。
+  // 占住唯一的名额，然后在**同一条连接**上把全程看完：
+  //
+  //   t=0      请求发出去 —— 它要读盘，拿不到名额
+  //   t=0..600 必须**一声不响**（既不是 200 也不是 503）
+  //   t=600    在**循环线程**上还名额（`app.post()`；与生产上两处归还点
+  //            `after_work` / `on_read_done` 是同一个线程）
+  //   t>600    那条挂着的请求被叫醒，自己读完、发完
+  //
+  // 这样"停"与"续做"由同一条连接钉住，"停"的代价只是**等**，不是失败。
+  //
+  // ★ 别用 `get()`：它内部要重试 40 次（每次 3 s 超时）⇒ 想看"没响应"得等
+  //   两分钟。这里直接用客户端的一次 `send_wait`，超时自己定。
   check(app.work_limit()->acquire(), "流式：占住唯一的名额");
   check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 1,
              "流式：在途数应当是 1");
 
-  uvcpp_http_response rs;
-  check(get(port, "/raw/hello.txt", rs), "流式-饱和：请求应当拿到响应");
-  check_eq_i(status_of(rs), 503, "流式-饱和：名额满时流式路径也应当是 503");
-  check(!header_of(rs, "retry-after").empty(),
-        "流式-饱和：503 必须带 Retry-After");
+  std::atomic<bool> replied(false);              // 响应回来了吗
+  std::atomic<bool> replied_at_release(false);   // 还名额的那一刻回来了吗
+  std::atomic<bool> released(false);
 
-  app.work_limit()->release();
-  uvcpp_http_response r2;
-  check(get(port, "/raw/hello.txt", r2), "流式-恢复：还回名额后请求应当成功");
-  check_eq_i(status_of(r2), 200, "流式-恢复：还回名额之后应当回到 200");
-  check(body_of(r2) == k_text, "流式-恢复：内容应当正常");
+  uvcpp_http_client probe;
+  check(probe.connect_wait("127.0.0.1", port, 2000) == 0, "流式：连得上");
+
+  std::thread releaser([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    // 非循环线程调 `post()` 落到 0 号那条循环 —— 这是它写明的契约。
+    app.post([&]() {
+      replied_at_release.store(replied.load());
+      app.work_limit()->release();
+      released.store(true);
+    });
+  });
+
+  uvcpp_http_response rs;
+  const int rc = probe.send_wait(uvcpp_http_request::make_get("/raw/hello.txt"),
+                                 rs, 6000);
+  replied.store(true);
+  releaser.join();
+
+  for (int i = 0; i < 200 && !released.load(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  check(released.load(),
+        "流式-挂起：那次投递必须真的跑到（否则下面几条全无意义 —— 这是前提断言）");
+  check(!replied_at_release.load(),
+        "流式-挂起：还名额之前的那 600 ms 里**一个响应都没有** —— 是停，不是拒"
+        "（老实现会立刻回 503，这一条会红）");
+
+  check_eq_i(rc, 0, "流式-续做：还回名额之后，挂住的那条必须被叫醒并收尾");
+  check_eq_i(status_of(rs), 200, "流式-续做：状态应当是 200（**不是** 503）");
+  check(body_of(rs) == k_text, "流式-续做：内容应当正常");
+  check(header_of(rs, "retry-after").empty(),
+        "流式-续做：这条路**不**该有 Retry-After（它没有被回绝）");
+
+  // 传输读完那一块就把名额还了，所以收尾时在途必须是 0。**这一条钉的是
+  // "块级借还成对"**：漏还一次不会让本组红，但会让闸门越用越紧（最后全 503）。
+  check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 0,
+             "流式-收尾：块级名额必须成对还掉");
 
   app.stop();
   app.join();
@@ -861,7 +928,7 @@ int main(int argc, char** argv) {
       {"unlimited", test_unlimited},
       {"default_limit", test_default_limit},
       {"static_integration", test_static_integration},
-      {"stream_still_gated", test_stream_path_still_gated},
+      {"stream_pauses_not_rejects", test_stream_path_pauses_not_rejects},
       {"does_not_queue", test_does_not_queue},
       {"wakeup_fires_on_release", test_wakeup_fires_on_release},
       {"wakeup_one_shot", test_wakeup_one_shot},

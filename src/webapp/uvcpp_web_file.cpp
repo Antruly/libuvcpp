@@ -23,6 +23,7 @@
 #include <uv.h>
 
 #include <webapp/uvcpp_log.h>
+#include <webapp/uvcpp_web_work_limit.h>
 
 // POSIX 上没有 O_BINARY（那是 Windows 的"不做 CRLF 翻译"标志）。
 #ifndef O_BINARY
@@ -72,7 +73,11 @@ uvcpp_web_file_transfer::uvcpp_web_file_transfer(uvcpp_loop* loop,
       state_(st_idle),
       abort_requested_(false),
       close_status_(0),
-      fd_(-1) {
+      fd_(-1),
+      gate_(nullptr),
+      gate_held_(false),
+      gate_wakeup_(0),
+      gate_waits_(0) {
   // 切片缓冲按最大值一次性备好，之后**永不重分配** —— 每一笔 `uv_fs_read`
   // 都写进同一块内存，这正是"一片缓冲就够"的落地方式。
   slice_buf_.resize(slice_bytes_);
@@ -93,6 +98,19 @@ uvcpp_web_file_transfer::~uvcpp_web_file_transfer() {
 // =========================================================================
 // 配置与观测
 // =========================================================================
+
+void uvcpp_web_file_transfer::set_chunk_gate(uvcpp_web_work_limit* limit) {
+  // **只在还没起跑时可以换闸门。** 跑起来之后 `gate_held_` 可能正代表"手里攥着
+  // 一个旧闸门的名额"，换掉它就没有对象可还了（新闸门的 release 不是它的账）。
+  // 调用点的次序本来就是"挂好再 start()"（`uvcpp_web_response` 那侧），所以
+  // 这里把违约挡掉而不是去救它。
+  if (state_ != st_idle) return;
+  gate_ = limit;
+}
+
+size_t uvcpp_web_file_transfer::gate_waits() const { return gate_waits_; }
+
+bool uvcpp_web_file_transfer::chunk_slot_held() const { return gate_held_; }
 
 void uvcpp_web_file_transfer::set_slice_bytes(size_t n) {
   // 0 = "用默认值"（与 `set_max_upload_size` 那一族的约定一致：0 不是"零字节"，
@@ -183,6 +201,19 @@ int uvcpp_web_file_transfer::start(const std::string& path, uint64_t first,
   return 0;
 }
 
+void uvcpp_web_file_transfer::release_chunk_slot() {
+  if (gate_ == nullptr) return;
+  if (gate_wakeup_ != 0) {
+    gate_->remove_wakeup(gate_wakeup_);
+    gate_wakeup_ = 0;
+  }
+  if (!gate_held_) return;
+  gate_held_ = false;
+  // 这一句可能**同步**跑别的传输的唤醒回调（它们会在这条栈上 acquire + 起读）。
+  // 本对象此刻的成员已经收拾干净（名额已还、唤醒已注销），所以它们是安全的。
+  gate_->release();
+}
+
 void uvcpp_web_file_transfer::resume() {
   if (state_ != st_paused) return;
   if (abort_requested_) return;  // 已经决定不发了，再读就是白读
@@ -234,6 +265,35 @@ void uvcpp_web_file_transfer::on_open_done(long long rc) {
 }
 
 void uvcpp_web_file_transfer::submit_read() {
+  // ---- 块级名额：读盘之前拿，读完立刻还 ----
+  //
+  // 位置就在"真要提交一笔 `uv_fs_read`"的前一句 —— 这是**唯一**一处提交读的
+  // 地方，所以名额的粒度严格等于"一次读盘"，不多不少。
+  //
+  // **拿不到不是失败**：停在块边界上（`st_paused`，此刻没有任何 fs 操作在途），
+  // 向闸门登记一次唤醒，等它叫。这条路上没有 503。
+  if (gate_ != nullptr && !gate_held_) {
+    if (!gate_->acquire()) {
+      ++gate_waits_;
+      state_ = st_paused;
+      if (gate_wakeup_ == 0) {
+        // `weak_ptr` 而不是 `shared_ptr`：闸门的唤醒表**替持有者续命**，
+        // 用 `shared_ptr` 就是一条 transfer → 闸门 → transfer 的环。
+        std::weak_ptr<uvcpp_web_file_transfer> w = shared_from_this();
+        gate_wakeup_ = gate_->add_wakeup([w]() {
+          std::shared_ptr<uvcpp_web_file_transfer> s = w.lock();
+          if (!s) return;
+          // 唤醒是**一次性**的（条目在回调前就被摘了）⇒ 先清 id 再续做；
+          // 续做里若又拿不到名额，会重新登记一条。
+          s->gate_wakeup_ = 0;
+          s->resume();
+        });
+      }
+      return;
+    }
+    gate_held_ = true;
+  }
+
   // 进到这里 `offset_ <= last_` 已经成立（每一处调用点都判过），所以
   // `last_ - offset_` 不会下溢，`+ 1` 是闭区间的"还差多少字节"。
   const uint64_t remain = last_ - offset_ + 1u;
@@ -271,6 +331,13 @@ void uvcpp_web_file_transfer::submit_read() {
 }
 
 void uvcpp_web_file_transfer::on_read_done(long long nread) {
+  // **第一句就还名额**：这一笔读已经跑完，闸门封的是"并行的读盘"，不是"在跑的
+  // 传输"。还在这儿而不是等到收尾：短读/出错/取消都走本函数，放第一句就没有
+  // 任何一条分支能漏掉它。
+  //
+  // 这一句可能同步叫醒别的传输（在那条栈上 acquire + 起读）。`this` 在本函数
+  // 期间一定活着 —— 读的完成回调按值捕了一份 `shared_from_this()`。
+  release_chunk_slot();
   note_window();
 
   if (abort_requested_) {
@@ -327,6 +394,10 @@ void uvcpp_web_file_transfer::on_read_done(long long nread) {
 }
 
 void uvcpp_web_file_transfer::submit_close(int status) {
+  // 纵深防御：走到关闭路径时名额**本该**已经还了（`on_read_done` 第一句）。
+  // 留着这一句是因为"漏还"的后果（闸门越来越紧、最后全 503）和一处忘掉不成
+  // 比例 —— 幂等，重复调用无副作用。
+  release_chunk_slot();
   close_status_ = status;
   state_ = st_closing;
 
@@ -361,6 +432,8 @@ void uvcpp_web_file_transfer::on_close_done(int status) {
 
 void uvcpp_web_file_transfer::finish(int status) {
   if (state_ == st_done) return;
+  // 同样必须在"不得再碰任何成员"那句之前（它要碰 `gate_*`）。
+  release_chunk_slot();
   state_ = st_done;
   // **这一句之后不得再碰任何成员。**
   sink_->on_done(status, bytes_sent_);

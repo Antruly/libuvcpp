@@ -33,6 +33,7 @@ APP = os.path.join(ROOT, "src", "webapp", "uvcpp_web_app.cpp")
 CONN = os.path.join(ROOT, "src", "webapp", "uvcpp_web_connection.cpp")
 LIMIT = os.path.join(ROOT, "src", "webapp", "uvcpp_web_work_limit.cpp")
 STATIC = os.path.join(ROOT, "src", "webapp", "uvcpp_web_static.cpp")
+TRANSFER = os.path.join(ROOT, "src", "webapp", "uvcpp_web_file.cpp")
 
 TESTS = [
     ("test_web_stream_func",      ["claim", "expect", "413"]),
@@ -41,7 +42,8 @@ TESTS = [
                                    "stall_killed", "slow_but_progressing",
                                    "abort_mid_stream", "progress_reported"]),
     ("test_web_app_worklimit_func", ["accounting", "static_integration",
-                                     "does_not_queue"]),
+                                     "does_not_queue",
+                                     "stream_pauses_not_rejects"]),
 ]
 
 # (名字, 文件, 原文, 变异后, 期望被抓的组)
@@ -128,11 +130,24 @@ MUTATIONS = [
      "      j->data = p.data;\n      j->served_from_cache = true;\n      return;",
      "static_integration(饱和-命中)"),
 
-    # 流式那一支**仍然**占名额（覆盖集合与改动前对齐）。放出去就红了。
-    ("S15 stream_not_gated", STATIC,
-     "    if (!acquire_slot(j)) return;\n    j->status = probe_status::STREAM;",
-     "    /* MUTATION: 流式不占名额 */\n    j->status = probe_status::STREAM;",
-     "stream_still_gated"),
+    # 流式那一支**不在 worker 里取名额**了（`1.3.6-dev` 起）—— 名额改由传输按块
+    # 借还，所以这一条变异也跟着翻面：**把块级闸门的接线摘掉**，等于传输没人管它
+    # 读盘，那条请求会立刻把整个文件发完 ⇒ 第 7 组钉的"还名额之前一个响应都没有"
+    # 会红。（原来的锚点 `if (!acquire_slot(j)) return;` 那句已经不在源码里了；
+    # 那种情况下本脚本记的是「变异**施加失败**（锚点匹配 0 次）」并继续跑 —— 不
+    # 报错，只是这条覆盖率静默消失，正是本仓最忌的形状。）
+    ("S15 stream_gate_not_wired", STATIC,
+     "    resp.set_file_chunk_gate(work_limit.get());",
+     "    /* MUTATION: 流式不挂块级闸门 */",
+     "stream_pauses_not_rejects(挂起那条)"),
+
+    # 块级名额"只拿不还"：漏还**不会当场红**，但闸门会越用越紧（终态是全 503）。
+    # 第 7 组收尾那句 `in_flight() == 0` 钉的就是这个 —— 一条 8 MiB 的传输读一块
+    # 漏一次，32 块就是 32 个名额，而限额是 16。
+    ("S16 chunk_slot_never_released", TRANSFER,
+     "  gate_->release();\n}",
+     "  /* MUTATION: 块级名额只拿不还 */\n}",
+     "stream_pauses_not_rejects(收尾)"),
 ]
 
 

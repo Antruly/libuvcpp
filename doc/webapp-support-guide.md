@@ -275,7 +275,7 @@ void doc_multipart_feed(const std::string& content_type) {
 `uvcpp_web_file_transfer` 把文件的 `[first, last]`（**闭区间**）分片读出来交给
 sink，用有界滑动窗口把静态下发的峰值内存从 2N 降到
 `high_water + 2*slice`（默认 ≈ 1.5 MiB，**与文件大小无关**，
-`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:341`）。
+`src/webapp/uvcpp_web_file.h:26-38`）。它刻意不拉 libuv（fd 用 `int` 存，`:386`）。
 
 ```cpp
 #include <webapp/uvcpp_web_file.h>
@@ -311,7 +311,7 @@ void doc_send_file(uvcpp::uvcpp_loop* loop, doc_file_sink& sink,
   调用方丢掉自己的 `shared_ptr` 即可。
 - **`on_done` 恰好一次**（`:134-146`），`status` 是 **libuv 码**（0 / `UV_ECANCELED` /
   `UV_EINVAL` 之类），不是 HTTP 码 —— 响应层自己会翻
-  （`src/webapp/uvcpp_web_response.cpp:1202-1222`）。
+  （`src/webapp/uvcpp_web_response.cpp:1203-1223`）。
 
 **必须由 `shared_ptr` 持有**（`:164`，内部用 `shared_from_this()`）。放栈上会在
 `start()` 里抛 `std::bad_weak_ptr`，而且**不是编译错误**。
@@ -445,9 +445,9 @@ error: no matching function for call to
 ### `on_done` 不一定来自 `uv_fs_close`
 
 有三条**没有 close 回调**的路径直接调 `finish()`：open 失败
-（`src/webapp/uvcpp_web_file.cpp:210-216` → `finish()`；`fd_ < 0` 时 `:333-337` 直接收尾）、
-close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-270`）。
-走到 `on_done` 时 fd 「**已经关完，或者根本没打开过**」（`src/webapp/uvcpp_web_file.h:140-142`），
+（`src/webapp/uvcpp_web_file.cpp:241-247` → `finish()`；`fd_ < 0` 时 `:404-408` 直接收尾）、
+close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-330`）。
+走到 `on_done` 时 fd 「**已经关完，或者根本没打开过**」（`src/webapp/uvcpp_web_file.h:141-143`），
 所以"在这里销毁 transfer 是安全的"成立，但**别把"回调已返回"当成前置条件**去依赖。
 
 ### `web_split_path_query()` 比头文件说的做得多
@@ -474,7 +474,7 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 |---|---|---|
 | `uvcpp_web_connection_registry` | **只能 loop 线程**（内部 `std::map` 无锁） | `src/webapp/uvcpp_web_connection.h:30-31`、`:142` |
 | `uvcpp_web_context` | 除 `post()` 外都在 loop 线程 | `src/webapp/uvcpp_web_context.h:98-99` |
-| `uvcpp_web_file_transfer` | loop 线程驱动，回调都在 loop 线程 | `src/webapp/uvcpp_web_file.h:167-171` |
+| `uvcpp_web_file_transfer` | loop 线程驱动，回调都在 loop 线程 | `src/webapp/uvcpp_web_file.h:168-172` |
 | `uvcpp_web_util` | 纯函数，无状态、线程安全 | — |
 | `uvcpp_web_mime_map` | 注册期配置、运行期只读；`default_map()` 是全局的 | `src/webapp/uvcpp_web_mime.h:31-34` |
 | `uvcpp_web_multipart` | **无线程设施**，由调用方决定在哪条线程跑 | `src/webapp/uvcpp_web_multipart.h:13-16` |
@@ -486,8 +486,8 @@ close 提交同步失败（`:349-353`）、`submit_read` 同步失败（`:265-27
 
 ### 所有权
 
-- `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:165`）。
-- `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:116-123`）。
+- `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:166`）。
+- `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:117-124`）。
 - `uvcpp_web_context::run()` **只存链的指针**
   （`src/webapp/uvcpp_web_context.h:366`、`:447`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
@@ -534,25 +534,46 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 
 **`set_stop_at_eof(true)` 时 `last` 要传 `UINT64_MAX - 1`，不是 `UINT64_MAX`。**
 后者 `remain = last_ - offset_ + 1u` 在第一个切片上就溢出成 0，于是当场收尾、
-一个字节都不读（`src/webapp/uvcpp_web_file.h:224-226`）。
+一个字节都不读（`src/webapp/uvcpp_web_file.h:225-227`）。
 
 **只有 `set_slice_bytes()` 是"必须在 `start()` 之前调"。** 它内部会
-`slice_buf_.resize()`（`src/webapp/uvcpp_web_file.cpp:101`），而 `submit_read()` 把
+`slice_buf_.resize()`（`src/webapp/uvcpp_web_file.cpp:119`），而 `submit_read()` 把
 `&slice_buf_[0]` 交给 libuv 当接收目标 —— 在途读期间调它，扩容会重新分配那块缓冲，
-那一笔 `uv_fs_read` 就写进**已释放**的内存。**两个 setter 都没有运行时守卫**，也不改
+那一笔 `uv_fs_read` 就写进**已释放**的内存。**这两个 setter 都没有运行时守卫**，也不改
 返回值，顺序错了查不出来。
 
-`set_stop_at_eof` 没有这条限制（`src/webapp/uvcpp_web_file.h:228-232`）：全类只有一个
+**`set_chunk_gate()` 是第二个"必须在 `start()` 之前调"的 setter**
+（前一个是 `set_slice_bytes()`；`set_stop_at_eof` 只是"建议提前"，
+`set_high_water_bytes` 没有约束）。它挂的是工作池的**块级名额闸门**
+（`src/webapp/uvcpp_web_file.h:282`）：读一块之前拿一个名额、读完立刻还，拿不到
+就停在块边界上等唤醒 —— 于是"真正并行读盘的条数"被名额封着，而"同时开着的大文件
+传输数"不必跟着降。它与另外两个 setter 有两处不同：
+
+- **它是一条借还纪律，不是一个配置项。** 名额的"还"被钉在**本传输所在循环的
+  线程**上：唤醒回调是在 `release()` 的那条栈上**同步**跑的，回调里的 `resume()`
+  会碰本对象的状态；从别的线程归还，就会和同一时刻循环线程上的 `cancel()`
+  抢同一个对象（库内两处归还点都在循环线程上：`after_work` 的整读路径、
+  `on_read_done` 的块级路径）。
+- **它不接管所有权**：传的是**借用**指针，存活期由调用方保证 —— 静态路由借的是
+  App 的 `work_limit()`（`src/webapp/uvcpp_web_static.cpp:1086`，且那一步在
+  `t->start()` 之前）。它也是唯一一个**会挡掉违约**的 setter：跑起来之后换闸门
+  会被**静默忽略**（`src/webapp/uvcpp_web_file.cpp:107`）—— 那时手上可能正攥着旧
+  闸门的名额，换掉就没有对象可还了。
+
+不调它（或传 `nullptr`）时**行为与从前逐字节相同**：直接 `new` 本类、不走静态路由
+的那些用法不受影响。
+
+`set_stop_at_eof` 没有这条限制（`src/webapp/uvcpp_web_file.h:229-233`）：全类只有一个
 读取点，就是"早于 `[first, last]` 撞上 EOF"的那一刻，在那之前设上都算数。提前设是
 习惯，不是要求 —— 那一刻何时到取决于文件实际多长。
 
 **`cancel()` 在"因背压停读"这一支上不能省。** 那时**没有任何 fs 操作在途**，
 `cancel()` 必须自己推进状态机，否则 `on_done` 永远不来、fd 一直开着
-（`src/webapp/uvcpp_web_file.cpp:197-203`）。`start()` 之前 `cancel()` 是空操作且**不触发
-`on_done`**（`src/webapp/uvcpp_web_file.h:268-271`）。
+（`src/webapp/uvcpp_web_file.cpp:228-234`）。`start()` 之前 `cancel()` 是空操作且**不触发
+`on_done`**（`src/webapp/uvcpp_web_file.h:299-302`）。
 
 **`backlog()` 是唯一的背压信号。** 恒返回 0 的 sink 只是让背压失效，
-窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:126-131`）—— 允许，但不是有界的了。
+窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:127-132`）—— 允许，但不是有界的了。
 
 **`web_url_encode()` 的 `keep` 优先于 `plus_for_space`。**
 `src/webapp/uvcpp_web_util.cpp:179` 先判 `unreserved || keep.find(c) != npos`，**再**判
@@ -602,7 +623,7 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 - **`attach_stream()` 的"必须在链跑起来之前调"没有运行时守卫**
   （`src/webapp/uvcpp_web_context.h:318-330`）：中途挂只会得到一个**永远收不到数据**的 stream，
   静默。
-- **如实记一处代价**：`src/webapp/uvcpp_web_file.cpp:173-179` 承认同步失败路径会漏一份
+- **如实记一处代价**：`src/webapp/uvcpp_web_file.cpp:191-197` 承认同步失败路径会漏一份
   `shared_ptr`（成环），作者判断"实际走不到"。
 
 > 这七个头里**没有 `TODO` / `FIXME` / 未实现字样**。上面这些是"**明确划界**"

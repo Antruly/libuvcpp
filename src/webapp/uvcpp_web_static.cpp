@@ -875,9 +875,17 @@ void uvcpp_web_static::Impl::run_job(job* j) {
     // 一个字节都不读。元数据已经全部带在 job 上了（上面那一段赋过值），
     // 所以 ETag/Last-Modified/条件请求/Range 在 loop 线程那侧照常判定。
     //
-    // **流式也要占名额**：它不整读，但确实在读盘 —— 闸门在这条路上的意义
-    // 与整读路径完全一样（见 acquire_slot）。
-    if (!acquire_slot(j)) return;
+    // **这条路上不取名额**（2026-09-24 改）。原先在这里 `acquire_slot`，
+    // 而名额是到 `after_work` 才还的 —— after_work 跑在**循环线程**上，于是
+    // 1000 条并发大文件时循环线程搬运不过来、after_work 排不上队，名额就被
+    // 攥在"一个字节都还没读"的请求手里。实测 `ab -c 1000` 打 8 MiB 文件：
+    // 4000 个请求里 267 个 503（约 6.7%），日志是
+    // `工作池已满（在途 0 / 16），拒绝静态请求 /big.bin` —— **在途 0 却拒绝**，
+    // 就是"名额被没在读盘的请求占着"的现场。
+    //
+    // 现在名额改由**传输自己按块借还**（见 `uvcpp_web_file_transfer::
+    // set_chunk_gate`）：读一块之前拿、读完立刻还，拿不到就停在块边界上等
+    // 唤醒。于是名额封的是"真正并行的读盘数"，而 1000 条传输可以全都在跑。
     j->status = probe_status::STREAM;
     return;
   }
@@ -1070,6 +1078,12 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     //
     // HEAD 也走这一支：`start_file_transfer()` 见到 `head_only_` 会自己短路成
     // "只发头、不读盘"，而 `arm_file_transfer()` 设的长度与 GET 那份逐字节相同。
+    // 闸门在**发起之前**交给响应（传输对象是响应自己 `new` 出来的，调用方
+    // 手上没有它），由响应转交给那个传输。`.get()` 是**借用**：`work_limit`
+    // 的所有者是本 `Impl`，而请求属于 App，App 活着它就在 —— 与下面
+    // `after_work` 里 `j->self->work_limit->release()` 借的是同一个生命周期。
+    // 为 `nullptr` 时与从前逐字节相同。
+    resp.set_file_chunk_gate(work_limit.get());
     resp.send_file_range(j->fs_path, static_cast<uint64_t>(first),
                          static_cast<uint64_t>(last));
   } else if (j->data) {

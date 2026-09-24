@@ -77,6 +77,7 @@
 | `uvcpp_ssl_context` | 新增私有成员 `verify_mode_` | `1.2.24` |
 | `uvcpp_memory_pool` | 私有成员换过（`destroying_` → `held_bytes_`） | `1.2.x` |
 | `uvcpp_http_server`、`uvcpp_ws_server`、`uvcpp_ws_sessions`、`uvcpp_tcp_server`、`uvcpp_web_app` | 私有布局重排（每循环一格容器、状态位改原子量），多循环那一批 | `1.2.21`–`1.2.23` |
+| `uvcpp_web_file_transfer`、`uvcpp_web_response` | 各新增私有成员（静态分片下发那一支的**块级名额闸门**：`gate_` / `gate_held_` / `gate_wakeup_` / `gate_waits_` 与 `file_gate_`），`sizeof` 变了 | `1.3.6-dev` |
 
 **三、还有一条编得过、单循环下也对，只有多循环才会读到错的数据**
 
