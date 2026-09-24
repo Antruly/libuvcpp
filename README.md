@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.19--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.20--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.19-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.20-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.19-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.20-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -752,6 +752,11 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   +12.02% RPS (`1.2.4`)
 - The response header table reserves on first insert, and `uvcpp_web_context`'s object and
   control block became a single allocation — 16.00 → 13.00 allocations per request (`1.2.20`)
+- The in-flight request queue is no longer rebuilt per request: on teardown the now-empty
+  vector is `swap`ped into a per-loop recycle slot and swapped back on the next enqueue
+  (both `swap`s, O(1), no allocation) while the **key is still erased** — an empty key left
+  in the table would permanently exempt that connection from the idle sweep, a steady leak
+  on a long-running server. 23.02 → 22.02 allocations per request (`1.3.20`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

@@ -1453,6 +1453,94 @@ void test_idle_timeout() {
 }
 
 // =========================================================================
+// 12b. 请求**跑完之后**，那条连接必须重新受闲置超时约束
+// =========================================================================
+//
+// 这一条盯的是 `inflight` 那条不变式：「组内空了，就连键一起摘掉」。
+//
+// 为什么必须单开一条：(b)(c)(d) 那几条连接**从来没有完整送达过一个请求**，
+// 而 (e) 验的是"有请求在途 ⇒ 别杀"。两头之间正好漏掉第三种形态 ——
+// 请求跑完、连接还开着、然后闲置。把 `context_finished()` 里那句
+// `inflight.erase` 整段删掉（变异），上面所有断言照样全绿：空键留在表里，
+// `idle_sweep()` 的在途豁免就对这条连接**永久**成立，客户端只要一直握着
+// 连接不说话，它就永远不关、登记表只涨不落 —— 正是 `uvcpp_web_app.cpp`
+// 里那句注释写的"稳定的泄漏"。
+void test_idle_timeout_after_request() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+  // 600 ms：扫描间隔 = max(200, 600/4) = 200 ms，所以关连接发生在超时后不久。
+  app.set_idle_timeout_ms(600);
+
+  app.get("/hi", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                    uvcpp_web_next next) {
+    (void)req;
+    (void)next;
+    resp.text("hi");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "收场后闲置超时服务启动");
+  const int port = app.bound_port();
+
+  uvcpp_tcp_client c;
+  std::atomic<bool> connected(false);
+  std::atomic<bool> closed(false);
+  std::string got;
+
+  check(c.connect("127.0.0.1", port,
+                  [&](int st) {
+                    if (st == 0) connected.store(true);
+                  }) == 0,
+        "客户端连上了");
+  uvcpp_loop* loop = c.get_loop();
+  check(uvcpp_test::wait_until(loop, [&] { return connected.load(); },
+                               uvcpp_test::kWaitMs),
+        "连接建立");
+
+  c.read_start_events([&](uvcpp_tcp_client&, const net_read_result& ev) {
+    if (ev.is_end()) {
+      closed.store(true);
+      return;
+    }
+    got.append(ev.data, ev.size);
+  });
+
+  const std::string req =
+      "GET /hi HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+  check(c.write(req.data(), req.size(), [](int) {}) == 0, "完整请求写出去了");
+
+  check(uvcpp_test::wait_until(
+            loop, [&] { return got.find("HTTP/1.1 200") != std::string::npos; },
+            5000),
+        "请求被正常应答（服务端上下文走完了 context_finished()）");
+
+  // --- 先证明连接**活过了**这次请求 ---
+  //
+  // 没有这一条，下面那句"连接被关了"就可能只是"响应发完就关连接"，与闲置
+  // 超时无关 —— 那样这条用例在变异版本上也照样绿（假证人）。
+  uvcpp_test::pump_for(loop, 200);
+  check(!closed.load(),
+        "应答之后连接还开着（keep-alive）—— 200 ms 内没被关");
+
+  // --- 这一条才是判据 ---
+  check(uvcpp_test::wait_until(loop, [&] { return closed.load(); }, 5000),
+        "静下来之后连接被闲置超时关掉了（在途那张表里没留下空键）");
+
+  check(wait_for([&] { return app.connection_count() == 0; }, 3000),
+        "关掉之后登记表也摘干净了");
+
+  std::atomic<bool> done(false);
+  if (c.get_tcp() != nullptr) {
+    c.get_tcp()->close([&](uvcpp_handle*) { done.store(true); });
+  }
+  uvcpp_test::wait_until(loop, [&] { return done.load(); },
+                         uvcpp_test::kWaitMs);
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
 // 用例表
 // =========================================================================
 struct test_case {
@@ -1494,6 +1582,7 @@ int main(int argc, char** argv) {
       {"graceful_shutdown", test_graceful_shutdown_with_inflight},
       {"start_failure_recoverable", test_start_failure_is_recoverable},
       {"idle_timeout", test_idle_timeout},
+      {"idle_timeout_after_request", test_idle_timeout_after_request},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

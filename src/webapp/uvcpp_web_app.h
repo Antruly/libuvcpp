@@ -1925,6 +1925,24 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
     std::map<uvcpp_web_conn_id, out_queue> inflight;
 
     /**
+     * @brief 回收来的空在途队列 —— 让上面那条队列的**容量跨请求留下**。
+     *
+     * 为什么要有它：`enqueue_inflight()` 用 `s->inflight[id]` 建空表（cap=0），
+     * 紧接着 `push_back` ⇒ 每请求必然一次 `_M_realloc_insert`；而收场时队列
+     * 一空就连键一起 `erase`，容量跟着扔掉。**键必须摘**（上面 `inflight` 那段
+     * 注释与 `context_finished()` 里那句都写着为什么：留空键会让那条连接被
+     * **永久**豁免闲置超时，在长跑服务上就是稳定的泄漏），**但容量没必要跟着
+     * 一起扔** —— 收场时把向量搬进这里，下次入队再搬回去。两次都是 `swap`，
+     * O(1)、不分配。
+     *
+     * 上限 `kOutQueueRecycleMax`（`uvcpp_web_app.cpp` 的匿名命名空间）：超了就
+     * 照旧扔掉容量，行为与改前一致，不影响正确性。
+     *
+     * 与 `inflight` 同一族的理由：只在**这条循环的线程**上动，不需要锁。
+     */
+    std::vector<out_queue> out_recycle;
+
+    /**
      * @brief `flush_out()` 正在跑 —— 挡住"续发 → 收场 → 又续发"的递归。
      *
      * **每格一个**：它护的是"这一格的队"的递归深度，不是全进程的。合成一个

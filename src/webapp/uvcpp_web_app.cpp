@@ -63,6 +63,13 @@ namespace uvcpp {
 
 namespace {
 
+/// 每格最多回收几条空在途队列（见 `loop_slot::out_recycle`）。
+///
+/// 一条空表只占一个 `out_entry` 的 24 B，256 条也就 12 KiB，而它换掉的是
+/// **每请求一次** `_M_realloc_insert`。设上限只是不让"某个瞬间几万条连接
+/// 同时收场"把回收槽撑成常驻内存 —— 超了就照旧扔掉容量，行为与改前一致。
+const size_t kOutQueueRecycleMax = 256;
+
 /**
  * @brief 流式响应的字节出口 —— `uvcpp_web_stream_sink` 在本层的落地。
  *
@@ -794,6 +801,15 @@ bool uvcpp_web_app::enqueue_inflight(
   // 是"没超上限"那一支，走这一支不会把上下文扣住不发。
   if (s == nullptr) return false;
   out_queue& q = s->inflight[id];
+  // ★ 复用一个回收来的空表：`operator[]` 建出来的是 cap=0，不换的话下面那句
+  //   `push_back` 每请求都要 `_M_realloc_insert` 一次。搬进来的只是一块**空**
+  //   缓冲（里面不存任何 ctx），所以与生命周期无关。
+  //   队列非空时（流水线：这条连接上已经挂着别的请求）`capacity() != 0`，
+  //   这一支自然跳过。
+  if (q.capacity() == 0 && !s->out_recycle.empty()) {
+    q.swap(s->out_recycle.back());
+    s->out_recycle.pop_back();
+  }
   const size_t cap = cfg_.max_pipelined_requests;
   // 0 = 不限（与超时、长度上限一处口径）。
   const bool over = (cap != 0 && q.size() >= cap);
@@ -2776,7 +2792,18 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   // **空队列要连键一起摘掉。** `idle_sweep()` 的豁免与停机宽限的判据都是
   // `inflight.find(id) != end()` / `!inflight.empty()`，留一个空队列在表里
   // 会让那条连接被**永久**豁免闲置超时 —— 表只涨不落，长跑服务上就是稳定的泄漏。
-  if (q->second.empty()) slot->inflight.erase(q);
+  if (q->second.empty()) {
+    // ★ 摘键之前把**容量**搬进本格的回收槽（`swap`，O(1)、不分配）。键照旧要
+    //   摘 —— 上面那两句注释说的就是为什么。但这条队列长度恒为 1，它的容量
+    //   是"每请求一次 `_M_realloc_insert`"的全部来源，没必要每请求重建。
+    //   搬的是**空**表（里面不存 ctx），所以不牵扯任何生命周期。
+    if (q->second.capacity() > 0 &&
+        slot->out_recycle.size() < kOutQueueRecycleMax) {
+      slot->out_recycle.push_back(out_queue());
+      slot->out_recycle.back().swap(q->second);
+    }
+    slot->inflight.erase(q);
+  }
 
   // 这个请求到此为止：半截请求的预算归零，下一次收到字节就是新请求的开头。
   // 放在摘号之后 —— 上面那些早返回都不该动计时。用本地 id，不要再用 ctx。
