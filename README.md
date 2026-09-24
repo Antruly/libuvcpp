@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.26--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.27--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.26-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.27-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.26-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.27-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -879,6 +879,14 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   classes (`1.2.21`–`1.2.23`) all have new layouts, and `uvcpp_handle`'s copy constructor,
   copy assignment and `clone()`, plus `uvcpp_req::clone()`, were **removed** (`1.2.5`) —
   **rebuild, do not just swap the binary** (see [RELEASE.md](./RELEASE.md))
+
+- One line did not compile on Windows: `owned_write_state` initialised
+  `uv_buf_t head = {nullptr, 0}` with the **Unix** member order, while Windows declares
+  `uv_buf_t` as `{ULONG len; char* base;}` (`uv/win.h`) and Unix as `{char* base; size_t len;}`
+  (`uv/unix.h`) — the two members are **mirrored**, so MSVC raised C2440 (`nullptr` into a
+  `ULONG`) and MinGW the same error, and every Windows job had been red since the
+  write-path cut (`1.3.22`). It now uses `uv_buf_init(nullptr, 0)`, which is
+  member-order independent (`1.3.27`)
 
 ---
 

@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.26--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.27--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.26-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.27-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.26-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.27-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -820,6 +820,12 @@ libuvcpp/
   （`1.2.24`）、`uvcpp_memory_pool`（`1.2.x`）与五个多循环类（`1.2.21`–`1.2.23`）布局
   都变了；`uvcpp_handle` 的拷贝构造、拷贝赋值与 `clone()`，以及 `uvcpp_req::clone()`
   则被**删除**（`1.2.5`）—— **必须重编，别只换二进制**（见 [RELEASE.md](./RELEASE.md)）
+
+- 修掉 Windows 上编不过的一行：`owned_write_state` 里 `uv_buf_t head = {nullptr, 0}` 用的是
+  **Unix** 的成员次序，而 Windows 的 `uv_buf_t` 是 `{ULONG len; char* base;}`（`uv/win.h`）、
+  Unix 的是 `{char* base; size_t len;}`（`uv/unix.h`）—— **两个成员次序相反** ⇒ MSVC 报
+  C2440（`nullptr` 喂给 `ULONG`）、MinGW 同错，七个 Windows job 自写路径那笔（`1.3.22`）起
+  全红。改用 `uv_buf_init(nullptr, 0)`，与成员次序无关（`1.3.27`）
 
 ---
 

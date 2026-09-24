@@ -66,8 +66,8 @@ struct owned_write_state {
   uvcpp_tcp_client::owned_write_cb_t fn = nullptr;
   void*             arg    = nullptr;
 
-  // 头部块：按连接复用，容量只增不减。
-  uv_buf_t head     = {nullptr, 0};
+  // 头部块：按连接复用，容量只增不减；初始化只许 uv_buf_init（{nullptr,0} 在 Windows 上编不过）
+  uv_buf_t head     = uv_buf_init(nullptr, 0);
   char*    head_buf = nullptr;
   size_t   head_cap = 0;
 
