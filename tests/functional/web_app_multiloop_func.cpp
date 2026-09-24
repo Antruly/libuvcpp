@@ -35,9 +35,15 @@
  *    墙钟兜底仍然要留（见 `require_within` / `stop_and_join_within`）：坏实现
  *    还可能有别的挂法，而 ctest 的 `Timeout` 看不出卡在哪一条判据上。
  * 3. **请求跑在工作循环上** —— n>1 时处理函数所在的那条线程必须**不是** 0 号
- *    循环的线程，而且必须**就是**该连接所属循环的线程（0 号是接受者，转手
- *    之后一条连接都不留 —— 这是 net 层 `accept_and_handoff()` 里那条显式轮转
- *    定下的）。坏实现（没转手 / 每格都回落 0 号）红。
+ *    循环的线程，而且必须**就是**该连接所属循环的线程。**哪条连接属哪条循环
+ *    有两条形状**（`is_fanout()`，运行时探测）：转手那条路是 net 层
+ *    `accept_and_handoff()` 里那条显式轮转定的（0 号一条都不留）；内核分流那条
+ *    路上 0 号**自己也承载连接** ⇒ "处理函数不在 0 号线程上"在分流下必然为假，
+ *    那一支只断言"是该连接所属循环的线程"。
+ *
+ *    **不夸大**：分流那一支**抓不到"每格都回落 0 号"**这类坏实现（0 号本来就在
+ *    收），它在分流下改由**监听 socket 普查**负责（每个循环一个监听句柄、属主
+ *    pid 相同）：`bench/bench_server.cpp` 的 `--loops N` 与 `/stats`。
  *
  *    **"哪条循环是哪条线程"是问出来的，不是猜的**：
  *    `uvcpp_loop_index_of_this_thread()` 不是导出符号（`src/net/uvcpp_loop_worker.h`
@@ -47,9 +53,10 @@
  *    线程上跑 fn"，于是它就是一个现成的公开口子：逐格投一个"报出自己是谁"的
  *    任务，就拿到了"循环号 → 线程身份"这张表（见 `ask_loop_threads`）。
  * 4. **id 的高段就是它所属的循环号** —— 每个 `on_connection` 收到的 id 都要
- *    满足 `loop_of(id) == client->loop_index()`，而且 n=3 时两条工作循环都得
- *    有连接（轮转是显式的：第 i 条落 `1 + i % (n-1)`，所以 16 条分给 2 条必然
- *    是 {8,8}）。坏实现（id 不带高段 / 全投一条循环）红。
+ *    满足 `loop_of(id) == client->loop_index()` —— **这条两条形状都成立，是承重
+ *    面**。至于"哪条循环分到几条"：转手路上是显式轮转（n=3 时 16 条分给 2 条
+ *    必然 {8,8}、0 号一条都不留），分流路上由内核哈希定 ⇒ 那一支只断言"高段都
+ *    落在 0..n-1 之内"。坏实现（id 不带高段）两条路上都红。
  * 5. **聚合量跑着读也安全** —— 循环还在跑的时候从主线程读
  *    `connection_count()` / `connection_count_at(i)` / `inflight_count()`，
  *    取值必须在界内，且各格之和等于总数。**这条是"单写者 + 原子读数"的
@@ -763,16 +770,29 @@ void test_loop_identity_and_ids() {
           "16 条连接都进了 on_connection（" + std::to_string(id_loop.size()) +
               "）");
 
-    int n1 = 0, n2 = 0, n0 = 0;
+    int n1 = 0, n2 = 0, n0 = 0, nbad = 0;
     for (size_t i = 0; i < id_loop.size(); ++i) {
       if (id_loop[i] == 1) ++n1;
       else if (id_loop[i] == 2) ++n2;
       else if (id_loop[i] == 0) ++n0;
+      else ++nbad;
     }
-    check(n1 == kConns / 2 && n2 == kConns / 2,
-          "显式轮转：16 条分给 2 条工作循环必然 {8,8}，实际 {" +
-              std::to_string(n1) + "," + std::to_string(n2) + "}");
-    check(n0 == 0, "0 号（接受者）一条都不留（转手是显式的）");
+    // **形状有两条**（`is_fanout()`，运行时探测）：只有转手那条路上分布才是确定
+    // 的（显式轮转 ⇒ {8,8}、0 号一条都不留）。内核分流下 0 号自己也收、分布由
+    // 内核哈希定 ⇒ 那两条必然为假，换成的判据是"高段都落在 0..2 之内"（越界说明
+    // 高段没带对）。至于"高段 == 连接自己那条循环"，上面已经逐条比过 —— **那条
+    // 才是本体判据**，两条形状都成立。
+    if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
+      check(nbad == 0, "分流下 16 条的高段都落在 0..2（越界 " +
+                           std::to_string(nbad) + " 条；分布 " +
+                           std::to_string(n0) + "/" + std::to_string(n1) + "/" +
+                           std::to_string(n2) + "）");
+    } else {
+      check(n1 == kConns / 2 && n2 == kConns / 2,
+            "显式轮转：16 条分给 2 条工作循环必然 {8,8}，实际 {" +
+                std::to_string(n1) + "," + std::to_string(n2) + "}");
+      check(n0 == 0, "0 号（接受者）一条都不留（转手是显式的）");
+    }
 
     // 连接的回调必须就在它自己那条循环的线程上（与 post 问出来的那张表对齐）。
     for (std::map<int, std::thread::id>::const_iterator it = conn_tid.begin();
@@ -797,15 +817,24 @@ void test_loop_identity_and_ids() {
     check(handler_tids.size() == static_cast<size_t>(kConns),
           "16 次请求都记下了线程身份（" +
               std::to_string(handler_tids.size()) + "）");
-    check(on0 == 0,
-          "n>1 时请求**不**在 0 号循环的线程上处理（落在 0 号的有 " +
-              std::to_string(on0) + " 条）");
     check(other == 0,
-          "请求线程全部落在已知的两条工作循环上（不认识的线程有 " +
+          "请求线程全部落在本服务端自己的循环上（不认识的线程有 " +
               std::to_string(other) + " 条）");
-    check(on1 == kConns / 2 && on2 == kConns / 2,
-          "请求按连接的轮转分给两条工作循环，必然 {8,8}（实际 {" +
-              std::to_string(on1) + "," + std::to_string(on2) + "}）");
+    if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
+      // 分流：0 号**自己也承载连接**，请求当然也跑在 0 号线程上 ⇒ "落在 0 号
+      // 的必须是 0 条"与"必然 {8,8}"在分流下必然为假。承重的那条是上面那句
+      // `other == 0`（请求没跑到不属于本服务端的线程上）＋每条连接"回调就在
+      // 它自己那条循环的线程上"（上面逐格比过）。分布只打印出来看，不作判据。
+      std::cout << "  [分流] 请求线程分布 0/1/2 = " << on0 << "/" << on1 << "/"
+                << on2 << "（内核哈希定，不作判据）" << std::endl;
+    } else {
+      check(on0 == 0,
+            "n>1 时请求**不**在 0 号循环的线程上处理（落在 0 号的有 " +
+                std::to_string(on0) + " 条）");
+      check(on1 == kConns / 2 && on2 == kConns / 2,
+            "请求按连接的轮转分给两条工作循环，必然 {8,8}（实际 {" +
+                std::to_string(on1) + "," + std::to_string(on2) + "}）");
+    }
   }
 
   // 停机也走一遍扇出路径（3 条循环）：这条用例本身不判它，但"两条工作循环
@@ -918,8 +947,18 @@ void test_aggregates_while_running() {
     check(c_got, "处理函数里取到了逐格读数（采样时连接是活的）");
     check(c_total >= 1, "采样时至少有 1 条连接活着（总数 " +
                             std::to_string(c_total) + "）");
-    check(c_at1 >= 1, "活着的连接记在 1 号分片上（实际 " +
-                          std::to_string(c_at1) + "）");
+    if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
+      // 分流：**采样那条连接自己可能就在 0 号**（0 号也承载连接）⇒ "一定记在
+      // 1 号分片"不成立。承重的判据是"它被记进了**一**格"：逐格之和 == 总数，
+      // 记两处（每格都回落 0 号那种）或漏记都会红 —— 下面那条。
+      check(c_at0 + c_at1 == c_total && c_total >= 1,
+            "采样的那条连接只被记在一格（0 号 " + std::to_string(c_at0) +
+                " + 1 号 " + std::to_string(c_at1) + " == 总数 " +
+                std::to_string(c_total) + "）");
+    } else {
+      check(c_at1 >= 1, "活着的连接记在 1 号分片上（实际 " +
+                            std::to_string(c_at1) + "）");
+    }
     check(c_at0 + c_at1 == c_total,
           "逐格之和 == 总数（" + std::to_string(c_at0) + "+" +
               std::to_string(c_at1) + " vs " + std::to_string(c_total) + "）");
@@ -977,12 +1016,23 @@ void test_ws_session_and_close_frame() {
   if (wss != nullptr) {
     require_within([&] { return wss->session_count() == 1; }, 3000,
                    "服务端看到 1 个 WS 会话");
-    check(wss->session_count_at(1) == 1,
-          "会话记在 **1 号**分片上（实际 1 号 = " +
-              std::to_string(wss->session_count_at(1)) + "）");
-    check(wss->session_count_at(0) == 0,
-          "0 号分片是空的（实际 " + std::to_string(wss->session_count_at(0)) +
-              "）");
+    if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
+      // 分流：WS 那条连接**可能落在 0 号** ⇒ "一定记在 1 号、0 号必须是空的"
+      // 必然为假。承重的是"**只记在一格**"：逐格之和 == session_count()
+      // （记两处、漏记都会红）。
+      check(wss->session_count_at(0) + wss->session_count_at(1) ==
+                wss->session_count(),
+            "会话只记在一格（0 号 " + std::to_string(wss->session_count_at(0)) +
+                " + 1 号 " + std::to_string(wss->session_count_at(1)) + " == " +
+                std::to_string(wss->session_count()) + "）");
+    } else {
+      check(wss->session_count_at(1) == 1,
+            "会话记在 **1 号**分片上（实际 1 号 = " +
+                std::to_string(wss->session_count_at(1)) + "）");
+      check(wss->session_count_at(0) == 0,
+            "0 号分片是空的（实际 " + std::to_string(wss->session_count_at(0)) +
+                "）");
+    }
   }
 
   // ---- 停机：对端必须收到 Close 帧，而不是被直接断掉 ----
@@ -1267,8 +1317,17 @@ void test_id_high_bits_from_loop() {
   uvcpp_http_response r;
   check(get(port, "/z", r) && status_of(r) == 200, "请求正常");
   check(seen_id.load() != 0, "on_connection 拿到了 id");
-  check(id_loop.load() == 1,
-        "n=2 时 id 的高段是 1（实际 " + std::to_string(id_loop.load()) + "）");
+  if (app.tcp_server() != nullptr && app.tcp_server()->is_fanout()) {
+    // 分流：这一条连接可能被内核分给 0 号或 1 号 ⇒ 高段是 0 还是 1 都合法。
+    // 能断言的是"高段是个合法循环号"（每循环一张表，越界就落到 0 号兜底那种
+    // 静默错配 —— 那正是这条判据要挡的形状）。
+    const int il = id_loop.load();
+    check(il >= 0 && il < 2,
+          "n=2 时 id 的高段是合法循环号（实际 " + std::to_string(il) + "）");
+  } else {
+    check(id_loop.load() == 1,
+          "n=2 时 id 的高段是 1（实际 " + std::to_string(id_loop.load()) + "）");
+  }
   // 低 44 位还是那份递增号：n=2 下第一条连接的递增号必须是 1。
   check((seen_id.load() & UVCPP_WEB_CONN_SEQ_MASK) == 1,
         "低 44 位是这条循环自己的递增号，从 1 起（实际 " +

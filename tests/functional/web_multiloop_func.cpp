@@ -17,8 +17,15 @@
  * 1. **对照组 n == 1 逐字不变** —— 请求全部答对、连接全挂在 0 号循环上、
  *    `on_connection` 就在接受者线程上、`loop_count() == 1` 且一条工作线程都没有。
  *    没有这个对照组，"n>1 也答对了"证明不了是切表切对了。
- * 2. **分布是确定的** —— 转手是显式轮转，所以 16 条连接分给 3 条工作循环必然
- *    得到 {6,5,5}，而 0 号（接受者）**一条都不留**。坏实现（全投 0 号）红。
+ * 2. **分布**：形状有两条，由**运行时探测**决定（`uvcpp_tcp_server::is_fanout()`）。
+ *    内核分流下 0 号**自己也在收**、分布由内核哈希定 ⇒ 那一支只断言**守恒**
+ *    （每条连接只落一处、一条不多一条不少）；转手那条路上才是显式轮转（16 条
+ *    分给 3 条必然 {6,5,5}、0 号一条都不留）。
+ *
+ *    **代价要说白**：分流那一支**抓不到"全都投给 0 号"**那种坏实现 —— 守恒照样
+ *    成立。那条改由**监听 socket 普查**负责：每个循环一个监听句柄、属主 pid
+ *    相同（`bench/bench_server.cpp` 的 `--loops` 与 `/stats`，实测 n=4 端口上
+ *    4 个 LISTEN 句柄、16 条连接分布 7/3/4/3）。
  *    这是 `doc/multiloop-design.md` §6 定的可红判据，**不拍均匀度阈值**。
  * 3. **一条连接的请求在它自己那条循环上被处理** —— 路由处理函数里记的线程 id
  *    必须等于该连接 `on_connection` 里记的那个，且 n>1 时一条都不落在接受者
@@ -165,6 +172,8 @@ class HttpRig {
           port_promise.set_value(-1);
           return;
         }
+        // 分流还是转手是**绑定时探出来的**（不是编译期常量）⇒ 判据问这次的结果。
+        fanout_.store(server.get_tcp_server()->is_fanout());
 
         sockaddr_in name;
         int namelen = static_cast<int>(sizeof(name));
@@ -239,6 +248,9 @@ class HttpRig {
     return gen_seen_;
   }
 
+  /** @brief 这次绑定走的是内核分流还是接受者+转手（`n>1` 才有意义）。 */
+  bool fanout() const { return fanout_.load(); }
+
   int port = 0;
 
  private:
@@ -251,6 +263,7 @@ class HttpRig {
   std::atomic<int> loops_rc_{-999};
   std::atomic<int> listen_rc_{-999};
   std::atomic<int> loop_count_{-1};
+  std::atomic<bool> fanout_{false};
   std::atomic<int> accepted_{0};
 
   mutable std::mutex mu_;
@@ -407,6 +420,25 @@ static bool run_phase(int loops, int nconn, int rounds, const char* tag) {
                     << per_loop[0] << "/" << nconn << "）\n";
           ok = false;
         }
+      } else if (rig.fanout()) {
+        // ---- 内核分流：0 号**自己也在收**，分布由内核哈希定。 ----
+        //
+        // 只断言**守恒**：每条连接只落一处、一条不多一条不少。不均匀不是失败，
+        // "某条工作循环一条都没分到"也不是失败 —— 内核两样都不保证。
+        // **代价**：这一支抓不到"全都投给 0 号"那种坏实现（守恒照样成立），
+        // 那条改由监听 socket 普查负责（每个循环一个句柄、属主 pid 相同）。
+        size_t sum = 0;
+        std::string shown;
+        for (int i = 0; i < nloops; ++i) {
+          shown += " " + std::to_string(per_loop[static_cast<size_t>(i)]);
+          sum += per_loop[static_cast<size_t>(i)];
+        }
+        std::cout << "  [" << tag << "] 分流分布（含 0 号）:" << shown
+                  << "，合计 " << sum << "\n";
+        if (sum != static_cast<size_t>(nconn)) {
+          std::cout << "  [" << tag << "] 合计不等于连接数（记了两处或漏了）\n";
+          ok = false;
+        }
       } else {
         if (per_loop[0] != 0) {
           std::cout << "  [" << tag << "] 接受者循环留了 " << per_loop[0]
@@ -470,6 +502,14 @@ static bool run_phase(int loops, int nconn, int rounds, const char* tag) {
       if (loops == 1) {
         if (used.size() != 1 || used.count(acceptor) == 0) {
           std::cout << "  [" << tag << "] n==1 时 on_connection 必须就在接受者线程上\n";
+          ok = false;
+        }
+      } else if (rig.fanout()) {
+        // 分流：**0 号也承载连接** ⇒ "接受者线程上一条都不该有"不成立；能断言的
+        // 只有"回调没超出本服务端自己的循环数"。
+        if (used.size() > static_cast<size_t>(loops)) {
+          std::cout << "  [" << tag << "] on_connection 出现在 " << used.size()
+                    << " 个线程上，超过循环总数 " << loops << "\n";
           ok = false;
         }
       } else {
@@ -618,7 +658,16 @@ static bool test_sequential_identity(int loops, const char* tag) {
                 << " 条、请求 " << req_tid.size() << " 条（该一样多）\n";
       ok = false;
     }
-    if (loops > 1) {
+    if (loops > 1 && rig.fanout()) {
+      // 分流：0 号自己也在收，内核也不保证每条工作循环都分到 —— 能断言的只有
+      // "连接回调没有超出本服务端自己的循环数"（"每条连接的回调都在它自己那条
+      // 循环的线程上"由上面那次逐条比对负责）。
+      if (conns.size() > static_cast<size_t>(loops)) {
+        std::cout << "  [" << tag << "] 6 条连接落在 " << conns.size()
+                  << " 个线程上，超过循环总数 " << loops << "\n";
+        ok = false;
+      }
+    } else if (loops > 1) {
       // 6 条连接、3 条工作循环 ⇒ 轮转必然让**每条工作循环都被用到**。
       if (conns.size() != static_cast<size_t>(loops - 1)) {
         std::cout << "  [" << tag << "] 6 条连接只落在 " << conns.size()
