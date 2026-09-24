@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.20--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.21--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.20-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.21-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.20-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.21-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -757,6 +757,13 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   (both `swap`s, O(1), no allocation) while the **key is still erased** — an empty key left
   in the table would permanently exempt that connection from the idle sweep, a steady leak
   on a long-running server. 23.02 → 22.02 allocations per request (`1.3.20`)
+- The response side's two per-request tables (response headers + `on_sent` callbacks) are no
+  longer rebuilt per request either: on teardown they are cleared and `swap`ped into a
+  per-loop recycle slot, then swapped back in **before the next request is dispatched**. That
+  removes the `reserve(4)`, the fifth header's growth, and the access-log `on_sent` growth in
+  steady state. The price is that what is handed to the next request must be an **empty**
+  table, so neither `clear()` may be dropped. 22.02 → 19.02 allocations per request
+  (`1.3.21`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

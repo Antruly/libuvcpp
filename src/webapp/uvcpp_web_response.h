@@ -664,6 +664,37 @@ class UVCPP_API uvcpp_web_response {
   void set_stream_id(int32_t stream_id) { resp_.stream_id = stream_id; }
   int32_t stream_id() const { return resp_.stream_id; }
 
+  // -------------------------------------------------------------------
+  // 表的回收口（框架用；用户代码不需要碰）
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 把上一条请求留下的两张**空**表换进来（`swap`，O(1)、不分配）。
+   *
+   * 背景：本对象的 `resp_` 与 `sent_cbs_` 都是**每请求新建**的，于是
+   * `http_reserve_headers()` 每请求 `reserve(4)` 一次、第 5 个头再扩容一次、
+   * 访问日志那条 `on_sent()` 再扩容一次。让框架把上一条请求用完的空表留下来
+   * 再换进来，稳态下这三次全部消失。
+   *
+   * **两边都必须是空的** —— 回收槽里只放 `yield_tables()` 清空过的表，所以
+   * 这不是"复用内容"，只是"复用缓冲"。
+   *
+   * 刻意不走 `raw()`：那个非 const 版会先 `sync_meta()`，而本函数是在**派发
+   * 之前**调的、body 还空着 —— 跑一次会写死 `content-length: 0`（与
+   * `set_stream_id()` 同一条理由，见它的注释）。
+   */
+  void adopt_tables(http_headers& spare_headers,
+                    std::vector<uvcpp_web_sent_cb>& spare_sent);
+
+  /**
+   * @brief 把两张表换出去给下一条请求复用（先 `clear()` 再 `swap()`）。
+   *
+   * 只在框架松手之前（`context_finished()`）调用 —— 那时响应已经发完，表里剩的
+   * 只是"刚才用过的那几个头"，清掉元素、留下容量即可。
+   */
+  void yield_tables(http_headers& spare_headers,
+                    std::vector<uvcpp_web_sent_cb>& spare_sent);
+
  private:
   /// 这个状态码是否不允许有 body（1xx / 204 / 304）。
   bool status_forbids_body() const;

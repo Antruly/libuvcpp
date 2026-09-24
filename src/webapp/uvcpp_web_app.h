@@ -1943,6 +1943,31 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
     std::vector<out_queue> out_recycle;
 
     /**
+     * @brief 一条响应留下来的两张**空**表，给下一条请求复用。
+     *
+     * 为什么要有它：`resp_` 与 `sent_cbs_` 都是**每请求新建**的（上下文由
+     * `uvcpp_web_context::create()` 每请求 `make_shared` 一次），于是
+     * `http_reserve_headers()` 每请求 `reserve(4)` 一次、第 5 个头再扩容一次、
+     * 访问日志那条 `on_sent()` 再扩容一次。三次分配换来的只是"这两张表本来就
+     * 该长那样" —— 与 `out_recycle` 是同一个形状：**内容不要，缓冲要**。
+     *
+     * 与 `out_recycle` 的区别：这两张表同生同灭，所以**一起搬**，用一个结构装。
+     * 回收槽里只放 `yield_tables()` **清空过**的表，因此搬过来的永远是"空的、
+     * 有容量的"，不牵扯任何元素的生命周期。
+     *
+     * 上限 `kRespTablesRecycleMax`（`uvcpp_web_app.cpp` 的匿名命名空间）：超了
+     * 就照旧扔掉容量，行为与改前一致，不影响正确性。
+     *
+     * 与 `inflight` 同一族的理由：只在**这条循环的线程**上动，不需要锁。
+     */
+    struct resp_tables {
+      http_headers headers;
+      std::vector<uvcpp_web_sent_cb> sent;
+    };
+
+    std::vector<resp_tables> resp_recycle;
+
+    /**
      * @brief `flush_out()` 正在跑 —— 挡住"续发 → 收场 → 又续发"的递归。
      *
      * **每格一个**：它护的是"这一格的队"的递归深度，不是全进程的。合成一个

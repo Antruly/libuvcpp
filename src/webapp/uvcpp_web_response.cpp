@@ -748,6 +748,16 @@ void uvcpp_web_response::notify_sent(const uvcpp_web_sent_info& info) {
       UVCPP_LOG_ERROR(log_category::RESPONSE) << "on_sent callback threw";
     }
   }
+
+  // ★ 把**容量**还给 `sent_cbs_`：上面那次 `swap` 把缓冲搬到了这个局部向量上，
+  //   出函数就跟着析构 —— 于是下一条请求又得 `_M_realloc_insert` 一次。清掉
+  //   已经跑完的回调（`clear()` 留容量）再换回去即可。
+  //   回调里如果又调了 `on_sent()`，`sent_cbs_` 就不是空的 ⇒ **不还**（那次新
+  //   挂的回调得留着），拿回容量即可。两种情形的可观察行为一字不动。
+  //   ★ 这句 `cbs.clear()` 同时是"回调不串到下一条请求"的**主守卫**
+  //   （`yield_tables()` 里还有第二道网）。两句互为备份、单删都观察不到。
+  cbs.clear();
+  if (sent_cbs_.empty()) sent_cbs_.swap(cbs);
 }
 
 void uvcpp_web_response::set_error_handler(const uvcpp_web_error_handler& h) {
@@ -1416,5 +1426,31 @@ uvcpp_http_response& uvcpp_web_response::raw() {
 }
 
 const uvcpp_http_response& uvcpp_web_response::raw() const { return resp_; }
+
+void uvcpp_web_response::adopt_tables(
+    http_headers& spare_headers, std::vector<uvcpp_web_sent_cb>& spare_sent) {
+  // 两边都空才换得干净：回收槽里只会放 `yield_tables()` 清空过的表。
+  resp_.headers.swap(spare_headers);
+  sent_cbs_.swap(spare_sent);
+}
+
+void uvcpp_web_response::yield_tables(
+    http_headers& spare_headers, std::vector<uvcpp_web_sent_cb>& spare_sent) {
+  // 先清元素、留下容量。响应到这里已经发完了，表里剩的只是"刚才用过的那几个
+  // 头"；`clear()` 掉它们之后这块缓冲就是一条干净的、有容量的空表。
+  //
+  // ★ `sent_cbs_.clear()` 是**第二道网**，不是主守卫。正常路径上
+  //   `notify_sent()` 早把表 `swap` 到局部、跑完、又还了个空的回来。
+  //   实测（`yield_tables()` 入口无条件打点，全树 ctest 跑一遍）：3593 次
+  //   调用**全部** `sent_cbs_ == 0`，同一份打点里 `hdrs` 是 5/6/7 ⇒ 头那半句
+  //   确实在干活。而"注册了 `on_sent` 却从没发出去"的路径（扣住 next +
+  //   停机强拆）**根本不走 `context_finished`**，所以也到不了这里。
+  //   留着是因为它是**构造上的**兜底：哪天多一条"没发就收场"的路，这一句
+  //   就能挡住旧回调串到下一条请求上去 —— 代价一行，而串味的现场极难查。
+  resp_.headers.clear();
+  sent_cbs_.clear();
+  resp_.headers.swap(spare_headers);
+  sent_cbs_.swap(spare_sent);
+}
 
 }  // namespace uvcpp

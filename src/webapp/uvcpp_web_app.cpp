@@ -70,6 +70,14 @@ namespace {
 /// 同时收场"把回收槽撑成常驻内存 —— 超了就照旧扔掉容量，行为与改前一致。
 const size_t kOutQueueRecycleMax = 256;
 
+/// 每格最多回收几张响应表（见 `loop_slot::resp_recycle`）。
+///
+/// 一张表稳态下就那么点东西（5 个 `http_header`、1 条 `on_sent` 回调），
+/// 256 张也就几十 KiB，而它换掉的是**每请求三次**堆分配。设上限的理由与
+/// `kOutQueueRecycleMax` 完全相同：不让"某个瞬间几万条连接同时收场"把回收槽
+/// 撑成常驻内存 —— 超了就照旧扔掉容量，行为与改前一致。
+const size_t kRespTablesRecycleMax = 256;
+
 /**
  * @brief 流式响应的字节出口 —— `uvcpp_web_stream_sink` 在本层的落地。
  *
@@ -1192,6 +1200,19 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
   }
 
   std::shared_ptr<uvcpp_web_context> ctx = uvcpp_web_context::create(*this, id);
+
+  // ★ 把上一条请求用完的**空**表换进来（`swap`，O(1)、不分配）。**必须在这里、
+  //   在处理函数跑之前** —— `http_reserve_headers()` 只在 `capacity() == 0` 时
+  //   才 `reserve(4)`，换晚了那次分配就已经发生了（见 `loop_slot::resp_recycle`
+  //   与 `uvcpp_web_response::adopt_tables()`）。
+  {
+    loop_slot* s0 = slot_of(id);
+    if (s0 != nullptr && !s0->resp_recycle.empty()) {
+      ctx->response().adopt_tables(s0->resp_recycle.back().headers,
+                                   s0->resp_recycle.back().sent);
+      s0->resp_recycle.pop_back();
+    }
+  }
 
   // 此刻的 `req` 只有 method/url/version/headers —— body 一个字节都还没到，
   // 而且**永远不会**进 `ctx->request().body_*()`（HTTP 层不会再累积它）。
@@ -2786,6 +2807,16 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   uvcpp_web_stream* s = ctx.stream();
   if (s != nullptr) s->resume();
 
+  // ★ 把这一条响应用完的两张表搬进本格的回收槽（`swap`，O(1)、不分配）——
+  //   与每请求那三次分配配对：`reserve(4)`、第 5 个头的扩容、`on_sent()` 的
+  //   扩容。**必须放在 `erase` 之前**：那之后上下文可能当场销毁，表也跟着没了。
+  //   `yield_tables()` 会先 `clear()` 再 `swap()`，所以搬进回收槽的是**空**表。
+  if (slot->resp_recycle.size() < kRespTablesRecycleMax) {
+    slot->resp_recycle.push_back(loop_slot::resp_tables());
+    ctx.response().yield_tables(slot->resp_recycle.back().headers,
+                                slot->resp_recycle.back().sent);
+  }
+
   q->second.erase(me);
   // 与 `enqueue_inflight()` 那一笔配对（唯一出队点）。
   slot->inflight_entries.fetch_sub(1);
@@ -3079,6 +3110,19 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   }
 
   std::shared_ptr<uvcpp_web_context> ctx = uvcpp_web_context::create(*this, id);
+
+  // ★ 把上一条请求用完的**空**表换进来（`swap`，O(1)、不分配）。**必须在这里、
+  //   在处理函数跑之前** —— `http_reserve_headers()` 只在 `capacity() == 0` 时
+  //   才 `reserve(4)`，换晚了那次分配就已经发生了（见 `loop_slot::resp_recycle`
+  //   与 `uvcpp_web_response::adopt_tables()`）。
+  {
+    loop_slot* s0 = slot_of(id);
+    if (s0 != nullptr && !s0->resp_recycle.empty()) {
+      ctx->response().adopt_tables(s0->resp_recycle.back().headers,
+                                   s0->resp_recycle.back().sent);
+      s0->resp_recycle.pop_back();
+    }
+  }
 
   // 请求体是**搬**过来的（move_buf），不是拷贝 —— 上传大文件时这一步省掉
   // 一倍内存。此后 `req` 的 body 就空了，HTTP 层那边也不会再用它。

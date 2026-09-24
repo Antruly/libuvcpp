@@ -1541,6 +1541,137 @@ void test_idle_timeout_after_request() {
 }
 
 // =========================================================================
+// 12c. 响应表跨请求复用了，但留给下一条的**必须是空表**
+// =========================================================================
+//
+// 这一条盯的是 `uvcpp_web_response::yield_tables()` / `adopt_tables()` 那对
+// 回收口（`loop_slot::resp_recycle`）。收场时把空表留下、下一条再换进来，换掉
+// 的是每请求三次堆分配（`reserve(4)`、第 5 个头的扩容、`on_sent()` 的扩容）。
+//
+// 前提是"留下的确实是**空**表"。`clear()` 一丢，上一条响应没发完的头就会原样
+// 出现在下一条响应里 —— 而**同名头会被覆盖**，所以只有当两条请求设的头名
+// **不同**时才看得出来。这正是本用例用 `x-alpha`、而 `/beta` 一个自定义头都
+// 不设的原因：光比对 content-type 是抓不住的。
+//
+// `sent_cbs_` 那半张表同理：中间件挂的回调若跟着表留到下一条，第二条响应就会
+// **发两次**通知（第一条的旧回调 + 本条的新回调）。计数器就是它的证人。
+//
+// ★ 但这一半有**两句**守卫、互为备份：`notify_sent()` 里的 `cbs.clear()`
+//   （把表 `swap` 到局部、跑完再还回来，正常路径上它是主守卫）与
+//   `yield_tables()` 里的 `sent_cbs_.clear()`（第二道网）。**任删一句都
+//   观察不到**（实测：单删各自全绿）；**两句一起去掉**，下面那条"恰好两次"
+//   才红，而且只有它红。别把单删的绿读成"这半张表没人管"。
+//
+// ★ 两条请求必须走**同一条连接**（keep-alive）：换了连接就是换了
+//   `loop_slot`/`resp_recycle` 的两格，复用的前提根本不成立。
+void test_response_tables_recycled_but_cleared() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+
+  // 每条请求都挂一个 on_sent 回调：跑完之后 `sent_calls` 必须**正好**等于
+  // 请求条数。多出来的那一次就是上一条留下的回调又跑了一遍。
+  std::atomic<int> sent_calls(0);
+  app.use([&sent_calls](uvcpp_web_request& req, uvcpp_web_response& resp,
+                        uvcpp_web_next next) {
+    (void)req;
+    resp.on_sent([&sent_calls](const uvcpp_web_sent_info&) {
+      sent_calls.fetch_add(1);
+    });
+    next();
+  });
+
+  app.get("/alpha", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                       uvcpp_web_next next) {
+    (void)req;
+    (void)next;
+    resp.set_header("x-alpha", "one");
+    resp.text("alpha-body");
+    resp.end();
+  });
+
+  // `/beta` 一个自定义头都不设 —— 它就是"看有没有东西跟过来"的那张白纸。
+  app.get("/beta", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                      uvcpp_web_next next) {
+    (void)req;
+    (void)next;
+    resp.text("beta-body");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "回收表用例的服务启动");
+  const int port = app.bound_port();
+
+  uvcpp_tcp_client c;
+  std::atomic<bool> connected(false);
+  std::string got;
+  check(c.connect("127.0.0.1", port,
+                  [&](int st) {
+                    if (st == 0) connected.store(true);
+                  }) == 0,
+        "客户端连上了");
+  uvcpp_loop* loop = c.get_loop();
+  check(uvcpp_test::wait_until(loop, [&] { return connected.load(); },
+                               uvcpp_test::kWaitMs),
+        "连接建立");
+
+  c.read_start_events([&](uvcpp_tcp_client&, const net_read_result& ev) {
+    if (!ev.is_end()) got.append(ev.data, ev.size);
+  });
+
+  const std::string r1 =
+      "GET /alpha HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+  check(c.write(r1.data(), r1.size(), [](int) {}) == 0, "第一条请求写出去了");
+  check(uvcpp_test::wait_until(
+            loop, [&] { return got.find("alpha-body") != std::string::npos; },
+            5000),
+        "第一条被应答了");
+
+  const std::string r2 =
+      "GET /beta HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+  check(c.write(r2.data(), r2.size(), [](int) {}) == 0,
+        "第二条请求写出去了（**同一条连接**）");
+  check(uvcpp_test::wait_until(
+            loop, [&] { return got.find("beta-body") != std::string::npos; },
+            5000),
+        "第二条被应答了");
+
+  // 把第二条响应单独切出来。用**最后**一个状态行起点：上面两条请求各回一条
+  // 响应，而 body 是 `alpha-body` / `beta-body`，都不含 `HTTP/1.1 200` 这个
+  // 串，所以切点唯一。先数一遍条数，数不对就说明切点根本不成立。
+  size_t n_status = 0;
+  for (size_t p = got.find("HTTP/1.1 200"); p != std::string::npos;
+       p = got.find("HTTP/1.1 200", p + 1)) {
+    ++n_status;
+  }
+  check(n_status == 2, "这条连接上正好回了**两条**响应");
+  const std::string resp2 = got.substr(got.rfind("HTTP/1.1 200"));
+
+  // --- 判据一：第一条的头不许跟过来 ---
+  check(resp2.find("x-alpha") == std::string::npos,
+        "第二条响应里没有第一条留下的 `x-alpha`（留下的表被清空过）");
+  check(resp2.find("alpha-body") == std::string::npos,
+        "第二条响应里没有第一条的 body");
+
+  // --- 判据二：`on_sent` 回调也不许跟过来 ---
+  //
+  // 通知是在 `send_response()` 里同步跑的，body 能看到时它早跑完了；这一拍只
+  // 是给"万一"留的余量，不给变异留喘息。
+  uvcpp_test::pump_for(loop, 200);
+  check(sent_calls.load() == 2,
+        "两条请求 ⇒ 恰好两次 `on_sent` 通知（回调没跟着表留到下一条）");
+
+  std::atomic<bool> done(false);
+  if (c.get_tcp() != nullptr) {
+    c.get_tcp()->close([&](uvcpp_handle*) { done.store(true); });
+  }
+  uvcpp_test::wait_until(loop, [&] { return done.load(); },
+                         uvcpp_test::kWaitMs);
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
 // 用例表
 // =========================================================================
 struct test_case {
@@ -1583,6 +1714,8 @@ int main(int argc, char** argv) {
       {"start_failure_recoverable", test_start_failure_is_recoverable},
       {"idle_timeout", test_idle_timeout},
       {"idle_timeout_after_request", test_idle_timeout_after_request},
+      {"response_tables_recycled_but_cleared",
+       test_response_tables_recycled_but_cleared},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 
