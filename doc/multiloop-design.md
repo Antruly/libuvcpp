@@ -144,9 +144,9 @@ worker 0 ⇒ 分布判据红（`[n=4] 分布 0 0 16`）；绕开转手（让 acc
 `tests/tools/run_loop_leak_probe.py` 自己的锚点过期、跑不起来 —— **"探针没跑"不等于"没泄漏"**，
 这条边界要带着看。
 
-> **本机只有 Windows。** 上面那条 POSIX `dup()` 腿在本机**编得到、跑不到**（走的是
-> `#if` 的 Windows 分支），证据只能来自 CI 的 ubuntu/macOS 腿。所以本页任何"两端都验过"
-> 的写法都是错的，只能写"Windows 本机验过、POSIX 由 CI 验"。
+> **本机只有 Windows，而这条 POSIX `dup()` 腿在 Windows 上根本"编不到"** —— 它在
+> `uvcpp_socket_handoff.cpp:65-75` 的 `#else` 里，本机跑的是同一函数的 Windows 支。CI 上也只有
+> **macOS** 腿真跑到它（Linux 侧 REUSEPORT 绑得上 ⇒ 永不走转手），别写"两端都验过"。
 
 
 ## 2. 平台事实：Windows 上"挪一条监听句柄"是死路

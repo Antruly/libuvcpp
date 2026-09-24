@@ -55,8 +55,10 @@
  *
  * **不在本用例里的**：TLS 的多循环语义（§4.4 要求"每条循环的 `SSL` 对象是它
  * 自己的"，那要等 webapp 那半边）；webapp 层（`uvcpp_web_app::set_loops` 还
- * 不存在）；POSIX 那条 `dup()` 路 —— 本机是 Windows，那条路**编得到、跑不到**，
- * 证据在 CI 的 ubuntu/macOS 腿上。不要在记录里写成"两端都验过"。
+ * 不存在）；POSIX 那条 `dup()` 路 —— 它在 Windows 上**根本编不到**（在
+ * `uvcpp_socket_handoff.cpp:65` 的 `#else` 里），本机跑的是**同一函数的 Windows
+ * 支**（`WSADuplicateSocketW`）。CI 上也只有 **macOS** 腿真跑到它：Linux 侧
+ * `UV_TCP_REUSEPORT` 绑得上 ⇒ `fanout_` 为真 ⇒ 永不走转手。不要写成"两端都验过"。
  */
 
 #include <atomic>
