@@ -765,14 +765,27 @@ void test_loop_identity_and_ids() {
   // 判据**时红时绿**等于没判据。真正有牙的那条在
   // `test_aggregates_while_running()` 里 —— 采样点放进处理函数，连接必然活着，
   // 前提 `at1 >= 1` 自己先断言。
+  // **这里原先有一条「逐格之和 == connection_count()」，已删。** 它既不能当
+  // 判据、又会时红时绿，两件事都实测过：
+  //
+  // * **不能当判据**：`connection_count()` 的实现就是逐格求和
+  //   （`src/webapp/uvcpp_web_app.cpp`）⇒ 只要四条读**是一个快照**，它对**任何**
+  //   坏实现都恒真（把 `connection_count_at(i)` 做成不看 i，和式照样成立）；
+  // * **会时红时绿**：那四个读**不是**一个快照。本机量过（一个线程连着开/关
+  //   连接、主线程同时做那四个读）：`samples=75,676,000`、
+  //   `torn(sum<total)=138`、`torn(sum>total)=152`、`worst(total=1 sum=0)`
+  //   —— 后一个数就是 CI 上那句 `0+0+0 vs 1` 的逐字同形。**双向**撕裂说明这是
+  //   读数被拆开，不是记错格（错账只往一个方向偏）。而且是在 **Linux、
+  //   REUSEPORT 分流、根本没有转手**的配置上量的 ⇒ 与平台、与转手都无关，
+  //   是**读法本身**的问题。
+  //
+  // 删了它**没有拔掉任何牙**（注入 M4 = `connection_count_at` 不看下标，实测本
+  // 用例照样红，红在另外三条上）：`cell_ok` 那条（每条连接在**它自己那一格**上
+  // 读得到，采在 `on_connection` 里、连接一定活着）、`test_aggregates_while_running()`
+  // 里的处理函数内采样（`c_net`/`c_leak`/和式），以及 `n == 1` 对照组的
+  // `at0 == connection_count()`。**别把和式搬回这里。**
   const size_t total = app.connection_count();
-  const size_t at0 = app.connection_count_at(0);
-  const size_t at1 = app.connection_count_at(1);
-  const size_t at2 = app.connection_count_at(2);
-  check(at0 + at1 + at2 == total,
-        "逐格之和 == connection_count()（" + std::to_string(at0) + "+" +
-            std::to_string(at1) + "+" + std::to_string(at2) + " vs " +
-            std::to_string(total) + "）");
+  (void)total;  // 留着只是把"此刻的聚合量"读一遍，不做断言（理由见上）
 
   {
     std::lock_guard<std::mutex> lk(mu);
