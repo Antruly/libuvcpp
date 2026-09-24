@@ -203,7 +203,8 @@ mostly operates on, so a new module page is a page CI will compile:
 | [`doc/expand-guide.md`](doc/expand-guide.md) | memory pool, page heap and span |
 | [`doc/json-guide.md`](doc/json-guide.md) | the application-layer JSON builder |
 | [`doc/json-reflect-guide.md`](doc/json-reflect-guide.md) | field-table JSON reflection (one macro, both directions) |
-| [`doc/wsdl-guide.md`](doc/wsdl-guide.md) | WSDL 1.1 document model and publishing (the SOAP half is not in this version) |
+| [`doc/wsdl-guide.md`](doc/wsdl-guide.md) | WSDL 1.1 document model and publishing |
+| [`doc/soap-guide.md`](doc/soap-guide.md) | SOAP envelopes and faults, dispatch from the WSDL binding, response and fault serialization |
 
 `doc/<module>/` subdirectories do not exist and should not be created: both gates scan
 `*.md` at the root plus `doc/*.md` **non-recursively**, so a page in a subdirectory is

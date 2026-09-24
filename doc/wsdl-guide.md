@@ -2,7 +2,9 @@
 
 `uvcpp` 的 WSDL 支持分成上下两半。**这一页只讲上半**：把一份 WSDL 1.1 文档
 解析成模型、按名字查它、原样发出去，以及**从模型生成**一份 WSDL。下半（SOAP
-信封、`soap:Fault`、按 operation 名派发、响应序列化）不在这版里，见 §12。
+信封、`soap:Fault`、按 operation 名派发、响应序列化）在
+[`doc/soap-guide.md`](soap-guide.md) —— 两半是同一个模块、同一个开关，读哪一页
+取决于你要解决的是"这份文档怎么读"还是"这条报文怎么处理"。
 
 它建在 `webapp` 之上：唯一的开关 `UVCPP_ENABLE_WSDL` 默认 **OFF**，XML 后端是
 **pugixml**（静态链入，`PUGIXML_VERSION` 可钉，默认 `v1.14`）。
@@ -411,7 +413,9 @@ import 进来的文档时，就别调它 —— 或者说别拿它的失败当"�
 
 ## 11. 判据
 
-两条 ctest 用例，都在 `UVCPP_ENABLE_WSDL=ON` 的树上跑：
+这一半有两条 ctest 用例，都在 `UVCPP_ENABLE_WSDL=ON` 的树上跑（整个模块一共四条；
+下半那两条 —— `soap_message_func` 与 `web_app_soap_func` —— 在
+[`doc/soap-guide.md`](soap-guide.md) §14）：
 
 | 用例 | 组数 | 钉什么 |
 |---|---|---|
@@ -424,21 +428,27 @@ import 进来的文档时，就别调它 —— 或者说别拿它的失败当"�
   （漏 `root_namespaces`/`source_bytes` 这两个"来源相关"的字段），`\n`/`\r` 在
   拼进去之前被转义，所以多行值不会把指纹撞平。用它判"四种前缀写法的模型相同"，
   比逐个字段比更不容易漏 —— 而漏一个字段就正好是这个模块最容易骗过自己的地方。
-- **宏关闭时这两条用例不存在**（不是 `[skip]`，是文件名过滤器把它们整个拿掉）：
-  实测 `UVCPP_ENABLE_WSDL=OFF` 的三棵树分别 100/100、107/107、46/46，且
-  `ctest -N | grep -ci wsdl` 为 0。这一条是刻意的 —— `[skip]` 照样 PASS 是本仓
-  已知的坑，所以"关掉模块时用例仍在"等于没有判据。
+- **宏关闭时这四条用例都不存在**（不是 `[skip]`，是文件名过滤器把它们整个拿掉 ——
+  上下两半一样，`ctest -N` 出来的名字里一条都找不到）：
+  实测 `UVCPP_ENABLE_WSDL=OFF` 的三棵树分别 100/100、107/107、46/46，且用例名里
+  含 `wsdl|soap` 的 0 条。★ 数的时候要先滤掉 `ctest -N` 的**头一行**
+  （`Test project <构建目录>`）：构建目录名里带 `wsdl` 时，直接
+  `ctest -N | grep -ci wsdl` 会把那一行数进去、把 0 报成 1，看着像"关掉了还有一条
+  用例剩着" —— 判据自己带进来一个与被测对象无关的匹配源。用
+  `ctest -N | grep -E '^ *Test +#' | grep -ciE 'wsdl|soap'`。这一条是刻意的 ——
+  `[skip]` 照样 PASS 是本仓已知的坑，所以"关掉模块时用例仍在"等于没有判据。
 - **错误码阶梯每一条都配对照臂**：只改一处、其余不变的那份**必须接受**。没有
   对照的话，"报了错"和"报了**对的**错"分不开，而后者才是要判的。
 
 ## 12. 没做的（如实列出）
 
-**SOAP 那一半（7b，不在这一版里）**：`Envelope`/`Header`/`Body` 的解析、`soap:Fault`、
+**SOAP 那一半不在这里**：`Envelope`/`Header`/`Body` 的解析、`soap:Fault`、
 SOAP 1.1 与 1.2 的命名空间差异、按 operation 名把 Body 里第一个元素派发给处理函数、
-SOAP 响应与 Fault 的序列化。派发要用的那几个**文档属性**（`soapAction`、`style`、
-`use`、1.1/1.2 之分）**已经收在模型里**，因为它们属于文档、不属于运行时。
+SOAP 响应与 Fault 的序列化 —— 全在 [`doc/soap-guide.md`](soap-guide.md)，那一页也有
+它自己"没做的"清单（那页的 §15）。派发要用的那几个**文档属性**（`soapAction`、
+`style`、`use`、1.1/1.2 之分）**收在模型里**，因为它们属于文档、不属于运行时。
 
-**这一半自己也没做的**：
+**这一半自己没做的**：
 
 - **`wsdl:import` 不取回**（§10）。只记 `namespace_uri` + `location`。
 - **WSDL 2.0 不支持**，只把它**认出来**并报 `UNSUPPORTED_VERSION`。
@@ -446,10 +456,11 @@ SOAP 响应与 Fault 的序列化。派发要用的那几个**文档属性**（`
   的 schema 说 `a` 是 `int`，而 SOAP 消息里给的是字符串"这类问题，本模块不判。
 - **不做 XSD 到 C++ 的代码生成**（gSOAP / `wsdl2h` 那一类）。
 - **不解析 `soap:header` / `soap:headerfault`**：模型里没有它们（1.1 的
-  `soap:header` 对应 Header 块的静态声明，属于 7b 的范围）。
+  `soap:header` 对应 Header 块的静态声明，属于下半，见
+  [`doc/soap-guide.md`](soap-guide.md) §13/§15）。
 - **`rpc`/`encoded` 只记录不实现**：`style`、`use`、`encodingStyle`、`namespace`
-  都如实读进模型，但本模块不据此组包 —— 那些语义在 7b，且 `encoded` 已经是被
-  WS-I 基本剖面淘汰的用法。
+  都如实读进模型，但本模块不据此组包 —— 组包是下半的事，且 `encoded` 已经是被
+  WS-I 基本剖面淘汰的用法（下半同样不实现它，那页的 §15）。
 - **不做 `portType` 继承**：`portType/@extends` 是个扩展属性，本模块只读这个
   `portType` **自己**的 `operation`，不把继承来的那些合进来 —— 而 SOAP 派发正是
   要按 operation 名查，所以真用继承的文档会在这里少几个 operation。这是刻意的
