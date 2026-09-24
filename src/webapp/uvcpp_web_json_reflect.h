@@ -124,10 +124,19 @@ inline bool uvcpp_read_bool(const uvcpp_json& j, bool& out) {
 }
 
 /// 目标是有符号整型时：上下界都要比。
+///
+/// ⚠ 那两处的括号**不是装饰**：`windows.h` 会把 `min` / `max` 定义成**宏**，
+/// `std::numeric_limits<T>::max()` 里的 `max` 于是被当成一次函数式宏调用 —— 零参
+/// 报 `C4003`（传统预处理器下只是警告、宏不展开，所以老半天没人看见），
+/// `/Zc:preprocessor` 下直接是**硬错**，还会连带 `C2589`/`C2059` 一串与根因
+/// 无关的报错。写成 `(...::max)()` 时 `max` 后面跟的是 `)` 而不是 `(`，宏不成立。
+/// 凡是 `#include <windows.h>` 之后实例化本函数的消费者都会撞上它，与本库用哪个
+/// 预处理器无关 —— 这里必须两处都括起来。同一句注释的另一个落点是
+/// `tests/functional/web_app_static_func.cpp` 里的 `std::min`。
 template <typename T>
 bool uvcpp_read_signed_into(long long s, T& out, std::true_type) {
-  if (s < static_cast<long long>(std::numeric_limits<T>::min())) return false;
-  if (s > static_cast<long long>(std::numeric_limits<T>::max())) return false;
+  if (s < static_cast<long long>((std::numeric_limits<T>::min)())) return false;
+  if (s > static_cast<long long>((std::numeric_limits<T>::max)())) return false;
   out = static_cast<T>(s);
   return true;
 }
@@ -137,7 +146,7 @@ template <typename T>
 bool uvcpp_read_signed_into(long long s, T& out, std::false_type) {
   if (s < 0) return false;
   if (static_cast<unsigned long long>(s) >
-      static_cast<unsigned long long>(std::numeric_limits<T>::max()))
+      static_cast<unsigned long long>((std::numeric_limits<T>::max)()))
     return false;
   out = static_cast<T>(s);
   return true;
@@ -154,7 +163,7 @@ bool uvcpp_read_integer(const uvcpp_json& j, T& out) {
   if (j.is_number_unsigned()) {
     const unsigned long long u = j.get<unsigned long long>();
     // 同一句对两种目标都对：有符号目标的 max 是正值，放进 ull 无损。
-    if (u > static_cast<unsigned long long>(std::numeric_limits<T>::max())) return false;
+    if (u > static_cast<unsigned long long>((std::numeric_limits<T>::max)())) return false;
     out = static_cast<T>(u);
     return true;
   }

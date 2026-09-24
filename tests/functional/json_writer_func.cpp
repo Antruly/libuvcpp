@@ -323,13 +323,18 @@ void group_escape() {
 // =========================================================================
 
 void group_numbers() {
+  // 下面那几处 `(std::numeric_limits<...>::max)()` 的括号**不是装饰**：
+  // `windows.h` 把 `min`/`max` 定义成宏，`...::max()` 里的 `max` 会被当成一次
+  // 函数式宏调用拆掉（`C4003`，`/Zc:preprocessor` 下是硬错）。这个 TU 现在没有
+  // `windows.h`，所以是**预防性**的；同一件事的正例见
+  // `src/webapp/uvcpp_web_json_reflect.h` 与 `web_app_static_func.cpp`。
   // --- 有符号整数：期望串手写，并且 `strtoll` 读回来必须等于原值 -----------
   {
     const long long vals[] = {
         0,
         -1,
-        std::numeric_limits<long long>::min(),
-        std::numeric_limits<long long>::max(),
+        (std::numeric_limits<long long>::min)(),
+        (std::numeric_limits<long long>::max)(),
         -32768,
     };
     const char* want[] = {
@@ -359,7 +364,7 @@ void group_numbers() {
         0ull,
         65535ull,
         4294967295ull,
-        std::numeric_limits<unsigned long long>::max(),
+        (std::numeric_limits<unsigned long long>::max)(),
     };
     const char* want[] = {"0", "65535", "4294967295", "18446744073709551615"};
     for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); ++i) {
