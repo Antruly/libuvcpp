@@ -49,6 +49,8 @@
 
 #include <pugixml.hpp>
 
+#include <wsdl/uvcpp_wsdl_document.h>
+
 #include <cstddef>
 #include <map>
 #include <string>
@@ -172,8 +174,45 @@ const char* xml_attr_raw(const pugi::xml_node& node, const char* name);
 const char* xml_attr(const pugi::xml_node& node, const char* name,
                      const char* fallback);
 
-/** @brief 取节点的文本（元素取子 pcdata 的拼接）。 */
+/**
+ * @brief 取节点的文本（元素取子 pcdata 的拼接）。
+ *
+ * 注释与 CDATA 的处理：CDATA 算文本（`node_cdata`），注释不算 —— 见实现。
+ */
 std::string xml_text(const pugi::xml_node& node);
+
+// ---------------------------------------------------------------------------
+// 三个"跨入口共用"的件
+// ---------------------------------------------------------------------------
+//
+// 它们原来各自待在 `uvcpp_wsdl_document.cpp` 的文件内匿名命名空间里。SOAP 那
+// 一半（`uvcpp_soap_message.cpp`）要的是一模一样的三件事，所以搬到这里 ——
+// 两个入口各写一份，早晚只有一份跟上改动。
+
+/**
+ * @brief 把 XML 层的结果翻成模块的状态码。
+ *
+ * 是一张**表**：将来加了新的 `xml_result` 值而漏改一处，只有 `-Wswitch`
+ * 会提醒（所以实现里没有 `default:`）。
+ */
+wsdl_status from_xml_result(xml_result r, const char** why);
+
+/**
+ * @brief 一个元素**整段**的原样文本（含它自己的标签，也含它自己的 `xmlns`）。
+ *
+ * 见 `uvcpp_wsdl_document.h` 里 `types_xml` 那条：拆掉外层标签会把那一层的
+ * 声明一起丢掉，所以存整段。
+ */
+std::string xml_raw_element(const pugi::xml_node& n);
+
+/**
+ * @brief 剥掉 CR。
+ *
+ * XML 处理器必须把行尾归一成 LF（XML 1.0 §2.11）。我们吃的是字节缓冲，
+ * 所以自己做 —— 归一之后，同一份文档在 CRLF 与 LF 两种行尾下解析出**同一个**
+ * 模型（"语义往返"这条判据因此不会在行尾上假红）。
+ */
+std::string xml_strip_cr(const std::string& s);
 
 }  // namespace wsdl_detail
 }  // namespace uvcpp

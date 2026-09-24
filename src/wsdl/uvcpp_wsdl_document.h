@@ -129,7 +129,18 @@ enum class wsdl_status : int {
   /** 根是 `{http://www.w3.org/ns/wsdl}description`：这是 WSDL **2.0**，本模块不支持。 */
   UNSUPPORTED_VERSION,
   /** 缺 `targetNamespace`（WSDL 1.1 §3.1 要求它存在）。 */
-  NO_TARGET_NAMESPACE
+  NO_TARGET_NAMESPACE,
+  // ---- 以下是 SOAP 那一半（`uvcpp_soap_message.h`）用的 ----
+  //
+  // 加在**尾部**：枚举值是按位置编码的，插在中间会改掉已有值的数值。
+  /** 根元素不是 SOAP 信封（也不是本模块认识的任何一个版本的信封）。 */
+  SOAP_NOT_ENVELOPE,
+  /** 没有 `Body` 元素，或 `Body` 里一个元素子节点都没有。 */
+  SOAP_NO_BODY,
+  /** `Body` 里的元素子节点多于一个（两个版本都只允许一个）。 */
+  SOAP_TOO_MANY_BODY_ELEMENTS,
+  /** `Body` 里是一个**连码都没有**的 `Fault`（两个版本都要求它必须有）。 */
+  SOAP_BAD_FAULT
 };
 
 /** @brief 给使用者看的一句话（判据里直接印它，比印数字好查）。 */

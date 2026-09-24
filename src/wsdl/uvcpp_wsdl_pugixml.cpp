@@ -9,6 +9,7 @@
 
 #if UVCPP_WSDL_ENABLE
 
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -191,6 +192,35 @@ std::string xml_text(const pugi::xml_node& node) {
     }
   }
   return out;
+}
+
+std::string xml_strip_cr(const std::string& s) {
+  if (s.find('\r') == std::string::npos) return s;
+  std::string out;
+  out.reserve(s.size());
+  for (std::string::size_type i = 0; i < s.size(); ++i) {
+    if (s[i] != '\r') out += s[i];
+  }
+  return out;
+}
+
+std::string xml_raw_element(const pugi::xml_node& n) {
+  std::ostringstream oss;
+  n.print(oss, "", pugi::format_raw);
+  return xml_strip_cr(oss.str());
+}
+
+wsdl_status from_xml_result(xml_result r, const char** why) {
+  switch (r) {
+    case xml_result::OK:            return wsdl_status::OK;
+    case xml_result::EMPTY:         return wsdl_status::EMPTY;
+    case xml_result::SYNTAX:        return wsdl_status::SYNTAX;
+    case xml_result::TOO_LARGE:     return wsdl_status::TOO_LARGE;
+    case xml_result::TOO_DEEP:      return wsdl_status::TOO_DEEP;
+    case xml_result::TOO_MANY_NODES:return wsdl_status::TOO_MANY_NODES;
+  }
+  if (why != nullptr) *why = "未知的 XML 层结果";
+  return wsdl_status::SYNTAX;
 }
 
 }  // namespace wsdl_detail

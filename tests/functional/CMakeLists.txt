@@ -62,7 +62,9 @@ endif()
 # `web_app_wsdl_func.cpp`（经 app 发布）。后者同时命中上面那条 `web_app_` 规则，
 # 所以「webapp 关、wsdl 开」下它已经走了；这里补的是「webapp 开、wsdl 关」。
 if(NOT UVCPP_ENABLE_WSDL)
-  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*wsdl[^/]*\.cpp$")
+  # `soap` 那一半（SOAP 信封、按 operation 派发）与 `wsdl` 是同一个模块
+  # （`UVCPP_ENABLE_WSDL`），只是文件名按件名走，所以两条都要摘。
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*(wsdl|soap)[^/]*\.cpp$")
 endif()
 
 foreach(test_src ${FUNC_SOURCES})

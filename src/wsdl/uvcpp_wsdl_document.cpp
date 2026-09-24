@@ -49,6 +49,11 @@ const char* wsdl_status_name(wsdl_status s) {
     case wsdl_status::NOT_WSDL:           return "not_wsdl";
     case wsdl_status::UNSUPPORTED_VERSION:return "unsupported_version";
     case wsdl_status::NO_TARGET_NAMESPACE:return "no_target_namespace";
+    case wsdl_status::SOAP_NOT_ENVELOPE:  return "soap_not_envelope";
+    case wsdl_status::SOAP_NO_BODY:       return "soap_no_body";
+    case wsdl_status::SOAP_TOO_MANY_BODY_ELEMENTS:
+                                          return "soap_too_many_body_elements";
+    case wsdl_status::SOAP_BAD_FAULT:     return "soap_bad_fault";
   }
   return "?";
 }
@@ -120,17 +125,6 @@ std::string escape_xml(const std::string& s, bool attr) {
       case '"':  out += (attr ? "&quot;" : "\""); break;
       default:   out += c;       break;
     }
-  }
-  return out;
-}
-
-/** XML 处理器必须把行尾归一成 LF（XML 1.0 §2.11）。我们吃的是字节缓冲，所以自己做。 */
-std::string strip_cr(const std::string& s) {
-  if (s.find('\r') == std::string::npos) return s;
-  std::string out;
-  out.reserve(s.size());
-  for (std::string::size_type i = 0; i < s.size(); ++i) {
-    if (s[i] != '\r') out += s[i];
   }
   return out;
 }
@@ -296,13 +290,6 @@ void for_each_child(ns_stack& ns, const pugi::xml_node& parent, Fn fn) {
 
 bool is_wsdl(const ns_stack& ns, const pugi::xml_node& n, const char* local) {
   return ns.is(n, wsdl_ns::wsdl(), local);
-}
-
-/** `<types>` 整段的原样文本（含它自己的标签，见头文件里那条理由）。 */
-std::string raw_element(const pugi::xml_node& n) {
-  std::ostringstream oss;
-  n.print(oss, "", pugi::format_raw);
-  return strip_cr(oss.str());
 }
 
 // --- 各个元素 ---------------------------------------------------------
@@ -545,19 +532,6 @@ wsdl_status parse_service(ns_stack& ns, const pugi::xml_node& n,
   return st;
 }
 
-wsdl_status from_xml_result(wd::xml_result r, const char** why) {
-  switch (r) {
-    case wd::xml_result::OK:            return wsdl_status::OK;
-    case wd::xml_result::EMPTY:         return wsdl_status::EMPTY;
-    case wd::xml_result::SYNTAX:        return wsdl_status::SYNTAX;
-    case wd::xml_result::TOO_LARGE:     return wsdl_status::TOO_LARGE;
-    case wd::xml_result::TOO_DEEP:      return wsdl_status::TOO_DEEP;
-    case wd::xml_result::TOO_MANY_NODES:return wsdl_status::TOO_MANY_NODES;
-  }
-  if (why != nullptr) *why = "未知的 XML 层结果";
-  return wsdl_status::SYNTAX;
-}
-
 }  // namespace
 
 wsdl_status uvcpp_wsdl_parse(const char* data, size_t len,
@@ -569,7 +543,7 @@ wsdl_status uvcpp_wsdl_parse(const char* data, size_t len,
   const wd::xml_limits xlim(lim.max_bytes, lim.max_depth, lim.max_nodes);
   pugi::xml_document pd;
   const wd::xml_result xr = wd::xml_parse(data, len, pd, xlim, why);
-  if (xr != wd::xml_result::OK) return from_xml_result(xr, why);
+  if (xr != wd::xml_result::OK) return wd::from_xml_result(xr, why);
 
   out.source_bytes = len;
 
@@ -613,7 +587,7 @@ wsdl_status uvcpp_wsdl_parse(const char* data, size_t len,
     if (st != wsdl_status::OK) return;
     if (is_wsdl(ns, c, "documentation")) {
       if (out.documentation.empty()) {
-        out.documentation = strip_cr(wd::xml_text(c));
+        out.documentation = wd::xml_strip_cr(wd::xml_text(c));
       }
       return;
     }
@@ -630,7 +604,7 @@ wsdl_status uvcpp_wsdl_parse(const char* data, size_t len,
     }
     if (is_wsdl(ns, c, "types")) {
       // 第二个 <types> 忽略（规范只允许一个）。
-      if (out.types_xml.empty()) out.types_xml = raw_element(c);
+      if (out.types_xml.empty()) out.types_xml = wd::xml_raw_element(c);
       return;
     }
     if (is_wsdl(ns, c, "message")) {
