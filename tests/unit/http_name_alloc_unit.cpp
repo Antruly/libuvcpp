@@ -76,6 +76,7 @@
 #error "这个用例只在 UVCPP_BUILD_WEB=ON 时有意义；CMake 里没有把它关在 if(UVCPP_BUILD_WEB) 内。"
 #endif
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
@@ -312,6 +313,32 @@ int main() {
     http_headers hv = with_slack();
     expect("http_set_header(hv, \"content-type\", kLongValue)  [新形状·覆写]",
            allocs_of([&] { http_set_header(hv, "content-type", kLongValue); }), 0);
+  }
+
+  // ---------------------------------------------------------------------
+  // 表本身 —— `http_lower_ascii()` 是一张 256 项的表，判据是**逐字节**对上
+  // `std::tolower`（C locale），不是抽几个字母看看。为什么值得单列一条：
+  // 那是张手写不了、只能生成的表，抄错一格的表现是"某个特定头名在某些大小写
+  // 下认不出来"，热路径上多半表现为偶发怪异而不是红。
+  //
+  // 顺带钉住"只动 ASCII"：0x80-0xFF 这 128 个字节**原样**通过（C locale 下
+  // `std::tolower` 也不动它们）。这一条不是多余的 —— 它把"表被写成'把高端字节
+  // 也映射一遍'"这种改法挡住。
+  // ---------------------------------------------------------------------
+  std::printf("-- 表（http_lower_ascii）\n");
+  {
+    long diff = 0;
+    long high_moved = 0;
+    for (int i = 0; i < 256; ++i) {
+      const unsigned char c = static_cast<unsigned char>(i);
+      if (http_lower_ascii(c) !=
+          static_cast<unsigned char>(std::tolower(c)))
+        ++diff;
+      if (i >= 0x80 && http_lower_ascii(c) != c) ++high_moved;
+    }
+    expect("http_lower_ascii 对 std::tolower（256 字节全覆盖）之差",
+           diff, 0);
+    expect("0x80-0xFF 原样通过（表没有去动高端字节）", high_moved, 0);
   }
 
   if (g_failures != 0) {

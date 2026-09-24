@@ -9,12 +9,12 @@
 
 #if UVCPP_WEB_ENABLE
 
+#include <web/uvcpp_http_common.h>
 #include <web/uvcpp_http_parser.h>
 #include <web/uvcpp_http_compress.h>
 #include <web/uvcpp_http_date.h>
 // `uvcpp_loop_index_of_this_thread()`：按循环切容器要问"我在哪条循环上"。
 #include <net/uvcpp_loop_worker.h>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>  // `std::abort()`：`ctxs_at()` 对多循环下的 -1 直接终止
 #include <cstring>
@@ -571,7 +571,9 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     if (!up.empty()) {
       bool is_ws = (up.size() == 9);
       for (size_t i = 0; is_ws && i < 9; i++)
-        if (std::tolower(static_cast<unsigned char>(up[i])) != "websocket"[i]) is_ws = false;
+        if (http_lower_ascii(static_cast<unsigned char>(up[i])) !=
+            static_cast<unsigned char>("websocket"[i]))
+          is_ws = false;
       if (is_ws) {
         // 升级之后，**同一次读**里剩下的字节属于新协议（WS 帧），不属于 HTTP。
         // 记下"这条连接正在升级"，等 `execute()` 返回到手了再把这批字节存起来

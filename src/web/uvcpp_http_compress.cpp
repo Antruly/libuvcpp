@@ -5,12 +5,12 @@
  * @version 1.0.0
  */
 
+#include <web/uvcpp_http_common.h>
 #include <web/uvcpp_http_compress.h>
 
 #if UVCPP_WEB_ENABLE
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <sstream>
 
@@ -47,8 +47,9 @@ http_compress_method http_compress::parse_accept_encoding(
     while (e > s && (tok[e-1] == ' ' || tok[e-1] == '\t')) e--;
     std::string enc = tok.substr(s, e - s);
 
-    // Lower-case for matching
-    for (auto& c : enc) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Lower-case for matching（`http_lower_ascii` 是同一张表，见
+    // `uvcpp_http_common.h` —— 全模块只剩这一个 ASCII 小写原语）
+    for (auto& c : enc) c = static_cast<char>(http_lower_ascii(static_cast<unsigned char>(c)));
 
     // Parse quality value
     double q = 1.0;
@@ -119,11 +120,12 @@ bool http_compress::should_compress(const std::string& content_type,
 
   // Lower-case for matching
   std::string ct = content_type;
-  for (auto& c : ct) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (auto& c : ct) c = static_cast<char>(http_lower_ascii(static_cast<unsigned char>(c)));
 
   for (const auto& excl : excluded_types) {
     std::string excl_lower = excl;
-    for (auto& c : excl_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (auto& c : excl_lower)
+      c = static_cast<char>(http_lower_ascii(static_cast<unsigned char>(c)));
 
     if (!excl_lower.empty() && excl_lower.back() == '/') {
       // Prefix match: "image/" matches "image/png", "image/jpeg", etc.

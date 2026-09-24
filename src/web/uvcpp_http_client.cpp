@@ -9,6 +9,7 @@
 
 #if UVCPP_WEB_ENABLE
 
+#include <web/uvcpp_http_common.h>
 #include <web/uvcpp_http_parser.h>
 #include <web/uvcpp_http_compress.h>
 #include <handle/uvcpp_tcp.h>
@@ -19,7 +20,6 @@
 #include <sstream>
 #include <cstdio>
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <functional>
 #include <vector>
@@ -663,7 +663,8 @@ void uvcpp_http_client::on_response_complete() {
       http_compress_method enc = http_compress_method::NONE;
       {
         std::string cel = ce;
-        for (auto& c : cel) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (auto& c : cel)
+          c = static_cast<char>(http_lower_ascii(static_cast<unsigned char>(c)));
         if (cel == "gzip" || cel == "x-gzip")
           enc = http_compress_method::GZIP;
         else if (cel == "deflate" || cel == "x-deflate")
@@ -773,7 +774,9 @@ static std::string get_header_value(const std::string& head,
   std::string lower;
   lower.resize(head.size());
   std::transform(head.begin(), head.end(), lower.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                 [](unsigned char c) {
+                   return static_cast<char>(http_lower_ascii(c));
+                 });
   std::string needle = name + ":";
   size_t pos = lower.find(needle);
   if (pos == std::string::npos) return "";
@@ -936,7 +939,9 @@ static bool read_one_message(const std::function<int(char*, size_t)>& rd,
   std::string telower;
   telower.resize(te.size());
   std::transform(te.begin(), te.end(), telower.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                 [](unsigned char c) {
+                   return static_cast<char>(http_lower_ascii(c));
+                 });
   const bool chunked = telower.find("chunked") != std::string::npos;
 
   bool haveLen = false;
