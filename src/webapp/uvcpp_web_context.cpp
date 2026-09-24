@@ -180,16 +180,31 @@ void uvcpp_web_context::advance() {
       // 这一环"会被永远误判成"又留了一份"，链再也走不到收尾。差值把它抵消掉。
       //
       // next 走 `post()` 而不是直接 `advance()`：这样**从工作线程调也成立**。
-      // 在 loop 线程上 post() 就是就地调用（多一层函数调用而已），行为与
-      // 直接调完全一致；不在 loop 线程上则自动投回去。少了这一层，"从线程池
-      // 回调里调 next()"就是跨线程跑链 —— 轻则数据竞争，重则在别的线程上
-      // 把响应写出去。异步续跑是本框架的核心用法，这条不该是个坑。
-      uvcpp_web_next next = uvcpp_web_next([self]() {
+      // loop 线程上那条快路径如今是**直接调 `advance()`**（省掉一次
+      // `std::function` 的堆分配），跨线程才回到 `post()` 投回去 —— 少了它，
+      // "从线程池回调里调 next()"就是跨线程跑链，轻则数据竞争，重则在别的
+      // 线程上把响应写出去。异步续跑是本框架的核心用法，这条不该是个坑。
+      // ★ 成本（1.3.13）：loop 线程上**就地**续跑，不造一个 `std::function`
+      // 再让它立刻同步执行 —— 那一圈是一次实打实的堆分配（GCC 的
+      // `std::function` 只在可调用对象**平凡可拷贝**时才用内联存储，而捕获
+      // `shared_ptr` 的 lambda 不是，于是构造与拷贝都落堆）。跨线程那条路
+      // 仍走 `post()`：那里闭包**必须**先存下来，分配是必需的。
+      // 捕获 `this` 是安全的：同一个闭包里的 `self` 就保着这个对象的命。
+      uvcpp_web_next next = uvcpp_web_next([this, self]() {
+        if (host_.on_loop_thread()) {
+          advance();
+          return;
+        }
         self->post([self]() { self->advance(); });
       });
 
       const long   before = self.use_count();
       const size_t idx    = chain_index_++;
+      // ★ 这里**必须按值拷贝，不能移动**：下面的 `kept_next` 判据是"调用前后的
+      // 引用计数差"，它靠的正是局部 `next` 在调用后仍持着自己那一份引用。
+      // 移动进去会把"处理器留了副本"与"局部被搬空"精确抵消，差值归零，
+      // 于是**留了 next 的处理器被误判成没留，响应被抢先发出去**。
+      // （1.3.13 试过移动：第 5/6/11 条用例当场红。）这一次分配是判据的代价。
       (*chain_)[idx](req_, resp_, next);
       const long after = self.use_count();
 
