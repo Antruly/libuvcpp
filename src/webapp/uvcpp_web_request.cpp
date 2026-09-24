@@ -6,6 +6,7 @@
 #include <webapp/uvcpp_web_request.h>
 
 #include <cstdlib>
+#include <iterator>  // std::make_move_iterator（take_from 搬头表用）
 
 // 只为**缓冲式** multipart（普通路由上的 `form()` / `file()`，见
 // `parse_multipart_form()`）。放在 `.cpp` 里而不是头文件里：那个头不必被每个
@@ -178,7 +179,22 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   src_.version   = src.version;
   src_.stream_id = src.stream_id;
   src_.url       = std::move(src.url);
-  src_.headers   = std::move(src.headers);
+
+  // 头表**逐元素搬进 `src_.headers` 已有的缓冲**，不再移动赋值。
+  //
+  // 移动赋值把 `src.headers` 那块缓冲**换手**带走 —— 而那个 vector 现在是
+  // **连接级**的（HTTP 层的搬移目的地，见 `uvcpp_http_parser::take_headers_into()`）：
+  // 带走它，下一条请求就得重新分配一次。这里只搬元素：`insert` 在容量够时一次
+  // 分配都不做，`clear()` 只改 size ⇒ 容量留在连接上，`src` 也只丢掉元素。
+  //
+  // 两句话都不能省：`clear()` 是"上一条请求的头不许留在表里"的守卫（认领时还会
+  // 再清一次，见 `adopt_headers()`），末尾那句 `clear()` 维持"搬过就空了"的契约
+  // —— 元素本身已经是 moved-from，但**表的大小**不靠 `std::move` 的通常行为保证。
+  src_.headers.clear();
+  src_.headers.insert(src_.headers.end(),
+                      std::make_move_iterator(src.headers.begin()),
+                      std::make_move_iterator(src.headers.end()));
+  src.headers.clear();
 
   method_  = src_.method;
   version_ = src_.version;
@@ -213,6 +229,20 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   if (!cl.empty() && !parse_size(cl, content_length_)) {
     content_length_ = 0;  // 非法声明按 0 处理；不信任这个值做分配
   }
+}
+
+void uvcpp_web_request::adopt_headers(http_headers& src) {
+  // 先清再换：换进来的表若带着上一条请求的头，下面 `take_from()` 会把它一起
+  // 搬进 `src_.headers`（`insert` 是**追加**）⇒ 第二条请求看见第一条的头。
+  src_.headers.clear();
+  src_.headers.swap(src);
+}
+
+void uvcpp_web_request::yield_headers(http_headers& dst) {
+  // 清空（元素在这里死掉，正是它们本来该死的那一刻），再把**空表**换回去 ——
+  // 回收槽里永远是"空的、有容量的"，于是"认领时要不要清"不构成正确性依赖。
+  src_.headers.clear();
+  src_.headers.swap(dst);
 }
 
 void uvcpp_web_request::set_peer(const std::string& ip, unsigned int port) {

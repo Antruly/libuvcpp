@@ -1196,10 +1196,15 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
   //   与 `uvcpp_web_response::adopt_tables()`）。
   {
     loop_slot* s0 = slot_of(id);
-    if (s0 != nullptr && !s0->resp_recycle.empty()) {
-      ctx->response().adopt_tables(s0->resp_recycle.back().headers,
-                                   s0->resp_recycle.back().sent);
-      s0->resp_recycle.pop_back();
+    if (s0 != nullptr) {
+      // ★ 请求头表那一块：**一块**表、不排队不设上限（与下面那两张表不同）。
+      //   也得在处理函数跑之前认领 —— `take_from()` 接住头的缓冲就是它。
+      ctx->request().adopt_headers(s0->req_hdr_recycle);
+      if (!s0->resp_recycle.empty()) {
+        ctx->response().adopt_tables(s0->resp_recycle.back().headers,
+                                     s0->resp_recycle.back().sent);
+        s0->resp_recycle.pop_back();
+      }
     }
   }
 
@@ -2806,6 +2811,12 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
                                 slot->resp_recycle.back().sent);
   }
 
+  // ★ 请求头表也交回去（`swap`，O(1)）。这一步必须**在 `erase` 之前**（同族理由：
+  //   之后上下文可能当场销毁），而且不能早于响应发出 —— `on_sent` 回调里用户还
+  //   能读请求头，而 `web_app::send_response()` 里那句 `notify_sent()` 是同步跑的
+  //   （流式响应推迟到流收尾，同样在本函数之前）。
+  ctx.request().yield_headers(slot->req_hdr_recycle);
+
   q->second.erase(me);
   // 与 `enqueue_inflight()` 那一笔配对（唯一出队点）。
   slot->inflight_entries.fetch_sub(1);
@@ -3136,10 +3147,15 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   //   与 `uvcpp_web_response::adopt_tables()`）。
   {
     loop_slot* s0 = slot_of(id);
-    if (s0 != nullptr && !s0->resp_recycle.empty()) {
-      ctx->response().adopt_tables(s0->resp_recycle.back().headers,
-                                   s0->resp_recycle.back().sent);
-      s0->resp_recycle.pop_back();
+    if (s0 != nullptr) {
+      // ★ 请求头表那一块：**一块**表、不排队不设上限（与下面那两张表不同）。
+      //   也得在处理函数跑之前认领 —— `take_from()` 接住头的缓冲就是它。
+      ctx->request().adopt_headers(s0->req_hdr_recycle);
+      if (!s0->resp_recycle.empty()) {
+        ctx->response().adopt_tables(s0->resp_recycle.back().headers,
+                                     s0->resp_recycle.back().sent);
+        s0->resp_recycle.pop_back();
+      }
     }
   }
 

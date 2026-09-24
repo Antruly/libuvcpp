@@ -746,12 +746,33 @@ class UVCPP_API uvcpp_http_server {
      */
     uint64_t generation = 0;
 
+    /**
+     * @brief 这条连接上**当前这条消息**的请求对象（h1 累积那条路）。
+     *
+     * ★ 它同时是**头表的搬移目的地**（`uvcpp_http_parser::take_headers_into()`）：
+     * 目的地必须活得比请求长，那块 vector 的容量才能跨请求留下 —— 这就是它挂在
+     * 连接上、而不是 `on_request_complete` 里一个局部变量的全部理由。请求跑完时
+     * 元素已经被 `uvcpp_web_request::take_from()` 搬走，这里只剩**空表 + 容量**。
+     *
+     * 交给处理函数的就是**这一个对象**（不再是每请求一个局部）。处理函数返回之后
+     * 不得再读它 —— 下一条请求会在原地重填。这条约束改前也有（那个局部对象在
+     * `on_request_complete` 返回时同样死了），变的是违反之后的**症状**：改前是读
+     * 悬垂内存（多半崩），现在是**静默读到下一条请求的内容**。
+     */
     uvcpp_http_request request;
     uvcpp_buf body_buf;
     bool headers_done = false;
     bool msg_done = false;
     http_stream_handler stream_handler;  // non-empty once a stream route matched
-    uvcpp_http_request stream_request;   // request view handed to the stream handler
+    /**
+     * @brief 请求视图；认领钩子与流式处理函数拿到的就是它。
+     *
+     * 它同样是**连接级**的：一是"视图只建一次、完成时接着用"（见
+     * @ref stream_view_built），二是这条路上的头表**搬进它**（`take_headers_into()`）
+     * —— 容量因此也跨请求留下。复位的两处（`on_message_begin` 与流式 END）都必须
+     * 只清内容、不还缓冲。
+     */
+    uvcpp_http_request stream_request;
 
     /**
      * @brief Whether @ref stream_request was built for this message.
@@ -976,7 +997,7 @@ class UVCPP_API uvcpp_http_server {
    * talking through proxies that forward it blindly.
    *
    * @param msg_headers 这条消息的头表。**必须是调用方手上那一份**：建请求视图
-   *        的那两条路会把头从解析器上搬走（`take_headers()`），搬过之后
+   *        的那两条路会把头从解析器上搬走（`take_headers_into()`），搬过之后
    *        `parser->get_headers()` 就是空表了。
    */
   bool check_expect_header(conn_ctx& ctx, uvcpp_tcp_client* client,

@@ -33,6 +33,23 @@ namespace uvcpp {
 namespace {
 
 /**
+ * @brief 把一条请求对象**清成空**，但**不还它那几块缓冲**（`clear()` 只改 size）。
+ *
+ * 为什么不能写 `r = uvcpp_http_request();`：`conn_ctx::request` 与
+ * `conn_ctx::stream_request` 都是**连接级**的，头表缓冲正是要靠它们跨请求留下
+ * —— 整对象赋值会把容量一起扔掉，`take_headers_into()` 也就退化成每请求一次分配
+ * （那正是本笔要省掉的那一笔）。
+ */
+void reset_request_keep_buffers(uvcpp_http_request& r) {
+  r.method    = http_method::HTTP_GET;
+  r.url       = "/";  // 与 `uvcpp_http_request()` 的默认值一致（不是清空）
+  r.version   = static_cast<uvcpp_http_version>(1);
+  r.headers.clear();
+  r.body.clear();
+  r.stream_id = 0;
+}
+
+/**
  * @brief Whether the message being parsed carries a body the server will read.
  *
  * `get_content_length()` returns 0 both for "no body" and for "chunked", so it
@@ -310,7 +327,8 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
     pctx->defer_close_to_message_end = false;
     pctx->expect_continue = false;
     pctx->stream_view_built = false;
-    pctx->stream_request = uvcpp_http_request();
+    // 只清内容、不还缓冲：下一条消息的头还要搬进这块表（`take_headers_into()`）。
+    reset_request_keep_buffers(pctx->stream_request);
   });
 
   pctx->parser->set_on_body([this, pctx, client](const char* at, size_t len) {
@@ -349,15 +367,16 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
       // used. `stream_view_built` lets on_request_complete reuse this one
       // instead of copying the header vector a second time.
       //
-      // 头表是**搬**过来的（`take_headers()`），不是拷的：一个字符串都不复制，
-      // 代价是每请求一次**向量**分配（换来解析器上那块缓冲不再逐请求重长）。
+      // 头表是**搬**过来的（`take_headers_into()`），不是拷的：一个字符串都不复制，
+      // 而且目的地是**连接上**那块表（`stream_request.headers`，容量跨请求留着）
+      // ⇒ 连那次向量分配也一并省掉（改前是每请求一次：目的地是本函数新造的）。
       // 这条路上它紧接着还要被搬进 `uvcpp_web_request`。搬走的后果是**解析器上
       // 这条消息的头空了**，所以下面 `check_expect_header` 与 `message_has_body`
       // 都改成读这份视图（见 `msg_headers`）。
       pctx->stream_request.method  = pctx->parser->get_method();
       pctx->stream_request.url     = pctx->parser->get_url();
       pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
-      pctx->stream_request.headers = pctx->parser->take_headers();
+      pctx->parser->take_headers_into(pctx->stream_request.headers);
       pctx->stream_view_built = true;
       built_view = true;
       try {
@@ -380,7 +399,7 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
         pctx->stream_request.method  = pctx->parser->get_method();
         pctx->stream_request.url     = pctx->parser->get_url();
         pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
-        pctx->stream_request.headers = pctx->parser->take_headers();
+        pctx->parser->take_headers_into(pctx->stream_request.headers);
         pctx->stream_view_built = true;
       }
       sh(http_stream_event::HEADERS, nullptr, 0, pctx->stream_request, client);
@@ -392,7 +411,7 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
     // --- must not also be told to continue.
     //
     // 这两条判据读的都是**这条消息的头**，而头表在上面两条建视图的路上已经
-    // 被 `take_headers()` 搬进 `stream_request` 了 —— 搬过就只剩那一份。
+    // 被 `take_headers_into()` 搬进 `stream_request` 了 —— 搬过就只剩那一份。
     const http_headers& msg_headers = pctx->stream_view_built
                                           ? pctx->stream_request.headers
                                           : pctx->parser->get_headers();
@@ -536,7 +555,8 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   if (ctx.stream_handler) {
     ctx.stream_handler(http_stream_event::END, nullptr, 0, ctx.stream_request, client);
     ctx.stream_handler = nullptr;
-    ctx.stream_request = uvcpp_http_request();
+    // 同上：只清内容。这一块表下一条消息还要接着当搬移目的地。
+    reset_request_keep_buffers(ctx.stream_request);
 
     // The handler answered from a BODY callback and asked for the connection to
     // close. That close was parked by pump_write() because the peer was still
@@ -560,33 +580,43 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     return;
   }
 
-  // The claim hook made us build the request view at headers time. Take it over
-  // by **move** — rebuilding it from the parser would mean a second pass over
-  // the header vector for every request. The move is a real move:
-  // `uvcpp_http_request` declares move operations, so this hands the vector over
-  // instead of cloning it (without them, `std::move` silently degrades to the
-  // copy assignment — that was the behaviour here until the move ops were
-  // added; see the contract in `uvcpp_http_request.h`).
-  uvcpp_http_request req;
-  if (ctx.stream_view_built) {
-    req = std::move(ctx.stream_request);
-    ctx.stream_request = uvcpp_http_request();
-    ctx.stream_view_built = false;
-  } else {
-    req.method  = ctx.parser->get_method();
-    req.url     = ctx.parser->get_url();
-    req.version = ctx.parser->get_uvcpp_http_version();
+  // 交给处理函数的是**连接上**那一个请求对象（`ctx.request` / `ctx.stream_request`），
+  // 不再是每请求一个局部。理由只有一个、但很硬：头表的**搬移目的地**必须活得比
+  // 请求长，那块 vector 的容量才能跨请求留下（`take_headers_into()` 里的 `clear()`
+  // 只改 size、不还容量）。
+  //
+  // 改前这里是 `req = std::move(ctx.stream_request)` —— 视图建好后再整份搬一次：
+  // 那一次搬不但多余，还把连接上那块缓冲的容量一起搬进了局部对象、随函数返回
+  // 一起没了。
+  //
+  // 对处理函数来说形状没变（还是一个 `uvcpp_http_request&`，方法/URL/头/体就地
+  // 取用），变的是它的**寿命**：改前那个局部对象在 `on_request_complete` 返回时
+  // 就死了（再读是悬垂），现在它活到下一条请求在原地重填（再读**读到的是下一条
+  // 请求**）。「处理函数返回之后不得再读它」这条约束两版一样，只是违反后的症状
+  // 从崩变成静默读错 —— 所以这里点名写出来。
+  uvcpp_http_request& req =
+      ctx.stream_view_built ? ctx.stream_request : ctx.request;
+  if (!ctx.stream_view_built) {
+    req.method    = ctx.parser->get_method();
+    req.url       = ctx.parser->get_url();
+    req.version   = ctx.parser->get_uvcpp_http_version();
+    req.stream_id = 0;  // h1 路径恒为 0（h2 走 `dispatch_h2_request`，不经过这里）
     // 与上面那两条建视图的路**同一个形状**：头表是**搬**过来的，不是拷的。
     // 拷一份 = 一次向量分配**外加每个非 SSO 的值各一次**（libstdc++ 的界是
-    // 15 字节，`Host: 127.0.0.1:8081` 这种就超了）；搬 = 一次向量分配、
-    // 一个字符串都不分配 —— 契约在 `uvcpp_http_parser.h` 的 `take_headers()`。
+    // 15 字节，`Host: 127.0.0.1:8081` 这种就超了）；搬 = 一个字符串都不分配
+    // —— 契约在 `uvcpp_http_parser.h` 的 `take_headers_into()`。
+    //
+    // 与改前只差一句：**目的地是连接上这块**（`ctx.request.headers`，容量跨请求
+    // 留着），不再是每请求新造的那个空 vector —— 那一次 `_M_allocate` 正是本笔要
+    // 省掉的（站点普查里 `take_headers` 那一笔 1.00 次/请求）。
     //
     // 搬走的后果是**解析器上这条消息的头空了**。这一条在本函数里已经吃透过：
     // 下面读 `accept-encoding` 与 `is_head` 用的都是 `req`，不是解析器；而延迟
     // 应答那条路更不可能回头读解析器 —— 它发响应时解析器早被复位了，所以那两样
     // 必须在下面缓存（见紧随其后的注释）。整条消息对解析器头表的读，到这一行为止。
-    req.headers = ctx.parser->take_headers();
+    ctx.parser->take_headers_into(req.headers);
   }
+  ctx.stream_view_built = false;
   req.body.clone(ctx.body_buf);
 
   // Capture what send_response() needs later: for a deferred response the

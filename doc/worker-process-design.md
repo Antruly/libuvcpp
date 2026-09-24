@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
 ## 3. POSIX（Linux / macOS）：零通讯
 
 **master 只做一件事：把端口占住。** 它走今天已有的 bind 链
-（`src/webapp/uvcpp_web_app.cpp:2001-2001` → `src/web/uvcpp_http_server.cpp:150-151` →
+（`src/webapp/uvcpp_web_app.cpp:2006-2006` → `src/web/uvcpp_http_server.cpp:167-168` →
 `src/net/uvcpp_tcp_server.cpp:377-382` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
 **然后不跑循环** —— `uv_listen` 会在 `listen(fd, backlog)` 那一步就把端口占住，
 而 master 的 loop 从不 `uv_run`，所以它永远不会 accept。于是"master 不接请求"是天然的，
@@ -180,8 +180,8 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   pipelined 化。上它之前要先查清的两件事**已经查完了**，结论在 §8；但这条路上后来又冒出
   **第三件事，而且是拦路的** —— 见 §9。
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
-  n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:1054`）、
-  `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:1979-1979` /
+  n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:1075`）、
+  `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:1996-1996` /
   `src/webapp/uvcpp_web_app.h:1937-1937`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
   `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:865`）都不需要切成 per-loop。

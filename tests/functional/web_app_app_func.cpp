@@ -1672,6 +1672,155 @@ void test_response_tables_recycled_but_cleared() {
 }
 
 // =========================================================================
+// 12d. 请求头表跨请求复用了，但留给下一条的**必须是空表**
+// =========================================================================
+//
+// 这一条盯的是 `uvcpp_web_request::adopt_headers()` / `yield_headers()` 那对
+// 回收口（`loop_slot::req_hdr_recycle`）与解析器那头的
+// `uvcpp_http_parser::take_headers_into()`。省下的是每请求**一次向量分配**：
+// 改前 `take_headers()` 里的 `http_headers out;` 是函数内新造的空 vector，那次
+// `_M_allocate` 每请求必付（站点普查里 `take_headers` 那一笔正好 1.00 次/请求）。
+//
+// 与 12c 同族：「留下的必须是**空**表」是前提 —— 上一条请求的头若跟着表过来，
+// 下一条的处理函数就会看见**别人的头**。同名头会被覆盖，所以两条请求故意用
+// **不同**的头名（`x-req-one` / `x-req-two`），光比 `host` 是抓不住的。
+//
+// ★ 这里比 12c 多一条判据：**缓冲地址**。`req.raw().headers.data()` 在两条请求
+//   上必须是**同一个指针** —— 那是"表没换手、容量留在原地"的直接证人。只看分配
+//   次数的话，"复用成功"与"清过头所以下一条又分了一次"未必分得开。
+//
+// ★ 归还的**时机**也被证：中间件在 `on_sent` 回调里读请求头，第一条必须还看得见
+//   `x-req-one`。`yield_headers()` 若挪到响应发出**之前**，这一条红而前三条全绿
+//   （它们只看处理函数那一刻）。
+//
+// ★ 两条请求必须走**同一条连接**（keep-alive）：换了连接就是换了 `loop_slot`
+//   的两格，复用的前提根本不成立。
+void test_request_headers_recycled_but_cleared() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+
+  std::atomic<int> one_saw_own(0);   // 第一条处理函数看得见自己的头
+  std::atomic<int> two_saw_own(0);   // 第二条处理函数看得见自己的头
+  std::atomic<int> sent_saw_one(0);  // 第一条的 on_sent 回调里还看得见
+  std::atomic<int> sent_saw_two(0);  // 第二条的 on_sent 回调里看得见自己的
+  std::string two_saw_one;           // 第二条查 `x-req-one`：必须**查不到**
+  std::size_t hdr_n_one = 0;         // 第一条**表里有多少条**（不许累积）
+  std::size_t hdr_n_two = 0;         // 第二条同上
+  const void* hdr_buf_one = nullptr;
+  const void* hdr_buf_two = nullptr;
+
+  // 每条请求都在 `on_sent` 里读**请求头**：这一拍已经在处理函数返回之后、
+  // 收场之前，位于 `send_response()` 里同步跑的 `notify_sent()` 里。
+  app.use([&sent_saw_one, &sent_saw_two](uvcpp_web_request& req,
+                                        uvcpp_web_response& resp,
+                                        uvcpp_web_next next) {
+    resp.on_sent([&req, &sent_saw_one, &sent_saw_two](
+                     const uvcpp_web_sent_info&) {
+      if (req.header("x-req-one") == "1") sent_saw_one.fetch_add(1);
+      if (req.header("x-req-two") == "2") sent_saw_two.fetch_add(1);
+    });
+    next();
+  });
+
+  app.get("/one", [&](uvcpp_web_request& req, uvcpp_web_response& resp,
+                      uvcpp_web_next next) {
+    (void)next;
+    if (req.header("x-req-one") == "1") one_saw_own.fetch_add(1);
+    hdr_n_one = req.raw().headers.size();
+    hdr_buf_one = req.raw().headers.data();
+    resp.text("one-body");
+    resp.end();
+  });
+
+  app.get("/two", [&](uvcpp_web_request& req, uvcpp_web_response& resp,
+                      uvcpp_web_next next) {
+    (void)next;
+    two_saw_one = req.header("x-req-one", "ABSENT");
+    if (req.header("x-req-two") == "2") two_saw_own.fetch_add(1);
+    hdr_n_two = req.raw().headers.size();
+    hdr_buf_two = req.raw().headers.data();
+    resp.text("two-body");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "头表复用用例的服务启动");
+  const int port = app.bound_port();
+
+  uvcpp_tcp_client c;
+  std::atomic<bool> connected(false);
+  std::string got;
+  check(c.connect("127.0.0.1", port,
+                  [&](int st) {
+                    if (st == 0) connected.store(true);
+                  }) == 0,
+        "客户端连上了");
+  uvcpp_loop* loop = c.get_loop();
+  check(uvcpp_test::wait_until(loop, [&] { return connected.load(); },
+                               uvcpp_test::kWaitMs),
+        "连接建立");
+
+  c.read_start_events([&](uvcpp_tcp_client&, const net_read_result& ev) {
+    if (!ev.is_end()) got.append(ev.data, ev.size);
+  });
+
+  // 两条请求**头数相同**（Host + 自定义 + Connection = 3）：容量在第一条上长到
+  // 3 就够了，第二条不许再扩 —— 这正是"指针相同"那条判据成立的前提。
+  const std::string r1 =
+      "GET /one HTTP/1.1\r\nHost: x\r\nx-req-one: 1\r\n"
+      "Connection: keep-alive\r\n\r\n";
+  check(c.write(r1.data(), r1.size(), [](int) {}) == 0, "第一条请求写出去了");
+  check(uvcpp_test::wait_until(
+            loop, [&] { return got.find("one-body") != std::string::npos; },
+            5000),
+        "第一条被应答了");
+
+  const std::string r2 =
+      "GET /two HTTP/1.1\r\nHost: x\r\nx-req-two: 2\r\n"
+      "Connection: keep-alive\r\n\r\n";
+  check(c.write(r2.data(), r2.size(), [](int) {}) == 0,
+        "第二条请求写出去了（**同一条连接**）");
+  check(uvcpp_test::wait_until(
+            loop, [&] { return got.find("two-body") != std::string::npos; },
+            5000),
+        "第二条被应答了");
+
+  // --- 判据一：各自看得见自己的头 ---
+  check(one_saw_own.load() == 1,
+        "第一条的处理函数看得见自己的 `x-req-one`");
+  check(two_saw_own.load() == 1,
+        "第二条的处理函数看得见自己的 `x-req-two`（清空没清过头）");
+
+  // --- 判据二：第一条的头不许跟过来 ---
+  check(two_saw_one == "ABSENT",
+        "第二条的处理函数里 `x-req-one` **整个查不到**（留下的表被清空过）");
+  check(hdr_n_one == 3 && hdr_n_two == 3,
+        "两条请求的表**各自只有 3 条**（搬移的目的地没有跨请求累积）");
+
+  // --- 判据三：缓冲地址相同（容量留在原地） ---
+  check(hdr_buf_one != nullptr && hdr_buf_two != nullptr,
+        "两条请求的头表都是非空的（下面那条指针判据才有意义）");
+  check(hdr_buf_one == hdr_buf_two,
+        "两条请求的头表用的是**同一块缓冲**（表没换手、容量留下来了）");
+
+  // --- 判据四：归还时机不早于响应发出 ---
+  uvcpp_test::pump_for(loop, 200);
+  check(sent_saw_one.load() == 1,
+        "第一条的 `on_sent` 回调里还看得见请求头（表是响应发出**之后**才收走的）");
+  check(sent_saw_two.load() == 1,
+        "第二条的 `on_sent` 回调里看得见自己的请求头");
+
+  std::atomic<bool> done(false);
+  if (c.get_tcp() != nullptr) {
+    c.get_tcp()->close([&](uvcpp_handle*) { done.store(true); });
+  }
+  uvcpp_test::wait_until(loop, [&] { return done.load(); },
+                         uvcpp_test::kWaitMs);
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
 // 用例表
 // =========================================================================
 struct test_case {
@@ -1716,6 +1865,8 @@ int main(int argc, char** argv) {
       {"idle_timeout_after_request", test_idle_timeout_after_request},
       {"response_tables_recycled_but_cleared",
        test_response_tables_recycled_but_cleared},
+      {"request_headers_recycled_but_cleared",
+       test_request_headers_recycled_but_cleared},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

@@ -1056,6 +1056,94 @@ static bool test_response_copy_keeps_deferred() {
   return true;
 }
 
+// -------------------------------------------------------------------------
+// Test: 请求头表不跨请求累积（搬移的目的地是**连接上**那块表）
+//
+// `take_headers_into()` 是**搬**（`make_move_iterator`），不是拷：目的地是
+// 连接级的 `ctx.request.headers`，容量因此跨请求留下 —— 省掉的那一笔就是
+// 站点普查里 `take_headers()` 的 1.00 次/请求。
+//
+// 搬的代价是"清目的地"成了**唯一**守卫：这条路上 `set_on_message_begin`
+// 只复位 `stream_request`（流式视图那份），**不碰** `request`。删掉
+// `dst.clear()`，第二条请求就会看到 `2 x n` 条 —— 前一条被搬空的壳留在表里。
+//
+// 所以这里两条判据都要（照 `web_app_app_func.cpp` 那条的教训）：
+//   · **表的大小**：搬走会留空名字的壳，按名字查是查不到的 ⇒ 只看查表的
+//     判据在变异态下**恒真**；
+//   · **按名字查**：补上"拷而非搬"那一类（名字会留下）。
+// -------------------------------------------------------------------------
+static bool test_request_headers_do_not_accumulate() {
+  TestServer srv;
+  std::atomic<std::size_t> n_one(0), n_two(0);
+  std::atomic<bool> one_own(false), two_own(false);
+  std::atomic<bool> two_saw_stale(false);
+
+  int port = srv.start([&](uvcpp_http_server& s) {
+    s.get("/one", [&](uvcpp_http_request& req, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+      if (req.get_header("x-req-one") == "1") one_own.store(true);
+      n_one.store(req.headers.size());
+      resp = uvcpp_http_response::ok("1", 1);
+    });
+    s.get("/two", [&](uvcpp_http_request& req, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+      if (!req.get_header("x-req-one").empty()) two_saw_stale.store(true);
+      if (req.get_header("x-req-two") == "2") two_own.store(true);
+      n_two.store(req.headers.size());
+      resp = uvcpp_http_response::ok("2", 1);
+    });
+  });
+
+  bool ok = true;
+  uvcpp_http_client client;
+  if (client.connect_wait("127.0.0.1", port, 3000) != 0) {
+    srv.shutdown();
+    return false;
+  }
+
+  uvcpp_http_request r1 = uvcpp_http_request::make_get("/one");
+  r1.set_header("x-req-one", "1");
+  uvcpp_http_request r2 = uvcpp_http_request::make_get("/two");
+  r2.set_header("x-req-two", "2");
+
+  uvcpp_http_response resp1, resp2;
+  const int rc1 = client.send_wait(r1, resp1, 5000);
+  const int rc2 = client.send_wait(r2, resp2, 5000);
+
+  // 前提：两条请求都得走完，而且各自**自己的**头必须到 —— 否则"第二条看不见
+  // 第一条的头"这件事根本没法归因（可能是头压根没解析）。
+  if (rc1 != 0 || rc2 != 0) {
+    std::cout << "  [err] keep-alive 复用失败 rc1=" << rc1
+              << " rc2=" << rc2 << "\n";
+    srv.shutdown();
+    return false;
+  }
+  if (!one_own.load() || !two_own.load()) {
+    std::cout << "  [err] 两条请求自己的头没到（one=" << one_own.load()
+              << " two=" << two_own.load() << "）—— 判据的前提不成立\n";
+    ok = false;
+  }
+  if (n_one.load() < 2) {
+    std::cout << "  [err] 第一条请求只有 " << n_one.load()
+              << " 条头（至少 2 条：host + x-req-one）—— 判据的前提不成立\n";
+    ok = false;
+  }
+  if (two_saw_stale.load()) {
+    std::cout << "  [err] 第二条请求里 `x-req-one` **还在**（留下的表没被清过）\n";
+    ok = false;
+  }
+  if (n_two.load() != n_one.load()) {
+    std::cout << "  [err] 头表跨请求**累积**了：第一条 " << n_one.load()
+              << " 条、第二条 " << n_two.load() << " 条（必须相等）\n";
+    ok = false;
+  }
+  std::cout << "  [info] 头表条数：第一条 " << n_one.load()
+            << "、第二条 " << n_two.load() << std::endl;
+
+  srv.shutdown();
+  return ok;
+}
+
 int main(int argc, char** argv) {
   // 可选参数：测试名子串过滤，便于单条定位。
   const std::string filter = (argc > 1) ? argv[1] : std::string();
@@ -1086,6 +1174,7 @@ int main(int argc, char** argv) {
     {"client_head_request", test_client_head_request},
     {"raw_data_hook", test_raw_data_hook},
     {"response_copy_keeps_deferred", test_response_copy_keeps_deferred},
+    {"request_headers_do_not_accumulate", test_request_headers_do_not_accumulate},
   };
   for (const auto& t : tests) {
     if (!filter.empty() && std::string(t.name).find(filter) == std::string::npos) {

@@ -225,8 +225,29 @@ class UVCPP_API uvcpp_http_parser {
    * ★这块缓冲按**连接**钉住 high-water：它现在活在解析器对象上（旧形状跟着请求对象
    * 一起释放），所以头最多的那条请求决定该连接之后每请求的常驻占用。上限是
    * `set_max_header_bytes()`，但那个值**默认 0 = 不限**。
+   *
+   * ★ 服务端那条**常规**路径已经不再用它了：那条路走 `take_headers_into()`（目的地
+   * 挂在连接上，连这一次向量分配也省掉）。本函数保留成"调用方手上没有可复用的
+   * 目的地"时的便利形状。
    */
   http_headers take_headers();
+
+  /**
+   * @brief 把整条头表**搬进** `dst`：元素搬过去，`dst` 那块缓冲留着复用。
+   *
+   * 与 `take_headers()` 只差一件事：**谁出那块 vector 缓冲**。`take_headers()`
+   * 的 `out` 是函数内新构造的空 vector ⇒ 那次 `_M_allocate` **每请求必付**；
+   * 本函数把元素搬进调用方**已经有的**缓冲里（`clear()` 只改 size、不还容量）
+   * ⇒ 容量够时**一次分配都不做**。
+   *
+   * 前提是 `dst` 活得比请求长 —— 服务端把它放在**连接**上（`conn_ctx::request`
+   * 与 `conn_ctx::stream_request`）。放宽成"任意 vector"也成立，只是那样每次都会
+   * 退化成一次分配，与 `take_headers()` 等价。
+   *
+   * `dst` 里原有元素**先被清掉**（本函数不追加到既有内容上）；搬走的后果与
+   * `take_headers()` 完全一样：解析器上这条消息的头空了、容量留在解析器上。
+   */
+  void take_headers_into(http_headers& dst);
 
   /** @brief Whether the message has Connection: keep-alive semantics. */
   bool should_keep_alive() const;

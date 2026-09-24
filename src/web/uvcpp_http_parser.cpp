@@ -255,11 +255,20 @@ const http_headers& uvcpp_http_parser::get_headers() const {
 
 http_headers uvcpp_http_parser::take_headers() {
   // 搬元素、不搬容量：搬完 clear()，那块长好的缓冲留在解析器上给下一条消息用。
+  // **目标 vector 是本函数自己造的那一个** ⇒ 这一次 `_M_allocate` 省不掉 ——
+  // 服务端那条常规路径改走 `take_headers_into()`（目的地挂在连接上）。
   http_headers out;
-  out.assign(std::make_move_iterator(headers_.begin()),
+  take_headers_into(out);
+  return out;
+}
+
+void uvcpp_http_parser::take_headers_into(http_headers& dst) {
+  // `clear()` 只改 size、不还容量 ⇒ 下面那次 insert 在容量够时**一次分配都不做**；
+  // 它同时保证"dst 里原有元素先没掉"（本函数不追加到既有内容上）。
+  dst.clear();
+  dst.insert(dst.end(), std::make_move_iterator(headers_.begin()),
              std::make_move_iterator(headers_.end()));
   headers_.clear();
-  return out;
 }
 
 bool uvcpp_http_parser::should_keep_alive() const {

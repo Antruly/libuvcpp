@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.25--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.26--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.25-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.26-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.25-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.26-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -808,6 +808,22 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   idle timeout forever, and shutdown would wait for a watchdog that never fires.
   M1's empty-queue recycle slot (`out_recycle`) is gone: this is the same win in a
   better shape. 7.02 → 6.02 allocations per request (`1.3.25`)
+- The request header table now **moves into a per-connection destination** instead
+  of a fresh vector per request: the parser gains
+  `take_headers_into(http_headers& dst)` (`clear()` then move the elements in —
+  `clear()` only changes the size, it keeps the capacity, so a destination with
+  room costs zero allocations), and the HTTP layer points the two view-building
+  paths and the accumulating path at `conn_ctx::stream_request.headers` /
+  `conn_ctx::request.headers`. The webapp gains
+  `uvcpp_web_request::adopt_headers()` / `yield_headers()` (non-virtual, same
+  shape as the response tables from the previous cut) plus one spare table per
+  connection (`loop_slot::req_hdr_recycle`), claimed before dispatch and returned
+  in `context_finished()`. Note that handlers now receive **the per-connection**
+  request object (no longer a local in `on_request_complete`), so reading it after
+  the handler returns goes from **crash** to **silently seeing the next request**;
+  likewise the request headers are empty once the response has gone out (the
+  return happens no earlier than `notify_sent()`).
+  6.02 → 5.02 allocations per request (`1.3.26`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

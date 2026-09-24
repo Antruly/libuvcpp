@@ -121,6 +121,33 @@ class UVCPP_API uvcpp_web_request {
    */
   void take_from(uvcpp_http_request& src);
 
+  /**
+   * @brief 认领一条**空的、有容量的**头表：本条请求的元素将搬进它。
+   *
+   * 与 `yield_headers()` 配对：认领的那块表由调用方持有（webapp 侧是连接级的
+   * 回收槽），请求跑完再交回去。`take_from()` 是**逐元素搬进 `src_.headers`**
+   * 已有的缓冲（不是移动赋值），所以**表本身不换手、容量留在原地** —— 这是本侧
+   * 不出分配的原因。
+   *
+   * 传进来的必须是一块**空**表（`yield_headers()` 保证这一点）。本函数自己也会
+   * `clear()` 一次：认领进来的表若带着元素，下一条请求就会看见**上一条的头**
+   * （与 M2a 的 `resp_.headers.clear()` 同一类守卫，那一条是被证人用例抓出来的）。
+   */
+  void adopt_headers(http_headers& src);
+
+  /**
+   * @brief 把用完的头表交回去：**先清空、再 `swap`**（两步都是 O(1)）。
+   *
+   * 清理放在这里而不是"认领时清"：清理会让元素的析构跑起来（每个 `http_header`
+   * 是两个 `std::string`），而这一步在请求收场之后做，正好落在它们本来就要死掉
+   * 的那一刻。交回去的是**空的、有容量的**表。
+   *
+   * ★ 调用时机不能早于**发出去之后**：`on_sent` 回调里用户还能读请求头。
+   * webapp 的调用点在 `context_finished()`，而 `send_response()` 里那句
+   * `notify_sent()` 是同步跑的（流式响应推迟到流收尾），所以那一刻头表还在。
+   */
+  void yield_headers(http_headers& dst);
+
   /** @brief 由派发器填充对端信息。 */
   void set_peer(const std::string& ip, unsigned int port);
 

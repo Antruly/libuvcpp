@@ -132,7 +132,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 
 `webapp/uvcpp_web_util.h` 是**纯函数模块，没有类**，39 个公开声明。
 它的头注释（`:10-11`）解释的是**为什么要新开这个模块** —— web 层连一个 query
-解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:226-229`），
+解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:243-246`），
 不是"这一页里的东西不存在"。`src/web/` 下也确实没有任何 query / cookie / URL 解码
 helper。
 
