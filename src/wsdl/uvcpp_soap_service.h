@@ -147,6 +147,7 @@
 #define SRC_WSDL_UVCPP_SOAP_SERVICE_H
 
 #include <uvcpp/uvcpp_config.h>
+#include <uvcpp/uvcpp_export.h>
 
 #if UVCPP_WSDL_ENABLE
 
@@ -187,7 +188,7 @@ enum class uvcpp_soap_version_policy : int {
 };
 
 /** @return `"any"` / `"1.1-only"` / `"1.2-only"`。 */
-const char* uvcpp_soap_version_policy_name(uvcpp_soap_version_policy p);
+UVCPP_API const char* uvcpp_soap_version_policy_name(uvcpp_soap_version_policy p);
 
 // =========================================================================
 // 一次调用（交给处理函数的那些东西）
@@ -200,7 +201,7 @@ const char* uvcpp_soap_version_policy_name(uvcpp_soap_version_policy p);
  * 这里**没有** HTTP 请求的指针：要 peer、路径、任意头，就在你自己的路由 lambda 里
  * 先取走再调处理函数。本层只把 SOAP 相关的东西搬过来。
  */
-struct uvcpp_soap_call {
+struct UVCPP_API uvcpp_soap_call {
   uvcpp_soap_version version = uvcpp_soap_version::V1_1;
 
   /** WSDL 里的 operation 名（**局部名**，派发的落点）。 */
@@ -264,7 +265,7 @@ struct uvcpp_soap_call {
  *
  * 字段是公开的，但正常用法是那四个 `set_*`。
  */
-struct uvcpp_soap_reply {
+struct UVCPP_API uvcpp_soap_reply {
   enum class kind_t : int {
     /** 什么都没给。请求-响应型算 `Receiver` Fault；单向 operation 算正常（202）。 */
     NONE = 0,
@@ -349,7 +350,7 @@ struct uvcpp_soap_reply {
  * **最后一条赢**，另一条永远收不到调用。这条是**静默**的，所以装配期该用
  * `operation_names()` 与 `dispatch_target_of()` 自查一遍。
  */
-class uvcpp_soap_service {
+class UVCPP_API uvcpp_soap_service {
  public:
   /**
    * @brief 处理函数：一次调用 -> 一次回复。
@@ -478,8 +479,8 @@ class uvcpp_soap_service {
  *       （路由表打平时先注册的赢）。
  * @note GET 那条路它不管 —— 要 `?wsdl` 就另外调 `uvcpp_wsdl_serve()`。
  */
-void uvcpp_soap_serve(uvcpp_web_app& app, const std::string& path,
-                      std::shared_ptr<uvcpp_soap_service> ep);
+UVCPP_API void uvcpp_soap_serve(uvcpp_web_app& app, const std::string& path,
+                                std::shared_ptr<uvcpp_soap_service> ep);
 
 }  // namespace uvcpp
 

@@ -99,6 +99,7 @@
 #define SRC_WSDL_UVCPP_SOAP_MESSAGE_H
 
 #include <uvcpp/uvcpp_config.h>
+#include <uvcpp/uvcpp_export.h>
 
 #if UVCPP_WSDL_ENABLE
 
@@ -120,7 +121,7 @@ enum class uvcpp_soap_version : int {
 };
 
 /** @return `"1.1"` / `"1.2"`。 */
-const char* uvcpp_soap_version_name(uvcpp_soap_version v);
+UVCPP_API const char* uvcpp_soap_version_name(uvcpp_soap_version v);
 
 /**
  * @brief 信封元素的命名空间 URI。
@@ -128,10 +129,10 @@ const char* uvcpp_soap_version_name(uvcpp_soap_version v);
  * 与 `wsdl_ns::soap11_envelope()` / `soap12_envelope()` 是**同一对常量**
  * —— 那两个在 7a 就放进去了，理由也写在那边（不让同一串字面量出现两次）。
  */
-const char* uvcpp_soap_envelope_ns(uvcpp_soap_version v);
+UVCPP_API const char* uvcpp_soap_envelope_ns(uvcpp_soap_version v);
 
 /** @return `"text/xml; charset=utf-8"`（1.1）/ `"application/soap+xml; charset=utf-8"`（1.2）。 */
-const char* uvcpp_soap_content_type(uvcpp_soap_version v);
+UVCPP_API const char* uvcpp_soap_content_type(uvcpp_soap_version v);
 
 /**
  * @brief 这个 `Content-Type` 归不归本层管？是的话给出**它指的是哪个版本**。
@@ -144,8 +145,8 @@ const char* uvcpp_soap_content_type(uvcpp_soap_version v);
  * @note 这里给出来的版本**只用于**"该回一个哪一版的 Fault"这种准入级判断；
  *       报文真正的版本一律以 `uvcpp_soap_parse()` 解析出来的为准。
  */
-bool uvcpp_soap_version_of_content_type(const std::string& ct,
-                                        uvcpp_soap_version& out);
+UVCPP_API bool uvcpp_soap_version_of_content_type(const std::string& ct,
+                                                  uvcpp_soap_version& out);
 
 /**
  * @brief 取 `Content-Type` 的 `action="…"` 参数（SOAP 1.2 的动作）。
@@ -153,7 +154,7 @@ bool uvcpp_soap_version_of_content_type(const std::string& ct,
  * 也认不带引号的写法（`action=urn:x`）—— 那是**非法**的 HTTP 参数语法，
  * 但真实客户端会写。找不到返回空串。
  */
-std::string uvcpp_soap_action_of_content_type(const std::string& ct);
+UVCPP_API std::string uvcpp_soap_action_of_content_type(const std::string& ct);
 
 /**
  * @brief 归一一个动作值：剥掉两端的空白与**一对**包着的 `"`。
@@ -163,7 +164,7 @@ std::string uvcpp_soap_action_of_content_type(const std::string& ct);
  * `SOAPAction: ""` 归一成空串（**这是个有意义的值**：规范里它表示"看报文体
  * 自己，别用动作头"，所以它**不**算"和 WSDL 里的 soapAction 不一致"）。
  */
-std::string uvcpp_soap_normalize_action(const std::string& raw);
+UVCPP_API std::string uvcpp_soap_normalize_action(const std::string& raw);
 
 // =========================================================================
 // Fault
@@ -193,8 +194,8 @@ enum class uvcpp_soap_fault_code : int {
  * @note 空串是个**有意义的返回值**，不是失败：`DATA_ENCODING_UNKNOWN` 在
  *       1.1 里根本不存在，硬凑一个名字发出去只会让对端把它当成应用自定义码。
  */
-const char* uvcpp_soap_fault_code_local(uvcpp_soap_fault_code c,
-                                        uvcpp_soap_version v);
+UVCPP_API const char* uvcpp_soap_fault_code_local(uvcpp_soap_fault_code c,
+                                                  uvcpp_soap_version v);
 
 /**
  * @brief 一条 Fault。字段与**报文里的位置**一一对应，两个版本共用一份结构。
@@ -204,7 +205,7 @@ const char* uvcpp_soap_fault_code_local(uvcpp_soap_fault_code c,
  * 那个 URI（1.1 的 `faultcode` 常写成 `soap:Client`，此时 `code_space` 就是
  * 信封命名空间）；由本层**生成**时它总是信封命名空间。
  */
-struct uvcpp_soap_fault {
+struct UVCPP_API uvcpp_soap_fault {
   uvcpp_soap_version version = uvcpp_soap_version::V1_1;
   std::string code;        ///< 本地名（`Client` / `Sender` / …）
   std::string code_space;  ///< `code` 的命名空间 URI（可空）
@@ -224,10 +225,10 @@ struct uvcpp_soap_fault {
 };
 
 /** @brief 按语义码造一条 Fault（`version` 一起定下来）。 */
-uvcpp_soap_fault uvcpp_soap_make_fault(uvcpp_soap_version v,
-                                       uvcpp_soap_fault_code code,
-                                       const std::string& reason,
-                                       const std::string& detail_inner_xml =
+UVCPP_API uvcpp_soap_fault uvcpp_soap_make_fault(uvcpp_soap_version v,
+                                                 uvcpp_soap_fault_code code,
+                                                 const std::string& reason,
+                                                 const std::string& detail_inner_xml =
                                            std::string());
 
 // =========================================================================
@@ -240,7 +241,7 @@ uvcpp_soap_fault uvcpp_soap_make_fault(uvcpp_soap_version v,
  * 字段是**公开**的（与 `uvcpp_wsdl_document` 同一个取舍）：它是数据，不是有
  * 不变量的句柄。
  */
-struct uvcpp_soap_message {
+struct UVCPP_API uvcpp_soap_message {
   uvcpp_soap_version version = uvcpp_soap_version::V1_1;
 
   /** `Header` 元素**整段**的原样 XML；没有 `Header` 时是空串。 */
@@ -287,22 +288,22 @@ struct uvcpp_soap_message {
  *
  * @param why 非空时接收一句**指向静态串**的说明（不接收时不写）。
  */
-wsdl_status uvcpp_soap_parse(const char* data, size_t len,
-                             uvcpp_soap_message& out,
-                             const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
-                             const char** why = nullptr);
+UVCPP_API wsdl_status uvcpp_soap_parse(const char* data, size_t len,
+                                       uvcpp_soap_message& out,
+                                       const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
+                                       const char** why = nullptr);
 
 /** @copydoc uvcpp_soap_parse(const char*, size_t, uvcpp_soap_message&, const uvcpp_wsdl_limits&, const char**) */
-wsdl_status uvcpp_soap_parse(const std::string& xml, uvcpp_soap_message& out,
-                             const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
-                             const char** why = nullptr);
+UVCPP_API wsdl_status uvcpp_soap_parse(const std::string& xml, uvcpp_soap_message& out,
+                                       const uvcpp_wsdl_limits& lim = uvcpp_wsdl_limits(),
+                                       const char** why = nullptr);
 
 // =========================================================================
 // 序列化
 // =========================================================================
 
 /** @brief 信封序列化的选项。目前只有前缀，将来要缩进宽度也是加在这里。 */
-struct uvcpp_soap_dump_options {
+struct UVCPP_API uvcpp_soap_dump_options {
   /** 信封命名空间用的前缀。默认 `"soap"`。 */
   std::string env_prefix;
   /** 缩进宽度（空格数）。默认 2。 */
@@ -321,10 +322,10 @@ struct uvcpp_soap_dump_options {
  *
  * 产出是**确定的**：同一个入参永远产出逐字节相同的文本。
  */
-std::string uvcpp_soap_dump_envelope(uvcpp_soap_version v,
-                                     const std::string& header_entries_xml,
-                                     const std::string& body_entries_xml,
-                                     const uvcpp_soap_dump_options& opt =
+UVCPP_API std::string uvcpp_soap_dump_envelope(uvcpp_soap_version v,
+                                               const std::string& header_entries_xml,
+                                               const std::string& body_entries_xml,
+                                               const uvcpp_soap_dump_options& opt =
                                          uvcpp_soap_dump_options());
 
 /**
@@ -336,16 +337,16 @@ std::string uvcpp_soap_dump_envelope(uvcpp_soap_version v,
  * **不做** rpc 风格那套 `part` 包装：包装元素里放什么由 `inner_xml` 决定，
  * 因为那要按 `message` 的 `part` 表来组，而本层不认识 WSDL。
  */
-std::string uvcpp_soap_dump_response(uvcpp_soap_version v,
-                                     const std::string& op_local,
-                                     const std::string& op_ns,
-                                     const std::string& inner_xml,
-                                     const uvcpp_soap_dump_options& opt =
+UVCPP_API std::string uvcpp_soap_dump_response(uvcpp_soap_version v,
+                                               const std::string& op_local,
+                                               const std::string& op_ns,
+                                               const std::string& inner_xml,
+                                               const uvcpp_soap_dump_options& opt =
                                          uvcpp_soap_dump_options());
 
 /** @brief 一条 Fault 的**整个信封**（Fault 进 Body）。 */
-std::string uvcpp_soap_dump_fault(const uvcpp_soap_fault& f,
-                                  const uvcpp_soap_dump_options& opt =
+UVCPP_API std::string uvcpp_soap_dump_fault(const uvcpp_soap_fault& f,
+                                            const uvcpp_soap_dump_options& opt =
                                       uvcpp_soap_dump_options());
 
 /**
@@ -355,8 +356,8 @@ std::string uvcpp_soap_dump_fault(const uvcpp_soap_fault& f,
  * `uvcpp_soap_dump_fault()` 里那一份**缩进不同**：那边它是信封的第 2 层，
  * 子元素按绝对层缩。判据要逐字节比整封时用前者，比元素本身时用这个。
  */
-std::string uvcpp_soap_dump_fault_element(const uvcpp_soap_fault& f,
-                                          const std::string& env_prefix);
+UVCPP_API std::string uvcpp_soap_dump_fault_element(const uvcpp_soap_fault& f,
+                                                    const std::string& env_prefix);
 
 }  // namespace uvcpp
 
