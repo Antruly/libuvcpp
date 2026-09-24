@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.4--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.5--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.4-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.5-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -512,9 +512,12 @@ int main() {
   档位拧到 1 不付任何代价。
 - **`n > 1` 时 `run(md)` 会被 `UV_EINVAL` 拒掉。** 用 `start()` / `start_background()`，
   收尾用 `stop()` 与 `join()`。
-- **接受者那条循环不承载任何连接。** `loop_count()` 报一共有几条循环，
-  `connection_count_at(i)` 报每格各有多少 —— 下标 `0` 是接受者，它恒为 0，
-  负载由各条工作循环分担。
+- **连接落在哪条循环上是平台性质，而且可以问出来。** `n > 1` 时 `is_fanout()`
+  回答这件事：平台接受 `UV_TCP_REUSEPORT`（Linux）时每条循环**含下标 `0`** 各自绑
+  一个监听口抢同一个端口，内核按四元组哈希把新连接分给它们 ⇒ `connection_count_at(0)`
+  通常是**非 0**，而除"每条连接只被记在一格"之外不作任何保证；Windows（以及那个
+  标志被拒的平台）上下标 `0` 是纯接受者，按显式轮转把每条连接交给 `1..n-1`，所以
+  它恒为 0。`loop_count()` 报一共有几条循环，`connection_count_at(i)` 报每格各有多少。
 
 **→ 档位怎么选、核怎么钉、以及什么样的扩展性读数算数或不算数：
 [doc/benchmark-rig.md](doc/benchmark-rig.md)。**
@@ -581,7 +584,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.4-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.5-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
