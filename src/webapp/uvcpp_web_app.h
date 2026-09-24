@@ -1915,8 +1915,20 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
      * 本来就是按调用顺序 FIFO 的（`uvcpp_http_server.cpp` 的 `enqueue_write` /
      * `pump_write`），所以顺序只要在这一层守住，协议层一行都不用改。
      *
-     * 组内空了的键会被摘掉，因此 `find(id) != end()` 仍等价于"这条连接上有在途
-     * 请求" —— `idle_sweep()` 与停机的判据都靠它，**别留空队列在表里**。
+     * ★ **键的寿命 = 「连接还活着」∪「队里还有人」，谁后到谁摘。** 建键点只有
+     * 一个：`enqueue_inflight()` 里的 `s->inflight[id]`（每**连接**一笔
+     * `_Rb_tree_node`）；摘键有两处：`context_finished()` 里最后一条出队（且
+     * `reg_find(id) == nullptr`）与 `on_close()`（且队已空）。键上带着的那块队列
+     * 缓冲因此也跨请求留下 —— "建键"与"首次扩容"这两笔都从每请求变成每连接。
+     * 键的数上限 = 同时在册连接数（与 `registry` 同阶），不是请求数。
+     *
+     * ★★ 推论（动这一族判据之前先读这句）：**`find(id) != end()` 不再等价于
+     * "这条连接上有在途请求"** —— 表里可以有**空**队列的键。判"有在途"一律要
+     * **逐队判空**：`idle_sweep()` 的闲置豁免与 `shutdown_step()` 第 0 拍都是
+     * 这么写的。拿键当判据的两个后果都是静默的 —— 前者让一条跑完过请求的
+     * keep-alive 连接被**永久**豁免闲置超时，后者让停机的看门狗**永远等不完**。
+     * 遍历那几处（`active_body_ctx()` / `flush_out()` / victims 名单）本来就
+     * 容忍空队，没有改。
      *
      * 与登记表同一族的理由：两个改动点（请求到达时入队、响应发完时出队）都在
      * **这条循环的线程**上，而 `idle_sweep()` 与停机看门狗要按它遍历/判空。
@@ -1925,33 +1937,18 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
     std::map<uvcpp_web_conn_id, out_queue> inflight;
 
     /**
-     * @brief 回收来的空在途队列 —— 让上面那条队列的**容量跨请求留下**。
-     *
-     * 为什么要有它：`enqueue_inflight()` 用 `s->inflight[id]` 建空表（cap=0），
-     * 紧接着 `push_back` ⇒ 每请求必然一次 `_M_realloc_insert`；而收场时队列
-     * 一空就连键一起 `erase`，容量跟着扔掉。**键必须摘**（上面 `inflight` 那段
-     * 注释与 `context_finished()` 里那句都写着为什么：留空键会让那条连接被
-     * **永久**豁免闲置超时，在长跑服务上就是稳定的泄漏），**但容量没必要跟着
-     * 一起扔** —— 收场时把向量搬进这里，下次入队再搬回去。两次都是 `swap`，
-     * O(1)、不分配。
-     *
-     * 上限 `kOutQueueRecycleMax`（`uvcpp_web_app.cpp` 的匿名命名空间）：超了就
-     * 照旧扔掉容量，行为与改前一致，不影响正确性。
-     *
-     * 与 `inflight` 同一族的理由：只在**这条循环的线程**上动，不需要锁。
-     */
-    std::vector<out_queue> out_recycle;
-
-    /**
      * @brief 一条响应留下来的两张**空**表，给下一条请求复用。
      *
      * 为什么要有它：`resp_` 与 `sent_cbs_` 都是**每请求新建**的（上下文由
      * `uvcpp_web_context::create()` 每请求 `make_shared` 一次），于是
      * `http_reserve_headers()` 每请求 `reserve(4)` 一次、第 5 个头再扩容一次、
      * 访问日志那条 `on_sent()` 再扩容一次。三次分配换来的只是"这两张表本来就
-     * 该长那样" —— 与 `out_recycle` 是同一个形状：**内容不要，缓冲要**。
+     * 该长那样" —— 与队列那一笔（`inflight` 的键活到连接关闭）是同一个形状：
+     * **内容不要，缓冲要**。
      *
-     * 与 `out_recycle` 的区别：这两张表同生同灭，所以**一起搬**，用一个结构装。
+     * 与它那一笔的区别：那里的"键"是**连接**，天生活得比请求长，键留着就够了；
+     * 这里的"键"（请求）天生一次性，只能靠"搬空表"来留缓冲 —— 也正因为如此，
+     * 这两张表同生同灭，**一起搬**，用一个结构装。
      * 回收槽里只放 `yield_tables()` **清空过**的表，因此搬过来的永远是"空的、
      * 有容量的"，不牵扯任何元素的生命周期。
      *

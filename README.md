@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.24--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.25--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.24-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.25-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.24-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.25-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -796,6 +796,18 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   they meant. The price, stated plainly: the block no longer passes through
   `operator delete`, so ASAN/valgrind cannot see it being freed (a known blind spot
   when chasing memory bugs). 8.02 → 7.02 allocations per request (`1.3.24`)
+- The **key** of the in-flight request queue table (`loop_slot::inflight`) is no
+  longer rebuilt per request: a key now lives as long as `connection alive`
+  union `queue non-empty`, whichever ends last (`context_finished()` on the final
+  dequeue, `on_close()` when the connection goes). The `std::map` node, and the
+  queue buffer hanging off it, therefore go from **once per request** to **once per
+  connection**. Every "is anything in flight?" predicate had to follow (`idle_sweep()`
+  idle exemption, the first step of `shutdown_step()`): they now test **queue
+  emptiness**, never key presence. Both ways of getting it wrong fail silently — a
+  keep-alive connection that already finished a request would be exempted from the
+  idle timeout forever, and shutdown would wait for a watchdog that never fires.
+  M1's empty-queue recycle slot (`out_recycle`) is gone: this is the same win in a
+  better shape. 7.02 → 6.02 allocations per request (`1.3.25`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

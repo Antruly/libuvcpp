@@ -63,19 +63,12 @@ namespace uvcpp {
 
 namespace {
 
-/// 每格最多回收几条空在途队列（见 `loop_slot::out_recycle`）。
-///
-/// 一条空表只占一个 `out_entry` 的 24 B，256 条也就 12 KiB，而它换掉的是
-/// **每请求一次** `_M_realloc_insert`。设上限只是不让"某个瞬间几万条连接
-/// 同时收场"把回收槽撑成常驻内存 —— 超了就照旧扔掉容量，行为与改前一致。
-const size_t kOutQueueRecycleMax = 256;
-
 /// 每格最多回收几张响应表（见 `loop_slot::resp_recycle`）。
 ///
 /// 一张表稳态下就那么点东西（5 个 `http_header`、1 条 `on_sent` 回调），
-/// 256 张也就几十 KiB，而它换掉的是**每请求三次**堆分配。设上限的理由与
-/// `kOutQueueRecycleMax` 完全相同：不让"某个瞬间几万条连接同时收场"把回收槽
-/// 撑成常驻内存 —— 超了就照旧扔掉容量，行为与改前一致。
+/// 256 张也就几十 KiB，而它换掉的是**每请求三次**堆分配。设上限只是不让
+/// "某个瞬间几万条连接同时收场"把回收槽撑成常驻内存 —— 超了就照旧扔掉容量，
+/// 行为与改前一致。
 const size_t kRespTablesRecycleMax = 256;
 
 /**
@@ -808,16 +801,12 @@ bool uvcpp_web_app::enqueue_inflight(
   // `dispatch_stream`）都先保证 id 是有效的（没登记就先补登记）。返回 false
   // 是"没超上限"那一支，走这一支不会把上下文扣住不发。
   if (s == nullptr) return false;
+  // ★ **建键点，每连接一次。** `operator[]` 只在"这条连接第一次入队"时分配
+  //   一个 `_Rb_tree_node`（一笔堆分配）；键此后活到连接关闭 —— 见头文件里
+  //   `inflight` 的注释 —— 所以键上那块队列缓冲也跟着留下来：下面那句
+  //   `push_back` 不再每请求 `_M_realloc_insert`。"建键"与"首次扩容"这两笔
+  //   因此都从**每请求**变成**每连接**（M1 那笔的回收槽换成了这个形状）。
   out_queue& q = s->inflight[id];
-  // ★ 复用一个回收来的空表：`operator[]` 建出来的是 cap=0，不换的话下面那句
-  //   `push_back` 每请求都要 `_M_realloc_insert` 一次。搬进来的只是一块**空**
-  //   缓冲（里面不存任何 ctx），所以与生命周期无关。
-  //   队列非空时（流水线：这条连接上已经挂着别的请求）`capacity() != 0`，
-  //   这一支自然跳过。
-  if (q.capacity() == 0 && !s->out_recycle.empty()) {
-    q.swap(s->out_recycle.back());
-    s->out_recycle.pop_back();
-  }
   const size_t cap = cfg_.max_pipelined_requests;
   // 0 = 不限（与超时、长度上限一处口径）。
   const bool over = (cap != 0 && q.size() >= cap);
@@ -2820,21 +2809,24 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   q->second.erase(me);
   // 与 `enqueue_inflight()` 那一笔配对（唯一出队点）。
   slot->inflight_entries.fetch_sub(1);
-  // **空队列要连键一起摘掉。** `idle_sweep()` 的豁免与停机宽限的判据都是
-  // `inflight.find(id) != end()` / `!inflight.empty()`，留一个空队列在表里
-  // 会让那条连接被**永久**豁免闲置超时 —— 表只涨不落，长跑服务上就是稳定的泄漏。
-  if (q->second.empty()) {
-    // ★ 摘键之前把**容量**搬进本格的回收槽（`swap`，O(1)、不分配）。键照旧要
-    //   摘 —— 上面那两句注释说的就是为什么。但这条队列长度恒为 1，它的容量
-    //   是"每请求一次 `_M_realloc_insert`"的全部来源，没必要每请求重建。
-    //   搬的是**空**表（里面不存 ctx），所以不牵扯任何生命周期。
-    if (q->second.capacity() > 0 &&
-        slot->out_recycle.size() < kOutQueueRecycleMax) {
-      slot->out_recycle.push_back(out_queue());
-      slot->out_recycle.back().swap(q->second);
-    }
-    slot->inflight.erase(q);
-  }
+
+  // **队里还有没有别人**：这一句必须在下面摘键之前问完 —— 键一摘，`q` 随即失效。
+  const bool has_more = !q->second.empty();
+
+  // ★ **键的寿命 = 「连接还活着」∪「队里还有人」，谁后到谁摘。** 两个事件：
+  //   这里（最后一条出队）与 `on_close()`（连接关闭）。两边都做完之后，这条
+  //   连接才在表里彻底消失。
+  //
+  //   为什么不再沿用「一空就摘」：那样键（`_Rb_tree_node`，一笔堆分配）与它
+  //   带着的那块缓冲都是**每请求**重建一次 —— 正是本笔要省掉的那一笔。键只活到
+  //   连接关闭 ⇒ 上限是**同时在册的连接数**（与 `registry` 同阶），不是
+  //   "连接数 × 请求数"。
+  //
+  //   ★ 与改前一样硬的那条要求没变：**空队列不许长期留在表里**（留着的连接
+  //   会被永久豁免闲置超时 = 长跑服务上稳定的泄漏）。旧写法靠"一空就摘"守，
+  //   新写法靠"连接一关就摘"守 —— 前提是 `idle_sweep()` 与停机宽限都已经改成
+  //   **逐队判空**（见那两处），不再拿"表里有键"当在途。
+  if (!has_more && reg_find(id) == nullptr) slot->inflight.erase(q);
 
   // 这个请求到此为止：半截请求的预算归零，下一次收到字节就是新请求的开头。
   // 放在摘号之后 —— 上面那些早返回都不该动计时。用本地 id，不要再用 ctx。
@@ -2847,7 +2839,9 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   //
   // 只在真的还有在途请求时才走这一支 —— 所以单请求与顺序 keep-alive 的行为
   // 与改前**逐字节相同**，这段逻辑只在流水线下生效。
-  if (slot->inflight.find(id) != slot->inflight.end()) {
+  // ★ 判据是**队里还有人**（上面那个局部量），不是"表里有键"：键现在活到连接
+  //   关闭，空队列的键到处都是。改前两者等价（键一空就摘），所以行为不变。
+  if (has_more) {
     reg_note_read(id, loop_now_ms(loop()));
     reg_mark_streaming(id, active_body_ctx(id) != nullptr);
   }
@@ -2950,6 +2944,25 @@ void uvcpp_web_app::on_close(uvcpp_tcp_client* client) {
       }
       for (size_t i = 0; i < victims.size(); ++i) victims[i]->stream_abort();
     }
+
+    // ★ 在途队列那一格：键的寿命是「连接还活着 ∪ 队里还有人」（见头文件里
+    //   `inflight` 的注释），"连接这一半"刚在本函数开头就没了 ⇒ 队里也空了的
+    //   键在这里摘。
+    //
+    //   **必须排在上面那段 victims 之后。** `stream_abort()` 一路会走到
+    //   `context_finished()`，那里按「队空 **且** `reg_find(id) == nullptr`」摘键
+    //   —— 连接已经摘了，所以它多半已经摘掉了（此处 `find` 找不到，跳过）。
+    //   反过来放在 victims **之前**会把还有元素的队列整格摘走：那些元素自己的
+    //   `context_finished()` 会因为"找不到键"而早返回，`resume()` /
+    //   `reg_note_request_done()` / `flush_out()` 三笔一起丢掉。
+    //
+    //   队里还有人的话，键留到**最后一个元素**出队时由 `context_finished()` 摘。
+    {
+      std::map<uvcpp_web_conn_id, out_queue >::iterator iq =
+          slot.inflight.find(id);
+      if (iq != slot.inflight.end() && iq->second.empty())
+        slot.inflight.erase(iq);
+    }
   }
 
   // 回调排在**摘表之后**：此刻 `connection(id)` 已经查不到了，这是刻意的
@@ -3049,7 +3062,13 @@ void uvcpp_web_app::idle_sweep() {
     // （连接、缓冲、context 全部不回收）。流式连接改按"停顿多久没进展"判定：
     // 持续有字节就活得下去，停下来才关。判据从登记表读，不另设集合，
     // 免得两处状态对不上。
-    if (slot.inflight.find(id) != slot.inflight.end() && !reg_is_streaming(id))
+    // ★ 「这条连接上有在途请求」= **队里还有人**，不是「表里有它的键」：键现在
+    //   活到连接关闭（见 `inflight` 的注释），空队列的键遍地都是 —— 拿键当判据
+    //   会把一条跑完过请求的 keep-alive 连接**永久**豁免闲置超时。
+    const std::map<uvcpp_web_conn_id, out_queue >::iterator iq =
+        slot.inflight.find(id);
+    if (iq != slot.inflight.end() && !iq->second.empty() &&
+        !reg_is_streaming(id))
       continue;
 
     // **已升级成 WS 的连接也豁免。** 60 秒没有消息对 WS 是常态（聊天室、
@@ -3426,15 +3445,28 @@ void uvcpp_web_app::shutdown_step() {
     // 等的判据是**本格**的在途队列：这个看门狗是本循环的，等待与放行都只
     // 覆盖本循环的连接。日志里那个数则是**全进程**聚合（`inflight_total()`）
     // —— 运维要看的是"还剩多少活儿"，不是"本循环还剩多少"。
-    if (!slot.inflight.empty() &&
-        loop_now_ms(loop()) < slot.shutdown_deadline_ms) {
+    // ★ 「还有在途请求吗」= **逐队判空**，不是 `inflight.empty()`：键现在活到
+    //   连接关闭（见 `inflight` 的注释），一条安静但没关的连接也会在表里留一个
+    //   **空**队列 ⇒ 拿键数当判据会让停机在这一拍**永远等不完**，宽限期到之后
+    //   每次都报"仍有 N 个请求在途"而 N 其实是 0。
+    //   这一拍只读表（要么 return、要么往下走），所以扫一遍、两个判断共用。
+    bool any_inflight = false;
+    for (std::map<uvcpp_web_conn_id, out_queue >::const_iterator it =
+             slot.inflight.begin();
+         it != slot.inflight.end(); ++it) {
+      if (!it->second.empty()) {
+        any_inflight = true;
+        break;
+      }
+    }
+    if (any_inflight && loop_now_ms(loop()) < slot.shutdown_deadline_ms) {
       return;  // 继续等，看门狗下一拍再看
     }
 
     slot.shutdown_phase = 1;
     if (slot.shutdown_timer != nullptr) slot.shutdown_timer->stop();
 
-    if (!slot.inflight.empty()) {
+    if (any_inflight) {
       UVCPP_LOG_WARN(log_category::CORE)
           << "宽限期到，仍有 " << inflight_total()
           << " 个请求在途（多半卡在异步处理器里），强制关闭连接";

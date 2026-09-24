@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.24--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.25--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.24-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.25-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.24-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.25-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -754,6 +754,15 @@ libuvcpp/
   `user_data_`、`hold_count_` 的语义都没动。★ 代价照实说：这一块不再经过
   `operator delete`，所以 ASAN/valgrind 看不到它的释放（查内存问题时是已知盲区）。
   每请求 8.02 → 7.02 次分配（`1.3.24`）
+- 在途请求队列表（`loop_slot::inflight`）的**键**不再每请求重建 —— 键的寿命
+  改成「连接还活着 ∪ 队里还有人」，谁后到谁摘（最后一条出队那一处 + `on_close()`
+  那一处）。于是那个 `std::map` 结点、以及结点上挂着的那块队列缓冲，都从
+  **每请求一次**变成**每连接一次**。★ 配套改的还有**每一处"有在途请求吗"的
+  判据**（`idle_sweep()` 的闲置豁免、`shutdown_step()` 第 0 拍）：一律改成
+  **逐队判空**，不再拿"表里有键"当在途 —— 两个失败都是静默的：前者让一条
+  跑完过请求的 keep-alive 连接被永久豁免闲置超时，后者让停机的看门狗永远等不完。
+  M1 那笔引进的"空队列回收槽"（`out_recycle`）随之整个删掉：它换的就是这个形状。
+  每请求 7.02 → 6.02 次分配（`1.3.25`）
 - 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
   超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
   `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）

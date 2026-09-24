@@ -76,7 +76,7 @@
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:190-190`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
-  （`src/webapp/uvcpp_web_app.cpp:447-447`，`kDefaultAlpn` 的定义），用户只能关掉它
+  （`src/webapp/uvcpp_web_app.cpp:440-440`，`kDefaultAlpn` 的定义），用户只能关掉它
   （`set_http2_enabled(false)`，`src/webapp/uvcpp_web_app.h:356`），或者自己设
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
 - **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
