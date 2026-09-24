@@ -72,6 +72,7 @@ cause — see [`RELEASE.md`](../RELEASE.md).
 | `UVCPP_ENABLE_ZLIB` | `OFF` | zlib | — |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | OpenSSL | — |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | nghttp2 + OpenSSL + web | OpenSSL off, or web off |
+| `UVCPP_ENABLE_WSDL` | `OFF` | pugixml + webapp | webapp off |
 
 The **target** used for linking is chosen by testing `TARGET uv_a` / `TARGET uv`, not by assuming
 a name: libuv 1.36 built both unconditionally, but from 1.51 `uv` is controlled by libuv's own
@@ -81,11 +82,19 @@ that is what lets the released DLL carry libuv statically.
 **Turning on a module does not turn on what it needs.** `UVCPP_BUILD_WEB=ON` does not enable
 zlib or OpenSSL; you opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is the exception in the other
 direction: it is *force-disabled* with a message when OpenSSL is off, because HTTP/2 here is
-TLS + ALPN only — there is no cleartext h2 (h2c) support.
+TLS + ALPN only — there is no cleartext h2 (h2c) support. `UVCPP_ENABLE_WSDL` is
+force-disabled the same way when `UVCPP_BUILD_WEBAPP=OFF`: it is built on top of the framework,
+so "on but unbuildable" is a worse configuration than "off".
 
 nghttp2 is linked **PRIVATE** and statically. It appears only in `src/http2/*.cpp` behind a
 pimpl, never in a public header, so it adds no DLL dependency to anything you build. zlib, by
 contrast, is linked publicly, because a public header includes `<zlib.h>`.
+
+pugixml — the WSDL module's XML backend, pulled in only when `UVCPP_ENABLE_WSDL=ON` — is linked
+**PRIVATE** and statically for the same reason: `<pugixml.hpp>` appears in exactly one file,
+`src/wsdl/uvcpp_wsdl_pugixml.h`, which is a *private* header (not installed, and filtered out of
+the package by `package_release.py`). So it adds no DLL beside `uvcpp.dll`, and the package
+carries no pugixml headers — a consumer of the WSDL module never needs pugixml installed.
 
 ### Library shape
 
@@ -134,6 +143,7 @@ toggling a feature. All are `CACHE STRING`:
 | `ZLIB_VERSION` | `v1.3.1` |
 | `OPENSSL_VERSION` | `openssl-3.4.0` |
 | `NGHTTP2_VERSION` | `v1.70.0` |
+| `PUGIXML_VERSION` | `v1.14` |
 | `LIBUV_VERSION` | `v1.51.0` |
 | `NLOHMANN_JSON_VERSION` | `v3.11.3` |
 

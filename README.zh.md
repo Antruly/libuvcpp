@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.6--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.7--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.6-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.7-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -195,6 +195,7 @@ int main() {
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS 上下文与每连接封装 —— 头文件最短、最容易写错的一层 |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法；实现进度与折衷另见 [doc/http2-status.md](doc/http2-status.md) |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
+| WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 —— 以及这一半**刻意**留给 SOAP 那一半的是什么 |
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -277,6 +278,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
 | `UVCPP_STATIC_RUNTIME` | `OFF` | 把编译器运行时（`libgcc`/`libstdc++`）静态链进库。**仅 MinGW 与 Linux 有效，MSVC 上是空操作** —— MSVC 用 `/MD`，发布包里自带 `vcruntime`/`msvcp` |
@@ -286,7 +288,8 @@ cmake --build . --config Release --parallel
 **注意**：开启 `UVCPP_BUILD_WEB=ON` 不会自动启用 `UVCPP_ENABLE_ZLIB` 或 `UVCPP_ENABLE_OPENSSL`。
 这些选项需要显式手动开启。`UVCPP_ENABLE_NGHTTP2` 在 `UVCPP_ENABLE_OPENSSL=OFF` 时
 **强制关闭**（给一条 warning，而不是留一个根本跑不起来的配置）—— 本库的 HTTP/2
-没有明文形态。
+没有明文形态。`UVCPP_ENABLE_WSDL` 同理，在 `UVCPP_BUILD_WEBAPP=OFF` 时**强制关闭**
+（它建在 webapp 之上）。
 
 ---
 
@@ -561,7 +564,8 @@ libuvcpp/
 │   ├── web-http-guide.md  # web 层的 HTTP 半边
 │   ├── web-ws-guide.md    # web 层的 WebSocket 半边
 │   ├── webapp-guide.md    # web 应用框架指南
-│   └── webapp-support-guide.md # webapp 底下那些没被框架指南覆盖的类型
+│   ├── webapp-support-guide.md # webapp 底下那些没被框架指南覆盖的类型
+│   └── wsdl-guide.md      # WSDL 1.1 文档模型、QName 查询、发布与生成
 ├── cmake/         # CMake 配置模板
 ├── .github/workflows/  # CI 流水线
 ├── CMakeLists.txt
@@ -584,7 +588,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.6-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.7-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在

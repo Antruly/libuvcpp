@@ -54,6 +54,17 @@ if(NOT UVCPP_ENABLE_NGHTTP2)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*h2_[^/]*\.cpp$")
 endif()
 
+# Exclude WSDL/SOAP tests when the wsdl module is not enabled.
+# 命名约定：**文件名里含 `wsdl` 的用例就需要 wsdl 模块**。`[^/]*` 前缀同样是必须的
+# （file(GLOB) 给的是全路径，写 `^wsdl_` 永远匹配不上 —— 上面 h2 那条踩过）。
+#
+# 两条用例都要摘：`wsdl_document_func.cpp`（纯文档模型）与
+# `web_app_wsdl_func.cpp`（经 app 发布）。后者同时命中上面那条 `web_app_` 规则，
+# 所以「webapp 关、wsdl 开」下它已经走了；这里补的是「webapp 开、wsdl 关」。
+if(NOT UVCPP_ENABLE_WSDL)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*wsdl[^/]*\.cpp$")
+endif()
+
 foreach(test_src ${FUNC_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
   string(REGEX REPLACE "[^a-zA-Z0-9_]" "_" exe_name "test_${test_name}")

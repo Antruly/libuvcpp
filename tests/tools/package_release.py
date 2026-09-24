@@ -53,13 +53,16 @@ VERSION = _header_version()
 
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
-MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2"]
+MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2",
+           "wsdl"]
 
 # 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
 # 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
 # 而且使用者根本没装 nghttp2 的头，一 include 就是硬编译错误。
-# CMakeLists.txt:985-986 的 install 规则里同一条排除，两处必须一起改。
-PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h"}
+# `uvcpp_wsdl_pugixml.h` 同理：它把 `<pugixml.hpp>` 拉进来，正是为了让
+# src/wsdl/ 里别的头一个 pugi 类型都不出现。
+# CMakeLists.txt 的 install 规则里同一条排除，两处必须一起改。
+PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），

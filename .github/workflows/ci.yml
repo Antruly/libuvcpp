@@ -1059,6 +1059,7 @@ jobs:
               -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
               -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
               -DUVCPP_ENABLE_NGHTTP2=ON \
+              -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
             echo "CONFIGURE_RC=$cfg"
@@ -1071,6 +1072,12 @@ jobs:
             grep -q '^#  define UVCPP_OPENSSL_ENABLE 1$' \
               build-cfg/include/uvcpp/uvcpp_config.h || {
               echo "::error title=config-contract::生成头里 UVCPP_OPENSSL_ENABLE 不是 1，判据 1 会退化成空转"; exit 1; }
+            # 同理钉住 WSDL：doc-snippets 对 `wsdl/` 那一档的判据是"模块真的开着"，
+            # 关着的话它会把 wsdl-guide.md 的片段全判成"没判"并退 3 —— 那行注解会
+            # 说成"没判"，而原因（开关没开到这一档）没人能从这个 job 看出来。
+            grep -q '^#  define UVCPP_WSDL_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_WSDL_ENABLE 不是 1，doc-snippets 会把 wsdl 片段全判成\"没判\""; exit 1; }
 
             echo "=== build ==="
             bld=0
@@ -1097,6 +1104,7 @@ jobs:
               -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
               -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
               -DUVCPP_ENABLE_NGHTTP2=ON \
+              -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
             echo "DEBUG_CONFIGURE_RC=$dbg"
@@ -1144,7 +1152,7 @@ jobs:
           fi
           exit "$rc"
 
-      # 挂在**这一档**的理由：它是唯一同时满足"六个模块全 ON、真的产出一个包、
+      # 挂在**这一档**的理由：它是唯一同时满足"七个模块全 ON、真的产出一个包、
       # 有 python、且 matrix 里同时有 g++ 与 cl 两条腿"的 job。门禁要的就是一个
       # 全开的包 —— 关着模块的包只会让它把大半片段判成"跳过"（退 3），判不出东西。
       #

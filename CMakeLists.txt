@@ -64,6 +64,15 @@ set(UVCPP_TRY_WRITE_MIN_BYTES 32768 CACHE STRING
 # 它依赖 web，所以 web 关掉时它也会被强制关掉。
 option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/log)" OFF)
 
+# WSDL/SOAP 模块。它建在 webapp 之上 —— 发布 WSDL 与派发 SOAP 都走 webapp 的路由，
+# 所以 webapp 关掉时它会被强制关掉（与 webapp⇒web 同形，见下面那段）。
+#
+# 依赖：pugixml（XML 解析）。**它是私有依赖** —— `<pugixml.hpp>` 只出现在
+# `src/wsdl/uvcpp_wsdl_pugixml.h` 这一个**不装出去**的头里，公开头一个 pugi 类型
+# 都不出现，所以使用者既不需要它的头也不需要它的库（与 nghttp2 同一种做法，
+# 见 src/http2/ 的 pimpl 说明）。
+option(UVCPP_ENABLE_WSDL "Enable WSDL/SOAP module (XML via pugixml, needs UVCPP_BUILD_WEBAPP)" OFF)
+
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 
@@ -120,6 +129,10 @@ set(LIBUV_VERSION "v1.51.0" CACHE STRING "libuv git tag/branch to fetch when usi
 # JSON 后端版本（仅 webapp 需要）。v3.11.x 是支持 C++11 的最后一条线，
 # 上游从 v3.12 起要求 C++11 之外的特性。
 set(NLOHMANN_JSON_VERSION "v3.11.3" CACHE STRING "nlohmann/json tag to fetch when building webapp")
+
+# WSDL/SOAP 的 XML 后端版本（仅 UVCPP_ENABLE_WSDL 需要）。v1.14 是 C++11 兼容的
+# 一档；再往上的版本对编译器/标准的要求要单独核一遍才升。
+set(PUGIXML_VERSION "v1.14" CACHE STRING "pugixml tag to fetch when building the wsdl module")
 
 # If user requests building libuv from source, or system libuv not found and user didn't opt to use system
 if (UVCPP_BUILD_LIBUV_FROM_SOURCE OR NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIB OR NOT UVCPP_USE_SYSTEM_LIBUV)
@@ -494,6 +507,12 @@ if(UVCPP_BUILD_WEBAPP)
   source_group("webapp" FILES ${WEBAPP_SRC_FILES})
 endif()
 
+# wsdl module source_group
+file(GLOB WSDL_SRC_FILES "${CMAKE_SOURCE_DIR}/src/wsdl/*.h" "${CMAKE_SOURCE_DIR}/src/wsdl/*.cpp")
+if(UVCPP_ENABLE_WSDL)
+  source_group("wsdl" FILES ${WSDL_SRC_FILES})
+endif()
+
 # read version from header (src/uvcpp/uvcpp_version.h)
 file(READ "${CMAKE_SOURCE_DIR}/src/uvcpp/uvcpp_version.h" UVCPP_VERSION_H)
 string(REGEX MATCH "#define[ \t]+UVCPP_VERSION_MAJOR[ \t]+([0-9]+)" _ ${UVCPP_VERSION_H})
@@ -573,6 +592,91 @@ if(UVCPP_BUILD_WEBAPP)
 else()
   add_compile_definitions(UVCPP_WEBAPP_ENABLE=0)
   message(STATUS "Web app framework disabled (UVCPP_WEBAPP_ENABLE=0)")
+endif()
+
+# wsdl 依赖 webapp：发布 WSDL 与派发 SOAP 都要走 webapp 的路由与请求/响应封装。
+# 与 nghttp2 那两条同样处理：强制关 + 出声，而不是留一个链得上、跑不起来的配置。
+if(UVCPP_ENABLE_WSDL AND NOT UVCPP_BUILD_WEBAPP)
+  message(WARNING
+    "UVCPP_ENABLE_WSDL=ON 需要 UVCPP_BUILD_WEBAPP=ON（wsdl 建在 webapp 之上，"
+    "它复用 webapp 的路由与请求/响应类型）。已强制关闭 wsdl。")
+  set(UVCPP_ENABLE_WSDL OFF)
+endif()
+
+if(UVCPP_ENABLE_WSDL)
+  add_compile_definitions(UVCPP_WSDL_ENABLE=1)
+  message(STATUS "WSDL/SOAP module enabled (UVCPP_WSDL_ENABLE=1)")
+
+  # -------------------------------------------------------------------
+  # pugixml —— wsdl 的 XML 后端
+  # -------------------------------------------------------------------
+  # 与 nghttp2 同一个形状（理由逐条相同，见上面那段长注释）：
+  #   * function 造作用域，用**普通变量**压住上游的 option()；
+  #   * BUILD_SHARED_LIBS 是全局的（我们默认 ON），必须显式压 OFF —— 否则
+  #     pugixml 建的是 `pugixml-shared`，uvcpp.dll 就多出一条运行时依赖；
+  #   * BUILD_TESTING 压 OFF：pugixml 的 CMakeLists 里有 include(CTest)，它会
+  #     把测试开关带进来；
+  #   * PIC 必须在建目标之前定好。
+  #
+  # ★ **nghttp2 能靠普通变量压住，pugixml 不能**，这是实测出来的分叉，不是风格
+  #   选择：普通变量压 option() 要 CMP0077=NEW（CMake 3.13），而策略是**按各
+  #   子目录自己的 cmake_minimum_required** 定的 —— 上游那句会把它重新按自己
+  #   声明的版本重放一遍。nghttp2 声明 `VERSION 3.14`（≥3.13 ⇒ NEW，压得住），
+  #   pugixml 声明 `VERSION 3.5`（<3.13 ⇒ CMP0077 未设 ⇒ 退回旧行为）。
+  #   旧行为的动作是**把我们那个普通变量清掉**、转而用 cache 值，并在 configure
+  #   期对每个这样的 option 印一条 `CMake Warning (dev)`。所以照着 nghttp2 的
+  #   样子把 WCHAR_MODE/COMPACT/NO_XPATH/NO_STL/NO_EXCEPTIONS 逐个点一遍，效果
+  #   是**五条警告 + 一点也没压住**（值仍是上游默认值，因为那些就是默认值）。
+  #   这五条因此**故意不写**：要钉就只能用 cache+FORCE，那与"与 nghttp2 同形"
+  #   相矛盾，而它们本来就是我们想要的那个值。
+  #   **我们真正需要的三条都不受影响**：BUILD_SHARED_LIBS 不是 option()（上游
+  #   直接读它），PIC 是普通变量且不经过 option()，PUGIXML_BUILD_TESTS 是
+  #   cmake_dependent_option（条件里就有 `CMAKE_SOURCE_DIR 就是 PROJECT_SOURCE_DIR`
+  #   这一条，add_subdirectory 进来必然为假）。下面那两条硬后置条件就是在证这件事。
+  #
+  # **异常保持开着**（上游默认）：pugixml 只在 OOM 时抛 bad_alloc，关掉它之后 OOM
+  #   走的是 `assert` —— release 里 NDEBUG 一开就是空操作，接着解引用空指针。抛
+  #   异常至少是定义良好的失败。这与 nlohmann 那条暴露面相同（见 uvcpp_web_json.h
+  #   顶部），我们的封装只是保证**解析失败**（畸形 XML / 超限）一律走返回值。
+  function(uvcpp_pugixml_configure)
+    set(BUILD_SHARED_LIBS   OFF)
+    set(PUGIXML_BUILD_TESTS OFF)
+    set(BUILD_TESTING       OFF)
+
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+    FetchContent_GetProperties(pugixml)
+    if(NOT pugixml_POPULATED)
+      FetchContent_Populate(pugixml)
+      add_subdirectory(${pugixml_SOURCE_DIR} ${pugixml_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif()
+  endfunction()
+
+  FetchContent_Declare(
+    pugixml
+    GIT_REPOSITORY https://github.com/zeux/pugixml.git
+    GIT_TAG        ${PUGIXML_VERSION}
+    GIT_SHALLOW    TRUE
+  )
+  uvcpp_pugixml_configure()
+
+  # 硬后置条件（与 nghttp2 那两条同形）：把"压住了没有"变成 configure 期的
+  # 一句话，而不是等 Linux 的链接器或 Windows 的加载器来说话。
+  if(NOT TARGET pugixml-static)
+    message(FATAL_ERROR
+      "pugixml 没建出 pugixml-static —— BUILD_SHARED_LIBS 没压住，或者上游改了库目标名")
+  endif()
+  get_target_property(_uvcpp_pugixml_pic pugixml-static POSITION_INDEPENDENT_CODE)
+  if(NOT _uvcpp_pugixml_pic)
+    message(FATAL_ERROR
+      "pugixml-static 的 POSITION_INDEPENDENT_CODE 没生效(=${_uvcpp_pugixml_pic}) —— "
+      "Linux 上 libuvcpp.so 会链不上它")
+  endif()
+
+  message(STATUS "pugixml integrated (tag=${PUGIXML_VERSION}, static)")
+else()
+  add_compile_definitions(UVCPP_WSDL_ENABLE=0)
+  message(STATUS "WSDL/SOAP module disabled (UVCPP_WSDL_ENABLE=0)")
 endif()
 
 if(UVCPP_ENABLE_ZLIB)
@@ -660,6 +764,15 @@ if(NOT UVCPP_ENABLE_NGHTTP2)
   list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/http2/")
 else()
   message(STATUS "Including http2 module in build (nghttp2 ${NGHTTP2_VERSION})")
+endif()
+
+# 根据 UVCPP_ENABLE_WSDL 排除 wsdl 模块
+if(NOT UVCPP_ENABLE_WSDL)
+  message(STATUS "Excluding wsdl module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/wsdl/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/wsdl/")
+else()
+  message(STATUS "Including wsdl module in build")
 endif()
 
 # Create uvcpp targets according to user selection.
@@ -762,6 +875,7 @@ _uvcpp_literal01(UVCPP_ENABLE_MEMORY_POOL UVCPP_BUILD_EXPAND)
 _uvcpp_literal01(UVCPP_NET_ENABLE       UVCPP_BUILD_NET)
 _uvcpp_literal01(UVCPP_WEB_ENABLE       UVCPP_BUILD_WEB)
 _uvcpp_literal01(UVCPP_WEBAPP_ENABLE    UVCPP_BUILD_WEBAPP)
+_uvcpp_literal01(UVCPP_WSDL_ENABLE      UVCPP_ENABLE_WSDL)
 _uvcpp_literal01(UVCPP_ZLIB_ENABLE      UVCPP_ENABLE_ZLIB)
 _uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
 _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
@@ -820,6 +934,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_NET_ENABLE=${UVCPP_NET_ENABLE}
       UVCPP_WEB_ENABLE=${UVCPP_WEB_ENABLE}
       UVCPP_WEBAPP_ENABLE=${UVCPP_WEBAPP_ENABLE}
+      UVCPP_WSDL_ENABLE=${UVCPP_WSDL_ENABLE}
       UVCPP_ZLIB_ENABLE=${UVCPP_ZLIB_ENABLE}
       UVCPP_OPENSSL_ENABLE=${UVCPP_OPENSSL_ENABLE}
       UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
@@ -911,6 +1026,27 @@ if(UVCPP_ENABLE_NGHTTP2)
       # install(EXPORT uvcppTargets) 要求导出集里每个非 IMPORTED 目标也在导出集
       # 里,nghttp2_static 不在。包上之后本工程内照常传播,导出里被剥成空。
       target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:nghttp2>)
+    endif()
+  endforeach()
+endif()
+
+# =========================================================================
+# WSDL 依赖链接 — pugixml
+# =========================================================================
+if(UVCPP_ENABLE_WSDL)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      # PRIVATE：pugixml 只出现在 src/wsdl/ 的 .cpp 与那个**不装出去**的
+      # uvcpp_wsdl_pugixml.h 里，公开头一个字都不引用它 —— 使用者既不需要它的
+      # include 也不需要它的 lib。
+      #
+      # 包 $<BUILD_INTERFACE:> 的理由与 zlib/nghttp2 那两段逐字相同（PRIVATE 在
+      # 静态库上会以 $<LINK_ONLY:> 进 INTERFACE_LINK_LIBRARIES，而 install(EXPORT)
+      # 要求导出集里每个非 IMPORTED 目标也在导出集里，pugixml-static 不在）。
+      #
+      # 用上游自己承诺的别名 `pugixml::pugixml`，而不是 `pugixml-static` 这个
+      # 库目标名 —— 别名是它对外的稳定接口，目标名漂过（nghttp2 那次同名缺陷）。
+      target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:pugixml::pugixml>)
     endif()
   endforeach()
 endif()
@@ -1030,6 +1166,16 @@ endif()
 file(GLOB WEBAPP_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/webapp/*.h")
 if(WEBAPP_HEADER_FILES AND UVCPP_BUILD_WEBAPP)
   install(FILES ${WEBAPP_HEADER_FILES} DESTINATION include/webapp)
+endif()
+
+# src/wsdl/ 的公开头不依赖 pugixml（`<pugixml.hpp>` 只出现在下面那个私有头里），
+# 所以只装我们自己的头 —— 与 http2 那条同一个理由（CMakeLists.txt 里 http2 那段）。
+file(GLOB WSDL_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/wsdl/*.h")
+# `uvcpp_wsdl_pugixml.h` 是**私有**头（它把 <pugixml.hpp> 拉进来，正是为了让别的头
+# 不拉），装出去等于把"使用者不需要 pugixml"这个结论作废。
+list(FILTER WSDL_HEADER_FILES EXCLUDE REGEX "uvcpp_wsdl_pugixml\\.h$")
+if(WSDL_HEADER_FILES AND UVCPP_ENABLE_WSDL)
+  install(FILES ${WSDL_HEADER_FILES} DESTINATION include/wsdl)
 endif()
 
 # ---------------------------------------------------------------------------

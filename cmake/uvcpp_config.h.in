@@ -46,6 +46,13 @@
 #  define UVCPP_WEBAPP_ENABLE @UVCPP_WEBAPP_ENABLE@
 #endif
 
+#if defined(UVCPP_WSDL_ENABLE) && (UVCPP_WSDL_ENABLE != @UVCPP_WSDL_ENABLE@)
+#  error "UVCPP_WSDL_ENABLE=@UVCPP_WSDL_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WSDL_ENABLE
+#  define UVCPP_WSDL_ENABLE @UVCPP_WSDL_ENABLE@
+#endif
+
 #if defined(UVCPP_ZLIB_ENABLE) && (UVCPP_ZLIB_ENABLE != @UVCPP_ZLIB_ENABLE@)
 #  error "UVCPP_ZLIB_ENABLE=@UVCPP_ZLIB_ENABLE@ in this build; remove your own definition of it"
 #endif

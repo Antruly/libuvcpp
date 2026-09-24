@@ -181,7 +181,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
-                "ssl/", "http2/", "expand/")
+                "ssl/", "http2/", "expand/", "wsdl/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -205,6 +205,13 @@ NOT_BUNDLED = ("openssl/", "nghttp2/")
 # `uvcpp_web_ws_client` 的片段在 WEBAPP=0 的包上**假红** —— 所以照样登记。**别按"多数
 # 头没守卫"把它删掉**：少数派那个才是决定这条记录的那一个。
 #
+# `wsdl/` 与 `web/` 同档，但机制更彻底一点：它的**两个**公开头整段套在
+# `#if UVCPP_WSDL_ENABLE` 里（宏为 0 时类直接消失），而且模块关掉时 `CMakeLists.txt`
+# 的 install 规则**根本不装**它们。两条路都通往假红，所以照样登记。**注意头在不在
+# 包里**这一半只是**本地**的形状：CI 打包 job 走 `package_release.py`，它是从 `src/`
+# 逐目录拷头的、与开关无关 —— 所以在那个包里 wsdl 头**在**、模块**没编**，
+# 只有这张表能把它判成"没编那个模块"而不是编不过。
+#
 # 不登记的：`net/` `expand/` `handle/` `req/` `uvcpp/`（实测各 0 个头用模块宏）。
 # 注意 `UVCPP_NET_ENABLE` **在生成头里是有定义的**（`cmake/uvcpp_config.h.in:28`），
 # 所以"没登记"不等于"没这个宏"，只是公开头一个都不用、宏为 0 时头依然完整。
@@ -219,6 +226,7 @@ MODULE_REQ = {
     "webapp/": "UVCPP_WEBAPP_ENABLE",
     "ssl/": "UVCPP_OPENSSL_ENABLE",
     "http2/": "UVCPP_NGHTTP2_ENABLE",
+    "wsdl/": "UVCPP_WSDL_ENABLE",
 }
 
 CONFIG_REL = os.path.join("include", "uvcpp", "uvcpp_config.h")
