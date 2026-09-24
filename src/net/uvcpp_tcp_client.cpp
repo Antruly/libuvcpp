@@ -47,6 +47,39 @@ static void trampoline_write(int status, void* arg) {
   delete cb;
 }
 
+// ---------------------------------------------------------------------------
+// 复用形态写请求（uvcpp_tcp_client::write_owned）的按连接状态
+// ---------------------------------------------------------------------------
+//
+// **归属：请求对象** —— 它挂在 `uvcpp_req::set_data` / `get_data` 那个槽上（那
+// 个槽本来就在，所以这一整套一个字都不改公开类型的布局）。请求在、状态就在；
+// 请求由调用方按连接留着重用，于是头部缓冲的容量也只申请一次，稳态下这一笔
+// 零分配（见 write_owned）。
+//
+// 为什么不按连接放在 `conn_ctx` 里（那才是"按连接"天然的家）：完成回调可能在
+// 连接上下文**已经被抹掉之后**才到（对端在途断开走 `remove_ctx` → `tbl.erase`），
+// 那一刻按 ctx 存的状态已经释放过了；而请求对象是 libuv 保证活到完成回调之后
+// 的。**判据是"谁的生命周期由 libuv 兜底"，不是"谁看起来更像按连接的"。**
+struct owned_write_state {
+  uvcpp_tcp_client* client = nullptr;
+  uvcpp_write*      w      = nullptr;
+  uvcpp_tcp_client::owned_write_cb_t fn = nullptr;
+  void*             arg    = nullptr;
+
+  // 头部块：按连接复用，容量只增不减。
+  uv_buf_t head     = {nullptr, 0};
+  char*    head_buf = nullptr;
+  size_t   head_cap = 0;
+
+  // 状态随请求一起放掉 ⇒ 头部缓冲也只在连接结束（或这一笔交不出去）时释放。
+  ~owned_write_state() {
+    if (head_buf != nullptr) {
+      uvcpp::uvcpp_free(head_buf);
+      head_buf = nullptr;
+    }
+  }
+};
+
 static void trampoline_read(uvcpp_buf* buf, void* arg) {
   auto* cb = static_cast<std::function<void(uvcpp_buf*)>*>(arg);
   (*cb)(buf);
@@ -156,6 +189,14 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   // **第一件事就把令牌作废**：此后 libuv 送进来的任何异步完成回调都只收尾
   // （把请求对象还回去），不再碰本对象的任何成员。
   if (alive_token_) *alive_token_ = 1;
+
+  // 复用形态（write_owned）在途的那一笔：存活判据不是令牌，而是按连接状态里
+  // 那个 `client` 指针 —— 同样**必须在这里**置空，且必须排在下面
+  // `write_arg_ = nullptr;` 之前（那之后就没有成员能找到这块状态了）。
+  // 完成回调据此判断"客户端已析构"：那时它连 `client` 都不许碰。
+  if (write_fn_ == trampoline_owned && write_arg_ != nullptr) {
+    static_cast<owned_write_state*>(write_arg_)->client = nullptr;
+  }
 
   // -------------------------------------------------------------------
   // **本对象可能是在它自己的某个回调里被析构的**（服务端最常见：读回调里
@@ -1305,23 +1346,10 @@ int uvcpp_tcp_client::write(const char* head, size_t head_len,
   uvcpp_write* w = new uvcpp_write();
   w->set_uv_buf_block(hb);
 
-  // 第 2 块：体。两种形状都**不拷字节**，差别只在谁负责让它活着。
-  // 注意判据是 `is_shared()` 而不是"有没有引用计数"：
-  //   * 共享视图 —— 引用计数接过来（`hold` 由请求对象持有到析构）；
-  //   * 自有块 —— `release_uv_buf()` 把块连同所有权交出来（**会先 materialize**，
-  //     共享视图走错这一支就会当场拷一份，所以顺序不能反）。同样走值形态：
-  //     这里也不需要一个堆上的 `uv_buf_t`。
-  if (body->is_shared()) {
-    uv_buf_t vb = uv_buf_init(const_cast<char*>(body->get_const_data()),
-                              static_cast<unsigned int>(body->size()));
-    w->append_uv_buf_view(vb, body->shared_ref());
-  } else if (body->size() > 0) {
-    uv_buf_t vb;
-    body->release_uv_buf(&vb);
-    w->append_uv_buf_block(vb);
-  }
-  // body 为空（且不是共享视图）时不追加第 2 块 —— 这时整条报文就是头部那块，
-  // 与 `write(uvcpp_buf*)` 传一个空块是同一形状。
+  // 第 2 块：体。判据与顺序**只有一份**，在 `uvcpp_write::adopt_body` 里
+  // （共享视图接引用计数、自有块接所有权，且 `release_uv_buf()` 会 materialize
+  // 所以顺序不能反）—— 复用形态 `write_owned` 走的是同一个方法。
+  w->adopt_body(body);
   w->set_self_free(true);
 
   std::shared_ptr<char> life = alive_token();
@@ -1354,6 +1382,194 @@ int uvcpp_tcp_client::write(const char* head, size_t head_len,
     return rc;
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 复用形态：请求对象与头部缓冲都由调用方持有，完成回调是**函数指针**
+// ---------------------------------------------------------------------------
+//
+// 与上面那个 4 参重载的差别**只在归属**：那边请求对象与它的头部块都是这条路上
+// 每笔现 `new` 的（还外加一个 `new std::function<void(int)>` 和一个捕获
+// `shared_ptr` 的跳板闭包）。这条路把三样都去掉：
+//
+//   * 请求对象由调用方 new 一次、按连接复用 ⇒ `uv_write_t` 那一笔也跟着从
+//     每请求降到每连接（它就在 `uvcpp_write` 的构造里）；
+//   * 头部字节拷进请求自己那份按连接复用的缓冲（`owned_write_state`）；
+//   * 完成回调是个**静态函数**：`uvcpp_stream::write` 把 `std::function` 按值
+//     收下、`std::move` 到底 —— 对平凡可拷贝、且尺寸进得了小对象缓冲的目标
+//     是就地存储（GCC 的判据是 `__is_location_invariant`，与 sizeof 无关），
+//     而捕获 `shared_ptr` 的闭包必然落堆。这条路上一次分配都没有。
+int uvcpp_tcp_client::write_owned(uvcpp_write* w, const char* head,
+                                  size_t head_len, uvcpp_buf* body,
+                                  owned_write_cb_t fn, void* arg) {
+  if (w == nullptr || fn == nullptr) return UV_EINVAL;
+  if (!has_status(TCP_CLIENT_CONNECTED)) return UV_ENOTCONN;
+  if (has_async_write_cb_) return UV_EALREADY;
+
+  owned_write_state* st = static_cast<owned_write_state*>(w->get_data());
+  if (st == nullptr) {
+    // 首次使用：这块状态跟着请求对象生灭（见 owned_write_state 的说明）。
+    st    = new owned_write_state();
+    st->w = w;
+    w->set_data(st);
+  }
+  st->client = this;
+  st->fn     = fn;
+  st->arg    = arg;
+
+#if UVCPP_OPENSSL_ENABLE
+  if (tls_ssl_ != nullptr) {
+    // 与 4 参重载同一个理由：TLS 下明文要经 `SSL_write`（它**拷**进去），
+    // 所以"两块"在这里没有意义，退回合并成一条。
+    //
+    // **这一段必须排在消费 head/body 之前**：下面 `adopt_body()` 会把体块的
+    // 所有权接手走（之后 `body->size()` 可能已经是 0），4 参重载把这段排在
+    // 消费之前 —— 那个顺序是承重的，这里照排（顺手也不再白拷一次头部）。
+    if (!tls_handshake_done_) {
+      st->client = nullptr;
+      st->fn     = nullptr;
+      st->arg    = nullptr;
+      return UV_ENOTCONN;
+    }
+
+    ::std::string merged(head, head_len);
+    if (body != nullptr && body->size() > 0) {
+      merged.append(body->get_const_data(), body->size());
+    }
+    const int trc = tls_write_plain(merged.data(), merged.size());
+    if (trc != 0) {
+      last_error_code_ = trc;
+      st->client = nullptr;
+      st->fn     = nullptr;
+      st->arg    = nullptr;
+      return trc;
+    }
+
+    // 标记在**发起之前**立：`tls_flush_out()` 可能同步跑完并回头调
+    // `trampoline_owned`，那时这两个成员得已经在位。
+    has_async_write_cb_ = true;
+    write_fn_  = trampoline_owned;
+    write_arg_ = st;
+    tls_write_pending_ = true;
+    tls_write_sync_    = false;
+    tls_flush_out();  // 完成时走 trampoline_owned → owned_write_done
+    return 0;
+  }
+#endif
+
+  // 第 1 块：头部。容量够就地 memcpy，不够才分配 —— 稳态（同一条连接的每一笔
+  // 响应）零分配。这块字节要活到完成回调，由"缓冲随状态、状态随请求"履行。
+  //
+  // 分配失败按本仓的既有形状**抛出**（`uvcpp_alloc_bytes` 会 memset 并抛
+  // `bad_alloc`，不返回 nullptr）。这里刻意把在途标记留在分配**之后**立 ——
+  // 抛出去时本对象仍是"没在写"的干净状态（4 参重载在这一点上更糙：它的
+  // `new uvcpp_write()` 落在标记之后，抛出去会留下一个永远在途的客户端）。
+  if (st->head_cap < head_len) {
+    void* nb = uvcpp::uvcpp_alloc_bytes(head_len);
+    if (st->head_buf != nullptr) uvcpp::uvcpp_free(st->head_buf);
+    st->head_buf = static_cast<char*>(nb);
+    st->head_cap = head_len;
+  }
+  if (head_len > 0 && head != nullptr) {
+    memcpy(st->head_buf, head, head_len);
+  }
+  st->head = uv_buf_init(st->head_buf, static_cast<unsigned int>(head_len));
+
+  // 复用前先复位：上一笔的体（自有块 / 视图引用）必须在这里放掉，否则紧接着的
+  // `set_uv_buf` 会把 `nbufs_` 归 1，那个槽位里的旧占用者就再也没人放了。
+  w->reset_for_reuse();
+  w->set_uv_buf(&st->head, /*owner=*/false);  // 借：字节归按连接那份缓冲
+  w->adopt_body(body);   // 体：与 4 参重载同一份判据（**顺序也只此一份**）
+  // 归属调用方：本类**绝不** delete 它（连"客户端已析构"那条路上也只是把它
+  // 连同状态一起放掉，见 owned_write_done）。
+  w->set_self_free(false);
+
+  has_async_write_cb_ = true;
+  write_fn_  = trampoline_owned;
+  write_arg_ = st;
+
+  const int rc = tcp_->write(
+      w, w->get_uv_bufs(), static_cast<unsigned int>(w->get_uv_nbufs()),
+      &uvcpp_tcp_client::owned_write_done);
+
+  if (rc != 0) {
+    // 提交失败：调用方收到非 0 就应当认为这次写没发生 —— 成员恢复原状，请求
+    // 对象仍归调用方（它会还回自己的槽继续复用）。
+    last_error_code_ = rc;
+    has_async_write_cb_ = false;
+    write_fn_  = nullptr;
+    write_arg_ = nullptr;
+    st->client = nullptr;
+    st->fn     = nullptr;
+    st->arg    = nullptr;
+    return rc;
+  }
+  return 0;
+}
+
+void uvcpp_tcp_client::owned_write_done(uvcpp_write* w, int status) {
+  owned_write_state* st =
+      (w != nullptr) ? static_cast<owned_write_state*>(w->get_data()) : nullptr;
+  if (st == nullptr) {
+    // 构造上的兜底：状态与请求同生共死，走到这里说明有人 hand-roll 了请求对象。
+    delete w;
+    return;
+  }
+  uvcpp_tcp_client* c = st->client;
+  if (c == nullptr) {
+    // 客户端已经析构（析构函数把这一格置空）：`c` 与本对象的成员一个都不能碰，
+    // 调用方的回调也不调（它的 `client` / `arg` 此刻已经不可信）。唯一还能做的
+    // 就是替调用方把请求连同状态还回去。
+    release_owned_write(w);
+    return;
+  }
+  c->finish_owned_write(status);
+
+  owned_write_cb_t fn = st->fn;
+  void*            arg = st->arg;
+  st->fn  = nullptr;
+  st->arg = nullptr;
+  if (fn != nullptr) {
+    // 请求的去向由调用方定：还回按连接的槽（复用）或 `release_owned_write`。
+    //
+    // 这里删 `w` 是**安全**的：`uvcpp_write::callback_write` 走
+    // `uvcpp_req::invoke_completion`，那里"读 `is_self_free()` 在调闭包之前、
+    // 按它删对象在闭包返回之后"，闭包返回后一个成员都不再碰 —— 所以调用方在
+    // 本回调里把 `w` 删掉是本仓既有的合法形状（那个函数的注释就是这么写的：
+    // "回调拿到 `self`，有权把它删掉"）。
+    fn(w, c, status, arg);
+  } else {
+    release_owned_write(w);
+  }
+}
+
+void uvcpp_tcp_client::finish_owned_write(int status) {
+  if (status != 0) last_error_code_ = status;
+  // 次序与另外几个重载一致：先存后清，且 `has_async_write_cb_` 必须在回调
+  // **之前**清 —— 否则回调里接着发起下一次写会拿到 UV_EALREADY。
+  write_fn_  = nullptr;
+  write_arg_ = nullptr;
+  has_async_write_cb_ = false;
+}
+
+void uvcpp_tcp_client::release_owned_write(uvcpp_write* w) {
+  if (w == nullptr) return;
+  // 状态（含头部缓冲）归请求对象，先放状态再放请求。请求的 `uv_buf` 指着状态
+  // 里那个 `uv_buf_t`，而它是按"借"登记的（owner=false）⇒ `~uvcpp_write` 不会
+  // 去 free 它（它只在 `uv_buf_owner` 为真时释放）—— 顺序在这一点上不承重，
+  // 写清楚只为下一个人不必再推一遍。
+  delete static_cast<owned_write_state*>(w->get_data());
+  w->set_data(nullptr);
+  delete w;
+}
+
+void uvcpp_tcp_client::trampoline_owned(int status, void* arg) {
+  // TLS 收尾那条路的跳板（`tls_finish_write` 走 `fn(status, arg)`），无捕获 ——
+  // `std::function` 就地存储。明文路**不经过这里**：那条路的完成回调是
+  // `owned_write_done`，由 `uvcpp_write::m_write_cb` 直接送达。
+  auto* st = static_cast<owned_write_state*>(arg);
+  if (st == nullptr || st->w == nullptr) return;
+  owned_write_done(st->w, status);
 }
 
 // uvcpp_buf* overload (zero-copy, transfers ownership of buffer data)

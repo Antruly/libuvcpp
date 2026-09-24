@@ -96,6 +96,30 @@ class UVCPP_API uvcpp_write : public uvcpp_req {
   void append_uv_buf_block(uv_buf_t bf);
 
   /**
+   * @brief 复用前的复位：放掉上一笔的字节（自有块 / 共享视图引用），第 1 块也
+   *        清成空 —— 下一笔自己会重设。**保留**自己的 `uv_write_t`。
+   *
+   * 给"按连接复用同一个写请求对象"那条路用（见
+   * `uvcpp_tcp_client::write_owned`）：请求对象申请一次、每笔响应重用，于是
+   * `uv_write_t` 与请求对象这两笔堆分配从"每请求"降到**每连接**。
+   *
+   * 只动"上一笔的字节归谁"：`hold_` / `second_owner` / `second_block_base_`
+   * 全部按各自的归属放掉。漏一个的后果不是泄漏而是"第二块是上一笔的"——
+   * 复用时下一次 append 会把占用者换掉，而那个槽位里还留着上一笔的块或视图。
+   */
+  void reset_for_reuse();
+
+  /**
+   * @brief 第 2 块：接手 `body`（`is_shared()` ⇒ 接引用计数；否则 ⇒ 接块的所有权）。
+   *
+   * 与 `uvcpp_tcp_client::write(head, head_len, body, cb)` 的体处理是**同一份**
+   * 判据，顺序也不能反（`release_uv_buf()` 会先把共享视图 materialize 成一份
+   * 拷贝，共享视图走错那一支就白拷一次）。抽到这里是为了不让第二个调用点各抄
+   * 一份 —— 本仓的 ws 那族就是这么来的（见 `start_write` 那条同族注释）。
+   */
+  void adopt_body(uvcpp_buf* body);
+
+  /**
    * @brief 本次写要交给 `uv_write` 的缓冲数组。
    *
    * 只有 1 块时返回 `get_uv_buf()`（与既有形状逐字一致）；有 2 块时返回内部

@@ -15,6 +15,9 @@
 #include <web/uvcpp_http_date.h>
 // `uvcpp_loop_index_of_this_thread()`：按循环切容器要问"我在哪条循环上"。
 #include <net/uvcpp_loop_worker.h>
+// `start_write` 要在连接上留一个复用形态的写请求（`new uvcpp_write()`），
+// 那需要完整类型；本层的公开头只把它当指针用，所以没在自己头里带进来。
+#include <req/uvcpp_write.h>
 #include <cstdio>
 #include <cstdlib>  // `std::abort()`：`ctxs_at()` 对多循环下的 -1 直接终止
 #include <cstring>
@@ -70,6 +73,12 @@ uvcpp_http_server::~uvcpp_http_server() {
       delete kv.second.h2;
       kv.second.h2 = nullptr;
 #endif
+      // 复用形态那个写请求（如果有）也在这张表里，与 `remove_ctx` 同一句 ——
+      // 能走到这里的正是"`remove_ctx` 没跑过"的那种路（客户端先于服务端被释放）。
+      if (kv.second.wrecycle != nullptr) {
+        uvcpp_tcp_client::release_owned_write(kv.second.wrecycle);
+        kv.second.wrecycle = nullptr;
+      }
     }
     tbl.clear();
   }
@@ -1247,6 +1256,85 @@ void uvcpp_http_server::fire_write_done(const std::shared_ptr<write_done>& d,
   if (fn) fn(status);
 }
 
+// 结算这次写。**身体是从 `start_write` 里那个 `on_written` 闭包整段搬过来的**
+// （连注释一起），所以"一块那条路"与"两块那条路"结算的仍然是同一份逻辑；搬出来
+// 的另一个理由是复用形态那条路也要用它，而那条路的完成回调是个函数指针、捕不了
+// 任何东西。见 `start_write` 里那段「重入次序铁律」。
+void uvcpp_http_server::settle_write(uvcpp_tcp_client* client,
+                                     const std::shared_ptr<write_done>& wd,
+                                     uvcpp_write* recycle, int status) {
+  std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+  auto c = tbl.find(client);
+  if (c == tbl.end()) {
+    // 连接已经从表里消失；这一块的下场仍然是"不会写出去了"。
+    //
+    // 复用形态还要多做一件事：那个写请求本来该在下面的 `cc.wrecycle` 格里等下
+    // 一笔，而那张表项已经没了 —— 除了本函数没有别人认它（库里只在完成回调这
+    // 一刻认），所以在这里放掉。**必须在 `fire_write_done` 之前**：闭包最自然
+    // 的动作就是再写一块，那一刻它既不该看见一个已经没人要的请求，也不该因为
+    // 这一格而被牵着走。
+    if (recycle != nullptr) uvcpp_tcp_client::release_owned_write(recycle);
+    fire_write_done(wd, status != 0 ? status : UV_ECANCELED);
+    return;
+  }
+
+  conn_ctx& cc = c->second;
+  cc.write_pending = false;
+  // **先把在途这一块摘下来，再关连接。** 反过来的话
+  // close_connection 会把它当成"还没结算的在途块"用 UV_ECANCELED
+  // 唤醒，而这里明明拿到了真实结果（ECONNRESET 之类）—— 调用方
+  // 就再也分不清"对端在写的时候走了"和"框架自己取消的"。
+  cc.inflight.reset();
+  // 复用形态：请求就地还回按连接的槽，下一笔 `start_write` 直接取用。
+  // **必须在 `close_connection` 之前**：那个函数可能经 `remove_ctx` 把这张表项
+  // 抹掉，抹掉之后这一格连同里面的请求一起消失（`remove_ctx` 会放掉它）。
+  if (recycle != nullptr) cc.wrecycle = recycle;
+  if (status != 0) {
+    // The peer is gone: nothing still queued can be delivered, and
+    // the connection needs retiring. Any `done` still parked in the
+    // queue is woken by close_connection() with UV_ECANCELED.
+    close_connection(client);
+    fire_write_done(wd, status);
+    return;  // `cc` 已经被 close_connection 抹掉，后面一个字都不能碰
+  }
+
+  fire_write_done(wd, 0);
+
+  // **`wd` 为空时上面那句什么用户代码都没跑**（`fire_write_done` 第一句就是
+  // `if (!d || d->fired) return;`），`contexts_` 必然还是刚才那个样子 —— 所以
+  // `c` 仍然有效，这一次 find 直接省掉。有 `wd` 时才必须重查：闭包最自然的
+  // 动作就是关连接或再写一块，两者都可能把表项摘掉。普通响应走的正是省掉
+  // 这一查的那条（`enqueue_write` 的五个调用点里四个不传 `done`）。
+  if (wd) {
+    c = tbl.find(client);
+    if (c == tbl.end()) return;
+  }
+  if (c->second.closing) return;
+
+  // **不在这里判 `close_requested`。** 这里是"某一块写完了"，而
+  // `close_requested` 的语义是"**我排的队写完**之后关"，不是"下一个写
+  // 完成时关"。一个 handler 完全可能（而且流式响应里就是常态）在**头部
+  // 还在途**的时候就把整条响应写完并调 `end_stream(close_after=true)`：
+  // 那时队列里还压着 body 的每一块，而本次写完成的是**头部**。早先在这里
+  // 判它，等于把整个 body 当成"写完头部之后的余量"丢掉 —— 线上症状是
+  // 只剩一个头部块、连接随即关闭（`web_stream_response_func` 的
+  // `stream_roundtrip` 就是这么红的）。
+  //
+  // 交给 pump_write 的空队列分支去收尾：它只在**队列真的空了**时才看
+  // `close_requested`，而且那条分支还带着"对端还在发 → 把关闭推迟到
+  // 消息结束"的判定（上传路径需要），在这里重写一遍必然漏掉那个判定。
+  pump_write(c->second, client);
+}
+
+void uvcpp_http_server::recycle_write_done(uvcpp_write* w,
+                                           uvcpp_tcp_client* client,
+                                           int status, void* arg) {
+  // 无捕获 ⇒ 转成 `std::function` 时走小对象缓冲，不落堆 —— 这一笔与请求对象、
+  // 头部缓冲那两笔一样，都是从这条路上省下来的。这里一转就回到那条共用结算路径。
+  static_cast<uvcpp_http_server*>(arg)->settle_write(
+      client, std::shared_ptr<write_done>(), w, status);
+}
+
 void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
   std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
   auto it = tbl.find(client);
@@ -1404,60 +1492,31 @@ void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
   // 回调提到两个重载外面来：两块那条路与一块那条路是**同一个**结算逻辑，
   // 抄成两份就是给"以后只改了一份"留口子（本仓的 ws 那族就是这么来的）。
   auto on_written = [this, client, wd](int status) {
-    std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
-    auto c = tbl.find(client);
-    if (c == tbl.end()) {
-      // 连接已经从表里消失；这一块的下场仍然是"不会写出去了"。
-      fire_write_done(wd, status != 0 ? status : UV_ECANCELED);
-      return;
-    }
-
-    conn_ctx& cc = c->second;
-    cc.write_pending = false;
-    // **先把在途这一块摘下来，再关连接。** 反过来的话
-    // close_connection 会把它当成"还没结算的在途块"用 UV_ECANCELED
-    // 唤醒，而这里明明拿到了真实结果（ECONNRESET 之类）—— 调用方
-    // 就再也分不清"对端在写的时候走了"和"框架自己取消的"。
-    cc.inflight.reset();
-    if (status != 0) {
-      // The peer is gone: nothing still queued can be delivered, and
-      // the connection needs retiring. Any `done` still parked in the
-      // queue is woken by close_connection() with UV_ECANCELED.
-      close_connection(client);
-      fire_write_done(wd, status);
-      return;  // `cc` 已经被 close_connection 抹掉，后面一个字都不能碰
-    }
-
-    fire_write_done(wd, 0);
-
-    // **`wd` 为空时上面那句什么用户代码都没跑**（`fire_write_done` 第一句就是
-    // `if (!d || d->fired) return;`），`contexts_` 必然还是刚才那个样子 —— 所以
-    // `c` 仍然有效，这一次 find 直接省掉。有 `wd` 时才必须重查：闭包最自然的
-    // 动作就是关连接或再写一块，两者都可能把表项摘掉。普通响应走的正是省掉
-    // 这一查的那条（`enqueue_write` 的五个调用点里四个不传 `done`）。
-    if (wd) {
-      c = tbl.find(client);
-      if (c == tbl.end()) return;
-    }
-    if (c->second.closing) return;
-
-    // **不在这里判 `close_requested`。** 这里是"某一块写完了"，而
-    // `close_requested` 的语义是"**我排的队写完**之后关"，不是"下一个写
-    // 完成时关"。一个 handler 完全可能（而且流式响应里就是常态）在**头部
-    // 还在途**的时候就把整条响应写完并调 `end_stream(close_after=true)`：
-    // 那时队列里还压着 body 的每一块，而本次写完成的是**头部**。早先在这里
-    // 判它，等于把整个 body 当成"写完头部之后的余量"丢掉 —— 线上症状是
-    // 只剩一个头部块、连接随即关闭（`web_stream_response_func` 的
-    // `stream_roundtrip` 就是这么红的）。
-    //
-    // 交给 pump_write 的空队列分支去收尾：它只在**队列真的空了**时才看
-    // `close_requested`，而且那条分支还带着"对端还在发 → 把关闭推迟到
-    // 消息结束"的判定（上传路径需要），在这里重写一遍必然漏掉那个判定。
-    pump_write(c->second, client);
+    settle_write(client, wd, nullptr, status);
   };
 
-  int rc = has_body ? client->write(wire.c_str(), wire.size(), body, on_written)
-                    : client->write(wire.c_str(), wire.size(), on_written);
+  // 复用形态那条路带出来的请求（一块/两块都可能有），失败时还回槽用。
+  uvcpp_write* recycle_w = nullptr;
+  int rc = 0;
+  if (wd) {
+    rc = has_body ? client->write(wire.c_str(), wire.size(), body, on_written)
+                  : client->write(wire.c_str(), wire.size(), on_written);
+  } else {
+    // ---- 复用形态 ----
+    // 没有 `done` 的调用点（`enqueue_write` 五个里占四个，普通响应正在其中）
+    // 走这条：请求对象连同它的 `uv_write_t`、头部缓冲都按连接复用，完成回调是
+    // 个函数指针 ⇒ 从请求对象到回调兑现**一次堆分配都没有**。
+    //
+    // 有 `done` 的那些必须留在原地：结算器的全部作用就是把那个闭包唤醒一次，
+    // 而闭包的去向只有 `wd` 知道（见上面那段"空闭包"的说明）—— 把 `done` 的
+    // 所有权搬到另一个容器里是另一件事，不在这笔里做。
+    if (ctx.wrecycle == nullptr) ctx.wrecycle = new uvcpp_write();
+    recycle_w = ctx.wrecycle;
+    ctx.wrecycle = nullptr;  // 出去的那一刻就不在这格里了（见 conn_ctx::wrecycle）
+    rc = client->write_owned(recycle_w, wire.c_str(), wire.size(),
+                             has_body ? body : nullptr,
+                             &uvcpp_http_server::recycle_write_done, this);
+  }
 
   if (rc != 0) {
     // The write never started, so its completion callback will never fire.
@@ -1468,6 +1527,12 @@ void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
     // 关完连接再用真实 rc 结算。
     ctx.write_pending = false;
     ctx.inflight.reset();
+    // 复用形态：交不出去的请求还回槽 —— 下面 `close_connection` 必然经由
+    // `remove_ctx`（或延迟到关闭收尾的那次）走过 `ctx.wrecycle`，由它连同头部
+    // 缓冲一起放掉。**不能在这里自己 delete**：那时 `body` 的所有权可能已经交给
+    // 这个请求了（`adopt_body`），而调用方栈上那份 `uvcpp_buf` 还指着同一块 ——
+    // 还回槽里让同一个出口收尾，就不存在两条释放路径。
+    if (recycle_w != nullptr) ctx.wrecycle = recycle_w;
     close_connection(client);
     fire_write_done(wd, rc);
   }
@@ -1557,6 +1622,12 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
     // 在"客户端已被析构"时会早返回，而这正是对端断开时发生的事。
     std::shared_ptr<write_done> inflight;
     inflight.swap(it->second.inflight);
+    // 复用形态那个写请求也在这一格里（见 conn_ctx::wrecycle）—— 它与上面两块
+    // 一样是"只有这张表登记着"的东西：库里只在完成回调那一刻认它，而这条路正是
+    // "回调可能永远不来"的那条（对端断开时网络层的写回调早返回）。先取到局部、
+    // 抹掉槽，erase 之后再放 —— 与上面两块同一个次序。
+    uvcpp_write* wrecycle = it->second.wrecycle;
+    it->second.wrecycle = nullptr;
     delete it->second.parser;
 #if UVCPP_NGHTTP2_ENABLE
     // h2 层**不拥有** client（那是 tcp_server 的 close manager 的责任），
@@ -1575,6 +1646,10 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
     it->second.h2 = nullptr;
 #endif
     tbl.erase(it);
+
+    // 放掉复用形态那个写请求（连同它的头部缓冲）。**放在唤醒 `done` 之前**：
+    // 那些闭包最自然的动作就是再写一块，而那一刻本表项已经没有了。
+    if (wrecycle != nullptr) uvcpp_tcp_client::release_owned_write(wrecycle);
 
     for (size_t i = 0; i < dropped.size(); ++i) {
       if (dropped[i].done) dropped[i].done(UV_ECANCELED);

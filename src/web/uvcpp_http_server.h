@@ -656,6 +656,29 @@ class UVCPP_API uvcpp_http_server {
   /** @brief 唤醒一个结算器；已经响过就什么都不做（幂等）。 */
   void fire_write_done(const std::shared_ptr<write_done>& d, int status);
 
+  /**
+   * @brief 一次写完成后的**唯一**结算路径：一块那条路与两块那条路共用它。
+   *
+   * 「重入次序铁律」就落在这个函数里（`start_write` 那段注释）：只在这一步碰
+   * `contexts_`，把要用的值拷出来再离开；不持有任何引用时调用 `done`；之后再
+   * 重新 find 决定下一步。抽成函数是因为**两条路必须逐字同一份**逻辑 ——
+   * 抄成两份就是给"以后只改了一份"留口子（本仓的 ws 那族就是这么来的）。
+   *
+   * @param recycle 复用形态那个写请求（见 @ref conn_ctx::wrecycle）；一元素形态
+   *                传 nullptr。非空时在本函数里还回 `ctx.wrecycle`，或按
+   *                "表项已经没了"那条路直接放掉。
+   */
+  void settle_write(uvcpp_tcp_client* client,
+                    const std::shared_ptr<write_done>& wd,
+                    uvcpp_write* recycle, int status);
+
+  /**
+   * @brief 复用形态的写完成回调：**无捕获 ⇒ 函数指针**，`std::function` 就地
+   *        存储，这一笔的堆分配就是这么省掉的（见 @ref settle_write）。
+   */
+  static void recycle_write_done(uvcpp_write* w, uvcpp_tcp_client* client,
+                                 int status, void* arg);
+
   struct conn_ctx {
     uvcpp_http_parser* parser = nullptr;
 
@@ -834,6 +857,23 @@ class UVCPP_API uvcpp_http_server {
      * 时它必然非空 —— 它是关闭路径唤醒在途那一块的唯一入口。
      */
     std::shared_ptr<write_done> inflight;
+
+    /**
+     * @brief 按连接复用的那个写请求（@ref uvcpp_tcp_client::write_owned）。
+     *
+     * 稳态下这里是 **nullptr**：`start_write` 取走它、写完后 `settle_write`
+     * 还回来，中间只在"写请求正在网络层手里"那一刻不在这格。所以它既不与
+     * @ref inflight 重叠，也不与 @ref write_queue 重叠。
+     *
+     * **只有这一张表认它**（库里只在完成回调那一刻认），所以两个抹除表项的地方
+     * 都必须放掉它：`remove_ctx`（对端断开、关闭收尾都经它）与析构函数里那个
+     * `tbl.clear()` 循环。少一处就是每条连接漏一个写请求对象加它的头部缓冲。
+     *
+     * 普通响应走这条路是因为它**一次堆分配都不发生**：请求对象（连同里面的
+     * `uv_write_t`）与头部缓冲都按连接复用，完成回调是个函数指针。有 `done`
+     * 的调用点仍走原来那条 —— 结算器要唤醒那个闭包，而闭包的去向只有它知道。
+     */
+    uvcpp_write* wrecycle = nullptr;
 
     bool close_requested = false;  // a response asked for close after its write
     bool closing = false;          // a close has already been issued

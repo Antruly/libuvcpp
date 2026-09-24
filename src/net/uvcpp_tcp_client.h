@@ -443,6 +443,50 @@ class UVCPP_API uvcpp_tcp_client {
             std::function<void(int)> cb);
 
   /**
+   * @brief 复用形态的完成回调：`w` 归调用方（见 @ref write_owned）。
+   *
+   * `client` 是这一笔所属的客户端。**客户端先析构时本回调不会被调用** ——
+   * 那时框架只把 `w` 连同它的复用状态还回去（见 @ref write_owned 的契约）。
+   */
+  typedef void (*owned_write_cb_t)(uvcpp_write* w, uvcpp_tcp_client* client,
+                                   int status, void* arg);
+
+  /**
+   * @brief 异步写：**请求对象与头部缓冲都由调用方持有**，完成回调是个**函数
+   *        指针**（不是 `std::function`）⇒ 这条路上一次堆分配都不发生。
+   *
+   * 与 @ref write(const char*, size_t, uvcpp_buf*, std::function<void(int)>)
+   * 的语义差别**只在归属**：
+   *
+   *   - `w` 由调用方 `new` / 持有 / 复用（典型用法：按连接留一个，写完还回来）。
+   *     框架**绝不** `delete` 它（内部按 `set_self_free(false)` 交回）；
+   *   - 头部字节拷进 `w` 自己那份按连接复用的缓冲（容量只增不减）⇒ 稳态下
+   *     头部这一笔零分配；
+   *   - 完成时框架调 `fn(w, client, status, arg)`，`w` 的去向由 `fn` 决定
+   *     （还回槽、或 `release_owned_write()` 放掉）；
+   *   - **客户端先析构**时 `fn` 不会被调用，框架替调用方把 `w` 放掉 ⇒ 调用方
+   *     那一笔不必（也无从）自行回收。
+   *
+   * `body` 的消费语义、以及 TLS 上退回"合并成一条"，与上面那个 4 参重载逐字
+   * 相同。同一个请求对象**不许**并发交两次（会被 `has_async_write_cb_` 拦成
+   * `UV_EALREADY`）；写完了才可以交下一笔。
+   *
+   * @param fn 不能为空（空回调请用上面那个重载）。
+   */
+  int write_owned(uvcpp_write* w, const char* head, size_t head_len,
+                  uvcpp_buf* body, owned_write_cb_t fn, void* arg);
+
+  /**
+   * @brief 放掉一个复用形态的写请求：连同它按连接那点状态（头部缓冲）一起。
+   *
+   * 调用方在 `fn` 里决定"还回槽继续复用"还是"不要了" —— 后者调这个。**必须**
+   * 走这个入口而不是 `delete w`：那点状态不在请求对象自己的成员里（它挂在
+   * `uvcpp_req::set_data` 的槽上，见 `write_owned` 的实现），漏了就是每条连接
+   * 一次的泄漏。
+   */
+  static void release_owned_write(uvcpp_write* w);
+
+  /**
    * @brief Synchronous write with explicit timeout (raw pointer).
    * @throws std::runtime_error if an async write callback was already
    *         registered.
@@ -825,6 +869,23 @@ class UVCPP_API uvcpp_tcp_client {
   void*              connect_arg_ = nullptr;
   write_callback_t   write_fn_    = nullptr;
   void*              write_arg_   = nullptr;
+
+  // -------------------------------------------------------------------
+  // 复用形态（write_owned）的内部收尾
+  // -------------------------------------------------------------------
+  //
+  // 这条路上**没有令牌可捕**（捕获 `shared_ptr` 的闭包就是把完成回调推上堆的
+  // 那一笔，正是本笔要消掉的），存活判据换成"按连接状态里的 `client` 指针还在
+  // 不在"：析构函数第一件事把它置空（与 `alive_token_` 同一时刻、同一个理由），
+  // 完成回调据此决定是收尾还是只把请求还回去。
+  //
+  // `write_fn_` 在这条路上只当**在途标记**（值是 `trampoline_owned`）——
+  // 完成回调是 `std::function` 就地存得下的**静态函数**，不走 `fn(status, arg)`
+  // 那一套（唯一会走的是 TLS 的收尾，见 `trampoline_owned`）；`write_arg_` 存
+  // 按连接状态，不是 `new` 出来的 `std::function`。
+  static void owned_write_done(uvcpp_write* w, int status);
+  static void trampoline_owned(int status, void* arg);
+  void finish_owned_write(int status);
 
   // -------------------------------------------------------------------
   // 存活令牌 —— 异步完成回调不许踩已析构的对象

@@ -97,6 +97,34 @@ void uvcpp_write::append_uv_buf_block(uv_buf_t bf) {
 
 uv_buf_t *uvcpp_write::get_uv_buf() { return uv_buf; }
 
+void uvcpp_write::reset_for_reuse() {
+  // 第 2 块：按它自己的归属放掉（自有块 / 第二块的值形态 / 共享视图的引用）。
+  release_second();
+  // 第 1 块：`set_uv_buf(nullptr, false)` 会按旧占用者的归属放掉（指针形态放
+  // 包装 + 块、值形态放块），并把 `nbufs_` 归 1 —— 与"重设第 1 块即回到只有
+  // 一块"那条既有规则同形。下一笔写自己会重设。
+  set_uv_buf(nullptr, false);
+}
+
+void uvcpp_write::adopt_body(uvcpp_buf* body) {
+  if (body == nullptr) return;
+  // 判据是 `is_shared()` 而不是"有没有引用计数"：
+  //   * 共享视图 —— 引用计数接过来（`hold` 由本请求持有到析构）；
+  //   * 自有块 —— `release_uv_buf()` 把块连同所有权交出来（**会先 materialize**，
+  //     共享视图走错这一支就会当场拷一份，所以顺序不能反）。
+  if (body->is_shared()) {
+    uv_buf_t vb = uv_buf_init(const_cast<char*>(body->get_const_data()),
+                              static_cast<unsigned int>(body->size()));
+    append_uv_buf_view(vb, body->shared_ref());
+  } else if (body->size() > 0) {
+    uv_buf_t vb;
+    body->release_uv_buf(&vb);
+    append_uv_buf_block(vb);
+  }
+  // body 为空（且不是共享视图）时不追加第 2 块 —— 这时整条报文就是头部那块，
+  // 与 `write(uvcpp_buf*)` 传一个空块是同一形状。
+}
+
 void uvcpp_write::append_uv_buf_view(
     uv_buf_t bf, const ::std::shared_ptr<const ::std::string> &hold) {
   release_second();
