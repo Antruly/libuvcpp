@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.23--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.24--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.23-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.24-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.23-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.24-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -787,6 +787,15 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   `next` still throws). The price, stated plainly: `sizeof(uvcpp_web_next)` **32 → 48**
   and `sizeof(uvcpp_web_stream)` **288 → 304**, every other public type unchanged — a
   **source and ABI break**. 12.02 → 8.02 allocations per request (`1.3.23`)
+- The block `uvcpp_web_context::create()` allocates (object and control block in
+  one) is no longer handed back to malloc: it stays in a **thread-local** free list
+  for the next request (`uvcpp_block_cache` in `uvcpp_alloc.h` — `std::allocate_shared`
+  plus a stateless allocator that only adds block recycling). **The memory block is
+  recycled, the object is not** — construction, destruction and refcounting are
+  untouched, so `shared_from_this()`, `user_data_` and `hold_count_` mean exactly what
+  they meant. The price, stated plainly: the block no longer passes through
+  `operator delete`, so ASAN/valgrind cannot see it being freed (a known blind spot
+  when chasing memory bugs). 8.02 → 7.02 allocations per request (`1.3.24`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

@@ -178,9 +178,9 @@ class UVCPP_API uvcpp_web_context
    * **只能这样造** —— 直接 `new` 或者放栈上会让 `shared_from_this()`
    * 抛异常（`advance()` 依赖它把自己续住）。
    *
-   * 走 `make_shared` 而不是 `shared_ptr(new …)`：后者每请求**两次**分配
-   * （1192 B 的对象 + 24 B 的控制块），合并之后只剩一次。构造函数是公开的，
-   * 但要一个凭证参数（见 `uvcpp_web_context_key`），外部造不出来。
+   * 走 `allocate_shared` + **块回收**（见 `uvcpp_alloc.h` 的 `uvcpp_block_cache`）：
+   * 对象与控制块合并成一块（`shared_ptr(new …)` 是两次分配），引用计数归零后那一块
+   * 留在本线程自由表里给下一条请求复用。构造/析构/引用计数一字未改，凭证参数照旧。
    */
   static std::shared_ptr<uvcpp_web_context> create(uvcpp_web_context_host& host,
                                                    uvcpp_web_conn_id conn_id);

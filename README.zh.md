@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.23--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.24--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.23-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.24-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.23-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.24-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -747,6 +747,13 @@ libuvcpp/
   移动 —— 判据就是靠拷贝把引用数抬起来、空 next 调用照旧抛）。代价照实说：
   `sizeof(uvcpp_web_next)` **32 → 48**、`uvcpp_web_stream` **288 → 304**，其余公开类型
   逐项不变 ⇒ 这是**源码 + ABI 双重断点**。每请求 12.02 → 8.02 次分配（`1.3.23`）
+- `uvcpp_web_context::create()` 那一块（对象与控制块合并出来的定长块）不再还给
+  malloc，而是留在**本线程**的自由表里给下一条请求复用（`uvcpp_alloc.h` 的
+  `uvcpp_block_cache`：`std::allocate_shared` + 一个只加一层块回收的无状态分配器）。
+  **只回收内存块、不回收对象** —— 构造/析构/引用计数一字未改，`shared_from_this()`、
+  `user_data_`、`hold_count_` 的语义都没动。★ 代价照实说：这一块不再经过
+  `operator delete`，所以 ASAN/valgrind 看不到它的释放（查内存问题时是已知盲区）。
+  每请求 8.02 → 7.02 次分配（`1.3.24`）
 - 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
   超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
   `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）

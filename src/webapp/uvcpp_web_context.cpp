@@ -8,6 +8,9 @@
 #include <webapp/uvcpp_web_context.h>
 
 #include <exception>
+#include <memory>
+
+#include <uvcpp/uvcpp_alloc.h>
 
 #include <webapp/uvcpp_log.h>
 
@@ -33,14 +36,19 @@ uvcpp_web_context::uvcpp_web_context(uvcpp_web_context_key,
 
 std::shared_ptr<uvcpp_web_context> uvcpp_web_context::create(
     uvcpp_web_context_host& host, uvcpp_web_conn_id conn_id) {
-  // `make_shared` 而不是 `shared_ptr(new …)`：后者是**两次**分配（对象 1192 B
-  // + 控制块 24 B），合并之后只剩一次 —— 普查里那是 1.00 次/请求。
+  // ① `make_shared` 而不是 `shared_ptr(new …)`：后者是**两次**分配（对象
+  //    1192 B + 控制块 24 B），合并之后只剩一次 —— 普查里那是 1.00 次/请求。
+  // ② 在 ① 之上再换成 `allocate_shared` + **块回收**：那一块（对象与控制块合并
+  //    出来的定长块）在引用计数归零时不再还给 malloc，而是留在**本线程**的自由
+  //    表里给下一条请求复用（见 `uvcpp_alloc.h` 的 `uvcpp_block_cache`）。
+  //    构造、析构、引用计数**一个字节都没改** —— 只换了「块从哪来」。
   //
-  // 构造函数是私有的，而 `make_shared` 够不着私有构造（它内部 new 的是
-  // `_Sp_counted_ptr_inplace` / `_Ref_count_obj2`，`friend` 给 `make_shared`
-  // 也没用，MSVC 上直接 C2248）。所以构造函数公开、用凭证参数锁住类外调用。
-  return std::make_shared<uvcpp_web_context>(uvcpp_web_context_key(), host,
-                                             conn_id);
+  // 构造函数是公开的、但带一个凭证参数（见 `uvcpp_web_context_key`），所以
+  // `make_shared` / `allocate_shared` 都够得着它，而类外的直接 `new` 或放栈上
+  // 造不出来 —— 那两条路会让 `shared_from_this()` 抛异常。
+  return std::allocate_shared<uvcpp_web_context>(
+      uvcpp_block_allocator<uvcpp_web_context>(), uvcpp_web_context_key(),
+      host, conn_id);
 }
 
 // =========================================================================
