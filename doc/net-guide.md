@@ -38,13 +38,13 @@
 
 | 类 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_tcp_server` | `src/net/uvcpp_tcp_server.h:121` | `bind` / `listen`，**拥有**每一条 accept 出来的连接，给所有连接共用一份读回调 |
+| `uvcpp_tcp_server` | `src/net/uvcpp_tcp_server.h:123` | `bind` / `listen`，**拥有**每一条 accept 出来的连接，给所有连接共用一份读回调 |
 | `uvcpp_tcp_client` | `src/net/uvcpp_tcp_client.h:99` | 双模式（异步回调 / 同步 `*_wait`）TCP 连接；服务端交给你的那条连接也是它 |
 | `uvcpp_udp_server` | `src/net/uvcpp_udp_server.h:51` | 绑定的 UDP 套接字，交付数据报时带来源 ip/port；没有"连接对象" |
 | `uvcpp_udp_client` | `src/net/uvcpp_udp_client.h:72` | UDP 客户端，`bind`/`connect`、异步与同步发送、内部接收缓存 |
 | `net_read_result` | `src/net/uvcpp_net_read.h:68` | 一次读事件的载体：数据 / 对端关闭 / 读错误 |
 
-`src/net/uvcpp_tcp_server.h:29` include 了 `net/uvcpp_tcp_client.h`，后者又 include 了
+`src/net/uvcpp_tcp_server.h:31` include 了 `net/uvcpp_tcp_client.h`，后者又 include 了
 `net/uvcpp_net_read.h`。所以**只写一句 `#include <net/uvcpp_tcp_server.h>` 就够**。
 
 ---
@@ -217,14 +217,14 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:426`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:558-559`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:461`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:593-594`） |
 
-`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:811-813`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1009-1011`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
 
-> 规矩是**回调里不要用同步的 `write_wait`/`read_wait`**（`src/net/uvcpp_tcp_server.h:90-95`）：
+> 规矩是**回调里不要用同步的 `write_wait`/`read_wait`**（`src/net/uvcpp_tcp_server.h:92-97`）：
 > 它们会把 loop 线程按住，一个慢对端能拖住这条 loop 上的**所有**连接。坑在于这两个函数
 > 的完成回调是可选参数，**省略它就等于同步** —— 按 `src/net/uvcpp_tcp_client.h:369-369`，
 > `cb == nullptr` **正是** `write_wait(data, len, 30000)`。同文件 `:99` 的官方示例回显
@@ -241,10 +241,19 @@ int loop_count() const;                // 1 + 工作循环数
 size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返回 0
 ```
 
-**`set_loops(n)` 把"一条循环"变成「一条接受者 + n−1 条工作循环」**，每条工作循环一条
-**专用 `std::thread`**（不是 libuv 线程池里的那种）。接受者（0 号，就是 `get_loop()`
-那条、由调用者的线程跑）accept 到连接之后把 socket **转手**给 `1 + (i % (n-1))` 号循环 ——
-**显式轮转**决定去向，所以分布是确定的、不会偶发，`client_count_at()` 看得见它。
+**`set_loops(n)` 把"一条循环"变成 n 条各跑自己循环的线程**，`1..n-1` 号各一条
+**专用 `std::thread`**（不是 libuv 线程池里的那种）。**"新连接怎么落到哪一条上"分两种
+形状，同一个二进制在不同平台上不一样**（运行时探测；`tcp_server->is_fanout()` 告诉你
+这次是哪一种）：
+
+- **内核分流**（平台接受 `UV_TCP_REUSEPORT`，Linux 是）：n 条循环**各自 `bind()` 同一个
+  端口**，内核按四元组把新连接分给其中任意一条 —— **0 号自己也收属于它的那一份**。
+  哪条落哪条由内核哈希定：**不保证均匀**，只保证逐格之和 == `client_count()`。
+- **接受者 + 转手**（Windows，以及那个标志被拒时的回落）：0 号（就是 `get_loop()` 那条、
+  由调用者的线程跑）accept 到连接之后把 socket **转手**给 `1 + (i % (n-1))` 号循环 ——
+  **显式轮转**决定去向，所以分布是确定的、不会偶发，0 号一条都不留。
+
+`client_count_at()` 两条路上都看得见分布，但**别把两端写进同一套判据**。
 
 **不调用它、或 `set_loops(1)`，与今天逐字节相同**：不建线程、不碰 fd、不看环境变量。
 `n` 取 1..64，越界 `UV_EINVAL`；已经 `listen()` 过、或已经用 `n>1` 装过一遍，都返回
@@ -259,9 +268,9 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 |---|---|---|
 | `listen()` 的连接回调、读/写/关闭回调 | 调用者的线程（loop 线程） | 在**那条连接自己那条循环的线程**上 |
 | 同一个服务端上不同连接的回调 | 顺序 | **可能并发**（不同工作线程） |
-| `set_read_callback` / `set_auto_read` / `set_ssl_context` / `set_tls_handshake_timeout_ms` | loop 线程 | **工作线程读**这些 ⇒ 必须在 `listen()` 之前设好，之后再改是数据竞争（`src/net/uvcpp_tcp_server.h:216-218`） |
+| `set_read_callback` / `set_auto_read` / `set_ssl_context` / `set_tls_handshake_timeout_ms` | loop 线程 | **工作线程读**这些 ⇒ 必须在 `listen()` 之前设好，之后再改是数据竞争（`src/net/uvcpp_tcp_server.h:230-232`） |
 | `client_count()` / `owns_client()` / `take_client()` / `return_client()` | loop 线程 | 登记表是**加锁**的，从任何线程调都对 |
-| 驱动一条连接（`write` / `read_start` / `close`） | loop 线程 | 仍然**只能在它自己那条循环的线程**上 —— 跨线程直接驱动是未定义行为（`src/net/uvcpp_tcp_server.h:213-215`） |
+| 驱动一条连接（`write` / `read_start` / `close`） | loop 线程 | 仍然**只能在它自己那条循环的线程**上 —— 跨线程直接驱动是未定义行为（`src/net/uvcpp_tcp_server.h:227-229`） |
 | `close_all_clients()` | 立即关本循环名下的 | 本循环名下的就地关，**别的循环是异步发起**（返回值只数"发起了"） |
 
 **你的回调要按"可能并发"写**：连接回调、数据回调都可能同时从几条工作线程进来。
@@ -271,7 +280,9 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 
 **这一段要读，而且是 2026-09-22 改过的一段。** Windows 上没有 `REUSEPORT`、
 `SO_REUSEADDR` 也当不了它的替代品（依据见[多循环设计](./multiloop-design.md) §2），
-所以两个平台用的是同一条形状：**一个接受者 + 把连接转手**。Windows 上的转手只能靠
+Windows 上就只剩这一条形状：**一个接受者 + 把连接转手**。**Linux 侧自 `1.3.5-dev`
+起不再走这条** —— 那边 n 条循环各自绑同一个端口、由内核分流（§4.1；`is_fanout()` 可问
+是哪一种），本节讲的转手税在 Linux 上不再付。Windows 上的转手只能靠
 `WSADuplicateSocketW` + `WSASocketW(FROM_PROTOCOL_INFO)` + `uv_tcp_open`
 （`src/net/uvcpp_socket_handoff.h`）。
 
@@ -409,9 +420,17 @@ size_t client_count_at(int loop_index) const;   // 0 号是接受者；越界返
 要谈扩展只能看 c=64 那列；c=64 那列里客户端与服务端**同进程抢核**，**只可横着比**（各臂同一个
 客户端），不能当"每核扩展性"读；`l4`/`l8` 的读数里**包含接受者做 accept + 转手**的开销。
 
+> **★ 这批臂的标签要重读（2026-09-24）。** 上面 `l1`..`l8` 量的是**转手那个形状**
+> （`lN` = 1 条接受者 + N−1 条工作循环，每条连接都转手 + 被翻成 EMULATE）。本版 Linux
+> 侧 `set_loops(n)` 已改成内核分流（§4.1）⇒ **转手那道税在 Linux 上不再付**，这批读数
+> 描述的是旧形状，**不能直接当新形状的基线**；新形状的读数要单独重量（分流形状量不到
+> 内核散列的分布，判据也得跟着换，见[多循环设计](./multiloop-design.md) §6 第 4 条）。
+
 **同一台装置还核了这几条**（都不用拍阈值）：`set_loops(0)` / `(65)` = `UV_EINVAL`，
-装过之后再调 / `listen()` 之后再调 = `UV_EBUSY` 且**不改状态**；逐循环条数**逐格**等于显式轮转
-（8 条连接 `n=4` ⇒ `loop0=0 loop1=3 loop2=3 loop3=2`），接受者循环上恒 0 条；线程数
+装过之后再调 / `listen()` 之后再调 = `UV_EBUSY` 且**不改状态**；逐循环条数在**转手形状**下
+**逐格**等于显式轮转（8 条连接 `n=4` ⇒ `loop0=0 loop1=3 loop2=3 loop3=2`），接受者循环上恒
+0 条 —— **这两条在分流形状下都不成立**（0 号自己也收、分布由内核哈希定），那边只保证
+"逐格之和 == 总数"；线程数
 `set_loops(4)` 后 7 → 10、`set_loops(8)` 后 7 → 14，而 **`listen()` 之后不变** ⇒ §4.1
 "工作线程是在 `set_loops()` 里起的"这一句有读数。
 
@@ -497,7 +516,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:422-424`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:457-459`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -558,7 +577,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 **默认服务端全包**：每条新连接被登记、并配一个关闭管理器，连接关闭时把它从服务端
 摘除并 `delete`。这件事**无条件发生**——你自己 `set_on_close()` 的那个槽位纯观察，
-取消不了它（`src/net/uvcpp_tcp_server.h:53-56`）。
+取消不了它（`src/net/uvcpp_tcp_server.h:55-58`）。
 
 所以：
 
@@ -569,14 +588,14 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 - 关掉一条连接之后也别再留指针：框架可能在完成回调里把它删掉。
 
 **"对端断开了"这件事只有读得见。** `nread < 0` 那条分支是唯一能发现它的地方
-（`src/net/uvcpp_tcp_server.h:57-63`）——不读的连接，即使设了 `set_on_close()` 也
+（`src/net/uvcpp_tcp_server.h:59-65`）——不读的连接，即使设了 `set_on_close()` 也
 **永远不会被触发**，而且这条连接不会被释放，等于每条一个静默泄漏。只想知道死活、
 不要数据的话，就用 `read_start_events()` 注册一个忽略数据的回调
 （`src/net/uvcpp_tcp_client.h:555-559`）。
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`src/net/uvcpp_tcp_server.cpp:744-751`）。
+（`src/net/uvcpp_tcp_server.cpp:942-949`）。
 
 ---
 
@@ -725,7 +744,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:399-402`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:545-553`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:580-588`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`
@@ -737,7 +756,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
 
 ## 12. 错误处理
 
-- **`int` 返回：0 成功，失败是 libuv 的负错误码**（`src/net/uvcpp_tcp_server.h:153`）。
+- **`int` 返回：0 成功，失败是 libuv 的负错误码**（`src/net/uvcpp_tcp_server.h:155`）。
   最后一个是粘性的，`get_last_error()` 拿。
 - 失败同时会置状态位（`TCP_SERVER_ERROR` / `TCP_CLIENT_ERROR`），`has_status()` 查。
 - **同步/异步混用是抛异常**，不是错误码——见 §9。这是本模块唯一会抛的地方。

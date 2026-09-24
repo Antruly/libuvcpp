@@ -19,7 +19,7 @@
 
 | 新增 | 说明 |
 |---|---|
-| **多循环横向扩展** | `uvcpp_tcp_server::set_loops(n)`（`1.2.21`）与 `uvcpp_web_app::set_loops(n)`（`1.2.23`）：**一个接受者 + n−1 条专用线程的工作循环**，配套两个新公开头（`net/uvcpp_loop_worker.h`、`net/uvcpp_socket_handoff.h`）与 socket 转手机制。Windows 上没有 `SO_REUSEPORT`，走的是「单接受者 + 无锁转手」，**默认开着**（只有 `set_loops(1)` 例外）；那条路上有一笔量过的吞吐代价，口径与数字见 [`doc/multiloop-design.md`](doc/multiloop-design.md)。 |
+| **多循环横向扩展** | `uvcpp_tcp_server::set_loops(n)`（`1.2.21`）与 `uvcpp_web_app::set_loops(n)`（`1.2.23`）：**一个接受者 + n−1 条专用线程的工作循环**，配套两个新公开头（`net/uvcpp_loop_worker.h`、`net/uvcpp_socket_handoff.h`）与 socket 转手机制。**新连接落哪条循环分两种形状**（运行时探测，`is_fanout()` 可问）：Linux 侧自 `1.3.5-dev` 起 n 条循环**各自绑同一端口、内核分流**（0 号自己也承载连接），Windows 上没有 `SO_REUSEPORT`，走的是「单接受者 + 无锁转手」，**默认开着**（只有 `set_loops(1)` 例外）；那条路上有一笔量过的吞吐代价，口径与数字见 [`doc/multiloop-design.md`](doc/multiloop-design.md)。 |
 | **HTTP/2 流级背压** | 收方向的 `pause_stream()` / `resume_stream()`、发方向单流待发队列的上界（默认 4 MiB）、以及 `peer_window_size()`（`1.2.25`）。**这是协议层机件，仓内没有应用层调用方** —— 框架侧不驱动它，所以 h2 上「边收边给」的流式请求体**仍不可达**，见 [`doc/http2-status.md`](doc/http2-status.md)。 |
 | **TLS 主机名校验** | `uvcpp_ssl::set_verify_hostname()`（`1.2.24`）—— 见下面「修复」的第一条。 |
 
@@ -445,6 +445,8 @@ int main() {
 - `uvcpp_tcp_server::set_loops(n)`（`1.2.21`）与 `uvcpp_web_app::set_loops(n)`（`1.2.23`）：
   一条接受者 + n−1 条专用线程的工作循环，配套 socket 转手原语与两个新公开头
   （`net/uvcpp_loop_worker.h`、`net/uvcpp_socket_handoff.h`）
+  （**Linux 侧自 `1.3.5-dev` 起改为内核分流**：n 条循环各自绑同一端口，`is_fanout()`
+  可问是哪一种；Windows 仍是上面这条）
 - HTTP/2 流级背压：收方向 `pause_stream()` / `resume_stream()`、发方向单流待发队列
   上界（默认 4 MiB）、`peer_window_size()`（`1.2.25`）。**这是协议层机件，仓内没有
   应用层调用方** —— 框架侧不驱动它，h2 上「边收边给」的流式请求体仍不可达
