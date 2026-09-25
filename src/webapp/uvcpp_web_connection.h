@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -137,9 +138,52 @@ struct UVCPP_API uvcpp_web_connection {
 };
 
 /**
+ * @brief 一次 splitmix64 finalizer：把键的**低位结构**打散。
+ *
+ * 为什么必须显式混洗，而不是直接用 `std::hash`：
+ * `std::unordered_map` 的桶数在两个平台上不一样 —— libstdc++ 用**素数**桶，
+ * MSVC 用**2 的幂**桶（桶号 = hash & (桶数-1)）。在后者上，恒等的 hash 意味着
+ * 「桶号 = 键的低位」，而本表的两把钥匙恰好都是低位有结构的：
+ *
+ * - `uvcpp_web_conn_id` 是 `next_id_++` 发出来的**顺序号**；
+ * - `uvcpp_tcp_client*` 来自同一尺寸的分配，**同类对象常落在各页的同一偏移上**。
+ *
+ * 低位同余 ⇒ 全挤进少数几个桶 ⇒ 查表退化成链走查，而这**在 Linux 上量不出来**
+ * （那边的素数桶把它遮住了）。所以这里不赌平台：先混一道再交给容器。代价约
+ * 5 个周期，而一次查表省下的是 9 层指针追逐。
+ *
+ * 这条不是推测：`t1/n3/reg_cmp.cpp` 拿 1000 个同尺寸节点、按 **MSVC 的桶策略**
+ * 重算过 —— 低位族只用 64 个桶、最长桶 16；混洗族用 635 个桶、最长桶 4。
+ * （复现的是**机理**；它在 MSVC 上的**发生频率**本装置没量。）
+ */
+inline uint64_t uvcpp_web_conn_mix64(uint64_t x) {
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+  return x;
+}
+
+/** @brief `uvcpp_web_conn_id` 的散列（理由见 @ref uvcpp_web_conn_mix64）。 */
+struct uvcpp_web_conn_id_hash {
+  size_t operator()(uvcpp_web_conn_id id) const {
+    return static_cast<size_t>(uvcpp_web_conn_mix64(id));
+  }
+};
+
+/** @brief `uvcpp_tcp_client*` 的散列（理由见 @ref uvcpp_web_conn_mix64）。 */
+struct uvcpp_web_conn_ptr_hash {
+  size_t operator()(const uvcpp_tcp_client* p) const {
+    return static_cast<size_t>(uvcpp_web_conn_mix64(
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p))));
+  }
+};
+
+/**
  * @brief 连接登记表：id ↔ 活连接的映射。
  *
- * @warning 只在 loop 线程上用。内部的 `std::map` 不是线程安全的。
+ * @warning 只在 loop 线程上用。内部的 `std::unordered_map` 不是线程安全的。
  */
 class UVCPP_API uvcpp_web_connection_registry {
  public:
@@ -333,8 +377,23 @@ class UVCPP_API uvcpp_web_connection_registry {
   void clear();
 
  private:
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection> by_id_;
-  std::map<uvcpp_tcp_client*, uvcpp_web_conn_id>    by_client_;
+  /**
+   * @brief id → 记录。
+   *
+   * `std::unordered_map` 而不是 `std::map`：这是**每请求至少三次**的热查表
+   * （`find` / `note_read` / `note_request_done`），而两把钥匙的低位都有结构
+   * ⇒ 见 `uvcpp_web_conn_mix64` 里"为什么必须显式混洗"。
+   *
+   * **节点稳定**这一条不能丢：`find()` 把记录指针交给调用方（`uvcpp_web_app`
+   * 拿它读 `peer_ip`/`peer_port`），而 `unordered_map` 只在 rehash 时重建桶
+   * 数组，元素本身不搬 —— 与 `std::map` 一样。
+   */
+  typedef std::unordered_map<uvcpp_web_conn_id, uvcpp_web_connection,
+                             uvcpp_web_conn_id_hash> by_id_map;
+  typedef std::unordered_map<uvcpp_tcp_client*, uvcpp_web_conn_id,
+                             uvcpp_web_conn_ptr_hash> by_client_map;
+  by_id_map     by_id_;
+  by_client_map by_client_;
   /**
    * @brief 下一个要发的**递增号**（不含循环号的那一段）。
    *

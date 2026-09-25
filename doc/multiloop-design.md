@@ -658,14 +658,14 @@ W4 之后改成了**连接自己那条**（`client->get_loop()`），分片用�
 
 ### 4.2 一处必须跟着改的判据：连接 id 的"是不是我发的号"
 
-`uvcpp_web_conn_id` 是 `uint64_t`（`src/webapp/uvcpp_web_connection.h:59`），由**登记表自己的**
-计数器发（`src/webapp/uvcpp_web_connection.h:344` 的 `next_id_`，
-`src/webapp/uvcpp_web_connection.cpp:53` 的 `next_id_++`），而 `issued()` 的判据是
+`uvcpp_web_conn_id` 是 `uint64_t`（`src/webapp/uvcpp_web_connection.h:60`），由**登记表自己的**
+计数器发（`src/webapp/uvcpp_web_connection.h:403` 的 `next_id_`，
+`src/webapp/uvcpp_web_connection.cpp:55` 的 `next_id_++`），而 `issued()` 的判据是
 
 ```cpp
 // doc-snippet: fragment — 已落地的判据（§4.2 的结论就是 `loop_of(id)` 那半）。
 return id != UVCPP_WEB_INVALID_CONN_ID && loop_of(id) == loop_index_ &&
-       seq_of(id) < next_id_;   // uvcpp_web_connection.cpp:206-207
+       seq_of(id) < next_id_;   // uvcpp_web_connection.cpp:208-209
 ```
 
 把登记表切成 n 份之后，**这条判据会对别的循环发的号返回真**。所以不能只是"多建 n 份登记表"：
@@ -676,10 +676,10 @@ return id != UVCPP_WEB_INVALID_CONN_ID && loop_of(id) == loop_index_ &&
 这一条是**设计里最容易漏的地方**，所以单列。
 
 > **核验状态（2026-09-22，外部复核）：这一节已经从设计变成落地，而且有判据。**
-> 位布局 20/44 在 `src/webapp/uvcpp_web_connection.h:64-82`（`UVCPP_WEB_CONN_LOOP_SHIFT`
-> 在 `:80`、`UVCPP_WEB_CONN_SEQ_MASK` 在 `:82`），
-> `make_id`（`:175`）/ `loop_of`（`:165`）/ `seq_of`（`:170`）互为逆运算，
-> 发号点是 `make_id(loop_index_, next_id_++)`（`src/webapp/uvcpp_web_connection.cpp:53`）；
+> 位布局 20/44 在 `src/webapp/uvcpp_web_connection.h:65-83`（`UVCPP_WEB_CONN_LOOP_SHIFT`
+> 在 `:81`、`UVCPP_WEB_CONN_SEQ_MASK` 在 `:83`），
+> `make_id`（`:219`）/ `loop_of`（`:209`）/ `seq_of`（`:214`）互为逆运算，
+> 发号点是 `make_id(loop_index_, next_id_++)`（`src/webapp/uvcpp_web_connection.cpp:55`）；
 > `issued()` 上面那段 `doc-snippet` 与代码**逐字一致**。
 > **n=1 逐字节不变**也有判据：`loop_index_ == 0` 时 `make_id` 是恒等变换，
 > 用例直接断言 `s1 == 1 && s2 == 2`。
@@ -689,10 +689,10 @@ return id != UVCPP_WEB_INVALID_CONN_ID && loop_of(id) == loop_index_ &&
 > ⇒ 这一节**不用再审**。
 
 > **剩一个口子，留给下一批（外部复核提的）**：`uvcpp_web_connection_registry(int loop_index = 0)`
-> （`src/webapp/uvcpp_web_connection.h:151`）**有默认实参**，而 `loop_slot::registry`
+> （`src/webapp/uvcpp_web_connection.h:195`）**有默认实参**，而 `loop_slot::registry`
 > （`src/webapp/uvcpp_web_app.h:1908-1908`）今天正是默认构造的。n>1 那天，哪条循环忘了传
 > 自己的号就会拿到 `loop_index_ == 0` —— 而**越界夹回的目标也是 0**
-> （`src/webapp/uvcpp_web_connection.cpp:29`），也就是那个会**撞号**的值：
+> （`src/webapp/uvcpp_web_connection.cpp:31`），也就是那个会**撞号**的值：
 > 两份表都发 `(0,1) (0,2) …`，于是本节要防的误判**原样回来，而且是静默的**
 > （`loop_of(id) == loop_index_` 恰好成立）。**下一批加一条廉价的一致性断言**：
 > 每循环初始化时断言 `registry_.loop_index() == 本循环号`（这个读口已经有了）

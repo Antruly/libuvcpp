@@ -1664,9 +1664,9 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   // 指出这条值得显式写出来 —— 它当时只在代码里成立，不在任何注释里。）
   //
   // ★ **但"哪一份"不是"能不能读"。** 上面这条只解决**定位**，不解决**跨线程
-  // 访问** —— 那一份里的 `std::map` 仍然不是线程安全的（`uvcpp_web_connection.h`
+  // 访问** —— 那一份里的容器仍然不是线程安全的（`uvcpp_web_connection.h`
   // 里那个类自己的 `@warning`），而这一点**拆分前后一样**：拆前也只有同一个
-  // `std::map`、同一条 `@warning`。真要跨线程读公开的 `connection(id)` /
+  // 同一张表、同一条 `@warning`。真要跨线程读公开的 `connection(id)` /
   // `find(id)`，得投递到那份所在的循环再回话，或者给那一份自带锁。
   // **`set_loops(n)` 落地（1.2.23-dev）没有解决这一条**，它只是把"哪一份"做对
   // 了 —— 跨线程读登记表仍是未做的（**聚合量**那边另说：`connection_count()` /

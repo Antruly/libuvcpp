@@ -7,6 +7,8 @@
 
 #include <webapp/uvcpp_web_connection.h>
 
+#include <algorithm>
+
 #include <net/uvcpp_tcp_client.h>
 
 namespace uvcpp {
@@ -39,7 +41,7 @@ uvcpp_web_conn_id uvcpp_web_connection_registry::add(uvcpp_tcp_client* client,
   // 已经不在 by_id_ 里的 id，之后 remove_by_client 就会摘掉一条不存在的记录
   // 并把新记录留在表里 —— 那才是最坏的结果（新连接永远不被回收）。
   if (client != nullptr) {
-    std::map<uvcpp_tcp_client*, uvcpp_web_conn_id>::iterator it =
+    by_client_map::iterator it =
         by_client_.find(client);
     if (it != by_client_.end()) {
       by_id_.erase(it->second);
@@ -75,7 +77,7 @@ uvcpp_web_conn_id uvcpp_web_connection_registry::add(uvcpp_tcp_client* client,
 
 bool uvcpp_web_connection_registry::note_read(uvcpp_web_conn_id id,
                                              int64_t now_ms) {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::iterator it =
+  by_id_map::iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return false;
 
@@ -89,7 +91,7 @@ bool uvcpp_web_connection_registry::note_read(uvcpp_web_conn_id id,
 }
 
 bool uvcpp_web_connection_registry::note_request_done(uvcpp_web_conn_id id) {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::iterator it =
+  by_id_map::iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return false;
 
@@ -102,7 +104,7 @@ bool uvcpp_web_connection_registry::note_request_done(uvcpp_web_conn_id id) {
 
 bool uvcpp_web_connection_registry::mark_streaming(uvcpp_web_conn_id id,
                                                    bool streaming) {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::iterator it =
+  by_id_map::iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return false;
   it->second.streaming = streaming;
@@ -110,7 +112,7 @@ bool uvcpp_web_connection_registry::mark_streaming(uvcpp_web_conn_id id,
 }
 
 bool uvcpp_web_connection_registry::is_streaming(uvcpp_web_conn_id id) const {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::const_iterator it =
+  by_id_map::const_iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return false;
   return it->second.streaming;
@@ -118,7 +120,7 @@ bool uvcpp_web_connection_registry::is_streaming(uvcpp_web_conn_id id) const {
 
 int64_t uvcpp_web_connection_registry::activity_since(
     uvcpp_web_conn_id id) const {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::const_iterator it =
+  by_id_map::const_iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return 0;
 
@@ -131,7 +133,7 @@ int64_t uvcpp_web_connection_registry::activity_since(
 
 bool uvcpp_web_connection_registry::touch(uvcpp_web_conn_id id,
                                          int64_t now_ms) {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::iterator it =
+  by_id_map::iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return false;
 
@@ -142,14 +144,14 @@ bool uvcpp_web_connection_registry::touch(uvcpp_web_conn_id id,
 }
 
 bool uvcpp_web_connection_registry::remove(uvcpp_web_conn_id id) {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::iterator it =
+  by_id_map::iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return false;
 
   if (it->second.client != nullptr) {
     // 只在反向索引确实指着这一条时才擦 —— 重复登记可能让同一个 client 的
     // 反向索引指向**新的**那个 id，那时擦掉它就等于把新连接弄丢了。
-    std::map<uvcpp_tcp_client*, uvcpp_web_conn_id>::iterator rit =
+    by_client_map::iterator rit =
         by_client_.find(it->second.client);
     if (rit != by_client_.end() && rit->second == id) {
       by_client_.erase(rit);
@@ -165,7 +167,7 @@ bool uvcpp_web_connection_registry::remove_by_client(
     uvcpp_tcp_client* client, uvcpp_web_conn_id* out_id) {
   if (client == nullptr) return false;
 
-  std::map<uvcpp_tcp_client*, uvcpp_web_conn_id>::iterator it =
+  by_client_map::iterator it =
       by_client_.find(client);
   if (it == by_client_.end()) return false;
 
@@ -180,7 +182,7 @@ bool uvcpp_web_connection_registry::remove_by_client(
 
 uvcpp_tcp_client* uvcpp_web_connection_registry::client(
     uvcpp_web_conn_id id) const {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::const_iterator it =
+  by_id_map::const_iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return nullptr;
   return it->second.client;
@@ -189,7 +191,7 @@ uvcpp_tcp_client* uvcpp_web_connection_registry::client(
 uvcpp_web_conn_id uvcpp_web_connection_registry::id_of(
     uvcpp_tcp_client* client) const {
   if (client == nullptr) return UVCPP_WEB_INVALID_CONN_ID;
-  std::map<uvcpp_tcp_client*, uvcpp_web_conn_id>::const_iterator it =
+  by_client_map::const_iterator it =
       by_client_.find(client);
   if (it == by_client_.end()) return UVCPP_WEB_INVALID_CONN_ID;
   return it->second;
@@ -209,7 +211,7 @@ bool uvcpp_web_connection_registry::issued(uvcpp_web_conn_id id) const {
 
 const uvcpp_web_connection* uvcpp_web_connection_registry::find(
     uvcpp_web_conn_id id) const {
-  std::map<uvcpp_web_conn_id, uvcpp_web_connection>::const_iterator it =
+  by_id_map::const_iterator it =
       by_id_.find(id);
   if (it == by_id_.end()) return nullptr;
   return &it->second;
@@ -224,12 +226,15 @@ size_t uvcpp_web_connection_registry::size() const {
 std::vector<uvcpp_web_conn_id> uvcpp_web_connection_registry::ids() const {
   std::vector<uvcpp_web_conn_id> out;
   out.reserve(by_id_.size());
-  // std::map 按 key 升序，所以直接遍历就是 id 升序。
-  for (std::map<uvcpp_web_conn_id, uvcpp_web_connection>::const_iterator it =
-           by_id_.begin();
-       it != by_id_.end(); ++it) {
+  for (by_id_map::const_iterator it = by_id_.begin(); it != by_id_.end(); ++it) {
     out.push_back(it->first);
   }
+  // **必须显式排序。** 从前这里是 `std::map`，遍历顺序就是 key 升序（这里原本
+  // 只写着一句"直接遍历就是 id 升序"）；换成 `unordered_map` 之后遍历顺序由桶
+  // 决定 —— 少这一句，那句注释就变成一句**看不出来的假话**，而 `ids()` 的契约
+  // 写着"顺序按 id 升序"（按号推进的调用方依赖它）。排序只花一次 O(n log n)，
+  // 而这个口本来就不在热路径上。
+  std::sort(out.begin(), out.end());
   return out;
 }
 

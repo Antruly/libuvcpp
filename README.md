@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.29--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.30--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.29-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.30-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.29-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.30-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -838,6 +838,22 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   reference (both write paths copy the bytes before returning); the queued path
   keeps its own copy.
   5.02 → 4.02 allocations per request (`1.3.28`)
+- The registry's two indexes move from `std::map` to `std::unordered_map`, each key
+  getting an **explicit mixing** (splitmix64) hash: both keys carry low-bit structure
+  (a monotonically increasing `conn_id`; equal-size allocations landing at the same
+  page offset), while MSVC's `unordered_map` uses power-of-two bucket counts and an
+  identity `std::hash`, so without mixing the table **silently** degrades to chain
+  walking -- unmeasurable on Linux, which uses prime buckets. Isolated microbenchmark:
+  key comparisons per request **40.45 -> 4.00** (10.11x, n=400); the in-process sampler
+  over 3 same-round interleaved pairs puts the registry cluster at **+1.16 pp median
+  (3/3 positive)**; the paired microsecond deltas (-0.08/-0.29/-0.46) sit inside the
+  device's own +/-0.25 us floor, so they are quoted as corroboration only. `ids()` used
+  to be ascending for free from `std::map` iteration; that no longer holds, so it now
+  sorts explicitly. **Public layout break: `sizeof(uvcpp_web_connection_registry)`
+  120 -> 136 (+16)** (on libstdc++ `unordered_map` is 8 bytes wider than `map`, times
+  two tables; the width differs on MSVC, but it is a break there too); `uvcpp_web_app`
+  and every other public type keep their size. 3.0161 allocations per request
+  (unmoved, `1.3.30`)
 - The **take/release** of a `uvcpp_buf`'s own block now goes through a
   **thread-local** free list for the `malloc` family (`uvcpp_malloc_block_cache`,
   exact-size slots, 4 slots x 64 blocks x at most 4 KiB per block => at most

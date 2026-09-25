@@ -92,9 +92,9 @@ void doc_includes() {
 
 ## 3. 连接身份
 
-`uvcpp_web_conn_id` 是一个 `uint64_t`（`src/webapp/uvcpp_web_connection.h:59`），
+`uvcpp_web_conn_id` 是一个 `uint64_t`（`src/webapp/uvcpp_web_connection.h:60`），
 从 1 开始，**单调递增、永不复用**；0 是无效值
-（`UVCPP_WEB_INVALID_CONN_ID`，`:62`）。存在它的唯一理由是：
+（`UVCPP_WEB_INVALID_CONN_ID`，`:63`）。存在它的唯一理由是：
 异步回调里"连接 7 已经死了"这句话，不会因为新连接拿到了 7 而变成谎话。
 
 ```cpp
@@ -118,7 +118,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 ```
 
 `add()` 的两个默认参数（`peer_ip` 空串、`peer_port` 0、`now_ms` 0）让它最常用的
-形态只有第一个实参。登记表全部方法在 `src/webapp/uvcpp_web_connection.h:139-360`。
+形态只有第一个实参。登记表全部方法在 `src/webapp/uvcpp_web_connection.h:183-419`。
 
 **一个连接有 `add()` 过的 id 就直接用它，别拿 `uvcpp_tcp_client*` 当身份。**
 旧那套（`src/web/uvcpp_static_server.cpp:418`、`:443` 用
@@ -472,7 +472,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 
 | 类型 | 约束 | 出处 |
 |---|---|---|
-| `uvcpp_web_connection_registry` | **只能 loop 线程**（内部 `std::map` 无锁） | `src/webapp/uvcpp_web_connection.h:30-31`、`:142` |
+| `uvcpp_web_connection_registry` | **只能 loop 线程**（内部 `std::unordered_map` 无锁） | `src/webapp/uvcpp_web_connection.h:30-31`、`:186` |
 | `uvcpp_web_context` | 除 `post()` 外都在 loop 线程 | `src/webapp/uvcpp_web_context.h:98-99` |
 | `uvcpp_web_file_transfer` | loop 线程驱动，回调都在 loop 线程 | `src/webapp/uvcpp_web_file.h:168-172` |
 | `uvcpp_web_util` | 纯函数，无状态、线程安全 | — |
@@ -492,8 +492,8 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
   （`src/webapp/uvcpp_web_context.h:366`、`:468`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
   **别传一个临时 vector**。
-- `uvcpp_web_connection_registry::find()` 返回内部 `std::map` 里的指针
-  （`src/webapp/uvcpp_web_connection.cpp:210-216`）。
+- `uvcpp_web_connection_registry::find()` 返回内部 `std::unordered_map` 里的指针
+  （`src/webapp/uvcpp_web_connection.cpp:212-218`）。
 - `uvcpp_web_mime_map::lookup()` 返回表内 `std::string` 的指针
   （`src/webapp/uvcpp_web_mime.cpp:107-108`）。
 - `uvcpp_logger::set_sink()` **不接管所有权**（`src/webapp/uvcpp_log.h:224-229`）。

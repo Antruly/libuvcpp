@@ -1246,7 +1246,7 @@ uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制
 | **在回调里 `delete` 客户端：能用，但那份内存不回收** | 在 `connect()` / `send()` 的回调里 `delete` 掉 `uvcpp_http_client` 是**支持**的（"响应回来就把客户端扔了"是本类最自然的用法），删掉之后不许再碰、也不许再 `send()`。代价是那一次析构**故意不拆内部对象**：`uvcpp_loop` + `uvcpp_tcp_client` + 解析器（h2 上再加一个 nghttp2 会话）留在循环上不释放 —— 换掉一个必然发生的 use-after-free（析构里那段"泵到句柄关完"会把**还压在栈上**的那条读路径再叫一遍，实测 `0xC0000005`）。要让内存回归，就别在回调里删：回调里置一个标志，循环退出之后再删。 |
 | **`uvcpp_http_client` 只在"有请求在飞"时才看得见对端断开** | 异步路径上对端在响应收完之前断开，`send()` 的回调会**落地**并以 `UV_ECONNRESET` 交付（本层写死的值，与传输层看到 EOF 还是 RST 无关），`HTTP_CLIENT_CONNECTED` 同时被清掉，此后的 `send()` 直接回 `UV_ENOTCONN` 而不是写进一条死 socket。**但只 `connect()` 过、从没 `send()` 过的客户端仍然不知道** —— 关闭通知只能搭在读路径上，而读是在第一次 `send()` 里才装的（`src/web/uvcpp_http_client.cpp:418-429`）。 |
 | **h2 上"可以重试"只有 `REFUSED_STREAM` 一个来源** | 对端关掉一条 h2 流时分三档（RFC 9113 §8.7）：`NO_ERROR`（多半是我们自己收摊）、`REFUSED_STREAM`（**这条请求没被处理过**）、`CANCEL`（对端不要这条流了）—— 三档都以 `UV_ECANCELED` 交付，其余错误码是 `UV_EPROTO`（协议失败）。其中只有 `REFUSED_STREAM` 会把 `resp.retryable` 置真。**假不等于"处理过了"**：连接断开是"结果未知"，`CANCEL` 不保证对端没处理过（重发就是重复副作用），两者都为假 —— 判据只能是"真 ⇒ 可以重试"，反过来推不成立。h1 上它恒为假（这个协议没有等价信号）。这个字段挂在**响应**上而不是客户端上：h2 一条连接同时有好几条流在飞，挂在客户端上分不清是哪一条。 |
-| **多循环下跨线程读登记表仍未做** | `app.connection(id)` / `app.find(id)` 按 id 定位到**那一格**，但那一格里的 `std::map` 不是线程安全的（§19）。**聚合量**（`connection_count()` / `inflight_count()`）不受影响，它们可以从任何线程读。 |
+| **多循环下跨线程读登记表仍未做** | `app.connection(id)` / `app.find(id)` 按 id 定位到**那一格**，但那一格里的容器不是线程安全的（§19）。**聚合量**（`connection_count()` / `inflight_count()`）不受影响，它们可以从任何线程读。 |
 | **`set_loops(n>1)` 之后，运行中注册路由从"会跑错业务"升级成 UB** | 链缓存是全进程共享的一张表，n 条循环会同时读写它。单循环时最坏是命中一条过期链；多循环时没有"最坏"（§19）。 |
 
 ---

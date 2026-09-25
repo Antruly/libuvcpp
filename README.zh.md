@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.29--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.30--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.29-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.30-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.29-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.30-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -785,6 +785,16 @@ libuvcpp/
   `start_write` 的头部参数由按值改按 const 引用（两条写路径都在返回前把字节
   拷走），入队那条路自己留一份拷贝。
   每请求 5.02 → 4.02 次分配（`1.3.28`）
+- 登记表的两个索引从 `std::map` 换成 `std::unordered_map`，两个键各配一个**显式混合**
+  （splitmix64）的哈希器：键本身带低位结构（自增的 `conn_id`；等尺寸分配落在同页偏移的指针），
+  而 MSVC 的 `unordered_map` 用 2 的幂桶、用恒等 `std::hash` ⇒ 不混合就**静默**退化成走链，
+  且在 Linux（素数桶）上量不出来。孤立微基准：每次请求的键比较 **40.45 → 4.00**（10.11×，n=400）；
+  本进程采样器同一轮交错 3 对，登记表那一簇占比 **+1.16 pp 中位（3/3 为正）**；配对 µs
+  −0.08/−0.29/−0.46 落在装置自身 ±0.25 µs 地板内 ⇒ 只当旁证。`ids()` 原先靠 `std::map`
+  迭代天然升序，换容器后不再成立 ⇒ 改成显式 `std::sort`。
+  **公开布局断点：`sizeof(uvcpp_web_connection_registry)` 120 → 136（+16）**
+  （libstdc++ 上 `unordered_map` 比 `map` 宽 8 字节，两张表；MSVC 上宽度不同，但同样是一个断点）；
+  `uvcpp_web_app` 与其余公开类型 `sizeof` 不变。每请求分配 3.0161（不动，`1.3.30`）
 - `uvcpp_buf` 自有块的**取/还**挂到一张**线程局部**的 `malloc` 族自由表上
   （`uvcpp_malloc_block_cache`，按精确尺寸分槽、4 槽 × 每槽 64 块 × 单块不超
   4 KiB ⇒ 每线程最多留 1 MiB）：取在 `resize_impl()` 两条「新造一块」的分支，
