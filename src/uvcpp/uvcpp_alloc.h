@@ -272,6 +272,106 @@ inline bool operator!=(const uvcpp_block_allocator<T>&,
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// 定长块的**线程局部**自由表（`malloc` 族；服务 `uvcpp_buf` 自己的块）
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief 按**精确尺寸**回收 `uvcpp_buf` 自有块的自由表。
+ *
+ * 与上面那个 `uvcpp_block_cache` 是同一套形状、**不同的分配器**：那个服务
+ * `std::allocate_shared`（块来自 `::operator new`、还回去走 `::operator delete`），
+ * 这个服务 `uvcpp_buf::resize_impl()` 那条路（块来自 `std::malloc`/`std::realloc`、
+ * 还回去走 `std::free`）。**两者不能混用** —— 把 `malloc` 来的块交给
+ * `operator delete` 是 UB，所以宁可多这三十行也不共用一张表。
+ *
+ * 为什么值得有它：`uvcpp_buf` 的块是**跟着对象走**的。每条响应都有自己的
+ * `uvcpp_buf`（上下文每请求新建），而那块内存的寿命比对象**还长**——响应体在
+ * `http_server::send_response()` 里就被搬进写队列（`qw.body = std::move(body)`）、
+ * 等写完才放。于是"上一条请求留下的容量"没有任何下一条能用上：`free_own()` 在
+ * 写完之后把它还给分配器，下一条请求再要一块同尺寸的。把"块的来去"从对象挂到
+ * **线程**上，同一尺寸的块就能在这些请求之间循环 —— `resize_impl()` 里
+ * "每请求一块响应体"那一次 `malloc` 就是这么消失的。
+ *
+ * 尺寸类按精确尺寸匹配，不做向上取整（与 `uvcpp_block_cache` 同一条理由：
+ * 向上取整会让"取一块存货"变成"取一块尺寸不对的"）。
+ *
+ * 上界：单块不超过 `kMaxCachedBytes`，每槽不超过 `kSlotMax` 块 ⇒ 本线程最多留下
+ * `kSlotCount * kSlotMax * kMaxCachedBytes`（4 × 64 × 4 KiB = 1 MiB）。这个数与
+ * M6 那张表同量级（4 × 256 × ~1.3 KiB），刻意没有再大。
+ */
+class uvcpp_malloc_block_cache {
+ public:
+  enum { kSlotCount = 4, kSlotMax = 64, kMaxCachedBytes = 4096 };
+
+  /** @brief 取一块**正好** `size` 字节的存货；没有就返回 nullptr（调用方退回 `std::malloc`）。 */
+  void* try_take(std::size_t size) noexcept {
+    if (size == 0 || size > kMaxCachedBytes) return nullptr;
+    for (unsigned i = 0; i < kSlotCount; ++i) {
+      slot& s = slots_[i];
+      if (s.size != size || s.head == nullptr) continue;
+      void* p = s.head;
+      s.head = *static_cast<void**>(p);  // 自由块的头 8 字节存下一块的地址
+      --s.count;
+      return p;
+    }
+    return nullptr;
+  }
+
+  /** @brief 还一块回来。太大、表满、或没有空闲的尺寸槽，就直接 `std::free`。 */
+  void put(void* p, std::size_t size) noexcept {
+    if (p == nullptr) return;
+    // 小到放不下链表指针的块不留（`uvcpp_buf` 不会要这么小的块，兜一下）。
+    if (size < sizeof(void*) || size > kMaxCachedBytes) {
+      std::free(p);
+      return;
+    }
+    slot* spare = nullptr;
+    for (unsigned i = 0; i < kSlotCount; ++i) {
+      slot& s = slots_[i];
+      if (s.size == size) {
+        if (s.count >= kSlotMax) {
+          std::free(p);
+          return;
+        }
+        *static_cast<void**>(p) = s.head;
+        s.head = p;
+        ++s.count;
+        return;
+      }
+      if (spare == nullptr && s.size == 0) spare = &s;
+    }
+    if (spare == nullptr) {
+      std::free(p);
+      return;
+    }
+    spare->size = size;
+    *static_cast<void**>(p) = nullptr;
+    spare->head = p;
+    spare->count = 1;
+  }
+
+ private:
+  struct slot {
+    std::size_t size;  ///< 这个槽服务的块尺寸；0 = 槽还空着
+    void* head;        ///< 自由块单链表
+    unsigned count;    ///< 链上有几块（上限 kSlotMax，防长跑把内存留住）
+  };
+  slot slots_[kSlotCount];
+};
+
+/**
+ * @brief 本线程的表。
+ *
+ * `= {}` 让它是**常量初始化**的（没有 `__cxa_guard_*`），结构体平凡析构 ⇒
+ * **不登记** `__cxa_thread_atexit`。跨线程释放只是把块留在释放那个线程的表里，
+ * 正确性不受影响（块是 `std::malloc` 来的，谁 `free` 都行）。
+ */
+inline uvcpp_malloc_block_cache& uvcpp_malloc_cache_here() noexcept {
+  static thread_local uvcpp_malloc_block_cache cache = {};
+  return cache;
+}
+
 } // namespace uvcpp
 
 #endif // SRC_UVCPP_UVCPP_ALLOC_H

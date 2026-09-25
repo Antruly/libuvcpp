@@ -320,7 +320,7 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
 
 ### 9.2 uvcpp 侧为什么变成 UAF，而不是"多跑一次回调"
 
-`callback_write`（`src/req/uvcpp_write.cpp:164-164`）取出闭包后走 `invoke_completion`
+`callback_write`（`src/req/uvcpp_write.cpp:185-185`）取出闭包后走 `invoke_completion`
 （`src/req/uvcpp_req.h:175-175`）——**回调返回之后 `delete self`**。所以重复的那次完成打在已释放对象上。
 ⇒ 「在自己的完成回调里释放自己」这个形状，**活不过一次重复投递**，与内核为什么多投无关。
 

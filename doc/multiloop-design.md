@@ -710,7 +710,7 @@ n 个循环之后变成跨核缓存行打架**：
   撞上的进程级锁。
 - 三条 atomic：请求 id（`src/webapp/uvcpp_web_middleware.cpp:63-65`，每请求）、
   reclaim / try_write 计数器（`src/net/uvcpp_tcp_client.cpp:99-101`、`:115-118`）、
-  `share_discard_count_`（`src/uvcpp/uvcpp_buf.cpp:216`）。注意后两条的形状会骗人：
+  `share_discard_count_`（`src/uvcpp/uvcpp_buf.cpp:227`）。注意后两条的形状会骗人：
   读取口 `reclaim_stats()` / `try_write_stats()` 的签名像实例指标，实际是**全进程聚合**。
 
 **不用动的一条**：`work_limit_`。它按 `UV_THREADPOOL_SIZE × 4`（下限 16，

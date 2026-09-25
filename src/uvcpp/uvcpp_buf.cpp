@@ -196,9 +196,20 @@ void uvcpp_buf::set_zero() {
 }
 
 void uvcpp_buf::free_own() {
+#if UVCPP_ENABLE_MEMORY_POOL
   if (this->buf.base != nullptr && this->capacity_ > 0) {
     UVCPP_VFREE(this->buf.base)
   }
+#else
+  // ★ 还块这一步与 `resize_impl()` 里"取块"那一步配对：把块留在**本线程**的自由表
+  //   里（尺寸取 `capacity_` —— 它就是当初要到的那个尺寸），下一条同尺寸的请求原样
+  //   取走。本仓"每请求一块响应体"那一次 `malloc` 就消失在这里。
+  //   `put()` 自己处理"太大 / 表满 / 没空槽"三种情况（那三种退回 `std::free`），
+  //   所以这些情况下与改前的 `UVCPP_VFREE` 逐字同义。
+  if (this->buf.base != nullptr && this->capacity_ > 0) {
+    uvcpp_malloc_cache_here().put(this->buf.base, this->capacity_);
+  }
+#endif
   this->buf.base = nullptr;
   this->buf.len = 0;
   this->capacity_ = 0;
@@ -307,10 +318,29 @@ void uvcpp_buf::resize_impl(size_t sz, bool zero_tail) {
     // 外部视图：这块内存不是我们的，既不能 free 也不能就地扩容 —— 拷一份自有的。
     // 这里只拷 min(旧长度, 新容量)：视图缩小时旧长度可能比新块还大，照旧长度
     // 拷会写越界。（内存池那条路自己会取 min，这里得手写。）
-    new_base = (char *)uvcpp_alloc_bytes(new_cap);
+    // 外部视图这条路也是"新造一块自有的" ⇒ 同样先问自由表。取来的是没过 memset
+    // 的旧块 ⇒ `sz` 到 `new_cap` 的富余段可能留着上一条请求的字节（见下）。
+#if !UVCPP_ENABLE_MEMORY_POOL
+    new_base = (char *)uvcpp_malloc_cache_here().try_take(new_cap);
+#endif
+    if (new_base == nullptr) new_base = (char *)uvcpp_alloc_bytes(new_cap);
     const size_t copy_len = (old_len < new_cap) ? old_len : new_cap;
     if (new_base != nullptr && copy_len > 0) {
       memcpy(new_base, this->buf.base, copy_len);
+    }
+  } else if (this->buf.base == nullptr) {
+    // ★ 全新一块（`base` 还没有）：先问本线程的自由表 —— 这就是"每请求一块响应体"
+    //   那一次分配的去处。`free_own()` 是它的配对（还块时尺寸取 `capacity_`，与这里
+    //   要的 `new_cap` 是同一个数）。没存货才真的分配。
+    //
+    //   取来的块**不清零**：`zero_tail` 那句清的是 [old_len, sz)，这里 old_len == 0
+    //   ⇒ [0, sz) 清到；富余段（`sz` → `new_cap`）不清 —— 但这条支改前走的是
+    //   `std::realloc`（**不带 memset**）⇒ 富余段改前也是脏的，语义未变。
+#if !UVCPP_ENABLE_MEMORY_POOL
+    new_base = (char *)uvcpp_malloc_cache_here().try_take(new_cap);
+#endif
+    if (new_base == nullptr) {
+      new_base = (char *)uvcpp_realloc_bytes(nullptr, 0, new_cap);
     }
   } else {
     new_base = (char *)uvcpp_realloc_bytes(this->buf.base, old_len, new_cap);

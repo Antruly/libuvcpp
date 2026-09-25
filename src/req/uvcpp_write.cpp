@@ -37,7 +37,28 @@ void uvcpp_write::release_second() {
     second_owner = nullptr;
   }
   if (second_block_base_ != nullptr) {
+    // ★ 这块就是"每请求一块响应体"那一块：`adopt_body()` 从响应体的 `uvcpp_buf`
+    //   手里接过所有权（`release_uv_buf()` 把 `capacity_` 清零、块交出来），到
+    //   这里才放。改前走 `uvcpp_free()` 直接还给分配器 ⇒ 那个块每请求造一次、
+    //   放一次，永远轮不到下一条请求用（第一半挂在 `free_own()` 上的还块因此
+    //   一次也没被调到，读数一行不动）。
+    //
+    //   还回**本线程**的自由表（取的那一侧在 `uvcpp_buf::resize_impl()`），下一条
+    //   同尺寸的响应直接取走。尺寸取 `pair_[1]` —— 它与这块同源（`base` 相等），
+    //   且恒 ≤ 真实容量（`uvcpp_buf` 的不变式：`len` 是可见长度、`capacity_` 才是
+    //   块大小）⇒ 按它做键只会"少复用"，绝不会给出比要的小的块。两条对不上时按
+    //   0 走，`put()` 当场 `std::free`，与改前的 `uvcpp_free` 逐字同义。
+    //
+    //   内存池那档不碰：那里的块不是 malloc 族的。
+#if UVCPP_ENABLE_MEMORY_POOL
     uvcpp::uvcpp_free(second_block_base_);
+#else
+    uvcpp::uvcpp_malloc_cache_here().put(
+        second_block_base_,
+        (pair_[1].base == second_block_base_)
+            ? static_cast<size_t>(pair_[1].len)
+            : static_cast<size_t>(0));
+#endif
     second_block_base_ = nullptr;
   }
   hold_.reset();

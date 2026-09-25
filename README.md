@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.28--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.29--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.28-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.29-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.28-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.29-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -838,6 +838,19 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   reference (both write paths copy the bytes before returning); the queued path
   keeps its own copy.
   5.02 → 4.02 allocations per request (`1.3.28`)
+- The **take/release** of a `uvcpp_buf`'s own block now goes through a
+  **thread-local** free list for the `malloc` family (`uvcpp_malloc_block_cache`,
+  exact-size slots, 4 slots x 64 blocks x at most 4 KiB per block => at most
+  1 MiB retained per thread): taken in the two "fresh block" branches of
+  `resize_impl()`, released in `free_own()` **and in the write request's
+  `release_second()`**. Both are inside `#if !UVCPP_ENABLE_MEMORY_POOL` - it is
+  deliberately **not** the same family as the previous cut's cache
+  (`::operator new` vs `malloc`; mixing them is UB).
+  Note why the release has to live on the write-request side: the response body
+  block is adopted by the write request (`adopt_body()`; `release_uv_buf()`
+  zeroes `capacity_` first), so it never goes through `free_own()` - the version
+  that only hooked `free_own()` moved the reading not at all.
+  4.02 → 3.02 allocations per request (`1.3.29`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.28--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.29--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.28-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.29-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.28-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.29-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -785,6 +785,16 @@ libuvcpp/
   `start_write` 的头部参数由按值改按 const 引用（两条写路径都在返回前把字节
   拷走），入队那条路自己留一份拷贝。
   每请求 5.02 → 4.02 次分配（`1.3.28`）
+- `uvcpp_buf` 自有块的**取/还**挂到一张**线程局部**的 `malloc` 族自由表上
+  （`uvcpp_malloc_block_cache`，按精确尺寸分槽、4 槽 × 每槽 64 块 × 单块不超
+  4 KiB ⇒ 每线程最多留 1 MiB）：取在 `resize_impl()` 两条「新造一块」的分支，
+  还在 `free_own()` **与写请求的 `release_second()`**。两处都在
+  `#if !UVCPP_ENABLE_MEMORY_POOL` 里 —— 与 M6 那张表**不是同一族**
+  （`::operator new` 族 vs `malloc` 族，混用是 UB），所以宁可另起一族。
+  ★ 为什么还块要落在写请求那一侧：响应体那块是被 `adopt_body()` 把所有权
+  接过写请求的（`release_uv_buf()` 会先把 `capacity_` 清零），**不走
+  `free_own()`** —— 只挂 `free_own()` 的那一版读数一行不动，原因就在这里。
+  每请求 4.02 → 3.02 次分配（`1.3.29`）
 - 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
   超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
   `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）
