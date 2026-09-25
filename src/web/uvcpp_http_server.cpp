@@ -825,7 +825,7 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   // 两块那条路上序列化的正是同一个头部块（`to_string(false)` 返回的就是
   // `to_string(true)` 去掉末尾体之后的部分），所以 `two_bufs` 与 HEAD 这一条
   // 不冲突：HEAD 永远走"只序列化头部"。
-  std::string wire = resp.to_string(/*include_body=*/!ctx.is_head && !two_bufs);
+  resp.to_string_into(ctx.wire_recycle, /*include_body=*/!ctx.is_head && !two_bufs);
 
   // close_after_write=false lets a streaming handler keep the connection open
   // to write the body after the header; it must close the connection itself.
@@ -839,9 +839,9 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   const size_t body_bytes = resp.body.size();
 
   if (two_bufs) {
-    enqueue_write(ctx, client, std::move(wire), std::move(resp.body));
+    enqueue_write(ctx, client, ctx.wire_recycle, std::move(resp.body));
   } else {
-    enqueue_write(ctx, client, std::move(wire));
+    enqueue_write(ctx, client, ctx.wire_recycle);
   }
   return body_bytes;
 }
@@ -975,7 +975,7 @@ int uvcpp_http_server::write_stream(uvcpp_tcp_client* client, int32_t stream_id,
   }
 #endif  // UVCPP_NGHTTP2_ENABLE
 
-  enqueue_write(ctx, client, std::move(bytes), std::move(done));
+  enqueue_write(ctx, client, bytes, std::move(done));
   return 0;
 }
 
@@ -1248,34 +1248,34 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
 }
 
 void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
-                                      std::string wire,
+                                      const std::string& wire,
                                       std::function<void(int)> done) {
   // **空闲时直接发，不绕队列。** 这是每个响应都走的那条路：一次 `queued_write`
   // 构造、一次入队、一次出队、两次移动、两次析构，换来的只是"下一条才轮到它"
   // 这个此时并不存在的约束。判据与 `pump_write` 的早返回逐字相同 —— 它见到
   // 这两个标志也是直接返回。见 `start_write` 的前置条件说明。
   if (!ctx.write_pending && !ctx.closing) {
-    start_write(ctx, client, std::move(wire), nullptr, false, std::move(done));
+    start_write(ctx, client, wire, nullptr, false, std::move(done));
     return;
   }
 
   queued_write qw;
-  qw.bytes = std::move(wire);
+  qw.bytes = wire;  // 拷一份：这块要活到冲刷时，而 wire 那块得留着容量
   qw.done = std::move(done);
   ctx.write_queue.push_back(std::move(qw));
   pump_write(ctx, client);
 }
 
 void uvcpp_http_server::enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client,
-                                      std::string head, uvcpp_buf body,
+                                      const std::string& head, uvcpp_buf body,
                                       std::function<void(int)> done) {
   if (!ctx.write_pending && !ctx.closing) {
-    start_write(ctx, client, std::move(head), &body, true, std::move(done));
+    start_write(ctx, client, head, &body, true, std::move(done));
     return;
   }
 
   queued_write qw;
-  qw.bytes = std::move(head);
+  qw.bytes = head;  // 拷一份（同上：head 可能是连接上那块复用缓冲）
   // 移动的是**句柄**（共享视图转引用计数、自有块转所有权），不是字节 ——
   // 这条队列本身就是"零拷贝"能不能成立的地方：这里如果拷了，后面两块写得再
   // 干净也白搭。见 `uvcpp_buf` 里"必须显式写移动"那段。
@@ -1445,7 +1445,7 @@ void uvcpp_http_server::pump_write(conn_ctx& ctx, uvcpp_tcp_client* client) {
   if (batch_n == 1) {
     queued_write qw = std::move(ctx.write_queue.front());
     ctx.write_queue.pop_front();
-    start_write(ctx, client, std::move(qw.bytes), &qw.body, qw.has_body,
+    start_write(ctx, client, qw.bytes, &qw.body, qw.has_body,
                 std::move(qw.done));
     return;
   }
@@ -1487,11 +1487,11 @@ void uvcpp_http_server::pump_write(conn_ctx& ctx, uvcpp_tcp_client* client) {
     };
   }
 
-  start_write(ctx, client, std::move(wire), nullptr, false, std::move(done));
+  start_write(ctx, client, wire, nullptr, false, std::move(done));
 }
 
 void uvcpp_http_server::start_write(conn_ctx& ctx, uvcpp_tcp_client* client,
-                                    std::string wire, uvcpp_buf* body,
+                                    const std::string& wire, uvcpp_buf* body,
                                     bool has_body,
                                     std::function<void(int)> done) {
   ctx.write_pending = true;

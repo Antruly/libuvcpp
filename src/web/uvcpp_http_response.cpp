@@ -171,6 +171,26 @@ void append_hex(std::string& out, unsigned long long v) {
 }  // namespace
 
 std::string uvcpp_http_response::to_string(bool include_body) const {
+  // 造串那个形态：给需要**返回值**的调用方（h2 帧、测试、上一层的辅助函数）
+  // 用。服务端热路径不走这里 —— 它走 `to_string_into` 把字节写进连接上那块
+  // 复用缓冲，省掉的正是下面 `std::string result;` 那一次分配（那个串的字节
+  // 立刻被拷进写请求自己的头部缓冲，然后就被析构了，见 `uvcpp_http_server`
+  // 里 `send_response` 的调用点）。
+  std::string result;
+  to_string_into(result, include_body);
+  return result;
+}
+
+void uvcpp_http_response::to_string_into(std::string& result,
+                                        bool include_body) const {
+  // 与 `to_string` **同一份实现**（上面那个就是"造一个空串再调这里"）⇒ 两条
+  // 路出来的字节逐字节相同，不存在"两处序列化慢慢漂开"这件事。
+  //
+  // `clear()` 是"复用得起来"的**全部**前提：它只把长度置 0、容量留着 —— 于是
+  // 下面那句 `reserve` 在稳态下（`est` 每次都一样）连进都不进。实测（探针
+  // `n1_streambuf_probe.cpp`，libstdc++ 13）：`= std::string()` 在这家实现上恰好
+  // 也留容量（空临时串的移动赋值退化成 clear），真丢缓冲的是 `swap`/`shrink_to_fit`。
+  result.clear();
   const std::string version_str = uvcpp_http_version_str(version);
   const std::string reason = status_message.empty()
                                  ? http_status_reason(status_code)
@@ -196,8 +216,9 @@ std::string uvcpp_http_response::to_string(bool include_body) const {
   }
   if (include_body) est += body.size() + 24;
 
-  std::string result;
-  result.reserve(est);
+  // 复用形态（`to_string_into` 的调用方）下 `result` 的容量是上一次留下的：只要
+  // `est` 没涨过它，这一句连 `reserve` 都不做 ⇒ 整条响应一次分配都没有。
+  if (est > result.capacity()) result.reserve(est);
 
   // --- Status line ---
   result += version_str;
@@ -236,7 +257,7 @@ std::string uvcpp_http_response::to_string(bool include_body) const {
   result += "\r\n";
 
   // 只序列化头部：到这里已经是一条完整的头部块（状态行 + 各头 + 空行）。
-  if (!include_body) return result;
+  if (!include_body) return;
 
   // --- Body ---
   if (chunked) {
@@ -256,8 +277,6 @@ std::string uvcpp_http_response::to_string(bool include_body) const {
   } else if (body.size() > 0) {
     result.append(body.get_const_data(), body.size());
   }
-
-  return result;
 }
 
 // =========================================================================

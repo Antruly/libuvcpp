@@ -1144,6 +1144,91 @@ static bool test_request_headers_do_not_accumulate() {
   return ok;
 }
 
+// =========================================================================
+// Test: to_string_into —— 复用缓冲形态与造串形态**逐字节相同**，且缓冲真复用
+//
+// 这一笔省掉的是"每响应造一个串"那一次分配（站点普查里
+// `uvcpp_http_response::to_string` 的 1.00 次/请求）：那个串的字节**立刻**被拷进
+// 写请求自己的头部缓冲（`uvcpp_tcp_client::write_owned` 里那次 memcpy），然后当场
+// 析构。改法 = 目的地由调用方给 —— 服务端把它挂在**连接**上，容量因此跨请求留下。
+//
+// 三条判据，各自都要能红（变异见 `n1_mutations.py`）：
+//   · **逐字节相同**：`to_string_into(out, v)` 与 `to_string(v)` 一字不差
+//     （v ∈ {true, false}；`false` 那支是 HEAD / 流式头部走的路）。
+//     ★ 这条现在**结构上是"按构造成立"的**（`to_string` 就是把活交给
+//     `to_string_into`），所以它挡的不是"实现写错"而是"**以后两者漂开**"——
+//     能红的变异是"壳里忘了转发 flag"那一种（M3）。
+//   · **脏缓冲**：目的地**已经有内容**时，结果不许带上旧内容 ⇒ 删掉
+//     `to_string_into` 里那句 `result.clear()` 必红（M1）。
+//   · **缓冲没被换掉**：先给一块**远大于**本次需要量的缓冲，调完之后容量不许
+//     掉下来 ⇒ `std::string().swap(x)` / `clear()+shrink_to_fit()` 这类真换缓冲的
+//     写法必红（M2）。
+//     ★ **不许**只判 `data()` 不变：真换缓冲那几种写法会把旧块还给分配器，下一次
+//     `reserve` 往往拿到**同一个地址**（本机实测，见 `n1_streambuf_probe.cpp` 的
+//     C/D 两臂：`data same` 而 `allocs reserve 1`）⇒ 那条判据是瞎子。
+static bool test_to_string_into_reuses_buffer() {
+  bool ok = true;
+
+  // ---- 一、两种形态逐字节相同（chunked 空体那条边界也要盖到）
+  struct Case { const char* name; bool chunked; bool empty; };
+  const Case cases[] = {
+    {"plain",         false, false},
+    {"chunked",       true,  false},
+    {"chunked-empty", true,  true },
+  };
+  for (std::size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    uvcpp_http_response resp = cases[i].empty
+        ? uvcpp_http_response::ok(nullptr, 0, "text/plain")
+        : uvcpp_http_response::ok("body-bytes", 10, "text/plain");
+    resp.set_header("x-a", "1");
+    if (cases[i].chunked) resp.set_header("transfer-encoding", "chunked");
+
+    for (int v = 0; v < 2; ++v) {
+      const bool include_body = (v == 0);
+      const std::string want = resp.to_string(include_body);
+      std::string got;
+      resp.to_string_into(got, include_body);
+      if (got != want) {
+        std::cout << "  [err] " << cases[i].name << " include_body=" << include_body
+                  << "：两种形态字节不同（" << got.size() << " vs " << want.size()
+                  << " 字节）\n";
+        ok = false;
+      }
+    }
+  }
+
+  // ---- 二、脏缓冲：目的地里先塞一段别的，结果不许带上它
+  {
+    uvcpp_http_response resp = uvcpp_http_response::ok("payload", 7, "text/plain");
+    std::string out = "STALE-CONTENT-MUST-VANISH-0123456789";
+    resp.to_string_into(out, true);
+    if (out != resp.to_string(true)) {
+      std::cout << "  [err] 目的地里原来那段内容没被清掉（缺 `clear()`？）\n";
+      ok = false;
+    }
+  }
+
+  // ---- 三、缓冲没被换掉：手工撑到 4096（整条响应只要 ~96），调完之后容量不许
+  //      掉下来。`clear()` 只改长度 ⇒ 仍是 4096；若实现里改成真换缓冲的写法，
+  //      容量会先掉到 SSO 尺寸、再按本次需要量涨回 ~96 ⇒ 掉下来 ⇒ 红。
+  {
+    uvcpp_http_response resp = uvcpp_http_response::ok("keep", 4, "text/plain");
+    std::string out;
+    out.reserve(4096);
+    const std::string::size_type cap_before = out.capacity();
+    resp.to_string_into(out, true);
+    if (out.capacity() < cap_before) {
+      std::cout << "  [err] 目的地被换掉了（容量 " << cap_before << " → "
+                << out.capacity() << "）⇒ 复用没成立\n";
+      ok = false;
+    }
+    std::cout << "  [info] 复用缓冲容量 " << cap_before << " → " << out.capacity()
+              << "，本次响应 " << out.size() << " 字节" << std::endl;
+  }
+
+  return ok;
+}
+
 int main(int argc, char** argv) {
   // 可选参数：测试名子串过滤，便于单条定位。
   const std::string filter = (argc > 1) ? argv[1] : std::string();
@@ -1175,6 +1260,7 @@ int main(int argc, char** argv) {
     {"raw_data_hook", test_raw_data_hook},
     {"response_copy_keeps_deferred", test_response_copy_keeps_deferred},
     {"request_headers_do_not_accumulate", test_request_headers_do_not_accumulate},
+    {"to_string_into_reuses_buffer", test_to_string_into_reuses_buffer},
   };
   for (const auto& t : tests) {
     if (!filter.empty() && std::string(t.name).find(filter) == std::string::npos) {

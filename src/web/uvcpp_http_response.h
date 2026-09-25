@@ -169,6 +169,24 @@ class UVCPP_API uvcpp_http_response {
                                           const uvcpp_buf& body);
 
   // -------------------------------------------------------------------
+  // Serialization into a caller-owned buffer
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 与 @ref to_string **逐字节相同**的序列化，但写进调用方给的串
+   *        （先把 `out` 清空、容量留下）。
+   *
+   * 给"同一块缓冲跨请求复用"的用法：服务端把它挂在连接上，于是第二次起
+   * `est > out.capacity()` 恒假 ⇒ 整条响应**一次分配都没有**。它比 @ref to_string
+   * 省下的那一次分配是**纯浪费**：服务端拿到字节之后立刻把它们拷进写请求自己的
+   * 头部缓冲（`uvcpp_tcp_client::write_owned` 里的 memcpy），那个临时串随即析构。
+   *
+   * @param out          目的地；**内容被清空**，容量保留。
+   * @param include_body 同 @ref to_string：false 时只写头部块（含末尾空行）。
+   */
+  void to_string_into(std::string& out, bool include_body = true) const;
+
+  // -------------------------------------------------------------------
   // Quick-response factories (for server use)
   // -------------------------------------------------------------------
 

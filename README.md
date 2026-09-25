@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.27--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.28--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.27-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.28-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.27-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.28-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -824,6 +824,20 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   likewise the request headers are empty once the response has gone out (the
   return happens no earlier than `notify_sent()`).
   6.02 → 5.02 allocations per request (`1.3.26`)
+- Response serialization no longer builds a throwaway string per request:
+  `uvcpp_http_response` gains the **additive** API
+  `to_string_into(std::string& out, bool include_body)` (`out.clear()` and then
+  write exactly as before, keeping the capacity; `to_string` degrades to "make an
+  empty string and call it", so both forms produce byte-identical output), and the
+  server points it at `conn_ctx::wire_recycle`, a **per-connection** buffer, so from
+  the second request on `est > capacity()` is always false and a whole response
+  costs zero allocations. The allocation it removes was pure waste: the temporary
+  string's bytes are immediately copied into the write request's own head buffer
+  (`uvcpp_tcp_client::write_owned`) and it is destroyed right away. The head
+  parameter of `enqueue_write` / `start_write` goes from by-value to by `const`
+  reference (both write paths copy the bytes before returning); the queued path
+  keeps its own copy.
+  5.02 → 4.02 allocations per request (`1.3.28`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /

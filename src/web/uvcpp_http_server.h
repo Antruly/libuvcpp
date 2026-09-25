@@ -900,7 +900,7 @@ class UVCPP_API uvcpp_http_server {
      * 的调用点仍走原来那条 —— 结算器要唤醒那个闭包，而闭包的去向只有它知道。
      */
     uvcpp_write* wrecycle = nullptr;
-
+    std::string wire_recycle;  // 响应序列化的复用缓冲：容量跨请求留下（见 uvcpp_http_response::to_string_into）
     bool close_requested = false;  // a response asked for close after its write
     bool closing = false;          // a close has already been issued
 
@@ -916,7 +916,7 @@ class UVCPP_API uvcpp_http_server {
   };
 
   /** @brief Queue bytes for the connection, draining as the socket permits. */
-  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string wire,
+  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, const std::string& wire,
                      std::function<void(int)> done = std::function<void(int)>());
 
   /**
@@ -924,10 +924,10 @@ class UVCPP_API uvcpp_http_server {
    *
    * `head` 必须与 `body` 拼起来正好是那条报文 —— 这个前提由调用方保证
    * （今天只有 `send_response` 用，判据写在那里：`to_string(false)` 接上 body
-   * 与 `to_string(true)` 逐字节相同）。`body` 按值收，调用方用 `std::move` 交
-   * 出来即可 —— 移动的是句柄，不是字节。
+   * 与 `to_string(true)` 逐字节相同）。`head` 按 const 引用收 —— 它可以指着跨请求复用的
+   * @ref conn_ctx::wire_recycle（入队那条路会拷进 `qw.bytes`）；`body` 按值收、移动的是句柄。
    */
-  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string head,
+  void enqueue_write(conn_ctx& ctx, uvcpp_tcp_client* client, const std::string& head,
                      uvcpp_buf body,
                      std::function<void(int)> done = std::function<void(int)>());
 
@@ -955,11 +955,11 @@ class UVCPP_API uvcpp_http_server {
    * 一次，于是"队列非空"永远蕴含"有一次写在途"。所以这条路与"入队再泵"逐字等价，
    * 省下的是每个响应一次 `queued_write` 构造 + 一次入队 + 一次出队 + 两次移动。
    *
-   * `body` 为 `nullptr` 时走单块写；非空时那块的内容按 @ref uvcpp_tcp_client::write
-   * 的消费语义交出去（共享视图接引用计数、自有块接所有权），**返回后 `*body` 即
-   * 可析构**。
+   * `wire` 按 const 引用收（两条写路径都在返回之前把头部字节拷走）⇒ 可以指着跨请求
+   * 复用的 `conn_ctx::wire_recycle`。`body` 为 `nullptr` 时走单块写；非空时那块的内容按
+   * @ref uvcpp_tcp_client::write 的消费语义交出去（共享视图接引用计数、自有块接所有权），**返回后 `*body` 即可析构**。
    */
-  void start_write(conn_ctx& ctx, uvcpp_tcp_client* client, std::string wire,
+  void start_write(conn_ctx& ctx, uvcpp_tcp_client* client, const std::string& wire,
                    uvcpp_buf* body, bool has_body, std::function<void(int)> done);
 
   /** @brief Close a connection exactly once and release its context. */
