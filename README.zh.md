@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.30--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.31--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.30-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.31-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.30-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.31-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -805,6 +805,27 @@ libuvcpp/
   接过写请求的（`release_uv_buf()` 会先把 `capacity_` 清零），**不走
   `free_own()`** —— 只挂 `free_own()` 的那一版读数一行不动，原因就在这里。
   每请求 4.02 → 3.02 次分配（`1.3.29`）
+- http 层的**响应头表**：那份 `std::vector<http_header>` 的**缓冲**按连接留下来
+  （`uvcpp_http_response::adopt_tables()` / `yield_tables()` 一对换手；认领在
+  `uvcpp_http_server::on_request_complete()` 造出 `resp` 之后、处理函数跑之前，
+  归还在 `send_response()` 的 h1 出口）。同一份容量原本每请求重新长一遍
+  ——`reserve(4)` + 两次 `_M_realloc_insert`（2→4→8）+ `resp = uvcpp_http_response::ok(...)`
+  那次整体拷贝赋值自带的一次 `operator=`，调用点普查上合起来 **4.00 次/请求**，
+  而这些分配一个字节的头都没多存。`GET /` 探针实测 **7.00 → 4.00 次/请求**
+  （ABBA 交错各 6 跑；对面 hical 同一个量是 3.00）。
+  ★ 表跨请求活着 ⇒ "处理函数拿到的一定是干净的空表"从一句显然的话变成必须守的
+  **不变式**：换出去之前先 `clear()`（`yield_tables()` 里那句是主守卫；
+  `adopt_tables()` 里那句是第二道网，**单删观察不到**），并补了用例
+  `response_headers_do_not_accumulate`（直读处理函数拿到的表 + 端到端两条判据，
+  因为只查"第二条看不见第一条的头"在残留**空名字**条目时恒真）。
+  ★ 契约面：`uvcpp_http_response` 只**加两个非虚方法**、不加数据成员 ⇒
+  `sizeof` 与 vtable 都不变，**无 ABI 断点**；`conn_ctx` 是私有嵌套类型 ⇒
+  `sizeof(uvcpp_http_server)` 也不变。**行为**上有一处变化：交还之后对**同一个
+  响应对象**再调一次 `send_response()`，第二次发的是没有头的报文（改前是第二份
+  完整报文）——一个请求发两份响应在 HTTP/1.1 上本来就是帧序错乱，且本函数自己
+  就会 `set_header`，两次调用从来不幂等；这里如实写出，不写成"无行为变化"。
+  残留的 4.00 里有两笔来自**处理函数自己造的临时响应**（`ok()` 里那句
+  `http_reserve_headers`），那份表不归连接管、回收槽够不到（`1.3.31`）
 - 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
   超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
   `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）

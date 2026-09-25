@@ -1145,6 +1145,108 @@ static bool test_request_headers_do_not_accumulate() {
 }
 
 // =========================================================================
+// Test: 响应头表跨请求**不留条目**（回收槽被清干净）
+//
+// 这一笔把响应头表的**缓冲**按连接留了下来（`uvcpp_http_response::adopt_tables()`
+// / `yield_tables()`；认领在 `uvcpp_http_server::on_request_complete()`、归还在
+// `send_response()` 的 h1 出口）。省的是调用点普查量出来的 3.00 次/请求
+// （`vector<http_header>::_M_realloc_insert` 2.00 + `operator=` 1.00），代价是
+// **那张表跨请求活着** —— 于是"处理函数拿到的一定是干净的空表"从一句显然的话
+// 变成了必须守的不变式。
+//
+// 两条判据，**缺一不可**（M2b 的教训：只查"第二条看不见第一条的头"会在表里
+// 残留**空名字**条目时恒真 —— 那种条目按名字查永远查不到）：
+//   · **A 直读**：第二条请求的处理函数拿到 `resp` 时，`resp.headers.size()`
+//     必须是 **0**。这条不经过任何报文往返，直接读"槽清干净了没有"。
+//   · **B 端到端**：第二条响应里查不到 `x-resp-one`，且两条响应的头条数相等
+//     （相等那条挡的是"条目被留下但名字为空"这种看不见的残留）。
+//
+// ★ 变异方向**不对称**，写在注释里免得下次白跑一轮：
+//   `yield_tables()` 里那句 `headers.clear()` 是**主守卫**（删掉 ⇒ A 立刻红）；
+//   `adopt_tables()` 里那句 `spare_headers.clear()` 是**第二道网**（删掉**观察
+//   不到** —— 正常路径上槽里的条目已经被 yield 那句清过了）。
+//   所以本用例的变异必须**两句一起去掉**才算数；单删 adopt 那句会读出"绿"，
+//   那不是用例钝，是那两句的关系如此。
+static bool test_response_headers_do_not_accumulate() {
+  TestServer srv;
+  std::atomic<std::size_t> seen_one(0), seen_two(0);
+  std::atomic<std::size_t> n_one(0), n_two(0);
+  std::atomic<bool> two_own(false);
+
+  int port = srv.start([&](uvcpp_http_server& s) {
+    s.get("/one", [&](uvcpp_http_request&, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+      seen_one.store(resp.headers.size());
+      resp = uvcpp_http_response::ok("1", 1);
+      resp.set_header("x-resp-one", "1");
+    });
+    s.get("/two", [&](uvcpp_http_request&, uvcpp_http_response& resp,
+                      uvcpp_tcp_client*) {
+      // ★ 判据 A：处理函数一进来就必须看见**空表**。
+      seen_two.store(resp.headers.size());
+      resp = uvcpp_http_response::ok("2", 2);
+      resp.set_header("x-resp-two", "2");
+      if (resp.get_header("x-resp-two") == "2") two_own.store(true);
+    });
+  });
+
+  bool ok = true;
+  uvcpp_http_client client;
+  if (client.connect_wait("127.0.0.1", port, 3000) != 0) {
+    srv.shutdown();
+    return false;
+  }
+
+  uvcpp_http_response resp1, resp2;
+  const int rc1 =
+      client.send_wait(uvcpp_http_request::make_get("/one"), resp1, 5000);
+  const int rc2 =
+      client.send_wait(uvcpp_http_request::make_get("/two"), resp2, 5000);
+  n_one.store(resp1.headers.size());
+  n_two.store(resp2.headers.size());
+
+  if (rc1 != 0 || rc2 != 0) {
+    std::cout << "  [err] keep-alive 复用失败 rc1=" << rc1 << " rc2=" << rc2
+              << "\n";
+    srv.shutdown();
+    return false;
+  }
+  // 前提：首请求的表必须是空的、第二条自己的头也必须真设上了 —— 否则"看不见
+  // 第一条的头"根本没法归因（可能是表压根空着、也可能头没设上）。
+  if (seen_one.load() != 0) {
+    std::cout << "  [err] 首请求进处理函数时表里就有 " << seen_one.load()
+              << " 条 —— 判据的前提不成立\n";
+    ok = false;
+  }
+  if (!two_own.load()) {
+    std::cout << "  [err] 第二条自己的 `x-resp-two` 没设上 —— 判据的前提不成立\n";
+    ok = false;
+  }
+  if (seen_two.load() != 0) {
+    std::cout << "  [err] 判据 A：第二条进处理函数时表里有 " << seen_two.load()
+              << " 条 ⇒ 回收槽没清干净，第一条留下的条目被交到了下一条手上\n";
+    ok = false;
+  }
+  if (!resp2.get_header("x-resp-one").empty()) {
+    std::cout << "  [err] 判据 B：第二条响应里 `x-resp-one` **还在**（值 `"
+              << resp2.get_header("x-resp-one") << "`）\n";
+    ok = false;
+  }
+  if (n_two.load() != n_one.load()) {
+    std::cout << "  [err] 判据 B：响应头表跨请求**累积**了：第一条 "
+              << n_one.load() << " 条、第二条 " << n_two.load()
+              << " 条（必须相等）\n";
+    ok = false;
+  }
+  std::cout << "  [info] 进处理函数时表条数：第一条 " << seen_one.load()
+            << "、第二条 " << seen_two.load() << "；响应头条数：第一条 "
+            << n_one.load() << "、第二条 " << n_two.load() << std::endl;
+
+  srv.shutdown();
+  return ok;
+}
+
+// =========================================================================
 // Test: to_string_into —— 复用缓冲形态与造串形态**逐字节相同**，且缓冲真复用
 //
 // 这一笔省掉的是"每响应造一个串"那一次分配（站点普查里
@@ -1260,6 +1362,8 @@ int main(int argc, char** argv) {
     {"raw_data_hook", test_raw_data_hook},
     {"response_copy_keeps_deferred", test_response_copy_keeps_deferred},
     {"request_headers_do_not_accumulate", test_request_headers_do_not_accumulate},
+    {"response_headers_do_not_accumulate",
+     test_response_headers_do_not_accumulate},
     {"to_string_into_reuses_buffer", test_to_string_into_reuses_buffer},
   };
   for (const auto& t : tests) {

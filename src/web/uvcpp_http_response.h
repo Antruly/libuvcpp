@@ -119,6 +119,33 @@ class UVCPP_API uvcpp_http_response {
   /** @brief Check if a header exists (case-insensitive). */
   bool has_header(const std::string& key) const;
 
+  /**
+   * @brief 把头表的**缓冲**从连接级的回收槽换进来（容量跨请求留下）。
+   *
+   * 为什么需要：响应对象每个请求新造一个，头表也从空开始 —— 不回收的话，光
+   * 「让表长到 4~5 个位置」就要 `reserve(4)` + 一到两次 `_M_realloc_insert`，
+   * 再加上 `resp = uvcpp_http_response::ok(...)` 那次整体拷贝赋值自带的一次
+   * 分配。这四笔在 `probe_h` 的调用点普查里合起来是 **5.00 次/请求**（对面
+   * hical 同一个量是 3.00），而它们一个字节的头都没多存。
+   *
+   * `spare_headers` 由**连接**持有（`conn_ctx::resp_hdr_recycle`），所以它的
+   * 寿命就是连接的寿命；连接关掉时随 `conn_ctx` 一起释放。
+   *
+   * ★ 交换进来之后**必须**先把元素清掉再交给处理函数：`headers` 是公开成员，
+   *   留着上一条请求的条目就是让处理函数静默读到上一条请求的头。所以清空这一步
+   *   放在 `adopt_tables()` 里（而不是 `yield_tables()`）—— 这样"换进来的那块
+   *   一定是干净的"这条不变式只在一个地方维护。
+   */
+  void adopt_tables(http_headers& spare_headers);
+
+  /**
+   * @brief 把头表交还给回收槽；元素先清掉，只留容量。
+   *
+   * 调用点在 `uvcpp_http_server::send_response()` 的 h1 出口：报文已经序列化进
+   * 写缓冲、体也交给写队列了，头表到这里再也用不着。见那个函数里的注释。
+   */
+  void yield_tables(http_headers& spare_headers);
+
   /** @copydoc set_header(const char*, const std::string&) */
   bool has_header(const char* key) const;
 

@@ -901,6 +901,13 @@ class UVCPP_API uvcpp_http_server {
      */
     uvcpp_write* wrecycle = nullptr;
     std::string wire_recycle;  // 响应序列化的复用缓冲：容量跨请求留下（见 uvcpp_http_response::to_string_into）
+
+    // 响应**头表**的复用槽：与上面那条同一个理由，只是那份容量在头表的向量里。
+    // 一次交换就能让「表长到 4~5 个位置」这条路上的一次 `reserve` 加一到两次
+    // `_M_realloc_insert` 全部消失（`probe_h` 的调用点普查：这几笔合起来
+    // 5.00 次/请求）。认领在 `on_request_complete` 造出 `resp` 之后、处理函数
+    // 之前；归还在 `send_response` 的 h1 出口。
+    http_headers resp_hdr_recycle;
     bool close_requested = false;  // a response asked for close after its write
     bool closing = false;          // a close has already been issued
 

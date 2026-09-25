@@ -35,6 +35,20 @@ uvcpp_http_response::uvcpp_http_response() {}
 
 uvcpp_http_response::~uvcpp_http_response() {}
 
+// 回收是一对换手：`adopt` 拿缓冲、清干净；`yield` 还回去、也清干净。
+// 两边都清，是为了让"回收槽里永远是一张干净的空表"这条不变式**不依赖调用方
+// 的顺序** —— 只清一边的话，少调一次 `yield`、或者连着调两次 `adopt`，就会把
+// 带条目的表交到下一请求手上。多一次 `clear()` 在空表上是白干的。
+void uvcpp_http_response::adopt_tables(http_headers& spare_headers) {
+  headers.swap(spare_headers);
+  spare_headers.clear();
+}
+
+void uvcpp_http_response::yield_tables(http_headers& spare_headers) {
+  headers.clear();
+  headers.swap(spare_headers);
+}
+
 // 两个成员函数是手写的（`UVCPP_DEFINE_COPY_FUNC` 只声明），逐字段列一遍 ——
 // **加字段时漏掉一处没有任何编译期提示**，`stream_id` 就这么漏过一次。
 //

@@ -627,6 +627,12 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
 
   uvcpp_http_response resp;
 
+  // 头表的缓冲按**连接**留下来：认领必须在处理函数跑之前（下面那句
+  // `handler(req, resp, client)` 会往表里塞头，认领晚了那些头就落在一块
+  // 马上要被丢掉的小缓冲上）。清空由 `adopt_tables()` 自己负责 —— 处理函数
+  // 拿到的一定是一张干净的表，看不见上一条请求的头。
+  resp.adopt_tables(ctx.resp_hdr_recycle);
+
   // Check for WebSocket upgrade BEFORE routing
   if (upgrade_handler_) {
     std::string up = http_get_header(req.headers, "upgrade");
@@ -843,6 +849,17 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   } else {
     enqueue_write(ctx, client, ctx.wire_recycle);
   }
+
+  // 归还要放在**最后**：头表一直要用到上面那句 `to_string_into()`（报文就是
+  // 从表里拼出来的），而 `enqueue_write` 拿走的是序列化后的字节与 `resp.body`，
+  // 不再碰 `headers`。放在这里之后，这一段里再新增"读头"的代码都得往回挪。
+  //
+  // ★ 一次点名：交还之后这个响应对象的头表就空了 ⇒ 对**同一个对象**再调一次
+  //   `send_response()`，第二次发的是没有头的报文（改前是第二份完整报文）。
+  //   一个请求发两份响应在 HTTP/1.1 上本来就是帧序错乱，而且本函数自己就会
+  //   `set_header`，两次调用从来不幂等 —— 所以这是一条如实写出来的行为变化，
+  //   不是"无变化"。
+  resp.yield_tables(ctx.resp_hdr_recycle);
   return body_bytes;
 }
 

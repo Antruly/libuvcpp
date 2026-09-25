@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.30--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.31--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.30-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.31-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.30-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.31-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -867,6 +867,35 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   zeroes `capacity_` first), so it never goes through `free_own()` - the version
   that only hooked `free_own()` moved the reading not at all.
   4.02 → 3.02 allocations per request (`1.3.29`)
+- The http layer's **response header table**: the backing storage of that
+  `std::vector<http_header>` is now kept per connection (`uvcpp_http_response::adopt_tables()`
+  / `yield_tables()`, a pair of swaps; claimed in `uvcpp_http_server::on_request_complete()`
+  after `resp` is built and before the handler runs, returned at the h1 exit of
+  `send_response()`). The same capacity used to be grown from scratch on every request
+  -- `reserve(4)` plus two `_M_realloc_insert` (2->4->8) plus the `operator=` that
+  `resp = uvcpp_http_response::ok(...)` brings with it: **4.00 allocations per request**
+  on the call-site census, while not one extra header byte was ever stored. On the
+  `GET /` probe this reads **7.00 -> 4.00 per request** (two interleaved runs; hical
+  reads 3.00 on that quantity too).
+  Because the table now outlives the request, "the handler always sees a clean, empty
+  table" stops being obvious and becomes an **invariant**: it is cleared before the swap
+  (the `clear()` in `yield_tables()` is the primary guard, the one in `adopt_tables()`
+  is a second net that **cannot be observed when removed alone**), and the new case
+  `response_headers_do_not_accumulate` covers it with two criteria -- reading the table
+  the handler is handed, plus the end-to-end check -- because "the second response cannot
+  see the first request's header" is vacuously true when the residue is an entry with an
+  **empty name**.
+  Contract surface: `uvcpp_http_response` gains **two non-virtual methods** and no data
+  member, so neither `sizeof` nor the vtable moves -- **no ABI break**; `conn_ctx` is a
+  private nested type, so `sizeof(uvcpp_http_server)` does not move either. One
+  **behavioural** change, stated plainly rather than as "no change": after the table is
+  returned, calling `send_response()` a second time on the **same response object** emits
+  a message with no headers (it used to emit a second full message) -- two responses to
+  one request is already a framing error in HTTP/1.1, and the function itself calls
+  `set_header`, so the two calls were never idempotent. Two of the remaining 4.00 come
+  from the **temporary response the handler builds itself** (`http_reserve_headers` inside
+  `ok()`), whose table belongs to no connection and is out of the recycle slot's reach
+  (`1.3.31`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /
