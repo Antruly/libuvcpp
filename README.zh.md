@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.3.31--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.3.32--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.3.31-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.3.32-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -592,7 +592,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.3.31-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.3.32-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0` 四个 tag。下面是
 `1.1.x` 与 `1.2.x` 这两条开发线从 `v1.1.0` 到 `v1.3.0` 之间落地的全部改动，按主题
 分组，括号里是它**首次出现**的那一档；已发布版本的说明在
@@ -826,6 +826,41 @@ libuvcpp/
   就会 `set_header`，两次调用从来不幂等；这里如实写出，不写成"无行为变化"。
   残留的 4.00 里有两笔来自**处理函数自己造的临时响应**（`ok()` 里那句
   `http_reserve_headers`），那份表不归连接管、回收槽够不到（`1.3.31`）
+- 修掉上一笔（`1.3.31`）在 **webapp 那条路**上引进的**每请求 +2.00 次分配**：
+  连接上的响应头表回收槽（`conn_ctx::resp_hdr_recycle`）与 webapp 每循环的槽
+  （`loop_slot::resp_recycle`）**抢同一块缓冲**。`uvcpp_http_server::send_response()`
+  收的是**引用**，而交进去的响应对象**不一定是领走那块缓冲的那一个** —— webapp
+  那条路正是反例：`on_request_complete()` 在自己那个**局部** `resp` 上认领，随后
+  因为 `resp.deferred` 为真直接返回（那一位由 webapp 只在"派发那一刻传进来的对象"
+  上设），真正被发送的却是 **webapp 自己**手上那个对象；于是那句无条件的
+  `yield_tables()` 把 webapp **有容量**的表换进连接槽、塞给它一块**容量 0** 的表，
+  紧接着 `context_finished()` 又把这块钱 0 的表收进 `resp_recycle` ⇒ **回收槽每请求
+  被毒化一次**、下一条请求的表从 0 重新长。验收路由 `/` 实测（`set_loops(1)` 档、
+  全局分配计数器）：**5.03 → 3.03 次/请求**（Δ −2.00，两次交错零重叠），落回并略优于
+  H1 之前那两笔（`1.3.28` 3.0356、`1.3.30` 3.0326）。
+  改法＝连接上记**谁领的**（`conn_ctx::resp_hdr_owner`），只有领走那块缓冲的对象才把它
+  还回去；另配一个 RAII 兜底，管 `on_request_complete()` 那几条**没走到
+  `send_response()`** 的出口（升级 / deferred）。
+  ★ 这一笔的判据是**两套、各管一条路**，因为两条路上的**主守卫是不同的一句**
+  （与 `1.3.31` 那对"单删都观察不到"的守卫恰好相反）：
+  · **容量面**（新用例 `response_header_capacity_reused`）管 **webapp 路** ——
+    掐掉 `send_response()` 里那句 owner 判据 ⇒ 红（读数 `0/0/0`、地址 `nil`）；
+  · **分配整数**（`probe_h`）管 **http 层路** —— 掐掉 RAII 那句判据 ⇒ 红
+    （4.0051 → 7.0053：同一条路上还了两遍，槽被清空）。
+    整段 RAII 拿掉**两套都绿**（计数 4.0052、容量 8）—— 那是**退役的兜底**：
+    它只在"认领了却没走到 `send_response()`"时才起作用，而现在两条臂都不走那条路。
+  · 新用例**自带正对照**：第一条请求拿到的表容量必须是 **0**（冷的），否则"第二条
+    有容量"完全可能只是"容量天生就有"。读的是**容量**而不是 `data()` —— 换过手之后
+    `reserve` 常拿回同一个地址，只看地址是瞎子。
+  ★ `1.3.31` 那条**行为变化**从此**只在 owner 判据为真的那条路上**成立：归还改成
+    `if (ctx.resp_hdr_owner == &resp)` 之后，只有**领过**那块缓冲的响应对象才会还；
+    **webapp 路**上 `send_response()` 那一刻什么都不还（那一侧由 M2a 那个每循环的槽在
+    `context_finished()` 里收）。这里**只写结构**（两行守卫的真值表），不写「第二次会
+    发什么」—— 那是行为断言，本笔没有装置去量它。
+  ★ H1 在 **http 层**的收益一分不动（`probe_h` 4.0051，与 `1.3.31` 同值）；响应字节与
+  上一笔**逐字节相同**（5 条路由：命中 / 路径参数 / 中间件 / 404，只归一 `date` 的值）。
+  ★ 契约面：`conn_ctx` 是**私有嵌套类型** ⇒ 只加一个数据成员；公开类型 `sizeof`
+  七型不变、**无新公开名字、无 ABI 断点**（`1.3.32`）
 - 头名查找多了一组**不拥有**的 `const char*` 重载（14 个类成员 + 4 个自由函数），
   超过 SSO 上限的字面量不再构造临时 `std::string`（`1.2.16`）；值位置
   `text()` / `html()` / `json()` / `json_str()` 同理（`1.2.17`）

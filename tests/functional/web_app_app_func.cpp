@@ -42,6 +42,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -1821,6 +1822,141 @@ void test_request_headers_recycled_but_cleared() {
 }
 
 // =========================================================================
+// 12e. 响应头表的缓冲**真的**跨请求留住了（H1 回收槽毒化那条回归）
+// =========================================================================
+//
+// 12c 盯的是"留下的表必须是**空**的"（**内容**面的不变式）。这一条盯的是
+// **容量**面：表里那块缓冲有没有真的留到下一请求。它是 H1（响应头表按连接
+// 留一块）与 M2a（webapp 侧 `resp_recycle`）**两套回收槽**撞出来的那条回归
+// 的直读证人。
+//
+// 现场：`uvcpp_http_server::send_response(client, resp)` 收的是**引用**，而
+// webapp 那条路交进来的是它**自己**手上的响应对象，不是 `on_request_complete()`
+// 里领走缓冲的那个**局部**对象（后者在 `resp.deferred` 那条早退路上根本没被
+// 发送）。于是那句无条件的 `yield_tables()` 把 webapp 手上**有容量**的表换进
+// 连接槽、塞给它一块**容量 0** 的表；紧接着 `context_finished()` 又把这块容量 0
+// 的表收进 `resp_recycle` ⇒ 下一条请求从 0 重新长。实测（验收路由 `/`、
+// C=400/T=4）：`set_loops(1)` 每请求分配 **5.04 → 3.03**。
+//
+// ★ 判据为什么是**容量**：本文件的用例里没有分配计数器（那是 VM 装置的活），
+//   而容量是这条不变式的**直接**读物 —— `capacity() == 0` 就等于"下一条请求
+//   必然要 `reserve(4)`，第 5 个头再来一次 `_M_realloc_insert`"。
+// ★ 判据**自带正对照**：第一条请求必须是**冷的**（容量 0）。没有这一条，
+//   "第二条有容量"完全可能只是"容量天生就有"，与复用无关。
+void test_response_header_capacity_reused() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+
+  std::size_t cap_one = 0, cap_two = 0, cap_three = 0;
+  const void* buf_two = nullptr;
+  const void* buf_three = nullptr;
+  int call = 0;
+
+  app.get("/cap", [&](uvcpp_web_request& req, uvcpp_web_response& resp,
+                      uvcpp_web_next next) {
+    (void)req;
+    (void)next;
+    // ★ 必须走 **const** 版 `raw()`：非 const 那个会先跑 `sync_meta()`，而这里
+    //   是派发之后、body 还空着的一拍 ⇒ 会把 `content-length` 写死成 0，顺带
+    //   把本用例要量的东西遮掉（M2a 记过同一条理由）。
+    const uvcpp_web_response& cr = resp;
+    const auto& h = cr.raw().headers;
+    const std::size_t n = h.capacity();
+    const void* p = static_cast<const void*>(h.data());
+    if (call == 0) {
+      cap_one = n;
+    } else if (call == 1) {
+      cap_two = n;
+      buf_two = p;
+    } else {
+      cap_three = n;
+      buf_three = p;
+    }
+    ++call;
+    resp.text("cap-body");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "容量复用用例的服务启动");
+  const int port = app.bound_port();
+
+  uvcpp_tcp_client c;
+  std::atomic<bool> connected(false);
+  std::string got;
+  check(c.connect("127.0.0.1", port,
+                  [&](int st) {
+                    if (st == 0) connected.store(true);
+                  }) == 0,
+        "客户端连上了");
+  uvcpp_loop* loop = c.get_loop();
+  check(uvcpp_test::wait_until(loop, [&] { return connected.load(); },
+                               uvcpp_test::kWaitMs),
+        "连接建立");
+
+  c.read_start_events([&](uvcpp_tcp_client&, const net_read_result& ev) {
+    if (!ev.is_end()) got.append(ev.data, ev.size);
+  });
+
+  // ★ 三条请求必须走**同一条** keep-alive 连接：换了连接就是换了 `loop_slot`，
+  //   复用的前提根本不成立。
+  // 数"cap-body"在收到的字节里出现过几次 —— 用来证明这一条真的**发回去了**，
+  // 不只证明处理函数被跑到了（`call` 只说明"进去了"，不说明"出来了"）。
+  const auto bodies_seen = [&got]() {
+    const std::string needle("cap-body");
+    std::size_t n = 0, at = 0;
+    while ((at = got.find(needle, at)) != std::string::npos) {
+      ++n;
+      at += needle.size();
+    }
+    return n;
+  };
+
+  const std::string req =
+      "GET /cap HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+  for (int i = 0; i < 3; ++i) {
+    check(c.write(req.data(), req.size(), [](int) {}) == 0, "请求写出去了");
+    check(uvcpp_test::wait_until(loop, [&] { return call >= i + 1; }, 5000),
+          "这一条被处理函数看见了");
+    // ★ 等到**响应体回到客户端**为止才发下一条：否则三条请求会挤在一起，而
+    //   下面"第二条/第三条拿到的是同一块缓冲"这个判据要的是**顺序**复用。
+    check(uvcpp_test::wait_until(
+              loop, [&] { return bodies_seen() >= static_cast<std::size_t>(i + 1); },
+              5000),
+          "这一条的响应体回到了客户端");
+  }
+
+  // --- 判据一（**正对照**）：第一条必须是冷的 ---
+  std::printf("    读数：容量 第一=%zu 第二=%zu 第三=%zu ｜ 缓冲地址 %p = %p\n",
+              cap_one, cap_two, cap_three,
+              static_cast<const void*>(buf_two),
+              static_cast<const void*>(buf_three));
+
+  check(cap_one == 0,
+        "第一条拿到的表容量是 **0** —— 这是正对照：下面那条"
+        "'第二条有容量'才不可能是'容量天生就有'");
+
+  // --- 判据二（主）：第二条拿到的表已经有容量 ---
+  check(cap_two >= 4,
+        "第二条拿到的表**已经有容量**（≥4 ⇒ 那次 `reserve(4)` 没有再发生）");
+
+  // --- 判据三：第三条仍复用同一块缓冲（地址只当旁证）---
+  check(cap_three >= 4 && buf_three == buf_two,
+        "第三条仍复用同一块缓冲（容量与地址都留住了）");
+
+  check(bodies_seen() == 3, "三条响应体都回来了（不是靠 IO 缓冲凑数）");
+
+  std::atomic<bool> done(false);
+  if (c.get_tcp() != nullptr) {
+    c.get_tcp()->close([&](uvcpp_handle*) { done.store(true); });
+  }
+  uvcpp_test::wait_until(loop, [&] { return done.load(); },
+                         uvcpp_test::kWaitMs);
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
 // 用例表
 // =========================================================================
 struct test_case {
@@ -1867,6 +2003,8 @@ int main(int argc, char** argv) {
        test_response_tables_recycled_but_cleared},
       {"request_headers_recycled_but_cleared",
        test_request_headers_recycled_but_cleared},
+      {"response_header_capacity_reused",
+       test_response_header_capacity_reused},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

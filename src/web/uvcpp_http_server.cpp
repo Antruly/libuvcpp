@@ -632,6 +632,26 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   // 马上要被丢掉的小缓冲上）。清空由 `adopt_tables()` 自己负责 —— 处理函数
   // 拿到的一定是一张干净的表，看不见上一条请求的头。
   resp.adopt_tables(ctx.resp_hdr_recycle);
+  ctx.resp_hdr_owner = &resp;
+
+  // ★ 领了就得**有且只有一个**配对，而配对点必须是"这条响应真的发完了"那一刻。
+  //   本函数有三条出口（升级 / deferred / 正常 `send_response()`），后两条才到
+  //   得了正常归还点，所以拿一个 RAII 兜底 —— 靠人工在三处各补一句 `yield` 是
+  //   会漏的，而**漏了的症状只是"下次从 0 长"**（静默，只有读数看得见）。
+  //
+  //   为什么认的是"领走缓冲的那个对象"而不是"本函数的局部对象"：见
+  //   `conn_ctx::resp_hdr_owner` 的注释 —— `send_response()` 收到的引用可能是
+  //   webapp 手上那个对象，无条件还就会把它的表换走、塞给它一块空的。
+  struct resp_hdr_guard {
+    conn_ctx& c;
+    uvcpp_http_response& r;
+    ~resp_hdr_guard() {
+      if (c.resp_hdr_owner == &r) {
+        r.yield_tables(c.resp_hdr_recycle);
+        c.resp_hdr_owner = nullptr;
+      }
+    }
+  } resp_hdr_guard_inst{ctx, resp};
 
   // Check for WebSocket upgrade BEFORE routing
   if (upgrade_handler_) {
@@ -859,7 +879,11 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   //   一个请求发两份响应在 HTTP/1.1 上本来就是帧序错乱，而且本函数自己就会
   //   `set_header`，两次调用从来不幂等 —— 所以这是一条如实写出来的行为变化，
   //   不是"无变化"。
-  resp.yield_tables(ctx.resp_hdr_recycle);
+  // ★ 只有**领走那块缓冲的那个对象**才还 —— 见 `conn_ctx::resp_hdr_owner`。
+  if (ctx.resp_hdr_owner == &resp) {
+    resp.yield_tables(ctx.resp_hdr_recycle);
+    ctx.resp_hdr_owner = nullptr;
+  }
   return body_bytes;
 }
 

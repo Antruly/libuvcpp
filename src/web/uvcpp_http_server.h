@@ -908,6 +908,27 @@ class UVCPP_API uvcpp_http_server {
     // 5.00 次/请求）。认领在 `on_request_complete` 造出 `resp` 之后、处理函数
     // 之前；归还在 `send_response` 的 h1 出口。
     http_headers resp_hdr_recycle;
+
+    /**
+     * @brief 谁把 `resp_hdr_recycle` 那块缓冲**领走了**（`nullptr` = 没人领）。
+     *
+     * 必须记这一笔，是因为归还点 `send_response(client, resp)` 收的是**引用**
+     * —— 而交进来的那个响应对象**不一定是领走缓冲的那一个**。webapp 那条路
+     * 就是反例：`on_request_complete()` 在自己那个局部 `resp` 上认领，随后因为
+     * `resp.deferred` 为真直接返回（那一位由 webapp 在 `uvcpp_web_app.cpp` 设，
+     * 它只在"派发那一刻传进来的那个对象"上），真正被发送的是 **webapp 自己**
+     * 手上那个对象（`http_->send_response(client, r.raw())`，同一个文件）。
+     *
+     * 这一层没加之前，`send_response()` 无条件 `yield_tables()` ⇒ 它把 webapp
+     * 手上那块**有容量**的表换进本槽，同时塞给 webapp 一块**容量 0** 的表；
+     * 紧接着 `uvcpp_web_app::context_finished()` 又把那块容量 0 的表收进
+     * `resp_recycle` ⇒ **回收槽每请求被毒化一次**、下一条请求的表从 0 重新长
+     * （`reserve(4)` 一次 + 撑过 4 条时再 `_M_realloc_insert` 一次）。实测
+     * （验收路由 `/`、C=400/T=4）：`set_loops(1)` **5.04 → 3.03**、
+     * `set_loops(4)` **5.01 → 3.01**。而本槽在 **http 层**上原有的收益
+     * （`probe_h` 7.00 → 4.00）一分不动 —— 两种路径的差别只是"谁领的谁还"。
+     */
+    uvcpp_http_response* resp_hdr_owner = nullptr;
     bool close_requested = false;  // a response asked for close after its write
     bool closing = false;          // a close has already been issued
 

@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.3.31--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.3.32--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.3.31-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.3.32-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -606,7 +606,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.3.31-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.3.32-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0` and `v1.3.0` are the
 tagged releases. Everything the `1.1.x` and `1.2.x` development lines accumulated between
 `v1.1.0` and `v1.3.0` is below, by theme, with the version each change first appeared in;
@@ -896,6 +896,53 @@ what is deliberately not supported — see [`doc/http2-status.md`](doc/http2-sta
   from the **temporary response the handler builds itself** (`http_reserve_headers` inside
   `ok()`), whose table belongs to no connection and is out of the recycle slot's reach
   (`1.3.31`)
+- Fixes an **extra 2.00 allocations per request** that the previous entry
+  (`1.3.31`) introduced **on the webapp path**: the per-connection response-header recycle
+  slot (`conn_ctx::resp_hdr_recycle`) and the per-loop webapp slot (`loop_slot::resp_recycle`)
+  were **fighting over one buffer**. `uvcpp_http_server::send_response()` takes a
+  **reference**, and the response object handed to it is **not necessarily the one that
+  claimed the buffer** -- the webapp path is exactly that case: `on_request_complete()`
+  claims on its own **local** `resp` and then returns early because `resp.deferred` is set
+  (the webapp only sets that bit on the object handed in at dispatch time), while what
+  actually gets sent is **the webapp's own** object. An unconditional `yield_tables()`
+  therefore swapped the webapp's **capacity-bearing** table into the connection slot and
+  handed it a **capacity-0** table instead, and `context_finished()` then pushed that
+  capacity-0 table into `resp_recycle` -- **poisoning the slot once per request**, so every
+  next request grew its table from zero again. On the acceptance route `/` (`set_loops(1)`,
+  global allocation counter) this reads **5.03 -> 3.03 per request** (delta -2.00, two
+  interleaved runs, no overlap), back to and slightly below the two entries before H1
+  (`1.3.28` 3.0356, `1.3.30` 3.0326).
+  The fix records **who claimed it** on the connection (`conn_ctx::resp_hdr_owner`) so only
+  the object that took the buffer gives it back, plus an RAII backstop for the exits of
+  `on_request_complete()` that **never reach `send_response()`** (upgrade / deferred).
+  This entry needs **two criteria, one per path**, because the **primary guard differs
+  between them** (the exact opposite of the `1.3.31` pair, where removing either one alone
+  was unobservable):
+  · the **capacity** criterion (new case `response_header_capacity_reused`) covers the
+    **webapp path** -- dropping the owner test inside `send_response()` turns it red
+    (readings `0/0/0`, addresses `nil`);
+  · the **allocation integer** (`probe_h`) covers the **http-layer path** -- dropping the
+    owner test inside the RAII backstop turns it red (4.0051 -> 7.0053: the same path
+    returns the table twice and empties the slot).
+    Removing the RAII block entirely leaves **both criteria green** (count 4.0052, capacity
+    8) -- it is a **defensive** line: it only matters when something claims and then never
+    reaches `send_response()`, which neither arm does today.
+  · the new case carries its own **opposite-face control**: the first request must observe
+    capacity **0** (cold), otherwise "the second one has capacity" could simply mean capacity
+    was always there. It reads **capacity**, not `data()` -- after a swap `reserve` often
+    hands back the same address, so an address-only criterion is blind.
+  · **the `1.3.31` behaviour note now narrows to the path where the owner test is true**:
+    with the hand-back gated on `ctx.resp_hdr_owner == &resp`, only a response object that
+    **claimed** the slot gives it back -- on the webapp path nothing is handed back at
+    `send_response()` time at all (that side is collected by the per-loop webapp slot, in
+    `context_finished()`). Stated structurally, because that is exactly what the two guards
+    say; no arm here exercises a double `send_response()`.
+  H1's **http-layer** gain is untouched (`probe_h` 4.0051, same as `1.3.31`), and the
+  response bytes are **byte-identical** to the previous entry (5 routes: hit, path
+  parameter, middleware, 404; only the `date` value is normalised).
+  Contract surface: `conn_ctx` is a **private nested type**, so this adds one data member;
+  `sizeof` is unchanged for all seven public types, with **no new public name and no ABI
+  break** (`1.3.32`)
 - Header lookups take a non-owning `const char*` overload (14 class members, four free
   functions), so a literal longer than the SSO limit stops constructing a temporary
   `std::string` (`1.2.16`) — the same for values in `text()` / `html()` / `json()` /
