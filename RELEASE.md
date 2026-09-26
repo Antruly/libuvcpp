@@ -9,6 +9,120 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.4.0 重点 (Highlights)
+
+`1.3.1` → `1.3.33` 这 33 个开发档全部收进这一版。**这一版有破坏性改动**：日志模块
+动了一处 vtable、一处对象布局和四个重载集（逐条见本节末「换二进制之前」）。
+
+### 新增
+
+| 新增 | 说明 | 档 |
+|---|---|---|
+| **SOAP 1.1/1.2 + WSDL 1.1** | 新模块 `src/wsdl/`（`UVCPP_ENABLE_WSDL`，默认 OFF）：WSDL 文档模型与发布层、SOAP 信封解析 / Fault / 序列化、operation 派发层（派发键、九种拒绝、响应包装）。依赖 pugixml，随包静态链接 | `1.3.7-dev`、`1.3.8-dev` |
+| **应用层 JSON** | `uvcpp_json` 构造器与字段表反射（`UVCPP_JSON_REFLECT`），不用再手写 `to_string` | `1.3.3-dev`、`1.3.4-dev` |
+| **日志模块完善** | 见下节 | `1.4.0` |
+| 多循环的 Linux 分流 | `set_loops(n > 1)` 在 Linux/BSD 上改为**内核分流**（n 条循环各自 `UV_TCP_REUSEPORT` 绑同一端口），Windows 仍是转手；`is_fanout()` 可问是哪一种 | `1.3.5-dev` |
+| `Date` 响应头 | 按秒缓存，不再每响应 `strftime` | `1.3.1-dev` |
+| 进程内设 libuv 线程池 | `uvcpp_set_threadpool_size()`，上限来源收口成一个常量 | `1.3.2-dev` |
+| 静态分片下发的名额闸门 | 按块借还工作池名额，拿不到名额时不再回 503 | `1.3.6-dev` |
+
+### 日志模块（`1.4.0`）
+
+- **看得到位置了**：新增 `UVCPP_LOGF(level, category, fmt, ...)`，注入
+  `__FILE__` / `__LINE__` / 函数名。访问日志原先**全表唯一**没有位置的一条，现在带
+  `(uvcpp_web_middleware.cpp:108)`。
+- **`<<` 能打的东西变多了**：`enum class`（底层整数）、`log_level` / `log_category`
+  （**名字**）、`nullptr`（输出 `null` —— 此前 `<< nullptr` 是**编译错误**，`const char*`
+  与 `const void*` 两个候选打平）。
+- **浮点不再丢精度**：改最短往返表示，`0.1` 仍是 `0.1`，而 16 位有效数字不会被 `%g`
+  截成 6 位。`float` 与 `double` 分开处理。
+- **两个新模块标签** `SOAP` / `WSDL`，并给 `src/wsdl/` 补上 9 处日志点
+  （`uvcpp_soap_service.cpp` 8 处：1 `DEBUG` / 3 `ERR` / 4 `WARN`，
+  `uvcpp_wsdl_serve.cpp` 1 处 `WARN`）；
+  `log_category::JSON` 此前**全仓 0 处使用**，现在序列化失败会记一条 ——
+  那个失败此前与"空 JSON 文档"完全不可区分（`resp.json(j)` 会发出 200 + 零字节正文）。
+- **`flush()`**：`uvcpp_logger::flush()` / `uvcpp_log_sink::flush()`。stdout 重定向到
+  文件时是块缓冲的，崩溃或被 `_exit()` 会丢掉最后一段日志。
+- **少几把锁、少几次分配**：等级改 `relaxed` 原子读 ⇒ **被过滤掉的调用点不再抢全局
+  互斥量，也不再分配、不再拼装**；`logger::write()` 把 sink 调用移出锁（锁内只快照
+  sink 指针）⇒ 每条**真的打出去**的记录少持一次锁，顺带解掉「sink 里再打日志会自死锁」；
+  控制台 sink 的 `min_level_` 同样改原子 ⇒ 每条的 `should_log()` 免锁；
+  `uvcpp_logf` 不再永远格式化两遍（先试 512 B 栈缓冲，只有真截断才走堆）；
+  删掉 `buf_.reserve(128)` ⇒ 每条日志不再先来一次堆分配；`record.message` 两处改移动。
+
+  **量程要说准**：控制台 sink **自己那把锁与那次 `fwrite`** 仍在（消掉它要动异步设计），
+  所以别把这笔读成"日志开销归零"。
+
+### 修复
+
+- **一个从来没有链过的公开类型** —— `uvcpp_console_log_options` 自 `1.2.0` 起就缺
+  `UVCPP_API`，于是共享库版（`UVCPP_BUILD_SHARED=ON`）下它的构造函数**不在导出表里**：
+  指南 §9 教的 `uvcpp_console_log_options opt;` 只要真的写进使用者的 TU 就是
+  `LNK2019`。它能躲过所有门禁有两个原因 —— 片段门禁**只编不链**
+  （`tests/tools/check_doc_snippets.py` 传给编译器的是 `-c`），而库自己的 TU 带
+  `UVCPP_EXPORTS`，只有**吃 import lib 的另一个 TU** 才会撞上；仓内此前也确实没有
+  一处构造过它（要自定义选项的人都走 `sink.options()`）。现已补上 `UVCPP_API`，
+  并有了第一条真的链接它的用例。
+
+- **启动钩子抛异常时，属主建的句柄没有任何回收点**（外部贡献者
+  [@sercebr](https://github.com/sercebr) 在
+  [#32](https://github.com/Antruly/libuvcpp/issues/32) 报的）。`uvcpp_loop_worker`
+  的必填钩子 `set_on_start()` 抛异常时，那条分支既没跑 `set_on_exit()`、也没把循环
+  泵干，于是属主在钩子里建的那些句柄一直挂着。触发条件是**内存分配失败**
+  （`std::bad_alloc`），所以它不是常见路径，但一旦踩到就是每次启动漏一块。
+  修法是那一支补上 `set_on_exit()`，并把「摘句柄 → 泵 → 关循环」抽成正常路径与
+  失败路径共用的一段，免得两处各自演化。
+
+  这一条报的是**悬垂写**（use-after-free）。实测下来后果是**泄漏**而不是悬垂：
+  `uvcpp_loop::loop_close()` 只在 `uv_loop_close()` 返回 0 时才置关闭位，钩子建的
+  句柄还开着就返回 `UV_EBUSY`，于是析构走的是"故意漏掉这一整块、换掉一个悬垂"
+  那条分支 —— 那块内存是**泄漏但有效**的。两道互相独立的防线都指向同一结论。
+  三臂实测（真·修前 / 只补钩子不泵 / 修好）确认**补钩子与泵两步都不可或缺**：
+  少任何一步，泄漏都还在。
+
+### 实测数据
+
+本版**不发布吞吐数字**。日志这一笔改的是"少抢几次锁、少几次分配"这类结构性开销，
+用本机这个回环靶场去量，前后差落在噪声里（该靶场上服务端 CPU 绝大部分花在内核，
+库自身占比很小），拿它当结论等于把噪声当信号。要自己量：`-DUVCPP_BUILD_BENCH=ON`
+后跑 `uvcpp_bench_server`，它带 `--access-log` 开关可以整开整关；同机多轮取最小值
+再比，**绝对值不跨机可比**。
+
+功能与回归侧有实测：
+
+- **回归**：`build-log`（VS 2022 x64 Release，WEBAPP + OPENSSL + WSDL + BENCH 全开）
+  **113/113 通过**；`build-h2`（同生成器，WSDL=OFF）**109/109 通过**。两棵都是全量
+  重编，`error C` 计数 0。
+- **变异**：日志改动配的 **10 条变异体全部被现有用例抓住**，没有一条是靠超时兜底
+  蒙混过去的。其中"等级该不该被配置覆盖"是**一对反向用例** —— 单跑任何一条，
+  "永远覆盖"或"永远不覆盖"都能骗过去，两条一起才把那个开关钉住。
+
+### 换二进制之前
+
+相对上一次发布（`v1.3.0`），这一版动过的东西分两类。
+
+**一、日志模块的 ABI 变化 —— 旧二进制必须重编**
+
+| 变化 | 为什么 |
+|---|---|
+| `uvcpp_log_sink` 新增**虚函数** `flush()` | **vtable 布局变了**。给了默认空实现，所以**源码**兼容；但任何继承它的既有二进制 sink 必须重编 |
+| `log_category` 在哨兵前插入 `SOAP` / `WSDL` | `CATEGORY_COUNT` 由 15 变 17，`uvcpp_logger::category_levels_` 变大 ⇒ **`uvcpp_logger` 的对象布局变了**。硬编码过 15、或缓存过某个 category 数值的代码会**静默错位** |
+| 新增 `UVCPP_API` 符号 | `uvcpp_logf_at(...)`、`uvcpp_logger::flush()`，以及**补导出的** `uvcpp_console_log_options()`（见上节「修复」）。前两个是新增功能，第三个是修复 —— 三条都是导出面**增加**，不强制旧二进制重编 |
+| `uvcpp_log_stream` 的重载集变了 | 新增模板 `operator<<` 与 `nullptr_t` 重载 ⇒ **无作用域枚举**实参的绑定从整型提升变成精确匹配。输出值不变，但重载解析变了 |
+
+**二、一条行为变更（不改代码也能观察到）**
+
+`uvcpp_logger::set_level()` 在 `app.start()` **之前**调用的，此前会被
+`init_process_once()` **无条件顶回** `cfg_.min_log_level`（默认 `INFO`）且不给任何提示。
+现在**只有**显式调用过 `app.set_log_level()` 才会套用配置值：
+
+- 调过 `app.set_log_level(X)` ⇒ `X` 生效，后调用的那个赢；
+- 没调过 ⇒ 你在 `start()` 之前设的全局等级**原样保留**。
+
+本仓的靶场正踩在这个坑里：`bench/bench_server --log-level WARN` 的等级被顶成 `INFO`
+（`TRACE`/`DEBUG` 则被压成 `INFO`），而自报那行印的是**请求值**，读数整个是假的。
+修好之后自报值改印生效值。
+
 ## v1.3.0 重点 (Highlights)
 
 `1.2.1` → `1.2.25` 这 25 个开发档全部收进这一版。**这一版有破坏性改动**：3 个公开符号
@@ -272,7 +386,7 @@ PE 里有没有 `RSDS` 指向自己的 `.pdb`；MinGW / Linux 上比对调试节
 包含它，所以只要 `-I` 指对，宏就自动与这个 dll 一致：
 
 ```bash
-export PKG_CONFIG_PATH=/path/to/libuvcpp-1.3.0-mingw-x64/lib/pkgconfig
+export PKG_CONFIG_PATH=/path/to/libuvcpp-1.4.0-mingw-x64/lib/pkgconfig
 g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvcpp) -o your_app.exe
 ```
 
@@ -435,9 +549,33 @@ int main() {
 ## 变更日志 (Changelog)
 
 这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`，
-`1.2.1` → `1.2.25` 收进 `v1.3.0`；按主题
+`1.2.1` → `1.2.25` 收进 `v1.3.0`，`1.3.1` → `1.3.33` 收进 `v1.4.0`；按主题
 汇总的清单在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
+
+### v1.4.0 (2026-09-26)
+
+**新增**:SOAP/WSDL、应用层 JSON、日志模块完善、多循环的 Linux 内核分流
+
+- 新模块 `src/wsdl/`（`UVCPP_ENABLE_WSDL`，默认 OFF）：WSDL 1.1 文档模型与发布层、
+  SOAP 1.1/1.2 信封解析 / Fault / 序列化、operation 派发层（`1.3.7-dev`、`1.3.8-dev`）
+- 应用层 JSON 构造器与字段表反射（`1.3.3-dev`、`1.3.4-dev`）
+- **日志模块**：`UVCPP_LOGF` 带源码位置、`enum class`/`log_level`/`log_category`/`nullptr`
+  重载、最短往返浮点、`flush()`、`SOAP`/`WSDL` 两个模块标签、`src/wsdl/` 的 9 处日志点、
+  `uvcpp_json_dump` 失败不再静默，以及过滤路径与每条记录的若干次抢锁和堆分配
+- `uvcpp_tcp_server::set_loops(n > 1)` 在 Linux/BSD 上改为 `UV_TCP_REUSEPORT` 内核分流
+  （`1.3.5-dev`），`is_fanout()` 可问是哪一种；Windows 仍是 socket 转手
+- `Date` 响应头（按秒缓存，`1.3.1-dev`）、进程内设 libuv 线程池大小（`1.3.2-dev`）、
+  静态分片下发改按块借还工作池名额、503 → 0（`1.3.6-dev`）
+- 其余是 `1.3.9-dev` → `1.3.32-dev` 线上约 25 笔「每请求少几次分配」的性能改动
+  （webapp 登记表索引换哈希表、响应序列化不再造串、读注册表不再每请求重建、……），
+  按主题见 README 的变更日志
+- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
+  依赖全静态链接
+
+**破坏性**:日志模块动了一处 vtable、一处对象布局、两个新增导出符号和四个重载集 ——
+**必须重编，不能只换二进制**；另有一条 `set_log_level` 的行为变更。
+逐条见上面「`v1.4.0` 重点」的「换二进制之前」。
 
 ### v1.3.0 (2026-09-23)
 
@@ -501,11 +639,11 @@ int main() {
 ## 下载 (Download)
 
 - Source code
-- `libuvcpp-1.3.0-mingw-x64.zip` / `libuvcpp-1.3.0-mingw-arm64.zip`
+- `libuvcpp-1.4.0-mingw-x64.zip` / `libuvcpp-1.4.0-mingw-arm64.zip`
   — Windows 预编译动态库（MinGW-w64，含调试档）
-- `libuvcpp-1.3.0-msvc-x64.zip` / `libuvcpp-1.3.0-msvc-arm64.zip`
+- `libuvcpp-1.4.0-msvc-x64.zip` / `libuvcpp-1.4.0-msvc-arm64.zip`
   — Windows 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
-- `libuvcpp-1.3.0-linux-x64.zip` / `libuvcpp-1.3.0-linux-arm64.zip`
+- `libuvcpp-1.4.0-linux-x64.zip` / `libuvcpp-1.4.0-linux-arm64.zip`
   — Linux 预编译动态库（含调试档）
 
 > ⚠️ 两个 Windows 版**互为替代、不可混用**：MinGW-w64 编出来的动态库不能被 MSVC
