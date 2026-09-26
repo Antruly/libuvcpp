@@ -11,6 +11,7 @@
 
 #include <string>
 
+#include <webapp/uvcpp_log.h>
 #include <wsdl/uvcpp_wsdl_pugixml.h>
 
 namespace uvcpp {
@@ -313,6 +314,18 @@ uvcpp_soap_service::uvcpp_soap_service(const uvcpp_wsdl_document& doc,
                                        const std::string& port)
     : doc_(doc) {
   build(service, port);
+
+  // 装配只在这一处收口：`build()` 内部有九条失败分支，每条 `why_` 都不同，
+  // 但**都**是"这个端点不可用"这一件事。在这里记一条，既盖住了全部九条，
+  // 也把"到底哪一条"交给 `why_`（它是精确的静态串，比在九个地方各写一句
+  // 更容易保持同步）。头文件 `uvcpp_soap_service.h` 里那句「判据与**启动
+  // 日志**都该看它」指的就是这里 —— 构造函数跑在循环起来之前，正是启动期。
+  if (!valid_) {
+    UVCPP_LOG_ERROR(log_category::SOAP)
+        << "SOAP 端点装配失败：" << why_ << "（service=\"" << service
+        << "\", port=\"" << port
+        << "\"）—— 这个端点会对每个请求回 Server Fault";
+  }
 }
 
 void uvcpp_soap_service::build(const std::string& service,
@@ -415,8 +428,16 @@ void uvcpp_soap_service::build(const std::string& service,
     ops_.push_back(e);
   }
   // 索引最后建：同一个键出现两次时**最后一条赢**（头文件里记着这条是静默的）。
+  // 记一条 WARN ——"静默"说的是**行为**（不报错、不抛），不是"没人该知道"：
+  // 派发键撞车意味着前面那条 operation 永远轮不到，多半是 WSDL 写重了。
   for (size_t i = 0; i < ops_.size(); ++i) {
-    index_[ops_[i].in_wrapper.str()] = i;
+    const std::string key = ops_[i].in_wrapper.str();
+    if (index_.find(key) != index_.end()) {
+      UVCPP_LOG_WARN(log_category::SOAP)
+          << "派发键重复：\"" << key << "\"（" << ops_[index_[key]].name
+          << " 被 " << ops_[i].name << " 覆盖，后者生效）";
+    }
+    index_[key] = i;
   }
 
   valid_ = true;
@@ -481,6 +502,11 @@ void uvcpp_soap_service::handle(uvcpp_web_request& req,
   // 准入失败时 `hinted` 保持 1.1 —— 没有任何版本线索时 1.1 是兼容面最大的形状。
   uvcpp_soap_version hinted = uvcpp_soap_version::V1_1;
   if (!uvcpp_soap_version_of_content_type(req.content_type(), hinted)) {
+    // DEBUG 而不是 WARN：这条路由挂在业务自己的路径上，而浏览器/探针/误配的
+    // 反代都会往那儿送普通请求 —— 它是噪声，不是信号。
+    UVCPP_LOG_DEBUG(log_category::SOAP)
+        << "Content-Type 不是 SOAP 媒体类型：\"" << req.content_type()
+        << "\"，回 415";
     send_fault(resp,
                uvcpp_soap_make_fault(uvcpp_soap_version::V1_1,
                                      uvcpp_soap_fault_code::CLIENT,
@@ -491,6 +517,11 @@ void uvcpp_soap_service::handle(uvcpp_web_request& req,
 
   // 装配失败是**我方的**问题（挑不到 service/port），不是请求的问题。
   if (!valid_) {
+    // 构造函数已经记过一次启动期的那条；这里再记一次是因为**每次请求**都在
+    // 提醒同一件事，而装配失败的服务今天是"每个请求静默回 500"。
+    UVCPP_LOG_ERROR(log_category::SOAP)
+        << "端点不可用却收到了请求（" << why_ << "）：" << req.method_name()
+        << ' ' << req.path();
     send_fault(resp,
                uvcpp_soap_make_fault(hinted, uvcpp_soap_fault_code::SERVER,
                                      k_reason_invalid_endpoint),
@@ -504,6 +535,9 @@ void uvcpp_soap_service::handle(uvcpp_web_request& req,
   const wsdl_status st = uvcpp_soap_parse(req.body_data(), req.body_size(), msg,
                                           limits_, nullptr);
   if (st != wsdl_status::OK) {
+    UVCPP_LOG_WARN(log_category::SOAP)
+        << "SOAP 报文解析失败：" << wsdl_status_name(st)
+        << "（body " << req.body_size() << " 字节）";
     send_fault(resp,
                uvcpp_soap_make_fault(hinted, uvcpp_soap_fault_code::CLIENT,
                                      std::string(k_reason_bad_envelope) +
@@ -553,6 +587,11 @@ void uvcpp_soap_service::handle(uvcpp_web_request& req,
   const std::string key = msg.body_qname();
   const std::map<std::string, size_t>::const_iterator found = index_.find(key);
   if (found == index_.end()) {
+    // WARN：这个端点只由 WSDL 决定它认哪些 operation，所以走到这里要么是调用方
+    // 拼错了名字，要么是有人在拿别的服务的报文探我们。两种都值得被看见。
+    UVCPP_LOG_WARN(log_category::SOAP)
+        << "Body 的 QName 不是本端点的 operation：\"" << key
+        << "\"（本端点认 " << index_.size() << " 个）";
     send_fault(resp,
                uvcpp_soap_make_fault(msg.version, uvcpp_soap_fault_code::CLIENT,
                                      std::string(k_reason_no_such_op) + key),
@@ -567,6 +606,11 @@ void uvcpp_soap_service::handle(uvcpp_web_request& req,
   const std::map<std::string, operation_fn>::const_iterator h =
       handlers_.find(e.name);
   if (h == handlers_.end()) {
+    // WARN 而不是 ERR：**告警指向的是服务方**——WSDL 里声明了这个 operation，
+    // 代码里却没注册处理函数。这是部署漏了一半，不是运行时故障。
+    UVCPP_LOG_WARN(log_category::SOAP)
+        << "WSDL 里声明了 operation \"" << e.name
+        << "\" 但没有注册处理函数，回 Server Fault";
     send_fault(resp,
                uvcpp_soap_make_fault(
                    msg.version, uvcpp_soap_fault_code::SERVER,
@@ -646,6 +690,11 @@ void uvcpp_soap_serve(uvcpp_web_app& app, const std::string& path,
                       std::shared_ptr<uvcpp_soap_service> ep) {
   if (!ep) {
     // 装配期的错（空指针），不该到循环线程上变成一次解引用崩溃。
+    // 配上一条日志：否则这里只是安静地装一条恒返 500 的路由，而调用方
+    // 从 `uvcpp_soap_serve` 的签名上完全看不出自己传了个空指针。
+    UVCPP_LOG_ERROR(log_category::SOAP)
+        << "uvcpp_soap_serve(\"" << path
+        << "\") 收到空端点，已改为注册一条恒回 500 的路由";
     app.post(path, [](uvcpp_web_request&, uvcpp_web_response& resp,
                       uvcpp_web_next next) {
       (void)next;

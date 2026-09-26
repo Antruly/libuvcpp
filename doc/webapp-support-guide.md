@@ -378,18 +378,18 @@ void doc_console_sink() {
 
 三个要点：
 
-- **`set_sink()` 不接管所有权**（`src/webapp/uvcpp_log.h:224-229`）：`&sink` 必须比
-  用法活得久。内置 sink 由 logger 自己 `new`/`delete`（`src/webapp/uvcpp_log.cpp:256-258`、
-  `:273`、`:342`），**用户传进去的 sink 不会被 delete**。
+- **`set_sink()` 不接管所有权**（`src/webapp/uvcpp_log.h:300-305`）：`&sink` 必须比
+  用法活得久。内置 sink 由 logger 自己 `new`/`delete`（`src/webapp/uvcpp_log.cpp:331-333`、
+  `:348`），**用户传进去的 sink 不会被 delete**。
 - **`split_streams` 默认 true** ⇒ WARN 及以上走 `stderr` 并且会 `fflush`
-  （`src/webapp/uvcpp_log_console.cpp:228-235`）。这是"WARN 日志不会因为进程被杀而丢"的实现点。
+  （`src/webapp/uvcpp_log_console.cpp:197-199` 选流、`:255` 刷盘）。这是"WARN 日志不会因为进程被杀而丢"的实现点。
 - **过滤有三层，排查"看不到日志"要按顺序查**：logger 全局等级 → 模块等级 →
-  `sink::min_level`。sink 的默认 `min_level_` 是 `TRACE`（`:134`、`:141`），
+  `sink::min_level`。sink 的默认 `min_level_` 是 `TRACE`（`:140`、`:147`），
   所以默认只在 logger 那层过滤。
 
-等级名是 **`log_level::ERR`（=4），不是 `ERROR`**（`src/webapp/uvcpp_log.h:64-70`：
+等级名是 **`log_level::ERR`（=4），不是 `ERROR`**（`src/webapp/uvcpp_log.h:71-77`：
 `<wingdi.h>` 里 `#define ERROR 0`）。`OFF`（=6）只作阈值，`should_log()` 显式挡掉
-（`src/webapp/uvcpp_log_console.cpp:149`）。
+（`src/webapp/uvcpp_log_console.cpp:158`）。
 
 ---
 
@@ -400,12 +400,12 @@ void doc_console_sink() {
 ### `uvcpp_console_log_options{false, true}` 编不过
 
 ```cpp
-// doc-snippet: fragment — 反面例子，故意编不过；照抄 src/webapp/uvcpp_log_console.h:25-26 的注释写出来的
+// doc-snippet: fragment — 反面例子，故意编不过；照抄 src/webapp/uvcpp_log_console.h:26-27 的注释写出来的
 uvcpp_console_log_options opt{false, true};
 ```
 
-`src/webapp/uvcpp_log_console.h:25-26` 的注释现在写的是**真正的成因**：让花括号写法
-失效的是那个**用户声明的构造函数**（`uvcpp_console_log_options();`，`:38`），不是
+`src/webapp/uvcpp_log_console.h:26-27` 的注释现在写的是**真正的成因**：让花括号写法
+失效的是那个**用户声明的构造函数**（`uvcpp_console_log_options();`，`:42`），不是
 NSDMI —— "避开 NSDMI"并不能让花括号写法变得可用。实测 g++ 的原话是
 
 ```
@@ -421,26 +421,30 @@ error: no matching function for call to
 
 ### 上不上色是两个条件
 
-`color` 这个字段的默认值是 **`true`**（`src/webapp/uvcpp_log_console.cpp:124`），真正
-决定上不上色的是 `color_enabled()` = `color_supported_ && options_.color`
-（`:171-173`）。终端能力那一半在 sink 构造时探测一次（`:135`、`:142`，探测逻辑
-`:67-85`：`NO_COLOR`、`isatty`、Windows 的 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`）。
-所以**默认构造下的有效行为就是"按终端能力判断"**，但那是 `color_supported_` 给的，
+`color` 这个字段的默认值是 **`true`**（`src/webapp/uvcpp_log_console.cpp:130`），真正
+决定上不上色的是 `color_enabled()` = `color_supported_for(to_stderr) && options_.color`
+（`:178-184`，两个重载）。终端能力那一半在 sink 构造时探测一次（`:141`、`:148`，探测逻辑
+`:71-91`：`NO_COLOR`、`isatty`、Windows 的 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`）。
+所以**默认构造下的有效行为就是"按终端能力判断"**，但那是 `color_supported_for()` 给的，
 不是 `color` 的默认值 —— 而且它**只在构造时算一次**，构造之后再把 stdout 重定向，
 上色状态不会跟着更新。
 
+**两条流是分开判的**：`color_supported_for(to_stderr)` 问的是**这条记录实际要写的那条
+流**。`./server > access.log` 只把 stdout 变成文件、stderr 还在终端上，于是 INFO 那份
+日志文件里不会混进转义序列，而它上面的 WARN 照样是彩色的。`NO_COLOR` 对两条流都算。
+
 ### 真实输出的一行长什么样
 
-头里的样例（`src/webapp/uvcpp_log_console.h:45-47`）画的就是**全默认**形状：时间戳、
+头里的样例（`src/webapp/uvcpp_log_console.h:49-51`）画的就是**全默认**形状：时间戳、
 等级、模块标签、`(tid:N)`、message，末尾是 `<调用点文件>:<行>`。真实的一行长这样
-（末尾取自 `tests/functional/web_app_log_func.cpp:84` 那次调用）：
+（末尾取自 `tests/functional/web_app_log_func.cpp:103` 那次调用）：
 
 ```
-2026-09-13 12:34:56.789 [INFO ] [REQUEST] (tid:14028) GET /index.html  (tests/functional/web_app_log_func.cpp:84)
+2026-09-13 12:34:56.789 [INFO ] [REQUEST] (tid:14028) GET /index.html  (tests/functional/web_app_log_func.cpp:103)
 ```
 
-那一列由 `show_thread` 拼出，默认 **true**（`src/webapp/uvcpp_log_console.cpp:126`、
-`:209-214`）；不想要就 `opt.show_thread = false`。
+那一列由 `show_thread` 拼出，默认 **true**（`src/webapp/uvcpp_log_console.cpp:132`、
+`:232-237`）；不想要就 `opt.show_thread = false`。
 
 ### `on_done` 不一定来自 `uv_fs_close`
 
@@ -478,7 +482,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 | `uvcpp_web_util` | 纯函数，无状态、线程安全 | — |
 | `uvcpp_web_mime_map` | 注册期配置、运行期只读；`default_map()` 是全局的 | `src/webapp/uvcpp_web_mime.h:31-34` |
 | `uvcpp_web_multipart` | **无线程设施**，由调用方决定在哪条线程跑 | `src/webapp/uvcpp_web_multipart.h:13-16` |
-| `uvcpp_console_log_sink` | `write()` 可从工作线程调用；`options()` 的读取**无锁** | `src/webapp/uvcpp_log.h:135-140`；`src/webapp/uvcpp_log_console.cpp:163-169` |
+| `uvcpp_console_log_sink` | `write()` 可从工作线程调用；`options()` 的读取**无锁** | `src/webapp/uvcpp_log.h:144-149`；`src/webapp/uvcpp_log_console.cpp:170-176` |
 
 在别的线程上要查连接，先 `context::post()` 回 loop 线程
 （`src/webapp/uvcpp_web_connection.h:31`）。改 `options()` 而 `write()` 正在别的线程上跑是
@@ -496,7 +500,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
   （`src/webapp/uvcpp_web_connection.cpp:212-218`）。
 - `uvcpp_web_mime_map::lookup()` 返回表内 `std::string` 的指针
   （`src/webapp/uvcpp_web_mime.cpp:107-108`）。
-- `uvcpp_logger::set_sink()` **不接管所有权**（`src/webapp/uvcpp_log.h:224-229`）。
+- `uvcpp_logger::set_sink()` **不接管所有权**（`src/webapp/uvcpp_log.h:300-305`）。
 
 ### 错误码
 

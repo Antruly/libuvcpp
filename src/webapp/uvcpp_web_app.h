@@ -353,6 +353,18 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_web_app& set_compression(bool enable);
   uvcpp_web_app& set_compress_min_body_size(size_t bytes);
   uvcpp_web_app& set_access_log(bool enable);
+  /**
+   * @brief 全局最低日志等级。
+   *
+   * @note **没调过这个函数时，本框架不动全局等级** —— `uvcpp_logger` 单例的
+   *       等级保持使用者自己设的值（默认 `INFO`）。调过之后以本函数为准，
+   *       在 `start()` 时套用到 `uvcpp_logger`。
+   *
+   * 早先版本在 `start()` 里**无条件**把全局等级改成这里的值（默认 `INFO`），
+   * 于是 `uvcpp_logger::instance().set_level(...)` 在 `start()` 之前设的一律
+   * 被静默吃掉 —— 连本仓的靶场 `bench/bench_server.cpp` 都栽在这上面（它的
+   * `--log-level` 旋钮因此两头失灵）。
+   */
   uvcpp_web_app& set_log_level(log_level level);
   uvcpp_web_app& set_server_header(const std::string& value);
   uvcpp_web_app& set_shutdown_grace_ms(int ms);
@@ -1410,6 +1422,18 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 分得开，否则那次重算会把用户关掉的闸门又装回去。
    */
   bool work_limit_explicit_;
+
+  /**
+   * @brief `set_log_level()` 被调过没有。
+   *
+   * 只用来决定 `start()` 里要不要把 `cfg_.min_log_level` 套用到
+   * `uvcpp_logger` 的全局等级上（`false` = 不动，让使用者自己设的那个值生效）。
+   * 「没设过」与「显式设成默认的 `INFO`」必须分得开，否则
+   * `uvcpp_logger::instance().set_level(DEBUG)` 又会被静默顶回 `INFO`。
+   *
+   * 同 `work_limit_explicit_`：置真之后不再置回。
+   */
+  bool log_level_explicit_;
 
   /**
    * @brief WS 服务（`enable_wss()` 时惰性创建，nullptr = 没开 WS）。

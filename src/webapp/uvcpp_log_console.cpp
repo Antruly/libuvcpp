@@ -58,22 +58,28 @@ const char* level_color(log_level level) {
 }
 
 /**
- * @brief 检查终端是否支持 ANSI 转义序列。
+ * @brief 检查某一条流的终端是否支持 ANSI 转义序列。
  *
  * Windows 10 之前的 conhost 默认不解释 ANSI，需要显式打开
  * ENABLE_VIRTUAL_TERMINAL_PROCESSING。这里顺手打开；打不开就不上色，
  * 免得日志里全是乱码的转义字符。
+ *
+ * @param to_stderr 问 stderr 还是 stdout。**两条流要分开问**：它们的终端能力
+ *        可以不同，`./server > access.log` 只把 stdout 变成文件，stderr 还在
+ *        终端上；早先只问 stdout，于是 WARN 以上明明打在终端上却不上色。
  */
-bool detect_color_support() {
+bool detect_color_support(bool to_stderr) {
   // 尊重 NO_COLOR 约定（https://no-color.org/）：只要设了就不上色。
+  // 这一条对两条流都算 —— 使用者说「别上色」就是别上色。
   const char* no_color = std::getenv("NO_COLOR");
   if (no_color != nullptr && no_color[0] != '\0') return false;
 
   // 重定向到文件/管道时不上色 —— 否则日志文件里会混入转义序列。
-  if (!UVCPP_ISATTY(UVCPP_FILENO(stdout))) return false;
+  std::FILE* stream = to_stderr ? stderr : stdout;
+  if (!UVCPP_ISATTY(UVCPP_FILENO(stream))) return false;
 
 #if defined(_WIN32)
-  HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+  HANDLE h = GetStdHandle(to_stderr ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
   if (h == INVALID_HANDLE_VALUE || h == nullptr) return false;
   DWORD mode = 0;
   if (!GetConsoleMode(h, &mode)) return false;  // 不是控制台
@@ -131,33 +137,34 @@ uvcpp_console_log_options::uvcpp_console_log_options()
 uvcpp_console_log_sink::uvcpp_console_log_sink()
     : mutex_(),
       options_(),
-      min_level_(log_level::TRACE),
-      color_supported_(detect_color_support()) {}
+      min_level_(static_cast<int>(log_level::TRACE)),
+      color_supported_{detect_color_support(false), detect_color_support(true)} {}
 
 uvcpp_console_log_sink::uvcpp_console_log_sink(
     const uvcpp_console_log_options& options)
     : mutex_(),
       options_(options),
-      min_level_(log_level::TRACE),
-      color_supported_(detect_color_support()) {}
+      min_level_(static_cast<int>(log_level::TRACE)),
+      color_supported_{detect_color_support(false), detect_color_support(true)} {}
 
 uvcpp_console_log_sink::~uvcpp_console_log_sink() {}
 
+// 免锁：这条路径在每个被放行的记录上都要走一遍，而紧接着的 write() 又要拿
+// 同一把互斥量。读一个原子比抢一次锁便宜得多，而且 write() 里那次锁仍然
+// 保证同一 sink 的多次输出不重叠。
 bool uvcpp_console_log_sink::should_log(log_level level,
                                         log_category /*category*/) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (min_level_ == log_level::OFF) return false;
-  return static_cast<int>(level) >= static_cast<int>(min_level_);
+  const int min = min_level_.load(std::memory_order_relaxed);
+  if (min == static_cast<int>(log_level::OFF)) return false;
+  return static_cast<int>(level) >= min;
 }
 
 void uvcpp_console_log_sink::set_min_level(log_level level) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  min_level_ = level;
+  min_level_.store(static_cast<int>(level), std::memory_order_relaxed);
 }
 
 log_level uvcpp_console_log_sink::min_level() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return min_level_;
+  return static_cast<log_level>(min_level_.load(std::memory_order_relaxed));
 }
 
 uvcpp_console_log_options& uvcpp_console_log_sink::options() {
@@ -169,13 +176,29 @@ const uvcpp_console_log_options& uvcpp_console_log_sink::options() const {
 }
 
 bool uvcpp_console_log_sink::color_enabled() const {
-  return color_supported_ && options_.color;
+  return color_enabled(false);
+}
+
+bool uvcpp_console_log_sink::color_enabled(bool to_stderr) const {
+  return color_supported_for(to_stderr) && options_.color;
+}
+
+void uvcpp_console_log_sink::flush() {
+  // 两条都刷：stdout 是块缓冲的（重定向到文件时尤其明显），stderr 默认不缓冲
+  // 但可能被使用者设成缓冲过。多刷一次 stderr 的代价可以忽略。
+  std::fflush(stdout);
+  std::fflush(stderr);
 }
 
 void uvcpp_console_log_sink::write(const uvcpp_log_record& record) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  const bool use_color = color_supported_ && options_.color;
+  // 先去哪条流，再据此决定上不上色 —— 两条流的终端能力可以不同。
+  const bool to_stderr =
+      options_.split_streams &&
+      static_cast<int>(record.level) >= static_cast<int>(log_level::WARN);
+  const bool use_color =
+      color_supported_for(to_stderr) && options_.color;
 
   // 先在本地把整行拼好，再一次性 fwrite —— 分多次 flockfile 输出会让并发
   // 日志互相穿插，而且行缓冲下每次 fputc 都可能触发刷盘。
@@ -225,9 +248,6 @@ void uvcpp_console_log_sink::write(const uvcpp_log_record& record) {
 
   line += '\n';
 
-  const bool to_stderr =
-      options_.split_streams &&
-      static_cast<int>(record.level) >= static_cast<int>(log_level::WARN);
   std::FILE* out = to_stderr ? stderr : stdout;
 
   std::fwrite(line.data(), 1, line.size(), out);

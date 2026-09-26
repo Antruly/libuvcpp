@@ -98,10 +98,14 @@ uvcpp_web_middleware web_middleware_access_log() {
 
     resp.on_sent([rq, start](const uvcpp_web_sent_info& info) {
       const uint64_t elapsed = now_ms() - start;
-      // 用 uvcpp_logf 而不是流式宏：等级要按状态码算出来，流式宏做不到
+      // 用 printf 风格而不是流式宏：等级要按状态码算出来，流式宏做不到
       // 「一个分支一个宏」还只拼一次字符串。logf 内部先判 is_enabled，
       // 被过滤掉时连格式化都不做。
-      uvcpp_logf(level_for_status(info.status_code), log_category::REQUEST,
+      //
+      // 用带位置的 UVCPP_LOGF 而不是 uvcpp_logf：控制台那行会多出
+      // `(uvcpp_web_middleware.cpp:NN)`。访问日志原先**全表唯一**没有位置的
+      // 一条 —— 恰恰是最需要知道「这条是框架自己打的还是业务打的」的那条。
+      UVCPP_LOGF(level_for_status(info.status_code), log_category::REQUEST,
                  "%s %s -> %d (%lluB, %llums)%s", rq->method_name(),
                  rq->path().c_str(), info.status_code,
                  static_cast<unsigned long long>(info.body_bytes),

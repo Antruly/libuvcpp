@@ -9,6 +9,8 @@
 
 #if UVCPP_WSDL_ENABLE
 
+#include <webapp/uvcpp_log.h>
+
 namespace uvcpp {
 
 const char* uvcpp_wsdl_content_type() { return "text/xml; charset=utf-8"; }
@@ -49,6 +51,16 @@ void uvcpp_wsdl_serve(uvcpp_web_app& app, const std::string& path,
                       const uvcpp_wsdl_source& src) {
   // ★ 按值捕获共享指针（不是捕获 src 的引用）—— 见头文件里那条语义说明。
   const std::shared_ptr<const std::string> held = src.shared();
+
+  // 空源是**注册期**就知道的事，所以记在这里而不是 `send_shared()` 里：
+  // 那条路每个请求走一次，在那儿记 WARN 等于刷屏。空 WSDL 会以 200 + 零字节
+  // 正文发出去（头文件里写明了这是有意的形状），WARN 而不是 ERR 也是这个原因
+  // —— 但它几乎总是"文档压根没生成/没加载进来"，所以要有一条能被看见的。
+  if (!held) {
+    UVCPP_LOG_WARN(log_category::WSDL)
+        << "uvcpp_wsdl_serve(\"" << path
+        << "\") 拿到空 WSDL 源，该路由会一直回 200 + 空正文";
+  }
   app.get(path, [held](uvcpp_web_request& req, uvcpp_web_response& resp,
                        uvcpp_web_next next) {
     (void)req;

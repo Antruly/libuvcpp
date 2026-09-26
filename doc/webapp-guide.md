@@ -1134,8 +1134,12 @@ bool        uvcpp_json_get_double(const uvcpp_json& j, const char* key, double& 
 enum class log_level { TRACE, DEBUG, INFO, WARN, ERR, FATAL, OFF };
 // 模块
 enum class log_category { CORE, HTTP, REQUEST, RESPONSE, HEADER, BODY, ROUTER,
-                          STATIC, WEBSOCKET, SSL, UPLOAD, DOWNLOAD, IO, RAW, JSON, ... };
+                          STATIC, WEBSOCKET, SSL, UPLOAD, DOWNLOAD, IO, RAW, JSON,
+                          SOAP, WSDL, ... };
 ```
+
+（`SOAP` / `WSDL` 是 1.4.0 加的，排在哨兵 `CATEGORY_COUNT` **之前** —— 顺序有意义，
+`CATEGORY_COUNT` 就是 `uvcpp_log_category_count()` 的返回值。）
 
 > ⚠️ **是 `ERR` 不是 `ERROR`**：`<wingdi.h>`（经 `<windows.h>` → `<uv.h>`）里有
 > `#define ERROR 0`，宏展开不看 `enum class` 作用域。对外展示用
@@ -1148,11 +1152,30 @@ UVCPP_LOG_INFO(log_category::ROUTER) << "matched " << path << " -> " << name;
 ```
 
 宏：`UVCPP_LOG_TRACE` / `UVCPP_LOG_DEBUG` / `UVCPP_LOG_INFO` / `UVCPP_LOG_WARN` /
-`UVCPP_LOG_ERROR` / `UVCPP_LOG_FATAL`（都带 category 参数）。被过滤时**零开销** ——
-连流对象都不构造、消息都不拼装。
+`UVCPP_LOG_ERROR` / `UVCPP_LOG_FATAL`（都带 category 参数）。被过滤时**不构造流对象、
+不拼装消息、不分配内存** —— 但仍要付一次 `is_enabled()`，它是两次 relaxed 原子读。
+**别写"零开销"**：它只是"没有锁、没有分配、没有拼装"，不是零。
 
-printf 风格逃生口 `uvcpp_logf(level, category, fmt, ...)`：**即使等级被过滤，参数也已经
-被求值**，高频路径别用。
+`<<` 支持：字符串、`char`、全部整型、`float`/`double`、`bool`、指针、`nullptr`（输出
+`null`）、`log_level` 与 `log_category`（输出**名字**，如 `WARN`/`ROUTER`）、以及任意
+`enum`（输出底层整数，含 `enum class`）。
+
+浮点走**最短往返表示**：精度从 6 试到 17，第一个能原样读回来的就赢。所以 `0.1` 打印成
+`0.1`、`3.5` 打印成 `3.5`、而 16 位有效数字不会被截断成 `%g` 那样的 6 位。`float` 与
+`double` 分开处理 —— `0.1f` 提升成 double 是 `0.10000000149011612`，按 double 求最短
+往返会一字不差地打印出那一长串。
+
+### 带源码位置的 printf 风格
+
+```cpp
+UVCPP_LOGF(log_level::WARN, log_category::REQUEST, "%s -> %d", path, code);
+```
+
+比 `uvcpp_logf` 多注入 `__FILE__` / `__LINE__` / 函数名，控制台那行会多出
+`(uvcpp_web_middleware.cpp:108)`。访问日志走的就是这条。
+
+`uvcpp_logf(level, category, fmt, ...)` 是**不带位置**的旧入口（源码兼容保留）：
+**即使等级被过滤，参数也已经被求值**，高频路径别用。要位置就用 `UVCPP_LOGF`。
 
 配置（`uvcpp_logger` 单例，默认全局等级 `INFO`，默认 sink 是内置控制台）：
 
@@ -1162,12 +1185,38 @@ uvcpp_logger::instance().set_level(log_category::WEBSOCKET, log_level::TRACE);
 uvcpp_logger::instance().set_all_category_levels(log_level::WARN);
 uvcpp_logger::instance().clear_category_overrides();
 uvcpp_logger::instance().set_sink(my_sink);      // nullptr = 恢复内置控制台
+uvcpp_logger::instance().flush();                // 转发给 sink 的 flush()
 ```
 
-自定义 sink：实现 `uvcpp_log_sink`（`virtual void write(const uvcpp_log_record&) = 0;`），
+### `app.set_log_level()` 与全局等级谁说了算
+
+`uvcpp_web_app::set_log_level(level)` **只在被显式调用过时**才把配置值套到全局等级上。
+所以：
+
+- 调过 `app.set_log_level(X)` ⇒ `X` 生效，**后调用的那个赢**（它在 `start()` 里套用）；
+- 没调过 ⇒ 全局等级**原样保留**，你在 `app.start()` 之前设的
+  `uvcpp_logger::instance().set_level(...)` 生效。
+
+> 1.4.0 之前这里是无条件覆盖的：`start()` 一定会把全局等级顶回 `cfg_.min_log_level`
+> （默认 `INFO`）且不给任何提示。`min_log_level` 的默认值不等于"用户想要 INFO"，它只是
+> "没人说过话"。
+
+### 自定义 sink
+
+实现 `uvcpp_log_sink`（`virtual void write(const uvcpp_log_record&) = 0;`），
 **实现必须自己保证线程安全**（`write()` 可能从工作线程池线程调用）。`set_sink`
 **不接管所有权**。sink **不得长期持有 `uvcpp_log_record` 的引用**（只在下游 `write()`
 调用期间有效）。
+
+- **`write()` 里不得再打日志**：logger 只负责把记录递过来，同一 sink 的重入由 sink 自己
+  的那把锁兜着 —— 在 `write()` 里再调 `UVCPP_LOG_*` 会重入同一把锁而**自死锁**。
+- **`set_sink()` 要在所有线程开始打日志之前调**：logger 现在**在锁外**调用 sink
+  （锁内只快照指针），所以换 sink 的同时别的线程正在用旧 sink，就没人替你挡住那个
+  旧对象的析构了。这是"不接管所有权"那条契约的延伸。
+- `flush()` 是 1.4.0 新增的虚函数，**给了默认空实现** —— 既有 sink 的源码不用改，
+  但它的 vtable 布局变了，**二进制 sink 必须重编**。用途：stdout 重定向到文件时是
+  块缓冲的，进程崩溃或被 `_exit()` 会丢掉最后一段日志。内置控制台 sink 实现为
+  `fflush(stdout) + fflush(stderr)`。
 
 ---
 

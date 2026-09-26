@@ -5,6 +5,11 @@
 
 #include <webapp/uvcpp_web_json.h>
 
+#include <exception>
+#include <string>
+
+#include <webapp/uvcpp_log.h>
+
 namespace uvcpp {
 
 const char* json_status_name(json_status status) {
@@ -112,13 +117,40 @@ json_status uvcpp_json_parse(const std::string& s, uvcpp_json& out) {
 // 序列化
 // =========================================================================
 
+namespace {
+
+/**
+ * @brief 把"序列化抛了"变成一条能被看见的日志。
+ *
+ * 这个异常**必须**吞掉（调用点在响应发送路径上，放它穿到 libuv 就是一次
+ * 崩溃），但吞掉之后返回的那个空串与「一个空的 JSON 文档」**完全不可区分**：
+ * 调用方拿到的都是 `""`，于是 `resp.json(j)` 会发出 `200` +
+ * `Content-Type: application/json` + **零字节正文**。没有返回值、没有布尔、
+ * 没有日志能分辨 —— 所以这条日志是这个失败**唯一**的出口。
+ *
+ * @param what 异常自报的原因；`nullptr` 表示是非 `std::exception` 的异常。
+ * @param fn   哪个重载抛的（两个重载的缩进参数不同，排障时要分得开）。
+ */
+void log_dump_failure(const char* what, const char* fn) {
+  UVCPP_LOG_ERROR(log_category::JSON)
+      << fn << " 序列化失败（多半是某个字符串里有非法 UTF-8）："
+      << (what != nullptr ? what : "非 std::exception 的异常")
+      << " —— 返回空串，调用方会把零字节正文当成成功的 JSON 发出去";
+}
+
+}  // namespace
+
 std::string uvcpp_json_dump(const uvcpp_json& j) {
   // dump() 在遇到非法 UTF-8 的字符串时抛 type_error.316。调用点常在响应
   // 发送路径上，那里抛异常同样会穿到 libuv —— 吞掉并返回空串，
   // 由调用方把空串当成序列化失败处理。
   try {
     return j.dump();
+  } catch (const std::exception& e) {
+    log_dump_failure(e.what(), "uvcpp_json_dump");
+    return std::string();
   } catch (...) {
+    log_dump_failure(nullptr, "uvcpp_json_dump");
     return std::string();
   }
 }
@@ -127,7 +159,11 @@ std::string uvcpp_json_dump(const uvcpp_json& j, int indent) {
   try {
     if (indent <= 0) return j.dump();
     return j.dump(indent);
+  } catch (const std::exception& e) {
+    log_dump_failure(e.what(), "uvcpp_json_dump(indent)");
+    return std::string();
   } catch (...) {
+    log_dump_failure(nullptr, "uvcpp_json_dump(indent)");
     return std::string();
   }
 }

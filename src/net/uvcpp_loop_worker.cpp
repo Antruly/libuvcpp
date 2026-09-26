@@ -106,16 +106,21 @@ void uvcpp_loop_worker::thread_main(std::promise<int>* ready) {
       hrc = UV_ECANCELED;
     }
     if (hrc != 0) {
-      // 与上面 async 建失败那条路**同一套收尾**：钩子可能已经建了东西，但它
-      // 自己最清楚怎么收（属主的收尾在 `on_exit_` 里），所以这里只保证循环
-      // 与邮箱不泄漏，然后走人。
-      delete async_;
-      async_ = nullptr;
-      if (loop_ != nullptr) {
-        loop_->loop_close();
-        delete loop_;
-        loop_ = nullptr;
+      // 这里**不能**照抄上面 async 建失败那条路：那时钩子还没跑，循环上什么都
+      // 没有；现在钩子已经跑了一半，`uvcpp_web_app` 那类属主极可能已经在这条
+      // 循环上建好了句柄（它是按顺序建的，中途分配失败就抛）。那些句柄只有
+      // 属主自己知道怎么收 —— **`on_exit_` 是它们唯一的回收点**。
+      //
+      // 不补这一句的后果很具体：`uvcpp_web_app` 会留下非空的 `slot.async`
+      // 与悬垂的 `slot.loop`（worker 线程这边把循环删了，属主不知道），
+      // 析构时 `delete loops_[i]->async` 就是在已释放的内存上 `uv_close`。
+      if (on_exit_) {
+        on_exit_();
       }
+      // 与正常路径共用同一份（摘句柄 → 泵 → 关循环）。**泵不是可省的**：
+      // `on_exit_` 里那些 `uv_close` 的完成回调得跑掉，否则 `uv_loop_close()`
+      // 撞 `UV_EBUSY`，`~uvcpp_loop` 只会把整块循环内存记成泄漏。
+      teardown_loop();
       ready->set_value(hrc);
       return;
     }
@@ -139,6 +144,11 @@ void uvcpp_loop_worker::thread_main(std::promise<int>* ready) {
     on_exit_();
   }
 
+  // 3~5. 摘句柄、泵、关循环、擦掉线程本地身份。
+  teardown_loop();
+}
+
+void uvcpp_loop_worker::teardown_loop() {
   // 3. `delete async_` 必须在 `uv_run` 返回之后、**不能**在它自己的回调里
   //    （那会析构正在执行的 std::function）。先把指针摘掉，让 `post()` 立刻
   //    开始拒收，再删。

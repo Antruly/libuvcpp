@@ -118,6 +118,11 @@ class uvcpp_loop_worker {
    *
    * **钩子里抛异常 = `start()` 拿到 `UV_ECANCELED`**（不会静默挂住，也不会被
    * 当成成功）。异常本身不外传，因为跨线程没法安全地重抛。
+   *
+   * 抛了异常也**一样会跑 `on_exit_`**：钩子可能已经建了一半东西（`uvcpp_web_app`
+   * 就是——它按顺序建 `async` / `loop` / `shutdown_timer`，中途分配失败就抛），
+   * 而那些东西只能由属主自己收。所以属主的收尾**不能只挂在成功路径上**，它必须
+   * 对"建到一半"也是幂等的（见 `release_loop_handles()` 那一族的空值容忍写法）。
    */
   void set_on_start(std::function<void()> fn) { on_start_ = std::move(fn); }
 
@@ -139,6 +144,17 @@ class uvcpp_loop_worker {
 
   /** @brief 把邮箱 swap 出来逐条跑。worker 线程调用。 */
   void drain();
+
+  /**
+   * @brief 摘邮箱句柄 → 泵掉挂起的关闭回调 → `loop_close` + 释放循环。worker 线程调用。
+   *
+   * **正常退出与"就绪钩子抛异常"两条路共用这一份**：顺序（先摘 `async_` 再泵、
+   * 泵完才能 `loop_close`）不能换，两处各写一遍迟早会走岔。
+   *
+   * 调用者负责在它**之前**跑 `on_exit_` —— 那是属主句柄唯一的回收点，它里面
+   * `uv_close` 出来的关闭回调正是靠这里的泵放掉的。
+   */
+  void teardown_loop();
 
   uvcpp_loop* loop_ = nullptr;
   int loop_index_ = 0;

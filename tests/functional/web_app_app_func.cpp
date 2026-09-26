@@ -1957,6 +1957,78 @@ void test_response_header_capacity_reused() {
 }
 
 // =========================================================================
+// N. 全局等级 vs app 配置：谁说了算
+// =========================================================================
+
+/** `uvcpp_logger::set_level()` 在 `app.start()` 之前调用的不该被静默顶掉。
+ *
+ * 这条曾经是坏的：`init_process_once()` **无条件**执行
+ * `uvcpp_logger::set_level(cfg_.min_log_level)`，而 `cfg_.min_log_level` 默认是
+ * `INFO`。于是"使用者在 start() 之前设的等级"一律被吃掉，只有
+ * `app.set_log_level()` 说了算 —— 可 `min_log_level` 的默认值只表示"没人说过话"，
+ * 不等于"用户想要 INFO"，两者必须分开。
+ *
+ * 踩在这个坑上的是靶场：`bench_server --log-level WARN` 的等级被顶成 INFO，
+ * `TRACE`/`DEBUG` 则被压成 INFO，而自报那行印的是**请求值** ⇒ 读数整个是假的。
+ *
+ * **两臂都是判据**，第二臂是对照组。只证"不再顶掉"是不够的 —— 那对"干脆永不
+ * 套用配置"的实现也一样成立，而那是把 `set_log_level()` 弄坏了。
+ *
+ * 注意这里**刻意不用** `configure_for_test()`：它会调 `set_log_level()`，
+ * 于是两臂都会变成"显式设过"。旧行为在这个文件里之所以一直没被测出来，
+ * 正是因为这个文件里每个 app 都走它。
+ */
+void test_log_level_precedence() {
+  // --- 臂一：没人说过话 ⇒ start() 不该动全局等级 ---
+  uvcpp_logger::instance().set_level(log_level::ERR);
+  check(uvcpp_logger::instance().global_level() == log_level::ERR,
+        "前提：全局等级已设成 ERR");
+
+  {
+    uvcpp_web_app app;
+    app.set_host("127.0.0.1").set_port(0).set_access_log(false);
+    // **刻意不调** set_log_level()：要验的就是"没人说过话"这一支。
+    app.get("/", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                    uvcpp_web_next next) {
+      (void)req;
+      (void)next;
+      resp.text("ok");
+      resp.end();
+    });
+
+    check(app.start_background() == 0, "臂一：服务启动");
+    check(uvcpp_logger::instance().global_level() == log_level::ERR,
+          "没调过 app.set_log_level() 时，start() 不应顶掉使用者设的全局等级");
+    app.stop();
+    app.join();
+  }
+
+  // --- 臂二（对照组）：显式设过 ⇒ 配置值说了算 ---
+  uvcpp_logger::instance().set_level(log_level::TRACE);
+  check(uvcpp_logger::instance().global_level() == log_level::TRACE,
+        "前提：全局等级已设成 TRACE");
+
+  {
+    uvcpp_web_app app;
+    app.set_host("127.0.0.1").set_port(0).set_access_log(false);
+    app.set_log_level(log_level::WARN);
+    app.get("/", [](uvcpp_web_request& req, uvcpp_web_response& resp,
+                    uvcpp_web_next next) {
+      (void)req;
+      (void)next;
+      resp.text("ok");
+      resp.end();
+    });
+
+    check(app.start_background() == 0, "臂二：服务启动");
+    check(uvcpp_logger::instance().global_level() == log_level::WARN,
+          "显式调过 app.set_log_level() 时，配置值应当赢");
+    app.stop();
+    app.join();
+  }
+}
+
+// =========================================================================
 // 用例表
 // =========================================================================
 struct test_case {
@@ -2005,6 +2077,7 @@ int main(int argc, char** argv) {
        test_request_headers_recycled_but_cleared},
       {"response_header_capacity_reused",
        test_response_header_capacity_reused},
+      {"log_level_precedence", test_log_level_precedence},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
 ## 3. POSIX（Linux / macOS）：零通讯
 
 **master 只做一件事：把端口占住。** 它走今天已有的 bind 链
-（`src/webapp/uvcpp_web_app.cpp:2006-2006` → `src/web/uvcpp_http_server.cpp:167-168` →
+（`src/webapp/uvcpp_web_app.cpp:2016` → `src/web/uvcpp_http_server.cpp:167-168` →
 `src/net/uvcpp_tcp_server.cpp:377-382` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
 **然后不跑循环** —— `uv_listen` 会在 `listen(fd, backlog)` 那一步就把端口占住，
 而 master 的 loop 从不 `uv_run`，所以它永远不会 accept。于是"master 不接请求"是天然的，
@@ -181,13 +181,16 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   **第三件事，而且是拦路的** —— 见 §9。
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
   n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:1103`）、
-  `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:1996-1996` /
-  `src/webapp/uvcpp_web_app.h:1937-1937`；这两个容器后来在多循环那条路上被搬进了
+  `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:2020` /
+  `src/webapp/uvcpp_web_app.h:1961`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
   `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:865`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。
-- **日志那条闸门在进程内照样存在。** `src/webapp/uvcpp_log.cpp:338-352` 持锁到
-  `target->write(record)` 返回 ⇒ 用户 sink 在全局锁里跑。多进程不改变这一点。
+- **日志那条闸门在进程内照样存在。** 1.4.0 之后 `src/webapp/uvcpp_log.cpp:416-436` 的
+  `write()` 已经**不持锁调 sink** 了（锁内只快照一次 `sink()`，`:342-351`），但默认
+  console sink **自己**那把锁与锁内的 `std::string` 拼接 / `fwrite` 仍在（
+  `src/webapp/uvcpp_log_console.cpp:193-256`）⇒ 同一条进程内，打日志的线程们仍然在
+  这一处排队。多进程不改变这一点，多进程改的是**别的**东西（见上面的闸门表）。
 - **`work_limit_` 仍按进程推。** `src/webapp/uvcpp_web_work_limit.cpp:206-210` 是
   `UV_THREADPOOL_SIZE × 4`（下限 16），与进程数无关 ⇒ n 个 worker 下它**仍然是对的数**。
   要写进文档的是另一件事：**n 个 worker × 每进程 4 条池线程 = 4n 条**，调

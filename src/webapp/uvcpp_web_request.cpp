@@ -8,6 +8,10 @@
 #include <cstdlib>
 #include <iterator>  // std::make_move_iterator（take_from 搬头表用）
 
+// `json()` 便捷版那条失败日志用（`json_status_name()` 由
+// `uvcpp_web_json.h` 提供，那个头经 `uvcpp_web_request.h` 已经在）。
+#include <webapp/uvcpp_log.h>
+
 // 只为**缓冲式** multipart（普通路由上的 `form()` / `file()`，见
 // `parse_multipart_form()`）。放在 `.cpp` 里而不是头文件里：那个头不必被每个
 // 包含请求头的编译单元拖进来。
@@ -528,7 +532,17 @@ bool uvcpp_web_request::json(uvcpp_json& out, json_status* status) const {
 
 uvcpp_json uvcpp_web_request::json() const {
   uvcpp_json out;
-  if (!json(out, nullptr)) return uvcpp_json();
+  // 用带 `status` 的那个重载而不是 `json(out, nullptr)`：这个便捷版本把失败
+  // 抹成了「一个 null 的 JSON 对象」，调用方**没有任何办法**分辨「body 不是
+  // JSON」和「body 就是一个 null」—— 那正是这一层最该说清楚的一件事。
+  // 签名不动（这是既有公开 API），改成在这里把状态记一条。
+  json_status st = json_status::OK;
+  if (!json(out, &st)) {
+    UVCPP_LOG_DEBUG(log_category::JSON)
+        << "请求体不是可用的 JSON（" << json_status_name(st) << "，body "
+        << body_size() << " 字节）：json() 返回 null 对象";
+    return uvcpp_json();
+  }
   return out;
 }
 

@@ -118,6 +118,14 @@ int main(int argc, char** argv) {
 
   // 先把等级定死再起服务：默认 WARN，于是即便某个模块在热路径上留了 DEBUG 日志，
   // 它也只花掉一次 `is_enabled` 判断。要量日志的价钱就 --log-level INFO。
+  //
+  // ★ 这一句**必须排在 `app.start_background()` 之前**，而且**只有**在靶场不调
+  //   `app.set_log_level()` 时才管用 —— 后者会把配置里的 `min_log_level` 当成
+  //   显式意图覆盖掉全局等级（见 `uvcpp_web_app.cpp` 的 `init_process_once`）。
+  //   在 1.4.0 之前不是这样：那时 `init_process_once()` 无条件覆盖，于是
+  //   `--log-level` 两头都失灵（WARN/ERR 被抬成 INFO、TRACE/DEBUG 被压成 INFO），
+  //   而下面那行自报还印着**请求值**，读数整个是假的。修好之后自报值与生效值
+  //   才是一回事 —— 这也是"量访问日志的价钱"这件事能成立的前提。
   uvcpp_logger::instance().set_level(level);
 
   std::signal(SIGINT, on_sigint);
@@ -200,7 +208,13 @@ int main(int argc, char** argv) {
   }
   std::printf("  routes        GET /json（内存 JSON）、GET /text、GET /stats\n");
   std::printf("  access_log    %s\n", access_log ? "ON" : "off");
-  std::printf("  log_level     %s\n", uvcpp_log_level_name(level));
+  // 印**生效值**而不是请求值：这两者曾经不一样（见上面那段说明），而一行
+  // 自报假掉的读数比没有读数更糟 —— 它会让人相信一个不存在的配置。
+  // `uvcpp_logger::instance().global_level()` 读的就是真正在过滤的那个数。
+  // （不是 `level(category)` —— 那个返回的是叠加了模块覆盖之后的结果，
+  //  `--log-level` 设的是全局那一档。）
+  std::printf("  log_level     %s\n",
+              uvcpp_log_level_name(uvcpp_logger::instance().global_level()));
   std::printf("  memory_pool   %s\n", pool_state());
   std::printf("  try_write     %s (min %d B)\n",
               UVCPP_TRY_WRITE_ENABLE ? "on" : "off", UVCPP_TRY_WRITE_MIN_BYTES);

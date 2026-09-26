@@ -279,6 +279,25 @@ struct uvcpp_web_router::router_table {
   /// 带通配：按**通配符之前的段数**分桶（可匹配 N >= k+1）
   std::map<size_t, route_bucket> wildcard_index;
 
+  /**
+   * @brief 找一条**会遮住** `e` 的既有路由（同模式，且方法相同、或有一方是 ANY）。
+   *
+   * `match()` 在特异度打平时保留**先注册**的那条，所以后注册的这条是**静默
+   * 无效**的：`add()` 返回真、DEBUG 那行照打，但它永远轮不到。全仓没有第二个
+   * 地方能观测到这件事（`uvcpp_wsdl_serve.h` 把这条 no-op 写进了文档，却只能
+   * 靠人记住）。同一个模式注册两次几乎总是笔误。
+   *
+   * 线性扫描：注册是启动期的事，与请求路径无关。
+   */
+  const route_entry* find_conflict(const route_entry& e) const {
+    for (size_t i = 0; i < routes.size(); ++i) {
+      const route_entry& r = routes[i];
+      if (r.pattern != e.pattern) continue;
+      if (r.any_method || e.any_method || r.method == e.method) return &r;
+    }
+    return nullptr;
+  }
+
   void add(const route_entry& e) {
     const size_t idx = routes.size();
     routes.push_back(e);
@@ -472,6 +491,15 @@ bool uvcpp_web_router::add(http_method method, const std::string& pattern,
     return false;
   }
 
+  if (const router_table::route_entry* dup = table_->find_conflict(e)) {
+    UVCPP_LOG_WARN(log_category::ROUTER)
+        << "路由重复注册：" << http_method_str(method) << " " << e.pattern
+        << " 已被先注册的 "
+        << (dup->any_method ? std::string("ANY")
+                            : std::string(http_method_str(dup->method)))
+        << " 遮住 —— 后注册的这条静默无效（特异度打平时保留先注册的那条）";
+  }
+
   table_->add(e);
   UVCPP_LOG_DEBUG(log_category::ROUTER)
       << "注册 " << http_method_str(method) << " " << e.pattern;
@@ -502,6 +530,14 @@ bool uvcpp_web_router::any(const std::string& pattern,
     UVCPP_LOG_WARN(log_category::ROUTER)
         << "路由模式非法，未注册：" << e.pattern << " —— " << err;
     return false;
+  }
+
+  if (const router_table::route_entry* dup = table_->find_conflict(e)) {
+    UVCPP_LOG_WARN(log_category::ROUTER)
+        << "路由重复注册：ANY " << e.pattern << " 已被先注册的 "
+        << (dup->any_method ? std::string("ANY")
+                            : std::string(http_method_str(dup->method)))
+        << " 遮住 —— 后注册的这条静默无效（特异度打平时保留先注册的那条）";
   }
 
   table_->add(e);

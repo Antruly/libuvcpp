@@ -224,6 +224,7 @@ uvcpp_web_app::uvcpp_web_app()
     : http_(new uvcpp_http_server()),
       work_limit_(new uvcpp_web_work_limit()),
       work_limit_explicit_(false),
+      log_level_explicit_(false),
       ws_server_(nullptr),
       stream_routes_seen_(0),
       upload_dir_(),
@@ -373,6 +374,7 @@ uvcpp_web_app& uvcpp_web_app::set_access_log(bool enable) {
 
 uvcpp_web_app& uvcpp_web_app::set_log_level(log_level level) {
   cfg_.min_log_level = level;
+  log_level_explicit_ = true;  // 从此 start() 才允许套用它（见头里的说明）
   return *this;
 }
 
@@ -1793,7 +1795,15 @@ int uvcpp_web_app::init_process_once() {
   if (loop == nullptr || tcp->get_tcp() == nullptr) return UV_EINVAL;
 
   // --- 配置 --------------------------------------------------------
-  uvcpp_logger::instance().set_level(cfg_.min_log_level);
+  // **只在用户显式调过 `set_log_level()` 时才覆盖全局等级。**
+  //
+  // 这一句曾经是无条件的，于是 `uvcpp_logger::instance().set_level(...)` 只要
+  // 在 `start()` 之前调用就一定被顶回 `cfg_.min_log_level`（默认 INFO），而且
+  // 没有任何提示。`min_log_level` 的默认值不等于"用户想要 INFO"，它只是"没人
+  // 说过话"，两者必须分开 —— 和下面 `work_limit_explicit_` 是同一个道理。
+  if (log_level_explicit_) {
+    uvcpp_logger::instance().set_level(cfg_.min_log_level);
+  }
 
   // 工作池在途上限：**没被用户显式设过就按此刻的线程池大小重算**。
   //

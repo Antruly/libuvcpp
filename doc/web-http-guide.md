@@ -213,7 +213,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
   body 不再被服务器缓冲，直接以 `HEADERS` / `BODY` / `END` 三个事件交给你。
 - `set_stream_claim(hook)`（`:263`）：`post_stream` 没中时问它。它返回一个
   `http_stream_handler`（认领）或空（不认领）。`webapp/` 正是靠它把自己的路由器
-  接进来的（`src/webapp/uvcpp_web_app.cpp:1920-1920`）。
+  接进来的（`src/webapp/uvcpp_web_app.cpp:1930`）。
 
 `stream_handler` 拿到的 `req` 是 `ctx.stream_request`，**头部视图只在当次调用内有效，
 要留就自己拷**（`src/web/uvcpp_http_server.h:107-109`）。
@@ -665,7 +665,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1155-1155`�
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:295-306`、`src/web/uvcpp_http_server.cpp:382-393`、`src/web/uvcpp_http_server.cpp:1784-1793`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:676-681`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:2882-2888`）。
+（`src/webapp/uvcpp_web_app.cpp:2892-2898`）。
 
 ### 静默失败清单
 
@@ -692,8 +692,8 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1155-1155`�
 `src/web/uvcpp_http_server.h:1009-1012` 现在都明写这一点。
 **真实的闲置清扫在 webapp 层**：`idle_timeout_ms` 默认 **60000**
 （`src/webapp/uvcpp_web_app.cpp:214-214`），而且为 0 时连扫描句柄都不建
-（`src/webapp/uvcpp_web_app.cpp:2152-2157`）。升级成 WebSocket 的连接被排除在闲置超时之外
-（`src/webapp/uvcpp_web_app.h:817`）。
+（`src/webapp/uvcpp_web_app.cpp:2162-2167`）。升级成 WebSocket 的连接被排除在闲置超时之外
+（`src/webapp/uvcpp_web_app.h:829`）。
 
 **二、`req` 与 `resp` 只在本次调用期间有效。**
 `resp` 仍是 `on_request_complete` 的局部对象（`src/web/uvcpp_http_server.cpp:628-628`）；`req` 自 1.3.26 起是
