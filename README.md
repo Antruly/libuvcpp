@@ -655,6 +655,15 @@ fixes came from issue reports by the project's first external contributor,
   failure, and it took the net layer's own TLS client path down with it (`1.4.1`)
 - No HTTP/3, no nghttp3, no handshake, no streams, no connection migration, no 0-RTT.
   [`doc/quic-guide.md`](doc/quic-guide.md) lists what is missing (`1.4.1`)
+- Also closes a hole the new snippets opened in a **gate**: the four QUIC examples in
+  `doc/quic-guide.md` made `tests/tools/check_doc_snippets.py` exit 3 forever on a
+  **release package** (QUIC is structurally off there, so those snippets always `[跳]`),
+  and the CI step is `exit "$rc"` — the config-contract job was permanently red no matter
+  how correct the code was. The tool's `DEFAULT_OFF` table now records modules that are
+  structurally off in release packages: they still print `[跳·默认关]` but no longer raise
+  the exit code. The cost is written next to that table (those snippets are not compiled
+  in CI; judging them needs a package that enables the module), as is the anti-vacuity
+  rule — if expected absence absorbs every candidate, it exits 3 again (`1.4.1`)
 
 ### HTTP/2
 

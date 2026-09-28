@@ -48,6 +48,15 @@
 包缺模块而跳过的片段会打 `[跳]` 并说明缺哪个开关，头不在包里打 `[停]`。两者都**不是红**：
 那是环境缺口，不是文档腐烂。报红就是假红，而假红会训练人忽略门禁。
 
+但有一类缺席**够不上**"前提不满足"：`DEFAULT_OFF` 里的模块在发布包里是**结构性**关着的
+（目前只有 `quic` —— 默认 OFF，`release.yml` 六条腿也都不开）。那些片段打
+`[跳·默认关]`，说明写在那张表旁边，**不**把退出码抬到 3；否则 CI 里那条
+`exit "$rc"` 会永久红，而那是发布配置的事实、不是文档腐烂。**代价也记在那张表旁边**：
+这些片段在 CI 里**不会被编**，要一份开了那个模块的包才判得到（本地验过 4/4 绿）。
+
+防真空转：预期缺席要是把候选**全**吸收了（`n_compiled == 0`），照样退 3 ——
+只靠"预期缺席"过关时，"全过"与"什么都没判"长得一模一样。
+
 ## 反空转（本仓规矩）
 
 靠"什么都没找到"通过的判据长得和全绿一模一样。所以：
@@ -249,6 +258,29 @@ MODULE_REQ = {
     "quic/": "UVCPP_QUIC_ENABLE",
 }
 
+# 发布包里**永远关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。
+#
+# 为什么非有这张表不可：CI 的 config-contract job 拿 `package_release.py` 出的包判片段，
+# 而那个包**所有模块全开**（`build-cfg` 的开关表就是照这个选的）。`quic` 是**第一个**
+# "发布配置里关着、文档里却有片段"的模块 —— `UVCPP_ENABLE_QUIC` 默认 OFF，`release.yml`
+# 六条腿也都不开它。于是在那个包里 `doc/quic-guide.md` 的 4 条片段必然 `[跳]`，
+# n_skip>0 ⇒ 退 3 ⇒ CI 那一步 `exit "$rc"` **直接红**。那不是文档腐烂，
+# 是这条门禁的**前提**与发布配置的**事实**不一致，而后者不会变。
+#
+# 放进来的**代价**必须写清楚，别读成"这 4 条免检"：
+#   这些片段在 CI 里**不会被编译** —— 判它们要一份 `UVCPP_QUIC_ENABLE=1` 的包，而 CI
+#   里唯一开 QUIC 的是 `quic` job，那棵树 web 关着，拿它判就会让 web/ssl/http2 的片段
+#   全部 `[跳]`（还是退 3）。所以这是"CI 里没有可判的包"，不是"不用判"。
+#   **手工验过一次**（2026-09-29）：`cmake --install build-quic --prefix …` 出的 QUIC=ON 包
+#   判出 `[绿] doc/quic-guide.md 编过 4/4 条`。哪天发布包开了 QUIC，这些 `[跳·默认关]`
+#   自己就没了，4 条片段**自动**回到被判集合里 —— 不用回来改这里，也没有"记得取消豁免"
+#   这种要靠人记的事。
+#
+# **别往里加模块。** 加一个，就等于在那个模块上把这条门禁关掉一半；表里每一项都得是
+# "发布配置里结构性地关着"的，而不是"顺手也关着"。`web/` `ssl/` `http2/` 这些在
+# `build-cfg` 里全是开的，它们缺席只能说明**拿错了包**，那正是该退 3 的情形。
+DEFAULT_OFF = {"UVCPP_QUIC_ENABLE"}
+
 CONFIG_REL = os.path.join("include", "uvcpp", "uvcpp_config.h")
 
 # 与 check_config_contract.py:72 同一个正则 —— 生成头的形状两处必须读得一样。
@@ -419,6 +451,7 @@ def main():
 
     print("\n---- 片段 ----")
     n_cand = n_compiled = n_frag = n_skip = n_bytes = 0
+    n_skip_off = 0
     for rel in docs:
         path = os.path.join(root, rel.replace("/", os.sep))
         if not os.path.exists(path):
@@ -500,10 +533,22 @@ def main():
                 if macro and cfg.get(macro) != "1":
                     unmet.append((prefix, macro, cfg.get(macro)))
             if unmet:
-                shown = sorted(set("%s 需要 %s（包里是 %s）" % u for u in unmet))
-                print("  [跳] %s %s" % (where, "；".join(shown)))
+                # 两类要分开：`DEFAULT_OFF` 里的模块缺席是**发布配置的事实**（见那张表的
+                # 说明），够不上"前提不满足"，不该把退出码抬到 3；其余任何模块缺席都还
+                # 是"拿错了包"，照旧退 3。这一行是这条门禁唯一容忍缺席的地方，别放宽。
+                off = [u for u in unmet if u[1] in DEFAULT_OFF]
+                hard = [u for u in unmet if u[1] not in DEFAULT_OFF]
                 page["skip"] += 1
-                n_skip += 1
+                if off:
+                    print("  [跳·默认关] %s %s —— 这个模块在发布包里从不打开，"
+                          "缺席是发布配置的事实，不是文档腐烂"
+                          % (where, "；".join(sorted(set(
+                              "%s 需要 %s（包里是 %s）" % u for u in off)))))
+                    n_skip_off += 1
+                if hard:
+                    print("  [跳] %s %s" % (where, "；".join(sorted(set(
+                        "%s 需要 %s（包里是 %s）" % u for u in hard)))))
+                    n_skip += 1
                 continue
 
             src = os.path.join(work, "s%02d_%s.cpp"
@@ -545,7 +590,8 @@ def main():
 
     print("\n==== 汇总 ====")
     print("候选 %d 条：编过 %d 条（%d B），标记为片段 %d 条，跳过 %d 条"
-          % (n_cand, n_compiled, n_bytes, n_frag, n_skip))
+          "（其中 %d 条是 `DEFAULT_OFF` 里默认关闭的模块，不算前提不满足）"
+          % (n_cand, n_compiled, n_bytes, n_frag, n_skip, n_skip_off))
     if failures:
         print("红 %d 条：" % len(failures))
         for f in failures:
@@ -559,6 +605,15 @@ def main():
     if n_skip:
         print("前提不满足，退出 3（判过的都过了，但有 %d 条因为包缺模块/缺头没判 ——"
               " 见上面的 `[跳]`/`[停]`）" % n_skip)
+        return 3
+    if n_skip_off and not n_compiled:
+        # 反空转：`DEFAULT_OFF` 是**唯一**能把"没判"从退出码里摘掉的东西，所以它必须
+        # 摘不掉全部 —— 否则一份把模块全关的包（或哪天有人把表填胖）就能让这条门禁
+        # 在**一条都没编过**的情况下报"全过"，而那与真全绿长得一模一样。
+        # 判据落在 `n_compiled` 上：只要还有任意一条真编过，这一趟就确实判了东西。
+        print("前提不满足，退出 3（%d 条都是 `DEFAULT_OFF` 里默认关闭模块的片段，"
+              "其余候选**一条都没编过** —— 预期缺席不许变成「整条门禁都别跑」）"
+              % n_skip_off)
         return 3
     print("全过（%d 条片段都编过）" % n_compiled)
     return 0

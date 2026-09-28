@@ -433,5 +433,12 @@ void install_reader(uvcpp_quic_connection& conn) {
   的行为一致。
 - **没有 `uvcpp_web` 那侧的接线。** `uvcpp_http_server` 不会因为 QUIC 打开就多出
   什么 —— 它连 `UVCPP_QUIC_ENABLE` 都不看。
+- **没有流状态枚举，也没有自研 varint 编解码。** 这两样都属于"没有调用方的名字"：
+  流的公开面就是 `stream_id` 本身，没有任何访问器会返回流状态，所以
+  `quic_stream_state` 那样的枚举一个消费者都没有；varint 的包解析/序列化归 ngtcp2，
+  自己写一份就是死代码。本仓库对这类名字是不发的 —— 尤其是公开头里的，它会进
+  `include/quic/`、进 API 兼容面，被下一个读代码的人当成承重结构。将来真做流时
+  再建，形状由那时的实现定。对照：`quic_connection_state` **留着**，因为 `state()`
+  是它的消费者，测试也断言在它上面。
 
 下一版（1.4.2 起）往里填的顺序：握手 → 流收发 → 连接关闭与超时 → 再谈 HTTP/3。
