@@ -553,6 +553,12 @@ int main() {
 汇总的清单在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
 
+**`1.4.1-dev` 还没发布，所以下面没有它的条目**（这一节只列打过 tag 的版本，1.4.x
+是收进下一个 tag 的开发线）。它目前的内容是 QUIC 传输层的地基 —— CMake 接线、ngtcp2
+接入、公开 API 形状与配置契约宏，**没有可用的传输** —— 按主题的清单同样在 README 的
+变更日志里，逐条的「这一版没做什么」在
+[`doc/quic-guide.md`](doc/quic-guide.md)。
+
 ### v1.4.0 (2026-09-26)
 
 **新增**:SOAP/WSDL、应用层 JSON、日志模块完善、多循环的 Linux 内核分流
@@ -694,7 +700,7 @@ int main() {
 - `cmake --install` 在当前树上是坏的：libuv 由 `FetchContent_MakeAvailable` 引入，
   它登记的 install 规则引用了一个从未构建的 `libuv.dll`，且它的规则排在本项目的
   规则之前 —— 一失败就整体中止，本项目的头文件与库一个都装不出来。
-  本次的 zip 绕过它、照 `CMakeLists.txt:699-831` 的规则手工组装，与之有两处
+  本次的 zip 绕过它、照 `CMakeLists.txt:1467-1639` 的规则手工组装，与之有两处
   刻意的差异：**libuv 的头放在 `include/` 顶层**（本库的公开头写的是
   `#include <uv.h>`，放进 `include/libuv/` 会找不到），以及**补上了 `zlib.h` /
   `zconf.h`**（`web/uvcpp_ws_parser.h` 在 `UVCPP_ZLIB_ENABLE=1` 时要 include 它，

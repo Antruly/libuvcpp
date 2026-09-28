@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:472-480`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:788-796`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
@@ -54,15 +54,24 @@ VERSION = _header_version()
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
 MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2",
-           "wsdl"]
+           "wsdl", "quic"]
 
 # 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
 # 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
 # 而且使用者根本没装 nghttp2 的头，一 include 就是硬编译错误。
 # `uvcpp_wsdl_pugixml.h` 同理：它把 `<pugixml.hpp>` 拉进来，正是为了让
 # src/wsdl/ 里别的头一个 pugi 类型都不出现。
-# CMakeLists.txt 的 install 规则里同一条排除，两处必须一起改。
-PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h"}
+#
+# `uvcpp_quic_ngtcp2.h` 是第三条，而且是三份里**剂量最重**的一份：它一次拉进
+# `<ngtcp2/ngtcp2.h>`、`<ngtcp2/ngtcp2_crypto_ossl.h>` 与（后者带的）
+# `<openssl/ssl.h>` —— 三个头路径。发出去，使用者就会拿到一个"一 include 就
+# 硬编译错误"的头，而且错误指向一个他根本没装的库。
+#
+# `CMakeLists.txt` 的 `list(FILTER QUIC_HEADER_FILES EXCLUDE REGEX
+# "uvcpp_quic_ngtcp2\\.h$")` 是同一条排除，**两处必须一起改** —— 这里漏了
+# 只影响发布包，那里漏了只影响 `cmake --install`，两边都不报错。
+PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
+                   "uvcpp_quic_ngtcp2.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），

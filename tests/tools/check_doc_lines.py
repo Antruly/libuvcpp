@@ -14,10 +14,12 @@
 
 ## 判据
 
-  1. **可解析**：每条引用都要落到 `src/` 下一个真实文件上。解析不了是**红**，
-     不是跳过 —— "指着一个不存在的文件"和"指着一个不存在的行"是同一种腐烂，
-     而前者以前连"文件存在"都没人判（`h2_session.h`、`client.h`、`h` 这类
-     截断名在本仓历史文档里真实存在过 34 处）。
+  1. **可解析**：每条引用都要落到本仓一个真实文件上（`src/` 下的源码，或根
+     `CMakeLists.txt`）。解析不了是**红**，不是跳过 —— "指着一个不存在的文件"
+     和"指着一个不存在的行"是同一种腐烂，而前者以前连"文件存在"都没人判
+     （`h2_session.h`、`client.h`、`h` 这类截断名在本仓历史文档里真实存在过
+     34 处）。带目录的 `<dir>/CMakeLists.txt` 在本仓里找不到时**不算红**而是按
+     "声明不在本仓"记进 `[记]` 印出来，理由见 `CMAKE_CITE_RE` 上面那段。
   2. **在范围内且非空行**：行号（含 `a-b` 区间）要落在文件里，且区间里至少有一行
      不是空白。
   3. **内容没变**：`doc_line_refs.lock` 锁文件记着每条引用**目标区间**的内容哈希。
@@ -28,7 +30,9 @@
      更说明问题。带省略号（`…` / `...`）的引述是删节，不判。
   5. **反空转**：解析成功的引用数 == 0 就是红。一个"一条都没查"的门禁是最坏的一种
      绿 —— 它长得和"全过"一模一样。
-  6. **没有 `.ext:行号` 简写**：`.cpp:123` 这种省掉文件名的写法**直接判红**。
+  6. **没有 `.ext:行号` 简写**：`.cpp:123` 这种省掉文件名的写法**直接判红**
+     （扩展名表 = 源码那套 + `txt`：这条门禁唯一判的非源码文件就是根
+     `CMakeLists.txt`，所以 `.txt:123` 同样要补全）。
      它是这个门禁自己的一处盲区：`CITE_RE` 要求首字符是字母数字，`BARE_RE` 的
      前视断言又挡住紧跟在词字符后面的 `:`，**两条都匹配不上** —— 于是这种引用
      从来没有被校验过一次，锁文件里也没有它们的条目。而它恰恰是最危险的一种：
@@ -79,17 +83,17 @@
 老末行照样动（尾部锚点已经覆盖到了）。所以首行锚点**一分覆盖都买不到**，
 只多一次"恰好在附近唯一"的误定位机会。这条是照着几何推的，也照着场景表验的。
 
-**存几个尾部锚点是量出来的，不是估的**（本仓 860 条锁条目、±`SHIFT_SCAN` 窗口内
-唯一才可定位；重测 `tests/tools/doc_line_anchor_stats.py`）：1 个 77.6%、
-**2 个 90.5%**、3 个 93.5%。取 2 个 —— 第三个只买 3 个百分点，却要多一列、多一次
+**存几个尾部锚点是量出来的，不是估的**（本仓 929 条锁条目、±`SHIFT_SCAN` 窗口内
+唯一才可定位；重测 `tests/tools/doc_line_anchor_stats.py`）：1 个 78.3%、
+**2 个 91.0%**、3 个 93.8%。取 2 个 —— 第三个只买 2.8 个百分点，却要多一列、多一次
 误定位机会。
 
-分层看才是全貌（同一份读数）：**单行**区间 529 条（61%，压根没有倒数第二行），
-第 1 个锚点就覆盖 91.7%，第 2 个对它**一分不买**；真正买不到的是**多行**那 331 条
-—— 1 个 55.0%、2 个 88.5%、3 个 96.4%。只看总数会读成"2 个锚点普遍更准"，其实是
-"六成条目没得选，另外四成里有一半靠第 2 个锚点才咬得动"。
+分层看才是全貌（同一份读数）：**单行**区间 581 条（63%，压根没有倒数第二行），
+第 1 个锚点就覆盖 92.3%，第 2 个对它**一分不买**；真正买不到的是**多行**那 348 条
+—— 1 个 54.9%、2 个 88.8%、3 个 96.3%。只看总数会读成"2 个锚点普遍更准"，其实是
+"六成多条目没得选，另外三成半里有一半靠第 2 个锚点才咬得动"。
 
-**剩下的 9.5% 是明知判不了的**（末两行都是 `}` 那种满文件都有的行），报告里按
+**剩下的 9.0% 是明知判不了的**（末两行都是 `}` 那种满文件都有的行），报告里按
 `[记]` 印出条数 —— "判不了"必须能看见，不然它和"判过了"在输出里长得一样。
 
 ## `[新]` / `[撤]`：锁的**集合**变了
@@ -118,12 +122,28 @@
 它要读者自己回想这一段在讲哪个文件，而猜正是它出错的方式。`<file>.h:88` 那种
 占位符（`CONTRIBUTING.md` 讲引用写法时用的）带 `>`，被同一个前视断言放过。
 
+## 根 `CMakeLists.txt` 的引用（补的一格，2026-09-29）
+
+`CMakeLists.txt:行号` 这类引用**以前一条都没被这个门禁看过**：`SRC_EXTS` 是源码
+扩展名表，`.txt` 不在里面 —— `CITE_RE` 匹配不上，判据 6 的简写正则（同一张表）
+也匹配不上。而它不是小事：全仓 39 处这类引用，实测 **34 处在 QUIC 那一批改动
+之前就已经指错**，根 `CMakeLists.txt` 从 1.4.0 的 1465 行长到 1820 行，六道门禁
+全绿。所以这里单开 `CMAKE_CITE_RE` 收它，收进来之后判据 1/2/3/5 与 `--update`
+的平移检测全都照常适用（那几条都是按 `Cite.path` 走的，与目标文件无关）。
+
+两处刻意的取舍，都在 `CMAKE_CITE_RE` 上面写了理由：上游自带树的路径
+（`<目录>/CMakeLists.txt:行号` 这一种）**不判存在性**、按 `[记]` 印出来；`.txt` **不往
+`SRC_EXTS` 里加**（加了会让那些外仓路径被 `resolve` 判红）。
+扫描范围也扩到了**非 md 文件**（`SCRIPT_GLOBS`），但只找 `CMakeLists.txt` 一种
+目标 —— 那 39 处里有 12 处写在脚本与 CI 配置里，只盖 md 等于留半个洞。
+
 ## 约定
 
   * 退出码 `0` 全过 / `1` 判红 / `3` 前提不满足（**没判**）。`1` 优先于 `3`。
   * 只用标准库，**绝不调 `git` 或别的外部命令**：CI 的 mingw64 档在 MSYS2 的 PATH
     上没有 git，曾导致整个脚本一条判据都没跑就退 3。
-  * 扫的范围（根 `*.md` + `doc/*.md`）逐个印出来，让边界可见。
+  * 扫的范围（根 `*.md` + `doc/*.md`，另加 `SCRIPT_GLOBS` 那批只判
+    `CMakeLists.txt` 的非 md 文件）逐个印出来，让边界可见。
   * **扫围栏代码块**，与 `check_docs.py` 相反：那边跳过围栏是因为 C++ 的
     `[](auto& x)` 看起来像 markdown 链接；这边引用恰恰大量写在示例的
     `// src/web/x.h:12` 注释里，跳了就漏掉一半。
@@ -191,6 +211,35 @@ CITE_RE = re.compile(
     r"(?<![\w./:\-<])([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:%s)):(\d+)(?:-(\d+))?"
     % "|".join(SRC_EXTS))
 
+# 根 `CMakeLists.txt` 的引用，形状是 `CMakeLists.txt:行号`（下面一律写"行号"
+# 而不是真数字：本文件自己也在这条门禁的扫描范围里，写个真数字就等于给自己
+# 埋了一处会烂的引用 —— 实测第一版就是那么写的，扫出来三条）。
+#
+# **为什么必须单开一条**：`SRC_EXTS` 只收源码扩展名，`.txt` 不在里面 —— 于是
+# 这个形状从来没被 `CITE_RE` 匹配过，判据 6 的简写正则（同一张扩展名表）也不
+# 管它。**结果是这一类引用在本仓完全无门禁**，而且真的烂了：
+# 实测 2026-09-29 全仓 39 处（`RELEASE.md`、8 篇 `doc/*.md`、`tests/tools/` 下
+# 三个脚本、两个 workflow），其中 **34 处早在 QUIC 那一批改动之前就已经指错**
+# ——根 `CMakeLists.txt` 从 1.4.0 的 1465 行长到 1820 行，没有任何一道门禁出声。
+# 这条正则补的就是这一格，补上之后判据 1/2/3/5 与 `--update` 的平移检测全都
+# 照常适用（那几条都是按 `Cite.path` 走的，与目标是什么文件无关）。
+#
+# **不把 `txt` 加进 `SRC_EXTS`**：那样 `<目录>/CMakeLists.txt:行号` 会被 `resolve`
+# 一路走到第三条兜底，报"`src/` 下没有这个文件" ⇒ 判据 1
+# 判红。而那两条指的是 ngtcp2 / nghttp2 **自带树**里的文件，本来就不该在本仓里
+# 找到（与 `nghttp2:nghttp2_session.c:2315` 那种带命名空间前缀的外部引用同一性质）。
+#
+# 判法：**裸** `CMakeLists.txt` 一定指仓库根那份（存在即判）；带目录的
+# `<dir>/CMakeLists.txt` 只在该路径**确实是本仓的文件**时才判，否则按"声明不在
+# 本仓"记进 `[记]` 逐条印出来 —— 不判的那部分必须看得见，与 `EXT_RE` 那条约定
+# 同一个意图：不许用路径形状把本仓的引用洗成不判。
+#
+# 裸 `.txt:行号` 简写（撇开文件名只写扩展名）由判据 6 判红 —— 它的扩展名表见
+# `SHORTHAND_EXTS`，比 `SRC_EXTS` 多一个 `txt` 就是为这一格。
+CMAKE_CITE_RE = re.compile(
+    r"(?<![\w./:\-<])((?:[A-Za-z0-9_][A-Za-z0-9_./-]*/)?CMakeLists\.txt)"
+    r":(\d+)(?:-(\d+))?")
+
 # 带命名空间前缀的引用：记下来、印出来，但不判存在性。
 EXT_RE = re.compile(
     r"(?<![\w./-])([A-Za-z0-9_]+):([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:%s)):(\d+)(?:-(\d+))?"
@@ -214,8 +263,19 @@ BARE_RE = re.compile(r"(?<![\w./:-])(?<!:\d):(\d+)(?:-(\d+))?")
 # 同一个 `-` 的转义问题（见 `CITE_RE` 上面）：这里也写成 `\-`。今天没有实测的形状
 # 能走到这一格（`.ext` 前面总是文件名字符），但四条正则的意图是同一个，留着一个
 # 区间写法只会让下一个人再踩一次。
+#
+# 扩展名表在这条上比 `SRC_EXTS` **多一个 `txt`**：这条门禁唯一会判的非源码文件就是
+# 根 `CMakeLists.txt`（见 `CMAKE_CITE_RE`），所以撇开文件名只写 `.txt:123` 同样是
+# 猜——而在这个仓库里它十有八九就是指根 `CMakeLists.txt`，正是最该补全的那个。
+# 加进来的代价是零：完整写法里 `.txt` 前面是词字符 `s`，被前视断言挡住，不会误伤
+# 那条已经能解析的写法（有回归表 S 那一排 + 本仓 55 处实测兜底）。
+#
+# 上面特意只说"完整写法"、不举带数字的例子 —— 本文件自己也在扫描范围里（见
+# `collect_scripts` 那批），举一个就当场变成两条判红：目标行恰好是空行时，判据 2
+# 会跟着一起咬。写这段的第一版就是这么红的。
+SHORTHAND_EXTS = SRC_EXTS + ("txt",)
 SHORTHAND_RE = re.compile(
-    r"(?<![\w./:\-<>])\.(%s):(\d+)(?:-(\d+))?" % "|".join(SRC_EXTS))
+    r"(?<![\w./:\-<>])\.(%s):(\d+)(?:-(\d+))?" % "|".join(SHORTHAND_EXTS))
 
 TRAIL_WS_RE = re.compile(r"[ \t]+$")
 
@@ -277,20 +337,26 @@ def resolve(root, index, tok):
     return None, "src/ 下没有叫 %s 的文件" % tok
 
 
-def collect_cites(root, docs):
+def collect_cites(root, docs, scripts=()):
     """按文档顺序取出全部引用，裸 `:NNN` 就地归属。
 
     另返回 `.ext:行号` 简写（判据 6 用）—— 它们**不是引用**：解析不了、也没有
     归属，所以进不了 `cites`，但那正是要判红的东西，得单独收一份。
+
+    `scripts` 里的文件（见 `SCRIPT_GLOBS`）**只找 `CMakeLists.txt` 一种目标**：
+    通用引用正则盖上去会撞上脚本自己的正则字面量与示例文本（本脚本的 `CITE_RE`
+    就是一条），造出一批假红，而假红会训练人忽略门禁。
     """
     index = load_src_index(root)
     cites = []
     external = []
     shorthands = []
+    cmake_outside = []
     unattributed = 0
     unreadable = []
+    md = set(docs)
 
-    for doc in docs:
+    for doc in list(docs) + list(scripts):
         try:
             with open(os.path.join(root, doc), encoding="utf-8") as f:
                 text = f.read()
@@ -301,45 +367,68 @@ def collect_cites(root, docs):
         if lines:
             lines[0] = lines[0].lstrip("﻿")
 
+        narrow = doc not in md
+
         # 段落 = 空行分隔的块。裸引用只在段落内继承文件名。
         last = None          # 本段落最近一条**能解析**的引用
 
         for i, ln in enumerate(lines):
-            if not ln.strip():
-                last = None
-                continue
-
-            for m in EXT_RE.finditer(ln):
-                external.append("%s 第 %d 行 `%s`" % (doc, i + 1, m.group(0)))
-
-            for m in CITE_RE.finditer(ln):
-                tok, a, b = m.group(1), int(m.group(2)), m.group(3)
-                c = Cite(doc, i + 1, m.group(0), a, int(b) if b else a, False)
-                rel, why = resolve(root, index, tok)
-                if rel is None:
-                    c.path = None
-                    c.why = why
-                else:
-                    c.path = rel
-                    c.why = None
-                    last = c
-                cites.append(c)
-
-            for m in BARE_RE.finditer(ln):
-                if last is None:
-                    unattributed += 1
+            if not narrow:
+                if not ln.strip():
+                    last = None
                     continue
-                a, b = int(m.group(1)), m.group(2)
-                c = Cite(doc, i + 1, m.group(0), a, int(b) if b else a, True)
-                c.path = last.path
+
+                for m in EXT_RE.finditer(ln):
+                    external.append("%s 第 %d 行 `%s`"
+                                    % (doc, i + 1, m.group(0)))
+
+                for m in CITE_RE.finditer(ln):
+                    tok, a, b = m.group(1), int(m.group(2)), m.group(3)
+                    c = Cite(doc, i + 1, m.group(0), a, int(b) if b else a,
+                             False)
+                    rel, why = resolve(root, index, tok)
+                    if rel is None:
+                        c.path = None
+                        c.why = why
+                    else:
+                        c.path = rel
+                        c.why = None
+                        last = c
+                    cites.append(c)
+
+                for m in BARE_RE.finditer(ln):
+                    if last is None:
+                        unattributed += 1
+                        continue
+                    a, b = int(m.group(1)), m.group(2)
+                    c = Cite(doc, i + 1, m.group(0), a, int(b) if b else a,
+                             True)
+                    c.path = last.path
+                    c.why = None
+                    cites.append(c)
+
+                for m in SHORTHAND_RE.finditer(ln):
+                    shorthands.append("%s 第 %d 行 `%s`"
+                                      % (doc, i + 1, m.group(0)))
+
+            for m in CMAKE_CITE_RE.finditer(ln):
+                rel = m.group(1).replace(os.sep, "/")
+                if not os.path.isfile(os.path.join(root, rel)):
+                    # 不在本仓（上游自带树的路径）。不判存在性，但逐条印出来。
+                    cmake_outside.append("%s 第 %d 行 `%s`"
+                                         % (doc, i + 1, m.group(0)))
+                    continue
+                a, b = int(m.group(2)), m.group(3)
+                c = Cite(doc, i + 1, m.group(0), a, int(b) if b else a, False)
+                c.path = rel
                 c.why = None
                 cites.append(c)
+                # 与 CITE_RE 那条一致：裸 `:NNN` 可以继承它。`narrow` 那批不算
+                # —— 脚本里的裸 `:NNN` 是代码/日志文本，不是引用。
+                if not narrow:
+                    last = c
 
-            for m in SHORTHAND_RE.finditer(ln):
-                shorthands.append("%s 第 %d 行 `%s`"
-                                  % (doc, i + 1, m.group(0)))
-
-    return cites, unattributed, unreadable, external, shorthands
+    return cites, unattributed, unreadable, external, shorthands, cmake_outside
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +499,8 @@ def hash_lines(lines, start, end):
 
 
 # 锁里每条引用另存几个**尾部锚点**的哈希（末行、倒数第二行……）。
-# 用途与取值理由见文件头「判『区间被内部插/删了行』」。1 个覆盖 77.6%、
-# 2 个 90.5%、3 个 93.5%（本仓 860 条实测；重测 `tests/tools/doc_line_anchor_stats.py`），
+# 用途与取值理由见文件头「判『区间被内部插/删了行』」。1 个覆盖 78.3%、
+# 2 个 91.0%、3 个 93.8%（本仓 929 条实测；重测 `tests/tools/doc_line_anchor_stats.py`），
 # 取 2。
 TAIL_ANCHORS = 2
 
@@ -850,6 +939,27 @@ def collect_docs(root):
     return docs
 
 
+# md 之外还要扫的文件。**只认 `CMakeLists.txt` 这一种引用目标**，理由见
+# `collect_cites`：脚本里到处是正则字面量与示例文本，通用引用正则盖上去只会造出
+# 假红。覆盖面是量出来的：全仓 39 处 `CMakeLists.txt:行号` 里有 12 处写在这批
+# 文件里（`tests/tools/` 下三个脚本、两个 workflow），它们和 md 里那 27 处烂过
+# 同一轮，只盖 md 那一半等于留着半个洞。
+#
+# 这份清单**故意只列这两处**：加目录就等于加一类"会被这个门禁读的文件"，
+# 而 `_local_deps/`（第三方树，`.gitignore` 里）之类的地方扫进来只会自找麻烦。
+# 清单与 `collect_docs` 一样要**逐个印出来**，让边界可见。
+SCRIPT_GLOBS = ("tests/tools/*.py", ".github/workflows/*.yml",
+                ".github/workflows/*.yaml")
+
+
+def collect_scripts(root):
+    out = []
+    for pat in SCRIPT_GLOBS:
+        out += glob.glob(os.path.join(root, pat))
+    return sorted(set(os.path.relpath(p, root).replace(os.sep, "/")
+                      for p in out))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=None,
@@ -874,11 +984,16 @@ def main():
         print("前提不满足，退出 3（**一条判据都没判**）")
         return 3
     print("  扫了 %d 个 md：%s" % (len(docs), " ".join(docs)))
+    scripts = collect_scripts(root)
+    # 扫描范围里**非 md** 的那半也要印出来：它只判 `CMakeLists.txt` 一种目标，
+    # 不印的话"那 12 处引用被扫过了吗"就只能靠读代码回答。
+    print("  另扫 %d 个非 md 文件（%s）：只认 `CMakeLists.txt` 一种引用"
+          % (len(scripts), "、".join(SCRIPT_GLOBS)))
 
-    cites, unattributed, unreadable, external, shorthands = \
-        collect_cites(root, docs)
+    cites, unattributed, unreadable, external, shorthands, cmake_outside = \
+        collect_cites(root, docs, scripts)
     for u in unreadable:
-        fail("文档读不了：%s" % u)
+        fail("文件读不了：%s" % u)
 
     print("  引用 %d 条（另有 %d 处裸 `:行号` 附近没有可归属的文件名，按约定不算引用）"
           % (len(cites), unattributed))
@@ -888,6 +1003,13 @@ def main():
         print("  [记] %d 条带命名空间前缀的引用（声明为外部源码，不判存在性）："
               % len(external))
         for e in external:
+            print("        %s" % e)
+    if cmake_outside:
+        # 与上一条同一个意图：`<目录>/CMakeLists.txt:行号` 判不了（本仓里没有
+        # 那个文件），那就必须让它**在日志里露头**，而不是静默地一条都不判。
+        print("  [记] %d 处 `CMakeLists.txt:行号` 指的不是本仓的文件"
+              "（上游自带树的路径，不判存在性）：" % len(cmake_outside))
+        for e in cmake_outside:
             print("        %s" % e)
 
     if args.list:
@@ -914,7 +1036,8 @@ def main():
         if len(bad) > 40:
             fail("…另有 %d 条同类" % (len(bad) - 40))
     else:
-        ok("判据 1：%d 条引用全部解析到 src/ 下的真实文件" % len(cites))
+        ok("判据 1：%d 条引用全部解析到本仓的真实文件（`src/` 下的源码，"
+           "或根 `CMakeLists.txt`）" % len(cites))
 
     good = [c for c in cites if c.path]
 
@@ -971,8 +1094,9 @@ def main():
     # 文件头：省掉文件名之后，"这是哪个文件"只能靠读者猜，而实测就猜错过。
     if shorthands:
         for s in shorthands[:40]:
-            fail("`.ext:行号` 简写：%s —— 补全成 `src/<module>/<file>:<行号>`"
-                 % s)
+            fail("`.ext:行号` 简写：%s —— 补全成完整文件名：源码写 "
+                 "`src/<module>/<file>:<行号>`，根 CMakeLists 写 "
+                 "`CMakeLists.txt:<行号>`" % s)
         if len(shorthands) > 40:
             fail("…另有 %d 处同类" % (len(shorthands) - 40))
     else:

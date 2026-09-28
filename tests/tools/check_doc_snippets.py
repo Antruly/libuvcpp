@@ -181,7 +181,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
-                "ssl/", "http2/", "expand/", "wsdl/")
+                "ssl/", "http2/", "expand/", "wsdl/", "quic/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -189,7 +189,13 @@ BUNDLED = ("uv.h", "uv/", "nlohmann/", "zlib.h", "zconf.h")
 
 # 公开头里**没有**、包里也**没有**的第三方头。文档片段真用上它们就是**环境缺口**
 # 而不是文档腐烂 —— 报 `[停]` 并退 3。报红的话就是**假红**，而假红会训练人忽略门禁。
-NOT_BUNDLED = ("openssl/", "nghttp2/")
+#
+# `ngtcp2/` 在这里的**前提**是 `quic/` 的公开头一个都不 include 它 —— 那正是
+# `uvcpp_quic_ngtcp2.h` 存在的全部理由，也是它不进 `package_release.py` 的
+# `PRIVATE_HEADERS` 之外的任何地方的理由。哪天有人从公开 quic 头里 include 了
+# ngtcp2，这条记录会把它判成**环境缺口**（退 3）而不是编不过（退 1）—— 两种都
+# 该红，但前者的提示是对的：问题不在文档，在那个头。
+NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/")
 
 # 头 → 记录"这个模块在不在这份构建里"的那个宏。
 #
@@ -221,12 +227,26 @@ NOT_BUNDLED = ("openssl/", "nghttp2/")
 # `webapp/` 那一行是量出来的，不是推出来的：同一段 `<webapp/uvcpp_web_ws_client.h>`
 # 的片段，对着把 `UVCPP_WEBAPP_ENABLE` 改成 0 的包跑 —— 现行表 `[跳]` 退 3，
 # 把这一行抽掉则编不过退 1。抽掉它就会造出一个**假红**，所以它承重。
+#
+# `quic/` 属于**第一档**（"宏为 0 时类会消失"）：本模块的**四个**公开头整段套在
+# `#if UVCPP_QUIC_ENABLE` 里（第五个头 `uvcpp_quic_ngtcp2.h` 是私有的，不进包、
+# 文档也不该引它）。模块关掉时 `CMakeLists.txt:1615` 的 install 规则确实不装它们，
+# 但那条只挡住 `cmake --install`：`package_release.py` 是从 `src/` 逐目录拷头的、
+# 与开关无关（同上面 wsdl 那段记的形状，实测过 —— 一份 `UVCPP_ENABLE_QUIC=OFF`
+# 的包里有 `include/quic/` 四个头，而没有 `uvcpp_quic_ngtcp2.h`）。所以在**发布包**
+# 上这些片段不会"因为头不在"而消失，只会**真编不过**：类被宏摘掉了，报的是未声明
+# 类型。真红还是假红都要登记，登记了才判得成"这个模块没编"。
+#
+# 顺带记一笔：`UVCPP_QUIC_ENABLE` 只可能由 `UVCPP_ENABLE_QUIC` 而来，而后者
+# **默认 OFF** —— 也就是说"没登记的包"恰好是最常见的那个包，这条记录也就恰好
+# 一直在承重，不是一道只在边角配置上才生效的防线。
 MODULE_REQ = {
     "web/": "UVCPP_WEB_ENABLE",
     "webapp/": "UVCPP_WEBAPP_ENABLE",
     "ssl/": "UVCPP_OPENSSL_ENABLE",
     "http2/": "UVCPP_NGHTTP2_ENABLE",
     "wsdl/": "UVCPP_WSDL_ENABLE",
+    "quic/": "UVCPP_QUIC_ENABLE",
 }
 
 CONFIG_REL = os.path.join("include", "uvcpp", "uvcpp_config.h")

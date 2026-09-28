@@ -25,6 +25,25 @@
                                             是表自己坏了。** 这条是把坑留成记录：
                                             有没有牙不能只看"格数非 0"，得看抓住的
                                             是不是**期望的那一格**
+  M8 `CMAKE_CITE_RE` 改成恒不匹配（= 根 `CMakeLists.txt` 这类引用整个不认识）
+                                         -> S10 的 `[胀]` 退化回 `[记]`（rc 0），抓 1 格。
+                                            **抓的正是期望的那一格** —— S10 的文档里
+                                            另引了一条普通 `src/` 引用，所以这棵树
+                                            不会先撞上"反空转"那条红（第一版没有那条
+                                            引用，变异后红的是"一条引用都没扫到"，
+                                            一样红，但**指错了地方**）
+  M9 把 `txt` 从简写扩展名表 `SHORTHAND_EXTS` 里拿掉
+                                         -> S11 在不带 `--update` 的那一趟退回"不红"，
+                                            抓 1 格。**这条证明 `txt` 那一格真的是
+                                            判据 6 在管**，不是"顺手写进表里"
+  M10 `SCRIPT_GLOBS = ()`（非 md 的扫描范围清空）
+                                         -> 本表**抓 0 格**，如实记：表里没有任何一格
+                                            的引用落在 `.py`/`.yml` 上，所以这一格
+                                            今天**没有场景**。它的证据在真仓库那一侧、
+                                            是**可数的**：引用 1030 → 1014 条，
+                                            也就是**16 条**来自非 md 扫描（`另扫 N 个
+                                            非 md 文件` 那行会跟着掉到 0）。
+                                            别把这句读成"它被验过了"
 
 场景（每个都在临时目录里现造，不碰真仓库）：
 
@@ -39,12 +58,28 @@
   S8  区间原文在下面另有**两份**拷贝，自己又被改了一行
                                              -> 期望：`[歧]` + 红，且**不写锁**
   S9  S8 加 `--force`                        -> 期望：`[歧]` + 不红，且**写锁**
+  S10 根 `CMakeLists.txt` 的被引区间内部插 1 行
+                                             -> 期望：`[胀]` + 红，且**不写锁**
+  S11 文档里写一条**裸** `.txt:行号` 简写    -> 期望：带 `--update` 那趟**不红**
+                                                （判据 6 不碰锁），不带 `--update`
+                                                那趟**必须红**
+
+**场景元组**是 `(名字, 基准 src, 基准 doc, 变异, 期望类别, 期望红, [额外参数],
+[不带 `--update` 的红], [基准 cmake])` —— 后三个位置都可以不写，`None` 与"不写"同义。
+
+**表头四列说的都是带 `--update` 的那一趟**（`rc` / `报告里的类` / `锁被改写?`），
+`无 --update` 那一列只在场景在第 8 位写了期望时才跑，取值 `红`/`不红`/`—`（没跑）。
+
+**为什么非要有"不带 `--update`"那一趟**：判据 1/2/6 的红只往 `failures` 里垫一条，
+而 `--update` 走的是"刷新锁"那条路并**直接 return**，退出码根本不看 `failures` ——
+也就是说把这几种判据整条拆掉，只跑 `--update` 的格照样全绿。第 8 位就是给这种
+"`--update` 看不见的判据"留的（S11 是唯一用它的格）。
 
 **已知边界（别把它读成"全覆盖"）**：S1/S4 那条判据靠"尾部锚点在 ±400 行内
-唯一"才咬得动。真仓库 860 条锁目实测（`check_doc_lines.py` 文件头也是这几个数；
+唯一"才咬得动。真仓库 929 条锁目实测（`check_doc_lines.py` 文件头也是这几个数；
 重测 `tests/tools/doc_line_anchor_stats.py`）：两个尾部锚点里**至少一个**唯一的
-778 条（90.5%）、一个都不唯一的 82 条（9.5%）。
-那 9.5% 会走 S5 那一格：`[刷]` + 一行 `[记] 判不了 N 条`。**"判不了"必须自己
+845 条（91.0%）、一个都不唯一的 84 条（9.0%）。
+那 9.0% 会走 S5 那一格：`[刷]` + 一行 `[记] 判不了 N 条`。**"判不了"必须自己
 报数**，否则它和"判过了"在日志里长得一模一样。
 
 用法：
@@ -99,8 +134,29 @@ void beta(void) {
 // epilogue
 """
 
+# S10 用：根 `CMakeLists.txt` 的正文，被引用的是 `:3-5` 那三行。内容刻意各不相同，
+# 否则尾部锚点在文件里不唯一，`[胀]` 那一格会退化成"判不了"（S5 就是这个几何）。
+BASE_CMAKE = """\
+# prologue
+add_definitions(-DONE)
+  set(OPT_ALPHA ON)
+  set(OPT_BETA  ON)
+  set(OPT_GAMMA ON)
+# epilogue
+"""
 
-def write_tree(root, src, doc):
+# 场景文档里那个"被引的根文件名"是**拼**出来的，不写字面量。原因：本文件躺在
+# `tests/tools/*.py` 里，正是 `SCRIPT_GLOBS` 的扫描范围内 —— 把根文件名连同行号
+# 写死在这个源文件里，门禁会把夹具里这一句当成对**真仓库根文件第 3-5 行**的引用，
+# 于是锁里多出一条假条目；以后谁动根文件那三行，红的是这个测试夹具。
+# （改这里第一版就是字面量，门禁当场红给 `scenes.py 第 264 行的引用，锁文件里没有
+# 这一条`。夹具不是文档引用，别让它进锁 —— 拿拼接绕开扫描，而不是把这个文件从
+# 扫描范围里摘出去：摘出去会把它以后真写的引用一起藏掉。同理，本文件里凡是
+# **提到**根文件行号的地方都写成 `CMakeLists.txt:<行号>` 那个样子，不写具体数字。）
+CMAKE_NAME = "CMake" + "Lists" + ".txt"
+
+
+def write_tree(root, src, doc, cmake=None):
     os.makedirs(os.path.join(root, "src", "m"), exist_ok=True)
     os.makedirs(os.path.join(root, "doc"), exist_ok=True)
     # 锁文件写在 `<root>/tests/tools/` 下 —— 目录不在的话 `--update` 会在
@@ -112,6 +168,12 @@ def write_tree(root, src, doc):
     with open(os.path.join(root, "doc", "t.md"), "w",
               encoding="utf-8", newline="\n") as f:
         f.write(doc)
+    # 只有 S10/S11 需要根 `CMakeLists.txt`（那两格才引用它）。不写的时候连文件都
+    # 不建 —— 免得别的格平白多出一个可被解析的目标，把期望搅浑。
+    if cmake is not None:
+        with open(os.path.join(root, "CMakeLists.txt"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write(cmake)
 
 
 def run_tool(tool, root, args):
@@ -193,8 +255,33 @@ def dup_two_copies(src, doc):
     return "".join(lines), doc
 
 
+def add_txt_shorthand(src, doc):
+    """S11：文档里写一条**裸** `.txt:行号` 简写（撇开文件名只剩扩展名）。"""
+    return src, doc + "\n另见 `.txt:1680` 那一行。\n"
+
+
+def grow_cmake_inside(src, doc):
+    """S10：根 `CMakeLists.txt` 的被引区间**内部**插 1 行（老末行下移 1 行）。
+
+    这条形状专门证"`CMakeLists.txt:行号` 这一类真的走完了全套"：解析成根那份文件、
+    进锁、尾部锚点定位得到 `k=+1` ⇒ `[胀]` + 红 + 不写锁。旧门禁（`CMakeLists.txt`
+    不在 `SRC_EXTS` 里）对这一格**一条判据都不判**，日志里连一行都不会出现。
+    """
+    lines = BASE_CMAKE.splitlines(True)
+    # 插在**第 4 行之前**（区间 3-5 内部），两个尾部锚点因此**一致地**后移 1 行。
+    # 插在倒数第二行与末行**之间**是另一格几何：那个位置只有末行锚点会动，另一个
+    # 留在原地 ⇒ 锚点互相矛盾 ⇒ 退化成 `[刷]` + "判不了"（不是 `[胀]`）。实测过，
+    # 所以这里的下标是 3 不是 4。
+    lines[3:3] = ["  set(OPT_DELTA ON)\n"]
+    return src, doc, "".join(lines)
+
+
 SCENES = [
-    # (名字, 基准 src, 基准 doc, 变异, 期望类别, 期望红?)
+    # (名字, 基准 src, 基准 doc, 变异, 期望类别, 期望红?,
+    #  [额外命令行参数], [只在**不带** `--update` 的那一趟要求的红/不红], [基准 cmake])
+    #
+    # 后三个位置都可以不写。第 8 位是给"`--update` 那条路看不见的判据"留的 ——
+    # 见 S11 那格与下面 `judge_red` 的用法说明。
     ("S0 基准（什么都不改）", BASE_SRC, BASE_DOC, None, "—", False),
     ("S1 区间内部插 2 行（末行唯一）", BASE_SRC, BASE_DOC,
      insert_inside, "[胀]", True),
@@ -213,6 +300,21 @@ SCENES = [
      dup_two_copies, "[歧]", True),
     ("S9 同上，带 --force", BASE_SRC, BASE_DOC, dup_two_copies,
      "[歧]", False, ["--force"]),
+    # S10：`--update` 那一趟就能判出来（`[胀]` 是报告里的类别）。
+    # 文档里**故意同时引一条普通源码**：只引 `CMakeLists.txt` 的话，一旦这一类引用
+    # 被拆掉，这棵树就一条引用都不剩 ⇒ 先撞上"反空转"那条红（"基准建锁就退了"），
+    # 报出来的原因是"扫描坏了"而不是"`[胀]` 不判了" —— 一样是红，但**指错了地方**。
+    # 有了这条 `src/` 引用，变异体 M8 的红才落在 `[胀]` 上。（实测过，见文件头 M8。）
+    ("S10 CMakeLists 被引区间内部插 1 行", BASE_SRC,
+     "# 测试文档\n\n见 src/m/f.cpp:2-6，另见 " + CMAKE_NAME + ":3-5。\n",
+     grow_cmake_inside, "[胀]", True, None, None, BASE_CMAKE),
+    # S11：**判据 6 在 `--update` 那一趟不改退出码** —— 它只往 `failures` 里垫一条，
+    # 而 `--update` 分支走的是"刷新锁"那条路（`shorthands` 压根不进 `cites`，锁也
+    # 不受影响）。所以这一格的`--update`期望是**不红**，真正的判决在不带 `--update`
+    # 的那一趟（第 8 位 `judge_red=True`）。写清楚是因为：只跑 `--update` 的话，
+    # 判据 6 整个被拆掉这一格照样全绿 —— 那就是"没判"伪装成"判过了"。
+    ("S11 裸 `.txt:行号` 简写", BASE_SRC, BASE_DOC,
+     add_txt_shorthand, "—", False, None, True, BASE_CMAKE),
 ]
 
 # 这串必须与工具**真正印出来**的标签逐字一致：原来这里是 `[歧义]`，而工具印的
@@ -231,17 +333,20 @@ def main():
     args = ap.parse_args()
 
     print("被测门禁: %s" % args.tool)
-    print("%-32s %-4s %-10s %-12s %s"
-          % ("场景", "rc", "报告里的类", "锁被改写?", "判定"))
-    print("-" * 88)
+    print("%-32s %-4s %-10s %-11s %-10s %s"
+          % ("场景", "rc", "报告里的类", "锁被改写?", "无 --update", "判定"))
+    print("-" * 96)
     bad = 0
     for scene in SCENES:
         # 第 7 个元素（可选）是这次 `--update` 的额外参数，比如 `--force`。
         name, src, doc, mut, want, want_red = scene[:6]
-        extra = list(scene[6]) if len(scene) > 6 else []
+        # `None` 与"不写"同义 —— 后三个位置都可以显式占位写 `None`。
+        extra = list(scene[6]) if len(scene) > 6 and scene[6] else []
+        judge_red = scene[7] if len(scene) > 7 else None
+        cmake = scene[8] if len(scene) > 8 else None
         tmp = tempfile.mkdtemp(prefix="docline_scene_")
         try:
-            write_tree(tmp, src, doc)
+            write_tree(tmp, src, doc, cmake)
             rc0, out0 = run_tool(args.tool, tmp, ["--update"])
             if rc0 != 0:
                 print("%-32s 基准建锁就退了 %d\n%s" % (name, rc0, out0))
@@ -249,8 +354,12 @@ def main():
                 continue
             before = lock_bytes(tmp)
             if mut:
-                s2, d2 = mut(src, doc)
-                write_tree(tmp, s2, d2)
+                r = mut(src, doc)
+                # 老变异只返回两份文本；S10 那份要**连 `CMakeLists.txt` 一起改**
+                # （`[胀]` 的前提就是被引内容本身动了），所以这里接受三份。
+                s2, d2 = r[0], r[1]
+                cm2 = r[2] if len(r) > 2 else cmake
+                write_tree(tmp, s2, d2, cm2)
             rc, out = run_tool(args.tool, tmp, ["--update"] + extra)
             after = lock_bytes(tmp)
             got = "+".join(marks_in(out)) or "—"
@@ -264,18 +373,36 @@ def main():
             else:
                 cls_ok = all(w in out for w in want.split("+"))
             ok = (rc != 0) == want_red and cls_ok
+            # 第二趟：同一棵树、不带 `--update`。只有声明了 `judge_red` 的格才跑。
+            # 为什么非要有这一趟：判据 1/2/6 的红只往 `failures` 里垫一条，而
+            # `--update` 走的是"刷新锁"那条路并**直接 return**，退出码不看 `failures`
+            # —— 也就是说把这些判据整条拆掉，只跑 `--update` 的格照样全绿。
+            # 这一趟把"判据本身还在不在"变成可证伪的。
+            if judge_red is not None:
+                rc2, out2 = run_tool(args.tool, tmp, [])
+                ok = ok and ((rc2 != 0) == judge_red)
+            else:
+                rc2 = None
             if not ok:
                 bad += 1
-            print("%-32s %-4d %-10s %-12s %s"
-                  % (name, rc, got, rewrote, "OK" if ok else "**不符（期望 %s/%s）**"
-                     % (want, "红" if want_red else "不红")))
+            print("%-32s %-4d %-10s %-11s %-10s %s"
+                  % (name, rc, got, rewrote,
+                     "—" if rc2 is None else ("红" if rc2 != 0 else "不红"),
+                     "OK" if ok else "**不符（期望 %s/%s%s）**"
+                     % (want, "红" if want_red else "不红",
+                        "" if judge_red is None
+                        else "，无 --update 要%s" % ("红" if judge_red else "不红"))))
             if not ok:
                 for ln in out.splitlines():
                     if any(m in ln for m in MARKS):
                         print("      | %s" % ln.strip())
+                if rc2 is not None:
+                    for ln in out2.splitlines():
+                        if "[红]" in ln:
+                            print("      | (无 --update) %s" % ln.strip())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-    print("-" * 88)
+    print("-" * 96)
     print("与期望不符 %d 格" % bad)
     return 1 if bad else 0
 

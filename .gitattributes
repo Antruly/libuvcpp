@@ -1,0 +1,35 @@
+# 行尾：仓库里一律存 LF，检出时按平台给本机行尾。
+#
+# 这份树最初在 Windows 上开发，于是工作树里的文件是 CRLF、而索引里是 LF。
+# git 因此长期把 ~237 个文件报成"已修改"，真正有内容变化的只有 26 个 ——
+# 这种噪声最坏的后果不是看不清楚，是**训练人用 `git add -A`**：那一次会把
+# 全仓存储的行尾整体改写，造出一个十几万行的噪声提交，把真实改动埋掉。
+#
+# 实测（2026-09-29）索引里含 CR 的文件数为 **0** —— 也就是说这份
+# `.gitattributes` 不改写任何已存储的字节，它只是让"工作树 CRLF / 索引 LF"
+# 不再算作差异（内容哈希那一侧本来就按通用换行读，不受影响）。
+#
+# 加这条之后，工作树里那些纯 CRLF 差异的文件从 `git status` 里消失；
+# 剩下的每一条都对应一次真实的改动。**新文件写 LF**（源码带 BOM，文档不带，
+# 见 CONTRIBUTING.md），别再让工作树重新长出 CRLF 来。
+* text=auto
+
+# 二进制：显式声明，别让 `text=auto` 的内容嗅探有出错的机会。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.lib binary
+*.dll binary
+*.exe binary
+*.obj binary
+*.pdb binary
+*.a binary
+
+# 锁文件是脚本逐行读写的产物，Windows 上生成时行尾会是 CRLF。钉成 LF，
+# 让"生成它的机器"不影响存进去的字节。
+tests/tools/doc_line_refs.lock text eol=lf

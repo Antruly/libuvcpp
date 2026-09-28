@@ -15,6 +15,7 @@ This document defines the rules and best practices for maintaining CI in this pr
 | `web` | Ubuntu, macOS, Windows | shared, web=ON | HTTP/WebSocket module |
 | `ssl` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON | SSL/TLS module |
 | `h2` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON, nghttp2=ON | HTTP/2 coverage; the only job asserting `NGHTTP2=ON` |
+| `quic` | **Ubuntu only** | shared, net=ON, **web=OFF**, OpenSSL=ON (3.5 built in-job), quic=ON | QUIC skeleton; the only job asserting `UVCPP_ENABLE_QUIC=ON`, and the only one covering "SSL on + web off" |
 | `full` | Ubuntu, macOS | shared, web=ON, OpenSSL=ON, zlib=ON | All features enabled |
 | `mingw64` | Windows (MSYS2 MinGW64) | shared, self-contained DLL, **+ Debug artifact** | MinGW release shape + import-table assertion |
 | `config-contract` | Ubuntu, Windows | package → install → consumer, **+ Debug artifact** | The `UVCPP_*_ENABLE` macro contract (see §5) |
@@ -61,6 +62,10 @@ are NOT auto-copied.
 | `web` | ✓ | ✓ | ✓ | — | — |
 | `ssl` | ✓ | ✓ | ✓ | ✓ | — |
 | `h2` | ✓ | ✓ | ✓ | ✓ | — |
+
+**ngtcp2 has no column either, and for the same reason** — it is linked static
+(`ngtcp2_static` + `ngtcp2_crypto_ossl_static`), and the `quic` job is Ubuntu-only, so it never
+appears in this Windows table at all.
 
 **nghttp2 has no DLL column value on purpose.** It is the one FetchContent dependency
 linked **static** (`nghttp2_static` + `NGHTTP2_STATICLIB`, see `CMakeLists.txt`), so
@@ -132,7 +137,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:814`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:1680`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -188,6 +193,49 @@ and they should not be "simplified" away:
    **returns 0** — so "not tested" and "passed" are indistinguishable in a ctest
    summary. Note also that `ctest` reports `100% tests passed` just as happily when
    the tests were never registered.
+
+### The `quic` job
+
+`quic` mirrors the `h2` gates for the same reason (`1.4.1`), and adds three problems of its own:
+
+- **It builds OpenSSL 3.5.0 from source inside the job** — the expensive step, hence
+  `timeout-minutes: 90`. It has to: the module cannot be configured against a TLS library
+  without the QUIC API, and no runner has one as a package. Ubuntu 24.04 ships 3.0.13, which
+  has neither `SSL_provide_quic_data` nor `SSL_set_quic_tls_cbs`. Two traps in that step are
+  worth naming, because both were **measured** on a real 3.5 build rather than guessed: the
+  exported `SSL_set_quic_tls_cbs` carries a **version suffix**
+  (`SSL_set_quic_tls_cbs@@OPENSSL_3.5.0`), so an end-anchored `nm | grep` matches nothing and
+  fails the job for no reason; and the installed `bin/openssl` has **no RUNPATH**, so `ld.so`
+  picks up the runner's 3.0.13 first and the binary dies with ``version `OPENSSL_3.4.0' not
+  found`` — it needs `LD_LIBRARY_PATH`.
+- Its configure line is the **only** place in CI that turns SSL on with the web module
+  **off** (`-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF`). That combination used to
+  compile `src/ssl/` without ever defining `UVCPP_SSL_LIBS` and then fail at **link** time;
+  `1.4.1` moved the OpenSSL discovery block out of `if(UVCPP_BUILD_WEB)` to fix it, and this
+  job is the only evidence that the fix holds.
+- The gates are the same three, for the same reason: `UVCPP_ENABLE_QUIC:BOOL=ON` in
+  `CMakeCache.txt`, both `ngtcp2 integrated` and `Including quic module in build` in the
+  configure log, and `ctest -N` really listing `test_quic_api_func`. The cache read alone is
+  stale by construction (the downgrade is a plain `set()`, not a cache write), and the
+  test-registration gate matters more here than anywhere else: with QUIC off
+  `quic_api_func.cpp` compiles its `#else` branch, whose `main()` prints an error and
+  **returns 2** — so a test that failed to register is a **failure**, not a silent pass.
+
+- A second, **configure-only** step turns on `nghttp2` and `quic` in one tree. That is the only
+  place either job covers the combination: `h2` leaves QUIC off and this job's main configure
+  leaves the web module off. It is a real failure mode, not a hypothetical — ngtcp2 and nghttp2
+  each create an unconditional `add_custom_target(check)`, so whichever is added second aborts
+  the configure. The root `CMakeLists.txt` works around it by copying the ngtcp2 sources into
+  the build tree and removing that one line, and this step is what keeps that workaround from
+  rotting silently. It is deliberately configure-only: what breaks is a configure-time line, and
+  building a transport-less skeleton afterwards would prove nothing extra.
+
+**No macOS or Windows leg this version.** Each would need its own QUIC-capable OpenSSL built
+from source in-job, and what is under test is a skeleton that talks to no socket — two more
+expensive builds would buy no coverage the ubuntu leg does not already have. The gap is
+written down here rather than left implicit. The prebuilt packages ship with
+`UVCPP_QUIC_ENABLE 0` regardless, because `release.yml` does not enable QUIC either (that
+would need a QUIC-capable OpenSSL on all six legs).
 
 ---
 

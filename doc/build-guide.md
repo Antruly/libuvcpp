@@ -72,6 +72,7 @@ cause — see [`RELEASE.md`](../RELEASE.md).
 | `UVCPP_ENABLE_ZLIB` | `OFF` | zlib | — |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | OpenSSL | — |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | nghttp2 + OpenSSL + web | OpenSSL off, or web off |
+| `UVCPP_ENABLE_QUIC` | `OFF` | ngtcp2 + OpenSSL ≥ 3.2 **with the QUIC API** + net | OpenSSL off, net off, or OpenSSL without the QUIC API |
 | `UVCPP_ENABLE_WSDL` | `OFF` | pugixml + webapp | webapp off |
 
 The **target** used for linking is chosen by testing `TARGET uv_a` / `TARGET uv`, not by assuming
@@ -85,6 +86,22 @@ direction: it is *force-disabled* with a message when OpenSSL is off, because HT
 TLS + ALPN only — there is no cleartext h2 (h2c) support. `UVCPP_ENABLE_WSDL` is
 force-disabled the same way when `UVCPP_BUILD_WEBAPP=OFF`: it is built on top of the framework,
 so "on but unbuildable" is a worse configuration than "off".
+
+`UVCPP_ENABLE_QUIC` follows the same rule with **three** independent prerequisites: OpenSSL
+off, net off, or an OpenSSL that has no QUIC API (anything below 3.2, and the 3.0.13 that
+Ubuntu 24.04 ships). Each one gets its own warning that says how to fix it — the third one
+also tells you that the fix is `-DOPENSSL_ROOT_DIR=<a 3.2+ prefix>`, because a warning that
+only says "not supported" is a warning nobody can act on. There is no cleartext QUIC: ALPN is
+a TLS extension, so "no OpenSSL" and "no QUIC" are the same statement.
+
+**The QUIC transport is a net-layer protocol, not a web-layer one** — which is why it is
+governed by `UVCPP_BUILD_NET` rather than `UVCPP_BUILD_WEB`, and why this build needed the
+OpenSSL discovery block moved out of `if(UVCPP_BUILD_WEB)`. Before that move,
+`-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF` compiled `src/ssl/` but never defined
+`UVCPP_SSL_LIBS`, and an empty `UVCPP_SSL_LIBS` expands to a **silent no-op**
+`target_link_libraries()` — the symptom was a link failure, not a configure error, and it took
+the net layer's own TLS client path down with it. The `quic` CI job is the only leg that
+covers "SSL on + web off".
 
 nghttp2 is linked **PRIVATE** and statically. It appears only in `src/http2/*.cpp` behind a
 pimpl, never in a public header, so it adds no DLL dependency to anything you build. zlib, by
@@ -143,6 +160,7 @@ toggling a feature. All are `CACHE STRING`:
 | `ZLIB_VERSION` | `v1.3.1` |
 | `OPENSSL_VERSION` | `openssl-3.4.0` |
 | `NGHTTP2_VERSION` | `v1.70.0` |
+| `NGTCP2_VERSION` | `v1.25.0` |
 | `PUGIXML_VERSION` | `v1.14` |
 | `LIBUV_VERSION` | `v1.51.0` |
 | `NLOHMANN_JSON_VERSION` | `v3.11.3` |
@@ -193,6 +211,13 @@ cmake --build build --config Release --parallel
 repository. Populate `_local_deps/` with checkouts of those three projects first, or skip the
 preset and pass the flags you want to a plain `cmake -S . -B <tree>`.
 
+**`--preset quic` fails on a fresh clone for a stronger reason**, and it is worth knowing
+before you try it: besides the two `_local_deps/` source checkouts it needs a **built** OpenSSL
+≥ 3.2 at `_local_deps/openssl-3.5-inst`, which is the expensive part (~5 minutes with a
+parallel make). [`doc/quic-guide.md`](quic-guide.md) has the configure-and-build recipe. The
+preset exists so that once that prefix is in place the whole thing is one command; it is not a
+one-command setup.
+
 Neither preset sets `CMAKE_BUILD_TYPE` or a generator, so on Linux `cmake --preset default`
 gives you an unoptimised single-config build.
 
@@ -233,7 +258,8 @@ build a single target instead of the default one — `cmake --build build --targ
 the copy does not happen, and your test runs against the **previous** library. Follow such a
 build with `cmake --build build --target copy_test_dlls`, or just build the default target.
 
-nghttp2 is deliberately absent from that copy list, because it is linked statically.
+nghttp2 is deliberately absent from that copy list, because it is linked statically. ngtcp2
+(and its OpenSSL binding) are absent for the same reason.
 
 ## Platform dependencies
 

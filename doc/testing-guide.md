@@ -30,6 +30,7 @@ keep in sync: the file name decides.
 | `web_ssl_app_*.cpp` | `UVCPP_BUILD_WEBAPP` + OpenSSL | `EXCLUDE REGEX "web_ssl_app_.*\.cpp$"` |
 | `web_ssl_*.cpp` | `UVCPP_ENABLE_OPENSSL` | `EXCLUDE REGEX "web_ssl_.*\.cpp$"` |
 | any file with `h2_` in it | `UVCPP_ENABLE_NGHTTP2` | `EXCLUDE REGEX "/[^/]*h2_[^/]*\.cpp$"` |
+| any file with `quic` in it | `UVCPP_ENABLE_QUIC` | `EXCLUDE REGEX "/[^/]*quic[^/]*\.cpp$"` |
 
 Each executable is named `test_<file-stem>`, with every character outside `[A-Za-z0-9_]`
 replaced by `_`. So `web_ssl_app_ws_func.cpp` becomes `test_web_ssl_app_ws_func`, and that is
@@ -53,8 +54,8 @@ the test excluded, and check the test is genuinely absent from the list.
 0 from a stub `main()` is indistinguishable from a pass in ctest output, and the exclusion filter
 is what actually removes the file.
 
-Two files still carry a fallback `main()`, and both are examples of the trap rather than of the
-rule:
+Three files still carry a fallback `main()`. The first two are examples of the trap rather than
+of the rule:
 
 ```cpp
 // doc-snippet: fragment — quoted from the middle of a file; the #else half is the point
@@ -79,11 +80,47 @@ The second one does not even print anything. Both are dead code as long as the C
 works, and both turn into a silent false pass the moment it stops working. Do not copy this
 pattern into a new test; if a file must not be built, exclude it in CMake.
 
+The third file is `tests/functional/quic_api_func.cpp`, and its `#else` half is the shape to
+copy instead — it prints an error and **returns 2**:
+
+```cpp
+// doc-snippet: fragment — the `#else` half only; the load-bearing part above it is a 40-line
+// rationale for *this* branch, which is not what this section is about
+// tests/functional/quic_api_func.cpp
+#else  // UVCPP_QUIC_ENABLE
+int main() {
+  std::cerr << "[quic_api] UVCPP_QUIC_ENABLE=0 —— 这个测试文件不该被编译进来"
+            << std::endl;
+  return 2;
+}
+#endif
+```
+
+That is the difference in one line: if the CMake filter stops working, the two files above go
+green while testing nothing, and this one goes **red**. The `1.4.1` CI job for QUIC leans on
+exactly this (`doc/ci-guide.md` §The `quic` job) — which is also why the file must be excluded
+rather than merely skipped, since a non-zero exit is only usable if a mis-registered test can
+actually reach it.
+
 To confirm a test is genuinely running rather than absent: run it directly and look for its
-output. 88 of the 89 functional tests print a `[<name>]`-prefixed banner; the closing line is
-**not** uniform — 59 print an `ALL PASS` / `FAIL` summary, and the rest print something else (a
+output. 107 of the 108 functional tests print a `[<name>]`-prefixed banner — the odd one out is
+`web_app_multiloop_func.cpp`, which prints only per-case lines. The closing line is **not**
+uniform either: 73 print an `ALL PASS` / `FAIL` summary, and the rest print something else (a
 `done success=` line, or only per-case `-> PASS` lines). There is no single convention to grep
 for, so read the executable's actual output rather than pattern-matching it.
+
+Both counts are measurements, not estimates, and they rot — **re-measure them before you quote
+them**. They came from
+
+```bash
+grep -lE '"\[[a-z0-9_]+' tests/functional/*.cpp | wc -l   # banner: 107
+grep -lE 'ALL PASS'      tests/functional/*.cpp | wc -l   # summary: 73
+ls tests/functional/*.cpp | wc -l                         # total: 108
+```
+
+The earlier form of this paragraph said "88 of the 89" and "59" — those numbers had drifted for
+several releases because nobody re-ran the command. A count in prose with no command next to it
+is a count that will be wrong; put the command in with it.
 
 ### Exit codes
 

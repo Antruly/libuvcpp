@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.4.0-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.4.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.4.0` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.4.1-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -32,6 +32,8 @@ application
 │ http2        │  ← h2 session/connection layers, nghttp2 glue (`UVCPP_ENABLE_NGHTTP2=ON`)
 ├────────────┤
 │ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL wrapper)
+├────────────┤
+│ quic         │  ← uvcpp_quic_client/server/connection, ngtcp2 glue (net layer, `UVCPP_ENABLE_QUIC=ON`)
 ├────────────┤
 │ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
 ├────────────┤
@@ -114,6 +116,12 @@ in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
   on the SSL context, `uvcpp_http_client` needs `set_http2_enabled(true)` (it builds the
   per-connection ALPN list itself), and `uvcpp_web_app` wires all of it for you. See
   [§13 of the webapp guide](doc/webapp-guide.md#13-http2).
+- `UVCPP_ENABLE_QUIC=ON` — QUIC transport (RFC 9000) over [ngtcp2](https://github.com/ngtcp2/ngtcp2),
+  linked static, in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON` **and** an
+  **OpenSSL ≥ 3.2 with the QUIC API**, plus `UVCPP_BUILD_NET=ON` (force-disabled without
+  any of them — there is no cleartext QUIC). **1.4.1 ships the skeleton only**: the
+  transport methods return `UV_ENOSYS`, there is no handshake, no stream data, and no
+  HTTP/3. See [doc/quic-guide.md](doc/quic-guide.md).
 
 ### Web app framework (`src/webapp/`) — `UVCPP_BUILD_WEBAPP=ON`
 
@@ -196,6 +204,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | webapp (support types) | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | The seven types under the framework: connection identity, web utilities, MIME, multipart, file transfer, per-request context, console logging |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS context and per-connection wrapper — the shortest header set and the easiest to get wrong |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer; for progress and trade-offs see [doc/http2-status.md](doc/http2-status.md) |
+| quic | [doc/quic-guide.md](doc/quic-guide.md) | The QUIC transport skeleton: the build contract, why it needs an OpenSSL ≥ 3.2, the API shape, and an honest list of what does not work yet |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
@@ -282,6 +291,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 ships the skeleton only: no handshake, no streams, no HTTP/3.** See [`doc/quic-guide.md`](doc/quic-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | Enable the WSDL/SOAP module (XML via pugixml, linked static). Requires `UVCPP_BUILD_WEBAPP=ON`. See [`doc/wsdl-guide.md`](doc/wsdl-guide.md) (the document half) and [`doc/soap-guide.md`](doc/soap-guide.md) (the runtime half) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | Fetch and build libuv from source via `FetchContent` |
@@ -292,7 +302,10 @@ cmake --build . --config Release --parallel
 **Important**: `UVCPP_ENABLE_ZLIB` and `UVCPP_ENABLE_OPENSSL` are NOT auto-enabled
 when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is
 **force-disabled** when `UVCPP_ENABLE_OPENSSL=OFF` (it warns rather than leaving a
-configuration that cannot work) — HTTP/2 here has no cleartext mode. `UVCPP_ENABLE_WSDL`
+configuration that cannot work) — HTTP/2 here has no cleartext mode. `UVCPP_ENABLE_QUIC`
+is force-disabled the same way for **three** separate missing prerequisites
+(`UVCPP_ENABLE_OPENSSL=OFF`, `UVCPP_BUILD_NET=OFF`, or an OpenSSL that has no QUIC API —
+anything below 3.2), each with its own warning that says how to fix it. `UVCPP_ENABLE_WSDL`
 is force-disabled the same way when `UVCPP_BUILD_WEBAPP=OFF`: the module is built on top of
 the framework.
 
@@ -556,6 +569,7 @@ libuvcpp/
 │   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
 │   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
 │   ├── http2/     # HTTP/2 session/connection layers, nghttp2 glue, ALPN (uvcpp_h2_nghttp2.h is private)
+│   ├── quic/      # QUIC transport skeleton, ngtcp2 glue (uvcpp_quic_ngtcp2.h is private)
 │   └── ssl/       # SSL/TLS context and connection wrapper
 ├── tests/
 │   ├── unit/      # Unit tests
@@ -574,6 +588,7 @@ libuvcpp/
 │   ├── json-reflect-guide.md # Field-table reflection: both directions, read semantics, limits
 │   ├── lowlevel-guide.md  # Event loop, handles and requests (the foundation)
 │   ├── net-guide.md       # TCP/UDP clients and servers
+│   ├── quic-guide.md      # QUIC transport skeleton: build contract, API shape, what is not done
 │   ├── release-process.md # How a release is cut, and what it does not check
 │   ├── soap-guide.md      # SOAP envelopes, fault shapes, dispatch from the binding
 │   ├── ssl-guide.md       # TLS context and per-connection wrapper
@@ -606,14 +621,40 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.4.0** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.4.1** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0` and `v1.4.0`
 are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development lines
-accumulated through `v1.4.0` is below, by theme, with the version each change first
-appeared in;
+accumulated through `v1.4.0`, plus what the `1.4.x` line has added since, is below, by
+theme, with the version each change first appeared in;
 release notes for the tagged versions are in [RELEASE.md](./RELEASE.md). Several of the
 fixes came from issue reports by the project's first external contributor,
 [@sercebr](https://github.com/sercebr).
+
+### QUIC transport (net layer)
+
+- [ngtcp2](https://github.com/ngtcp2/ngtcp2) is wired into the build behind
+  `UVCPP_ENABLE_QUIC` (**off by default**), statically linked, with the same FetchContent
+  + private-header pattern nghttp2 uses for HTTP/2 (`1.4.1`)
+- **1.4.1 ships the skeleton, not the transport**: `connect()`, `listen()`,
+  `open_stream()` and friends return `UV_ENOSYS`, and their completion callbacks are never
+  invoked — a contract pinned by `tests/functional/quic_api_func.cpp` rather than promised
+  in prose, so the day it is implemented the test goes red instead of the claim quietly
+  going stale (`1.4.1`)
+- Turning it on requires `UVCPP_ENABLE_OPENSSL=ON` **and** an OpenSSL ≥ 3.2 with the QUIC
+  API (`SSL_set_quic_tls_cbs`) **and** `UVCPP_BUILD_NET=ON`; without any one of the three
+  the switch is force-disabled with a warning that says how to fix it, instead of leaving
+  a configuration that configures but cannot link (`1.4.1`)
+- The parts that are real are the parts verifiable today: the build contract, `bind()`
+  argument validation (`uv_inet_pton` — the address is rejected up front, not at
+  `listen()`), the `UVCPP_QUIC_ENABLE` config macro, and three backend probes that
+  genuinely call into `libngtcp2` and `ngtcp2_crypto_ossl_static` (`1.4.1`)
+- Fixes a pre-existing defect it happened to need: the OpenSSL discovery block lived
+  *inside* `if(UVCPP_BUILD_WEB)`, so `-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF`
+  compiled `src/ssl/` but never defined `UVCPP_SSL_LIBS`, and an empty `UVCPP_SSL_LIBS`
+  expands to a **silent no-op** `target_link_libraries()` — the symptom was a link
+  failure, and it took the net layer's own TLS client path down with it (`1.4.1`)
+- No HTTP/3, no nghttp3, no handshake, no streams, no connection migration, no 0-RTT.
+  [`doc/quic-guide.md`](doc/quic-guide.md) lists what is missing (`1.4.1`)
 
 ### HTTP/2
 

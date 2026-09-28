@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.4.0-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.4.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
 
@@ -11,7 +11,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.4.0` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.4.1-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -32,6 +32,8 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 │ http2        │  ← h2 会话/连接层、nghttp2 胶水（`UVCPP_ENABLE_NGHTTP2=ON`）
 ├────────────┤
 │ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL 封装)
+├────────────┤
+│ quic         │  ← uvcpp_quic_client/server/connection、ngtcp2 胶水（net 层，`UVCPP_ENABLE_QUIC=ON`）
 ├────────────┤
 │ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
 ├────────────┤
@@ -114,6 +116,12 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
   只要 `set_http2_enabled(true)`（ALPN 名单由 `connect()` 每条连接现拼）；
   `uvcpp_web_app` 那两层都已经替你接好。详见
   [webapp 指南 §13](doc/webapp-guide.md#13-http2)。
+- `UVCPP_ENABLE_QUIC=ON` — QUIC 传输（RFC 9000），基于
+  [ngtcp2](https://github.com/ngtcp2/ngtcp2)（静态链入），在 **net 层**。需要
+  `UVCPP_ENABLE_OPENSSL=ON` **以及**一份**带 QUIC API 的 OpenSSL ≥ 3.2**，再加上
+  `UVCPP_BUILD_NET=ON`（三条缺一即强制关 —— 没有明文 QUIC 这回事）。**1.4.1 只交
+  骨架**：传输方法返回 `UV_ENOSYS`，没有握手、没有流数据、没有 HTTP/3。详见
+  [doc/quic-guide.md](doc/quic-guide.md)。
 
 ### Web 应用框架（`src/webapp/`）— `UVCPP_BUILD_WEBAPP=ON`
 
@@ -194,6 +202,7 @@ int main() {
 | webapp（支撑类型） | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | 框架底下那七个类型：连接身份、web 工具函数、MIME、multipart、文件下发、每请求上下文、控制台日志 |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS 上下文与每连接封装 —— 头文件最短、最容易写错的一层 |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法；实现进度与折衷另见 [doc/http2-status.md](doc/http2-status.md) |
+| quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输骨架：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出"还没做"的清单 |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
@@ -279,6 +288,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 只交骨架：没有握手、没有流、没有 HTTP/3。** 见 [`doc/quic-guide.md`](doc/quic-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md)（文档那一半）与 [`doc/soap-guide.md`](doc/soap-guide.md)（运行时那一半） |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
@@ -289,8 +299,11 @@ cmake --build . --config Release --parallel
 **注意**：开启 `UVCPP_BUILD_WEB=ON` 不会自动启用 `UVCPP_ENABLE_ZLIB` 或 `UVCPP_ENABLE_OPENSSL`。
 这些选项需要显式手动开启。`UVCPP_ENABLE_NGHTTP2` 在 `UVCPP_ENABLE_OPENSSL=OFF` 时
 **强制关闭**（给一条 warning，而不是留一个根本跑不起来的配置）—— 本库的 HTTP/2
-没有明文形态。`UVCPP_ENABLE_WSDL` 同理，在 `UVCPP_BUILD_WEBAPP=OFF` 时**强制关闭**
-（它建在 webapp 之上）。
+没有明文形态。`UVCPP_ENABLE_QUIC` 同理，而且它有**三个**各自独立的前置条件
+（`UVCPP_ENABLE_OPENSSL=OFF`、`UVCPP_BUILD_NET=OFF`、或者那份 OpenSSL 没有 QUIC API
+—— 3.2 以下都属于这一类），缺哪个就为哪个打一条说明**怎么修**的 warning。
+`UVCPP_ENABLE_WSDL` 同理，在 `UVCPP_BUILD_WEBAPP=OFF` 时**强制关闭**（它建在 webapp
+之上）。
 
 ---
 
@@ -543,6 +556,7 @@ libuvcpp/
 │   ├── web/       # HTTP 客户端/服务端, WebSocket 客户端/服务端, 帧解析器
 │   ├── webapp/    # Web 应用框架（路由、中间件、静态、上传、WS 客户端、日志）
 │   ├── http2/     # HTTP/2 会话/连接层、nghttp2 胶水、ALPN（uvcpp_h2_nghttp2.h 是私有头）
+│   ├── quic/      # QUIC 传输骨架、ngtcp2 胶水（uvcpp_quic_ngtcp2.h 是私有头，1.4.1 只有形状）
 │   └── ssl/       # SSL/TLS 上下文和连接封装
 ├── tests/
 │   ├── unit/      # 单元测试
@@ -561,6 +575,7 @@ libuvcpp/
 │   ├── json-reflect-guide.md # JSON 反射：一个宏标出字段表，两个方向共用
 │   ├── lowlevel-guide.md  # 事件循环、句柄与请求（地基）
 │   ├── net-guide.md       # TCP/UDP 客户端与服务端
+│   ├── quic-guide.md      # QUIC 传输骨架：构建契约、API 形状、以及没做的那一列
 │   ├── release-process.md # 发布怎么出，以及这条链**没有**检查什么
 │   ├── soap-guide.md      # SOAP 信封、Fault 形状、从 binding 推派发键
 │   ├── ssl-guide.md       # TLS 上下文与每连接封装
@@ -592,12 +607,38 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.4.0** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.4.1** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0` 五个 tag。下面是
-`1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部改动，按主题
-分组，括号里是它**首次出现**的那一档；已发布版本的说明在
+`1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部改动，外加
+`1.4.x` 这一条线此后新增的东西，按主题分组，括号里是它**首次出现**的那一档；
+已发布版本的说明在
 [RELEASE.md](./RELEASE.md)。其中若干条来自本仓第一位外部贡献者
 [@sercebr](https://github.com/sercebr) 报的 issue。
+
+### QUIC 传输（net 层）
+
+- 把 [ngtcp2](https://github.com/ngtcp2/ngtcp2) 接进构建系统，藏在
+  `UVCPP_ENABLE_QUIC` 后面（**默认关**），静态链入，走的是 nghttp2 给 HTTP/2 用的
+  同一套 FetchContent + 私有头模式（`1.4.1`）
+- **1.4.1 交的是骨架，不是传输**：`connect()`、`listen()`、`open_stream()` 这一批
+  返回 `UV_ENOSYS`，完成回调一次都不会被调 —— 这条契约由
+  `tests/functional/quic_api_func.cpp` 钉住，而不是靠散文承诺；哪天真实现了，是
+  **用例变红**，不是"框架写好了"这句话悄悄过期（`1.4.1`）
+- 打开它需要同时满足 `UVCPP_ENABLE_OPENSSL=ON`、一份带 QUIC API 的 OpenSSL ≥ 3.2
+  （`SSL_set_quic_tls_cbs`）、以及 `UVCPP_BUILD_NET=ON`；缺任何一条都**强制关闭**并
+  打一条说明怎么修的 warning，而不是留一个"能配置、链不上"的组合（`1.4.1`）
+- 真实现的部分就是今天能被验证的部分：构建契约、`bind()` 的参数校验
+  （`uv_inet_pton` 当场拒掉非法地址，而不是等到 `listen()`）、`UVCPP_QUIC_ENABLE`
+  配置宏，以及三个真调进 `libngtcp2` 与 `ngtcp2_crypto_ossl_static` 的后端探针
+  （`1.4.1`）
+- 顺带修了一个它正好撞上的既有缺陷：OpenSSL 的发现块原先**嵌在
+  `if(UVCPP_BUILD_WEB)` 里面**，于是
+  `-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF` 会把 `src/ssl/` 编进去、
+  却从不定义 `UVCPP_SSL_LIBS`；而空的 `UVCPP_SSL_LIBS` 展开出来是个**静默的空
+  操作** `target_link_libraries()` —— 症状是**链接失败**，而且把 net 层自己的
+  TLS 客户端路径一起带坏了（`1.4.1`）
+- 没有 HTTP/3、没接 nghttp3、没有握手、没有流、没有连接迁移、没有 0-RTT。
+  缺什么列在 [`doc/quic-guide.md`](doc/quic-guide.md) 里（`1.4.1`）
 
 ### HTTP/2
 

@@ -641,6 +641,182 @@ jobs:
           exit "$rc"
 
   # ---------------------------------------------------------------------------
+  # QUIC: net + OpenSSL >= 3.2 + ngtcp2, web OFF (Ubuntu only)
+  #
+  # 这一档和其他档有个根本区别：**它必须自己在 job 里编一份 OpenSSL**。
+  # 本模块的配置期预检要求那份 OpenSSL 带 QUIC API（`SSL_set_quic_tls_cbs`），
+  # 而 runner 上没有任何**包**能提供 —— ubuntu-latest 自带的 3.0.13 两个符号
+  # 都没有。所以这里从源码编 3.5.0（约 10 分钟，故 timeout-minutes: 90）。
+  #
+  # 它同时是**唯一**覆盖 "SSL 开 + web 关" 这个组合的档：`1.4.1` 把 OpenSSL 的
+  # 发现块从 `if(UVCPP_BUILD_WEB)` 里搬了出来，而在那之前这个组合会把
+  # `src/ssl/` 编进去却从不定义 `UVCPP_SSL_LIBS`，然后**链接失败**。
+  #
+  # 只有 ubuntu 一条腿：另两条腿各自都要在 job 里再编一份 QUIC-capable 的
+  # OpenSSL，而被测的东西是个不碰 socket 的骨架 —— 多两轮十几分钟的构建换不到
+  # ubuntu 腿没有的覆盖。这个缺口写在 doc/ci-guide.md 里，不留成隐含假设。
+  # ---------------------------------------------------------------------------
+  quic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev zlib1g-dev
+
+      - name: Build OpenSSL 3.5 from source (needs the QUIC API)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSL --retry 3 --retry-delay 5 -o openssl.tar.gz \
+            https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-3.5.0
+          mkdir -p openssl-src
+          tar xzf openssl.tar.gz -C openssl-src --strip-components=1
+          cd openssl-src
+          # `no-tests` 只是不编上游的测试套件 —— 与 QUIC API 无关，能省一大截时间。
+          ./Configure --prefix="$HOME/openssl-quic" --libdir=lib shared no-tests
+          make -j"$(nproc)"
+          make install_sw
+          # 装出来的 openssl 可执行档**没有** RUNPATH，NEEDED 只有 libssl.so.3 /
+          # libcrypto.so.3，ld.so 会先命中 runner 上那份 3.0.13，于是报
+          # "version `OPENSSL_3.4.0' not found" 并让这一步红掉 —— 而这份 OpenSSL
+          # 本身没问题。所以显式给它自己的 lib。
+          LD_LIBRARY_PATH="$HOME/openssl-quic/lib" "$HOME/openssl-quic/bin/openssl" version
+          # 自检：这份 OpenSSL 真的带 QUIC API。不查的话，下面配置期的
+          # "缺 QUIC API → 强制关闭" 会把整个 job 变成一次**静默的空转**。
+          #
+          # 匹配**不锚行尾**：这个符号是带版本后缀的（`SSL_set_quic_tls_cbs@@OPENSSL_3.5.0`），
+          # 锚了 `$` 就一个都匹配不上，job 会在配置期之前假红。另外要求它是**有定义的**
+          # 那一栏（`T`/`W`）—— `nm -D` 里未定义引用长成 `U SSL_set_quic_tls_cbs`，
+          # 只按名字匹配的话，一份"只有引用、没有实现"的 libssl 也能过。
+          nm -D "$HOME/openssl-quic/lib/libssl.so" | grep -qE ' [TW] SSL_set_quic_tls_cbs($|@)' || {
+            echo "::error title=quic-openssl::编出来的 libssl 没有 SSL_set_quic_tls_cbs —— 这份 OpenSSL 不对，后面的门禁全都会是空转"; exit 1; }
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          # 上一步那条注释同样适用：这份 openssl 没有 RUNPATH，得喂它自己的 lib。
+          # 另外 CMake 的 `check_symbol_exists` 只是**链接**、不运行，所以这个导出
+          # 对配置期没有副作用 —— 它在这里的作用只是让下面那行 version 别打出噪声。
+          export LD_LIBRARY_PATH="$HOME/openssl-quic/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          mkdir -p ci-logs
+          {
+            echo "=== toolchain ==="
+            cmake --version
+            "$HOME/openssl-quic/bin/openssl" version
+            echo "=== configure ==="
+            cfg=0
+            cmake -S . -B build-quic -DCMAKE_BUILD_TYPE=Release \
+              -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+              -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=OFF \
+              -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_QUIC=ON \
+              -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
+              > ci-logs/build-quic-configure.log 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat ci-logs/build-quic-configure.log
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            # 门禁 1：quic **真的**被集成了。三条判据缺一不可 ——
+            #   ① 缓存里开关是 ON（用户传了，但可能被强制关掉：本工程有
+            #      "QUIC=ON 但 OPENSSL=OFF / NET=OFF / OpenSSL 没有 QUIC API
+            #      就 warn + 强制关" 三条从属规则）；
+            #   ② CMakeLists 真的打出了 "ngtcp2 integrated"（FetchContent 走通）；
+            #   ③ `src/quic/` 真的进了源列表。
+            # 少任何一条，这个 job 都会去编一个**不带 QUIC** 的库然后全绿。
+            grep -q 'UVCPP_ENABLE_QUIC:BOOL=ON' build-quic/CMakeCache.txt || {
+              echo "::error title=quic::CMakeCache 里 UVCPP_ENABLE_QUIC 不是 ON —— 这个 job 没在测 QUIC"; exit 1; }
+            grep -q 'ngtcp2 integrated' ci-logs/build-quic-configure.log || {
+              echo "::error title=quic::配置消息里没有 'ngtcp2 integrated' —— ngtcp2 没被集成"; exit 1; }
+            grep -q 'Including quic module in build' ci-logs/build-quic-configure.log || {
+              echo "::error title=quic::src/quic/ 没进源列表 —— 编出来的库不含 QUIC"; exit 1; }
+
+            echo "=== resolved toolchain (CMakeCache) ==="
+            grep -E '^(CMAKE_(GENERATOR|LINKER|CXX_COMPILER|C_COMPILER)|OPENSSL_|NGTCP2_)' \
+              build-quic/CMakeCache.txt || true
+            echo "=== build ==="
+            bld=0
+            cmake --build build-quic --config Release --parallel 4 2>&1 \
+              | tee ci-logs/build-quic-build.log || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/build-quic-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-quic::${msg:-rc=$bld (no error line matched)}"
+            fi
+            exit "$bld"
+          } 2>&1 | tee ci-logs/build-quic.log
+
+      - name: Gate — http2 + quic must configure together
+        shell: bash
+        run: |
+          # 这一条是**唯一**覆盖 "http2 与 quic 同时开" 的地方：`h2` job 关 quic，
+          # 上面那步关 web。它防的是一个真实的硬失败 —— ngtcp2 与 nghttp2 都
+          # 无条件建 `add_custom_target(check)`，后加进来的那个直接 configure
+          # 失败；根 `CMakeLists.txt` 里那段"把 ngtcp2 源码复制进构建目录、
+          # 摘掉那一行"就是为它存在的，见 doc/quic-guide.md §7 第 7 条。
+          #
+          # 只配置不构建：本版 QUIC 是个骨架，构建它不多证明什么，而会红的
+          # 地方（那行 add_custom_target）正好在配置期。
+          mkdir -p ci-logs
+          cmake -S . -B build-quic-h2 -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
+            > ci-logs/build-quic-h2-configure.log 2>&1 || {
+              rc=$?
+              echo "::error title=quic-h2::http2 与 quic 同时开配置失败 —— 多半是 ngtcp2/nghttp2 的 check 目标又撞名了（doc/quic-guide.md §7 第 7 条）"
+              tail -40 ci-logs/build-quic-h2-configure.log
+              exit "$rc"
+            }
+          # 两道判据：两个模块都**真的**在。把撞名"治好"也可能治成"quic 被
+          # 静默降级关掉"，那样这一条会假装变绿。
+          grep -q 'ngtcp2 integrated' ci-logs/build-quic-h2-configure.log || {
+            echo "::error title=quic-h2::配置过了，但 ngtcp2 没被集成"; exit 1; }
+          grep -q 'Including http2 module in build' ci-logs/build-quic-h2-configure.log || {
+            echo "::error title=quic-h2::配置过了，但 http2 没被集成"; exit 1; }
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-quic-ubuntu
+          path: ci-logs/
+          if-no-files-found: ignore
+
+      - name: Test
+        shell: bash
+        run: |
+          # OpenSSL 是 **shared** 编的，所以运行期要能找到它。
+          export LD_LIBRARY_PATH="$HOME/openssl-quic/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          # 门禁 2：quic 用例真的注册了。只跑 ctest 不足以发现"它们根本没被注册" ——
+          # 而这一档里它的代价更大：QUIC 关掉时 quic_api_func.cpp 编的是 `#else`
+          # 分支，那个 main() 打一行错并**返回 2**，所以没注册是**失败**而不是静默通过。
+          if ! ctest --test-dir build-quic -N 2>&1 | grep -q "test_quic_api_func"; then
+            echo "::error title=quic::test_quic_api_func 没被注册 —— quic 关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+            ctest --test-dir build-quic -N 2>&1 | tail -20
+            exit 1
+          fi
+          # Only test_shutdown_func is excluded (flaky ~1%, not hanging) — see
+          # doc/ci-guide.md §4.
+          rc=0
+          out=$(ctest --test-dir build-quic --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-quic::${msg:-rc=$rc (no FAILED block)}"
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-quic-output::${blk}"
+            fi
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
   # Full: Web + OpenSSL + zlib (Ubuntu + macOS)
   # ---------------------------------------------------------------------------
   full:
@@ -763,16 +939,16 @@ jobs:
           #   不带 preset ⇒ 这个开关默认 OFF ⇒ `find_library` 在 MSYS2 里撞上
           #   C:/msys64/mingw64/lib/libuv.dll.a（runner 镜像自带 libuv）⇒ 链成
           #   共享库，产物依赖 `libuv-1.dll`（MSYS2 那份的 DLL 名带 -1）。
-          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:275 判的是
+          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:708 判的是
           #   `TARGET uv_a`，而 find_library 给的是一个**路径**，不是 target，
           #   所以那个分支根本进不去。
           #
           # ② -DBUILD_SHARED_LIBS=OFF —— 管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #   llhttp_shared ⇒ 依赖 libllhttp.dll）。它不管 uvcpp 自己
-          #   （CMakeLists.txt:485 是显式的 `add_library(uvcpp SHARED ...)`）。
+          #   （CMakeLists.txt:1089 是显式的 `add_library(uvcpp SHARED ...)`）。
           #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
           #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
-          #   （275 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
+          #   （708 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \

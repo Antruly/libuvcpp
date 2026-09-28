@@ -74,6 +74,13 @@
 #  define UVCPP_NGHTTP2_ENABLE @UVCPP_NGHTTP2_ENABLE@
 #endif
 
+#if defined(UVCPP_QUIC_ENABLE) && (UVCPP_QUIC_ENABLE != @UVCPP_QUIC_ENABLE@)
+#  error "UVCPP_QUIC_ENABLE=@UVCPP_QUIC_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_QUIC_ENABLE
+#  define UVCPP_QUIC_ENABLE @UVCPP_QUIC_ENABLE@
+#endif
+
 #if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
 #  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
 #endif

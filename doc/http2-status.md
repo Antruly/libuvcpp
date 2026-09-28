@@ -81,13 +81,13 @@
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
 - **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
   写明了理由（引了就把 nghttp2 的 include 路径扩散给每个使用者与测试 TU）。
-  `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:61`），缺 OpenSSL 或缺 web
+  `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:110`），缺 OpenSSL 或缺 web
   模块时还会被强制置 OFF 并告警。
 
 ### 1.4 依赖与产物
 
 `nghttp2` 是**唯一被强制静态**的依赖：`uvcpp_nghttp2_configure()`
-（`CMakeLists.txt:266`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
+（`CMakeLists.txt:349`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
 静态 `nghttp2_static` 交给链接器。实测 `pe_imports()`：开了 h2 的 DLL 与没开的
 相比，非白名单依赖集合**都是** `llhttp.dll uv.dll zlib1.dll` —— 开 h2 不新增
 任何 DLL 依赖。
@@ -173,7 +173,7 @@
 |---|---|
 | **h2c（明文 h2）** | 不做 `Upgrade: h2c`、不做 prior-knowledge、不做协议嗅探。本库的 h2 一律走 TLS + ALPN。 |
 | **RFC 8441（WebSocket over HTTP/2）** | 不做，看到 `:protocol` 伪头一律按未知伪头拒（`uvcpp_h2_session.cpp` 的 `handle_pseudo`）。 |
-| **HTTP/3** | 不做。 |
+| **HTTP/3** | **不做，而且本页管不到它。** 1.4.1 落的是 QUIC **传输层**的地基（`src/quic/`，只有骨架，不能通信），HTTP/3 本身仍然一个字节都没有 —— 连 nghttp3 都没接。见 [`doc/quic-guide.md`](./quic-guide.md)。 |
 | **SERVER_PUSH** | 既不发也不收：`SETTINGS_ENABLE_PUSH = 0` 在 `init()` 里就宣告了。 |
 | **h2spec** | 不引入。协议一致性靠上面 1.5 那四个用例 + 会话层用例。 |
 | **改 `uvcpp_s` / `uvcpp_a_s` 的语义** | 不动。 |
@@ -375,7 +375,7 @@ ctest --test-dir build-h2 -C Release --timeout 60
    - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
      `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
      "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
-     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:1148`
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:1776`
      的注释），与 `pwsh` 无关。
    - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
      `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己

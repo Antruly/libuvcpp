@@ -24,6 +24,22 @@
         "FETCHCONTENT_SOURCE_DIR_LIBUV": "${sourceDir}/_local_deps/libuv",
         "FETCHCONTENT_SOURCE_DIR_NGHTTP2": "${sourceDir}/_local_deps/nghttp2"
       }
+    },
+    {
+      "name": "quic",
+      "displayName": "QUIC (net layer, ngtcp2)",
+      "description": "Build the QUIC skeleton: net + OpenSSL >= 3.2 + ngtcp2, web OFF. Needs _local_deps/openssl-3.5-inst and _local_deps/ngtcp2 to exist.",
+      "binaryDir": "${sourceDir}/build_quic",
+      "cacheVariables": {
+        "UVCPP_BUILD_NET": "ON",
+        "UVCPP_BUILD_WEB": "OFF",
+        "UVCPP_ENABLE_OPENSSL": "ON",
+        "UVCPP_ENABLE_QUIC": "ON",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "OPENSSL_ROOT_DIR": "${sourceDir}/_local_deps/openssl-3.5-inst",
+        "FETCHCONTENT_SOURCE_DIR_LIBUV": "${sourceDir}/_local_deps/libuv",
+        "FETCHCONTENT_SOURCE_DIR_NGTCP2": "${sourceDir}/_local_deps/ngtcp2"
+      }
     }
   ]
 }

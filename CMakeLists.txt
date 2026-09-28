@@ -73,6 +73,27 @@ option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/lo
 # 见 src/http2/ 的 pimpl 说明）。
 option(UVCPP_ENABLE_WSDL "Enable WSDL/SOAP module (XML via pugixml, needs UVCPP_BUILD_WEBAPP)" OFF)
 
+# QUIC 传输层 —— net 层的一条**链路协议**，为后面的 HTTP/3 铺路。
+#
+# 后端是 **ngtcp2**，位置与 nghttp2 之于 HTTP/2 完全相同：协议栈归它，本库只做
+# 事件循环、缓冲与生命周期的接线。它也**只经 TLS 的 ALPN 协商使用** —— QUIC 本身
+# 就建在 TLS 1.3 上，没有"明文 QUIC"这回事 —— 所以开启它必须同时开启 OpenSSL，
+# 而且那份 OpenSSL 必须**带 QUIC API**（mainline ≥ 3.2）。3.0/3.1 没有
+# `SSL_set_quic_tls_cbs`，libngtcp2 在它自己的 configure 期就会 FATAL_ERROR。
+# 两条都由下面 QUIC 那一节在配置期检查并**强制关闭 + 出声**，不留一个"能配置、
+# 链不上、跑不起来"的组合。
+#
+# 默认 OFF。**1.4.1 只交骨架**：CMake 接线、依赖接入、公开 API 形状与配置契约宏；
+# 传输本身（握手、开流、收发）从 1.4.2 起往里填 —— 也就是说这一版**不能**收发
+# 任何一个字节，见 doc/quic-guide.md 里"没做的"那一节。
+#
+# 它**不属于 web 层**，所以刻意不放在下面那组"Web 子开关"里：那组的标题写着
+# "仅在 UVCPP_BUILD_WEB=ON 时有效"，而 QUIC 在 web 关闭时照样要能用（它住在
+# net 层）。它读的是 `UVCPP_ENABLE_OPENSSL`，那个开关虽然在下面那组里声明，
+# 但本文件里读它的守卫都在声明**之后**，顺序没问题。
+option(UVCPP_ENABLE_QUIC
+  "Enable QUIC transport via ngtcp2 (net layer). Needs UVCPP_ENABLE_OPENSSL=ON and an OpenSSL >= 3.2 with the QUIC API. No HTTP/3 yet" OFF)
+
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 
@@ -95,6 +116,7 @@ set(LLHTTP_VERSION  "release/v9.2.0" CACHE STRING "llhttp git tag to fetch")
 set(ZLIB_VERSION    "v1.3.1"         CACHE STRING "zlib git tag to fetch")
 set(OPENSSL_VERSION "openssl-3.4.0"  CACHE STRING "OpenSSL git tag to fetch")
 set(NGHTTP2_VERSION "v1.70.0"        CACHE STRING "nghttp2 git tag to fetch")
+set(NGTCP2_VERSION  "v1.25.0"        CACHE STRING "ngtcp2 git tag to fetch")
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -226,23 +248,45 @@ if(UVCPP_BUILD_WEB)
     endif()
   endif()
 
-  # -------------------------------------------------------------------
-  # OpenSSL / SSL module
-  # -------------------------------------------------------------------
-  if(UVCPP_ENABLE_OPENSSL)
-    # Try system OpenSSL first, then FetchContent as fallback
-    find_package(OpenSSL QUIET)
-    if(OPENSSL_FOUND)
-      message(STATUS "Using system OpenSSL ${OPENSSL_VERSION}")
-      set(UVCPP_SSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
-    else()
-      # FetchContent for OpenSSL is complex (requires Perl for config).
-      # On Windows, prefer installing via vcpkg or pre-built binaries.
-      message(WARNING "System OpenSSL not found. Install OpenSSL or use vcpkg.")
-      message(WARNING "  vcpkg: vcpkg install openssl:x64-windows")
-      message(WARNING "  Or download from https://slproweb.com/products/Win32OpenSSL.html")
-      set(UVCPP_ENABLE_OPENSSL OFF)
-    endif()
+endif()
+
+# =========================================================================
+# OpenSSL 依赖 —— **刻意不在上面那个 if(UVCPP_BUILD_WEB) 里**
+# =========================================================================
+# 这段原先嵌在 web 块内部，那是个 bug：`src/ssl/` 的编译只受
+# `UVCPP_ENABLE_OPENSSL` 控制（见下面的排除规则），与 web 无关；net 层的
+# `uvcpp_tcp_client::enable_tls()` 也直接用 OpenSSL。于是
+# `-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF` 这个组合会**把 ssl 编进去、
+# 却从不定义 `UVCPP_SSL_LIBS`** —— 而 `UVCPP_SSL_LIBS` 为空时，下面那句
+# `target_link_libraries(<t> PRIVATE ${UVCPP_SSL_LIBS})` 展开成
+# `target_link_libraries(<t> PRIVATE)`，一个**静默的空操作**：配置期一声不响，
+# 报错拖到链接期。症状还分平台 —— Linux 上系统 OpenSSL 头在默认搜索路径里，
+# 所以是**编译过、链接炸**；MinGW/MSVC 上没有默认路径，是**编译炸**。
+#
+# QUIC 要求的正是"net 层 + SSL + web 关闭"这个组合（它住在 net 层），所以这段
+# 必须待在 web 块外面。
+#
+# **位置**：紧跟在上面 web 块的 `endif()` 之后，而不是提到文件顶层 ——
+# `if(UVCPP_BUILD_WEB)` 块本身不能整个上提：llhttp 必须仍挂在 web 下，它里面那条
+# `set(BUILD_STATIC_LIBS ON CACHE BOOL … FORCE)` 是 llhttp 的钉子（nghttp2 也读
+# `BUILD_STATIC_LIBS`），上提会往每个非 web 树的根 cache 里写一条 ON。这一段净
+# 长度不变，所以紧随其后的"SSL 模块源文件"块位置不动；但**本文件后面所有行号
+# 会随 QUIC 那一大段变大**。仓库里约 39 处文档与脚本按 `CMakeLists.txt:NNN`
+# 引用它，改本文件时**必须逐个按内容重校**（`check_doc_lines.py` 只锁 `src/`
+# 下的引用，这一类它一条都不判；实测已烂过一轮：2026-09-29 修正 39 处，其中 34 处早于 QUIC）。
+if(UVCPP_ENABLE_OPENSSL)
+  # Try system OpenSSL first, then FetchContent as fallback
+  find_package(OpenSSL QUIET)
+  if(OPENSSL_FOUND)
+    message(STATUS "Using system OpenSSL ${OPENSSL_VERSION}")
+    set(UVCPP_SSL_LIBS OpenSSL::SSL OpenSSL::Crypto)
+  else()
+    # FetchContent for OpenSSL is complex (requires Perl for config).
+    # On Windows, prefer installing via vcpkg or pre-built binaries.
+    message(WARNING "System OpenSSL not found. Install OpenSSL or use vcpkg.")
+    message(WARNING "  vcpkg: vcpkg install openssl:x64-windows")
+    message(WARNING "  Or download from https://slproweb.com/products/Win32OpenSSL.html")
+    set(UVCPP_ENABLE_OPENSSL OFF)
   endif()
 endif()
 
@@ -384,6 +428,224 @@ if(UVCPP_ENABLE_NGHTTP2)
   message(STATUS "nghttp2 integrated (tag=${NGHTTP2_VERSION}, static)")
 endif()
 
+# =========================================================================
+# QUIC 传输层 —— ngtcp2 后端
+# =========================================================================
+# 三条守卫，顺序是**load-bearing** 的：先"有没有 OpenSSL"，再"有没有 net 层"，
+# 最后才是"那份 OpenSSL 带不带 QUIC API"（这条要用上一条的结果去探）。
+#
+# 全部照仓库既有的"静默降级链"风格：`set(UVCPP_ENABLE_QUIC OFF)` 是**普通变量**，
+# 不是 cache 写。于是 `CMakeCache.txt` 里仍然是 `UVCPP_ENABLE_QUIC:BOOL=ON` ——
+# 这正是 h2 job 要**三道**门禁的原因（cache、configure 日志、用例是否真注册），
+# 也是下面那句 `Including quic module in build` 存在的理由：CI 要 grep 它。
+#
+# 位置也是 load-bearing 的：这几条必须**早于** `_uvcpp_literal01` 那一批（本文件
+# 后面），否则生成头里写 1 而编译定义写 0，第一个 TU 就 `#error`。
+if(UVCPP_ENABLE_QUIC AND NOT UVCPP_ENABLE_OPENSSL)
+  message(WARNING
+    "UVCPP_ENABLE_QUIC=ON 需要 UVCPP_ENABLE_OPENSSL=ON（QUIC 建在 TLS 1.3 上，"
+    "ALPN 是 TLS 扩展，没有明文 QUIC 这回事）。已强制关闭 quic。")
+  set(UVCPP_ENABLE_QUIC OFF)
+endif()
+
+if(UVCPP_ENABLE_QUIC AND NOT UVCPP_BUILD_NET)
+  message(WARNING
+    "UVCPP_ENABLE_QUIC=ON 需要 UVCPP_BUILD_NET=ON（QUIC 是 net 层的一条链路协议，"
+    "并且复用 src/net/uvcpp_net_read.h 的 net_read_result 事件契约）。已强制关闭 quic。")
+  set(UVCPP_ENABLE_QUIC OFF)
+endif()
+
+# -------------------------------------------------------------------------
+# OpenSSL 有没有 QUIC API —— **判据必须和 ngtcp2 自己的一致**
+# -------------------------------------------------------------------------
+# 这一段的顺序是照着 ngtcp2 的 `CMakeLists.txt` 抄的，不是随手写的：它**先**查
+# `SSL_provide_quic_data`，**只有它不存在时**才查 `SSL_set_quic_tls_cbs`；前者为真
+# 走 quictls/LibreSSL 分支（`HAVE_QUICTLS`），后者为真才是 mainline OpenSSL ≥ 3.2
+# （`HAVE_OSSL`）。这个分支决定它**建哪个 crypto 目标**：
+#
+#   HAVE_OSSL   ⇒ ngtcp2_crypto_ossl_static    ← 我们链的就是这个
+#   HAVE_QUICTLS⇒ ngtcp2_crypto_quictls_static ← 目标名不同
+#
+# 所以"只查 SSL_set_quic_tls_cbs"是错的：quictls 树上它可能也为真，于是预检放行，
+# 然后去链一个**从没被建出来**的目标。这里复刻它的顺序，判据才和它一致。
+#
+# **不要**用 `OPENSSL_VERSION` 做版本比较：本文件上面把它钉成了一个 cache STRING
+# （值是 git tag，如 `openssl-3.4.0`），而 FindOpenSSL 在**同名**上设的是普通变量；
+# OpenSSL 没找到时比的是 tag 解析出来的 `0.4.0`，`VERSION_LESS 3.2` 恒真。用
+# `check_symbol_exists` + 自己的 `UVCPP_` 前缀缓存名，既躲开撞名，又不会把一个
+# "打了 QUIC 补丁的 3.0" 误判掉（那种树 ngtcp2 是收的）。
+if(UVCPP_ENABLE_QUIC)
+  include(CheckSymbolExists)
+  include(CMakePushCheckState)
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_INCLUDES  "${OPENSSL_INCLUDE_DIR}")
+  set(CMAKE_REQUIRED_LIBRARIES "${OPENSSL_LIBRARIES}")
+  if(WIN32)
+    # 同 ngtcp2：静态 libcrypto 直接调 Cert*/BCrypt 系列，探测链接时得带上。
+    list(APPEND CMAKE_REQUIRED_LIBRARIES ws2_32 bcrypt crypt32)
+  endif()
+  check_symbol_exists(SSL_provide_quic_data "openssl/ssl.h"
+                      UVCPP_OPENSSL_HAS_QUIC_PROVIDE)
+  if(NOT UVCPP_OPENSSL_HAS_QUIC_PROVIDE)
+    check_symbol_exists(SSL_set_quic_tls_cbs "openssl/ssl.h"
+                        UVCPP_OPENSSL_HAS_QUIC_CBS)
+  endif()
+  cmake_pop_check_state()
+
+  # 要的是"mainline、且带 QUIC API"这一格：没有 provide、但有 cbs。
+  # 另外两格（有 provide ⇒ quictls 分支；两个都没有 ⇒ 完全没有 QUIC API）都关掉。
+  if(UVCPP_OPENSSL_HAS_QUIC_PROVIDE OR NOT UVCPP_OPENSSL_HAS_QUIC_CBS)
+    message(WARNING
+      "UVCPP_ENABLE_QUIC=ON 需要一份**带 QUIC API 的 mainline OpenSSL ≥ 3.2**，"
+      "而找到的那份不满足（头在 ${OPENSSL_INCLUDE_DIR}）。\n"
+      "  为什么非 3.2 不可：libngtcp2 在它自己的 configure 期就会因为缺 "
+      "SSL_set_quic_tls_cbs 而 FATAL_ERROR，而且我们要链的 ngtcp2_crypto_ossl_static "
+      "根本不会被建出来。\n"
+      "  怎么修：编一份 3.2+ 到某个前缀，再把它指过来 ——\n"
+      "    cmake -S . -B build-quic -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_OPENSSL=ON \\\n"
+      "          -DOPENSSL_ROOT_DIR=<那份 3.2+ 的前缀>\n"
+      "  （3.0/3.1 与 Ubuntu 24.04 自带的 3.0.13 都不行。）已强制关闭 quic。")
+    set(UVCPP_ENABLE_QUIC OFF)
+  endif()
+endif()
+
+if(UVCPP_ENABLE_QUIC)
+  # 与 nghttp2 同一个套路：用 `function` 造作用域，靠 CMP0077=NEW 让同名**普通
+  # 变量**压住 ngtcp2 自己的 `option()`（它在 `CMakeOptions.txt` 里，由它本文件
+  # `include()` 进来，读到的就是这里造的那些普通变量）。`cmake_dependent_option`
+  # 是例外 —— 它内部那条 `set(... CACHE ... FORCE)` 无视 CMP0077，所以
+  # BUILD_TESTING 照样落进根 cache，只是值被我们压成了 OFF。
+  #
+  # `ENABLE_LIB_ONLY=ON` 是关键的一条：它让 ngtcp2 跳过 `examples/` 与 `tests/`，
+  # 而 `third-party/`（http-parser / urlparse 那些）整段挂在
+  # `if(LIBEV_FOUND AND LIBNGHTTP3_FOUND)` 下面也不会建。于是 **libngtcp2 不需要
+  # nghttp3、也不需要 libev** —— nghttp3 留到 HTTP/3 那一版再接。
+  function(uvcpp_ngtcp2_configure)
+    set(ENABLE_STATIC_LIB  ON)
+    set(ENABLE_SHARED_LIB  OFF)
+    set(ENABLE_LIB_ONLY    ON)
+    set(ENABLE_OPENSSL     ON)
+    set(ENABLE_WERROR      OFF)
+    set(ENABLE_DEBUG       OFF)
+    set(ENABLE_ASAN        OFF)
+    set(ENABLE_JEMALLOC    OFF)
+    set(ENABLE_GNUTLS      OFF)
+    set(ENABLE_BORINGSSL   OFF)
+    set(ENABLE_PICOTLS     OFF)
+    set(ENABLE_WOLFSSL     OFF)
+    set(BUILD_TESTING      OFF)
+
+    # PIC 必须在**建目标之前**定好 —— 属性是 add_library 那一刻初始化的。
+    # 这不是仪式：ngtcp2 只给**共享**那两个目标设了 POSITION_INDEPENDENT_CODE，
+    # 静态的那两个没设 ⇒ Linux 上 libuvcpp.so 链不上（同 nghttp2 那段注释里的
+    # R_X86_64_PC32 报错）。设在这里而不是事后改属性：前者按名字无关的方式给整个
+    # 子树初始化，上游改库目标名也不会静默失效。
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+    FetchContent_GetProperties(ngtcp2)
+    if(NOT ngtcp2_POPULATED)
+      FetchContent_Populate(ngtcp2)
+
+      # ---------------------------------------------------------------
+      # `check` 目标撞名 —— 只能改源，先看清楚为什么
+      # ---------------------------------------------------------------
+      # ngtcp2 与 nghttp2 **都**无条件地
+      #   add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
+      # （`ngtcp2/CMakeLists.txt:160`、`nghttp2/CMakeLists.txt:174`，都不带守卫）。
+      # 于是 **http2 与 quic 同时开**时，后加进来的那个直接 configure 失败：
+      #   add_custom_target cannot create target "check" because another target
+      #   with the same name already exists.
+      # 本文件里 nghttp2 那段在前，所以撞的是 ngtcp2 —— 但成因是"两个上游都建"，
+      # 不是"ngtcp2 建错了"。
+      #
+      # CMake 给的逃生口是 CMP0002=OLD，**在这里救不了**：策略只在没有被子目录
+      # 覆盖时继承，而 ngtcp2 自己的 `cmake_minimum_required(VERSION 3.20)`
+      # 会把继承下来的 OLD 重置回 NEW —— 那句在第 25 行，`add_custom_target`
+      # 在第 160 行。下面三种设法都是**实测**失败的，别再试：
+      #   ① 本文件顶层 `cmake_policy(SET CMP0002 OLD)`（含放进上面那个
+      #      `function()` 里的变体）；② `set(CMAKE_POLICY_DEFAULT_CMP0002
+      #      OLD CACHE STRING "" FORCE)`；③ 指望 `enable_testing()` 关掉就行
+      #      （撞名与 testing 无关，只看逻辑目标名）。
+      #
+      # 于是只剩改源。**不原地改**：`FETCHCONTENT_SOURCE_DIR_NGTCP2` 通常指着
+      # 使用者的一份检出（本地是 `_local_deps/ngtcp2`），原地改等于弄脏别人的
+      # 工作树，而且下次 configure 会把那处改动当成上游内容。所以：把源码
+      # **复制**进构建目录，只动副本，也从副本构建。
+      #
+      # 复制只在第一次做 —— 副本在就跳过，重复 configure 不再付这份开销。
+      # 代价是**改了 `_local_deps/ngtcp2` 之后要删掉副本**（见 doc/quic-guide.md）。
+      set(_uvcpp_ngtcp2_src "${CMAKE_BINARY_DIR}/_deps/uvcpp-ngtcp2-src")
+      set(_uvcpp_ngtcp2_bin "${CMAKE_BINARY_DIR}/_deps/uvcpp-ngtcp2-build")
+      if(NOT EXISTS "${_uvcpp_ngtcp2_src}/CMakeLists.txt")
+        file(COPY "${ngtcp2_SOURCE_DIR}/" DESTINATION "${_uvcpp_ngtcp2_src}"
+             PATTERN ".git" EXCLUDE)
+        file(READ "${_uvcpp_ngtcp2_src}/CMakeLists.txt" _uvcpp_ngtcp2_cml)
+        set(_uvcpp_ngtcp2_check_line
+            [[add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})]])
+        string(FIND "${_uvcpp_ngtcp2_cml}" "${_uvcpp_ngtcp2_check_line}"
+               _uvcpp_ngtcp2_hit)
+        if(_uvcpp_ngtcp2_hit EQUAL -1)
+          message(FATAL_ERROR
+            "补丁没打上：在 ${_uvcpp_ngtcp2_src}/CMakeLists.txt 里找不到 "
+            "`add_custom_target(check COMMAND \${CMAKE_CTEST_COMMAND})`。\n"
+            "  上游改过这一处。请对着那个文件重新确认：要么它已经不建 `check`"
+            "（那这段补丁连同这条断言一起删掉），要么那一行的写法变了（这条 "
+            "string(FIND) 要跟着改）。\n"
+            "  **别把这条断言删掉了事**：它一失效，补丁就变成静默空转，而 "
+            "http2+quic 会在 add_subdirectory 那里报一条看不出所以然的撞名错。")
+        endif()
+        string(REPLACE "${_uvcpp_ngtcp2_check_line}"
+          "# [uvcpp] 摘掉 `check`：它与 nghttp2 的无条件同名目标冲突，见根 CMakeLists.txt 里那段注释"
+          _uvcpp_ngtcp2_cml "${_uvcpp_ngtcp2_cml}")
+        file(WRITE "${_uvcpp_ngtcp2_src}/CMakeLists.txt" "${_uvcpp_ngtcp2_cml}")
+      endif()
+
+      add_subdirectory("${_uvcpp_ngtcp2_src}" "${_uvcpp_ngtcp2_bin}" EXCLUDE_FROM_ALL)
+    endif()
+  endfunction()
+
+  # 与 nghttp2 同样**不能**用 FetchContent_MakeAvailable：它等价于
+  # add_subdirectory，会连上游的 install 规则（ngtcp2Config.cmake、
+  # libngtcp2.pc）一并登记，污染 `cmake --install`。EXCLUDE_FROM_ALL 一起排除，
+  # 而目标照样能被下面的链接依赖拉起来。
+  FetchContent_Declare(
+    ngtcp2
+    GIT_REPOSITORY https://github.com/ngtcp2/ngtcp2.git
+    GIT_TAG        ${NGTCP2_VERSION}
+    GIT_SHALLOW    TRUE
+  )
+  uvcpp_ngtcp2_configure()
+
+  # 存在性断言要**排在 PIC 断言前面**。少了它，目标不存在时
+  # `get_target_property` 返回 NOTFOUND，下面那条 FATAL 会谎报"PIC 没生效"，
+  # 而真因是"目标压根没建"—— 这种误导性的报错比不报还费时间。
+  if(NOT TARGET ngtcp2_static)
+    message(FATAL_ERROR
+      "ngtcp2 没建出 ngtcp2_static —— ENABLE_STATIC_LIB/ENABLE_SHARED_LIB 没压住,"
+      "或者上游改了库目标名")
+  endif()
+  if(NOT TARGET ngtcp2_crypto_ossl_static)
+    message(FATAL_ERROR
+      "ngtcp2 没建出 ngtcp2_crypto_ossl_static —— 说明那份 OpenSSL 走的不是 mainline "
+      "分支(上游此时只在 quictls/LibreSSL 下建 ngtcp2_crypto_quictls_static),"
+      "上面那段 QUIC API 预检和这里对不上了")
+  endif()
+  get_target_property(_uvcpp_ngtcp2_pic ngtcp2_static POSITION_INDEPENDENT_CODE)
+  if(NOT _uvcpp_ngtcp2_pic)
+    message(FATAL_ERROR
+      "ngtcp2_static 的 POSITION_INDEPENDENT_CODE 没生效(=${_uvcpp_ngtcp2_pic}) —— "
+      "Linux 上 libuvcpp.so 会链不上它")
+  endif()
+  get_target_property(_uvcpp_ngtcp2_crypto_pic ngtcp2_crypto_ossl_static POSITION_INDEPENDENT_CODE)
+  if(NOT _uvcpp_ngtcp2_crypto_pic)
+    message(FATAL_ERROR
+      "ngtcp2_crypto_ossl_static 的 POSITION_INDEPENDENT_CODE 没生效"
+      "(=${_uvcpp_ngtcp2_crypto_pic}) —— Linux 上 libuvcpp.so 会链不上它")
+  endif()
+
+  message(STATUS "ngtcp2 integrated (tag=${NGTCP2_VERSION}, static)")
+endif()
+
 # NOTE: PATH for Windows tests is set *after* add_subdirectory(tests) below
 # to ensure tesets are registered before we query TESTS property.
 
@@ -511,6 +773,16 @@ endif()
 file(GLOB WSDL_SRC_FILES "${CMAKE_SOURCE_DIR}/src/wsdl/*.h" "${CMAKE_SOURCE_DIR}/src/wsdl/*.cpp")
 if(UVCPP_ENABLE_WSDL)
   source_group("wsdl" FILES ${WSDL_SRC_FILES})
+endif()
+
+# quic module source_group
+# CONFIGURE_DEPENDS：新加一个 .cpp 不重新 configure 就不会被编进去，而
+# 「编过了」和「编了这个文件」在这里长得一模一样（这个坑本批已经踩过一次）。
+# 同一个 QUIC_SRC_FILES 还在下面被用来做"空模块"判据 —— 见那里的注释。
+if(UVCPP_ENABLE_QUIC)
+  file(GLOB QUIC_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/quic/*.h" "${CMAKE_SOURCE_DIR}/src/quic/*.cpp")
+  source_group("quic" FILES ${QUIC_SRC_FILES})
 endif()
 
 # read version from header (src/uvcpp/uvcpp_version.h)
@@ -703,6 +975,18 @@ else()
   message(STATUS "HTTP/2 disabled (UVCPP_NGHTTP2_ENABLE=0)")
 endif()
 
+# 目录作用域这一对与下面 `_uvcpp_literal01` + `target_compile_definitions` 那两处
+# **不是重复**：后者管的是库本身与 find_package 的消费者，而 tests/、examples/、
+# bench/ 里有些 TU 在 include 公开头**之前**就用这个宏，靠的正是目录作用域。
+# 八个既有模块都有这一对，照做。
+if(UVCPP_ENABLE_QUIC)
+  add_compile_definitions(UVCPP_QUIC_ENABLE=1)
+  message(STATUS "QUIC enabled (UVCPP_QUIC_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_QUIC_ENABLE=0)
+  message(STATUS "QUIC disabled (UVCPP_QUIC_ENABLE=0)")
+endif()
+
 if(UVCPP_ENABLE_TRY_WRITE)
   add_compile_definitions(UVCPP_TRY_WRITE_ENABLE=1
                           UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES})
@@ -773,6 +1057,30 @@ if(NOT UVCPP_ENABLE_WSDL)
   list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/wsdl/")
 else()
   message(STATUS "Including wsdl module in build")
+endif()
+
+# 根据 UVCPP_ENABLE_QUIC 排除 quic 模块。
+# 两个列表都要排：UVCPP_SOURCES 管编不编，UVCPP_HEADERS 管这些头会不会被当成
+# 「本库的公开头」参与后续的安装/导出判断。
+if(NOT UVCPP_ENABLE_QUIC)
+  message(STATUS "Excluding quic module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/quic/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/quic/")
+else()
+  # CI 要 grep 这一行 —— 开关的降级是普通变量 set()，降级之后 CMakeCache.txt 里
+  # 仍然是 `UVCPP_ENABLE_QUIC:BOOL=ON`，只 grep cache 会得到一个假绿。
+  message(STATUS "Including quic module in build (ngtcp2 ${NGTCP2_VERSION})")
+
+  # 「开了 QUIC 但目录是空的」必须当场红，不能绿。
+  # 否则那棵树能同时骗过三道看起来很像门禁的东西：cache 里 QUIC=ON、
+  # configure 日志里有 "ngtcp2 integrated"、编译也过 —— 而 src/quic/ 一个 .cpp
+  # 都没有，**零行 QUIC 代码被编译过**。这与 h2 job 立三道门禁是同一个教训：
+  # 「没测」必须表现为**失败**，而不是表现为**通过**。
+  if(NOT QUIC_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_ENABLE_QUIC=ON 但 src/quic/ 下一个文件都没有 —— 这个配置会编出"
+      "一个不含任何 QUIC 代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
 endif()
 
 # Create uvcpp targets according to user selection.
@@ -904,6 +1212,7 @@ _uvcpp_literal01(UVCPP_WSDL_ENABLE      UVCPP_ENABLE_WSDL)
 _uvcpp_literal01(UVCPP_ZLIB_ENABLE      UVCPP_ENABLE_ZLIB)
 _uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
 _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
+_uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
 _uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
 
 # 值宏：空字面量会让 `#if X != ` 变成语法错误，宁可在 configure 期就停下。
@@ -963,6 +1272,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_ZLIB_ENABLE=${UVCPP_ZLIB_ENABLE}
       UVCPP_OPENSSL_ENABLE=${UVCPP_OPENSSL_ENABLE}
       UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
+      UVCPP_QUIC_ENABLE=${UVCPP_QUIC_ENABLE}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
     )
@@ -1051,6 +1361,37 @@ if(UVCPP_ENABLE_NGHTTP2)
       # install(EXPORT uvcppTargets) 要求导出集里每个非 IMPORTED 目标也在导出集
       # 里,nghttp2_static 不在。包上之后本工程内照常传播,导出里被剥成空。
       target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:nghttp2>)
+    endif()
+  endforeach()
+endif()
+
+# =========================================================================
+# QUIC 依赖链接 — ngtcp2
+# =========================================================================
+if(UVCPP_ENABLE_QUIC)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      # 两个目标,不是一个,而且**都必须写死在这里**:
+      #
+      # * `ngtcp2_static` —— 协议状态机本身;
+      # * `ngtcp2_crypto_ossl_static` —— 把 ngtcp2 的 crypto 回调接到 OpenSSL
+      #   EVP/QUIC 那套上。少了后者,`ngtcp2_crypto_*` 的符号在 `uvcpp_quic_ngtcp2.cpp`
+      #   里全成未定义;只写 `ngtcp2_static` 编得过、链不过,报错还落在别人家里。
+      #
+      # **这里用的是 ngtcp2 的裸目标名,没有别名可用** —— 与上面 nghttp2 那段不同,
+      # ngtcp2 的 `lib/CMakeLists.txt` 只 `add_library(ngtcp2_static ...)`,从头到尾
+      # 没有一句 `add_library(... ALIAS ...)`。所以名字漂了的风险只能靠上面配置段
+      # 那两条 `if(NOT TARGET ...)` 的 FATAL_ERROR 兜住(照 nghttp2 那处 :416/:421 的
+      # 两道断言),不能靠"用别名更稳"。
+      #
+      # PRIVATE 与 $<BUILD_INTERFACE:> 的理由与上面 nghttp2 那段逐字相同:
+      # 只出现在 `src/quic/` 的 .cpp 里(pimpl),公开头一个字都不引用 ngtcp2;
+      # 而 PRIVATE 在**静态**库上会以 $<LINK_ONLY:...> 写进
+      # INTERFACE_LINK_LIBRARIES,`install(EXPORT uvcppTargets)` 要求导出集里每个
+      # 非 IMPORTED 目标也在导出集里 —— 这两个 ngtcp2 目标都不在。
+      target_link_libraries(${_tgt} PRIVATE
+        $<BUILD_INTERFACE:ngtcp2_static>
+        $<BUILD_INTERFACE:ngtcp2_crypto_ossl_static>)
     endif()
   endforeach()
 endif()
@@ -1258,6 +1599,20 @@ file(GLOB HTTP2_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/http2/*.h")
 list(FILTER HTTP2_HEADER_FILES EXCLUDE REGEX "uvcpp_h2_nghttp2\\.h$")
 if(HTTP2_HEADER_FILES AND UVCPP_ENABLE_NGHTTP2)
   install(FILES ${HTTP2_HEADER_FILES} DESTINATION include/http2)
+endif()
+
+# src/quic/ 同理：公开头是 pimpl 形状的（<ngtcp2/ngtcp2.h> 只出现在 .cpp 里），
+# 使用者拿到的头不依赖 ngtcp2 本身。
+file(GLOB QUIC_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/quic/*.h")
+# `uvcpp_quic_ngtcp2.h` 是**私有**头（它把 <ngtcp2/ngtcp2.h> 拉进来，正是为了让别的
+# 头不拉），装出去等于把"使用者不需要 ngtcp2"这个结论作废。
+#
+# **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
+# 那个脚本自己按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，
+# `package_release.py` 打出来的包里照样会带上它。
+list(FILTER QUIC_HEADER_FILES EXCLUDE REGEX "uvcpp_quic_ngtcp2\\.h$")
+if(QUIC_HEADER_FILES AND UVCPP_ENABLE_QUIC)
+  install(FILES ${QUIC_HEADER_FILES} DESTINATION include/quic)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too

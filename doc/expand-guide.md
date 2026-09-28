@@ -95,11 +95,11 @@ cmake -S . -B build -DUVCPP_BUILD_EXPAND=ON
 | `-DUVCPP_BUILD_EXPAND=ON` | `UVCPP_ENABLE_MEMORY_POOL=1` |
 | `-DUVCPP_BUILD_EXPAND=OFF`（默认） | `UVCPP_ENABLE_MEMORY_POOL=0` |
 
-选项到宏的映射在 `CMakeLists.txt:508-514` 一处完成。用预编译包时**什么都不用传** ——
+选项到宏的映射在 `CMakeLists.txt:804-810` 一处完成。用预编译包时**什么都不用传** ——
 包里的 `include/uvcpp/uvcpp_config.h` 就是那次构建的值，自己再传一个冲突的值是硬 `#error`。
 
 关掉时 `src/expand/` 整目录被 `list(FILTER ... EXCLUDE REGEX "src/expand/")` 排除
-（`CMakeLists.txt:606-615`），并且**不安装头**（`CMakeLists.txt:1005-1008`）。于是
+（`CMakeLists.txt:999-1008`），并且**不安装头**（`CMakeLists.txt:1517-1520`）。于是
 "关掉之后包含它"在两条路上表现**完全不同**：
 
 | 你怎么构建 | `#include <expand/uvcpp_memory_pool.h>` 的结果 |

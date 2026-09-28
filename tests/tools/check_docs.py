@@ -65,13 +65,13 @@ def ok(what):
 # ---------------------------------------------------------------------------
 
 # **必须允许前导空白**：`UVCPP_BUILD_FUNCTIONAL` 是缩进在 `if(UVCPP_BUILD_TESTS)`
-# 里面的（CMakeLists.txt:929），写成 `^option\(` 会静默少一个 —— 而少的那一个
+# 里面的（CMakeLists.txt:1437），写成 `^option\(` 会静默少一个 —— 而少的那一个
 # 恰好是"只在某个前提成立时才存在"的那一类，也就是最该被盯住的。
 OPTION_RE = re.compile(r"^\s*option\(\s*([A-Za-z_][A-Za-z0-9_]*)", re.M)
 
 # `UVCPP_TRY_WRITE_MIN_BYTES` 跨两行（`set(` 换行后才写值），而 `[^)]*` 是取反字符类、
 # 天然跨行，所以不用 DOTALL。**只认 `CACHE STRING`**：`set(UVCPP_LIB_TARGET ... CACHE
-# INTERNAL ...)`（CMakeLists.txt:914）同样是 `UVCPP_` 前缀 + CACHE 形状，但它是个内部
+# INTERNAL ...)`（CMakeLists.txt:1423）同样是 `UVCPP_` 前缀 + CACHE 形状，但它是个内部
 # 变量，不是旋钮。
 CACHE_STRING_RE = re.compile(
     r"^\s*set\(\s*(UVCPP_[A-Za-z0-9_]*)\s+[^)]*CACHE\s+STRING", re.M)

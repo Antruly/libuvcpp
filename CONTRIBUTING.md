@@ -163,6 +163,14 @@ code page, and a Chinese comment then swallows the following newline — a repor
 inside `<algorithm>`, with `C4819` as the only clue. `add_compile_options(/utf-8)` covers
 in-repo builds but is directory-scoped and does not reach `find_package` consumers.
 
+Write new files with **LF** line endings; documentation takes no BOM. `.gitattributes` declares
+`* text=auto`, so the repository stores LF regardless of what the checkout looks like. That line
+is load-bearing rather than cosmetic: this tree was developed on Windows, and before it existed
+the CRLF working copies hashed differently from the LF index — 245 of 406 tracked files — which
+`git status` reported as "modified" (263 entries, of which 26 were real). The failure mode is
+not the noise itself but the habit it invites: a blanket `git add -A` would have staged all of
+them at once, rewriting line endings across the whole repository inside a single commit.
+
 ### Where new documentation goes
 
 `doc/`, singular, as `.md`. **Not `docs/` and not `.txt`** — both are in `.gitignore`, so a
@@ -266,6 +274,19 @@ rather than guessing which file `.cpp` refers to, because guessing is how it wen
 Placeholders are written with angle brackets (`<file>`, `src/<module>/<file>`) and are **not**
 read as citations — the gate skips them, the same way `check_docs.py` does. That matters for
 prose *about* citation syntax, which would otherwise cite itself red.
+
+The root `CMakeLists.txt` is cited in the same shape, `CMakeLists.txt:NNN`, and is held to the
+same criteria. That is newer than it sounds: `.txt` is not a source extension, so both citation
+regexes missed it the way they miss the extension-only shorthand, and the numbers went
+unchecked while the file grew from 1465 lines at 1.4.0 to 1820 — 34 of them already wrong
+before the QUIC work added the last 355. In prose, write the bare name (the gate resolves it
+against the file at the repository root); a citation into a build tree would need a line
+number in a file nobody has, so there is no reason to qualify it.
+
+A `<dir>/CMakeLists.txt` reference is judged only when that path exists in this repository.
+`ngtcp2/CMakeLists.txt:160` points into a vendored upstream tree, which arrives in the build
+directory rather than in a clone, so it is recorded and printed as unjudged instead of failed —
+the same "ignored, but loudly" treatment as a namespaced third-party reference.
 
 A reference to third-party source — nghttp2's `nghttp2_session.c`, say — is written with a
 namespace prefix:
