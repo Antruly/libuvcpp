@@ -80,6 +80,18 @@ if(NOT UVCPP_ENABLE_QUIC)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*quic[^/]*\.cpp$")
 endif()
 
+# Exclude HTTP/3 tests when the http3 module is not enabled.
+# 命名约定：**文件名里含 `http3` 的用例就需要 http3 模块**（现在只有两条
+# `http3_request_func.cpp` / `http3_web_func.cpp`）。`[^/]*` 前缀同样是必须的
+# —— `file(GLOB)` 给的是全路径，写 `^http3_` 永远匹配不上（h2 那条踩过）。
+#
+# **这一条不能靠上面 quic 那条顺带摘掉**：`http3` 这个词里没有 `quic` 这四个
+# 字母连在一起，两条正则互不覆盖。`UVCPP_ENABLE_HTTP3=ON` 而 QUIC 被守卫链
+# 降级成 OFF 时，上面那条会摘掉 `quic_*`、这条摘掉 `http3_*`，两条各管各的。
+if(NOT UVCPP_ENABLE_HTTP3)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*http3[^/]*\.cpp$")
+endif()
+
 foreach(test_src ${FUNC_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
   string(REGEX REPLACE "[^a-zA-Z0-9_]" "_" exe_name "test_${test_name}")

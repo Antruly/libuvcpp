@@ -21,11 +21,13 @@ namespace uvcpp {
 // `uvcpp_h3_common.h` 里那几个具名错误码的保险丝：值必须与 nghttp3 自己的宏
 // 逐一对齐。这个 TU 是全仓唯一 include 了 nghttp3 的地方，所以断言只能放这儿。
 //
-// 这两条断言就是"不造平行表"那个决定的**执行机构**：`H3_NO_ERROR` 与
-// `H3_EXCESSIVE_LOAD` 之所以敢在公开头里写成裸数字，是因为它们在这里被钉死在
+// 这几条断言就是"不造平行表"那个决定的**执行机构**：`H3_NO_ERROR` 那三个之所以
+// 敢在公开头里写成裸数字，是因为它们在这里被钉死在
 // 上游的取数上。往 `uvcpp_h3_common.h` 里再加一个 h3 错误码而不在这里加一条
 // 断言，等于把平行表从明处搬到暗处。
 static_assert(H3_NO_ERROR == NGHTTP3_H3_NO_ERROR, "h3 error code drift");
+static_assert(H3_INTERNAL_ERROR == NGHTTP3_H3_INTERNAL_ERROR,
+              "h3 error code drift");
 static_assert(H3_EXCESSIVE_LOAD == NGHTTP3_H3_EXCESSIVE_LOAD,
               "h3 error code drift");
 

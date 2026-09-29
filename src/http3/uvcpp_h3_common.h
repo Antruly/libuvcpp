@@ -98,15 +98,22 @@ const size_t H3_MAX_WRITE_VECS = 16;
  * 里的 rx/tx 码，以及 `uvcpp_h3_session::quic_app_error_code()` 给 QUIC 收尾用的
  * 那个）——**不在这里造一张平行表**：那种表会跟上游一起漂移，而且漂移是静默的。
  *
- * 上面那条规矩的保险丝在 `uvcpp_h3_session.cpp`：下面两个值各有一条
+ * 上面那条规矩的保险丝在 `uvcpp_h3_session.cpp`：下面三个值各有一条
  * `static_assert` 对着 nghttp3 自己的宏（`NGHTTP3_H3_NO_ERROR` /
- * `NGHTTP3_H3_EXCESSIVE_LOAD`）。加了常量却不加断言，就等于把"平行表"从明处
- * 搬到了暗处。
+ * `NGHTTP3_H3_INTERNAL_ERROR` / `NGHTTP3_H3_EXCESSIVE_LOAD`）。加了常量却不加
+ * 断言，就等于把"平行表"从明处搬到了暗处。
  *
  * 取值是 HTTP/3 的规矩，不是随便定的：`0x0100` 起、每个 +1，落在 QUIC 自己的
  * 保留区间之外（`0x00`–`0x1f` 是 QUIC 传输层错误码）。
  */
 const uint64_t H3_NO_ERROR = 0x0100;
+/**
+ * @brief 本端自己出了错（关键单向流开不出来、绑不上之类）。
+ *
+ * 这一条的消费者是 `uvcpp_h3_connection` 里那两处"本层继续不下去"的收场：
+ * 它们必须给对端一个**真话**的错误码，而 `H3_NO_ERROR`（"正常关闭"）是句假话。
+ */
+const uint64_t H3_INTERNAL_ERROR = 0x0102;
 /// 一个头块（或一个请求/响应）超出了我们愿意付出的资源 —— 本层用它收尾"头部
 /// 预算超限"那条路（见 `H3_DEFAULT_MAX_FIELD_SECTION_SIZE`）。
 const uint64_t H3_EXCESSIVE_LOAD = 0x0107;
