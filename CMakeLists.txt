@@ -1604,13 +1604,18 @@ endif()
 # src/quic/ 同理：公开头是 pimpl 形状的（<ngtcp2/ngtcp2.h> 只出现在 .cpp 里），
 # 使用者拿到的头不依赖 ngtcp2 本身。
 file(GLOB QUIC_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/quic/*.h")
-# `uvcpp_quic_ngtcp2.h` 是**私有**头（它把 <ngtcp2/ngtcp2.h> 拉进来，正是为了让别的
-# 头不拉），装出去等于把"使用者不需要 ngtcp2"这个结论作废。
+# `uvcpp_quic_ngtcp2.h` 与 `uvcpp_quic_session.h` 是**私有**头：
+#
+# - 前者把 <ngtcp2/ngtcp2.h> 拉进来（正是为了让别的头不拉）；
+# - 后者是 `quic_session` 的定义，里面直接写着 `ngtcp2_conn*`、`SSL*`、
+#   `ngtcp2_path_storage` 这些字段 —— 它包含前者，所以两者要么一起装要么
+#   一起不装，而正确答案是**一起不装**：装出去等于把"使用者不需要 ngtcp2"
+#   这个结论作废，而且会把一个根本没有稳定 ABI 的类摆进公开面。
 #
 # **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
 # 那个脚本自己按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，
 # `package_release.py` 打出来的包里照样会带上它。
-list(FILTER QUIC_HEADER_FILES EXCLUDE REGEX "uvcpp_quic_ngtcp2\\.h$")
+list(FILTER QUIC_HEADER_FILES EXCLUDE REGEX "uvcpp_quic_(ngtcp2|session)\\.h$")
 if(QUIC_HEADER_FILES AND UVCPP_ENABLE_QUIC)
   install(FILES ${QUIC_HEADER_FILES} DESTINATION include/quic)
 endif()

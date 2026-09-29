@@ -4,40 +4,41 @@
  * @author zhuweiye
  * @version 1.4.1
  *
- * **这个用例测的不是"QUIC 能跑"，而是"QUIC 还跑不了这件事是被写下来的"。**
- * 1.4.1 交付的只有构建契约、模块骨架与 API 形状（见 `doc/quic-guide.md`），
- * 传输一个字节都不通。于是一个诚实的问题就变成：怎么让"还没实现"这件事
- * **在 CI 上表现为可判定的**，而不是靠文档里一句"暂不支持"？
+ * **这个用例在 1.4.1 之前测的是"QUIC 还跑不了这件事是被写下来的"**：那时动作
+ * 一律返回 `UV_ENOSYS`、回调一条都不许响。文件头写着"哪天真实现了，用例会红，
+ * 逼着实现者显式回来改契约"。传输落地之后它红了，这个文件就是那次改契约的结果。
  *
- * 答案是三条，各管一件事：
+ * 现在它管三类事：
  *
- * 1. **后端真链上了**（1.x）。三条证据分别压在 ngtcp2 的头路径、`ngtcp2_static`
- *    的符号、`ngtcp2_crypto_ossl_static` 的符号上。第三条尤其重要 —— 那一半
- *    取决于"那份 OpenSSL 是不是带 QUIC API 的 mainline ≥ 3.2"，是整条接线里
- *    最容易坏的地方。**光有 `quic_ngtcp2_version_string()` 不算证据**：它读的是
- *    一个编译期宏，一个"头骗到了、库没链上"的树照样能跑绿它。
- * 2. **动作全部返回 `UV_ENOSYS`**（3.x/4.x/5.x）。这是"没实现"的**正面**表达：
- *    调用方拿得到一个明确的"这条路没通"，而不是一个沉默的空操作。
- * 3. **回调一次都不被调**（4.x/5.x）。这一条是三条里唯一不能靠"我看了一眼
- *    返回码"得到的：一个接口收下回调、返回 0、然后永远不回调，在外观上与
- *    "正在工作"完全一样，而调用方会把整条超时路径压在那条依赖上 ——
- *    本仓库里最难查的一类挂死。
+ * 1. **后端真链上了**（`test_backend_is_really_linked`）。三条证据分别压在
+ *    ngtcp2 的头路径、`ngtcp2_static` 的符号、`ngtcp2_crypto_ossl_static` 的
+ *    符号上。第三条尤其重要 —— 那一半取决于"那份 OpenSSL 是不是带 QUIC API 的
+ *    mainline ≥ 3.2"，是整条接线里最容易坏的地方。**光有
+ *    `quic_ngtcp2_version_string()` 不算证据**：它读的是一个编译期宏，一个
+ *    "头骗到了、库没链上"的树照样能跑绿它。
+ * 2. **没挂到连接上的那个壳，说的是实话**（`test_connection_shell`）。一个默认
+ *    构造的 `uvcpp_quic_connection` 背后**没有内核**，于是
+ *    `open_stream()` / `write_stream()` / `close()` 一律返回 `UV_ENOTCONN` ——
+ *    不是 `UV_ENOSYS`。"功能没实现"这句在 1.4.1 已经不成立了，"这个对象没挂到
+ *    连接上"才是。这条区别是**故意**用同一个词测出来的：把 `UV_ENOTCONN` 换成
+ *    `UV_ENOSYS`（或反过来）都会红。
+ * 3. **`connect()` / `listen()` 返回负值就是没收下，回调一次都不许排**
+ *    （`test_endpoint_contract`）。一个接口收下回调、返回 0、然后永远不回调，
+ *    在外观上与"正在工作"完全一样，而调用方会把整条超时路径压在那条依赖上 ——
+ *    本仓库里最难查的一类挂死。所以"没返 0 就不许回调"这条要**在返负值的那条
+ *    路上也成立**（没设 TLS 上下文 → `UV_EINVAL`）。
  *
  * 第 3 条怎么才能**不是空断言**：光"我没拨循环所以回调没跑"是没意义的。所以
  * 用例在这期间**真拨**循环，并且用一个 10ms 定时器**证明这段时间里循环确实在
- * 被拨**（`pumped`）。定时器触发了而四条回调一条都没响，那句话才成立。
+ * 被拨**（`pumped`）。定时器触发了而那些回调一条都没响，那句话才成立。
  *
- * 反过来，一旦哪天真把传输实现了，这个文件会**红**（`UV_ENOSYS` 断言不再成立），
- * 逼着实现者回来显式改契约 —— 这正是想要的：不能让"框架写好了"这句话在
- * 没人注意的时候悄悄变成假的。
- *
- * **这个文件里没有看门狗。** 同目录 19/108 个 `*_func.cpp` 有一只（2026-09-29 数），
- * 用来兜住"回调永远不来"那类挂死。这里不需要，而且加一只**反而有害**：
- * `loop_drain.h` 的 `drain()` 是**有界**的（最多 256 轮 `UV_RUN_NOWAIT`），
- * `wait_util.h` 的 `wait_until` 每个都带 deadline，`loop_drain` 还是 RAII ——
- * 本文件里没有任何一处可能无限等待，看门狗一次都不会触发。一只永不触发的看门狗
- * 只会让人以为这里有超时兜底。真需要它的地方也不在这里：挂死风险在**没实现**的
- * 传输里不存在，等哪天真接上传输，风险会跟着实现一起长出来。
+ * **这个文件里没有看门狗。** 同目录的 `*_func.cpp` 有一多半带一只，用来兜住
+ * "回调永远不来"那类挂死。这里不需要：`loop_drain.h` 的 `drain()` 是**有界**的
+ * （最多 256 轮 `UV_RUN_NOWAIT`），`wait_util.h` 的 `wait_until` 每个都带
+ * deadline，`loop_drain` 还是 RAII —— 本文件里没有任何一处可能无限等待。
+ * 真会挂死的那些路径（握手、收流）在 `quic_handshake_func.cpp` 与
+ * `quic_stream_func.cpp` 里测，那两个文件里的 `wait_until` 也全都带 5 秒
+ * deadline。
  */
 #include <cctype>
 #include <cstdlib>
@@ -178,43 +179,47 @@ void test_default_alpn() {
 }
 
 // =========================================================================
-// 3. 连接壳
+// 3. 没挂到连接上的那个壳
 // =========================================================================
 
 void test_connection_shell() {
-  std::cout << "  -- 连接壳" << std::endl;
+  std::cout << "  -- 连接壳（没有内核）" << std::endl;
 
   uvcpp_quic_connection conn;
 
-  // 1.4.1 的状态机还不存在，所以这两个是**恒定值**。断言它们不是"测实现"，
-  // 而是把这个恒定事实写下来：将来状态机落地时这里会红，提醒改契约。
+  // 没有内核 → `IDLE`。这里钉的不是"状态机恒为 IDLE"（从前那条已经作废），
+  // 而是"**没挂上去**的连接报 IDLE" —— 挂上去之后它就会跟着内核走，
+  // 那一半在握手/流两个用例里测。
   check(conn.state() == quic_connection_state::IDLE,
-        "state() 在 1.4.1 恒为 IDLE（状态机还没写）");
+        "没挂到端点的壳，state() == IDLE");
   check_eq_s(conn.alpn_selected(), "",
-             "alpn_selected() 在 1.4.1 恒为空串（握手还没实现）");
+             "没挂到端点的壳，alpn_selected() 是空串（不是猜的默认值）");
 
-  // 回调装上去不崩，且**一条都不会被调** —— 见本文件开头第 3 条。
-  // 这里没有循环可拨，所以这轮只是"装得上"；真正的"不回调"断言在下面
-  // 客户端/服务端那一段里（那里有循环）。
+  // 回调装上去不崩，且**一条都不会被调**（这个壳没有循环、没有内核）。
   uvcpp_quic_connection::callbacks cbs;
-  cbs.on_read = [](uvcpp_quic_connection&, const net_read_result&) {};
+  cbs.on_read = [](uvcpp_quic_connection&, int64_t, const net_read_result&) {};
   cbs.on_stream_open = [](uvcpp_quic_connection&, int64_t) {};
+  cbs.on_write = [](uvcpp_quic_connection&, int64_t, int) {};
   cbs.on_alpn = [](uvcpp_quic_connection&, const std::string&) {};
   cbs.on_close = [](uvcpp_quic_connection&, int) {};
   conn.set_callbacks(cbs);
-  check(true, "set_callbacks() 收下四个回调");
+  check(true, "set_callbacks() 收下五个回调");
 
-  check_eq_i(conn.open_stream(), UV_ENOSYS, "open_stream() == UV_ENOSYS");
-  check_eq_i(conn.open_stream(false), UV_ENOSYS,
-             "open_stream(单向) == UV_ENOSYS");
-  check_eq_i(conn.write_stream(0, "x", 1, false), UV_ENOSYS,
-             "write_stream() == UV_ENOSYS");
-  check_eq_i(conn.write_stream(0, nullptr, 0, true), UV_ENOSYS,
-             "write_stream(空块收尾) == UV_ENOSYS");
-  check_eq_i(conn.shutdown_stream(0), UV_ENOSYS,
-             "shutdown_stream() == UV_ENOSYS");
-  check_eq_i(conn.close(), UV_ENOSYS, "close() == UV_ENOSYS");
-  check_eq_i(conn.close(42), UV_ENOSYS, "close(error_code) == UV_ENOSYS");
+  // **`UV_ENOTCONN` 而不是 `UV_ENOSYS`** —— 见文件头第 2 条。下面这几条断言
+  // 与 1.4.0 那版逐字相同、期望值不同，那个差别就是"传输实现了"这件事在
+  // 契约上的化身。
+  check_eq_i(conn.open_stream(true), UV_ENOTCONN,
+             "open_stream(双向) == UV_ENOTCONN");
+  check_eq_i(conn.open_stream(false), UV_ENOTCONN,
+             "open_stream(单向) == UV_ENOTCONN");
+  check_eq_i(conn.write_stream(0, "x", 1, false), UV_ENOTCONN,
+             "write_stream() == UV_ENOTCONN");
+  check_eq_i(conn.write_stream(0, nullptr, 0, true), UV_ENOTCONN,
+             "write_stream(空块收尾) == UV_ENOTCONN");
+  check_eq_i(conn.shutdown_stream(0), UV_ENOTCONN,
+             "shutdown_stream() == UV_ENOTCONN");
+  check_eq_i(conn.close(), UV_ENOTCONN, "close() == UV_ENOTCONN");
+  check_eq_i(conn.close(42), UV_ENOTCONN, "close(error_code) == UV_ENOTCONN");
 }
 
 // =========================================================================
@@ -224,7 +229,6 @@ void test_connection_shell() {
 void test_endpoint_contract(uvcpp_loop& loop) {
   std::cout << "  -- 端点契约（共享循环）" << std::endl;
 
-  // 这四条回调如果在 1.4.1 里的任何时刻被调到，就是契约被破坏了。
   bool any_cb_fired = false;
   const auto mark = [&any_cb_fired]() { any_cb_fired = true; };
 
@@ -243,21 +247,35 @@ void test_endpoint_contract(uvcpp_loop& loop) {
     client.set_alpn_protos({});  // "一个都不发"，与"没设过"是两件事
     server.set_ssl_context(nullptr);
     server.set_alpn_select_protos({std::string(quic_default_alpn())});
+    server.set_idle_timeout(30000);
+    client.set_idle_timeout(30000);
 
+    // **没设 TLS 上下文就是没配。** QUIC 没有明文模式（ALPN 是 TLS 扩展），
+    // 退化成一个不加密的端点不是"宽容"，是假装成功 —— 所以这条路返回
+    // `UV_EINVAL`，而不是建一条谁都认的裸连接。
     check_eq_i(client.connect("127.0.0.1", 1, [&mark](int) { mark(); }),
-               UV_ENOSYS, "client.connect() == UV_ENOSYS");
-    // 主机名这条也要试：解析那一步同样没实现，不能因为"名字看起来对"就走到
-    // 别的分支上去（那会让 `host` 参数在校验里被悄悄用上）。
+               UV_EINVAL, "没设 TLS 上下文时 client.connect() == UV_EINVAL");
+    // 主机名这条也要试：解析那一步在 TLS 校验**之后**，不能因为"名字看起来对"
+    // 就绕过了上面那条判据。
     check_eq_i(client.connect("localhost", 1, [&mark](int) { mark(); }),
-               UV_ENOSYS, "client.connect(主机名) == UV_ENOSYS");
+               UV_EINVAL, "没设 TLS 上下文时 connect(主机名) == UV_EINVAL");
+    // 端口范围与空主机名同样在"一切失败都在返回负值的那条路上解决"之内。
+    check_eq_i(client.connect("127.0.0.1", -1, [&mark](int) { mark(); }),
+               UV_EINVAL, "connect(端口 -1) == UV_EINVAL");
+    check_eq_i(client.connect("127.0.0.1", 65536, [&mark](int) { mark(); }),
+               UV_EINVAL, "connect(端口 65536) == UV_EINVAL");
+    check_eq_i(client.connect(nullptr, 1, [&mark](int) { mark(); }), UV_EINVAL,
+               "connect(host == nullptr) == UV_EINVAL");
     check(client.connection() == nullptr,
-          "1.4.1 的 connection() 恒为 nullptr（建不出连接）");
-    check_eq_i(client.close(), UV_ENOSYS, "client.close() == UV_ENOSYS");
+          "connect() 没返 0 时 connection() 是空的（没建出半条连接）");
+    // 连不上就没得关 —— 这一条与上面那句 `UV_ENOTCONN` 是同一个道理。
+    check_eq_i(client.close(), UV_ENOTCONN,
+               "没连接时 client.close() == UV_ENOTCONN");
 
     check_eq_i(server.listen([&mark](uvcpp_quic_connection*) { mark(); }),
-               UV_ENOSYS, "server.listen() == UV_ENOSYS");
+               UV_EINVAL, "没设 TLS 上下文时 server.listen() == UV_EINVAL");
 
-    // ---- bind：1.4.1 里唯一的"真行为"，所以判据要真的分得开好坏 ----
+    // ---- bind：文件里唯一的"纯登记"动作，所以判据要真的分得开好坏 ----
     check_eq_i(server.bind("127.0.0.1", 5555), 0, "bind(合法 IPv4) == 0");
     check_eq_s(server.configured_ip(), "127.0.0.1", "configured_ip() 回登记值");
     check_eq_i(server.configured_port(), 5555, "configured_port() 回登记值");
@@ -281,6 +299,11 @@ void test_endpoint_contract(uvcpp_loop& loop) {
 
     // 端口 0 是合法的（"由内核挑"），别把它当成"没设过"给拒了。
     check_eq_i(server.bindIpv4("0.0.0.0", 0), 0, "bindIpv4(端口 0) == 0");
+    // 但 `listen()` 之前它**报的就是 0** —— "内核挑了哪个"要 listen 之后才知道。
+    // 这一条钉的是"`configured_port()` 不做无中生有的猜测"：它报的要么是登记值，
+    // 要么是内核真给的那个，唯独不是"顺手挑一个看起来合理的"。
+    check_eq_i(server.configured_port(), 0,
+               "登记为 0 且还没 listen() 时，configured_port() 也是 0");
     check_eq_i(server.bindIpv4(nullptr, 0), 0, "bindIpv4(nullptr) == 0（通配）");
     check_eq_s(server.configured_ip(), "0.0.0.0",
                "bindIpv4(nullptr) 回落到通配地址");
@@ -290,11 +313,11 @@ void test_endpoint_contract(uvcpp_loop& loop) {
     check_eq_i(server.bindIpv4("::1", 5555), UV_EINVAL,
                "bindIpv4(给的是 IPv6) == UV_EINVAL");
 
-    // ---- 三次调用之后，回调一次都不许响 ----
+    // ---- 这一串失败之后，回调一次都不许响 ----
     //
     // `pump_proof` 是这条断言**不空转**的证据：10ms 后它会把 `pumped` 置真，
     // 而 `wait_until` 会在那一刻返回。于是"循环在这段时间里确实被拨了"
-    // 与"四条回调一条都没响"是同一段墙钟里发生的两件事。
+    // 与"那些回调一条都没响"是同一段墙钟里发生的两件事。
     bool pumped = false;
     uvcpp_timer pump_proof(&loop);
     pump_proof.start(
@@ -313,7 +336,7 @@ void test_endpoint_contract(uvcpp_loop& loop) {
           "否则下面那条断言只是没拨循环而已");
     check(!any_cb_fired,
           "connect/listen 的完成回调一次都没被调 —— "
-          "返回 UV_ENOSYS 时必须一条回调都不排，"
+          "返回负值时必须一条回调都不排，"
           "否则调用方会挂在一条永远不会来的依赖上");
   }
 
@@ -375,9 +398,9 @@ void test_self_owned_loop(uvcpp_loop& shared) {
     check(client.connection() == nullptr, "默认构造的客户端也建不出连接");
   }
 
-  // 顺序是 load-bearing 的：**先**证明循环还能拨（这一条会被上面那个定时器的
-  // 关闭回调干扰吗？不会 —— `wait_until` 自己会拨循环，关闭回调顺带跑完），
-  // **再**把队列彻底收干净，最后才断言"什么都没留下"。
+  // 顺序是 load-bearing 的：**先**证明循环还能拨（`wait_until` 自己会拨循环，
+  // 上面那个定时器的关闭回调顺带跑完），**再**把队列彻底收干净，最后才断言
+  // "什么都没留下"。
   check_loop_still_usable(shared);
 
   uvcpp_test::drain(&shared);
@@ -395,9 +418,12 @@ int main() {
   test_default_alpn();
   test_connection_shell();
 
+  // **不要再调 `loop.init()`。** `uvcpp_loop` 的构造函数里已经调过一次了，
+  // 在一条已经初始化过的循环上再 `uv_loop_init` 会把它的内部句柄（async、
+  // 定时器堆）重置一遍 —— libuv 不查这个，于是它不报错，只是把上一次分配
+  // 的东西漏掉。这里从前有一句，是骨架期留下的。
   uvcpp_loop loop;
   uvcpp_test::loop_drain drain_loop(&loop);
-  loop.init();
 
   test_endpoint_contract(loop);
   test_self_owned_loop(loop);

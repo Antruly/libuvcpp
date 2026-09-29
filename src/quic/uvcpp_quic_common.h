@@ -4,10 +4,10 @@
  * @author zhuweiye
  * @version 1.4.1
  *
- * **注意这一版（1.4.1）交付的是什么**：只有 **API 形状**与**构建契约**。
- * 传输路径一个字节都还没通 —— 不能握手、不能开流、不能收发。公开面里那些
- * 「动作」方法一律返回 `UV_ENOSYS`，这个约定由 `tests/functional/quic_api_func.cpp`
- * 逐条钉住。真东西留给 1.4.x 后面的版本。
+ * **1.4.1 的 QUIC 是一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时
+ * 都通了，一条连接上的多条流共用同一条 UDP 口。**没做的**是 HTTP/3（nghttp3 连
+ * 依赖都没接）、0-RTT、连接迁移、datagram（RFC 9221）与 multipath —— 这份清单
+ * 在 `doc/quic-guide.md` §8 里逐条列着，别在别处另维护一份。
  *
  * 本头**不包含** `<ngtcp2/ngtcp2.h>`（理由见 `uvcpp_quic_ngtcp2.h`）。
  */
@@ -56,8 +56,8 @@ class uvcpp_quic_connection;  // 见 src/quic/uvcpp_quic_connection.h
  * 值，调用方要拷就自己拷。也**不加** `std::vector<std::string>` 那份重载 ——
  * 那会让每个调用点都多一次堆分配，只为了包一个长度已知的 C 串。
  *
- * @warning 这一版没有任何代码把它交给 TLS 层（握手还没实现）。它的存在是**把
- *          API 形状定下来**：将来 `set_alpn_protos()` 不设时，用的就是它。
+ * `uvcpp_quic_client::set_alpn_protos()` 与 `uvcpp_quic_server::set_alpn_select_protos()`
+ * 不设时，交给 TLS 的就是它。
  */
 inline const char* quic_default_alpn() {
   return "h3";
@@ -70,14 +70,18 @@ inline const char* quic_default_alpn() {
 /**
  * @brief 一条 QUIC 连接在本层的生命周期（RFC 9000 §10）。
  *
- * @warning **1.4.1 里没有任何代码路径给这些值赋值** —— 传输状态机还没有。
- *          目前 `uvcpp_quic_connection::state()` 恒返回 `IDLE`。这里把它列出来是
- *          **把 API 形状定下来**，不是为了假装已经能跑；所以每个值的语义都照着
- *          RFC 写清楚，将来填状态机时不用再猜。
+ * 由 `uvcpp_quic_connection::state()` 报出来，也是
+ * `quic_detail::quic_session` 内部那个状态机的对外投影。
  *
  * 与 `uvcpp_h2_common.h` 里 `h2_stream_state` 同一套做法：只命名**有具名语义**
  * 的几个，其余一律以 ngtcp2 的原始返回值透传 —— **不在这里造一张平行表**，
  * 那种表会和上游一起漂移，而且漂移是静默的。
+ *
+ * @note 没有"`ESTABLISHED` 之前不能开流"这条限制：QUIC 允许在握手完成前就把流
+ *       开出去（`ngtcp2_conn_open_bidi_stream` 的说明里写着可以在握手前调），
+ *       那些字节排在 0-RTT 队列里，等密钥齐了一起走。本库不做 0-RTT，所以
+ *       实践中第一个应用数据字节总在握手之后 —— 但那是**时序**，不是这里的
+ *       一条规则，用例不该拿 `state()` 当"能不能开流"的判据。
  */
 enum class quic_connection_state {
   IDLE,         ///< 还没有对端。客户端在此状态可以去 `connect()`。
@@ -108,8 +112,9 @@ enum class quic_connection_state {
 /**
  * @brief 框架层 QUIC 读回调。
  *
- * @param conn   事件所属的连接。
- * @param result 事件内容（**复用 net 层那套语义**，见本文件开头）。
+ * @param conn      事件所属的连接。
+ * @param stream_id **事件属于哪条流**（QUIC 流号，`int64_t`）。
+ * @param result    事件内容（**复用 net 层那套语义**，见本文件开头）。
  *
  * 在 **loop 线程**上调用。回调返回后 `result.data` 失效。
  *
@@ -120,8 +125,15 @@ enum class quic_connection_state {
  *       `uv_stream_t`，继承不了），要么就得在回调里伪造一个 TCP 客户端引用。
  *       所以复用落在**语义**那一层（`net_read_result` / `net_read_event`），
  *       那是真正共用的部分；第一个参数按本层自己的类型走。
+ *
+ * @note 加 `stream_id` 是 QUIC 与 TCP 的**本质**差别，不是灵活性：一条 QUIC
+ *       连接上并行跑着很多条流，而 TCP 上只有一条字节流。不加这个参数，调用方
+ *       根本没法说清"收到的这半句话是哪一问的回答"。`src/http2/` 那边的
+ *       `uvcpp_h2_session` 回调同样是 `(session&, stream_id, …)` 的形状 ——
+ *       多路复用层都长这样，不是巧合。
  */
-typedef std::function<void(uvcpp_quic_connection&, const net_read_result&)>
+typedef std::function<void(uvcpp_quic_connection&, int64_t stream_id,
+                           const net_read_result&)>
     uvcpp_quic_read_cb;
 
 // =========================================================================

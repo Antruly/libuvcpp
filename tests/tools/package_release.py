@@ -67,11 +67,16 @@ MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "h
 # `<openssl/ssl.h>` —— 三个头路径。发出去，使用者就会拿到一个"一 include 就
 # 硬编译错误"的头，而且错误指向一个他根本没装的库。
 #
+# `uvcpp_quic_session.h` 是第四条，性质不同：它**不**直接拉第三方头（包含上面
+# 那个而已），但它是 `quic_session` 的**定义** —— 字段里写着 `ngtcp2_conn*`、
+# `SSL*`、`ngtcp2_path_storage`，公开面的形状是 pimpl 就是为了把它们关在
+# `.cpp` 里。发出去等于把那个决定反过来，而且会摆出一个没有任何稳定性承诺的类。
+#
 # `CMakeLists.txt` 的 `list(FILTER QUIC_HEADER_FILES EXCLUDE REGEX
-# "uvcpp_quic_ngtcp2\\.h$")` 是同一条排除，**两处必须一起改** —— 这里漏了
-# 只影响发布包，那里漏了只影响 `cmake --install`，两边都不报错。
+# "uvcpp_quic_(ngtcp2|session)\\.h$")` 是同一条排除，**两处必须一起改** ——
+# 这里漏了只影响发布包，那里漏了只影响 `cmake --install`，两边都不报错。
 PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
-                   "uvcpp_quic_ngtcp2.h"}
+                   "uvcpp_quic_ngtcp2.h", "uvcpp_quic_session.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），

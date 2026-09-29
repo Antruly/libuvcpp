@@ -45,6 +45,16 @@
 // `CMakeLists.txt` 里那段 QUIC API 预检（复刻 ngtcp2 自己的分支顺序）是专门
 // 用来把这两种树分开的，改那边之前先读这里。
 #include <ngtcp2/ngtcp2_crypto_ossl.h>
+// 与上面那句**不是**二选一，两个都要。
+//
+// `ngtcp2_crypto_ossl.h` 只把 crypto 的**后端**（`ngtcp2_crypto_ossl_ctx` 那一族
+// 上下文管理函数）给出来，它自己只 include `ngtcp2.h` 与 `<openssl/ssl.h>`，
+// **不**include 这个头。而我们要填进 `ngtcp2_callbacks` 的那一堆
+// `ngtcp2_crypto_*_cb`（`encrypt` / `decrypt` / `hp_mask` / `recv_retry` /
+// `client_initial` / …）与 struct 成员用的 `ngtcp2_crypto_conn_ref` 全在
+// `ngtcp2_crypto.h` 里。少了这一句的报错是"`ngtcp2_crypto_encrypt_cb` 未声明"
+// 这种，看着像名字写错了，其实是头没进来。
+#include <ngtcp2/ngtcp2_crypto.h>
 
 namespace uvcpp {
 namespace quic_detail {
