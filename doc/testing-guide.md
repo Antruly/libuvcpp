@@ -98,7 +98,7 @@ int main() {
 
 That is the difference in one line: if the CMake filter stops working, the two files above go
 green while testing nothing, and this one goes **red**. The `1.4.1` CI job for QUIC leans on
-exactly this (`doc/ci-guide.md` §The `quic` job) — which is also why the file must be excluded
+exactly this (`doc/ci-guide.md` §The `quic` entries) — which is also why the file must be excluded
 rather than merely skipped, since a non-zero exit is only usable if a mis-registered test can
 actually reach it.
 
@@ -146,10 +146,11 @@ drivers below are built around this.
 ## The flaky test, and the one with its own timeout
 
 **`test_shutdown_func` is excluded in CI only.** It is flaky at roughly 1%, and it is excluded
-via `--exclude-regex "test_shutdown_func"` on every `ctest` invocation in `ci.yml` and
-`release.yml`. It is *not* excluded locally, and it is not hanging — the comment in `ci.yml`
-says so explicitly, because "flaky" and "hangs" get conflated and the second one would justify a
-much more invasive fix. Run it locally; if it fails, re-run it before believing it.
+via `--exclude-regex "test_shutdown_func"` on every `ctest` invocation in the four platform
+files and `release.yml`. It is *not* excluded locally, and it is not hanging — the comment in
+the workflow files says so explicitly, because "flaky" and "hangs" get conflated and the second
+one would justify a much more invasive fix. Run it locally; if it fails, re-run it before
+believing it.
 
 **`test_web_app_static_func` has its own `TIMEOUT 90`.** It is the heaviest test in the tree
 (≈16.5 s on the Ubuntu runner, ≈21.4 s on Windows) while CI passes `--timeout 30`. A per-test
@@ -179,14 +180,14 @@ executable is on disk; CMake does not delete executables whose source files have
 
 ## `tests/tools/` — the script index
 
-Twenty-six scripts. Most exist because a specific claim needed to be *measured* rather than
+Thirty-two scripts. Most exist because a specific claim needed to be *measured* rather than
 argued, so they are evidence-producing tools, not a coherent framework. Several are one-shots
 kept because deleting them would lose the method.
 
 ### Gate exit codes: `3` is **not** a failure
 
 The gate scripts — `check_doc_versions.py`, `check_docs.py`, `verify_tree.py`,
-`check_config_contract.py` — share a three-valued exit code:
+`check_config_contract.py`, `check_ci_layout.py` — share a three-valued exit code:
 
 | Code | Means |
 |---|---|
@@ -217,6 +218,7 @@ nothing is the failure mode worth spending a rule on: it looks green forever.
 | `check_docs.py` | Documentation gate — the CMake option tables in both READMEs match the options the build actually defines (both directions), every relative link and repo path resolves, and no `doc/*.md` is orphaned. Runs on every push. |
 | `check_doc_snippets.py` | Documentation gate — every ```` ```cpp ```` block in a tracked document actually compiles against a packaged header set. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#code-blocks-in-documentation) for the block conventions. |
 | `check_doc_lines.py` | Documentation gate — every `file:line` reference in a tracked document still points where it did, and none is written in the extension-only shorthand (`<file>.cpp:123`). Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#line-references-in-documentation) for the citation conventions. |
+| `check_ci_layout.py` | **CI-layout gate** — `.github/workflows/` is exactly the four per-platform files, each one's job and feature-matrix entries match the table in [`ci-guide.md`](ci-guide.md) **both ways**, each `h2`/`quic` entry still carries its four gate strings, and both READMEs' CI badges point at files that exist. Runs on every push. |
 
 **Why `check_doc_lines.py` exists.** `check_docs.py`'s path criterion strips the `:NNN`
 suffix (`LINE_SUFFIX_RE`) *before* testing whether the file exists — the line number half was

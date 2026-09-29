@@ -100,8 +100,9 @@ OpenSSL discovery block moved out of `if(UVCPP_BUILD_WEB)`. Before that move,
 `-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF` compiled `src/ssl/` but never defined
 `UVCPP_SSL_LIBS`, and an empty `UVCPP_SSL_LIBS` expands to a **silent no-op**
 `target_link_libraries()` — the symptom was a link failure, not a configure error, and it took
-the net layer's own TLS client path down with it. The `quic` CI job is the only leg that
-covers "SSL on + web off".
+the net layer's own TLS client path down with it. The `quic` CI entries are the only legs that
+cover "SSL on + web off" — there are three of them, one per platform file (Ubuntu, macOS,
+Windows MSVC).
 
 nghttp2 is linked **PRIVATE** and statically. It appears only in `src/http2/*.cpp` behind a
 pimpl, never in a public header, so it adds no DLL dependency to anything you build. zlib, by

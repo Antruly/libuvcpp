@@ -126,7 +126,7 @@ jobs:
           exit $rc
 
       # **出包之前必须全绿**。发布一个测试挂掉的库比不发更坏。
-      # 排除项与 ci.yml 一致：test_shutdown_func 是 ~1% 的既有间歇性失败
+      # 排除项与四个平台文件一致：test_shutdown_func 是 ~1% 的既有间歇性失败
       # （doc/ci-guide.md §4），拿它卡发布只会卡住发布本身。
       - name: Test
         run: |

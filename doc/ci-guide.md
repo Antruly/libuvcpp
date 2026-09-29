@@ -1,49 +1,121 @@
 # CI Guidelines & Rules
 
 This document defines the rules and best practices for maintaining CI in this project.
-**All contributors must read and follow these guidelines before modifying `.github/workflows/ci.yml`.**
+**All contributors must read and follow these guidelines before modifying anything under
+`.github/workflows/`.**
 
 ---
 
-## 1. CI Job Matrix Overview
+## 1. One platform per file, one feature per entry
 
-| Job | Platforms | Config | Why |
-|-----|-----------|--------|-----|
-| `basic` | Ubuntu, macOS | static + shared, web=OFF | Core library sanity |
-| `windows-basic` | Windows | shared only, web=OFF | Windows shared coverage (static is in `windows-static`) |
-| `windows-static` | Windows | static only, web=OFF, MSVC gen | Windows static + MSVC coverage |
-| `web` | Ubuntu, macOS, Windows | shared, web=ON | HTTP/WebSocket module |
-| `ssl` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON | SSL/TLS module |
-| `h2` | Ubuntu, macOS, Windows | shared, web=ON, OpenSSL=ON, nghttp2=ON | HTTP/2 coverage; the only job asserting `NGHTTP2=ON` |
-| `quic` | **Ubuntu only** | shared, net=ON, **web=OFF**, OpenSSL=ON (3.5 built in-job), quic=ON | QUIC skeleton; the only job asserting `UVCPP_ENABLE_QUIC=ON`, and the only one covering "SSL on + web off" |
-| `full` | Ubuntu, macOS | shared, web=ON, OpenSSL=ON, zlib=ON | All features enabled |
-| `mingw64` | Windows (MSYS2 MinGW64) | shared, self-contained DLL, **+ Debug artifact** | MinGW release shape + import-table assertion |
-| `config-contract` | Ubuntu, Windows | package → install → consumer, **+ Debug artifact** | The `UVCPP_*_ENABLE` macro contract (see §5) |
+CI is **four workflow files, one per platform/toolchain**, each with its own `push` and
+`pull_request` triggers. There is no aggregate file and no aggregate badge. The layout is
+machine-checked by `tests/tools/check_ci_layout.py`, which reads the table below between the
+two HTML comments — if you add a feature entry or a platform, that table is part of the change.
 
-The two rows marked **+ Debug artifact** build a second, `UVCPP_BUILD_TESTS=OFF` tree
-(`build-mingw-dbg` / `build-cfg-dbg`) and pass `--debug-tree` to `package_release.py`.
-That is what puts the Debug staging, the `.pdb`, and `uvcpp-debug.pc` under a per-push
-gate — the release chain only runs on tags, so without this the whole Debug path would
-first execute on the day of a release.
+<!-- ci-layout:start -->
+| Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
+|---|---|---|---|---|---|
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
+| `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `Windows (MinGW64)` | `Windows (MinGW64) / mingw64` | `windows-latest` (MSYS2) |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic` | `macOS` | `macOS / <feature>` | `macos-latest` |
+<!-- ci-layout:end -->
 
-**Rationale**: Windows MSVC compilation is slow. Basic builds are split into two separate jobs (`windows-basic` shared + `windows-static` static) so each job has only ONE build cycle.
+The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
+for a file whose job is not a matrix. `check_ci_layout.py` compares it **both ways** against
+the file, so deleting a feature entry without touching this table is red — that is what makes
+"QUIC was quietly dropped from the MSVC leg" impossible to merge.
+
+**Why one file per platform.** The old single file was 1369 lines with 10 jobs spanning four
+platforms and eight feature sets; the two Windows jobs sat 900 lines apart. A feature matrix
+that has grown to eight entries stops being readable when it is interleaved with three other
+platforms. Splitting is not a coverage change: every gate that existed before still exists,
+and the `check_ci_layout.py` criteria were written to keep it that way.
+
+**Inside a file, the skeleton is written once and the entries carry the differences.** Each
+matrix entry has `feature` (also the check name), `flags` (a **block sequence** of `-D`
+options, expanded with `join(matrix.flags, ' ')`), and — for the entries that need them —
+`gate_*` strings and `openssl_root`. Three rules about the entries are load-bearing:
+
+- **Never use a YAML boolean in an `if:`.** GitHub coerces it into a numeric comparison
+  (`true == 'true'` is `1 == NaN`, i.e. **false**), so that leg would never run. Compare
+  strings (`matrix.feature == 'quic'`), and remember that an entry missing the key evaluates
+  to null, which compares false — exactly what is wanted.
+- **`flags` is a block sequence, never a flow sequence and never a folded scalar.** The
+  comment explaining why `-DUVCPP_BUILD_EXPAND=ON` is present has to sit on that `-D` line;
+  a flow `[...]` has nowhere to put it, and a folded `>` silently joins continuation lines
+  into one space and swallows arguments (see the note on that in `release.yml`).
+- **Every matrix job sets `name:` explicitly** (to `<platform> / ${{ matrix.feature }}` here).
+  Without it GitHub splices the whole matrix — `flags` array included — into the check name,
+  which is both unreadable and unstable, while branch protection remembers the name.
+
+**Two things that are deliberately not in these files.**
+
+- **No `concurrency:`.** It would cancel an in-flight run on the next push, and cancelling a
+  run **drops a gate**. The gates are the only product here.
+- **No aggregate "run everything" workflow.** That would put us back where we started.
+
+### Gaps: combinations that are *not* covered
+
+These are written down, not left implicit. None of them is a regression — the single-file
+layout did not cover them either.
+
+| Gap | Why |
+|---|---|
+| MinGW + QUIC | Deferred to the same batch as splitting the MinGW job by feature: that job is a single job whose `defaults: shell: msys2 {0}` is job-level (it cannot be conditionalised) and whose tail is a hard-coded `--platform mingw-x64` package→consumer contract. |
+| MinGW + h2 | Never covered. MinGW has never compiled the HTTP/2 module. |
+| MSVC + full | Windows has never had a `full` leg (`full` is Ubuntu + macOS only). |
+| Windows static + web/webapp | The static entry is `WEB=OFF`. |
+| macOS `config-contract` | `package_release.py`'s `PLATFORMS` has no macOS key — see §5. |
+| WSDL with tests | Both places that set `WSDL=ON` also set `TESTS=OFF`; the WSDL module has never been run by ctest. |
+| **base build with `UVCPP_BUILD_NET=OFF`** | `tests/functional/CMakeLists.txt` filters web/webapp/ssl/h2/wsdl/quic and **not** net, so `NET=OFF` would compile net test files against a library with `src/net/` filtered out — red by construction. Opening this cell needs that filter first. Today "base" therefore means net at its default (on) with `WEB=OFF`, i.e. the two `basic-*` entries. |
+
+The three workflows that need a second (artifact-only, `UVCPP_BUILD_TESTS=OFF`) tree —
+`mingw64`, `config-contract` on Linux and `config-contract` on MSVC — build
+`build-mingw-dbg` / `build-cfg-dbg` and pass `--debug-tree` to `package_release.py`. That is
+what puts the Debug staging, the `.pdb`, and `uvcpp-debug.pc` under a per-push gate; the
+release chain only runs on tags, so without this the whole Debug path would first execute on
+the day of a release.
+
+**Rationale for the runners**: Windows MSVC compilation is slow, so each Windows entry has
+exactly ONE `cmake --build` + `ctest` cycle.
 
 ---
 
-## 2. Adding a New Job
+## 2. Adding a Feature Entry (or a Platform)
 
-Checklist before adding a job:
+Checklist before adding a `feature:` entry:
 
-1. **Single *test* cycle per Windows job** — never run two `cmake --build` + `ctest`
-   cycles in one Windows job. An extra **artifact-only** build (no tests, no ctest) is
-   allowed when the job's deliverable needs a second configuration — see the Debug
-   artifact above — but it still costs compile time, so raise `timeout-minutes` to cover it.
-2. **Add `--timeout 30`** to every `ctest` invocation — prevents a single hung test from blocking the entire CI.
-3. **Add `--exclude-regex "test_shutdown_func"`** to every `ctest` invocation. See §4 for why it is the only one still excluded.
-4. **Copy runtime DLLs on Windows** before running ctest. See §3 below.
-5. **Set `timeout-minutes`** — 90 min for multi-platform jobs, 60 min for single-platform Windows jobs.
-6. **Use `shell: bash`** for all run blocks — cross-platform compatibility.
-7. **Matrix `fail-fast: false`** — a single platform failure must not cancel others.
+1. **Single *test* cycle per entry** — never run two `cmake --build` + `ctest` cycles in one
+   entry. An extra **artifact-only** build (no tests, no ctest) is allowed when the entry's
+   deliverable needs a second configuration — see the Debug tree above — but raise
+   `timeout-minutes` to cover it.
+2. **Add `--timeout 30`** to every `ctest` invocation — prevents a single hung test from
+   blocking the whole leg. (`mingw64` uses `--timeout 60`: that tree runs the whole suite
+   under MSYS2 and the same value is what `release.yml` uses.)
+3. **Add `--exclude-regex "test_shutdown_func"`** to every `ctest` invocation. See §4 for why
+   it is the only one still excluded.
+4. **Copy runtime DLLs on Windows** before running ctest — the MSVC file has one shared,
+   tolerant copy step; extend it if the entry adds a shared dependency. See §3.
+5. **Set `timeout-minutes`** — 90 minutes for every job here. A matrix cannot set a
+   per-entry timeout, so the worst-case Windows leg sets the job's value.
+6. **Use `shell: bash`** for all run blocks in the Linux/Windows/macOS files — except the
+   MinGW file, whose job-level `defaults` already puts every `run:` in MSYS2's bash.
+7. **Matrix `fail-fast: false`** — a single entry's failure must not cancel the others.
+8. **Update the §1 table** and run `python tests/tools/check_ci_layout.py`.
+
+**Adding a platform** means adding a fifth file — which `check_ci_layout.py` criterion 1
+rejects outright. That is intentional: a new platform is a spec change (add it to
+`PLATFORM_FILES` in the gate, to the §1 table, and to both READMEs' badges), not something
+that should slip in unnoticed.
+
+**Files must stay flat under `.github/workflows/`.** `check_doc_lines.py`'s scan set is
+`.github/workflows/*.yml` — no `**` — so a workflow in a subdirectory would silently drop its
+line-number citations out of that gate's scan set. `check_ci_layout.py` asserts there is no
+nested workflow file for exactly this reason.
 
 ---
 
@@ -51,39 +123,58 @@ Checklist before adding a job:
 
 When building shared libraries on Windows, test executables need DLLs next to them at runtime.
 The CMakeLists.txt POST_BUILD step copies `uvcpp.dll`, but FetchContent-built dependencies
-are NOT auto-copied.
+are NOT auto-copied. The MSVC file has **one** copy step shared by every entry (every `cp`
+is tolerant: `2>/dev/null || true`), so the table below is "what that step must find on
+disk for this entry", not "what a given job hardcodes":
 
-### Required DLL copy list
+| Entry | uvcpp.dll | uv.dll | llhttp.dll | OpenSSL DLLs | nghttp2 DLL | ngtcp2 DLL |
+|---|---|---|---|---|---|---|
+| `basic-shared` | ✓ | ✓ | — | — | — | — |
+| `basic-static` | — | ✓ | — | — | — | — |
+| `web` | ✓ | ✓ | ✓ | — | — | — |
+| `ssl` | ✓ | ✓ | ✓ | ✓ | — | — |
+| `h2` | ✓ | ✓ | ✓ | ✓ | — | — |
+| `quic` | ✓ | ✓ | — | ✓ | — | — |
 
-| Job | uvcpp.dll | uv.dll | llhttp.dll | OpenSSL DLLs | nghttp2 DLL |
-|-----|-----------|--------|------------|--------------|-------------|
-| `windows-basic` | ✓ | ✓ | — | — | — |
-| `windows-static` | — | ✓ | — | — | — |
-| `web` | ✓ | ✓ | ✓ | — | — |
-| `ssl` | ✓ | ✓ | ✓ | ✓ | — |
-| `h2` | ✓ | ✓ | ✓ | ✓ | — |
+Two of those `—` are the kind that look like an omission and are not:
 
-**ngtcp2 has no column either, and for the same reason** — it is linked static
-(`ngtcp2_static` + `ngtcp2_crypto_ossl_static`), and the `quic` job is Ubuntu-only, so it never
-appears in this Windows table at all.
+- **`basic-static` has no `uvcpp.dll` cell value** because a static-only entry never
+  produces one — nothing links against it, the test executables carry the library inside
+  themselves. That is why the old `windows-static` job copied `uv.dll` and nothing else; the
+  shared copy step in `ci-windows-msvc.yml` still *attempts* `uvcpp.dll` for every entry, and
+  this cell is not a claim about that step, it is a claim about what exists on disk.
+- **`llhttp.dll` is `—` on every entry with `UVCPP_BUILD_WEB=OFF`** (`basic-*`, `quic`) —
+  **and not merely unneeded, but not built at all**: llhttp is fetched from inside the
+  `if(UVCPP_BUILD_WEB)` block, and `CMakeLists.txt` says so in as many words ("llhttp — HTTP
+  解析器, WEB=ON 时必须下载"). Measured on this machine: the `web` tree has
+  `_deps/llhttp-build/`, the `basic-static` and `quic` trees have no `_deps/llhttp*` at all.
+  So a `cp` for it there is a tolerant no-op covering a file that was never compiled.
 
-**nghttp2 has no DLL column value on purpose.** It is the one FetchContent dependency
-linked **static** (`nghttp2_static` + `NGHTTP2_STATICLIB`, see `CMakeLists.txt`), so
-`uvcpp.dll` gains no new runtime dependency and no copy step is needed. That was the
-reason for choosing static: the alternative is one more DLL to chase through every
-job, every packaging script, and every consumer's `bin/`.
+**nghttp2 and ngtcp2 have no column value on purpose.** Both are linked **static**
+(`nghttp2_static` + `NGHTTP2_STATICLIB`; `ngtcp2_static` + `ngtcp2_crypto_ossl_static`), so
+`uvcpp.dll` gains no new runtime dependency and no copy step is needed. That was the reason
+for choosing static: the alternative is one more DLL to chase through every entry, every
+packaging script, and every consumer's `bin/`. The copy step is therefore also the
+**assertion** that the static decision still holds — if either ever becomes shared again, the
+test executables fail to start (`0xC0000135`) and the `quic`/`h2` entries go red.
+
+**OpenSSL is a different story and must be copied** for `ssl` / `h2` / `quic` (all three link
+it, and on the MSVC runner it is the dynamic `choco` build): without `libssl-3-x64.dll` and
+`libcrypto-3-x64.dll` next to the executables, every case in those entries exits with
+`0xC0000135`, which reads like a DLL-copy bug rather than a TLS/QUIC problem.
 
 ### DLL copy step template
 
 ```yaml
 - name: Copy runtime DLLs (Windows)
-  if: runner.os == 'Windows'
   shell: bash
   run: |
+    feat="${{ matrix.feature }}"
+    tree="build-$feat"
     for d in tests/unit tests/functional tests/expand; do
-      mkdir -p "build-xxx/$d/Release"
-      cp build-xxx/Release/uvcpp.dll "build-xxx/$d/Release/" 2>/dev/null || true
-      cp build-xxx/_deps/libuv-build/Release/uv.dll "build-xxx/$d/Release/" 2>/dev/null || true
+      mkdir -p "$tree/$d/Release"
+      cp "$tree/Release/uvcpp.dll" "$tree/$d/Release/" 2>/dev/null || true
+      cp "$tree/_deps/libuv-build/Release/uv.dll" "$tree/$d/Release/" 2>/dev/null || true
       # Add dependency-specific DLLs as needed
     done
 ```
@@ -94,7 +185,7 @@ If you add a new library via FetchContent that builds as a shared DLL (because
 `BUILD_SHARED_LIBS=ON` by default), you MUST:
 
 1. Find where the DLL is output (`_deps/<name>-build/Release/<name>.dll`)
-2. Add a `cp` line to ALL relevant Windows jobs' DLL copy steps
+2. Add a `cp` line to the shared Windows copy step in `ci-windows-msvc.yml`
 3. Use `2>/dev/null || true` — the DLL may not exist in static configs
 
 **Do NOT** try to force a FetchContent dependency to build static by setting
@@ -117,6 +208,11 @@ specific to it:
   defines it as `int` (not `SSIZE_T`) — the library is compiled with `int`, so anything
   else is an ABI mismatch. `_CRT_DECLARE_NONSTDC_NAMES` does not help, and
   `NGHTTP2_NO_SSIZE_T` deletes callbacks we need.
+
+ngtcp2 needs the same static-selection trick, and one extra: both it and nghttp2 create an
+unconditional `add_custom_target(check)`, so turning them on **together** used to abort the
+configure. The root `CMakeLists.txt` copies the ngtcp2 sources into the build tree and
+removes that one line; §5 has the gate that keeps that workaround honest.
 
 ---
 
@@ -146,18 +242,20 @@ show is the part that matters: the exclusion outlived the bug. When you touch
 this list, re-measure the entries; a reason written months ago is a hypothesis,
 not a finding.
 
-`.github/workflows/ci.yml` was updated to match on 2026-09-17: all seven `ctest`
-invocations now pass `--exclude-regex "test_shutdown_func"` and nothing else, so
-`test_tcp_func` and `test_memory_pool` run on every job and must stay green.
+The four platform files were updated to match on 2026-09-17: **every** one of the 21 matrix
+legs that runs `ctest` passes `--exclude-regex "test_shutdown_func"` and nothing else
+(21 = 7 Linux + 6 Windows MSVC + 7 macOS + 1 MinGW, i.e. the sum of the `Features` column in
+§1, plus the MinGW job), so `test_tcp_func` and `test_memory_pool` run on every leg and must
+stay green.
 
-**Rule**: excluded tests must have a tracking issue. Do not add to the exclude
-list without documenting the reason here and filing a GitHub issue.
+**Rule**: excluded tests must have a tracking issue. Do not add to the exclude list
+without documenting the reason here and filing a GitHub issue.
 
 ---
 
 ## 5. CMake Build Options in CI
 
-Every CI job must explicitly set these options — never rely on defaults:
+Every matrix entry must explicitly set these options — never rely on defaults:
 
 ```
 -DCMAKE_BUILD_TYPE=Release
@@ -167,21 +265,21 @@ Every CI job must explicitly set these options — never rely on defaults:
 -DUVCPP_BUILD_WEB=ON|OFF
 ```
 
-For web/ssl/full jobs, also set:
+For the web/ssl/h2/full entries, also set:
 ```
 -DUVCPP_ENABLE_ZLIB=ON|OFF
 -DUVCPP_ENABLE_OPENSSL=ON|OFF
 ```
 
-The `h2` job adds:
+The `h2` entries add:
 ```
 -DUVCPP_ENABLE_NGHTTP2=ON
 ```
 
-**This option is `OFF` by default, and no other job sets it — so `h2` is the only job
+**This option is `OFF` by default, and no other entry sets it — so `h2` is the only entry
 that compiles `src/http2/` at all.** Everything else builds a library without HTTP/2
 and goes green, which is correct for them and meaningless as evidence about HTTP/2.
-Two gates in that job exist purely to keep that from turning into a vacuous green,
+Two gates in that entry exist purely to keep that from turning into a vacuous green,
 and they should not be "simplified" away:
 
 1. after configure, assert `UVCPP_ENABLE_NGHTTP2:BOOL=ON` in `CMakeCache.txt` **and**
@@ -194,50 +292,67 @@ and they should not be "simplified" away:
    summary. Note also that `ctest` reports `100% tests passed` just as happily when
    the tests were never registered.
 
-### The `quic` job
+The strings live in the matrix entry (`gate_switch` / `gate_integrated` / `gate_module` /
+`gate_test`) and the steps consume them as `matrix.gate_*`, because the skeleton is shared
+with the entries that have no gates. `check_ci_layout.py` asserts both halves: the four
+strings are inside the entry that needs them, and the file really references `matrix.gate_*`.
 
-`quic` mirrors the `h2` gates for the same reason (`1.4.1`), and adds three problems of its own:
+### The `quic` entries
 
-- **It builds OpenSSL 3.5.0 from source inside the job** — the expensive step, hence
-  `timeout-minutes: 90`. It has to: the module cannot be configured against a TLS library
-  without the QUIC API, and no runner has one as a package. Ubuntu 24.04 ships 3.0.13, which
-  has neither `SSL_provide_quic_data` nor `SSL_set_quic_tls_cbs`. Two traps in that step are
-  worth naming, because both were **measured** on a real 3.5 build rather than guessed: the
-  exported `SSL_set_quic_tls_cbs` carries a **version suffix**
-  (`SSL_set_quic_tls_cbs@@OPENSSL_3.5.0`), so an end-anchored `nm | grep` matches nothing and
-  fails the job for no reason; and the installed `bin/openssl` has **no RUNPATH**, so `ld.so`
-  picks up the runner's 3.0.13 first and the binary dies with ``version `OPENSSL_3.4.0' not
-  found`` — it needs `LD_LIBRARY_PATH`.
+`quic` mirrors the `h2` gates for the same reason (`1.4.1`), and adds problems of its own.
+It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (see §1).
+
+- **Only the Ubuntu leg builds OpenSSL from source, and it has to.** The module cannot be
+  configured against a TLS library without the QUIC API, and no *package* on that runner
+  provides one: Ubuntu 24.04 ships 3.0.13, which has neither `SSL_provide_quic_data` nor
+  `SSL_set_quic_tls_cbs`. So the leg builds 3.5.0 from source (the expensive step: the job's
+  `timeout-minutes: 90` covers it). Two traps in that step are worth naming, because both
+  were **measured** on a real 3.5 build rather than guessed: the exported
+  `SSL_set_quic_tls_cbs` carries a **version suffix** (`SSL_set_quic_tls_cbs@@OPENSSL_3.5.0`),
+  so an end-anchored `nm | grep` matches nothing and fails the leg for no reason; and the
+  installed `bin/openssl` has **no RUNPATH**, so `ld.so` picks up the runner's 3.0.13 first
+  and the binary dies with ``version `OPENSSL_3.4.0' not found`` — it needs `LD_LIBRARY_PATH`.
+- **The macOS leg uses Homebrew's `openssl@3`** (≥ 3.2, so it has the API) and needs no
+  in-job build — but it **must** pass `-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"`:
+  `openssl@3` is keg-only and `FindOpenSSL` has no Homebrew hints at all. A prelude step
+  runs `nm -gU` on that dylib and fails loudly if `_SSL_set_quic_tls_cbs` is missing or the
+  prefix comes back empty, because the *symptom* of a wrong OpenSSL is a **silent downgrade**
+  (see the next bullet), which would otherwise be attributed to ngtcp2.
+- **The MSVC leg uses `choco install openssl`** (the same source the `ssl`/`h2` entries use).
+  Do **not** add `-DOPENSSL_USE_STATIC_LIBS=ON` there: the choco package ships no static
+  libraries, `find_package` would fail, and `UVCPP_ENABLE_OPENSSL` would be silently
+  downgraded to OFF — red in the wrong place. Because OpenSSL is then dynamic there, the
+  shared DLL-copy step has to place `libssl-3-x64.dll` / `libcrypto-3-x64.dll` next to the
+  executables (§3).
+- **What a QUIC-incapable OpenSSL looks like, on every leg**: *not* a configure-time fatal.
+  The root `CMakeLists.txt`'s QUIC precheck warns and force-`set()`s `UVCPP_ENABLE_QUIC OFF`
+  first, while the cache still reads `ON`. So the load-bearing gate is
+  `ngtcp2 integrated` being **absent** — gate ① (the cache read) is the weak one, and the
+  `nm` preludes on Linux/macOS exist to keep gate ② from being vacuous.
 - Its configure line is the **only** place in CI that turns SSL on with the web module
   **off** (`-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF`). That combination used to
   compile `src/ssl/` without ever defining `UVCPP_SSL_LIBS` and then fail at **link** time;
-  `1.4.1` moved the OpenSSL discovery block out of `if(UVCPP_BUILD_WEB)` to fix it, and this
-  job is the only evidence that the fix holds.
-- The gates are the same three, for the same reason: `UVCPP_ENABLE_QUIC:BOOL=ON` in
-  `CMakeCache.txt`, both `ngtcp2 integrated` and `Including quic module in build` in the
-  configure log, and `ctest -N` really listing `test_quic_api_func`. The cache read alone is
-  stale by construction (the downgrade is a plain `set()`, not a cache write), and the
-  test-registration gate matters more here than anywhere else: with QUIC off
+  `1.4.1` moved the OpenSSL discovery block out of `if(UVCPP_BUILD_WEB)` to fix it, and these
+  entries are the evidence that the fix holds. All three keep web off, so this coverage did
+  not get diluted by adding legs.
+- The test-registration gate matters more here than anywhere else: with QUIC off
   `quic_api_func.cpp` compiles its `#else` branch, whose `main()` prints an error and
   **returns 2** — so a test that failed to register is a **failure**, not a silent pass.
+  (This is also why the file is excluded rather than merely skipped; see
+  `doc/testing-guide.md`.)
+- On Ubuntu, a second, **configure-only** step turns on `nghttp2` and `quic` in one tree. That
+  is the only place either entry covers the combination: `h2` leaves QUIC off and this entry's
+  main configure leaves the web module off. It is a real failure mode, not a hypothetical — the
+  two `add_custom_target(check)` lines collide (§3). It is deliberately configure-only: what
+  breaks is a configure-time line, and building a transport-less skeleton afterwards would
+  prove nothing extra.
+- **A QUIC-incapable OpenSSL on MSVC would need the Ubuntu recipe** (build it in-job) as the
+  fallback. That path has not been taken because `nmake` does not parallelise on Windows and
+  the package-manager route is tried first. If the `quic` entry on MSVC goes red with
+  `ngtcp2 integrated` missing, that is the fallback, not a redesign.
 
-- A second, **configure-only** step turns on `nghttp2` and `quic` in one tree. That is the only
-  place either job covers the combination: `h2` leaves QUIC off and this job's main configure
-  leaves the web module off. It is a real failure mode, not a hypothetical — ngtcp2 and nghttp2
-  each create an unconditional `add_custom_target(check)`, so whichever is added second aborts
-  the configure. The root `CMakeLists.txt` works around it by copying the ngtcp2 sources into
-  the build tree and removing that one line, and this step is what keeps that workaround from
-  rotting silently. It is deliberately configure-only: what breaks is a configure-time line, and
-  building a transport-less skeleton afterwards would prove nothing extra.
-
-**No macOS or Windows leg this version.** Each would need its own QUIC-capable OpenSSL built
-from source in-job, and what is under test is a skeleton that talks to no socket — two more
-expensive builds would buy no coverage the ubuntu leg does not already have. The gap is
-written down here rather than left implicit. The prebuilt packages ship with
-`UVCPP_QUIC_ENABLE 0` regardless, because `release.yml` does not enable QUIC either (that
-would need a QUIC-capable OpenSSL on all six legs).
-
----
+**macOS and Windows prebuilt packages still ship `UVCPP_QUIC_ENABLE 0`** regardless:
+`release.yml` does not enable QUIC (that would need a QUIC-capable OpenSSL on all six legs).
 
 ### The macro contract: `config-contract` (and the `mingw64` tail)
 
@@ -247,14 +362,15 @@ every public header includes it **before its first module guard**. A consumer pa
 `-D` at all; a conflicting `-D` from the consumer is a hard `#error` naming this build's
 value.
 
-Why a separate job rather than a step on `web`/`h2`: on Ubuntu those legs install
+Why a separate job rather than a step on `web`/`h2`: on Ubuntu those entries install
 `libuv1-dev`, and `package_release.py` requires libuv to live under the tree's `_deps/`
 — otherwise it deliberately exits 2 and produces no package. This job configures the way
 `release.yml` does (`UVCPP_BUILD_LIBUV_FROM_SOURCE=ON`) and **with OpenSSL ON**, because
 the member-layout shift being guarded against (`ssl_ctx_` is declared before
 `http_`/`registry_` in `uvcpp_web_app`) only bites when `UVCPP_OPENSSL_ENABLE=1`. The job
 asserts that value in the generated header *before* building: with it off, criterion 1
-silently degrades into a no-op.
+silently degrades into a no-op. The same is asserted for `UVCPP_WSDL_ENABLE`, because
+`check_doc_snippets.py` treats "module really on" as the premise for the `wsdl/` snippets.
 
 `tests/tools/check_config_contract.py` runs three criteria:
 
@@ -286,12 +402,14 @@ silently degrades into a no-op.
 It is **not** compared against `CMakeCache.txt`: OpenSSL/nghttp2/webapp are silently
 downgraded to OFF when their dependency is missing (the `set(UVCPP_ENABLE_OPENSSL OFF)`
 / `set(UVCPP_ENABLE_NGHTTP2 OFF)` / `set(UVCPP_BUILD_WEBAPP OFF)` lines in the top-level
-`CMakeLists.txt` — plain `set()` calls, so the cache still reads ON). The export file holds the
-post-downgrade values, generated from the same literals as the header.
+`CMakeLists.txt` — plain `set()` calls, so the cache still reads ON). The export file holds
+the post-downgrade values, generated from the same literals as the header.
 
-Toolchains covered: `ubuntu` (gcc/ELF), `config-contract`'s `windows` leg (MSVC/PE — it
-needs `ilammy/msvc-dev-cmd` because `cl.exe` is not on the Windows runner's default
+Toolchains covered: `ubuntu` (gcc/ELF), `ci-windows-msvc.yml`'s `config-contract` (MSVC/PE —
+it needs `ilammy/msvc-dev-cmd` because `cl.exe` is not on the Windows runner's default
 PATH), and `mingw64` (MinGW/PE; that job gained `mingw-w64-x86_64-python` for this).
+`check_ci_layout.py` pins the `--platform` / `--cxx` pair of each of the two standalone
+`config-contract` jobs, because a wrong pair means the gate silently tests another toolchain.
 
 **Known gap:** the chain cannot run on macOS — `package_release.py`'s `PLATFORMS` has no
 macOS key (`mingw-x64/arm64`, `msvc-x64/arm64`, `linux-x64/arm64` only). So the macro
@@ -301,26 +419,49 @@ contract is never verified against a clang/macOS toolchain.
 
 ## 6. Installing System Dependencies
 
-### Ubuntu
+Dependencies are installed **per feature entry**, never as a union — installing
+`libssl-dev` for the Ubuntu `quic` entry would put the system's 3.0.13 into the candidate
+set and manufacture a fresh silent-downgrade path. Each file has one install step with a
+`case "${{ matrix.feature }}"` in it, and an unknown feature name is a hard error there.
+
+### Ubuntu (`ci-linux-ubuntu.yml`)
 ```bash
-sudo apt-get update && sudo apt-get install -y libuv1-dev ninja-build
-# ssl job adds: libssl-dev
-# full job adds: libssl-dev zlib1g-dev
+# basic-static | basic-shared
+sudo apt-get install -y libuv1-dev ninja-build
+# web
+sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
+# ssl | h2
+sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
+# full
+sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
+# quic — no libssl-dev on purpose: it builds OpenSSL 3.5 from source
+sudo apt-get install -y libuv1-dev zlib1g-dev
+# config-contract
+sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
 ```
 
-### macOS
+### macOS (`ci-macos.yml`)
 ```bash
+# basic-static | basic-shared
 brew install libuv ninja
-# ssl/full jobs add: openssl
-# full job adds: zlib
+# web
+brew install libuv zlib ninja
+# ssl | h2 | full
+brew install libuv openssl zlib ninja
+# quic — explicit openssl@3, and -DOPENSSL_ROOT_DIR points at it
+brew install libuv zlib ninja openssl@3
 ```
 
-### Windows
+### Windows MSVC (`ci-windows-msvc.yml`)
 ```bash
-# No system deps needed for basic/web (libuv + llhttp via FetchContent)
-# ssl job: choco install openssl --no-progress
+# basic-static | basic-shared | web — no system deps (libuv + llhttp via FetchContent)
+# ssl | h2 | quic
+choco install openssl --no-progress
 # OpenSSL DLL path: C:/Program Files/OpenSSL/bin/ (or OpenSSL-Win64)
 ```
+
+### Windows MinGW64 (`ci-mingw64.yml`)
+`msys2/setup-msys2` installs `mingw-w64-x86_64-{gcc,cmake,ninja,openssl,python}`.
 
 ---
 
@@ -329,8 +470,10 @@ brew install libuv ninja
 1. Add a `UVCPP_BUILD_<MODULE>` option in `CMakeLists.txt`
 2. Add corresponding `UVCPP_<MODULE>_ENABLE` compile definition
 3. Filter sources with `list(FILTER ... REGEX "src/<module>/")` when disabled
-4. Add a CI job or extend an existing one to test the new module
-5. If the module pulls new FetchContent deps, update the DLL copy steps
+4. Add a **`feature:` entry** to the platform files where the module must be covered —
+   `feature` + `flags`, plus `gate_*` if the entry can go green without the module. Then
+   update the §1 table, and update §1's "Gaps" table for the platforms you are *not* adding.
+5. If the module pulls new FetchContent deps, update the shared Windows DLL copy step
 6. Add functional tests in `tests/functional/`
 
 ---
@@ -343,7 +486,11 @@ brew install libuv ninja
    The runner's VS version changed. Remove hardcoded `-G "Visual Studio XX YYYY"` and let CMake pick.
 3. **Single test hangs**: Check if it has an internal watchdog timer. If not, add one first,
    then investigate the root cause.
-4. **`|| true` at end of ctest — removed 2026-09-17.** It had been added to tolerate the
+4. **A whole feature entry stopped running**: check the §1 table against the file with
+   `python tests/tools/check_ci_layout.py`. A renamed entry makes every step guarded by
+   `if: matrix.feature == '<old name>'` disappear **without an error** — the leg still
+   reports success, having done nothing.
+5. **`|| true` at end of ctest — removed 2026-09-17.** It had been added to tolerate the
    intermittent failures listed in §4, but it applies to the whole `ctest` invocation, so a **real**
    test failure was swallowed exactly like a flake and the job still went green. That is what made
    the stale exclusions in §4 survivable for months: nothing could go red to contradict them.
@@ -353,6 +500,20 @@ brew install libuv ninja
    The one remaining justification is `test_shutdown_func` (~1% flake), which stays excluded. If you
    would rather it ran, replace the exclusion with `ctest --repeat until-pass:3` rather than
    reinstating `|| true` — `--repeat` targets the known flake, `|| true` disables the gate.
+
+### Changed check names (branch protection)
+
+Splitting the file **renamed every check**. The old names were the job ids
+(`basic (ubuntu-latest)`, `h2 (windows-latest)`, `config-contract (ubuntu-latest)`, …); the
+new ones are `Linux (Ubuntu) / basic-static`, `Windows (MSVC) / quic`,
+`Windows (MinGW64) / mingw64`, `macOS / h2`, and so on — see the §1 table.
+
+If branch protection requires status checks **by name**, they must be re-pointed on GitHub
+before the first pull request against the new layout, or every PR parks at
+"Expected — waiting for status to be reported". There is nothing in the repository that can
+do this step for you: it is a repository setting, not a file.
+
+The four badges are 404 until the new files are on the default branch.
 
 ---
 
@@ -364,4 +525,4 @@ brew install libuv ninja
 
 ---
 
-*Last updated: 2026-09-20. This document should be updated whenever CI rules change.*
+*Last updated: 2026-09-29. This document should be updated whenever CI rules change.*

@@ -163,7 +163,10 @@ code page, and a Chinese comment then swallows the following newline — a repor
 inside `<algorithm>`, with `C4819` as the only clue. `add_compile_options(/utf-8)` covers
 in-repo builds but is directory-scoped and does not reach `find_package` consumers.
 
-Write new files with **LF** line endings; documentation takes no BOM. `.gitattributes` declares
+Write new files with **LF** line endings; documentation takes no BOM. `tests/tools/*.py`
+follows the **documentation** rule rather than the source rule — all 32 are BOM-less today, so a
+new gate script that copied the source convention would be the only one, and the shebang line is
+the thing a BOM breaks. `.gitattributes` declares
 `* text=auto`, so the repository stores LF regardless of what the checkout looks like. That line
 is load-bearing rather than cosmetic: this tree was developed on Windows, and before it existed
 the CRLF working copies hashed differently from the LF index — 245 of 406 tracked files — which
@@ -179,15 +182,17 @@ reference material (RFC texts, an early development plan) that is deliberately k
 repository; do not reference those paths from tracked documentation, because they will not
 resolve for anyone who clones.
 
-Two gates run on documentation changes, both from CI as well as by hand:
+These gates run on documentation (and, for the last one, CI-layout) changes, from CI as well as
+by hand:
 
 | Command | Checks |
 |---|---|
 | `python tests/tools/check_docs.py` | The CMake option tables in both READMEs match the options the build actually defines, every relative link and repo path resolves, and no document is orphaned. |
 | `python tests/tools/check_doc_snippets.py --pkg <package dir>` | Every ```` ```cpp ```` block in a tracked document actually **compiles** against the packaged headers. |
 | `python tests/tools/check_doc_lines.py` | Every `file:line` reference in a tracked document still resolves, still lands on a non-blank line, still points at the same content it did when the lockfile was written, and is not written in the extension-only shorthand (`<file>.cpp:123`). |
+| `python tests/tools/check_ci_layout.py` | `.github/workflows/` is exactly the four per-platform files, each file's jobs and feature-matrix entries match the table in `doc/ci-guide.md` **both ways**, and the CI badges in both READMEs point at files that exist. Adding or renaming a matrix entry without updating that table is red. |
 
-Both use the same three exit codes, which are worth reading carefully: `0` every criterion ran
+They use the same three exit codes, which are worth reading carefully: `0` every criterion ran
 and passed, `1` a criterion ran and is **red**, and `3` a criterion's **premise was missing, so
 it never ran**. `3` is not a failure — a red criterion also outranks an unjudged one — so read
 the summary block rather than the exit code. See

@@ -1,0 +1,599 @@
+name: Linux (Ubuntu)
+
+# 一平台一个文件 —— 这个文件里**只有** Linux (Ubuntu) 这条腿的测试。四个文件：
+# ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
+#
+# 文件内按**功能分格**：矩阵里一格一个 feature，格的名字就是 check 名
+# （`Linux (Ubuntu) / quic`）。骨架只写一次，格与格的差别全在矩阵条目里 ——
+# 旋钮是条目里的 `flags`（块序列，`join()` 展开），门禁要的字符串也挂在条目上
+# （`gate_*`），这样"某一格被悄悄删掉"或"门禁串在搬运里变形"都能被
+# tests/tools/check_ci_layout.py 抓到。
+#
+# 不设 `concurrency:`：取消一次正在跑的 run 等于**丢一组门禁**，而门禁是这个
+# 文件唯一的产品。
+#
+# 布局规范（含**未覆盖的格**和为什么）在 doc/ci-guide.md §1。改这个文件之前先看它。
+# 注意四个文件必须**平铺**在 `.github/workflows/` 下：`check_doc_lines.py` 的
+# `SCRIPT_GLOBS` 是 `.github/workflows/*.yml`（没有 `**`），挪进子目录会让
+# ci-mingw64.yml 里那三条 CMakeLists 引用**静默**掉出扫描集。
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  linux:
+    # 不给 `name` 的话 GitHub 会把整个 matrix（含 flags 数组）拼进 check 名，
+    # 又长又会随任何一行开关变化 —— 而分支保护里记的是这个名字。
+    name: Linux (Ubuntu) / ${{ matrix.feature }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 基础版：net 默认 ON、web=OFF。**没有** "基础版 = `UVCPP_BUILD_NET=OFF`"
+          # 那一格：tests/functional/CMakeLists.txt 有 web/webapp/ssl/h2/wsdl/quic
+          # 六条过滤器，唯独没有 net ⇒ NET=OFF 会把 net 用例编进一个已把 `src/net/`
+          # 滤掉的库，必然红。要开那一格得先补那条过滤器（doc/ci-guide.md §1）。
+          - feature: basic-static
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_STATIC=ON
+              - -DUVCPP_BUILD_SHARED=OFF
+              - -DUVCPP_BUILD_WEB=OFF
+          - feature: basic-shared
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_STATIC=OFF
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=OFF
+
+          # web：`UVCPP_ENABLE_ZLIB` 必须留 ON —— webapp 的压缩用例断言 gzip 真的
+          # 发生过，zlib 关着那两个组会红，而那个组合没人会去构建。zlib 在
+          # find_package 落空时走 FetchContent，所以任何平台都不需要额外依赖。
+          - feature: web
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+          - feature: ssl
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+
+          # h2：**这一格存在的唯一理由是"别让它绿得没有内容"**。`UVCPP_ENABLE_NGHTTP2`
+          # 默认 OFF，所以别的格都**不编译 `src/http2/`** —— 少了这一格，一整块
+          # HTTP/2 代码可以带着 CI 全绿推上去而从未被编译过一次。
+          # 因此它带四个门禁串（`gate_*`，Configure 与 Test 两步各用一半）：
+          # 配置之后核缓存里那个开关真的是 ON、且消息里真的出现了 `nghttp2 integrated`、
+          # 且 `src/http2/` 真进了源列表；测试之前核 h2 用例**真的被注册了**。
+          # 只跑 ctest 不够：nghttp2 关掉时 `h2_*` 用例走 `#else` 那条只打印 SKIP
+          # 的 `main()` 并且**返回 0** —— "没测"与"通过"在 ctest 里长得一模一样
+          # （本仓栽过一次：`tests/functional/CMakeLists.txt` 的过滤正则写成 `^h2_`，
+          # 而 `file(GLOB)` 给的是全路径，永远匹配不上）。
+          - feature: h2
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_NGHTTP2=ON
+            gate_name: nghttp2
+            gate_switch: 'UVCPP_ENABLE_NGHTTP2:BOOL=ON'
+            gate_integrated: nghttp2 integrated
+            gate_module: Including http2 module in build
+            gate_test: test_h2_session_func
+
+          # full：`UVCPP_BUILD_EXPAND` 自 v1.1.0 起默认 OFF（默认开时，使用者 TU 忘了
+          # 定义 `UVCPP_ENABLE_MEMORY_POOL` 会静默拿到与 dll 不同的分配器 —— 见
+          # RELEASE.md）。这里显式打开：不打开的话 tests/expand 那批用例在 CI 里
+          # 一条都不跑，内存池就成了没人测的死代码。**别顺手把这行删掉。**
+          - feature: full
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_BUILD_EXPAND=ON
+
+          # quic：**四格里唯一自己在 job 里编一份 OpenSSL 的**（见下面那条
+          # "Build OpenSSL 3.5 from source" 步）。它必须自建：模块的配置期预检要求
+          # 那份 OpenSSL 带 QUIC API（`SSL_set_quic_tls_cbs`），而 runner 上没有任何
+          # **包**能提供 —— ubuntu-latest 自带的 3.0.13 两个符号都没有。
+          #
+          # 它同时是**唯一**覆盖 "SSL 开 + web 关" 这个组合的格：`1.4.1` 把 OpenSSL
+          # 的发现块从 `if(UVCPP_BUILD_WEB)` 里搬了出来，在那之前这个组合会把
+          # `src/ssl/` 编进去却从不定义 `UVCPP_SSL_LIBS`，然后**链接失败**。
+          # macOS / Windows 的 quic 格用包管理器给的 OpenSSL（各自的文件里有注释）。
+          - feature: quic
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=OFF
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_QUIC=ON
+            openssl_root: $HOME/openssl-quic
+            gate_name: ngtcp2
+            gate_switch: 'UVCPP_ENABLE_QUIC:BOOL=ON'
+            gate_integrated: ngtcp2 integrated
+            gate_module: Including quic module in build
+            gate_test: test_quic_api_func
+    steps:
+      - uses: actions/checkout@v4
+
+      # 装包**按格**，不取并集：给 quic 那一格装 `libssl-dev` 会把系统那份 3.0.13
+      # 摆进候选，凭空造出一条"没有 QUIC API 的 OpenSSL"通道 —— 而那一格要的恰恰是
+      # 它自己编的那份。
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          case "${{ matrix.feature }}" in
+            basic-static|basic-shared) pkgs="libuv1-dev ninja-build" ;;
+            web)                       pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
+            ssl|h2)                    pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
+            full)                      pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
+            quic)                      pkgs="libuv1-dev zlib1g-dev" ;;
+            *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
+          esac
+          sudo apt-get install -y $pkgs
+
+      # 下面五条是**文档**门禁：纯 python、只读仓库本身（`doc/`、`src/`、锁文件），
+      # 不碰构建、不需要编译器，所以与操作系统无关 —— 挂在 basic-static 这一格上
+      # 跑一次就够（这些门禁今天多余地跑在 ubuntu+macos 两条腿上）。
+      # 为什么是 Linux 而不是别的：判据要按真实文件系统解析路径，而这一条是
+      # **大小写敏感**的腿 —— 在 Windows/macOS 上拼错的路径也能命中。
+      #
+      # `if:` 里用的是 `matrix.feature == 'basic-static'`（字符串比字符串）：GitHub
+      # 的类型强制会把 YAML 布尔量变成数字比（`true == 'true'` 是 `1 == NaN` ⇒ 假），
+      # 那样这一格会**永远不跑**。别把它改成布尔量。
+      #
+      # 改名这一格会让这五条门禁**无声消失**，所以 check_ci_layout.py 盯着它：
+      # 每个 `if: matrix.feature == 'X'` 里的 X 必须在同一文件的矩阵里真的存在。
+
+      # README 顶上那几个版本号显示的是**当前源码树**的版本（`UVCPP_VERSION_STRING`，
+      # 开发版带 `-dev`），所以这条在每次 push 上都真判，不分开发版/发布版：
+      # 两条 README 必须一致 + 命中恰好 4 处 + 4 处都等于版本头。
+      # 出包时 `package_release.py` 用 `--expect` 再调一次（`--version` 能覆盖头文件）。
+      # rc=3 是「前提不满足、**没判**」，别读成「不一致」。
+      - name: Check doc versions
+        if: matrix.feature == 'basic-static'
+        run: python3 tests/tools/check_doc_versions.py
+
+      # 另外三条文档判据：① CMake 旋钮与两版 README 的选项表双向相等；
+      # ② 文档里的相对链接与仓库路径都解析得到；③ doc/ 下没有被正文孤立的一篇。
+      # 同样：rc=3 是「前提不满足、**没判**」，别读成判红了。
+      - name: Check docs
+        if: matrix.feature == 'basic-static'
+        run: python3 tests/tools/check_docs.py
+
+      # 第三条文档判据：文档里写的 `文件:行号` 必须还指着它当初指的东西。
+      #
+      # 为什么非要有它：`check_docs.py` 判据 2 的 `LINE_SUFFIX_RE` 是**先把 `:NNN`
+      # 剥掉再判文件存在** —— 行号那半从来没有工具校验。于是
+      # 「改一行注释 -> 引用撞飞 -> 六道门禁全绿」是一条真实路径，而这批文档里
+      # 有几百条引用、其中上百条整条落在注释行上。
+      - name: Check doc line references
+        if: matrix.feature == 'basic-static'
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/check_doc_lines.py 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            # `空转`（一条引用都没扫到）与 `前提`（退 3、没判）都要进注解：
+            # 它们和「判红了」是三件事，挤在一个 rc 里，只有注解能分开。
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '\[红\]|\[停\]|红 [0-9]+ 条|前提|空转|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=doc-lines::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      # 上面那条门禁**自己的**回归表：八种"引用被撞飞"的形状各造一遍，逐格
+      # 对期望。为什么非要有它：那个门禁的判据是"前提 A 成立则判 B"，前提不
+      # 成立时它不报错、只是**安静地走了另一条分支** —— 而"走了另一条分支"和
+      # "判过了"在输出里长得一模一样。没有这张表，任何人把某个分支改成恒假都
+      # 不会有人发现（实测：拆掉 `[胀]` 那条判据，门禁照样全绿）。
+      # 只在临时目录里现造样例，不碰真仓库。
+      - name: Check doc line scenes (self-test of the gate above)
+        if: matrix.feature == 'basic-static'
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/check_doc_lines_scenes.py 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '不符|Traceback|Error' | head -20 | tr '\n' ' ' \
+              | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=doc-lines-scenes::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      # 第五条：CI **自己的布局**。一平台一个文件、文件内按功能分格、每格的
+      # 门禁串与 doc/ci-guide.md §1 那张表一致、两版 README 的徽章不指向不存在的
+      # 文件 —— 这些以前一条门禁都没有，删掉一个平台文件或一格只会**静默**少跑
+      # 一堆东西（徽章则是静默 404，`check_docs.py` 明说不判 `http(s)://` 目标）。
+      - name: Check CI layout
+        if: matrix.feature == 'basic-static'
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/check_ci_layout.py 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            # `[停]`（前提不满足、退 3）与「判红了」是两件事，注解要分得开。
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '\[红\]|\[停\]|红 [0-9]+ 条|前提|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=ci-layout::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      # 只有 quic 那一格需要：一份带 QUIC API 的 OpenSSL 从源码编出来。
+      # 约 10 分钟，所以那条腿的 timeout 是 90。
+      - name: Build OpenSSL 3.5 from source (quic only)
+        if: matrix.feature == 'quic'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSL --retry 3 --retry-delay 5 -o openssl.tar.gz \
+            https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-3.5.0
+          mkdir -p openssl-src
+          tar xzf openssl.tar.gz -C openssl-src --strip-components=1
+          cd openssl-src
+          # `no-tests` 只是不编上游的测试套件 —— 与 QUIC API 无关，能省一大截时间。
+          ./Configure --prefix="$HOME/openssl-quic" --libdir=lib shared no-tests
+          make -j"$(nproc)"
+          make install_sw
+          # 装出来的 openssl 可执行档**没有** RUNPATH，NEEDED 只有 libssl.so.3 /
+          # libcrypto.so.3，ld.so 会先命中 runner 上那份 3.0.13，于是报
+          # "version `OPENSSL_3.4.0' not found" 并让这一步红掉 —— 而这份 OpenSSL
+          # 本身没问题。所以显式给它自己的 lib。
+          LD_LIBRARY_PATH="$HOME/openssl-quic/lib" "$HOME/openssl-quic/bin/openssl" version
+          # 自检：这份 OpenSSL 真的带 QUIC API。不查的话，配置期的
+          # "缺 QUIC API → 强制关闭" 会把整格变成一次**静默的空转**。
+          #
+          # 匹配**不锚行尾**：这个符号是带版本后缀的（`SSL_set_quic_tls_cbs@@OPENSSL_3.5.0`），
+          # 锚了 `$` 就一个都匹配不上，会在配置期之前假红。另外要求它是**有定义的**
+          # 那一栏（`T`/`W`）—— `nm -D` 里未定义引用长成 `U SSL_set_quic_tls_cbs`，
+          # 只按名字匹配的话，一份"只有引用、没有实现"的 libssl 也能过。
+          #
+          # 这条是**弱**判据（真正的判据是下面配置期那四道 `gate_*`）：那份 OpenSSL
+          # 不合用时，根 CMakeLists.txt 的 QUIC 预检会先 WARNING + `set(... OFF)`，
+          # 而 cache 照样写着 ON，于是咬人的是 `ngtcp2 integrated` 缺席那一关。
+          nm -D "$HOME/openssl-quic/lib/libssl.so" | grep -qE ' [TW] SSL_set_quic_tls_cbs($|@)' || {
+            echo "::error title=quic-openssl::编出来的 libssl 没有 SSL_set_quic_tls_cbs —— 这份 OpenSSL 不对，后面的门禁全都会是空转"; exit 1; }
+
+      # 配置与构建**折进同一段日志**：只靠 step stdout 的话，配置失败在外头读不到
+      # （job 日志匿名 403，artifact 下载要 token），注解是唯一读得到的出口。
+      # CONFIGURE_RC=/BUILD_RC= 那两个标记说明死在配置还是死在构建。
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          feat="${{ matrix.feature }}"
+          tree="build-$feat"
+          mkdir -p ci-logs
+          {
+            echo "=== toolchain ==="
+            cmake --version
+            openssl version 2>/dev/null || echo "(openssl not on PATH)"
+            echo "=== configure ==="
+            cfg=0
+            extra=()
+            if [ -n "${{ matrix.openssl_root }}" ]; then
+              extra+=("-DOPENSSL_ROOT_DIR=${{ matrix.openssl_root }}")
+            fi
+            cmake -S . -B "$tree" -DCMAKE_BUILD_TYPE=Release \
+              "${extra[@]}" ${{ join(matrix.flags, ' ') }} \
+              > "ci-logs/$feat-configure.log" 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat "ci-logs/$feat-configure.log"
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            # 门禁 1：这一格开的模块**真的**被集成了。三条判据缺一不可 ——
+            #   ① 缓存里开关是 ON（用户传了，但可能被强制关掉：本工程对
+            #      NGHTTP2/QUIC 各有一条"依赖不满足就 warn + 强制关"的从属规则，
+            #      而 cache 是**普通 `set()`**，照样写着 ON）；
+            #   ② CMakeLists 真的打出了 `<dep> integrated`（FetchContent 走通）；
+            #   ③ `src/<module>/` 真的进了源列表。
+            # 少任何一条，这一格都会去编一个**不带该模块**的库然后全绿。
+            if [ -n "${{ matrix.gate_switch }}" ]; then
+              grep -q '${{ matrix.gate_switch }}' "$tree/CMakeCache.txt" || {
+                echo "::error title=$feat::CMakeCache 里 ${{ matrix.gate_switch }} 不是 ON —— 这一格没在测 ${{ matrix.gate_name }}"; exit 1; }
+              grep -q '${{ matrix.gate_integrated }}' "ci-logs/$feat-configure.log" || {
+                echo "::error title=$feat::配置消息里没有 '${{ matrix.gate_integrated }}' —— ${{ matrix.gate_name }} 没被集成"; exit 1; }
+              grep -q '${{ matrix.gate_module }}' "ci-logs/$feat-configure.log" || {
+                echo "::error title=$feat::src/ 里那一块没进源列表 —— 编出来的库不含 ${{ matrix.gate_name }}"; exit 1; }
+            fi
+
+            echo "=== resolved toolchain (CMakeCache) ==="
+            grep -E '^(CMAKE_(GENERATOR|LINKER|CXX_COMPILER|C_COMPILER|VS_|MSVC)|MSVC_|OPENSSL_|NGHTTP2_|NGTCP2_)' \
+              "$tree/CMakeCache.txt" || true
+            echo "=== build ==="
+            bld=0
+            cmake --build "$tree" --config Release --parallel 4 2>&1 \
+              | tee "ci-logs/$feat-build.log" || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                "ci-logs/$feat-build.log" | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-$feat::${msg:-rc=$bld (no error line matched)}"
+            fi
+            exit "$bld"
+          } 2>&1 | tee "ci-logs/$feat.log"
+
+      # 名字必须带 feat：upload-artifact 的名字在**一次 run 内唯一**，两条矩阵腿
+      # 同名会让后一条红在 "an artifact with this name already exists" 上。
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-linux-ubuntu-${{ matrix.feature }}
+          path: ci-logs/
+          if-no-files-found: ignore
+
+      # 这一条是**唯一**覆盖 "http2 与 quic 同时开" 的地方：h2 那一格关 quic，
+      # quic 那一格关 web。它防的是一个真实的硬失败 —— ngtcp2 与 nghttp2 都
+      # 无条件建 `add_custom_target(check)`，后加进来的那个直接 configure 失败；
+      # 根 `CMakeLists.txt` 里那段"把 ngtcp2 源码复制进构建目录、摘掉那一行"
+      # 就是为它存在的，见 doc/quic-guide.md §7 第 7 条。
+      #
+      # 只配置不构建：本版 QUIC 是个骨架，构建它不多证明什么，而会红的地方
+      # （那行 add_custom_target）正好在配置期。
+      - name: Gate — http2 + quic must configure together
+        if: matrix.feature == 'quic'
+        shell: bash
+        run: |
+          mkdir -p ci-logs
+          cmake -S . -B build-quic-h2 -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
+            > ci-logs/build-quic-h2-configure.log 2>&1 || {
+              rc=$?
+              echo "::error title=quic-h2::http2 与 quic 同时开配置失败 —— 多半是 ngtcp2/nghttp2 的 check 目标又撞名了（doc/quic-guide.md §7 第 7 条）"
+              tail -40 ci-logs/build-quic-h2-configure.log
+              exit "$rc"
+            }
+          # 两道判据：两个模块都**真的**在。把撞名"治好"也可能治成"quic 被
+          # 静默降级关掉"，那样这一条会假装变绿。
+          grep -q 'ngtcp2 integrated' ci-logs/build-quic-h2-configure.log || {
+            echo "::error title=quic-h2::配置过了，但 ngtcp2 没被集成"; exit 1; }
+          grep -q 'Including http2 module in build' ci-logs/build-quic-h2-configure.log || {
+            echo "::error title=quic-h2::配置过了，但 http2 没被集成"; exit 1; }
+
+      - name: Test
+        shell: bash
+        run: |
+          feat="${{ matrix.feature }}"
+          tree="build-$feat"
+          # quic 那格的 OpenSSL 是 **shared** 编的，运行期要能找到它。
+          if [ -f "$HOME/openssl-quic/lib/libssl.so" ]; then
+            export LD_LIBRARY_PATH="$HOME/openssl-quic/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          # 门禁 2：这一格的用例真的注册了。只跑 ctest 不足以发现"它们根本没被注册"——
+          # 那种情况下总数少几个，而 ctest 照旧报 "100% tests passed"。
+          # 在 quic 这一格代价更大：QUIC 关掉时 quic_api_func.cpp 编的是 `#else`
+          # 分支，那个 main() 打一行错并**返回 2**，所以没注册是**失败**而不是
+          # 静默通过 —— 但"注册了但没跑"这种情况只有这里拦得住。
+          if [ -n "${{ matrix.gate_test }}" ]; then
+            if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "${{ matrix.gate_test }}"; then
+              echo "::error title=$feat::${{ matrix.gate_test }} 没被注册 —— 模块关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+              ctest --test-dir "$tree" -N 2>&1 | tail -20
+              exit 1
+            fi
+          fi
+          # Only test_shutdown_func is excluded: it is flaky (~1%), not hanging.
+          # test_tcp_func and test_memory_pool were excluded for defects that are
+          # long fixed (see doc/ci-guide.md §4) — they run, and must stay green.
+          rc=0
+          out=$(ctest --test-dir "$tree" --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-$feat::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / glibc 的
+            # `free(): invalid pointer` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-$feat-output::${blk}"
+            fi
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
+  # 使能宏契约（issue #6 第 3 条）：出包 → 装 → 消费方
+  #
+  # 为什么单开一个 job 而不挂在 web/h2 那些格上：它们装的是 `libuv1-dev`（系统
+  # libuv），而 package_release.py 要求 libuv 在构建树的 `_deps/` 里，否则按设计判
+  # "缺少必需文件"退 2、不产包。这里照 release.yml 的配置来
+  # （LIBUV_FROM_SOURCE=ON），且 **OPENSSL 也开着** —— 成员布局错位那一档
+  # （`ssl_ctx_` 声明在 `http_`/`registry_` 之前）只有 UVCPP_OPENSSL_ENABLE=1 时
+  # 才真的会咬人，关着编出来的包会把判据 1 退化成空转。
+  #
+  # 两个平台各一个 job（这一个是 gcc/ELF，`ci-windows-msvc.yml` 那个是 MSVC/PE，
+  # MinGW/PE 那一档在 ci-mingw64.yml 的 job 尾巴上）：
+  #   三档工具链覆盖的是**头契约本身**，不是某个平台的运行时。
+  #
+  # macOS **跑不了这条链**：package_release.py 的 PLATFORMS 里没有 macOS 的 key。
+  # 这是已知缺口，记在 doc/ci-guide.md §5。
+  # ---------------------------------------------------------------------------
+  config-contract:
+    name: Linux (Ubuntu) / config-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # 脚本打印中文。python 写管道时按 locale 选编码（ubuntu 的 C locale 是
+    # ASCII）⇒ 在 print 那行 UnicodeEncodeError，看着像脚本 bug。显式钉成 UTF-8。
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          {
+            # 这一档照抄 release.yml 里 linux 那份（它已经在真实发版里跑通了）：
+            # 依赖全静态（PIC + OPENSSL_USE_STATIC_LIBS + STATIC_RUNTIME）。
+            echo "=== configure ==="
+            cfg=0
+            extra=(-DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                    -DOPENSSL_USE_STATIC_LIBS=ON -DUVCPP_STATIC_RUNTIME=ON)
+            cmake -S . -B build-cfg -DCMAKE_BUILD_TYPE=Release "${extra[@]}" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+              -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+              -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+              -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+              -DUVCPP_ENABLE_NGHTTP2=ON \
+              -DUVCPP_ENABLE_WSDL=ON \
+              -DUVCPP_BUILD_EXPAND=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat ci-logs/cfg-configure.log
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            # 这个 job 的全部意义是"出包→装→消费方"那条链，所以先钉死包里
+            # OPENSSL 真的是 1：不是 1 的话判据 1 抓不到布局错位，整条门禁
+            # 会绿得毫无内容（而它自己看不出来）。
+            grep -q '^#  define UVCPP_OPENSSL_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_OPENSSL_ENABLE 不是 1，判据 1 会退化成空转"; exit 1; }
+            # 同理钉住 WSDL：doc-snippets 对 `wsdl/` 那一档的判据是"模块真的开着"，
+            # 关着的话它会把 wsdl-guide.md 的片段全判成"没判"并退 3 —— 那行注解会
+            # 说成"没判"，而原因（开关没开到这一档）没人能从这个 job 看出来。
+            grep -q '^#  define UVCPP_WSDL_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_WSDL_ENABLE 不是 1，doc-snippets 会把 wsdl 片段全判成\"没判\""; exit 1; }
+
+            echo "=== build ==="
+            bld=0
+            cmake --build build-cfg --config Release --parallel 4 2>&1 \
+              | tee ci-logs/cfg-build.log || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/cfg-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-cfg::${msg:-rc=$bld (no error line matched)}"
+            fi
+
+            # 调试档：另开一棵树，开关与上面**逐字相同**（含那三个 extra）。
+            echo "=== debug configure + build ==="
+            dbg=0
+            cmake -S . -B build-cfg-dbg -DCMAKE_BUILD_TYPE=Debug "${extra[@]}" \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+              -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+              -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+              -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+              -DUVCPP_ENABLE_NGHTTP2=ON \
+              -DUVCPP_ENABLE_WSDL=ON \
+              -DUVCPP_BUILD_EXPAND=ON \
+              -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
+            echo "DEBUG_CONFIGURE_RC=$dbg"
+            if [ "$dbg" = "0" ]; then
+              cmake --build build-cfg-dbg --config Debug --parallel 4 2>&1 \
+                | tee ci-logs/cfg-dbg-build.log || dbg=$?
+              echo "DEBUG_BUILD_RC=$dbg"
+            fi
+            if [ "$dbg" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/cfg-dbg-build.log ci-logs/cfg-dbg-configure.log 2>/dev/null \
+                | head -40 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+              echo "::error title=build-cfg-dbg::${msg:-rc=$dbg (no error line matched)}"
+            fi
+            if [ "$bld" = "0" ]; then bld=$dbg; fi
+            exit "$bld"
+          } 2>&1 | tee ci-logs/cfg.log
+
+      - name: Package
+        shell: bash
+        run: |
+          python3 tests/tools/package_release.py \
+            --tree build-cfg --platform linux-x64 \
+            --config Release --debug-tree build-cfg-dbg --out dist
+
+      - name: Config contract (issue #6 item 3)
+        shell: bash
+        run: |
+          pkg=$(ls -d dist/libuvcpp-*-linux-x64 2>/dev/null | head -1)
+          if [ -z "$pkg" ]; then
+            echo "::error title=config-contract::没找到 linux-x64 的包（出包那步没产出？）"
+            exit 1
+          fi
+          echo "pkg=$pkg"
+          rc=0
+          out=$(python3 tests/tools/check_config_contract.py \
+            --pkg "$pkg" --tree build-cfg --cxx g++ 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|红 [0-9]+ 条|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=config-contract::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      # 挂在**这一档**的理由：它是唯一同时满足"七个模块全 ON、真的产出一个包、
+      # 有 python"的档。门禁要的就是一个全开的包 —— 关着模块的包只会让它把大半
+      # 片段判成"跳过"（退 3），判不出东西。
+      #
+      # 退路（首跑因编码红时用，不许悄悄降级）：把这一步删掉，MSVC 那半条腿留在
+      # `ci-windows-msvc.yml` 的同名 job 里 —— 那半条**只能靠 CI 验**，本机没有 `cl`。
+      - name: Doc snippets must compile
+        shell: bash
+        run: |
+          pkg=$(ls -d dist/libuvcpp-*-linux-x64 2>/dev/null | head -1)
+          if [ -z "$pkg" ]; then
+            echo "::error title=doc-snippets::没找到 linux-x64 的包（出包那步没产出？）"
+            exit 1
+          fi
+          echo "pkg=$pkg"
+          rc=0
+          out=$(python3 tests/tools/check_doc_snippets.py \
+            --pkg "$pkg" --cxx g++ 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            # `前提` 也进匹配：rc=3（片段因为包里缺模块而**没判**）与 rc=1（判红了）
+            # 是两件事，注解里必须分得开，否则"没判成"会被读成"红了"。
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '\[红\]|\[停\]|红 [0-9]+ 条|前提|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=doc-snippets::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-linux-ubuntu-config-contract
+          path: ci-logs/
+          if-no-files-found: ignore

@@ -92,8 +92,8 @@ OpenSSL 的发现块（`find_package(OpenSSL)` → `UVCPP_SSL_LIBS`）原先**�
 客户端路径一起坏）。
 
 1.4.1 把那段发现块**平移到 web 块之外**，净行长不变。QUIC 正好住在这个组合里，
-所以这个 bug 是被 QUIC 逼出来的；CI 里那个 ubuntu-only 的 `quic` job 是**唯一**
-覆盖它的那条腿。
+所以这个 bug 是被 QUIC 逼出来的；四个平台文件里的 `quic` 格（ubuntu / macOS /
+Windows MSVC 各一格）是**唯一**覆盖它的那几格 —— 每一格都是 SSL 开、web 关。
 
 ---
 
@@ -426,8 +426,9 @@ void install_reader(uvcpp_quic_connection& conn) {
 - **`state()` 恒为 `IDLE`、`alpn_selected()` 恒为空串。** 状态机还没有；枚举值与
   默认值的存在是为了把 API 形状定下来，不是为了假装已经能跑。
 - **没有多循环支持。** 见 [§5.2](#52-服务端)。
-- **macOS / Windows 的 CI 腿没有开 QUIC。** 只有 ubuntu 一条腿，`doc/ci-guide.md`
-  里有理由。
+- **MinGW 的 CI 腿没有开 QUIC。** macOS 与 Windows MSVC 各有一格 `quic`（1.4.1 补的，
+  它们用包管理器给的 OpenSSL，只有 ubuntu 那格自建），只有 MSYS2 那条腿还没有 —— 它是
+  单个 job，按功能拆它和加 QUIC 格是同一件事，`doc/ci-guide.md` §1 的"未覆盖的格"里有理由。
 - **预编译包里 quic 头是惰性的**（`UVCPP_QUIC_ENABLE 0`）。`release.yml` 本版不
   开 QUIC（六条腿都要一份 QUIC-capable OpenSSL），所以与 `http2` 头在非 h2 包里
   的行为一致。

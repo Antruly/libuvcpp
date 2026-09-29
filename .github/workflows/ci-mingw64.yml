@@ -1,0 +1,203 @@
+name: Windows (MinGW64)
+
+# 一平台一个文件 —— 这个文件是**一条工具链**：MSYS2 的 MinGW-w64（发布产物用的
+# 正是它），所以它的测试覆盖不能只靠开发机。四个文件：ci-linux-ubuntu.yml /
+# ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
+#
+# 这个文件是**单个 job、不是矩阵**：整条 job 挂在 `defaults: run: shell: msys2 {0}`
+# 上（job 级，**不能**条件化），尾巴又是 `--platform mingw-x64` 写死的
+# package → consumer 合约。按功能拆它和加 MinGW 的 QUIC/h2 格是同一件事，两件一起
+# 下批做 —— 今天这一档就是"full"（见 doc/ci-guide.md §1 的"未覆盖的格"）。
+#
+# 不设 `concurrency:`：取消一次正在跑的 run 等于**丢一组门禁**。
+# 必须**平铺**在 `.github/workflows/` 下：行号门禁（`check_doc_lines`）的 `SCRIPT_GLOBS` 是
+# `.github/workflows/*.yml`（没有 `**`），挪进子目录会让下面注释里那三条
+# CMakeLists 引用**静默**掉出扫描集。
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  mingw64:
+    name: Windows (MinGW64) / mingw64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-python
+
+      - name: Configure & Build
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          # 两个都是"依赖必须静态进去"的开关，缺一个产物就多一个 dll 依赖，
+          # 和"任意 64 位 Windows 直接可用"的发布承诺冲突。下面那条断言两个都抓得到，
+          # 这条注释是让下次改的人知道该传什么、以及为什么本机看不出来。
+          #
+          # ① -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON —— 本机看不出来的真正原因在这里：
+          #   CMakePresets.json:22 有这个开关，而本机所有树都是走 preset 配置的，
+          #   所以一直链的是 FetchContent 的静态 libuv。CI 是裸 `cmake -S . -B`，
+          #   不带 preset ⇒ 这个开关默认 OFF ⇒ `find_library` 在 MSYS2 里撞上
+          #   C:/msys64/mingw64/lib/libuv.dll.a（runner 镜像自带 libuv）⇒ 链成
+          #   共享库，产物依赖 `libuv-1.dll`（MSYS2 那份的 DLL 名带 -1）。
+          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:708 判的是
+          #   `TARGET uv_a`，而 find_library 给的是一个**路径**，不是 target，
+          #   所以那个分支根本进不去。
+          #
+          # ② -DBUILD_SHARED_LIBS=OFF —— 管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
+          #   llhttp_shared ⇒ 依赖 libllhttp.dll）。它不管 uvcpp 自己
+          #   （CMakeLists.txt:1089 是显式的 `add_library(uvcpp SHARED ...)`）。
+          #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
+          #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
+          #   （708 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
+          cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
+            | tee ci-logs/mingw-configure.log
+          bld=0
+          cmake --build build-mingw --parallel 4 2>&1 | tee ci-logs/mingw-build.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/mingw-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-mingw::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
+
+          # 调试档：另开一棵单配置树，开关与上面**逐字相同** —— 这里最容易漏的是
+          # 上面①②那两条依赖静态的开关，漏了就只有调试档多出 dll 依赖，而它恰恰
+          # 是使用者拿去调试时才会撞上的那份。`-DUVCPP_BUILD_TESTS=OFF`：这条腿要
+          # 的是**产物**，调试档的测试不在这里跑（理由见 RELEASE.md「Debug 版前提」）。
+          cmake -S . -B build-mingw-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
+            | tee ci-logs/mingw-dbg-configure.log
+          bld=0
+          cmake --build build-mingw-dbg --parallel 4 2>&1 \
+            | tee ci-logs/mingw-dbg-build.log || bld=$?
+          if [ "$bld" != "0" ]; then
+            msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+              ci-logs/mingw-dbg-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+              | head -c 6000 || true)
+            echo "::error title=build-mingw-dbg::${msg:-rc=$bld (no error line matched)}"
+            exit "$bld"
+          fi
+
+      - name: Assert the DLL is self-contained
+        run: |
+          # 发布承诺是"任意 64 位 Windows 直接可用"。这条不是风格问题：一旦
+          # UVCPP_STATIC_RUNTIME / OPENSSL_USE_STATIC_LIBS 被改坏或漏传，产物在
+          # 开发机上照样跑得动，换台机器才 0xc0000135 —— 只有在这里断言才拦得住。
+          #
+          # 白名单，不是黑名单：黑名单原先只 grep libgcc|libstdc|libwinpthread，
+          # 而 MSYS2 同时装了 libssl.a 和 libssl.dll.a，find_library 默认挑 .dll.a
+          # ⇒ 产物会多一个 libssl-3-x64.dll 而断言照样放行。
+          # 两份都要过：调试档是**另一次 configure**，上面①②任何一条漏传，
+          # 就只有那一份多出 dll 依赖 —— 只查发布档会把它放过去。
+          rc=0
+          for d in build-mingw/libuvcpp.dll build-mingw-dbg/libuvcppd.dll; do
+            echo "--- $d"
+            deps=$(objdump -p "$d" | awk '/DLL Name/ {print $3}' | sort -u)
+            echo "$deps"
+            bad=$(echo "$deps" | grep -viE '^(ADVAPI32|bcrypt|bcryptprimitives|CRYPT32|dbghelp|DNSAPI|IPHLPAPI|KERNEL32|msvcrt|ntdll|ole32|PSAPI|RPCRT4|SECUR32|SHELL32|SHLWAPI|USER32|USERENV|WINMM|WS2_32|api-ms-win-[a-z0-9-]+)\.dll$' || true)
+            if [ -n "$bad" ]; then
+              echo "::error title=mingw-not-self-contained::$d 依赖了非 Windows 自带的模块: $bad"
+              rc=1
+            fi
+          done
+          exit $rc
+
+      - name: Test
+        run: |
+          rc=0
+          out=$(ctest --test-dir build-mingw --output-on-failure \
+            --timeout 60 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-mingw::${msg:-rc=$rc (no FAILED block)}"
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-mingw-output::${blk}"
+            fi
+          fi
+          exit "$rc"
+
+      # 出包 → 装 → 消费方（issue #6 第 3 条）。这条腿是 MinGW/PE 那一档：
+      # 这棵树本来就是按发布规格配的（OPENSSL=ON / LIBUV_FROM_SOURCE=ON），
+      # 成员布局错位那一档在这里是活的。
+      # 路径一律用**相对**的：MSYS2 bash 把 `/d/...` 形状的实参喂给原生 python 时
+      # 会做路径转换，相对路径不经过那一步。
+      - name: Package & config contract (issue #6 item 3)
+        env:
+          # 两个脚本都打印中文。原生 python 写管道时按 locale 选编码
+          # （runner 上是 cp1252）⇒ UnicodeEncodeError 直接在打印那行崩掉，
+          # 看着像脚本 bug。MSYS2 是否默认 UTF-8 不在我们控制之内，显式钉住。
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          rc=0
+          out=$(python tests/tools/package_release.py \
+            --tree build-mingw --platform mingw-x64 \
+            --debug-tree build-mingw-dbg --out dist 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" \
+              | grep -E 'error|Error|缺少|失败|Traceback' | head -20 \
+              | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=package-mingw::${msg:-rc=$rc (no error line matched)}"
+            exit "$rc"
+          fi
+          pkg=$(ls -d dist/libuvcpp-*-mingw-x64 2>/dev/null | head -1)
+          if [ -z "$pkg" ]; then
+            echo "::error title=config-contract::出包那步没产出 mingw-x64 的包"
+            exit 1
+          fi
+          echo "pkg=$pkg"
+          rc=0
+          out=$(python tests/tools/check_config_contract.py \
+            --pkg "$pkg" --tree build-mingw --cxx g++ 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|红 [0-9]+ 条|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=config-contract::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-mingw64
+          path: ci-logs/
+          if-no-files-found: ignore

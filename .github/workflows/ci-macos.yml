@@ -1,0 +1,254 @@
+name: macOS
+
+# 一平台一个文件 —— 这个文件里**只有** macOS（Apple clang / arm64）这条腿的测试。
+# 四个文件：ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
+#
+# 文件内按**功能分格**：矩阵里一格一个 feature，格的名字就是 check 名
+# （`macOS / quic`）。骨架只写一次，格与格的差别全在矩阵条目里。
+#
+# 不设 `concurrency:`：取消一次正在跑的 run 等于**丢一组门禁**。
+#
+# 布局规范（含**未覆盖的格**和为什么）在 doc/ci-guide.md §1。这一条腿**跑不了**
+# 使能宏契约那条链（`package_release.py` 的 PLATFORMS 里没有 macOS 的 key），
+# 那是已知缺口而不是遗漏 —— 见 doc/ci-guide.md §5。
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  macos:
+    name: macOS / ${{ matrix.feature }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 基础版：net 默认 ON、web=OFF。
+          - feature: basic-static
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_STATIC=ON
+              - -DUVCPP_BUILD_SHARED=OFF
+              - -DUVCPP_BUILD_WEB=OFF
+          - feature: basic-shared
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_STATIC=OFF
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=OFF
+
+          # web：`UVCPP_ENABLE_ZLIB` 必须留 ON —— webapp 的压缩用例断言 gzip 真的
+          # 发生过，zlib 关着那两个组会红。zlib 在 find_package 落空时走 FetchContent。
+          - feature: web
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+          - feature: ssl
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+
+          # h2：门禁的四个串见 doc/ci-guide.md §5。
+          - feature: h2
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_NGHTTP2=ON
+            gate_name: nghttp2
+            gate_switch: 'UVCPP_ENABLE_NGHTTP2:BOOL=ON'
+            gate_integrated: nghttp2 integrated
+            gate_module: Including http2 module in build
+            gate_test: test_h2_session_func
+
+          # full：`UVCPP_BUILD_EXPAND` 自 v1.1.0 起默认 OFF（默认开时，使用者 TU 忘了
+          # 定义 `UVCPP_ENABLE_MEMORY_POOL` 会静默拿到与 dll 不同的分配器 —— 见
+          # RELEASE.md）。这里显式打开：不打开的话 tests/expand 那批用例在 CI 里
+          # 一条都不跑，内存池就成了没人测的死代码。**别顺手把这行删掉。**
+          - feature: full
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_BUILD_EXPAND=ON
+
+          # quic（1.4.1 新增的腿）：和 ubuntu 那条腿的区别**只有 OpenSSL 的来源**。
+          # ubuntu 让 ssl 那一格各自装 `libssl-dev`（3.0.13，两个 QUIC 符号都没有），
+          # 所以那边必须从源码编一份；macOS 用 Homebrew 的 `openssl@3`（>= 3.2，带
+          # QUIC API），所以这里不需要自建，只要显式把 root 钉过去。
+          #
+          # **`-DOPENSSL_ROOT_DIR` 在这里是必需而不是可选**：`openssl@3` 是 keg-only，
+          # 而 CMake 的 `FindOpenSSL` 没有任何 Homebrew 提示。`brew --prefix openssl@3`
+          # 给出空串时 `-DOPENSSL_ROOT_DIR=` 会让 find_package 落到别处、QUIC 被
+          # 静默降级 —— 所以下面那一步先自检（空串当红）。
+          - feature: quic
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=OFF
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_QUIC=ON
+            openssl_root: $(brew --prefix openssl@3)
+            gate_name: ngtcp2
+            gate_switch: 'UVCPP_ENABLE_QUIC:BOOL=ON'
+            gate_integrated: ngtcp2 integrated
+            gate_module: Including quic module in build
+            gate_test: test_quic_api_func
+    steps:
+      - uses: actions/checkout@v4
+
+      # 装包**按格**：`openssl@3` 只给 quic 那一格显式点名（别的格用 `openssl`，
+      # 它今天就是 openssl@3 的别名，但那两格不需要钉 root）。
+      - name: Install deps
+        run: |
+          case "${{ matrix.feature }}" in
+            basic-static|basic-shared) brew install libuv ninja ;;
+            web)                       brew install libuv zlib ninja ;;
+            ssl|h2|full)               brew install libuv openssl zlib ninja ;;
+            quic)                      brew install libuv zlib ninja openssl@3 ;;
+            *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
+          esac
+
+      # 只有 quic 那一格需要：先证明这份 Homebrew OpenSSL 真的带 QUIC API。
+      # 不在这一步拦住的话，配置期的"缺 QUIC API → WARNING + 强制关闭"会把整格
+      # 变成一次**静默的空转**（cache 照样写着 ON），而症状会落到门禁 ②
+      # （`ngtcp2 integrated` 缺席）上 —— 那时注解说的是"ngtcp2 没被集成"，
+      # 而真正的原因（这份 OpenSSL 不对）没人从那条输出里看得出来。
+      - name: Check the Homebrew OpenSSL has the QUIC API (quic only)
+        if: matrix.feature == 'quic'
+        shell: bash
+        run: |
+          set -o pipefail
+          prefix="$(brew --prefix openssl@3)"
+          if [ -z "$prefix" ] || [ ! -d "$prefix" ]; then
+            echo "::error title=quic-openssl::brew --prefix openssl@3 是空的或不存在 —— 上一步的 openssl@3 没装上"
+            exit 1
+          fi
+          echo "prefix=$prefix"
+          "$prefix/bin/openssl" version
+          # runner 上是 LLVM 的 nm：`-U` 是 `--defined-only`（**不是** GNU 那个
+          # "只看未定义"），所以命中即"有定义"。Mach-O 符号带**前导下划线**，
+          # 且没有 ELF 那种 `@@OPENSSL_3.5.0` 版本后缀 —— 别把 ubuntu 那条
+          # `($|@)` 的逻辑抄过来（也不必结尾锚定）。
+          nm -gU "$prefix/lib/libssl.dylib" | grep -q '_SSL_set_quic_tls_cbs' || {
+            echo "::error title=quic-openssl::这份 openssl@3 没有 QUIC API（缺 SSL_set_quic_tls_cbs）—— 需要 >= 3.2 的 openssl@3，否则配置期会把 UVCPP_ENABLE_QUIC 静默关掉"; exit 1; }
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          feat="${{ matrix.feature }}"
+          tree="build-$feat"
+          mkdir -p ci-logs
+          {
+            echo "=== toolchain ==="
+            cmake --version
+            openssl version 2>/dev/null || echo "(openssl not on PATH)"
+            echo "=== configure ==="
+            cfg=0
+            extra=()
+            if [ -n "${{ matrix.openssl_root }}" ]; then
+              extra+=("-DOPENSSL_ROOT_DIR=${{ matrix.openssl_root }}")
+            fi
+            cmake -S . -B "$tree" -DCMAKE_BUILD_TYPE=Release \
+              "${extra[@]}" ${{ join(matrix.flags, ' ') }} \
+              > "ci-logs/$feat-configure.log" 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat "ci-logs/$feat-configure.log"
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            # 门禁 1：这一格开的模块**真的**被集成了。三条判据缺一不可（理由见
+            # doc/ci-guide.md §5）：缓存里开关是 ON、配置消息里出现了
+            # `<dep> integrated`、`src/<module>/` 真的进了源列表。
+            if [ -n "${{ matrix.gate_switch }}" ]; then
+              grep -q '${{ matrix.gate_switch }}' "$tree/CMakeCache.txt" || {
+                echo "::error title=$feat::CMakeCache 里 ${{ matrix.gate_switch }} 不是 ON —— 这一格没在测 ${{ matrix.gate_name }}"; exit 1; }
+              grep -q '${{ matrix.gate_integrated }}' "ci-logs/$feat-configure.log" || {
+                echo "::error title=$feat::配置消息里没有 '${{ matrix.gate_integrated }}' —— ${{ matrix.gate_name }} 没被集成"; exit 1; }
+              grep -q '${{ matrix.gate_module }}' "ci-logs/$feat-configure.log" || {
+                echo "::error title=$feat::src/ 里那一块没进源列表 —— 编出来的库不含 ${{ matrix.gate_name }}"; exit 1; }
+            fi
+
+            echo "=== resolved toolchain (CMakeCache) ==="
+            grep -E '^(CMAKE_(GENERATOR|LINKER|CXX_COMPILER|C_COMPILER)|OPENSSL_|NGHTTP2_|NGTCP2_)' \
+              "$tree/CMakeCache.txt" || true
+            echo "=== build ==="
+            bld=0
+            cmake --build "$tree" --config Release --parallel 4 2>&1 \
+              | tee "ci-logs/$feat-build.log" || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              # 这一手是被 e3c0a0d 打的：四个 mac job 全挂在编译上（macOS 的
+              # sigemptyset 是宏，`::sigemptyset` 直接是语法错误），而本机 MSVC
+              # 整段跳过那个 `#if`，注解里只有一句 "exit code 2"，白等一轮。
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                "ci-logs/$feat-build.log" | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-$feat::${msg:-rc=$bld (no error line matched)}"
+            fi
+            exit "$bld"
+          } 2>&1 | tee "ci-logs/$feat.log"
+
+      # 名字必须带 feat：upload-artifact 的名字在**一次 run 内唯一**。
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-macos-${{ matrix.feature }}
+          path: ci-logs/
+          if-no-files-found: ignore
+
+      - name: Test
+        shell: bash
+        run: |
+          feat="${{ matrix.feature }}"
+          tree="build-$feat"
+          # 这一格的 OpenSSL 是 Homebrew 的 dylib，路径由 brew 的链接目录提供，
+          # 不需要 LD_LIBRARY_PATH（DYLD_* 那套也不要加：runner 上会连带影响别的）。
+          # 门禁 2：这一格的用例真的注册了。只跑 ctest 不足以发现"它们根本没被注册"——
+          # 那种情况下总数少几个，而 ctest 照旧报 "100% tests passed"。
+          if [ -n "${{ matrix.gate_test }}" ]; then
+            if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "${{ matrix.gate_test }}"; then
+              echo "::error title=$feat::${{ matrix.gate_test }} 没被注册 —— 模块关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+              ctest --test-dir "$tree" -N 2>&1 | tail -20
+              exit 1
+            fi
+          fi
+          # Only test_shutdown_func is excluded (flaky ~1%, not hanging) — see
+          # doc/ci-guide.md §4.
+          rc=0
+          out=$(ctest --test-dir "$tree" --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-build-$feat::${msg:-rc=$rc (no FAILED block)}"
+            # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
+            # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
+            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / libc++ 的
+            # `libc++abi: terminating` 全在那段里）。
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-build-$feat-output::${blk}"
+            fi
+          fi
+          exit "$rc"

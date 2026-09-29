@@ -4,7 +4,10 @@
 
 [![版本](https://img.shields.io/badge/version-1.4.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
+[![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
+[![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
+[![Windows (MinGW64)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-mingw64.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-mingw64.yml)
+[![macOS](https://github.com/Antruly/libuvcpp/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-macos.yml)
 
 # libuvcpp
 
@@ -586,7 +589,7 @@ libuvcpp/
 │   ├── webapp-support-guide.md # webapp 底下那些没被框架指南覆盖的类型
 │   └── wsdl-guide.md      # WSDL 1.1 文档模型、QName 查询、发布与生成
 ├── cmake/         # CMake 配置模板
-├── .github/workflows/  # CI 流水线
+├── .github/workflows/  # 一个平台一个 workflow 文件，文件内按功能分格
 ├── CMakeLists.txt
 ├── CONTRIBUTING.md     # 从 clone 到跑通测试，以及本仓的开发约定
 ├── README.md
@@ -960,6 +963,15 @@ libuvcpp/
   Unix 的是 `{char* base; size_t len;}`（`uv/unix.h`）—— **两个成员次序相反** ⇒ MSVC 报
   C2440（`nullptr` 喂给 `ULONG`）、MinGW 同错，七个 Windows job 自写路径那笔（`1.3.22`）起
   全红。改用 `uv_buf_init(nullptr, 0)`，与成员次序无关（`1.3.27`）
+- CI 改成**一个平台一个 workflow 文件** —— `ci-linux-ubuntu.yml`、`ci-windows-msvc.yml`、
+  `ci-mingw64.yml`、`ci-macos.yml`，各自带触发条件，文件内按**功能分格**（基础版 / web /
+  ssl / h2 / quic / full），骨架每平台只写一次；替掉原来那个横跨四个平台、十个 job 的
+  1369 行 `ci.yml`。README 顶上从一枚汇总徽章换成四枚按平台的，红的那条腿自己说得出是哪个
+  平台红了。QUIC 补上 **macOS 与 Windows MSVC** 两格（只有 ubuntu 那格自建 OpenSSL 3.5，
+  另两格用包管理器给的；macOS 那边因为 `openssl@3` 是 keg-only，必须显式钉
+  `-DOPENSSL_ROOT_DIR`）。新门禁 `check_ci_layout.py` 让四个文件与 `doc/ci-guide.md` 的
+  布局表**双向**相等：悄悄删掉一格、改掉一格的名字（挂在 `if: matrix.feature == …` 上的
+  步骤会跟着无声消失）、或者徽章指向一个已删文件，都会红而不是没人发现（`1.4.1`）
 
 ---
 

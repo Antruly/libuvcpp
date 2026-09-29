@@ -4,7 +4,10 @@
 
 [![version](https://img.shields.io/badge/version-1.4.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![CI](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci.yml)
+[![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
+[![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
+[![Windows (MinGW64)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-mingw64.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-mingw64.yml)
+[![macOS](https://github.com/Antruly/libuvcpp/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-macos.yml)
 
 # libuvcpp
 
@@ -599,7 +602,7 @@ libuvcpp/
 │   ├── webapp-support-guide.md # Types under webapp not covered by the framework guide
 │   └── wsdl-guide.md      # WSDL 1.1 model, QName lookup, publishing, and generating one
 ├── cmake/         # CMake config templates
-├── .github/workflows/  # CI pipeline
+├── .github/workflows/  # One workflow file per platform, feature matrix inside
 ├── CMakeLists.txt
 ├── CONTRIBUTING.md     # Clone -> build -> test, plus the repo's conventions
 ├── README.md
@@ -1057,6 +1060,17 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   `ULONG`) and MinGW the same error, and every Windows job had been red since the
   write-path cut (`1.3.22`). It now uses `uv_buf_init(nullptr, 0)`, which is
   member-order independent (`1.3.27`)
+- CI is now **one workflow file per platform** — `ci-linux-ubuntu.yml`,
+  `ci-windows-msvc.yml`, `ci-mingw64.yml`, `ci-macos.yml` — each with its own triggers and a
+  **feature matrix** (basic / web / ssl / h2 / quic / full) written once per file, replacing
+  the single 1369-line `ci.yml` that spanned four platforms and ten jobs. The README carries
+  four per-platform badges instead of one aggregate, so a red leg names the platform that is
+  red. QUIC gained **macOS and Windows MSVC** entries (only Ubuntu builds its OpenSSL 3.5 from
+  source; the other two use the package manager's, and macOS pins `-DOPENSSL_ROOT_DIR` because
+  `openssl@3` is keg-only), and a new gate, `check_ci_layout.py`, holds the files and
+  `doc/ci-guide.md`'s layout table equal **both ways**: a silently deleted matrix entry, a
+  renamed one that would take the steps guarded by `if: matrix.feature == …` with it, or a
+  badge pointing at a deleted file is red rather than unnoticed (`1.4.1`)
 
 ---
 
