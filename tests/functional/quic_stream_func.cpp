@@ -16,13 +16,17 @@
  *    `write_stream()` 被确认。
  * 2. **单向流。** 客户端开一条单向流写 `"uni"` —— 它只能发，服务端只能收。
  *    这条钉的是 `open_stream(false)` 没有退化成双向流（流号的低位不同）。
- * 3. **`shutdown_stream()` 只关发送方向。** 客户端写 `"half"`（**不带** FIN），
- *    等服务端收到之后调 `shutdown_stream()`。此后：
+ * 3. **`shutdown_stream()` 只关发送方向，而且对端当场知道。** 客户端写 `"half"`
+ *    （**不带** FIN），等服务端收到之后调 `shutdown_stream()`。此后：
  *    - 本端再 `write_stream()` 同一流 → `NGTCP2_ERR_STREAM_SHUT_WR`；
- *    - **读方向照常** —— 服务端已经回写的 `"half-echo"` 仍然到得了。
+ *    - **服务端的读方向收尾** —— 这一步在线上是 RESET_STREAM，服务端的 `on_read`
+ *      会收到一次 `PEER_CLOSED`（应用错误码是 0，所以不是 `READ_ERROR`）；
+ *    - **本端的读方向照常** —— 服务端已经回写的 `"half-echo"` 仍然到得了。
  *
- * 第 3 条的两个断言必须成对看：只查前一条的话，一个把整条流拆掉的实现也能过，
- * 而那正是这条 API 要避免的事。
+ * 第 3 条那三个断言必须成对看：只查第一个的话，一个把整条流拆掉的实现也能过，
+ * 而那正是这条 API 要避免的事；只查后两个、不查中间那个的话，"对端 reset 的读侧
+ * 收尾信号"这条事件就没被量过 —— 少了它，一个"还剩几个字节没到"的读循环会一直
+ * 等下去。
  *
  * **流号是断言的**，不是"拿到了就用"。客户端发起的双向流低位是 `0b00`
  * （0、4、8…），单向流是 `0b10`（2、6、10…）—— 见 RFC 9000 §2.1。这两条一起
@@ -316,6 +320,20 @@ void test_streams_over_one_loop() {
     check_eq_i(c->shutdown_stream(half_id), 0, "shutdown_stream() 返回 0");
     check_eq_i(c->write_stream(half_id, "x", 1, false), kErrStreamShutWr,
                "shutdown 之后再 write_stream 同一流报 NGTCP2_ERR_STREAM_SHUT_WR");
+
+    // **对端 reset 的读侧收尾信号。** 上面那次 `shutdown_stream()` 在线上是一个
+    // RESET_STREAM 帧（`ngtcp2_conn_shutdown_stream_write` 排的，`ngtcp2_conn.c`
+    // 里那个 `conn_shutdown_stream_write` 的注释写着 "RESET_STREAM frame is
+    // scheduled"），服务端收到它必须在**那一刻**结束这条流的读方向 —— 否则一个
+    // "还差几个字节"的读循环会永远等一个不会来的包。
+    //
+    // 这条同时钉住错误码的映射：应用错误码 0 报 `PEER_CLOSED` 而不是
+    // `READ_ERROR(0)`。所以下面那句 `server_read_errors.empty()` 不是凑数的 ——
+    // 映射反了它就会红。
+    check(uvcpp_test::wait_until(
+              &loop, [&] { return server_peer_closed.count(half_id) != 0; },
+              kDeadlineMs),
+          "服务端收到对端的 RESET_STREAM，读侧以 PEER_CLOSED 收场");
 
     // **读方向没被一起关掉。** 服务端早在收到 "half" 时就回写了 "half-echo"
     // —— 那一笔必须还能到达。把这一条删掉的话，"`shutdown_stream` 把整条流

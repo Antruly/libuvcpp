@@ -238,8 +238,9 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/")
 # 把这一行抽掉则编不过退 1。抽掉它就会造出一个**假红**，所以它承重。
 #
 # `quic/` 属于**第一档**（"宏为 0 时类会消失"）：本模块的**四个**公开头整段套在
-# `#if UVCPP_QUIC_ENABLE` 里（第五个头 `uvcpp_quic_ngtcp2.h` 是私有的，不进包、
-# 文档也不该引它）。模块关掉时 `CMakeLists.txt:1615` 的 install 规则确实不装它们，
+# `#if UVCPP_QUIC_ENABLE` 里（另外两个头 `uvcpp_quic_ngtcp2.h` 与
+# `uvcpp_quic_session.h` 是私有的，不进包、文档也不该引它们）。模块关掉时
+# `CMakeLists.txt:1620` 的 install 规则确实不装它们，
 # 但那条只挡住 `cmake --install`：`package_release.py` 是从 `src/` 逐目录拷头的、
 # 与开关无关（同上面 wsdl 那段记的形状，实测过 —— 一份 `UVCPP_ENABLE_QUIC=OFF`
 # 的包里有 `include/quic/` 四个头，而没有 `uvcpp_quic_ngtcp2.h`）。所以在**发布包**

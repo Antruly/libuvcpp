@@ -173,7 +173,7 @@
 |---|---|
 | **h2c（明文 h2）** | 不做 `Upgrade: h2c`、不做 prior-knowledge、不做协议嗅探。本库的 h2 一律走 TLS + ALPN。 |
 | **RFC 8441（WebSocket over HTTP/2）** | 不做，看到 `:protocol` 伪头一律按未知伪头拒（`uvcpp_h2_session.cpp` 的 `handle_pseudo`）。 |
-| **HTTP/3** | **不做，而且本页管不到它。** 1.4.1 落的是 QUIC **传输层**的地基（`src/quic/`，只有骨架，不能通信），HTTP/3 本身仍然一个字节都没有 —— 连 nghttp3 都没接。见 [`doc/quic-guide.md`](./quic-guide.md)。 |
+| **HTTP/3** | **不做，而且本页管不到它。** 1.4.1 落的是 QUIC **传输层**（`src/quic/`，真能握手、真能收发流，但只到链路这一层），HTTP/3 本身仍然一个字节都没有 —— 连 nghttp3 都没接。见 [`doc/quic-guide.md`](./quic-guide.md)。 |
 | **SERVER_PUSH** | 既不发也不收：`SETTINGS_ENABLE_PUSH = 0` 在 `init()` 里就宣告了。 |
 | **h2spec** | 不引入。协议一致性靠上面 1.5 那四个用例 + 会话层用例。 |
 | **改 `uvcpp_s` / `uvcpp_a_s` 的语义** | 不动。 |
@@ -375,7 +375,7 @@ ctest --test-dir build-h2 -C Release --timeout 60
    - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
      `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
      "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
-     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:1776`
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:1781`
      的注释），与 `pwsh` 无关。
    - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
      `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己

@@ -240,7 +240,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:1680`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:1685`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -358,17 +358,19 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
   `1.4.1` moved the OpenSSL discovery block out of `if(UVCPP_BUILD_WEB)` to fix it, and these
   entries are the evidence that the fix holds. All three keep web off, so this coverage did
   not get diluted by adding legs.
-- The test-registration gate matters more here than anywhere else: with QUIC off
-  `quic_api_func.cpp` compiles its `#else` branch, whose `main()` prints an error and
-  **returns 2** — so a test that failed to register is a **failure**, not a silent pass.
-  (This is also why the file is excluded rather than merely skipped; see
-  `doc/testing-guide.md`.)
+- The test-registration gate matters more here than anywhere else: with QUIC off all three
+  QUIC test files (`quic_api_func.cpp`, `quic_handshake_func.cpp`, `quic_stream_func.cpp`)
+  compile their `#else` branch, whose `main()` prints an error and **returns 2** — so a test
+  that failed to register is a **failure**, not a silent pass. (This is also why those files
+  are excluded rather than merely skipped; see `doc/testing-guide.md`.) The gate string in the
+  matrix entry names one of the three (`test_quic_api_func`) as a sentinel; the other two ride
+  the same `ctest` invocation.
 - On Ubuntu, a second, **configure-only** step turns on `nghttp2` and `quic` in one tree. That
   is the only place either entry covers the combination: `h2` leaves QUIC off and this entry's
   main configure leaves the web module off. It is a real failure mode, not a hypothetical — the
   two `add_custom_target(check)` lines collide (§3). It is deliberately configure-only: what
-  breaks is a configure-time line, and building a transport-less skeleton afterwards would
-  prove nothing extra.
+  breaks is a configure-time line, and building the library afterwards would prove nothing
+  extra about that collision.
 - **A QUIC-incapable OpenSSL on MSVC would need the Ubuntu recipe** (build it in-job) as the
   fallback. That path has not been taken because `nmake` does not parallelise on Windows and
   the package-manager route is tried first. If the `quic` entry on MSVC goes red with

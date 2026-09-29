@@ -122,9 +122,9 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
 - `UVCPP_ENABLE_QUIC=ON` — QUIC 传输（RFC 9000），基于
   [ngtcp2](https://github.com/ngtcp2/ngtcp2)（静态链入），在 **net 层**。需要
   `UVCPP_ENABLE_OPENSSL=ON` **以及**一份**带 QUIC API 的 OpenSSL ≥ 3.2**，再加上
-  `UVCPP_BUILD_NET=ON`（三条缺一即强制关 —— 没有明文 QUIC 这回事）。**1.4.1 只交
-  骨架**：传输方法返回 `UV_ENOSYS`，没有握手、没有流数据、没有 HTTP/3。详见
-  [doc/quic-guide.md](doc/quic-guide.md)。
+  `UVCPP_BUILD_NET=ON`（三条缺一即强制关 —— 没有明文 QUIC 这回事）。**1.4.1 起它是
+  一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时都通了。HTTP/3 还没有
+  （nghttp3 连依赖都没接）。详见 [doc/quic-guide.md](doc/quic-guide.md)。
 
 ### Web 应用框架（`src/webapp/`）— `UVCPP_BUILD_WEBAPP=ON`
 
@@ -205,7 +205,7 @@ int main() {
 | webapp（支撑类型） | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | 框架底下那七个类型：连接身份、web 工具函数、MIME、multipart、文件下发、每请求上下文、控制台日志 |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS 上下文与每连接封装 —— 头文件最短、最容易写错的一层 |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法；实现进度与折衷另见 [doc/http2-status.md](doc/http2-status.md) |
-| quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输骨架：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出"还没做"的清单 |
+| quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出"还没做"的清单 |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
@@ -291,7 +291,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 只交骨架：没有握手、没有流、没有 HTTP/3。** 见 [`doc/quic-guide.md`](doc/quic-guide.md) |
+| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 是一条真能通信的链路协议：握手、流收发、关闭与空闲超时都通了；HTTP/3 还没有。** 见 [`doc/quic-guide.md`](doc/quic-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md)（文档那一半）与 [`doc/soap-guide.md`](doc/soap-guide.md)（运行时那一半） |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
@@ -559,7 +559,7 @@ libuvcpp/
 │   ├── web/       # HTTP 客户端/服务端, WebSocket 客户端/服务端, 帧解析器
 │   ├── webapp/    # Web 应用框架（路由、中间件、静态、上传、WS 客户端、日志）
 │   ├── http2/     # HTTP/2 会话/连接层、nghttp2 胶水、ALPN（uvcpp_h2_nghttp2.h 是私有头）
-│   ├── quic/      # QUIC 传输骨架、ngtcp2 胶水（uvcpp_quic_ngtcp2.h 是私有头，1.4.1 只有形状）
+│   ├── quic/      # QUIC 传输、ngtcp2 胶水（uvcpp_quic_ngtcp2.h / uvcpp_quic_session.h 是私有头）
 │   └── ssl/       # SSL/TLS 上下文和连接封装
 ├── tests/
 │   ├── unit/      # 单元测试
@@ -578,7 +578,7 @@ libuvcpp/
 │   ├── json-reflect-guide.md # JSON 反射：一个宏标出字段表，两个方向共用
 │   ├── lowlevel-guide.md  # 事件循环、句柄与请求（地基）
 │   ├── net-guide.md       # TCP/UDP 客户端与服务端
-│   ├── quic-guide.md      # QUIC 传输骨架：构建契约、API 形状、以及没做的那一列
+│   ├── quic-guide.md      # QUIC 传输：构建契约、API 形状、以及没做的那一列
 │   ├── release-process.md # 发布怎么出，以及这条链**没有**检查什么
 │   ├── soap-guide.md      # SOAP 信封、Fault 形状、从 binding 推派发键
 │   ├── ssl-guide.md       # TLS 上下文与每连接封装
@@ -623,10 +623,27 @@ libuvcpp/
 - 把 [ngtcp2](https://github.com/ngtcp2/ngtcp2) 接进构建系统，藏在
   `UVCPP_ENABLE_QUIC` 后面（**默认关**），静态链入，走的是 nghttp2 给 HTTP/2 用的
   同一套 FetchContent + 私有头模式（`1.4.1`）
-- **1.4.1 交的是骨架，不是传输**：`connect()`、`listen()`、`open_stream()` 这一批
-  返回 `UV_ENOSYS`，完成回调一次都不会被调 —— 这条契约由
-  `tests/functional/quic_api_func.cpp` 钉住，而不是靠散文承诺；哪天真实现了，是
-  **用例变红**，不是"框架写好了"这句话悄悄过期（`1.4.1`）
+- **1.4.1 把骨架填成了一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时
+  端到端都通了。骨架期那条 `UV_ENOSYS` 契约由 `tests/functional/quic_api_func.cpp`
+  钉住而不是靠散文承诺，所以实现落地时它**真的红了**，逼着契约被显式改写 —— 而不是
+  让"框架写好了"这句话悄悄过期。现在 `quic_api_func.cpp` 钉的是**实现**：81 条断言
+  覆盖端点契约、关闭路径与空闲超时。新增 `quic_handshake_func.cpp`（22 条）与
+  `quic_stream_func.cpp`（33 条），在一条循环上真起服务端与客户端（`1.4.1`）
+- **流事件按流报。** `on_read` 多了 `int64_t stream_id` 参数，并新增了
+  `on_write` 完成回调 —— 一次 `write_stream()` 对应一次 `on_write`，与
+  `uvcpp_tcp_client::write()` 那条"受理不是发出去了"是同一条契约。**不**新增
+  `uvcpp_quic_stream` 类：风格照 `src/http2/uvcpp_h2_session.h`，回调自己带流号
+  （`1.4.1`）
+- **读侧的收尾按流、在它发生的时刻报**：对端 FIN 由 `on_read` 报 `PEER_CLOSED`；
+  对端 `RESET_STREAM` 也由 `on_read` 报（应用错误码 0 → `PEER_CLOSED`，非 0 →
+  `READ_ERROR`）。`on_stream_close` 是**故意**不接的 —— 它要等两个方向都收场才跑，
+  那时读侧已经没有新信息，拿它再报一次会让调用方对同一条流收两次尾（`1.4.1`）
+- **修掉一条只在静下来的连接上才现形的丢数据 bug**：从**回调外面**调
+  `write_stream()`（刚 `connect()` 完，或用户自己的定时器里）会把字节排进队列，然后
+  指望下一个进来的包把它们推出去 —— 而在一条已经静下来的连接上那个包永远不会来，
+  等到的是空闲超时。根因是 flush 循环的第一轮跳过了挑流，而静连接上没有待发的非流
+  帧，于是 `writev_stream` 返回 0、被当成收工。由 `quic_stream_func.cpp` 第 3 段
+  故意"从回调外面写"的用例抓到（`1.4.1`）
 - 打开它需要同时满足 `UVCPP_ENABLE_OPENSSL=ON`、一份带 QUIC API 的 OpenSSL ≥ 3.2
   （`SSL_set_quic_tls_cbs`）、以及 `UVCPP_BUILD_NET=ON`；缺任何一条都**强制关闭**并
   打一条说明怎么修的 warning，而不是留一个"能配置、链不上"的组合（`1.4.1`）
@@ -640,8 +657,16 @@ libuvcpp/
   却从不定义 `UVCPP_SSL_LIBS`；而空的 `UVCPP_SSL_LIBS` 展开出来是个**静默的空
   操作** `target_link_libraries()` —— 症状是**链接失败**，而且把 net 层自己的
   TLS 客户端路径一起带坏了（`1.4.1`）
-- 没有 HTTP/3、没接 nghttp3、没有握手、没有流、没有连接迁移、没有 0-RTT。
-  缺什么列在 [`doc/quic-guide.md`](doc/quic-guide.md) 里（`1.4.1`）
+- **还没有的**：HTTP/3（nghttp3 连依赖都没接）、0-RTT、连接迁移、无状态重置、
+  datagram（RFC 9221）、multipath、多循环支持。对端的 `STOP_SENDING` 也没接 ——
+  这是一处**已知的缺口**，不是遗漏：本端会继续往一条对端已经丢弃的流上填字节，
+  直到流控卡住。缺什么逐条列在 [`doc/quic-guide.md`](doc/quic-guide.md) 里（`1.4.1`）
+- **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
+  `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:1618`）、打包也排除
+  （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
+  `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
+  四个公开头（`1.4.1`）
 - 顺带补上一条**门禁**的洞：`doc/quic-guide.md` 新加的 4 条片段让
   `tests/tools/check_doc_snippets.py` 在**发布包**上永远退 3（那个包里 QUIC 是
   结构性关着的，片段必然 `[跳]`），而 CI 那一步是 `exit "$rc"` —— 于是不管代码多

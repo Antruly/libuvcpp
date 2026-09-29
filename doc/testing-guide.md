@@ -96,6 +96,10 @@ int main() {
 #endif
 ```
 
+The other two QUIC test files — `quic_handshake_func.cpp` and `quic_stream_func.cpp`, both
+new in `1.4.1` — copy that same `#else` shape. All three match the `quic` filter, so a broken
+filter takes all three red together.
+
 That is the difference in one line: if the CMake filter stops working, the two files above go
 green while testing nothing, and this one goes **red**. The `1.4.1` CI job for QUIC leans on
 exactly this (`doc/ci-guide.md` §The `quic` entries) — which is also why the file must be excluded

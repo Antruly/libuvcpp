@@ -6,17 +6,23 @@
 那层 HTTP/3 的地基，但**它自己不是 HTTP** —— 这一层不认识请求、响应、流上面的任何
 语义。
 
-> ## ⚠ 这一版（1.4.1）没有可用的 QUIC 传输
+> ## 1.4.1 起它是一条真能通信的链路协议
 >
-> 1.4.1 交付的是**构建契约、依赖接入、公开 API 形状与配置契约宏**。
-> `connect()` / `listen()` / `open_stream()` / `write_stream()` / `close()`
-> 一律返回 `UV_ENOSYS`，**握手、开流、收发一个字节都还没通**。真东西从 1.4.2 起
-> 往里填。这一点在下面 [§4](#4-141-交付了什么) 与
-> [§8](#8-没做的如实列出) 里逐条列清楚，公开头里每个方法上也都挂着 `@warning`。
+> 握手、流收发、连接关闭与空闲超时**都通了**：一条 UDP 口上真起得来连接，一条
+> 连接上真跑得动多条流，两边真能互发字节。这些不是"设计好了"，是三个功能用例
+> 里的断言量出来的（`quic_handshake_func.cpp` 22 条、`quic_stream_func.cpp`
+> 33 条、`quic_api_func.cpp` 81 条）。
 >
-> 说这件事的不是本页的礼貌用语，是 `tests/functional/quic_api_func.cpp` 里那一批
-> 断言：哪天真实现了，**用例会红**，逼着实现者显式回来改这份契约，而不是让
-> "框架写好了"这句话悄悄变成假的。
+> **没做的**是 HTTP/3（nghttp3 连依赖都没接）、0-RTT、连接迁移、无状态重置、
+> datagram（RFC 9221）与 multipath —— 逐条列在下面
+> [§8](#8-没做的如实列出)，别在别处另维护一份。
+>
+> 1.4.1 之前在公开头上挂着的那一片 `@warning` 已经整片摘掉了：它们描述的是
+> "返回 `UV_ENOSYS`、回调一次都不跑"的骨架，而那个契约是被
+> `tests/functional/quic_api_func.cpp` **钉住**的 —— 实现落地时那些断言确实红了，
+> 逼着实现者回来把契约显式改成真的，而不是让"框架写好了"这句话悄悄变成假的。
+> 现在它们测的是**实现**：没挂到连接上的壳返回 `UV_ENOTCONN`、没设 TLS 上下文的
+> 端点返回 `UV_EINVAL` 且一条回调都不许排。
 
 - 打开方式：`-DUVCPP_ENABLE_QUIC=ON`。**默认 OFF**（`CMakeLists.txt:94`），而且
   下面三种情况会被**强制**置 OFF 并打 warning，而不是留一个"能配置、链不上、
@@ -29,8 +35,8 @@
      [§2](#2-编译期条件一份带-quic-api-的-openssl--32)。
 - 包含方式：`<quic/uvcpp_quic_client.h>`、`<quic/uvcpp_quic_server.h>`、
   `<quic/uvcpp_quic_connection.h>`、`<quic/uvcpp_quic_common.h>`。私有的
-  `<quic/uvcpp_quic_ngtcp2.h>` **不安装**（`CMakeLists.txt:1613`）—— 理由见
-  [§7](#7-典型坑) 第一条。
+  `<quic/uvcpp_quic_ngtcp2.h>` 与 `<quic/uvcpp_quic_session.h>` **都不安装**
+  （`CMakeLists.txt:1618`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 四个公开头**全部**整段套在 `#if UVCPP_QUIC_ENABLE` 里，所以**不开关就一个类都
   看不到**。这与 `web/`、`ssl/`、`http2/`、`wsdl/` 同档。
 
@@ -56,9 +62,9 @@
 
 | 类 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_quic_client` | `src/quic/uvcpp_quic_client.h:59` | 客户端**端点**：一条 UDP 口 + 它名下的那条连接 |
-| `uvcpp_quic_server` | `src/quic/uvcpp_quic_server.h:51` | 服务端**端点**：一条（或多条）UDP 口 + 它上面**所有**连接 |
-| `uvcpp_quic_connection` | `src/quic/uvcpp_quic_connection.h:47` | 一条 QUIC 连接：状态机、流、CID、ALPN |
+| `uvcpp_quic_client` | `src/quic/uvcpp_quic_client.h:57` | 客户端**端点**：一条 UDP 口 + 它名下的那条连接 |
+| `uvcpp_quic_server` | `src/quic/uvcpp_quic_server.h:57` | 服务端**端点**：一条（或多条）UDP 口 + 它上面**所有**连接 |
+| `uvcpp_quic_connection` | `src/quic/uvcpp_quic_connection.h:58` | 一条 QUIC 连接：状态机、流、CID、ALPN |
 | `net_read_result` / `net_read_event` | `src/net/uvcpp_net_read.h:68` | **复用 net 层**的读事件语义（不是本模块新造的） |
 
 **为什么是三个类而不是一个。** `uvcpp_tcp_client` 一个对象既是 socket 又是连接，
@@ -74,7 +80,7 @@
 为两套名字相同的语义各写一遍分支，而且两套迟早漂移。复用落在**语义**那一层
 （`net_read_result` / `net_read_event`）；回调的**第一个参数**按本层自己的类型走，
 因为 `uvcpp_net_read_cb` 那个 typedef 写死了 `uvcpp_tcp_client&`
-（`src/quic/uvcpp_quic_common.h:108-125` 有完整理由）。
+（`src/quic/uvcpp_quic_common.h:109-137` 有完整理由）。
 
 **它不属于 web 层。** 所以 `CMakeLists.txt:94` 那个 `option()` 刻意**不**放在
 "Web 子开关"那一组里 —— 那组的标题写着"仅在 `UVCPP_BUILD_WEB=ON` 时有效"，而
@@ -168,22 +174,25 @@ nghttp3 留到真做 HTTP/3 的那一版再接。
 
 ## 4. 1.4.1 交付了什么
 
-| 东西 | 状态 |
-|---|---|
-| CMake 接线（开关、三守卫、QUIC API 探针、FetchContent、PIC 断言） | **真实现** |
-| 依赖接入（`ngtcp2_static` + `ngtcp2_crypto_ossl_static`，静态链入） | **真实现** |
-| 配置契约宏 `UVCPP_QUIC_ENABLE`（生成头 + `_uvcpp_literal01` + PUBLIC 编译定义三处一致） | **真实现** |
-| `uvcpp_quic_server::bind()` 系列**参数校验** | **真实现**（但不建 socket） |
-| `set_ssl_context()` / `set_alpn_protos()` / `set_alpn_select_protos()` | **真实现**（只存值） |
-| `run()` / `stop()` | **真实现**（转发到 loop） |
-| `quic_ngtcp2_version_string()` / `quic_error_string()` / `quic_crypto_backend_init()` / `_free()` | **真实现**（真调进 ngtcp2） |
-| 握手 | **没有** |
-| 开流、收发、流控、重传、丢包恢复 | **没有** |
-| 连接迁移、0-RTT、无状态重置、datagram（RFC 9221） | **没有** |
-| HTTP/3（nghttp3） | **没有**（连依赖都还没接） |
+| 东西 | 状态 | 判据在哪 |
+|---|---|---|
+| CMake 接线（开关、三守卫、QUIC API 探针、FetchContent、PIC 断言） | **真实现** | `check_ci_layout.py` 的 `FEATURE_GATES["quic"]` |
+| 依赖接入（`ngtcp2_static` + `ngtcp2_crypto_ossl_static`，静态链入） | **真实现** | `quic_api_func.cpp` 的三条链接证据 |
+| 配置契约宏 `UVCPP_QUIC_ENABLE`（生成头 + `_uvcpp_literal01` + PUBLIC 编译定义三处一致） | **真实现** | `check_config_contract.py` |
+| **握手**（Initial → TLS 1.3 → ALPN → 1-RTT） | **真实现** | `quic_handshake_func.cpp` |
+| **开流、收发、流控、重传、丢包恢复** | **真实现**（ngtcp2 驱动） | `quic_stream_func.cpp` |
+| **连接关闭（两端各自的 CONNECTION_CLOSE）与空闲超时** | **真实现** | `quic_api_func.cpp` §5 |
+| **服务端的 CID 路由**（一条连接多个 SCID + 对端原始 DCID） | **真实现** | `quic_handshake_func.cpp` + `quic_stream_func.cpp` |
+| `uvcpp_quic_server::bind()` 系列**参数校验** | **真实现**（登记；socket 在 `listen()` 里建） | `quic_api_func.cpp` §4 |
+| `set_ssl_context()` / `set_alpn_protos()` / `set_alpn_select_protos()` / `set_idle_timeout()` | **真实现** | — |
+| `run()` / `stop()` | **真实现**（转发到 loop） | — |
+| `quic_ngtcp2_version_string()` / `quic_error_string()` / `quic_crypto_backend_init()` / `_free()` | **真实现**（真调进 ngtcp2） | `quic_api_func.cpp` §1 |
+| 对端 reset 一条流（RESET_STREAM）时读侧的收尾事件 | **真实现** | `quic_stream_func.cpp` 第 3 段 |
+| 连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath | **没有** | [§8](#8-没做的如实列出) |
+| HTTP/3（nghttp3） | **没有**（连依赖都还没接） | [§8](#8-没做的如实列出) |
 
-一句话：**这一层现在是一个能配置、能编译、能被链接、能被测试的骨架，不是一个能
-通信的实现。**
+一句话：**这一层现在是一条能握手、能开流、能收发、能干净收场的链路协议**；它上面
+还没有 HTTP/3，所以它还不认识"请求"和"响应"。
 
 ---
 
@@ -193,6 +202,7 @@ nghttp3 留到真做 HTTP/3 的那一版再接。
 
 ```cpp
 #include <quic/uvcpp_quic_client.h>
+#include <quic/uvcpp_quic_connection.h>
 #include <ssl/uvcpp_ssl_context.h>
 
 #include <string>
@@ -200,38 +210,79 @@ nghttp3 留到真做 HTTP/3 的那一版再接。
 
 using namespace uvcpp;
 
-// 配置这一档在 1.4.1 就已经是真实现：只存值，配置期就能调。
-void configure_quic_client(uvcpp_ssl_context& tls, uvcpp_quic_client& cli) {
+// 配置 + 连接。**回调要在 connect() 返回之后、下一次循环迭代之前装上去** ——
+// 理由见下面那条 warning。
+int start_quic_client(uvcpp_ssl_context& tls, uvcpp_quic_client& cli) {
   cli.set_ssl_context(&tls);   // 生命周期必须覆盖整条连接，本对象不持有它
   cli.set_alpn_protos(std::vector<std::string>{"h3"});
+  cli.set_idle_timeout(30000);  // 毫秒；0 = 不超时
+
+  const int rc = cli.connect("127.0.0.1", 4433, [](int) {
+    // 那个 0 是**握手完成**，不是"受理了"：这一刻起才谈得上发数据。
+  });
+  if (rc != 0) return rc;   // 负值 = 连开始都没开始，回调一次都不会跑
+
+  uvcpp_quic_connection::callbacks cbs;
+  cbs.on_alpn = [](uvcpp_quic_connection&, const std::string&) {
+    // 进来的字符串就是对端选定的协议名；到这一刻 state() 才到 ESTABLISHED。
+  };
+  cbs.on_read = [](uvcpp_quic_connection&, int64_t,
+                   const net_read_result&) {
+    // 一条连接上有很多条流 —— 所以流号是回调参数，不是从别处查的。
+  };
+  cli.connection()->set_callbacks(cbs);
+  return 0;
 }
 ```
 
 - 两个构造函数：`uvcpp_quic_client()`（**自建** loop，析构时关掉它）与
   `uvcpp_quic_client(uvcpp_loop*)`（**共享**外部 loop，析构时**不会**关它）——
   与 `uvcpp_tcp_client` 那条约定逐字相同。
+- `connect()` 的**完成回调报的是握手完成**，不是"地址解析好了"：`cb(0)` 与
+  `on_alpn` / `state()==ESTABLISHED` 是同一时刻。`connect()` 本身并不发包 ——
+  第一个 Initial 包要等循环转起来才出去，所以"返回 0"只表示"这条路开始了"。
+- **回调必须在 `connect()` 返回后、下一次循环迭代前装上。** 这既是安全的
+  （那时还没有任何包进来），也是**唯一**的窗口：等 `cb(0)` 再装，握手期间发生的事
+  （比如服务端侧那一刻的 `on_stream_open`）已经过去了。
 - `set_alpn_protos({})`（空列表）**不等于回到默认**：默认是
   `quic_default_alpn()`，也就是 `"h3"`；空列表的含义是"一个候选都不发"，通常直接
   握手失败。
 - `set_ssl_context(nullptr)` 是"清空"，而**不设就是没配**：QUIC 没有明文模式，
-  所以缺上下文时应当**失败**，而不是退化成一个不加密的连接。
+  所以缺上下文时 `connect()` 返回 `UV_EINVAL`，而不是退化成一个不加密的连接。
+- `set_idle_timeout(ms)` 只在 `connect()` **之前**调有效 —— 握手一开始传输参数就
+  发出去了，之后改只是改一个再也不会被读到的字段。
 
 ### 5.2 服务端
 
 ```cpp
 #include <quic/uvcpp_quic_server.h>
+#include <quic/uvcpp_quic_connection.h>
+#include <ssl/uvcpp_ssl_context.h>
 
 #include <cstdio>
 
 using namespace uvcpp;
 
-// bind() 是 1.4.1 里的真实现：它真的校验地址字面量 —— 但不创建任何 socket。
-int show_bind_result(uvcpp_quic_server& srv) {
-  if (srv.bind("0.0.0.0", 4433) != 0) return 1;   // 0 = 登记成功
-  std::printf("%s:%d\n", srv.configured_ip().c_str(), srv.configured_port());
+// 端口用 0 让内核挑一个 —— 这是测试里发现端口的标准写法。
+int start_quic_server(uvcpp_ssl_context& tls, uvcpp_quic_server& srv) {
+  srv.set_ssl_context(&tls);
+  srv.set_alpn_select_protos(std::vector<std::string>{"h3"});
 
-  // "not-an-address" 经 uv_inet_pton() 走一遍，当场被拒 —— 不是等到 listen() 才炸。
-  return srv.bind("not-an-address", 4433) == UV_EINVAL ? 0 : 2;
+  if (srv.bind("127.0.0.1", 0) != 0) return 1;   // 0 = 登记成功（真校验，但不建 socket）
+  if (srv.listen([](uvcpp_quic_connection* c) {
+        // 连接**刚建出来**（首包到达）就跑，不是握手完成时 —— 回调要在这一格里装。
+        uvcpp_quic_connection::callbacks cbs;
+        cbs.on_alpn = [](uvcpp_quic_connection&, const std::string&) {
+          // 到这一刻起才谈得上收发。
+        };
+        c->set_callbacks(cbs);
+      }) != 0) {
+    return 2;
+  }
+
+  // listen() 之后它报的是**内核实际给的那个端口**，不再是登记的 0。
+  std::printf("%s:%d\n", srv.configured_ip().c_str(), srv.configured_port());
+  return 0;
 }
 ```
 
@@ -239,10 +290,16 @@ int show_bind_result(uvcpp_quic_server& srv) {
   `uv_inet_pton()`，端口范围 `0..65535`；**先校验、后赋值**，所以失败时已经登记好的
   地址不变。域名**不收** —— UDP 的绑定要一个 `sockaddr`，"解析成本机接口地址"是另
   一件事（解析出多个地址选哪个？），不在这里猜。
-- 访问器叫 **`configured_ip()` / `configured_port()`**，不叫 `bound_*`。名字就该
-  看得出这件事：**本版不创建、不绑定任何 socket**，所以 `bind()` 返回 0
-  **不等于**"这个端口归我了"。端口被占用要等到 `listen()` 才会暴露，而
-  `listen()` 这一版返回 `UV_ENOSYS`。
+- **socket 是在 `listen()` 里建的，不是 `bind()` 里。** 所以 `bind()` 返回 0 仍然
+  **不等于**"这个端口归我了"—— 端口冲突要到 `listen()` 才暴露。访问器叫
+  `configured_ip()` / `configured_port()` 而不是 `bound_*`，正是为了名字上不撒谎。
+- 但 `configured_port()` 在 `listen()` **之后**报的是**内核实际分配**的端口：
+  写 `bind("127.0.0.1", 0)` 让内核挑一个，然后拿这个访问器问出是哪一号 ——
+  测试里没它就没法发现端口。
+- `listen()` 在**首包到达、连接对象刚建出来**的那一刻跑 `connection_cb`，
+  **不是**握手完成时。这与客户端的 `connect()` 相反，理由只有一个：`on_alpn` /
+  `on_read` 这些回调要在它的下一行装上去，装晚了握手期间的事件全丢。
+  要"能开始收发"这个点，看 `on_alpn` 或 `state()`。
 - 服务端是 ALPN 的**选择方**：对端候选里没有一个落在 `set_alpn_select_protos()`
   列表里时，按 RFC 7301 应当以 `no_application_protocol` 告警结束握手，而**不是**
   挑一个双方都没承诺的协议名。
@@ -252,49 +309,62 @@ int show_bind_result(uvcpp_quic_server& srv) {
 ### 5.3 连接
 
 ```cpp
-#include <quic/uvcpp_quic_client.h>
-#include <quic/uvcpp_quic_server.h>
+#include <quic/uvcpp_quic_connection.h>
+
+#include <cstdint>
 
 using namespace uvcpp;
 
-// 1.4.1 的**成文契约**：动作方法返回 UV_ENOSYS，且完成回调一次都不跑。
-// 回调不跑那半边由 tests/functional/quic_api_func.cpp 钉（本页只断言返回值）。
-bool transport_is_not_implemented(uvcpp_quic_client& cli, uvcpp_quic_server& srv) {
-  const bool a = cli.connect("example.com", 443, [](int) {}) == UV_ENOSYS;
-  const bool b = srv.listen([](uvcpp_quic_connection*) {}) == UV_ENOSYS;
-  const bool c = cli.connection() == nullptr;   // 本版恒为 nullptr
-  return a && b && c;
+// 一次往返：开流、写、只关发送方向。
+int one_round_trip(uvcpp_quic_connection& conn) {
+  const int64_t id = conn.open_stream(/*bidi=*/true);
+  if (id < 0) return 1;   // 负值就是错误码；NGTCP2_ERR_STREAM_ID_BLOCKED 是正常的一种
+
+  if (conn.write_stream(id, "hello", 5, /*end_stream=*/true) != 0) return 2;
+  // write_stream() 是**受理**：返回 0 只表示字节进了发送队列。
+  // 真正"对端确认了"由 on_write(conn, id, 0) 报，一次调用对一次回调。
+
+  // 只关发送方向（QUIC 的流是两个方向各关一次的）；读方向照常收。
+  return conn.shutdown_stream(id) == 0 ? 0 : 3;
 }
 ```
-
-**"返回 `UV_ENOSYS` 时回调不跑"是一条成文契约，不是实现细节。** "受理了但永远不
-回调"是最难查的一类挂死（调用方在等一个永远不来的事件），宁可不收。两个动作方法上
-都挂着这条 `@warning`。
 
 `uvcpp_quic_connection` 的公开面：
 
 | 方法 | 1.4.1 的行为 |
 |---|---|
-| `set_callbacks(const callbacks&)` | 真实现（存值） |
-| `state()` | 恒 `quic_connection_state::IDLE` |
-| `alpn_selected()` | 恒空串（**不是**默认 ALPN，也不是猜测值） |
-| `open_stream(bool bidi = true)` | 恒 `UV_ENOSYS`（返回 `int64_t`） |
-| `write_stream(stream_id, data, len, end_stream = false)` | 恒 `UV_ENOSYS` |
-| `shutdown_stream(stream_id)` | 恒 `UV_ENOSYS` |
-| `close(int error_code = 0)` | 恒 `UV_ENOSYS` |
+| `set_callbacks(const callbacks&)` | 真实现（存值，随时可换） |
+| `state()` | 真状态机：`IDLE → HANDSHAKING → ESTABLISHED → CLOSING → CLOSED` |
+| `alpn_selected()` | 握手完成后是对端选定的协议名；之前是空串 |
+| `open_stream(bool bidi = true)` | 真开流，返回流号；失败返负的错误码 |
+| `write_stream(stream_id, data, len, end_stream = false)` | 受理进发送队列，`on_write` 报完成 |
+| `shutdown_stream(stream_id)` | 只关发送方向；队列里没写完的以 `NGTCP2_ERR_STREAM_SHUT_WR` 收场 |
+| `close(int error_code = 0)` | 发 CONNECTION_CLOSE，`state()` 到 `CLOSING` |
 
-两处签名上的讲究：
+四件签名与语义上的讲究：
 
 - `open_stream()` 返回 `int64_t` 而不是 `int`。QUIC 的流号是 62 位无符号（RFC 9000
   §2.1 允许到 2^62−1），用一个会截断的返回类型，就是把一个"永远到不了"的假设焊进
   签名里。
+- **`write_stream()` 是"受理"不是"发出去了"。** 没有完成通知，调用方就只能靠猜来
+  决定什么时候能重用缓冲区 —— 这是 `uvcpp_tcp_client::write()` 早就定下的同一条
+  约定，`on_write` 是它在流上的对应物，且**一次调用恰好对应一次回调**。
 - `shutdown_stream()` 与 `close()` 是**两个**动作，因为 QUIC 的流是**两个方向各关
   一次**的。想要 TCP 那种"两边一起关"，得 `shutdown_stream()` 之后再等对端也关。
+- `close(error_code)` 的错误码 0 与非 0 有语义差别：非 0 会被当作**应用错误码**发给
+  对端。客户端端点自己的 `close()` 不吃参数 —— 只发一个干净的 CONNECTION_CLOSE。
 
-回调集合 `uvcpp_quic_connection::callbacks` 有四个：`on_read`、`on_stream_open`、
-`on_alpn`、`on_close`。四个都在 **loop 线程**上跑，而且 `on_read` /
-`on_stream_open` 会在某个内部调用**还没返回**的时候就同步跑用户代码 —— 于是用户
-代码可以在回调里 `close()` 掉这条连接，回调返回后**不要再碰本对象**。
+回调集合 `uvcpp_quic_connection::callbacks` 有**五**个：`on_read`、`on_stream_open`、
+`on_write`、`on_alpn`、`on_close`。五个都在 **loop 线程**上跑，而且 `on_read` /
+`on_stream_open` / `on_write` 会在某个内部调用**还没返回**的时候就同步跑用户代码 ——
+于是用户代码可以在回调里 `write_stream()` / `close()` 掉这条连接（这两件事都被受理，
+真正的发包推到回调退栈之后），但**回调返回后不要再碰本对象**，尤其是 `on_close`
+之后：那时端点已经在准备销毁它了。
+
+`on_close` 的 `error_code` 按符号分三种意思：`> 0` 是对端的**应用**错误码，`= 0`
+是干净关闭，`< 0` 是传输层原因（`NGTCP2_ERR_DRAINING` 表示对端关了我们、
+`NGTCP2_ERR_IDLE_CLOSE` 表示空闲超时），拿 `quic_error_string()` 问它的意思。
+无论多少条路通向终结，它**恰好跑一次**。
 
 ### 5.4 读事件
 
@@ -302,22 +372,36 @@ bool transport_is_not_implemented(uvcpp_quic_client& cli, uvcpp_quic_server& srv
 #include <quic/uvcpp_quic_common.h>
 #include <quic/uvcpp_quic_connection.h>
 
+#include <cstdint>
+
 using namespace uvcpp;
 
-// 读回调拿到的 result 与 net 层**同一套语义**（net_read_result / net_read_event）。
+// 读回调拿到的 result 与 net 层**同一套语义**（net_read_result / net_read_event），
+// 只是多了一个流号：一条连接上有很多条流。
 void install_reader(uvcpp_quic_connection& conn) {
   uvcpp_quic_connection::callbacks cbs;
-  cbs.on_read = [](uvcpp_quic_connection&, const net_read_result& r) {
+  cbs.on_read = [](uvcpp_quic_connection&, int64_t,
+                   const net_read_result& r) {
     if (r.event == net_read_event::DATA) {
       // r.data 只在本次回调期间有效（r.size 是字节数，二进制安全，可能含 NUL）；
       // r.error 只有 event == READ_ERROR 时才是 libuv 错误码。
       return;
     }
     // PEER_CLOSED 是一次**干净收尾**，不是错误；READ_ERROR 才是。
+    // 两者都**按流**报：某条流收到 FIN 或 RESET_STREAM 只结束那一条流。
   };
   conn.set_callbacks(cbs);
 }
 ```
+
+读侧的收尾**按流**到达，而且**两个方向各报各的**：对端发 FIN 由 `on_read` 报
+`PEER_CLOSED`；对端发 RESET_STREAM（它不要这条流了）也由 `on_read` 报，只是错误码
+非 0 时报 `READ_ERROR`、为 0 时报 `PEER_CLOSED` —— 错误码是应用自己定的，0 按约定
+就是"没有错误"，报成 `READ_ERROR(0)` 会让调用方去做无意义的错误处理。
+
+**`on_stream_close` 那一格是故意留空的。** 它要等**两个**方向都收场才跑，那时读侧
+早就没有新信息了，拿它再报一次只会让调用方对同一条流收两次尾。本层把读侧的信号
+放在**它自己的到达时刻**上，写侧的收尾则由 `on_write` 报。
 
 ---
 
@@ -358,10 +442,12 @@ void install_reader(uvcpp_quic_connection& conn) {
 ## 7. 典型坑
 
 1. **别指望从公开头里看到 ngtcp2。** `<ngtcp2/ngtcp2.h>` 只出现在私有的
-   `src/quic/uvcpp_quic_ngtcp2.h` 里，而那个头**不安装**
-   （`CMakeLists.txt:1613`）、打包也被排除。理由有两条：一是使用者不该被逼着去配
-   ngtcp2 的搜索路径才能 include 一个本库的头；二是 ngtcp2 的类型一旦漏进公开面，
-   它的版本就变成了本库的 ABI。这处排除与 `tests/tools/package_release.py` 的
+   `src/quic/uvcpp_quic_ngtcp2.h` 里，而它和持有 ngtcp2 句柄的
+   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:1618`）、打包
+   也被排除。理由有两条：一是使用者不该被逼着去配 ngtcp2 的搜索路径才能 include
+   一个本库的头；二是 `uvcpp_quic_session.h` 的成员里就有 `ngtcp2_conn*`、`SSL*`、
+   `ngtcp2_path_storage`，它的字段布局直接跟着 ngtcp2 的版本走 —— 一旦漏进公开面，
+   那个版本就变成了本库的 ABI。这处排除与 `tests/tools/package_release.py` 的
    `PRIVATE_HEADERS` 是**一对**，两处必须一起改。
 
 2. **ngtcp2 的 include 路径是 PRIVATE 进来的。** 静态库上那是 `$<LINK_ONLY:…>`，
@@ -370,11 +456,12 @@ void install_reader(uvcpp_quic_connection& conn) {
    `src/quic/uvcpp_quic_ngtcp2.cpp`（由它 include 私有头）的原因：测试只经公开头
    调用，符号在链接期解析，照样证明 ngtcp2 真被链上。
 
-3. **`src/quic/` 的源文件被 `list(FILTER … EXCLUDE REGEX "src/quic/")` 排除**，而
-   且"开了 QUIC 但目录是空的"会**当场 FATAL**（`CMakeLists.txt:1079`）。后者
-   防的是一棵树同时骗过三道看起来很像门禁的东西：cache 里 `QUIC=ON`、日志里有
-   `ngtcp2 integrated`、编译也过 —— 而 `src/quic/` 一个 `.cpp` 都没有，**零行 QUIC
-   代码被编译过**。"没测"必须表现为**失败**，不是表现为**通过**。
+3. **`src/quic/` 的源文件被 `list(FILTER … EXCLUDE REGEX "src/quic/")` 排除**
+   （`CMakeLists.txt:1067`，头文件那一条在 `:1068`），而且"开了 QUIC 但目录是空的"
+   会**当场 FATAL**（`CMakeLists.txt:1081`）。后者防的是一棵树同时骗过三道看起来
+   很像门禁的东西：cache 里 `QUIC=ON`、日志里有 `ngtcp2 integrated`、编译也过 ——
+   而 `src/quic/` 一个 `.cpp` 都没有，**零行 QUIC 代码被编译过**。"没测"必须表现为
+   **失败**，不是表现为**通过**。
 
 4. **不要从公开 quic 头里 `#include` ngtcp2。** 除了上面第 1 条那个 ABI 理由，
    `tests/tools/check_doc_snippets.py` 的 `NOT_BUNDLED` 里记着 `ngtcp2/`：公开头
@@ -403,14 +490,21 @@ void install_reader(uvcpp_quic_connection& conn) {
      使用者自己的工作树。
    - **那道补丁配了一条断言**：找不到那一行就 FATAL，而不是静默跳过。上游改了
      写法时你会看到"补丁没打上"，而不是"配置莫名其妙的撞名错"。
-   - **别把这个组合当成被支持的组合去用**：QUIC 这一版没有传输，两个一起开
-     只是证明构建契约成立。CI 里没有任何一条腿同时开这两个（`h2` 关 quic，
-     `quic` 关 web），所以这条路径没有门禁看着。
+   - **别把这个组合当成被支持的组合去用。** CI 里没有任何一条腿同时开这两个
+     （`h2` 关 quic，`quic` 关 web），所以这条路径**没有门禁看着** —— 它能配出来
+     只证明构建契约成立，不证明那棵树被跑过。
 
    CMake 自己的逃生口 `CMP0002=OLD`（"逻辑目标名必须全局唯一"）在这里**救不了**：
    策略只在没有被子目录覆盖时继承，而 ngtcp2 的 `cmake_minimum_required` 会把
    继承下来的 OLD 重置回 NEW。试过的三种设法（父目录 `cmake_policy(SET)`、函数
    作用域、`CMAKE_POLICY_DEFAULT_CMP0002`）**都实测失败**，别再走一遍。
+
+8. **`close(42)` 之后，值 42 只有对端收得到 —— 你自己那一侧的 `on_close` 收到的是
+   0。** 这不是漏报：本端一旦发出 CONNECTION_CLOSE 就进了 `CLOSING` 期，而 RFC 9000
+   §10.2.1 规定这个状态下不再处理收到的包，于是对端的回应被 ngtcp2 一律以
+   `NGTCP2_ERR_CLOSING` 丢掉。所以"本端先关的那一侧拿不到对端的错误码"是**协议
+   行为**，不是本层的取舍 —— `tests/functional/quic_api_func.cpp` §5 把它量成了
+   两条断言（一侧 42、另一侧 0），免得后来人把它当 bug 修掉。
 
 ---
 
@@ -418,13 +512,12 @@ void install_reader(uvcpp_quic_connection& conn) {
 
 按仓库惯例，这一节必须老实写。以下都是**这一版真的没有**，不是"文档没写"：
 
-- **没有任何可用的 QUIC 传输。** 不能握手、不能开流、不能收发一个字节。
 - **没有 HTTP/3。** nghttp3 本版**连依赖都没接**。这一层是它的地基，不是它。
 - **没有连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath。**
-- **`bind()` 不建 socket。** 端口冲突、权限不足这类错误要等到 `listen()` 才会暴露，
-  而 `listen()` 这一版返回 `UV_ENOSYS`。
-- **`state()` 恒为 `IDLE`、`alpn_selected()` 恒为空串。** 状态机还没有；枚举值与
-  默认值的存在是为了把 API 形状定下来，不是为了假装已经能跑。
+- **对端的 STOP_SENDING 没接。** 收到它意味着"你这条流别再发了"，本层不会自动回
+  一个 RESET_STREAM，于是会继续往一条对端已经丢弃的流上填字节，直到流控卡住。
+  这是一处**已知的缺口**，不是遗漏 —— 接它需要在回调里排一个延后的 reset 意图
+  （与 `close()` 那条同形状），留到需要的时候再做。
 - **没有多循环支持。** 见 [§5.2](#52-服务端)。
 - **MinGW 的 CI 腿没有开 QUIC。** macOS 与 Windows MSVC 各有一格 `quic`（1.4.1 补的，
   它们用包管理器给的 OpenSSL，只有 ubuntu 那格自建），只有 MSYS2 那条腿还没有 —— 它是
@@ -435,11 +528,14 @@ void install_reader(uvcpp_quic_connection& conn) {
 - **没有 `uvcpp_web` 那侧的接线。** `uvcpp_http_server` 不会因为 QUIC 打开就多出
   什么 —— 它连 `UVCPP_QUIC_ENABLE` 都不看。
 - **没有流状态枚举，也没有自研 varint 编解码。** 这两样都属于"没有调用方的名字"：
-  流的公开面就是 `stream_id` 本身，没有任何访问器会返回流状态，所以
-  `quic_stream_state` 那样的枚举一个消费者都没有；varint 的包解析/序列化归 ngtcp2，
-  自己写一份就是死代码。本仓库对这类名字是不发的 —— 尤其是公开头里的，它会进
-  `include/quic/`、进 API 兼容面，被下一个读代码的人当成承重结构。将来真做流时
-  再建，形状由那时的实现定。对照：`quic_connection_state` **留着**，因为 `state()`
-  是它的消费者，测试也断言在它上面。
+  流已经是真实现了，但它的公开面仍然只是 `stream_id` 本身加一组事件回调，没有任何
+  访问器会返回"这条流的读方向还在不在"之类的状态，所以 `quic_stream_state` 那样的
+  枚举**依然**一个消费者都没有；varint 的包解析/序列化归 ngtcp2，自己写一份就是
+  死代码。本仓库对这类名字是不发的 —— 尤其是公开头里的，它会进 `include/quic/`、
+  进 API 兼容面，被下一个读代码的人当成承重结构。对照：`quic_connection_state`
+  **留着**，因为 `state()` 是它的消费者，测试也断言在它上面。
+- **没有连接级的统计/指标**（丢包数、RTT、拥塞窗口）。想读这些得上 ngtcp2 的
+  `ngtcp2_conn_get_*`，而那是私有头里的类型，公开面暂时不接。
 
-下一版（1.4.2 起）往里填的顺序：握手 → 流收发 → 连接关闭与超时 → 再谈 HTTP/3。
+下一步只剩 **HTTP/3**（接 nghttp3，把请求/响应那层语义建在这条链路协议上）。
+连接迁移、0-RTT 那些不在路线图上 —— 它们要等有真实需求时才谈。

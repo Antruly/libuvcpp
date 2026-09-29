@@ -122,9 +122,9 @@ in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
 - `UVCPP_ENABLE_QUIC=ON` — QUIC transport (RFC 9000) over [ngtcp2](https://github.com/ngtcp2/ngtcp2),
   linked static, in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON` **and** an
   **OpenSSL ≥ 3.2 with the QUIC API**, plus `UVCPP_BUILD_NET=ON` (force-disabled without
-  any of them — there is no cleartext QUIC). **1.4.1 ships the skeleton only**: the
-  transport methods return `UV_ENOSYS`, there is no handshake, no stream data, and no
-  HTTP/3. See [doc/quic-guide.md](doc/quic-guide.md).
+  any of them — there is no cleartext QUIC). As of **1.4.1** it is a real link protocol:
+  handshake, streams, connection close and idle timeout all work. HTTP/3 is not there
+  yet (nghttp3 is not wired in). See [doc/quic-guide.md](doc/quic-guide.md).
 
 ### Web app framework (`src/webapp/`) — `UVCPP_BUILD_WEBAPP=ON`
 
@@ -207,7 +207,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | webapp (support types) | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | The seven types under the framework: connection identity, web utilities, MIME, multipart, file transfer, per-request context, console logging |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS context and per-connection wrapper — the shortest header set and the easiest to get wrong |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer; for progress and trade-offs see [doc/http2-status.md](doc/http2-status.md) |
-| quic | [doc/quic-guide.md](doc/quic-guide.md) | The QUIC transport skeleton: the build contract, why it needs an OpenSSL ≥ 3.2, the API shape, and an honest list of what does not work yet |
+| quic | [doc/quic-guide.md](doc/quic-guide.md) | The QUIC transport: the build contract, why it needs an OpenSSL ≥ 3.2, the API shape, and an honest list of what does not work yet |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
@@ -294,7 +294,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 ships the skeleton only: no handshake, no streams, no HTTP/3.** See [`doc/quic-guide.md`](doc/quic-guide.md) |
+| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 is a real link protocol: handshake, streams, close and idle timeout work; HTTP/3 is not there yet.** See [`doc/quic-guide.md`](doc/quic-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | Enable the WSDL/SOAP module (XML via pugixml, linked static). Requires `UVCPP_BUILD_WEBAPP=ON`. See [`doc/wsdl-guide.md`](doc/wsdl-guide.md) (the document half) and [`doc/soap-guide.md`](doc/soap-guide.md) (the runtime half) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | Fetch and build libuv from source via `FetchContent` |
@@ -572,7 +572,7 @@ libuvcpp/
 │   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
 │   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
 │   ├── http2/     # HTTP/2 session/connection layers, nghttp2 glue, ALPN (uvcpp_h2_nghttp2.h is private)
-│   ├── quic/      # QUIC transport skeleton, ngtcp2 glue (uvcpp_quic_ngtcp2.h is private)
+│   ├── quic/      # QUIC transport, ngtcp2 glue (uvcpp_quic_ngtcp2.h / uvcpp_quic_session.h are private)
 │   └── ssl/       # SSL/TLS context and connection wrapper
 ├── tests/
 │   ├── unit/      # Unit tests
@@ -591,7 +591,7 @@ libuvcpp/
 │   ├── json-reflect-guide.md # Field-table reflection: both directions, read semantics, limits
 │   ├── lowlevel-guide.md  # Event loop, handles and requests (the foundation)
 │   ├── net-guide.md       # TCP/UDP clients and servers
-│   ├── quic-guide.md      # QUIC transport skeleton: build contract, API shape, what is not done
+│   ├── quic-guide.md      # QUIC transport: build contract, API shape, what is not done
 │   ├── release-process.md # How a release is cut, and what it does not check
 │   ├── soap-guide.md      # SOAP envelopes, fault shapes, dispatch from the binding
 │   ├── ssl-guide.md       # TLS context and per-connection wrapper
@@ -638,11 +638,33 @@ fixes came from issue reports by the project's first external contributor,
 - [ngtcp2](https://github.com/ngtcp2/ngtcp2) is wired into the build behind
   `UVCPP_ENABLE_QUIC` (**off by default**), statically linked, with the same FetchContent
   + private-header pattern nghttp2 uses for HTTP/2 (`1.4.1`)
-- **1.4.1 ships the skeleton, not the transport**: `connect()`, `listen()`,
-  `open_stream()` and friends return `UV_ENOSYS`, and their completion callbacks are never
-  invoked — a contract pinned by `tests/functional/quic_api_func.cpp` rather than promised
-  in prose, so the day it is implemented the test goes red instead of the claim quietly
-  going stale (`1.4.1`)
+- **1.4.1 turns the skeleton into a real link protocol**: handshake, streams,
+  connection close and idle timeout all work end to end. The `UV_ENOSYS` contract the
+  skeleton carried was pinned by `tests/functional/quic_api_func.cpp` rather than promised
+  in prose, so implementing it turned that test red and forced the contract to be rewritten
+  deliberately instead of the claim quietly going stale. `quic_api_func.cpp` now pins the
+  *implementation*: 81 checks covering the endpoint contract, the close path and idle
+  timeout. New: `quic_handshake_func.cpp` (22 checks) and `quic_stream_func.cpp`
+  (33 checks) run a real server and a real client on one loop (`1.4.1`)
+- **The stream events are per-stream.** `on_read` gained an `int64_t stream_id`
+  parameter and a new `on_write` completion callback was added — one call to
+  `write_stream()` is one `on_write`, the same "accepted, not sent" contract
+  `uvcpp_tcp_client::write()` already had. No `uvcpp_quic_stream` class: the style is
+  `src/http2/uvcpp_h2_session.h`'s, where callbacks carry the stream id (`1.4.1`)
+- **The read side ends per stream, at the moment it ends**: a peer FIN reports
+  `PEER_CLOSED` from `on_read`; a peer `RESET_STREAM` reports there too (app error code 0
+  → `PEER_CLOSED`, non-zero → `READ_ERROR`). `on_stream_close` is deliberately left
+  unwired — it fires only when *both* directions are done, by which time the read side has
+  nothing new to say, and reporting from it would make callers finish one stream twice
+  (`1.4.1`)
+- **A latent data-loss bug on a quiet connection got fixed**: `write_stream()` called from
+  *outside* a callback (right after `connect()`, or from a user timer) queued the bytes and
+  then relied on the next inbound packet to push them out — on a settled connection that
+  packet never comes, and the wait ends in an idle timeout. The flush loop skipped picking
+  a stream on its first round, and a quiet connection has no pending non-stream frame, so
+  `writev_stream` returned 0 and the loop treated that as "done". Caught by
+  `quic_stream_func.cpp`'s third phase, which writes from outside a callback on purpose
+  (`1.4.1`)
 - Turning it on requires `UVCPP_ENABLE_OPENSSL=ON` **and** an OpenSSL ≥ 3.2 with the QUIC
   API (`SSL_set_quic_tls_cbs`) **and** `UVCPP_BUILD_NET=ON`; without any one of the three
   the switch is force-disabled with a warning that says how to fix it, instead of leaving
@@ -656,8 +678,18 @@ fixes came from issue reports by the project's first external contributor,
   compiled `src/ssl/` but never defined `UVCPP_SSL_LIBS`, and an empty `UVCPP_SSL_LIBS`
   expands to a **silent no-op** `target_link_libraries()` — the symptom was a link
   failure, and it took the net layer's own TLS client path down with it (`1.4.1`)
-- No HTTP/3, no nghttp3, no handshake, no streams, no connection migration, no 0-RTT.
-  [`doc/quic-guide.md`](doc/quic-guide.md) lists what is missing (`1.4.1`)
+- **Still missing**: HTTP/3 (nghttp3 is not wired in at all), 0-RTT, connection
+  migration, stateless reset, datagram (RFC 9221), multipath, and multi-loop support.
+  A peer `STOP_SENDING` is not wired either — a known gap, not an oversight: the local
+  side keeps writing into a stream the peer has discarded until flow control stalls.
+  [`doc/quic-guide.md`](doc/quic-guide.md) lists every one of these (`1.4.1`)
+- **The private-header pair.** `uvcpp_quic_session.h` holds `ngtcp2_conn*`, `SSL*` and
+  `ngtcp2_path_storage`, so its layout tracks the ngtcp2 version — it is the second
+  private header, alongside `uvcpp_quic_ngtcp2.h`. Both are excluded from the install
+  (`CMakeLists.txt:1618`) and from the package
+  (`tests/tools/package_release.py`'s `PRIVATE_HEADERS`); measured with
+  `cmake --install build-quic --prefix /tmp/inst`, which lands exactly the four public
+  headers in `include/quic/` (`1.4.1`)
 - Also closes a hole the new snippets opened in a **gate**: the four QUIC examples in
   `doc/quic-guide.md` made `tests/tools/check_doc_snippets.py` exit 3 forever on a
   **release package** (QUIC is structurally off there, so those snippets always `[跳]`),
