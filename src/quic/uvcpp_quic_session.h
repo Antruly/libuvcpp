@@ -126,6 +126,18 @@ struct quic_session_events {
   ::std::function<void(uint64_t max_streams)> on_streams_bidi_available;
   ::std::function<void(uint64_t max_streams)> on_streams_uni_available;
 
+  /// **对端**发了 STOP_SENDING（RFC 9000 §19.5）："这条流你别再发了"。
+  /// `app_error_code` 是那个帧里带的。
+  ///
+  /// 与 `on_stream_reset` 方向相反、也**不会**互相替代：reset 报"对端不发了"
+  /// （我这一侧读完了），这一格报"对端不要我发了"（我这一侧发不动了）。一次
+  /// 对端取消在线上是两个帧，两条通知各来一次是正常的。
+  ///
+  /// 本端收到它**不自动回 RESET_STREAM** —— 那要发一个帧，而这是应用层的判断
+  /// （见 `fill_callbacks` 里那一格的长注释）。
+  ::std::function<void(int64_t stream_id, uint64_t app_error_code)>
+      on_stop_sending;
+
   /// ngtcp2 让本端**新发一个 CID** 给对端用（RFC 9000 §5.1.1）。端点必须把它
   /// 连同已有的那几个一起加进路由表 —— 服务端的一条 UDP 口上，**同一个连接的
   /// 每一个 CID 都得指回同一个连接对象**，漏一个就会在"对端换 CID"之后把后续
@@ -312,8 +324,33 @@ class quic_session {
    * 注意与 `write_stream(..., fin=true)` 的区别：那条是"写完这块就关"，
    * 这条是"队列里有没写完的也照样关"（`ngtcp2_conn_shutdown_stream_write`
    * 会丢掉没发完的）。
+   *
+   * @param app_error_code 随 RESET_STREAM 发出去的应用错误码（0 = 没有错误）。
    */
-  int shutdown_stream(int64_t stream_id);
+  int shutdown_stream(int64_t stream_id, uint64_t app_error_code = 0);
+
+  /**
+   * @brief 只关**读**方向（发 STOP_SENDING，写方向照常）。
+   *
+   * @param app_error_code 随 STOP_SENDING 发出去的应用错误码。
+   *
+   * @note 这条**只排帧、不改本端 `send_q_`**：写方向完全不受影响，与
+   *       `shutdown_stream()` 正好各管一半。
+   *
+   * @note 关掉之后**不会有本地的收尾事件报给 `on_stream_*`** —— ngtcp2 那一格
+   *       （`stream_stop_sending`）回调的是"你自己关的读方向"，本层刻意没填：
+   *       调用方自己刚下的这个决定，不需要被通知一遍。而且那个回调是在
+   *       `ngtcp2_conn_writev_stream` 的写循环**内部**响的，从那里往上报一个
+   *       应用事件，等于允许应用在"写"的栈里再调一次 `write_stream()` ——
+   *       ngtcp2 明令禁止重入写函数。详见 `fill_callbacks` 里那段。
+   */
+  int shutdown_stream_read(int64_t stream_id, uint64_t app_error_code = 0);
+
+  /**
+   * @brief 本端还能新开多少条本地发起的流（`ngtcp2_conn_get_streams_*_left`）。
+   * @param bidi true = 双向流额度，false = 单向流额度。
+   */
+  uint64_t streams_left(bool bidi) const;
 
   /// 给本类内部的 ngtcp2 静态回调取回 `this` 用（`crypto_get_conn` 也要）。
   ngtcp2_conn* raw_conn() const { return conn_; }
@@ -353,6 +390,11 @@ class quic_session {
   static int cb_stream_reset(ngtcp2_conn* conn, int64_t stream_id,
                              uint64_t final_size, uint64_t app_error_code,
                              void* user_data, void* stream_user_data);
+  // 对端发了 STOP_SENDING。**与 `cb_stream_reset` 方向相反**（那个报"对端不发
+  // 了"，这个报"对端不要我发了"），所以是两格，不能合成一格。
+  static int cb_recv_stop_sending(ngtcp2_conn* conn, int64_t stream_id,
+                                  uint64_t app_error_code, void* user_data,
+                                  void* stream_user_data);
   // `stream_close2` 而不是 `stream_close`：前者把收/发两个方向的应用错误码
   // 分开报，后者只有一个合并值。两个都能填，但填了 `_2` 之后 ngtcp2 就不再调
   // 另一个（见 `ngtcp2_callbacks` 的说明），所以只填 `_2`。

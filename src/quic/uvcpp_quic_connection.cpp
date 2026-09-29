@@ -111,6 +111,14 @@ void uvcpp_quic_connection::endpoint::attach(
       r.data  = reinterpret_cast<const char*>(data);
       r.size  = datalen;
       r.error = 0;
+      // **QUIC 与 TCP 在这一点上不一样，这不是笔误。** STREAM 帧可以**同时**
+      // 带数据与 FIN 位，所以"这块就是最后一块"是这一格自己带着的信息，不是
+      // 下一次回调才有的东西。TCP 那条路上它恒为 false（那边确实是两次回调）。
+      //
+      // HTTP/3 那一层要用它：`nghttp3_conn_read_stream2()` 的 `fin` 形参说的是
+      // "这次喂进去的字节就是这条流的结尾"，而 h3 的请求/响应体**恰恰**以
+      // "头块 + 数据 + FIN" 这种形状收场 —— 分不出这一位就没法把流正确结束。
+      r.fin   = fin;
       c.impl_->cbs.on_read(c, stream_id, r);
     }
     if (fin) {
@@ -119,6 +127,8 @@ void uvcpp_quic_connection::endpoint::attach(
       r.data  = nullptr;
       r.size  = 0;
       r.error = 0;
+      // 干净收尾 —— 与 `on_stream_reset` 那一格（`fin == false`）成对。
+      r.fin   = true;
       // 上面那一跳里用户可能已经把连接关了（那是允许的）—— 但**关**不等于
       // **销毁**：销毁要等内核退栈之后（见 `endpoint::attach` 那条说明）。
       // 所以这里继续用 `c` 是安全的。
@@ -149,6 +159,12 @@ void uvcpp_quic_connection::endpoint::attach(
     r.data  = nullptr;
     r.size  = 0;
     r.error = static_cast<int>(app_error_code);
+    // **RESET 不是 FIN**，即使应用错误码是 0（那种情况下事件名看起来一样）。
+    // 这一位就是"读侧到此为止"那两种收场的唯一分界：`true` = 对端说完了，
+    // `false` = 对端不要了。HTTP/3 那一层要拿它选路 —— 前者喂
+    // `nghttp3_conn_read_stream2(..., fin=1, ...)`，后者走
+    // `nghttp3_conn_close_stream()`。
+    r.fin   = false;
     c.impl_->cbs.on_read(c, stream_id, r);
   };
 
@@ -186,11 +202,43 @@ void uvcpp_quic_connection::endpoint::attach(
     h.on_remove_cid(c, std::string(reinterpret_cast<const char*>(cid), cidlen));
   };
 
-  // 这两格留空：本层不做连接迁移、不主动放开对端的流数上限，端点在收到包之后
-  // 重试 `open_stream()` 就是全部需要做的事（`write_stream` 那条路会自己把
-  // 攒下的数据带上路）。
-  ev.on_streams_bidi_available = nullptr;
-  ev.on_streams_uni_available  = nullptr;
+  // 对端放开了流数上限 —— **两条方向合成的同一个用户回调**。
+  //
+  // 内核把它们分成两格（ngtcp2 的两个回调），公开面收成一格：调用方关心的是
+  // "现在能多开几条、往哪个方向"，`bidi` 一位就说清了。分成两个 `std::function`
+  // 只会让每个调用点都写一遍同样的两段代码。
+  //
+  // 从前这两格被显式置空，理由写的是"端点在收到包之后重试 `open_stream()` 就是
+  // 全部需要做的事"。那句话对**应用自己**开流的场景成立，对 HTTP/3 **不成立**：
+  // h3 必须在握手刚完就开出控制流 + 两条 QPACK 流，而那会儿对端的
+  // `initial_max_streams_uni` 可能还没到 —— 那时 `open_stream(false)` 拿到的是
+  // `NGTCP2_ERR_STREAM_ID_BLOCKED`，而"等下一个包到了再试"在本层没有切入点
+  // （应用看不到包）。所以这一格必须接出来。
+  ev.on_streams_bidi_available = [&c](uint64_t max_streams) {
+    if (c.impl_->cbs.on_streams_available != nullptr) {
+      c.impl_->cbs.on_streams_available(c, /*bidi=*/true, max_streams);
+    }
+  };
+  ev.on_streams_uni_available = [&c](uint64_t max_streams) {
+    if (c.impl_->cbs.on_streams_available != nullptr) {
+      c.impl_->cbs.on_streams_available(c, /*bidi=*/false, max_streams);
+    }
+  };
+
+  // 对端发了 STOP_SENDING —— "这条流你别再发了"。
+  //
+  // 与 `on_read` 那条收尾是**两件不同的事**，两个方向各报一次：`on_read` 报的是
+  // "对端不发了"（我这一侧读完了），这一格报的是"对端不要我发了"（我这一侧发
+  // 不动了）。合成一个通知会让调用方分不清该关哪一半。
+  //
+  // 内核那一侧收到 STOP_SENDING 之后**不自动回 RESET_STREAM**：按 RFC 9000
+  // §3.5，收到它的一侧"应当"用 RESET_STREAM 回应，但那是应用的判断 ——
+  // HTTP/3 里 nghttp3 会要求先取消掉那条流上排队的响应，然后由它指示发什么。
+  ev.on_stop_sending = [&c](int64_t stream_id, uint64_t app_error_code) {
+    if (c.impl_->cbs.on_stop_sending != nullptr) {
+      c.impl_->cbs.on_stop_sending(c, stream_id, app_error_code);
+    }
+  };
 
   session->set_events(std::move(ev));
 }
@@ -229,9 +277,21 @@ int uvcpp_quic_connection::write_stream(int64_t stream_id, const char* data,
   return impl_->session->write_stream(stream_id, data, len, end_stream);
 }
 
-int uvcpp_quic_connection::shutdown_stream(int64_t stream_id) {
+int uvcpp_quic_connection::shutdown_stream(int64_t stream_id,
+                                           uint64_t app_error_code) {
   if (impl_->session == nullptr) return UV_ENOTCONN;
-  return impl_->session->shutdown_stream(stream_id);
+  return impl_->session->shutdown_stream(stream_id, app_error_code);
+}
+
+int uvcpp_quic_connection::shutdown_stream_read(int64_t stream_id,
+                                                uint64_t app_error_code) {
+  if (impl_->session == nullptr) return UV_ENOTCONN;
+  return impl_->session->shutdown_stream_read(stream_id, app_error_code);
+}
+
+uint64_t uvcpp_quic_connection::streams_left(bool bidi) const {
+  if (impl_->session == nullptr) return 0;
+  return impl_->session->streams_left(bidi);
 }
 
 int uvcpp_quic_connection::close(int error_code) {

@@ -189,15 +189,37 @@ void quic_session::fill_callbacks(ngtcp2_callbacks* cbs, bool is_server) {
   // 结束。没有它，"对端不要了"与"对端还在慢慢发"在读侧长得一模一样。
   cbs->stream_reset = &quic_session::cb_stream_reset;
 
+  // 对端叫我们别再发了（STOP_SENDING）。**方向与上面那格相反**，所以是另一格：
+  // reset 报"我读不动了"，这一格报"你别发了"。少了它，一条被对端取消的流上，
+  // 本层会继续把队列里的字节排出去 —— 而 RFC 9000 §3.5 要的是"回应一个
+  // RESET_STREAM，然后停下"。
+  //
+  // **线上的那个 RESET_STREAM 不用我们发**：ngtcp2 在自己的收帧路径里
+  // （`conn_recv_stop_sending`）先调这一格、紧接着就自己 `conn_reset_stream()`
+  // 排好那个帧（除非那条流的数据早已 FIN 且全部被确认 —— 那种情况下本来就没
+  // 什么好取消的）。所以这一格是**纯通知**：本层把它转给应用，让应用去取消它
+  // 自己那份还没交给 `write_stream()` 的内容。这里**不要**再调
+  // `shutdown_stream()` —— 那会重复排一个 RESET_STREAM。
+  cbs->recv_stop_sending = &quic_session::cb_recv_stop_sending;
+
   // **故意没填的几格，写在这里免得后来人以为是漏了：**
   //
   // - `path_validation`：本层不做连接迁移 —— 地址对不上的包直接按"不可用路径"
   //   丢掉（见 `read_pkt` 里那段）。
-  // - `stream_stop_sending`：对端发 STOP_SENDING 是"你这条流别再发了"。本层
-  //   暂时没接：收到它之后本端不会自动回 RESET_STREAM，会继续往一条对端已经
-  //   丢弃的流上填字节，直到流控卡住。**这是一处已知的缺口**，不是遗漏 ——
-  //   接它需要一条"回调里排一个 reset"的延后意图（与 `want_close_` 同形状），
-  //   留到需要的时候再做。
+  // - `stream_stop_sending`：**"本端自己把读方向关了"的事后通知**，不是对端的
+  //   动作（对端的那个是上面刚填的 `recv_stop_sending`）。不填有两条理由，
+  //   第二条是硬的：
+  //     1. 没有消费者 —— 关读方向这件事**就是调用方自己刚下的决定**，再通知
+  //        它一遍等于把同一个事实说两次。
+  //     2. **它是从写循环里响的。** ngtcp2 在 `ngtcp2_conn_writev_stream` 的
+  //        内部循环里调它（`ngtcp2_conn.c` 那个 `conn_call_stream_stop_sending`
+  //        就在排队 STOP_SENDING 帧的那一段里），而我们的应用回调全都是
+  //        "用户可以顺手再 `write_stream()` 一下"的形状 —— 从那一格往上报，
+  //        就等于允许在 `ngtcp2_conn_writev_stream` 的栈里再调一次它，而
+  //        ngtcp2 明令禁止重入写函数。`do_flush()` 那条路上没有 `in_callback_`
+  //        护栏（那个护栏守的是**收包**那半边），所以这条重入真的会走到 ngtcp2
+  //        里去。要接它得先给写路径也加一道"回调期间只记意图"的闸，那是另一件
+  //        事，本批不做。
   // - `extend_max_remote_streams_bidi` / `extend_max_stream_data`：放开流数与
   //   放开流控窗口这两件事**一定**随着某个包到达，而每个包处理完都会走一次
   //   `do_flush()` —— 被卡住的那条流在下一轮自然被重新拾起，不需要专门通知。
@@ -965,7 +987,7 @@ int quic_session::write_stream(int64_t stream_id, const char* data, size_t len,
   return 0;
 }
 
-int quic_session::shutdown_stream(int64_t stream_id) {
+int quic_session::shutdown_stream(int64_t stream_id, uint64_t app_error_code) {
   if (conn_ == nullptr) return UV_ENOTCONN;
 
   std::map<int64_t, stream_send>::iterator it = send_q_.find(stream_id);
@@ -977,12 +999,42 @@ int quic_session::shutdown_stream(int64_t stream_id) {
     // `acked_stream_data_offset`。
     it->second.closed_write = true;
   }
-  const int rv = ngtcp2_conn_shutdown_stream_write(conn_, 0, stream_id, 0);
+  const int rv =
+      ngtcp2_conn_shutdown_stream_write(conn_, 0, stream_id, app_error_code);
   if (rv != 0) return rv;
   // RESET_STREAM 帧是 `shutdown_stream_write` **排上**的，不是它发出去的 ——
   // 与 `write_stream()` 那条同一个道理（那里的注释解释了为什么这一句非有不可）。
   flush();
   return 0;
+}
+
+int quic_session::shutdown_stream_read(int64_t stream_id,
+                                       uint64_t app_error_code) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+
+  // **与 `shutdown_stream()` 的对称处和不对称处各一条。**
+  //
+  // 对称的是形状：都是一句 ngtcp2 调用 + 一次 flush（帧是排上的，不是发出去
+  // 的，理由同上）。
+  //
+  // 不对称的是**没有** `send_q_` 那一段：关读方向完全不碰发送队列 —— 那正是
+  // 这条 API 存在的意义（"我读不动了"与"我不发了"是两件事）。写方向此后照常，
+  // 排队里的字节照常上线、照常有 `on_write`。
+  const int rv =
+      ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
+  if (rv != 0) return rv;
+  flush();
+  return 0;
+}
+
+uint64_t quic_session::streams_left(bool bidi) const {
+  if (conn_ == nullptr) return 0;
+  // 用 `_2` 那两个重载：不带后缀的版本收的是非 const `ngtcp2_conn*`，而且
+  // ngtcp2 自己标了弃用（"Use ngtcp2_conn_get_streams_*_left2 instead"）。
+  // 本层是 `const` 成员函数，取 `const` 重载还省掉一次不必要的
+  // const_cast 味道。
+  return bidi ? ngtcp2_conn_get_streams_bidi_left2(conn_)
+              : ngtcp2_conn_get_streams_uni_left2(conn_);
 }
 
 bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* vec,
@@ -1205,6 +1257,28 @@ int quic_session::cb_stream_reset(ngtcp2_conn* conn, int64_t stream_id,
   // `NGTCP2_ERR_STREAM_SHUT_WR` 收场）。这一格只报读方向。
   if (self->events_.on_stream_reset != nullptr) {
     self->events_.on_stream_reset(stream_id, app_error_code);
+  }
+  return 0;
+}
+
+int quic_session::cb_recv_stop_sending(ngtcp2_conn* conn, int64_t stream_id,
+                                       uint64_t app_error_code, void* user_data,
+                                       void* stream_user_data) {
+  (void)conn;
+  (void)stream_user_data;
+  quic_session* self = static_cast<quic_session*>(user_data);
+  cb_guard guard(self->in_callback_);
+
+  // **这里不排 RESET_STREAM。** ngtcp2 在调完本回调之后立刻就自己排了那个帧
+  // （见 `fill_callbacks` 里那一格的长注释）。本层再调一次
+  // `ngtcp2_conn_shutdown_stream_write` 只会往线上多塞一个 RESET_STREAM。
+  //
+  // **也不动 `send_q_`。** 队列里那些已经被 `write_stream()` 受理的字节，
+  // 它们的收场由 `stream_close2` 统一报（那时剩下的 `on_write` 会以
+  // `NGTCP2_ERR_STREAM_SHUT_WR` 收场）。在这里就地清掉队列，反而会让那些
+  // 完成通知少报 —— 上层在等它们。
+  if (self->events_.on_stop_sending != nullptr) {
+    self->events_.on_stop_sending(stream_id, app_error_code);
   }
   return 0;
 }

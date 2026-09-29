@@ -27,6 +27,12 @@
  *    在外观上与"正在工作"完全一样，而调用方会把整条超时路径压在那条依赖上 ——
  *    本仓库里最难查的一类挂死。所以"没返 0 就不许回调"这条要**在返负值的那条
  *    路上也成立**（没设 TLS 上下文 → `UV_EINVAL`）。
+ * 4. **读侧收尾说的必须是真话**（`test_read_side_termination`，1.4.1 Q5 加的）。
+ *    `net_read_result::fin` 这一位把"对端说完了"与"对端不要了"分开 —— 而这两件
+ *    事在事件名上是**一样**的（都是 `PEER_CLOSED`）。HTTP/3 那一层要靠它选路
+ *    （喂 FIN 还是关流），所以它红的时候不是"少了一条断言"，是上层会写错。
+ *    同一节还钉住 `streams_left()` 真问到了内核、以及 `on_stop_sending` 是
+ *    **另一个方向**的通知（收它不产生读侧收尾）。
  *
  * 第 3 条怎么才能**不是空断言**：光"我没拨循环所以回调没跑"是没意义的。所以
  * 用例在这期间**真拨**循环，并且用一个 10ms 定时器**证明这段时间里循环确实在
@@ -38,11 +44,12 @@
  * deadline，`loop_drain` 还是 RAII —— 本文件里没有任何一处可能无限等待。
  * 真会挂死的那些路径（握手、收流）在 `quic_handshake_func.cpp` 与
  * `quic_stream_func.cpp` 里测，那两个文件里的 `wait_until` 也全都带 5 秒
- * deadline。
+ * deadline —— 第 5、6 节那几段真连接也是（复用同一个 `kCloseDeadlineMs`）。
  */
 #include <cctype>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -220,6 +227,19 @@ void test_connection_shell() {
              "write_stream(空块收尾) == UV_ENOTCONN");
   check_eq_i(conn.shutdown_stream(0), UV_ENOTCONN,
              "shutdown_stream() == UV_ENOTCONN");
+  // 1.4.1 Q5 加进来的两条：带错误码的 shutdown_stream（默认实参不改变上面那条
+  // 断言的意思）与关读方向的 shutdown_stream_read。两条都是"没有内核"，
+  // 与 `UV_ENOSYS` 是两句话。
+  check_eq_i(conn.shutdown_stream(0, 5), UV_ENOTCONN,
+             "shutdown_stream(id, 错误码) == UV_ENOTCONN");
+  check_eq_i(conn.shutdown_stream_read(0), UV_ENOTCONN,
+             "shutdown_stream_read() == UV_ENOTCONN");
+  check_eq_i(conn.shutdown_stream_read(0, 7), UV_ENOTCONN,
+             "shutdown_stream_read(id, 错误码) == UV_ENOTCONN");
+  // 流额度同理：没有内核就没有额度可报，报 **0** 而不是"随便一个大数"或 -1
+  // —— 返回类型是无符号的，负数表达不了"不知道"。
+  check_eq_i(conn.streams_left(true), 0, "没有内核时 streams_left(双向) == 0");
+  check_eq_i(conn.streams_left(false), 0, "没有内核时 streams_left(单向) == 0");
   check_eq_i(conn.close(), UV_ENOTCONN, "close() == UV_ENOTCONN");
   check_eq_i(conn.close(42), UV_ENOTCONN, "close(error_code) == UV_ENOTCONN");
 }
@@ -372,6 +392,15 @@ const uint64_t kIdleTimeoutMs = 300;
 /// 一条连接从 `connect()` 到空闲超时收场的 deadline（毫秒）。
 const int kCloseDeadlineMs = 5000;
 
+/// 第 6 节里"先让连接静下来"的那段时长（毫秒）。
+///
+/// **取值有讲究**：太短则连接上还有包在飞（那些包会把排队中的帧顺带带出去，
+/// 于是"少了 flush"就观察不到）；太长则整条用例白等。250ms 是实测下来
+/// "ACK 延迟计时器、PTO 这些都过去了、而空闲超时（默认几十秒）还远没到"的
+/// 一档 —— 改小之前先重跑一次变异（去掉 `shutdown_stream_read()` 里那次
+/// `flush()`，这一条必须红）。
+const int kQuietMs = 250;
+
 /// 应用错误码用例里服务端给的那个数。**随便取的，只要非 0 且不是常见的
 /// libuv/ngtcp2 码** —— 断言要的是"它原样传到了对端"，取 42 就没有
 /// "碰巧对上某个内部码"的余地。
@@ -514,7 +543,228 @@ void test_close_path(uvcpp_loop& loop, bool idle_timeout_case) {
 }
 
 // =========================================================================
-// 6. 自建循环那条路 + run/stop
+// 6. 读侧那三样：FIN 与 RESET 分得开、流额度、STOP_SENDING
+// =========================================================================
+
+/// 一条连接上跑三段，全部复用同一次握手 —— 三样东西各有一段。
+///
+/// **这三样是 1.4.1 Q5（HTTP/3）的**前置**：分不出 FIN 与 RESET，h3 就没法把
+/// "请求体发完了"与"请求被取消了"分开；没有流额度事件，h3 那三条关键单向流
+/// 在额度没到时只能轮询（而额度是随包来的，轮询在静下来的连接上永远等不到）；
+/// 没有 STOP_SENDING，一条被对端取消的流会一直往外填字节。
+///
+/// 三段共用的判据只有一条主线：**`net_read_result::fin` 说的必须是真话**。
+/// 所以每段都在同一个 `on_read` 里把 `(event, fin)` 一起记下来，而不是各段自己
+/// 猜一个事件名 —— 事件名在 FIN 与 RESET-0 两条路上是**一样**的（都是
+/// `PEER_CLOSED`），这一位是唯一的分界。
+void test_read_side_termination(uvcpp_loop& loop) {
+  std::cout << "  -- 读侧收尾 / 流额度 / STOP_SENDING" << std::endl;
+
+  uvcpp_ssl_context server_ctx(tls_mode::SERVER, tls_version::TLS_1_3);
+  if (!server_ctx.generate_self_signed("localhost", 2048)) {
+    check(false, "生成自签证书失败");
+    return;
+  }
+  uvcpp_ssl_context client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3);
+  client_ctx.set_verify_mode(tls_verify_mode::NONE);
+
+  // 服务端给 STOP_SENDING 带的应用错误码。取 7 而不是 0：0 在两边看起来与
+  // "没有错误"一样，断言就分不出"码传对了"与"码被丢掉了"。
+  const uint64_t kStopCode = 7;
+
+  {
+    uvcpp_quic_server server(&loop);
+    server.set_ssl_context(&server_ctx);
+    check_eq_i(server.bind("127.0.0.1", 0), 0, "bind(127.0.0.1, 0)");
+
+    std::map<int64_t, std::string>   srv_bytes;
+    std::map<int64_t, bool>          srv_data_fin;   ///< DATA 事件带过的 fin
+    std::map<int64_t, net_read_event> srv_term_event; ///< 非 DATA 事件
+    std::map<int64_t, bool>          srv_term_fin;
+    std::map<int64_t, uint64_t>      srv_stop;       ///< 对端叫我们停的码
+    uvcpp_quic_connection*           server_conn = nullptr;
+
+    check_eq_i(server.listen([&](uvcpp_quic_connection* c) {
+                 server_conn = c;
+                 uvcpp_quic_connection::callbacks cbs;
+                 cbs.on_read = [&](uvcpp_quic_connection&, int64_t id,
+                                   const net_read_result& r) {
+                   if (r.event == net_read_event::DATA) {
+                     srv_bytes[id].append(r.data, r.size);
+                     srv_data_fin[id] = r.fin;
+                   } else {
+                     srv_term_event[id] = r.event;
+                     srv_term_fin[id]   = r.fin;
+                   }
+                 };
+                 cbs.on_stop_sending = [&](uvcpp_quic_connection&, int64_t id,
+                                           uint64_t code) {
+                   srv_stop[id] = code;
+                 };
+                 c->set_callbacks(cbs);
+               }),
+               0, "listen() 返回 0");
+    const int port = server.configured_port();
+    check(port > 0, "listen() 之后 configured_port() 报内核分配的端口");
+
+    uvcpp_quic_client client(&loop);
+    client.set_ssl_context(&client_ctx);
+
+    std::map<int64_t, bool>           cli_data_fin;
+    std::map<int64_t, net_read_event> cli_term_event;
+    std::map<int64_t, bool>           cli_term_fin;
+    std::map<int64_t, uint64_t>       cli_stop;
+    bool  connected = false;
+    int64_t sid_grace = -1;  ///< FIN 收场：干净
+    int64_t sid_reset = -1;  ///< RESET-0 收场：不干净，但事件名一样
+    int64_t sid_stop  = -1;  ///< 服务端关读方向，客户端在 on_stop_sending 上知道
+
+    check_eq_i(client.connect("127.0.0.1", port, [&](int status) {
+                 connected = (status == 0);
+                 if (!connected) return;
+                 uvcpp_quic_connection* c = client.connection();
+                 if (c == nullptr) return;
+                 sid_grace = c->open_stream(true);
+                 if (sid_grace >= 0) {
+                   c->write_stream(sid_grace, "abc", 3, /*end_stream=*/true);
+                 }
+                 sid_reset = c->open_stream(true);
+                 if (sid_reset >= 0) {
+                   c->write_stream(sid_reset, "half", 4, false);
+                 }
+                 sid_stop = c->open_stream(true);
+                 if (sid_stop >= 0) c->write_stream(sid_stop, "x", 1, false);
+               }),
+               0, "connect() 返回 0");
+
+    {
+      uvcpp_quic_connection::callbacks cbs;
+      cbs.on_read = [&](uvcpp_quic_connection&, int64_t id,
+                        const net_read_result& r) {
+        if (r.event == net_read_event::DATA) {
+          cli_data_fin[id] = r.fin;
+        } else {
+          cli_term_event[id] = r.event;
+          cli_term_fin[id]   = r.fin;
+        }
+      };
+      cbs.on_stop_sending = [&](uvcpp_quic_connection&, int64_t id,
+                                uint64_t code) { cli_stop[id] = code; };
+      client.connection()->set_callbacks(cbs);
+    }
+
+    check(uvcpp_test::wait_until(&loop, [&] { return connected; },
+                                 kCloseDeadlineMs),
+          "握手在 deadline 内完成");
+    if (!connected) return;
+
+    // ---- 流额度 ------------------------------------------------------
+    //
+    // 握手之后客户端手上一定有多条双向流的额度（服务端的
+    // `initial_max_streams_bidi` 默认是 100）。这一条钉的是"这个函数真的问到了
+    // 内核"：一个恒返 0 的实现会让上面那句"没有内核时 == 0"照样绿。
+    uvcpp_quic_connection* cc = client.connection();
+    check(cc != nullptr, "握手之后 connection() 还在");
+    if (cc == nullptr) return;
+    check(cc->streams_left(true) > 0,
+          "握手之后 streams_left(双向) > 0 —— 它真问到了内核");
+
+    check(sid_grace >= 0 && sid_reset >= 0 && sid_stop >= 0,
+          "客户端开出了三条双向流");
+    if (sid_grace < 0 || sid_reset < 0 || sid_stop < 0) return;
+
+    // ---- 第 1 段：FIN -------------------------------------------------
+    check(uvcpp_test::wait_until(
+              &loop, [&] { return srv_term_event.count(sid_grace) != 0; },
+              kCloseDeadlineMs),
+          "服务端在 grace 那条流上收到了收尾事件");
+    check_eq_s(srv_bytes[sid_grace], "abc", "服务端收到的字节");
+    // **DATA 事件自己带着 fin。** QUIC 的 STREAM 帧可以同时带数据与 FIN 位，
+    // 所以"这块就是最后一块"是这一格的信息 —— 而 TCP 那条路上它恒为 false。
+    // 丢了这一位，h3 在"头块 + 数据 + FIN"这种形状上就结束不了流。
+    check(srv_data_fin.count(sid_grace) != 0 && srv_data_fin[sid_grace],
+          "服务端 DATA 事件的 fin == true（这块数据后面就是 FIN）");
+    check(srv_term_event[sid_grace] == net_read_event::PEER_CLOSED,
+          "FIN 的收尾事件是 PEER_CLOSED");
+    check(srv_term_fin[sid_grace],
+          "FIN 的 PEER_CLOSED 带 fin == true（干净收尾）");
+
+    // ---- 第 2 段：RESET-0 ---------------------------------------------
+    //
+    // `shutdown_stream()` 不带码（默认实参 0），线上是 RESET_STREAM(0)。
+    // 服务端看到的**事件名与上面那段一样**，唯一的区别就在 `fin` 上 ——
+    // 这正是这一位存在的全部理由。
+    check(uvcpp_test::wait_until(
+              &loop, [&] { return srv_bytes[sid_reset] == "half"; },
+              kCloseDeadlineMs),
+          "服务端收到了 half（不带 FIN 的那块）");
+    check_eq_i(cc->shutdown_stream(sid_reset), 0, "shutdown_stream() 返回 0");
+    check(uvcpp_test::wait_until(
+              &loop, [&] { return srv_term_event.count(sid_reset) != 0; },
+              kCloseDeadlineMs),
+          "服务端在 reset 那条流上收到了收尾事件");
+    check(srv_term_event[sid_reset] == net_read_event::PEER_CLOSED,
+          "RESET-0 的收尾事件**也是** PEER_CLOSED（错误码 0 不是错误）");
+    check(!srv_term_fin[sid_reset],
+          "RESET-0 的 PEER_CLOSED 带 fin == false —— 与上面那段正好相反");
+    // 两块字节是分两次到的（"abc" 带 FIN、"half" 不带），所以这一段顺带钉住了
+    // 上面那条 `srv_data_fin` 的判据不是"恒为真"。
+    check(srv_data_fin.count(sid_reset) != 0 && !srv_data_fin[sid_reset],
+          "不带 FIN 的那块数据，DATA 事件的 fin == false");
+
+    // ---- 第 3 段：STOP_SENDING ----------------------------------------
+    check(uvcpp_test::wait_until(&loop, [&] { return srv_bytes[sid_stop] == "x"; },
+                                 kCloseDeadlineMs),
+          "服务端收到了 x");
+    check(server_conn != nullptr, "服务端拿到过连接对象");
+    if (server_conn == nullptr) return;
+
+    // **先让这条连接静下来。** 这一步是判据的一部分，不是"等一等更保险"：
+    // `shutdown_stream_read()` 只**排**一个 STOP_SENDING 帧，把它变成数据报的
+    // 是同一函数尾巴上那次 flush。连接上还有别的包在飞时，那个帧会搭着下一个
+    // 包出去 —— 于是"少了那次 flush"这件事在功能上**看不出来**（实测：不静默
+    // 的话，去掉 flush 照样在几毫秒内到达）。只有在一条真的静下来的连接上，
+    // "没有 flush 就出不去"才是可观察的，而这正是 `write_stream()` 那条注释
+    // 说过的同一个道理。
+    uvcpp_test::pump_for(&loop, kQuietMs);
+
+    // 服务端"不读了"。线上是一个 STOP_SENDING 帧，客户端必须在
+    // `on_stop_sending` 上知道，并且拿到服务端给的那个码。
+    check_eq_i(server_conn->shutdown_stream_read(sid_stop, kStopCode), 0,
+               "shutdown_stream_read() 返回 0");
+    check(uvcpp_test::wait_until(&loop, [&] { return cli_stop.count(sid_stop) != 0; },
+                                 kCloseDeadlineMs),
+          "客户端收到了对端的 STOP_SENDING");
+    check_eq_i(cli_stop.count(sid_stop) ? static_cast<long long>(cli_stop[sid_stop])
+                                        : -1,
+               static_cast<long long>(kStopCode),
+               "STOP_SENDING 上的应用错误码原样传到");
+    // 上面那条"客户端收到了 STOP_SENDING"就是"帧真发出去了"的证据：
+    // `shutdown_stream_read()` 只**排**帧，把它变成数据报的是同一函数尾巴上
+    // 那次 flush。删掉那次 flush，那条断言会一直等到 deadline 而红 ——
+    // 这正是 `write_stream()` 那里注释过的同一件事。
+    //
+    // 顺带一条**不许报错**的：对一条已经收尾的流再关一次读方向不该崩。ngtcp2
+    // 在流不存在时返回 0（"This function returns 0 if a stream denoted by
+    // stream_id is not found."），所以这里断言的是 0 而不是"随便什么都行"。
+    check_eq_i(cc->shutdown_stream_read(sid_grace, 0), 0,
+               "对一条已经收尾的流再调 shutdown_stream_read() 返回 0");
+
+    // ---- 收尾 ---------------------------------------------------------
+    // **收 STOP_SENDING 是发送方向的事，不是读方向的。** 客户端在第 3 段里
+    // 收到的是"你别发了"，它这条流的**读**方向一个字节都没动过 —— 所以这边
+    // 不该冒出任何收尾事件。这一条防的是"两个方向的通知合成一个"那种实现：
+    // 那种实现下，客户端会在 `on_stop_sending` 之外**再**收到一次读侧收尾。
+    check(cli_term_event.count(sid_stop) == 0,
+          "收到 STOP_SENDING 的那条流上，读侧没有多余的收尾事件");
+    check(server_conn->streams_left(true) > 0,
+          "服务端的 streams_left(双向) > 0（额度对两端都成立）");
+    check_eq_i(client.close(), 0, "close() 返回 0");
+  }
+}
+
+// =========================================================================
+// 7. 自建循环那条路 + run/stop
 // =========================================================================
 
 /**
@@ -596,6 +846,12 @@ int main() {
   check_eq_i(quic_crypto_backend_init(), 0, "为关闭用例重起 crypto 后端");
   test_close_path(loop, /*idle_timeout_case=*/true);
   test_close_path(loop, /*idle_timeout_case=*/false);
+  quic_crypto_backend_free();
+
+  // 读侧那三样（FIN/RESET 的分界、流额度、STOP_SENDING）要一条**真握手过的**
+  // 连接才谈得上，所以放在这里 —— 它们不是"没挂内核的壳"能测的。
+  check_eq_i(quic_crypto_backend_init(), 0, "为读侧用例重起 crypto 后端");
+  test_read_side_termination(loop);
   quic_crypto_backend_free();
 
   test_self_owned_loop(loop);

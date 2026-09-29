@@ -76,10 +76,37 @@ struct UVCPP_API net_read_result {
    */
   int            error;
 
+  /**
+   * @brief 这次事件是不是对端**干净地**结束了它在这个方向上的发送（FIN）。
+   *
+   * 与 `event` 合起来才构成完整语义：
+   *
+   *   - `DATA`        ：这块数据后面跟着 FIN。TCP 恒为 `false` —— 一条 TCP 字节
+   *                     流上"数据"与"结束"是两次独立的 read 回调；而 QUIC 的
+   *                     STREAM 帧**可以同时带数据与 FIN 位**，于是"最后一块"与
+   *                     "到此为止"是同一个通知里的两件事。
+   *   - `PEER_CLOSED` ：`true` 是对端发了 FIN 的正常收尾；`false` 是对端发了
+   *                     **应用错误码 0 的 RESET** —— 同样是"读侧到此为止"，
+   *                     但不是干净收尾，用这个字段把两种收场分开。
+   *   - `READ_ERROR`  ：恒为 `false`。
+   *
+   * **为什么要它**：分不出 FIN 与 RESET 的调用方没法把"请求体发完了"与"请求被
+   * 取消了"分开处理 —— 两者在事件上长得一模一样，而在 HTTP/3 那一层是两条完全
+   * 不同的路（前者喂 `fin=1` 给 nghttp3，后者走 `close_stream()`）。
+   *
+   * @note 老代码不读这个字段时行为**逐字不变**：FIN 与 RESET-0 都仍然只报一次
+   *       `PEER_CLOSED`，只是多带了一位信息。
+   */
+  bool           fin;
+
   /// 显式构造函数。**不用成员初始化器（NSDMI）** —— 那会让本结构体失去
-  /// C++11 的聚合初始化资格。内联定义在这里，免得为这四行单开一个 .cpp。
+  /// C++11 的聚合初始化资格。内联定义在这里，免得为这几行单开一个 .cpp。
   net_read_result()
-      : event(net_read_event::DATA), data(nullptr), size(0), error(0) {}
+      : event(net_read_event::DATA),
+        data(nullptr),
+        size(0),
+        error(0),
+        fin(false) {}
 
   bool is_data() const { return event == net_read_event::DATA; }
   /** @brief 连接是不是结束了（正常关闭或出错都算）。 */

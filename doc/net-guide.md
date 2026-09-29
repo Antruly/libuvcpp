@@ -512,7 +512,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 | `set_read_callback(cb)` | 服务端 `:232` | 同上 | 一份回调覆盖所有连接 |
 
 **`read_start` 与 `read_start_events` 互斥。** 用过其中一个再用另一个，拿到
-`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:2101-2109`）：
+`UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:2107-2115`）：
 两条路共用同一个底层 stream，同时注册的话底层 `read_start` 会把先注册的那个
 **静默覆盖**掉——用户以为两个回调都在收数据，实际只有一个。
 
@@ -575,7 +575,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 - **`data` 只在本次回调期间有效**（`src/net/uvcpp_net_read.h:64-66`）：缓冲区回调返回后
   就被复用/释放。要留着就自己拷走。
-- **回调跑在事件循环线程上**（`:95`）。别在里面做重活，用 `uvcpp_work`。
+- **回调跑在事件循环线程上**（`:122`）。别在里面做重活，用 `uvcpp_work`。
 - **枚举名故意不叫 `ERROR` / `EOF`**（`:49-51`）：`<windows.h>`（经 `<uv.h>`）会
   `#define ERROR 0`，`EOF` 是 `<cstdio>` 的宏。所以是 `READ_ERROR` / `PEER_CLOSED`。
 

@@ -1795,6 +1795,9 @@ int uvcpp_tcp_client::arm_async_read() {
             r.data  = buf->base;
             r.size  = static_cast<size_t>(nread);
             r.error = 0;
+            // TCP 上"有数据"与"对端不发了"是两次独立的 read 回调，所以这一块
+            // 后面跟着 FIN 这件事由**下一次**回调（`nread == UV_EOF`）报。
+            r.fin   = false;
 
             // base 先存局部：回调里可能把这个 client 关掉/删掉，之后就再也
             // 不能碰成员了，但 libuv 的缓冲区仍然必须释放。
@@ -1868,6 +1871,9 @@ int uvcpp_tcp_client::arm_async_read() {
               r.data  = nullptr;
               r.size  = 0;
               r.error = (nread == UV_EOF) ? 0 : static_cast<int>(nread);
+              // TCP 唯一的"干净收尾"就是 UV_EOF（对端发了 FIN）。出错那一路
+              // 置 false —— 它讲的是"读不下去了"，不是"对端说完了"。
+              r.fin   = (nread == UV_EOF);
               // 与上面那条数据路径同一件事（栈上拷一份再调），只是这里多一层：
               // **下面还要在本对象上跑 `fire_close_callbacks()`**，而"对端断了
               // 就收摊"的写法（回调里 `delete client`）意味着那会儿对象已经没了。
@@ -2699,6 +2705,8 @@ void uvcpp_tcp_client::tls_deliver_plain() {
     r.data  = out.data();
     r.size  = out.size();
     r.error = 0;
+    // 明密文分流之后的那条数据路，理由与上面那条一致（TCP 恒为 false）。
+    r.fin   = false;
     // 把 std::function 拷到局部再调：回调里可能把这个客户端关掉/删掉，
     // 那样成员 `net_read_cb_` 的存储会在 operator() 执行到一半时消失。
     uvcpp_net_read_cb cb = net_read_cb_;
@@ -2826,6 +2834,9 @@ void uvcpp_tcp_client::tls_fail(int err, bool peer_closed) {
     r.data  = nullptr;
     r.size  = 0;
     r.error = peer_closed ? 0 : code;
+    // TCP 的 PEER_CLOSED 本来就只可能来自对端 FIN（见本函数上面 `peer_closed`
+    // 怎么算出来的），所以这里恒等于 `peer_closed`。
+    r.fin   = peer_closed;
     uvcpp_net_read_cb cb = net_read_cb_;
     try {
       cb(*this, r);

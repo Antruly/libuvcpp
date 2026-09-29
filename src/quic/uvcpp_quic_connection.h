@@ -83,6 +83,54 @@ class UVCPP_API uvcpp_quic_connection {
     uvcpp_quic_read_cb on_read;
 
     /**
+     * @brief 对端放开了流数上限，本端现在可以多开 `max_streams` 条**本地发起**
+     *        的流。
+     *
+     * @param bidi        `true` = 双向流额度（`open_stream(true)` 那一档），
+     *                    `false` = 单向流额度（`open_stream(false)`）。
+     * @param max_streams **累计**上限（"本端到此刻为止最多能开多少条"），
+     *                    不是这一回的增量 —— 与 ngtcp2 的
+     *                    `extend_max_local_streams_*` 同义。
+     *
+     * **为什么要有它**：`open_stream()` 在对端还没放开额度时返回
+     * `NGTCP2_ERR_STREAM_ID_BLOCKED`，而"什么时候再试"这件事**只有这里**说得出。
+     * 没有这个回调，调用方只能轮询 —— 而轮询在一条静下来的连接上永远不会变成
+     * "可以了"（额度是随包来的，不是随时间来的）。
+     *
+     * @note 握手刚完时对端的额度通常**已经**到了（`initial_max_streams_*` 是
+     *       传输参数，随第一个包来），所以这条回调在多数连接上一次都不响。它是
+     *       为"额度用完了、对端后来才放开"那一路准备的 —— 而 HTTP/3 的控制流与
+     *       两条 QPACK 流正好是这种"一上来就要三条单向流"的用法。
+     */
+    std::function<void(uvcpp_quic_connection&, bool bidi, uint64_t max_streams)>
+        on_streams_available;
+
+    /**
+     * @brief 对端下发了 STOP_SENDING —— "这条流你别再发了"。
+     *
+     * @param stream_id      被要求停下的那条流。
+     * @param app_error_code 对端给的应用错误码（它在 STOP_SENDING 里带的）。
+     *
+     * **与 `on_read` 的收尾是两件事**，方向相反：`on_read` 报"对端不发了"
+     * （我这一侧读完了），这一格报"对端不要我发了"（我这一侧发不动了）。一次
+     * 对端取消在线上是**两个**帧 —— RESET_STREAM（我读不动了）与 STOP_SENDING
+     * （你别发了）—— 所以两条通知各来一次是正常的，不是重复。
+     *
+     * @note **线上回应由协议栈自己发掉**：RFC 9000 §3.5 要求收到 STOP_SENDING
+     *       的一侧回一个 RESET_STREAM，ngtcp2 在它自己的收帧路径里就直接排了那个
+     *       帧（除非那条流的数据早已 FIN 且被确认）。所以这一格是**纯通知**，
+     *       不是"等你决定回不回"。你要做的是：别再往这条流上排新东西，并且把
+     *       应用自己那份还没交给 `write_stream()` 的待发送内容取消掉 —— 那些
+     *       东西协议栈不知道。
+     *
+     *       那条流上已经受理但还没确认的 `write_stream()` 会以 `on_write` 报
+     *       `NGTCP2_ERR_STREAM_SHUT_WR` 收场（走 `stream_close2` 那条路）。
+     */
+    std::function<void(uvcpp_quic_connection&, int64_t stream_id,
+                       uint64_t app_error_code)>
+        on_stop_sending;
+
+    /**
      * @brief 对端开了一条新流（服务端侧才收得到；客户端侧是自己 `open_stream()`
      *        开的，不走这个回调）。
      */
@@ -202,8 +250,46 @@ class UVCPP_API uvcpp_quic_connection {
    *       `ngtcp2_conn_shutdown_stream_write` 的语义就是丢掉它们）。所以这条
    *       之后，那些还没被确认的 `write_stream()` 调用会以 `on_write` 报
    *       `NGTCP2_ERR_STREAM_SHUT_WR` 收场 —— 不会有人永远等着。
+   *
+   * @param app_error_code 随 RESET_STREAM 发给对端的应用错误码。0 是缺省值，
+   *       也是"没有错误"的约定值。非 0 时对端的读侧会以 `READ_ERROR` 收场
+   *       （而不是 `PEER_CLOSED`）—— 见 `net_read_result::fin`。
    */
-  int shutdown_stream(int64_t stream_id);
+  int shutdown_stream(int64_t stream_id, uint64_t app_error_code = 0);
+
+  /**
+   * @brief 只关**读**方向（发 STOP_SENDING，写方向照常）。
+   *
+   * 这是上面那条的镜像：`shutdown_stream()` 说"我不发了"（RESET_STREAM），
+   * 这条说"你别发了"（STOP_SENDING）。对端收到之后会在它的 `on_stop_sending`
+   * 里知道。
+   *
+   * @param app_error_code 随 STOP_SENDING 发给对端的应用错误码；0 是缺省值。
+   * @return 0 = 已受理；`UV_ENOTCONN` = 还没挂到端点上。
+   *
+   * @note 调过之后，这条流的**读侧就到此为止了**：不会再有任何 `on_read`
+   *       事件（连接不因此结束，别的流也不受影响）。**也不会有一次"收尾"
+   *       通知** —— 那是你自己刚下的决定，`on_stream_*` 里不会再报一遍。
+   *       这与对端 reset 我们时不同（那个会报 `PEER_CLOSED`/`READ_ERROR`），
+   *       因为那件事除了这里没人知道。
+   *
+   * @note 与 `shutdown_stream()` 是对称的：那条关写、这条关读。两个都调了，
+   *       这条流才算真正收场（对端也关完之后 `on_stream_close` 那边才算完账）。
+   */
+  int shutdown_stream_read(int64_t stream_id, uint64_t app_error_code = 0);
+
+  /**
+   * @brief 本端还能**新开**多少条本地发起的流。
+   *
+   * @param bidi `true` 问双向流额度，`false` 问单向流额度。
+   * @return 剩余条数；还没挂到端点上时返回 0。
+   *
+   * 这是 `open_stream()` 那个 `NGTCP2_ERR_STREAM_ID_BLOCKED` 的**主动**版本：
+   * 想在开流之前先看一眼能不能开（比如服务端要按额度决定给对端多少
+   * `SETTINGS_MAX_CONCURRENT_STREAMS`），就用它。**不要拿它当"能不能开"的唯一
+   * 判据** —— 它报的是一个快照，`open_stream()` 仍可能因为别的原因失败。
+   */
+  uint64_t streams_left(bool bidi) const;
 
   /**
    * @brief 关掉整条连接。
