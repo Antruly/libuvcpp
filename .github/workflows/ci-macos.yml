@@ -143,12 +143,39 @@ jobs:
           fi
           echo "prefix=$prefix"
           "$prefix/bin/openssl" version
-          # runner 上是 LLVM 的 nm：`-U` 是 `--defined-only`（**不是** GNU 那个
-          # "只看未定义"），所以命中即"有定义"。Mach-O 符号带**前导下划线**，
-          # 且没有 ELF 那种 `@@OPENSSL_3.5.0` 版本后缀 —— 别把 ubuntu 那条
-          # `($|@)` 的逻辑抄过来（也不必结尾锚定）。
-          nm -gU "$prefix/lib/libssl.dylib" | grep -q '_SSL_set_quic_tls_cbs' || {
-            echo "::error title=quic-openssl::这份 openssl@3 没有 QUIC API（缺 SSL_set_quic_tls_cbs）—— 需要 >= 3.2 的 openssl@3，否则配置期会把 UVCPP_ENABLE_QUIC 静默关掉"; exit 1; }
+          # 单独判一次这个 dylib 在不在：`nm` 读不到文件时的报错长得和"这库里
+          # 没有那个符号"一模一样，而这两件事的修法完全不同（一个是装包，
+          # 一个是换一份 >= 3.2 的包）。让注解说准是哪一种。
+          if [ ! -e "$prefix/lib/libssl.dylib" ]; then
+            echo "::error title=quic-openssl::找不到 $prefix/lib/libssl.dylib —— 这份 openssl@3 的布局与预期不同，先看上面那行 openssl version"
+            exit 1
+          fi
+          # 判据只用 `nm -g`（"只看外部符号"）+ 名字，**不用 `-U`**，也**不做
+          # 正则形状匹配**。两条都是同一次教训（d40e124 的第一次 macOS 运行）：
+          #
+          # ① `-U` 的含义在两族 nm 之间是**反的** —— LLVM 是 `--defined-only`，
+          #    而 GNU 那边"只看未定义"写作 `-u`。押错一边，这一格就会在一份
+          #    **好的** OpenSSL 上红。第一次运行的 `-gU` 正是这么红的。
+          # ② `^[0-9a-fA-F]+ [TtSsDdBb] _名字$` 这种形状匹配押的是 nm 的**输出
+          #    格式**，而它同样不是契约（地址列宽度、`-g` 下的类型字母都可能变）。
+          #
+          # 这条自检的全部价值只是"早一点、话说清楚一点"—— 真判据是门禁 ②
+          # （`ngtcp2 integrated`），所以它**不该**有自己的假红来源。名字带前导
+          # 下划线（Mach-O），且没有 ELF 那种 `@@OPENSSL_3.5.0` 版本后缀，别把
+          # ubuntu 那条 `($|@)` 的逻辑抄过来。`libssl.dylib` 不会去"引用"自己
+          # 定义的那个函数，所以外部符号表里出现这个名字就是有定义。
+          lib="$prefix/lib/libssl.dylib"
+          hits=$(nm -g "$lib" 2>/dev/null | grep -c '_SSL_set_quic_tls_cbs' || true)
+          echo "nm -g 命中 SSL_set_quic_tls_cbs 的行数：$hits"
+          nm -g "$lib" 2>/dev/null | grep '_SSL_set_quic_tls_cbs' \
+            || echo "(nm -g 没有打出这一行)"
+          if [ "$hits" = "0" ]; then
+            # 把**证据**折进注解：一条腿红了以后，不登录能读到的只有注解
+            # （artifact zip 匿名下载是 401，实测过），所以"多少行、哪个版本"
+            # 必须出现在这里，否则下一次红又要靠猜。
+            echo "::error title=quic-openssl::这份 openssl@3（$("$prefix/bin/openssl" version 2>/dev/null)）的 libssl 里没有 SSL_set_quic_tls_cbs（nm -g 共 $(nm -g "$lib" 2>/dev/null | wc -l | tr -d ' ') 行）—— 需要 >= 3.2 的 openssl@3，否则配置期会把 UVCPP_ENABLE_QUIC 静默关掉"
+            exit 1
+          fi
 
       - name: Configure & Build
         shell: bash

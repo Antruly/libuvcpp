@@ -503,10 +503,41 @@ choco install openssl --no-progress
 
 ### Changed check names (branch protection)
 
-Splitting the file **renamed every check**. The old names were the job ids
-(`basic (ubuntu-latest)`, `h2 (windows-latest)`, `config-contract (ubuntu-latest)`, …); the
-new ones are `Linux (Ubuntu) / basic-static`, `Windows (MSVC) / quic`,
-`Windows (MinGW64) / mingw64`, `macOS / h2`, and so on — see the §1 table.
+Splitting the file **renamed every check**. A check's name is the job's `name:` **alone** —
+GitHub does *not* prefix it with the workflow `name:` (verified against the last single-file
+run: it reported `basic (ubuntu-latest)`, not `CI / basic (ubuntu-latest)`). That is why every
+job in these four files spells the platform out itself: with a bare `name: ${{ matrix.feature }}`
+the four platforms would all report `basic-static` and collide in the checks list.
+
+The left column below is the **complete** old list, read off the last run of `ci.yml` (19
+checks, commit `34a7162`), so the mapping is exhaustive rather than illustrative:
+
+| Old check (`ci.yml`, 19) | New check |
+|---|---|
+| `basic (ubuntu-latest)` | `Linux (Ubuntu) / basic-static` **and** `Linux (Ubuntu) / basic-shared` |
+| `basic (macos-latest)` | `macOS / basic-static` **and** `macOS / basic-shared` |
+| `windows-basic` | `Windows (MSVC) / basic-shared` (the entry carrying `EXPAND=ON`) |
+| `windows-static` | `Windows (MSVC) / basic-static` |
+| `web (ubuntu-latest)` | `Linux (Ubuntu) / web` |
+| `web (macos-latest)` | `macOS / web` |
+| `web (windows-latest)` | `Windows (MSVC) / web` |
+| `ssl (ubuntu-latest)` | `Linux (Ubuntu) / ssl` |
+| `ssl (macos-latest)` | `macOS / ssl` |
+| `ssl (windows-latest)` | `Windows (MSVC) / ssl` |
+| `h2 (ubuntu-latest)` | `Linux (Ubuntu) / h2` |
+| `h2 (macos-latest)` | `macOS / h2` |
+| `h2 (windows-latest)` | `Windows (MSVC) / h2` |
+| `full (ubuntu-latest)` | `Linux (Ubuntu) / full` |
+| `full (macos-latest)` | `macOS / full` |
+| `quic` | `Linux (Ubuntu) / quic` |
+| `mingw64` | `Windows (MinGW64) / mingw64` |
+| `config-contract (ubuntu-latest, linux-x64, g++, python3)` | `Linux (Ubuntu) / config-contract` |
+| `config-contract (windows-2022, msvc-x64, cl, python)` | `Windows (MSVC) / config-contract` |
+
+**New-only checks** (no old counterpart, so nothing to re-point *away* from):
+`Windows (MSVC) / quic` and `macOS / quic` are the legs this batch adds; `basic-shared` /
+`basic-static` are the old single `basic` leg split in two (it becomes *two* required entries
+where there was one).
 
 If branch protection requires status checks **by name**, they must be re-pointed on GitHub
 before the first pull request against the new layout, or every PR parks at
