@@ -24,19 +24,19 @@
 > 现在它们测的是**实现**：没挂到连接上的壳返回 `UV_ENOTCONN`、没设 TLS 上下文的
 > 端点返回 `UV_EINVAL` 且一条回调都不许排。
 
-- 打开方式：`-DUVCPP_ENABLE_QUIC=ON`。**默认 OFF**（`CMakeLists.txt:94`），而且
+- 打开方式：`-DUVCPP_ENABLE_QUIC=ON`。**默认 OFF**（`CMakeLists.txt:95`），而且
   下面三种情况会被**强制**置 OFF 并打 warning，而不是留一个"能配置、链不上、
   跑不起来"的组合：
-  1. 没开 OpenSSL（`CMakeLists.txt:444`）—— QUIC 建在 TLS 1.3 上，ALPN 是 TLS
+  1. 没开 OpenSSL（`CMakeLists.txt:470`）—— QUIC 建在 TLS 1.3 上，ALPN 是 TLS
      扩展，**没有明文 QUIC** 这回事；
-  2. 没开 net 层（`CMakeLists.txt:451`）—— QUIC 是 net 层的一条链路协议，并且复用
+  2. 没开 net 层（`CMakeLists.txt:477`）—— QUIC 是 net 层的一条链路协议，并且复用
      `src/net/uvcpp_net_read.h` 的读事件契约；
-  3. OpenSSL 找得到、但**不带 QUIC API**（`CMakeLists.txt:497`）—— 判据见
+  3. OpenSSL 找得到、但**不带 QUIC API**（`CMakeLists.txt:523`）—— 判据见
      [§2](#2-编译期条件一份带-quic-api-的-openssl--32)。
 - 包含方式：`<quic/uvcpp_quic_client.h>`、`<quic/uvcpp_quic_server.h>`、
   `<quic/uvcpp_quic_connection.h>`、`<quic/uvcpp_quic_common.h>`。私有的
   `<quic/uvcpp_quic_ngtcp2.h>` 与 `<quic/uvcpp_quic_session.h>` **都不安装**
-  （`CMakeLists.txt:1618`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:1881`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 四个公开头**全部**整段套在 `#if UVCPP_QUIC_ENABLE` 里，所以**不开关就一个类都
   看不到**。这与 `web/`、`ssl/`、`http2/`、`wsdl/` 同档。
 
@@ -82,7 +82,7 @@
 因为 `uvcpp_net_read_cb` 那个 typedef 写死了 `uvcpp_tcp_client&`
 （`src/quic/uvcpp_quic_common.h:109-137` 有完整理由）。
 
-**它不属于 web 层。** 所以 `CMakeLists.txt:94` 那个 `option()` 刻意**不**放在
+**它不属于 web 层。** 所以 `CMakeLists.txt:95` 那个 `option()` 刻意**不**放在
 "Web 子开关"那一组里 —— 那组的标题写着"仅在 `UVCPP_BUILD_WEB=ON` 时有效"，而
 QUIC 在 web 关闭时照样要能用。这正是下面 [§3](#3-怎么拿到那份-openssl) 要单独说
 一遍的原因：QUIC 逼出来的那个组合是"**net 打开 + SSL 打开 + web 关闭**"，而在
@@ -114,10 +114,10 @@ libngtcp2 支持两个分支，判据写在它自己的 `CMakeLists.txt` 里，�
 | 上面那个没有、`SSL_set_quic_tls_cbs` 有 | mainline OpenSSL ≥ 3.2（`HAVE_OSSL`） | **`ngtcp2_crypto_ossl_static`** ← 我们链的是这个 |
 | 两个都没有 | — | 一个都不建，configure 期 `FATAL_ERROR` |
 
-本库的探针**复刻**了这个顺序（`CMakeLists.txt:487`、`CMakeLists.txt:490`）。这不是
+本库的探针**复刻**了这个顺序（`CMakeLists.txt:513`、`CMakeLists.txt:516`）。这不是
 仪式：只查 `SSL_set_quic_tls_cbs` 的探针会在 quictls 树上"通过"，然后去链一个**从来
 没被建出来**的目标。所以探针的结论是"没有 provide、但有 cbs"才放行
-（`CMakeLists.txt:497`）；另外两格都强制关闭并出声。
+（`CMakeLists.txt:523`）；另外两格都强制关闭并出声。
 
 > **Ubuntu 24.04 自带的 3.0.13 不行。** 3.0/3.1 没有那两个符号中的任何一个。这不是
 > 保守估计 —— 对着本机那份 `libssl.so.3` 量过：两个符号数都是 0。
@@ -152,8 +152,8 @@ nghttp2 / zlib / pugixml 的用法一致。
 配置成功的标志是两行 `message(STATUS)`，CI 也正是 grep 这两行：
 
 ```
-ngtcp2 integrated (tag=v1.25.0, static)          # CMakeLists.txt:646
-Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:1072
+ngtcp2 integrated (tag=v1.25.0, static)          # CMakeLists.txt:672
+Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:1256
 ```
 
 > **只 grep `CMakeCache.txt` 是不够的。** 三条降级用的都是**普通变量**
@@ -455,7 +455,7 @@ void install_reader(uvcpp_quic_connection& conn) {
 
 1. **别指望从公开头里看到 ngtcp2。** `<ngtcp2/ngtcp2.h>` 只出现在私有的
    `src/quic/uvcpp_quic_ngtcp2.h` 里，而它和持有 ngtcp2 句柄的
-   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:1618`）、打包
+   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:1881`）、打包
    也被排除。理由有两条：一是使用者不该被逼着去配 ngtcp2 的搜索路径才能 include
    一个本库的头；二是 `uvcpp_quic_session.h` 的成员里就有 `ngtcp2_conn*`、`SSL*`、
    `ngtcp2_path_storage`，它的字段布局直接跟着 ngtcp2 的版本走 —— 一旦漏进公开面，
@@ -469,8 +469,8 @@ void install_reader(uvcpp_quic_connection& conn) {
    调用，符号在链接期解析，照样证明 ngtcp2 真被链上。
 
 3. **`src/quic/` 的源文件被 `list(FILTER … EXCLUDE REGEX "src/quic/")` 排除**
-   （`CMakeLists.txt:1067`，头文件那一条在 `:1068`），而且"开了 QUIC 但目录是空的"
-   会**当场 FATAL**（`CMakeLists.txt:1081`）。后者防的是一棵树同时骗过三道看起来
+   （`CMakeLists.txt:1251`，头文件那一条在 `:1252`），而且"开了 QUIC 但目录是空的"
+   会**当场 FATAL**（`CMakeLists.txt:1265`）。后者防的是一棵树同时骗过三道看起来
    很像门禁的东西：cache 里 `QUIC=ON`、日志里有 `ngtcp2 integrated`、编译也过 ——
    而 `src/quic/` 一个 `.cpp` 都没有，**零行 QUIC 代码被编译过**。"没测"必须表现为
    **失败**，不是表现为**通过**。

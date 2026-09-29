@@ -56,13 +56,13 @@ jobs:
           #   不带 preset ⇒ 这个开关默认 OFF ⇒ `find_library` 在 MSYS2 里撞上
           #   C:/msys64/mingw64/lib/libuv.dll.a（runner 镜像自带 libuv）⇒ 链成
           #   共享库，产物依赖 `libuv-1.dll`（MSYS2 那份的 DLL 名带 -1）。
-          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:708 判的是
+          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:875 判的是
           #   `TARGET uv_a`，而 find_library 给的是一个**路径**，不是 target，
           #   所以那个分支根本进不去。
           #
           # ② -DBUILD_SHARED_LIBS=OFF —— 管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #   llhttp_shared ⇒ 依赖 libllhttp.dll）。它不管 uvcpp 自己
-          #   （CMakeLists.txt:1089 是显式的 `add_library(uvcpp SHARED ...)`）。
+          #   （CMakeLists.txt:1295 是显式的 `add_library(uvcpp SHARED ...)`）。
           #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
           #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
           #   （708 行挑 `uv_a`），但那一路在 CI 上本来就走不到。

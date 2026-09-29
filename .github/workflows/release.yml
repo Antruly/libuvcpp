@@ -58,15 +58,15 @@ jobs:
           # ① UVCPP_BUILD_LIBUV_FROM_SOURCE=ON：不带 preset 时它默认 OFF，
           #    `find_library` 会撞上 runner 镜像 MSYS2 自带的 libuv.dll.a，链成
           #    共享库 ⇒ 依赖 libuv-1.dll。BUILD_SHARED_LIBS 救不了这一路
-          #    （CMakeLists.txt:708 判的是 TARGET uv_a，而 find_library 给的是路径）。
+          #    （CMakeLists.txt:875 判的是 TARGET uv_a，而 find_library 给的是路径）。
           # ② BUILD_SHARED_LIBS=OFF：管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #    llhttp_shared ⇒ 依赖 libllhttp.dll）。zlib 不受影响，
-          #    CMakeLists.txt:1321-1322 明确链 zlibstatic。
+          #    CMakeLists.txt:1558-1559 明确链 zlibstatic。
           # 本机所有树都走 CMakePresets（它有 ①），所以这两条从来没在本机复现过。
           #
-          # ③ UVCPP_ENABLE_NGHTTP2=ON：这个开关**默认 OFF**（CMakeLists.txt:110），
+          # ③ UVCPP_ENABLE_NGHTTP2=ON：这个开关**默认 OFF**（CMakeLists.txt:132），
           #    而这几个打包装的 job 一直没传它 —— 于是包里根本没有 h2，README 却在
-          #    介绍它。nghttp2 是唯一被强制静态的依赖（CMakeLists.txt:351-365），
+          #    介绍它。nghttp2 是唯一被强制静态的依赖（CMakeLists.txt:377-391），
           #    所以开它不会给产物添任何 dll。六个打包 job 都必须传，任何一个漏了
           #    就会发一个"同版本号但少一半功能"的包。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -324,7 +324,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # 不靠镜像里"碰巧装了 OpenSSL"：没找到时 `find_package(OpenSSL QUIET)` 会把
-      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:279），那样发出去的包
+      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:305），那样发出去的包
       # 一句 SSL 都没有 —— 而它的生成头会**如实**说 0，使用者照配也拿不到 SSL。
       - name: Install OpenSSL
         shell: bash
@@ -336,7 +336,7 @@ jobs:
           set -o pipefail
           # 同 mingw-x64：① 让 libuv 从源码静态编（runner 上若有系统 libuv，
           # 不带这个开关就会链成 uv.dll），② 让 llhttp 静态（否则 llhttp.dll）。
-          # zlib 不受 ② 影响（CMakeLists.txt:1321-1322 明确链 zlibstatic）。
+          # zlib 不受 ② 影响（CMakeLists.txt:1558-1559 明确链 zlibstatic）。
           # MSVC 侧 uvcpp 自己仍走 /MD + 包内自带 VC++ 运行库，与此无关。
           cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
             -DBUILD_SHARED_LIBS=OFF \

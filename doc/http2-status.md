@@ -81,13 +81,13 @@
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
 - **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
   写明了理由（引了就把 nghttp2 的 include 路径扩散给每个使用者与测试 TU）。
-  `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:110`），缺 OpenSSL 或缺 web
+  `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:132`），缺 OpenSSL 或缺 web
   模块时还会被强制置 OFF 并告警。
 
 ### 1.4 依赖与产物
 
 `nghttp2` 是**唯一被强制静态**的依赖：`uvcpp_nghttp2_configure()`
-（`CMakeLists.txt:349`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
+（`CMakeLists.txt:375`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
 静态 `nghttp2_static` 交给链接器。实测 `pe_imports()`：开了 h2 的 DLL 与没开的
 相比，非白名单依赖集合**都是** `llhttp.dll uv.dll zlib1.dll` —— 开 h2 不新增
 任何 DLL 依赖。
@@ -375,7 +375,7 @@ ctest --test-dir build-h2 -C Release --timeout 60
    - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
      `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
      "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
-     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:1781`
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:2066`
      的注释），与 `pwsh` 无关。
    - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
      `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己

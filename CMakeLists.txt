@@ -83,16 +83,38 @@ option(UVCPP_ENABLE_WSDL "Enable WSDL/SOAP module (XML via pugixml, needs UVCPP_
 # 两条都由下面 QUIC 那一节在配置期检查并**强制关闭 + 出声**，不留一个"能配置、
 # 链不上、跑不起来"的组合。
 #
-# 默认 OFF。**1.4.1 只交骨架**：CMake 接线、依赖接入、公开 API 形状与配置契约宏；
-# 传输本身（握手、开流、收发）从 1.4.2 起往里填 —— 也就是说这一版**不能**收发
-# 任何一个字节，见 doc/quic-guide.md 里"没做的"那一节。
+# 默认 OFF。**1.4.1 里它是一条真能通信的链路协议**：握手、开流、双向收发、连接
+# 关闭与空闲超时都通了，`tests/functional/quic_*_func.cpp` 在跑真实的两端点。
+# 哪几件事**没做**（0-RTT、迁移、版本协商、无状态重置……）见 doc/quic-guide.md 的
+# "§4 真实现"那张表 —— 那张表是这一节唯一的权威，别的地方不要重复它。
 #
 # 它**不属于 web 层**，所以刻意不放在下面那组"Web 子开关"里：那组的标题写着
 # "仅在 UVCPP_BUILD_WEB=ON 时有效"，而 QUIC 在 web 关闭时照样要能用（它住在
 # net 层）。它读的是 `UVCPP_ENABLE_OPENSSL`，那个开关虽然在下面那组里声明，
 # 但本文件里读它的守卫都在声明**之后**，顺序没问题。
 option(UVCPP_ENABLE_QUIC
-  "Enable QUIC transport via ngtcp2 (net layer). Needs UVCPP_ENABLE_OPENSSL=ON and an OpenSSL >= 3.2 with the QUIC API. No HTTP/3 yet" OFF)
+  "Enable QUIC transport via ngtcp2 (net layer). Needs UVCPP_ENABLE_OPENSSL=ON and an OpenSSL >= 3.2 with the QUIC API" OFF)
+
+# HTTP/3 —— **web 层**的一条传输，架在上面的 QUIC 之上。
+#
+# 位置与 nghttp2 之于 HTTP/2 完全相同：协议语义归 **nghttp3**（QPACK、帧、流
+# 状态机），本库只做"字节从哪来往哪去"的接线与请求/响应的翻译。所以它有两个
+# **硬依赖**，下面 HTTP3 那一节会在配置期检查：
+#
+#   1. **QUIC** —— h3 没有别的承载。而 QUIC 自己已经强制了 OPENSSL，所以
+#      HTTP3 ⇒ QUIC ⇒ OPENSSL 这一串是传递的，本文件不再重复检查 SSL。
+#   2. **WEB** —— 它是 web 层的传输，接在 `uvcpp_http_client` /
+#      `uvcpp_http_server` 上；没有 web 层，这一层建出来没有调用方。
+#
+# 两条都不满足时**强制关闭 + 出声**（照 QUIC 那一套），不留"能配置、跑不起来"
+# 的组合。
+#
+# 默认 OFF，而且**关掉时产出的二进制与不开这一项时逐字节相同** —— `src/http3/`
+# 整个不参与编译，web 层里那些 h3 块全在 `#if UVCPP_HTTP3_ENABLE` 里。h1/h2 跑
+# TCP、h3 跑 UDP，两条 socket 不相交，所以"接进 web 层"不等于"往 h1 的路上加
+# 东西"；那张逐函数的对照表在 doc/http3-guide.md 里。
+option(UVCPP_ENABLE_HTTP3
+  "Enable HTTP/3 via nghttp3 (web layer, over the QUIC transport). Needs UVCPP_ENABLE_QUIC=ON and UVCPP_BUILD_WEB=ON" OFF)
 
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
@@ -117,6 +139,10 @@ set(ZLIB_VERSION    "v1.3.1"         CACHE STRING "zlib git tag to fetch")
 set(OPENSSL_VERSION "openssl-3.4.0"  CACHE STRING "OpenSSL git tag to fetch")
 set(NGHTTP2_VERSION "v1.70.0"        CACHE STRING "nghttp2 git tag to fetch")
 set(NGTCP2_VERSION  "v1.25.0"        CACHE STRING "ngtcp2 git tag to fetch")
+# 仓库在 `https://github.com/ngtcp2/nghttp3.git` —— 组织是 **ngtcp2**，不是
+# nghttp2。nghttp3 与 nghttp2 同源（同一个作者、同一套代码风格），但它是为了
+# QUIC 重写的另一个库：没有 TCP 那套帧层，多了 QPACK，API 完全不同。
+set(NGHTTP3_VERSION "v1.18.0"        CACHE STRING "nghttp3 git tag to fetch")
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -646,6 +672,147 @@ if(UVCPP_ENABLE_QUIC)
   message(STATUS "ngtcp2 integrated (tag=${NGTCP2_VERSION}, static)")
 endif()
 
+# =========================================================================
+# HTTP/3 —— nghttp3 后端，架在 QUIC 之上
+# =========================================================================
+# 两条守卫，都照 QUIC 那一套"静默降级链"写：`set(... OFF)` 是**普通变量**，
+# 不是 cache 写，所以 cache 里仍然是 `UVCPP_ENABLE_HTTP3:BOOL=ON`，只 grep cache
+# 会得到一个假绿 —— 这就是下面那句 `Including http3 module in build` 存在的理由。
+#
+# 位置：**在这两条之后、`_uvcpp_literal01` 那一批之前**。前者不只是顺序好看：
+# QUIC 自己的守卫在这一段**上面**已经跑过，所以"QUIC 被强制关掉了"这件事我们
+# 这里直接读结果就行，不需要把 OPENSSL / NET 那两条重写一遍（HTTP3 ⇒ QUIC ⇒
+# OPENSSL 是传递的）。后者是硬约束：守卫晚于那一批，生成头里写 1、编译定义写 0，
+# 第一个 TU 就 `#error`。
+#
+# 顺带说清这两条为什么**报错信息里要给出路**：这两个组合都不是使用者的笔误，
+# 而是"开关之间的真实依赖"。一句话说清依赖，比让他去读三个 option 的注释快。
+if(UVCPP_ENABLE_HTTP3 AND NOT UVCPP_ENABLE_QUIC)
+  message(WARNING
+    "UVCPP_ENABLE_HTTP3=ON 需要 UVCPP_ENABLE_QUIC=ON（HTTP/3 是 QUIC 之上的一条"
+    "应用层协议，它没有别的承载 —— 就像 h2 不能没有 TCP）。已强制关闭 http3。")
+  set(UVCPP_ENABLE_HTTP3 OFF)
+endif()
+
+if(UVCPP_ENABLE_HTTP3 AND NOT UVCPP_BUILD_WEB)
+  message(WARNING
+    "UVCPP_ENABLE_HTTP3=ON 需要 UVCPP_BUILD_WEB=ON（HTTP/3 是 web 层的一条传输，"
+    "接在 uvcpp_http_client / uvcpp_http_server 上；没有 web 层，这一层建出来没有"
+    "调用方）。已强制关闭 http3。")
+  set(UVCPP_ENABLE_HTTP3 OFF)
+endif()
+
+if(UVCPP_ENABLE_HTTP3)
+  # 这两条路径在 `function` 作用域**外面**先定一份：nghttp3_static 不给
+  # build-interface 的 include 目录（见下面那段），我们的目标必须自己把它加上，
+  # 而那些 `target_include_directories` 调用在 function 外面。CMake 的函数能读
+  # 调用者的变量，所以 function 里面照样用得到。
+  set(_uvcpp_nghttp3_src "${CMAKE_BINARY_DIR}/_deps/uvcpp-nghttp3-src")
+  set(_uvcpp_nghttp3_bin "${CMAKE_BINARY_DIR}/_deps/uvcpp-nghttp3-build")
+
+  # 与 nghttp2 / ngtcp2 同一个套路：用 `function` 造作用域，靠 CMP0077=NEW 让同名
+  # **普通变量**压住 nghttp3 自己的 `option()`（它在 `CMakeOptions.txt` 里，由它
+  # 本文件 `include()` 进来，读到的就是这里造的那些普通变量）。
+  #
+  # `ENABLE_LIB_ONLY=ON` 是关键的一条：它让 nghttp3 跳过 `examples/`（`tests/` 那
+  # 边另有 BUILD_TESTING 管着）。于是 **libnghttp3 不依赖 libev、也不依赖 c-ares**。
+  function(uvcpp_nghttp3_configure)
+    set(ENABLE_STATIC_LIB  ON)
+    set(ENABLE_SHARED_LIB  OFF)
+    set(ENABLE_LIB_ONLY    ON)
+    set(ENABLE_WERROR      OFF)
+    set(ENABLE_DEBUG       OFF)
+    set(ENABLE_ASAN        OFF)
+    set(ENABLE_STATIC_CRT  OFF)
+    set(BUILD_TESTING      OFF)
+
+    # PIC 必须在**建目标之前**定好 —— 属性是 add_library 那一刻初始化的。理由与
+    # ngtcp2 那段逐字相同：nghttp3 只给 `nghttp3`（共享那个）设了
+    # POSITION_INDEPENDENT_CODE，`nghttp3_static` 没设 ⇒ Linux 上 libuvcpp.so
+    # 链不上（R_X86_64_PC32）。
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+    FetchContent_GetProperties(nghttp3)
+    if(NOT nghttp3_POPULATED)
+      FetchContent_Populate(nghttp3)
+
+      # ---------------------------------------------------------------
+      # `check` 目标撞名 —— **第三个**来源
+      # ---------------------------------------------------------------
+      # `nghttp3/CMakeLists.txt:71` 与 nghttp2:174、ngtcp2:160 是**同一行**：
+      #   add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
+      # 一样不带守卫，一样在 `cmake_minimum_required(VERSION 3.20)`（:26）之后 ——
+      # 所以 CMP0002=OLD 那三条设法在这里同样救不了，理由与 ngtcp2 那段逐字相同，
+      # 不再重复。
+      #
+      # 撞名只在"两个都开"时出现，而 h3 一定要开 quic ⇒ nghttp3 与 ngtcp2 必然
+      # 同框 ⇒ **http3 这一格必然撞**（ngtcp2 在前，所以撞的是 nghttp3）。这不是
+      # "也许会发生"，是"确定了会发生"。
+      #
+      # 处理与 ngtcp2 完全一致：拷一份源码树进构建目录，只动副本。**不原地改** ——
+      # `FETCHCONTENT_SOURCE_DIR_NGHTTP3` 通常指着使用者的一份检出。
+      if(NOT EXISTS "${_uvcpp_nghttp3_src}/CMakeLists.txt")
+        file(COPY "${nghttp3_SOURCE_DIR}/" DESTINATION "${_uvcpp_nghttp3_src}"
+             PATTERN ".git" EXCLUDE)
+        file(READ "${_uvcpp_nghttp3_src}/CMakeLists.txt" _uvcpp_nghttp3_cml)
+        set(_uvcpp_nghttp3_check_line
+            [[add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})]])
+        string(FIND "${_uvcpp_nghttp3_cml}" "${_uvcpp_nghttp3_check_line}"
+               _uvcpp_nghttp3_hit)
+        if(_uvcpp_nghttp3_hit EQUAL -1)
+          message(FATAL_ERROR
+            "补丁没打上：在 ${_uvcpp_nghttp3_src}/CMakeLists.txt 里找不到 "
+            "`add_custom_target(check COMMAND \${CMAKE_CTEST_COMMAND})`。\n"
+            "  上游改过这一处。请对着那个文件重新确认：要么它已经不建 `check`"
+            "（那这段补丁连同这条断言一起删掉），要么那一行的写法变了（这条 "
+            "string(FIND) 要跟着改）。\n"
+            "  **别把这条断言删掉了事**：它一失效，补丁就变成静默空转，而 "
+            "quic+http3 会在 add_subdirectory 那里报一条看不出所以然的撞名错。")
+        endif()
+        string(REPLACE "${_uvcpp_nghttp3_check_line}"
+          "# [uvcpp] 摘掉 `check`：它与 nghttp2/ngtcp2 的无条件同名目标冲突，见根 CMakeLists.txt 里那段注释"
+          _uvcpp_nghttp3_cml "${_uvcpp_nghttp3_cml}")
+        file(WRITE "${_uvcpp_nghttp3_src}/CMakeLists.txt" "${_uvcpp_nghttp3_cml}")
+      endif()
+
+      add_subdirectory("${_uvcpp_nghttp3_src}" "${_uvcpp_nghttp3_bin}" EXCLUDE_FROM_ALL)
+    endif()
+  endfunction()
+
+  # 同 nghttp2 / ngtcp2：**不能**用 FetchContent_MakeAvailable —— 它等价于
+  # add_subdirectory，会连上游的 install 规则（nghttp3Config.cmake、libnghttp3.pc）
+  # 一并登记，污染 `cmake --install`。EXCLUDE_FROM_ALL 一起排除，目标照样能被
+  # 下面的链接依赖拉起来。
+  FetchContent_Declare(
+    nghttp3
+    GIT_REPOSITORY https://github.com/ngtcp2/nghttp3.git
+    GIT_TAG        ${NGHTTP3_VERSION}
+    GIT_SHALLOW    TRUE
+  )
+  uvcpp_nghttp3_configure()
+
+  # 存在性断言排在 PIC 断言前面，理由与 ngtcp2 那段逐字相同：目标不存在时
+  # `get_target_property` 返回 NOTFOUND，PIC 那条 FATAL 会谎报"PIC 没生效"。
+  #
+  # 目标名是**裸的 `nghttp3_static`，没有 ALIAS** —— 与 `ngtcp2_static` 同形，
+  # 与 `nghttp2_static` 也同形。别去猜 `nghttp3::nghttp3_static` 那种带命名空间
+  # 的名字：上游只在**导出**（`install(EXPORT)`）时才造 `nghttp3::` 前缀，而
+  # 我们走的是 add_subdirectory，拿到的是构建树里的原始目标名。
+  if(NOT TARGET nghttp3_static)
+    message(FATAL_ERROR
+      "nghttp3 没建出 nghttp3_static —— ENABLE_STATIC_LIB/ENABLE_SHARED_LIB 没压住,"
+      "或者上游改了库目标名")
+  endif()
+  get_target_property(_uvcpp_nghttp3_pic nghttp3_static POSITION_INDEPENDENT_CODE)
+  if(NOT _uvcpp_nghttp3_pic)
+    message(FATAL_ERROR
+      "nghttp3_static 的 POSITION_INDEPENDENT_CODE 没生效(=${_uvcpp_nghttp3_pic}) —— "
+      "Linux 上 libuvcpp.so 会链不上它")
+  endif()
+
+  message(STATUS "nghttp3 integrated (tag=${NGHTTP3_VERSION}, static)")
+endif()
+
 # NOTE: PATH for Windows tests is set *after* add_subdirectory(tests) below
 # to ensure tesets are registered before we query TESTS property.
 
@@ -783,6 +950,15 @@ if(UVCPP_ENABLE_QUIC)
   file(GLOB QUIC_SRC_FILES CONFIGURE_DEPENDS
        "${CMAKE_SOURCE_DIR}/src/quic/*.h" "${CMAKE_SOURCE_DIR}/src/quic/*.cpp")
   source_group("quic" FILES ${QUIC_SRC_FILES})
+endif()
+
+# http3 module source_group
+# CONFIGURE_DEPENDS 的理由与 quic 那段逐字相同。同一个 HTTP3_SRC_FILES 还在下面
+# 被用来做"空模块"判据。
+if(UVCPP_ENABLE_HTTP3)
+  file(GLOB HTTP3_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/http3/*.h" "${CMAKE_SOURCE_DIR}/src/http3/*.cpp")
+  source_group("http3" FILES ${HTTP3_SRC_FILES})
 endif()
 
 # read version from header (src/uvcpp/uvcpp_version.h)
@@ -987,6 +1163,14 @@ else()
   message(STATUS "QUIC disabled (UVCPP_QUIC_ENABLE=0)")
 endif()
 
+if(UVCPP_ENABLE_HTTP3)
+  add_compile_definitions(UVCPP_HTTP3_ENABLE=1)
+  message(STATUS "HTTP/3 enabled (UVCPP_HTTP3_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_HTTP3_ENABLE=0)
+  message(STATUS "HTTP/3 disabled (UVCPP_HTTP3_ENABLE=0)")
+endif()
+
 if(UVCPP_ENABLE_TRY_WRITE)
   add_compile_definitions(UVCPP_TRY_WRITE_ENABLE=1
                           UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES})
@@ -1083,6 +1267,28 @@ else()
   endif()
 endif()
 
+# 根据 UVCPP_ENABLE_HTTP3 排除 http3 模块。形状与上面 quic 那段逐字相同 ——
+# 包括为什么两个列表都要排。
+if(NOT UVCPP_ENABLE_HTTP3)
+  message(STATUS "Excluding http3 module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/http3/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/http3/")
+else()
+  # CI 要 grep 这一行，理由与 quic 那句相同（降级是普通变量 set()，cache 里
+  # 仍然是 ON）。
+  message(STATUS "Including http3 module in build (nghttp3 ${NGHTTP3_VERSION})")
+
+  # 「开了 HTTP3 但目录是空的」同样必须当场红。这一格比 quic 那格更值得防：
+  # h3 的公开面在 web 层里是**可选接线**，一个空的 src/http3/ 不会让任何东西
+  # 编译失败 —— 它会编出一个"h3 开关是 ON、但一条 h3 代码都没有"的库，
+  # 而配置日志、cache、构建全绿。
+  if(NOT HTTP3_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_ENABLE_HTTP3=ON 但 src/http3/ 下一个文件都没有 —— 这个配置会编出"
+      "一个不含任何 HTTP/3 代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
+endif()
+
 # Create uvcpp targets according to user selection.
 # Shared target
 if(UVCPP_BUILD_SHARED)
@@ -1150,6 +1356,35 @@ if (TARGET uvcpp_a_s)
   )
 endif()
 
+# HTTP/3：nghttp3 的 include 目录**得我们自己挂**,不能指望链接传递。
+#
+# 与 ngtcp2 那一处**实质不同**,别照着它以为"链上就有了":ngtcp2 的
+# `lib/CMakeLists.txt:131` 给 `ngtcp2_static` 挂了 `PUBLIC ${ngtcp2_INCLUDE_DIRS}`,
+# 所以 ngtcp2 的头顺着 target_link_libraries 自己流过来;nghttp3 的
+# `lib/CMakeLists.txt:115` 只写了 `INTERFACE $<INSTALL_INTERFACE:include>` ——
+# build 侧**一个字都没有**,它自己那些头是靠 `lib/CMakeLists.txt:27-30` 的
+# **目录级** `include_directories()` 找到的,那个作用域出不了 nghttp3 自己的目录。
+# 不挂这两条,`uvcpp_h3_nghttp3.h` 里那句 `#include <nghttp3/nghttp3.h>` 直接
+# 找不到文件。两条都要:前者是源码树里的 `lib/includes`,后者是 configure_file
+# 生成的 `nghttp3/version.h`(它落在构建树里)。
+#
+# PRIVATE:只有 `src/http3/*.cpp` 需要它,公开头一个字都不引用 nghttp3 —— 这正是
+# `uvcpp_h3_nghttp3.h` 存在且**不装出去**的理由。这里**不套** `$<BUILD_INTERFACE:>`,
+# 而上面那些链接依赖套了:PRIVATE 的 include 目录根本不会进
+# `INTERFACE_INCLUDE_DIRECTORIES`,绝对路径没有机会被 `install(EXPORT)` 看见;
+# 而 PRIVATE 的**链接**依赖会在静态库上以 `$<LINK_ONLY:...>` 写进
+# `INTERFACE_LINK_LIBRARIES`,那才是上面必须包起来的原因。包在这里只会让人以为
+# 它在防一件不存在的事。
+if(UVCPP_ENABLE_HTTP3)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      target_include_directories(${_tgt} PRIVATE
+        "${_uvcpp_nghttp3_src}/lib/includes"
+        "${_uvcpp_nghttp3_bin}/lib/includes")
+    endif()
+  endforeach()
+endif()
+
 # MSVC：`/Zc:preprocessor`（符合标准的预处理器）必须**跟着导出的目标走**。
 #
 # 理由见 `src/uvcpp/uvcpp_json_reflect.h` 里 `UVCPP_JSON_FIELDS` 上面那段：
@@ -1213,6 +1448,7 @@ _uvcpp_literal01(UVCPP_ZLIB_ENABLE      UVCPP_ENABLE_ZLIB)
 _uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
 _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
 _uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
+_uvcpp_literal01(UVCPP_HTTP3_ENABLE     UVCPP_ENABLE_HTTP3)
 _uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
 
 # 值宏：空字面量会让 `#if X != ` 变成语法错误，宁可在 configure 期就停下。
@@ -1273,6 +1509,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_OPENSSL_ENABLE=${UVCPP_OPENSSL_ENABLE}
       UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
       UVCPP_QUIC_ENABLE=${UVCPP_QUIC_ENABLE}
+      UVCPP_HTTP3_ENABLE=${UVCPP_HTTP3_ENABLE}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
     )
@@ -1392,6 +1629,32 @@ if(UVCPP_ENABLE_QUIC)
       target_link_libraries(${_tgt} PRIVATE
         $<BUILD_INTERFACE:ngtcp2_static>
         $<BUILD_INTERFACE:ngtcp2_crypto_ossl_static>)
+    endif()
+  endforeach()
+endif()
+
+# =========================================================================
+# HTTP/3 依赖链接 — nghttp3
+# =========================================================================
+if(UVCPP_ENABLE_HTTP3)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      # 一个目标,裸名,**没有 ALIAS** —— 与上面 ngtcp2 那段同形,与 nghttp2 不同
+      # (nghttp2 有 `add_library(nghttp2 ALIAS ...)`)。所以名字漂了只能靠上面配置段
+      # 那条 `if(NOT TARGET nghttp3_static)` 的 FATAL_ERROR 兜住。
+      #
+      # **include 目录不在这里,在上面那段 `target_include_directories` 里** ——
+      # 这是我们与 ngtcp2 那段唯一的实质差别:ngtcp2_static 挂了 PUBLIC 的 include
+      # 目录,链上就顺过来了;nghttp3_static 只给 INSTALL_INTERFACE,链**不**带
+      # include。别以为"照 ngtcp2 抄一行 link 就够了"。
+      #
+      # PRIVATE 与 $<BUILD_INTERFACE:> 的理由与上面 nghttp3 的 include 段逐字相同:
+      # nghttp3 只出现在 `src/http3/` 的 .cpp 与那个**不装出去**的
+      # `uvcpp_h3_nghttp3.h` 里,公开头一个字都不引用它;而 PRIVATE 在**静态**库上
+      # 会以 $<LINK_ONLY:...> 写进 INTERFACE_LINK_LIBRARIES,
+      # `install(EXPORT uvcppTargets)` 要求导出集里每个非 IMPORTED 目标也在导出集
+      # 里 —— nghttp3_static 不在。
+      target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:nghttp3_static>)
     endif()
   endforeach()
 endif()
@@ -1618,6 +1881,28 @@ file(GLOB QUIC_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/quic/*.h")
 list(FILTER QUIC_HEADER_FILES EXCLUDE REGEX "uvcpp_quic_(ngtcp2|session)\\.h$")
 if(QUIC_HEADER_FILES AND UVCPP_ENABLE_QUIC)
   install(FILES ${QUIC_HEADER_FILES} DESTINATION include/quic)
+endif()
+
+# src/http3/ 同理：公开头是 pimpl 形状的（<nghttp3/nghttp3.h> 只出现在 .cpp 里），
+# 使用者拿到的头不依赖 nghttp3 本身。
+file(GLOB HTTP3_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/http3/*.h")
+# `uvcpp_h3_nghttp3.h` 与 `uvcpp_h3_session.h` 是**私有**头：
+#
+# - 前者把 <nghttp3/nghttp3.h> 拉进来（正是为了让别的头不拉）；
+# - 后者是 `h3_session` 的定义，跳板与成员里直接写着 `nghttp3_conn*`、
+#   `nghttp3_rcbuf*`、`nghttp3_vec`、`nghttp3_ssize`（它包含前者，所以两者要么
+#   一起装要么一起不装，而正确答案是**一起不装**：装出去等于把"使用者不需要
+#   nghttp3"这个结论作废，而且会把一个根本没有稳定 ABI 的类摆进公开面）。
+#
+# **只装 `uvcpp_h3_common.h` 与 `uvcpp_h3_connection.h`**（后者在 P3 落地）——
+# 这两个是"使用者真的要用"的那一层：常量、`h3_header`、驱动类。
+#
+# **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
+# 那个脚本自己按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，
+# `package_release.py` 打出来的包里照样会带上它。
+list(FILTER HTTP3_HEADER_FILES EXCLUDE REGEX "uvcpp_h3_(nghttp3|session)\\.h$")
+if(HTTP3_HEADER_FILES AND UVCPP_ENABLE_HTTP3)
+  install(FILES ${HTTP3_HEADER_FILES} DESTINATION include/http3)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too

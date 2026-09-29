@@ -81,6 +81,13 @@
 #  define UVCPP_QUIC_ENABLE @UVCPP_QUIC_ENABLE@
 #endif
 
+#if defined(UVCPP_HTTP3_ENABLE) && (UVCPP_HTTP3_ENABLE != @UVCPP_HTTP3_ENABLE@)
+#  error "UVCPP_HTTP3_ENABLE=@UVCPP_HTTP3_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HTTP3_ENABLE
+#  define UVCPP_HTTP3_ENABLE @UVCPP_HTTP3_ENABLE@
+#endif
+
 #if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
 #  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
 #endif

@@ -41,7 +41,7 @@
 ## 2. 编译期条件与包含
 
 - **没有开关。** 它是核心模块，`UVCPP_ENABLE_NET` / `_WEB` / `_WEBAPP` 一个都不影响它；
-  `CMakeLists.txt:747` 那个收 `src/uvcpp/` 下源文件的 GLOB 已经把它收进去了。
+  `CMakeLists.txt:914` 那个收 `src/uvcpp/` 下源文件的 GLOB 已经把它收进去了。
 - **不需要 nlohmann、不需要 OpenSSL、不需要 zlib。** 头文件只带
   `<cstddef>` 与 `<string>`，实现只多带 `<cmath> <cstdio> <cstdlib> <cstring> <new> <stdexcept>`。
 - **C++11**（本仓没有 per-target 覆盖），所以没有 `std::string_view`、没有 `if constexpr`。
