@@ -58,6 +58,8 @@
 #include <quic/uvcpp_quic_common.h>
 #include <quic/uvcpp_quic_connection.h>
 #include <quic/uvcpp_quic_server.h>
+#include <ssl/uvcpp_ssl_context.h>
+#include <ssl/uvcpp_ssl_common.h>
 
 #include "loop_drain.h"
 #include "wait_util.h"
@@ -351,7 +353,168 @@ void test_endpoint_contract(uvcpp_loop& loop) {
 }
 
 // =========================================================================
-// 5. 自建循环那条路 + run/stop
+// 5. 关闭与空闲超时
+// =========================================================================
+
+/// `ngtcp2.h:688`：`NGTCP2_ERR_IDLE_CLOSE`。理由同 `quic_stream_func.cpp` 里
+/// 那个 `kErrStreamShutWr` —— 公开头不许露 ngtcp2 的符号，而 `on_close` 的
+/// `error_code < 0` 那一支要的正是这个数。
+const int kErrIdleClose = -238;
+
+/// 空闲超时用例里两边声明的 `max_idle_timeout`（毫秒）。
+///
+/// **300 不是"随便一个小数"。** 实际生效的是双方声明里小的那个（RFC 9000
+/// §10.1），而 ngtcp2 会按 3 倍 PTO 之类的规则决定真正的到期时刻 —— 取 300
+/// 是为了让整个用例在 1 秒量级收场，同时离"刚握完手就超时"那种假红（握手本身
+/// 就要花几十毫秒）留出足够余量。设成 50 会开始飘。
+const uint64_t kIdleTimeoutMs = 300;
+
+/// 一条连接从 `connect()` 到空闲超时收场的 deadline（毫秒）。
+const int kCloseDeadlineMs = 5000;
+
+/// 应用错误码用例里服务端给的那个数。**随便取的，只要非 0 且不是常见的
+/// libuv/ngtcp2 码** —— 断言要的是"它原样传到了对端"，取 42 就没有
+/// "碰巧对上某个内部码"的余地。
+const int kAppErrorCode = 42;
+
+/**
+ * @brief 两端各起一条真连接，测两种**收场**：空闲超时 与 带应用错误码的关闭。
+ *
+ * 两条都是"连接终结"这条路，而这条路在 1.4.0 那版里根本没有 —— 那时
+ * `close()` 返回 `UV_ENOSYS`、`on_close` 一次都不会响。
+ *
+ * @param which true = 跑空闲超时那条，false = 跑应用错误码那条。
+ */
+void test_close_path(uvcpp_loop& loop, bool idle_timeout_case) {
+  if (idle_timeout_case) {
+    std::cout << "  -- 空闲超时" << std::endl;
+  } else {
+    std::cout << "  -- 带应用错误码的关闭" << std::endl;
+  }
+
+  uvcpp_ssl_context server_ctx(tls_mode::SERVER, tls_version::TLS_1_3);
+  if (!server_ctx.generate_self_signed("localhost", 2048)) {
+    check(false, "生成自签证书失败");
+    return;
+  }
+  uvcpp_ssl_context client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3);
+  client_ctx.set_verify_mode(tls_verify_mode::NONE);
+
+  // 这两条都跑在**共享循环**上，所以整段包在一个块里 —— 退出块时两个端点都
+  // 析构、句柄都进 `closing` 队列，外层最后那条 `loop_alive() == 0` 才谈得上
+  // "收干净了"。
+  {
+    uvcpp_quic_server server(&loop);
+    server.set_ssl_context(&server_ctx);
+    server.set_idle_timeout(idle_timeout_case ? kIdleTimeoutMs : 30000);
+    check_eq_i(server.bind("127.0.0.1", 0), 0, "bind(127.0.0.1, 0)");
+
+    int  server_close_code = 12345;  // 哨兵：绝不可能"碰巧对上"
+    int  server_close_hits = 0;
+
+    server.listen([&](uvcpp_quic_connection* c) {
+      uvcpp_quic_connection::callbacks cbs;
+      cbs.on_close = [&](uvcpp_quic_connection&, int code) {
+        ++server_close_hits;
+        server_close_code = code;
+      };
+      if (!idle_timeout_case) {
+        // 握手一完成就带错误码 42 关掉。这条路**只有**
+        // `uvcpp_quic_connection::close(code)` 走得通 —— 两个端点自己的
+        // `close()` 都不带码（客户端的干脆没有参数）。所以本用例是那个
+        // 公开 API 的唯一实测点。
+        //
+        // 而且它顺带测了"在回调里关连接"：`on_alpn` 是从 ngtcp2 的回调栈里
+        // 出来的，ngtcp2 明令不许在那里面调 `write_connection_close` ——
+        // `quic_session` 必须把这次关闭**记下来**、等 `read_pkt` 退栈再兑现。
+        cbs.on_alpn = [](uvcpp_quic_connection& conn, const std::string&) {
+          check_eq_i(conn.close(kAppErrorCode), 0,
+                     "握手完成后 connection::close(42) 返回 0");
+        };
+      }
+      c->set_callbacks(cbs);
+    });
+    const int port = server.configured_port();
+    check(port > 0, "listen() 之后 configured_port() 报内核分配的端口");
+
+    uvcpp_quic_client client(&loop);
+    client.set_ssl_context(&client_ctx);
+    client.set_idle_timeout(idle_timeout_case ? kIdleTimeoutMs : 30000);
+
+    bool connected = false;
+    int  client_close_code = 12345;
+    int  client_close_hits = 0;
+    bool client_closed = false;
+
+    const int rc = client.connect("127.0.0.1", port, [&](int status) {
+      connected = (status == 0);
+    });
+    check_eq_i(rc, 0, "connect() 返回 0");
+    if (rc != 0) return;
+
+    {
+      uvcpp_quic_connection::callbacks cbs;
+      cbs.on_close = [&](uvcpp_quic_connection&, int code) {
+        ++client_close_hits;
+        client_close_code = code;
+        client_closed      = true;
+      };
+      client.connection()->set_callbacks(cbs);
+    }
+
+    check(uvcpp_test::wait_until(&loop, [&] { return connected; },
+                                 kCloseDeadlineMs),
+          "握手在 deadline 内完成");
+    if (!connected) return;
+
+    // 从这一刻起**谁也不说话**（空闲超时那条），或者等对端那张 CONNECTION_CLOSE。
+    check(uvcpp_test::wait_until(&loop, [&] { return client_closed; },
+                                 kCloseDeadlineMs),
+          idle_timeout_case ? "客户端因空闲超时收场"
+                            : "客户端收到了对端的 CONNECTION_CLOSE");
+
+    if (!idle_timeout_case) {
+      // **错误码如实**：42 是服务端在 CONNECTION_CLOSE 里给的应用错误码，
+      // 客户端那边必须是**正数 42**（`> 0` = 对端的应用错误码）。报成
+      // `NGTCP2_ERR_DRAINING`（-224）也"能过"，所以这条断言要精确到数。
+      check_eq_i(client_close_code, kAppErrorCode,
+                 "客户端的 on_close 拿到对端的应用错误码 42");
+      // 本端自己关的那一侧看不到对端的回话 —— `close()` 把连接推进 CLOSING
+      // 之后来的包一律被 ngtcp2 丢掉（`NGTCP2_ERR_CLOSING` 那条）。所以这里
+      // 只能等它自己走完关闭期，拿到的是**干净关闭**那个 0。
+      check(uvcpp_test::wait_until(&loop, [&] { return server_close_hits != 0; },
+                                   kCloseDeadlineMs),
+            "服务端的 on_close 跑到了");
+      check_eq_i(server_close_code, 0,
+                 "本端先关的那一侧拿不到对端的错误码（CLOSING 期丢包），"
+                 "报的是 0");
+    } else {
+      // **空闲超时是传输层原因，不是应用错误码** —— `NGTCP2_ERR_IDLE_CLOSE`
+      // 走的是 `on_close` 约定里 `error_code < 0` 那一支，而且这一格
+      // **一个包都不发**（RFC 9000 §10.1：空闲关闭不算一次连接错误）。
+      check_eq_i(client_close_code, kErrIdleClose,
+                 "客户端的 on_close 报 NGTCP2_ERR_IDLE_CLOSE");
+      check(uvcpp_test::wait_until(&loop, [&] { return server_close_hits != 0; },
+                                   kCloseDeadlineMs),
+            "服务端也因为空闲超时收场了（一条静下来的连接两侧都会超时）");
+      check_eq_i(server_close_code, kErrIdleClose,
+                 "服务端的 on_close 也报 NGTCP2_ERR_IDLE_CLOSE");
+    }
+
+    // **恰好一次。** 这条路有好几个入口（对端关、超时、协议错），一个把
+    // `finalize()` 的"只报一次"守卫漏掉的实现会在两边都报两遍 —— 而上层拿到
+    // 两次终结通知，就会把"摘表 + 销毁"做两遍。
+    check_eq_i(client_close_hits, 1, "客户端 on_close 恰好跑了 1 次");
+    check_eq_i(server_close_hits, 1, "服务端 on_close 恰好跑了 1 次");
+
+    // 端点收尾之后指针就该是空的 —— 这不是"跑到了"的重复，是钉住收尾**发生过**。
+    check(client.connection() == nullptr,
+          "on_close 之后客户端的 connection() 变空");
+  }
+}
+
+// =========================================================================
+// 6. 自建循环那条路 + run/stop
 // =========================================================================
 
 /**
@@ -426,6 +589,15 @@ int main() {
   uvcpp_test::loop_drain drain_loop(&loop);
 
   test_endpoint_contract(loop);
+
+  // ngtcp2 的 crypto 后端是**进程级**的，在任何端点和任何 TLS 上下文之前。
+  // `test_backend_is_really_linked()` 结束时把它 free 掉了，所以这里重新起一次
+  // （那一节测的是 init/free 这对函数本身，与这里的用法不冲突）。
+  check_eq_i(quic_crypto_backend_init(), 0, "为关闭用例重起 crypto 后端");
+  test_close_path(loop, /*idle_timeout_case=*/true);
+  test_close_path(loop, /*idle_timeout_case=*/false);
+  quic_crypto_backend_free();
+
   test_self_owned_loop(loop);
 
   std::cout << "[functional quic_api] checks=" << g_checks
