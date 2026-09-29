@@ -36,7 +36,7 @@ application
 ├────────────┤
 │ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL wrapper)
 ├────────────┤
-│ quic         │  ← uvcpp_quic_client/server/connection, ngtcp2 glue (net layer, `UVCPP_ENABLE_QUIC=ON`)
+│ quic + http3 │  ← uvcpp_quic_client/server/connection, ngtcp2 glue (net layer, `UVCPP_ENABLE_QUIC=ON`); h3 rides on it, nghttp3 glue (web layer, `UVCPP_ENABLE_HTTP3=ON`)
 ├────────────┤
 │ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
 ├────────────┤
@@ -123,8 +123,18 @@ in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
   linked static, in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON` **and** an
   **OpenSSL ≥ 3.2 with the QUIC API**, plus `UVCPP_BUILD_NET=ON` (force-disabled without
   any of them — there is no cleartext QUIC). As of **1.4.1** it is a real link protocol:
-  handshake, streams, connection close and idle timeout all work. HTTP/3 is not there
-  yet (nghttp3 is not wired in). See [doc/quic-guide.md](doc/quic-guide.md).
+  handshake, streams, connection close and idle timeout all work. HTTP/3 rides on top of
+  it — see the next bullet. See [doc/quic-guide.md](doc/quic-guide.md).
+- `UVCPP_ENABLE_HTTP3=ON` — HTTP/3 (RFC 9114) in the **web layer**, parsed by
+  [nghttp3](https://github.com/ngtcp2/nghttp3) (note the org: `ngtcp2`, not `nghttp2`)
+  and carried over the QUIC transport, both linked static. Requires
+  `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` (force-disabled without them). As of
+  **1.4.1** `uvcpp_http_client` / `uvcpp_http_server` speak h3 transparently —
+  `set_http3_enabled(true)` on the client, `listen_quic()` on the server — and the
+  routing table, handlers and response type are the same ones h1/h2 use. HTTP/3 runs on
+  **UDP on its own sockets**, so **HTTP/1.1 and HTTP/2 are untouched** (the compile
+  commands and symbol sizes of the h1 path are byte-identical with the switch off). See
+  [doc/http3-guide.md](doc/http3-guide.md).
 
 ### Web app framework (`src/webapp/`) — `UVCPP_BUILD_WEBAPP=ON`
 
@@ -208,6 +218,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS context and per-connection wrapper — the shortest header set and the easiest to get wrong |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer; for progress and trade-offs see [doc/http2-status.md](doc/http2-status.md) |
 | quic | [doc/quic-guide.md](doc/quic-guide.md) | The QUIC transport: the build contract, why it needs an OpenSSL ≥ 3.2, the API shape, and an honest list of what does not work yet |
+| http3 | [doc/http3-guide.md](doc/http3-guide.md) | HTTP/3 as the web layer's second transport: the three QUIC extensions it needed, the API shape (session vs connection, the three critical streams), the CMake wiring, and why HTTP/1.1 is unaffected by it |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
@@ -294,8 +305,8 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 is a real link protocol: handshake, streams, close and idle timeout work; HTTP/3 is not there yet.** See [`doc/quic-guide.md`](doc/quic-guide.md) |
-| `UVCPP_ENABLE_HTTP3` | `OFF` | Enable HTTP/3 (RFC 9114) in the **web layer**, parsed by nghttp3 and carried over the QUIC transport (both linked static). Requires `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` — force-disabled without them |
+| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 is a real link protocol: handshake, streams, close and idle timeout work; HTTP/3 rides on top of it (next row).** See [`doc/quic-guide.md`](doc/quic-guide.md) |
+| `UVCPP_ENABLE_HTTP3` | `OFF` | Enable HTTP/3 (RFC 9114) in the **web layer**, parsed by nghttp3 and carried over the QUIC transport (both linked static). Requires `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` — force-disabled without them. **1.4.1 is an end-to-end transport: `uvcpp_http_client` / `uvcpp_http_server` speak it, h1/h2 are untouched (it runs on UDP).** See [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | Enable the WSDL/SOAP module (XML via pugixml, linked static). Requires `UVCPP_BUILD_WEBAPP=ON`. See [`doc/wsdl-guide.md`](doc/wsdl-guide.md) (the document half) and [`doc/soap-guide.md`](doc/soap-guide.md) (the runtime half) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | Fetch and build libuv from source via `FetchContent` |
@@ -309,7 +320,9 @@ when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is
 configuration that cannot work) — HTTP/2 here has no cleartext mode. `UVCPP_ENABLE_QUIC`
 is force-disabled the same way for **three** separate missing prerequisites
 (`UVCPP_ENABLE_OPENSSL=OFF`, `UVCPP_BUILD_NET=OFF`, or an OpenSSL that has no QUIC API —
-anything below 3.2), each with its own warning that says how to fix it. `UVCPP_ENABLE_WSDL`
+anything below 3.2), each with its own warning that says how to fix it. `UVCPP_ENABLE_HTTP3`
+is force-disabled the same way for **two** missing prerequisites (`UVCPP_ENABLE_QUIC=OFF`
+or `UVCPP_BUILD_WEB=OFF`), also with its own warning. `UVCPP_ENABLE_WSDL`
 is force-disabled the same way when `UVCPP_BUILD_WEBAPP=OFF`: the module is built on top of
 the framework.
 
@@ -574,6 +587,7 @@ libuvcpp/
 │   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
 │   ├── http2/     # HTTP/2 session/connection layers, nghttp2 glue, ALPN (uvcpp_h2_nghttp2.h is private)
 │   ├── quic/      # QUIC transport, ngtcp2 glue (uvcpp_quic_ngtcp2.h / uvcpp_quic_session.h are private)
+│   ├── http3/     # HTTP/3 session/connection layers, nghttp3 glue (uvcpp_h3_nghttp3.h / uvcpp_h3_session.h are private)
 │   └── ssl/       # SSL/TLS context and connection wrapper
 ├── tests/
 │   ├── unit/      # Unit tests
@@ -588,6 +602,7 @@ libuvcpp/
 │   ├── expand-guide.md    # Memory pool / page heap / span usage
 │   ├── http2-guide.md     # Using the low-level HTTP/2 session and connection layers
 │   ├── http2-status.md    # HTTP/2 support status
+│   ├── http3-guide.md     # HTTP/3 in the web layer: the needed QUIC extensions, API shape, CMake wiring, h1 non-regression
 │   ├── json-guide.md      # Building JSON by hand: the escape contract and its limits
 │   ├── json-reflect-guide.md # Field-table reflection: both directions, read semantics, limits
 │   ├── lowlevel-guide.md  # Event loop, handles and requests (the foundation)
@@ -679,11 +694,12 @@ fixes came from issue reports by the project's first external contributor,
   compiled `src/ssl/` but never defined `UVCPP_SSL_LIBS`, and an empty `UVCPP_SSL_LIBS`
   expands to a **silent no-op** `target_link_libraries()` — the symptom was a link
   failure, and it took the net layer's own TLS client path down with it (`1.4.1`)
-- **Still missing**: HTTP/3 (nghttp3 is not wired in at all), 0-RTT, connection
-  migration, stateless reset, datagram (RFC 9221), multipath, and multi-loop support.
-  A peer `STOP_SENDING` is not wired either — a known gap, not an oversight: the local
-  side keeps writing into a stream the peer has discarded until flow control stalls.
-  [`doc/quic-guide.md`](doc/quic-guide.md) lists every one of these (`1.4.1`)
+- **Still missing**: 0-RTT, connection migration, stateless reset, datagram (RFC 9221),
+  multipath, and multi-loop support. The other two gaps this bullet used to carry are
+  both closed in 1.4.1: HTTP/3 now sits on top of this transport (next section), and a
+  peer `STOP_SENDING` reaches the application as `on_stop_sending`. The transport still
+  does not answer one by itself — that is deliberate (the protocol layer above decides),
+  so `doc/quic-guide.md` §8 says "the contract changed", not "the gap is gone" (`1.4.1`)
 - **The private-header pair.** `uvcpp_quic_session.h` holds `ngtcp2_conn*`, `SSL*` and
   `ngtcp2_path_storage`, so its layout tracks the ngtcp2 version — it is the second
   private header, alongside `uvcpp_quic_ngtcp2.h`. Both are excluded from the install
@@ -700,6 +716,71 @@ fixes came from issue reports by the project's first external contributor,
   the exit code. The cost is written next to that table (those snippets are not compiled
   in CI; judging them needs a package that enables the module), as is the anti-vacuity
   rule — if expected absence absorbs every candidate, it exits 3 again (`1.4.1`)
+
+### HTTP/3 (web layer)
+
+- [nghttp3](https://github.com/ngtcp2/nghttp3) is wired into the build behind
+  `UVCPP_ENABLE_HTTP3` (**off by default**), statically linked, in the **web layer**, and
+  it needs the QUIC transport underneath (`UVCPP_ENABLE_QUIC=ON`) — h3 *is* QUIC, there is
+  no h3-over-TCP (`1.4.1`)
+- **1.4.1 makes it an end-to-end transport, not a skeleton.** `uvcpp_http_client` gained
+  `set_http3_enabled(true)` and `uvcpp_http_server` gained
+  `set_quic_ssl_context()` + `listen_quic(port)`, and both go through the **same** routing
+  table, the same handler signature and the same `uvcpp_http_response` as h1/h2 —
+  handlers do not know which transport they are answering (`1.4.1`)
+- **`"h3"` never enters the TCP ALPN list.** Advertising `h3` in a TCP ClientHello is
+  meaningless: a peer that picks it feeds h3's binary framing into the HTTP/1.1 parser,
+  and the symptom is "connected, writes go out, no response ever arrives, nothing errors".
+  The client's TCP ALPN list is unchanged; h3 travels through `uvcpp_quic_client`, which
+  carries its own ALPN (`1.4.1`)
+- **HTTP/1.1 is not on the h3 path at all** — that was a hard requirement for this
+  batch, and it is measured rather than promised: with `-DUVCPP_ENABLE_HTTP3=OFF` the
+  compiler command lines for `uvcpp_http_server.cpp`, `uvcpp_http_client.cpp` and
+  `uvcpp_tcp_client.cpp` are byte-identical to the previous revision, and
+  `nm --print-size --size-sort` gives identical sizes for the h1 hot path
+  (`on_tcp_connection`, `on_connection_data`, `on_request_complete`). h3 uses a separate
+  context table (the h1 `conn_ctx` gained **no fields**) and UDP sockets that h1 never
+  touches (`1.4.1`)
+- **It needed three things from QUIC, and all three are now public API**: FIN and
+  `RESET_STREAM` told apart (`net_read_result::fin`), a stream-credit event
+  (`on_streams_available` + `streams_left()`) so the three critical unidirectional streams
+  can be opened when the credit arrives instead of being polled, and `STOP_SENDING`
+  (`on_stop_sending` + `shutdown_stream_read()`). `shutdown_stream()` also stopped
+  hard-coding error code 0 — cancelling a stream is not the same as finishing it
+  (`1.4.1`)
+- **The layer is split the way `src/http2/` is**: `uvcpp_h3_session` is a pure
+  byte-in/byte-out engine (it does not know what a socket is) and
+  `uvcpp_h3_connection` drives it over one `uvcpp_quic_connection`. Only
+  `uvcpp_h3_common.h` and `uvcpp_h3_connection.h` ship; `uvcpp_h3_nghttp3.h` (the only
+  place that includes nghttp3) and `uvcpp_h3_session.h` are private, matching the quic
+  pair (`1.4.1`)
+- **Two functional tests pin it**, and they pin values, not "something happened":
+  `http3_request_func.cpp` (95 checks — handshake, a real GET served by a real handler,
+  the `:method`/`:path`/`:status` token mapping, a body that is exactly `hello-h3`, the
+  once-and-only-once completion queue, close) and `http3_web_func.cpp` (92 checks — the
+  same thing through the web layer, plus the h1 request answered by the *same* server
+  object on the other socket) (`1.4.1`)
+- **Two of the mutation-table entries come back 0 red, and that is recorded as such**:
+  re-entering nghttp3's write path from inside its own callback is reachable only by
+  review or a sanitizer, and one `add_write_offset()` variation is unreachable by
+  construction (this layer always sets EOF with the last data block). They are written
+  down in `doc/http3-guide.md` rather than counted as covered (`1.4.1`)
+- Which half is real and which is not: `POST` bodies work, but request/response trailers,
+  GOAWAY, server push, extended CONNECT, streaming routes over h3, and multi-loop h3 are
+  **not implemented** — `doc/http3-guide.md` §4 and §8 list them, and the unsupported
+  paths are refused explicitly instead of being silently mis-routed (`1.4.1`)
+- The same gate hole the QUIC snippets opened now has a second entry: the three examples
+  in `doc/http3-guide.md` are judged against a package that has h3 on (3/3 compile), and
+  on the release package they print `[跳·默认关]` instead of raising
+  `check_doc_snippets.py`'s exit code — the table and its cost are documented in the tool
+  and in §5 of the guide (`1.4.1`)
+- The Linux http3 entry carries one extra step that configures **h2 + quic + http3
+  together** and asserts all three integration messages are present. Reason: nghttp2,
+  ngtcp2 and nghttp3 each add an unconditional target named `check`, and the third one to
+  arrive makes `cmake` fail with a collision that names neither the library nor the file.
+  It lives on the Linux leg because that is the one leg where all three are configured in
+  a single `cmake` invocation anyway — the collision itself is platform-independent
+  (`1.4.1`)
 
 ### HTTP/2
 
@@ -1104,6 +1185,11 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   `doc/ci-guide.md`'s layout table equal **both ways**: a silently deleted matrix entry, a
   renamed one that would take the steps guarded by `if: matrix.feature == …` with it, or a
   badge pointing at a deleted file is red rather than unnoticed (`1.4.1`)
+- HTTP/3 gained the **same three** entries — Linux, macOS and Windows MSVC (no MinGW: that
+  leg has neither an h2 nor a quic entry). None of the three has run yet. The Windows cell
+  says in a comment that it could not be checked locally (there is no MSVC on the machine
+  that wrote it), so its first green is a CI run; the Linux leg of the whole feature was
+  exercised locally end to end before it was pushed (`1.4.1`)
 
 ---
 

@@ -111,6 +111,37 @@ jobs:
             gate_integrated: ngtcp2 integrated
             gate_module: Including quic module in build
             gate_test: test_quic_api_func
+
+          # http3（1.4.1 新增的腿）：web 层多出来的那条 h3 传输。与 quic 那一格
+          # 的差别就是 **WEB=ON** —— h3 的公开面长在 `uvcpp_http_client` /
+          # `uvcpp_http_server` 上，web 关着时 `CMakeLists.txt` 会把它强制关掉。
+          #
+          # **这一格是本机验不了的**（开发机上没有 MSVC），第一次绿是在 CI 上 ——
+          # 与 `quic` 那一格当年同一条路径。会红的地方与它同源：nghttp3 作为子
+          # 项目在 MSVC 上编、以及"拷源码 + 摘掉那行 add_custom_target(check)"
+          # 那段 CMake 在 MSVC 上的行为。`src/http3/*.cpp` 由我们编，而本工程
+          # **没有** `/W4 /WX`（根 CMakeLists 里一个 warning 开关都没有），所以
+          # 那里没有 Windows 独有的硬失败面。
+          #
+          # OpenSSL 与 quic 那一格同一份（`choco install openssl`），所以
+          # "不要加 `-DOPENSSL_USE_STATIC_LIBS=ON`"那条警告同样适用；nghttp3 被
+          # 压成静态，所以下面 Copy runtime DLLs 那里**不需要**为它加一行
+          # （`libssl-3-x64.dll` 那两行照旧要）。
+          - feature: http3
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_QUIC=ON
+              - -DUVCPP_ENABLE_HTTP3=ON
+            gate_name: nghttp3
+            gate_switch: 'UVCPP_ENABLE_HTTP3:BOOL=ON'
+            gate_integrated: nghttp3 integrated
+            gate_module: Including http3 module in build
+            gate_test: test_http3_web_func
     steps:
       - uses: actions/checkout@v4
 
@@ -121,7 +152,7 @@ jobs:
         run: |
           case "${{ matrix.feature }}" in
             basic-static|basic-shared|web) echo "(这一格没有系统依赖)" ;;
-            ssl|h2|quic)                   choco install openssl --no-progress ;;
+            ssl|h2|quic|http3)             choco install openssl --no-progress ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
 
@@ -212,11 +243,12 @@ jobs:
             cp "$tree/_deps/llhttp-build/Release/llhttp.dll" "$tree/$d/Release/" 2>/dev/null || true
             cp "$tree/_deps/llhttp-build/llhttp.dll" "$tree/$d/Release/" 2>/dev/null || true
           done
-          # **nghttp2 / ngtcp2 这里刻意没有 cp**：两者都被压成静态
+          # **nghttp2 / ngtcp2 / nghttp3 这里刻意没有 cp**：三者都被压成静态
           # （`nghttp2_static` + `NGHTTP2_STATICLIB`、`ngtcp2_static` +
-          # `ngtcp2_crypto_ossl_static`），`uvcpp.dll` 不新增运行时依赖。所以这一步
-          # 不只是"少拷一个 dll"，它同时是"静态链接这个决定是否真的成立"的检验 ——
-          # 哪天它变回动态，这里就会红（DLL 找不到 ⇒ 全部用例 `0xC0000135`）。
+          # `ngtcp2_crypto_ossl_static`、`nghttp3_static`），`uvcpp.dll` 不新增
+          # 运行时依赖。所以这一步不只是"少拷一个 dll"，它同时是"静态链接这个决定
+          # 是否真的成立"的检验 —— 哪天它变回动态，这里就会红
+          # （DLL 找不到 ⇒ 全部用例 `0xC0000135`）。
           # OpenSSL DLLs — uvcpp.dll links against them when a feature turns SSL on;
           # they must be findable next to the test executables.
           for ssl_dir in \

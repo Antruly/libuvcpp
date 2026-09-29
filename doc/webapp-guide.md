@@ -997,7 +997,13 @@ h2 会话的参数在 `uvcpp_h2_session::init()` 上是带默认值的形参，*
   收到 `:protocol` 一律拒。`app.websocket()` 继续走 HTTP/1.1 的 `Upgrade`。
 - **不做 SERVER_PUSH**（RFC 9113 已废弃它）：我们宣告 `SETTINGS_ENABLE_PUSH=0` 且从不发
   `PUSH_PROMISE`。
-- **不做 HTTP/3**。
+- **框架没有为 HTTP/3 加开关**（但它已经能用）。1.4.1 给 `uvcpp_http_server` /
+  `uvcpp_http_client` 多加了一条 h3 传输（`listen_quic()`、`set_http3_enabled()`），
+  走的是**同一张路由表**，所以 `app.get()` 注册的处理函数在 h3 请求上照样跑 ——
+  要开就在 `app.http_server()` 拿到的那一个 server 上自己
+  `set_quic_ssl_context()` + `listen_quic()`（`run()` / `stop()` 对两种传输一次
+  管全）。**h3 上没有流式路由**（`post_stream` / `set_stream_claim`），撞上会被
+  显式拒绝，不是静默错路由。见 [`doc/http3-guide.md`](./http3-guide.md)。
 - 不实现优先级树的完整语义（`PRIORITY` 帧照收，只是不据此调度）。
 
 ### 安全边界

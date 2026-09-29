@@ -173,7 +173,7 @@
 |---|---|
 | **h2c（明文 h2）** | 不做 `Upgrade: h2c`、不做 prior-knowledge、不做协议嗅探。本库的 h2 一律走 TLS + ALPN。 |
 | **RFC 8441（WebSocket over HTTP/2）** | 不做，看到 `:protocol` 伪头一律按未知伪头拒（`uvcpp_h2_session.cpp` 的 `handle_pseudo`）。 |
-| **HTTP/3** | **不做，而且本页管不到它。** 1.4.1 落的是 QUIC **传输层**（`src/quic/`，真能握手、真能收发流，但只到链路这一层），HTTP/3 本身仍然一个字节都没有 —— 连 nghttp3 都没接。见 [`doc/quic-guide.md`](./quic-guide.md)。 |
+| **HTTP/3** | **不在本页范围内，而且 1.4.1 起它已经落地了。** 那一层在 `src/http3/`（nghttp3 解析，跑在 `src/quic/` 上，并接进了 web 层），与 h2 是两条**不同的传输**：本页只记 h2 的账，h3 的账记在 [`doc/http3-guide.md`](./http3-guide.md)。这里删掉的那句"HTTP/3 本身一个字节都没有"在 1.4.1 里不再成立 —— 顺着 git 历史读到它的人请以新那份为准。 |
 | **SERVER_PUSH** | 既不发也不收：`SETTINGS_ENABLE_PUSH = 0` 在 `init()` 里就宣告了。 |
 | **h2spec** | 不引入。协议一致性靠上面 1.5 那四个用例 + 会话层用例。 |
 | **改 `uvcpp_s` / `uvcpp_a_s` 的语义** | 不动。 |

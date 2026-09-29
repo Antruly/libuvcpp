@@ -49,10 +49,12 @@
 那是环境缺口，不是文档腐烂。报红就是假红，而假红会训练人忽略门禁。
 
 但有一类缺席**够不上**"前提不满足"：`DEFAULT_OFF` 里的模块在发布包里是**结构性**关着的
-（目前只有 `quic` —— 默认 OFF，`release.yml` 六条腿也都不开）。那些片段打
-`[跳·默认关]`，说明写在那张表旁边，**不**把退出码抬到 3；否则 CI 里那条
+（目前是 `quic` 与 `http3` —— 两个都默认 OFF，`release.yml` 六条腿也都不开）。
+那些片段打 `[跳·默认关]`，说明写在那张表旁边，**不**把退出码抬到 3；否则 CI 里那条
 `exit "$rc"` 会永久红，而那是发布配置的事实、不是文档腐烂。**代价也记在那张表旁边**：
-这些片段在 CI 里**不会被编**，要一份开了那个模块的包才判得到（本地验过 4/4 绿）。
+这些片段在 CI 里**不会被编**，要一份开了那个模块的包才判得到
+（quic 本地验过 4/4 绿；http3 本地验过一次 3/3 绿，命令与两个包的实测都记在
+`doc/http3-guide.md` §5 第 8 条）。
 
 防真空转：预期缺席要是把候选**全**吸收了（`n_compiled == 0`），照样退 3 ——
 只靠"预期缺席"过关时，"全过"与"什么都没判"长得一模一样。
@@ -190,7 +192,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
-                "ssl/", "http2/", "expand/", "wsdl/", "quic/")
+                "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -204,7 +206,12 @@ BUNDLED = ("uv.h", "uv/", "nlohmann/", "zlib.h", "zconf.h")
 # `PRIVATE_HEADERS` 之外的任何地方的理由。哪天有人从公开 quic 头里 include 了
 # ngtcp2，这条记录会把它判成**环境缺口**（退 3）而不是编不过（退 1）—— 两种都
 # 该红，但前者的提示是对的：问题不在文档，在那个头。
-NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/")
+#
+# `nghttp3/` 是第三条，前提与 `ngtcp2/` 逐字同形：`http3/` 的公开头一个都不
+# include 它 —— 那是 `uvcpp_h3_nghttp3.h` 存在的全部理由，也是它只出现在
+# `package_release.py` 的 `PRIVATE_HEADERS` 里的理由。哪天有人从公开 h3 头里
+# include 了 nghttp3，这条记录会把它判成**环境缺口**（退 3）而不是文档腐烂。
+NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/", "nghttp3/")
 
 # 头 → 记录"这个模块在不在这份构建里"的那个宏。
 #
@@ -250,6 +257,14 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/")
 # 顺带记一笔：`UVCPP_QUIC_ENABLE` 只可能由 `UVCPP_ENABLE_QUIC` 而来，而后者
 # **默认 OFF** —— 也就是说"没登记的包"恰好是最常见的那个包，这条记录也就恰好
 # 一直在承重，不是一道只在边角配置上才生效的防线。
+#
+# `http3/` 与 `quic/` 逐条同形，而且**比 quic 更早就咬到人**：`doc/http3-guide.md`
+# 的三条片段里有一条（§3.3 "经 web 层"）只 include `<ssl/…>` 与 `<web/…>`，
+# 两个模块在 `build-cfg` 里都是开的 —— 不登记的话它会被**编**，而它调的
+# `set_http3_enabled()` / `listen_quic()` 整段套在 `#if UVCPP_HTTP3_ENABLE` 里
+# （`uvcpp_http_client.h:299`、`uvcpp_http_server.h:188`），于是报的是**未声明的
+# 成员**：那是**假红**（文档没腐烂，是那个包没编 h3）。登记了才判得成"这个模块
+# 没编"。同一条记录也兜住了另外两条 `<http3/…>` 片段（类被宏整段摘掉）。
 MODULE_REQ = {
     "web/": "UVCPP_WEB_ENABLE",
     "webapp/": "UVCPP_WEBAPP_ENABLE",
@@ -257,6 +272,7 @@ MODULE_REQ = {
     "http2/": "UVCPP_NGHTTP2_ENABLE",
     "wsdl/": "UVCPP_WSDL_ENABLE",
     "quic/": "UVCPP_QUIC_ENABLE",
+    "http3/": "UVCPP_HTTP3_ENABLE",
 }
 
 # 发布包里**永远关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。
@@ -277,10 +293,18 @@ MODULE_REQ = {
 #   自己就没了，4 条片段**自动**回到被判集合里 —— 不用回来改这里，也没有"记得取消豁免"
 #   这种要靠人记的事。
 #
-# **别往里加模块。** 加一个，就等于在那个模块上把这条门禁关掉一半；表里每一项都得是
-# "发布配置里结构性地关着"的，而不是"顺手也关着"。`web/` `ssl/` `http2/` 这些在
-# `build-cfg` 里全是开的，它们缺席只能说明**拿错了包**，那正是该退 3 的情形。
-DEFAULT_OFF = {"UVCPP_QUIC_ENABLE"}
+# `UVCPP_HTTP3_ENABLE` 是**第二条**，判据与 quic 逐条相同（`UVCPP_ENABLE_HTTP3`
+# 默认 OFF、`release.yml` 六条腿一条都不开它），所以它在发布包里缺席同样是**结构性**
+# 的。但它的**入口**和 quic 不一样，这里如实记下来：quic 那 4 条是 `<quic/…>` 片段
+# 自己撞上来的，而 h3 这一条是本批**明知会撞还选了这条路** ——
+# `doc/http3-guide.md` 是一篇新文档，理论上可以标成 `fragments-default` 把三条片段
+# 一揽子豁免掉。没这么做：那样连"哪天发布包开了 h3"也回不来，而这张表**自己会回**。
+#
+# 判据不是"这个模块现在关着"，而是**"发布配置里结构性地关着"**。每加一条，
+# 就等于在那个模块上把这条门禁关掉一半，所以每一行都得单独交代理由 —— 不是"顺手
+# 也关着"。`web/` `ssl/` `http2/` 这些在 `build-cfg` 里全是开的，它们缺席只能说明
+# **拿错了包**，那正是该退 3 的情形，**不许**进这张表。
+DEFAULT_OFF = {"UVCPP_QUIC_ENABLE", "UVCPP_HTTP3_ENABLE"}
 
 CONFIG_REL = os.path.join("include", "uvcpp", "uvcpp_config.h")
 

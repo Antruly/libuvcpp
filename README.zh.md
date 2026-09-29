@@ -36,7 +36,7 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 ├────────────┤
 │ ssl (TLS)    │  ← uvcpp_ssl, uvcpp_ssl_context (OpenSSL 封装)
 ├────────────┤
-│ quic         │  ← uvcpp_quic_client/server/connection、ngtcp2 胶水（net 层，`UVCPP_ENABLE_QUIC=ON`）
+│ quic + http3 │  ← uvcpp_quic_client/server/connection、ngtcp2 胶水（net 层，`UVCPP_ENABLE_QUIC=ON`）；h3 架在它上面，nghttp3 胶水（web 层，`UVCPP_ENABLE_HTTP3=ON`）
 ├────────────┤
 │ net          │  ← uvcpp_tcp_client/server, uvcpp_udp_client/server
 ├────────────┤
@@ -123,8 +123,17 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
   [ngtcp2](https://github.com/ngtcp2/ngtcp2)（静态链入），在 **net 层**。需要
   `UVCPP_ENABLE_OPENSSL=ON` **以及**一份**带 QUIC API 的 OpenSSL ≥ 3.2**，再加上
   `UVCPP_BUILD_NET=ON`（三条缺一即强制关 —— 没有明文 QUIC 这回事）。**1.4.1 起它是
-  一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时都通了。HTTP/3 还没有
-  （nghttp3 连依赖都没接）。详见 [doc/quic-guide.md](doc/quic-guide.md)。
+  一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时都通了。HTTP/3 架在它
+  上面 —— 见下一条。详见 [doc/quic-guide.md](doc/quic-guide.md)。
+- `UVCPP_ENABLE_HTTP3=ON` — **web 层**的 HTTP/3（RFC 9114），解析用
+  [nghttp3](https://github.com/ngtcp2/nghttp3)（注意组织是 `ngtcp2`，不是 `nghttp2`），
+  跑在 QUIC 传输之上，两者都静态链入。需要 `UVCPP_ENABLE_QUIC=ON` 与
+  `UVCPP_BUILD_WEB=ON`（缺一即强制关闭）。**1.4.1 起 `uvcpp_http_client` /
+  `uvcpp_http_server` 透明地说它** —— 客户端 `set_http3_enabled(true)`，服务端
+  `listen_quic()`，而路由表、处理函数签名、`uvcpp_http_response` 与 h1/h2 是**同
+  一份**。HTTP/3 跑在 **UDP 自己的 socket 上**，所以 **HTTP/1.1 与 HTTP/2 一个字节
+  没动**（开关关掉时 h1 那条路的编译命令与符号尺寸逐字节相同）。详见
+  [doc/http3-guide.md](doc/http3-guide.md)。
 
 ### Web 应用框架（`src/webapp/`）— `UVCPP_BUILD_WEBAPP=ON`
 
@@ -206,6 +215,7 @@ int main() {
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS 上下文与每连接封装 —— 头文件最短、最容易写错的一层 |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法；实现进度与折衷另见 [doc/http2-status.md](doc/http2-status.md) |
 | quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出"还没做"的清单 |
+| http3 | [doc/http3-guide.md](doc/http3-guide.md) | 作为 web 层第二条传输的 HTTP/3：它向 QUIC 要的那三样扩展、API 形状（会话 vs 连接、三条关键流）、CMake 接线，以及为什么它不影响 HTTP/1.1 |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
@@ -291,8 +301,8 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 是一条真能通信的链路协议：握手、流收发、关闭与空闲超时都通了；HTTP/3 还没有。** 见 [`doc/quic-guide.md`](doc/quic-guide.md) |
-| `UVCPP_ENABLE_HTTP3` | `OFF` | 启用 **web 层**的 HTTP/3（RFC 9114），由 nghttp3 解析，跑在 QUIC 传输之上（两者都静态链入）。需要 `UVCPP_ENABLE_QUIC=ON` 与 `UVCPP_BUILD_WEB=ON` —— 缺一即强制关闭 |
+| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 是一条真能通信的链路协议：握手、流收发、关闭与空闲超时都通了；HTTP/3 架在它上面（下一行）。** 见 [`doc/quic-guide.md`](doc/quic-guide.md) |
+| `UVCPP_ENABLE_HTTP3` | `OFF` | 启用 **web 层**的 HTTP/3（RFC 9114），由 nghttp3 解析，跑在 QUIC 传输之上（两者都静态链入）。需要 `UVCPP_ENABLE_QUIC=ON` 与 `UVCPP_BUILD_WEB=ON` —— 缺一即强制关闭。**1.4.1 是一条端到端可用的传输：`uvcpp_http_client` / `uvcpp_http_server` 都说它，而 h1/h2 一个字节没动（它跑在 UDP 上）。** 见 [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md)（文档那一半）与 [`doc/soap-guide.md`](doc/soap-guide.md)（运行时那一半） |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
@@ -305,7 +315,8 @@ cmake --build . --config Release --parallel
 **强制关闭**（给一条 warning，而不是留一个根本跑不起来的配置）—— 本库的 HTTP/2
 没有明文形态。`UVCPP_ENABLE_QUIC` 同理，而且它有**三个**各自独立的前置条件
 （`UVCPP_ENABLE_OPENSSL=OFF`、`UVCPP_BUILD_NET=OFF`、或者那份 OpenSSL 没有 QUIC API
-—— 3.2 以下都属于这一类），缺哪个就为哪个打一条说明**怎么修**的 warning。
+—— 3.2 以下都属于这一类），缺哪个就为哪个打一条说明**怎么修**的 warning。`UVCPP_ENABLE_HTTP3` 同理，它有
+**两个**前置条件（`UVCPP_ENABLE_QUIC=OFF` 或 `UVCPP_BUILD_WEB=OFF`），也各自有 warning。
 `UVCPP_ENABLE_WSDL` 同理，在 `UVCPP_BUILD_WEBAPP=OFF` 时**强制关闭**（它建在 webapp
 之上）。
 
@@ -561,6 +572,7 @@ libuvcpp/
 │   ├── webapp/    # Web 应用框架（路由、中间件、静态、上传、WS 客户端、日志）
 │   ├── http2/     # HTTP/2 会话/连接层、nghttp2 胶水、ALPN（uvcpp_h2_nghttp2.h 是私有头）
 │   ├── quic/      # QUIC 传输、ngtcp2 胶水（uvcpp_quic_ngtcp2.h / uvcpp_quic_session.h 是私有头）
+│   ├── http3/     # HTTP/3 会话/连接层、nghttp3 胶水（uvcpp_h3_nghttp3.h / uvcpp_h3_session.h 是私有头）
 │   └── ssl/       # SSL/TLS 上下文和连接封装
 ├── tests/
 │   ├── unit/      # 单元测试
@@ -575,6 +587,7 @@ libuvcpp/
 │   ├── expand-guide.md    # 内存池 / 页堆 / span 的功能说明
 │   ├── http2-guide.md     # HTTP/2 低层会话与连接层的用法
 │   ├── http2-status.md    # HTTP/2 支持现状
+│   ├── http3-guide.md     # web 层的 HTTP/3：它要的 QUIC 扩展、API 形状、CMake 接线、h1 不回归
 │   ├── json-guide.md      # 手写 JSON 构造：转义契约与它的边界
 │   ├── json-reflect-guide.md # JSON 反射：一个宏标出字段表，两个方向共用
 │   ├── lowlevel-guide.md  # 事件循环、句柄与请求（地基）
@@ -658,10 +671,11 @@ libuvcpp/
   却从不定义 `UVCPP_SSL_LIBS`；而空的 `UVCPP_SSL_LIBS` 展开出来是个**静默的空
   操作** `target_link_libraries()` —— 症状是**链接失败**，而且把 net 层自己的
   TLS 客户端路径一起带坏了（`1.4.1`）
-- **还没有的**：HTTP/3（nghttp3 连依赖都没接）、0-RTT、连接迁移、无状态重置、
-  datagram（RFC 9221）、multipath、多循环支持。对端的 `STOP_SENDING` 也没接 ——
-  这是一处**已知的缺口**，不是遗漏：本端会继续往一条对端已经丢弃的流上填字节，
-  直到流控卡住。缺什么逐条列在 [`doc/quic-guide.md`](doc/quic-guide.md) 里（`1.4.1`）
+- **还没有的**：0-RTT、连接迁移、无状态重置、datagram（RFC 9221）、multipath、
+  多循环支持。这条里原先另外两条都在 1.4.1 关掉了：HTTP/3 现在架在这条传输上
+  （下一节），对端的 `STOP_SENDING` 也已经送到应用面前（`on_stop_sending`）。
+  传输层自己仍然**不**回一个 —— 这是刻意的（拍板的是上面那层协议），所以
+  `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
   `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:1881`）、打包也排除
@@ -675,6 +689,59 @@ libuvcpp/
   "发布配置里结构性关着"的模块记下来：照样打 `[跳·默认关]`，但不抬退出码。
   **代价写在那张表旁边**（这些片段在 CI 里不会被编，要一份开了该模块的包才判得到），
   防真空转规则也在那里 —— 预期缺席要是把候选全吸收了，照样退 3（`1.4.1`）
+
+### HTTP/3（web 层）
+
+- [nghttp3](https://github.com/ngtcp2/nghttp3) 被接进构建，挂在 `UVCPP_ENABLE_HTTP3`
+  后面（**默认关**）、静态链入、位置在 **web 层**，而且它需要下面的 QUIC 传输
+  （`UVCPP_ENABLE_QUIC=ON`）—— h3 **就是** QUIC，没有 h3-over-TCP 这回事（`1.4.1`）
+- **1.4.1 把它做成端到端可用的传输，不是一个骨架。** `uvcpp_http_client` 多了
+  `set_http3_enabled(true)`，`uvcpp_http_server` 多了 `set_quic_ssl_context()` +
+  `listen_quic(port)`，而两者走的是**同一张**路由表、同一个处理函数签名、同一个
+  `uvcpp_http_response` —— 处理函数不知道自己在答哪条传输（`1.4.1`）
+- **`"h3"` 绝不进 TCP 的 ALPN 名单。** 在 TCP 的 ClientHello 里报 `h3` 是无意义的：
+  对端选了我们就会把 h3 的二进制分帧喂给 HTTP/1.1 解析器，症状是"连上了、写得出去、
+  响应永远不来、哪里都不报错"。客户端那份 TCP ALPN 名单**一个字没动**，h3 走
+  `uvcpp_quic_client`，ALPN 由它自己带（`1.4.1`）
+- **HTTP/1.1 根本不在 h3 这条路上** —— 这是本批的硬要求，而且是**量出来的**、不是
+  承诺的：`-DUVCPP_ENABLE_HTTP3=OFF` 时 `uvcpp_http_server.cpp`、
+  `uvcpp_http_client.cpp`、`uvcpp_tcp_client.cpp` 三者的编译器命令行与上一版**逐字节
+  相同**，`nm --print-size --size-sort` 给出的 h1 热路函数尺寸也相同
+  （`on_tcp_connection`、`on_connection_data`、`on_request_complete`）。h3 用的是
+  另一张上下文表（h1 的 `conn_ctx` **一个字段都没加**）和 h1 从不碰的 UDP socket
+  （`1.4.1`）
+- **它向 QUIC 要了三样东西，三样现在都是公开 API**：FIN 与 `RESET_STREAM` 能分开
+  （`net_read_result::fin`）、流额度事件（`on_streams_available` + `streams_left()`，
+  让那三条关键单向流在额度到达时开出来，而不是轮询）、以及 `STOP_SENDING`
+  （`on_stop_sending` + `shutdown_stream_read()`）。`shutdown_stream()` 也不再写死
+  错误码 0 —— 取消一条流和把它发完不是一回事（`1.4.1`）
+- **分层照 `src/http2/` 抄**：`uvcpp_h3_session` 是纯的"收字节吐字节"引擎（不知道
+  socket 是什么），`uvcpp_h3_connection` 驱动它跑在一条 `uvcpp_quic_connection` 上。
+  只有 `uvcpp_h3_common.h` 与 `uvcpp_h3_connection.h` 发出去；`uvcpp_h3_nghttp3.h`
+  （唯一 include nghttp3 的地方）与 `uvcpp_h3_session.h` 是私有头，与 quic 那一对
+  同形（`1.4.1`）
+- **两条功能用例钉着它**，钉的是值不是"发生过什么"：`http3_request_func.cpp`
+  （95 条检查 —— 握手、真处理函数答的真 GET、`:method`/`:path`/`:status` 的 token
+  映射、body 恰好等于 `hello-h3`、恰好一次 的完成队列、close）与
+  `http3_web_func.cpp`（92 条检查 —— 同一件事走 web 层，外加**同一个** server 对象
+  在另一条 socket 上照旧答一次 h1 请求）（`1.4.1`）
+- **变异表里有两行红 0 条，如实记着**：在 nghttp3 自己的回调里重入它的写函数，只有
+  评审或 sanitizer 抓得到；另一条 `add_write_offset()` 的变异**设计上就不可达**
+  （本层永远把 EOF 与最后一块数据一起置上）。两条都写进 `doc/http3-guide.md`，没有
+  算成"已覆盖"（`1.4.1`）
+- 哪些真、哪些不真：`POST` 请求体可以，但请求/响应 trailers、GOAWAY、Server Push、
+  extended CONNECT、h3 上的流式路由、多循环 h3 都**没做** —— 逐条列在
+  `doc/http3-guide.md` §4 与 §8，而且不支持的路径是**显式拒绝**，不是静默路由错
+  （`1.4.1`）
+- QUIC 那批片段捅出来的门禁洞现在有了第二条：`doc/http3-guide.md` 的 3 条片段对着
+  一份开了 h3 的包判（3/3 编过），而在发布包上它们打 `[跳·默认关]`、不抬
+  `check_doc_snippets.py` 的退出码 —— 那张表和代价写在工具里、也写在指南 §5
+  （`1.4.1`）
+- Linux 那条 h3 格还带一步专门的门禁：**h2 + quic + http3 同时配置**，并断言三条
+  集成消息都在。理由是 nghttp2 / ngtcp2 / nghttp3 各自都无条件建一个名叫 `check`
+  的目标，第三个进来的会让 `cmake` 撞名失败、而报错里既没有库名也没有文件名。放在
+  Linux 那条腿上是因为那是**本来就要一次 `cmake` 把这仨全配起来**的那条腿 ——
+  撞名本身与平台无关（`1.4.1`）
 
 ### HTTP/2
 
@@ -998,6 +1065,10 @@ libuvcpp/
   `-DOPENSSL_ROOT_DIR`）。新门禁 `check_ci_layout.py` 让四个文件与 `doc/ci-guide.md` 的
   布局表**双向**相等：悄悄删掉一格、改掉一格的名字（挂在 `if: matrix.feature == …` 上的
   步骤会跟着无声消失）、或者徽章指向一个已删文件，都会红而不是没人发现（`1.4.1`）
+- HTTP/3 补上**同样三格** —— Linux、macOS 与 Windows MSVC（MinGW 那条腿没有：它既没有
+  h2 也没有 quic 格）。三格**一次都还没跑过**；Windows 那格在注释里写明了本机验不了
+  （写它的机器上没有 MSVC），所以它的第一次绿是一次 CI 运行；Linux 那条腿的整个特性在
+  推送前已经在本机端到端跑通（`1.4.1`）
 
 ---
 

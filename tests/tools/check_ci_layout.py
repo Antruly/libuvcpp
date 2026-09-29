@@ -127,6 +127,11 @@ FEATURE_GATES = {
            "Including http2 module in build", "test_h2_session_func"],
     "quic": ["UVCPP_ENABLE_QUIC:BOOL=ON", "ngtcp2 integrated",
              "Including quic module in build", "test_quic_api_func"],
+    # 1.4.1：web 层多出来的那条 h3 传输。它在三条腿上（linux / macOS / MSVC），
+    # **不在 MinGW 那条上** —— 与 quic 同一个理由（单 job，且 h3 还要 QUIC 先开），
+    # 记在 doc/ci-guide.md §1 的"未覆盖的格"里。
+    "http3": ["UVCPP_ENABLE_HTTP3:BOOL=ON", "nghttp3 integrated",
+              "Including http3 module in build", "test_http3_web_func"],
 }
 
 # 矩阵条目上承载这些串的字段名。文件里必须真的出现 `matrix.<字段>`（判据 6 后半）。
@@ -456,7 +461,7 @@ def main():
                     sorted(doc_feats[name] - file_feats[name])))
 
     # ---- 判据 6 ----
-    print("\n---- 判据 6：h2 / quic 的门禁串在**那一格自己的条目里**，且真接进了步骤 ----")
+    print("\n---- 判据 6：h2 / quic / http3 的门禁串在**那一格自己的条目里**，且真接进了步骤 ----")
     for name, text in sorted(texts.items()):
         lines = text.splitlines()
         entries = feature_entries(lines)

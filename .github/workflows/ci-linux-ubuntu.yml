@@ -131,6 +131,28 @@ jobs:
             gate_integrated: ngtcp2 integrated
             gate_module: Including quic module in build
             gate_test: test_quic_api_func
+
+          # http3（1.4.1 新增的腿）：web 层多出来的那条 h3 传输。与 quic 那一格
+          # 的差别就是 **WEB=ON** —— h3 的公开面长在 `uvcpp_http_client` /
+          # `uvcpp_http_server` 上，web 关着时 `CMakeLists.txt` 会把它强制关掉。
+          # 它同时也是**唯一**供得起 `check` 目标三个来源的格（见下面那条
+          # configure 门禁），所以这一格的门禁串盯的是 `nghttp3`。
+          - feature: http3
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_QUIC=ON
+              - -DUVCPP_ENABLE_HTTP3=ON
+            openssl_root: $HOME/openssl-quic
+            gate_name: nghttp3
+            gate_switch: 'UVCPP_ENABLE_HTTP3:BOOL=ON'
+            gate_integrated: nghttp3 integrated
+            gate_module: Including http3 module in build
+            gate_test: test_http3_web_func
     steps:
       - uses: actions/checkout@v4
 
@@ -146,6 +168,11 @@ jobs:
             ssl|h2)                    pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             full)                      pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             quic)                      pkgs="libuv1-dev zlib1g-dev" ;;
+            # http3 与 quic 一样自己编那份 OpenSSL（不带 `libssl-dev`，理由同上）；
+            # 多一个 zlib 是因为 WEB=ON，而 h3 那条腿上有一组压缩往返用例
+            # （`#if UVCPP_ZLIB_ENABLE`，故意留着：它给 `apply_compression_for`
+            # 那次拆分当护栏）。
+            http3)                     pkgs="libuv1-dev zlib1g-dev" ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
           sudo apt-get install -y $pkgs
@@ -243,10 +270,11 @@ jobs:
           fi
           exit "$rc"
 
-      # 只有 quic 那一格需要：一份带 QUIC API 的 OpenSSL 从源码编出来。
-      # 约 10 分钟，所以那条腿的 timeout 是 90。
-      - name: Build OpenSSL 3.5 from source (quic only)
-        if: matrix.feature == 'quic'
+      # 只有 quic / http3 那两格需要：一份带 QUIC API 的 OpenSSL 从源码编出来
+      # （h3 跑在 QUIC 上，要的是同一份）。约 10 分钟，所以那两条腿的
+      # timeout 是 90。
+      - name: Build OpenSSL 3.5 from source (quic + http3)
+        if: matrix.feature == 'quic' || matrix.feature == 'http3'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -355,14 +383,15 @@ jobs:
           path: ci-logs/
           if-no-files-found: ignore
 
-      # 这一条是**唯一**覆盖 "http2 与 quic 同时开" 的地方：h2 那一格关 quic，
-      # quic 那一格关 web。它防的是一个真实的硬失败 —— ngtcp2 与 nghttp2 都
-      # 无条件建 `add_custom_target(check)`，后加进来的那个直接 configure 失败；
+      # 这一条覆盖 "http2 与 quic 同时开"：h2 那一格关 quic，quic 那一格关 web。
+      # 它防的是一个真实的硬失败 —— ngtcp2 与 nghttp2 都无条件建
+      # `add_custom_target(check)`，后加进来的那个直接 configure 失败；
       # 根 `CMakeLists.txt` 里那段"把 ngtcp2 源码复制进构建目录、摘掉那一行"
       # 就是为它存在的，见 doc/quic-guide.md §7 第 7 条。
+      # （**三个来源**同时在场那一档在 http3 那一格上，见下一条 —— 这里只有两个。）
       #
-      # 只配置不构建：本版 QUIC 是个骨架，构建它不多证明什么，而会红的地方
-      # （那行 add_custom_target）正好在配置期。
+      # 只配置不构建：这一条判的就是"两个依赖块能同时配置"，而会红的地方
+      # （那行 add_custom_target）正好在配置期 —— 构建它多花十分钟，不多证明什么。
       - name: Gate — http2 + quic must configure together
         if: matrix.feature == 'quic'
         shell: bash
@@ -384,6 +413,36 @@ jobs:
             echo "::error title=quic-h2::配置过了，但 ngtcp2 没被集成"; exit 1; }
           grep -q 'Including http2 module in build' ci-logs/build-quic-h2-configure.log || {
             echo "::error title=quic-h2::配置过了，但 http2 没被集成"; exit 1; }
+
+      # 上面那条只有**两个**来源（nghttp2 + ngtcp2）。1.4.1 又多了**第三个**：
+      # nghttp3 的 `CMakeLists.txt:71` 也有 `add_custom_target(check ...)`，而
+      # 根 `CMakeLists.txt` 里为它打了**第二段**同形的"拷源码 + 摘掉那一行"补丁。
+      # h3 那一格自己关着 h2（它的 flags 里没有 NGHTTP2），所以"三个同时在场"
+      # 只有这里判得到 —— 缺任何一段补丁，这一条都在**配置期**就红。
+      #
+      # 只配置不构建：会红的地方（那两行 add_custom_target）正好在配置期。
+      - name: Gate — http2 + quic + http3 must configure together
+        if: matrix.feature == 'http3'
+        shell: bash
+        run: |
+          mkdir -p ci-logs
+          cmake -S . -B build-h2-h3 -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
+            > ci-logs/build-h2-h3-configure.log 2>&1 || {
+              rc=$?
+              echo "::error title=http3-h2::http2 + quic + http3 同时开配置失败 —— 多半是 nghttp3 / ngtcp2 / nghttp2 的 check 目标又撞名了（doc/http3-guide.md §5）"
+              tail -40 ci-logs/build-h2-h3-configure.log
+              exit "$rc"
+            }
+          # 三道判据：三个模块都**真的**在。把撞名"治好"也可能治成"某一个被
+          # 静默降级关掉"，那样这一条会假装变绿。
+          for m in 'ngtcp2 integrated' 'nghttp3 integrated' 'Including http2 module in build'; do
+            grep -q "$m" ci-logs/build-h2-h3-configure.log || {
+              echo "::error title=http3-h2::配置过了，但没有 '$m' —— 三个模块没同时在场"; exit 1; }
+          done
 
       - name: Test
         shell: bash

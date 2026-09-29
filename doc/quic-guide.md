@@ -2,9 +2,9 @@
 
 `src/quic/` 是 **net 层**上的一条**链路协议** —— QUIC（RFC 9000），后端是
 [ngtcp2](https://github.com/ngtcp2/ngtcp2)。它的位置与 `src/http2/` 对 HTTP/2 完全
-相同：协议栈归上游，本库只做事件循环、缓冲与生命周期的接线。它是 `src/web/` 里将来
-那层 HTTP/3 的地基，但**它自己不是 HTTP** —— 这一层不认识请求、响应、流上面的任何
-语义。
+相同：协议栈归上游，本库只做事件循环、缓冲与生命周期的接线。它是 `src/http3/` 的
+地基 —— **HTTP/3 那一层已经落地**（1.4.1，见 [`doc/http3-guide.md`](./http3-guide.md)），
+但**它自己不是 HTTP**：这一层不认识请求、响应、流上面的任何语义。
 
 > ## 1.4.1 起它是一条真能通信的链路协议
 >
@@ -13,9 +13,13 @@
 > 里的断言量出来的（`quic_handshake_func.cpp` 22 条、`quic_stream_func.cpp`
 > 33 条、`quic_api_func.cpp` 81 条）。
 >
-> **没做的**是 HTTP/3（nghttp3 连依赖都没接）、0-RTT、连接迁移、无状态重置、
-> datagram（RFC 9221）与 multipath —— 逐条列在下面
-> [§8](#8-没做的如实列出)，别在别处另维护一份。
+> **没做的**是 0-RTT、连接迁移、无状态重置、datagram（RFC 9221）与 multipath
+> —— 逐条列在下面 [§8](#8-没做的如实列出)，别在别处另维护一份。
+>
+> 1.4.1 顺带把三样只对上层有意义的东西从内核接了出来（FIN 与 RESET 分开报、
+> 流额度事件、STOP_SENDING）—— 它们的调用方是 HTTP/3，所以**形状的说明在
+> [`doc/http3-guide.md`](./http3-guide.md) §2**，本页只记"接出来了"这件事与它在
+> 哪条断言上（[§4](#4-141-交付了什么)）。
 >
 > 1.4.1 之前在公开头上挂着的那一片 `@warning` 已经整片摘掉了：它们描述的是
 > "返回 `UV_ENOSYS`、回调一次都不跑"的骨架，而那个契约是被
@@ -38,7 +42,7 @@
   `<quic/uvcpp_quic_ngtcp2.h>` 与 `<quic/uvcpp_quic_session.h>` **都不安装**
   （`CMakeLists.txt:1881`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 四个公开头**全部**整段套在 `#if UVCPP_QUIC_ENABLE` 里，所以**不开关就一个类都
-  看不到**。这与 `web/`、`ssl/`、`http2/`、`wsdl/` 同档。
+  看不到**。这与 `web/`、`ssl/`、`http2/`、`http3/`、`wsdl/` 同档。
 
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一版没做"的地方都明确
 > 标出来 —— 那些地方比 API 更容易踩。
@@ -168,7 +172,8 @@ Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:1256
 **只压住 ngtcp2 那一批开关就够**：`ENABLE_LIB_ONLY=ON` 让 ngtcp2 跳过它自己的
 `examples/` 与 `tests/`，`third-party/` 整段挂在 `if(LIBEV_FOUND AND
 LIBNGHTTP3_FOUND)` 下不会建。所以 **libngtcp2 既不需要 nghttp3，也不需要 libev** ——
-nghttp3 留到真做 HTTP/3 的那一版再接。
+nghttp3 由 HTTP/3 那一层自己接（`CMakeLists.txt` 的 http3 依赖块），QUIC 这条路
+不需要它，也**不该**为了 QUIC 去接它。
 
 ---
 
@@ -189,8 +194,11 @@ nghttp3 留到真做 HTTP/3 的那一版再接。
 | `run()` / `stop()` | **真实现**（转发到 loop） | `quic_api_func.cpp` §6（自建循环那一节） |
 | `quic_ngtcp2_version_string()` / `quic_error_string()` / `quic_crypto_backend_init()` / `_free()` | **真实现**（真调进 ngtcp2） | `quic_api_func.cpp` §1 |
 | 对端 reset 一条流（RESET_STREAM）时读侧的收尾事件 | **真实现** | `quic_stream_func.cpp` 第 3 段 |
+| **FIN 与 RESET 分开报**（`net_read_result::fin`，连同 TCP 那四处构造点一起是真话） | **真实现** | `quic_api_func.cpp`（"DATA 的 fin == true"、"RESET-0 带 fin == false"） |
+| **流额度事件** `on_streams_available` + `streams_left(bidi)` | **真实现** | `quic_api_func.cpp`（"没有内核时 streams_left==0"、"服务端的 streams_left(双向) > 0"） |
+| **STOP_SENDING**（`on_stop_sending`）与 `shutdown_stream_read()` | **真实现**（1.4.1 补上的，原是 [§8](#8-没做的如实列出) 那条缺口） | `quic_api_func.cpp`（"客户端收到了对端的 STOP_SENDING"、"应用错误码原样传到"） |
 | 连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath | **没有** | [§8](#8-没做的如实列出) |
-| HTTP/3（nghttp3） | **没有**（连依赖都还没接） | [§8](#8-没做的如实列出) |
+| HTTP/3（nghttp3） | **不在本层**（1.4.1 落在 `src/http3/`） | [`doc/http3-guide.md`](./http3-guide.md) |
 
 **"判据在哪"这一列不是装饰。** 上面每一格都指得到一条会因为它坏掉而变红的断言；
 指不到的地方**不写**，而是列在下面。这一版**没有**判据的有两处，写出来免得被当成
@@ -204,7 +212,8 @@ nghttp3 留到真做 HTTP/3 的那一版再接。
   的迁移那一档，不存在。
 
 一句话：**这一层现在是一条能握手、能开流、能收发、能干净收场的链路协议**；它上面
-还没有 HTTP/3，所以它还不认识"请求"和"响应"。
+那层 HTTP/3 已经落地（[`doc/http3-guide.md`](./http3-guide.md)），但**它自己不
+认识"请求"和"响应"** —— 那是上面那一层的活。
 
 ---
 
@@ -350,7 +359,9 @@ int one_round_trip(uvcpp_quic_connection& conn) {
 | `alpn_selected()` | 握手完成后是对端选定的协议名；之前是空串 |
 | `open_stream(bool bidi = true)` | 真开流，返回流号；失败返负的错误码 |
 | `write_stream(stream_id, data, len, end_stream = false)` | 受理进发送队列，`on_write` 报完成 |
-| `shutdown_stream(stream_id)` | 只关发送方向；队列里没写完的以 `NGTCP2_ERR_STREAM_SHUT_WR` 收场 |
+| `shutdown_stream(stream_id, app_error_code = 0)` | 只关发送方向；队列里没写完的以 `NGTCP2_ERR_STREAM_SHUT_WR` 收场 |
+| `shutdown_stream_read(stream_id, app_error_code = 0)` | 只关**读**方向：给对端发一个 STOP_SENDING（"别再发了"） |
+| `streams_left(bool bidi)` | 现在还能开几条本地流（**累计**上限，不是增量）；没内核时是 0 |
 | `close(int error_code = 0)` | 发 CONNECTION_CLOSE，`state()` 到 `CLOSING` |
 
 四件签名与语义上的讲究：
@@ -363,11 +374,16 @@ int one_round_trip(uvcpp_quic_connection& conn) {
   约定，`on_write` 是它在流上的对应物，且**一次调用恰好对应一次回调**。
 - `shutdown_stream()` 与 `close()` 是**两个**动作，因为 QUIC 的流是**两个方向各关
   一次**的。想要 TCP 那种"两边一起关"，得 `shutdown_stream()` 之后再等对端也关。
+- **两个方向的关闭各有自己的入口**：`shutdown_stream()` 关的是**写**方向（"我说完
+  了"），`shutdown_stream_read()` 关的是**读**方向（"你别再发了"，线上是一个
+  STOP_SENDING 帧）。两者都收应用错误码，默认 0。**对端**下的 STOP_SENDING 不在
+  这两个入口上，它由 `on_stop_sending` 报 —— 方向相反的两件事，别混。
 - `close(error_code)` 的错误码 0 与非 0 有语义差别：非 0 会被当作**应用错误码**发给
   对端。客户端端点自己的 `close()` 不吃参数 —— 只发一个干净的 CONNECTION_CLOSE。
 
-回调集合 `uvcpp_quic_connection::callbacks` 有**五**个：`on_read`、`on_stream_open`、
-`on_write`、`on_alpn`、`on_close`。五个都在 **loop 线程**上跑，而且 `on_read` /
+回调集合 `uvcpp_quic_connection::callbacks` 有**七**个：`on_read`、`on_stream_open`、
+`on_write`、`on_alpn`、`on_close`、`on_streams_available`、`on_stop_sending`。
+七个都在 **loop 线程**上跑，而且 `on_read` /
 `on_stream_open` / `on_write` 会在某个内部调用**还没返回**的时候就同步跑用户代码 ——
 于是用户代码可以在回调里 `write_stream()` / `close()` 掉这条连接（这两件事都被受理，
 真正的发包推到回调退栈之后），但**回调返回后不要再碰本对象**，尤其是 `on_close`
@@ -410,6 +426,41 @@ void install_reader(uvcpp_quic_connection& conn) {
 `PEER_CLOSED`；对端发 RESET_STREAM（它不要这条流了）也由 `on_read` 报，只是错误码
 非 0 时报 `READ_ERROR`、为 0 时报 `PEER_CLOSED` —— 错误码是应用自己定的，0 按约定
 就是"没有错误"，报成 `READ_ERROR(0)` 会让调用方去做无意义的错误处理。
+
+**但"谁报的"分不出那是一件事还是两件事**，所以 1.4.1 给结果加了一格
+`net_read_result::fin`（`src/net/uvcpp_net_read.h:100`）：`PEER_CLOSED && fin` 是
+对端发了 FIN 的正常收尾，`PEER_CLOSED && !fin` 是对端发了**应用错误码 0 的
+RESET_STREAM**。两者都报 `PEER_CLOSED` 是有意的 —— 对上层来说"读侧到此为止"是
+同一件事 —— 而 `fin` 才是让 HTTP/3 分得开"请求体发完了"与"请求被取消了"的那一位
+（`nghttp3_conn_read_stream2()` 要的就是它）。TCP 那四处构造点一律置 `true`，因为
+TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP 也是真话。
+
+另外两格是 1.4.1 新接出来的：
+
+```cpp
+// doc-snippet: fragment — 两格回调的装法摘录（`cbs` 来自上文），不是完整翻译单元
+  // 本端现在可以多开 max_streams 条**累计**上限的本地流（不是增量）。
+  // 握手刚完时对端的 initial_max_streams_* 可能还没到，想开流就得等这一格。
+  cbs.on_streams_available = [](uvcpp_quic_connection& c, bool bidi,
+                                uint64_t max_streams) {
+    (void)c; (void)bidi; (void)max_streams;
+    // c.streams_left(bidi) 问"现在还能开几条"。
+  };
+  // 对端下发了 STOP_SENDING："这条流你别再发了"。与 on_read 的收尾是两件事 ——
+  // 那个报"对端不发了"，这个报"对端不要我发了"。
+  cbs.on_stop_sending = [](uvcpp_quic_connection& c, int64_t stream_id,
+                           uint64_t app_error_code) {
+    (void)app_error_code;
+    c.shutdown_stream(stream_id, /*app_error_code=*/0);  // 通常在这里认账
+  };
+```
+
+> **本层收到 STOP_SENDING 时不会自己回一个 RESET_STREAM。** 以前那句"对端的
+> STOP_SENDING 没接"描述的是"这个事件根本到不了应用"；现在它到得了，而**默认的
+> 动作留给上层**：该不该认账、用什么错误码认，是协议层的事（HTTP/3 那一层要按
+> nghttp3 的指示走），链路层替它决定只会在"对端已经不要这条流了"和"这条流本来就
+> 读完了"这两件事之间猜错。所以这一格不是"缺口已补"，是**契约改了**：能看见，
+> 拍板的是上层。
 
 **`on_stream_close` 那一格是故意留空的。** 它要等**两个**方向都收场才跑，那时读侧
 早就没有新信息了，拿它再报一次只会让调用方对同一条流收两次尾。本层把读侧的信号
@@ -494,7 +545,9 @@ void install_reader(uvcpp_quic_connection& conn) {
    `check` 的 custom target（`ngtcp2/CMakeLists.txt:160`、`nghttp2/CMakeLists.txt:174`），
    后加进来的那个会直接 configure 失败。所以 `CMakeLists.txt` 里那段把 ngtcp2 的
    源码**复制**进构建目录、在副本上摘掉那一行（`build*/_deps/uvcpp-ngtcp2-src/`）。
-   三个推论：
+   （**nghttp3 是同一个坑的第三个来源**，1.4.1 的 HTTP/3 照同一套处置 ——
+   见 [`doc/http3-guide.md`](./http3-guide.md) §5。三个来源里两个同时开就撞上，
+   所以别把这个组合当成"只有一个补丁要打"。）本文下面那三条推论：
 
    - **`-DFETCHCONTENT_SOURCE_DIR_NGTCP2=<本地检出>` 之后改了那份检出，要删掉
      `build*/_deps/uvcpp-ngtcp2-src/` 再 configure** —— 副本只在第一次 configure 时
@@ -524,12 +577,9 @@ void install_reader(uvcpp_quic_connection& conn) {
 
 按仓库惯例，这一节必须老实写。以下都是**这一版真的没有**，不是"文档没写"：
 
-- **没有 HTTP/3。** nghttp3 本版**连依赖都没接**。这一层是它的地基，不是它。
+- **本层里没有 HTTP/3，也不该有。** 1.4.1 把它落在了 `src/http3/`
+  （[`doc/http3-guide.md`](./http3-guide.md)）—— 这一层是它的地基，不是它。
 - **没有连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath。**
-- **对端的 STOP_SENDING 没接。** 收到它意味着"你这条流别再发了"，本层不会自动回
-  一个 RESET_STREAM，于是会继续往一条对端已经丢弃的流上填字节，直到流控卡住。
-  这是一处**已知的缺口**，不是遗漏 —— 接它需要在回调里排一个延后的 reset 意图
-  （与 `close()` 那条同形状），留到需要的时候再做。
 - **没有多循环支持。** 见 [§5.2](#52-服务端)。
 - **MinGW 的 CI 腿没有开 QUIC。** macOS 与 Windows MSVC 各有一格 `quic`（1.4.1 补的，
   它们用包管理器给的 OpenSSL，只有 ubuntu 那格自建），只有 MSYS2 那条腿还没有 —— 它是
@@ -549,5 +599,6 @@ void install_reader(uvcpp_quic_connection& conn) {
 - **没有连接级的统计/指标**（丢包数、RTT、拥塞窗口）。想读这些得上 ngtcp2 的
   `ngtcp2_conn_get_*`，而那是私有头里的类型，公开面暂时不接。
 
-下一步只剩 **HTTP/3**（接 nghttp3，把请求/响应那层语义建在这条链路协议上）。
-连接迁移、0-RTT 那些不在路线图上 —— 它们要等有真实需求时才谈。
+下一步是把 h3 接进 web 层的**流式路由**与 **GOAWAY 的平滑退场**（见
+[`doc/http3-guide.md`](./http3-guide.md) §8 的收尾）。连接迁移、0-RTT 那些仍然不在
+路线图上 —— 它们要等有真实需求时才谈，本层也**不该**为了它们先动形状。

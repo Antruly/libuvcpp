@@ -111,6 +111,28 @@ jobs:
             gate_integrated: ngtcp2 integrated
             gate_module: Including quic module in build
             gate_test: test_quic_api_func
+
+          # http3（1.4.1 新增的腿）：web 层多出来的那条 h3 传输。与 quic 那一格
+          # 的差别就是 **WEB=ON** —— h3 的公开面长在 `uvcpp_http_client` /
+          # `uvcpp_http_server` 上，web 关着时 `CMakeLists.txt` 会把它强制关掉。
+          # 这一格是 macOS 上**唯一**编译 `src/http3/` 的配置（也是 Apple clang
+          # 第一次编它）。
+          - feature: http3
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_ENABLE_OPENSSL=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_QUIC=ON
+              - -DUVCPP_ENABLE_HTTP3=ON
+            openssl_root: $(brew --prefix openssl@3)
+            gate_name: nghttp3
+            gate_switch: 'UVCPP_ENABLE_HTTP3:BOOL=ON'
+            gate_integrated: nghttp3 integrated
+            gate_module: Including http3 module in build
+            gate_test: test_http3_web_func
     steps:
       - uses: actions/checkout@v4
 
@@ -122,17 +144,18 @@ jobs:
             basic-static|basic-shared) brew install libuv ninja ;;
             web)                       brew install libuv zlib ninja ;;
             ssl|h2|full)               brew install libuv openssl zlib ninja ;;
-            quic)                      brew install libuv zlib ninja openssl@3 ;;
+            quic|http3)                brew install libuv zlib ninja openssl@3 ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
 
-      # 只有 quic 那一格需要：先证明这份 Homebrew OpenSSL 真的带 QUIC API。
-      # 不在这一步拦住的话，配置期的"缺 QUIC API → WARNING + 强制关闭"会把整格
-      # 变成一次**静默的空转**（cache 照样写着 ON），而症状会落到门禁 ②
-      # （`ngtcp2 integrated` 缺席）上 —— 那时注解说的是"ngtcp2 没被集成"，
-      # 而真正的原因（这份 OpenSSL 不对）没人从那条输出里看得出来。
-      - name: Check the Homebrew OpenSSL has the QUIC API (quic only)
-        if: matrix.feature == 'quic'
+      # 只有 quic / http3 那两格需要：先证明这份 Homebrew OpenSSL 真的带 QUIC API
+      # （h3 跑在 QUIC 上，要的是同一份）。不在这一步拦住的话，配置期的
+      # "缺 QUIC API → WARNING + 强制关闭"会把整格变成一次**静默的空转**
+      # （cache 照样写着 ON），而症状会落到门禁 ②（`ngtcp2 integrated` 缺席）上
+      # —— 那时注解说的是"ngtcp2 没被集成"，而真正的原因（这份 OpenSSL 不对）
+      # 没人从那条输出里看得出来。
+      - name: Check the Homebrew OpenSSL has the QUIC API (quic + http3)
+        if: matrix.feature == 'quic' || matrix.feature == 'http3'
         shell: bash
         run: |
           set -o pipefail

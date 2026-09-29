@@ -16,12 +16,12 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic`, `http3` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `Windows (MinGW64)` | `Windows (MinGW64) / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic` | `macOS` | `macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3` | `macOS` | `macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -32,7 +32,12 @@ the file, so deleting a feature entry without touching this table is red — tha
 **This layout is now the measured one, not the intended one.** The first run of a commit
 carrying all four files produced exactly the 23 checks in the table above — none missing, none
 extra, no collisions — and the run that also carries the two corrections described below is
-green on all four platforms (2026-09-29). Two things were only learnable by running it:
+green on all four platforms (2026-09-29). 1.4.1 added the three `http3` entries (`http3` needs
+QUIC + web, so it could not exist before those two did), which takes the table to **26**
+checks; the `windows` one had never run before that commit, since there is no MSVC on the
+development machine — that leg's first execution *is* the gate (see §2 for how a new entry is
+supposed to be argued). Two things were
+only learnable by running it:
 `src/quic/*.cpp` and `ngtcp2` compile on **MSVC** for the first time here, and the macOS leg's
 own OpenSSL prelude was wrong in a way that had nothing to do with OpenSSL (see §5).
 
@@ -73,6 +78,7 @@ layout did not cover them either.
 | Gap | Why |
 |---|---|
 | MinGW + QUIC | Deferred to the same batch as splitting the MinGW job by feature: that job is a single job whose `defaults: shell: msys2 {0}` is job-level (it cannot be conditionalised) and whose tail is a hard-coded `--platform mingw-x64` package→consumer contract. |
+| MinGW + HTTP/3 | The same job, and one more prerequisite: `http3` is force-disabled unless QUIC is on, so it cannot be added before the QUIC gap above is closed. |
 | MinGW + h2 | Never covered. MinGW has never compiled the HTTP/2 module. |
 | MSVC + full | Windows has never had a `full` leg (`full` is Ubuntu + macOS only). |
 | Windows static + web/webapp | The static entry is `WEB=OFF`. |
