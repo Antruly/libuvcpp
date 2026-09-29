@@ -30,7 +30,6 @@
 
 #include <uv.h>
 
-#include <cstdio>
 #include <cstring>
 #include <utility>
 

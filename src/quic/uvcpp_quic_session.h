@@ -281,7 +281,22 @@ class quic_session {
    */
   bool on_expiry(uint64_t now_ns);
 
-  /** @brief 下一次该醒来的时刻（`ngtcp2_conn_get_expiry2`）；`UINT64_MAX` = 没有。 */
+  /**
+   * @brief 下一次该醒来的时刻；`UINT64_MAX` = 没有。
+   *
+   * **不是 `ngtcp2_conn_get_expiry2()` 的直通。** 关闭期那条路 ngtcp2 不管：
+   * 它进了 `NGTCP2_CS_CLOSING` 之后 `get_expiry` **只**看丢包检测 / ACK 延迟 /
+   * 空闲这些计时器，**没有**"3 × PTO 之后关掉"这一格（本机 ngtcp2 v1.25.0 的
+   * `ngtcp2_conn_get_expiry2` 与 `ngtcp2_conn_in_closing_period2` 逐行读过：
+   * 前者根本不含关闭期，后者只是个状态查询）。所以本端先关的那一侧要靠**自己**
+   * 那个 `close_deadline_` 把关闭期兜住 —— 少了它，一条已经说完了话的连接要一直
+   * 等到**空闲超时**（默认 30 s）才肯报 `on_close`。
+   *
+   * 这曾经是**一条真的漏洞**：`close()` 之后连接停在 CLOSING，只有"碰巧有丢包
+   * 检测计时器要到点"时才会走完关闭期。`quic_api_func` 那条用例恰好落在那一格里
+   * （刚握完手，PTO 还排着），所以**一直是绿的**，直到 http3 那边连着问了三次
+   * 请求、链路静下来之后才把 30 s 的等待暴露出来。
+   */
   uint64_t next_expiry() const;
 
   /**
@@ -518,6 +533,9 @@ class quic_session {
   /// 只要单调且同一个时钟源）。
   static uint64_t now_ns() { return uv_hrtime(); }
 
+  /// RFC 9000 §10.2.1 的关闭期：3 × PTO。公式与常量说明见 `.cpp`。
+  ngtcp2_duration closing_period() const;
+
   // --- 拥有的东西（顺序即析构顺序，别调） ---
   ngtcp2_conn*             conn_ = nullptr;
   ngtcp2_crypto_ossl_ctx*  ossl_ctx_ = nullptr;
@@ -558,6 +576,14 @@ class quic_session {
    */
   int                      in_callback_ = 0;
   bool                     want_flush_ = false;
+  /**
+   * @brief 关闭期的终点（`now_ns()` 那种纳秒）。
+   *
+   * 只在 `do_close()` 里置一次，`next_expiry()` 在 CLOSING 状态下直接报它。
+   * 见 `next_expiry()` 的说明：ngtcp2 不给关闭期计时器，这一格是本层自己补的
+   * RFC 9000 §10.2.1 那条 3 × PTO。
+   */
+  uint64_t                 close_deadline_ = UINT64_MAX;
   bool                     want_close_ = false;
   int                      want_close_code_ = 0;
 

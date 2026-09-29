@@ -66,6 +66,13 @@ const unsigned kMaxFlushRounds = 128;
 /// RFC 9000 §10.2.1 允许的 CONNECTION_CLOSE 重发次数上限。
 const int kMaxCloseSends = 3;
 
+/// RFC 9002 §6.1.2 的 `kGranularity`：rttvar 那一项的下限。
+const ngtcp2_duration kGranularity = 1 * NGTCP2_MILLISECONDS;
+
+/// RFC 9000 §18.2 给 `max_ack_delay` 的默认值，也就是 `fill_transport_params()`
+/// **没有改**的那个值（它只改流量控制的几格）。PTO 的公式里有它一项。
+const ngtcp2_duration kDefaultMaxAckDelay = 25 * NGTCP2_MILLISECONDS;
+
 /// 把 `sockaddr` 的族翻译成长度。传进来的地址没有长度参数（签名是
 /// `const struct sockaddr*`），而 ngtcp2 要 `ngtcp2_socklen`。
 /// 只认 AF_INET / AF_INET6 —— 别的族 QUIC 走不了，返回 0 让调用方拒绝。
@@ -706,9 +713,27 @@ void quic_session::do_flush() {
 // 到期
 // =========================================================================
 
+ngtcp2_duration quic_session::closing_period() const {
+  if (conn_ == nullptr) return 3 * kGranularity;
+  // ngtcp2 v1.25.0 里 `compute_pto` 是这个形状（`ngtcp2_conn.c` 的
+  // `compute_pto()` + `ngtcp2_conn_compute_pto()`），但那个函数**不是公开
+  // API**，本层拿不到，所以照它的公式自己算一遍。三项里 `max_ack_delay` 取的
+  // 是默认值：`PTO` 用的是**对端**的 `max_ack_delay`，而握手后的连接里那个
+  // 值就是两侧 `transport_params_default()` 给出来的 25 ms（两边都是本库）。
+  ngtcp2_conn_info  ci;
+  ngtcp2_conn_get_conn_info2(conn_, &ci);
+  const ngtcp2_duration var =
+      (4 * ci.rttvar > kGranularity) ? 4 * ci.rttvar : kGranularity;
+  return 3 * (ci.smoothed_rtt + var + kDefaultMaxAckDelay);
+}
+
 uint64_t quic_session::next_expiry() const {
   if (conn_ == nullptr) return UINT64_MAX;
   if (is_closed()) return UINT64_MAX;
+  // 关闭期由本层自己兜（见头里那段说明）：CLOSING 状态下不再看 ngtcp2 的
+  // 那几个计时器 —— 它们的下一个到期点是空闲超时，那是 30 s 量级的东西，
+  // 而 RFC 9000 §10.2.1 要的是 3 × PTO。
+  if (state_ == quic_connection_state::CLOSING) return close_deadline_;
   return ngtcp2_conn_get_expiry2(conn_);
 }
 
@@ -782,6 +807,9 @@ void quic_session::do_close(int error_code) {
   close_sends_ = 0;
   (void)send_close_packet();
   state_ = quic_connection_state::CLOSING;
+  // 关闭期的终点。**必须在 state_ 之后** —— `next_expiry()` 就是按 state_ 分
+  // 支去报这一格的，先置它再置 state_ 的话中间那一瞬会报出一个还没算好的值。
+  close_deadline_ = now_ns() + static_cast<uint64_t>(closing_period());
 }
 
 bool quic_session::send_close_packet() {

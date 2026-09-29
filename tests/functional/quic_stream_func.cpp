@@ -190,6 +190,9 @@ void test_streams_over_one_loop() {
   int64_t half_id  = -1;
   bool    connected      = false;
   int     connect_status = 12345;
+  // 本端先关的那一侧的收场。哨兵值不可能"碰巧对上"。
+  int     client_close_hits = 0;
+  int     client_close_code = 12345;
 
   const int rc = client.connect("127.0.0.1", port, [&](int status) {
     connected      = true;
@@ -234,6 +237,10 @@ void test_streams_over_one_loop() {
     };
     cbs.on_write = [&](uvcpp_quic_connection&, int64_t id, int status) {
       client_writes[id] = status;
+    };
+    cbs.on_close = [&](uvcpp_quic_connection&, int code) {
+      ++client_close_hits;
+      client_close_code = code;
     };
     client.connection()->set_callbacks(cbs);
   }
@@ -351,6 +358,26 @@ void test_streams_over_one_loop() {
     check(server_read_errors.empty(), "服务端没读到过错误事件");
   }
   check_eq_i(client.close(), 0, "close() 返回 0");
+
+  // **关闭期是本端自己要兜的。** ngtcp2 进了 `NGTCP2_CS_CLOSING` 之后
+  // `ngtcp2_conn_get_expiry2()` **不**给关闭期的到期时刻（它只看丢包检测 / ACK
+  // 延迟 / 空闲那几项），所以"等 3 × PTO 然后收尾"这件事只能由本层自己排一个
+  // 计时器（`quic_session::close_deadline_`）。
+  //
+  // 少了那一格，这条断言要一直等到**空闲超时**（本用例没改，默认 30 s）才可能
+  // 变真 —— 而 `kDeadlineMs` 是 5000。所以它钉的正是那个"关闭期没排计时器"
+  // 的漏洞：删掉 `do_close()` 里给 `close_deadline_` 赋值那一行，这里当场红。
+  //
+  // **不能只断言"等一会儿看它关没关"**：本用例握完手之后链路是静下来才关的，
+  // 那时没有 PTO 排着 —— 而旧实现只有"恰好有丢包检测计时器要到点"时才会走完
+  // 关闭期。这条用例当初正是**因此**绿着（`quic_api_func` 那条也一样）。
+  //
+  // 错误码要**精确到 0**：本端先关的一侧拿不到对端的 CONNECTION_CLOSE 里的码
+  // （RFC 9000 §10.2.1：closing 期的包一律丢），所以它报的是干净关闭。
+  check(uvcpp_test::wait_until(&loop, [&] { return client_close_hits != 0; },
+                               kDeadlineMs),
+        "本端 close() 之后 on_close 在 deadline 内跑到（关闭期有计时器）");
+  check_eq_i(client_close_code, 0, "本端先关的那一侧报的是干净关闭 0");
 }
 
 }  // namespace
