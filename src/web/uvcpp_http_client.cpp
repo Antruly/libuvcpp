@@ -35,6 +35,13 @@
 #include <http2/uvcpp_h2_session.h>
 #endif
 
+// h3 那条腿：QUIC 端点 + h3 驱动层。同样只在这一层出现。
+#if UVCPP_HTTP3_ENABLE
+#include <http3/uvcpp_h3_connection.h>
+#include <quic/uvcpp_quic_client.h>
+#include <quic/uvcpp_quic_connection.h>
+#endif
+
 namespace uvcpp {
 
 // =========================================================================
@@ -117,6 +124,16 @@ uvcpp_http_client::~uvcpp_http_client() {
   delete h2_;
   h2_ = nullptr;
 #endif
+#if UVCPP_HTTP3_ENABLE
+  // 次序在拆 `quic_` **之前**：h3 层捕着它底下那条 QUIC 连接（不拥有），而
+  // `quic_` 拥有那条连接并会把它销毁。倒了就是"h3 层指向已经没了的内核"。
+  //
+  // `quic_` 本身**不删** —— 它是本对象的一个子对象，与 `tcp_` 同一条策略
+  // （下面那段"有意的泄漏"）。`quic_->close()` 也没在这里调：析构路径上那条
+  // dance 是给 TCP 的句柄写的，QUIC 的收尾是它自己那 256 轮 `UV_RUN_NOWAIT`。
+  delete h3_;
+  h3_ = nullptr;
+#endif
   // Close TCP if still active
   if (tcp_ != nullptr && !has_status(HTTP_CLIENT_CLOSED)) {
     uvcpp_tcp* raw_tcp = tcp_->get_tcp();
@@ -176,6 +193,24 @@ uvcpp_http_client::~uvcpp_http_client() {
   delete tcp_;
   tcp_ = nullptr;
 
+#if UVCPP_HTTP3_ENABLE
+  // 与 `tcp_` **同一个坑、同一条理由**（见上面那二十行）：`quic_` 也是
+  // `new uvcpp_quic_client(loop_)` 出来的、借的是本对象的循环，而它的析构同样
+  // 要在循环还在分配着的时候跑。所以这一句的位置不是随手放的。
+  //
+  // **拆之前先道别。** `~uvcpp_quic_client` 走的是 `impl_->teardown()`，那条路
+  // 直接 `delete` 内核，**一个字节都不发** —— 对端于是只能等自己的 idle timeout
+  // （默认 30 秒）才发现这边没了。`close()` 那一包是**同步**发出去的
+  // （`do_close()` → `send_close_packet()`），所以这一句之后紧接着 `delete`
+  // 不影响它上路；不发它，一次"用完就析构"就是一次让对端白等半分钟的静默断开。
+  //
+  // 只影响 h3 那条腿：`quic_` 是懒建的，h1/h2 的连接上它恒为 `nullptr`。
+  if (quic_ != nullptr) quic_->close();
+
+  delete quic_;
+  quic_ = nullptr;
+#endif
+
   if (loop_ != nullptr) {
     loop_->loop_close();
     delete loop_;
@@ -203,6 +238,18 @@ int uvcpp_http_client::connect(const char* host, int port,
   peer_goaway_      = false;
   peer_goaway_code_ = 0;
   peer_goaway_last_ = 0;
+#endif
+
+#if UVCPP_HTTP3_ENABLE
+  // h3 换的是**传输**（UDP），所以它在最前面判：`cb` 为空那条路（= `connect_wait`
+  // 的同步写法）对 h3 不成立，理由写在 `set_http3_enabled()` 的说明里。
+  if (http3_enabled_) {
+    if (!cb) {
+      last_error_code_ = UV_ENOTSUP;
+      return UV_ENOTSUP;
+    }
+    return connect_quic(host, port, std::move(cb));
+  }
 #endif
 
   if (cb) {
@@ -302,6 +349,17 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
   peer_goaway_last_ = 0;
 #endif
 
+#if UVCPP_HTTP3_ENABLE
+  // 同步那条路是对**socket fd** 做阻塞收发的（`send_wait_plain` 的说明里写了
+  // 它连超时都只有 Windows 支），而 QUIC 没有"一条连接的 fd"这回事 —— 它要做
+  // 的是泵它自己的循环。所以这里报错，**不是**"悄悄退化成 h1"：那样会把明文
+  // HTTP/1.1 写进一条 UDP 上的 QUIC 连接，一处报错都没有。
+  if (http3_enabled_) {
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
+
   bool done = false;
   int result = 0;
 
@@ -380,6 +438,12 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   // 是 llhttp 的附属品，在 h2 上全是空的。响应按流 id 归位（`h2_streams_`），
   // 所以这里**不能**碰下面那些状态复位 —— 那些是按"一条连接一个在飞请求"写的。
   if (h2_active_) return send_h2(req, std::move(cb));
+#endif
+#if UVCPP_HTTP3_ENABLE
+  // 一行**在 h2 那行之前**：h3 连的是 UDP，这条连接上根本不会有 h2 会话
+  // （`h2_active_` 恒假），两件事互斥。放在前面是照"换的是传输"这个层级来的 ——
+  // 将来谁把两个开关一起打开，走的也是这条。
+  if (h3_active_) return send_h3(req, std::move(cb));
 #endif
 
   // Reset state for new request
@@ -510,6 +574,16 @@ int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
     return UV_ENOTSUP;
   }
 #endif
+#if UVCPP_HTTP3_ENABLE
+  // 同一条纪律，换了个理由：h2 那边是"阻塞式 I/O 驱动不了内存 BIO 会话"，
+  // h3 这边更彻底 —— 底下**没有 socket fd** 可阻塞，要动的是 QUIC 自己的循环。
+  if (h3_active_ || http3_enabled_) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
+
 #if UVCPP_OPENSSL_ENABLE
   if (ssl_enabled_ && ssl_) {
     return send_wait_ssl(req, resp, timeout_ms);
@@ -1013,6 +1087,17 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
 int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
                                       uvcpp_http_response& resp,
                                       int timeout_ms) {
+#if UVCPP_HTTP3_ENABLE
+  // 同 `send_wait_plain`：本函数公开，守卫得自己有一道。h3 那条腿的 TLS 会话
+  // 在 **QUIC 自己**的握手里（密钥由 ngtcp2 的 crypto 回调管），`ssl_` 里那份
+  // 是 TCP 那条腿的 —— 拿它去阻塞读写，写进去的是它自己那条会话，与 UDP 上
+  // 正在跑的 QUIC 连接**毫无关系**。
+  if (h3_active_ || http3_enabled_) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
   if (!ssl_) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
 
   // 设置 socket 收发超时，避免阻塞挂死。**只有 Windows 这一支设了** —— POSIX 上
@@ -1061,6 +1146,17 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
 int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
                                         uvcpp_http_response& resp,
                                         int timeout_ms) {
+#if UVCPP_HTTP3_ENABLE
+  // 本函数是**公开的**（使用者可以直接调），所以守卫不能只靠 `send_wait()` 那
+  // 一道。底下那句 `tcp_->get_tcp()` 在 h3 模式下是一条**从没连过**的 TCP 句柄
+  // （句柄建出来了、没 connect），拿它的 fd 去做阻塞收发是"对着一个没人听的
+  // 环回端口写"—— 同样是"写成功、响应等不到"。
+  if (h3_active_ || http3_enabled_) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
   uv_os_sock_t sock;
   if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) != 0) {
     set_status(HTTP_CLIENT_ERROR);
@@ -1141,10 +1237,6 @@ bool uvcpp_http_client::is_compression_enabled() const {
 void uvcpp_http_client::set_http2_enabled(bool on) { http2_enabled_ = on; }
 
 bool uvcpp_http_client::http2_enabled() const { return http2_enabled_; }
-
-const std::string& uvcpp_http_client::negotiated_alpn() const {
-  return negotiated_alpn_;
-}
 
 // `h2_` 还在时问活的那一份，拆了之后答抄下来的那一份 —— 两个时机都得对：
 // 连接还开着的时候调用方要能**提前**知道对端在收摊（好把请求挪走），
@@ -1382,6 +1474,356 @@ void uvcpp_http_client::on_h2_disconnect(uvcpp_h2_connection&) {
 }
 
 #endif  // UVCPP_NGHTTP2_ENABLE
+
+#if UVCPP_NGHTTP2_ENABLE || UVCPP_HTTP3_ENABLE
+
+// 上面两条腿各自往这一个成员里写：h2 在 TCP 的成功回调里从 `tcp_` 抄，
+// h3 在 QUIC 的成功回调里从 `quic_` 抄。读的时候只有这一个口子 —— 调用方
+// 不需要知道这次走的是哪条传输。
+const std::string& uvcpp_http_client::negotiated_alpn() const {
+  return negotiated_alpn_;
+}
+
+#endif  // UVCPP_NGHTTP2_ENABLE || UVCPP_HTTP3_ENABLE
+
+#if UVCPP_HTTP3_ENABLE
+
+// =========================================================================
+// HTTP/3
+// =========================================================================
+//
+// 这一整段的形状是照着上面 h2 那一段抄的（**故意**）。两条腿的差别全在传输
+// （TCP/memory-BIO vs QUIC/UDP），而 web 层这一侧的规矩是同一套：
+//   - 回调都跑在别人的栈上，可能**同步**跑进用户的 `send()` 回调；
+//   - 用户可以在那个回调里把整个 client 析构掉；
+//   - 所以每个回调**先把要交付的东西攒齐、把条目从表里摘走，再碰用户代码**。
+// 抄形状、不抄结论：凡是 h2 那段注释解释过"为什么"的地方，这里只写"与 h2
+// 那条路同一条理由"，具体来龙去脉去那一处看。
+
+namespace {
+
+/// 这条流结算时**手上有什么就说什么**。
+///
+/// `status == 0` 就是"一个响应头都没收到过"，于是交付出去的必须是
+/// `HTTP_STATUS_NONE`。理由与 `h2_response_not_received()` 逐字相同：一份默认
+/// 构造的 `uvcpp_http_response` 是 `200 OK`，那是替对端说了一句它从没说过的话。
+///
+/// 与 h2 那份的唯一差别是版本号：h3 的响应报 `HVER_30`，不是 `HVER_20`。
+/// 报错了不会当场坏掉（这个字段只出现在把消息按 h1 排版的地方），正因如此
+/// 才要在这里写对。
+uvcpp_http_response h3_response_not_received(int64_t stream_id) {
+  uvcpp_http_response r;
+  r.version        = uvcpp_http_version::HVER_30;
+  r.status_code    = HTTP_STATUS_NONE;
+  r.status_message = http_status_reason(HTTP_STATUS_NONE);
+  // 流号必须带上：一条连接上同时有好几条流在飞时，它是调用方对号入座的唯一凭据。
+  // `int32_t` 是 `uvcpp_http_response` 的既有字段宽（与 h2 共用），而 QUIC 给
+  // 客户端发起的双向流号是 0、4、8…… 一条连接上走到 2^31 需要 5 亿次请求，
+  // 那之前先撞上的是对端的额度。即便真撞上了，坏的也只是这个身份字段，
+  // 不是 `take_completed()` 的交付次数。
+  r.stream_id      = static_cast<int32_t>(stream_id);
+  return r;
+}
+
+/// `h3_response` → 本层的响应对象。**只搬事实**：h3 层没给的东西一个都不编。
+uvcpp_http_response h3_to_http_response(const h3_response& in) {
+  uvcpp_http_response r = h3_response_not_received(in.stream_id);
+  if (in.status != 0) {
+    r.status_code    = static_cast<http_status>(in.status);
+    r.status_message = http_status_reason(r.status_code);
+  }
+  r.headers.reserve(in.headers.size());
+  for (size_t i = 0; i < in.headers.size(); ++i) {
+    http_header h;
+    h.name  = in.headers[i].name;
+    h.value = in.headers[i].value;
+    r.headers.push_back(h);
+  }
+  if (!in.body.empty()) r.body.append_data(in.body.data(), in.body.size());
+  return r;
+}
+
+}  // namespace
+
+void uvcpp_http_client::set_http3_enabled(bool on) { http3_enabled_ = on; }
+
+bool uvcpp_http_client::http3_enabled() const { return http3_enabled_; }
+
+int uvcpp_http_client::connect_quic(const char* host, int port,
+                                    std::function<void(int)> cb) {
+  // QUIC 没有明文模式（ALPN 是 TLS 扩展），所以没设上下文连 ClientHello 都拼不
+  // 出来。这里报错，**不是**"悄悄退化回 TCP"：那会把这次请求变成一次明文 h1
+  // 请求，而调用方明说了要 h3。
+  if (ssl_ctx_ == nullptr) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = UV_EINVAL;
+    cb(UV_EINVAL);  // 与上面 TCP 那条路一致：早退也交付一次
+    return UV_EINVAL;
+  }
+
+  if (quic_ == nullptr) quic_ = new uvcpp_quic_client(loop_);
+  quic_->set_ssl_context(ssl_ctx_);
+  // **不设 ALPN。** `uvcpp_quic_client` 不调 `set_alpn_protos()` 时用的就是
+  // `quic_default_alpn()`（`"h3"`），而那份名单**只属于这条 UDP 腿** —— 与
+  // `connect()` 里给 TCP 的那份 `{"h2","http/1.1"}` 毫无关系。往 TCP 的
+  // ClientHello 里塞 `h3` 是另一个病，见 `set_http3_enabled()` 的说明。
+
+  // 下面这三个早退里，前两个在 `quic_->connect()` **之前**，第三个在它**之后**
+  // —— 那一次 QUIC 的握手回调还是会来（`connect()` 返回 0 的契约就是"cb 一定
+  // 会被调一次"），而调用方在这三条路上已经拿到失败码了。这个标志就是让那一次
+  // 不再重复交付。
+  const std::shared_ptr<char> armed = std::make_shared<char>(0);
+  const std::weak_ptr<char>   tok   = alive_token_;
+
+  const int rc = quic_->connect(host, port, [this, tok, cb, armed](int status) {
+    if (tok.expired() || *armed != 0) return;
+    if (status != 0) {
+      clear_status(HTTP_CLIENT_CONNECTED);
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = status;
+      cb(status);
+      return;
+    }
+    // 与 TCP 那条路同一个次序、同一条理由：ALPN 是握手内谈完的，走到这里已是
+    // 终局；`CONNECTED` 置上之后 `send()` 才放行（它的头一道守卫就是这个标志）。
+    set_status(HTTP_CLIENT_CONNECTED);
+    clear_status(HTTP_CLIENT_ERROR);
+    if (uvcpp_quic_connection* c = quic_->connection()) {
+      negotiated_alpn_ = c->alpn_selected();
+    }
+    cb(0);
+  });
+  if (rc != 0) {
+    *armed = 1;
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = rc;
+    cb(rc);
+    return rc;
+  }
+
+  // **h3 层要在这一刻建，不能等 `cb(0)`。** `uvcpp_quic_client::connect()` 的
+  // `@warning` 把窗口写死了："回调要在这里装：`connect()` 返回之后、下一次循环
+  // 迭代之前"。而 h3 层正是 QUIC 那条连接的回调持有者 —— 等 `cb(0)`（那是**握手
+  // 完成**，循环已经转过好几轮）再装，握手期间的 `on_alpn` 早就过去了，三条关键
+  // 单向流永远开不出来，表现是 `send()` 一律 `UV_EAGAIN` 而没有任何一处报错。
+  const int hrc = start_h3();
+  if (hrc != 0) {
+    *armed = 1;
+    // 这次连接已经作废，把 UDP 那头也收掉 —— 否则它会自己把握手走完，然后
+    // 挂着一条谁都不认的连接等空闲超时。`close()` 之后 `on_close` 会跑，而那时
+    // h3 层已经删了，两边的存活令牌都会让它静默返回。
+    if (quic_ != nullptr) quic_->close();
+    clear_status(HTTP_CLIENT_CONNECTED);
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = hrc;
+    cb(hrc);
+    return hrc;
+  }
+  return 0;
+}
+
+int uvcpp_http_client::start_h3() {
+  uvcpp_quic_connection* qconn =
+      (quic_ != nullptr) ? quic_->connection() : nullptr;
+  // 调到这里而端点名下有没连接，只可能是调用次序错了（h3 层必须在 `connect()`
+  // 返回之后建）。如实报出来，别去 new 一个指向未来的对象。
+  if (qconn == nullptr) return UV_ENOTCONN;
+
+  h3_ = new uvcpp_h3_connection(qconn, /*server_side=*/false);
+
+  uvcpp_h3_connection::callbacks hc;
+  const std::weak_ptr<char> tok = alive_token_;
+
+  // 一条流收场 → 把队列里攒下的响应交付掉。**这是本层唯一的一处交付时机**
+  // （另一处是连接没了时的 `on_h3_disconnect`）：h3 层把"收全了"和"没能收全"
+  // 都变成队列里的一格，而两者都在这个回调之前落进去。所以这里不需要"成功
+  // 一条、失败一条"分别去哪一格 —— 交给 `take_completed()` 一视同仁地吐。
+  hc.on_stream_close = [this, tok](uvcpp_h3_connection&,
+                                   const h3_stream_close_info&) {
+    if (tok.expired()) return;
+    pump_h3_completed();
+  };
+
+  // 连接级致命错误。本层收到时 h3 那边**已经在关这条连接了**（那是唯一正确的
+  // 动作），所以这里不做事，只把错误码留住 —— `on_h3_disconnect` 一律报
+  // `UV_ECANCELED`，而"是我们自己的 nghttp3 出错了"与"对端走了"靠这个字段才分
+  // 得开。
+  hc.on_error = [this, tok](uvcpp_h3_connection&, int code) {
+    if (tok.expired()) return;
+    last_error_code_ = code;
+  };
+
+  hc.on_disconnect = [this, tok](uvcpp_h3_connection& c) {
+    if (tok.expired()) return;
+    on_h3_disconnect(c);
+  };
+
+  // `on_request` 留空：那是服务端侧的槽（`uvcpp_h3_connection` 按 `server_side`
+  // 分流），客户端会话不会调它。
+
+  const int rv = h3_->start(hc);
+  if (rv != 0) {
+    delete h3_;
+    h3_ = nullptr;
+    return rv;
+  }
+  h3_active_ = true;
+  return 0;
+}
+
+int uvcpp_http_client::send_h3(
+    const uvcpp_http_request& req,
+    std::function<void(const uvcpp_http_response&, int)> cb) {
+  if (h3_ == nullptr) {
+    last_error_code_ = UV_ENOTCONN;
+    return UV_ENOTCONN;
+  }
+
+  // `:authority` 的来源与 h2 那条路**逐字相同**：h1 的 `to_string()` 在缺 host
+  // 时会自己补一个（从 URL 里抠，抠不到就写 localhost），h2/h3 这两条没有那层
+  // 兜底，缺了就是一个空的权威来源。我们手上正好有权威来源 —— `connect()` 的 host。
+  uvcpp_http_request out = req;
+  if (!out.has_header("host")) out.set_header("host", host_);
+
+  h3_request h3r;
+  h3r.method    = http_method_str(out.method);
+  h3r.authority = out.get_header("host");
+  h3r.path      = out.url.empty() ? std::string("/") : out.url;
+  // `scheme` 留空 —— `send_request()` 会把它缺省成 `https`，而那个默认值在 h3
+  // 上是**唯一可能**的取值（QUIC 没有明文那一档），不是猜的。
+  h3r.headers.reserve(out.headers.size());
+  for (size_t i = 0; i < out.headers.size(); ++i) {
+    const http_header& h = out.headers[i];
+    // `host` 已经进了 `:authority`，再发一遍就是两个权威来源。
+    if (http_name_equal(h.name, "host")) continue;
+    // 连接专属头（connection / keep-alive / transfer-encoding / upgrade /
+    // proxy-connection）在 h3 里是**畸形头**（RFC 9114 §4.2）。它们由**会话层**
+    // 剥（`h3_is_connection_specific()`），与 h2 把这一步放在 `submit_request()`
+    // 里是同一条分层规矩。这里不重复判 —— 但要知道那条过滤是承重的：h1 的
+    // `to_string()` 默认就会加一个 `connection: keep-alive`，而一个为 h1 拼好的
+    // 请求被原样交给 h3 是常态，不是异常。
+    h3_header nh;
+    nh.name  = h.name;
+    nh.value = h.value;
+    h3r.headers.push_back(nh);
+  }
+  h3r.body = out.body.to_string();
+
+  const int64_t sid = h3_->send_request(h3r);
+  if (sid < 0) {
+    last_error_code_ = static_cast<int>(sid);
+    return static_cast<int>(sid);
+  }
+  h3_streams_[sid].cb = std::move(cb);
+
+  // 响应**不可能**在这一刻就到：`send_request()` 只是把字节交给了 QUIC，回包要
+  // 等循环转起来。所以这里不 pump —— 与 h2 那条路不一样的地方只有这一点。
+  return 0;
+}
+
+void uvcpp_http_client::pump_h3_completed() {
+  if (h3_ == nullptr) return;
+  const std::weak_ptr<char> tok = alive_token_;
+
+  for (;;) {
+    // 每一轮都先看令牌：下面那次用户回调完全可能把整个 client 析构掉，那之后
+    // `h3_streams_` 一个字节都不能再读。
+    if (tok.expired()) return;
+
+    h3_response r;
+    if (h3_ == nullptr || !h3_->take_completed(r)) return;
+
+    std::map<int64_t, h3_stream_state>::iterator it =
+        h3_streams_.find(r.stream_id);
+    // 不是本层发出去的请求（理论上到不了这儿）。**不交付** —— 没有回调可交。
+    if (it == h3_streams_.end()) continue;
+
+    // 先把要交付的东西攒齐、把条目摘走，再碰用户代码。
+    const uvcpp_http_response resp = h3_to_http_response(r);
+    std::function<void(const uvcpp_http_response&, int)> cb =
+        std::move(it->second.cb);
+    h3_streams_.erase(it);
+
+    set_status(HTTP_CLIENT_COMPLETE);
+    clear_status(HTTP_CLIENT_RECEIVING);
+    if (r.error == 0) {
+      clear_status(HTTP_CLIENT_ERROR);
+    } else {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = r.error;
+    }
+
+    if (cb) cb(resp, r.error);
+  }
+}
+
+void uvcpp_http_client::on_h3_disconnect(uvcpp_h3_connection&) {
+  const std::weak_ptr<char> tok = alive_token_;
+
+  // 与 `on_h2_disconnect` 同一条纪律、同一个次序：**先把要交付的东西全部攒齐、
+  // 把整个 h3 层摘走，再碰用户代码** —— 用户回调里完全可以把整个 client 析构掉。
+  //
+  // 攒的时候不去问"每条流对端回过什么"：h3 层在叫我们之前，已经把每一条在飞的
+  // 本地请求都结算过一次了（`uvcpp_h3_connection::on_quic_close` 的次序是先
+  // 逐条 `complete_response(UV_ECANCELED)`、再 `cbs_.on_disconnect`），所以下面
+  // 这一轮 `take_completed()` 是**完整**的，一条都不会漏。
+  struct delivery {
+    std::function<void(const uvcpp_http_response&, int)> cb;
+    uvcpp_http_response resp;
+    int                 error = 0;
+  };
+  std::vector<delivery> done;
+
+  if (h3_ != nullptr) {
+    h3_response r;
+    while (h3_->take_completed(r)) {
+      std::map<int64_t, h3_stream_state>::iterator it =
+          h3_streams_.find(r.stream_id);
+      if (it == h3_streams_.end()) continue;
+      delivery d;
+      d.resp  = h3_to_http_response(r);
+      d.error = r.error;
+      d.cb    = std::move(it->second.cb);
+      h3_streams_.erase(it);
+      done.push_back(std::move(d));
+    }
+  }
+
+  // `delete h3_` 是**被允许的**：`on_disconnect` 的契约就是"持有者在这里销毁本
+  // 对象"，它返回后 `uvcpp_h3_connection` 不再碰自己任何一个成员（存活令牌已经
+  // 置位，见它的析构）。
+  delete h3_;
+  h3_ = nullptr;
+  h3_active_ = false;
+
+  // 队列里按理已经空了（上面那段说了为什么）。真剩下谁也不能让它干等：兜一个
+  // `UV_ECANCELED`，且**如实报"一个响应头都没收到过"**（`HTTP_STATUS_NONE`），
+  // 绝不退回默认构造的那个 `200 OK`。
+  for (std::map<int64_t, h3_stream_state>::iterator it = h3_streams_.begin();
+       it != h3_streams_.end(); ++it) {
+    if (!it->second.cb) continue;
+    delivery d;
+    d.resp  = h3_response_not_received(it->first);
+    d.error = UV_ECANCELED;
+    d.cb    = std::move(it->second.cb);
+    done.push_back(std::move(d));
+  }
+  h3_streams_.clear();
+
+  // 与 h2 那条路同一条理由：摘掉 CONNECTED，`send()` 的头一道守卫就挡住之后的
+  // 发送（拿到 `UV_ENOTCONN` 而不是"往一条死连接上写"）；**不置**
+  // `HTTP_CLIENT_CLOSED` —— 那个标志在本类里是"`tcp_` 的句柄已经关完了"。
+  clear_status(HTTP_CLIENT_CONNECTED);
+  set_status(HTTP_CLIENT_ERROR);
+  last_error_code_ = UV_ECANCELED;
+
+  for (size_t i = 0; i < done.size(); ++i) {
+    if (tok.expired()) return;
+    if (done[i].cb) done[i].cb(done[i].resp, done[i].error);
+  }
+}
+
+#endif  // UVCPP_HTTP3_ENABLE
 
 }  // namespace uvcpp
 

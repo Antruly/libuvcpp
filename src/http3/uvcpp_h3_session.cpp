@@ -34,6 +34,42 @@ static_assert(H3_EXCESSIVE_LOAD == NGHTTP3_H3_EXCESSIVE_LOAD,
 namespace {
 
 /**
+ * @brief 大小写无关地比一个头名。
+ *
+ * 本层在 `web/` **之下**（`src/http3/` 里一处 `web/` 的引用都没有，这是分层的
+ * 一部分），所以借不到 `web/uvcpp_http_common.h` 的 `http_name_equal` ——
+ * 那一条是 **`const char*` 重载**，也是为了零分配，这里照它的样子自己写一个。
+ */
+bool h3_name_is(const std::string& n, const char* lit) {
+  const size_t nlen = std::strlen(lit);
+  if (n.size() != nlen) return false;
+  for (size_t i = 0; i < nlen; ++i) {
+    const char a = n[i];
+    const char b = lit[i];
+    const char la = (a >= 'A' && a <= 'Z') ? static_cast<char>(a + 32) : a;
+    if (la != b) return false;
+  }
+  return true;
+}
+
+/**
+ * @brief 连接专属头（RFC 9114 §4.2）：**h3 上不该存在**的字段。
+ *
+ * h3 的"连接"是整个 QUIC 连接、不是这一条流，所以"这条消息之后要不要保持连接"
+ * 在这条协议上根本不是一个问题 —— 上游把带这些字段的消息判成**畸形**。
+ *
+ * 剥的动作必须在这一层：h1 那条路**自己会加** `connection: keep-alive`
+ * （`uvcpp_http_request.cpp` 的 `to_string()` 与响应那边的兜底），于是同一个
+ * `uvcpp_http_request` 走 h1 能过、走 h3 会被对端判畸形。与
+ * `uvcpp_h2_session.cpp` 那张名单逐字同源（那边也是"收到即拒、发出即剥"）。
+ */
+bool h3_is_connection_specific(const std::string& n) {
+  return h3_name_is(n, "connection") || h3_name_is(n, "keep-alive") ||
+         h3_name_is(n, "transfer-encoding") || h3_name_is(n, "upgrade") ||
+         h3_name_is(n, "proxy-connection");
+}
+
+/**
  * @brief nghttp3 调用栈的深度守卫。
  *
  * 规矩只有一条：**`nghttp3_conn_read_stream2()` 与 `nghttp3_conn_writev_stream()`
@@ -311,6 +347,12 @@ int uvcpp_h3_session::submit(const std::vector<h3_header>& headers,
   for (size_t i = 0; i < headers.size(); ++i) {
     const h3_header& h = headers[i];
     if (h.name.empty()) return UV_EINVAL;
+    // 连接专属头**根本不发**，所以它也不进预算 —— 计在账上会让一串被剥掉的
+    // 头把一个合法请求顶成 `UV_EMSGSIZE`。剥的理由见上面那张名单。
+    if (h.kind == h3_header_kind::REGULAR &&
+        h3_is_connection_specific(h.name)) {
+      continue;
+    }
     // RFC 9114 §4.2.2 的计法：`namelen + valuelen + 32`。与收方向的
     // `h3_header_budget` 是同一个数、同一个算法，这一点必须一致 —— 两边不一样
     // 就会出现"我们肯收 64 KiB 却只肯发 32 KiB"这种没法解释的不对称。

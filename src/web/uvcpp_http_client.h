@@ -52,6 +52,14 @@ class uvcpp_h2_session;
 class uvcpp_h2_stream;
 #endif
 
+#if UVCPP_HTTP3_ENABLE
+// 同一条纪律。`http3/uvcpp_h3_connection.h` 自己**不**含 nghttp3 的类型（它
+// 装得出去），但本头是每个使用者每个 TU 都要引的，让它多背一层包含关系没有
+// 好处 —— 前置声明足够，定义全在 .cpp 里。
+class uvcpp_h3_connection;
+class uvcpp_quic_client;
+#endif
+
 // =========================================================================
 // Status flags
 // =========================================================================
@@ -259,12 +267,6 @@ class UVCPP_API uvcpp_http_client {
   bool http2_enabled() const;
 
   /**
-   * @brief 本次连接**实际**协商出的 ALPN 协议：`"h2"` / `"http/1.1"` /
-   *        `""`（未连接或没走 TLS）。连接前恒为空。
-   */
-  const std::string& negotiated_alpn() const;
-
-  /**
    * @brief 对端在这个连接上发过 GOAWAY 没有。
    *
    * **这是"优雅告别"与"网络挂了"之间唯一的区分手段。** 两者在 `send()` 的
@@ -279,6 +281,46 @@ class UVCPP_API uvcpp_http_client {
   uint32_t peer_goaway_error_code() const;
   /// 对端 GOAWAY 里的 `last_stream_id`；没收到过时是 0。
   int32_t peer_goaway_last_stream_id() const;
+#endif
+
+#if UVCPP_NGHTTP2_ENABLE || UVCPP_HTTP3_ENABLE
+  /**
+   * @brief 本次连接**实际**协商出的 ALPN 协议。
+   *
+   * - TCP 那条腿（h1/h2）：`"h2"` / `"http/1.1"`，没走 TLS 时是 `""`；
+   * - **h3 那条腿**：`"h3"` —— 它谈在 QUIC 自己的 TLS 握手里，与 `tcp_` 毫无
+   *   关系（见下面 `set_http3_enabled()` 的说明）。
+   *
+   * 连接前恒为空。
+   */
+  const std::string& negotiated_alpn() const;
+#endif
+
+#if UVCPP_HTTP3_ENABLE
+  /**
+   * @brief 让后续连接走 **HTTP/3（QUIC/UDP）** 而不是 TCP（**默认关**）。
+   *
+   * 与 `set_http2_enabled()` 是**两件不同的事**，别当成"升级链上的下一级"：
+   * h2 是"在 TCP 上谈一个更好的协议"，h3 是**另一条传输**（UDP）。所以
+   *
+   * - **不碰 TCP 那条腿的 ALPN 名单**：`"h3"` 绝不进 `connect()` 里那份
+   *   `{"h2","http/1.1"}` 列表 —— 在 TCP 的 ClientHello 里报 `h3` 只会让对端
+   *   把 h3 的二进制流喂给 llhttp，症状是"连上了、写成功了、响应永远不来"。
+   * - 打开之后 `connect()` 建的是 `uvcpp_quic_client`（ALPN 用它自己的默认
+   *   `"h3"`），**不建 TCP socket**；`send()` 走 h3 那条路。
+   * - **必须配 TLS**：QUIC 没有明文模式（ALPN 是 TLS 扩展），所以没调
+   *   `set_ssl_context()` 时 `connect()` 返回 `UV_EINVAL`。
+   * - **只有异步系列**（`connect(host,port,cb)` + `send(req,cb)`）。`connect_wait`
+   *   / `send_wait` / `send_wait_plain` 一律 `UV_ENOTSUP`：同步那条路是对
+   *   **socket fd** 做阻塞收发，而 QUIC 没有"一条连接的 fd"这回事，它要做的是
+   *   泵它自己的循环 —— 那正是 `run()` 的事。
+   * - 两个开关同时打开时 **h3 优先**（它换的是传输，不是协议名）。
+   *
+   * `UVCPP_ENABLE_HTTP3` 没开时这个函数不存在（整个 API 都在
+   * `#if UVCPP_HTTP3_ENABLE` 里）。
+   */
+  void set_http3_enabled(bool on);
+  bool http3_enabled() const;
 #endif
 
  private:
@@ -323,6 +365,24 @@ class UVCPP_API uvcpp_http_client {
   /// `send()` 的 h2 实现：提交一条流并把字节冲出去。
   int  send_h2(const uvcpp_http_request& req,
                std::function<void(const uvcpp_http_response&, int)> cb);
+#endif
+
+#if UVCPP_HTTP3_ENABLE
+  // h3 的回调跑在 QUIC 那些回调的栈里（可能同步跑进用户的 `send()` 回调），
+  // 所以纪律与 h2 那一段相同：**先把要交付的东西攒齐、把条目从表里摘走，
+  // 再碰用户代码**。
+  /** @brief `connect()` 的 h3 那条路：建端点、装 h3 层、发起握手。 */
+  int  connect_quic(const char* host, int port, std::function<void(int)> cb);
+  /// 建 h3 层并把 QUIC 的回调接上。**必须在 `quic_->connect()` 返回之后、
+  /// 循环转起来之前调**——理由见定义处那段（晚了就收不到 `on_alpn`）。
+  int  start_h3();
+  /// `send()` 的 h3 实现：提交一条请求并把字节冲出去。
+  int  send_h3(const uvcpp_http_request& req,
+               std::function<void(const uvcpp_http_response&, int)> cb);
+  /// 把 h3 层里已经收全的响应交付给各自的回调（一次一条，见 `take_completed`）。
+  void pump_h3_completed();
+  /// h3 层报"底层 QUIC 连接结束了"。**持有者在这里销毁 h3 层**。
+  void on_h3_disconnect(uvcpp_h3_connection& c);
 #endif
 
   // -------------------------------------------------------------------
@@ -392,8 +452,31 @@ class UVCPP_API uvcpp_http_client {
   uint32_t peer_goaway_code_ = 0;
   int32_t  peer_goaway_last_ = 0;
 
-  std::string negotiated_alpn_;
   std::map<int32_t, h2_stream_state> h2_streams_;
+#endif
+
+#if UVCPP_NGHTTP2_ENABLE || UVCPP_HTTP3_ENABLE
+  /// 本次连接协商出来的 ALPN。**两条腿各写各的**：h2 那份来自
+  /// `tcp_->tls_alpn_selected()`（TCP 的 TLS 握手），h3 那份来自
+  /// `quic_->connection()->alpn_selected()`（QUIC 自己的 TLS 握手）—— 不是同一次
+  /// 握手的两种说法，所以不能共用一条写入路径。读取只有 `negotiated_alpn()`。
+  std::string negotiated_alpn_;
+#endif
+
+#if UVCPP_HTTP3_ENABLE
+  /// 一条在飞的 h3 请求各攒一份，与 `h2_stream_state` 逐字同形。**响应按流号
+  /// 归位**，理由与 h2 那条相同（一条连接上可以同时有好几条流）。
+  struct h3_stream_state {
+    std::function<void(const uvcpp_http_response&, int)> cb;
+  };
+
+  bool http3_enabled_ = false;   // 用户意图（走不走 h3）
+  bool h3_active_ = false;       // 本对象现在真的在跑 h3（h3_ 非空且活着）
+  uvcpp_quic_client*   quic_ = nullptr;  // h3 那条腿的端点。本对象拥有它。
+  uvcpp_h3_connection* h3_   = nullptr;  // 不拥有它底下那条 QUIC 连接
+  /// 键是**流号**。完成的响应本身在 h3 层的队列里（`take_completed`），
+  /// 这里只存"这条流要交给谁" —— 与 h2 那边一个道理：两份真值会走散。
+  std::map<int64_t, h3_stream_state> h3_streams_;
 #endif
 
 #if UVCPP_ZLIB_ENABLE

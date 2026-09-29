@@ -249,7 +249,7 @@ inline const char* http_status_reason(http_status s) {
 const http_status HTTP_STATUS_NONE = static_cast<http_status>(0);
 
 // =========================================================================
-// HTTP 版本 — 预埋 HTTP/2 枚举值，当前只实现 1.0 和 1.1
+// HTTP 版本 — 1.0 / 1.1 走 llhttp，2 与 3 是协商出来的、没有版本行
 //
 // NOTE: Values use "HV_" prefix to avoid collision with Windows SDK
 // macros (HTTP_1_1, HTTP_VERSION_1_1, etc.)
@@ -259,6 +259,7 @@ enum class uvcpp_http_version : uint8_t {
   HVER_10 = 0,  // HTTP/1.0 (RFC 1945)
   HVER_11 = 1,  // HTTP/1.1 (RFC 7230-7235)
   HVER_20 = 2,  // HTTP/2   (RFC 7540/9113)
+  HVER_30 = 3,  // HTTP/3   (RFC 9114)
 };
 
 /**
@@ -266,6 +267,7 @@ enum class uvcpp_http_version : uint8_t {
  *
  * h2 是 `"HTTP/2"`，**不是** `"HTTP/2.0"` —— 后者只在早期的
  * `draft-ietf-httpbis-http2` 里出现过，RFC 7540 定稿后就没有 `.0` 了。
+ * h3 同理是 `"HTTP/3"`（RFC 9114 §3.1 里的版本标识就是它，同样没有 `.0`）。
  *
  * 注意这个串在 h2 上**没有任何线上面貌**：h2 没有版本行、没有 reason phrase，
  * 版本是 ALPN 协商出来的。它只出现在"把 h2 消息当 h1 排版"的地方（调试输出、
@@ -277,6 +279,7 @@ inline const char* uvcpp_http_version_str(uvcpp_http_version v) {
     case uvcpp_http_version::HVER_10: return "HTTP/1.0";
     case uvcpp_http_version::HVER_11: return "HTTP/1.1";
     case uvcpp_http_version::HVER_20: return "HTTP/2";
+    case uvcpp_http_version::HVER_30: return "HTTP/3";
     default:                          return "HTTP/1.1";
   }
 }

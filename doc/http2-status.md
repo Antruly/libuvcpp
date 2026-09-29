@@ -52,7 +52,7 @@
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
   收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:499`）。
-- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1295`，RFC 9113 §8.7）：
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1387`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
@@ -72,7 +72,7 @@
 
 ### 1.3 三个接入面
 
-- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:255`）
+- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:263`）
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:190-190`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
@@ -149,7 +149,7 @@
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
 - **一处已死的成员**（只报告，本批没动）：
-  - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:62`）全仓零引用 ——
+  - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:70`）全仓零引用 ——
     这一处**确实不影响行为**，它只是个没接线的状态位。
 - **`keep_alive_` 那一处已经修掉了**（原先列在上面这条清单里，因为后果是真的）。
   当时的形状是：它只在 `on_response_complete()` 里被写、**从没被读**，于是调用方
@@ -158,10 +158,10 @@
   也是空的，一个字节都不影响发出去的请求。
   现在两个方向都兑现了：响应说 `close`（含 `Connection` 逗号列表里不在首项的
   `close`）就在交付回调之前清掉 `HTTP_CLIENT_CONNECTED`
-  （`src/web/uvcpp_http_client.cpp:636-656`），第二次 `send()` 同步拒成
+  （`src/web/uvcpp_http_client.cpp:710-730`），第二次 `send()` 同步拒成
   `UV_ENOTCONN` —— 与 h2 那条 `peer_goaway_received()` 的提前拦截同一形状；
   `set_keep_alive(false)` 则让请求真的带上 `connection: close`
-  （`src/web/uvcpp_http_client.cpp:452-467`）。
+  （`src/web/uvcpp_http_client.cpp:516-531`）。
   用例：`tests/functional/web_http_client_keepalive_func.cpp`。
   两件事都属于 h1，与本页的 h2 无关，留在这儿只为了让下次盘查的人不必再核一遍。
 
