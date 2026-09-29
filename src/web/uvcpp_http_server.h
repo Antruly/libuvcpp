@@ -44,6 +44,18 @@ namespace uvcpp {
 class uvcpp_h2_connection;
 #endif
 
+// 身份凭证那个类同上，但**无条件**前向声明：下面 `set_quic_ssl_context()` 的
+// 声明不带 `#if`（理由写在那一条上）。
+class uvcpp_ssl_context;
+
+#if UVCPP_HTTP3_ENABLE
+// h3 与 QUIC 两层同 h2 那条理由：头都是 pimpl 形状的（nghttp3 / ngtcp2 只在
+// .cpp 里），引了就把"关掉 http3 也能编 web 模块"作废。
+class uvcpp_h3_connection;
+class uvcpp_quic_server;
+class uvcpp_quic_connection;
+#endif
+
 class uvcpp_http_parser;
 
 // =========================================================================
@@ -172,6 +184,64 @@ class UVCPP_API uvcpp_http_server {
   int bindIpv4(const char* ip, int port);
   int bindIpv6(const char* ip, int port);
   int listen(int backlog = 128);
+
+#if UVCPP_HTTP3_ENABLE
+  /**
+   * @brief 起一个 **HTTP/3（QUIC/UDP）** 监听口。
+   *
+   * 与 @ref listen 那份 TCP 口**各自独立**：两个都开 = 同一个服务端对象同时
+   * 用 h1/h2（TCP）与 h3（QUIC）服务，只开一个是合法的。路由表、兜底处理函数、
+   * 压缩旋钮全是**同一份** —— 处理函数不需要知道自己被哪条传输调起来。
+   *
+   * @param port UDP 端口。**0 = 让内核挑**，之后用 @ref quic_listen_port 读回来。
+   * @param ip   nullptr = 通配（IPv4 `0.0.0.0`），与 `uvcpp_quic_server::bind()`
+   *             同一套取值（IPv6 请用 IP 字面量，如 `"::1"`）。
+   *
+   * @return 0 成功；`UV_EALREADY` 本对象上已经有一个 QUIC 口；
+   *         `UV_EINVAL` 还没装 TLS 上下文（见 @ref set_quic_ssl_context：
+   *         QUIC 没有明文模式）；其余是 bind / listen 的失败码。
+   *
+   * @note **顺序**：`set_quic_ssl_context()` → `listen_quic()` → `run()`。与 TCP
+   *       那条腿一样，端口要 `listen_quic()` 之后才真的可连。
+   *
+   * @note **共用一条循环**：QUIC 端点**不做多循环扇出**（`uvcpp_quic_server`
+   *       只有一条循环），而它用的就是 @ref get_tcp_server 那条 —— 所以
+   *       @ref run 与 @ref stop 对两种传输一次管全，调用方不必为 h3 多写一行。
+   *
+   * @warning **h3 上暂不支持流式路由**。`post_stream` 注册的流式处理函数与
+   *          `set_stream_claim` 装的认领钩子在 TCP 那条路上才生效；一条 h3 请求
+   *          撞上它们时**不会**被静默改道，而是回 500 并在 stderr 上说明。
+   *          同理，处理函数在 h3 上拿到的是 `client == nullptr`，`resp.deferred`
+   *          也没法兑现 —— 撞上它同样回 500 并说明。
+   *
+   * @note 这一格（连同下面两格）跟着 `UVCPP_HTTP3_ENABLE` 一起在/不在：HTTP/3
+   *       没编进来时**整个 h3 公开面都不存在**，与 `uvcpp_http_client` 那边的
+   *       `set_http3_enabled()` 同一套做法。这是**编译期**的"没有"，不是运行时
+   *       的失败 —— 也因此，`UVCPP_ENABLE_HTTP3=OFF` 的树里本类与从前逐字相同。
+   */
+  int listen_quic(int port, const char* ip = nullptr);
+
+  /**
+   * @brief 给 h3 那条腿装身份凭证。**必须早于 @ref listen_quic。**
+   *
+   * QUIC 的每条连接在**首包**时就要有一个可用的 SSL_CTX（ALPN 是 TLS 扩展，
+   * QUIC 没有明文模式），所以装晚了 `listen_quic()` 直接返回 `UV_EINVAL`
+   * —— 而不是收下一个永远握不上手的端口。
+   *
+   * 与 TCP 那条腿**分开装**（`get_tcp_server()->set_ssl_context()`）：它们可以
+   * 不是同一份凭证，而且用途不同 —— TCP 那份要协商 `h2`，QUIC 这份只需要 h3
+   * （`uvcpp_quic_server` 默认就用 `"h3"`）。
+   */
+  void set_quic_ssl_context(uvcpp_ssl_context* ctx);
+
+  /**
+   * @brief h3 那条腿实际绑上的 UDP 端口；没起来时返回 0。
+   *
+   * 与 `uvcpp_tcp_server` 那边取端口的方式不同，这里给的是个直读的口子：
+   * QUIC 端点不在 `get_tcp_server()` 的账上，没有别的门能问到它。
+   */
+  int quic_listen_port() const;
+#endif
 
   // -------------------------------------------------------------------
   // Route registration
@@ -399,7 +469,20 @@ class UVCPP_API uvcpp_http_server {
   // Loop control
   // -------------------------------------------------------------------
 
+  /**
+   * @brief 跑循环。**两种传输共用这一条循环**（见 @ref listen_quic），所以
+   *        TCP 与 QUIC 两个端口都由这一句转起来，不需要为 h3 另调一次。
+   */
   int run(uv_run_mode md = UV_RUN_DEFAULT);
+
+  /**
+   * @brief 停机：TCP 那条腿收尾，h3 那条腿的循环也停掉。
+   *
+   * @note **只开 h3 也必须调它。** `uvcpp_tcp_server::stop()` 在"没在 listen"
+   *       时是同步早返回的 —— QUIC-only 的服务端正好是那个形状，于是
+   *       "h3 那边没人停循环"会让 `run()` 永远不回来。这一条的处置写在本函数
+   *       的实现里（两个 server 都要停），调用方不必自己补。
+   */
   void stop(std::function<void()> on_stopped = nullptr);
 
   // -------------------------------------------------------------------
@@ -997,6 +1080,20 @@ class UVCPP_API uvcpp_http_server {
   bool apply_compression(conn_ctx& ctx, uvcpp_http_response& resp);
 
   /**
+   * @brief @ref apply_compression 的**按编码串取值**版本 —— 不读任何上下文。
+   *
+   * 压缩决策只用到请求的一个字段（`accept-encoding`），这一整段逻辑是**协议
+   * 无关**的。h1 那条路那个字段在连接级单槽里（`conn_ctx::accept_encoding`），
+   * h2 把它临时借进去，h3 则连一个可借的上下文字段都没有（它压根不复用
+   * `conn_ctx`）—— 于是把实现搬到这里，三边共用同一份：**同一个处理函数在三条
+   * 传输上的响应形状必须逐字相同**，抄成两份就是给"以后只改了一份"留口子。
+   *
+   * @param accept_encoding 这条**请求**的 `accept-encoding` 头值（空 = 没有）。
+   */
+  bool apply_compression_for(const std::string& accept_encoding,
+                             uvcpp_http_response& resp);
+
+  /**
    * @brief Answer during the headers callback and stop caring about the rest.
    *
    * Queues a `Connection: close` response, marks the context rejected so no
@@ -1058,11 +1155,91 @@ class UVCPP_API uvcpp_http_server {
                            uvcpp_http_request& req);
 #endif
 
+#if UVCPP_HTTP3_ENABLE
+  // -------------------------------------------------------------------
+  // HTTP/3 那条腿（QUIC/UDP）
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 一条 h3 连接上属于**本服务端**的东西。
+   *
+   * 今天只有一格（h3 驱动层）。做成结构体而不是直接把 `uvcpp_h3_connection*`
+   * 当值塞进表里，与 @ref conn_ctx 同一个形状：这张表的键是连接，将来要挂
+   * 别的按连接的东西时不必改表。
+   */
+  struct quic_ctx {
+    /// 这条 QUIC 连接上的 h3 驱动层；`remove_h3_ctx()` 之后为 nullptr。
+    uvcpp_h3_connection* h3 = nullptr;
+  };
+
+  /// 新到的 QUIC 连接（`uvcpp_quic_server::listen` 的回调里进来）。
+  void on_quic_connection(uvcpp_quic_connection* conn);
+
+  /**
+   * @brief 把一条**已收全**的 h3 请求交给路由，并在它那条流上回话。
+   *
+   * `req` 是已经从 `h3_request` 转过来的 **web 层请求对象**（转换在
+   * `on_quic_connection` 的回调里做，`h3_request` 因此不出现在本类的声明里）。
+   * `req.version == HVER_30`、`req.stream_id` 是那条 h3 流 —— 一个处理函数
+   * 靠这两样分辨自己在替哪条传输、哪条流回话。
+   */
+  void dispatch_h3_request(uvcpp_quic_connection* conn, uvcpp_http_request& req);
+
+  /**
+   * @brief 在指定的 h3 流上回一个响应。
+   *
+   * 与 `send_h2_response` 同一套规矩：补 `date`、走同一份压缩、HEAD 按 GET 的
+   * 长度钉 `content-length` 但不发体、连接专属头交给会话层剥。
+   *
+   * @param stream_id 由调用方**显式**给（不从 `resp.stream_id` 读）：处理函数
+   *        整对象替换过 `resp` 时那一格会被冲成 0（h2 那边同一个理由）。
+   * @param accept_encoding 这条流的 `accept-encoding` —— 与 h2 一样按流取值，
+   *        因为一条 h3 连接上同样并发跑着多条流。
+   */
+  int send_h3_response(uvcpp_quic_connection* conn, int64_t stream_id,
+                       uvcpp_http_response& resp,
+                       const std::string& accept_encoding, bool is_head);
+
+  /**
+   * @brief 底层 QUIC 连接结束了：摘表 + 删 h3 层。**幂等**。
+   *
+   * 由 `on_disconnect` 调，析构里也走一遍（那条路上 `on_disconnect` 可能从没
+   * 跑过）。**先摘表再删对象** —— 与 `remove_ctx` 同一个次序，理由见那里。
+   */
+  void remove_h3_ctx(uvcpp_quic_connection* conn);
+#endif
+
   /// 没有显式打开就恒 false。
   bool http2_enabled_ = false;
 
   uvcpp_tcp_server* tcp_server_ = nullptr;
   int status_ = HTTP_SERVER_NONE;
+
+#if UVCPP_HTTP3_ENABLE
+  /**
+   * @brief h3 连接的登记表，键是 QUIC 连接。
+   *
+   * **只有一张，不按循环切** —— 与 @ref contexts_ 相反，而这**不是取舍**：
+   * QUIC 端点只有一条循环（`uvcpp_quic_server` 不提供多循环扇出，用的就是
+   * `tcp_server_` 那条），所以这张表的每一次访问都落在同一条循环的线程上，
+   * `ctxs_at()` 那套按循环取表的机制在这里没有对应物。
+   *
+   * 键用 `uvcpp_quic_connection*` 是唯一的选择：QUIC 连接没有"代次号"，而
+   * h3 层与 QUIC 连接一一对应。**值刻意不是 `conn_ctx`** —— 那个结构体在 h1
+   * 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付的，哪怕一条 h3
+   * 请求都没有。
+   */
+  std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_;
+
+  /**
+   * @brief QUIC 端点。懒建（@ref listen_quic 里），**与 `tcp_server_` 共用
+   *        同一条循环**，所以 @ref run / @ref stop 不必知道它存在也能转起来。
+   */
+  uvcpp_quic_server* quic_server_ = nullptr;
+
+  /// h3 那条腿的身份凭证（@ref set_quic_ssl_context 记下的，建端点时转交）。
+  uvcpp_ssl_context* quic_ssl_ctx_ = nullptr;
+#endif
 
   std::vector<route_entry> routes_;
   http_request_handler default_handler_;

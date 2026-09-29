@@ -47,9 +47,9 @@
 ## 1. 这一层是什么
 
 `uvcpp_http_server` **不是从零写的 socket 服务器** —— 它建在 `uvcpp_tcp_server`
-之上（`src/web/uvcpp_http_server.cpp:68-70`：构造函数第一件事就是
+之上（`src/web/uvcpp_http_server.cpp:139-141`：构造函数第一件事就是
 `new uvcpp_tcp_server()`），每条连接配一个独立的 `uvcpp_http_parser` 上下文
-（`src/web/uvcpp_http_server.h:1103` 的 `contexts_` —— 装的是**每连接状态**，
+（`src/web/uvcpp_http_server.h:1280` 的 `contexts_` —— 装的是**每连接状态**，
 单循环时它是一张 `std::map<uvcpp_tcp_client*, conn_ctx>`；多循环下它按循环分成
 若干张，取表见 `doc/multiloop-design.md` §4.1）。
 
@@ -65,7 +65,7 @@
 （`<webapp/uvcpp_web_handler.h>`）。web 层的异步续跑只有一条路：`resp.deferred = true`。
 
 **三、`web/` 有 h2，但入口只有两条。** 服务端 `set_http2_enabled(true)`
-（`src/web/uvcpp_http_server.h:192-192`）加 TLS+ALPN，客户端
+（`src/web/uvcpp_http_server.h:262-262`）加 TLS+ALPN，客户端
 `set_http2_enabled(true)`（`src/web/uvcpp_http_client.h:445`）。
 两条都**默认关**；只有 `webapp/` 框架层默认开、零配置自动协商。
 **不做 h2c** —— 明文升级在 `src/` 里零实现。
@@ -95,7 +95,7 @@
 
 ## 3. 最小服务端
 
-这就是 `src/web/uvcpp_http_server.h:151-160` 那段官方示例（我把它补成了完整 TU）：
+这就是 `src/web/uvcpp_http_server.h:163-172` 那段官方示例（我把它补成了完整 TU）：
 
 ```cpp
 #include <web/uvcpp_http_server.h>
@@ -123,8 +123,8 @@ int main() {
 ```
 
 `bind` / `bindIpv4` / `bindIpv6` / `listen` 四个都在这里转调 `uvcpp_tcp_server`，
-返回 libuv 错误码（`src/web/uvcpp_http_server.cpp:167-196`）。`listen` 的默认 backlog 是
-128（`src/web/uvcpp_http_server.h:174-174`）。四个里只有 `listen` 多做一件事：转调之前
+返回 libuv 错误码（`src/web/uvcpp_http_server.cpp:258-287`）。`listen` 的默认 backlog 是
+128（`src/web/uvcpp_http_server.h:186-186`）。四个里只有 `listen` 多做一件事：转调之前
 先把每循环的上下文表按 `loop_count()` 定型 —— 多循环时工作循环的线程是在
 `set_loops()` 里放行的，等它接手连接再取表就晚了（`doc/multiloop-design.md` §4）。
 
@@ -145,13 +145,13 @@ void doc_graceful_shutdown(uvcpp::uvcpp_http_server& server) {
 ```
 
 想一步到位就两个都调。连接级的 `close_connection()` 是 **private**
-（`src/web/uvcpp_http_server.h:994-994`）—— 单个连接只能从 `uvcpp_tcp_client` 那侧关。
+（`src/web/uvcpp_http_server.h:1077-1077`）—— 单个连接只能从 `uvcpp_tcp_client` 那侧关。
 
 ---
 
 ## 4. 路由与匹配规则
 
-注册 API **全部返回 `void`**，没有失败通道（`src/web/uvcpp_http_server.h:253-286`）：
+注册 API **全部返回 `void`**，没有失败通道（`src/web/uvcpp_http_server.h:323-356`）：
 
 ```cpp
 #include <net/uvcpp_tcp_client.h>
@@ -183,7 +183,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
 }
 ```
 
-**匹配规则（`src/web/uvcpp_http_server.cpp:241-254`）：剥掉 query 再逐字节比路径，
+**匹配规则（`src/web/uvcpp_http_server.cpp:386-399`）：剥掉 query 再逐字节比路径，
 线性扫描，首次命中即返回。** 于是：
 
 - **没有参数、没有通配、没有正则、没有中间件**（`src/webapp/uvcpp_web_router.h:9-14`
@@ -191,17 +191,17 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
 - **重复注册同一路径时先注册的赢，后面的永远不可达** —— 而 API 返回 `void`，
   没有任何提示。
 - 都没命中 → `default_handler_`；`default_handler_` 为空 → 直接 **404**
-  （`src/web/uvcpp_http_server.cpp:676-681`）。
+  （`src/web/uvcpp_http_server.cpp:821-826`）。
 - **分不出 404 和 405**：`get("/x")` 已注册时来一个 `POST /x`，走的还是兜底
   或 404，不会回 405。
 
-路由表就是个 `std::vector`（`src/web/uvcpp_http_server.cpp:216-239`），
+路由表就是个 `std::vector`（`src/web/uvcpp_http_server.cpp:361-384`），
 `listen()` 之后仍可以改；但它没有锁。
 
 ### 请求目标里的 query 要自己解
 
 **web 层不提供任何 query / cookie / form / URL 解码工具，`req.url` 就是原始请求目标
-（含 `?query`）。** 路由匹配时会把 query 剥掉再去比（`src/web/uvcpp_http_server.cpp:243-246`），
+（含 `?query`）。** 路由匹配时会把 query 剥掉再去比（`src/web/uvcpp_http_server.cpp:388-391`），
 但**解析 query 是 handler 自己的事** —— 这一层没有这个函数。要用就在 `webapp/` 的
 `web_parse_query()`（`src/webapp/uvcpp_web_util.h:179`）或者自己写一个。
 
@@ -216,7 +216,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
   接进来的（`src/webapp/uvcpp_web_app.cpp:1930`）。
 
 `stream_handler` 拿到的 `req` 是 `ctx.stream_request`，**头部视图只在当次调用内有效，
-要留就自己拷**（`src/web/uvcpp_http_server.h:107-109`）。
+要留就自己拷**（`src/web/uvcpp_http_server.h:119-121`）。
 
 ---
 
@@ -284,7 +284,7 @@ h2 连接上要么自己设回去，要么改用带 `stream_id` 的 `send_respon
 ## 6. 异步响应
 
 **handler 返回之前没发响应，就再也没机会发了** —— 除非把 `resp.deferred` 置真。
-框架见到它就直接 return（`src/web/uvcpp_http_server.cpp:687-688`），
+框架见到它就直接 return（`src/web/uvcpp_http_server.cpp:832-833`），
 由你自己在之后（且必须在 loop 线程上）调 `send_response()`。
 
 真实代码里的"之后"是异步完成回调。库内推荐的卸载重活方式是 `uvcpp_work`：
@@ -327,19 +327,19 @@ void doc_deferred(uvcpp::uvcpp_http_server& server) {
 }
 ```
 
-`connection_generation()`（`src/web/uvcpp_http_server.h:572-572`）是本层最容易被忽略、
+`connection_generation()`（`src/web/uvcpp_http_server.h:655-655`）是本层最容易被忽略、
 又最容易出致命错的 API：**返回 0 表示这条连接已经不在服务器的登记表里，此时不该写它。**
 代次号单调递增、永不复用，所以"连接还活着"时号不变、"地址被新连接复用"时号对不上
-（`:1075-1081`）。`is_connected()` 就是 `generation != 0`（`:575`）。
+（`:1252-1258`）。`is_connected()` 就是 `generation != 0`（`:658`）。
 
 **`send_response()` 会把 `resp.body` 移走。** 两块写（`nbufs = 2`）时 body 被
 `std::move`，之后 `resp.body.size()` 是 0。要记"上线了多少 body"就用它的**返回值**
-（`src/web/uvcpp_http_server.h:427-440`）。webapp 正是这么记访问日志的。
+（`src/web/uvcpp_http_server.h:510-523`）。webapp 正是这么记访问日志的。
 `deferred` 的标志位在**检查之后会被清掉**，所以那个 `resp` 对象不必一直活着 ——
 但你要发送的那一份得自己留着。
 
 **`stop()` 与 `close_all_clients()` 都不唤醒写队列里的 `done`**
-（`src/web/uvcpp_http_server.cpp:86-88` 明说）。
+（`src/web/uvcpp_http_server.cpp:157-159` 明说）。
 
 ---
 
@@ -377,7 +377,7 @@ void doc_stream(uvcpp::uvcpp_http_server& server) {
 }
 ```
 
-**`write_stream` 的 `done` 契约（`src/web/uvcpp_http_server.h:482-505`）：**
+**`write_stream` 的 `done` 契约（`src/web/uvcpp_http_server.h:565-588`）：**
 
 - 入队后**保证恰好一次**，**包括连接还在队列里就被关掉的场合**；
 - **但只有 `write_stream` 返回 0 才有这个保证** —— 非 0 时 `done` **不会被调**，
@@ -385,24 +385,24 @@ void doc_stream(uvcpp::uvcpp_http_server& server) {
 - `done` **绝不在函数返回前同步跑**（`:487`）。
 
 **同名方法在 h1 与 h2 上含义不同，而且没有编译期区分手段**
-（`src/web/uvcpp_http_server.h:479-526`）：
+（`src/web/uvcpp_http_server.h:562-609`）：
 
 | | h1 | h2 |
 |---|---|---|
 | `write_stream(client, bytes, ...)` | `bytes` 是**已组好 chunked 帧**的字节 | `bytes` 是**裸 body** |
 | `end_stream(client, close_after)` | 可能关连接 | **不关连接**，只发 `END_STREAM` |
-| 在 h2 连接上调 h1 那两个重载 | `write_stream` 返回 `UV_EINVAL`、`end_stream` **静默返回**（`src/web/uvcpp_http_server.cpp:1008-1008`、`src/web/uvcpp_http_server.cpp:1037-1037`）/ `begin_stream(client, resp)` 打一条 stderr 后丢弃（`src/web/uvcpp_http_server.cpp:909-914`） | — |
+| 在 h2 连接上调 h1 那两个重载 | `write_stream` 返回 `UV_EINVAL`、`end_stream` **静默返回**（`src/web/uvcpp_http_server.cpp:1153-1153`、`src/web/uvcpp_http_server.cpp:1182-1182`）/ `begin_stream(client, resp)` 打一条 stderr 后丢弃（`src/web/uvcpp_http_server.cpp:1054-1059`） | — |
 
 **`is_head` 与 `accept_encoding` 是连接级单槽，h2 上必须按流记。**
-`src/web/uvcpp_http_server.h:699-729` 把三类后果写得很细；`send_h2_response` 里
+`src/web/uvcpp_http_server.h:782-812` 把三类后果写得很细；`send_h2_response` 里
 是临时把"这条流的值借到连接级字段"再调压缩的
-（`src/web/uvcpp_http_server.cpp:1928-1936`）。
+（`src/web/uvcpp_http_server.cpp:2081-2089`）。
 
 ### 升级到别的协议
 
-`on_upgrade(handler)`（`src/web/uvcpp_http_server.h:235`）是单槽（`src/web/uvcpp_http_server.cpp:202-204`）。
+`on_upgrade(handler)`（`src/web/uvcpp_http_server.h:305`）是单槽（`src/web/uvcpp_http_server.cpp:347-349`）。
 它被调时这条连接已经从 http 解析里摘出来了，之后的字节归你；升级时**已经读进来但
-还没解析的字节**用 `take_upgrade_leftover(client)`（`src/web/uvcpp_http_server.h:250-250` / `src/web/uvcpp_http_server.cpp:206-206`）取走 ——
+还没解析的字节**用 `take_upgrade_leftover(client)`（`src/web/uvcpp_http_server.h:320-320` / `src/web/uvcpp_http_server.cpp:351-351`）取走 ——
 客户端把 `Upgrade` 请求与第一帧 WebSocket 数据包在同一个 TCP 段里发过来是合法的，
 少了这一步那一帧就永远丢了。
 
@@ -583,7 +583,7 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 
 ## 10. 上限与旋钮
 
-**三个上限的默认值全是 0，也就是全都不限**（`src/web/uvcpp_http_server.h:1077-1079`）：
+**三个上限的默认值全是 0，也就是全都不限**（`src/web/uvcpp_http_server.h:1254-1256`）：
 
 | 旋钮 | 默认 | 越限的答复 |
 |---|---|---|
@@ -592,55 +592,55 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 | `set_max_url_bytes(n)` | 0 = 不限 | **414 + `Connection: close`** |
 
 **三者"生效时机"不一致**：头/URL 上限在 accept 时被拷进解析器
-（`src/web/uvcpp_http_server.cpp:283-284`）⇒ **listen 之后改它只对新连接生效**；
-`max_body_size_` 是每块 body 现读成员（`src/web/uvcpp_http_server.cpp:345-345`）⇒ **立刻生效**。
+（`src/web/uvcpp_http_server.cpp:428-429`）⇒ **listen 之后改它只对新连接生效**；
+`max_body_size_` 是每块 body 现读成员（`src/web/uvcpp_http_server.cpp:490-490`）⇒ **立刻生效**。
 三处头文件注释一个字都没提这个区别。
 
 **头/URL 上限对"被 claim 的请求"照样生效。** 这两道是在 llhttp 的头部回调里边收边判的
 （`src/web/uvcpp_parser` 侧 `src/web/uvcpp_http_parser.cpp:430-478`），而 claim hook
-是在 `headers_complete` 才被问的（`src/web/uvcpp_http_server.cpp:352-407`）。
+是在 `headers_complete` 才被问的（`src/web/uvcpp_http_server.cpp:497-552`）。
 所以被认领的请求**照样会被 414/431 拒掉并直接关连接**，认领者连 `HEADERS` 事件
-都收不到。**只有 `max_body_size` 真正停在认领边界**（`src/web/uvcpp_http_server.cpp:335-351`）——
-头文件把这条区别写在了 `src/web/uvcpp_http_server.h:316-319`（「a claimed request is not exempt」）
-与 `:114-116`（`max_body_size` 豁免）两处。
+都收不到。**只有 `max_body_size` 真正停在认领边界**（`src/web/uvcpp_http_server.cpp:480-496`）——
+头文件把这条区别写在了 `src/web/uvcpp_http_server.h:386-389`（「a claimed request is not exempt」）
+与 `:126-128`（`max_body_size` 豁免）两处。
 
 **头/URL 是"边收边判"的**：一超就停，代价有界，而不是先收完再判
-（`src/web/uvcpp_http_server.h:306-311`）。
+（`src/web/uvcpp_http_server.h:376-381`）。
 
 ### 压缩
 
-zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1155-1155`），最小 body 1024
-（`src/web/uvcpp_http_server.h:1156-1156`），排除的 MIME 走 `default_excluded_mime_types()`
+zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1332-1332`），最小 body 1024
+（`src/web/uvcpp_http_server.h:1333-1333`），排除的 MIME 走 `default_excluded_mime_types()`
 （`src/web/uvcpp_http_compress.cpp:146-165`）。压缩变体缓存三道限：
-单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1057-1067`）。
+单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1202-1212`）。
 
 ### 协议行为
 
 - **keep-alive**：HTTP/1.1 默认开、1.0 默认关；handler 显式设了 `connection`
-  头就听 handler 的（`src/web/uvcpp_http_server.cpp:797-811`）。
+  头就听 handler 的（`src/web/uvcpp_http_server.cpp:942-956`）。
 - **`Date` 每个响应都发，且按秒缓存**：四个出报文的口子各补一次 ——
-  `send_response`（`src/web/uvcpp_http_server.cpp:782-782`）、h1 流式
-  `begin_stream`（`src/web/uvcpp_http_server.cpp:940-940`）、h2 流式
-  `begin_stream`（`src/web/uvcpp_http_server.cpp:973-973`）、h2 整包
-  `send_h2_response`（`src/web/uvcpp_http_server.cpp:1920-1920`）。值由
+  `send_response`（`src/web/uvcpp_http_server.cpp:927-927`）、h1 流式
+  `begin_stream`（`src/web/uvcpp_http_server.cpp:1085-1085`）、h2 流式
+  `begin_stream`（`src/web/uvcpp_http_server.cpp:1118-1118`）、h2 整包
+  `send_h2_response`（`src/web/uvcpp_http_server.cpp:2073-2073`）。值由
   `uvcpp::http_date()` 造（`src/web/uvcpp_http_date.cpp:86-107`）：IMF-fixdate、
   **恒 GMT**，星期名与月份名是写死的 ASCII 表 —— 它**不**用 `strftime` 的
   `%a`/`%b`，那两个说明符在 `setlocale(LC_TIME, "")` 之后会吐本地文字，对端
   解析不了。handler 自己设过 `Date` 就不覆盖
   （`src/web/uvcpp_http_date.cpp:114-124`）。1xx 那两条报文是**裸字节**直接写
   出去的、没经这个收口，所以不带 `Date`：`100 Continue`
-  （`src/web/uvcpp_http_server.cpp:426-426`）与 WebSocket 握手
+  （`src/web/uvcpp_http_server.cpp:571-571`）与 WebSocket 握手
   （`src/web/uvcpp_ws_server.cpp:202-202`）—— RFC 9110 §6.6.1 对 1xx 只是
   **可发**，不发也合规；这是"没经手"，不是"写了排除"。
 - **`Expect: 100-continue` 支持**，且在 headers 回调里就补
-  `HTTP/1.1 100 Continue\r\n\r\n` 裸字节（`src/web/uvcpp_http_server.cpp:412-427`）—— 注释解释了为什么
+  `HTTP/1.1 100 Continue\r\n\r\n` 裸字节（`src/web/uvcpp_http_server.cpp:557-572`）—— 注释解释了为什么
   不能用 `send_response()`（1xx 不该带 `Content-Length`）。HTTP/1.0 上 `Expect`
-  被忽略（`src/web/uvcpp_http_server.cpp:696-701`）；**未知的 `Expect` 回 417**（`src/web/uvcpp_http_server.cpp:711-716`）。
-- **声明的 `Content-Length` 超限 → body 还没到就回 413**（`src/web/uvcpp_http_server.cpp:719-731`）。
-- **畸形报文走正规响应路径回 400 + `Connection: close`**（`src/web/uvcpp_http_server.cpp:521-530`），
+  被忽略（`src/web/uvcpp_http_server.cpp:841-846`）；**未知的 `Expect` 回 417**（`src/web/uvcpp_http_server.cpp:856-861`）。
+- **声明的 `Content-Length` 超限 → body 还没到就回 413**（`src/web/uvcpp_http_server.cpp:864-876`）。
+- **畸形报文走正规响应路径回 400 + `Connection: close`**（`src/web/uvcpp_http_server.cpp:666-675`），
   不是手搓字节。
 - **流水线**：一次读里可以有多条报文，解析器按消息边界 reset
-  （`src/web/uvcpp_http_server.cpp:309-332`、`src/web/uvcpp_http_server.cpp:469-485`）；**web 层不限条数**，webapp 才限。
+  （`src/web/uvcpp_http_server.cpp:454-477`、`src/web/uvcpp_http_server.cpp:614-630`）；**web 层不限条数**，webapp 才限。
 
 ### 没有的旋钮
 
@@ -658,12 +658,12 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1155-1155`�
    常见值 `UV_ENOTCONN`、`UV_ENOTSUP`、`UV_ETIMEDOUT`、`UV_ECONNRESET`、`UV_EINVAL`。
 2. **回调里的 `err` 参数**：客户端 `(resp, err)`、流式写的 `done(int)`。
 3. **返回值加 stderr**：`send_response` 在连接已不在表里时**打一条 stderr 警告
-   并返回 0**（`src/web/uvcpp_http_server.cpp:766-776`）；`begin_stream` 同理
-   （`src/web/uvcpp_http_server.cpp:892-899`）—— 但它是 `void`，你**无从判断**。
+   并返回 0**（`src/web/uvcpp_http_server.cpp:911-921`）；`begin_stream` 同理
+   （`src/web/uvcpp_http_server.cpp:1037-1044`）—— 但它是 `void`，你**无从判断**。
 
 **异常只在一处被接住**：`on_connection` / `stream_claim` / h2 连接钩子三个钩子
-里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:295-306`、`src/web/uvcpp_http_server.cpp:382-393`、`src/web/uvcpp_http_server.cpp:1784-1793`）。
-**`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:676-681`），
+里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:440-451`、`src/web/uvcpp_http_server.cpp:527-538`、`src/web/uvcpp_http_server.cpp:1937-1946`）。
+**`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:821-826`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
 （`src/webapp/uvcpp_web_app.cpp:2892-2898`）。
 
@@ -688,16 +688,16 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1155-1155`�
 **一、服务端没有超时，一个连上不发字节的连接会永久占着。**
 `uvcpp_http_server` 与 `uvcpp_tcp_server` 里没有任何超时机制
 （`src/web/` 下 grep `idle_timeout` 只命中 `uvcpp_ws_parser::is_idle`），
-`src/web/uvcpp_http_server.cpp:511-512`、`src/web/uvcpp_http_server.cpp:1460-1462` 与头文件
-`src/web/uvcpp_http_server.h:1009-1012` 现在都明写这一点。
+`src/web/uvcpp_http_server.cpp:656-657`、`src/web/uvcpp_http_server.cpp:1613-1615` 与头文件
+`src/web/uvcpp_http_server.h:1106-1109` 现在都明写这一点。
 **真实的闲置清扫在 webapp 层**：`idle_timeout_ms` 默认 **60000**
 （`src/webapp/uvcpp_web_app.cpp:214-214`），而且为 0 时连扫描句柄都不建
 （`src/webapp/uvcpp_web_app.cpp:2162-2167`）。升级成 WebSocket 的连接被排除在闲置超时之外
 （`src/webapp/uvcpp_web_app.h:829`）。
 
 **二、`req` 与 `resp` 只在本次调用期间有效。**
-`resp` 仍是 `on_request_complete` 的局部对象（`src/web/uvcpp_http_server.cpp:628-628`）；`req` 自 1.3.26 起是
-**连接上那个请求对象**的引用（`src/web/uvcpp_http_server.cpp:597-598`），handler 返回后它**不被析构**
+`resp` 仍是 `on_request_complete` 的局部对象（`src/web/uvcpp_http_server.cpp:773-773`）；`req` 自 1.3.26 起是
+**连接上那个请求对象**的引用（`src/web/uvcpp_http_server.cpp:742-743`），handler 返回后它**不被析构**
 —— 下一条请求会在**原地**把它重填一遍，所以违反「返回之后不得再读它」的症状变成了
 **静默读到下一条请求**（改前是悬垂读）。`deferred` 那句是**唯一**的例外通道。
 
@@ -706,7 +706,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1155-1155`�
 `cb == nullptr` 通常**正是**同步版本。
 
 **四、`ctx.stream_request` 的头部视图是借的。** 只在当次调用内有效
-（`src/web/uvcpp_http_server.h:107-109`）。
+（`src/web/uvcpp_http_server.h:119-121`）。
 
 **五、h1 与 h2 的 `write_stream` / `end_stream` 同名不同义**，且没有编译期区分
 （[§7](#7-流式响应)）。
