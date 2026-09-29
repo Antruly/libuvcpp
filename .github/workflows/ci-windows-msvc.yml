@@ -147,12 +147,17 @@ jobs:
 
       # 装包**按格**：basic 那两格与 web 一格一个系统依赖都不需要（libuv 与 llhttp
       # 都走 FetchContent；llhttp 只在 WEB=ON 时才去取，所以 basic 那两格连它都没有）。
+      #
+      # 有系统依赖的那四格统一交给 `.github/scripts/win-openssl-deps.sh`：它把判据从
+      # "choco 退出 0"改成"这台机器上有一份 CMake 找得到的 OpenSSL"，理由（含
+      # 2026-09-29 20:46 UTC 起 `choco install openssl` 恒非 0 退出那件事）写在那个
+      # 脚本的头部。**别把这一行改回裸 choco**。
       - name: Install deps
         shell: bash
         run: |
           case "${{ matrix.feature }}" in
             basic-static|basic-shared|web) echo "(这一格没有系统依赖)" ;;
-            ssl|h2|quic|http3)             choco install openssl --no-progress ;;
+            ssl|h2|quic|http3)             bash .github/scripts/win-openssl-deps.sh ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
 
@@ -251,6 +256,9 @@ jobs:
           # （DLL 找不到 ⇒ 全部用例 `0xC0000135`）。
           # OpenSSL DLLs — uvcpp.dll links against them when a feature turns SSL on;
           # they must be findable next to the test executables.
+          #
+          # **这张位置表与 `.github/scripts/win-openssl-deps.sh` 里那张必须同表**
+          # （那边把 "Install deps" 判定为"找到了"，这里才拷得到）；两处一起改。
           for ssl_dir in \
             "C:/Program Files/OpenSSL/bin" \
             "C:/Program Files/OpenSSL-Win64/bin" \
@@ -330,8 +338,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 与矩阵那四格同一个脚本、同一条判据（这一格钉的是 windows-2022，那里的
+      # `choco install openssl` 与 windows-latest 上同一时刻开始恒非 0 退出 ——
+      # 两张不同的镜像同时变，正是"变的是源那一边"的旁证）。
       - name: Install deps (Windows)
-        run: choco install openssl --no-progress
+        shell: bash
+        run: bash .github/scripts/win-openssl-deps.sh
 
       # cl.exe 不在 windows runner 的默认 PATH 上：CMake 自己找得到它，但 bash
       # 里没有。而下面的正例/反例**必须**是裸编译器调用 —— 走 CMake 的话

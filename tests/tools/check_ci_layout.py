@@ -149,7 +149,21 @@ LITERAL_OWNERS = {
     "brew --prefix openssl@3": {"ci-macos.yml"},
     "_SSL_set_quic_tls_cbs": {"ci-macos.yml"},
     # MSVC
-    "choco install openssl --no-progress": {"ci-windows-msvc.yml"},
+    #
+    # 2026-09-30：Windows 上装 OpenSSL 的三个地方（矩阵那四格、config-contract、
+    # release.yml 的 msvc-x64）统一收到 `.github/scripts/win-openssl-deps.sh`。
+    # 起因是裸 `choco install openssl` 从 2026-09-29 20:46 UTC 起在那两张 windows
+    # 镜像上都恒非 0 退出（148，没有查到有出处的解释），而 workflow 逐字节没改
+    # （`git diff 0addc23f 699d27e -- .github/workflows/ci-windows-msvc.yml` 是空的）。
+    # 那一步真正要的是"这台机器上有一份 CMake 找得到的 OpenSSL"，所以判据从
+    # "choco 退出 0"改成"文件在不在"，理由与实测都写在那个脚本头部。
+    #
+    # 于是这里**两向**钉住两件事：调用点在，且裸 choco 那一行从四个平台文件里
+    # 消失（第二项是空集 —— 判据 7 本来就支持空集，它判的是"多一个也红"）。
+    # 换句话说：谁要是把某处改回裸 `choco install openssl --no-progress` 来"修"
+    # 一次红，这条断言会把那一改钉回来。
+    "bash .github/scripts/win-openssl-deps.sh": {"ci-windows-msvc.yml"},
+    "choco install openssl --no-progress": set(),
     "ilammy/msvc-dev-cmd": {"ci-windows-msvc.yml"},
     "--platform msvc-x64": {"ci-windows-msvc.yml"},
     "--cxx cl": {"ci-windows-msvc.yml"},

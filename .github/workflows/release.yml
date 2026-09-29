@@ -326,9 +326,18 @@ jobs:
       # 不靠镜像里"碰巧装了 OpenSSL"：没找到时 `find_package(OpenSSL QUIET)` 会把
       # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:305），那样发出去的包
       # 一句 SSL 都没有 —— 而它的生成头会**如实**说 0，使用者照配也拿不到 SSL。
+      #
+      # 这条要求由 `.github/scripts/win-openssl-deps.sh` 兑现，而且比原来那一行更硬：
+      # 原来 `choco install` 退出 0 就算数，现在**必须真找到一份 openssl.exe**，
+      # 找不到就 exit 1（并把找过哪几处、choco 的原话折进 `::error`）。镜像自带的那份
+      # 也认，但它要跟 choco 那份一样先被"找到"才放行 —— 所以"静静发一个没有 SSL 的
+      # 包"这条路仍然堵着。
+      #
+      # 为什么不再直接用裸 choco：2026-09-29 20:46 UTC 起它在两张 windows 镜像上都
+      # 恒非 0 退出，理由与实测写在那个脚本的头部。
       - name: Install OpenSSL
         shell: bash
-        run: choco install openssl --no-progress
+        run: bash .github/scripts/win-openssl-deps.sh
 
       - name: Configure & Build
         shell: bash

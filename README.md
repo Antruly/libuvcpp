@@ -1186,10 +1186,25 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   renamed one that would take the steps guarded by `if: matrix.feature == …` with it, or a
   badge pointing at a deleted file is red rather than unnoticed (`1.4.1`)
 - HTTP/3 gained the **same three** entries — Linux, macOS and Windows MSVC (no MinGW: that
-  leg has neither an h2 nor a quic entry). None of the three has run yet. The Windows cell
-  says in a comment that it could not be checked locally (there is no MSVC on the machine
-  that wrote it), so its first green is a CI run; the Linux leg of the whole feature was
-  exercised locally end to end before it was pushed (`1.4.1`)
+  leg has neither an h2 nor a quic entry). The Linux and macOS cells went green on their
+  first run; the Windows cell says in a comment that it could not be checked locally (there
+  is no MSVC on the machine that wrote it), so its first green is a CI run — and as of
+  `1.4.1` it has not had one, because its `Install deps` step fails before `Configure &
+  Build` ever runs (next bullet). The Linux leg of the whole feature was exercised locally
+  end to end before it was pushed (`1.4.1`)
+- Windows dependency install moved into `.github/scripts/win-openssl-deps.sh`, shared by the
+  four MSVC matrix entries, the MSVC `config-contract` job, and `release.yml`'s
+  `msvc-x64`. From 2026-09-29 20:46 UTC, `choco install openssl --no-progress` exits
+  non-zero **every** time on both `windows-latest` and `windows-2022` (148), while the
+  workflow file is byte-identical to the last green run (`git diff 0addc23f 699d27e --
+  .github/workflows/ci-windows-msvc.yml` is empty) — the runners changed, not the project.
+  The step's real requirement was never "choco exited 0" but "this machine has an OpenSSL
+  `find_package(OpenSSL)` will find", so the decision now rests on the file system: look in
+  the same four directories the DLL-copy step uses, fall back to `choco install openssl
+  --no-progress --yes` with three backoff retries, re-check, and `::error` with the
+  directories searched plus choco's own words if there is still nothing. `check_ci_layout.py`
+  pins it both ways — the call site must be in `ci-windows-msvc.yml`, and the bare
+  `choco install openssl --no-progress` line must appear in no platform file (`1.4.1`)
 
 ---
 

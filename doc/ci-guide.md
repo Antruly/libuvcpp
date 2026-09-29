@@ -341,8 +341,10 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
   decides: `nm -g` plus a name match **does** find `_SSL_set_quic_tls_cbs` on the runner
   (measured — it is what turned this leg green after the `-gU` form had reddened it), so a
   genuinely QUIC-incapable `openssl@3` would still produce a warning naming itself.
-- **The MSVC leg uses `choco install openssl`** (the same source the `ssl`/`h2` entries use).
-  Do **not** add `-DOPENSSL_USE_STATIC_LIBS=ON` there: the choco package ships no static
+- **The MSVC leg uses the OpenSSL from `.github/scripts/win-openssl-deps.sh`** (the same
+  source the `ssl`/`h2`/`http3` entries use — see §6 for why it is a script and not a bare
+  `choco install openssl`).
+  Do **not** add `-DOPENSSL_USE_STATIC_LIBS=ON` there: that package ships no static
   libraries, `find_package` would fail, and `UVCPP_ENABLE_OPENSSL` would be silently
   downgraded to OFF — red in the wrong place. Because OpenSSL is then dynamic there, the
   shared DLL-copy step has to place `libssl-3-x64.dll` / `libcrypto-3-x64.dll` next to the
@@ -467,6 +469,8 @@ sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 # quic — no libssl-dev on purpose: it builds OpenSSL 3.5 from source
 sudo apt-get install -y libuv1-dev zlib1g-dev
+# http3 — same as quic (HTTP/3 needs QUIC, so it needs the same 3.5)
+sudo apt-get install -y libuv1-dev zlib1g-dev
 # config-contract
 sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
 ```
@@ -481,15 +485,33 @@ brew install libuv zlib ninja
 brew install libuv openssl zlib ninja
 # quic — explicit openssl@3, and -DOPENSSL_ROOT_DIR points at it
 brew install libuv zlib ninja openssl@3
+# http3 — same as quic (same explicit openssl@3)
+brew install libuv zlib ninja openssl@3
 ```
 
 ### Windows MSVC (`ci-windows-msvc.yml`)
 ```bash
 # basic-static | basic-shared | web — no system deps (libuv + llhttp via FetchContent)
-# ssl | h2 | quic
-choco install openssl --no-progress
+# ssl | h2 | quic | http3
+bash .github/scripts/win-openssl-deps.sh
 # OpenSSL DLL path: C:/Program Files/OpenSSL/bin/ (or OpenSSL-Win64)
 ```
+
+**Why the MSVC entries call a script rather than `choco install openssl` directly.** From
+2026-09-29 20:46 UTC onwards that command exits non-zero **every time** on both `windows-latest`
+and `windows-2022` (exit 148, for which no documented meaning could be found), while
+`git diff 0addc23f 699d27e -- .github/workflows/ci-windows-msvc.yml` is empty — the workflow did
+not change, the runners did. What those entries actually need is not "choco exited 0" but "this
+machine has an OpenSSL that `find_package(OpenSSL)` will find", and choco's exit code lies in
+both directions (against a 503 from the community feed it has been seen to print *Unable to find
+package* and still exit 0). So the decision moved onto the file system: the script looks in the
+same four directories the DLL-copy step uses, falls back to `choco install openssl --no-progress
+--yes` with three backoff retries, and re-checks — `::error` plus exit 1 if there is still
+nothing, naming the directories it searched and quoting choco. It is shared with
+`release.yml`'s `msvc-x64`, which has the same problem and the same requirement (see
+`doc/release-process.md`). `check_ci_layout.py`'s criterion 7 pins both directions: the call site
+must be in `ci-windows-msvc.yml`, and the bare `choco install openssl --no-progress` line must
+appear in **no** platform file.
 
 ### Windows MinGW64 (`ci-mingw64.yml`)
 `msys2/setup-msys2` installs `mingw-w64-x86_64-{gcc,cmake,ninja,openssl,python}`.

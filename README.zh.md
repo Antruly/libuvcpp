@@ -1066,9 +1066,22 @@ libuvcpp/
   布局表**双向**相等：悄悄删掉一格、改掉一格的名字（挂在 `if: matrix.feature == …` 上的
   步骤会跟着无声消失）、或者徽章指向一个已删文件，都会红而不是没人发现（`1.4.1`）
 - HTTP/3 补上**同样三格** —— Linux、macOS 与 Windows MSVC（MinGW 那条腿没有：它既没有
-  h2 也没有 quic 格）。三格**一次都还没跑过**；Windows 那格在注释里写明了本机验不了
-  （写它的机器上没有 MSVC），所以它的第一次绿是一次 CI 运行；Linux 那条腿的整个特性在
-  推送前已经在本机端到端跑通（`1.4.1`）
+  h2 也没有 quic 格）。Linux 与 macOS 那两格第一次跑就绿了；Windows 那格在注释里写明了
+  本机验不了（写它的机器上没有 MSVC），所以它的第一次绿只能是一次 CI 运行 —— 而到
+  `1.4.1` 为止它还没绿过，因为它的 `Install deps` 那一步在 `Configure & Build` 之前
+  就失败了（见下一条）。Linux 那条腿的整个特性在推送前已经在本机端到端跑通（`1.4.1`）
+- Windows 的依赖安装收进 `.github/scripts/win-openssl-deps.sh`，由 MSVC 矩阵四格、两处
+  `config-contract` 的 Windows 那一半、以及 `release.yml` 的 `msvc-x64` 共用。从
+  2026-09-29 20:46 UTC 起，`choco install openssl --no-progress` 在 `windows-latest` 与
+  `windows-2022` 上都**每一次**都非 0 退出（148），而 workflow 文件与最后一次全绿的那次
+  逐字节相同（`git diff 0addc23f 699d27e -- .github/workflows/ci-windows-msvc.yml` 是空的）
+  —— 变的是 runner，不是本工程。这一步真正的要求从来不是"choco 退出 0"，而是"这台机器上
+  有一份 `find_package(OpenSSL)` 找得到的 OpenSSL"，所以判据改落在文件系统上：先看那份
+  DLL 拷贝步骤用的同样四个目录，再回落到 `choco install openssl --no-progress --yes`
+  并退避重试三次，然后重新看一遍 —— 还是没有就 `::error`，把找过的目录与 choco 的原话
+  一起写进注解。`check_ci_layout.py` 把这件事**两向**钉住：调用点必须在
+  `ci-windows-msvc.yml` 里，而裸 `choco install openssl --no-progress` 一行必须在四个
+  平台文件里一个都不出现（`1.4.1`）
 
 ---
 

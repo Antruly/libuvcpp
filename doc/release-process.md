@@ -91,8 +91,10 @@ Beyond the import whitelist, each leg asserts what only it can see:
 - **MSVC legs** assert a list of `UVCPP_*` cache entries are `ON`. `find_package(OpenSSL QUIET)`
   silently sets `UVCPP_ENABLE_OPENSSL` to `OFF` when it cannot find OpenSSL, and the generated
   header then honestly reports `0` — so a package with no SSL at all still builds, passes its
-  tests and packages cleanly. `choco install openssl` runs first specifically so the leg does not
-  depend on the image happening to ship one.
+  tests and packages cleanly. `.github/scripts/win-openssl-deps.sh` runs first specifically so
+  the leg does not proceed without an OpenSSL: it either *finds* one (the image's own copy counts,
+  and it names the path and version it found) or exits 1. A bare `choco install openssl` used to
+  stand in for that, but it stopped working on both Windows images — see `doc/ci-guide.md` §6.
 - **The ABI assertions use `sed -n`, not `grep`.** GitHub's `shell: bash` runs under `-eo
   pipefail`, so a `grep` with no match returns non-zero, `-e` aborts the whole step, and the
   `echo` / `::error` lines never execute — leaving a bare "exit code 1" with no explanation.
