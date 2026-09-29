@@ -25,15 +25,21 @@
 # ---------------------------------------------------------------------------
 set -u
 
-SSL_DIRS="
-/c/Program Files/OpenSSL/bin
-/c/Program Files/OpenSSL-Win64/bin
-/c/Program Files (x86)/OpenSSL/bin
-/c/Program Files/OpenSSL-Win32/bin
-"
+# **必须是数组，不能是空格分隔的单个字符串。** 这张表里三条路径带空格，写成
+# `SSL_DIRS="…"` 再 `for d in $SSL_DIRS` 会被 IFS 按空格切开成 `/c/Program`、
+# `Files/OpenSSL/bin` 这种碎片，于是**一次都命不中**，而错误信息里用引号打印出来
+# 又长得完全正常。第一版就是这么写的，在 runner 上实测红了一次才看出来
+# （本机那次自测的桩件路径里没有空格，恰恰绕过了这个 bug）。
+SSL_DIRS=(
+  "/c/Program Files/OpenSSL/bin"
+  "/c/Program Files/OpenSSL-Win64/bin"
+  "/c/Program Files (x86)/OpenSSL/bin"
+  "/c/Program Files/OpenSSL-Win32/bin"
+)
 
 find_ssl() {
-  for d in $SSL_DIRS; do
+  local d
+  for d in "${SSL_DIRS[@]}"; do
     if [ -x "$d/openssl.exe" ]; then
       echo "$d"
       return 0
@@ -71,7 +77,10 @@ if [ -z "$found" ]; then
   # 注解是这台机器上唯一能自证的出口 —— job 日志匿名读不到
   # （`/actions/jobs/<id>/logs` 是 403），所以 choco 的原话要折进 `::error` 里，
   # 不能只留在日志里。`%` 要先转义成 `%25`，否则注解会被截断。
-  echo "::error title=win-openssl-deps::这台 runner 上没有 CMake 找得到的 OpenSSL。找过：$(printf '%s' "$SSL_DIRS" | tr '\n' ' ' | sed 's/^ *//; s/ *$//')。choco 最后那次的末 1200 字：$(printf '%s' "${choco_out:-（choco 没留下输出）}" | tr '\n' ' ' | tail -c 1200 | sed 's/%/%25/g')"
+  #
+  # `command -v openssl` 不是判据的一部分（PATH 上有一份 openssl.exe 不等于有头文件
+  # 与 .lib），只为了让下一次的注解能自己说清"这台机器上到底有没有"，省一轮猜测。
+  echo "::error title=win-openssl-deps::这台 runner 上没有 CMake 找得到的 OpenSSL。找过：$(printf '%s ' "${SSL_DIRS[@]}")。PATH 上的 openssl：$(command -v openssl || echo '(没有)')。choco 最后那次的末 1200 字：$(printf '%s' "${choco_out:-（choco 没留下输出）}" | tr '\n' ' ' | tail -c 1200 | sed 's/%/%25/g')"
   exit 1
 fi
 
