@@ -180,16 +180,28 @@ nghttp3 留到真做 HTTP/3 的那一版再接。
 | 依赖接入（`ngtcp2_static` + `ngtcp2_crypto_ossl_static`，静态链入） | **真实现** | `quic_api_func.cpp` 的三条链接证据 |
 | 配置契约宏 `UVCPP_QUIC_ENABLE`（生成头 + `_uvcpp_literal01` + PUBLIC 编译定义三处一致） | **真实现** | `check_config_contract.py` |
 | **握手**（Initial → TLS 1.3 → ALPN → 1-RTT） | **真实现** | `quic_handshake_func.cpp` |
-| **开流、收发、流控、重传、丢包恢复** | **真实现**（ngtcp2 驱动） | `quic_stream_func.cpp` |
+| **开流、收发**（流控、重传、丢包恢复由 ngtcp2 驱动，本层不自己实现） | **真实现** | `quic_stream_func.cpp` |
 | **连接关闭（两端各自的 CONNECTION_CLOSE）与空闲超时** | **真实现** | `quic_api_func.cpp` §5 |
-| **服务端的 CID 路由**（一条连接多个 SCID + 对端原始 DCID） | **真实现** | `quic_handshake_func.cpp` + `quic_stream_func.cpp` |
+| **服务端的 CID 路由**（握手要跨好几个包，路由不对就握不上） | **真实现** | `quic_handshake_func.cpp` + `quic_stream_func.cpp` |
 | `uvcpp_quic_server::bind()` 系列**参数校验** | **真实现**（登记；socket 在 `listen()` 里建） | `quic_api_func.cpp` §4 |
-| `set_ssl_context()` / `set_alpn_protos()` / `set_alpn_select_protos()` / `set_idle_timeout()` | **真实现** | — |
-| `run()` / `stop()` | **真实现**（转发到 loop） | — |
+| `set_ssl_context()` / `set_alpn_protos()` / `set_alpn_select_protos()` | **真实现** | `quic_handshake_func.cpp`（ALPN 真协商成 `"h3"`）、`quic_api_func.cpp` §4（缺上下文 → `UV_EINVAL`） |
+| `set_idle_timeout()` | **真实现** | `quic_api_func.cpp` §5（300ms 到期，两侧 `NGTCP2_ERR_IDLE_CLOSE`） |
+| `run()` / `stop()` | **真实现**（转发到 loop） | `quic_api_func.cpp` §6（自建循环那一节） |
 | `quic_ngtcp2_version_string()` / `quic_error_string()` / `quic_crypto_backend_init()` / `_free()` | **真实现**（真调进 ngtcp2） | `quic_api_func.cpp` §1 |
 | 对端 reset 一条流（RESET_STREAM）时读侧的收尾事件 | **真实现** | `quic_stream_func.cpp` 第 3 段 |
 | 连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath | **没有** | [§8](#8-没做的如实列出) |
 | HTTP/3（nghttp3） | **没有**（连依赖都还没接） | [§8](#8-没做的如实列出) |
+
+**"判据在哪"这一列不是装饰。** 上面每一格都指得到一条会因为它坏掉而变红的断言；
+指不到的地方**不写**，而是列在下面。这一版**没有**判据的有两处，写出来免得被当成
+已经量过：
+
+- **丢包重传与丢包恢复没有被量过。** 那是 ngtcp2 的职责，本层只是把它的定时器与
+  重发路径接起来，而三条用例里**没有一条真丢过包** —— "它真做了"这件事本仓没有
+  证据，只有"它没坏到让我们看出来"。
+- **CID 没有被换过。** 路由那一格量的是"跨多个包还能找到同一条连接"，而一个真的
+  换 CID 的场景（对端按 `preferred_address` 换、或迁移）属于 [§8](#8-没做的如实列出)
+  的迁移那一档，不存在。
 
 一句话：**这一层现在是一条能握手、能开流、能收发、能干净收场的链路协议**；它上面
 还没有 HTTP/3，所以它还不认识"请求"和"响应"。
