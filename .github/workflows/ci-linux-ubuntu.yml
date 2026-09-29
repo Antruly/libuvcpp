@@ -316,7 +316,14 @@ jobs:
               grep -q '${{ matrix.gate_switch }}' "$tree/CMakeCache.txt" || {
                 echo "::error title=$feat::CMakeCache 里 ${{ matrix.gate_switch }} 不是 ON —— 这一格没在测 ${{ matrix.gate_name }}"; exit 1; }
               grep -q '${{ matrix.gate_integrated }}' "ci-logs/$feat-configure.log" || {
-                echo "::error title=$feat::配置消息里没有 '${{ matrix.gate_integrated }}' —— ${{ matrix.gate_name }} 没被集成"; exit 1; }
+                # 把**配置期的原话**折进注解：这条门禁最常被 OpenSSL/依赖不对触发，
+                # 而那种情形下 root CMakeLists 的预检只会 WARNING 一句、把开关
+                # 静默关掉（cache 里照样写着 ON），真正的原因只在那句 WARNING 里。
+                # 公仓的 artifact zip 匿名下载是 401（实测），所以注解是唯一
+                # 不登录读得到的地方 —— 原话必须跟着走，否则下一次红又要靠猜。
+                why=$(grep -E '(CMake (Warning|Error)|QUIC API|ngtcp2|nghttp2|Cannot|Unsupported|No such)' \
+                  "ci-logs/$feat-configure.log" | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
+                echo "::error title=$feat::配置消息里没有 '${{ matrix.gate_integrated }}' —— ${{ matrix.gate_name }} 没被集成${why:+；配置期的原话：$why}"; exit 1; }
               grep -q '${{ matrix.gate_module }}' "ci-logs/$feat-configure.log" || {
                 echo "::error title=$feat::src/ 里那一块没进源列表 —— 编出来的库不含 ${{ matrix.gate_name }}"; exit 1; }
             fi

@@ -137,44 +137,40 @@ jobs:
         run: |
           set -o pipefail
           prefix="$(brew --prefix openssl@3)"
-          if [ -z "$prefix" ] || [ ! -d "$prefix" ]; then
-            echo "::error title=quic-openssl::brew --prefix openssl@3 是空的或不存在 —— 上一步的 openssl@3 没装上"
-            exit 1
-          fi
           echo "prefix=$prefix"
-          "$prefix/bin/openssl" version
-          # 单独判一次这个 dylib 在不在：`nm` 读不到文件时的报错长得和"这库里
-          # 没有那个符号"一模一样，而这两件事的修法完全不同（一个是装包，
-          # 一个是换一份 >= 3.2 的包）。让注解说准是哪一种。
-          if [ ! -e "$prefix/lib/libssl.dylib" ]; then
-            echo "::error title=quic-openssl::找不到 $prefix/lib/libssl.dylib —— 这份 openssl@3 的布局与预期不同，先看上面那行 openssl version"
-            exit 1
-          fi
-          # 判据只用 `nm -g`（"只看外部符号"）+ 名字，**不用 `-U`**，也**不做
-          # 正则形状匹配**。两条都是同一次教训（d40e124 的第一次 macOS 运行）：
+          # 这一步**只提示，不判红**（全部分支都用 `::warning`，一次 `exit 1`
+          # 都没有）。这是 d40e124 第一次 macOS 运行换来的设计：
           #
-          # ① `-U` 的含义在两族 nm 之间是**反的** —— LLVM 是 `--defined-only`，
-          #    而 GNU 那边"只看未定义"写作 `-u`。押错一边，这一格就会在一份
-          #    **好的** OpenSSL 上红。第一次运行的 `-gU` 正是这么红的。
-          # ② `^[0-9a-fA-F]+ [TtSsDdBb] _名字$` 这种形状匹配押的是 nm 的**输出
-          #    格式**，而它同样不是契约（地址列宽度、`-g` 下的类型字母都可能变）。
+          # 那次它红在 `nm -gU … | grep -q _SSL_set_quic_tls_cbs` 上。而
+          # **`-U` 的含义在两族 nm 之间是反的**（LLVM 是 `--defined-only`，
+          # GNU 那边"只看未定义"写作 `-u`），再加上 Mach-O 的 dylib 可能被 strip
+          # 掉符号表（只剩导出 trie，`nm` 没得读）—— 也就是说，这条自检有**至少
+          # 两条**与 OpenSSL 好坏无关的红法。押错一次就是烧掉一整轮 macOS
+          # （7 条腿），而它原本只是想让报错早一点、话说清楚一点。
           #
-          # 这条自检的全部价值只是"早一点、话说清楚一点"—— 真判据是门禁 ②
-          # （`ngtcp2 integrated`），所以它**不该**有自己的假红来源。名字带前导
-          # 下划线（Mach-O），且没有 ELF 那种 `@@OPENSSL_3.5.0` 版本后缀，别把
-          # ubuntu 那条 `($|@)` 的逻辑抄过来。`libssl.dylib` 不会去"引用"自己
-          # 定义的那个函数，所以外部符号表里出现这个名字就是有定义。
+          # 真判据在下面配置期那条门禁 ②（`ngtcp2 integrated`）：OpenSSL 不对时
+          # 根 CMakeLists 的预检会 WARNING + 强制关掉 QUIC，于是配置消息里没有
+          # 那一行 —— 那才是判据，而且它报的时候会把配置期的**原话**一起带出来
+          # （见 Configure 那一步的门禁 ②）。所以这里退成纯诊断是对的：
+          # 一条自检绝不该比它所服务的门禁更容易红。
+          #
+          # 证据照样收集 —— 一条腿红了以后不登录能读到的只有注解（公仓的
+          # artifact zip 匿名下载是 401，实测过），所以"多少行、哪个版本"要么
+          # 出现在这里，要么就没人看得到。
           lib="$prefix/lib/libssl.dylib"
-          hits=$(nm -g "$lib" 2>/dev/null | grep -c '_SSL_set_quic_tls_cbs' || true)
-          echo "nm -g 命中 SSL_set_quic_tls_cbs 的行数：$hits"
-          nm -g "$lib" 2>/dev/null | grep '_SSL_set_quic_tls_cbs' \
-            || echo "(nm -g 没有打出这一行)"
-          if [ "$hits" = "0" ]; then
-            # 把**证据**折进注解：一条腿红了以后，不登录能读到的只有注解
-            # （artifact zip 匿名下载是 401，实测过），所以"多少行、哪个版本"
-            # 必须出现在这里，否则下一次红又要靠猜。
-            echo "::error title=quic-openssl::这份 openssl@3（$("$prefix/bin/openssl" version 2>/dev/null)）的 libssl 里没有 SSL_set_quic_tls_cbs（nm -g 共 $(nm -g "$lib" 2>/dev/null | wc -l | tr -d ' ') 行）—— 需要 >= 3.2 的 openssl@3，否则配置期会把 UVCPP_ENABLE_QUIC 静默关掉"
-            exit 1
+          if [ -z "$prefix" ] || [ ! -d "$prefix" ]; then
+            echo "::warning title=quic-openssl::brew --prefix openssl@3 是空的或不存在 —— 上一步的 openssl@3 没装上；**这一步不判红**，配置期的 ngtcp2 集成门禁会报"
+          elif [ ! -e "$lib" ]; then
+            echo "::warning title=quic-openssl::找不到 $lib（$("$prefix/bin/openssl" version 2>/dev/null)）—— 布局与预期不同；**这一步不判红**，判据见配置期的 ngtcp2 集成门禁"
+          else
+            "$prefix/bin/openssl" version
+            hits=$(nm -g "$lib" 2>/dev/null | grep -c '_SSL_set_quic_tls_cbs' || true)
+            echo "nm -g 命中 SSL_set_quic_tls_cbs 的行数：$hits（nm -g 共 $(nm -g "$lib" 2>/dev/null | wc -l | tr -d ' ') 行）"
+            nm -g "$lib" 2>/dev/null | grep '_SSL_set_quic_tls_cbs' \
+              || echo "(nm -g 没有打出这一行)"
+            if [ "$hits" = "0" ]; then
+              echo "::warning title=quic-openssl::这份 openssl@3（$("$prefix/bin/openssl" version 2>/dev/null)）的 libssl 里 nm -g 看不到 SSL_set_quic_tls_cbs —— 可能真缺（需要 >= 3.2），也可能只是 nm 读不到（strip / 语义）；**这一步不判红**，下面配置期的 ngtcp2 集成门禁会连原话一起报"
+            fi
           fi
 
       - name: Configure & Build
@@ -208,7 +204,14 @@ jobs:
               grep -q '${{ matrix.gate_switch }}' "$tree/CMakeCache.txt" || {
                 echo "::error title=$feat::CMakeCache 里 ${{ matrix.gate_switch }} 不是 ON —— 这一格没在测 ${{ matrix.gate_name }}"; exit 1; }
               grep -q '${{ matrix.gate_integrated }}' "ci-logs/$feat-configure.log" || {
-                echo "::error title=$feat::配置消息里没有 '${{ matrix.gate_integrated }}' —— ${{ matrix.gate_name }} 没被集成"; exit 1; }
+                # 把**配置期的原话**折进注解：这条门禁最常被 OpenSSL/依赖不对触发，
+                # 而那种情形下 root CMakeLists 的预检只会 WARNING 一句、把开关
+                # 静默关掉（cache 里照样写着 ON），真正的原因只在那句 WARNING 里。
+                # 公仓的 artifact zip 匿名下载是 401（实测），所以注解是唯一
+                # 不登录读得到的地方 —— 原话必须跟着走，否则下一次红又要靠猜。
+                why=$(grep -E '(CMake (Warning|Error)|QUIC API|ngtcp2|nghttp2|Cannot|Unsupported|No such)' \
+                  "ci-logs/$feat-configure.log" | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
+                echo "::error title=$feat::配置消息里没有 '${{ matrix.gate_integrated }}' —— ${{ matrix.gate_name }} 没被集成${why:+；配置期的原话：$why}"; exit 1; }
               grep -q '${{ matrix.gate_module }}' "ci-logs/$feat-configure.log" || {
                 echo "::error title=$feat::src/ 里那一块没进源列表 —— 编出来的库不含 ${{ matrix.gate_name }}"; exit 1; }
             fi
