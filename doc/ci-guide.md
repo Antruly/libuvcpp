@@ -29,6 +29,13 @@ for a file whose job is not a matrix. `check_ci_layout.py` compares it **both wa
 the file, so deleting a feature entry without touching this table is red — that is what makes
 "QUIC was quietly dropped from the MSVC leg" impossible to merge.
 
+**This layout is now the measured one, not the intended one.** The first run of a commit
+carrying all four files produced exactly the 23 checks in the table above — none missing, none
+extra, no collisions — and the run that also carries the two corrections described below is
+green on all four platforms (2026-09-29). Two things were only learnable by running it:
+`src/quic/*.cpp` and `ngtcp2` compile on **MSVC** for the first time here, and the macOS leg's
+own OpenSSL prelude was wrong in a way that had nothing to do with OpenSSL (see §5).
+
 **Why one file per platform.** The old single file was 1369 lines with 10 jobs spanning four
 platforms and eight feature sets; the two Windows jobs sat 900 lines apart. A feature matrix
 that has grown to eight entries stops being readable when it is interleaved with three other
@@ -324,7 +331,10 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
   easier to red than the gate it serves**, because a false red costs a whole macOS rotation
   (seven entries) and points the reader at the wrong cause. What actually decides is gate ②,
   and it now quotes the configure log's own words into its `::error` (see the next-but-one
-  bullet), so the *reason* still survives.
+  bullet), so the *reason* still survives. The probe is not vacuous even though it no longer
+  decides: `nm -g` plus a name match **does** find `_SSL_set_quic_tls_cbs` on the runner
+  (measured — it is what turned this leg green after the `-gU` form had reddened it), so a
+  genuinely QUIC-incapable `openssl@3` would still produce a warning naming itself.
 - **The MSVC leg uses `choco install openssl`** (the same source the `ssl`/`h2` entries use).
   Do **not** add `-DOPENSSL_USE_STATIC_LIBS=ON` there: the choco package ships no static
   libraries, `find_package` would fail, and `UVCPP_ENABLE_OPENSSL` would be silently
