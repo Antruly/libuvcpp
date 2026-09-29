@@ -315,9 +315,16 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
 - **The macOS leg uses Homebrew's `openssl@3`** (≥ 3.2, so it has the API) and needs no
   in-job build — but it **must** pass `-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"`:
   `openssl@3` is keg-only and `FindOpenSSL` has no Homebrew hints at all. A prelude step
-  runs `nm -gU` on that dylib and fails loudly if `_SSL_set_quic_tls_cbs` is missing or the
-  prefix comes back empty, because the *symptom* of a wrong OpenSSL is a **silent downgrade**
-  (see the next bullet), which would otherwise be attributed to ngtcp2.
+  looks at that dylib, but it is **diagnostic only: it emits `::warning` and never `exit 1`**.
+  That is a deliberate correction, not an oversight, and the first-ever macOS run bought it:
+  the prelude ran `nm -gU` and failed the leg for a reason **unrelated to OpenSSL**. `-U`
+  means *defined-only* to LLVM's `nm` and the opposite convention to GNU's (`-u`), and a
+  Mach-O dylib may be stripped so `nm` has no symbol table to read at all — two ways to red
+  that say nothing about the library. The rule this produced: **a self-check must never be
+  easier to red than the gate it serves**, because a false red costs a whole macOS rotation
+  (seven entries) and points the reader at the wrong cause. What actually decides is gate ②,
+  and it now quotes the configure log's own words into its `::error` (see the next-but-one
+  bullet), so the *reason* still survives.
 - **The MSVC leg uses `choco install openssl`** (the same source the `ssl`/`h2` entries use).
   Do **not** add `-DOPENSSL_USE_STATIC_LIBS=ON` there: the choco package ships no static
   libraries, `find_package` would fail, and `UVCPP_ENABLE_OPENSSL` would be silently
@@ -327,8 +334,14 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
 - **What a QUIC-incapable OpenSSL looks like, on every leg**: *not* a configure-time fatal.
   The root `CMakeLists.txt`'s QUIC precheck warns and force-`set()`s `UVCPP_ENABLE_QUIC OFF`
   first, while the cache still reads `ON`. So the load-bearing gate is
-  `ngtcp2 integrated` being **absent** — gate ① (the cache read) is the weak one, and the
-  `nm` preludes on Linux/macOS exist to keep gate ② from being vacuous.
+  `ngtcp2 integrated` being **absent** — gate ① (the cache read) is the weak one. Because the
+  root precheck only *warns*, gate ②'s failure message carries the configure log's own
+  `CMake Warning`/`CMake Error` lines**: without them the annotation would name the symptom
+  (ngtcp2 missing) and hide the cause (the OpenSSL), and the log itself is not readable
+  without a login (artifact zips answer **401** anonymously). The Linux leg additionally keeps
+  a **hard-failing** `nm -D` prelude on its self-built OpenSSL — that one is safe to let fail
+  because it was verified green on a real 3.5 build, and it guards the leg that builds
+  OpenSSL in the first place.
 - Its configure line is the **only** place in CI that turns SSL on with the web module
   **off** (`-DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_BUILD_WEB=OFF`). That combination used to
   compile `src/ssl/` without ever defining `UVCPP_SSL_LIBS` and then fail at **link** time;
