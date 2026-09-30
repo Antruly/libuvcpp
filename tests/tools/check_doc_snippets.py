@@ -2,6 +2,14 @@
 # -*- coding: utf-8 -*-
 """示例门禁：文档里的 ```cpp 片段必须真编得过。
 
+```c 片段也判（`1.4.1` 起）—— C ABI 那一层（`include/capi/`）的用法只能用 C 写，
+而"编得过"这件事对它比对别的模块更要紧：这些片段正是 P/Invoke 调用方要照抄的
+东西，**C 编译器的判据与 C++ 编译器的不是一条**（`tests/capi/` 那两个用例就
+编不过 C++，见 `doc/testing-guide.md`）。C 片段用 `--cc`（默认由 `--cxx` 推：
+`g++`→`gcc`、`clang++`→`clang`、`cl`→`cl`）编，`-std=c99` / MSVC 的 `/TC`。
+`capi/` 那几份头**没有模块守卫**，所以 C 片段不登记模块需求（登记了会在
+`UVCPP_CAPI_ENABLE=0` 的包上造出一个假 `[跳]`）。
+
 ## 为什么要有这条
 
 文档腐烂**不会**有人报 bug —— 读者照着抄、编不过，然后自己想办法，最后不吭声。
@@ -13,6 +21,7 @@
 ## 约定（全仓统一，写在 `CONTRIBUTING.md`）
 
   ```cpp                       ⇒ **完整翻译单元**（自带 `#include`），必须编得过
+  ```c                         ⇒ 同上，但**用 C 编译器**（C99）编。给 C ABI 的示例
   ```cpp + 首行注释            ⇒ `// doc-snippet: fragment — <理由>` 明示"这不是独立
                                    TU"（摘录，或**故意编不过的反例**）；不编，**理由必填**
   文档里的 `<!-- doc-snippets: fragments-default -->`
@@ -42,7 +51,7 @@
   * `1` 判红了：某条片段编不过、标了 `fragment` 却没写理由、片段没有本库头、
     围栏信息串写错、围栏没闭合……
   * `3` 前提不满足、**这条门禁没判**：包里没有这条片段要的模块/头、
-    片段要的头不在包里（`<openssl/…>` 这种）、一条 cpp 片段都没扫到。
+    片段要的头不在包里（`<openssl/…>` 这种）、一条 cpp/c 片段都没扫到。
   **`1` 优先于 `3`** —— 已经判出来的红不该被"没判成的那部分"盖掉。
 
 包缺模块而跳过的片段会打 `[跳]` 并说明缺哪个开关，头不在包里打 `[停]`。两者都**不是红**：
@@ -68,6 +77,12 @@
   * 片段**没有包含任何本库的头** ⇒ 红：登记不了模块需求就等于绕过了检查。
   * 围栏信息串**以 `cpp` 开头但不止于此**（```` ```cppp ````）⇒ 红：多打一个字
     就把一条示例静默关了，而"少判了一条"和"判过了"长得一样。
+  * C 那一族同理：`c99` / `C` / `c11` 这类写法 ⇒ 红（只认小写 `c`）。
+    两个正则**分开**写的理由：`cpp` 那一族可以按前缀判（`cpp…` 只可能是笔误），
+    C 这一族**不能** —— `cmake`、`css`、`csharp` 都以 `c` 开头，按前缀判会把
+    它们全判红。所以 C 这一族判的是"像 C 的标准版本号"这个形状。
+  * 所以也要写清楚：```` ```cmake ```` / ```` ```css ```` 这些围栏**照样不看** ——
+    它们不是候选，也不会因此报红。
 
 用法：
     python tests/tools/check_doc_snippets.py --pkg <package dir> --cxx g++
@@ -109,6 +124,13 @@ FENCE_RE = re.compile(r"^[ \t]*```(.*)$")
 # 只有这两种写法算"这是 C++ 片段"。**信息串以 cpp/c++ 开头但不止于此的写法要判红**：
 # 那正是"多打一个字就静默关掉一条示例"的形状。
 CPP_INFO = ("cpp", "c++")
+
+# C 那一族只认小写 `c`。**不能按前缀判**：`cmake`、`css`、`csharp` 都以 `c`
+# 开头，前缀判会把它们全判成红 —— 一门本来只管示例的门禁会去挑剔别的语言的围栏。
+# 判"像 C 的标准版本号"这个形状（`c90`/`c99`/`c11`/`c17`/`c23`、以及大写的 `C`），
+# 它们都是"手一抖就把示例静默关掉"的同一形状。
+C_INFO = ("c",)
+C_LOOKALIKE_RE = re.compile(r"^c(?:[0-9]{2})?$", re.I)
 
 MARK_COMPILE_RE = re.compile(r"^//\s*doc-snippet:\s*compile\b(.*)$")
 MARK_FRAGMENT_RE = re.compile(r"^//\s*doc-snippet:\s*fragment\b(.*)$")
@@ -192,7 +214,8 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
-                "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/")
+                "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/",
+                "capi/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -235,6 +258,25 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/", "nghttp3/")
 # 只有这张表能把它判成"没编那个模块"而不是编不过。
 #
 # 不登记的：`net/` `expand/` `handle/` `req/` `uvcpp/`（实测各 0 个头用模块宏）。
+#
+# `capi/` 也是这一档，而且理由更强：C 面那几个头**一个模块守卫都没有** —— 它们
+# 无条件声明全部函数与句柄（`uvcpp_c.h` 那个伞头里只有 `#if UVCPP_NET_ENABLE` 包着
+# **子头**的 include，与 CAPI 开关无关）。于是 `UVCPP_CAPI_ENABLE=0` 的包上，一段
+# 包含 `<capi/uvcpp_c.h>` 的片段**照样编得过**（本门只编到 `.o`、不链接，所以
+# "符号其实不在库里"这件事它看不见）。登记 `UVCPP_CAPI_ENABLE` 会在这时造出一个
+# **假 `[跳]`**：把一条本该判绿的片段改判成"没判"，顺带把退出码从 0 抬到 3 —— 正是
+# 上面第二档说的那种失真。
+#
+# **实测过**（2026-09-30）：拿本机一棵 `CAPI=ON` 的树 `cmake --install` 出一个包，
+# 先用它判一遍 `doc/capi-guide.md`（结论记在那篇文档的 §6）；再把包里生成头的
+# `UVCPP_CAPI_ENABLE` 改成 0，**同一条命令重跑**，那几条片段仍然一路判绿、退出码 0
+# —— 这就是"它们不靠这个开关"的实测依据，也是不登记它的理由。
+#
+# 那条"关掉开关还能不能编"的判据不在本门，而在 `check_config_contract.py`（它拿的是
+# **生成头里的宏**与构建树的开关对账），以及 `tests/capi/` 那两个用例（它们编不过就
+# 是编不过）。另外 CI 的 config-contract job 现在带 `-DUVCPP_ENABLE_CAPI=ON`，
+# 所以那里的包与发布包一致：即便哪天有人回头把它登记进来，也不会在那条腿上造出
+# `[跳]`。
 # 注意 `UVCPP_NET_ENABLE` **在生成头里是有定义的**（`cmake/uvcpp_config.h.in:28`），
 # 所以"没登记"不等于"没这个宏"，只是公开头一个都不用、宏为 0 时头依然完整。
 # `UVCPP_ENABLE_MEMORY_POOL` 同理不是模块缺席开关：它在 `src/uvcpp/uvcpp_alloc.h:19`
@@ -247,7 +289,7 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/", "nghttp3/")
 # `quic/` 属于**第一档**（"宏为 0 时类会消失"）：本模块的**四个**公开头整段套在
 # `#if UVCPP_QUIC_ENABLE` 里（另外两个头 `uvcpp_quic_ngtcp2.h` 与
 # `uvcpp_quic_session.h` 是私有的，不进包、文档也不该引它们）。模块关掉时
-# `CMakeLists.txt:1883` 的 install 规则确实不装它们，
+# `CMakeLists.txt:2017` 的 install 规则确实不装它们，
 # 但那条只挡住 `cmake --install`：`package_release.py` 是从 `src/` 逐目录拷头的、
 # 与开关无关（同上面 wsdl 那段记的形状，实测过 —— 一份 `UVCPP_ENABLE_QUIC=OFF`
 # 的包里有 `include/quic/` 四个头，而没有 `uvcpp_quic_ngtcp2.h`）。所以在**发布包**
@@ -348,7 +390,33 @@ def is_msvc(cxx):
     return base.startswith("cl") and "clang" not in base
 
 
-def compile_cmd(cxx, pkg, src, obj):
+# `--cxx` → `--cc` 的对照表。**这不是"g++ 去掉两个加号"** —— 那个规则给出的是
+# `g`，一个不存在的程序名。名字对不上时按表外的规则退：去掉尾部 `++`，再不行就
+# 原样用（POSIX 上 C 编译器的规范名 `cc` 当兜底）。
+CC_OF_CXX = {
+    "g++": "gcc", "gcc": "gcc",
+    "clang++": "clang", "clang": "clang",
+    "c++": "cc", "cc": "cc",
+    "cl": "cl", "cl.exe": "cl.exe", "clang-cl": "clang-cl",
+}
+
+
+def cc_from_cxx(cxx):
+    """由 `--cxx` 推出 `--cc`（`--cc` 没显式给时用）。
+
+    派生而不是默认写死 `gcc`：CI 上那条腿给的是 `g++` / `cl`，本机可能是
+    `clang++` 或某个交叉编译器 —— 写死会在那些地方编出"编译器不存在"这种与文档
+    腐烂无关的红，而假红会训练人忽略门禁。
+    """
+    base = os.path.basename(cxx).lower()
+    if base in CC_OF_CXX:
+        return CC_OF_CXX[base]
+    if base.endswith("++"):
+        return cxx[:-2]
+    return cxx
+
+
+def compile_cmd(cxx, pkg, src, obj, lang="cpp"):
     """与 `check_config_contract.py:305` 同形（那边只是不带 `/utf-8`）。
 
     **两处故意不同**，都是为了不制造假红：
@@ -367,6 +435,16 @@ def compile_cmd(cxx, pkg, src, obj):
         guide.md` 里那段说明。要测"默认消费条件"是 `check_config_contract.py` 的事。
     """
     inc = os.path.join(pkg, "include")
+    if lang == "c":
+        # C 那一支：`-std=c99` 而不是 `-std=c11` —— 头里承诺的是 C99
+        # （见 `doc/capi-guide.md` §1），拿更高的标准编会把"其实只用了 C99"这件事
+        # 悄悄放宽。MSVC 侧加 `/TC`：`.c` 后缀本身已经会走 C 编译器，显式写死是
+        # 为了"文件名规则与语言规则不一致"时也不会静默换成 C++。
+        # 不加 `/Zc:preprocessor`：那是给 `UVCPP_JSON_FIELDS` 那批 C++ 宏用的。
+        if is_msvc(cxx):
+            return [cxx, "/nologo", "/TC", "/utf-8", "/I" + inc,
+                    "/c", src, "/Fo:" + obj]
+        return [cxx, "-std=c99", "-I" + inc, "-c", src, "-o", obj]
     if is_msvc(cxx):
         return [cxx, "/nologo", "/std:c++14", "/EHsc", "/utf-8",
                 "/Zc:preprocessor", "/I" + inc, "/c", src, "/Fo:" + obj]
@@ -432,6 +510,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pkg", help="package_release.py 的 stage 目录")
     ap.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
+    ap.add_argument("--cc", default=None,
+                    help="编 ```c 片段用的 C 编译器（默认由 --cxx 推："
+                         "g++→gcc、clang++→clang、cl→cl）")
     ap.add_argument("--root", default=None,
                     help="仓库根（默认取本脚本的上两级目录）")
     ap.add_argument("--docs", nargs="+", default=None,
@@ -455,8 +536,10 @@ def main():
         print("前提不满足，退出 3（**片段门禁一条都没判**）")
         return 3
     pkg = os.path.abspath(args.pkg)
+    if not args.cc:
+        args.cc = os.environ.get("CC") or cc_from_cxx(args.cxx)
     print("包: %s" % pkg)
-    print("编译器: %s" % args.cxx)
+    print("编译器: %s（```c 片段用 %s）" % (args.cxx, args.cc))
 
     cfg, err = read_config(pkg)
     if cfg is None:
@@ -476,6 +559,7 @@ def main():
 
     print("\n---- 片段 ----")
     n_cand = n_compiled = n_frag = n_skip = n_bytes = 0
+    n_cand_c = n_compiled_c = 0
     n_skip_off = 0
     for rel in docs:
         path = os.path.join(root, rel.replace("/", os.sep))
@@ -491,19 +575,33 @@ def main():
         frag_default = FRAGMENTS_DEFAULT in text
 
         page = {"rel": rel, "cand": 0, "compiled": 0, "frag": 0,
-                "skip": 0, "red": 0, "bytes": 0}
+                "skip": 0, "red": 0, "bytes": 0,
+                "cand_c": 0, "compiled_c": 0}
         for idx, f in enumerate(fences, 1):
             info = f["info"].lower()
-            if info not in CPP_INFO:
+            if info in CPP_INFO:
+                lang = "cpp"
+            elif info in C_INFO:
+                lang = "c"
+            else:
                 # 信息串"以 cpp 开头但不止于此"——多打一个字就把一条示例静默关了。
                 if info.startswith(CPP_INFO):
                     fail("%s 第 %d 行的围栏信息串是 `%s`，不是 `cpp` —— "
                          "写错的标记会让这条片段被静默跳过"
                          % (rel, f["lineno"], f["info"]))
                     page["red"] += 1
+                elif C_LOOKALIKE_RE.match(info):
+                    # `c99` / `C` 这些写法：形状上是 C，但不是本门认的那一个。
+                    fail("%s 第 %d 行的围栏信息串是 `%s`，不是 `c` —— "
+                         "C 片段只认小写 `c`（`cmake`/`css` 那类别的语言不受影响）"
+                         % (rel, f["lineno"], f["info"]))
+                    page["red"] += 1
                 continue
             page["cand"] += 1
             n_cand += 1
+            if lang == "c":
+                page["cand_c"] += 1
+                n_cand_c += 1
             where = "%s 第 %d 行" % (rel, f["lineno"])
 
             kind, reason = first_line_marker(f["body"])
@@ -576,11 +674,13 @@ def main():
                     n_skip += 1
                 continue
 
-            src = os.path.join(work, "s%02d_%s.cpp"
-                               % (idx, re.sub(r"\W+", "_", rel)[:40]))
+            ext = ".c" if lang == "c" else ".cpp"
+            src = os.path.join(work, "s%02d_%s%s"
+                               % (idx, re.sub(r"\W+", "_", rel)[:40], ext))
             obj = os.path.splitext(src)[0] + (".obj" if is_msvc(args.cxx) else ".o")
             write_tu(src, f["body"] + "\n")
-            rc, out = run(compile_cmd(args.cxx, pkg, src, obj), work)
+            cc = args.cc if lang == "c" else args.cxx
+            rc, out = run(compile_cmd(cc, pkg, src, obj, lang), work)
             if rc != 0:
                 fail("%s 编不过：%s" % (where, first_error(out, src, f["lineno"])))
                 for ln in out.splitlines()[:8]:
@@ -591,6 +691,9 @@ def main():
             page["bytes"] += len(f["body"])
             n_compiled += 1
             n_bytes += len(f["body"])
+            if lang == "c":
+                page["compiled_c"] += 1
+                n_compiled_c += 1
 
         # 页面级反空转：`fragments-default` 是一次**面向整篇**的豁免，所以它必须
         # 留下至少一条仍然被编的片段 —— 否则那一行就等于"把这一篇从门禁里摘出去"，
@@ -608,15 +711,20 @@ def main():
                  " `// doc-snippet: compile`" % (rel, page["cand"]))
             page["red"] += 1
 
-        print("  [%s] %-26s 编过 %d/%d 条，片段 %d 条%s"
+        print("  [%s] %-26s 编过 %d/%d 条，片段 %d 条%s%s"
               % ("红" if page["red"] else ("跳" if page["skip"] else "绿"),
                  rel, page["compiled"], page["cand"], page["frag"],
+                 "（其中 C 片段 %d/%d）" % (page["compiled_c"], page["cand_c"])
+                 if page["cand_c"] else "",
                  "（%d B）" % page["bytes"] if page["bytes"] else ""))
 
     print("\n==== 汇总 ====")
     print("候选 %d 条：编过 %d 条（%d B），标记为片段 %d 条，跳过 %d 条"
           "（其中 %d 条是 `DEFAULT_OFF` 里默认关闭的模块，不算前提不满足）"
           % (n_cand, n_compiled, n_bytes, n_frag, n_skip, n_skip_off))
+    if n_cand_c:
+        print("  其中 ```c 片段：候选 %d 条，编过 %d 条（C 编译器 %s）"
+              % (n_cand_c, n_compiled_c, args.cc))
     if failures:
         print("红 %d 条：" % len(failures))
         for f in failures:
@@ -624,8 +732,8 @@ def main():
         # 有红就报红：前提不够不该把已经判出来的红盖掉。
         return 1
     if n_cand == 0:
-        print("前提不满足，退出 3（**片段门禁一条都没判**：一条 ```cpp 都没扫到 ——"
-              " 要么抽取器坏了，要么这个仓库真的没有示例）")
+        print("前提不满足，退出 3（**片段门禁一条都没判**：一条 ```cpp/```c 都没扫到"
+              " —— 要么抽取器坏了，要么这个仓库真的没有示例）")
         return 3
     if n_skip:
         print("前提不满足，退出 3（判过的都过了，但有 %d 条因为包缺模块/缺头没判 ——"

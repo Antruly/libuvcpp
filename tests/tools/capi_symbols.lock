@@ -1,0 +1,39 @@
+# C ABI 的符号面锁 —— tests/tools/check_capi_symbols.py --update 生成
+# 一行一个导出的 uvcpp_c_* 符号，字典序。删/改任何一个都要把
+# UVCPP_C_ABI_VERSION +1（见 doc/capi-guide.md 的 ABI 契约那节）。
+# 共 35 个。
+uvcpp_c_abi_version
+uvcpp_c_last_error_string
+uvcpp_c_live_handle_count
+uvcpp_c_strerror
+uvcpp_c_tcp_client_alpn_selected
+uvcpp_c_tcp_client_close
+uvcpp_c_tcp_client_connect
+uvcpp_c_tcp_client_connect_wait
+uvcpp_c_tcp_client_free
+uvcpp_c_tcp_client_is_connected
+uvcpp_c_tcp_client_is_tls
+uvcpp_c_tcp_client_last_error
+uvcpp_c_tcp_client_new
+uvcpp_c_tcp_client_read_pause
+uvcpp_c_tcp_client_read_resume
+uvcpp_c_tcp_client_read_stop
+uvcpp_c_tcp_client_run
+uvcpp_c_tcp_client_set_events
+uvcpp_c_tcp_client_stop
+uvcpp_c_tcp_client_write
+uvcpp_c_tcp_client_write_wait
+uvcpp_c_tcp_server_bind
+uvcpp_c_tcp_server_client_count
+uvcpp_c_tcp_server_close_all_clients
+uvcpp_c_tcp_server_free
+uvcpp_c_tcp_server_last_error
+uvcpp_c_tcp_server_listen
+uvcpp_c_tcp_server_local_port
+uvcpp_c_tcp_server_loop_count
+uvcpp_c_tcp_server_new
+uvcpp_c_tcp_server_run
+uvcpp_c_tcp_server_set_events
+uvcpp_c_tcp_server_set_loops
+uvcpp_c_tcp_server_stop
+uvcpp_c_version_string

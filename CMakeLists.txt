@@ -116,6 +116,27 @@ option(UVCPP_ENABLE_QUIC
 option(UVCPP_ENABLE_HTTP3
   "Enable HTTP/3 via nghttp3 (web layer, over the QUIC transport). Needs UVCPP_ENABLE_QUIC=ON and UVCPP_BUILD_WEB=ON" OFF)
 
+# C ABI（`src/capi/`）—— 给 C / C# P-Invoke / Rust FFI 用的一层**纯 C**门面。
+#
+# 与上面每一个开关的**种类都不同**：那些开关决定"编进哪一个模块"，这一个决定
+# "要不要给已经编进去的模块再多一套 C 入口"。所以：
+#
+#   * 它不引入任何第三方依赖（这一层是薄包装，`uvcpp_c_*.cpp` 只 include 本库
+#     自己的头），因此**没有** FetchContent 段，也没有 link 那一段；
+#   * 它不改动任何既有的 C++ 导出：`UVCPP_API` 那一套（`uvcpp_export.h`）一个
+#     字节都不动，C 面自己有一枚 `UVCPP_C_API`（见 `src/capi/uvcpp_c_common.h`）；
+#   * 关掉时产出与"没有这一项"逐字节相同 —— `src/capi/` 整个不参与编译，装出去
+#     的包里也不会出现 `include/capi/`。
+#
+# 默认 OFF。**但它是一个"要么全给"的开关**：C 面覆盖 net / web / webapp /
+# http2 / http3 / quic，少一个模块就会有一批句柄类型根本不存在，所以下面那两条
+# 守卫把"少模块"的组合直接强制关闭 —— 这与 nghttp2/http3 那两条是同一套做法。
+#
+# 发布与 `full` 那一格都会打开它（见 RELEASE / .github/workflows/）：
+# "支持导出 C 类型接口"是这一版的一条发布判据，不是可选项。
+option(UVCPP_ENABLE_CAPI
+  "Export the C ABI surface (src/capi/, pure C headers for C#/FFI). Needs UVCPP_BUILD_NET=ON and UVCPP_BUILD_WEB=ON" OFF)
+
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 
@@ -702,6 +723,36 @@ if(UVCPP_ENABLE_HTTP3 AND NOT UVCPP_BUILD_WEB)
   set(UVCPP_ENABLE_HTTP3 OFF)
 endif()
 
+# =========================================================================
+# C ABI —— 两条守卫
+# =========================================================================
+# 形状与上面 QUIC / HTTP3 那两段逐条相同：`set(... OFF)` 是**普通变量**，不是
+# cache 写，所以 `CMakeCache.txt` 里仍然是 `UVCPP_ENABLE_CAPI:BOOL=ON`，只 grep
+# cache 会得到一个假绿 —— 这就是下面那句 `Including capi module in build` 存在
+# 的理由（CI 与 test 都 grep 它）。
+#
+# 位置同样是 load-bearing 的：必须在 `_uvcpp_literal01` 那一批**之前**（晚了的话
+# 生成头里写 1、编译定义写 0，第一个 TU 就 `#error`），也在下面 `CAPI_SRC_FILES`
+# 那个 GLOB 之前（晚了的话"被强制关掉"的那次 configure 仍然会去 glob）。
+#
+# 为什么是**两条**而不是一条 `NOT WEB OR NOT NET`：这两种缺失是两件不同的事，
+# 各自的出路也不同（一个是"上层四块没有宿主"，一个是"地基没编进来"）。分开写
+# 才能把话说清楚，这也是本文件里 nghttp2 / wsdl / quic 那几处的既有风格。
+if(UVCPP_ENABLE_CAPI AND NOT UVCPP_BUILD_NET)
+  message(WARNING
+    "UVCPP_ENABLE_CAPI=ON 需要 UVCPP_BUILD_NET=ON（C 门面的地基是 net 那一层："
+    "tcp_client / tcp_server 是绝大多数上层句柄的宿主）。已强制关闭 capi。")
+  set(UVCPP_ENABLE_CAPI OFF)
+endif()
+
+if(UVCPP_ENABLE_CAPI AND NOT UVCPP_BUILD_WEB)
+  message(WARNING
+    "UVCPP_ENABLE_CAPI=ON 需要 UVCPP_BUILD_WEB=ON（C 门面里 web / webapp / "
+    "http2 / http3 四块都接在 web 层上，没有 web 层就没有这些头可导）。"
+    "已强制关闭 capi。")
+  set(UVCPP_ENABLE_CAPI OFF)
+endif()
+
 if(UVCPP_ENABLE_HTTP3)
   # 这两条路径在 `function` 作用域**外面**先定一份：nghttp3_static 不给
   # build-interface 的 include 目录（见下面那段），我们的目标必须自己把它加上，
@@ -961,6 +1012,19 @@ if(UVCPP_ENABLE_HTTP3)
   source_group("http3" FILES ${HTTP3_SRC_FILES})
 endif()
 
+# capi module source_group
+# CONFIGURE_DEPENDS 的理由与 quic/http3 那两段逐字相同（新加一个 .cpp 不重新
+# configure 就不会被编进去，而"编过了"与"编了这个文件"长得一模一样）。同一个
+# CAPI_SRC_FILES 还在下面被用来做"空模块"判据。
+#
+# 这里 glob 的是**头 + 源**，而 .h 那几份**不进** UVCPP_SOURCES 的编译，只是拿
+# 来做 source_group 与"目录非空"判据 —— 与 quic/http3 那两处的形状一致。
+if(UVCPP_ENABLE_CAPI)
+  file(GLOB CAPI_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/capi/*.h" "${CMAKE_SOURCE_DIR}/src/capi/*.cpp")
+  source_group("capi" FILES ${CAPI_SRC_FILES})
+endif()
+
 # read version from header (src/uvcpp/uvcpp_version.h)
 file(READ "${CMAKE_SOURCE_DIR}/src/uvcpp/uvcpp_version.h" UVCPP_VERSION_H)
 string(REGEX MATCH "#define[ \t]+UVCPP_VERSION_MAJOR[ \t]+([0-9]+)" _ ${UVCPP_VERSION_H})
@@ -1171,6 +1235,14 @@ else()
   message(STATUS "HTTP/3 disabled (UVCPP_HTTP3_ENABLE=0)")
 endif()
 
+if(UVCPP_ENABLE_CAPI)
+  add_compile_definitions(UVCPP_CAPI_ENABLE=1)
+  message(STATUS "C ABI enabled (UVCPP_CAPI_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_CAPI_ENABLE=0)
+  message(STATUS "C ABI disabled (UVCPP_CAPI_ENABLE=0)")
+endif()
+
 if(UVCPP_ENABLE_TRY_WRITE)
   add_compile_definitions(UVCPP_TRY_WRITE_ENABLE=1
                           UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES})
@@ -1286,6 +1358,28 @@ else()
     message(FATAL_ERROR
       "UVCPP_ENABLE_HTTP3=ON 但 src/http3/ 下一个文件都没有 —— 这个配置会编出"
       "一个不含任何 HTTP/3 代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
+endif()
+
+# 根据 UVCPP_ENABLE_CAPI 排除 capi 模块。形状与上面 quic/http3 那两段逐字相同
+# —— 包括为什么两个列表都要排（SOURCES 管编不编，HEADERS 管会不会进安装/导出）。
+if(NOT UVCPP_ENABLE_CAPI)
+  message(STATUS "Excluding capi module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/capi/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/capi/")
+else()
+  # CI 要 grep 这一行，理由与 quic/http3 那两句相同（降级是普通变量 set()，
+  # cache 里仍然是 ON）。
+  message(STATUS "Including capi module in build (C ABI)")
+
+  # 「开了 CAPI 但目录是空的」必须当场红，不能绿 —— 这一格比 quic/http3 那两格
+  # 更值得防：C 面是**纯增量**的（它不接进任何既有编译路径，没有它别的模块照样
+  # 编得过、跑得动），所以一个空的 src/capi/ 会编出一个"开关是 ON、一行 C 面
+  # 代码都没有"的库，而 cache、configure 日志、构建、测试**全绿**。
+  if(NOT CAPI_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_ENABLE_CAPI=ON 但 src/capi/ 下一个文件都没有 —— 这个配置会编出"
+      "一个不含任何 C ABI 代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
   endif()
 endif()
 
@@ -1449,6 +1543,7 @@ _uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
 _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
 _uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
 _uvcpp_literal01(UVCPP_HTTP3_ENABLE     UVCPP_ENABLE_HTTP3)
+_uvcpp_literal01(UVCPP_CAPI_ENABLE      UVCPP_ENABLE_CAPI)
 _uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
 
 # 值宏：空字面量会让 `#if X != ` 变成语法错误，宁可在 configure 期就停下。
@@ -1510,11 +1605,43 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
       UVCPP_QUIC_ENABLE=${UVCPP_QUIC_ENABLE}
       UVCPP_HTTP3_ENABLE=${UVCPP_HTTP3_ENABLE}
+      UVCPP_CAPI_ENABLE=${UVCPP_CAPI_ENABLE}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
     )
   endif()
 endforeach()
+
+# ---------------------------------------------------------------------------
+# C ABI 的导出宏：`UVCPP_C_API`（**不是** `UVCPP_API`）
+# ---------------------------------------------------------------------------
+# 上面那一批 `UVCPP_XXX_ENABLE` 说的是"这份库里有哪些模块"；这一条说的是"这份
+# 产物是 DLL 还是静态库"，而 C 面的那枚宏需要这个信息（见
+# `src/capi/uvcpp_c_common.h` 里它自己的注释）：
+#
+#   - `UVCPP_C_BUILD`  → **私有**定义在 SHARED 目标上：编 DLL 自己那一趟，
+#                        `extern "C" __declspec(dllexport)` 出去；
+#   - `UVCPP_C_SHARED` → **PUBLIC** 定义在 SHARED 目标上：消费一份 DLL 的人
+#                        （`find_package(uvcpp)` 之后）一路继承到
+#                        `__declspec(dllimport)`；
+#   - 静态目标两个都不定义：`UVCPP_C_API` 展开成空，与今天的行为一致。
+#
+# 为什么**不复用** `UVCPP_EXPORTS` / `UVCPP_IMPORTS`：那一对是本工程自己的
+# "编库/用库"标记（`uvcpp_export.h` 里解释过 `UVCPP_IMPORTS` 为什么从来不定义
+# ——本仓自己的 TU 全在 `UVCPP_EXPORTS` 这一趟里）。C 面多要一条信息：**跨 DLL
+# 边界**。混用会让"静态链接"和"用一份 DLL"这两种情况互相看不出区别，而这正是
+# MSVC 上会退化成一跳间接调用、并与导入库对不上时症状极难认的那一格。
+#
+# 只在 WIN32 上定义：那两个宏的判据本身就是 `defined(_WIN32) && ...`，在别的
+# 平台上定义它们只是往 INTERFACE 里塞噪音。
+if(WIN32)
+  foreach (_uvcpp_t uvcpp uvcpp_s)
+    if (TARGET ${_uvcpp_t})
+      target_compile_definitions(${_uvcpp_t} PRIVATE UVCPP_C_BUILD)
+      target_compile_definitions(${_uvcpp_t} PUBLIC  UVCPP_C_SHARED)
+    endif()
+  endforeach()
+endif()
 
 # Add debug postfix 'd' for debug builds so debug artifacts are distinguishable.
 if (TARGET uvcpp)
@@ -1703,6 +1830,13 @@ if (UVCPP_BUILD_TESTS)
   endif()
   if (UVCPP_BUILD_EXPAND)
     add_subdirectory(tests/expand)
+  endif()
+  # C ABI 的用例（tests/capi/）。只在开关打开时**存在**：关掉时它们不进 ctest，
+  # 于是 `ctest -R capi` 会报"没有匹配的用例"而不是"通过" —— 那正是本仓要的形状
+  # （「没测」不许长得像「测过且通过」）。守卫放在这里而不是 tests/capi/CMakeLists.txt
+  # 里，是为了让那个文件只讲一件事：这些用例长什么样。
+  if (UVCPP_ENABLE_CAPI)
+    add_subdirectory(tests/capi)
   endif()
 endif()
 
@@ -1903,6 +2037,26 @@ file(GLOB HTTP3_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/http3/*.h")
 list(FILTER HTTP3_HEADER_FILES EXCLUDE REGEX "uvcpp_h3_(nghttp3|session)\\.h$")
 if(HTTP3_HEADER_FILES AND UVCPP_ENABLE_HTTP3)
   install(FILES ${HTTP3_HEADER_FILES} DESTINATION include/http3)
+endif()
+
+# src/capi/ —— C ABI 那一层。它是**纯 C** 的头，装给 C / C# P-Invoke / 别的
+# 语言用，所以装到 `include/capi/` 而不是并进 `include/uvcpp/`：这一层的
+# 稳定性承诺与 C++ 面是**两条线**（见 `uvcpp_c_common.h` 的“版本与兼容承诺”），
+# 放在目录上也看得见这条分界。
+#
+# 与 quic/http3 那两处不同的是：capi 的头**不依赖任何第三方**（这一层是薄包装，
+# 连 libuv 的类型都不出现在公开面上 —— 都是不透明指针 + 标量），所以没有"私有头
+# 摘出去"以外的顾虑。但**私有头照样有一个**：`uvcpp_c_internal.h` 里是魔数、
+# 收口宏和 `uvcpp_c_detail` 的那些件，全都**没有任何稳定性承诺**，装出去等于把
+# "这一层内部长什么样"摆进公开面。
+#
+# **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
+# 那个脚本自己按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，
+# `package_release.py` 打出来的包里照样会带上它。
+file(GLOB CAPI_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/capi/*.h")
+list(FILTER CAPI_HEADER_FILES EXCLUDE REGEX "uvcpp_c_internal\\.h$")
+if(CAPI_HEADER_FILES AND UVCPP_ENABLE_CAPI)
+  install(FILES ${CAPI_HEADER_FILES} DESTINATION include/capi)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too

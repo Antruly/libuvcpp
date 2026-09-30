@@ -79,6 +79,8 @@ jobs:
           # 定义 `UVCPP_ENABLE_MEMORY_POOL` 会静默拿到与 dll 不同的分配器 —— 见
           # RELEASE.md）。这里显式打开：不打开的话 tests/expand 那批用例在 CI 里
           # 一条都不跑，内存池就成了没人测的死代码。**别顺手把这行删掉。**
+          # 另一条：这一格也是带 C ABI 的那一格（"release 与 full 都支持 C 接口
+          # 导出"是需求本身）。ubuntu 那条腿上有同样的一行，理由写在那里。
           - feature: full
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -87,6 +89,7 @@ jobs:
               - -DUVCPP_ENABLE_OPENSSL=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_BUILD_EXPAND=ON
+              - -DUVCPP_ENABLE_CAPI=ON
 
           # quic（1.4.1 新增的腿）：和 ubuntu 那条腿的区别**只有 OpenSSL 的来源**。
           # ubuntu 让 ssl 那一格各自装 `libssl-dev`（3.0.13，两个 QUIC 符号都没有），
@@ -133,16 +136,41 @@ jobs:
             gate_integrated: nghttp3 integrated
             gate_module: Including http3 module in build
             gate_test: test_http3_web_func
+
+          # capi（1.4.1 新增的腿）：**C ABI 那一层**。这一格在 macOS 上的价值与
+          # MSVC 那格不同 —— Apple clang 与 Linux 的 gcc/clang 是两套 C 前端，
+          # 而这一层的判据全靠**一个真正的 C 编译器**（`tests/capi/` 是 C99）。
+          # 依赖：与 `web` 同一份（C 层是纯增量薄包装，不加任何外部依赖）。
+          #
+          # 符号面锁（`check_capi_symbols.py`）**只在 ubuntu 那一格跑**：它按 GNU
+          # nm 的方言解析那条腿的动态符号表，而 Mach-O 与 PE 各是另一套方言
+          # （脚本里那三条分支写得很清楚）。那两条腿守的是"编得出、链得上"，
+          # 见 doc/ci-guide.md §5。
+          - feature: capi
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_CAPI=ON
+            gate_name: capi
+            gate_switch: 'UVCPP_ENABLE_CAPI:BOOL=ON'
+            gate_integrated: C ABI enabled
+            gate_module: Including capi module in build
+            gate_test: test_capi_net_func
     steps:
       - uses: actions/checkout@v4
 
-      # 装包**按格**：`openssl@3` 只给 quic 那一格显式点名（别的格用 `openssl`，
-      # 它今天就是 openssl@3 的别名，但那两格不需要钉 root）。
+      # 装包**按格**：`openssl@3` 只给 quic / http3 那两格显式点名（别的格用
+      # `openssl`，它今天就是 openssl@3 的别名，但那两格不需要钉 root）。
+      # `capi` 与 `web` 同一份 —— C 层不加任何外部依赖。
       - name: Install deps
         run: |
           case "${{ matrix.feature }}" in
             basic-static|basic-shared) brew install libuv ninja ;;
-            web)                       brew install libuv zlib ninja ;;
+            web|capi)                  brew install libuv zlib ninja ;;
             ssl|h2|full)               brew install libuv openssl zlib ninja ;;
             quic|http3)                brew install libuv zlib ninja openssl@3 ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;

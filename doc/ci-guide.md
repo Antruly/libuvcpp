@@ -16,12 +16,12 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic`, `http3` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic`, `http3`, `capi` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `Windows (MinGW64)` | `Windows (MinGW64) / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3` | `macOS` | `macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `macOS` | `macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -34,7 +34,8 @@ carrying all four files produced exactly the 23 checks in the table above — no
 extra, no collisions — and the run that also carries the two corrections described below is
 green on all four platforms (2026-09-29). 1.4.1 added the three `http3` entries (`http3` needs
 QUIC + web, so it could not exist before those two did), which takes the table to **26**
-checks; the `windows` one had never run before that commit, since there is no MSVC on the
+checks; and then the three `capi` entries (the C ABI layer — Ubuntu, macOS and MSVC; see §5),
+which takes it to **29**. The `windows` one had never run before that commit, since there is no MSVC on the
 development machine — that leg's first execution *is* the gate (see §2 for how a new entry is
 supposed to be argued). Two things were
 only learnable by running it:
@@ -246,7 +247,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:1970`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2124`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -387,6 +388,56 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
 **macOS and Windows prebuilt packages still ship `UVCPP_QUIC_ENABLE 0`** regardless:
 `release.yml` does not enable QUIC (that would need a QUIC-capable OpenSSL on all six legs).
 
+### The `capi` entries
+
+`capi` is `src/capi/` — the **C ABI** surface (`extern "C"`, C99 headers, for C#/P-Invoke and
+any other FFI). It is the one module that is *not* a feature you can be missing: it compiles
+**into the existing `uvcpp` library**, so no entry here produces an extra artifact, and the
+release package's module set is unchanged by it. It runs on **three legs** — Ubuntu, macOS and
+Windows MSVC. MinGW is the gap (see §1).
+
+Two of the four `gate_*` strings are the usual ones, and the same two traps apply as for `h2`
+and `quic`: the cache reads `ON` even when the guard force-`set()`s the module off, so
+`Including capi module in build` is the load-bearing string; and a missing test registration
+would otherwise be invisible.
+
+What is specific to this entry:
+
+- **The counter-example step is the point.** `UVCPP_ENABLE_CAPI` is force-disabled unless
+  **both** `UVCPP_BUILD_NET` and `UVCPP_BUILD_WEB` are on (two guards, two warnings — see the
+  root `CMakeLists.txt`). The `capi` entry's own flags satisfy both, so the guard branches
+  **never execute on a normal run** — deleting a guard is a green path. The Ubuntu step
+  `Gate — C ABI must be force-disabled without web/net` configures twice on purpose (once with
+  `WEB=OFF`, once with `NET=OFF`) and asserts three things each time: configure **succeeds**
+  (the guard must warn and `set(... OFF)`, not fail), the log contains `已强制关闭 capi`, and
+  the log does **not** contain `Including capi module in build`. The third one matters: without
+  it, a guard that warns and then builds anyway would pass. It runs on Ubuntu only — the guard
+  logic is platform-independent, and three copies of a configure-only step would cost more than
+  they cover.
+- **The symbol lock is Ubuntu-only too**, and that is deliberate rather than an oversight.
+  `tests/tools/check_capi_symbols.py` compares the library's **exported** `uvcpp_c_*` symbols
+  against `tests/tools/capi_symbols.lock` (via `nm -D`, the ELF dialect). Its purpose is to make
+  "someone deleted or renamed a C symbol" red in CI instead of an
+  `EntryPointNotFoundException` on an already-built C# side. The macOS (`nm -gU`) and Windows
+  (`dumpbin /exports`) dialects are **not** implemented, so the script exits 3 (`not judged`)
+  there; what the macOS and MSVC entries judge is "it compiles and links", which is their own
+  reason for existing (`UVCPP_C_API` resolves to `dllexport`/`dllimport` only on `_WIN32`, and
+  `tests/capi/` is compiled by a real C front end — Apple clang and `cl` respectively).
+- **Why it exists separately from `full`.** `full` (Ubuntu/macOS only) carries
+  `-DUVCPP_ENABLE_CAPI=ON` because "release and `full` both support the C ABI" is the
+  requirement, not a convenience — but `full`'s gate strings are about the memory pool, and its
+  ctest count does not tell you whether the two pure-C tests were registered. The dedicated
+  entry is where that is asserted.
+- **No OpenSSL, no nghttp2, no zlib for the C layer itself.** `capi`'s flags match `web`'s
+  dependency row. The C surface's first batch (`common` + `net`) has no TLS entry point at all;
+  the modules that do (`web`/`webapp`/`http2`/`http3`/`quic`) get their C surface later, and
+  each will arrive with its own entry and its own flags.
+
+**Release configurations** pass `-DUVCPP_ENABLE_CAPI=ON` on all six legs (see `release.yml`),
+which is what makes the shipped `include/capi/` headers match a library that actually exports
+the symbols. `UVCPP_CAPI_ENABLE` also joined `check_config_contract.py`'s `MACROS` list, so the
+generated-header contract covers it on the Linux and MSVC `config-contract` jobs.
+
 ### The macro contract: `config-contract` (and the `mingw64` tail)
 
 Consumer-visible `UVCPP_*_ENABLE` macros come from a **generated**
@@ -471,6 +522,8 @@ sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 sudo apt-get install -y libuv1-dev zlib1g-dev
 # http3 — same as quic (HTTP/3 needs QUIC, so it needs the same 3.5)
 sudo apt-get install -y libuv1-dev zlib1g-dev
+# capi — same as web: the C layer itself adds no external dependency
+sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 # config-contract
 sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
 ```
@@ -487,11 +540,13 @@ brew install libuv openssl zlib ninja
 brew install libuv zlib ninja openssl@3
 # http3 — same as quic (same explicit openssl@3)
 brew install libuv zlib ninja openssl@3
+# capi — same as web: the C layer itself adds no external dependency
+brew install libuv zlib ninja
 ```
 
 ### Windows MSVC (`ci-windows-msvc.yml`)
 ```bash
-# basic-static | basic-shared | web — no system deps (libuv + llhttp via FetchContent)
+# basic-static | basic-shared | web | capi — no system deps (libuv + llhttp via FetchContent)
 # ssl | h2 | quic | http3
 bash .github/scripts/win-openssl-deps.sh
 # OpenSSL DLL path: C:/Program Files/OpenSSL/bin/ (or OpenSSL-Win64)

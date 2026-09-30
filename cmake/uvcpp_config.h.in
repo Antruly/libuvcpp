@@ -88,6 +88,13 @@
 #  define UVCPP_HTTP3_ENABLE @UVCPP_HTTP3_ENABLE@
 #endif
 
+#if defined(UVCPP_CAPI_ENABLE) && (UVCPP_CAPI_ENABLE != @UVCPP_CAPI_ENABLE@)
+#  error "UVCPP_CAPI_ENABLE=@UVCPP_CAPI_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_CAPI_ENABLE
+#  define UVCPP_CAPI_ENABLE @UVCPP_CAPI_ENABLE@
+#endif
+
 #if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
 #  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
 #endif

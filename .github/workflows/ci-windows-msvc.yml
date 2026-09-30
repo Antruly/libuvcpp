@@ -142,11 +142,43 @@ jobs:
             gate_integrated: nghttp3 integrated
             gate_module: Including http3 module in build
             gate_test: test_http3_web_func
+
+          # capi（1.4.1 新增的腿）：**C ABI 那一层**。这一格在 MSVC 上不是"多一
+          # 个模块"，而是这一层**唯一**能被 `cl` 编一遍的地方 —— 而且它是**两件**
+          # 事情的判据，缺了哪件都得靠猜：
+          #
+          # ① `UVCPP_C_API` 那枚宏在 `_WIN32` 下走的是 `dllexport`/`dllimport`
+          #    两条分支（`UVCPP_C_BUILD` / `UVCPP_C_SHARED`），而 `UVCPP_C_SHARED`
+          #    是 SHARED 目标上的 PUBLIC 定义 —— 也就是说**这一格验证的正是
+          #    "消费方加了 `dllimport` 还链得上"**。它错了在别的平台上一点感觉
+          #    都没有（那两条分支只在 `_WIN32` 下非空）。
+          # ② `tests/capi/` 那两个用例是**纯 C**（`C_STANDARD 99`），`cl` 编 `.c`
+          #    走的是它自己的 C 前端：`extern "C"` 那套收口宏、`UVCPP_C_API` 的
+          #    位置、头里有没有漏掉 C++ 才认的写法 —— 这些只有 `cl` 能判。
+          #
+          # 依赖：与 `web` 那一格同一份 —— **一个系统依赖都不需要**（libuv 与
+          # llhttp 走 FetchContent）。所以下面那个 `case` 把它归到"没有系统依赖"
+          # 那一行里，别顺手塞进 win-openssl-deps.sh。
+          - feature: capi
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_CAPI=ON
+            gate_name: capi
+            gate_switch: 'UVCPP_ENABLE_CAPI:BOOL=ON'
+            gate_integrated: C ABI enabled
+            gate_module: Including capi module in build
+            gate_test: test_capi_net_func
     steps:
       - uses: actions/checkout@v4
 
-      # 装包**按格**：basic 那两格与 web 一格一个系统依赖都不需要（libuv 与 llhttp
-      # 都走 FetchContent；llhttp 只在 WEB=ON 时才去取，所以 basic 那两格连它都没有）。
+      # 装包**按格**：basic 那两格、web 与 capi 这几格一个系统依赖都不需要（libuv 与
+      # llhttp 都走 FetchContent；llhttp 只在 WEB=ON 时才去取，所以 basic 那两格连它
+      # 都没有）。capi 与 web 同一份 —— C 层是**纯增量**的薄包装，不加任何外部依赖。
       #
       # 有系统依赖的那四格统一交给 `.github/scripts/win-openssl-deps.sh`：它把判据从
       # "choco 退出 0"改成"这台机器上有一份 CMake 找得到的 OpenSSL"，理由（含
@@ -156,7 +188,7 @@ jobs:
         shell: bash
         run: |
           case "${{ matrix.feature }}" in
-            basic-static|basic-shared|web) echo "(这一格没有系统依赖)" ;;
+            basic-static|basic-shared|web|capi) echo "(这一格没有系统依赖)" ;;
             ssl|h2|quic|http3)             bash .github/scripts/win-openssl-deps.sh ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
@@ -365,6 +397,9 @@ jobs:
             # 判据 1 抓不到成员布局错位，而且下面那条断言会把这个 job 判红
             # （红得对，但红在开关抄错，不是红在被测对象）。
             # MSVC 侧 uvcpp 自己走 /MD + 包内自带 VC++ 运行库，不需要 STATIC_RUNTIME。
+            #
+            # `-DUVCPP_ENABLE_CAPI=ON` 与 release.yml 那六条腿一致：发布包里**有**
+            # `include/capi/`，所以代表发布包的那棵树也得有 C 符号在库里。
             echo "=== configure ==="
             cfg=0
             cmake -S . -B build-cfg -DCMAKE_BUILD_TYPE=Release \
@@ -375,6 +410,7 @@ jobs:
               -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
+              -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
             echo "CONFIGURE_RC=$cfg"
@@ -418,6 +454,7 @@ jobs:
               -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
+              -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
             echo "DEBUG_CONFIGURE_RC=$dbg"

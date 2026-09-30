@@ -10,12 +10,21 @@ why several of the conventions here exist — most of them were paid for once al
 | `tests/unit/` | three executables, wired by hand | `tests/CMakeLists.txt` → `add_subdirectory(unit)` |
 | `tests/functional/` | **one executable per `.cpp`**, from a `file(GLOB)` | root `CMakeLists.txt`, inside `if(UVCPP_BUILD_FUNCTIONAL)` |
 | `tests/expand/` | one executable, the memory pool | root `CMakeLists.txt`, inside `if(UVCPP_BUILD_EXPAND)` |
+| `tests/capi/` | one executable per `.c`, **compiled as C** | `tests/capi/CMakeLists.txt`, added from the root inside `if(UVCPP_ENABLE_CAPI)` |
 
 `tests/CMakeLists.txt` is eight lines long and adds **only** `unit`. The other two directories
 are added from the root file, because they depend on switches the root file owns. Adding a test
 directory means editing the root `CMakeLists.txt`, not `tests/CMakeLists.txt`.
 
 `tests/expand` does not have a switch of its own — it follows `UVCPP_BUILD_EXPAND`.
+
+`tests/capi` is the one layer whose sources are **not** C++. Its two files (`capi_common_func.c`,
+`capi_net_func.c`) are compiled by a C compiler against `include/capi/`, and they are what turns
+"the headers are usable from C" from a claim into a measurement — a header that only *looks* like
+C (a stray `namespace`, a default argument, `bool` from `<stdbool.h>` missing) fails to compile
+here rather than at a C# call site. Because the layer is opt-in, the directory is registered under
+`UVCPP_ENABLE_CAPI` instead of a `UVCPP_BUILD_*` switch, and `tests/capi/CMakeLists.txt` may not
+include any C++ header. See [`capi-guide.md`](capi-guide.md).
 
 ## Filename is the filter key
 
@@ -198,7 +207,7 @@ executable is on disk; CMake does not delete executables whose source files have
 
 ## `tests/tools/` — the script index
 
-Thirty-three scripts (`ls tests/tools/*.py | wc -l`). Most exist because a specific claim needed
+Thirty-five scripts (`ls tests/tools/*.py | wc -l`). Most exist because a specific claim needed
 to be *measured* rather than argued, so they are evidence-producing tools, not a coherent
 framework. Several are one-shots kept because deleting them would lose the method.
 
@@ -237,6 +246,7 @@ nothing is the failure mode worth spending a rule on: it looks green forever.
 | `check_doc_snippets.py` | Documentation gate — every ```` ```cpp ```` block in a tracked document actually compiles against a packaged header set. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#code-blocks-in-documentation) for the block conventions. |
 | `check_doc_lines.py` | Documentation gate — every `file:line` reference in a tracked document still points where it did, and none is written in the extension-only shorthand (`<file>.cpp:123`). Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#line-references-in-documentation) for the citation conventions. |
 | `check_ci_layout.py` | **CI-layout gate** — `.github/workflows/` is exactly the four per-platform files, each one's job and feature-matrix entries match the table in [`ci-guide.md`](ci-guide.md) **both ways**, each `h2`/`quic`/`http3` entry still carries its four gate strings, and both READMEs' CI badges point at files that exist. Runs on every push. |
+| `check_capi_symbols.py` | **C ABI symbol lock** — every function declared `UVCPP_C_API` in `src/capi/*.h` must be in `capi_symbols.lock`, and the lock must match what the library actually exports (`nm -D` / `nm -gU` / `nm` per platform) **both ways**. Criterion 1 runs without a build, so a rename is caught even on a machine that never compiled the layer. `--update` rewrites the lock. Runs on every push (Ubuntu only — the lock is a symbol *name* set, and names do not vary by platform). |
 
 **Why `check_doc_lines.py` exists.** `check_docs.py`'s path criterion strips the `:NNN`
 suffix (`LINE_SUFFIX_RE`) *before* testing whether the file exists — the line number half was
@@ -314,14 +324,15 @@ the tests, and reports whether the mutation was caught — and by which test.
 | `run_idle_mutation.py` | `run()` returning when there is nothing left to wait for |
 | `run_tcp_client_dtor_mutation.py` | `~uvcpp_tcp_client` — no sleeping in the destructor |
 | `http3_mutation.py` | `1.4.1` — HTTP/3's completion accounting, its once-only contract, and the QUIC FIN/RESET split it sits on |
+| `capi_mutation.py` | `1.4.1` — the C ABI layer's five load-bearing rules: handle death (poison + registry), the callback-table `size` rule, the `extern "C"` exception boundary, the ABI-version self-check, and the buffer-too-small contract |
 
-**`http3_mutation.py` is the one driver here that is about a `1.4.x` module**, and it exists
-because the earlier ones for those modules were not kept: the QUIC batch (`0eb4e20`…`0addc23f`)
-and the first HTTP/3 pass (`fe35eca`, `9da32cc`) each ran a mutation table from a throwaway
-script that lived outside the repo, so their results were quotable in a commit message and not
-re-runnable. This driver re-measures nine mutations over the two HTTP/3 tests plus
-`test_quic_api_func`; its own header records each one's verdict, and three facts from the run
-are worth repeating here:
+**`http3_mutation.py` and `capi_mutation.py` are the two drivers here that belong to a `1.4.x`
+module**, and the first of them exists because the earlier ones for those modules were not kept:
+the QUIC batch (`0eb4e20`…`0addc23f`) and the first HTTP/3 pass (`fe35eca`, `9da32cc`) each ran a
+mutation table from a throwaway script that lived outside the repo, so their results were
+quotable in a commit message and not re-runnable. This driver re-measures nine mutations over the
+two HTTP/3 tests plus `test_quic_api_func`; its own header records each one's verdict, and three
+facts from the run are worth repeating here:
 
 - **The once-only contract's guard is a pair, not a site.** Deleting `complete_response()`'s
   internal `if (s.completed) return;` and deleting `on_stream_close`'s `!s.completed` each
@@ -338,6 +349,21 @@ are worth repeating here:
 - **One caught mutant is caught by hanging, not by failing.** `take_completed()` not popping
   its queue makes both HTTP/3 tests time out (`rc=124`) rather than print a `[FAIL]`. The
   driver prints that distinction instead of flattening it to "red".
+
+**`capi_mutation.py` produced the sharpest of all of these lessons, and it is not about the C
+ABI.** Its first version predicted that all three handle-death mutants would be caught, because
+the C tests assert "use a freed handle → `UVCPP_C_E_STALE`, never UB". All three survived. The
+guards are two (`registry_remove()` + `poison_head()`), so mutating either alone leaves the other
+in place — but mutating **both** survived too, which is not redundancy. The assertion was
+measuring the allocator: glibc's tcache writes its `next` pointer at offset 0 of a freed chunk,
+which is exactly where the handle magic lives, so the "read the magic of freed memory" check
+accidentally sees a non-magic value whatever the guards do. The fix was to add an observable that
+the allocator cannot fake — `uvcpp_c_live_handle_count()`, i.e. the registry's size — plus a test
+that it returns to its baseline; only then did two of the three mutants go red. **The general
+rule: an assertion whose mechanism could be satisfied by something other than the code under test
+is not evidence, and the only way to find out is to break the code on purpose.** The third mutant
+still survives, and the driver now says *why* (the two guards are mutually redundant by design)
+instead of relabelling it.
 
 **The verdict rule is two conditions, not one**: (1) the exit code is non-zero, **and** (2) the
 *expected group*, run on its own, is also red. Running the full suite and observing that

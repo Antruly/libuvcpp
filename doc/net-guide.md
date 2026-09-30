@@ -808,6 +808,10 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
 - **TLS 的 `PEER_STRICT` 只在客户端上多做事**：它会拿 `connect()` 收到的那个名字去
   校验对端证书的主机名，`PEER` 不会（见 [TLS 与证书指南](./ssl-guide.md)）。服务端上
   两者仍等价 —— 服务端没有可校验的名字。
+- **C 面只到 TCP，且看不到 TLS 参数**：这一层的 C ABI（`include/capi/uvcpp_c_net.h`）
+  给了 `tcp_client` / `tcp_server` 的精选面，**没有** UDP、**没有** DNS，也**没有**
+  证书/私钥/SNI 这些设置入口（只有 `is_tls()` / `alpn_selected()` 两个查询）。
+  T 到什么程度、为什么这么切，见 [C ABI 指南](./capi-guide.md) §4。
 - **多循环两端都已落地**：net 层 `uvcpp_tcp_server::set_loops()`（§4）与框架层
   `uvcpp_web_app::set_loops(n)` 都有了，后者配套 `loop_count()` /
   `connection_count_at(int)`；注意 `connections()` 只返回**本循环**那一份。客户端与

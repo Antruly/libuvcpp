@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:964-972`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1028-1036`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
@@ -54,7 +54,7 @@ VERSION = _header_version()
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
 MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2",
-           "wsdl", "quic", "http3"]
+           "wsdl", "quic", "http3", "capi"]
 
 # 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
 # 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
@@ -80,9 +80,19 @@ MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "h
 # 与 quic 那两条一一对应（前者拉 `<nghttp3/nghttp3.h>`，后者是 `h3_session` 的
 # 定义，字段里写着 `nghttp3_conn*`）。对应的 CMake 侧是
 # `list(FILTER HTTP3_HEADER_FILES EXCLUDE REGEX "uvcpp_h3_(nghttp3|session)\\.h$")`。
+#
+# `uvcpp_c_internal.h` 是第七条，但**它不是前六条那种"拉第三方头"**：它一个
+# 第三方头都不拉（只拉自己的 `uvcpp_c_common.h` 和 libuv），编得过、也不给使用者
+# 添依赖。排除它的理由换了一条：它把 C 层的**内部形状**摆出来 —— 句柄里的
+# `magic`/`abi` 摆在哪一格、`uvcpp_c_detail` 那几个模板、`UVCPP_C_TRY` 那对宏、
+# 活句柄登记表的三个函数。这些没有一条有稳定性承诺，而"看得见"会被当成
+# "可以用"。对应的 CMake 侧是
+# `list(FILTER CAPI_HEADER_FILES EXCLUDE REGEX "uvcpp_c_internal\\.h$")`，
+# **两处必须一起改**（同前六条那条规矩）。
 PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
                    "uvcpp_quic_ngtcp2.h", "uvcpp_quic_session.h",
-                   "uvcpp_h3_nghttp3.h", "uvcpp_h3_session.h"}
+                   "uvcpp_h3_nghttp3.h", "uvcpp_h3_session.h",
+                   "uvcpp_c_internal.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），

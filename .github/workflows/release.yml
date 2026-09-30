@@ -69,6 +69,15 @@ jobs:
           #    介绍它。nghttp2 是唯一被强制静态的依赖（CMakeLists.txt:377-391），
           #    所以开它不会给产物添任何 dll。六个打包 job 都必须传，任何一个漏了
           #    就会发一个"同版本号但少一半功能"的包。
+          #
+          # ④ UVCPP_ENABLE_CAPI=ON：它**默认也是 OFF**，而"发布出来的库支持导出 C
+          #    类型接口"是这一版的一条**发布判据**（需求原话），不是可选项。与
+          #    ③ 同一条纪律：**十个 configure 一个都不许漏**（六个打包 job，其中四个
+          #    各自还有一棵 debug 树）。漏一个的后果比 ③ 更隐蔽 —— 包里的头照样有
+          #    `include/capi/`（那由 `package_release.py` 的 MODULES 决定，与这一趟
+          #    开关无关），于是"头在、符号不在"，使用方在**运行时**才拿到
+          #    `EntryPointNotFoundException`。C 层是薄包装：不加外部依赖、不多产物、
+          #    不多一个 dll，所以开它不改变发布包的模块集合。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
@@ -76,6 +85,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -94,6 +104,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -229,6 +240,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -244,6 +256,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -354,6 +367,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -369,9 +383,13 @@ jobs:
       - name: Assert the requested modules are actually on
         shell: bash
         run: |
+          # UVCPP_ENABLE_CAPI 也在这一串里：它的守卫链（缺 NET 或 WEB 就 warn +
+          # 强制关）是**普通变量 set()**，cache 里照旧写着 ON，所以这一条断言按
+          # 设计就抓不到类似 QUIC 那两处"静默降级"；它能抓的是"这一趟根本没传这个
+          # -D"（比如将来谁复制粘贴了一个新 job）。这正是它在这里的价值。
           for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
                    UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB \
-                   UVCPP_ENABLE_NGHTTP2; do
+                   UVCPP_ENABLE_NGHTTP2 UVCPP_ENABLE_CAPI; do
             if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
               echo "::error title=msvc-module-off::${k} 没有生效，包会缺功能"
               grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
@@ -511,6 +529,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -543,9 +562,13 @@ jobs:
       - name: Assert the requested modules are actually on
         shell: bash
         run: |
+          # UVCPP_ENABLE_CAPI 也在这一串里：它的守卫链（缺 NET 或 WEB 就 warn +
+          # 强制关）是**普通变量 set()**，cache 里照旧写着 ON，所以这一条断言按
+          # 设计就抓不到类似 QUIC 那两处"静默降级"；它能抓的是"这一趟根本没传这个
+          # -D"（比如将来谁复制粘贴了一个新 job）。这正是它在这里的价值。
           for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
                    UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB \
-                   UVCPP_ENABLE_NGHTTP2; do
+                   UVCPP_ENABLE_NGHTTP2 UVCPP_ENABLE_CAPI; do
             if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
               echo "::error title=msvc-arm64-module-off::${k} 没有生效，包会缺功能"
               grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
@@ -617,6 +640,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -632,6 +656,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -717,6 +742,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -731,6 +757,7 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON

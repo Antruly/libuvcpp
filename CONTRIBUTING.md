@@ -188,7 +188,7 @@ by hand:
 | Command | Checks |
 |---|---|
 | `python tests/tools/check_docs.py` | The CMake option tables in both READMEs match the options the build actually defines, every relative link and repo path resolves, and no document is orphaned. |
-| `python tests/tools/check_doc_snippets.py --pkg <package dir>` | Every ```` ```cpp ```` block in a tracked document actually **compiles** against the packaged headers. |
+| `python tests/tools/check_doc_snippets.py --pkg <package dir>` | Every ```` ```cpp ```` and ```` ```c ```` block in a tracked document actually **compiles** against the packaged headers (C blocks with a C compiler). |
 | `python tests/tools/check_doc_lines.py` | Every `file:line` reference in a tracked document still resolves, still lands on a non-blank line, still points at the same content it did when the lockfile was written, and is not written in the extension-only shorthand (`<file>.cpp:123`). |
 | `python tests/tools/check_ci_layout.py` | `.github/workflows/` is exactly the four per-platform files, each file's jobs and feature-matrix entries match the table in `doc/ci-guide.md` **both ways**, and the CI badges in both READMEs point at files that exist. Adding or renaming a matrix entry without updating that table is red. |
 
@@ -235,6 +235,7 @@ so nothing reported it.)
 | Written as | Means |
 |---|---|
 | ```` ```cpp ```` | Self-contained: it carries its own `#include`s and must compile. |
+| ```` ```c ```` | The same, but compiled by a **C compiler** (`-std=c99`; `/TC` under MSVC). Use it for the C ABI layer (`include/capi/`), where the code a reader copies has to be C, not C++ that happens to look like it. The C compiler is derived from `--cxx` (`g++` → `gcc`, `clang++` → `clang`, `cl` → `cl`), or set explicitly with `--cc`. Only lowercase `c` counts — ```` ```c99 ```` and ```` ```C ```` are red, the same way ```` ```cppp ```` is. |
 | ```` ```cpp ```` + first line `// doc-snippet: fragment — <why>` | Not compiled. **The reason is mandatory** — an unexplained exemption is an exemption nobody can review. |
 | `<!-- doc-snippets: fragments-default -->` near the top of a page | Every block on that page is an excerpt; the ones that are self-contained opt back in with `// doc-snippet: compile`. At least one must. |
 
@@ -289,7 +290,7 @@ against the file at the repository root); a citation into a build tree would nee
 number in a file nobody has, so there is no reason to qualify it.
 
 A `<dir>/CMakeLists.txt` reference is judged only when that path exists in this repository.
-`ngtcp2/CMakeLists.txt:160` points into a vendored upstream tree, which arrives in the build
+`ngtcp2/CMakeLists.txt:181` points into a vendored upstream tree, which arrives in the build
 directory rather than in a clone, so it is recorded and printed as unjudged instead of failed —
 the same "ignored, but loudly" treatment as a namespaced third-party reference.
 

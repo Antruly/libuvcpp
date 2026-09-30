@@ -99,6 +99,9 @@ jobs:
           # 定义 `UVCPP_ENABLE_MEMORY_POOL` 会静默拿到与 dll 不同的分配器 —— 见
           # RELEASE.md）。这里显式打开：不打开的话 tests/expand 那批用例在 CI 里
           # 一条都不跑，内存池就成了没人测的死代码。**别顺手把这行删掉。**
+          #
+          # 另一条：这一格也是带 `-DUVCPP_ENABLE_CAPI=ON` 的那一格 —— "release 与
+          # full 都支持 C ABI 导出"是需求本身（下一格说明 C ABI 单独那一格管什么）。
           - feature: full
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -107,6 +110,7 @@ jobs:
               - -DUVCPP_ENABLE_OPENSSL=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_BUILD_EXPAND=ON
+              - -DUVCPP_ENABLE_CAPI=ON
 
           # quic：**四格里唯一自己在 job 里编一份 OpenSSL 的**（见下面那条
           # "Build OpenSSL 3.5 from source" 步）。它必须自建：模块的配置期预检要求
@@ -153,6 +157,33 @@ jobs:
             gate_integrated: nghttp3 integrated
             gate_module: Including http3 module in build
             gate_test: test_http3_web_func
+
+          # capi（1.4.1 新增的腿）：**C ABI 那一层**（`src/capi/`）。
+          #
+          # 为什么 `full` 那一格带着 `CAPI=ON` 还要单开一格：两张判据在 `full` 上
+          # 判不了。① `full` 不带 `WEBAPP=ON`（默认 ON，但那一格没显式写），而
+          # `UVCPP_ENABLE_CAPI` 的守卫链要的是 `NET` + `WEB` —— 守卫到底有没有生效
+          # 只有在**专门造一次反例**时才看得出来，那件事在下面那条 `if` 步骤里做。
+          # ② `tests/capi/` 是**纯 C** 编的（`C_STANDARD 99`），它要的是"这一格真的
+          # 把两个 .c 用例注册进去并跑起来"，而 `full` 那格的门禁串盯的是内存池。
+          #
+          # 这一格**不带 OpenSSL / 不带 h2**：C 面这一批（common + net）一个加密
+          # 入口都没有，开了只会让这一格的失败原因变多。SSL/h2/h3 的 C 面进了之后，
+          # 那一批会各自带自己的格（见 doc/capi-guide.md §CI）。
+          - feature: capi
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_NET=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_CAPI=ON
+            gate_name: capi
+            gate_switch: 'UVCPP_ENABLE_CAPI:BOOL=ON'
+            gate_integrated: C ABI enabled
+            gate_module: Including capi module in build
+            gate_test: test_capi_net_func
     steps:
       - uses: actions/checkout@v4
 
@@ -173,6 +204,10 @@ jobs:
             # （`#if UVCPP_ZLIB_ENABLE`，故意留着：它给 `apply_compression_for`
             # 那次拆分当护栏）。
             http3)                     pkgs="libuv1-dev zlib1g-dev" ;;
+            # capi 跟 web 那一格同一份：`WEB=ON` 要 zlib（WebSocket 压缩那组
+            # 用例），`WEBAPP=ON` 跟着 web 走。C 层自己**一个外部依赖都不加**
+            # （它是薄包装），所以这里不出现任何新包。
+            capi)                      pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
           sudo apt-get install -y $pkgs
@@ -444,6 +479,69 @@ jobs:
               echo "::error title=http3-h2::配置过了，但没有 '$m' —— 三个模块没同时在场"; exit 1; }
           done
 
+      # C ABI 的守卫链：**反例那一侧**。
+      #
+      # 为什么非要有这条：守卫（缺 NET 或 WEB 就 warn + 强制关）**平时是不跑的**
+      # ——capi 那一格自己把两个都开齐了，`if(NOT WEB)` 那个分支永远不进。于是
+      # "守卫被谁顺手删了"是一条**全绿**的路径（删掉它，CAPI 照样导出、用例照样
+      # 过），而真实后果是使用者给一个他自己都说不清的组合、拿到一份没有 C 符号
+      # 的库。这里**故意造一次反例**，把那个分支跑一遍。
+      #
+      # 而且要判三件事，缺一都会假绿：
+      #   ① 配置**不能失败**（"报错退出"不是我们想要的反应，`set(... OFF)` 才是）；
+      #   ② 那句 WARNING 真的在（证明走的是守卫，不是别的原因把 CAPI 关掉的）；
+      #   ③ 源列表里**没有** `Including capi module in build`（证明 `src/capi/`
+      #      真的被排除了，而不是只有一句警告、库还是编了 C 面）。
+      # 只 grep `CMakeCache.txt` 是**假绿**：守卫是普通变量 `set()`，cache 里照旧
+      # 写着 `UVCPP_ENABLE_CAPI:BOOL=ON`。
+      - name: Gate — C ABI must be force-disabled without web/net
+        if: matrix.feature == 'capi'
+        shell: bash
+        run: |
+          mkdir -p ci-logs
+          for bad in "-DUVCPP_BUILD_WEB=OFF:web" "-DUVCPP_BUILD_NET=OFF:net"; do
+            opt="${bad%%:*}"; what="${bad##*:}"
+            log="ci-logs/capi-guard-$what-configure.log"
+            rc=0
+            cmake -S . -B "build-capi-noguard-$what" -DCMAKE_BUILD_TYPE=Release \
+              -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEBAPP=ON \
+              -DUVCPP_ENABLE_CAPI=ON "$opt" > "$log" 2>&1 || rc=$?
+            if [ "$rc" != "0" ]; then
+              echo "::error title=capi-guard::少了 $what 时配置**失败**了 rc=$rc —— 守卫该做的是 warn + 强制关，不是让配置红"
+              tail -30 "$log"; exit 1
+            fi
+            grep -q '已强制关闭 capi' "$log" || {
+              echo "::error title=capi-guard::少了 $what 时没有那句 '已强制关闭 capi' —— 守卫没生效（CAPI 会带着一个不成立的组合编下去）"
+              grep -iE 'capi|warning' "$log" | head -20; exit 1; }
+            if grep -q 'Including capi module in build' "$log"; then
+              echo "::error title=capi-guard::少了 $what，警告打了，但 src/capi/ 还是进了源列表 —— 库会导出一份这个组合下不该有的 C 面"
+              exit 1
+            fi
+            echo "守卫（少 $what）：warn 到了、模块真的被排除了"
+          done
+
+      # C ABI 的**符号面锁**：`uvcpp_c_*` 那些导出符号与 `capi_symbols.lock` 逐条比。
+      #
+      # 为什么挂在 Linux 这一格：`nm -D`（**动态**符号表）是 ELF 的方言，macOS 是
+      # `-gU`、Windows 是 `dumpbin /exports`，脚本只认这一种就退 3。这一格编的是
+      # `libuvcpp.so`，正好是这一层交付面的形状。
+      #
+      # 它防的是"删掉/改掉一个 C 符号而六道门禁全绿"——那个错误第一个发现的人是
+      # **已经编好的 C# 侧**（运行时 EntryPointNotFoundException）。
+      - name: Gate — C ABI symbol surface matches the lock
+        if: matrix.feature == 'capi'
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/check_capi_symbols.py --tree build-capi 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|\[停\]|Error|Traceback' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=capi-symbols::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
       - name: Test
         shell: bash
         run: |
@@ -528,6 +626,12 @@ jobs:
           {
             # 这一档照抄 release.yml 里 linux 那份（它已经在真实发版里跑通了）：
             # 依赖全静态（PIC + OPENSSL_USE_STATIC_LIBS + STATIC_RUNTIME）。
+            #
+            # `-DUVCPP_ENABLE_CAPI=ON` 是**照抄的一部分**，不是额外加码：release.yml
+            # 六条腿现在都开它，于是发布包里**有** `include/capi/` 那几个头。这个
+            # job 拿的包要能代表发布包 —— 头在、模块却关着的话，`check_doc_snippets`
+            # 会把 `doc/capi-guide.md` 的片段全部"编过"（它们编得过，见那张表旁边
+            # 的说明），而这个 job 也就永远量不到 C 面与包的组合。
             echo "=== configure ==="
             cfg=0
             extra=(-DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -540,6 +644,7 @@ jobs:
               -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
+              -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
             echo "CONFIGURE_RC=$cfg"
@@ -582,6 +687,7 @@ jobs:
               -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
+              -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
             echo "DEBUG_CONFIGURE_RC=$dbg"
