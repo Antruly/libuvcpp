@@ -554,6 +554,12 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   是同一件事，`doc/ci-guide.md` §1 的"未覆盖的格"里有理由。
 - **预编译包里 http3 头是惰性的**（`UVCPP_HTTP3_ENABLE 0`）。`release.yml` 本版不
   开 HTTP/3，与 `quic` / `http2` 头在非该模块的包里的行为一致。
+- **C 面（1.4.4 起）接在一条"借来的" QUIC 连接上**：`include/capi/uvcpp_c_http3.h`
+  是 h3 驱动层一个句柄（`uvcpp_c_h3_connection`）+ 请求 / 响应构造器 + 回调期的请求
+  视图。它**照抄**了本页那条 h3 与 QUIC 的分工（h3 换掉连接上的回调表），于是 C 面
+  也继承了它的边界：装了 h3 之后，那个借来的 QUIC 连接句柄的收尾只能由 h3 的
+  `on_disconnect` 做 —— 这一条是本层最容易被漏掉的承重结构，被 `capi_mutation.py`
+  的 M18 钉着。trailers / push / 逐帧回调仍不给，见 [C ABI 指南](./capi-guide.md) §4。
 - **没有 h3 的优先/依赖（`priority`）语义**，也没有连接级统计。
 
 下一步是**把 h3 上的流式路由补上**（`post_stream` / `set_stream_claim` 需要一条

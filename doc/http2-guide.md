@@ -540,6 +540,12 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:798
 - **`want_read`/`want_write` 不参与致命判定**：`on_fatal` 只有两类触发者，这两个公开
   成员本层一处都没读（`src/http2/uvcpp_h2_session.h:182-194`）—— 详见
   [现状 §2](./http2-status.md#2-做了但有折衷写死了)。
+- **C 面（1.4.3 起）只给驱动层那一个句柄**：`include/capi/uvcpp_c_http2.h` 里是
+  `uvcpp_c_h2_connection`（外加**调用方所有**的请求 / 响应构造器与回调期的流视图），
+  `uvcpp_h2_session` **不单独出现** —— 会话层的 `drain()` 是"吐出字节"，照抄成第二个
+  句柄就等于让 C 侧自己写一遍驱动层；本层里那些"写完成之后再结算"的顺序恰好最容易写错。
+  同样没有 priority、没有 PUSH、没有逐帧回调。它是什么、不提供什么，见
+  [C ABI 指南](./capi-guide.md) §4。
 
 ---
 

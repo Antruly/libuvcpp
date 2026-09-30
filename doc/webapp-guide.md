@@ -1286,9 +1286,14 @@ uvcpp_logger::instance().flush();                // 转发给 sink 的 flush()
   `next` / 延迟应答，但**只挑 C# / P-Invoke 调用方真正要用的那一片**：本页里凡是签名
   带 C++ 类型的入口（`req.json(uvcpp_json&)`、`set_file_chunk_gate()`、
   `set_stream_sink()` 之类）在 C 面**不存在**，C 侧走 `uvcpp_c_resp_json_str()` /
-  `uvcpp_c_resp_begin_chunked()` + `uvcpp_c_resp_write_chunk()` 这样的窄口子。HTTP/2 / QUIC / HTTP3 的 C 面
-  在后续批次里，**目前不存在** —— 别照着本页的签名去 P/Invoke。提供什么、明确不提供
-  什么、以及它的契约见 [C ABI 指南](./capi-guide.md)。
+  `uvcpp_c_resp_begin_chunked()` + `uvcpp_c_resp_write_chunk()` 这样的窄口子。
+  **但本页 §13 那条"协商出 `h2` 就走 h2"在 C 侧用不上**：`uvcpp_c_webapp.h` 刻意
+  不给 TLS 入口（`enable_ssl*` / `enable_wss()` 那几条要 `uvcpp_ssl_context`，它的
+  生命周期与 C 句柄是两套东西），没有 TLS 就没有 ALPN、也就没有 h2 —— C 写的 app
+  是明文 HTTP/1.1。要在 C 侧跑 h2 / h3，用**它们各自那份头**里的类型
+  （`uvcpp_c_http2.h` 是 1.4.3 落地的，`uvcpp_c_quic.h` / `uvcpp_c_http3.h` 是
+  1.4.4 落地的）：那三个是**独立**的句柄，不是往 `uvcpp_c_webapp_*` 上拧一个开关。
+  提供什么、明确不提供什么、以及它的契约见 [C ABI 指南](./capi-guide.md)。
 
 ---
 
