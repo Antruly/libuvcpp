@@ -740,6 +740,11 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1332-1332`�
   （[§9](#9-静态文件服务)）。
 - **`uvcpp_http_server` 不自己管 TLS**，要在 `listen()` 之前装到
   `get_tcp_server()` 上。
+- **C 面（1.4.3 起）只给精选的那一片**：客户端在
+  `include/capi/uvcpp_c_web.h`（`http_client` / `http_response`），服务端那一片在
+  `include/capi/uvcpp_c_webapp.h`（**C 侧的服务端就是 app**，没有单独的
+  `uvcpp_c_http_server`）。同样没有 TLS 参数、没有重定向跟随。它是什么、不提供
+  什么，见 [C ABI 指南](./capi-guide.md) §4。
 
 ---
 

@@ -70,6 +70,18 @@ size_t registry_size() {
   return registry().size();
 }
 
+int copy_out(const std::string& s, char* buf, size_t cap) {
+  const size_t n = s.size();
+  // `int` 装不下就报"缓冲区太小"而不是截断：静默截断会让调用方拿到一个
+  // 长度对不上的字符串，而它没有任何办法发现。
+  if (n > 0x7fffffffu) return UVCPP_C_E_BUFFER_TOO_SMALL;
+  if (buf != nullptr && cap >= n + 1) {
+    if (n > 0) std::memcpy(buf, s.data(), n);
+    buf[n] = '\0';
+  }
+  return static_cast<int>(n);
+}
+
 void set_last_error(const char* what) {
   if (what == nullptr) {
     g_last_error[0] = '\0';
@@ -134,6 +146,7 @@ extern "C" UVCPP_C_API const char* uvcpp_c_strerror(int err) {
     case UVCPP_C_E_NOT_BUILT:           return "module not built into this library";
     case UVCPP_C_E_WRONG_THREAD:        return "called from a thread other than the event loop's";
     case UVCPP_C_E_BUFFER_TOO_SMALL:    return "caller-provided buffer is too small";
+    case UVCPP_C_E_NOT_FOUND:           return "the thing asked for is not present";
     default: break;
   }
 

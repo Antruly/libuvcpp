@@ -167,9 +167,12 @@ jobs:
           # ② `tests/capi/` 是**纯 C** 编的（`C_STANDARD 99`），它要的是"这一格真的
           # 把两个 .c 用例注册进去并跑起来"，而 `full` 那格的门禁串盯的是内存池。
           #
-          # 这一格**不带 OpenSSL / 不带 h2**：C 面这一批（common + net）一个加密
-          # 入口都没有，开了只会让这一格的失败原因变多。SSL/h2/h3 的 C 面进了之后，
-          # 那一批会各自带自己的格（见 doc/capi-guide.md §CI）。
+          # 这一格**不带 OpenSSL / 不带 h2**：C 面到批 2（common + net + webapp/web）
+          # 为止一个加密入口都没有，开了只会让这一格的失败原因变多。SSL/h2/h3 的
+          # C 面进了之后，那一批会各自带自己的格（见 doc/capi-guide.md §CI）。
+          #
+          # `tests/capi/` 那三个用例都在这条腿上跑（末尾那句全量 ctest 是判据），
+          # `gate_test` 只是"注册了没有"那一条的抽查点，所以它仍指着批 1 那个名字。
           - feature: capi
             flags:
               - -DUVCPP_BUILD_TESTS=ON

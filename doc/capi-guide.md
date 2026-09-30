@@ -9,16 +9,21 @@ http3 / quic，而不需要写一个 C++ 中间层。
 C 层是薄包装（约 150–250 个函数的精选门面，见 §4），不新增第三方依赖、不新增
 产物、不改动 C++ 那一侧的任何导出行为。
 
-> ## 1.4.2 起它的第一批是"能用的"：地基 + net
+> ## 进度：1.4.2 地基 + net，1.4.3 webapp + web
 >
-> 这一批交付了 `uvcpp_c_common.h` 与 `uvcpp_c_net.h`：ABI 自洽、错误码与文案、
-> 句柄的生死与类型检查、版本化回调表的 `size` 规则、线程纪律，以及
-> **`tcp_client` / `tcp_server` 的完整可用面**。判据是 `tests/capi/` 下两个
-> **纯 C 编译**的用例（`capi_common_func.c`、`capi_net_func.c`）：它们本机真起
-> 两端、真收字节，并在 `tests/tools/capi_mutation.py` 那张变异表下被逐条拆守卫。
+> **批 1（1.4.2）**交付了 `uvcpp_c_common.h` 与 `uvcpp_c_net.h`：ABI 自洽、错误码
+> 与文案、句柄的生死与类型检查、版本化回调表的 `size` 规则、线程纪律，以及
+> **`tcp_client` / `tcp_server` 的完整可用面**。
 >
-> **没做的**逐条列在 [§7](#7-没做的如实列出)：web / webapp / http2 / http3 /
-> quic 的 C 面、TLS 参数入口、UDP、DNS。别在别处另维护一份。
+> **批 2（1.4.3）**交付了 `uvcpp_c_webapp.h`（服务端那一大片：app / 路由 /
+> 中间件 / 静态 / 上传 / ws 路由 / `req` / `resp` / `next` / **延迟应答**）与
+> `uvcpp_c_web.h`（**客户端**：`http_client` / `http_response` / `ws_client`）。
+> 判据是 `tests/capi/` 下三个**纯 C 编译**的用例（`capi_common_func.c`、
+> `capi_net_func.c`、`capi_webapp_func.c`）：拿 C 写的客户端去打 C 写的服务端，
+> body 逐字节比，并在 `tests/tools/capi_mutation.py` 那张变异表下被逐条拆守卫。
+>
+> **没做的**逐条列在 [§7](#7-没做的如实列出)：http2 / http3 / quic 的 C 面、
+> TLS 参数入口、UDP、DNS。别在别处另维护一份。
 
 ## 目录
 
@@ -111,11 +116,17 @@ configure）都传 `-DUVCPP_ENABLE_CAPI=ON`，CI 的 `full` 格与专门的 `cap
 
 | 段 | 值 | 出处 |
 |---|---|---|
-| 本层的码 | `-20001` … `-20009` | `enum uvcpp_c_error`，见 `include/capi/uvcpp_c_common.h` |
+| 本层的码 | `-20001` … `-20010` | `enum uvcpp_c_error`，见 `include/capi/uvcpp_c_common.h` |
 | libuv 的码 | `-errno` 与 `-4095` 那一带（`UV_EOF`、`UV_EAI_*`…） | **原样透传**，不翻译 |
 
+**`-20010`（`UVCPP_C_E_NOT_FOUND`）是 1.4.3 加的**，它解决的是"查不到"与"查到
+空值"必须分得开这件事：`uvcpp_c_http_response_header(resp, "X-Foo", …)` 返回
+负数 = 这次响应里**没有这个头**；返回 `0` = 有这个头、值是空串。合并成一个答案
+的话，调用方就没法把"服务端没给 Cache-Control"与"服务端给了 Cache-Control
+但值是空的"分开。它落在枚举**末尾**，所以老客户端不受影响（见 §3.5 那条规矩）。
+
 两段不可能撞（libuv 最负的一个是 `UV_UNKNOWN` = -4096），所以
-`uvcpp_c_strerror(err)` 能一句判出"这是谁家的码"：本层那九格给中文/英文文案，
+`uvcpp_c_strerror(err)` 能一句判出"这是谁家的码"：本层那十格给中文/英文文案，
 落在 `-4096 … -1` 这一段的交给 `uv_strerror_r()`（**线程局部**缓冲，不是
 `uv_strerror()` 那个进程共享的静态缓冲 —— 这一层就是给多线程的 FFI 用的）。
 两段都不是时返回 `"unknown error code"`。
@@ -215,16 +226,39 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
   `tests/tools/capi_symbols.lock` 逐条比。删一个/改一个名字 ⇒ 门禁红，而不是
   已经编好的 C# 侧在运行时抛 `EntryPointNotFoundException`。
 
+**批 2（1.4.3）为什么没有把 `UVCPP_C_ABI_VERSION` 从 1 抬到 2**，以及这条判断
+是怎么**量**出来的，不是"我们觉得是加面"：
+
+- 判据是 **`git diff` 里批 1 那 35 个符号一个签名都没动**。这一批对既有文件的
+  改动只有四处：`uvcpp_c_common.h` 往枚举末尾加 `-20010`（规矩里写着"往枚举
+  末尾加值不算"）、`uvcpp_c_internal.h` 加内部件、`uvcpp_c_net.cpp` 把文件-local
+  的 `copy_out()` 收进 `detail` 命名空间（它是匿名命名空间里的静态符号，本来
+  就不在导出面上）、以及伞头多两个 `#include`。**没有一条落在"删函数、改签名、
+  改结构体已有字段"这三类里。**
+- 反过来说，老客户端（按头 1 编出来的）拿到这份新库，它调的那 35 个函数的
+  行为逐条不变；新加的那 148 个它看不见。`check_capi_symbols.py` 的两个方向也
+  照旧：删一个 ⇒ 判据 2 报"承诺过、库里没了"。
+- **批 3 若只是继续加面，同一条推论照用**；只要动到既有那 183 个里的任何一个，
+  就 +1。
+
 ## 4. 提供什么、明确不提供什么
 
-这一批（1.4.2）只到地基 + net。**名字都是 `uvcpp_c_` 前缀。**
+到 1.4.3 为止共 **183 个函数**（`tests/tools/capi_symbols.lock` 就是这份名单）。
+**名字都是 `uvcpp_c_` 前缀。**
 
 | 头 | 提供 | 不提供 |
 |---|---|---|
-| `capi/uvcpp_c_common.h` | `abi_version` / `version_string` / `strerror` / `last_error_string` / `live_handle_count`；错误码表；导出宏 `UVCPP_C_API` | 日志级别、内存分配器入口 —— 这一层不返回分配的内存（§3.3） |
-| `capi/uvcpp_c_net.h`（客户端，17 个） | `new` / `free` / `set_events` / `connect` / `connect_wait` / `write` / `write_wait` / `read_pause` / `read_resume` / `read_stop` / `close` / `run` / `stop` / `is_connected` / `last_error` / `is_tls` / `alpn_selected` | TLS **参数**入口（证书、私钥、SNI、校验开关）—— 那是 C++ 的 `uvcpp_ssl_context`，C 面没有对应类型；DNS 解析（与 C++ 侧一致，只收 IPv4/IPv6 串） |
-| `capi/uvcpp_c_net.h`（服务端，13 个） | `new` / `free` / `set_events` / `bind` / `local_port` / `listen` / `set_loops` / `loop_count` / `run` / `stop` / `client_count` / `close_all_clients` / `last_error` | 每连接独立的 accept 策略（回调里给句柄，动作自己定） |
+| `capi/uvcpp_c_common.h`（5 个） | `abi_version` / `version_string` / `strerror` / `last_error_string` / `live_handle_count`；错误码表；导出宏 `UVCPP_C_API` | 日志级别、内存分配器入口 —— 这一层不返回分配的内存（§3.3） |
+| `capi/uvcpp_c_net.h`（客户端 17 个） | `new` / `free` / `set_events` / `connect` / `connect_wait` / `write` / `write_wait` / `read_pause` / `read_resume` / `read_stop` / `close` / `run` / `stop` / `is_connected` / `last_error` / `is_tls` / `alpn_selected` | TLS **参数**入口（证书、私钥、SNI、校验开关）—— 那是 C++ 的 `uvcpp_ssl_context`，C 面没有对应类型；DNS 解析（与 C++ 侧一致，只收 IPv4/IPv6 串） |
+| `capi/uvcpp_c_net.h`（服务端 13 个） | `new` / `free` / `set_events` / `bind` / `local_port` / `listen` / `set_loops` / `loop_count` / `run` / `stop` / `client_count` / `close_all_clients` / `last_error` | 每连接独立的 accept 策略（回调里给句柄，动作自己定） |
+| `capi/uvcpp_c_webapp.h`（119 个） | **app**：`new` / `free` / 一组 `set_*` 配置 / `get·post·put·del·patch·head·options·any` / `use` / `websocket` / `serve_static` / `post_upload` / `start` / `start_background` / `stop` / `join` / `bound_port` / `running` / 几个计数。**请求侧**：`req_*`（method / path / query / header / cookie / body / keep-alive / peer）。**响应侧**：`resp_*`（status / header / text / html / json_str / binary / send_file / redirect / 4xx 5xx 快捷 / `begin_chunked` + `write_chunk` / `on_sent` / `on_drain`）。**流程**：`next_run` / `defer` + `deferred_*`。**ws**：`ws_req_*`（升级期）与 `ws_conn_*`（连接期） | 任何要 C++ 类型的入口（见下面那段）；WSS（`enable_wss` 要 SSL 上下文）；**服务端主动推送 / 广播**：不行 —— 那需要一个活过回调的连接句柄，而 `ws_conn` 是回调期句柄 |
+| `capi/uvcpp_c_web.h`（29 个） | **HTTP 客户端**：`new` / `free` / `set_keep_alive` / `connect` / `get` / `post` / `run` / `stop` / `close` / `is_connected` / `last_error`；响应侧 `http_response_*`（status / header / content-type / body）。**WS 客户端**：`new` / `free` / `set_events` / `connect` / `send_text` / `send_binary` / `close` / `run` / `stop` / `session_count` / `is_open` / `last_error` | **服务端那一侧全都不在这里**（http_server / ws_server / ws_connection 走 webapp 那份头）。HTTP 客户端的流式响应体（`on_body` 逐块）不给 —— C 面只在响应回调里给完整 body。`wss://` 不给（同上，要 SSL 上下文） |
 | `capi/uvcpp_c.h` | 伞头：按各模块宏 include 上面几份 | 任何 C++ 类型、任何 libuv 类型（§1 第 2 条） |
+
+**`ws_client` 那一族的取舍要单独讲一句**：它**不给连接句柄**（收发都从客户端对象
+走）。理由与"服务端不许广播"是同一条 —— 连接句柄要活过回调，而这一层承诺不了
+那个生命周期。C# 侧若确实要"按连接"做事，走 webapp 那侧的 ws 路由（升级期有
+`ws_req`，连接期有 `ws_conn`，动作在那两个回调里做完）。
 
 不提供的那几件事都有**明确的原因**，不是"还没做"：C 头里出现
 `uvcpp_ssl_context` 就等于要求调用方理解 C++ 的对象生命周期；而"参数入口"在
@@ -264,14 +298,23 @@ C# 侧本来就是一个 `P/Invoke` 到别处的字符串转换。
 
 ```bash
 # 配一棵 CAPI=ON 的树（§2 那条命令）
+#
+# ★ 动过 `src/uvcpp/uvcpp_version.h` 之后要**重跑一次 configure**（`cmake -S . -B
+#   build-capi`，不需要重给选项，缓存在）：`test_capi_common_func` 比的那个版本前缀
+#   是 configure 期从那个头里抓出来、以 -D 传进用例的，不重配就是"库说 1.4.3、用例
+#   还拿着 1.4.2"，于是**基线**整个红掉，看起来像 C 层坏了。这条是踩出来的。
 cmake --build build-capi -j"$(nproc)"
 
-# ① C 层自己的用例（两个都是**纯 C**编的）
+# ① C 层自己的用例（三个都是**纯 C**编的）
 ctest --test-dir build-capi -R capi --output-on-failure
 #   test_capi_common_func：地基（ABI 自洽、错误码文案、句柄生死与类型、
 #                          活句柄数收支平衡、事件表 size 规则）
 #   test_capi_net_func   ：net 端到端（真起两端、真收字节的回显、线程纪律、
 #                          异常不过边界）
+#   test_capi_webapp_func：webapp + web 端到端（**C 写的客户端打 C 写的
+#                          服务端**：七条 HTTP 走同一条 keep-alive 连接，
+#                          跨线程的延迟应答，中间件次序，静态目录，两种 WS
+#                          关闭方式，回调期句柄越界，登记表收支平衡）
 
 # ② 头**真是 C 的**，不是"看起来像 C"：每一份都过一个 C 编译器
 #
@@ -281,7 +324,8 @@ ctest --test-dir build-capi -R capi --output-on-failure
 #
 # `uvcpp_c_internal.h` **不在**这一轮里：它是内部头（CMake 与
 # `package_release.py` 两道过滤器都不装它），C 去 include 它本就该失败。
-for h in src/capi/uvcpp_c_common.h src/capi/uvcpp_c_net.h; do
+for h in src/capi/uvcpp_c_common.h src/capi/uvcpp_c_net.h \
+         src/capi/uvcpp_c_web.h src/capi/uvcpp_c_webapp.h; do
   printf '#include "%s"\n' "${h#src/}" > /tmp/probe.c
   gcc -x c -std=c99 -pedantic-errors -Wall -Wextra -Werror \
       -fsyntax-only -I src /tmp/probe.c || echo "不是纯 C: $h"
@@ -293,6 +337,8 @@ gcc -x c -std=c99 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only \
 # （批 3 之后这里要按模块宏逐个 include：h2 / quic / h3 各自只在对应选项下出现）
 
 # ③ 反空转：把承重的守卫逐条拆掉，看用例有没有一声响
+#   1.4.3 起是十二条（M1–M12）。单看一条用 --only，省掉整表重跑：
+#     python3 tests/tools/capi_mutation.py --tree build-capi --only M8
 python3 tests/tools/capi_mutation.py --tree build-capi
 
 # ④ 符号面锁
@@ -329,8 +375,8 @@ Linux / macOS / MSVC 三格红在 `uvcpp_c_net.cpp` 那两句
 
 ### 变异表量出来的（2026-09-30，Linux / gcc，`--tree build-capi --jobs 8`）
 
-八条变异（一条基线 + M1–M7），判据是"实际结果与**先写下来的预期**一致、源码按字节还原、
-还原后两个用例复跑全绿"。实测：
+到 1.4.3 为止共十二条（一条基线 + M1–M12），判据是"实际结果与**先写下来的预期**一致、
+源码按字节还原、还原后三个用例复跑全绿"。批 1（M1–M7）实测：
 
 | # | 拆掉什么 | 预期 | 实得 | 谁红的 |
 |---|---|---|---|---|
@@ -343,6 +389,26 @@ Linux / macOS / MSVC 三格红在 `uvcpp_c_net.cpp` 那两句
 | M7 | `abi_version()` 与头里的宏不一致 | 抓住 | 抓住 | `test_capi_common_func`（`= 2, want 1`） |
 
 M1、M2、M3 是第一版**全都没抓住**的三条，下面那段记的就是这件事。
+
+批 2（1.4.3）加的五条，全部由新的 `test_capi_webapp_func` 抓住：
+
+| # | 拆掉什么 | 预期 | 实得 | 谁红的（哪一条断言） |
+|---|---|---|---|---|
+| M8 | `FrameScope::~FrameScope()` 那句"全部摘表" | 抓住 | 抓住 | `test_capi_webapp_func` —— 但**只**红在 `uvcpp_c_live_handle_count() = 5, want 0`（下面单开一段） |
+| M9 | `resp_get_header()` 查不到时退化成 `0` | 抓住 | 抓住 | 同上（7 条 `= 0, want -20010`）—— 这条也把 `UVCPP_C_E_NOT_FOUND` 这个新码钉住了 |
+| M10 | `serve_static()` 不查空参 | 抓住 | 抓住 | 同上（`= -20003, want -20001`：一路走到运行时才炸成异常码） |
+| M11 | `http_client_is_connected()` 直接返回 1 | 抓住 | 抓住 | 同上（`= 1, want 0`）—— "关掉之后不许再自称连着" |
+| M12 | `ws_client_connect()` 不查 `ws://` | 抓住 | 抓住 | 同上（`= -20003, want -20001`） |
+
+M10 / M12 红出来的**码是 `-20003`（异常）而不是 `-20001`（参数）**，这是有信息量的：
+少了那句入参检查，错误就推迟到深处、以"某处抛了异常"的形式出现。也就是说断言写的
+`E_INVALID_ARG` 量的不是"没崩"，而是"**在边界上**就被挡住了"。
+
+查单条变异不用整表重跑：
+
+```bash
+python3 tests/tools/capi_mutation.py --tree build-capi --only M8
+```
 
 ### 第一版的假绿，以及它量错了什么
 
@@ -365,6 +431,36 @@ M1、M2、M3 是第一版**全都没抓住**的三条，下面那段记的就是
   顺带记一笔：这一条的第一版锚点写坏了（替换后花括号不配对，`cpp` 直接编不过），
   脚本按"构建失败"退 3 —— 那一次是**脚本自己的 bug**，而"构建失败一律不当成
   抓住了"这条纪律正是靠它才有了价值。
+
+### 第二次假绿：M8 与"回调期句柄越界"那两条断言
+
+批 2 的 `test_capi_webapp_func` 里有两条断言，写的是"把一枚回调期句柄带出回调之后再问
+它，必须得到 `E_STALE`，而且这不能是 UB"。它们在 M8 下**没有红** —— 抓住 M8 的只有最
+后那句 `uvcpp_c_live_handle_count() == 0`。查下来是两个各自独立的问题：
+
+1. **位置错了（读了一块不该读的内存）。** 第一版把它们放在 `stop()` / `join()` **之后**，
+   理由是"那时候所有回调都跑完了，最确定"。可是 `join()` 一回来，服务端那条线程的栈
+   就被 glibc 收回去、重新映射成零页：`alive()` 读到的魔数是 0，断言照样过，过的是
+   "那块内存被清了"，不是"这道守卫挡住了它"。更糟的是，那一刻那块地址**已经不属于
+   这个进程**，去读它本身就是潜伏的 UB —— 一条以"不许 UB"为卖点的断言，自己踩在 UB
+   上。改到 `join()` **之前**（线程还活着，读的是活栈）之后，这一半问题消掉。
+2. **这个判据量不了这个机制（这一半改位置解决不了）。** 我原以为挪到 `join()` 之前之后，
+   M8 会让它俩红在 `E_WRONG_THREAD`（`-20008`）上 —— 登记表里那枚地址还在、魔数还在，
+   于是 `alive()` 判真、接着线程检查发现问话的是主线程。**实测不是**：改完之后 M8 依然
+   只红在活句柄数那条上。原因是 `creq` / `cresp` 是 `route_trampoline` 的**栈上局部量**，
+   回调一返回，那块栈立刻被后续的循环代码复用，魔数被无关的写入盖掉了，`alive()` 在
+   "读魔数"那一句就判假，根本走不到线程检查。
+
+   → 结论写清楚：**只要句柄住在栈上，"魔数"这个判据就区分不出"被毒化"和"被栈复用盖
+   掉"**，所以 M8 这个变异在 C 面**只有** `uvcpp_c_live_handle_count()` 量得出来。那两
+   条断言量的是**契约**（"回调返回之后这枚句柄必须给 `E_STALE`"），不是**机制**（"是谁
+   让它给的"）。两者都得有，但不能拿前者当后者的证据 —— 这正是第一版假绿的那个毛病，
+   只是换了一层。
+
+这一条与批 1 那条（`alive()` 那几步的**顺序是承重的**）是同一件事的两面，区别在于：
+批 1 是"先查登记表、再读魔数"这个顺序救了命（M8 下登记表里那枚地址还在，代码**真的去
+读了**那块栈；基线里它被登记表那一句挡在读内存之前 —— 两者对外都给 `E_STALE`，差别在
+"有没有读一块本不该读的内存"）。所以文档里那句"先查表"不是风格，是这次量出来的。
 
 ### 符号面锁：两边都真的会红
 
@@ -396,13 +492,17 @@ M1、M2、M3 是第一版**全都没抓住**的三条，下面那段记的就是
 
 ```
 # 发布包（CAPI=ON 的树出的）：
-python3 tests/tools/check_doc_snippets.py --pkg dist/libuvcpp-1.4.2-linux-x64 \
+python3 tests/tools/check_doc_snippets.py --pkg dist/libuvcpp-1.4.3-linux-x64 \
     --cxx g++ --docs doc/capi-guide.md
-  [绿] doc/capi-guide.md  编过 1/1 条（其中 C 片段 1/1）（648 B）   rc=0
+  包里的模块: CAPI=1 HTTP3=0 NET=1 NGHTTP2=0 OPENSSL=0 QUIC=0 TRY_WRITE=1 WEBAPP=1 WEB=1 …
+  [绿] doc/capi-guide.md          编过 1/1 条，片段 0 条（其中 C 片段 1/1）（648 B）
 
 # 把包里生成头的 UVCPP_CAPI_ENABLE 改成 0，同一条命令重跑：
-  [绿] doc/capi-guide.md  编过 1/1 条（其中 C 片段 1/1）（648 B）   rc=0
+  [绿] doc/capi-guide.md          编过 1/1 条，片段 0 条（其中 C 片段 1/1）（648 B）
 ```
+
+（两份输出都是 2026-09-30 在这棵树上量的；注意上面那行 `包里的模块` 里
+`CAPI=1` 与 `CAPI=0` 的差别 —— 头照编不误，就是第 ② 件事。）
 
 ②就是"它们不靠这个开关"的实测依据，也是这个模块**没有**登记进
 `check_doc_snippets.py` 的 `MODULE_REQ` 的理由（登记它会在 ② 的情形下造出一个

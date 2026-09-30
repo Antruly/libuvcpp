@@ -85,8 +85,12 @@ static void test_abi_and_version(void) {
   CHECK(v != NULL);
   if (v != NULL) {
     CHECK(strlen(v) > 0);
-    /* 前缀相等：库里那份串是 "1.4.2-dev"（开发版带后缀），头里抓出来的是
-     * "1.4.2"，所以比前缀而不是全等。 */
+    /* 前缀相等：库里那份串带 "-dev" 后缀（开发版），CMake 传进来的
+     * `UVCPP_TEST_VERSION` 不带 —— 所以比前缀而不是全等。
+     *
+     * **这一条同时是"版本号动过、构建树没重配"的探测器**：`UVCPP_TEST_VERSION`
+     * 是 configure 期从 `uvcpp_version.h` 抓出来、以 -D 传进来的，改完那个头
+     * 不重跑 cmake 的话，库说新版本、用例还拿着旧串，这里就红。 */
     CHECK(strncmp(v, UVCPP_TEST_VERSION, strlen(UVCPP_TEST_VERSION)) == 0);
   }
 
@@ -105,7 +109,7 @@ static void test_strerror(void) {
       UVCPP_C_E_INVALID_ARG, UVCPP_C_E_STALE,       UVCPP_C_E_EXCEPTION,
       UVCPP_C_E_STATE,       UVCPP_C_E_NO_MEMORY,   UVCPP_C_E_UNSUPPORTED,
       UVCPP_C_E_NOT_BUILT,   UVCPP_C_E_WRONG_THREAD,
-      UVCPP_C_E_BUFFER_TOO_SMALL};
+      UVCPP_C_E_BUFFER_TOO_SMALL, UVCPP_C_E_NOT_FOUND};
   const int n = (int)(sizeof(kCodes) / sizeof(kCodes[0]));
   int i;
   int j;

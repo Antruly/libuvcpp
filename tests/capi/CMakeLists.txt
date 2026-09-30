@@ -31,6 +31,7 @@ set(UVCPP_CAPI_TEST_VERSION_DEF "UVCPP_TEST_VERSION=\"${UVCPP_VERSION}\"")
 set(UVCPP_CAPI_TESTS
   capi_common_func.c   # 地基：ABI 自洽、错误码、句柄生死、事件表 size 规则
   capi_net_func.c      # net：真起两端、真收字节的回显
+  capi_webapp_func.c   # webapp + web：C 写的 app 与 C 写的客户端互相打
 )
 
 foreach(_capi_src ${UVCPP_CAPI_TESTS})

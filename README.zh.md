@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.4.2--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.4.3--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.4.2-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.4.3-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -219,7 +219,7 @@ int main() {
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.2 只到地基 + net，其余模块还没做** |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.3 已到地基 + net + webapp/web，HTTP/2、QUIC、HTTP3 还没做** |
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -627,7 +627,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.4.2** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.4.3** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0` 五个 tag。下面是
 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部改动，外加
 `1.4.x` 这一条线此后新增的东西，按主题分组，括号里是它**首次出现**的那一档；
@@ -660,6 +660,33 @@ libuvcpp/
   块的头 4 个字节，而 glibc 的 tcache 早已把 `next` 指针写在那儿，它们量的是分配器。
   补上 `uvcpp_c_live_handle_count()`（登记表收支平衡唯一可被外部量到的形式）才真的红；
   仍有一条如设计存活，如实写在文档里（`1.4.2`）
+- **1.4.3 补上 webapp 与 web 两片**：新增 `uvcpp_c_webapp.h`（119 个入口）与
+  `uvcpp_c_web.h`（29 个入口），到此共 **183 个函数**。app / 路由 / 中间件 / 静态目录 /
+  上传 / WebSocket 路由 / `req` / `resp` / `next` / 延迟应答，以及 `http_client`、
+  `http_server`、`ws_server` / `ws_connection` / `ws_client`。**JSON 依旧不进 C 头** ——
+  响应侧只有 `uvcpp_c_resp_json_str()`（一个字符串），请求侧只有 body 原始字节
+  （`1.4.3`）
+- **回调期句柄是这一层最容易被误用的一处，1.4.3 把它变成机制而不是一句提醒**：
+  `uvcpp_c_req` / `resp` / `next` / `ws_req` / `ws_conn` / `http_response` 都在**栈上**
+  造，进回调登记、出回调摘表（`FrameScope` 的析构，所以用户回调抛异常那条路径也漏不
+  掉）。回调返回之后再用它一律 `UVCPP_C_E_STALE`，**永远不是 UB**；唯一能带出回调的
+  是 `uvcpp_c_deferred`（它真的持有 `ctx`），延迟应答、从别的线程投回来都走它（`1.4.3`）
+- **这一批一个新错误码、零个 ABI 破坏**：`UVCPP_C_E_NOT_FOUND`（-20010）加在枚举**尾
+  部**，所以按本层自己的规矩它不算 ABI 变更；`UVCPP_C_ABI_VERSION` 因此仍是 **1**，
+  判据不是"我觉得没破坏"，而是 `git diff` 里批 1 那 35 个符号**一个签名都没动**（`1.4.3`）
+- **第三个纯 C 用例，这次是"C 写的客户端打 C 写的服务端"**：`test_capi_webapp_func`
+  （210 条断言）在一个进程里起一个纯 C 的 app，再用纯 C 的 HTTP / WebSocket 客户端打
+  自己 —— 七条请求共用一条 keep-alive 连接、body 逐字节比、header 往返、中间件次序、
+  静态目录、跨线程的延迟应答"晚到但如期"、两种 WebSocket 关闭方式，收尾核对登记表
+  收支平衡（`1.4.3`）
+- **变异表第二次挖出假绿，而这一次的结论更窄**：`1.4.3` 加了 M8–M12 五条，"回调期
+  句柄带出回调之后必须给 `E_STALE`"那两条断言**没能抓住 M8**（拆掉 `FrameScope` 的摘
+  表）。查下来是两件事：位置原先排在 `app_join()` **之后**，那时服务端线程的栈已被
+  glibc 收回、魔数读成 0，断言过的是"内存没了"，而且读它本身就是那条断言号称要排除的
+  UB（已挪到 `join()` 之前）；挪完 M8 依旧不红 —— 句柄住在栈上，回调一返回那块栈就被
+  复用、魔数被无关写入盖掉，**魔数这个判据区分不出"被毒化"和"被栈复用盖掉"**，M8 因
+  此只有 `uvcpp_c_live_handle_count()` 量得出来。那两条量的是**契约**，不是**机制**：
+  两者都该有，错在拿前者当后者的证据（`1.4.3`）
 
 ### QUIC 传输（net 层）
 

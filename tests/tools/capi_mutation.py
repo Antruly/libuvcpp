@@ -7,9 +7,10 @@
 C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常不过边界；丙、回调表按
 `size` 逐格看；丁、所有权三类；戊、线程纪律）里，**甲、乙、丙**都是"我们很小心"
 很容易写成、而"到底有没有用"很容易想当然的三条。这个驱动把它们各自的守卫**逐条
-拆掉**，看 `tests/capi/` 那两个纯 C 用例（`test_capi_common_func` 量甲、丙、
-`test_capi_net_func` 量乙和线程纪律）**有没有一声响**。没响的如实记成覆盖缺口，
-不许写"等价"。
+拆掉**，看 `tests/capi/` 那三个纯 C 用例（`test_capi_common_func` 量甲、丙，
+`test_capi_net_func` 量乙和线程纪律，`test_capi_webapp_func` 量甲在 webapp 那侧的
+**回调期句柄**形态与"查询不存在"那条约定）**有没有一声响**。没响的如实记成覆盖
+缺口，不许写"等价"。
 
 被测的不变式（每条都在用例里有对应的断言）
 ------------------------------------------
@@ -20,6 +21,9 @@ C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常
            分配器，见 M2 上面那段）；
        A2. `uvcpp_c_live_handle_count()` 收支平衡（只有它能咬 M2/M3）。M1 按
            设计活下来。
+     A 在 webapp 那侧还多一种形态：**回调期句柄**（`req` / `resp` 那些栈对象）
+     出了回调就不许再用了。守卫是 `FrameScope` 的析构里那句"全部摘表"。
+     见 M8。
   B. 句柄**类型**也要对：服务端句柄传给客户端那一族函数必须是 `E_STALE`。这一条
      打的只是第二道（魔数），见 M5。
   C. 回调表**只读调用方声明覆盖到了的那几格**：老客户端写一张只有前几格的表，
@@ -28,16 +32,27 @@ C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常
      （abort），因为那正是"异常逃出去"的真实表现。
   E. 头里的 `UVCPP_C_ABI_VERSION` 与库返回的那个数必须一致（P/Invoke 最常见的
      故障：头与 .so/.dll 不是一次编出来的）。见 M7。
+  F. **"查不到"与"查到空值"是两件事**（`1.4.3` 加的 `UVCPP_C_E_NOT_FOUND`）：
+     `header("X-Nope")` 必须是负数，不能退化成 `0` —— 退化了就把"没带这个头"
+     与"带了这个头但值是空的"合并成同一个回答。见 M9。
+  G. 入参那一层要**当场**拒绝（`E_INVALID_ARG`），不能"注册成功、运行时才炸"。
+     C 面最容易漏的就是这个：C 调用方没有编译期检查，一个 NULL 回调会一路走到
+     事件循环里。见 M10。
+  H. 客户端的"连上了没有"必须问**底下那条连接**，不能问 C++ 那层按位或的状态
+     （`CONNECTED` 一旦置上就再也不会清）。见 M11。这条只有"关掉之后还不肯承认
+     已断开"这种方向能量出来 —— 所以断言写在 `close()` 之后。
+  I. `uvcpp_c_ws_client_connect` 只认 `ws://`：别的 scheme 当场 `E_INVALID_ARG`，
+     不许往下走成"某个连接错误"。见 M12。
 
 怎么判"抓住了"
 --------------
 与别的驱动同一条：(1) 某个用例的退出码非零，**且** (2) 它自己那行
 `checks=… failures=…` 里 `failures` 非零。第二条是为了区分"这一组自己红的"和
-"被别人的红带下去的"；两个用例是分开跑的，所以它天然成立，但仍然逐条印出来。
+"被别人的红带下去的"；三个用例是分开跑的，所以它天然成立，但仍然逐条印出来。
 `rc` 是信号（M6 预期就是它）时不会有 `checks=` 那行 —— 那种情况下**非零退出码
 就是判据**，脚本会照实写明"没有 checks= 那一行"，免得读的人以为它是一句 FAIL。
 
-对**预期活下来**的变异，除两个用例照常跑之外**再跑一次整棵树**的 ctest；全绿才
+对**预期活下来**的变异，除三个用例照常跑之外**再跑一次整棵树**的 ctest；全绿才
 算那条判定站得住（`doc/testing-guide.md` 的规矩，与 `run_idle_mutation.py` M1、
 `http3_mutation.py` 同一条）。
 
@@ -64,11 +79,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 INTERNAL = os.path.join(ROOT, "src", "capi", "uvcpp_c_internal.h")
 COMMON = os.path.join(ROOT, "src", "capi", "uvcpp_c_common.cpp")
 NET = os.path.join(ROOT, "src", "capi", "uvcpp_c_net.cpp")
+WEB = os.path.join(ROOT, "src", "capi", "uvcpp_c_web.cpp")
+WEBAPP = os.path.join(ROOT, "src", "capi", "uvcpp_c_webapp.cpp")
 
-# 两个纯 C 用例（在 <tree>/tests/capi/ 下）。顺序无所谓，超时都是 60 s。
+# 三个纯 C 用例（在 <tree>/tests/capi/ 下）。顺序无所谓，超时都是 60 s。
 TARGETS = [
     "test_capi_common_func",
     "test_capi_net_func",
+    "test_capi_webapp_func",
 ]
 
 # 卸掉守卫的两句原文（`unregister_head()` 的函数体），M1~M3 共用。
@@ -161,6 +179,68 @@ MUTATIONS = [
        "  return static_cast<unsigned int>(UVCPP_C_ABI_VERSION);",
        "  return static_cast<unsigned int>(UVCPP_C_ABI_VERSION) + 1u;"
        "  /* MUTATION */")]),
+
+    # =====================================================================
+    # 批 2（webapp + web）。下面五条都只有 `test_capi_webapp_func` 咬得住
+    # —— 批 1 的两个用例一个都不碰 webapp/web 那两片源码。
+    # =====================================================================
+
+    # ---- 甲在 webapp 那侧的形态：回调期句柄出了回调就不许再用 ----
+    #
+    # `FrameScope::~FrameScope()` 里那句循环是**唯一**一处"回调返回后把这些栈
+    # 对象摘出登记表"。拆掉它之后，**只有** `uvcpp_c_live_handle_count()` 那条
+    # 断言会红（`= 5, want 0`）。用例里另外那两条"把回调期句柄带出回调再问它"
+    # 的 `E_STALE` 断言**照样过**。
+    #
+    # 原本这里的预期是"那两条会红在 `UVCPP_C_E_WRONG_THREAD` 上"，**实测不是**
+    # —— 所以别照着那个预期去改用例。原因是 `creq` / `cresp` 是
+    # `route_trampoline` 的**栈上局部量**：回调一返回，那块栈立刻被后续的循环
+    # 代码复用，魔数被无关的写入盖掉，`alive()` 在"读魔数"那一句就判假，根本走
+    # 不到线程检查。也就是说**只要句柄住在栈上，"魔数"这个判据就区分不出"被毒
+    # 化"和"被栈复用盖掉"**。
+    #
+    # 那两条断言量的是**契约**（"回调之外问它必须给 `E_STALE`，且不许是 UB"），
+    # 这条变异量得出来的是**机制**（登记表到底有没有摘干净）—— 两者都该有，错在
+    # 拿前者当后者的证据。完整经过见 doc/capi-guide.md §6 的"第二次假绿"。
+    ("M8 回调期句柄不摘表（FrameScope 拆掉）",
+     True,
+     [(WEBAPP,
+       "    for (int i = n_ - 1; i >= 0; --i) unregister_head(slots_[i]);",
+       "    /* MUTATION: 回调返回后不摘表 */")]),
+
+    # ---- F：查不到 ≠ 空值 ----
+    ("M9 查不到的头退化成 0",
+     True,
+     [(WEB,
+       "    if (!resp->resp->has_header(name)) return UVCPP_C_E_NOT_FOUND;",
+       "    if (!resp->resp->has_header(name)) return 0;  /* MUTATION */")]),
+
+    # ---- G：入参当场拒绝 ----
+    ("M10 serve_static 不查空参",
+     True,
+     [(WEBAPP,
+       "    if (prefix == nullptr || root_dir == nullptr) "
+       "return UVCPP_C_E_INVALID_ARG;",
+       "    /* MUTATION: 空参不查（让它一路走到运行时） */")]),
+
+    # ---- H：连上了没有要问底下那条连接 ----
+    ("M11 is_connected 直接说自己连着",
+     True,
+     [(WEB,
+       "    const bool up = tcp->has_status(uv::TCP_CLIENT_CONNECTED) &&\n"
+       "                    !tcp->has_status(uv::TCP_CLIENT_CLOSING) &&\n"
+       "                    !tcp->has_status(uv::TCP_CLIENT_CLOSED);\n"
+       "    return up ? 1 : 0;\n",
+       "    return 1;  /* MUTATION: 不查底层连接 */\n")]),
+
+    # ---- I：只认 ws:// ----
+    ("M12 ws_client_connect 不查 scheme",
+     True,
+     [(WEB,
+       '    const std::string u(url);\n'
+       '    if (u.compare(0, 5, "ws://") != 0) {',
+       '    const std::string u(url);\n'
+       '    if (false) {  /* MUTATION: 不查 scheme */')]),
 ]
 
 RUN_TIMEOUT_S = 600
@@ -229,6 +309,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tree", default="build-capi")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--only", default=None,
+                    help="只跑标签里含这个子串的变异（比如 M8）。基线照跑 —— 没有"
+                         "基线就没有'抓住了'这句话的参照物。")
     args = ap.parse_args()
 
     tree = os.path.join(ROOT, args.tree)
@@ -236,7 +319,16 @@ def main():
         print("没有这棵树：%s —— 先按 doc/capi-guide.md 配一棵 CAPI=ON 的。" % tree)
         return 3
 
-    files = sorted({e[0] for _l, _x, edits in MUTATIONS for e in edits})
+    selected = MUTATIONS
+    if args.only:
+        selected = [m for m in MUTATIONS if args.only.lower() in m[0].lower()]
+        if not selected:
+            print("没有标签含 %r 的变异。" % args.only)
+            return 3
+        print("--only %s：只跑 %s" % (args.only, "、".join(m[0].split()[0]
+                                                          for m in selected)))
+
+    files = sorted({e[0] for _l, _x, edits in selected for e in edits})
     before = {p: read_bytes(p) for p in files}
     sums = {p: md5(p) for p in before}
 
@@ -247,7 +339,7 @@ def main():
 
     try:
         cases = [("基线（未变异）", None, None)] + [
-            (l, exp, edits) for l, exp, edits in MUTATIONS]
+            (l, exp, edits) for l, exp, edits in selected]
 
         for label, expect, edits in cases:
             for p, b in before.items():
@@ -280,7 +372,7 @@ def main():
                 verdict = "%s %s（%s）" % (
                     "抓住" if caught else "没抓住", mark,
                     "、".join(x.replace("test_capi_", "").replace("_func", "")
-                              for x in red) or "两个都没红")
+                              for x in red) or "三个都没红")
             summary.append((label, verdict))
             print("\n[%s] %s" % (label, verdict), flush=True)
             for name, r, f, lines, cnt in rows:
@@ -308,7 +400,7 @@ def main():
         rows = run_targets(tree)
         tail_ok = (rc == 0 and errs == 0 and
                    all(r == 0 and f == 0 for _n, r, f, _l, _c in rows))
-        print("还原后重建 rc=%s errors=%s；两个 exe 复跑 %s（应全 0）"
+        print("还原后重建 rc=%s errors=%s；三个 exe 复跑 %s（应全 0）"
               % (rc, errs, [(n.replace("test_capi_", ""), r, f)
                             for n, r, f, _l, _c in rows]))
 

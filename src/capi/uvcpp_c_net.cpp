@@ -61,6 +61,9 @@ static_assert(
     "net_read_event::READ_ERROR 必须与 UVCPP_C_READ_ERROR 同值");
 
 using uvcpp_c_detail::alive;
+// `copy_out()` 从 `1.4.3` 起收在 `uvcpp_c_detail` 里（webapp 面也要用它，
+// 而"返回长度 + 写不写结尾 NUL"这处算术抄成两份就是两份会各自漂的算术）。
+using uvcpp_c_detail::copy_out;
 
 // ---------------------------------------------------------------------------
 // 句柄
@@ -245,17 +248,6 @@ int maybe_arm_read(uvcpp_c_tcp_client* c) {
       });
   if (rc == 0) c->read_armed = 1;
   return rc;
-}
-
-/** @brief "调用方给缓冲区"那套约定（见 `uvcpp_c_common.h`）。 */
-int copy_out(const std::string& s, char* buf, size_t cap) {
-  const size_t n = s.size();
-  if (n > 0x7fffffffu) return UVCPP_C_E_BUFFER_TOO_SMALL;
-  if (buf != nullptr && cap >= n + 1) {
-    if (n > 0) std::memcpy(buf, s.data(), n);
-    buf[n] = '\0';
-  }
-  return static_cast<int>(n);
 }
 
 }  // namespace

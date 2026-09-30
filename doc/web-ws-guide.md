@@ -554,6 +554,12 @@ PageHeap 下实测 SEGFAULT（`src/web/uvcpp_ws_client.cpp:124-145`）。
 - **关闭握手只有一半**：发了 Close 就关连接，不等对端回帧、也没有超时（[§9](#9-关闭)）。
 - **解压不检测截断**（`src/web/uvcpp_ws_parser.h:179`）。
 - **`send_close` 不校验关闭码**，1005 / 1006 发得出去（[§9](#9-关闭)）。
+- **C 面（1.4.3 起）只给"收发"这一片**：客户端在
+  `include/capi/uvcpp_c_web.h`（`ws_client`，**不给连接句柄** —— 收发都从客户端
+  对象走），服务端那一片在 `include/capi/uvcpp_c_webapp.h`（`websocket()` 路由，
+  升级期给 `ws_req`、连接期给 `ws_conn`）。**没有广播 / 主动推送**：那要一枚活过
+  回调的连接句柄，而本层的连接句柄是**回调期句柄**。原委见
+  [C ABI 指南](./capi-guide.md) §4。
 
 ---
 

@@ -18,8 +18,10 @@ directory means editing the root `CMakeLists.txt`, not `tests/CMakeLists.txt`.
 
 `tests/expand` does not have a switch of its own — it follows `UVCPP_BUILD_EXPAND`.
 
-`tests/capi` is the one layer whose sources are **not** C++. Its two files (`capi_common_func.c`,
-`capi_net_func.c`) are compiled by a C compiler against `include/capi/`, and they are what turns
+`tests/capi` is the one layer whose sources are **not** C++. Its three files
+(`capi_common_func.c`, `capi_net_func.c`, `capi_webapp_func.c` — the last of which drives a
+C-written client against a C-written server, in one process) are compiled by a C compiler
+against `include/capi/`, and they are what turns
 "the headers are usable from C" from a claim into a measurement — a header that only *looks* like
 C (a stray `namespace`, a default argument, `bool` from `<stdbool.h>` missing) fails to compile
 here rather than at a C# call site. Because the layer is opt-in, the directory is registered under
@@ -324,7 +326,7 @@ the tests, and reports whether the mutation was caught — and by which test.
 | `run_idle_mutation.py` | `run()` returning when there is nothing left to wait for |
 | `run_tcp_client_dtor_mutation.py` | `~uvcpp_tcp_client` — no sleeping in the destructor |
 | `http3_mutation.py` | `1.4.1` — HTTP/3's completion accounting, its once-only contract, and the QUIC FIN/RESET split it sits on |
-| `capi_mutation.py` | `1.4.2` — the C ABI layer's five load-bearing rules: handle death (poison + registry), the callback-table `size` rule, the `extern "C"` exception boundary, the ABI-version self-check, and the buffer-too-small contract |
+| `capi_mutation.py` | `1.4.2`/`1.4.3` — the C ABI layer's load-bearing rules: handle death (poison + registry), the callback-table `size` rule, the `extern "C"` exception boundary, the ABI-version self-check, the buffer-too-small contract (`1.4.2`); then the callback-scope handle guard, "a header that is not there must not read as an empty one", argument rejection *at the boundary* rather than deep inside, "closed means it must not claim to be connected", and the accepted WebSocket schemes (`1.4.3`). `--only M8` runs a single mutation without rebuilding the whole table |
 
 **`http3_mutation.py` and `capi_mutation.py` are the two drivers here that belong to a `1.4.x`
 module**, and the first of them exists because the earlier ones for those modules were not kept:
@@ -364,6 +366,22 @@ rule: an assertion whose mechanism could be satisfied by something other than th
 is not evidence, and the only way to find out is to break the code on purpose.** The third mutant
 still survives, and the driver now says *why* (the two guards are mutually redundant by design)
 instead of relabelling it.
+
+**`capi_mutation.py` then produced the same lesson a second time, one layer up (`1.4.3`).** The
+`test_capi_webapp_func` assertion "take a callback-scope handle out of the callback and ask it
+something — you must get `E_STALE`, and it must not be UB" looked like the strongest kind of
+check. It was not. Its first version ran *after* `app_join()`, i.e. after the server thread's
+stack had been returned to glibc: the magic read back as zero, so it passed because the memory
+was gone, not because the guard worked — and the read itself was the very UB the assertion
+claimed to rule out. Moved to before the join, the UB half goes away, but the mutant that deletes
+the unregister loop *still* passes it: the handles live on `route_trampoline`'s stack, so the
+frame is reused the moment the callback returns and the magic is overwritten by unrelated writes.
+So a magic-based check **cannot** distinguish "poisoned" from "clobbered by stack reuse", and
+that mutation is observable only through `uvcpp_c_live_handle_count()`. The two assertions were
+measuring the *contract* ("this handle must now report `E_STALE`") while reading as if they
+measured the *mechanism* ("the guard is what made it say so") — the `1.4.2` failure mode, wearing
+a different hat. Both kinds of assertion are worth having; the error is taking the first as
+evidence for the second.
 
 **The verdict rule is two conditions, not one**: (1) the exit code is non-zero, **and** (2) the
 *expected group*, run on its own, is also red. Running the full suite and observing that

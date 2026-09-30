@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.4.2--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.4.3--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.4.2-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.4.3-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -222,7 +222,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
-| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.2 ships the foundation + net; the other modules are not there yet** |
+| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.3 ships the foundation + net + webapp/web; HTTP/2, QUIC and HTTP/3 are not there yet** |
 
 Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
 performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
@@ -643,7 +643,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.4.2** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.4.3** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0` and `v1.4.0`
 are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development lines
 accumulated through `v1.4.0`, plus what the `1.4.x` line has added since, is below, by
@@ -684,6 +684,43 @@ fixes came from issue reports by the project's first external contributor,
   pointer — i.e. they were measuring the allocator. `uvcpp_c_live_handle_count()`, which
   makes the registry's balance externally observable, is what made them catchable; one
   mutant still survives and is documented as redundant by design (`1.4.2`)
+- **1.4.3 lands the webapp and web slices**: `uvcpp_c_webapp.h` (119 entry points) and
+  `uvcpp_c_web.h` (29), for **183 functions** in total — the app, routing, middleware,
+  static files, uploads, WebSocket routes, `req` / `resp` / `next` / deferred responses,
+  plus `http_client`, `http_server` and `ws_server` / `ws_connection` / `ws_client`.
+  **JSON still does not enter a C header**: the response side gets
+  `uvcpp_c_resp_json_str()` (one string) and the request side gets raw body bytes (`1.4.3`)
+- **Callback-scope handles are the one thing in this layer that is easy to misuse, and
+  1.4.3 turns that into a mechanism rather than a warning**: `uvcpp_c_req`, `resp`, `next`,
+  `ws_req`, `ws_conn` and `http_response` are built **on the stack**, registered on the way
+  into the callback and unregistered on the way out (in `FrameScope`'s destructor, so a
+  user callback that throws cannot skip it). Using one after the callback returns gives
+  `UVCPP_C_E_STALE`, **never UB**. The only thing that may leave a callback is
+  `uvcpp_c_deferred`, which really holds `ctx` — deferred responses and cross-thread
+  hand-backs both go through it (`1.4.3`)
+- **One new error code and no ABI break**: `UVCPP_C_E_NOT_FOUND` (-20010) was appended at
+  the **tail** of the enum, which by this layer's own rule is not an ABI change, so
+  `UVCPP_C_ABI_VERSION` is still **1**. The criterion is not "we think nothing broke" but
+  "`git diff` shows that none of batch 1's 35 symbols changed signature" (`1.4.3`)
+- **A third pure-C test, this time a C-written client against a C-written server**:
+  `test_capi_webapp_func` (210 checks) starts a pure-C app in the same process and then
+  drives it with pure-C HTTP and WebSocket clients — seven requests over one keep-alive
+  connection, bodies compared byte for byte, headers round-tripped, middleware ordering, a
+  static directory, a cross-thread deferred response that arrives late but on time, both
+  shapes of WebSocket close, and the registry's balance checked at the end (`1.4.3`)
+- **The mutation table caught a false green a second time, and this verdict is narrower**:
+  `1.4.3` added M8–M12, and the two assertions saying "a callback-scope handle carried out
+  of its callback must report `E_STALE`" **failed to catch M8** (deleting `FrameScope`'s
+  unregistration). Two separate things were wrong. They used to run *after* `app_join()`,
+  where the server thread's stack has already gone back to glibc — the magic read as zero,
+  so they passed because the memory was gone, and reading it at all was the very UB the
+  assertion claimed to rule out (they now run before the join). And even moved, M8 still
+  passes them: the handles live on the stack, so the frame is reused the moment the
+  callback returns and the magic is overwritten by unrelated writes — **a magic-based check
+  cannot tell "poisoned" from "clobbered by stack reuse"**, so M8 is observable only
+  through `uvcpp_c_live_handle_count()`. Those two assertions measure the *contract*, not
+  the *mechanism*; both are worth having, and the error is taking the first as evidence for
+  the second (`1.4.3`)
 
 ### QUIC transport (net layer)
 

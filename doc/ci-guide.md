@@ -426,11 +426,17 @@ What is specific to this entry:
 - **Why it exists separately from `full`.** `full` (Ubuntu/macOS only) carries
   `-DUVCPP_ENABLE_CAPI=ON` because "release and `full` both support the C ABI" is the
   requirement, not a convenience — but `full`'s gate strings are about the memory pool, and its
-  ctest count does not tell you whether the two pure-C tests were registered. The dedicated
-  entry is where that is asserted.
+  ctest count does not tell you whether the pure-C tests were registered. The dedicated
+  entry is where that is asserted. Since `1.4.3` those are **three** tests
+  (`test_capi_common_func`, `test_capi_net_func`, `test_capi_webapp_func`); the entry's
+  `gate_test` still names the one from the first batch, because the "is it registered at all"
+  check is a spot check and the last step of the job runs the whole suite.
 - **No OpenSSL, no nghttp2, no zlib for the C layer itself.** `capi`'s flags match `web`'s
-  dependency row. The C surface's first batch (`common` + `net`) has no TLS entry point at all;
-  the modules that do (`web`/`webapp`/`http2`/`http3`/`quic`) get their C surface later, and
+  dependency row. Through batch 2 (`common` + `net` + `webapp`/`web`) the C surface has no TLS
+  entry point at all — including the parts that wrap modules which *do* have one, which is why
+  the leg can stay OpenSSL-free: `uvcpp_c_tcp_client_is_tls()` answers 0 and
+  `uvcpp_c_tcp_client_alpn_selected()` answers an empty string in **both** builds rather than
+  being `#if`-ed into two behaviours. The remaining modules (`http2`/`http3`/`quic`) get their C surface later, and
   each will arrive with its own entry and its own flags.
 
 **Release configurations** pass `-DUVCPP_ENABLE_CAPI=ON` on all six legs (see `release.yml`),

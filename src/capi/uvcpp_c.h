@@ -55,7 +55,21 @@
 #  include "capi/uvcpp_c_net.h"
 #endif
 
-/* web / webapp / http2 / quic / http3 的子头在后续批次里加到这里，形状同上：
+/* webapp：app / 路由 / 中间件 / req / resp / next / 延迟应答 / 静态 / ws 路由。
+ * 批 2 落地。注意它**依赖** net 与 web 两层（`uvcpp_web_app` 自己就骑在
+ * `uvcpp_http_server` 上），所以 CMake 的守卫链保证 `UVCPP_CAPI_ENABLE=ON` 时
+ * 这两个宏必然是 1 —— 这里不必再写"webapp 开了但 web 没开"的分支。 */
+#if UVCPP_WEBAPP_ENABLE
+#  include "capi/uvcpp_c_webapp.h"
+#endif
+
+/* web：HTTP 客户端与 WebSocket 客户端（**只给客户端**，服务端走 webapp 那份）。
+ * 批 2 落地。 */
+#if UVCPP_WEB_ENABLE
+#  include "capi/uvcpp_c_web.h"
+#endif
+
+/* http2 / quic / http3 的子头在后续批次里加到这里，形状同上：
  * 一个 `#if UVCPP_XXX_ENABLE` 包一份 `#include`，不带任何别的逻辑。 */
 
 #endif  /* SRC_CAPI_UVCPP_C_H */

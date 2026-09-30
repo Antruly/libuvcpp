@@ -1281,10 +1281,14 @@ uvcpp_logger::instance().flush();                // 转发给 sink 的 flush()
 - **没有请求体解压**（gzip 请求体不认识）。
 - **没有读背压**：流水线里排在后面的请求照常解析、照常跑，超上限直接拒（§18）。
 - **h2 只走 TLS + ALPN**，没有 h2c（见下）。
-- **这一层的 C ABI 还没做**。C 面（`include/capi/`）1.4.2 只交付了地基 + net
-  （`uvcpp_c_tcp_client` / `uvcpp_c_tcp_server`）；app / router / req / resp / 延迟
-  应答这些的 C 版本在后续批次里，**目前不存在** —— 别照着本页的签名去 P/Invoke。
-  已有的那部分与它的契约见 [C ABI 指南](./capi-guide.md)。
+- **C 面是门面，不是本页的逐方法镜像。** `include/capi/uvcpp_c_webapp.h`（1.4.3 起）
+  给了 app / 路由 / 中间件 / 静态目录 / 上传 / WebSocket 路由 / `req` / `resp` /
+  `next` / 延迟应答，但**只挑 C# / P-Invoke 调用方真正要用的那一片**：本页里凡是签名
+  带 C++ 类型的入口（`req.json(uvcpp_json&)`、`set_file_chunk_gate()`、
+  `set_stream_sink()` 之类）在 C 面**不存在**，C 侧走 `uvcpp_c_resp_json_str()` /
+  `uvcpp_c_resp_begin_chunked()` + `uvcpp_c_resp_write_chunk()` 这样的窄口子。HTTP/2 / QUIC / HTTP3 的 C 面
+  在后续批次里，**目前不存在** —— 别照着本页的签名去 P/Invoke。提供什么、明确不提供
+  什么、以及它的契约见 [C ABI 指南](./capi-guide.md)。
 
 ---
 

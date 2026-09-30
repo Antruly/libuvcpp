@@ -271,6 +271,22 @@ inline bool table_size_ok(uint32_t size) {
   return size >= static_cast<uint32_t>(sizeof(uint32_t));
 }
 
+// -------------------------------------------------------------------------
+// 字符串出口：调用方给缓冲区
+// -------------------------------------------------------------------------
+
+/**
+ * @brief `uvcpp_c_common.h` 里"调用方给缓冲区"那条约定的**唯一实现**。
+ *
+ * 写进 `uvcpp_c_detail` 而不是各文件各写一份：这条约定的全部风险都集中在
+ * "返回长度"与"写不写结尾 NUL"这一处算术上，抄成两份就是两份会各自漂的算术。
+ * `tests/capi/capi_webapp_func.c` 里那几条 `cap = 0` 先问长度、再按长度取值的
+ * 断言，量的就是它。
+ *
+ * @return 字符串真实长度（不含结尾 NUL）；负数 = 错误码。
+ */
+int copy_out(const std::string& s, char* buf, size_t cap);
+
 }  // namespace uvcpp_c_detail
 
 #endif  /* SRC_CAPI_UVCPP_C_INTERNAL_H */
