@@ -80,7 +80,10 @@ jobs:
           # RELEASE.md）。这里显式打开：不打开的话 tests/expand 那批用例在 CI 里
           # 一条都不跑，内存池就成了没人测的死代码。**别顺手把这行删掉。**
           # 另一条：这一格也是带 C ABI 的那一格（"release 与 full 都支持 C 接口
-          # 导出"是需求本身）。ubuntu 那条腿上有同样的一行，理由写在那里。
+          # 导出"是需求本身）。ubuntu 那条腿上有同样的一行，理由写在那里 ——
+          # 包括**为什么不在这里补 `-DUVCPP_BUILD_WEBAPP=ON`**：这一格是
+          # "CAPI 开、WEBAPP 关"这个组合的唯一一站，1.4.3 批 2 的那次红就是它
+          # 与 ubuntu 那条腿一起报出来的。
           - feature: full
             flags:
               - -DUVCPP_BUILD_TESTS=ON

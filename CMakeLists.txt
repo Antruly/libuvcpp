@@ -1381,6 +1381,47 @@ else()
       "UVCPP_ENABLE_CAPI=ON 但 src/capi/ 下一个文件都没有 —— 这个配置会编出"
       "一个不含任何 C ABI 代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
   endif()
+
+  # ---------------------------------------------------------------------------
+  # 子模块过滤：C 面**按模块分文件**，每一份子头该不该存在，由它背后那个模块
+  # 的开关说了算 —— 与上面 `src/webapp/`、`src/http2/` 那两段的纪律是同一条，
+  # 只是这一层多了一级（capi 挂在 web 上，而 webapp / h2 / quic / h3 是它的
+  # 可选下层）。`UVCPP_ENABLE_CAPI` 的守卫链只保证 NET + WEB 必然开着，
+  # **不保证** webapp 开着（它默认 OFF），更不保证 h2 / quic / h3 开着。
+  #
+  # 这一段是**量出来的**，不是预防性加上去的。批 2 推上去之后，Linux 与 macOS
+  # 的 `full` 格（`WEB=ON`、`WEBAPP` 取默认 OFF、`CAPI=ON`）第一次就红了，红的
+  # 是 `src/webapp/uvcpp_web_json.h:39: fatal error: nlohmann/json.hpp: No such
+  # file or directory`，编译的单元是 `src/capi/uvcpp_c_webapp.cpp` —— 看起来像
+  # "依赖装漏了"，实际是"模块过滤漏了"：nlohmann 是 `if(UVCPP_BUILD_WEBAPP)`
+  # 那段 `target_link_libraries` 挂上去的，而 cpp 那边照样把这个 TU 塞进了源列表。
+  # 与 1.4.2 那次 `9ee0027` 是同一条教训的第三次：**C 面不许依赖一个它够不着的
+  # 特性** —— 前两次是"代码里 include 了一个没开的模块的头"，这一次是"构建图上
+  # 编了一个没开的模块的文件"。
+  #
+  # 为什么过滤写在 CMake 而不是文件里的 `#if UVCPP_XXX_ENABLE`：与 C++ 那边同一个
+  # 理由 —— "哪些 .cpp 进了这一趟编译"在 `cmake --build` 的源列表里看得见，写在
+  # `#if` 里则要编一遍才知道，而"编了一个空的 TU"是**全绿**的。
+  #
+  # 这张表是唯一一处写这件事的地方：源列表与安装头两处都从 `UVCPP_CAPI_DISABLED`
+  # 派生（安装那处在文件末尾，见 `CAPI_HEADER_FILES`）。
+  set(UVCPP_CAPI_DISABLED "")
+  foreach(_uvcpp_capi_pair
+      "UVCPP_BUILD_WEBAPP:uvcpp_c_webapp"     # app / 路由 / 中间件 / 静态 / ws 路由
+      "UVCPP_ENABLE_NGHTTP2:uvcpp_c_http2"    # h2 session / connection
+      "UVCPP_ENABLE_QUIC:uvcpp_c_quic"        # QUIC client / server / connection
+      "UVCPP_ENABLE_HTTP3:uvcpp_c_http3"      # h3 connection
+    )
+    string(REPLACE ":" ";" _uvcpp_capi_mv "${_uvcpp_capi_pair}")
+    list(GET _uvcpp_capi_mv 0 _uvcpp_capi_opt)
+    list(GET _uvcpp_capi_mv 1 _uvcpp_capi_base)
+    if(NOT ${_uvcpp_capi_opt})
+      list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/capi/${_uvcpp_capi_base}\\.cpp$")
+      list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/capi/${_uvcpp_capi_base}\\.h$")
+      list(APPEND UVCPP_CAPI_DISABLED "${_uvcpp_capi_base}")
+      message(STATUS "  capi: 排除 ${_uvcpp_capi_base}（${_uvcpp_capi_opt}=OFF）")
+    endif()
+  endforeach()
 endif()
 
 # Create uvcpp targets according to user selection.
@@ -2055,6 +2096,16 @@ endif()
 # `package_release.py` 打出来的包里照样会带上它。
 file(GLOB CAPI_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/capi/*.h")
 list(FILTER CAPI_HEADER_FILES EXCLUDE REGEX "uvcpp_c_internal\\.h$")
+# 下层模块关着的子头**不装**。这不是洁癖：装了它就等于承诺一份符号根本不存在的
+# 接口（`UVCPP_WEBAPP_ENABLE=0` 的库里没有 `uvcpp_c_app_new`），而使用方要到
+# **运行时**才发现（`EntryPointNotFoundException`）—— 与 `capi_symbols.lock`
+# 要防的是同一件事，只是这里防在"头装不装"那一侧。伞头 `uvcpp_c.h` 自己也按
+# `uvcpp_config.h` 里的宏决定拉哪几份，两边说的是同一句话。
+#
+# `UVCPP_CAPI_DISABLED` 由上面 capi 那一段的**同一张表**填出来（见那里的注释）。
+foreach(_uvcpp_capi_base ${UVCPP_CAPI_DISABLED})
+  list(FILTER CAPI_HEADER_FILES EXCLUDE REGEX "${_uvcpp_capi_base}\\.h$")
+endforeach()
 if(CAPI_HEADER_FILES AND UVCPP_ENABLE_CAPI)
   install(FILES ${CAPI_HEADER_FILES} DESTINATION include/capi)
 endif()

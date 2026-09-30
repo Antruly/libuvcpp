@@ -31,8 +31,25 @@ set(UVCPP_CAPI_TEST_VERSION_DEF "UVCPP_TEST_VERSION=\"${UVCPP_VERSION}\"")
 set(UVCPP_CAPI_TESTS
   capi_common_func.c   # 地基：ABI 自洽、错误码、句柄生死、事件表 size 规则
   capi_net_func.c      # net：真起两端、真收字节的回显
-  capi_webapp_func.c   # webapp + web：C 写的 app 与 C 写的客户端互相打
 )
+
+# 用例**跟着它量的那个模块的开关走**。
+#
+# 为什么必须写这一条，而不是"反正 CAPI 开着就一起编"：C 面的守卫链只保证
+# NET + WEB 开着（见顶层 CMakeLists.txt 那段），webapp / h2 / quic / h3 都是
+# 它的**可选下层**。所以 `-DUVCPP_ENABLE_CAPI=ON` 而 `WEBAPP` 取默认 OFF 是一个
+# **合法组合**（CI 的 `full` 格就是它），那个组合下 `uvcpp_c_app_new` 这个符号
+# 根本不存在 —— 把用例注册进去就是链不上（Linux/macOS）或者链接期报未解析外部
+# （MSVC），红的是一个"这条腿本来就没有的能力"，而不是代码坏了。
+#
+# 反过来说，**不许**把这段写成"编不过就跳过"：模块关着时这个用例不**存在**
+# （`--target` 找不到、`ctest -R` 报没有匹配），与上面讲的"没测不许长得像测过"
+# 是同一条。想让这条用例在某个配置下跑起来，办法是把那个模块打开，不是让它变绿。
+if(UVCPP_BUILD_WEBAPP)
+  list(APPEND UVCPP_CAPI_TESTS
+    capi_webapp_func.c   # webapp + web：C 写的 app 与 C 写的客户端互相打
+  )
+endif()
 
 foreach(_capi_src ${UVCPP_CAPI_TESTS})
   get_filename_component(_capi_name ${_capi_src} NAME_WE)

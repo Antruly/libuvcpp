@@ -486,6 +486,21 @@ static struct {
     }                                                                    \
   } while (0)
 
+/**
+ * @brief 把一次 `copy_out` 捞回来的字节放进定长字段：0 结尾，放不下的截掉。
+ *
+ * 不用 `strncpy`：它在 MSVC 上会以 C4996 刷屏（"this function or variable may be
+ * unsafe"），而本目录的另外两份 C 用例一处都没用它 —— 这个用例没有理由开这个头。
+ */
+static void put_str(char* dst, size_t cap, const char* src) {
+  size_t n;
+  if (cap == 0) return;
+  n = strlen(src);
+  if (n >= cap) n = cap - 1;
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
 /** @brief 把一条响应拷进 `g_http.r`（回调里唯一允许做的事）。 */
 static void http_capture(uvcpp_c_http_response* resp) {
   char buf[64];
@@ -504,15 +519,15 @@ static void http_capture(uvcpp_c_http_response* resp) {
              n, uvcpp_c_strerror(n));
       ++g_failed;
     } else {
-      strncpy(g_http.r.status_msg, msg, sizeof(g_http.r.status_msg) - 1);
+      put_str(g_http.r.status_msg, sizeof(g_http.r.status_msg), msg);
     }
   }
   if (uvcpp_c_http_response_header(resp, "X-Capi", buf, sizeof(buf)) > 0)
-    strncpy(g_http.r.x_capi, buf, sizeof(g_http.r.x_capi) - 1);
+    put_str(g_http.r.x_capi, sizeof(g_http.r.x_capi), buf);
   if (uvcpp_c_http_response_header(resp, "X-MW", buf, sizeof(buf)) > 0)
-    strncpy(g_http.r.x_mw, buf, sizeof(g_http.r.x_mw) - 1);
+    put_str(g_http.r.x_mw, sizeof(g_http.r.x_mw), buf);
   if (uvcpp_c_http_response_header(resp, "X-Slow", buf, sizeof(buf)) > 0)
-    strncpy(g_http.r.x_slow, buf, sizeof(g_http.r.x_slow) - 1);
+    put_str(g_http.r.x_slow, sizeof(g_http.r.x_slow), buf);
   uvcpp_c_http_response_content_type(resp, g_http.r.content_type,
                                      sizeof(g_http.r.content_type));
 

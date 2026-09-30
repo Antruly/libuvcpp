@@ -102,6 +102,17 @@ jobs:
           #
           # 另一条：这一格也是带 `-DUVCPP_ENABLE_CAPI=ON` 的那一格 —— "release 与
           # full 都支持 C ABI 导出"是需求本身（下一格说明 C ABI 单独那一格管什么）。
+          #
+          # ★ 这一格的**模块集合**与 `capi` 那一格**不同**，而这不是疏漏：这里
+          #   没写 `-DUVCPP_BUILD_WEBAPP=ON`，而它**默认是 OFF**（顶层
+          #   CMakeLists.txt:65）。所以这一格是"CAPI 开着、WEBAPP 关着"这个组合的
+          #   **唯一**一站 —— 1.4.3 批 2 的 CI 红就是它先报出来的：那时
+          #   `src/capi/uvcpp_c_webapp.cpp` 被无条件编进源列表，而它 include 的
+          #   nlohmann 只在 `if(UVCPP_BUILD_WEBAPP)` 那段才挂上编译命令行，于是
+          #   两个平台的 `full` 同时红在 `nlohmann/json.hpp: No such file or
+          #   directory`。修法在 CMakeLists 里那张子模块表，不是在这里补一个
+          #   `-DUVCPP_BUILD_WEBAPP=ON` —— 补开关只是把这一格也变成"webapp 开着"，
+          #   那个组合就再也没人量了，而它是使用者的正常配置。
           - feature: full
             flags:
               - -DUVCPP_BUILD_TESTS=ON
