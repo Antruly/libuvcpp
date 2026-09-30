@@ -31,6 +31,7 @@ keep in sync: the file name decides.
 | `web_ssl_*.cpp` | `UVCPP_ENABLE_OPENSSL` | `EXCLUDE REGEX "web_ssl_.*\.cpp$"` |
 | any file with `h2_` in it | `UVCPP_ENABLE_NGHTTP2` | `EXCLUDE REGEX "/[^/]*h2_[^/]*\.cpp$"` |
 | any file with `quic` in it | `UVCPP_ENABLE_QUIC` | `EXCLUDE REGEX "/[^/]*quic[^/]*\.cpp$"` |
+| any file with `http3` in it | `UVCPP_ENABLE_HTTP3` | `EXCLUDE REGEX "/[^/]*http3[^/]*\.cpp$"` |
 
 Each executable is named `test_<file-stem>`, with every character outside `[A-Za-z0-9_]`
 replaced by `_`. So `web_ssl_app_ws_func.cpp` becomes `test_web_ssl_app_ws_func`, and that is
@@ -100,6 +101,13 @@ The other two QUIC test files — `quic_handshake_func.cpp` and `quic_stream_fun
 new in `1.4.1` — copy that same `#else` shape. All three match the `quic` filter, so a broken
 filter takes all three red together.
 
+The two HTTP/3 test files, `http3_request_func.cpp` and `http3_web_func.cpp` (also new in
+`1.4.1`), do the same. Note that the `quic` and `http3` filters do **not** cover each other:
+the string `http3` does not contain `quic`, so `-DUVCPP_ENABLE_HTTP3=ON` in a tree where the
+guard chain has forced QUIC back to `OFF` drops `quic_*` with one rule and `http3_*` with the
+other, and neither rule can stand in for the other. That is why there are two rows in the
+table above rather than one.
+
 That is the difference in one line: if the CMake filter stops working, the two files above go
 green while testing nothing, and this one goes **red**. The `1.4.1` CI job for QUIC leans on
 exactly this (`doc/ci-guide.md` §The `quic` entries) — which is also why the file must be excluded
@@ -107,7 +115,7 @@ rather than merely skipped, since a non-zero exit is only usable if a mis-regist
 actually reach it.
 
 To confirm a test is genuinely running rather than absent: run it directly and look for its
-output. 107 of the 108 functional tests print a `[<name>]`-prefixed banner — the odd one out is
+output. 111 of the 112 functional tests print a `[<name>]`-prefixed banner — the odd one out is
 `web_app_multiloop_func.cpp`, which prints only per-case lines. The closing line is **not**
 uniform either: 73 print an `ALL PASS` / `FAIL` summary, and the rest print something else (a
 `done success=` line, or only per-case `-> PASS` lines). There is no single convention to grep
@@ -117,19 +125,25 @@ Both counts are measurements, not estimates, and they rot — **re-measure them 
 them**. They came from
 
 ```bash
-grep -lE '"\[[a-z0-9_]+' tests/functional/*.cpp | wc -l   # banner: 107
+grep -lE '"\[[a-z0-9_]+' tests/functional/*.cpp | wc -l   # banner: 111
 grep -lE 'ALL PASS'      tests/functional/*.cpp | wc -l   # summary: 73
-ls tests/functional/*.cpp | wc -l                         # total: 108
+ls tests/functional/*.cpp | wc -l                         # total: 112
 ```
 
-The earlier form of this paragraph said "88 of the 89" and "59" — those numbers had drifted for
-several releases because nobody re-ran the command. A count in prose with no command next to it
-is a count that will be wrong; put the command in with it.
+The earlier form of this paragraph said "88 of the 89" and "59", and then "107 of the 108" and
+"108" — those numbers had drifted for several releases because nobody re-ran the command, and
+the last set had already drifted **before** HTTP/3 was added: measuring the QUIC batch's own
+final commit (`git show 0addc23f`) gives 110 files and 109 banners, i.e. the three QUIC test
+files landed without this paragraph being updated. The two HTTP/3 files moved it by two more.
+A count in prose with no command next to it is a count that will be wrong; put the command in
+with it.
 
 ### Exit codes
 
 Success is `0`. Failure is non-zero, and the code is **not uniform**: most `main()`s `return 2`,
-but twelve functional tests `return 1`. Check for non-zero rather than for a specific value —
+but thirteen functional tests `return 1` (`grep -l 'return 1;' tests/functional/*.cpp | wc -l`,
+re-measured at `1.4.1` — the prose said "twelve" for a while, which is what a count with no
+command next to it does). Check for non-zero rather than for a specific value —
 this is exactly what the mutation drivers' verdict rule does.
 
 The `main()` of most functional tests returns on the **first** failing case, which is why a
@@ -184,9 +198,9 @@ executable is on disk; CMake does not delete executables whose source files have
 
 ## `tests/tools/` — the script index
 
-Thirty-two scripts. Most exist because a specific claim needed to be *measured* rather than
-argued, so they are evidence-producing tools, not a coherent framework. Several are one-shots
-kept because deleting them would lose the method.
+Thirty-three scripts (`ls tests/tools/*.py | wc -l`). Most exist because a specific claim needed
+to be *measured* rather than argued, so they are evidence-producing tools, not a coherent
+framework. Several are one-shots kept because deleting them would lose the method.
 
 ### Gate exit codes: `3` is **not** a failure
 
@@ -222,7 +236,7 @@ nothing is the failure mode worth spending a rule on: it looks green forever.
 | `check_docs.py` | Documentation gate — the CMake option tables in both READMEs match the options the build actually defines (both directions), every relative link and repo path resolves, and no `doc/*.md` is orphaned. Runs on every push. |
 | `check_doc_snippets.py` | Documentation gate — every ```` ```cpp ```` block in a tracked document actually compiles against a packaged header set. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#code-blocks-in-documentation) for the block conventions. |
 | `check_doc_lines.py` | Documentation gate — every `file:line` reference in a tracked document still points where it did, and none is written in the extension-only shorthand (`<file>.cpp:123`). Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#line-references-in-documentation) for the citation conventions. |
-| `check_ci_layout.py` | **CI-layout gate** — `.github/workflows/` is exactly the four per-platform files, each one's job and feature-matrix entries match the table in [`ci-guide.md`](ci-guide.md) **both ways**, each `h2`/`quic` entry still carries its four gate strings, and both READMEs' CI badges point at files that exist. Runs on every push. |
+| `check_ci_layout.py` | **CI-layout gate** — `.github/workflows/` is exactly the four per-platform files, each one's job and feature-matrix entries match the table in [`ci-guide.md`](ci-guide.md) **both ways**, each `h2`/`quic`/`http3` entry still carries its four gate strings, and both READMEs' CI badges point at files that exist. Runs on every push. |
 
 **Why `check_doc_lines.py` exists.** `check_docs.py`'s path criterion strips the `:NNN`
 suffix (`LINE_SUFFIX_RE`) *before* testing whether the file exists — the line number half was
@@ -299,6 +313,31 @@ the tests, and reports whether the mutation was caught — and by which test.
 | `wss_mutation.py` | `enable_wss()`'s TLS half |
 | `run_idle_mutation.py` | `run()` returning when there is nothing left to wait for |
 | `run_tcp_client_dtor_mutation.py` | `~uvcpp_tcp_client` — no sleeping in the destructor |
+| `http3_mutation.py` | `1.4.1` — HTTP/3's completion accounting, its once-only contract, and the QUIC FIN/RESET split it sits on |
+
+**`http3_mutation.py` is the one driver here that is about a `1.4.x` module**, and it exists
+because the earlier ones for those modules were not kept: the QUIC batch (`0eb4e20`…`0addc23f`)
+and the first HTTP/3 pass (`fe35eca`, `9da32cc`) each ran a mutation table from a throwaway
+script that lived outside the repo, so their results were quotable in a commit message and not
+re-runnable. This driver re-measures nine mutations over the two HTTP/3 tests plus
+`test_quic_api_func`; its own header records each one's verdict, and three facts from the run
+are worth repeating here:
+
+- **The once-only contract's guard is a pair, not a site.** Deleting `complete_response()`'s
+  internal `if (s.completed) return;` and deleting `on_stream_close`'s `!s.completed` each
+  survive *alone* — the other caller still covers it. Delete both at once and `test_http3_request_func`
+  goes red with five failures, the first of which is `那一条请求只给过一次：期望 1，实得 2`.
+  A mutation table that only ever broke one site at a time would have concluded, wrongly, that
+  the contract was untested.
+- **A survivor is not automatically a gap, and this driver found one that is.** The
+  `add_ack_offset` mutant (attribute a stream's acknowledged bytes to another stream) survives
+  the whole tree — all 79 tests green. It is not an equivalent mutant: nghttp3 really does see
+  the wrong accounting. It is a **coverage gap**, and the honest thing to write next to it is
+  the test that would be needed to close it (concurrent streams with a QPACK dynamic table in
+  use), not "equivalent".
+- **One caught mutant is caught by hanging, not by failing.** `take_completed()` not popping
+  its queue makes both HTTP/3 tests time out (`rc=124`) rather than print a `[FAIL]`. The
+  driver prints that distinction instead of flattening it to "red".
 
 **The verdict rule is two conditions, not one**: (1) the exit code is non-zero, **and** (2) the
 *expected group*, run on its own, is also red. Running the full suite and observing that

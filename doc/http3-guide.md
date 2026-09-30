@@ -328,7 +328,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 | h3 上的流式路由（`post_stream` / `set_stream_claim`） | **没有**（显式拒绝，不静默错路由） | [§8](#8-没做的如实列出) |
 
 **"判据在哪"这一列不是装饰。** 上面每一格都指得到一条会因为它坏掉而变红的断言；
-指不到的地方**不写**，而是列在下面。这一版**没有**判据的有两处，写出来免得被当成
+指不到的地方**不写**，而是列在下面。这一版**没有**判据的有三处，写出来免得被当成
 已经量过：
 
 - **重新入纪律（"nghttp3 的写函数不能在它的回调里调"）功能用例抓不到。** 它只会在
@@ -336,6 +336,13 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
   `want_write_` 标志（与 `uvcpp_h2_session` 同形），算"照模板评审覆盖"，不算量过。
 - **丢包重传仍然没有被量过。** 那是 QUIC 那一层的事，照 `doc/quic-guide.md` §4 里
   那条如实记录办。
+- **`add_ack_offset` 记错流，三个用例都看不出来。** 这条不是猜的：
+  `tests/tools/http3_mutation.py` 的 M1 把 `on_write` 里那句 `add_ack_offset` 的
+  归属流换成 `pending_` 的第一条流（单计数器近似），跑出来 `failures=0`，整棵树
+  79/79 也全绿。它**不是等价变异** —— nghttp3 那边看到的记账确实错了 —— 而是
+  一条**覆盖缺口**：要有"多条流并发 + 用到 QPACK 动态表"的用例才可能观测到它，
+  现在没有这样一条。同一张变异表里另外八条的实测结果（哪几条红、红几条、以及
+  `take_completed()` 不 pop 那次是**挂死/中止**而不是 FAIL）都写在那份脚本的头部。
 
 一句话：**这一层现在是一条能握手、能开流、能收发请求与响应、能干净收场的 h3
 传输**，而且它接在 web 层上 —— `uvcpp_http_client` / `uvcpp_http_server` 多了一条
