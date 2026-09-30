@@ -41,8 +41,9 @@
  *     断开时由本层回收。
  *   - `set_ssl_context()` / `enable_tls()`：TLS 需要 `uvcpp_ssl_context`，它的
  *     生命周期与 C 侧的 `uvcpp_c_*` 句柄是两套东西。等 web 那一批（批 2）把
- *     ssl 的 C 面定下来再一起给。**因此本层的 `is_tls()` 恒为假**（`UVCPP_SSL_*`
- *     那一格没开时它本来就是假的）。
+ *     ssl 的 C 面定下来再一起给。**因此本批的 `is_tls()` 恒为 0、
+ *     `alpn_selected()` 恒为空串** —— 不是占位，是实话：这一层没有任何一句
+ *     能让连接装上 TLS，所以从这里拿到的每条连接都真的没装。
  *   - `uvcpp_buf` 家族（`read_start(cb)` / `write(uvcpp_buf*)` / `read_wait()`）：
  *     全是 C++ 类型，C 侧不出现。
  */
@@ -293,7 +294,10 @@ UVCPP_C_API int uvcpp_c_tcp_client_is_tls(uvcpp_c_tcp_client* client);
 
 /**
  * @brief TLS 协商出来的 ALPN 协议名，走"调用方给缓冲区"那套约定
- *        （见 `uvcpp_c_common.h`）。没协商出来就是长度 0。
+ *        （见 `uvcpp_c_common.h`）。
+ *
+ * **本批恒为长度 0**（连 `cap = 1` 的缓冲区都只会拿到一个空串）—— 理由与
+ * `uvcpp_c_tcp_client_is_tls()` 同一条，见文件开头的"不提供"。
  */
 UVCPP_C_API int uvcpp_c_tcp_client_alpn_selected(uvcpp_c_tcp_client* client,
                                                  char* buf, size_t cap);

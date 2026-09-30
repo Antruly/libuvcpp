@@ -532,7 +532,15 @@ extern "C" UVCPP_C_API int uvcpp_c_tcp_client_is_tls(uvcpp_c_tcp_client* c) {
   UVCPP_C_TRY
     if (!alive(c, UVCPP_C_MAGIC_TCP_CLIENT)) return UVCPP_C_E_STALE;
     if (c->cli == nullptr) return UVCPP_C_E_STALE;
-    return c->cli->is_tls() ? 1 : 0;
+    // 答 0 是**真话**，不是占位：这一层一个给 C 的 TLS 入口都没有（见头里的
+    // "不提供"），所以从这里能拿到的每一条连接都真的没装 TLS。
+    //
+    // 刻意**不**写成 `c->cli->is_tls()`：那个成员整个被 `#if UVCPP_OPENSSL_ENABLE`
+    // 围住，而本项目的 capi 格**故意不带 OpenSSL**（Linux / macOS / MSVC 三格，
+    // 理由写在各格的注释里）。调它会让"C 面这一批能不能编出来"取决于一个 C 面
+    // 根本够不着的特性 —— 而那三格正是本层唯一跑纯 C 用例的地方。等 ssl 的 C 面
+    // 落地（后续批次），这里才该换成真正的那一句。
+    return 0;
   UVCPP_C_CATCH(UVCPP_C_E_EXCEPTION)
 }
 
@@ -541,11 +549,18 @@ extern "C" UVCPP_C_API int uvcpp_c_tcp_client_alpn_selected(
   UVCPP_C_TRY
     if (!alive(c, UVCPP_C_MAGIC_TCP_CLIENT)) return UVCPP_C_E_STALE;
     if (c->cli == nullptr) return UVCPP_C_E_STALE;
-    // 这一条**要**查线程（与本段的 `is_connected` / `last_error` 那几条纯标量
-    // 读不同）：`tls_alpn_selected()` 返回的是个 `std::string`，握手线程可能正在
-    // 改写它，跨线程读到的不是"稍微旧一点的值"而是**一块正在被改的内存**。
-    if (!uvcpp_c_detail::thread_ok(&c->head)) return UVCPP_C_E_WRONG_THREAD;
-    return copy_out(c->cli->tls_alpn_selected(), buf, cap);
+    // 同 `_is_tls()`：本批没有给 C 的 TLS 入口，协商出来的名字因此**恒为空串**。
+    // 上一版这里调的是 `c->cli->tls_alpn_selected()`，而那个成员只在
+    // `UVCPP_OPENSSL_ENABLE` 下存在 —— 于是就有一条腿（capi 格）编不过，见头里
+    // 那条"不提供"的注释。
+    //
+    // 空串也走同一个 `copy_out()`：这一层"调用方给缓冲区"的约定只该有一个实现，
+    // 这里另写一句 `buf[0] = '\0'` 就是第二处会写结尾 NUL 的地方。
+    //
+    // 线程检查一并去掉：它当初在这里的理由是 `tls_alpn_selected()` 返回引用、
+    // 握手线程可能正在改写那块内存；现在既不读也不返回，就没有可被别的线程
+    // 改坏的东西 —— 留一个查不出任何问题的检查只会让行为在两种构建里不一样。
+    return copy_out(std::string(), buf, cap);
   UVCPP_C_CATCH(UVCPP_C_E_EXCEPTION)
 }
 

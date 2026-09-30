@@ -274,10 +274,23 @@ ctest --test-dir build-capi -R capi --output-on-failure
 #                          异常不过边界）
 
 # ② 头**真是 C 的**，不是"看起来像 C"：每一份都过一个 C 编译器
-for h in src/capi/uvcpp_c*.h; do
-  gcc -x c -std=c99 -pedantic-errors -Werror -fsyntax-only -I src "$h" \
-    || echo "不是纯 C: $h"
+#
+# 形状是"写一个只 include 它的 .c"，**不是**把头当主文件喂进去 ——
+# `gcc ... uvcpp_c_net.h` 在 `-Werror` 下会红在 `#pragma once in main file` 上，
+# 那是调用的毛病，不是头的问题。
+#
+# `uvcpp_c_internal.h` **不在**这一轮里：它是内部头（CMake 与
+# `package_release.py` 两道过滤器都不装它），C 去 include 它本就该失败。
+for h in src/capi/uvcpp_c_common.h src/capi/uvcpp_c_net.h; do
+  printf '#include "%s"\n' "${h#src/}" > /tmp/probe.c
+  gcc -x c -std=c99 -pedantic-errors -Wall -Wextra -Werror \
+      -fsyntax-only -I src /tmp/probe.c || echo "不是纯 C: $h"
 done
+# 伞头照**装出去的样子**编：`uvcpp_config.h` 是 configure 期生成的，只在构建树里
+printf '#include <capi/uvcpp_c.h>\n' > /tmp/probe.c
+gcc -x c -std=c99 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only \
+  -I src -I build-capi/include /tmp/probe.c || echo "伞头不是纯 C"
+# （批 3 之后这里要按模块宏逐个 include：h2 / quic / h3 各自只在对应选项下出现）
 
 # ③ 反空转：把承重的守卫逐条拆掉，看用例有没有一声响
 python3 tests/tools/capi_mutation.py --tree build-capi
@@ -289,6 +302,30 @@ python3 tests/tools/check_capi_symbols.py --tree build-capi
 cmake -S . -B /tmp/capi-bad \
   -DUVCPP_ENABLE_CAPI=ON -DUVCPP_BUILD_WEB=OFF 2>&1 | grep -i capi
 ```
+
+⑥ **这一层要按 CI 那格的样子再编一次 —— 不带 OpenSSL。**
+
+```bash
+cmake -S . -B build-capi-ci -DCMAKE_BUILD_TYPE=Release \
+  -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+  -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+  -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_CAPI=ON      # 注意：没有 ENABLE_OPENSSL
+cmake --build build-capi-ci -j"$(nproc)" && ctest --test-dir build-capi-ci -R capi
+```
+
+**这不是"再跑一遍确认"，它抓的是另一类错。** §2 那条命令带着
+`-DUVCPP_ENABLE_OPENSSL=ON`，于是 C 层实现里凡是调了**只在某个特性下存在**的
+C++ 成员的写法，在本机都是绿的 —— 而 CI 的 capi 格是**故意不带 OpenSSL** 的
+（理由：C 面这一批一个加密入口都没有，开了只会让这一格的失败原因变多），
+于是同一种写法在那三格上全都编不过。1.4.2 第一次推送就是这么红的：
+Linux / macOS / MSVC 三格红在 `uvcpp_c_net.cpp` 那两句
+`c->cli->is_tls()` / `c->cli->tls_alpn_selected()` 上，而 MinGW64 那格
+**带** OpenSSL，绿。四腿三红一绿，差别只有这一处。
+
+所以判据是：**C 层能不能编出来，不许取决于一个 C 面够不着的特性。**
+本层的做法是同一个函数在两种构建里给出同一个答案（`is_tls()` 恒 0、
+`alpn_selected()` 恒空串 —— 这一批没有给 C 的 TLS 入口，所以那就是实话），
+而不是拿 `#if` 把两边的行为编成两样。
 
 ### 变异表量出来的（2026-09-30，Linux / gcc，`--tree build-capi --jobs 8`）
 
