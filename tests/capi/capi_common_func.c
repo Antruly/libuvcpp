@@ -85,8 +85,8 @@ static void test_abi_and_version(void) {
   CHECK(v != NULL);
   if (v != NULL) {
     CHECK(strlen(v) > 0);
-    /* 前缀相等：库里那份串是 "1.4.1-dev"（开发版带后缀），头里抓出来的是
-     * "1.4.1"，所以比前缀而不是全等。 */
+    /* 前缀相等：库里那份串是 "1.4.2-dev"（开发版带后缀），头里抓出来的是
+     * "1.4.2"，所以比前缀而不是全等。 */
     CHECK(strncmp(v, UVCPP_TEST_VERSION, strlen(UVCPP_TEST_VERSION)) == 0);
   }
 

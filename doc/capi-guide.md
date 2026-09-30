@@ -9,7 +9,7 @@ http3 / quic，而不需要写一个 C++ 中间层。
 C 层是薄包装（约 150–250 个函数的精选门面，见 §4），不新增第三方依赖、不新增
 产物、不改动 C++ 那一侧的任何导出行为。
 
-> ## 1.4.1 起它的第一批是"能用的"：地基 + net
+> ## 1.4.2 起它的第一批是"能用的"：地基 + net
 >
 > 这一批交付了 `uvcpp_c_common.h` 与 `uvcpp_c_net.h`：ABI 自洽、错误码与文案、
 > 句柄的生死与类型检查、版本化回调表的 `size` 规则、线程纪律，以及
@@ -154,7 +154,7 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
 }
 ```
 
-本层**只读 `size` 覆盖到了的那几格**，不把整张表读满。差别在于老客户端：1.4.1
+本层**只读 `size` 覆盖到了的那几格**，不把整张表读满。差别在于老客户端：1.4.2
 编出来的表有 4 格，将来 1.5.0 的表有 6 格，那个老客户端传进来的 `size` 只到第 4
 格 —— "读满"会去读它**根本没有的字节**（那是调用方栈上的别的东西，取值随机），
 "逐格"则干净地当"第 5、6 格没给"。这就是"以后加字段不破坏已编好的客户端"从
@@ -217,7 +217,7 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
 
 ## 4. 提供什么、明确不提供什么
 
-这一批（1.4.1）只到地基 + net。**名字都是 `uvcpp_c_` 前缀。**
+这一批（1.4.2）只到地基 + net。**名字都是 `uvcpp_c_` 前缀。**
 
 | 头 | 提供 | 不提供 |
 |---|---|---|
@@ -359,7 +359,7 @@ M1、M2、M3 是第一版**全都没抓住**的三条，下面那段记的就是
 
 ```
 # 发布包（CAPI=ON 的树出的）：
-python3 tests/tools/check_doc_snippets.py --pkg dist/libuvcpp-1.4.1-linux-x64 \
+python3 tests/tools/check_doc_snippets.py --pkg dist/libuvcpp-1.4.2-linux-x64 \
     --cxx g++ --docs doc/capi-guide.md
   [绿] doc/capi-guide.md  编过 1/1 条（其中 C 片段 1/1）（648 B）   rc=0
 

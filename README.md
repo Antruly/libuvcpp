@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.4.1--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.4.2--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.4.1-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.4.2-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -222,7 +222,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
-| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.1 ships the foundation + net; the other modules are not there yet** |
+| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.2 ships the foundation + net; the other modules are not there yet** |
 
 Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
 performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
@@ -643,7 +643,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.4.1** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.4.2** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0` and `v1.4.0`
 are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development lines
 accumulated through `v1.4.0`, plus what the `1.4.x` line has added since, is below, by
@@ -651,6 +651,39 @@ theme, with the version each change first appeared in;
 release notes for the tagged versions are in [RELEASE.md](./RELEASE.md). Several of the
 fixes came from issue reports by the project's first external contributor,
 [@sercebr](https://github.com/sercebr).
+
+### C ABI (`uvcpp_c_*`)
+
+- **The `extern "C"` surface exists**, behind `UVCPP_ENABLE_CAPI` (**off by default**,
+  but on for every release configuration and for the `full` CI cell). `src/capi/`
+  installs to `include/capi/` and compiles into the existing `uvcpp` library — no extra
+  artifact, no extra DLL to copy, no new third-party dependency, no `.def` (`1.4.2`)
+- **It is a curated facade, not a per-method mirror of the C++ API.** A faithful mirror
+  would be 1500+ entry points (`uvcpp_web_app` alone has ~107 public methods), which is
+  not a surface anybody binds to by hand; what is published is the slice a C#/P-Invoke
+  caller actually needs. JSON never enters a C header (`uvcpp_json` *is*
+  `nlohmann::json`), and neither does any libuv type (`1.4.2`)
+- **Five rules carry the ABI, each with a test rather than a sentence**: handles are
+  opaque pointers with a magic word *and* a live-handle registry (use-after-free gives
+  `UVCPP_C_E_STALE`, not UB); no C++ exception crosses the boundary; callback tables start
+  with a `uint32_t size` that is checked field by field, so a field appended at the tail
+  cannot break an already-compiled client; every function says which of three ownership
+  classes it belongs to; the thread rule is the C++ one, and it is enforced (`1.4.2`)
+- **`uvcpp_c_abi_version()` makes the most common P/Invoke failure fail loudly** — a header
+  and a `.so` / `.dll` that were not built from the same tree. It is deliberately a
+  separate line from the library version, and the test asserts it equals the header
+  macro (`1.4.2`)
+- **1.4.2 ships the foundation + net**: 35 entry points (5 common, 17 `tcp_client`,
+  13 `tcp_server`). The web, webapp, HTTP/2, QUIC and HTTP/3 C surfaces are **not** there
+  yet, and `[doc/capi-guide.md](doc/capi-guide.md)` §7 lists what is missing instead of
+  implying otherwise — no TLS *parameter* entry points, no UDP, no DNS (`1.4.2`)
+- **The mutation table found a false green on its first run**, which is the part worth
+  recording. Seven deliberate breakages, expected verdicts written down first; the three
+  handle-death mutants survived, because the use-after-free assertions were reading the
+  first four bytes of freed memory — where glibc's tcache has already written its `next`
+  pointer — i.e. they were measuring the allocator. `uvcpp_c_live_handle_count()`, which
+  makes the registry's balance externally observable, is what made them catchable; one
+  mutant still survives and is documented as redundant by design (`1.4.2`)
 
 ### QUIC transport (net layer)
 

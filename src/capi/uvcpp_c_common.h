@@ -45,7 +45,7 @@
  * 版本与兼容承诺
  * --------------
  * `UVCPP_C_ABI_VERSION` 与**库版本号是两条线**：后者是 `uvcpp_version.h` 里的
- * 1.4.1（`uvcpp_c_version_string()` 返回的就是它），前者是这一层的 ABI 承诺。
+ * 1.4.2（`uvcpp_c_version_string()` 返回的就是它），前者是这一层的 ABI 承诺。
  * 任何"ABI 可见"的改动（改一个函数的签名、删一个函数、改回调表某个字段的
  * **含义**）都要 +1；往回调表**尾部**加格子不算（规矩 3 保证老客户端不受
  * 影响），往枚举末尾加值也不算。
@@ -98,7 +98,8 @@ extern "C" {
 UVCPP_C_API unsigned int uvcpp_c_abi_version(void);
 
 /**
- * @brief 本库的版本字符串（形如 `"1.4.1"`），与 `uvcpp_version.h` 同源。
+ * @brief 本库的版本字符串（形如 `"1.4.2-dev"`；发布版不带 `-dev`），
+ * 与 `uvcpp_version.h` 同源。
  *
  * @return **静态**字符串，不要释放；进程生命周期内一直有效。
  */

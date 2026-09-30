@@ -324,7 +324,7 @@ the tests, and reports whether the mutation was caught — and by which test.
 | `run_idle_mutation.py` | `run()` returning when there is nothing left to wait for |
 | `run_tcp_client_dtor_mutation.py` | `~uvcpp_tcp_client` — no sleeping in the destructor |
 | `http3_mutation.py` | `1.4.1` — HTTP/3's completion accounting, its once-only contract, and the QUIC FIN/RESET split it sits on |
-| `capi_mutation.py` | `1.4.1` — the C ABI layer's five load-bearing rules: handle death (poison + registry), the callback-table `size` rule, the `extern "C"` exception boundary, the ABI-version self-check, and the buffer-too-small contract |
+| `capi_mutation.py` | `1.4.2` — the C ABI layer's five load-bearing rules: handle death (poison + registry), the callback-table `size` rule, the `extern "C"` exception boundary, the ABI-version self-check, and the buffer-too-small contract |
 
 **`http3_mutation.py` and `capi_mutation.py` are the two drivers here that belong to a `1.4.x`
 module**, and the first of them exists because the earlier ones for those modules were not kept:

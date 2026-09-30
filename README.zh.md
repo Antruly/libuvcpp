@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.4.1--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.4.2--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.4.1-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.4.2-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -219,7 +219,7 @@ int main() {
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.1 只到地基 + net，其余模块还没做** |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.2 只到地基 + net，其余模块还没做** |
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -627,13 +627,39 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.4.1** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.4.2** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0` 五个 tag。下面是
 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部改动，外加
 `1.4.x` 这一条线此后新增的东西，按主题分组，括号里是它**首次出现**的那一档；
 已发布版本的说明在
 [RELEASE.md](./RELEASE.md)。其中若干条来自本仓第一位外部贡献者
 [@sercebr](https://github.com/sercebr) 报的 issue。
+
+### C ABI（`uvcpp_c_*`）
+
+- **`extern "C"` 这一层有了**，藏在 `UVCPP_ENABLE_CAPI` 后面（**默认关**，但每一个发布
+  配置与 `full` 那条 CI 格都打开）。`src/capi/` 装到 `include/capi/`，**编进现有
+  `uvcpp` 库** —— 不多一个产物、不多一处 DLL 拷贝、不新增第三方依赖、不需要 `.def`
+  （`1.4.2`）
+- **它是精选门面，不是 C++ API 的逐方法镜像。** 逐方法镜像会到 1500+ 个入口
+  （`uvcpp_web_app` 一个类就 ≈107 个公开方法），那不是有人会手写的绑定面；发出来的是
+  C# / P-Invoke 调用方真正要用的那一片。JSON 绝不进 C 头（`uvcpp_json` 就是
+  `nlohmann::json`），libuv 类型同样不进（`1.4.2`）
+- **五条承重规矩各自有一条用例，不是一句"我们很小心"**：句柄是不透明指针 + 魔数 +
+  **登记表**（释放后再用给 `UVCPP_C_E_STALE`，不是 UB）；C++ 异常绝不过边界；回调表以
+  `uint32_t size` 打头并**逐格**判，所以往尾部加一格**不破坏**已编好的客户端；每个函数
+  写明自己属于三类所有权里的哪一类；线程规则与 C++ 一致，且**真查**（`1.4.2`）
+- **`uvcpp_c_abi_version()` 让 P/Invoke 最常见的故障当场响** —— 头与 `.so` / `.dll`
+  不是一次编出来的。它与库版本号**刻意是两条线**，用例断言它等于头里的宏（`1.4.2`）
+- **1.4.2 交付的是地基 + net**：35 个入口（common 5、`tcp_client` 17、`tcp_server` 13）。
+  web / webapp / HTTP/2 / QUIC / HTTP3 的 C 面**还没做**，`doc/capi-guide.md` 的 §7
+  如实列出缺什么而不是暗示全量；具体到这一批，没有 TLS **参数**入口、没有 UDP、
+  没有 DNS（`1.4.2`）
+- **变异表第一次跑就挖出一处假绿**，这是最值得记的那件事。七条故意弄坏，预期先写下
+  再跑；三条"句柄失效"变异**都没被抓住** —— 因为那几条 use-after-free 断言读的是空闲
+  块的头 4 个字节，而 glibc 的 tcache 早已把 `next` 指针写在那儿，它们量的是分配器。
+  补上 `uvcpp_c_live_handle_count()`（登记表收支平衡唯一可被外部量到的形式）才真的红；
+  仍有一条如设计存活，如实写在文档里（`1.4.2`）
 
 ### QUIC 传输（net 层）
 

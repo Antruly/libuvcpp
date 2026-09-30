@@ -1281,7 +1281,7 @@ uvcpp_logger::instance().flush();                // 转发给 sink 的 flush()
 - **没有请求体解压**（gzip 请求体不认识）。
 - **没有读背压**：流水线里排在后面的请求照常解析、照常跑，超上限直接拒（§18）。
 - **h2 只走 TLS + ALPN**，没有 h2c（见下）。
-- **这一层的 C ABI 还没做**。C 面（`include/capi/`）1.4.1 只交付了地基 + net
+- **这一层的 C ABI 还没做**。C 面（`include/capi/`）1.4.2 只交付了地基 + net
   （`uvcpp_c_tcp_client` / `uvcpp_c_tcp_server`）；app / router / req / resp / 延迟
   应答这些的 C 版本在后续批次里，**目前不存在** —— 别照着本页的签名去 P/Invoke。
   已有的那部分与它的契约见 [C ABI 指南](./capi-guide.md)。
