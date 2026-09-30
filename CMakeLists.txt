@@ -2193,6 +2193,18 @@ if(WIN32)
   if(TARGET test_memory_pool)
     list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/tests/expand${_cfg_subdir}")
   endif()
+  # `tests/capi` 是 1.4.1 加的（`UVCPP_ENABLE_CAPI=ON` 才有目标），加的时候
+  # **漏了这一行** —— 与 `tests/expand` 当初漏掉是同一件事、同一个后果：那三支
+  # 用例全是**纯 C**（`.c`），链的照样是 `uvcpp.dll` / `uv.dll` / `llhttp.dll`，
+  # 少一个就是在进 `main()` 之前就被加载器拦下、一个字节都不打印。
+  #
+  # 挂 `if(TARGET test_capi_net_func)` 而不是 `if(UVCPP_ENABLE_CAPI)`：这一排
+  # 邻居全是 TARGET 判据，而"这个目录里到底有没有 .exe"由**目标存不存在**说了
+  # 算 —— 模块开着但某个用例被按模块过滤掉时，前者问的还是对的那件事。
+  # (`test_capi_net_func` 是那一支里**无条件**登记的一支，见 tests/capi/CMakeLists.txt。)
+  if(TARGET test_capi_net_func)
+    list(APPEND _test_dll_dirs "${CMAKE_BINARY_DIR}/tests/capi${_cfg_subdir}")
+  endif()
   # 示例的输出目录同样需要 DLL：webapp_demo.exe 直接依赖 uvcpp.dll / uv.dll /
   # llhttp.dll，缺一个就是 0xc0000135 静默退出。
   if(TARGET webapp_demo)

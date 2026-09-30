@@ -61,7 +61,7 @@ jobs:
           #    （CMakeLists.txt:875 判的是 TARGET uv_a，而 find_library 给的是路径）。
           # ② BUILD_SHARED_LIBS=OFF：管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #    llhttp_shared ⇒ 依赖 libllhttp.dll）。zlib 不受影响，
-          #    CMakeLists.txt:1558-1559 明确链 zlibstatic。
+          #    CMakeLists.txt:1599-1600 明确链 zlibstatic。
           # 本机所有树都走 CMakePresets（它有 ①），所以这两条从来没在本机复现过。
           #
           # ③ UVCPP_ENABLE_NGHTTP2=ON：这个开关**默认 OFF**（CMakeLists.txt:132），
@@ -358,7 +358,7 @@ jobs:
           set -o pipefail
           # 同 mingw-x64：① 让 libuv 从源码静态编（runner 上若有系统 libuv，
           # 不带这个开关就会链成 uv.dll），② 让 llhttp 静态（否则 llhttp.dll）。
-          # zlib 不受 ② 影响（CMakeLists.txt:1558-1559 明确链 zlibstatic）。
+          # zlib 不受 ② 影响（CMakeLists.txt:1599-1600 明确链 zlibstatic）。
           # MSVC 侧 uvcpp 自己仍走 /MD + 包内自带 VC++ 运行库，与此无关。
           cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
             -DBUILD_SHARED_LIBS=OFF \

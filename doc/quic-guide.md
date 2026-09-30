@@ -40,7 +40,7 @@
 - 包含方式：`<quic/uvcpp_quic_client.h>`、`<quic/uvcpp_quic_server.h>`、
   `<quic/uvcpp_quic_connection.h>`、`<quic/uvcpp_quic_common.h>`。私有的
   `<quic/uvcpp_quic_ngtcp2.h>` 与 `<quic/uvcpp_quic_session.h>` **都不安装**
-  （`CMakeLists.txt:2015`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:2056`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 四个公开头**全部**整段套在 `#if UVCPP_QUIC_ENABLE` 里，所以**不开关就一个类都
   看不到**。这与 `web/`、`ssl/`、`http2/`、`http3/`、`wsdl/` 同档。
 
@@ -506,7 +506,7 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 
 1. **别指望从公开头里看到 ngtcp2。** `<ngtcp2/ngtcp2.h>` 只出现在私有的
    `src/quic/uvcpp_quic_ngtcp2.h` 里，而它和持有 ngtcp2 句柄的
-   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:2015`）、打包
+   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:2056`）、打包
    也被排除。理由有两条：一是使用者不该被逼着去配 ngtcp2 的搜索路径才能 include
    一个本库的头；二是 `uvcpp_quic_session.h` 的成员里就有 `ngtcp2_conn*`、`SSL*`、
    `ngtcp2_path_storage`，它的字段布局直接跟着 ngtcp2 的版本走 —— 一旦漏进公开面，

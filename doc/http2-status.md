@@ -375,7 +375,7 @@ ctest --test-dir build-h2 -C Release --timeout 60
    - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
      `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
      "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
-     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:2220`
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:2283`
      的注释），与 `pwsh` 无关。
    - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
      `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己

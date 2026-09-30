@@ -99,7 +99,7 @@ cmake -S . -B build -DUVCPP_BUILD_EXPAND=ON
 包里的 `include/uvcpp/uvcpp_config.h` 就是那次构建的值，自己再传一个冲突的值是硬 `#error`。
 
 关掉时 `src/expand/` 整目录被 `list(FILTER ... EXCLUDE REGEX "src/expand/")` 排除
-（`CMakeLists.txt:1255-1264`），并且**不安装头**（`CMakeLists.txt:1914-1917`）。于是
+（`CMakeLists.txt:1255-1264`），并且**不安装头**（`CMakeLists.txt:1955-1958`）。于是
 "关掉之后包含它"在两条路上表现**完全不同**：
 
 | 你怎么构建 | `#include <expand/uvcpp_memory_pool.h>` 的结果 |

@@ -30,12 +30,12 @@
      `uvcpp_http_client` / `uvcpp_http_server` 上，web 关掉时它没有使用者。
 - 包含方式：`<http3/uvcpp_h3_common.h>`、`<http3/uvcpp_h3_connection.h>`。
   私有的 `<http3/uvcpp_h3_nghttp3.h>` 与 `<http3/uvcpp_h3_session.h>` **都不安装**
-  （`CMakeLists.txt:2038`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:2079`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 两个公开头整段套在 `#if UVCPP_HTTP3_ENABLE` 里，web 层那边新加的
   `listen_quic()` / `set_http3_enabled()` 也是，所以**不开关就一个名字都看不到**。
   这与 `quic/`、`web/`、`ssl/`、`http2/`、`wsdl/` 同档。
 - 开关与依赖：nghttp3 走 FetchContent（`NGHTTP3_VERSION`，`CMakeLists.txt:166`），
-  静态链入 `nghttp3_static`（`CMakeLists.txt:1784`）—— 详见
+  静态链入 `nghttp3_static`（`CMakeLists.txt:1825`）—— 详见
   [§5](#5-cmake-接线与那条-check-撞名的坑)。
 
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一版没做"的地方都明确
@@ -384,11 +384,11 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 
 5. **三处编译定义同步**：`cmake/uvcpp_config.h.in` 的 `UVCPP_HTTP3_ENABLE` 段、
    目录级 `add_compile_definitions`、PUBLIC `target_compile_definitions`，
-   外加 `_uvcpp_literal01(UVCPP_HTTP3_ENABLE UVCPP_ENABLE_HTTP3)`（`CMakeLists.txt:1545`）。
+   外加 `_uvcpp_literal01(UVCPP_HTTP3_ENABLE UVCPP_ENABLE_HTTP3)`（`CMakeLists.txt:1586`）。
    四处不一致会以 `#error` 或静默的 ABI 错配收场，`check_config_contract.py` 盯着
    其中一个方向。
 
-6. **链接是 PRIVATE**（`CMakeLists.txt:1784` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
+6. **链接是 PRIVATE**（`CMakeLists.txt:1825` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
    （`src/http3/uvcpp_h3_connection.h:287`），它经公开头调用、链接期解析。
@@ -475,7 +475,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 1. **别指望从公开 h3 头里看到 nghttp3。** `<nghttp3/nghttp3.h>` 只出现在私有的
    `src/http3/uvcpp_h3_nghttp3.h` 里，而它和持有 nghttp3 句柄的
-   `src/http3/uvcpp_h3_session.h` **两个都不安装**（`CMakeLists.txt:2038`）、打包
+   `src/http3/uvcpp_h3_session.h` **两个都不安装**（`CMakeLists.txt:2079`）、打包
    也排除。理由与 quic 那一对逐字相同：一是使用者不该被逼着去配 nghttp3 的搜索
    路径才能 include 一个本库的头；二是 `uvcpp_h3_session.h` 的字段布局直接跟着
    nghttp3 的版本走 —— 一旦漏进公开面，那个版本就变成了本库的 ABI。这处排除与

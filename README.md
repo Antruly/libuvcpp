@@ -776,7 +776,7 @@ fixes came from issue reports by the project's first external contributor,
 - **The private-header pair.** `uvcpp_quic_session.h` holds `ngtcp2_conn*`, `SSL*` and
   `ngtcp2_path_storage`, so its layout tracks the ngtcp2 version — it is the second
   private header, alongside `uvcpp_quic_ngtcp2.h`. Both are excluded from the install
-  (`CMakeLists.txt:2015`) and from the package
+  (`CMakeLists.txt:2056`) and from the package
   (`tests/tools/package_release.py`'s `PRIVATE_HEADERS`); measured with
   `cmake --install build-quic --prefix /tmp/inst`, which lands exactly the four public
   headers in `include/quic/` (`1.4.1`)

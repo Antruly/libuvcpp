@@ -268,7 +268,33 @@ jobs:
         run: |
           feat="${{ matrix.feature }}"
           tree="build-$feat"
-          for d in tests/unit tests/functional tests/expand; do
+          # ★ 测试目录**只有这一份清单**，下面两处循环都用它。
+          #
+          # 原先这行是硬编码的 `tests/unit tests/functional tests/expand`，而
+          # 1.4.1 加的 `tests/capi/` 不在里面。Windows 没有 rpath：`uvcpp.dll`
+          # 与 `uv.dll` 必须与 .exe 同目录才找得到，而 `tests/capi/` 那三条纯 C
+          # 用例是这一层唯一**只**链这两个 DLL 的可执行文件 —— 于是它们在
+          # 加载期就被拦下，一行自己的代码都没跑。
+          #
+          # 观察到的形状（`9ee0027` / `d3b5b68` / `b867d51` 三次注解逐条一样）：
+          #
+          #     91/93 Test #91: test_capi_common_func ...***Timeout 60.12 sec
+          #     92/93 Test #92: test_capi_net_func    ...***Timeout 60.00 sec
+          #     93/93 Test #93: test_capi_webapp_func ...***Timeout 60.01 sec
+          #
+          # 三条都**正好**撞在 ctest 自己那个 `TIMEOUT 60` 上，而且捕获到的输出
+          # 一片空白 —— 与"用例断言为假"（那会立刻打 FAIL 并以非 0 退出）不是
+          # 一回事。加载期失败的两种表现形式（直接 0xc0000135 退出，或者弹一个
+          # 系统错误框、进程就停在那里直到被 ctest 杀掉）取决于父进程的 error
+          # mode，本仓 `tests/expand` 那次实测到的是前者、注解只能说后者；两种
+          # 都指向已经修掉的那一份漏拷。**这一格的判据只能由 CI 来量**（本机没有
+          # MSVC），所以这条注释写的是"改了什么、为什么"，不是"已经绿了"。
+          #
+          # 所以这里**不是**"顺手补一个目录"，是把那份清单提到一个变量上：
+          # 下一个模块加测试目录时只改这一行，两处循环不可能再各自漂。
+          # 同一份漏拷在 `CMakeLists.txt` 的 `_test_dll_dirs` 里也有一份，一起改了。
+          test_dirs="tests/unit tests/functional tests/expand tests/capi"
+          for d in $test_dirs; do
             mkdir -p "$tree/$d/Release"
             cp "$tree/Release/uvcpp.dll" "$tree/$d/Release/" 2>/dev/null || true
             cp "$tree/_deps/libuv-build/Release/uv.dll" "$tree/$d/Release/" 2>/dev/null || true
@@ -298,7 +324,7 @@ jobs:
             "C:/Program Files/OpenSSL-Win32/bin"; do
             if [ -d "$ssl_dir" ]; then
               echo "Found OpenSSL DLLs in: $ssl_dir"
-              for d in tests/unit tests/functional tests/expand; do
+              for d in $test_dirs; do
                 cp "$ssl_dir"/libssl-*.dll "$tree/$d/Release/" 2>/dev/null || true
                 cp "$ssl_dir"/libcrypto-*.dll "$tree/$d/Release/" 2>/dev/null || true
               done
