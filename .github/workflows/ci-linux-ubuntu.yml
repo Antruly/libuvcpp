@@ -80,6 +80,19 @@ jobs:
           # 的 `main()` 并且**返回 0** —— "没测"与"通过"在 ctest 里长得一模一样
           # （本仓栽过一次：`tests/functional/CMakeLists.txt` 的过滤正则写成 `^h2_`，
           # 而 `file(GLOB)` 给的是全路径，永远匹配不上）。
+          # ★ 批 3a（1.4.3）给这一格加了一行 `-DUVCPP_ENABLE_CAPI=ON`。为什么
+          #   必须是**这一格**：`src/capi/uvcpp_c_http2.cpp` 跟着 NGHTTP2 走
+          #   （顶层那张 `UVCPP_CAPI_DISABLED` 表），而带 NGHTTP2 的只有这一格
+          #   —— `capi` 那一格的 flags 里没有它。少了这一行，两件事在 CI 里
+          #   同时归零：
+          #     1. `tests/capi/capi_h2_func.c` 这个目标在任何平台上都**不存在**
+          #        （`tests/capi/CMakeLists.txt` 里它挂在 `UVCPP_ENABLE_NGHTTP2`
+          #        下）—— "h2 的 C 面端到端真发过一次"没人量；
+          #     2. `tests/tools/capi_symbols.lock` 里 h2 那一片**一条腿都判不了**
+          #        （判据 2 要一条既开 NGHTTP2 又开 CAPI 的腿，见下面那条门禁步骤
+          #        的 `if:` 与 doc/capi-guide.md §3.5）。
+          #   WEB / WEBAPP 本来就是 ON，所以这一格配出来的模块集合与本机那棵
+          #   `build-capi-h2` 逐字相同。
           - feature: h2
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -89,6 +102,7 @@ jobs:
               - -DUVCPP_ENABLE_OPENSSL=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_NGHTTP2=ON
+              - -DUVCPP_ENABLE_CAPI=ON
             gate_name: nghttp2
             gate_switch: 'UVCPP_ENABLE_NGHTTP2:BOOL=ON'
             gate_integrated: nghttp2 integrated
@@ -542,12 +556,21 @@ jobs:
       #
       # 它防的是"删掉/改掉一个 C 符号而六道门禁全绿"——那个错误第一个发现的人是
       # **已经编好的 C# 侧**（运行时 EntryPointNotFoundException）。
+      #
+      # ★ 两条腿跑它，因为**锁是分片的**（`#@ module`，见 doc/capi-guide.md §3.5）：
+      #   要判一片，那条腿必须既开 CAPI、又开着那一片自己的模块。没有哪一条腿
+      #   同时满足"有 h2"和"是 capi 格"，所以：
+      #     `capi` 那一格 → common / net / web / webapp 四片判完，h2 片如实报「未判」；
+      #     `h2`   那一格 → 五片全判（它从批 3a 起也带 `-DUVCPP_ENABLE_CAPI=ON`）；
+      #   两格合起来，锁里每一片都有至少一条腿真的量过。少跑哪一条，那几片就会
+      #   退化成"只有判据 1（静态）管着"——而 `--update` 时还看不出来差别。
       - name: Gate — C ABI symbol surface matches the lock
-        if: matrix.feature == 'capi'
+        if: matrix.feature == 'capi' || matrix.feature == 'h2'
         shell: bash
         run: |
           rc=0
-          out=$(python3 tests/tools/check_capi_symbols.py --tree build-capi 2>&1) || rc=$?
+          out=$(python3 tests/tools/check_capi_symbols.py \
+            --tree "build-${{ matrix.feature }}" 2>&1) || rc=$?
           printf '%s\n' "$out"
           if [ "$rc" != "0" ]; then
             msg=$(printf '%s\n' "$out" | grep -E '\[红\]|\[停\]|Error|Traceback' \

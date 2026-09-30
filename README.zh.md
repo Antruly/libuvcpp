@@ -219,7 +219,7 @@ int main() {
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.3 已到地基 + net + webapp/web，HTTP/2、QUIC、HTTP3 还没做** |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.3 已到地基 + net + webapp/web + HTTP/2，QUIC、HTTP3 还没做** |
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -679,6 +679,21 @@ libuvcpp/
   自己 —— 七条请求共用一条 keep-alive 连接、body 逐字节比、header 往返、中间件次序、
   静态目录、跨线程的延迟应答"晚到但如期"、两种 WebSocket 关闭方式，收尾核对登记表
   收支平衡（`1.4.3`）
+- **批 3a 把 HTTP/2 的 C 面接上**：新增 `uvcpp_c_http2.h`（46 个入口），到此共
+  **229 个函数**。C 面只有**驱动层**一个句柄（`uvcpp_c_h2_connection`）—— 会话层
+  不单独给：那会要求 C 侧自己写一遍 socket 驱动，而且两个句柄指向同一份内部状态时，
+  "先 free 哪个"就成了第二份真相。请求 / 响应是**构造器**（调用方建、调用方废），
+  `uvcpp_c_h2_stream` 是**回调期句柄**。**不给**优先级 / 依赖 / push 与逐帧回调 ——
+  `uvcpp_h2_session` 本来就没有前几项。第四个纯 C 用例 `test_capi_h2_func`（244 条
+  断言）在**一条**连接上真跑三条流（POST 带 body / GET / 流式 GET），状态码与 body
+  逐字节比，收尾核对登记表收支平衡（`1.4.3`）
+- **符号面锁在这一批变成分片的**（`#@ module <名>` 一行开一片），因为一条腿只开得起
+  一部分模块：CI 的 `capi` 格**没有** NGHTTP2，h2 那一片在它那棵树上本来就不该导出，
+  平的锁会把"这一片这棵树没有"报成"这个符号被删了"——一个很有说服力的假红。门禁现在
+  按**每片自己的开关**（从这棵树的 `uvcpp_config.h` 里读）逐片判：开着 → 与导出面
+  逐条相等；关着 → 这一片**一个都不许出现**，并如实印一行「未判」。CI 里 `capi` 格与
+  `h2` 格合起来才覆盖锁里每一片，所以 `h2` 格从这一批起也带 `-DUVCPP_ENABLE_CAPI=ON`
+  （`1.4.3`）
 - **变异表第二次挖出假绿，而这一次的结论更窄**：`1.4.3` 加了 M8–M12 五条，"回调期
   句柄带出回调之后必须给 `E_STALE`"那两条断言**没能抓住 M8**（拆掉 `FrameScope` 的摘
   表）。查下来是两件事：位置原先排在 `app_join()` **之后**，那时服务端线程的栈已被

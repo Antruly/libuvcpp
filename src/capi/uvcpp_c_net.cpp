@@ -253,6 +253,27 @@ int maybe_arm_read(uvcpp_c_tcp_client* c) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// 跨文件的句柄解包
+// ---------------------------------------------------------------------------
+//
+// 实现放在这里而不是各自的 `.cpp`：`uvcpp_c_tcp_client` 的真身只在本文件可见，
+// 这是**唯一**一个能同时看见"句柄布局"与"底下那个 C++ 对象"的地方。
+// 用法与理由写在 `uvcpp_c_internal.h` 的声明处。
+
+namespace uvcpp_c_detail {
+
+uvcpp::uvcpp_tcp_client* tcp_client_unwrap(const void* handle) {
+  const uvcpp_c_tcp_client* w = static_cast<const uvcpp_c_tcp_client*>(handle);
+  // `alive()` 已经把三种情况一起挡住了：空指针、被 `reap_client()` 摘过表的
+  // （它摘表在先、置 `cli = nullptr` 在后，所以查表为假时下面那句也不会读到
+  // 一个正在被清空的字段）、以及"这个指针压根不是我们发的"。
+  if (!alive(w, UVCPP_C_MAGIC_TCP_CLIENT)) return nullptr;
+  return w->cli;
+}
+
+}  // namespace uvcpp_c_detail
+
+// ---------------------------------------------------------------------------
 // 客户端
 // ---------------------------------------------------------------------------
 

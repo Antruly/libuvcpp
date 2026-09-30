@@ -222,7 +222,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
-| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.3 ships the foundation + net + webapp/web; HTTP/2, QUIC and HTTP/3 are not there yet** |
+| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.3 ships the foundation + net + webapp/web + HTTP/2; QUIC and HTTP/3 are not there yet** |
 
 Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
 performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
@@ -708,6 +708,26 @@ fixes came from issue reports by the project's first external contributor,
   connection, bodies compared byte for byte, headers round-tripped, middleware ordering, a
   static directory, a cross-thread deferred response that arrives late but on time, both
   shapes of WebSocket close, and the registry's balance checked at the end (`1.4.3`)
+- **Batch 3a wires up the HTTP/2 C surface**: `uvcpp_c_http2.h` (46 entry points) brings
+  the total to **229 functions**. The C side has exactly one handle — the driver layer
+  (`uvcpp_c_h2_connection`) — because exposing the session layer as a second handle would
+  ask the caller to write the socket driver again *and* make "which one do I free first"
+  a second source of truth. Requests and responses are **constructors** (caller allocates,
+  caller frees); `uvcpp_c_h2_stream` is a **callback-scope handle**. **Not provided**:
+  priority, dependencies, push, and per-frame callbacks — `uvcpp_h2_session` has no
+  priority or push to begin with. A fourth pure-C test, `test_capi_h2_func` (244 checks),
+  runs three streams over **one** connection (POST with a body, GET, streaming GET),
+  compares status codes and bodies byte for byte, and checks the registry balance at the
+  end (`1.4.3`)
+- **The symbol lock became slice-aware in this batch** (`#@ module <name>` starts a
+  slice), because one leg only ever enables part of the module set: CI's `capi` leg has
+  no NGHTTP2, so the h2 slice is *not supposed to be exported there* — a flat lock would
+  report "this slice is absent from this tree" as "this symbol was deleted", a very
+  persuasive false red. The gate now judges **slice by slice against that slice's own
+  switch** (read from the tree's `uvcpp_config.h`): on → the slice must match the export
+  surface exactly; off → the slice must appear **nowhere**, plus an explicit "not judged"
+  line. In CI the `capi` and `h2` legs together cover every slice, which is why the `h2`
+  leg now carries `-DUVCPP_ENABLE_CAPI=ON` (`1.4.3`)
 - **The mutation table caught a false green a second time, and this verdict is narrower**:
   `1.4.3` added M8–M12, and the two assertions saying "a callback-scope handle carried out
   of its callback must report `E_STALE`" **failed to catch M8** (deleting `FrameScope`'s

@@ -10,8 +10,12 @@
  *
  *   - `#include <capi/uvcpp_c.h>` 之后，凡是你这份库里开了的模块，它的
  *     `uvcpp_c_*` 声明都在；关掉的模块**一个字都不出现**（而不是"声明在、
- *     一调就失败"）。这就是为什么每份子头都有 `#if` 守卫，而这里不写死。
- *   - 想精确控制（比如只看 net 那一份）就直接 include 子头。
+ *     一调就失败"）。**这道 `#if` 在本文件里**，子头自己没有模块守卫 ——
+ *     子头是"这个模块的 C 面长什么样"，而"这份库里有没有这个模块"只有
+ *     `uvcpp_config.h` 知道；两处都写就是两份会各自漂的开关。
+ *   - 想精确控制（比如只看 net 那一份）就直接 include 子头 —— 那时**绕过**了
+ *     上面这道判断，所以要么你确实知道自己在干什么，要么先看一眼
+ *     `UVCPP_CAPI_ENABLE` 那一段。
  *
  * 一份最小的用法（C# 侧 P/Invoke 之前先自己在 C 里验一遍的那种）：
  *
@@ -69,7 +73,17 @@
 #  include "capi/uvcpp_c_web.h"
 #endif
 
-/* http2 / quic / http3 的子头在后续批次里加到这里，形状同上：
+/* http2：会话与连接。批 3 落地。
+ *
+ * 它**不住在 net 或 web 之下**：`uvcpp_h2_connection` 是骑在一条已经握手完的
+ * `uvcpp_tcp_client` 上的（ALPN 协商出 h2），请求 / 响应类型又是 web 的。
+ * 那两个宏在 `UVCPP_CAPI_ENABLE=ON` 时必然是 1（守卫链保证），所以这里只判
+ * NGHTTP2 自己那一格。 */
+#if UVCPP_NGHTTP2_ENABLE
+#  include "capi/uvcpp_c_http2.h"
+#endif
+
+/* quic / http3 的子头在后续批次里加到这里，形状同上：
  * 一个 `#if UVCPP_XXX_ENABLE` 包一份 `#include`，不带任何别的逻辑。 */
 
 #endif  /* SRC_CAPI_UVCPP_C_H */

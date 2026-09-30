@@ -51,6 +51,17 @@ if(UVCPP_BUILD_WEBAPP)
   )
 endif()
 
+# h2 那一份跟着 `NGHTTP2` 走，**不是**跟着 `WEB` 走：`src/capi/uvcpp_c_http2.*`
+# 本来就在顶层那张 `UVCPP_CAPI_DISABLED` 表里由 `UVCPP_ENABLE_NGHTTP2` 决定
+# 编不编（CMakeLists.txt 里那一段）。这条用例量的是那一份，所以开关必须是同一个
+# —— 两个都写 `NGHTTP2` 的话，`CAPI=ON, NGHTTP2=ON` 与 `CAPI=ON, NGHTTP2=OFF`
+# 两种配置下"库里有几份文件、ctest 里有几个用例"是同步的。
+if(UVCPP_ENABLE_NGHTTP2)
+  list(APPEND UVCPP_CAPI_TESTS
+    capi_h2_func.c       # http2：C 写的服务端与 C 写的客户端在一条连接上跑三条流
+  )
+endif()
+
 foreach(_capi_src ${UVCPP_CAPI_TESTS})
   get_filename_component(_capi_name ${_capi_src} NAME_WE)
   set(_capi_exe "test_${_capi_name}")

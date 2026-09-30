@@ -7,10 +7,10 @@
 C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常不过边界；丙、回调表按
 `size` 逐格看；丁、所有权三类；戊、线程纪律）里，**甲、乙、丙**都是"我们很小心"
 很容易写成、而"到底有没有用"很容易想当然的三条。这个驱动把它们各自的守卫**逐条
-拆掉**，看 `tests/capi/` 那三个纯 C 用例（`test_capi_common_func` 量甲、丙，
+拆掉**，看 `tests/capi/` 那几个纯 C 用例（`test_capi_common_func` 量甲、丙，
 `test_capi_net_func` 量乙和线程纪律，`test_capi_webapp_func` 量甲在 webapp 那侧的
-**回调期句柄**形态与"查询不存在"那条约定）**有没有一声响**。没响的如实记成覆盖
-缺口，不许写"等价"。
+**回调期句柄**形态与"查询不存在"那条约定，`test_capi_h2_func` 量它们在 http2 那侧
+的同几种形态）**有没有一声响**。没响的如实记成覆盖缺口，不许写"等价"。
 
 被测的不变式（每条都在用例里有对应的断言）
 ------------------------------------------
@@ -20,21 +20,24 @@ C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常
        A1. 释放后再用/双重释放给 `E_STALE`（M1~M3 三种情况下都绿 —— 它量的是
            分配器，见 M2 上面那段）；
        A2. `uvcpp_c_live_handle_count()` 收支平衡（只有它能咬 M2/M3）。M1 按
-           设计活下来。
+           设计活下来。批 3a 起
+           `capi_h2_func` 也有这条断言（M16 全靠它）。
      A 在 webapp 那侧还多一种形态：**回调期句柄**（`req` / `resp` 那些栈对象）
      出了回调就不许再用了。守卫是 `FrameScope` 的析构里那句"全部摘表"。
-     见 M8。
+     见 M8；h2 那侧是同一个 `FrameScope` 的同一句（`stream` 那枚），见 M16。
   B. 句柄**类型**也要对：服务端句柄传给客户端那一族函数必须是 `E_STALE`。这一条
      打的只是第二道（魔数），见 M5。
   C. 回调表**只读调用方声明覆盖到了的那几格**：老客户端写一张只有前几格的表，
-     后面那几格的字节**一个都不许读**。见 M4。
+     后面那几格的字节**一个都不许读**。见 M4；"连 `size` 自己都不足 4 字节"
+     那半条见 M15（h2 那侧）。
   D. C++ 异常不许穿过 `extern "C"`。见 M6 —— 判断它"没响"的标准是**进程没了**
      （abort），因为那正是"异常逃出去"的真实表现。
   E. 头里的 `UVCPP_C_ABI_VERSION` 与库返回的那个数必须一致（P/Invoke 最常见的
      故障：头与 .so/.dll 不是一次编出来的）。见 M7。
   F. **"查不到"与"查到空值"是两件事**（`1.4.3` 加的 `UVCPP_C_E_NOT_FOUND`）：
      `header("X-Nope")` 必须是负数，不能退化成 `0` —— 退化了就把"没带这个头"
-     与"带了这个头但值是空的"合并成同一个回答。见 M9。
+     与"带了这个头但值是空的"合并成同一个回答。见 M9；h2 那侧同一条规矩的另一种
+     形态（"响应头还没到"与"状态码是 0"在那层数据里是同一个值）见 M14。
   G. 入参那一层要**当场**拒绝（`E_INVALID_ARG`），不能"注册成功、运行时才炸"。
      C 面最容易漏的就是这个：C 调用方没有编译期检查，一个 NULL 回调会一路走到
      事件循环里。见 M10。
@@ -61,6 +64,11 @@ C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常
     python3 tests/tools/capi_mutation.py [--tree build-capi] [--jobs 8]
 
 要的是一棵 **CAPI=ON** 的树（本机怎么配见 `doc/capi-guide.md` §怎么开）。
+批 3a 起还想判 M13~M16（http2 那四条）的话，这棵树还要**开着
+`UVCPP_ENABLE_NGHTTP2`** —— 那个用例跟着这个开关走。选了 h2 的变异而这棵树
+没编那个 exe 时，脚本**退 3**（「没判」，见 `main()` 里那段），不会拿 `run_targets()`
+给的 127 去冒充"抓住了"。
+
 脚本改源码、重编、再按字节还原，结束时核对 md5 并再跑一次确认全绿；任一步不对
 就非 0 退出。
 """
@@ -81,13 +89,22 @@ COMMON = os.path.join(ROOT, "src", "capi", "uvcpp_c_common.cpp")
 NET = os.path.join(ROOT, "src", "capi", "uvcpp_c_net.cpp")
 WEB = os.path.join(ROOT, "src", "capi", "uvcpp_c_web.cpp")
 WEBAPP = os.path.join(ROOT, "src", "capi", "uvcpp_c_webapp.cpp")
+HTTP2 = os.path.join(ROOT, "src", "capi", "uvcpp_c_http2.cpp")
 
-# 三个纯 C 用例（在 <tree>/tests/capi/ 下）。顺序无所谓，超时都是 60 s。
+# 纯 C 用例（在 <tree>/tests/capi/ 下）。顺序无所谓，超时都是 60 s。
 TARGETS = [
     "test_capi_common_func",
     "test_capi_net_func",
     "test_capi_webapp_func",
 ]
+
+# 第四个用例**跟着 `UVCPP_ENABLE_NGHTTP2` 走**，不是跟着 CAPI 走（判据在
+# `tests/capi/CMakeLists.txt` 里，与 `src/capi/uvcpp_c_http2.*` 同一个开关）。
+# 所以一棵 `CAPI=ON, NGHTTP2=OFF` 的树是**合法**的，那棵树里这个 exe 根本不存在
+# —— 那种情况下它不是"跑红了"，是"没得跑"。M13~M16 只碰 `uvcpp_c_http2.cpp`，
+# 少了这个 exe 就一条都判不了，于是 main() 里显式分两种情形处理（见那里的两段
+# 注释），而不是让基线报一个 127 出来冒充"红了"。
+H2_TARGET = "test_capi_h2_func"
 
 # 卸掉守卫的两句原文（`unregister_head()` 的函数体），M1~M3 共用。
 UNREGISTER_BODY = ("  registry_remove(h);\n"
@@ -241,6 +258,83 @@ MUTATIONS = [
        '    if (u.compare(0, 5, "ws://") != 0) {',
        '    const std::string u(url);\n'
        '    if (false) {  /* MUTATION: 不查 scheme */')]),
+
+    # =====================================================================
+    # 批 3a（http2）。下面四条都只有 `test_capi_h2_func` 咬得住。
+    #
+    # ★ 这四条要求树里**开着 NGHTTP2**（那个用例跟着这个开关走）。树里没有它
+    #   时 main() 直接退 3（"没判"），不会拿一个 127 冒充"抓住了"。
+    # =====================================================================
+
+    # ---- 戊：线程纪律，h2 那一侧 ----
+    #
+    # 服务端那条线程上：连接活着的时候从**另一条线程**喊 `flush`。C 面的承诺
+    # 是当场 `E_WRONG_THREAD`。拆掉这一句之后 `c->conn->flush()` 会在没有 loop
+    # 亲和的那条线程上跑起来 —— 要么返回 0（断言拿到 0、红），要么直接崩
+    # （rc 非 0，也是红）。两种都算抓住，所以这条的判据不依赖它在哪一边。
+    ("M13 h2 flush 不查线程",
+     True,
+     [(HTTP2,
+       "    if (!ok(c)) return UVCPP_C_E_STALE;\n"
+       "    if (!uvcpp_c_detail::thread_ok(&c->head)) "
+       "return UVCPP_C_E_WRONG_THREAD;\n"
+       "    return c->conn->flush();",
+       "    if (!ok(c)) return UVCPP_C_E_STALE;\n"
+       "    /* MUTATION: 不查线程 */\n"
+       "    return c->conn->flush();")]),
+
+    # ---- F 在 h2 那一侧的形态：响应头还没到 ≠ 状态码是 0 ----
+    #
+    # `h2_response_not_received()` 把 `status_code` 填成 `HTTP_STATUS_NONE`
+    # （就是 0），所以"还没到"和"到了但状态码是 0"在这层数据里是**同一个值**。
+    # C 面把它译成 `E_NOT_FOUND`，这里拆成"照实返回 0"。用例在请求回调里就问
+    # 一次（那时头当然还没到），两条流各一次 —— 拿到 0 就红。
+    ("M14 h2 response_status 把'没到'当 0 返回",
+     True,
+     [(HTTP2,
+       "    if (code == static_cast<int>(uvcpp::HTTP_STATUS_NONE)) {\n"
+       "      return UVCPP_C_E_NOT_FOUND;\n"
+       "    }",
+       "    if (code == static_cast<int>(uvcpp::HTTP_STATUS_NONE)) {\n"
+       "      return 0;  /* MUTATION: 把'没到'当成 0 */\n"
+       "    }")]),
+
+    # ---- 丙在 h2 那一侧的形态：回调表先看 `size` ----
+    #
+    # 和 M4（`field_present` 恒真）量的是**同一条规矩的两半**：M4 管"逐格问你
+    # 覆盖到哪了"，这条管"连你自己声明的 size 都不足 4 字节时，整张表都不读"。
+    # 用例拿一张 `size = 0` 的表去 `start`，必须当场 `E_INVALID_ARG`。
+    #
+    # ★ 这条的预期是**改过用例之后**才成立的，写在这里免得下次又猜：按 True 写
+    #   （"用例里明明有那么一次坏表调用"），本机一跑**没抓住，四个用例全绿**。
+    #   病不在守卫，在**用例**：那两处坏表调用喂的都是 `h2_cbs` 那一格
+    #   （`capi_h2_func.c` 里两张 `uvcpp_c_h2_callbacks`），而这条拆的是 `start`
+    #   里**另一条** `table_size_ok`（`conn_cbs`）。同一句守卫的两个分支，只量了
+    #   一个 —— 一个覆盖缺口，不是"等价"。补上"`h2` 表缺席、`conn` 表 `size = 0`"
+    #   那一次调用（服务端那段，注释里带 ★）之后这条才真的红，而且红得像一份
+    #   事故报告：那一次 `start` 居然返回 0（副作用全落地了），紧接着真 `start`
+    #   拿到 `-114`（`UV_EALREADY` —— 会话已经被上一趟开起来了）、GOAWAY 也没了。
+    ("M15 h2 连接回调表的 size 不校验",
+     True,
+     [(HTTP2,
+       "    if (conn_cbs != nullptr && "
+       "!uvcpp_c_detail::table_size_ok(conn_cbs->size)) {",
+       "    if (false && conn_cbs != nullptr) {  /* MUTATION: 不查 size */")]),
+
+    # ---- 甲在 h2 那一侧的形态：回调期句柄出栈即摘表 ----
+    #
+    # ★ 这一条与 M8 是**同一件事、同一个代价，但红在哪一条断言上不一样**，写
+    #   在这里免得下次又猜：h2 用例里那三条"把 stream 带出回调再问它"的
+    #   `E_STALE` 断言**照样过**（理由与 M8 完全相同：栈被复用，魔数早没了），
+    #   真正咬住它的是这一趟跑完时的 `uvcpp_c_live_handle_count() == 0` ——
+    #   那也是加这条断言的全部理由。
+    ("M16 h2 回调期句柄不摘表（FrameScope 拆掉）",
+     True,
+     [(HTTP2,
+       "    for (int i = n_ - 1; i >= 0; --i) {\n"
+       "      uvcpp_c_detail::unregister_head(slots_[i]);\n"
+       "    }",
+       "    /* MUTATION: 回调返回后不摘表 */")]),
 ]
 
 RUN_TIMEOUT_S = 600
@@ -269,18 +363,18 @@ def run(cmd, cwd=ROOT, timeout=RUN_TIMEOUT_S):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def build(tree, jobs):
-    rc, out = run(["cmake", "--build", tree, "--target"] + TARGETS +
+def build(tree, jobs, targets):
+    rc, out = run(["cmake", "--build", tree, "--target"] + targets +
                   ["--parallel", str(jobs)])
     errs = len(re.findall(r"\berror:", out)) + len(re.findall(r"error C\d+", out))
     return rc, errs, out
 
 
-def run_targets(tree):
+def run_targets(tree, targets):
     """-> [(名字, rc, failures, [FAIL 行], [c1, c2]), …]"""
     d = os.path.join(tree, "tests", "capi")
     rows = []
-    for name in TARGETS:
+    for name in targets:
         exe = os.path.join(d, name)
         if not os.path.exists(exe):
             rows.append((name, 127, -1, ["（可执行文件不在：%s）" % exe], []))
@@ -328,6 +422,31 @@ def main():
         print("--only %s：只跑 %s" % (args.only, "、".join(m[0].split()[0]
                                                           for m in selected)))
 
+    # 这一趟跑哪几个用例：三个常驻的 + h2 那个（只在这棵树编了它的时候）。
+    #
+    # 两种情形分开处理，**不许混成一种**：编了 → 四个一起跑、四个都算判据；
+    # 没编（这棵树的 `UVCPP_ENABLE_NGHTTP2=OFF`，一个合法组合）→ 只要这趟选的
+    # 变异没碰 `uvcpp_c_http2.cpp` 就照跑三个；碰了就直接退 3，说清"这一趟什么
+    # 都没判"。退 3 而不是退 1：`run_targets()` 对不存在的 exe 会给一个 127 行，
+    # 那个 127 长得和"用例真红了"一模一样，拿它去填"抓住了"是把没判写成判过。
+    h2_exe = os.path.join(tree, "tests", "capi", H2_TARGET)
+    have_h2 = os.path.exists(h2_exe)
+    touches_h2 = any(e[0] == HTTP2 for _l, _x, edits in selected for e in edits)
+    if touches_h2 and not have_h2:
+        print("这棵树里没有 %s：\n  %s\n"
+              "M13~M16 碰的是 `src/capi/uvcpp_c_http2.cpp`，判它们要靠那条用例，"
+              "而那条用例跟着 `UVCPP_ENABLE_NGHTTP2` 走（判据在 "
+              "tests/capi/CMakeLists.txt）。\n"
+              "配一棵开着它的树（本机那份叫 build-capi-h2，命令见 "
+              "doc/capi-guide.md）。\n"
+              "★ 这一趟什么都没判 —— 退 3 是「没判」，不是「通过」。"
+              % (H2_TARGET, h2_exe))
+        return 3
+    targets = TARGETS + ([H2_TARGET] if have_h2 else [])
+    if not have_h2:
+        print("这棵树没开 NGHTTP2（没有 %s）：这趟只跑 %d 个用例，"
+              "h2 那几条变异不在里面。" % (H2_TARGET, len(TARGETS)))
+
     files = sorted({e[0] for _l, _x, edits in selected for e in edits})
     before = {p: read_bytes(p) for p in files}
     sums = {p: md5(p) for p in before}
@@ -352,13 +471,13 @@ def main():
                                     "\n%r" % (label, path, n, old))
                     write_bytes(path, s.replace(old, new, 1).encode("utf-8"))
 
-            rc, errs, out = build(tree, args.jobs)
+            rc, errs, out = build(tree, args.jobs, targets)
             if rc != 0 or errs:
                 print("[%s] 构建失败 rc=%s errors=%s" % (label, rc, errs))
                 print(out[-3000:])
                 return 3
 
-            rows = run_targets(tree)
+            rows = run_targets(tree, targets)
             red = [n for n, r, f, _fl, _c in rows if r != 0 or f != 0]
             caught = bool(red)
             if expect is None:
@@ -372,7 +491,7 @@ def main():
                 verdict = "%s %s（%s）" % (
                     "抓住" if caught else "没抓住", mark,
                     "、".join(x.replace("test_capi_", "").replace("_func", "")
-                              for x in red) or "三个都没红")
+                              for x in red) or ("%d 个都没红" % len(targets)))
             summary.append((label, verdict))
             print("\n[%s] %s" % (label, verdict), flush=True)
             for name, r, f, lines, cnt in rows:
@@ -396,12 +515,12 @@ def main():
         print("\n源码按字节还原: %s" % ("是" if restored_ok else "否 —— 有问题！"))
         rc, out = run(["grep", "-rn", "MUTATION", os.path.join(ROOT, "src")])
         print("grep 残留: %s" % (out.strip() or "(无)"))
-        rc, errs, _ = build(tree, args.jobs)
-        rows = run_targets(tree)
+        rc, errs, _ = build(tree, args.jobs, targets)
+        rows = run_targets(tree, targets)
         tail_ok = (rc == 0 and errs == 0 and
                    all(r == 0 and f == 0 for _n, r, f, _l, _c in rows))
-        print("还原后重建 rc=%s errors=%s；三个 exe 复跑 %s（应全 0）"
-              % (rc, errs, [(n.replace("test_capi_", ""), r, f)
+        print("还原后重建 rc=%s errors=%s；%d 个 exe 复跑 %s（应全 0）"
+              % (rc, errs, len(targets), [(n.replace("test_capi_", ""), r, f)
                             for n, r, f, _l, _c in rows]))
 
     print("\n==== 汇总 ====")

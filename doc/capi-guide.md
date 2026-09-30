@@ -225,6 +225,14 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
 - `tests/tools/check_capi_symbols.py` 把**实际导出的** `uvcpp_c_*` 符号与
   `tests/tools/capi_symbols.lock` 逐条比。删一个/改一个名字 ⇒ 门禁红，而不是
   已经编好的 C# 侧在运行时抛 `EntryPointNotFoundException`。
+- **那份锁是分片的**（批 3a 改的，`#@ module <名>` 一行开一片），因为一条腿
+  只开得起一部分模块：CI 那条 `capi` 腿的 flags 里**没有** `NGHTTP2` / `QUIC` /
+  `HTTP3`，那几片符号在它那棵树上**本来就不该导出**。平的锁会把"这一片这棵树
+  没有"和"这个符号被删了"报成同一件事 —— 一个很有说服力的**假红**。
+  所以门禁按**每片自己的开关**（从这棵树的 `uvcpp_config.h` 里读）逐片判：
+  开着 → 这一片与导出面逐条相等；关着 → 这一片要求**一个都不许出现**，并如实
+  印一行「未判」。**「未判」不是「通过」**，它是要拿另一条腿去补的账 ——
+  quic 那几片的判据在 CI 的 `quic` 腿上，而不是在 `capi` 腿上假装判过。
 
 **批 2（1.4.3）为什么没有把 `UVCPP_C_ABI_VERSION` 从 1 抬到 2**，以及这条判断
 是怎么**量**出来的，不是"我们觉得是加面"：
@@ -238,13 +246,14 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
 - 反过来说，老客户端（按头 1 编出来的）拿到这份新库，它调的那 35 个函数的
   行为逐条不变；新加的那 148 个它看不见。`check_capi_symbols.py` 的两个方向也
   照旧：删一个 ⇒ 判据 2 报"承诺过、库里没了"。
-- **批 3 若只是继续加面，同一条推论照用**；只要动到既有那 183 个里的任何一个，
-  就 +1。
+- **批 3a（`1.4.3`）加的 `uvcpp_c_http2.h` 是 46 个**：`git diff` 里批 1+2 那 183 个
+  符号同样一个签名都没动，所以 `UVCPP_C_ABI_VERSION` 仍是 **1**。同一条推论照用；
+  只要动到既有那 183 个里的任何一个，就 +1。
 
 ## 4. 提供什么、明确不提供什么
 
-到 1.4.3 为止共 **183 个函数**（`tests/tools/capi_symbols.lock` 就是这份名单）。
-**名字都是 `uvcpp_c_` 前缀。**
+到 1.4.3 为止共 **229 个函数**（`tests/tools/capi_symbols.lock` 就是这份名单，
+**分片**记着，每片对着一份头）。**名字都是 `uvcpp_c_` 前缀。**
 
 | 头 | 提供 | 不提供 |
 |---|---|---|
@@ -253,6 +262,7 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
 | `capi/uvcpp_c_net.h`（服务端 13 个） | `new` / `free` / `set_events` / `bind` / `local_port` / `listen` / `set_loops` / `loop_count` / `run` / `stop` / `client_count` / `close_all_clients` / `last_error` | 每连接独立的 accept 策略（回调里给句柄，动作自己定） |
 | `capi/uvcpp_c_webapp.h`（119 个） | **app**：`new` / `free` / 一组 `set_*` 配置 / `get·post·put·del·patch·head·options·any` / `use` / `websocket` / `serve_static` / `post_upload` / `start` / `start_background` / `stop` / `join` / `bound_port` / `running` / 几个计数。**请求侧**：`req_*`（method / path / query / header / cookie / body / keep-alive / peer）。**响应侧**：`resp_*`（status / header / text / html / json_str / binary / send_file / redirect / 4xx 5xx 快捷 / `begin_chunked` + `write_chunk` / `on_sent` / `on_drain`）。**流程**：`next_run` / `defer` + `deferred_*`。**ws**：`ws_req_*`（升级期）与 `ws_conn_*`（连接期） | 任何要 C++ 类型的入口（见下面那段）；WSS（`enable_wss` 要 SSL 上下文）；**服务端主动推送 / 广播**：不行 —— 那需要一个活过回调的连接句柄，而 `ws_conn` 是回调期句柄 |
 | `capi/uvcpp_c_web.h`（29 个） | **HTTP 客户端**：`new` / `free` / `set_keep_alive` / `connect` / `get` / `post` / `run` / `stop` / `close` / `is_connected` / `last_error`；响应侧 `http_response_*`（status / header / content-type / body）。**WS 客户端**：`new` / `free` / `set_events` / `connect` / `send_text` / `send_binary` / `close` / `run` / `stop` / `session_count` / `is_open` / `last_error` | **服务端那一侧全都不在这里**（http_server / ws_server / ws_connection 走 webapp 那份头）。HTTP 客户端的流式响应体（`on_body` 逐块）不给 —— C 面只在响应回调里给完整 body。`wss://` 不给（同上，要 SSL 上下文） |
+| `capi/uvcpp_c_http2.h`（46 个） | **连接**：`connection_new` / `free` / `start` / `flush` / `shutdown` / `close_now` / `closed` / `closing` / `last_error` / `stream_count` / `bytes_in` / `bytes_out` / `pause_stream` / `resume_stream` / `begin_goaway` / `submit_goaway` / `submit_rst` / `submit_request` / `peer_goaway_received` / `peer_goaway_error_code` / `peer_goaway_last_stream_id`。**服务端应答**：`send_status` / `send_headers` / `send_response` / `send_data`。**构造器**（调用方建、调用方废）：`h2_request_new` / `set_header` / `set_body` / `free`、`h2_response_new` / `set_status` / `set_header` / `set_content_type` / `set_body` / `free`。**流视图**（回调期句柄）：`id` / `state` / `paused` / `rejected` / `body_bytes` / `expected_body` / `request_method_name` / `request_path` / `request_header` / `request_has_header` / `response_status` / `response_header` | `uvcpp_h2_session` 这个**独立句柄**（那会要求 C 侧自己写 socket；而且两个句柄指向同一份内部状态时，"先 free 哪个"就成了第二份真相）；`recv` / `drain` / `want_read` / `want_write`（传输层的事，驱动层自己做）；**优先级 / 依赖 / push**（`uvcpp_h2_session` 本来就没有这几项）；`on_begin_headers` / `on_frame_recv` 那类**逐帧**回调；`session().take_completed()`（驱动层自己在写完成路径上跑它，使用方没有插手的余地） |
 | `capi/uvcpp_c.h` | 伞头：按各模块宏 include 上面几份 | 任何 C++ 类型、任何 libuv 类型（§1 第 2 条） |
 
 **`ws_client` 那一族的取舍要单独讲一句**：它**不给连接句柄**（收发都从客户端对象
@@ -315,6 +325,26 @@ ctest --test-dir build-capi -R capi --output-on-failure
 #                          服务端**：七条 HTTP 走同一条 keep-alive 连接，
 #                          跨线程的延迟应答，中间件次序，静态目录，两种 WS
 #                          关闭方式，回调期句柄越界，登记表收支平衡）
+#   test_capi_h2_func    ：http2 端到端（**这条在 build-capi 里不存在** ——
+#                          它跟着 `UVCPP_ENABLE_NGHTTP2` 走，见下面 ①b）
+
+# ①b HTTP/2 那一份要另配一棵树：`src/capi/uvcpp_c_http2.*` 与它那条用例
+#    都挂在 NGHTTP2 那个开关下（顶层 `UVCPP_CAPI_DISABLED` 表 +
+#    `tests/capi/CMakeLists.txt`），而上面那棵 build-capi 是**故意**不带
+#    OpenSSL 的（那是 CI 的 capi 格的样子）。这条树与 CI 的 `h2` 格逐字同构：
+cmake -S . -B build-capi-h2 -DCMAKE_BUILD_TYPE=Release \
+  -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+  -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+  -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON \
+  -DUVCPP_ENABLE_NGHTTP2=ON -DUVCPP_ENABLE_CAPI=ON \
+  -DFETCHCONTENT_SOURCE_DIR_LIBUV=$PWD/_local_deps/libuv
+cmake --build build-capi-h2 -j"$(nproc)"
+ctest --test-dir build-capi-h2 -R capi --output-on-failure
+#   test_capi_h2_func（244 条）：纯 C 的服务端与纯 C 的客户端在**一条**连接上
+#   跑三条流（POST 带 body / GET / 流式 GET），状态码与 body 逐字节比，
+#   `expected_body()` 的两条路各自断言，跨线程 `flush` 必须 `E_WRONG_THREAD`，
+#   收尾核对登记表收支平衡（回调期句柄摘干净了没有 —— 这是那件事**唯一**的
+#   可观测形式，见下面 M8/M16 那两段）
 
 # ② 头**真是 C 的**，不是"看起来像 C"：每一份都过一个 C 编译器
 #
@@ -325,7 +355,8 @@ ctest --test-dir build-capi -R capi --output-on-failure
 # `uvcpp_c_internal.h` **不在**这一轮里：它是内部头（CMake 与
 # `package_release.py` 两道过滤器都不装它），C 去 include 它本就该失败。
 for h in src/capi/uvcpp_c_common.h src/capi/uvcpp_c_net.h \
-         src/capi/uvcpp_c_web.h src/capi/uvcpp_c_webapp.h; do
+         src/capi/uvcpp_c_web.h src/capi/uvcpp_c_webapp.h \
+         src/capi/uvcpp_c_http2.h; do
   printf '#include "%s"\n' "${h#src/}" > /tmp/probe.c
   gcc -x c -std=c99 -pedantic-errors -Wall -Wextra -Werror \
       -fsyntax-only -I src /tmp/probe.c || echo "不是纯 C: $h"
@@ -334,15 +365,28 @@ done
 printf '#include <capi/uvcpp_c.h>\n' > /tmp/probe.c
 gcc -x c -std=c99 -pedantic-errors -Wall -Wextra -Werror -fsyntax-only \
   -I src -I build-capi/include /tmp/probe.c || echo "伞头不是纯 C"
-# （批 3 之后这里要按模块宏逐个 include：h2 / quic / h3 各自只在对应选项下出现）
+# 伞头那一份用**哪个树的 config** 有讲究：`<树>/include/uvcpp/uvcpp_config.h`
+# 是 configure 期生成的，伞头按它里面那几枚宏决定 include 哪几份头。所以
+# `-I build-capi/include` 只能验到"这一格开着的那些"；要把 h2 也验一遍就换成
+# `-I build-capi-h2/include`（或直接像上面那样逐份 include —— 一份头不依赖伞头
+# 的宏，单独编它反而是更硬的一条）。
+# （批 3b 加 quic / h3 之后，这两行按同一个道理再补。）
 
 # ③ 反空转：把承重的守卫逐条拆掉，看用例有没有一声响
-#   1.4.3 起是十二条（M1–M12）。单看一条用 --only，省掉整表重跑：
-#     python3 tests/tools/capi_mutation.py --tree build-capi --only M8
-python3 tests/tools/capi_mutation.py --tree build-capi
+#   1.4.3 起是十六条（M1–M16）—— M13–M16 是批 3a 的 http2 那四条。单看一条用
+#   --only，省掉整表重跑：
+#     python3 tests/tools/capi_mutation.py --tree build-capi-h2 --only M15
+#   ★ 整表要用 **build-capi-h2** 那棵树：M13–M16 判的是 `uvcpp_c_http2.cpp`，
+#     而那条用例只在开着 NGHTTP2 的树里存在。拿 build-capi 跑整表会**退 3**
+#     （选中的变异碰了 h2、这棵树里却没有那个 exe）—— 脚本不肯拿 `run_targets()`
+#     给的 127 去冒充"抓住了"，那种"没判"不许长得像"判过了"。
+python3 tests/tools/capi_mutation.py --tree build-capi-h2
 
-# ④ 符号面锁
+# ④ 符号面锁。**两棵树各跑一次**：锁是分片的，每片要一条开着那个模块的腿来判。
+#   build-capi  → common / net / web / webapp 逐条对上，http2 那片如实印「未判」
+#   build-capi-h2 → 五片全判
 python3 tests/tools/check_capi_symbols.py --tree build-capi
+python3 tests/tools/check_capi_symbols.py --tree build-capi-h2
 
 # ⑤ 守卫链的反例（两条都应当**配置成功**、打 warning、把模块排除掉）
 cmake -S . -B /tmp/capi-bad \
@@ -375,8 +419,10 @@ Linux / macOS / MSVC 三格红在 `uvcpp_c_net.cpp` 那两句
 
 ### 变异表量出来的（2026-09-30，Linux / gcc，`--tree build-capi --jobs 8`）
 
-到 1.4.3 为止共十二条（一条基线 + M1–M12），判据是"实际结果与**先写下来的预期**一致、
-源码按字节还原、还原后三个用例复跑全绿"。批 1（M1–M7）实测：
+到 1.4.3 为止共十六条（一条基线 + M1–M16），判据是"实际结果与**先写下来的预期**一致、
+源码按字节还原、还原后四个用例复跑全绿"。**整表要在 `build-capi-h2` 那棵树上跑**
+（M13–M16 判的是 http2 那一片，它在 build-capi 里根本不存在；选了 h2 的变异却没那
+棵树时脚本**退 3**，不拿 127 冒充"抓住了"）。批 1（M1–M7）实测：
 
 | # | 拆掉什么 | 预期 | 实得 | 谁红的 |
 |---|---|---|---|---|
@@ -404,10 +450,24 @@ M10 / M12 红出来的**码是 `-20003`（异常）而不是 `-20001`（参数�
 少了那句入参检查，错误就推迟到深处、以"某处抛了异常"的形式出现。也就是说断言写的
 `E_INVALID_ARG` 量的不是"没崩"，而是"**在边界上**就被挡住了"。
 
-查单条变异不用整表重跑：
+批 3a（1.4.3）加的四条，全部由新的 `test_capi_h2_func` 抓住，四条都是**同一批规矩在
+http2 那一侧的形态**：
+
+| # | 拆掉什么 | 预期 | 实得 | 谁红的（哪一条断言） |
+|---|---|---|---|---|
+| M13 | `h2_conn_flush()` 的线程检查 | 抓住 | 抓住 | `test_capi_h2_func`（`cross_thread_flush_rc = 0, want -20008`） |
+| M14 | `h2_stream_response_status()` 把"头还没到"当 `0` 返回 | 抓住 | 抓住 | 同上（6 条 `= 0, want -20010`：三条流 × 请求回调 + 收尾各一次） |
+| M15 | `start()` 里 `conn` 表的 `size` 检查 | 抓住 | 抓住（**但改过用例**，见下） | 同上（`= 0, want -20001`，紧接着真 `start` 拿到 `-114`、GOAWAY 也没了） |
+| M16 | h2 那份 `FrameScope` 的"出栈摘表" | 抓住 | 抓住 | 同上（`uvcpp_c_live_handle_count() = 7, want 0`） |
+
+M15 与 M16 各自挖出一处**用例**的毛病，两处都不是守卫坏了 —— 见下面那一段。M16 与 M8
+是同一件事在另一份文件里的翻版，判据也一样只有活句柄数那条。
+
+查单条变异不用整表重跑（注意树：h2 那四条只在开着 NGHTTP2 的树里判得了）：
 
 ```bash
-python3 tests/tools/capi_mutation.py --tree build-capi --only M8
+python3 tests/tools/capi_mutation.py --tree build-capi-h2 --only M13
+python3 tests/tools/capi_mutation.py --tree build-capi   --only M8
 ```
 
 ### 第一版的假绿，以及它量错了什么
@@ -462,18 +522,48 @@ python3 tests/tools/capi_mutation.py --tree build-capi --only M8
 读了**那块栈；基线里它被登记表那一句挡在读内存之前 —— 两者对外都给 `E_STALE`，差别在
 "有没有读一块本不该读的内存"）。所以文档里那句"先查表"不是风格，是这次量出来的。
 
-### 符号面锁：两边都真的会红
+### 第三次假绿：M15 与"同一句守卫有两个分支，只喂了一个"
 
-`check_capi_symbols.py` 报绿不算数，得看它能不能红。实测（2026-09-30，Linux）：
+批 3a 的 M15 拆的是 `uvcpp_c_h2_conn_start()` 里**两条** `table_size_ok` 检查中的一条
+（`conn_cbs` 那条），而 `test_capi_h2_func` 里那两处坏表调用喂的都是**另一条**
+（`h2_cbs`）。于是预期写的"抓住"，实测是**四个用例全绿**。病不在守卫，在**用例**：
+同一条规矩的两个分支，只量了一个 —— 而这一点在用例里完全看不出来，那两处调用长得
+很像"已经覆盖了 size 这件事"。
+
+补上"`h2` 表缺席、`conn` 表 `size = 0`"那一次调用之后，M15 才真的红，而且红得很有
+信息量：**那一次 `start` 居然返回了 0**（副作用全落地了：SETTINGS 发了、回调装上了），
+紧接着那次真 `start` 拿到 `-114`（`UV_EALREADY`），`peer_goaway` 也因为会话已经歪掉
+而没出现。三行断言把"拒绝必须发生在任何动作之前"这条规矩量得比原来清楚得多 ——
+这正是把一次假绿改造成一条真判据的样子。
+
+### 符号面锁：两边都真的会红，并且"关着"的那片是「未判」
+
+`check_capi_symbols.py` 报绿不算数，得看它能不能红 —— 而且这一版还要看它**在该说
+「没判」的时候说不说「没判」**。实测（2026-09-30，Linux，两棵树）：
 
 | 动什么 | 判据 1（头 ↔ 锁） | 判据 2（库 ↔ 锁） | 退出码 |
 |---|---|---|---|
-| 不动 | 绿（35 个都在锁里） | 绿（35 个逐条对上） | `0` |
-| 锁里**多**一行库没有的 | 绿 | **红**（"锁里承诺过、库里没了"） | `1` |
-| 锁里**少**一行库里有的 | **红**（"头里声明了、锁里没有"） | **红**（"库里导出了、锁里没记"） | `1` |
+| 不动（`build-capi-h2`） | 绿（229 个都在锁里） | 绿（**五片全判**，229 个逐条对上） | `0` |
+| 不动（`build-capi`） | 绿 | 绿（四片判，`http2` 印「未判」，183 个逐条对上） | `0` |
+| 把 `#@ module` 行全删掉（退回平锁） | **红**（229 处"符号出现在任何片头之前"） | —— | `1` |
+| 锁里**少**一行头里有的 | **红**（"头里声明了、锁里没有"） | **红**（"库里导出了、锁里没记"） | `1` |
+| 往**开着**的那片塞一个库里没有的 | 绿 | **红**（"锁里承诺过、库里没了"） | `1` |
+| 往**关着**的那片塞一个，**对关掉它的树**跑 | 绿 | **绿，但那一行如实印「未判」**（"这一片 47 个这棵树一个都没导出，与「关着」对得上"） | `0` |
+| 同一份，**对开着它的树**跑 | 绿 | **红**（同上那条） | `1` |
+| 头里有一处声明没登记进 `MODULES` | **红** | —— | `1` |
+| 树不存在（config 读不出来） | —— | **[停]「判据 2 没判」** | `3` |
 | 跑 `--update` 而头里有、库里没有 | —— | —— | `1`（**拒绝写锁**） |
 
-最后一行是本轮补的一条：`--update` 第一版把"头里的声明 ∪ 库里的导出"直接写进锁，
+中间那两行是**一对**，也是这一版分片的全部理由：关着的那片在这棵树上量不出来，如实印
+「未判」、把账留给开着的那条腿 —— 但那个假符号并没有就这么溜过去，换一棵开着它的树
+就是一条红。所以 CI 上 `capi` 与 `h2` 两条腿要**一起**看：任何一片都必须至少有一条腿
+是"开着"的，否则那一片永远停在「未判」上而没人发现（这也是批 3a 给 h2 那条腿加
+`-DUVCPP_ENABLE_CAPI=ON` 的原因）。
+
+倒数第二行是"不许拿空当绿"：树不在、`uvcpp_config.h` 读不出来时，报告里那 229 个符号
+一个都没量，退 `3`。**3 是「没判」，不是「通过」**。
+
+`--update` 那一行是本轮补的一条：`--update` 第一版把"头里的声明 ∪ 库里的导出"直接写进锁，
 于是头里多了一个声明、库里没有定义这种漂移会被**静默固化成一条承诺** —— 而那正是
 判据 2 存在的理由。现在它拒绝写锁并把名字打出来。
 
@@ -482,6 +572,14 @@ python3 tests/tools/capi_mutation.py --tree build-capi --only M8
 `--update` 把它写进锁，紧接着判据 2 报"承诺过、库里没了 `uvcpp_c_xxx`" ——
 一条彻头彻尾的假红。修法是扫之前先剥注释（`strip_comments()`）。头里的注释本来
 就该随便举例。
+
+同一类坑还踩了第二次，这次是**自己跟自己的格式没对上**：写锁的那半边在片头后面挂了
+一句注解（`#@ module common  (5 个)`），读锁那半边的正则要求行尾就结束 —— 于是
+`--update` 刚写完，同一条命令再跑一遍就报"229 处：符号出现在任何 `#@ module` 行之前"，
+也就是**把刚生成的锁判成平锁**。两边的约定只差一个后缀，症状却是"这份锁与这个门禁不是
+一个版本"。修法是正则**显式**认下这一种注解（只认 `(数字 个)` 这一种写法，别的尾巴照旧
+算形状不对）—— 注解是给人看的散文，不参与判断，但形状必须唯一。教训是：写与读是同一个
+文件的两种解释，**它们得一起测**；只测其中一边，另一边会把绿判成红。
 
 ### 文档片段与"关掉开关还能不能编"
 
@@ -522,9 +620,11 @@ python3 tests/tools/check_doc_snippets.py --pkg dist/libuvcpp-1.4.3-linux-x64 \
 
 ## 7. 没做的（如实列出）
 
-- **web / webapp / http2 / http3 / quic 的 C 面**：这一批没有。它们各自会带自己
-  的头（`uvcpp_c_web.h` / `uvcpp_c_webapp.h` / `uvcpp_c_http2.h` /
-  `uvcpp_c_quic.h` / `uvcpp_c_http3.h`）与自己的用例，逐条照这一批的规矩来。
+- **http3 / quic 的 C 面**：到 1.4.3 为止还没有 —— 它们是批 3b。这两份头
+  （`uvcpp_c_quic.h` / `uvcpp_c_http3.h`）与用例 `tests/capi/capi_quic_h3_func.c`
+  会照批 3a 的规矩来，`capi_symbols.lock` 也在这批补齐最后两片。
+  （`uvcpp_c_web.h` / `uvcpp_c_webapp.h` 是批 2、`uvcpp_c_http2.h` 是批 3a，
+  都已经在树上了。）
 - **TLS 参数入口**（证书、私钥、SNI、校验开关）：见 §4 那张表。`is_tls()` 与
   `alpn_selected()` 这两个**查询**有，**设置**没有。
 - **UDP**：`net` 那一层有，C 面没给 —— 这一批的判据是"一个真实的 TCP 程序能用

@@ -34,6 +34,10 @@
 
 #include "capi/uvcpp_c_common.h"
 
+namespace uvcpp {
+class uvcpp_tcp_client;  // 只为 `tcp_client_unwrap()` 的返回类型
+}  // namespace uvcpp
+
 namespace uvcpp_c_detail {
 
 // -------------------------------------------------------------------------
@@ -156,6 +160,15 @@ struct handle_head {
 
 #define UVCPP_C_MAGIC_TCP_CLIENT UVCPP_C_MAGIC('e', 'h', 'c', '1')
 #define UVCPP_C_MAGIC_TCP_SERVER UVCPP_C_MAGIC('e', 'h', 's', '1')
+
+/* 批 3 的四种。命名继续按"那个类型叫什么"取末位：`c` = connection、`s` =
+ * stream、`q` = request、`r` = response。**每个类型一枚**而不是所有句柄共用一
+ * 枚：`alive()` 的第二段就是拿它认出"这不是我这一类句柄"，共用一枚等于把类型
+ * 检查整段撤掉（拿一个 h2 流句柄去当响应构造器用，会一路走到读错布局的地方）。 */
+#define UVCPP_C_MAGIC_H2_CONN UVCPP_C_MAGIC('e', 'h', '2', 'c')
+#define UVCPP_C_MAGIC_H2_STREAM UVCPP_C_MAGIC('e', 'h', '2', 's')
+#define UVCPP_C_MAGIC_H2_REQUEST UVCPP_C_MAGIC('e', 'h', '2', 'q')
+#define UVCPP_C_MAGIC_H2_RESPONSE UVCPP_C_MAGIC('e', 'h', '2', 'r')
 
 /* 字节顺序钉在这里：`tests/capi/capi_common_func.c` 造"冒充的句柄"时用的是
  * **写死的** `0x31636865u`。两边同时改才可能漂，而这是一句编译期的话。 */
@@ -286,6 +299,28 @@ inline bool table_size_ok(uint32_t size) {
  * @return 字符串真实长度（不含结尾 NUL）；负数 = 错误码。
  */
 int copy_out(const std::string& s, char* buf, size_t cap);
+
+// -------------------------------------------------------------------------
+// 跨文件的句柄解包
+// -------------------------------------------------------------------------
+//
+// C 面**按模块分文件**，而有些能力要拿另一个模块的句柄当输入：h2 的驱动层是
+// 建在一条已经握手过的 TCP 连接上的（`uvcpp_c_h2_connection_new(client, …)`），
+// 而 `uvcpp_c_tcp_client` 的真身（`struct uvcpp_c_tcp_client`）只写在
+// `uvcpp_c_net.cpp` 的文件作用域里 —— 别的 `.cpp` 拿不到它。
+//
+// **不把那个结构体搬进头里的理由**：搬进来就是"句柄的布局有一个第二份定义"，
+// 将来给 TCP 句柄加一个字段、改了顺序，读它的地方不会有任何编译期提醒，只会
+// 静默读错偏移。所以出口是**一个函数**：谁想知道"这个 C 句柄底下是谁"，都得
+// 问 net 那一侧，判据（亡故 / 已被回收 / 底下是不是 nullptr）只有一处。
+//
+// 参数用 `const void*` 而不是 `uvcpp_c_tcp_client*`：这个头**不拉** `uvcpp_c_net.h`
+// （那会把这层的地基和某个模块绑在一起，而 QUIC 那一侧将来也要解它自己的句柄）。
+// 句柄本来就不是给本层读的，退化成一个地址正合适。
+//
+// @return 底下的 C++ 连接；句柄无效（空、已释放、类型不对、底下已经没了）返回
+//         `nullptr` —— **不区分**，与 `alive()` 同一条：调用方要做的事一样。
+uvcpp::uvcpp_tcp_client* tcp_client_unwrap(const void* handle);
 
 }  // namespace uvcpp_c_detail
 

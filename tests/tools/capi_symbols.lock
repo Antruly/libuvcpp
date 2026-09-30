@@ -1,8 +1,84 @@
 # C ABI 的符号面锁 —— tests/tools/check_capi_symbols.py --update 生成
-# 一行一个导出的 uvcpp_c_* 符号，字典序。删/改任何一个都要把
-# UVCPP_C_ABI_VERSION +1（见 doc/capi-guide.md 的 ABI 契约那节）。
-# 共 183 个。
+#
+# 分片写：`#@ module <名>` 开一片，后面一行一个符号，字典序。片名与
+# 它那份头的对应在 check_capi_symbols.py 的 MODULES 里。
+#
+# 为什么分片：一条腿只开得起一部分模块（Linux 那条 `capi` 腿没有
+# NGHTTP2 / QUIC / HTTP3），而「锁里有、库里没有」在那条腿上不是
+# 缺面、是**这一片本来就不该有**。判据 2 按每片自己的开关逐片判：
+# 开着 → 逐条相等；关着 → 一个都不许出现（并如实印「未判」）。
+#
+# 删/改任何一个都要把 UVCPP_C_ABI_VERSION +1（见 doc/capi-guide.md
+# 的 ABI 契约那节）。
+# 共 229 个，5 片。
+#@ module common  (5 个)
 uvcpp_c_abi_version
+uvcpp_c_last_error_string
+uvcpp_c_live_handle_count
+uvcpp_c_strerror
+uvcpp_c_version_string
+#@ module net  (30 个)
+uvcpp_c_tcp_client_alpn_selected
+uvcpp_c_tcp_client_close
+uvcpp_c_tcp_client_connect
+uvcpp_c_tcp_client_connect_wait
+uvcpp_c_tcp_client_free
+uvcpp_c_tcp_client_is_connected
+uvcpp_c_tcp_client_is_tls
+uvcpp_c_tcp_client_last_error
+uvcpp_c_tcp_client_new
+uvcpp_c_tcp_client_read_pause
+uvcpp_c_tcp_client_read_resume
+uvcpp_c_tcp_client_read_stop
+uvcpp_c_tcp_client_run
+uvcpp_c_tcp_client_set_events
+uvcpp_c_tcp_client_stop
+uvcpp_c_tcp_client_write
+uvcpp_c_tcp_client_write_wait
+uvcpp_c_tcp_server_bind
+uvcpp_c_tcp_server_client_count
+uvcpp_c_tcp_server_close_all_clients
+uvcpp_c_tcp_server_free
+uvcpp_c_tcp_server_last_error
+uvcpp_c_tcp_server_listen
+uvcpp_c_tcp_server_local_port
+uvcpp_c_tcp_server_loop_count
+uvcpp_c_tcp_server_new
+uvcpp_c_tcp_server_run
+uvcpp_c_tcp_server_set_events
+uvcpp_c_tcp_server_set_loops
+uvcpp_c_tcp_server_stop
+#@ module web  (29 个)
+uvcpp_c_http_client_close
+uvcpp_c_http_client_connect
+uvcpp_c_http_client_free
+uvcpp_c_http_client_get
+uvcpp_c_http_client_is_connected
+uvcpp_c_http_client_last_error
+uvcpp_c_http_client_new
+uvcpp_c_http_client_post
+uvcpp_c_http_client_run
+uvcpp_c_http_client_set_keep_alive
+uvcpp_c_http_client_stop
+uvcpp_c_http_response_body
+uvcpp_c_http_response_content_type
+uvcpp_c_http_response_has_header
+uvcpp_c_http_response_header
+uvcpp_c_http_response_status_code
+uvcpp_c_http_response_status_message
+uvcpp_c_ws_client_close
+uvcpp_c_ws_client_connect
+uvcpp_c_ws_client_free
+uvcpp_c_ws_client_is_open
+uvcpp_c_ws_client_last_error
+uvcpp_c_ws_client_new
+uvcpp_c_ws_client_run
+uvcpp_c_ws_client_send_binary
+uvcpp_c_ws_client_send_text
+uvcpp_c_ws_client_session_count
+uvcpp_c_ws_client_set_events
+uvcpp_c_ws_client_stop
+#@ module webapp  (119 个)
 uvcpp_c_app_any
 uvcpp_c_app_bound_port
 uvcpp_c_app_connection_count
@@ -53,25 +129,6 @@ uvcpp_c_deferred_post
 uvcpp_c_deferred_req
 uvcpp_c_deferred_resp
 uvcpp_c_deferred_resume
-uvcpp_c_http_client_close
-uvcpp_c_http_client_connect
-uvcpp_c_http_client_free
-uvcpp_c_http_client_get
-uvcpp_c_http_client_is_connected
-uvcpp_c_http_client_last_error
-uvcpp_c_http_client_new
-uvcpp_c_http_client_post
-uvcpp_c_http_client_run
-uvcpp_c_http_client_set_keep_alive
-uvcpp_c_http_client_stop
-uvcpp_c_http_response_body
-uvcpp_c_http_response_content_type
-uvcpp_c_http_response_has_header
-uvcpp_c_http_response_header
-uvcpp_c_http_response_status_code
-uvcpp_c_http_response_status_message
-uvcpp_c_last_error_string
-uvcpp_c_live_handle_count
 uvcpp_c_next_run
 uvcpp_c_req_body
 uvcpp_c_req_body_empty
@@ -124,50 +181,6 @@ uvcpp_c_resp_stream_bytes_written
 uvcpp_c_resp_streaming
 uvcpp_c_resp_text
 uvcpp_c_resp_write_chunk
-uvcpp_c_strerror
-uvcpp_c_tcp_client_alpn_selected
-uvcpp_c_tcp_client_close
-uvcpp_c_tcp_client_connect
-uvcpp_c_tcp_client_connect_wait
-uvcpp_c_tcp_client_free
-uvcpp_c_tcp_client_is_connected
-uvcpp_c_tcp_client_is_tls
-uvcpp_c_tcp_client_last_error
-uvcpp_c_tcp_client_new
-uvcpp_c_tcp_client_read_pause
-uvcpp_c_tcp_client_read_resume
-uvcpp_c_tcp_client_read_stop
-uvcpp_c_tcp_client_run
-uvcpp_c_tcp_client_set_events
-uvcpp_c_tcp_client_stop
-uvcpp_c_tcp_client_write
-uvcpp_c_tcp_client_write_wait
-uvcpp_c_tcp_server_bind
-uvcpp_c_tcp_server_client_count
-uvcpp_c_tcp_server_close_all_clients
-uvcpp_c_tcp_server_free
-uvcpp_c_tcp_server_last_error
-uvcpp_c_tcp_server_listen
-uvcpp_c_tcp_server_local_port
-uvcpp_c_tcp_server_loop_count
-uvcpp_c_tcp_server_new
-uvcpp_c_tcp_server_run
-uvcpp_c_tcp_server_set_events
-uvcpp_c_tcp_server_set_loops
-uvcpp_c_tcp_server_stop
-uvcpp_c_version_string
-uvcpp_c_ws_client_close
-uvcpp_c_ws_client_connect
-uvcpp_c_ws_client_free
-uvcpp_c_ws_client_is_open
-uvcpp_c_ws_client_last_error
-uvcpp_c_ws_client_new
-uvcpp_c_ws_client_run
-uvcpp_c_ws_client_send_binary
-uvcpp_c_ws_client_send_text
-uvcpp_c_ws_client_session_count
-uvcpp_c_ws_client_set_events
-uvcpp_c_ws_client_stop
 uvcpp_c_ws_conn_close
 uvcpp_c_ws_conn_is_open
 uvcpp_c_ws_conn_send_binary
@@ -185,3 +198,50 @@ uvcpp_c_ws_req_path
 uvcpp_c_ws_req_peer_ip
 uvcpp_c_ws_req_query
 uvcpp_c_ws_req_route
+#@ module http2  (46 个)
+uvcpp_c_h2_conn_begin_goaway
+uvcpp_c_h2_conn_bytes_in
+uvcpp_c_h2_conn_bytes_out
+uvcpp_c_h2_conn_close_now
+uvcpp_c_h2_conn_closed
+uvcpp_c_h2_conn_closing
+uvcpp_c_h2_conn_flush
+uvcpp_c_h2_conn_free
+uvcpp_c_h2_conn_last_error
+uvcpp_c_h2_conn_pause_stream
+uvcpp_c_h2_conn_peer_goaway_error_code
+uvcpp_c_h2_conn_peer_goaway_last_stream_id
+uvcpp_c_h2_conn_peer_goaway_received
+uvcpp_c_h2_conn_resume_stream
+uvcpp_c_h2_conn_send_data
+uvcpp_c_h2_conn_send_headers
+uvcpp_c_h2_conn_send_response
+uvcpp_c_h2_conn_send_status
+uvcpp_c_h2_conn_shutdown
+uvcpp_c_h2_conn_start
+uvcpp_c_h2_conn_stream_count
+uvcpp_c_h2_conn_submit_goaway
+uvcpp_c_h2_conn_submit_request
+uvcpp_c_h2_conn_submit_rst
+uvcpp_c_h2_connection_new
+uvcpp_c_h2_request_free
+uvcpp_c_h2_request_new
+uvcpp_c_h2_request_set_header
+uvcpp_c_h2_response_free
+uvcpp_c_h2_response_new
+uvcpp_c_h2_response_set_body
+uvcpp_c_h2_response_set_content_type
+uvcpp_c_h2_response_set_header
+uvcpp_c_h2_response_set_status
+uvcpp_c_h2_stream_body_bytes
+uvcpp_c_h2_stream_expected_body
+uvcpp_c_h2_stream_id
+uvcpp_c_h2_stream_paused
+uvcpp_c_h2_stream_rejected
+uvcpp_c_h2_stream_request_has_header
+uvcpp_c_h2_stream_request_header
+uvcpp_c_h2_stream_request_method_name
+uvcpp_c_h2_stream_request_path
+uvcpp_c_h2_stream_response_header
+uvcpp_c_h2_stream_response_status
+uvcpp_c_h2_stream_state

@@ -60,6 +60,12 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
 
           # h2：门禁的四个串见 doc/ci-guide.md §5。
+          # ★ 批 3a（1.4.3）给这一格加了一行 `-DUVCPP_ENABLE_CAPI=ON`：h2 是
+          #   **唯一**带 NGHTTP2 的一格，而 `src/capi/uvcpp_c_http2.cpp` 跟着那个
+          #   开关走（顶层那张 `UVCPP_CAPI_DISABLED` 表）—— 不加这一行，
+          #   `tests/capi/capi_h2_func.c` 这个目标在 Apple clang 下不存在，
+          #   "h2 的 C 面能编、能跑"在这里就是零。WEB / WEBAPP 本来就是 ON，
+          #   所以配出来的模块集合与本机那棵 `build-capi-h2` 逐字相同。
           - feature: h2
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -69,6 +75,7 @@ jobs:
               - -DUVCPP_ENABLE_OPENSSL=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_NGHTTP2=ON
+              - -DUVCPP_ENABLE_CAPI=ON
             gate_name: nghttp2
             gate_switch: 'UVCPP_ENABLE_NGHTTP2:BOOL=ON'
             gate_integrated: nghttp2 integrated
