@@ -59,10 +59,15 @@
  *     （`send()` 的回调只在 `on_response_complete()` 时响一次）本来就不是
  *     流式的，本层如实跟着它，不假装有。
  *   - `set_ssl_context()` / `set_http2_enabled()` / `set_http3_enabled()` /
- *     `set_compression_enabled()` / ALPN 读数：全部要 C++ 类型或另一套握手，
- *     留给各自的批次（h2 / h3 那一批会给 `uvcpp_c_http2.h` / `uvcpp_c_http3.h`）。
- *     **因此本批的客户端只跑明文 HTTP/1.1**，`_is_connected()` 说的就是
- *     "TCP 连上了"。
+ *     `set_compression_enabled()`：全部要 C++ 类型（`uvcpp_ssl_context`）或另一套
+ *     握手，**这一层不给**，而且 h2 / h3 那两批做完也没给 —— 它们给的是
+ *     `uvcpp_c_http2.h` / `uvcpp_c_http3.h` 里**各自独立的**一套连接句柄，
+ *     不是往这个 `http_client` 上拧一个开关（那正是"两套握手挤进一个对象"）。
+ *     于是 `uvcpp_c_http_client` 只跑明文 HTTP/1.1，`_is_connected()` 说的就是
+ *     "TCP 连上了"；要跑 h2 / h3 就用那两个头里的类型，它们各自带着自己的
+ *     传输 / TLS 配置入口（`uvcpp_c_quic_tls_*` 那些）。
+ *     ALPN 读数同理：那是 net 那一份自己的查询函数（`_is_tls()` /
+ *     `_alpn_selected()`，不带 OpenSSL 的构建里如实答 0 / 空串），这里不转发。
  *   - `get_tcp_client()`：把底下的 TCP 客户端交出去就是第二条所有权模型。
  *     本层拿它做的事只有一件（`close()`），那是 `uvcpp_c_http_client_close()`。
  */

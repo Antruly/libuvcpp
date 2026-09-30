@@ -82,6 +82,20 @@
 
 #include "capi/uvcpp_c_common.h"
 
+/* `uvcpp_c_h2_connection_new()` 收的是一条**既有的** `uvcpp_c_tcp_client`（本层
+ * 不拥有它，只借），所以这里 include net 那份头 —— 类型从**它的所有者**那里来。
+ *
+ * ★ 这一行是补的，理由值得记一笔：漏掉它之后，**伞头里编得过、单独 include
+ * 本头编不过**。`struct uvcpp_c_tcp_client*` 在参数表里出现时，若此前没有声明过
+ * 这个 tag，C 编译器会当场**新造一个只属于这条原型的**不完整类型 —— 而 `-Werror`
+ * 下这是一条红（`-Wvisibility` / "declared inside parameter list will not be
+ * visible outside of this definition"）。伞头之所以看不出来，只是因为 `uvcpp_c.h`
+ * 按顺序先 include 了 net 那份。判据就是把每一份头**单独**喂给 C 编译器
+ * （见 `doc/capi-guide.md` §6 ②）。
+ * `UVCPP_ENABLE_NGHTTP2=ON` 本来就要求 `UVCPP_BUILD_WEB=ON`（连带 NET，
+ * CMakeLists.txt 那条守卫），所以这份 include 在任何编得出本头的配置里都成立。 */
+#include "capi/uvcpp_c_net.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

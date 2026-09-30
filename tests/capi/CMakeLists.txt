@@ -62,6 +62,18 @@ if(UVCPP_ENABLE_NGHTTP2)
   )
 endif()
 
+# quic + h3 那一份只写 `HTTP3` 一个开关，因为顶层守卫链里 `HTTP3 ⇒ QUIC` 是
+# **强制过的**（CMakeLists.txt 里那两条 `set(... OFF)`：没有 QUIC、没有 web，
+# http3 都会被关掉）。这条用例量的两份源文件正好被这一个开关一起盖住
+# —— `uvcpp_c_quic.*` 由 `UVCPP_ENABLE_QUIC` 决定、`uvcpp_c_http3.*` 由
+# `UVCPP_ENABLE_HTTP3` 决定，而后者蕴含前者。写成 `QUIC AND HTTP3` 也对，但那是
+# 把守卫链已经保证过的传递关系又抄一遍，抄漂的那天两个开关就会打架。
+if(UVCPP_ENABLE_HTTP3)
+  list(APPEND UVCPP_CAPI_TESTS
+    capi_quic_h3_func.c  # quic + http3：C 写的两端在一条 UDP 上真跑三次请求
+  )
+endif()
+
 foreach(_capi_src ${UVCPP_CAPI_TESTS})
   get_filename_component(_capi_name ${_capi_src} NAME_WE)
   set(_capi_exe "test_${_capi_name}")
@@ -97,8 +109,10 @@ foreach(_capi_src ${UVCPP_CAPI_TESTS})
 
   add_test(NAME ${_capi_exe} COMMAND ${_capi_exe})
 
-  # 这两个用例都会**真起一个 TCP 端点**并且各自跑一条事件循环。挂死的形态是
-  # "循环里还有活跃句柄、谁都没去关"，那种情形下 ctest 只能靠超时救 —— 显式
-  # 钉一条短的（别指望命令行那个硬编码的 `--timeout`，它比这大得多）。
+  # 这几个用例都会**真起端点**（net / webapp / h2 是 TCP，quic + h3 是 UDP）并且
+  # 各自跑事件循环。挂死的形态是"循环里还有活跃句柄、谁都没去关"，那种情形下
+  # ctest 只能靠超时救 —— 显式钉一条短的（别指望命令行那个硬编码的 `--timeout`，
+  # 它比这大得多）。60s 对最重的那一份（quic+h3：握手 + 三条流 + 关连接，本机
+  # 实测 1s 以内）留了两个数量级。
   set_tests_properties(${_capi_exe} PROPERTIES TIMEOUT 60)
 endforeach()

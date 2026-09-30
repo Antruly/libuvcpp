@@ -130,6 +130,11 @@ jobs:
           # `uvcpp_http_server` 上，web 关着时 `CMakeLists.txt` 会把它强制关掉。
           # 这一格是 macOS 上**唯一**编译 `src/http3/` 的配置（也是 Apple clang
           # 第一次编它）。
+          #
+          # 1.4.4 起它也带 `-DUVCPP_ENABLE_CAPI=ON`：批 3b 的 C 面（quic + http3）
+          # 长在这两个模块上，而 `tests/capi/capi_quic_h3_func.c`（纯 C 写的
+          # UDP 两端）只有在这一格编得出来。判据是"它真的注册进去了并跑绿"
+          # —— 符号面锁只在 ubuntu 那一格跑（见下面 `capi` 那格的说明）。
           - feature: http3
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -140,6 +145,7 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_QUIC=ON
               - -DUVCPP_ENABLE_HTTP3=ON
+              - -DUVCPP_ENABLE_CAPI=ON
             openssl_root: $(brew --prefix openssl@3)
             gate_name: nghttp3
             gate_switch: 'UVCPP_ENABLE_HTTP3:BOOL=ON'

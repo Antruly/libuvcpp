@@ -427,17 +427,24 @@ What is specific to this entry:
   `-DUVCPP_ENABLE_CAPI=ON` because "release and `full` both support the C ABI" is the
   requirement, not a convenience — but `full`'s gate strings are about the memory pool, and its
   ctest count does not tell you whether the pure-C tests were registered. The dedicated
-  entry is where that is asserted. Since `1.4.3` those are **three** tests
-  (`test_capi_common_func`, `test_capi_net_func`, `test_capi_webapp_func`); the entry's
-  `gate_test` still names the one from the first batch, because the "is it registered at all"
-  check is a spot check and the last step of the job runs the whole suite.
+  entry is where that is asserted. Since `1.4.4` those are **five** tests
+  (`test_capi_common_func`, `test_capi_net_func`, `test_capi_webapp_func`, plus
+  `test_capi_h2_func` and `test_capi_quic_h3_func`, which only exist on the legs that enable
+  NGHTTP2 / HTTP3); the entry's `gate_test` still names the one from the first batch, because
+  the "is it registered at all" check is a spot check and the last step of the job runs the
+  whole suite.
+- **Which leg judges which slice.** The C surface spans modules, so `1.4.4` also put
+  `-DUVCPP_ENABLE_CAPI=ON` on the Ubuntu **`h2`** and **`http3`** entries — one leg only ever
+  enables part of the module set (`capi` has no SSL/h2/quic, `http3` has no webapp), and the
+  symbol lock's slices are judged against each slice's own switch. Three legs together cover
+  all seven; see `doc/capi-guide.md` §3.5 for the table.
 - **No OpenSSL, no nghttp2, no zlib for the C layer itself.** `capi`'s flags match `web`'s
-  dependency row. Through batch 2 (`common` + `net` + `webapp`/`web`) the C surface has no TLS
-  entry point at all — including the parts that wrap modules which *do* have one, which is why
-  the leg can stay OpenSSL-free: `uvcpp_c_tcp_client_is_tls()` answers 0 and
-  `uvcpp_c_tcp_client_alpn_selected()` answers an empty string in **both** builds rather than
-  being `#if`-ed into two behaviours. The remaining modules (`http2`/`http3`/`quic`) get their C surface later, and
-  each will arrive with its own entry and its own flags.
+  dependency row. That leg stays OpenSSL-free on purpose: it is the "does the C layer stand up
+  by itself" leg, and the C surfaces that do wrap cryptography arrive on their own legs with
+  their own flags (`http2` on the `h2` entry, `quic` + `http3` on the `http3` entry). The one
+  place this bites is a wrapper whose C++ member only exists under a feature switch — which is
+  why `uvcpp_c_tcp_client_is_tls()` answers 0 and `uvcpp_c_tcp_client_alpn_selected()` answers
+  an empty string in **both** builds rather than being `#if`-ed into two behaviours.
 
 **Release configurations** pass `-DUVCPP_ENABLE_CAPI=ON` on all six legs (see `release.yml`),
 which is what makes the shipped `include/capi/` headers match a library that actually exports

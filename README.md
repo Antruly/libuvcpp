@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.4.3--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.4.4--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.4.3-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.4.4-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -222,7 +222,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
-| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.3 ships the foundation + net + webapp/web + HTTP/2; QUIC and HTTP/3 are not there yet** |
+| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.4 completes all seven modules** (foundation + net + webapp/web + HTTP/2 + QUIC + HTTP/3, 321 functions); all it needs is `-DUVCPP_ENABLE_CAPI=ON` |
 
 Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
 performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
@@ -643,7 +643,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.4.3** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.4.4** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0` and `v1.4.0`
 are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development lines
 accumulated through `v1.4.0`, plus what the `1.4.x` line has added since, is below, by
@@ -741,6 +741,59 @@ fixes came from issue reports by the project's first external contributor,
   through `uvcpp_c_live_handle_count()`. Those two assertions measure the *contract*, not
   the *mechanism*; both are worth having, and the error is taking the first as evidence for
   the second (`1.4.3`)
+- **Batch 3b lands the QUIC and HTTP/3 C surfaces, which completes the layer**: new
+  `uvcpp_c_quic.h` (42 entries) and `uvcpp_c_http3.h` (50 entries), bringing the total to
+  **321 functions across seven slices**. The QUIC slice is the full "many streams on one
+  connection" surface (TLS contexts, ALPN, idle timeout, stream shutdown, byte counters);
+  the HTTP/3 slice attaches to a **borrowed** QUIC connection handle, which is why an h3
+  connection handle must be freed by its owner inside `on_disconnect` — the rule is in the
+  header and pinned by the test (`1.4.4`)
+- **An interface gap this batch wrote itself into**: `uvcpp_c_h3_conn_send_response()` was
+  **unusable** as first written. C++'s `send_response()` returns `UV_EINVAL` when
+  `stream_id < 0`, and the C-side response container's stream id (internally `-1`) had no
+  setter at all. The fix is `uvcpp_c_h3_response_set_stream_id()`, which rejects negatives
+  **at the boundary** — `-1` is the "no owner yet" sentinel, not a stream, and in QUIC
+  **stream 0 is a real stream**, so the default cannot be 0 either (`1.4.4`)
+- **Who unregisters a borrowed connection handle is the load-bearing part of this batch**:
+  once h3 is attached it **replaces** the connection's whole callback table, so the bare
+  QUIC `on_close` trampoline never fires — leaving h3's `on_disconnect` as the only entry
+  point for "this connection is gone". Drop it and the borrowed QUIC handle stays in the
+  registry forever, and the whole battery of "reusing it must give `E_STALE`" assertions
+  **cannot see that** (the handle is still live, the magic is still there). The only thing
+  that can is the closing `uvcpp_c_live_handle_count() == 0` — mutation M18 (`1.4.4`)
+- **A fifth pure-C test, `test_capi_quic_h3_func` (280 checks)**: it differs from the h2
+  one in exactly one place, forced by what QUIC is — it pumps **two loops on one thread**
+  (both ends are on UDP, so two threads would mean handling "who runs first" as timing
+  luck), then, after the handshake (ALPN `h3`), sends three requests **serially** (POST
+  with a body and a header set twice, GET with `_send_status`, GET with an empty 204). The
+  price is that it cannot measure `E_WRONG_THREAD`; what it measures instead are two things
+  only the C surface has: reading a callback table field by field by `size`, and type
+  confusion with a magic per type (passing an h3 handle as a QUIC connection must give
+  `E_STALE`) (`1.4.4`)
+- **The mutation table grew a third time, and "which tree can run the table" became
+  mechanism rather than folklore**: M17–M20 are the quic + h3 four (the endpoint callback
+  table's `size`, that unregistration above, h3's `FrameScope`, and the negative stream
+  id). The driver itself changed twice: **both callback tables now get a truncated table**
+  (h3's and the endpoint's `uvcpp_c_quic_callbacks`), because "one guard, two branches, only
+  one of them fed" is exactly what batch 3a's M15 dug up; and **a missing test executable
+  now exits 3 and names the mutations that have no criterion left** — the three local trees
+  mirroring CI each lack one piece (`build-capi` has no SSL/h2/quic, `build-capi-h3` has no
+  webapp), so the whole table needs one tree with everything on, `build-capi-all` (`1.4.4`)
+- **The symbol lock gained a third CI leg**: the `http3` leg carries
+  `-DUVCPP_ENABLE_CAPI=ON` from this batch on. No single leg can enable all seven slices
+  (the `capi` leg has no SSL/h2/quic, the `http3` leg has no webapp), so three legs
+  **together** cover all seven: `capi` judges four, `h2` five, `http3` six (in that tree the
+  `webapp` slice is judged by the "a disabled module must export nothing" rule and honestly
+  prints "not judged"). No slice gets to coast on "another leg will judge it" (`1.4.4`)
+- **A batch-3a header defect got fixed along the way, and only "feed each header to a C
+  compiler on its own" can see it**: `uvcpp_c_http2.h`'s parameter list names
+  `struct uvcpp_c_tcp_client*` without including the header that owns that type,
+  `capi/uvcpp_c_net.h`. It compiles fine **through the umbrella** (`uvcpp_c.h` includes
+  net first) and fails the moment you include that header **alone** — a tag first seen in a
+  parameter list gets a brand-new type scoped to that prototype, one `-Wvisibility` red
+  under `-Werror`. The fix is that one include, shaped like `uvcpp_c_quic.h` already does
+  it. The lesson is that the umbrella's include order hides this whole class of defect,
+  while "include only the one slice I use" is entirely legitimate (`1.4.4`)
 
 ### QUIC transport (net layer)
 

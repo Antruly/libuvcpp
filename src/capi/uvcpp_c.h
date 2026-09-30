@@ -83,7 +83,23 @@
 #  include "capi/uvcpp_c_http2.h"
 #endif
 
-/* quic / http3 的子头在后续批次里加到这里，形状同上：
- * 一个 `#if UVCPP_XXX_ENABLE` 包一份 `#include`，不带任何别的逻辑。 */
+/* quic：端点（客户端 / 服务端）、连接、以及一枚 TLS 配置句柄。批 3b 落地。
+ *
+ * 它**不在 web 之下**：QUIC 只需要 net（`uvcpp_quic_server` 自己就是一条 UDP
+ * 口），而 `uvcpp_config.h` 的守卫链保证 `UVCPP_QUIC_ENABLE` 为真时 net 与
+ * OpenSSL 都是开的 —— 所以这里只判 QUIC 自己那一格。那份头里那句
+ * `#include "capi/uvcpp_c_net.h"`（复用 `uvcpp_c_read_result`）因此在任何能编
+ * 出它的配置里都成立。 */
+#if UVCPP_QUIC_ENABLE
+#  include "capi/uvcpp_c_quic.h"
+#endif
+
+/* http3：h3 驱动层一个句柄 + 请求 / 响应构造器 + 回调期的请求视图。批 3b 落地。
+ * HTTP3 依赖 QUIC（守卫链保证），而 quic 那份头已经在上一条 `#if` 里拉进来了；
+ * 这里再 include 一次不是多余的 —— 单独 include `capi/uvcpp_c_http3.h` 的人也要
+ * 能编。 */
+#if UVCPP_HTTP3_ENABLE
+#  include "capi/uvcpp_c_http3.h"
+#endif
 
 #endif  /* SRC_CAPI_UVCPP_C_H */

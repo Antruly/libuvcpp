@@ -166,6 +166,18 @@ jobs:
           # `uvcpp_http_server` 上，web 关着时 `CMakeLists.txt` 会把它强制关掉。
           # 它同时也是**唯一**供得起 `check` 目标三个来源的格（见下面那条
           # configure 门禁），所以这一格的门禁串盯的是 `nghttp3`。
+          #
+          # 1.4.4 起它也带 `-DUVCPP_ENABLE_CAPI=ON`：批 3b 的 C 面（quic + http3）
+          # 就是长在这两个模块上的，而**符号面锁**（下面那条 `if` 也放行了它）
+          # 需要一条真的编出 `uvcpp_c_quic.*` / `uvcpp_c_http3.*` 的腿 —— 锁里那
+          # 两片按各自的开关判，在这条腿上是 ON，于是逐条对上（判据 2 的
+          # "ON → 精确相等"那一半，见 `tests/tools/check_capi_symbols.py` 的
+          # `MODULES` 与 doc/capi-guide.md §3.5）。
+          #
+          # 注意这一格**没有** `-DUVCPP_BUILD_WEBAPP=ON`（默认 OFF）：于是
+          # `uvcpp_c_webapp.*` 不编、"webapp 那一片"在这条腿上是 0 个符号
+          # —— 那正是判据 2 的另一半（关着的模块必须**一个都不导出**，脚本印
+          # `未判`）。所以这一格量与不量是有分工的，不是漏写。
           - feature: http3
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -176,6 +188,7 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_QUIC=ON
               - -DUVCPP_ENABLE_HTTP3=ON
+              - -DUVCPP_ENABLE_CAPI=ON
             openssl_root: $HOME/openssl-quic
             gate_name: nghttp3
             gate_switch: 'UVCPP_ENABLE_HTTP3:BOOL=ON'
@@ -192,9 +205,11 @@ jobs:
           # ② `tests/capi/` 是**纯 C** 编的（`C_STANDARD 99`），它要的是"这一格真的
           # 把两个 .c 用例注册进去并跑起来"，而 `full` 那格的门禁串盯的是内存池。
           #
-          # 这一格**不带 OpenSSL / 不带 h2**：C 面到批 2（common + net + webapp/web）
-          # 为止一个加密入口都没有，开了只会让这一格的失败原因变多。SSL/h2/h3 的
-          # C 面进了之后，那一批会各自带自己的格（见 doc/capi-guide.md §CI）。
+          # 这一格**不带 OpenSSL / 不带 h2 / 不带 quic**：它是"C API 这一层自己
+          # 立不立得起来"那条腿，四个加密模块的 C 面各有它自己的格
+          # （h2 那一格、http3 那一格），开在这里只会让这一格的失败原因变多、
+          # 让"是 C 层坏了还是 nghttp2 没找到"这件事变得难判。分工见
+          # doc/capi-guide.md §3.5 与 §CI。
           #
           # `tests/capi/` 那三个用例都在这条腿上跑（末尾那句全量 ctest 是判据），
           # `gate_test` 只是"注册了没有"那一条的抽查点，所以它仍指着批 1 那个名字。
@@ -557,15 +572,20 @@ jobs:
       # 它防的是"删掉/改掉一个 C 符号而六道门禁全绿"——那个错误第一个发现的人是
       # **已经编好的 C# 侧**（运行时 EntryPointNotFoundException）。
       #
-      # ★ 两条腿跑它，因为**锁是分片的**（`#@ module`，见 doc/capi-guide.md §3.5）：
+      # ★ 三条腿跑它，因为**锁是分片的**（`#@ module`，见 doc/capi-guide.md §3.5）：
       #   要判一片，那条腿必须既开 CAPI、又开着那一片自己的模块。没有哪一条腿
-      #   同时满足"有 h2"和"是 capi 格"，所以：
-      #     `capi` 那一格 → common / net / web / webapp 四片判完，h2 片如实报「未判」；
-      #     `h2`   那一格 → 五片全判（它从批 3a 起也带 `-DUVCPP_ENABLE_CAPI=ON`）；
-      #   两格合起来，锁里每一片都有至少一条腿真的量过。少跑哪一条，那几片就会
+      #   同时开得起全部模块（`capi` 格没有 SSL/h2/quic，`http3` 格没有 webapp），
+      #   所以：
+      #     `capi`  那一格 → common / net / web / webapp 四片判完，h2 / quic / h3 三片如实报「未判」；
+      #     `h2`    那一格 → 再加 h2，共五片（它从批 3a 起也带 `-DUVCPP_ENABLE_CAPI=ON`）；
+      #     `http3` 那一格 → 再加 quic 与 h3 两片，共六片（它从批 3b 起也带
+      #                      `-DUVCPP_ENABLE_CAPI=ON`）——webapp 那一片在这一格上
+      #                      按开关关着，于是走的是判据 2 的后半："关着的模块必须
+      #                      一个都不导出"，脚本印「未判」而不是"绿"。
+      #   三格合起来，锁里每一片都有至少一条腿真的量过。少跑哪一条，那几片就会
       #   退化成"只有判据 1（静态）管着"——而 `--update` 时还看不出来差别。
       - name: Gate — C ABI symbol surface matches the lock
-        if: matrix.feature == 'capi' || matrix.feature == 'h2'
+        if: matrix.feature == 'capi' || matrix.feature == 'h2' || matrix.feature == 'http3'
         shell: bash
         run: |
           rc=0

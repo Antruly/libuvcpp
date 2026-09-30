@@ -138,6 +138,12 @@ jobs:
           # "不要加 `-DOPENSSL_USE_STATIC_LIBS=ON`"那条警告同样适用；nghttp3 被
           # 压成静态，所以下面 Copy runtime DLLs 那里**不需要**为它加一行
           # （`libssl-3-x64.dll` 那两行照旧要）。
+          #
+          # 1.4.4 起它也带 `-DUVCPP_ENABLE_CAPI=ON`：批 3b 的 C 面（quic + http3）
+          # —— 这一格的"C 面在 `_WIN32` 下"那条价值在这里比在 `capi` 格更大：
+          # `tests/capi/capi_quic_h3_func.c` 是这一批唯一一份**真的用 UDP 发字节**
+          # 的纯 C 用例，而它链的是 DLL（`UVCPP_C_SHARED` 那侧的 `dllimport`）。
+          # `src/capi/uvcpp_c_quic.cpp` / `uvcpp_c_http3.cpp` 也第一次被 `cl` 编。
           - feature: http3
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -148,6 +154,7 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_QUIC=ON
               - -DUVCPP_ENABLE_HTTP3=ON
+              - -DUVCPP_ENABLE_CAPI=ON
             gate_name: nghttp3
             gate_switch: 'UVCPP_ENABLE_HTTP3:BOOL=ON'
             gate_integrated: nghttp3 integrated

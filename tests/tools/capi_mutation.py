@@ -64,10 +64,11 @@ C 门的五条承重规矩（甲、不透明句柄 + 活句柄表；乙、异常
     python3 tests/tools/capi_mutation.py [--tree build-capi] [--jobs 8]
 
 要的是一棵 **CAPI=ON** 的树（本机怎么配见 `doc/capi-guide.md` §怎么开）。
-批 3a 起还想判 M13~M16（http2 那四条）的话，这棵树还要**开着
-`UVCPP_ENABLE_NGHTTP2`** —— 那个用例跟着这个开关走。选了 h2 的变异而这棵树
-没编那个 exe 时，脚本**退 3**（「没判」，见 `main()` 里那段），不会拿 `run_targets()`
-给的 127 去冒充"抓住了"。
+每一段变异还各自要一棵**开着它那个模块**的树：M13~M16（h2 那四条）要
+`UVCPP_ENABLE_NGHTTP2`，M17~M20（quic + h3 那四条）要 `UVCPP_ENABLE_HTTP3`
+—— 那两个用例各自跟着这两个开关走。选了某个变异而这棵树没编它要的那个 exe 时，
+脚本**退 3**（「没判」，见 `main()` 里那段），不会拿 `run_targets()` 给的 127
+去冒充"抓住了"；反过来，这棵树没编、而这一趟**没**选它的变异，照跑剩下的。
 
 脚本改源码、重编、再按字节还原，结束时核对 md5 并再跑一次确认全绿；任一步不对
 就非 0 退出。
@@ -90,6 +91,8 @@ NET = os.path.join(ROOT, "src", "capi", "uvcpp_c_net.cpp")
 WEB = os.path.join(ROOT, "src", "capi", "uvcpp_c_web.cpp")
 WEBAPP = os.path.join(ROOT, "src", "capi", "uvcpp_c_webapp.cpp")
 HTTP2 = os.path.join(ROOT, "src", "capi", "uvcpp_c_http2.cpp")
+QUIC = os.path.join(ROOT, "src", "capi", "uvcpp_c_quic.cpp")
+HTTP3 = os.path.join(ROOT, "src", "capi", "uvcpp_c_http3.cpp")
 
 # 纯 C 用例（在 <tree>/tests/capi/ 下）。顺序无所谓，超时都是 60 s。
 TARGETS = [
@@ -105,6 +108,14 @@ TARGETS = [
 # 少了这个 exe 就一条都判不了，于是 main() 里显式分两种情形处理（见那里的两段
 # 注释），而不是让基线报一个 127 出来冒充"红了"。
 H2_TARGET = "test_capi_h2_func"
+
+# 第五个用例跟着 `UVCPP_ENABLE_HTTP3` 走（`tests/capi/CMakeLists.txt` 里那一条
+# `if(UVCPP_ENABLE_HTTP3)`，而守卫链保证 HTTP3 ⇒ QUIC ⇒ OPENSSL ⇒ WEB）。
+# M17~M20 碰的是 `uvcpp_c_quic.cpp` / `uvcpp_c_http3.cpp`，两处都在它的覆盖范围
+# 里，所以这里**一个目标管两条腿**（QUIC 与 HTTP3 的 C 面）—— 本机那棵
+# `build-capi-h3` 就是这么配的。少了这个 exe 时与 h2 那条同样的处理：退 3
+# （「没判」），不是拿一个 127 去冒充"抓住了"。
+H3_TARGET = "test_capi_quic_h3_func"
 
 # 卸掉守卫的两句原文（`unregister_head()` 的函数体），M1~M3 共用。
 UNREGISTER_BODY = ("  registry_remove(h);\n"
@@ -335,6 +346,70 @@ MUTATIONS = [
        "      uvcpp_c_detail::unregister_head(slots_[i]);\n"
        "    }",
        "    /* MUTATION: 回调返回后不摘表 */")]),
+
+    # ---- 丙在 quic 那一侧的形态：**端点那份**回调表也先看 `size` ----
+    #
+    # 与 M4、M15 量的是同一条规矩，但落在**另一张表**上：M4 拆的是逐格问
+    # "你覆盖到哪了"（`field_present`），M15 拆的是 h2 那份表的 `size` 自检，
+    # 这一条拆的是 `uvcpp_c_quic_callbacks` 的自检。
+    #
+    # ★ 这一格**只有返回码能当判据**，写在这里免得下次以为断言写少了：`size = 3`
+    #   那张截断表里的格本来就不会被填（连 `field_present` 都轮不到），所以
+    #   "装上了"与"没装上"在**行为**上长得一模一样。拆掉守卫之后，服务端那次
+    #   `_conn_set_callbacks()` 与客户端那次都返回 `0`，而用例断言的是
+    #   `E_INVALID_ARG` —— 红在两句话上，不在行为上。用例里那两处注释写着同一件事。
+    ("M17 quic 端点回调表的 size 不校验",
+     True,
+     [(QUIC,
+       "  if (!uvcpp_c_detail::table_size_ok(table->size)) {\n"
+       "    uvcpp_c_detail::set_last_error(\n"
+       "        \"uvcpp_c_quic_callbacks.size 连第一格都没盖住\");\n"
+       "    return UVCPP_C_E_INVALID_ARG;\n"
+       "  }",
+       "  /* MUTATION: 不查 size */")]),
+
+    # ---- 甲在 quic + h3 那一侧的形态：借来的连接句柄由谁反登记 ----
+    #
+    # 这一条是批 3b 最要紧的一格，理由在 `uvcpp_c_quic.cpp` 里那段注释里：
+    # **装上 h3 之后，本模块 `on_close` 那套跳板被 h3 整个换掉**，于是"这条
+    # 连接没了"这件事只剩 h3 的 `on_disconnect` 一个入口。这里把那个入口摘掉，
+    # 借出的 `uvcpp_c_quic_connection` 就永远留在登记表里。
+    #
+    # ★ 它会从哪一句上红，本机跑出来之后才知道（见文件头"预期是怎么来的"）：
+    #   最直接的是收尾那句 `uvcpp_c_live_handle_count() == 0`，但**不排除**它先
+    #   在别处炸掉 —— 句柄还活着、`conn` 还指着一个已经析构掉的 C++ 对象，
+    #   `_conn_state()` 就是在读一块野内存。两种都算抓住（一个是 rc 非 0 且
+    #   `checks=` 那行照旧在，另一个是进程直接没了），驱动里都印出来。
+    ("M18 h3 on_disconnect 不毒化借来的 QUIC 句柄",
+     True,
+     [(HTTP3,
+       "  uvcpp_c_detail::quic_conn_detach(qconn);",
+       "  /* MUTATION: 不毒化借来的连接句柄 */")]),
+
+    # ---- 甲在 h3 那一侧的形态：回调期句柄出栈即摘表 ----
+    #
+    # 与 M8（webapp）、M16（h2）是同一件事的第三处，代价与红在哪一句上也同一个
+    # 形状：那几条"把 view 带出回调再问它"的 `E_STALE` 断言**未必**会红（栈被
+    # 复用，魔数早没了 —— 见 M8 那段），真正咬住它的是收尾的
+    # `uvcpp_c_live_handle_count() == 0`。断言写在哪儿由本机跑出来的结果说了算。
+    ("M19 h3 回调期句柄不摘表（FrameScope 拆掉）",
+     True,
+     [(HTTP3,
+       "    if (h_ != nullptr) uvcpp_c_detail::unregister_head(h_);",
+       "    /* MUTATION: 回调返回后不摘表 */")]),
+
+    # ---- G 在 h3 那一侧的形态：流号是负数要**当场**拦 ----
+    #
+    # `-1` 是"还没有归属"的日子值（QUIC 里 0 是一条**真的**流），不是一句
+    # "随便一个流"。C++ 那侧的 `send_response()` 会以 `UV_EINVAL` 拒收，但那是
+    # **发的时候**才知道；这里拆掉的是"设的时候就拦住"那一句。用例在构造器那
+    # 一段问了一次：`_set_stream_id(resp, -1)` 必须 `E_INVALID_ARG`。
+    ("M20 h3 _set_stream_id 不拦负数",
+     True,
+     [(HTTP3,
+       "    if (stream_id < 0) return UVCPP_C_E_INVALID_ARG;\n"
+       "    resp->resp.stream_id = stream_id;",
+       "    resp->resp.stream_id = stream_id;  /* MUTATION: 负数照收 */")]),
 ]
 
 RUN_TIMEOUT_S = 600
@@ -422,30 +497,49 @@ def main():
         print("--only %s：只跑 %s" % (args.only, "、".join(m[0].split()[0]
                                                           for m in selected)))
 
-    # 这一趟跑哪几个用例：三个常驻的 + h2 那个（只在这棵树编了它的时候）。
+    # 这一趟跑哪几个用例 —— **按这棵树实际编了哪几个决定**。
     #
-    # 两种情形分开处理，**不许混成一种**：编了 → 四个一起跑、四个都算判据；
-    # 没编（这棵树的 `UVCPP_ENABLE_NGHTTP2=OFF`，一个合法组合）→ 只要这趟选的
-    # 变异没碰 `uvcpp_c_http2.cpp` 就照跑三个；碰了就直接退 3，说清"这一趟什么
-    # 都没判"。退 3 而不是退 1：`run_targets()` 对不存在的 exe 会给一个 127 行，
-    # 那个 127 长得和"用例真红了"一模一样，拿它去填"抓住了"是把没判写成判过。
-    h2_exe = os.path.join(tree, "tests", "capi", H2_TARGET)
-    have_h2 = os.path.exists(h2_exe)
-    touches_h2 = any(e[0] == HTTP2 for _l, _x, edits in selected for e in edits)
-    if touches_h2 and not have_h2:
-        print("这棵树里没有 %s：\n  %s\n"
-              "M13~M16 碰的是 `src/capi/uvcpp_c_http2.cpp`，判它们要靠那条用例，"
-              "而那条用例跟着 `UVCPP_ENABLE_NGHTTP2` 走（判据在 "
-              "tests/capi/CMakeLists.txt）。\n"
-              "配一棵开着它的树（本机那份叫 build-capi-h2，命令见 "
-              "doc/capi-guide.md）。\n"
-              "★ 这一趟什么都没判 —— 退 3 是「没判」，不是「通过」。"
-              % (H2_TARGET, h2_exe))
+    # 判据是"用例跟着它量的那个模块的开关走"（`tests/capi/CMakeLists.txt`）：
+    # webapp 那份跟 `UVCPP_BUILD_WEBAPP`、h2 那份跟 `UVCPP_ENABLE_NGHTTP2`、
+    # quic+h3 那份跟 `UVCPP_ENABLE_HTTP3`。所以"这棵树里没有某个 exe"是一个
+    # **合法**情形（本机那棵 build-capi-h3 就没开 WEBAPP，build-capi 没开
+    # NGHTTP2），不是"跑红了"，也不是"通过"。
+    #
+    # 分两种情形处理，**不许混成一种**：
+    #   - 那几条变异碰的源文件**不在**这个 exe 的覆盖范围里 → 照跑剩下的；
+    #   - 在里面 → 直接退 3，说清"这一趟什么都没判"。
+    # 退 3 而不是退 1：`run_targets()` 对不存在的 exe 会给一个 127 行，那个 127
+    # 长得和"用例真红了"一模一样，拿它去填"抓住了"是把没判写成判过。
+    # （前两格没有可关的开关，恒在。）
+    # (用例, 它量的源文件, "它跟着哪个开关走"（只为把话说清楚）)
+    exe_covers = [
+        ("test_capi_common_func", set(), "恒有（CAPI 开着就有）"),
+        ("test_capi_net_func", set(), "恒有（CAPI 开着就有）"),
+        ("test_capi_webapp_func", {WEBAPP}, "UVCPP_BUILD_WEBAPP"),
+        (H2_TARGET, {HTTP2}, "UVCPP_ENABLE_NGHTTP2"),
+        (H3_TARGET, {QUIC, HTTP3}, "UVCPP_ENABLE_HTTP3（它蕴含 QUIC）"),
+    ]
+    targets = []
+    for name, covers, switch in exe_covers:
+        exe = os.path.join(tree, "tests", "capi", name)
+        if os.path.exists(exe):
+            targets.append(name)
+            continue
+        hit = [l for l, _x, edits in selected
+               if any(p in covers for p, _o, _n in edits)]
+        if hit:
+            print("这棵树里没有 %s：\n  %s\n"
+                  "这趟选中的变异里有 %s 要靠它判，而这条用例跟着 %s 走"
+                  "（判据在 tests/capi/CMakeLists.txt）。\n"
+                  "配一棵编了它的树（本机那三棵与命令见 doc/capi-guide.md）。\n"
+                  "★ 这一趟什么都没判 —— 退 3 是「没判」，不是「通过」。"
+                  % (name, exe, "、".join(h.split()[0] for h in hit), switch))
+            return 3
+        print("这棵树没编 %s（%s 关着）：这趟不跑它，碰它的那几条变异不在"
+              "判据里。" % (name, switch))
+    if not targets:
+        print("这棵树里一个 capi 用例都没有 —— 先按 doc/capi-guide.md 配一棵。")
         return 3
-    targets = TARGETS + ([H2_TARGET] if have_h2 else [])
-    if not have_h2:
-        print("这棵树没开 NGHTTP2（没有 %s）：这趟只跑 %d 个用例，"
-              "h2 那几条变异不在里面。" % (H2_TARGET, len(TARGETS)))
 
     files = sorted({e[0] for _l, _x, edits in selected for e in edits})
     before = {p: read_bytes(p) for p in files}

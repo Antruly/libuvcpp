@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.4.3--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.4.4--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.4.3-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.4.4-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -219,7 +219,7 @@ int main() {
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.3 已到地基 + net + webapp/web + HTTP/2，QUIC、HTTP3 还没做** |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.4 起七个模块全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3，共 321 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON` |
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -627,7 +627,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.4.3** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.4.4** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0` 五个 tag。下面是
 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部改动，外加
 `1.4.x` 这一条线此后新增的东西，按主题分组，括号里是它**首次出现**的那一档；
@@ -702,6 +702,48 @@ libuvcpp/
   复用、魔数被无关写入盖掉，**魔数这个判据区分不出"被毒化"和"被栈复用盖掉"**，M8 因
   此只有 `uvcpp_c_live_handle_count()` 量得出来。那两条量的是**契约**，不是**机制**：
   两者都该有，错在拿前者当后者的证据（`1.4.3`）
+- **批 3b 把 QUIC 与 HTTP/3 的 C 面接上，这一层到此做完**：新增 `uvcpp_c_quic.h`
+  （42 个入口）与 `uvcpp_c_http3.h`（50 个入口），共 **321 个函数 / 七片**。QUIC 那
+  一片给的是"一条连接上很多条流"的完整面（TLS 上下文、ALPN、idle timeout、流开关、
+  字节计数），HTTP/3 那一片接在一枚**借来的** QUIC 连接句柄上 —— 所以 h3 的连接句柄
+  必须在 `on_disconnect` 里由持有者 `free`，那条纪律写在头里、用例里也钉着（`1.4.4`）
+- **写这一批时踩出来的一个接口缺口**：`uvcpp_c_h3_conn_send_response()` 本来是**没
+  法用**的 —— C++ 的 `send_response()` 在 `stream_id < 0` 时给 `UV_EINVAL`，而 C 侧
+  那枚响应容器的流号（内部 `-1`）从来没有设置入口。补的是
+  `uvcpp_c_h3_response_set_stream_id()`，负数**当场** `E_INVALID_ARG`：`-1` 是"还没
+  有归属"的日子值不是一条流，而 QUIC 里 **0 是一条真的流**，所以流号的初值不能是 0
+  （`1.4.4`）
+- **借来的连接句柄由谁反登记，是这一批最要紧的一处**：装上 h3 之后，连接上那张回调
+  表被 h3 **整个换掉**，裸 QUIC 的 `on_close` 跳板一次都不响 —— 于是"这条连接没了"
+  只剩 h3 的 `on_disconnect` 一个入口。少这一个入口，借出的 QUIC 连接句柄就永远留在
+  登记表里，而"再用它必须 `E_STALE`"那一套断言**量不出**这件事（句柄还活着、魔数还
+  在）。唯一量得出它的是收尾那句 `uvcpp_c_live_handle_count() == 0` —— 也就是变异
+  M18（`1.4.4`）
+- **第五个纯 C 用例 `test_capi_quic_h3_func`（280 条断言）**：与 h2 那一份只差一处，
+  而那一处被 QUIC 的本质逼出来 —— 它用**一条线程泵两条循环**（两侧都在 UDP 上，两条
+  线程就要处理"谁先跑"的时序偶然），握手（ALPN `h3`）之后**串行**发三条请求（POST
+  带 body + 同名头设两次 / GET + `_send_status` / GET + 204 空体）。代价是量不到
+  `E_WRONG_THREAD`，换上来的是两条**只有 C 面才有**的东西：回调表按 `size` 逐格读、
+  每个类型一枚魔数的类型混淆（拿 h3 句柄当 QUIC 连接用必须是 `E_STALE`）（`1.4.4`）
+- **变异表第三次扩容，而且"整表要哪棵树"这件事变成了机制**：M17–M20 是 quic + h3 的
+  四条（端点回调表的 `size`、上面那条反登记、h3 的 `FrameScope` 摘表、`_set_stream_id`
+  拦负数）。这一批还改了两处驱动本身：**两张表各喂一次坏表**（h3 那份与端点那份
+  `uvcpp_c_quic_callbacks`，因为"同一句守卫有两个分支、只喂一个"正是批 3a 的 M15 挖
+  出来的病），以及**用例缺一个就退 3 并点名是哪几条变异没有判据** —— 本机那三棵
+  CI 同构的树各缺一块（`build-capi` 没 SSL/h2/quic、`build-capi-h3` 没 webapp），所以
+  整表要一棵全开的 `build-capi-all`（`1.4.4`）
+- **符号面锁在 CI 上挂第三条腿**：`http3` 那格从这一批起也带
+  `-DUVCPP_ENABLE_CAPI=ON`。没有哪一条腿开得起全部七片（`capi` 格没 SSL/h2/quic、
+  `http3` 格没 webapp），所以是三条腿**合起来**把七片都盖上：`capi` 判四片、
+  `h2` 判五片、`http3` 判六片（它那棵树里 `webapp` 那一片按"关着的模块一个都不许
+  导出"判，如实印「未判」）。哪一片都不许靠"另一条腿会判"蒙过去（`1.4.4`）
+- **顺带修掉一个批 3a 留下的头文件缺陷，而它只有"逐份头单独喂 C 编译器"量得出来**：
+  `uvcpp_c_http2.h` 的参数表里写着 `struct uvcpp_c_tcp_client*`，却没有 include 那个
+  类型的所有者 `capi/uvcpp_c_net.h`。**伞头里编得过**（`uvcpp_c.h` 先 include 了 net
+  那份），**单独 include 本头就红** —— 参数表里第一次出现的 tag，C 会新造一个只属于
+  这条原型的类型，`-Werror` 下一条红。修法是补那一份 include（形状照
+  `uvcpp_c_quic.h`）。教训是伞头的 include 顺序会把这类毛病整个盖住，而"只 include
+  我要的那一份"是完全正当的用法（`1.4.4`）
 
 ### QUIC 传输（net 层）
 

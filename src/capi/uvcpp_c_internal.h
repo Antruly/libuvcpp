@@ -35,7 +35,8 @@
 #include "capi/uvcpp_c_common.h"
 
 namespace uvcpp {
-class uvcpp_tcp_client;  // 只为 `tcp_client_unwrap()` 的返回类型
+class uvcpp_tcp_client;       // 只为 `tcp_client_unwrap()` 的返回类型
+class uvcpp_quic_connection;  // 只为 `quic_conn_unwrap()` 的返回类型
 }  // namespace uvcpp
 
 namespace uvcpp_c_detail {
@@ -169,6 +170,26 @@ struct handle_head {
 #define UVCPP_C_MAGIC_H2_STREAM UVCPP_C_MAGIC('e', 'h', '2', 's')
 #define UVCPP_C_MAGIC_H2_REQUEST UVCPP_C_MAGIC('e', 'h', '2', 'q')
 #define UVCPP_C_MAGIC_H2_RESPONSE UVCPP_C_MAGIC('e', 'h', '2', 'r')
+
+/* 批 3b 的八种。四字节的取法同上（读出来是 `"eqc1"` 那一类），但**换了一个头
+ * 字母**（`e` → `q` / `h`）：
+ *
+ *   - `eq*1`：QUIC 那一族（client / server / tls / connection）；
+ *   - `eh3*`：h3 那一族（connection / request / response / request-view），
+ *     与 `eh2*` 排成一对，一眼能看出"这是哪一层的句柄"。
+ *
+ * 每个类型**仍然各有一枚**，理由同上（类型检查是 `alive()` 的第二段，共用一枚
+ * 等于把那一整段撤掉）。`uvcpp_c_quic_connection` 那一枚是**借来的**句柄用的：
+ * 它在底层连接被关掉时反登记 + 毒化，而它从来不由调用方 free（那个类型上没有
+ * free 函数）—— 见 `uvcpp_c_quic.h` 文件头。 */
+#define UVCPP_C_MAGIC_QUIC_CLIENT UVCPP_C_MAGIC('e', 'q', 'c', '1')
+#define UVCPP_C_MAGIC_QUIC_SERVER UVCPP_C_MAGIC('e', 'q', 's', '1')
+#define UVCPP_C_MAGIC_QUIC_TLS UVCPP_C_MAGIC('e', 'q', 't', '1')
+#define UVCPP_C_MAGIC_QUIC_CONN UVCPP_C_MAGIC('e', 'q', 'n', '1')
+#define UVCPP_C_MAGIC_H3_CONN UVCPP_C_MAGIC('e', 'h', '3', 'c')
+#define UVCPP_C_MAGIC_H3_REQUEST UVCPP_C_MAGIC('e', 'h', '3', 'q')
+#define UVCPP_C_MAGIC_H3_RESPONSE UVCPP_C_MAGIC('e', 'h', '3', 'r')
+#define UVCPP_C_MAGIC_H3_REQ_VIEW UVCPP_C_MAGIC('e', 'h', '3', 'v')
 
 /* 字节顺序钉在这里：`tests/capi/capi_common_func.c` 造"冒充的句柄"时用的是
  * **写死的** `0x31636865u`。两边同时改才可能漂，而这是一句编译期的话。 */
@@ -321,6 +342,41 @@ int copy_out(const std::string& s, char* buf, size_t cap);
 // @return 底下的 C++ 连接；句柄无效（空、已释放、类型不对、底下已经没了）返回
 //         `nullptr` —— **不区分**，与 `alive()` 同一条：调用方要做的事一样。
 uvcpp::uvcpp_tcp_client* tcp_client_unwrap(const void* handle);
+
+/**
+ * @brief 上面那一条的 QUIC 版（批 3b 加的，那个文件顶上早写着"QUIC 那一侧将来
+ *        也要解它自己的句柄"）。
+ *
+ * 消费者只有一个：`uvcpp_c_http3.cpp` 建 `uvcpp_h3_connection` 时要那条
+ * `uvcpp_quic_connection`，而"借来的句柄"的真身（`struct uvcpp_c_quic_connection`）
+ * 只写在 `uvcpp_c_quic.cpp` 的文件作用域里。
+ *
+ * **"底下还没连上"也返回 `nullptr`**：借来的句柄从 `_client_new()` 那一刻就存在
+ * （那时它是一枚空壳），而 h3 拿到一条还没有连接的连接是没意义的 —— 判据放在
+ * 这里，`uvcpp_c_http3.cpp` 那一侧只需要判一次 null。
+ */
+uvcpp::uvcpp_quic_connection* quic_conn_unwrap(const void* handle);
+
+/**
+ * @brief "这条连接没了"：把一枚**借来的**连接句柄毒化 + 反登记。
+ *
+ * 上面那一条是**读**句柄，这一条是**改**它的死期，两者成对 —— 借来的句柄没有
+ * `_free()`，所以"它什么时候不算数了"必须由知道这件事的那一侧说出来。
+ *
+ * 消费者同样只有一个：`uvcpp_c_http3.cpp`。理由在 `uvcpp_c_quic.cpp` 的文件头
+ * 第 2 条，这里只留结论：h3 的 `start()` 会把 C++ 连接上那张回调表**整个换成
+ * 它自己的**（h3 要吃 `on_read` / `on_alpn`），于是 `uvcpp_c_quic.cpp` 自己那套
+ * 跳板（本来由它的 `on_close` 负责收尾）从此一次都不响。所以：
+ *
+ *   - 裸 QUIC（没装 h3）：QUIC 那一侧的 `on_close` 跳板收；
+ *   - 装了 h3：h3 那一侧在它的 `on_disconnect` 里叫这一声。
+ *
+ * 两边都收不到的症状是同一个 —— 活句柄数收不回来（`capi_mutation.py` 的 M18）。
+ *
+ * @param handle 任何指针都安全：不是一枚活的 QUIC 连接句柄时什么都不做
+ *               （先查登记表，不读调用方那块内存）。
+ */
+void quic_conn_detach(const void* handle);
 
 }  // namespace uvcpp_c_detail
 
