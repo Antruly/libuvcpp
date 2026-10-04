@@ -111,9 +111,11 @@ configure）都传 `-DUVCPP_ENABLE_CAPI=ON`，CI 的 `full` 格与专门的 `cap
 - `cmake --install`（`install(FILES CAPI_HEADER_FILES ...)`）—— **不在**。
   那条规则套在 `if(UVCPP_ENABLE_CAPI)` 里。
 - `tests/tools/package_release.py`（发布 zip）—— **在**。它是从 `src/<模块>/`
-  逐目录拷头的，与开关无关（`wsdl` 那一路是同一个形状）。发布腿现在都开 CAPI，
-  所以这两种来源在发布包里是一致的；但如果你自己拿一棵 `CAPI=OFF` 的树出包，
-  会得到"头在、符号不在"的包 —— 那正是 §6 里那条实测要说的事。
+  逐目录拷头的，与开关无关（`wsdl` 那一路是同一个形状）。发布腿现在都开 CAPI
+  —— 十条 configure（含 `release.yml` 的两条 MinGW 腿，以及 CI 的 `mingw64` 尾
+  那条按发布规格配的腿），所以这两种来源在发布包里是一致的；但如果你自己拿一棵
+  `CAPI=OFF` 的树出包，会得到"头在、符号不在"的包 —— 那正是 §6 ⑦ 那条实测
+  要说的事。
 
 ## 3. ABI 契约
 
@@ -499,6 +501,39 @@ Linux / macOS / MSVC 三格红在 `uvcpp_c_net.cpp` 那两句
 本层的做法是同一个函数在两种构建里给出同一个答案（`is_tls()` 恒 0、
 `alpn_selected()` 恒空串 —— 这一批没有给 C 的 TLS 入口，所以那就是实话），
 而不是拿 `#if` 把两边的行为编成两样。
+
+⑦ **判据 4：从包外面看这一层**（`check_config_contract.py`，1.4.4 加的那条）。
+
+上面 ① 那几个用例编的是**构建树里**的头，所以它们量不到"装出去的那份对不对"：
+头漏装、装错目录、库里没导出符号 —— 这几件事在树里全都是绿的。判据 4 补的就是
+这一格。它拿 `package_release.py` 出的**包**，用一个**纯 C 编译器**（由 `--cxx` 推出，
+`CC_OF_CXX` 那张表与 `check_doc_snippets.py` 同一份）编一个只
+`#include <capi/uvcpp_c.h>` 的翻译单元，**零个 `-D`**：
+
+```bash
+# 出一份**与 release 同形**的包（这棵树就是照 CI config-contract 那格配的：
+# web/webapp/zlib/openssl/nghttp2/wsdl/expand ON、QUIC OFF、CAPI ON）
+python3 tests/tools/package_release.py --tree build-vfy-cfg \
+  --platform linux-x64 --config Release --out /tmp/pkg-vfy
+# 注意是 `--out` 不是 `--outdir`；`--pkg` 要的是**里面那层**目录
+python3 tests/tools/check_config_contract.py \
+  --pkg /tmp/pkg-vfy/libuvcpp-<版本>-linux-x64 --tree build-vfy-cfg --cxx g++
+```
+
+三条断言各对着一条**契约**，不是"跑起来没崩"：`uvcpp_c_abi_version()` 必须等于头里的
+`UVCPP_C_ABI_VERSION`（P/Invoke 最常见的故障是头与库不是一次编出来的）；
+`uvcpp_c_tcp_client_new()` → `_free()` → **再 `_free()` 必须 `E_STALE`**（不是 0、
+不是崩溃 —— 这是这一层自己的承诺，C++ 侧没有对应物）；收尾
+`uvcpp_c_live_handle_count() == 0`（登记表收支平衡，且**从包外面**也量得到）。
+
+判据 1 编的是 C++/webapp 那一面，**碰不到 `include/capi/`**，所以这条不是判据 1 的
+重复。树的 `UVCPP_CAPI_ENABLE=0` 时它印 `[跳]` 退 3，与判据 1 在 webapp 关着时的
+做法一样；主流程取两条的 `min` —— 只有**两条都没判成**才算"没判"(3)。
+
+反空转（本机实测的两条）：删掉包里 `include/capi/uvcpp_c.h` → 判据 4 红在
+`fatal error: capi/uvcpp_c.h: 没有那个文件或目录`；把用例里双 `free` 的预期改成
+`E_STALE+1` → 红在 `double free=-20002 want -20002`。（第二条量的正是"这条断言
+真的在比"，不是"它总能过"。）
 
 ### 变异表量出来的
 

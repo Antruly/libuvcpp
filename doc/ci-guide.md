@@ -469,7 +469,7 @@ asserts that value in the generated header *before* building: with it off, crite
 silently degrades into a no-op. The same is asserted for `UVCPP_WSDL_ENABLE`, because
 `check_doc_snippets.py` treats "module really on" as the premise for the `wsdl/` snippets.
 
-`tests/tools/check_config_contract.py` runs three criteria:
+`tests/tools/check_config_contract.py` runs four criteria:
 
 1. **ABI-shaped positive** — compile a consumer with a **raw compiler invocation** (`-I`
    only, zero `-D`), construct a `uvcpp_web_app`, assert `connection_count() == 0`,
@@ -495,6 +495,19 @@ silently degrades into a no-op. The same is asserted for `UVCPP_WSDL_ENABLE`, be
    with a hardcoded name the debug `.pc` was checked zero times, and it is the one whose
    `-luvcppd` exists nowhere else in the package — measured, not assumed: mutating it to
    `-luvcppdx` used to leave the gate green (`1.1.35`).
+4. **C surface** — compile a **pure C** translation unit (C compiler derived from `--cxx`
+   through `CC_OF_CXX`, same table as `check_doc_snippets.py`) that includes only
+   `<capi/uvcpp_c.h>`, with **zero `-D`**, against the same package; run it and assert the
+   header's `UVCPP_C_ABI_VERSION` equals the library's `uvcpp_c_abi_version()`, that
+   `uvcpp_c_tcp_client_new()` → `_free()` → a **second** `_free()` returns `E_STALE` (not
+   0, not a crash), and that `uvcpp_c_live_handle_count() == 0` at the end. Criterion 1
+   only ever exercises the **C++**/webapp face and cannot touch `include/capi/`; this one
+   covers the hole that the C ABI is the layer's whole outward promise yet **no gate had
+   looked at it from outside a package** (`tests/capi/` compiles the *build tree's* headers,
+   so a missing or misplaced install stays green there). On a tree whose
+   `UVCPP_CAPI_ENABLE` is 0 it prints `[跳]` and returns 3, like criterion 1 with webapp off
+   — and the runner takes `min` of the two, so a run is only "not judged" when *neither*
+   criterion could run.
 
 It is **not** compared against `CMakeCache.txt`: OpenSSL/nghttp2/webapp are silently
 downgraded to OFF when their dependency is missing (the `set(UVCPP_ENABLE_OPENSSL OFF)`
@@ -507,6 +520,10 @@ it needs `ilammy/msvc-dev-cmd` because `cl.exe` is not on the Windows runner's d
 PATH), and `mingw64` (MinGW/PE; that job gained `mingw-w64-x86_64-python` for this).
 `check_ci_layout.py` pins the `--platform` / `--cxx` pair of each of the two standalone
 `config-contract` jobs, because a wrong pair means the gate silently tests another toolchain.
+The `mingw64` tail configures with `-DUVCPP_ENABLE_CAPI=ON`, the way `release.yml`'s two
+MinGW legs do — without it criterion 4 would print `[跳]` there, and the package would keep
+shipping `include/capi/` (`package_release.py`'s `MODULES` is independent of the switch)
+next to a DLL that exports no `uvcpp_c_*` symbol at all.
 
 **Known gap:** the chain cannot run on macOS — `package_release.py`'s `PLATFORMS` has no
 macOS key (`mingw-x64/arm64`, `msvc-x64/arm64`, `linux-x64/arm64` only). So the macro

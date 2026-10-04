@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """核「使能宏与 dll 一致」这条契约是不是真的立住了（issue #6 第 3 条）。
 
-三条判据，每条都能当场变成红的：
+四条判据，每条都能当场变成红的：
 
   1. **ABI 形态的正例**：拿包里的头 + 包里的 dll，用**裸编译器调用**编一个消费方
      （只要 `-I`，**一个 `-D` 都不加**），构造一个 `uvcpp_web_app`，断言
@@ -25,6 +25,14 @@
      之前**（"含不含"这种判据会放过插进 `#if` 里的坏版本）；② 源码树里没有同名
      手写副本；③ 包里的生成头与构建树的**逐字节相同**，且与构建树导出的
      `INTERFACE_COMPILE_DEFINITIONS` 取值一致。
+
+  4. **C 面**：拿同一个包，用**纯 C 编译器**（由 `--cxx` 推出，表在 `CC_OF_CXX`）
+     编一个只 `#include <capi/uvcpp_c.h>` 的翻译单元，**零个 `-D`**，跑起来断言
+     头里的 `UVCPP_C_ABI_VERSION` 与库里那个一样、句柄 `new → free → 双 free`
+     必须 `E_STALE`、收尾 `uvcpp_c_live_handle_count() == 0`。
+     判据 1 量的是 C++/webapp 那一面，**碰不到** `capi/`：这条补的是"C ABI 是这里
+     唯一的对外承诺面，却没有任何门禁从包外面碰过它"这个洞。树里 CAPI 关着时
+     整条 `[跳]`。
 
 判据 ③ 不拿 `CMakeCache.txt` 对：OpenSSL/nghttp2/webapp 在依赖缺失时会被**静默
 降级为 OFF**（`CMakeLists.txt` 里 `set(UVCPP_ENABLE_OPENSSL OFF)` /
@@ -301,9 +309,91 @@ int main() {
 """
 
 
+# `--cxx` → C 编译器。与 `check_doc_snippets.py:CC_OF_CXX` **同一张表、同一套退法**
+# （那份的文档说得更全：`g++` 去掉两个加号给出的是 `g`，一个不存在的程序名）。
+# 两份是刻意各写一遍的：这两个脚本的调用点、编译选项与语言都不同，共用一个模块
+# 只会让其中一份的改动牵动另一份 —— 但**这张表本身**必须一样，不然同一个 `--cxx`
+# 会在两处推出不同的 C 编译器。
+CC_OF_CXX = {
+    "g++": "gcc", "gcc": "gcc",
+    "clang++": "clang", "clang": "clang",
+    "c++": "cc", "cc": "cc",
+    "cl": "cl", "cl.exe": "cl.exe", "clang-cl": "clang-cl",
+}
+
+
+def cc_from_cxx(cxx):
+    base = os.path.basename(cxx).lower()
+    if base in CC_OF_CXX:
+        return CC_OF_CXX[base]
+    if base.endswith("++"):
+        return cxx[:-2]
+    return cxx
+
+
 def is_msvc(cxx):
     base = os.path.basename(cxx).lower()
     return base.startswith("cl") and "clang" not in base
+
+
+# 判据 4 的消费方：**纯 C**，而且只用 common + net 那两片。
+#
+# 这两片是**守卫链保证的**（`UVCPP_ENABLE_CAPI` ⇒ `UVCPP_BUILD_WEB` ⇒
+# `UVCPP_BUILD_NET`），所以这份程序在任何"CAPI 开着"的包上都编得出、链得上
+# —— 不像判据 1 那样要先看 webapp 开没开。
+#
+# 它量的是**装出去的那份**（`include/capi/` 里那几份头 + 包里那个库）能不能被一个
+# C 翻译单元用起来，这是 build 树里的 `tests/capi/` 量不到的一件事：
+#
+#   * 头没被 install / 装错目录（`<capi/uvcpp_c.h>` 这条路径在包里必须成立）；
+#   * 生成头 `uvcpp_config.h` 与头里那几个模块守卫对得上 —— **零个 `-D`**；
+#   * 符号真的被导出（`uvcpp_c_tcp_client_new` 链不上就是这条红，而不是运行期
+#     `EntryPointNotFoundException` —— 那正是 C# 侧会遇到的形状，只是它更晚）。
+#
+# 三条断言各自对应一条**契约**，不是"跑起来没崩"：
+#   ① `abi_version() == UVCPP_C_ABI_VERSION`：P/Invoke 最常见的故障（头与库不是
+#      一次编出来的）在这里当场响。
+#   ② 句柄的生死：`new` → `free` → **再 `free` 必须 `E_STALE`**（不是崩溃，
+#      也不是 0）。这条在 C++ 侧没有对应物 —— 它是这一层自己的承诺。
+#   ③ 收尾 `live_handle_count() == 0`：登记表收支平衡，且**从包外面**也量得到。
+C_CONSUMER = r"""
+#include <capi/uvcpp_c.h>
+#include <stdio.h>
+
+int main(void) {
+  uvcpp_c_tcp_client* c;
+  size_t live;
+  int rc;
+
+  if (uvcpp_c_abi_version() != UVCPP_C_ABI_VERSION) {
+    printf("abi=%u want=%u\n",
+           (unsigned)uvcpp_c_abi_version(), (unsigned)UVCPP_C_ABI_VERSION);
+    return 1;
+  }
+
+  c = uvcpp_c_tcp_client_new();
+  if (c == NULL) {
+    printf("tcp_client_new=NULL\n");
+    return 1;
+  }
+  rc = uvcpp_c_tcp_client_free(c);
+  if (rc != UVCPP_C_OK) {
+    printf("free=%d want %d\n", rc, (int)UVCPP_C_OK);
+    return 1;
+  }
+  rc = uvcpp_c_tcp_client_free(c);
+  if (rc != UVCPP_C_E_STALE) {
+    printf("double free=%d want %d\n", rc, (int)UVCPP_C_E_STALE);
+    return 1;
+  }
+
+  live = uvcpp_c_live_handle_count();
+  printf("abi=%u version=%s live=%u\n",
+         (unsigned)uvcpp_c_abi_version(), uvcpp_c_version_string(),
+         (unsigned)live);
+  return live == 0 ? 0 : 1;
+}
+"""
 
 
 def compile_cmd(cxx, pkg, work, defs, out, link=True):
@@ -323,6 +413,32 @@ def compile_cmd(cxx, pkg, work, defs, out, link=True):
         return cmd + ["-c", src, "-o", out]
     cmd += [src, "-L" + lib, "-luvcpp", "-o", out]
     # MinGW 的 ld 没有 rpath，那边靠 PATH 找 dll（见 runtime_env）。
+    if sys.platform.startswith("linux"):
+        cmd += ["-Wl,-rpath," + os.path.abspath(lib)]
+    return cmd
+
+
+def compile_cmd_c(cxx, pkg, work, out):
+    """判据 4 的编译命令：**C 模式、零个 `-D`**。
+
+    与 `compile_cmd` 分开写而不是加一个 `lang=` 参数：这两条判据要的
+    *语言、文件、扩展名、链接名*全都不一样，合成一个函数只会让下一个人
+    在改 C++ 那条时误伤 C 那条。C 那条的要点是**没有任何 `-D`** —— 头里
+    那几个模块守卫必须由**包里的** `uvcpp_config.h` 满足。
+    """
+    cc = cc_from_cxx(cxx)
+    inc = os.path.join(pkg, "include")
+    lib = os.path.join(pkg, "lib")
+    src = os.path.join(work, "c_consumer.c")
+    if is_msvc(cc):
+        # `/TC` 是"把这个文件当 C 编"，与文件名后缀无关 —— 判据是"这是个 C
+        # 翻译单元"，不是"这个文件叫 .c"。`/utf-8` 与 `check_doc_snippets.py`
+        # 的 C 模式逐字一致。
+        return [cc, "/nologo", "/TC", "/utf-8", "/I" + inc, src,
+                "/Fe:" + out, "/link", "/LIBPATH:" + lib, "uvcpp.lib"]
+    # `-std=c99`：这一层承诺的是 C89/C99 能用的形状（无 `inline`、
+    # 无指定初始化器当依赖），拿 c99 当底线是**故意比 C11 严**。
+    cmd = [cc, "-std=c99", "-I" + inc, src, "-L" + lib, "-luvcpp", "-o", out]
     if sys.platform.startswith("linux"):
         cmd += ["-Wl,-rpath," + os.path.abspath(lib)]
     return cmd
@@ -399,6 +515,46 @@ def check_abi(tree_vals, pkg, work, cxx):
              % out.strip()[-2000:])
         return 1
     ok("反例被生成头的 #error 拦下（且报错文案是它的）")
+    return 0
+
+
+def check_capi_consumer(tree_vals, pkg, work, cxx):
+    """判据 4：装出去的那份能不能被一个**纯 C** 翻译单元用起来。
+
+    与判据 1 是两个不同的洞：判据 1 量的是"使能宏 ↔ dll 布局"，它编的是 **C++**、
+    走的是 `webapp`；这一条量的是 **C 这一面**（`include/capi/` + 库里那些
+    `uvcpp_c_*` 符号）。C ABI 是本层唯一的对外承诺面，而**到这个判据之前，没有
+    任何一道门禁从包外面碰过它** —— `tests/capi/` 那几个用例编的是**构建树**里的
+    头，装错了、漏装了、装到别的目录，它们一个都不会红。
+
+    只在树的 `UVCPP_CAPI_ENABLE == "1"` 时跑：CAPI 关着的树上 `include/capi/`
+    压根不该在包里（`package_release.py` 的模块清单里有 `capi`，而 CMake 在
+    CAPI=OFF 时不会 install 那些头 —— 这本身就是一条会被这里量到的契约）。
+    """
+    capi = tree_vals.get("UVCPP_CAPI_ENABLE")
+    if capi != "1":
+        print("  [跳] 包的 CAPI=%s，没有 C 面可核。" % capi)
+        print("       这一档必须在 CAPI 打开的 job 上跑，否则这条门禁是个摆设。")
+        return 3
+
+    with open(os.path.join(work, "c_consumer.c"), "w", encoding="utf-8",
+              newline="\n") as f:
+        f.write(C_CONSUMER)
+
+    exe = os.path.join(work, "c_consumer.exe" if is_msvc(cxx) else "c_consumer")
+    rc, out = run(compile_cmd_c(cxx, pkg, work, exe), work, runtime_env(pkg))
+    if rc != 0:
+        fail("C 消费方编/链不过（零个 -D，只用包里的头与库）：\n%s"
+             % out.strip()[-2000:])
+        return 1
+    ok("C 消费方编过、链过（裸 %s，零个 -D）" % cc_from_cxx(cxx))
+
+    rc, out = run([exe], work, runtime_env(pkg))
+    print("       C 消费方输出：%s" % out.strip())
+    if rc != 0:
+        fail("C 消费方跑出 rc=%d：%s" % (rc, out.strip()[-1500:]))
+        return 1
+    ok("abi 头库一致、句柄 new/free/双 free 语义、收尾 live_handle_count()==0")
     return 0
 
 
@@ -493,6 +649,12 @@ def main():
 
     print("\n[1][2] ABI 正例 / 反例")
     rc = check_abi(vals, pkg, work, args.cxx)
+
+    print("\n[4] C 消费方（include/capi/ + 库里的 uvcpp_c_* 符号）")
+    # 两条判据各有自己的 `[跳]`（webapp 关 / CAPI 关）。取 **min**：只有两条
+    # **都**没判成，这次运行才算"没判成"（3）；只要有一条真量过了，就是绿
+    # （0）。`fail()` 那条路在上面已经统一按 1 收口。
+    rc = min(rc, check_capi_consumer(vals, pkg, work, args.cxx))
 
     print("\n==== 汇总 ====")
     if failures:

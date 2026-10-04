@@ -66,12 +66,21 @@ jobs:
           #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
           #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
           #   （708 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
+          #
+          # ③ -DUVCPP_ENABLE_CAPI=ON —— `release.yml` 的 mingw-x64 / mingw-arm64
+          #   两条腿都传了它（那边的注释 ④ 列了整条理由链），这条 CI 腿**以前没传**，
+          #   于是两个后果同时成立：一、CI 不跑发布腿实际发出去的那份配置；二、
+          #   `package_release.py` 的 MODULES 与开关无关，包里的 `include/capi/`
+          #   照样在，而 dll 里一个 `uvcpp_c_*` 符号都没有 —— 正是"头在、符号不在"
+          #   那个只能在运行时才炸的形状。`check_config_contract.py` 判据 4 就是
+          #   冲着它来的（CAPI=0 时它会 `[跳]`，这条腿改完才真的判得动）。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
@@ -96,6 +105,7 @@ jobs:
             -DUVCPP_BUILD_TESTS=OFF -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \

@@ -305,7 +305,7 @@ and `rcx`.
 |---|---|
 | `package_release.py` | Assembles one build tree into a release zip. Deliberately bypasses `cmake --install` and reproduces the layout by hand — see [`release-process.md`](release-process.md). |
 | `check_doc_versions.py` | Asserts the version string in both READMEs equals the one in the source tree. |
-| `check_config_contract.py` | Asserts the "enable macro matches the DLL" contract holds, using **bare compiler invocations** on a packaged header + DLL and adding not one `-D`. |
+| `check_config_contract.py` | Asserts the "enable macro matches the DLL" contract holds, using **bare compiler invocations** on a packaged header + DLL and adding not one `-D`. Its fourth criterion does the same from the **C** side: a pure-C consumer of the packaged `include/capi/` headers, compiled by a C compiler with zero `-D`, asserting the C ABI version matches, the handle free/stale semantics hold, and the live-handle count returns to zero. |
 
 ### Mutation drivers
 
