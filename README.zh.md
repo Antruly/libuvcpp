@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.4.4--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.5.0-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.4.4-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.5.0` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -219,7 +219,7 @@ int main() {
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.4 起七个模块全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3，共 321 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON` |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.4 起七个模块全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3，共 321 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份对过账的 C# 绑定 |
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -302,8 +302,8 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | 启用 OpenSSL（HTTPS/WSS） |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | 启用 HTTP/2（nghttp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON` 与 `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 是一条真能通信的链路协议：握手、流收发、关闭与空闲超时都通了；HTTP/3 架在它上面（下一行）。** 见 [`doc/quic-guide.md`](doc/quic-guide.md) |
-| `UVCPP_ENABLE_HTTP3` | `OFF` | 启用 **web 层**的 HTTP/3（RFC 9114），由 nghttp3 解析，跑在 QUIC 传输之上（两者都静态链入）。需要 `UVCPP_ENABLE_QUIC=ON` 与 `UVCPP_BUILD_WEB=ON` —— 缺一即强制关闭。**1.4.1 是一条端到端可用的传输：`uvcpp_http_client` / `uvcpp_http_server` 都说它，而 h1/h2 一个字节没动（它跑在 UDP 上）。** 见 [`doc/http3-guide.md`](doc/http3-guide.md) |
+| `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 是一条真能通信的链路协议：握手、流收发、关闭与空闲超时都通了；HTTP/3 架在它上面（下一行）。** **1.5.0 起六条发布腿的预编译包都打开它**（此前发布包不带 QUIC）。见 [`doc/quic-guide.md`](doc/quic-guide.md) |
+| `UVCPP_ENABLE_HTTP3` | `OFF` | 启用 **web 层**的 HTTP/3（RFC 9114），由 nghttp3 解析，跑在 QUIC 传输之上（两者都静态链入）。需要 `UVCPP_ENABLE_QUIC=ON` 与 `UVCPP_BUILD_WEB=ON` —— 缺一即强制关闭。**1.4.1 是一条端到端可用的传输：`uvcpp_http_client` / `uvcpp_http_server` 都说它，而 h1/h2 一个字节没动（它跑在 UDP 上）。** **1.5.0 起六条发布腿的预编译包都打开它**（此前发布包不带 HTTP/3）。见 [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md)（文档那一半）与 [`doc/soap-guide.md`](doc/soap-guide.md)（运行时那一半） |
 | `UVCPP_ENABLE_CAPI` | `OFF` | 导出 **C ABI**（`src/capi/`，C99 头，给 C#/P-Invoke 以及别的 FFI 用），编进**同一个** `uvcpp` 库 —— 不多一个产物。需要 `UVCPP_BUILD_NET=ON` 与 `UVCPP_BUILD_WEB=ON`，缺一即强制关闭（C 面横跨 net/web/webapp）。**每一个发布配置都打开它。** 见 [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
@@ -627,10 +627,11 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.4.4** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
-报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0` 五个 tag。下面是
-`1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部改动，外加
-`1.4.x` 这一条线此后新增的东西，按主题分组，括号里是它**首次出现**的那一档；
+当前源码树是 **1.5.0** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`
+六个 tag。下面是 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部
+改动，外加 `1.4.x` 这条线（收进 `v1.5.0`）与 `1.5.0` 新增的东西，按主题分组，括号里是
+它**首次出现**的那一档；
 已发布版本的说明在
 [RELEASE.md](./RELEASE.md)。其中若干条来自本仓第一位外部贡献者
 [@sercebr](https://github.com/sercebr) 报的 issue。
@@ -744,6 +745,41 @@ libuvcpp/
   这条原型的类型，`-Werror` 下一条红。修法是补那一份 include（形状照
   `uvcpp_c_quic.h`）。教训是伞头的 include 顺序会把这类毛病整个盖住，而"只 include
   我要的那一份"是完全正当的用法（`1.4.4`）
+
+### C# 绑定（`bindings/csharp/`）
+
+- **这一层有了第一个真消费方，而且随仓一起发**：`bindings/csharp/` 两份 `.cs`
+  （`UvcppNative.cs` 183 条 + `UvcppNative.Protocols.cs` 138 条，同一个 partial 类的两半），
+  外加一个能跑的 QUIC 回显例子（`dotnet run` 默认做一次回环：服务端收、回显、客户端收到
+  同样的字节，逐字节比，收尾断言 `uvcpp_c_live_handle_count()` 回到 0）。**判据是"一条不
+  多、一条不少"**：321 条 `DllImport` 与 `tests/tools/capi_symbols.lock` 的 321 个
+  `uvcpp_c_*` 符号**双向对账**，两个方向的差集都为空；核法是一段纯文本脚本，不需要库、
+  不需要编译（`1.5.0`）
+- **它第一次跑就撞出库里的一个必现 SIGSEGV，这是"绑定是 C 面第一个真消费方"的直接价值**：
+  例子跑通回显之后**不关连接**、直接 `uvcpp_c_quic_server_free()` → 崩在"边遍历
+  `server->conns` 边 `detach_conn()`"（后者的"反登记"那一半会从这张表里 `erase`，而
+  `unordered_map::erase` 把**当前迭代器**弄失效，`++it` 踩在已回收的桶上；表里只有一条
+  连接也照样崩）。修复是先把句柄抄进一个局部数组再统一 detach；回归用例
+  `test_free_with_live_conn()` 与变异 M21 一起进（`1.5.0`）
+- **同一版还暴露了一处文档缺口，代价是"回显了两次"**：QUIC 的 `on_read` 收尾是**两条**
+  回调 —— 一个"带数据和 FIN 的 STREAM 帧"先报一条 `DATA`（**那条 `DATA` 的 `fin` 也是
+  非 0**，它是"这块就是最后一块"的信息位），紧接着再报一条 `PEER_CLOSED`。所以**流的
+  结束判据是 `PEER_CLOSED`，不是 `fin`**。例子第一版拿 `fin` 当结束判据，第二次回显时写
+  方向已经关了（ngtcp2 给 -219），异常从被 native 调进来的回调里逃出去 → abort
+  （本机实测退出码 134）。这条现在写在 `uvcpp_c_quic.h` 的字段注释与绑定 README 里（`1.5.0`）
+- **编译门槛是量出来的，不是猜的**：`net8.0` 编过且真跑过；`netstandard2.1` + `LangVersion 10`
+  编过（只编过，没跑过）；`netstandard2.0` **编不过**（参考程序集里 `UnmanagedType` 没有
+  `LPUTF8Str`）；C# 9 及更早**编不过**（文件范围命名空间要 C# 10）—— 于是"Unity / Mono 也
+  编得过"这句话**是错的**（Unity 2022 还是 C# 9），`UvcppNative.Protocols.cs` 里那句自述按
+  实测改掉了（`1.5.0`）
+- **"手写一份 P/Invoke 声明"会怎么坏，逐条对着真实头文件量过**（绑定 README §八 那张表）：
+  最狠的一格是 `bool uvcpp_c_app_running(app)` —— 托管 `bool` 默认按 Win32 `BOOL` 封送
+  （非 0 即 `true`），拿一个已经 `_free()` 掉的句柄问它，`int` 声明读到 `-20002`
+  （`E_STALE`）、`bool` 声明读到 **`True`**，"出错了"被读成"正在运行"；另有"凭空多一个
+  回调参数"（`uvcpp_c_tcp_server_listen` 实际是 `(server, int backlog)`，写成一个回调指针
+  的话 C 侧把指针的低 32 位当 backlog 用，编得过、跑得动、语义全错）与"以为它借出一枚
+  字符串指针"（`uvcpp_c_req_path` 实际是"你给缓冲区、它还把长度"，写成 `IntPtr f(req)`
+  就是少两个参数、C 侧往栈上垃圾地址写）。**这张表就是这一层必须有那份定义类的理由**（`1.5.0`）
 
 ### QUIC 传输（net 层）
 
@@ -1195,6 +1231,28 @@ libuvcpp/
   一起写进注解。`check_ci_layout.py` 把这件事**两向**钉住：调用点必须在
   `ci-windows-msvc.yml` 里，而裸 `choco install openssl --no-progress` 一行必须在四个
   平台文件里一个都不出现（`1.4.1`）
+
+- **1.5.0 起六条发布腿的产物都是全功能的**（QUIC + HTTP3 + C API 一起开）。QUIC 的前提是
+  一份带 QUIC API 的 OpenSSL ≥ 3.2，而六条腿的来路各不相同，逐条记在 `release.yml`
+  文件头：Linux 两条腿**不装** 22.04 的 `libssl-dev`（那份是 3.0.2，没有 QUIC API ——
+  装上只是给 `find_package` 添一份不合用的候选），改成在 job 里自建 OpenSSL 3.5.0
+  （`no-shared no-tests -fPIC`；`-fPIC` **不是保险是承重的**，本机量过同一份源码两种
+  命令行生成的 `CFLAGS`），编完当场用 `nm --defined-only libssl.a` 查
+  `SSL_set_quic_tls_cbs` 有定义；MinGW 两条用 MSYS2 包的（3.6.x）；MSVC-x64 用 runner
+  脚本给的那份；MSVC-arm64 自己拿 `VC-WIN64-ARM no-asm` 编 3.5.8（`1.5.0`）
+- **六条腿的模块断言从读 `CMakeCache.txt` 改成读生成的头**：QUIC/HTTP3 的守卫链是
+  `message(WARNING)` + 普通变量 `set(... OFF)`，于是 cache 里**照旧**写着 `=ON` 而编译器
+  看到的是 0 —— 只 grep cache 的断言会**放行一个缺功能的包**，而"发出去的包缺功能"正是
+  它要拦的那件事。判据落在 `<tree>/include/uvcpp/uvcpp_config.h`：那是编译器真正读到的
+  那个数，也是 `config-contract` 门禁读的那个数。名字映射逐条对着 `CMakeLists.txt` 的
+  `_uvcpp_literal01(...)` 抄（第一版按名字猜，把 `UVCPP_BUILD_EXPAND` 写成了
+  `UVCPP_WSDL_ENABLE`，拿真生成头实测时当场红了一条）；mingw 与 linux 四条腿**两份树都
+  量**（发布档与调试档是两次独立 configure，漏传只让其中一份缺功能）（`1.5.0`）
+- **六条腿的 timeout 120→150 分钟**（全开 QUIC/HTTP3 之后，每条腿除了自己的源文件还要
+  FetchContent 编 ngtcp2 与 nghttp3，Linux 那两条还要多编一份 OpenSSL；msvc-arm64 是
+  180）。Linux 的自包含断言名单加上 ngtcp2 / nghttp3：它们今天由本仓
+  `ENABLE_SHARED_LIB=OFF` 压成静态、**不可能**出现在 `ldd` 里，写进名单是为了让"哪天有人
+  把上游那个开关改成 ON"变成一条当场看得见的红（`1.5.0`）
 
 ---
 

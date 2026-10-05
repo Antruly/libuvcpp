@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.4.4--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.5.0-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.4.4-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.5.0` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -222,7 +222,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
-| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.4 completes all seven modules** (foundation + net + webapp/web + HTTP/2 + QUIC + HTTP/3, 321 functions); all it needs is `-DUVCPP_ENABLE_CAPI=ON` |
+| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.4 completes all seven modules** (foundation + net + webapp/web + HTTP/2 + QUIC + HTTP/3, 321 functions); all it needs is `-DUVCPP_ENABLE_CAPI=ON`. **As of 1.5.0 all six release legs ship it**, alongside the reconciled C# binding in [`bindings/csharp/`](bindings/csharp/README.md) |
 
 Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
 performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
@@ -306,8 +306,8 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | Enable OpenSSL (HTTPS/WSS) |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | Enable HTTP/2 (nghttp2, linked static). Requires `UVCPP_ENABLE_OPENSSL=ON` and `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 is a real link protocol: handshake, streams, close and idle timeout work; HTTP/3 rides on top of it (next row).** See [`doc/quic-guide.md`](doc/quic-guide.md) |
-| `UVCPP_ENABLE_HTTP3` | `OFF` | Enable HTTP/3 (RFC 9114) in the **web layer**, parsed by nghttp3 and carried over the QUIC transport (both linked static). Requires `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` — force-disabled without them. **1.4.1 is an end-to-end transport: `uvcpp_http_client` / `uvcpp_http_server` speak it, h1/h2 are untouched (it runs on UDP).** See [`doc/http3-guide.md`](doc/http3-guide.md) |
+| `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 is a real link protocol: handshake, streams, close and idle timeout work; HTTP/3 rides on top of it (next row).** **As of 1.5.0 all six release legs enable it** (earlier packages did not). See [`doc/quic-guide.md`](doc/quic-guide.md) |
+| `UVCPP_ENABLE_HTTP3` | `OFF` | Enable HTTP/3 (RFC 9114) in the **web layer**, parsed by nghttp3 and carried over the QUIC transport (both linked static). Requires `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` — force-disabled without them. **1.4.1 is an end-to-end transport: `uvcpp_http_client` / `uvcpp_http_server` speak it, h1/h2 are untouched (it runs on UDP).** **As of 1.5.0 all six release legs enable it** (earlier packages did not). See [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | Enable the WSDL/SOAP module (XML via pugixml, linked static). Requires `UVCPP_BUILD_WEBAPP=ON`. See [`doc/wsdl-guide.md`](doc/wsdl-guide.md) (the document half) and [`doc/soap-guide.md`](doc/soap-guide.md) (the runtime half) |
 | `UVCPP_ENABLE_CAPI` | `OFF` | Export the **C ABI** (`src/capi/`, C99 headers for C#/P-Invoke and any other FFI) out of the same `uvcpp` library — no extra artifact. Requires `UVCPP_BUILD_NET=ON` and `UVCPP_BUILD_WEB=ON`; force-disabled without them (the C surface spans net/web/webapp). **Turned on for every release configuration.** See [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
@@ -643,11 +643,11 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.4.4** — that is what `UVCPP_VERSION_STRING`
-(`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0` and `v1.4.0`
-are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development lines
-accumulated through `v1.4.0`, plus what the `1.4.x` line has added since, is below, by
-theme, with the version each change first appeared in;
+The current source tree is **1.5.0** — that is what `UVCPP_VERSION_STRING`
+(`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.4.0` and
+`v1.5.0` are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development
+lines accumulated through `v1.4.0`, plus what the `1.4.x` line (released as `v1.5.0`) and
+`1.5.0` itself have added, is below, by theme, with the version each change first appeared in;
 release notes for the tagged versions are in [RELEASE.md](./RELEASE.md). Several of the
 fixes came from issue reports by the project's first external contributor,
 [@sercebr](https://github.com/sercebr).
@@ -794,6 +794,49 @@ fixes came from issue reports by the project's first external contributor,
   under `-Werror`. The fix is that one include, shaped like `uvcpp_c_quic.h` already does
   it. The lesson is that the umbrella's include order hides this whole class of defect,
   while "include only the one slice I use" is entirely legitimate (`1.4.4`)
+
+### C# binding (`bindings/csharp/`)
+
+- **The C surface now has a real consumer, and it ships with the repo**: two `.cs` files
+  under `bindings/csharp/` (`UvcppNative.cs`, 183 declarations + `UvcppNative.Protocols.cs`,
+  138 — two halves of one partial class), plus a runnable QUIC echo example (`dotnet run`
+  does one round trip by default and asserts `uvcpp_c_live_handle_count()` returns to 0 at
+  the end). **The criterion is "not one more, not one fewer"**: the 321 `DllImport`
+  declarations and the 321 `uvcpp_c_*` symbols in `tests/tools/capi_symbols.lock` are
+  reconciled **both ways**, and both set differences are empty; the check is a plain-text
+  script needing neither a library nor a compiler (`1.5.0`)
+- **Its first run crashed the library, which is exactly what a first real consumer is
+  for**: after a successful echo round trip the example did **not** close the connection and
+  called `uvcpp_c_quic_server_free()` directly → SIGSEGV in "iterate `server->conns` while
+  `detach_conn()` erases from it" (`unordered_map::erase` invalidates the *current*
+  iterator, so `++it` steps onto a reclaimed bucket; a single live connection is enough).
+  The fix snapshots the handles into a local vector first; the regression
+  `test_free_with_live_conn()` and mutation M21 go with it (`1.5.0`)
+- **The same version closed a documentation gap, at the price of echoing twice**: QUIC's
+  `on_read` end-of-stream is **two** callbacks — a STREAM frame carrying data **and** FIN
+  first reports `DATA` (whose `fin` is **also non-zero**: it is the "this block is the last
+  one" bit), then immediately reports `PEER_CLOSED`. So **the end-of-stream criterion is
+  `PEER_CLOSED`, not `fin`**. The example's first version keyed on `fin`, echoed a second
+  time onto a half-closed stream (ngtcp2 returned -219), and the exception escaped a
+  native-invoked callback → abort (measured: exit code 134). This is now written into
+  `uvcpp_c_quic.h` and the binding README (`1.5.0`)
+- **The compile floor was measured, not guessed**: `net8.0` compiles and really runs;
+  `netstandard2.1` + `LangVersion 10` compiles (compile-only); `netstandard2.0` **does not**
+  (the reference assemblies have no `UnmanagedType.LPUTF8Str`); C# 9 and earlier **do not**
+  (file-scoped namespaces need C# 10) — so "Unity / Mono compile it too" **is false**
+  (Unity 2022 is still C# 9), and the claim in `UvcppNative.Protocols.cs` was corrected to
+  the measured floors (`1.5.0`)
+- **How hand-written P/Invoke declarations go wrong, measured line by line against the real
+  headers** (binding README §8): the nastiest cell is `bool uvcpp_c_app_running(app)` —
+  managed `bool` marshals as a Win32 `BOOL` (non-zero is `true`), so asking a freed handle
+  reads `-20002` (`E_STALE`) through an `int` declaration and **`True`** through a `bool`
+  one: "it errored" is read as "it is running". Also "an invented callback parameter"
+  (`uvcpp_c_tcp_server_listen` is really `(server, int backlog)`; declare a callback pointer
+  there and C reads the pointer's low 32 bits as the backlog — compiles, runs, wrong), and
+  "assuming it lends you a string pointer" (`uvcpp_c_req_path` is really "you pass a buffer,
+  it returns the length"; as `IntPtr f(req)` it is two arguments short and C writes to
+  stack garbage). **That table is the reason this layer needs a checked definition file**
+  (`1.5.0`)
 
 ### QUIC transport (net layer)
 
@@ -1351,6 +1394,34 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   directories searched plus choco's own words if there is still nothing. `check_ci_layout.py`
   pins it both ways — the call site must be in `ci-windows-msvc.yml`, and the bare
   `choco install openssl --no-progress` line must appear in no platform file (`1.4.1`)
+
+- **As of 1.5.0 all six release legs ship full-featured artifacts** (QUIC + HTTP3 + C API
+  enabled). QUIC needs an OpenSSL >= 3.2 with the QUIC API, and the six legs get it from
+  different places — the table at the top of `release.yml` records each one: the two Linux
+  legs deliberately **do not install** Ubuntu 22.04's `libssl-dev` (3.0.2, no QUIC API —
+  installing it only adds an unusable candidate to `find_package`) and build OpenSSL 3.5.0
+  in-job instead (`no-shared no-tests -fPIC`, where `-fPIC` is **load-bearing, not
+  belt-and-braces** — measured locally by diffing the `CFLAGS` in the generated Makefiles),
+  then check `SSL_set_quic_tls_cbs` is *defined* in `libssl.a` with `nm --defined-only`;
+  the two MinGW legs use MSYS2's package (3.6.x); MSVC-x64 uses the one the runner script
+  provides; MSVC-arm64 builds 3.5.8 itself with `VC-WIN64-ARM no-asm` (`1.5.0`)
+- **All six legs' module assertions now read the generated header instead of
+  `CMakeCache.txt`**: QUIC/HTTP3 are guarded by `message(WARNING)` plus a plain-variable
+  `set(... OFF)`, so the cache still says `=ON` while the compiler sees 0 — a
+  cache-grepping assertion **lets a package without the feature through**, which is exactly
+  what it exists to stop. The criterion is `<tree>/include/uvcpp/uvcpp_config.h`: the number
+  the compiler actually reads, and the one the `config-contract` gate reads. The name
+  mapping is copied entry by entry from `_uvcpp_literal01(...)` in `CMakeLists.txt` (the
+  first version guessed from the name and wrote `UVCPP_WSDL_ENABLE` for
+  `UVCPP_BUILD_EXPAND`; run against a real generated header it failed immediately); the
+  four MinGW/Linux legs check **both trees**, because release and debug are two independent
+  configures and omitting a flag only breaks one of them (`1.5.0`)
+- **All six legs' timeouts went from 120 to 150 minutes** (with QUIC/HTTP3 on, each leg
+  builds ngtcp2 and nghttp3 via FetchContent on top of its own sources, and the two Linux
+  legs build OpenSSL as well; msvc-arm64 is 180). The Linux self-containment assertion now
+  also names ngtcp2 / nghttp3: this repo pins them static with `ENABLE_SHARED_LIB=OFF`
+  today, so they **cannot** show up in `ldd` — naming them turns "somebody flips that
+  upstream switch to ON" into a failure you see immediately (`1.5.0`)
 
 ---
 

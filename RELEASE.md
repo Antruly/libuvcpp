@@ -9,6 +9,84 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.5.0 重点 (Highlights)
+
+`1.4.1` → `1.4.4` 这条开发线（HTTP/2、QUIC、HTTP/3 的 C 面，共 321 个函数）连同上
+面那几件 `1.5.0` 自己的改动，一起收进这一版。
+
+### 发布包：六条腿的预编译二进制从此都是全功能的
+
+这一版**最大的一处用户可见变化**在这里。此前的发布包**不带 QUIC / HTTP/3**（那两个
+开关默认 OFF，发布腿也不传）；`1.5.0` 起六条腿（linux-x64 / linux-arm64 / mingw-x64 /
+mingw-arm64 / msvc-x64 / msvc-arm64）的**发布档与调试档都带上 QUIC + HTTP/3 + C ABI**。
+
+判据**不是**"我们传了 `-D`"，而是**读生成的头**：每条腿各加一步断言，读
+`<tree>/include/uvcpp/uvcpp_config.h` 里那十个宏（`UVCPP_NET_ENABLE`、
+`UVCPP_WEB_ENABLE`、`UVCPP_WEBAPP_ENABLE`、`UVCPP_ENABLE_MEMORY_POOL`、
+`UVCPP_ZLIB_ENABLE`、`UVCPP_OPENSSL_ENABLE`、`UVCPP_NGHTTP2_ENABLE`、
+`UVCPP_CAPI_ENABLE`、`UVCPP_QUIC_ENABLE`、`UVCPP_HTTP3_ENABLE`）。**为什么不能 grep
+`CMakeCache.txt`**：QUIC / HTTP3 缺依赖时走的是 `message(WARNING)` + **普通变量**
+`set(... OFF)`，于是缓存里照旧写着 `=ON` 而编译器看到的是 0 —— 只 grep 缓存的断言会
+**放行一个缺功能的包**，而"发出去的包缺功能"正是它要拦的那件事。生成的头是编译器真正
+读到的那个数。（名字映射也不是按名字猜的：第一版把 `UVCPP_BUILD_EXPAND` 写成
+`UVCPP_WSDL_ENABLE`，拿真生成头实测时当场红了一条。）
+
+QUIC 的前提是一份**带 QUIC API 的 OpenSSL ≥ 3.2**，而六条腿的来路各不相同（逐条记在
+`release.yml` 文件头那张表里，改任何一条之前先看它）：
+
+| 腿 | 这份 OpenSSL 从哪来 |
+|---|---|
+| linux-x64 / linux-arm64 | **不装** Ubuntu 22.04 的 `libssl-dev`（3.0.2，没有 QUIC API —— 装上只是给 `find_package` 添一份不合用的候选），job 里自建 **OpenSSL 3.5.0**（`no-shared no-tests -fPIC`；`-fPIC` **不是保险是承重的**，本机量过同一份源码两种命令行生成的 `CFLAGS`）。编完当场 `nm --defined-only libssl.a` 查 `SSL_set_quic_tls_cbs` **有定义** |
+| mingw-x64 / mingw-arm64 | MSYS2 包的 `openssl`（今天 3.6.x，≥ 3.2） |
+| msvc-x64 | runner 脚本给的那份（`.github/scripts/win-openssl-deps.sh`）；不够 3.2 就会被预检静默关掉 QUIC，从而被断言判红 |
+| msvc-arm64 | 镜像上没有 arm64 的，这条腿自己拿 `VC-WIN64-ARM no-asm` 编 3.5.8；另外把"这份 OpenSSL 确实带 QUIC API"从配置期探测结果（缓存变量 `UVCPP_OPENSSL_HAS_QUIC_CBS`）里读回来，好把"OpenSSL 不对"与"开关没传"两类红分开报 |
+
+依赖仍然**全静态**：libuv / llhttp / zlib / OpenSSL / nghttp2 / **ngtcp2** / **nghttp3**。
+Linux 上 `ldd libuvcpp.so` 只剩 `libc` 与 `ld-linux`（那条自包含断言 `1.5.0` 起把
+ngtcp2 / nghttp3 也写进名单 —— 它们今天被本仓以 `ENABLE_SHARED_LIB=OFF` 压成静态、
+**不可能**出现在 `ldd` 里，写进去是为了让"哪天有人把上游那个开关改成 ON"变成一条当场
+看得见的红）。
+
+### C# 绑定（`bindings/csharp/`）
+
+`321` 条 `DllImport`（`UvcppNative.cs` 183 + `UvcppNative.Protocols.cs` 138，同一个
+partial 类的两半）+ 一个能跑的 **QUIC 回显例子**（`dotnet run` 默认做一次回环：服务端
+收、回显、客户端收到同样的字节，逐字节比，收尾断言活句柄数回到 0）。**判据是"一条不
+多、一条不少"**：与 `tests/tools/capi_symbols.lock` 里 `321` 个 `uvcpp_c_*` 符号**双向
+对账**，两个方向的差集都为空 —— 一段纯文本脚本就能核，不需要库、不需要编译。用法、
+动态库名字那一栏（Windows 上 MinGW 包与 MSVC 包**不一样**）与"别手写声明"的理由都在
+[`bindings/csharp/README.md`](bindings/csharp/README.md)。
+
+例子的价值不只是一份示例：它第一次跑就撞出库里的一个必现 SIGSEGV（带着活连接
+`uvcpp_c_quic_server_free()`），见下面「修复」。
+
+### 修复
+
+- **QUIC 端点带着活连接释放会 SIGSEGV**（1.5.0）。`uvcpp_c_quic_server_free()` 边遍历
+  `server->conns` 边 `detach_conn()`，而后者的"反登记"那一半会从这张表里 `erase` ——
+  `unordered_map::erase` 把**当前迭代器**弄失效，`++it` 踩在已回收的桶上；表里只有一条
+  连接也照样崩。修复是先把句柄抄进一个局部数组，再统一 detach。回归用例
+  `test_free_with_live_conn()`（自签 TLS + 一次真握手，**不 close 也不 stop** 直接 free
+  两端 + 两个 TLS 上下文，再断言登记表回到进场时的数）与变异 M21 一起进 —— 反空转是
+  量出来的：把修复拿掉重跑，这条用例 SIGSEGV。
+- **`uvcpp_c_quic.h` 补上一处会让人写错两遍的文档**（1.5.0）：QUIC 的 `on_read` 收尾是
+  **两条**回调 —— 一个"带数据和 FIN 的 STREAM 帧"先报一条 `DATA`（**那条 `DATA` 的
+  `fin` 也是非 0**），紧接着再报一条 `PEER_CLOSED`。所以**流的结束判据是
+  `PEER_CLOSED`，不是 `fin`**。例子第一版拿 `fin` 当结束判据，于是回显了两次，第二次写
+  方向已经关了（ngtcp2 给 -219），异常从 native 调进来的回调里逃出去 → abort（本机实测
+  退出码 134）。
+
+### 换二进制之前
+
+- **C++ API 没有破坏性改动**；**C ABI 版本仍是 `1`**（`uvcpp_c_abi_version()` 返回 1），
+  这一版**没有**新增、删除或改名任何 `uvcpp_c_*` 符号 —— 符号面仍是 321 条。
+- 但**发布包的模块集合变了**：拿 1.5.0 的包接上去之后，`UVCPP_QUIC_ENABLE` /
+  `UVCPP_HTTP3_ENABLE` / `UVCPP_CAPI_ENABLE` 由 `0` 变 `1`，链接期会多出这三批符号与
+  头。**从源码构建的人不受影响** —— 三个开关的默认值仍是 `OFF`，`full` 那条 CI 格也
+  没有替谁改默认。
+- 拿新包但**不**想用这几片的人什么都不用做：多出来的头是惰性的，模块宏由包里的
+  `include/uvcpp/uvcpp_config.h` 给出。
+
 ## v1.4.0 重点 (Highlights)
 
 `1.3.1` → `1.3.33` 这 33 个开发档全部收进这一版。**这一版有破坏性改动**：日志模块
@@ -299,6 +377,10 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 
 ## 预编译产物 (Prebuilt binaries)
 
+`1.5.0` 起**每一档的发布档与调试档都是全功能的**：QUIC + HTTP/3 + C ABI
+（`UVCPP_QUIC_ENABLE` / `UVCPP_HTTP3_ENABLE` / `UVCPP_CAPI_ENABLE` 都是 1，此前的发布包
+这三项是 0 —— 逐条的来路与判据见上面「`v1.5.0` 重点」）。
+
 本版本提供 **6 个平台**（x64 与 arm64 × MinGW-w64 / MSVC / GCC）的预编译动态库，
 **每档都含发布版与调试版两份**（`v1.1.0` 起就是 6 份，此前这里只列了 3 个 x64 ——
 是这段写漏了，不是少发了包）：
@@ -317,7 +399,7 @@ nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.
 
 | 文件 | 说明 |
 |---|---|
-| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL 以及 MinGW 运行时均已静态链接进去** |
+| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL / nghttp2 / ngtcp2 / nghttp3 以及 MinGW 运行时均已静态链接进去** |
 | `lib/libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
 | `bin/libuvcppd.dll` | **调试档**动态库（MSVC 那份叫 `uvcppd.dll`）。用法与前提见下面「调试档」一节 |
 | `lib/libuvcppd.dll.a` | 调试档导入库（`-luvcppd`）；MSVC 那份是 `uvcppd.lib` |
@@ -386,7 +468,7 @@ PE 里有没有 `RSDS` 指向自己的 `.pdb`；MinGW / Linux 上比对调试节
 包含它，所以只要 `-I` 指对，宏就自动与这个 dll 一致：
 
 ```bash
-export PKG_CONFIG_PATH=/path/to/libuvcpp-1.4.0-mingw-x64/lib/pkgconfig
+export PKG_CONFIG_PATH=/path/to/libuvcpp-1.5.0-mingw-x64/lib/pkgconfig
 g++ -std=c++11 $(pkg-config --cflags uvcpp) your_app.cpp $(pkg-config --libs uvcpp) -o your_app.exe
 ```
 
@@ -549,15 +631,39 @@ int main() {
 ## 变更日志 (Changelog)
 
 这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`，
-`1.2.1` → `1.2.25` 收进 `v1.3.0`，`1.3.1` → `1.3.33` 收进 `v1.4.0`；按主题
-汇总的清单在 [README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
+`1.2.1` → `1.2.25` 收进 `v1.3.0`，`1.3.1` → `1.3.33` 收进 `v1.4.0`，
+`1.4.1` → `1.4.4` 收进 `v1.5.0`；按主题汇总的清单在
+[README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
 
-**`1.4.1-dev` 还没发布，所以下面没有它的条目**（这一节只列打过 tag 的版本，1.4.x
-是收进下一个 tag 的开发线）。它目前的内容是 QUIC 传输层的地基 —— CMake 接线、ngtcp2
-接入、公开 API 形状与配置契约宏，**没有可用的传输** —— 按主题的清单同样在 README 的
-变更日志里，逐条的「这一版没做什么」在
-[`doc/quic-guide.md`](doc/quic-guide.md)。
+**`1.4.1` → `1.4.4` 那条开发线已经收进 `v1.5.0`**，所以下面有它的一条：这一版把那四
+个开发档（QUIC 传输、HTTP/3、以及 C ABI 的三批）与 1.5.0 自己的改动一起发。按主题的
+清单同样在 README 的变更日志里，逐条的「这一版没做什么」在
+[`doc/quic-guide.md`](doc/quic-guide.md) 与 [`doc/http3-guide.md`](doc/http3-guide.md)。
+
+### v1.5.0 (2026-10-05)
+
+**新增**:发布包全功能（QUIC + HTTP/3 + C ABI）、C# 绑定与 QUIC 例子
+
+- **六条发布腿的预编译包（发布档 + 调试档）都带上 QUIC + HTTP/3 + C ABI**。判据读
+  `<tree>/include/uvcpp/uvcpp_config.h` 而不是 `CMakeCache.txt` —— 静默降级（WARNING +
+  普通变量 `set OFF`）在缓存里看不出来，只 grep 缓存的断言会放行一个缺功能的包。
+  QUIC 需要带 QUIC API 的 OpenSSL ≥ 3.2：Linux 两条腿自建 3.5.0、MinGW 两条用 MSYS2 的、
+  MSVC-x64 用 runner 脚本给的那份、MSVC-arm64 自建 3.5.8
+- **C# 绑定**：`bindings/csharp/` 两份 `.cs`（321 条 `DllImport`，与符号面锁双向对账）
+  加一个能跑的 QUIC 回显例子；编译门槛是量出来的（`net8.0` 真跑过、`netstandard2.1` +
+  C# 10 编得过、`netstandard2.0` 与 C# 9 编不过 —— 所以"Unity / Mono 也编得过"是错的）
+- **修复**：QUIC 端点带着活连接 `_server_free()` 会 SIGSEGV（边遍历 `conns` 边
+  `detach_conn()` = erase 当前迭代器），改成一趟快照；`uvcpp_c_quic.h` 补上"`on_read` 的
+  收尾是两条回调、结束判据是 `PEER_CLOSED` 不是 `fin`"
+- 其余是 `1.4.1` → `1.4.4` 那条线上的东西：QUIC 传输层、HTTP/3、C ABI 的三批（地基 +
+  net、webapp + web、HTTP/2、QUIC + HTTP/3，共 321 个函数），按主题见 README 的变更日志
+- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
+  依赖全静态链接
+
+**破坏性**:无 C++ API 变更；C ABI 版本仍是 `1`，符号面 321 条不变。但发布包的**模块
+集合变了**（QUIC / HTTP3 / CAPI 由 0 变 1），换包的人会多出这三批符号与头；从源码构建
+的人不受影响（默认仍是 OFF）。逐条见上面「`v1.5.0` 重点」的「换二进制之前」。
 
 ### v1.4.0 (2026-09-26)
 
@@ -645,11 +751,11 @@ int main() {
 ## 下载 (Download)
 
 - Source code
-- `libuvcpp-1.4.0-mingw-x64.zip` / `libuvcpp-1.4.0-mingw-arm64.zip`
+- `libuvcpp-1.5.0-mingw-x64.zip` / `libuvcpp-1.5.0-mingw-arm64.zip`
   — Windows 预编译动态库（MinGW-w64，含调试档）
-- `libuvcpp-1.4.0-msvc-x64.zip` / `libuvcpp-1.4.0-msvc-arm64.zip`
+- `libuvcpp-1.5.0-msvc-x64.zip` / `libuvcpp-1.5.0-msvc-arm64.zip`
   — Windows 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
-- `libuvcpp-1.4.0-linux-x64.zip` / `libuvcpp-1.4.0-linux-arm64.zip`
+- `libuvcpp-1.5.0-linux-x64.zip` / `libuvcpp-1.5.0-linux-arm64.zip`
   — Linux 预编译动态库（含调试档）
 
 > ⚠️ 两个 Windows 版**互为替代、不可混用**：MinGW-w64 编出来的动态库不能被 MSVC
