@@ -81,3 +81,11 @@ Thumbs.db
 dist*/
 _probe/
 _backup_*/
+
+# C# 示例的构建产物（bindings/csharp/examples/*）
+#
+# `bin/` 与 `obj/` 是 dotnet 的规矩，里面除了 .dll 还有 `project.assets.json`、
+# `*.nuget.g.props` 与一份 `*.csproj.nuget.dgspec.json`（**绝对路径**，换机器就没意义）。
+# 不写成 `bin/` 全局规则：C++ 库里没有叫 bin/ 的正当产物，但写窄一点总归更好读。
+bindings/csharp/**/bin/
+bindings/csharp/**/obj/

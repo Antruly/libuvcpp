@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    QUIC 回显示例（bindings/csharp/examples/QuicEcho）。
+
+    两个刻意的选择：
+
+      * **把两个绑定文件直接 Compile 进来**，不建一个类库工程再 ProjectReference。
+        用户手上的用法就是"把 UvcppNative.cs / UvcppNative.Protocols.cs 两个文件丢进
+        自己的工程"（见 bindings/csharp/README.md），示例照这条路走才叫照着它写的。
+      * **不写 RuntimeIdentifier**：示例在哪个平台跑，就用哪个平台的 libuvcpp 动态库。
+        库怎么被找到见 README.md 的"DllImport 解析"一节。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>QuicEcho</AssemblyName>
+    <RootNamespace>Uvcpp.Examples.QuicEcho</RootNamespace>
+    <!-- 绑定本身不含 unsafe；这里也禁掉，免得示例里不小心冒出依赖指针的写法。 -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../UvcppNative.cs" />
+    <Compile Include="../../UvcppNative.Protocols.cs" />
+  </ItemGroup>
+
+</Project>

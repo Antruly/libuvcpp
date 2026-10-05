@@ -312,6 +312,12 @@ C# 侧本来就是一个 `P/Invoke` 到别处的字符串转换。
 
 ## 5. 从 C# P/Invoke 用
 
+**这一层发出去的那份绑定在 `bindings/csharp/`**：两份 `.cs`（321 条 `DllImport`，
+与 `tests/tools/capi_symbols.lock` 一一对账）+ 一个能跑的 QUIC 例子，用法、动态
+库名字那一栏（Windows 上 MinGW 包与 MSVC 包**不一样**）、以及**别手写声明**的
+理由都在 [`bindings/csharp/README.md`](../bindings/csharp/README.md)。下面的清单
+是那一层的总纲；具体到某一条的实测后果，那份 README 的 §八 有一张逐条的对照表。
+
 这一节只列**会真出事**的那几条。
 
 1. **委托必须自己保活。** `set_events` 收的是一个函数指针；C# 那边是一个
@@ -326,8 +332,14 @@ C# 侧本来就是一个 `P/Invoke` 到别处的字符串转换。
 3. **句柄是 `IntPtr`，别去解引用。** 头里给的是不完整类型，C# 侧照抄成
    `IntPtr` 就行。**不要**自己声明一个同名的 `struct` 去 `Marshal.PtrToStructure`
    —— 布局没有承诺。
-4. **字符编码写死 `CharSet.Ansi`**（这一层收 `const char*`，按字节原样用，
-   自己不做任何编码转换）。路径、JSON、body 都由调用方决定编码。
+4. **字符串按 UTF-8 封送**：`[MarshalAs(UnmanagedType.LPUTF8Str)]`（仓库里那份
+   绑定就是这么声明的）。这一层收 `const char*` 是**按字节原样用**、自己不做任
+   何编码转换，所以编解码的锅在调用方 —— 而本仓的约定是 UTF-8（文本响应的
+   `Content-Type` 里写的就是 `charset=utf-8`，JSON 也是 UTF-8）。
+   **不要写 `CharSet.Ansi`**：本机（Linux / .NET 8）它恰好等于 UTF-8，看不出问
+   题；Windows 上 `Ansi` 的含义是**系统 ANSI 代码页**，中文会变成非 UTF-8 字节。
+   反过来，回调里**借出**的 `const char*`（`uvcpp_c_last_error_string()` 一类）
+   用 `Marshal.PtrToStringUTF8()` 读（.NET 5+）。
 5. **`*_wait()` 那一族会阻塞**，只能在循环还没跑的时候用；在回调里调它们会把
    循环卡死（`connect_wait` 甚至会**抛异常**，见 §6 那条异常边界的用例）。
 6. **`size` 那一格给 `(uint32_t)Marshal.SizeOf<T>()`**，并且你的 `StructLayout`
