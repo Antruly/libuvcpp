@@ -1186,6 +1186,32 @@ def main():
         if os.path.exists(p):
             shutil.copy2(p, stage)
 
+    # ---- C# 绑定（`bindings/csharp/`） ----
+    # 用户对 C# 侧的诉求是"**这个 .cs 文件 + 这份动态库**就能开工"，所以绑定跟着
+    # 二进制一起发 —— 只发动态库的话，写 C# 的人还得再回仓里捞一遍这两份声明。
+    #
+    # 只发**源码**。`examples/QuicEcho/` 下的 `bin/` 与 `obj/` 是本机
+    # `dotnet build` 的产物（可执行文件、NuGet 缓存、写死本机绝对路径的
+    # `*.FileListAbsolute.txt`），发出去既是垃圾也把本机路径漏了出去。这里按
+    # 目录名排除，与 `.gitignore` 是同一条界线 —— 那边排除的是"入不入库"，
+    # 这边是"入不入包"，两边指的是同一批文件、理由也一样。
+    #
+    # 两份 `UvcppNative*.cs` 是这份绑定的全部内容，**必须都在**：只 `copytree`
+    # 不点名，万一哪天目录被挪走或改名，拷出来是一棵空树或半棵树，而包照发照绿
+    # —— 那就成了"包里有个 bindings/csharp/ 目录，打开是空的"。
+    bind_src = os.path.join(repo, "bindings", "csharp")
+    if not os.path.isdir(bind_src):
+        missing.append("C# 绑定目录 %s" % bind_src)
+    else:
+        for f in ("UvcppNative.cs", "UvcppNative.Protocols.cs"):
+            if not os.path.isfile(os.path.join(bind_src, f)):
+                missing.append("C# 绑定缺 %s" % f)
+        shutil.copytree(bind_src, os.path.join(stage, "bindings", "csharp"),
+                        ignore=shutil.ignore_patterns("bin", "obj", ".vs"))
+        n_cs = sum(1 for _r, _d, fs in os.walk(os.path.join(stage, "bindings"))
+                   for f in fs if f.endswith(".cs"))
+        print("bindings/csharp：%d 份 .cs（已排除 bin/ 与 obj/）" % n_cs)
+
     if missing:
         print("\n**缺少必需的文件，不产出残缺的包**：")
         for m in missing:

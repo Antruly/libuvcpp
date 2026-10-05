@@ -19,6 +19,10 @@
 | `UvcppNative.Protocols.cs` | `uvcpp_c_http2.h` / `_quic.h` / `_http3.h` | 138 |
 | `examples/QuicEcho/` | —— | 一个能跑的例子（回显服务端 + 自带客户端） |
 
+每份**预编译发布包**（`libuvcpp-<版本>-<平台>.zip`）里也有一个 `bindings/csharp/`
+目录，内容就是这五份文件（`bin/`、`obj/` 是本机 `dotnet build` 的产物，刻意不发）
+—— 换句话说，C# 侧要的东西在发布包里是齐的，不必再回仓里捞。
+
 两份 `.cs` 合起来 321 条，与 `tests/tools/capi_symbols.lock` 里的 321 个 C 符号
 **一一对应**（怎么自己核，见 §七）。它们是同一个 `UvcppNative` partial 类的两半：
 `Lib` 这个 DllImport 名字、`UVCPP_C_ABI_VERSION`、`UvcppError` / `UvcppCException` /

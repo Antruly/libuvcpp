@@ -395,7 +395,8 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 | Linux arm64 | GCC | 同上 | 同上 |
 
 每个 zip 内含 `bin/`（动态库）、`lib/`（导入库）、`include/`（公开头，含 libuv、
-nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.pc`）与文档。
+nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.pc`）、
+`bindings/csharp/`（C# 绑定与示例）与文档。
 
 | 文件 | 说明 |
 |---|---|
@@ -406,6 +407,7 @@ nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.
 | `bin/uvcppd.pdb` | **仅 MSVC**：调试档的符号文件，与 `uvcppd.dll` 同目录 |
 | `include/` | 公开头文件，含 `expand/`（内存池） |
 | `include/uvcpp/uvcpp_config.h` | **生成的**模块使能宏。每个公开头自己包含它，使用者**不必再传任何 `-D`**（见下） |
+| `bindings/csharp/` | C# 绑定：`UvcppNative.cs` + `UvcppNative.Protocols.cs`（321 条 `DllImport`）与 `examples/QuicEcho/`（一个能跑的回环例子）。放在包里是为了让 C# 侧"这两份声明 + 这份动态库"就能开工，不必再回仓里捞 |
 
 > 命名遵循各工具链的惯例：**MinGW/GCC 产出 `libuvcpp.dll`**，MSVC 产出 `uvcpp.dll`。
 
@@ -757,6 +759,10 @@ int main() {
   — Windows 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
 - `libuvcpp-1.5.0-linux-x64.zip` / `libuvcpp-1.5.0-linux-arm64.zip`
   — Linux 预编译动态库（含调试档）
+
+每个 zip 里都带一份 `bindings/csharp/`（C# 绑定与那个 QUIC 回环例子），用法见
+`bindings/csharp/README.md`。平台的差别只在 `bin/` 与 `lib/` 里的库：绑定本身
+与平台无关，六份包里是同一份源码。
 
 > ⚠️ 两个 Windows 版**互为替代、不可混用**：MinGW-w64 编出来的动态库不能被 MSVC
 > 链接，反之亦然（C++ ABI 不同）。用哪套工具链就下哪个 zip；arm64 同理，别拿 x64 的
