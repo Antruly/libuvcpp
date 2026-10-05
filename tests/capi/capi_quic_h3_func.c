@@ -699,6 +699,96 @@ static void test_constructors(void) {
 }
 
 /* =========================================================================
+ * "还挂着活连接就 free 端点" —— 服务端收尾那条路的回归
+ * =========================================================================
+ *
+ * 这条用例的来历是一枚**必现的 SIGSEGV**：`uvcpp_c_quic_server_free()` 原先边
+ * 遍历 `server->conns` 边 `detach_conn()`，而后者会从那张表里 `erase`（那是它
+ * "反登记"那一半）—— 当前迭代器失效，`++it` 踩在已回收的桶上。哪怕表里只有
+ * 一条连接也照样崩。
+ *
+ * 为什么仓里原先抓不到：**所有** QUIC 用例（包括本文件的主流程）都是"先关
+ * 连接、再释放端点"，于是 `_free()` 那一刻那张表永远是空的，这条路径一次都没
+ * 被走过。撞上它的是 C# 例子（`bindings/csharp/examples/QuicEcho`）—— 它是最
+ * 早的外部消费者，形状就是"跑完一趟回显，直接把两端释放掉"。
+ *
+ * 判据三条：两个 `_free()` 都返回 0；执行流活到下一句（崩了就根本没有下一句）；
+ * 活句柄数回到进来时的数（借出的连接句柄必须已经被反登记 —— 少了这一条，
+ * "毒化"那一半漏掉也测不出来）。
+ */
+static uvcpp_c_quic_client* fl_cli;
+static uvcpp_c_quic_server* fl_srv;
+static int                  fl_connected;
+
+static void fl_on_connect(void* ud, int status) {
+  (void)ud;
+  if (status == 0) fl_connected = 1;
+}
+
+/* 什么都不装：本用例量的是收尾，不是数据面。 */
+static void fl_on_connection(void* ud, uvcpp_c_quic_connection* c) {
+  (void)ud;
+  (void)c;
+}
+
+static void test_free_with_live_conn(void) {
+  const char* const protos[1] = {"echo/1"};
+  uvcpp_c_quic_tls* tls_srv;
+  uvcpp_c_quic_tls* tls_cli;
+  uint64_t          t0;
+  int               before;
+  int               port;
+
+  printf("[capi quic+h3] 带着活连接释放端点\n");
+
+  before = (int)uvcpp_c_live_handle_count();
+
+  tls_srv = uvcpp_c_quic_tls_server_selfsigned("localhost");
+  tls_cli = uvcpp_c_quic_tls_client_new(NULL);
+  CHECK(tls_srv != NULL);
+  CHECK(tls_cli != NULL);
+  if (tls_srv == NULL || tls_cli == NULL) return;
+
+  fl_srv = uvcpp_c_quic_server_new();
+  CHECK(fl_srv != NULL);
+  if (fl_srv == NULL) return;
+  CHECK_INT(uvcpp_c_quic_server_set_tls(fl_srv, tls_srv), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_server_set_alpn_protos(fl_srv, protos, 1), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_server_bind(fl_srv, "127.0.0.1", 0), 0);
+  CHECK_INT(uvcpp_c_quic_server_listen(fl_srv, fl_on_connection, NULL), 0);
+  port = uvcpp_c_quic_server_configured_port(fl_srv);
+  CHECK(port > 0);
+  if (port <= 0) return;
+
+  fl_cli = uvcpp_c_quic_client_new();
+  CHECK(fl_cli != NULL);
+  if (fl_cli == NULL) return;
+  CHECK_INT(uvcpp_c_quic_client_set_tls(fl_cli, tls_cli), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_client_set_alpn_protos(fl_cli, protos, 1), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_client_connect(fl_cli, "127.0.0.1", port,
+                                        fl_on_connect, NULL),
+            0);
+
+  /* 泵到握手完成 —— 这一步是整条用例的**前提**：到这儿服务端那张 `conns`
+   * 表里才真的有一枚活句柄。没有它，下面两个 `_free()` 走的是空表那条路，
+   * 复现不出迭代器失效。 */
+  t0 = uv_hrtime();
+  while (!fl_connected && (uv_hrtime() - t0) < 5000ULL * 1000000ULL) {
+    uvcpp_c_quic_client_run_once(fl_cli);
+    uvcpp_c_quic_server_run_once(fl_srv);
+    uv_sleep(1);
+  }
+  CHECK_INT(fl_connected, 1);
+
+  /* 到这里**不 close、不 stop**，直接释放两端 —— 这就是那条必崩的路。 */
+  CHECK_INT(uvcpp_c_quic_client_free(fl_cli), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_server_free(fl_srv), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_tls_free(tls_cli), UVCPP_C_OK);
+  CHECK_INT(uvcpp_c_quic_tls_free(tls_srv), UVCPP_C_OK);
+  CHECK_INT((int)uvcpp_c_live_handle_count(), before);
+}
+
+/* =========================================================================
  * 主流程
  * ========================================================================= */
 
@@ -736,6 +826,11 @@ int main(void) {
   printf("[capi quic+h3] start\n");
 
   test_constructors();
+
+  /* 第二条：把"释放还在用的端点"这条收尾路径单独走一遍（它有自己的 TLS 对与
+   * 端点对，与下面主流程那套互不干扰；crypto 已经在 `test_constructors()` 里
+   * 初始化过，这里不再调、也不释放）。 */
+  test_free_with_live_conn();
 
   /* ---- TLS：服务端现场生成自签证书、客户端不校验（默认） ---- */
   g.tls_srv = uvcpp_c_quic_tls_server_selfsigned("localhost");

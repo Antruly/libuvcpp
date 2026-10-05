@@ -410,6 +410,45 @@ MUTATIONS = [
        "    if (stream_id < 0) return UVCPP_C_E_INVALID_ARG;\n"
        "    resp->resp.stream_id = stream_id;",
        "    resp->resp.stream_id = stream_id;  /* MUTATION: 负数照收 */")]),
+
+    # ---- quic 端点收尾：带着活连接 free，别边遍历边 erase ----
+    #
+    # 这一枚**不是想出来的**：它是 C# 例子（`bindings/csharp/examples/QuicEcho`）
+    # 第一次跑通回显之后暴露的必现 SIGSEGV —— `_server_free()` 边遍历
+    # `server->conns` 边 `detach_conn()`，而后者会从那张表里 `erase`（"反登记"
+    # 那一半），`unordered_map::erase` 把**当前这个迭代器**弄失效，`++it` 踩在
+    # 已回收的桶上。修复是"先把句柄抄进一个局部数组，再统一 detach"。
+    #
+    # ★ 这条变异第一版**抓不住**，写在头里省得下次误判：本目录批 3 的 QUIC 用例
+    #   清一色是"先关连接、再释放端点"，`_free()` 那一刻 `conns` 永远是空的 ——
+    #   空的（或只有一条也罢，`it` 失效后 `++it` 同样是 UB）都轮不到。真正咬住它
+    #   的是 `capi_quic_h3_func.c` 里补的 `test_free_with_live_conn()`（自签 TLS +
+    #   一次真握手，**不 close** 直接 free）。所以加这条变异与加那条用例是同一件
+    #   事的两半，缺一个这格就永远是空的。
+    #
+    # 它红的方式与 M18 同一档：进程直接没了（rc 139），因此抓没抓住**不看
+    # `failures=`**，看的是"没有 `checks=` 那一行"或者活句柄数对不上。
+    ("M21 quic server_free 边遍历 conns 边 detach（带着活连接释放）",
+     True,
+     [(QUIC,
+       "    std::vector<uvcpp_c_quic_connection*> live_handles;\n"
+       "    live_handles.reserve(server->conns.size());\n"
+       "    for (std::unordered_map<uvcpp::uvcpp_quic_connection*,\n"
+       "                            uvcpp_c_quic_connection*>::iterator it =\n"
+       "             server->conns.begin();\n"
+       "         it != server->conns.end(); ++it) {\n"
+       "      live_handles.push_back(it->second);\n"
+       "    }\n"
+       "    for (size_t i = 0; i < live_handles.size(); ++i) {\n"
+       "      detach_conn(live_handles[i]);\n"
+       "    }\n",
+       "    /* MUTATION: 边遍历 conns 边 detach —— 后者 erase 掉了当前迭代器 */\n"
+       "    for (std::unordered_map<uvcpp::uvcpp_quic_connection*,\n"
+       "                            uvcpp_c_quic_connection*>::iterator it =\n"
+       "             server->conns.begin();\n"
+       "         it != server->conns.end(); ++it) {\n"
+       "      detach_conn(it->second);\n"
+       "    }\n")]),
 ]
 
 RUN_TIMEOUT_S = 600

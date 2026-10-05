@@ -833,11 +833,27 @@ extern "C" UVCPP_C_API int uvcpp_c_quic_server_free(uvcpp_c_quic_server* server)
     }
     // 先把还活着的借用句柄全部毒化：C++ 的析构会拆掉每一条连接，而那时句柄
     // 必须已经在表外（否则"活句柄数"会留下一批永远不会有人回收的账）。
+    //
+    // **必须先把句柄抄一份出来**，不能边遍历 `conns` 边 `detach_conn()`：后者
+    // 会从 `conns` 里 `erase`（那是它的"反登记"那一半），而 `unordered_map` 的
+    // `erase` 会把**当前这个迭代器**弄失效 —— 于是 `++it` 踩在已经回收的桶上。
+    // 哪怕表里只有一条连接也照样崩（`it` 失效后 `++it` 就是 UB）。
+    //
+    // 本机实测：C# 例子（`bindings/csharp/examples/QuicEcho`）跑完回显、**不关
+    // 连接**直接 `uvcpp_c_quic_server_free()` → SIGSEGV，gdb 停在改之前的这一行；
+    // 同一形状的最小纯 C 复现（自签 TLS + 一次回环 + 不关连接直接 free）同样必现。
+    // 收尾顺序"先毒化、再 delete 句柄、最后 delete 端点"本身没问题 ——
+    // `~quic_session` 不发事件，所以 `delete srv` 不会回头调那些已经删掉的跳板。
+    std::vector<uvcpp_c_quic_connection*> live_handles;
+    live_handles.reserve(server->conns.size());
     for (std::unordered_map<uvcpp::uvcpp_quic_connection*,
                             uvcpp_c_quic_connection*>::iterator it =
              server->conns.begin();
          it != server->conns.end(); ++it) {
-      detach_conn(it->second);
+      live_handles.push_back(it->second);
+    }
+    for (size_t i = 0; i < live_handles.size(); ++i) {
+      detach_conn(live_handles[i]);
     }
     server->conns.clear();
     for (size_t i = 0; i < server->retired.size(); ++i) delete server->retired[i];

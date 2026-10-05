@@ -508,6 +508,20 @@ typedef struct uvcpp_c_quic_callbacks {
    *               `event` 是 DATA / PEER_CLOSED / READ_ERROR，`fin` 在 QUIC 上
    *               **会有真值**（STREAM 帧可以同时带数据与 FIN 位）。
    *               `result->data` **只在那次回调里有效**，要留就当场拷走。
+   *
+   *               **收尾是两条回调，不是一条。** 一个"带数据和 FIN 的 STREAM
+   *               帧"会先报一条 `DATA`、紧接着再报一条 `PEER_CLOSED`（为什么
+   *               是两条：`uvcpp_quic_connection.cpp` 的 `ev.on_stream_data`
+   *               那一段，`uvcpp_c_read_result` 一次只装得下一个事件，而 QUIC
+   *               的帧把两者放在一起）。**注意那条 `DATA` 的 `fin` 也是非 0**
+   *               ——它是"这块就是最后一块"的信息位，留给 HTTP/3 那种要当场
+   *               分帧的调用方，**不是**"回调报完了"的意思。
+   *
+   *               所以**流的结束判据是 `PEER_CLOSED`，不是 `fin`**：它恰好来
+   *               一次，也是 net 那层同一个事件（TCP 上也是它）。拿 `fin` 当
+   *               结束判据的调用方会把同一段收尾做两遍 —— 本库自己的 C# 例子
+   *               第一版就是这么写的，于是回显了两次，第二次时写方向已经关了，
+   *               拿到 ngtcp2 的错误码。
    */
   void (*on_read)(void* user_data, uvcpp_c_quic_connection* c,
                   int64_t stream_id, const uvcpp_c_read_result* result);
