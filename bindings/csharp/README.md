@@ -188,19 +188,26 @@ dotnet run                 # 回环往返
 dotnet run -- --serve      # 只当服务端，监听 4433（--port 改）
 ```
 
-本机实测输出（Linux x64 / .NET 8.0.11 / 发布档 `libuvcpp.so`）：
+本机实测输出（Linux x64 / .NET 8.0.11 / 发布档 `libuvcpp.so`，`1.5.0`）：
 
 ```
-libuvcpp 1.4.4-dev（C ABI 1）
-服务端在 127.0.0.1:39184 上收 QUIC（ALPN uvcpp-echo/1）
+libuvcpp 1.5.0（C ABI 1）
+服务端在 127.0.0.1:36547 上收 QUIC（ALPN uvcpp-echo/1）
   服务端：新连接进来了
   客户端：握手完成，流 0 上发了 20 字节
   服务端：流 0 收到 20 字节，回显并 FIN
   客户端：流 0 收到 20 字节并收到 PEER_CLOSED
   协商出的 ALPN：uvcpp-echo/1
+  服务端 on_close 来过：False；客户端 on_close 来过：False
 回环通过：20 字节逐字节相等（63 ms）
   收尾后活句柄数：0
 ```
+
+（端口每次都是内核挑的，所以那一行每次都不同；`(63 ms)` 也随机器变。）
+`on_close 来过：False` 那两行不是可有可无的：它说明这条回环**从头到尾没有关过连接**，
+例子最后是**带着活连接**把两端释放掉的 —— 而"带着活连接释放端点"正是
+`uvcpp_c_quic_server_free()` 曾经 SIGSEGV 的那个形状（这个例子第一次跑就是它撞出来的；
+修复、回归用例与变异 M21 都在 `1.5.0` 里）。所以这两行同时也是那条回归的一次真实验证。
 
 最后那行 `活句柄数：0` 不是装饰：它是这个例子自己带的一条断言 —— 跑完把两端与
 两个 TLS 上下文都 `_free()` 之后，`uvcpp_c_live_handle_count()` 必须回到 0。
