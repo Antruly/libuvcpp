@@ -398,18 +398,24 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
    （v1.18.0 的源码树在 `https://github.com/ngtcp2/nghttp3.git` —— 组织是
    `ngtcp2`，不是 `nghttp2`）。
 
-8. **本文那三条片段要"h3 模块在"才算数，而发布包里它是关的。**
+8. **本文那三条片段要"h3 模块在"才算数，而 CI 手里那份判据包里它是关的。**
    `tests/tools/check_doc_snippets.py` 靠片段 **include 了谁** 登记"这条片段要哪个
    模块"，所以 §3.3 那条明明只用 web 层 API 的片段也列了
    `<http3/uvcpp_h3_connection.h>` —— 不列的话它会**被编**，而它调的
    `set_http3_enabled()` / `listen_quic()` 整段在 `#if UVCPP_HTTP3_ENABLE` 里
    （`uvcpp_http_client.h:299`、`uvcpp_http_server.h:188`），于是报的是"未声明的
    成员"：那是**假红**（文档没腐烂，是那个包没编 h3）。
-   登记之后，`config-contract` job 手里那个包（照 `release.yml` 配的，h3 关着）
-   会把这三条判成 `[跳·默认关]` 而不是 `[跳]`，**退出码不会抬到 3**。两个宏
-   （`UVCPP_QUIC_ENABLE`、`UVCPP_HTTP3_ENABLE`）在脚本的 `DEFAULT_OFF` 表里，
-   判据与代价都写在那张表旁边：**这三条在 CI 里不会被编**，本地验过一次
-   （2026-09-30，`3/3` 绿）：
+   登记之后，`config-contract` job 手里那个包会把这三条判成 `[跳·默认关]` 而不是
+   `[跳]`，**退出码不会抬到 3**。两个宏（`UVCPP_QUIC_ENABLE`、`UVCPP_HTTP3_ENABLE`）
+   在脚本的 `DEFAULT_OFF` 表里，判据与代价都写在那张表旁边。
+
+   > ⚠️ **`1.5.0` 起这句话要说准**：`config-contract` 那份包**不是**发布包的逐字副本，
+   > 两份的开关集合本来就不同 —— 它开 `WSDL`、不开 QUIC/HTTP3，而 `1.5.0` 起的发布包
+   > 反过来（开 QUIC/HTTP3、不开 WSDL）。所以"发布包里 h3 是关的"**不再成立**；成立的
+   > 是"**跑这个门禁的那份包里 h3 是关的**"（`check_doc_snippets.py` 只在两个
+   > `config-contract` job 里跑，没有哪条腿拿带 h3 的包跑过它）。代价因此比原来更直白：
+   > **这三条在 CI 里仍然一条都不会被编**，要判它们就得本地来一次 —— 本地验过一次
+   > （2026-09-30，`3/3` 绿）：
 
    ```
    cmake --install <HTTP3=ON 的构建树> --prefix /tmp/h3-inst
@@ -552,8 +558,11 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 - **MinGW 的 CI 腿没有开 HTTP/3**（quic 在那边也没开）。macOS 与 Windows MSVC
   各有一格 `http3`，只有 MSYS2 那条腿没有 —— 它是单个 job，按功能拆它和加 h3 格
   是同一件事，`doc/ci-guide.md` §1 的"未覆盖的格"里有理由。
-- **预编译包里 http3 头是惰性的**（`UVCPP_HTTP3_ENABLE 0`）。`release.yml` 本版不
-  开 HTTP/3，与 `quic` / `http2` 头在非该模块的包里的行为一致。
+- **预编译包（`1.5.0` 起）里这个头是活的**（`UVCPP_HTTP3_ENABLE 1`）：六条腿的发布档
+  与调试档都开了 HTTP/3（连带 QUIC）。**在 1.5.0 之前这条不成立**：那时候的发布包不带
+  HTTP/3，这个头是惰性的（与 `quic` / `http2` 头在非该模块的包里的行为一致）。**从源码
+  构建的人不受影响**：`UVCPP_ENABLE_HTTP3` 默认仍是 `OFF`，它与 QUIC + web 两个前提也
+  照旧要自己满足。
 - **C 面（1.4.4 起）接在一条"借来的" QUIC 连接上**：`include/capi/uvcpp_c_http3.h`
   是 h3 驱动层一个句柄（`uvcpp_c_h3_connection`）+ 请求 / 响应构造器 + 回调期的请求
   视图。它**照抄**了本页那条 h3 与 QUIC 的分工（h3 换掉连接上的回调表），于是 C 面

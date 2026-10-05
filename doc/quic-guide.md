@@ -584,9 +584,12 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 - **MinGW 的 CI 腿没有开 QUIC。** macOS 与 Windows MSVC 各有一格 `quic`（1.4.1 补的，
   它们用包管理器给的 OpenSSL，只有 ubuntu 那格自建），只有 MSYS2 那条腿还没有 —— 它是
   单个 job，按功能拆它和加 QUIC 格是同一件事，`doc/ci-guide.md` §1 的"未覆盖的格"里有理由。
-- **预编译包里 quic 头是惰性的**（`UVCPP_QUIC_ENABLE 0`）。`release.yml` 本版不
-  开 QUIC（六条腿都要一份 QUIC-capable OpenSSL），所以与 `http2` 头在非 h2 包里
-  的行为一致。
+- **预编译包（`1.5.0` 起）里这个头是活的**（`UVCPP_QUIC_ENABLE 1`）：六条腿的发布档
+  与调试档都开了 QUIC —— 为此每条腿都得有一份带 QUIC API 的 OpenSSL ≥ 3.2，逐条的来路
+  与判据（读生成的头，不是 `CMakeCache.txt`）见 `release.yml` 文件头那张表。**在 1.5.0
+  之前这条不成立**：那时候的发布包不带 QUIC，这个头是惰性的（与 `http2` 头在非 h2 包里
+  的行为一致）。**从源码构建的人不受影响**：`UVCPP_ENABLE_QUIC` 默认仍是 `OFF`，前提
+  也照旧要自己满足。
 - **没有 `uvcpp_web` 那侧的接线。** `uvcpp_http_server` 不会因为 QUIC 打开就多出
   什么 —— 它连 `UVCPP_QUIC_ENABLE` 都不看。
 - **没有流状态枚举，也没有自研 varint 编解码。** 这两样都属于"没有调用方的名字"：

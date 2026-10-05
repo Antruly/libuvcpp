@@ -385,8 +385,16 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
   the package-manager route is tried first. If the `quic` entry on MSVC goes red with
   `ngtcp2 integrated` missing, that is the fallback, not a redesign.
 
-**macOS and Windows prebuilt packages still ship `UVCPP_QUIC_ENABLE 0`** regardless:
-`release.yml` does not enable QUIC (that would need a QUIC-capable OpenSSL on all six legs).
+**The `config-contract` packages and the prebuilt release packages are now two different
+module sets, on purpose** — and each is judged by its own artifact, never by a shared
+assumption. As of **1.5.0** `release.yml` enables QUIC/HTTP3 on all six legs (each leg
+supplies a QUIC-capable OpenSSL >= 3.2; see the table at the top of that file), while the two
+`config-contract` jobs do not — they enable `WSDL` instead, which the release legs leave off.
+So "does *this* package have QUIC?" is answered by the per-leg assertion step reading
+`<tree>/include/uvcpp/uvcpp_config.h`, **never** by grepping `CMakeCache.txt`: the QUIC/HTTP3
+guard chain emits `message(WARNING)` and plain-`set()`s the option OFF, so the cache keeps
+saying `=ON` while the compiler sees 0 — a cache-grepping assertion lets a package without
+the feature through, which is the one thing it exists to stop.
 
 ### The `capi` entries
 
