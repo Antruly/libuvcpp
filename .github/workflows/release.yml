@@ -27,13 +27,46 @@ permissions:
 # 这里原本有一条 `env: UVCPP_VERSION: '1.1.0'`，全文件零引用，且标签打到 v1.1.5
 # 时它仍然写着 1.1.0 —— 删掉，免得下次有人拿它当"版本来源"。
 
+# ---------------------------------------------------------------------------
+# 1.5.0 起：**六条腿的发布产物都是全功能的**（QUIC + HTTP3 + C API 一起开）
+# ---------------------------------------------------------------------------
+# 之前的版本里发布包**不带** QUIC/HTTP3（那两个开关默认 OFF，发布腿也不传）。
+# 1.5.0 起官方二进制按"全功能"发，于是每条腿都要满足 QUIC 的前提：一份
+# **带 QUIC API 的 mainline OpenSSL ≥ 3.2**。各腿的来路不同，逐条记在这里，
+# 改任何一条之前先看这张表：
+#
+#   linux-x64 / linux-arm64  —— runner 是 22.04，apt 的 libssl-dev 是 **3.0.2**
+#       （没有 QUIC API），所以这两条腿**自己在 job 里编一份 OpenSSL 3.5.0**，
+#       参数是 `no-shared no-tests -fPIC`：静态（发布产物要"除 libc 外无运行时
+#       依赖"）、PIC（要塞进 libuvcpp.so）。同时**不装** libssl-dev，免得给
+#       find_package 摆一份不合用的候选。见各腿 "Build OpenSSL with the QUIC API"。
+#   mingw-x64 / mingw-arm64  —— 用 MSYS2 包的 openssl（今天 3.6.5，≥ 3.2）。
+#       这两条腿是把静态 OpenSSL 链进 dll，与 SSL 那条路同一条，只是多了一个
+#       会用到 QUIC 符号的 ngtcp2。
+#   msvc-x64                —— 用 runner 镜像/脚本给的那份 OpenSSL（见
+#       `.github/scripts/win-openssl-deps.sh`）。这份**必须是 ≥ 3.2**：不够的话
+#       配置期预检会把 QUIC 静默关掉，而下面的模块断言会把这条腿判红。
+#   msvc-arm64              —— 镜像上没有 arm64 的 OpenSSL，这条腿自己拿
+#       `VC-WIN64-ARM no-asm` 从源码编 3.5.8（见 "Build OpenSSL for arm64"）。
+#
+# **静默降级**是这五处共同的风险形状：OpenSSL 不合用时根 CMakeLists 走的是
+# `message(WARNING)` + `set(UVCPP_ENABLE_QUIC OFF)`，那是**普通变量**，于是
+# `CMakeCache.txt` 里照旧写着 `=ON` 而编译器看到的是 0。所以六条腿的模块断言
+# **一律读生成的头**（`<tree>/include/uvcpp/uvcpp_config.h`）而不是 cache ——
+# 判据得是"编译器真读到了什么"。理由写在 mingw-x64 那条断言步的注释里。
+
 jobs:
   # ---------------------------------------------------------------------------
   # Windows x64 / MinGW-w64 —— 这是主发布产物（依赖全静态，任意 64 位 Windows 可用）
   # ---------------------------------------------------------------------------
   mingw-x64:
     runs-on: windows-latest
-    timeout-minutes: 120
+    # 120 → 150（1.5.0 起）：这一版**六条腿全开 QUIC/HTTP3**，于是每条腿除了
+    # 自己的源文件与用例，还要先把 ngtcp2 / nghttp3 从源码编出来（FetchContent，
+    # 见 CMakeLists.txt 里那两段），linux 那两条腿还要多编一份 OpenSSL。
+    # 卡在上限上红一次 = 重推一次标签 + 再等一个多小时；多给的这半小时只在真
+    # 出问题时才用到。两个方向的代价不对称，所以给。
+    timeout-minutes: 150
     defaults:
       run:
         shell: msys2 {0}
@@ -86,6 +119,7 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -105,6 +139,7 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -133,6 +168,54 @@ jobs:
               echo "::error title=mingw-not-self-contained::$d 依赖了非 Windows 自带的模块: $bad"
               rc=1
             fi
+          done
+          exit $rc
+
+      # **这份判据取生成的头，不取 CMakeCache** —— 1.5.0 起三个新开关里有两个走
+      # 静默降级链（QUIC/HTTP3：缺依赖或那份 OpenSSL 不带 QUIC API 时是
+      # `message(WARNING)` + `set(... OFF)`，**普通变量、不是 cache 写**），于是
+      # `CMakeCache.txt` 里**照旧**写着 `=ON`，而编译器看到的是生成头里的 0。
+      # 只 grep cache 的断言会放行一个缺功能的包 —— 而"发出去的包缺功能"正是它
+      # 要拦的那件事，放行等于没写。生成的头是编译器真正读到的那个数，也是
+      # config-contract 门禁读的那个数。
+      #
+      # 名字映射（cache 键 → 生成头里的宏，别照着 cache 键去 grep）。**这张表是
+      # 逐条对着 `CMakeLists.txt` 的 `_uvcpp_literal01(...)` 那一段抄的**，不是
+      # 按名字想当然：
+      #   UVCPP_BUILD_EXPAND⇒**UVCPP_ENABLE_MEMORY_POOL**（不是 WSDL —— expand 是
+      #     内存池那个模块，`UVCPP_WSDL_ENABLE` 归另一个开关 `UVCPP_ENABLE_WSDL`，
+      #     它默认 OFF 且发布腿**刻意不开**，所以这一串里绝不能出现 WSDL_ENABLE：
+      #     第一版就是按名字猜的，本机对着真生成头实测当场红了一条，而六条腿会
+      #     一起红）；
+      #   UVCPP_BUILD_WEB⇒UVCPP_WEB_ENABLE、UVCPP_BUILD_WEBAPP⇒UVCPP_WEBAPP_ENABLE、
+      #   UVCPP_BUILD_NET⇒UVCPP_NET_ENABLE、UVCPP_ENABLE_ZLIB⇒UVCPP_ZLIB_ENABLE；
+      #   其余同名加 `_ENABLE` 后缀（`UVCPP_ENABLE_QUIC`⇒`UVCPP_QUIC_ENABLE`）。
+      #
+      # 两份产物都量：调试档与发布档是**两次独立的 configure**，漏传只让其中一份
+      # 缺功能 —— 而那一份正是使用者拿去调试时才撞上的。
+      - name: Assert the requested modules are actually on
+        run: |
+          rc=0
+          check_tree() {
+            tree="$1"; shift
+            hdr="$tree/include/uvcpp/uvcpp_config.h"
+            if [ ! -f "$hdr" ]; then
+              echo "::error title=mingw-x64-no-config-header::找不到 $hdr —— 这一档的 configure 没落地"
+              rc=1; return
+            fi
+            for k in "$@"; do
+              if ! grep -qE "^#  define ${k} 1$" "$hdr"; then
+                echo "::error title=mingw-x64-module-off::${k} 在 $tree 里不是 1，包会缺功能"
+                grep -E "^#  define ${k} " "$hdr" || echo "  （生成头里没有这一项）"
+                rc=1
+              fi
+            done
+          }
+          for t in build-mingw build-mingw-dbg; do
+            check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
+              UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
+              UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
+              UVCPP_HTTP3_ENABLE
           done
           exit $rc
 
@@ -170,7 +253,7 @@ jobs:
   # ---------------------------------------------------------------------------
   mingw-arm64:
     runs-on: windows-11-arm
-    timeout-minutes: 120
+    timeout-minutes: 150
     defaults:
       run:
         shell: msys2 {0}
@@ -241,6 +324,7 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -257,6 +341,7 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -300,6 +385,34 @@ jobs:
           sys.exit(rc)
           PY
 
+      # 与 mingw-x64 那一同名步骤逐字同构（判据为什么取生成的头、名字怎么映射、
+      # 为什么两份产物都要量 —— 全在那边的注释里），只换了标题里的腿名。
+      - name: Assert the requested modules are actually on
+        run: |
+          rc=0
+          check_tree() {
+            tree="$1"; shift
+            hdr="$tree/include/uvcpp/uvcpp_config.h"
+            if [ ! -f "$hdr" ]; then
+              echo "::error title=mingw-arm64-no-config-header::找不到 $hdr —— 这一档的 configure 没落地"
+              rc=1; return
+            fi
+            for k in "$@"; do
+              if ! grep -qE "^#  define ${k} 1$" "$hdr"; then
+                echo "::error title=mingw-arm64-module-off::${k} 在 $tree 里不是 1，包会缺功能"
+                grep -E "^#  define ${k} " "$hdr" || echo "  （生成头里没有这一项）"
+                rc=1
+              fi
+            done
+          }
+          for t in build-mingw build-mingw-dbg; do
+            check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
+              UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
+              UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
+              UVCPP_HTTP3_ENABLE
+          done
+          exit $rc
+
       - name: Test
         run: |
           # 续行必须写在块标量里。`run: cmd \` 是 YAML 普通标量，普通标量把换行
@@ -332,7 +445,7 @@ jobs:
     # 的节奏上（今天 VS2026，下次不知道）。windows-2022 上只有 VS2022，
     # 生成器是写死还是自动挑结果相同，但写出来在日志里可核对。
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -368,6 +481,7 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -383,19 +497,35 @@ jobs:
       - name: Assert the requested modules are actually on
         shell: bash
         run: |
-          # UVCPP_ENABLE_CAPI 也在这一串里：它的守卫链（缺 NET 或 WEB 就 warn +
-          # 强制关）是**普通变量 set()**，cache 里照旧写着 ON，所以这一条断言按
-          # 设计就抓不到类似 QUIC 那两处"静默降级"；它能抓的是"这一趟根本没传这个
-          # -D"（比如将来谁复制粘贴了一个新 job）。这正是它在这里的价值。
-          for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
-                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB \
-                   UVCPP_ENABLE_NGHTTP2 UVCPP_ENABLE_CAPI; do
-            if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
-              echo "::error title=msvc-module-off::${k} 没有生效，包会缺功能"
-              grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
-              exit 1
+          # 判据从 CMakeCache 改成**生成的头**（1.5.0 起）：旧写法只 grep cache，
+          # 而这一版新开的 QUIC/HTTP3 走的正是"cache 里照旧 ON、真正生效的是 0"
+          # 那条静默降级链 —— 旧断言会放行一个缺功能的包。完整理由、名字映射与
+          # "两份产物都要量"都在 mingw-x64 那个同名步骤的注释里。
+          #
+          # MSVC 这里只有**一棵**多配置树（Release/Debug 共用一次 configure），
+          # 所以 `for t` 只有一格 —— 与 mingw/linux 那边两份树的形状不同，
+          # 那是生成器差异（单配置 vs 多配置），不是漏了一只。
+          rc=0
+          check_tree() {
+            tree="$1"; shift
+            hdr="$tree/include/uvcpp/uvcpp_config.h"
+            if [ ! -f "$hdr" ]; then
+              echo "::error title=msvc-x64-no-config-header::找不到 $hdr —— configure 没落地"
+              rc=1; return
             fi
-          done
+            for k in "$@"; do
+              if ! grep -qE "^#  define ${k} 1$" "$hdr"; then
+                echo "::error title=msvc-x64-module-off::${k} 在 $tree 里不是 1，包会缺功能"
+                grep -E "^#  define ${k} " "$hdr" || echo "  （生成头里没有这一项）"
+                rc=1
+              fi
+            done
+          }
+          check_tree build-msvc UVCPP_NET_ENABLE UVCPP_WEB_ENABLE \
+            UVCPP_WEBAPP_ENABLE UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE \
+            UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE \
+            UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE
+          exit $rc
 
       - name: Test
         shell: bash
@@ -564,6 +694,7 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -604,19 +735,42 @@ jobs:
       - name: Assert the requested modules are actually on
         shell: bash
         run: |
-          # UVCPP_ENABLE_CAPI 也在这一串里：它的守卫链（缺 NET 或 WEB 就 warn +
-          # 强制关）是**普通变量 set()**，cache 里照旧写着 ON，所以这一条断言按
-          # 设计就抓不到类似 QUIC 那两处"静默降级"；它能抓的是"这一趟根本没传这个
-          # -D"（比如将来谁复制粘贴了一个新 job）。这正是它在这里的价值。
-          for k in UVCPP_ENABLE_OPENSSL UVCPP_BUILD_WEB UVCPP_BUILD_WEBAPP \
-                   UVCPP_BUILD_EXPAND UVCPP_ENABLE_ZLIB \
-                   UVCPP_ENABLE_NGHTTP2 UVCPP_ENABLE_CAPI; do
-            if ! grep -qE "^${k}:(BOOL|UNINITIALIZED)=ON$" build-msvc/CMakeCache.txt; then
-              echo "::error title=msvc-arm64-module-off::${k} 没有生效，包会缺功能"
-              grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项)"
-              exit 1
+          # 判据从 CMakeCache 改成**生成的头**（1.5.0 起）—— 完整理由（为什么 cache
+          # 会漏掉 QUIC/HTTP3 的静默降级、名字怎么映射、为什么只有一棵树）在
+          # msvc-x64 那个同名步骤的注释里。这一条是 arm64 特有的**补充**判据：
+          # 这条腿的 OpenSSL 是自己拿 `VC-WIN64-ARM no-asm` 从源码编的（见上面
+          # "Build OpenSSL for arm64"），本机无法验证，所以这里额外把"这份 OpenSSL
+          # 确实带 QUIC API"从**配置期的探测结果**里读回来 —— 探测结果是 cache 变量
+          # `UVCPP_OPENSSL_HAS_QUIC_CBS`，它与 QUIC 是否真生效是同一次探测的两面，
+          # 拿它能把"OpenSSL 不对"与"开关没传"两类红分开报。
+          rc=0
+          for k in UVCPP_OPENSSL_HAS_QUIC_CBS; do
+            if ! grep -qE "^${k}:(INTERNAL|BOOL)=1$" build-msvc/CMakeCache.txt; then
+              echo "::error title=msvc-arm64-openssl-no-quic::这份 OpenSSL 的探测结果里没有 QUIC API（$k 不是 1）—— ngtcp2 的 crypto 目标会走错分支/建不出来"
+              grep -E "^${k}:" build-msvc/CMakeCache.txt || echo "  (缓存里没有这一项，说明预检没跑到)"
+              rc=1
             fi
           done
+          check_tree() {
+            tree="$1"; shift
+            hdr="$tree/include/uvcpp/uvcpp_config.h"
+            if [ ! -f "$hdr" ]; then
+              echo "::error title=msvc-arm64-no-config-header::找不到 $hdr —— configure 没落地"
+              rc=1; return
+            fi
+            for k in "$@"; do
+              if ! grep -qE "^#  define ${k} 1$" "$hdr"; then
+                echo "::error title=msvc-arm64-module-off::${k} 在 $tree 里不是 1，包会缺功能"
+                grep -E "^#  define ${k} " "$hdr" || echo "  （生成头里没有这一项）"
+                rc=1
+              fi
+            done
+          }
+          check_tree build-msvc UVCPP_NET_ENABLE UVCPP_WEB_ENABLE \
+            UVCPP_WEBAPP_ENABLE UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE \
+            UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE \
+            UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE
+          exit $rc
 
       - name: Test
         shell: bash
@@ -646,14 +800,60 @@ jobs:
   # ---------------------------------------------------------------------------
   linux-x64:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
+      # **不装 `libssl-dev`**（1.5.0 起）：这一版发布包要带 QUIC/HTTP3，而 22.04 那份
+      # libssl-dev 是 3.0.2 —— 没有 QUIC API。装上它只会往 find_package 的候选里
+      # 摆一份不合用的头（`OPENSSL_INCLUDE_DIR` 指错，配置期预检就看的是它），
+      # 而"预检不过 ⇒ 静默关掉 QUIC"是**静默坏包**：cache 里照旧 ON，包却缺功能。
+      # 三处候选里只留一份、且是对的那一份，比"指对了就行"稳。与
+      # ci-linux-ubuntu.yml 的 quic/http3 两格同一条规矩（那边注释里也写了这条）。
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev zlib1g-dev ninja-build
+          sudo apt-get install -y zlib1g-dev ninja-build
+
+      - name: Build OpenSSL with the QUIC API
+        run: |
+          set -euo pipefail
+          # 3.5.0 是 QUIC API（`SSL_set_quic_tls_cbs`）进 mainline 之后的一份稳定版。
+          # 与 ci-linux-ubuntu.yml 的 quic 格同一份源码、同一套参数，**除了一点**：
+          # 那边编 `shared`（测试跑起来要 LD_LIBRARY_PATH），这里必须 `no-shared` ——
+          # 发布产物的判据是"除 libc 外没有运行时依赖"，下面那条 ldd 断言会拦
+          # libssl.so.3。静态库要塞进 libuvcpp.so，所以还要显式 `-fPIC` —— 它
+          # **不是保险，是承重的**：OpenSSL 的 Configure 把不认识的 `-X` 参数收进用户
+          # CFLAGS，而 `no-shared` 自己**不带** PIC。本机实测同一份源码两条命令行
+          # 生成的 Makefile：
+          #   给 `-fPIC` ⇒ CFLAGS=-Wall -O3 -fPIC（装出来只有 libssl.a/libcrypto.a，
+          #                探针 .so 链得上）
+          #   不给      ⇒ CFLAGS=-Wall -O3      （静态库链进 .so 就是
+          #                "relocation R_X86_64_PC32 ... recompile with -fPIC"）
+          cd "$RUNNER_TEMP"
+          curl -sSL --retry 3 --retry-delay 5 -o openssl.tar.gz \
+            https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-3.5.0
+          mkdir -p openssl-src
+          tar xzf openssl.tar.gz -C openssl-src --strip-components=1
+          cd openssl-src
+          # `no-tests` 只是不编上游测试套件（省时间），`no-shared` 见上。
+          ./Configure --prefix="$HOME/openssl-quic" --libdir=lib \
+            no-shared no-tests -fPIC
+          make -j"$(nproc)"
+          make install_sw
+          "$HOME/openssl-quic/bin/openssl" version
+          # 自检：这份 OpenSSL 真的带 QUIC API。不查的话，配置期那道预检会
+          # WARNING + `set(UVCPP_ENABLE_QUIC OFF)`，整条腿变成一次**静默降级**，
+          # 而 cache 里仍是 ON —— 下面那条断言才是最终判据，这条只是让失败停在
+          # 更近的地方（省下一次 ~40 分钟的构建）。
+          #
+          # 查的是**静态库**，所以是 `nm` 而不是 `nm -D`（no-shared 下没有 .so），
+          # 且要求那枚符号是**有定义的**（`T`/`W`）：只按名字匹配的话，一份"只有
+          # 引用没有实现"的库也能过。`$` 锚行尾在这里是对的 —— 归档成员里的符号
+          # 不带 `@@OPENSSL_x.y.z` 那种版本后缀（本机实测）。
+          nm --defined-only "$HOME/openssl-quic/lib/libssl.a" \
+            | grep -qE ' [TW] SSL_set_quic_tls_cbs$' || {
+            echo "::error title=quic-openssl::编出来的 libssl.a 没有 SSL_set_quic_tls_cbs —— 这份 OpenSSL 不对，后面的 QUIC/HTTP3 断言必然红"; exit 1; }
 
       - name: Configure & Build
         run: |
@@ -683,7 +883,9 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux --parallel 4
@@ -699,7 +901,9 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux-dbg --parallel 4
@@ -726,7 +930,11 @@ jobs:
             # 第三方库必须是静态进去的：这几个在用户机器上不一定有，缺了就是
             # "装了跑不起来"。libstdc++/libgcc_s 只警告不失败 —— glibc 那边偶尔
             # 仍会渗出 libgcc_s，钉死它会让发布卡在一件不致命的事上。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
+            # ngtcp2/nghttp3 是 1.5.0 起新进这份产物的两枚：它们由本仓 FetchContent
+            # 以 `ENABLE_SHARED_LIB=OFF` 压成静态（CMakeLists.txt 里那两段），所以
+            # 今天**不可能**出现在这里 —— 把它写进名单是为了让"哪天有人把上游那个
+            # 开关改成 ON"变成一条**当场看得见**的红，而不是一个安静的 DLL 依赖。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2|ngtcp2|nghttp3)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -735,6 +943,37 @@ jobs:
             if [ -n "$soft" ]; then
               echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
             fi
+          done
+          exit $rc
+
+      - name: Assert the requested modules are actually on
+        run: |
+          # 与 mingw-x64 那一同名步骤逐字同构（判据为什么取生成的头、名字怎么
+          # 映射、为什么两份树都要量 —— 全在那边的注释里）。这条腿多一层理由：
+          # 它的 OpenSSL 是 job 里现编的，**编出一份不带 QUIC API 的库**完全可能
+          # （源码/参数被人改错），而那种情况下配置期只会 WARNING 一句然后把
+          # QUIC 关掉 —— 生成头是唯一会说实话的地方。
+          rc=0
+          check_tree() {
+            tree="$1"; shift
+            hdr="$tree/include/uvcpp/uvcpp_config.h"
+            if [ ! -f "$hdr" ]; then
+              echo "::error title=linux-no-config-header::找不到 $hdr —— 这一档的 configure 没落地"
+              rc=1; return
+            fi
+            for k in "$@"; do
+              if ! grep -qE "^#  define ${k} 1$" "$hdr"; then
+                echo "::error title=linux-module-off::${k} 在 $tree 里不是 1，包会缺功能"
+                grep -E "^#  define ${k} " "$hdr" || echo "  （生成头里没有这一项）"
+                rc=1
+              fi
+            done
+          }
+          for t in build-linux build-linux-dbg; do
+            check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
+              UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
+              UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
+              UVCPP_HTTP3_ENABLE
           done
           exit $rc
 
@@ -764,14 +1003,38 @@ jobs:
   # ---------------------------------------------------------------------------
   linux-arm64:
     runs-on: ubuntu-22.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
+      # 不装 libssl-dev —— 理由与 linux-x64 那边逐字相同（22.04 那份是 3.0.2，
+      # 没有 QUIC API；装上只是给 find_package 添一份不合用的候选）。
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev zlib1g-dev ninja-build
+          sudo apt-get install -y zlib1g-dev ninja-build
+
+      # 与 linux-x64 那一同名步骤逐字同构（同一份源码、同一套参数、同一条自检），
+      # 只有 `--prefix` 下的那份库是 aarch64 的 —— OpenSSL 的 Configure 按机器
+      # 自己挑目标（这里挑到 linux-aarch64），不需要我们传。`-fPIC` 在 aarch64 上
+      # 一样是承重的（理由见 linux-x64 那边的实测）。
+      - name: Build OpenSSL with the QUIC API
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSL --retry 3 --retry-delay 5 -o openssl.tar.gz \
+            https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-3.5.0
+          mkdir -p openssl-src
+          tar xzf openssl.tar.gz -C openssl-src --strip-components=1
+          cd openssl-src
+          ./Configure --prefix="$HOME/openssl-quic" --libdir=lib \
+            no-shared no-tests -fPIC
+          make -j"$(nproc)"
+          make install_sw
+          "$HOME/openssl-quic/bin/openssl" version
+          nm --defined-only "$HOME/openssl-quic/lib/libssl.a" \
+            | grep -qE ' [TW] SSL_set_quic_tls_cbs$' || {
+            echo "::error title=quic-openssl::编出来的 libssl.a 没有 SSL_set_quic_tls_cbs —— 这份 OpenSSL 不对，后面的 QUIC/HTTP3 断言必然红"; exit 1; }
 
       - name: Configure & Build
         run: |
@@ -785,7 +1048,9 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux --parallel 4
@@ -800,7 +1065,9 @@ jobs:
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux-dbg --parallel 4
@@ -818,7 +1085,11 @@ jobs:
             fi
             echo "--- so=$so"
             ldd "$so"
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2)[^ ]*\.so[^ ]*' | sort -u || true)
+            # ngtcp2/nghttp3 是 1.5.0 起新进这份产物的两枚：它们由本仓 FetchContent
+            # 以 `ENABLE_SHARED_LIB=OFF` 压成静态（CMakeLists.txt 里那两段），所以
+            # 今天**不可能**出现在这里 —— 把它写进名单是为了让"哪天有人把上游那个
+            # 开关改成 ON"变成一条**当场看得见**的红，而不是一个安静的 DLL 依赖。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2|ngtcp2|nghttp3)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -827,6 +1098,37 @@ jobs:
             if [ -n "$soft" ]; then
               echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
             fi
+          done
+          exit $rc
+
+      - name: Assert the requested modules are actually on
+        run: |
+          # 与 mingw-x64 那一同名步骤逐字同构（判据为什么取生成的头、名字怎么
+          # 映射、为什么两份树都要量 —— 全在那边的注释里）。这条腿多一层理由：
+          # 它的 OpenSSL 是 job 里现编的，**编出一份不带 QUIC API 的库**完全可能
+          # （源码/参数被人改错），而那种情况下配置期只会 WARNING 一句然后把
+          # QUIC 关掉 —— 生成头是唯一会说实话的地方。
+          rc=0
+          check_tree() {
+            tree="$1"; shift
+            hdr="$tree/include/uvcpp/uvcpp_config.h"
+            if [ ! -f "$hdr" ]; then
+              echo "::error title=linux-no-config-header::找不到 $hdr —— 这一档的 configure 没落地"
+              rc=1; return
+            fi
+            for k in "$@"; do
+              if ! grep -qE "^#  define ${k} 1$" "$hdr"; then
+                echo "::error title=linux-module-off::${k} 在 $tree 里不是 1，包会缺功能"
+                grep -E "^#  define ${k} " "$hdr" || echo "  （生成头里没有这一项）"
+                rc=1
+              fi
+            done
+          }
+          for t in build-linux build-linux-dbg; do
+            check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
+              UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
+              UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
+              UVCPP_HTTP3_ENABLE
           done
           exit $rc
 
