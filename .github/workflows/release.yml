@@ -425,6 +425,24 @@ jobs:
   # Windows arm64 / MSVC (VS2022 v143) —— 与 msvc-x64 同源，只差架构。
   # 真正的卡点是 OpenSSL：choco 的 openssl 只有 x64/x86，arm64 那份没有现成的，
   # 只能自己编。其余开关与 msvc-x64 逐字一致。
+  #
+  # **工具集是 v143，但它现在只能靠 `-T` 钉住、不能靠镜像，这里把为什么写清楚。**
+  # `windows-11-arm` 这个标签在 2026-09-21~30 之间从 VS2022 镜像切成了 VS2026 镜像
+  # （GitHub 的公告；本仓第一次撞上它是 2026-10-04 那次 release 测试，红在下面那条
+  # ABI 断言上）。VS2026 的**默认**工具集不再是 v143，所以"让 CMake 自己挑生成器"
+  # 这条腿会静默把 ABI 升上去 —— 那边 msvc-x64 钉在 `windows-2022` 上照旧是 v143，
+  # 两个包就对不上了，而 `RELEASE.md` 的平台表把两个 Windows 包都写成 VS2022。
+  #
+  # 好在**镜像里装着 v143 的 ARM64 工具集**：
+  # `Microsoft.VisualStudio.Component.VC.14.44.17.14.ARM64`（见 actions/runner-images
+  # 的 `Windows11-VS2026-Arm64-Readme.md`；14.44 就是 VS2022 17.14 的那版 MSVC）。
+  # 所以这条腿改成三处一起钉 v143：OpenSSL 那步的 `vcvarsall -vcvars_ver`、
+  # 下面 configure 的 `-T v143`、以及那条断言（断言**工具集**而不是生成器名）。
+  # 注意**别**照着 msvc-x64 的样子写死 `-G "Visual Studio 17 2022"`：那张镜像上
+  # 没有 VS2022，生成器名只会是 18 2026 —— 要钉的是工具集，不是生成器。
+  #
+  # 若哪天镜像连这个兼容组件也撤了，失败是响亮的：configure 期 `MSB8020`
+  # （"cannot be found for Platform Toolset = 'v143'"），而不是发一个 ABI 不同的包。
   # ---------------------------------------------------------------------------
   msvc-arm64:
     runs-on: windows-11-arm
@@ -494,8 +512,19 @@ jobs:
             exit /b 1
           )
           echo VSDIR=%VSDIR%
-          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" arm64
+          rem `-vcvars_ver=14.44` 把工具集钉到 v143（14.44 = VS2022 17.14 那版 MSVC），
+          rem 理由见 job 头那段：VS2026 是默认工具集，不钉就会让 OpenSSL 用 14.5x
+          rem 编、而 uvcpp 那边用 `-T v143` 编 —— 一个包里两个工具集。
+          rem 光传参不算数，下面直接核对 vcvars 真的选中了 14.44（`VCToolsVersion`
+          rem 是 vcvars 自己导出的），传了个不存在的版本号而静默回退也拦得住。
+          rem 用 /l 让 '.' 按字面匹配 —— findstr 默认把搜索串当正则。
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" arm64 -vcvars_ver=14.44
           if errorlevel 1 exit /b 1
+          echo VCToolsVersion=%VCToolsVersion%
+          echo %VCToolsVersion% | findstr /l /b "14.44." >nul || (
+            echo ::error title=openssl-toolset-drift::期望 v143 的 MSVC 14.44，实际 '%VCToolsVersion%'
+            exit /b 1
+          )
 
           cd /d "%GITHUB_WORKSPACE%\openssl-src"
           perl Configure VC-WIN64-ARM no-asm no-tests no-apps no-makedepend /FS ^
@@ -511,10 +540,15 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          # 不写 -G：windows-11-arm 现在有 VS2022，而公告说这张镜像 9 月起切
-          # VS2026（今天就是 9 月），写死 `-G "Visual Studio 17 2022"` 会变成第二个
-          # msvc-x64 那样的"生成器找不到"。架构用 -A 钉住，生成器交给 CMake 挑，
-          # 挑到哪个由下面那条 ABI 断言把关。
+          # 不写 -G：这张镜像已经只剩 VS2026 了（job 头那段），写死
+          # `-G "Visual Studio 17 2022"` 就是 msvc-x64 那边的"生成器找不到"。
+          # 生成器交给 CMake 挑（今天会挑到 VS2026），但**工具集**必须钉回 v143：
+          # ABI 是工具集决定的，不是生成器决定的 —— 包要是拿 v144 编出来，
+          # 就和钉在 windows-2022 上的 msvc-x64 不是一个 ABI，而 RELEASE.md
+          # 两个 Windows 包都写着 "MSVC (VS2022)"。`-T v143` 就是这一钉，
+          # 镜像上真装了 v143 的 arm64 组件（job 头引了 runner-images 的清单），
+          # 没有的话 configure 阶段就 MSB8020 响亮地停。下面那条断言再从
+          # CMakeCache 里把实际选中的工具集读回来核对 —— 传参不算数，缓存算数。
           #
           # 开关与 msvc-x64 逐字一致（理由见那边）：BUILD_SHARED_LIBS=OFF 管 llhttp、
           # UVCPP_BUILD_LIBUV_FROM_SOURCE=ON 管 libuv。
@@ -522,7 +556,7 @@ jobs:
           # OPENSSL_ROOT_DIR 必须显式给：不给的话 find_package 会在镜像里乱找，
           # 而 choco 那份是 x64 的 —— 把 x64 的 .lib 链进 arm64 是响亮失败，
           # 但"找不到 ⇒ QUIET 静默关掉 SSL"是静默坏包，两种都不能靠运气。
-          cmake -S . -B build-msvc -A arm64 \
+          cmake -S . -B build-msvc -A arm64 -T v143 \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
             -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
@@ -538,9 +572,16 @@ jobs:
           # 调试档：同 msvc-x64，只建 `uvcpp` 这一个目标（见那边的注释）。
           cmake --build build-msvc --config Debug --target uvcpp --parallel 4
 
-      # 镜像切到 VS2026 之后 CMake 会**静默**换生成器，用户拿到的 ABI 就从 v143
-      # 变成 v144 —— 而且会和钉在 windows-2022 上的 msvc-x64 对不上。这种事必须
-      # 响亮。判据取 CMakeCache，比刮 configure 的日志稳。
+      # ABI 由**工具集**决定，不由生成器决定：镜像从 VS2022 换到 VS2026 之后，
+      # 同一个生成器（现在是 "Visual Studio 18 2026"）能配出 v143 也能配出 v144
+      # 两种 ABI。上面用 `-T v143` 钉住，这一条把**缓存里实际落下的**值读回来
+      # 核对 —— 传参不算数，缓存算数：`-T` 被谁删了、写成了别的版本、或镜像上
+      # 没装 v143 而 CMake 静默回退，都在这里响。判据取 CMakeCache，比刮
+      # configure 日志稳。
+      #
+      # 取的是 CMAKE_GENERATOR_TOOLSET（`-T` 落的那个）；不传 `-T` 时它是空串
+      # （本机对着一个 VS2022 的缓存实测过），所以"有人删掉 -T"会被下面这句抓住，
+      # 不会悄悄漏成生成器的默认工具集。
       #
       # 平台键是 CMAKE_GENERATOR_PLATFORM（`-A` 落的那个），**不是**
       # CMAKE_VS_PLATFORM_NAME —— 后者是 CMake 脚本里的变量，CMakeCache.txt 里
@@ -553,9 +594,10 @@ jobs:
         run: |
           gen=$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' build-msvc/CMakeCache.txt)
           plat=$(sed -n 's/^CMAKE_GENERATOR_PLATFORM:INTERNAL=//p' build-msvc/CMakeCache.txt)
-          echo "generator=$gen  platform=$plat"
-          if [ "$gen" != "Visual Studio 17 2022" ] || [ "$plat" != "arm64" ]; then
-            echo "::error title=arm64-abi-drift::期望 'Visual Studio 17 2022' / arm64，实际 '$gen' / '$plat' —— 镜像换 VS 了，这一版的 ABI 会和 msvc-x64 对不上，先停下来定"
+          ts=$(sed -n 's/^CMAKE_GENERATOR_TOOLSET:INTERNAL=//p' build-msvc/CMakeCache.txt)
+          echo "generator=$gen  platform=$plat  toolset=$ts"
+          if [ "$ts" != "v143" ] || [ "$plat" != "arm64" ]; then
+            echo "::error title=arm64-abi-drift::期望工具集 v143 / arm64，实际 '$ts' / '$plat' ——（生成器是 '$gen'）工具集换了这一版 ABI 就和钉在 VS2022 上的 msvc-x64 对不上，而 RELEASE.md 两个 Windows 包都写着 MSVC (VS2022)，先停下来定"
             exit 1
           fi
 
