@@ -561,6 +561,14 @@ double pct(const std::vector<double>& sorted, double p) {
 int main(int argc, char** argv) {
   Mode                mode   = kPush;
   int                 rounds = 7;
+  /// `udpfloor` 每个数据报装多少字节。**必须与 QUIC 那一档量到的数据报一样大**，
+  /// 否则两条读数不可比：地板本身也是按包数付内核税的。
+  ///
+  /// 默认 1444 是 QUIC 那一侧放开数据报上限之后 PMTUD 停的那一档（见
+  /// `doc/benchmark-rig.md`）；跑之前先看输出的 `pkt=` 那几个字，量出来的地板
+  /// 是哪一档由它自报，不靠默认值。以前这里是 1200 —— 那是"数据报被钉在 1200"
+  /// 那个版本的配套口径，留着会让默认比较**默认就不公平**。
+  size_t              floor_pkt = 1444;
   std::vector<size_t> sizes;
   sizes.push_back(1024);
   sizes.push_back(8192);
@@ -585,6 +593,9 @@ int main(int argc, char** argv) {
     } else if (std::strncmp(a, "--sizes=", 8) == 0) {
       std::vector<size_t> got = parse_sizes(a + 8);
       if (!got.empty()) sizes = got;
+    } else if (std::strncmp(a, "--pkt=", 6) == 0) {
+      const long v = std::atol(a + 6);
+      if (v > 0) floor_pkt = static_cast<size_t>(v);
     } else {
       std::fprintf(stderr, "unknown arg: %s\n", a);
       return 2;
@@ -593,7 +604,8 @@ int main(int argc, char** argv) {
 
   // 裸 UDP 地板：不走 `Rig`（那里一条连接都没有），单独一条路。
   if (mode == kUdpFloor) {
-    std::printf("uvcpp bare-UDP floor  rounds=%d\n", rounds);
+    std::printf("uvcpp bare-UDP floor  rounds=%d  pkt=%llu\n", rounds,
+                static_cast<unsigned long long>(floor_pkt));
     std::printf("%10s %12s %12s %10s %12s\n", "bytes", "min_ms", "med_ms",
                 "MB/s", "us/pkt");
     std::printf("-----------------------------------------------------------"
@@ -601,7 +613,7 @@ int main(int argc, char** argv) {
     bool bad = false;
     for (size_t si = 0; si < sizes.size(); ++si) {
       const size_t n   = sizes[si];
-      const size_t pkt = (n < 1200) ? n : 1200;
+      const size_t pkt = (n < floor_pkt) ? n : floor_pkt;
       UdpFloor     f;
       if (!f.setup(pkt, n)) {
         std::printf("%10llu  SETUP FAILED\n",

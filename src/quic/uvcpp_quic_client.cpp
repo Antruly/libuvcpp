@@ -51,9 +51,12 @@ namespace {
 /// 而解析失败/卡住时必须能返回一个错误码，不能把调用方永远挂在里面。
 const int kResolveTimeoutMs = 5000;
 
-/// 收到一个数据报时给 libuv 的接收缓冲大小。QUIC 的单个数据报不超过
-/// 1200 字节（我们自己的 `max_tx_udp_payload_size` 就是它，对端也一样受
-/// `NGTCP2_MAX_UDP_PAYLOAD_SIZE` 约束），4096 有充足余量。
+/// 收到一个数据报时给 libuv 的接收缓冲大小。
+///
+/// 它必须 ≥ 我们对外的 `max_udp_payload_size`（= 本库的 `kDatagramBufLen`，
+/// 1500）—— **不是** ngtcp2 那个下界 `NGTCP2_MAX_UDP_PAYLOAD_SIZE`(1200)：
+/// 1200 只是"任何路径都保证能过"的那个值，我们实际会发（也会收）到 1500。
+/// 缓冲给小了不会报错，是**静默截断**，表现成"偶尔重传"。4096 有充足余量。
 const size_t kRecvBufLen = 4096;
 
 /// 一毫秒的纳秒数。`uv_hrtime()` 与 ngtcp2 的 `timestamp()` 都是纳秒。
@@ -480,7 +483,7 @@ struct uvcpp_quic_client::impl {
     rc = udp->recv_start(
         [](uvcpp_handle*, size_t sz, uv_buf_t* buf) {
           // 一次数据报一块缓冲。**不给它 `sz`**（libuv 的建议值通常是 65536）
-          // —— 那是一次 64KiB 的分配换一个最多 1200 字节的包。
+          // —— 那是一次 64KiB 的分配换一个最多 `kDatagramBufLen` 字节的包。
           (void)sz;
           uvcpp_buf::alloc_buf(buf, kRecvBufLen);
         },

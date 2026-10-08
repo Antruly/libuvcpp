@@ -51,13 +51,43 @@ const size_t kServerScidLen = 18;
 const size_t kClientScidLen = 18;
 const size_t kInitialDcidLen = 18;
 
-/// 一次 `writev_stream` 的落点缓冲。
+/// 一个数据报的上限。**三处取同一个值**：`writev_stream` 的落点缓冲、
+/// `settings.max_tx_udp_payload_size`、以及我们对外的 `max_udp_payload_size`
+/// 传输参数（`fill_transport_params()`）。
 ///
-/// 下界是硬的：ngtcp2 要求它**至少** `NGTCP2_MAX_UDP_PAYLOAD_SIZE`(1200)，而
-/// 我们同时把 `settings.max_tx_udp_payload_size` 设成了 1200 —— ngtcp2
-/// 不会产出比那个更大的数据报，所以这里多出来的 300 只是给"包快满了"留一点
-/// 回旋（`NGTCP2_ERR_NOBUF` 的余地），**不会**变成一个 1500 字节的数据报。
+/// 下界是硬的：ngtcp2 要求 `max_tx_udp_payload_size` **至少**
+/// `NGTCP2_MAX_UDP_PAYLOAD_SIZE`(1200)，落点缓冲也不能比它小。
+///
+/// 上界取 1500（典型以太网 MTU）。这个数是从一条**缺陷**里定出来的：ngtcp2
+/// 自带的 PMTUD 探测表是 {1406, 1342, 1232, 1444}，而 `conn_start_pmtud()` 把
+/// `min(对端 max_udp_payload_size, 本端 max_tx_udp_payload_size)` 当作硬上限 ——
+/// 上限一旦 ≤ 1200，**四档探测全部越界被跳过**，PMTUD 当场判 `finished` 并被
+/// `conn_stop_pmtud()` 关掉，数据报此后永远钉在 1200 字节。所以这里以前那句
+/// "多出来的 300 只是回旋余地、不会变成一个 1500 字节的数据报"是**自证**的：
+/// 它之所以成立，恰恰因为 PMTUD 已经被这条上限关死了。
+///
+/// 也不能取到远超 1444（比如 `NGTCP2_MAX_TX_UDP_PAYLOAD_SIZE`=65527）：探测表
+/// 最大就到 1444，多出来的只是给"对端可以发更大"留的口子，而我们的接收缓冲
+/// 只有 `kRecvBufLen`(4096)。
+///
+/// ⚠️ 落点缓冲**必须 ≥ 探测表的最大一档**：`conn_write_pmtud_probe()` 里有一句
+/// `if (probelen > destlen) return 0;` —— 缓冲比 1444 小的话探测包会**静默**发
+/// 不出去，PMTUD 又变回死的，而且一点声音都没有。
 const size_t kDatagramBufLen = 1500;
+
+// 这两条守的是**同一个缺陷的两个入口**，都是"改一个数就把 PMTUD 静默关掉"，
+// 而且关掉之后一切照常工作、只是慢——正是要靠编译器拦下来的那种。
+//
+// 1) 钉回下限 1200 ⇒ `conn_start_pmtud()` 的硬上限 ≤1200 ⇒ 探测表四档全越界。
+static_assert(kDatagramBufLen > NGTCP2_MAX_UDP_PAYLOAD_SIZE,
+              "数据报上限不能钉回 NGTCP2_MAX_UDP_PAYLOAD_SIZE(1200)：那会把 "
+              "ngtcp2 自带的 PMTUD 整条关掉（它的探测表四档都在 1200 以上），"
+              "2 MB 一笔要多发约 17% 的数据报。见 kDatagramBufLen 的说明。");
+// 2) 缓冲小于探测表最大一档 ⇒ `conn_write_pmtud_probe()` 里
+//    `if (probelen > destlen) return 0;` 把探测包悄悄丢掉，同上。
+static_assert(kDatagramBufLen >= 1444,
+              "落点缓冲必须 ≥ ngtcp2 自带 PMTUD 探测表的最大一档(1492-48=1444)，"
+              "否则探测包会被 conn_write_pmtud_probe() 静默丢弃，PMTUD 又变回死的。");
 
 /// 单次 `do_flush()` 的轮数上限。正常两三轮就空，这条只是防挂死 ——
 /// ngtcp2 万一一直报"还能写"，loop 线程不能停在这儿。
@@ -126,6 +156,11 @@ struct cb_guard {
  * 的深度，而那是一次性的。curl 把窗口提到 10× 是另一个形状的负载（它的接收端
  * 不是"接到就还"）。
  *
+ * 同一个函数里还装了 `max_udp_payload_size`（单个数据报的上限）。它和上面那组
+ * 窗口**不是一回事**：窗口是"这一档够用了"的取舍，而它是"我们到底收得下多大
+ * 的包"的**事实陈述**，默认那 65527 在我们这儿是假的（接收缓冲只有 4096）。
+ * 见下面那一处赋值。
+ *
  * ⚠️ 这几个数是**对外可见的传输参数**（进 Initial 包），动它等于改线上一档行为。
  * 想动，先拿 `bench_quic` 量出跨过噪声的收益。
  */
@@ -138,6 +173,20 @@ void fill_transport_params(ngtcp2_transport_params* params,
   params->initial_max_data = 1024 * 1024;
   params->initial_max_streams_bidi = 100;
   params->initial_max_streams_uni = 100;
+  // 我们**收**得下的单个数据报上限，也就是对端被允许发过来的最大值。
+  //
+  // 默认值是 `NGTCP2_DEFAULT_MAX_RECV_UDP_PAYLOAD_SIZE`(65527)，而两只端点的
+  // 接收缓冲都只有 `kRecvBufLen`(4096) —— 今天撞不上，因为对端也是本库、也把
+  // 自己钉在同一个上限上。但那是**靠对端自觉**：一个照 RFC 走的第三方实现完全
+  // 可以合法地发一个 65527 字节的数据报（我们自己就是这么宣布的），我们会在
+  // 内核那一层就被截断，AEAD 校验失败后被当成丢包重传 —— 不是内存安全缺陷，
+  // 是一处**静默的性能悬崖**，而且只在跨实现时出现。宣布成我们真收得下的那一
+  // 档才是诚实的。
+  //
+  // 取 `kDatagramBufLen` 而不是 `kRecvBufLen`：两个端点的发送上限与接收上限
+  // 因此是同一个数，行为对称，也不会出现"对端发 4096、我们只探到 1444"这种
+  // 单边拉长的形状。
+  params->max_udp_payload_size = kDatagramBufLen;
   params->max_idle_timeout =
       static_cast<ngtcp2_duration>(idle_timeout_ms) * NGTCP2_MILLISECONDS;
   // CID 的可用数量。1 是协议允许的最小值，8 是常见默认 —— 取 8 是为了让
@@ -415,7 +464,10 @@ int quic_session::init_client(uvcpp_ssl_context* ssl_ctx,
   ngtcp2_settings settings;
   ngtcp2_settings_default(&settings);
   settings.initial_ts = now_ns();
-  settings.max_tx_udp_payload_size = NGTCP2_MAX_UDP_PAYLOAD_SIZE;
+  // 数据报上限。**不能钉回 `NGTCP2_MAX_UDP_PAYLOAD_SIZE`(1200)** —— 那等于把
+  // ngtcp2 自带的 PMTUD 整条关掉（它拿这个值当硬上限，而探测表四档都在 1200
+  // 以上），理由与代价见 `kDatagramBufLen`。
+  settings.max_tx_udp_payload_size = kDatagramBufLen;
 
   ngtcp2_transport_params params;
   fill_transport_params(&params, idle_timeout_ms);
@@ -473,7 +525,10 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
   ngtcp2_settings settings;
   ngtcp2_settings_default(&settings);
   settings.initial_ts = now_ns();
-  settings.max_tx_udp_payload_size = NGTCP2_MAX_UDP_PAYLOAD_SIZE;
+  // 数据报上限。**不能钉回 `NGTCP2_MAX_UDP_PAYLOAD_SIZE`(1200)** —— 那等于把
+  // ngtcp2 自带的 PMTUD 整条关掉（它拿这个值当硬上限，而探测表四档都在 1200
+  // 以上），理由与代价见 `kDatagramBufLen`。
+  settings.max_tx_udp_payload_size = kDatagramBufLen;
 
   ngtcp2_transport_params params;
   fill_transport_params(&params, idle_timeout_ms);

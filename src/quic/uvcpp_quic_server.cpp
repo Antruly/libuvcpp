@@ -54,8 +54,8 @@ namespace {
 /// 落结果的暂存区。
 const size_t kAddrLen = 128;
 
-/// 收到一个数据报时给 libuv 的接收缓冲大小。同 `uvcpp_quic_client.cpp`：QUIC 的
-/// 单个数据报不超过 1200 字节。
+/// 收到一个数据报时给 libuv 的接收缓冲大小。同 `uvcpp_quic_client.cpp`：要
+/// ≥ 我们对外的 `max_udp_payload_size`（1500），给小了是静默截断。
 const size_t kRecvBufLen = 4096;
 
 /// 一毫秒的纳秒数。`uv_hrtime()` 与 ngtcp2 的 `timestamp()` 都是纳秒。
