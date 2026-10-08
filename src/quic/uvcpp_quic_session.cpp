@@ -141,6 +141,34 @@ struct cb_guard {
   cb_guard& operator=(const cb_guard&) = delete;
 };
 
+/// 「收到多少个 ACK-eliciting 包才**立刻**回一个 ACK」的那个下限。
+///
+/// ngtcp2 的默认值是 2（`ngtcp2_settings_default()`），对应 RFC 9000 §13.2.1
+/// 那句 "an endpoint SHOULD send an ACK frame after receiving at least two
+/// ack-eliciting packets"。那个默认值在**回环 / 局域网**上代价很大，原因是一
+/// 道乘法：`ngtcp2_conn_ack_delay_expiry()` 的到期时刻是
+/// `first_unacked_ts + min(max_ack_delay, max(srtt/8, 1ns))`，而回环上 `srtt`
+/// 只有几十微秒 ⇒ 延迟 ACK 的窗口塌到微秒级，`ack_thresh` 就成了**唯一**还在
+/// 起作用的闸门，于是接收端几乎每收两个包就回一个 ACK。
+///
+/// 实测（`build-quicwin`，MinGW Release，2 MiB push × 15 轮，同机同轮交错，
+/// 内核实发数据报数 + 服务端 send 计数）：服务端每轮发出的控制包在
+/// `ack_thresh=2` 时是 **821** 个，改成 16 之后是 **161** 个；客户端载荷包数
+/// 不变（1623）。总数据报 2445 → 1783 / 轮，中位耗时 19.25 ms → 13.81 ms
+/// （+38% 吞吐）。再往上加到 32 / 64 / 128 都不再有系统差（16 已经在平台
+/// 上），所以取**到达平台的最小值**——离上面那句 SHOULD 的偏离最小。
+///
+/// **为什么在广域网上几乎无影响**：那里 `srtt/8` 是毫秒量级（30 ms RTT ⇒
+/// 3.75 ms），远大于包间隔，**延迟 ACK 计时器**才是那个闸门 —— 无论
+/// `ack_thresh` 取多少，ACK 都会在 `srtt/8` 之内出去。也就是说这一档只在低
+/// RTT 链路上真正生效，而那里的瓶颈本来就是"每个数据报一次 syscall"。
+///
+/// **代价说清楚**：ACK 变稀 ⇒ 对端检测丢包、推进拥塞窗口的反馈变慢。上界是
+/// 延迟 ACK 计时器（`max_ack_delay` = 25 ms，RFC 9000 §18.2 的默认值），协议
+/// 允许；但**有丢包的链路上这是一笔真实取舍**，不是白拿。本机回环无丢包，
+/// 量到的全是收益 —— 别把这个数读成"公网也 +38%"。
+const size_t kAckThreshold = 16;
+
 /**
  * @brief 把两边共用的流控/传输参数装上。
  *
@@ -468,6 +496,8 @@ int quic_session::init_client(uvcpp_ssl_context* ssl_ctx,
   // ngtcp2 自带的 PMTUD 整条关掉（它拿这个值当硬上限，而探测表四档都在 1200
   // 以上），理由与代价见 `kDatagramBufLen`。
   settings.max_tx_udp_payload_size = kDatagramBufLen;
+  // ACK 频率。**默认那个 2 在低 RTT 链路上太密** —— 理由、实测数字与代价见 `kAckThreshold`。
+  settings.ack_thresh = kAckThreshold;
 
   ngtcp2_transport_params params;
   fill_transport_params(&params, idle_timeout_ms);
@@ -529,6 +559,8 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
   // ngtcp2 自带的 PMTUD 整条关掉（它拿这个值当硬上限，而探测表四档都在 1200
   // 以上），理由与代价见 `kDatagramBufLen`。
   settings.max_tx_udp_payload_size = kDatagramBufLen;
+  // ACK 频率。**默认那个 2 在低 RTT 链路上太密** —— 理由、实测数字与代价见 `kAckThreshold`。
+  settings.ack_thresh = kAckThreshold;
 
   ngtcp2_transport_params params;
   fill_transport_params(&params, idle_timeout_ms);
