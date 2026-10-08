@@ -928,9 +928,10 @@ fixes came from issue reports by the project's first external contributor,
   (16 KiB 25.410 ms / 64 KiB 21.907 / 256 KiB 21.913 one-way at 2 MiB — the knee is at
   64 KiB). `quic_stream_func.cpp` gained a fourth phase that echoes 64 KiB
   and 3 × 64 KiB + 1234 B and compares the **whole stream byte for byte**, because a
-  count-based check is immune to exactly the misplacement this bug class produces: mutation
-  M3 (swap two equal-sized chunks' contents — same length, same accounting, same delivery)
-  is caught by nothing but the byte comparison, at the chunk boundary (`1.5.1`)
+  count-based check is immune to exactly the misplacement this bug class produces: a mutant
+  that swaps two equal-sized chunks' contents — same length, same accounting, same delivery,
+  and the same byte count on both sides — is caught by nothing but the byte comparison, at
+  the chunk boundary (`1.5.1`)
 - **The QUIC datagram path no longer copies every packet.** Both endpoints try
   `uv_udp_try_send()` first — synchronous, so `data` is dead before the call returns and no
   copy is needed — and fall back to the existing async copy-and-queue path on anything but
