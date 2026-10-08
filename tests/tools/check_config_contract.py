@@ -79,6 +79,7 @@ MACROS = [
     "UVCPP_CAPI_ENABLE",
     "UVCPP_TRY_WRITE_ENABLE",
     "UVCPP_TRY_WRITE_MIN_BYTES",
+    "UVCPP_UDP_GSO_ENABLE",
 ]
 
 DEF_RE = re.compile(r"^#\s*define\s+(UVCPP_[A-Z0-9_]+)\s+(\S+)\s*$", re.M)

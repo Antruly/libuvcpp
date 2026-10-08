@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.5.1--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.5.2--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.5.1-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.5.2-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -311,6 +311,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_STATIC_RUNTIME` | `OFF` | 把编译器运行时（`libgcc`/`libstdc++`）静态链进库。**仅 MinGW 与 Linux 有效，MSVC 上是空操作** —— MSVC 用 `/MD`，发布包里自带 `vcruntime`/`msvcp` |
 | `UVCPP_ENABLE_TRY_WRITE` | `ON` | 拷贝进写缓冲之前先试一次 `uv_try_write` |
 | `UVCPP_TRY_WRITE_MIN_BYTES` | `32768` | 值得尝试 `uv_try_write` 的最小载荷（是 `CACHE STRING`，不是 `option()`） |
+| `UVCPP_ENABLE_UDP_GSO` | Windows **且** `UVCPP_ENABLE_QUIC=ON` 时为 `ON`，否则 `OFF` | QUIC 传输的发送侧 UDP 分段卸载：把一批等长的数据报用 `UDP_SEND_MSG_SIZE` 在**一次** `WSASendTo` 里交给协议栈，而不是每个数据报一次系统调用。分段尺寸取自每次聚合写回填的值，所以线上跑的还是今天那些数据报。**仅 Windows** —— 其余平台这段代码被编掉，开关在那里是空操作。见 [`doc/quic-guide.md`](doc/quic-guide.md) |
 
 **注意**：开启 `UVCPP_BUILD_WEB=ON` 不会自动启用 `UVCPP_ENABLE_ZLIB` 或 `UVCPP_ENABLE_OPENSSL`。
 这些选项需要显式手动开启。`UVCPP_ENABLE_NGHTTP2` 在 `UVCPP_ENABLE_OPENSSL=OFF` 时
@@ -627,7 +628,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.5.1-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.5.2-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`
 六个 tag。下面是 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部
 改动，外加 `1.4.x` 这条线（收进 `v1.5.0`）与 `v1.5.0` 之后新增的东西，按主题分组，括号里是
@@ -827,7 +828,7 @@ libuvcpp/
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2056`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2090`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -864,6 +865,14 @@ libuvcpp/
   只有成功才走快路，这不是保守而是必需的：在失败处 `return` 等于**静默把这个包扔了**，
   而 QUIC 只会把它当丢包去重传（症状是"能跑但慢"）。libuv 在已有异步发送排队时返回
   `UV_EAGAIN`，所以快路的包不会插到慢路的包前面（`1.5.1`）
+- **QUIC 的发送路径在 Windows 上把数据报批量交出去。** `UVCPP_ENABLE_UDP_GSO`（默认值
+  是派生的：Windows 且带 QUIC 时为开）把一次聚合出来的**一批等长数据报**用
+  `UDP_SEND_MSG_SIZE` 在**一次** `WSASendTo` 里交给协议栈。Windows 上 libuv 是一个数据报
+  一次 `WSASendTo`（`uv__udp_try_send2()` 就是个 `for` 循环）—— MsQuic 对照里那笔
+  "每数据报成本"正是在这里；Linux 那边上游已经把每批 20 个折成一次 `sendmmsg()`，所以
+  这个开关在那里整段编掉，显式打开也不生效。分段尺寸取的是**本次聚合写回填的值**、
+  不是常量，所以线上跑的还是原来那些数据报；收方向**故意没做** —— 半开会让 libuv 把
+  粘在一起的数据报当成**一次**读交给应用（`1.5.2`）
 
 ### HTTP/3（web 层）
 

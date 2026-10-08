@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1028-1036`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1047-1055`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。

@@ -24,6 +24,16 @@ def ctest_tests(tree, config="Release"):
 
     工作目录取装 `CTestTestfile.cmake` 的那一层 —— 就是 `add_test` 的默认值
     `CMAKE_CURRENT_BINARY_DIR`（多配置生成器下它是 `Release` 的上一级）。
+
+    **两种生成器都要认。** 多配置（Visual Studio）的把每条 `add_test` 包在
+    `if(CTEST_CONFIGURATION_TYPE MATCHES "^(Release)$")` 里；单配置（Ninja、
+    Makefiles）**一条配置守卫都没有**，`add_test` 是裸的。只按前者解析的话，
+    单配置树会匹配到**零条**用例 —— 而 `run_pageheap_gate.py` 拿到空清单是
+    `return 3`（"没跑成"），不是跑绿。本机 QUIC 只在 Ninja 树上装得起来
+    （MSVC 那份 OpenSSL 没有 QUIC API），所以这条差异直接决定那条门禁跑不跑得了。
+
+    判据是**文件里出现过配置守卫没有**：出现过 ⇒ 按 `config` 筛（老行为，
+    一个字节没变）；一条都没有 ⇒ 整个文件都属于这一档（单配置树只有一档）。
     """
     want = config.upper()
     out = []
@@ -31,6 +41,7 @@ def ctest_tests(tree, config="Release"):
         if "CTestTestfile.cmake" not in files:
             continue
         cur = None
+        guarded = False
         with open(os.path.join(base, "CTestTestfile.cmake"),
                   "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -38,11 +49,12 @@ def ctest_tests(tree, config="Release"):
                 m = re.match(r'^(?:else)?if\(CTEST_CONFIGURATION_TYPE MATCHES '
                              r'"\^\((.*)\)\$"\)', s)
                 if m:
+                    guarded = True
                     # `[Rr][Ee][Ll][Ee][Aa][Ss][Ee]` → "RELEASE"：每对括号取首字母
                     cur = "".join(p[0].upper()
                                   for p in re.findall(r"\[(.)(.)\]", m.group(1)))
                     continue
-                if cur != want:
+                if guarded and cur != want:
                     continue
                 a = re.match(r'^add_test\(\[=\[(.*?)\]=\]\s+"(.*?)"\)', s)
                 if a:

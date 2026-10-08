@@ -40,7 +40,7 @@
 - 包含方式：`<quic/uvcpp_quic_client.h>`、`<quic/uvcpp_quic_server.h>`、
   `<quic/uvcpp_quic_connection.h>`、`<quic/uvcpp_quic_common.h>`。私有的
   `<quic/uvcpp_quic_ngtcp2.h>` 与 `<quic/uvcpp_quic_session.h>` **都不安装**
-  （`CMakeLists.txt:2056`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:2090`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 四个公开头**全部**整段套在 `#if UVCPP_QUIC_ENABLE` 里，所以**不开关就一个类都
   看不到**。这与 `web/`、`ssl/`、`http2/`、`http3/`、`wsdl/` 同档。
 
@@ -112,6 +112,98 @@ Windows MSVC 各一格）是**唯一**覆盖它的那几格 —— 每一格都�
 
 ---
 
+### 1.2 Windows 上的发送侧 UDP GSO/USO（1.5.2）
+
+**这笔账。** Windows 上 libuv 发一个 UDP 数据报就是一次 `WSASendTo`
+（`src/win/udp.c` 里 `uv__udp_try_send2()` 是个纯 `for` 循环），于是 QUIC 的每个
+数据报都自带一次系统调用。Linux 上这笔账**上游已经塌缩掉了**：`src/unix/udp.c` 的
+`uv__udp_sendmsg()` 每批 20 个请求折成一次 `sendmmsg()`，而触发它的正是本库 QUIC
+那种连发形状 —— 所以这不是"libuv 慢"，是"Windows 那一侧少一条路"。
+
+**做法。** 一次 `WSASendTo` 交一批**等长**数据报给协议栈，由它按
+`UDP_SEND_MSG_SIZE`（选项号 2，`IPPROTO_UDP`）切开送出去。切在内核里做，所以
+**对端看到的还是一个个正常数据报** —— 变的只有系统调用次数。这条机制本身在原生
+UDP 地板上量过（`doc/benchmark-rig.md`）：`--pkt=1434` 时 11.19 µs/包 →
+2.99 µs/包，而同期线上数据报数 1462 → 1473，**一个没少**。
+
+**本库上的实测（同会话交错 A/B，各 4 轮 × 15 rounds，钉核 mask=1）。** 同一台机上交错
+跑 `UVCPP_ENABLE_UDP_GSO=OFF` 与 `=ON` 两个二进制，**每一轮把两条臂的先后顺序翻过来**
+（装置在仓库外，`_probe/gso_ab.py` 的 `interleave()`）—— 固定"先 off 后 on"的话，任何"第二个跑的那个
+更暖"的效应（频率爬升、页缓存、CPU boost 掉回去）都**恒定偏向 ON**，而它长得和真实收益
+一模一样；取各臂最小值削不掉系统性偏置，翻顺序是免费的。
+
+| 轴 | 尺寸 | 墙钟 OFF/ON | cyc/B | 线上数据报数 |
+|---|---|---|---|---|
+| push（单向） | 2 MiB | **1.345×** | 1.332× | 噪声内 |
+| push（单向） | 32 MiB | **1.332×** | 1.343× | 噪声内 |
+| echo（双向单流） | 2 MiB | **1.341×** | 1.340× | 噪声内 |
+| echo（双向单流） | 32 MiB | **1.342×** | 1.331× | 噪声内 |
+
+墙钟与 `cyc/B`（每字节周期数，bench 自报）是两条独立读数，四个格子上给出的倍数一致，
+所以这不是某一条量具的偏置。**"线上数据报数没变"用的是 bench 自报的 `recv_calls`**
+（接收侧调用次数，起 GSO 完全不影响它）：两边**逐轮自己的跨度比组间差还大**（32 MiB
+push 一例：本臂跨度 67、组间差 42），所以判据落在噪声里 —— 注意这里没写成"两个数必须
+逐字相等"，那样写会自己变红（`recv_calls` 本身逐轮就飘 ~0.2%）。
+
+**同会话的对照臂是裸 UDP 地板**（`--mode=udpfloor`，一个数据报一次 `uv_udp_try_send`、
+不开 USO）：ON 的 QUIC 只要它的 **0.650×**（2 MiB）/ **0.689×**（32 MiB）。QUIC 干的活
+**严格多于**裸 UDP，比地板还快只能是发送机制本身换了 —— 这是"系统调用真的塌了"的自证，
+也是本笔唯一不依赖"墙钟差异"的独立证据（读数是 `_probe/gso_ab/run4.txt`）。
+
+**开关。** `UVCPP_ENABLE_UDP_GSO`（宏 `UVCPP_UDP_GSO_ENABLE`）。默认值是**派生**的：
+Windows 且 `UVCPP_ENABLE_QUIC=ON` → `ON`，其余一律 `OFF`。非 Windows 上还有一层
+**降级**：显式传 `-DUVCPP_ENABLE_UDP_GSO=ON` 也会被按回 `OFF`（配置期报一行 note），
+所以这个宏在非 Windows 上**恒为 0、整段代码不编进去** —— 是"不生效"，不是"编进来
+但是死的"。派生值必须算在 QUIC 的**静默降级链之后**（`CMakeLists.txt:555` 之后），
+否则一条"QUIC 已被降级掉"的配置会把 GSO 打开。
+
+**两层闸门。**
+
+1. **编译期** `UVCPP_UDP_GSO_ENABLE`：为 0 时 `do_flush()` 走的分支与今天逐字节
+   相同 —— 「关闭 == 今天」是结构性的，不靠 review。
+2. **运行期** `quic_session::gso_`：`init_client()`/`init_server()` 末尾（也就是
+   `bind()` 之后）拿 `kDatagramBufLen`(1500) 探一次 —— 那个值**大于** PMTUD 探测表
+   最大的一档 1444，所以探测本身不会切开任何一个包，只为回答"这台机器支不支持"；
+   真正发的时候按**本次 agg2 回填的 `*pgsolen`** 重设（见下），**值变了才去撞
+   系统调用**，所以一次大批量传输里通常只设一两次。重设失败就把 `gso_` **永久**
+   置假，并把这一批按 `pgsolen` 切开逐段发 —— **绝不**在选项没设对时把聚合缓冲
+   当一个大包发出去。
+
+**分段尺寸为什么只能取 `*pgsolen`。** `UDP_SEND_MSG_SIZE` 是"每段多少字节"，而
+PMTUD 会把 path MTU 从 1200 抬到 1444：设大了协议栈**切在包中间**，设小了把完整的
+包切碎。而 agg2 的源码保证了"一旦继续聚合，所有非末包长度都**等于** `*pgsolen`"，
+且它 == `ngtcp2_conn_get_path_max_tx_udp_payload_size2()`（`ngtcp2:lib/ngtcp2_conn.c:14360`
+那条 `if`）。所以"值 = 本次回填的 `*pgsolen`"是唯一无假设的正确做法。
+
+**聚合缓冲按上限开，不按此刻量到的值。** `ngtcp2_conn_get_send_quantum2()` 在握手
+刚开始时报的是 `10 × max_udp_payload_size` = 12000（`ngtcp2:lib/ngtcp2_cc.c:53` 覆盖掉了
+`ngtcp2:lib/ngtcp2_conn.c:923` 那个 64 KiB），然后随 PMTUD 上抬。缓冲要是按**当前值**开，
+聚合就被压在 8 个包上下（本机实测过这个形状）。开成 64 KiB 上限（`kGsoBufLen`，
+`uvcpp_quic_session.cpp:133`），让 ngtcp2 自己那条 `ngtcp2_min(buflen,
+send_quantum)`（`ngtcp2:lib/ngtcp2_conn.c:14304`）去限才是对的形状。下限仍是 `kDatagramBufLen`：
+agg2 里有 `assert(buflen >= path_max_udp_payloadlen)`。
+
+**只做发送侧一半，而且这是有意的。** 收方向要 `UDP_RECV_MAX_COALESCED_SIZE` +
+`WSARecvMsg` + `UDP_COALESCED_INFO`，而 `uv_udp_recv_start` 够不着控制消息。
+**半开比不开更糟**：对端把几个数据报粘在一起，libuv 会把它们当成**一次**读交给
+应用 ⇒ 静默的内容损坏。要做得自己实现整条收包路径，那是另一笔活（本版不做）。
+
+**坑一：`uv_fileno` 要 `bind()` 之后才有 socket。** libuv 的 UDP 句柄是**惰性**
+建 socket 的 —— `uv_udp_init`（AF_UNSPEC）之后 `handle->socket` 还是
+`INVALID_SOCKET`，这时 `uv_fileno` 返回 `UV_EBADF`，`setsockopt` 无从谈起。本机实测：
+bind 前 `fileno rc=-4083 sock=-1`，bind 后 `rc=0 sock=628`。所以探测点落在
+`init_client()`/`init_server()` 的末尾（`setup_gso()`，`uvcpp_quic_session.cpp:923`），
+不是建对象的时候。
+
+**坑二：`setsockopt` 成功 ≠ 协议栈真会切。** 本机实测 512…65483 **全都返回成功**，
+包括远超 MTU 的值 —— 所以那个返回值只能当"这台机器认得这个选项号"，不能当"它真的
+在切"。这条残余风险靠用例挡，不靠探测：`tests/functional/quic_gso_func.cpp` 的
+第 1 部分在**裸 UDP** 上单独量这条机制（对照组是同一个 `setsockopt` 从不设的
+socket），第 2 部分跑一次 192 KiB 的 QUIC 传输逐字节比对。第 1 部分是**环境**判据
+（这一档该切却没切就红），第 2 部分加变异对照才是库侧的判据。
+
+---
+
 ## 2. 编译期条件：一份带 QUIC API 的 OpenSSL ≥ 3.2
 
 QUIC 的版本协商走 TLS 的 ALPN 扩展，所以 QUIC **必须**有一份支持 QUIC 的 TLS 库。
@@ -161,8 +253,8 @@ nghttp2 / zlib / pugixml 的用法一致。
 配置成功的标志是两行 `message(STATUS)`，CI 也正是 grep 这两行：
 
 ```
-ngtcp2 integrated (tag=v1.25.0, static)          # CMakeLists.txt:693
-Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:1328
+ngtcp2 integrated (tag=v1.25.0, static)          # CMakeLists.txt:712
+Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:1360
 ```
 
 > **只 grep `CMakeCache.txt` 是不够的。** 三条降级用的都是**普通变量**
@@ -511,7 +603,7 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 
 1. **别指望从公开头里看到 ngtcp2。** `<ngtcp2/ngtcp2.h>` 只出现在私有的
    `src/quic/uvcpp_quic_ngtcp2.h` 里，而它和持有 ngtcp2 句柄的
-   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:2056`）、打包
+   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:2090`）、打包
    也被排除。理由有两条：一是使用者不该被逼着去配 ngtcp2 的搜索路径才能 include
    一个本库的头；二是 `uvcpp_quic_session.h` 的成员里就有 `ngtcp2_conn*`、`SSL*`、
    `ngtcp2_path_storage`，它的字段布局直接跟着 ngtcp2 的版本走 —— 一旦漏进公开面，
@@ -519,14 +611,14 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
    `PRIVATE_HEADERS` 是**一对**，两处必须一起改。
 
 2. **ngtcp2 的 include 路径是 PRIVATE 进来的。** 静态库上那是 `$<LINK_ONLY:…>`，
-   不传播头路径 —— 所以**功能测试不能** `#include <ngtcp2/ngtcp2.h>`。这就是
+   不传播头路径 —— 功能测试**光靠链接**拿不到那份头（真要 include，得照 `web_ssl_*` 自己挂 OpenSSL 的写法补一句 `target_include_directories(... $<TARGET_PROPERTY:ngtcp2_static,INTERFACE_INCLUDE_DIRECTORIES>)`，`tests/functional/CMakeLists.txt` 末尾有一条注释记着这个写法）。**但那条路也别走**：本机 PATH 上有 MSYS2 那份**版本不同**的 ngtcp2，`-I` 没排到它前面就会静默拿到它（报错长得像本库的私有头写错了）；而且库里那些私有 helper **没有导出** —— 白盒用例就算编得过，链接期也是 `undefined reference`。这就是
    `quic_ngtcp2_version_string()` 声明在**公开**头、实现在
    `src/quic/uvcpp_quic_ngtcp2.cpp`（由它 include 私有头）的原因：测试只经公开头
    调用，符号在链接期解析，照样证明 ngtcp2 真被链上。
 
 3. **`src/quic/` 的源文件被 `list(FILTER … EXCLUDE REGEX "src/quic/")` 排除**
-   （`CMakeLists.txt:1323`，头文件那一条在 `:1252`），而且"开了 QUIC 但目录是空的"
-   会**当场 FATAL**（`CMakeLists.txt:1337`）。后者防的是一棵树同时骗过三道看起来
+   （`CMakeLists.txt:1355`，头文件那一条在 `:1252`），而且"开了 QUIC 但目录是空的"
+   会**当场 FATAL**（`CMakeLists.txt:1369`）。后者防的是一棵树同时骗过三道看起来
    很像门禁的东西：cache 里 `QUIC=ON`、日志里有 `ngtcp2 integrated`、编译也过 ——
    而 `src/quic/` 一个 `.cpp` 都没有，**零行 QUIC 代码被编译过**。"没测"必须表现为
    **失败**，不是表现为**通过**。
@@ -612,6 +704,8 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
   它有一条别处没有的规矩：连接句柄是**借来的**（只有端点建连接、只有端点关连接），
   所以它没有 `_free()`，而"它什么时候不算数了"由知道这件事的那一侧毒化它 —— 见
   [C ABI 指南](./capi-guide.md) §3.3 与 §4。
+
+- **GSO 只做了发送侧。** 收方向（`UDP_RECV_MAX_COALESCED_SIZE` + `WSARecvMsg` + `UDP_COALESCED_INFO`）没做，理由与代价见上面 [§1.2](#12-windows-上的发送侧-udp-gsouso152)：`uv_udp_recv_start` 够不着控制消息，半开会让粘在一起的数据报被当成一次读。另外这个开关**只在 Windows 上生效** —— Linux 上 libuv 那条 `sendmmsg` 批量（每批 20 个）已经在那儿了，不需要本库再做一遍。
 
 下一步是把 h3 接进 web 层的**流式路由**与 **GOAWAY 的平滑退场**（见
 [`doc/http3-guide.md`](./http3-guide.md) §8 的收尾）。连接迁移、0-RTT 那些仍然不在

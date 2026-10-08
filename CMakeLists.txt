@@ -556,6 +556,25 @@ if(UVCPP_ENABLE_QUIC)
   endif()
 endif()
 
+# Windows QUIC 发送侧的 USO/GSO 批量路径。
+#
+# 位置**必须**在所有静默降级之后：`UVCPP_ENABLE_QUIC` 上面会被改成普通变量（缺
+# OPENSSL / 缺 BUILD_NET / 没有 QUIC API），而 `CMakeCache.txt` 里它仍然是 ON
+# —— 算早了就会给一条"QUIC 其实已经被降级掉"的配置打开 GSO，而那份库根本没编。
+# 默认值规则（用户 2026-10-09 拍板）：Windows 且有 QUIC ⇒ ON（这是 QUIC 的
+# 优化项，要让 CI 那几条 Windows+QUIC 腿默认带着）；其余 ⇒ OFF，非 Windows 上
+# 连显式打开也按回 OFF（`UDP_SEND_MSG_SIZE` 是 Winsock 扩展，别处没有等价物）。
+set(_default_uvcpp_udp_gso OFF)
+if(WIN32 AND UVCPP_ENABLE_QUIC)
+  set(_default_uvcpp_udp_gso ON)
+endif()
+option(UVCPP_ENABLE_UDP_GSO
+  "Windows only: let the QUIC sender hand a batch of equal-sized datagrams to the stack in one WSASendTo via UDP_SEND_MSG_SIZE (USO). Compiled out on non-Windows builds."
+  ${_default_uvcpp_udp_gso})
+if(NOT WIN32)
+  set(UVCPP_ENABLE_UDP_GSO OFF)
+endif()
+
 if(UVCPP_ENABLE_QUIC)
   # 与 nghttp2 同一个套路：用 `function` 造作用域，靠 CMP0077=NEW 让同名**普通
   # 变量**压住 ngtcp2 自己的 `option()`（它在 `CMakeOptions.txt` 里，由它本文件
@@ -1252,6 +1271,19 @@ else()
   message(STATUS "try_write fast path disabled (UVCPP_TRY_WRITE_ENABLE=0)")
 endif()
 
+# 这行 STATUS 就是派生默认值的可观测面：CI 上不传这个开关，靠的就是
+# WIN32 AND UVCPP_ENABLE_QUIC 推出的 ON，配置期要能从日志里看见它。
+if(UVCPP_ENABLE_UDP_GSO)
+  add_compile_definitions(UVCPP_UDP_GSO_ENABLE=1)
+  message(STATUS "UDP GSO/USO send path enabled (UVCPP_UDP_GSO_ENABLE=1, WIN32=${WIN32}, QUIC=${UVCPP_ENABLE_QUIC})")
+else()
+  add_compile_definitions(UVCPP_UDP_GSO_ENABLE=0)
+  message(STATUS "UDP GSO/USO send path disabled (UVCPP_UDP_GSO_ENABLE=0)")
+  # 非 Windows 走不到"用户显式打开"这一档 —— 选项那一处已经把它按回 OFF 了，
+  # 所以这里不用再报一次。于是这个宏在非 Windows 上**恒为 0**，`#if
+  # UVCPP_UDP_GSO_ENABLE` 守的那一整段不编进去。
+endif()
+
 # 根据 UVCPP_BUILD_EXPAND 选项排除 expand 模块
 if(NOT UVCPP_BUILD_EXPAND)
   message(STATUS "Excluding expand module from build")
@@ -1586,6 +1618,7 @@ _uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
 _uvcpp_literal01(UVCPP_HTTP3_ENABLE     UVCPP_ENABLE_HTTP3)
 _uvcpp_literal01(UVCPP_CAPI_ENABLE      UVCPP_ENABLE_CAPI)
 _uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
+_uvcpp_literal01(UVCPP_UDP_GSO_ENABLE   UVCPP_ENABLE_UDP_GSO)
 
 # 值宏：空字面量会让 `#if X != ` 变成语法错误，宁可在 configure 期就停下。
 if("${UVCPP_TRY_WRITE_MIN_BYTES}" STREQUAL "")
@@ -1649,6 +1682,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_CAPI_ENABLE=${UVCPP_CAPI_ENABLE}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
+      UVCPP_UDP_GSO_ENABLE=${UVCPP_UDP_GSO_ENABLE}
     )
   endif()
 endforeach()

@@ -36,6 +36,21 @@
 
 #include <ssl/uvcpp_ssl_context.h>
 
+#if UVCPP_UDP_GSO_ENABLE && defined(_WIN32)
+// 只有 Windows 的那条路要 socket 句柄与 winsock 的选项常量；其余平台这段
+// 整个不编（见下面 `set_udp_gso_seg` 的 `#else` 分支）。
+#  include <handle/uvcpp_udp.h>
+// `UDP_SEND_MSG_SIZE` 是 winsock 的扩展选项，**MSVC 的 SDK 有、MinGW 没有**
+// （`grep -rln UDP_SEND_MSG_SIZE /c/msys64/mingw64/include/` 零命中）。而
+// `.github/workflows/release.yml` 的 `mingw-x64` 腿正是 `windows-latest` +
+// `UVCPP_ENABLE_QUIC=ON` ⇒ 这里不兜底就是一条编不过的发布腿。
+// 这个数取自 `ws2ipdef.h:1004`，是**选项号**；真正的分段尺寸是传给
+// `setsockopt` 的那个 int。
+#  ifndef UDP_SEND_MSG_SIZE
+#    define UDP_SEND_MSG_SIZE 2
+#  endif
+#endif
+
 namespace uvcpp {
 namespace quic_detail {
 
@@ -92,6 +107,31 @@ static_assert(kDatagramBufLen >= 1444,
 /// 单次 `do_flush()` 的轮数上限。正常两三轮就空，这条只是防挂死 ——
 /// ngtcp2 万一一直报"还能写"，loop 线程不能停在这儿。
 const unsigned kMaxFlushRounds = 128;
+
+#if UVCPP_UDP_GSO_ENABLE
+/// 一次 `ngtcp2_conn_write_aggregate_pkt2` 最多写几个包。**0 = 尽量多写**，
+/// 也就是交给缓冲长度去限：落点缓冲按 `kGsoBufLen`（64 KiB）开，满 MTU(1444)
+/// 时约 45 个包 —— 这正是 ngtcp2 那个不带 `2` 的规范版
+/// `ngtcp2_conn_write_aggregate_pkt` 的行为（它就是把 `buflen` 钳到
+/// send quantum 再传 `num_pkts = 0`，见 `ngtcp2.h:6983-6988`）。再叠一个
+/// 包数上界在这里是多余的，也就没有一个"拍出来的数"要解释。
+const size_t kGsoMaxPkts = 0;
+
+/// 聚合落点缓冲的长度。
+///
+/// **不能按"init 那一刻量到的 quantum"开** —— 本机实测那是 **12000**
+/// （= `10 × max_udp_payload_size`，`ngtcp2_cc.c:53`，那时 PMTUD 还没把
+/// payload 抬上去），而 `send_quantum` 的上限是 **64 KiB**（`ngtcp2_cc.c:57-73`
+/// 与 `ngtcp2_bbr.c:1359-1366` 都封在 64 KiB，再 `max` 上 `10 ×
+/// max_udp_payload_size`）。按 12000 开就把自己钉死在"每批 8 个包"上，而
+/// 它本来会随 pacing 爬上来。
+///
+/// 按上限开是安全的，因为**真正的闸门在 ngtcp2 里面**：
+/// `ngtcp2_conn_write_aggregate_pkt2` 第一句就是
+/// `buflen = ngtcp2_min(buflen, ngtcp2_conn_get_send_quantum2(conn))`
+/// （`ngtcp2_conn.c:14304`）。我们给的长度是**上限的上限**。
+const size_t kGsoBufLen = 64 * 1024;
+#endif  // UVCPP_UDP_GSO_ENABLE
 
 /// RFC 9000 §10.2.1 允许的 CONNECTION_CLOSE 重发次数上限。
 const int kMaxCloseSends = 3;
@@ -445,6 +485,29 @@ int quic_session::setup_tls(uvcpp_ssl_context* ssl_ctx, bool is_server,
   return 0;
 }
 
+bool set_udp_gso_seg(uvcpp_udp* udp, int seg) {
+#if UVCPP_UDP_GSO_ENABLE && defined(_WIN32)
+  if (udp == nullptr || seg <= 0) return false;
+  uv_os_sock_t sock = (uv_os_sock_t)-1;
+  if (udp->fileno(sock) != 0) return false;
+  if (sock == (uv_os_sock_t)-1) return false;
+  const int v = seg;
+  // ⚠️ **返回值不是"协议栈会切"的证据。** 本机实测（`_probe/uso_split.py` 与
+  // `uso_probe.py`）：这个选项连 65483（超过任何真实 MTU）都返 OK，bind 前后
+  // 都一样。它只回答"这个值被记下了"。真正的证据只能来自对端 —— 所以
+  // `tests/functional/quic_gso_func.cpp` 在接收侧断言每个数据报的长度。
+  return ::setsockopt((SOCKET)sock, IPPROTO_UDP, UDP_SEND_MSG_SIZE,
+                      reinterpret_cast<const char*>(&v),
+                      static_cast<int>(sizeof(v))) == 0;
+#else
+  // 非 Windows，或宏关掉：整段不编。**返回 false** 而不是 true —— 调用方拿它
+  // 当真值就等于"以为自己开了 GSO"，那会让聚合缓冲被当成一个大包发出去。
+  (void)udp;
+  (void)seg;
+  return false;
+#endif
+}
+
 // =========================================================================
 // 建立
 // =========================================================================
@@ -454,7 +517,8 @@ int quic_session::init_client(uvcpp_ssl_context* ssl_ctx,
                               const struct sockaddr* local,
                               const struct sockaddr* remote,
                               const char* server_name, uint64_t idle_timeout_ms,
-                              quic_send_fn send) {
+                              quic_send_fn send,
+                              quic_gso_set_seg_fn set_gso_seg) {
   // 只能建一次。再调会漏掉上一次的 conn_ 与 SSL —— 那是明确的调用方错误，
   // 用一个错误码挡在前面，好过静默泄漏。
   if (conn_ != nullptr || ossl_ctx_ != nullptr) return UV_EALREADY;
@@ -468,6 +532,11 @@ int quic_session::init_client(uvcpp_ssl_context* ssl_ctx,
   if (rv != 0) return rv;
 
   send_ = send;
+#if UVCPP_UDP_GSO_ENABLE
+  set_gso_seg_ = set_gso_seg;
+#else
+  (void)set_gso_seg;
+#endif
 
   // 路径必须是**我们自己的**缓冲区：ngtcp2 会把 `ngtcp2_path` 的两个指针
   // 一存到底，后续每次写包都可能回填远端地址（连接迁移时它会变）。用栈上的
@@ -517,6 +586,10 @@ int quic_session::init_client(uvcpp_ssl_context* ssl_ctx,
   // `cb_client_initial` 派生，而它要拿 TLS 原生句柄。
   ngtcp2_conn_set_tls_native_handle(conn_, ossl_ctx_);
 
+#if UVCPP_UDP_GSO_ENABLE
+  setup_gso();
+#endif
+
   state_ = quic_connection_state::HANDSHAKING;
   return 0;
 }
@@ -526,6 +599,7 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
                               const struct sockaddr* local,
                               const struct sockaddr* remote,
                               uint64_t idle_timeout_ms, quic_send_fn send,
+                              quic_gso_set_seg_fn set_gso_seg,
                               const ngtcp2_cid& client_scid,
                               const ngtcp2_cid& original_dcid) {
   if (conn_ != nullptr || ossl_ctx_ != nullptr) return UV_EALREADY;
@@ -540,6 +614,11 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
   if (rv != 0) return rv;
 
   send_ = send;
+#if UVCPP_UDP_GSO_ENABLE
+  set_gso_seg_ = set_gso_seg;
+#else
+  (void)set_gso_seg;
+#endif
 
   ngtcp2_path_storage_init(
       &path_, reinterpret_cast<const ngtcp2_sockaddr*>(local),
@@ -587,6 +666,10 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
   }
 
   ngtcp2_conn_set_tls_native_handle(conn_, ossl_ctx_);
+
+#if UVCPP_UDP_GSO_ENABLE
+  setup_gso();
+#endif
 
   state_ = quic_connection_state::HANDSHAKING;
 
@@ -719,6 +802,22 @@ void quic_session::do_flush() {
   }
 
   const ngtcp2_tstamp ts = now_ns();
+
+#if UVCPP_UDP_GSO_ENABLE
+  // 两层闸门的汇合点：编译期宏 + 运行期 `gso_`。**这里是个纯粹的早退分支**，
+  // 下面那整段老路径一个字都没动 —— 所以「关掉 GSO == 今天」是结构性成立的，
+  // 不靠 review 保证。
+  if (gso_) {
+    do_flush_gso(ts);
+    // agg2 **自己不会**调这个（文档明写 "does not call
+    // ngtcp2_conn_update_pkt_tx_time"，`ngtcp2.h:7008`）。不补这一句，
+    // PTO 与拥塞控制的发包时刻就不推进，症状是"包发出去了但重传计时器
+    // 永远不响"。
+    ngtcp2_conn_update_pkt_tx_time(conn_, ts);
+    return;
+  }
+#endif
+
   uint8_t buf[kDatagramBufLen];
   ngtcp2_path_storage ps;
   ngtcp2_path_storage_zero(&ps);
@@ -818,6 +917,177 @@ void quic_session::do_flush() {
   // 发包时刻不会推进，表现为"包发完了但重传计时器永远不响"。
   ngtcp2_conn_update_pkt_tx_time(conn_, ts);
 }
+
+#if UVCPP_UDP_GSO_ENABLE
+
+void quic_session::setup_gso() {
+  if (conn_ == nullptr || !set_gso_seg_) return;
+
+  // 探测值取 `kDatagramBufLen`(1500)：PMTUD 探测表最大一档是 1444，所以这个
+  // 值下**任何一次单包发送都不会被切** —— 探测本身不改线上行为。
+  //
+  // ⚠️ 这一步只回答"**选项装得上吗**"。它**测不出**"装上了但协议栈其实不切"
+  // —— 本机实测这个选项连 65483 都返成功（`_probe/uso_probe.py`）。那条残余
+  // 风险只能由对端证，见 `tests/functional/quic_gso_func.cpp`。
+  if (!set_gso_seg_(static_cast<int>(kDatagramBufLen))) return;
+
+  // 按**上限**开，而不是按此刻量到的值 —— 理由见 `kGsoBufLen`。
+  // `kDatagramBufLen` 那层下限是给 `assert(buflen >= path_max_udp_payloadlen)`
+  // 兜底的：PMTUD 那一档最大 1444，1500 > 1444。
+  size_t q = ngtcp2_conn_get_send_quantum2(conn_);
+  if (q < kGsoBufLen) q = kGsoBufLen;
+  if (q < kDatagramBufLen) q = kDatagramBufLen;
+  gso_buf_.assign(q, static_cast<uint8_t>(0));
+  gso_ = true;
+}
+
+void quic_session::do_flush_gso(ngtcp2_tstamp ts) {
+  if (gso_buf_.empty()) return;
+
+  ngtcp2_path_storage ps;
+  ngtcp2_path_storage_zero(&ps);
+  ngtcp2_pkt_info pi;
+  std::memset(&pi, 0, sizeof(pi));
+
+  // 外层节奏与老路径**同形**：第一轮永远来一次（ACK / CRYPTO /
+  // HANDSHAKE_DONE 要靠它出去），之后只在"还有流数据待发"时继续 —— 否则这个
+  // 循环没有终止判据。`next_sendable_stream` 在这里只当判据用，回调里会重挑
+  // 一次（回调拿不到这里挑好的那一段）。
+  bool first = true;
+  for (unsigned round = 0; round < kMaxFlushRounds; ++round) {
+    int64_t sid = -1;
+    ngtcp2_vec dv[kMaxStreamVecs];
+    size_t dc = 0;
+    size_t hd = 0;
+    uint32_t fl = 0;
+    const bool have = next_sendable_stream(&sid, dv, &dc, &hd, &fl);
+    if (!have && !first) break;
+    first = false;
+
+    size_t pgsolen = 0;
+    const ngtcp2_ssize nwrite = ngtcp2_conn_write_aggregate_pkt2(
+        conn_, &ps.path, &pi, gso_buf_.data(), gso_buf_.size(), &pgsolen,
+        &quic_session::gso_write_pkt, kGsoMaxPkts, ts);
+
+    if (nwrite < 0) {
+      // 那三种"这一条流现在发不了"已经在回调里被翻成 0 了（见 gso_write_pkt），
+      // 所以走到这儿的基本都是连接级错误 —— 与老路径同一套收尾。
+      handle_conn_error(static_cast<int>(nwrite));
+      break;
+    }
+    // 0 = 成功但这一轮没有东西要发（拥塞窗口满、或被放大攻击限流），
+    // **不是失败**。与老路径同义。
+    if (nwrite == 0) break;
+    // 一个包都没写出来时 agg2 不会回填 `ps.path`；拿它去 send 就是空指针。
+    if (ps.path.remote.addr == nullptr) break;
+
+    send_batch(static_cast<size_t>(nwrite), pgsolen, ps.path.remote.addr,
+               static_cast<int>(ps.path.remote.addrlen));
+  }
+}
+
+ngtcp2_ssize quic_session::gso_write_pkt(ngtcp2_conn* conn, ngtcp2_path* path,
+                                         ngtcp2_pkt_info* pi, uint8_t* dest,
+                                         size_t destlen, ngtcp2_tstamp ts,
+                                         void* user_data) {
+  quic_session* self = static_cast<quic_session*>(user_data);
+
+  int64_t stream_id = -1;
+  ngtcp2_vec datav[kMaxStreamVecs];
+  size_t datavcnt = 0;
+  size_t handed = 0;
+  uint32_t flags = 0;
+  // **`have == false` 也照样往下走**：ACK / CRYPTO / 控制帧要在这里出去，而
+  // 它们不需要挑流（与老路径第一轮空跑挑流的道理相同）。
+  self->next_sendable_stream(&stream_id, datav, &datavcnt, &handed, &flags);
+
+  ngtcp2_ssize datalen = -1;
+  const ngtcp2_ssize nwrite = ngtcp2_conn_writev_stream(
+      conn, path, pi, dest, destlen, &datalen, flags, stream_id,
+      datavcnt != 0 ? datav : nullptr, datavcnt, ts);
+
+  if (nwrite < 0) {
+    if (nwrite == NGTCP2_ERR_STREAM_DATA_BLOCKED ||
+        nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
+        nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
+      if (nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
+          nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
+        // 留着它，每一轮都会撞同一堵墙，把它后面那些流全部饿死。同老路径。
+        self->send_q_.erase(stream_id);
+      }
+      // **返 0 = 干净的收工方式**：agg2 外层写的是
+      // `if (nwrite == 0) { nwrite = wbuf - buf; break; }`
+      // （`ngtcp2_conn.c:14345`），也就是"收工，返回已写总量"。这与老路径那个
+      // `break` 同义。**返负数会被当成连接级错误原样透传出去**，那是另一回事。
+      return 0;
+    }
+    return nwrite;
+  }
+
+  // ★ 记账必须搬到这里。外层现在拿到的是"这一批一共多少字节"，**不再逐包
+  // 回读**，所以老路径 `do_flush()` 循环体里那一段（找流、`sent_off +=`、
+  // FIN 落地）只能在这儿做一次。判据与注释与老路径逐字相同：
+  //   - `n <= handed` 是防 `sent_off > write_off` 下溢（那会变成越界读）；
+  //   - FIN 落地比的是"这次编进去的字节数 == 这次给它的字节数"，不是"队列空了"。
+  if (datalen >= 0 && stream_id >= 0) {
+    std::map<int64_t, stream_send>::iterator it = self->send_q_.find(stream_id);
+    if (it != self->send_q_.end()) {
+      stream_send& s = it->second;
+      const size_t n = static_cast<size_t>(datalen);
+      if (n <= handed) s.sent_off += n;
+      if (s.fin_requested && !s.fin_written && (datavcnt == 0 || n == handed)) {
+        s.fin_written = true;
+      }
+    }
+  }
+  return nwrite;
+}
+
+void quic_session::send_batch(size_t total, size_t pgsolen,
+                              const struct sockaddr* peer, int peerlen) {
+  if (pgsolen == 0 || total <= pgsolen) {
+    // 单包：短包 / ACK / 控制帧 / PMTUD 探测包。**分段尺寸必须 ≥ 这一包的长度**，
+    // 否则协议栈会把它切碎。取 `max(本包长度, path MTU)`：稳态下 path MTU 就是
+    // 那个值，所以整条连接里这个数基本不变，端点那份缓存也就基本都命中。
+    const size_t pmax = static_cast<size_t>(
+        ngtcp2_conn_get_path_max_tx_udp_payload_size2(conn_));
+    const size_t want = total > pmax ? total : pmax;
+    if (!set_gso_seg_ || !set_gso_seg_(static_cast<int>(want))) {
+      gso_ = false;
+    }
+    send_(gso_buf_.data(), total, peer, peerlen);
+    return;
+  }
+
+  // 一批等长数据报。分段尺寸**就是 `pgsolen`**（agg2 回填的"非末包长度"），
+  // 不能拿别的东西代替 —— 见 `quic_gso_set_seg_fn` 的说明。
+  if (!set_gso_seg_ || !set_gso_seg_(static_cast<int>(pgsolen))) {
+    // 设不上就**永久**退回老路径的速度（这一批先自己按 `pgsolen` 切开逐段发，
+    // 语义与今天的逐包发送完全相同）。绝不能把没设对分段尺寸的缓冲当一个大包
+    // 发出去 —— 那会在线上变成一个 ~14 KB 的数据报，而对端接收缓冲只有
+    // `kRecvBufLen`(4096)。
+    gso_ = false;
+    send_in_pieces(total, pgsolen, peer, peerlen);
+    return;
+  }
+  // 端点拿到的是 `forward(data, len, peer, peerlen)`：整个 `len` 进一个
+  // `uv_buf_t` 交给 `uv_udp_try_send`，而 Windows 上那条路**没有长度上限**，
+  // 所以这里就是**一次** `WSASendTo`，由协议栈按 `pgsolen` 切开。
+  send_(gso_buf_.data(), total, peer, peerlen);
+}
+
+void quic_session::send_in_pieces(size_t total, size_t pgsolen,
+                                  const struct sockaddr* peer, int peerlen) {
+  size_t off = 0;
+  while (off < total) {
+    size_t n = total - off;
+    if (n > pgsolen) n = pgsolen;
+    send_(gso_buf_.data() + off, n, peer, peerlen);
+    off += n;
+  }
+}
+
+#endif  // UVCPP_UDP_GSO_ENABLE
 
 // =========================================================================
 // 到期

@@ -144,6 +144,18 @@ messages it is a net loss; the break-even sits around 16 KiB and jitters there, 
 32 KiB default. This is the only knob in the project that is a `CACHE STRING` rather than an
 `option()`, so it takes a value, not `ON`/`OFF`.
 
+`UVCPP_ENABLE_UDP_GSO` (derived: `ON` only when `WIN32` **and** `UVCPP_ENABLE_QUIC=ON`) turns on
+the QUIC transport's send-side UDP segmentation offload. On Windows libuv sends one datagram per
+`WSASendTo`, so a QUIC connection pays one system call per datagram; this path hands ngtcp2's
+whole equal-sized aggregate to the stack in **one** call and lets the kernel split it at
+`UDP_SEND_MSG_SIZE`. The splitting happens in the kernel, so the wire still carries exactly the
+datagrams it carries today — only the call count changes. Linux needs none of this: libuv's
+`uv__udp_sendmsg()` already folds up to 20 requests into one `sendmmsg()`, and this library's
+QUIC send shape is what triggers it. The code is compiled out when the switch is off, so on
+Linux "enabling" it is a no-op rather than "on but ineffective". See
+[`quic-guide.md`](quic-guide.md) §1.2 for the two gates, and for why the segment size can only
+come from what each aggregate write reports rather than from a constant.
+
 ### Tests
 
 `UVCPP_BUILD_TESTS` (ON) and `UVCPP_BUILD_FUNCTIONAL` (ON). The latter is declared **inside**

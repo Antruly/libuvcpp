@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.5.1--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.5.2--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.5.1-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.5.2-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -315,6 +315,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_STATIC_RUNTIME` | `OFF` | Statically link the compiler runtime (`libgcc`/`libstdc++`) into the library. **MinGW and Linux only — a no-op on MSVC**, which uses `/MD` and ships `vcruntime`/`msvcp` in the package |
 | `UVCPP_ENABLE_TRY_WRITE` | `ON` | Try `uv_try_write` before copying into a write buffer |
 | `UVCPP_TRY_WRITE_MIN_BYTES` | `32768` | Smallest payload worth attempting `uv_try_write` for (a `CACHE STRING`, not an `option()`) |
+| `UVCPP_ENABLE_UDP_GSO` | `ON` when Windows **and** `UVCPP_ENABLE_QUIC=ON`, else `OFF` | Send-side UDP Segmentation Offload for the QUIC transport: hand a batch of equal-sized datagrams to the stack in **one** `WSASendTo` via `UDP_SEND_MSG_SIZE`, instead of one syscall per datagram. The segment size is taken from what each aggregate write reports, so the wire carries exactly the datagrams it carries today. **Windows only** — the code is compiled out elsewhere and the switch is a no-op there. See [`doc/quic-guide.md`](doc/quic-guide.md) |
 
 **Important**: `UVCPP_ENABLE_ZLIB` and `UVCPP_ENABLE_OPENSSL` are NOT auto-enabled
 when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is
@@ -643,7 +644,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.5.1-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.5.2-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.4.0` and
 `v1.5.0` are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development
 lines accumulated through `v1.4.0`, plus what the `1.4.x` line (released as `v1.5.0`) added
@@ -893,7 +894,7 @@ fixes came from issue reports by the project's first external contributor,
 - **The private-header pair.** `uvcpp_quic_session.h` holds `ngtcp2_conn*`, `SSL*` and
   `ngtcp2_path_storage`, so its layout tracks the ngtcp2 version — it is the second
   private header, alongside `uvcpp_quic_ngtcp2.h`. Both are excluded from the install
-  (`CMakeLists.txt:2056`) and from the package
+  (`CMakeLists.txt:2090`) and from the package
   (`tests/tools/package_release.py`'s `PRIVATE_HEADERS`); measured with
   `cmake --install build-quic --prefix /tmp/inst`, which lands exactly the four public
   headers in `include/quic/` (`1.4.1`)
@@ -940,6 +941,16 @@ fixes came from issue reports by the project's first external contributor,
   returning on failure would silently drop the datagram, which QUIC would read as loss and
   retransmit (the symptom being "works, but slowly"). libuv returns `UV_EAGAIN` while an
   async send is queued, so a fast-path packet can never overtake a slow-path one (`1.5.1`)
+- **The QUIC send path batches its datagrams on Windows.** `UVCPP_ENABLE_UDP_GSO` (derived
+  default: on for a Windows build that has QUIC) hands a whole aggregate of equal-sized
+  datagrams to the stack in **one** `WSASendTo`, segmented by `UDP_SEND_MSG_SIZE`. On
+  Windows libuv sends one datagram per `WSASendTo` (`uv__udp_try_send2()` is a plain loop),
+  which is where the per-datagram cost that the MsQuic comparison kept landing on lives;
+  Linux already folds up to 20 requests into one `sendmmsg()`, so the switch is compiled out
+  there and is a no-op if you turn it on. The segment size is whatever that batch reports,
+  never a constant, so the wire carries the datagrams it carried before — and the receive
+  half is deliberately not implemented, since a half-open receive side would let libuv hand
+  coalesced datagrams to the application as a single read (`1.5.2`)
 
 ### HTTP/3 (web layer)
 

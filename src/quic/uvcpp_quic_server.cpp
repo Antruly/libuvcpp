@@ -121,6 +121,13 @@ struct uvcpp_quic_server::impl {
   uvcpp_timer* timer = nullptr;
   bool         listening = false;
 
+  /// 这一个监听 socket 上 `UDP_SEND_MSG_SIZE` 当前是多少。0 = 没设过。
+  ///
+  /// 这里**只有一份**，因为服务端所有连接共用同一个 socket —— 也正是
+  /// 缓存必须放在端点而不能放在会话上的原因（见 `uvcpp_quic_client.cpp`
+  /// 里同名成员的说明）。
+  int gso_seg = 0;
+
   std::function<void(uvcpp_quic_connection*)> connection_cb;
 
   /// 本端绑定地址的快照（`listen()` 那一刻取的）。每条连接的 `ngtcp2_path` 的
@@ -370,6 +377,12 @@ struct uvcpp_quic_server::impl {
         idle_timeout_ms,
         [this](const uint8_t* data, size_t len, const struct sockaddr* p,
                int plen) { forward(data, len, p, plen); },
+        [this](int seg) -> bool {
+          if (seg == gso_seg) return true;  // 没变就别去撞系统调用
+          if (!quic_detail::set_udp_gso_seg(udp, seg)) return false;
+          gso_seg = seg;
+          return true;
+        },
         scid, odcid);
     if (rc != 0) {
       // `attach` 已经把内核的所有权接过来了，`holder` 一析构就连它一起收
@@ -398,6 +411,7 @@ struct uvcpp_quic_server::impl {
 
     udp = new uvcpp_udp(loop);
     if (udp == nullptr) return UV_ENOMEM;
+    gso_seg = 0;  // 换了 socket，上一份缓存作废
 
     rc = udp->bind(reinterpret_cast<const struct sockaddr*>(&sa), 0);
     if (rc != 0) return rc;

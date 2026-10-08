@@ -18,7 +18,7 @@
   （`src/http2/uvcpp_h2_session.h:70`）。
 - 包含方式：`<http2/uvcpp_h2_session.h>`、`<http2/uvcpp_h2_connection.h>`、
   `<http2/uvcpp_h2_common.h>`。私有的 `<http2/uvcpp_h2_nghttp2.h>` **不安装**
-  （`CMakeLists.txt:2037`）。
+  （`CMakeLists.txt:2071`）。
 
 > 本页讲**怎么用**。它与 [HTTP/2 支持现状](./http2-status.md) 分工：那篇讲
 > **实现进度、写死的折衷、已知缺口**，本页不重复那些，需要时直接链过去。
@@ -72,12 +72,12 @@ int drain(std::string& out);                                      // src/http2/u
 ## 2. 编译期条件
 
 `UVCPP_NGHTTP2_ENABLE` **在任何构建里都有定义**，只是值不同：ON ⇒ `1`，OFF ⇒ `0`
-（`CMakeLists.txt:1584`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
+（`CMakeLists.txt:1616`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
 （`src/http2/uvcpp_h2_common.h:19`、`src/http2/uvcpp_h2_session.h:33`、`src/http2/uvcpp_h2_connection.h:27`）。
 
 为 0 时：头**还在**（源码树里能 include、也编得过），但里面**一个类型都不声明** ——
 写 `uvcpp_h2_session s(true);` 会"未定义类型"。安装出来的包里则**根本没有这几个头**
-（`CMakeLists.txt:2038` 只在开关 ON 时装）。
+（`CMakeLists.txt:2072` 只在开关 ON 时装）。
 
 所以使用者的写法是把自己的那段包起来：
 

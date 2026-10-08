@@ -42,6 +42,7 @@
 namespace uvcpp {
 
 class uvcpp_ssl_context;
+class uvcpp_udp;
 
 namespace quic_detail {
 
@@ -64,6 +65,44 @@ namespace quic_detail {
  */
 using quic_send_fn = ::std::function<void(
     const uint8_t* data, size_t len, const struct sockaddr* peer, int peerlen)>;
+
+/**
+ * @brief 让端点把「这一段发送要按多少字节切」告诉协议栈 —— Windows 的 USO。
+ *
+ * 这是 `ngtcp2_conn_write_aggregate_pkt2()` 那条路对外的**唯一**依赖，做成回调而
+ * 不是让本类持有 `uvcpp_udp*`，理由与 `quic_send_fn` 一样：本类不认识 socket。
+ *
+ * @param seg 每段的字节数。**必须精确等于这一批里每一个（非末）数据报的长度**，
+ *            也就是 `ngtcp2_conn_write_aggregate_pkt2` 回填的 `*pgsolen`；单包发送
+ *            时给一个 **≥ 这个包长度** 的值（那时它整包出去，不切）。设小了协议栈
+ *            会把一个包**切在中间**，对端拿到的是碎片 —— 不是丢包，是坏字节。
+ * @return true = 协议栈收下了这个分段尺寸，此后本 socket 上的发送按 `seg` 切。
+ *         false = 设不上 ⇒ 调用方必须**退回逐包发送**。
+ *
+ * @warning **返回 true 不等于协议栈真的会切。** 本机实测（`_probe/uso_probe.py`）：
+ *          `setsockopt` 对 512…65483 这**一整段**值全部返回成功，而 65483 远超任何
+ *          真实 MTU。所以返回值的含义只是"选项装上了"；"真的切开了"只能由**对端**
+ *          来证（`tests/functional/quic_gso_func.cpp` 就是干这个的）。
+ *
+ * @note 选项是**每 socket** 的、而且**一直生效**：设成 N 之后，这条 socket 上任何
+ *       长度 > N 的发送都会被切开，包括别的连接发的。所以第二条参数 `seg` 的值
+ *       不是"给这一批用的提示"，是"此后这条 socket 的全局状态"。端点那一侧把它
+ *       包一层**按 socket 缓存**的 lambda（同一个值不重复调 `setsockopt`），
+ *       本类每次发送前都用**这一批真正需要的那个值**去要一次。
+ */
+using quic_gso_set_seg_fn = ::std::function<bool(int seg)>;
+
+/**
+ * @brief `quic_gso_set_seg_fn` 的落地：给 `udp` 的 socket 设 `UDP_SEND_MSG_SIZE`。
+ *
+ * @return Windows 上返回 `setsockopt` 成功与否；**非 Windows 一律 false**
+ *         （那个选项是 winsock 扩展，且 `UVCPP_UDP_GSO_ENABLE=0` 时整段不编）。
+ *
+ * 定义在 `uvcpp_quic_session.cpp` —— 这个头是私有头，所以放这里既不新增安装面，
+ * 也不用碰 `CMakeLists.txt` 的 `src/quic/*.h` 安装排除（那份与
+ * `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是**一对，必须一起改**）。
+ */
+bool set_udp_gso_seg(uvcpp_udp* udp, int seg);
 
 /**
  * @brief 内核往外报的事件。
@@ -198,7 +237,7 @@ class quic_session {
                   const ::std::vector<::std::string>& alpn,
                   const struct sockaddr* local, const struct sockaddr* remote,
                   const char* server_name, uint64_t idle_timeout_ms,
-                  quic_send_fn send);
+                  quic_send_fn send, quic_gso_set_seg_fn set_gso_seg);
 
   /**
    * @brief 以服务端身份建立内核。
@@ -227,6 +266,7 @@ class quic_session {
                   const ::std::vector<::std::string>& alpn,
                   const struct sockaddr* local, const struct sockaddr* remote,
                   uint64_t idle_timeout_ms, quic_send_fn send,
+                  quic_gso_set_seg_fn set_gso_seg,
                   const ngtcp2_cid& client_scid,
                   const ngtcp2_cid& original_dcid);
 
@@ -450,6 +490,42 @@ class quic_session {
   /// 真正干活的 `flush()`：`flush()` 只是它外面那层"现在能不能做"的判断。
   void do_flush();
 
+#if UVCPP_UDP_GSO_ENABLE
+  /// 第二层闸门的初始化：问一次端点「这条路支不支持 USO」，支持就把落点缓冲按
+  /// `ngtcp2_conn_get_send_quantum2()`（默认 64 KiB）开出来。
+  ///
+  /// **只在 `conn_` 建好之后调**（要读 send quantum）。探测用的分段尺寸是
+  /// `kDatagramBufLen`(1500)：PMTUD 探测表最大一档 1444，所以这个值**任何一次
+  /// 单包发送都不会被切** —— 也就是说探测本身不改线上行为。
+  void setup_gso();
+
+  /// `do_flush()` 的 GSO 分支：一次 `ngtcp2_conn_write_aggregate_pkt2` 攒一批
+  /// 等长数据报，再一次 `send_` 交给内核（Windows 上就是一次 `WSASendTo`）。
+  ///
+  /// 与老路径的**唯一**差别是"一批"与"一个一个"；挑流、记账、错误分诊、以及
+  /// 每轮那条 `nwrite == 0 → 收工` 的判据全部同形。
+  void do_flush_gso(ngtcp2_tstamp ts);
+
+  /// 攒一批时每写**一个包**被 ngtcp2 叫回来一次。挑流 + 记账 + 错误翻译都在这儿。
+  ///
+  /// 必须是静态成员（`ngtcp2_write_pkt` 是个 C 函数指针），`self` 从 `user_data` 取。
+  static ngtcp2_ssize gso_write_pkt(ngtcp2_conn* conn, ngtcp2_path* path,
+                                    ngtcp2_pkt_info* pi, uint8_t* dest,
+                                    size_t destlen, ngtcp2_tstamp ts,
+                                    void* user_data);
+
+  /// 把 `gso_buf_` 里的 `total` 字节发出去，其中前 `pgsolen` 字节一个数据报。
+  ///
+  /// `pgsolen == 0 || total <= pgsolen` 时是**单包**（短包 / ACK / 控制帧 /
+  /// PMTUD 探测包），与老路径同形的一次发送。
+  void send_batch(size_t total, size_t pgsolen, const struct sockaddr* peer,
+                  int peerlen);
+
+  /// `send_batch` 的兜底：分段尺寸设不上时自己按 `pgsolen` 切开逐段发。
+  void send_in_pieces(size_t total, size_t pgsolen, const struct sockaddr* peer,
+                      int peerlen);
+#endif  // UVCPP_UDP_GSO_ENABLE
+
   /// `close()` 真正干活的那半：备好 `close_ccerr_`、发第一个终端包、进 CLOSING。
   void do_close(int error_code);
 
@@ -618,6 +694,32 @@ class quic_session {
   ngtcp2_path_storage      path_;
 
   quic_send_fn             send_;
+
+#if UVCPP_UDP_GSO_ENABLE
+  /// 「让内核按 N 字节切」这条路。空 = 端点没给，GSO 一律不用。
+  quic_gso_set_seg_fn      set_gso_seg_;
+
+  /**
+   * @brief 这条路能不能用。
+   *
+   * **建连接时探测**得出（`init_client` / `init_server` 的**末尾**，也就是端点
+   * `bind()` 之后 —— `uv_udp_init` 是惰性建 socket 的，bind 之前 `uv_fileno` 返
+   * `UV_EBADF`。拿 `kDatagramBufLen`(1500) 试一次）：这台机器、这条 socket 支不支持
+   * USO。探测只回答"选项装不装得上"，**不回答**"协议栈真的会不会切" —— 后者只能
+   * 由对端证（见 `quic_gso_set_seg_fn` 的 warning）。
+   *
+   * 运行期还会被置假一次：某次发送前设分段尺寸失败，说明这条路已经不可信，本连接
+   * 此后一律走老路径。
+   */
+  bool                     gso_ = false;
+
+  /// 一次 `ngtcp2_conn_write_aggregate_pkt2` 的落点缓冲。
+  ///
+  /// 按 `ngtcp2_conn_get_send_quantum2()` 开（默认 64 KiB）—— 那也正是 agg2
+  /// 内部用满的量级，且远大于 `assert(buflen >= path_max_udp_payloadlen)` 的下限。
+  /// 是成员而不是栈数组：64 KiB 放栈上有栈溢出的风险，而这个对象本来就长命。
+  ::std::vector<uint8_t>   gso_buf_;
+#endif  // UVCPP_UDP_GSO_ENABLE
 
   quic_session_events      events_;
 

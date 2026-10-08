@@ -117,6 +117,25 @@ foreach(test_src ${FUNC_SOURCES})
       target_link_libraries(${exe_name} PRIVATE crypt32)
     endif()
   endif()
+  # ⚠️ 想在这棵树下写**白盒**功能用例（include `src/quic/*.h` 那种私有头）的话，
+  # 光有 `-I ${CMAKE_SOURCE_DIR}/src` 还不够：私有头里 include 了 ngtcp2，而
+  # **ngtcp2 的 include 目录不会顺着链接传过来**（根 CMakeLists 把
+  # `ngtcp2_static` 挂在 `$<BUILD_INTERFACE:>` + PRIVATE 下，静态/共享库上都会以
+  # `$<LINK_ONLY:...>` 进 `INTERFACE_LINK_LIBRARIES`，而它**不带** include 目录，
+  # 见 `doc/quic-guide.md` §7.2）。要挂就照 `web_ssl_*` 自己挂 OpenSSL 那样写：
+  #
+  #     target_include_directories(${exe_name} PRIVATE
+  #       $<TARGET_PROPERTY:ngtcp2_static,INTERFACE_INCLUDE_DIRECTORIES>)
+  #
+  # 不挂的话 MinGW 的 g++ 会**静默**捞到 `C:/msys64/mingw64/include/ngtcp2/` 那份
+  # **别人装的、版本不同**的头，报出来的是"`ngtcp2_stateless_reset_token` 没有
+  # 声明" —— 看着像本库的私有头写错了，其实是被换了一份头。
+  #
+  # 现在没有用例走这条路（`quic_gso_func.cpp` 用的是公开 API），所以这里只是一条
+  # 给下一个人的提示，不挂任何目标。另有一层理由不要碰那条路：**库里那些私有
+  # helper 没有导出**（`libuvcpp.dll` 的导出表里没有 `quic_detail::*`），白盒用例
+  # 即使编得过也**链接不到** —— 症状是 `undefined reference`。
+
   add_test(NAME ${exe_name} COMMAND ${exe_name})
 endforeach()
 

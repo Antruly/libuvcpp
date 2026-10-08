@@ -93,7 +93,7 @@ struct doc_thing {
 ```
 
 两个头都**不在 `<uvcpp.h>` 里**：那个聚合头只收 `uvcpp_define/version/export` 与
-`handle/loop/req` 三组。两个头都被 `CMakeLists.txt:965` 与 webapp 那份同形的 GLOB 自动
+`handle/loop/req` 三组。两个头都被 `CMakeLists.txt:984` 与 webapp 那份同形的 GLOB 自动
 收进构建与安装，**不需要往任何清单里加一行**。
 
 - **没有开关。** 写出侧不吃 `UVCPP_ENABLE_*` 任何一个；读入侧只吃它本来就依赖的

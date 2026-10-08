@@ -106,6 +106,13 @@ struct uvcpp_quic_client::impl {
   /// 本对象名下那条连接。**拥有它** —— 收尾时 delete。
   uvcpp_quic_connection* conn = nullptr;
 
+  /// 这一个 socket 上 `UDP_SEND_MSG_SIZE` 当前是多少。0 = 没设过。
+  ///
+  /// **缓存在端点，不在会话上**：那个选项是**每 socket** 的持久状态，而
+  /// 服务端一个监听口被所有连接共用 —— 会话侧的缓存会被别的会话改陈旧，
+  /// 于是某一次发送会用错的分段尺寸（切在包中间）。
+  int gso_seg = 0;
+
   std::function<void(int)> connect_cb;
   /// `cb` 只跑一次。`connect()` 失败时它**一次都不跑** —— 那条契约由
   /// `quic_api_func.cpp` 钉着。
@@ -432,6 +439,7 @@ struct uvcpp_quic_client::impl {
 
     udp = new uvcpp_udp(loop);
     if (udp == nullptr) return UV_ENOMEM;
+    gso_seg = 0;  // 换了 socket，上一份缓存作废
 
     // 本端：与对端同族的通配地址 + 端口 0（内核挑）。**不能跨族**：一条
     // `AF_INET` 的 UDP 口发不到一个 IPv6 对端去，libuv 会在 send 时报
@@ -474,7 +482,13 @@ struct uvcpp_quic_client::impl {
         reinterpret_cast<const struct sockaddr*>(&remote_sa), host,
         idle_timeout_ms,
         [this](const uint8_t* data, size_t len, const struct sockaddr* peer,
-               int peerlen) { forward(data, len, peer, peerlen); });
+               int peerlen) { forward(data, len, peer, peerlen); },
+        [this](int seg) -> bool {
+          if (seg == gso_seg) return true;  // 没变就别去撞系统调用
+          if (!quic_detail::set_udp_gso_seg(udp, seg)) return false;
+          gso_seg = seg;
+          return true;
+        });
     if (rc != 0) return rc;
 
     timer = new uvcpp_timer(loop);
