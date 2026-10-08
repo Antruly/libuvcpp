@@ -730,6 +730,7 @@ void test_run_default_drives_reconnect() {
 //
 // **对照组是必须的**：不加的话，"读到 false"可能只是"服务端压根不支持压缩"，
 // 那样这个用例什么都没测到。对照组用同一个 `echo_server`（它默认开着压缩）。
+#if UVCPP_ZLIB_ENABLE
 void test_compression_setting_reaches_inner() {
   echo_server srv;
   const int port = srv.start();
@@ -836,6 +837,7 @@ void test_compression_setting_reaches_inner() {
     srv2.stop();
   }
 }
+#endif  // UVCPP_ZLIB_ENABLE
 
 // =========================================================================
 // 13. `run(UV_RUN_DEFAULT)` 在"没事可做"时要自己返回
@@ -985,8 +987,10 @@ int main(int argc, char** argv) {
       {"connect_wait", test_connect_wait},
       {"close_during_connect_cancels", test_close_during_connect_cancels},
       {"run_default_drives_reconnect", test_run_default_drives_reconnect},
+#if UVCPP_ZLIB_ENABLE
       {"compression_setting_reaches_inner",
        test_compression_setting_reaches_inner},
+#endif
       {"run_default_returns_when_idle",
        test_run_default_returns_when_idle},
   };

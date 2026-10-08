@@ -487,7 +487,12 @@ static void t_default_construct_is_inert() {
   c.start();               // 幂等：再来一次也不该有副作用
   // 没有传输层时这些公开访问器也不能崩（它们都不碰 tcp_）。
   check(c.get_max_message_size() > 0, "默认构造也带上了消息上限");
+#if UVCPP_ZLIB_ENABLE
+  // 压缩那套访问器只在 zlib 开着时才存在（公开头里是 `#if UVCPP_ZLIB_ENABLE`），
+  // 所以这条断言只在那个配置下有意义。用例本身不守卫 —— 它的主断言是「默认构造
+  // 编得过且链接得过、start() 惰性」，与压缩无关。
   check(!c.is_compression_enabled(), "默认构造不启用压缩");
+#endif  // UVCPP_ZLIB_ENABLE
   check(true, "默认构造的对象可安全 start() 与析构");
 }
 

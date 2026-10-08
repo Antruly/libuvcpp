@@ -926,6 +926,7 @@ void test_real_client_roundtrip() {
 // **两种调用顺序都要测**，因为 WS 服务是**惰性创建**的：`websocket()` 之前
 // `ws_server()` 还是 nullptr，逃生口 `ws_server()->set_compression()` 在那个
 // 时刻够不着 —— 这正是这个 app 级入口存在的理由，也是本用例存在的理由。
+#if UVCPP_ZLIB_ENABLE
 void test_ws_compression_config() {
   const char kExt[] = "permessage-deflate; client_max_window_bits";
 
@@ -995,6 +996,7 @@ void test_ws_compression_config() {
   app.stop();
   app.join();
 }
+#endif  // UVCPP_ZLIB_ENABLE
 
 struct test_case {
   const char* name;
@@ -1023,7 +1025,9 @@ int main(int argc, char** argv) {
       {"idle_timeout_exempt", test_idle_timeout_exempt},
       {"app_shutdown_closes_sessions", test_app_shutdown_closes_sessions},
       {"real_client_roundtrip", test_real_client_roundtrip},
+#if UVCPP_ZLIB_ENABLE
       {"ws_compression_config", test_ws_compression_config},
+#endif
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 
