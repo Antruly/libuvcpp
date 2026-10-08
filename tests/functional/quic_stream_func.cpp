@@ -35,6 +35,8 @@
  * **为什么两端共用一条循环**：同 `quic_handshake_func.cpp` 文件头那条。
  */
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <string>
@@ -105,6 +107,58 @@ const int kErrStreamShutWr = -219;
 
 const int kDeadlineMs = 5000;
 
+// ---------------------------------------------------------------------------
+// 跨分块的载荷（第 4 段用）
+// ---------------------------------------------------------------------------
+
+/// 发送侧存储的一块有多大（`stream_send::kChunkSize`）。
+///
+/// **这里抄一个数而不是引那个常量**：`stream_send` 是 `quic_session` 的私有
+/// 内嵌结构，公开头一个符号都不露（`uvcpp_quic_common.h` 的文件头写着为什么）。
+/// 抄下来是为了让下面两个尺寸**精确地**钉在两边的形状上：一个正好等于一块，
+/// 一个跨三块还多一截。那个常量改了，这一段的注释就该跟着改（值对不上不会
+/// 让它变错，只会让它退化成"随便一个大载荷"—— 所以注释里写明这层关系）。
+const size_t kOneChunk = 64 * 1024;
+
+/// 大载荷的报头长度。固定宽度，所以服务端不用找分隔符 —— 第 4 段的两条流
+/// 都靠它自报长度，服务端因此不需要预先知道客户端要发多大。
+const size_t kBigHeader = 16;  // "BIG:" + 12 位十进制
+
+/// 造一条 \p n 字节的载荷。
+///
+/// **逐字节随位置变**，理由与 `bench_quic.cpp` 里 `payload_byte()` 逐字相同：
+/// 常数填充对"搬错了位置"免疫（收端照样收到 n 个同样的字节，计数全对）。
+/// 这里比那边更强一层 —— 收端拿到的整串与发出去的整串**逐字节比**，所以
+/// 错位、丢一段、重复一段都会现形。
+std::string big_payload(size_t n) {
+  std::string s;
+  s.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    s.push_back(static_cast<char>('a' + ((i * 7 + (i >> 6)) % 26)));
+  }
+  return s;
+}
+
+/// 带报头的整段字节：`"BIG:%012llu"` + 载荷。
+std::string big_message(size_t n) {
+  char hdr[kBigHeader + 1];
+  std::snprintf(hdr, sizeof(hdr), "BIG:%012llu",
+                static_cast<unsigned long long>(n));
+  return std::string(hdr) + big_payload(n);
+}
+
+/// 两串第一个不同的下标；完全相同返回 `std::string::npos`。
+///
+/// 失败信息里带上它，是为了让"哪里开始不对"自报家门 —— 一条 200000 字节的
+/// 流只说"不相等"没用，第一个不同的偏移才指得出是边界、是开头还是尾巴。
+size_t first_diff(const std::string& got, const std::string& want) {
+  const size_t n = got.size() < want.size() ? got.size() : want.size();
+  for (size_t i = 0; i < n; ++i) {
+    if (got[i] != want[i]) return i;
+  }
+  return got.size() == want.size() ? std::string::npos : n;
+}
+
 void test_streams_over_one_loop() {
   uvcpp_loop loop;
   uvcpp_test::loop_drain drain_loop(&loop);
@@ -130,6 +184,7 @@ void test_streams_over_one_loop() {
   std::map<int64_t, int> server_read_errors;    // 流号 -> 错误码
   std::map<int64_t, int> server_writes;         // 流号 -> on_write 跑了几次
   std::vector<int64_t>   server_opened;         // on_stream_open 见过的流号
+  std::map<int64_t, int> server_big_echoed;     // 第 4 段：这条流已经回过声了
   uvcpp_quic_connection* server_conn = nullptr;
 
   const int listen_rc = server.listen([&](uvcpp_quic_connection* c) {
@@ -154,6 +209,15 @@ void test_streams_over_one_loop() {
             // 客户端这条流**没带 FIN**，所以服务端不能等 FIN 才回 ——
             // 它收到这 4 个字节就回。回写本身带 FIN：服务端的发送方向到此为止。
             conn.write_stream(id, "half-echo", 9, true);
+          } else if (acc.size() >= kBigHeader &&
+                     acc.compare(0, 4, "BIG:") == 0) {
+            // 第 4 段：报头自带长度，所以服务端不必预先知道客户端发多大。
+            const size_t n = static_cast<size_t>(
+                std::strtoul(acc.c_str() + 4, nullptr, 10));
+            if (acc.size() >= kBigHeader + n && server_big_echoed.count(id) == 0) {
+              server_big_echoed.emplace(id, 1);
+              conn.write_stream(id, acc.data() + kBigHeader, n, true);
+            }
           }
           break;
         }
@@ -349,6 +413,51 @@ void test_streams_over_one_loop() {
               &loop,
               [&] { return client_got[half_id] == "half-echo"; }, kDeadlineMs),
           "shutdown 只关发送方向：读方向的回声照常到达");
+  }
+
+  // --- 第 4 段：跨分块的大载荷 -----------------------------------------
+  //
+  // 发送侧的存储是**定长分块**的（`stream_send::kChunkSize`，见那个结构的
+  // 注释：它就是 ngtcp2 那条"交给它的数据必须原地不动"的硬要求的形状）。
+  // 这一段拿两个尺寸去钉分块引入的**边界**：
+  //
+  //   - `kOneChunk`（正好一块）：数据末尾落在块边界上 —— `settle()` 丢完这块
+  //     之后 `chunks` 整个变空，而 `next_sendable_stream()` 定位用的那个除法
+  //     正好落在"下一块的开头"。
+  //   - `3 * kOneChunk + 1234`（跨三块还多一截）：每个包都横跨一次块边界，
+  //     于是 `next_sendable_stream()` 一次要描述**两段**内存（ngtcp2 收的是
+  //     `ngtcp2_vec` 数组，本层一次最多给 16 段）。
+  //
+  // 判据是**整条流逐字节相同**，不是字节数 —— 计数式判据对错位免疫，而分块
+  // 搬错的典型症状恰好是"字节数一个不差、内容整体偏了一段"。
+  {
+    const size_t big_sizes[2] = {kOneChunk, 3 * kOneChunk + 1234};
+    for (int bi = 0; bi < 2; ++bi) {
+      const size_t      n   = big_sizes[bi];
+      const std::string msg = big_message(n);
+      const int64_t     sid = c->open_stream(true);
+      check(sid >= 0,
+            "客户端开出了大载荷流（" + std::to_string(n) + " 字节）");
+      if (sid < 0) continue;
+      check_eq_i(c->write_stream(sid, msg.data(), msg.size(), false), 0,
+                 "write_stream(" + std::to_string(msg.size()) + " 字节) 返回 0");
+
+      const bool back = uvcpp_test::wait_until(
+          &loop, [&] { return client_got[sid].size() >= n; }, kDeadlineMs);
+      check(back, "大载荷（" + std::to_string(n) +
+                      " 字节）的回声在 deadline 内收全");
+      // 服务端回的是报头之后那 n 个字节，所以这里比的就是 `big_payload(n)`。
+      const std::string want = msg.substr(kBigHeader);
+      const std::string& got = client_got[sid];
+      const size_t       diff = first_diff(got, want);
+      check(diff == std::string::npos,
+            "大载荷（" + std::to_string(n) + " 字节）逐字节相同；第一个不同的" +
+                "偏移 " +
+                (diff == std::string::npos ? std::string("无")
+                                           : std::to_string(diff)) +
+                "（实收 " + std::to_string(got.size()) + "，期望 " +
+                std::to_string(n) + "）");
+    }
   }
 
   // -------------------------------------------------------------------

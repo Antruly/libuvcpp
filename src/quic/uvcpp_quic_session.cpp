@@ -2,7 +2,7 @@
  * @file src/quic/uvcpp_quic_session.cpp
  * @brief `quic_session` 的实现 —— 本模块里唯一直接驱动 ngtcp2 与 OpenSSL 的地方。
  * @author zhuweiye
- * @version 1.4.1
+ * @version 1.5.1
  *
  * 读它的顺序：`init_client` / `init_server` 看骨架 → `read_pkt` 与 `do_flush`
  * 看数据怎么进出 → `finalize` / `do_close` 看收尾 → 最末那一片 `cb_*` 看 ngtcp2
@@ -66,6 +66,11 @@ const unsigned kMaxFlushRounds = 128;
 /// RFC 9000 §10.2.1 允许的 CONNECTION_CLOSE 重发次数上限。
 const int kMaxCloseSends = 3;
 
+/// `stream_send::op_marks` 里"已经报过 `on_write` 的前缀"攒到多长才真的从头部
+/// 挪掉。见 `settle()` 第 2 条：每来一次确认就 erase 一遍是 O(待报数)，批量写
+/// 的场景下会变成 O(n²)。这个数只决定"多久挪一次"，不影响任何语义。
+const size_t kOpMarkCompactMin = 256;
+
 /// RFC 9002 §6.1.2 的 `kGranularity`：rttvar 那一项的下限。
 const ngtcp2_duration kGranularity = 1 * NGTCP2_MILLISECONDS;
 
@@ -111,6 +116,18 @@ struct cb_guard {
  *
  * 数值取的是"够测试与一般 RPC 用"的一档，不是调优过的值：窗口按流 256 KiB、
  * 按连接 1 MiB，双向与单向各允许对端开 100 条。
+ *
+ * **"把窗口开大"这条优化试过了，本机量不出收益，所以没改。** 本仓的
+ * `bench/bench_quic.cpp`（`--mode=push`，2 MB 单流）在 1 MiB/4 MiB 与
+ * 256 KiB/1 MiB 两档下各跑 3×15 轮，最小值差在 ±3% 以内 —— 也就是噪声。
+ * 原因读码就能看到：接收端在每个 `recv_stream_data` 里**立刻**
+ * `ngtcp2_conn_extend_max_stream_offset()`（见那个回调），所以流水线一旦铺开，
+ * 窗口更新就连续到达，发送端不会每 256 KiB 停一次；窗口大小只影响**铺开那一下**
+ * 的深度，而那是一次性的。curl 把窗口提到 10× 是另一个形状的负载（它的接收端
+ * 不是"接到就还"）。
+ *
+ * ⚠️ 这几个数是**对外可见的传输参数**（进 Initial 包），动它等于改线上一档行为。
+ * 想动，先拿 `bench_quic` 量出跨过噪声的收益。
  */
 void fill_transport_params(ngtcp2_transport_params* params,
                            uint64_t idle_timeout_ms) {
@@ -636,12 +653,13 @@ void quic_session::do_flush() {
   bool first = true;
   for (unsigned round = 0; round < kMaxFlushRounds; ++round) {
     int64_t stream_id = -1;
-    ngtcp2_vec datav;
+    ngtcp2_vec datav[kMaxStreamVecs];
     size_t datavcnt = 0;
+    size_t handed = 0;
     uint32_t flags = 0;
 
-    const bool have =
-        next_sendable_stream(&stream_id, &datav, &datavcnt, &flags);
+    const bool have = next_sendable_stream(&stream_id, datav, &datavcnt,
+                                           &handed, &flags);
     if (!have && !first) break;
     first = false;
 
@@ -654,7 +672,7 @@ void quic_session::do_flush() {
     // 得多：每一轮要么拿到一个**完整的包**，要么 0，要么一个错误码。
     const ngtcp2_ssize nwrite = ngtcp2_conn_writev_stream(
         conn_, &ps.path, &pi, buf, sizeof(buf), &datalen, flags, stream_id,
-        datavcnt != 0 ? &datav : nullptr, datavcnt, ts);
+        datavcnt != 0 ? datav : nullptr, datavcnt, ts);
 
     if (nwrite < 0) {
       if (nwrite == NGTCP2_ERR_STREAM_DATA_BLOCKED ||
@@ -682,13 +700,18 @@ void quic_session::do_flush() {
       if (it != send_q_.end()) {
         stream_send& s = it->second;
         const size_t n = static_cast<size_t>(datalen);
-        if (s.written + n <= s.buf.size()) s.written += n;
+        // `*pdatalen` 按 ngtcp2 的契约不可能超过给它的那段（`handed`）。这里
+        // 仍然夹一道：`sent_off > write_off` 会让 `write_off - sent_off` 下溢成
+        // 一个天文数字，而那个数会原样变成下一轮递给 ngtcp2 的长度 —— 正是
+        // 越界读的形状（见头里 `stream_send` 的注释）。少记一笔最多让这段
+        // 字节晚一轮出去，不会越界。
+        if (n <= handed) s.sent_off += n;
         // FIN 落地的判据：ngtcp2 只在"给它的数据**全部**被编进 STREAM 帧"时才
         // 会设 fin 位（文档原话："If all given data is encoded as STREAM frame in
         // dest, and if flags & FIN is nonzero, fin flag is set"）。所以这里比的是
         // "这次编进去的字节数 == 这次给它的字节数"，不是"队列空了"。
         if (s.fin_requested && !s.fin_written &&
-            (datavcnt == 0 || n == datav.len)) {
+            (datavcnt == 0 || n == handed)) {
           s.fin_written = true;
         }
       }
@@ -996,10 +1019,31 @@ int quic_session::write_stream(int64_t stream_id, const char* data, size_t len,
     return static_cast<int>(NGTCP2_ERR_STREAM_SHUT_WR);
   }
 
-  if (len != 0) s.buf.insert(s.buf.end(), data, data + len);
-  // 记一个"这次调用覆盖到哪儿"的界标（绝对偏移）。一次 `on_write` 对应一个，
-  // 与 `uv_write` 一次请求一次回调同一形状。
-  s.op_marks.push_back(s.base_offset + s.buf.size());
+  if (len != 0) {
+    // 往最后一块里塞，塞满就开新块。**每块出生时 `reserve(kChunkSize)` 且
+    // 此后只写到这里为止** —— 这两条合起来保证块内地址一生不变，而那是
+    // 递给 ngtcp2 的指针能一直有效的前提（见头里 `stream_send` 的注释）。
+    // 用 `insert` 而不是 `resize`+`memcpy`：写入的是**从未递出去过**的那一段
+    // （起点 `write_off >= sent_off`），所以既不搬字节也不碰已有数据。
+    size_t done = 0;
+    while (done < len) {
+      if (s.chunks.empty() ||
+          s.chunks.back().size() == stream_send::kChunkSize) {
+        s.chunks.emplace_back();
+        s.chunks.back().reserve(stream_send::kChunkSize);
+      }
+      ::std::vector<uint8_t>& c = s.chunks.back();
+      const size_t room = stream_send::kChunkSize - c.size();
+      const size_t take = room < (len - done) ? room : (len - done);
+      c.insert(c.end(), data + done, data + done + take);
+      done += take;
+    }
+    s.write_off += len;
+  }
+  // 记一个"这次调用覆盖到哪儿"的界标（绝对偏移 = 这次受理之后的下一个字节）。
+  // 一次 `on_write` 对应一个，与 `uv_write` 一次请求一次回调同一形状。
+  // 用绝对偏移而不是块下标，是为了丢块时这里一个数都不用改。
+  s.op_marks.push_back(s.write_off);
   if (fin) s.fin_requested = true;
 
   // **攒下的字节要有人推动才会出去。** 这一句是"写"这条路上唯一能把
@@ -1065,8 +1109,8 @@ uint64_t quic_session::streams_left(bool bidi) const {
               : ngtcp2_conn_get_streams_uni_left2(conn_);
 }
 
-bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* vec,
-                                        size_t* datavcnt,
+bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
+                                        size_t* datavcnt, size_t* handed,
                                         uint32_t* flags) const {
   // 按流号升序取**第一条**能发的。不做轮转：一条流发完再轮到下一条，
   // 对"先来的先出去"这件事更直观，而本层也不打算在这里做调度公平性
@@ -1075,23 +1119,39 @@ bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* vec,
        it != send_q_.end(); ++it) {
     const stream_send& s = it->second;
     if (s.closed_write) continue;
-    const size_t remaining = s.buf.size() - s.written;
+    const uint64_t remaining = s.write_off - s.sent_off;
     const bool has_fin = s.fin_requested && !s.fin_written;
     if (remaining == 0 && !has_fin) continue;
 
     *stream_id = it->first;
+    size_t cnt = 0;
+    size_t total = 0;
     if (remaining != 0) {
-      vec->base = const_cast<uint8_t*>(s.buf.data() + s.written);
-      vec->len = remaining;
-      *datavcnt = 1;
+      // 把 `[sent_off, write_off)` 描述成至多 `kMaxStreamVecs` 段连续内存。
+      //
+      // 除最后一块外每块都是满的（本结构的稳态），所以"第几块 + 块内偏移"
+      // 一次除法就算得出来。**描不完也没关系**：一次调用只可能编进一个包
+      // （~1200 B），剩下的下一轮再描 —— 而每轮都是从同一个 `sent_off` 起算，
+      // 所以描述永远是"从下一个待发字节开始"的，不会漏。
+      const uint64_t rel = s.sent_off - s.base_off;
+      size_t idx = static_cast<size_t>(rel / stream_send::kChunkSize);
+      size_t off = static_cast<size_t>(rel % stream_send::kChunkSize);
+      for (; idx < s.chunks.size() && cnt < kMaxStreamVecs; ++idx) {
+        const ::std::vector<uint8_t>& c = s.chunks[idx];
+        if (off >= c.size()) break;  // 只在最后一块上可能（见上面的稳态）
+        datav[cnt].base = const_cast<uint8_t*>(c.data() + off);
+        datav[cnt].len = c.size() - off;
+        total += datav[cnt].len;
+        ++cnt;
+        off = 0;
+      }
     } else {
       // 只剩一个 FIN 要发：**空数据 + FIN 位**是合法的一次调用（ngtcp2 文档：
       // "Empty data is treated specially, and it is only accepted if no data,
       // including the empty data, is submitted to a stream or FIN is set"）。
-      vec->base = nullptr;
-      vec->len = 0;
-      *datavcnt = 0;
     }
+    *datavcnt = cnt;
+    *handed = total;
     *flags = has_fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0;
     return true;
   }
@@ -1102,11 +1162,11 @@ void quic_session::note_acked(stream_send& s, uint64_t offset, uint64_t datalen)
   if (datalen == 0) return;
   uint64_t start = offset;
   const uint64_t end = offset + datalen;
-  if (end <= s.acked) return;  // 整个区间都已经在连续前缀里了
-  if (start < s.acked) start = s.acked;
+  if (end <= s.ack_off) return;  // 整个区间都已经在连续前缀里了
+  if (start < s.ack_off) start = s.ack_off;
 
-  if (start == s.acked) {
-    s.acked = end;
+  if (start == s.ack_off) {
+    s.ack_off = end;
   } else {
     // 前面还有洞：先记下来（与已有的洞取并集），等前面的补上再并进 `acked`。
     std::map<uint64_t, uint64_t>::iterator it = s.holes.lower_bound(start);
@@ -1135,35 +1195,47 @@ void quic_session::note_acked(stream_send& s, uint64_t offset, uint64_t datalen)
   // 这里的小 map 元素数是个位数，多扫几下不值得省。
   for (;;) {
     std::map<uint64_t, uint64_t>::iterator it = s.holes.begin();
-    if (it == s.holes.end() || it->first > s.acked) break;
-    if (it->second > s.acked) s.acked = it->second;
+    if (it == s.holes.end() || it->first > s.ack_off) break;
+    if (it->second > s.ack_off) s.ack_off = it->second;
     s.holes.erase(it);
   }
 }
 
 void quic_session::settle(stream_send& s, int64_t stream_id) {
-  // 1) 丢掉已确认的**连续前缀**。`acked` 之后一个字节都不动 —— 那些还要重传。
-  if (s.acked > s.base_offset) {
-    const size_t drop = static_cast<size_t>(s.acked - s.base_offset);
-    if (drop >= s.buf.size()) {
-      s.buf.clear();
-      s.written = 0;
-    } else {
-      s.buf.erase(s.buf.begin(), s.buf.begin() + static_cast<ptrdiff_t>(drop));
-      s.written = (s.written > drop) ? (s.written - drop) : 0;
-    }
-    s.base_offset = s.acked;
+  // 1) 丢掉已确认的**整块前缀**。`ack_off` 之后一个字节都不动 —— 那些还要重传。
+  //
+  // **这里不每来一次确认就搬一遍字节。** 旧版是一条连续 `vector`，前端
+  // `erase(begin, begin+drop)` 的代价是 O(剩余字节) 的 memmove，而本函数每个
+  // 包头都会跑一次（每个包都带确认），于是一笔 n 字节的传输要搬 O(n²) 的字节：
+  // 实测 2 MB 单流整笔 168 ms，其中约 160 ms 是这一句。
+  //
+  // 分块之后丢一块是 O(1)（`deque::pop_front` + 归还一块），摊还到每字节最多
+  // 一次分配一次归还 —— 与"攒够再挪一遍"同一量级，但**同时**满足 ngtcp2 那条
+  // "交给它的数据必须原地不动"的硬要求（旧版的挪动正违反它，见头里
+  // `stream_send` 的注释）。判据是"这一块**整个**落在确认前缀里"：只确认了一半
+  // 的块不能丢，它后半段对 ngtcp2 来说仍要重传，而它已经不在我们手里了。
+  while (!s.chunks.empty()) {
+    const uint64_t chunk_end =
+        s.base_off + static_cast<uint64_t>(s.chunks.front().size());
+    if (chunk_end > s.ack_off) break;
+    s.chunks.pop_front();
+    s.base_off = chunk_end;
   }
 
   // 2) 把因此完成的 `write_stream()` 报出去。`op_marks` 天然升序，因此
   //    回调顺序就是调用顺序。
-  while (s.op_done < s.op_marks.size() && s.acked >= s.op_marks[s.op_done]) {
+  while (s.op_done < s.op_marks.size() && s.ack_off >= s.op_marks[s.op_done]) {
     ++s.op_done;
     if (events_.on_write) events_.on_write(stream_id, 0);
   }
-  // 界标用绝对偏移，所以上面那次 `buf` 挪动不影响它们；已经回调过的那些
-  // 直接扔掉，免得 `op_marks` 随着流的长度一直长。
-  if (s.op_done > 0) {
+  // 界标用绝对偏移，所以第 1 条丢块不影响它们。已经回调过的那些
+  // **攒够一批再挪**，理由与第 1 条逐字相同：每来一次确认就从头部 erase
+  // 一遍是 O(待报数)，调用方"一次写、等一次回调"的常见形状下它一直很小，
+  // 而批量写的场景会把它变成 O(n²)。`op_done` 本身就是那个待报前缀的长度。
+  //
+  // `op_marks` **不是**递给 ngtcp2 的东西，所以它这里怎么挪都不违反那条
+  // "原地不动"的约束 —— 两条约束的适用面别混。
+  if (s.op_done >= kOpMarkCompactMin) {
     s.op_marks.erase(s.op_marks.begin(),
                      s.op_marks.begin() + static_cast<ptrdiff_t>(s.op_done));
     s.op_done = 0;

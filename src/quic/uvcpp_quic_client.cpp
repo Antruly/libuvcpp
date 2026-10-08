@@ -2,7 +2,7 @@
  * @file src/quic/uvcpp_quic_client.cpp
  * @brief 客户端端点：一条 UDP 口、一个到期定时器、一条连接。
  * @author zhuweiye
- * @version 1.4.1
+ * @version 1.5.1
  *
  * 三件事在这里接起来（内核本身在 `uvcpp_quic_session.cpp`）：
  *
@@ -214,16 +214,48 @@ struct uvcpp_quic_client::impl {
     (void)peerlen;
     if (udp == nullptr || data == nullptr || len == 0) return;
 
-    // **拷一份**：`data` 只在本次调用里有效，而 `uv_udp_send` 是异步的。
+    uv_buf_t bufs[1];
+    bufs[0] = uv_buf_init(const_cast<char*>(reinterpret_cast<const char*>(data)),
+                          static_cast<unsigned int>(len));
+
+    // ---------------------------------------------------------------------
+    // 快路：同步发，一个字节都不拷，也不排完成回调。
+    // ---------------------------------------------------------------------
+    //
+    // `quic_send_fn` 的契约是"`data` 回调返回后即失效"，而 `uv_udp_try_send`
+    // 是**同步**的 —— 数据在本次调用内就进了内核，返回之后就不再碰 `data`。
+    // 所以这里不需要拷贝。两个调用点给的又都是**栈上**的临时缓冲
+    // （`do_flush()` 与 `send_close_packet()` 里的 `uint8_t buf[kDatagramBufLen]`），
+    // 于是整条发送路径上每包少一次 `new char[]` + 一次 `memcpy` + 一次 `delete[]`。
+    //
+    // 顺带省掉的是**每包一次的事件循环轮转**：异步发送要为每个包排一个完成
+    // 回调，2 MB 那样的一笔传输就是 1700 多个包、1700 多次多余的循环轮转，
+    // 而那些轮转全落在计时窗口里。
+    //
+    // **只有"发出去了"才走快路**：其余任何返回值（`UV_EAGAIN`、`UV_ENOSYS`、
+    // 别的错误码）一律落到下面的慢路。这条不是保守，是必需的 ——
+    // 把"快路失败"直接 `return` 掉等于**静默把这个包扔了**，而 QUIC 只会
+    // 把它当丢包去重传，症状是"能跑但慢"，查起来很贵。
+    //
+    // 顺带说清顺序：libuv 在**已经有一条排队的异步发送**时让 `try_send` 返
+    // `UV_EAGAIN`（`uv__udp_try_send` 里 `send_queue_count != 0` 那一格），
+    // 所以一旦某个包走了慢路，它后面的包也会一直走慢路，不会出现"后发的快路包
+    // 插到先发的慢路包前面"。
+    const int sent = udp->try_send(bufs, 1, peer);
+    if (sent >= 0) return;
+
+    // ---------------------------------------------------------------------
+    // 慢路：拷一份交给异步队列。只有上面那条快路走不通时才到这里。
+    // ---------------------------------------------------------------------
     char* copy = new char[len];
     std::memcpy(copy, data, len);
 
-    uv_buf_t bufs[1];
-    bufs[0] = uv_buf_init(copy, static_cast<unsigned int>(len));
+    uv_buf_t abufs[1];
+    abufs[0] = uv_buf_init(copy, static_cast<unsigned int>(len));
 
     uvcpp_udp_send* req = new uvcpp_udp_send();
     req->init();
-    udp->send(req, bufs, 1, peer, [copy, req](uvcpp_udp_send* r, int status) {
+    udp->send(req, abufs, 1, peer, [copy, req](uvcpp_udp_send* r, int status) {
       // 发送结果**不报给内核**：UDP 的失败对 QUIC 来说就是丢包，交给重传处理
       // 才是对的（`send` 报 `UV_EAGAIN` 那种更不该当成连接错误 —— 那只是
       // 这一瞬间发不出去，不是这条连接出了事）。

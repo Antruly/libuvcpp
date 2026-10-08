@@ -2,7 +2,7 @@
  * @file src/quic/uvcpp_quic_session.h
  * @brief 私有头：一条连接的**状态机内核** —— 唯一持有 `ngtcp2_conn*` 的地方。
  * @author zhuweiye
- * @version 1.4.1
+ * @version 1.5.1
  *
  * 分层：`uvcpp_quic_connection` 是**公开面**（谁看得见、回调叫什么），本类是
  * **内核**（协议怎么跑）。公开面里一个 ngtcp2 类型都不出现，内核里一个用户可见
@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <string>
@@ -53,9 +54,13 @@ namespace quic_detail {
  *             ngtcp2 每次回填（连接迁移之后它会变）—— **不要自己记地址**。
  * @param peerlen `peer` 的长度。
  *
- * 端点负责把它塞进 `uv_udp_send`，并自己管缓冲区的生命周期。本类**不持有**
- * socket，也不回读任何发送结果：UDP 的发送失败对 QUIC 来说就是丢包，交给
- * 重传处理是对的（`uv_udp_try_send` 报 `UV_EAGAIN` 那种也不该当成连接错误）。
+ * 端点负责把它交给 UDP 口（快路 `uv_udp_try_send`，队列满时才排
+ * `uv_udp_send`），并自己管缓冲区的生命周期。本类**不持有** socket，也不回读
+ * 任何发送结果：UDP 的发送失败对 QUIC 来说就是丢包，交给重传处理是对的
+ * （`uv_udp_try_send` 报 `UV_EAGAIN` 那种也不该当成连接错误）。
+ *
+ * @note 数据**必须在 `send` 返回前就交给内核**（同步的），因为本类给的缓冲
+ *       是栈上的临时数组。这正是快路能不拷贝的前提；慢路自己拷一份来满足它。
  */
 using quic_send_fn = ::std::function<void(
     const uint8_t* data, size_t len, const struct sockaddr* peer, int peerlen)>;
@@ -480,14 +485,57 @@ class quic_session {
    * 能改 buffer"，而那条约束经常被违反）。这里拷一份，代价是一次 memcpy，
    * 换来的是"返回之后随便改"。
    *
-   * 队列里那段字节与流偏移的对应关系是**绝对**的（`base_offset`），因为
+   * 队列里那段字节与流偏移的对应关系是**绝对**的（`base_off`），因为
    * ngtcp2 的 `acked_stream_data_offset` 报的也是绝对偏移 —— 用相对下标去对
    * 那条回调，会在有重传时错位。
+   *
+   * **存储是分块的，不是一条能长的连续缓冲。** 这不是为省事，是 ngtcp2 的
+   * 硬要求：交给它的那 `*pdatalen` 个字节必须**原地不动**（`ngtcp2.h` 的原话是
+   * "The caller must keep the portion of data covered by |*pdatalen| bytes in
+   * tact until acked_stream_data_offset indicates that they are acknowledged"），
+   * 因为重传时它**只留了那些指针**，不会自己再存一份数据。而一条能长的连续
+   * vector 两条都做不到：尾部 `insert` 超容量会**搬地址**（旧块释放），头部
+   * 压缩会**搬字节**。分块把这条约束落到两个具体做法上 ——
+   *
+   * - 每块出生时 `reserve(kChunkSize)`、**且只写到这里为止** ⇒ 块内地址一生不变；
+   * - 只整块丢**全部确认**的块 ⇒ 从不搬字节，而丢一块是 O(1)。
+   *
+   * 旧形状的两种症状都实测过（`bench_quic --mode=echo --rounds=15
+   * --sizes=2097152`）：先是**偶发**崩溃 —— 20 次里 3 次，栈是
+   * `ngtcp2_cpymem` ← `ngtcp2_pkt_encode_stream_frame` 从 STREAM 帧的数据
+   * 指针上读（`0xC0000005`，目标落在 MEM_RESERVE）；把"地址/字节都不许动"
+   * 临时焊死之后 20 次 0 崩。
+   *
+   * 但**静默坏字节才是常态**，而且比崩溃更坏：把 HEAD 那份存储换回来重编、
+   * 跑同一个量具（`--mode=push|echo --rounds=15 --sizes=2097152`，3 次独立
+   * 构建 × 2 个方向 = 6 次运行），**6/6 都在 15 轮内报内容不符**，首个不符的
+   * 流偏移在 63 605 ～ 1 811 177 之间浮动 —— 坏在哪儿取决于时序，"会坏"则是
+   * 必现的。于是它连一个可用于比较的 2 MiB 读数都拿不出来：不是"慢一点"，
+   * 是**交付出去的字节是错的**。分块就是那条约束的正式形状。
    */
   struct stream_send {
-    ::std::vector<uint8_t> buf;      ///< 从 `base_offset` 起、尚未被确认的字节
-    uint64_t base_offset = 0;        ///< `buf[0]` 对应的流偏移
-    size_t   written = 0;            ///< `buf` 里已经交给 ngtcp2 的前缀长度
+    /// 每块的容量。取值是折中：块越大分配次数越少，但"最后一块只确认了
+    /// 一部分"时要多留一段死字节（上界就是一块）；块越小，一次
+    /// `writev_stream` 要描述的连续段越多（ngtcp2 一次最多收 256 段，见
+    /// `kMaxStreamVecs`）。
+    ///
+    /// 实测（`--mode=push --rounds=9 --sizes=2097152`，9 轮最小值）：16 KiB
+    /// **25.410 ms** / cyc-B 35.95、64 KiB **21.907 ms** / 30.68、256 KiB
+    /// **21.913 ms** / 30.85。64 KiB 与 256 KiB 落在噪声内（差 0.03%），
+    /// 取小的那个：一块的**容量**是每条约活的流都要占的（提交量），小四倍
+    /// 更划算。16 KiB 那一档慢 16%，说明这个折中不是平的 —— 但拐点在
+    /// 64 KiB，往上加没有回报。
+    static constexpr size_t kChunkSize = 64 * 1024;
+    /// 尚存活的字节，按流偏移升序。除最后一块外每块都是满的 —— 这条是本结构
+    /// 的稳态（新块只在旧块写满时才开），`next_sendable_stream()` 用它做除法
+    /// 定位，`settle()` 用它做整块丢弃。
+    ::std::deque<::std::vector<uint8_t>> chunks;
+    /// `chunks.front()[0]` 的流偏移。**只有 `chunks` 空时才等于 `write_off`。**
+    uint64_t base_off = 0;
+    /// 下一个待写字节的流偏移 = `base_off` + 存活字节数。
+    uint64_t write_off = 0;
+    /// 已经交给 ngtcp2 的下一个字节的流偏移（`base_off <= sent_off <= write_off`）。
+    uint64_t sent_off = 0;
     bool     fin_requested = false;  ///< 调用方要发 FIN
     bool     fin_written = false;    ///< FIN 已经交给 ngtcp2 了
     /// `shutdown_stream()` 调过了。此后 ngtcp2 不再接受这条流的写，排队里
@@ -495,38 +543,49 @@ class quic_session {
     /// 所以这条流要从"可发"里排除，否则每轮 flush 都会在第一轮撞上它。
     bool     closed_write = false;
 
-    /// `[base_offset, acked)` 这一段是**连续的**、已被对端确认的字节。
-    /// 它只从 `base_offset` 起算 —— 乱序到达的确认先落在 `holes` 里，等前面的
-    /// 洞补上再并进来。理由：`buf` 的前缀只能在"整段都已确认"时才能丢，
-    /// 否则丢掉的那段对 ngtcp2 来说仍要重传，而它已经不在我们手里了。
-    uint64_t acked = 0;
+    /// `[base_off, ack_off)` 这一段是**连续的**、已被对端确认的字节。
+    /// 它只从 `base_off` 起算 —— 乱序到达的确认先落在 `holes` 里，等前面的
+    /// 洞补上再并进来。理由：块只能在"整块都已确认"时才能丢，
+    /// 否则丢掉的那半段对 ngtcp2 来说仍要重传，而它已经不在我们手里了。
+    uint64_t ack_off = 0;
     /// 已确认但**还不连续**的区间 `[first, second)`，绝对偏移。
     ::std::map<uint64_t, uint64_t> holes;
 
     /// 每次 `write_stream()` 受理时，把"这次调用覆盖到的末尾绝对偏移"压进来。
     /// 一次 `on_write` 对应这里的一个元素 —— 与 `uv_write` 一次请求一次回调
-    /// 同一形状。用**绝对偏移**而不是 `buf` 下标，是为了 `compact()` 挪动
-    /// `buf` 时这里一个数都不用改。
+    /// 同一形状。用**绝对偏移**而不是块下标，是为了丢块时这里一个数都不用改。
     ::std::vector<uint64_t> op_marks;
     size_t op_done = 0;  ///< `op_marks` 里已经回调过的前缀长度
   };
   ::std::map<int64_t, stream_send> send_q_;
 
-  /// 确认进展：把 `[offset, offset+datalen)` 并进去，并推进 `acked`。
+  /// 确认进展：把 `[offset, offset+datalen)` 并进去，并推进 `ack_off`。
   static void note_acked(stream_send& s, uint64_t offset, uint64_t datalen);
 
   /**
-   * @brief 一次确认进展之后收尾：丢掉已确认的前缀，并把因此完成的
+   * @brief 一次确认进展之后收尾：丢掉已确认的**整块**前缀，并把因此完成的
    *        `write_stream()` 通过 `on_write` 报出去。
    *
-   * 两件事放一起，是因为它们**共用同一个判据**（`acked`）：分开写迟早会出现
+   * 两件事放一起，是因为它们**共用同一个判据**（`ack_off`）：分开写迟早会出现
    * "报了完成但字节还留着"或反过来的漂移。
    */
   void settle(stream_send& s, int64_t stream_id);
 
+  /// 一次递给 ngtcp2 的连续段数上限。
+  ///
+  /// ngtcp2 内部收得下 256 段（`NGTCP2_MAX_STREAM_DATACNT`，但它只在自己私有的
+  /// `ngtcp2_pkt.h` 里，公开头拿不到），而一个包连 16 KiB 的一块都装不满
+  /// （~1200 B），所以 16 段远够用，同时离那个内部上限留着安全余量。
+  /// 注意**不能**按这个数去取那个内部宏 —— 那只在 ngtcp2 的私有头里。
+  static constexpr size_t kMaxStreamVecs = 16;
+
   /// 挑一条还有东西可发的流。
-  /// @return 有可发的返回 true，并填好 `stream_id` / `vec` / `datavcnt` / `flags`。
-  bool next_sendable_stream(int64_t* stream_id, ngtcp2_vec* vec, size_t* datavcnt,
+  /// @return 有可发的返回 true，并填好 `stream_id` / `datav` / `datavcnt` /
+  ///         `handed` / `flags`。`handed` 是这次描述出去的总字节数 —— 调用方
+  ///         拿它判 FIN（ngtcp2 只在"给它的数据**全部**编进 STREAM 帧"时才设
+  ///         fin 位，见 `.cpp` 里 `do_flush()` 那一格）。
+  bool next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
+                            size_t* datavcnt, size_t* handed,
                             uint32_t* flags) const;
 
   /// `uv_hrtime()` 纳秒 —— ngtcp2 的 `timestamp()` 就是它（单位与原点都不重要，

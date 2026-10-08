@@ -47,6 +47,11 @@
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一版没做"的地方都明确
 > 标出来 —— 那些地方比 API 更容易踩。
 
+> **吞吐不在这一页。** 这里讲契约，不讲速率。大载荷的**量具、读数与前提**单开在
+> [benchmark-rig.md](./benchmark-rig.md) 的「QUIC 吞吐量具」一节；同处还记着 issue #34
+> 那次大载荷崩溃的根因（ngtcp2 要求交给它的那段数据"原样留着"，而当时的发送缓冲
+> 既会扩容搬地址、也会丢前缀搬字节）与修法（分块发送队列）。
+
 ---
 
 ## 目录
@@ -84,7 +89,7 @@
 为两套名字相同的语义各写一遍分支，而且两套迟早漂移。复用落在**语义**那一层
 （`net_read_result` / `net_read_event`）；回调的**第一个参数**按本层自己的类型走，
 因为 `uvcpp_net_read_cb` 那个 typedef 写死了 `uvcpp_tcp_client&`
-（`src/quic/uvcpp_quic_common.h:109-137` 有完整理由）。
+（`src/quic/uvcpp_quic_common.h:110-138` 有完整理由）。
 
 **它不属于 web 层。** 所以 `CMakeLists.txt:95` 那个 `option()` 刻意**不**放在
 "Web 子开关"那一组里 —— 那组的标题写着"仅在 `UVCPP_BUILD_WEB=ON` 时有效"，而

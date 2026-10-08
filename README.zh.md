@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.5.0-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.5.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.5.0` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.5.1-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -627,10 +627,10 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.5.0** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.5.1-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`
 六个 tag。下面是 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部
-改动，外加 `1.4.x` 这条线（收进 `v1.5.0`）与 `1.5.0` 新增的东西，按主题分组，括号里是
+改动，外加 `1.4.x` 这条线（收进 `v1.5.0`）与 `v1.5.0` 之后新增的东西，按主题分组，括号里是
 它**首次出现**的那一档；
 已发布版本的说明在
 [RELEASE.md](./RELEASE.md)。其中若干条来自本仓第一位外部贡献者
@@ -838,6 +838,32 @@ libuvcpp/
   "发布配置里结构性关着"的模块记下来：照样打 `[跳·默认关]`，但不抬退出码。
   **代价写在那张表旁边**（这些片段在 CI 里不会被编，要一份开了该模块的包才判得到），
   防真空转规则也在那里 —— 预期缺席要是把候选全吸收了，照样退 3（`1.4.1`）
+- **发送路径上那处大载荷崩溃已定位并修掉。** `write_stream()` 把 `std::vector<uint8_t>`
+  里的一个指针交给了 ngtcp2，而那块缓冲会**增长**。ngtcp2 存的是应用给的**指针**
+  （重传帧链就拿着它们），而 `ngtcp2.h` 要求被覆盖的那段字节**原样留着**
+  （"in tact"），直到 `acked_stream_data_offset` 说它被确认 —— 于是那块缓冲在
+  **两个方向**上违反了契约：扩容把地址搬走；丢掉已确认的前缀时把尾巴 `memmove` 上来，
+  地址没变、字节变了。症状：`--mode=echo --sizes=2097152` 20 次里崩 3 次
+  （`0xC0000005`），出错的那次读在 `ngtcp2_cpymem` ← `ngtcp2_pkt_encode_stream_frame`
+  里，目标区域是 `MEM_RESERVE`（越过了某个堆块已提交区的末尾）。先把"地址与字节都不许动"
+  临时焊死，**20 次 0 崩**，而未修的对照是 3/20；正式修法是**分块发送队列** —— 每块出生时
+  `reserve(64 KiB)`、此后只写到这里为止、只在**整块**都被确认时才丢 —— 两条约束都按构造
+  成立，丢块 O(1) 且不搬字节。**"代价百分之几"这句话量不出来，而原因本身是个发现**：
+  把 HEAD 那份存储换回来重编、跑同一个量具，**6 次运行（3 次独立构建 × push/echo）全部**
+  在 15 轮内报 `DATA MISMATCH`，一行耗时都不打印，首个不符的流偏移在 63 605 ～ 1 811 177
+  之间浮动 —— 旧形状**每次**吐出的字节都是错的，不是"慢一点"，所以那个基线在 2 MiB 上
+  根本不存在，拿它当分母没有意义；崩（3/20）只是它最响的那种症状。分块大小则是量出来的
+  （2 MiB 单向：16 KiB 25.410 ms / 64 KiB 21.907 / 256 KiB 21.913，拐点在 64 KiB）。
+  `quic_stream_func.cpp` 加了第四段，回显 64 KiB 与
+  3 × 64 KiB + 1234 B 并**逐字节**比对整条流 —— 计数式判据恰好对这类错位免疫：变异体 M3
+  （对调两个**等长**块的**内容**，长度、记账、送达全不变）只有逐字节判据抓得住，
+  且它报出的第一个不同偏移正是块边界（`1.5.1`）
+- **QUIC 的数据报路径不再每包拷一次。** 两个端点现在先试 `uv_udp_try_send()` —— 它同步，
+  返回时 `data` 已死，不必拷 —— 只有不是"已发出"才落回原来的异步拷贝入队那条路。
+  2 MB 一笔就是约 1700 次 `new char[]` + `memcpy` + `delete[]` 与约 1700 次多余的循环轮转。
+  只有成功才走快路，这不是保守而是必需的：在失败处 `return` 等于**静默把这个包扔了**，
+  而 QUIC 只会把它当丢包去重传（症状是"能跑但慢"）。libuv 在已有异步发送排队时返回
+  `UV_EAGAIN`，所以快路的包不会插到慢路的包前面（`1.5.1`）
 
 ### HTTP/3（web 层）
 

@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.5.0-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.5.1--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.5.0` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.5.1-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -643,11 +643,12 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.5.0** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.5.1-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.4.0` and
 `v1.5.0` are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development
-lines accumulated through `v1.4.0`, plus what the `1.4.x` line (released as `v1.5.0`) and
-`1.5.0` itself have added, is below, by theme, with the version each change first appeared in;
+lines accumulated through `v1.4.0`, plus what the `1.4.x` line (released as `v1.5.0`) added
+and what the `1.5.x` line has added since, is below, by theme, with the version each change
+first appeared in;
 release notes for the tagged versions are in [RELEASE.md](./RELEASE.md). Several of the
 fixes came from issue reports by the project's first external contributor,
 [@sercebr](https://github.com/sercebr).
@@ -905,6 +906,39 @@ fixes came from issue reports by the project's first external contributor,
   the exit code. The cost is written next to that table (those snippets are not compiled
   in CI; judging them needs a package that enables the module), as is the anti-vacuity
   rule — if expected absence absorbs every candidate, it exits 3 again (`1.4.1`)
+- **A large-payload crash in the send path was root-caused and fixed.** `write_stream()`
+  handed ngtcp2 a pointer into a `std::vector<uint8_t>` that kept growing. ngtcp2 stores the
+  application's *pointers* (a retransmission frame chain holds them), and `ngtcp2.h` requires
+  the covered bytes stay **in tact** until `acked_stream_data_offset` says they are
+  acknowledged — so the buffer violated the contract in **two** ways: growth reallocated the
+  address away, and dropping the acked prefix `memmove`d the tail up so the address stayed
+  but the bytes shifted. Symptom: `--mode=echo --sizes=2097152` died with `0xC0000005` in 3
+  of 20 runs, the faulting read inside `ngtcp2_cpymem` ← `ngtcp2_pkt_encode_stream_frame`,
+  targeting a `MEM_RESERVE` region (past the committed end of a heap block). Holding address
+  and bytes still (a temporary reserve + no-compaction patch) took it to **0/20** against the
+  unpatched control's 3/20; the real fix is a **chunked send queue** — 64 KiB chunks, each
+  `reserve`d on birth and never written past, dropped only when *entirely* acknowledged —
+  which satisfies both constraints by construction, drops in O(1) and shifts no bytes. There
+  is no "cost N%" figure for it, and the reason is itself the finding: with HEAD's storage
+  swapped back in, the rig reported `DATA MISMATCH` in **6 of 6 runs** (3 rebuilds × push and
+  echo, 15 rounds each) at 2 MiB — never printing a timing row at all, and the first bad
+  offset wandering between 63 605 and 1 811 177. The old shape ships corrupted bytes every
+  time rather than merely running slowly, so it provides no baseline to divide by; the crash
+  (3 of 20) was only its loudest symptom. The chunk size is measured rather than guessed
+  (16 KiB 25.410 ms / 64 KiB 21.907 / 256 KiB 21.913 one-way at 2 MiB — the knee is at
+  64 KiB). `quic_stream_func.cpp` gained a fourth phase that echoes 64 KiB
+  and 3 × 64 KiB + 1234 B and compares the **whole stream byte for byte**, because a
+  count-based check is immune to exactly the misplacement this bug class produces: mutation
+  M3 (swap two equal-sized chunks' contents — same length, same accounting, same delivery)
+  is caught by nothing but the byte comparison, at the chunk boundary (`1.5.1`)
+- **The QUIC datagram path no longer copies every packet.** Both endpoints try
+  `uv_udp_try_send()` first — synchronous, so `data` is dead before the call returns and no
+  copy is needed — and fall back to the existing async copy-and-queue path on anything but
+  "sent". On a 2 MB push that removes ~1700 `new char[]`/`memcpy`/`delete[]` triples and
+  ~1700 extra loop turns. Only success takes the fast path, and that is not conservatism:
+  returning on failure would silently drop the datagram, which QUIC would read as loss and
+  retransmit (the symptom being "works, but slowly"). libuv returns `UV_EAGAIN` while an
+  async send is queued, so a fast-path packet can never overtake a slow-path one (`1.5.1`)
 
 ### HTTP/3 (web layer)
 

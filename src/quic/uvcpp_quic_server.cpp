@@ -2,7 +2,7 @@
  * @file src/quic/uvcpp_quic_server.cpp
  * @brief 服务端端点：一条 UDP 口、一张「CID → 连接」的表、一个到期定时器。
  * @author zhuweiye
- * @version 1.4.1
+ * @version 1.5.1
  *
  * 与 `uvcpp_quic_client.cpp` 的三件事同构（发 / 收 / 到期），只多一层**分派**：
  * 一条口上跑着很多条连接，所以每个入包要先按 DCID 找到"这是谁的"。找表的键由
@@ -167,22 +167,32 @@ struct uvcpp_quic_server::impl {
     }
   }
 
-  /// 把内核要发的一个数据报交给 UDP 口。与客户端那份逐字同理（含"必须拷贝"
-  /// 与"发送结果不报给内核"两条理由），见 `uvcpp_quic_client.cpp`。
+  /// 把内核要发的一个数据报交给 UDP 口。与客户端那份逐字同理（含"为什么快路
+  /// 可以不拷"与"发送结果不报给内核"两条理由），见 `uvcpp_quic_client.cpp`。
   void forward(const uint8_t* data, size_t len, const struct sockaddr* peer,
                int peerlen) {
     (void)peerlen;
     if (udp == nullptr || data == nullptr || len == 0) return;
 
+    uv_buf_t bufs[1];
+    bufs[0] = uv_buf_init(const_cast<char*>(reinterpret_cast<const char*>(data)),
+                          static_cast<unsigned int>(len));
+
+    // 快路：同步发、零拷贝、无完成回调。逐字同 `uvcpp_quic_client.cpp` 那份
+    // （含"为什么能安全地不拷"与"为什么只有成功才走快路"两条理由），见那边的注释。
+    const int sent = udp->try_send(bufs, 1, peer);
+    if (sent >= 0) return;
+
+    // 慢路：拷一份交给异步队列。
     char* copy = new char[len];
     std::memcpy(copy, data, len);
 
-    uv_buf_t bufs[1];
-    bufs[0] = uv_buf_init(copy, static_cast<unsigned int>(len));
+    uv_buf_t abufs[1];
+    abufs[0] = uv_buf_init(copy, static_cast<unsigned int>(len));
 
     uvcpp_udp_send* req = new uvcpp_udp_send();
     req->init();
-    udp->send(req, bufs, 1, peer, [copy, req](uvcpp_udp_send* r, int status) {
+    udp->send(req, abufs, 1, peer, [copy, req](uvcpp_udp_send* r, int status) {
       (void)status;
       delete[] copy;
       delete r;

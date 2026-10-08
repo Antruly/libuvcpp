@@ -2,7 +2,7 @@
  * @file src/quic/uvcpp_quic_common.h
  * @brief QUIC 传输层的公开小件：ALPN 默认值、状态枚举、读事件回调、后端探针。
  * @author zhuweiye
- * @version 1.4.1
+ * @version 1.5.1
  *
  * **1.4.1 的 QUIC 是一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时
  * 都通了，一条连接上的多条流共用同一条 UDP 口。**没做的**是 HTTP/3（nghttp3 连
@@ -18,6 +18,7 @@
 #include <uvcpp/uvcpp_config.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 
