@@ -51,9 +51,15 @@ jobs:
               - -DUVCPP_BUILD_SHARED=ON
               - -DUVCPP_BUILD_WEB=OFF
 
-          # web：`UVCPP_ENABLE_ZLIB` 必须留 ON —— webapp 的压缩用例断言 gzip 真的
-          # 发生过，zlib 关着那两个组会红，而那个组合没人会去构建。zlib 在
+          # web：这一格**开** zlib。压缩那一族的用例（判据是"gzip 真的发生过"）
+          # 只在 zlib 开着时存在，所以这一格是它们的家。zlib 在
           # find_package 落空时走 FetchContent，所以任何平台都不需要额外依赖。
+          #
+          # ★ 这里原先写的是"zlib 关着那两个组会红，而**那个组合没人会去构建**"。
+          #   后半句是错的，代价在 #35：`UVCPP_ENABLE_ZLIB` 的**默认值就是 OFF**，
+          #   所以"关着"恰恰是使用者最常见的配置，而它当时连**编都编不过**
+          #   （3 个用例 TU、14 条 `has no member named`），在 master 上躺了很久。
+          #   现在由下面的 `zlib-off` 格真的编它 —— **别把那一格删掉**。
           - feature: web
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -61,6 +67,26 @@ jobs:
               - -DUVCPP_BUILD_WEB=ON
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=ON
+
+          # zlib-off：模块集合与 `web` **逐字相同**，只差最后那个 `-D` 取 OFF ——
+          # 而 OFF 正好是该选项的**默认值**，也就是使用者不写任何东西时拿到的配置。
+          #
+          # 这一格存在的唯一理由：`UVCPP_ENABLE_ZLIB=OFF` + `WEB/WEBAPP=ON` 这个
+          # 组合原先在 CI 里**一格都没有**（每个 job 都显式 =ON），于是两类缺陷
+          # 一起藏在 master 上（#35）：编译期 3 个用例 TU 编不过，运行期压缩那一族
+          # 的断言必然失败。`.github/workflows/` 里加这一格的代价是一份 CI 时间，
+          # 不加的代价是这条配置再一次"只在使用者手上才第一次被编到"。
+          #
+          # 它跑的是**全量 ctest**，所以判据不止"编得过"：zlib 关着时压缩那几条
+          # 用例按设计**根本不存在**（守卫在 tests/functional/ 那三个文件里），
+          # 其余的照常跑；而 `web` 那一格开 zlib，永远走不到这些分支。
+          - feature: zlib-off
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=OFF
           - feature: ssl
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -239,6 +265,12 @@ jobs:
           case "${{ matrix.feature }}" in
             basic-static|basic-shared) pkgs="libuv1-dev ninja-build" ;;
             web)                       pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
+            # zlib-off：**故意装得和 `web` 一模一样**（含 zlib1g-dev）。这一格
+            # 与 `web` 的唯一差别就是那个 `-D` 取 OFF ⇒ 两边红绿不同只可能归因
+            # 到那个开关本身，不会混进"系统上有没有 zlib"。#35 那种缺陷的成因
+            # 正是"没开开关"，不是"没装库"（`UVCPP_ENABLE_ZLIB=OFF` 时
+            # `find_package(ZLIB)` 压根不会被调用）。
+            zlib-off)                  pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
             ssl|h2)                    pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             full)                      pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             quic)                      pkgs="libuv1-dev zlib1g-dev" ;;

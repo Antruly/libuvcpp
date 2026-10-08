@@ -869,6 +869,20 @@ void test_head() {
   check_eq_i(static_cast<long long>(raw_body(rr.raw).size()), 0, "304 不能有 body");
 }
 
+// =========================================================================
+// ⚠️ 下面四条（6b / 6c / 6b' / 6c'）**整体只在 zlib 开着时存在**。
+//
+// `UVCPP_ENABLE_ZLIB` 的默认值是 OFF，而「开 webapp + 不显式开 zlib」是
+// **默认可达**的组合。在那个配置下压缩不可能发生：变体表一条也不会存，
+// `compress_variant_stats()` 恒为 0 —— 而下面这些用例的判据全是"压过之后
+// 表里应当有几条、字节账该是多少"，在那里必然失败。
+//
+// 它们的**全部内容**都关于压缩，没有一条是别的主题顺带断言压缩，所以守卫
+// 包住**函数与它们的调用点**：在那个配置下这四条根本不存在，而不是
+// "静默跳过"（语义见 `tests/functional/CMakeLists.txt:32-38`）。
+// 调用点在下面 `main()` 里，也一并守卫 —— 漏掉一处就是链接期报错。
+// =========================================================================
+#if UVCPP_ZLIB_ENABLE
 // ---- 6b. 压缩开着时 HEAD 必须报与 GET **逐字节相同**的头 ----
 //
 // 静态层最隐蔽的一条：HEAD 曾经**不读盘**，`content-length` 按文件原始长度
@@ -1377,6 +1391,7 @@ void test_variant_byte_cap_on_evict() {
             << " entries=" << s.entries << " bytes=" << s.bytes
             << " C=" << c << std::endl;
 }
+#endif  // UVCPP_ZLIB_ENABLE
 
 // ---- 7. 尺寸闸门 ----
 
@@ -1693,7 +1708,9 @@ int main() {
     if (want("range")) test_range();
     if (want("ifrange")) test_if_range();
     if (want("head")) test_head();
+#if UVCPP_ZLIB_ENABLE
     if (want("head-compressed")) test_head_compressed();
+#endif
     if (want("size")) test_size_gate();
     if (want("dotfiles")) test_dotfiles();
     if (want("traversal")) test_traversal();
@@ -1745,10 +1762,13 @@ int main() {
     (void)dflt;
   }
 
-  // 自带一个 App 的一条用例，放在共享 App 停掉之后跑（理由见函数上方）。
+  // 自带一个 App 的三条用例，放在共享 App 停掉之后跑（理由见函数上方）。
+  // zlib 关着时它们不存在 —— 守卫与定义那边是同一对，见上面那一大段说明。
+#if UVCPP_ZLIB_ENABLE
   test_compress_variant();
   test_variant_byte_account_on_evict();
   test_variant_byte_cap_on_evict();
+#endif  // UVCPP_ZLIB_ENABLE
 
   cleanup_root();
 

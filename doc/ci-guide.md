@@ -16,7 +16,7 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic`, `http3`, `capi` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
@@ -551,6 +551,9 @@ set and manufacture a fresh silent-downgrade path. Each file has one install ste
 # basic-static | basic-shared
 sudo apt-get install -y libuv1-dev ninja-build
 # web
+sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
+# zlib-off — deliberately identical to web: the only delta is -DUVCPP_ENABLE_ZLIB=OFF,
+# so a red/green difference is attributable to that switch and nothing else
 sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 # ssl | h2
 sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build

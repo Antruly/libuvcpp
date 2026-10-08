@@ -868,6 +868,14 @@ void test_disconnect_mid_request() {
 // =========================================================================
 // 9. 压缩：配置真的传到了 HTTP 层
 // =========================================================================
+//
+// ⚠️ 本段**只在 zlib 开着时存在**。`UVCPP_ENABLE_ZLIB` 的默认值是 OFF，而
+// 「开 webapp（WEB+WEBAPP=ON，TESTS 默认 ON）+ 不显式传 -DUVCPP_ENABLE_ZLIB=ON」
+// 是**默认可达**的组合 —— 在它下面压缩不可能发生，本段那些"真的压过"的断言
+// 必然失败。守卫包住**函数与它在用例表里的登记**，于是这一条在那个配置下
+// **根本不存在**，而不是"静默跳过"：语义与 `tests/functional/CMakeLists.txt:32-38`
+// 一致，CI 也有一条 `zlib-off` 的腿真的编这个组合（见 doc/ci-guide.md §1）。
+#if UVCPP_ZLIB_ENABLE
 void test_compression_wiring() {
   uvcpp_web_app app;
   configure_for_test(app);
@@ -915,6 +923,7 @@ void test_compression_wiring() {
   app.stop();
   app.join();
 }
+#endif  // UVCPP_ZLIB_ENABLE
 
 // =========================================================================
 // 9b. on_sent 的 body_bytes 必须描述**真正写上线的字节数**
@@ -1020,6 +1029,9 @@ void test_sent_bytes_head() {
  * 同样要**对照组**：不带 accept-encoding 的同一路由，`body_bytes` 必须还是原长
  * —— 没有它，"body_bytes 恒等于压缩后长度"（即恒为一个小数）也能蒙混过关。
  */
+// 压缩那一半同上：zlib 关着时这一条整体不存在 —— `body_bytes` 只能等于原长，
+// 「压缩后的长度」这个判据在那个配置下没有意义。
+#if UVCPP_ZLIB_ENABLE
 void test_sent_bytes_compressed() {
   uvcpp_web_app app;
   configure_for_test(app);
@@ -1069,6 +1081,7 @@ void test_sent_bytes_compressed() {
   app.stop();
   app.join();
 }
+#endif  // UVCPP_ZLIB_ENABLE
 
 /**
  * 同一条路由上，HEAD 的 `content-length` 必须与 GET **逐字相同** —— 压缩开着时也一样。
@@ -1112,9 +1125,21 @@ void test_head_content_length_matches_get() {
   check(roundtrip(port, gr, g), "带 gzip 的 GET 有响应");
   const std::string g_cl = http_get_header(g.headers, "content-length");
   const std::string g_ce = http_get_header(g.headers, "content-encoding");
+#if UVCPP_ZLIB_ENABLE
   check(!g_cl.empty() && g_ce.find("gzip") != std::string::npos &&
             std::strtoul(g_cl.c_str(), nullptr, 10) < big.size(),
         "GET 这条确实压过（有 content-encoding，且长度严格小于 4000）");
+#else
+  // zlib 关着时压缩不可能发生，所以这句前提换成"这条 GET 确实**没**被压"。
+  //
+  // 为什么不把整条用例摘掉：它钉的是 **HEAD 与 GET 的 content-length 逐字相同**，
+  // 那件事与压缩无关，在这个配置下仍然成立、也仍然值得测（摘掉它就是白丢覆盖）。
+  // 而"两边都不压缩当然一致"在这个配置下是**正确**行为，不是蒙混 —— 所以这里
+  // 把它反过来钉住，而不是留一个空档。
+  check(g_ce.empty(), "zlib 关着时 GET 不该声称 content-encoding");
+  check(std::strtoul(g_cl.c_str(), nullptr, 10) == big.size(),
+        "zlib 关着时 GET 的 content-length 应当就是原长");
+#endif  // UVCPP_ZLIB_ENABLE
 
   // (b) HEAD 带同一个 accept-encoding：头必须与 GET 一致。
   uvcpp_http_request hr = uvcpp_http_request::make_head("/big");
@@ -2063,9 +2088,13 @@ int main(int argc, char** argv) {
       {"connection_hooks", test_connection_hooks},
       {"raw_data_claim", test_raw_data_claim},
       {"disconnect_mid_request", test_disconnect_mid_request},
+#if UVCPP_ZLIB_ENABLE
       {"compression_wiring", test_compression_wiring},
+#endif
       {"sent_bytes_head", test_sent_bytes_head},
+#if UVCPP_ZLIB_ENABLE
       {"sent_bytes_compressed", test_sent_bytes_compressed},
+#endif
       {"head_cl_matches_get", test_head_content_length_matches_get},
       {"graceful_shutdown", test_graceful_shutdown_with_inflight},
       {"start_failure_recoverable", test_start_failure_is_recoverable},

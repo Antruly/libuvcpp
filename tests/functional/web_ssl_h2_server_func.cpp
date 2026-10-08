@@ -932,6 +932,12 @@ int main() {
   //   B. `accept_encoding`：流 3 带 `accept-encoding: gzip` 且延迟，流 4 不带。
   //      旧实现按流 4 的空串判定 ⇒ 该压的没压。判据是 `content-encoding: gzip`。
   //      （这一条天然成立：放行流自己不带 `accept-encoding`，正好把它抹平。）
+  //
+  //      ⚠️ 这一子用例**分两臂**：压缩那一半只在 `UVCPP_ZLIB_ENABLE` 下存在
+  //      （该选项默认 OFF）。zlib 关着时 A 照跑、B 反过来断言"要了 gzip 也
+  //      不该声称 gzip" —— 不删断言，但那个配置下确实量不到"按流决定"。
+  //      **A 不能跟着一起摘掉**：它钉的 `is_head` 与压缩毫无关系，而且在
+  //      zlib 关掉的库里照样是个真靶子。
   {
     scenario_server srv(&sctx, /*enable_h2=*/true);
     if (!srv.ok()) {
@@ -1029,6 +1035,7 @@ int main() {
     const bool b_has = c.find_response(b_defer, rb);
     check(b_has, "per_stream/B: 延迟流没有响应");
     if (b_has) {
+#if UVCPP_ZLIB_ENABLE
       // **核心判据**：要了 gzip 的那条流必须拿到 gzip。
       check(rb.content_encoding == "gzip",
             "per_stream/B: 要了 gzip 的流拿到 content-encoding=\"" +
@@ -1040,6 +1047,23 @@ int main() {
             "per_stream/B: 声称 gzip 但 body 有 " +
                 std::to_string(rb.body.size()) + " 字节，原文才 " +
                 std::to_string(kDeferBody.size()) + " 字节");
+#else
+      // zlib 关着（`UVCPP_ENABLE_ZLIB` 默认就是 OFF）：压缩不可能发生，
+      // 于是要了 gzip 也只能原样回。这一臂**不是**把断言删掉 —— 它把
+      // 那个配置下正确的行为钉住：绝不能只贴一个 `content-encoding` 声明
+      // 而 body 没压（那正是这条子用例真正防的事）。
+      //
+      // 代价要说准：这一臂**证不到**"压缩方式按流决定"了（两边都不压，
+      // 按流还是按连接看不出来）。那个性质只在 zlib 开着时有意义，
+      // 也只在 ON 那一臂上被量。
+      check(rb.content_encoding.empty(),
+            "per_stream/B: zlib 关着时不该声称 gzip，实际 content-encoding=\"" +
+                rb.content_encoding + "\"");
+      check(rb.body.size() == kDeferBody.size(),
+            "per_stream/B: zlib 关着时 body 必须是原文（" +
+                std::to_string(kDeferBody.size()) + " 字节），实际 " +
+                std::to_string(rb.body.size()) + " 字节");
+#endif  // UVCPP_ZLIB_ENABLE
     }
     // 干扰项对照：**没要** gzip 的那条流不该被压。
     seen_response rp;
