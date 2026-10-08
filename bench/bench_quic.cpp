@@ -45,6 +45,7 @@
  *
  * ```
  * uvcpp_bench_quic [--mode=push|echo|udpfloor] [--rounds=N] [--sizes=8192,65536,...]
+ *                  [--streams=N]    # 每轮开 N 条并发流；--sizes= 是**每条流**的字节数
  *                  [--pkt=N]        # 只对 --mode=udpfloor 有意义，见下
  * ```
  *
@@ -60,6 +61,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -202,9 +204,14 @@ struct Rig {
   uvcpp_quic_connection*   client_conn = nullptr;
 
   Mode   mode    = kPush;
-  size_t target  = 0;   ///< 本次要传的字节数
-  size_t srv_got = 0;   ///< 服务端已收字节
-  size_t cli_got = 0;   ///< 客户端已收字节（echo 用）
+  /// 每轮开几条并发流。`--streams=N`，默认 1。
+  ///
+  /// `--sizes=` 那一列是**每条流**的字节数，所以一轮的总量是 `streams × size`。
+  /// 默认 1 时与加这个开关之前完全同形，老数字仍可比。
+  size_t streams = 1;
+  size_t target  = 0;   ///< 本次要传的**总量**（`streams × size`）
+  size_t srv_got = 0;   ///< 服务端已收字节（所有流合计）
+  size_t cli_got = 0;   ///< 客户端已收字节（echo 用，所有流合计）
   size_t srv_calls = 0; ///< 服务端 on_read(DATA) 次数
   size_t cli_calls = 0; ///< 客户端 on_read(DATA) 次数
   bool   srv_done = false;
@@ -213,6 +220,12 @@ struct Rig {
   int    connect_status = 12345;
   int    write_status = 12345;
   bool   write_acked = false;
+  size_t write_acks = 0; ///< 收到写确认的**流数**（多流下要齐了才算收尾）
+  /// 每条流各自的绝对偏移。`scan_payload()` 要求的位置下标是**流内**偏移，
+  /// 而 `srv_got` 是所有流合计 —— 多流下一混用，内容判据就恒真了（对错位免疫
+  /// 的正是这种计数式判据）。所以两处判据各按流记账。
+  std::map<int64_t, size_t> srv_off;
+  std::map<int64_t, size_t> cli_off;
   /// 第一个内容不符的**流偏移**（`SIZE_MAX` = 一个都没错）。
   ///
   /// 收侧逐个字节对着 `payload_byte()` 比。见那个函数上的注释：这是"分块边界
@@ -220,10 +233,10 @@ struct Rig {
   size_t srv_bad = SIZE_MAX;
   size_t cli_bad = SIZE_MAX;
 
-  explicit Rig(Mode m) : watchdog(&loop),
+  explicit Rig(Mode m, size_t st) : watchdog(&loop),
                          server_ctx(tls_mode::SERVER, tls_version::TLS_1_3),
                          client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3),
-                         mode(m) {}
+                         mode(m), streams(st) {}
 
   /// 逐字节比对一段收到的数据，返回**第一个**不符处的流偏移；全对返回
   /// `SIZE_MAX`。`at` 是这段数据在流里的起始绝对偏移（本装置每条流每轮都从 0
@@ -261,9 +274,13 @@ struct Rig {
                            const net_read_result& r) {
         if (r.event != net_read_event::DATA) return;
         ++srv_calls;
-        if (srv_bad == SIZE_MAX) {
-          const size_t bad = scan_payload(r.data, r.size, srv_got);
-          if (bad != SIZE_MAX) srv_bad = bad;
+        {
+          size_t& off = srv_off[id];
+          if (srv_bad == SIZE_MAX) {
+            const size_t bad = scan_payload(r.data, r.size, off);
+            if (bad != SIZE_MAX) srv_bad = bad;
+          }
+          off += r.size;
         }
         srv_got += r.size;
         if (mode == kEcho && r.size != 0) {
@@ -291,13 +308,17 @@ struct Rig {
 
     {
       uvcpp_quic_connection::callbacks cbs;
-      cbs.on_read = [this](uvcpp_quic_connection&, int64_t,
+      cbs.on_read = [this](uvcpp_quic_connection&, int64_t id,
                            const net_read_result& r) {
         if (r.event != net_read_event::DATA) return;
         ++cli_calls;
-        if (cli_bad == SIZE_MAX) {
-          const size_t bad = scan_payload(r.data, r.size, cli_got);
-          if (bad != SIZE_MAX) cli_bad = bad;
+        {
+          size_t& off = cli_off[id];
+          if (cli_bad == SIZE_MAX) {
+            const size_t bad = scan_payload(r.data, r.size, off);
+            if (bad != SIZE_MAX) cli_bad = bad;
+          }
+          off += r.size;
         }
         cli_got += r.size;
         if (cli_got >= target) cli_done = true;
@@ -305,6 +326,7 @@ struct Rig {
       cbs.on_write = [this](uvcpp_quic_connection&, int64_t, int status) {
         write_acked  = true;
         write_status = status;
+        ++write_acks;
       };
       client->connection()->set_callbacks(cbs);
     }
@@ -316,10 +338,10 @@ struct Rig {
     return connect_status == 0;
   }
 
-  /// 跑一轮：开新流、写 \p n 字节带 FIN、等终点事件。
+  /// 跑一轮：开 \ref streams 条并发流、每条写 \p n 字节带 FIN、等终点事件。
   /// @param out 收到结果；超时返回 false。
   bool once(size_t n, Round* out) {
-    target    = n;
+    target    = n * streams;
     srv_got   = 0;
     cli_got   = 0;
     srv_calls = 0;
@@ -327,21 +349,32 @@ struct Rig {
     srv_done  = false;
     cli_done  = false;
     write_acked  = false;
+    write_acks   = 0;
     write_status = 12345;
     srv_bad   = SIZE_MAX;
     cli_bad   = SIZE_MAX;
+    srv_off.clear();
+    cli_off.clear();
 
-    // 位置相关的载荷 —— 见 `payload_byte()` 上的注释。
+    // 位置相关的载荷 —— 见 `payload_byte()` 上的注释。**每条流都用同一份**：
+    // 判据比对的是**流内**偏移，所以"哪条流"不影响它。
     std::vector<char> payload(n);
     for (size_t i = 0; i < n; ++i) payload[i] = payload_byte(i);
 
-    const int64_t id = client_conn->open_stream(true);
-    if (id < 0) return false;
+    // 开流是纯本地动作（ngtcp2 要等第一次写才往网上放东西），所以放在 t0 之前，
+    // 计时里只剩搬运本身。
+    std::vector<int64_t> ids(streams);
+    for (size_t s = 0; s < streams; ++s) {
+      ids[s] = client_conn->open_stream(true);
+      if (ids[s] < 0) return false;
+    }
 
     const uint64_t t0 = uv_hrtime();
     const uint64_t c0 = thread_cycles_now();
-    const int wrc = client_conn->write_stream(id, payload.data(), n, true);
-    if (wrc != 0) return false;
+    for (size_t s = 0; s < streams; ++s) {
+      const int wrc = client_conn->write_stream(ids[s], payload.data(), n, true);
+      if (wrc != 0) return false;
+    }
 
     const bool ok = pump_until(
         &loop,
@@ -351,8 +384,8 @@ struct Rig {
     const uint64_t c1 = thread_cycles_now();
 
     // 让"写完被确认"这件事也走完再收回这一轮 —— 否则它的收尾会串到下一轮，
-    // 下一轮的计时里就混进了上一轮的尾巴。
-    pump_until(&loop, [this] { return write_acked; }, kSetupDeadlineNs);
+    // 下一轮的计时里就混进了上一轮的尾巴。多流下要**每一条**都确认到。
+    pump_until(&loop, [this] { return write_acks >= streams; }, kSetupDeadlineNs);
 
     if (!ok) return false;
     // 内容不符也判这一轮失败，并且**不能混进计时**：错位的字节数一模一样，
@@ -574,6 +607,9 @@ int main(int argc, char** argv) {
   /// 是哪一档由它自报，不靠默认值。以前这里是 1200 —— 那是"数据报被钉在 1200"
   /// 那个版本的配套口径，留着会让默认比较**默认就不公平**。
   size_t              floor_pkt = 1444;
+  /// 每条尺寸开几条**并发流**。`--sizes=` 那一列是**每条流**的字节数，
+  /// 一轮的总量 = `streams × size`。默认 1 = 加这个开关之前的老形状。
+  size_t              streams = 1;
   std::vector<size_t> sizes;
   sizes.push_back(1024);
   sizes.push_back(8192);
@@ -601,6 +637,9 @@ int main(int argc, char** argv) {
     } else if (std::strncmp(a, "--pkt=", 6) == 0) {
       const long v = std::atol(a + 6);
       if (v > 0) floor_pkt = static_cast<size_t>(v);
+    } else if (std::strncmp(a, "--streams=", 10) == 0) {
+      const long v = std::atol(a + 10);
+      if (v > 0) streams = static_cast<size_t>(v);
     } else {
       std::fprintf(stderr, "unknown arg: %s\n", a);
       return 2;
@@ -657,6 +696,11 @@ int main(int argc, char** argv) {
 
   std::printf("uvcpp QUIC throughput rig  mode=%s  rounds=%d\n",
               (mode == kEcho) ? "echo" : "push", rounds);
+  if (streams > 1) {
+    std::printf("并发流 streams=%llu  ⇒ 下表 bytes 是**总量**，"
+                "--sizes= 给的是每条流的字节数\n",
+                static_cast<unsigned long long>(streams));
+  }
   std::printf("%10s %12s %12s %10s %10s %12s\n", "bytes", "min_ms",
               "med_ms", "MB/s", "recv_calls", "B/call");
   std::printf("-----------------------------------------------------------"
@@ -665,11 +709,13 @@ int main(int argc, char** argv) {
   bool any_failed = false;
 
   for (size_t si = 0; si < sizes.size(); ++si) {
-    const size_t n = sizes[si];
-    Rig          rig(mode);
+    const size_t n     = sizes[si];
+    /// 这一档的总量。`streams == 1` 时与 `n` 相同，老数字仍可比。
+    const size_t total = n * streams;
+    Rig          rig(mode, streams);
     if (!rig.setup()) {
       std::printf("%10llu  SETUP FAILED\n",
-                  static_cast<unsigned long long>(n));
+                  static_cast<unsigned long long>(total));
       any_failed = true;
       continue;
     }
@@ -699,11 +745,11 @@ int main(int argc, char** argv) {
       const size_t bad = rig.first_bad();
       if (bad != SIZE_MAX) {
         std::printf("%10llu  DATA MISMATCH 第一个不符在流偏移 %llu\n",
-                    static_cast<unsigned long long>(n),
+                    static_cast<unsigned long long>(total),
                     static_cast<unsigned long long>(bad));
       } else {
         std::printf("%10llu  ROUND FAILED\n",
-                    static_cast<unsigned long long>(n));
+                    static_cast<unsigned long long>(total));
       }
       any_failed = true;
       continue;
@@ -729,16 +775,16 @@ int main(int argc, char** argv) {
       if (cpu[i] < cyc_best) cyc_best = cpu[i];
     }
 
-    const double mbps = (static_cast<double>(n) / (1024.0 * 1024.0)) /
+    const double mbps = (static_cast<double>(total) / (1024.0 * 1024.0)) /
                         (best / 1000.0);
     std::printf("%10llu %12.3f %12.3f %10.2f %10llu %12.1f\n",
-                static_cast<unsigned long long>(n), best, med, mbps,
+                static_cast<unsigned long long>(total), best, med, mbps,
                 static_cast<unsigned long long>(calls_rep),
-                calls_rep ? static_cast<double>(n) /
+                calls_rep ? static_cast<double>(total) /
                                 static_cast<double>(calls_rep)
                           : 0.0);
     std::printf("           (cyc/B %.2f  cold r1: %s%.3f ms)\n",
-                (n != 0) ? cyc_best / static_cast<double>(n) : 0.0,
+                (total != 0) ? cyc_best / static_cast<double>(total) : 0.0,
                 cold_ok ? "" : "FAILED ", cold_ok ? cold.ms : 0.0);
     std::fflush(stdout);
   }
