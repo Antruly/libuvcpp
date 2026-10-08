@@ -45,7 +45,12 @@
  *
  * ```
  * uvcpp_bench_quic [--mode=push|echo|udpfloor] [--rounds=N] [--sizes=8192,65536,...]
+ *                  [--pkt=N]        # 只对 --mode=udpfloor 有意义，见下
  * ```
+ *
+ * `--pkt=N` 定 `udpfloor` 每个数据报装多少字节。**必须与 QUIC 那一档实际用的数据报
+ * 一样大** —— 地板本身也按包数付内核税，拿不同档的地板当分母是不可比的。默认值只
+ * 是个起点，量的是哪一档以输出里那行自报的 `pkt=` 为准。
  */
 
 #include <uv.h>
