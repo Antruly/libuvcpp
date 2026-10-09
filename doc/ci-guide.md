@@ -16,9 +16,9 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `ssl`, `h2`, `quic`, `http3`, `capi` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `ssl`, `h2`, `quic`, `http3`, `capi` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `Windows (MinGW64)` | `Windows (MinGW64) / mingw64` | `windows-latest` (MSYS2) |
 | `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `macOS` | `macOS / <feature>` | `macos-latest` |
@@ -84,7 +84,8 @@ layout did not cover them either.
 | MSVC + full | Windows has never had a `full` leg (`full` is Ubuntu + macOS only). |
 | Windows static + web/webapp | The static entry is `WEB=OFF`. |
 | macOS `config-contract` | `package_release.py`'s `PLATFORMS` has no macOS key — see §5. |
-| WSDL with tests | Both places that set `WSDL=ON` also set `TESTS=OFF`; the WSDL module has never been run by ctest. |
+| MinGW + WSDL | The same single MinGW job as the three gaps above. `release.yml`'s `mingw-x64` and `mingw-arm64` legs **do** enable WSDL, so it is covered at release time but not on push/PR — which is why it was verified locally on the MinGW x64 shape before being turned on there. |
+| macOS + WSDL | No entry, and macOS never compiles `src/wsdl/`. Lower risk than the MinGW gap above: macOS is not a release platform, so there is no path on which it reaches a user unbuilt. |
 | **base build with `UVCPP_BUILD_NET=OFF`** | `tests/functional/CMakeLists.txt` filters web/webapp/ssl/h2/wsdl/quic and **not** net, so `NET=OFF` would compile net test files against a library with `src/net/` filtered out — red by construction. Opening this cell needs that filter first. Today "base" therefore means net at its default (on) with `WEB=OFF`, i.e. the two `basic-*` entries. |
 
 The three workflows that need a second (artifact-only, `UVCPP_BUILD_TESTS=OFF`) tree —
@@ -388,13 +389,46 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
 **The `config-contract` packages and the prebuilt release packages are now two different
 module sets, on purpose** — and each is judged by its own artifact, never by a shared
 assumption. As of **1.5.0** `release.yml` enables QUIC/HTTP3 on all six legs (each leg
-supplies a QUIC-capable OpenSSL >= 3.2; see the table at the top of that file), while the two
-`config-contract` jobs do not — they enable `WSDL` instead, which the release legs leave off.
+supplies a QUIC-capable OpenSSL >= 3.2; see the table at the top of that file), and as of
+**1.5.2** it enables `WSDL` too; the two `config-contract` jobs enable `WSDL` but not
+QUIC/HTTP3. So the two sets differ in exactly one direction each, and neither is the other's
+substitute.
 So "does *this* package have QUIC?" is answered by the per-leg assertion step reading
 `<tree>/include/uvcpp/uvcpp_config.h`, **never** by grepping `CMakeCache.txt`: the QUIC/HTTP3
 guard chain emits `message(WARNING)` and plain-`set()`s the option OFF, so the cache keeps
 saying `=ON` while the compiler sees 0 — a cache-grepping assertion lets a package without
 the feature through, which is the one thing it exists to stop.
+
+### The `wsdl` entries
+
+`wsdl` is the WSDL 1.1 document model plus the SOAP runtime. Both live in `src/wsdl/`
+(`uvcpp_wsdl_*.{h,cpp}` and `uvcpp_soap_*.{h,cpp}` — there is no separate `src/soap/`) and
+hang off the single `UVCPP_ENABLE_WSDL` switch. It runs on **two legs** — Ubuntu and Windows
+MSVC. MinGW and macOS are the gap (see §1).
+
+- **Why the entry exists at all.** `UVCPP_ENABLE_WSDL` is **off by default**, so every other
+  entry builds a `src/wsdl/`-less library and goes green — correct for them, and meaningless as
+  evidence about WSDL. Until `1.5.2` the only thing that ever turned it on was the two
+  `config-contract` jobs, and those are **configure-only**. Adding `-DUVCPP_ENABLE_WSDL=ON`
+  to `release.yml` without an entry here would have made the **first compile of that
+  configuration happen at release time**. This is the same argument as `h2`'s, and the repo
+  has already paid for learning it once: `UVCPP_ENABLE_ZLIB=OFF` + `WEB/WEBAPP=ON` had no
+  entry at all and shipped two classes of defect (#35).
+- **It is `web` plus one switch**, exactly as `zlib-off` is `web` minus one, and its dep list
+  is **byte-identical to `web`'s**. That is deliberate: `pugixml` is pulled by `FetchContent`
+  (`CMakeLists.txt:1186`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
+  there is nothing to install — and keeping the package set identical means a red/green
+  difference between the two legs can only be attributed to the switch itself.
+- **All four gates are load-bearing here.** Gate ② is `pugixml integrated` (the FetchContent
+  actually resolved), gate ③ is `Including wsdl module in build` (`src/wsdl/` really entered
+  the source list), and gate ④ is `test_wsdl_document_func`. Gate ④ matters more than usual:
+  the four WSDL/SOAP test files are removed by a glob+FILTER in
+  `tests/functional/CMakeLists.txt` when the module is off, and `ctest` reports
+  `100% tests passed` just as happily when they were never registered.
+- **It runs the full `ctest`**, so the gate is not merely "it compiled": the four files that
+  need the module — `wsdl_document_func`, `soap_message_func`, `web_app_wsdl_func`,
+  `web_app_soap_func` — really execute. The entry's gate string names one of them as a
+  sentinel; the other three ride the same `ctest` invocation.
 
 ### The `capi` entries
 

@@ -87,6 +87,40 @@ jobs:
               - -DUVCPP_BUILD_WEB=ON
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=OFF
+
+          # wsdl：与 `web` 的 `flags` **逐字相同**，只多一个 `-DUVCPP_ENABLE_WSDL=ON`
+          # —— 和上面 `zlib-off` 是同一个形状的两个方向（那一格是 `web` 减一个开关，
+          # 这一格是 `web` 加一个开关）。
+          #
+          # 这一格存在的唯一理由与 h2 那条同源：`UVCPP_ENABLE_WSDL` **默认 OFF**，
+          # 别的格都不编译 `src/wsdl/`。没有它，「发布包带上 WSDL/SOAP」这条配置
+          # 第一次被编到就是**发版那一刻** —— 而 `release.yml` 六条腿一起开它。
+          # （本仓为这件事付过一次学费：`UVCPP_ENABLE_ZLIB=OFF` + `WEB/WEBAPP=ON`
+          # 那个组合整整一版没有一格覆盖，#35。）
+          #
+          # 它跑**全量 ctest**，所以判据不止"编得过"：文件名里含 `wsdl`/`soap` 的
+          # 四条用例（`wsdl_document_func` / `soap_message_func` /
+          # `web_app_wsdl_func` / `web_app_soap_func`）在这里**真的注册、真的跑**。
+          # 模块关掉时它们被 `tests/functional/CMakeLists.txt` 的 glob+FILTER 摘掉，
+          # 而 ctest 报 "100% tests passed" 时并不会说"少了几条"。
+          #
+          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1186`），
+          # 装包表与 `web` 那一格逐字相同 —— 这样两边红绿不同只可能归因到那个开关。
+          # 四个门禁串见 doc/ci-guide.md §5。
+          - feature: wsdl
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_WSDL=ON
+            gate_name: pugixml
+            gate_switch: 'UVCPP_ENABLE_WSDL:BOOL=ON'
+            gate_integrated: pugixml integrated
+            gate_module: Including wsdl module in build
+            gate_test: test_wsdl_document_func
+
           - feature: ssl
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -271,6 +305,11 @@ jobs:
             # 正是"没开开关"，不是"没装库"（`UVCPP_ENABLE_ZLIB=OFF` 时
             # `find_package(ZLIB)` 压根不会被调用）。
             zlib-off)                  pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
+            # wsdl：与 `web` **逐字相同**，理由同上面 `zlib-off` 那条 —— 两边红绿
+            # 不同只该归因到 `-DUVCPP_ENABLE_WSDL` 本身，不混进"系统上有没有
+            # pugixml"。pugixml 由根 CMakeLists.txt 的 FetchContent 拉（`GIT_TAG`
+            # 钉在 `PUGIXML_VERSION`），**不发包管理器**，所以这里一个新包都没有。
+            wsdl)                      pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
             ssl|h2)                    pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             full)                      pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             quic)                      pkgs="libuv1-dev zlib1g-dev" ;;

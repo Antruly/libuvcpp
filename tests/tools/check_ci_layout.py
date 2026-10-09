@@ -132,6 +132,15 @@ FEATURE_GATES = {
     # 记在 doc/ci-guide.md §1 的"未覆盖的格"里。
     "http3": ["UVCPP_ENABLE_HTTP3:BOOL=ON", "nghttp3 integrated",
               "Including http3 module in build", "test_http3_web_func"],
+    # 1.5.2：`UVCPP_ENABLE_WSDL` 默认 OFF，而发布腿自这一版起**显式开**它（发布包
+    # 从此带 WSDL/SOAP）。这一格就是那条发布配置在 push/PR 阶段的替身。
+    #
+    # **登记在这里不是可选的** —— `FEATURE_GATES.get(feat)` 对未登记的 feature
+    # 返回 None，判据 6 会**静默跳过**它。不登记就等于新加的那一格没有任何东西
+    # 拦得住"它其实编了一个不带 wsdl 的库然后全绿"，而那正是这一整条判据存在的
+    # 理由（见上面那段注释）。
+    "wsdl": ["UVCPP_ENABLE_WSDL:BOOL=ON", "pugixml integrated",
+             "Including wsdl module in build", "test_wsdl_document_func"],
 }
 
 # 矩阵条目上承载这些串的字段名。文件里必须真的出现 `matrix.<字段>`（判据 6 后半）。
@@ -475,7 +484,7 @@ def main():
                     sorted(doc_feats[name] - file_feats[name])))
 
     # ---- 判据 6 ----
-    print("\n---- 判据 6：h2 / quic / http3 的门禁串在**那一格自己的条目里**，且真接进了步骤 ----")
+    print("\n---- 判据 6：h2 / quic / http3 / wsdl 的门禁串在**那一格自己的条目里**，且真接进了步骤 ----")
     for name, text in sorted(texts.items()):
         lines = text.splitlines()
         entries = feature_entries(lines)

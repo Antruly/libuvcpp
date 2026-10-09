@@ -100,7 +100,7 @@ Linux 上让运行时找到它：`LD_LIBRARY_PATH=<包里的 lib 目录>`，或�
 `PATH` 或 exe 同目录。
 
 三方依赖**不用管**：发布包的动态库把 libuv / llhttp / zlib / OpenSSL / nghttp2 /
-ngtcp2 / nghttp3 都静态链进去了 —— 三条腿各有各的断言在发布流程里把这件事钉着，
+ngtcp2 / nghttp3 / pugixml 都静态链进去了 —— 三条腿各有各的断言在发布流程里把这件事钉着，
 Linux 上 `ldd libuvcpp.so` 只剩 `libc` 与 `ld-linux`，Windows 上导入表只剩系统
 dll。MSVC 包额外带三份 VC++ 运行库（`msvcp140.dll` / `vcruntime140.dll` /
 `vcruntime140_1.dll`），一起拷过去即可。（发布包**没有 macOS 那一档**，六个平台

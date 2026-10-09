@@ -411,11 +411,11 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 
    > ⚠️ **`1.5.0` 起这句话要说准**：`config-contract` 那份包**不是**发布包的逐字副本，
    > 两份的开关集合本来就不同 —— 它开 `WSDL`、不开 QUIC/HTTP3，而 `1.5.0` 起的发布包
-   > 反过来（开 QUIC/HTTP3、不开 WSDL）。所以"发布包里 h3 是关的"**不再成立**；成立的
-   > 是"**跑这个门禁的那份包里 h3 是关的**"（`check_doc_snippets.py` 只在两个
-   > `config-contract` job 里跑，没有哪条腿拿带 h3 的包跑过它）。代价因此比原来更直白：
-   > **这三条在 CI 里仍然一条都不会被编**，要判它们就得本地来一次 —— 本地验过一次
-   > （2026-09-30，`3/3` 绿）：
+   > 反过来（开 QUIC/HTTP3；`WSDL` 自 `1.5.2` 起**两份都开**）。所以"发布包里 h3 是关的"
+   > **不再成立**；成立的是"**跑这个门禁的那份包里 h3 是关的**"（`check_doc_snippets.py`
+   > 只在两个 `config-contract` job 里跑，没有哪条腿拿带 h3 的包跑过它）。代价因此比
+   > 原来更直白：**这三条在 CI 里仍然一条都不会被编**，要判它们就得本地来一次 ——
+   > 本地验过一次（2026-09-30，`3/3` 绿）：
 
    ```
    cmake --install <HTTP3=ON 的构建树> --prefix /tmp/h3-inst

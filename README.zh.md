@@ -1283,6 +1283,17 @@ libuvcpp/
   `_uvcpp_literal01(...)` 抄（第一版按名字猜，把 `UVCPP_BUILD_EXPAND` 写成了
   `UVCPP_WSDL_ENABLE`，拿真生成头实测时当场红了一条）；mingw 与 linux 四条腿**两份树都
   量**（发布档与调试档是两次独立 configure，漏传只让其中一份缺功能）（`1.5.0`）
+- **1.5.2 起发布包连 WSDL/SOAP 一起带上，"全功能"因此是那十一个宏**。在那之前
+  `UVCPP_ENABLE_WSDL` 是六条腿唯一漏掉的模块，而它的失败方式很安静：包里**照样装着**
+  `include/wsdl/*.h`（那份清单由 `package_release.py` 的 `MODULES` 决定，与开关无关），
+  但生成头里 `UVCPP_WSDL_ENABLE` 是 0，于是那些头的全部内容落在 `#if` 外面 —— **头在、
+  功能不在**。现在十个 configure（六条腿，其中四条各多一棵调试树）全传
+  `-DUVCPP_ENABLE_WSDL=ON`，六张断言清单全加 `UVCPP_WSDL_ENABLE`。pugixml 走
+  `FetchContent`、被压成静态、以 `PRIVATE` 链接，所以它与其余私有依赖一样进 DLL：
+  不多一个运行时 dll、`.pc` 不用改、使用方什么都不用装。Ubuntu 与 Windows MSVC 各多一格
+  `wsdl` 矩阵，让这份配置在**每次 push** 上被编译**并运行** —— 这一点是承重的：此前那四条
+  `wsdl`/`soap` 用例在整个 CI 里**一次都没被 ctest 跑过**，唯二打开该模块的地方都是
+  configure-only（`1.5.2`）
 - **六条腿的 timeout 120→150 分钟**（全开 QUIC/HTTP3 之后，每条腿除了自己的源文件还要
   FetchContent 编 ngtcp2 与 nghttp3，Linux 那两条还要多编一份 OpenSSL；msvc-arm64 是
   180）。Linux 的自包含断言名单加上 ngtcp2 / nghttp3：它们今天由本仓

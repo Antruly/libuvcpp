@@ -120,6 +120,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -140,6 +141,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -182,14 +184,21 @@ jobs:
       # 名字映射（cache 键 → 生成头里的宏，别照着 cache 键去 grep）。**这张表是
       # 逐条对着 `CMakeLists.txt` 的 `_uvcpp_literal01(...)` 那一段抄的**，不是
       # 按名字想当然：
-      #   UVCPP_BUILD_EXPAND⇒**UVCPP_ENABLE_MEMORY_POOL**（不是 WSDL —— expand 是
-      #     内存池那个模块，`UVCPP_WSDL_ENABLE` 归另一个开关 `UVCPP_ENABLE_WSDL`，
-      #     它默认 OFF 且发布腿**刻意不开**，所以这一串里绝不能出现 WSDL_ENABLE：
-      #     第一版就是按名字猜的，本机对着真生成头实测当场红了一条，而六条腿会
-      #     一起红）；
+      #   UVCPP_BUILD_EXPAND⇒**UVCPP_ENABLE_MEMORY_POOL**（**不是** WSDL —— expand
+      #     是内存池那个模块，名字像纯属巧合。第一版就是按名字猜的，本机对着真
+      #     生成头实测当场红了一条，而六条腿会一起红）；
       #   UVCPP_BUILD_WEB⇒UVCPP_WEB_ENABLE、UVCPP_BUILD_WEBAPP⇒UVCPP_WEBAPP_ENABLE、
       #   UVCPP_BUILD_NET⇒UVCPP_NET_ENABLE、UVCPP_ENABLE_ZLIB⇒UVCPP_ZLIB_ENABLE；
       #   其余同名加 `_ENABLE` 后缀（`UVCPP_ENABLE_QUIC`⇒`UVCPP_QUIC_ENABLE`）。
+      #
+      # **`UVCPP_ENABLE_WSDL`⇒`UVCPP_WSDL_ENABLE` 现在必须在下面那一串里。** 它归
+      # 自己那个开关（不是 `UVCPP_BUILD_EXPAND`），默认 OFF，而发布腿自 1.5.2 起
+      # **显式开**它：`1.5.0` 起发布包带上 QUIC/HTTP3/C ABI，WSDL/SOAP 是当时漏下
+      # 的唯一一块 —— 包里的 `include/wsdl/*.h` 照装不误（那由 `package_release.py`
+      # 的 MODULES 决定，与开关无关），但生成头里 `UVCPP_WSDL_ENABLE` 是 0，于是那些
+      # 头的内容整段落在 `#if` 外面**编出来是空的**，使用方拿到的是"头在、功能不在"。
+      # 打开它同时要满足 `UVCPP_BUILD_WEBAPP=ON`（WSDL 的前提，否则配置期静默降级），
+      # 而六条腿本来就都开着。
       #
       # 两份产物都量：调试档与发布档是**两次独立的 configure**，漏传只让其中一份
       # 缺功能 —— 而那一份正是使用者拿去调试时才撞上的。
@@ -215,7 +224,7 @@ jobs:
             check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
-              UVCPP_HTTP3_ENABLE
+              UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE
           done
           exit $rc
 
@@ -325,6 +334,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -342,6 +352,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -409,7 +420,7 @@ jobs:
             check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
-              UVCPP_HTTP3_ENABLE
+              UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE
           done
           exit $rc
 
@@ -482,6 +493,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -524,7 +536,7 @@ jobs:
           check_tree build-msvc UVCPP_NET_ENABLE UVCPP_WEB_ENABLE \
             UVCPP_WEBAPP_ENABLE UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE \
             UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE \
-            UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE
+            UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE
           exit $rc
 
       - name: Test
@@ -695,6 +707,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -769,7 +782,7 @@ jobs:
           check_tree build-msvc UVCPP_NET_ENABLE UVCPP_WEB_ENABLE \
             UVCPP_WEBAPP_ENABLE UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE \
             UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE \
-            UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE
+            UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE
           exit $rc
 
       - name: Test
@@ -884,6 +897,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -902,6 +916,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -973,7 +988,7 @@ jobs:
             check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
-              UVCPP_HTTP3_ENABLE
+              UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE
           done
           exit $rc
 
@@ -1049,6 +1064,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -1066,6 +1082,7 @@ jobs:
             -DUVCPP_ENABLE_NGHTTP2=ON \
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -1128,7 +1145,7 @@ jobs:
             check_tree "$t" UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
-              UVCPP_HTTP3_ENABLE
+              UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE
           done
           exit $rc
 

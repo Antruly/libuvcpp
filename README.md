@@ -1462,6 +1462,20 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   `UVCPP_BUILD_EXPAND`; run against a real generated header it failed immediately); the
   four MinGW/Linux legs check **both trees**, because release and debug are two independent
   configures and omitting a flag only breaks one of them (`1.5.0`)
+- **As of 1.5.2 the release packages carry WSDL/SOAP as well, so "full-featured" now means
+  all eleven asserted macros.** Until then `UVCPP_ENABLE_WSDL` was the one module the six
+  legs left off, and the failure mode was quiet: the packages still *shipped*
+  `include/wsdl/*.h` (that list is `package_release.py`'s `MODULES`, independent of the
+  switch), but with `UVCPP_WSDL_ENABLE 0` in the generated header their whole contents sat
+  inside `#if` — headers present, functionality absent. All ten configure sites (six legs,
+  four of which also have a debug tree) now pass `-DUVCPP_ENABLE_WSDL=ON`, and all six
+  assertion lists add `UVCPP_WSDL_ENABLE`. pugixml is pulled by `FetchContent`, forced
+  static, and linked **privately**, so it goes into the DLL like the other private
+  dependencies: no new runtime DLL, no `.pc` change, nothing for a consumer to install. A
+  new `wsdl` matrix entry on Ubuntu and Windows MSVC compiles **and runs** this configuration
+  on every push — which matters because until now the four `wsdl`/`soap` test files had never
+  been executed by `ctest` anywhere, the two places that turned the module on being
+  configure-only (`1.5.2`)
 - **All six legs' timeouts went from 120 to 150 minutes** (with QUIC/HTTP3 on, each leg
   builds ngtcp2 and nghttp3 via FetchContent on top of its own sources, and the two Linux
   legs build OpenSSL as well; msvc-arm64 is 180). The Linux self-containment assertion now

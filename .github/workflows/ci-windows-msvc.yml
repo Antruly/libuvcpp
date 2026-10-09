@@ -55,6 +55,32 @@ jobs:
               - -DUVCPP_BUILD_WEB=ON
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=ON
+
+          # wsdl：与 `web` 的 `flags` **逐字相同**，只多一个 `-DUVCPP_ENABLE_WSDL=ON`。
+          #
+          # `UVCPP_ENABLE_WSDL` 默认 OFF，别的格都不编译 `src/wsdl/`（同理，MSVC
+          # 从没编过它）。只在 `release.yml` 打开的话，这条配置第一次被编到就是
+          # **发版那一刻** —— 而 release.yml 的 msvc-x64 / msvc-arm64 两条腿都开着
+          # 它。这一格就是那两条腿在 push/PR 阶段的替身。
+          #
+          # pugixml 走 FetchContent（根 `CMakeLists.txt:1186`，`GIT_TAG` 钉在
+          # `PUGIXML_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
+          # 的装包需求与 `web` 逐字相同。
+          # 四个门禁串见 doc/ci-guide.md §5。
+          - feature: wsdl
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_WSDL=ON
+            gate_name: pugixml
+            gate_switch: 'UVCPP_ENABLE_WSDL:BOOL=ON'
+            gate_integrated: pugixml integrated
+            gate_module: Including wsdl module in build
+            gate_test: test_wsdl_document_func
+
           - feature: ssl
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -206,7 +232,8 @@ jobs:
         shell: bash
         run: |
           case "${{ matrix.feature }}" in
-            basic-static|basic-shared|web|capi) echo "(这一格没有系统依赖)" ;;
+            # wsdl 也在这一组：pugixml 走 FetchContent，与 zlib 一样不是系统依赖。
+            basic-static|basic-shared|web|capi|wsdl) echo "(这一格没有系统依赖)" ;;
             ssl|h2|quic|http3)             bash .github/scripts/win-openssl-deps.sh ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
