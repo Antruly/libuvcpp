@@ -313,6 +313,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_CAPI` | `OFF` | Export the **C ABI** (`src/capi/`, C99 headers for C#/P-Invoke and any other FFI) out of the same `uvcpp` library — no extra artifact. Requires `UVCPP_BUILD_NET=ON` and `UVCPP_BUILD_WEB=ON`; force-disabled without them (the C surface spans net/web/webapp). **Turned on for every release configuration.** See [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_ENABLE_DB` | `OFF` | Enable the **database module** (`src/db/`): one `uvcpp_db_client` per connection over SQLite / MySQL / PostgreSQL, with table-style access to the result rows. It is the only module that **requires a third-party client library** (libsqlite3 / libmysqlclient / libpq) — force-disabled when none of the three is found. **Every release configuration turns it on**, so the prebuilt packages ship it. See [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_ENABLE_DB_SQLITE` | `ON` | Build the SQLite backend of the db module (needs `sqlite3.h` + libsqlite3). Not found ⇒ **this one backend is force-disabled with a warning**; the others still build |
+| `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | Build that SQLite backend from a **hash-pinned source amalgamation** (one static `sqlite3.c`, forced PIC) instead of `find_package(SQLite3)`. **The six release legs use it**: linking the system `libsqlite3.so` would add a `DT_NEEDED` and break the packages' self-contained promise, while the system `libsqlite3.a` on Ubuntu 24.04 is not PIC (verified: `R_X86_64_PC32 … can not be used when making a shared object`). Needs network at configure time, or the zip placed by hand; both are described in [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | Build the MySQL backend (needs `mysql.h` + libmysqlclient). Non-standard installs: `-DCMAKE_PREFIX_PATH=…` or `-DUVCPP_DB_MYSQL_INCLUDE_DIR=… -DUVCPP_DB_MYSQL_LIBRARY=…` |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | Build the PostgreSQL backend (needs `libpq-fe.h` + libpq). Non-standard installs: `-DCMAKE_PREFIX_PATH=…` or `-DPostgreSQL_INCLUDE_DIR=… -DPostgreSQL_LIBRARY=…` |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
@@ -899,7 +900,7 @@ fixes came from issue reports by the project's first external contributor,
 - **The private-header pair.** `uvcpp_quic_session.h` holds `ngtcp2_conn*`, `SSL*` and
   `ngtcp2_path_storage`, so its layout tracks the ngtcp2 version — it is the second
   private header, alongside `uvcpp_quic_ngtcp2.h`. Both are excluded from the install
-  (`CMakeLists.txt:2299-2299`) and from the package
+  (`CMakeLists.txt:2388-2388`) and from the package
   (`tests/tools/package_release.py`'s `PRIVATE_HEADERS`); measured with
   `cmake --install build-quic --prefix /tmp/inst`, which lands exactly the four public
   headers in `include/quic/` (`1.4.1`)

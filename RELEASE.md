@@ -379,7 +379,25 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 
 `1.5.0` 起**每一档的发布档与调试档都是全功能的**：QUIC + HTTP/3 + C ABI
 （`UVCPP_QUIC_ENABLE` / `UVCPP_HTTP3_ENABLE` / `UVCPP_CAPI_ENABLE` 都是 1，此前的发布包
-这三项是 0 —— 逐条的来路与判据见上面「`v1.5.0` 重点」）。
+这三项是 0 —— 逐条的来路与判据见上面「`v1.5.0` 重点」）。**数据库模块随后也进了六条腿**
+（`UVCPP_DB_ENABLE` 从 0 变 1），但**只带 SQLite 一个后端** —— 见下面那一段。
+
+**包里的数据库模块只有 SQLite。** 六条腿各传四个 `-D`：
+
+```
+-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF
+```
+
+两个 `OFF` 是**显式**关的，不是"找不到"：发布腿的 runner 上装着 `libpq-dev`，
+`find_package(PostgreSQL QUIET)` 会**静默**成功，于是 `libuvcpp.so` 悄悄多一条
+`libpq.so.5` 的 `DT_NEEDED` —— 而"装到别的机器上跑不起来"正是发布腿那条 `ldd` 断言要拦的
+形状（名单里 `sqlite3` / `mysqlclient` / `pq` 三枚都在）。SQLite 那份也**不链系统的**：
+`UVCPP_DB_SQLITE_FROM_SOURCE=ON` 让配置期下一份**钉死哈希**的 amalgamation、编成静态且带
+PIC 的 `uvcpp_sqlite3` 链进去 —— 链系统的 `libsqlite3.so` 会多一条 `DT_NEEDED`，而 Ubuntu
+24.04 上系统的 `libsqlite3.a` 不是 PIC。所以预编译包里 `uvcpp_db_drivers()` 只打印
+`sqlite`；要 MySQL / PostgreSQL 就**从源码编**（默认三个后端都开，那时它们按各自那份
+客户端库正常链接）。两条理由的实测数据在 [`doc/db-guide.md`](doc/db-guide.md)。
 
 本版本提供 **6 个平台**（x64 与 arm64 × MinGW-w64 / MSVC / GCC）的预编译动态库，
 **每档都含发布版与调试版两份**（`v1.1.0` 起就是 6 份，此前这里只列了 3 个 x64 ——
@@ -400,12 +418,12 @@ nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.
 
 | 文件 | 说明 |
 |---|---|
-| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL / nghttp2 / ngtcp2 / nghttp3 以及 MinGW 运行时均已静态链接进去** |
+| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL / nghttp2 / ngtcp2 / nghttp3 / SQLite 以及 MinGW 运行时均已静态链接进去** |
 | `lib/libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
 | `bin/libuvcppd.dll` | **调试档**动态库（MSVC 那份叫 `uvcppd.dll`）。用法与前提见下面「调试档」一节 |
 | `lib/libuvcppd.dll.a` | 调试档导入库（`-luvcppd`）；MSVC 那份是 `uvcppd.lib` |
 | `bin/uvcppd.pdb` | **仅 MSVC**：调试档的符号文件，与 `uvcppd.dll` 同目录 |
-| `include/` | 公开头文件，含 `expand/`（内存池） |
+| `include/` | 公开头文件，含 `expand/`（内存池）与 `db/`（数据库 — 公开头里**不出现** `sqlite3.h`，三个后端都是 pimpl，所以用包里的 db 模块不需要装任何客户端库的头） |
 | `include/uvcpp/uvcpp_config.h` | **生成的**模块使能宏。每个公开头自己包含它，使用者**不必再传任何 `-D`**（见下） |
 | `bindings/csharp/` | C# 绑定：`UvcppNative.cs` + `UvcppNative.Protocols.cs`（321 条 `DllImport`）与 `examples/QuicEcho/`（一个能跑的回环例子）。放在包里是为了让 C# 侧"这两份声明 + 这份动态库"就能开工，不必再回仓里捞 |
 
@@ -812,7 +830,7 @@ int main() {
 - `cmake --install` 在当前树上是坏的：libuv 由 `FetchContent_MakeAvailable` 引入，
   它登记的 install 规则引用了一个从未构建的 `libuv.dll`，且它的规则排在本项目的
   规则之前 —— 一失败就整体中止，本项目的头文件与库一个都装不出来。
-  本次的 zip 绕过它、照 `CMakeLists.txt:2148-2395` 的规则手工组装，与之有两处
+  本次的 zip 绕过它、照 `CMakeLists.txt:2237-2484` 的规则手工组装，与之有两处
   刻意的差异：**libuv 的头放在 `include/` 顶层**（本库的公开头写的是
   `#include <uv.h>`，放进 `include/libuv/` 会找不到），以及**补上了 `zlib.h` /
   `zconf.h`**（`web/uvcpp_ws_parser.h` 在 `UVCPP_ZLIB_ENABLE=1` 时要 include 它，

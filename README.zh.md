@@ -309,6 +309,7 @@ cmake --build . --config Release --parallel
 | `UVCPP_ENABLE_CAPI` | `OFF` | 导出 **C ABI**（`src/capi/`，C99 头，给 C#/P-Invoke 以及别的 FFI 用），编进**同一个** `uvcpp` 库 —— 不多一个产物。需要 `UVCPP_BUILD_NET=ON` 与 `UVCPP_BUILD_WEB=ON`，缺一即强制关闭（C 面横跨 net/web/webapp）。**每一个发布配置都打开它。** 见 [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_ENABLE_DB` | `OFF` | 启用**数据库模块**（`src/db/`）：一个连接一个 `uvcpp_db_client`，底下是 SQLite / MySQL / PostgreSQL 三个后端，结果行按表的方式取。它是全仓**唯一一个必需第三方客户端库**（libsqlite3 / libmysqlclient / libpq）的模块 —— 三个都找不到就强制关闭。**每一个发布配置都打开它**，所以预编译包里带着这个模块。见 [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_ENABLE_DB_SQLITE` | `ON` | 编 db 模块的 SQLite 后端（要 `sqlite3.h` 与 libsqlite3）。找不到时**只强制关掉这一个**并出声，其余后端照编 |
+| `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | 这个 SQLite 后端改成用一份**钉死哈希的源码 amalgamation** 自己编（一个静态 `sqlite3.c`，强制 PIC），不走 `find_package(SQLite3)`。**六条发布腿走的就是它**：链系统的 `libsqlite3.so` 会多一条 `DT_NEEDED`、破坏发布包的"自包含"承诺，而 Ubuntu 24.04 上系统的 `libsqlite3.a` 不是 PIC（实测 `R_X86_64_PC32 … can not be used when making a shared object`）。配置期需要联网，或者自己把 zip 放到位 —— 两种做法都写在 [`doc/db-guide.md`](doc/db-guide.md) 里 |
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` 与 libmysqlclient）。装在非标准位置时：`-DCMAKE_PREFIX_PATH=…` 或 `-DUVCPP_DB_MYSQL_INCLUDE_DIR=… -DUVCPP_DB_MYSQL_LIBRARY=…` |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` 与 libpq）。装在非标准位置时：`-DCMAKE_PREFIX_PATH=…` 或 `-DPostgreSQL_INCLUDE_DIR=… -DPostgreSQL_LIBRARY=…` |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
@@ -833,7 +834,7 @@ libuvcpp/
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2299-2299`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2388-2388`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）

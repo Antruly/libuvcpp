@@ -65,7 +65,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 或链接错误**，只会在运行时读到错位的垃圾。
 
 关掉这个选项时：`src/ssl/` 会被从源文件与头文件列表里排除，**而且根本不安装 ssl 头**
-（`CMakeLists.txt:2271-2272`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
+（`CMakeLists.txt:2360-2361`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
 找不到文件。同理，`uvcpp_tcp_server::set_ssl_context()` 在关掉时**连声明都不存在**。
 
 运行时"关掉 TLS"不是宏，是 `set_ssl_context(nullptr)`。

@@ -74,6 +74,9 @@ cause — see [`RELEASE.md`](../RELEASE.md).
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | nghttp2 + OpenSSL + web | OpenSSL off, or web off |
 | `UVCPP_ENABLE_QUIC` | `OFF` | ngtcp2 + OpenSSL ≥ 3.2 **with the QUIC API** + net | OpenSSL off, net off, or OpenSSL without the QUIC API |
 | `UVCPP_ENABLE_WSDL` | `OFF` | pugixml + webapp | webapp off |
+| `UVCPP_ENABLE_CAPI` | `OFF` | net + web (nothing else — the C surface is a thin wrapper) | net off, or web off |
+| `UVCPP_ENABLE_DB` | `OFF` | any one of libsqlite3 / libmysqlclient / libpq | **all three** backend libraries missing |
+| `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | network, or the hash-pinned zip placed by hand | — |
 
 The **target** used for linking is chosen by testing `TARGET uv_a` / `TARGET uv`, not by assuming
 a name: libuv 1.36 built both unconditionally, but from 1.51 `uv` is controlled by libuv's own
@@ -113,6 +116,36 @@ pugixml — the WSDL module's XML backend, pulled in only when `UVCPP_ENABLE_WSD
 `src/wsdl/uvcpp_wsdl_pugixml.h`, which is a *private* header (not installed, and filtered out of
 the package by `package_release.py`). So it adds no DLL beside `uvcpp.dll`, and the package
 carries no pugixml headers — a consumer of the WSDL module never needs pugixml installed.
+
+`UVCPP_ENABLE_CAPI` is the one switch whose prerequisite is another **module** rather than a
+library: the exported surface spans net/web/webapp, so it is force-disabled without `net` and
+`web`. It adds no dependency of its own — the C layer is a thin wrapper over the C++ classes.
+
+The db module is the only one that **needs a third-party client library**, and it is three
+switches deep: `UVCPP_ENABLE_DB` plus `UVCPP_ENABLE_DB_SQLITE` / `_MYSQL` / `_PGSQL` (all ON by
+default). Each backend is force-disabled **on its own** with a warning when its library is
+missing, and only when **all three** are gone is the module itself turned off — so a machine
+with sqlite3 but no libpq still builds a working, one-backend-lighter module, and the configure
+log says which ones made it (`db: SQLite 后端开（3.54.0）`). As with every force-disable in this
+file, the cache keeps reading `ON`; the message to grep is `Including db module in build`.
+Unlike the other dependencies listed above, these client libraries are **not** absorbed into the
+library: all three are linked `PRIVATE`, which keeps the consumer's include path and link line
+clean, but `PRIVATE` on a **shared** library still writes the dependency into that library's own
+`DT_NEEDED` — a source build with the system client libraries gives you a `libuvcpp.so` that
+needs `libmysqlclient.so.21` / `libpq.so.5` at load time. That is why the release configurations
+turn both of them **explicitly** `OFF` and ship SQLite only, and it is also why the release
+workflow's `ldd` assertion names `sqlite3` as well as the two: the point is to make "a client
+library leaked into the package" a red line rather than something discovered on a user's machine.
+For the static libraries (`uvcpp_a` / `uvcpp_a_s`) the export set carries none of the three, so
+their consumers link the client library themselves — spelled out in [`db-guide.md`](db-guide.md).
+
+`UVCPP_DB_SQLITE_FROM_SOURCE` decides *where* the SQLite backend comes from: `find_package`
+(system) or a hash-pinned amalgamation compiled into a static `uvcpp_sqlite3` with explicit PIC.
+It needs network at configure time, and it does **not** silently fall back to the system library
+when the download or the hash check fails — the same discipline as
+`UVCPP_BUILD_LIBUV_FROM_SOURCE`, because a fallback that only shows up on a machine that happens
+to have the library is a difference you cannot see. Both the reason the release legs need it and
+the offline recipe are in [`db-guide.md`](db-guide.md).
 
 ### Library shape
 

@@ -40,6 +40,7 @@ cmake --build build-db -j
 |---|---|---|
 | `UVCPP_ENABLE_DB` | `OFF` | 主开关。关掉时 `src/db/` 整个不进构建，公开头的内容整段落在 `#if UVCPP_DB_ENABLE` 外面 |
 | `UVCPP_ENABLE_DB_SQLITE` | `ON` | 编 SQLite 后端（要 `sqlite3.h` + libsqlite3） |
+| `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | 上面那个 SQLite 后端改用**钉死哈希的源码 amalgamation**自己编，不走 `find_package`。**六条发布腿都是这个**（见下一节） |
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` + libmysqlclient） |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` + libpq） |
 
@@ -77,6 +78,57 @@ int main() {
 ```
 
 预编译包少哪个后端时，**这一行是第一个该看的地方**。
+
+### 预编译包里的 SQLite 是**从源码编的**：`UVCPP_DB_SQLITE_FROM_SOURCE`
+
+六条发布腿各传四个 `-D`：
+
+```
+-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF
+```
+
+也就是说 —— **预编译包里的 db 模块只有 SQLite 一个后端**（`uvcpp_db_drivers()`
+只会打印 `sqlite`）。这不是漏配，是两条实测理由把另两条路都堵死了：
+
+| 想链系统的那份 | 实测结果 |
+|---|---|
+| `libsqlite3.so` | 产物多一条 `DT_NEEDED`。发布腿有一条 `ldd` 断言在拦这个形状（原本的名单里还没有 `sqlite3` —— 已经补上，否则它会一条条放行） |
+| `libsqlite3.a` | Ubuntu 24.04 上那份**不是 PIC**：`gcc -shared -fPIC … /usr/lib/x86_64-linux-gnu/libsqlite3.a` 当场报 `relocation R_X86_64_PC32 against symbol 'sqlite3CtypeMap' can not be used when making a shared object; recompile with -fPIC` |
+
+MySQL / PostgreSQL 是**显式关**的，不是"找不到"：runner 上装着 `libpq-dev` 时
+`find_package` 会**静默**成功，发布包就悄悄多一条 `libpq.so.5` 的 `DT_NEEDED`。
+
+打开这个开关之后，配置期会做这几件事（都可以在本机复现）：
+
+```
+-- db: 下载 SQLite amalgamation 3540000（sqlite.org，钉死哈希）
+-- db: SQLite 后端开（3.54.0，源码 amalgamation，静态）
+```
+
+1. 从 `https://www.sqlite.org/2026/sqlite-amalgamation-3540000.zip` 下那份
+   **amalgamation**（一个 `sqlite3.c` + 一个 `sqlite3.h`，没有别的依赖），
+   `EXPECTED_HASH SHA3_256=7b670a62fdfbd672b75fef004cb703c8a3e87d3a5cc7d675b4a08337004a2d93`
+   ——这个值就是 sqlite.org 下载页上印在那一行旁边的那个，逐字对上。
+   `TLS_VERIFY ON`。zip 落在 `<build>/_deps/uvcpp-sqlite/`，下次配置**再核一遍哈希**
+   （那个文件就躺在构建目录里、谁都能改；只核一次等于把"上次下对了"当成"这次也对"）。
+2. 解出 `sqlite-amalgamation-3540000/sqlite3.c`，编成静态目标 `uvcpp_sqlite3`，
+   **显式 `POSITION_INDEPENDENT_CODE ON`** —— 不靠全局那个
+   `CMAKE_POSITION_INDEPENDENT_CODE`：这一份一定会进共享库，而使用者那棵树未必传了
+   全局开关，那时症状是链接期一句 `recompile with -fPIC`，离原因很远。
+3. 版本号从解出来的 `sqlite3.h` 里读（`SQLITE_VERSION`），不在 CMake 里再抄一遍。
+   所以上面那行 STATUS 里的 `3.54.0` 是**编进去的那个版本**，不是想象的。
+
+**这条路不调用 `find_package`。** 与 `UVCPP_BUILD_LIBUV_FROM_SOURCE` 同一条纪律：
+不猜机器上有什么。"优先源码、找不到再看系统"是不够的——runner 上装着
+`libsqlite3-dev` 时它会静默链上系统那份，而那种产物在开发机上照样跑得动。
+
+离线机器：把 `sqlite-amalgamation-3540000.zip` 自己放到
+`<build>/_deps/uvcpp-sqlite/` 下（哈希要对得上），或者直接
+`-DUVCPP_DB_SQLITE_FROM_SOURCE=OFF` 回到系统那份（本地开发用完全够）。
+
+**这条路只影响 SQLite 后端怎么来，不动公开面**：`uvcpp_db_client` 的方法、
+返回码、连接串格式一个字不变。
 
 ### 客户端库装在非标准位置
 
@@ -479,6 +531,17 @@ CI 上服务容器都起了还缺 URL，说明是配置写错了，所以 CI 里
 
 不设 `UVCPP_DB_TEST_REQUIRE` 时，本地没起 MySQL 也能得到一句诚实的
 `***Skipped`，而不是一条假绿。
+
+**CI 上这四条腿摆在哪**：Ubuntu 与 macOS 各一条 `db` 矩阵格、MSVC 一条、MinGW 那条腿
+（两次 configure 都开），四者都只跑 SQLite —— 那三个 runner 上没有数据库服务端，而
+Windows 上走的是 `UVCPP_DB_SQLITE_FROM_SOURCE`（MSYS2 若装了
+`mingw-w64-x86_64-sqlite3`，`find_library` 会挑中 `libsqlite3.dll.a`，dll 就多一个
+`sqlite3.dll` 依赖）。**远程后端另有一个 job**：Ubuntu 上单独的 `db-servers`，用两个
+`services:` 容器跑真 MySQL 8.0 与 PostgreSQL 16 —— `services:` 是 **job 级**的，塞进矩阵
+会把两个容器拖进全部十一格。那三格把两个远程后端**显式关掉**（不关也只是两条 `***Skipped`，
+买不到覆盖），`db-servers` 反过来把 SQLite 显式关掉：**每一边都有一条反向断言**，
+少了它，"开关被改坏了"是一条全绿的路。逐格的四道门禁与两个 service 容器的配置见
+[`ci-guide.md`](ci-guide.md) §5。
 
 ---
 

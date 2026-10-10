@@ -156,6 +156,11 @@ option(UVCPP_ENABLE_CAPI
 option(UVCPP_ENABLE_DB
   "Enable the database module (src/db/): one uvcpp_db_client per connection, over SQLite/MySQL/PostgreSQL" OFF)
 option(UVCPP_ENABLE_DB_SQLITE "Build the SQLite backend of the db module (needs libsqlite3)" ON)
+# 关掉 find_package，改成下载一份**钉死哈希**的 amalgamation 自己编成静态库。
+# 发布腿用的就是它 —— 理由（系统那份 .so 会多一条动态依赖、系统那份 .a 不是
+# PIC）写在本文件下面 SQLite 发现那一段里。
+option(UVCPP_DB_SQLITE_FROM_SOURCE
+  "Build the SQLite backend from a pinned source amalgamation (static) instead of the system libsqlite3" OFF)
 option(UVCPP_ENABLE_DB_MYSQL  "Build the MySQL backend of the db module (needs libmysqlclient)" ON)
 option(UVCPP_ENABLE_DB_PGSQL  "Build the PostgreSQL backend of the db module (needs libpq)" ON)
 
@@ -827,15 +832,99 @@ set(UVCPP_DB_LINK_LIBS "")
 if(UVCPP_ENABLE_DB)
   # ---- SQLite ----
   if(UVCPP_ENABLE_DB_SQLITE)
-    find_package(SQLite3 QUIET)
-    if(SQLite3_FOUND)
-      list(APPEND UVCPP_DB_LINK_LIBS SQLite::SQLite3)
-      message(STATUS "db: SQLite 后端开（${SQLite3_VERSION}）")
+    if(UVCPP_DB_SQLITE_FROM_SOURCE)
+      # 「自己下载一份源码来编」这条路是给**发布腿**用的，理由是可实测的两条 ——
+      # 系统那份 libsqlite3 两条路都走不通：
+      #   * 链 `libsqlite3.so` ⇒ 产物多一条 DT_NEEDED `libsqlite3.so.0`，正是
+      #     release.yml 那条 `ldd` 断言在拦的形状（"这几个在用户机器上不一定有"）；
+      #   * 链 `libsqlite3.a` ⇒ Ubuntu 24.04 上那份**不是 PIC 的**，塞进 .so 当场
+      #     `relocation R_X86_64_PC32 against symbol 'sqlite3CtypeMap' can not be
+      #     used when making a shared object`（本机实测，见 doc/db-guide.md）。
+      #
+      # 与 `UVCPP_BUILD_LIBUV_FROM_SOURCE` 同一条纪律：**不猜机器上有什么**，所以
+      # 这条路**不调用** find_package —— 只做"优先源码、找不到再看系统"是不够的：
+      # runner 上装着 libsqlite3-dev 时，发布腿会静默链上系统那份、悄悄多一条
+      # 动态依赖，而那种产物在开发机上照样跑得动（`libsqlite3.so.0` 几乎到处都有，
+      # 那条断言的名单原先**也没有** sqlite3 —— 两处都已按这条理由改掉）。
+      #
+      # 版本 / 年份目录 / SHA3-256 是同一件事的三个写法，换一个就得三个一起换；
+      # 哈希就是 sqlite.org 下载页上印在那一行旁边的那个（本机下载后逐字核对过）。
+      set(_uvcpp_sqlite_ver "3540000")
+      set(_uvcpp_sqlite_year "2026")
+      set(_uvcpp_sqlite_sha3
+          "7b670a62fdfbd672b75fef004cb703c8a3e87d3a5cc7d675b4a08337004a2d93")
+      set(_uvcpp_sqlite_dir "${CMAKE_BINARY_DIR}/_deps/uvcpp-sqlite")
+      set(_uvcpp_sqlite_zip
+          "${_uvcpp_sqlite_dir}/sqlite-amalgamation-${_uvcpp_sqlite_ver}.zip")
+      set(_uvcpp_sqlite_src
+          "${_uvcpp_sqlite_dir}/sqlite-amalgamation-${_uvcpp_sqlite_ver}")
+
+      if(EXISTS "${_uvcpp_sqlite_zip}")
+        # 缓存命中**也要**重新核一遍哈希：那个 zip 就躺在构建目录里、谁都能改，
+        # 只核一次等于把"上一次下载对了"当成"这一次也对"。
+        file(SHA3_256 "${_uvcpp_sqlite_zip}" _uvcpp_sqlite_got)
+        if(NOT _uvcpp_sqlite_got STREQUAL _uvcpp_sqlite_sha3)
+          message(FATAL_ERROR
+            "UVCPP_DB_SQLITE_FROM_SOURCE=ON 但缓存里的 ${_uvcpp_sqlite_zip} 哈希"
+            "对不上（期望 ${_uvcpp_sqlite_sha3}，实际 ${_uvcpp_sqlite_got}）。"
+            "删掉那个文件再配置一次。")
+        endif()
+      else()
+        file(MAKE_DIRECTORY "${_uvcpp_sqlite_dir}")
+        message(STATUS
+          "db: 下载 SQLite amalgamation ${_uvcpp_sqlite_ver}（sqlite.org，钉死哈希）")
+        file(DOWNLOAD
+          "https://www.sqlite.org/${_uvcpp_sqlite_year}/sqlite-amalgamation-${_uvcpp_sqlite_ver}.zip"
+          "${_uvcpp_sqlite_zip}"
+          EXPECTED_HASH SHA3_256=${_uvcpp_sqlite_sha3}
+          TLS_VERIFY ON
+          STATUS _uvcpp_sqlite_dl)
+        list(GET _uvcpp_sqlite_dl 0 _uvcpp_sqlite_rc)
+        if(NOT _uvcpp_sqlite_rc EQUAL 0)
+          list(GET _uvcpp_sqlite_dl 1 _uvcpp_sqlite_msg)
+          # 半截的包不能留在缓存里冒充"下过了" —— 下一次配置会把它当命中，
+          # 然后死在哈希那一句上，而不是死在这里。
+          file(REMOVE "${_uvcpp_sqlite_zip}")
+          message(FATAL_ERROR
+            "UVCPP_DB_SQLITE_FROM_SOURCE=ON 但下载失败：${_uvcpp_sqlite_msg}。"
+            "离线机器可以自己把 sqlite-amalgamation-${_uvcpp_sqlite_ver}.zip 放到 "
+            "${_uvcpp_sqlite_dir}/（哈希要对得上），或者用 "
+            "-DUVCPP_DB_SQLITE_FROM_SOURCE=OFF 回到系统那份 libsqlite3。")
+        endif()
+      endif()
+
+      if(NOT EXISTS "${_uvcpp_sqlite_src}/sqlite3.c")
+        file(ARCHIVE_EXTRACT INPUT "${_uvcpp_sqlite_zip}"
+             DESTINATION "${_uvcpp_sqlite_dir}")
+      endif()
+
+      add_library(uvcpp_sqlite3 STATIC "${_uvcpp_sqlite_src}/sqlite3.c")
+      # PIC 显式打开，**不靠**全局那个 `CMAKE_POSITION_INDEPENDENT_CODE`：这一份
+      # 一定会被链进共享库（`uvcpp` / `uvcpp_s`），而使用者那棵树未必传了全局开关
+      # —— 那时症状是链接期一句 "recompile with -fPIC"，离原因很远。
+      set_target_properties(uvcpp_sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      # 版本从 amalgamation 自己的 sqlite3.h 里读：别在这里再抄一遍（抄的那份
+      # 一定会漂，而它只出现在一行 STATUS 里，漂了也没人看得见）。
+      file(STRINGS "${_uvcpp_sqlite_src}/sqlite3.h" _uvcpp_sqlite_verline
+           REGEX "^#define SQLITE_VERSION +\"")
+      string(REGEX REPLACE "^#define SQLITE_VERSION +\"([^\"]+)\".*" "\\1"
+             _uvcpp_sqlite_verstr "${_uvcpp_sqlite_verline}")
+      list(APPEND UVCPP_DB_INCLUDE_DIRS "${_uvcpp_sqlite_src}")
+      list(APPEND UVCPP_DB_LINK_LIBS uvcpp_sqlite3)
+      message(STATUS
+        "db: SQLite 后端开（${_uvcpp_sqlite_verstr}，源码 amalgamation，静态）")
     else()
-      message(WARNING
-        "UVCPP_ENABLE_DB_SQLITE=ON 但找不到 libsqlite3（要 sqlite3.h 与 "
-        "libsqlite3）。已强制关闭这个后端 —— 其余后端照编。")
-      set(UVCPP_ENABLE_DB_SQLITE OFF)
+      find_package(SQLite3 QUIET)
+      if(SQLite3_FOUND)
+        list(APPEND UVCPP_DB_LINK_LIBS SQLite::SQLite3)
+        message(STATUS "db: SQLite 后端开（${SQLite3_VERSION}）")
+      else()
+        message(WARNING
+          "UVCPP_ENABLE_DB_SQLITE=ON 但找不到 libsqlite3（要 sqlite3.h 与 "
+          "libsqlite3）。已强制关闭这个后端 —— 其余后端照编。"
+          "想让它自己下载一份钉死的源码来编就加 -DUVCPP_DB_SQLITE_FROM_SOURCE=ON。")
+        set(UVCPP_ENABLE_DB_SQLITE OFF)
+      endif()
     endif()
   endif()
 
