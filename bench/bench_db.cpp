@@ -144,12 +144,14 @@ std::string ddl_create(kind k) {
 
 /// 占位符的写法**是方言差异**：MySQL / SQLite 是 `?`，PostgreSQL 是 `$1..$n`。
 /// 驱动**不替调用方换算** —— 这正是 `tests/functional/db_suite.h` 里那个
-/// `dialect::ph()` 存在的理由（那边是"方言唯一的差异"）。这里照抄同一条规矩；
-/// 第 1 次拿 `?` 打 PG 时它报的是 `syntax error at or near ","`。
+/// `dialect::ph()` 存在的理由。这里照抄同一条规矩；第 1 次拿 `?` 打 PG 时它报的
+/// 是 `syntax error at end of input`。
 ///
-/// （`src/db/uvcpp_db_params.h:22` 与 `doc/db-guide.md` 都写着"PG 侧本模块自己
-/// 转成 `$1..$n`、调用方不用管"，与实现对不上 —— 这一条是本次量具撞出来的，
-/// 如实报上去，没有在这里顺手改掉：改文档还是改实现是个要定的方向。）
+/// （这一处早先与 `src/db/uvcpp_db_params.h`、`doc/db-guide.md` §5 里那句"PG 侧
+/// 本模块自己转成 `$1..$n`"对不上 —— 是这支量具撞出来的。**已经收敛**：那两处
+/// 改成跟实现一致，`db_suite.h` 也加了 `test_placeholder_dialect()` 钉住
+/// "错的写法必须红"。另注：SQLite 把 `$1` 当**命名**参数收下，所以**光测 SQLite
+/// 看不到这个差异** —— 这也是为什么量具要在三个后端上各跑一遍。）
 std::string ph(kind k, int n) {
   return k == kind::postgres ? "$" + std::to_string(n) : std::string("?");
 }
