@@ -810,8 +810,16 @@ bool uvcpp_web_app::enqueue_inflight(
   //   因此都从**每请求**变成**每连接**（M1 那笔的回收槽换成了这个形状）。
   out_queue& q = s->inflight[id];
   const size_t cap = cfg_.max_pipelined_requests;
+  // **这道闸门只对 h1 成立。** 它守的是 HTTP/1.1 的流水线：同一个读缓冲里
+  // 可以排着一串请求，得有个上限兜住内存。h2 的并发上限是**协议内建**的
+  // `SETTINGS_MAX_CONCURRENT_STREAMS`（本库声明 100），对端自己会守规矩 ——
+  // 在这里再套一层默认 8，只会把合规的流打成 503 + 关连接。而 `connection:
+  // close` 在 h2 上还是个非法头（RFC 9113 §8.2.2），连接级的东西不该由一条
+  // 流来定。判据与 `finish()` 那处跳过排队闸门的写法同源：`stream_id() == 0`
+  // 即 h1。文档 `doc/webapp-guide.md` 早就这么写了，代码一直没跟上。
+  const bool h1 = (ctx->response().stream_id() == 0);
   // 0 = 不限（与超时、长度上限一处口径）。
-  const bool over = (cap != 0 && q.size() >= cap);
+  const bool over = (h1 && cap != 0 && q.size() >= cap);
   q.push_back(out_entry(ctx));
   // 这是**唯一**的入队点，所以记账就放在这里（出队那笔在 `context_finished()`）。
   // 计的是上下文条数而不是 map 键数：一条连接上可以同时挂好几条请求。
