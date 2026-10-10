@@ -13,6 +13,7 @@ sharp edge lives in the linked pages, not here.
 | fix or extend CI | [`doc/ci-guide.md`](doc/ci-guide.md) |
 | measure throughput on this machine | [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |
 | use the library, not develop it | [`README.md`](README.md) / [`README.zh.md`](README.zh.md) |
+| report a security problem, or read the conduct rules | [`SECURITY.md`](SECURITY.md) / [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
 
 ## Prerequisites
 
@@ -152,8 +153,13 @@ The single source of truth is `src/uvcpp/uvcpp_version.h`:
 
 ### Code style
 
-There is no `.clang-format`, no `.editorconfig`, no `.clang-tidy` and no git hooks — follow
-the surrounding code. The house style is 2-space indentation, `snake_case` for types and
+There is no `.clang-format` and no `.clang-tidy`, and no git hooks — follow the surrounding
+code. `.editorconfig` exists, but it deliberately covers only line endings and indent width.
+It does **not** set `charset`, and that omission is the interesting part: EditorConfig's
+`charset = utf-8` means UTF-8 with *no* BOM, so writing it would have editors strip the BOM
+from the 269 source files that carry one, while `utf-8-bom` would add one to the 132 that do
+not. Both directions are a whole-repository diff on save. The BOM rule below stays a rule a
+person applies, not one an editor applies behind their back. The house style is 2-space indentation, `snake_case` for types and
 functions with a `uvcpp_` prefix on public names, and dense explanatory comments in Chinese
 that record *why* a thing is the way it is (including what was tried and rejected). Comments
 are cheap; rediscovering a past failure is not.

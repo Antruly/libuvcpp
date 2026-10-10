@@ -1,0 +1,100 @@
+name: Bug report
+description: Something built or behaved incorrectly. Not for security problems.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A short, reproducible report gets fixed. Please fill in the version and
+        the platform — most bugs in this library are platform- or
+        configuration-specific, and without those two the report cannot be
+        reproduced here.
+
+        **Security problems must not be filed here.** Use the private advisory
+        form linked on the new-issue page.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "The release tag (e.g. v1.5.0), or the commit SHA if you are on a -dev tree."
+      placeholder: v1.5.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Which build is this? The names are the ones used by the release packages.
+      options:
+        - linux-x64
+        - linux-arm64
+        - msvc-x64
+        - msvc-arm64
+        - mingw-x64
+        - mingw-arm64
+        - other (built from source myself)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-obtained
+    attributes:
+      label: How did you get the library?
+      options:
+        - Prebuilt package from the GitHub Release
+        - Built from source with CMake
+        - A package manager (vcpkg, Conan, a distro package)
+    validations:
+      required: true
+
+  - type: textarea
+    id: switches
+    attributes:
+      label: Build switches
+      description: "If you built from source: the CMake options you configured with. Otherwise the package name you downloaded."
+      placeholder: |
+        -DUVCPP_BUILD_SHARED=ON -DUVCPP_ENABLE_OPENSSL=ON ...
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest program or sequence of steps that shows it. A minimal source file beats a description of one.
+      render: cpp
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, assertion text or backtrace
+      description: Paste the raw output. Do not summarise it — the exact text usually carries the answer.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: This is not a security vulnerability (those go to the private advisory form).
+          required: true
+        - label: I can reproduce this on the version and platform named above.
+          required: true

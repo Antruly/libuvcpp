@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Antruly/libuvcpp/security/advisories/new
+    about: Private channel, visible only to you and the maintainers. Never file a security problem as a public issue.
+  - name: Build, test and contribution guide
+    url: https://github.com/Antruly/libuvcpp/blob/master/CONTRIBUTING.md
+    about: Getting it building, the gate scripts, the conventions this repository follows, and what each exit code means.
+  - name: Questions about using the library
+    url: https://github.com/Antruly/libuvcpp/blob/master/README.md
+    about: Overview, the download table, and links to the per-module guides under doc/.

@@ -1,0 +1,32 @@
+# libuvcpp 的编辑器约定 —— 只管两类事：行尾、缩进。
+#
+# **charset 故意不写。** EditorConfig 里 `charset = utf-8` 的语义是「UTF-8，
+# 不带 BOM」，`utf-8-bom` 才是「带 BOM」。本仓两种文件都在：源码按约定带 BOM，
+# 文档与 `tests/tools/*.py` 不带 —— 实测（2026-10-11）`git ls-files` 的源码里
+# 269 个带 BOM、132 个不带（`bench/` 整个目录不带，`tests/functional` 93 个不带）。
+# 所以无论把 charset 写成哪一个值，编辑器都会在**保存时**把几百个文件的 BOM
+# 状态改写一遍；那不是一次改动，是一场全仓库假 diff —— 与 `.gitattributes`
+# 里记的 CRLF 噪声同一种形状，而它的真实危害是训练人去用 `git add -A`。
+# BOM 该由人按 CONTRIBUTING.md 的规矩决定（新源码文件带、文档不带），不交给编辑器。
+#
+# 同理不把 `insert_final_newline` / `trim_trailing_whitespace` 写成全局 true：
+# 实测有 72 个已跟踪文件结尾没有换行、17 个带尾随空格，写成 true 同样是一次
+# 全仓库改写。两者只在下面按语言各写一条真正有理由的。
+
+root = true
+
+[*]
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+# Python 是 4 空格（实测 `tests/tools/*.py` 里 4 空格缩进行 3806 行、8 空格 2201 行、
+# 12 空格 1042 行）。上面那条 `[*] indent_size = 2` 对它是错的 —— 编辑器会把新
+# 缩进写成 2 空格，而 Python 的缩进是语法。
+[*.py]
+indent_size = 4
+
+# Markdown 里行尾的两个空格是**硬换行**（相当于 `<br>`）。编辑器里那条「保存时
+# 去掉尾随空格」会把它们吃掉、把渲染结果改掉，所以这里显式关掉。
+[*.md]
+trim_trailing_whitespace = false

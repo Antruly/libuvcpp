@@ -1,0 +1,67 @@
+name: Feature request
+description: Propose a capability the library does not have yet.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first and the API second. A request that starts
+        from a real use case is much easier to design against than one that
+        starts from a proposed signature.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the library would this touch?
+      options:
+        - Event loop, handles and requests
+        - TCP / UDP
+        - SSL / TLS
+        - HTTP or WebSocket (web layer)
+        - The web app framework
+        - HTTP/2
+        - HTTP/3 / QUIC
+        - Databases
+        - C ABI
+        - JSON, reflection, WSDL / SOAP
+        - Build, packaging or CI
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does the library get in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would like to be able to write. A sketch of the call site is enough; a full design is not expected.
+      render: cpp
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What you do instead today, and why it is not good enough.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I checked the module guides under doc/ and the README, and this capability is genuinely absent.
+          required: true
