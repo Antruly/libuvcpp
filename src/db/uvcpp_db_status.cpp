@@ -26,6 +26,7 @@ const char* uvcpp_db_status_name(uvcpp_db_status status) {
     case uvcpp_db_status::UNSUPPORTED: return "unsupported";
     case uvcpp_db_status::MISUSE: return "misuse";
     case uvcpp_db_status::OUT_OF_MEMORY: return "out_of_memory";
+    case uvcpp_db_status::NO_CONNECTION: return "no_connection";
   }
   return "unknown";
 }

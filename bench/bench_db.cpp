@@ -21,6 +21,9 @@
  *      `uvcpp_db_async`（本库替开发者写掉的那层门面）—— 它和手写 `uvcpp_work`
  *      那条必须落在同一量级，否则门面就是把异步偷换回了同步。三条臂用**同一个
  *      client、同一条连接**，差别只在"在哪个线程上阻塞"。
+ *   3. **同一批活怎么分到多条连接上**（第 10 节）—— `uvcpp_db_client` 里那把递归
+ *      锁的价钱，以及连接池买到了多少。三条臂：共享 1 个 client / 各开 1 个 /
+ *      池子。池子那条是**复用**的证据：`created_total()` 停在 max 上。
  *
  * 怎么读
  * ------
@@ -64,6 +67,7 @@
 
 #include <db/uvcpp_db.h>
 #include <db/uvcpp_db_async.h>
+#include <db/uvcpp_db_pool.h>
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_timer.h>
 #include <req/uvcpp_work.h>
@@ -601,7 +605,7 @@ int main(int argc, char** argv) {
   // `uvcpp_db_client` 内部是一把递归锁：同一个 client 多线程用是安全的，但同一
   // 时刻只有一个在真的用连接。这一节量的是那句话的实际价格。
   {
-    section("10. 并发 —— 4 线程 × 500 次点查：共享 1 个 client vs 各开 1 个");
+    section("10. 并发 —— 4 线程 × 500 次点查：共享 1 个 client / 各开 1 个 / 池子");
     const int threads = 4;
     const int per_thread = 500;
     const int64_t nrows = rows;
@@ -616,6 +620,11 @@ int main(int argc, char** argv) {
       }
     };
 
+    // 三条臂各自的耗时留着，最后算比值 —— 判据要能一眼看出来，不靠人肉比较。
+    double dt_one_client = 0.0;
+    double dt_four_clients = 0.0;
+    double dt_pool = 0.0;
+
     {
       std::vector<std::thread> pool;
       const double t0 = now_us();
@@ -624,6 +633,7 @@ int main(int argc, char** argv) {
       }
       for (auto& th : pool) th.join();
       const double dt = now_us() - t0;
+      dt_one_client = dt;
       std::printf("  %-26s %12.1f ms %14.0f calls/s\n", "4 threads / 1 client",
                   dt / 1000.0, threads * per_thread * 1e6 / dt);
     }
@@ -651,14 +661,64 @@ int main(int argc, char** argv) {
         }
         for (auto& th : pool) th.join();
         const double dt = now_us() - t0;
+        dt_four_clients = dt;
         std::printf("  %-26s %12.1f ms %14.0f calls/s\n", "4 threads / 4 clients",
                     dt / 1000.0, threads * per_thread * 1e6 / dt);
       }
     }
+    // 第三条：池子。同一批活、同一个并发度，区别只在连接从哪来 —— 每条线程**每次
+    // 查询**借一条、用完立刻还。所以它买的就是上面「4 clients」那条的并行度，代价
+    // 是每次多一次借还；而它相对「4 clients」少的，是那 4 次 open（各 1.9~2.4 ms）。
+    {
+      uvcpp_db_pool pool;
+      const uvcpp_db_status ist = pool.init(url, threads, threads);
+      if (!uvcpp_db_ok(ist)) {
+        std::fprintf(stderr, "  池子起不来：%s\n", pool.last_error().c_str());
+      } else {
+        std::vector<int> failed(static_cast<size_t>(threads), 0);
+        std::vector<std::thread> workers;
+        const double t0 = now_us();
+        for (int i = 0; i < threads; ++i) {
+          workers.emplace_back([&pool, &psql, &failed, i, per_thread, nrows]() {
+            for (int k = 0; k < per_thread; ++k) {
+              const int64_t id = 1 + (k * 7919) % nrows;
+              uvcpp_db_table t;
+              if (!uvcpp_db_ok(pool.query(psql, {id}, &t))) ++failed[i];
+            }
+          });
+        }
+        for (auto& th : workers) th.join();
+        const double dt = now_us() - t0;
+        dt_pool = dt;
+        int bad = 0;
+        for (size_t i = 0; i < failed.size(); ++i) bad += failed[i];
+        std::printf(
+            "  %-26s %12.1f ms %14.0f calls/s   [created %llu / reused %llu / 借不到 %d 次]\n",
+            "4 threads / pool(4)", dt / 1000.0, threads * per_thread * 1e6 / dt,
+            static_cast<unsigned long long>(pool.created_total()),
+            static_cast<unsigned long long>(pool.reused_total()), bad);
+      }
+    }
+
+    if (dt_four_clients > 0.0 && dt_pool > 0.0) {
+      std::printf(
+          "  池子 / 各开一条 之比：%.2f×（判据：同量级，约 1×）   池子 / 共享一条 之比：%.2f×\n",
+          dt_pool / dt_four_clients, dt_pool / dt_one_client);
+    }
+
     std::printf(
-        "  读法  共享那条比「各开一条」慢多少，就是那把递归锁的实际价格 —— 也就是\n"
-        "        「连接池」这件事值不值得做的第一个数。反过来，「各开一条」快多少，\n"
-        "        是连接数换并行度的上限（服务端的 max_connections 是它的天花板）。\n");
+        "  读法  「共享 1 个 client」比「各开一条」慢多少，就是那把递归锁的实际价格\n"
+        "        —— 也就是「连接池」这件事值不值得做的第一个数。反过来，「各开一条」\n"
+        "        快多少，是连接数换并行度的上限（服务端的 max_connections 是它的\n"
+        "        天花板）。第三条是池子：它买的正是上面那条的并行度，成本只多一次借还\n"
+        "        （一把锁 + 一次出队，约 1 µs），所以**判据是它和「各开一条」同量级**\n"
+        "        （1× 附近，见上面那行比值）—— 掉了才说明借还那层把并行度吃回去了。\n"
+        "        注意它**不是**必然落在两者之间：进程内的 SQLite 上它甚至会略快于\n"
+        "        「各开一条」（那边唯一的开销就是线程调度，4 条连接的 open 是白付的）。\n"
+        "        方括号里的 created 是**复用的见证**：它等于 max（是 4，不是 2000），\n"
+        "        说明连接是借来借去，而不是每次新开；reused 则说明这两千次里有多少次\n"
+        "        是白捡的。这一节也顺带量到池子在**并发**上的代价：`query()` 的借还是\n"
+        "        一次一条，想更快就得自己 `acquire()` 拿在手里批量用（事务那种用法）。\n");
   }
 
   // ---- 收尾 ----

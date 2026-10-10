@@ -40,6 +40,7 @@
 #include <vector>
 
 #include <db/uvcpp_db.h>
+#include <db/uvcpp_db_pool.h>
 
 namespace uvcpp_db_test {
 
@@ -811,6 +812,78 @@ inline void test_factory_and_options(harness& h, const std::string& url) {
   h.check(log_lines > 0, "set_log 之后每次查询都留一行日志");
 }
 
+/// 连接池。**三家共用同一组断言** —— 池子是纯本库的东西（借还、复用、超时），
+/// 底下是什么数据库不该改变它的行为。任何"某个后端不一样"的断言出现在这里，
+/// 都说明池子漏了一层抽象。
+///
+/// 超时一律给小的（几十毫秒）：这一组要证的是"到点会醒"，不是"能等多久"。
+inline void test_pool(harness& h, const std::string& url) {
+  std::cout << "-- 连接池 --" << std::endl;
+
+  uvcpp::uvcpp_db_pool pool;
+  h.eq_status(pool.init(url, 1, 2), uvcpp_db_status::OK, "pool.init(min=1, max=2)");
+  h.check(pool.size() == 1, "init 之后立刻就有 1 条（不是懒开：open 的钱摊在 init 上）");
+  h.check(pool.idle() == 1 && pool.in_use() == 0, "那条在空闲表里，没有在外借");
+  h.check(pool.max_size() == 2 && pool.min_size() == 1, "上下限记的是传进去的数");
+  h.check(pool.created_total() == 1, "created_total == 1（只开了 min 条）");
+
+  // ---- 代借代还：一次调用借一条、回来之前还掉 ----
+  uvcpp_db_table t;
+  h.eq_status(pool.query("SELECT 1 AS one", &t), uvcpp_db_status::OK, "pool.query");
+  h.eq_int(static_cast<int64_t>(t.row_count()), 1, "结果集拿回来了");
+  h.check(pool.in_use() == 0, "代借代还之后没有留在外面的连接");
+  h.check(pool.reused_total() >= 1, "这一条是复用来的（reused_total 涨了）");
+  h.check(pool.created_total() == 1, "没有为这一次查询再开连接");
+
+  // ---- 借还：借到还之间这条连接**归调用方独占**，事务只能这么写 ----
+  uvcpp_db_client* c1 = pool.acquire(2000);
+  h.check(c1 != nullptr, "acquire 借到一条");
+  uvcpp_db_client* c2 = pool.acquire(2000);
+  h.check(c2 != nullptr && c2 != c1, "第二条 acquire 开了一条新的（不是把同一条借两次）");
+  h.check(pool.size() == 2 && pool.in_use() == 2, "两条都在外借");
+  h.check(pool.created_total() == 2, "created_total 涨到 2");
+
+  // 到上限了：第三条只能等 —— 给 60 ms，必须**醒过来**并交回 nullptr。
+  uvcpp_db_client* c3 = pool.acquire(60);
+  h.check(c3 == nullptr, "max 处再借：超时后拿到 nullptr（不是挂住）");
+  h.check(!pool.last_error().empty(), "借不出时 last_error() 说得出来为什么");
+  h.check(pool.size() == 2, "借不出不会把池子撑过 max");
+
+  // 事务钉在**同一条**借出的连接上。
+  h.eq_status(c1->begin(), uvcpp_db_status::OK, "借出的连接上 begin");
+  h.eq_status(c1->execute("CREATE TABLE IF NOT EXISTS uvcpp_db_pool_probe (v INTEGER)"),
+              uvcpp_db_status::OK, "借出的连接上建表");
+  h.eq_status(c1->rollback(), uvcpp_db_status::OK, "借出的连接上 rollback");
+
+  pool.release(c1);
+  pool.release(c2);
+  h.check(pool.in_use() == 0 && pool.idle() == 2, "还回去之后两条都回到空闲表");
+  h.eq_status(pool.ping(), uvcpp_db_status::OK, "还回去的连接还能用");
+
+  // ---- 重复 / 陌生指针都是 no-op，不是崩溃 ----
+  pool.release(c1);
+  h.check(pool.in_use() == 0, "重复 release 是 no-op");
+  pool.release(reinterpret_cast<uvcpp_db_client*>(&pool));
+  h.check(pool.size() == 2, "release 一个不属于本池的指针不会动池子");
+
+  // ---- 回收：min 是保底 ----
+  h.eq_int(static_cast<int64_t>(pool.close_idle()), 1, "close_idle 把空闲的收到 min");
+  h.check(pool.size() == 1 && pool.idle() == 1, "收到 min 就停手");
+  h.check(pool.created_total() == 2, "回收之后再借会复用那条，不会重开");
+
+  // ---- 关了之后借不出 ----
+  pool.close();
+  h.check(pool.acquire(10) == nullptr, "close 之后 acquire 拿不到");
+  h.eq_status(pool.query("SELECT 1", &t), uvcpp_db_status::MISUSE,
+              "close 之后再 query 报 MISUSE（是「没 init」，不是「连不上」）");
+
+  // ---- 上限/保底的夹取 ----
+  uvcpp::uvcpp_db_pool p2;
+  h.eq_status(p2.init(url, 5, 2), uvcpp_db_status::OK, "min > max 时夹到 max");
+  h.check(p2.size() == 2 && p2.max_size() == 2, "夹取之后确实只开了 2 条");
+  h.eq_status(p2.init(url, 1, 0), uvcpp_db_status::MISUSE, "max == 0 是 MISUSE");
+}
+
 /// 把上面所有组跑一遍。`url` 是已经打开好的那一个。
 inline int run_suite(const std::string& url, const dialect& d) {
   std::cout << "== 后端 " << d.name() << " ==" << std::endl;
@@ -852,6 +925,9 @@ inline int run_suite(const std::string& url, const dialect& d) {
   test_export(h, types);
 
   test_factory_and_options(h, url);
+
+  // 池子自己开自己的连接（`url` 现成的），与上面那个 client 互不干扰。
+  test_pool(h, url);
 
   // 金额那一列在三个后端上的**同一条**判据在 `test_ddl_insert_select()` 里，
   // 这里不再重复。这一段原本是"原生定点列 -> double"的专有断言，现在归到上面

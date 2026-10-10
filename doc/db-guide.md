@@ -3,10 +3,13 @@
 `src/db/` 是**库外的一层薄封装**：一个连接 = 一个 `uvcpp_db_client`，底下挂
 SQLite / MySQL / PostgreSQL 三个后端，SQL 由调用方写，结果按**表**取（列名 →
 值）。它不参与事件循环，也不是 ORM —— 没有模型、没有迁移、没有关系映射。
+（建在它上面、替你把 `uv_queue_work` 那段样板写掉的 `uvcpp_db_async` 与
+`uvcpp_db_pool` 才碰循环，见 [§3](#3-公开面)；**底座本身**不认识 `uvcpp_loop`。）
 
 > ## 一句话说清它是什么
 >
-> **同步的**、**一个 client 一个连接**、**不自动重连**、**返回码不抛异常**，
+> **同步的底座**（异步门面与连接池建在它上面）、**一个 client 一个连接**、
+> **不自动重连**、**返回码不抛异常**，
 > 把三个后端在"同一条 SQL 该得到同一个结果"这件事上钉到一套契约里，
 > 并把三家**真不一样**的地方如实写在这里，而不是假装它们一样。
 >
@@ -322,7 +325,102 @@ worker 手里的锁 —— 不会死锁，但会把循环卡住，正好抵消�
 
 ### 3.1 连接池
 
-还没做，见 [§11](#11-没做的如实列出)。
+`uvcpp_db_pool`（`#include <db/uvcpp_db_pool.h>`）是一组 `uvcpp_db_client`，按需借出、
+用完归还。它买的是**连接复用**（不再每次付 `open` 的 1.9~2.4 ms）与**多条连接**
+（上一段那把递归锁不再互相等）—— 正好补上异步门面补不了的那一半：异步买的是"循环
+不被卡住"，池子买的是"并发"。**单线程串行跑的场景它一分钱都省不下来**，还会多一层
+借还，那就别用，一个 `uvcpp_db_client` 加门面就够。
+
+量具 `bench/bench_db.cpp` 第 10 节，4 条线程 × 500 次点查：
+
+| 连接怎么来 | MySQL | PostgreSQL | SQLite |
+|---|---|---|---|
+| 4 条线程共享 1 个 client | 211.5 ms | 101.3 ms | 16.4 ms |
+| 4 条线程各开 1 个 client | 64.1 ms | 29.6 ms | 7.1 ms |
+| 4 条线程走池子（`max=4`） | **61.9 ms** | **32.8 ms** | **6.0 ms** |
+| 池子 / 各开一条 | 0.97× | 1.11× | 0.85× |
+
+判据就是最后一行的**同量级**（1× 附近）：池子买的正是"各开一条"那份并行度，多出来的
+只有一次借还（一把锁 + 一次出队）。同时打印的 `created_total()` 是**复用的见证** ——
+它停在 `max`（4）上而不是 2000，说明连接是借来借去，不是每次新开。
+
+```cpp
+#include <cstdio>
+
+#include <db/uvcpp_db.h>
+#include <db/uvcpp_db_pool.h>
+
+// 建池：min 条**当场**开好 —— 连不上在这里就报出来，不留到第一次查询
+int open_pool(uvcpp::uvcpp_db_pool* pool) {
+  if (!uvcpp::uvcpp_db_ok(pool->init("sqlite:///tmp/app.db", 2, 8))) {
+    std::fprintf(stderr, "%s\n", pool->last_error().c_str());
+    return 1;
+  }
+  return 0;
+}
+
+// ① 代借代还：单条语句用这个 —— 一次调用借一条、用完立刻还
+void count_users(uvcpp::uvcpp_db_pool* pool) {
+  uvcpp::uvcpp_db_table t;
+  if (!uvcpp::uvcpp_db_ok(pool->query("SELECT COUNT(*) AS n FROM users", &t))) {
+    std::fprintf(stderr, "%s\n", pool->last_error().c_str());
+    return;
+  }
+  for (const uvcpp::uvcpp_db_row& row : t.rows()) {
+    std::printf("%s\n", row["n"].to_text().c_str());
+  }
+}
+
+// ② 借还：借到还之间这条连接**归你独占** —— 事务只能这么写
+void transfer(uvcpp::uvcpp_db_pool* pool, int64_t from, int64_t to, int64_t amount) {
+  uvcpp::uvcpp_db_client* c = pool->acquire();  // 会阻塞（默认 5 s）
+  if (c == nullptr) return;                     // 借不到：原因在 pool->last_error() 里
+  c->begin();
+  c->execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", {amount, from});
+  c->execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", {amount, to});
+  c->commit();
+  pool->release(c);                             // 一定要还
+}
+```
+
+| 组 | 成员 |
+|---|---|
+| 起停 | `init(url, min=1, max=8)` / `close()` |
+| 借还 | `acquire()` / `acquire(timeout_ms)` / `release(c)` / `discard(c)` |
+| 代借代还 | `query(...)` / `execute(...)` / `insert(...)` / `ping()` |
+| 异步 | `query(loop, ...)` / `execute(loop, ...)` / `insert(loop, ...)`（回调形状与门面**完全一致**） |
+| 调参 | `set_acquire_timeout_ms`(5000) / `set_idle_timeout_ms`(60000) / `set_check_on_acquire`(false) / `set_timeout_ms` |
+| 观测 | `size` / `in_use` / `idle` / `max_size` / `min_size` / `created_total` / `reused_total` / `last_error` / `close_idle` |
+
+**异步池查询每次调用自己借还一条连接**，所以单条语句走它最省事；而**事务走不了异步的**
+—— 它要独占一条连接直到 `commit`，异步那套的借还在回调之前就结束了。事务只有
+`acquire()`/`release()` 这一条路，池子也因此**不提供** `begin()`。
+
+四条承重语义：
+
+* **`min` 条立刻开**，失败当场报 `OPEN_FAILED`（`open` 一次 1.9~2.4 ms，留到第一次
+  查询再开是把延迟藏起来，不是消掉）。`min` 默认 1。
+* **增长发生在 `acquire()` 的调用线程上**（`total < max` 就新开一条）。异步路径下那
+  就是池线程 —— 不卡循环；同步路径下就是调用方自己。
+* **坏连接不回池子**：借出去的那条一旦返回 `NOT_CONNECTED`，池子把它 `discard` 掉
+  （代借代还那组自己就是这么做的）。**不自动重试** —— 写操作重试就是重复写，与
+  [§7](#7-事务以及事务里不重试)同一条原则。默认也不在借出时 `ping`（`ping` 一次约
+  20 µs，每次借出都付会吃掉池子省下的一部分），要开用 `set_check_on_acquire(true)`。
+* **池子不回收自己**：不起后台线程、不挂定时器。缩容只在 `acquire()` / `release()`
+  顺手做（按 `idle_timeout_ms`），或者你显式 `close_idle()`；两者都**不会缩到 `min`
+  以下**。一个池子挂着 `min` 条空闲连接是设计，不是漏回收。
+
+三条禁令，都是这套接口形状的直接后果（详见 `src/db/uvcpp_db_pool.h` 的类注释）：
+
+1. **`acquire()` 是阻塞的，绝不能在事件循环线程上调。** 要在循环上取连接就用异步
+   接口（借还在池线程里做）。
+2. **代借代还的同步方法（`pool.query` 等）同样是阻塞的**，它们是给工作线程用的。
+3. **别在借出期间去投异步池查询。** 异步池查询自己要借一条连接：`max=1` 时那唯一一条
+   在你手里，池线程会一直等到借出超时。它**会**醒（超时是硬的，默认 5 s），但你会拿到
+   `NO_CONNECTION` 而不是结果。这条同时也是"libuv 默认池只有 4 条线程、
+   `uv_fs_*` / DNS 共用"那条代价的另一面：4 条池线程都去等连接，文件 IO 就一起饿着。
+   用例 `tests/functional/db_sqlite_pool_func.cpp` 钉的就是这个 —— 借走唯一一条、投
+   异步池查询、断言它在超时后拿到 `NO_CONNECTION` 而**不是挂住**。
 
 ---
 
@@ -335,6 +433,7 @@ worker 手里的锁 —— 不会死锁，但会把循环卡住，正好抵消�
 | `NO_DRIVER` | 这个后端的驱动没编进这份库 |
 | `OPEN_FAILED` | 主机/端口不可达、认证失败、库不存在、超时 |
 | `NOT_CONNECTED` | 没开就调，或执行途中连接掉了 |
+| `NO_CONNECTION` | **连接池借不出**：已到 `max` 且全在外借，等到借出超时也没等到 |
 | `PREPARE_FAILED` | 语句准备失败：**SQL 语法错、表/列不存在** |
 | `EXEC_FAILED` | 语句执行失败：约束冲突、类型不匹配、死锁重试用尽、权限不足 |
 | `BIND_FAILED` | 参数与占位符对不上（**个数**、或名字找不到） |
@@ -352,6 +451,11 @@ worker 手里的锁 —— 不会死锁，但会把循环卡住，正好抵消�
 驱动按错误号/`SQLSTATE` 分开（判据见 [§9](#9-跨后端共用套件抓到过的四处)）。
 为什么值得分：调用方的下一步动作不同 —— `PREPARE_FAILED` 改 SQL，`EXEC_FAILED`
 可能是重试（死锁、锁等待）或改数据。
+
+**`NO_CONNECTION` 与 `NOT_CONNECTED` 必须分开**：后者说的是"这条连接没打开"，拿它顶
+前者就是撒谎 —— 池子里每条连接都是好的，只是**没有空闲的**。两者的处置办法也完全
+不同：前者该重连，后者该扩容（或把借出的还回来）。这个码只有 `uvcpp_db_pool` 会产生
+（见 [§3.1](#31-连接池)）。
 
 ---
 
@@ -623,11 +727,13 @@ Windows 上走的是 `UVCPP_DB_SQLITE_FROM_SOURCE`（MSYS2 若装了
 
 ## 11. 没做的（如实列出）
 
-* **连接池。** 一个 client 一个连接。要并发就开多个 client，池子还没写
-  （见 [§3.1](#31-连接池)）。
 * **协程（`co_await` / C++20 那套）。** 异步门面给的是**回调 + future**两种形状
   （见 [§3](#3-公开面)），本库是 C++11 的，不引入协程。
 * **门面的背压。** 不限制在途条数 —— 一个连接本来就是串行的，排队等锁不会更快。
+  池子那边也一样：它在途条数的上界就是 `max`（借不出来就等），没有额外的闸。
+* **池子的后台回收。** 不起线程、不挂定时器（见 [§3.1](#31-连接池)）：不调
+  `acquire()` / `release()` / `close_idle()`，池子就不会缩。这是有意的取舍 ——
+  池子要保持事件循环无关，多一条线程去扫空闲表不值得。
 * **独立的数据库线程池。** 门面复用的是 libuv 那条默认池（4 条线程，与
   `uv_fs_*` / DNS 共用）。慢查询会把文件 IO 挤掉，要缓解只能调
   `uvcpp_set_threadpool_size()`。
