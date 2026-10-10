@@ -19,12 +19,46 @@
  *   2. **投递失败时回调不被调** —— 约定是「投递失败看返回值，回调不来」。
  *   3. **回调里 `delete` 门面是安全的** —— 之后在途的那一条不再回调，进程照常
  *      收尾。这是 `alive_token` 那套的见证，同时钉住「在途的活不写已释放的门面」。
+ *      「在途」是**量出来的**（`in_flight() == 2`），不是等出来的。
  *   4. **future 糖在无循环的 main 上可用**，且连投多条时全部兑现、账还干净。
  *   5. **失败走状态码，不走异常**：SQL 错时回调拿到非 0 状态 + 一句人读文案。
+ *
+ * ## 第 3 条：两版修法，和一个真实的死锁
+ *
+ * 它原本是「投两条 → 在第一条的回调里 `delete` 门面 → 断言第二条的回调不来」，
+ * 隐含假定**第一条的 after_work 先于第二条**。libuv 默认池有 4 条线程，两条谁先
+ * 跑完**不保证** —— 第二条先回来时，它的回调是在门面**还活着**的时候合法触发的，
+ * 断言于是失败，看着像门面漏了一条回调。这是 2026-10 CI 上 Linux 那格红的原因
+ * （本机 200 次才翻 1 次，CI 负载高先炸）。
+ *
+ * 第一版修法是「把顺序钉死」：让第二条的 work 相在**日志钩子**里停住，第一条的
+ * 回调等到它进了 work 相才删门面、再放行。**这个修法本身是错的，而且错得更狠** ——
+ *
+ *   `uvcpp_db.cpp` 的 `query()` 整段攥着 client 的互斥量（`lock_guard` 在函数体
+ *   最外层），而日志是在**锁里面**记的（`log_line`）。所以「在钩子里扣住」= 「替
+ *   整个 client 攥着锁」。同一个 client 上，第一条那条活的查询会去等这把锁 ——
+ *   于是第一条的 `after_work` 永远不来、第一条的回调永远不来、闸门永远不开、
+ *   第二条永远不放。**构造性的死锁**，不是偶发。
+ *
+ * 现场（本机 500 次循环跑到第 N 次挂住 73 分钟）：进程 7 条线程**全部**停在
+ * futex 上，最后三行输出是 `第一条回调来过一次，实得 0` / `第二条**真的跑过**`。
+ * 「第二条跑过」而「第一条没回来」正是上面那条链的指纹。给它加个 5 秒上界只是把
+ * 挂死换成假红，病根没动。
+ *
+ * 现在的做法是把确定性**换个地方取**：
+ *
+ *   - **「在途」用账量，不用时序**。`complete_job` 把 `in_flight` 归零放在**用户
+ *     回调之后**，两条 `complete_job` 又都在循环线程上串行 —— 所以在**任何一个**
+ *     回调里读 `in_flight()`，另一条的账必然还在（恒等于 2）。谁先到都成立。
+ *   - **钩子改成纯粹记账**（原子自增，一个字节都不阻塞）—— 于是没有锁可攥，死锁
+ *     的来路被拆掉。
+ *   - **「被抑制」在 `drain` 之后才断言**。`drain` 会把还挂在循环上的 `after_work`
+ *     拨干净；拨完仍是 0 条回调，配合「两条的 SQL 都真的跑过」（日志各记一笔 ⇒
+ *     work 相已完成 ⇒ libuv 保证交付 `after_work`），「被抑制」才和「压根没轮到」
+ *     分得开。
  */
 
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
@@ -219,48 +253,88 @@ int test_delete_facade_inside_callback() {
   const std::string path = temp_dir() + "/uvcpp-db-async-del.db";
   if (!uvcpp::uvcpp_db_ok(open_fresh(path, &db))) return 1;
 
-  // 见证第二条**真的跑过**：它的用户回调被抑制了，所以不能靠回调计数来证明
-  // 「不是压根没跑」。日志是在池线程上、查询前后各记一笔的。
-  std::atomic<bool> second_ran(false);
-  db.set_log([&second_ran](const std::string& line) {
-    if (line.find("B_MARK") != std::string::npos) second_ran.store(true);
+  // 两条活各留一个 SQL 标记，用来在**日志钩子**里见证「它的 work 相真的跑过」。
+  //
+  // **钩子里一个字节都不许阻塞**（见文件头那段死锁记录）：`query()` 整段攥着
+  // client 的互斥量，日志是在**锁里面**记的 —— 谁在钩子里停住，谁就替整个 client
+  // 攥着锁，同一个 client 上另一条活的查询会跟着停。所以这里只有原子自增。
+  std::atomic<int> a_sql(0);
+  std::atomic<int> b_sql(0);
+  db.set_log([&](const std::string& line) {
+    if (line.find("A_MARK") != std::string::npos) a_sql.fetch_add(1);
+    if (line.find("B_MARK") != std::string::npos) b_sql.fetch_add(1);
   });
 
   uvcpp::uvcpp_loop loop;
   uvcpp::uvcpp_db_async* a = new uvcpp::uvcpp_db_async(&db);
 
-  std::atomic<int> first_calls(0);
-  std::atomic<int> second_calls(0);
+  std::atomic<int> arrived(0);             // 累计到了几个用户回调
+  std::atomic<int> first_sql(-1);          // 先到的那个是第几条（0 = A，1 = B）
+  std::atomic<int> later_calls(0);         // 后到那条的回调（**期望恒为 0**）
+  std::atomic<size_t> live_at_delete(0);
+  std::atomic<bool> deleted(false);
 
-  const int rc1 = a->query(
-      &loop, "SELECT 'A_MARK' AS m", {},
-      [&](uvcpp::uvcpp_db_status, const uvcpp::uvcpp_db_table&) {
-        first_calls.fetch_add(1);
-        delete a;  // 门面自己没了 —— 之后在途的活不该再回来碰它
-        a = nullptr;
-      });
-  const int rc2 = a->query(
-      &loop, "SELECT 'B_MARK' AS m", {},
-      [&](uvcpp::uvcpp_db_status, const uvcpp::uvcpp_db_table&) {
-        second_calls.fetch_add(1);
-      });
+  // 两条共用同一个回调体：**先到的那个**负责删门面，后到的那个只记账。谁先到不由
+  // libuv 保证（上一版正是把它当成保证了才红），所以这里两边对称。
+  auto on_done = [&](int idx) {
+    if (arrived.fetch_add(1) != 0) {
+      later_calls.fetch_add(1);  // 门面已经在先到那个回调里没了，这里**不该**被走到
+      return;
+    }
+    first_sql.store(idx);
+
+    // **删门面那一刻「另一条确实在途」是量出来的，不是等出来的。** `complete_job`
+    // 把 `in_flight` 归零放在**用户回调之后**（`uvcpp_db_async.cpp` 的
+    // `release_slot`），两条 `complete_job` 又都在循环线程上串行 —— 所以在任何一个
+    // 回调里读，另一条的账必然还在，恒等于 2。这条判据比上一版「等它进 work 相」
+    // 结实：那个等法不但要靠时序，还会把它自己等死。
+    live_at_delete.store(a->in_flight());
+
+    delete a;  // 门面自己没了 —— 之后在途的活不该再回来碰它
+    a = nullptr;
+    deleted.store(true);
+  };
+
+  const int rc1 = a->query(&loop, "SELECT 'A_MARK' AS m", {},
+                           [&](uvcpp::uvcpp_db_status,
+                               const uvcpp::uvcpp_db_table&) { on_done(0); });
+  const int rc2 = a->query(&loop, "SELECT 'B_MARK' AS m", {},
+                           [&](uvcpp::uvcpp_db_status,
+                               const uvcpp::uvcpp_db_table&) { on_done(1); });
   check(rc1 == 0 && rc2 == 0, "两条都投递成功");
 
-  // 第二条的回调**不会**来（门面已经在第一条的回调里没了），所以只能靠看门狗
-  // 收场。600 ms 对两条 SQLite 查询是绰绰有余的。
+  // 后到那条的用户回调**不会**来（门面已经在先到那条的回调里没了），所以没有事件
+  // 能停这条循环，只能靠看门狗收场 —— 600 ms 对两条毫秒级的 SQLite 查询绰绰有余。
+  // 看门狗只负责停，不负责判（它一停，下面 `drain` 还是会把排队的 after_work 拨完）。
   uvcpp::uvcpp_timer watchdog(&loop);
   watchdog.start([&loop](uvcpp::uvcpp_timer*) { loop.stop(); }, 600, 0);
   loop.run(UV_RUN_DEFAULT);
 
-  check(first_calls.load() == 1, "第一条回调来过一次，实得 " +
-                                     std::to_string(first_calls.load()));
-  check(second_ran.load(), "第二条**真的跑过**（日志里有它的 SQL）");
-  check(second_calls.load() == 0,
-        "门面没了之后，第二条的回调不再来，实得 " +
-            std::to_string(second_calls.load()));
-
+  // **`drain` 是判据的一部分，不是收尾礼节。** 它把还挂在循环上的 `after_work`
+  // 拨干净（libuv 在 `uv_run` 返回前清 stop_flag，所以第一轮只是清标志、第二轮起
+  // 跑真身）。只有拨过之后回调计数还是 0，「被抑制」才和「循环提前停了、压根没轮到
+  // 它」分得开 —— 而下面「两条的 SQL 都跑过」那条判据证明两条 work 相都完成了，
+  // libuv 对已完成的 work 保证交付 after_work，于是「没轮到」被排除。
   watchdog.stop();
   drain_loop(&loop);
+
+  check(arrived.load() == 1,
+        "总共只有一个用户回调到过（先到那个），实得 " +
+            std::to_string(arrived.load()));
+  check(deleted.load(),
+        "先到的那个回调里门面已经删掉了（先到的是第 " +
+            std::to_string(first_sql.load() + 1) + " 条投出去的）");
+  check(live_at_delete.load() == 2,
+        "删门面那一刻，另一条确实在途：in_flight 实得 " +
+            std::to_string(live_at_delete.load()) + "，应为 2");
+  check(a_sql.load() >= 1 && b_sql.load() >= 1,
+        "两条的 SQL 都真的跑过（日志里各记到一笔：" +
+            std::to_string(a_sql.load()) + " / " +
+            std::to_string(b_sql.load()) + "）");
+  check(later_calls.load() == 0,
+        "门面没了之后，后到那条的回调不再来，实得 " +
+            std::to_string(later_calls.load()));
+
   db.set_log(nullptr);
   db.close();
   std::remove(path.c_str());

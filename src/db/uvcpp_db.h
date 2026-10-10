@@ -71,6 +71,18 @@ class UVCPP_API uvcpp_db_client {
  public:
   /// 日志回调：每次 query/execute 之后调一次，内容是 SQL、参数个数、行数/影响
   /// 行数、耗时。开着它跑基准会失真，但它比事后猜「为什么慢」便宜。
+  ///
+  /// **线程与锁（写这一条是因为踩过）**：它在**发起这次查询的那条线程**上被调
+  /// （不是循环线程 —— 异步门面下那就是池线程），而且调用时 client 的互斥量
+  /// **还在手上**：日志是 `query()` 体内记的，锁罩着整个函数体。
+  ///
+  /// 于是钩子里有两件事不能做：
+  ///
+  ///   1. **别阻塞。** 钩子在等 = 这个 client 的锁在等 —— 同一个 client 上别的
+  ///      线程的查询会**全部**跟着停住。异步门面下这足以凑出死锁（本仓
+  ///      `db_sqlite_async_func.cpp` 第 3 条用例上一版就是这么挂死的）。
+  ///   2. **别在钩子里改用别的线程再用这个 client 并等它回来** —— 同上，锁在
+  ///      你手上。同一条线程上递归再用是允许的（那是递归锁）。
   using log_callback = std::function<void(const std::string&)>;
 
   uvcpp_db_client();
@@ -155,6 +167,8 @@ class UVCPP_API uvcpp_db_client {
   /// MySQL 是读写超时，PG 是 `statement_timeout`）。
   void set_timeout_ms(int timeout_ms);
   int timeout_ms() const;
+  /// 装/卸日志回调（`nullptr` 或空 `function` 即关掉）。语义、线程与锁的约束
+  /// 见上面 `log_callback` 的注释 —— 一句话：**钩子里别阻塞**。
   void set_log(log_callback callback);
 
  private:
