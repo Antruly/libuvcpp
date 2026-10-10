@@ -37,3 +37,17 @@ if(UVCPP_ENABLE_QUIC)
 else()
   message(STATUS "bench: UVCPP_ENABLE_QUIC=OFF，跳过 QUIC 吞吐量具")
 endif()
+
+# 数据库量具。同样**不挂在 webapp 下**：db 模块自己就是一层（不依赖 net/web），
+# 它量的是「同步调用把事件循环卡多久」—— 这一条只有把 webapp 关掉也照样量得出来，
+# 才有意义。要一个真服务端才能跑，参数是连接串，见文件头。
+if(UVCPP_ENABLE_DB)
+  add_executable(uvcpp_bench_db bench_db.cpp)
+  target_include_directories(uvcpp_bench_db PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(uvcpp_bench_db PRIVATE ${UVCPP_LIB_TARGET} ${LIBUV_LIB})
+  if(WIN32)
+    target_link_libraries(uvcpp_bench_db PRIVATE ws2_32)
+  endif()
+else()
+  message(STATUS "bench: UVCPP_ENABLE_DB=OFF，跳过数据库量具")
+endif()
