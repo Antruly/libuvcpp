@@ -17,7 +17,23 @@
  *   3. **多线程借还不会把池子撑过 `max`**，而且是**复用**（`created_total()` 停在
  *      `max` 上，不随调用次数涨）。
  *   4. **在途的活遇到池子先走一步**：投出去之后立刻 `delete` 池子，进程不能崩，
- *      回调也不能被调（存活凭证那套的见证）。
+ *      回调也不能被调（存活凭证那套的见证）。**这一条同时钉着一处平台相关的
+ *      回归，别删**：见下面「第 4 节为什么值钱」。
+ *
+ * ## 第 4 节为什么值钱
+ *
+ * 它看着和第 3 节重复（"多个线程一起借还"），其实是**唯一**能发现下面这个 bug
+ * 的用例：`uvcpp_db_pool` 的析构要"等 work 相归零"，而那段等待一度写在
+ * `~impl()` 里，`impl_` 又是个 `std::unique_ptr` —— 两个标准库的析构顺序**正好
+ * 相反**（libc++ 先把成员指针置空再调 deleter，libstdc++ 反过来）。于是那段等待
+ * 在 Linux 上保护得严严实实，在 macOS 上等的却是"`impl_` 已经空了"的那扇窗，
+ * 工作线程撞在 `impl_->mu_` 上直接 SEGV。
+ *
+ * 关键在于：**这个 bug 在 Linux 上本地永远跑不出来** —— libstdc++ 恰好掩盖了它，
+ * 而且没有任何内存错误可供 ASan / valgrind / TSan 抓（它就是"时序对了"，不是
+ * 数据竞争）。当年为了定位它，本机把第 4 节在 `-O0`/`-O3` 下各跑了四百多遍、外加
+ * valgrind 与 TSan，全绿。所以这条用例是**跨标准库**的守卫：只有 macOS 那条腿
+ * （libc++）真的会红。删了它，这个 bug 会无声无息地回来。
  *
  * ## 为什么文件名带 `db_sqlite`
  *
@@ -29,23 +45,12 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
 #include <vector>
-
-// **临时诊断**（见下面 `install_crash_trace`）：macOS 上第 4 节必崩、本机怎么跑
-// 都不崩，拿一版带调用栈的崩溃报告回来定位。定位完这几行连同 `mark()` 一起拆掉。
-#if defined(__APPLE__) || defined(__linux__)
-#include <execinfo.h>
-#include <pthread.h>
-#include <signal.h>
-#include <unistd.h>
-#endif
 
 #include <db/uvcpp_db.h>
 #include <db/uvcpp_db_pool.h>
@@ -67,76 +72,6 @@ void check(bool cond, const std::string& what) {
     std::cout << "  [ ok ] " << what << std::endl;
   }
 }
-
-/// **临时诊断**：把「走到哪一行了」显式打出来，且**每次都在标准输出上**。
-/// CI 那条注解只截标准输出那一块，打到别处等于没打。
-void mark(const std::string& what) {
-  std::cout << "  .... " << what << std::endl;
-}
-
-#if defined(__APPLE__) || defined(__linux__)
-
-/// **临时诊断**：当前线程的 id 打出来 —— "崩在主线程（循环线程）还是 libuv 池
-/// 线程"是这一趟最要紧的一条信息。两个平台上 `pthread_t` **不是同一种类型**
-/// （macOS 是指针、Linux 是整数），所以转换方式必须分开写：上一趟就是拿
-/// `static_cast` 一条路走到底，在 macOS 上编不过。
-uintptr_t thread_bits() {
-#if defined(__APPLE__)
-  return reinterpret_cast<uintptr_t>(::pthread_self());
-#else
-  return static_cast<uintptr_t>(::pthread_self());
-#endif
-}
-
-/// **临时诊断**：SEGV / BUS / ABRT 的处理器。要回答三个问题 ——
-/// 哪个信号、出错地址是多少、**崩在哪条线程的哪一帧**。
-/// 直接 `write()` 到 fd 1：`std::cout` 的缓冲区在崩溃时救不回来，而 `write` 是
-/// 异步信号安全的（`backtrace_symbols_fd` 严格说不安全，但它是这里唯一能给出
-/// 符号名的东西 —— 诊断用，值这个风险）。
-void crash_trace(int sig, siginfo_t* info, void* /*uctx*/) {
-  char buf[256];
-  // 不查 `strsignal`：macOS 的头里它挂在更严的特性开关底下，编不过比没有更糟。
-  const int n = std::snprintf(
-      buf, sizeof(buf),
-      "\n===== 崩溃：信号 %d，地址 %p，si_code %d，线程 0x%lx =====\n", sig,
-      info != nullptr ? info->si_addr : nullptr,
-      info != nullptr ? info->si_code : 0,
-      static_cast<unsigned long>(thread_bits()));
-  if (n > 0) {
-    const ssize_t w = ::write(STDOUT_FILENO, buf, static_cast<size_t>(n));
-    (void)w;
-  }
-
-  void* frames[64];
-  const int got = ::backtrace(frames, 64);
-  ::backtrace_symbols_fd(frames, got, STDOUT_FILENO);
-  const char* tail = "===== 调用栈结束 =====\n";
-  const ssize_t w2 = ::write(STDOUT_FILENO, tail, std::strlen(tail));
-  (void)w2;
-
-  ::signal(sig, SIG_DFL);
-  ::raise(sig);
-}
-
-void install_crash_trace() {
-  struct sigaction sa;
-  std::memset(&sa, 0, sizeof(sa));
-  sa.sa_sigaction = crash_trace;
-  sa.sa_flags = SA_SIGINFO;
-  // **不加 `::`**：macOS 的 <signal.h> 里 `sigemptyset` 是函数式宏，带 `::`
-  // 前缀宏不展开、又没有同名函数，直接编不过（上一趟就是这么撞上的第二条）。
-  sigemptyset(&sa.sa_mask);
-  const int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL};
-  for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); ++i) {
-    sigaction(sigs[i], &sa, nullptr);
-  }
-}
-
-#else
-
-void install_crash_trace() {}
-
-#endif  // __APPLE__ || __linux__
 
 std::string temp_dir() {
   const char* keys[] = {"TMPDIR", "TEMP", "TMP"};
@@ -369,44 +304,38 @@ int test_pool_destroyed_with_job_in_flight() {
                                loop.stop();
                              });
   check(rc == 0, "投出去了");
-  mark("投出去之后池子：size=" + std::to_string(pool->size()) +
-       " in_use=" + std::to_string(pool->in_use()) +
-       " idle=" + std::to_string(pool->idle()) +
-       " created=" + std::to_string(pool->created_total()));
 
   // 池子当场没：析构会等 work 相收完（这一条就是那段等待的见证 —— 不等的话
   // 工作线程会踩在已经释放的连接上，进程在这里就崩了，不可能走到下面）。
-  mark("① delete pool 之前");
+  //
+  // **这一行是跨标准库的判据，不是随手写的一句 `delete`。** 池线程此刻正按设计
+  // 在 `run_pool_job` 里回头调 `pool->acquire()`，而 `pool->impl_` 是个
+  // `std::unique_ptr`：那段"等 work 相归零"必须在 `impl_` 被销毁**之前**跑完。
+  // libc++（macOS）先置空成员指针再调 deleter，libstdc++（Linux）反过来 —— 所以
+  // 放错地方只有 macOS 会红，本机怎么跑都是绿的（见文件头「第 4 节为什么值钱」）。
   delete pool;
-  mark("② delete pool 回来了");
 
   uvcpp::uvcpp_timer watchdog(&loop);
-  mark("③ 看门狗建好了");
   watchdog.start(
       [&](uvcpp::uvcpp_timer*) {
         watchdog_fired.store(true);
         loop.stop();
       },
       800, 0);
-  mark("④ 看门狗起来了，进循环");
   loop.run(UV_RUN_DEFAULT);
-  mark("⑤ 循环回来了");
 
   check(watchdog_fired.load(), "池子没了之后没有任何东西会停这条循环（回调被抑制）");
   check(calls.load() == 0, "池子没了 ⇒ 回调不被调（存活凭证那套），实得 " +
                                std::to_string(calls.load()));
 
   watchdog.stop();
-  mark("⑥ 看门狗停了，开始排空");
   uvcpp_test::drain(&loop);
-  mark("⑦ 这一节走到了头");
   return 0;
 }
 
 }  // namespace
 
 int main() {
-  install_crash_trace();  // **临时诊断**，定位完拆掉
   g_path = temp_dir() + "/uvcpp-db-pool.db";
   g_url = "sqlite://" + g_path;
 

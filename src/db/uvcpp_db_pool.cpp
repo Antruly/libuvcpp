@@ -18,7 +18,8 @@
  * 开连接（1.9~2.4 ms）**在锁外**做：先占一个名额（`opening_`）再解锁去开，开完
  * 回来填表。名额**先占后开**，所以两条线程同时借也开不出超过 `max` 条。
  *
- * 析构那一段的顺序是承重的，见 `~impl()` 的注释。
+ * 析构那一段的顺序是承重的，且**分在 `~uvcpp_db_pool()` 与 `~impl()` 两处** ——
+ * 「等 work 相归零」必须在 `impl_` 还活着的时候做，见那两个析构函数的注释。
  */
 
 #include "db/uvcpp_db_pool.h"
@@ -206,15 +207,22 @@ struct uvcpp_db_pool::impl {
   std::shared_ptr<char> alive_ = std::make_shared<char>(0);
   std::shared_ptr<pool_counters> counters_ = std::make_shared<pool_counters>();
 
-  ~impl() {
-    // 顺序承重，四步都不能换：
-    // 1. 断回调 —— 之后跑完的活不再调用户闭包；
-    // 2. 置 closed_ 并叫醒在等的 acquire —— 否则下面要等到各自的借出超时
-    //    （最长 5 s 一条）；
-    // 3. **等 work 相归零**：还在池线程上的活可能正捏着一条连接，池子不能先拆。
-    //    回调相**不等** —— 那只在调用方自己的循环上，可能永远不来，等它就是死等
-    //    （那也正是 job 在 work 相结束时把 `pool` 置空的原因）；
-    // 4. 最后才释放连接。
+  /// 收尾第一段：断回调、叫醒在等的 `acquire`、**等 work 相归零**。
+  ///
+  /// **调用点是承重的：必须由 `~uvcpp_db_pool` 在 `impl_` 还活着的时候调，
+  /// 不能放回 `~impl()` 里。** 理由见 `uvcpp_db_pool::~uvcpp_db_pool`
+  /// 那段注释（`std::unique_ptr` 的析构顺序两个标准库正好相反，放错地方
+  /// macOS 上必崩）。这里三步顺序也不能换：
+  ///
+  /// 1. 断回调 —— 之后跑完的活不再调用户闭包；
+  /// 2. 置 `closed_` 并叫醒在等的 `acquire` —— 否则要等到各自的借出超时
+  ///    （最长 5 s 一条）；
+  /// 3. **等 work 相归零**：还在池线程上的活可能正捏着一条连接，池子不能先拆。
+  ///    回调相**不等** —— 那只在调用方自己的循环上，可能永远不来，等它就是死等
+  ///    （那也正是 job 在 work 相结束时把 `pool` 置空的原因）。
+  ///
+  /// 返回之后 `closed_` 为真且 work 相为 0，此后不会再有工作线程碰到本对象。
+  void wind_down() {
     alive_.reset();
     {
       std::lock_guard<std::mutex> lk(mu_);
@@ -227,7 +235,16 @@ struct uvcpp_db_pool::impl {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
+  }
 
+  /// 收尾第二段：把连接全放掉（在借的也一起 —— 那些指针当场变成野指针，
+  /// 头文件里写明了）。走到这里 work 相已经归零（`wind_down` 的账），
+  /// 不会再有人经 `p->acquire()` 那一串摸进来。
+  ///
+  /// **这里不做那段等待**：`~impl()` 是 `impl_` 那个 `unique_ptr` 的 deleter，
+  /// 在 libc++（macOS）上它被调用的时刻成员指针**已经**是 nullptr 了 —— 详见
+  /// `uvcpp_db_pool::~uvcpp_db_pool`。
+  ~impl() {
     std::lock_guard<std::mutex> lk(mu_);
     idle_.clear();
     owned_.clear();
@@ -463,7 +480,36 @@ struct uvcpp_db_pool::impl {
 
 uvcpp_db_pool::uvcpp_db_pool() : impl_(new impl()) { impl_->owner_ = this; }
 
-uvcpp_db_pool::~uvcpp_db_pool() = default;
+uvcpp_db_pool::~uvcpp_db_pool() {
+  // **顺序承重：这句必须在 `impl_` 这个成员被销毁之前跑。**
+  //
+  // 在途的活（池线程上的 `run_pool_job`）会经**公开对象指针**回头调
+  // `p->acquire()` / `p->release()` —— 那都是 `impl_->…`。而 `impl_` 是个
+  // `std::unique_ptr`，两个标准库的析构顺序**正好相反**：
+  //
+  //   libstdc++（Linux）：先 `get_deleter()(ptr)`（跑 `~impl`），**之后**才置空；
+  //   libc++（macOS）   ：`~unique_ptr(){ reset(); }`，而 `reset()` 是
+  //                       **先把成员指针置成 nullptr，再调 deleter**。
+  //
+  // 于是只要那段「等 work 相归零」留在 `~impl()` 里，macOS 上等的就是
+  // 「`impl_` 已经空了」的那扇窗：工作线程撞在 `impl_->mu_` 上直接 SEGV。
+  // 现场指纹是**出错地址 `0x18`**（`mu_` 在 `impl` 里偏移 8，glibc 的
+  // `pthread_mutex_lock` 头一件事是读 `pthread_mutex_t::__kind`，那又在
+  // 互斥量内偏移 16 —— 8 + 16 = 0x18），栈顶是
+  // `pthread_mutex_lock` ← `uvcpp_db_pool::acquire()` ← `callback_work`。
+  // Linux 上永远看不见 —— libstdc++ 恰好把指针留到 deleter 返回之后；MSVC 也
+  // 不置空。
+  //
+  // **这个 bug 在本机（Linux）也能验，办法是把 libc++ 的时序搬过来**：把
+  // `uvcpp_db_pool::~uvcpp_db_pool` 临时代码写成
+  // `impl* raw = impl_.release(); delete raw;`（等价于 libc++ 的"先置空再跑
+  // deleter"），出事那版会在第 4 节那条用例上稳定 SEGV 在 0x18；把 drain 提到
+  // 析构体里（就是现在这样）则 5/5 绿。改这种顺序时值得照这个法子先复现一遍。
+  //
+  // 放到析构体里（成员析构**之前**）就够：`wind_down()` 返回时 work 相已经归零，
+  // 此后没有任何工作线程还会碰这个对象，`impl_` 怎么销毁都安全。
+  impl_->wind_down();
+}
 
 uvcpp_db_status uvcpp_db_pool::init(const std::string& url, size_t min, size_t max) {
   if (max == 0) {
