@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.5.2--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.5.3--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.5.2-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.5.3-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -634,7 +634,7 @@ libuvcpp/
 
 ## 变更日志
 
-当前源码树是 **1.5.2-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
+当前源码树是 **1.5.3-dev** —— 即 `UVCPP_VERSION_STRING`（`src/uvcpp/uvcpp_version.h`）
 报告的那个串。本仓打过 `v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`
 六个 tag。下面是 `1.1.x`、`1.2.x` 与 `1.3.x` 这三条开发线一路到 `v1.4.0` 落地的全部
 改动，外加 `1.4.x` 这条线（收进 `v1.5.0`）与 `v1.5.0` 之后新增的东西，按主题分组，括号里是
@@ -1289,7 +1289,8 @@ libuvcpp/
   `_uvcpp_literal01(...)` 抄（第一版按名字猜，把 `UVCPP_BUILD_EXPAND` 写成了
   `UVCPP_WSDL_ENABLE`，拿真生成头实测时当场红了一条）；mingw 与 linux 四条腿**两份树都
   量**（发布档与调试档是两次独立 configure，漏传只让其中一份缺功能）（`1.5.0`）
-- **1.5.2 起发布包连 WSDL/SOAP 一起带上，"全功能"因此是那十一个宏**。在那之前
+- **1.5.2 起发布包连 WSDL/SOAP 一起带上**，六条腿的断言清单于是从十个宏变成十一个。
+  在那之前
   `UVCPP_ENABLE_WSDL` 是六条腿唯一漏掉的模块，而它的失败方式很安静：包里**照样装着**
   `include/wsdl/*.h`（那份清单由 `package_release.py` 的 `MODULES` 决定，与开关无关），
   但生成头里 `UVCPP_WSDL_ENABLE` 是 0，于是那些头的全部内容落在 `#if` 外面 —— **头在、
@@ -1300,6 +1301,25 @@ libuvcpp/
   `wsdl` 矩阵，让这份配置在**每次 push** 上被编译**并运行** —— 这一点是承重的：此前那四条
   `wsdl`/`soap` 用例在整个 CI 里**一次都没被 ctest 跑过**，唯二打开该模块的地方都是
   configure-only（`1.5.2`）
+- **1.5.3 起发布包再带上数据库模块，而包里的 db 只带 SQLite 一个后端**（六条腿的断言
+  清单因此是**十三个宏**）。每条腿各传四个 `-D`：`-DUVCPP_ENABLE_DB=ON`
+  `-DUVCPP_DB_SQLITE_FROM_SOURCE=ON -DUVCPP_ENABLE_DB_MYSQL=OFF
+  -DUVCPP_ENABLE_DB_PGSQL=OFF`。两个 `OFF` 是**显式**关的，不是"找不到"：发布 runner 上
+  装着 `libpq-dev`，`find_package` 会**静默**成功，于是 `libuvcpp.so` 悄悄多一条
+  `libpq.so.5` 的 `DT_NEEDED` —— 而"装到别的机器上跑不起来"正是发布腿那条 `ldd` 断言
+  要拦的形状。**`PRIVATE` 链接挡不住这件事**：`PRIVATE` 关的是头文件与编译定义，
+  共享库上它照样写 `DT_NEEDED`。SQLite 那份走的是源码 amalgamation（哈希钉死、编成
+  静态且强制 PIC），不是系统的 `libsqlite3`：链 `.so` 会多一条 `DT_NEEDED`，而 Ubuntu
+  24.04 上系统的 `libsqlite3.a` 不是 PIC（实测 `R_X86_64_PC32 against symbol
+  'sqlite3CtypeMap' can not be used when making a shared object`）。改这条断言之前
+  先看一件事：它读的是**生成的头**而不是 `CMakeCache.txt`，因为"三个后端一个都没成"时
+  模块是被普通 `set()` 强制关闭的 —— 缓存里照旧写着 `ON` 而编译器看到 0，
+  只 grep 缓存的断言会放行一个 `UVCPP_DB_ENABLE 0` 的包。CI 侧四个平台各有一格：
+  Ubuntu / macOS / MSVC 三格开 SQLite，MinGW 那条腿两次 configure 都开；**两个远程
+  后端另有一个 job**（Ubuntu 的 `db-servers`，起真 MySQL 8.0 与 PostgreSQL 16 容器，
+  `UVCPP_DB_TEST_REQUIRE=1` 把"没连上"从"未判定"变成失败），每一边都带反向断言 ——
+  `db` 格不许出现远程后端的开日志，`db-servers` 不许出现 `db: SQLite 后端开`、也不许
+  注册 `test_db_sqlite_func`（`1.5.3`）
 - **六条腿的 timeout 120→150 分钟**（全开 QUIC/HTTP3 之后，每条腿除了自己的源文件还要
   FetchContent 编 ngtcp2 与 nghttp3，Linux 那两条还要多编一份 OpenSSL；msvc-arm64 是
   180）。Linux 的自包含断言名单加上 ngtcp2 / nghttp3：它们今天由本仓

@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.5.2--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.5.3--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Linux (Ubuntu)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![Windows (MSVC)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.5.2-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.5.3-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ---
@@ -650,7 +650,7 @@ the existing code style.
 
 ## Changelog
 
-The current source tree is **1.5.2-dev** — that is what `UVCPP_VERSION_STRING`
+The current source tree is **1.5.3-dev** — that is what `UVCPP_VERSION_STRING`
 (`src/uvcpp/uvcpp_version.h`) reports. `v1.0.0`, `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.4.0` and
 `v1.5.0` are the tagged releases. Everything the `1.1.x`, `1.2.x` and `1.3.x` development
 lines accumulated through `v1.4.0`, plus what the `1.4.x` line (released as `v1.5.0`) added
@@ -1468,8 +1468,8 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   `UVCPP_BUILD_EXPAND`; run against a real generated header it failed immediately); the
   four MinGW/Linux legs check **both trees**, because release and debug are two independent
   configures and omitting a flag only breaks one of them (`1.5.0`)
-- **As of 1.5.2 the release packages carry WSDL/SOAP as well, so "full-featured" now means
-  all eleven asserted macros.** Until then `UVCPP_ENABLE_WSDL` was the one module the six
+- **As of 1.5.2 the release packages carry WSDL/SOAP as well**, which took the six legs'
+  assertion lists from ten macros to eleven. Until then `UVCPP_ENABLE_WSDL` was the one module the six
   legs left off, and the failure mode was quiet: the packages still *shipped*
   `include/wsdl/*.h` (that list is `package_release.py`'s `MODULES`, independent of the
   switch), but with `UVCPP_WSDL_ENABLE 0` in the generated header their whole contents sat
@@ -1482,6 +1482,29 @@ described in [doc/benchmark-rig.md](doc/benchmark-rig.md).
   on every push — which matters because until now the four `wsdl`/`soap` test files had never
   been executed by `ctest` anywhere, the two places that turned the module on being
   configure-only (`1.5.2`)
+- **As of 1.5.3 the release packages carry the database module too, and the db in them has
+  SQLite as its only backend** (so the six legs' assertion lists now hold **thirteen**
+  macros). Each leg passes four `-D`s: `-DUVCPP_ENABLE_DB=ON`
+  `-DUVCPP_DB_SQLITE_FROM_SOURCE=ON -DUVCPP_ENABLE_DB_MYSQL=OFF
+  -DUVCPP_ENABLE_DB_PGSQL=OFF`. The two `OFF`s are **explicit**, not "not found": the release
+  runners do carry `libpq-dev`, so `find_package` succeeds **silently** and `libuvcpp.so`
+  quietly grows a `libpq.so.5` `DT_NEEDED` — exactly the shape the legs' `ldd` assertion
+  exists to catch. **`PRIVATE` linking does not prevent this**: `PRIVATE` governs headers and
+  compile definitions, but on a shared library it still writes `DT_NEEDED`. The SQLite
+  backend comes from a source amalgamation (hash-pinned, built static, forced PIC) rather
+  than the system `libsqlite3`: linking the `.so` would add a `DT_NEEDED`, and the system
+  `libsqlite3.a` on Ubuntu 24.04 is not PIC (measured: `R_X86_64_PC32 against symbol
+  'sqlite3CtypeMap' can not be used when making a shared object`). One thing to know before
+  touching that assertion: it reads the **generated header**, not `CMakeCache.txt`, because
+  when all three backends are missing the module is force-disabled with a plain `set()` — the
+  cache keeps saying `ON` while the compiler sees 0, so a cache-only assertion would wave
+  through a package with `UVCPP_DB_ENABLE 0`. On the CI side each of the four platforms has
+  an entry: Ubuntu, macOS and MSVC turn SQLite on, and the MinGW leg turns it on in both
+  configures. The **two remote backends get a job of their own** (Ubuntu's `db-servers`,
+  running real MySQL 8.0 and PostgreSQL 16 containers, with `UVCPP_DB_TEST_REQUIRE=1`
+  turning "never connected" from "not judged" into a failure), and every side carries a
+  reverse assertion — the `db` entries must not log a remote backend as on, and `db-servers`
+  must neither log `db: SQLite 后端开` nor register `test_db_sqlite_func` (`1.5.3`)
 - **All six legs' timeouts went from 120 to 150 minutes** (with QUIC/HTTP3 on, each leg
   builds ngtcp2 and nghttp3 via FetchContent on top of its own sources, and the two Linux
   legs build OpenSSL as well; msvc-arm64 is 180). The Linux self-containment assertion now
