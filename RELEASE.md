@@ -315,7 +315,7 @@ commit 说明为什么它对 1.2.0 仍然成立。
 ### 修复
 
 四类问题一并收掉。逐条的一档号在
-[README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
+[CHANGELOG.md](https://github.com/Antruly/libuvcpp/blob/master/CHANGELOG.md)
 里 —— 那边是唯一的清单，这边不抄第二份（两份手写的清单正是本仓已经栽过的形状）。
 
 - **协议正确性** —— 错误路径伪造状态码、中途断流送出假的 `200`、`206` 被压缩
@@ -653,7 +653,7 @@ int main() {
 这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`，
 `1.2.1` → `1.2.25` 收进 `v1.3.0`，`1.3.1` → `1.3.33` 收进 `v1.4.0`，
 `1.4.1` → `1.4.4` 收进 `v1.5.0`；按主题汇总的清单在
-[README 的变更日志](https://github.com/Antruly/libuvcpp/blob/master/README.md#changelog)
+[CHANGELOG.md](https://github.com/Antruly/libuvcpp/blob/master/CHANGELOG.md)
 里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
 
 **`1.4.1` → `1.4.4` 那条开发线已经收进 `v1.5.0`**，所以下面有它的一条：这一版把那四

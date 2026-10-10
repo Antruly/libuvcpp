@@ -154,10 +154,14 @@ tag was `v1.1.5`, and was removed rather than left available as a false "source 
 3. **Run `python tests/tools/check_doc_versions.py`.** It asserts the README strings equal the
    one in the source tree, so steps 1 and 2 cannot drift apart unnoticed. It runs in CI on every
    push.
-4. **Update `RELEASE.md`** with the new version's section. `publish` passes this file *entire*,
+4. **Add this version's entry to `CHANGELOG.md`.** That file is the single changelog now — the
+   two READMEs only point at it. Add the version to the per-version list at the end and, when
+   the release folds in development lines, say so in the topic section each folded change
+   belongs to.
+5. **Update `RELEASE.md`** with the new version's section. `publish` passes this file *entire*,
    with no extraction step — `--notes-file RELEASE.md` becomes the whole Release body, so put
    the new version's section where a reader arriving at the Release page will find it.
-5. Commit, tag `vX.Y.Z`, and push the tag.
+6. Commit, tag `vX.Y.Z`, and push the tag.
 
 Between releases, the tree sits at `<next>-dev`: each feature push bumps the **patch** level and
 keeps `UVCPP_VERSION_IS_RELEASE` at `0`, so the tree reports e.g. `1.2.1-dev`. The major/minor

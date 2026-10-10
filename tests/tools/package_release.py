@@ -1188,7 +1188,7 @@ def main():
                        % ", ".join(sorted(leaked)))
 
     # ---- 文档 ----
-    for f in ("README.md", "RELEASE.md", "LICENSE"):
+    for f in ("README.md", "CHANGELOG.md", "RELEASE.md", "LICENSE"):
         p = os.path.join(repo, f)
         if os.path.exists(p):
             shutil.copy2(p, stage)
