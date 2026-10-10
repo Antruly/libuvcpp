@@ -44,14 +44,34 @@ uint64_t monotonic_ms() {
 
 /// 控制帧洪泛的令牌桶（RFC 9113 §10.5）。
 ///
-/// SETTINGS / PING / RST_STREAM / PRIORITY / WINDOW_UPDATE 都不带业务数据，
-/// 但每一个都要花 CPU 处理，而 PING 还要我们回一个 ACK —— 攻击者花 1 个包
-/// 换我们 1 个包，**是放大器**。一个 64 KiB 的连接窗口对这类帧没有约束，
-/// 所以只能自己数。
+/// SETTINGS / PING / RST_STREAM / PRIORITY 都不带业务数据，但每一个都要花 CPU
+/// 处理，而 PING 还要我们回一个 ACK —— 攻击者花 1 个包换我们 1 个包，**是
+/// 放大器**。一个 64 KiB 的连接窗口对这类帧没有约束，所以只能自己数。
+///
+/// **WINDOW_UPDATE 不在这里，这是判据不是遗漏。** 它和上面那四种有三个区别，
+/// 每一个单独都足以把它排除：
+///
+///   1. **不回帧、不分配。** 它只让 nghttp2 改一个整数；上面那四种要么逼我们回
+///      一帧（SETTINGS ACK / PING ACK），要么动流表。同样的 CPU，攻击者用 DATA
+///      帧能换到的更多，而 DATA 这条路只由流数与 `H2_DEFAULT_MAX_BODY_BYTES`
+///      兜着 —— 一条比它更便宜的帧却要按"包/秒"设卡，是反的。
+///   2. **它的正常速率与"我们发出去多少字节"成正比**，而不是与墙钟成正比。
+///      对端每消费半个窗口就回一帧，于是**任何固定速率的上限都是一个吞吐上限**：
+///      32 帧/秒 × 32 KiB = 1 MiB/s，一条连接只要跑得比这快就会被自己人掐断。
+///      这不是理论值 —— 64 条流各取一个 200 KiB 的静态文件，一个窗口正常的客户端
+///      （curl、浏览器、本库自己的 `uvcpp_http_client`，都是 64 KiB 缺省窗口）
+///      在 50 ms 内就会撞上去，然后**整条连接**被 GOAWAY(ENHANCE_YOUR_CALM) 掉，
+///      而服务端日志上什么都看不到：它只是在如实发一个 200 KiB 的文件。
+///   3. 要按量设卡，正确的量是**我们已经发出去的字节数**（对端不可能合法地
+///      比这更快地还额度），不是秒。那是另一套记账，而按第 1 条，它并不需要。
 ///
 /// 取值：正常客户端在连接建立的头一秒会发两三个 SETTINGS/PING，稳态近乎为零，
 /// 所以 64 的突发额度对任何正常客户端都够（包括同时开上百条流的）；32 个/秒
 /// 的补充速率则远低于"能让服务端忙起来"的量级。
+///
+/// **RST_STREAM 留在里面**是同一套推理的反面：它的速率与**请求数**成正比而与
+/// 字节数无关，而且每次都在动流表，所以"取消风暴"确实要有个上限。它的额度与
+/// SETTINGS/PING 共用，测得不够用时再单独给一档。
 const double H2_CONTROL_BURST          = 64.0;
 const double H2_CONTROL_REFILL_PER_SEC = 32.0;
 
@@ -472,12 +492,15 @@ struct uvcpp_h2_session::impl {
 
     // 计数必须在按流号查表**之前** —— 这些帧的 `stream_id` 恒为 0，
     // 落在下面那个 `streams.end()` 的早返回上，一个都数不到。
+    //
+    // `NGHTTP2_WINDOW_UPDATE` **故意不在这张单子上**：上面那段常量注释里写了三条
+    // 理由，其中最硬的一条是"它的正常速率与我们已经发出去的字节数成正比，所以
+    // 任何包/秒的上限都是一个吞吐上限"。加它回来之前先读那一段。
     switch (frame->hd.type) {
       case NGHTTP2_SETTINGS:
       case NGHTTP2_PING:
       case NGHTTP2_RST_STREAM:
       case NGHTTP2_PRIORITY:
-      case NGHTTP2_WINDOW_UPDATE:
         if (!control_frame_ok()) return;
         break;
       default:

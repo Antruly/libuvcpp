@@ -162,9 +162,14 @@ struct link {
               << " pumped=" << pumped << " fatals=" << fatal_count
               << " last_fatal=" << last_fatal << " drain_err=" << drain_err
               << "\n";
+    // body 只在小的时候逐字打：大响应用例（2 MiB）一失败就往 CI 日志里灌
+    // 两兆字节的 x，把上面那行真正有用的诊断顶出屏幕。
     std::cout << "    [dump " << tag << "] resp=" << resp_count
               << " status=" << resp_status << " resp_end=" << (resp_end ? 1 : 0)
-              << " resp_body=" << resp_body
+              << " resp_body="
+              << (resp_body.size() <= 256
+                      ? resp_body
+                      : "<" + std::to_string(resp_body.size()) + " bytes>")
               << " hdrs=" << resp_headers.size() << "\n";
     for (size_t i = 0; i < resp_headers.size(); ++i) {
       std::cout << "      rh[" << i << "] " << resp_headers[i].name << ": "
@@ -633,6 +638,66 @@ bool test_normal_control_traffic_passes() {
   // 一次都没被拦：没有 fatal、响应全都到齐、流表清空。
   if (L.fatal_count != 0) return false;
   if (L.resp_end != true) return false;
+  return L.server.stream_count() == 0 && L.client.stream_count() == 0;
+}
+
+/// 一条**合法的大响应**不许被当成洪泛。
+///
+/// 这是上面那两个用例的反面，也是它们的漏网之鱼：那两条都只发"小响应 + 少量
+/// 控制帧"，于是"把 WINDOW_UPDATE 也算进控制帧预算"这个错法在它们眼里完全
+/// 合法 —— 而它会把**任何**窗口正常的客户端掐死。
+///
+/// WINDOW_UPDATE 的正常速率与对端消费的字节数成正比：对端每收半个窗口就回
+/// 一帧。这里两边都用缺省的 64 KiB 窗口（`init()` 不发 `SETTINGS_INITIAL_WINDOW_SIZE`），
+/// 于是 2 MiB 的响应本体就要换回几十帧 —— 稳稳越过 64 的突发额度。
+///
+/// 判据是**两件**，而以第一件为准：
+///   1. `fatal_count == 0` —— 这才是那条错法的指纹。它在线上就是一句
+///      `GOAWAY(ENHANCE_YOUR_CALM)`，而真跑在网络上的时候连接是**当场**断的，
+///      在飞的那些 body 全部作废（本机实测：64 条流各取一个 200 KiB 的静态
+///      文件，一个也收不全）。本用例里两条会话是手工搬字节的，`pump()` 收到
+///      致命错误也不会停，所以 body 反而能凑齐 —— 只断言 body 长度的话，
+///      这条用例在带 bug 的版本上照样绿。
+///   2. body 逐字节收全 —— 防的是别的截断，不防这个。
+///
+/// 2 MiB 这个量是挑的：它必须大于 `H2_CONTROL_BURST` × 半个窗口（64 × 32 KiB
+/// = 2 MiB）才必然越过额度，而 `pump()` 最多搬 256 轮、每轮一个窗口，
+/// 2 MiB / 64 KiB = 32 轮，留足了余量。
+bool test_large_response_is_not_a_flood() {
+  link& L = make_link();
+  if (!L.init()) return false;
+
+  const size_t kBody = 2u * 1024u * 1024u;
+  L.reply.status_code = http_status::OK;
+  L.reply.set_header("content-type", "application/octet-stream");
+  L.reply.body = uvcpp_buf(std::string(kBody, 'x'));
+
+  const int32_t sid =
+      L.client.submit_request(make_req(http_method::HTTP_GET, "/big"), "");
+  if (sid <= 0) return false;
+  L.pump();
+
+  if (L.fatal_count != 0) {
+    std::cerr << "  [diag] big: fatal_count=" << L.fatal_count
+              << " last_fatal=" << L.last_fatal << " got=" << L.resp_body.size()
+              << " want=" << kBody << std::endl;
+    return false;
+  }
+  if (L.resp_count != 1 || L.resp_status != static_cast<int>(http_status::OK)) {
+    std::cerr << "  [diag] big: resp_count=" << L.resp_count
+              << " status=" << L.resp_status << std::endl;
+    return false;
+  }
+  // 逐字节收全：少一个字节就说明这条连接被"洪泛"判据半路掐过。
+  if (L.resp_body.size() != kBody) {
+    std::cerr << "  [diag] big: body=" << L.resp_body.size() << " want=" << kBody
+              << std::endl;
+    return false;
+  }
+  if (L.resp_end != true) {
+    std::cerr << "  [diag] big: resp_end=0" << std::endl;
+    return false;
+  }
   return L.server.stream_count() == 0 && L.client.stream_count() == 0;
 }
 
@@ -1187,6 +1252,7 @@ int main() {
     {"control_flood_is_capped", test_control_flood_is_capped},
     {"fatal_error_notifies_once", test_fatal_error_notifies_once},
     {"normal_control_traffic_passes", test_normal_control_traffic_passes},
+    {"large_response_is_not_a_flood", test_large_response_is_not_a_flood},
     {"header_budget_rejects_oversize", test_header_budget_rejects_oversize},
     {"header_budget_normal_passes", test_header_budget_normal_passes},
     {"oversize_submit_is_refused", test_oversize_submit_is_refused},
