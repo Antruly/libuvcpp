@@ -532,7 +532,7 @@ The four entries, and what each one measures:
   imports and trip the self-containment assertion in that file. Configure-time network is required;
   an offline machine can drop the hash-pinned zip into `${build}/_deps/uvcpp-sqlite/`.
 - **Ubuntu `db-servers`** — the two *remote* backends, against real servers. `services:` is
-  job-level, so this cannot be a matrix entry (it would drag two containers into all eleven Ubuntu
+  job-level, so this cannot be a matrix entry (it would drag two containers into all twelve Ubuntu
   cells, including `basic-static`). It is the mirror image of the `db` entries: SQLite explicitly
   `OFF`, MySQL and PostgreSQL `ON`, plus two **reverse** assertions — the configure log must *not*
   contain `db: SQLite 后端开`, and `test_db_sqlite_func` must *not* be registered. Without those,
@@ -599,7 +599,15 @@ the member-layout shift being guarded against (`ssl_ctx_` is declared before
 `http_`/`registry_` in `uvcpp_web_app`) only bites when `UVCPP_OPENSSL_ENABLE=1`. The job
 asserts that value in the generated header *before* building: with it off, criterion 1
 silently degrades into a no-op. The same is asserted for `UVCPP_WSDL_ENABLE`, because
-`check_doc_snippets.py` treats "module really on" as the premise for the `wsdl/` snippets.
+`check_doc_snippets.py` treats "module really on" as the premise for the `wsdl/` snippets —
+and for `UVCPP_DB_ENABLE`, for the same reason: `doc/db-guide.md` carries five snippets that
+need `db/uvcpp_db.h`, and with the module off this gate exits **3**, which makes both
+`config-contract` jobs red. That is not hypothetical — it is what the 2026-10-10 run of
+`c130406` did, and the fix was to give that tree the release configuration's four database
+`-D`s (including `UVCPP_DB_SQLITE_FROM_SOURCE=ON`, so the job needs no `libsqlite3-dev`). The
+assertion reads the **generated header**, not the cache, because "all three backends missing"
+force-disables the module with a plain `set()` — the cache keeps saying `ON` while the compiler
+sees 0, and the resulting exit 3 looks exactly like "the package is missing a module".
 
 `tests/tools/check_config_contract.py` runs four criteria:
 
@@ -695,13 +703,14 @@ sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 sudo apt-get install -y libuv1-dev libsqlite3-dev ninja-build
 # db-servers — the mirror image: the two remote client libraries, no libsqlite3-dev
 sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev ninja-build
-# config-contract
+# config-contract — the tree is a copy of the release configuration, so its SQLite comes
+# from the pinned amalgamation (UVCPP_DB_SQLITE_FROM_SOURCE) and needs no package at all
 sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
 ```
 
 `db-servers` also declares the two `services:` (MySQL 8.0 and PostgreSQL 16, with
 `--health-cmd` waits), which is why it is a **separate job** — `services:` is job-level, and
-putting it on the matrix job would start two containers for each of the eleven Ubuntu cells.
+putting it on the matrix job would start two containers for each of the twelve Ubuntu cells.
 
 ### macOS (`ci-macos.yml`)
 ```bash

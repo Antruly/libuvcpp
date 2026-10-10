@@ -762,7 +762,7 @@ jobs:
   # 数据库模块的两个**远程**后端：MySQL 与 PostgreSQL
   #
   # 为什么单开一个 job 而不挂在上面的 `db` 格上：这两个后端要一个**真的服务端**，
-  # 而 `services:` 是 **job 级**的 —— 挂到那个矩阵 job 上，十一格会各自拖起两个
+  # 而 `services:` 是 **job 级**的 —— 挂到那个矩阵 job 上，十二格会各自拖起两个
   # 容器，并且给 `basic-static` 这种"什么都不开"的格平白加两个系统依赖。
   #
   # 这一格的开关与 `db` 那一格**互不相交**：SQLite 显式 OFF、MySQL 与 PostgreSQL
@@ -826,10 +826,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 两个客户端库的**开发包**。Ubuntu 上的 `libmysqlclient-dev` 由 MariaDB 的
-      # Connector/C 提供（`Provides:` 那一栏写着这个名字）—— 驱动只用
-      # `mysql_real_connect` / `mysql_query` / `mysql_stmt_*` 那一族稳定 API，
-      # 两份实现都认。
+      # 两个客户端库的**开发包**。`libmysqlclient-dev` 到底是哪一份，取决于发行版，
+      # **不能靠名字猜** —— 本机对着 `apt-cache show` 核过（Ubuntu 24.04）：
+      # `Source: mysql-8.0`、`Version: 8.0.46-0ubuntu0.24.04.4`、依赖
+      # `libmysqlclient21`，即 **Oracle 的 MySQL 8.0 客户端**（`libmysqlclient.so.21`）；
+      # MariaDB 那份要绕一道 `default-libmysqlclient-dev`（`mysql-defaults` 的
+      # 元包）才拿得到。本机那份 db 构建链的就是 `.so.21`，套件在它上面 160/160。
+      # 驱动只用 `mysql_real_connect` / `mysql_query` / `mysql_stmt_*` 那一族稳定
+      # API，两份实现都认 —— 但"认不认"是量出来的，"装的是哪一份"得写对，
+      # 否则下一个人照着这条注释去解释一条 MariaDB 上才有的行为会白找半天。
       # **不装 `libsqlite3-dev`**：这一格的 SQLite 是显式 OFF 的，装了反而会让人
       # 以为"这一格也量过 SQLite"（而下面那句反向断言正是冲着这件事来的）。
       - name: Install deps
@@ -983,6 +988,15 @@ jobs:
             # job 拿的包要能代表发布包 —— 头在、模块却关着的话，`check_doc_snippets`
             # 会把 `doc/capi-guide.md` 的片段全部"编过"（它们编得过，见那张表旁边
             # 的说明），而这个 job 也就永远量不到 C 面与包的组合。
+            #
+            # 数据库那四个 `-D` 是同一件事的第二次发生，而且**已经被红过一次**：
+            # `doc/db-guide.md` 有 5 条片段要 `db/uvcpp_db.h`，本档不开这个模块时
+            # `check_doc_snippets.py` 把它们全判成"前提不满足"并**退 3**（不是退 0）
+            # —— 2026-10-10 那轮 CI 的 linux 与 msvc 两个 config-contract 就是这么
+            # 红的。四个开关与 release.yml 逐字相同：SQLite 走源码 amalgamation，
+            # 两个远程后端显式 OFF。这么做还有两个副产品：这一档**不需要**
+            # `libsqlite3-dev`（也就顺带量了"发布那条路在没有系统 sqlite3 的机器上
+            # 走得通"），以及 runner 上万一哪天装上 libpq-dev 也不会静默链进去。
             echo "=== configure ==="
             cfg=0
             extra=(-DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -996,6 +1010,8 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+              -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
             echo "CONFIGURE_RC=$cfg"
@@ -1014,6 +1030,13 @@ jobs:
             grep -q '^#  define UVCPP_WSDL_ENABLE 1$' \
               build-cfg/include/uvcpp/uvcpp_config.h || {
               echo "::error title=config-contract::生成头里 UVCPP_WSDL_ENABLE 不是 1，doc-snippets 会把 wsdl 片段全判成\"没判\""; exit 1; }
+            # 数据库这一条判的是**生成的头**，不是缓存：`UVCPP_ENABLE_DB=ON` 但三个
+            # 后端一个都没成时，模块走的是普通 `set()` 强制关闭 —— 缓存里照旧写着
+            # ON，而编译器看到的是 0。那时 doc-snippets 会退 3，而"退 3"在这一档
+            # 看起来与"包缺了个模块"一模一样，分不出是哪一步坏的。
+            grep -q '^#  define UVCPP_DB_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_DB_ENABLE 不是 1，doc-snippets 会把 db 片段全判成\"没判\"（三个后端一个都没集成？见上面的配置日志）"; exit 1; }
 
             echo "=== build ==="
             bld=0
@@ -1039,6 +1062,8 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+              -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
             echo "DEBUG_CONFIGURE_RC=$dbg"

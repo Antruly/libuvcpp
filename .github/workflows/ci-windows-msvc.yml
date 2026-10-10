@@ -505,6 +505,13 @@ jobs:
             #
             # `-DUVCPP_ENABLE_CAPI=ON` 与 release.yml 那六条腿一致：发布包里**有**
             # `include/capi/`，所以代表发布包的那棵树也得有 C 符号在库里。
+            #
+            # 数据库那四个 `-D` 同理，而且**已经被红过一次**：`doc/db-guide.md` 有
+            # 5 条片段要 `db/uvcpp_db.h`，这一档不开模块时 `check_doc_snippets.py`
+            # 把它们全判成"前提不满足"并退 3（2026-10-10 那轮 CI 的 windows 与
+            # linux 两个 config-contract 就是这么红的）。四个开关与 release.yml 的
+            # msvc 腿逐字相同 —— 包括 `UVCPP_DB_SQLITE_FROM_SOURCE=ON`：Windows 上
+            # 本来就没有系统 sqlite3，发布腿走的就是这条路。
             echo "=== configure ==="
             cfg=0
             cmake -S . -B build-cfg -DCMAKE_BUILD_TYPE=Release \
@@ -516,6 +523,8 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+              -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
             echo "CONFIGURE_RC=$cfg"
@@ -533,6 +542,12 @@ jobs:
             grep -q '^#  define UVCPP_WSDL_ENABLE 1$' \
               build-cfg/include/uvcpp/uvcpp_config.h || {
               echo "::error title=config-contract::生成头里 UVCPP_WSDL_ENABLE 不是 1，doc-snippets 会把 wsdl 片段全判成\"没判\""; exit 1; }
+            # 数据库：判生成的头而不是缓存 —— 三个后端一个都没成时模块被普通
+            # `set()` 强制关闭，缓存里照旧是 ON 而编译器看到 0，那时 doc-snippets
+            # 退 3，与"包缺模块"长得一样，分不出坏在哪一步（下载失败？哈希？）。
+            grep -q '^#  define UVCPP_DB_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_DB_ENABLE 不是 1，doc-snippets 会把 db 片段全判成\"没判\"（SQLite 源码那份没编进来？见上面的配置日志）"; exit 1; }
 
             echo "=== build ==="
             bld=0
@@ -560,6 +575,8 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+              -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
             echo "DEBUG_CONFIGURE_RC=$dbg"
