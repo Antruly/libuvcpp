@@ -45,6 +45,16 @@ Windows job 之间隔着 900 行别的平台。改成一平台一个文件、文
  12. 两个 `config-contract` job 各自带着正确的 `--platform`/`--cxx` 组合
      （`linux-x64` + `g++` / `msvc-x64` + `cl`）—— 这一对抄错的话，门禁跑的
      是另一套工具链而它自己不会说。
+ 13. `release.yml` 的 Release 正文来自 `release_notes.py --tag`，且**不再**出现
+     `--notes-file RELEASE.md`。这是防回退：整份 RELEASE.md 当正文的时候，读的人
+     得自己在八百行里找"这一版新增了什么"，而这一版有哪六个包、点哪个，正文里
+     根本没有。回退这件事在 diff 里就是一个参数改回去，没有任何别的东西会拦。
+ 14. 两版 README 的下载表（`<!-- downloads:start/end -->` 之间）**逐字对得上**
+     `package_release.py` 的 `PLATFORMS`：六行、slug 集合相等、一个 tag、资产名
+     与 URL 形状正确。**刻意不与版本头比对** —— 开发期 README 指的是上一个已发布
+     版本、版本头指的是下一个，比了就是天天红。抄一份平台清单到文档里更不行：抄的
+     那份漂掉之后，症状是"README 上有一个 404 的下载链接"，而链接是绝对 URL，
+     `check_docs.py` 明说不判 `http(s)://` 目标（就是判据 10 拦徽章 404 的同一条路）。
 
 **反空转**：一条判据都没能判（四个文件都不在、§1 那张表解析不出、README 里一条
 workflow URL 都没有）时退 3，不许长成"全过"。这就是 `check_doc_snippets.py` 的
@@ -206,11 +216,19 @@ LITERAL_OWNERS = {
 }
 
 # ---- 判据 8：文档门禁 ------------------------------------------------------------
-# 这五条是纯 python、只读仓库、与操作系统无关，所以只在一个文件的一条腿上跑。
+# 这几条是纯 python、只读仓库、与操作系统无关，所以只在一个文件的一条腿上跑。
 # 把它们摊回四个文件不会更安全（判据本身与平台无关），但会让"跑了几次"变得
-# 不可知 —— 而"这一格改名让五条门禁无声消失"正是判据 8 前半要拦的那种事。
+# 不可知 —— 而"这一格改名让这几条门禁无声消失"正是判据 8 前半要拦的那种事。
+#
+# `release_notes.py` 在列的方式与别条不同：它在 `ci-linux-ubuntu.yml` 上跑的是
+# `--self-test`（形状回归表），而真正干活的那次调用在 `release.yml` 的 publish 里
+# —— 那条腿不在这四个文件里，所以这条判据看到的仍然只有 ci-linux-ubuntu.yml。
+# 它为什么该进这张表：发布正文由它生成，而它的形状（切哪一节、下载表几行、rc
+# 怎么分）没有任何别的门禁看得见；`release.yml` 里那次调用要是被删掉，判据 13 管；
+# 它**自己**判错则是靠这里这个 self-test 管。
 DOC_GATES = ["check_doc_versions.py", "check_docs.py", "check_doc_lines.py",
-             "check_doc_lines_scenes.py", "check_ci_layout.py"]
+             "check_doc_lines_scenes.py", "check_ci_layout.py",
+             "release_notes.py"]
 DOC_GATE_FILE = "ci-linux-ubuntu.yml"
 
 # ---- 判据 12：使能宏契约的两档工具链 --------------------------------------------
@@ -218,6 +236,21 @@ CONFIG_CONTRACT = {
     "ci-linux-ubuntu.yml": ("--platform linux-x64", "--cxx g++"),
     "ci-windows-msvc.yml": ("--platform msvc-x64", "--cxx cl"),
 }
+
+# ---- 判据 13：Release 正文的来源 -------------------------------------------------
+# 发版腿不在这四个平台文件里（它是 `release.yml`），所以不进 `texts`，单独读。
+RELEASE_YML = "release.yml"
+RELEASE_NOTES_TOOL = "release_notes.py"
+# 回退的样子。写成正则而不是字面量：`--notes-file RELEASE.md` 与
+# `--notes-file=RELEASE.md` 两种拼法都要拦得住。
+RE_NOTES_FILE_OLD = re.compile(r"--notes-file[=\s]+RELEASE\.md")
+
+# ---- 判据 14：两版 README 的下载表 -----------------------------------------------
+DOWNLOADS_START = "<!-- downloads:start -->"
+DOWNLOADS_END = "<!-- downloads:end -->"
+RE_DOWNLOAD_URL = re.compile(
+    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/"
+    r"(v\d+\.\d+\.\d+)/(libuvcpp-(\d+\.\d+\.\d+)-([A-Za-z0-9_.-]+)\.zip)")
 
 RE_NAME = re.compile(r"^name:\s*(\S.*?)\s*$")
 RE_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
@@ -358,6 +391,33 @@ def invokes(text, script):
         if script in l:
             return True
     return False
+
+
+def load_platforms():
+    """`package_release.PLATFORMS` —— 平台清单与命名式的**唯一来源**。
+
+    判据 14 要拿它当期望值。抄一份到本脚本里也行得通，但那正是判据 14 想拦的漂移：
+    抄来的清单本身不会红。（`package_release` 在 import 期读版本头，读不到会
+    `SystemExit` —— 那是**前提不满足**，不是"没有平台"。）
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    try:
+        import package_release
+    except SystemExit as e:
+        return None, "import package_release 时退出（%s）" % e
+    except Exception as e:                                   # noqa: BLE001
+        return None, "import package_release 失败（%s）" % e
+    return list(package_release.PLATFORMS), None
+
+
+def download_rows(text):
+    """README 的下载表 → `[(tag, 资产名, 版本, slug)]`。返回 `(rows, err)`。"""
+    if DOWNLOADS_START not in text or DOWNLOADS_END not in text:
+        return None, "没有 %s / %s 这两行标记" % (DOWNLOADS_START, DOWNLOADS_END)
+    seg = text.split(DOWNLOADS_START, 1)[1].split(DOWNLOADS_END, 1)[0]
+    return RE_DOWNLOAD_URL.findall(seg), None
 
 
 def main():
@@ -632,10 +692,70 @@ def main():
         else:
             ok("%s 的 config-contract：%s + %s" % (name, plat, cxx))
 
+    # ---- 判据 13 ----
+    print("\n---- 判据 13：Release 正文来自 release_notes.py，不再整份贴 RELEASE.md ----")
+    rel_text, rel_err = read(root, os.path.join(WORKFLOW_DIR, RELEASE_YML))
+    if rel_text is None:
+        halt("%s —— 判据 13 没得判" % rel_err)
+    else:
+        if invokes(rel_text, RELEASE_NOTES_TOOL):
+            ok("release.yml 调了 %s" % RELEASE_NOTES_TOOL)
+        else:
+            fail("release.yml 里没有真的调用 %s（注释里提一句不算）—— "
+                 "正文就是整份 RELEASE.md，这一版新增了什么得读者自己找" % RELEASE_NOTES_TOOL)
+        old = RE_NOTES_FILE_OLD.search(rel_text)
+        if old:
+            fail("release.yml 里还有 `%s` —— 这是回退到「把整份归档当正文」。"
+                 "正文应当由 %s --out 生成后再交给 --notes-file"
+                 % (old.group(0), RELEASE_NOTES_TOOL))
+        else:
+            ok("release.yml 里没有 `--notes-file RELEASE.md`")
+
+    # ---- 判据 14 ----
+    print("\n---- 判据 14：两版 README 的下载表与 PLATFORMS 逐字对得上 ----")
+    platforms, perr = load_platforms()
+    if platforms is None:
+        halt("%s —— 判据 14 没得判（没有期望值就无从比对）" % perr)
+        platforms = []
+    for name, text in sorted(readmes.items()):
+        if not platforms:
+            break
+        got, derr = download_rows(text)
+        if derr is not None:
+            fail("%s：%s —— 下载表那一节被删掉或被改了标记，判据 14 对它没得判"
+                 % (name, derr))
+            continue
+        if len(got) != len(platforms):
+            fail("%s：下载表有 %d 行，`package_release.PLATFORMS` 有 %d 个平台"
+                 % (name, len(got), len(platforms)))
+            continue
+        tags = set(g[0] for g in got)
+        if len(tags) != 1:
+            fail("%s：下载表里有 %d 个不同的 tag（%s）—— 一张表只该指一版"
+                 % (name, len(tags), sorted(tags)))
+            continue
+        tag = tags.pop()
+        # tag 与资产名里的版本必须自洽：`/download/v1.6.0/libuvcpp-1.5.0-…zip`
+        # 是一个**能构造出来的** URL，GitHub 会给 404，而它长得完全正常。
+        wrong = sorted("%s（tag 说 %s）" % (g[1], tag) for g in got
+                       if tag != "v" + g[2] or g[1] != "libuvcpp-%s-%s.zip" % (g[2], g[3]))
+        if wrong:
+            fail("%s：这些资产名与 tag 不自洽：%s" % (name, wrong))
+            continue
+        slugs = set(g[3] for g in got)
+        if slugs != set(platforms):
+            fail("%s：下载表的 slug 集合与 PLATFORMS 不等 —— 多了 %s、少了 %s。"
+                 "多出来的那个链接是 404，少掉的那个平台没人找得到包"
+                 % (name, sorted(slugs - set(platforms)), sorted(set(platforms) - slugs)))
+            continue
+        ok("%s：%d 行、tag %s、六个 slug 与 PLATFORMS 相等" % (name, len(got), tag))
+
     # ---- 反空转 ----
     print("\n---- 反空转：一条判据都没判时不许长成「全过」 ----")
     judged = len(texts) + len(rows or []) + sum(len(RE_WORKFLOW_URL.findall(t))
                                                for t in readmes.values())
+    judged += 1 if rel_text is not None else 0
+    judged += len(platforms)
     if judged == 0:
         halt("四个平台文件、§1 表、README 徽章**一样都没读到** —— 什么都没判")
     else:

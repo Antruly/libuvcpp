@@ -400,9 +400,10 @@ jobs:
           esac
           sudo apt-get install -y $pkgs
 
-      # 下面五条是**文档**门禁：纯 python、只读仓库本身（`doc/`、`src/`、锁文件），
-      # 不碰构建、不需要编译器，所以与操作系统无关 —— 挂在 basic-static 这一格上
-      # 跑一次就够（这些门禁今天多余地跑在 ubuntu+macos 两条腿上）。
+      # 下面几条是**文档**门禁：纯 python、只读仓库本身（`doc/`、`src/`、锁文件、
+      # 两版 README 与四个 workflow），不碰构建、不需要编译器，所以与操作系统无关
+      # —— 挂在 basic-static 这一格上跑一次就够（这些门禁今天多余地跑在
+      # ubuntu+macos 两条腿上）。
       # 为什么是 Linux 而不是别的：判据要按真实文件系统解析路径，而这一条是
       # **大小写敏感**的腿 —— 在 Windows/macOS 上拼错的路径也能命中。
       #
@@ -490,6 +491,31 @@ jobs:
               | grep -E '\[红\]|\[停\]|红 [0-9]+ 条|前提|Error|Traceback' \
               | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
             echo "::error title=ci-layout::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      # 第六条：发布正文那个工具的**形状**回归表。
+      #
+      # 为什么非要有它：`release.yml` 的 publish 用 `release_notes.py --tag` 现切
+      # Release 正文，而按 tag 切片这件事的失败方式是**安静的** —— 切到的要是
+      # 邻版那一节、或者下载表少了那个 arm64 的行，产物仍然是一份像样的正文，
+      # 发出去之后才有人发现"这一版讲的是上一版"。形状表（`--self-test`，内存
+      # fixture、不碰盘）把"切哪一节、表几行、slug 集合、rc 怎么分"逐格钉住。
+      #
+      # 它跑在**每次 push** 上而不是发版时：发版当天才第一次跑的门禁，等于没有。
+      - name: Check release notes shapes (self-test)
+        if: matrix.feature == 'basic-static'
+        shell: bash
+        run: |
+          rc=0
+          out=$(python3 tests/tools/release_notes.py --self-test 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            # rc=3 是「前提不满足、**没判**」，与 rc=1「判红了」是两件事。
+            msg=$(printf '%s\n' "$out" \
+              | grep -E '\[红\]|\[停\]|不符|前提|Error|Traceback' | head -20 \
+              | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=release-notes-shapes::${msg:-rc=$rc (no red line matched)}"
           fi
           exit "$rc"
 

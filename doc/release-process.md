@@ -3,8 +3,11 @@
 How a release is cut: what triggers it, what each of the six build legs produces, how the
 packages are verified, and what the process still does **not** check.
 
-The user-facing release notes live in [`RELEASE.md`](../RELEASE.md) — that file is the *history*
-of what shipped, not the procedure. This page is the procedure.
+[`RELEASE.md`](../RELEASE.md) is the *history* of what shipped, not the procedure — and since
+1.6.0 it is also **not** the body of any Release. `publish` slices that file by tag through
+[`tests/tools/release_notes.py`](../tests/tools/release_notes.py), which emits a six-platform
+download table, the `## vX.Y.Z` section for that tag, and a pointer to `CHANGELOG.md`. This page
+is the procedure.
 
 ## Trigger
 
@@ -131,14 +134,31 @@ result would be five platforms with debug artifacts and one without.
 The MSVC `.pdb` requirement is stated separately because MinGW and Linux embed debug info in the
 shared library and have no separate symbol file. Do not ask all six for the same shape.
 
-Then it creates or updates the Release:
+Then it builds the Release body from the tag and creates or updates the Release:
 
 ```bash
-gh release create "$TAG" --title "libuvcpp $TAG" --notes-file RELEASE.md
+python3 tests/tools/release_notes.py --tag "$TAG" --repo "$GITHUB_REPOSITORY" \
+  --out "$RUNNER_TEMP/release-notes.md"
+gh release create "$TAG" --title "libuvcpp $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
 # or, if it already exists:
-gh release edit "$TAG" --title "libuvcpp $TAG" --notes-file RELEASE.md
+gh release edit "$TAG" --title "libuvcpp $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
 gh release upload "$TAG" dist/*.zip --clobber
 ```
+
+The slicing step runs **unconditionally**, so `dry_run` rehearses it too: the thing most likely
+to be exercised for the first time on release day is the step that reads the tag. It exits `0`
+when a body was produced, `1` when a criterion failed (no section for that tag; the header claims
+to be a release but disagrees with the tag), and `3` when a premise is missing (`RELEASE.md`
+unreadable, tag not of the form `vX.Y.Z`). **`3` means "not judged", not "green"** — as
+everywhere else in `tests/tools/`, a non-zero exit fails the job and the distinction only matters
+when reading the log.
+
+Before 1.6.0 this step did not exist and `--notes-file RELEASE.md` published the **entire**
+eight-hundred-line archive as every Release's body: a reader arriving at the page had to find
+"what is new in this version" themselves, and the one thing they most wanted — which six packages
+this version has, and where to click — was not in the file at all. `check_ci_layout.py`
+criterion 13 fails if `release_notes.py` stops being invoked or if `--notes-file RELEASE.md`
+comes back.
 
 The version in the zip names and in `uvcpp.pc`'s `Version` field is read by the packager from
 `src/uvcpp/uvcpp_version.h`. It is **not** written anywhere in the workflow — an early
@@ -158,9 +178,12 @@ tag was `v1.1.5`, and was removed rather than left available as a false "source 
    two READMEs only point at it. Add the version to the per-version list at the end and, when
    the release folds in development lines, say so in the topic section each folded change
    belongs to.
-5. **Update `RELEASE.md`** with the new version's section. `publish` passes this file *entire*,
-   with no extraction step — `--notes-file RELEASE.md` becomes the whole Release body, so put
-   the new version's section where a reader arriving at the Release page will find it.
+5. **Add the new version's section to `RELEASE.md`** — a `## vX.Y.Z 重点 (Highlights)` heading.
+   That section, and *only* that section, becomes the Release body, so write it to stand alone:
+   it is what a reader sees directly under the download table, with no lead-in from the file's
+   preamble. Everything at or below `## 以下为归档` is archive and never published. Rehearse the
+   slice locally first — `python3 tests/tools/release_notes.py --tag vX.Y.Z | head -40` — and
+   check it against the real `dist/*.zip` names rather than against the naming formula.
 6. Commit, tag `vX.Y.Z`, and push the tag.
 
 Between releases, the tree sits at `<next>-dev`: each feature push bumps the **patch** level and
@@ -177,13 +200,30 @@ than the artifacts' timestamps.
 These are recorded rather than fixed. They are real, and a reader should not assume the process
 covers them.
 
-**Nothing asserts the tag matches the version header.** Push `v1.3.0` against a tree whose header
-says `1.2.0` and every leg builds happily, the packages are named `1.2.0`, and the Release is
-published under the tag `v1.3.0`. `check_doc_versions.py` does have a `--this-is-a-release` flag
-("judge by release rules, ignoring the header's flag") that would be the right tool for this
-assertion, but **it has no call sites** — not in CI, not in the workflows. It was added for
-manual use and never wired in. Adding the tag↔header check is a worthwhile change that this
-document does not claim exists.
+**Nothing asserts the tag matches the version header — almost.** Push `v1.3.0` against a tree
+whose header says `1.2.0` and every leg builds happily, the packages are named `1.2.0`, and the
+Release is published under the tag `v1.3.0`. Since 1.6.0 `release_notes.py` checks one direction:
+if the header says it *is* a release (`UVCPP_VERSION_IS_RELEASE` non-zero) and its version
+disagrees with `--tag`, it exits 1 and `publish` stops before creating anything.
+
+The remaining hole is deliberate, not an oversight. The check is skipped when the header reports a
+*development* tree, because `master` always carries the next version as `-dev` and re-publishing a
+historical tag (`workflow_dispatch` with a tag that already exists, to reformat an old Release)
+legitimately runs on exactly that tree — a stricter rule would block the path this document tells
+you to take. The symptom still surfaces, one step later: the download table's URLs are built from
+the tag while the asset names come from the header, so tagging `v1.6.0` over a `1.5.3-dev` tree
+publishes a table of 404s.
+
+`check_doc_versions.py` has a `--this-is-a-release` flag ("judge by release rules, ignoring the
+header's flag") that would be the right tool for the strict form of this assertion, but **it has
+no call sites** — not in CI, not in the workflows. It was added for manual use and never wired in.
+
+**`--tag v1.0.0` cannot produce a body.** `RELEASE.md` has no `v1.0.0` section — that tag predates
+the per-version sections, and it has no GitHub Release either — so `release_notes.py` exits 1 with
+that reason. Every tag that *does* have a Release slices fine: `v1.1.0` through `v1.5.0` were each
+verified against the live asset list, including `v1.1.0`, whose heading uses the older
+`## 新增模块 (New in v1.1.0)` shape instead of `## vX.Y.Z 重点` (the tool matches on "the heading
+contains the version marker", not on the heading's wording, for exactly this reason).
 
 **macOS cannot run this chain.** `package_release.py` has no macOS key in its `PLATFORMS` table,
 so there is no macOS leg and no macOS package. The library itself builds on macOS — see
@@ -206,7 +246,8 @@ controls.
 
 ## See also
 
-- [`RELEASE.md`](../RELEASE.md) — the release history, and the body of each GitHub Release
+- [`RELEASE.md`](../RELEASE.md) — the release history, and the source each Release body is sliced from
+- [`tests/tools/release_notes.py`](../tests/tools/release_notes.py) — the slicer; `--self-test` is its shape table
 - [`build-guide.md`](build-guide.md) — the switches, including the static-build recipe
 - [`testing-guide.md`](testing-guide.md) — what the legs' test steps actually run
 - [`ci-guide.md`](ci-guide.md) — the CI job matrix for ordinary pushes

@@ -1237,7 +1237,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Release 正文取 RELEASE.md 里这一版的段落，所以需要完整历史/工作区
+          # 正文由 `release_notes.py` 从工作区里的 `RELEASE.md` 现切 —— 切的是
+          # **那份文件里的段落**，不是 git 历史，所以 depth 1 就够（这里曾经写着
+          # "需要完整历史"，与实际的 1 自相矛盾）。
           fetch-depth: 1
 
       - uses: actions/download-artifact@v4
@@ -1278,6 +1280,25 @@ jobs:
               sys.exit(1)
           PY
 
+      # `RELEASE.md` 是**归档**，不是任何一版的正文（见该文件顶上的注释）。正文按
+      # tag 现切：下载表 + 这一版那个 `## vX.Y.Z 重点` 小节 + 指向 CHANGELOG.md。
+      # 此前是把整份八百多行的 RELEASE.md 当正文 —— 每次发版贴的都是同一份，读的人
+      # 得自己在里面找"这一版新增了什么"，而这一版有哪六个包、点哪个，文件里没有。
+      #
+      # **无条件跑**：dry_run 也要跑。空转的全部意义就是排练这条链，而切片恰恰是
+      # 最可能在发版当天才第一次跑的一步。
+      - name: Build release notes from RELEASE.md
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          python3 tests/tools/release_notes.py --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/release-notes.md"
+          # 退出码 0 生成成功 / 1 判据红了（缺该 tag 的小节、tag 与版本头不符）/
+          # 3 前提不满足（RELEASE.md 读不到…）。Actions 里非 0 一律失败，但 3 是
+          # **「没判」而不是「绿」** —— 别看到 3 以为可以放行。
+          echo "---- $RUNNER_TEMP/release-notes.md ----"
+          cat "$RUNNER_TEMP/release-notes.md"
+          echo "---- 共 $(wc -l < "$RUNNER_TEMP/release-notes.md") 行 ----"
+
       - name: Create / update release
         if: ${{ !inputs.dry_run }}
         env:
@@ -1287,9 +1308,9 @@ jobs:
           echo "tag=$TAG"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，更新标题与正文"
-            gh release edit "$TAG" --title "libuvcpp $TAG" --notes-file RELEASE.md
+            gh release edit "$TAG" --title "libuvcpp $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
-            gh release create "$TAG" --title "libuvcpp $TAG" --notes-file RELEASE.md
+            gh release create "$TAG" --title "libuvcpp $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
           # --clobber：重跑时覆盖同名资产，让这条流程幂等
           gh release upload "$TAG" dist/*.zip --clobber
