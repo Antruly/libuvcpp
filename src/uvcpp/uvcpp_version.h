@@ -17,7 +17,7 @@
 #define UVCPP_VERSION_PATCH 1
 
 // 0 = 非发布版；1 = 发布版
-#define UVCPP_VERSION_IS_RELEASE 0
+#define UVCPP_VERSION_IS_RELEASE 1
 
 // 可选后缀（例如用于构建元信息），默认为空字符串
 #define UVCPP_VERSION_SUFFIX ""
