@@ -17,7 +17,41 @@
 - **版本**：`1.5.3-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
----
+## 下载
+
+<!-- downloads:start -->
+最新版本是 **v1.5.0**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
+全部公开头文件、`uvcpp.pc` 与 CMake 包配置，旁边不需要再放任何 DLL 或 `.so`。
+某一版的包里到底开了哪些模块，按版本记在 [CHANGELOG.md](./CHANGELOG.md) 里。
+
+| 平台 | 工具链 | 包 |
+|---|---|---|
+| Windows x64 | MSVC 2022 | [libuvcpp-1.5.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-msvc-x64.zip) · 14.9 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.5.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-msvc-arm64.zip) · 14.3 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.5.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-mingw-x64.zip) · 18.5 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.5.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-mingw-arm64.zip) · 15.1 MB |
+| Linux x64 | GCC | [libuvcpp-1.5.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-linux-x64.zip) · 18.4 MB |
+| Linux arm64 | GCC | [libuvcpp-1.5.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-linux-arm64.zip) · 18.8 MB |
+
+更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
+包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
+<!-- downloads:end -->
+
+## 目录
+
+- [下载](#下载)
+- [概述](#概述)
+- [功能特性](#功能特性)
+- [文档](#文档)
+- [编译要求](#编译要求)
+- [构建](#构建)
+- [快速入门](#快速入门)
+- [测试](#测试)
+- [多循环横向扩展](#多循环横向扩展)
+- [项目结构](#项目结构)
+- [CI 与贡献](#ci-与贡献)
+- [变更日志](#变更日志)
+- [许可证](#许可证)
 
 ## 概述
 
@@ -45,8 +79,6 @@ libuvcpp 在 libuv 的事件循环、句柄和请求之上提供了一层薄而�
 │ uvcpp core   │  ← uvcpp_buf, uvcpp_thread, uvcpp_alloc, ...
 └────────────┘
 ```
-
----
 
 ## 功能特性
 
@@ -106,34 +138,18 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
 | `uvcpp_ws_frame` | 帧结构体，opcode、mask、close-code 辅助方法 |
 | `uvcpp_http_common` | HTTP 方法/状态码枚举、版本枚举（HVER_10/11/20）、header 辅助函数 |
 
-**可选功能**（需显式开启，不会自动启用）：
+**可选功能** —— 每一个都要显式开，`UVCPP_BUILD_WEB=ON` 一个都不会替你打开：
 
-- `UVCPP_ENABLE_ZLIB=ON` — WebSocket 压缩扩展（RFC 7692, Per-Message Deflate）
-- `UVCPP_ENABLE_OPENSSL=ON` — HTTPS/WSS 通过 SSL/TLS 模块
-- `UVCPP_ENABLE_NGHTTP2=ON` — HTTP/2（RFC 9113），基于
-  [nghttp2](https://github.com/nghttp2/nghttp2)（静态链入）。需要
-  `UVCPP_ENABLE_OPENSSL=ON`（缺了强制关）—— 本库的 h2 **只走 TLS + ALPN**：
-  不做 h2c、不做 prior-knowledge、不做 RFC 8441、不做 `:protocol`。它**默认关，
-  且没有任何自动升级**：`uvcpp_http_server` 要 `set_http2_enabled(true)` **并且**在
-  SSL 上下文上显式 `set_alpn_select_protos({"h2","http/1.1"})`；`uvcpp_http_client`
-  只要 `set_http2_enabled(true)`（ALPN 名单由 `connect()` 每条连接现拼）；
-  `uvcpp_web_app` 那两层都已经替你接好。详见
-  [webapp 指南 §13](doc/webapp-guide.md#13-http2)。
-- `UVCPP_ENABLE_QUIC=ON` — QUIC 传输（RFC 9000），基于
-  [ngtcp2](https://github.com/ngtcp2/ngtcp2)（静态链入），在 **net 层**。需要
-  `UVCPP_ENABLE_OPENSSL=ON` **以及**一份**带 QUIC API 的 OpenSSL ≥ 3.2**，再加上
-  `UVCPP_BUILD_NET=ON`（三条缺一即强制关 —— 没有明文 QUIC 这回事）。**1.4.1 起它是
-  一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时都通了。HTTP/3 架在它
-  上面 —— 见下一条。详见 [doc/quic-guide.md](doc/quic-guide.md)。
-- `UVCPP_ENABLE_HTTP3=ON` — **web 层**的 HTTP/3（RFC 9114），解析用
-  [nghttp3](https://github.com/ngtcp2/nghttp3)（注意组织是 `ngtcp2`，不是 `nghttp2`），
-  跑在 QUIC 传输之上，两者都静态链入。需要 `UVCPP_ENABLE_QUIC=ON` 与
-  `UVCPP_BUILD_WEB=ON`（缺一即强制关闭）。**1.4.1 起 `uvcpp_http_client` /
-  `uvcpp_http_server` 透明地说它** —— 客户端 `set_http3_enabled(true)`，服务端
-  `listen_quic()`，而路由表、处理函数签名、`uvcpp_http_response` 与 h1/h2 是**同
-  一份**。HTTP/3 跑在 **UDP 自己的 socket 上**，所以 **HTTP/1.1 与 HTTP/2 一个字节
-  没动**（开关关掉时 h1 那条路的编译命令与符号尺寸逐字节相同）。详见
-  [doc/http3-guide.md](doc/http3-guide.md)。
+| 开关 | 加上什么 |
+|---|---|
+| `UVCPP_ENABLE_ZLIB` | WebSocket 压缩扩展（RFC 7692, Per-Message Deflate） |
+| `UVCPP_ENABLE_OPENSSL` | HTTPS / WSS |
+| `UVCPP_ENABLE_NGHTTP2` | HTTP/2（RFC 9113）—— 只走 TLS + ALPN，不做 h2c，且不显式开就不升级 |
+| `UVCPP_ENABLE_QUIC` | net 层的 QUIC 传输（RFC 9000）—— 需要带 QUIC API 的 OpenSSL ≥ 3.2 |
+| `UVCPP_ENABLE_HTTP3` | web 层的 HTTP/3（RFC 9114），跑在自己的 UDP socket 上，所以 HTTP/1.1 与 HTTP/2 一个字节没动 |
+
+每个开关**要求什么**、缺前置时是被强制关掉还是让配置失败，看下面的
+[CMake 选项](#cmake-选项)；它在运行时要付什么代价，看 [文档](#文档)里对应的那一篇。
 
 ### Web 应用框架（`src/webapp/`）— `UVCPP_BUILD_WEBAPP=ON`
 
@@ -196,13 +212,13 @@ int main() {
 | `uvcpp_ssl` | 每连接 SSL 封装，`handshake()`/`read()`/`write()`/`shutdown()` |
 | `uvcpp_ssl_common` | `tls_version`, `tls_mode`, `tls_verify_mode`, `tls_cert_info` 枚举/结构体 |
 
-### 模块指南
+## 文档
 
-上面每张表是**有什么类**；下面这几篇讲**怎么用** —— 典型流程、错误处理、以及
-头注释与实现对不上的地方。全部在 `doc/` 下，**每一段的示例都被 CI 逐条编译过**
+上面每张表是**有什么类**；下面这几篇讲**怎么用** —— 典型流程、错误处理、以及头注释与
+实现对不上的地方。全部在 `doc/` 下，**每一段的示例都被 CI 逐条编译过**
 （`tests/tools/check_doc_snippets.py`），可以照抄。
 
-| 模块 | 指南 | 讲什么 |
+| 领域 | 指南 | 讲什么 |
 |---|---|---|
 | 低层（handle + req） | [doc/lowlevel-guide.md](doc/lowlevel-guide.md) | 事件循环、句柄与请求的生命周期、`<uvcpp.h>` 到底聚合了什么 |
 | JSON（核心） | [doc/json-guide.md](doc/json-guide.md) | 手写 JSON 响应：转义契约、失败语义、各种上限，以及怎么接到响应层 |
@@ -210,25 +226,29 @@ int main() {
 | net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP 客户端与服务端；异步与同步双模式，以及两者不能混用的地方 |
 | web（HTTP 半边） | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP 服务端/客户端/解析器/静态服务；关服为什么是两步 |
 | web（WS 半边） | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket 握手、帧、关闭码 |
-| webapp（框架） | [doc/webapp-guide.md](doc/webapp-guide.md) | 路由、中间件、请求响应、上传、静态服务、WebSocket、日志 |
+| webapp（框架） | [doc/webapp-guide.md](doc/webapp-guide.md) | 路由、中间件、请求响应、上传、静态服务、WebSocket、日志 —— 以及 §19 的多循环横向扩展 |
 | webapp（支撑类型） | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | 框架底下那七个类型：连接身份、web 工具函数、MIME、multipart、文件下发、每请求上下文、控制台日志 |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS 上下文与每连接封装 —— 头文件最短、最容易写错的一层 |
-| http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法；实现进度与折衷另见 [doc/http2-status.md](doc/http2-status.md) |
-| quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出"还没做"的清单 |
+| http2 | [doc/http2-guide.md](doc/http2-guide.md) | 低层会话/连接层的用法 |
+| http2（现状） | [doc/http2-status.md](doc/http2-status.md) | HTTP/2 目前支持什么、不支持什么，以及那些取舍的由来 |
+| quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出「还没做」的清单 |
 | http3 | [doc/http3-guide.md](doc/http3-guide.md) | 作为 web 层第二条传输的 HTTP/3：它向 QUIC 要的那三样扩展、API 形状（会话 vs 连接、三条关键流）、CMake 接线，以及为什么它不影响 HTTP/1.1 |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| db（SQLite / MySQL / PostgreSQL） | [doc/db-guide.md](doc/db-guide.md) | 一个连接一个 `uvcpp_db_client`、三个后端、连接串的语法、返回码表、共用套件钉住的那一条跨后端契约（以及三家**真不一样**的三处）、参数绑定、事务与"事务里不重试"的规矩、`DECIMAL` 要付的代价、建在同一条连接上的异步门面（`uvcpp_db_async`，回调 + future）与可选的连接池，以及怎么对着真服务端跑测试 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.5.3 起八片全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db，共 402 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`（db 那一片还要它自己的 `-DUVCPP_ENABLE_DB=ON` 加一个后端）。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份 C# 绑定（覆盖前七片那 321 个，db 那 81 个是如实列出的缺口）|
+| db（SQLite / MySQL / PostgreSQL） | [doc/db-guide.md](doc/db-guide.md) | 一个连接一个 `uvcpp_db_client`、三个后端、连接串的语法、返回码表、共用套件钉住的那一条跨后端契约（以及三家**真不一样**的三处）、参数绑定、事务与「事务里不重试」的规矩、`DECIMAL` 要付的代价、建在同一条连接上的异步门面（`uvcpp_db_async`，回调 + future）与可选的连接池，以及怎么对着真服务端跑测试 |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.5.3 起八片全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db，共 402 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`（db 那一片还要它自己的 `-DUVCPP_ENABLE_DB=ON` 加一个后端）。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份 C# 绑定（覆盖前七片那 321 个，db 那 81 个是如实列出的缺口） |
+| 构建与打包 | [doc/build-guide.md](doc/build-guide.md) | 每个开关是什么意思、开关之间怎么组合、构建树、平台依赖、仓库结构，以及值得认识的失败 |
+| 性能实测 | [doc/benchmark.md](doc/benchmark.md) | 每连接内存、吞吐与稳定性的实测读数 |
+| 压测装置 | [doc/benchmark-rig.md](doc/benchmark-rig.md) | 一次压测该怎么定档、怎么钉核，以及什么样的扩展性读数算数而不是噪声 |
+| 测试 | [doc/testing-guide.md](doc/testing-guide.md) | 测试的三层、文件名即过滤键、`tests/tools/` 的脚本索引，以及门禁退出码约定 |
+| CI | [doc/ci-guide.md](doc/ci-guide.md) | 普通推送的 CI 作业矩阵，以及它依赖的 runner 侧装置 |
+| 发布流程 | [doc/release-process.md](doc/release-process.md) | 发布怎么出、六条构建腿各产出什么，以及这条链**没有**检查什么 |
+| 多循环设计 | [doc/multiloop-design.md](doc/multiloop-design.md) | `set_loops(n)` 背后的推演：两种落点形状、哪些东西必须按循环切开，以及还没做的那部分 |
+| 多进程设计 | [doc/worker-process-design.md](doc/worker-process-design.md) | `set_worker_processes(n)` 背后的推演：为什么要重跑 `main()`、POSIX 与 Windows 两条路，以及 Windows 转手路径上那个未决的 libuv 层缺陷 |
 
-模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
-[doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
-[doc/testing-guide.md](doc/testing-guide.md) 测试分层、
-[doc/ci-guide.md](doc/ci-guide.md) CI 维护、
-[doc/release-process.md](doc/release-process.md) 发布流程与它不检查什么。
-
----
+两篇 `-design.md` 讲的是一个功能**为什么这么设计**，不是怎么用；`-status.md` 与
+`-process.md` 是同一类，只是高一层。
 
 ## 编译要求
 
@@ -238,11 +258,7 @@ int main() {
 - **libuv**：如系统未安装，通过 FetchContent 自动拉取并构建
 - **支持平台**：Windows、Linux、macOS
 
----
-
 ## 构建
-
-### 基本构建（仅核心）
 
 ```bash
 mkdir build && cd build
@@ -251,38 +267,11 @@ cmake --build . --config Release --parallel
 ctest --output-on-failure -C Release
 ```
 
-### 启用 Web 模块（HTTP + WebSocket）
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
-  -DUVCPP_BUILD_WEB=ON
-cmake --build . --config Release --parallel
-```
-
-### 完整构建（Web + SSL + 压缩）
-
-```bash
-# Linux: 先安装系统依赖
-sudo apt-get install libssl-dev zlib1g-dev
-
-cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
-  -DUVCPP_BUILD_WEB=ON \
-  -DUVCPP_ENABLE_OPENSSL=ON \
-  -DUVCPP_ENABLE_ZLIB=ON
-cmake --build . --config Release --parallel
-```
-
-### 加上 Web 应用框架
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
-  -DUVCPP_BUILD_WEB=ON \
-  -DUVCPP_BUILD_WEBAPP=ON \
-  -DUVCPP_BUILD_EXAMPLES=ON
-cmake --build . --config Release --parallel
-# 可运行示例（自校验）：
-./examples/Release/webapp_demo
-```
+默认只有核心。再加一个模块就是再添一个 `-D` —— `-DUVCPP_BUILD_WEB=ON` 是 HTTP 与
+WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` 是应用框架，
+`-DUVCPP_ENABLE_HTTP3=ON` 是 HTTP/3。值得照抄的那四种配置、它们背后的平台依赖
+（QUIC 与 HTTP/3 要一份带 QUIC API 的 OpenSSL ≥ 3.2），以及开关之间怎么互相牵制：
+[doc/build-guide.md](doc/build-guide.md)。
 
 ### CMake 选项
 
@@ -329,9 +318,7 @@ cmake --build . --config Release --parallel
 `UVCPP_ENABLE_WSDL` 同理，在 `UVCPP_BUILD_WEBAPP=OFF` 时**强制关闭**（它建在 webapp
 之上）。
 
----
-
-## 快速入门示例
+## 快速入门
 
 ### TCP Echo 服务端
 
@@ -392,132 +379,27 @@ int main() {
 }
 ```
 
-### WebSocket 客户端
-
-```cpp
-#include "web/uvcpp_ws_client.h"
-#include <iostream>
-
-int main() {
-    uvcpp::uvcpp_ws_client client;
-
-    client.connect("ws://echo.websocket.org/chat",
-        [](uvcpp::uvcpp_ws_connection* conn, int err) {
-            if (err) return;
-
-            conn->on_text([](const std::string& msg) {
-                std::cout << "回显: " << msg << std::endl;
-            });
-
-            const std::string msg = "Hello WebSocket!";
-            conn->send_text(msg.c_str(), msg.size());
-        });
-
-    client.run();
-    return 0;
-}
-```
-
-### WebSocket 服务端
-
-```cpp
-#include "web/uvcpp_ws_server.h"
-#include <iostream>
-
-int main() {
-    uvcpp::uvcpp_ws_server server;
-    server.bind("127.0.0.1", 8080);
-
-    server.on_connection([](uvcpp::uvcpp_ws_connection* conn) {
-        std::cout << "WS 客户端已连接" << std::endl;
-
-        conn->on_text([conn](const std::string& msg) {
-            std::cout << "收到: " << msg << std::endl;
-            const std::string reply = "回显: " + msg;
-            conn->send_text(reply.c_str(), reply.size());
-        });
-
-        // 会话结束是 (关闭码, 原因) 两个参数，不是"一个连接指针"。
-        conn->on_close([](uvcpp::ws_close_code code, const std::string& reason) {
-            std::cout << "WS 客户端断开: "
-                      << static_cast<int>(code) << " " << reason << std::endl;
-        });
-    });
-
-    server.listen();
-    server.run();
-    return 0;
-}
-```
-
-### SSL/TLS 服务端
-
-```cpp
-#include "ssl/uvcpp_ssl_context.h"
-#include "net/uvcpp_tcp_server.h"
-
-int main() {
-    // 创建 SSL 上下文
-    uvcpp::uvcpp_ssl_context ssl_ctx(uvcpp::tls_mode::SERVER);
-    ssl_ctx.generate_self_signed("localhost");  // 或 load_certificate_file()
-
-    uvcpp::uvcpp_tcp_server server;
-    server.set_ssl_context(&ssl_ctx);
-    server.bind("127.0.0.1", 8443);
-    // ... set_read_callback, listen, run
-}
-```
-
----
+WebSocket 客户端与服务端、TLS 服务端，以及一个完整的 web 应用，都在
+[文档](#文档)里 —— webapp 那个例子就在上面的「功能特性」里。
 
 ## 测试
 
 ```bash
-# 构建并测试
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON
 cmake --build build --config Release --parallel
-
-# 运行全部测试
 ctest --test-dir build --output-on-failure -C Release
-
-# 仅运行 web 模块测试
-ctest --test-dir build -C Release -R "web_"
-
-# 排除特定测试（test_shutdown_func 约 1% 概率失败——是 flake 不是挂死，详见 doc/ci-guide.md §4）
-ctest --test-dir build -C Release --exclude-regex "test_shutdown_func"
 ```
 
-### 可选门禁：完整页堆（PageHeap）跑一遍全量
+三层 —— `tests/unit/`、`tests/functional/` 与 `tests/expand/` —— 加上 `tests/tools/`
+下的那些门禁脚本。文件名就是过滤键（`-R "web_"`）；`test_shutdown_func` 是已知的约 1%
+flake，不是挂死；只有 Windows 能跑的页堆门禁（`tests/tools/run_pageheap_gate.py`，
+至今唯一抓到过释放后使用的门禁）是可选的、而且明显更慢。这些连同退出码约定 ——
+**`3` 是「没判」，不是「绿」** —— 都写在 [doc/testing-guide.md](doc/testing-guide.md)。
 
-裸跑时 `free` 掉的内存页还在、内容还是旧的，**释放后使用是静默的**。完整页堆把
-释放过的块立刻 unmap，同一个读当场变成访问违例 —— 它曾在普通构建 / 无内存池构建 /
-单元测试三层验收全绿的同时，一次抓出 8 个用例的 use-after-free。
+## 多循环横向扩展
 
-```bash
-# 需要 Windows SDK 的调试工具 gflags.exe（通常在管理员终端里跑）
-python -u tests/tools/run_pageheap_gate.py --tree build-webapp
-```
-
-它先裸跑一遍拿基线，再逐个用例「开页堆 → 回查注册表 → 跑 → 关页堆 → 回查」，
-只把「基线绿、页堆崩」算抓到。退出码 `0` 全绿、`1` 门禁不通过、`3` 门禁自身没跑成
-（基线红 / 页堆没设上 / 没关干净 / 抓到的是过期 DLL）。
-
-**它显著变慢**，所以不进 ctest 默认套件。页堆在每个用例的 `finally` 里关掉，另有
-`atexit` 与 `Ctrl-C` 兜底 —— 残留会让这台机器上后面所有测试都慢一个量级。
-
-测试覆盖：
-- **单元测试**：`tests/unit/` — 句柄类型、请求类型、uvcpp 工具类
-- **功能测试**：`tests/functional/` — 所有模块的运行时行为
-- **Expand 测试**：`tests/expand/` — 内存池分配测试
-- **测试工具**：`tests/tools/` — 变异脚本与门禁（变异如 `mutate_ws_client.py`、
-  `run_tcp_client_dtor_mutation.py`；门禁如 `run_pageheap_gate.py`）
-
----
-
-## 多循环横向扩展（`set_loops`）
-
-一条事件循环最多只能占满一个核。那个核吃满之后，`set_loops(n)` 会在**同一个进程内**起
-**1 条接受者循环 + n−1 条工作循环**：接受这条路留在一个线程上，连接的 I/O 摊到各条工作循环。
+一条事件循环最多只能占满一个核。`uvcpp_web_app::set_loops(n)` 在**同一个进程内**起
+**1 条接受者循环 + n−1 条工作循环**，把连接的 I/O 摊到各条工作循环上：
 
 ```cpp
 #include <webapp/uvcpp_web_app.h>
@@ -543,94 +425,39 @@ int main() {
 }
 ```
 
-打开它之前值得知道这几条：
+`set_loops()` 返回 `int`，所以接不到 `set_host(...).set_port(...)` 这条链上；而且它必须
+和路由注册一样**在 `start()` 之前**调用。`n == 1` 与「从不调用它」逐字节相同；`n > 1`
+时 `run(md)` 会被拒，改用 `start()` + `join()`。
 
-- **在 `start()` / `run()` 之前调用。** 路由注册也要在 `start()` 之前 —— `n > 1` 时这条
-  从「建议」变成「必须」。
-- **`set_loops` 返回 `int`，所以不能接在 `set_host(...).set_port(...)` 这条链上。**
-  成功返 `0`；`n` 不在 `1..64` 内返 `UV_EINVAL`；运行时已经起来过返 `UV_EBUSY`。
-- **`n == 1` 与「从不调用它」逐字节相同** —— 不建格子、不装钩子、不多起线程。
-  档位拧到 1 不付任何代价。
-- **`n > 1` 时 `run(md)` 会被 `UV_EINVAL` 拒掉。** 用 `start()` / `start_background()`，
-  收尾用 `stop()` 与 `join()`。
-- **连接落在哪条循环上是平台性质，而且可以问出来。** `n > 1` 时 `is_fanout()`
-  回答这件事：平台接受 `UV_TCP_REUSEPORT`（Linux）时每条循环**含下标 `0`** 各自绑
-  一个监听口抢同一个端口，内核按四元组哈希把新连接分给它们 ⇒ `connection_count_at(0)`
-  通常是**非 0**，而除"每条连接只被记在一格"之外不作任何保证；Windows（以及那个
-  标志被拒的平台）上下标 `0` 是纯接受者，按显式轮转把每条连接交给 `1..n-1`，所以
-  它恒为 0。`loop_count()` 报一共有几条循环，`connection_count_at(i)` 报每格各有多少。
-  **想在 Linux 上验另一条腿**：`set_handoff_forced(true)`（**必须在 `set_loops()` 之前调**）
-  强制走转手 —— 这是**测试用的口子**，把内核分流换成用户态转手，生产上别用。
-
-**→ 档位怎么选、核怎么钉、以及什么样的扩展性读数算数或不算数：
-[doc/benchmark-rig.md](doc/benchmark-rig.md)。**
-
----
+连接落在哪条循环上是**平台性质** —— Linux 上是内核分流，Windows 上是显式转手 ——
+`is_fanout()` 告诉你这次是哪一种。逐循环读数、停机那几条规矩、以及用之前该先知道的
+例外，都在 [webapp 指南 §19](doc/webapp-guide.md#19-横向扩展多循环set_loops)；为什么是这个
+形状看 [doc/multiloop-design.md](doc/multiloop-design.md)；档位怎么选、核怎么钉看
+[doc/benchmark-rig.md](doc/benchmark-rig.md)。
 
 ## 项目结构
 
 ```
 libuvcpp/
-├── src/
-│   ├── uvcpp/     # 核心工具（buf, thread, version, alloc, ...）
-│   ├── handle/    # libuv 句柄封装（loop, tcp, udp, timer, ...）
-│   ├── req/       # libuv 请求封装（write, connect, fs, work, ...）
-│   ├── expand/    # 内存池（page heap, span, enterprise allocator）
-│   ├── net/       # TCP/UDP 客户端/服务端
-│   ├── web/       # HTTP 客户端/服务端, WebSocket 客户端/服务端, 帧解析器
-│   ├── webapp/    # Web 应用框架（路由、中间件、静态、上传、WS 客户端、日志）
-│   ├── http2/     # HTTP/2 会话/连接层、nghttp2 胶水、ALPN（uvcpp_h2_nghttp2.h 是私有头）
-│   ├── quic/      # QUIC 传输、ngtcp2 胶水（uvcpp_quic_ngtcp2.h / uvcpp_quic_session.h 是私有头）
-│   ├── http3/     # HTTP/3 会话/连接层、nghttp3 胶水（uvcpp_h3_nghttp3.h / uvcpp_h3_session.h 是私有头）
-│   └── ssl/       # SSL/TLS 上下文和连接封装
-├── tests/
-│   ├── unit/      # 单元测试
-│   ├── functional/# 功能/集成测试
-│   ├── tools/     # 测试工具（变异脚本等）
-│   └── expand/    # 内存池测试
-├── examples/      # 可运行示例（webapp_demo）
-├── doc/           # 文档
-│   ├── benchmark.md       # 每连接内存、吞吐与稳定性实测
-│   ├── build-guide.md     # 各个 CMake 开关、构建树、平台依赖
-│   ├── capi-guide.md      # C ABI（uvcpp_c_*）：ABI 契约、提供什么、不提供什么
-│   ├── ci-guide.md        # CI 维护指南
-│   ├── expand-guide.md    # 内存池 / 页堆 / span 的功能说明
-│   ├── http2-guide.md     # HTTP/2 低层会话与连接层的用法
-│   ├── http2-status.md    # HTTP/2 支持现状
-│   ├── http3-guide.md     # web 层的 HTTP/3：它要的 QUIC 扩展、API 形状、CMake 接线、h1 不回归
-│   ├── json-guide.md      # 手写 JSON 构造：转义契约与它的边界
-│   ├── json-reflect-guide.md # JSON 反射：一个宏标出字段表，两个方向共用
-│   ├── lowlevel-guide.md  # 事件循环、句柄与请求（地基）
-│   ├── net-guide.md       # TCP/UDP 客户端与服务端
-│   ├── quic-guide.md      # QUIC 传输：构建契约、API 形状、以及没做的那一列
-│   ├── release-process.md # 发布怎么出，以及这条链**没有**检查什么
-│   ├── soap-guide.md      # SOAP 信封、Fault 形状、从 binding 推派发键
-│   ├── ssl-guide.md       # TLS 上下文与每连接封装
-│   ├── testing-guide.md   # 测试分层、文件名即过滤键、tests/tools 索引
-│   ├── web-http-guide.md  # web 层的 HTTP 半边
-│   ├── web-ws-guide.md    # web 层的 WebSocket 半边
-│   ├── webapp-guide.md    # web 应用框架指南
-│   ├── webapp-support-guide.md # webapp 底下那些没被框架指南覆盖的类型
-│   └── wsdl-guide.md      # WSDL 1.1 文档模型、QName 查询、发布与生成
-├── cmake/         # CMake 配置模板
-├── .github/workflows/  # 一个平台一个 workflow 文件，文件内按功能分格
-├── CMakeLists.txt
-├── CONTRIBUTING.md     # 从 clone 到跑通测试，以及本仓的开发约定
-├── README.md
-├── README.zh.md
-└── RELEASE.md          # 发布说明 / 历史
+├── src/          # 库本体，一个模块一个目录
+├── tests/        # 单元/功能/内存池测试，工具脚本在 tools/
+├── examples/     # 可运行示例
+├── bench/        # 压测靶场
+├── bindings/     # C ABI 的 C# 绑定
+├── doc/          # 「文档」一节列出的全部指南
+└── cmake/        # CMake 配置模板
 ```
 
----
+逐个模块带注释的完整树在 [doc/build-guide.md](doc/build-guide.md#repository-layout)。
 
 ## CI 与贡献
 
-每次推送和 PR 都会通过 GitHub Actions 运行 CI。详见 [doc/ci-guide.md](doc/ci-guide.md)
-了解 CI 维护规范 — 修改 CI 的贡献者务必先阅读。
+每次推送和 PR 都会通过 GitHub Actions 跑 CI：四个 workflow，一个平台一个
+（`ci-linux-ubuntu.yml`、`ci-windows-msvc.yml`、`ci-mingw64.yml`、`ci-macos.yml` —— 就是
+页首那四枚徽章），每个文件内部按功能分格。改之前请先读 [doc/ci-guide.md](doc/ci-guide.md)。
 
-欢迎贡献！请提交 issue 或 PR，保持修改小而专注，并遵循现有代码风格。
-
----
+欢迎贡献 —— [CONTRIBUTING.md](./CONTRIBUTING.md) 是「从 clone 到跑绿」的路径与本仓的
+约定；安全问题走 [SECURITY.md](./SECURITY.md)，不要开公开 issue。
 
 ## 变更日志
 
@@ -640,8 +467,6 @@ libuvcpp/
 它原先在这里，已经长到约 740 行。留在这里的是下载表、功能概览与 CMake 选项，其余一律
 链出去。逐版本的发布叙事（这一版新增什么、换二进制会坏什么）在
 [RELEASE.md](./RELEASE.md)。
-
----
 
 ## 许可证
 

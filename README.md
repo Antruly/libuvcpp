@@ -17,7 +17,43 @@ object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 645
 - **Version**: `1.5.3-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
----
+## Download
+
+<!-- downloads:start -->
+The newest release is **v1.5.0**. Six prebuilt packages, each one self-contained — the
+Release and Debug builds of the library, all the public headers, `uvcpp.pc` and the CMake
+package files, and no extra DLLs or `.so` files to ship alongside. Which modules a given
+package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
+
+| Platform | Toolchain | Package |
+|---|---|---|
+| Windows x64 | MSVC 2022 | [libuvcpp-1.5.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-msvc-x64.zip) · 14.9 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.5.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-msvc-arm64.zip) · 14.3 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.5.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-mingw-x64.zip) · 18.5 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.5.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-mingw-arm64.zip) · 15.1 MB |
+| Linux x64 | GCC | [libuvcpp-1.5.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-linux-x64.zip) · 18.4 MB |
+| Linux arm64 | GCC | [libuvcpp-1.5.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.5.0/libuvcpp-1.5.0-linux-arm64.zip) · 18.8 MB |
+
+Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
+What a package contains, and why it is laid out that way:
+[doc/release-process.md](doc/release-process.md).
+<!-- downloads:end -->
+
+## Table of contents
+
+- [Download](#download)
+- [Overview](#overview)
+- [Features](#features)
+- [Documentation](#documentation)
+- [Requirements](#requirements)
+- [Build](#build)
+- [Quick Start](#quick-start)
+- [Testing](#testing)
+- [Multi-loop scaling](#multi-loop-scaling)
+- [Project structure](#project-structure)
+- [CI & Contributing](#ci--contributing)
+- [Changelog](#changelog)
+- [License](#license)
 
 ## Overview
 
@@ -45,8 +81,6 @@ application
 │ uvcpp core   │  ← uvcpp_buf, uvcpp_thread, uvcpp_alloc, ...
 └────────────┘
 ```
-
----
 
 ## Features
 
@@ -107,34 +141,20 @@ in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
 | `uvcpp_ws_frame` | Frame struct with opcode, mask, close-code helpers |
 | `uvcpp_http_common` | HTTP method/status enums, version enum (HVER_10/11/20), header helpers |
 
-**Optional features** (opt-in, not auto-enabled):
+**Optional features** — each is opt-in, and none of them is switched on by
+`UVCPP_BUILD_WEB=ON`:
 
-- `UVCPP_ENABLE_ZLIB=ON` — Per-Message Deflate compression (RFC 7692) for WebSocket
-- `UVCPP_ENABLE_OPENSSL=ON` — HTTPS (WSS) via SSL/TLS module
-- `UVCPP_ENABLE_NGHTTP2=ON` — HTTP/2 (RFC 9113) via [nghttp2](https://github.com/nghttp2/nghttp2).
-  Requires `UVCPP_ENABLE_OPENSSL=ON` (force-disabled without it) — h2 is **TLS + ALPN
-  only**: no h2c, no prior knowledge, no RFC 8441, no `:protocol`. It is **off by
-  default and nothing upgrades automatically**: `uvcpp_http_server` needs
-  `set_http2_enabled(true)` **and** an explicit `set_alpn_select_protos({"h2","http/1.1"})`
-  on the SSL context, `uvcpp_http_client` needs `set_http2_enabled(true)` (it builds the
-  per-connection ALPN list itself), and `uvcpp_web_app` wires all of it for you. See
-  [§13 of the webapp guide](doc/webapp-guide.md#13-http2).
-- `UVCPP_ENABLE_QUIC=ON` — QUIC transport (RFC 9000) over [ngtcp2](https://github.com/ngtcp2/ngtcp2),
-  linked static, in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON` **and** an
-  **OpenSSL ≥ 3.2 with the QUIC API**, plus `UVCPP_BUILD_NET=ON` (force-disabled without
-  any of them — there is no cleartext QUIC). As of **1.4.1** it is a real link protocol:
-  handshake, streams, connection close and idle timeout all work. HTTP/3 rides on top of
-  it — see the next bullet. See [doc/quic-guide.md](doc/quic-guide.md).
-- `UVCPP_ENABLE_HTTP3=ON` — HTTP/3 (RFC 9114) in the **web layer**, parsed by
-  [nghttp3](https://github.com/ngtcp2/nghttp3) (note the org: `ngtcp2`, not `nghttp2`)
-  and carried over the QUIC transport, both linked static. Requires
-  `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` (force-disabled without them). As of
-  **1.4.1** `uvcpp_http_client` / `uvcpp_http_server` speak h3 transparently —
-  `set_http3_enabled(true)` on the client, `listen_quic()` on the server — and the
-  routing table, handlers and response type are the same ones h1/h2 use. HTTP/3 runs on
-  **UDP on its own sockets**, so **HTTP/1.1 and HTTP/2 are untouched** (the compile
-  commands and symbol sizes of the h1 path are byte-identical with the switch off). See
-  [doc/http3-guide.md](doc/http3-guide.md).
+| Switch | Adds |
+|---|---|
+| `UVCPP_ENABLE_ZLIB` | Per-Message Deflate compression (RFC 7692) for WebSocket |
+| `UVCPP_ENABLE_OPENSSL` | HTTPS / WSS |
+| `UVCPP_ENABLE_NGHTTP2` | HTTP/2 (RFC 9113) — TLS + ALPN only, no h2c, and nothing upgrades until you ask for it |
+| `UVCPP_ENABLE_QUIC` | The QUIC transport (RFC 9000) in the net layer — needs an OpenSSL ≥ 3.2 with the QUIC API |
+| `UVCPP_ENABLE_HTTP3` | HTTP/3 (RFC 9114) in the web layer, on its own UDP sockets, so HTTP/1.1 and HTTP/2 are untouched |
+
+What each switch *requires*, and when it is force-disabled instead of failing the
+configure, is in [CMake Options](#cmake-options) below. What each one costs at runtime is
+in the matching guide under [Documentation](#documentation).
 
 ### Web app framework (`src/webapp/`) — `UVCPP_BUILD_WEBAPP=ON`
 
@@ -198,14 +218,14 @@ Runnable example: `examples/webapp_demo.cpp`.
 | `uvcpp_ssl` | Per-connection SSL wrapper, `handshake()`/`read()`/`write()`/`shutdown()` |
 | `uvcpp_ssl_common` | `tls_version`, `tls_mode`, `tls_verify_mode`, `tls_cert_info` enums/structs |
 
-### Module guides
+## Documentation
 
-The tables above list **what exists**; the pages below explain **how to use it** —
-typical flows, error handling, and the places where the header comments disagree with
-the implementation. All of them live in `doc/`, and **every code example in them is
-compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy.
+The tables above list **what exists**; the pages below explain **how to use it** — typical
+flows, error handling, and the places where the header comments disagree with the
+implementation. All of them live in `doc/`, and **every code example in them is compiled by
+CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy.
 
-| Module | Guide | What it covers |
+| Area | Guide | What it covers |
 |---|---|---|
 | Low level (handle + req) | [doc/lowlevel-guide.md](doc/lowlevel-guide.md) | The event loop, handle/request lifetimes, and what `<uvcpp.h>` actually aggregates |
 | JSON (core) | [doc/json-guide.md](doc/json-guide.md) | Building a JSON response by hand: the escape contract, sticky failures, limits, and how it meets the response layer |
@@ -213,10 +233,11 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP clients and servers; the async and sync modes, and where they must not be mixed |
 | web (HTTP half) | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP server/client/parser/static server; why shutdown takes two calls |
 | web (WS half) | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket handshake, frames, close codes |
-| webapp (framework) | [doc/webapp-guide.md](doc/webapp-guide.md) | Routing, middleware, request/response, upload, static, WebSocket, logging |
+| webapp (framework) | [doc/webapp-guide.md](doc/webapp-guide.md) | Routing, middleware, request/response, upload, static, WebSocket, logging — and multi-loop scaling in §19 |
 | webapp (support types) | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | The seven types under the framework: connection identity, web utilities, MIME, multipart, file transfer, per-request context, console logging |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS context and per-connection wrapper — the shortest header set and the easiest to get wrong |
-| http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer; for progress and trade-offs see [doc/http2-status.md](doc/http2-status.md) |
+| http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer |
+| http2 (status) | [doc/http2-status.md](doc/http2-status.md) | What HTTP/2 does and does not support yet, and the trade-offs behind that |
 | quic | [doc/quic-guide.md](doc/quic-guide.md) | The QUIC transport: the build contract, why it needs an OpenSSL ≥ 3.2, the API shape, and an honest list of what does not work yet |
 | http3 | [doc/http3-guide.md](doc/http3-guide.md) | HTTP/3 as the web layer's second transport: the three QUIC extensions it needed, the API shape (session vs connection, the three critical streams), the CMake wiring, and why HTTP/1.1 is unaffected by it |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
@@ -224,15 +245,17 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
 | db (SQLite / MySQL / PostgreSQL) | [doc/db-guide.md](doc/db-guide.md) | One `uvcpp_db_client` per connection over three backends, the URL grammar, the status codes, the one cross-backend contract the shared suite enforces (and the three places the backends genuinely differ), parameter binding, transactions and the no-retry-inside-a-transaction rule, what `DECIMAL` costs you, the async facade (`uvcpp_db_async`, callbacks + a future) and the optional connection pool built on the same connection, and how to run the tests against a real server |
 | C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.5.3 completes all eight slices** (foundation + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db, 402 functions); all it needs is `-DUVCPP_ENABLE_CAPI=ON`, and db additionally needs its own `-DUVCPP_ENABLE_DB=ON` plus a backend. **As of 1.5.0 all six release legs ship it**, alongside the C# binding in [`bindings/csharp/`](bindings/csharp/README.md) (which covers the first seven slices, 321 of the 402 — db is a stated gap) |
+| Build & packaging | [doc/build-guide.md](doc/build-guide.md) | What every switch means and how the switches combine, the build trees, the platform dependencies, the repository layout, and the failures worth recognising |
+| Performance | [doc/benchmark.md](doc/benchmark.md) | Measured per-connection memory, throughput and stability |
+| Benchmark rig | [doc/benchmark-rig.md](doc/benchmark-rig.md) | How to size and pin a benchmark run, and which scaling readings are valid rather than noise |
+| Tests | [doc/testing-guide.md](doc/testing-guide.md) | The three test layers, filename-as-filter-key, the `tests/tools/` index, and the gate exit codes |
+| CI | [doc/ci-guide.md](doc/ci-guide.md) | The CI job matrix for ordinary pushes, and the runner-side setup it depends on |
+| Release process | [doc/release-process.md](doc/release-process.md) | How a release is cut, what the six build legs produce, and what the pipeline does not check |
+| Multi-loop design | [doc/multiloop-design.md](doc/multiloop-design.md) | The reasoning behind `set_loops(n)`: the two placement shapes, what had to be split per loop, and what is still open |
+| Multi-process design | [doc/worker-process-design.md](doc/worker-process-design.md) | The reasoning behind `set_worker_processes(n)`: re-running `main()`, the POSIX and Windows paths, and the open libuv-level defect on the Windows hand-off path |
 
-Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
-performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
-tree, [doc/testing-guide.md](doc/testing-guide.md) for the test layers,
-[doc/ci-guide.md](doc/ci-guide.md) for CI maintenance, and
-[doc/release-process.md](doc/release-process.md) for how a release is cut and what that
-pipeline does not check.
-
----
+The two `-design.md` pages are the reasoning behind a feature rather than instructions for
+using it; the two `-status.md`/`-process.md` pages are the same, one level up.
 
 ## Requirements
 
@@ -242,11 +265,7 @@ pipeline does not check.
 - **libuv**: auto-fetched via FetchContent if not found on system
 - **Platforms**: Windows, Linux, macOS
 
----
-
 ## Build
-
-### Basic build (core only)
 
 ```bash
 mkdir build && cd build
@@ -255,38 +274,12 @@ cmake --build . --config Release --parallel
 ctest --output-on-failure -C Release
 ```
 
-### With Web module (HTTP + WebSocket)
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
-  -DUVCPP_BUILD_WEB=ON
-cmake --build . --config Release --parallel
-```
-
-### With Web + SSL + compression (full)
-
-```bash
-# Linux: install system deps first
-sudo apt-get install libssl-dev zlib1g-dev
-
-cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
-  -DUVCPP_BUILD_WEB=ON \
-  -DUVCPP_ENABLE_OPENSSL=ON \
-  -DUVCPP_ENABLE_ZLIB=ON
-cmake --build . --config Release --parallel
-```
-
-### With the web app framework
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON \
-  -DUVCPP_BUILD_WEB=ON \
-  -DUVCPP_BUILD_WEBAPP=ON \
-  -DUVCPP_BUILD_EXAMPLES=ON
-cmake --build . --config Release --parallel
-# runnable example (self-checking):
-./examples/Release/webapp_demo
-```
+Core is all that is on by default; every further module is one more `-D` —
+`-DUVCPP_BUILD_WEB=ON` for HTTP and WebSocket, `-DUVCPP_ENABLE_OPENSSL=ON` for HTTPS,
+`-DUVCPP_BUILD_WEBAPP=ON` for the application framework, `-DUVCPP_ENABLE_HTTP3=ON` for
+HTTP/3. The four configurations worth copying, the platform dependencies behind them (an
+OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches interact:
+[doc/build-guide.md](doc/build-guide.md).
 
 ### CMake Options
 
@@ -334,8 +327,6 @@ is force-disabled the same way for **two** missing prerequisites (`UVCPP_ENABLE_
 or `UVCPP_BUILD_WEB=OFF`), also with its own warning. `UVCPP_ENABLE_WSDL`
 is force-disabled the same way when `UVCPP_BUILD_WEBAPP=OFF`: the module is built on top of
 the framework.
-
----
 
 ## Quick Start
 
@@ -400,135 +391,30 @@ int main() {
 }
 ```
 
-### WebSocket Client
-
-```cpp
-#include "web/uvcpp_ws_client.h"
-#include <iostream>
-
-int main() {
-    uvcpp::uvcpp_ws_client client;
-
-    client.connect("ws://echo.websocket.org/chat",
-        [](uvcpp::uvcpp_ws_connection* conn, int err) {
-            if (err) return;
-
-            conn->on_text([](const std::string& msg) {
-                std::cout << "Echo reply: " << msg << std::endl;
-            });
-
-            const std::string msg = "Hello WebSocket!";
-            conn->send_text(msg.c_str(), msg.size());
-        });
-
-    client.run();
-    return 0;
-}
-```
-
-### WebSocket Server
-
-```cpp
-#include "web/uvcpp_ws_server.h"
-#include <iostream>
-
-int main() {
-    uvcpp::uvcpp_ws_server server;
-    server.bind("127.0.0.1", 8080);
-
-    server.on_connection([](uvcpp::uvcpp_ws_connection* conn) {
-        std::cout << "WS client connected" << std::endl;
-
-        conn->on_text([conn](const std::string& msg) {
-            std::cout << "Received: " << msg << std::endl;
-            const std::string reply = "Echo: " + msg;
-            conn->send_text(reply.c_str(), reply.size());
-        });
-
-        // Session end is (close code, reason) — not the connection pointer.
-        conn->on_close([](uvcpp::ws_close_code code, const std::string& reason) {
-            std::cout << "WS client disconnected: "
-                      << static_cast<int>(code) << " " << reason << std::endl;
-        });
-    });
-
-    server.listen();
-    server.run();
-    return 0;
-}
-```
-
-### SSL/TLS Server
-
-```cpp
-#include "ssl/uvcpp_ssl_context.h"
-#include "net/uvcpp_tcp_server.h"
-
-int main() {
-    // Create SSL context
-    uvcpp::uvcpp_ssl_context ssl_ctx(uvcpp::tls_mode::SERVER);
-    ssl_ctx.generate_self_signed("localhost");  // or load_certificate_file()
-
-    uvcpp::uvcpp_tcp_server server;
-    server.set_ssl_context(&ssl_ctx);
-    server.bind("127.0.0.1", 8443);
-    // ... set_read_callback, listen, run
-}
-```
-
----
+The WebSocket client and server, a TLS server, and a complete web app are in
+[Documentation](#documentation) — the webapp example is in Features, above.
 
 ## Testing
 
 ```bash
-# Build with tests
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUVCPP_BUILD_TESTS=ON
 cmake --build build --config Release --parallel
-
-# Run all tests
 ctest --test-dir build --output-on-failure -C Release
-
-# Run only web module tests
-ctest --test-dir build -C Release -R "web_"
-
-# Run with exclusions (test_shutdown_func fails ~1% of runs — flaky, not hanging; doc/ci-guide.md §4)
-ctest --test-dir build -C Release --exclude-regex "test_shutdown_func"
 ```
 
-### Optional gate: run the whole suite under PageHeap
+Three layers — `tests/unit/`, `tests/functional/` and `tests/expand/` — plus the gate
+scripts in `tests/tools/`. The filename is the filter key (`-R "web_"`),
+`test_shutdown_func` is a known ~1% flake rather than a hang, and the Windows-only
+PageHeap gate (`tests/tools/run_pageheap_gate.py`) — the one gate that has ever caught a
+use-after-free — is optional and markedly slower. All of it, including the exit-code
+convention where **`3` means "not judged", not "green"**:
+[doc/testing-guide.md](doc/testing-guide.md).
 
-On a plain run a freed page is still mapped and still holds the old bytes — **use-after-free is
-silent**. Full PageHeap unmaps a freed block immediately, turning the same read into an access
-violation on the spot. It once caught 8 use-after-free cases while the normal build, the
-no-memory-pool build and the unit-test layer were all green.
+## Multi-loop scaling
 
-```bash
-# Needs gflags.exe from the Windows SDK debugging tools (usually an elevated shell)
-python -u tests/tools/run_pageheap_gate.py --tree build-webapp
-```
-
-It takes a baseline by running the suite plainly first, then goes case by case
-"enable PageHeap → re-read the registry → run → disable → re-read", and only counts
-"green baseline, crashed under PageHeap" as a catch. Exit codes: `0` all green,
-`1` the gate failed, `3` the gate itself could not run (baseline red / PageHeap never took
-effect / did not clean up / it was exercising a stale DLL).
-
-**It is markedly slower**, which is why it is not in the default ctest suite. PageHeap is
-switched off in each case's `finally`, with `atexit` and `Ctrl-C` as backstops — leftovers make
-every later test on the machine an order of magnitude slower.
-
-Test coverage:
-- **Unit tests**: `tests/unit/` — handle types, request types, uvcpp utilities
-- **Functional tests**: `tests/functional/` — runtime behavior for all modules
-- **Expand tests**: `tests/expand/` — memory pool allocation tests
-
----
-
-## Multi-loop scaling (`set_loops`)
-
-One event loop can only ever occupy one core. Once that core is saturated, `set_loops(n)`
-runs **1 acceptor loop + n−1 worker loops** inside a single process: the accept path stays
-on one thread, and connection I/O is spread across the workers.
+One event loop can only ever occupy one core. `uvcpp_web_app::set_loops(n)` runs **1
+acceptor loop + n−1 worker loops** inside a single process, spreading connection I/O
+across the workers:
 
 ```cpp
 #include <webapp/uvcpp_web_app.h>
@@ -554,99 +440,44 @@ int main() {
 }
 ```
 
-Worth knowing before you turn it on:
+`set_loops()` returns `int`, so it does not join the `set_host(...).set_port(...)` builder
+chain, and it has to be called — like route registration — **before `start()`**. `n == 1`
+is byte-for-byte the behaviour of never calling it; with `n > 1`, `run(md)` is rejected and
+you use `start()` + `join()`.
 
-- **Call it before `start()` / `run()`.** Register your routes before `start()` as well —
-  with `n > 1` that stops being advice and becomes a requirement.
-- **`set_loops` returns `int`, so it cannot be chained** onto the
-  `set_host(...).set_port(...)` builder. It returns `0` on success, `UV_EINVAL` when `n`
-  is outside `1..64`, and `UV_EBUSY` if the runtime has already started.
-- **`n == 1` is byte-for-byte the behaviour of never calling it** — no slots, no hooks, no
-  extra thread. Switching the knob on at 1 costs nothing.
-- **With `n > 1`, `run(md)` is rejected with `UV_EINVAL`.** Use `start()` /
-  `start_background()`, then `stop()` and `join()`.
-- **Where a connection lands is a platform property, and you can ask which one you
-  got.** With `n > 1`, `is_fanout()` answers it: on platforms that accept
-  `UV_TCP_REUSEPORT` (Linux) every loop binds its own listener on the same port —
-  **index `0` included** — and the kernel spreads new connections across them by 4-tuple
-  hash, so `connection_count_at(0)` is normally **non-zero** and nothing beyond "each
-  connection is counted in exactly one slot" is promised; on Windows (and anywhere the
-  flag is rejected) index `0` is a pure acceptor that hands every connection to `1..n-1`
-  by explicit rotation, so it stays at zero. `loop_count()` reports how many loops exist
-  and `connection_count_at(i)` how many each holds. **To exercise the other leg on
-  Linux**, `set_handoff_forced(true)` (call it **before** `set_loops()`) forces the handoff
-  shape — a **test-only** hook that trades kernel fan-out for user-space handoff; don't ship it.
+Which loop a connection lands on is a platform property — kernel fan-out on Linux,
+explicit hand-off on Windows — and `is_fanout()` answers which one you got. The readings,
+the shutdown rules and the exceptions worth knowing first are in
+[§19 of the webapp guide](doc/webapp-guide.md#19-横向扩展多循环set_loops); why it is built
+that way is in [doc/multiloop-design.md](doc/multiloop-design.md); sizing and core pinning
+are in [doc/benchmark-rig.md](doc/benchmark-rig.md).
 
-**→ Sizing, core pinning, and what makes a scaling reading valid or invalid:
-[doc/benchmark-rig.md](doc/benchmark-rig.md).**
-
----
-
-## Project Structure
+## Project structure
 
 ```
 libuvcpp/
-├── src/
-│   ├── uvcpp/     # Core utilities (buf, thread, version, alloc, ...)
-│   ├── handle/    # libuv handle wrappers (loop, tcp, udp, timer, ...)
-│   ├── req/       # libuv request wrappers (write, connect, fs, work, ...)
-│   ├── expand/    # Memory pool (page heap, span, enterprise allocator)
-│   ├── net/       # TCP/UDP client/server
-│   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
-│   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
-│   ├── http2/     # HTTP/2 session/connection layers, nghttp2 glue, ALPN (uvcpp_h2_nghttp2.h is private)
-│   ├── quic/      # QUIC transport, ngtcp2 glue (uvcpp_quic_ngtcp2.h / uvcpp_quic_session.h are private)
-│   ├── http3/     # HTTP/3 session/connection layers, nghttp3 glue (uvcpp_h3_nghttp3.h / uvcpp_h3_session.h are private)
-│   └── ssl/       # SSL/TLS context and connection wrapper
-├── tests/
-│   ├── unit/      # Unit tests
-│   ├── functional/# Functional/integration tests
-│   ├── tools/     # Test tooling (e.g. mutation harnesses)
-│   └── expand/    # Memory pool tests
-├── examples/      # Runnable examples (webapp_demo)
-├── doc/           # Documentation
-│   ├── benchmark.md       # Measured per-connection memory, throughput, stability
-│   ├── build-guide.md     # Every CMake switch, build trees, platform deps
-│   ├── capi-guide.md      # The C ABI (uvcpp_c_*): ABI rules, what is provided, what is not
-│   ├── ci-guide.md        # CI maintenance guidelines
-│   ├── expand-guide.md    # Memory pool / page heap / span usage
-│   ├── http2-guide.md     # Using the low-level HTTP/2 session and connection layers
-│   ├── http2-status.md    # HTTP/2 support status
-│   ├── http3-guide.md     # HTTP/3 in the web layer: the needed QUIC extensions, API shape, CMake wiring, h1 non-regression
-│   ├── json-guide.md      # Building JSON by hand: the escape contract and its limits
-│   ├── json-reflect-guide.md # Field-table reflection: both directions, read semantics, limits
-│   ├── lowlevel-guide.md  # Event loop, handles and requests (the foundation)
-│   ├── net-guide.md       # TCP/UDP clients and servers
-│   ├── quic-guide.md      # QUIC transport: build contract, API shape, what is not done
-│   ├── release-process.md # How a release is cut, and what it does not check
-│   ├── soap-guide.md      # SOAP envelopes, fault shapes, dispatch from the binding
-│   ├── ssl-guide.md       # TLS context and per-connection wrapper
-│   ├── testing-guide.md   # Test layers, filename filters, tests/tools index
-│   ├── web-http-guide.md  # The HTTP half of the web layer
-│   ├── web-ws-guide.md    # The WebSocket half of the web layer
-│   ├── webapp-guide.md    # Web app framework guide
-│   ├── webapp-support-guide.md # Types under webapp not covered by the framework guide
-│   └── wsdl-guide.md      # WSDL 1.1 model, QName lookup, publishing, and generating one
-├── cmake/         # CMake config templates
-├── .github/workflows/  # One workflow file per platform, feature matrix inside
-├── CMakeLists.txt
-├── CONTRIBUTING.md     # Clone -> build -> test, plus the repo's conventions
-├── README.md
-├── README.zh.md
-└── RELEASE.md          # Release notes / history
+├── src/          # The library, one directory per module
+├── tests/        # Unit, functional and expand tests, plus the gate scripts in tools/
+├── examples/     # Runnable examples
+├── bench/        # The benchmark rig
+├── bindings/     # C# binding for the C ABI
+├── doc/          # Every guide listed under Documentation
+└── cmake/        # CMake config templates
 ```
 
----
+The full annotated tree, module by module, is in
+[doc/build-guide.md](doc/build-guide.md#repository-layout).
 
 ## CI & Contributing
 
-CI runs on every push and PR via GitHub Actions. See [doc/ci-guide.md](doc/ci-guide.md) for
-the CI maintenance guidelines — contributors modifying the CI must read it first.
+CI runs on every push and PR through GitHub Actions: four workflows, one per platform
+(`ci-linux-ubuntu.yml`, `ci-windows-msvc.yml`, `ci-mingw64.yml`, `ci-macos.yml` — the
+badges at the top of this page), each holding a feature matrix. Read
+[doc/ci-guide.md](doc/ci-guide.md) before changing any of it.
 
-Contributions are welcome. Please open an issue or PR, keep changes focused, and follow
-the existing code style.
-
----
+Contributions are welcome — [CONTRIBUTING.md](./CONTRIBUTING.md) has the clone-to-green
+path and this repository's conventions. A vulnerability goes to [SECURITY.md](./SECURITY.md),
+not to a public issue.
 
 ## Changelog
 
@@ -658,8 +489,6 @@ It used to sit here, at roughly 920 lines. What stays in this README is the down
 the feature summary and the CMake options; everything else links out. The per-release
 narrative — what a version adds, and what breaks if you swap the binary — is in
 [RELEASE.md](./RELEASE.md).
-
----
 
 ## License
 

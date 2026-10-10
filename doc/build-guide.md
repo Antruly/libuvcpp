@@ -327,6 +327,52 @@ with `LNK2019` errors reported inside libcrypto. `tests/functional/CMakeLists.tx
 `crypt32` itself for the SSL cases precisely so that a missing `-D` cannot silently decide
 whether the tests compile.
 
+## Repository layout
+
+```
+libuvcpp/
+├── src/
+│   ├── uvcpp/     # Core utilities (buf, thread, version, alloc, ...)
+│   ├── handle/    # libuv handle wrappers (loop, tcp, udp, timer, ...)
+│   ├── req/       # libuv request wrappers (write, connect, fs, work, ...)
+│   ├── expand/    # Memory pool (page heap, span, enterprise allocator)
+│   ├── net/       # TCP/UDP client/server, the QUIC transport, socket hand-off
+│   ├── web/       # HTTP client/server, WebSocket client/server, frame parser
+│   ├── webapp/    # Web app framework (router, middleware, static, upload, WS client, log)
+│   ├── http2/     # HTTP/2 session/connection layers, nghttp2 glue, ALPN
+│   ├── quic/      # QUIC session/connection layers, ngtcp2 glue
+│   ├── http3/     # HTTP/3 session/connection layers, nghttp3 glue
+│   ├── db/        # One client per connection over SQLite / MySQL / PostgreSQL
+│   ├── ssl/       # SSL/TLS context and connection wrapper
+│   └── wsdl/      # WSDL 1.1 model and SOAP runtime
+├── tests/
+│   ├── unit/      # Unit tests
+│   ├── functional/# Functional/integration tests
+│   ├── expand/    # Memory pool tests
+│   └── tools/     # Gate scripts, mutation drivers, probes, the release packager
+├── examples/      # Runnable examples (webapp_demo)
+├── bench/         # The benchmark rig
+├── bindings/      # C# binding for the C ABI
+├── doc/           # Every guide — the index is the Documentation table in README.md
+├── cmake/         # CMake config templates
+├── .github/       # Workflows, runner-side scripts, issue and PR templates
+├── CMakeLists.txt
+├── CMakePresets.json
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+├── RELEASE.md
+├── README.md / README.zh.md
+└── LICENSE
+```
+
+Not every header in a module directory is public. `tests/tools/package_release.py` copies every
+`.h` under `src/<module>/` **except** a named `PRIVATE_HEADERS` set: the glue layers that name
+third-party types a consumer of the package does not have (`uvcpp_h2_nghttp2.h`,
+`uvcpp_quic_ngtcp2.h`, `uvcpp_quic_session.h`, `uvcpp_h3_nghttp3.h`, `uvcpp_h3_session.h`,
+`uvcpp_wsdl_pugixml.h`) plus two internal contracts (`uvcpp_c_internal.h`,
+`uvcpp_db_driver.h`). The same exclusions are written a second time, as `list(FILTER …)` calls
+in `CMakeLists.txt`, and the two lists have to be changed together.
+
 ## Common failures
 
 | Symptom | Cause | Fix |
