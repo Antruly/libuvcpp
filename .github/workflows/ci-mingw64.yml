@@ -1,4 +1,4 @@
-name: Windows (MinGW64)
+name: CI · Windows · MinGW-w64
 
 # 一平台一个文件 —— 这个文件是**一条工具链**：MSYS2 的 MinGW-w64（发布产物用的
 # 正是它），所以它的测试覆盖不能只靠开发机。四个文件：ci-linux-ubuntu.yml /
@@ -22,7 +22,7 @@ on:
 
 jobs:
   mingw64:
-    name: Windows (MinGW64) / mingw64
+    name: CI · Windows · MinGW-w64 / mingw64
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:

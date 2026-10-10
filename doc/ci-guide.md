@@ -16,13 +16,13 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
-| `.github/workflows/ci-linux-ubuntu.yml` | `db-servers` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / db-servers` | `ubuntu-latest` |
-| `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
-| `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `Windows (MinGW64)` | `Windows (MinGW64) / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `macOS` | `macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `db-servers` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / db-servers` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / config-contract` | `ubuntu-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `CI · Windows · MSVC` | `CI · Windows · MSVC / config-contract` | `windows-2022` |
+| `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `CI · Windows · MinGW-w64` | `CI · Windows · MinGW-w64 / mingw64` | `windows-latest` (MSYS2) |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -857,28 +857,28 @@ checks, commit `34a7162`), so the mapping is exhaustive rather than illustrative
 
 | Old check (`ci.yml`, 19) | New check |
 |---|---|
-| `basic (ubuntu-latest)` | `Linux (Ubuntu) / basic-static` **and** `Linux (Ubuntu) / basic-shared` |
-| `basic (macos-latest)` | `macOS / basic-static` **and** `macOS / basic-shared` |
-| `windows-basic` | `Windows (MSVC) / basic-shared` (the entry carrying `EXPAND=ON`) |
-| `windows-static` | `Windows (MSVC) / basic-static` |
-| `web (ubuntu-latest)` | `Linux (Ubuntu) / web` |
-| `web (macos-latest)` | `macOS / web` |
-| `web (windows-latest)` | `Windows (MSVC) / web` |
-| `ssl (ubuntu-latest)` | `Linux (Ubuntu) / ssl` |
-| `ssl (macos-latest)` | `macOS / ssl` |
-| `ssl (windows-latest)` | `Windows (MSVC) / ssl` |
-| `h2 (ubuntu-latest)` | `Linux (Ubuntu) / h2` |
-| `h2 (macos-latest)` | `macOS / h2` |
-| `h2 (windows-latest)` | `Windows (MSVC) / h2` |
-| `full (ubuntu-latest)` | `Linux (Ubuntu) / full` |
-| `full (macos-latest)` | `macOS / full` |
-| `quic` | `Linux (Ubuntu) / quic` |
-| `mingw64` | `Windows (MinGW64) / mingw64` |
-| `config-contract (ubuntu-latest, linux-x64, g++, python3)` | `Linux (Ubuntu) / config-contract` |
-| `config-contract (windows-2022, msvc-x64, cl, python)` | `Windows (MSVC) / config-contract` |
+| `basic (ubuntu-latest)` | `CI · Linux · Ubuntu / basic-static` **and** `CI · Linux · Ubuntu / basic-shared` |
+| `basic (macos-latest)` | `CI · macOS / basic-static` **and** `CI · macOS / basic-shared` |
+| `windows-basic` | `CI · Windows · MSVC / basic-shared` (the entry carrying `EXPAND=ON`) |
+| `windows-static` | `CI · Windows · MSVC / basic-static` |
+| `web (ubuntu-latest)` | `CI · Linux · Ubuntu / web` |
+| `web (macos-latest)` | `CI · macOS / web` |
+| `web (windows-latest)` | `CI · Windows · MSVC / web` |
+| `ssl (ubuntu-latest)` | `CI · Linux · Ubuntu / ssl` |
+| `ssl (macos-latest)` | `CI · macOS / ssl` |
+| `ssl (windows-latest)` | `CI · Windows · MSVC / ssl` |
+| `h2 (ubuntu-latest)` | `CI · Linux · Ubuntu / h2` |
+| `h2 (macos-latest)` | `CI · macOS / h2` |
+| `h2 (windows-latest)` | `CI · Windows · MSVC / h2` |
+| `full (ubuntu-latest)` | `CI · Linux · Ubuntu / full` |
+| `full (macos-latest)` | `CI · macOS / full` |
+| `quic` | `CI · Linux · Ubuntu / quic` |
+| `mingw64` | `CI · Windows · MinGW-w64 / mingw64` |
+| `config-contract (ubuntu-latest, linux-x64, g++, python3)` | `CI · Linux · Ubuntu / config-contract` |
+| `config-contract (windows-2022, msvc-x64, cl, python)` | `CI · Windows · MSVC / config-contract` |
 
 **New-only checks** (no old counterpart, so nothing to re-point *away* from):
-`Windows (MSVC) / quic` and `macOS / quic` are the legs this batch adds; `basic-shared` /
+`CI · Windows · MSVC / quic` and `CI · macOS / quic` are the legs this batch adds; `basic-shared` /
 `basic-static` are the old single `basic` leg split in two (it becomes *two* required entries
 where there was one).
 

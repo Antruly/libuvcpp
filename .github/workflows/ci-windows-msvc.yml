@@ -1,11 +1,11 @@
-name: Windows (MSVC)
+name: CI · Windows · MSVC
 
 # 一平台一个文件 —— 这个文件里**只有** Windows (MSVC) 这条腿的测试。四个文件：
 # ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
 # MinGW 是**另一个**文件（那是一条不同的工具链、不同的发布产物，见 ci-mingw64.yml）。
 #
 # 文件内按**功能分格**：矩阵里一格一个 feature，格的名字就是 check 名
-# （`Windows (MSVC) / quic`）。骨架只写一次，格与格的差别全在矩阵条目里。
+# （`CI · Windows · MSVC / quic`）。骨架只写一次，格与格的差别全在矩阵条目里。
 #
 # 不设 `concurrency:`：取消一次正在跑的 run 等于**丢一组门禁**。
 #
@@ -19,7 +19,7 @@ on:
 
 jobs:
   windows:
-    name: Windows (MSVC) / ${{ matrix.feature }}
+    name: CI · Windows · MSVC / ${{ matrix.feature }}
     runs-on: windows-latest
     # 90 而不是 60：矩阵没法按条目设 timeout，而这一格里 quic 那格会装 OpenSSL
     # 再配一遍；一条挂死的 Windows 腿因此会烧 90 分钟。接受，写在这里。
@@ -532,7 +532,7 @@ jobs:
   # 这是已知缺口，记在 doc/ci-guide.md §5。
   # ---------------------------------------------------------------------------
   config-contract:
-    name: Windows (MSVC) / config-contract
+    name: CI · Windows · MSVC / config-contract
     # 钉 windows-2022 与 release.yml 的 msvc-x64 一致：windows-latest 现在指向只有
     # VS2026 的镜像，而 ilammy/msvc-dev-cmd 是按 vswhere -latest 找工具链的 ——
     # 让这个 job 的 MSVC 基线跟发布产物那条链不同源，出问题时没人能说清是哪一边的性质。

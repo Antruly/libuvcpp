@@ -1,10 +1,10 @@
-name: Linux (Ubuntu)
+name: CI · Linux · Ubuntu
 
 # 一平台一个文件 —— 这个文件里**只有** Linux (Ubuntu) 这条腿的测试。四个文件：
 # ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
 #
 # 文件内按**功能分格**：矩阵里一格一个 feature，格的名字就是 check 名
-# （`Linux (Ubuntu) / quic`）。骨架只写一次，格与格的差别全在矩阵条目里 ——
+# （`CI · Linux · Ubuntu / quic`）。骨架只写一次，格与格的差别全在矩阵条目里 ——
 # 旋钮是条目里的 `flags`（块序列，`join()` 展开），门禁要的字符串也挂在条目上
 # （`gate_*`），这样"某一格被悄悄删掉"或"门禁串在搬运里变形"都能被
 # tests/tools/check_ci_layout.py 抓到。
@@ -27,7 +27,7 @@ jobs:
   linux:
     # 不给 `name` 的话 GitHub 会把整个 matrix（含 flags 数组）拼进 check 名，
     # 又长又会随任何一行开关变化 —— 而分支保护里记的是这个名字。
-    name: Linux (Ubuntu) / ${{ matrix.feature }}
+    name: CI · Linux · Ubuntu / ${{ matrix.feature }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -881,7 +881,7 @@ jobs:
   # 却连不上"的包然后全绿。这一格不是矩阵，串没地方挂，所以写死在步骤里。
   # ---------------------------------------------------------------------------
   db-servers:
-    name: Linux (Ubuntu) / db-servers
+    name: CI · Linux · Ubuntu / db-servers
     runs-on: ubuntu-latest
     timeout-minutes: 90
     services:
@@ -1093,7 +1093,7 @@ jobs:
   # 这是已知缺口，记在 doc/ci-guide.md §5。
   # ---------------------------------------------------------------------------
   config-contract:
-    name: Linux (Ubuntu) / config-contract
+    name: CI · Linux · Ubuntu / config-contract
     runs-on: ubuntu-latest
     timeout-minutes: 90
     # 脚本打印中文。python 写管道时按 locale 选编码（ubuntu 的 C locale 是

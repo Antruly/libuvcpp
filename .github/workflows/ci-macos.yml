@@ -1,10 +1,10 @@
-name: macOS
+name: CI · macOS
 
 # 一平台一个文件 —— 这个文件里**只有** macOS（Apple clang / arm64）这条腿的测试。
 # 四个文件：ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
 #
 # 文件内按**功能分格**：矩阵里一格一个 feature，格的名字就是 check 名
-# （`macOS / quic`）。骨架只写一次，格与格的差别全在矩阵条目里。
+# （`CI · macOS / quic`）。骨架只写一次，格与格的差别全在矩阵条目里。
 #
 # 不设 `concurrency:`：取消一次正在跑的 run 等于**丢一组门禁**。
 #
@@ -20,7 +20,7 @@ on:
 
 jobs:
   macos:
-    name: macOS / ${{ matrix.feature }}
+    name: CI · macOS / ${{ matrix.feature }}
     runs-on: macos-latest
     timeout-minutes: 90
     strategy:
