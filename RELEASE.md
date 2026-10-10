@@ -9,7 +9,11 @@
      发版时的 Release 正文**不在这里**：它由 `release_notes.py` 按 tag 从本文件
      切出该版本那一节（标题里含版本记号的那个 `##`），前面缀一张按平台排的下载表，
      再交给 `gh release --notes-file`。Release 的标题由标签单独给
-     （`--title "libuvcpp $TAG"`），所以本文件自己的标题里仍然不写版本号。 -->
+     （`--title "libuvcpp $TAG"`），所以本文件自己的标题里仍然不写版本号。
+
+     写新小节时两条规矩，都是因为正文渲染在 **Release 页**上、不在仓库里：
+     末尾不要再写「详见 CHANGELOG.md」—— 工具固定会缀那一行，写了就重两遍；
+     小节里指向仓库内文件的链接要写**绝对 URL**，相对路径在 Release 页上指不回仓库。 -->
 
 ## 简介 (Introduction)
 
@@ -117,10 +121,10 @@ db 那次的两个 `OFF`（MySQL / PostgreSQL）是**显式**关的，不是"找
 - 包里 `uvcpp_db_drivers()` 只打印 `sqlite`；要 MySQL / PostgreSQL 就从源码编
   （默认三个后端都开）。
 
-逐条的「这一版没做什么」在 [`doc/db-guide.md`](doc/db-guide.md)、
-[`doc/quic-guide.md`](doc/quic-guide.md) 与 [`doc/http3-guide.md`](doc/http3-guide.md)；
-按主题汇总的清单在这个 tag 对应的
-[CHANGELOG.md](https://github.com/Antruly/libuvcpp/blob/master/CHANGELOG.md)。
+逐条的「这一版没做什么」在
+[`doc/db-guide.md`](https://github.com/Antruly/libuvcpp/blob/master/doc/db-guide.md)、
+[`doc/quic-guide.md`](https://github.com/Antruly/libuvcpp/blob/master/doc/quic-guide.md)、
+[`doc/http3-guide.md`](https://github.com/Antruly/libuvcpp/blob/master/doc/http3-guide.md)。
 
 ## v1.5.0 重点 (Highlights)
 
