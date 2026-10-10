@@ -486,11 +486,32 @@ jobs:
             echo "::error title=ctest-build-$feat::${msg:-rc=$rc (no FAILED block)}"
             # 失败用例的**子进程输出**：`--output-on-failure` 把它的 stdout/stderr 紧跟在
             # 自己的 `***`（SegFault / Subprocess aborted / Timeout）结果行之后。job 日志
-            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以每个失败块取前 30 行一并
-            # 折进注解 —— 否则注解里只有用例名，没有崩溃现场（断言文案 / 运行库的
-            # `free(): invalid pointer` 全在那段里）。
-            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
-              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            # 匿名读不到（`/actions/jobs/<id>/logs` 是 403），所以把它折进注解 —— 否则
+            # 注解里只有用例名，没有崩溃现场（断言文案 / 运行库的 `free(): invalid pointer`
+            # 全在那段里）。
+            #
+            # 块的两端都承重：起点是那条 `***` 结果行，终点是下一条 `NN/MM Test #`
+            # / `Start N:` / `N% tests passed` —— 不是"起点之后固定 30 行"。
+            # **取头 20 行 + 尾 25 行**，因为崩溃现场在输出的**末尾**（进程是打印到
+            # 一半死的）：只取头，对"输出比窗口长"的用例恰好把现场切掉，注解里剩下
+            # 一串 `[ ok ]`，看不出崩在哪一句 —— 1.5.3 首次 macOS 的
+            # `test_db_sqlite_pool_func` 就这么红的（注解正好 30 行，末行停在第 30 条
+            # 断言上，第 31 行之后是什么无从得知）。
+            #
+            # awk **不 `exit`**：提前退出会让上面的 `printf` 吃 SIGPIPE，配上
+            # `set -o pipefail` 就是"注解没打出来、步骤先死在赋值上"。`head` 那一支同理。
+            blk=$(printf '%s\n' "$out" | awk '
+              /^[0-9]+\/[0-9]+ Test #/ || /^ *Start [0-9]+: / || /^[0-9]+% tests passed/ { if (f) f = 0 }
+              /\*\*\*/ { f = 1 }
+              f { print }' | tr -d '\r')
+            cnt=$(printf '%s\n' "$blk" | wc -l | tr -d ' ')
+            if [ "$cnt" -gt 50 ]; then
+              blk="$(printf '%s\n' "$blk" | head -20 || true)
+              ……（中间 $((cnt - 45)) 行省略）……
+              $(printf '%s\n' "$blk" | tail -25 || true)"
+            fi
+            blk=$(printf '%s\n' "$blk" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' \
+              | sed 's/%/%25/g' | head -c 6000 || true)
             if [ -n "$blk" ]; then
               echo "::error title=ctest-build-$feat-output::${blk}"
             fi
