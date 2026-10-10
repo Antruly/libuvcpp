@@ -104,7 +104,7 @@ jobs:
           # 模块关掉时它们被 `tests/functional/CMakeLists.txt` 的 glob+FILTER 摘掉，
           # 而 ctest 报 "100% tests passed" 时并不会说"少了几条"。
           #
-          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1312`），
+          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1401`），
           # 装包表与 `web` 那一格逐字相同 —— 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
           - feature: wsdl
@@ -287,6 +287,43 @@ jobs:
             gate_integrated: C ABI enabled
             gate_module: Including capi module in build
             gate_test: test_capi_net_func
+
+          # db（1.5.x 新增的腿）：数据库模块（`src/db/`）。`UVCPP_ENABLE_DB`
+          # **默认 OFF**，所以其余每一格**一行 `src/db/` 都不编** —— 少了这一格，
+          # 整个数据库模块可以带着 CI 全绿推上去而从未被编译过一次，而那正是
+          # #35 那个形状（一个"默认关"的开关，没人编过它）。
+          #
+          # 这一格只开 **SQLite**，走的是 `find_package(SQLite3)` 那条**默认路**
+          # （装包表里就多一个 `libsqlite3-dev`）。MySQL / PostgreSQL 两个后端在
+          # 这里**显式写 OFF**，不是省事：
+          #   * 它们的判据要一个**真的服务端**，而 runner 上没有；
+          #   * 不给服务端时那两条用例按设计退 3（未判定），ctest 报 `***Skipped`
+          #     —— 那是"没测"，可在 job 的结论里与"测过"一样是**非红**。在矩阵格
+          #     里顺手把它们开开，得到的是两条假覆盖。
+          # 所以远程后端另开一个 job（下面的 `db-servers`），**服务容器只有 job 级
+          # 的 `services:` 起得起来**。两格的开头开关互不相交（这里 SQLite=ON、
+          # 远程两个 OFF；那里正好反过来），谁的失败就归因给谁。
+          #
+          # 三个门禁串缺一不可，理由与其它格同源：三个后端一个都不成时模块会被
+          # **强制关闭**，而那个 `set()` 是普通变量（`CMakeCache.txt` 里照旧写着
+          # `UVCPP_ENABLE_DB:BOOL=ON`）；`db: SQLite 后端开` 证明确实有后端成了，
+          # `Including db module in build` 证明 `src/db/` 真进了源列表。
+          # 第四条（`test_db_sqlite_func` 真的注册了）同样不能省：`src/db/` 被滤掉
+          # 时那些用例被 `tests/functional/CMakeLists.txt` 的 glob 摘掉，而 ctest
+          # 少了十几条用例照样报 "100% tests passed"。
+          - feature: db
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_ENABLE_DB_SQLITE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
+            gate_name: sqlite3
+            gate_switch: 'UVCPP_ENABLE_DB:BOOL=ON'
+            gate_integrated: 'db: SQLite 后端开'
+            gate_module: Including db module in build
+            gate_test: test_db_sqlite_func
     steps:
       - uses: actions/checkout@v4
 
@@ -322,6 +359,13 @@ jobs:
             # 用例），`WEBAPP=ON` 跟着 web 走。C 层自己**一个外部依赖都不加**
             # （它是薄包装），所以这里不出现任何新包。
             capi)                      pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
+            # db：这一格只开 SQLite 后端，所以只多一个 `libsqlite3-dev`（就是
+            # `find_package(SQLite3)` 找的那两样：`sqlite3.h` 与 `libsqlite3`）。
+            # **别把两个远程后端的客户端库装进来**：装了就变成"找得到就编"，
+            # 而它们的用例在这台机器上没有服务端可连 —— 那是两条假覆盖（退 3）。
+            # `libmysqlclient-dev` / `libpq-dev` 装在那个单独 job 里。
+            # 也**不加** `libuv1-dev` 之外的任何东西：这一格量的是数据库模块。
+            db)                        pkgs="libuv1-dev libsqlite3-dev ninja-build" ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
           sudo apt-get install -y $pkgs
@@ -710,6 +754,185 @@ jobs:
               | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
             if [ -n "$blk" ]; then
               echo "::error title=ctest-build-$feat-output::${blk}"
+            fi
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
+  # 数据库模块的两个**远程**后端：MySQL 与 PostgreSQL
+  #
+  # 为什么单开一个 job 而不挂在上面的 `db` 格上：这两个后端要一个**真的服务端**，
+  # 而 `services:` 是 **job 级**的 —— 挂到那个矩阵 job 上，十一格会各自拖起两个
+  # 容器，并且给 `basic-static` 这种"什么都不开"的格平白加两个系统依赖。
+  #
+  # 这一格的开关与 `db` 那一格**互不相交**：SQLite 显式 OFF、MySQL 与 PostgreSQL
+  # 显式 ON。于是两边红绿不同只可能归因到后端本身，不会混进"这一格是不是也开了
+  # SQLite"。开发机上这两个后端是拿系统装的 MySQL / PostgreSQL 量的（doc/db-guide.md
+  # 里记了怎么建那个一次性库）；这里换成官方镜像，量的是同一份驱动代码对**另一个
+  # 服务端版本**，以及"多用户 / 多权限的服务器上连接串该怎么写"。
+  #
+  # 判据不是"ctest 报了绿"。`tests/functional/db_mysql_func.cpp` /
+  # `db_pgsql_func.cpp` 在**没给 URL** 时按设计退 3（未判定），而
+  # `tests/functional/CMakeLists.txt` 给这两条设了 `SKIP_RETURN_CODE 3` ⇒ ctest 报
+  # `***Skipped`。"没测"与"测过了"在 ctest 摘要里是两个词，但**两个都不是红** ——
+  # 所以这里设 `UVCPP_DB_TEST_REQUIRE=1`：缺 URL 就是**失败**（退出码 1，见那两个
+  # 文件的开头）。服务容器都起了还跳过，只可能是配置写错了，那种时候"绿"是最坏的
+  # 结果。
+  #
+  # 配置期照 `db` 那一格的三道门禁判（缓存开关、两个后端各自的 `db: <后端> 后端开`、
+  # 以及 `src/db/` 真进了源列表）。少任何一条，这一格都会去编一个"库起来了、用例
+  # 却连不上"的包然后全绿。这一格不是矩阵，串没地方挂，所以写死在步骤里。
+  # ---------------------------------------------------------------------------
+  db-servers:
+    name: Linux (Ubuntu) / db-servers
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      # MySQL 8 保持**默认认证插件**（`caching_sha2_password`），不传
+      # `--default-authentication-plugin=mysql_native_password`。那面旗子是常见的
+      # 顺手一招，理由是"caching_sha2 在非 TLS 连接上要求客户端先取服务端 RSA
+      # 公钥（`MYSQL_OPT_GET_SERVER_PUBLIC_KEY`），而本库的驱动只调
+      # `mysql_real_connect`、没设那一项"。**本机实测这条路是走得通的**：
+      #   * 在 MySQL 8.0.46 上建一个 `IDENTIFIED WITH caching_sha2_password` 的用户，
+      #     驱动那份构建（链 Ubuntu 的 `libmysqlclient-dev`，libmysqlclient.so.21）
+      #     连上去 **160/160 全过**；
+      #   * 原因也量到了：驱动不设任何 SSL 选项 ⇒ 客户端按默认的
+      #     `ssl-mode=PREFERRED` 协商 TLS，而 MySQL 8 在 `--initialize` 时就自动
+      #     生成了自签证书 —— 一次套件跑完服务端 `Ssl_accepts` 涨了 6（套件开了
+      #     6 条连接）。连接是 TLS，caching_sha2 的"安全连接"前提本来就满足。
+      # 那面旗子在 8.0.34 起是 deprecated、8.4 起被删；既然默认值实测可用，就
+      # 不要它 —— 留着只会让下一个把它迁到 8.4 的人撞一次"容器起不来"。
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: uvcpp
+          MYSQL_DATABASE: uvcpp_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -puvcpp"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: uvcpp
+          POSTGRES_PASSWORD: uvcpp
+          POSTGRES_DB: uvcpp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U uvcpp -d uvcpp_test"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+
+      # 两个客户端库的**开发包**。Ubuntu 上的 `libmysqlclient-dev` 由 MariaDB 的
+      # Connector/C 提供（`Provides:` 那一栏写着这个名字）—— 驱动只用
+      # `mysql_real_connect` / `mysql_query` / `mysql_stmt_*` 那一族稳定 API，
+      # 两份实现都认。
+      # **不装 `libsqlite3-dev`**：这一格的 SQLite 是显式 OFF 的，装了反而会让人
+      # 以为"这一格也量过 SQLite"（而下面那句反向断言正是冲着这件事来的）。
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev ninja-build
+
+      - name: Configure & Build
+        shell: bash
+        run: |
+          set -o pipefail
+          tree=build-db-servers
+          mkdir -p ci-logs
+          {
+            echo "=== configure ==="
+            cfg=0
+            cmake -S . -B "$tree" -DCMAKE_BUILD_TYPE=Release \
+              -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+              -DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=OFF \
+              -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+              > ci-logs/db-servers-configure.log 2>&1 || cfg=$?
+            echo "CONFIGURE_RC=$cfg"
+            cat ci-logs/db-servers-configure.log
+            if [ "$cfg" != "0" ]; then exit "$cfg"; fi
+
+            grep -q 'UVCPP_ENABLE_DB:BOOL=ON' "$tree/CMakeCache.txt" || {
+              echo "::error title=db-servers::CMakeCache 里 UVCPP_ENABLE_DB 不是 ON —— 这一格没在测数据库"; exit 1; }
+            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'Including db module in build'; do
+              grep -q "$m" ci-logs/db-servers-configure.log || {
+                why=$(grep -E 'db:|CMake (Warning|Error)|找不到|No such' \
+                  ci-logs/db-servers-configure.log | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
+                echo "::error title=db-servers::配置消息里没有 '$m' —— 后端没被集成，后面的 ctest 会是空转${why:+；配置期的原话：$why}"; exit 1; }
+            done
+            # 反向：SQLite 显式关着，配置消息里就不许出现它"开后端"的那一句。
+            # 少了这一句，`-DUVCPP_ENABLE_DB_SQLITE=OFF` 被谁改坏了也没人知道
+            # —— 而它改坏的后果正是前面那段注释说的"假覆盖"。
+            if grep -q 'db: SQLite 后端开' ci-logs/db-servers-configure.log; then
+              echo "::error title=db-servers::SQLite 开着 —— 这一格量的是两个远程后端，开关组合必须与 db 那一格互不相交"; exit 1
+            fi
+
+            echo "=== resolved db backends (CMakeCache) ==="
+            grep -E '^(UVCPP_ENABLE_DB|UVCPP_DB_|MYSQL|PostgreSQL|PostgreSQL_)' \
+              "$tree/CMakeCache.txt" || true
+            echo "=== build ==="
+            bld=0
+            cmake --build "$tree" --config Release --parallel 4 2>&1 \
+              | tee ci-logs/db-servers-build.log || bld=$?
+            echo "BUILD_RC=$bld"
+            if [ "$bld" != "0" ]; then
+              msg=$(grep -E 'error:|error C[0-9]|error LNK|Error|FAILED|undefined reference' \
+                ci-logs/db-servers-build.log | head -40 | tr '\n' ' ' | sed 's/%/%25/g' \
+                | head -c 6000 || true)
+              echo "::error title=build-db-servers::${msg:-rc=$bld (no error line matched)}"
+            fi
+            exit "$bld"
+          } 2>&1 | tee ci-logs/db-servers.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-linux-ubuntu-db-servers
+          path: ci-logs/
+          if-no-files-found: ignore
+
+      - name: Test
+        shell: bash
+        # 三个环境变量是这一格与 `db` 那一格的**判据差别**所在：URL 给了才真的连，
+        # REQUIRE 设了才不许退 3。容器名与上面 `services:` 里那两个网络别名一致
+        # （`ports:` 映射到 127.0.0.1，用哪个都行 —— 这里走 127.0.0.1，与
+        # doc/db-guide.md 里开发机上那条连接串同形）。
+        env:
+          UVCPP_DB_TEST_MYSQL_URL: mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test
+          UVCPP_DB_TEST_PGSQL_URL: postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test
+          UVCPP_DB_TEST_REQUIRE: "1"
+        run: |
+          tree=build-db-servers
+          for t in test_db_mysql_func test_db_pgsql_func; do
+            if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "$t"; then
+              echo "::error title=db-servers::$t 没被注册 —— 这个后端被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+              ctest --test-dir "$tree" -N 2>&1 | tail -20
+              exit 1
+            fi
+          done
+          # 反向那一条：SQLite 显式关着 ⇒ 它的用例**一条都不许注册**。
+          # "关着的模块必须一条用例都不在"是这一格唯一能证明"OFF 真的生效"的地方
+          # —— 否则那两条用例照跑照过（这台机器上本来就有 sqlite3），而那正是
+          # "关了等于没关"的样子。
+          if ctest --test-dir "$tree" -N 2>&1 | grep -q 'test_db_sqlite_func'; then
+            echo "::error title=db-servers::SQLite 显式关着，test_db_sqlite_func 却注册了 —— 这一格量不出'只开远程后端'这个组合"
+            exit 1
+          fi
+          rc=0
+          out=$(ctest --test-dir "$tree" --output-on-failure -C Release \
+            --timeout 30 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -A40 'The following tests FAILED' | tr '\n' ' ' | sed 's/%/%25/g' || true)
+            echo "::error title=ctest-db-servers::${msg:-rc=$rc (no FAILED block)}"
+            blk=$(printf '%s\n' "$out" | awk '/\*\*\*/ { n = 30 } n > 0 { print; n-- }' \
+              | tr -d '\r' | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            if [ -n "$blk" ]; then
+              echo "::error title=ctest-db-servers-output::${blk}"
             fi
           fi
           exit "$rc"

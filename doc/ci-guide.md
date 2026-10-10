@@ -16,12 +16,13 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `Linux (Ubuntu)` | `Linux (Ubuntu) / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `db-servers` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / db-servers` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `Linux (Ubuntu)` | `Linux (Ubuntu) / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `ssl`, `h2`, `quic`, `http3`, `capi` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `Windows (MSVC)` | `Windows (MSVC) / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `Windows (MSVC)` | `Windows (MSVC) / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `Windows (MinGW64)` | `Windows (MinGW64) / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi` | `macOS` | `macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `macOS` | `macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -35,7 +36,9 @@ extra, no collisions — and the run that also carries the two corrections descr
 green on all four platforms (2026-09-29). 1.4.1 added the three `http3` entries (`http3` needs
 QUIC + web, so it could not exist before those two did), which takes the table to **26**
 checks; and then the three `capi` entries (the C ABI layer — Ubuntu, macOS and MSVC; see §5),
-which takes it to **29**. The `windows` one had never run before that commit, since there is no MSVC on the
+which takes it to **29**. The database module added four more — a `db` entry on Ubuntu, macOS
+and MSVC, plus the single `db-servers` job (MySQL + PostgreSQL through service containers,
+Ubuntu only; see §5) — which takes it to **33**. The `windows` one had never run before that commit, since there is no MSVC on the
 development machine — that leg's first execution *is* the gate (see §2 for how a new entry is
 supposed to be argued). Two things were
 only learnable by running it:
@@ -86,6 +89,9 @@ layout did not cover them either.
 | macOS `config-contract` | `package_release.py`'s `PLATFORMS` has no macOS key — see §5. |
 | MinGW + WSDL | The same single MinGW job as the three gaps above. `release.yml`'s `mingw-x64` and `mingw-arm64` legs **do** enable WSDL, so it is covered at release time but not on push/PR — which is why it was verified locally on the MinGW x64 shape before being turned on there. |
 | macOS + WSDL | No entry, and macOS never compiles `src/wsdl/`. Lower risk than the MinGW gap above: macOS is not a release platform, so there is no path on which it reaches a user unbuilt. |
+| MySQL / PostgreSQL on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The two remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 service containers). The other three `db` entries set both backends **explicitly `OFF`** rather than leaving them on: with no server the two tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. |
+| `UVCPP_DB_SQLITE_FROM_SOURCE` on Linux | On Linux and macOS the `db` entries use the **default** path (`find_package(SQLite3)` against the system/SDK library); the from-source path is exercised on MSVC and MinGW. What is platform-specific about it is TLS and extraction — `file(DOWNLOAD)` over Schannel on Windows, MSYS2's libcurl + `ca-certificates` on MinGW — and both of those are covered. The Linux release legs run it on every tag. The cost of this entry, and it is a real one: MSVC and MinGW now need the network **at configure time** (hash-pinned zip from sqlite.org). An offline machine can pre-place it, see §5. |
+| `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
 | **base build with `UVCPP_BUILD_NET=OFF`** | `tests/functional/CMakeLists.txt` filters web/webapp/ssl/h2/wsdl/quic and **not** net, so `NET=OFF` would compile net test files against a library with `src/net/` filtered out — red by construction. Opening this cell needs that filter first. Today "base" therefore means net at its default (on) with `WEB=OFF`, i.e. the two `basic-*` entries. |
 
 The three workflows that need a second (artifact-only, `UVCPP_BUILD_TESTS=OFF`) tree —
@@ -248,7 +254,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2436-2436`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2525-2525`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -416,7 +422,7 @@ MSVC. MinGW and macOS are the gap (see §1).
   entry at all and shipped two classes of defect (#35).
 - **It is `web` plus one switch**, exactly as `zlib-off` is `web` minus one, and its dep list
   is **byte-identical to `web`'s**. That is deliberate: `pugixml` is pulled by `FetchContent`
-  (`CMakeLists.txt:1312`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
+  (`CMakeLists.txt:1401`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
   there is nothing to install — and keeping the package set identical means a red/green
   difference between the two legs can only be attributed to the switch itself.
 - **All four gates are load-bearing here.** Gate ② is `pugixml integrated` (the FetchContent
@@ -492,6 +498,90 @@ What is specific to this entry:
 which is what makes the shipped `include/capi/` headers match a library that actually exports
 the symbols. `UVCPP_CAPI_ENABLE` also joined `check_config_contract.py`'s `MACROS` list, so the
 generated-header contract covers it on the Linux and MSVC `config-contract` jobs.
+
+### The `db` entries
+
+`db` is `src/db/` — the database module (one `uvcpp_db_client` per connection, over SQLite /
+MySQL / PostgreSQL). `UVCPP_ENABLE_DB` is **`OFF` by default**, and it is the only module that
+needs a third-party *client library* (`libsqlite3` / `libmysqlclient` / `libpq`), so every other
+entry compiles **not one line** of `src/db/`. That is the same shape as `h2` and `wsdl`, with one
+more layer: `db` has three backends behind it, and **if none of the three is found the module
+itself is force-disabled** (a plain `set(UVCPP_ENABLE_DB OFF)`, so `CMakeCache.txt` still reads
+`UVCPP_ENABLE_DB:BOOL=ON`). The second gate string is therefore about a *backend*:
+
+| | |
+|---|---|
+| `gate_switch` | `UVCPP_ENABLE_DB:BOOL=ON` in `CMakeCache.txt` — the switch was passed and was not force-disabled at the cache level |
+| `gate_integrated` | `db: SQLite 后端开` in the configure log — **a backend actually succeeded**. Without this one the entry can go green having configured a module that has nothing to talk to |
+| `gate_module` | `Including db module in build` — `src/db/` really reached the source list |
+| `gate_test` | `test_db_sqlite_func` is in `ctest -N` — without this, "the module was filtered out" and "the tests passed" look identical |
+
+The four entries, and what each one measures:
+
+- **Ubuntu `db`, macOS `db`** — SQLite through `find_package(SQLite3)`, both remote backends
+  explicitly `OFF`. On Ubuntu that is `libsqlite3-dev`; on macOS **no package at all** is needed,
+  because `Modules/Platform/Darwin.cmake` inserts `${CMAKE_OSX_SYSROOT}/usr` at the front of
+  `CMAKE_SYSTEM_PREFIX_PATH`, so the SDK's `sqlite3.h` and `/usr/lib/libsqlite3.tbd` are found
+  (Homebrew's `sqlite` is keg-only, and its own caveat is "macOS provides SQLite").
+- **MSVC `db`, and the MinGW job's tail** — SQLite **from source**
+  (`-DUVCPP_DB_SQLITE_FROM_SOURCE=ON`), which is the path the six release legs use. Windows has no
+  system sqlite3, so this is also the only way to cover the module there. It compiles one static
+  `sqlite3.c` with `POSITION_INDEPENDENT_CODE ON` (the system `.a` on Ubuntu 24.04 is not PIC, and
+  the system `.so` would add a `DT_NEEDED` that release's `ldd` assertion bans — see `doc/db-guide.md`).
+  On MinGW it also avoids `libsqlite3.dll.a`: linking that would put `sqlite3.dll` into the DLL's
+  imports and trip the self-containment assertion in that file. Configure-time network is required;
+  an offline machine can drop the hash-pinned zip into `${build}/_deps/uvcpp-sqlite/`.
+- **Ubuntu `db-servers`** — the two *remote* backends, against real servers. `services:` is
+  job-level, so this cannot be a matrix entry (it would drag two containers into all eleven Ubuntu
+  cells, including `basic-static`). It is the mirror image of the `db` entries: SQLite explicitly
+  `OFF`, MySQL and PostgreSQL `ON`, plus two **reverse** assertions — the configure log must *not*
+  contain `db: SQLite 后端开`, and `test_db_sqlite_func` must *not* be registered. Without those,
+  "`-DUVCPP_ENABLE_DB_SQLITE=OFF` stopped working" is a fully green path on a machine that has
+  sqlite3 anyway.
+
+What is specific to `db-servers`:
+
+- **`UVCPP_DB_TEST_REQUIRE=1` is the judgement, not `ctest`.** Without a URL the two remote tests
+  exit **3** by design, and `tests/functional/CMakeLists.txt` gives them `SKIP_RETURN_CODE 3`, so
+  ctest prints `***Skipped`. That is honest, but a job whose only two interesting tests skipped is
+  **not red**. `UVCPP_DB_TEST_REQUIRE` turns "no URL" into exit 1. Servers are up; if the tests
+  skip, the configuration is wrong, and green would be the worst possible outcome.
+- **MySQL 8 keeps its default authentication plugin** (`caching_sha2_password`), with no
+  `--default-authentication-plugin=mysql_native_password`. That flag is the usual reflex, and
+  the argument for it sounds solid — caching_sha2 over a **non-TLS** connection makes the client
+  fetch the server's RSA public key (`MYSQL_OPT_GET_SERVER_PUBLIC_KEY`), and this module's driver
+  calls plain `mysql_real_connect` — but it is **not** needed, and that was measured, not assumed:
+  a `caching_sha2_password` user on MySQL 8.0.46 authenticated through this driver and the shared
+  suite passed **160/160**, and the reason is visible in the server counters — one suite run moved
+  `Ssl_accepts` by 6 (the suite opens six connections), because the driver sets no SSL option, so
+  the client's default `ssl-mode=PREFERRED` negotiates TLS against the self-signed certificates
+  MySQL 8 generates during `--initialize`. The connection *is* TLS, which is exactly the
+  precondition caching_sha2 needs. The flag is deprecated since 8.0.34 and removed in 8.4, so
+  keeping it would only break the next person who moves that image.
+- **PostgreSQL 16 authenticates with `scram-sha-256`, and the URL's password is really used.**
+  The official image defaults to scram, while every local database used during development runs
+  `trust` — so the local runs of the shared suite never exercised the password path at all, and
+  "the URL contains a password" is not evidence that the library reads it. Measured by flipping
+  the local cluster to `scram-sha-256` for `127.0.0.1` (`ALTER ROLE uvcpp PASSWORD …`, one line of
+  `pg_hba.conf`, `pg_reload_conf()`): the branch's own binary,
+  `UVCPP_DB_TEST_REQUIRE=1 UVCPP_DB_TEST_PGSQL_URL='postgresql://uvcpp:uvcpp@127.0.0.1:55432/uvcpp_test'
+  test_db_pgsql_func`, gives **160/160 and exit 0**, while the same binary with a wrong password
+  exits **1** with `FATAL: password authentication failed for user "uvcpp"`. So
+  `uvcpp_db_url::parse` (`src/db/uvcpp_db_factory.cpp`) does hand `user:password` to libpq rather
+  than dropping it, and a wrong URL is red rather than a quiet skip. (The cluster was set back to
+  `trust` afterwards.)
+- **The URLs live in the step's `env:`**, not in the test sources:
+  `mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test` and
+  `postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test`, matching the credentials the two
+  containers are created with.
+
+**Release configurations** pass `-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON` with
+`-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF` on all ten configure points. The two
+explicit `OFF`s are load-bearing rather than tidiness: those legs run on runners that have
+`libpq-dev` installed, `find_package(PostgreSQL QUIET)` would succeed silently, and the shipped
+`libuvcpp.so` would grow a `libpq.so.5` `DT_NEEDED` that the release `ldd` assertion exists to
+ban. Packages therefore carry **SQLite only** — the other two backends need a client library the
+user installs anyway, and a source build gets all three by default.
 
 ### The macro contract: `config-contract` (and the `mingw64` tail)
 
@@ -599,9 +689,19 @@ sudo apt-get install -y libuv1-dev zlib1g-dev
 sudo apt-get install -y libuv1-dev zlib1g-dev
 # capi — same as web: the C layer itself adds no external dependency
 sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
+# db — SQLite only (the two remote backends are OFF in this entry, so their client
+# libraries are deliberately NOT installed: installing them would turn "explicitly
+# off" into "found and compiled", against two tests that have no server to reach)
+sudo apt-get install -y libuv1-dev libsqlite3-dev ninja-build
+# db-servers — the mirror image: the two remote client libraries, no libsqlite3-dev
+sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev ninja-build
 # config-contract
 sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
 ```
+
+`db-servers` also declares the two `services:` (MySQL 8.0 and PostgreSQL 16, with
+`--health-cmd` waits), which is why it is a **separate job** — `services:` is job-level, and
+putting it on the matrix job would start two containers for each of the eleven Ubuntu cells.
 
 ### macOS (`ci-macos.yml`)
 ```bash
@@ -617,11 +717,15 @@ brew install libuv zlib ninja openssl@3
 brew install libuv zlib ninja openssl@3
 # capi — same as web: the C layer itself adds no external dependency
 brew install libuv zlib ninja
+# db — same as basic: SQLite comes from the macOS SDK, and Homebrew's `sqlite` is
+# keg-only (installing it would only mean pinning a root)
+brew install libuv ninja
 ```
 
 ### Windows MSVC (`ci-windows-msvc.yml`)
 ```bash
 # basic-static | basic-shared | web | capi — no system deps (libuv + llhttp via FetchContent)
+# db — no system deps either: its SQLite is built *from source* (UVCPP_DB_SQLITE_FROM_SOURCE)
 # ssl | h2 | quic | http3
 bash .github/scripts/win-openssl-deps.sh
 # OpenSSL DLL path: C:/Program Files/OpenSSL/bin/ (or OpenSSL-Win64)
@@ -645,6 +749,14 @@ appear in **no** platform file.
 
 ### Windows MinGW64 (`ci-mingw64.yml`)
 `msys2/setup-msys2` installs `mingw-w64-x86_64-{gcc,cmake,ninja,openssl,python}`.
+
+The single job's tail also enables the database module, with SQLite built from source
+(`-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON`, both remote backends `OFF`) — the same
+configuration `release.yml`'s `mingw-x64` / `mingw-arm64` legs use, so this leg is where "the
+database module compiles on the toolchain we ship" first gets asked. `mingw-w64-x86_64-sqlite3`
+is deliberately **not** installed: `find_library` would pick its `libsqlite3.dll.a` (the same
+`.dll.a`-first rule the OpenSSL comment in that file records), the DLL would import `sqlite3.dll`,
+and the self-containment assertion a step below would (correctly) fail.
 
 ---
 

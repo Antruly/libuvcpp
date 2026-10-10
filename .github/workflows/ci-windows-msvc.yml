@@ -63,7 +63,7 @@ jobs:
           # **发版那一刻** —— 而 release.yml 的 msvc-x64 / msvc-arm64 两条腿都开着
           # 它。这一格就是那两条腿在 push/PR 阶段的替身。
           #
-          # pugixml 走 FetchContent（根 `CMakeLists.txt:1312`，`GIT_TAG` 钉在
+          # pugixml 走 FetchContent（根 `CMakeLists.txt:1401`，`GIT_TAG` 钉在
           # `PUGIXML_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
           # 的装包需求与 `web` 逐字相同。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -217,12 +217,43 @@ jobs:
             gate_integrated: C ABI enabled
             gate_module: Including capi module in build
             gate_test: test_capi_net_func
+
+          # db（1.5.x 新增的腿）：数据库模块（`src/db/`）。`UVCPP_ENABLE_DB`
+          # **默认 OFF**，所以别的格一行 `src/db/` 都不编 —— 少了这一格，整个
+          # 数据库模块可以带着 CI 全绿推上去而从未被 `cl` 编过一次。
+          #
+          # 这一格的 SQLite **从源码编**（`-DUVCPP_DB_SQLITE_FROM_SOURCE=ON`）：
+          # Windows 上没有系统 sqlite3，而这正是**发布包走的那条路** ——
+          # `release.yml` 六条腿全用这个开关。于是这一格量的不只是"数据库模块在
+          # MSVC 上编得过"，还有那条 `file(DOWNLOAD)` 在 Windows 上走得通：CMake
+          # 官方二进制自带的 libcurl 走 **Schannel**（`Utilities/cmcurl/CMakeLists.txt`
+          # 里 `elseif(WIN32) set(CURL_USE_SCHANNEL ON)`），用的是 Windows 证书存储，
+          # 所以 `TLS_VERIFY ON` 不依赖任何 CA 文件。配置期需要联网；离线机器可以
+          # 把那份 zip 按哈希放进 `${构建目录}/_deps/uvcpp-sqlite/`（见 doc/db-guide.md）。
+          #
+          # MySQL / PostgreSQL 两个远程后端**显式 OFF**：这一档没有服务端，开了
+          # 只会得到两条退 3（未判定）的用例 —— "未判定"在 job 结论里是**非红**，
+          # 那不是覆盖。两个远程后端由 Ubuntu 的 `db-servers` job 用服务容器量。
+          - feature: db
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_DB_SQLITE_FROM_SOURCE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
+            gate_name: sqlite3
+            gate_switch: 'UVCPP_ENABLE_DB:BOOL=ON'
+            gate_integrated: 'db: SQLite 后端开'
+            gate_module: Including db module in build
+            gate_test: test_db_sqlite_func
     steps:
       - uses: actions/checkout@v4
 
       # 装包**按格**：basic 那两格、web 与 capi 这几格一个系统依赖都不需要（libuv 与
       # llhttp 都走 FetchContent；llhttp 只在 WEB=ON 时才去取，所以 basic 那两格连它
       # 都没有）。capi 与 web 同一份 —— C 层是**纯增量**的薄包装，不加任何外部依赖。
+      # db 也在这一组：它的 SQLite 从源码编（理由写在矩阵那一格里）。
       #
       # 有系统依赖的那四格统一交给 `.github/scripts/win-openssl-deps.sh`：它把判据从
       # "choco 退出 0"改成"这台机器上有一份 CMake 找得到的 OpenSSL"，理由（含
@@ -233,7 +264,10 @@ jobs:
         run: |
           case "${{ matrix.feature }}" in
             # wsdl 也在这一组：pugixml 走 FetchContent，与 zlib 一样不是系统依赖。
-            basic-static|basic-shared|web|capi|wsdl) echo "(这一格没有系统依赖)" ;;
+            # db 也是：它的 SQLite 是**从源码编**的（`UVCPP_DB_SQLITE_FROM_SOURCE`），
+            # 所以 Windows 上不需要任何 sqlite 包 —— 这一格一个系统依赖都没有，
+            # 别把它塞进 win-openssl-deps.sh（那是 OpenSSL 专用的）。
+            basic-static|basic-shared|web|capi|wsdl|db) echo "(这一格没有系统依赖)" ;;
             ssl|h2|quic|http3)             bash .github/scripts/win-openssl-deps.sh ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac

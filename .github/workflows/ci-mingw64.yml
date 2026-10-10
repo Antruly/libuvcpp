@@ -56,13 +56,13 @@ jobs:
           #   不带 preset ⇒ 这个开关默认 OFF ⇒ `find_library` 在 MSYS2 里撞上
           #   C:/msys64/mingw64/lib/libuv.dll.a（runner 镜像自带 libuv）⇒ 链成
           #   共享库，产物依赖 `libuv-1.dll`（MSYS2 那份的 DLL 名带 -1）。
-          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:1062 判的是
+          #   注意 `BUILD_SHARED_LIBS` 在这一路上救不了场：CMakeLists.txt:1151 判的是
           #   `TARGET uv_a`，而 find_library 给的是一个**路径**，不是 target，
           #   所以那个分支根本进不去。
           #
           # ② -DBUILD_SHARED_LIBS=OFF —— 管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #   llhttp_shared ⇒ 依赖 libllhttp.dll）。它不管 uvcpp 自己
-          #   （CMakeLists.txt:1440-1440 是显式的 `add_library(uvcpp SHARED ...)`）。
+          #   （CMakeLists.txt:1529-1529 是显式的 `add_library(uvcpp SHARED ...)`）。
           #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
           #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
           #   （708 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
@@ -74,6 +74,16 @@ jobs:
           #   照样在，而 dll 里一个 `uvcpp_c_*` 符号都没有 —— 正是"头在、符号不在"
           #   那个只能在运行时才炸的形状。`check_config_contract.py` 判据 4 就是
           #   冲着它来的（CAPI=0 时它会 `[跳]`，这条腿改完才真的判得动）。
+          # ④ -DUVCPP_ENABLE_DB=ON + -DUVCPP_DB_SQLITE_FROM_SOURCE=ON + 两个远程
+          #   后端 OFF —— 与 `release.yml` 的 mingw-x64 / mingw-arm64 两条腿
+          #   **逐字同一份**数据库配置（那边的注释 ⑤ 列了整条理由链）。这一条 CI
+          #   腿是"发布产物用的那条工具链"在 push/PR 阶段的替身，所以发布腿开了
+          #   的模块这里也要开：否则"数据库模块在 MinGW 上编不编得过"第一次被问到
+          #   就是发版那一刻。
+          #   FROM_SOURCE 在这里还有一条本地的理由：MSYS2 的 `mingw-w64-x86_64-sqlite3`
+          #   给的是 `libsqlite3.dll.a`，find_library 挑中它 ⇒ dll 多一个 sqlite3.dll
+          #   依赖，正好撞上下面那条"自包含"断言；而源码那份编成**静态**库，
+          #   链进 dll 不留任何外部名字。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
@@ -81,10 +91,22 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
             | tee ci-logs/mingw-configure.log
+          # 数据库模块的三道门禁。这一格不是矩阵（串没地方挂），所以写死在这里，
+          # 判据与 Linux / macOS / MSVC 那三格的 `gate_*` 同源：模块被"三个后端
+          # 一个都没成"那条规则强制关掉时，`Including db module in build` 缺席，
+          # 而缓存里那个普通 `set()` 照旧写着 ON —— 只 grep 缓存是假绿。
+          grep -q 'db: SQLite 后端开' ci-logs/mingw-configure.log || {
+            echo "::error title=mingw-db::配置消息里没有 'db: SQLite 后端开' —— SQLite 后端没被集成（下载失败？哈希对不上？）"
+            grep -E 'db:|CMake (Warning|Error)|下载|哈希' ci-logs/mingw-configure.log | head -20
+            exit 1; }
+          grep -q 'Including db module in build' ci-logs/mingw-configure.log || {
+            echo "::error title=mingw-db::src/db/ 没进源列表 —— 编出来的 dll 不含数据库模块"; exit 1; }
           bld=0
           cmake --build build-mingw --parallel 4 2>&1 | tee ci-logs/mingw-build.log || bld=$?
           if [ "$bld" != "0" ]; then
@@ -106,6 +128,8 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
@@ -147,6 +171,14 @@ jobs:
 
       - name: Test
         run: |
+          # 门禁 2（数据库模块）：这一格不是矩阵，`gate_test` 没地方挂，所以直接判。
+          # 少了这一句，"模块关了但 ctest 报 100% passed"这条路径在 MinGW 上无人拦
+          # —— 那正是 Linux 那几格用第四条门禁串拦下来的形状。
+          if ! ctest --test-dir build-mingw -N 2>&1 | grep -q test_db_sqlite_func; then
+            echo "::error title=mingw-db::test_db_sqlite_func 没被注册 —— 模块被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+            ctest --test-dir build-mingw -N 2>&1 | tail -20
+            exit 1
+          fi
           rc=0
           out=$(ctest --test-dir build-mingw --output-on-failure \
             --timeout 60 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?

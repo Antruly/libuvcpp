@@ -141,6 +141,19 @@ FEATURE_GATES = {
     # 理由（见上面那段注释）。
     "wsdl": ["UVCPP_ENABLE_WSDL:BOOL=ON", "pugixml integrated",
              "Including wsdl module in build", "test_wsdl_document_func"],
+    # 1.5.x：数据库模块（`src/db/`）。`UVCPP_ENABLE_DB` 也是**默认 OFF**，而它比
+    # 上面那几条多一层：它底下三个后端各有一个子开关，**三个都不成时模块会被强制
+    # 关闭**（`CMakeLists.txt` 里那条 `set(UVCPP_ENABLE_DB OFF)` 是普通变量，
+    # `CMakeCache.txt` 里照旧写着 ON）—— 所以第二条门禁串盯的是**后端**那一句
+    # `db: SQLite 后端开`，它才是"确实有后端成了"的见证。
+    #
+    # 三格（ubuntu / macOS / MSVC）都是"SQLite 开、两个远程后端显式 OFF"。
+    # 远程后端要一个真的服务端，只有 Ubuntu 那个单开的 `db-servers` job（服务容器
+    # 是 job 级的）量得到 —— 那一条不是矩阵格，`FEATURE_GATES` 管不到它，它的三道
+    # 配置期门禁 + 反向断言写死在那个 job 的步骤里（判据 6 只走矩阵条目，这一点在
+    # 上面的循环里写着）。
+    "db": ["UVCPP_ENABLE_DB:BOOL=ON", "db: SQLite 后端开",
+           "Including db module in build", "test_db_sqlite_func"],
 }
 
 # 矩阵条目上承载这些串的字段名。文件里必须真的出现 `matrix.<字段>`（判据 6 后半）。

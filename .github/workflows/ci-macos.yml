@@ -176,16 +176,48 @@ jobs:
             gate_integrated: C ABI enabled
             gate_module: Including capi module in build
             gate_test: test_capi_net_func
+
+          # db：数据库模块（`src/db/`）。`UVCPP_ENABLE_DB` **默认 OFF**，所以别的
+          # 格一行 `src/db/` 都不编 —— 少了这一格，整个模块可以带着 CI 全绿推上去
+          # 而从未在这条工具链上被编过一次。
+          #
+          # SQLite 走 `find_package(SQLite3)` 那条默认路，而 macOS 上**一个包都
+          # 不用装**：CMake 的 `Modules/Platform/Darwin.cmake` 在
+          # `_CMAKE_OSX_SYSROOT_PATH` 存在时把 `${sysroot}/usr` **插在
+          # `CMAKE_SYSTEM_PREFIX_PATH` 最前面**，于是 `find_path(sqlite3.h)` 命中
+          # SDK 里那份头、`find_library(sqlite3)` 命中 `/usr/lib/libsqlite3.tbd`。
+          # （Homebrew 的 `sqlite` 是 keg-only，它自己那句说明就是"macOS 自带
+          # SQLite"；装它反而要多传一个 root。）所以装包表与 `basic-*` 同一行。
+          #
+          # MySQL / PostgreSQL 两个远程后端在这里**显式 OFF**：这一档没有服务端，
+          # 开了只会拿到两条退 3（未判定）的用例，而"未判定"在 job 结论里是**非红**
+          # —— 那不是覆盖，是假覆盖。两个远程后端由 Ubuntu 那个单开的 `db-servers`
+          # job 用服务容器量（见 doc/ci-guide.md §5）。
+          - feature: db
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_ENABLE_DB_SQLITE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
+            gate_name: sqlite3
+            gate_switch: 'UVCPP_ENABLE_DB:BOOL=ON'
+            gate_integrated: 'db: SQLite 后端开'
+            gate_module: Including db module in build
+            gate_test: test_db_sqlite_func
     steps:
       - uses: actions/checkout@v4
 
       # 装包**按格**：`openssl@3` 只给 quic / http3 那两格显式点名（别的格用
       # `openssl`，它今天就是 openssl@3 的别名，但那两格不需要钉 root）。
       # `capi` 与 `web` 同一份 —— C 层不加任何外部依赖。
+      # `db` 与 `basic-*` 同一份 —— SQLite 在 macOS 上来自 SDK（理由写在矩阵里
+      # 那一格的注释里），Homebrew 的 `sqlite` 是 keg-only，装了反而要钉 root。
       - name: Install deps
         run: |
           case "${{ matrix.feature }}" in
-            basic-static|basic-shared) brew install libuv ninja ;;
+            basic-static|basic-shared|db) brew install libuv ninja ;;
             web|capi)                  brew install libuv zlib ninja ;;
             ssl|h2|full)               brew install libuv openssl zlib ninja ;;
             quic|http3)                brew install libuv zlib ninja openssl@3 ;;
