@@ -238,15 +238,91 @@ int main() {
 * **`row["name"]` 保证不崩**：找不到列时给一个静态的 NULL 值。
   行/列越界同样返回 NULL 值，不抛也不越界读。
 
-### 同步，且**故意**是同步的
+### 同步底座 + 异步门面
 
 三个客户端库全是阻塞 API，没有异步版本。把它们塞进事件循环只有两条路：丢线程池
-（`uv_queue_work`）或者自己实现协议。这一层是**第一条路的底座** —— 异步封装该建在
-它**上面**，而不是把它包进互斥锁再从别的线程碰事件循环（库内其它模块的线程规矩是
-"谁创建的谁用"，跨线程共享连接对象会把这条规矩捅破）。
+（`uv_queue_work`）或者自己实现协议。`uvcpp_db_client` 是**第一条路的底座**，而
+`uvcpp_db_async`（`#include <db/uvcpp_db_async.h>`）就是建在它上面、替你把那段
+样板写掉的那一层。
 
 `uvcpp_db_client` 内部有一把递归锁：同一个 client 可以被多个线程调，但**同一时刻
-只有一个在真的用连接**。要并发就开多个 client。
+只有一个在真的用连接**。要并发就开多个 client（或者 [§3.1 的连接池](#31-连接池)）。
+
+#### 为什么它是"底座"而不是"就该同步"
+
+同步底座本身不是缺陷，缺陷是**在事件循环线程上直接调它**。量具
+（`bench/bench_db.cpp` 第 9 节）把代价量出来了 —— 一条 1 ms 的定时器挂在循环上，
+同期跑 10 条 50 ms 的慢查询，记相邻两次到点的最大间隔：
+
+| 这批查询怎么跑 | 循环被卡多久（max gap） | 同批工作总耗时 |
+|---|---|---|
+| 直接在循环线程上同步跑 | **504 ms**（MySQL） | 504 ms |
+| 手写 `uvcpp_work` 派到线程池 | **2.1 ms** | 506 ms |
+| `uvcpp_db_async` 派到线程池 | **2.0 ms** | 505 ms |
+
+三行里最要紧的是**后两行的总耗时和第一行一样**：异步买的是"循环不被卡住"，
+**不是**"查询变快"。同一个 client、同一条连接、同一把锁，总时间当然一样。
+
+#### `uvcpp_db_async`：两种形状
+
+```cpp
+#include <cstdio>
+
+#include <db/uvcpp_db.h>
+#include <db/uvcpp_db_async.h>
+#include <handle/uvcpp_loop.h>
+
+// ① 回调式：cb 在 loop 的线程上被调（loop 由调用方自己 run）
+void submit_on_loop(uvcpp::uvcpp_db_client* db, uvcpp::uvcpp_loop* loop) {
+  uvcpp::uvcpp_db_async a(db);        // 绑连接，不持有
+  a.query(loop, "SELECT id, name FROM users WHERE city = ?", {"杭州"},
+          [](uvcpp::uvcpp_db_status st, const uvcpp::uvcpp_db_table& t) {
+            if (!uvcpp::uvcpp_db_ok(st)) return;   // 失败时 t 是空表
+            for (const uvcpp::uvcpp_db_row& row : t.rows()) {
+              std::printf("%s\n", row["name"].to_text().c_str());
+            }
+          });
+  a.execute(loop, "UPDATE users SET age = ? WHERE id = ?", {30, 7},
+            [](uvcpp::uvcpp_db_status, int64_t) {});
+}
+
+// ② future 糖：给不在循环上的调用方（门面懒起一条私有循环线程）
+uvcpp::uvcpp_db_result fetch_from_worker(uvcpp::uvcpp_db_client* db) {
+  uvcpp::uvcpp_db_async a(db);
+  auto f = a.query("SELECT COUNT(*) FROM users");
+  return f.get();                     // 阻塞**调用方这条线程**
+}
+```
+
+契约有四条，都是承重的：
+
+* **完成回调一定在 `loop` 的线程上被调，且只调一次。** 这不是本库拼的，是
+  `uv_queue_work` 的 after-work 由 libuv 从 `uv__work_done` 里在循环线程上发出的
+  结果 —— 所以这里**没有** `uv_async` 邮箱。
+* **投递失败（loop 传空、同一个 work 复用）**：`query()`/`execute()` **返回负值**，
+  **回调不会被调**。别等回调，看返回值。
+* **在回调里 `delete` 门面是合法的。** 门面析构第一件事就断掉存活凭证，之后跑完的
+  活不再调用户闭包，也不会二次回调。
+* **future 的 `get()` 会阻塞调用方自己那条线程** —— 在事件循环线程上用它就是把
+  刚躲开的阻塞又请回来。不在循环上的线程（工作线程、C# 的线程池）才用它。
+
+#### 它用的是**全库唯一**那条线程池，和 `uv_fs_*` / DNS 共用
+
+`uv_queue_work` 丢进的是 libuv 的默认线程池，**默认只有 4 条线程**
+（`UV_THREADPOOL_SIZE` 可改，1..1024，**第一次投递时**读进缓存）。同一条池子还被
+`uv_fs_*`、`uv_getaddrinfo`、`uv_getnameinfo`、`uv_random` 用着 —— 所以
+**一条 30 秒的慢查询会把文件读写和 DNS 一起堵住**。要变就在任何投递之前调
+`uvcpp_set_threadpool_size()`。这是这套模型的已知代价，不是门面漏做了什么。
+
+门面**不做背压**（不限制在途条数）。一条连接本来就是串行的，在途多条只会排队等那把
+递归锁，不会更快；真正的并发看下一节的连接池。
+
+**别把异步和同步混着用来"省时间"**：在循环线程上调一次同步 `db.query()`，会去等
+worker 手里的锁 —— 不会死锁，但会把循环卡住，正好抵消掉异步的全部意义。
+
+### 3.1 连接池
+
+还没做，见 [§11](#11-没做的如实列出)。
 
 ---
 
@@ -547,9 +623,14 @@ Windows 上走的是 `UVCPP_DB_SQLITE_FROM_SOURCE`（MSYS2 若装了
 
 ## 11. 没做的（如实列出）
 
-* **连接池。** 一个 client 一个连接。要并发就开多个 client，池子还没写。
-* **异步 / 协程封装。** 这一层是同步底座（见 [§3](#3-公开面)）。往
-  `uv_queue_work` 上挂一层是后续的事。
+* **连接池。** 一个 client 一个连接。要并发就开多个 client，池子还没写
+  （见 [§3.1](#31-连接池)）。
+* **协程（`co_await` / C++20 那套）。** 异步门面给的是**回调 + future**两种形状
+  （见 [§3](#3-公开面)），本库是 C++11 的，不引入协程。
+* **门面的背压。** 不限制在途条数 —— 一个连接本来就是串行的，排队等锁不会更快。
+* **独立的数据库线程池。** 门面复用的是 libuv 那条默认池（4 条线程，与
+  `uv_fs_*` / DNS 共用）。慢查询会把文件 IO 挤掉，要缓解只能调
+  `uvcpp_set_threadpool_size()`。
 * **ORM 那套东西。** 没有模型、没有迁移、没有关系映射、没有查询构造器 ——
   它是"能安全地执行 SQL 并拿到表"，不是 ActiveRecord。命名上叫 `db` 而不是
   `orm`，就是因为后面那半句不打算假装。

@@ -17,8 +17,10 @@
  *      的判据本身，而不是"异步听起来高级"。这里直接量：身上挂着一条 1 ms 的
  *      定时器，同期在 loop 线程上跑 N 条慢查询，记**相邻两次到点的最大间隔**与
  *      **被合并掉的点数**；对照臂把同一批查询交给 `uvcpp_work`（`uv_queue_work`）
- *      扔进线程池，同一个定时器应当回到噪声级。两条臂用**同一个 client、同一条
- *      连接**，差别只在"在哪个线程上阻塞"。
+ *      扔进线程池，同一个定时器应当回到噪声级。第三条臂把同一批活交给
+ *      `uvcpp_db_async`（本库替开发者写掉的那层门面）—— 它和手写 `uvcpp_work`
+ *      那条必须落在同一量级，否则门面就是把异步偷换回了同步。三条臂用**同一个
+ *      client、同一条连接**，差别只在"在哪个线程上阻塞"。
  *
  * 怎么读
  * ------
@@ -61,6 +63,7 @@
 #include <vector>
 
 #include <db/uvcpp_db.h>
+#include <db/uvcpp_db_async.h>
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_timer.h>
 #include <req/uvcpp_work.h>
@@ -225,18 +228,31 @@ struct stall_result {
   bool timed_out = false;  ///< 兜底看门狗咬过
 };
 
-/// 卡顿臂。`async_arm=false` 在定时器回调里跑那批慢查询（= loop 线程上），
-/// `true` 用 `uvcpp_work` 派到线程池。两条臂都拿同一个 client、同一条连接。
+/// 三条臂：同一批慢查询、同一个 client、同一条连接，差别只在**在哪个线程上
+/// 阻塞**（以及异步那两条由谁把活交给线程池）。
+enum arm_kind {
+  ARM_SYNC,    ///< 直接在定时器回调里跑 —— loop 线程上阻塞
+  ARM_WORK,    ///< 手写 `uvcpp_work`（`uv_queue_work`）派到线程池
+  ARM_FACADE,  ///< `uvcpp_db_async`，也就是"本库替你把上面那段写掉"的那一层
+};
+
+/// 卡顿臂。三条臂都拿同一个 client、同一条连接。ARM_FACADE 与 ARM_WORK 该
+/// 给出**同量级**的间隔 —— 门面要是偷偷把那批查询挪回同步执行，这一臂会当场
+/// 顶到几百毫秒，和 ARM_SYNC 一样。
 ///
 /// 判据用**相邻到点的间隔**而不是"迟到"：libuv 会把错过的重复定时器合并成一次
 /// 回调，合并之后按"第几次到点"去算本该的时刻会一路错下去（迟到量能算出比整段
 /// 时长还大的数）。间隔不需要基准 —— 理想值是 1 ms，被卡住的那一次会直接顶到
 /// 卡顿时长。
 stall_result run_stall_arm(uvcpp_db_client* db, const std::string& sql, int reps,
-                           bool async_arm) {
+                           arm_kind kind) {
+  const bool async_arm = (kind != ARM_SYNC);
   stall_result r;
   uvcpp_loop loop;
   loop.init();
+  // 门面必须活得比循环久（回调跑在循环线程上、句柄投在那条循环上）。声明在
+  // `loop` 之后、`beat`/`guard` 之前：析构逆序正好是「定时器 → 门面 → 循环」。
+  std::unique_ptr<uvcpp_db_async> facade;
 
   const steady::time_point t0 = steady::now();
   const auto elapsed_us = [&t0]() {
@@ -263,7 +279,7 @@ stall_result run_stall_arm(uvcpp_db_client* db, const std::string& sql, int reps
           // 先让定时器跑一个点再动数据库 —— 有基准，间隔才可解释。
           fired = true;
           batch0 = now_us();
-          if (async_arm) {
+          if (kind == ARM_WORK) {
             for (int i = 0; i < reps; ++i) {
               uvcpp_work* w = new uvcpp_work();
               w->init();
@@ -283,6 +299,27 @@ stall_result run_stall_arm(uvcpp_db_client* db, const std::string& sql, int reps
                   });
               if (rc != 0) {
                 delete w;
+                if (--remaining == 0) loop.stop();
+              } else {
+                ++queued;
+              }
+            }
+            if (queued == 0) loop.stop();
+          } else if (kind == ARM_FACADE) {
+            // 门面：同一批活、同一条连接，只是派发 / 搬结果 / 回收 work 三件事
+            // 由 `uvcpp_db_async` 包掉。这一臂的意义就是**和上一臂对照** ——
+            // 间隔若顶到几百毫秒，说明门面把活偷偷挪回了同步执行。
+            facade.reset(new uvcpp_db_async(db));
+            for (int i = 0; i < reps; ++i) {
+              const int rc = facade->query(
+                  &loop, sql,
+                  [&](uvcpp_db_status, const uvcpp_db_table&) {
+                    if (--remaining == 0) {
+                      r.batch_us = now_us() - batch0;
+                      loop.stop();
+                    }
+                  });
+              if (rc != 0) {
                 if (--remaining == 0) loop.stop();
               } else {
                 ++queued;
@@ -527,7 +564,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- 9. 卡顿：同步调用挂在 loop 线程上 vs 派到线程池 ----
+  // ---- 9. 卡顿：同步挂在 loop 线程上 vs 手写 work vs 门面 ----
   {
     double slow_us = 0;
     const std::string slow = calibrate_slow(&db, k, &slow_us);
@@ -536,16 +573,27 @@ int main(int argc, char** argv) {
       std::printf("  标定失败，跳过（%s）\n", db.last_error().c_str());
     } else {
       std::printf("  慢查询单条 %.1f ms\n", slow_us / 1000.0);
-      const stall_result sync = run_stall_arm(&db, slow, 10, false);
+      const stall_result sync = run_stall_arm(&db, slow, 10, ARM_SYNC);
       print_stall("sync (on loop thread)", sync);
-      const stall_result asy = run_stall_arm(&db, slow, 10, true);
-      print_stall("async (via vcpp_work)", asy);
+      const stall_result work = run_stall_arm(&db, slow, 10, ARM_WORK);
+      print_stall("async (via vcpp_work)", work);
+      const stall_result fac = run_stall_arm(&db, slow, 10, ARM_FACADE);
+      print_stall("async (via db_async)", fac);
       std::printf(
           "  读法  max gap 是这条 1 ms 定时器相邻两次到点的最大间隔（理想 1000 us）。\n"
           "        同步臂在那批查询期间循环整个停住，于是 max gap 直接顶到那批查询的\n"
           "        时长、错过的点被 libuv 合并成一个（ticks 塌到几十）；异步臂的循环\n"
           "        在等数据库时照常转，ticks 应当是满的。两臂的 batch 耗时是同一个\n"
-          "        量级 —— 异步不是把查询变快，是不让别的事跟着一起等。\n");
+          "        量级 —— 异步不是把查询变快，是不让别的事跟着一起等。\n"
+          "        后两条臂的**唯一**差别是「活由谁交给线程池」：手写 `uvcpp_work`\n"
+          "        对比 `uvcpp_db_async` 的一次调用。它们的 max gap 必须同量级 ——\n"
+          "        门面只是把那段样板收了起来，要是它偷偷改回同步执行，这一臂会当场\n"
+          "        顶到和同步臂一样大。\n");
+      if (work.max_gap_us > 0 && fac.max_gap_us > 0) {
+        const double ratio = fac.max_gap_us / work.max_gap_us;
+        std::printf("  门面 / 手写 work 的 max gap 之比：%.2f×（判据：同量级，约 1×）\n",
+                    ratio);
+      }
     }
   }
 
