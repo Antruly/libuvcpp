@@ -223,7 +223,7 @@ compiled by CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
 | db (SQLite / MySQL / PostgreSQL) | [doc/db-guide.md](doc/db-guide.md) | One `uvcpp_db_client` per connection over three backends, the URL grammar, the status codes, the one cross-backend contract the shared suite enforces (and the three places the backends genuinely differ), parameter binding, transactions and the no-retry-inside-a-transaction rule, what `DECIMAL` costs you, the async facade (`uvcpp_db_async`, callbacks + a future) and the optional connection pool built on the same connection, and how to run the tests against a real server |
-| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.4.4 completes all seven modules** (foundation + net + webapp/web + HTTP/2 + QUIC + HTTP/3, 321 functions); all it needs is `-DUVCPP_ENABLE_CAPI=ON`. **As of 1.5.0 all six release legs ship it**, alongside the reconciled C# binding in [`bindings/csharp/`](bindings/csharp/README.md) |
+| C ABI (`uvcpp_c_*`) | [doc/capi-guide.md](doc/capi-guide.md) | The `extern "C"` surface for C#/P-Invoke and other FFI: the option and its guard chain, the five ABI rules (error codes, callback-table `size`, ownership classes, thread rule, ABI version), what each module provides and deliberately does not, and what the mutation table actually measured. **1.5.3 completes all eight slices** (foundation + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db, 402 functions); all it needs is `-DUVCPP_ENABLE_CAPI=ON`, and db additionally needs its own `-DUVCPP_ENABLE_DB=ON` plus a backend. **As of 1.5.0 all six release legs ship it**, alongside the C# binding in [`bindings/csharp/`](bindings/csharp/README.md) (which covers the first seven slices, 321 of the 402 — db is a stated gap) |
 
 Outside the modules there is also [doc/benchmark.md](doc/benchmark.md) for measured
 performance, [doc/build-guide.md](doc/build-guide.md) for every CMake switch and build
@@ -802,6 +802,56 @@ fixes came from issue reports by the project's first external contributor,
   under `-Werror`. The fix is that one include, shaped like `uvcpp_c_quic.h` already does
   it. The lesson is that the umbrella's include order hides this whole class of defect,
   while "include only the one slice I use" is entirely legitimate (`1.4.4`)
+- **1.5.3 lands the database module's C surface**: new `uvcpp_c_db.h` (**81 entries**),
+  bringing the total to **402 functions across eight slices**. Connections, synchronous
+  queries and transactions, parameters, result tables and values, a **connection pool** and
+  an **async facade** — C#, Rust and Python's `ctypes` can drive the database module today
+  without writing the `uv_queue_work` boilerplate or managing a set of connections
+  themselves. **This slice has its own module switch** (`UVCPP_DB_ENABLE`): db hangs off
+  neither net nor web, so `CAPI=ON, DB=OFF` is a legal combination, and with none of the
+  three backends (SQLite / MySQL / PostgreSQL) built the module is force-disabled. The
+  backend-level switches have nothing to do with the **symbol surface** — they only decide
+  which names `uvcpp_c_db_drivers()` reports, which is why the symbol lock judges
+  `UVCPP_DB_ENABLE` and no backend at all (`1.5.3`)
+- **"Adding a slice does not bump it", the fourth time — and this time the criterion is
+  blunter than in earlier batches**: `UVCPP_C_ABI_VERSION` stays **1**, because
+  `git diff --stat origin/master -- src/capi/` prints **exactly one line**
+  (`src/capi/uvcpp_c.h | 12 ++++++++++++`, an `#if UVCPP_DB_ENABLE` include in the
+  umbrella) — the seven existing headers and their seven `.cpp` files are untouched, byte
+  for byte (`1.5.3`)
+- **The C async interface takes no loop parameter — the one shape difference from the C++
+  side**: C++'s `uvcpp_db_async::query(uvcpp_loop* loop, …)` takes this library's
+  `uvcpp_loop*`, and on the C side **there is nothing legal to pass**: no public function
+  produces a `uvcpp_loop*`, and "borrow the caller's own `uv_loop_t*`" is simply wrong —
+  `~uvcpp_loop()` calls `uv_loop_close()` on whatever pointer it holds and frees **the
+  caller's** memory with it. A parameter nobody can legally fill is worse than no parameter
+  (it invites C# to pass a guessed pointer), so `uvcpp_c_db_async_*` takes none: completion
+  callbacks always land on the facade's own **lazily started** loop thread, stopped and
+  joined by `_async_free()`. To move results onto **your** loop, post one of the
+  `uvcpp_c_net.h` `*_post()` wakeups from inside the callback (`1.5.3`)
+- **A sixth pure-C test, per-backend this time**: `test_capi_db_func` asserts through
+  create-table / insert / query / transaction / pool / async (296 checks on this machine's
+  `build-capi-all`, 792 with connection strings for all three backends). The load-bearing
+  ones are "after borrowing the only connection, a second `acquire` returns
+  `NO_CONNECTION` on timeout instead of hanging", "`_async_free()` inside a callback gives
+  `E_STATE`" and "an out-of-range column returns a static NULL view". With no backend at
+  all it exits 3 (**not judged**, not passed). All three `capi` CI legs carry
+  `-DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=ON` from this batch, and the `db-servers`
+  job now enables the C surface too, so the C test runs against **real** MySQL and
+  PostgreSQL (`1.5.3`)
+- **The mutation table's fourth expansion**: M22–M26 are the db five (an out-of-range
+  column index, `free` on a borrowed client, `free` on a pool still bound to a facade, a
+  callback table missing `on_table`). Expectations were written down **before** running, and
+  all five are caught; three of them are caught as **crashes** (one `SIGABRT`, two
+  `SIGSEGV`, no `checks=` line), recorded as such rather than read as a plain FAIL
+  (`1.5.3`)
+- **The db slice of the symbol lock is judged by one leg only, so that leg gained a gate**:
+  the `capi` entry is the only one with CAPI and DB open at once, and when
+  `UVCPP_ENABLE_DB` is force-disabled the lock **does not go red** — it honestly prints
+  "not judged" on the db line and exits 0. In other words that leg could degrade from "the
+  only leg judging db" to "a leg not judging db" in complete silence. So it now has a step:
+  the configure log must contain `db: SQLite 后端开` and `Including db module in build`,
+  and `ctest -N` must list `test_capi_db_func` (`1.5.3`)
 
 ### C# binding (`bindings/csharp/`)
 
@@ -845,6 +895,12 @@ fixes came from issue reports by the project's first external contributor,
   it returns the length"; as `IntPtr f(req)` it is two arguments short and C writes to
   stack garbage). **That table is the reason this layer needs a checked definition file**
   (`1.5.0`)
+- **The db slice (81 entries) is not bound in this batch — a gap stated as a gap**: the
+  binding is a hand-written, line-by-line-checked artifact, so it stays honest only when it
+  grows with a batch and every line gets read. The lock holds 402 symbols today; the
+  plain-text reconciliation script in `bindings/csharp/README.md` §7 prints
+  `db 0/81 ← not bound`, while the other seven slices (321) still have **both** set
+  differences empty (`1.5.3`)
 
 ### QUIC transport (net layer)
 
@@ -900,7 +956,7 @@ fixes came from issue reports by the project's first external contributor,
 - **The private-header pair.** `uvcpp_quic_session.h` holds `ngtcp2_conn*`, `SSL*` and
   `ngtcp2_path_storage`, so its layout tracks the ngtcp2 version — it is the second
   private header, alongside `uvcpp_quic_ngtcp2.h`. Both are excluded from the install
-  (`CMakeLists.txt:2388-2388`) and from the package
+  (`CMakeLists.txt:2389-2389`) and from the package
   (`tests/tools/package_release.py`'s `PRIVATE_HEADERS`); measured with
   `cmake --install build-quic --prefix /tmp/inst`, which lands exactly the four public
   headers in `include/quic/` (`1.4.1`)

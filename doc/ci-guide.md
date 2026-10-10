@@ -254,7 +254,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2525-2525`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2526-2526`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -475,19 +475,40 @@ What is specific to this entry:
   `-DUVCPP_ENABLE_CAPI=ON` because "release and `full` both support the C ABI" is the
   requirement, not a convenience — but `full`'s gate strings are about the memory pool, and its
   ctest count does not tell you whether the pure-C tests were registered. The dedicated
-  entry is where that is asserted. Since `1.4.4` those are **five** tests
+  entry is where that is asserted. Since `1.5.3` those are **six** tests
   (`test_capi_common_func`, `test_capi_net_func`, `test_capi_webapp_func`, plus
   `test_capi_h2_func` and `test_capi_quic_h3_func`, which only exist on the legs that enable
-  NGHTTP2 / HTTP3); the entry's `gate_test` still names the one from the first batch, because
+  NGHTTP2 / HTTP3, and `test_capi_db_func`, which only exists where `UVCPP_ENABLE_DB` is on);
+  the entry's `gate_test` still names the one from the first batch, because
   the "is it registered at all" check is a spot check and the last step of the job runs the
   whole suite.
 - **Which leg judges which slice.** The C surface spans modules, so `1.4.4` also put
   `-DUVCPP_ENABLE_CAPI=ON` on the Ubuntu **`h2`** and **`http3`** entries — one leg only ever
   enables part of the module set (`capi` has no SSL/h2/quic, `http3` has no webapp), and the
-  symbol lock's slices are judged against each slice's own switch. Three legs together cover
-  all seven; see `doc/capi-guide.md` §3.5 for the table.
-- **No OpenSSL, no nghttp2, no zlib for the C layer itself.** `capi`'s flags match `web`'s
-  dependency row. That leg stays OpenSSL-free on purpose: it is the "does the C layer stand up
+  symbol lock's slices are judged against each slice's own switch. `1.5.3` added the db slice,
+  which is judged on exactly **one** leg: the three `capi` entries all carry
+  `-DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=ON` (with both remote backends explicitly
+  `OFF`), and the Ubuntu one is the only leg in the whole matrix that has CAPI and DB open at
+  the same time. Three Ubuntu legs between them judge all eight slices (5 + 5 + 6, with db
+  judged only on the first and webapp only on the first two); see `doc/capi-guide.md` §3.5
+  for the table.
+- **The db slice is the one slice whose judgment can silently evaporate, so the Ubuntu `capi`
+  entry gained a step for it.** If `UVCPP_ENABLE_DB` is force-disabled (no backend found) the
+  symbol lock does not go red — it prints "not judged" on the db line and exits 0, and the
+  "every slice is judged by at least one leg" property is gone with nothing to show for it.
+  The step `Gate — the C ABI leg really has the db slice open` therefore requires
+  `db: SQLite 后端开` and `Including db module in build` in the configure log and
+  `test_capi_db_func` in `ctest -N`, the same three criteria the `db` entry uses. The macOS and
+  MSVC `capi` entries carry the same flags for a different reason — not the lock (it is
+  Ubuntu-only) but "the C slice compiles under Apple clang and `cl` and its test runs there".
+- **No OpenSSL, no nghttp2, no zlib for the C layer itself — and, since `1.5.3`, exactly one
+  database backend.** `capi`'s flags match `web`'s dependency row plus, on Ubuntu,
+  `libsqlite3-dev` (the pure-C db test needs a backend to talk to, and SQLite is the one that
+  needs no server; the two remote backends stay explicitly `OFF`, whose tests would exit 3 and
+  read as coverage without being any). MSVC takes SQLite **from source**
+  (`-DUVCPP_DB_SQLITE_FROM_SOURCE=ON`), which is the same network-at-configure cost the `db`
+  entry already pays and the path the release legs use; macOS finds it in the SDK and installs
+  nothing. That leg stays OpenSSL-free on purpose: it is the "does the C layer stand up
   by itself" leg, and the C surfaces that do wrap cryptography arrive on their own legs with
   their own flags (`http2` on the `h2` entry, `quic` + `http3` on the `http3` entry). The one
   place this bites is a wrapper whose C++ member only exists under a feature switch — which is
@@ -574,6 +595,24 @@ What is specific to `db-servers`:
   `mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test` and
   `postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test`, matching the credentials the two
   containers are created with.
+
+**Since `1.5.3` the C surface of the module rides these same legs.** `src/capi/uvcpp_c_db.h`
+is the eighth slice of the C ABI, and its test `test_capi_db_func` looks at the *same*
+`UVCPP_DB_TEST_*_URL` variables as the C++ suite — so once the two `env:` lines above are
+present, the C test goes over MySQL and PostgreSQL with no further change, and the
+`SKIP_RETURN_CODE 3` / `UVCPP_DB_TEST_REQUIRE=1` contract applies to it verbatim. From the
+other direction the three `capi` entries now carry a SQLite backend (see the `capi` entries
+above). Two things follow that are easy to get backwards:
+
+- The `db-servers` entry needed **`-DUVCPP_BUILD_WEB=ON`** as well, because `CAPI ⇒ WEB` and
+  `UVCPP_BUILD_WEB` is `OFF` by default — `-DUVCPP_ENABLE_CAPI=ON` alone is force-disabled by
+  the guard chain and the entry would look like it has CAPI while exporting not one C symbol.
+  Its gate therefore greps the configure log for `Including capi module in build`, not the
+  cache (`CMakeCache.txt` would still read `ON` — the guard chain uses a plain `set()`).
+- Because the C test reads the URLs from the environment and the C++ test does too, **the
+  `db-servers` entry is the only place the C db wrapper is exercised against a remote
+  backend**, and the three `capi` entries are the only place the symbol lock judges the db
+  slice. Neither leg can be dropped without silently losing one of those.
 
 **Release configurations** pass `-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON` with
 `-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF` on all ten configure points. The two

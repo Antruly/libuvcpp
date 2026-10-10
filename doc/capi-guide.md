@@ -3,13 +3,16 @@
 `src/capi/` 是本库的 **C 接口层**：一组 `extern "C"` 导出的函数、几份**纯 C**
 （C99）的头，装到 `include/capi/`。它的用途很具体 —— 让 C#、Rust、Go、Python
 这些语言能通过 FFI（P/Invoke 那一路）用到本库的 webapp / web / net / http2 /
-http3 / quic，而不需要写一个 C++ 中间层。
+http3 / quic / db，而不需要写一个 C++ 中间层。
 
 它与 C++ ABI 的关系只有一句：**同一份库、同一个版本号、同一个 `.dll`/`.so`**。
-C 层是薄包装（约 150–250 个函数的精选门面，见 §4），不新增第三方依赖、不新增
-产物、不改动 C++ 那一侧的任何导出行为。
+C 层是薄包装（402 个函数的精选门面，见 §4），不新增第三方依赖、不新增产物、
+不改动 C++ 那一侧的任何导出行为。**"不新增第三方依赖"这条对 db 那一片同样成立
+但要说清楚**：`uvcpp_c_db.h` 自己一个依赖都不拉，可它包装的那个模块**有**后端
+（SQLite / MySQL / PostgreSQL）—— 库开着哪个后端，C 面就报得出哪个驱动名，见
+§4 那张表里 db 那一行。
 
-> ## 进度：1.4.4 七片全部就位（这批做完了）
+> ## 进度：1.5.3 八片全部就位（这批做完了）
 >
 > **批 1（1.4.2）**交付了 `uvcpp_c_common.h` 与 `uvcpp_c_net.h`：ABI 自洽、错误码
 > 与文案、句柄的生死与类型检查、版本化回调表的 `size` 规则、线程纪律，以及
@@ -21,14 +24,21 @@ C 层是薄包装（约 150–250 个函数的精选门面，见 §4），不新
 >
 > **批 3a（1.4.3）**交付了 `uvcpp_c_http2.h`（驱动层一个句柄 + 构造器 + 流视图），
 > **批 3b（1.4.4）**交付了 `uvcpp_c_quic.h`（TLS 上下文 / 客户端 / 服务端 /
-> 借来的连接句柄）与 `uvcpp_c_http3.h`（接在借来的 QUIC 连接上的一层）。
+> 借来的连接句柄）与 `uvcpp_c_http3.h`（接在借来的 QUIC 连接上的一层）——
 > 到此共 **321 个函数 / 七片**。
 >
-> 判据是 `tests/capi/` 下五个**纯 C 编译**的用例（`capi_common_func.c`、
-> `capi_net_func.c`、`capi_webapp_func.c`、`capi_h2_func.c`、
-> `capi_quic_h3_func.c`）：三个端到端用例都是拿 C 写的客户端去打 C 写的服务端
-> （webapp / h2 在 TCP 上，quic + h3 在 UDP 上），body 逐字节比，并在
-> `tests/tools/capi_mutation.py` 那张变异表（二十条 + 一条基线）下被逐条拆守卫。
+> **批 4（1.5.3）**交付了 `uvcpp_c_db.h`（**81 个**：连接 / 同步查询与事务 /
+> 参数 / 结果集与值 / **连接池** / **异步门面**，见 §4 与 `doc/db-guide.md`）。
+> 这一片有两处与前面七片不同，都写进了 §3.5：① 它是**唯一一片有自己的模块
+> 开关**的（`UVCPP_DB_ENABLE`，别的几片都被 CAPI 的守卫链顺手拉起来）；② 它
+> 包里带着的后端**不固定**。到此共 **402 个函数 / 八片**。
+>
+> 判据是 `tests/capi/` 下**六个**纯 C 编译的用例（前五个之外加
+> `capi_db_func.c`）：三个端到端用例都是拿 C 写的客户端去打 C 写的服务端
+> （webapp / h2 在 TCP 上，quic + h3 在 UDP 上），body 逐字节比；db 那一份是
+> **逐后端**建表 / 插入 / 查询 / 事务 / 池 / 异步各跑一遍（后端由环境变量里的
+> 连接串给，见 §6 与 `doc/db-guide.md` 的「C 接口」）。全部在
+> `tests/tools/capi_mutation.py` 那张变异表（二十六条 + 一条基线）下被逐条拆守卫。
 >
 > **没做的**逐条列在 [§7](#7-没做的如实列出)（UDP 的通用面、h3 的 trailers 与
 > push、逐帧回调、TLS 参数入口……）。别在别处另维护一份。
@@ -80,7 +90,7 @@ C 层是薄包装（约 150–250 个函数的精选门面，见 §4），不新
 cmake -S . -B build-capi -DUVCPP_BUILD_TESTS=ON \
   -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
   -DUVCPP_BUILD_EXPAND=ON -DUVCPP_ENABLE_OPENSSL=ON -DUVCPP_ENABLE_ZLIB=ON \
-  -DUVCPP_ENABLE_CAPI=ON
+  -DUVCPP_ENABLE_CAPI=ON -DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=ON
 ```
 
 `UVCPP_ENABLE_CAPI` **默认 OFF**。它有一条守卫链（`CMakeLists.txt` 里两段
@@ -103,6 +113,20 @@ cmake -S . -B build-capi -DUVCPP_BUILD_TESTS=ON \
 configure）都传 `-DUVCPP_ENABLE_CAPI=ON`，CI 的 `full` 格与专门的 `capi` 格也都
 开着。也就是说，**"库里能导出 C 接口"这件事每天都有腿在跑**，"关着"的配置也有
 （其余各格）。
+
+**db 那一片的开关是它自己的，`UVCPP_ENABLE_CAPI=ON` 不蕴含它。** db 不接在
+net / web 上 —— 一个不联网、不起服务的程序照样可以连数据库 —— 所以
+`CAPI=ON, DB=OFF` 是个**合法组合**，那时伞头里 `#if UVCPP_DB_ENABLE` 那一段
+不成立，`capi/uvcpp_c_db.h` 既不在源列表里、也不在装出去的 `include/capi/` 里
+（§5 那条"头还在包里吗"的判法对它同样适用）。db 自己还有一条**同形状**的守卫
+链：`UVCPP_ENABLE_DB` 开着、但 SQLite / MySQL / PostgreSQL **三个后端一个都没
+找着**时，整个模块被强制关闭 —— 判法也一样，看 configure 日志里那句
+`Including db module in build`，别看 cache。
+
+后端那一级开关（`UVCPP_ENABLE_DB_SQLITE` / `_MYSQL` / `_PGSQL`）与 C 的**符号面
+无关**：关掉 MySQL 只是让 `uvcpp_c_db_drivers()` 不再报出那个名字、让
+`mysql://…` 的连接串报 `NO_DRIVER`；`uvcpp_c_db.h` 里那 81 个函数一个不多一个
+不少。所以符号锁那一片只判 `UVCPP_DB_ENABLE`，不判任何一个后端。
 
 ### 关着的时候，头还在包里吗
 
@@ -242,19 +266,22 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
   所以门禁按**每片自己的开关**（从这棵树的 `uvcpp_config.h` 里读）逐片判：
   开着 → 这一片与导出面逐条相等；关着 → 这一片要求**一个都不许出现**，并如实
   印一行「未判」。**「未判」不是「通过」**，它是要拿另一条腿去补的账。
-- **没有哪一条腿开得起全部七片**，所以门禁在 ubuntu 上挂**三条**腿，合起来把
-  七片都盖上（每片至少被一条真的量过一次）：
+- **没有哪一条腿开得起全部八片**，所以门禁在 ubuntu 上挂**三条**腿，合起来把
+  八片都盖上（每片至少被一条真的量过一次）：
 
   | 腿（`ci-linux-ubuntu.yml`） | 它带的开关 | 判了哪几片 |
   |---|---|---|
-  | `capi` | CAPI + WEBAPP，**没有** SSL/h2/quic | common / net / web / webapp 四片；h2 / quic / http3 三片印「未判」|
-  | `h2` | 再加 `NGHTTP2` | 再加 h2 片，共五片 |
-  | `http3` | 再加 `QUIC` + `HTTP3`（**没有** WEBAPP）| 再加 quic / http3 两片，共六片；webapp 那一片按"关着的模块一个都不许导出"判，印「未判」|
+  | `capi` | CAPI + WEBAPP + **DB（SQLite）**，**没有** SSL/h2/quic | common / net / web / webapp / **db** 五片；h2 / quic / http3 三片印「未判」|
+  | `h2` | 再加 `NGHTTP2`（**没有** DB）| 再加 h2 片，共五片；db 那一片这一格没开，印「未判」|
+  | `http3` | 再加 `QUIC` + `HTTP3`（**没有** WEBAPP / DB）| 再加 quic / http3 两片，共六片；webapp 与 db 两片按"关着的模块一个都不许导出"判，印「未判」|
 
   这条腿的选择本身也是判据的一部分：`quic` 那几片**不是**在 `capi` 腿上假装
-  判过的，`webapp` 那一片也**不是**在 `http3` 腿上假装判过的。本机对应的三棵树
-  叫 `build-capi` / `build-capi-h2` / `build-capi-h3`（§6），另有一棵
-  `build-capi-all` 把七片一次开齐。
+  判过的，`webapp` 那一片也**不是**在 `http3` 腿上假装判过的；`db` 那一片同理
+  —— 八片里**只有它在 `capi` 腿上是真判的**（那一格从批 4 起是唯一的
+  "CAPI 与 DB 同时开着"的腿），所以那一条腿多了一道门禁专门钉住这件事，见下面
+  「批 4 加一片为什么也不 +1」那一段的后半。本机对应的三棵树叫 `build-capi` /
+  `build-capi-h2` / `build-capi-h3`（§6），另有一棵 `build-capi-all` 把八片一次
+  开齐。
 
 **批 2（1.4.3）为什么没有把 `UVCPP_C_ABI_VERSION` 从 1 抬到 2**，以及这条判断
 是怎么**量**出来的，不是"我们觉得是加面"：
@@ -277,11 +304,41 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
   里没有一处动到已声明的函数）。**批 3b 确实动过一次 `uvcpp_c_http3.h` 的
   接口面**（补上 `uvcpp_c_h3_response_set_stream_id()`）—— 但那一份头是这一批
   新加的、从未发布过，所以那是"把没写完的东西写完"，不是"改了一个承诺"。
+- **批 4（`1.5.3`）加的 db 一片是 81 个**，`UVCPP_C_ABI_VERSION` 仍是 **1**。
+  这一次连"读 diff 判有没有动到声明"都用不着：`git diff --stat origin/master --
+  src/capi/` 的输出**只有一行** `src/capi/uvcpp_c.h | 12 ++++++++++++`（伞头多
+  一段 `#if UVCPP_DB_ENABLE` 的 include），既有的七份头与七份 `.cpp` **一个字节
+  都没动**。那 81 个符号只出现在新头 `uvcpp_c_db.h` 里。**加一片不 +1，这已经是
+  第四次**（1.4.3 的 http2、1.4.4 的 quic + http3、这一次的 db）；这条线的规矩
+  从来不是"加了东西就 +1"，是上面那三类改动。
+- 那 81 个里有一处**形状**上的选择要写下来，因为它是这一片唯一没有先例的地方：
+  **C 的异步接口没有循环参数**。C++ 侧 `uvcpp_db_async::query()` 收一枚
+  `uvcpp_loop*`，而 C 面**没有合法的东西可填** —— 公开头里没有任何函数能造出
+  `uvcpp_loop*`，而"把调用方自己的 `uv_loop_t*` 借进来"是错的：
+  `~uvcpp_loop()` 会对自己手上那个指针调 `uv_loop_close()`、成功就连同内存一起
+  释放（`src/handle/uvcpp_loop.cpp` 里那段注释讲的就是这件事），于是"借"别人的
+  循环等于归还别人的内存。**给一个没人填得合法的参数比不给更糟**（它会诱使 C#
+  侧传一个猜来的指针），所以 `uvcpp_c_db_async_*` 干脆不收：完成回调一律在门面
+  自带的那条循环线程上被调，那条线程懒起、由 `_async_free()` 叫停并 join；
+  要把结果搬回**你自己的**循环，就在回调里往那条循环投一次跨线程唤醒
+  （`uvcpp_c_net.h` 的 `*_post()` 那一族就是这条路）。这段决定的完整理由写在
+  `src/capi/uvcpp_c_db.h` 开头。
+- **`capi` 那条腿为此多了一道门禁。** db 是八片里**唯一只在一条腿上真判**的
+  （只有那一格同时开着 CAPI 与 DB），而 `UVCPP_ENABLE_DB` 走的是与本工程
+  NGHTTP2 / QUIC 同形状的**强制关**规则：三个后端一个都没找着 ⇒ 打 warning +
+  `set(... OFF)`，cache 里照旧写着 `ON`。真发生这种事，符号面锁**不会红** ——
+  它只在 db 那一行如实印「未判」，然后退 0。也就是说这条腿可以从"唯一判 db 的
+  腿"退化成"没在判 db 的腿"而全程无声，而 §3.5 那条"每片至少被一条腿真量过"
+  就断了。所以 `ci-linux-ubuntu.yml` 的 `capi` 腿上多了一条只挂那一格的步骤：
+  到配置日志里核 `db: SQLite 后端开` 与 `Including db module in build`、
+  再到 `ctest -N` 里核 `test_capi_db_func` 真的注册了（三条与 `db` 那一格
+  同源）。macOS / MSVC 两格也照同一套加了 db 与这道步骤，但那边**不为锁**，
+  为的是"C 面在 Apple clang 与 `cl` 上编得过、用例在那两个平台上真的跑过"。
 
 ## 4. 提供什么、明确不提供什么
 
-到 1.4.4 为止共 **321 个函数**（`tests/tools/capi_symbols.lock` 就是这份名单，
-**分片**记着，每片对着一份头；七片：5 + 30 + 29 + 119 + 46 + 42 + 50）。
+到 1.5.3 为止共 **402 个函数**（`tests/tools/capi_symbols.lock` 就是这份名单，
+**分片**记着，每片对着一份头；八片：5 + 30 + 29 + 119 + 46 + 42 + 50 + 81）。
 **名字都是 `uvcpp_c_` 前缀。**
 
 | 头 | 提供 | 不提供 |
@@ -294,6 +351,7 @@ void install(void* ctx, uvcpp_c_tcp_client* c) {
 | `capi/uvcpp_c_http2.h`（46 个） | **连接**：`connection_new` / `free` / `start` / `flush` / `shutdown` / `close_now` / `closed` / `closing` / `last_error` / `stream_count` / `bytes_in` / `bytes_out` / `pause_stream` / `resume_stream` / `begin_goaway` / `submit_goaway` / `submit_rst` / `submit_request` / `peer_goaway_received` / `peer_goaway_error_code` / `peer_goaway_last_stream_id`。**服务端应答**：`send_status` / `send_headers` / `send_response` / `send_data`。**构造器**（调用方建、调用方废）：`h2_request_new` / `set_header` / `set_body` / `free`、`h2_response_new` / `set_status` / `set_header` / `set_content_type` / `set_body` / `free`。**流视图**（回调期句柄）：`id` / `state` / `paused` / `rejected` / `body_bytes` / `expected_body` / `request_method_name` / `request_path` / `request_header` / `request_has_header` / `response_status` / `response_header` | `uvcpp_h2_session` 这个**独立句柄**（那会要求 C 侧自己写 socket；而且两个句柄指向同一份内部状态时，"先 free 哪个"就成了第二份真相）；`recv` / `drain` / `want_read` / `want_write`（传输层的事，驱动层自己做）；**优先级 / 依赖 / push**（`uvcpp_h2_session` 本来就没有这几项）；`on_begin_headers` / `on_frame_recv` 那类**逐帧**回调；`session().take_completed()`（驱动层自己在写完成路径上跑它，使用方没有插手的余地） |
 | `capi/uvcpp_c_quic.h`（42 个） | **进程级**：`crypto_init` / `crypto_free` / `ngtcp2_version` / `error_string`。**TLS**（调用方建、调用方废）：`tls_client_new` / `tls_server_new` / `tls_server_selfsigned` / `set_ca_file` / `set_verify` / `free`。**客户端**：`new` / `connect` / `connection`（借来的连接句柄）/ `set_tls` / `set_alpn_protos` / `set_idle_timeout` / `run` / `run_once` / `stop` / `close` / `free`。**服务端**：`new` / `set_tls` / `set_alpn_protos` / `set_idle_timeout` / `bind` / `configured_ip` / `configured_port` / `listen` / `run` / `run_once` / `stop` / `free`。**连接**（借来的）：`set_callbacks` / `state` / `alpn_selected` / `open_stream` / `write_stream` / `shutdown_stream` / `shutdown_stream_read` / `streams_left` / `close` | 一条流上的**读回调寄存器**（`on_read` 那些走 `_conn_set_callbacks` 那张表，不单开函数）；**每个连接一枚 `*_free()`** —— 借来的句柄没有 `free`（§3.3 第三类）；明文模式（QUIC 没有这回事：不配 TLS 的 `listen` / `connect` 直接失败）；证书/私钥**逐项**入口（服务端只有 `_server_new(证书, 私钥)` 与 `_server_selfsigned()` 两个入口，客户端只吃 CA 文件与一个校验开关）；0-RTT / 迁移 / 版本协商的旋钮 |
 | `capi/uvcpp_c_http3.h`（50 个） | **连接**：`connection_new`（接在一枚借来的 QUIC 连接句柄上）/ `free`（**持有者销毁**，见文件头第 2 条）/ `start` / `send_request` / `take_completed` / `completed_count` / `send_response` / `send_status` / `flush` / `close` / `ready` / `closed` / `server_side` / `bytes_in` / `bytes_out` / `alpn_selected` / 三条关键流各自的流号（`_control_stream_id` / `_qpack_encoder_stream_id` / `_qpack_decoder_stream_id`，还没开出来时 -1）；另有进程级的 `h3_version`（nghttp3 的版本串）。**构造器**（调用方建、调用方废）：`h3_request_new` / `set_scheme` / `set_authority` / `set_header` / `set_body` / `free`，`h3_response_new` / `set_status` / `set_stream_id` / `set_header` / `set_content_type` / `set_body` / `reset` / `free`，加它们的读侧（`status` / `stream_id` / `body` / `body_size` / `error` / `header` / `has_header`）。**请求视图**（回调期句柄）：`method` / `path` / `scheme` / `authority` / `header` / `has_header` / `body` / `body_size` / `stream_id` | **trailers**（两边都不给：请求侧与响应侧都没有）、**server push**（与 `doc/http3-guide.md` 的"真实现"表一致）；**客户端侧的响应回调** —— 客户端拿响应走 `_take_completed()` + 那枚 `h3_response` 的读侧，没有第四条 `on_response` 吊桥；`uvcpp_h3_connection` 那层的 `on_stream_close` **只给收尾信息**（流号 + 四个错误位），逐帧的 `on_frame_*` 不给 |
+| `capi/uvcpp_c_db.h`（81 个） | **进程级 / 值**：`status_name` / `drivers`（这份库真编了哪几个后端）/ `value_type` / `value_type_name` / `value_is_null` / `value_to_text·int64·uint64·double·bool` / `value_bytes` / `value_size`。**参数**：`params_new` / `free` / 八个 `add_null·int64·uint64·double·bool·text·blob` / `clear` / `count`。**结果集**：`table_free` / `row_count` / `column_count` / `column_name` / `column_index` / `cell` / `affected_rows` / `table_name` / `to_json` / `to_csv`。**连接 + 同步**：`client_new` / `free` / `open` / `close` / `is_open` / `reconnect` / `ping` / `driver_name` / `url` / `last_error` / `set_timeout_ms` / `query` / `execute` / `insert` / `last_insert_id` / `begin·commit·rollback` / `table_names` / `table_schema` / `escape` / `escape_identifier`。**连接池**：`pool_new` / `free` / `init` / `close` / `acquire` / `release` / `discard` / `query` / `execute` / `ping` / `size` / `in_use` / `idle` / `min_size` / `max_size` / `created_total` / `reused_total` / `close_idle` / `set_acquire_timeout_ms` / `last_error`。**异步**：`async_new`（绑 client）/ `async_new_pool` / `free` / `query` / `execute` / `in_flight` | `set_log()`（C++ 那侧收 `std::function`，跨 FFI 要另立一份字符串生命周期约定，而诊断有 `last_error` + `status_name` 两条路）；**异步接口的循环参数** —— 见 §3.5 最后一条，C 面没有合法的东西可填；**池子上的事务**：代借代还那组每个语句一条连接，要有事务就用 `_acquire()` 独占一条（头里写死）；**驱动专属旋钮**（字符集 / SSL 选项 / 连接选项那类）—— C++ 侧本来也没有对应入口；`uvcpp_c_db_async_*` 出来的表是**回调期**交给你、**之后仍然有效**的，但**装结果的那条循环线程是本片自己的**，不是你的（要把结果搬回自己的循环见 §3.5 那一段） |
 | `capi/uvcpp_c.h` | 伞头：按各模块宏 include 上面几份 | 任何 C++ 类型、任何 libuv 类型（§1 第 2 条） |
 
 **`ws_client` 那一族的取舍要单独讲一句**：它**不给连接句柄**（收发都从客户端对象
@@ -312,11 +370,20 @@ C# 侧本来就是一个 `P/Invoke` 到别处的字符串转换。
 
 ## 5. 从 C# P/Invoke 用
 
-**这一层发出去的那份绑定在 `bindings/csharp/`**：两份 `.cs`（321 条 `DllImport`，
-与 `tests/tools/capi_symbols.lock` 一一对账）+ 一个能跑的 QUIC 例子，用法、动态
-库名字那一栏（Windows 上 MinGW 包与 MSVC 包**不一样**）、以及**别手写声明**的
-理由都在 [`bindings/csharp/README.md`](../bindings/csharp/README.md)。下面的清单
-是那一层的总纲；具体到某一条的实测后果，那份 README 的 §八 有一张逐条的对照表。
+**这一层发出去的那份绑定在 `bindings/csharp/`**：两份 `.cs`（183 + 138 = **321**
+条 `DllImport`，与 `tests/tools/capi_symbols.lock` 里**前七片**那 321 条一一对账）
++ 一个能跑的 QUIC 例子，用法、动态库名字那一栏（Windows 上 MinGW 包与 MSVC 包
+**不一样**）、以及**别手写声明**的理由都在
+[`bindings/csharp/README.md`](../bindings/csharp/README.md)。下面的清单是那一层的
+总纲；具体到某一条的实测后果，那份 README 的 §八 有一张逐条的对照表。
+
+**db 那一片（81 个）的 C# 绑定这一批没做，这是如实列出的缺口，不是遗漏。** 锁里
+今天 402 条，其中 db 那 81 条在 `bindings/csharp/` 里**没有**对应声明 —— 那份绑定
+是手写 + 逐条核过的产物（它的 README 讲了为什么不能拿工具生成），跟着一批新片
+一起做才能保持"条条都有人读过"。所以：这一批交付的是**库里的 C 面**（C 消费者、
+Rust、Python 的 `ctypes` 今天就能用），C# 侧要用 db 得自己照下面这几条加声明，
+或者等下一批。`check_capi_symbols.py` 那条锁**不管**这件事 —— 它比的是库与头，
+C# 绑定是第三个消费者，见 `bindings/csharp/README.md` 的 §一。
 
 这一节只列**会真出事**的那几条。
 

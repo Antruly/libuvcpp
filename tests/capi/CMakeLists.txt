@@ -74,6 +74,20 @@ if(UVCPP_ENABLE_HTTP3)
   )
 endif()
 
+# db 那一份跟着 `UVCPP_ENABLE_DB` 走 —— 这是**唯一一片有自己开关的**：别的几片
+# 都被 CAPI 的守卫链顺手拉起来了，db 不是任何片的依赖，也不是任何片的下层，所以
+# `CAPI=ON, DB=OFF` 是个合法组合，那时 `uvcpp_c_db.h` 里的声明一个都不存在。
+#
+# 后端的开关**不**参与这里的判断：本用例的后端是从**环境变量里的连接串**来的
+# （见文件开头那段），一个后端都没编进来时它自己退 3（未判定）。写成
+# `if(UVCPP_ENABLE_DB AND UVCPP_ENABLE_DB_SQLITE)` 的话，`db-servers` 那条腿
+# （SQLite 关着、只有远端两个）会**看不到这个用例** —— 而那正是最该跑它的一格。
+if(UVCPP_ENABLE_DB)
+  list(APPEND UVCPP_CAPI_TESTS
+    capi_db_func.c       # db：连接 / 参数 / 结果集 / 事务 / 池 / 异步，逐后端一遍
+  )
+endif()
+
 foreach(_capi_src ${UVCPP_CAPI_TESTS})
   get_filename_component(_capi_name ${_capi_src} NAME_WE)
   set(_capi_exe "test_${_capi_name}")
@@ -116,3 +130,16 @@ foreach(_capi_src ${UVCPP_CAPI_TESTS})
   # 实测 1s 以内）留了两个数量级。
   set_tests_properties(${_capi_exe} PROPERTIES TIMEOUT 60)
 endforeach()
+
+if(UVCPP_ENABLE_DB)
+  # db 那份用例在"这台机器一个后端都没有"时退 3（未判定），而不是退 0 —— 它
+  # **不许**装成跑过了。3 在这条链上的含义与 `tests/functional/` 里那几个
+  # `db_*_func` 用例完全一样（`UVCPP_DB_TEST_REQUIRE` 一设就把它变成红），所以
+  # ctest 这一侧要照同一套读法：3 = 跳过，不是通过。
+  #
+  # 认下 `SKIP_RETURN_CODE 3` 会不会把"真判不了"洗成绿？不会：**本机与 CI 的三条
+  # `capi` 腿都开着 SQLite**（临时库文件，不需要任何服务端），所以那三步里
+  # 它必然是真跑的。能落到 3 的只有"连 SQLite 都没开"的构造，而那种构造下
+  # `uvcpp_c_db.h` 里那批同步函数本来就是"没有后端可连" —— 那时跳过是如实的。
+  set_tests_properties(test_capi_db_func PROPERTIES SKIP_RETURN_CODE 3)
+endif()

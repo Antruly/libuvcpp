@@ -220,7 +220,7 @@ int main() {
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
 | db（SQLite / MySQL / PostgreSQL） | [doc/db-guide.md](doc/db-guide.md) | 一个连接一个 `uvcpp_db_client`、三个后端、连接串的语法、返回码表、共用套件钉住的那一条跨后端契约（以及三家**真不一样**的三处）、参数绑定、事务与"事务里不重试"的规矩、`DECIMAL` 要付的代价、建在同一条连接上的异步门面（`uvcpp_db_async`，回调 + future）与可选的连接池，以及怎么对着真服务端跑测试 |
-| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.4.4 起七个模块全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3，共 321 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份对过账的 C# 绑定 |
+| C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.5.3 起八片全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db，共 402 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`（db 那一片还要它自己的 `-DUVCPP_ENABLE_DB=ON` 加一个后端）。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份 C# 绑定（覆盖前七片那 321 个，db 那 81 个是如实列出的缺口）|
 
 模块之外还有：[doc/benchmark.md](doc/benchmark.md) 性能实测读数、
 [doc/build-guide.md](doc/build-guide.md) 构建开关与构建树、
@@ -752,6 +752,43 @@ libuvcpp/
   这条原型的类型，`-Werror` 下一条红。修法是补那一份 include（形状照
   `uvcpp_c_quic.h`）。教训是伞头的 include 顺序会把这类毛病整个盖住，而"只 include
   我要的那一份"是完全正当的用法（`1.4.4`）
+- **1.5.3 把数据库模块的 C 面接上**：新增 `uvcpp_c_db.h`（**81 个入口**），到此共
+  **402 个函数 / 八片**。连接 / 同步查询与事务 / 参数 / 结果集与值 / **连接池** /
+  **异步门面** —— C#、Rust、Python 的 `ctypes` 今天就能用数据库模块，不用自己写
+  `uv_queue_work` 那段样板，也不用自己管一组连接。**这一片有自己的模块开关**
+  （`UVCPP_DB_ENABLE`）：db 不接在 net / web 上，所以 `CAPI=ON, DB=OFF` 是合法组合；
+  三个后端（SQLite / MySQL / PostgreSQL）一个都没编进来时整个模块被强制关掉。后端
+  那一级开关与**符号面**无关 —— 它只决定 `uvcpp_c_db_drivers()` 报出哪几个名字，
+  所以符号锁只判 `UVCPP_DB_ENABLE`，不判任何一个后端（`1.5.3`）
+- **"加一片不 +1"第四次，而这一次的判据比前几批更直接**：`UVCPP_C_ABI_VERSION` 仍是
+  **1**，因为 `git diff --stat origin/master -- src/capi/` 的输出**只有一行**
+  （`src/capi/uvcpp_c.h | 12 ++++++++++++`，伞头多一段 `#if UVCPP_DB_ENABLE` 的
+  include），既有的七份头与七份 `.cpp` **一个字节都没动**（`1.5.3`）
+- **C 的异步接口没有循环参数 —— 这是它与 C++ 那侧唯一一处形状差别**：C++ 的
+  `uvcpp_db_async::query(uvcpp_loop* loop, …)` 收的是本库的 `uvcpp_loop*`，而 C 面
+  **没有合法的东西可填**：公开头里造不出 `uvcpp_loop*`，而"借调用方自己的
+  `uv_loop_t*`"会让 `~uvcpp_loop()` 去 `uv_loop_close()` 并释放一块**别人的**内存。
+  给一个没人填得合法的参数比不给更糟（它会诱使 C# 侧传一个猜来的指针），所以
+  `uvcpp_c_db_async_*` 干脆不收：完成回调一律在门面自带的那条**懒起**的循环线程上
+  被调，`_async_free()` 里叫停并 join；要把结果搬回自己的循环，就在回调里投一次
+  `uvcpp_c_net.h` 那族 `*_post()`（`1.5.3`）
+- **第六个纯 C 用例，这次是逐后端的**：`test_capi_db_func` 把建表 / 插入 / 查询 /
+  事务 / 池 / 异步逐项断言一遍（本机 `build-capi-all` 上 **296 条**，三个后端都给了
+  连接串时 **792 条**），承重的几条是"借走唯一一条连接之后第二个 `acquire` 在超时后
+  拿到 `NO_CONNECTION` 而**不是挂住**""在回调里 `_async_free` 拿 `E_STATE`""越界列号
+  返回静态 NULL 视图"。一个后端都没有时它退 3（**未判定**，不是通过）。CI 的 `capi`
+  三格从这一批起都带 `-DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=ON`，`db-servers`
+  那一格也把 C 面打开，让 C 写的用例对着**真的** MySQL / PostgreSQL 各跑一遍（`1.5.3`）
+- **变异表第四次扩容**：M22–M26 是 db 的五条（结果集列号越界、借出的 client 不许
+  `free`、池子被门面绑着时不许 `free`、回调表 `on_table` 缺席），仍然是**先写预期
+  再跑**，五条全部被抓住；其中三条的形态是**崩溃**（一次 `SIGABRT`、两次 `SIGSEGV`，
+  没有 `checks=` 行），照实记在表里而不是读成一句 FAIL（`1.5.3`）
+- **符号面锁的 db 那一片只在一条腿上真判，所以那条腿多了一道门禁**：`capi` 那格是
+  唯一同时开着 CAPI 与 DB 的腿，而 `UVCPP_ENABLE_DB` 被强制关掉时**锁不会红** ——
+  它只在 db 那一行如实印「未判」，然后退 0。也就是说那条腿能从"唯一判 db 的腿"退化
+  成"没在判 db 的腿"而全程无声。所以那一格新增一步：配置日志里必须有
+  `db: SQLite 后端开` 与 `Including db module in build`，`ctest -N` 里必须有
+  `test_capi_db_func`（`1.5.3`）
 
 ### C# 绑定（`bindings/csharp/`）
 
@@ -787,6 +824,10 @@ libuvcpp/
   的话 C 侧把指针的低 32 位当 backlog 用，编得过、跑得动、语义全错）与"以为它借出一枚
   字符串指针"（`uvcpp_c_req_path` 实际是"你给缓冲区、它还把长度"，写成 `IntPtr f(req)`
   就是少两个参数、C 侧往栈上垃圾地址写）。**这张表就是这一层必须有那份定义类的理由**（`1.5.0`）
+- **db 那一片（81 个）这一批没有绑，这是如实列出的缺口**：绑定是手写 + 逐条核过的
+  产物，跟着一批新片一起做才能保持"条条都有人读过"，所以它不是自动生成的。锁今天
+  402 条，`bindings/csharp/README.md` §七 那个纯文本对账脚本会打印
+  `db 0/81 ← 没绑`，其余七片 321 条在**两个方向**上的差集仍为空（`1.5.3`）
 
 ### QUIC 传输（net 层）
 
@@ -834,7 +875,7 @@ libuvcpp/
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2388-2388`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2389-2389`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）

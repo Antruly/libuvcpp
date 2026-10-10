@@ -156,12 +156,21 @@ jobs:
           # capi（1.4.1 新增的腿）：**C ABI 那一层**。这一格在 macOS 上的价值与
           # MSVC 那格不同 —— Apple clang 与 Linux 的 gcc/clang 是两套 C 前端，
           # 而这一层的判据全靠**一个真正的 C 编译器**（`tests/capi/` 是 C99）。
-          # 依赖：与 `web` 同一份（C 层是纯增量薄包装，不加任何外部依赖）。
+          #
+          # ★ 1.5.3 起这一格**同时开 DB**（只开 SQLite，两个远程后端显式 OFF），
+          # 于是 `tests/capi/capi_db_func.c`（纯 C）也在 Apple clang 下过一遍。
+          # 依赖**一个都不加**：macOS 的 SQLite 来自 SDK —— `Modules/Platform/
+          # Darwin.cmake` 把 `${CMAKE_OSX_SYSROOT}/usr` 插在
+          # `CMAKE_SYSTEM_PREFIX_PATH` 最前面，`sqlite3.h` 与 `/usr/lib/libsqlite3.tbd`
+          # 就在那儿（理由与 `db` 那一格同一段，Homebrew 的 `sqlite` 是 keg-only，
+          # 装了反而要钉 root）。所以下面那个 `case` 里 `capi` 仍与 `web` 同行。
           #
           # 符号面锁（`check_capi_symbols.py`）**只在 ubuntu 那一格跑**：它按 GNU
           # nm 的方言解析那条腿的动态符号表，而 Mach-O 与 PE 各是另一套方言
           # （脚本里那三条分支写得很清楚）。那两条腿守的是"编得出、链得上"，
-          # 见 doc/ci-guide.md §5。
+          # 见 doc/ci-guide.md §5 —— db 那一片在它们上面同样**判不了**，所以
+          # 这一格的 db 开关不是为了锁，而是为了"这层在 Apple clang 下真的编、
+          # 真的跑"。
           - feature: capi
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -171,6 +180,10 @@ jobs:
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_CAPI=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_ENABLE_DB_SQLITE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
             gate_name: capi
             gate_switch: 'UVCPP_ENABLE_CAPI:BOOL=ON'
             gate_integrated: C ABI enabled
@@ -343,6 +356,34 @@ jobs:
           name: build-log-macos-${{ matrix.feature }}
           path: ci-logs/
           if-no-files-found: ignore
+
+      # ★ 1.5.3：C ABI 这条腿同时开着 db 那一片，而"开没开成"不会自己变红。
+      #   macOS 的 SQLite 来自 SDK，理论上不用装任何东西 —— 但 SDK 布局变了、
+      #   或 `CMAKE_OSX_SYSROOT` 没插进搜索路径时，守卫会把 `UVCPP_ENABLE_DB`
+      #   强制关掉，C 面的 db 符号一条都不编，而整格**照旧全绿**（`gate_test`
+      #   指的 `test_capi_net_func` 还在）。判据同 `db` 那一格的三个门禁串。
+      - name: Gate — the C ABI leg really has the db slice open
+        if: matrix.feature == 'capi'
+        shell: bash
+        run: |
+          log="ci-logs/capi-configure.log"
+          if [ ! -f "$log" ]; then
+            echo "::error title=capi-db::找不到 $log —— 这条步骤依赖上面 configure 那步写的日志"
+            ls -la ci-logs/ 2>/dev/null || true
+            exit 1
+          fi
+          fail=0
+          grep -q 'db: SQLite 后端开' "$log" || {
+            echo "::error title=capi-db::配置日志里没有 'db: SQLite 后端开' —— SDK 里那份 SQLite 没被找到，UVCPP_ENABLE_DB 会被守卫强制关掉，C 面的 db 符号一条都不编而整格全绿"
+            grep -iE 'db|sqlite|warning' "$log" | head -20; fail=1; }
+          grep -q 'Including db module in build' "$log" || {
+            echo "::error title=capi-db::没有 'Including db module in build' —— src/db/ 没进源列表，C 面那 81 个符号编不出来"
+            fail=1; }
+          ctest --test-dir build-capi -N 2>/dev/null | grep -q 'test_capi_db_func' || {
+            echo "::error title=capi-db::test_capi_db_func 没注册 —— 「模块被过滤掉了」和「用例跑过了」在 ctest 的输出里长得一样"
+            ctest --test-dir build-capi -N 2>&1 | tail -30; fail=1; }
+          if [ "$fail" != "0" ]; then exit 1; fi
+          echo "这一格同时开着 CAPI 与 DB：SDK 的 SQLite 找到了、模块进了源列表、C 面的 db 用例注册了 —— C 面的 db 包装在 Apple clang 下真的被编过一遍"
 
       - name: Test
         shell: bash

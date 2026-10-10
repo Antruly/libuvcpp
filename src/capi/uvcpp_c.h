@@ -102,4 +102,16 @@
 #  include "capi/uvcpp_c_http3.h"
 #endif
 
+/* db：一个底座（连接 / 参数 / 结果集 / 值）+ 两个可选用法（连接池、异步门面）。
+ *
+ * 与上面几片不同，db 那片**不在任何别的片之下**，也不是任何片的依赖 —— 数据库
+ * 模块可以没有网、没有 SSL、没有 web 单独编出来（`UVCPP_DB_ENABLE=ON` 而
+ * `UVCPP_BUILD_NET=OFF` 是合法配置）。所以这里只判它自己那一格。
+ *
+ * 那份头里**不含 `<uv.h>`**：它的异步接口自带一条循环线程，不需要调用方提供
+ * `uv_loop_t`。这是它唯一的形状差别，理由写在 `capi/uvcpp_c_db.h` 开头。 */
+#if UVCPP_DB_ENABLE
+#  include "capi/uvcpp_c_db.h"
+#endif
+
 #endif  /* SRC_CAPI_UVCPP_C_H */

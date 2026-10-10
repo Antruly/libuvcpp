@@ -1677,6 +1677,7 @@ else()
       "UVCPP_ENABLE_NGHTTP2:uvcpp_c_http2"    # h2 session / connection
       "UVCPP_ENABLE_QUIC:uvcpp_c_quic"        # QUIC client / server / connection
       "UVCPP_ENABLE_HTTP3:uvcpp_c_http3"      # h3 connection
+      "UVCPP_ENABLE_DB:uvcpp_c_db"            # 连接 / 参数 / 结果集 / 池 / 异步
     )
     string(REPLACE ":" ";" _uvcpp_capi_mv "${_uvcpp_capi_pair}")
     list(GET _uvcpp_capi_mv 0 _uvcpp_capi_opt)

@@ -223,32 +223,53 @@ Ctrl+C，真做服务端程序时把每一端放到自己的线程上用 `*_run(
 
 ---
 
-## 七、覆盖面：321 个符号，怎么自己核
+## 七、覆盖面：绑定 321 条，锁里 402 条（**db 那 81 条还没绑**）
 
 `tests/tools/capi_symbols.lock` 是 C 面的符号面锁，`tests/tools/check_capi_symbols.py`
-拿它与构建出来的库对账。绑定与它的关系是**双向**的：
+拿它与构建出来的库对账。锁是**分片**记的（`#@ module <名>`，见
+`doc/capi-guide.md` §3.5）：今天**八片、402 条**，而这两份 `.cs` 覆盖其中
+**七片、321 条**。
+
+**db 那一片（81 条）这一批没有绑 —— 这条缺口如实写在 `doc/capi-guide.md` §5。**
+绑定是手写 + 逐条核过的产物（理由见 §八），跟着一批新片一起做才能保持"条条都有
+人读过"，所以它不是自动的；下面那个脚本会把它打印成 `db 0/81 ← 没绑`，**那是
+预期的**，不是脚本坏了。
 
 ```bash
-# C 头 → 库（需要一份开着 CAPI 的构建树）
+# C 头 → 库（需要一份开着 CAPI 与 DB 的构建树；CI 跑的就是这一条）
 python3 tests/tools/check_capi_symbols.py --tree build-capi
 
-# 绑定 → 锁（不需要库，纯文本对账；也是本仓 CI 会跑的那条）
+# 绑定 → 锁（不需要库，纯文本对账；给你在本地核这两份 .cs 用）
 python3 - <<'PY'
-import re, pathlib
-lock = {l.strip() for l in open("tests/tools/capi_symbols.lock")
-        if l.strip().startswith("uvcpp_c_")}
+import re
+# 锁按 `#@ module <名>` 分片。绑定今天覆盖前七片；db **没绑**（见上）。
+BOUND = {"common", "net", "web", "webapp", "http2", "quic", "http3"}
+slices, cur = {}, None
+for line in open("tests/tools/capi_symbols.lock", encoding="utf-8"):
+    line = line.strip()
+    m = re.match(r"#@ module (\S+)", line)
+    if m:
+        cur = m.group(1)
+        slices[cur] = set()
+    elif line.startswith("uvcpp_c_") and cur:
+        slices[cur].add(line)
 src = "".join(open(p, encoding="utf-8").read()
               for p in ("bindings/csharp/UvcppNative.cs",
                         "bindings/csharp/UvcppNative.Protocols.cs"))
 decl = set(re.findall(r'EntryPoint\s*=\s*"([^"]+)"', src))
-print("锁里有、绑定没声明：", sorted(lock - decl))
-print("绑定声明了、锁里没有：", sorted(decl - lock))
-print("两边都是 %d 条" % len(decl))
+for name in sorted(slices):
+    got = len(slices[name] & decl)
+    print("%-8s %3d/%3d %s" % (name, got, len(slices[name]),
+                               "" if got == len(slices[name]) else "← 没绑"))
+bound = set().union(*(slices[n] for n in BOUND))
+print("已绑的那七片，锁里有、绑定没声明：", sorted(bound - decl))
+print("已绑的那七片，绑定声明了、锁里没有：", sorted(decl - set().union(*slices.values())))
 PY
 ```
 
-两组都应该是空的，条数是 321。**加了新的 C 函数而没同步绑定**，上面第二个脚本
-会当场说出来 —— 别等到运行期才发现某个 `EntryPointNotFoundException`。
+那两行**都要是空的**（逐片那张表里只有 `db` 那一行写着 `← 没绑`）。**加了新的
+C 函数而没同步绑定**，第一行会当场说出来 —— 别等到运行期才发现某个
+`EntryPointNotFoundException`。
 
 ---
 
@@ -277,13 +298,17 @@ P/Invoke 的声明**没有任何编译器替你核对**：`DllImport` 写错一�
 那条规矩没有例外。）
 
 **这就是这两份 `.cs` 存在的理由**，也是它们为什么是**对着锁生成、再逐条对账**过
-的：321 条声明 ↔ `tests/tools/capi_symbols.lock` 里 321 个符号，名字、参数个数、
-`size_t`→`nuint` 的映射全在 §七 那个脚本的射程里。要加一个 C 函数，是"改头 →
-补锁 → 补绑定"三步，每一步都有东西看着；手写一份则是**没有任何东西看着**。
+的：321 条声明 ↔ `tests/tools/capi_symbols.lock` 里**被绑的那七片**那 321 个符号
+（锁今天 402 条，多出来的 81 条是 db，见 §七），名字、参数个数、`size_t`→`nuint`
+的映射全在 §七 那个脚本的射程里。要加一个 C 函数，是"改头 → 补锁 → 补绑定"三步，
+每一步都有东西看着；手写一份则是**没有任何东西看着**。
 
 ---
 
 ## 九、没验过的部分（照实说）
+
+**db 那一片（81 个函数）这里一行都没有** —— 不是"没验过"，是**没做**，理由与
+影响在 §七。所以这一节下面的"真跑过"那句话，说的都是**前七片**那些声明。
 
 已经**真跑过**的是：Linux x64、.NET 8（`net8.0`）、发布档 `libuvcpp.so`、
 `examples/QuicEcho` 的整个回环。编译门槛是量出来的：

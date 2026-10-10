@@ -422,6 +422,50 @@ void transfer(uvcpp::uvcpp_db_pool* pool, int64_t from, int64_t to, int64_t amou
    用例 `tests/functional/db_sqlite_pool_func.cpp` 钉的就是这个 —— 借走唯一一条、投
    异步池查询、断言它在超时后拿到 `NO_CONNECTION` 而**不是挂住**。
 
+### 3.2 C 接口（`include/capi/uvcpp_c_db.h`，1.5.3 起）
+
+C# / Rust / Python 的 `ctypes` 用数据库模块**不必**先写一层 C++。这一片是上面几组的
+C 面，一格一格对着：
+
+| C 面 | C++ 那侧 |
+|---|---|
+| `uvcpp_c_db_client_*` | `uvcpp_db_client` 的同名方法 |
+| `uvcpp_c_db_params_*` | `uvcpp_db_params`（八个 `add_*` 逐个对上它的重载）|
+| `uvcpp_c_db_table_*` | `uvcpp_db_table` 的读侧 + `to_json()` / `to_csv()` |
+| `uvcpp_c_db_value_*` | `uvcpp_db_value` 的读侧（写侧走参数）|
+| `uvcpp_c_db_pool_*` | `uvcpp_db_pool`（借还 + 代借代还 + 观测）|
+| `uvcpp_c_db_async_*` | `uvcpp_db_async`，以及池子那一组异步 |
+
+三个开关与这一片的关系，一句话：**`UVCPP_ENABLE_DB` 是它的开关**（关了就没有
+`uvcpp_c_db.h`，一个函数都不导出）；**后端那一级开关与它无关** —— 关掉 MySQL 只是让
+`uvcpp_c_db_drivers()` 不再报出那个名字、让 `mysql://…` 报 `NO_DRIVER`，符号面一个
+不多一个不少。C 面的完整清单与所有权规则在
+[`doc/capi-guide.md` §4](capi-guide.md#4-提供什么明确不提供什么) 那张表里。
+
+C 这一侧有四条与 C++ 不同、**必须**知道的：
+
+1. **一个 `int` 上住着两套编码。** `>= 0` 是 `uvcpp_c_db_status`（与
+   [§4](#4-返回码)那张表**数值逐条对齐**，0 = OK）；`< 0` 是 C 层错误
+   （`UVCPP_C_E_STALE` 句柄失效 / `_E_INVALID_ARG` / `_E_EXCEPTION`）或者 libuv 码
+   原样穿过。两段不会撞：db 状态码全在 `0..11`。
+2. **结果集是调用方拥有的句柄。** `_query` / `_table_schema` 交出来的、以及异步回调
+   收到的那个 `uvcpp_c_db_table*`，用完都要 `uvcpp_c_db_table_free()`；而
+   `_cell()` 给出的 `uvcpp_c_db_value*` 是**借来的视图**（属于那张表，没有 `free`）。
+   池子借出的 `uvcpp_c_db_client*` 同理归池子 —— 对它调 `_client_free()` 是 `E_STATE`。
+3. **C 的异步没有循环参数。** C++ 的 `uvcpp_db_async::query()` 收一枚 `uvcpp_loop*`，
+   而 C 面没有合法的东西可填（公开头里造不出 `uvcpp_loop*`；把调用方自己的
+   `uv_loop_t*` 借进来会让 `~uvcpp_loop()` 去 `uv_loop_close()` 并释放别人的内存）。
+   所以 `uvcpp_c_db_async_*` 的完成回调一律在**门面自带的那条懒起的循环线程**上被调；
+   要回到自己的循环，就在回调里投一次 `uvcpp_c_net.h` 的 `*_post()`。
+4. **不提供 `set_log()`。** C++ 那侧收 `std::function`，跨 FFI 每行日志都要另立一份
+   字符串生命周期约定；诊断走 `_client_last_error()` 与 `uvcpp_c_db_status_name()`。
+
+真跑的判据是 `tests/capi/capi_db_func.c`（纯 C 编译）：把**后端从环境变量**里拿
+（`UVCPP_DB_TEST_PGSQL_URL` / `UVCPP_DB_TEST_MYSQL_URL`），有哪个就连哪个，逐后端把
+建表 / 插入 / 查询 / 事务 / 池 / 异步各跑一遍；一个后端都没有时退 3（**未判定**，
+`tests/functional/` 那几条 db 用例是同一个约定）。本机 `build-capi-all` 上 296 条断言，
+三个后端都给连接串时 792 条。
+
 ---
 
 ## 4. 返回码

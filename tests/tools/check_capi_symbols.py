@@ -106,6 +106,12 @@ MODULES = [
     ("http2",      "uvcpp_c_http2.h",   "UVCPP_NGHTTP2_ENABLE"),
     ("quic",       "uvcpp_c_quic.h",    "UVCPP_QUIC_ENABLE"),
     ("http3",      "uvcpp_c_http3.h",   "UVCPP_HTTP3_ENABLE"),
+    # db 是**唯一一片有自己开关的**：别的几片都被 CAPI 的守卫链顺手拉起来了
+    # （CAPI ⇒ NET + WEB），db 不是任何片的依赖、也不是任何片的下层 ——
+    # `CAPI=ON, DB=OFF` 是合法组合，那时 `uvcpp_c_db.h` 里的声明一个都不该存在。
+    # 开关写 `UVCPP_DB_ENABLE`（这个模块自己的），不是某个后端那一格：
+    # 后端的开关只决定 `uvcpp_c_db_drivers()` 报出什么名字，符号面一个字都不差。
+    ("db",         "uvcpp_c_db.h",      "UVCPP_DB_ENABLE"),
     ("undeclared", None,                None),
 ]
 

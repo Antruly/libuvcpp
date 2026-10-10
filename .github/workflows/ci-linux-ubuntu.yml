@@ -271,8 +271,30 @@ jobs:
           # 让"是 C 层坏了还是 nghttp2 没找到"这件事变得难判。分工见
           # doc/capi-guide.md §3.5 与 §CI。
           #
-          # `tests/capi/` 那三个用例都在这条腿上跑（末尾那句全量 ctest 是判据），
+          # DB 是这条规矩的唯一例外，理由与加密模块**不同类**：db 那一片的判据
+          # 不是"加密栈通不通"这种会污染失败归因的东西，而是一条**没它就没别处**
+          # 的覆盖（见上面 ★①②）。它带来的新依赖只有 SQLite —— 走
+          # `find_package(SQLite3)` 的**默认路**（与 `db` 那一格同一条），
+          # 于是装包表里 `capi` 那一行多一个 `libsqlite3-dev`。
+          #
+          # `tests/capi/` 那**四**个用例都在这条腿上跑（末尾那句全量 ctest 是判据），
           # `gate_test` 只是"注册了没有"那一条的抽查点，所以它仍指着批 1 那个名字。
+          #
+          # ★ 1.5.3 起这一格**同时开 DB**（只开 SQLite，两个远程后端显式 OFF），
+          # 理由不是"顺手都开着"：
+          #   ① 符号面锁是**分片**的，db 那一片（81 个符号）只有在"CAPI 与 DB 同时
+          #      开着"的腿上才判得动（`check_capi_symbols.py` 的 `MODULES`），而
+          #      整个矩阵里**只有这一格**同时开着这两个 —— `h2`/`http3` 那两格不带
+          #      DB，`db` 那三格不带 CAPI。不加这四个 `-D`，db 那一片就永远是"未判"。
+          #   ② 那一片的"未判"**不会让任何门禁变红**（脚本对未判的片只打印一行、
+          #      退 0），所以另有一条步骤专门证伪它 —— 见下面
+          #      "Gate — C ABI 这条腿真的开着 db 那一片"。
+          #   ③ 只开 SQLite：C 层是薄包装，那两个远程后端的语义已由 C++ 套件在
+          #      `db-servers` 那条腿上对着**真**服务端证过；C 面自己再去连一遍，
+          #      买到的是"同一个薄包装再错一次"的概率，不是新信息。
+          #      而**远程那两个后端必须显式 OFF**：不写 OFF 时 runner 上有
+          #      `libpq-dev`，`find_package` 会悄悄成功，包上多一条 DT_NEEDED，
+          #      而用例因为没 URL 会退 3 —— 一个"看起来在测"的假绿。
           - feature: capi
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -282,6 +304,10 @@ jobs:
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_CAPI=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_ENABLE_DB_SQLITE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
             gate_name: capi
             gate_switch: 'UVCPP_ENABLE_CAPI:BOOL=ON'
             gate_integrated: C ABI enabled
@@ -355,10 +381,14 @@ jobs:
             # （`#if UVCPP_ZLIB_ENABLE`，故意留着：它给 `apply_compression_for`
             # 那次拆分当护栏）。
             http3)                     pkgs="libuv1-dev zlib1g-dev" ;;
-            # capi 跟 web 那一格同一份：`WEB=ON` 要 zlib（WebSocket 压缩那组
-            # 用例），`WEBAPP=ON` 跟着 web 走。C 层自己**一个外部依赖都不加**
-            # （它是薄包装），所以这里不出现任何新包。
-            capi)                      pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
+            # capi 跟 web 那一格同一份，**多一个 libsqlite3-dev**：`WEB=ON` 要
+            # zlib（WebSocket 压缩那组用例），`WEBAPP=ON` 跟着 web 走；SQLite
+            # 是 1.5.3 起这一格同时开 DB 带来的（见上面 capi 那一格的 ★）。
+            # C 层自己仍然**一个外部依赖都不加** —— 它是薄包装，SQLite 是
+            # `src/db/` 的后端、不是 `src/capi/` 的。**不要**把两个远程后端的
+            # 客户端库装进来：它们在这一格的 flags 里是显式 OFF，装了只会让
+            # "find_package 悄悄成功"变成可能（假绿的形状见 db 那一格的注释）。
+            capi)                      pkgs="libuv1-dev zlib1g-dev libsqlite3-dev ninja-build" ;;
             # db：这一格只开 SQLite 后端，所以只多一个 `libsqlite3-dev`（就是
             # `find_package(SQLite3)` 找的那两样：`sqlite3.h` 与 `libsqlite3`）。
             # **别把两个远程后端的客户端库装进来**：装了就变成"找得到就编"，
@@ -691,7 +721,9 @@ jobs:
       #   要判一片，那条腿必须既开 CAPI、又开着那一片自己的模块。没有哪一条腿
       #   同时开得起全部模块（`capi` 格没有 SSL/h2/quic，`http3` 格没有 webapp），
       #   所以：
-      #     `capi`  那一格 → common / net / web / webapp 四片判完，h2 / quic / h3 三片如实报「未判」；
+      #     `capi`  那一格 → common / net / web / webapp **/ db** 五片判完，h2 / quic / h3
+      #                      三片如实报「未判」（db 那一片是 1.5.3 起在这一格开的，
+      #                      整个矩阵里只有这一格同时开着 CAPI 与 DB）；
       #     `h2`    那一格 → 再加 h2，共五片（它从批 3a 起也带 `-DUVCPP_ENABLE_CAPI=ON`）；
       #     `http3` 那一格 → 再加 quic 与 h3 两片，共六片（它从批 3b 起也带
       #                      `-DUVCPP_ENABLE_CAPI=ON`）——webapp 那一片在这一格上
@@ -699,6 +731,14 @@ jobs:
       #                      一个都不导出"，脚本印「未判」而不是"绿"。
       #   三格合起来，锁里每一片都有至少一条腿真的量过。少跑哪一条，那几片就会
       #   退化成"只有判据 1（静态）管着"——而 `--update` 时还看不出来差别。
+      #
+      # ★★ 上面那句"每一片都有至少一条腿真的量过"在 db 这一片上是**靠一条开关
+      #   撑着的**，而那条开关失效时**没有任何东西会变红**：`UVCPP_ENABLE_DB` 的
+      #   后端全找不到时守卫会把它打成 OFF，那时 `check_capi_symbols.py` 对 db
+      #   那一片印一行「未判」、**退 0**（"未判"本来就是一个合法的中间态，脚本
+      #   不能拿它当红）。于是"这条腿是唯一判 db 的腿"这件事可以静默消失，而 CI
+      #   全绿。下面那条步骤就是专门证伪它 —— 判据抄 `db` 那一格的三个门禁串，
+      #   再加一条用例注册。
       - name: Gate — C ABI symbol surface matches the lock
         if: matrix.feature == 'capi' || matrix.feature == 'h2' || matrix.feature == 'http3'
         shell: bash
@@ -713,6 +753,42 @@ jobs:
             echo "::error title=capi-symbols::${msg:-rc=$rc (no red line matched)}"
           fi
           exit "$rc"
+
+      # ★ 这条步骤存在的唯一理由是**上面那条门禁在这一格上判不了 db 那一片的
+      #   "未判"**：符号锁对"这一片没被判"只打印一行、退 0，所以一个后端都没找到
+      #   （守卫 `set(UVCPP_ENABLE_DB OFF)`）时，整格照旧全绿，而锁里 db 那一片
+      #   就再没有第二只眼睛看着 —— h2 有 `h2` 格、quic/h3 有 `http3` 格，db
+      #   **只有这一格**。
+      #
+      # 判据抄的是 `db` 那一格的三个门禁串（`gate_switch` 不抄，理由同那一格：
+      # cache 里那行在守卫强制关闭时**照样**是 ON，它判不了东西）+ 一条用例注册。
+      #   * `db: SQLite 后端开` ⇒ 后端真的找到了（`gate_integrated`）
+      #   * `Including db module in build` ⇒ `src/db/` 真的进了源列表（`gate_module`）
+      #   * `test_capi_db_func` 在 `ctest -N` 里 ⇒ C 面的 db 用例真的注册了
+      # 这三条**同时**成立才叫"这一格真的在判 db 那一片"。少任何一条，db 那一片
+      # 就退回"未判"，而那种绿是最坏的一种：看起来覆盖了，其实一行没量。
+      - name: Gate — the C ABI leg really has the db slice open
+        if: matrix.feature == 'capi'
+        shell: bash
+        run: |
+          log="ci-logs/capi-configure.log"
+          if [ ! -f "$log" ]; then
+            echo "::error title=capi-db::找不到 $log —— 这条步骤依赖上面 configure 那步写的日志"
+            ls -la ci-logs/ 2>/dev/null || true
+            exit 1
+          fi
+          fail=0
+          grep -q 'db: SQLite 后端开' "$log" || {
+            echo "::error title=capi-db::配置日志里没有 'db: SQLite 后端开' —— 这个后端没找到，UVCPP_ENABLE_DB 被守卫强制关掉了，锁里 db 那一片会退化成「未判」（而那是绿的）"
+            grep -iE 'db|sqlite|warning' "$log" | head -20; fail=1; }
+          grep -q 'Including db module in build' "$log" || {
+            echo "::error title=capi-db::没有 'Including db module in build' —— src/db/ 没进源列表，C 面那 81 个符号编不出来"
+            fail=1; }
+          ctest --test-dir build-capi -N 2>/dev/null | grep -q 'test_capi_db_func' || {
+            echo "::error title=capi-db::test_capi_db_func 没注册 —— 「模块被过滤掉了」和「用例跑过了」在 ctest 的输出里长得一样"
+            ctest --test-dir build-capi -N 2>&1 | tail -30; fail=1; }
+          if [ "$fail" != "0" ]; then exit 1; fi
+          echo "这一格同时开着 CAPI 与 DB：后端找到了、模块进了源列表、C 面的 db 用例注册了 —— 符号锁里 db 那一片是真判，不是「未判」"
 
       - name: Test
         shell: bash
@@ -851,8 +927,25 @@ jobs:
           {
             echo "=== configure ==="
             cfg=0
+            # ★ 1.5.3 起这一格**同时开 C ABI**（`NET`+`WEB`+`CAPI`），让
+            #   `test_capi_db_func` 对着**真** MySQL / PostgreSQL 各跑一遍。
+            #   两个陷阱，都会让这一格变成"看起来开了 CAPI、其实一个 C 符号都没有"
+            #   的假绿：
+            #     ① `UVCPP_ENABLE_CAPI` 的守卫链要的是 `NET` **和** `WEB`，而
+            #        `UVCPP_BUILD_WEB` 默认是 **OFF**（`UVCPP_BUILD_NET` 默认 ON）。
+            #        只写 `-DUVCPP_ENABLE_CAPI=ON` ⇒ 守卫 warn 一句、把它 `set()`
+            #        回 OFF，而 **`CMakeCache.txt` 里照样读得到
+            #        `UVCPP_ENABLE_CAPI:BOOL=ON`**（守卫用的是普通变量，不写 cache）。
+            #        所以下面那句断言 grep 的是**配置消息** `Including capi module
+            #        in build`，不是 cache —— grep cache 是个假门禁。
+            #     ② 不加 `-DUVCPP_BUILD_WEB=ON` 的话，连 `src/capi/uvcpp_c_web*.cpp`
+            #        都不会进源列表（CAPI 与 WEB 的哥俩关系见根 CMakeLists.txt）。
+            #   为什么不复用 `capi` 那一格：那一格只开 SQLite，两个远程后端是显式
+            #   OFF 的（判据互不相交，见那一格的注释）。C 面那两个后端只能在这一格
+            #   量 —— URL 就在下面 Test 那步的 `env:` 里，C 用例读的是同一批变量。
             cmake -S . -B "$tree" -DCMAKE_BUILD_TYPE=Release \
               -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+              -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=OFF \
               -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
               > ci-logs/db-servers-configure.log 2>&1 || cfg=$?
@@ -862,7 +955,10 @@ jobs:
 
             grep -q 'UVCPP_ENABLE_DB:BOOL=ON' "$tree/CMakeCache.txt" || {
               echo "::error title=db-servers::CMakeCache 里 UVCPP_ENABLE_DB 不是 ON —— 这一格没在测数据库"; exit 1; }
-            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'Including db module in build'; do
+            # 后两个串是 1.5.3 加 C ABI 时补的：`Including db module in build`
+            # 管的是 db 那一片，`Including capi module in build` 管的是 C 面。
+            # 后者**必须**是配置消息而不是 cache 比对 —— 见上面 configure 那段 ★①。
+            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'Including db module in build' 'Including capi module in build'; do
               grep -q "$m" ci-logs/db-servers-configure.log || {
                 why=$(grep -E 'db:|CMake (Warning|Error)|找不到|No such' \
                   ci-logs/db-servers-configure.log | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
@@ -912,7 +1008,10 @@ jobs:
           UVCPP_DB_TEST_REQUIRE: "1"
         run: |
           tree=build-db-servers
-          for t in test_db_mysql_func test_db_pgsql_func; do
+          # `test_capi_db_func` 是 1.5.3 加的：它是**这一个 job** 唯一一次让 C 面的
+          # db 包装对着**真**服务端跑（另外一个分支 SQLite 的那条腿在 `capi` 那三格）。
+          # 它读的是同一组 `UVCPP_DB_TEST_*_URL`，所以这里什么都不用多传。
+          for t in test_db_mysql_func test_db_pgsql_func test_capi_db_func; do
             if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "$t"; then
               echo "::error title=db-servers::$t 没被注册 —— 这个后端被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
               ctest --test-dir "$tree" -N 2>&1 | tail -20

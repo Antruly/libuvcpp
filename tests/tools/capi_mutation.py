@@ -93,6 +93,7 @@ WEBAPP = os.path.join(ROOT, "src", "capi", "uvcpp_c_webapp.cpp")
 HTTP2 = os.path.join(ROOT, "src", "capi", "uvcpp_c_http2.cpp")
 QUIC = os.path.join(ROOT, "src", "capi", "uvcpp_c_quic.cpp")
 HTTP3 = os.path.join(ROOT, "src", "capi", "uvcpp_c_http3.cpp")
+DB = os.path.join(ROOT, "src", "capi", "uvcpp_c_db.cpp")
 
 # 纯 C 用例（在 <tree>/tests/capi/ 下）。顺序无所谓，超时都是 60 s。
 TARGETS = [
@@ -116,6 +117,16 @@ H2_TARGET = "test_capi_h2_func"
 # `build-capi-h3` 就是这么配的。少了这个 exe 时与 h2 那条同样的处理：退 3
 # （「没判」），不是拿一个 127 去冒充"抓住了"。
 H3_TARGET = "test_capi_quic_h3_func"
+
+# 第六个用例跟着 `UVCPP_ENABLE_DB` 走 —— 这一片**唯一**有自己开关的，与
+# `src/capi/uvcpp_c_db.*` 同一个开关（`tests/capi/CMakeLists.txt` 里那一条）。
+# ★ 它比其他几个多一个前提：**这棵树得有一个能连的后端**。用例的后端是从
+#   `UVCPP_DB_TEST_*_URL` 与 `UVCPP_DB_SQLITE_ENABLE` 里挑的，一个都没有时它
+#   退 3。本机与 CI 的 `capi` 腿都开着 SQLite，所以正常情形下它是真跑的；
+#   万一落到"没后端"那一档，`run_targets()` 会看到 rc=3 → 记成红，也就是
+#   **判不了就报红**，不会假装抓住/没抓住。（要跑这棵树的 db 变异，务必让
+#   SQLite 开着 —— 配树命令见 doc/capi-guide.md。）
+DB_TARGET = "test_capi_db_func"
 
 # 卸掉守卫的两句原文（`unregister_head()` 的函数体），M1~M3 共用。
 UNREGISTER_BODY = ("  registry_remove(h);\n"
@@ -449,6 +460,74 @@ MUTATIONS = [
        "         it != server->conns.end(); ++it) {\n"
        "      detach_conn(it->second);\n"
        "    }\n")]),
+
+    # ---- db（`uvcpp_c_db.cpp`）----
+    #
+    # 这几条量的都是**C 面特有**的那些判据 —— C++ 那侧有 RAII、有异常、有类型
+    # 挡着的东西，到 C 面只能变成一句显式的判断，而"那句判断在不在"正是这一片
+    # 最容易被悄悄改掉的地方（改掉之后 C++ 那套用例一个字都不会红）。
+
+    # M22：`column_index()` 的"没有这一列"。0 是个**合法下标**，拿它当"没有"
+    # 就是撒谎 —— 调用方会去读第 0 列，而且读到的东西看着还挺正常。
+    ("M22 db column_index 的没有这一列退化成 0",
+     True,
+     [(DB,
+       "    if (idx == std::string::npos) return UVCPP_C_E_NOT_FOUND;",
+       "    if (idx == std::string::npos) return 0;  /* MUTATION: 拿 0 冒充没有 */")]),
+
+    # M23：越界的那一格。`at()` 越界返回的是**一枚静态 NULL 值**（可读），用例靠
+    # 这一条把"这一格没有"变成 `_is_null()` 为真、不需要第二条分支。改成返回
+    # NULL 之后，每个读格子的人都得先判空 —— 那正是这条设计要消掉的东西。
+    ("M23 db table_cell 越界不给可读的 NULL 视图",
+     True,
+     [(DB,
+       "    return wrap(&table->t.at(row, column));",
+       "    if (row >= table->t.row_count() || column >= table->t.column_count())\n"
+       "      return nullptr;  /* MUTATION: 越界给 NULL */\n"
+       "    return wrap(&table->t.at(row, column));")]),
+
+    # M24：池子借出的那枚句柄不能拿去 `_client_free()`。拆掉这一句之后，调用方
+    # "顺手 free 掉"就真的把池子那条连接删了 —— 池子的账上还记着它，之后还回来
+    # 的是一块已释放的内存。用例在借出之后立刻问了一次：`_client_free(a)` 必须
+    # `E_STATE`。
+    #
+    # ★ 实测（本机 build-capi-all，2026-10-10）：**rc=-6（SIGABRT），没有
+    #   `checks=` 那一行** —— 红在退出前那一趟里：连接被提前删掉之后池子收尾时
+    #   又删了一次，glibc 的 tcache 直接 abort。也就是说这条变异不是被某条断言
+    #   拦下的（那条断言其实也红了，只是没活到打印），而是被**分配器**拦下的。
+    #   这正是 M1 那段注释讲的同一件事的反面：句柄守卫拆掉之后，最后的防线变成了
+    #   分配器，而分配器给的是 abort，不是一个能读懂的返回码。
+    ("M24 db 借来的句柄也能 _client_free",
+     True,
+     [(DB,
+       "    if (!client->owned) return UVCPP_C_E_STATE;",
+       "    /* MUTATION: 借来的也照放 */")]),
+
+    # M25：池子被异步门面绑着时不许 free。这是本片唯一一处"次序约束必须当场
+    # 报错"的地方：门面在池线程里借还连接，池子一没它就在读已释放的内存。
+    #
+    # ★ 实测：**rc=-11（SIGSEGV）** —— 门面的循环线程在池子没了之后照样接活，
+    #   读的是已释放的池子。这条红得比 M24 更"远"：崩在另一条线程里，与本线程
+    #   的断言完全无关，所以它只能靠 `alive()` 那一层拦在**调用那一刻**。
+    ("M25 db 有门面绑着的池子也照 free",
+     True,
+     [(DB,
+       "    if (owner_has_async(pool)) return UVCPP_C_E_STATE;",
+       "    /* MUTATION: 门面绑着也照拆 */")]),
+
+    # M26：投递时"这一笔的交付通道"必须给了。拆掉之后，一个 `on_table == NULL`
+    # 的投递会被**收下**，然后在交付那一刻调一个空的函数指针。
+    #
+    # ★ 实测：**rc=-11（SIGSEGV）**，与预测的同一档。它红的方式值得记下来：一个
+    #   "参数没给全"的调用，如果不在**投递时**拦掉，就会变成**在循环线程上**的
+    #   一次跳转 —— 那时调用方早已返回，没有任何人能接住它。
+    ("M26 db check_events 不收 NULL 交付通道",
+     True,
+     [(DB,
+       "    if (!field_present(ev->size, &uvcpp_c_db_query_events::on_table) ||\n"
+       "        ev->on_table == nullptr) {",
+       "    if (!field_present(ev->size, &uvcpp_c_db_query_events::on_table)) {\n"
+       "      /* MUTATION: on_table == NULL 也收 */")]),
 ]
 
 RUN_TIMEOUT_S = 600
@@ -557,6 +636,7 @@ def main():
         ("test_capi_webapp_func", {WEBAPP}, "UVCPP_BUILD_WEBAPP"),
         (H2_TARGET, {HTTP2}, "UVCPP_ENABLE_NGHTTP2"),
         (H3_TARGET, {QUIC, HTTP3}, "UVCPP_ENABLE_HTTP3（它蕴含 QUIC）"),
+        (DB_TARGET, {DB}, "UVCPP_ENABLE_DB"),
     ]
     targets = []
     for name, covers, switch in exe_covers:

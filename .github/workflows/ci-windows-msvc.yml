@@ -196,13 +196,28 @@ jobs:
           #    是 SHARED 目标上的 PUBLIC 定义 —— 也就是说**这一格验证的正是
           #    "消费方加了 `dllimport` 还链得上"**。它错了在别的平台上一点感觉
           #    都没有（那两条分支只在 `_WIN32` 下非空）。
-          # ② `tests/capi/` 那两个用例是**纯 C**（`C_STANDARD 99`），`cl` 编 `.c`
+          # ② `tests/capi/` 那**四**个用例是**纯 C**（`C_STANDARD 99`），`cl` 编 `.c`
           #    走的是它自己的 C 前端：`extern "C"` 那套收口宏、`UVCPP_C_API` 的
           #    位置、头里有没有漏掉 C++ 才认的写法 —— 这些只有 `cl` 能判。
           #
-          # 依赖：与 `web` 那一格同一份 —— **一个系统依赖都不需要**（libuv 与
-          # llhttp 走 FetchContent）。所以下面那个 `case` 把它归到"没有系统依赖"
-          # 那一行里，别顺手塞进 win-openssl-deps.sh。
+          # ★ 1.5.3 起这一格**同时开 DB**（只开 SQLite，两个远程后端显式 OFF），
+          # 于是第三件事也归它判：**C 面的 db 包装在 MSVC 上编得过、跑得起来**。
+          # 与 Ubuntu 那一格不同，这里让 db 上这一格的**首要理由不是符号锁**
+          # （`check_capi_symbols.py` 只认 ELF 的动态符号表方言，Windows 上退 3），而是
+          # "这一层在 `cl` 下没被编过一次"这件事本身。
+          #
+          # SQLite 走**从源码编**（`-DUVCPP_DB_SQLITE_FROM_SOURCE=ON`）：Windows
+          # 上没有系统 sqlite3，这与 `db` 那一格、与 `release.yml` 六条腿走的是
+          # 同一条路。**不加这个开关**，`find_package(SQLite3)` 会失败 ⇒ 守卫把
+          # `UVCPP_ENABLE_DB` 强制关掉 ⇒ C 面那 81 个符号一个都不编，而整格**全绿**
+          # （cache 里 `UVCPP_ENABLE_CAPI:BOOL=ON` 照旧）—— 所以下面另有一条
+          # `Gate — the C ABI leg really has the db slice open` 专门证伪它。
+          #
+          # 依赖：与 `web` 那一格同一份 —— **没有系统依赖**（libuv 与 llhttp 走
+          # FetchContent，SQLite 走 FetchContent）。所以下面那个 `case` 仍然把它
+          # 归到"没有系统依赖"那一行里，别顺手塞进 win-openssl-deps.sh。
+          # （与 Ubuntu 那格的差别：那边 SQLite 是 `apt` 的 `libsqlite3-dev`，
+          # 这边是从源码编 —— 两边都不需要额外装包，但路子不同。）
           - feature: capi
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -212,6 +227,11 @@ jobs:
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_CAPI=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_ENABLE_DB_SQLITE=ON
+              - -DUVCPP_DB_SQLITE_FROM_SOURCE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
             gate_name: capi
             gate_switch: 'UVCPP_ENABLE_CAPI:BOOL=ON'
             gate_integrated: C ABI enabled
@@ -410,6 +430,36 @@ jobs:
               break
             fi
           done
+
+      # ★ 1.5.3：C ABI 这条腿同时开着 db 那一片，而"开没开成"在这格上**不会自己
+      #   变红**。后端一个都没找到时守卫把 `UVCPP_ENABLE_DB` 强制关掉 ⇒ C 面的
+      #   db 符号一条都不编 ⇒ 但配置照过、ctest 照旧全绿（`gate_test` 指的还是
+      #   `test_capi_net_func`，它照样在）。判据三条，抄 `db` 那一格的三个门禁串：
+      #   后端找到了、模块进了源列表、C 面的 db 用例注册了。
+      #   为什么这一格要证明这个：MSVC 的 SQLite 是**从源码编**的，而那条路依赖
+      #   配置期联网 —— 它断掉时上面三条会同时不成立，而**不成立不等于红**。
+      - name: Gate — the C ABI leg really has the db slice open
+        if: matrix.feature == 'capi'
+        shell: bash
+        run: |
+          log="ci-logs/capi-configure.log"
+          if [ ! -f "$log" ]; then
+            echo "::error title=capi-db::找不到 $log —— 这条步骤依赖上面 configure 那步写的日志"
+            ls -la ci-logs/ 2>/dev/null || true
+            exit 1
+          fi
+          fail=0
+          grep -q 'db: SQLite 后端开' "$log" || {
+            echo "::error title=capi-db::配置日志里没有 'db: SQLite 后端开' —— SQLite 没找到（这一格是从源码编的，那条路要配置期联网），UVCPP_ENABLE_DB 会被守卫强制关掉，C 面的 db 符号一条都不编而整格全绿"
+            grep -iE 'db|sqlite|warning' "$log" | head -20; fail=1; }
+          grep -q 'Including db module in build' "$log" || {
+            echo "::error title=capi-db::没有 'Including db module in build' —— src/db/ 没进源列表，C 面那 81 个符号编不出来"
+            fail=1; }
+          ctest --test-dir build-capi -N 2>/dev/null | grep -q 'test_capi_db_func' || {
+            echo "::error title=capi-db::test_capi_db_func 没注册 —— 「模块被过滤掉了」和「用例跑过了」在 ctest 的输出里长得一样"
+            ctest --test-dir build-capi -N 2>&1 | tail -30; fail=1; }
+          if [ "$fail" != "0" ]; then exit 1; fi
+          echo "这一格同时开着 CAPI 与 DB：SQLite 编出来了、模块进了源列表、C 面的 db 用例注册了 —— C 面的 db 包装在 cl 下真的被编过一遍"
 
       - name: Test
         shell: bash
