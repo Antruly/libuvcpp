@@ -1,13 +1,126 @@
 # libuvcpp Release Notes
 
-<!-- 标题里**不写版本号**：这份文件被 `release.yml` 整份当成 GitHub Release 的
-     正文（`gh release create --notes-file RELEASE.md`），而 Release 的标题由
-     标签单独给（`--title "libuvcpp $TAG"`）。写死一个版本号在这里，下一个 tag
-     的正文首行就会自称是上一版。哪一版做了什么，下面「变更日志」里本来就有。 -->
+<!-- 这份文件是**归档**，不是任何一版的正文。
+
+     下面每个 `## vX.Y.Z 重点 (Highlights)` 小节记的都是那一版发出去时的样子。
+     重发历史 tag（`gh release edit`）时还要按原样取用，所以旧小节**不追改** ——
+     要补后来的事实，补进 CHANGELOG.md，不要回头改这里的旧段落。
+
+     发版时的 Release 正文**不在这里**：它由 `release_notes.py` 按 tag 从本文件
+     切出该版本那一节（标题里含版本记号的那个 `##`），前面缀一张按平台排的下载表，
+     再交给 `gh release --notes-file`。Release 的标题由标签单独给
+     （`--title "libuvcpp $TAG"`），所以本文件自己的标题里仍然不写版本号。 -->
 
 ## 简介 (Introduction)
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
+
+## v1.6.0 重点 (Highlights)
+
+`1.5.1` → `1.5.3` 这条开发线收进这一版：**新增数据库模块**（含它在 C ABI 里的第八片）、
+QUIC 传输上四处性能与正确性改动、以及发布包的两轮扩容。
+
+### 新增模块：数据库（`src/db/`）— `UVCPP_ENABLE_DB=ON`
+
+一个连接一个 `uvcpp_db_client`，**同一套接口盖住 SQLite / MySQL / PostgreSQL** 三个
+后端，结果行按表取（列名或列号）。**默认关**，而且是本库**唯一需要第三方客户端库**
+的模块（libsqlite3 / libmysqlclient / libpq）。三个后端一个都没找到时整个模块被强制
+关掉并打一条说明怎么修的 warning，而不是留一个"能配置、链不上"的组合。
+
+- **占位符是方言差异，不换算。** 写 `$1` 是 PostgreSQL 的语法，写 `?` 是另外两家的；
+  本库**原样透传**给你选的那个后端，不做 `?` → `$n` 的改写。这一条实测过六种组合。
+- **事务里不重试。** 失败后的重试会把语句挪出那个事务本身，所以门面不替你重试。
+- **`DECIMAL` 有代价**：它既到不了浮点也到不了整型，代价写在 `doc/db-guide.md` 里。
+- **异步门面 `uvcpp_db_async`**（回调 + `future`）**不写 `uv_queue_work`** —— 要跑在
+  工作线程池上的样板它替你收掉了。
+- **连接池**建在同一条连接类型上，把并发从 1 抬到 N；借出的 client 不许 `free`、池子
+  被门面绑着时也不许 `free`，这两条都被变异测试钉住（M22–M26）。
+
+### C ABI 第八片：db —— 402 个函数 / 八片
+
+`uvcpp_c_db.h` 是第八片，**81 个入口**（连接 / 同步查询与事务 / 参数 / 结果集与值 /
+连接池 / 异步门面），到此合计 **402 个函数**。C#、Rust、Python 的 `ctypes` 今天就能
+用数据库模块。
+
+- **`UVCPP_C_ABI_VERSION` 仍是 `1`。** 加一片不 +1 的判据这次**比前几批更直接**：
+  `git diff --stat` 在 `src/capi/` 上只有一行（伞头多一段 `#if UVCPP_DB_ENABLE` 的
+  include），既有的七份头与七份 `.cpp` 一个字节都没动。
+- **C 的异步接口不收循环参数 —— 这是它与 C++ 那侧唯一一处形状差别。** 公开头里造不出
+  一个合法的 `uvcpp_loop*`，而"借调用方自己的 `uv_loop_t*`"会让 `~uvcpp_loop()` 去
+  `uv_loop_close()` 并释放一块别人的内存。给一个没人填得合法的参数比不给更糟，所以完成
+  回调一律在门面自带的那条懒起循环线程上跑；要把结果搬回自己的循环，就在回调里投一次
+  `uvcpp_c_net.h` 那族 `*_post()`。
+- **C# 绑定仍覆盖前七片**（321 of 402）—— db 那 81 条是它自己 README 里如实列出的缺口，
+  不是漏写。
+
+### 发布包：两轮扩容
+
+六条发布腿的预编译包在这一版里**多带两个模块**：
+
+| 版本 | 多了什么 | 断言清单 |
+|---|---|---|
+| `1.5.2` | WSDL / SOAP | 十个宏 → 十一个 |
+| `1.5.3` | 数据库（**只带 SQLite 一个后端**） | 十一个 → 十三个 |
+
+WSDL 那次值得单独说，因为它的失败方式很安静：包里**照样装着** `include/wsdl/*.h`
+（那份清单由打包脚本的模块表决定，与开关无关），但生成头里 `UVCPP_WSDL_ENABLE` 是 0，
+于是那些头的全部内容落在 `#if` 外面 —— **头在、功能不在**。
+
+db 那次的两个 `OFF`（MySQL / PostgreSQL）是**显式**关的，不是"找不到"：发布 runner 上
+装着 `libpq-dev`，`find_package` 会**静默**成功，于是共享库悄悄多一条 `libpq.so.5` 的
+`DT_NEEDED` —— 而"装到别的机器上跑不起来"正是发布腿那条 `ldd` 断言要拦的形状。
+`PRIVATE` 链接挡不住这件事：`PRIVATE` 关的是头文件与编译定义，共享库上它照样写
+`DT_NEEDED`。SQLite 那份也**不链系统的**：走配置期下的一份**哈希钉死**的 amalgamation，
+编成静态且强制 PIC 链进去（Ubuntu 24.04 上系统的 `libsqlite3.a` 不是 PIC）。
+
+两轮的判据都**读生成的头**（`<tree>/include/uvcpp/uvcpp_config.h`）而不是
+`CMakeCache.txt` —— 模块被强制关闭时走的是普通 `set()`，缓存里照旧写着 `ON` 而编译器
+看到 0，只 grep 缓存的断言会**放行一个缺功能的包**。
+
+### QUIC：两处正确性、两处性能
+
+- **大载荷下交付出去的字节是错的（`1.5.1`）** —— 这是本版最重要的一处修复。
+  `write_stream()` 把 `std::vector<uint8_t>` 里的一个指针交给 ngtcp2，而那块缓冲会
+  **增长**（把地址搬走），丢已确认前缀时又会把尾巴 `memmove` 上来（地址没变、字节变了）；
+  ngtcp2 要求在字节被确认前它们"原样留着"。症状是 2 MiB 回显 20 次里崩 3 次
+  （`0xC0000005`），而崩只是它**最响**的那种症状：把 HEAD 那份存储换回来重编、跑同一个
+  量具，**6 次运行全部**在 15 轮内报 `DATA MISMATCH` —— 旧形状每次吐出的字节都是错的，
+  那个基线在 2 MiB 上根本不存在。正式修法是**分块发送队列**：每块出生时预留、此后只写
+  到这里为止、只在整块被确认时才丢，两条约束按构造成立。
+- **数据报上限钉在 1200，把 ngtcp2 自带的 PMTUD 整条关死（`1.5.1`）**。1200 是"任何
+  路径都保证能过"的**下界**，看着最保守，实际让探测表 `{1406, 1342, 1232, 1444}`
+  四档全部越界、PMTUD 当场判完成并被关掉，此后每个数据报都被钉死在 1200 字节 ——
+  2 MiB 单向要 1748 个数据报。改成 1500（典型以太网 MTU）后，交错跑五轮取最小值，
+  接收侧 `on_read(DATA)` 次数**对照组 1743～1766、改完 1392～1446，两组一次都没有
+  重叠**（墙钟在那个分辨率上分不出结论，这一行才是结构证据），全尺寸扫描每一档都
+  变快（+4.2% ～ +23.8%）。两条 `static_assert` 守着这个缺陷的两个入口，都拿对照臂
+  验过（改回 1200 ⇒ 构建失败）。
+- **ACK 阈值从 ngtcp2 默认的 2 提到 16（`1.5.1`）**。低 RTT 链路上延迟 ACK 的窗口塌到
+  微秒级，阈值成了唯一还在起作用的闸门，接收端几乎每收两个包就回一个 ACK。实测 2 MiB
+  单向总数据报 **2445 → 1783（−27%）**、中位耗时 **19.25 → 13.81 ms**。**成本说清楚**：
+  ACK 变稀 ⇒ 对端检测丢包、推进 cwnd 的反馈变慢，上界是延迟 ACK 计时器（25 ms）；本机
+  回环无丢包，量到的全是收益，别把这个数读成"公网也 +38%"。
+- **Windows 发送侧批量交数据报（`1.5.2`）**。`UVCPP_ENABLE_UDP_GSO` 把一次聚合出来的
+  一批等长数据报用一次 `WSASendTo` 交给协议栈，而不是每个数据报一次（libuv 在 Windows
+  上是一个数据报一次 `WSASendTo`）。分段尺寸取的是本次聚合写回填的值、不是常量，所以
+  线上跑的还是原来那些数据报。**Windows only** —— Linux 上游已经把每批折成一次
+  `sendmmsg()`，这个开关在那里整段编掉。收方向**故意没做**（半开会让 libuv 把粘在一起
+  的数据报当成一次读交给应用）。
+
+### 换二进制之前
+
+- **C++ API 没有破坏性改动**；**C ABI 版本仍是 `1`**，本版**新增**了 db 那一片
+  （81 个 `uvcpp_c_db_*`），**没有删除或改名**任何既有符号。
+- **发布包的模块集合变了**：换上 `1.6.0` 的包之后，`UVCPP_WSDL_ENABLE` 与
+  `UVCPP_DB_ENABLE` 由 `0` 变 `1`。**从源码构建的人不受影响** —— 两个开关的默认值仍是
+  `OFF`。
+- 包里 `uvcpp_db_drivers()` 只打印 `sqlite`；要 MySQL / PostgreSQL 就从源码编
+  （默认三个后端都开）。
+
+逐条的「这一版没做什么」在 [`doc/db-guide.md`](doc/db-guide.md)、
+[`doc/quic-guide.md`](doc/quic-guide.md) 与 [`doc/http3-guide.md`](doc/http3-guide.md)；
+按主题汇总的清单在这个 tag 对应的
+[CHANGELOG.md](https://github.com/Antruly/libuvcpp/blob/master/CHANGELOG.md)。
 
 ## v1.5.0 重点 (Highlights)
 
@@ -375,6 +488,49 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 - `uvcpp_web_ws` / `uvcpp_web_ws_client` — 接入 webapp 的 WebSocket
 - `uvcpp_log` / `uvcpp_log_console` — 日志
 
+## 主要特性 (Key Features)
+
+低层（`uvcpp_loop` / `uvcpp_tcp` / `uvcpp_pipe` / `uvcpp_udp` / `uvcpp_timer` /
+`uvcpp_signal` / `uvcpp_process` / `uvcpp_fs*` 这些句柄，与 `uvcpp_write` /
+`uvcpp_connect` / `uvcpp_fs` / `uvcpp_work` / `uvcpp_getaddrinfo` 这些请求）之外，
+本库另有 net / web / webapp / ssl / db 五个高层模块，与 expand / wsdl / capi 三个。
+**逐个类的清单在 [README.md 的功能特性一节](README.md#features)** —— 那边是唯一的
+清单，此处不抄第二份。
+
+## 构建要求 (Requirements)
+
+C++11 或更高、CMake 3.20+、libuv 1.0.0+，支持 Windows / Linux / macOS。可选依赖：
+OpenSSL（TLS；QUIC 与 HTTP/3 还要 ≥ 3.2）、zlib（压缩）、llhttp 与 nlohmann/json
+（HTTP / Web 框架，可由 FetchContent 自动获取）、pugixml（WSDL/SOAP）、ngtcp2 与
+nghttp3（QUIC / HTTP/3）、libsqlite3 / libmysqlclient / libpq（数据库，至少一个）。
+各平台依赖与全部开关在 [doc/build-guide.md](doc/build-guide.md)。
+
+## 使用示例 (Example)
+
+从 clone 到跑绿的那条路，以及可以照抄的完整例子（**每一个都被 CI 逐条编译过**）在
+[README.md 的快速入门](README.md#quick-start)；`examples/` 下另有可运行示例。
+
+## 变更日志 (Changelog)
+
+**按主题汇总的清单在 [CHANGELOG.md](./CHANGELOG.md)** —— 那一段是唯一的清单，
+这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。逐版本的**发布叙事**就是
+上面那些 `## vX.Y.Z 重点` 小节，而每个已发布 tag 的清单条目在 CHANGELOG.md 末尾的
+「逐个版本」里。
+
+开发版线是怎么折叠的：`1.1.1` → `1.1.35` 收进 `v1.2.0`，`1.2.1` → `1.2.25` 收进
+`v1.3.0`，`1.3.1` → `1.3.33` 收进 `v1.4.0`，`1.4.1` → `1.4.4` 收进 `v1.5.0`，
+`1.5.1` → `1.5.3` 收进 `v1.6.0`。逐条的「这一版没做什么」在
+[`doc/db-guide.md`](doc/db-guide.md)、[`doc/quic-guide.md`](doc/quic-guide.md) 与
+[`doc/http3-guide.md`](doc/http3-guide.md)。
+
+---
+
+## 以下为归档
+
+这一分界线以下是**归档**段落。它们记的是跨版本仍然成立的东西，不是某一版的新增，
+所以 `release_notes.py` 按 tag 切出的 Release 正文里**没有**这几节 —— 要看它们，
+来这份文件；要按版本看，翻上面的 `## vX.Y.Z 重点`。
+
 ## 预编译产物 (Prebuilt binaries)
 
 `1.5.0` 起**每一档的发布档与调试档都是全功能的**：QUIC + HTTP/3 + C ABI
@@ -565,226 +721,7 @@ g++ -std=c++11 -g -I include your_app.cpp -L lib -luvcppd -o your_app.exe
 `net` / `web` / `webapp` / `ssl` 的类**不在聚合头里**，按模块显式 include，例如
 `#include "handle/uvcpp_tcp.h"`、`#include "web/uvcpp_http_server.h"`。
 
-## 主要特性 (Key Features)
-
-### Handles（句柄）
-- `uvcpp_loop` - 事件循环核心
-- `uvcpp_tcp` - TCP 客户端/服务端
-- `uvcpp_pipe` - 管道通信（支持 IPC）
-- `uvcpp_udp` - UDP 通信
-- `uvcpp_tty` - 终端设备
-- `uvcpp_poll` - 文件描述符轮询
-- `uvcpp_timer` - 定时器
-- `uvcpp_signal` - 信号处理
-- `uvcpp_fs_event` / `uvcpp_fs_poll` - 文件系统监控
-- `uvcpp_async` - 异步通知
-- `uvcpp_process` - 进程管理
-- `uvcpp_idle` / `uvcpp_prepare` / `uvcpp_check` - 事件循环钩子
-
-### Requests（请求）
-- `uvcpp_write` - 写请求
-- `uvcpp_connect` - 连接请求
-- `uvcpp_shutdown` - 关闭请求
-- `uvcpp_fs` - 文件系统操作
-- `uvcpp_work` - 工作请求（线程池）
-- `uvcpp_getaddrinfo` / `uvcpp_getnameinfo` - DNS 查询
-- `uvcpp_udp_send` - UDP 发送请求
-
-### 缓冲区管理 (Buffer Management)
-- `uvcpp_buf` - C++ 封装 `uv_buf_t`，提供安全内存管理
-
-### 实用工具 (Utilities)
-- 线程、互斥锁、条件变量
-- 线程安全的环境变量、用户/组信息
-- 目录遍历、文件描述符操作
-- 随机数生成、CPU 信息、网络接口
-
-## 构建要求 (Requirements)
-
-- C++11 或更高版本
-- CMake 3.20+
-- libuv 1.0.0+
-- 支持 Windows / Linux / macOS
-- 可选：OpenSSL（TLS）、zlib（压缩）、llhttp 与 nlohmann/json（HTTP/Web 框架，可由 FetchContent 自动获取）
-
-## 使用示例 (Example)
-
-```cpp
-#include "uvcpp.h"
-#include "handle/uvcpp_tcp.h"
-#include <iostream>
-#include <string>
-using namespace uvcpp;
-
-int main() {
-    uvcpp_loop loop;
-    loop.init();
-
-    uvcpp_tcp server(&loop);
-    server.bindIpv4("127.0.0.1", 8080);
-    
-    server.listen([&](uvcpp_stream* s, int status) {
-        auto client = new uvcpp_tcp(&loop);
-        s->accept(client);
-        
-        client->read_start(
-            [](uvcpp_handle*, size_t, uv_buf_t* buf) {
-                uvcpp_buf::alloc_buf(buf, 1024);
-            },
-            [client](uvcpp_stream*, ssize_t nread, const uv_buf_t* buf) {
-                if (nread > 0) {
-                    std::cout << "Received: " << std::string(buf->base, nread) << std::endl;
-                }
-                uvcpp_buf::free_buf(const_cast<uv_buf_t*>(buf));
-                if (nread <= 0) {
-                    client->close([client](uvcpp_handle*) { delete client; });
-                }
-            }
-        );
-    }, 128);
-
-    loop.run(UV_RUN_DEFAULT);
-    return 0;
-}
-```
-
-## 变更日志 (Changelog)
-
-这里只列**已发布**的 tag。开发版线 `1.1.1` → `1.1.35` 已全部收进 `v1.2.0`，
-`1.2.1` → `1.2.25` 收进 `v1.3.0`，`1.3.1` → `1.3.33` 收进 `v1.4.0`，
-`1.4.1` → `1.4.4` 收进 `v1.5.0`；按主题汇总的清单在
-[CHANGELOG.md](https://github.com/Antruly/libuvcpp/blob/master/CHANGELOG.md)
-里 —— 那一段是唯一的清单，这边不抄一份（两份手写的清单正是本仓已经栽过的形状）。
-
-**`1.4.1` → `1.4.4` 那条开发线已经收进 `v1.5.0`**，所以下面有它的一条：这一版把那四
-个开发档（QUIC 传输、HTTP/3、以及 C ABI 的三批）与 1.5.0 自己的改动一起发。按主题的
-清单同样在 README 的变更日志里，逐条的「这一版没做什么」在
-[`doc/quic-guide.md`](doc/quic-guide.md) 与 [`doc/http3-guide.md`](doc/http3-guide.md)。
-
-### v1.5.0 (2026-10-05)
-
-**新增**:发布包全功能（QUIC + HTTP/3 + C ABI）、C# 绑定与 QUIC 例子
-
-- **六条发布腿的预编译包（发布档 + 调试档）都带上 QUIC + HTTP/3 + C ABI**。判据读
-  `<tree>/include/uvcpp/uvcpp_config.h` 而不是 `CMakeCache.txt` —— 静默降级（WARNING +
-  普通变量 `set OFF`）在缓存里看不出来，只 grep 缓存的断言会放行一个缺功能的包。
-  QUIC 需要带 QUIC API 的 OpenSSL ≥ 3.2：Linux 两条腿自建 3.5.0、MinGW 两条用 MSYS2 的、
-  MSVC-x64 用 runner 脚本给的那份、MSVC-arm64 自建 3.5.8
-- **C# 绑定**：`bindings/csharp/` 两份 `.cs`（321 条 `DllImport`，与符号面锁双向对账）
-  加一个能跑的 QUIC 回显例子；编译门槛是量出来的（`net8.0` 真跑过、`netstandard2.1` +
-  C# 10 编得过、`netstandard2.0` 与 C# 9 编不过 —— 所以"Unity / Mono 也编得过"是错的）
-- **修复**：QUIC 端点带着活连接 `_server_free()` 会 SIGSEGV（边遍历 `conns` 边
-  `detach_conn()` = erase 当前迭代器），改成一趟快照；`uvcpp_c_quic.h` 补上"`on_read` 的
-  收尾是两条回调、结束判据是 `PEER_CLOSED` 不是 `fin`"
-- 其余是 `1.4.1` → `1.4.4` 那条线上的东西：QUIC 传输层、HTTP/3、C ABI 的三批（地基 +
-  net、webapp + web、HTTP/2、QUIC + HTTP/3，共 321 个函数），按主题见 README 的变更日志
-- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
-  依赖全静态链接
-
-**破坏性**:无 C++ API 变更；C ABI 版本仍是 `1`，符号面 321 条不变。但发布包的**模块
-集合变了**（QUIC / HTTP3 / CAPI 由 0 变 1），换包的人会多出这三批符号与头；从源码构建
-的人不受影响（默认仍是 OFF）。逐条见上面「`v1.5.0` 重点」的「换二进制之前」。
-
-### v1.4.0 (2026-09-26)
-
-**新增**:SOAP/WSDL、应用层 JSON、日志模块完善、多循环的 Linux 内核分流
-
-- 新模块 `src/wsdl/`（`UVCPP_ENABLE_WSDL`，默认 OFF）：WSDL 1.1 文档模型与发布层、
-  SOAP 1.1/1.2 信封解析 / Fault / 序列化、operation 派发层（`1.3.7-dev`、`1.3.8-dev`）
-- 应用层 JSON 构造器与字段表反射（`1.3.3-dev`、`1.3.4-dev`）
-- **日志模块**：`UVCPP_LOGF` 带源码位置、`enum class`/`log_level`/`log_category`/`nullptr`
-  重载、最短往返浮点、`flush()`、`SOAP`/`WSDL` 两个模块标签、`src/wsdl/` 的 9 处日志点、
-  `uvcpp_json_dump` 失败不再静默，以及过滤路径与每条记录的若干次抢锁和堆分配
-- `uvcpp_tcp_server::set_loops(n > 1)` 在 Linux/BSD 上改为 `UV_TCP_REUSEPORT` 内核分流
-  （`1.3.5-dev`），`is_fanout()` 可问是哪一种；Windows 仍是 socket 转手
-- `Date` 响应头（按秒缓存，`1.3.1-dev`）、进程内设 libuv 线程池大小（`1.3.2-dev`）、
-  静态分片下发改按块借还工作池名额、503 → 0（`1.3.6-dev`）
-- 其余是 `1.3.9-dev` → `1.3.32-dev` 线上约 25 笔「每请求少几次分配」的性能改动
-  （webapp 登记表索引换哈希表、响应序列化不再造串、读注册表不再每请求重建、……），
-  按主题见 README 的变更日志
-- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
-  依赖全静态链接
-
-**破坏性**:日志模块动了一处 vtable、一处对象布局、两个新增导出符号和四个重载集 ——
-**必须重编，不能只换二进制**；另有一条 `set_log_level` 的行为变更。
-逐条见上面「`v1.4.0` 重点」的「换二进制之前」。
-
-### v1.3.0 (2026-09-23)
-
-**新增**:多循环横向扩展、HTTP/2 流级背压、TLS 主机名校验
-
-- `uvcpp_tcp_server::set_loops(n)`（`1.2.21`）与 `uvcpp_web_app::set_loops(n)`（`1.2.23`）：
-  一条接受者 + n−1 条专用线程的工作循环，配套 socket 转手原语与两个新公开头
-  （`net/uvcpp_loop_worker.h`、`net/uvcpp_socket_handoff.h`）
-  （**Linux 侧自 `1.3.5-dev` 起改为内核分流**：n 条循环各自绑同一端口，`is_fanout()`
-  可问是哪一种；Windows 仍是上面这条）
-- HTTP/2 流级背压：收方向 `pause_stream()` / `resume_stream()`、发方向单流待发队列
-  上界（默认 4 MiB）、`peer_window_size()`（`1.2.25`）。**这是协议层机件，仓内没有
-  应用层调用方** —— 框架侧不驱动它，h2 上「边收边给」的流式请求体仍不可达
-- `tls_verify_mode::PEER_STRICT` 在客户端侧真的校验主机名（`1.2.24`）——
-  此前它与 `PEER` 完全等价
-- 其余是 `1.2.1` → `1.2.25` 线上的修复与性能改动，按主题见 README 的变更日志
-- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
-  依赖全静态链接
-
-**破坏性**:删了 3 个公开符号、改了 7 处布局或导出符号 —— **必须重编，不能只换二进制**，
-逐条见上面「`v1.3.0` 重点」的「换二进制之前」。
-
-### v1.2.0 (2026-09-20)
-
-**新增**:HTTP/2（nghttp2）、发布包里的调试档
-
-- 集成 HTTP/2：nghttp2、ALPN 协商、h2 会话与连接层；`uvcpp_web_app` 零配置自动
-  协商版本，低层 `http_client` / `http_server` 要 h2 得显式打开
-- 每个预编译包同时提供发布档与调试档（`uvcppd.dll` / `libuvcppd.so`），MSVC 那份
-  带 `uvcppd.pdb`
-- 打包器改为让产物**自报家门**：两档装反、`.pdb` 对不上源，都拒绝出包
-- 其余是 `1.1.1` → `1.1.35` 线上的修复与性能改动，按主题见 README 的变更日志
-- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
-  依赖全静态链接
-
-### v1.1.0 (2026-09-19)
-
-**新增**:网络层、HTTP/1.1 与 WebSocket、TLS、Web 应用框架
-
-- 新增 `net` 模块：TCP / UDP 的服务端与客户端
-- 新增 `web` 模块：HTTP/1.1（llhttp）、WebSocket（RFC 6455）、gzip/deflate 压缩、静态文件服务
-- 新增 `ssl` 模块：基于 OpenSSL 的 TLS
-- 新增 `webapp` 模块：路由、中间件、静态资源、流式响应、multipart 上传、文件下发、JSON、日志
-- 修复内存池在 MinGW-w64 上的线程退出崩溃（根因与修法见「已知问题」），
-  `expand` 模块首次随发布产物一起提供
-- 预编译动态库：6 个平台（Windows / Linux × x64 / arm64 × MinGW-w64 / MSVC / GCC），
-  依赖全静态链接
-
-### v1.0.0 (2026-02-02)
-
-**首发版本 (Initial Release)**
-
-- ✅ 所有 14 个功能测试通过
-- ✅ 支持 Windows / Linux / macOS
-- ✅ 完整的 libuv API C++ 封装
-- ✅ 现代 C++ 接口设计
-- ✅ 智能内存管理
-- ✅ 线程池支持
-- ✅ 单元测试覆盖
-
-## 下载 (Download)
-
-- Source code
-- `libuvcpp-1.5.0-mingw-x64.zip` / `libuvcpp-1.5.0-mingw-arm64.zip`
-  — Windows 预编译动态库（MinGW-w64，含调试档）
-- `libuvcpp-1.5.0-msvc-x64.zip` / `libuvcpp-1.5.0-msvc-arm64.zip`
-  — Windows 预编译动态库（MSVC / VS2022，含调试档与 `uvcppd.pdb`）
-- `libuvcpp-1.5.0-linux-x64.zip` / `libuvcpp-1.5.0-linux-arm64.zip`
-  — Linux 预编译动态库（含调试档）
-
-每个 zip 里都带一份 `bindings/csharp/`（C# 绑定与那个 QUIC 回环例子），用法见
-`bindings/csharp/README.md`。平台的差别只在 `bin/` 与 `lib/` 里的库：绑定本身
-与平台无关，六份包里是同一份源码。
-
-> ⚠️ 两个 Windows 版**互为替代、不可混用**：MinGW-w64 编出来的动态库不能被 MSVC
-> 链接，反之亦然（C++ ABI 不同）。用哪套工具链就下哪个 zip；arm64 同理，别拿 x64 的
-> 包去链 arm64 的程序。
+---
 
 ## 已知问题 (Known Issues)
 
