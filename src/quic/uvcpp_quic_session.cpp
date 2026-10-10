@@ -1744,7 +1744,6 @@ int quic_session::cb_stream_close2(ngtcp2_conn* conn, uint32_t flags,
                                    int64_t stream_id, uint64_t rx_app_error_code,
                                    uint64_t tx_app_error_code, void* user_data,
                                    void* stream_user_data) {
-  (void)conn;
   (void)flags;
   (void)tx_app_error_code;
   (void)stream_user_data;
@@ -1763,6 +1762,39 @@ int quic_session::cb_stream_close2(ngtcp2_conn* conn, uint32_t flags,
       }
     }
     self->send_q_.erase(it);
+  }
+
+  // **把额度还回去。**
+  //
+  // 本端在传输参数里宣布的 `initial_max_streams_bidi` / `_uni` 是"对端**同时**
+  // 能开多少条"，不是"这条连接一辈子能开多少条"—— RFC 9000 §4.1 说得很清楚，
+  // MAX_STREAMS 管的是同时处于 open 状态的流数。ngtcp2 不会替我们补发：它自己
+  // 的文档写着"库不会自动提高最大流上限"，唯一的例外是调用方**没有**装
+  // `stream_open` 回调时它才自己补（`ngtcp2.h` 里
+  // `ngtcp2_conn_extend_max_streams_bidi` 那一节）。本库装了（见
+  // `fill_callbacks`），那个例外因此不成立 —— 不再这里还额度，对端开满 100 条
+  // 之后就再也开不出新的：一条 QUIC 连接**终生只服务 100 个请求**，而不是
+  // 同时 100 个。这正是 `baseline-h3` 打分崩塌的形状（64 连接 × 100 = 6400）。
+  //
+  // 只还对端发起的那些：我们宣布的额度管的就是它们，本端自己开的流不占这个数。
+  // 流号低两位由 RFC 9000 §2.1 定死：bit0 = 发起方（0 客户端 / 1 服务端），
+  // bit1 = 方向（0 双向 / 1 单向）。
+  //
+  // 已知道的一处不精确：对端**跳号**开流时，中间那些被"隐式打开"的流不会走
+  // `stream_open`，ngtcp2 会替它们自动补一次；这里再补一次就多给了一个额度。
+  // 后果只是"允许的并发比宣布的多一点"，不泄漏任何资源，方向也安全；而跳号在
+  // 实际里不出现（ngtcp2 的 h2load、本库的 h3 客户端都按序开）。为它挂一张
+  // 逐流记录表，是拿热路径上的一次分配换一个到不了的分支，不值当。
+  //
+  // 补出去的额度由 `read_pkt()` 尾巴上那一次 `flush()` 兑现成 MAX_STREAMS 帧
+  // （`extend_*` 只是把内部计数加上去，不是写函数，回调里调它没有第 1 条那个
+  // 禁忌）。
+  if ((ngtcp2_conn_is_server2(conn) != 0) == ((stream_id & 0x1) == 0)) {
+    if ((stream_id & 0x2) == 0) {
+      ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+    } else {
+      ngtcp2_conn_extend_max_streams_uni(conn, 1);
+    }
   }
 
   // 报**收方向**那个应用错误码：发送方向的是我们自己 reset 时给的，调用方
