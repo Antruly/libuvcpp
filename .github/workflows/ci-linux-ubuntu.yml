@@ -104,7 +104,7 @@ jobs:
           # 模块关掉时它们被 `tests/functional/CMakeLists.txt` 的 glob+FILTER 摘掉，
           # 而 ctest 报 "100% tests passed" 时并不会说"少了几条"。
           #
-          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1186`），
+          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1312`），
           # 装包表与 `web` 那一格逐字相同 —— 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
           - feature: wsdl

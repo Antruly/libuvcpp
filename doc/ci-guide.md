@@ -248,7 +248,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2209`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2436-2436`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -416,7 +416,7 @@ MSVC. MinGW and macOS are the gap (see §1).
   entry at all and shipped two classes of defect (#35).
 - **It is `web` plus one switch**, exactly as `zlib-off` is `web` minus one, and its dep list
   is **byte-identical to `web`'s**. That is deliberate: `pugixml` is pulled by `FetchContent`
-  (`CMakeLists.txt:1186`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
+  (`CMakeLists.txt:1312`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
   there is nothing to install — and keeping the package set identical means a red/green
   difference between the two legs can only be attributed to the switch itself.
 - **All four gates are load-bearing here.** Gate ② is `pugixml integrated` (the FetchContent

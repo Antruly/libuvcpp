@@ -1,0 +1,500 @@
+# 数据库模块指南
+
+`src/db/` 是**库外的一层薄封装**：一个连接 = 一个 `uvcpp_db_client`，底下挂
+SQLite / MySQL / PostgreSQL 三个后端，SQL 由调用方写，结果按**表**取（列名 →
+值）。它不参与事件循环，也不是 ORM —— 没有模型、没有迁移、没有关系映射。
+
+> ## 一句话说清它是什么
+>
+> **同步的**、**一个 client 一个连接**、**不自动重连**、**返回码不抛异常**，
+> 把三个后端在"同一条 SQL 该得到同一个结果"这件事上钉到一套契约里，
+> 并把三家**真不一样**的地方如实写在这里，而不是假装它们一样。
+>
+> 它默认**关**（`UVCPP_ENABLE_DB=OFF`）：它是全仓唯一一个必需第三方客户端库的
+> 模块。发布配置**显式打开**它，所以预编译包里带着这个模块。
+
+## 目录
+
+- [1. 怎么开](#1-怎么开)
+- [2. 连接串](#2-连接串)
+- [3. 公开面](#3-公开面)
+- [4. 返回码](#4-返回码)
+- [5. 参数绑定与转义](#5-参数绑定与转义)
+- [6. 三个后端：钉住的一致，与如实列出的三处不同](#6-三个后端钉住的一致与如实列出的三处不同)
+- [7. 事务，以及"事务里不重试"](#7-事务以及事务里不重试)
+- [8. 类型与精度：`DECIMAL` 的钱会丢](#8-类型与精度decimal-的钱会丢)
+- [9. 跨后端共用套件抓到过的四处](#9-跨后端共用套件抓到过的四处)
+- [10. 本地怎么跑](#10-本地怎么跑)
+- [11. 没做的（如实列出）](#11-没做的如实列出)
+
+---
+
+## 1. 怎么开
+
+```bash
+cmake -S . -B build-db -DUVCPP_ENABLE_DB=ON
+cmake --build build-db -j
+```
+
+| 开关 | 默认 | 语义 |
+|---|---|---|
+| `UVCPP_ENABLE_DB` | `OFF` | 主开关。关掉时 `src/db/` 整个不进构建，公开头的内容整段落在 `#if UVCPP_DB_ENABLE` 外面 |
+| `UVCPP_ENABLE_DB_SQLITE` | `ON` | 编 SQLite 后端（要 `sqlite3.h` + libsqlite3） |
+| `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` + libmysqlclient） |
+| `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` + libpq） |
+
+三个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
+想明确裁掉哪一个才写 `=OFF`（那时连"找不到"的警告都不会有）。
+
+降级链是**两级**，两级都是 `message(WARNING)` + 普通变量 `set(... OFF)`：
+
+1. 某一个后端找不到 → 关掉**那一个**，其余照编；
+2. 三个都关掉了 → 关掉**整个模块** —— 那样的库能编出一个 `uvcpp_db_client`，
+   但它谁也打不开，属于"能配置、跑不起来"。
+
+所以 `CMakeCache.txt` 里 `UVCPP_ENABLE_DB_MYSQL:BOOL=ON` **不代表**它编进去了
+—— 缓存不是判据。判据是配置期的这几行，CI 与用例都 grep 它们：
+
+```
+-- db: SQLite 后端开（3.45.1）
+-- db: MySQL 后端开（/usr/lib/x86_64-linux-gnu/libmysqlclient.so）
+-- db: PostgreSQL 后端开（libpq 16.15）
+-- Including db module in build (database integration)
+```
+
+运行期问一句更直接：
+
+```cpp
+#include <cstdio>
+
+#include <db/uvcpp_db.h>
+
+int main() {
+  // "sqlite,mysql,postgres" —— 只列**真的编进来**的那几个
+  std::printf("%s\n", uvcpp::uvcpp_db_drivers().c_str());
+  return 0;
+}
+```
+
+预编译包少哪个后端时，**这一行是第一个该看的地方**。
+
+### 客户端库装在非标准位置
+
+不用新开关，走 CMake 的常规搜索路径：
+
+```bash
+cmake -DUVCPP_ENABLE_DB=ON -DCMAKE_PREFIX_PATH=/opt/mysql ..
+# 或者直接点名（find_path/find_library 会尊重预先设好的同名 cache 变量）
+cmake -DUVCPP_ENABLE_DB=ON \
+      -DUVCPP_DB_MYSQL_INCLUDE_DIR=/opt/mysql/include \
+      -DUVCPP_DB_MYSQL_LIBRARY=/opt/mysql/lib/libmysqlclient.so ..
+# PostgreSQL 走 CMake 自带的 FindPostgreSQL
+cmake -DUVCPP_ENABLE_DB=ON \
+      -DPostgreSQL_INCLUDE_DIR=/opt/pgsql/include \
+      -DPostgreSQL_LIBRARY=/opt/pgsql/lib/libpq.so ..
+```
+
+### 静态库上的已知缺口
+
+三个客户端库挂在 `$<BUILD_INTERFACE:>` + `PRIVATE` 下：**共享库**上
+`DT_NEEDED` 会跟着走，使用方什么都不用做；**静态库**（`uvcpp_a` / `uvcpp_a_s`）
+上那一条不传给消费者，使用方要自己链：
+
+```cmake
+target_link_libraries(myapp PRIVATE uvcpp_a sqlite3 pq mysqlclient)
+```
+
+这是**故意**的取舍，与 zlib / nghttp2 那几处同形：把绝对路径写进导出集会过得了
+`install(EXPORT)` 却搬到别的机器才断，比缺一条 `target_link_libraries` 更难查
+（后者是链接期一句 `undefined reference to sqlite3_open_v2`，指向明确）。
+
+---
+
+## 2. 连接串
+
+```
+sqlite:///abs/path/app.db        sqlite://rel/path.db       sqlite::memory:
+mysql://user:pass@host:3306/dbname
+postgres://user:pass@host:5432/dbname
+```
+
+| 项 | 规则 |
+|---|---|
+| scheme 别名 | `postgres` / `postgresql` / `pgsql` / `pg` → `postgres`；`mariadb` → `mysql`。**别名归一化之后**才去做"认不认得"的判断 |
+| 缺省端口 | MySQL 3306、PostgreSQL 5432 |
+| 密码 | 可省（`mysql://root@host/db`）。URL 里带特殊字符要自己转义，本模块不做 URL 解码 |
+| SQLite 的路径 | `sqlite://` 后面**原样**当一个路径用（不解析 user/host/port）。父目录不存在时驱动会**建**出来 |
+| 没带 scheme | `BAD_URL`。报错原文里会带上传进来的整串 |
+
+### `BAD_URL` 与 `NO_DRIVER` 是两件事
+
+这是本模块唯一一处"两个返回码看着像、含义差很远"的分界，值得单说：
+
+* `BAD_URL` —— 这个 **scheme 根本不存在**（`oracle://…`、少写 scheme）。是调用方写错了。
+* `NO_DRIVER` —— 这个后端**存在、但这份包没编进来**（`mysql://…` 而包里只有
+  SQLite）。换一份包就好，SQL 一个字不用改。
+
+判据是「这个 scheme 是不是本模块支持过的后端」（`uvcpp_db_driver_known()`），
+**不是**「这份构建里有没有」。用后者的话两种情况都是假，分不开 —— 而"打不开连接"
+这个笼统说法，恰恰是最没用的一句错误信息。用例里两条都有断言。
+
+---
+
+## 3. 公开面
+
+```cpp
+#include <cstdio>
+
+#include <db/uvcpp_db.h>
+
+int main() {
+  uvcpp::uvcpp_db_client db;
+  uvcpp::uvcpp_db_status st = db.open("sqlite:///tmp/app.db");
+  if (!uvcpp::uvcpp_db_ok(st)) {
+    std::fprintf(stderr, "%s\n", db.last_error().c_str());
+    return 1;
+  }
+
+  uvcpp::uvcpp_db_table t;
+  db.query("SELECT id, name FROM users WHERE age > ?", {18}, &t);
+  for (const uvcpp::uvcpp_db_row& row : t.rows()) {
+    std::printf("%s\n", row["name"].to_text().c_str());
+  }
+  return 0;
+}
+```
+
+| 组 | 成员 |
+|---|---|
+| 连接 | `open` / `close` / `is_open` / `reconnect` / `ping` / `url` / `driver_name` / `last_error` |
+| 读 | `query(sql, &t)`、`query(sql, params, &t)` |
+| 写 | `execute(sql, [affected])`、`execute(sql, params, [affected])`、`insert(sql, params, &new_id)` |
+| 自增 | `last_insert_id()` / `last_insert_id(&v)` |
+| 事务 | `begin` / `commit` / `rollback` |
+| 元信息 | `table_names(&v)` / `table_schema(table, &t)` |
+| 转义 | `escape(text)` / `escape_identifier(ident)` |
+| 配置 | `set_timeout_ms` / `timeout_ms` / `set_log` |
+| 自由函数 | `uvcpp_db_open(url, &status, &error)`、`uvcpp_db_drivers()` |
+
+三条容易踩的：
+
+* **`last_error()` 不会因为一次成功就清空** —— 失败现场比成功更值得留着。
+  所以判"这次行不行"看返回码，别去看 `last_error()` 空不空。
+* **`uvcpp_db_open()` 的 `error` 出口是必需的**，不是可选装饰：失败时那个
+  client 当场就被销毁了，`last_error()` 跟着没 —— 只给返回码的话，"认证失败"
+  与"库不存在"在调用方眼里是同一个 `OPEN_FAILED`。
+* **`row["name"]` 保证不崩**：找不到列时给一个静态的 NULL 值。
+  行/列越界同样返回 NULL 值，不抛也不越界读。
+
+### 同步，且**故意**是同步的
+
+三个客户端库全是阻塞 API，没有异步版本。把它们塞进事件循环只有两条路：丢线程池
+（`uv_queue_work`）或者自己实现协议。这一层是**第一条路的底座** —— 异步封装该建在
+它**上面**，而不是把它包进互斥锁再从别的线程碰事件循环（库内其它模块的线程规矩是
+"谁创建的谁用"，跨线程共享连接对象会把这条规矩捅破）。
+
+`uvcpp_db_client` 内部有一把递归锁：同一个 client 可以被多个线程调，但**同一时刻
+只有一个在真的用连接**。要并发就开多个 client。
+
+---
+
+## 4. 返回码
+
+| 返回码 | 含义 |
+|---|---|
+| `OK` | 成功 |
+| `BAD_URL` | 连接串解析不了 |
+| `NO_DRIVER` | 这个后端的驱动没编进这份库 |
+| `OPEN_FAILED` | 主机/端口不可达、认证失败、库不存在、超时 |
+| `NOT_CONNECTED` | 没开就调，或执行途中连接掉了 |
+| `PREPARE_FAILED` | 语句准备失败：**SQL 语法错、表/列不存在** |
+| `EXEC_FAILED` | 语句执行失败：约束冲突、类型不匹配、死锁重试用尽、权限不足 |
+| `BIND_FAILED` | 参数与占位符对不上（**个数**、或名字找不到） |
+| `UNSUPPORTED` | 这个后端不支持该操作（SQLite 没有存储过程、没有 `lastval()`） |
+| `MISUSE` | 用法错误：空 SQL、空结果集指针 |
+| `OUT_OF_MEMORY` | 内存不足 |
+
+返回码只区分**哪一类失败**，不枚举各家数据库自己的错误号 —— 那属于驱动的私有
+词汇表。要 SQLSTATE / errno 时看 `last_error()` 里的原文（它里面就有）。
+
+**`PREPARE_FAILED` 与 `EXEC_FAILED` 的分界线是「服务端有没有接受这条语句」**，
+不是「哪一步失败」：语法错、表/列不存在属于前者；唯一键冲突、除零、死锁属于后者。
+这条线在三家上**都成立**，包括**裸通道**（MySQL 的文本协议、PostgreSQL 的
+`PQexec`）—— 那两条路是服务端一步做完"解析 + 执行"，两种错从同一个出口回来，
+驱动按错误号/`SQLSTATE` 分开（判据见 [§9](#9-跨后端共用套件抓到过的四处)）。
+为什么值得分：调用方的下一步动作不同 —— `PREPARE_FAILED` 改 SQL，`EXEC_FAILED`
+可能是重试（死锁、锁等待）或改数据。
+
+---
+
+## 5. 参数绑定与转义
+
+**值一律走参数，SQL 文本里永远不拼接外部输入。** 占位符在公开 API 里**只有
+一种写法**：
+
+```cpp
+#include <db/uvcpp_db.h>
+
+uvcpp::uvcpp_db_status find_by_id(uvcpp::uvcpp_db_client& db,
+                                  uvcpp::uvcpp_db_table& t) {
+  return db.query("SELECT * FROM users WHERE id = ? AND name = ?", {1, "abc"}, &t);
+}
+```
+
+PostgreSQL 的 `$1..$n` 由驱动**自己**换算，调用方不用管 —— 换连接串不该等于换
+SQL 写法。这条是共用套件里的 `dialect::ph()`（方言唯一的差异）钉住的。
+
+* `uvcpp_db_params` 从 `{1, "a", 2.5}` 这种初始化列表构造，元素类型由
+  `uvcpp_db_value` 的构造函数定；`add()` / `add_null()` 是追加式写法。
+* 个数对不上 → `BIND_FAILED`（**三家一致**，且都**不会**执行语句）。
+* 字符串默认是 `TEXT`，要按字节存（图片、加密后的 payload）用
+  `uvcpp_db_value::blob(p, n)` —— 它按数据长度走，含 `0x00` 也不会被截断。
+
+**转义只在拼标识符时才需要**，而且它是"加引号"，不是"消毒"：
+
+```cpp
+#include <string>
+
+#include <db/uvcpp_db.h>
+
+std::string quote_table(uvcpp::uvcpp_db_client& db,
+                        const std::string& user_supplied) {
+  const std::string tbl = db.escape_identifier(user_supplied);
+  // 表名来自外部输入时，仍然要对着白名单查一遍再用
+  return tbl;
+}
+```
+
+`escape()` 转义的是**字面量内容**（不含两侧引号），MySQL 用反斜杠、SQLite/PG
+用双写单引号 —— 期望值各家不同，所以用例判的是**往返相等**：
+把一段装着引号、反斜杠、分号与 `--` 的文本存进去，再原样读回来。
+
+> 顺带一条与安全有关的实事：MySQL 连接开着 `CLIENT_MULTI_STATEMENTS`，
+> 一次 `execute()` 里可以放多条以分号隔开的语句。那是便利也是风险 ——
+> 拼接 SQL 就等于把第二条语句的权力交给数据。**能参数化就参数化。**
+> 另外，含 `?` 的语句走的是预处理通道，而预处理协议**不接受**多语句：
+> 想用多语句就别用占位符。
+
+---
+
+## 6. 三个后端：钉住的一致，与如实列出的三处不同
+
+### 钉住的一致（共用套件 `tests/functional/db_suite.h`，三家各跑一遍）
+
+本机实测的读数（数字各不相同是**设计如此**，见下面"三处真不一样"）：
+
+| 后端 | 通过 | 不适用 | 日志里的那两行 |
+|---|---|---|---|
+| SQLite | 157 | 2 | `没编进来的后端 -> NO_DRIVER`、`原生时间类型标签`（它没有原生时间类型） |
+| MySQL | 159 | 1 | `没编进来的后端 -> NO_DRIVER`（这份构建三个后端都在） |
+| PostgreSQL | 159 | 1 | 同上 |
+
+"不适用"是**独立的一格计数器**，与"通过"分开打印 —— 跳过永远不会在日志里
+伪装成通过。
+
+套件钉住的是：
+
+* 同一条 DDL/DML/SELECT 在三个后端上得到**同一份结果**：列名、列序、行数、
+  值的文本形态逐字节相等；
+* 空串**不是** NULL，NULL **不是**空串（DDL 里带 `NOT NULL DEFAULT ''`，
+  把空串折成 NULL 的实现会撞在非空约束上，失败得响亮）；
+* 长值（32 KB 文本、含 `0x00`/`0xFF` 的 BLOB）往返逐字节相等；
+* 参数个数对不上 → `BIND_FAILED`；语法错/表不存在 → `PREPARE_FAILED`；
+* 事务：`begin` 之后 `rollback`，写进去的行**不在**；`commit` 之后在；
+* 外键约束真的生效（SQLite 在 `open()` 里执行了 `PRAGMA foreign_keys = ON`
+  —— 它**默认是关的**，不显式打开的话外键是画上去的）；
+* `table_names()` / `table_schema()` 能报出刚建的表与列。
+
+共用套件的形状是「一个 `dialect` 虚基类 + 一个 `harness`」：不同后端只能**提供
+方言**（占位符写法、自增主键的列声明、定点的列声明），**不能**分叉断言。
+任何 `if (backend == ...)` 都被视为"差异还没收敛"，不接受。
+
+### 三处**真**不一样（如实列出）
+
+| 项 | SQLite | MySQL | PostgreSQL |
+|---|---|---|---|
+| 布尔 | 没有布尔类型，`INTEGER` 的 0/1 | `TINYINT(1)`，读回来是**整数** | 有真 `BOOL`，读回来是 `BOOL` |
+| 日期时间 | 没有原生类型，存**文本** | 原生 `DATETIME`/`DATE`/`TIME` | 原生 `timestamp`/`date`/`time` |
+| 定点（钱） | 没有，只能 `TEXT` 存字符串 | 原生 `DECIMAL`，读成 `double` | 原生 `NUMERIC`，读成 `double` |
+
+所以套件里判**值**（`to_bool()`、`to_text()`）而不是判**类型标签** ——
+判类型标签的断言在 MySQL/SQLite 上必然红，而那红的不是被测代码。
+
+日期时间一律以**文本**形态保存（`"YYYY-MM-DD"`、`"HH:MM:SS"`、
+`"YYYY-MM-DD HH:MM:SS"`）：这是三家都能无损往返、且人眼直接可读的表示。
+SQLite 本来就没有日期类型，PostgreSQL 的文本格式恰好就是这个形状。
+
+### 后端各自怎么读结果（想看清"为什么某条断言长这样"时看这里）
+
+* **SQLite**：`sqlite3_column_*` 按**运行期**类型取，与列的声明类型无关
+  （SQLite 是动态类型，声明只是"亲和性"）。整型超出 `INT64_MAX` 时驱动**拒绝
+  绑定**（`BIND_FAILED`），不截断成负数存进去 —— 用例里有这条见证。
+* **MySQL**：两条通道。非空参数走预处理协议（二进制），空参数走文本协议
+  （`mysql_query`）—— 后者不只是"少一次 prepare"：旧服务端的预处理协议**拒绝**
+  DDL。结果读回来时，**`TEXT` 与 `BLOB` 是同一个类型标签**，分它们的是字符集
+  （见 [§9](#9-跨后端共用套件抓到过的四处)）。
+* **PostgreSQL**：`libpq` 全部以**文本**形态收发，参数也按文本传
+  （`PQexecParams` 的 `paramFormats` 全 0），类型让服务端从上下文推断。
+  `BYTEA` 走文本形态时必须**十六进制编码**成 `\x...`（`open()` 里设了
+  `bytea_output = 'hex'`），读回来再解码 —— 两头都不做的话，`blob("a\0b")`
+  会以原始文本发出去，服务端报 `invalid input syntax for type bytea`，
+  而读回来的是一个 10 字符长的假 blob，**不报任何错**。
+
+---
+
+## 7. 事务，以及"事务里不重试"
+
+```cpp
+#include <db/uvcpp_db.h>
+
+uvcpp::uvcpp_db_status transfer(uvcpp::uvcpp_db_client& db) {
+  uvcpp::uvcpp_db_status st = db.begin();
+  if (uvcpp::uvcpp_db_ok(st)) {
+    st = db.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", {100, 1});
+  }
+  if (uvcpp::uvcpp_db_ok(st)) {
+    st = db.execute("UPDATE accounts SET balance = balance + ? WHERE id = 2", {100});
+  }
+  if (!uvcpp::uvcpp_db_ok(st)) {
+    db.rollback();     // 出错就回滚
+    return st;
+  }
+  return db.commit();
+}
+```
+
+* 三家都是同一个形状，**不嵌套**：重复 `begin()` 由后端报错（不在这里拦，
+  因为 MySQL 会静默提交前一个 —— 拦了反而给出一种它做不到的保证）。
+* `reconnect()` 在事务里调 = **放弃那个事务**。
+* **MySQL 的死锁/锁等待超时在事务里不重试。** InnoDB 报 `ER_LOCK_DEADLOCK`
+  （1213）时会**回滚整个事务** —— 那时重放这一条语句只会写进一个"已经不在事务
+  里"的连接，调用方以为还在交易中，实际每条语句都在自动提交。所以那种情况下
+  驱动把错误交回调用方，由它决定要不要**重做整笔交易**。事务外（单条语句）才
+  重试，退避 50/100/200 ms，共 3 次。这条规矩写在驱动里，也有注释说明为什么。
+
+---
+
+## 8. 类型与精度：`DECIMAL` 的钱会丢
+
+| 本模块 | MySQL | SQLite | PostgreSQL |
+|---|---|---|---|
+| `NIL` | NULL | NULL | NULL |
+| `INT64` / `UINT64` | BIGINT 及以下整型 | INTEGER | int2/int4/int8 |
+| `DOUBLE` | FLOAT / DOUBLE / **DECIMAL** | REAL | float4 / float8 / **numeric** |
+| `BOOL` | TINYINT(1) / BOOL | INTEGER(0/1) | bool |
+| `TEXT` | CHAR / VARCHAR / TEXT | TEXT | text / varchar / char |
+| `BLOB` | BLOB | BLOB | bytea |
+| `DATE` / `TIME` / `DATETIME` | DATE / TIME / DATETIME | —（文本） | date / time / timestamp |
+
+**`DECIMAL` / `NUMERIC` 读进来是 `double`** —— 金额在那一步就丢精度了
+（`0.1 + 0.2` 那件事）。本模块没有定点类型，所以：
+
+> **要精确的钱就用 `TEXT` 存字符串**（或存最小货币单位的整数）。
+> 三个后端都支持这条路，而且 SQLite 上它本来就是唯一的路。
+
+这条不是"设计缺陷说明"，是**取值建议**：反过来做（把 `DECIMAL` 读成 double
+再算账）在测试里也不会红，只会在对账时差一分钱。
+
+---
+
+## 9. 跨后端共用套件抓到过的四处
+
+这一节是"共用套件为什么值这个钱"的账本。四条都是**共用套件在真服务端上抓出来
+的**，不是设计时想到的；抓出来之前，每一条都是"看着没事"。
+
+1. **`TEXT` 列读回来是个 blob。** MySQL 里 `TEXT` 与 `BLOB` 在协议上是**同一个
+   类型标签**（服务端两个都报 `MYSQL_TYPE_BLOB` = 252），唯一的区别是
+   `charsetnr`：`TEXT` 报列自己的排序规则（utf8mb4 上是 255），`BLOB` 报 63。
+   驱动早先按类型标签一刀切，于是 `s_val TEXT` 读出来是 blob、`to_json()` 打出
+   `[blob 5 bytes]`，而**不报任何错**。本机实测：
+
+   ```
+   s_val TEXT          -> type=252 charsetnr=255
+   b_val BLOB          -> type=252 charsetnr=63
+   v_val VARBINARY(32) -> type=253 charsetnr=63
+   ```
+
+   顺带一条反面教训：判据也**不能**写成"`charsetnr == 63` 就是字节" ——
+   `DECIMAL` / `INT` 这些**数值**列的 `charsetnr` 同样是 63，那样一刀切的话
+   金额列会以 blob 抛出来，而 `to_double()` 得到 0。两层判据缺一不可。
+
+2. **多给参数被静默忽略。** `mysql_stmt_bind_param` 按服务端报的
+   `param_count` 读绑定数组，多给的元素**直接不看** —— `WHERE id = ?` 配两个
+   参数照常执行、照常返回 `OK`。套件里那条"多给参数 → `BIND_FAILED`"当初拿到
+   的是 `ok`，于是补上 `mysql_stmt_param_count` 的显式校验。
+
+3. **少给参数被当成语法错。** `WHERE id = ?` 配 0 个参数时，驱动会走"空参数 =
+   裸通道"那条路，服务端把 `?` 当语法错报回来（1064）—— 于是"参数个数不对"
+   表现成"SQL 写错了"。现在的判据是：**SQL 里出现 `?` 就走预处理通道**，
+   让 `param_count` 做权威判断（字面量里的 `?` 也走那条路，代价只是这一次用
+   二进制协议，结果一样）。
+
+4. **`PREPARE_FAILED` 在裸通道上丢过。** 上面两条修完之后还剩一条：语法错与
+   表不存在在 MySQL/PG 的裸通道上都报 `EXEC_FAILED`，而 SQLite 报
+   `PREPARE_FAILED`。裸通道是服务端一步做完"解析 + 执行"，两种错从同一个出口
+   回来，所以驱动得按错误号分开：MySQL 看 `ER_PARSE_ERROR`(1064) /
+   `ER_NO_SUCH_TABLE`(1146) / `ER_BAD_FIELD_ERROR`(1054) 等，PostgreSQL 看
+   `SQLSTATE` 的 **42 类**（`syntax_error_or_access_rule_violation`）——
+   两个例外是 `42P02`（`$1` 没给参数）与 `08P01`（Bind 参数个数对不上），
+   它们归 `BIND_FAILED`，不是 `PREPARE_FAILED`。
+
+还有一条不是"抓到的"、但值得记：**PostgreSQL 的 `BYTEA` 两头都要编解码**
+（见 [§6](#6-三个后端钉住的一致与如实列出的三处不同)），早先是"写进去报错、
+读回来不报错但内容错"——后者更坏。
+
+---
+
+## 10. 本地怎么跑
+
+三条用例在 `tests/functional/`：`db_sqlite_func.cpp`（**不需要服务端**，永远真
+跑）、`db_mysql_func.cpp`、`db_pgsql_func.cpp`。共用套件在 `db_suite.h`。
+
+```bash
+cmake -S . -B build-db3 -DUVCPP_BUILD_TESTS=ON -DUVCPP_ENABLE_DB=ON
+cmake --build build-db3 -j"$(nproc)"
+
+# SQLite：什么都不用给
+./build-db3/tests/functional/test_db_sqlite_func
+
+# MySQL / PostgreSQL：给一个**一次性**的库的连接串
+export UVCPP_DB_TEST_MYSQL_URL='mysql://root@127.0.0.1:3306/uvcpp_test'
+export UVCPP_DB_TEST_PGSQL_URL='postgresql://uvcpp@127.0.0.1:5432/uvcpp_test'
+./build-db3/tests/functional/test_db_mysql_func
+./build-db3/tests/functional/test_db_pgsql_func
+```
+
+**套件里有 `DROP TABLE` / `CREATE TABLE`，URL 必须指向一个一次性的库。**
+用例自己的表名都是 `uvcpp_db_*` 前缀，但别拿生产库试。
+
+| 环境变量 | 作用 |
+|---|---|
+| `UVCPP_DB_TEST_MYSQL_URL` | MySQL 用例的连接串。没有它 → 退出码 **3**（未判定） |
+| `UVCPP_DB_TEST_PGSQL_URL` | PostgreSQL 用例的连接串，同上 |
+| `UVCPP_DB_TEST_REQUIRE` | 设了它，缺 URL 就是**失败**（退出码 1），不是跳过 |
+
+退出码 3 是照本仓 gate 脚本的规矩来的：**「未判定」不是「通过」**。ctest 那边用
+`SKIP_RETURN_CODE 3` 把它报成 `***Skipped` —— 与 `Passed` 在日志里是两个词。
+CI 上服务容器都起了还缺 URL，说明是配置写错了，所以 CI 里额外设
+`UVCPP_DB_TEST_REQUIRE=1`，那时跳过就变成红。
+
+不设 `UVCPP_DB_TEST_REQUIRE` 时，本地没起 MySQL 也能得到一句诚实的
+`***Skipped`，而不是一条假绿。
+
+---
+
+## 11. 没做的（如实列出）
+
+* **连接池。** 一个 client 一个连接。要并发就开多个 client，池子还没写。
+* **异步 / 协程封装。** 这一层是同步底座（见 [§3](#3-公开面)）。往
+  `uv_queue_work` 上挂一层是后续的事。
+* **ORM 那套东西。** 没有模型、没有迁移、没有关系映射、没有查询构造器 ——
+  它是"能安全地执行 SQL 并拿到表"，不是 ActiveRecord。命名上叫 `db` 而不是
+  `orm`，就是因为后面那半句不打算假装。
+* **准备语句缓存 / 语句复用。** 每次 `query`/`execute` 都是新的
+  `mysql_stmt_prepare` / `PQexecParams`。省掉它换来的是"状态不跨语句泄漏"，
+  这个取舍是有意的；要批量插入时请用事务包住循环。
+* **`DECIMAL` 的定点类型**（见 [§8](#8-类型与精度decimal-的钱会丢)）。
+* **SQLite 上的日期时间语义。** 它是文本，`date()` / `datetime()` 这些函数能用，
+  但本模块不替你做时区换算 —— 存进去什么字符串，取出来就是什么字符串。
+* **`UINT64` 超过 `INT64_MAX` 的往返**：MySQL 有 unsigned 绑定、SQLite 会拒绝、
+  PostgreSQL 的 `int8` 是有符号的。跨后端要存那么大的数请用 `TEXT`。

@@ -63,7 +63,7 @@ jobs:
           # **发版那一刻** —— 而 release.yml 的 msvc-x64 / msvc-arm64 两条腿都开着
           # 它。这一格就是那两条腿在 push/PR 阶段的替身。
           #
-          # pugixml 走 FetchContent（根 `CMakeLists.txt:1186`，`GIT_TAG` 钉在
+          # pugixml 走 FetchContent（根 `CMakeLists.txt:1312`，`GIT_TAG` 钉在
           # `PUGIXML_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
           # 的装包需求与 `web` 逐字相同。
           # 四个门禁串见 doc/ci-guide.md §5。

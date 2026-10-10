@@ -215,7 +215,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
                 "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/",
-                "capi/")
+                "capi/", "db/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -289,7 +289,7 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/", "nghttp3/")
 # `quic/` 属于**第一档**（"宏为 0 时类会消失"）：本模块的**四个**公开头整段套在
 # `#if UVCPP_QUIC_ENABLE` 里（另外两个头 `uvcpp_quic_ngtcp2.h` 与
 # `uvcpp_quic_session.h` 是私有的，不进包、文档也不该引它们）。模块关掉时
-# `CMakeLists.txt:2092` 的 install 规则确实不装它们，
+# `CMakeLists.txt:2301-2301` 的 install 规则确实不装它们，
 # 但那条只挡住 `cmake --install`：`package_release.py` 是从 `src/` 逐目录拷头的、
 # 与开关无关（同上面 wsdl 那段记的形状，实测过 —— 一份 `UVCPP_ENABLE_QUIC=OFF`
 # 的包里有 `include/quic/` 四个头，而没有 `uvcpp_quic_ngtcp2.h`）。所以在**发布包**
@@ -315,6 +315,7 @@ MODULE_REQ = {
     "wsdl/": "UVCPP_WSDL_ENABLE",
     "quic/": "UVCPP_QUIC_ENABLE",
     "http3/": "UVCPP_HTTP3_ENABLE",
+    "db/": "UVCPP_DB_ENABLE",
 }
 
 # 发布包里**永远关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。

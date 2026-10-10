@@ -92,6 +92,34 @@ if(NOT UVCPP_ENABLE_HTTP3)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*http3[^/]*\.cpp$")
 endif()
 
+# Exclude database tests when the db module is not enabled.
+# 命名约定：**文件名里含 `db` 的用例就需要 db 模块**（`db_sqlite_func.cpp` 等）。
+# `[^/]*` 前缀是必须的 —— `file(GLOB)` 给的是全路径，写 `^db_` 永远匹配不上
+# （h2 那条踩过，注释在上面）。db 模块默认 **OFF**，所以这条过滤器默认是
+# **生效**的：不摘的话，那几条用例会在 `UVCPP_DB_ENABLE=0`（公开头整个落在
+# `#if` 外面）的树上编不过 —— 而不是"跳过"，是编译失败，整个 job 红。
+if(NOT UVCPP_ENABLE_DB)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db[^/]*\.cpp$")
+endif()
+
+# 模块开着、但某一个后端没编进来时，那一条用例也要摘掉。
+#
+# 上面那条只摘"整个模块关掉"的情形。`-DUVCPP_ENABLE_DB=ON` 而没有
+# libmysqlclient 时，MySQL 后端会在配置期被降级成 OFF（普通变量 `set()`，
+# 不是 cache 写）—— 那时 `db_mysql_func.cpp` 里的 `open()` 会拿到
+# `NO_DRIVER`，用例**红**。而真相是"这个后端不在这份包里"，它该表现为
+# **用例不存在**，不是"用例失败"（`tests/functional/CMakeLists.txt` 开头那段
+# 注释里的老坑：没测过 ≠ 测过）。
+if(NOT UVCPP_ENABLE_DB_SQLITE)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_sqlite[^/]*\.cpp$")
+endif()
+if(NOT UVCPP_ENABLE_DB_MYSQL)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_mysql[^/]*\.cpp$")
+endif()
+if(NOT UVCPP_ENABLE_DB_PGSQL)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_pgsql[^/]*\.cpp$")
+endif()
+
 foreach(test_src ${FUNC_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
   string(REGEX REPLACE "[^a-zA-Z0-9_]" "_" exe_name "test_${test_name}")
@@ -167,3 +195,43 @@ if(TARGET test_web_app_multiloop_func)
 endif()
 
 
+
+# ---------------------------------------------------------------------------
+# 数据库模块的用例
+# ---------------------------------------------------------------------------
+
+# 静态库构建下，db 用例必须**自己**把客户端库链上。
+#
+# 根 CMakeLists 给库挂的是 `PRIVATE $<BUILD_INTERFACE:${_db_lib}>`：共享库上
+# libsqlite3 / libmysqlclient / libpq 会以 `DT_NEEDED` 跟着走，用例什么都不用
+# 做；但静态库上那一条**不会**传给消费者（`$<BUILD_INTERFACE:>` 就是这么设的，
+# 与 zlib / nghttp2 那几处同一个形状，见 `doc/db-guide.md` 里记的那个已知缺口）。
+# 不补这一句，`-DUVCPP_BUILD_SHARED=OFF -DUVCPP_ENABLE_DB=ON` 那条配置下这里的
+# 每条 db 用例都是 `undefined reference to sqlite3_open_v2`。
+if(UVCPP_ENABLE_DB AND UVCPP_DB_LINK_LIBS)
+  foreach(_db_src ${FUNC_SOURCES})
+    get_filename_component(_db_name ${_db_src} NAME_WE)
+    if(_db_name MATCHES "db")
+      target_link_libraries(test_${_db_name} PRIVATE ${UVCPP_DB_LINK_LIBS})
+    endif()
+  endforeach()
+endif()
+
+# MySQL / PostgreSQL 那两条要一个**真的服务端**，所以它们自己按环境变量决定
+# 跑还是判"未判定"（退出码 3）。ctest 得知道 3 是什么意思，否则"这台机器上
+# 没有 MySQL"会显示成 `Failed` —— 而把它改成 `return 0` 又会显示成 `Passed`，
+# 那是本仓最忌讳的那种绿：**没测过**长得和**测过了**一模一样。
+#
+# `SKIP_RETURN_CODE` 是 ctest 自带的那一格（3.0 起），报出来的是
+# `***Skipped`，与 `Passed` 在日志里是两个词。
+#
+# SQLite 那条**不设**这个属性：它不需要服务端，永远真跑。给它也设上的话，
+# 将来某条路径误返回 3 就会从"红"退化成"跳过"。
+#
+# CI 上还会额外设 `UVCPP_DB_TEST_REQUIRE=1`：那时缺 URL 是**失败**（退出码 1），
+# 不是跳过 —— 服务容器都起了还跳过，说明配置写错了，必须红。
+foreach(_db_remote test_db_mysql_func test_db_pgsql_func)
+  if(TARGET ${_db_remote})
+    set_tests_properties(${_db_remote} PROPERTIES SKIP_RETURN_CODE 3)
+  endif()
+endforeach()

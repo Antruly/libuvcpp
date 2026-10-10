@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1047-1055`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1173-1181`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
@@ -54,7 +54,7 @@ VERSION = _header_version()
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
 MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2",
-           "wsdl", "quic", "http3", "capi"]
+           "wsdl", "quic", "http3", "capi", "db"]
 
 # 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
 # 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
@@ -92,7 +92,14 @@ MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "h
 PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
                    "uvcpp_quic_ngtcp2.h", "uvcpp_quic_session.h",
                    "uvcpp_h3_nghttp3.h", "uvcpp_h3_session.h",
-                   "uvcpp_c_internal.h"}
+                   "uvcpp_c_internal.h",
+                   # db 模块的私有头：三个后端都靠它做接口，但它是**内部契约**
+                   # （`uvcpp_db_driver` / `uvcpp_db_url` / `uvcpp_db_make_*`），
+                   # 摆出去等于承诺一份没有任何稳定性保证的 ABI。
+                   # 与 `CMakeLists.txt` 的
+                   # `list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_driver\\.h$")`
+                   # 是一对，两处必须一起改。
+                   "uvcpp_db_driver.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），

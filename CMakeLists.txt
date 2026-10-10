@@ -137,6 +137,28 @@ option(UVCPP_ENABLE_HTTP3
 option(UVCPP_ENABLE_CAPI
   "Export the C ABI surface (src/capi/, pure C headers for C#/FFI). Needs UVCPP_BUILD_NET=ON and UVCPP_BUILD_WEB=ON" OFF)
 
+# 数据库模块（`src/db/`）—— 一个连接 = 一个 `uvcpp_db_client`，底下挂
+# SQLite / MySQL / PostgreSQL 三个后端。
+#
+# **默认 OFF**：它是唯一一个**必需第三方客户端库**的模块（libsqlite3 /
+# libmysqlclient / libpq），而这三样在 CI 与使用者机器上的位置千差万别。
+# 官方发布包与 `full` 那一格会**显式打开**它 —— "预编译包带数据库模块"是
+# 一条发布判据，不是默认行为（见 RELEASE / .github/workflows/）。
+#
+# 它不依赖 net / web 任何一层，也不进事件循环：数据库客户端库
+# （libmysqlclient / libpq / sqlite3）全是**阻塞** API，本模块就是一层薄的同步
+# 访问层，异步封装该建在它**上面**（`uv_queue_work`），而不是把它包进互斥锁
+# 再从别的线程碰事件循环。理由写在 `src/db/uvcpp_db.h` 的类注释里。
+#
+# 三个后端各有一个子开关，**默认都是 ON**（在主开关打开时）—— 它们的语义是
+# "找得到就编、找不到就**降级并出声**"，不是"我要不要用它"。想明确裁掉哪一个
+# 就在这里写 `=OFF`，那时它连"找不到"的警告都不会有。
+option(UVCPP_ENABLE_DB
+  "Enable the database module (src/db/): one uvcpp_db_client per connection, over SQLite/MySQL/PostgreSQL" OFF)
+option(UVCPP_ENABLE_DB_SQLITE "Build the SQLite backend of the db module (needs libsqlite3)" ON)
+option(UVCPP_ENABLE_DB_MYSQL  "Build the MySQL backend of the db module (needs libmysqlclient)" ON)
+option(UVCPP_ENABLE_DB_PGSQL  "Build the PostgreSQL backend of the db module (needs libpq)" ON)
+
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 
@@ -772,6 +794,101 @@ if(UVCPP_ENABLE_CAPI AND NOT UVCPP_BUILD_WEB)
   set(UVCPP_ENABLE_CAPI OFF)
 endif()
 
+# =========================================================================
+# 数据库模块 —— 三个后端的发现与静默降级
+# =========================================================================
+# 形状与上面 QUIC / HTTP3 / CAPI 那几段相同：`set(... OFF)` 是**普通变量**、
+# 不是 cache 写，所以 `CMakeCache.txt` 里仍然是 `UVCPP_ENABLE_DB_MYSQL:BOOL=ON`，
+# 只 grep cache 会得到一个假绿 —— 下面那句 `Including db module in build` 与
+# `db: ... 后端已关闭` 那几行才是可观测面（CI 与测试都 grep 它们）。
+#
+# 位置同样是 load-bearing 的：必须在 `_uvcpp_literal01` 那一批**之前**（晚了
+# 生成头里写 1、编译定义写 0，第一个 TU 就 `#error`），也在下面 `DB_SRC_FILES`
+# 那个 GLOB 之前。
+#
+# 为什么是"找不到就降级"而不是"找不到就 FATAL_ERROR"：这三个客户端库在 CI 与
+# 使用者机器上的有无**不可预测**（SQLite 几乎到处都有，libmysqlclient 与 libpq
+# 常要单独装），而"我只想用 SQLite"是完全正当的用法。所以：
+#   * 单个后端找不到 → 出声 + 关掉**那一个**，其余照编；
+#   * 三个都关掉了   → 出声 + 关掉**整个模块** —— 那样的库能编出一个
+#                      `uvcpp_db_client`，但它谁也打不开，属于"能配置、跑不起来"
+#                      的组合，与 nghttp2 / quic / http3 那几处是同一条纪律。
+#
+# 依赖是怎么找的：SQLite 与 PostgreSQL 用 CMake 自带的 Find 模块
+# （`FindSQLite3` / `FindPostgreSQL`，两个模块在 CMake 3.14+ 都提供带命名空间的
+# 导入目标）；MySQL 没有自带模块，走 `find_path` + `find_library`。
+# 所有候选都按 CMake 的常规搜索路径找，所以**指定位置不需要新开关**：
+#     cmake -DCMAKE_PREFIX_PATH=/opt/mysql -DUVCPP_ENABLE_DB=ON ..
+# 或者直接给 `-DUVCPP_DB_MYSQL_INCLUDE_DIR=... -DUVCPP_DB_MYSQL_LIBRARY=...`
+# （`find_path` / `find_library` 会尊重预先设好的同名 cache 变量）。
+set(UVCPP_DB_INCLUDE_DIRS "")
+set(UVCPP_DB_LINK_LIBS "")
+
+if(UVCPP_ENABLE_DB)
+  # ---- SQLite ----
+  if(UVCPP_ENABLE_DB_SQLITE)
+    find_package(SQLite3 QUIET)
+    if(SQLite3_FOUND)
+      list(APPEND UVCPP_DB_LINK_LIBS SQLite::SQLite3)
+      message(STATUS "db: SQLite 后端开（${SQLite3_VERSION}）")
+    else()
+      message(WARNING
+        "UVCPP_ENABLE_DB_SQLITE=ON 但找不到 libsqlite3（要 sqlite3.h 与 "
+        "libsqlite3）。已强制关闭这个后端 —— 其余后端照编。")
+      set(UVCPP_ENABLE_DB_SQLITE OFF)
+    endif()
+  endif()
+
+  # ---- MySQL ----
+  if(UVCPP_ENABLE_DB_MYSQL)
+    find_path(UVCPP_DB_MYSQL_INCLUDE_DIR
+      NAMES mysql.h
+      PATH_SUFFIXES mysql include/mysql)
+    find_library(UVCPP_DB_MYSQL_LIBRARY
+      NAMES mysqlclient libmysqlclient mysqlclient_r mariadb)
+    if(UVCPP_DB_MYSQL_INCLUDE_DIR AND UVCPP_DB_MYSQL_LIBRARY)
+      list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_MYSQL_INCLUDE_DIR}")
+      list(APPEND UVCPP_DB_LINK_LIBS "${UVCPP_DB_MYSQL_LIBRARY}")
+      message(STATUS "db: MySQL 后端开（${UVCPP_DB_MYSQL_LIBRARY}）")
+    else()
+      message(WARNING
+        "UVCPP_ENABLE_DB_MYSQL=ON 但找不到 libmysqlclient（要 mysql.h 与 "
+        "libmysqlclient）。已强制关闭这个后端 —— 其余后端照编。"
+        "指定位置用 -DCMAKE_PREFIX_PATH=… 或 -DUVCPP_DB_MYSQL_INCLUDE_DIR=… "
+        "-DUVCPP_DB_MYSQL_LIBRARY=…。")
+      set(UVCPP_ENABLE_DB_MYSQL OFF)
+    endif()
+  endif()
+
+  # ---- PostgreSQL ----
+  if(UVCPP_ENABLE_DB_PGSQL)
+    find_package(PostgreSQL QUIET)
+    if(PostgreSQL_FOUND)
+      list(APPEND UVCPP_DB_LINK_LIBS PostgreSQL::PostgreSQL)
+      message(STATUS "db: PostgreSQL 后端开（libpq ${PostgreSQL_VERSION_STRING}）")
+    else()
+      message(WARNING
+        "UVCPP_ENABLE_DB_PGSQL=ON 但找不到 libpq（要 libpq-fe.h 与 libpq）。"
+        "已强制关闭这个后端 —— 其余后端照编。指定位置用 -DCMAKE_PREFIX_PATH=… "
+        "或 -DPostgreSQL_INCLUDE_DIR=… -DPostgreSQL_LIBRARY=…。")
+      set(UVCPP_ENABLE_DB_PGSQL OFF)
+    endif()
+  endif()
+
+  # ---- 三个都关掉 ⇒ 整个模块关掉（见上面那段理由）----
+  if(NOT UVCPP_ENABLE_DB_SQLITE AND NOT UVCPP_ENABLE_DB_MYSQL AND
+     NOT UVCPP_ENABLE_DB_PGSQL)
+    message(WARNING
+      "UVCPP_ENABLE_DB=ON 但 SQLite / MySQL / PostgreSQL 三个后端一个都没成 —— "
+      "这样的库会编出一个谁也打不开的 uvcpp_db_client。已强制关闭 db 模块。")
+    set(UVCPP_ENABLE_DB OFF)
+  endif()
+endif()
+
+if(UVCPP_ENABLE_DB)
+  list(REMOVE_DUPLICATES UVCPP_DB_INCLUDE_DIRS)
+endif()
+
 if(UVCPP_ENABLE_HTTP3)
   # 这两条路径在 `function` 作用域**外面**先定一份：nghttp3_static 不给
   # build-interface 的 include 目录（见下面那段），我们的目标必须自己把它加上，
@@ -1044,6 +1161,15 @@ if(UVCPP_ENABLE_CAPI)
   source_group("capi" FILES ${CAPI_SRC_FILES})
 endif()
 
+# db module source_group
+# CONFIGURE_DEPENDS 的理由与 capi/quic/http3 那几段逐字相同。同一个
+# DB_SRC_FILES 还在下面被用来做"空模块"判据。
+if(UVCPP_ENABLE_DB)
+  file(GLOB DB_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/db/*.h" "${CMAKE_SOURCE_DIR}/src/db/*.cpp")
+  source_group("db" FILES ${DB_SRC_FILES})
+endif()
+
 # read version from header (src/uvcpp/uvcpp_version.h)
 file(READ "${CMAKE_SOURCE_DIR}/src/uvcpp/uvcpp_version.h" UVCPP_VERSION_H)
 string(REGEX MATCH "#define[ \t]+UVCPP_VERSION_MAJOR[ \t]+([0-9]+)" _ ${UVCPP_VERSION_H})
@@ -1262,6 +1388,25 @@ else()
   message(STATUS "C ABI disabled (UVCPP_CAPI_ENABLE=0)")
 endif()
 
+if(UVCPP_ENABLE_DB)
+  add_compile_definitions(UVCPP_DB_ENABLE=1)
+  message(STATUS "Database module enabled (UVCPP_DB_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_DB_ENABLE=0)
+  message(STATUS "Database module disabled (UVCPP_DB_ENABLE=0)")
+endif()
+# 三个后端宏**不受主开关守卫**：主开关关掉时它们照样按"这个后端编不编"取 0。
+# 写成 `if(UVCPP_ENABLE_DB) ... else 三个都 0` 的话，`uvcpp_db_factory.cpp` 里
+# 那句 `#if UVCPP_DB_SQLITE_ENABLE` 在模块关掉时是**未定义标识符**（求值为 0，
+# 结果碰巧一样）—— 碰巧一样的东西不该靠碰巧。
+foreach(_uvcpp_db_backend SQLITE MYSQL PGSQL)
+  if(UVCPP_ENABLE_DB_${_uvcpp_db_backend})
+    add_compile_definitions(UVCPP_DB_${_uvcpp_db_backend}_ENABLE=1)
+  else()
+    add_compile_definitions(UVCPP_DB_${_uvcpp_db_backend}_ENABLE=0)
+  endif()
+endforeach()
+
 if(UVCPP_ENABLE_TRY_WRITE)
   add_compile_definitions(UVCPP_TRY_WRITE_ENABLE=1
                           UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES})
@@ -1456,6 +1601,27 @@ else()
   endforeach()
 endif()
 
+# 根据 UVCPP_ENABLE_DB 排除 db 模块。形状与上面 capi 那段逐字相同 —— 包括
+# 为什么两个列表都要排（SOURCES 管编不编，HEADERS 管会不会进安装/导出）。
+if(NOT UVCPP_ENABLE_DB)
+  message(STATUS "Excluding db module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/db/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/db/")
+else()
+  # CI 要 grep 这一行，理由与 quic/http3/capi 那几句相同（单个后端的降级是
+  # 普通变量 set()，cache 里仍然是 ON）。
+  message(STATUS "Including db module in build (database integration)")
+
+  # 「开了 DB 但目录是空的」必须当场红，不能绿 —— 与 capi 那一格同一个理由：
+  # 一个空的 src/db/ 会编出一个"开关是 ON、一行数据库代码都没有"的库，而
+  # cache、configure 日志、构建、测试**全绿**。
+  if(NOT DB_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_ENABLE_DB=ON 但 src/db/ 下一个文件都没有 —— 这个配置会编出一个"
+      "不含任何数据库代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
+endif()
+
 # Create uvcpp targets according to user selection.
 # Shared target
 if(UVCPP_BUILD_SHARED)
@@ -1617,6 +1783,10 @@ _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
 _uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
 _uvcpp_literal01(UVCPP_HTTP3_ENABLE     UVCPP_ENABLE_HTTP3)
 _uvcpp_literal01(UVCPP_CAPI_ENABLE      UVCPP_ENABLE_CAPI)
+_uvcpp_literal01(UVCPP_DB_ENABLE        UVCPP_ENABLE_DB)
+_uvcpp_literal01(UVCPP_DB_SQLITE_ENABLE UVCPP_ENABLE_DB_SQLITE)
+_uvcpp_literal01(UVCPP_DB_MYSQL_ENABLE  UVCPP_ENABLE_DB_MYSQL)
+_uvcpp_literal01(UVCPP_DB_PGSQL_ENABLE  UVCPP_ENABLE_DB_PGSQL)
 _uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
 _uvcpp_literal01(UVCPP_UDP_GSO_ENABLE   UVCPP_ENABLE_UDP_GSO)
 
@@ -1680,6 +1850,10 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_QUIC_ENABLE=${UVCPP_QUIC_ENABLE}
       UVCPP_HTTP3_ENABLE=${UVCPP_HTTP3_ENABLE}
       UVCPP_CAPI_ENABLE=${UVCPP_CAPI_ENABLE}
+      UVCPP_DB_ENABLE=${UVCPP_DB_ENABLE}
+      UVCPP_DB_SQLITE_ENABLE=${UVCPP_DB_SQLITE_ENABLE}
+      UVCPP_DB_MYSQL_ENABLE=${UVCPP_DB_MYSQL_ENABLE}
+      UVCPP_DB_PGSQL_ENABLE=${UVCPP_DB_PGSQL_ENABLE}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
       UVCPP_UDP_GSO_ENABLE=${UVCPP_UDP_GSO_ENABLE}
@@ -1878,6 +2052,41 @@ if(UVCPP_ENABLE_WSDL)
       # 用上游自己承诺的别名 `pugixml::pugixml`，而不是 `pugixml-static` 这个
       # 库目标名 —— 别名是它对外的稳定接口，目标名漂过（nghttp2 那次同名缺陷）。
       target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:pugixml::pugixml>)
+    endif()
+  endforeach()
+endif()
+
+# =========================================================================
+# 数据库模块依赖链接 — libsqlite3 / libmysqlclient / libpq
+# =========================================================================
+# PRIVATE + `$<BUILD_INTERFACE:>`：
+#
+# * **include 目录 PRIVATE**（下面那条 `target_include_directories`）：公开头
+#   （`db/uvcpp_db*.h`）一个字都不 include 第三方的头 —— 三个后端都是 pimpl，
+#   `sqlite3.h` / `mysql.h` / `libpq-fe.h` 只出现在各自的 .cpp 里。所以使用者
+#   既不需要它们的 include，也不该被动继承一份绝对路径。
+#
+# * **链接 PRIVATE**：`install(EXPORT uvcppTargets)` 要求导出集里每个非 IMPORTED
+#   目标也在导出集里，而 `SQLite::SQLite3` / `PostgreSQL::PostgreSQL` 是
+#   find_package 造出来的导入目标、`UVCPP_DB_MYSQL_LIBRARY` 是一个**绝对路径**
+#   —— 两者直接写进 INTERFACE 都会让 `install(EXPORT)` 在 generate 阶段就失败
+#   （绝对路径则是能装出去但搬到别的机器就断）。包上之后本工程内照常传播，
+#   导出里被剥成空。
+#
+# * **已知缺口（与 zlib 那处同形，本次不动）**：静态库（`uvcpp_a` /
+#   `uvcpp_a_s`）的使用者要自己把 libsqlite3/libmysqlclient/libpq 链上 ——
+#   导出集里没有这三样。这是**故意**的取舍：把绝对路径写进导出集比缺一条
+#   target_link_libraries 更难查（后者是链接期一条 undefined reference，
+#   前者是搬到别的机器才断）。`doc/db-guide.md` 里写了该怎么办。
+if(UVCPP_ENABLE_DB)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      if(UVCPP_DB_INCLUDE_DIRS)
+        target_include_directories(${_tgt} PRIVATE ${UVCPP_DB_INCLUDE_DIRS})
+      endif()
+      foreach(_db_lib ${UVCPP_DB_LINK_LIBS})
+        target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:${_db_lib}>)
+      endforeach()
     endif()
   endforeach()
 endif()
@@ -2142,6 +2351,24 @@ foreach(_uvcpp_capi_base ${UVCPP_CAPI_DISABLED})
 endforeach()
 if(CAPI_HEADER_FILES AND UVCPP_ENABLE_CAPI)
   install(FILES ${CAPI_HEADER_FILES} DESTINATION include/capi)
+endif()
+
+# src/db/ —— 数据库模块。公开面是 `uvcpp_db_client`（一个连接一个对象）加上
+# 四个值类型（status / value / row+table / params），装到 `include/db/`，
+# 与别的模块同一条流水线。
+#
+# `uvcpp_db_driver.h` 是**私有**头：里面是连接串解析、驱动虚基类与三个工厂函数
+# —— 按定义就是实现细节（使用者拿到的是 `uvcpp_db_client`，不是驱动），而且
+# 它一旦装出去，"驱动接口可以随便改"这句话就不成立了。三个后端的 .cpp 与
+# `uvcpp_db_factory.cpp` 都带它，所以它必须留在源树里。
+#
+# **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
+# 那个脚本自己按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，
+# `package_release.py` 打出来的包里照样会带上它。
+file(GLOB DB_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/db/*.h")
+list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_driver\\.h$")
+if(DB_HEADER_FILES AND UVCPP_ENABLE_DB)
+  install(FILES ${DB_HEADER_FILES} DESTINATION include/db)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too

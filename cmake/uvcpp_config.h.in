@@ -95,6 +95,37 @@
 #  define UVCPP_CAPI_ENABLE @UVCPP_CAPI_ENABLE@
 #endif
 
+#if defined(UVCPP_DB_ENABLE) && (UVCPP_DB_ENABLE != @UVCPP_DB_ENABLE@)
+#  error "UVCPP_DB_ENABLE=@UVCPP_DB_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_ENABLE
+#  define UVCPP_DB_ENABLE @UVCPP_DB_ENABLE@
+#endif
+
+/* 三个后端宏：模块关掉时它们是 0（不是"未定义"）。写成"未定义"的话
+   `#if UVCPP_DB_SQLITE_ENABLE` 求值也是 0，结果碰巧一样 —— 而碰巧一样的东西
+   在 `-Wundef` 下会变成一条警告，且它自己说不清"这个后端是关着还是模块没编"。 */
+#if defined(UVCPP_DB_SQLITE_ENABLE) && (UVCPP_DB_SQLITE_ENABLE != @UVCPP_DB_SQLITE_ENABLE@)
+#  error "UVCPP_DB_SQLITE_ENABLE=@UVCPP_DB_SQLITE_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_SQLITE_ENABLE
+#  define UVCPP_DB_SQLITE_ENABLE @UVCPP_DB_SQLITE_ENABLE@
+#endif
+
+#if defined(UVCPP_DB_MYSQL_ENABLE) && (UVCPP_DB_MYSQL_ENABLE != @UVCPP_DB_MYSQL_ENABLE@)
+#  error "UVCPP_DB_MYSQL_ENABLE=@UVCPP_DB_MYSQL_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_MYSQL_ENABLE
+#  define UVCPP_DB_MYSQL_ENABLE @UVCPP_DB_MYSQL_ENABLE@
+#endif
+
+#if defined(UVCPP_DB_PGSQL_ENABLE) && (UVCPP_DB_PGSQL_ENABLE != @UVCPP_DB_PGSQL_ENABLE@)
+#  error "UVCPP_DB_PGSQL_ENABLE=@UVCPP_DB_PGSQL_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_PGSQL_ENABLE
+#  define UVCPP_DB_PGSQL_ENABLE @UVCPP_DB_PGSQL_ENABLE@
+#endif
+
 #if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
 #  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
 #endif
