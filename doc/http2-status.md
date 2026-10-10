@@ -39,19 +39,19 @@
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:953`）。
+  （`src/http2/uvcpp_h2_session.cpp:976`）。
 - **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
   错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
   **在飞的流一条都不动** —— GOAWAY 关的是"新流"，不是"连接"。
 - **控制帧令牌桶** `H2_CONTROL_BURST = 64` / `H2_CONTROL_REFILL_PER_SEC = 32`
-  （`src/http2/uvcpp_h2_session.cpp:55-56`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
+  （`src/http2/uvcpp_h2_session.cpp:75-76`）：SETTINGS/PING/RST/PRIORITY/WINDOW_UPDATE 不带
   业务数据，所以给它们单独一个桶；泼出去的那次以 GOAWAY(0x0b) 收尾，而不是
   NO_ERROR —— 否则对端只看到一次"正常关闭"，不知道为什么。
 - **协议白名单**：伪头按**方向**白名单（服务端收到 `:status` 即拒）、`:scheme`
   只认 `https`（接受 `http` 等于给混淆代理开后门）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
-  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:499`）。
+  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:522`）。
 - **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1387`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
@@ -312,7 +312,7 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1329`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1352`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关
