@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -75,6 +76,18 @@ void mark(const std::string& what) {
 
 #if defined(__APPLE__) || defined(__linux__)
 
+/// **临时诊断**：当前线程的 id 打出来 —— "崩在主线程（循环线程）还是 libuv 池
+/// 线程"是这一趟最要紧的一条信息。两个平台上 `pthread_t` **不是同一种类型**
+/// （macOS 是指针、Linux 是整数），所以转换方式必须分开写：上一趟就是拿
+/// `static_cast` 一条路走到底，在 macOS 上编不过。
+uintptr_t thread_bits() {
+#if defined(__APPLE__)
+  return reinterpret_cast<uintptr_t>(::pthread_self());
+#else
+  return static_cast<uintptr_t>(::pthread_self());
+#endif
+}
+
 /// **临时诊断**：SEGV / BUS / ABRT 的处理器。要回答三个问题 ——
 /// 哪个信号、出错地址是多少、**崩在哪条线程的哪一帧**。
 /// 直接 `write()` 到 fd 1：`std::cout` 的缓冲区在崩溃时救不回来，而 `write` 是
@@ -82,13 +95,13 @@ void mark(const std::string& what) {
 /// 符号名的东西 —— 诊断用，值这个风险）。
 void crash_trace(int sig, siginfo_t* info, void* /*uctx*/) {
   char buf[256];
+  // 不查 `strsignal`：macOS 的头里它挂在更严的特性开关底下，编不过比没有更糟。
   const int n = std::snprintf(
       buf, sizeof(buf),
-      "\n===== 崩溃：信号 %d (%s)，地址 %p，si_code %d，线程 %p =====\n", sig,
-      ::strsignal(sig), info != nullptr ? info->si_addr : nullptr,
+      "\n===== 崩溃：信号 %d，地址 %p，si_code %d，线程 0x%lx =====\n", sig,
+      info != nullptr ? info->si_addr : nullptr,
       info != nullptr ? info->si_code : 0,
-      reinterpret_cast<void*>(
-          static_cast<uintptr_t>(::pthread_self())));
+      static_cast<unsigned long>(thread_bits()));
   if (n > 0) {
     const ssize_t w = ::write(STDOUT_FILENO, buf, static_cast<size_t>(n));
     (void)w;
@@ -110,10 +123,12 @@ void install_crash_trace() {
   std::memset(&sa, 0, sizeof(sa));
   sa.sa_sigaction = crash_trace;
   sa.sa_flags = SA_SIGINFO;
-  ::sigemptyset(&sa.sa_mask);
+  // **不加 `::`**：macOS 的 <signal.h> 里 `sigemptyset` 是函数式宏，带 `::`
+  // 前缀宏不展开、又没有同名函数，直接编不过（上一趟就是这么撞上的第二条）。
+  sigemptyset(&sa.sa_mask);
   const int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL};
   for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); ++i) {
-    ::sigaction(sigs[i], &sa, nullptr);
+    sigaction(sigs[i], &sa, nullptr);
   }
 }
 
