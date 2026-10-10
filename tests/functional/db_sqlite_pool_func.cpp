@@ -31,10 +31,20 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
 #include <vector>
+
+// **临时诊断**（见下面 `install_crash_trace`）：macOS 上第 4 节必崩、本机怎么跑
+// 都不崩，拿一版带调用栈的崩溃报告回来定位。定位完这几行连同 `mark()` 一起拆掉。
+#if defined(__APPLE__) || defined(__linux__)
+#include <execinfo.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 #include <db/uvcpp_db.h>
 #include <db/uvcpp_db_pool.h>
@@ -56,6 +66,62 @@ void check(bool cond, const std::string& what) {
     std::cout << "  [ ok ] " << what << std::endl;
   }
 }
+
+/// **临时诊断**：把「走到哪一行了」显式打出来，且**每次都在标准输出上**。
+/// CI 那条注解只截标准输出那一块，打到别处等于没打。
+void mark(const std::string& what) {
+  std::cout << "  .... " << what << std::endl;
+}
+
+#if defined(__APPLE__) || defined(__linux__)
+
+/// **临时诊断**：SEGV / BUS / ABRT 的处理器。要回答三个问题 ——
+/// 哪个信号、出错地址是多少、**崩在哪条线程的哪一帧**。
+/// 直接 `write()` 到 fd 1：`std::cout` 的缓冲区在崩溃时救不回来，而 `write` 是
+/// 异步信号安全的（`backtrace_symbols_fd` 严格说不安全，但它是这里唯一能给出
+/// 符号名的东西 —— 诊断用，值这个风险）。
+void crash_trace(int sig, siginfo_t* info, void* /*uctx*/) {
+  char buf[256];
+  const int n = std::snprintf(
+      buf, sizeof(buf),
+      "\n===== 崩溃：信号 %d (%s)，地址 %p，si_code %d，线程 %p =====\n", sig,
+      ::strsignal(sig), info != nullptr ? info->si_addr : nullptr,
+      info != nullptr ? info->si_code : 0,
+      reinterpret_cast<void*>(
+          static_cast<uintptr_t>(::pthread_self())));
+  if (n > 0) {
+    const ssize_t w = ::write(STDOUT_FILENO, buf, static_cast<size_t>(n));
+    (void)w;
+  }
+
+  void* frames[64];
+  const int got = ::backtrace(frames, 64);
+  ::backtrace_symbols_fd(frames, got, STDOUT_FILENO);
+  const char* tail = "===== 调用栈结束 =====\n";
+  const ssize_t w2 = ::write(STDOUT_FILENO, tail, std::strlen(tail));
+  (void)w2;
+
+  ::signal(sig, SIG_DFL);
+  ::raise(sig);
+}
+
+void install_crash_trace() {
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = crash_trace;
+  sa.sa_flags = SA_SIGINFO;
+  ::sigemptyset(&sa.sa_mask);
+  const int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL};
+  for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); ++i) {
+    ::sigaction(sigs[i], &sa, nullptr);
+  }
+}
+
+#else
+
+void install_crash_trace() {}
+
+#endif  // __APPLE__ || __linux__
 
 std::string temp_dir() {
   const char* keys[] = {"TMPDIR", "TEMP", "TMP"};
@@ -288,32 +354,44 @@ int test_pool_destroyed_with_job_in_flight() {
                                loop.stop();
                              });
   check(rc == 0, "投出去了");
+  mark("投出去之后池子：size=" + std::to_string(pool->size()) +
+       " in_use=" + std::to_string(pool->in_use()) +
+       " idle=" + std::to_string(pool->idle()) +
+       " created=" + std::to_string(pool->created_total()));
 
   // 池子当场没：析构会等 work 相收完（这一条就是那段等待的见证 —— 不等的话
   // 工作线程会踩在已经释放的连接上，进程在这里就崩了，不可能走到下面）。
+  mark("① delete pool 之前");
   delete pool;
+  mark("② delete pool 回来了");
 
   uvcpp::uvcpp_timer watchdog(&loop);
+  mark("③ 看门狗建好了");
   watchdog.start(
       [&](uvcpp::uvcpp_timer*) {
         watchdog_fired.store(true);
         loop.stop();
       },
       800, 0);
+  mark("④ 看门狗起来了，进循环");
   loop.run(UV_RUN_DEFAULT);
+  mark("⑤ 循环回来了");
 
   check(watchdog_fired.load(), "池子没了之后没有任何东西会停这条循环（回调被抑制）");
   check(calls.load() == 0, "池子没了 ⇒ 回调不被调（存活凭证那套），实得 " +
                                std::to_string(calls.load()));
 
   watchdog.stop();
+  mark("⑥ 看门狗停了，开始排空");
   uvcpp_test::drain(&loop);
+  mark("⑦ 这一节走到了头");
   return 0;
 }
 
 }  // namespace
 
 int main() {
+  install_crash_trace();  // **临时诊断**，定位完拆掉
   g_path = temp_dir() + "/uvcpp-db-pool.db";
   g_url = "sqlite://" + g_path;
 
