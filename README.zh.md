@@ -26,12 +26,12 @@
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-x64.zip) |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-arm64.zip) |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.6.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-x64.zip) |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.6.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-arm64.zip) |
-| Linux x64 | GCC | [libuvcpp-1.6.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-x64.zip) |
-| Linux arm64 | GCC | [libuvcpp-1.6.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-arm64.zip) |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-x64.zip) · 18.3 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-arm64.zip) · 17.6 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.6.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-x64.zip) · 22.6 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.6.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-arm64.zip) · 18.4 MB |
+| Linux x64 | GCC | [libuvcpp-1.6.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-x64.zip) · 22.5 MB |
+| Linux arm64 | GCC | [libuvcpp-1.6.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-arm64.zip) · 22.7 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。

@@ -27,12 +27,12 @@ package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
 
 | Platform | Toolchain | Package |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-x64.zip) |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-arm64.zip) |
-| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.6.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-x64.zip) |
-| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.6.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-arm64.zip) |
-| Linux x64 | GCC | [libuvcpp-1.6.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-x64.zip) |
-| Linux arm64 | GCC | [libuvcpp-1.6.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-arm64.zip) |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-x64.zip) · 18.3 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.6.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-msvc-arm64.zip) · 17.6 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.6.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-x64.zip) · 22.6 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.6.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-mingw-arm64.zip) · 18.4 MB |
+| Linux x64 | GCC | [libuvcpp-1.6.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-x64.zip) · 22.5 MB |
+| Linux arm64 | GCC | [libuvcpp-1.6.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.6.0/libuvcpp-1.6.0-linux-arm64.zip) · 22.7 MB |
 
 Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
 What a package contains, and why it is laid out that way:
