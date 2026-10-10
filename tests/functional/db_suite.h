@@ -61,8 +61,19 @@ class dialect {
   virtual const char* name() const = 0;
 
   /// 第 n 个（从 **1** 数）参数的占位符。SQLite/MySQL 恒为 `?`，
-  /// PostgreSQL 是 `$n`。
+  /// PostgreSQL 是 `$n`。本模块把 SQL **原样**交给驱动，**不换算** —— 所以
+  /// 这个函数是方言的一部分，不是"调用方的偏好"。
   virtual std::string ph(size_t n) const = 0;
+
+  /// 除了 `ph()` 那种写法，这个后端还收不收 `$n`。**只有 SQLite 收**（它把
+  /// `$1` 当**命名**参数，于是 `?` 写法的 SQL 在它这儿照样能跑）；MySQL 与
+  /// PostgreSQL 都不收。默认 false。
+  ///
+  /// 它存在的理由是一条**量出来的**事实：`query("... WHERE id = ?", {1}, &t)`
+  /// 在 SQLite 上跑绿，**不**代表它在 PostgreSQL 上也行 —— 那边报
+  /// `PREPARE_FAILED`（`syntax error at end of input`）。所以"绿了"这件事得按
+  /// 后端分开说，见证见 `test_placeholder_dialect()`。
+  virtual bool accepts_dollar_placeholder() const { return false; }
 
   /// 一张"每种类型来一列"的表。`e_val` 三家的声明都必须带
   /// `NOT NULL DEFAULT ''` —— 见 `test_empty_string_is_not_null()`。
@@ -884,6 +895,72 @@ inline void test_pool(harness& h, const std::string& url) {
   h.eq_status(p2.init(url, 1, 0), uvcpp_db_status::MISUSE, "max == 0 是 MISUSE");
 }
 
+/// 16. 占位符是**方言**的 —— 本模块把 SQL **原样**交给驱动，**不换算**。
+///
+/// 这一条是整个套件里**唯一一条反向判据**：别处都是"对的写法要能跑"，这里是
+/// "**错的**写法必须失败"。为什么值得单开一条：其它组一律走 `dialect::ph()`，
+/// 它**永远**写不出错的那种写法，所以"驱动会自己把 `?` 换算成 `$1..$n`"这句话
+/// 可以在文档里活很久，而没有一个断言反对它 —— 代价由调用方付：一段在 SQLite
+/// 上跑绿的 `?`，搬到 PostgreSQL 上是 `PREPARE_FAILED`。
+///
+/// 三家实测（本机，真服务端；"另一种写法"都**带够参数**，免得报错其实来自
+/// "参数个数对不上"而不是"写法不对"）：
+///
+/// ```
+/// PG     `?`  -> prepare_failed（syntax error at end of input）
+/// PG     `$1` -> ok
+/// MySQL  `?`  -> ok
+/// MySQL  `$1` -> prepare_failed（Unknown column '$1' in 'where clause'）
+/// SQLite `?`  -> ok
+/// SQLite `$1` -> ok          <- 当**命名**参数收下，这就是那个坑
+/// ```
+inline void test_placeholder_dialect(harness& h) {
+  std::cout << "-- 占位符是方言的 --" << std::endl;
+
+  const std::string table = "uvcpp_db_ph";
+  h.db->execute("DROP TABLE IF EXISTS " + table);
+  h.ok(h.db->execute("CREATE TABLE " + table + " (id INTEGER, name TEXT)"),
+       "建占位符用例的表");
+
+  const std::string own = h.d->ph(1);
+
+  // 用**方言自己的**写法插入（PG 上这一步就是 `$1` / `$2`）。两个号都用到，
+  // 所以下面断言①取回了正确的行，也就同时证明了"编号按实参次序、从 1 起"。
+  h.ok(h.db->execute("INSERT INTO " + table + " (id, name) VALUES (" +
+                         h.d->ph(1) + ", " + h.d->ph(2) + ")",
+                     {int64_t(11), std::string("ph")}),
+       "用方言自己的写法（" + h.d->ph(1) + " / " + h.d->ph(2) + "）插入一行");
+
+  // ① 方言自己的写法：不光要能跑，还要跑**对**。
+  uvcpp_db_table t;
+  h.eq_status(h.db->query("SELECT name FROM " + table + " WHERE id = " + own,
+                          {int64_t(11)}, &t),
+              uvcpp_db_status::OK, "ph() 写法的查询成功");
+  h.check(t.row_count() == 1 && t.rows()[0][0].to_text() == "ph",
+          "ph() 写法真的取到了那一行（也顺带钉住 $n 的编号从 1 起、按实参次序）");
+
+  // ② 另一种写法：只能按后端的脾气来。**这一半才是这条用例的目的。**
+  const std::string other = (own == "$1") ? "?" : "$1";
+  const bool expect_ok = (other == "$1") && h.d->accepts_dollar_placeholder();
+
+  uvcpp_db_table t2;
+  const uvcpp_db_status st =
+      h.db->query("SELECT name FROM " + table + " WHERE id = " + other,
+                  {int64_t(11)}, &t2);
+  if (expect_ok) {
+    h.eq_status(st, uvcpp_db_status::OK,
+                "SQLite 把 `$1` 当**命名**参数收下，所以它照样能跑");
+    h.check(t2.row_count() == 1 && t2.rows()[0][0].to_text() == "ph",
+            "SQLite 用 `$1` 取回的是同一行 —— 正因如此，"
+            "**只测 SQLite 看不出写法错**");
+  } else {
+    h.eq_status(st, uvcpp_db_status::PREPARE_FAILED,
+                "另一种写法（" + other + "）必须在**准备阶段**就失败，"
+                "报 PREPARE_FAILED");
+    h.check(t2.row_count() == 0, "失败时结果集是空的（不是半个结果）");
+  }
+}
+
 /// 把上面所有组跑一遍。`url` 是已经打开好的那一个。
 inline int run_suite(const std::string& url, const dialect& d) {
   std::cout << "== 后端 " << d.name() << " ==" << std::endl;
@@ -923,6 +1000,7 @@ inline int run_suite(const std::string& url, const dialect& d) {
   test_escaping(h, serial);
   test_row_access(h, serial);
   test_export(h, types);
+  test_placeholder_dialect(h);
 
   test_factory_and_options(h, url);
 

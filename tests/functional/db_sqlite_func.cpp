@@ -36,6 +36,12 @@ class sqlite_dialect : public dialect {
 
   std::string ph(size_t) const { return "?"; }
 
+  /// SQLite 把 `$1` 当**命名**参数收下（`?` 与 `$1` 在这儿都能跑）。这是
+  /// **量出来**的，不是设计 —— 见 `test_placeholder_dialect()` 与
+  /// `doc/db-guide.md` §5。后果要说清楚：**只测 SQLite 发现不了占位符写错**，
+  /// 同一段写死 `?` 的 SQL 在 PostgreSQL 上是 `PREPARE_FAILED`。
+  bool accepts_dollar_placeholder() const { return true; }
+
   std::string serial_pk_type() const { return "INTEGER PRIMARY KEY AUTOINCREMENT"; }
 
   std::string create_types_table(const std::string& t) const {

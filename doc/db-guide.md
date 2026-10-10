@@ -511,20 +511,49 @@ C 这一侧有四条与 C++ 不同、**必须**知道的：
 
 ## 5. 参数绑定与转义
 
-**值一律走参数，SQL 文本里永远不拼接外部输入。** 占位符在公开 API 里**只有
-一种写法**：
+**值一律走参数，SQL 文本里永远不拼接外部输入。** 但**占位符是方言的一部分** ——
+本模块把 SQL **原样**交给驱动，**不换算**：
+
+| 后端 | 占位符 | 第 n 个参数 |
+|---|---|---|
+| SQLite | `?` | 按出现次序 |
+| MySQL | `?` | 按出现次序 |
+| PostgreSQL | `$1`…`$n` | `$1` = 参数表第 0 个 |
 
 ```cpp
 #include <db/uvcpp_db.h>
 
 uvcpp::uvcpp_db_status find_by_id(uvcpp::uvcpp_db_client& db,
                                   uvcpp::uvcpp_db_table& t) {
+  // SQLite / MySQL：
   return db.query("SELECT * FROM users WHERE id = ? AND name = ?", {1, "abc"}, &t);
+  // PostgreSQL 上同一条要写成 "... WHERE id = $1 AND name = $2"
 }
 ```
 
-PostgreSQL 的 `$1..$n` 由驱动**自己**换算，调用方不用管 —— 换连接串不该等于换
-SQL 写法。这条是共用套件里的 `dialect::ph()`（方言唯一的差异）钉住的。
+在 PostgreSQL 与 MySQL 上，拿错写法不会静默走偏 —— 它在**准备阶段**就报出来
+（本机对着真服务端量过，六种组合一个不漏）：
+
+| 连接 | 写法 | 结果 |
+|---|---|---|
+| PostgreSQL | `?` | `PREPARE_FAILED` —— `syntax error at end of input` |
+| PostgreSQL | `$1` | ok |
+| MySQL | `?` | ok |
+| MySQL | `$1` | `PREPARE_FAILED` —— `Unknown column '$1' in 'where clause'` |
+| SQLite | `?` | ok |
+| SQLite | `$1` | **ok** —— 这里有个坑，见下 |
+
+**SQLite 把 `$1` 当命名参数收下**（能跑通），所以**只测 SQLite 永远发现不了写法
+错**：同一段 SQL 在 PG 上必红。跨后端的代码请走共用套件的 `dialect::ph(n)`，别
+自己写死 —— 那是方言必须暴露的差异，也是
+[`tests/functional/db_suite.h`](../tests/functional/db_suite.h) 里的
+`dialect::ph()` 与 `test_placeholder_dialect()` 钉住的。
+
+**为什么驱动不做换算**：PostgreSQL 里 `?` 本身就是合法的**操作符**（jsonb / hstore
+的"键存在"），`?` 也能出现在字符串字面量和带引号的标识符里 —— 盲扫一遍会把
+**合法**的 SQL 悄悄改成语义不同的另一句。反方向同样不通：SQLite 收下 `$1`（当命名
+参数，语义与位置参数不同），所以没有哪个统一形式能安全地翻译成两家。宁可让写错
+的人**当场**拿到 `PREPARE_FAILED`，也不替他猜。
 
 * `uvcpp_db_params` 从 `{1, "a", 2.5}` 这种初始化列表构造，元素类型由
   `uvcpp_db_value` 的构造函数定；`add()` / `add_null()` 是追加式写法。
@@ -723,6 +752,13 @@ uvcpp::uvcpp_db_status transfer(uvcpp::uvcpp_db_client& db) {
 还有一条不是"抓到的"、但值得记：**PostgreSQL 的 `BYTEA` 两头都要编解码**
 （见 [§6](#6-三个后端钉住的一致与如实列出的三处不同)），早先是"写进去报错、
 读回来不报错但内容错"——后者更坏。
+
+再一条**反向**的教训，关于"套件绿了"能推出什么：**SQLite 收下 `$1`**（当命名
+参数），所以一段把 `?` 写死、又在 SQLite 上跑绿了的 SQL，拿到 PostgreSQL 上是
+`PREPARE_FAILED`。共用套件本身用 `dialect::ph()` 取占位符，**永远不会**写出错
+的那种写法 —— 也就是说这一条不是"套件抓到的"，是**套件覆盖不到**的：想过这一关
+得专门写一条"拿错写法必须失败"的用例（`db_suite.h` 的 `test_placeholder_dialect`，
+三家各跑一遍）。文档里那句"驱动会自己换算"活了很久没被发现，正是这个盲区。
 
 ---
 

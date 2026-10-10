@@ -8,9 +8,11 @@
  *
  * @code
  * uvcpp_db_table t;
- * db.query("SELECT * FROM users WHERE age > ? AND city = ?",
+ * db.query("SELECT * FROM users WHERE age > ? AND city = ?",   // `?`：SQLite/MySQL
  *          {30, "杭州"}, &t);          // initializer_list 直接当实参
  * @endcode
+ *
+ * PostgreSQL 那条连接上同样的查询要写 `age > $1 AND city = $2` —— 理由见下。
  *
  * ## 为什么坚持参数化
  *
@@ -19,9 +21,17 @@
  * 规矩不一样，于是「有参数就安全」这句话并不成立 —— 而参数化只解决**值**，
  * 表名、列名、ORDER BY 方向这些**标识符**仍然只能由代码决定。所以：
  *
- *  * 值一律走 `?`（PostgreSQL 侧本模块自己转成 `$1..$n`）；
+ *  * 值走**方言自己的**占位符 —— 本模块**原样**把 SQL 交给驱动，不换算：
+ *    SQLite / MySQL 是 `?`，PostgreSQL 是 `$1..$n`（`$1`、`$2` 依次对应参数
+ *    表里的第 0、1 个值）。共用套件里这件事由 `dialect::ph(n)` 收口；
  *  * 要拼标识符时用 `uvcpp_db_client::escape_identifier()`，且只在白名单
  *    之后调用（它的作用是加引号，不是消毒）。
+ *
+ * **为什么不换算**：PostgreSQL 里 `?` 本身就是合法的操作符（jsonb / hstore 的
+ * 「键存在」），`?` 也可以出现在字符串字面量或带引号的标识符里 —— 盲换会在
+ * **合法**的 SQL 上静默改语义。反过来 SQLite 把 `$1` 当**命名参数**收下（能跑
+ * 通，但语义与位置参数不同），所以两家的写法也没法归一。只测 SQLite 看不出这个
+ * 差异 —— 拿 `?` 去 PG 会报 `PREPARE_FAILED`（`syntax error at end of input`）。
  */
 
 #pragma once
