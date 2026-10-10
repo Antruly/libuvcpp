@@ -13,8 +13,13 @@
  *    NOT raw deflate.  This means *positive* window_bits values:
  *      gzip:    15 + 16 = 31
  *      deflate: 15       (zlib header/trailer)
- *  - Each compress/decompress call creates a fresh z_stream —
- *    no context takeover.  Safe for concurrent use.
+ *  - Every call starts from a **fresh deflate/inflate state** — no context
+ *    takeover, so each response is an independent stream.  `compress()`
+ *    reaches that state by resetting a per-thread kernel instead of building
+ *    a new one per call (a level-6 deflate kernel is ~256 KB, and allocating
+ *    that on every response is what used to dominate `json-comp`); the bytes
+ *    produced are identical either way.  Safe for concurrent use — the kernel
+ *    is thread-local, so no two threads ever share one.
  *  - Auto-detection of incoming encoding via inflateInit2(…, 47).
  */
 

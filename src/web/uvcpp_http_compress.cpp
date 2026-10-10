@@ -172,6 +172,48 @@ const std::vector<std::string>& http_compress::default_excluded_mime_types() {
 
 #include <zlib.h>
 
+namespace {
+
+// 每个线程留一份 deflate 内核，用完 `deflateReset()` 复用，而不是每请求
+// `deflateInit2()` / `deflateEnd()` 一遍。
+//
+// `deflateInit2()` 要为内核要一大块内存 —— level 6、windowBits 15 时约 256 KB
+// （两个 32 KB 窗口，加上 32 K 条目的 hash 表与 prev 链）。而这条路在**每个
+// 被压缩的响应**上都要走一遍，那块内存在请求之间不携带任何信息：`deflateReset()`
+// 之后产出的字节与刚 init 完的一份**逐字节相同**（它就是这个语义），参数一个
+// 都没变。于是每请求一次 256 KB 的分配/释放，换不来任何东西。
+//
+// 单线程下那一次分配只是几十微秒，但在**每条循环线程各来一次**的服务器上不是：
+// 256 KB 在默认的 mmap 阈值（128 KB）之上，glibc 走的是 `mmap`/`munmap`，而那条
+// 路要拿内核的地址空间锁、并且每释放一次就让其他核上的 TLB 失效一次。实测
+// `json-comp` 那条腿上，压缩把服务端吞吐从约 42 000 rps 压到约 15 800 rps ——
+// 差值远大于 deflate 本身的 55 µs（见下），那一大块就是这里的内核争用。
+//
+// 线程局部而不是全局：压缩跑在各条循环线程上，一份共享内核就得加锁，把省下来
+// 的有还回去。代价是调用过压缩的线程各常驻一份内核 —— 它只在真被用到时才分配。
+//
+// `deflateReset()` 换不了窗口参数（gzip 是 31、zlib 是 15），所以记着上一回是
+// 哪一种；换档时老老实实 end 掉再 init 一次。
+struct deflate_slot {
+  z_stream strm;
+  bool     inited;
+  int      window_bits;
+
+  deflate_slot() : inited(false), window_bits(0) {
+    std::memset(&strm, 0, sizeof(strm));
+  }
+  ~deflate_slot() {
+    if (inited) deflateEnd(&strm);
+  }
+};
+
+deflate_slot& deflate_slot_for_this_thread() {
+  static thread_local deflate_slot slot;
+  return slot;
+}
+
+}  // namespace
+
 http_compress_result http_compress::compress(const char* data, size_t len,
                                                http_compress_method method) {
   http_compress_result result;
@@ -185,15 +227,29 @@ http_compress_result http_compress::compress(const char* data, size_t len,
     default: result.success = false; return result;
   }
 
-  z_stream strm;
-  std::memset(&strm, 0, sizeof(strm));
-
-  if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                   window_bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+  deflate_slot& slot = deflate_slot_for_this_thread();
+  int rv;
+  if (slot.inited && slot.window_bits == window_bits) {
+    rv = deflateReset(&slot.strm);
+  } else {
+    if (slot.inited) {
+      deflateEnd(&slot.strm);
+      slot.inited = false;
+    }
+    std::memset(&slot.strm, 0, sizeof(slot.strm));
+    rv = deflateInit2(&slot.strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                      window_bits, 8, Z_DEFAULT_STRATEGY);
+    if (rv == Z_OK) {
+      slot.inited = true;
+      slot.window_bits = window_bits;
+    }
+  }
+  if (rv != Z_OK) {
     result.success = false;
     return result;
   }
 
+  z_stream& strm = slot.strm;
   strm.next_in   = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(data));
   strm.avail_in  = static_cast<uInt>(len);
 
@@ -210,7 +266,7 @@ http_compress_result http_compress::compress(const char* data, size_t len,
   } while (ret == Z_OK);
 
   result.success = (ret == Z_STREAM_END);
-  deflateEnd(&strm);
+  // 不 `deflateEnd()` —— 内核留给这个线程的下一次调用（见上面 `deflate_slot`）。
   return result;
 }
 
