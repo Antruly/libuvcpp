@@ -41,6 +41,7 @@
  */
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <iostream>
@@ -246,6 +247,67 @@ raw_hold_result raw_hold(int port, const std::string& bytes, int wait_ms) {
   uvcpp_test::wait_until(loop, [&] { return done.load(); }, uvcpp_test::kWaitMs);
   for (int i = 0; i < 30; ++i) loop->run(UV_RUN_NOWAIT);
   return res;
+}
+
+/**
+ * 裸客户端「发完就读」：连上去、把 bytes 一次写完，然后泵循环收响应，直到
+ * 头块收齐（`\r\n\r\n`）、对端 FIN、或 wait_ms 用光。收到什么原样返回。
+ *
+ * 和 `raw_hold` 的区别只在收什么：那个只关心"对端有没有 FIN"，这个要**响应的
+ * 字节**（验状态码必须看到响应本身）。而之所以要裸发，是因为
+ * `uvcpp_http_client` 只会造"完整且合法"的请求 —— 「重复 Host 字段行」这种
+ * 形状它表达不出来。
+ */
+std::string raw_exchange(int port, const std::string& bytes,
+                         int wait_ms = 3000) {
+  uvcpp_tcp_client client;
+  std::string       got;
+  std::atomic<bool> connected(false);
+  std::atomic<bool> peer_closed(false);
+
+  int rc = client.connect("127.0.0.1", port, [&](int st) {
+    if (st != 0) return;
+    connected.store(true);
+    client.read_start_events([&](uvcpp_tcp_client&, const net_read_result& r) {
+      if (r.is_end()) {
+        peer_closed.store(true);
+      } else if (r.data != nullptr && r.size > 0) {
+        got.append(r.data, r.size);
+      }
+    });
+    if (!bytes.empty()) client.write(bytes.data(), bytes.size(), [](int) {});
+  });
+  if (rc != 0) return got;
+
+  uvcpp_loop* loop = client.get_loop();
+  uvcpp_test::wait_until(loop, [&] { return connected.load(); },
+                         uvcpp_test::kWaitMs);
+  if (connected.load()) {
+    const std::chrono::steady_clock::time_point t0 =
+        std::chrono::steady_clock::now();
+    while (true) {
+      loop->run(UV_RUN_NOWAIT);
+      if (peer_closed.load()) break;
+      // 头块收齐就够了：状态码在第一行。不等到 FIN 是因为 keep-alive 的
+      // 响应根本不会 FIN，硬等就得等满 wait_ms。
+      if (got.find("\r\n\r\n") != std::string::npos) break;
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count() >= wait_ms) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  std::atomic<bool> done(false);
+  if (client.get_tcp() != nullptr) {
+    client.get_tcp()->close([&](uvcpp_handle*) { done.store(true); });
+  }
+  uvcpp_test::wait_until(loop, [&] { return done.load(); },
+                         uvcpp_test::kWaitMs);
+  for (int i = 0; i < 30; ++i) loop->run(UV_RUN_NOWAIT);
+  return got;
 }
 
 /** 轮询等待一个条件成立，最长 timeout_ms 毫秒。 */
@@ -2054,6 +2116,84 @@ void test_log_level_precedence() {
 }
 
 // =========================================================================
+// 22. Host / Transfer-Encoding 校验：**认领路径**上也得受检
+// =========================================================================
+/**
+ * 低层那条（`web_http_server_func.cpp` 的 `host_and_te_validation`）只证明
+ * "低层路由受检"，证明不了 webapp。差别是实质的：`uvcpp_web_app` 会调用
+ * `set_stream_claim(...)`，而 `uvcpp_http_server` 的 `on_headers_complete`
+ * 里**请求一旦被认领就直接 return** —— 校验只要排在认领钩子之后，webapp
+ * 这条路上就整条绕过，而 webapp 才是绝大多数用法。
+ *
+ * 所以这条用例的**唯一价值**就是钉住那个先后次序：它必须用 webapp，而且必须
+ * 裸发（`uvcpp_http_client` 造不出「重复 Host 字段行」这种形状）。写在
+ * feature 上的断言用的是 RFC 9112 §3.2 —— 那份规范里唯一把 400 写成 MUST
+ * 的地方：缺 Host / 多于一行 Host / Host 字段值非法，三种都得真回 400。
+ */
+void test_host_validation_on_claim_path() {
+  uvcpp_web_app app;
+  configure_for_test(app);
+  // 路由只为"不该被拦的那些"能回 200，校验本身在路由之前。
+  app.get("/", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                  uvcpp_web_next) {
+    resp.text("ok");
+    resp.end();
+  });
+  app.post("/", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                   uvcpp_web_next) {
+    resp.text("ok");
+    resp.end();
+  });
+
+  check(app.start_background() == 0, "webapp 启动");
+  const int port = app.bound_port();
+  if (port <= 0) {
+    check(false, "webapp 没有拿到端口");
+    app.stop();
+    app.join();
+    return;
+  }
+
+  struct case_t {
+    const char* what;
+    const char* raw;
+    int         want;   ///< 期望的状态码
+  };
+  const case_t cases[] = {
+      // §3.2 的三种违反形态 —— 走的都是被 webapp 认领的那条路
+      {"缺 Host",          "GET / HTTP/1.1\r\n\r\n",                         400},
+      {"重复 Host",        "GET / HTTP/1.1\r\nHost: a.com\r\nHost: b.com\r\n\r\n", 400},
+      {"重复 Host 同值",   "GET / HTTP/1.1\r\nHost: a.com\r\nHost: a.com\r\n\r\n", 400},
+      {"Host 带路径",      "GET / HTTP/1.1\r\nHost: a.com/p\r\n\r\n",         400},
+      // §6.1：TE 整行为空（llhttp 不把空值记成"存在"，于是退回 CL 框架）
+      {"TE 空值 + CL",     "POST / HTTP/1.1\r\nHost: a.com\r\n"
+                           "Transfer-Encoding: \r\nContent-Length: 3\r\n\r\nabc", 400},
+      // 以下不许误伤：合法请求要真走到路由、真回 200
+      {"正常请求",         "GET / HTTP/1.1\r\nHost: a.com\r\n\r\n",           200},
+      {"HTTP/1.0 带 Host", "GET / HTTP/1.0\r\nHost: a.com\r\n\r\n",           200},
+      {"Host 尾随空白",    "GET / HTTP/1.1\r\nHost: a.com   \r\n\r\n",        200},
+      {"Host 头名小写",    "GET / HTTP/1.1\r\nhost: a.com\r\n\r\n",           200},
+  };
+
+  for (const case_t& c : cases) {
+    const std::string got = raw_exchange(port, c.raw);
+    int code = -1;
+    const size_t sp = got.find(' ');
+    if (sp != std::string::npos && got.size() > sp + 3) {
+      code = std::atoi(got.c_str() + sp + 1);
+    }
+    if (code != c.want) {
+      std::cout << "  [err] webapp/" << c.what << "：期望 " << c.want
+                << "，实际 " << code << "（收到 " << got.size() << " 字节）\n";
+      g_failures++;
+    }
+  }
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
 // 用例表
 // =========================================================================
 struct test_case {
@@ -2107,6 +2247,8 @@ int main(int argc, char** argv) {
       {"response_header_capacity_reused",
        test_response_header_capacity_reused},
       {"log_level_precedence", test_log_level_precedence},
+      {"host_validation_on_claim_path",
+       test_host_validation_on_claim_path},
   };
   const int count = static_cast<int>(sizeof(tests) / sizeof(tests[0]));
 

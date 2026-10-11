@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <uvcpp/uvcpp_define.h>
@@ -562,6 +563,93 @@ static bool test_malformed_request_gets_400() {
   } else if (got.find("connection: close") == std::string::npos) {
     std::cout << "  [err] 400 响应缺少 connection: close\n";
     ok = false;
+  }
+
+  srv.shutdown();
+  return ok;
+}
+
+// -------------------------------------------------------------------------
+// Test: RFC 9112 §3.2 的 Host 三条 MUST-400，＋ §6.1 的空 Transfer-Encoding
+//
+// §3.2 是这份规范里**唯一**把 400 写成 MUST 的地方：「缺 Host 字段行 / 多于一行
+// Host / Host 字段值非法」三条并列，三种形态都得真回一个 400（静默关连接不算）。
+// §6.1 那条是另一格：`Transfer-Encoding = #transfer-coding`、`token = 1*tchar`，
+// 空值一个 tchar 都没有，而 llhttp 在值整行为空时**不把 TE 记成存在** —— 于是
+// `TE:（空）+ Content-Length` 会被当成「没有 TE」、退回 CL 框架照常应答，而前端
+// 若按 TE 存在处置（§6.3：压过 CL）就是走私。
+//
+// **这条只覆盖低层路由。** 判据点之所以放在 claim 钩子之前，是因为 webapp 装了
+// `set_stream_claim`（请求被它认领后回调就 return 了）—— 所以"认领路径也受检"
+// 得由 `web_app_app_func.cpp` 里那条配套用例来证，两条合起来才算齐。
+//
+// 不注册任何路由：合法请求落到 404，正好当"非 400"的对照，省掉路由的干扰。
+// -------------------------------------------------------------------------
+static bool test_host_and_te_validation() {
+  TestServer srv;
+  int port = srv.start(nullptr);
+
+  struct Case {
+    const char* what;
+    const char* raw;
+    bool reject;   // true = 必须回 400
+  };
+  const Case cases[] = {
+    // --- §3.2：三种违反形态，各自真回一个 400 ---
+    {"缺 Host",          "GET / HTTP/1.1\r\n\r\n",                          true},
+    {"重复 Host",        "GET / HTTP/1.1\r\nHost: a.com\r\nHost: b.com\r\n\r\n", true},
+    {"重复 Host 同值",   "GET / HTTP/1.1\r\nHost: a.com\r\nHost: a.com\r\n\r\n", true},
+    {"Host 空值",        "GET / HTTP/1.1\r\nHost: \r\n\r\n",                 true},
+    {"Host 带 userinfo", "GET / HTTP/1.1\r\nHost: u@a.com\r\n\r\n",          true},
+    {"Host 带路径",      "GET / HTTP/1.1\r\nHost: a.com/p\r\n\r\n",          true},
+    {"Host 逗号列表",    "GET / HTTP/1.1\r\nHost: a.com, b.com\r\n\r\n",     true},
+    // --- §6.1：TE 整行为空（有 CL 与无 CL 两种都要拦） ---
+    {"TE 空值 + CL",     "POST / HTTP/1.1\r\nHost: a.com\r\n"
+                         "Transfer-Encoding: \r\nContent-Length: 3\r\n\r\nabc", true},
+    {"TE 空值 无 CL",    "POST / HTTP/1.1\r\nHost: a.com\r\n"
+                         "Transfer-Encoding: \r\n\r\n",                      true},
+    // --- 以下一条都不许误伤 ---
+    // Host 是 1.1 才引入的，1.0 没有它不算违规。
+    {"HTTP/1.0 无 Host", "GET / HTTP/1.0\r\n\r\n",                           false},
+    {"Host 带端口",      "GET / HTTP/1.1\r\nHost: a.com:8080\r\n\r\n",       false},
+    {"Host IPv6 字面量", "GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n",       false},
+    // 两头 OWS 不属于字段值本身（RFC 9110 §5.5），得先修掉再判。
+    {"Host 前导空白",    "GET / HTTP/1.1\r\nHost:    a.com\r\n\r\n",         false},
+    {"Host 尾随空白",    "GET / HTTP/1.1\r\nHost: a.com   \r\n\r\n",         false},
+    // 头名大小写无关（解析器**不**把头名小写化，比较是大小写无关的那种）。
+    {"Host 头名小写",    "GET / HTTP/1.1\r\nhost: a.com\r\n\r\n",            false},
+    {"Host 混合大小写",  "GET / HTTP/1.1\r\nHoSt: a.com\r\n\r\n",            false},
+    // 空列表元素是合法的（RFC 9110 §5.6.1.2），不算"值为空"。
+    {"TE 空元素+chunked", "POST / HTTP/1.1\r\nHost: a.com\r\n"
+                          "Transfer-Encoding: ,chunked\r\n\r\n"
+                          "3\r\nabc\r\n0\r\n\r\n",                           false},
+    {"TE chunked",       "POST / HTTP/1.1\r\nHost: a.com\r\n"
+                         "Transfer-Encoding: chunked\r\n\r\n"
+                         "3\r\nabc\r\n0\r\n\r\n",                            false},
+  };
+
+  bool ok = true;
+  for (const Case& c : cases) {
+    std::string got;
+    if (!raw_exchange(port, c.raw, got)) {
+      std::cout << "  [err] " << c.what << "：没有任何响应\n";
+      ok = false;
+      continue;
+    }
+    // 取状态行里的码，而不是在整份响应里 find("400") —— 后者会被 body 或
+    // `date` 之类的头撞上。
+    int code = 0;
+    const size_t sp = got.find(' ');
+    if (sp != std::string::npos && got.size() > sp + 3) {
+      code = std::atoi(got.c_str() + sp + 1);
+    }
+    const bool got_400 = (code == 400);
+    if (got_400 != c.reject) {
+      std::cout << "  [err] " << c.what << "：期望 "
+                << (c.reject ? "400" : "非 400（本例应为 404）")
+                << "，实际 " << code << "\n";
+      ok = false;
+    }
   }
 
   srv.shutdown();
@@ -1353,6 +1441,7 @@ int main(int argc, char** argv) {
     {"large_response_async", test_large_response_async},
     {"slow_client_does_not_block_loop", test_slow_client_does_not_block_loop},
     {"malformed_request_gets_400", test_malformed_request_gets_400},
+    {"host_and_te_validation", test_host_and_te_validation},
     {"body_limit_returns_413", test_body_limit_returns_413},
     {"header_limit_returns_431", test_header_limit_returns_431},
     {"url_limit_returns_414", test_url_limit_returns_414},
