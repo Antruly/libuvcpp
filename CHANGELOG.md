@@ -559,8 +559,10 @@
   不带版本号），`uvcpp::version_string()` 则终于把 `UVCPP_VERSION_STRING` 接出来了
   —— 那个宏此前全仓没有一个读者（`1.3.1`）
 - HTTP/1.1 缺 `Host`、`Host` 出现多于一行、`Host` 字段值非法，三种形态一律真回一个 `400`
-  （静默关连接不算）；`Transfer-Encoding` 整行为空也一样。判据是 RFC 9112 §3.2 —— 这份
-  规范里**唯一**把 400 写成 MUST 的地方 —— 外加 §6.1 那条：`transfer-coding = token`、
+  （静默关连接不算）；`Transfer-Encoding` 整行为空也一样。判据是 RFC 9112 §3.2 那条 ——
+  它是**本库此前唯一不拦的一条 MUST-400**：同规范里 §5.1 的"冒号前有空白"、§6.1 的"TE
+  不以 `chunked` 收尾"、§6.3 的"多个不等的 CL"也都写着 MUST-400，但拦它们的是 llhttp，
+  本库一直是 400（逐条实测过）。外加 §6.1 那条：`transfer-coding = token`、
   `token = 1*tchar`，整行为空一个 tchar 都没有，而 llhttp 在值整行为空时**不把 TE 记成
   "存在"**，于是 `TE:（空）+ Content-Length` 被当成"没有 TE"、退回 CL 框架照常应答，前端
   若按 §6.3 压过 CL 处置就是走私。判据点排在 `set_stream_claim` 钩子**之前** —— 请求被
@@ -912,8 +914,10 @@
 
 **修复**:HTTP/1.1 的 `Host` 与空 `Transfer-Encoding` 一律 `400`
 
-一条改动，判据来自 RFC 9112 §3.2 —— 那份规范里**唯一**把 400 写成 MUST 的地方：缺 `Host`
-字段行、`Host` 多于一行、`Host` 字段值非法，三种形态都得真回一个 `400`，静默关连接不算。
+一条改动，判据来自 RFC 9112 §3.2：缺 `Host` 字段行、`Host` 多于一行、`Host` 字段值非法，
+三种形态都得真回一个 `400`，静默关连接不算。它是该规范里**本库此前唯一不拦的一条
+MUST-400** —— §5.1 的"冒号前有空白"、§6.1 的"TE 不以 `chunked` 收尾"、§6.3 的"多个不等的
+CL"同样写着 MUST-400，那些是 llhttp 拦的，本库一直是 400。
 外加 §6.1 那条空 `Transfer-Encoding`（[HTTP 与 WebSocket 语义](#http-与-websocket-语义)）：
 `transfer-coding = token`、`token = 1*tchar`，整行为空一个 tchar 都没有，而 llhttp 在值整行
 为空时**不把 TE 记成"存在"** —— 于是 `TE:（空）+ Content-Length` 被当成"没有 TE"、退回
