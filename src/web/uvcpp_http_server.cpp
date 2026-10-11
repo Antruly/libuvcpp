@@ -70,6 +70,115 @@ bool message_has_body(const uvcpp_http_parser* parser,
                          "chunked");
 }
 
+/**
+ * @brief `Host` 的字段值是否合 `uri-host [ ":" port ]`（RFC 9110 §7.2）。
+ *
+ * 只做**字符类**判定：不解析 IPv6 字面量、不核端口是不是数字、不核 `%` 后面
+ * 那两位是不是十六进制。要挡的是已经被证明会引起路由混淆的那几个字符 ——
+ * userinfo 的 `@`、路径的 `/` 与 `\`、列表的 `,` —— 外加空白与控制字符，
+ * 而不是去复刻一遍 RFC 3986 的 ABNF。
+ *
+ * **逗号上故意比 ABNF 严一点**：`reg-name` 的 `sub-delims` 里确实含着逗号，
+ * 但 `Host` 不是列表型字段（RFC 9110 §7.2），一个带逗号的值只可能是两个主机名
+ * 挤在一起；前端按第一个路由、后端按第二个取，就是缓存投毒 / 虚拟主机绕过。
+ */
+bool host_value_is_valid(const std::string& raw) {
+  // RFC 9110 §5.5：`field-line = field-name ":" OWS field-value OWS`，两头的
+  // OWS **不属于**字段值。llhttp 只丢掉冒号后那段前导空白，尾随那段留在值里
+  // （实测 `Host: example.com   ` 给出来的值就带三个空格），所以两头自己再修
+  // 一次 —— 不修的话，一个合法 Host 只要尾巴上多一个空格就被判成"非法字段值"
+  // 回 400，那是**反向**的不合规。
+  size_t b = 0;
+  size_t e = raw.size();
+  while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
+  while (e > b && (raw[e - 1] == ' ' || raw[e - 1] == '\t')) --e;
+
+  if (b == e) return false;   // 空值，或整串都是空白
+  for (size_t i = b; i < e; ++i) {
+    const unsigned char c = static_cast<unsigned char>(raw[i]);
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z')) {
+      continue;
+    }
+    switch (c) {
+      // unreserved 里除字母数字之外的那些
+      case '-': case '.': case '_': case '~':
+      // pct-encoded 的引导符（不核那两位，宽松）
+      case '%':
+      // sub-delims 里**除逗号**的那些
+      case '!': case '$': case '&': case '\'': case '(': case ')':
+      case '*': case '+': case ';': case '=':
+      // `:` 分端口，`[` `]` 是 IPv6 字面量
+      case ':': case '[': case ']':
+        continue;
+      default:
+        // 空格 / 制表 / CR / LF / `/` / `\` / `@` / `,` / `?` / `#` / 非 ASCII …
+        return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief RFC 9112 §3.2 的三条 MUST 是否被违反：HTTP/1.1 请求必须**恰好一个**、
+ *        且字段值合法的 `Host`。
+ *
+ * 缺、多于一行（值相同也一样）、字段值非法，三种都回 400。判据里"多于一行"
+ * 与值无关，所以两行同值也算 —— RFC 那句写的是 "more than one Host header
+ * field line"，没有给同值开例外。
+ *
+ * **HTTP/1.0 不受此限**：`Host` 是 1.1 才引入的，1.0 的请求没有它不算违规，
+ * 本库照旧服务（探针里 `http10-no-host` 那条把两种处置都算合格，即为此）。
+ *
+ * @return true = 违反 §3.2，调用方回 400。
+ */
+bool host_header_violates(const http_headers& hs, uvcpp_http_version ver) {
+  if (ver != uvcpp_http_version::HVER_11) return false;
+  const http_header* seen = nullptr;
+  for (size_t i = 0; i < hs.size(); ++i) {
+    // 头名在解析器里是**原样保留**的（`ll_on_header_field` 逐字 append，
+    // 不小写化），所以比大小写无关的那种比法，和 `message_has_body` 一致。
+    if (!http_name_equal(hs[i].name, "host")) continue;
+    if (seen != nullptr) return true;
+    seen = &hs[i];
+  }
+  if (seen == nullptr) return true;
+  return !host_value_is_valid(seen->value);
+}
+
+/**
+ * @brief 有没有一条 `Transfer-Encoding` 头，且**它的值整个是空的**。
+ *
+ * RFC 9112 §6.1 的 ABNF 是 `Transfer-Encoding = #transfer-coding`、
+ * `transfer-coding = token`、`token = 1*tchar` —— 空串里一个 `tchar` 都没有，
+ * 不匹配任何一条。所以这样一行头**语法上在、语义上一个编码都没声明**，留下
+ * 一个框架歧义：前端按"TE 存在"（§6.3：压过 `Content-Length`）还是按"TE 空
+ * 所以不存在"（退回 `Content-Length`）处置？两边不一致就是请求走私。
+ *
+ * **只判"所有 TE 行合起来一个元素都没有"**：`Transfer-Encoding: ,chunked`
+ * 那种前面挂着空列表元素的是合法的（RFC 9110 §5.6.1.2：收方 MUST 解析并忽略
+ * 合理数量的空列表元素），多行 `TE` 等价于把它们按逗号接起来，所以只要**有
+ * 任何一行非空**就不算违规，交给下面原有的判据。
+ *
+ * 注：非空但不认识的编码（`TE: identity`）以及 `TE: chunked` 与 `CL` 同时出现，
+ * llhttp 自己就判畸形了，走的是上面 `has_error()` 那条 400 ＋ 关连接的路。
+ * 本函数补的正是它漏掉的那一格：值为空时 llhttp **不把 TE 记成存在**。
+ *
+ * @return true = 应当回 400。
+ */
+bool transfer_encoding_is_void(const http_headers& hs) {
+  bool any_te_line = false;
+  for (size_t i = 0; i < hs.size(); ++i) {
+    if (!http_name_equal(hs[i].name, "transfer-encoding")) continue;
+    any_te_line = true;
+    const std::string& v = hs[i].value;
+    for (size_t k = 0; k < v.size(); ++k) {
+      if (v[k] != ' ' && v[k] != '\t') return false;   // 这行有内容
+    }
+  }
+  return any_te_line;
+}
+
 #if UVCPP_HTTP3_ENABLE
 /**
  * @brief h3 请求里的 `:method` 串 → 枚举。
@@ -496,6 +605,24 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
   });
   pctx->parser->set_on_headers_complete([this, pctx, client]() {
     pctx->headers_done = true;
+
+    // 两条**必须在认领钩子之前**判的：(1) RFC 9112 §3.2 的三条 MUST-400
+    // （缺 / 重复 / 值非法的 Host）；(2) §6.1 那条"Transfer-Encoding 整行为空"。
+    //
+    // 排在这个位置的原因是框架层装了 `set_stream_claim`（`uvcpp_web_app.cpp`
+    // 里那一处）：请求一旦被它认领，本函数在后面就 `return` 了 —— 放后面等于
+    // 只有走低层路由的请求受检，而 webapp 才是绝大多数用法。
+    //
+    // 此刻头表还在解析器上：`take_headers_into()` 是下面那条建视图的路上才
+    // 搬的，所以这里读得到全部头。
+    const http_headers& h1_headers = pctx->parser->get_headers();
+    if (host_header_violates(h1_headers,
+                             pctx->parser->get_uvcpp_http_version()) ||
+        transfer_encoding_is_void(h1_headers)) {
+      reject_early(*pctx, client, http_status::BAD_REQUEST,
+                   /*message_will_complete=*/true);
+      return;
+    }
 
     // Resolve a streaming route now that method + url are known; when matched,
     // deliver HEADERS and hand body chunks directly to the handler.
