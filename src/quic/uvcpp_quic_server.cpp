@@ -136,10 +136,6 @@ struct uvcpp_quic_server::impl {
   sockaddr_storage local_sa{};
   int              local_len = 0;
 
-  /// 本端 SCID 的长度。**短包头的 DCID 长度不写在包上**（RFC 9000 §17.3.1），
-  /// 解它必须先知道这个值。第一次从 `on_new_cid` 学到（本端所有 SCID 等长）。
-  size_t cid_len = 0;
-
   /// 路由表：CID 字节串 → 连接。一条连接有多个键（本端每个 SCID + 对端首包的
   /// 原始 DCID）。**表里的指针不拥有连接** —— 所有权在 `owned` 那张。
   std::map<std::string, uvcpp_quic_connection*> by_cid;
@@ -294,8 +290,17 @@ struct uvcpp_quic_server::impl {
     bool routed = false;
 
     // ① 已存在的连接？DCID 就是路由键。
+    //
+    // `short_dcidlen` 要的是**本端**发的 CID 有多长 —— 短包头不把 DCID 长度写在
+    // 包上（RFC 9000 §17.3.1），只能由收方按自己选的规则反推。**不能拿对端的
+    // SCID 长度顶上**：两端各自选自己的长度（RFC 9000 §5.1），对端可以选 8 而
+    // 本端选 18（`ngtcp2` 的 h2load 就是 8）。拿 8 去解一条 18 字节 CID 的短包头，
+    // 解出来的 key 一个都命中不了 `by_cid`，于是握手之后每一个 1-RTT 包都被丢，
+    // 双方靠 PTO（初始约 1 s）重传才能推进 —— 表象是「服务端 CPU≈0、每连接每 5 s
+    // 只出几个响应」。
     std::string dcid;
-    if (quic_detail::quic_session::peek_dcid(data, len, cid_len, &dcid)) {
+    if (quic_detail::quic_session::peek_dcid(
+            data, len, quic_detail::quic_session::scid_len(), &dcid)) {
       std::map<std::string, uvcpp_quic_connection*>::iterator it =
           by_cid.find(dcid);
       if (it != by_cid.end()) {
@@ -341,8 +346,6 @@ struct uvcpp_quic_server::impl {
   uvcpp_quic_connection* create_conn(const std::string& client_scid,
                                      const std::string& original_dcid,
                                      const struct sockaddr* peer) {
-    if (cid_len == 0) cid_len = client_scid.size();
-
     std::unique_ptr<uvcpp_quic_connection> holder(new uvcpp_quic_connection());
     uvcpp_quic_connection* raw = holder.get();
 
