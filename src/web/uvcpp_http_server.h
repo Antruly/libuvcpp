@@ -797,6 +797,48 @@ class UVCPP_API uvcpp_http_server {
   /** @brief 这条连接是否还挂在服务器上（= `connection_generation() != 0`）。 */
   bool is_connected(uvcpp_tcp_client* client) const;
 
+  // -------------------------------------------------------------------
+  // 稍后回话（推迟应答）
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 给 h1/h2 这条连接造一枚「稍后回话」凭据 —— 见 @ref uvcpp_http_reply。
+   *
+   * h3 上**用不到它**：那条腿上处理函数手里没有 `uvcpp_tcp_client*`，凭据由
+   * 派发那一步直接填进 `req.reply`。三条腿上处理函数要的东西因此是同一个：
+   * 读 `req.reply`。
+   *
+   * @param client    那条 TCP 连接；**不在本服务器的登记表里就返回无效凭据**。
+   * @param stream_id 这条请求的 h2 流号；h1 上传 0。
+   */
+  uvcpp_http_reply reply_of(uvcpp_tcp_client* client,
+                            int32_t stream_id = 0) const;
+
+  /**
+   * @brief 这枚凭据**现在**还能用来回话吗。
+   *
+   * 判据是代次对得上：连接还活着、且没被另一条连接复用那一格。连接断开、服务器
+   * 停了、h3 的连接收尾了 —— 都会让它变假。**异步路径上写之前必须问一次**；
+   * `send_reply()` 自己也查，所以漏问的后果是"响应被丢掉"，不是"发给别人"。
+   */
+  bool reply_alive(const uvcpp_http_reply& reply) const;
+
+  /**
+   * @brief 凭一枚凭据把响应送出去 —— 「推迟应答」那条路的收口。
+   *
+   * 与 `send_response()` 的分工：那个收的是 `uvcpp_tcp_client*`（只有 h1/h2 有
+   * 这东西），这个收的是凭据（三条腿都有）。h1/h2 上两者等价；h3 上本函数是**唯一**
+   * 能稍后回话的入口。
+   *
+   * 必须在 `reply.loop()` 那条循环的线程上调用。与 `send_response()` 一样，
+   * 返回之后**不保证** `resp` 还完整（body 可能已被移动出去）；要记上线了多少
+   * body 就用返回值。
+   *
+   * @return 交出去的 body 字节数；凭据无效/连接换人/这条流已经收场时返回负值
+   *         （`UV_EINVAL` / `UV_ENOENT`），且**一个字节都不发**。
+   */
+  int send_reply(const uvcpp_http_reply& reply, uvcpp_http_response& resp);
+
  private:
   // -------------------------------------------------------------------
   // Route matching
@@ -1359,7 +1401,61 @@ class UVCPP_API uvcpp_http_server {
   struct quic_ctx {
     /// 这条 QUIC 连接上的 h3 驱动层；`remove_h3_ctx()` 之后为 nullptr。
     uvcpp_h3_connection* h3 = nullptr;
+
+    /**
+     * @brief 连接代次 —— 与 @ref conn_ctx::generation **同一个计数器**。
+     *
+     * 用途也逐字相同：一条连接收场、另一条新连接落在同一个地址上时，靠它把
+     * "那枚凭据还是当初那条连接的吗"回答掉。h3 上没有别的东西能回答它：
+     * `uvcpp_quic_connection*` 一样是会被复用的地址。
+     */
+    uint64_t generation = 0;
+
+    /**
+     * @brief 这条连接所在的那条循环（= 它那条端点的循环）。
+     *
+     * 留在这一格里，是因为"稍后回话"的凭据要带上"把工作投回哪条循环"，而
+     * `uvcpp_quic_connection` 自己没有循环的入口。凭据只在**循环线程**上造，
+     * 所以这一格与连接同生共死，不存在读到过期值的时候。
+     */
+    uvcpp_loop* loop = nullptr;
+
+    /**
+     * @brief 这条连接上正在跑的流 —— 每条一格，流收场时删。
+     *
+     * 镜像 @ref conn_ctx::h2_streams，但**只留推迟应答要用的那两样**：h3 的
+     * `on_request` 拿到的是**已经收全**的请求（不需要攒 body，也没有溢出这一说），
+     * 而 `send_h3_response()` 在推迟那条路上没有请求对象可读，得回来查这两样。
+     *
+     * 生命周期 = 流的生命周期：派发时建立，`on_stream_close` 时删除。**不能**
+     * 在响应发出去时删 —— 推迟应答正是"发的时候才回来读它"。
+     */
+    struct h3_stream_state {
+      std::string accept_encoding;  ///< 派发时从这条流自己的请求头里取
+      bool        is_head = false;  ///< 这条流是 HEAD
+    };
+    std::map<int64_t, h3_stream_state> h3_streams;
   };
+
+  // -------------------------------------------------------------------
+  // 凭据：就地把一枚 uvcpp_http_reply 填满
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 填一枚 h1/h2 凭据（派发那两处的收口）。
+   *
+   * 与公开的 @ref reply_of 的差别只有一个：**不查表**。派发那两处手里已经有
+   * `ctx` 了，而那是**每请求**的热路 —— 为了一个代次号再走一次 map 查找是白付
+   * 的。`reply_of()` 那条路留给"手里只有 `client`"的调用方。
+   */
+  void fill_reply(uvcpp_http_reply& r, uvcpp_tcp_client* client,
+                  const conn_ctx& ctx, int32_t stream_id) const;
+
+#if UVCPP_HTTP3_ENABLE
+  /** @brief @ref fill_reply 的 h3 版（那条腿上没有 `conn_ctx`）。 */
+  void fill_h3_reply(uvcpp_http_reply& r, uvcpp_quic_connection* conn,
+                     const quic_ctx& qc, int64_t stream_id) const;
+#endif
 
   /**
    * @brief 本线程所在那条循环的 h3 登记表。**镜像 @ref ctxs_here 那一套。**
@@ -1379,6 +1475,10 @@ class UVCPP_API uvcpp_http_server {
    *          逐字同罪。
    */
   std::map<uvcpp_quic_connection*, quic_ctx>& quic_ctxs_at(int loop_index);
+
+  /// @brief @ref quic_ctxs_at 的 const 版（`reply_alive()` 这类只读入口用）。
+  const std::map<uvcpp_quic_connection*, quic_ctx>& quic_ctxs_at(
+      int loop_index) const;
 
   /**
    * @brief 本线程所在那条循环的序号 —— 就是 @ref quic_ctxs_here 拿来取表的那个数。
@@ -1411,12 +1511,15 @@ class UVCPP_API uvcpp_http_server {
    *
    * @param stream_id 由调用方**显式**给（不从 `resp.stream_id` 读）：处理函数
    *        整对象替换过 `resp` 时那一格会被冲成 0（h2 那边同一个理由）。
-   * @param accept_encoding 这条流的 `accept-encoding` —— 与 h2 一样按流取值，
-   *        因为一条 h3 连接上同样并发跑着多条流。
+   *
+   * `accept-encoding` 与"是不是 HEAD"不在这张参数表上 —— 与 h2 一样是按流取的，
+   * 但那条腿上它们是形参（h2 的派发是本函数的上游，手里就有请求），而 h3 的推迟
+   * 应答中间隔了一次"稍后"，回来时请求对象早没了。于是它们随流登记在
+   * @ref quic_ctx::h3_streams 里，本函数自己去查。查不到（畸形请求的 400、流已经
+   * 收场）就按"没有压缩、不是 HEAD"处理 —— 那正是这两样的默认值。
    */
   int send_h3_response(uvcpp_quic_connection* conn, int64_t stream_id,
-                       uvcpp_http_response& resp,
-                       const std::string& accept_encoding, bool is_head);
+                       uvcpp_http_response& resp);
 
   /**
    * @brief 把 \p fn 投到第 \p loop_index 条循环上跑，并**有界地等它跑完**。

@@ -49,6 +49,7 @@
 #if UVCPP_WEB_ENABLE && UVCPP_NGHTTP2_ENABLE
 
 #include <net/uvcpp_tcp_client.h>
+#include <req/uvcpp_work.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_http_response.h>
@@ -182,6 +183,29 @@ struct TestServer {
       server.get("/hello", [](uvcpp_http_request&, uvcpp_http_response& resp,
                               uvcpp_tcp_client*) {
         resp = uvcpp_http_response::ok("hello", 5, "text/plain");
+      });
+
+      // 推迟应答（1.6.7）：凭据从 `req.reply` 拿，兑现入口是 `send_reply()`。
+      // 这一条钉的是凭据里的**流号**真的落到了 `resp.stream_id` 上 —— h2 的
+      // 发送按流号归位，少了那一句，响应会被 `send_h2_response(client, 0, resp)`
+      // 丢在 `h2_streams.find(0)` 那一步，而且**一处错误都不打**（客户端看到
+      // 的只是超时）。`uvcpp_static_server` 那条路以前正是这个症状。
+      //
+      // 捕获 `&server` 是安全的：处理函数挂在这个对象上，它长不过 server。
+      server.get("/later", [&server](uvcpp_http_request& req,
+                                     uvcpp_http_response& resp,
+                                     uvcpp_tcp_client*) {
+        const uvcpp_http_reply reply = req.reply;  // 按值留一份
+        resp.deferred = true;  // 声明"这条响应由我负责"
+        uvcpp_work* w = new uvcpp_work();
+        w->queue_work(reply.loop(), [](uvcpp_work*) {},
+                      [&server, reply](uvcpp_work* self, int) {
+                        delete self;
+                        if (!server.reply_alive(reply)) return;
+                        uvcpp_http_response out =
+                            uvcpp_http_response::ok("later", 5, "text/plain");
+                        server.send_reply(reply, out);
+                      });
       });
 
       server.bind("127.0.0.1", 0);
@@ -319,7 +343,7 @@ std::string h2_client_hello() {
  * 与会话的重新武装，任何一处没接上都会表现为超时。
  */
 bool h2_roundtrip(int port, int& status, std::string& body, std::string& sent,
-                  std::string& raw) {
+                  std::string& raw, const std::string& url = "/plain") {
   uvcpp_h2_session            cli(false);
   uvcpp_h2_session::callbacks cbs;
   bool     done  = false;
@@ -337,7 +361,7 @@ bool h2_roundtrip(int port, int& status, std::string& body, std::string& sent,
   cbs.on_fatal        = [&](uvcpp_h2_session&, int) { fatal = true; };
 
   if (cli.init(cbs) != 0) return false;
-  if (cli.submit_request(make_req(http_method::HTTP_GET, "/plain"), "") <= 0) {
+  if (cli.submit_request(make_req(http_method::HTTP_GET, url), "") <= 0) {
     return false;
   }
 
@@ -415,6 +439,48 @@ void test_h2c_roundtrip() {
   check(ok, "明文连接上收到了完整的 h2 响应");
   check(status == 200, "状态码是 200（实收 " + std::to_string(status) + "）");
   check(body == kBody, "响应体是 world（实收 \"" + body + "\"）");
+
+  srv.shutdown();
+}
+
+// =========================================================================
+// 第 1 轮之二：明文 h2 上的**推迟应答**（凭据 + send_reply）
+// =========================================================================
+
+/**
+ * @brief 同一台明文服务端上，走一趟 `resp.deferred` + `req.reply` 的应答。
+ *
+ * 这一条与第 1 轮打的是同一条腿、同一份前言分流，差别只在处理函数**不在这一次
+ * 调用里回话**：它把凭据按值留下、把结果投回循环线程，回来时进度函数早返回了。
+ *
+ * 判据是"完整的 200 + 那个体"，而**静默丢包正是它的反例**：h2 的发送按
+ * `resp.stream_id` 归位，凭据里那个流号要是没搬上去，`send_h2_response()` 会在
+ * `h2_streams.find(0)` 上失败并返回 `UV_EINVAL` —— 客户端那边只是一直等到超时，
+ * 服务端一处错误都不打。所以这条用例的价值全在"它答出来了"。
+ */
+void test_h2c_deferred_reply() {
+  std::cout << "[1b] 明文 h2 上的推迟应答（req.reply + send_reply）"
+            << std::endl;
+  TestServer srv;
+  const int  port = srv.start(/*h2c=*/true);
+  check(port > 0, "服务端起来了（端口 0 由系统分配）");
+  if (port <= 0) return;
+
+  int         status = 0;
+  std::string body;
+  std::string sent;
+  std::string raw;
+  const bool  ok = h2_roundtrip(port, status, body, sent, raw, "/later");
+
+  info("发 " + std::to_string(sent.size()) + " 字节，收 " +
+       std::to_string(raw.size()) + " 字节" +
+       (raw.empty() ? std::string(" —— 服务端一个字节都没回")
+                    : std::string("；帧：" + frame_dump(raw))));
+
+  check(ok, "推迟那条也收到了完整的 h2 响应（不是静默超时）");
+  check(status == 200, "推迟那条的状态码是 200（实收 " +
+                           std::to_string(status) + "）");
+  check(body == "later", "推迟那条的响应体是 later（实收 \"" + body + "\"）");
 
   srv.shutdown();
 }
@@ -646,6 +712,7 @@ int main() {
             << std::endl;
 
   test_h2c_roundtrip();
+  test_h2c_deferred_reply();
   test_h1_unchanged_on_same_port();
   test_preface_byte_at_a_time();
   test_preface_split_at_last_byte();

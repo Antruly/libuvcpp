@@ -13,7 +13,9 @@
  *    `/staticfoo` 不算命中（挂载点是路径段，不是字符串前缀）；
  *  - **目录请求**：`/sub` 与 `/sub/` 都落到 `/sub/index.html`；
  *  - **HEAD 不带 body**（但 Content-Length 反映 GET 应有的长度）；
- *  - **连接代次号**：单调递增、永不复用；半途断连不写错连接。
+ *  - **连接代次号**：单调递增、永不复用；半途断连不写错连接；
+ *  - **多循环并发**（`set_loops(4)` + 8 路 × 120 次）：同一个服务对象被多条
+ *    循环线程同时用，判据是"逐条响应都对且进程活着"。
  *
  * 通过真实的 uvcpp_http_server（后台线程）+ uvcpp_http_client（阻塞同步）
  * 端到端验证，参考 tcp_server_func.cpp 的 server 线程模式。
@@ -153,6 +155,8 @@ struct StaticTestServer {
   std::string root;
   std::string url_root;
   bool spa_fallback;
+  /// 工作循环数（`set_loops()` 的实参）。1 = 今天的行为。
+  int loops;
 
   std::promise<int> port_promise;
   std::atomic<bool> stop{false};
@@ -164,14 +168,17 @@ struct StaticTestServer {
   int closes = 0;
 
   StaticTestServer(const std::string& r, bool spa,
-                   const std::string& mount = std::string("/"))
-      : root(r), url_root(mount), spa_fallback(spa) {}
+                   const std::string& mount = std::string("/"),
+                   int nloops = 1)
+      : root(r), url_root(mount), spa_fallback(spa), loops(nloops) {}
 
   int start() {
     thread = std::thread([this]() {
       uvcpp_static_server static_svr(root, url_root);
       static_svr.set_spa_fallback(spa_fallback);
       uvcpp_http_server server;
+      // 必须在 `listen()` 之前（见 `uvcpp_http_server::set_loops` 的 @warning）。
+      server.set_loops(loops);
 
       // 代次号只能从 loop 线程上问 —— 测试线程拿不到 server 对象。
       server.on_connection([this, &server](uvcpp_tcp_client* c) {
@@ -1020,6 +1027,116 @@ static bool test_stale_connection_crosstalk() {
   return ok;
 }
 
+// =========================================================================
+// Test 8: 多循环下的并发（`set_loops(n > 1)`）
+// =========================================================================
+/**
+ * @brief 同一个 `uvcpp_static_server` 被 n 条循环线程同时用。
+ *
+ * 这一条钉的是**多循环下的数据正确性**：判据是"并发跑完之后每一个响应都还是它
+ * 自己那个文件的内容，而且进程活着"。
+ *
+ * **它不是「修前必红」的那种用例 —— 别把它当成锁还在的证据。** 本类修的那三处
+ * 竞态（`cache_` 无锁的 `std::map`、`retired_` 无锁、以及按循环分桶）在入口层
+ * 是**立刻段错误**（见 `uvcpp_static_server.h` 顶上那张 A/B 表：h2load-h3 打
+ * `/static/*`，修前 `-c 4` 起就是 `0 done`）。但同样的代码在下面这个形状下
+ * **摘掉锁也照样全绿** —— 实测把 5 处加锁全摘掉重建，4 条循环 × 8 路 × 120 与
+ * 4 条循环 × 16 路 × 300 各跑 3 次都是 PASS。原因是这里的并发写窗口窄（只有
+ * 6 个缓存键、`retired_` 每轮 `serve()` 就排空一次），而数据竞争是 UB，不保证
+ * 以段错误的形式现形。所以这条用例能抓的是**错数据与进程死亡**，不是"锁被删了"。
+ *
+ * **为什么必须多循环才现形**：单循环下 `serve()` 与 after_work 都在同一条
+ * 线程上，两者天然互斥。这也是它一直没被本文件的前七条用例抓到的原因 ——
+ * 它们全是单循环。
+ *
+ * **判据不去数"多少条循环各处理了多少请求"**：那是统计判据（与
+ * `tcp_multiloop_func.cpp` 第 1 条同一个立场，文档 `doc/multiloop-design.md`
+ * §6）。这里要的是"并发下数据不错、不崩"，所以判据是逐条比 body/状态码。
+ *
+ * 负载里**必须有走线程池的那条路**（`big.bin` 的首次读盘 ⇒ `load_async` ⇒
+ * after_work 里 `retire()`），否则 `retired_` 根本不会被并发碰。所以这一节
+ * 特意关掉 SPA、并且每个线程都混着请求 404 与缓存命中。
+ */
+static bool test_multiloop_concurrency() {
+  if (!prepare_fs()) return false;
+
+  // 4 条工作循环 + acceptor = 5 条线程。取值小是有意的：这条用例要能在 CI 的
+  // 双核机器上跑。**不要因为"跑快点"往上加** —— 加循环数换不来更硬的判据
+  // （见本函数上面那段：摘掉锁跑到 16 路 × 300 也照样绿），只会让 CI 更慢。
+  StaticTestServer runner(kTmpDir, /*spa_fallback=*/false,
+                          /*mount=*/"/", /*nloops=*/4);
+  int port = runner.start();
+
+  const int nthreads = 8;
+  const int per_thread = 120;
+
+  struct Case { const char* path; int status; size_t len; };
+  static const Case kCases[] = {
+    {"/index.html",     200, sizeof("<html>INDEX-V1</html>") - 1},
+    {"/app.js",         200, 0},   // 长度下面单独算
+    {"/lib..min.js",    200, sizeof("MINIFIED") - 1},
+    {"/sub/index.html", 200, sizeof("<html>SUB-INDEX</html>") - 1},
+    {"/big.bin",        200, 256 * 1024},  // 走线程池读盘那条路
+    // 404 的 body 是框架给的错误页，长度不是这条用例要钉的东西 —— 只钉状态码。
+    {"/missing.css",    404, static_cast<size_t>(-1)},
+  };
+  const size_t ncases = sizeof(kCases) / sizeof(kCases[0]);
+
+  std::atomic<int> done(0);
+  std::atomic<int> bad(0);
+  std::mutex sample_mutex;
+  std::string sample;
+
+  std::vector<std::thread> workers;
+  for (int t = 0; t < nthreads; ++t) {
+    workers.push_back(std::thread([&, t]() {
+      for (int i = 0; i < per_thread; ++i) {
+        const Case& c = kCases[(t + i) % static_cast<int>(ncases)];
+        int status = 0;
+        std::string body;
+        if (!http_get(port, c.path, status, body)) {
+          ++bad;
+          std::lock_guard<std::mutex> lk(sample_mutex);
+          if (sample.empty()) sample = std::string(c.path) + " 请求没完成";
+          continue;
+        }
+        size_t want = c.len;
+        if (std::strcmp(c.path, "/app.js") == 0) want = std::strlen(kAppJs);
+        const bool len_ok =
+            want == static_cast<size_t>(-1) ? true : body.size() == want;
+        if (status != c.status || !len_ok) {
+          ++bad;
+          std::lock_guard<std::mutex> lk(sample_mutex);
+          if (sample.empty()) {
+            sample = std::string(c.path) + " -> " +
+                     std::to_string(status) + "，" +
+                     std::to_string(body.size()) + " 字节（期望 " +
+                     std::to_string(c.status) + "，" +
+                     std::to_string(want) + " 字节）";
+          }
+        }
+        ++done;
+      }
+    }));
+  }
+  for (size_t i = 0; i < workers.size(); ++i) workers[i].join();
+
+  bool ok = true;
+  if (bad.load() != 0) {
+    std::cout << "  [err] " << bad.load() << "/" << (nthreads * per_thread)
+              << " 个响应不对（第一例：" << sample << "）\n";
+    ok = false;
+  }
+  if (done.load() != nthreads * per_thread) {
+    std::cout << "  [err] 只有 " << done.load() << " 个请求跑完\n";
+    ok = false;
+  }
+
+  runner.shutdown();
+  cleanup_fs();
+  return ok;
+}
+
 int main(int argc, char** argv) {
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
@@ -1030,6 +1147,7 @@ int main(int argc, char** argv) {
     {"head_no_body", test_head_no_body},
     {"generation_and_midflight_disconnect", test_generation_and_midflight_disconnect},
     {"stale_connection_crosstalk", test_stale_connection_crosstalk},
+    {"multiloop_concurrency", test_multiloop_concurrency},
   };
   // 可选过滤：`test_web_static_server_func.exe <name>` 只跑一条。
   // 间歇性故障的定位全靠它 —— 整跑到一次崩溃要几十秒，单条用例是秒级，

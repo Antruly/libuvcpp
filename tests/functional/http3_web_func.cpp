@@ -38,7 +38,9 @@
  * 是因为服务端跑在另一个线程上）。
  */
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -48,11 +50,19 @@
 
 #if UVCPP_HTTP3_ENABLE
 
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>  // _mkdir / _rmdir
+#else
+#include <unistd.h>  // rmdir
+#endif
+
 #include <uv.h>
 
 #include <handle/uvcpp_loop.h>
 #include <handle/uvcpp_timer.h>
 #include <quic/uvcpp_quic_common.h>
+#include <req/uvcpp_work.h>
 #include <ssl/uvcpp_ssl_common.h>
 #include <ssl/uvcpp_ssl_context.h>
 #include <web/uvcpp_http_client.h>
@@ -61,6 +71,7 @@
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_http_response.h>
 #include <web/uvcpp_http_server.h>
+#include <web/uvcpp_static_server.h>
 
 #include "loop_drain.h"
 #include "wait_util.h"
@@ -537,16 +548,22 @@ void test_web_server_h3_and_h1_over_one_object() {
 }
 
 /**
- * @brief h3 上**明确不支持**的三样：`set_stream_claim()` 装的认领钩子、
- *        `post_stream()` 注册的流式路由、以及处理函数把 `resp.deferred` 置真。
+ * @brief h3 上**明确不支持**的两样，与**现在已经支持**的那一样。
  *
- * 为什么值得单独一条用例：这三样在本批里都是"**没有入口**"，而"没有入口"最糟的
- * 实现方式是**静默** —— 请求进来、处理函数没跑（或跑了但响应发不出去）、客户端
- * 一直等、服务端一处错误都不打。本用例钉的就是"撞上时是一条 500，不是一次静默
- * 超时"。
+ * 不支持：`set_stream_claim()` 装的认领钩子、`post_stream()` 注册的流式路由。
+ * 这两样都是"**没有入口**"，而"没有入口"最糟的实现方式是**静默** —— 请求进来、
+ * 处理函数没跑、客户端一直等、服务端一处错误都不打。所以判据钉的是"撞上时是一条
+ * 500，不是一次静默超时"。
  *
- * 四条：三条各自钉一个前提；最后一条是**对照** —— 把三样都撤掉之后，同一条 h3
- * 连接、同一个路径必须答 200。没有这条对照，"一律回 500"也能让上面三条全绿。
+ * 支持：处理函数把 `resp.deferred` 置真（推迟应答）。1.6.7 之前它也在上面那两样
+ * 里，理由是"h3 上没有稍后能用的发送入口" —— 那条腿上处理函数拿到的是
+ * `uvcpp_tcp_client*` 的 nullptr。补上 `req.reply` + `send_reply()` 之后入口有了，
+ * 于是它的判据从"500"翻成"兑现成 200"，并且**只收到一份响应**（框架不能在推迟之后
+ * 又抢着发一份）。这一条留着不删，正是为了钉住"只有一份"。
+ *
+ * 四条：A / B 各钉一个不支持的前提，C 钉推迟那条路，D 是**对照** —— 把前提都撤掉
+ * 之后，同一条 h3 连接、同一个路径必须答 200。没有 D，"一律回 500"也能让 A / B
+ * 全绿。
  */
 void test_unsupported_paths_refuse_explicitly() {
   uvcpp_http_server server;
@@ -572,14 +589,24 @@ void test_unsupported_paths_refuse_explicitly() {
     ++ok_calls;
     resp = uvcpp_http_response::ok("ok", 2);
   });
-  // 推迟应答要求处理函数手里有"稍后送出去"的入口（h1/h2 上是那个 `client` 与
-  // `send_response()`），h3 上没有 —— 它要的是 QUIC 连接句柄。
-  server.get("/defer", [&defer_seen](uvcpp_http_request&,
-                                     uvcpp_http_response& resp,
-                                     uvcpp_tcp_client*) {
+  // 推迟应答：**h3 上现在也做得到**。凭据是 `req.reply`（三条传输上都有），
+  // 兑现入口是 `server.send_reply()`。这里走一趟真的异步 —— 把结果投回循环
+  // 线程，回来时处理函数早就返回了、`req` 那份对象也早没了，能用的只剩下凭据。
+  server.get("/defer", [&server, &defer_seen](uvcpp_http_request& req,
+                                              uvcpp_http_response& resp,
+                                              uvcpp_tcp_client*) {
     ++defer_seen;
-    resp          = uvcpp_http_response::ok("not-now", 7);
-    resp.deferred = true;
+    const uvcpp_http_reply reply = req.reply;  // 按值留一份，别留引用
+    resp.deferred = true;  // 声明"这条响应由我负责"：框架这就不发了
+    uvcpp_work* w = new uvcpp_work();
+    w->queue_work(reply.loop(), [](uvcpp_work*) {},
+                  [&server, reply](uvcpp_work* self, int) {
+                    delete self;
+                    if (!server.reply_alive(reply)) return;
+                    uvcpp_http_response out =
+                        uvcpp_http_response::ok("later", 5);
+                    server.send_reply(reply, out);
+                  });
   });
   server.post_stream("/stream",
                      [&stream_seen](http_stream_event, const char*, size_t,
@@ -604,7 +631,7 @@ void test_unsupported_paths_refuse_explicitly() {
         "refuse: 握手在 deadline 内完成");
   check_eq_i(st, 0, "refuse: connect 的 cb 收到 0");
 
-  // 一次往返的帮手。**超时也算失败**：这三条要证明的正是"不是静默超时"，
+  // 一次往返的帮手。**超时也算失败**：这几条要证明的正是"不是静默超时"，
   // 所以谓词等的是"回调来过"，不是"等够了"。
   struct probe {
     int calls  = 0;
@@ -648,18 +675,23 @@ void test_unsupported_paths_refuse_explicitly() {
   check_eq_i(p.status, 500, "refuse: post_stream() 那条路由在 h3 上回 500");
   check_eq_i(stream_seen, 0, "refuse: 流式处理函数一次都没被调");
 
-  // ---- C) 处理函数把 `resp.deferred` 置真 ------------------------------
+  // ---- C) 处理函数把 `resp.deferred` 置真 —— **h3 上走得通了** ---------
+  // 这一条从前钉的是"500，不是静默超时"。1.6.7 起它不是"没有入口"那一类了：
+  // 凭据（`req.reply`）与兑现入口（`send_reply()`）三条腿上都有，于是判据反过来
+  // —— 那一次推迟**兑现**成了 200。留在这里而不是删掉，是因为"框架没有抢着先
+  // 发一份、又补发第二份"这件事仍然要钉（真发两份的话 `p.calls` 会是 2）。
   check(roundtrip(uvcpp_http_request::make_get("/defer")),
-        "refuse: deferred 那条也收到了应答");
-  check_eq_i(p.status, 500, "refuse: resp.deferred 在 h3 上回 500");
-  check_eq_i(defer_seen, 1,
-             "refuse: 处理函数跑了（推迟是它自己置的），只是那个推迟兑现不了");
+        "refuse: deferred 那条的响应到了（推迟之后由 send_reply 送出）");
+  check_eq_i(p.status, 200, "refuse: 推迟应答在 h3 上兑现成了 200");
+  check_eq_i(p.calls, 1,
+             "refuse: 推迟那条**只**收到一份响应（框架没有先发一份空的）");
+  check_eq_i(defer_seen, 1, "refuse: 处理函数跑了，且只跑了一次");
 
-  // ---- D) 对照：三样都不成立时，同一条连接、同一个路径照常 200 ---------
+  // ---- D) 对照：前提都撤掉时，同一条连接、同一个路径照常 200 -----------
   check(roundtrip(uvcpp_http_request::make_get("/ok")),
         "refuse: 对照那一条的响应到了");
   check_eq_i(p.status, 200,
-             "refuse: 三样都不成立时 /ok 照常 200（上面那三条是有条件的）");
+             "refuse: 前提都撤掉时 /ok 照常 200（上面那几条是有条件的）");
   check_eq_i(ok_calls, 1, "refuse: 对照那一条上处理函数跑了，且只跑了一次");
 }
 
@@ -735,6 +767,167 @@ void test_h3_only_stop_returns_from_run() {
              "h3-only: 状态落到 STOPPED");
 }
 
+// =========================================================================
+// 静态文件挂到 h3 上（`uvcpp_static_server` 的推迟应答走通）
+// =========================================================================
+
+/// 临时目录。与 `web_static_server_func.cpp` 用的是同一个形状（相对 CWD、
+/// 已存在也算成功），但**名字不同** —— 两条用例可能被同一个 ctest 进程先后
+/// 跑到，共用一块地会互相踩。
+const char* kStaticDir = "uvcpp_h3_static_tmp";
+
+std::string static_path(const std::string& rel) {
+  return std::string(kStaticDir) + "/" + rel;
+}
+
+bool ensure_dir(const std::string& abs) {
+  struct stat st;
+  if (stat(abs.c_str(), &st) == 0) return (st.st_mode & S_IFMT) == S_IFDIR;
+#ifdef _WIN32
+  return _mkdir(abs.c_str()) == 0;
+#else
+  return mkdir(abs.c_str(), 0755) == 0;
+#endif
+}
+
+bool write_text(const std::string& rel, const std::string& content) {
+  std::ofstream f(static_path(rel).c_str(), std::ios::binary | std::ios::trunc);
+  if (!f.good()) return false;
+  f.write(content.data(), static_cast<std::streamsize>(content.size()));
+  f.close();
+  return true;
+}
+
+void static_cleanup() {
+  std::remove(static_path("hello.txt").c_str());
+#ifdef _WIN32
+  _rmdir(kStaticDir);
+#else
+  rmdir(kStaticDir);
+#endif
+}
+
+/**
+ * @brief `uvcpp_static_server` 挂到 h3 上 —— 推迟应答那条路在第三条腿上走通。
+ *
+ * 这一条钉的是 1.6.7 那处补丁：h3 的派发从前对 `resp.deferred` 是**显式拒绝**
+ * （回 500 + 写 stderr），理由是"没有稍后能用的发送入口"——那条腿上处理函数拿到
+ * 的 `uvcpp_tcp_client*` 是 nullptr，而 `uvcpp_static_server` 正是靠 `client` +
+ * 代次号记账的。补上 `req.reply` / `send_reply()` 之后，同一个静态器不改一行
+ * 用法就挂得上第三条腿。
+ *
+ * 四条，各自钉一个**不同的** call site（这是本用例的主要价值 —— 静态那条路上
+ * "把响应送出去"有四个出口，只打一条覆盖不到另外三条）：
+ *
+ * - 首次请求 `/hello.txt`：`serve()` → `stat_async` → `stat_step` 未命中缓存 →
+ *   `load_async` → after_work 里 **`send_reply`**（读盘那条出口）；
+ * - 再请求一次同一个路径：`stat_step` 里**缓存命中**那一支直接发（第二条出口，
+ *   一条 work 都不排）；
+ * - `/nope.txt`（SPA 关掉）：`stat_step` 走到末尾的 404（第三条出口）；
+ * - HEAD `/hello.txt`：`is_head` 现在来自 `quic_ctx::h3_streams`（按流登记的那
+ *   一格），而不是形参 —— 这条同时钉住"推迟回来的那次发送还读得到按流状态"。
+ */
+void test_static_files_over_h3() {
+  if (!ensure_dir(kStaticDir) || !write_text("hello.txt", "static-over-h3")) {
+    std::cerr << "  [FAIL] 建不出静态测试目录 " << kStaticDir << std::endl;
+    ++g_failures;
+    return;
+  }
+
+  uvcpp_http_server server;
+  uvcpp_loop*       sloop = server.get_tcp_server()->get_loop();
+  uvcpp_test::loop_drain drain_sloop(sloop);
+
+  uvcpp_ssl_context server_ctx(tls_mode::SERVER, tls_version::TLS_1_3);
+  if (!server_ctx.generate_self_signed("localhost", 2048)) {
+    std::cerr << "  [FAIL] 生成自签证书失败" << std::endl;
+    ++g_failures;
+    static_cleanup();
+    return;
+  }
+  uvcpp_ssl_context client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3);
+  client_ctx.set_verify_mode(tls_verify_mode::NONE);
+
+  uvcpp_static_server st(kStaticDir);
+  // SPA 回退关掉：否则 `/nope.txt` 会回退到 index.html 而那里没这个文件，
+  // 于是 404 那条出口要靠"回退目标也不存在"才走到 —— 绕远且说不清在钉什么。
+  st.set_spa_fallback(false);
+  server.on_request(st.handler(&server));
+  server.set_quic_ssl_context(&server_ctx);
+
+  check_eq_i(server.listen_quic(0, "127.0.0.1"), 0, "static-h3: listen_quic(0)");
+  const int qport = server.quic_listen_port();
+
+  uvcpp_http_client h3c;
+  uvcpp_loop*       h3loop = h3c.get_tcp_client()->get_loop();
+  h3c.set_http3_enabled(true);
+  h3c.set_ssl_context(&client_ctx);
+
+  int st_code = 12345;
+  check_eq_i(h3c.connect("127.0.0.1", qport, [&st_code](int s) { st_code = s; }),
+             0, "static-h3: connect() 返回 0");
+  check(wait_all(sloop, h3loop, nullptr, [&] { return st_code != 12345; },
+                 kDeadlineMs),
+        "static-h3: 握手在 deadline 内完成");
+  check_eq_i(st_code, 0, "static-h3: connect 的 cb 收到 0");
+
+  struct got {
+    int         calls  = 0;
+    int         status = 0;
+    std::string body;
+    std::string clen;
+  };
+  got g;
+  auto roundtrip = [&](const uvcpp_http_request& req) -> bool {
+    g = got();
+    if (h3c.send(req, [&g](const uvcpp_http_response& r, int) {
+          ++g.calls;
+          g.status = static_cast<int>(r.status_code);
+          g.body   = r.body.to_string();
+          g.clen   = r.get_header("content-length");
+        }) != 0) {
+      return false;
+    }
+    return wait_all(sloop, h3loop, nullptr, [&] { return g.calls > 0; },
+                    kDeadlineMs);
+  };
+
+  // ---- 第 1 条：读盘那条出口（load_async 的 after_work 里 send_reply）----
+  check(roundtrip(uvcpp_http_request::make_get("/hello.txt")),
+        "static-h3: 首次请求 /hello.txt 的响应到了");
+  check_eq_i(g.status, 200, "static-h3: 首次请求 /hello.txt 回 200");
+  check_eq_s(g.body, "static-over-h3", "static-h3: 字节逐字相同");
+
+  // ---- 第 2 条：缓存命中那条出口（stat_step 里不排 work，直接发）--------
+  check(roundtrip(uvcpp_http_request::make_get("/hello.txt")),
+        "static-h3: 第二次请求 /hello.txt 的响应到了");
+  check_eq_i(g.status, 200, "static-h3: 缓存命中那条也回 200");
+  check_eq_s(g.body, "static-over-h3", "static-h3: 缓存命中的字节逐字相同");
+  check_eq_i(static_cast<long long>(st.cache_size()), 1,
+             "static-h3: 缓存里就那一格（第二次是命中，没有再排一次读盘）");
+
+  // ---- 第 3 条：404 那条出口 ------------------------------------------
+  check(roundtrip(uvcpp_http_request::make_get("/nope.txt")),
+        "static-h3: 不存在的路径也收到了应答（404，不是静默超时）");
+  check_eq_i(g.status, 404, "static-h3: 不存在的路径回 404");
+
+  // ---- 第 4 条：HEAD —— `is_head` 按流登记，推迟回来时仍读得到 ----------
+  check(roundtrip(uvcpp_http_request::make_head("/hello.txt")),
+        "static-h3: HEAD 的响应到了");
+  check_eq_i(g.status, 200, "static-h3: HEAD 回 200");
+  check_eq_s(g.body, "", "static-h3: HEAD 一个字节的 body 都不发");
+  check_eq_s(g.clen, "14",
+             "static-h3: HEAD 报的 content-length 是 GET 会有的长度");
+
+  // 四条打完连接还活着 —— 推迟应答如果哪一次把流用错了（回给别的流、或者
+  // 索性把连接弄死），这里会立刻显形。
+  check(roundtrip(uvcpp_http_request::make_get("/hello.txt")),
+        "static-h3: 四条之后同一条连接照样答得出下一条");
+  check_eq_i(g.status, 200, "static-h3: 那一条也是 200");
+
+  static_cleanup();
+}
+
 }  // namespace
 
 int main() {
@@ -744,6 +937,7 @@ int main() {
   test_web_server_h3_and_h1_over_one_object();
   test_unsupported_paths_refuse_explicitly();
   test_h3_only_stop_returns_from_run();
+  test_static_files_over_h3();
   quic_crypto_backend_free();
 
   std::cout << "[functional http3_web] checks=" << g_checks

@@ -542,6 +542,21 @@ uvcpp_http_server::quic_ctxs_at(int loop_index) {
   return quic_ctxs_[static_cast<size_t>(loop_index)];
 }
 
+const std::map<uvcpp_quic_connection*, uvcpp_http_server::quic_ctx>&
+uvcpp_http_server::quic_ctxs_at(int loop_index) const {
+  // 与上面那条非 const 版**判据逐条相同**（那边是权威）：越界的两个分支都夹回
+  // 0 号，因为 0 号一定存在（`quic_ctxs_` 只在 `listen_quic()` 里非空）。
+  //
+  // 这里**没有 abort 那条路**，而且不是漏了：-1 只在"不在任何循环线程上"出现，
+  // 而这条 const 路唯一的调用方是按凭据里存好的序号查表 —— 那个序号是**造凭据
+  // 那一刻**在循环线程上记下来的，不会是 -1。
+  if (loop_index < 0 ||
+      static_cast<size_t>(loop_index) >= quic_ctxs_.size()) {
+    return quic_ctxs_[0];
+  }
+  return quic_ctxs_[static_cast<size_t>(loop_index)];
+}
+
 std::map<uvcpp_quic_connection*, uvcpp_http_server::quic_ctx>&
 uvcpp_http_server::quic_ctxs_here() {
   // 单循环的快路径：表只有一张，就不去读线程本地量了 —— 与 `ctxs_of()` 那条
@@ -1412,6 +1427,10 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   // so these cannot be read back off the parser at send time.
   ctx.accept_encoding = http_get_header(req.headers, "accept-encoding");
   ctx.is_head = (req.method == http_method::HTTP_HEAD);
+
+  // 「稍后回话」凭据（见 `uvcpp_http_reply`）：h1 上它背后只有这条 TCP 连接，
+  // 流号恒为 0 —— 与 h2 那条腿同一个形状，处理函数因此不必分辨自己在哪条腿上。
+  fill_reply(req.reply, client, ctx, 0);
 
   uvcpp_http_response resp;
 
@@ -2482,6 +2501,97 @@ bool uvcpp_http_server::is_connected(uvcpp_tcp_client* client) const {
   return connection_generation(client) != 0;
 }
 
+// =========================================================================
+// 稍后回话：凭据的造与用
+// =========================================================================
+
+void uvcpp_http_server::fill_reply(uvcpp_http_reply& r, uvcpp_tcp_client* client,
+                                   const conn_ctx& ctx, int32_t stream_id) const {
+  // 就地写字段，**不查表**：这是每请求的热路，`ctx` 已经在手上了。
+  r.server_     = const_cast<uvcpp_http_server*>(this);
+  r.client_     = client;
+  r.loop_       = client->get_loop();
+  r.loop_index_ = client->loop_index();
+  r.stream_id_  = stream_id;
+  r.generation_ = ctx.generation;
+  r.version_    = uvcpp_http_version::HVER_11;
+#if UVCPP_NGHTTP2_ENABLE
+  // 版本由**连接**决定，不由流号决定：h2 连接上 `stream_id` 恒非 0，而 h1 上
+  // 它恒为 0 —— 判据取哪一个都行，取连接这一个少一次分支歧义。
+  if (ctx.h2 != nullptr) r.version_ = uvcpp_http_version::HVER_20;
+#endif
+}
+
+uvcpp_http_reply uvcpp_http_server::reply_of(uvcpp_tcp_client* client,
+                                             int32_t stream_id) const {
+  uvcpp_http_reply r;
+  if (client == nullptr) return r;
+  // 这一个入口**必须**查表：调用方手里只有 `client`，而"代次号"与"这条连接是
+  // 不是 h2"两件事都只有 `conn_ctx` 知道。派发那两处不走这里（它们有 `ctx`）。
+  const std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+  std::map<uvcpp_tcp_client*, conn_ctx>::const_iterator it = tbl.find(client);
+  if (it == tbl.end()) return r;  // 不在登记表里 ⇒ 无效凭据（`valid()` 为假）
+  fill_reply(r, client, it->second, stream_id);
+  return r;
+}
+
+#if UVCPP_HTTP3_ENABLE
+void uvcpp_http_server::fill_h3_reply(uvcpp_http_reply& r,
+                                      uvcpp_quic_connection* conn,
+                                      const quic_ctx& qc,
+                                      int64_t stream_id) const {
+  r.server_     = const_cast<uvcpp_http_server*>(this);
+  r.quic_       = conn;
+  r.loop_       = qc.loop;
+  r.loop_index_ = quic_loop_index_here();
+  r.stream_id_  = static_cast<int32_t>(stream_id);
+  r.generation_ = qc.generation;
+  r.version_    = uvcpp_http_version::HVER_30;
+}
+#endif
+
+bool uvcpp_http_server::reply_alive(const uvcpp_http_reply& reply) const {
+  // `server_ != this` 这一条不是多余的：一枚凭据可以被传给别人、也可以在服务器
+  // 析构之后被拿来用，两种情况下它都不是"我们这张表里的一条连接"。
+  if (!reply.valid() || reply.server_ != this) return false;
+  if (reply.generation_ == 0) return false;  // 从未登记
+#if UVCPP_HTTP3_ENABLE
+  if (reply.quic_ != nullptr) {
+    // h3 的表按循环切，凭据里存的那一号就是它自己那条循环。**不用
+    // `quic_ctxs_here()`**：那个入口读的是"当前线程在几号循环"，而本函数
+    // 允许在别的线程上被问（问一个布尔值不需要在循环线程上，见头文件的说明）。
+    const std::map<uvcpp_quic_connection*, quic_ctx>& t =
+        quic_ctxs_at(reply.loop_index_);
+    std::map<uvcpp_quic_connection*, quic_ctx>::const_iterator it =
+        t.find(reply.quic_);
+    return it != t.end() && it->second.generation == reply.generation_;
+  }
+#endif
+  if (reply.client_ == nullptr) return false;
+  const std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(reply.client_);
+  std::map<uvcpp_tcp_client*, conn_ctx>::const_iterator it =
+      tbl.find(reply.client_);
+  return it != tbl.end() && it->second.generation == reply.generation_;
+}
+
+int uvcpp_http_server::send_reply(const uvcpp_http_reply& reply,
+                                  uvcpp_http_response& resp) {
+  if (!reply.valid() || reply.server_ != this) return UV_EINVAL;
+  // 连接换人了就**一个字节都不发**。这不是"保险"：地址被新连接复用时，那枚
+  // 凭据里存的指针指向的是**另一条连接**，写下去就是把 A 的响应发给 B。
+  if (!reply_alive(reply)) return UV_ENOENT;
+#if UVCPP_HTTP3_ENABLE
+  if (reply.quic_ != nullptr) {
+    return send_h3_response(reply.quic_, reply.stream_id_, resp);
+  }
+#endif
+  if (reply.client_ == nullptr) return UV_EINVAL;
+  // h2 的流号在 `resp` 上（会话层按它归位），而调用方造出来的响应通常是"新"的、
+  // 那一格是 0 —— 凭据里带的那一个才是权威。h1 上这一句是写 0，等于没写。
+  resp.stream_id = reply.stream_id_;
+  return static_cast<int>(send_response(reply.client_, resp));
+}
+
 void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
   // 对端断开走的是**这条路**（`set_on_close` → 这里），不是 close_connection。
   // 所以队列里那几块的 done 必须在这里唤醒 —— 少了这一步，它们永远不响，而
@@ -2728,6 +2838,11 @@ void uvcpp_http_server::dispatch_h2_request(uvcpp_tcp_client* client,
   sit->second.accept_encoding = http_get_header(req.headers, "accept-encoding");
   sit->second.is_head = (req.method == http_method::HTTP_HEAD);
 
+  // 「稍后回话」凭据（见 `uvcpp_http_reply`）：h2 上它比 h1 多一样东西 ——
+  // 流号。一条 h2 连接上并发跑着多条流，处理函数推迟应答时"我替哪条流回话"
+  // 全靠它，而推迟那条路上 `resp.stream_id` 可能已经被整对象替换冲掉了。
+  fill_reply(req.reply, client, ctx, stream_id);
+
   uvcpp_http_response resp;
   resp.stream_id = stream_id;
 
@@ -2814,7 +2929,17 @@ void uvcpp_http_server::on_quic_connection(uvcpp_quic_connection* conn) {
   // **先登记、再 start**：`start()` 会同步冲一轮待发字节（三条关键流），那一轮
   // 随时可能把对端触发的回调跑起来 —— 那时表里必须已经有这一项，否则一个立刻
   // 到达的请求会在一张空表上查不到连接（被静默丢掉）。
-  tbl[conn].h3 = h3;
+  quic_ctx& qc = tbl[conn];
+  qc.h3 = h3;
+  // 代次用**同一个**计数器（`conn_ctx::generation` 那个）：两条腿各一套号会让
+  // "这个号是哪条腿的"变成一个新的歧义，而它要回答的问题一模一样。
+  qc.generation = ++next_generation_;
+  // 循环在 `listen_quic` 建端点时定下来，这里只是取回来 —— h3 的回调只可能在
+  // 它自己那条端点的循环线程上跑，所以这一句读到的就是对的（见 `quic_ctx::loop`）。
+  if (static_cast<size_t>(li) < quic_servers_.size() &&
+      quic_servers_[static_cast<size_t>(li)] != nullptr) {
+    qc.loop = quic_servers_[static_cast<size_t>(li)]->get_loop();
+  }
   // 计数与登记同步（同一条线程，同一个临界区之外也没有并发读者会看到"登记了但
   // 没计数"——读数那两格只是给人看的近似值，见头文件）。
   {
@@ -2843,11 +2968,19 @@ void uvcpp_http_server::on_quic_connection(uvcpp_quic_connection* conn) {
       // （下面 `dispatch_h3_request` 里那几处才是）。
       uvcpp_http_response bad =
           uvcpp_http_response::make(http_status::BAD_REQUEST);
-      send_h3_response(conn, h3req.stream_id, bad, std::string(),
-                       /*is_head=*/false);
+      send_h3_response(conn, h3req.stream_id, bad);
       return;
     }
     dispatch_h3_request(conn, req);
+  };
+  cbs.on_stream_close = [this, conn](uvcpp_h3_connection&,
+                                     const h3_stream_close_info& info) {
+    // 流收场 ⇒ 它的那格状态也收场。**按流**：一条连接上同时跑着多条流，删错了
+    // 就是把另一条流的 `is_head` 抹掉。连接已经摘表了（`on_disconnect` 先跑）
+    // 就什么都不做 —— 那一整格连同表项一起没了。
+    std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+    std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = t.find(conn);
+    if (it != t.end()) it->second.h3_streams.erase(info.stream_id);
   };
   cbs.on_error = [](uvcpp_h3_connection&, int code) {
     // h3 层收到致命错误之后**会自己把 QUIC 连接关掉**（那是唯一正确的动作，
@@ -2875,6 +3008,21 @@ void uvcpp_http_server::dispatch_h3_request(uvcpp_quic_connection* conn,
   // （h2 那边同一个理由），而本函数一路都要用它。
   const int64_t stream_id = req.stream_id;
 
+  // 这条流的状态就在这一句建立：**推迟应答**要在响应发出去那一刻回来读它，而
+  // 那时手上只有连接与流号（见 `quic_ctx::h3_streams`）。建立点必须在所有会
+  // 发响应的分支**之前**，否则推迟那一条自己就成了唯一读不到状态的人。
+  std::map<uvcpp_quic_connection*, quic_ctx>& tbl = quic_ctxs_here();
+  std::map<uvcpp_quic_connection*, quic_ctx>::iterator cit = tbl.find(conn);
+  if (cit == tbl.end() || cit->second.h3 == nullptr) return;  // 连接已收尾
+  {
+    quic_ctx::h3_stream_state& ss = cit->second.h3_streams[stream_id];
+    ss.accept_encoding = http_get_header(req.headers, "accept-encoding");
+    ss.is_head = (req.method == http_method::HTTP_HEAD);
+  }
+  // 「稍后回话」的凭据 —— h3 上它是处理函数**唯一**能拿到的那一枚（那条腿上
+  // 第三个形参恒为 nullptr）。在跑处理函数之前填好。
+  fill_h3_reply(req.reply, conn, cit->second, stream_id);
+
   // 这一批没做的那两样，**显式拒绝**而不是静默错路由。两条都写在分派**之前**：
   // 它们是服务端**配置**层面的条件，撞上时用户的处理函数根本不该被跑起来 ——
   // 跑起来它就会收到一个自己没打算接的请求，然后回一个"看着正常"的响应。
@@ -2890,7 +3038,7 @@ void uvcpp_http_server::dispatch_h3_request(uvcpp_quic_connection* conn,
                               : "post_stream() 注册的流式路由");
     uvcpp_http_response gap =
         uvcpp_http_response::make(http_status::INTERNAL_SERVER_ERROR);
-    send_h3_response(conn, stream_id, gap, std::string(), /*is_head=*/false);
+    send_h3_response(conn, stream_id, gap);
     return;
   }
 
@@ -2905,8 +3053,9 @@ void uvcpp_http_server::dispatch_h3_request(uvcpp_quic_connection* conn,
   auto handler = find_handler(req.method, req.url);
   if (handler) {
     // 第三个参数 `uvcpp_tcp_client*` 在 h3 上**没有对应物** ⇒ 传 nullptr。
-    // 这是"处理函数不该认传输"那条设计的边界：需要连接级动作（关闭、原始写）
-    // 的处理函数在 h3 下拿不到句柄，只能按 `resp.version` 分辨自己在哪条腿上。
+    // 这条腿上的连接句柄是 `req.reply`（推迟应答要用的那一枚），不是它 —— 需要
+    // 连接级动作（关闭、原始写）的处理函数在 h3 下拿不到 `client`，只能按
+    // `req.reply.version()` 分辨自己在哪条腿上。
     handler(req, resp, nullptr);
   } else {
     resp = uvcpp_http_response::not_found();
@@ -2917,33 +3066,36 @@ void uvcpp_http_server::dispatch_h3_request(uvcpp_quic_connection* conn,
   }
 
   if (resp.deferred) {
-    // 推迟应答要求处理函数手里有"稍后把响应送出去"的入口（h1/h2 上那是
-    // `client` 与 `send_response()`）—— h3 这条腿上没有：上面给的是 nullptr，
-    // 而 `send_h3_response()` 要一个 QUIC 连接句柄。
-    // **明说**：静默什么都不发，对端会一直等到超时，而且一处错误都没有。
-    std::fprintf(stderr,
-                 "[uvcpp_http_server] h3 上不支持 resp.deferred（推迟应答）："
-                 "没有稍后能用的发送入口\n");
-    uvcpp_http_response gap =
-        uvcpp_http_response::make(http_status::INTERNAL_SERVER_ERROR);
-    send_h3_response(conn, stream_id, gap, std::string(), /*is_head=*/false);
+    // 推迟应答：处理函数**自己**负责把响应送出去，入口是 `req.reply` 与
+    // `send_reply()`（h1/h2 上是 `client` 与 `send_response()`）。这里必须
+    // 什么都不做 —— 发了就是同一个请求两份响应。
     return;
   }
 
-  send_h3_response(conn, stream_id, resp,
-                   http_get_header(req.headers, "accept-encoding"),
-                   req.method == http_method::HTTP_HEAD);
+  send_h3_response(conn, stream_id, resp);
 }
 
 int uvcpp_http_server::send_h3_response(uvcpp_quic_connection* conn,
                                         int64_t stream_id,
-                                        uvcpp_http_response& resp,
-                                        const std::string& accept_encoding,
-                                        bool is_head) {
+                                        uvcpp_http_response& resp) {
   std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
   std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = t.find(conn);
   if (it == t.end() || it->second.h3 == nullptr) return UV_EINVAL;
   uvcpp_h3_connection* h3 = it->second.h3;
+
+  // `accept_encoding` / `is_head` 是**按流**取的，取自派发那一刻登记的那一格
+  // （`quic_ctx::h3_streams`）。取不到（畸形请求的 400、流已经收场）就按
+  // "没有压缩、不是 HEAD" 处理 —— 那正是这两样的默认值。
+  std::string accept_encoding;
+  bool is_head = false;
+  {
+    std::map<int64_t, quic_ctx::h3_stream_state>::iterator sit =
+        it->second.h3_streams.find(stream_id);
+    if (sit != it->second.h3_streams.end()) {
+      accept_encoding = sit->second.accept_encoding;
+      is_head = sit->second.is_head;
+    }
+  }
 
   // 与 `send_h2_response` 逐条相同：h3 也是一条**绕过** `send_response` 的独立
   // 应答路径（h1 那个入口要 `uvcpp_tcp_client*`），所以下面这几件一件都不能少
@@ -2951,8 +3103,8 @@ int uvcpp_http_server::send_h3_response(uvcpp_quic_connection* conn,
   http_ensure_date(resp);
 
   // 压缩是协议无关的，而且在这条腿上是**按流取值**：h3 一条连接上同样并发跑着
-  // 多条流，编码串在分派那一刻就从这条请求自己的头里取出来递进来了（h2 那边
-  // 是临时借进连接级单槽，h3 连可借的槽都没有 —— 于是有了
+  // 多条流，编码串在分派那一刻就从这条请求自己的头里取出来、随流登记下来了
+  // （h2 那边是临时借进连接级单槽，h3 连可借的槽都没有 —— 于是有了
   // `apply_compression_for`）。
   apply_compression_for(accept_encoding, resp);
 

@@ -21,6 +21,7 @@
 #include <uvcpp/uvcpp_define.h>
 #include <uvcpp/uvcpp_buf.h>
 #include <web/uvcpp_http_common.h>
+#include <web/uvcpp_http_reply.h>
 
 namespace uvcpp {
 
@@ -49,6 +50,20 @@ class UVCPP_API uvcpp_http_request {
    * —— 没有这个字段，一个延迟应答的处理函数就说不清自己在替哪条流回话。
    */
   int32_t       stream_id = 0;
+
+  /**
+   * @brief 这条请求的「稍后回话」凭据 —— 见 @ref uvcpp_http_reply。
+   *
+   * 三条传输上**都**会被框架填好（h1 / h2 / h3），处理函数按值留一份就能在
+   * 异步结果回来时凭它把响应送出去（`uvcpp_http_server::send_reply()`）。它是
+   * `resp.deferred = true` 那条路的另一半：置了 `deferred` 却拿不到凭据，那条
+   * 响应就永远发不出去。
+   *
+   * @warning **按值留，别留引用**：它指向的是这次派发的那份请求对象，而那份对象
+   *          的寿命只到处理函数返回（h1 上它是**连接级复用**的那个对象，下一个
+   *          请求就会把它改掉）。异步路径上留引用是留了一个迟早会指向别人的指针。
+   */
+  uvcpp_http_reply reply;
 
   // -------------------------------------------------------------------
   // Header operations

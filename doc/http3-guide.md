@@ -12,7 +12,7 @@
 >
 > 两个功能用例在一条循环上真起一个服务端与一个客户端，真握手、真发请求、真收
 > 响应：`http3_request_func.cpp`（95 条断言，h3 这一层）与 `http3_web_func.cpp`
-> （92 条断言，走 `uvcpp_http_client` / `uvcpp_http_server` 的公开面）。
+> （112 条断言，走 `uvcpp_http_client` / `uvcpp_http_server` 的公开面）。
 > 这些不是"设计好了"，是量出来的。**同一个 `uvcpp_http_server` 对象**在同一条
 > 循环上既答 h3 也答 h1，这正是下面 [§6](#6-接进-web-层之后-h1-的判据是什么)
 > 那条硬约束的护栏。
@@ -53,6 +53,7 @@
 6. [接进 web 层之后 h1 的判据是什么](#6-接进-web-层之后-h1-的判据是什么)
 7. [典型坑](#7-典型坑)
 8. [没做的（如实列出）](#8-没做的如实列出)
+9. [推迟应答：h3 上补上的那一半](#9-推迟应答h3-上补上的那一半)
 
 ---
 
@@ -302,10 +303,13 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
   用例钉着（`http3_web_func.cpp` 的 `test_h3_only_stop_returns_from_run()`）。
 - **h3 上暂不支持流式路由。** `post_stream` 注册的流式处理函数与
   `set_stream_claim` 装的认领钩子在 TCP 那条路上才生效；一条 h3 请求撞上它们会被
-  **显式拒绝**（500 + stderr 一行），而不是被静默路由错。同理，h3 上
-  `resp.deferred` 会被拒，处理函数拿到的是 `client == nullptr`。
-  **这三条各有断言**（`test_unsupported_paths_refuse_explicitly()`）——
+  **显式拒绝**（500 + stderr 一行），而不是被静默路由错。
+  **这两条各有断言**（`test_unsupported_paths_refuse_explicitly()`）——
   静默错路由是这一层最容易犯、也最难查的错。
+- **推迟应答（`resp.deferred`）在 h3 上是支持的**（`1.6.8-dev` 起，见
+  [§9](#9-推迟应答h3-上补上的那一半)）。处理函数拿到的仍然是
+  `client == nullptr`（一条 QUIC 连接下面没有 TCP 客户端这回事），但"稍后回话"
+  的凭据在 `req.reply` 上 —— 三条传输同一个形状。
 
 ---
 
@@ -319,7 +323,8 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 | **端到端 GET**（开流 → 头块 → 响应 → `take_completed()` 恰好一次） | **真实现** | `http3_request_func.cpp` |
 | **三条关键单向流**（控制流 + QPACK 编码/解码流，含"额度没到时补开"） | **真实现** | `http3_request_func.cpp`（三条流号非 -1） |
 | **头部预算**（`namelen + valuelen + 32`，越界当场断开而不是解完再看） | **真实现** | `http3_request_func.cpp` |
-| **两条显式拒绝**（认领钩子、流式路由）+ `resp.deferred` 拒绝 | **真实现** | `http3_web_func.cpp` 的 `test_unsupported_paths_refuse_explicitly()` |
+| **两条显式拒绝**（认领钩子、流式路由） | **真实现** | `http3_web_func.cpp` 的 `test_unsupported_paths_refuse_explicitly()` |
+| **推迟应答**（`resp.deferred` + `req.reply` + `send_reply()`） | **真实现**（`1.6.8-dev`） | `http3_web_func.cpp` 的 `test_unsupported_paths_refuse_explicitly()` 与 `test_static_files_over_h3()` |
 | **接进 web 层**（`listen_quic` / `set_http3_enabled`，同一个 server 同时答 h3 与 h1） | **真实现** | `http3_web_func.cpp` |
 | **h3-only 的 `stop()` 让 `run()` 回来** | **真实现** | `http3_web_func.cpp` 的 `test_h3_only_stop_returns_from_run()`（带看门狗） |
 | 压缩（`accept-encoding` 按**每条流**取，h1/h3 共用同一份实现） | **真实现** | `http3_web_func.cpp`（h3 与 h1 两条腿各验一次往返） |
@@ -456,7 +461,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 **（c）往共享结构里加了什么：服务端零。** h3 用**另一张表**
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
-`src/web/uvcpp_http_server.h:1507`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
+`src/web/uvcpp_http_server.h:1610-1610`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
 的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:473-479`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假
@@ -550,9 +555,10 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   继续走 HTTP/1.1 的 `Upgrade`（h2 上同样不做，见 `doc/http2-status.md`）。
 - **h3 上没有流式路由。** `post_stream` 的流式处理函数与 `set_stream_claim` 的
   认领钩子在 TCP 那条路上才生效；h3 上撞上它们是**显式拒绝**（500 + 一行 stderr），
-  不是静默错路由。`resp.deferred` 同理。
+  不是静默错路由。（`resp.deferred` **曾经**在这一串里，`1.6.8-dev` 起支持了 ——
+  见 [§9](#9-推迟应答h3-上补上的那一半)。）
 - **h3 上 `client` 是 `nullptr`。** 处理函数拿不到 `uvcpp_tcp_client*` —— 一条
-  QUIC 连接下面没有 TCP 客户端这回事。
+  QUIC 连接下面没有 TCP 客户端这回事。要"稍后回话"就用 `req.reply`。
 - ~~**没有多循环支持。**~~ **已撤销（`1.6.6-dev`）**：`uvcpp_http_server::set_loops(n)`
   会把 1..n−1 号 QUIC 端点各建到一条工作循环上（端点那一层的开关是
   `uvcpp_quic_server::set_reuseport()`），`quic_fanout()` 报扇出到底成没成。**回落是常态
@@ -578,6 +584,66 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   的 M18 钉着。trailers / push / 逐帧回调仍不给，见 [C ABI 指南](./capi-guide.md) §4。
 - **没有 h3 的优先/依赖（`priority`）语义**，也没有连接级统计。
 
-下一步是**把 h3 上的流式路由补上**（`post_stream` / `set_stream_claim` 需要一条
-"稍后把响应送出去"的入口，h3 的 `stream_id` 就是那个句柄），以及 **GOAWAY 的
-平滑退场**。0-RTT、连接迁移那些仍然不在路线图上 —— 它们要等有真实需求时才谈。
+---
+
+## 9. 推迟应答：h3 上补上的那一半
+
+`1.6.8-dev` 之前，h3 的派发对 `resp.deferred` 是**显式拒绝**的：写一行 stderr、
+回 500。理由写得很实在 —— 「推迟应答要求处理函数手里有"稍后把响应送出去"的入口，
+而 h3 这条腿上处理函数拿到的是 `uvcpp_tcp_client*` 的 nullptr，`send_h3_response()`
+要的是一个 QUIC 连接句柄」。**拒绝不是缺陷**（静默才是），但它把一整类处理函数挡在
+了第三条腿之外：`uvcpp_static_server` 就是靠"稍后答"活着的，于是 `static-h3`
+这一档根本订阅不了。
+
+补上的东西是 `uvcpp_http_reply` —— 一枚**值语义的句柄**，三条传输上同一个形状：
+
+| 传输 | 凭据背后 |
+|---|---|
+| HTTP/1.1 | 那条 TCP 连接（流号恒为 0） |
+| HTTP/2 | 那条连接 **+ 它的一条流** |
+| HTTP/3 | 那条 QUIC 连接 **+ 它的一条流** |
+
+处理函数从 `req.reply` 拿它（框架在三条腿的派发那一步都填好），兑现入口是
+`uvcpp_http_server::send_reply()`。写之前先问 `reply_alive()`（见
+[web HTTP 指南](./web-http-guide.md) §6 那段 —— 凭据不保证"还能回话"，地址会被复用）。
+
+```cpp
+#include <net/uvcpp_tcp_client.h>
+#include <req/uvcpp_work.h>
+#include <web/uvcpp_http_request.h>
+#include <web/uvcpp_http_response.h>
+#include <web/uvcpp_http_server.h>
+
+void doc_h3_deferred(uvcpp::uvcpp_http_server& server) {
+  server.get("/slow", [&server](uvcpp::uvcpp_http_request& req,
+                                uvcpp::uvcpp_http_response& resp,
+                                uvcpp::uvcpp_tcp_client*) {
+    const uvcpp::uvcpp_http_reply reply = req.reply;  // 按值留，别留引用
+    resp.deferred = true;                            // 声明"这次不由框架发"
+    uvcpp::uvcpp_work* w = new uvcpp::uvcpp_work();
+    w->queue_work(reply.loop(), [](uvcpp::uvcpp_work*) {},
+                  [&server, reply](uvcpp::uvcpp_work* self, int) {
+                    delete self;
+                    if (!server.reply_alive(reply)) return;  // 换人了：丢掉
+                    uvcpp::uvcpp_http_response late =
+                        uvcpp::uvcpp_http_response::ok("done", 4);
+                    server.send_reply(reply, late);
+                  });
+  });
+}
+```
+
+**按流的那两样跟着凭据走。** `accept-encoding` 与"是不是 HEAD"在 h3 上是**按流**
+取的（一条连接上并发跑着多条流），而推迟那条路上"回来发送"与"派发"之间隔了一次
+异步 —— 请求对象早没了。所以它们随流登记在 `quic_ctx::h3_streams` 里，由
+`send_h3_response()` 自己回来查，生命周期跟着流走（`on_stream_close` 里删）。
+
+判据在 `http3_web_func.cpp` 的两条用例上：`test_unsupported_paths_refuse_explicitly()`
+的 C 段（推迟**兑现**成 200，且**只收到一份**响应 —— 框架不能在推迟之后又抢着发一份）
+与 `test_static_files_over_h3()`（`uvcpp_static_server` 挂上第三条腿，四条出口各打一次：
+读盘、缓存命中、404、HEAD）。
+
+**下一步**是把 h3 上的**流式**路由补上（`post_stream` / `set_stream_claim`）——
+它要的不是"稍后把响应送出去"（那件事现在有了），而是"边收边交给使用者"，
+即把 h3 的 `on_data` 接出来。以及 **GOAWAY 的平滑退场**。0-RTT、连接迁移那些仍然
+不在路线图上 —— 它们要等有真实需求时才谈。

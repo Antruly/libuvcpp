@@ -54,6 +54,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -68,17 +69,32 @@ class uvcpp_work;
 /**
  * @brief 静态文件服务：懒加载 + mtime 校验缓存 + 线程池异步读盘。
  *
- * @warning **多循环（`n > 1`）下尚不安全，别拿它当 `uvcpp_web_static` 用。**
+ * **多循环（`n > 1`）下可用**（1.6.8 起）。这一份的 `cache_` / `retired_` 从前
+ * 与 `uvcpp_web_static` 修好之前是同一个形状：按"循环线程只有一条"写的，既没有
+ * 锁也没有按循环分桶。那时的判断是"本类在本仓库里没有生产调用点（只有用例构造
+ * 它），改它就是改一段没人跑、也验不了的代码"。
  *
- * 这一份的 `cache_` / `retired_` 与从前的 `uvcpp_web_static` 是同一个形状：
- * 按"循环线程只有一条"写的，既没有锁也没有按循环分桶。请求路径上真正活着的
- * 那个是 `uvcpp_web_static`（`uvcpp_web_app::serve_static()` 造的就是它），
- * 它已经修好了；**本类在本仓库里没有任何生产调用点**（只有用例构造它），
- * 所以行为改动推迟到有调用方时再做 —— 现在改就是改一段没人跑、也验不了的
- * 代码。
+ * 那个前提在 h3 上不成立了：`uvcpp_http_server` 没有 `serve_static()` 那种高层
+ * 入口（`uvcpp_web_app` 才有），**h3 那条腿要挂静态文件只能用本类** —— 而 h3 的
+ * 端点默认就扇在 `set_loops(n)` 条循环上。于是两处按 `uvcpp_web_static.cpp` 里
+ * `Impl::mu_` 与 `Impl::retired` 的注释补齐。
  *
- * 多循环下要用它，先按 `uvcpp_web_static.cpp` 里 `Impl::mu_` 与
- * `Impl::retired` 的注释把这两处补齐。
+ * 判据是**入口层（h2load-h3 打 `/static/*`，同一份条目、同一台机器）的 A/B**，
+ * 不是"看着加了锁"：
+ *
+ * | 并发 | 修前 | 修后 |
+ * |---|---|---|
+ * | `-c 4` | 立刻死，`0 done`（段错误落在 `drain_retired()` 的 `delete` 上） | 全 2xx |
+ * | `-c 16` | 立刻死 | 16,690 / 16,690 全 2xx |
+ * | `-c 64` | 立刻死 | 17,431 完成、2 失败，进程存活 |
+ *
+ * **下面那条功能用例不是「修前必红」的那种**，别把它当成锁还在的证据：
+ * `tests/functional/web_static_server_func.cpp::multiloop_concurrency` 钉的是
+ * **多循环下逐条响应的正确性**（状态码 + body 长度逐条比对）与进程存活。
+ * 实测把本类的 5 处加锁再摘掉（`retire` / `drain_retired` / `drain_all_retired` /
+ * 缓存写 / 缓存读）重建后重跑，4 条循环 × 8 路 × 120 与 4 条循环 × 16 路 × 300
+ * **都仍然全绿**（各跑 3 次）—— 这里的并发写窗口窄，而且是 UB，不保证以段错误的
+ * 形式现形。所以：**这条用例绿，说明不了锁还在**；钉住这个修复的是上表那条 A/B。
  */
 class UVCPP_API uvcpp_static_server {
 public:
@@ -98,10 +114,18 @@ public:
    * @brief 生成兜底 handler，供 server.on_request() 直接挂载。
    * @param server 所属 HTTP 服务器（deferred 响应发送需要）。
    * @note 本对象生命周期必须不短于 server（handler 捕获了 this 指针）。
+   * @note 挂在 `on_request()` 上就等于三条传输（h1 / h2 / h3）都归它管：
+   *       推迟应答走的是 `req.reply` + `send_reply()`，不再依赖 `client`。
    */
   http_request_handler handler(uvcpp_http_server* server);
 
-  /** @brief 手动处理一个请求（handler() 内部即调用本方法）。 */
+  /**
+   * @brief 手动处理一个请求（handler() 内部即调用本方法）。
+   *
+   * @param client 这条请求的 TCP 连接，**h3 上传 nullptr**。本方法只在
+   *        `req.reply` 无效时才用它现造一枚凭据（手工构造的请求对象走的那条
+   *        老路），所以 h3 上传 nullptr 不影响它工作。
+   */
   void serve(uvcpp_http_request& req, uvcpp_http_response& resp,
              uvcpp_tcp_client* client, uvcpp_http_server* server);
 
@@ -138,10 +162,14 @@ private:
    * 为什么不是同步 stat：整个库的硬性约定是「事件循环线程上不做 IO」。
    * 本地 SSD 上一次 stat 是微秒级，但网络盘/机械盘上是毫秒级 —— 而
    * "通常很快"不是保证。所以元数据和读盘走同一条路（线程池）。
+   *
+   * @param reply 这条请求的「稍后回话」凭据（见 @ref uvcpp_http_reply）。
+   *        从前这里传的是 `(generation, client)` 两格 —— 换成凭据之后 h3
+   *        那条腿也走得通了（那里没有 `uvcpp_tcp_client*` 可传）。
    */
   void stat_async(std::string fs_path, std::string url_path,
                   std::string spa_fs_path, std::string spa_url_path,
-                  int step, uint64_t generation, uvcpp_tcp_client* client,
+                  int step, const uvcpp_http_reply& reply,
                   uvcpp_http_server* server);
 
   /** @brief stat 完成后的分派：目录 → 拼 index 再来一次；不存在 → SPA 回退；否则发。 */
@@ -150,22 +178,18 @@ private:
   /** @brief 异步读盘：线程池读文件，loop 线程更新缓存 + deferred 发送。 */
   void load_async(const std::string& fs_path, const std::string& cache_key,
                   int64_t msec, int64_t mnsec, int64_t size,
-                  uint64_t generation, uvcpp_tcp_client* client,
-                  uvcpp_http_server* server);
+                  const uvcpp_http_reply& reply, uvcpp_http_server* server);
 
-  /**
-   * @brief 这条连接还是当初那条吗？不是就别写。
-   *
-   * 光比指针不够：连接关掉后 `uvcpp_tcp_client` 会被 delete，新连接完全可能
-   * 落在同一个地址上。代次号单调递增不复用，所以地址被复用时对不上号。
-   */
-  static bool connection_matches(uvcpp_http_server* server,
-                                 uvcpp_tcp_client* client, uint64_t generation);
+  // 「这条连接还是当初那条吗」那条判据搬进了 `uvcpp_http_reply` 自己
+  // （`uvcpp_http_server::reply_alive()`）：它要的那两样 —— 代次号与"在哪张表里
+  // 查" —— 正是凭据随身带着的东西，于是本类不必再自己存一遍、也不必再判一次
+  // `client == nullptr`（h3 那条腿上它恒为真）。
 
   static std::string mime_of(const std::string& path);
 
   /**
-   * @brief 把用完的 `uvcpp_work` 挂起来，**下次 `serve()` 时**才真正 delete。
+   * @brief 把用完的 `uvcpp_work` 挂起来，**下次同一循环进 `serve()` 时**才真正
+   *        delete。
    *
    * 为什么不能在 after_work 回调里直接 delete：`uvcpp_work::m_after_work_cb`
    * 就是**正在执行的那个闭包本身**（`callback_after_work()` 里是
@@ -174,23 +198,66 @@ private:
    * 已释放内存。这个坑在 `webapp/uvcpp_web_static.cpp` 上实测是约 50% 概率的
    * 段错误（只在寄存器分配迫使重新加载时才炸，所以时灵时不灵）。
    *
-   * 本文件两处回调都把 `delete work` 放在**最后一句**，今天恰好没炸；但那是
-   * 运气而不是保证 —— 编译器换个内联策略、或者谁在末尾再加一行读捕获的
-   * 代码，就变成同一个 bug。所以统一改成"挂起来、下次进 `serve()` 再删"，
-   * 那时早已不在任何回调里。
+   * @param loop **投递这个 `work` 的那条循环**（`queue_work()` 的第一个实参）。
+   *        分桶的理由与 `uvcpp_web_static` 里 `Impl::retired` 那份逐字相同：
+   *        `delete` 的时机是"这条循环下次进 `serve()`"，合成一个桶的话，循环 0
+   *        的 `serve()` 会把循环 1 上还没跑完回调的 `work` 一起删掉 —— 循环 1
+   *        随后在那个已释放的对象上执行回调。分桶之后每条循环只删自己投出去的，
+   *        而"同一条循环正在跑 after_work"与"同一条循环正在跑 `serve()`"互斥。
    */
-  void retire(uvcpp_work* w) { retired_.push_back(w); }
+  void retire(uvcpp_loop* loop, uvcpp_work* w);
 
-  /** @brief 真正释放挂起的 `uvcpp_work`。**只能在 loop 线程调**。 */
-  void drain_retired();
+  /** @brief 真正释放 \p loop 那一条循环攒下的。**只能在该循环线程上调。** */
+  void drain_retired(uvcpp_loop* loop);
+
+  /** @brief 析构用：所有桶一起排空（此后没有别的线程会往里放）。 */
+  void drain_all_retired();
+
+  /**
+   * @brief 当前代码跑在哪条循环上 —— `drain_retired()` 的桶键。
+   *
+   * `client` 优先（h1/h2 上它就是这条请求的连接，而连接属于哪条循环是确定的）；
+   * h3 上 `client` 恒为 nullptr，取凭据里存好的那一个（h3 的回调只可能在它自己
+   * 那条端点的循环线程上跑）。两者都取不到（用例手工造的请求对象、又没给
+   * 连接）时返回 nullptr，那时**不排空任何桶**——宁可不删，也不删错。
+   */
+  static uvcpp_loop* loop_of(uvcpp_tcp_client* client,
+                             const uvcpp_http_reply& reply);
 
   std::string local_dir_;
   std::string url_root_;
   std::string index_file_;
   bool spa_fallback_ = true;
   bool cache_enabled_ = true;
+
+  /**
+   * @brief 内存缓存，**受 `mu_` 护**。
+   *
+   * 从前它是"循环线程只有一条"写的（无锁）。多循环下两个循环线程同时
+   * `cache_.find()` 与 `cache_[k] = e`（后者是插入，会动红黑树结构）就是
+   * 并发写同一张 `std::map`。
+   */
   std::map<std::string, CacheEntry> cache_;
-  std::vector<uvcpp_work*> retired_;
+
+  /**
+   * @brief 待回收的 `uvcpp_work`，**按循环分桶**（见 @ref retire）。
+   *
+   * **表本身**（增删桶）受 `mu_` 护 —— 两条循环同时 `retired_[l]` 就是往同一张
+   * `std::map` 上并发写。桶里的 `delete` 在锁外做。
+   */
+  std::map<uvcpp_loop*, std::vector<uvcpp_work*> > retired_;
+
+  /**
+   * @brief 护 `cache_` 与 `retired_` 的表结构。
+   *
+   * **锁，不是分片**，理由与 `uvcpp_web_static` 那份相同：分片会让每片各有一份
+   * 缓存，内存成倍而命中率反而掉（同一条路径的请求落到不同片上互相看不见）。
+   * 单循环下这把锁没有可争用的对象，代价是一次未争用的 `lock`/`unlock`。
+   *
+   * `mutable`：`serve()` 走的是非 const 路径，但 `resolve_url()` 这类只读者是
+   * const —— 留成 mutable 免得将来加只读访问器时再回来改一遍。
+   */
+  mutable std::mutex mu_;
 };
 
 }  // namespace uvcpp

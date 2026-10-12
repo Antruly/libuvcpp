@@ -129,9 +129,12 @@ stat_kind stat_path(uvcpp_loop* loop, const std::string& path,
 struct uvcpp_static_server::StatTask {
   uvcpp_static_server* self;
   uvcpp_http_server* server;
-  uvcpp_tcp_client* client;
-  uint64_t generation;      // 发起时的连接代次（回来时要对得上）
-  uvcpp_loop* loop;         // 从 loop 线程记下来的，worker 里不能再碰 client
+  // 「稍后回话」凭据 —— 代替从前的 `(client, generation)` 两格。它把"回给哪条
+  // 连接、哪条流"与"还是不是当初那条"两件事收在一处，而且是**三条传输上同一
+  // 个形状**：h3 上根本没有 `uvcpp_tcp_client*` 可留（那条腿上处理函数拿到的是
+  // nullptr），从前那条静态路由因此在 h3 上走不通。
+  uvcpp_http_reply reply;
+  uvcpp_loop* loop;         // `reply.loop()`，在 loop 线程上取好；worker 里别碰 reply
 
   std::string fs_path;      // 当前要 stat 的本地路径
   std::string url_path;     // 对应的 URL 路径（缓存键）
@@ -149,8 +152,7 @@ struct uvcpp_static_server::StatTask {
 struct uvcpp_static_server::LoadTask {
   uvcpp_static_server* self;    // 事件循环线程回调用（更新缓存）
   uvcpp_http_server* server;    // deferred 响应发送
-  uvcpp_tcp_client* client;     // 客户端连接
-  uint64_t generation;          // 发起时的连接代次
+  uvcpp_http_reply reply;       // 回给哪条连接哪条流（见 StatTask 里那段说明）
   std::string fs_path;          // 本地文件路径
   std::string cache_key;        // 缓存键（URL 路径）
   int64_t mtime_sec;            // serve 阶段 stat 到的 mtime
@@ -188,12 +190,50 @@ uvcpp_static_server::~uvcpp_static_server() {
   // 注意这**不能**保证"析构之后没有回调再来" —— 在途任务捕获的 `self` 仍是
   // 本对象。那条约定是 `handler()` 文档里写的「本对象生命周期必须不短于
   // server」，属于调用方的责任，这里只是把已经退役的那批还掉。
-  drain_retired();
+  drain_all_retired();
 }
 
-void uvcpp_static_server::drain_retired() {
-  for (size_t i = 0; i < retired_.size(); ++i) delete retired_[i];
-  retired_.clear();
+void uvcpp_static_server::retire(uvcpp_loop* loop, uvcpp_work* w) {
+  std::lock_guard<std::mutex> lk(mu_);
+  retired_[loop].push_back(w);
+}
+
+void uvcpp_static_server::drain_retired(uvcpp_loop* loop) {
+  // 取不到循环（用例手工造的请求对象又没给连接）⇒ **一个桶都不排空**。
+  // 宁可不删：删错桶是 UAF，不删只是这一批多活一会儿，下次总有一条真循环
+  // 的 `serve()` 或析构来收。
+  if (loop == nullptr) return;
+  std::vector<uvcpp_work*> mine;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::map<uvcpp_loop*, std::vector<uvcpp_work*> >::iterator it =
+        retired_.find(loop);
+    if (it == retired_.end()) return;
+    mine.swap(it->second);
+    retired_.erase(it);
+  }
+  // 锁外删：`~uvcpp_work` 里会发生什么不该由这把锁兜着。
+  for (size_t i = 0; i < mine.size(); ++i) delete mine[i];
+}
+
+void uvcpp_static_server::drain_all_retired() {
+  std::map<uvcpp_loop*, std::vector<uvcpp_work*> > all;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    all.swap(retired_);
+  }
+  for (std::map<uvcpp_loop*, std::vector<uvcpp_work*> >::iterator it =
+           all.begin();
+       it != all.end(); ++it) {
+    for (size_t i = 0; i < it->second.size(); ++i) delete it->second[i];
+  }
+}
+
+uvcpp_loop* uvcpp_static_server::loop_of(uvcpp_tcp_client* client,
+                                         const uvcpp_http_reply& reply) {
+  if (client != nullptr) return client->get_loop();
+  if (reply.valid()) return reply.loop();
+  return nullptr;
 }
 
 http_request_handler uvcpp_static_server::handler(uvcpp_http_server* server) {
@@ -240,17 +280,15 @@ bool uvcpp_static_server::resolve_url(const std::string& raw_url,
 void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
                                      std::string spa_fs_path,
                                      std::string spa_url_path, int step,
-                                     uint64_t generation,
-                                     uvcpp_tcp_client* client,
+                                     const uvcpp_http_reply& reply,
                                      uvcpp_http_server* server) {
   StatTask* task = new StatTask();
   task->self = this;
   task->server = server;
-  task->client = client;
-  task->generation = generation;
-  // **在 loop 线程上把 loop 指针记下来**。worker 里绝不能再通过 client 去取
+  task->reply = reply;
+  // **在 loop 线程上把 loop 指针记下来**。worker 里绝不能再通过 reply 去取
   // 它 —— 那时连接可能已经被回收，而 loop 的生命周期覆盖整个服务器。
-  task->loop = client != nullptr ? client->get_loop() : nullptr;
+  task->loop = reply.loop();
   task->fs_path = fs_path;
   task->url_path = url_path;
   task->spa_fs_path = spa_fs_path;
@@ -264,7 +302,7 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
   uvcpp_work* work = new uvcpp_work();
   int rc = work->queue_work(
       task->loop,
-      // worker 线程：只做元数据，不碰 client / server
+      // worker 线程：只做元数据，不碰 reply / server
       [task](uvcpp_work*) {
         task->kind = stat_path(task->loop, task->fs_path, task->mtime_sec,
                                task->mtime_nsec, task->size);
@@ -272,10 +310,10 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
       [task, work](uvcpp_work*, int /*status*/) {
         uvcpp_static_server* self = task->self;
         self->stat_step(task);
-        // `work` 交给 `serve()` 回收 —— 详见 `retire()` 的注释。**这里之后
-        // 绝不能再碰 `work`**；`task` 是另一个堆对象，`work` 还没被释放，
-        // 所以读捕获变量 `task` 仍然是安全的。
-        self->retire(work);
+        // `work` 交给**这条循环**下次进 `serve()` 时回收 —— 详见 `retire()`
+        // 的注释。**这里之后绝不能再碰 `work`**；`task` 是另一个堆对象，
+        // `work` 还没被释放，所以读捕获变量 `task` 仍然是安全的。
+        self->retire(task->loop, work);
         delete task;
       });
 
@@ -290,30 +328,40 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
 
 void uvcpp_static_server::stat_step(StatTask* task) {
   // 连接已经换人了（或者断了）：**什么都别写**。地址可能已经被新连接复用，
-  // 写下去就是把 A 的响应发给 B。
-  if (!connection_matches(task->server, task->client, task->generation)) {
+  // 写下去就是把 A 的响应发给 B —— 凭据里的代次号就是为这一句存在的。
+  if (!task->server->reply_alive(task->reply)) {
     return;
   }
 
   if (task->kind == stat_kind::FILE) {
     // 缓存命中且文件没变 → 内存直出（零磁盘 IO）
     if (cache_enabled_) {
-      std::map<std::string, CacheEntry>::iterator it =
-          cache_.find(task->url_path);
-      if (it != cache_.end() && it->second.mtime_sec == task->mtime_sec &&
-          it->second.mtime_nsec == task->mtime_nsec &&
-          it->second.size == task->size) {
-        const CacheEntry& e = it->second;
-        uvcpp_http_response resp =
-            uvcpp_http_response::ok(e.data->data(), e.data->size(), e.mime);
-        task->server->send_response(task->client, resp);
+      // 查与取在锁内，**用**在锁外：命中时把条目**拷一份**出来（`CacheEntry`
+      // 里那块数据是 `shared_ptr`，拷贝是三次指针/整数赋值），这样
+      // `send_reply()` —— 它会一路走到写 socket —— 不在这把锁里跑。
+      CacheEntry hit;
+      bool found = false;
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::map<std::string, CacheEntry>::iterator it =
+            cache_.find(task->url_path);
+        if (it != cache_.end() && it->second.mtime_sec == task->mtime_sec &&
+            it->second.mtime_nsec == task->mtime_nsec &&
+            it->second.size == task->size) {
+          hit = it->second;
+          found = true;
+        }
+      }
+      if (found) {
+        uvcpp_http_response resp = uvcpp_http_response::ok(
+            hit.data->data(), hit.data->size(), hit.mime);
+        task->server->send_reply(task->reply, resp);
         return;
       }
     }
     // 未命中或文件已变更 → 异步读盘（线程池），deferred 响应
     load_async(task->fs_path, task->url_path, task->mtime_sec,
-               task->mtime_nsec, task->size, task->generation, task->client,
-               task->server);
+               task->mtime_nsec, task->size, task->reply, task->server);
     return;
   }
 
@@ -327,8 +375,8 @@ void uvcpp_static_server::stat_step(StatTask* task) {
     if (!url.empty() && url[url.size() - 1] != '/') url += '/';
     url += index_file_;
 
-    stat_async(dir, url, task->spa_fs_path, task->spa_url_path, 1,
-               task->generation, task->client, task->server);
+    stat_async(dir, url, task->spa_fs_path, task->spa_url_path, 1, task->reply,
+               task->server);
     return;
   }
 
@@ -336,25 +384,23 @@ void uvcpp_static_server::stat_step(StatTask* task) {
   if (task->step < 2 && !task->spa_fs_path.empty() &&
       task->spa_fs_path != task->fs_path) {
     stat_async(task->spa_fs_path, task->spa_url_path, std::string(),
-               std::string(), 2, task->generation, task->client, task->server);
+               std::string(), 2, task->reply, task->server);
     return;
   }
 
   uvcpp_http_response resp = uvcpp_http_response::not_found();
-  task->server->send_response(task->client, resp);
+  task->server->send_reply(task->reply, resp);
 }
 
 void uvcpp_static_server::load_async(const std::string& fs_path,
                                      const std::string& cache_key, int64_t msec,
                                      int64_t mnsec, int64_t size,
-                                     uint64_t generation,
-                                     uvcpp_tcp_client* client,
+                                     const uvcpp_http_reply& reply,
                                      uvcpp_http_server* server) {
   LoadTask* task = new LoadTask();
   task->self = this;
   task->server = server;
-  task->client = client;
-  task->generation = generation;
+  task->reply = reply;
   task->fs_path = fs_path;
   task->cache_key = cache_key;
   task->mtime_sec = msec;
@@ -364,7 +410,7 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
 
   uvcpp_work* work = new uvcpp_work();
   int rc = work->queue_work(
-      client->get_loop(),
+      reply.loop(),
       // worker 线程：只做磁盘 IO
       [task](uvcpp_work*) {
         task->data = std::make_shared<std::string>();
@@ -375,12 +421,12 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
         uvcpp_static_server* self = task->self;
         // 先把 `work` 挂起来（只是入队，不释放任何东西），之后**再也不碰它**。
         // 放在最前面是为了让"两条 return 路径都别漏了回收"这件事不可能写错。
-        self->retire(work);
+        // 桶键取**投递它的那条循环**（`queue_work()` 的第一实参就是它）。
+        self->retire(task->reply.loop(), work);
 
         uvcpp_http_response resp;
-        // 连接换人了就别写 —— 见 `connection_matches()`。
-        if (!connection_matches(task->server, task->client,
-                                task->generation)) {
+        // 连接换人了就别写 —— 凭据里的代次对不上就不发（见 `reply_alive()`）。
+        if (!task->server->reply_alive(task->reply)) {
           delete task;
           return;
         }
@@ -391,40 +437,41 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
           e.mtime_sec = task->mtime_sec;
           e.mtime_nsec = task->mtime_nsec;
           e.size = task->size;
-          self->cache_[task->cache_key] = e;
+          {
+            // 插入会动红黑树结构，而别的循环线程可能正在这棵树上查 —— 见头文件
+            // 里 `cache_` 的说明。锁内只做这一次赋值，`mime_of()` 留在外面。
+            std::lock_guard<std::mutex> lk(self->mu_);
+            self->cache_[task->cache_key] = e;
+          }
           resp = uvcpp_http_response::ok(e.data->data(), e.data->size(), e.mime);
         } else {
           resp = uvcpp_http_response::not_found();
         }
-        task->server->send_response(task->client, resp);
+        task->server->send_reply(task->reply, resp);
         delete task;
       });
 
   // 极端情况：线程池排队失败，直接兜底 404 并回收
   if (rc != 0) {
-    if (connection_matches(server, client, generation)) {
+    if (server->reply_alive(reply)) {
       uvcpp_http_response resp = uvcpp_http_response::not_found();
-      server->send_response(client, resp);
+      server->send_reply(reply, resp);
     }
     delete task;
     delete work;
   }
 }
 
-bool uvcpp_static_server::connection_matches(uvcpp_http_server* server,
-                                             uvcpp_tcp_client* client,
-                                             uint64_t generation) {
-  if (server == nullptr || client == nullptr) return false;
-  return server->connection_generation(client) == generation;
-}
-
 void uvcpp_static_server::serve(uvcpp_http_request& req, uvcpp_http_response& resp,
                                 uvcpp_tcp_client* client,
                                 uvcpp_http_server* server) {
-  // 先把上一批用完的 `uvcpp_work` 真正删掉。这里是**安全的删除点**：`serve()`
-  // 由请求驱动，必然跑在 loop 线程上，而且此时不在任何 libuv 完成回调里 ——
-  // 与在 after_work 回调里 delete 完全是两回事（详见 `retire()`）。
-  drain_retired();
+  // 先把**本条循环**上一批用完的 `uvcpp_work` 真正删掉。这里是**安全的删除点**：
+  // `serve()` 由请求驱动，必然跑在 loop 线程上，而且此时不在任何 libuv 完成回调里
+  // —— 与在 after_work 回调里 delete 完全是两回事（详见 `retire()`）。
+  //
+  // 只看自己这一桶：别的循环攒下的`work`，其 after_work 回调**排在别的循环上**，
+  // 可能还没跑完；在这里顺手删掉就是让那条循环在一个已释放的对象上继续执行回调。
+  drain_retired(loop_of(client, req.reply));
 
   // 仅 GET / HEAD
   if (req.method != http_method::HTTP_GET &&
@@ -439,10 +486,20 @@ void uvcpp_static_server::serve(uvcpp_http_request& req, uvcpp_http_response& re
     return;
   }
 
-  // 记下这条连接此刻的代次。异步跑完回来时要靠它确认"还是同一条连接"。
-  const uint64_t generation = server->connection_generation(client);
-  if (generation == 0) {
-    // 连接已经不在服务器上了 —— 写它没有意义，而且指针可能已被复用。
+  // 「稍后回话」凭据：异步跑完回来时**全靠它**（它同时回答了"回给哪条连接哪条
+  // 流"与"还是不是当初那条"）。
+  //
+  // 优先取框架填好的那枚 `req.reply` —— **三条传输上都有**，于是本类不必知道
+  // 自己在 h1 / h2 / h3 哪条腿上（从前它只认 `client`，而 h3 那条腿上处理函数
+  // 拿到的是 nullptr，静态路由因此在 h3 上直接不可用）。取不到才退回按 `client`
+  // 现造一枚：那是**手工构造的请求对象**走的老路（用例里这么干），只存在于 h1/h2。
+  uvcpp_http_reply reply = req.reply;
+  if (!reply.valid() && client != nullptr) {
+    reply = server->reply_of(client, resp.stream_id);
+  }
+  // 造不出有效凭据（连接已经不在服务器上了）⇒ 写它没有意义，而且指针可能已被
+  // 复用。回一个 404 而不是推迟 —— 推迟出去也没有入口能把它送出去。
+  if (!server->reply_alive(reply)) {
     resp = uvcpp_http_response::not_found();
     return;
   }
@@ -462,8 +519,7 @@ void uvcpp_static_server::serve(uvcpp_http_request& req, uvcpp_http_response& re
   // 元数据也要异步取：sync stat 在事件循环线程上是阻塞 IO，
   // 本地盘上微秒级、网络盘上是毫秒级 —— 属于"通常很快但不是保证"的那类。
   resp.deferred = true;
-  stat_async(fs_path, url_path, spa_fs_path, spa_url_path, 0, generation, client,
-             server);
+  stat_async(fs_path, url_path, spa_fs_path, spa_url_path, 0, reply, server);
 }
 
 std::string uvcpp_static_server::mime_of(const std::string& path) {

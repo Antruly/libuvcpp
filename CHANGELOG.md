@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.7-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.8-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -408,6 +408,35 @@
 
 ### HTTP/3（web 层）
 
+- **h3 上的「稍后应答」通了 —— `static-h3` 那一档从此订阅得上**（`1.6.8-dev`）：
+  h3 派发从前对 `resp.deferred` 一律回 500 + 写 stderr（那条腿上交给处理函数的
+  `uvcpp_tcp_client*` 是 `nullptr`，没有任何东西能"稍后回话"）。补的是
+  `uvcpp_http_reply` —— 一枚**与传输无关的**「稍后回话」凭据（见下面「HTTP 与
+  WebSocket 语义」那条）；h3 上它由 `quic_ctx` 的按流表兜住，在
+  `on_stream_close` 回调里注销。于是 `uvcpp_static_server` / `uvcpp_web_static`
+  那条 deferred 的路在 h3 上原样走通。**判据两半**：①
+  `tests/functional/http3_web_func.cpp` 里那条「不支持的路径显式拒绝」改成
+  「被支持」—— `deferred` 从 500 变 200，`set_stream_claim` 与 `post_stream`
+  仍是 500（它们要的是另一套能力），并加了一条"三个条件全关时仍 200"的对照；
+  ② 平台 `scripts/validate.sh` 里那条断言
+  `h2load --alpn-list=h3 -n 4 -c 1 -t 1 https://localhost:$H2PORT/static/reset.css`
+  本机实测 **4/4 个 2xx**（修前 0/4）。同一份条目按 `static-h3` 的形状压
+  （`-c 64 -m 64 -t 8 -D 3s`）：**17,433 完成 / 17,505 个 2xx，约 5,811 rps、
+  120 MB/s**
+- **`uvcpp_static_server` 的多循环竞态**（`1.6.8-dev`）：本类的 `cache_` 与
+  `retired_` 从前是"循环线程只有一条"写的（两张表都没有锁），而 h3 那条腿
+  **只有本类可用**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`），
+  h3 端点又默认扇在 `set_loops(n)` 条循环上 —— 它就这样从"没有生产调用点的代码"
+  变成了线上路径。按 `uvcpp_web_static` 修好时那份形状补齐：`mu_` 护两张表、
+  `retired_` **按循环分桶**（`delete` 只能在该循环线程上做；合成一个桶会把别的
+  循环还在跑回调的 `uvcpp_work` 删掉，是 UAF）。**判据是入口层的 A/B**（同一份
+  条目、同一台机器，h2load-h3 打 `/static/*`）：修前 `-c 4` 起立刻死、`0 done`
+  （段错误落在 `drain_retired()` 的 `delete` 上）；修后 `-c 16` →
+  **16,690 / 16,690 全 2xx**、`-c 64` → **17,431 完成 / 2 失败**，进程存活。
+  新增用例 `tests/functional/web_static_server_func.cpp::multiloop_concurrency`
+  （4 条工作循环 × 8 路 × 120 次，逐条比状态码与 body 长度）钉的是**多循环下的
+  数据正确性**；它**不是**"修前必红"的那种 —— 实测把本类 5 处加锁全摘掉重建后
+  它照样全绿（4×8×120 与 4×16×300 各跑 3 次），所以它绿**不能**当成锁还在的证据
 - **`listen_quic()` 会把 QUIC 端点扇到工作循环上**（`1.6.6-dev`）：`set_loops(n)` 之后
   0 号端点建在 acceptor 线程、1..n−1 号各投递到一条工作循环上建（有界等待，任一失败
   整体回滚）。`quic_fanout()` 报成没成、`quic_connection_count_at(i)` 报每端点的连接数
@@ -645,6 +674,18 @@
 
 ### HTTP 与 WebSocket 语义
 
+- **`uvcpp_http_reply`：与传输无关的「稍后回话」凭据**（`1.6.8-dev`）。h1/h2 上的
+  推迟应答本来靠处理函数拿到的 `uvcpp_tcp_client*`，而"这还是当初那条连接吗"只能
+  另外问一次（代次号）；h3 那条腿连连接对象都没有。新类型把这层值语义化：
+  `uvcpp_http_server::reply_of()` 取一枚、`reply_alive()` 判它还有没有效、
+  `send_reply()` 发。里面装的是**代次号 + "在哪张表里查"**，所以传值、拷贝都安全，
+  且连接地址被新连接复用时"一个字节都不发"（不是保险，是防把 A 的响应发给 B）。
+  **顺带修掉一个潜伏的 h2 缺陷**：h2 上流号在 `resp` 上，而调用方造出来的响应通常
+  是"新"的、那一格是 0，凭据里带的那一个才是权威 —— 从前少了这一句，`send_response()`
+  就把一份**流号 0** 的响应交给会话层，它归位不了、静默丢弃，客户端一直等到超时。
+  **判据**：`tests/functional/web_h2_cleartext_func.cpp` 新增的 `h2c_deferred_reply`
+  （`/later` 路由，`req.reply` + `send_reply()`）—— 修前这条超时，修后 200；h3 那半
+  在 `http3_web_func.cpp` 里（见上）
 - 错误路径不再编造状态码；连接中途断开时不再交付编出来的 `200`（`1.1.10`、`1.1.11`）
 - `Accept-Encoding` 里显式写出的 `q=0` 不再被 `*` 覆盖（`1.1.17`）
 - `HEAD` 与 `GET` 的头完全一致，压缩响应也一样（`1.1.18`、`1.1.21`）
