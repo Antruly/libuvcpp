@@ -1436,10 +1436,15 @@ class UVCPP_API uvcpp_http_server {
     };
     std::map<int64_t, h3_stream_state> h3_streams;
   };
+#endif  // UVCPP_HTTP3_ENABLE
 
   // -------------------------------------------------------------------
   // 凭据：就地把一枚 uvcpp_http_reply 填满
   // -------------------------------------------------------------------
+  //
+  // 这一段**不在上面那道 `#if` 里**：`fill_reply` 是 h1 与 h2 两条腿共用的，
+  // 把它关进 h3 的守卫里会让 HTTP3=OFF 的配置编译不过（声明没了、定义还在）。
+  // 下一道 `#if` 到本文件末尾为止，h3 那半边的声明都在里面。
 
   /**
    * @brief 填一枚 h1/h2 凭据（派发那两处的收口）。
@@ -1455,7 +1460,6 @@ class UVCPP_API uvcpp_http_server {
   /** @brief @ref fill_reply 的 h3 版（那条腿上没有 `conn_ctx`）。 */
   void fill_h3_reply(uvcpp_http_reply& r, uvcpp_quic_connection* conn,
                      const quic_ctx& qc, int64_t stream_id) const;
-#endif
 
   /**
    * @brief 本线程所在那条循环的 h3 登记表。**镜像 @ref ctxs_here 那一套。**
