@@ -217,10 +217,10 @@ size_t close_all_clients();
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:486`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:618-619`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:522`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:654-655`） |
 
-`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1026-1028`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1037-1039`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
 
@@ -527,7 +527,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:482-484`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:518-520`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -606,7 +606,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`src/net/uvcpp_tcp_server.cpp:959-966`）。
+（`src/net/uvcpp_tcp_server.cpp:970-977`）。
 
 ---
 
@@ -755,7 +755,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:399-402`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:605-613`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:641-649`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`
@@ -814,8 +814,11 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   T 到什么程度、为什么这么切，见 [C ABI 指南](./capi-guide.md) §4。
 - **多循环两端都已落地**：net 层 `uvcpp_tcp_server::set_loops()`（§4）与框架层
   `uvcpp_web_app::set_loops(n)` 都有了，后者配套 `loop_count()` /
-  `connection_count_at(int)`；注意 `connections()` 只返回**本循环**那一份。客户端与
-  UDP 两侧都没有多循环，细节见[多循环设计](./multiloop-design.md)。
+  `connection_count_at(int)`；注意 `connections()` 只返回**本循环**那一份。
+  **UDP 那一侧也落地了，但形状不同**（`1.6.6-dev`）：`uvcpp_quic_server::set_reuseport()`
+  用的是**每端点一个 socket + `UV_UDP_REUSEPORT`**，由内核按 4 元组哈希分流，
+  没有转手那一套；平台给不出分流语义时回落单端点（`is_reuseport()` 如实报），
+  见[多循环设计](./multiloop-design.md) §9。**客户端那一侧仍然没有多循环。**
 
 ---
 

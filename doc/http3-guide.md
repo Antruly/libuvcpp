@@ -285,7 +285,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 }
 ```
 
-- `uvcpp_http_server::listen_quic()` 在 `src/web/uvcpp_http_server.h:222`，
+- `uvcpp_http_server::listen_quic()` 在 `src/web/uvcpp_http_server.h:270`，
   客户端那一侧是 `set_http3_enabled()`（`src/web/uvcpp_http_client.h:322`）。
   **整个 h3 公开面都套在 `#if UVCPP_HTTP3_ENABLE` 里** —— 没编进来时它不存在，
   这是**编译期**的"没有"，不是运行时返回错误。
@@ -293,8 +293,10 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
   ClientHello 里报 `h3` 会让对端把 h3 的二进制流喂给 llhttp，症状是"连上了、
   写得出去、响应永远不来、哪里都不报错"。所以 `uvcpp_http_client` 原来那份 ALPN
   列表**一个字没动**，h3 走 `uvcpp_quic_client` 自己的 ALPN。
-- **两种传输共用一条循环。** `uvcpp_quic_server` 不做多循环扇出，`run()` 在有
-  QUIC 端点时直接跑那条循环；`stop()` 两条腿都停。**只开 h3 也必须调 `stop()`**
+- **两种传输共用一条循环**（扇出之后是"共用那 n 条"）。`uvcpp_http_server::set_loops(n)`
+  在 `listen_quic()` **之前**调时，0 号端点建在 acceptor 那条循环上、1..n−1 号各建在一条
+  工作循环上；**没调、或 `set_loops(1)`** 时 `run()` 在有 QUIC 端点时直接跑那条循环，
+  与改动前逐字相同。`stop()` 两条腿都停。**只开 h3 也必须调 `stop()`**
   —— 纯 h3 的服务端上 TCP 那条腿一次都没 `listen()`，`uvcpp_tcp_server::stop()`
   会同步早返回，少了"停 QUIC 循环"那一句，`run()` 永远不回来。这条有专门一条
   用例钉着（`http3_web_func.cpp` 的 `test_h3_only_stop_returns_from_run()`）。
@@ -403,7 +405,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
    模块"，所以 §3.3 那条明明只用 web 层 API 的片段也列了
    `<http3/uvcpp_h3_connection.h>` —— 不列的话它会**被编**，而它调的
    `set_http3_enabled()` / `listen_quic()` 整段在 `#if UVCPP_HTTP3_ENABLE` 里
-   （`uvcpp_http_client.h:299`、`uvcpp_http_server.h:188`），于是报的是"未声明的
+   （`uvcpp_http_client.h:299`、`uvcpp_http_server.h:220`），于是报的是"未声明的
    成员"：那是**假红**（文档没腐烂，是那个包没编 h3）。
    登记之后，`config-contract` job 手里那个包会把这三条判成 `[跳·默认关]` 而不是
    `[跳]`，**退出码不会抬到 3**。两个宏（`UVCPP_QUIC_ENABLE`、`UVCPP_HTTP3_ENABLE`）
@@ -454,7 +456,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 **（c）往共享结构里加了什么：服务端零。** h3 用**另一张表**
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
-`src/web/uvcpp_http_server.h:1232`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
+`src/web/uvcpp_http_server.h:1404`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
 的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:473-479`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假
@@ -551,8 +553,13 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   不是静默错路由。`resp.deferred` 同理。
 - **h3 上 `client` 是 `nullptr`。** 处理函数拿不到 `uvcpp_tcp_client*` —— 一条
   QUIC 连接下面没有 TCP 客户端这回事。
-- **没有多循环支持。** `uvcpp_quic_server` 不做多循环扇出（`set_loops()` ），
-  所以 h3 只有一条循环在收包。两种传输共用那一条循环。
+- ~~**没有多循环支持。**~~ **已撤销（`1.6.6-dev`）**：`uvcpp_http_server::set_loops(n)`
+  会把 1..n−1 号 QUIC 端点各建到一条工作循环上（端点那一层的开关是
+  `uvcpp_quic_server::set_reuseport()`），`quic_fanout()` 报扇出到底成没成。**回落是常态
+  而不是异常** —— 平台给不出 `SO_REUSEPORT` 的分流语义时（Windows / macOS /
+  libuv < 1.50）就只有 0 号一个端点，功能与单循环逐字相同。判据一律按
+  `quic_fanout()` 分叉，别按平台名分叉。本机量到的 A/B 在
+  [`doc/benchmark-rig.md`](./benchmark-rig.md)「扇出 A/B」那一节。
 - **请求体/响应体只在内存里攒**（上限 `H3_DEFAULT_MAX_BODY_BYTES`，64 MiB），
   没有边收边交给使用者的那一档。
 - **MinGW 的 CI 腿没有开 HTTP/3**（quic 在那边也没开）。macOS 与 Windows MSVC

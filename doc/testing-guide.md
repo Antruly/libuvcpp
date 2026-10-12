@@ -326,6 +326,7 @@ the tests, and reports whether the mutation was caught — and by which test.
 | `wss_mutation.py` | `enable_wss()`'s TLS half |
 | `run_idle_mutation.py` | `run()` returning when there is nothing left to wait for |
 | `run_tcp_client_dtor_mutation.py` | `~uvcpp_tcp_client` — no sleeping in the destructor |
+| `quic_fanout_mutation.py` | QUIC fan-out — the endpoint loop in `listen_quic()`, and `bind_udp()`'s reported-vs-requested `SO_REUSEPORT` (see below; needs a QUIC tree) |
 | `http3_mutation.py` | `1.4.1` — HTTP/3's completion accounting, its once-only contract, and the QUIC FIN/RESET split it sits on |
 | `capi_mutation.py` | `1.4.2`/`1.4.3` — the C ABI layer's load-bearing rules: handle death (poison + registry), the callback-table `size` rule, the `extern "C"` exception boundary, the ABI-version self-check, the buffer-too-small contract (`1.4.2`); then the callback-scope handle guard, "a header that is not there must not read as an empty one", argument rejection *at the boundary* rather than deep inside, "closed means it must not claim to be connected", and the accepted WebSocket schemes (`1.4.3`, M8–M12); then the same rules as they look on the http2 side — the thread check on `flush`, "headers not arrived" vs status 0, the connection callback table's `size`, and the stack-handle unregister (`1.4.3` batch 3a, M13–M16); then the same again on the quic + http3 side — **the endpoint** callback table's `size`, the borrowed QUIC handle that only h3's `on_disconnect` unregisters once h3 has replaced the connection's callback table, h3's own `FrameScope`, and the negative stream id (`1.4.4` batch 3b, M17–M20). Each segment needs the tree that has *its* module on: M13–M16 have no target in a plain `build-capi`, M17–M20 have none outside a quic + http3 tree, and M8/M10 need a webapp one — so the table as a whole runs on `build-capi-all`. When the tree is missing, the script exits **3** and names the mutations left without a criterion, rather than dressing the missing executable (a `127`) up as a catch. `--only M8` runs a single mutation without rebuilding the whole table |
 
@@ -383,6 +384,25 @@ measuring the *contract* ("this handle must now report `E_STALE`") while reading
 measured the *mechanism* ("the guard is what made it say so") — the `1.4.2` failure mode, wearing
 a different hat. Both kinds of assertion are worth having; the error is taking the first as
 evidence for the second.
+
+**`quic_fanout_mutation.py` is the third round of the same lesson, and this time the mutant that
+survived did so because the *criterion* was blind — so the fix went into the tests
+(`1.6.6-dev`).** Its two interesting mutants are "pin `listen_quic()`'s endpoint loop to one
+iteration" and "drop the `SO_REUSEPORT` flag unconditionally". Both survived the first run, and
+not because the tests were thin: every criterion in `test_http3_multiloop_func` and
+`test_quic_server_multiloop_func` branched on values the library reports about *itself*
+(`quic_fanout()`, `is_reuseport()`), and a broken implementation reports exactly the same shape
+as a platform that refused the flag — honest `false`, one endpoint, every connection on loop 0.
+What separates them is a **library-external** fact: whether this kernel can put two binds of one
+`(addr, port)` into the same REUSEPORT group at all. So `tests/functional/reuseport_probe.h` was
+added (a raw `uv_loop_t`, `uv_udp_bind` twice on the same port with the flag), the two tests each
+grew a criterion that conjoins it, and both mutants went red. The driver is explicit that this
+one is **platform-conditional on purpose**: these two are expected to be caught where the kernel
+can fan out, and expected to *survive* on Windows/macOS/libuv < 1.50, where falling back to one
+endpoint is the correct behaviour and the two shapes are supposed to be identical. It reads the
+verdict out of the baseline run's own probe line rather than from the platform name. A fourth
+mutant (removing the "already listening, ignore this" gate in `set_reuseport()`) is expected to
+survive: it is behaviourally equivalent, since the flag is fixed at `bind()` time.
 
 **The verdict rule is two conditions, not one**: (1) the exit code is non-zero, **and** (2) the
 *expected group*, run on its own, is also red. Running the full suite and observing that

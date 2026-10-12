@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.5--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.6--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.5-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.6-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -434,6 +434,14 @@ int main() {
 例外，都在 [webapp 指南 §19](doc/webapp-guide.md#19-横向扩展多循环set_loops)；为什么是这个
 形状看 [doc/multiloop-design.md](doc/multiloop-design.md)；档位怎么选、核怎么钉看
 [doc/benchmark-rig.md](doc/benchmark-rig.md)。
+
+**QUIC / HTTP-3 也能扩，但走的是另一条路**（`1.6.6-dev`）。UDP 没有 `accept()`，所以
+`uvcpp_http_server::set_loops(n)` 建的是**每条循环一个 QUIC 端点、各带
+`UV_UDP_REUSEPORT` 抢同一个端口** —— 内核按每个数据报的 4 元组哈希挑一个。全程没有
+转手，`quic_fanout()` 报扇出到底成没成：**做不了的平台（Windows、macOS、libuv < 1.50）
+回落成单端点** —— 那正是"从不调用 `set_loops()`"的行为 —— 而且 `is_reuseport()` 会
+如实报，不回读请求值。本机实测一条循环顶在 0.89 核上的 ~89 k req/s（那一个核**就是**
+天花板），八条循环到 ~389–437 k。完整 A/B 在 [doc/benchmark-rig.md](doc/benchmark-rig.md)。
 
 ## 项目结构
 

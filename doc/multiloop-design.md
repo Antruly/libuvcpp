@@ -32,6 +32,10 @@
 > —— 收在循环内存被释放之前、且在那条循环的线程上，所以既不 UAF、也不让
 > `uv_loop_close()` 撞 `UV_EBUSY` 漏掉整块循环内存（§4.6（七）记的是第一版为什么落错）。
 >
+> **（`1.6.6-dev`，第四端）**：**UDP / QUIC 那一侧也落地了**，但形状与上面三层不同 ——
+> 每端点一个 socket + `UV_UDP_REUSEPORT`，内核按 4 元组哈希分流，没有转手那一步。
+> 见 §9。它带回一条对别处也成立的教训：判据不能只读被测对象自报的状态。
+>
 > **还没做的**（诚实记着，别把它们读成"验过了"）：跨线程读登记表那一条（见
 > `uvcpp_web_app.h` 里 `reg_of()` 那段 ★）；`chain_cache_` 在 n>1 下的并发读写
 > 仍是 UB，本批**只把它写进契约**（`set_loops()` 的 doc block + 类头契约四），
@@ -115,9 +119,9 @@ acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
 worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
   └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:146-146 起）
        └─ 在**这条循环的线程**上：new uvcpp_tcp_client(worker_loop) 装转手来的 socket
-          （src/net/uvcpp_tcp_server.cpp:687 on_handoff_task）→ mark_accepted() → 登记
+          （src/net/uvcpp_tcp_server.cpp:698 on_handoff_task）→ mark_accepted() → 登记
           → setup_client_callbacks() → TLS 块 → deliver_connection()
-          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:714 finish_accept）
+          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:725 finish_accept）
 ```
 
 **去向是显式轮转，不是内核散列**，所以分布是**确定性**的（第 i 条必然落在
@@ -127,7 +131,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
 
 - **转手必须在 `mark_accepted()` 之前**，也就是整条尾巴（登记、`setup_client_callbacks`、
   TLS、`deliver_connection`）都必须在**目标循环的线程**上跑 —— `enable_tls()` 会当场在这条
-  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:747`）。
+  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:758`）。
 - **POSIX 的 `uv_accept` 硬断言同循环**（`libuv:unix/stream.c:539`），所以转手靠
   `dup()` + `uv_tcp_open`（后者"已存在"的检查是**按循环**做的，跨循环共用一个 fd 不会被拒、
   只会 double close）。
@@ -298,10 +302,10 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 | 容器 | 位置 | 触碰频率 |
 |---|---|---|
-| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1280` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
+| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1471` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | ~~`uvcpp_web_app::inflight_`~~ → `loop_slot::inflight` | `src/webapp/uvcpp_web_app.h:1961`（**已切开**，W4 / 2c） | **每请求** |
 | ~~`uvcpp_web_app::upgraded_`~~ → `loop_slot::upgraded` | `src/webapp/uvcpp_web_app.h:2020`（**已切开**，W4 / 2c） | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:872` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:905` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** 它原来只有一份
 `loop_tid_`/`post_queue_`，投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。
@@ -327,7 +331,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 > 落地的是**一个实例、内部按循环切表**：`contexts_` 从一张
 > `std::map<uvcpp_tcp_client*, conn_ctx>` 变成
 > `std::vector<std::map<uvcpp_tcp_client*, conn_ctx> >`
-> （`src/web/uvcpp_http_server.h:1280`），索引 = `uvcpp_tcp_client::loop_index()`；
+> （`src/web/uvcpp_http_server.h:1471`），索引 = `uvcpp_tcp_client::loop_index()`；
 > 取表只有三个入口 —— `ctxs_of(client)`（有连接时）、`ctxs_here()`（没有连接、
 > 靠线程本地的循环号，`src/net/uvcpp_loop_worker.h` 那对
 > `uvcpp_loop_index_of_this_thread()`）、`ctxs_at(i)`；`n == 1` 时
@@ -357,8 +361,8 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 **但"接受者就是这个循环"在那条路上不再成立 —— 这正是 net 层要转手的原因。**
 `:266` 的 `new uvcpp_tcp_client(loop_)` 与 `:269` 的 `s->accept(...)` 今天是 **n==1 那条分支**；
-n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:639` 的 `accept_and_handoff`），
-客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:687` 的 `on_handoff_task`）。
+n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:650` 的 `accept_and_handoff`），
+客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:698` 的 `on_handoff_task`）。
 ⇒ webapp 层要接的话，**每个 `uvcpp_http_server` 的 `tcp_server` 各自 `set_loops(n)`**
 仍然成立（每个 app 一份循环组），但"接受者即本循环"这条直觉要换成 §1.1 那张图。
 
@@ -627,20 +631,20 @@ W4 之后改成了**连接自己那条**（`client->get_loop()`），分片用�
 **这两条是这次重过一遍的产出，之前设计稿与外部复核都没提到它们。**
 
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
-> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1363-1363`）是
+> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1554-1554`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
-> （`src/web/uvcpp_http_server.cpp:1523-1523`），未命中时插入并可能触发 LRU 淘汰
-> （`src/web/uvcpp_http_server.cpp:1576-1576`、`src/web/uvcpp_http_server.cpp:1370-1370`）。
+> （`src/web/uvcpp_http_server.cpp:1935-1935`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:1988-1988`、`src/web/uvcpp_http_server.cpp:1782-1782`）。
 > 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
-> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1364-1367`）一起加锁；
+> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1555-1558`）一起加锁；
 > **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
 >
-> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1381-1381`）
+> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1572-1572`）
 > 一把**非递归**锁护住那张表与四个计数。加锁点只有三个**外层入口** —— 命中
-> （`src/web/uvcpp_http_server.cpp:1523-1523`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
+> （`src/web/uvcpp_http_server.cpp:1935-1935`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
 > 整张表的字节总量，拆成两次加锁会让别的循环插在中间按一个已不成立的总量做决定）、
 > `compress_variant_stats()`。两个帮手改名成 `..._locked()`
-> （`src/web/uvcpp_http_server.h:1392-1392` / `src/web/uvcpp_http_server.h:1396-1396`），意思就是"调用方已持锁" ——
+> （`src/web/uvcpp_http_server.h:1583-1583` / `src/web/uvcpp_http_server.h:1587-1587`），意思就是"调用方已持锁" ——
 > 淘汰要算字节总量，所以这两个互相调用，同一条非递归锁不能进两次。
 > 临界区里只碰表与计数：命中那条路把共享句柄**拷出锁外**再 `share()`，
 > `finish_headers()` 也在锁外（它改的是响应，不碰表）。
@@ -751,13 +755,13 @@ if (it == ctxs_here().end()) return;   // 两个容器的 end() 相比
 连接所属的那条循环。§4.1.1 己 那条（工作项投错循环）与"不在任何循环线程上"恰好破坏它 ——
 那时比较的是**两个不同容器**的迭代器（标准上是 UB；`std::map` 的 `end()` 是各自表头节点的
 地址，于是"找不到"这条早退**恒不成立**），后面紧跟着的 `it->second` 就解引用了 `end()`。
-⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:2059-2059`
+⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:2471-2471`
 那处 `ctxs_here()` 是**有意的**（`begin_h2_goaway()` 要的就是本循环那张表），不动。
 
 **（二）`ctxs_at(-1)` 在多循环下直接终止，不再夹回 0 号。** `-1` 不是越界，它的含义是
 "不在任何循环线程上"（`uvcpp_loop_index_of_this_thread()` 的初值）。单循环下夹回 0 号
 与从前逐字相同，那条路原样保留；n > 1 时 0 号只是 n 张里的一张，夹回去会让"漏调了一条循环"
-看着正常 —— `begin_h2_goaway()` 的契约是每条循环各调一次（`src/web/uvcpp_http_server.h:277-280`），
+看着正常 —— `begin_h2_goaway()` 的契约是每条循环各调一次（`src/web/uvcpp_http_server.h:372-375`），
 夹回 0 号时它只向 0 号循环道别，却返回一个像样的条数。错得比崩安静，所以选崩：libuv 对
 API 误用也是直接终止（先例见 `src/handle/uvcpp_handle.cpp:363` 引的那句）。
 
@@ -907,9 +911,9 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > 这条要写进 `uvcpp_web_app::set_loops()` 的 doc block（理由与出处见 §4.1 的理由更正块）。
 >
 > **停机那一族另有一条硬约束（2026-09-22，外部复核 §1）**：`begin_h2_goaway()` 只翻
-> **本循环**那张表（`src/web/uvcpp_http_server.cpp:2059-2059` 的 `ctxs_here()`），而
+> **本循环**那张表（`src/web/uvcpp_http_server.cpp:2471-2471` 的 `ctxs_here()`），而
 > `ctxs_at(-1)` 在 `contexts_.size() > 1` 且调用者不在任何循环线程上时直接
-> `std::abort()`（`src/web/uvcpp_http_server.cpp:370-375`）⇒ **停机那一族必须"每条
+> `std::abort()`（`src/web/uvcpp_http_server.cpp:468-473`）⇒ **停机那一族必须"每条
 > 循环各跑一次、且每次都在该循环自己的线程上"**。顺着这条往回看，今天的 `stop()`
 > （`src/webapp/uvcpp_web_app.cpp:2198`）在 n>1 下是坏的：非循环线程进来时它走
 > `post(...)`，而 `post()` 的落点是 0 号（§5.2）⇒ 1..n−1 的停机状态机永远不会被推进，
@@ -920,8 +924,8 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > （`uvcpp_tcp_server::stop()` 里的 `tcp_->close(...)`）——扇出之后"谁第一个进来谁执行
 > 那句 close"，而第一个进来的可能是工作循环 ⇒ **跨循环 `uv_close`**（libuv 里那不是
 > 线程安全的）。它本身是**真幂等**（早退判据 `!has_status(TCP_SERVER_LISTENING)`
-> 在 `src/net/uvcpp_tcp_server.cpp:870`，而第一次进来就在
-> `src/net/uvcpp_tcp_server.cpp:876` `clear_status`），
+> 在 `src/net/uvcpp_tcp_server.cpp:881`，而第一次进来就在
+> `src/net/uvcpp_tcp_server.cpp:887` `clear_status`），
 > 所以"只让 0 号发"与"每条循环都发"在结果上等价，但前者才是对的形状。
 >
 > **这一段在 1.2.23-dev 已落地，而且它是本批唯一一处"计划写错、设计稿写对"的地方**
@@ -1106,3 +1110,54 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
   `[8,0]`）是在 Windows 上量的，只在 Windows 成立** —— 别拿它去论证 Linux/macOS 的行为；
   §3 路 (a) 的依据是 libuv 的 `REUSEPORT` 支持矩阵与 Linux CI 的读数，不是它。
 - 用法（webapp 层实现之后）：[webapp 应用框架开发者指南](./webapp-guide.md)。
+
+## 9. UDP 那一侧：形状不同，所以另起一条（`1.6.6-dev`）
+
+§1..§8 讲的全是 **TCP**：一条接受者循环 `accept()` 到连接，再把 socket **转手**给某条
+工作循环（Windows 走 `WSADuplicateSocketW`，POSIX 走 `dup()`，§2/§3）。**UDP 没有
+`accept()`**，也没有"这条连接归谁"这个转手点 —— 每个数据报是独立到达的。所以
+端点的
+`set_reuseport()` 只是它的开关：`uvcpp_http_server::set_loops(n)` 走的是另一条路：
+
+- **每端点一个 socket，各带 `UV_UDP_REUSEPORT` 抢同一个端口**，由**内核**按 4 元组哈希
+  分流。没有转手、没有握手、没有一条属于某条循环的"连接对象"要先建出来。
+- 这是 libuv 的 `UV_UDP_REUSEPORT`（**1.50 起**，`handle/uvcpp_udp.h` 里按
+  `UV_VERSION_HEX` 分叉出 `UVCPP_UDP_REUSEPORT_FLAG` —— 它是一个枚举成员不是宏，
+  所以 `#ifdef` 判不了它）。**分流语义只有 Linux / FreeBSD / DragonFly / Solaris 11.4 /
+  AIX 7.2.5 上有**；Windows 的 `uv_udp_bind` 在**建 socket 之前**就返
+  `ERROR_NOT_SUPPORTED`，macOS 的 `uv__sock_reuseport` 返 `UV_ENOTSUP`，libuv < 1.50
+  连标志都没有。
+- **回落 = 去掉标志重绑一次**（照 `src/net/uvcpp_tcp_server.cpp` 里那一段），并置
+  `reuseport = false` + 一行 stderr。`is_reuseport()` 报的是「**这次绑定真的带上标志
+  了没有**」，不是「调用方请求了没有」—— 这两个值在"标志被静默丢掉"时正好分叉，
+  也是下面那条判据的由来。
+
+**为什么 per-endpoint 的 CID 表够用**：SCID 是每连接现取的 18 字节随机；连接归属由
+「谁收到首包谁建」定；本层**不做连接迁移**，稳定 4 元组被内核哈希恒定映射到同一 socket
+⇒ 后续包必然落回同一端点。落到陌生端点的包**丢，不转发**（QUIC 里这等价于链路丢包，
+重传兜底）。**已知边界**：一旦加连接迁移或 socket 热重启，转发或共享 CID 表就从
+"可选"变成"必需"。
+
+**顺序契约（新增一道门）**：`listen_quic()` 之后再 `set_loops(n > 1)` ⇒ 返 `UV_EBUSY`。
+今天 `uvcpp_tcp_server::set_loops()` 只看 `TCP_SERVER_LISTENING`，而**纯 h3 的服务端上
+TCP 从未 listen** —— 不补这道门就会出现「端点建了 1 个、per-loop 表按 1 张定尺寸，
+而工作线程报 1..n−1 号」⇒ 越界夹回 0 号 ⇒ 跨线程并发写同一张 map。
+
+**停机**：工作端点**绝对不调 `stop()`**（`uvcpp_quic_server::stop()` 是 `loop->stop()`，
+在工作循环上调它会让 `uv_run` 提前返回、绕过 `stopping_` 闸）。工作循环的停止**独占**
+`uvcpp_tcp_server::stop_workers()`；只有 0 号端点 `stop()`，且从它自己的线程调 ——
+所以 `uvcpp_http_server::stop()` 一行都不用改。析构是三段式（**顺序是承重的**）：
+① 在 `stop_workers()` **之前**把 1..n−1 号端点与其 h3 连接投递到各自循环上删掉、有界等待；
+② `stop_workers()`；③ 收 0 号。①在②之后做就是 UAF。
+
+**判据按 `quic_fanout()` 分叉，不按平台名分叉。** 原因见下面这条：这两者一开始**分不开**。
+
+**这一节为什么存在 —— 一次被变异表逼出来的判据修正。** 第一版的变异表里，
+「`listen_quic()` 的端点循环写死 1 条」与「无条件把标志丢掉」这两种坏实现
+**全绿活了下来**。原因不是用例太少，而是**用例的每一条判据都分叉在库自己报的数上**
+（`quic_fanout()` / `is_reuseport()`）—— 它们报出来的形状与"平台拒绝标志"**一模一样**：
+都诚实报假、都只有一个端点、连接都落在 0 号。分得开两者的只有**库外**的事实：这个
+平台到底给不给得出分流。于是补了 `tests/functional/reuseport_probe.h`（裸 `uv_loop_t`，
+同端口带标志绑两次）与两条用例各自的判据，M1/M3 才从"活下来"变成"抓住"。
+**这是本仓第一条按"库外事实"写的判据**，记在这里是因为它的教训通用于别处：
+一个只读被测对象自报状态的断言，对"它内部错了"和"外面本来就给不出"是盲的。

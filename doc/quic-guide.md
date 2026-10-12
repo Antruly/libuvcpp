@@ -72,7 +72,7 @@
 | 类 | 头 | 角色 |
 |---|---|---|
 | `uvcpp_quic_client` | `src/quic/uvcpp_quic_client.h:57` | 客户端**端点**：一条 UDP 口 + 它名下的那条连接 |
-| `uvcpp_quic_server` | `src/quic/uvcpp_quic_server.h:57` | 服务端**端点**：一条（或多条）UDP 口 + 它上面**所有**连接 |
+| `uvcpp_quic_server` | `src/quic/uvcpp_quic_server.h:65` | 服务端**端点**：一条（或多条）UDP 口 + 它上面**所有**连接 |
 | `uvcpp_quic_connection` | `src/quic/uvcpp_quic_connection.h:58` | 一条 QUIC 连接：状态机、流、CID、ALPN |
 | `net_read_result` / `net_read_event` | `src/net/uvcpp_net_read.h:68` | **复用 net 层**的读事件语义（不是本模块新造的） |
 
@@ -192,7 +192,7 @@ agg2 里有 `assert(buflen >= path_max_udp_payloadlen)`。
 建 socket 的 —— `uv_udp_init`（AF_UNSPEC）之后 `handle->socket` 还是
 `INVALID_SOCKET`，这时 `uv_fileno` 返回 `UV_EBADF`，`setsockopt` 无从谈起。本机实测：
 bind 前 `fileno rc=-4083 sock=-1`，bind 后 `rc=0 sock=628`。所以探测点落在
-`init_client()`/`init_server()` 的末尾（`setup_gso()`，`uvcpp_quic_session.cpp:923`），
+`init_client()`/`init_server()` 的末尾（`setup_gso()`，`uvcpp_quic_session.cpp:943`），
 不是建对象的时候。
 
 **坑二：`setsockopt` 成功 ≠ 协议栈真会切。** 本机实测 512…65483 **全都返回成功**，
@@ -421,8 +421,19 @@ int start_quic_server(uvcpp_ssl_context& tls, uvcpp_quic_server& srv) {
 - 服务端是 ALPN 的**选择方**：对端候选里没有一个落在 `set_alpn_select_protos()`
   列表里时，按 RFC 7301 应当以 `no_application_protocol` 告警结束握手，而**不是**
   挑一个双方都没承诺的协议名。
-- **没有** `uvcpp_tcp_server` 那套多循环扇出（`set_loops()`）。QUIC 的多循环切分是
-  按 CID 而不是按连接亲和度做的，形状不同 —— 这不是"暂时没写"，是**不打算照搬**。
+- **多循环扇出有了，但走的是 UDP 自己的形状**（`1.6.6-dev`）。`uvcpp_tcp_server`
+  那套是"接受者 accept 到一条连接、再把 socket 转手给某条工作循环"；UDP 没有 accept，
+  这一层走的是**每端点一个 socket、各带 `UV_UDP_REUSEPORT` 抢同一个端口**，由内核按
+  4 元组哈希分流。所以它**不是照搬**，也**不是"暂时没写"**：形状不同是这条传输的性质
+  决定的（见 [`doc/multiloop-design.md`](./multiloop-design.md) §9）。
+
+  两个前提下它才是真的：① 平台给得出 `SO_REUSEPORT` 的分流语义 —— Linux / FreeBSD /
+  DragonFly / Solaris 11.4 / AIX 7.2.5；**Windows 的 `uv_udp_bind` 直接返错、macOS 的
+  `uv__sock_reuseport` 返 `UV_ENOTSUP`、libuv < 1.50 根本没有这个标志**，这三处
+  **去掉标志重绑一次**（今天的行为，功能零变化），`is_reuseport()` 会如实报 `false`；
+  ② 本层**不做连接迁移** —— 稳定 4 元组被内核恒定映射到同一 socket，所以"每端点一张
+  CID 表"够用，包落到陌生端点就丢（在 QUIC 里等价于链路丢包，重传兜底）。**这两个前提
+  一旦破掉**（加连接迁移、或者热重启 socket），转发或共享 CID 表就从"可选"变成"必需"。
 
 ### 5.3 连接
 
@@ -677,7 +688,9 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 - **本层里没有 HTTP/3，也不该有。** 1.4.1 把它落在了 `src/http3/`
   （[`doc/http3-guide.md`](./http3-guide.md)）—— 这一层是它的地基，不是它。
 - **没有连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath。**
-- **没有多循环支持。** 见 [§5.2](#52-服务端)。
+- ~~**没有多循环支持。**~~ **已撤销（`1.6.6-dev`）**：`uvcpp_quic_server::set_reuseport()` +
+  `uvcpp_http_server::set_loops(n)` 这条路通了，扇出走 UDP 自己那条形状（每端点一个
+  socket + `UV_UDP_REUSEPORT`），回落与边界见 [§5.2](#52-服务端)。
 - **MinGW 的 CI 腿没有开 QUIC。** macOS 与 Windows MSVC 各有一格 `quic`（1.4.1 补的，
   它们用包管理器给的 OpenSSL，只有 ubuntu 那格自建），只有 MSYS2 那条腿还没有 —— 它是
   单个 job，按功能拆它和加 QUIC 格是同一件事，`doc/ci-guide.md` §1 的"未覆盖的格"里有理由。

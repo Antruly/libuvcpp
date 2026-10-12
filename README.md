@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.6.5--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.6.6--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.6.5-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.6.6-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -451,6 +451,16 @@ the shutdown rules and the exceptions worth knowing first are in
 [§19 of the webapp guide](doc/webapp-guide.md#19-横向扩展多循环set_loops); why it is built
 that way is in [doc/multiloop-design.md](doc/multiloop-design.md); sizing and core pinning
 are in [doc/benchmark-rig.md](doc/benchmark-rig.md).
+
+**QUIC / HTTP-3 scales too, by a different route** (1.6.6-dev). UDP has no `accept()`, so
+`uvcpp_http_server::set_loops(n)` builds **one QUIC endpoint per loop, each holding the
+same port with `UV_UDP_REUSEPORT`** — the kernel hashes each datagram's 4-tuple to one of
+them. Nothing is ever handed over, and `quic_fanout()` says whether the fan-out really
+happened: **the platforms that cannot do it (Windows, macOS, libuv < 1.50) fall back to a
+single endpoint** — which is exactly the behaviour of never calling `set_loops()` — and
+`is_reuseport()` reports that honestly rather than echoing the request. On this machine
+one loop tops out at ~89 k req/s on 0.89 of a core (that one core *is* the ceiling); eight
+loops reach ~389–437 k. Full A/B in [doc/benchmark-rig.md](doc/benchmark-rig.md).
 
 ## Project structure
 

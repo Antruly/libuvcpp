@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.5-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.6-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -240,6 +240,23 @@
 
 ### QUIC 传输（net 层）
 
+- **`uvcpp_quic_server::set_reuseport()`：让一次 `listen()` 带着 `UV_UDP_REUSEPORT` 去绑**
+  （`1.6.6-dev`）—— 好让 n 个端点抢同一个端口（扇出的那一半在
+  `uvcpp_http_server::set_loops(n)`）。**`is_reuseport()` 报的是「这次绑定真的带上标志了
+  没有」，不是「调用方请求了没有」**；`set_reuseport()` 在**已经收包之后**调用只打一行
+  诊断（标志是 `bind()` 那一刻用的，之后改不了）。`UV_UDP_REUSEPORT` 是 libuv **1.50**
+  才有的成员、且是**枚举量不是宏**，所以按 `UV_VERSION_HEX` 分叉出
+  `UVCPP_UDP_REUSEPORT_FLAG`（`handle/uvcpp_udp.h`）—— 不是纸面上的讲究：CI 的 ubuntu 腿
+  装的是系统 libuv 1.48，直接用那个名字在那里**编不过**。
+  `listen()` 失败会把 `reuseport` 回滚成 `false`。`bind("127.0.0.1", 0)` 时**必须先由
+  0 号解析出真端口再建工作端点**，否则各挑各的端口、内核分流永不发生
+- **`uvcpp_quic_server::set_scid_len(n)` / `scid_len()`（取 `8..20`）**（`1.6.6-dev`）——
+  `745608c` 那条缺陷的**回归旋钮**。短包头不把 DCID 长度写在包上（RFC 9000 §17.3.1），
+  收方只能按**自己**选的长度反推；而本库两端默认都选 18 ⇒ 「拿**对端** SCID 长度去解
+  **本端** DCID」这类错误**恒等抵消**，既有用例一条都不会红（那条缺陷就是这么在平台上
+  才现形的 —— 上游 `h2load` 选的是 8）。这个口子把两端拉开，让没有 `h2load` 的 CI 自己
+  复现：用例见 `tests/functional/quic_stream_func.cpp` 的
+  `test_streams_with_mismatched_cid_len()`
 - 把 [ngtcp2](https://github.com/ngtcp2/ngtcp2) 接进构建系统，藏在
   `UVCPP_ENABLE_QUIC` 后面（**默认关**），静态链入，走的是 nghttp2 给 HTTP/2 用的
   同一套 FetchContent + 私有头模式（`1.4.1`）
@@ -391,6 +408,16 @@
 
 ### HTTP/3（web 层）
 
+- **`listen_quic()` 会把 QUIC 端点扇到工作循环上**（`1.6.6-dev`）：`set_loops(n)` 之后
+  0 号端点建在 acceptor 线程、1..n−1 号各投递到一条工作循环上建（有界等待，任一失败
+  整体回滚）。`quic_fanout()` 报成没成、`quic_connection_count_at(i)` 报每端点的连接数
+  （合计等于 `quic_connection_count()`）。web 层那三张按连接索引的表跟着切成
+  per-loop，取表用 `uvcpp_loop_index_of_this_thread()` —— **连接所属循环 ≡ 当前线程
+  所在循环**。**`listen_quic()` 之后再 `set_loops(n>1)` 返 `UV_EBUSY`**：纯 h3 的服务端
+  TCP 从未 `listen()`，不补这道门就会出现"端点 1 个、表 1 张、工作线程报 1..n−1 号"
+  ⇒ 跨线程写同一张 map。析构三段式：**先**在 `stop_workers()` 之前把工作端点连它们的
+  h3 连接投递到各自循环上删掉（有界等待），**再** `stop_workers()`，**最后**收 0 号 ——
+  顺序反了就是 UAF
 - [nghttp3](https://github.com/ngtcp2/nghttp3) 被接进构建，挂在 `UVCPP_ENABLE_HTTP3`
   后面（**默认关**）、静态链入、位置在 **web 层**，而且它需要下面的 QUIC 传输
   （`UVCPP_ENABLE_QUIC=ON`）—— h3 **就是** QUIC，没有 h3-over-TCP 这回事（`1.4.1`）
@@ -519,6 +546,23 @@
 
 ### 横向扩展（多事件循环）
 
+- **第四端：UDP / QUIC 也扇出了，形状与上面三层不同**（`1.6.6-dev`）。
+  `uvcpp_quic_server::set_reuseport()` + `uvcpp_http_server::set_loops(n)`：UDP 没有
+  `accept()`，所以不是"转手 socket"，而是**每端点一个 socket、各带 `UV_UDP_REUSEPORT`
+  抢同一个端口**，内核按 4 元组哈希分流。**平台给不出的地方（Windows 的 `uv_udp_bind`
+  在建 socket 前就返 `ERROR_NOT_SUPPORTED`、macOS 返 `UV_ENOTSUP`、libuv < 1.50 没有
+  这个标志）回落成单端点** —— 那就是"从不调用 `set_loops()`"的行为；`is_reuseport()`
+  报的是「这次绑定真的带上标志了没有」，不是「调用方请求了没有」。
+  判据：本机 h2load-h3 打同一条目，`h3.set_loops(1)` 88 738–91 433 req/s（0.89 核，
+  **单核就是它的天花板**）→ `set_loops(8)` 388 024–437 385 req/s（5.62 核），每连接
+  响应数 6 933–7 143 → 30 314–34 171；`n=1` 与改动前逐字节相同。A/B 与生成器侧
+  共同瓶颈的读数在 [`doc/benchmark-rig.md`](doc/benchmark-rig.md)「扇出 A/B」。
+- **这条判据一开始是错的，改的是用例不是脚本**（`1.6.6-dev`）：第一版变异表里
+  「端点循环写死 1 条」与「无条件丢掉标志」两种坏实现**全绿活了下来**——因为两条用例的
+  判据全部读的是库自己报的数（`quic_fanout()` / `is_reuseport()`），而它们的形状与
+  "平台拒绝标志"**一模一样**。补了库外探针（`tests/functional/reuseport_probe.h`：裸
+  `uv_loop_t`、同端口带标志绑两次）才分得开。变异表在
+  [`tests/tools/quic_fanout_mutation.py`](tests/tools/quic_fanout_mutation.py)
 - `uvcpp_tcp_server::set_loops(n)`：把接受的连接摊到 `n` 条事件循环上 —— 一条接受者
   加 `n-1` 条工作循环，每条一个**专用 `std::thread`**（不是 libuv 线程池的线程）。
   不调用它、或 `set_loops(1)`，与旧行为逐字节相同（`1.2.21`）
