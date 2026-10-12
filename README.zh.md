@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.9--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.10--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.9-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.10-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -233,6 +233,7 @@ int main() {
 | http2（现状） | [doc/http2-status.md](doc/http2-status.md) | HTTP/2 目前支持什么、不支持什么，以及那些取舍的由来 |
 | quic | [doc/quic-guide.md](doc/quic-guide.md) | QUIC 传输：构建契约、为什么非 OpenSSL ≥ 3.2 不可、API 形状，以及一份如实列出「还没做」的清单 |
 | http3 | [doc/http3-guide.md](doc/http3-guide.md) | 作为 web 层第二条传输的 HTTP/3：它向 QUIC 要的那三样扩展、API 形状（会话 vs 连接、三条关键流）、CMake 接线，以及为什么它不影响 HTTP/1.1 |
+| grpc | [doc/grpc-guide.md](doc/grpc-guide.md) | 作为库模块的 gRPC 信封：5 字节长度前缀帧与一小撮 protobuf wire format、三段式应答（`grpc-status` 为什么走尾随头、HTTP 状态码为什么恒为 200）、错误码对照表，以及如实列出「没做」的那一节 |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |

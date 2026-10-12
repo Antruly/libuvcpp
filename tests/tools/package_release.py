@@ -55,7 +55,7 @@ VERSION = _header_version()
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
 MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2",
-           "wsdl", "quic", "http3", "capi", "db"]
+           "wsdl", "quic", "http3", "capi", "db", "grpc"]
 
 # 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
 # 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
@@ -101,6 +101,22 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
                    # `list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_driver\\.h$")`
                    # 是一对，两处必须一起改。
                    "uvcpp_db_driver.h"}
+
+# 按**构建树**决定要不要发的头：与 `PRIVATE_HEADERS` 那条规矩不同，它们不是
+# "永远不发"，而是"这个配置下发了就是坏包"。
+#
+# 目前只有一条。`uvcpp_grpc_server.h` 的每一个参数都是 web 层的类型（它 include
+# `<web/uvcpp_http_common.h>`），所以 `UVCPP_BUILD_WEB=OFF` 的树上它连自己的依赖都
+# 找不到 —— 发出去，使用者一 include 就是硬编译错误，而错误指向一个这个包里根本
+# 不存在的头。`src/grpc/uvcpp_grpc.h`（编解码那半）**只有** `<cstdint>` 与 libuv
+# 的错误码，任何配置下都发。
+#
+# `CMakeLists.txt` 的 `list(FILTER UVCPP_HEADERS EXCLUDE REGEX
+# "src/grpc/uvcpp_grpc_server\\.h")`（`CMakeLists.txt:1572-1574`）与
+# `list(FILTER GRPC_HEADER_FILES EXCLUDE REGEX "uvcpp_grpc_server\\.h$")`
+# （`CMakeLists.txt:2338-2343`）是同一条排除的两处 —— **三处必须一起改**：
+# 这里漏了只影响发布包，CMake 那两处漏了只影响 `cmake --install`，三边都不报错。
+WEB_GATED_HEADERS = {"uvcpp_grpc_server.h"}
 
 # 每个平台一份产物描述：从构建树里的**哪些路径**取**哪些文件**。
 # `lib_dll` 是动态库（默认进 `bin/`；ELF 平台用 `lib_dest` 改到 `lib/`），
@@ -553,11 +569,30 @@ def dep_src(tree, repo, name):
     return find_dir(dep_src_paths(tree, repo, name))
 
 
+def tree_enable(tree, macro):
+    """从构建树里那份**生成**的 `uvcpp_config.h` 读一个使能宏。
+
+    返回 `True` / `False`，读不到这个宏（或读不到文件）时回 `None`。
+
+    **权威是这一份，不是 `CMakeCache.txt`**：包里每个公开头都包含它，它就是
+    "这个包编出来是什么样"的单一真相 —— 而缓存里可能留着上一次 configure 的值。
+    与 `check_config_contract.py` 拿它当判据是同一条理由。
+    """
+    path = os.path.join(tree, "include", "uvcpp", "uvcpp_config.h")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            m = re.match(r"\s*#\s*define\s+%s\s+([01])\b" % re.escape(macro), line)
+            if m:
+                return m.group(1) == "1"
+    return None
+
+
 def copytree(src, dst):
     if os.path.isdir(dst):
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
-
 
 def copy_header(src, dst):
     """拷公开头；含非 ASCII 又没 BOM 的，补一个 UTF-8 BOM。
@@ -1042,6 +1077,13 @@ def main():
     # ---- 公开头 ----
     # 每个模块目录**至少**要发出一个头。模块名写错（或目录空了）时，包会"成功"
     # 产出，而使用者一 include 就是找不到文件 —— 让它在这里失败，别在消费方炸。
+    #
+    # `WEB_GATED_HEADERS` 里那些要看构建树开没开 web。**权威是树上那份生成的
+    # `uvcpp_config.h`**，不是 CMakeCache：包里每个公开头都包含它，它就是"这个包
+    # 编出来是什么样"的单一真相。读不到就**按开着处理**（发布腿全都开着 web，
+    # 而"读不到"只可能发生在构建树还没 configure 的时候 —— 那种情况上面那条
+    # `missing[]` 已经会拦下来）。
+    web_off = tree_enable(tree, "UVCPP_WEB_ENABLE") is False
     for m in MODULES:
         d = os.path.join(repo, "src", m)
         if not os.path.isdir(d):
@@ -1051,9 +1093,12 @@ def main():
         os.makedirs(dst, exist_ok=True)
         n = 0
         for f in os.listdir(d):
-            if f.endswith(".h") and f not in PRIVATE_HEADERS:
-                copy_header(os.path.join(d, f), os.path.join(dst, f))
-                n += 1
+            if not f.endswith(".h") or f in PRIVATE_HEADERS:
+                continue
+            if web_off and f in WEB_GATED_HEADERS:
+                continue
+            copy_header(os.path.join(d, f), os.path.join(dst, f))
+            n += 1
         if n == 0:
             missing.append("模块 %s 一个头都没发出" % m)
     # 注意给的是**完整目标文件名**：`copy_header` 收文件路径，不是 `copy2` 那种
@@ -1101,7 +1146,7 @@ def main():
 
     # **曾经是差异 2**：补 zlib.h / zconf.h —— `web/uvcpp_ws_parser.h` 在
     # UVCPP_ZLIB_ENABLE=1 时要 include 它，而 install 规则里原先没有这一条。
-    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:2499-2502`），所以这
+    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:2531-2534`），所以这
     # 不再是"刻意的差异"，只是本脚本手工组装 stage、**不走 `cmake --install`** 时
     # 对同一件事的重复一遍 —— 两边必须落到同一个位置（`include/` 顶层）。
     z = dep_src(tree, repo, "zlib-131") or dep_src(tree, repo, "zlib")

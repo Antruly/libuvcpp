@@ -1554,6 +1554,26 @@ else()
   message(STATUS "Including web module in build")
 endif()
 
+# gRPC 模块（`src/grpc/`）分两半，摘法**不一样**：
+#
+#   - `uvcpp_grpc.{h,cpp}` 是编解码（5 字节长度前缀帧 + varint），它连 web 层
+#     是什么都不知道，**任何树上都在**；
+#   - `uvcpp_grpc_server.{h,cpp}` 的每一个参数都是 web 层的类型
+#     （`uvcpp_http_server&`、`uvcpp_http_response&`、`http_headers`），web 关掉
+#     时它的头会去 include 一个不存在的模块。
+#
+# 所以只摘后半截，而不是整个目录 —— 判据是"不依赖 web 的东西不该跟着一起消失"，
+# 与 webapp/ssl 那几条（整个模块一个开关）不同的原因也在这：这里一个目录下住着
+# 两个依赖面不同的东西。
+#
+# 只摘 `UVCPP_SOURCES`/`UVCPP_HEADERS` 是不够的，装出去的头也要摘 ——
+# 见下面 `install` 那一段里的 `GRPC_HEADER_FILES`。
+if(NOT UVCPP_BUILD_WEB)
+  message(STATUS "Excluding gRPC server glue from build (web module is off)")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/grpc/uvcpp_grpc_server\\.cpp")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/grpc/uvcpp_grpc_server\\.h")
+endif()
+
 # 根据 UVCPP_BUILD_WEBAPP 选项排除 webapp 模块
 if(NOT UVCPP_BUILD_WEBAPP)
   message(STATUS "Excluding webapp module from build")
@@ -2309,6 +2329,18 @@ endif()
 file(GLOB WEB_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/web/*.h")
 if(WEB_HEADER_FILES AND UVCPP_BUILD_WEB)
   install(FILES ${WEB_HEADER_FILES} DESTINATION include/web)
+endif()
+
+# src/grpc/ 的头分两类，装法跟着依赖面走（与上面那条 `list(FILTER)` 同一个判据）：
+# 编解码那一半没有依赖，任何树上都装；服务端那一半的参数全是 web 层的类型，
+# web 关掉的树上它根本没编进库，装出去等于给使用者一份**链不上**的头
+# （能 include、一到链接期就没有符号，比编不过更难查）。
+file(GLOB GRPC_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/grpc/*.h")
+if(NOT UVCPP_BUILD_WEB)
+  list(FILTER GRPC_HEADER_FILES EXCLUDE REGEX "uvcpp_grpc_server\\.h$")
+endif()
+if(GRPC_HEADER_FILES)
+  install(FILES ${GRPC_HEADER_FILES} DESTINATION include/grpc)
 endif()
 
 file(GLOB WEBAPP_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/webapp/*.h")

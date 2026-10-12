@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.9-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.10-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -23,6 +23,7 @@
   - [QUIC 传输（net 层）](#quic-传输net-层)
   - [HTTP/3（web 层）](#http3web-层)
   - [HTTP/2](#http2)
+  - [gRPC（`src/grpc/`）](#grpcsrcgrpc)
   - [数据库（`src/db/`）](#数据库srcdb)
   - [横向扩展（多事件循环）](#横向扩展多事件循环)
   - [HTTP 与 WebSocket 语义](#http-与-websocket-语义)
@@ -301,7 +302,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2400-2400`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2432-2432`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -601,6 +602,61 @@
   也就是说**只断言 END_STREAM 是假绿**，真正的判据是"`on_response_end` 那一刻的
   头列表里有 `grpc-status`"。同一轮还拿同一个端口的 h1 那一侧断言 `UV_ENOTSUP`、
   且报文里看不到 `grpc-status`（变异：h1 那条路直接 `return 0` ⇒ 红）。稳定 38/38
+
+### gRPC（`src/grpc/`）
+
+动机是 HttpArena 的 `unary-grpc` / `unary-grpc-tls` 两档：那条负载发的是
+`requests/grpc-sum.bin`（9 个字节 `00 00 00 00 04 08 01 10 02`），服务端要解两个
+`int32`、算个和、把结果编回一帧，再按 gRPC 的形状发出去。整条路上**只有两样东西是
+协议事实、不随调用方变化** —— 5 字节长度前缀帧与 protobuf 的 varint —— 剩下的都是
+应用逻辑。本模块收的正是那两样。
+
+用法与边界见 [`doc/grpc-guide.md`](doc/grpc-guide.md)。
+
+- **`src/grpc/` 是一个模块，而且按依赖面切成两半**（`1.6.10-dev`）。
+  `uvcpp_grpc.{h,cpp}` 是编解码：帧（1 字节压缩标志 + 4 字节**大端**长度）、varint、
+  以及"只编解 wire type 0 字段 + 跳过别的 wire type"的字段读写。它的每一个参数都是
+  `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
+  `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
+  `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
+  两处都摘掉**（`CMakeLists.txt:1572-1574`、`CMakeLists.txt:2338-2343`）——
+  实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
+  只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
+  **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
+  `UVCPP_BUILD_WEB` 打架的开关
+- **一条 unary 应答的三段顺序由 `grpc_send_unary()` 一个函数包办**（`1.6.10-dev`）。
+  `HEADERS(200 + content-type)` → `DATA(帧)` → `HEADERS(grpc-status)`。第二段的
+  `write_stream()` 返回 0 只说明"已入队"，**那批字节真的写完了**的唯一信号是它的
+  `done` 回调，所以尾随头必须在 `done` 里发 —— 早一步就是"END_STREAM 在前、字节在
+  后"的协议违例，而对端只会表现为解包失败或超时。把这套顺序留给调用方，等于让每个
+  写 gRPC 路由的人各踩一次同一个坑、且**踩错时没有任何本地症状**。失败那条更短：
+  `deferred = true` → `begin_stream()` → `send_trailers()`，两句背靠背 —— 中间没有
+  数据在飞，`send_trailers()` 那条"DATA 队列空不空"的前置条件当场成立，而
+  `submit_headers()` 是**同步**把会话置成 `HEADERS_SENT` 的，所以不会撞上
+  `UV_EALREADY`（gRPC 里这叫 Trailers-Only）
+- **编解码的判据是逐字节的手算字面量，而且每个 fixture 都要先过一道"装置自检"**
+  （`1.6.10-dev`）。`tests/functional/grpc_codec_func.cpp` 八轮（帧前缀大端、流式
+  `consumed`、上限、varint 表与四类拒绝、字段编解、last-wins、跳过 wire type 1/2/5、
+  拒绝 field 0 与 wire type 3），名字不匹配任何一条过滤正则 ⇒ **任何配置下都编、都
+  跑**。`tests/functional/web_h2_grpc_func.cpp` 四轮走真 socket + 真路由（名字同时命中
+  `web_.*` 与 `/[^/]*h2_[^/]*` ⇒ web 或 nghttp2 关掉时**整个文件不参与构建**，"没测"
+  表现为"用例不存在"而不是一个假装通过的 SKIP）。**这份用例第一版是红的**，而红的
+  原因值得记下来：手写的请求体字面量在三处各少了一个 `\x00`（5 字节前缀的 4 个长度
+  字节写成了 3 个），长度于是从 4 变成 1032，服务端报"载荷还没收全"、照样回
+  `INVALID_ARGUMENT(3)` —— **第 3 轮那四条判据全"通过"了，一个字节都没钉住**。
+  现在是每个 fixture 先自检"它是不是我以为的那份字节"（`fixture_is_sum_frame()` 让
+  **解码器**当权威，`tests/functional/web_h2_grpc_func.cpp:347-370`），响应侧则让手算
+  的十六进制字面量与"`decode_exact` 解得开"互为独立的两道口径。第二处错同一类：
+  第二组请求体里 `a0 8c 06` 应为 `a0 8d 06`（100000 的第二个 varint 字节是 13 不是 12），
+  而"解得开一帧"的自检**照样绿** —— 因为那是一帧完全合法的、只是数不对的字节。
+  自检于是改成连**值**一起断言（`1.6.10-dev`）
+- **回归**（`1.6.10-dev`）：`build-capi-h2`（WEB + NGHTTP2）116/116；
+  `build-capi-all`（CAPI + HTTP3 + WSDL 关，全功能）129/129，两条 DB 用例按惯例
+  skip；`-DUVCPP_BUILD_WEB=OFF` 的树编过，且 `test_web_h2_grpc_func` 不在其中。
+  门禁：`check_doc_versions` / `check_docs` / `check_doc_lines`（1085 条引用）/
+  `check_config_contract`（对着新打的包）/ `check_ci_layout` / `check_capi_symbols`
+  全过；`check_doc_snippets` 拿 `build-all` 的包（WSDL 开）编过 103/103 条
+  —— 拿 `build-capi-all` 的包跑会退 **3（14 条 WSDL 片段没判）**，那**不是绿**
 
 ### 数据库（`src/db/`）
 

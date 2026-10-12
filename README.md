@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.6.9--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.6.10--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.6.9-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.6.10-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -240,6 +240,7 @@ CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy.
 | http2 (status) | [doc/http2-status.md](doc/http2-status.md) | What HTTP/2 does and does not support yet, and the trade-offs behind that |
 | quic | [doc/quic-guide.md](doc/quic-guide.md) | The QUIC transport: the build contract, why it needs an OpenSSL ≥ 3.2, the API shape, and an honest list of what does not work yet |
 | http3 | [doc/http3-guide.md](doc/http3-guide.md) | HTTP/3 as the web layer's second transport: the three QUIC extensions it needed, the API shape (session vs connection, the three critical streams), the CMake wiring, and why HTTP/1.1 is unaffected by it |
+| grpc | [doc/grpc-guide.md](doc/grpc-guide.md) | The gRPC envelope as a library module: the 5-byte length-prefixed frame and a narrow slice of protobuf wire format, the three-segment response shape (why `grpc-status` rides a trailer and the HTTP status is always 200), the error-code mapping, and what it deliberately does not do |
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | Memory pool, page heap and span, and why they ship disabled |
 | WSDL (document + publishing) | [doc/wsdl-guide.md](doc/wsdl-guide.md) | Parsing a WSDL 1.1 document into a model, looking things up by QName, serving it or generating one |
 | SOAP (envelope + dispatch) | [doc/soap-guide.md](doc/soap-guide.md) | Envelopes and `soap:Fault` in 1.1 and 1.2, the dispatch key derived from the binding, the nine rejections and which side each one belongs to, and why the response wrapper is not the dispatch key |
