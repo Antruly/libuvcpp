@@ -9,10 +9,10 @@
 读法：**先看主题清单**。它按模块分组，每条括号里写的是这处改动**首次出现**的开发档号
 （`1.1.7`、`1.3.5-dev` 这种）。开发档不单独发布 —— 它们按线折叠进稳定版：
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
-`1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`、`1.6.2` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
+`1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`、`1.6.2`、`1.6.3` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.2**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`。
+当前源码树是 **1.6.3**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -32,6 +32,7 @@
   - [性能](#性能)
   - [配置、打包与 CI](#配置打包与-ci)
 - [逐个版本](#逐个版本)
+  - [v1.6.3 (2026-10-12)](#v163-2026-10-12)
   - [v1.6.2 (2026-10-11)](#v162-2026-10-11)
   - [v1.6.1 (2026-10-11)](#v161-2026-10-11)
   - [v1.6.0 (2026-10-11)](#v160-2026-10-11)
@@ -904,11 +905,51 @@
   180）。Linux 的自包含断言名单加上 ngtcp2 / nghttp3：它们今天由本仓
   `ENABLE_SHARED_LIB=OFF` 压成静态、**不可能**出现在 `ldd` 里，写进名单是为了让"哪天有人
   把上游那个开关改成 ON"变成一条当场看得见的红（`1.5.0`）
+- **`cmake --install` 现在也装从源码取的 zlib 那两个头**（`zlib.h`、`zconf.h`）。公开且会被
+  安装的 `src/web/uvcpp_ws_parser.h` 在 `#if UVCPP_ZLIB_ENABLE` 里引 `<zlib.h>`，而生成的
+  `uvcpp_config.h` 把这个宏**默认定成 1**（还带一条 `#error` 禁止消费者自己定义成 0）——
+  关不掉。库自己编得过，是因为那份 zlib 是 FetchContent 取来**静态**链进去的，头只存在于
+  构建树；于是"用发布包"与"从源码建库再 `cmake --install`"这两条路分了叉，而后者一编就死在
+  `zlib.h` 找不到上（发布包是 `package_release.py` 手工补的这两个头，install 规则里没有）。
+  开关用普通变量 `UVCPP_ZLIB_FROM_SOURCE`，**不是** `DEFINED zlib_SOURCE_DIR` —— 后者是
+  FetchContent 写进缓存的 `:STATIC`，走过一次取源支路就一直在，翻回系统 zlib 支路照样
+  "defined"，会装出一份陈旧的 `zlib.h`（这条假阳性实测过）。系统 zlib 的平台上不触发。
+  `cmake --install` 在本仓 CI 里**没有任何一格覆盖**（唯一的 `make install*` 是 OpenSSL 的
+  `install_sw`），所以这条分叉此前没人看得见（`1.6.3`）
 
 ## 逐个版本
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.6.3 (2026-10-12)
+
+**修复**:`cmake --install` 现在也装从源码取的 zlib 那两个头
+
+从源码建库、再对着 `cmake --install` 出来的前缀编译的消费者，此前一编就死。公开且会被安装的
+`src/web/uvcpp_ws_parser.h` 在 `#if UVCPP_ZLIB_ENABLE` 里引 `<zlib.h>`，生成的
+`uvcpp_config.h` 又把这个宏**默认定成 1**（附一条 `#error` 禁止消费者自己定义成 0），而 zlib
+的那两个头只存在于构建树 —— 它是 FetchContent 取的源码、被**静态**链进 `libuvcpp.so`，
+装的时候没人管它。
+
+发布包没这个毛病：`package_release.py` 给包手工补了 `include/zlib.h` / `include/zconf.h`，
+注释里直说「install 规则里没有这一条」。所以是同一件事的两条路分了叉，而 `cmake --install`
+在本仓 CI 里**没有任何一格覆盖**（唯一的 `make install*` 是 OpenSSL 的 `install_sw`），
+分叉因此一直没人看见。它是从 [HttpArena](https://github.com/MDA2AV/HttpArena) 上那份
+**从源码建库**的条目里冒出来的：那个入口钉 `v1.6.1`、在容器里自己编库，最后一条
+`RUN g++ … main.cc` 就死在这一处，报的是
+`include/web/uvcpp_ws_parser.h:31:10: fatal error: zlib.h: No such file or directory`。
+
+install 规则补上这两个头，只在**取源码**那条支路装（系统 zlib 的平台上消费者手里本来就有）。
+开关刻意不用 `DEFINED zlib_SOURCE_DIR`：那是 FetchContent 写进**缓存**的
+`zlib_SOURCE_DIR:STATIC`，走过一次取源支路就一直在，后来翻回系统 zlib 支路照样 "defined"，
+会装出一份陈旧的 `zlib.h`（`zlib.h` 在源码目录、`zconf.h` 由 zlib 自己的 CMake 在配置期
+生成到构建目录，两个都得取）。改用普通变量后三条支路实测：取源支路 `cmake_install.cmake`
+里 1 条、**同一个构建目录**翻回系统 zlib 支路 0 条、再翻回来又是 1 条。
+
+判据不是平台读数：在一个**没有系统 zlib** 的头树里（`-nostdinc -nostdinc++` 加符号链接农场
+顶替 `/usr/include`），只用这个安装前缀编公开头 —— 修完 rc=0 且 `-M` 指明 `zlib.h` 来自前缀；
+把这两个头从前缀里抽掉就复现出上面那条 CI 报错，逐字同一处。没有性能面。
 
 ### v1.6.2 (2026-10-11)
 

@@ -19,6 +19,68 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.6.3 重点 (Highlights)
+
+`v1.6.2` 之后的补丁版，一条改动：**`cmake --install` 现在也装从源码取的 zlib 那两个头**。
+
+影响面说清楚：**从发布包用库的人不受影响**（包里本来就带着那两个头），受影响的是**自己从
+源码建库、再对着装出来的前缀编译**的人 —— 这条路上，公开头里有一处引用是编不过去的。
+
+### 一个公开头，装出来却编不过
+
+公开且会被安装的 `web/uvcpp_ws_parser.h` 在 `#if UVCPP_ZLIB_ENABLE` 里引 `<zlib.h>`，而
+生成的 `uvcpp_config.h` 把这个宏**默认定义成 1**，旁边还有一条 `#error` 禁止消费者自己把它
+定义成 0 —— 也就是说这条依赖关不掉。
+
+库自己编得过，是因为那份 zlib 是 FetchContent 取的源码、被**静态**链进 `libuvcpp.so`：头只
+存在于构建树里，装的时候没人管它。于是同一件事有了两条路：
+
+| 用法 | 头从哪来 | 结果 |
+|---|---|---|
+| 解压发布包 | 包里手工补的 `include/zlib.h`、`include/zconf.h` | 编得过 |
+| 从源码建库 + `cmake --install` | install 规则里没有这两条 | 编不过 |
+
+第二行是这次的缺陷。它是从 [HttpArena](https://github.com/MDA2AV/HttpArena) 上那份从源码
+建库的条目里冒出来的：最后一条 `RUN g++ … main.cc` 死在
+`include/web/uvcpp_ws_parser.h:31:10: fatal error: zlib.h: No such file or directory`。
+
+顺带一提，这条分叉此前**没有任何一道门禁看得见**：本仓 CI 里唯一一处 `make install*` 是
+OpenSSL 的 `install_sw`，没有任何一格跑 `cmake --install`。发布包那条路是
+`tests/tools/package_release.py` 手工组装 stage 的，它补这两个头时注释里写着「install 规则
+里没有这一条」—— 两份清单各写各的，谁也没跟谁比过。
+
+### 怎么修的，以及为什么开关不能图省事
+
+install 规则补上这两个头，且只在**取源码**那条支路装（系统 zlib 的平台上，消费者手里本来
+就有这份头）：
+
+```cmake
+if(UVCPP_ENABLE_ZLIB AND UVCPP_ZLIB_FROM_SOURCE)
+  install(FILES "${zlib_SOURCE_DIR}/zlib.h" "${zlib_BINARY_DIR}/zconf.h"
+          DESTINATION include)
+endif()
+```
+
+开关是**普通变量**，这一点是刻意的。最顺手的写法是 `if(DEFINED zlib_SOURCE_DIR)`，但它不
+成立：`zlib_SOURCE_DIR` 是 FetchContent 写进**缓存**的 `zlib_SOURCE_DIR:STATIC`，只要某次
+配置走过取源支路就一直在，后来翻回系统 zlib 支路也照样 "defined" —— 会装出一份陈旧的
+`zlib.h`，源码目录被清掉时还会让整个 install 中断。这条假阳性是实测出来的，不是推的。
+
+两个头取自两个目录也不能省：`zlib.h` 在源码目录，`zconf.h` 由 zlib 自己的 CMake 在**配置期**
+`configure_file` 生成到构建目录。
+
+三种状态实测过：取源支路 `cmake_install.cmake` 里 1 条；**同一个构建目录**翻回系统 zlib 支路
+0 条（即上面那个缓存陷阱的形状）；再翻回来又是 1 条。
+
+### 判据
+
+不是平台读数，是"在一个**没有系统 zlib** 的头树里，只用这个安装前缀能不能编过公开头"：
+`-nostdinc -nostdinc++` 加一个顶替 `/usr/include` 的符号链接农场，编一个 `#include <web/…>`
+的最小翻译单元 —— 修完 **rc=0**，且 `g++ -M` 指明 `zlib.h` / `zconf.h` 来自**安装前缀**；
+把这两个头从前缀里抽掉，就复现出上面那条 CI 报错，逐字同一处、同一文件同一行。
+
+**这次改动不含任何性能面。** 不要拿它去许诺任何分数变化。
+
 ## v1.6.2 重点 (Highlights)
 
 `v1.6.1` 之后的补丁版，一条改动：**HTTP/1.1 的 `Host` 与空 `Transfer-Encoding` 一律 400**。
