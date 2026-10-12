@@ -1014,7 +1014,7 @@ h2 会话的参数在 `uvcpp_h2_session::init()` 上是带默认值的形参，*
 |---|---|
 | 伪头畸形 / 顺序错 / 重复 | `RST_STREAM(PROTOCOL_ERROR)`（RFC 9113 §8.1.2） |
 | `:authority` 与 `host` 冲突 | RST —— 请求走私/缓存投毒的经典入口 |
-| `:scheme` 不是 `https` | RST |
+| `:scheme` 与实际传输层不符（TLS 上不是 `https` / 明文上不是 `http`） | RST |
 | 连接专属头（`connection` / `keep-alive` / `transfer-encoding` / `upgrade` / `proxy-connection`） | 收到即 RST；发出时一律剥掉 |
 | `content-length` 与 DATA 实长不符 | RST（h2→h1 走私的手法） |
 | 头部膨胀 / HPACK bomb | 逐字段累加 `namelen+valuelen+32` 封顶 64 KiB —— **这是唯一防线**，`SETTINGS_MAX_HEADER_LIST_SIZE` 只是宣告出去的值，nghttp2 的接收路径**不做任何强制**（对端可以不遵守，bomb 正是不遵守的那种对端） |

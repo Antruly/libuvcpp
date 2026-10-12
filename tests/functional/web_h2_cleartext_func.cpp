@@ -19,6 +19,15 @@
  *      字节流走到 `send_trailers()` 必须拿到 `UV_ENOTSUP`，而不是被当成普通
  *      响应头混进首部（混进去调用方看着"发出去了"，对端收到的却是另一份报文）。
  *      这一条同样落在第八轮里，用的是同一个 h2c 端口的 h1 那一侧。
+ *   6. 第九、十轮判的是**明文这条腿上的 `:scheme`**：RFC 9113 §8.1.1 要求它
+ *      与实际 URI 一致，于是明文只能是 `http`、TLS 只能是 `https`，**不符就拒**
+ *      （拒掉的那一格拦的是"明文连接自称 https"这种混淆代理入口）。这两轮是
+ *      1.6.12 修掉的那个缺陷的回归：服务端曾经把 `https` 钉死，明文 h2c 每一条
+ *      流都被 RST_STREAM(PROTOCOL_ERROR)，而前八轮**一个字节都没走到它** ——
+ *      那些轮的字节是客户端会话 `drain()` 出来的，而客户端当时也钉死 `https`，
+ *      两边一起错、恒等抵消。所以第九轮的头块是**手拼的**（`raw_h2_get()`），
+ *      造字节的手与被检验的手不是同一只；第十轮再拿真会话的字节回头打给服务端，
+ *      把"两端各自独立地按传输层取值"这一条闭合成环。
  *
  * 装置与"为什么这样能把住关"：
  *
@@ -150,6 +159,76 @@ const size_t kPrefaceLen  = sizeof(kPreface) - 1;  // 24
 
 /// h2 响应体的明文一定出现在 DATA 帧的载荷里（h2 的 DATA 不编码）。
 const char kBody[] = "world";
+
+/// 手拼一条 h2 帧（RFC 9113 §4.1：9 字节定长头 + 载荷）。
+///
+/// 第 9/10 轮**故意**不用本库的客户端会话：那正是这个缺陷藏了这么久的原因。
+/// 缺陷在 `:scheme` 上，而客户端会话过去把它钉死成 `https` —— 同源的用例
+/// 两边一起错，恒等抵消（与 h3 那个 CID 长度缺陷同一形状）。判据落在字节上，
+/// 造字节的手就不能是那支正在被检验的手。
+std::string h2_frame(unsigned type, unsigned flags, uint32_t sid,
+                     const std::string& payload) {
+  std::string out;
+  const uint32_t n = static_cast<uint32_t>(payload.size());
+  out += static_cast<char>((n >> 16) & 0xFFu);
+  out += static_cast<char>((n >> 8) & 0xFFu);
+  out += static_cast<char>(n & 0xFFu);
+  out += static_cast<char>(type);
+  out += static_cast<char>(flags);
+  out += static_cast<char>((sid >> 24) & 0x7Fu);
+  out += static_cast<char>((sid >> 16) & 0xFFu);
+  out += static_cast<char>((sid >> 8) & 0xFFu);
+  out += static_cast<char>(sid & 0xFFu);
+  out += payload;
+  return out;
+}
+
+/// HPACK 里"字面量 + 不做索引 + 名字也是字面量"那一种（RFC 7541 §6.2.2）。
+///
+/// 首字节 `0x00` = 4 位前缀的值 0（"新名字"），后面两个字符串各自是
+/// 「1 位 Huffman 标志(0) + 7 位长度」。名字与值都短于 128 字节，所以长度
+/// 一字节装得下，不需要 §5.1 的整数编码。
+std::string hpack_literal(const std::string& name, const std::string& value) {
+  std::string out;
+  out += '\x00';
+  out += static_cast<char>(name.size());
+  out += name;
+  out += static_cast<char>(value.size());
+  out += value;
+  return out;
+}
+
+/// 手工拼一条 `GET <path>` 的完整开场：前言 + 空 SETTINGS + 一条带头块的流。
+/// **`scheme` 是唯一的变量** —— 第 9/10 两轮的对照全靠它。
+std::string raw_h2_get(const std::string& scheme, const std::string& path) {
+  std::string block;
+  block += hpack_literal(":method", "GET");
+  block += hpack_literal(":scheme", scheme);
+  block += hpack_literal(":authority", "example.com");
+  block += hpack_literal(":path", path);
+  return std::string(kPreface, kPrefaceLen) +
+         h2_frame(0x4u, 0x0u, 0u, std::string()) +  // SETTINGS（空：全套缺省）
+         h2_frame(0x1u, 0x4u | 0x1u, 1u, block);    // HEADERS + END_HEADERS|END_STREAM
+}
+
+/// 收到的字节里有没有**某一类**帧。
+///
+/// 摊开成帧表而不是 `find()` 一两字节：`\x03`（RST_STREAM 的类型号）在载荷里
+/// 随手就会出现（HPACK 或 body 里），拿它当判据会随 body 内容忽真忽假。
+bool has_frame_type(const std::string& s, unsigned type) {
+  size_t off = 0;
+  while (off + 9 <= s.size()) {
+    const unsigned char* p =
+        reinterpret_cast<const unsigned char*>(s.data()) + off;
+    const uint32_t len = (static_cast<uint32_t>(p[0]) << 16) |
+                         (static_cast<uint32_t>(p[1]) << 8) |
+                         static_cast<uint32_t>(p[2]);
+    if (off + 9 + len > s.size()) break;  // 截断：后面都不是完整的帧
+    if (p[3] == type) return true;
+    off += 9 + len;
+  }
+  return false;
+}
 
 uvcpp_http_request make_req(http_method m, const std::string& url,
                             const std::string& host = "example.com") {
@@ -388,6 +467,13 @@ bool looks_like_h1(const std::string& got) {
 std::string h2_client_hello() {
   uvcpp_h2_session            cli(false);
   uvcpp_h2_session::callbacks cbs;
+  // **必须显式声明这是明文连接。** 会话的 `:scheme` 由它定（TLS 上 `https`、
+  // 明文上 `http`），缺省是 TLS —— 不声明的话这里 `drain()` 出来的是
+  // `:scheme: https`，而服务端在明文这条腿上（正确地）只认 `http`，于是
+  // "真客户端的字节"这个锚点本身就把服务端判死了。构造出来的会话默认 TLS，
+  // 是因为库内唯一的构造者 `uvcpp_h2_connection` 总会按 `client->is_tls()`
+  // 覆盖掉这个值；手工搭会话的用例是唯一需要自己说清楚的场景。
+  cli.set_tls(false);
   cbs.on_fatal = [](uvcpp_h2_session&, int) {};
   if (cli.init(cbs) != 0) return std::string();
   if (cli.submit_request(make_req(http_method::HTTP_GET, "/plain"), "") <= 0) {
@@ -410,6 +496,7 @@ bool h2_roundtrip(int port, int& status, std::string& body, std::string& sent,
                   std::string& raw, const std::string& url = "/plain") {
   uvcpp_h2_session            cli(false);
   uvcpp_h2_session::callbacks cbs;
+  cli.set_tls(false);  // 明文连接（理由见 h2_client_hello 那一处）
   bool     done  = false;
   bool     fatal = false;
   int      st    = 0;
@@ -565,6 +652,7 @@ bool h2_trailers_roundtrip(int port, int& status, std::string& body,
                            http_headers& end_headers, std::string& raw) {
   uvcpp_h2_session            cli(false);
   uvcpp_h2_session::callbacks cbs;
+  cli.set_tls(false);  // 明文连接（理由见 h2_client_hello 那一处）
   bool         done  = false;
   bool         fatal = false;
   int          st    = 0;
@@ -894,6 +982,137 @@ void test_h2c_disabled_control() {
   srv.shutdown();
 }
 
+// =========================================================================
+// 第 9 轮：`:scheme` 必须与**实际传输层**一致 —— 明文侧（字节级的对照组）
+// =========================================================================
+
+/**
+ * @brief 两条只差 `:scheme` 一个字的连接，必须得到**两种**结果。
+ *
+ * 这一轮的全部价值在"造字节的手不是被检验的那只手"：包里的 HEADERS 是手拼的
+ * （`raw_h2_get()`），不经过 `uvcpp_h2_session`，也不经过 `uvcpp_tcp_client`
+ * 之外的任何本库代码。原来的缺陷（服务端把 `https` 钉死）在本文件前八轮里
+ * **一个字节都没被走到**，因为那些轮的字节全是客户端会话 `drain()` 出来的，
+ * 而它当时也钉死 `https` —— 两边一起错，恒等抵消。
+ */
+void test_scheme_must_match_cleartext() {
+  std::cout << "[9] 明文连接上 `:scheme` 只能是 http（手拼字节，不经过客户端会话）"
+            << std::endl;
+  TestServer srv;
+  const int  port = srv.start(/*h2c=*/true);
+  if (port <= 0) {
+    check(false, "服务端起来了");
+    return;
+  }
+
+  // (a) `http` —— 合规客户端（curl/h2load 的先验知识 h2c）会发的值：必须被派发。
+  {
+    std::string got;
+    const bool  ok = write_then_read(
+        port, {raw_h2_get("http", "/plain")}, 0, got,
+        [](const std::string& s) { return s.find(kBody) != std::string::npos; },
+        3000);
+
+    info("(a) `:scheme: http` 回复 " + std::to_string(got.size()) + " 字节：" +
+         frame_dump(got));
+    check(ok, "(a) `:scheme: http` 被判成 h2 并派发（响应体 world 出现在 DATA 里）");
+    check(!has_frame_type(got, 0x3u), "(a) 没有 RST_STREAM");
+  }
+
+  // (b) `https` —— 同一条连接、同一个端口、**只改这一个字**：必须被拒。
+  //
+  // 为什么"再宽松一点，两个都收"不成立：明文连接自称 `https`，中间那个终结
+  // TLS 的代理/缓存就会按 https 的语义去处理它（缓存键、Cookie 的 Secure、
+  // HSTS）。RFC 9113 §8.1.1 要拦的正是这个，所以这一格判的不是"服务端挑剔"，
+  // 是"服务端没有帮混淆代理开门"。
+  {
+    std::string got;
+    const bool  ok = write_then_read(
+        port, {raw_h2_get("https", "/plain")}, 0, got,
+        [](const std::string& s) { return has_frame_type(s, 0x3u); }, 3000);
+
+    info("(b) `:scheme: https` 回复 " + std::to_string(got.size()) + " 字节：" +
+         frame_dump(got));
+    check(ok, "(b) `:scheme: https` 被 RST_STREAM 拒掉");
+    check(got.find(kBody) == std::string::npos,
+          "(b) 没有派发（响应体一个字节都不该出现）");
+    check(srv.chunk_count() >= 1, "前提：服务端确实读到了字节");
+  }
+
+  srv.shutdown();
+}
+
+// =========================================================================
+// 第 10 轮：同一个对照组，但走本库的客户端会话（两处事实必须同源）
+// =========================================================================
+
+/**
+ * @brief 第 9 轮的镜像：客户端会话**发**出来的字节，按它的 `set_tls()` 取值。
+ *
+ * 判据为什么不是"在字节里找 `http`/`https` 这几个字符"：`submit_request` 的帧
+ * 是 nghttp2 编出来的，头块里伪头的**名字**大概率走静态表索引（`:scheme` 是
+ * 索引 6），值也可能被 Huffman 编码 —— 字面量搜索会随编码器策略忽真忽假。
+ * 所以这一轮让**服务端**当判据：同样的字节打给明文服务端，第 9 轮已经用
+ * 手拼字节钉死了它的口径（`http` 派发、`https` 拒）。于是
+ *   - 明文会话的字节被派发 ⇒ 它发的是 `http`；
+ *   - TLS 会话的字节被 RST ⇒ 它发的是 `https`。
+ * 这条链上没有任何一处是"两端同源抵消"：两端的取值由两个**独立**的事实决定
+ * （各自那条连接的 TLS 与否），而判据（哪一侧该被拒）由手拼字节单独钉住。
+ */
+void test_client_session_scheme_follows_transport() {
+  std::cout << "[10] 客户端会话按 set_tls() 填 `:scheme`（服务端当判据）"
+            << std::endl;
+  TestServer srv;
+  const int  port = srv.start(/*h2c=*/true);
+  if (port <= 0) {
+    check(false, "服务端起来了");
+    return;
+  }
+
+  auto drained = [](bool tls) {
+    uvcpp_h2_session            cli(false);
+    uvcpp_h2_session::callbacks cbs;
+    cbs.on_fatal = [](uvcpp_h2_session&, int) {};
+    cli.set_tls(tls);
+    if (cli.init(cbs) != 0) return std::string();
+    if (cli.submit_request(make_req(http_method::HTTP_GET, "/plain"), "") <= 0) {
+      return std::string();
+    }
+    std::string out;
+    if (cli.drain(out) != 0) return std::string();
+    return out;
+  };
+
+  const std::string plain   = drained(/*tls=*/false);
+  const std::string via_tls = drained(/*tls=*/true);
+  check(plain.size() > kPrefaceLen, "装置自检：明文会话给出了字节");
+  check(via_tls.size() > kPrefaceLen, "装置自检：TLS 会话给出了字节");
+
+  {
+    std::string got;
+    const bool  ok = write_then_read(
+        port, {plain}, 0, got,
+        [](const std::string& s) { return s.find(kBody) != std::string::npos; },
+        3000);
+    info("明文会话的字节回复 " + std::to_string(got.size()) + " 字节：" +
+         frame_dump(got));
+    check(ok, "明文会话发的 `:scheme: http` 被服务端接受并派发");
+  }
+
+  {
+    std::string got;
+    const bool  ok = write_then_read(
+        port, {via_tls}, 0, got,
+        [](const std::string& s) { return has_frame_type(s, 0x3u); }, 3000);
+    info("TLS 会话的字节回复 " + std::to_string(got.size()) + " 字节：" +
+         frame_dump(got));
+    check(ok, "TLS 会话发的 `:scheme: https` 在明文口上被 RST_STREAM 拒掉");
+    check(got.find(kBody) == std::string::npos, "TLS 会话那份没有被派发");
+  }
+
+  srv.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -909,6 +1128,8 @@ int main() {
   test_buffered_prefix_replayed_on_mismatch();
   test_preface_diverges_at_last_byte();
   test_h2c_disabled_control();
+  test_scheme_must_match_cleartext();
+  test_client_session_scheme_follows_transport();
 
   std::cout << "[functional web_h2_cleartext] done failures=" << g_failures
             << std::endl;

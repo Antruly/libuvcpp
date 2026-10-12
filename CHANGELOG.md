@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.11-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.12-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -602,6 +602,26 @@
   也就是说**只断言 END_STREAM 是假绿**，真正的判据是"`on_response_end` 那一刻的
   头列表里有 `grpc-status`"。同一轮还拿同一个端口的 h1 那一侧断言 `UV_ENOTSUP`、
   且报文里看不到 `grpc-status`（变异：h1 那条路直接 `return 0` ⇒ 红）。稳定 38/38
+- **`:scheme` 不再钉死 `https` —— 明文 h2c 之前整条腿是坏的**（`1.6.12-dev`）。
+  1.6.5 加的 h2c（先验知识）在本仓所有用例里都是绿的，但那是**两端同源**的绿：
+  收方向把 `:scheme` 钉死成 `https`（`handle_pseudo()`），发方向也钉死成
+  `https`（`submit_request()`），两边一起错、恒等抵消 —— 与 h3 那个 CID 长度
+  缺陷同一形状。真客户端不这么发：`curl --http2-prior-knowledge http://…` 与
+  `h2load -p h2c` 发的是 `:scheme: http`，于是**每一条流**都在那里被
+  `RST_STREAM(PROTOCOL_ERROR)` 关掉，症状是"连上了、发出去了、永远等不到响应"。
+  修法是让取值跟**实际传输层**走：会话新增 `set_tls()` / `is_tls()`，
+  `uvcpp_h2_connection` 一律按 `client->is_tls()` 覆盖（库内唯一的构造者，客户端
+  与服务端两条腿都走它），收方向要求"与传输层一致"（TLS ⇒ `https`，明文 ⇒
+  `http`），发方向按同一个值填。**不改成"两个都收"**：一条明文连接自称 `https`
+  正是 RFC 9113 §8.1.1 要拦的混淆代理入口（缓存键、Cookie 的 `Secure`、HSTS 都会
+  按 https 的语义处理它），所以那一格仍判 `RST_STREAM`。判据落在**手拼字节**上
+  而不是本库客户端上（`tests/functional/web_h2_cleartext_func.cpp` 的
+  `raw_h2_get()`：前言 + 空 SETTINGS + 一条 `0x00` 字面量头块），两轮只差
+  `:scheme` 一个字 —— `http` 必须派发（DATA 里出现 body）、`https` 必须被 RST
+  且 body 一个字节都不出现；再拿真会话 `drain()` 出来的字节回头打给服务端，
+  把"两端各自独立地按传输层取值"闭合。修前那一格实测
+  `49 字节：SETTINGS + SETTINGS-ACK + RST_STREAM(stream 1)`；修后
+  `97 字节：SETTINGS + ACK + HEADERS(END_HEADERS) + DATA(world, END_STREAM)`
 
 ### gRPC（`src/grpc/`）
 
@@ -645,7 +665,7 @@
   字节写成了 3 个），长度于是从 4 变成 1032，服务端报"载荷还没收全"、照样回
   `INVALID_ARGUMENT(3)` —— **第 3 轮那四条判据全"通过"了，一个字节都没钉住**。
   现在是每个 fixture 先自检"它是不是我以为的那份字节"（`fixture_is_sum_frame()` 让
-  **解码器**当权威，`tests/functional/web_h2_grpc_func.cpp:347-370`），响应侧则让手算
+  **解码器**当权威，`tests/functional/web_h2_grpc_func.cpp:350-373`），响应侧则让手算
   的十六进制字面量与"`decode_exact` 解得开"互为独立的两道口径。第二处错同一类：
   第二组请求体里 `a0 8c 06` 应为 `a0 8d 06`（100000 的第二个 varint 字节是 13 不是 12），
   而"解得开一帧"的自检**照样绿** —— 因为那是一帧完全合法的、只是数不对的字节。

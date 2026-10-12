@@ -129,6 +129,14 @@ struct uvcpp_h2_session::impl {
 
   nghttp2_session*    session     = nullptr;
   bool                server_side = false;
+
+  /// 这条连接是不是 TLS —— `:scheme` 的唯一来源（见 `set_tls()`）。
+  ///
+  /// 缺省 true 是**历史行为**：本层在 `uvcpp_h2_connection` 之前只有 TLS 那一条
+  /// 腿。判断错这一位不会静默跑偏：明文连接上填 `https` 会被对端（只要对端也
+  /// 照 §8.1.1 判）以 PROTOCOL_ERROR 关掉流。
+  bool tls = true;
+
   callbacks           cbs;
   size_t              max_header_list = 64u * 1024u;
   int                 last_error      = 0;
@@ -345,8 +353,20 @@ struct uvcpp_h2_session::impl {
         s.request.url = v;
       }
     } else if (n == ":scheme") {
-      // 只做 TLS。接受 `http` 等于给混淆代理（RFC 9113 §8.1.1）开后门。
-      if (!want_request || v != "https") {
+      // 取值必须与**这条连接实际的传输层**一致：TLS 上 `https`，明文上 `http`。
+      //
+      // 判据是"不符就拒"（RFC 9113 §8.1.1 要求 scheme 与 URI 一致），而不是
+      // 钉死某一个字面量：
+      //   - 钉死 `https`（本条 1.6.11 之前的写法）会把明文 h2c 整条腿判死 ——
+      //     合规客户端（curl/h2load 的先验知识 h2c）发的是 `http`，于是每一
+      //     条流都在这里被 RST_STREAM(PROTOCOL_ERROR)，症状是"连上了、发出去
+      //     了、没有响应"；
+      //   - 反过来"两个都收"等于给混淆代理开后门：一条**明文**连接自称
+      //     `https`，中间那个终结 TLS 的缓存/代理就会按 https 的语义去处理它
+      //     （缓存键、Cookie 的 Secure 属性、HSTS），这正是 §8.1.1 要拦的。
+      // 两侧都合规的写法只有上面那一条：比实际传输层。
+      const char* want = tls ? "https" : "http";
+      if (!want_request || v != want) {
         reject(s.stream_id, NGHTTP2_PROTOCOL_ERROR);
       }
     } else if (n == ":authority") {
@@ -740,6 +760,10 @@ uvcpp_h2_session::uvcpp_h2_session(bool server_side) : impl_(new impl()) {
   impl_->server_side = server_side;
   impl_->owner       = this;
 }
+
+void uvcpp_h2_session::set_tls(bool tls) { impl_->tls = tls; }
+
+bool uvcpp_h2_session::is_tls() const { return impl_->tls; }
 
 uvcpp_h2_session::~uvcpp_h2_session() {
   if (impl_ && impl_->session) nghttp2_session_del(impl_->session);
@@ -1357,7 +1381,12 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   const std::string authority = req.get_header("host");
   store.push_back(method);
   names.push_back(":method");
-  store.push_back("https");
+  // 与收方向同一处事实：填这条连接**实际**的 scheme，不是钉死的字面量。
+  // 钉死 `https` 的后果在明文 h2c 上是致命的 —— 对端只要照 §8.1.1 判，我们
+  // 发出的每一条请求都会被 RST_STREAM(PROTOCOL_ERROR) 关掉，而本层看着一切
+  // 正常（帧发出去了、流也开了），症状是"永远等不到响应"。这也是为什么用例
+  // 里"两端同源"的自测恒等抵消：客户端填 https、服务端也（曾经）只认 https。
+  store.push_back(impl_->tls ? "https" : "http");
   names.push_back(":scheme");
   store.push_back(authority);
   names.push_back(":authority");

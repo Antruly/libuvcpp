@@ -276,6 +276,9 @@ bool h2_call(int port, const std::string& path, const std::string& payload,
              int deadline_ms = 4000) {
   uvcpp_h2_session            cli(false);
   uvcpp_h2_session::callbacks cbs;
+  // 明文 h2c：会话的 `:scheme` 按它填（缺省是 TLS），不声明的话服务端在明文
+  // 这条腿上会（正确地）按 PROTOCOL_ERROR 关掉这条流。
+  cli.set_tls(false);
 
   cbs.on_response = [&](uvcpp_h2_session&, uvcpp_h2_stream& stream, bool) {
     out.status        = static_cast<int>(stream.response.status_code);

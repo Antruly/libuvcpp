@@ -205,6 +205,27 @@ class UVCPP_API uvcpp_h2_session {
   uvcpp_h2_session& operator=(const uvcpp_h2_session&) = delete;
 
   /**
+   * @brief 声明这条连接**是不是 TLS**。这是 `:scheme` 唯一的取值来源。
+   *
+   * 为什么是"传输层的事实"而不是"调用方随便填的字符串"：RFC 9113 §8.1.1 要求
+   * `:scheme` 与 URI 的 scheme 一致，而一条连接的 scheme 由它自己那一层定 ——
+   * TLS 上是 `https`，明文上是 `http`。收方向按它判定，发方向按它填值。
+   *
+   * 默认 **true**（TLS）：这是本层在 `uvcpp_h2_connection` 之外被直接构造时的
+   * 历史行为（`uvcpp_h2_connection` 会按 `client->is_tls()` 覆盖掉）。手工搭
+   * 一条**明文**会话（先验知识 h2c）的用例必须显式 `set_tls(false)`，否则它发
+   * 的 `:scheme: https` 会（正确地）被明文那一侧拒掉。
+   *
+   * 这里刻意**不**做成"任意 scheme 字符串"：本层没有代理那种"说出与传输不符
+   * 的 scheme"的场景，而一旦允许，那条最容易踩的错（明文连接自称 https，见
+   * 收方向那道判定）就会从"连接级拒绝"退化成"静默接受"。
+   */
+  void set_tls(bool tls);
+
+  /// @brief 见 `set_tls()`。默认 true。
+  bool is_tls() const;
+
+  /**
    * @brief 注册回调并提交初始 SETTINGS。
    *
    * @param max_header_list_size 我们**愿意接收**的头部列表上限。

@@ -402,7 +402,7 @@ int grpc_parse_unary_body(const std::string& body, std::string& message,
 （`00 00 00 04` 看着就像"标志 + 长度"）。后果很隐蔽：长度从 4 变成 1032，解码器报
 `UV_ENODATA`（"载荷还没收全"），落到同一个 `INVALID_ARGUMENT` 上 —— **判据照样绿，
 而一个字节都没钉住**。写这种用例时，每个手写的 fixture 都该先过一道"它是不是我以为的
-那份字节"的自检（`tests/functional/web_h2_grpc_func.cpp:347-370` 那个 `fixture_is_sum_frame`
+那份字节"的自检（`tests/functional/web_h2_grpc_func.cpp:350-373` 那个 `fixture_is_sum_frame`
 就是干这个的，而它的第一版正是栽在这里）。
 
 **② 负的 `int32` 要符号扩展到 64 位。** 见 §3 —— `-1` 是 10 字节，不是 1 字节。

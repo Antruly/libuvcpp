@@ -17,7 +17,16 @@ namespace uvcpp {
 
 uvcpp_h2_connection::uvcpp_h2_connection(uvcpp_tcp_client* client,
                                          bool              server_side)
-    : client_(client), session_(new uvcpp_h2_session(server_side)) {}
+    : client_(client), session_(new uvcpp_h2_session(server_side)) {
+  // 会话层要**知道**这条连接是不是 TLS —— `:scheme` 收发两侧都按它判（见
+  // `uvcpp_h2_session::set_tls()`）。事实来源只有一个：底层连接自己。
+  //
+  // 不能按"server_side"或"ALPN 协商出了 h2"来推：ALPN 只在 TLS 上存在，而
+  // 明文 h2c 那条腿**同样**要建服务端 h2 会话（`set_h2c_enabled()`，RFC 9113
+  // §3.4）—— 两者的区别只在这一个布尔上。客户端为 null 时按 TLS 记（`start()`
+  // 会以 `UV_EINVAL` 拒掉这种连接，这个值永远用不上）。
+  session_->set_tls(client_ != nullptr && client_->is_tls());
+}
 
 uvcpp_h2_connection::~uvcpp_h2_connection() {
   if (alive_token_) *alive_token_ = 1;  // 先置位，再拆成员
