@@ -490,7 +490,9 @@ int uvcpp_http_server::set_loops(int n) {
   //
   // **只挡 n > 1**：`set_loops(1)` 在下面那条腿的契约里是"幂等的空操作"（它
   // 什么都不建），h3 端点建好之后调它一个字节都不会变，没有理由拒。
+#if UVCPP_HTTP3_ENABLE
   if (n > 1 && !quic_servers_.empty()) return UV_EBUSY;
+#endif
 
   // 余下的判据（越界以外的 `UV_EBUSY`、`n == 1` 的幂等）在下面那条腿上，那边
   // 才是权威 —— 这里不重抄一遍，抄出来迟早会与它走岔。
