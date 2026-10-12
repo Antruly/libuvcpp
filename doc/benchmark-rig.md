@@ -739,6 +739,84 @@ rps 那四行是两臂各 **4 次**的均值，同臂内的极值：`static-h2-c
 （`image/svg+xml`），改前**压根没被压过**，两臂唯一的差别就是线上 71 680 → 11 739 字节
 ⇒ 那一格量到的是纯带宽。其余几格的差值里同时含带宽与"请求线程上那次 zlib 压缩"。
 
+### 预压缩孪生：两条静态腿各自的探针
+
+`1.6.15-dev` 给 `uvcpp_web_app::serve_static` 那条腿加了 `precompressed`（见上一节），
+`1.6.18-dev` 给它补到 `uvcpp_static_server` 上 —— 而那是**另一份实现**，挂在
+`uvcpp_http_server::on_request()` 上，条目里只有 h3 那条腿用它（`uvcpp_web_app` 没有
+`uvcpp_http_server` 那样的裸监听器，h3 要挂静态文件就只能用 `uvcpp_static_server`）。
+所以这一轮的量具不是"条目的一个环境变量"，而是一支**探针**（`probe.cpp`，在仓外）：
+`probe <srv|app> <root> <precompressed 0|1> <loops>` 一次只起**一条**腿、只起**一个**
+监听器，`srv` 走 `uvcpp_http_server + uvcpp_static_server`，`app` 走
+`uvcpp_web_app + serve_static`。语料就是条目那份 `data/static`（20 个文件 + 30 个孪生
+= 50 个，原件合计 1 271 603 B），驱动器是 `h2load -p http/1.1` 打一份把 20 个 URI 全
+列上的清单。
+
+**坑一：语料挂在哪个文件系统上会直接决定结论。** 本机那份 `data/static` 的原路径
+（`/home/zwy/mintSet/...`）是一个 **ntfs-3g（FUSE）挂载**（`findmnt` 报
+`/dev/nvme0n1p4 fuseblk`），在那里**一次 `stat` 要 45.9 µs**；同一批 50 个文件
+`cp -a` 到 ext4 上之后是 **1.35 µs —— 34 倍**：
+
+```
+/home/zwy/mintSet/public/HttpArena/data/static   5000 stats in 229.8 ms = 45.95 us/stat
+/tmp/arena-run/pc/withtwin                        5000 stats in   6.8 ms =  1.35 us/stat
+```
+
+两条静态腿都**每请求 stat 一次**（那是 mtime 实时更新那条设计），而开了孪生之后还要
+再多 stat 一次候选结尾名。于是同一份代码、同一批字节，只在原路径上量会得到**反的**
+结论：`app` 腿 pc=1 看上去比 pc=0 **慢 2.4 倍**（23 982 → 9 806 rps），而那正是"多出来
+的那次 stat 乘 46 µs"本身 —— 那条腿当时已经整个卡在 stat 上（关掉它也只跑 24 k，
+关/开只差一次 stat 的量）。**此后凡是量静态腿，语料一律先 `cp -a` 到 ext4**，下面这张
+表就是在那份拷贝上量的。平台是把数据集挂进容器的，落在普通文件系统上，所以 ext4 那组
+才是能外推的一组。
+
+**坑二：`h2load -p http/1.1` 的 `-m` 是「每连接在途请求数」（流水线深度），不是
+并发流数。** `uvcpp_web_app` 有一条自带的闸（`cfg_.max_pipelined_requests`，**默认 8**，
+`uvcpp_web_app.cpp`），越界时回 **503 "too many pipelined requests"** 并关连接。于是
+`-m 32` 打 `app` 腿会得到这样一行：
+
+```
+requests: 20000 total, 156082 started, 35696 done, 31528 succeeded, 168472 failed,
+          164304 errored, 0 timeout
+status codes: 31566 2xx, 0 3xx, 0 4xx, 4168 5xx
+```
+
+—— 看着像服务端崩了，其实是驱动器的参数越了闸。`-m 2` 才稳（8000 个里 0 个 503），
+`-m 4` 已经偶尔越（40 ~ 660 个）。**两条腿在同一个 `-m` 下表现还不一样**：
+`uvcpp_static_server` 挂在 `uvcpp_http_server::on_request()` 上，那一层没有这道闸，
+同一个 `-m 32` 它 40 000 个请求全 2xx。所以"5xx 数"在两条腿之间不可比，它量的是驱动器。
+
+**坑三：`-c 256` 那一档是双峰的，别拿它当判据。** 上面那些越界的 503 每个都会带走一条
+连接，h2load 要重连，于是同一格读数能落在大相径庭的两个值上（pc=1 一次 38 299 rps、
+重跑 219 398 rps）。`-c 64 -m 2` 下三次重复的散布在 5% 以内，所以下表取那一档；
+`-c 256` 只用来量**字节数**（那一栏与并发无关）。
+
+读数（同一份 ext4 拷贝、8 条循环、`h2load -p http/1.1 -c 64 -m 2 -n 8000`、
+`Accept-Encoding: br;q=1, gzip;q=0.8`，20 个文件轮转）：
+
+| 腿 | `precompressed=0` | `precompressed=1` | 差 | 8000 请求送出字节 |
+|---|---|---|---|---|
+| `uvcpp_static_server`（h3 那条腿） | 933.15 rps（8.57 s） | **82 451.28**（97.0 ms） | **88×** | 173 843 446 → 131 194 904（−24.5%） |
+| `uvcpp_web_app::serve_static` | 110 773（三次中位） | **185 280**（三次中位） | **+67%** | 172 797 487 → 131 865 720（−23.7%） |
+
+`app` 腿那一格的三次原始读数：pc=0 为 119 207 / 110 470 / 110 773，pc=1 为
+185 280 / 185 434 / 183 205。字节那一栏是精确值（读每个响应的 `content-length`），
+并且**两臂在 `pc=1` 上收敛到同一个数**（两条腿都变成 653 777 076 字节的实体），
+这正是"发的是盘上同一批孪生"的旁证。
+
+`uvcpp_static_server` 那一格能到 88× 是**真的**，不是量具鬼影：关掉时它每请求在
+**循环线程**上把整份文件 deflate 一遍（`compress_enabled_` 默认就是 true，而全仓只有
+`uvcpp_web_static` 填 `resp.cache_tag`，本类不填 ⇒ 那个变体缓存对它不生效），20 个文件
+平均 63.6 KB、最大的 `app.js` 204 800 B ⇒ 每请求 2 ~ 7 ms 的 zlib，8 条循环合起来正好
+落在 933 rps 这个量级上。它**与语料在哪个文件系统上无关**（ntfs-3g 上是 933.15、
+ext4 上是 921.16）—— 因为它卡的是 CPU，不是 stat。
+
+另有一条口径要声明：**`precompressed=0` 那一臂发出去的不是原文件**，是实时 deflate 出来
+的 gzip。它每轮 426 KB，比盘上那套 `.gz` 孪生（343 783 B / 363 783 B 含无孪生文件）
+还大 —— 实时压缩器是按延迟配的，不是按体积配的。所以 −24% 那一栏里同时含"省掉一次
+白压"和"换成一份压得更狠的字节"两件事；纯带宽那一份是 br 与 gz 之间的 10.5%（15 个有
+孪生的文件上是 14.6%）。
+
 ### 这个量具什么时候不作数
 
 - **它量的是对端的脸色。** 同一份服务端换一个 h3 客户端（`nghttpx --http3` 也行），

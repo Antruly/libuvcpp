@@ -9,6 +9,10 @@
 #include <sstream>
 #include <vector>
 
+// `http_pick_precompressed_variants()` —— 孪生后缀的挑选规则。与技术层的
+// `uvcpp_web_static` 共用同一份实现（理由见那个函数上面那段）。
+#include <web/uvcpp_http_common.h>
+
 #include <req/uvcpp_fs.h>
 #include <req/uvcpp_work.h>
 
@@ -123,6 +127,28 @@ stat_kind stat_path(uvcpp_loop* loop, const std::string& path,
   return kind;
 }
 
+/**
+ * @brief 给一份取自孪生文件的响应补上 `content-encoding` 与 `vary`。
+ *
+ * `content-type` **不在这里改**：它取自原文件的路径（`app.js` → `text/javascript`），
+ * 而 `app.js.br` 的扩展名是 `.br`，按它推类型会得到 `application/octet-stream`。
+ * 调用方传进来的 `mime` 已经是原文件的那一份。
+ *
+ * `vary` 是必须的：同一条 URL 会因为 `Accept-Encoding` 给出不同的字节，中间缓存
+ * 不看到这一行就会把 brotli 的响应发给一个只说 gzip 的客户端（RFC 9110 §12.5.5）。
+ * 已经在头表里的不覆盖 —— 与实时压缩那条路（`apply_compression_for`）同一条规矩。
+ *
+ * 顺带一提：这一对头**同时**把 `uvcpp_http_server` 的实时压缩挡在门外（那边
+ * `if (resp.has_header("content-encoding")) return false;`），所以孪生文件不会
+ * 被再压一遍。
+ */
+void apply_variant_headers(uvcpp_http_response& resp,
+                           const std::string& variant) {
+  if (variant.empty()) return;
+  resp.set_header("content-encoding", variant == ".br" ? "br" : "gzip");
+  if (!resp.has_header("vary")) resp.set_header("vary", "accept-encoding");
+}
+
 }  // namespace
 
 // 异步 stat 任务：worker 线程取元数据，loop 线程决定下一步走向。
@@ -146,6 +172,17 @@ struct uvcpp_static_server::StatTask {
   int64_t mtime_sec;
   int64_t mtime_nsec;
   int64_t size;
+
+  // --- 预压缩孪生（`set_precompressed(true)` 时才有内容） ---
+  //
+  // `variants` 在 **loop 线程**上按请求头算好（worker 不该碰 `req`），worker 只
+  // 负责按序 probe。`variant` 是 worker 的产出：选中的那个后缀，空串 = 发原文件。
+  // 选中之后 `fs_path`/`mtime_*`/`size` **全部换成孪生那一份** —— 缓存校验比的是
+  // "要发的那个文件变了没有"，拿原文件的 mtime 去校验孪生的字节，改的只是孪生
+  // 时会一直发旧字节。
+  std::string variants[2];
+  size_t variant_count;
+  std::string variant;
 };
 
 // 异步加载任务上下文（worker 线程与事件循环线程之间传递）
@@ -153,9 +190,11 @@ struct uvcpp_static_server::LoadTask {
   uvcpp_static_server* self;    // 事件循环线程回调用（更新缓存）
   uvcpp_http_server* server;    // deferred 响应发送
   uvcpp_http_reply reply;       // 回给哪条连接哪条流（见 StatTask 里那段说明）
-  std::string fs_path;          // 本地文件路径
-  std::string cache_key;        // 缓存键（URL 路径）
-  int64_t mtime_sec;            // serve 阶段 stat 到的 mtime
+  std::string fs_path;          // 本地文件路径（孪生命中时是孪生那一份）
+  std::string cache_key;        // 缓存键（URL 路径 + 孪生后缀）
+  std::string mime_key;         // 取 content-type 用的路径：**永远是原文件**
+  std::string variant;          // 选中的孪生后缀（""=原文件），决定 content-encoding
+  int64_t mtime_sec;            // stat 到的 mtime（孪生命中时是孪生的）
   int64_t mtime_nsec;
   int64_t size;
   bool ok;                      // worker 线程读盘结果
@@ -281,7 +320,9 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
                                      std::string spa_fs_path,
                                      std::string spa_url_path, int step,
                                      const uvcpp_http_reply& reply,
-                                     uvcpp_http_server* server) {
+                                     uvcpp_http_server* server,
+                                     const std::string* variants,
+                                     size_t variant_count) {
   StatTask* task = new StatTask();
   task->self = this;
   task->server = server;
@@ -298,6 +339,10 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
   task->mtime_sec = 0;
   task->mtime_nsec = 0;
   task->size = 0;
+  task->variant_count = variant_count > 2 ? 2 : variant_count;
+  for (size_t i = 0; i < task->variant_count; ++i) {
+    task->variants[i] = variants[i];
+  }
 
   uvcpp_work* work = new uvcpp_work();
   int rc = work->queue_work(
@@ -306,6 +351,23 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
       [task](uvcpp_work*) {
         task->kind = stat_path(task->loop, task->fs_path, task->mtime_sec,
                                task->mtime_nsec, task->size);
+        // 孪生探查也在这个线程上：它同样只有 stat，而且必须在**同一个** work
+        // 里做完 —— 分成两趟的话，两次 stat 之间文件可能被换掉，选出来的孪生
+        // 与刚校验过的 mtime 对不上。
+        if (task->kind != stat_kind::FILE || task->variant_count == 0) return;
+        for (size_t i = 0; i < task->variant_count; ++i) {
+          const std::string cand = task->fs_path + task->variants[i];
+          int64_t s = 0, ns = 0, sz = 0;
+          if (stat_path(task->loop, cand, s, ns, sz) != stat_kind::FILE) {
+            continue;  // 这一种盘上没有，试下一种（有序表的意义就在这）
+          }
+          task->variant = task->variants[i];
+          task->fs_path = cand;
+          task->mtime_sec = s;
+          task->mtime_nsec = ns;
+          task->size = sz;
+          return;
+        }
       },
       [task, work](uvcpp_work*, int /*status*/) {
         uvcpp_static_server* self = task->self;
@@ -334,6 +396,11 @@ void uvcpp_static_server::stat_step(StatTask* task) {
   }
 
   if (task->kind == stat_kind::FILE) {
+    // 缓存键带孪生后缀：同一条 URL 在 `Accept-Encoding` 不同时取的是**两份不同
+    // 的字节**（`app.js` 与 `app.js.br`），合成一个键就会把 brotli 的字节发给
+    // 一个只说 gzip 的客户端。后缀是 `.br`/`.gz`，都是 `url_path` 里不可能出现
+    // 的结尾（合法的静态文件名里带点也会带扩展名，而键的比对是整串相等）。
+    const std::string cache_key = task->url_path + task->variant;
     // 缓存命中且文件没变 → 内存直出（零磁盘 IO）
     if (cache_enabled_) {
       // 查与取在锁内，**用**在锁外：命中时把条目**拷一份**出来（`CacheEntry`
@@ -344,7 +411,7 @@ void uvcpp_static_server::stat_step(StatTask* task) {
       {
         std::lock_guard<std::mutex> lk(mu_);
         std::map<std::string, CacheEntry>::iterator it =
-            cache_.find(task->url_path);
+            cache_.find(cache_key);
         if (it != cache_.end() && it->second.mtime_sec == task->mtime_sec &&
             it->second.mtime_nsec == task->mtime_nsec &&
             it->second.size == task->size) {
@@ -355,13 +422,15 @@ void uvcpp_static_server::stat_step(StatTask* task) {
       if (found) {
         uvcpp_http_response resp = uvcpp_http_response::ok(
             hit.data->data(), hit.data->size(), hit.mime);
+        apply_variant_headers(resp, hit.variant);
         task->server->send_reply(task->reply, resp);
         return;
       }
     }
     // 未命中或文件已变更 → 异步读盘（线程池），deferred 响应
-    load_async(task->fs_path, task->url_path, task->mtime_sec,
-               task->mtime_nsec, task->size, task->reply, task->server);
+    load_async(task->fs_path, cache_key, task->url_path, task->variant,
+               task->mtime_sec, task->mtime_nsec, task->size, task->reply,
+               task->server);
     return;
   }
 
@@ -376,7 +445,7 @@ void uvcpp_static_server::stat_step(StatTask* task) {
     url += index_file_;
 
     stat_async(dir, url, task->spa_fs_path, task->spa_url_path, 1, task->reply,
-               task->server);
+               task->server, task->variants, task->variant_count);
     return;
   }
 
@@ -384,7 +453,8 @@ void uvcpp_static_server::stat_step(StatTask* task) {
   if (task->step < 2 && !task->spa_fs_path.empty() &&
       task->spa_fs_path != task->fs_path) {
     stat_async(task->spa_fs_path, task->spa_url_path, std::string(),
-               std::string(), 2, task->reply, task->server);
+               std::string(), 2, task->reply, task->server, task->variants,
+               task->variant_count);
     return;
   }
 
@@ -393,7 +463,9 @@ void uvcpp_static_server::stat_step(StatTask* task) {
 }
 
 void uvcpp_static_server::load_async(const std::string& fs_path,
-                                     const std::string& cache_key, int64_t msec,
+                                     const std::string& cache_key,
+                                     const std::string& mime_key,
+                                     const std::string& variant, int64_t msec,
                                      int64_t mnsec, int64_t size,
                                      const uvcpp_http_reply& reply,
                                      uvcpp_http_server* server) {
@@ -403,6 +475,8 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
   task->reply = reply;
   task->fs_path = fs_path;
   task->cache_key = cache_key;
+  task->mime_key = mime_key;
+  task->variant = variant;
   task->mtime_sec = msec;
   task->mtime_nsec = mnsec;
   task->size = size;
@@ -433,7 +507,8 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
         if (task->ok) {
           CacheEntry e;
           e.data = task->data;
-          e.mime = uvcpp_static_server::mime_of(task->cache_key);
+          e.mime = uvcpp_static_server::mime_of(task->mime_key);
+          e.variant = task->variant;
           e.mtime_sec = task->mtime_sec;
           e.mtime_nsec = task->mtime_nsec;
           e.size = task->size;
@@ -444,6 +519,7 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
             self->cache_[task->cache_key] = e;
           }
           resp = uvcpp_http_response::ok(e.data->data(), e.data->size(), e.mime);
+          apply_variant_headers(resp, task->variant);
         } else {
           resp = uvcpp_http_response::not_found();
         }
@@ -516,10 +592,30 @@ void uvcpp_static_server::serve(uvcpp_http_request& req, uvcpp_http_response& re
     spa_fs_path = local_dir_ + root_index;
   }
 
+  // 预压缩孪生的候选表，在**这条 loop 线程**上按请求头算好：worker 里没有
+  // `req`，也不该有 —— 它只该做磁盘 IO。两道关卡：
+  //
+  //   * 本类没开 `precompressed`（默认）⇒ 一个候选都不给；
+  //   * 请求带 `Range` ⇒ 同样不给。范围说的是**原文件**的字节坐标，换一份表示
+  //     之后那个坐标就不成立了（与 `uvcpp_web_static` 同策，那边也有一句
+  //     `!req.has_header("range")`）。本类今天不做 Range，这一条是为了将来
+  //     加它的时候不会漏。
+  //
+  // 候选表按引用传下去的话，`std::string variants[2]` 得活到 worker 跑完 ——
+  // 所以 `stat_async()` 按值拷进 `StatTask`，这里这个数组只活到函数返回。
+  std::string variants[2];
+  size_t variant_count = 0;
+  if (precompressed_ && !req.has_header("range")) {
+    variant_count =
+        http_pick_precompressed_variants(req.get_header("accept-encoding"),
+                                         variants);
+  }
+
   // 元数据也要异步取：sync stat 在事件循环线程上是阻塞 IO，
   // 本地盘上微秒级、网络盘上是毫秒级 —— 属于"通常很快但不是保证"的那类。
   resp.deferred = true;
-  stat_async(fs_path, url_path, spa_fs_path, spa_url_path, 0, reply, server);
+  stat_async(fs_path, url_path, spa_fs_path, spa_url_path, 0, reply, server,
+             variants, variant_count);
 }
 
 std::string uvcpp_static_server::mime_of(const std::string& path) {

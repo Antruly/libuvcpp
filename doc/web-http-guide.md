@@ -577,12 +577,13 @@ int doc_static() {
 （`src/web/uvcpp_static_server.h:116-120`）—— 上面那个写法（`files` 先于 `server` 声明、
 后于它析构）是对的。
 
-默认值（构造参数 `src/web/uvcpp_static_server.h:109-111`、成员初值 `:230-231`）：
+默认值（构造参数 `src/web/uvcpp_static_server.h:109-111`、成员初值 `:299-300`）：
 `url_root = "/"`、`index_file = "index.html"`、`spa_fallback = true`、`cache_enabled = true`。
 后两个**有 setter**（`set_spa_fallback()` `:133-133`、`set_cache_enabled()` `:136-136`），
-前两个只能走构造函数。
+前两个只能走构造函数。另有一个 `set_precompressed()`（`:186-189`，默认 `false`）——
+见下面「预压缩孪生」那条。
 构造函数还会把 `local_dir` 去掉尾斜杠、把 `url_root` 规范成 `"/"` 或 `"/xxx"`
-（`src/web/uvcpp_static_server.cpp:167-185`）。
+（`src/web/uvcpp_static_server.cpp:206-224`）。
 
 **它是懒加载的**：首次请求某文件才读盘并进内存缓存，此后每次请求在线程池里
 stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下一个请求就返回新内容**，
@@ -596,14 +597,23 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
   是"循环线程只有一条"写的（两张表都没有锁）。这条在 h3 上从"没人跑"变成必需：
   h3 端点默认就扇在 n 条循环上，而 h3 上挂静态文件**只有本类可用**
   （`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`）。
-- 防目录穿越靠**段级归一化**（`src/web/uvcpp_static_server.cpp:39-76`），
-  并额外拒掉 `\`、`:`、NUL 与控制字符（`:40-44`）。
+- 防目录穿越靠**段级归一化**（`src/web/uvcpp_static_server.cpp:43-80`），
+  并额外拒掉 `\`、`:`、NUL 与控制字符（`:44-48`）。
 - **`spa_fallback` 默认开，意味着找不到文件时也返回 200 的 `index.html`**
-  （`src/web/uvcpp_static_server.cpp:384-388`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
-- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:428-431`
+  （`src/web/uvcpp_static_server.cpp:453-458`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
+- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:502-505`
   取到凭据、`reply_alive()` 逐处核），不是连接 id。
-- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:525-558`）；要可配的用 webapp 层的
+- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:621-654`）；要可配的用 webapp 层的
   `uvcpp_web_static`（`src/webapp/uvcpp_web_static.h`）。
+- **不做实时压缩**：它不填 `resp.cache_tag`，所以 `uvcpp_http_server` 那个按 `cache_tag`
+  做键的响应变体缓存对它**不生效** —— 开着 `compress` 时它每请求在循环线程上把整份文件
+  deflate 一遍。想省这一次，用 `set_precompressed(true)`（1.6.18 起，默认关）：盘上放了
+  `x.js.br` / `x.js.gz` 就整份读它、原样发出去并附 `content-encoding` 与
+  `vary: accept-encoding`。挑选规则与框架层 `uvcpp_web_static` 的 `precompressed` **是
+  同一份实现**（`web/uvcpp_http_common.h` 的 `http_pick_precompressed_variants()`），
+  边界也一样：孪生文件不存在就退回原文件、带 `Range` 的请求不取孪生。实测（同一份
+  `data/static`、8 循环）**933 → 82 451 rps（88×）**，见
+  [`benchmark.md`](benchmark.md) §4.4。
 
 ---
 

@@ -564,6 +564,144 @@ inline void http_set_header(http_headers& hdrs, const char* name,
   hdrs.push_back(http_header{std::string(name, n), value});
 }
 
+// =========================================================================
+// `Accept-Encoding` → 预压缩孪生文件后缀
+// =========================================================================
+//
+// 两个静态器（协议层的 `uvcpp_static_server` 与应用层的 `uvcpp_web_static`）
+// 都要做同一件事：客户端说它收 brotli，盘上恰好躺着 `foo.br`，就把那份发出去。
+// 判定规则是 RFC 9110 的，两边**必须逐字一致** —— 同一条 `Accept-Encoding`
+// 在两个监听器上选出不同的表示，是那种"看日志永远看不出来"的偏差。所以实现
+// 只有这一份，放在这一层（`web` 是协议层，`webapp` 在它上面，反向不成立）。
+//
+// 返回一张**有序**候选表而不是一个后缀：客户端能收的常常不止一种，而盘上备了
+// 哪几种是构建期的事。只认首选的话，"这个资源只压过 `.gz`" 就会退化成"这个
+// 资源没压过"、把原文件发出去 —— 而次优的那份本来就在盘上。nginx 同时挂
+// brotli 与 gzip_static 两个模块时、Caddy 写 `precompressed br gzip` 时，
+// 都是**按序取第一个存在的**，这里照做。
+
+/// `q=` 的值。只认 `[0-9]*[.[0-9]*]`：本层只拿它做"是不是 0"和两个编码之间的
+/// 先后比较，`strtod` 会拖进 locale 语义，为这点事不值当。解析不出数字时按
+/// RFC 9110 §12.4.2 的宽松读法当作 1（"没说就是全要"）。
+inline double http_parse_quality(const std::string& v) {
+  double x = 0.0;
+  size_t i = 0;
+  bool any = false;
+  for (; i < v.size() && v[i] >= '0' && v[i] <= '9'; ++i) {
+    x = x * 10.0 + static_cast<double>(v[i] - '0');
+    any = true;
+  }
+  if (i < v.size() && v[i] == '.') {
+    ++i;
+    double f = 0.1;
+    for (; i < v.size() && v[i] >= '0' && v[i] <= '9'; ++i) {
+      x += static_cast<double>(v[i] - '0') * f;
+      f *= 0.1;
+      any = true;
+    }
+  }
+  if (!any) return 1.0;
+  return x > 1.0 ? 1.0 : x;  // RFC 9110：q 落在 [0,1]，越界按 1 收
+}
+
+/// 去掉首尾 OWS（`Accept-Encoding` 的分隔符两侧到处是空格，且常带 CRLF 折行）。
+inline std::string http_trim_ows(const std::string& s) {
+  size_t b = 0;
+  size_t e = s.size();
+  while (b < e) {
+    const char c = s[b];
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') ++b;
+    else break;
+  }
+  while (e > b) {
+    const char c = s[e - 1];
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') --e;
+    else break;
+  }
+  return s.substr(b, e - b);
+}
+
+/**
+ * @brief 从 `Accept-Encoding` 里挑出预压缩孪生文件的后缀，按优先级排好。
+ *
+ * `out[0]`/`out[1]` 写入 `".br"` / `".gz"`，返回**候选个数**（0/1/2）。返回 0
+ * 表示不用孪生文件、发原文件。只认 `br` 与 `gzip`（含 `x-gzip` 这个历史别名）
+ * 两个 token：本仓的压缩器只会 deflate，所以 `deflate` 这个 token 对应的是
+ * **实时压缩**那条路，不在孪生文件里管。
+ *
+ * `q=0` 是明确拒绝，即便它是唯一被声明的编码也不选它。同 `q` 时优先 `br` ——
+ * 两份产物都是我们自己发出去的字节，brotli 在同一份资源上更小（本仓
+ * `data/static` 那 20 个文件上平均小 16%）。`*` 按 RFC 9110 §12.5.3 匹配所有
+ * 未列出的编码，这里让它同时兜住两者。
+ *
+ * @param header `Accept-Encoding` 的值（可空）。
+ * @param out    长度 2 的输出数组，调用方负责提供。
+ * @return 写进 `out` 的候选个数。
+ */
+inline size_t http_pick_precompressed_variants(const std::string& header,
+                                               std::string out[2]) {
+  out[0].clear();
+  out[1].clear();
+  bool br_ok = false, gz_ok = false, star_ok = false;
+  double br_q = 0.0, gz_q = 0.0, star_q = 0.0;
+
+  size_t pos = 0;
+  while (pos <= header.size()) {
+    const size_t comma = header.find(',', pos);
+    const std::string raw = http_trim_ows(header.substr(
+        pos, comma == std::string::npos ? std::string::npos : comma - pos));
+    pos = (comma == std::string::npos) ? header.size() + 1 : comma + 1;
+    if (raw.empty()) continue;
+
+    std::string name = raw;
+    double q = 1.0;
+    const size_t semi = raw.find(';');
+    if (semi != std::string::npos) {
+      name = http_trim_ows(raw.substr(0, semi));
+      // 参数段可能不止一个（`gzip;q=0.8;foo=bar`），逐个找 `q=`。
+      size_t p = semi + 1;
+      while (p <= raw.size()) {
+        const size_t sc = raw.find(';', p);
+        const std::string one = http_trim_ows(raw.substr(
+            p, sc == std::string::npos ? std::string::npos : sc - p));
+        p = (sc == std::string::npos) ? raw.size() + 1 : sc + 1;
+        if (one.size() > 2 && (one[0] == 'q' || one[0] == 'Q') && one[1] == '=') {
+          q = http_parse_quality(one.substr(2));
+        }
+      }
+    }
+    if (name.empty()) continue;
+
+    if (http_name_iequal(name.data(), name.size(), "br", 2)) {
+      if (q > 0.0) { br_ok = true; br_q = q; }
+    } else if (http_name_iequal(name.data(), name.size(), "gzip", 4) ||
+               http_name_iequal(name.data(), name.size(), "x-gzip", 6)) {
+      if (q > 0.0) { gz_ok = true; gz_q = q; }
+    } else if (name == "*") {
+      if (q > 0.0) { star_ok = true; star_q = q; }
+    }
+  }
+
+  if (star_ok) {  // 未列出的按通配的 q 收；显式声明过的以显式那份为准
+    if (!br_ok) { br_ok = true; br_q = star_q; }
+    if (!gz_ok) { gz_ok = true; gz_q = star_q; }
+  }
+  // 排序只在这三个组合里有意义；同 q 时 br 在前（本仓 `data/static` 上平均小 16%）。
+  size_t n = 0;
+  if (br_ok && gz_ok) {
+    out[0] = (br_q >= gz_q) ? std::string(".br") : std::string(".gz");
+    out[1] = (br_q >= gz_q) ? std::string(".gz") : std::string(".br");
+    n = 2;
+  } else if (br_ok) {
+    out[0] = ".br";
+    n = 1;
+  } else if (gz_ok) {
+    out[0] = ".gz";
+    n = 1;
+  }
+  return n;
+}
+
 }  // namespace uvcpp
 
 #endif  // UVCPP_WEB_ENABLE

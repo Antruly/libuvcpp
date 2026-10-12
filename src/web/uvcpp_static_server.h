@@ -135,6 +135,59 @@ public:
   /** @brief 是否启用内存缓存，默认 true。 */
   void set_cache_enabled(bool enable) { cache_enabled_ = enable; }
 
+  /**
+   * @brief 是否发盘上的预压缩孪生文件（`foo.br` / `foo.gz`），默认 **false**。
+   *
+   * 开了之后，一次 `/static/app.js` 在 `Accept-Encoding: br, gzip` 下取的是
+   * `app.js.br`：**字节更少**，而且**一次 deflate 都不用做**。
+   *
+   * 为什么这件事必须在这里做、而不是靠 `uvcpp_http_server` 的实时压缩：那个
+   * 是**开着**的（`compress_enabled_` 默认 true），但它按 `resp.cache_tag`
+   * 缓存压好的变体 —— 而全仓只有 `uvcpp_web_static` 填 `cache_tag`
+   * （`uvcpp_web_static.cpp` 里那一行）。本类不填，于是走本类的每一条腿都
+   * **每个请求在循环线程上重压一遍整个文件**。
+   *
+   * 实测（探针 `probe.cpp`，本仓 `data/static` 20 个文件轮转、8 条循环、
+   * `h2load -p http/1.1 -c 64 -m 2 -n 8000`、
+   * `Accept-Encoding: br;q=1, gzip;q=0.8`；同一份语料的 ext4 拷贝，理由见下）：
+   *
+   * | 本选项 | rps | 8000 请求送出字节 |
+   * |---|---|---|
+   * | 关（每个请求重压） | 933.15（8.57 s） | 173,843,446 |
+   * | 开（发盘上孪生） | **82,451.28**（97.0 ms） | 131,194,904 |
+   * | 差 | **88×** | **−24.5%** |
+   *
+   * 字节那一栏与文件系统无关，且**不全是 brotli 省下来的**：盘上 20 个文件共
+   * 1,271,603 B，其中 15 个有孪生（br 224,029 B / gz 262,407 B，br 比 gz 再少
+   * 14.6%），另外 5 个 webp/woff2 没有孪生、按原样发（101,376 B）—— 即盘上
+   * 「br + 原样」325,405 B 对「gz + 原样」363,783 B，br 少 10.5%。而关掉本选项时
+   * 发出去的不是原文件、是**实时 deflate 出来的 gzip**，它每轮 426 KB，比盘上
+   * 那套 `.gz` 孪生（363,783 B）还大 —— 所以开这一档同时省掉「一次白压」和
+   * 「一份比预压更差的压缩」。
+   *
+   * **rps 那一栏要连同语料所在文件系统一起读**：本机 `data/static` 的原路径挂在
+   * ntfs-3g（FUSE）上，一次 `stat` 45.9 µs；同一份 50 个文件原样拷到 ext4 上是
+   * 1.35 µs，**34 倍**。开了本选项之后每个请求要多 stat 一次候选结尾名，于是在
+   * ntfs-3g 上这条腿反而只有 32,448 rps（stat 成了瓶颈），在 ext4 上才跑出上表。
+   * 上表因此取 ext4 那份拷贝；量具页 `doc/benchmark-rig.md` 记了这条。
+   *
+   * 挑选规则（只认 `br`/`gzip`、`q=0` 是拒绝、同 q 时 `br` 在前、`*` 兜底）与
+   * 技术层的 `uvcpp_web_static` 共用同一份实现 ——
+   * `http_pick_precompressed_variants()`，见 `web/uvcpp_http_common.h`。
+   *
+   * 默认关（与 `uvcpp_web_static_options::precompressed` 一致）：它是**对盘的
+   * 一个约定**（同名 `.br`/`.gz` 是那份资源的另一份表示），不该在调用方没说要
+   * 的时候悄悄生效。
+   *
+   * 带 `Range` 的请求**一律不取孪生**（与 `uvcpp_web_static` 同策）：范围说的是
+   * 原文件的字节坐标，换一份表示之后那个坐标就不成立了。本类今天不做 Range，
+   * 这一条是为了将来加它时不会漏。
+   */
+  void set_precompressed(bool enable) { precompressed_ = enable; }
+
+  /** @brief 是否发预压缩孪生文件，默认 false。见 @ref set_precompressed。 */
+  bool precompressed() const { return precompressed_; }
+
   /** @brief 当前缓存条目数。 */
   size_t cache_size() const { return cache_.size(); }
 
@@ -145,6 +198,10 @@ private:
   struct CacheEntry {
     std::shared_ptr<std::string> data;
     std::string mime;
+    /// 这份字节是哪个孪生文件来的（`""` / `".br"` / `".gz"`）。
+    /// 命中那一支要靠它补 `content-encoding` —— 键里虽然有后缀，但键是用来
+    /// **查**的，发响应时手上只有条目本身。
+    std::string variant;
     int64_t mtime_sec;
     int64_t mtime_nsec;
     int64_t size;
@@ -167,16 +224,28 @@ private:
    *        从前这里传的是 `(generation, client)` 两格 —— 换成凭据之后 h3
    *        那条腿也走得通了（那里没有 `uvcpp_tcp_client*` 可传）。
    */
+  /// @param variants 预压缩孪生的候选后缀（有序，最多 2 个），可为 nullptr。
+  ///        在 **loop 线程**上按请求头算好传进来 —— worker 不该碰 `req`。
+  /// @param variant_count 候选个数，0 表示这次请求不取孪生（关卡见
+  ///        @ref set_precompressed）。
   void stat_async(std::string fs_path, std::string url_path,
                   std::string spa_fs_path, std::string spa_url_path,
                   int step, const uvcpp_http_reply& reply,
-                  uvcpp_http_server* server);
+                  uvcpp_http_server* server, const std::string* variants,
+                  size_t variant_count);
 
   /** @brief stat 完成后的分派：目录 → 拼 index 再来一次；不存在 → SPA 回退；否则发。 */
   void stat_step(StatTask* task);
 
-  /** @brief 异步读盘：线程池读文件，loop 线程更新缓存 + deferred 发送。 */
+  /**
+   * @brief 异步读盘：线程池读文件，loop 线程更新缓存 + deferred 发送。
+   *
+   * @param mime_key 取 `content-type` 用的路径 —— **永远是原文件**，不是孪生
+   *        （`app.js.br` 按扩展名推出来的是 `application/octet-stream`）。
+   * @param variant  选中的孪生后缀（`""` = 原文件），决定 `content-encoding`。
+   */
   void load_async(const std::string& fs_path, const std::string& cache_key,
+                  const std::string& mime_key, const std::string& variant,
                   int64_t msec, int64_t mnsec, int64_t size,
                   const uvcpp_http_reply& reply, uvcpp_http_server* server);
 
@@ -229,6 +298,7 @@ private:
   std::string index_file_;
   bool spa_fallback_ = true;
   bool cache_enabled_ = true;
+  bool precompressed_ = false;  ///< 见 @ref set_precompressed，默认关
 
   /**
    * @brief 内存缓存，**受 `mu_` 护**。

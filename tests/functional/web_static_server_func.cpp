@@ -15,7 +15,10 @@
  *  - **HEAD 不带 body**（但 Content-Length 反映 GET 应有的长度）；
  *  - **连接代次号**：单调递增、永不复用；半途断连不写错连接；
  *  - **多循环并发**（`set_loops(4)` + 8 路 × 120 次）：同一个服务对象被多条
- *    循环线程同时用，判据是"逐条响应都对且进程活着"。
+ *    循环线程同时用，判据是"逐条响应都对且进程活着"；
+ *  - **预压缩孪生**（`set_precompressed`）：关时一个孪生都不碰；开时按
+ *    `Accept-Encoding` 挑 `.br`/`.gz`，含 `q=0` 是拒绝、`*` 兜底、无孪生退回、
+ *    `Range` 不取孪生，以及**缓存命中那一次也要带上 `content-encoding`**。
  *
  * 通过真实的 uvcpp_http_server（后台线程）+ uvcpp_http_client（阻塞同步）
  * 端到端验证，参考 tcp_server_func.cpp 的 server 线程模式。
@@ -98,6 +101,14 @@ static bool ensure_dir(const std::string& abs) {
 /// 根目录下的内容；`kAppJs` 的长度在 HEAD 用例里被当成期望的 Content-Length。
 static const char* kAppJs = "console.log('JS-V1');";
 
+/// `app.js` 的预压缩孪生，给 `test_precompressed` 用。
+///
+/// **它们不是真的 brotli/deflate 流，也不必是**：这一节钉的是"服务端挑了盘上
+/// 哪一份、挂了哪个 `content-encoding`"，不是"压出来的字节能不能解开"。真去
+/// 解压就要把用例绑到一个第三方解码器上，而那条往返里的服务端一个字节都没压。
+static const char* kAppJsBr = "APP-JS-BR-TWIN";
+static const char* kAppJsGz = "APP-JS-GZ-TWIN-BYTES";
+
 static bool prepare_fs() {
   if (!ensure_dir(kTmpDir) || !ensure_dir(tmp_path("sub"))) {
     std::cout << "  [err] 建不出临时目录 " << kTmpDir << "\n";
@@ -120,6 +131,12 @@ static bool prepare_fs() {
   std::string big(256 * 1024, 'x');
   if (!write_text("big.bin", big)) return false;
 
+  // 孪生文件只在 `set_precompressed(true)` 下才会被取到；默认关的那些用例
+  // 因此不受它们影响（`index.html` 故意**不**给孪生，用来钉"没有孪生就退回
+  // 原文件"）。
+  if (!write_text("app.js.br", kAppJsBr)) return false;
+  if (!write_text("app.js.gz", kAppJsGz)) return false;
+
   return write_text("index.html", "<html>INDEX-V1</html>") &&
          write_text("app.js", kAppJs);
 }
@@ -127,6 +144,8 @@ static bool prepare_fs() {
 static void cleanup_fs() {
   std::remove(tmp_path("index.html").c_str());
   std::remove(tmp_path("app.js").c_str());
+  std::remove(tmp_path("app.js.br").c_str());
+  std::remove(tmp_path("app.js.gz").c_str());
   std::remove(tmp_path("lib..min.js").c_str());
   std::remove(tmp_path("big.bin").c_str());
   std::remove(tmp_path("sub/index.html").c_str());
@@ -157,6 +176,8 @@ struct StaticTestServer {
   bool spa_fallback;
   /// 工作循环数（`set_loops()` 的实参）。1 = 今天的行为。
   int loops;
+  /// 是否发盘上的预压缩孪生文件（`set_precompressed()`）。默认关。
+  bool precompressed;
 
   std::promise<int> port_promise;
   std::atomic<bool> stop{false};
@@ -169,13 +190,15 @@ struct StaticTestServer {
 
   StaticTestServer(const std::string& r, bool spa,
                    const std::string& mount = std::string("/"),
-                   int nloops = 1)
-      : root(r), url_root(mount), spa_fallback(spa), loops(nloops) {}
+                   int nloops = 1, bool pc = false)
+      : root(r), url_root(mount), spa_fallback(spa), loops(nloops),
+        precompressed(pc) {}
 
   int start() {
     thread = std::thread([this]() {
       uvcpp_static_server static_svr(root, url_root);
       static_svr.set_spa_fallback(spa_fallback);
+      static_svr.set_precompressed(precompressed);
       uvcpp_http_server server;
       // 必须在 `listen()` 之前（见 `uvcpp_http_server::set_loops` 的 @warning）。
       server.set_loops(loops);
@@ -268,6 +291,39 @@ static bool http_get(int port, const std::string& path, int& status, std::string
   }
   if (rc != 0) return false;
   status = static_cast<int>(resp.status_code);
+  body.assign(resp.body.get_const_data(), resp.body.size());
+  return true;
+}
+
+/**
+ * @brief 带 `accept-encoding` / `range` 的 GET：额外问出响应的
+ *        `content-encoding`。
+ *
+ * 空字符串表示**不发**那个头。`accept-encoding` 是原样发出去的 —— 包括
+ * `gzip;q=0`、`*` 这些专门给那条挑选规则看的形状；它正是 `test_precompressed`
+ * 要分辨的那一层，客户端这边一个字节都不该替它规范化。
+ */
+static bool http_get_enc(int port, const std::string& path,
+                         const std::string& accept_encoding,
+                         const std::string& range,
+                         int& status, std::string& encoding,
+                         std::string& body) {
+  uvcpp_http_response resp;
+  int rc = -1;
+  for (int i = 0; i < 40; ++i) {
+    uvcpp_http_client client;
+    rc = client.connect_wait("127.0.0.1", port, 2000);
+    if (rc != 0) { std::this_thread::sleep_for(std::chrono::milliseconds(25)); continue; }
+    uvcpp_http_request req = uvcpp_http_request::make_get(path);
+    if (!accept_encoding.empty()) req.set_header("accept-encoding", accept_encoding);
+    if (!range.empty()) req.set_header("range", range);
+    rc = client.send_wait(req, resp, 3000);
+    if (rc == 0) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  if (rc != 0) return false;
+  status = static_cast<int>(resp.status_code);
+  encoding = resp.get_header("content-encoding", "");
   body.assign(resp.body.get_const_data(), resp.body.size());
   return true;
 }
@@ -1137,6 +1193,107 @@ static bool test_multiloop_concurrency() {
   return ok;
 }
 
+// =========================================================================
+// Test 9: 预压缩孪生文件（`set_precompressed`）
+// =========================================================================
+//
+// 判据是**盘上哪一份被发出去**，看的是 `content-encoding` 与 body 的逐字节比对。
+// 开关本身在 `uvcpp_static_server` 上，挑选规则在 `http_pick_precompressed_variants()`
+// （`web/uvcpp_http_common.h`），与技术层的 `uvcpp_web_static` 共用同一份实现 ——
+// 所以这里钉的是那一份规则在这条腿上确实接上了，而不是另有一套。
+//
+// 关的那一档必须**一个孪生都不碰**：`.br`/`.gz` 就摆在盘上，它照样发原文件。
+// 这是"默认关"这个承诺的可执行版本。
+static bool test_precompressed() {
+  if (!prepare_fs()) return false;
+
+  bool ok = true;
+  int status = 0;
+  std::string enc, body;
+
+  // --- 关 ---
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/false);
+    const int port = runner.start();
+    if (!http_get_enc(port, "/app.js", "br;q=1, gzip;q=0.8", "", status, enc, body)) {
+      ok = false;
+    } else if (status != 200 || !enc.empty() || body != kAppJs) {
+      std::cout << "  [err] 关时 GET /app.js -> " << status << " enc='" << enc
+                << "' '" << body << "'\n";
+      ok = false;
+    }
+    runner.shutdown();
+  }
+
+  // --- 开 ---
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/false,
+                            /*mount=*/"/", /*nloops=*/1, /*precompressed=*/true);
+    const int port = runner.start();
+
+    struct Case {
+      const char* path;
+      const char* accept_encoding;
+      const char* want_enc;   // 期望的 content-encoding（"" = 一个都没有）
+      const char* want_body;
+    };
+    const Case cases[] = {
+      // br 与 gzip 都在、q 不同 ⇒ br 胜（本仓语料上它更小）。
+      {"/app.js", "br;q=1, gzip;q=0.8", "br",   kAppJsBr},
+      // 只认 gzip ⇒ 退到 .gz。
+      {"/app.js", "gzip",               "gzip", kAppJsGz},
+      // **同一条再来一次**：这次走缓存命中那条路。缓存键是拼了后缀的
+      // `/app.js.br`，但发响应时手上只有条目本身 —— 缓存条目不带回
+      // `variant` 的话，这一档就会变成"body 是孪生、头却说没编码"。
+      {"/app.js", "br;q=1, gzip;q=0.8", "br",   kAppJsBr},
+      // `q=0` 是**拒绝**，不是"最低优先"。
+      {"/app.js", "br;q=0, gzip",       "gzip", kAppJsGz},
+      // `*` 兜底：两份都收，同 q 时 br 在前。
+      {"/app.js", "*",                  "br",   kAppJsBr},
+      // 两份都不认 ⇒ 原文件。
+      {"/app.js", "identity",           "",     kAppJs},
+      // **没有孪生**的文件：退回原文件，与关着时逐字节相同。
+      {"/index.html", "br;q=1, gzip;q=0.8", "", "<html>INDEX-V1</html>"},
+    };
+    const size_t ncases = sizeof(cases) / sizeof(cases[0]);
+    for (size_t i = 0; i < ncases; ++i) {
+      const Case& c = cases[i];
+      if (!http_get_enc(port, c.path, c.accept_encoding, "", status, enc, body)) {
+        std::cout << "  [err] #" << i << " " << c.path << " 请求没完成\n";
+        ok = false;
+        continue;
+      }
+      if (status != 200 || enc != c.want_enc || body != c.want_body) {
+        std::cout << "  [err] #" << i << " " << c.path << " ae='"
+                  << c.accept_encoding << "' -> " << status << " enc='" << enc
+                  << "' body='" << body << "'（期望 200 enc='" << c.want_enc
+                  << "' body='" << c.want_body << "'）\n";
+        ok = false;
+      }
+    }
+
+    // 带 `Range` 的请求**一律不取孪生**：范围说的是**原文件**的字节坐标，换一份
+    // 表示之后那个坐标就不成立了。断言只钉"没拿到孪生"这一件事，不去钉本类
+    // 面对 `Range` 时到底回 200 还是 206 —— 本类今天不做 Range，那是另一条
+    // 能力边界，不是这条用例要管的东西。
+    if (!http_get_enc(port, "/app.js", "br;q=1, gzip;q=0.8", "bytes=0-3",
+                      status, enc, body)) {
+      std::cout << "  [err] Range 请求没完成\n";
+      ok = false;
+    } else if (!enc.empty() ||
+               body.find("TWIN") != std::string::npos) {
+      std::cout << "  [err] Range 请求拿到了孪生：enc='" << enc << "' body='"
+                << body << "'\n";
+      ok = false;
+    }
+
+    runner.shutdown();
+  }
+
+  cleanup_fs();
+  return ok;
+}
+
 int main(int argc, char** argv) {
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
@@ -1148,6 +1305,7 @@ int main(int argc, char** argv) {
     {"generation_and_midflight_disconnect", test_generation_and_midflight_disconnect},
     {"stale_connection_crosstalk", test_stale_connection_crosstalk},
     {"multiloop_concurrency", test_multiloop_concurrency},
+    {"precompressed", test_precompressed},
   };
   // 可选过滤：`test_web_static_server_func.exe <name>` 只跑一条。
   // 间歇性故障的定位全靠它 —— 整跑到一次崩溃要几十秒，单条用例是秒级，

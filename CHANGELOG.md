@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.17-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.18-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -913,6 +913,25 @@
   阈值与 4 KiB 阈值），外加一份两臂逐字段的端到端核验（同一份二进制、`precompressed`
   0/1 各跑一遍，比对的字段是**长度 + `content-encoding` + `etag`** —— 长度是主判据，
   "回了 200 但发的是原文件"与"回了孪生文件"只差一个字节数）。
+- **同一个 `precompressed` 选项补到 `uvcpp_static_server` 上**（`1.6.18-dev`）。上一版
+  只做在 `uvcpp_web_static`（框架层 `serve_static` 那条路）上，而 web 层还有**另一份**
+  静态器 `uvcpp_static_server` —— 它挂在裸 `uvcpp_http_server` 的 `on_request()` 上，
+  HttpArena 条目里只有 h3 那条腿用它（h3 要挂静态文件只能走它，`uvcpp_web_app` 没有
+  裸监听器）。两边**共用同一套挑选规则**：`web/uvcpp_http_common.h` 里的
+  `http_pick_precompressed_variants()` 是两个实现唯一的那份 `Accept-Encoding` →
+  `.br`/`.gz` 判定，`uvcpp_web_static` 也改成调它（候选与次序逐字段不变）。
+  与框架层那条路的**关键差别在于它原先连变体缓存都不挂**：`compress_enabled_` 默认 true，
+  而全仓只有 `uvcpp_web_static` 填 `resp.cache_tag`（响应变体缓存按它做键），本类不填 ⇒
+  `uvcpp_http_server::apply_compression_for()` 那个缓存对它**不生效**，于是它**每请求在
+  循环线程上把整份文件 deflate 一遍**。所以这一个选项对它不是"省带宽"而是"省掉一次白压"，
+  实测 **88×**（见「性能」组）。
+  **两处与框架层一致的边界**：带 `Range` 的请求不取孪生（要切的是原文件的字节）；
+  缓存命中那一条路也照样挂 `content-encoding` / `vary`（否则第二次请求会退化成无编码）。
+  **判据**：`tests/functional/web_static_server_func.cpp` 新增的 `test_precompressed()`
+  —— 关掉时一个孪生都不碰、开着时按 `Accept-Encoding` 挑 br/gz，含 `q=0` 是拒绝、
+  `*` 兜底、无孪生退回原文件、`Range` 不取孪生，以及**缓存命中那一次也要带上
+  `content-encoding`**（八行）。该用例**已做变异测试**：分别把变体头摘掉、只留缓存命中那处、
+  把挑选整个关掉，三次都变红，且"期望原文件"那几行在最后一次仍然绿（说明它不是恒真）。
 - **`uvcpp_http_reply`：与传输无关的「稍后回话」凭据**（`1.6.8-dev`）。h1/h2 上的
   推迟应答本来靠处理函数拿到的 `uvcpp_tcp_client*`，而"这还是当初那条连接吗"只能
   另外问一次（代次号）；h3 那条腿连连接对象都没有。新类型把这层值语义化：
@@ -1290,6 +1309,31 @@
   `take_from` 少一次拷贝）这一整包在同量具上是 **+328.6 条/请求**（`web_url_decode` 每请求
   被调 5.03 次，其中 4 次是 1 字节的查询键/值，原地版省下的那点拷贝抵不过多出来的一趟扫描），
   已整体还原，只留下上面这三处。
+
+- **`uvcpp_static_server` 发盘上孪生的实测**（`1.6.18-dev`）—— 量具是仓外一支探针
+  （`probe.cpp`），**一次只起一条静态腿**、`h2load -p http/1.1 -c 64 -m 2 -n 8000` 打
+  同一份 `data/static`（20 个文件 + 30 个孪生，原件合计 1 271 603 B），
+  `Accept-Encoding: br;q=1, gzip;q=0.8`、20 个 URI 轮转。两臂：`set_precompressed`
+  0 / 1。
+
+  | 腿 | 关 | 开 | 差 | 8000 请求送出字节 |
+  |---|---:|---:|---:|---:|
+  | `uvcpp_static_server`（`static-h3` 那条腿） | 933.15 rps | **82 451.28** | **88×** | 173 843 446 → 131 194 904（−24.5%） |
+  | `uvcpp_web_app::serve_static` | 110 773 | **185 280** | **+67%** | 172 797 487 → 131 865 720（−23.7%） |
+
+  `uvcpp_static_server` 那一格能到 88× 是因为它**原先连变体缓存都没有**（每请求在循环
+  线程上 deflate 一整份文件，见「HTTP 与 WebSocket 语义」组），所以开孪生对它等于**删掉
+  一整次 zlib**；`uvcpp_web_app` 那条腿本来就"压一次缓一次"，开孪生只省掉"压出来那份比
+  盘上那份大"，因此只有 +67%。两条腿在 `pc=1` 上收敛到**同一个字节数**（653 777 076），
+  是"发的是盘上同一批孪生"的旁证。**一条口径**：关那一臂发出去的**不是原文件**，是实时
+  deflate 出来的 gzip（每轮 426 KB，比盘上那套 `.gz` 孪生还大）—— 所以这张表是"现场压
+  vs 发盘上那份"，不是"发原文件 vs 发压缩件"。
+  ★ **这一轮量具踩的两个坑都记在 [`doc/benchmark-rig.md`](doc/benchmark-rig.md)**：其一，
+  语料的原路径挂在 **ntfs-3g（FUSE）**上，一次 `stat` **45.9 µs**，同一批文件拷到 ext4 上
+  是 **1.35 µs（34 倍）** —— 两条静态腿都每请求 stat、开孪生还要多 stat 一次，于是只在
+  原路径上量会得到**反的**结论（`app` 腿看似慢 2.4 倍，其实是卡在 stat 上）；其二，
+  `h2load -p http/1.1` 的 `-m` 是**流水线深度**，`uvcpp_web_app` 默认 8 的在途上限越界就回
+  503 并关连接，`-m 32` 下那一片 5xx 全是驱动器的参数，不是服务端读数。
 
 ### 配置、打包与 CI
 
