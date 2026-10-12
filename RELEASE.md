@@ -19,6 +19,49 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.6.4 重点 (Highlights)
+
+`v1.6.3` 之后的补丁版，一条改动：**多循环（`set_loops(n > 1)`）下服务端析构不再与工作循环抢同一张表**。
+
+### 崩在哪
+
+`uvcpp_http_server` 在 `set_loops(n > 1)` 下给每条循环各留一张连接上下文表。析构时它逐张清掉，
+而**工作循环线程此刻还在跑** —— 它们的退出路径要关掉自己名下的连接，那条路上会经由关闭回调
+回到 `remove_ctx`，写的正是同一张表。core 里两条栈刚好对在一起：
+
+| 线程 | 栈 |
+|---|---|
+| 跑析构的那条 | `~uvcpp_http_server` → `delete tcp_server_` → `~uvcpp_loop_worker` → `std::thread::join()` |
+| 工作循环那条 | `uv_run` 收尾 → 关闭回调 → `uvcpp_http_server::remove_ctx` → `std::map::erase` → **SIGSEGV** |
+
+`remove_ctx` 手里那个迭代器指向的结点，刚被析构体那句 `clear()` 释放掉。
+
+### 为什么它不是"偶发"
+
+析构体的注释写着「析构发生在**所有**循环线程都已经停了之后（调用方的责任，见
+`uvcpp_tcp_server` 的停机次序）」，但**这条责任今天没人能履行**：停 worker 的 `stop_workers()`
+是私有的，`stop()` 只关监听句柄、不动已建立的连接，`close_all_clients()` 是异步投递。而唯一
+会停 worker 的地方，是那个析构体自己的**最后一行** —— 次序正好反了。
+
+判据不是"多跑几遍看看"：把 `tests/functional/test_web_multiloop_func` 用 `taskset -c 0-3`
+钉在 4 个核上（与 CI runner 同形）、8 路进程并发各跑 250 次 —— **改前 2000 次崩 18 次**
+（rc=139）；改后 2000 次 **0 崩**，另一次 8 路 × 500 = 4000 次也是 0 崩。单进程
+`--repeat until-fail:30` 压不出来，这正是它此前被当成 flake、靠空提交重跑糊过去的原因。
+
+### 怎么修的
+
+两处，都在停机次序上：
+
+- `src/net/uvcpp_tcp_server.h`：`stop_workers()` 仍然私有，加一条
+  `friend class uvcpp_http_server;` —— 与仓里 `uvcpp_web_stream` 那条「私有 + friend：公开它
+  等于允许任意调用方在循环还转着的时候把工作线程拆掉」的既有约定同形。
+- `src/web/uvcpp_http_server.cpp`：析构体第一句 `tcp_server_->stop_workers();`，之后才是那几张
+  表的收尾。
+
+单循环（`set_loops(1)`）时工作线程列表本来就是空的 ⇒ 这一句是空操作，**单循环行为逐字节不变**。
+回归：本机 `build-capi` 109/109、`build-capi-all`（全功能，含 QUIC / HTTP3 / NGHTTP2 / WEBAPP /
+CAPI）124/124 全过。
+
 ## v1.6.3 重点 (Highlights)
 
 `v1.6.2` 之后的补丁版，一条改动：**`cmake --install` 现在也装从源码取的 zlib 那两个头**。

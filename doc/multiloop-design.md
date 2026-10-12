@@ -301,7 +301,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1280` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | ~~`uvcpp_web_app::inflight_`~~ → `loop_slot::inflight` | `src/webapp/uvcpp_web_app.h:1961`（**已切开**，W4 / 2c） | **每请求** |
 | ~~`uvcpp_web_app::upgraded_`~~ → `loop_slot::upgraded` | `src/webapp/uvcpp_web_app.h:2020`（**已切开**，W4 / 2c） | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:865` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:872` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** 它原来只有一份
 `loop_tid_`/`post_queue_`，投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。
@@ -629,15 +629,15 @@ W4 之后改成了**连接自己那条**（`client->get_loop()`），分片用�
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
 > —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1363-1363`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
-> （`src/web/uvcpp_http_server.cpp:1504-1504`），未命中时插入并可能触发 LRU 淘汰
-> （`src/web/uvcpp_http_server.cpp:1557-1557`、`src/web/uvcpp_http_server.cpp:1351-1351`）。
+> （`src/web/uvcpp_http_server.cpp:1523-1523`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:1576-1576`、`src/web/uvcpp_http_server.cpp:1370-1370`）。
 > 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
 > `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1364-1367`）一起加锁；
 > **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
 >
 > **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1381-1381`）
 > 一把**非递归**锁护住那张表与四个计数。加锁点只有三个**外层入口** —— 命中
-> （`src/web/uvcpp_http_server.cpp:1504-1504`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
+> （`src/web/uvcpp_http_server.cpp:1523-1523`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
 > 整张表的字节总量，拆成两次加锁会让别的循环插在中间按一个已不成立的总量做决定）、
 > `compress_variant_stats()`。两个帮手改名成 `..._locked()`
 > （`src/web/uvcpp_http_server.h:1392-1392` / `src/web/uvcpp_http_server.h:1396-1396`），意思就是"调用方已持锁" ——
@@ -751,7 +751,7 @@ if (it == ctxs_here().end()) return;   // 两个容器的 end() 相比
 连接所属的那条循环。§4.1.1 己 那条（工作项投错循环）与"不在任何循环线程上"恰好破坏它 ——
 那时比较的是**两个不同容器**的迭代器（标准上是 UB；`std::map` 的 `end()` 是各自表头节点的
 地址，于是"找不到"这条早退**恒不成立**），后面紧跟着的 `it->second` 就解引用了 `end()`。
-⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:2040-2040`
+⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:2059-2059`
 那处 `ctxs_here()` 是**有意的**（`begin_h2_goaway()` 要的就是本循环那张表），不动。
 
 **（二）`ctxs_at(-1)` 在多循环下直接终止，不再夹回 0 号。** `-1` 不是越界，它的含义是
@@ -907,9 +907,9 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > 这条要写进 `uvcpp_web_app::set_loops()` 的 doc block（理由与出处见 §4.1 的理由更正块）。
 >
 > **停机那一族另有一条硬约束（2026-09-22，外部复核 §1）**：`begin_h2_goaway()` 只翻
-> **本循环**那张表（`src/web/uvcpp_http_server.cpp:2040-2040` 的 `ctxs_here()`），而
+> **本循环**那张表（`src/web/uvcpp_http_server.cpp:2059-2059` 的 `ctxs_here()`），而
 > `ctxs_at(-1)` 在 `contexts_.size() > 1` 且调用者不在任何循环线程上时直接
-> `std::abort()`（`src/web/uvcpp_http_server.cpp:351-356`）⇒ **停机那一族必须"每条
+> `std::abort()`（`src/web/uvcpp_http_server.cpp:370-375`）⇒ **停机那一族必须"每条
 > 循环各跑一次、且每次都在该循环自己的线程上"**。顺着这条往回看，今天的 `stop()`
 > （`src/webapp/uvcpp_web_app.cpp:2198`）在 n>1 下是坏的：非循环线程进来时它走
 > `post(...)`，而 `post()` 的落点是 0 号（§5.2）⇒ 1..n−1 的停机状态机永远不会被推进，

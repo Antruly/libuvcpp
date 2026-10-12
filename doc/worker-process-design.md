@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
 ## 3. POSIX（Linux / macOS）：零通讯
 
 **master 只做一件事：把端口占住。** 它走今天已有的 bind 链
-（`src/webapp/uvcpp_web_app.cpp:2024` → `src/web/uvcpp_http_server.cpp:367-368` →
+（`src/webapp/uvcpp_web_app.cpp:2024` → `src/web/uvcpp_http_server.cpp:386-387` →
 `src/net/uvcpp_tcp_server.cpp:377-382` → `src/handle/uvcpp_tcp.h:59-60`）建出监听 socket，
 **然后不跑循环** —— `uv_listen` 会在 `listen(fd, backlog)` 那一步就把端口占住，
 而 master 的 loop 从不 `uv_run`，所以它永远不会 accept。于是"master 不接请求"是天然的，
@@ -184,7 +184,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:2020` /
   `src/webapp/uvcpp_web_app.h:1961`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
-  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:865`）都不需要切成 per-loop。
+  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:872`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。
 - **日志那条闸门在进程内照样存在。** 1.4.0 之后 `src/webapp/uvcpp_log.cpp:416-436` 的
   `write()` 已经**不持锁调 sink** 了（锁内只快照一次 `sink()`，`:342-351`），但默认
