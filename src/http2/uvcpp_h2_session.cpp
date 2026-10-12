@@ -977,6 +977,59 @@ bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
 }
 
 /**
+ * @brief 把一组**尾随头**折成 nghttp2 的头部数组（`build_response_nv` 的"无首部"版）。
+ *
+ * 三处与首部那条路**刻意不同**：
+ *  - **伪首部一律拒**（返回 false），不像连接专属头那样替他剥掉 —— 尾随头块里
+ *    出现 `:status` 是 RFC 9113 §8.1 明令禁止的，剥掉等于让调用方以为发了一个
+ *    对端收不到的字段（而对端若真收到会直接判协议错）。
+ *  - 不参与 `content-length` 的归一：那个字段在尾随头里没有意义，原样发。
+ *  - 连接专属头（`connection` / `keep-alive` / `te` 等）**仍然剥掉** —— 与首部
+ *    那条路一致，它们在 h2 里本来就不该存在。
+ *
+ * `names[i]` 指向 `trailers` 里的字符串、`store[i]` 是值 —— 两者都比本次调用
+ * 活得久，`nghttp2_submit_trailer()` 默认按拷贝取用（见 `build_response_nv` 上
+ * 那段关于 `NGHTTP2_NV_FLAG_NONE` 的说明）。
+ */
+bool build_trailer_nv(const http_headers& trailers,
+                      std::vector<std::string>& store,
+                      std::vector<nghttp2_nv>&  nv) {
+  store.clear();
+  store.reserve(trailers.size());
+  std::vector<const char*> names;
+  names.reserve(trailers.size());
+
+  for (size_t i = 0; i < trailers.size(); ++i) {
+    const http_header& h = trailers[i];
+    if (h.name.empty()) return false;
+    if (h.name[0] == ':') return false;                // 伪首部：拒，不剥
+    if (is_connection_specific(h.name)) continue;      // 连接专属：剥掉
+    if (!nghttp2_check_header_name(
+            reinterpret_cast<const uint8_t*>(h.name.data()), h.name.size()) ||
+        !nghttp2_check_header_value_rfc9113(
+            reinterpret_cast<const uint8_t*>(h.value.data()), h.value.size())) {
+      return false;
+    }
+    names.push_back(h.name.c_str());
+    store.push_back(h.value);
+  }
+
+  nv.clear();
+  nv.reserve(names.size());
+  for (size_t i = 0; i < names.size(); ++i) {
+    nghttp2_nv e;
+    e.name     = reinterpret_cast<uint8_t*>(const_cast<char*>(names[i]));
+    e.value    = reinterpret_cast<uint8_t*>(const_cast<char*>(store[i].data()));
+    e.namelen  = std::strlen(names[i]);
+    e.valuelen = store[i].size();
+    e.flags    = NGHTTP2_NV_FLAG_NONE;
+    nv.push_back(e);
+  }
+  // 一个字段都没有的尾随头块是合法的（就是"到此结束"的意思），不在这里拒。
+  return true;
+}
+
+/**
  * @brief 这个头部块还发得出去吗。
  *
  * nghttp2 在发送前会拿 `nghttp2_hd_deflate_bound()` 估一个上界，超过
@@ -1159,6 +1212,60 @@ int uvcpp_h2_session::submit_data(int32_t stream_id, const char* data,
   os.queued_bytes += c.data.size();
   os.chunks.push_back(std::move(c));
   return 0;  // 有 frame 在飞（刚提的，或者之前那个），它会回头把这块取走
+}
+
+// 文档注释在头文件里（`submit_trailer` 的声明处），本处只留实现说明：
+// `nghttp2_submit_trailer()` 是 `submit_headers_shared(..., END_STREAM, ...)`
+// 的薄壳（`nghttp2_submit.c:132`），**提交时不校验流状态** —— 上面那几道闸是
+// 唯一的闸，所以每一道都必须在动 `out_stream` 之前判。
+int uvcpp_h2_session::submit_trailer(int32_t stream_id,
+                                     const http_headers& trailers) {
+  if (!impl_->session) return UV_EINVAL;
+  auto sit = impl_->streams.find(stream_id);
+  if (sit == impl_->streams.end()) return UV_EINVAL;
+  // 尾随头是**首部之后的第二个头块**：首部还没发（`OPEN`）时发它，对端先收到的
+  // 是一个没有 `:status` 的头块；已经收过尾（`SENT`）时再发就是第二个 END_STREAM。
+  if (sit->second.state != h2_stream_state::HEADERS_SENT) return UV_EALREADY;
+
+  impl::out_stream& os = impl_->out_streams[stream_id];
+  if (os.ended) return UV_EALREADY;
+  if (!os.chunks.empty() && os.chunks.back().end_stream) return UV_EALREADY;
+  // **还有字节没交出去的时候不能发尾随头。** nghttp2 的 `nghttp2_submit_trailer()`
+  // 发的是一个带 END_STREAM 的 HEADERS（`nghttp2_submit.c`：就是
+  // `submit_headers_shared(..., NGHTTP2_FLAG_END_STREAM, ...)`），而它进的是
+  // `ob_reg` 队列、DATA 帧挂在流自己的 item 上 —— 两者不共用一个队列，所以
+  // 一旦尾随头抢在 DATA 前面出去（队里还有字节、或者那条 DATA 正卡在流控窗口
+  // 上），对端就会先看见 END_STREAM、再看见字节，是协议违例（nghttp2 自己的
+  // 文档也写死了这条："You cannot send trailer fields after sending frame with
+  // END_STREAM set"）。
+  //
+  // 判据**只看队列空不空**：队空 ⟺ provider 手里一个字节都不剩了。**不能拿
+  // `frame_pending` / `deferred` 当"还有字节欠着"的证据** —— 那两个是"提交过
+  // 一个 data frame"的记账位，块发完之后 provider 还会被叫一次（队空 ⇒ 返回
+  // `NGHTTP2_ERR_DEFERRED`），于是它们**一直是真**：拿它们当判据，这条路上永远
+  // 只会拿到 `UV_EBUSY`，等于整个功能没接上。
+  //
+  // 调用方把最后一块的 `done` 当成信号，在它里面再发尾随头（`done` 是在那批
+  // 字节写完之后才跑的，所以那时队必空）。给 `UV_EBUSY` 而不是 `UV_EALREADY`，
+  // 是为了让调用方能一眼分开"我现在就该等"和"这条流的状态根本不对"。
+  if (!os.chunks.empty()) return UV_EBUSY;
+
+  std::vector<std::string> store;
+  std::vector<nghttp2_nv>  nv;
+  if (!build_trailer_nv(trailers, store, nv)) return UV_EINVAL;
+  // 与另两条提交一样：超限在**动状态之前**退，且退得同步（理由见
+  // `header_block_fits()` 那段注释 —— nghttp2 把这个错误处理成"静默丢帧 + 关流"）。
+  if (!header_block_fits(nv)) return UV_EMSGSIZE;
+
+  const int rv = nghttp2_submit_trailer(impl_->session, stream_id, nv.data(),
+                                        nv.size());
+  if (rv != 0) return rv;  // 连 nghttp2 都没收下 ⇒ 同样什么都没发生
+
+  // 状态与 `ended` 只在这之后落。`ended` 是 `submit_data` 那道闸的输入，
+  // 置上之后这条流再也补不了字节 —— 正是"END_STREAM 已经出去了"的意思。
+  sit->second.state = h2_stream_state::SENT;
+  os.ended          = true;
+  return 0;
 }
 
 void uvcpp_h2_session::take_completed(std::vector<std::function<void()>>& out) {

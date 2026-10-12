@@ -1858,6 +1858,28 @@ void uvcpp_http_server::end_stream(uvcpp_tcp_client* client, int32_t stream_id,
   pump_write(ctx, client);
 }
 
+int uvcpp_http_server::send_trailers(uvcpp_tcp_client* client, int32_t stream_id,
+                                     const http_headers& trailers) {
+  if (client == nullptr) return UV_ECANCELED;
+  std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+  auto it = tbl.find(client);
+  // 与 `write_stream()` 同一套口径：连接不在表里或正在关，都当"这条流已经没了"。
+  if (it == tbl.end() || it->second.closing) return UV_ECANCELED;
+  conn_ctx& ctx = it->second;
+
+#if UVCPP_NGHTTP2_ENABLE
+  if (ctx.h2 != nullptr) {
+    if (stream_id == 0) return UV_EINVAL;  // h2 上没有"这条连接那条流"这回事
+    return ctx.h2->send_trailers(stream_id, trailers);
+  }
+#endif  // UVCPP_NGHTTP2_ENABLE
+
+  // h1：尾随头在 h1 上要 chunked 编码（末尾一个零长度块 + 字段），本库没做那条
+  // 路。**明说 `UV_ENOTSUP` 而不是"照发一遍"** —— 后者会把尾随头当成普通响应头
+  // 塞进首部，调用方看到的是"发出去了"，对端看到的是另一份报文。
+  return UV_ENOTSUP;
+}
+
 // 压缩变体表的总字节上限。#11 第 3 条量出来的是"重复 deflate"这一项，
 // 而 deflate 的产物通常比原文小，所以按**压缩后**字节记账真正占的内存只会更少。
 #if UVCPP_ZLIB_ENABLE

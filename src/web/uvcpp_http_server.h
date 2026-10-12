@@ -750,6 +750,31 @@ class UVCPP_API uvcpp_http_server {
   void end_stream(uvcpp_tcp_client* client, int32_t stream_id, bool close_after);
 
   /**
+   * @brief 用**尾随头**结束一条流：同一条流上的第二个头块，自带 END_STREAM。
+   *
+   * 这是 `end_stream(client, stream_id, false)` 的"带字段"版 —— 两者都是"这条流
+   * 到此为止"，但只有它能带字段。gRPC 就靠它：`grpc-status` / `grpc-message`
+   * 按规范走尾随头，而不是首部（RFC 9113 §8.1）。
+   *
+   * **只能用在 h2 上**，而且**必须在这条流的 body 一个字节都不欠的时候**调：
+   * `begin_stream()` → `write_stream()`（等它的 `done` 回来）→ 本函数。还有字节
+   * 在飞时返 `UV_EBUSY`（理由见 `uvcpp_h2_session::submit_trailer()` —— 那会发出
+   * 一个"END_STREAM 在前、字节在后"的协议违例）。h1 上返 `UV_ENOTSUP`：h1 的
+   * 尾随头要 chunked 编码，本库没做那条路，说清楚比默默发出去强。
+   *
+   * @param trailers 尾随头字段。**伪首部（`:` 开头）一律拒**（`UV_EINVAL`），
+   *        连接专属头按首部那条路的规矩剥掉，与 `on_trailer()` 收到的形状一致。
+   *
+   * @return 0 受理；`UV_ECANCELED` 连接已经不在表里（或正在关，与
+   *         `write_stream()` 同一套口径）；`UV_EINVAL` 字段非法；`UV_EBUSY` 还有 body
+   *         欠着；`UV_EALREADY` 这条流的状态不允许（首部还没发、或者已经收过
+   *         尾了）；`UV_EMSGSIZE` 头块超上限；`UV_ENOTSUP` 走了 h1 那条腿。
+   *         **每一种失败都保证"什么都没发生"。**
+   */
+  int send_trailers(uvcpp_tcp_client* client, int32_t stream_id,
+                    const http_headers& trailers);
+
+  /**
    * @brief Register a callback fired when a connection is removed (closed).
    *        Lets a streaming handler free per-connection state (open file, queued
    *        buffers) on an abrupt disconnect where no END event will fire.

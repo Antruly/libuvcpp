@@ -319,6 +319,38 @@ class UVCPP_API uvcpp_h2_session {
                   bool end_stream, std::function<void(int)> done);
 
   /**
+   * @brief 提交**尾随头**（trailers）：同一条流上的第二个头块，自带 END_STREAM。
+   *
+   * 这是 gRPC 那条路缺的最后一块 —— `grpc-status` / `grpc-message` 按规范走
+   * 尾随头，而不是首部。收的方向早就有，但**没有专门的回调槽**：尾随头块在
+   * `on_begin_headers` 里被认出来（`HCAT_HEADERS`，**不**清请求/响应状态），
+   * 字段照常走 `on_header` 折进 `request` / `response` 的头列表，收尾那一下由
+   * 头块自带的 END_STREAM 经 `finish_body()` 报成 `on_request_end` /
+   * `on_response_end`（`on_frame_recv()` 的 `HCAT_HEADERS` 那一支）。发的一直没有。
+   *
+   * 与 `submit_data(..., end_stream=true)` 的关系：两者都是"这条流到此为止"，
+   * 但**只有尾随头能带字段**。已经提交过终止块（`end_stream=true` 那块，或者
+   * 又一次 `submit_trailer`）之后再调它就是协议违例，本层直接拒（见下）。
+   *
+   * 与 `submit_headers` 的关系：那个是**首部**，发的是 `:status` 那一套；本函数
+   * 发的是**尾随头**，按 RFC 9113 §8.1 尾随头块里**不允许出现伪首部**，所以
+   * 名字以 `:` 开头的字段一律拒掉（`UV_EINVAL`），而不是替他丢掉 —— 丢掉会让
+   * 调用方以为自己发了一个对端收不到的字段。
+   *
+   * 名字一律折成小写（与 `http_headers` 的约定一致），空名字或含非法字符的
+   * 名字拒掉。**不做** `content-length` 之类的语义检查：尾随头里出现什么是
+   * 调用方的事，本层只保证它按 h2 的规矩上线。
+   *
+   * @return 0 受理；`UV_EINVAL` 会话没了 / 流不存在 / 字段非法；
+   *         `UV_EALREADY` 这条流的状态不允许（首部还没发、或者已经收过尾了）；
+   *         `UV_EBUSY` 队列里还有字节没交出去（见 `submit_data` 的 `done` 那条
+   *         契约：在最后一块的 `done` 里调本函数，那时队必空）；
+   *         `UV_EMSGSIZE` 头块超上限。**每一种失败都保证"什么都没发生"**
+   *         —— 没有入队、没有动流状态、没有置 `ended`。
+   */
+  int submit_trailer(int32_t stream_id, const http_headers& trailers);
+
+  /**
    * @brief 取走已经可以回调的那些块的 `done`（已绑好结果码）。
    *
    * 传输层在**写完成之后**调用它并逐个执行。分开两步是因为 `submit_data`

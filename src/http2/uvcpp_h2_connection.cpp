@@ -279,6 +279,13 @@ int uvcpp_h2_connection::send_headers(int32_t stream_id,
   return flush();
 }
 
+int uvcpp_h2_connection::send_trailers(int32_t stream_id,
+                                       const http_headers& trailers) {
+  const int rv = session_->submit_trailer(stream_id, trailers);
+  if (rv != 0) return rv;
+  return flush();
+}
+
 int uvcpp_h2_connection::pause_stream(int32_t stream_id) {
   // 不 flush：暂停不产生字节。
   return session_->pause_stream(stream_id);

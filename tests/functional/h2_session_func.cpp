@@ -58,6 +58,13 @@ struct link {
   std::string resp_body;
   http_headers resp_headers;
   bool        resp_end = false;   ///< 整条响应收完（on_response_end）
+  /// `on_response_end` **那一刻**的整份头列表。
+  ///
+  /// 与 @ref resp_headers 的差别就是尾随头：那个是 `on_response` 时抓的（只有首部
+  /// 块），而尾随头是**同一条流的第二个头块**、收下之后折进同一个 `response.headers`
+  /// —— 只有在这里才看得到它已经进去了。尾随头没有专门的回调槽，这就是它在会话层
+  /// 的观测面（见 `submit_trailer` 的声明注释）。
+  http_headers resp_headers_end;
   int         client_closed = 0;
   /// 客户端看到的那条流的 RST 码。只数次数证明不了"为什么被拒" ——
   /// 一次协议错误和一次超预算在只计数器的判据里长得一模一样。
@@ -139,8 +146,9 @@ struct link {
                         size_t n) {
       resp_body.append(d, n);
     };
-    cc.on_response_end = [this](uvcpp_h2_session&, uvcpp_h2_stream&) {
-      resp_end = true;
+    cc.on_response_end = [this](uvcpp_h2_session&, uvcpp_h2_stream& st) {
+      resp_end         = true;
+      resp_headers_end = st.response.headers;
     };
     cc.on_close = [this](uvcpp_h2_session&, int32_t, uint32_t code) {
       if (code != 0) ++rst_count;
@@ -1236,6 +1244,307 @@ static bool test_out_stream_cap_control() {
   return cap_group(1u << 20, 0, 8192);
 }
 
+// =========================================================================
+// 尾随头（`submit_trailer`）
+//
+// 这条路的判据**只能落在客户端收到的头列表上**：尾随头是同一条流的第二个头块，
+// 它既不经过 `on_response`（那个只在 `HCAT_RESPONSE` 上跑），也不改变 body ——
+// 收下之后折进同一个 `response.headers`，所以要看的是 `on_response_end` 那一刻的
+// `resp_headers_end`。只断言"resp_end 为真"是不够的：END_STREAM 由 `submit_data`
+// 的终止块也能带来，两者在那一格上长得一模一样。
+// =========================================================================
+
+/// 尾随头字段的小构造器（`http_headers` 就是 `vector<http_header>`）。
+void add_tr(http_headers& t, const char* name, const char* value) {
+  http_header h;
+  h.name  = name;
+  h.value = value;
+  t.push_back(h);
+}
+
+http_headers mk_tr(const char* name, const char* value) {
+  http_headers t;
+  add_tr(t, name, value);
+  return t;
+}
+
+/// 主体：首部 → 两块 body → 尾随头，四样都要到；两条流的账都要平。
+bool test_trailer_roundtrip() {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.auto_reply = false;  // 手工走流式那条路
+
+  const int32_t sid =
+      L.client.submit_request(make_req(http_method::HTTP_POST, "/sum"), "");
+  if (sid <= 0) return false;
+  L.pump();
+  if (L.req_count != 1) return false;
+
+  // ① 首部还没发就发尾随头：对端会先收到一个没有 `:status` 的头块。
+  if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != UV_EALREADY) {
+    std::cerr << "  [diag] 首部之前应当 UV_EALREADY" << std::endl;
+    return false;
+  }
+
+  uvcpp_http_response head;
+  head.status_code = http_status::OK;
+  head.set_header("content-type", "application/grpc");
+  if (L.server.submit_headers(sid, head) != 0) {
+    std::cerr << "  [diag] submit_headers 失败" << std::endl;
+    return false;
+  }
+
+  const std::string b1("aaaa");
+  if (L.server.submit_data(sid, b1.data(), b1.size(), false, nullptr) != 0) {
+    std::cerr << "  [diag] 第一块被拒" << std::endl;
+    return false;
+  }
+  // ② 队列里还有字节：尾随头必须被挡 —— 否则那个自带 END_STREAM 的 HEADERS 会
+  //    插到字节前面（nghttp2 里 DATA 挂在流自己的 item 上、HEADERS 走 ob_reg，
+  //    两边不是一个队列）。
+  if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != UV_EBUSY) {
+    std::cerr << "  [diag] 队里还有字节时应当 UV_EBUSY" << std::endl;
+    return false;
+  }
+  L.pump();
+  if (L.resp_body != "aaaa") {
+    std::cerr << "  [diag] 第一块没到客户端，收到 " << L.resp_body.size()
+              << " 字节" << std::endl;
+    return false;
+  }
+
+  const std::string b2("bb");
+  if (L.server.submit_data(sid, b2.data(), b2.size(), false, nullptr) != 0) {
+    std::cerr << "  [diag] 第二块被拒" << std::endl;
+    return false;
+  }
+  L.pump();
+  if (L.resp_body != "aaaabb") {
+    std::cerr << "  [diag] body=" << L.resp_body << "，期望 aaaabb" << std::endl;
+    return false;
+  }
+
+  // ③ 队空 ⇒ 受理。**这一条是"判据只看 chunks 空不空"的正面证据**：此刻
+  //    `frame_pending` / `deferred` 都是真（provider 在队空时又返回过一次
+  //    DEFERRED），拿它们当"还有字节欠着"这条路上永远只会得到 UV_EBUSY。
+  http_headers tr;
+  add_tr(tr, "grpc-status", "0");
+  add_tr(tr, "grpc-message", "");
+  // 连接专属头照首部那条路的规矩剥掉（不报错，也不上线）。
+  add_tr(tr, "connection", "close");
+  const int trc = L.server.submit_trailer(sid, tr);
+  if (trc != 0) {
+    std::cerr << "  [diag] 队空后 submit_trailer rc=" << trc << std::endl;
+    return false;
+  }
+  // ④ 收过尾了：再来一次是第二个 END_STREAM，必须拒。
+  if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != UV_EALREADY) {
+    std::cerr << "  [diag] 第二次尾随头应当 UV_EALREADY" << std::endl;
+    return false;
+  }
+  // 尾随头发出去之后 body 也补不了了 —— END_STREAM 已经在线上了，再发字节就是
+  // "END_STREAM 在前、字节在后"。这一条与上一条一起把"收尾只能收一次"钉住。
+  if (L.server.submit_data(sid, "xx", 2, false, nullptr) != UV_EALREADY) {
+    std::cerr << "  [diag] 尾随头之后不该还能补 body" << std::endl;
+    return false;
+  }
+  L.pump();
+
+  if (!L.resp_end) {
+    std::cerr << "  [diag] 客户端没收到 END_STREAM" << std::endl;
+    return false;
+  }
+  if (http_get_header(L.resp_headers_end, "grpc-status") != "0") {
+    std::cerr << "  [diag] 尾随头 grpc-status 没到" << std::endl;
+    return false;
+  }
+  if (http_get_header(L.resp_headers_end, "grpc-message") != "") {
+    std::cerr << "  [diag] 尾随头 grpc-message（空值）没到" << std::endl;
+    return false;
+  }
+  // 剥掉的那条**不许**上线：它不是"报错"而是"没发生"。
+  if (http_get_header(L.resp_headers_end, "connection") != "") {
+    std::cerr << "  [diag] 连接专属头被原样发出去了" << std::endl;
+    return false;
+  }
+  // 首部块里不该提前出现尾随头字段（两个头块必须真是两块）。
+  if (http_get_header(L.resp_headers, "grpc-status") != "") {
+    std::cerr << "  [diag] 尾随头混进了首部块" << std::endl;
+    return false;
+  }
+  if (L.fatal_count != 0 || L.rst_count != 0) {
+    std::cerr << "  [diag] fatals=" << L.fatal_count << " last=" << L.last_fatal
+              << " rst=" << L.rst_count << " code=" << L.last_rst_code
+              << std::endl;
+    return false;
+  }
+  // 两端的 END_STREAM 都发完了 ⇒ 流表该清空（尾随头那条路的收尾真的走到了）。
+  if (L.server.stream_count() != 0 || L.client.stream_count() != 0) {
+    std::cerr << "  [diag] 流表没清空 svr=" << L.server.stream_count()
+              << " cli=" << L.client.stream_count() << std::endl;
+    return false;
+  }
+  return true;
+}
+
+/// 空 body：首部之后直接尾随头（gRPC 的空响应就是这形状）。
+///
+/// 与上一条的分工：这条**一次 `submit_data` 都没有**，所以它同时是"尾随头不依赖
+/// 那条流式队列被碰过"的证据 —— `frame_pending` / `deferred` 都还是假。
+bool test_trailer_without_body() {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.auto_reply = false;
+
+  const int32_t sid =
+      L.client.submit_request(make_req(http_method::HTTP_POST, "/empty"), "");
+  if (sid <= 0) return false;
+  L.pump();
+
+  uvcpp_http_response head;
+  head.status_code = http_status::OK;
+  head.set_header("content-type", "application/grpc");
+  if (L.server.submit_headers(sid, head) != 0) return false;
+  L.pump();
+
+  if (L.server.submit_trailer(sid, mk_tr("grpc-status", "12")) != 0) {
+    std::cerr << "  [diag] 无 body 时 submit_trailer 被拒" << std::endl;
+    return false;
+  }
+  L.pump();
+
+  if (!L.resp_end) return false;
+  if (!L.resp_body.empty()) {
+    std::cerr << "  [diag] 本该没有 body，收到 " << L.resp_body.size() << " 字节"
+              << std::endl;
+    return false;
+  }
+  if (http_get_header(L.resp_headers_end, "grpc-status") != "12") {
+    std::cerr << "  [diag] 尾随头没到" << std::endl;
+    return false;
+  }
+  if (L.fatal_count != 0 || L.rst_count != 0) return false;
+  return L.server.stream_count() == 0 && L.client.stream_count() == 0;
+}
+
+/// 失败面：**每一种拒绝都保证"什么都没发生"**。
+///
+/// 分几条独立的 link：一条流的状态只能往前走，把六种拒绝挤在一条流上会让后面的
+/// 断言读到前面那种留下的状态。
+bool test_trailer_rejects() {
+  // ① 流不存在 / 流号是 0。
+  {
+    link& L = make_link();
+    if (!L.init()) return false;
+    L.auto_reply = false;
+    const int32_t sid =
+        L.client.submit_request(make_req(http_method::HTTP_GET, "/a"), "");
+    if (sid <= 0) return false;
+    L.pump();
+    if (L.server.submit_trailer(sid + 2, mk_tr("grpc-status", "0")) != UV_EINVAL) {
+      std::cerr << "  [diag] 不存在的流应当 UV_EINVAL" << std::endl;
+      return false;
+    }
+    if (L.server.submit_trailer(0, mk_tr("grpc-status", "0")) != UV_EINVAL) {
+      std::cerr << "  [diag] 流号 0 应当 UV_EINVAL" << std::endl;
+      return false;
+    }
+  }
+  // ② 字段非法：伪首部 / 空名字 / 值里有裸控制字符 —— 三者都不是"剥掉"，
+  //    是**拒**（对端收到 `:status` 会直接判协议错，替调用方丢掉等于让他以为
+  //    发出去了一个收不到的字段）。
+  {
+    link& L = make_link();
+    if (!L.init()) return false;
+    L.auto_reply = false;
+    const int32_t sid =
+        L.client.submit_request(make_req(http_method::HTTP_GET, "/b"), "");
+    if (sid <= 0) return false;
+    L.pump();
+    uvcpp_http_response head;
+    head.status_code = http_status::OK;
+    if (L.server.submit_headers(sid, head) != 0) return false;
+    L.pump();
+
+    if (L.server.submit_trailer(sid, mk_tr(":status", "200")) != UV_EINVAL) {
+      std::cerr << "  [diag] 伪首部应当 UV_EINVAL" << std::endl;
+      return false;
+    }
+    if (L.server.submit_trailer(sid, mk_tr("", "x")) != UV_EINVAL) {
+      std::cerr << "  [diag] 空名字应当 UV_EINVAL" << std::endl;
+      return false;
+    }
+    if (L.server.submit_trailer(sid, mk_tr("x-bad", "a\nb")) != UV_EINVAL) {
+      std::cerr << "  [diag] 含控制字符的值应当 UV_EINVAL" << std::endl;
+      return false;
+    }
+    // 三种拒绝之后这条流必须还在原地（状态没动）—— 所以正常的那个还发得出去。
+    if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != 0) {
+      std::cerr << "  [diag] 被拒之后流状态被动了" << std::endl;
+      return false;
+    }
+  }
+  // ③ 已经交了终止块（`end_stream=true` 那块，还在队里）：再发尾随头就是第二个
+  //    END_STREAM。**这一格测的是 `chunks.back().end_stream` 那一支**，所以必须在
+  //    `pump()` **之前**问 —— 那批字节一上线两条 END_STREAM 就都发完了，流会从
+  //    会话的流表里消失，那时拿到的会是"这条流不存在"（下一段测的就是它）。
+  {
+    link& L = make_link();
+    if (!L.init()) return false;
+    L.auto_reply = false;
+    const int32_t sid =
+        L.client.submit_request(make_req(http_method::HTTP_GET, "/c"), "");
+    if (sid <= 0) return false;
+    L.pump();
+    uvcpp_http_response head;
+    head.status_code = http_status::OK;
+    if (L.server.submit_headers(sid, head) != 0) return false;
+    if (L.server.submit_data(sid, "z", 1, true, nullptr) != 0) return false;
+    if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != UV_EALREADY) {
+      std::cerr << "  [diag] 终止块已入队时应当 UV_EALREADY" << std::endl;
+      return false;
+    }
+    L.pump();
+    if (!L.resp_end) {
+      std::cerr << "  [diag] 终止块那条路没收到 END_STREAM" << std::endl;
+      return false;
+    }
+    if (L.resp_body != "z") return false;
+    // 收尾之后这条流已经从会话的流表里没了 —— 再问一次是 EINVAL 而不是
+    // EALREADY，两者都是拒绝，但**成因不同**：这一格拒绝的理由是"查无此流"。
+    if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != UV_EINVAL) {
+      std::cerr << "  [diag] 流收场之后应当 UV_EINVAL" << std::endl;
+      return false;
+    }
+  }
+  // ④ 整条响应一次发完（`submit_response`，不是流式那条路）：状态是 SENT，
+  //    尾随头没有立足之地。
+  {
+    link& L = make_link();
+    if (!L.init()) return false;
+    L.auto_reply = false;
+    const int32_t sid =
+        L.client.submit_request(make_req(http_method::HTTP_GET, "/d"), "");
+    if (sid <= 0) return false;
+    L.pump();
+    uvcpp_http_response r;
+    r.status_code = http_status::OK;
+    r.body        = mk_buf("whole");
+    if (L.server.submit_response(sid, r) != 0) return false;
+    // `submit_response` 当场就把状态推到 `SENT`（不是"等发完才算"），所以这一格
+    // 问在 `pump()` 之前 —— 之后就问不到了：那条流收场即从流表消失，拿到的会是
+    // ③ 里那种"查无此流"，两格就分不开了。
+    if (L.server.submit_trailer(sid, mk_tr("grpc-status", "0")) != UV_EALREADY) {
+      std::cerr << "  [diag] 一次性响应之后应当 UV_EALREADY" << std::endl;
+      return false;
+    }
+    L.pump();
+    if (!L.resp_end) return false;
+    if (L.resp_body != "whole") return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1258,6 +1567,9 @@ int main() {
     {"oversize_submit_is_refused", test_oversize_submit_is_refused},
     {"out_stream_cap_rejects", test_out_stream_cap},
     {"out_stream_cap_control", test_out_stream_cap_control},
+    {"trailer_roundtrip", test_trailer_roundtrip},
+    {"trailer_without_body", test_trailer_without_body},
+    {"trailer_rejects", test_trailer_rejects},
     {"oversize_response_is_refused", test_oversize_response_is_refused},
     {"goaway_reports_last_processed_stream",
      test_goaway_reports_last_processed_stream},

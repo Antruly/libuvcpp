@@ -12,7 +12,13 @@
  *   1. 判对了 —— 前言完整时服务端真的按 h2 回帧、路由真的跑到（第一、四、六轮）；
  *   2. 判错了 —— 不是前言时一个字节都不能因此丢掉或重复（第二、五轮）；
  *   3. 前言**跨读边界**时不能只看当前这一段（第三、四轮，这是本层唯一的新状态）；
- *   4. 开关关掉时，同一个字节流必须**逐字节**走今天那条 h1 的路（第七轮）。
+ *   4. 开关关掉时，同一个字节流必须**逐字节**走今天那条 h1 的路（第七轮）；
+ *   5. 第八轮与前言无关，钉的是**这条腿上才有的第二段头** —— 明文 h2 的尾随头
+ *      （`grpc-status` 那类，1.6.9）。它挂在这个文件里，是因为尾随头只有在
+ *      "一条连接能承载多条流"的协议上才存在，h1 那条腿**没有对应物**：同一份
+ *      字节流走到 `send_trailers()` 必须拿到 `UV_ENOTSUP`，而不是被当成普通
+ *      响应头混进首部（混进去调用方看着"发出去了"，对端收到的却是另一份报文）。
+ *      这一条同样落在第八轮里，用的是同一个 h2c 端口的 h1 那一侧。
  *
  * 装置与"为什么这样能把住关"：
  *
@@ -51,6 +57,7 @@
 #include <net/uvcpp_tcp_client.h>
 #include <req/uvcpp_work.h>
 #include <uvcpp/uvcpp_buf.h>
+#include <web/uvcpp_http_common.h>
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_http_response.h>
 #include <web/uvcpp_http_server.h>
@@ -64,6 +71,17 @@ namespace {
 // =========================================================================
 // 判据
 // =========================================================================
+
+/// 头列表里**有没有**这个名字。
+///
+/// 与 `http_get_header(...) != ""` 的差别就是空值字段：那个对"没发"与"发了个空值"
+/// 给同一个答案，而尾随头这一路恰好有 `grpc-message: ""` 这种正常情形。
+bool has_named(const http_headers& hs, const std::string& name) {
+  for (size_t i = 0; i < hs.size(); ++i) {
+    if (hs[i].name == name) return true;
+  }
+  return false;
+}
 
 int g_failures = 0;
 
@@ -192,6 +210,52 @@ struct TestServer {
       // 的只是超时）。`uvcpp_static_server` 那条路以前正是这个症状。
       //
       // 捕获 `&server` 是安全的：处理函数挂在这个对象上，它长不过 server。
+      // 尾随头（1.6.9）：流式回一块 body，等它的 `done` 回来之后再发尾随头。
+      //
+      // **顺序是这条路线的全部**：尾随头是一个自带 END_STREAM 的头块，抢在
+      // body 前面出去就是"END_STREAM 在前、字节在后"。所以必须在**最后一块的
+      // `done` 里**发 —— 那个回调是那批字节写完之后才跑的（`write_stream` 的
+      // 注释写了这条契约），会话层也据此只认"队列空"（见 `submit_trailer`）。
+      server.get("/trailers", [&server](uvcpp_http_request& req,
+                                        uvcpp_http_response& resp,
+                                        uvcpp_tcp_client* client) {
+        resp.deferred = true;  // 这条响应由处理函数自己收尾
+        uvcpp_http_response head;
+        head.status_code = http_status::OK;
+        head.set_header("content-type", "application/grpc");
+        server.begin_stream(client, req.stream_id, head);
+        const int32_t sid = req.stream_id;
+        server.write_stream(client, sid, std::string(kBody),
+                            [&server, client, sid](int rc) {
+                              if (rc != 0) return;
+                              http_headers tr;
+                              http_header  h;
+                              h.name  = "grpc-status";
+                              h.value = "0";
+                              tr.push_back(h);
+                              h.name  = "grpc-message";
+                              h.value = "";
+                              tr.push_back(h);
+                              server.send_trailers(client, sid, tr);
+                            });
+      });
+
+      // h1 那一侧的尾随头：**必须明着拒掉**。判据只能是返回值 —— 处理函数跑在
+      // 服务端线程上，它自己断言失败时客户端看到的是超时，什么都说明不了。所以
+      // 这里把 rc 编进 body，让客户端那一侧能读到（见第 8 轮）。
+      server.get("/trailers-h1", [&server](uvcpp_http_request& req,
+                                           uvcpp_http_response& resp,
+                                           uvcpp_tcp_client* client) {
+        http_headers tr;
+        http_header  h;
+        h.name  = "grpc-status";
+        h.value = "0";
+        tr.push_back(h);
+        const int         rc = server.send_trailers(client, req.stream_id, tr);
+        const std::string s  = std::to_string(rc);
+        resp = uvcpp_http_response::ok(s.c_str(), s.size(), "text/plain");
+      });
+
       server.get("/later", [&server](uvcpp_http_request& req,
                                      uvcpp_http_response& resp,
                                      uvcpp_tcp_client*) {
@@ -489,6 +553,131 @@ void test_h2c_deferred_reply() {
 // 第 2 轮：同一个端口上的 h1 逐字节不变
 // =========================================================================
 
+/**
+ * @brief 打 `/trailers`：判据落在**客户端会话收到的第二个头块**上。
+ *
+ * 与 `h2_roundtrip` 的差别只有一处观测点，但那处是关键：尾随头字段收下之后折进
+ * 同一个 `response.headers`，而 `on_response` 只在**首部块**上跑（尾随头块的
+ * category 是 `HCAT_HEADERS`）—— 所以要在 `on_response_end` 那一刻抓。
+ * 只断言"收到 END_STREAM"是不够的：`end_stream()` 那条路带的也是 END_STREAM。
+ */
+bool h2_trailers_roundtrip(int port, int& status, std::string& body,
+                           http_headers& end_headers, std::string& raw) {
+  uvcpp_h2_session            cli(false);
+  uvcpp_h2_session::callbacks cbs;
+  bool         done  = false;
+  bool         fatal = false;
+  int          st    = 0;
+  http_headers first_headers;
+  std::string  bd;
+
+  cbs.on_response = [&](uvcpp_h2_session&, uvcpp_h2_stream& stream, bool) {
+    st            = static_cast<int>(stream.response.status_code);
+    first_headers = stream.response.headers;
+  };
+  cbs.on_body = [&](uvcpp_h2_session&, uvcpp_h2_stream&, const char* d, size_t n) {
+    bd.append(d, n);
+  };
+  cbs.on_response_end = [&](uvcpp_h2_session&, uvcpp_h2_stream& stream) {
+    done        = true;
+    end_headers = stream.response.headers;
+  };
+  cbs.on_fatal = [&](uvcpp_h2_session&, int) { fatal = true; };
+
+  if (cli.init(cbs) != 0) return false;
+  if (cli.submit_request(make_req(http_method::HTTP_GET, "/trailers"), "") <= 0) {
+    return false;
+  }
+
+  uvcpp_tcp_client c;
+  if (c.connect_wait("127.0.0.1", port, 3000) != 0) return false;
+
+  const std::chrono::steady_clock::time_point t0 =
+      std::chrono::steady_clock::now();
+  for (;;) {
+    std::string out;
+    if (cli.drain(out) != 0) break;
+    if (!out.empty() && c.write_wait(out.data(), out.size(), 3000) != 0) break;
+    if (done || fatal) break;
+    if (ms_since(t0) >= 4000) break;
+
+    uvcpp_buf b;
+    const int rv = c.read_wait(b, 30);
+    if (rv == 0) {
+      if (b.size() > 0 && b.get_const_data() != nullptr) {
+        raw.append(b.get_const_data(), b.size());
+        if (cli.recv(b.get_const_data(), b.size()) != 0) break;
+      }
+    } else if (rv != UV_ETIMEDOUT) {
+      break;
+    }
+  }
+
+  status = st;
+  body   = bd;
+  // 首部块里不许提前出现尾随头字段 —— 两个头块必须真是两块。
+  for (size_t i = 0; i < first_headers.size(); ++i) {
+    if (first_headers[i].name == "grpc-status") return false;
+  }
+  return done;
+}
+
+/**
+ * @brief 第 8 轮：`send_trailers()` 真的把尾随头发上线了吗。
+ *
+ * 判据三样，缺一样都说明不了这条路通：
+ *   1. 客户端按流收到 200 与 body `world`（首部与 DATA 都对）；
+ *   2. **`on_response_end` 那一刻的头列表里有 `grpc-status: 0`** —— 这是尾随头
+ *      真的到了的**唯一**证据（它不是首部、也不是 body）；
+ *   3. 首部块（`on_response` 那一刻）里**没有**它。
+ * 外加同端口的 h1 那一侧：`send_trailers()` 返 `UV_ENOTSUP`，且报文里看不到
+ * `grpc-status`（既没有被塞进首部，也没有别的什么"装作发成功了"的路径）。
+ *
+ * 反例的形状值得写下来：只断言"客户端收到了 END_STREAM"是**假绿** ——
+ * 把处理函数里的 `send_trailers()` 换成 `end_stream(client, sid, false)`
+ * 那一条照样绿（两者都是 END_STREAM），而 gRPC 那条路要的正是"END_STREAM
+ * 捎带一段字段"。
+ */
+void test_h2c_trailers() {
+  std::cout << "[8] 明文 h2 上的尾随头（send_trailers）" << std::endl;
+  TestServer  srv;
+  const int   port = srv.start(/*h2c=*/true);
+  check(port > 0, "服务端起来了");
+  if (port <= 0) return;
+
+  int          status = 0;
+  std::string  body, raw;
+  http_headers end_headers;
+  const bool ok = h2_trailers_roundtrip(port, status, body, end_headers, raw);
+
+  // 同一个端口的 **h1 那一侧**：同样的调用必须拿到 `UV_ENOTSUP`，而且要能从
+  // 报文上看出尾随头**没有**被塞进首部。
+  const std::string want = std::to_string(UV_ENOTSUP);
+  std::string       h1_got;
+  const bool        h1_ok = write_then_read(
+      port, {"GET /trailers-h1 HTTP/1.1\r\nHost: h\r\n\r\n"}, 0, h1_got,
+      [&want](const std::string& s) { return s.find(want) != std::string::npos; },
+      3000);
+  srv.shutdown();
+
+  check(ok, "整条响应收完（含 END_STREAM）");
+  check(status == 200, "状态码 200");
+  check(body == kBody, "body 与处理函数发的一致");
+  check(http_get_header(end_headers, "grpc-status") == "0",
+        "尾随头 grpc-status: 0 到了客户端");
+  // 空值的字段也要**在**：`grpc-message` 在成功路径上就是空的，而"这个字段没发"
+  // 与"发了个空值"在 `http_get_header() == ""` 这一格上长得一模一样 ——
+  // 所以这一条查的是**存在性**，不是值。
+  check(has_named(end_headers, "grpc-message"),
+        "空值尾随头 grpc-message 也在头列表里（存在性，不是值）");
+  check(raw.find("world") != std::string::npos,
+        "DATA 载荷里能看到 body 的明文（确认走的是 h2）");
+  info("h1 上 send_trailers() 返回 " + want + "（UV_ENOTSUP）");
+  check(h1_ok, "h1 上 send_trailers() 返回 UV_ENOTSUP（body 里读到的）");
+  check(h1_got.find("grpc-status") == std::string::npos,
+        "尾随头没有被当成普通响应头混进 h1 的首部");
+}
+
 void test_h1_unchanged_on_same_port() {
   std::cout << "[2] 开了 h2c 的同一个端口上，h1 照旧" << std::endl;
   TestServer srv;
@@ -713,6 +902,7 @@ int main() {
 
   test_h2c_roundtrip();
   test_h2c_deferred_reply();
+  test_h2c_trailers();
   test_h1_unchanged_on_same_port();
   test_preface_byte_at_a_time();
   test_preface_split_at_last_byte();

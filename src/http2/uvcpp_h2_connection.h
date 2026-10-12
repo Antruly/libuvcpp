@@ -109,6 +109,15 @@ class UVCPP_API uvcpp_h2_connection {
   int send_headers(int32_t stream_id, const uvcpp_http_response& resp);
 
   /**
+   * @brief 提交尾随头（同一条流上的第二个头块，自带 END_STREAM）+ `flush()`。
+   *
+   * `session().submit_trailer(...)` 的薄包装，契约逐条相同 —— 尤其这一条：
+   * **body 还有字节欠着时返 `UV_EBUSY`**，调用方应当把最后一块的 `done` 当信号，
+   * 在它里面再发尾随头。这是 gRPC 那条路（`grpc-status` 走尾随头）的最后一环。
+   */
+  int send_trailers(int32_t stream_id, const http_headers& trailers);
+
+  /**
    * @brief 提交一块流式 body + `flush()`。
    * @param done 这块上线后回调一次，**绝不在本次调用里同步跑**（由写完成路径执行，
    *             语义同 h1 那条路；流被 RST 或断了也一定跑，参数 `UV_ECANCELED`）。

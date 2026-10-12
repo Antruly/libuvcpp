@@ -49,7 +49,7 @@
 `uvcpp_http_server` **不是从零写的 socket 服务器** —— 它建在 `uvcpp_tcp_server`
 之上（`src/web/uvcpp_http_server.cpp:263-265`：构造函数第一件事就是
 `new uvcpp_tcp_server()`），每条连接配一个独立的 `uvcpp_http_parser` 上下文
-（`src/web/uvcpp_http_server.h:1677-1677` 的 `contexts_` —— 装的是**每连接状态**，
+（`src/web/uvcpp_http_server.h:1706-1706` 的 `contexts_` —— 装的是**每连接状态**，
 单循环时它是一张 `std::map<uvcpp_tcp_client*, conn_ctx>`；多循环下它按循环分成
 若干张，取表见 `doc/multiloop-design.md` §4.1）。
 
@@ -147,7 +147,7 @@ void doc_graceful_shutdown(uvcpp::uvcpp_http_server& server) {
 ```
 
 想一步到位就两个都调。连接级的 `close_connection()` 是 **private**
-（`src/web/uvcpp_http_server.h:1289-1289`）—— 单个连接只能从 `uvcpp_tcp_client` 那侧关。
+（`src/web/uvcpp_http_server.h:1314-1314`）—— 单个连接只能从 `uvcpp_tcp_client` 那侧关。
 
 ---
 
@@ -348,10 +348,10 @@ h1 / h2 上还有一条**逐字等价**的老路：手里那个 `uvcpp_tcp_clien
 `uvcpp_static_server` 走过它很多年），但 **h3 上不成立** —— 那条腿上第三个形参恒为
 `nullptr`，没有 `client` 可记。新代码用 [§6.1](#61-reqreply--send_reply168-dev-起推荐)。
 
-`connection_generation()`（`src/web/uvcpp_http_server.h:795-795`）是本层最容易被忽略、
+`connection_generation()`（`src/web/uvcpp_http_server.h:820-820`）是本层最容易被忽略、
 又最容易出致命错的 API：**返回 0 表示这条连接已经不在服务器的登记表里，此时不该写它。**
 代次号单调递增、永不复用，所以"连接还活着"时号不变、"地址被新连接复用"时号对不上
-（`:1649-1655`）。`is_connected()` 就是 `generation != 0`（`:798`）。
+（`:1678-1684`）。`is_connected()` 就是 `generation != 0`（`:823-823`）。
 
 **`send_response()` 会把 `resp.body` 移走。** 两块写（`nbufs = 2`）时 body 被
 `std::move`，之后 `resp.body.size()` 是 0。要记"上线了多少 body"就用它的**返回值**
@@ -415,9 +415,9 @@ void doc_stream(uvcpp::uvcpp_http_server& server) {
 | 在 h2 连接上调 h1 那两个重载 | `write_stream` 返回 `UV_EINVAL`、`end_stream` **静默返回**（`src/web/uvcpp_http_server.cpp:1815-1815`、`src/web/uvcpp_http_server.cpp:1844-1844`）/ `begin_stream(client, resp)` 打一条 stderr 后丢弃（`src/web/uvcpp_http_server.cpp:1716-1721`） | — |
 
 **`is_head` 与 `accept_encoding` 是连接级单槽，h2 上必须按流记。**
-`src/web/uvcpp_http_server.h:964-994` 把三类后果写得很细；`send_h2_response` 里
+`src/web/uvcpp_http_server.h:989-1019` 把三类后果写得很细；`send_h2_response` 里
 是临时把"这条流的值借到连接级字段"再调压缩的
-（`src/web/uvcpp_http_server.cpp:2882-2890`）。
+（`src/web/uvcpp_http_server.cpp:2904-2912`）。
 
 ### 升级到别的协议
 
@@ -609,7 +609,7 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 
 ## 10. 上限与旋钮
 
-**三个上限的默认值全是 0，也就是全都不限**（`src/web/uvcpp_http_server.h:1651-1653`）：
+**三个上限的默认值全是 0，也就是全都不限**（`src/web/uvcpp_http_server.h:1680-1682`）：
 
 | 旋钮 | 默认 | 越限的答复 |
 |---|---|---|
@@ -635,10 +635,10 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 
 ### 压缩
 
-zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1729-1729`），最小 body 1024
-（`src/web/uvcpp_http_server.h:1730-1730`），排除的 MIME 走 `default_excluded_mime_types()`
+zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1758-1758`），最小 body 1024
+（`src/web/uvcpp_http_server.h:1759-1759`），排除的 MIME 走 `default_excluded_mime_types()`
 （`src/web/uvcpp_http_compress.cpp:146-165`）。压缩变体缓存三道限：
-单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1864-1874`）。
+单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1886-1896`）。
 
 ### 协议行为
 
@@ -648,7 +648,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1729-1729`�
   `send_response`（`src/web/uvcpp_http_server.cpp:1589-1589`）、h1 流式
   `begin_stream`（`src/web/uvcpp_http_server.cpp:1747-1747`）、h2 流式
   `begin_stream`（`src/web/uvcpp_http_server.cpp:1780-1780`）、h2 整包
-  `send_h2_response`（`src/web/uvcpp_http_server.cpp:2874-2874`）。值由
+  `send_h2_response`（`src/web/uvcpp_http_server.cpp:2896-2896`）。值由
   `uvcpp::http_date()` 造（`src/web/uvcpp_http_date.cpp:86-107`）：IMF-fixdate、
   **恒 GMT**，星期名与月份名是写死的 ASCII 表 —— 它**不**用 `strftime` 的
   `%a`/`%b`，那两个说明符在 `setlocale(LC_TIME, "")` 之后会吐本地文字，对端
@@ -688,7 +688,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1729-1729`�
    （`src/web/uvcpp_http_server.cpp:1699-1706`）—— 但它是 `void`，你**无从判断**。
 
 **异常只在一处被接住**：`on_connection` / `stream_claim` / h2 连接钩子三个钩子
-里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:1010-1021`、`src/web/uvcpp_http_server.cpp:1115-1126`、`src/web/uvcpp_http_server.cpp:2695-2704`）。
+里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:1010-1021`、`src/web/uvcpp_http_server.cpp:1115-1126`、`src/web/uvcpp_http_server.cpp:2717-2726`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:1483-1488`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
 （`src/webapp/uvcpp_web_app.cpp:2929-2935`）。
@@ -714,8 +714,8 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1729-1729`�
 **一、服务端没有超时，一个连上不发字节的连接会永久占着。**
 `uvcpp_http_server` 与 `uvcpp_tcp_server` 里没有任何超时机制
 （`src/web/` 下 grep `idle_timeout` 只命中 `uvcpp_ws_parser::is_idle`），
-`src/web/uvcpp_http_server.cpp:1314-1315`、`src/web/uvcpp_http_server.cpp:2275-2277` 与头文件
-`src/web/uvcpp_http_server.h:1318-1321` 现在都明写这一点。
+`src/web/uvcpp_http_server.cpp:1314-1315`、`src/web/uvcpp_http_server.cpp:2297-2299` 与头文件
+`src/web/uvcpp_http_server.h:1343-1346` 现在都明写这一点。
 **真实的闲置清扫在 webapp 层**：`idle_timeout_ms` 默认 **60000**
 （`src/webapp/uvcpp_web_app.cpp:214`），而且为 0 时连扫描句柄都不建
 （`src/webapp/uvcpp_web_app.cpp:2199-2204`）。升级成 WebSocket 的连接被排除在闲置超时之外

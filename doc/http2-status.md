@@ -132,7 +132,7 @@
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**（两个枚举值上也标了这一点）。
 - **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:182-194`）：
   三类里的"`want_read`/`want_write` 双双为假"那一类**不可达** —— 这两个是公开成员
-  （`src/http2/uvcpp_h2_session.h:373`、`:375`），但本层没有任何一处拿它们判定致命。
+  （`src/http2/uvcpp_h2_session.h:405-405`、`:407-407`），但本层没有任何一处拿它们判定致命。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
@@ -313,7 +313,7 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1352`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1459-1459`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关
