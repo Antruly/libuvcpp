@@ -805,15 +805,28 @@ rps 那四行是两臂各 **4 次**的均值，同臂内的极值：`static-h2-c
 - **服务端 CPU**：读 `/proc/<pid>/stat` 的 utime+stime 差分除以 2xx（HZ 由
   `getconf CLK_TCK` 给）。**这条只能同轮次比**（理由见本节开头那个 35%）。
 
-### 这一路上被**证伪**的两个假设
+### 这一路上被**证伪**的三个假设
 
-写下来是因为它们看上去都很像"大的那个杠杆"，而两个都不是：
+写下来是因为它们看上去都很像"大的那个杠杆"，而三个都不是：
 
 - **「`uv_write` 每条响应多一次 `epoll_ctl`」是错的。** 读 `_local_deps/libuv/src/unix/stream.c`
   可以确认：`uv_write2` 在写队列为空时**直接调 `uv__write(stream)` 并且不挂 `POLLOUT`**；
   `uv__io_start(POLLOUT)` 只在部分写 / `UV_EAGAIN` 那条"没写完"的支路上才走到。一条
   装得下的响应**一次 `epoll_ctl` 都不多花**。
 - **「每请求不止一次 `write`」也是错的。** 见上面 `syscr`/`syscw` 那两个 1.004 —— 就是各一次。
+- **「`result += "字面量"` 每次都要 `strlen`」是错的** —— `-O3` 下 GCC 已经把它**常量折叠**
+  掉了。这条值得单独记：`__strlen_avx2` 在 h1 baseline 上是 **16.10 次/请求**，看上去正好
+  对得上序列化里那十来处字面量落笔，于是"改成 `append(ptr, n)` 就能省掉它们"是极自然的
+  推断。实测是 **0**：把 `to_string_into` 里九处 `result += "…"` 全换成显式长度之后，
+  同量具两轮夹逼 **10 927.7 / 10 920.2 → 10 927.0**，落在散布里 —— 改动已整体还原。
+  原因是 `char_traits<char>::length(const char*)` 在 libstdc++ 里就是 `__builtin_strlen`，
+  实参是字面量时编译期就折叠了；`objdump` 上两个二进制在 `to_string_into` 里**都是 17 处
+  `_M_append(char const*, unsigned long)`、一处 `strlen@plt`**，一模一样。
+  那 16.10 次的真身在别处：把 `strlen` 的 PLT 桩（一个匿名地址，所以按名字找调用者永远
+  是 `?`）反查回去，落在 `uvcpp_http_response::set_header(const char*, const char*)` 上
+  的只有 **2.01/req**（`http_header{std::string(name, n), value}` 里 `value` 那一下）；
+  其余的调用者是 **libstdc++ 自己**（`std::string(const char*)` 那一族），在库这一侧
+  根本看不见 —— 想再往下走就得先数清每请求 11 次 `malloc` 是谁要的，而不是盯着 `strlen`。
 
 ## 这一页不是什么
 
