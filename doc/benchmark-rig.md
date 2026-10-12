@@ -747,6 +747,74 @@ rps 那四行是两臂各 **4 次**的均值，同臂内的极值：`static-h2-c
   路径上还多一层 TLS 与 ALPN 协商。
 - 回环上的数不外推（理由同上一节）。
 
+## 每请求指令数的量具（`callgrind`）
+
+上面那几节的读数都是 **rps / 微秒**，它们有一个共同的毛病：**这台机器的 CPU 频率会漂**。
+`/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` 是 `powersave`，实测
+`scaling_cur_freq` 在 2.36 GHz 上下浮动，而量程是 400–4500 MHz。同一份二进制、同一条
+命令行、同一个下午，`µs/请求` 能摆到 **35%**（`/proc/<pid>/stat` 差分那一路尤其明显）——
+于是"改前 15.5、改后 17.1"这种对比**什么都没说明**，除非两臂**交替**跑（`A B B A`），
+而且**只认同轮次内的差**。这一节补的量具绕开了这条：**每请求指令数**。
+
+`valgrind --tool=callgrind` 数的是**指令条数**，与频率、与缓存命中无关，同一份二进制上是
+确定性的。实测同一版本连跑三次：**11 285.8 / 11 283.3 / 11 291.8**（散度 0.08%）——
+比 rps 那一路稳两个数量级。代价是慢（本机约 50×），所以它只配在**小窗口**上用。
+
+### A/B 怎么摆：只换 `LD_LIBRARY_PATH` 指的那份 `.so`
+
+被测服务端（HttpArena 条目的裸机版 `server_ab`）是**动态**链 `libuvcpp.so` 的，所以
+"改前/改后"两版可以共存：各留一份 `.so` 在两个目录里，跑的时候把 `LD_LIBRARY_PATH`
+指到其中一个。比 `git stash` + 重编可靠，也不会把工作树搅乱 —— **两臂跑的是同一份
+二进制**，唯一的变量就是库里那几个字节。驱动器 `cg-diff.sh <so 目录> <标签> <连接数> <URI>`
+一次只跑一个臂，外面套一层交替顺序的小脚本。
+
+窗口取 `-c 2000 -t 8 -d 5s`。**每次都要记下这一次的 2xx 数**，因为下面的分母是它。
+
+### 两次 dump、`part:` 是**增量**不是快照
+
+跑法是：起 valgrind（在 `taskset -c 0` 上），等端口起来、`sleep 3` 让初始化落定，
+`callgrind_control -d <vgpid>` 打第一份；然后才是那 5 秒负载；负载跑完再 `-d` 打第二份。
+`--combine-dumps=yes` 让两次 dump **追加进同一个文件、共用一份压缩符号表**，文件里按
+`part: 1`、`part: 2` 切开。于是 **`part 2` 就是这 5 秒窗口里的增量**，把它除以这一次的
+2xx 才是"每请求"。
+
+这一路上踩过的坑，按会不会让你得出**错的数**排序：
+
+1. **`totals:` 行不是代价行。** 每个 part 末尾有一行 `totals: <N>`，它的首字符是 `t`
+   所以不会撞上"首字符是数字才当代价行"的判据 —— 但**一旦解析器写松了**（比如按
+   "两个字段、第二个是数字"来判），这一行的 N 会被加到 part 的**最后一个函数**头上，
+   总量直接翻几倍。这个坑真的吃到过：曾经算出 31 876.9 条/请求，而真值是 11 285。
+2. **分组键必须归一。** callgrind 记对象名的方式**在不同 dump 里可以不一样**（一会儿是
+   `/tmp/.../so-before/libuvcpp.so`、一会儿是 `libuvcpp.so`）。做逐函数 A/B 时如果不拿
+   `os.path.basename(ob)` 归一，**同一个函数会以「−X / +X」成对出现**，看上去像"每个
+   函数都被改到了"—— 而实际上那是同一个函数的两条键各算了一次自己。
+3. **part 分隔符是 `part:`，带冒号。** 写成 `part `（空格）就一条边都抽不出来，而脚本
+   **静默返回 0**，看上去像"这个函数没人调"。
+4. **`cfn=` / `fn=` 的名字可能就写在同一行**（`cfn=(664) __strlen_avx2`），此时去查
+   `(664) -> name` 的定义表是查不到的 —— 表面现象是"调 strlen 的边合计 0 条"。
+5. **`$!` 必须是 valgrind 自己的 pid。** 拿它去 `callgrind_control -d`；而 `kill -9`
+   直接杀 valgrind 会**丢掉符号表**（那个文件此后解析出来全是地址）。所以先 `-d` 再杀。
+6. **一次 dump 的 `part 1` 是"起完到开跑"那段**（初始化、建监听、3 秒空闲）。它是
+   **几十倍**于 part 2 的十分之一量级（本机 21.8 M 对 319 M），不要拿它算每请求。
+
+### 同时量到的两条旁证
+
+- **系统调用**：读 `/proc/<pid>/io` 的 `syscr` / `syscw` 差分除以 2xx。h1 baseline 是
+  **write/req = 1.0040、read/req = 1.0047** —— 恰好一条请求一次 `read` 一次 `write`，
+  没有可省的系统调用；pipelined（`-p 16`）则降到 **0.126 / 0.064**。
+- **服务端 CPU**：读 `/proc/<pid>/stat` 的 utime+stime 差分除以 2xx（HZ 由
+  `getconf CLK_TCK` 给）。**这条只能同轮次比**（理由见本节开头那个 35%）。
+
+### 这一路上被**证伪**的两个假设
+
+写下来是因为它们看上去都很像"大的那个杠杆"，而两个都不是：
+
+- **「`uv_write` 每条响应多一次 `epoll_ctl`」是错的。** 读 `_local_deps/libuv/src/unix/stream.c`
+  可以确认：`uv_write2` 在写队列为空时**直接调 `uv__write(stream)` 并且不挂 `POLLOUT`**；
+  `uv__io_start(POLLOUT)` 只在部分写 / `UV_EAGAIN` 那条"没写完"的支路上才走到。一条
+  装得下的响应**一次 `epoll_ctl` 都不多花**。
+- **「每请求不止一次 `write`」也是错的。** 见上面 `syscr`/`syscw` 那两个 1.004 —— 就是各一次。
+
 ## 这一页不是什么
 
 - 不是读数记录 —— 读数属于跑它的那套硬件加配置，写在 [`benchmark.md`](benchmark.md)。
@@ -759,4 +827,6 @@ rps 那四行是两臂各 **4 次**的均值，同臂内的极值：`static-h2-c
 - 靶场与驱动器：`bench/bench_server.cpp` / `bench/driver.js` / `bench/gen.js`。
 - QUIC 吞吐量具：`bench/bench_quic.cpp`（`--mode=push|echo|udpfloor`）。
 - HttpArena 的 h3 量具：上游 nghttp2 的 `h2load`（`--enable-http3`），钉 v1.69.0。
+- 每请求指令数的量具：`valgrind --tool=callgrind` + `callgrind_control -d`；
+  A/B 靠 `LD_LIBRARY_PATH` 换 `libuvcpp.so`，解析与逐函数对比是一次性脚本（不随库发布）。
 - 口径与历史读数：[`benchmark.md`](benchmark.md)。

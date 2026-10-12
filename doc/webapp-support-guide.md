@@ -200,7 +200,7 @@ void doc_mime_override() {
 ```
 
 内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:456`，实现
-`src/webapp/uvcpp_web_util.cpp:981-984`），`builtin_size()` 也转调它
+`src/webapp/uvcpp_web_util.cpp:995-998`），`builtin_size()` 也转调它
 （`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
 
@@ -312,7 +312,7 @@ void doc_send_file(uvcpp::uvcpp_loop* loop, doc_file_sink& sink,
   调用方丢掉自己的 `shared_ptr` 即可。
 - **`on_done` 恰好一次**（`:134-146`），`status` 是 **libuv 码**（0 / `UV_ECANCELED` /
   `UV_EINVAL` 之类），不是 HTTP 码 —— 响应层自己会翻
-  （`src/webapp/uvcpp_web_response.cpp:1225-1245`）。
+  （`src/webapp/uvcpp_web_response.cpp:1231-1251`）。
 
 **必须由 `shared_ptr` 持有**（`:164`，内部用 `shared_from_this()`）。放栈上会在
 `start()` 里抛 `std::bad_weak_ptr`，而且**不是编译错误**。
@@ -512,7 +512,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 
 而 `uvcpp_web_util` 里另有**两个哨兵值**：`web_hex_value()` 失败返回 `-1`
 （`src/webapp/uvcpp_web_util.cpp:127-132`），`web_parse_http_date()` 失败返回 `(time_t)-1`
-（`:1173-1174`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
+（`:1187-1188`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
 **这几种码一个都不要喂给 `uv_strerror()`**，会得到看似合理的垃圾。
 
 ---
@@ -587,17 +587,17 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 只放行 `/` 是安全的。
 
 **`web_build_cookie()` 只校验 name 与 value。**
-`path`（`src/webapp/uvcpp_web_util.cpp:471-474`）与 `same_site`（`:483-488`）是**原样拼接**的
+`path`（`src/webapp/uvcpp_web_util.cpp:485-488`）与 `same_site`（`:497-502`）是**原样拼接**的
 —— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:228-230` 只描述了取值
-集合，没声明"会校验"。`name` 是校验的（`:461-464`，非 token 字符直接返回空串），
-`value` 也是编码的（`:469`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
-设计：`SameSite=None` 会自动补 `Secure`（`:486-489`）。
+集合，没声明"会校验"。`name` 是校验的（`:475-478`，非 token 字符直接返回空串），
+`value` 也是编码的（`:483`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
+设计：`SameSite=None` 会自动补 `Secure`（`:500-503`）。
 
 **`web_sanitize_filename()` 只能当元数据。** 它不保证是合法文件名（`*` `?` `"`
 照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:415-419`）；`max_len` 是**软**
 上限（设备名保护会让结果多一字节，`:411-413`）。
 
-**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:254-284`）—— `;` 会被当成
+**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:268-298`）—— `;` 会被当成
 值的一部分。头 `:160-169` 没写分隔符。
 
 **连接身份有三套，不要混。** 见 §3。

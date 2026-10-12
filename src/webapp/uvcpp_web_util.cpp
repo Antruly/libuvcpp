@@ -251,6 +251,20 @@ std::vector<std::pair<std::string, std::string> > web_parse_query(
   std::vector<std::pair<std::string, std::string> > out;
   if (query.empty()) return out;
 
+  // 先按 `&` 的个数预留。段数**至多**是「`&` 个数 + 1」（空段会被跳过 ⇒ 是上界），
+  // 所以这一次 `reserve` 之后不会再扩容。
+  //
+  // 不预留的话，`?a=1&b=1` 这种两个参数的查询要撞一次 `_M_realloc_insert` ——
+  // 那一次要把已经装好的键值对**整体搬走**再释放旧块，callgrind 上 h1 baseline
+  // 每请求 154.4 条，比这一趟数 `&`（同一量具下约 25 条）贵一个量级。
+  {
+    size_t segs = 1;
+    for (size_t i = 0; i < query.size(); ++i) {
+      if (query[i] == '&') ++segs;
+    }
+    out.reserve(segs);
+  }
+
   size_t start = 0;
   while (true) {
     const size_t amp = query.find('&', start);

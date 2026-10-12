@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.16-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.17-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -1256,6 +1256,40 @@
   服务端 **617.3 → 143.3 µs CPU/请求**；整轮 `static-h2`（`-c 256`）
   **43 756 → 52 752（+20.6%）**、175.7 → 139.1 µs。两臂的 woff2 那 4 轮区间
   （9 385–15 356 对 42 202–57 462）**不重叠**。
+
+- 每请求的序列化与查询解析路径上省掉三处重复工作（`1.6.17-dev`）—— 三处都只动**自己这一趟**，
+  不改任何分支结果，报文逐字节不变（`to_string()` 与 `to_string_into()` 仍是同一份实现，
+  测试里那条逐字节比对继续覆盖）。
+  ★ **`web_parse_query` 先按 `&` 的个数预留**。`?a=1&b=1` 这种两个参数的查询，原先第二次
+  `push_back` 会撞一次 `vector<pair<string,string>>::_M_realloc_insert` —— 那一次要把已经
+  装好的键值对**整体搬走**再释放旧块。段数至多是「`&` 个数 + 1」（空段会被跳过 ⇒ 是上界），
+  所以预留之后这一支**归零**。
+  ★ **响应头表只走一趟**。原先 `to_string_into` 为了估长度、判 `chunked`、判
+  `has_header("content-length")` 把 `headers` 走三遍，加上落笔那趟共四遍；三条判据都只依赖
+  `headers` 自己，合成一趟不改任何分支（`has_cl` 只被"落笔之后要不要补"用到，先记住即可）。
+  ★ **状态行不再为字面量造 `std::string`**。`version_str` 那两句的重心是那个三元表达式
+  `cond ? const char* : const std::string&` —— 公共类型是 `std::string`，于是**每一次响应**
+  都要拷一份 `status_message`（哪怕它是空的），配上 `version_str` 就是每响应两次分配、
+  两次释放、两次 `strlen`，只为持有 8 字节和 3 字节的字面量；改成 `const char*` + 显式长度。
+  同处的 `size_to_string` 由「`reserve(m)` + m 次 `+=`」改成「低位先落地、倒一次进正向缓冲、
+  `std::string(fwd, m)` 一次成串」（m ≤ 15 走 SSO，不分配）。
+  **判据**（callgrind，h1 `baseline2?a=1&b=1`、`-c 2000`、5 s 窗口，每轮
+  `callgrind_control -d` 取**增量**；同一份 `server_ab`、只换 `LD_LIBRARY_PATH` 指向的
+  那份 `libuvcpp.so`，两臂交替）：逐函数归因 —— `_M_realloc_insert` **154.9 → 0**、
+  `malloc`/`_int_free`/`free`/`operator new` 那簇 **−133.7**、新增的数 `&` 循环
+  `web_parse_query` **+46.2** ⇒ 查询预留净 **−242.4**；`has_header(const char*)` −10.1、
+  `__strlen_avx2` −14.2 及摊开的部分 ⇒ 头遍历合一 **−44**。合起来
+  **11 287.7 / 11 284.9 → 10 927.5 条/请求**，即 **−358.8（−3.18%）**；跨批次复核
+  −366.7（−3.25%）。
+  ★ **量具本身暴露的一个坑**：per-function 比对的分组键必须拿
+  `os.path.basename(ob)` 归一 —— callgrind 在某些 dump 里用绝对路径拼对象名，两臂的目录名
+  不同，不归一的话同一个函数会以「−X / +X」**成对**出现，看着像每个函数都被改到了。
+  量法与这次一并被**证伪**的假设（`uv_write` 每条响应多一次 `epoll_ctl`；`baseline` 每请求
+  多于 1 次 `write`）记在 [`doc/benchmark-rig.md`](doc/benchmark-rig.md)。
+  ★ **试过并退回的**：把 `web_url_decode` / `web_collapse_slashes` 改写成原地版本（外加
+  `take_from` 少一次拷贝）这一整包在同量具上是 **+328.6 条/请求**（`web_url_decode` 每请求
+  被调 5.03 次，其中 4 次是 1 字节的查询键/值，原地版省下的那点拷贝抵不过多出来的一趟扫描），
+  已整体还原，只留下上面这三处。
 
 ### 配置、打包与 CI
 

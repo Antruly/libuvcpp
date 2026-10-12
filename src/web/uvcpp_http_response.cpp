@@ -10,6 +10,7 @@
 #if UVCPP_WEB_ENABLE
 
 #include <web/uvcpp_http_parser.h>
+#include <cstring>
 #include <sstream>
 
 namespace uvcpp {
@@ -205,28 +206,42 @@ void uvcpp_http_response::to_string_into(std::string& result,
   // `n1_streambuf_probe.cpp`，libstdc++ 13）：`= std::string()` 在这家实现上恰好
   // 也留容量（空临时串的移动赋值退化成 clear），真丢缓冲的是 `swap`/`shrink_to_fit`。
   result.clear();
-  const std::string version_str = uvcpp_http_version_str(version);
-  const std::string reason = status_message.empty()
-                                 ? http_status_reason(status_code)
-                                 : status_message;
+  // 这两样都是**字面量**，只要它们的字节和长度，不要 `std::string`。
+  //
+  // 原先这两句写成 `const std::string version_str = ...;` 与
+  // `const std::string reason = cond ? const char* : const std::string&;` ——
+  // 后者那个三元表达式的公共类型是 `std::string`，于是**每一次响应**都要把
+  // `status_message` 拷一份，哪怕它是空的。两条合起来是每响应两次分配、两次
+  // 释放、两次 `strlen`（`basic_string(const char*)` 的构造要量长度）——
+  // 全都是为了持有一个 8 字节和 3 字节的字面量。callgrind 上 h1 baseline 的
+  // `_M_construct<char*>` 141 条/请求 + malloc/free 里相应的一份，就在这里。
+  const char* version_c = uvcpp_http_version_str(version);
+  const size_t version_len = ::strlen(version_c);
+  const char* reason_c = status_message.empty()
+                             ? http_status_reason(status_code)
+                             : status_message.c_str();
+  const size_t reason_len = ::strlen(reason_c);
 
-  // Detect chunked transfer encoding
+  // --- Headers ---
+  //
+  // 长度估算、`chunked` 判定、`content-length` 判定**合成一趟**：原先这里是三趟
+  // （估长度一趟、找 `transfer-encoding` 一趟、`has_header("content-length")` 一趟），
+  // 加上下面落笔那趟，每响应要把头表走四遍。三条判据都只依赖 `headers` 自己，合起来
+  // 不改任何分支的结果 —— `has_cl` 只被"落笔之后要不要补 content-length"用到，
+  // 先记住即可（原实现里它也是在那之前就算好的）。
+  //
+  // 先算一遍长度直接 reserve：拼的过程中不再增长，整条响应只有一次分配。
+  // 估算是上界而非精确值 —— 估大了只是多占一点，估小了也只会多一次增长。
+  size_t est = 32 + version_len + reason_len;
   bool chunked = false;
+  bool has_cl = false;
   for (const auto& h : headers) {
-    if (http_name_equal(h.name, "transfer-encoding") &&
+    est += h.name.size() + h.value.size() + 4;
+    if (!has_cl && http_name_equal(h.name, "content-length")) has_cl = true;
+    if (!chunked && http_name_equal(h.name, "transfer-encoding") &&
         h.value.find("chunked") != std::string::npos) {
       chunked = true;
     }
-  }
-
-  // --- Headers ---
-  bool has_cl = has_header("content-length");
-
-  // 先算一遍长度直接 reserve：拼的过程中不再增长，整条响应只有一次分配。
-  // 估算是上界而非精确值 —— 估大了只是多占一点，估小了也只会多一次增长。
-  size_t est = 32 + version_str.size() + reason.size();
-  for (const auto& h : headers) {
-    est += h.name.size() + h.value.size() + 4;
   }
   if (include_body) est += body.size() + 24;
 
@@ -235,7 +250,7 @@ void uvcpp_http_response::to_string_into(std::string& result,
   if (est > result.capacity()) result.reserve(est);
 
   // --- Status line ---
-  result += version_str;
+  result.append(version_c, version_len);
   result += ' ';
   // 状态码按 **int** 打印，与原实现 `oss << static_cast<int>(status_code)` 逐字一致。
   // `append_dec` 收的是无符号，直接传下去的话 `static_cast<http_status>(-1)`
@@ -249,7 +264,7 @@ void uvcpp_http_response::to_string_into(std::string& result,
     append_dec(result, static_cast<unsigned long long>(code));
   }
   result += ' ';
-  result += reason;
+  result.append(reason_c, reason_len);
   result += "\r\n";
 
   for (const auto& h : headers) {

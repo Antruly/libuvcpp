@@ -36,6 +36,13 @@ namespace {
  * 「标准库把 C++11 全实现完了」。
  */
 std::string size_to_string(size_t v) {
+  // 低位先落地，再倒一次进正向缓冲，最后**一次**成串。
+  //
+  // 原先写成 `s.reserve(m)` + 每字符一次 `s += tmp[--m]`：那 m 次 `+=` 每次都要
+  // 走一遍容量检查与尾零维护，`reserve` 外带一次足以分配的开销。callgrind 上这条
+  // 函数在 h1 baseline 每请求 **76.4 条 → 65.4 条**（`/baseline2?a=1&b=1`，
+  // 每请求一次调用）—— 它干的只是把 content-length 那三四个数字拼成串。
+  // `std::string(fwd, m)` 在 m ≤ 15 时走 SSO，一个字节都不分配。
   char tmp[24];
   int m = 0;
   if (v == 0) {
@@ -46,10 +53,9 @@ std::string size_to_string(size_t v) {
       v /= 10;
     }
   }
-  std::string s;
-  s.reserve(static_cast<size_t>(m));
-  while (m > 0) s += tmp[--m];
-  return s;
+  char fwd[24];
+  for (int i = 0; i < m; ++i) fwd[i] = tmp[m - 1 - i];
+  return std::string(fwd, static_cast<size_t>(m));
 }
 
 /// 默认文本 body 用：把状态码写成 "404 Not Found" 这样的短句。
