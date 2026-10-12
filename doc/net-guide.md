@@ -213,16 +213,27 @@ size_t close_all_clients();
 `stop()` 然后 `close_all_clients()`。`close_all_clients()` 返回"发起了关闭"的条数
 ——句柄已经死掉的连接会被回收但不计数。
 
-两个 setter 有**顺序约束**，而且**都没有被强制**：
+三个 setter 有**顺序约束**，而且**都没有被强制**：
 
 | setter | 约束 |
 |---|---|
-| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:522`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:654-655`） |
+| `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:561`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:693-694`） |
+| `set_tcp_nodelay` | 必须在 `listen()`（以及 `set_loops(n > 1)`，如果要用）之前调（`src/net/uvcpp_tcp_server.h:222`） |
 
-`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1037-1039`），
+`set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1051-1053`），
 **`listen()` 之后调不会报错、也不会生效于已有连接**——只有那之后 accept 的连接才吃得到。
 这是个静默的半失效状态，别踩。
+
+`set_tcp_nodelay` **默认 true**，也就是说新连接默认就带上 `TCP_NODELAY`。这不是可有可无的
+调优：libuv 建出来的 socket 不设它，于是 Nagle 开着，而 Linux 的延迟 ACK 是 40 ms —— 一次
+应答只要被写成两段，第二段就得等那 40 ms。h2 上的 gRPC 正是两段（头块+DATA、尾随头），
+而 h1 是一段：同一台服务器、同一个 `h2load`、同一条回环上，h1 路由的 `request` 中位数
+**21 µs**，h2c 上的 gRPC 路由 **41.00 ms**，`-c 1 -m 1` 五秒只出 121 个请求（开 `TCP_NODELAY`
+后 29 µs / 147 447 个）。**但 `-c 256 -m 100` 那种持续流水上量不出差别** —— ACK 一直在流，
+Nagle 最多压住一个 RTT（回环上几十 µs）：它是低并发请求/应答的时延开关，不是吞吐旋钮。
+要**关**它的是自己成批小写的调用方（Nagle 会替它们合并成满 MSS 的段、省包），请求/应答型
+服务端都不属于这一类 —— nginx 的 `tcp_nodelay` 与 Go 的 `net/http` 同样默认开。
 
 > 规矩是**回调里不要用同步的 `write_wait`/`read_wait`**（`src/net/uvcpp_tcp_server.h:92-97`）：
 > 它们会把 loop 线程按住，一个慢对端能拖住这条 loop 上的**所有**连接。坑在于这两个函数
@@ -279,9 +290,9 @@ Linux 上 `UV_TCP_REUSEPORT` 恒绑得上 ⇒ 转手那条腿**本来永远跑�
 |---|---|---|
 | `listen()` 的连接回调、读/写/关闭回调 | 调用者的线程（loop 线程） | 在**那条连接自己那条循环的线程**上 |
 | 同一个服务端上不同连接的回调 | 顺序 | **可能并发**（不同工作线程） |
-| `set_read_callback` / `set_auto_read` / `set_ssl_context` / `set_tls_handshake_timeout_ms` | loop 线程 | **工作线程读**这些 ⇒ 必须在 `listen()` 之前设好，之后再改是数据竞争（`src/net/uvcpp_tcp_server.h:230-232`） |
+| `set_read_callback` / `set_auto_read` / `set_ssl_context` / `set_tls_handshake_timeout_ms` | loop 线程 | **工作线程读**这些 ⇒ 必须在 `listen()` 之前设好，之后再改是数据竞争（`src/net/uvcpp_tcp_server.h:269-271`） |
 | `client_count()` / `owns_client()` / `take_client()` / `return_client()` | loop 线程 | 登记表是**加锁**的，从任何线程调都对 |
-| 驱动一条连接（`write` / `read_start` / `close`） | loop 线程 | 仍然**只能在它自己那条循环的线程**上 —— 跨线程直接驱动是未定义行为（`src/net/uvcpp_tcp_server.h:227-229`） |
+| 驱动一条连接（`write` / `read_start` / `close`） | loop 线程 | 仍然**只能在它自己那条循环的线程**上 —— 跨线程直接驱动是未定义行为（`src/net/uvcpp_tcp_server.h:266-268`） |
 | `close_all_clients()` | 立即关本循环名下的 | 本循环名下的就地关，**别的循环是异步发起**（返回值只数"发起了"） |
 
 **你的回调要按"可能并发"写**：连接回调、数据回调都可能同时从几条工作线程进来。
@@ -509,7 +520,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 | `read_start(cb)` | 客户端 `:432` | `void(uvcpp_buf*)` | 裸数据，**分不出对端关闭** |
 | `read_start(nullptr)` | 客户端 | —— | 只为打开内部接收缓存给 `read_wait()` 用 |
 | `read_start_events(cb)` | 客户端 `:446` | `void(uvcpp_tcp_client&, const net_read_result&)` | **带语义的事件** |
-| `set_read_callback(cb)` | 服务端 `:232` | 同上 | 一份回调覆盖所有连接 |
+| `set_read_callback(cb)` | 服务端 `:265` | 同上 | 一份回调覆盖所有连接 |
 
 **`read_start` 与 `read_start_events` 互斥。** 用过其中一个再用另一个，拿到
 `UV_EALREADY`。挡在前面的理由写在实现里（`src/net/uvcpp_tcp_client.cpp:2107-2115`）：
@@ -527,7 +538,7 @@ n−1 条工作线程起好了（见 §4），而接着的 `bind()` / `listen()`
 
 **在服务端上不要自己再注册读。** 设了 `set_read_callback` 之后，每个新连接由框架自动
 `read_start_events()`；你在 `listen` 的回调里再 `read_start()` 会拿到 `UV_EALREADY`
-（`src/net/uvcpp_tcp_server.h:518-520`）。反过来说，**设它之前**在连接回调里注册的读
+（`src/net/uvcpp_tcp_server.h:557-559`）。反过来说，**设它之前**在连接回调里注册的读
 优先级更高，会被保留。
 
 ---
@@ -606,7 +617,7 @@ void doc_dispatch(uvcpp::uvcpp_tcp_client& client,
 
 服务端有个 `set_auto_read`（默认 **true**）。关掉它只在"你要完全接管读路径、并且
 自己负责发现断开"时有意义；关掉又没设回调时，服务端会给每条连接往 stderr 打一行警告
-（`src/net/uvcpp_tcp_server.cpp:970-977`）。
+（`src/net/uvcpp_tcp_server.cpp:984-991`）。
 
 ---
 
@@ -755,7 +766,7 @@ socket 之间流动（`src/net/uvcpp_tcp_client.h:193-205`）。所以 `web/` �
   所以调用之后那个 `uvcpp_buf` **仍然是满的**，数据仍归它（`src/net/uvcpp_tcp_client.h:399-402`）。
 - **握手完成前 `write()` 必然失败**，返回 `UV_ENOTCONN`。
 - **握手失败的连接根本不会被交出来**：`on_connection` 一次都不调，只记在
-  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:641-649`）。所以明文直连 TLS 端口时，
+  `last_error_code_` 里（`src/net/uvcpp_tcp_server.h:680-688`）。所以明文直连 TLS 端口时，
   上层"没被通知过"这条连接——这是有意的。
 
 握手期连接不在任何上层登记表里，所以另有 `set_tls_handshake_timeout_ms()`

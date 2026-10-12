@@ -600,6 +600,10 @@ void uvcpp_tcp_server::set_loop_exit_hook(
 
 bool uvcpp_tcp_server::is_fanout() const { return fanout_; }
 
+void uvcpp_tcp_server::set_tcp_nodelay(bool on) { tcp_nodelay_ = on; }
+
+bool uvcpp_tcp_server::tcp_nodelay() const { return tcp_nodelay_; }
+
 void uvcpp_tcp_server::set_handoff_forced(bool on) {
   // 与 `set_loop_start_hook()` 同一条时序规则：工作线程一跑起来，`is_fanout()`
   // 那一刻的值就已经定了（绑定发生在 `set_loops()` 之后、`listen()` 之前），
@@ -726,6 +730,16 @@ void uvcpp_tcp_server::finish_accept(uvcpp_tcp_client* client) {
   // Mark the client as connected — sets CONNECTED | READABLE |
   // WRITABLE so that write() and read_start() work correctly.
   client->mark_accepted();
+
+  // 关掉 Nagle（默认开，见 `set_tcp_nodelay()`）。
+  //
+  // **这里**是两条接受路（就地收下、跨循环转手）唯一的汇合点，也是 fd 一定
+  // 已经就位的地方（`mark_accepted()` 之后、任何用户回调之前）。设失败不返回
+  // 错误、也不关连接：它是**性能**开关，一个跑在把 `TCP_NODELAY` 当摆设的
+  // 平台上的库，不该因为这个词设不上就拒绝服务一条本来能用的连接。
+  if (tcp_nodelay_) {
+    client->get_tcp()->nodelay(1);
+  }
 
   // **登记 + 装管理回调要排在用户回调之前。**
   //

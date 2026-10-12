@@ -184,7 +184,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:2061` /
   `src/webapp/uvcpp_web_app.h:2002`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
-  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:905`）都不需要切成 per-loop。
+  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:944`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。
 - **日志那条闸门在进程内照样存在。** 1.4.0 之后 `src/webapp/uvcpp_log.cpp:416-436` 的
   `write()` 已经**不持锁调 sink** 了（锁内只快照一次 `sink()`，`:342-351`），但默认
@@ -274,7 +274,7 @@ SYN_SENT**。⇒ 判据必须把**超时**和**被拒**分开记：只数"拒连
   烧 CPU 多的那条臂看起来更慢。再加上回环上那笔随负载伸缩的税 ⇒ 这个装置的 `WALL_MS`
   **分辨不了接入路径的开销**。要真比，得把服务端与客户端拆成两个进程、逐轮配对同号。
 - **没测每连接的应用层工作量。** 客户端只 connect 就关，**不发请求** ⇒ 量的是接入与关闭，
-  `enable_tls`（`src/net/uvcpp_tcp_server.cpp:758`）那次 arm 之后的请求处理没进这条路径。
+  `enable_tls`（`src/net/uvcpp_tcp_server.cpp:772`）那次 arm 之后的请求处理没进这条路径。
 - **没测"master 自己 accept + IPC 转手"那条路**（§7 的机制本身还没实现）。
   外部贡献者的拒连接读数在他的装置上，本探针**没有**复现它、也**没有**否证它 ——
   只否证了"本库单进程的接入路径在突发下会拒"这个具体担忧。

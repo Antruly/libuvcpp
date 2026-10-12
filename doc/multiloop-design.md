@@ -95,16 +95,16 @@ int main() {
 
 ### 1.1 已经落地的那一半：net 层的 `set_loops(n)`
 
-**已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:268`）
+**已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:307`）
 把"一条循环"变成 **n 条各跑自己循环的线程**，`1..n-1` 号各一条**专用 `std::thread`**
 （`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:66-66` —— 不是 `uv_queue_work`
 那条线程池）。**"新连接怎么落到某一条循环上"分两种形状**，而且是**运行时探测**出来的
 （同一个二进制在不同平台上不一样）：Linux 上 n 条各自绑同一端口、内核分流（§3 路 (a)，
 **本版已落地**）；Windows 与那个标志被拒时的回落才是下面 §2、§3 讲的"一条接受者 +
 显式轮转转手"。想知道这次是哪一种：`is_fanout()`。配套读法：`loop_count()`
-（`src/net/uvcpp_tcp_server.h:324`）、`client_count_at(i)`
-（`src/net/uvcpp_tcp_server.h:407`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
-（`src/net/uvcpp_tcp_server.h:197` 起是完整的对外说明）。
+（`src/net/uvcpp_tcp_server.h:363`）、`client_count_at(i)`
+（`src/net/uvcpp_tcp_server.h:446`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
+（`src/net/uvcpp_tcp_server.h:236` 起是完整的对外说明）。
 
 ```
 acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
@@ -119,9 +119,9 @@ acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
 worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
   └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:146-146 起）
        └─ 在**这条循环的线程**上：new uvcpp_tcp_client(worker_loop) 装转手来的 socket
-          （src/net/uvcpp_tcp_server.cpp:698 on_handoff_task）→ mark_accepted() → 登记
+          （src/net/uvcpp_tcp_server.cpp:702 on_handoff_task）→ mark_accepted() → 登记
           → setup_client_callbacks() → TLS 块 → deliver_connection()
-          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:725 finish_accept）
+          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:729 finish_accept）
 ```
 
 **去向是显式轮转，不是内核散列**，所以分布是**确定性**的（第 i 条必然落在
@@ -131,7 +131,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
 
 - **转手必须在 `mark_accepted()` 之前**，也就是整条尾巴（登记、`setup_client_callbacks`、
   TLS、`deliver_connection`）都必须在**目标循环的线程**上跑 —— `enable_tls()` 会当场在这条
-  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:758`）。
+  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:772`）。
 - **POSIX 的 `uv_accept` 硬断言同循环**（`libuv:unix/stream.c:539`），所以转手靠
   `dup()` + `uv_tcp_open`（后者"已存在"的检查是**按循环**做的，跨循环共用一个 fd 不会被拒、
   只会 double close）。
@@ -305,7 +305,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1706-1706` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | ~~`uvcpp_web_app::inflight_`~~ → `loop_slot::inflight` | `src/webapp/uvcpp_web_app.h:2002`（**已切开**，W4 / 2c） | **每请求** |
 | ~~`uvcpp_web_app::upgraded_`~~ → `loop_slot::upgraded` | `src/webapp/uvcpp_web_app.h:2061`（**已切开**，W4 / 2c） | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:905` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:944` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** 它原来只有一份
 `loop_tid_`/`post_queue_`，投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。
@@ -361,8 +361,8 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 **但"接受者就是这个循环"在那条路上不再成立 —— 这正是 net 层要转手的原因。**
 `:266` 的 `new uvcpp_tcp_client(loop_)` 与 `:269` 的 `s->accept(...)` 今天是 **n==1 那条分支**；
-n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:650` 的 `accept_and_handoff`），
-客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:698` 的 `on_handoff_task`）。
+n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:654` 的 `accept_and_handoff`），
+客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:702` 的 `on_handoff_task`）。
 ⇒ webapp 层要接的话，**每个 `uvcpp_http_server` 的 `tcp_server` 各自 `set_loops(n)`**
 仍然成立（每个 app 一份循环组），但"接受者即本循环"这条直觉要换成 §1.1 那张图。
 
@@ -915,7 +915,7 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 ## 5. 对外约束
 
 > **net 层已经把这节的四条落进头文件了**（`set_loops()` 的 doc block，
-> `src/net/uvcpp_tcp_server.h:198` 起）：`n=1` 逐字节相同、`on_connection` 可能并发、
+> `src/net/uvcpp_tcp_server.h:237` 起）：`n=1` 逐字节相同、`on_connection` 可能并发、
 > `close_all_clients()` 在 `n>1` 时是异步发起、`pause_read()` 只在自己循环的线程上调。
 > **面向使用者的版本在 [net 层指南](./net-guide.md) 的多循环那一节**
 > （含 Windows 那条风险的完整交代）。下面 §5.2/§5.3 是**webapp 层**还没定的部分。
@@ -939,8 +939,8 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > （`uvcpp_tcp_server::stop()` 里的 `tcp_->close(...)`）——扇出之后"谁第一个进来谁执行
 > 那句 close"，而第一个进来的可能是工作循环 ⇒ **跨循环 `uv_close`**（libuv 里那不是
 > 线程安全的）。它本身是**真幂等**（早退判据 `!has_status(TCP_SERVER_LISTENING)`
-> 在 `src/net/uvcpp_tcp_server.cpp:881`，而第一次进来就在
-> `src/net/uvcpp_tcp_server.cpp:887` `clear_status`），
+> 在 `src/net/uvcpp_tcp_server.cpp:895`，而第一次进来就在
+> `src/net/uvcpp_tcp_server.cpp:901` `clear_status`），
 > 所以"只让 0 号发"与"每条循环都发"在结果上等价，但前者才是对的形状。
 >
 > **这一段在 1.2.23-dev 已落地，而且它是本批唯一一处"计划写错、设计稿写对"的地方**
