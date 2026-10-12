@@ -719,6 +719,18 @@ bool uvcpp_web_response::ended() const { return ended_; }
 bool uvcpp_web_response::deferred() const { return deferred_; }
 void uvcpp_web_response::set_deferred(bool v) { deferred_ = v; }
 
+uvcpp_web_response& uvcpp_web_response::set_trailers(const http_headers& t) {
+  // 拷贝而不是接管：调用方多半是拿一个 `grpc_ok_trailers()` 的临时量进来的
+  // （`set_trailers(grpc_ok_trailers())`），接管一个右值引用之外的东西没有意义，
+  // 而按值收又会多一次拷贝。尾随块一共几个字段，拷一次不是这条路上的开销。
+  trailers_ = t;
+  return *this;
+}
+
+bool uvcpp_web_response::has_trailers() const { return !trailers_.empty(); }
+
+const http_headers& uvcpp_web_response::trailers() const { return trailers_; }
+
 void uvcpp_web_response::on_sent(const uvcpp_web_sent_cb& cb) {
   // 叠加而不是覆盖：访问日志与业务代码都会挂这个回调。
   if (cb) sent_cbs_.push_back(cb);

@@ -2608,6 +2608,73 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   }
 
   // -------------------------------------------------------------------
+  // 带尾随头的响应：三段（HEADERS → DATA → HEADERS）
+  // -------------------------------------------------------------------
+  //
+  // 又一条**绕开** `http_->send_response()` 的路，理由与流式那条同源：那个函数
+  // 一次提交就把整条报文交出去，而尾随头是**之后**的另一段头块 —— 它自带
+  // END_STREAM，抢在 body 前面出去就是"END_STREAM 在前、字节在后"。
+  //
+  // 顺序由这里包办，不留给调用方拼：`write_stream()` 的 `done` 是"那批字节真的
+  // 写完了"的**唯一**信号，尾随头必须在它里面发。留给调用方等于让每个写 gRPC
+  // 路由的人各踩一次同一个坑，而踩错时**没有任何本地症状**（对端只是解包失败
+  // 或者干脆超时）。
+  //
+  // 前提（`set_trailers()` 的契约里写明了）：h2 且非流式。两条不成立的前提各给
+  // 一句 WARN —— "以为发了、其实没发"是尾随头最容易发生的失败，而它对本端
+  // 完全静默（对端只是拿不到状态码，多半表现为超时）。
+  if (r.has_trailers() && !r.streaming() && r.stream_id() == 0) {
+    UVCPP_LOG_WARN(log_category::RESPONSE)
+        << "连接 " << ctx.connection_id()
+        << " 是 HTTP/1.1：尾随头（" << r.trailers().size()
+        << " 个字段）已丢弃 —— h1 上的尾随头要 chunked 编码，本库没做那条路";
+  }
+
+  if (r.has_trailers() && r.streaming()) {
+    UVCPP_LOG_WARN(log_category::RESPONSE)
+        << "连接 " << ctx.connection_id()
+        << " 走的是流式：尾随头（" << r.trailers().size()
+        << " 个字段）已丢弃 —— 流式那条路的收尾是 end_stream()，没有第二段头块"
+           "的位置";
+  }
+
+  if (r.has_trailers() && !r.streaming() && r.stream_id() != 0) {
+    // 体与头分开：`begin_stream()` 只读状态码与头列表，所以头块里那份体必须
+    // 先摘出来 —— 留着它不会多发字节（头列表里没有它），但会让下面那句
+    // `notify_sent()` 之后还挂着一份已经发完的字节。
+    uvcpp_http_response head = r.raw();
+    std::string        body;
+    if (head.body.size() > 0) {
+      body.assign(head.body.get_const_data(), head.body.size());
+    }
+    head.body.clear();
+
+    const int32_t      sid = r.stream_id();
+    const http_headers tl  = r.trailers();  // 拷贝：本响应随后会被回收
+
+    http_->begin_stream(client, sid, head);
+
+    if (r.head_only() || body.empty()) {
+      // Trailers-Only：没有 DATA 段，两句可以背靠背 —— `send_trailers()` 那条
+      // "body 一个字节都不欠"的前置条件（只看 DATA 队列空不空）当场成立。
+      http_->send_trailers(client, sid, tl);
+      info.body_bytes = 0;
+    } else {
+      info.body_bytes = body.size();
+      // 非 0 = 这批字节没写出去（连接没了或正在关）⇒ 尾随头跟着作废：此时发它
+      // 要么被拒、要么变成一条只带状态码的"应答"，两种都不该发生。
+      http_->write_stream(client, sid, std::move(body),
+                          [this, client, sid, tl](int rc) {
+                            if (rc != 0) return;
+                            http_->send_trailers(client, sid, tl);
+                          });
+    }
+
+    r.notify_sent(info);
+    return;
+  }
+
+  // -------------------------------------------------------------------
   // 流式（chunked）响应：走另一条出口
   // -------------------------------------------------------------------
   //

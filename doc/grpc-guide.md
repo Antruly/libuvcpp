@@ -9,7 +9,7 @@
 
 这个分法不是洁癖，是**依赖事实**：编解码那半的每一个参数都是 `std::string` / `uint32_t`
 （`src/grpc/uvcpp_grpc.h:100-194`），而服务端那半的每个参数都是 web 层的类型
-（`src/grpc/uvcpp_grpc_server.h:108-150`）。所以关掉 web 模块时前者照编照装、后者
+（`src/grpc/uvcpp_grpc_server.h:116-132`）。所以关掉 web 模块时前者照编照装、后者
 **从构建与安装里都摘掉**（`CMakeLists.txt:1572-1574`、`CMakeLists.txt:2338-2343`）——
 装在 `include/grpc/` 下，而不是 `include/web/` 下。
 
@@ -64,11 +64,11 @@ HEADERS   尾随头 grpc-status: 0（自带 END_STREAM）
   那里；RFC 9113 §8.1 提供了"首部之后还能有一个头块"这条机制）。本库为此在 1.6.9 补了
   `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:774`）。
 - 失败应答可以**只有第三段**（没有 DATA）—— gRPC 里叫 **Trailers-Only**。本模块的
-  两条失败路径都是这个形状（`src/grpc/uvcpp_grpc_server.cpp:112-128`）。
+  两条失败路径都是这个形状（`src/grpc/uvcpp_grpc_server.cpp:115-131`）。
 
 **gRPC 只存在于能承载多条流的协议上**，也就是 h2 / h3。h1 上的 gRPC 要 chunked 编码
 兜尾随头，本库没做 —— 在 h1 上调用本模块会拿到 `UV_EINVAL`（判据是
-`resp.stream_id == 0`，`src/grpc/uvcpp_grpc_server.cpp:70-78`）。
+`resp.stream_id == 0`，`src/grpc/uvcpp_grpc_server.cpp:73-81`）。
 
 ---
 
@@ -174,18 +174,18 @@ int32 100000  → 08 a0 8d 06
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-const char* grpc_content_type();                                   // src/grpc/uvcpp_grpc_server.h:56
-http_headers grpc_ok_trailers();                                   // src/grpc/uvcpp_grpc_server.h:66
+const char* grpc_content_type();                                   // src/grpc/uvcpp_grpc_server.h:64
+http_headers grpc_ok_trailers();                                   // src/grpc/uvcpp_grpc_server.h:74
 http_headers grpc_status_trailers(grpc_status status, const std::string& message);
-                                                                   // src/grpc/uvcpp_grpc_server.h:74
-std::string grpc_percent_encode(const std::string& s);             // src/grpc/uvcpp_grpc_server.h:84
+                                                                   // src/grpc/uvcpp_grpc_server.h:82
+std::string grpc_percent_encode(const std::string& s);             // src/grpc/uvcpp_grpc_server.h:92
 
 int grpc_send_unary(uvcpp_http_server& server, uvcpp_tcp_client* client,
                     uvcpp_http_response& resp, const std::string& message);
-                                                                   // src/grpc/uvcpp_grpc_server.h:108
+                                                                   // src/grpc/uvcpp_grpc_server.h:116
 int grpc_send_status(uvcpp_http_server& server, uvcpp_tcp_client* client,
                      uvcpp_http_response& resp, grpc_status status,
-                     const std::string& message);                  // src/grpc/uvcpp_grpc_server.h:122
+                     const std::string& message);                  // src/grpc/uvcpp_grpc_server.h:130
 ```
 
 一条成功应答就这样出去 —— 顺序**全部由这一个函数包办**：
@@ -239,23 +239,118 @@ void handle_grpc_sum(uvcpp_http_server&                server,
 
 `grpc_send_unary()` 因此只动 `resp` 的两个字段：它置 `deferred = true`（这条应答由处理
 函数自己发，框架别再回一条），然后读只读的 `stream_id`
-（`src/grpc/uvcpp_grpc_server.cpp:70-110`）。
+（`src/grpc/uvcpp_grpc_server.cpp:73-113`）。
 
 **Tailers-Only 为什么可以两句背靠背**：失败那条走
 `begin_stream()` → `send_trailers()`，中间**没有任何数据在飞**，所以
 `send_trailers()` 那条"body 一个字节都不欠"的前置条件当场成立 —— 它的判据只看 **DATA
 队列空不空**（`chunks.empty()`），与发过几段头无关；而 `begin_stream()` 里的
 `submit_headers()` 是**同步**把会话置成 `HEADERS_SENT` 的，所以紧接着的
-`send_trailers()` 不会撞上 `UV_EALREADY`（`src/grpc/uvcpp_grpc_server.cpp:112-128`）。
+`send_trailers()` 不会撞上 `UV_EALREADY`（`src/grpc/uvcpp_grpc_server.cpp:115-131`）。
+
+### web 框架那一侧：声明，而不是发送
+
+`uvcpp_web_app` 的路由签名里既没有 `uvcpp_http_server&` 也没有 `uvcpp_tcp_client*`
+—— 它拿到的是 `uvcpp_web_request&` / `uvcpp_web_response&`，**发送者是框架**。所以框架
+那一侧是另外两个入口（它们在 `UVCPP_BUILD_WEBAPP=ON` 才在库里，webapp 是可选模块且
+**默认关**）：
+
+```cpp
+// doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
+int grpc_web_send_unary(uvcpp_web_response& resp, const std::string& message);
+int grpc_web_send_status(uvcpp_web_response& resp, grpc_status status,
+                         const std::string& message);
+int grpc_parse_unary_body(const std::string& body, std::string& message,
+                          grpc_status& fail_status, std::string& err);
+```
+
+两个发送版本的差别只有一个，而且是被框架结构定死的：**谁负责把三段的顺序排对**。
+
+- 底层版面对的是裸 `uvcpp_http_server`，处理函数之后没有人替它发送，所以它自己
+  `begin_stream` → `write_stream` →（在 `done` 里）`send_trailers`。它的 0 是"**已入队**"。
+- web 版面对的是 `uvcpp_web_response`，它的发送者是 `uvcpp_web_app`：框架在处理函数
+  返回后统一发。所以它只**声明**这条应答长什么样（`status` / `content-type` / body /
+  `set_trailers()`），三段顺序由 `uvcpp_web_app::send_response()` 包办 —— 那是整个框架
+  里唯一同时看得见 `write_stream()` 的 `done` 与 `send_trailers()` 的地方。
+  它的 0 是"**已声明**"，字节还没上线。
+
+```cpp
+// 完整翻译单元：同一件事，写在一个 uvcpp_web_app 路由里
+#include <grpc/uvcpp_grpc.h>
+#include <grpc/uvcpp_grpc_server.h>
+#include <webapp/uvcpp_web_app.h>
+
+using namespace uvcpp;
+
+// 处理函数只声明形状；三段顺序由框架排，尾随头由框架在 DATA 写完时发。
+void handle_grpc_sum(uvcpp_web_request&  req,
+                     uvcpp_web_response& resp,
+                     uvcpp_web_next      next) {
+  std::string message;
+  grpc_status fail_status = grpc_status::INVALID_ARGUMENT;
+  std::string err;
+  if (grpc_parse_unary_body(req.body_str(), message, fail_status, err) != 0) {
+    // 失败：只有尾随头的 Trailers-Only（框架看到空 body + 有尾随头，就只发两段）。
+    grpc_web_send_status(resp, fail_status, err);
+    resp.end();
+    return;
+  }
+
+  int32_t a = 0;
+  int32_t b = 0;
+  grpc_field_get_int32(message.data(), message.size(), 1, a, nullptr);
+  grpc_field_get_int32(message.data(), message.size(), 2, b, nullptr);
+
+  std::string reply;
+  grpc_field_put_int32(reply, 1, a + b);
+  grpc_web_send_unary(resp, reply);
+  resp.end();
+
+  (void)next;  // 不调 next() = 链停在这里，由框架收尾
+}
+```
+
+**`grpc_parse_unary_body()` 为什么有 `std::string` 那个重载**：`uvcpp_web_request`
+暴露的是 `body_str()`（`std::string`），而底层那版收 `uvcpp_buf` —— 这两样**不是
+"同一份字节的两个入口"**：`uvcpp_web_request::take_from()` 把 body **搬**进了自己的
+`body_`，源请求的 `src_.body` 那之后就空了（`src/webapp/uvcpp_web_request.h:120` 明写
+"调用之后不得再使用 `src.body`"）。所以 `req.raw().body` 既不该被碰、也拿不到东西。
+让每个写 gRPC 路由的人自己把 `std::string` 包回 `uvcpp_buf` 只为了喂这一句，是把库内
+的类型选择漏到了使用者面前。两个重载**同一个实现**，语义逐字相同。
+
+**头表：摘三个，留其余。** `grpc_web_send_unary()` / `grpc_web_send_status()` 会把
+`content-length` / `transfer-encoding` / `content-encoding` 摘掉，**其余的头原地保留**。
+两半的理由不同：
+
+- 摘的那三个是**线上错帧**的来源，不是"头表里多个字段"。`uvcpp_web_response::sync_meta()`
+  的规则是"**已存在** `Content-Length` 或 `Transfer-Encoding: chunked` 时不动它"
+  （那条规则对普通响应是对的：使用者在做分块/流式时不能被覆盖），但对这两个函数是致命的
+  —— 处理函数先设过一个 `content-length: 999` 再调本函数，这条应答就会带着"999 字节"的
+  声明上线，而实际只发得出去 7 个：**对端会一直等剩下 992 个字节**。
+  `content-encoding` 同理，gRPC 自己的压缩走 `grpc-encoding`。
+- 留的那些就是 gRPC 的 **initial metadata**（`:status` 之后、DATA 之前那一段头块）。
+  服务端给客户端捎带应答元数据是规范内的用法，而这一段头块正是由 `set_header()` 攒出来的。
+  底层版**做不到**这件事（它另起一份干净的 `uvcpp_http_response head`），web 版做得到
+  —— 这是两个版本**有意**留下来的唯一一处行为差异。
+
+**h1 与流式上会被丢弃，各留一句 WARN。** `set_trailers()` 的前提是"h2 且非流式"：
+
+- **h1**（`stream_id == 0`）：尾随头按规范要 chunked 编码兜，本库没做那条路，所以字段被
+  丢弃、**体照发**（对端看到一条语法完好的 200 + 那段帧，只是永远等不到 `grpc-status`）。
+- **流式**（`begin_chunked()` 之后）：那条路的收尾是 `end_stream()`，没有第二段头块的
+  位置，同样丢弃。
+
+两条都只记一句 WARN 而不改行为 —— "以为发了、其实没发"是尾随头最容易发生的失败，而它
+对本端完全静默（对端只是拿不到状态码，多半表现为超时）。
 
 ### 尾随头的内容
 
 - `grpc_ok_trailers()` 成功时**只有** `grpc-status: 0`。不带空的 `grpc-message` ——
   那个字段按规范是"对失败的说明"，成功时它没有内容可说，而一个空值字段是"声明了一件
-  没发生的事"（`src/grpc/uvcpp_grpc_server.cpp:45-52`）。
+  没发生的事"（`src/grpc/uvcpp_grpc_server.cpp:48-55`）。
 - `grpc_status_trailers()` 带 `grpc-status` + `grpc-message`，后者已**百分号编码**
-  （`src/grpc/uvcpp_grpc_server.cpp:54-64`）。规范只允许 `0x20..0x7E` 里**除 `%` 外的**
-  字符原样出现，其余一律 `%XX`（**大写**十六进制，`src/grpc/uvcpp_grpc_server.cpp:22`）。
+  （`src/grpc/uvcpp_grpc_server.cpp:57-67`）。规范只允许 `0x20..0x7E` 里**除 `%` 外的**
+  字符原样出现，其余一律 `%XX`（**大写**十六进制，`src/grpc/uvcpp_grpc_server.cpp:25`）。
   所以一句中文的失败说明到了对端手里是一串 `%E4%B8%AD...`；空串仍然是空串。
 - 本函数**不校验** `status` 的取值范围：对端认不出的码按 `UNKNOWN` 处置，这是规范说的。
 
@@ -267,12 +362,17 @@ void handle_grpc_sum(uvcpp_http_server&                server,
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
 int grpc_parse_unary_body(const uvcpp_buf& body, std::string& message,
                           grpc_status& fail_status, std::string& err);
-                                                                   // src/grpc/uvcpp_grpc_server.h:149
+                                                                   // src/grpc/uvcpp_grpc_server.h:229
+
+// web 框架那一侧（UVCPP_BUILD_WEBAPP=ON）：入参是 std::string，
+// 因为 uvcpp_web_request 暴露的就是 body_str()。实现与上面那条完全相同。
+int grpc_parse_unary_body(const std::string& body, std::string& message,
+                          grpc_status& fail_status, std::string& err);
 ```
 
 两个出参都是必填的，因为它们就是这个函数存在的理由：失败时要回的那条 Trailers-Only
 需要**同时**拿到一句人话和一个 gRPC 状态码，分两次调用去凑只会让每条路由各写一遍那张
-对照表（`src/grpc/uvcpp_grpc_server.cpp:134-153`）。
+对照表（`src/grpc/uvcpp_grpc_server.cpp:207-224`）。
 
 出参语义：成功时 `message` 是解出来的消息字节；失败时它被清空、`fail_status` 是
 该用的状态码、`err` 是那句该放进 `grpc-message` 的话。返回值非 0 时**就是编解码层那个
@@ -282,7 +382,7 @@ int grpc_parse_unary_body(const uvcpp_buf& body, std::string& message,
 
 ## 6. 错误码对照
 
-编解码层的错误码 → gRPC 状态码（`src/grpc/uvcpp_grpc_server.cpp:134-153` 那张表）：
+编解码层的错误码 → gRPC 状态码（`src/grpc/uvcpp_grpc_server.cpp:207-224` 那张表）：
 
 | 编解码层 | gRPC | 为什么 |
 |---|---|---|
@@ -344,6 +444,8 @@ varint 定在 protobuf 的编码规范里，两边都不随调用方变化。放
 - **不做流式 RPC。** 本模块只有 unary：`grpc_frame_decode_exact()` 的存在就是为了让
   "一条流式请求打到 unary 方法上"这件事**被拒**而不是被当成两条 unary。
 - **不做 h1 上的 gRPC**（要 chunked 兜尾随头），也不做 WebSocket 上的。
+  web 框架那一侧撞上 h1 时的行为是"**尾随头丢弃、体照发 + 一句 WARN**"，
+  不是静默成功也不是报错 —— 见 §4 那条子节。
 - **不做客户端 stub。** 这一层给的是"发一条 gRPC 应答"和"解一条 gRPC 请求"，
   客户端那一侧请照 §1 的三段形状自己收（`uvcpp_h2_session` 的收尾随头那条路本来就在，
   尾随头块 category 是 `HCAT_HEADERS`、字段折进同一个 `response.headers`）。

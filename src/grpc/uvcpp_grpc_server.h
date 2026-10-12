@@ -2,7 +2,7 @@
  * @file src/grpc/uvcpp_grpc_server.h
  * @brief gRPC 的**服务端**那一半：把 `uvcpp_grpc.h` 的信封接到 `uvcpp_http_server` 上。
  * @author zhuweiye
- * @version 1.6.10
+ * @version 1.6.11
  *
  * 一条 unary 的 gRPC 应答在线上是**三段**，而且顺序是硬约束：
  *
@@ -24,6 +24,11 @@
  *
  * 本文件需要 web 层（`UVCPP_BUILD_WEB=ON`）：它的每一个参数都是 web 层的类型。
  * 编解码那一半没有这个依赖，见 `uvcpp_grpc.h`。
+ *
+ * 底下那两条 `grpc_web_send_*`（web 框架那一侧）**还要** webapp
+ * （`UVCPP_BUILD_WEBAPP=ON`）：它们的参数是 `uvcpp_web_response`，而 webapp 是
+ * 可选模块且默认关。所以这一份头里住了三个依赖面不同的东西，各自的开关写在
+ * 各自那一段前面 —— 与 `CMakeLists.txt` 里"只摘后半截"的摘法同一个理由。
  */
 
 #pragma once
@@ -47,6 +52,9 @@ namespace uvcpp {
 class uvcpp_http_server;
 class uvcpp_http_response;
 class uvcpp_tcp_client;
+#if UVCPP_WEBAPP_ENABLE
+class uvcpp_web_response;
+#endif
 
 // =========================================================================
 // 尾随头
@@ -122,6 +130,78 @@ UVCPP_API int grpc_send_unary(uvcpp_http_server& server, uvcpp_tcp_client* clien
 UVCPP_API int grpc_send_status(uvcpp_http_server& server, uvcpp_tcp_client* client,
                                uvcpp_http_response& resp, grpc_status status,
                                const std::string& message);
+
+// =========================================================================
+// 发送：web 框架那一侧
+// =========================================================================
+//
+// 这一小节挂在**第二个**开关下：它要 `uvcpp_web_response`，那是 webapp 层的类型。
+// webapp 是可选模块（`UVCPP_BUILD_WEBAPP`，默认 OFF），而 web 层不是 —— 所以
+// "web 开着、webapp 关着"是一份合法且是**默认**的构建，那时这两个函数既不在
+// 库里也不在这里，与整个文件在 web 关掉时的处境同形。
+#if UVCPP_WEBAPP_ENABLE
+
+/**
+ * @brief 与 `grpc_send_unary()` 同一件事，但用的是 `uvcpp_web_app` 的响应对象。
+ *
+ * 两个版本的差别只有一个，而且是被框架结构定死的：**谁负责把三段的顺序排对**。
+ *
+ *   - 底层版（`grpc_send_unary()`）面对的是裸 `uvcpp_http_server`，没有人会在
+ *     处理函数之后替它发送，所以它自己 `begin_stream → write_stream →（在
+ *     `done` 里）send_trailers`，并把 `resp.deferred` 置真。
+ *   - 本版面对的是 `uvcpp_web_response`，它的发送者是 `uvcpp_web_app`：框架在
+ *     处理函数返回后统一发。所以这里只**声明**这条应答长什么样
+ *     （`status` / `content-type` / body / `set_trailers()`），三段顺序由
+ *     `uvcpp_web_app::send_response()` 包办 —— 那也是整个框架里唯一能同时
+ *     看见 `write_stream` 的 `done` 与 `send_trailers()` 的地方。
+ *
+ * 头表里**描述 body 的那三个**（`content-length` / `transfer-encoding` /
+ * `content-encoding`）会被本函数摘掉，理由见 `.cpp` 里那条注释（留着就是线上
+ * 错帧）。**其余的头原地保留** —— 它们就是 gRPC 的 initial metadata，服务端
+ * 捎带应答元数据是规范内的用法；处理函数在这之前设的 `x-*` 会照常上线。
+ *
+ * @return 0；`UV_EMSGSIZE`（编码后超过单条消息上限，此时 **@p resp 一个字段都
+ *         没动**，调用方还可以改回一条 `RESOURCE_EXHAUSTED`）。
+ *         **注意返回 0 只表示"这条应答已经声明好了"** —— 字节还没上线，与底层版
+ *         "已入队"的口径不同。
+ */
+UVCPP_API int grpc_web_send_unary(uvcpp_web_response& resp,
+                                  const std::string& message);
+
+/**
+ * @brief 与 `grpc_send_status()` 同一件事，但用的是 `uvcpp_web_response`。
+ *
+ * 一条**只有尾随头**的应答（Trailers-Only）：HTTP 状态码 200、body 为空、
+ * 尾随块里带 `grpc-status`。框架看到 body 为空 + 有尾随头，就只发两段
+ * （HEADERS → HEADERS），中间不插 DATA。
+ *
+ * 处理函数先前放进 body 的东西会被清掉，描述 body 的那三个头（见上一条）同样
+ * 摘掉 —— 一条 Trailers-Only 带着 `content-length: 999` 上线是最坏的一种错帧
+ * （对端会等一批永远不来的字节）。其余的头照上一条的规矩保留。
+ *
+ * 恒返回 0（这一段编码没有失败路径）。
+ */
+UVCPP_API int grpc_web_send_status(uvcpp_web_response& resp, grpc_status status,
+                                   const std::string& message);
+
+/**
+ * @brief 收的那一半的 web 版：`grpc_parse_unary_body()` 的 `std::string` 重载。
+ *
+ * 存在的理由纯粹是**参数类型对不上**，而且不是能绕过去的那种：`uvcpp_web_request`
+ * 暴露的是 `body_str()`（`std::string`），而底层那版收 `uvcpp_buf` ——
+ * `uvcpp_web_request::take_from()` 把 body **搬**进了自己的 `body_`，源请求的
+ * `src_.body` 那之后就空了（`uvcpp_web_request.h:120` 明写"调用之后不得再使用"），
+ * 所以 `req.raw().body` 既不是"另一个能拿到同一份字节的入口"，也不该被碰。
+ * 让每个 webapp 里写 gRPC 路由的人自己把 `std::string` 包回 `uvcpp_buf`
+ * 只为了喂这一句，是把库内的类型选择漏到了使用者面前。
+ *
+ * 语义与 `uvcpp_buf` 那版**逐字相同**（同一个实现，只是入参形状不同）：
+ * 空 body 与"`data` 为空"都是 `UV_EINVAL` + `INVALID_ARGUMENT`。
+ */
+UVCPP_API int grpc_parse_unary_body(const std::string& body, std::string& message,
+                                    grpc_status& fail_status, std::string& err);
+
+#endif  // UVCPP_WEBAPP_ENABLE
 
 // =========================================================================
 // 收

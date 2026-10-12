@@ -439,6 +439,36 @@ class UVCPP_API uvcpp_web_response {
   void set_deferred(bool v);
 
   /**
+   * @brief 让这条响应在 body 之后**再发一段尾字段**（trailers）。
+   *
+   * 这是 gRPC 那条路的接口：一条 unary 应答的状态码走尾随头（`grpc-status`），
+   * 与 HTTP 状态码**不是一回事** —— HTTP 层永远是 200，成败在尾随块里。发送的
+   * 三段顺序（HEADERS → DATA → HEADERS）由框架在 `send_response()` 里包办，
+   * 调用方只需要在这里把那段字段**声明**出来。
+   *
+   * 规则：
+   *  - **只在 h2（`stream_id != 0`）上有效。** h1 的尾随头要先 chunked 编码，
+   *    本库没做那条路（`uvcpp_http_server::send_trailers()` 在 h1 上返
+   *    `UV_ENOTSUP`）。h1 请求上这一段会被**忽略**并打一条 WARN —— 与
+   *    "照发一遍"不同，后者会把尾随头当普通响应头塞进首部，调用方看到的是
+   *    "发出去了"，对端看到的是另一份报文。
+   *  - **响应体为空时只发一段头**（Trailers-Only）：HEADERS 之后直接是尾随块，
+   *    中间没有 DATA —— 这正是 gRPC 失败路径的形状。
+   *  - **带尾随头的响应不经过 HTTP 层的压缩。** gRPC 有自己的 `grpc-encoding`，
+   *    HTTP 层再压一遍，对端按 gRPC 的规矩解不开；而尾随块本身在压缩之后
+   *    还要重算长度，两件事纠缠在一起没有收益。
+   *  - 与 `begin_chunked()` 的流式路径**互斥**：流式那条路的收尾是
+   *    `end_stream()`，没有第二段头块的位置。设了尾随头又走流式，尾随头被忽略。
+   *
+   * @param t 尾字段。空表等于没设。
+   */
+  uvcpp_web_response& set_trailers(const http_headers& t);
+  /** @brief 有没有设过尾随头（空表算没有）。 */
+  bool has_trailers() const;
+  /** @brief 设过的那段尾字段（没设过时是空表）。 */
+  const http_headers& trailers() const;
+
+  /**
    * @brief 注册「响应真正发出后」的回调。
    *
    * **可叠加**：多次调用会按注册顺序**全部**触发，后注册的不会顶掉先注册的。
@@ -780,6 +810,10 @@ class UVCPP_API uvcpp_web_response {
   bool head_only_;
   bool ended_;
   bool deferred_;
+  /// 尾随头（`set_trailers()`）。空表 = 没设 —— h2 上"发一段空的尾随块"是合法
+  /// 形状（它就是 END_STREAM），所以"空"与"没设"必须是同一个状态，不能靠另一个
+  /// bool 区分。
+  http_headers trailers_;
   std::vector<uvcpp_web_sent_cb> sent_cbs_;
   uvcpp_web_error_handler error_cb_;
 

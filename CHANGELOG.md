@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.10-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.11-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -657,6 +657,69 @@
   `check_config_contract`（对着新打的包）/ `check_ci_layout` / `check_capi_symbols`
   全过；`check_doc_snippets` 拿 `build-all` 的包（WSDL 开）编过 103/103 条
   —— 拿 `build-capi-all` 的包跑会退 **3（14 条 WSDL 片段没判）**，那**不是绿**
+
+- **gRPC 也能从 `uvcpp_web_app` 用**（`1.6.11-dev`）。前面那三条
+  （`grpc_send_unary` / `grpc_send_status` / `grpc_parse_unary_body(uvcpp_buf)`）都要
+  `uvcpp_http_server&` + `uvcpp_tcp_client*`，而框架的路由签名里两样都没有 —— 它拿到的
+  是 `uvcpp_web_request&` / `uvcpp_web_response&`，发送者是框架。于是补三条
+  （`#if UVCPP_WEBAPP_ENABLE`，同文件第二个开关；webapp 默认关、"web 开 webapp 关"是
+  **默认**配置，CI 的 `http3` 那一格就是）：
+  `grpc_web_send_unary()` / `grpc_web_send_status()` / `grpc_parse_unary_body(std::string)`。
+  两个发送版本的差别只有一处、且被框架结构定死：**谁排三段的顺序**。底层版自己
+  `begin_stream → write_stream →（在 done 里）send_trailers`，返回 0 是"已入队"；web 版
+  只**声明**形状（status / content-type / body / `set_trailers()`），顺序由
+  `uvcpp_web_app::send_response()` 包办 —— 那是整个框架里唯一同时看得见 `write_stream()`
+  的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
+  `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
+  `trailers()`（`src/webapp/uvcpp_web_response.h:465-469`），并在 `send_response()` 里加了
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2626-2675`）。
+  `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
+  自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
+  "另一条拿到同一份字节的路"。判据与量法见下一条
+- **尾随头的三条前提各有一个失败模式，三条都有用例**（`1.6.11-dev`）。
+  `tests/functional/web_app_h2_grpc_func.cpp` 四轮，走真 socket + 真路由（文件名同时命中
+  `web_app_.*` 与 `/[^/]*h2_[^/]*` ⇒ webapp 或 nghttp2 关掉时**整个文件不参与构建**）：
+  **① 三段**（首部块里**没有** `grpc-status`、DATA 逐字节是手算的 `00 00 00 00 02 08 03`、
+  `on_response_end` 那一刻的头列表里有 `grpc-status: 0`）；**② Trailers-Only**（空请求体与
+  截断的帧 → 体为空 + `grpc-status: 3`，另外把 `中文` → `%E4%B8%AD%E6%96%87` 这条编码
+  钉在一条**自己给的字面量**上，与解码器的措辞无关）；**③ 流式**上被丢弃（`end_stream`
+  那一刻也没有 `grpc-status`）；**④ h1** 上被丢弃（`content-length: 7`、体照发、
+  报文里搜不到 `grpc-status`）。变异：把 `set_trailers()` 那一句删掉 ⇒ ① 的前两条照样绿、
+  ③④ 照样绿，**只有第 3 条断言红** —— 那正是"尾随头真的到了"的唯一证据
+- **写这条用例时逮到库里的一个真缺陷：`content-length` 会漏出去**（`1.6.11-dev`）。
+  第一版断言"处理函数设过的头一个都别上线"，红了：`grpc_web_send_*` 当时只管设
+  status/content-type/body，**没动头表**。查下去分成两类，处置不同：
+  `uvcpp_web_response::sync_meta()` 的规则是"**已存在** `Content-Length` 或
+  `Transfer-Encoding: chunked` 时不动它"（对普通响应是对的），所以处理函数先设的
+  `content-length: 999` 会**留着** —— 而这条应答只有 7 个字节，对端会一直等剩下 992 个。
+  这是**线上错帧**，不是"头表里多个字段"。于是两个发送函数摘掉
+  `content-length` / `transfer-encoding` / `content-encoding` 三个，**其余原地保留**
+  （它们就是 gRPC 的 initial metadata，服务端捎带应答元数据是规范内的用法）。
+  变异复验：把摘 `content-length` 那一句去掉 ⇒ 7 条断言红，其中两条是**整条往返收不完**
+  （客户端卡在那 992 个字节上）—— 错帧的后果当场看得见
+- **回归**（`1.6.11-dev`）：`build-capi-all`（WEBAPP=ON）上**串行**全量
+  `ctest --output-on-failure` **130 条全过、0 failed**（`100% tests passed`，
+  149.64 s；两条 DB 用例 `test_db_mysql_func` / `test_db_pgsql_func` 因本机没起
+  服务而 Skip，是既有的条件跳过而不是失败。**必须串行**：并行 `-j` 下
+  `test_tcp_two_buf_write_func` 会偶发红、单跑两遍都绿，是并行执行的 flake，
+  与本节无关）；同树上 `ctest -R
+  "grpc|web_app|web_h2|web_stream|web_static|h2_"` 39/39；`build-h3`（**WEB=ON 且
+  WEBAPP=OFF**，照 CI 的 `http3` 那一格配的）编过，且该树里 `nm -DC libuvcpp.so` 只导出
+  `grpc_send_unary` / `grpc_send_status` 两条、两条 `grpc_web_send_*` **一个符号都没有**，
+  `ctest -N` 里也不注册新用例；`build-capi-all` 上四条符号都在、用例注册为 #66
+- **门禁**（`1.6.11-dev`）：`check_doc_versions` / `check_docs` / `check_ci_layout` /
+  `check_capi_symbols`（8 片判过、`undeclared` 那 1 片照旧「未判」）EXIT=0；
+  `check_doc_lines` 5 条判据、1137 条引用全过（其中 **27 条跟着挪** ——
+  `grpc_server.h/.cpp` 中间插了内容、`web_app.cpp` 加了 67 行，`doc_line_refs.lock`
+  重刷了两次：第一次那两条 `[胀]`/`[歧]` 要先把**文档里**写的行号改对，第二次才把
+  两条「平移后被顶掉」的键补回去）；`check_config_contract` 与 `check_doc_snippets`
+  都拿 `package_release` 现打的 `1.6.11` 包跑（后者的 7 条 QUIC/HTTP3 片段按
+  `DEFAULT_OFF` 跳过，不算前提不满足 —— 拿缺 WSDL 的包跑会退 **3**，那不是绿）；
+  `verify_tree`（`build-capi-all`）的 build/mtime 两道 PASS，dll 那道 FAIL 是
+  `copy_test_dlls` 这个 target 建在 `CMakeLists.txt` 的 `if(WIN32)` 里、Linux 上恒
+  不存在（既有）。这一节改过 `uvcpp_version.h`，**构建树必须重跑一次 `cmake .`**：
+  `test_capi_common_func` 就是那条「版本号动过、构建树没重配」的探测器，
+  它红了正说明探测器是好的
 
 ### 数据库（`src/db/`）
 

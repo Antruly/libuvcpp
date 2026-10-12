@@ -691,7 +691,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1758-1758`�
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:1010-1021`、`src/web/uvcpp_http_server.cpp:1115-1126`、`src/web/uvcpp_http_server.cpp:2717-2726`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:1483-1488`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:2929-2935`）。
+（`src/webapp/uvcpp_web_app.cpp:2996-3002`）。
 
 ### 静默失败清单
 
