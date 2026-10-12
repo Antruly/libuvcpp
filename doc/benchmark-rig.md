@@ -825,6 +825,32 @@ ext4 上是 921.16）—— 因为它卡的是 CPU，不是 stat。
   路径上还多一层 TLS 与 ALPN 协商。
 - 回环上的数不外推（理由同上一节）。
 
+### 平台自己的读数从哪读
+
+本仓每一节的读数都要自己造量具；平台不用 —— 它自己就是量具，而且把原始读数**公开**了。
+要引用平台的数（例如 [`benchmark.md`](benchmark.md) §4.5），从这四个地方取：
+
+| 要什么 | 在哪 |
+|---|---|
+| 每档读数（rps / 延迟 / `2xx` / `5xx` / CPU / RSS / `reconnects`） | 推送条目的那条分支上的 `site/data/results/<条目>.json` |
+| 该档的原始服务端输出 | 同仓 `site/static/logs/<档>/<连接数>/<条目>.log` |
+| 家族分与名次 | `https://www.http-arena.com/badge/index.json` |
+| 参考机、核绑定、内核调参 | `site/content/docs/hardware/_index.md`、`scripts/lib/system.sh` |
+
+四个坑：
+
+- **读的是 bot 的提交，不是 PR 评论。** 平台跑完会把结果**提交回**推送条目的那条分支
+  （`Benchmark results: <条目>  [skip ci]`），所以 `git show <sha>:site/data/results/<条目>.json`
+  就是权威原文。PR 评论里那份是摘要，而且**发出去还能改** —— 引用它等于引用一份会变的副本。
+- **`badge/index.json` 里同一个家族并列着两份名次**：`default`（`tuned=0` 且
+  `type ∈ {flagship, emerging}`）与 `withTuned`。同一份数据、同一个分、**名次不同**，
+  引用时不说清是哪一份就没有意义。
+- **家族分是同家族各档之和** ⇒ **没订阅的档等于整档 0 分**，不是"没参加"。所以
+  `results/<条目>.json` 里**少一个键**要读成「这一档还没订阅」，而不是「这一档跑挂了」。
+- **`rps` 只把 `2xx` 算进去。** 一档只要还有 5xx，`rps × duration` 与 `2xx + 5xx` 就对不上
+  —— 而那正是"负载没变、只是拒了一批"与"负载真的涨了"的分界线。引用任何一档之前先做这
+  一次除法，`benchmark.md` §4.5 里 `static-h2` 那条闭合的归因就是这么读出来的。
+
 ## 每请求指令数的量具（`callgrind`）
 
 上面那几节的读数都是 **rps / 微秒**，它们有一个共同的毛病：**这台机器的 CPU 频率会漂**。
@@ -920,4 +946,7 @@ ext4 上是 921.16）—— 因为它卡的是 CPU，不是 stat。
 - HttpArena 的 h3 量具：上游 nghttp2 的 `h2load`（`--enable-http3`），钉 v1.69.0。
 - 每请求指令数的量具：`valgrind --tool=callgrind` + `callgrind_control -d`；
   A/B 靠 `LD_LIBRARY_PATH` 换 `libuvcpp.so`，解析与逐函数对比是一次性脚本（不随库发布）。
+- 平台自己的读数：HttpArena 仓 `site/data/results/<条目>.json`（bot 提交回推送条目的分支）、
+  `site/static/logs/`、`site/content/docs/hardware/_index.md`，以及
+  `https://www.http-arena.com/badge/index.json`。位置与四个坑见上面「平台自己的读数从哪读」。
 - 口径与历史读数：[`benchmark.md`](benchmark.md)。
