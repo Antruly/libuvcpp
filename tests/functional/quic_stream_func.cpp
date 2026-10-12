@@ -33,6 +33,12 @@
  * 钉住了 `open_stream(bidi)` 那个布尔真的传到了 `ngtcp2_conn_open_*_stream`。
  *
  * **为什么两端共用一条循环**：同 `quic_handshake_func.cpp` 文件头那条。
+ *
+ * 文件里还有**第二对端点**（`test_streams_with_mismatched_cid_len`）：同一段
+ * 回声，但服务端的 CID 长度调成 8（上游 `h2load` 的选择）而客户端保持 18。
+ * 上面五段用的都是本库自己的两端（长度相同）⇒「拿对端 SCID 长度去解本端短包头
+ * 的 DCID」这类错误**恒等抵消**，在 CI 上永远看不见（`745608c` 的缺陷正是
+ * 如此）。那一段的判据、量法与读数写在它自己的注释里。
  */
 #include <cstdint>
 #include <cstdio>
@@ -106,6 +112,24 @@ void check_eq_s(const std::string& got, const std::string& want,
 const int kErrStreamShutWr = -219;
 
 const int kDeadlineMs = 5000;
+
+/// 第 6 段那一档：服务端自己选的 SCID 长度（上游 `h2load` 也选 8），而客户端
+/// 保持默认 18 ⇒ 两端不同长。短包头里的 DCID 长度只能按**本端**那个数反推，
+/// 这一段就是让 CI 在没有 `h2load` 的情况下也走一遍那个形状。
+const size_t kMismatchedServerScidLen = 8;
+
+/// 第 6 段串行回声的轮数与总墙钟上界。
+///
+/// **两个数都是实测定的**（本机、回环、8 核，各跑 3 遍）：好的一档 20 次串行
+/// 回声 **44 / 44 / 45 ms**（一次回环往返是亚毫秒，剩下的全是 `wait_until` 那
+/// 1 ms 的轮询粒度）；把服务端查表那个长度换回「对端 SCID 长度」的坏实现下
+/// **一轮都过不去** —— deadline 放到 30 s 也是 0/20。
+///
+/// 上界取 500 ms（离正常值 11 倍，离"一轮都过不去"无穷倍）而不是贴着实测值
+/// 取，是因为这条判据不该去区分"慢"与"不通"：那是两个不同的结论，而**两者都
+/// 是红的**。500 ms 这个数只负责"别把一次正经的回环往返判成缺陷"。
+const int kMismatchRoundTrips = 20;
+const int kMismatchBudgetMs   = 500;
 
 // ---------------------------------------------------------------------------
 // 跨分块的载荷（第 4 段用）
@@ -489,6 +513,150 @@ void test_streams_over_one_loop() {
   check_eq_i(client_close_code, 0, "本端先关的那一侧报的是干净关闭 0");
 }
 
+// =========================================================================
+// 第 6 段：**两端 CID 长度不同** —— 短包头的 DCID 长度只能按"本端"反推
+// =========================================================================
+//
+// 上面五段用的都是**本库自己的两端**（`kClientScidLen == kServerScidLen`），
+// 于是「拿**对端** SCID 的长度去解**本端**短包头里的 DCID」这类错误在这里
+// **恒等抵消**：`745608c` 那条缺陷改前在 `quic_*` / `http3_*` 全套用例上全绿，
+// 是上游 `h2load`（它选 8 字节）打出来的。
+//
+// 所以这一段把两端**拉开**：服务端 `set_scid_len(8)`，客户端保持默认 18。
+// 短包头不把 DCID 长度写在包上（RFC 9000 §17.3.1），收方只能按自己选的长度
+// 反推 —— 服务端查表时用的必须是**它自己**那个 8，不是对端那个 18。
+//
+// **判据为什么是"总耗时"而不是"回声回来了没有"**：坏实现下服务端的查表长度
+// 与实际不符 ⇒ 每一个短包头都命中不了 `by_cid` ⇒ 1-RTT 包整批丢掉。本用例
+// **在握手回调之后才写 ping**，那时客户端手上已经没有任何 Handshake 空间的包
+// 可以搭车（能被服务端路由的只有长包头），所以坏实现下是**一串都过不去**：
+// 实测那个 deadline 放到 30 s 也是 0/20。**但平台上它表现为"极慢"而不是
+// "不动"**（`745608c` 的读数：每响应 ~1.09 s）—— 那边的 h2load 是**边握手边
+// 发请求**，早期那些请求能和 Handshake 包合并成一趟车混进去。
+//
+// 于是这条判据不能只写"回声回来了没有"：那一种形状在 CI 上能不能现形，取决于
+// "这一次有没有搭上车"，而那是时序。所以跑 `kMismatchRoundTrips` 次**串行**
+// 回声量**总墙钟** —— 一次侥幸的合并重传救得了一条，救不了二十条。
+void test_streams_with_mismatched_cid_len() {
+  std::cout << "  [CID] 服务端 SCID 8 字节 / 客户端 18 字节：回声照常往返"
+            << std::endl;
+
+  uvcpp_loop loop;
+  uvcpp_test::loop_drain drain_loop(&loop);
+
+  uvcpp_ssl_context server_ctx(tls_mode::SERVER, tls_version::TLS_1_3);
+  if (!server_ctx.generate_self_signed("localhost", 2048)) {
+    std::cerr << "  [FAIL] 生成自签证书失败" << std::endl;
+    ++g_failures;
+    return;
+  }
+  uvcpp_ssl_context client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3);
+  client_ctx.set_verify_mode(tls_verify_mode::NONE);
+
+  uvcpp_quic_server server(&loop);
+  server.set_ssl_context(&server_ctx);
+  // 上游 h2load 用的就是 8（`NGTCP2_MIN_INITIAL_DCIDLEN`）。
+  server.set_scid_len(kMismatchedServerScidLen);
+  check_eq_i(server.scid_len(), (long long)kMismatchedServerScidLen,
+             "set_scid_len(8) 之后 scid_len() 报 8");
+  check_eq_i(server.bind("127.0.0.1", 0), 0, "bind(127.0.0.1, 0)");
+
+  std::map<int64_t, std::string> server_got;
+  std::map<int64_t, int>         echoes;  // 流号 -> 回过几次声
+
+  const int listen_rc = server.listen([&](uvcpp_quic_connection* c) {
+    uvcpp_quic_connection::callbacks cbs;
+    cbs.on_read = [&](uvcpp_quic_connection& conn, int64_t id,
+                      const net_read_result& r) {
+      if (r.event != net_read_event::DATA) return;
+      std::string& acc = server_got[id];
+      acc.append(r.data, r.size);
+      if (acc == "ping" && echoes.count(id) == 0) {
+        echoes.emplace(id, 1);
+        conn.write_stream(id, "pong", 4, true);
+      }
+    };
+    c->set_callbacks(cbs);
+  });
+  check_eq_i(listen_rc, 0, "listen() 返回 0");
+  check_eq_i(server.scid_len(), (long long)kMismatchedServerScidLen,
+             "listen() 不会改动这个数");
+  if (listen_rc != 0) return;
+
+  const int port = server.configured_port();
+  check(port > 0, "listen() 之后 configured_port() 报内核分配的端口");
+
+  uvcpp_quic_client client(&loop);
+  client.set_ssl_context(&client_ctx);
+
+  std::map<int64_t, std::string> client_got;
+  bool    connected      = false;
+  int     connect_status = 12345;
+
+  const int rc = client.connect("127.0.0.1", port, [&](int status) {
+    connected      = true;
+    connect_status = status;
+  });
+  check_eq_i(rc, 0, "connect() 返回 0");
+  if (rc != 0) return;
+
+  {
+    uvcpp_quic_connection::callbacks cbs;
+    cbs.on_read = [&](uvcpp_quic_connection&, int64_t id,
+                      const net_read_result& r) {
+      if (r.event == net_read_event::DATA) client_got[id].append(r.data, r.size);
+    };
+    client.connection()->set_callbacks(cbs);
+  }
+
+  // 握手用长包头，**与这一段测的东西无关**：长包头把 DCID 长度写在包上，所以
+  // 坏实现下握手照样能成 —— 这也是那条缺陷"握手正常、请求卡死"的形状。
+  const bool up =
+      uvcpp_test::wait_until(&loop, [&] { return connected; }, kDeadlineMs);
+  check(up, "握手在 deadline 内完成（长包头不受这个缺陷影响）");
+  if (!up) return;
+  check_eq_i(connect_status, 0, "connect 的 cb 收到 0");
+
+  uvcpp_quic_connection* c = client.connection();
+  if (c == nullptr) {
+    check(false, "握手之后 connection() 还在");
+    return;
+  }
+
+  const std::chrono::steady_clock::time_point t0 =
+      std::chrono::steady_clock::now();
+  int done = 0;
+  for (int i = 0; i < kMismatchRoundTrips; ++i) {
+    const int64_t sid = c->open_stream(true);
+    if (sid < 0) {
+      check(false, "第 " + std::to_string(i) + " 次 open_stream()");
+      break;
+    }
+    if (c->write_stream(sid, "ping", 4, true) != 0) {
+      check(false, "第 " + std::to_string(i) + " 次 write_stream(ping)");
+      break;
+    }
+    // 这一条同时是"服务端**真的**收到了一个短包头"的直接证据：`server_got`
+    // 只在服务端路由到这条连接之后才可能有内容。
+    const bool back = uvcpp_test::wait_until(
+        &loop, [&] { return client_got[sid] == "pong"; }, kDeadlineMs);
+    check(back, "第 " + std::to_string(i) + " 次回声在 deadline 内回来");
+    if (!back) break;
+    check_eq_s(server_got[sid], "ping", "服务端收到的字节（第 " +
+                                           std::to_string(i) + " 次）");
+    ++done;
+  }
+  const long long total_ms = uvcpp_test::elapsed_ms(t0);
+  std::cout << "  [CID] " << done << "/" << kMismatchRoundTrips
+            << " 次串行回声共 " << total_ms << " ms" << std::endl;
+  check_eq_i(done, kMismatchRoundTrips, "每一轮都收到了回声");
+  check(total_ms < kMismatchBudgetMs,
+        "串行回声总耗时 < " + std::to_string(kMismatchBudgetMs) + " ms（实得 " +
+            std::to_string(total_ms) + " ms）—— 坏实现下每个来回都要等一个 PTO");
+
+  check_eq_i(client.close(), 0, "close() 返回 0");
+}
+
 }  // namespace
 
 int main() {
@@ -497,6 +665,8 @@ int main() {
   check_eq_i(quic_crypto_backend_init(), 0, "quic_crypto_backend_init()");
 
   test_streams_over_one_loop();
+  // 第二段：**另起一对**（服务端换一个 CID 长度）—— 两端 CID 长度不同的那一档。
+  test_streams_with_mismatched_cid_len();
 
   quic_crypto_backend_free();
 
