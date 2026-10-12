@@ -563,6 +563,118 @@ ngtcp2 存的是**指针**（重传帧链里 `ngtcp2_vec_copy` 只拷那个指�
 原来那条异步拷贝入队的路。2 MB 一笔就是约 1700 次
 `new char[]` + `memcpy` + `delete[]` 与约 1700 次多余的循环轮转。
 
+## HttpArena 的 h3 量具：上游 `h2load`
+
+榜单 `baseline-h3` 那一档**不是**用本仓的量具量的。它的负载是上游 nghttp2 的 `h2load`
+（用 `--enable-http3` 编的，容器里钉 v1.69.0），对端是别人写的客户端；而
+`bench/bench_quic.cpp`（见上一节）的两端都是本库 —— 凡是「两端恰好一致」的假设，
+在那个量具上都不成立，而 h3 这一档的读数恰恰取决于**对端**怎么选 CID、什么时候 ACK、
+什么时候重传。要复现它，只能把那个对端建出来。
+
+这套装置建于 2026-10-12，是那之后所有 h3 A/B 的唯一量具。它同时验证了另一件事：
+**换对端不是可选的严谨，是能不能看见 bug 的分界线** —— 两端同源时，两个实现里
+任何「恰好一致」的错误都会互相抵消。
+
+### 建：三步 + 一个从 deb 里拆出来的 libev
+
+`h2load` 的 h3 腿要 `libngtcp2_crypto_ossl`（nghttp2 只认这个名字的 crypto helper）：
+
+```bash
+PFX=/tmp/h3lab/prefix
+OSSL=<repo>/_local_deps/openssl-3.5-inst    # 3.5 才有 SSL_set_quic_tls_cbs
+
+# ① nghttp3：只要静态库
+<repo>/_local_deps/nghttp3/configure --prefix=$PFX \
+  --enable-lib-only --enable-shared=no && make -j && make install
+
+# ② ngtcp2：--with-openssl 指到 3.5，产出 libngtcp2_crypto_ossl.a
+<repo>/_local_deps/ngtcp2/configure --prefix=$PFX \
+  --enable-lib-only --enable-shared=no \
+  PKG_CONFIG_PATH=$OSSL/lib/pkgconfig:$PFX/lib/pkgconfig && make -j && make install
+
+# ③ nghttp2 1.69.0：--enable-app 才会建 h2load
+/tmp/h3lab/src/nghttp2-1690/configure --prefix=$PFX \
+  --enable-shared=no --enable-app --enable-http3 \
+  --disable-examples --disable-python-bindings CXXFLAGS=-std=c++20 \
+  LIBEV_CFLAGS=-I$PFX/usr/include \
+  LIBEV_LIBS="-L$PFX/usr/lib/x86_64-linux-gnu -lev" && make -j
+```
+
+三处**不是照抄就行**的地方，每一处都先花掉了一次误判：
+
+- **上游那份 `h2load.cc` 直接用 `ev_loop`/`ev_io`/`ev_timer`** —— 驱动器是 libev，不是
+  libuv，也不是「h2load 顺带的依赖」。本机没有 libev 而 sudo 要密码，但
+  **`apt-get download libev-dev` 不需要 root**：落盘后 `dpkg-deb -x` 到 `$PFX` 即可。
+  而且那两个变量是**必需的**：`configure.ac` 里那条 `AC_CHECK_LIB([ev],[ev_time])`
+  在 `LIBEV_CFLAGS` 与 `LIBEV_LIBS` 都设了的时候会**跳过**检查 —— 不设它反而更容易过，
+  设了才是「明确告诉它库在哪」。libev 只属于这个生成器进程，与本库无关。
+- **最后一步会以 `cannot find -lcares` 收场**，而那**不是**「没装 c-ares」。
+  `libc-ares-dev` 给的是 `libcares.so` 与 `libcares_static.a`，它链接指向的
+  `libcares.so.2` 在**运行时包** `libc-ares2` 里，而那个包没下 —— 前缀里于是躺着一条
+  悬空符号链接。补 `libcares.so.2` 的链接即可；去改 `CARES_LIBS` 是在治症状。
+- **nghttp2 1.70 要 GCC 14**（新加的 `<print>`），1.69.0 + `-std=c++20` 用 GCC 13 能过。
+  容器里钉的就是 1.69.0，本机跟它对齐 —— 生成器换版本，读数就不可比。
+
+### 跑：条目裸机起，命令照抄平台
+
+条目本身照 HttpArena 仓里 `frameworks/libuvcpp/Dockerfile` 的 flags 手工配一遍，
+不用 docker：`_local_deps` 的 OpenSSL 与 pgsql-dev 顶上，八个
+`FETCHCONTENT_SOURCE_DIR_*` 指到 `_local_deps`，那份 Dockerfile 里的四个硬编码路径
+（证书、密钥、数据集、静态根）sed 成本机的实际路径。建完把 `libuvcpp.so` 装到一个前缀，
+条目的 `rpath` 指过去 —— 之后**改库不用重编条目**，A/B 因此是同一个二进制在跑。
+
+平台那条命令（`scripts/lib/tools/h2load-h3.sh`；`profiles.sh` 给 `baseline-h3` 的
+连接数是 **64**，`H3THREADS` 默认 **64**）：
+
+```bash
+h2load --alpn-list=h3 "https://localhost:8443/baseline2?a=1&b=1" -c 64 -m 64 -t 64 -D 5s
+```
+
+**`--alpn-list=h3` 不是修饰，它同时是唯一的判别开关。** 不加它，`h2load` 会在 8443 上
+按 **h2 over TLS** 谈，读数照样一片漂亮而与 h3 毫无关系 —— 本仓为此误判过一次
+（把一个 266 975 的数字当成了 h3 的结果）。
+
+读数要看**两个数**：`req/s`，以及 `requests:` 那行除以 `-c` —— 也就是**每连接出了几个
+响应**。只报 rps，会把「停滞没被触及」与「瓶颈换了地方」混成同一种东西：这两种情况的
+rps 可以一模一样。
+
+### 2026-10-12 的基线（本机 18 核，Intel Core Ultra 5 125H）
+
+改前（1.6.4 那份实现）：
+
+| 命令 | `requests` | 2xx | req/s | 每连接响应数 |
+|---|---|---|---|---|
+| `-c 64 -m 64 -t 64 -D 5s` ×3 | 315 / 255 / 150 | 315 / 255 / 150 | 63.0 / 51.0 / 30.0 | 4.9 / 4.0 / 2.3 |
+| `-c 1 -m 1 -t 1 -D 5s` | 1 | **0** | 0.20 | — |
+| `-c 1 -m 64 -t 1 -D 5s` | 14 | 12 | 2.80 | — |
+
+平台在它自己那台机器上量到的是 **58 rps / 294 个 2xx**（`baseline-h3-64`）—— 正落在这三格
+的区间里。这是这套量具**保真**的证据：本机的绝对值不必等于平台，但同一条命令下**病理的
+形状**必须一致。
+
+第三行是**分水岭那一格**：单连接、单路流水，改前 5 秒只出 1 个请求，而且它失败了。
+「64 条连接一起卡」与「一条连接也卡」是两种病，这一格把它们分开 —— 它说明病在
+**每一条连接**里面，扇出（多循环）救不了它，必须先修连接本身。
+
+同一天、同一个量具、改后：
+
+| 命令 | `requests` | 2xx | req/s |
+|---|---|---|---|
+| `-c 64 -m 64 -t 64 -D 5s` ×3 | 429 553 / 412 692 / 399 236 | 全 2xx，**0 个 5xx** | 85 910.6 / 82 538.4 / 79 847.2 |
+| `-c 1 -m 1 -t 1 -D 5s` | 4 386 | 4 385 | 877.2 |
+| `-c 1 -m 64 -t 1 -D 5s` | 480 131 | 480 129 | 96 026.2 |
+
+每连接响应数从 ~4.9 变成 ~6 700。改法与判据写在那一条提交与 `CHANGELOG.md` 里；
+这一页只留量具，读数归 [`benchmark.md`](benchmark.md)。
+
+### 这个量具什么时候不作数
+
+- **它量的是对端的脸色。** 同一份服务端换一个 h3 客户端（`nghttpx --http3` 也行），
+  读数就变。这不是缺陷，是这一档的性质 —— 所以这里的数不能当「本库的 h3 吞吐」引用。
+- **别拿它跟 `bench_quic.cpp` 的数比。** 后者两端同源、载荷可控；这里两端不同源，
+  路径上还多一层 TLS 与 ALPN 协商。
+- 回环上的数不外推（理由同上一节）。
+
 ## 这一页不是什么
 
 - 不是读数记录 —— 读数属于跑它的那套硬件加配置，写在 [`benchmark.md`](benchmark.md)。
@@ -574,4 +686,5 @@ ngtcp2 存的是**指针**（重传帧链里 `ngtcp2_vec_copy` 只拷那个指�
 
 - 靶场与驱动器：`bench/bench_server.cpp` / `bench/driver.js` / `bench/gen.js`。
 - QUIC 吞吐量具：`bench/bench_quic.cpp`（`--mode=push|echo|udpfloor`）。
+- HttpArena 的 h3 量具：上游 nghttp2 的 `h2load`（`--enable-http3`），钉 v1.69.0。
 - 口径与历史读数：[`benchmark.md`](benchmark.md)。
