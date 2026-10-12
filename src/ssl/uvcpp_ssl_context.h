@@ -25,6 +25,7 @@
 
 // Forward declarations for OpenSSL types (defined in .cpp via <openssl/ssl.h>)
 struct ssl_ctx_st;
+struct ssl_st;  // 一条连接的 `SSL`；见 apply_alpn_to_ssl()
 
 namespace uvcpp {
 
@@ -126,8 +127,27 @@ class UVCPP_API uvcpp_ssl_context {
   /**
    * @brief 客户端：宣告本端支持的协议名，例如 {"h2", "http/1.1"}。
    * @return 列表为空（编码后为空）返回 false；否则 true。
+   *
+   * **写的是共享的 `SSL_CTX`**，所以多个线程共用一个上下文时它必须被同步
+   * （本函数内部已经用一把进程内的锁护住"free 旧名单 + malloc 新名单"那一对，
+   * 不会再双重释放）。**每条连接各自的名单请走 `apply_alpn_to_ssl()`** ——
+   * 那才是逐连接的语义，且完全不共享。
    */
   bool set_alpn_protos(const std::vector<std::string>& protos);
+
+  /**
+   * @brief 客户端：把名单装到**一条具体的连接**上，不碰共享的 `SSL_CTX`。
+   *
+   * 这是 QUIC 会话走的那条路，也是"一个 `uvcpp_ssl_context` 被多条连接、
+   * 多个线程共用"时唯一安全的装法：`SSL_CTX_set_alpn_protos` 内部会先 free
+   * 掉 ctx 上那份旧名单再 malloc 一份新的，两条线程同时进来就会各自读到同一个
+   * 指针、各 free 一次（实测表现：三字节区域上的 `attempting double-free`）。
+   * 装到 `SSL*` 上则天然每连接私有，不需要任何同步。
+   *
+   * @param ssl    `SSL_new()` 出来的连接句柄；本函数不改动 `SSL_CTX`。
+   * @return 编码后为空（名单为空、或某个名字超过 255 字节）返回 false；否则 true。
+   */
+  bool apply_alpn_to_ssl(ssl_st* ssl, const std::vector<std::string>& protos);
 
   /**
    * @brief 服务端：给出可选的协议名并安装选择回调。
@@ -135,6 +155,11 @@ class UVCPP_API uvcpp_ssl_context {
    * **挑不中时回调返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal。** 这正是"不带 ALPN
    * 的 HTTP/1.1 客户端照常握手成功、由上层回落 h1"的实现方式；写成 fatal 会让
    * 所有老客户端连握手都完不成。无扩展、有扩展但无交集都走这条路。
+   *
+   * **请在开始 accept 之前调**：回调是注册在 `SSL_CTX` 上的（OpenSSL 没有
+   * per-`SSL` 的"选择回调"），名单本体就是本对象的一个成员 —— 一边握手一边
+   * 改名单，等于让回调读一个正在被覆盖的 `std::string`。同一份名单重复调是
+   * 幂等的，直接返回、不碰 OpenSSL。
    */
   void set_alpn_select_protos(const std::vector<std::string>& protos);
 
@@ -145,8 +170,12 @@ class UVCPP_API uvcpp_ssl_context {
    * 显式设过的名单**（那是他的协议策略，比框架的默认更权威）。没有这个查询口，
    * 框架只能二选一：要么无条件覆盖，要么一律不设 —— 前者静默改掉用户的配置，
    * 后者让"默认支持 h2"落空。
+   *
+   * **定义在 .cpp 里**（不是内联）：它读的 `alpn_select_wire_` 是个 `std::string`，
+   * 而"谁先装"这件事恰恰发生在多条连接并发建起来的时候 —— 写入侧在锁里，
+   * 这个读侧也必须在同一把锁里，否则就是边写边读。
    */
-  bool has_alpn_select() const { return !alpn_select_wire_.empty(); }
+  bool has_alpn_select() const;
 
   // -------------------------------------------------------------------
   // Status

@@ -608,6 +608,16 @@
   没有可校验的名字
 - 绕开 `tcp_client` / `http_client` 直接用 `uvcpp_ssl` 的调用方**拿不到**这层校验，
   得自己调 `uvcpp_ssl::set_verify_hostname()`
+- **一个 `uvcpp_ssl_context` 可以被多条连接、多个线程安全共用了。** 客户端 ALPN 改成一律装到
+  **本条连接**的 `SSL` 上（新增 `uvcpp_ssl_context::apply_alpn_to_ssl()`，QUIC 会话是第一个
+  改用它的），不再往共享的 `SSL_CTX` 上装 —— `SSL_CTX_set_alpn_protos` 内部是"free 掉 ctx
+  上旧的那份名单、再 malloc 一份新的"，两条线程各自建连接时就会读到同一个旧指针、各 free
+  一次。ASAN 下是 `attempting double-free`（三字节区域，25 次里 6 次），Release 下是 glibc
+  堆损坏中止（30 次里 7 次；`double free or corruption (out)`、`unaligned tcache chunk`，
+  **进程被信号打死，不是一行断言失败**）。服务端那条"选择回调"OpenSSL 只有 `SSL_CTX` 级的
+  注册口，所以改成**安装时进一把进程内的锁 + 同一份名单幂等**，`has_alpn_select()` 的读侧也
+  进同一把锁 —— 它此前是内联的 `!alpn_select_wire_.empty()`，而"谁先装"恰好发生在多条连接
+  并发建起来的那一刻，那就是边写边读一个 `std::string`（`1.6.5-dev`）
 
 ### 内存与缓冲
 

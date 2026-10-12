@@ -336,6 +336,22 @@ int alpn_select_cb(SSL* /*ssl*/, const unsigned char** out, unsigned char* outle
   return SSL_TLSEXT_ERR_OK;
 }
 
+// 护住"改 ctx 上那份 ALPN 名单"的几行。两个理由都要它：
+//
+//   1. **客户端侧**：`SSL_CTX_set_alpn_protos` 内部是"free 掉 ctx 上旧的
+//      `ext.alpn` 再 malloc 一份新的"。一个上下文被多个线程共用时，两次调用会
+//      各自读到同一个旧指针、各 free 一次 —— `attempting double-free`。
+//   2. **服务端侧**：`alpn_select_wire_` 是 `std::string`，写入侧（安装）与
+//      读取侧（`has_alpn_select()` 那道闸门）都是并发发生的，而"谁先装"这件事
+//      恰好就发生在多条连接同时建起来的那一刻。
+//
+// 不做成成员：`uvcpp_ssl_context` 是公开类，加一个 `std::mutex` 成员就改了它的
+// 布局。这把锁只覆盖"改名单"这一小段，不进任何热路径，进程内一把足够。
+std::mutex& alpn_ctx_mutex() {
+  static std::mutex m;
+  return m;
+}
+
 }  // namespace
 
 bool uvcpp_ssl_context::set_alpn_protos(const std::vector<std::string>& protos) {
@@ -343,6 +359,11 @@ bool uvcpp_ssl_context::set_alpn_protos(const std::vector<std::string>& protos) 
   const std::string wire = ssl_detail::alpn_wire_format(protos);
   if (wire.empty()) return false;
   // 注意：SSL_CTX_set_alpn_protos **成功返回 0**，与 OpenSSL 大多数接口相反。
+  //
+  // 逐连接的名单请用 `apply_alpn_to_ssl()`：这条留的是 ctx 级语义，改的是共享
+  // 状态。锁只保证它不再撕裂 OpenSSL 内部那一对 free/malloc，**不**表示"边握手
+  // 边改名单"是安全的 —— 已经建出来的 `SSL` 继承的是建它那一刻的名单。
+  std::lock_guard<std::mutex> guard(alpn_ctx_mutex());
   if (SSL_CTX_set_alpn_protos(ctx_,
                               reinterpret_cast<const unsigned char*>(wire.data()),
                               static_cast<unsigned int>(wire.size())) != 0) {
@@ -352,14 +373,40 @@ bool uvcpp_ssl_context::set_alpn_protos(const std::vector<std::string>& protos) 
   return true;
 }
 
+bool uvcpp_ssl_context::apply_alpn_to_ssl(ssl_st* ssl,
+                                          const std::vector<std::string>& protos) {
+  if (ssl == nullptr) return false;
+  const std::string wire = ssl_detail::alpn_wire_format(protos);
+  if (wire.empty()) return false;
+  // 与 SSL_CTX_set_alpn_protos 同样：**成功返回 0**。不需要锁：写的是这条连接
+  // 自己的 `SSL`，别的线程碰不到它。
+  if (SSL_set_alpn_protos(ssl, reinterpret_cast<const unsigned char*>(wire.data()),
+                          static_cast<unsigned int>(wire.size())) != 0) {
+    clear_error();
+    return false;
+  }
+  return true;
+}
+
 void uvcpp_ssl_context::set_alpn_select_protos(const std::vector<std::string>& protos) {
   if (!ctx_) return;
-  alpn_select_wire_ = ssl_detail::alpn_wire_format(protos);
+  const std::string wire = ssl_detail::alpn_wire_format(protos);
+  std::lock_guard<std::mutex> guard(alpn_ctx_mutex());
+  // 幂等：同一份名单直接返回。既省掉一次无谓的注册，也让"多条连接并发建起来"
+  // 时只有一个线程真正动 ctx。空名单也要走完，因为它是"把回调摘掉"的语义。
+  if (wire == alpn_select_wire_) return;
+  alpn_select_wire_ = wire;
   if (alpn_select_wire_.empty()) {
     SSL_CTX_set_alpn_select_cb(ctx_, nullptr, nullptr);
     return;
   }
   SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_);
+}
+
+bool uvcpp_ssl_context::has_alpn_select() const {
+  // 与写入侧同一把锁，理由见 alpn_ctx_mutex()。
+  std::lock_guard<std::mutex> guard(alpn_ctx_mutex());
+  return !alpn_select_wire_.empty();
 }
 
 // =========================================================================

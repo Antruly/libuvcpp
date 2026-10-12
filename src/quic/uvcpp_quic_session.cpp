@@ -424,24 +424,36 @@ int quic_session::setup_tls(uvcpp_ssl_context* ssl_ctx, bool is_server,
     return UV_EINVAL;
   }
 
-  // ALPN 要在 `SSL_new` **之前**装到 SSL_CTX 上：装的是 ctx 的默认值，
-  // 新建的 `SSL` 继承它。
+  // ALPN 的两条腿装的**不是同一个东西**，所以集合点也不同：
+  //
+  //   服务端是"选择回调"，OpenSSL 只有 ctx 级的注册口（没有 per-`SSL` 的），
+  //   只能在 `SSL_new` 之前装到 `SSL_CTX` 上。
+  //   客户端是"我宣告支持什么"，这个必须是**逐连接**的。
+  //
+  // 客户端**不能**往共享的 `SSL_CTX` 上装：`SSL_CTX_set_alpn_protos` 内部是
+  // "free 掉 ctx 上旧的 `ext.alpn` 再 malloc 一份新的"，而一个上下文会被多条
+  // 连接、多个线程共用（QUIC 客户端每条连接一个自己的循环，天然并发）——
+  // 两次调用各自读到同一个旧指针、各 free 一次，就是双重释放。ASAN 下的实测
+  // 表现：三字节区域上的 `attempting double-free`，栈顶正是这里。
+  // 装到 `SSL` 上则天然是这条连接私有的，不需要同步。
   //
   // 服务端只在调用方自己没装过选择回调时装 —— `set_alpn_select_protos` 写的是
   // `SSL_CTX_set_alpn_select_cb`，装两次是后者覆盖前者，会把调用方自己的
   // 选择逻辑吃掉。
-  if (!alpn.empty()) {
-    if (is_server) {
-      if (!ssl_ctx->has_alpn_select()) {
-        (void)ssl_ctx->set_alpn_select_protos(alpn);
-      }
-    } else {
-      (void)ssl_ctx->set_alpn_protos(alpn);
+  if (!alpn.empty() && is_server) {
+    if (!ssl_ctx->has_alpn_select()) {
+      (void)ssl_ctx->set_alpn_select_protos(alpn);
     }
   }
 
   ssl_ = SSL_new(ssl_ctx->raw_ctx());
   if (ssl_ == nullptr) return UV_ENOMEM;
+
+  if (!alpn.empty() && !is_server) {
+    // 装不上不致命：编码为空（某个名字超 255 字节）时就是"没宣告"，对端按
+    // "无交集"处理，与刚才不装的结果一致。
+    (void)ssl_ctx->apply_alpn_to_ssl(ssl_, alpn);
+  }
 
   // 原生句柄那一层间接：ngtcp2 v1.25.0 的 conn 里存的是
   // `ngtcp2_crypto_ossl_ctx*`，**不是**裸 `SSL*`。先建 ctx（SSL 可以后填，
