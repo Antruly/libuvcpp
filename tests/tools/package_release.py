@@ -4,9 +4,10 @@
 
 为什么不走 `cmake --install`：libuv 是 `FetchContent_MakeAvailable` 拉进来的，
 它登记了引用 `libuv.dll` 的 install 规则（那个 dll 从没被构建过），而且它的规则
-排在本项目的前面 —— 一失败就整体中止，本项目的头和库一个都装不出来。所以这里
-照 `CMakeLists.txt` 末尾的 install 规则手工复刻同一套布局，并保留两处**刻意的**
-差异（见下）。
+排在本项目的前面 —— 一失败就整体中止，本项目的头和库一个都装不出来（这是
+**Windows** 腿上的形状，Linux 上没有那个 `.dll`、同一条 install 走得通）。所以
+这里照 `CMakeLists.txt` 末尾的 install 规则手工复刻同一套布局，并保留一处
+**刻意的**差异（见下）。
 
 用法：
     python tests/tools/package_release.py --tree build-mingw --platform mingw-x64
@@ -29,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1262-1270`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1268-1276`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
@@ -1098,8 +1099,11 @@ def main():
                 copytree(src, os.path.join(stage, "include", jsub))
                 break
 
-    # 差异 2：补 zlib.h / zconf.h。`web/uvcpp_ws_parser.h` 在
-    # UVCPP_ZLIB_ENABLE=1 时要 include 它，但 install 规则里没有这一条。
+    # **曾经是差异 2**：补 zlib.h / zconf.h —— `web/uvcpp_ws_parser.h` 在
+    # UVCPP_ZLIB_ENABLE=1 时要 include 它，而 install 规则里原先没有这一条。
+    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:2498-2501`），所以这
+    # 不再是"刻意的差异"，只是本脚本手工组装 stage、**不走 `cmake --install`** 时
+    # 对同一件事的重复一遍 —— 两边必须落到同一个位置（`include/` 顶层）。
     z = dep_src(tree, repo, "zlib-131") or dep_src(tree, repo, "zlib")
     if z:
         for f in ("zlib.h", "zconf.h"):

@@ -318,6 +318,12 @@ if(UVCPP_BUILD_WEB)
         FetchContent_Populate(zlib)
         add_subdirectory(${zlib_SOURCE_DIR} ${zlib_BINARY_DIR} EXCLUDE_FROM_ALL)
       endif()
+      # 给下面的 install 规则用：这条支路取过源码 ⇒ 头得由我们随包发出去。
+      # **不能用 `DEFINED zlib_SOURCE_DIR` 当开关** —— 那是 FetchContent 写进
+      # 缓存的 `zlib_SOURCE_DIR:STATIC`，一旦某次配置走过这里就一直在，后来翻回
+      # 上面那条系统 zlib 支路也照样"defined"，会装出一份陈旧的 zlib.h（源码目录
+      # 被清掉时还会让整个 install 中断）。普通变量每次配置重新算，不会残留。
+      set(UVCPP_ZLIB_FROM_SOURCE TRUE)
       message(STATUS "zlib integrated (tag=${ZLIB_VERSION})")
     endif()
   endif()
@@ -2018,9 +2024,13 @@ if(UVCPP_BUILD_WEB)
         # 优先 ZLIB::ZLIB：自带 INTERFACE 包含目录，且正确处理 Debug/Release
         # （${ZLIB_LIBRARIES} 是带 optimized/debug 关键字的裸路径）。
         #
-        # 既有缺口（本次不动）：导出集里没有 zlib，而安装的
-        # uvcpp_ws_parser.h 会 #include <zlib.h>。补它要加
-        # find_dependency(ZLIB)，会让没装 zlib 的使用者 find_package 就失败。
+        # 导出集里没有 zlib，而安装的 uvcpp_ws_parser.h 会 `#include <zlib.h>`：
+        # 那个头现在由下面的 install 规则装进 `include/`（与 libuv 那段相邻），
+        # 所以**共享库**的使用者不缺东西 —— 头在我们前缀里，符号在
+        # `libuvcpp.so` 里，不用额外链。**静态库**（`uvcpp_a` / `uvcpp_a_s`）的
+        # 使用者仍要自己把 zlib 链上，与 DB 那处同形的取舍。
+        # 仍然不加 `find_dependency(ZLIB)`：那会让没装 zlib 的使用者
+        # `find_package(uvcpp)` 就失败，比缺一条 `target_link_libraries` 更难查。
         if(TARGET zlibstatic)
           target_link_libraries(${_tgt} PUBLIC $<BUILD_INTERFACE:zlibstatic>)
         elseif(TARGET ZLIB::ZLIB)
@@ -2465,6 +2475,29 @@ endif()
 if(UVCPP_BUILD_LIBUV_FROM_SOURCE AND DEFINED libuv_SOURCE_DIR)
   message(STATUS "Installing libuv headers from ${libuv_SOURCE_DIR}/include into include/libuv")
   install(DIRECTORY ${libuv_SOURCE_DIR}/include/ DESTINATION include/libuv FILES_MATCHING PATTERN "*.h")
+endif()
+
+# If we built zlib from source as part of this project, install its public headers
+# too —— 与上面 libuv 那段同理，而少了它这里**直接编不过**：公开且会被安装的
+# `src/web/uvcpp_ws_parser.h` 在 `#if UVCPP_ZLIB_ENABLE` 里 `#include <zlib.h>`，
+# 而生成的 `uvcpp_config.h` 把该宏**默认定成 1**（还带一条 `#error` 禁止你自己
+# 定义成 0）—— 拿到我们安装前缀的使用者一定会去包含 `zlib.h`，可我们又是把 zlib
+# **静态**链进 `libuvcpp.so` 的，系统路径上什么都没有。以前只有
+# `tests/tools/package_release.py` 给**发布包**补这两个头（那脚本手工组装 stage、
+# 不走 install），`cmake --install` 出来的前缀里没有 ⇒ "从源码建库"的使用者一编
+# 就死在 `fatal error: zlib.h: No such file or directory`（HttpArena 入口实测）。
+#
+# 两个文件在两个目录，不能只取一处：`zlib.h` 在**源码**目录，`zconf.h` 由 zlib
+# 自己的 CMake 在**配置期**用 `configure_file` 生成到**构建**目录（v1.3.1 里那一步
+# 是无条件的，所以 install 期它一定在）。装到 `include/` 顶层而不是
+# `include/zlib/`：公开头写的是 `#include <zlib.h>`，与 libuv 那些头的道理相同。
+#
+# 系统 zlib 的那条支路不装 —— 那种平台的使用者手里本来就有这份头。
+# `UVCPP_ZLIB_FROM_SOURCE` 只在上面 FetchContent 那条支路里设（理由见那里：
+# `DEFINED zlib_SOURCE_DIR` 是缓存项，翻回系统支路也不消失）。
+if(UVCPP_ENABLE_ZLIB AND UVCPP_ZLIB_FROM_SOURCE)
+  message(STATUS "Installing zlib headers (${zlib_SOURCE_DIR}/zlib.h, ${zlib_BINARY_DIR}/zconf.h) into include")
+  install(FILES "${zlib_SOURCE_DIR}/zlib.h" "${zlib_BINARY_DIR}/zconf.h" DESTINATION include)
 endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/src/uvcpp.h")
   install(FILES ${CMAKE_SOURCE_DIR}/src/uvcpp.h DESTINATION include)
