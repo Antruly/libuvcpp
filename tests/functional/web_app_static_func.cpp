@@ -248,6 +248,24 @@ bool build_root() {
   ok = write_file(r + "/.hash.txt", "d41d8cd9") && ok;
   ok = write_file(r + "/a..b.txt", "double dot is fine") && ok;
 
+  // 预压缩孪生文件的靶子。**三份内容互不相同**，于是"回的是哪一份"只看 body
+  // 就够，不必去猜长度。`/pc` 挂载开着 `precompressed`，`/` 挂载是默认值（关）。
+  ok = write_file(r + "/pc.txt", "PLAIN-BODY") && ok;
+  ok = write_file(r + "/pc.txt.br", "BR-SIDECAR-BODY") && ok;
+  ok = write_file(r + "/pc.txt.gz", "GZ-SIDECAR-BODY") && ok;
+  // 只有 `.gz` 一种：首选 `br` 缺席时必须退到它，而不是退回原文件。
+  ok = write_file(r + "/gzonly.txt", "PLAIN-GZONLY") && ok;
+  ok = write_file(r + "/gzonly.txt.gz", "GZONLY-SIDECAR") && ok;
+  // 一种都没有：必须**逐字节**退成不选项时的行为。
+  ok = write_file(r + "/notwin.txt", "NO-SIDECAR") && ok;
+  // 孪生**自己**超过 `max_cached_file_size`（`/pcs` 把它设成 4096）：分片下发
+  // 那条路挂不上 `content-encoding`，所以孪生再小也不能用 —— 这里孪生是 5000。
+  ok = write_file(r + "/over.txt", "SMALL-PLAIN") && ok;
+  ok = write_file(r + "/over.txt.br", std::string(5000, 'O')) && ok;
+  // 反过来：**大原文件 + 小孪生**。阈值量的是"这次要读进内存的那一份"，
+  // 所以 1 MiB+1 的 `huge.txt` 能靠 100 字节的边车下发。
+  ok = write_file(r + "/huge.txt.br", std::string(100, 'B')) && ok;
+
   ok = ensure_dir(r + "/sub") && ok;
   ok = write_file(r + "/sub/index.html", "<h1>SUB-INDEX</h1>") && ok;
   ok = write_file(r + "/sub/a.txt", "sub a") && ok;
@@ -300,6 +318,15 @@ void cleanup_root() {
   remove_file(std::string(k_root) + "/.env");
   remove_file(std::string(k_root) + "/.hash.txt");
   remove_file(std::string(k_root) + "/a..b.txt");
+  remove_file(std::string(k_root) + "/pc.txt");
+  remove_file(std::string(k_root) + "/pc.txt.br");
+  remove_file(std::string(k_root) + "/pc.txt.gz");
+  remove_file(std::string(k_root) + "/gzonly.txt");
+  remove_file(std::string(k_root) + "/gzonly.txt.gz");
+  remove_file(std::string(k_root) + "/notwin.txt");
+  remove_file(std::string(k_root) + "/over.txt");
+  remove_file(std::string(k_root) + "/over.txt.br");
+  remove_file(std::string(k_root) + "/huge.txt.br");
   remove_file(std::string(k_root) + "/home.html");
   TEST_RMDIR((std::string(k_root) + "/sub").c_str());
   TEST_RMDIR((std::string(k_root) + "/deep/inner").c_str());
@@ -1612,6 +1639,156 @@ void test_options() {
   check_eq(body_of(r), "<h1>HOME</h1>", "自定义索引文件名应当生效");
 }
 
+// ---- 15. 预压缩孪生文件 ----
+
+/**
+ * @brief `precompressed`：盘上的 `x.txt.br` / `x.txt.gz` 直接当响应体发出去。
+ *
+ * 判据是 **body 是那一份的文件**，不是"少发了多少字节" —— 后者在"回错了一份"
+ * 的时候反而变大。三份夹具内容互不相同就是为了这个。
+ *
+ * 这里同时钉住三条**不许越过的边界**（Range 不切孪生、孪生自己超阈值不用、
+ * 选不中时逐字节退回原行为），以及一条容易写漏的方向：**首选缺席要退到次选**，
+ * 而不是退回原文件 —— nginx 同时在跑 brotli 与 gzip_static、Caddy 写
+ * `precompressed br gzip` 时都是这个次序。
+ */
+void test_precompressed() {
+  std::cout << "[static] precompressed" << std::endl;
+  uvcpp_http_response r;
+  typedef std::vector<std::pair<std::string, std::string> > H;
+  const std::string kAE = "accept-encoding";
+
+  // (1) 客户端没声明的编码：一个字都不该变（连 `vary` 都不发）
+  check(get(g_port, "/pc/pc.txt", r), "/pc/pc.txt 应当有响应");
+  check_eq(body_of(r), "PLAIN-BODY", "没带 Accept-Encoding 时发原文件");
+  check_eq(header_of(r, "content-encoding"), "", "没协商就不该有 content-encoding");
+  check_eq(header_of(r, "vary"), "", "没协商就不该有 vary");
+  const std::string etag_plain = header_of(r, "etag");
+
+  // (2) `br` → `.br` 那一份；MIME 按**原文件名**报，不是 `.br` 的 octet-stream
+  check(get_with(g_port, "/pc/pc.txt", H(1, std::make_pair(kAE, "br")), r),
+        "/pc/pc.txt + br 应当有响应");
+  check_eq_i(status_of(r), 200, "br 变体的状态码");
+  check_eq(body_of(r), "BR-SIDECAR-BODY", "br 应当发 .br 的字节");
+  check_eq(header_of(r, "content-encoding"), "br", "br 变体要声明 content-encoding");
+  check_eq(header_of(r, "vary"), "accept-encoding", "两种表示必须带 vary");
+  check_eq(header_of(r, "content-type"), "text/plain; charset=utf-8",
+           "MIME 取原文件那一份，不取 .br 后缀");
+  check_eq_i(std::stoll(header_of(r, "content-length")),
+             static_cast<long long>(std::string("BR-SIDECAR-BODY").size()),
+             "content-length 是孪生那一份的长度");
+  // 孪生有自己的 mtime/大小，所以它的 ETag **必须**与原文件不同 —— 否则一个
+  // 中间缓存会拿原文件的验证器去匹配压缩过的字节。
+  check_ne(header_of(r, "etag"), etag_plain, "br 变体的 ETag 必须与原文件不同");
+
+  // (3) `gzip` → `.gz` 那一份
+  check(get_with(g_port, "/pc/pc.txt", H(1, std::make_pair(kAE, "gzip")), r),
+        "/pc/pc.txt + gzip 应当有响应");
+  check_eq(body_of(r), "GZ-SIDECAR-BODY", "gzip 应当发 .gz 的字节");
+  check_eq(header_of(r, "content-encoding"), "gzip", "gzip 变体的编码声明");
+
+  // (4) q 值排序：即使两个都可接受，听客户端的
+  check(get_with(g_port, "/pc/pc.txt",
+                 H(1, std::make_pair(kAE, "br;q=1, gzip;q=0.8")), r),
+        "带 q 的协商应当有响应");
+  check_eq(body_of(r), "BR-SIDECAR-BODY", "br 的 q 更高就该选 br");
+  check(get_with(g_port, "/pc/pc.txt",
+                 H(1, std::make_pair(kAE, "br;q=0.5, gzip;q=0.9")), r),
+        "带 q 的协商应当有响应（gzip 更高）");
+  check_eq(body_of(r), "GZ-SIDECAR-BODY", "gzip 的 q 更高就该选 gzip");
+  check(get_with(g_port, "/pc/pc.txt",
+                 H(1, std::make_pair(kAE, "br;q=1, gzip;q=1")), r),
+        "同 q 应当有响应");
+  check_eq(body_of(r), "BR-SIDECAR-BODY", "同 q 时优先 br");
+
+  // (5) `q=0` 是**明确拒绝**（RFC 9110 §12.5.3），不是"没提到"
+  check(get_with(g_port, "/pc/pc.txt", H(1, std::make_pair(kAE, "br;q=0")), r),
+        "q=0 应当有响应");
+  check_eq(body_of(r), "PLAIN-BODY", "br;q=0 是拒绝 br，不是选它");
+  check_eq(header_of(r, "content-encoding"), "", "被拒绝的编码不该出现");
+  check(get_with(g_port, "/pc/pc.txt",
+                 H(1, std::make_pair(kAE, "br;q=0, gzip;q=0")), r),
+        "两个都 q=0 应当有响应");
+  check_eq(body_of(r), "PLAIN-BODY", "两个都拒绝就发原文件");
+
+  // (6) `*` 兜住所有**没被显式声明**的编码
+  check(get_with(g_port, "/pc/pc.txt", H(1, std::make_pair(kAE, "*")), r),
+        "通配应当有响应");
+  check_eq(body_of(r), "BR-SIDECAR-BODY", "通配下取 br（同 q 时更小）");
+
+  // (7) **首选缺席要退到次选。** 盘上只有 `.gz`，客户端声明 br 与 gzip ——
+  //     发原文件是"能做得更好却没做"，而次优的那份就在盘上。
+  check(get_with(g_port, "/pc/gzonly.txt", H(1, std::make_pair(kAE, "br, gzip")), r),
+        "/pc/gzonly.txt 应当有响应");
+  check_eq(body_of(r), "GZONLY-SIDECAR", "br 缺席时必须退到 .gz");
+  check_eq(header_of(r, "content-encoding"), "gzip", "退到 .gz 后编码声明是 gzip");
+  // 但客户端明确拒绝 gzip 时**不许**这么做
+  check(get_with(g_port, "/pc/gzonly.txt",
+                 H(1, std::make_pair(kAE, "br;q=1, gzip;q=0")), r),
+        "/pc/gzonly.txt（拒绝 gzip）应当有响应");
+  check_eq(body_of(r), "PLAIN-GZONLY", "客户端拒绝 gzip 时不许发 .gz");
+
+  // (8) 一个孪生都没有 ⇒ 与关掉本选项时逐字节相同
+  check(get_with(g_port, "/pc/notwin.txt",
+                 H(1, std::make_pair(kAE, "br, gzip")), r),
+        "/pc/notwin.txt 应当有响应");
+  check_eq(body_of(r), "NO-SIDECAR", "没有孪生就发原文件");
+  check_eq(header_of(r, "content-encoding"), "", "没有孪生就不该有编码声明");
+  check_eq(header_of(r, "vary"), "", "没有孪生就不该有 vary");
+
+  // (9) **Range 与孪生互斥**：要切的是原文件的字节，切孪生会切出没有意义的
+  //     压缩流片段，而 `content-range` 还会拿原文件的坐标去描述它。
+  H ranged;
+  ranged.push_back(std::make_pair(kAE, std::string("br")));
+  ranged.push_back(std::make_pair(std::string("range"), std::string("bytes=0-4")));
+  check(get_with(g_port, "/pc/pc.txt", ranged, r),
+        "带 Range 的 br 请求应当有响应");
+  check_eq_i(status_of(r), 206, "带 Range 应当回 206");
+  check_eq(body_of(r), "PLAIN", "Range 必须切**原文件**，不是孪生");
+  check_eq(header_of(r, "content-encoding"), "", "206 一律不编码");
+  check_eq(header_of(r, "content-range"), "bytes 0-4/10", "content-range 按原文件坐标");
+
+  // (10) 孪生**自己**超 `max_cached_file_size`（/pcs 是 4096）⇒ 不能用
+  check(get_with(g_port, "/pcs/over.txt", H(1, std::make_pair(kAE, "br")), r),
+        "/pcs/over.txt 应当有响应");
+  check_eq(body_of(r), "SMALL-PLAIN", "孪生自己超阈值时退回原文件");
+  check_eq(header_of(r, "content-encoding"), "", "退回原文件就没有编码声明");
+  // 阈值之内的照常走孪生
+  check(get_with(g_port, "/pcs/pc.txt", H(1, std::make_pair(kAE, "br")), r),
+        "/pcs/pc.txt 应当有响应");
+  check_eq(body_of(r), "BR-SIDECAR-BODY", "阈值之内照常走孪生");
+
+  // (11) 大原文件 + 小孪生：1 MiB+1 的 `huge.txt` 由 100 字节的边车下发。
+  //      这正是不选本选项时**做不到**的（那条路要么整读原文件要么分片流式，
+  //      两者都压不了）。
+  check(get_with(g_port, "/pcs/huge.txt", H(1, std::make_pair(kAE, "br")), r),
+        "/pcs/huge.txt 应当有响应");
+  check_eq_i(status_of(r), 200, "大文件 + 小孪生的状态码");
+  check_eq_i(std::stoll(header_of(r, "content-length")), 100,
+             "下发的是孪生那一份的 100 字节，不是 1 MiB");
+  check_eq(header_of(r, "content-encoding"), "br", "大文件的孪生也要声明编码");
+  check_eq_i(static_cast<long long>(body_of(r).size()), 100, "body 就是那 100 字节");
+
+  // (12) `precompressed` 默认关：同一个文件在默认挂载上一律发原文件。
+  //      这条是"默认行为零变化"的回归闸门。
+  check(get_with(g_port, "/pc.txt", H(1, std::make_pair(kAE, "br, gzip")), r),
+        "默认挂载上的 /pc.txt 应当有响应");
+  check_eq(body_of(r), "PLAIN-BODY", "选项默认关：盘上有孪生也不许用");
+  check_eq(header_of(r, "content-encoding"), "", "选项默认关：不该有编码声明");
+
+  // (13) HEAD 与 GET 的头必须一致（一样走孪生、一样声明编码）
+  const std::string req_head =
+      "HEAD /pc/pc.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+      "Accept-Encoding: br\r\n\r\n";
+  raw_result h = raw_exchange(g_port, req_head, 3000);
+  check(h.ok, "带 br 的 HEAD 应当有响应");
+  check_eq_i(raw_status(h.raw), 200, "带 br 的 HEAD 状态码");
+  check_eq(raw_header(h.raw, "content-encoding"), "br", "HEAD 也要声明 br");
+  check_eq(raw_header(h.raw, "content-length"), "15", "HEAD 的长度是孪生的长度");
+  check_eq_i(static_cast<long long>(raw_body(h.raw).size()), 0,
+             "HEAD 一个 body 字节都不能有");
+}
+
 }  // namespace
 
 // =========================================================================
@@ -1685,6 +1862,17 @@ int main() {
 
     std::shared_ptr<uvcpp_web_static> cached = app.serve_static("/cache", k_root);
 
+    // 预压缩孪生文件：`/pc` 用默认阈值（1 MiB），`/pcs` 把阈值压到 4096 字节，
+    // 好让"孪生自己超阈值"这条边界在小文件上就能测到。
+    uvcpp_web_static_options pc;
+    pc.precompressed = true;
+    app.serve_static("/pc", k_root, pc);
+
+    uvcpp_web_static_options pcs;
+    pcs.precompressed = true;
+    pcs.max_cached_file_size = 4096;
+    app.serve_static("/pcs", k_root, pcs);
+
     // 自定义索引用例要的文件，得在 App 起来之前放进文档根
     write_file(std::string(k_root) + "/home.html", "<h1>HOME</h1>");
 
@@ -1718,6 +1906,7 @@ int main() {
     if (want("spa")) test_spa_fallback();
     if (want("cache")) test_cache();
     if (want("options")) test_options();
+    if (want("precompressed")) test_precompressed();
 
     app.stop();
     app.join();

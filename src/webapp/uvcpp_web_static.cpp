@@ -500,6 +500,23 @@ struct uvcpp_web_static::Impl {
     std::vector<cache_probe> probes;
 
     /**
+     * @brief 客户端**可接受**的预压缩后缀，按 q 降序，至多两个；空串 = 没这一位。
+     *
+     * 在 `serve()`（循环线程）里按 `Accept-Encoding` 定下来，之后不再变。
+     * worker 按序探 `final_url + try_variants[i]`，**取第一个存在的**。
+     */
+    std::string try_variants[2];
+
+    /**
+     * @brief **已经 stat 通过**并被采用的那一个后缀，空 = 用原文件。
+     *
+     * 它与 `try_variants[0]` 不一定相同：首选缺席（比如盘上只有 `.gz`）时取的是
+     * 后面的候选。**全都没探到就自己清空**（见 `run_job`），所以 worker 结束时
+     * 它为空就等价于"这次没用孪生文件"。
+     */
+    std::string variant;
+
+    /**
      * @brief 本 job 当前**持有一个工作池名额**吗。
      *
      * 名额从 `serve()` 搬进 `run_job()` 之后，"拿过"不再是一条必走的路
@@ -514,6 +531,14 @@ struct uvcpp_web_static::Impl {
     bool served_from_cache;
     std::string final_url;
     std::string fs_path;  ///< 只用于取 MIME 与日志，不再参与路径判断
+    /**
+     * @brief 取 MIME 用的路径 —— **永远是原文件**那一份。
+     *
+     * 用了孪生文件时 `fs_path` 会变成 `app.js.br`，而 `.br` 在后缀表里只能
+     * 查成 `application/octet-stream`。类型要按**原文件名**报，压缩只是同一份
+     * 表示的另一种编码（靠 `content-encoding` 声明），不是另一种类型。
+     */
+    std::string mime_path;
     int64_t mtime_sec;
     int64_t mtime_nsec;
     int64_t size;
@@ -652,16 +677,37 @@ struct uvcpp_web_static::Impl {
   }
 
   // ---- LRU（共享一份，受 mu_ 护；`evict()` 例外，见它自己的注释）----
-  void collect_probes(const std::string& url,
+  /**
+   * @brief 给每个候选键**各探一次**：原文件，以及每一个可接受后缀的孪生键。
+   *
+   * 为什么要两个都探：循环线程不知道盘上有没有孪生文件 —— 那正是 worker
+   * 要去 stat 的事。多探一条只是多一次内存里的 map 查找；少探一条则会让
+   * "孪生文件已缓存"的那次命中退化成一次读盘。
+   *
+   * 键就是**拼好后缀的 URL 本身**（`/static/app.js.br`），跟 `put()` 写进去的
+   * 那一份对得上，也天然把 `.br` / `.gz` / 原文件分成三条互不覆盖的条目。
+   */
+  void collect_probes(const std::string& url, const std::string variants[2],
                       std::vector<cache_probe>& out) const {
-    add_probe(url, out);
+    add_probe(url, variants, out);
     for (size_t i = 0; i < cfg->index_names.size(); ++i) {
-      add_probe(join_url(url, cfg->index_names[i]), out);
+      add_probe(join_url(url, cfg->index_names[i]), variants, out);
     }
-    if (cfg->spa_fallback && !cfg->spa_url.empty()) add_probe(cfg->spa_url, out);
+    if (cfg->spa_fallback && !cfg->spa_url.empty()) {
+      add_probe(cfg->spa_url, variants, out);
+    }
   }
 
-  void add_probe(const std::string& key, std::vector<cache_probe>& out) const {
+  void add_probe(const std::string& key, const std::string variants[2],
+                 std::vector<cache_probe>& out) const {
+    add_one_probe(key, out);
+    for (size_t i = 0; i < 2; ++i) {
+      if (!variants[i].empty()) add_one_probe(key + variants[i], out);
+    }
+  }
+
+  void add_one_probe(const std::string& key,
+                     std::vector<cache_probe>& out) const {
     for (size_t i = 0; i < out.size(); ++i) {
       if (out[i].key == key) return;  // 去重：候选键可能撞车
     }
@@ -842,12 +888,48 @@ void uvcpp_web_static::Impl::run_job(job* j) {
   j->policy_rejected = pr.policy_rejected;
   j->final_url = pr.final_url;
   j->fs_path = pr.fs_path;
+  j->mime_path = pr.fs_path;
   j->mtime_sec = pr.mtime_sec;
   j->mtime_nsec = pr.mtime_nsec;
   j->size = pr.size;
   j->served_from_cache = false;
 
   if (s != probe_status::OK || pr.is_dir) return;
+
+  // ---- 预压缩孪生文件 ----
+  //
+  // 位置在尺寸闸门**之前**：闸门该量的是"这次真要读进内存的那份"有多大，
+  // 而孪生文件比原文件小得多（本仓语料上平均小 75%）—— 拿原文件的大小去
+  // 拒绝一个只读 12 KB 的请求，是拿一条与实际字节无关的数当判据。
+  //
+  // 只走**整读**那条路：超过 `max_cached_file_size` 的走分片下发，而分片
+  // 下发不经过响应层，`content-encoding` 这个头挂不上去（见选项说明）。
+  // 所以孪生文件自己也超阈值时一样退回原文件。
+  //
+  // 探不到（404/403/是个目录）就清空 `variant`，让后面全部退回原文件 ——
+  // 于是"没预压过的资源"与关掉本选项时逐字节相同。
+  //
+  // 这一步用 `probe_leaf` 而不是 `probe_with_index`：孪生文件只能是**文件**
+  // 本身，`/static/app.js.br/index.html` 这种东西不存在也不该被找。
+  for (size_t i = 0; i < 2; ++i) {
+    if (j->try_variants[i].empty()) break;
+    probe_result vp;
+    const probe_status vs =
+        probe_leaf(j->loop, *j->cfg, pr.final_url + j->try_variants[i], vp);
+    if (vs == probe_status::OK && !vp.is_dir &&
+        static_cast<uint64_t>(vp.size) <=
+            static_cast<uint64_t>(j->cfg->max_cached_file_size)) {
+      j->variant = j->try_variants[i];
+      j->final_url = vp.final_url;
+      j->fs_path = vp.fs_path;
+      j->mtime_sec = vp.mtime_sec;
+      j->mtime_nsec = vp.mtime_nsec;
+      j->size = vp.size;
+      break;
+    }
+    // 首选缺席（或它自己超阈值）就试下一个 —— nginx 与 Caddy 都是这个次序。
+    // 全都没探到则 `j->variant` 保持为空，退回原文件。
+  }
 
   // 尺寸闸门放在读盘**之前**：超限的请求一个字节都不读，直接 413。
   // 这是"读进内存再一次写出去"这个实现的必要配套，没有它，一个 2 GiB 的
@@ -871,7 +953,7 @@ void uvcpp_web_static::Impl::run_job(job* j) {
   // 阈值 0 表示"一律走流式"（见 options 的说明），所以这里**不能**写成
   // `thr > 0 && ...` —— 那样 0 就变成了"从不流式"，与文档相反。
   const size_t thr = j->cfg->max_cached_file_size;
-  if (static_cast<uint64_t>(pr.size) > static_cast<uint64_t>(thr)) {
+  if (static_cast<uint64_t>(j->size) > static_cast<uint64_t>(thr)) {
     // 一个字节都不读。元数据已经全部带在 job 上了（上面那一段赋过值），
     // 所以 ETag/Last-Modified/条件请求/Range 在 loop 线程那侧照常判定。
     //
@@ -899,8 +981,10 @@ void uvcpp_web_static::Impl::run_job(job* j) {
   // 是零 —— 实测并发 64 时 71.7% 的请求被拒，其中 99.97% 本来能命中缓存。
   for (size_t i = 0; i < j->probes.size(); ++i) {
     const cache_probe& p = j->probes[i];
-    if (p.key == pr.final_url && p.size == pr.size &&
-        p.mtime_sec == pr.mtime_sec && p.mtime_nsec == pr.mtime_nsec) {
+    // 比的是**这一份**（可能已经是孪生文件）的身份：键、大小、mtime。键里
+    // 已经带上了后缀，所以 `.br` 的命中不会把原文件的条目顶掉。
+    if (p.key == j->final_url && p.size == j->size &&
+        p.mtime_sec == j->mtime_sec && p.mtime_nsec == j->mtime_nsec) {
       j->data = p.data;
       j->served_from_cache = true;
       return;
@@ -911,9 +995,9 @@ void uvcpp_web_static::Impl::run_job(job* j) {
   if (!acquire_slot(j)) return;
 
   std::shared_ptr<std::string> buf(new std::string());
-  if (!read_file(j->loop, pr.fs_path, pr.size, *buf)) {
+  if (!read_file(j->loop, j->fs_path, j->size, *buf)) {
     UVCPP_LOG_ERROR(log_category::IO)
-        << "静态文件读取失败: " << pr.fs_path << "（" << pr.size << " 字节）";
+        << "静态文件读取失败: " << j->fs_path << "（" << j->size << " 字节）";
     j->status = probe_status::IO_ERROR;
     return;
   }
@@ -967,7 +1051,9 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
       break;  // STREAM 只换产出 body 的方式，元数据与 OK 完全一样
   }
 
-  const std::string ct = content_type_for(j->fs_path);
+  // MIME 取**原文件**那一份（`mime_path`）：孪生文件是同一份表示的另一种
+  // 编码，靠 `content-encoding` 声明，类型不该跟着后缀变成 octet-stream。
+  const std::string ct = content_type_for(j->mime_path);
   const std::string etag =
       opts.etag ? make_etag(j->size, j->mtime_sec, j->mtime_nsec)
                 : std::string();
@@ -984,6 +1070,20 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     resp.set_header("cache-control", opts.cache_control);
   }
   resp.set_content_type(ct);
+
+  // 预压缩孪生文件：body 就是盘上那份压缩产物，声明它的编码，并挂上
+  // `vary` —— 同一个 URL 从此有两种表示，任何共享缓存都必须按
+  // `Accept-Encoding` 分桶，否则会把 brotli 的字节发给只认 gzip 的客户端。
+  //
+  // 声明之后 `apply_compression()` 会**自己让路**：它见到响应已有
+  // `content-encoding` 就原样放行，不会再压第二遍（压第二遍还会把已经压过的
+  // 字节再"压大"一次）。
+  if (!j->variant.empty()) {
+    resp.set_header("content-encoding",
+                    j->variant == ".br" ? "br" : "gzip");
+    resp.set_header("vary", "accept-encoding");
+  }
+
   const bool ranged_ok = opts.range;
   if (ranged_ok) resp.set_header("accept-ranges", "bytes");
 
@@ -1132,7 +1232,10 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     // 也可以把 `first`/`count` 编进键、让每段 Range 各自成条，但那样 Range 就能
     // 用任意多的键把"整个文件的变体"挤出去（淘汰只看最近使用），而换来的只是
     // "同一段 Range 重复请求"这一个边角收益。不值。
-    if (!partial) {
+    // **用了孪生文件就不设 tag**：tag 是给**实时压缩**的变体缓存当键的，
+    // 而这份 body 已经是压缩产物，`apply_compression()` 见到
+    // `content-encoding` 根本不会进来。设了它只会白占一份变体缓存的位置。
+    if (!partial && j->variant.empty()) {
       resp.raw().cache_tag = j->fs_path + "\x1f" + std::to_string(j->size) +
                              "\x1f" + std::to_string(j->mtime_sec) + "\x1f" +
                              std::to_string(j->mtime_nsec);
@@ -1183,6 +1286,7 @@ uvcpp_web_static_options::uvcpp_web_static_options(size_t max_file)
       cache_max_entries(256),
       cache_max_bytes(32u * 1024u * 1024u),
       max_cached_file_size(1024u * 1024u),
+      precompressed(false),
       dotfiles(uvcpp_web_dotfile_policy::HIDE),
       follow_symlinks(true),
       add_charset(true),
@@ -1214,6 +1318,111 @@ bool valid_index_name(const std::string& name) {
     if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) return false;
   }
   return true;
+}
+
+/// `q=` 的值。只认 `[0-9]*[.[0-9]*]`：本层只拿它做"是不是 0"和两个编码之间的
+/// 先后比较，`strtod` 会拖进 locale 语义，为这点事不值当。解析不出数字时按
+/// RFC 9110 §12.4.2 的宽松读法当作 1（"没说就是全要"）。
+double parse_quality(const std::string& v) {
+  double x = 0.0;
+  size_t i = 0;
+  bool any = false;
+  for (; i < v.size() && v[i] >= '0' && v[i] <= '9'; ++i) {
+    x = x * 10.0 + static_cast<double>(v[i] - '0');
+    any = true;
+  }
+  if (i < v.size() && v[i] == '.') {
+    ++i;
+    double f = 0.1;
+    for (; i < v.size() && v[i] >= '0' && v[i] <= '9'; ++i) {
+      x += static_cast<double>(v[i] - '0') * f;
+      f *= 0.1;
+      any = true;
+    }
+  }
+  if (!any) return 1.0;
+  return x > 1.0 ? 1.0 : x;  // RFC 9110：q 落在 [0,1]，越界按 1 收
+}
+
+/**
+ * @brief 从 `Accept-Encoding` 里挑出预压缩孪生文件的后缀。
+ *
+ * 返回 `".br"` / `".gz"`，或空串（= 不用孪生文件，发原文件）。只认 `br` 与
+ * `gzip`（含 `x-gzip` 这个历史别名）两个 token：本仓的压缩器只会 deflate，
+ * 所以 `deflate` 这个 token 对应的是**实时压缩**那条路，不在孪生文件里管。
+ *
+ * `q=0` 是明确拒绝，即便它是唯一被声明的编码也不选它。同 `q` 时优先 `br` ——
+ * 两份产物都是我们自己发出去的字节，brotli 在同一份资源上更小（本仓
+ * `data/static` 那 20 个文件上平均小 16%）。`*` 按 RFC 9110 §12.5.3 匹配所有
+ * 未列出的编码，这里让它同时兜住两者。
+ *
+ * **返回的是一张有序表而不是一个后缀。** 客户端能收的常常不止一种，而盘上
+ * 备了哪几种是构建期的事。只认首选的话，"这个资源只压过 `.gz`"就会退化成
+ * "这个资源没压过"、把原文件发出去 —— 而次优的那份本来就在盘上。nginx 同时
+ * 挂 brotli 与 gzip_static 两个模块时、Caddy 写 `precompressed br gzip` 时，
+ * 都是**按序取第一个存在的**，这里照做。
+ */
+size_t pick_precompressed_variants(const std::string& header,
+                                   std::string out[2]) {
+  out[0].clear();
+  out[1].clear();
+  bool br_ok = false, gz_ok = false, star_ok = false;
+  double br_q = 0.0, gz_q = 0.0, star_q = 0.0;
+
+  size_t pos = 0;
+  while (pos <= header.size()) {
+    const size_t comma = header.find(',', pos);
+    const std::string raw = web_trim(header.substr(
+        pos, comma == std::string::npos ? std::string::npos : comma - pos));
+    pos = (comma == std::string::npos) ? header.size() + 1 : comma + 1;
+    if (raw.empty()) continue;
+
+    std::string name = raw;
+    double q = 1.0;
+    const size_t semi = raw.find(';');
+    if (semi != std::string::npos) {
+      name = web_trim(raw.substr(0, semi));
+      // 参数段可能不止一个（`gzip;q=0.8;foo=bar`），逐个找 `q=`。
+      size_t p = semi + 1;
+      while (p <= raw.size()) {
+        const size_t sc = raw.find(';', p);
+        const std::string one = web_trim(raw.substr(
+            p, sc == std::string::npos ? std::string::npos : sc - p));
+        p = (sc == std::string::npos) ? raw.size() + 1 : sc + 1;
+        if (one.size() > 2 && (one[0] == 'q' || one[0] == 'Q') && one[1] == '=') {
+          q = parse_quality(one.substr(2));
+        }
+      }
+    }
+    if (name.empty()) continue;
+
+    if (web_equals_ci(name, "br")) {
+      if (q > 0.0) { br_ok = true; br_q = q; }
+    } else if (web_equals_ci(name, "gzip") || web_equals_ci(name, "x-gzip")) {
+      if (q > 0.0) { gz_ok = true; gz_q = q; }
+    } else if (name == "*") {
+      if (q > 0.0) { star_ok = true; star_q = q; }
+    }
+  }
+
+  if (star_ok) {  // 未列出的按通配的 q 收；显式声明过的以显式那份为准
+    if (!br_ok) { br_ok = true; br_q = star_q; }
+    if (!gz_ok) { gz_ok = true; gz_q = star_q; }
+  }
+  // 排序只在这三个组合里有意义；同 q 时 br 在前（本仓 `data/static` 上平均小 16%）。
+  size_t n = 0;
+  if (br_ok && gz_ok) {
+    out[0] = (br_q >= gz_q) ? std::string(".br") : std::string(".gz");
+    out[1] = (br_q >= gz_q) ? std::string(".gz") : std::string(".br");
+    n = 2;
+  } else if (br_ok) {
+    out[0] = ".br";
+    n = 1;
+  } else if (gz_ok) {
+    out[0] = ".gz";
+    n = 1;
+  }
+  return n;
 }
 
 }  // namespace
@@ -1387,11 +1596,24 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
   j->url = url;
   j->is_head = (req.method() == http_method::HTTP_HEAD);
 
+  // 预压缩孪生文件的后缀在这里定，**只按请求头算一次**。
+  //
+  // 带 `Range` 的请求一律不用：分段要切的是**原文件**的字节，对孪生文件切段
+  // 会切出一段没有意义的压缩流。这与响应层那条"206 一律不编码"是同一条规则
+  // （对孪生文件来说，206 与 `content-encoding` 一起出现本身就是矛盾的：
+  // `Content-Range` 会拿原文件的坐标系去描述压缩流里的偏移）。
+  if (im->opts.precompressed && !req.has_header("range")) {
+    pick_precompressed_variants(req.header("accept-encoding"),
+                                j->try_variants);
+  }
+
   // 留住 next。**赋值必须发生在 `serve()` 返回之前**（也就是 handler 调用
   // 返回之前）—— 框架是在 handler 返回的那一刻量引用数来判断"留没留"的。
   j->next = next;
 
-  if (im->cache_enabled()) im->collect_probes(url, j->probes);
+  if (im->cache_enabled()) {
+    im->collect_probes(url, j->try_variants, j->probes);
+  }
 
   uvcpp_work* work = new uvcpp_work();
   const int rc = work->queue_work(

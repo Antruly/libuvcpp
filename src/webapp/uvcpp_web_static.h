@@ -207,7 +207,8 @@ struct UVCPP_API uvcpp_web_static_options {
    * 存在（整份文件）、`content-length` 已知（兄弟文件的大小）、与
    * `transfer-encoding` 没有交互。它换不来"任意大文件"（得先压好），但静态
    * 资源的可压缩主体（js / css / wasm / json）本来就是打包器产出的，那一步
-   * 天然已经做过。代价是那条路**自己**得声明 `vary: accept-encoding` —— 它
+   * 天然已经做过（**1.6.15 已经做了，即下面的 `precompressed`**）。代价是
+   * 那条路**自己**得声明 `vary: accept-encoding` —— 它
    * 同样不经过 `apply_compression()`，拿不到那处声明，上面"逐字节相同"这句
    * 届时也就不再成立。
    *
@@ -216,6 +217,38 @@ struct UVCPP_API uvcpp_web_static_options {
    * 不会让 2 MiB 的那个文件变小。
    */
   size_t max_cached_file_size;
+
+  /**
+   * @brief 是否使用**预压缩孪生文件**（`app.js.br` / `app.js.gz`）。默认 false。
+   *
+   * 开了之后，盘上有孪生文件的资源直接读它、原样发出去（带上
+   * `content-encoding` 与 `vary: accept-encoding`），**不再走实时压缩**。形状与
+   * nginx 的 `gzip_static`、Caddy 的 `precompressed br gzip` 一致，也正是上面
+   * `max_cached_file_size` 里"先考虑的不是流式 deflate"那段说的那条路。
+   *
+   * 选择规则：`br` 的 `q` 不低于 `gzip` 时取 `.br`（同 `q` 时 brotli 更小），
+   * 否则取 `.gz`；**首选那份不在盘上就试下一个** —— 于是客户端两份都接受而只有
+   * `.gz` 存在时会退到它（nginx 双模块、Caddy 都是这个次序）。客户端一个都没
+   * 声明就照旧发原文件。`q=0` 是**明确拒绝**（RFC 9110 §12.5.3），不会因为
+   * "只声明了它"而被选中。孪生文件**不存在**时退回原文件，于是"没预压过的
+   * 资源"与关掉本选项时逐字节相同。
+   *
+   * 三条边界，都是为了不把"压缩"和"内容协商"搅在一起：
+   *  - **带 `Range` 的请求一律不用孪生文件** —— 要切的是**原文件**的字节，
+   *    对孪生文件切段会切出一段没有意义的压缩流。与实时压缩那条"206 一律
+   *    不编码"是同一条规则。
+   *  - **阈值量的是孪生文件自己**：孪生文件 ≤ `max_cached_file_size` 才用它，
+   *    原文件多大不参与这个判定 —— 于是 2 MiB 的原文件照样能靠一个 1 KB 的边车
+   *    下发（分片下发那条路不经过响应层，挂不上 `content-encoding`，所以孪生文件
+   *    **自己**超阈值时不能走它）。
+   *  - **不套用 MIME 排除表**：排除表管的是"要不要**实时**压"，而 `.br` 已经
+   *    在盘上了。也正因为如此，`image/svg+xml` 这类默认被排除的类型，只要盘上
+   *    有孪生文件就会用上。
+   *
+   * 孪生文件自己的 `mtime`/大小参与全部缓存判定（`ETag`、`Last-Modified`、
+   * LRU 的失效比较都取它），所以重新压一遍之后对端必然拿到新的那一份。
+   */
+  bool precompressed;
 
   /** @brief dotfile 策略。默认 `HIDE`（404）。 */
   uvcpp_web_dotfile_policy dotfiles;

@@ -459,10 +459,40 @@ app.serve_static("/assets", "./public");
 | `cache_control` | 空 = 不发 | 框架不替你猜 |
 | `cache_max_entries` / `cache_max_bytes` | 256 / 32 MiB | `entries` 为 0 = 关缓存 |
 | `max_cached_file_size` | 1 MiB | **`0` = 一律流式**（与别的 setter"0 = 用默认"相反） |
+| `precompressed` | `false` | 盘上有 `x.js.br` / `x.js.gz` 就直接发它，不走实时压缩 |
 | `dotfiles` | `HIDE`（404） | 见 [§17](#17-安全) |
 | `follow_symlinks` | `true` | 关掉时只查**最后一段** |
 | `add_charset` | `true` | |
 | `mime` | `nullptr` = 默认表 | **不持有所有权** |
+
+### 预压缩孪生文件（`precompressed`）
+
+`serve_static()` 挂上去的资源，如果盘上**还有一份同名兄弟文件**（`app.js.br` /
+`app.js.gz`，构建流水线里压好的那种），开了本选项就直接读它、原样发出去，附上
+`content-encoding` 与 `vary: accept-encoding`。形状同 nginx 的 `gzip_static`（以及
+brotli 模块那一路）、Caddy 的 `precompressed br gzip`。
+
+它在**整读那条路**上顶掉实时压缩，省掉两样东西：请求线程上那次 zlib 压缩
+（`Z_DEFAULT_COMPRESSION`，level 6、windowBits 15），以及"压缩率由**运行时**参数
+决定"这件事 —— 构建期可以用 brotli 的最高档慢慢压，运行时不行（一次 `deflate` 就在
+收到请求的那条循环上跑）。这也正是 `max_cached_file_size` 的文档里"真要做，先考虑的
+不是流式 deflate"所指的那条路：整份文件 ⇒ 没有块边界、`content-length` 已知（就是
+孪生文件的大小）、与 `transfer-encoding` 没有交互。
+
+- **选择规则**：`br` 的 `q` 不低于 `gzip` 时取 `.br`（同 `q` 时 brotli 更小），否则
+  取 `.gz`；首选那份**不在盘上**就试下一个 —— 于是客户端两份都接受而只有 `.gz` 存在
+  时会退到 `.gz`（nginx 双模块、Caddy 都是这个次序）。客户端一个都没声明，或者只
+  声明的那个写了 `q=0`（RFC 9110 §12.5.3 的**明确拒绝**），就照旧发原文件。
+- **孪生文件不存在 ⇒ 逐字节等于关掉本选项**。想开就整站开，没有"要挑选哪些资源
+  预压"的中间态；盘上没压的资源不受影响。
+- **带 `Range` 的请求一律不用孪生文件**：要切的是**原文件**的字节，对孪生文件切段会
+  切出一段没有意义的压缩流。与"206 一律不压缩"是同一条规则。
+- **阈值量的是孪生文件自己**：孪生文件 ≤ `max_cached_file_size` 才用它，原文件多大
+  不参与判定 —— 2 MiB 的原文件靠一个 1 KB 的边车下发是正常的。
+- **不套 MIME 排除表**：那张表管的是"要不要**实时**压"，而 `.br` 已经在盘上了。所以
+  `image/svg+xml` 这类默认被排除的类型，只要盘上有孪生文件就会用上。
+- 孪生文件自己的 `mtime`/大小参与**全部**缓存判定（`ETag`、`Last-Modified`、LRU 的
+  失效比较都取它），重新压一遍之后对端必然拿到新的那一份。
 
 ### Range / 条件请求
 
