@@ -490,7 +490,7 @@ src/web/uvcpp_http_client.h:445-445 87d70f054eaf6247 87d70f054eaf6247 -
 src/web/uvcpp_http_client.h:473-479 340e9dc8f77e5300 af9e4cd7c13c830c ddd6cd5f5eec36db
 src/web/uvcpp_http_client.h:70-70 b28db9b27491a2ec b28db9b27491a2ec -
 src/web/uvcpp_http_common.h:246-247 5d5591c858a59089 abf28ca15bd6320a 2c6c767a330c50df
-src/web/uvcpp_http_compress.cpp:146-165 48e7d9a7d957f1cf c2b7df6201fdd336 da45956b02d4c7ce
+src/web/uvcpp_http_compress.cpp:146-173 eacfcf720dcf43a9 da45956b02d4c7ce 5f2fc80b5762a27f
 src/web/uvcpp_http_date.cpp:114-124 3a0c004dfb16ee45 c2b7df6201fdd336 cf8b867126d74138
 src/web/uvcpp_http_date.cpp:86-107 7aa26b345b898872 c2b7df6201fdd336 cc6e8e969c01b9d0
 src/web/uvcpp_http_parser.cpp:430-478 36c72595b65f436f c2b7df6201fdd336 34e8729861e457ab

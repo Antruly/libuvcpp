@@ -267,6 +267,15 @@ static bool test_mime_exclusion() {
   if (!http_compress::should_compress("application/json", excl)) return false;
   if (!http_compress::should_compress("text/css", excl)) return false;
 
+  // 字体：woff/woff2 里装的本来就是压缩流，再 deflate 一遍产物**更大**
+  // （本仓语料 22 528 → 22 556、18 432 → 18 460 字节）—— 这两条是精确匹配，
+  // 不是 `font/` 前缀。
+  if (http_compress::should_compress("font/woff", excl)) return false;
+  if (http_compress::should_compress("font/woff2", excl)) return false;
+  // ...而**未压缩**的字体格式照旧要压：写前缀匹配就会把这两条一起排掉。
+  if (!http_compress::should_compress("font/ttf", excl)) return false;
+  if (!http_compress::should_compress("font/otf", excl)) return false;
+
   return true;
 }
 #endif  // UVCPP_ZLIB_ENABLE

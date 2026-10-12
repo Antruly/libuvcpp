@@ -160,6 +160,15 @@ const std::vector<std::string>& http_compress::default_excluded_mime_types() {
     "application/zstd",
     "application/pdf",
     "application/octet-stream",
+    // 字体：**只排 woff/woff2，不排整个 `font/`**。这两个容器里装的本来就是
+    // 压缩流（WOFF 是 gzip 过的 sfnt，WOFF2 是 brotli 过的），再 deflate 一遍
+    // 不但白烧 CPU，产物还**比原文件大** —— 本仓语料上 22 528 → 22 556、
+    // 18 432 → 18 460 字节。而 `font/ttf` / `font/otf` / `font/collection` 是
+    // 未压缩的轮廓数据，deflate 有实打实的收益，所以前缀匹配在这里是**错的**。
+    // 这与 Caddy `encode` 的跳过表一致（它也是逐个列 `font/woff` / `font/woff2`，
+    // 不是整个 `font/`）。
+    "font/woff",
+    "font/woff2",
   };
   return types;
 }

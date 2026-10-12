@@ -637,8 +637,16 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 
 zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1758-1758`），最小 body 1024
 （`src/web/uvcpp_http_server.h:1759-1759`），排除的 MIME 走 `default_excluded_mime_types()`
-（`src/web/uvcpp_http_compress.cpp:146-165`）。压缩变体缓存三道限：
+（`src/web/uvcpp_http_compress.cpp:146-173`）。压缩变体缓存三道限：
 单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1886-1896`）。
+
+排除表里带 `/` 的条目按**前缀**匹配（`image/` 管住所有位图），不带 `/` 的按**精确**
+匹配。字体那一组是刻意写成精确匹配的：`font/woff` 与 `font/woff2` 里装的本来就是
+压缩流（WOFF 是 gzip 过的 sfnt、WOFF2 是 brotli 过的），再 deflate 一遍不但白烧
+CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 → 18 460 字节）；
+而 `font/ttf` / `font/otf` / `font/collection` 是未压缩的轮廓数据，deflate 有实打实
+的收益 —— 写成 `font/` 前缀会把这两类一起排掉。Caddy 的 `encode` 跳过表同样是把
+这两个类型逐个列出来。
 
 ### 协议行为
 
