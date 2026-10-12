@@ -250,8 +250,27 @@ uvcpp_http_server::uvcpp_http_server() {
 }
 
 uvcpp_http_server::~uvcpp_http_server() {
-  // 按循环走一遍。析构发生在**所有**循环线程都已经停了之后（调用方的责任，
-  // 见 `uvcpp_tcp_server` 的停机次序），所以这里逐张表翻是安全的。
+  // **先让工作循环退场，再动下面那几张按循环切的表。**
+  //
+  // 上面那条"析构发生在所有循环线程都已经停了之后"是**调用方的责任**，而
+  // 调用方**没有任何办法**履行它：能停 worker 的 `stop_workers()` 是私有的，
+  // 唯一会调它的地方是本函数末尾那句 `delete tcp_server_` —— 那时代码已经把
+  // `contexts_` 逐张清过一遍了。于是 worker 的退出路径（关掉自己名下的连接
+  // ⇒ 关闭回调 ⇒ `remove_ctx` ⇒ `tbl.erase`）与这次清表撞在同一张表上：worker
+  // 的迭代器指向刚被 `clear()` 释放掉的结点，`erase` 落在
+  // `_Rb_tree_rebalance_for_erase` 里读一个已经还回去的结点 ⇒ SIGSEGV。
+  //
+  // 实测（`tests/functional/web_multiloop_func.cpp` 的 `seq n=4` 一档，4 核、
+  // 8 路并发）：2000 次里崩 20 次（约 1%），崩点恒在这一句下面那张
+  // `tbl.clear()` 与 worker 的 `remove_ctx` 之间。
+  //
+  // 单循环没有 worker（`set_loops(1)` 时 `workers_` 是空的），这一句是空操作
+  // ⇒ 既有单循环行为逐字节不变。
+  if (tcp_server_ != nullptr) tcp_server_->stop_workers();
+
+  // 按循环走一遍。到这儿循环线程**真的**都停了：worker 已经 join，acceptor
+  // 那条循环的线程是调用者自己的（`run()` 就在调用者线程上跑，见
+  // `uvcpp_tcp_server::run`），它此刻正在这个析构里，不可能同时泵循环。
   for (size_t li = 0; li < contexts_.size(); ++li) {
     std::map<uvcpp_tcp_client*, conn_ctx>& tbl = contexts_[li];
     for (auto& kv : tbl) {

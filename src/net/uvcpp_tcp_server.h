@@ -818,6 +818,13 @@ class UVCPP_API uvcpp_tcp_server {
   /** @brief 停掉并 join 全部 worker（幂等）。**必须在既有四步收尾之前**调。 */
   void stop_workers();
 
+  // 私有 + `friend uvcpp_http_server`，与 `uvcpp_web_stream` 那边同一条理由：
+  // 上层析构**必须**在动它自己那几张按循环切的表之前把工作循环停掉 —— worker
+  // 的退出路径会关上自己名下的连接，而那条路会经由关闭回调跑 `remove_ctx`，
+  // 写的正是那几张表。公开 `stop_workers()` 等于允许任意调用方在循环还转着的
+  // 时候把工作线程拆掉。
+  friend class uvcpp_http_server;
+
   // Trampoline — C-style fn ptr + void* to avoid MSVC std::function
   // copy-chain corruption through libuv's callback layers.
   using connection_callback_t = void(*)(uvcpp_tcp_client* client,
