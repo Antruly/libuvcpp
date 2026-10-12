@@ -70,6 +70,28 @@ class UVCPP_API uvcpp_h2_connection {
   int start(const uvcpp_h2_session::callbacks& h2_cbs, const callbacks& conn_cbs);
 
   /**
+   * @brief 把一段**已经收到**的字节喂给会话，并把待发字节冲出去。
+   *
+   * 与"读回调收到数据"那条路（`on_read()` 的 DATA 分支）**逐句同形**，区别只在
+   * 字节从哪来：那条是由本层自己装上的读回调递进来的，这一条是**调用方**递进来的。
+   *
+   * 为什么需要它：一条连接按 h1 登记、起了 h1 的读之后才发现对端发的是 HTTP/2
+   * （明文连接的先验知识 h2c，见 `uvcpp_http_server::set_h2c_enabled`），那几段
+   * "探测期"已经收下来的字节必须原样补给会话 —— 24 字节前言是 `nghttp2` 自己
+   * 要认的，重新读是读不回来的（它们已经从套接字上被取走了）。
+   *
+   * @param data 字节，**本函数返回后即可释放**（会话在调用期间把要留的拷走）。
+   * @param len  字节数。`0` 是空操作，`data` 为 `nullptr` 时**不碰它**。
+   * @return 0 成功；会话已经结束（`closed()`）时 `UV_ECANCELED`；否则是
+   *         `uvcpp_h2_session::recv()` 的错误码 —— 那种情况下本层已经按
+   *         `on_fatal` 的约定收过尾了，调用方不必再做什么。
+   *
+   * @warning **必须在 `start()` 之后调**（`start()` 才建会话），并且只能在
+   *          `client()` 那条循环的线程上。
+   */
+  int feed(const char* data, size_t len);
+
+  /**
    * @brief 提交一个响应并立刻把待发字节冲出去。
    *
    * 是 `session().submit_response(...)` + `flush()` 的合并 —— 后者忘了调就是

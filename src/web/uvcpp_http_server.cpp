@@ -39,6 +39,21 @@ namespace uvcpp {
 
 namespace {
 
+#if UVCPP_NGHTTP2_ENABLE
+/**
+ * @brief RFC 9113 §3.4 的连接前言，**逐字节**就是这一段。
+ *
+ * 明文连接的 h2c 判定（`uvcpp_http_server::set_h2c_enabled`）拿它当判据。写成
+ * 常量而不是散在代码里比较字符串，是因为它同时是三件事的**唯一**来源：比对的
+ * 长度、比对的字节、以及"24"这个数。
+ *
+ * 末尾那个空字节不参与比较（`kH2cPrefaceLen` 是 `sizeof - 1`），但留着它让这个
+ * 常量是一个 C 字符串，接上 `+` 运算之类也能直接用。
+ */
+const char kH2cPreface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const size_t kH2cPrefaceLen = sizeof(kH2cPreface) - 1;
+#endif
+
 /**
  * @brief 把一条请求对象**清成空**，但**不还它那几块缓冲**（`clear()` 只改 size）。
  *
@@ -1168,6 +1183,76 @@ void uvcpp_http_server::on_connection_data(uvcpp_tcp_client* client,
       return;  // consumed by the hook; the parser never sees this chunk
     }
   }
+
+#if UVCPP_NGHTTP2_ENABLE
+  // ---- 明文连接的 h2c 判定（只在 `set_h2c_enabled(true)` 之后）----
+  //
+  // 判据是 RFC 9113 §3.4 的**先验知识**：头 24 个字节与固定前言逐字节相同就当
+  // h2，否则当 h1。**不是嗅探** —— 两边都由确定的字节决定，没有"猜"这一档。
+  //
+  // 位置：必须在 `parser->execute()` **之前**。那 24 个字节一旦喂给 llhttp，
+  // 它就已经被当成一条畸形请求行吃掉了（`PRI` 不是方法），而 h2 会话要的恰恰
+  // 是**原样**的这 24 个字节（`nghttp2` 自己认它）。
+  //
+  // 排在 `raw_data_hook_` **之后**是有意的：那个钩子的契约是"能看见原始字节、
+  // 也能把连接整个接管走"，接管了就不该再有人替它决定协议。
+  if (h2c_enabled() && ctx.parser != nullptr &&
+      ctx.h2c == conn_ctx::h2c_probe_state::PROBING && !client->is_tls()) {
+    const size_t have = ctx.h2c_probe.size();
+    // `matched` 是**本段里**连着的匹配字节数；`ctx.h2c_probe` 存的是**前面几段**
+    // 攒下的。分开数是为了下面"岔了"那条路能一次喂对：那时攒下的字节要按原样
+    // 补喂，而本段是从下标 0 起整段走常规路径 —— 本段被比过的那些字节还在里面，
+    // 单独再喂一次就是重复。
+    size_t matched = 0;
+    while (have + matched < kH2cPrefaceLen && matched < len &&
+           data[matched] == kH2cPreface[have + matched]) {
+      ++matched;
+    }
+
+    if (have + matched == kH2cPrefaceLen) {
+      // 前言齐了 ⇒ 整条连接转 h2。
+      //
+      // 交出去的必须是**从第 0 个字节起的整条流**，也就是
+      // `h2c_probe`（前几段，前言的 `[0, have)`）拼上**本段整段** `data`：
+      //
+      //   - 本段里被用来比对的 `matched` 个字节**不能跳过**。那 24 字节前言
+      //     不是我们替 nghttp2 剥掉的包装 —— 服务端会话**自己就要认它**
+      //     （`nghttp2_session_mem_recv2()` 对不上就返回 `-903`
+      //     `NGHTTP2_ERR_BAD_CLIENT_MAGIC`，而且是致命的）。第一版在这里写的是
+      //     `data + matched`，服务端于是只发得出去自己的 SETTINGS 就再没动静，
+      //     连客户端 SETTINGS 的 ACK 都没有。
+      //   - 本段 `matched` 之后的字节是前言后面跟的第一批帧（前言与第一帧挤在
+      //     同一个 TCP 段里到达是常态），本来就要一起交出去。
+      //
+      // 于是"前缀在前、本段整段在后"正好拼成一条从字节 0 开始的完整流，既没跳
+      // 也没重。
+      ctx.h2c = conn_ctx::h2c_probe_state::H2;
+      std::string pending = ctx.h2c_probe;
+      ctx.h2c_probe.clear();
+      pending.append(data, len);
+      // **这一句之后 `ctx` 就悬垂了**：`switch_to_h2c()` 会把本节点摘掉、再让
+      // h2 那条路插一份新的。所以它是本函数里最后一句用法，后面只剩一个 `return`。
+      switch_to_h2c(client, pending);
+      return;
+    }
+
+    if (matched == len) {
+      // 本段整个都是前言的开头，还没比完：攒着等下一段。**解析器一个字节都没
+      // 吃到**（这个 `return` 就是"本段到此为止"）。
+      ctx.h2c_probe.append(data, len);
+      return;
+    }
+
+    // 岔了 ⇒ 定案 h1，此后这条连接上与 h2c 有关的代码一行都不再跑。攒下的那几段
+    // 是"看过没吃过"的，按原样补喂给解析器；本段整个落到下面的常规路径上去。
+    ctx.h2c = conn_ctx::h2c_probe_state::H1;
+    if (have > 0) {
+      ctx.parser->execute(ctx.h2c_probe.data(), ctx.h2c_probe.size());
+      ctx.h2c_probe.clear();
+    }
+    // 不 return：本段（`data`, `len`）还要走常规路径。
+  }
+#endif
 
   // Keep-alive: 上一条消息收完了就重置解析器，好让这次读里的下一条报文能解析。
   //
@@ -2483,7 +2568,8 @@ size_t uvcpp_http_server::begin_h2_goaway() {
 
 #if UVCPP_NGHTTP2_ENABLE
 
-void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
+void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client,
+                                             bool run_connection_hook) {
   conn_ctx ctx;
   ctx.parser = nullptr;  // 与 h2 互斥：h2 连接上没有 llhttp
   ctx.generation = ++next_generation_;
@@ -2491,7 +2577,11 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
 
   // 与本层 h1 那条路**次序一致**：登记之后才跑连接钩子，钩子里的
   // `connection_generation(client)` 才拿得到身份。
-  if (connection_handler_) {
+  //
+  // `run_connection_hook` 只有"明文连接改判成 h2"那条路会传 false：那条连接
+  // 已经按 h1 登记过一次、钩子也跑过了（见 `switch_to_h2c()`）。改判是**同一条
+  // 连接换了协议**，不是新连接，钩子跑第二次等于把调用方的每连接簿记翻倍。
+  if (run_connection_hook && connection_handler_) {
     try {
       connection_handler_(client);
     } catch (const std::exception& e) {
@@ -2584,6 +2674,44 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client) {
     std::fprintf(stderr, "[uvcpp_http_server] h2 start failed: %d\n", rv);
     h2->close_now();
   }
+}
+
+void uvcpp_http_server::switch_to_h2c(uvcpp_tcp_client* client,
+                                      const std::string& pending) {
+  // 一条明文连接在**已经按 h1 登记、已经起了 h1 的读**之后改判成 h2。三件事必须
+  // 按这个次序做，缺一件都留下一个静默的坏状态：
+  //
+  // 1) 摘掉 h1 那份 `conn_ctx`（含 llhttp 解析器）。`on_tcp_connection_h2()` 会
+  //    自己登记一份新的，不先摘就是**把它盖掉** —— 那份解析器当场泄漏，而它每个
+  //    连接一个，跑上一天就是稳定的内存增长。
+  // 2) 卸掉 h1 那条读回调。**必须排在重建之前**：`read_start_events()` 对"已经
+  //    注册过读"的连接返回 `UV_EALREADY`（判据在 `read_start()` 里），而 h2 层的
+  //    `start()` 正是靠它登记的 —— 不卸的话 h2 层起不来，连接静默变成"收了字节
+  //    什么都不做"。
+  //    这里**丢不掉字节**：我们此刻正跑在那个读回调里（调用链是
+  //    `on_connection_data` ← 它），同步地卸掉再装上，中间没有一次循环迭代；
+  //    而本段字节已经在 `pending` 里了。
+  // 3) 建 h2 会话，再把 `pending`（前言 + 同段跟来的帧）喂给它。喂在 `start()`
+  //    **之后**：那时读已经被重新 arm 上，但新的一次读回调只可能在下一轮循环里
+  //    跑，而这里是同步的 —— 所以"先喂 pending、再收到新字节"这个次序是确定的，
+  //    不是靠运气。
+  std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
+  std::map<uvcpp_tcp_client*, conn_ctx>::iterator it = tbl.find(client);
+  if (it == tbl.end()) return;  // 原始数据钩子里已经把连接关了
+  uvcpp_http_parser* parser = it->second.parser;
+  tbl.erase(it);
+  delete parser;
+
+  client->read_stop();
+  // 钩子**不重跑**：这条连接按 h1 登记时已经跑过一次（见那里的注释）。
+  on_tcp_connection_h2(client, /*run_connection_hook=*/false);
+
+  std::map<uvcpp_tcp_client*, conn_ctx>& tbl2 = ctxs_of(client);
+  std::map<uvcpp_tcp_client*, conn_ctx>::iterator it2 = tbl2.find(client);
+  if (it2 == tbl2.end()) return;  // 钩子里/start 失败时已经把连接关了
+  uvcpp_h2_connection* h2 = it2->second.h2;
+  if (h2 == nullptr || pending.empty()) return;
+  h2->feed(pending.data(), pending.size());
 }
 
 void uvcpp_http_server::dispatch_h2_request(uvcpp_tcp_client* client,

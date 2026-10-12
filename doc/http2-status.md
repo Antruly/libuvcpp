@@ -76,7 +76,7 @@
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:355-355`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
-  （`src/webapp/uvcpp_web_app.cpp:442`，`kDefaultAlpn` 的定义），用户只能关掉它
+  （`src/webapp/uvcpp_web_app.cpp:459`，`kDefaultAlpn` 的定义），用户只能关掉它
   （`set_http2_enabled(false)`，`src/webapp/uvcpp_web_app.h:368`），或者自己设
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
 - **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
@@ -87,7 +87,7 @@
 ### 1.4 依赖与产物
 
 `nghttp2` 是**唯一被强制静态**的依赖：`uvcpp_nghttp2_configure()`
-（`CMakeLists.txt:429-429`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
+（`CMakeLists.txt:430-430`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
 静态 `nghttp2_static` 交给链接器。实测 `pe_imports()`：开了 h2 的 DLL 与没开的
 相比，非白名单依赖集合**都是** `llhttp.dll uv.dll zlib1.dll` —— 开 h2 不新增
 任何 DLL 依赖。
@@ -171,7 +171,8 @@
 
 | 不做 | 说明 |
 |---|---|
-| **h2c（明文 h2）** | 不做 `Upgrade: h2c`、不做 prior-knowledge、不做协议嗅探。本库的 h2 一律走 TLS + ALPN。 |
+| **`Upgrade: h2c` 协商** | **不做**，而且这是按标准做的：这条机制在 RFC 7540 §3.2，RFC 9113 §3.1 **把它删掉了**。本库也**不做**协议嗅探（那是猜，不是判）。 |
+| **明文 h2（先验知识 h2c）** | **做**（1.6.7 起）：连接的**头 24 个字节**与 `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` 逐字节相同时按 h2 处理（RFC 9113 §3.4）。两边都由确定的字节决定，没有"猜"这一档。默认**关**，`set_h2c_enabled(true)` 打开；h2 层与传输层本来就不看 TLS，所以这条路与 ALPN 那条并存。 |
 | **RFC 8441（WebSocket over HTTP/2）** | 不做，看到 `:protocol` 伪头一律按未知伪头拒（`uvcpp_h2_session.cpp` 的 `handle_pseudo`）。 |
 | **HTTP/3** | **不在本页范围内，而且 1.4.1 起它已经落地了。** 那一层在 `src/http3/`（nghttp3 解析，跑在 `src/quic/` 上，并接进了 web 层），与 h2 是两条**不同的传输**：本页只记 h2 的账，h3 的账记在 [`doc/http3-guide.md`](./http3-guide.md)。这里删掉的那句"HTTP/3 本身一个字节都没有"在 1.4.1 里不再成立 —— 顺着 git 历史读到它的人请以新那份为准。 |
 | **SERVER_PUSH** | 既不发也不收：`SETTINGS_ENABLE_PUSH = 0` 在 `init()` 里就宣告了。 |
@@ -375,7 +376,7 @@ ctest --test-dir build-h2 -C Release --timeout 60
    - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
      `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
      "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
-     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:2667-2667`
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:2668-2668`
      的注释），与 `pwsh` 无关。
    - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
      `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己

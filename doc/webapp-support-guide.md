@@ -72,7 +72,7 @@
 **这七个头里没有一个用 `UVCPP_WEBAPP_ENABLE` 守卫自己。** 21 个 webapp 头
 里只有 `src/webapp/uvcpp_web_ws_client.h:52` 一处（`#endif` 在 `:402`）用了这个宏。
 所以"没开 webapp 却 include 了这七个头"是**链接期失败**（那几个 `.cpp` 没进构建，
-`CMakeLists.txt:1559-1560`），不是编译期被 `#if` 挡住。这与 `uvcpp_web_ws_client.h`
+`CMakeLists.txt:1560-1561`），不是编译期被 `#if` 挡住。这与 `uvcpp_web_ws_client.h`
 的做法不一致 —— 看上去是历史的，不是设计。
 
 头在包里的位置是平铺的 `include/webapp/`：
@@ -132,7 +132,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 
 `webapp/uvcpp_web_util.h` 是**纯函数模块，没有类**，39 个公开声明。
 它的头注释（`:10-11`）解释的是**为什么要新开这个模块** —— web 层连一个 query
-解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:928-931`），
+解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:943-946`），
 不是"这一页里的东西不存在"。`src/web/` 下也确实没有任何 query / cookie / URL 解码
 helper。
 

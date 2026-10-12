@@ -358,6 +358,51 @@ class UVCPP_API uvcpp_http_server {
   bool http2_enabled() const { return http2_enabled_; }
 
   /**
+   * @brief 让**明文**连接也能走 HTTP/2（先验知识 h2c）。
+   *
+   * **默认 false** —— 不显式打开，明文连接就恒走 llhttp，与既有行为逐字节一致。
+   *
+   * 打开之后，每条非 TLS 连接的头 24 个字节与 RFC 9113 §3.4 的连接前言
+   * （`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`）**逐字节比一次**：全中 ⇒ 这条连接交给
+   * h2，否则 ⇒ 照旧给 llhttp，而且比过的那几个字节一个不少地补喂回去。
+   *
+   * 两件事要一起说清楚，因为它们决定了这个开关能不能乱开：
+   *
+   * - **这不是嗅探。** 判据是固定串的逐字节比较，不是"看着像 HTTP/2 就按 HTTP/2
+   *   处理"。所以它**只**支持先验知识那一种 h2c（客户端一上来就发前言），
+   *   **不做** `Upgrade: h2c` 协商 —— 那个在 RFC 9113 里已经被删掉了。合法的
+   *   HTTP/1.1 请求里没有哪一条会长成前言的样子（`PRI` 不是一个方法），所以这里
+   *   没有"误判"这一类风险。
+   * - **代价在每条明文连接的头 24 个字节上**，且只在打开之后：比较是逐字节的，
+   *   定案后立刻停（`conn_ctx::h2c_probe_state`），此后每条连接零开销。关闭时
+   *   （默认）一个字节都不比。
+   *
+   * @note 还要 @ref set_http2_enabled 也是开的：h2c 是"HTTP/2 走明文"，不是
+   *       "另一种 HTTP/2"。只开这一个等于什么都不发生。
+   *
+   * @note 被改判的那条连接上 @ref on_connection 钩子**只跑一次**（在按 h1 登记
+   *       的时候），不会因为改判而再跑一次 —— 那个钩子的契约是"比这条连接上
+   *       任何请求都早的簿记点"，跑两次会让调用方的每条连接计数翻倍。
+   */
+  void set_h2c_enabled(bool on) { h2c_enabled_ = on; }
+
+  /**
+   * @brief h2c 是不是真的开着。
+   *
+   * **与 `set_h2c_enabled()` 给的那个值不一定相等**，两处都可能让它答 false：
+   * 这份 libuvcpp 没编进 nghttp2（那种树上 `set_h2c_enabled(true)` 记下的只是
+   * "意图"，请求路径上不会有一行跑）、或者 @ref http2_enabled 不是真。**判据要看
+   * 这个值**，别拿 `#ifdef` 猜、也别拿自己设过的那个值猜。
+   */
+  bool h2c_enabled() const {
+#if UVCPP_NGHTTP2_ENABLE
+    return h2c_enabled_ && http2_enabled_;
+#else
+    return false;
+#endif
+  }
+
+  /**
    * @brief 给**本循环上**的 h2 连接发 GOAWAY，但一条都不关。
    *
    * 停机前该先调它，再走关连接那一套：GOAWAY 排进队列之后要几轮循环才出网，
@@ -906,6 +951,36 @@ class UVCPP_API uvcpp_http_server {
       bool        is_head  = false; ///< 这条流是 HEAD
     };
     std::map<int32_t, h2_stream_state> h2_streams;
+
+    /**
+     * @brief 明文连接上「这条是不是 h2c」的判定状态。
+     *
+     * 判据是 RFC 9113 §3.4 的**先验知识**（prior knowledge）：第一段字节与固定的
+     * 24 字节前言逐字节相同 ⇒ h2，否则 ⇒ h1。**不是嗅探** —— 两边都由确定的字节
+     * 决定，没有"看着像"。所以这个状态机只有三个态，且一旦离开 @ref PROBING 就
+     * 再也不回头。
+     *
+     * - @ref PROBING：还没收够 24 字节，也没比岔。这个态下 @ref h2c_probe 攒着
+     *   已经收下的字节，**解析器一个字节都没吃到** —— 那批字节可能整个属于前言，
+     *   喂给 llhttp 就是"把一条合法 h2 连接打成畸形请求"。
+     * - @ref H1：比岔了。此后这条连接上与 h2c 有关的代码一行都不再跑。
+     * - @ref H2：24 字节全中。此刻 `conn_ctx` 会被整个换掉（见
+     *   `switch_to_h2c()`），所以这个态只在不换表那条路上（单测直接观察）有意义。
+     *
+     * 只有 `set_h2c_enabled(true)` 且**明文**连接才会离开 @ref PROBING —— 默认
+     * 配置下这个字段恒为 @ref PROBING 且没人读它。
+     */
+    enum class h2c_probe_state { PROBING, H1, H2 };
+    h2c_probe_state h2c = h2c_probe_state::PROBING;
+
+    /**
+     * @brief @ref PROBING 期间攒下的字节，长度 `0..23`。
+     *
+     * 必须攒：TCP 会把 24 字节前言切成任意几段（`"PRI * HT"` + `"TP/2.0\r\n\r\nSM\r\n\r\n"`
+     * 是合法的到达方式），而"比岔了"的那一刻得把**前面几段**按原样补喂给解析器
+     * —— 它们是用户请求的一部分，丢了就是一条被静默吞掉的请求。
+     */
+    std::string h2c_probe;
 #endif
 
     /**
@@ -1242,8 +1317,27 @@ class UVCPP_API uvcpp_http_server {
   // -------------------------------------------------------------------
 
 #if UVCPP_NGHTTP2_ENABLE
-  /// h2 连接的分流入口（`on_tcp_connection` 里判完 ALPN 后进来）。
-  void on_tcp_connection_h2(uvcpp_tcp_client* client);
+  /**
+   * @brief h2 连接的分流入口（`on_tcp_connection` 里判完 ALPN 后进来）。
+   *
+   * @param run_connection_hook 要不要在登记之后跑 @ref on_connection 钩子。
+   *        TLS 那条路（ALPN 判 h2）与明文那条被改判的路（`switch_to_h2c()`）
+   *        在这里分叉：前者这条连接是**第一次**被登记，钩子必须跑；后者它已经
+   *        按 h1 登记过一次、钩子也跑过了，再跑一次就是让调用方的每条连接簿记
+   *        翻倍。**默认 true**，只有改判那条路传 false。
+   */
+  void on_tcp_connection_h2(uvcpp_tcp_client* client,
+                            bool run_connection_hook = true);
+
+  /**
+   * @brief 把一条**已经按 h1 登记、已经起了 h1 的读**的明文连接改判成 h2。
+   *
+   * 只由 @ref on_connection_data 里那段前言比较在"24 字节全中"时调用。
+   *
+   * @param pending 探测期已经收下、**还没喂给任何解析器**的字节：24 字节前言本身，
+   *                加上与它同段到达的那些（前言和第一帧挤在一个 TCP 段里是常态）。
+   */
+  void switch_to_h2c(uvcpp_tcp_client* client, const std::string& pending);
 
   /// 把一条**已收全**的 h2 请求交给路由，并在对应的流上回话。
   void dispatch_h2_request(uvcpp_tcp_client* client, int32_t stream_id,
@@ -1380,6 +1474,15 @@ class UVCPP_API uvcpp_http_server {
 
   /// 没有显式打开就恒 false。
   bool http2_enabled_ = false;
+
+  /**
+   * @brief 明文连接的 h2c（先验知识）开关；没有显式打开就恒 false。
+   *
+   * 与 @ref http2_enabled_ 分开记，因为两者的有效期不同：h2 那条路是**每条连接
+   * 建的时候**问一次 ALPN，这条是**每个读段**问一次（判定期要逐字节比前言）。
+   * 合成一个字段之后调用方就没法表达"我要 h2，但明文照旧走 h1"。
+   */
+  bool h2c_enabled_ = false;
 
   uvcpp_tcp_server* tcp_server_ = nullptr;
   int status_ = HTTP_SERVER_NONE;

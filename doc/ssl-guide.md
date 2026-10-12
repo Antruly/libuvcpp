@@ -65,7 +65,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 或链接错误**，只会在运行时读到错位的垃圾。
 
 关掉这个选项时：`src/ssl/` 会被从源文件与头文件列表里排除，**而且根本不安装 ssl 头**
-（`CMakeLists.txt:2371-2372`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
+（`CMakeLists.txt:2372-2373`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
 找不到文件。同理，`uvcpp_tcp_server::set_ssl_context()` 在关掉时**连声明都不存在**。
 
 运行时"关掉 TLS"不是宏，是 `set_ssl_context(nullptr)`。
@@ -178,7 +178,7 @@ bool doc_load_server_cert(uvcpp::uvcpp_ssl_context& ctx,
 }
 ```
 
-`generate_self_signed` **只用于测试和受控内网**（`src/webapp/uvcpp_web_app.h:463-466`）。
+`generate_self_signed` **只用于测试和受控内网**（`src/webapp/uvcpp_web_app.h:491-494`）。
 
 ---
 
@@ -260,7 +260,7 @@ bool has_alpn_select() const;
 |---|---|---|
 | `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:657` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:650-652`） |
 | `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:221-221` | "生命周期必须覆盖**整条连接**"（`:217`） |
-| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1980` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
+| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:1996` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
 顺序：`set_ssl_context` **必须在 `listen()` 之前**（`:346-347`），清空用
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。

@@ -407,6 +407,34 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   bool http2_enabled() const;
 
   /**
+   * @brief 开/关**明文** HTTP/2（先验知识 h2c）—— **默认关**。
+   *
+   * 与 `set_http2_enabled()` 的方向刻意不同：那一个管的是"TLS 上要不要宣告 h2"
+   * （默认开，因为 ALPN 协商不成会自动回落，零风险）；这一个管的是"**不加密**的
+   * 连接上要不要认 HTTP/2 前言"，那是一项**协议行为上的改变** —— 打开之后，
+   * 头 24 个字节等于 RFC 9113 连接前言的明文连接会被当成 h2，而不是一条畸形
+   * 请求。要它就得说一声。
+   *
+   * 打开之后有两条腿会走 h2：
+   *   - **专用端口**（如平台约定的 8082）：客户端上来就发前言，判定必中；
+   *   - **与 h1 同端口**（如 8080 上再挂 gRPC 的明文腿）：h1 与 h2c 按前言
+   *     **逐字节**分流，判定是确定的，不是嗅探 —— 判据与边界见
+   *     `uvcpp_http_server::set_h2c_enabled()`。
+   *
+   * 换言之：`h2c` 与 h1 共存不需要两个端口，也不需要 `Upgrade: h2c` 协商
+   * （那个在 RFC 9113 里已经删掉了）。
+   *
+   * @note **要 `http2_enabled()` 也为真**：`set_http2_enabled(false)` 之后再
+   *       调它不会有任何效果，`h2c_enabled()` 会如实回报 `false`。理由同底层：
+   *       h2c 是"HTTP/2 走明文"，不是"另一种 HTTP/2"。
+   *
+   * @note **只在 `start()` 之前调有效**（与 `set_http2_enabled()` 同一条），
+   *       `nghttp2` 没编进来时也是**记录意图的空操作**。
+   */
+  uvcpp_web_app& set_h2c_enabled(bool enable);
+  bool h2c_enabled() const;
+
+  /**
    * @brief 工作池在途任务上限（`uv_queue_work` 的背压闸门）。
    *
    * 默认是按 `UV_THREADPOOL_SIZE`（未设 → libuv 的 4）推导的 ×4、下限 16 ——
@@ -1399,6 +1427,19 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 报 h2 —— 那正是最坏的一种：协商成功，然后没人会说 h2。
    */
   bool http2_requested_ = true;
+
+  /**
+   * @brief 用户对**明文** h2（先验知识 h2c）的意图（**默认不要**）。
+   *
+   * 与 @ref http2_requested_ 分开记：那个是"TLS 上要不要 h2"，默认要（协商不成
+   * 自动回落，零风险）；这个是"不加密的连接上要不要认 HTTP/2 前言"，默认不要
+   * （它改变的是明文连接的协议判定）。合成一个字段就没法表达"TLS 上要 h2、
+   * 明文上还是 h1"这个默认姿态本身。
+   *
+   * 与 `h2c_enabled()` 的关系同上面那一条：字段是意图，访问器答的是"真能开吗"
+   * （要再 `&&` 一次 @ref http2_requested_ 与 `UVCPP_NGHTTP2_ENABLE`）。
+   */
+  bool h2c_requested_ = false;
 
   uvcpp_web_router   router_;
   std::vector<uvcpp_web_middleware> middlewares_;

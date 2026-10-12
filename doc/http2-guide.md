@@ -13,12 +13,12 @@
 
 - 打开方式：`-DUVCPP_ENABLE_NGHTTP2=ON`。**默认 OFF**（`CMakeLists.txt:180-180`），
   而且缺 OpenSSL 或缺 web 模块时会被**强制**置 OFF 并打 warning
-  （`CMakeLists.txt:398-398`、`CMakeLists.txt:407-407`）—— 因为 `uvcpp_h2_stream`
+  （`CMakeLists.txt:399-399`、`CMakeLists.txt:408-408`）—— 因为 `uvcpp_h2_stream`
   里直接放 `uvcpp_http_request` / `uvcpp_http_response`
   （`src/http2/uvcpp_h2_session.h:70`）。
 - 包含方式：`<http2/uvcpp_h2_session.h>`、`<http2/uvcpp_h2_connection.h>`、
   `<http2/uvcpp_h2_common.h>`。私有的 `<http2/uvcpp_h2_nghttp2.h>` **不安装**
-  （`CMakeLists.txt:2380-2380`）。
+  （`CMakeLists.txt:2382-2382`）。
 
 > 本页讲**怎么用**。它与 [HTTP/2 支持现状](./http2-status.md) 分工：那篇讲
 > **实现进度、写死的折衷、已知缺口**，本页不重复那些，需要时直接链过去。
@@ -72,12 +72,12 @@ int drain(std::string& out);                                      // src/http2/u
 ## 2. 编译期条件
 
 `UVCPP_NGHTTP2_ENABLE` **在任何构建里都有定义**，只是值不同：ON ⇒ `1`，OFF ⇒ `0`
-（`CMakeLists.txt:1878-1878`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
+（`CMakeLists.txt:1879-1879`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
 （`src/http2/uvcpp_h2_common.h:19`、`src/http2/uvcpp_h2_session.h:33`、`src/http2/uvcpp_h2_connection.h:27`）。
 
 为 0 时：头**还在**（源码树里能 include、也编得过），但里面**一个类型都不声明** ——
 写 `uvcpp_h2_session s(true);` 会"未定义类型"。安装出来的包里则**根本没有这几个头**
-（`CMakeLists.txt:2381-2381` 只在开关 ON 时装）。
+（`CMakeLists.txt:2382-2382` 只在开关 ON 时装）。
 
 所以使用者的写法是把自己的那段包起来：
 
@@ -156,15 +156,15 @@ uvcpp_h2_connection(uvcpp_tcp_client* client, bool server_side);  // src/http2/u
 int start(const uvcpp_h2_session::callbacks& h2_cbs,
           const callbacks& conn_cbs);                             // src/http2/uvcpp_h2_connection.h:70
 int send_response(int32_t stream_id, const uvcpp_http_response& resp,
-                  bool omit_body = false);                        // src/http2/uvcpp_h2_connection.h:78
-int send_status(int32_t stream_id, int status, const std::string& body);  // :82
-int send_headers(int32_t stream_id, const uvcpp_http_response& resp);     // :87
+                  bool omit_body = false);                        // src/http2/uvcpp_h2_connection.h:100
+int send_status(int32_t stream_id, int status, const std::string& body);  // :104
+int send_headers(int32_t stream_id, const uvcpp_http_response& resp);     // :109
 int send_data(int32_t stream_id, const char* data, size_t len,
-              bool end_stream, std::function<void(int)> done);        // :96
-int flush();                                                              // :127
-int begin_goaway();                                                       // :140
-void shutdown();                                                          // :143
-void close_now();                                                         // :146
+              bool end_stream, std::function<void(int)> done);        // :118
+int flush();                                                              // :149
+int begin_goaway();                                                       // :162
+void shutdown();                                                          // :165
+void close_now();                                                         // :168
 ```
 
 它**不拥有** `uvcpp_tcp_client`（`src/http2/uvcpp_h2_connection.h:34`），
@@ -193,7 +193,7 @@ struct callbacks {
    （`src/http2/uvcpp_h2_connection.cpp:18` 只存指针），但头文件的参数说明要求它
    （`src/http2/uvcpp_h2_connection.h:54`）。谁建谁自己判：
    `client->is_tls() && client->tls_alpn_selected() == "h2"`
-   （照 `src/web/uvcpp_http_server.cpp:958-958`）。
+   （照 `src/web/uvcpp_http_server.cpp:973-973`）。
 3. **`on_disconnect` 里必须销毁这个对象。** 头文件写得很直白：
    "回调返回后**不要**再碰本对象 —— 持有者应当在这里把它销毁"
    （`src/http2/uvcpp_h2_connection.h:46-51`）。
@@ -208,7 +208,7 @@ TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字�
 ### 唯一的那个连接级回调
 
 `on_disconnect` 在三种情况下触发：对端关了、读错了、我们自己关完了
-（`src/http2/uvcpp_h2_connection.cpp:207`、`:385`）。它**排在框架自己的关闭回调之前**，
+（`src/http2/uvcpp_h2_connection.cpp:232`、`:410`）。它**排在框架自己的关闭回调之前**，
 所以那是你最后一次能安全碰这条连接的机会。
 
 ---
@@ -219,14 +219,14 @@ TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字�
 那四个 `send_*` 是"`submit_*` + `flush()`"的合并 —— 忘了 `flush()` 就是
 "响应提交了但一个字节都没发"这种最难查的静默失败（`src/http2/uvcpp_h2_connection.h:74`）。
 
-库内那份接好的实现（`src/web/uvcpp_http_server.cpp:2510-2510` 起）的调用序列：
+库内那份接好的实现（`src/web/uvcpp_http_server.cpp:2600-2600` 起）的调用序列：
 
-1. 分流点判 ALPN，是 h2 就走另一条路（`src/web/uvcpp_http_server.cpp:958-958`）；
-2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:2510-2510`）；
-3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:2515-2515`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:2575-2575`）；
-4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:2580-2580`）；
-5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:2582-2582`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:2583-2583`）；
-6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:2620-2620` 起）。
+1. 分流点判 ALPN，是 h2 就走另一条路（`src/web/uvcpp_http_server.cpp:973-973`）；
+2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:2600-2600`）；
+3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:2605-2605`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:2665-2665`）；
+4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:2670-2670`）；
+5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:2672-2672`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:2673-2673`）；
+6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:2748-2748` 起）。
 
 一个能编的最小响应侧写法：
 
@@ -267,9 +267,9 @@ done)` → 最后一块 `end_stream = true`。三处要点：
 - **提交过 `end_stream` 之后这条流不再接受新的 `submit_data`**，再发就是协议违例
   （`src/http2/uvcpp_h2_session.h:305`）；
 - **每一块的 `done` 必须恰好跑一次**，流中途被 RST 或连接断了也会跑，参数是
-  `UV_ECANCELED`（`src/http2/uvcpp_h2_connection.h:122-125`）；
+  `UV_ECANCELED`（`src/http2/uvcpp_h2_connection.h:144-147`）；
 - **拆传输的正确顺序**是 `take_cancelled_dones(out)` → 销毁对象 → 在**自己的上下文
-  已经拆干净之后**逐个跑那些 `done`（`src/http2/uvcpp_h2_connection.h:148-160`）。
+  已经拆干净之后**逐个跑那些 `done`（`src/http2/uvcpp_h2_connection.h:170-182`）。
   它只取走、不跑，理由写在头里。
 
 ---
@@ -343,7 +343,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 `on_request_end` 的触发条件是**「这条流的 END_STREAM 到了」**，不是"有请求体才算"
 （`src/http2/uvcpp_h2_session.cpp:522`）。HEADERS 自带 END_STREAM 的请求（也就是
 绝大多数 GET）**也会触发**，而且是紧接着 `on_request` 同步来的 —— 库内自己就依赖
-这一点：`src/web/uvcpp_http_server.cpp:2537-2538` 明说那里**不能** `erase` 流状态，
+这一点：`src/web/uvcpp_http_server.cpp:2627-2628` 明说那里**不能** `erase` 流状态，
 无 body 的请求这两下是背靠背的，擦掉之后那条请求就没人派发了。
 
 **二、客户端交付响应只能放 `on_response_end`。** 带 body 的响应里 `on_response` 的
@@ -391,7 +391,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 | `:scheme` 白名单 | 只接受 `https` | `src/http2/uvcpp_h2_session.cpp:347` |
 
 **没有闲置超时**（`src/http2/` 里 grep `idle|timeout|keepalive` 零命中）。
-`src/web/uvcpp_http_server.h:1201-1204` 提到的那个 idle sweep 属于 **webapp 层**
+`src/web/uvcpp_http_server.h:1276-1279` 提到的那个 idle sweep 属于 **webapp 层**
 （默认 60 s），既不是 h1 服务器自带的，也不覆盖 h2 连接。
 
 对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:378`）、
@@ -496,7 +496,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:821
 `nghttp2_stream`（`src/http2/uvcpp_h2_session.h:243`）。用 `in_nghttp2()` 判自己是不是
 在回调里；推迟到 `recv()` 返回之后再冲即可，连接层本来就在返回之后冲一次。
 **注意 `flush()` 在回调里调用是安全的** —— 它自己会推迟，排队的字节一个都不会丢
-（`src/http2/uvcpp_h2_connection.h:127-131`）。
+（`src/http2/uvcpp_h2_connection.h:149-153`）。
 
 **`recv()` 的返回值不能在连接已死之后用来判据。** 回调可能把宿主整条析构掉，
 那时 `this` 已经没了。所以调用方进来之前要先本地持一份 `shared_ptr`
@@ -512,7 +512,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:821
 
 **`run_completed()` 只在没有写在飞的时候调**，而且 `done` 跑起来之后**一个字都不能
 写成员** —— `done` 跑的是用户代码，它可能再补一笔写
-（`src/http2/uvcpp_h2_connection.h:179`）。
+（`src/http2/uvcpp_h2_connection.h:201`）。
 
 **`content-length` 校验只在服务端请求方向做。** 客户端侧的响应头只挡连接专属头，
 不校验 `content-length`（`src/http2/uvcpp_h2_session.cpp:470`）。
@@ -535,7 +535,9 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:821
   [现状 §4.2](./http2-status.md#42-还没修的只记录)。
   `H2_DEFAULT_INITIAL_WINDOW_SIZE` **仍然**全仓零引用。
 - **不给 h2 加故障注入缝**，也没有 h2 的 PUSH。
-- **不做 h2c**（明文升级）：没有 ALPN 就没有 h2。
+- **不做 `Upgrade: h2c` 协商、不做协议嗅探**。明文 h2 走的是 RFC 9113 §3.4 的
+  **先验知识**：头 24 个字节逐字节等于固定前言就按 h2（`set_h2c_enabled(true)`，
+  默认关）。这条判定是**确定性的**，与"猜协议"是两件事。
 - **服务端不推 PUSH_PROMISE**，`ENABLE_PUSH` 恒为 0，而且也没有发 PUSH 的 API。
 - **`want_read`/`want_write` 不参与致命判定**：`on_fatal` 只有两类触发者，这两个公开
   成员本层一处都没读（`src/http2/uvcpp_h2_session.h:182-194`）—— 详见

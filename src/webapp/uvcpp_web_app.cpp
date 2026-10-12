@@ -425,6 +425,23 @@ bool uvcpp_web_app::http2_enabled() const {
 #endif
 }
 
+uvcpp_web_app& uvcpp_web_app::set_h2c_enabled(bool enable) {
+  h2c_requested_ = enable;
+  return *this;
+}
+
+bool uvcpp_web_app::h2c_enabled() const {
+#if UVCPP_NGHTTP2_ENABLE
+  // **两个都要**：h2c 是"HTTP/2 走明文"，不是"另一种 HTTP/2"。只报意图会让
+  // `set_http2_enabled(false)` 之后 `set_h2c_enabled(true)` 看起来生效了，而
+  // 底层那条腿一个字都不会走（`on_connection_data` 里的判定要 `http2_enabled_`
+  // 也为真 —— 这里是同一个判据的第二处拼写，必须一致）。
+  return h2c_requested_ && http2_requested_;
+#else
+  return false;
+#endif
+}
+
 uvcpp_web_app& uvcpp_web_app::set_work_limit(size_t limit) {
   work_limit_->set_limit(limit);
   // 记下"用户明确给过数"：`start()` 只会对**没给过**的情形重算上限（见
@@ -1957,8 +1974,9 @@ int uvcpp_web_app::init_process_once() {
       return UV_EINVAL;
     }
 
-    // HTTP/2 只在 TLS 上做（不做 h2c），所以"宣告 h2"这件事**挂在这里**：
-    // 没有 TLS 就没有 ALPN，也就没有可协商的东西。
+    // "宣告 h2"这件事**挂在这里**：没有 TLS 就没有 ALPN，也就没有可协商的东西。
+    // （明文那条路不靠 ALPN —— 它靠前言判定，配置在下面 `UVCPP_OPENSSL_ENABLE`
+    //   块**之外**，因为明文服务器可以整个不编 OpenSSL。）
     //
     // 两件事必须同时做，缺一不可：
     //   1. **宣告**这份名单 —— 让对端在握手里挑一个；用户自己设过就是他的
@@ -1975,11 +1993,22 @@ int uvcpp_web_app::init_process_once() {
       ssl_ctx_->set_alpn_select_protos(http2_enabled() ? kDefaultAlpn
                                                         : kHttp11Alpn);
     }
-    if (http2_enabled()) http_->set_http2_enabled(true);
-
     tcp->set_ssl_context(ssl_ctx_.get());
   }
 #endif  // UVCPP_OPENSSL_ENABLE
+
+  // --- 协议层：h2（TLS 上）与 h2c（明文上）---------------------------
+  //
+  // **必须在 `UVCPP_OPENSSL_ENABLE` 块之外**：h2c 那条腿与 OpenSSL 无关（一条
+  // 明文连接上没有任何东西要协商），而"这份库里没编 OpenSSL"是常见配置 ——
+  // 写在块里就等于在这种树上悄悄没有 h2c。
+  //
+  // 底层那个开关（`uvcpp_http_server::set_http2_enabled`）是**协议层**的总闸，
+  // TLS 与明文两条腿都要它：TLS 那条在 `on_tcp_connection()` 里判 ALPN，明文
+  // 那条在 `on_connection_data()` 里判前言。只开 h2c 不开 h2 是自相矛盾的组合，
+  // `h2c_enabled()` 因此如实回报 false（见那里的注释）。
+  if (http2_enabled()) http_->set_http2_enabled(true);
+  http_->set_h2c_enabled(h2c_enabled());
 
   // --- 放行工作循环 ---------------------------------------------------
   //

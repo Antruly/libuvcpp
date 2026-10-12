@@ -121,6 +121,31 @@ void uvcpp_h2_connection::on_read(uvcpp_tcp_client&, const net_read_result& r) {
   run_completed();
 }
 
+int uvcpp_h2_connection::feed(const char* data, size_t len) {
+  if (closed_) return UV_ECANCELED;
+  if (data == nullptr || len == 0) return 0;
+
+  bytes_in_ += len;
+
+  // 下面这几句与 `on_read()` 的 DATA 分支逐句相同，理由也相同：`recv()` 会同步
+  // 跑用户代码（路由 handler），用户代码可以关掉连接、进而让持有者销毁本对象
+  // ——本地持一份 `shared_ptr` 就不会在回调里把会话拆掉，存活令牌则挡住"本对象
+  // 已经没了还接着碰成员"。**不要**为了"少写几行"把它改成直接调
+  // `session().recv()`：那条路上一次照抄只在用例里活过。
+  std::shared_ptr<uvcpp_h2_session> self = session_;
+  const std::shared_ptr<char>       life = alive_token();
+
+  const int rv = self->recv(data, len);
+
+  if (!token_alive(life)) return rv;
+  if (closed_) return rv;
+  if (rv != 0) return rv;  // `recv()` 里的 `on_fatal` 已经走过 `shutdown()`
+
+  flush();
+  run_completed();
+  return 0;
+}
+
 // =========================================================================
 // 发
 // =========================================================================

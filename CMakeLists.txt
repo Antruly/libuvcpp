@@ -177,7 +177,7 @@ option(UVCPP_BUILD_BENCH "Build the benchmark range (bench/)" OFF)
 # =========================================================================
 option(UVCPP_ENABLE_ZLIB    "Enable zlib (gzip, WebSocket Per-Message Deflate)"  OFF)
 option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS + WSS)"                     OFF)
-option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN only, no h2c)" OFF)
+option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN, plus opt-in cleartext h2c)" OFF)
 
 # =========================================================================
 # 依赖库版本覆盖
@@ -392,13 +392,14 @@ endif()
 # =========================================================================
 # nghttp2 —— HTTP/2 后端
 # =========================================================================
-# 本库的 HTTP/2 **只**经 TLS 的 ALPN 协商得到,没有 h2c / 明文 h2(见 doc)。ALPN 是
-# TLS 扩展 ⇒ 没有 OpenSSL 就没有 h2。这里强制关掉并出声,而不是留一个链得上、
-# 跑不起来的配置。
+# 本库的 HTTP/2 有两条腿:TLS 上经 ALPN 协商,明文上经先验知识判前言(两者都见
+# doc/http2-status.md)。**明文那条腿本身不需要 OpenSSL**,但整块 h2 模块与 TLS
+# 那条腿是同一份代码、同一个开关,所以这里仍然按"没有 OpenSSL 就没有 h2"处理:
+# 强制关掉并出声,而不是留一个链得上、跑不起来的配置。
 if(UVCPP_ENABLE_NGHTTP2 AND NOT UVCPP_ENABLE_OPENSSL)
   message(WARNING
-    "UVCPP_ENABLE_NGHTTP2=ON 需要 UVCPP_ENABLE_OPENSSL=ON(HTTP/2 只做 TLS+ALPN,"
-    "不做 h2c/明文 h2)。已强制关闭 nghttp2。")
+    "UVCPP_ENABLE_NGHTTP2=ON 需要 UVCPP_ENABLE_OPENSSL=ON(h2 模块与 TLS 那条腿"
+    "共用一份代码;明文 h2c 虽不需要 OpenSSL,但整块仍挂在它之后)。已强制关闭 nghttp2。")
   set(UVCPP_ENABLE_NGHTTP2 OFF)
 endif()
 

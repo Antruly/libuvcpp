@@ -937,8 +937,9 @@ cli.connect("host", 443, [&](int err) {
 - **h2 上没有单槽状态**：一条连接上并发几条流时，应答**按 `resp.stream_id` 归位**
   （h1 那条路上它恒为 0）。回调是逐条的，`stream_id` 是你唯一的"这条回应的是哪次
   请求"的凭据。
-- 必须配 TLS。明文上没有 ALPN，本库也不做 h2c，所以没设 SSL 上下文时打开它只是
-  **记录意图**，连接照样是 HTTP/1.1。
+- 必须配 TLS。明文上没有 ALPN，所以没设 SSL 上下文时打开它只是**记录意图**，
+  连接照样是 HTTP/1.1 —— 明文上要 h2 得另外开 `set_h2c_enabled(true)`
+  （先验知识，见下）。
 
 ### h2 上原来就成立的
 
@@ -987,12 +988,13 @@ h2 会话的参数在 `uvcpp_h2_session::init()` 上是带默认值的形参，*
 
 ### 非目标（如实列出）
 
-- **不做 h2c / 明文 h2**，两个方向都不做：
-  - `Upgrade: h2c` 这条**已经被移除**了 —— 它曾经在 RFC 7540 §3.2，RFC 9113 §3.1
-    明确删掉了它。不是"我们懒得做"，是协议里没有了。
-  - prior-knowledge（直接按 h2 发而不协商）也不做：本库没有明文嗅探，一个不认识的
-    明文连接按 HTTP/1.1 处理。
-  所以**h2 只在 TLS 上**。明文端口永远是 HTTP/1.1。
+- **不做 `Upgrade: h2c` 协商**：这条机制曾经在 RFC 7540 §3.2，RFC 9113 §3.1 明确
+  删掉了它。不是"我们懒得做"，是协议里没有了。
+- **明文 h2 走先验知识，不做嗅探**（1.6.7 起）：`app.set_h2c_enabled(true)` 之后，
+  一条没有 TLS 的连接如果**头 24 个字节**与 `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`
+  逐字节相同就按 h2（RFC 9113 §3.4）。**默认关**，因为它会让明文端口不再是纯
+  HTTP/1.1；打开之后同一个端口两种协议并存，判据是那 24 个字节，不是猜。
+  没有 TLS 就没有 ALPN —— 这条路的判据本来也不是 ALPN。
 - **不做 RFC 8441**（WebSocket over h2）：不宣告 `SETTINGS_ENABLE_CONNECT_PROTOCOL`，
   收到 `:protocol` 一律拒。`app.websocket()` 继续走 HTTP/1.1 的 `Upgrade`。
 - **不做 SERVER_PUSH**（RFC 9113 已废弃它）：我们宣告 `SETTINGS_ENABLE_PUSH=0` 且从不发
@@ -1280,7 +1282,8 @@ uvcpp_logger::instance().flush();                // 转发给 sink 的 flush()
 - **没有内建的鉴权 / 会话 / 限流**：`too_many_requests()` 只是个状态码 helper。
 - **没有请求体解压**（gzip 请求体不认识）。
 - **没有读背压**：流水线里排在后面的请求照常解析、照常跑，超上限直接拒（§18）。
-- **h2 只走 TLS + ALPN**，没有 h2c（见下）。
+- **h2 走 TLS + ALPN，明文那一路要显式开**（`set_h2c_enabled(true)`，默认关，
+  先验知识，见 §13）。
 - **C 面是门面，不是本页的逐方法镜像。** `include/capi/uvcpp_c_webapp.h`（1.4.3 起）
   给了 app / 路由 / 中间件 / 静态目录 / 上传 / WebSocket 路由 / `req` / `resp` /
   `next` / 延迟应答，但**只挑 C# / P-Invoke 调用方真正要用的那一片**：本页里凡是签名

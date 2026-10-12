@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.6--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.7--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.6-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.7-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -144,7 +144,7 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
 |---|---|
 | `UVCPP_ENABLE_ZLIB` | WebSocket 压缩扩展（RFC 7692, Per-Message Deflate） |
 | `UVCPP_ENABLE_OPENSSL` | HTTPS / WSS |
-| `UVCPP_ENABLE_NGHTTP2` | HTTP/2（RFC 9113）—— 只走 TLS + ALPN，不做 h2c，且不显式开就不升级 |
+| `UVCPP_ENABLE_NGHTTP2` | HTTP/2（RFC 9113）—— 默认走 TLS + ALPN，显式开之后另有明文 h2（先验知识，RFC 9113 §3.4）。不显式开就不升级 |
 | `UVCPP_ENABLE_QUIC` | net 层的 QUIC 传输（RFC 9000）—— 需要带 QUIC API 的 OpenSSL ≥ 3.2 |
 | `UVCPP_ENABLE_HTTP3` | web 层的 HTTP/3（RFC 9114），跑在自己的 UDP socket 上，所以 HTTP/1.1 与 HTTP/2 一个字节没动 |
 
@@ -310,8 +310,9 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 
 **注意**：开启 `UVCPP_BUILD_WEB=ON` 不会自动启用 `UVCPP_ENABLE_ZLIB` 或 `UVCPP_ENABLE_OPENSSL`。
 这些选项需要显式手动开启。`UVCPP_ENABLE_NGHTTP2` 在 `UVCPP_ENABLE_OPENSSL=OFF` 时
-**强制关闭**（给一条 warning，而不是留一个根本跑不起来的配置）—— 本库的 HTTP/2
-没有明文形态。`UVCPP_ENABLE_QUIC` 同理，而且它有**三个**各自独立的前置条件
+**强制关闭**（给一条 warning，而不是留一个根本跑不起来的配置）—— HTTP/2 这个模块
+同时装着 TLS 那条腿，所以整块挂在 OpenSSL 之后，尽管明文（`h2c`）那条腿本身并不
+需要它。`UVCPP_ENABLE_QUIC` 同理，而且它有**三个**各自独立的前置条件
 （`UVCPP_ENABLE_OPENSSL=OFF`、`UVCPP_BUILD_NET=OFF`、或者那份 OpenSSL 没有 QUIC API
 —— 3.2 以下都属于这一类），缺哪个就为哪个打一条说明**怎么修**的 warning。`UVCPP_ENABLE_HTTP3` 同理，它有
 **两个**前置条件（`UVCPP_ENABLE_QUIC=OFF` 或 `UVCPP_BUILD_WEB=OFF`），也各自有 warning。

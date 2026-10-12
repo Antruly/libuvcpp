@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.6.6--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.6.7--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.6.6-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.6.7-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -148,7 +148,7 @@ in the package — are in [`RELEASE.md`](./RELEASE.md#调试档debug-版).
 |---|---|
 | `UVCPP_ENABLE_ZLIB` | Per-Message Deflate compression (RFC 7692) for WebSocket |
 | `UVCPP_ENABLE_OPENSSL` | HTTPS / WSS |
-| `UVCPP_ENABLE_NGHTTP2` | HTTP/2 (RFC 9113) — TLS + ALPN only, no h2c, and nothing upgrades until you ask for it |
+| `UVCPP_ENABLE_NGHTTP2` | HTTP/2 (RFC 9113) — TLS + ALPN by default, plus cleartext h2 (prior knowledge, RFC 9113 §3.4) when you ask for it. Nothing upgrades on its own |
 | `UVCPP_ENABLE_QUIC` | The QUIC transport (RFC 9000) in the net layer — needs an OpenSSL ≥ 3.2 with the QUIC API |
 | `UVCPP_ENABLE_HTTP3` | HTTP/3 (RFC 9114) in the web layer, on its own UDP sockets, so HTTP/1.1 and HTTP/2 are untouched |
 
@@ -319,7 +319,9 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 **Important**: `UVCPP_ENABLE_ZLIB` and `UVCPP_ENABLE_OPENSSL` are NOT auto-enabled
 when `UVCPP_BUILD_WEB=ON`. You must opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is
 **force-disabled** when `UVCPP_ENABLE_OPENSSL=OFF` (it warns rather than leaving a
-configuration that cannot work) — HTTP/2 here has no cleartext mode. `UVCPP_ENABLE_QUIC`
+configuration that cannot work) — the HTTP/2 module carries the TLS leg as well, so the
+whole module is gated on OpenSSL even though the cleartext (`h2c`) leg does not need it.
+`UVCPP_ENABLE_QUIC`
 is force-disabled the same way for **three** separate missing prerequisites
 (`UVCPP_ENABLE_OPENSSL=OFF`, `UVCPP_BUILD_NET=OFF`, or an OpenSSL that has no QUIC API —
 anything below 3.2), each with its own warning that says how to fix it. `UVCPP_ENABLE_HTTP3`
