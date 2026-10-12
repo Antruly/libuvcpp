@@ -250,6 +250,67 @@ uvcpp_http_server::uvcpp_http_server() {
 }
 
 uvcpp_http_server::~uvcpp_http_server() {
+#if UVCPP_HTTP3_ENABLE
+  // -------------------------------------------------------------------
+  // (A) **赶在 `stop_workers()` 之前**把 1..n−1 号循环上的 h3 层与 QUIC 端点
+  //     收掉。
+  //
+  // 为什么必须在这一刻：那两样东西**只能在它们自己那条循环的线程上拆**
+  // （`~uvcpp_quic_server` 要关自己的 socket 与定时器，`~uvcpp_h3_connection`
+  // 要关它挂在连接上的回调）。`stop_workers()` 一返回，那些线程就 join 掉了 ——
+  // 之后再 `delete` 就是往一块已经释放的循环上写 `uv_close`。
+  //
+  // 这与**上面**那条"先停 worker 再清表"的规则**不冲突，是同一件事的两端**：
+  // `contexts_` 那几张表是**共享**的（worker 的退出路径会去 `erase` 同一张表，
+  // 所以要先 join 再 clear）；而这里每一格是**它自己循环私有的**，别人不会碰
+  // ⇒ 由那条循环自己拆，既安全又必须早。
+  //
+  // 投递失败的处置（`post_to_loop()` 返回 false，或者有界等待到点还没回来）：
+  // **打一行 stderr，然后放任那块内存**。硬删是 UAF —— 那条循环要么已经不在
+  // 受理投递了、要么卡在别处，两种情况下我们都没有"它现在不在用这块内存"的
+  // 证据。`~uvcpp_loop` 那条"泄漏而不释放"的既有策略就是同一个取舍。
+  //
+  // **没开 QUIC 就整段跳过**（`quic_servers_` 为空）：那时 1..n−1 号名下既没有
+  // h3 层也没有端点，投过去只会空跑一趟 —— 而投递失败时那行 stderr 会把一句
+  // 假话写到运维脸上（"h3 层与 QUIC 端点没能收掉"，其实一个都没有）。
+  // -------------------------------------------------------------------
+  if (tcp_server_ != nullptr && !quic_servers_.empty()) {
+    const int n = tcp_server_->loop_count();
+    for (int i = 1; i < n; ++i) {
+      // `shared_ptr` 而不是栈上的捕获：投递是异步的，而调用方（本析构）**不等
+      // 那件任务跑完**（下面 `wait_for` 有墙钟上限）。任务比析构活得久是正常
+      // 情形，它捕获的东西就不能是栈上的。
+      std::shared_ptr<std::promise<void> > done(new std::promise<void>());
+      std::shared_future<void> fut = done->get_future().share();
+      const bool queued =
+          tcp_server_->post_to_loop(i, [this, i, done]() {
+            teardown_quic_loop(static_cast<size_t>(i));
+            // 一条循环只投一次，`set_value` 不会重复调（重复调会抛
+            // `future_error`，而那是从 worker 线程往外抛的异常 —— 整个进程
+            // 会 `std::terminate`）。
+            done->set_value();
+          });
+      if (!queued) {
+        std::fprintf(stderr,
+                     "[uvcpp_http_server] 析构：第 %d 条循环已经不收投递了，"
+                     "它名下的 h3 层与 QUIC 端点没能收掉（放任不释放）\n",
+                     i);
+        continue;
+      }
+      // 有界等待，与 `uvcpp_tcp_server::start_worker_listeners()` 同一个数。
+      // 收掉一格是"关几个句柄"，正常在微秒级；等不到就说明那条线程不转了，
+      // 再等下去只会把析构变成挂死。
+      if (fut.wait_for(std::chrono::seconds(5)) !=
+          std::future_status::ready) {
+        std::fprintf(stderr,
+                     "[uvcpp_http_server] 析构：等第 %d 条循环收尾超过 5 秒，"
+                     "不再等（那块内存放任不释放）\n",
+                     i);
+      }
+    }
+  }
+#endif
+
   // **先让工作循环退场，再动下面那几张按循环切的表。**
   //
   // 上面那条"析构发生在所有循环线程都已经停了之后"是**调用方的责任**，而
@@ -299,28 +360,65 @@ uvcpp_http_server::~uvcpp_http_server() {
     tbl.clear();
   }
 #if UVCPP_HTTP3_ENABLE
-  // h3 驱动层是 `on_quic_connection()` new 出来的，**只有 `quic_ctxs_` 登记它**
-  // ⇒ 少了这一段就是每条还活着的 h3 连接漏一个 h3 层（连同 nghttp3 的会话与它
-  // 的缓冲）。能走到这里的正是"`on_disconnect` 没跑过"那种路（客户端先于服务端
-  // 被释放），与上面 h2 那一段是同一个形状、同一个理由。
+  // -------------------------------------------------------------------
+  // (C) 0 号那一格：它就是我们此刻所在这条循环（`run()` 在调用方线程上跑），
+  //     所以**就地拆**，不投递。
   //
-  // 次序：**先删 h3，再删 QUIC 端点。** h3 层持有 QUIC 连接，反过来不成立
-  // （`uvcpp_h3_connection` 的类注释写着"持有者必须在 QUIC 连接被端点释放之前
-  // 销毁本对象"）。这里**不**调 `h3->close()`：此刻对端多半早就没了，而
-  // QUIC 端点析构本来就会把它的连接放掉。
-  for (std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
-           quic_ctxs_.begin();
-       it != quic_ctxs_.end(); ++it) {
-    delete it->second.h3;
-    it->second.h3 = nullptr;
+  // h3 驱动层是 `on_quic_connection()` new 出来的，**只有 `quic_ctxs_` 登记它**
+  // ⇒ 少了这一步就是每条还活着的 h3 连接漏一个 h3 层（连同 nghttp3 的会话与它
+  // 的缓冲）。能走到这里的正是"`on_disconnect` 没跑过"那种路（客户端先于服务端
+  // 被释放），与上面 h2 那一段是同一个形状、同一个理由。1..n−1 号在 (A) 段已
+  // 经各自拆完了，所以这里只走一格。
+  //
+  // `quic_servers_` 在那一段里已经被逐格置空；这里连同两张 vector 一起清掉
+  // （`quic_listen_port()` / `quic_fanout()` 之后都报"没有这条腿"）。
+  if (!quic_servers_.empty()) {
+    teardown_quic_loop(0);
+    quic_servers_.clear();
+    quic_ctxs_.clear();
+    quic_conn_counts_.clear();
   }
-  quic_ctxs_.clear();
-  delete quic_server_;
-  quic_server_ = nullptr;
 #endif
   delete tcp_server_;
   tcp_server_ = nullptr;
 }
+
+#if UVCPP_HTTP3_ENABLE
+
+void uvcpp_http_server::teardown_quic_loop(size_t loop_index) {
+  if (loop_index >= quic_servers_.size()) return;
+
+  // **先整张摘表、再删对象** —— 与 `remove_h3_ctx()` 同一个次序，而这里是它最
+  // 要命的一处：`~uvcpp_h3_connection` 会跑自己的收尾，那一步可能回到
+  // `remove_h3_ctx(conn)`；表里那一项要是还指着这个正在析构的对象，那边就会
+  // **再删一次**（`t.erase(it); ... delete h3;`）。所以先把每一项的 `h3` 置空、
+  // 整张 clear（此后重入进来什么都查不到，与"已经摘过"同一条路），对象攒在
+  // 一边最后统一放。
+  std::map<uvcpp_quic_connection*, quic_ctx>& tbl = quic_ctxs_[loop_index];
+  std::vector<uvcpp_h3_connection*> doomed;
+  doomed.reserve(tbl.size());
+  for (std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = tbl.begin();
+       it != tbl.end(); ++it) {
+    if (it->second.h3 != nullptr) doomed.push_back(it->second.h3);
+    it->second.h3 = nullptr;
+  }
+  tbl.clear();
+  for (size_t i = 0; i < doomed.size(); ++i) delete doomed[i];
+
+  // 端点在 h3 之后删（理由与今天那段注释同源：h3 持有 QUIC 连接，反向不成立）。
+  // 它会连带收掉还在的连接，那些回调进来时表已经空了。
+  delete quic_servers_[loop_index];
+  quic_servers_[loop_index] = nullptr;
+
+  {
+    std::lock_guard<std::mutex> lk(quic_conn_counts_mu_);
+    if (loop_index < quic_conn_counts_.size()) {
+      quic_conn_counts_[loop_index] = 0;
+    }
+  }
+}
+
+#endif  // UVCPP_HTTP3_ENABLE
 
 std::map<uvcpp_tcp_client*, uvcpp_http_server::conn_ctx>&
 uvcpp_http_server::ctxs_of(uvcpp_tcp_client* client) {
@@ -383,6 +481,104 @@ uvcpp_http_server::ctxs_at(int loop_index) {
   return contexts_[static_cast<size_t>(loop_index)];
 }
 
+int uvcpp_http_server::set_loops(int n) {
+  // 取值校验**先做**：它与状态无关，越界的 n 在任何时刻都是调用方的错。
+  if (n < 1 || n > 64) return UV_EINVAL;
+
+  // 这道门是本层独有的，理由见头文件：QUIC 端点按 `loop_count()` 一次建齐，
+  // 建完再改 n 就是"表按 1 张定尺寸、而回调报 1..n−1 号"。
+  //
+  // **只挡 n > 1**：`set_loops(1)` 在下面那条腿的契约里是"幂等的空操作"（它
+  // 什么都不建），h3 端点建好之后调它一个字节都不会变，没有理由拒。
+  if (n > 1 && !quic_servers_.empty()) return UV_EBUSY;
+
+  // 余下的判据（越界以外的 `UV_EBUSY`、`n == 1` 的幂等）在下面那条腿上，那边
+  // 才是权威 —— 这里不重抄一遍，抄出来迟早会与它走岔。
+  return tcp_server_->set_loops(n);
+}
+
+int uvcpp_http_server::loop_count() const {
+  return tcp_server_ != nullptr ? tcp_server_->loop_count() : 1;
+}
+
+#if UVCPP_HTTP3_ENABLE
+
+std::map<uvcpp_quic_connection*, uvcpp_http_server::quic_ctx>&
+uvcpp_http_server::quic_ctxs_at(int loop_index) {
+  // 与 `ctxs_at()` 逐条同源（那边的注释是权威，这里只留本层特有的差别）：
+  // **-1 ＝ "不在任何循环线程上"**，单循环下夹回 0 号与从前逐字相同、多循环下
+  // 直接 abort（夹回去会让"漏调了一条循环"看着正常）。差别只有一处：h3 的
+  // 回调**只可能**从某条循环的线程上进来，所以走到 -1 那条路上的不是"上层忘了
+  // 在每条循环上各调一次"，而是"本层在循环线程之外碰了这张表" —— 同样是误用。
+  if (loop_index < 0) {
+    if (quic_ctxs_.size() > 1) {
+      std::fprintf(stderr,
+                   "[uvcpp_http_server] quic_ctxs_at(): 不在任何循环线程上"
+                   "（loop_index == -1），多循环下这张表是不确定的\n");
+      std::abort();
+    }
+    return quic_ctxs_[0];
+  }
+  if (static_cast<size_t>(loop_index) >= quic_ctxs_.size()) {
+    return quic_ctxs_[0];
+  }
+  return quic_ctxs_[static_cast<size_t>(loop_index)];
+}
+
+std::map<uvcpp_quic_connection*, uvcpp_http_server::quic_ctx>&
+uvcpp_http_server::quic_ctxs_here() {
+  // 单循环的快路径：表只有一张，就不去读线程本地量了 —— 与 `ctxs_of()` 那条
+  // 同一个理由（`contexts_` 是本层最热的一次查找，这里是 h3 每次回调的入口）。
+  if (quic_ctxs_.size() == 1) return quic_ctxs_[0];
+  return quic_ctxs_at(uvcpp_loop_index_of_this_thread());
+}
+
+int uvcpp_http_server::quic_loop_index_here() const {
+  // 单循环：夹回 0 号（计数表也只有一格），与 `quic_ctxs_here()` 的快路径同源。
+  if (quic_ctxs_.size() <= 1) return 0;
+  const int li = uvcpp_loop_index_of_this_thread();
+  // 多循环下判据与 `quic_ctxs_at()` 逐条相同（那边是权威）。这里不复用那个函数，
+  // 是因为它回的是表不是序号 —— 但**判据不能因此走岔**，所以这一段的每一句都与
+  // 它对齐：-1 ＝ 不在任何循环线程上 ＝ 误用，越界 ＝ 到不了。
+  if (li < 0 || static_cast<size_t>(li) >= quic_ctxs_.size()) {
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] quic_loop_index_here(): 不在任何循环线程上"
+                 "（loop_index == %d），多循环下这个序号是不确定的\n",
+                 li);
+    std::abort();
+  }
+  return li;
+}
+
+bool uvcpp_http_server::quic_fanout() const {
+  // 数**真的建起来了**的端点，不是数数组长度：回滚那条路上（`listen_quic()` 的
+  // err 分支）向量可能留着 n 格却一格都不服务 —— 那种时候它必须报 false。
+  size_t live = 0;
+  for (size_t i = 0; i < quic_servers_.size(); ++i) {
+    if (quic_servers_[i] != nullptr) ++live;
+  }
+  return live > 1;
+}
+
+size_t uvcpp_http_server::quic_connection_count_at(int loop_index) const {
+  if (loop_index < 0) return 0;
+  std::lock_guard<std::mutex> lk(quic_conn_counts_mu_);
+  if (static_cast<size_t>(loop_index) >= quic_conn_counts_.size()) return 0;
+  const int v = quic_conn_counts_[static_cast<size_t>(loop_index)];
+  return v > 0 ? static_cast<size_t>(v) : 0;
+}
+
+size_t uvcpp_http_server::quic_connection_count() const {
+  size_t sum = 0;
+  std::lock_guard<std::mutex> lk(quic_conn_counts_mu_);
+  for (size_t i = 0; i < quic_conn_counts_.size(); ++i) {
+    if (quic_conn_counts_[i] > 0) sum += static_cast<size_t>(quic_conn_counts_[i]);
+  }
+  return sum;
+}
+
+#endif  // UVCPP_HTTP3_ENABLE
+
 int uvcpp_http_server::bind(const char* ip, int port) {
   return tcp_server_->bind(ip, port);
 }
@@ -421,7 +617,100 @@ void uvcpp_http_server::set_quic_ssl_context(uvcpp_ssl_context* ctx) {
   // 端点已经起来了就是"装晚了"：**不静默吞掉**，转交给 QUIC 端点让它按自己的
   // 规矩处置（新连接用新凭证，已经建好的那些各持自己那一份 —— QUIC 的凭证是
   // 按连接存的，改不了）。
-  if (quic_server_ != nullptr) quic_server_->set_ssl_context(ctx);
+  //
+  // 多循环下 1..n−1 号各自跑在**别的线程**上：这一格是它们读、我们写，所以
+  // 必须投过去在它们自己那条线程上写（`uvcpp_quic_server` 的线程约定，见它的
+  // 类注释）。0 号就地写。
+  for (size_t i = 0; i < quic_servers_.size(); ++i) {
+    if (quic_servers_[i] == nullptr) continue;
+    if (i == 0) {
+      quic_servers_[0]->set_ssl_context(ctx);
+      continue;
+    }
+    uvcpp_quic_server* ep = quic_servers_[i];
+    if (!run_on_quic_loop(i, [ep, ctx]() { ep->set_ssl_context(ctx); })) {
+      std::fprintf(stderr,
+                   "[uvcpp_http_server] set_quic_ssl_context(): 第 %zu 条循环"
+                   "上的 QUIC 端点没换成凭证\n",
+                   i);
+    }
+  }
+}
+
+bool uvcpp_http_server::run_on_quic_loop(size_t loop_index,
+                                         std::function<void()> fn) {
+  if (loop_index == 0) {
+    // 0 号吃不进投递（`post_to_loop()` 契约），就地跑 —— 调用方本来就在那条
+    // 线程上（这是本函数的契约，不是推断）。
+    fn();
+    return true;
+  }
+
+  std::shared_ptr<std::promise<void> > done(new std::promise<void>());
+  std::shared_future<void> fut = done->get_future().share();
+  const bool queued = tcp_server_ != nullptr &&
+                      tcp_server_->post_to_loop(static_cast<int>(loop_index),
+                                                [fn, done]() {
+                                                  fn();
+                                                  done->set_value();
+                                                });
+  if (!queued) {
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] 第 %zu 条循环不收投递了（已经在收尾？）\n",
+                 loop_index);
+    return false;
+  }
+  if (fut.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] 等第 %zu 条循环做完超过 5 秒，不再等\n",
+                 loop_index);
+    return false;
+  }
+  return true;
+}
+
+uvcpp_quic_server* uvcpp_http_server::start_quic_endpoint(uvcpp_loop* loop,
+                                                          const char* ip,
+                                                          bool reuseport,
+                                                          int* port_io,
+                                                          int* rc_out) {
+  *rc_out = 0;
+  if (loop == nullptr) {
+    *rc_out = UV_EINVAL;
+    return nullptr;
+  }
+
+  uvcpp_quic_server* qs = new uvcpp_quic_server(loop);
+  qs->set_ssl_context(quic_ssl_ctx_);
+  // ALPN **不覆盖**：用 `uvcpp_quic_server` 自己的默认（`"h3"`）。在 TCP 那份
+  // 名单里加 `h3` 才是要避免的事 —— 对端选了它就会把 h3 的二进制流喂给 llhttp。
+  if (reuseport) qs->set_reuseport(true);
+
+  // **空串要还原成 nullptr**：`uvcpp_quic_server::bind()` 拿 nullptr 表示"通配"，
+  // 而空串在它那里是个**畸形字面量**（`literal_fits(AF_INET, "")` 与
+  // `literal_fits(AF_INET6, "")` 都假）⇒ `UV_EINVAL`。`listen_quic()` 为了把地址
+  // 按值交给扇出那些任务，先把 nullptr 存成了 `std::string`，到这里必须还原
+  // —— 少这一句，"传 ip=nullptr"这条最常用的路会当场起不来。
+  const char* bind_ip = (ip != nullptr && ip[0] != '\0') ? ip : nullptr;
+
+  int rc = qs->bind(bind_ip, *port_io);
+  if (rc == 0) {
+    rc = qs->listen(
+        [this](uvcpp_quic_connection* conn) { on_quic_connection(conn); });
+  }
+  if (rc != 0) {
+    // 建到一半失败（端口被占之类）：端点**没有被登记**，当场放掉 —— 否则就是
+    // 一次 bind 失败的调用漏一条 UDP socket 加一条循环引用。
+    delete qs;
+    *rc_out = rc;
+    return nullptr;
+  }
+
+  // 端口 0 在这里就地解析成真号：**扇出的每个端点必须绑同一个端口**（内核那个
+  // REUSEPORT 组是按 `(地址, 端口)` 找的），各绑各的 0 就各挑各的口，组根本
+  // 不存在。真号的传播方向是**由 0 号往外**，所以只有这一处需要读回来。
+  if (*port_io == 0) *port_io = qs->configured_port();
+  return qs;
 }
 
 int uvcpp_http_server::listen_quic(int port, const char* ip) {
@@ -434,36 +723,157 @@ int uvcpp_http_server::listen_quic(int port, const char* ip) {
                  "先调 set_quic_ssl_context()\n");
     return UV_EINVAL;
   }
-  if (quic_server_ != nullptr) return UV_EALREADY;
+  // 非空的 `quic_servers_` 有两种来路：这条腿已经起来了（重复调），或者上一次
+  // 建到一半、收尾时那条循环已经不收投递了（下面 err 那一段）。两种都拒：前者
+  // 按契约是 `UV_EALREADY`，后者再 `assign` 一次会把可能还排在某条循环邮箱里
+  // 的收尾任务指向的容器拆掉 —— 那正是 UAF。第二种来路在 stderr 上已经吼过。
+  if (!quic_servers_.empty()) return UV_EALREADY;
 
-  // **共用接受者那条循环**（`get_loop()`）：于是一条 `uv_run()` 同时转 TCP 与
-  // UDP 两个端点，`run()` 与 `stop()` 的调用方用法一个字都不用改。QUIC 端点
-  // 本来也只有一条循环（它不做多循环扇出），所以这里没有"选哪条"的余地。
-  uvcpp_quic_server* qs = new uvcpp_quic_server(tcp_server_->get_loop());
-  qs->set_ssl_context(quic_ssl_ctx_);
+  const int n = loop_count();
 
-  // ALPN **不覆盖**：用 `uvcpp_quic_server` 自己的默认（`"h3"`）。在 TCP 那份
-  // 名单里加 `h3` 才是要避免的事 —— 对端选了它就会把 h3 的二进制流喂给 llhttp。
-  int rc = qs->bind(ip, port);
-  if (rc == 0) {
-    rc = qs->listen(
-        [this](uvcpp_quic_connection* conn) { on_quic_connection(conn); });
-  }
-  if (rc != 0) {
-    // 建到一半失败（端口被占之类）：端点**没有被登记**，当场放掉 —— 否则就是
-    // 一次 bind 失败的调用漏一条 UDP socket 加一条循环引用。
-    delete qs;
+  // **表和端点数组按循环数一次定死**（理由同 `listen()`：工作循环的线程早在
+  // `set_loops()` 里就放行了，1..n−1 号的回调随时可能来）。此后尺寸只读：
+  // `set_loops()` 在 `listen_quic()` 之后返 `UV_EBUSY`。
+  quic_ctxs_.assign(static_cast<size_t>(n),
+                    std::map<uvcpp_quic_connection*, quic_ctx>());
+  quic_servers_.assign(static_cast<size_t>(n),
+                       static_cast<uvcpp_quic_server*>(nullptr));
+  quic_conn_counts_.assign(static_cast<size_t>(n), 0);
+
+  // **地址取一份自己的**：扇出那些任务是在别的线程上跑的，`ip` 的生存期归调用方
+  // （`listen_quic()` 返回之后它就可能是野指针了，而任务不保证已经跑完 —— 超时
+  // 那条路上它就还挂在邮箱里）。`bind_ip` 按值进每个任务。
+  const std::string bind_ip = (ip != nullptr) ? std::string(ip) : std::string();
+
+  // ---- 0 号：建在 acceptor 那条循环上，就地建 ----
+  int rc = 0;
+  int real_port = port;
+  uvcpp_quic_server* ep0 =
+      start_quic_endpoint(tcp_server_->get_loop(), bind_ip.c_str(), n > 1,
+                          &real_port, &rc);
+  if (ep0 == nullptr) {
+    quic_servers_.clear();
+    quic_ctxs_.clear();
+    quic_conn_counts_.clear();
     return rc;
   }
+  quic_servers_[0] = ep0;
 
-  quic_server_ = qs;
-  // 两种传输共用一个状态字：这里已经真的在服务了，与 `listen()` 那一句同义。
-  status_ = HTTP_SERVER_LISTENING;
-  return 0;
+  // `n == 1`（没调过 `set_loops()`）= 今天的行为，到此为止。
+  //
+  // **回落也在这一条上**：`n > 1` 但这个平台/这份 libuv 绑不上 REUSEPORT
+  // （Windows 无条件拒、macOS 没实现、libuv < 1.50 没这个标志）⇒ 0 号自己已经
+  // 把那一次去掉标志重绑过了（`start_quic_endpoint` 之下的
+  // `uvcpp_quic_server::start_listen()`），这里**不再建 1..n−1 号**：它们没有
+  // REUSEPORT 就抢不到同一个端口，建出来的只会是"最后绑上的那个把前一个踢掉"。
+  if (n == 1 || !ep0->is_reuseport()) {
+    if (n > 1) {
+      std::fprintf(stderr,
+                   "[uvcpp_http_server] listen_quic(): 这份 libuv/平台绑不上"
+                   "REUSEPORT（UDP 要 1.50+，且只在 Linux/FreeBSD/DragonFly/"
+                   "Solaris 11.4/AIX 7.2.5 上有负载均衡语义）：QUIC 只有 0 号"
+                   "一个端点，`quic_fanout()` 为 false\n");
+    }
+    status_ = HTTP_SERVER_LISTENING;
+    return 0;
+  }
+
+  // ---- 1..n−1 号：各投到对应的工作循环上，在那些线程上建 ----
+  int first_err = 0;
+  for (int i = 1; i < n; ++i) {
+    // 循环指针在这里取就够：`workers_` 在 `set_loops()` 之后不再变，而
+    // `post_to_loop()` 马上还会替我们再判一次下标。真正必须在工作线程上做的是
+    // **建端点**（`uv_udp_bind()` 要求在本循环的线程上跑），那是下面那个任务。
+    uvcpp_loop* worker_loop = tcp_server_->loop_at(i);
+    if (worker_loop == nullptr) {
+      first_err = UV_EINVAL;
+      break;
+    }
+
+    // 结果用 `shared_ptr` 带回来，不用栈上的引用：超时那条路上任务还挂在邮箱
+    // 里，捕获一个已经出栈的变量就是 UAF。
+    std::shared_ptr<int> wrc(new int(0));
+    uvcpp_quic_server** slot = &quic_servers_[static_cast<size_t>(i)];
+    const bool done = run_on_quic_loop(
+        static_cast<size_t>(i),
+        [this, bind_ip, real_port, wrc, slot, worker_loop]() {
+          int rc2 = 0;
+          int p = real_port;
+          uvcpp_quic_server* ep = start_quic_endpoint(
+              worker_loop, bind_ip.c_str(), true, &p, &rc2);
+          if (ep == nullptr) {
+            *wrc = (rc2 != 0) ? rc2 : UV_EIO;
+            return;
+          }
+          if (!ep->is_reuseport()) {
+            // 0 号带得上、它带不上：这种平台不会走到这里（0 号那次绑定与它
+            // 走的是同一个探测），真走到了就只能放弃这一个 —— 留着它的话，
+            // 它绑的是同一个端口却没有 REUSEPORT，等于把 0 号挤掉。
+            delete ep;
+            *wrc = UV_ENOTSUP;
+            return;
+          }
+          *slot = ep;
+          *wrc = 0;
+        });
+
+    if (!done) {
+      if (first_err == 0) first_err = UV_ETIMEDOUT;
+      break;
+    }
+    if (*wrc != 0) {
+      first_err = *wrc;
+      break;
+    }
+  }
+
+  if (first_err == 0) {
+    // 两种传输共用一个状态字：这里已经真的在服务了，与 `listen()` 那一句同义。
+    status_ = HTTP_SERVER_LISTENING;
+    return 0;
+  }
+
+  // ---- 回滚 ----
+  //
+  // 已经建起来的那几个（含 0 号）全部拆掉，本对象回到"没有 QUIC 腿"的状态。
+  //
+  // 拆法照 `uvcpp_tcp_server::start_worker_listeners()` 那条半成品回收：**每个
+  // 端点都由它自己那条循环收**（`teardown_quic_loop()`），投递是 FIFO 的，所以
+  // 这条一定排在上面那个建端点的任务之后跑 —— 超时那条路上也不会与它并发。
+  // 幂等：空的那格直接返回。
+  //
+  // `quic_servers_` **不在这里清空**，与 `worker_listeners_` 同一个理由：那条
+  // 任务可能还挂在某条循环的邮箱里，清掉容器就是让它去读一块已经还回去的内存。
+  // 于是"清不清得掉"要看每个 `run_on_quic_loop()` 的返回值：
+  bool all_torn = true;
+  for (int i = 1; i < n; ++i) {
+    const int idx = i;
+    if (!run_on_quic_loop(static_cast<size_t>(i),
+                          [this, idx]() { teardown_quic_loop(idx); })) {
+      all_torn = false;
+    }
+  }
+  teardown_quic_loop(0);  // 0 号就地拆（`run_on_quic_loop(0)` 也是就地）
+
+  if (all_torn) {
+    // 都拆干净了 ⇒ 回到"从没 `listen_quic()` 过"，调用方可以修好端口再试一次。
+    quic_servers_.clear();
+    quic_ctxs_.clear();
+    quic_conn_counts_.clear();
+  } else {
+    // 有循环没能在 5 秒内把活干完。**不放任也不硬来**：容器留着（那块内存由
+    // 析构兜底），只把话说清楚 —— 上面已经逐条打过 stderr 了。
+    std::fprintf(stderr,
+                 "[uvcpp_http_server] listen_quic(): 回滚没能全部完成，"
+                 "本对象这次不再受理 QUIC 端点\n");
+  }
+  return first_err;
 }
 
 int uvcpp_http_server::quic_listen_port() const {
-  return quic_server_ != nullptr ? quic_server_->configured_port() : 0;
+  return (!quic_servers_.empty() && quic_servers_[0] != nullptr)
+             ? quic_servers_[0]->configured_port()
+             : 0;
 }
 
 #endif  // UVCPP_HTTP3_ENABLE
@@ -2262,21 +2672,36 @@ void uvcpp_http_server::on_quic_connection(uvcpp_quic_connection* conn) {
   // 一条 QUIC 连接只建一次 h3 层。这个回调是"**首包到达**"那一刻跑的（握手
   // 还没完）—— 正是 `uvcpp_quic_server::listen()` 那条约定的时机：等握手完成
   // 再装，握手期间到达的流数据就全丢了（首包之后紧接着就是流帧）。
-  if (quic_ctxs_.find(conn) != quic_ctxs_.end()) return;
+  //
+  // **表按当前线程取**：这个回调是某条 QUIC 端点的 `listen` 回调，端点是按循环
+  // 建的（`listen_quic()`），所以它只会在**那条端点自己的循环线程**上跑 —— 与
+  // 连接以后全部 h3 回调同一个线程。取表的迭代器只与这张表自己的 `end()` 比。
+  std::map<uvcpp_quic_connection*, quic_ctx>& tbl = quic_ctxs_here();
+  if (tbl.find(conn) != tbl.end()) return;
+  const int li = quic_loop_index_here();
 
   uvcpp_h3_connection* h3 = new uvcpp_h3_connection(conn, /*server_side=*/true);
   // **先登记、再 start**：`start()` 会同步冲一轮待发字节（三条关键流），那一轮
   // 随时可能把对端触发的回调跑起来 —— 那时表里必须已经有这一项，否则一个立刻
   // 到达的请求会在一张空表上查不到连接（被静默丢掉）。
-  quic_ctxs_[conn].h3 = h3;
+  tbl[conn].h3 = h3;
+  // 计数与登记同步（同一条线程，同一个临界区之外也没有并发读者会看到"登记了但
+  // 没计数"——读数那两格只是给人看的近似值，见头文件）。
+  {
+    std::lock_guard<std::mutex> lk(quic_conn_counts_mu_);
+    if (static_cast<size_t>(li) < quic_conn_counts_.size()) {
+      ++quic_conn_counts_[static_cast<size_t>(li)];
+    }
+  }
 
   uvcpp_h3_connection::callbacks cbs;
   cbs.on_request = [this, conn](uvcpp_h3_connection&, const h3_request& h3req) {
     // 回调**先查表**：上一条请求的处理过程中可能已经把连接收了尾
     // （`on_disconnect` 里表项就摘掉了），此后这个闭包再进来必须什么都不做。
-    std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
-        quic_ctxs_.find(conn);
-    if (it == quic_ctxs_.end() || it->second.h3 == nullptr) return;
+    // 表还是按当前线程取 —— 与登记那一句同一条线程、同一条端点。
+    std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+    std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = t.find(conn);
+    if (it == t.end() || it->second.h3 == nullptr) return;
 
     // 转成 web 层那份请求对象。转换在这一层做，为的是让 `h3_request` 不出现在
     // `uvcpp_http_server` 的声明里（公开头只认 web 自己的类型）。
@@ -2385,9 +2810,9 @@ int uvcpp_http_server::send_h3_response(uvcpp_quic_connection* conn,
                                         uvcpp_http_response& resp,
                                         const std::string& accept_encoding,
                                         bool is_head) {
-  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
-      quic_ctxs_.find(conn);
-  if (it == quic_ctxs_.end() || it->second.h3 == nullptr) return UV_EINVAL;
+  std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = t.find(conn);
+  if (it == t.end() || it->second.h3 == nullptr) return UV_EINVAL;
   uvcpp_h3_connection* h3 = it->second.h3;
 
   // 与 `send_h2_response` 逐条相同：h3 也是一条**绕过** `send_response` 的独立
@@ -2436,14 +2861,24 @@ int uvcpp_http_server::send_h3_response(uvcpp_quic_connection* conn,
 }
 
 void uvcpp_http_server::remove_h3_ctx(uvcpp_quic_connection* conn) {
-  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
-      quic_ctxs_.find(conn);
-  if (it == quic_ctxs_.end()) return;  // 幂等：on_disconnect 与析构都可能会来
+  std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = t.find(conn);
+  if (it == t.end()) return;  // 幂等：on_disconnect 与析构都可能会来
+  // 序号在**确认有这一项之后**才求：它要走 abort 那条判据（多循环 + 不在循环
+  // 线程上），而一次"已经摘过了"的幂等重入不该因此崩掉。
+  const int li = quic_loop_index_here();
   uvcpp_h3_connection* h3 = it->second.h3;
   it->second.h3 = nullptr;
   // **先摘表、再删对象**（与 `remove_ctx` 同一个次序）：删对象会跑它自己的
   // 收尾，而那一步可能回到本函数；表还在的话那次重入就会再删一次。
-  quic_ctxs_.erase(it);
+  t.erase(it);
+  {
+    std::lock_guard<std::mutex> lk(quic_conn_counts_mu_);
+    if (static_cast<size_t>(li) < quic_conn_counts_.size() &&
+        quic_conn_counts_[static_cast<size_t>(li)] > 0) {
+      --quic_conn_counts_[static_cast<size_t>(li)];
+    }
+  }
   delete h3;
 }
 
@@ -2503,14 +2938,22 @@ void uvcpp_http_server::stop(std::function<void()> on_stopped) {
   tcp_server_->stop([this, on_stopped]() {
     status_ = HTTP_SERVER_STOPPED;
 #if UVCPP_HTTP3_ENABLE
-    // 两个端点**共用同一条循环**（见 `listen_quic()`），所以这里收完 TCP 那条
-    // 腿再停循环。次序反了的话，TCP 那侧异步关闭的收尾回调再也不会跑 ——
-    // 而它正是我们这个 lambda 本身。
+    // TCP 与 0 号 QUIC 端点**共用 0 号循环**（见 `listen_quic()`），所以这里收完
+    // TCP 那条腿再停循环。次序反了的话，TCP 那侧异步关闭的收尾回调再也不会跑
+    // —— 而它正是我们这个 lambda 本身。
     //
     // 这一句对"**只**开了 h3"的服务端是**必需**的：`uvcpp_tcp_server::stop()`
     // 在没在 listen 时是同步早返回的（调用方还没 `listen()` 就是这个形状），
     // 于是不补这一句就没人去停循环，`run()` 永远不回来。
-    if (quic_server_ != nullptr) quic_server_->stop();
+    //
+    // **只停 0 号**：1..n−1 号端点是各自那条工作循环上的 listener，它们的循环由
+    // `uvcpp_tcp_server::stop_workers()` 停 —— `uvcpp_quic_server::stop()` 是
+    // `loop->stop()`，在工作循环上调它会让 `uv_run` 提前返回、绕过那边
+    // `stopping_` 的闸（`uvcpp_quic_server::stop()` 的注释是权威）。所以这一段
+    // 与扇出与否无关，一个字都不用跟着 n 变。
+    if (!quic_servers_.empty() && quic_servers_[0] != nullptr) {
+      quic_servers_[0]->stop();
+    }
 #endif
     if (on_stopped) on_stopped();
   });

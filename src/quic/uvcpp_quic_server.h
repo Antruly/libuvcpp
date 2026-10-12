@@ -48,9 +48,17 @@ class uvcpp_ssl_context;
  * 持有多个 CID）—— 本端自己发的每一个 SCID，加上对端首包里的那个原始 DCID。
  * 表由内核的 `on_new_cid` / `on_remove_cid` 事件驱动着长与缩，本层只管维护。
  *
- * **多循环**：本版**没有** `uvcpp_tcp_server` 那套多循环扇出（`set_loops()`）。
- * QUIC 的多循环切分是按 CID 而不是按连接亲和度做的，形状不同，不是"暂时没写"，
- * 是**不打算照搬**。这行注释就是给后来人的路标。
+ * **多循环**：本类**不提供** `uvcpp_tcp_server::set_loops()` 那样的旋钮，而那是
+ * **设计**不是缺口：本类的一个实例就是**一条循环上的一个 UDP socket**，多循环那
+ * 件事是**在上面一层**由多个本类实例拼出来的 —— 每个实例一个 socket、各带
+ * `UV_UDP_REUSEPORT` 抢同一个端口，内核按四元组哈希把数据报分给其中一个。
+ * `uvcpp_http_server::set_loops(n)` 干的就是这件事（见 `listen_quic()`）。
+ *
+ * 两个端点各持一张 CID 表**够用**，因为：SCID 是每连接现取的随机值，连接归属由
+ * 「谁收到首包谁建」定，而本库**不做连接迁移** ⇒ 同一个四元组被内核哈希恒定映射
+ * 到同一个 socket，后续包必落回同一端点。落到陌生端点的包**丢掉，不转发**（在
+ * QUIC 里这与链路丢包等价，重传兜底）。边界：一旦将来加连接迁移、或者做 socket
+ * 热重启，转发或共享 CID 表就从"可选"变成"必需"。
  *
  * **线程**：所有成员都只能在 `get_loop()` 那条线程上调用。
  */
@@ -147,6 +155,81 @@ class UVCPP_API uvcpp_quic_server {
   void set_alpn_select_protos(const std::vector<std::string>& protos);
 
   /**
+   * @brief 让下一次 `listen()` **带 `UV_UDP_REUSEPORT` 去绑**，好与别的端点
+   *        （各自一条循环、各自一个本类实例）**抢同一个端口**。
+   *
+   * 这是拼多循环扇出的那一半：n 个本类实例各绑各的 socket、带同一个标志、
+   * 落在同一个 `(地址, 端口)` 上，内核按四元组哈希把数据报分给其中一个。
+   * **不调它（默认）就是今天的行为**：一个端点独占那个端口。
+   *
+   * 回落是**运行时**的，且不改变返回值 —— 与 `uvcpp_tcp_server::set_loops()`
+   * 那条同一套：平台不支持（Windows 直接返 `ERROR_NOT_SUPPORTED`；macOS 等
+   * `uv__sock_reuseport()` 返 `UV_ENOTSUP`）、或者这份 libuv 太老
+   * （`UV_UDP_REUSEPORT` 是 **1.50** 才有的，见 `handle/uvcpp_udp.h` 末尾），
+   * 那次带标志的 `bind()` 会失败 ⇒ 自动**去掉标志重绑一次**（`bind(2)` 还没发
+   * 生过，同一个句柄可以重来），并在 stderr 上打一行说明。真伪一律问
+   * @ref is_reuseport：**调用方要靠它决定"能不能再建第 2..n 个端点"**。
+   *
+   * @warning 必须在 @ref listen **之前**调：标志是 `bind()` 那一刻用的，绑完
+   *          再改它不会改变已经绑好的形状。
+   *
+   * @note 这是**给多循环扇出用的口子**，不是"更快的开关"：单独一个端点带不带
+   *       这个标志，功能与吞吐完全一样 —— 差别只在"同一个端口能不能被第二个人
+   *       绑上"。
+   */
+  void set_reuseport(bool on);
+
+  /**
+   * @brief 这次 `listen()` 到底带上 `SO_REUSEPORT` 了没有。
+   *
+   * **运行时探测的结果，不是编译期常量**：同一个二进制在不同平台上不一样
+   * （Linux 上给得出来，Windows 上 libuv 无条件拒绝，macOS 上
+   * `uv__sock_reuseport()` 没有实现）。判据要看这个值决定断言哪一套，别拿
+   * `#ifdef` 猜平台。
+   *
+   * `false` 有三种来路，对调用方是**同一件事**（这个端点独占端口）：没调过
+   * @ref set_reuseport、平台不支持、标志被 libuv 忽略。`listen()` 成功之前
+   * 恒为 `false`。
+   */
+  bool is_reuseport() const;
+
+  /**
+   * @brief 本端点**自己发的 SCID** 用几个字节。默认 18
+   *        （`quic_session::scid_len()`），不调它 = 今天逐字节相同。
+   *
+   * 为什么这是个可调的值：短包头**不把 DCID 长度写在包上**（RFC 9000
+   * §17.3.1），收方只能按**自己**选的长度反推；而两端各自选自己的长度
+   * （RFC 9000 §5.1）。本库两端默认都选 18 ⇒ 同源，于是「拿**对端** SCID 的
+   * 长度去解**本端**的 DCID」这类错误**恒等抵消**：既有用例一条都不会红
+   * （`745608c` 那条缺陷就是这么在平台上才现形的 —— 上游 `h2load` 选的是
+   * 8）。这个口子让用例把两端拉开，让 CI 自己复现那一条。
+   *
+   * @param n 取 `8..20`。上限是 `NGTCP2_MAX_CIDLEN`(20)；下限取 8 而不是
+   *          `NGTCP2_MIN_CIDLEN`(1)，是因为一条 UDP 口上跑着很多条连接，1 字节
+   *          的 CID 只有 256 种取值 ⇒ 撞键是常态，那个档不是"另一种配置"而是
+   *          "路由坏掉"。越界与"装晚了"一样只打一行 stderr 并忽略。
+   *
+   * @warning 必须在 @ref listen **之前**调：这个数在**建连接**时定下（本端
+   *          SCID 的长度就写进首包了），而每一次入包查表都用它 —— 监听之后再
+   *          改，已经在跑的那些连接会立刻全部解错包头。
+   *
+   * @note 这是**给用例用的口子**，不是"更省字节的开关"：CID 长短只影响每包
+   *       18 − n 个字节的开销，而它换来的是"两端长度可以不一样"这条被测的
+   *       自由度。
+   */
+  void set_scid_len(size_t n);
+
+  /**
+   * @brief 本端点自己发的 SCID 有几个字节 —— @ref set_scid_len 记下的值，
+   *        没调过就是 `quic_session::scid_len()`（18）。
+   *
+   * @note 它与 `quic_detail::quic_session::scid_len()` **不一定相等**：那一个
+   *       是本库的默认值，这一个是**这个端点**实际用的值。端点在查表时用的是
+   *       后者。
+   */
+  size_t scid_len() const;
+
+  /**
    * @brief 空闲超时（毫秒）。**默认 30000**（30 秒）；`0` = 不设超时。
    *
    * 与 `uvcpp_quic_client::set_idle_timeout()` 同一条：这个值进 QUIC 的
@@ -192,7 +275,16 @@ class UVCPP_API uvcpp_quic_server {
    */
   int run(uv_run_mode md = UV_RUN_DEFAULT);
 
-  /** @brief 停循环，导致 `run()` 返回。 */
+  /**
+   * @brief 停**本端点所在的那条循环**，导致 `run()` 返回。
+   *
+   * @warning **只能在 `get_loop()` 自己的线程上调。** `uvcpp_http_server` 的多
+   *          循环扇出会建 n 个本类实例（1..n−1 号跑在各自的工作循环上），那些
+   *          **一次都不能调它**：在工作循环上调这条会让那条 `uv_run()` 提前返回、
+   *          绕过 `uvcpp_loop_worker` 自己的停机闸，于是排空邮箱、关本循环的
+   *          连接、泵掉挂起的关闭回调这一串收尾就再也没人跑。工作循环的停止权
+   *          **独占** `uvcpp_tcp_server::stop_workers()`。
+   */
   void stop();
 
  private:

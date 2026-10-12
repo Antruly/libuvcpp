@@ -144,4 +144,27 @@ private:
 
 } // namespace uvcpp
 
+// ---------------------------------------------------------------------------
+// `UV_UDP_REUSEPORT` 与 `UV_TCP_REUSEPORT`（见 `uvcpp_tcp.h` 末尾）是同一族里
+// 的两件事，但**版本门槛不同**：TCP 那个是 libuv **1.49** 加的，UDP 这个是
+// **1.50**（`ChangeLog` 里 "unix: support SO_REUSEPORT with load balancing for
+// UDP" 落在 1.50.0 那一段）。它同样是 `enum uv_udp_flags` 的**枚举量、不是宏**
+// —— 所以老版本上 `#ifdef UV_UDP_REUSEPORT` 判不出来，只能按版本号分叉。
+// 这不是纸面上的讲究：本仓 CI 的 ubuntu 腿装的是**系统 libuv**
+// （`apt-get install libuv1-dev`，ubuntu-24.04 给的是 1.48），直接用那个名字
+// 在那里是**编不过**的。
+//
+// 取 0 的含义与 TCP 那条一致："这个标志用不上，退回既有退路" ——
+// `uvcpp_quic_server::start_listen()` 拿到 0 之后那次 `bind()` 不带标志，抢不到
+// 端口就**回落成单端点**（= 今天的行为）。**但回落不是只有这一条**：带得上标志
+// 的平台（Linux）也可能在运行时被拒（`uv__sock_reuseport()` 返回 `UV_ENOTSUP`
+// 的那一族 —— macOS 就在里面，而那是 CI 的一条腿），所以真伪一律由
+// **那次绑定的返回码**定，不由这个宏定。
+// ---------------------------------------------------------------------------
+#if defined(UV_VERSION_HEX) && UV_VERSION_HEX >= 0x013200
+#define UVCPP_UDP_REUSEPORT_FLAG UV_UDP_REUSEPORT
+#else
+#define UVCPP_UDP_REUSEPORT_FLAG 0
+#endif
+
 #endif // SRC_HANDLE_UVCPP_UDP_H

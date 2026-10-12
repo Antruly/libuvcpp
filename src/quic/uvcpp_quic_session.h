@@ -260,7 +260,13 @@ class quic_session {
    *   直接握手失败**：客户端会拿它和自己收到的首包 DCID 比对，不一致就报
    *   `TRANSPORT_PARAMETER_ERROR`。它同时还是端点做 «首包路由» 的键。
    *
-   * 本端自己的 SCID 由本函数**自己随机生成**（18 字节），不从外面传。
+   * 本端自己的 SCID 由本函数**自己随机生成**，长度是 \p scid_len ——
+   * **生成方负责把这个数记下来**：对端此后每个短包头里的 DCID 就是它，而包头
+   * 不把长度写在包上（RFC 9000 §17.3.1），所以端点每次查表都得按它反推。
+   * 本库默认取 `quic_session::scid_len()`（18 字节）。
+   *
+   * @param scid_len 本端 SCID 的字节数。合法区间 `1..NGTCP2_MAX_CIDLEN`(20)，
+   *        越界由 `ngtcp2_conn_server_new()` 拒。
    */
   int init_server(uvcpp_ssl_context* ssl_ctx,
                   const ::std::vector<::std::string>& alpn,
@@ -268,7 +274,7 @@ class quic_session {
                   uint64_t idle_timeout_ms, quic_send_fn send,
                   quic_gso_set_seg_fn set_gso_seg,
                   const ngtcp2_cid& client_scid,
-                  const ngtcp2_cid& original_dcid);
+                  const ngtcp2_cid& original_dcid, size_t scid_len);
 
   // -----------------------------------------------------------------
   // 服务端路由 —— 端点的 CID 表就靠这三条填
@@ -306,7 +312,13 @@ class quic_session {
                          ::std::string* client_scid,
                          ::std::string* original_dcid);
 
-  /** @brief 本库为一条连接选的 CID 长度（短包头解析要用，见上）。 */
+  /**
+   * @brief 本库**默认**给一条连接选的 CID 长度（短包头解析要用，见上）。
+   *
+   * 它是 `init_server()` 那个 \p scid_len 参数的默认来路，也是
+   * `uvcpp_quic_server::set_scid_len()` 不调用时的取值 —— 两端同源时都是它，
+   * 所以「拿对端的 SCID 长度顶上」这类错误在同源用例里**恒等抵消**，看不见。
+   */
   static size_t scid_len();
 
   /**

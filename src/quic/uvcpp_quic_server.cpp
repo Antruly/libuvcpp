@@ -121,6 +121,14 @@ struct uvcpp_quic_server::impl {
   uvcpp_timer* timer = nullptr;
   bool         listening = false;
 
+  /// `set_reuseport(true)` 记下的**意图**；真伪是 `reuseport`。
+  bool want_reuseport = false;
+  /// 本端 SCID 的长度（`set_scid_len()` 写的）。默认就是本库那一个 ——
+  /// **端点解短包头时的长度必须是这个数**，不是对端 SCID 的长度。
+  size_t scid_len = quic_detail::quic_session::scid_len();
+  /// 这次绑定**真的**带上 `SO_REUSEPORT` 了没有 —— 运行时探测的结果。
+  bool reuseport = false;
+
   /// 这一个监听 socket 上 `UDP_SEND_MSG_SIZE` 当前是多少。0 = 没设过。
   ///
   /// 这里**只有一份**，因为服务端所有连接共用同一个 socket —— 也正是
@@ -299,8 +307,7 @@ struct uvcpp_quic_server::impl {
     // 双方靠 PTO（初始约 1 s）重传才能推进 —— 表象是「服务端 CPU≈0、每连接每 5 s
     // 只出几个响应」。
     std::string dcid;
-    if (quic_detail::quic_session::peek_dcid(
-            data, len, quic_detail::quic_session::scid_len(), &dcid)) {
+    if (quic_detail::quic_session::peek_dcid(data, len, scid_len, &dcid)) {
       std::map<std::string, uvcpp_quic_connection*>::iterator it =
           by_cid.find(dcid);
       if (it != by_cid.end()) {
@@ -386,7 +393,7 @@ struct uvcpp_quic_server::impl {
           gso_seg = seg;
           return true;
         },
-        scid, odcid);
+        scid, odcid, scid_len);
     if (rc != 0) {
       // `attach` 已经把内核的所有权接过来了，`holder` 一析构就连它一起收
       // （连接层的 `~impl` 里 delete 内核）。所以这里**不要**再 delete `s`。
@@ -403,6 +410,37 @@ struct uvcpp_quic_server::impl {
   // 起监听
   // ---------------------------------------------------------------
 
+  /**
+   * @brief 绑这个 UDP socket；`want_reuseport` 时先带标志试，失败就去掉标志重来。
+   *
+   * 为什么"重来一次"是安全的：`uv__udp_bind()` 是在 `bind(2)` **之前**设那些
+   * socket 选项的（`libuv:src/unix/udp.c:406-410` 那次 `uv__sock_reuseport()`），
+   * 选项设不上就在那一步返回、句柄还没绑上 ⇒ 同一个句柄可以再绑一次不带标志的。
+   * Windows 更干脆：`libuv:src/win/udp.c:206` 见到这个标志**在造 socket 之前**
+   * 就 `return ERROR_NOT_SUPPORTED`，句柄原封不动。
+   *
+   * 代价只是那次 `fill_addr()` 分出来的地址 —— 与 `uvcpp_tcp_server::
+   * bind_on_loops()` 那条回落一模一样，包括"回落成功才打一行 stderr"这个时机
+   * （回落也失败时不打：那时调用方拿到的是错误码，多一行"已回落"只会误导）。
+   */
+  int bind_udp(const struct sockaddr* sa) {
+    const int flags = want_reuseport ? UVCPP_UDP_REUSEPORT_FLAG : 0;
+    int rc = udp->bind(sa, static_cast<unsigned int>(flags));
+    if (rc != 0 && flags != 0) {
+      rc = udp->bind(sa, 0);
+      reuseport = false;
+      if (rc == 0) {
+        std::fprintf(stderr,
+                     "[uvcpp_quic_server] 这份 libuv/平台绑不上 REUSEPORT"
+                     "（UDP 要 1.50+，且 Linux/FreeBSD/DragonFly/Solaris 11.4"
+                     "/AIX 7.2.5 之外都拒）：这个端点独占端口\n");
+      }
+      return rc;
+    }
+    reuseport = (flags != 0);
+    return rc;
+  }
+
   int start_listen() {
     if (listening) return UV_EALREADY;
 
@@ -416,7 +454,7 @@ struct uvcpp_quic_server::impl {
     if (udp == nullptr) return UV_ENOMEM;
     gso_seg = 0;  // 换了 socket，上一份缓存作废
 
-    rc = udp->bind(reinterpret_cast<const struct sockaddr*>(&sa), 0);
+    rc = bind_udp(reinterpret_cast<const struct sockaddr*>(&sa));
     if (rc != 0) return rc;
 
     // 取回内核实际给的本端地址。`bind(ip, 0)` 时这里才有真端口；**每条连接的
@@ -569,6 +607,44 @@ void uvcpp_quic_server::set_idle_timeout(uint64_t ms) {
   impl_->idle_timeout_ms = ms;
 }
 
+void uvcpp_quic_server::set_reuseport(bool on) {
+  // 装晚了就是"配了却没生效"那种最难查的形状，与 `uvcpp_tcp_server::
+  // set_handoff_forced()` 同一条处置：**不静默吞掉**。这里不返错（标志本身
+  // 已经是"尽力而为"了），只在 stderr 上说明。
+  if (impl_->listening) {
+    std::fprintf(stderr,
+                 "[uvcpp_quic_server] set_reuseport(): 端点已经在收包了，"
+                 "这一句被忽略（标志是 bind() 那一刻用的）\n");
+    return;
+  }
+  impl_->want_reuseport = on;
+}
+
+bool uvcpp_quic_server::is_reuseport() const { return impl_->reuseport; }
+
+void uvcpp_quic_server::set_scid_len(size_t n) {
+  // 两条都是"配了却没生效"的形状，与上面 `set_reuseport()` 同一条处置：
+  // **不静默吞掉**，但也都不返错（这是个配置项，不是一次失败的操作）。
+  if (impl_->listening) {
+    // 监听之后改这个数不是"晚一点生效"，是"已经在跑的那些连接立刻全部解错
+    // 包头"：本端 SCID 的长度在建连接时就写进首包了，而每次入包查表都用它。
+    std::fprintf(stderr,
+                 "[uvcpp_quic_server] set_scid_len(): 端点已经在收包了，"
+                 "这一句被忽略（长度在 listen() 之前定）\n");
+    return;
+  }
+  if (n < 8 || n > NGTCP2_MAX_CIDLEN) {
+    std::fprintf(stderr,
+                 "[uvcpp_quic_server] set_scid_len(%zu): 越界，取 8..%d；"
+                 "这一句被忽略\n",
+                 n, static_cast<int>(NGTCP2_MAX_CIDLEN));
+    return;
+  }
+  impl_->scid_len = n;
+}
+
+size_t uvcpp_quic_server::scid_len() const { return impl_->scid_len; }
+
 // =========================================================================
 // Listen / Run
 // =========================================================================
@@ -589,6 +665,9 @@ int uvcpp_quic_server::listen(
     // 连接"，此时再回调一次会让调用方在自己的错误分支里被判一次成功。
     impl_->connection_cb = nullptr;
     impl_->listening     = false;
+    // `reuseport` 也跟着回滚：`is_reuseport()` 的契约是"**这次** `listen()`
+    // 到底带上了没有"，没成的那一次不许在事后报 true。
+    impl_->reuseport     = false;
     if (impl_->udp != nullptr) {
       delete impl_->udp;
       impl_->udp = nullptr;

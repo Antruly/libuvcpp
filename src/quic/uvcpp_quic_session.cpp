@@ -613,9 +613,13 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
                               uint64_t idle_timeout_ms, quic_send_fn send,
                               quic_gso_set_seg_fn set_gso_seg,
                               const ngtcp2_cid& client_scid,
-                              const ngtcp2_cid& original_dcid) {
+                              const ngtcp2_cid& original_dcid,
+                              size_t scid_len) {
   if (conn_ != nullptr || ossl_ctx_ != nullptr) return UV_EALREADY;
   if (send == nullptr) return UV_EINVAL;
+  // 早拒：`ngtcp2_conn_server_new()` 那边也会拒，但它拒的时候本函数已经建了
+  // 半个会话（SSL 那一套），清理路径比这一行贵得多。
+  if (scid_len == 0 || scid_len > NGTCP2_MAX_CIDLEN) return UV_EINVAL;
 
   const int locallen = sockaddr_len(local);
   const int remotelen = sockaddr_len(remote);
@@ -639,9 +643,13 @@ int quic_session::init_server(uvcpp_ssl_context* ssl_ctx,
       static_cast<ngtcp2_socklen>(remotelen), nullptr);
 
   // 本端（服务端）自己的 SCID：新挑一个随机值。此后对端发包时往 DCID 里填它。
+  //
+  // 长度由调用方给（`uvcpp_quic_server::set_scid_len()`，默认
+  // `quic_session::scid_len()` = 18）。**端点解短包头时用的必须是这个数** ——
+  // 不是对端 SCID 的长度，两者可以不同（RFC 9000 §5.1 各选各的）。
   ngtcp2_cid server_scid;
-  server_scid.datalen = kServerScidLen;
-  fill_random(server_scid.data, kServerScidLen);
+  server_scid.datalen = scid_len;
+  fill_random(server_scid.data, scid_len);
 
   ngtcp2_settings settings;
   ngtcp2_settings_default(&settings);

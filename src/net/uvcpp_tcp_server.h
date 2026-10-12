@@ -406,6 +406,42 @@ class UVCPP_API uvcpp_tcp_server {
    */
   size_t client_count_at(int loop_index) const;
 
+  /**
+   * @brief 第 \p index 条循环的句柄。0 = acceptor 那条（就是 `get_loop()`）；
+   *        越界返回 nullptr。
+   *
+   * 为什么上层要得到它：**工作循环的循环对象只有在这里拿得到**，而 UI/属主要
+   * 在上面建只属于那条循环的东西（观察点、定时器）时得先有它。net 自己那一族
+   * 钩子（`set_loop_start_hook` / `set_loop_exit_hook`）也够用，但它们是**建循环
+   * 时**的一次性回调，而上面这层要的是"任何时候都能问到第 i 条是谁"。
+   *
+   * @note `n == 1` 时它只答得出 `index == 0`（其余返回 nullptr）—— 那时确实
+   *       只有一条循环，与今天逐字相同。
+   */
+  uvcpp_loop* loop_at(int index) const;
+
+  /**
+   * @brief 把 \p fn 投到第 \p loop_index 条循环的线程上跑。
+   *
+   * 用途：属主要在**别的循环**上动它自己那份按循环切的状态（建/收端点、关属主
+   * 句柄），而那些动作只能在循环线程上做。`uvcpp_http_server` 的多循环 QUIC 扇出
+   * 与它的析构都是靠这个。
+   *
+   * @return true = 已受理；false = **没受理**（\p loop_index 不在 1..n−1 里，
+   *         或者那条工作循环已经不在受理投递了）。与 `uvcpp_loop_worker::post()`
+   *         同一条语义：被拒 = 任务当场析构，所以携带 RAII 资源的任务不需要自己
+   *         写失败清理。
+   *
+   * @warning **0 号不吃投递**：那是调用方自己那条循环（`run()` 就在调用方线程
+   *          上），"投过去"与"直接调"没有任何区别，而且这里也没法证明调用方
+   *          就在那条线程上。要在 0 号上做事，就地做。
+   *
+   * @note 投递是**异步**的：返回 true 只表示"受理了"，不表示已经跑完。要等它
+   *       跑完得自己拿一个 `std::promise` 之类的东西把结果交回来（照
+   *       `start_worker_listeners()` 的写法）。
+   */
+  bool post_to_loop(int loop_index, std::function<void()> fn);
+
   // -----------------------------------------------------------------
   // Stop
   // -----------------------------------------------------------------
@@ -720,9 +756,6 @@ class UVCPP_API uvcpp_tcp_server {
   // -----------------------------------------------------------------
   // 多循环（`set_loops(n > 1)` 时才用得上）
   // -----------------------------------------------------------------
-
-  /** @brief 第 \p index 条循环。0 = acceptor 循环（`loop_`）；越界返回 nullptr。 */
-  uvcpp_loop* loop_at(int index) const;
 
   /**
    * @brief acceptor 侧：把刚接受的连接取出来转手给某个 worker。

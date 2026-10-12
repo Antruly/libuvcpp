@@ -183,6 +183,38 @@ class UVCPP_API uvcpp_http_server {
   int bind(const char* ip, int port);
   int bindIpv4(const char* ip, int port);
   int bindIpv6(const char* ip, int port);
+
+  /**
+   * @brief 设定工作循环数。**不调用（或 `set_loops(1)`）= 今天的行为**。
+   *
+   * 直接转发给 @ref get_tcp_server 的 `uvcpp_tcp_server::set_loops(n)` —— 两条
+   * 腿合用一套循环，所以这个数**同时**决定 h1/h2 与 h3 各用几条。那段完整语义
+   * （n 条循环各跑各的、内核分流还是接受者+转手、`is_fanout()` 怎么读、
+   * 装上之后谁在哪个线程上、Windows 那条路的代价与边界）写在
+   * `net/uvcpp_tcp_server.h` 里，这里不重抄。
+   *
+   * 与那条腿的**唯一区别**是 h3 那半边的接线，写在 @ref listen_quic 里。
+   *
+   * @param n 循环总数，取 1..64。
+   * @return 0 成功；`UV_EINVAL` n 越界；`UV_EBUSY` 已经 `listen()` 过、已经用
+   *         `n > 1` 装过一遍，或者**已经 `listen_quic()` 过**（见下）。`n == 1`
+   *         是幂等的空操作。
+   *
+   * @warning **必须在 `listen()` 与 `listen_quic()` 之前调。** 后一条是本层
+   *          独有的：QUIC 那些端点是**按 `loop_count()` 定尺寸**一次建齐的
+   *          （n 个 socket 各绑各的），端点建完再改 n 就变成"表按 1 张定尺寸、
+   *          而回调报 1..n−1 号"，只能拒。TCP 那半边的 `set_loops()` 只看得到
+   *          自己 listen 没 listen —— h3-only 的服务端上它一次都没 listen 过，
+   *          挡不住这件事，所以这道门补在本层。
+   *
+   * @note 这个函数**不做** h3 专属的第二个旋钮。两条腿各一个循环数会让表的尺寸、
+   *       `run()` / `stop()` 的语义全部分叉，而它们共用一条 `uv_run()`。
+   */
+  int set_loops(int n);
+
+  /** @brief 循环总数（1 + 工作循环数）。没调过 `set_loops()` 就是 1。 */
+  int loop_count() const;
+
   int listen(int backlog = 128);
 
 #if UVCPP_HTTP3_ENABLE
@@ -202,11 +234,27 @@ class UVCPP_API uvcpp_http_server {
    *         QUIC 没有明文模式）；其余是 bind / listen 的失败码。
    *
    * @note **顺序**：`set_quic_ssl_context()` → `listen_quic()` → `run()`。与 TCP
-   *       那条腿一样，端口要 `listen_quic()` 之后才真的可连。
+   *       那条腿一样，端口要 `listen_quic()` 之后才真的可连。要用多循环就先
+   *       `set_loops(n)`（见那条的 `@warning`）。
    *
-   * @note **共用一条循环**：QUIC 端点**不做多循环扇出**（`uvcpp_quic_server`
-   *       只有一条循环），而它用的就是 @ref get_tcp_server 那条 —— 所以
-   *       @ref run 与 @ref stop 对两种传输一次管全，调用方不必为 h3 多写一行。
+   * ## 多循环
+   *
+   * `set_loops(n)` 过（n > 1）时这里**建 n 个 QUIC 端点**：0 号建在 acceptor
+   * 那条循环上，1..n−1 号各投递到对应的工作循环上、在那条线程上建，全部建好才
+   * 返回。n 个 socket 各带 `UV_UDP_REUSEPORT`、**抢同一个端口**，内核按四元组
+   * 哈希把数据报分给其中一个（QUIC 的 CID 表是按端点各存一份的，够用 —— 理由
+   * 与那条边界写在 `quic/uvcpp_quic_server.h` 的类注释里）。所以 @ref run 与
+   * @ref stop 仍然一次管全，调用方不必为 h3 多写一行。
+   *
+   * **这不是"Linux 限定"**：`UV_UDP_REUSEPORT` 要 libuv **1.50+**，而 Windows
+   * 上 libuv 无条件拒绝、macOS 上 `uv__sock_reuseport()` 没有实现。那些平台上
+   * 0 号那次绑定会**自动去掉标志重绑一次**（并在 stderr 上说明），于是
+   * @ref quic_fanout 为 `false`、**只有 0 号一个端点** —— 功能与单循环逐字相同，
+   * 只是没有扇出。判据要按 @ref quic_fanout 分叉，别拿 `#ifdef` 猜平台。
+   *
+   * **扇出失败是原子的**：1..n−1 号里任何一个建不起来（端口被别人抢走之类），
+   * 已经建好的全部拆掉、0 号也拆掉，返回那个错误码，本对象回到"没有 QUIC 腿"
+   * 的状态。
    *
    * @warning **h3 上暂不支持流式路由**。`post_stream` 注册的流式处理函数与
    *          `set_stream_claim` 装的认领钩子在 TCP 那条路上才生效；一条 h3 请求
@@ -239,8 +287,55 @@ class UVCPP_API uvcpp_http_server {
    *
    * 与 `uvcpp_tcp_server` 那边取端口的方式不同，这里给的是个直读的口子：
    * QUIC 端点不在 `get_tcp_server()` 的账上，没有别的门能问到它。
+   *
+   * @note 多循环下**所有端点绑的是同一个端口**（那正是内核分流的前提），所以
+   *       报 0 号那一个就够 —— 它们不是"n 条腿各有各的口"。
    */
   int quic_listen_port() const;
+
+  /**
+   * @brief 这次 `listen_quic()` 是不是**真的**建出了 n 个端点（内核分流）。
+   *
+   * **运行时探测的结果，不是编译期常量**：与 `uvcpp_tcp_server::is_fanout()`
+   * 同一套理由（`UV_UDP_REUSEPORT` 要 libuv 1.50+，且 Windows 无条件拒绝、
+   * macOS 没实现）。`false` 时有且只有 0 号一个端点 —— h3 那半边的功能与
+   * 单循环逐字相同。
+   *
+   * `listen_quic()` 之前、以及从没调过 `set_loops(n>1)` 时恒为 `false`。
+   *
+   * @note 本层的 `quic_fanout()` 与 `get_tcp_server()->is_fanout()` **可以不同**：
+   *       那是两种不同的 socket 选项（`UV_TCP_REUSEPORT` 1.49+ 对
+   *       `UV_UDP_REUSEPORT` 1.50+），平台清单也不完全一样。要判 h3 的分布形状
+   *       就问这一个。
+   */
+  bool quic_fanout() const;
+
+  /**
+   * @brief 本层**当前登记着**的 h3 连接总数（所有循环相加）。
+   *
+   * 数的是"h3 驱动层已经为它建起来的那些连接" —— 一条 QUIC 连接在**首包到达**
+   * 时就被 `on_quic_connection()` 收下表，所以这个数比"握手完成了几条"早。
+   *
+   * 与 `client_count()` 那条同一套口径：它是**读数**，不是判据 —— 想知道分布
+   * 形状按 @ref quic_fanout 分叉。
+   *
+   * @note **可以从任何线程调**（各循环的计数由一把小锁护着，而它只在连接登记 /
+   *       摘除时碰，不在每请求那条路上），拿到的是"问的那一刻"的近似值：别的
+   *       循环正在建的连接可能这一拍还没算进来。要精确值就得在停机之后问，而
+   *       那时表已经空了 —— 所以它天生是个**运行中**的读数。
+   */
+  size_t quic_connection_count() const;
+
+  /**
+   * @brief 第 \p loop_index 条循环名下**当前登记着**的 h3 连接数。越界返回 0。
+   *
+   * **0 号不是恒 0 的**：@ref quic_fanout 为真时 0 号（acceptor 那条）自己也收
+   * 属于它的那一份。与 `uvcpp_tcp_server::client_count_at()` 同一条口径，包括
+   * 那句"只保证逐格之和 == @ref quic_connection_count，别拍均匀度阈值"。
+   *
+   * 线程与近似值的说明同 @ref quic_connection_count。
+   */
+  size_t quic_connection_count_at(int loop_index) const;
 #endif
 
   // -------------------------------------------------------------------
@@ -1172,6 +1267,35 @@ class UVCPP_API uvcpp_http_server {
     uvcpp_h3_connection* h3 = nullptr;
   };
 
+  /**
+   * @brief 本线程所在那条循环的 h3 登记表。**镜像 @ref ctxs_here 那一套。**
+   *
+   * "这条连接属于哪张表"不问连接 —— 问当前线程：QUIC 端点是**按循环建的**
+   * （@ref listen_quic），所以一条连接的全部回调都在它自己那条循环的线程上跑，
+   * 而 h3 层的回调又都是从那些回调里出来的。与 h1 那条腿必须给客户端存一个
+   * `loop_index` 不同，这里连那个字段都省了。
+   */
+  std::map<uvcpp_quic_connection*, quic_ctx>& quic_ctxs_here();
+
+  /**
+   * @brief @ref quic_ctxs_here 的三件套取值。
+   *
+   * @warning **返回的迭代器只能与该表自己的 `end()` 比**：多循环下第 i 张与第 j
+   *          张不是同一个容器，跨容器比较迭代器与 @ref ctxs_at 那条 `@warning`
+   *          逐字同罪。
+   */
+  std::map<uvcpp_quic_connection*, quic_ctx>& quic_ctxs_at(int loop_index);
+
+  /**
+   * @brief 本线程所在那条循环的序号 —— 就是 @ref quic_ctxs_here 拿来取表的那个数。
+   *
+   * 存在的理由只有一个：连接计数表 `quic_conn_counts_` 是**按序号**存的，而取表
+   * 那条路只回一张表、不回序号。两条路的判据必须一模一样（单循环一律算 0 号，
+   * 多循环下不在任何循环线程上就 abort），所以**不写成两份**：这里判一次，
+   * @ref quic_ctxs_here 也照同一条规矩走。
+   */
+  int quic_loop_index_here() const;
+
   /// 新到的 QUIC 连接（`uvcpp_quic_server::listen` 的回调里进来）。
   void on_quic_connection(uvcpp_quic_connection* conn);
 
@@ -1201,6 +1325,51 @@ class UVCPP_API uvcpp_http_server {
                        const std::string& accept_encoding, bool is_head);
 
   /**
+   * @brief 把 \p fn 投到第 \p loop_index 条循环上跑，并**有界地等它跑完**。
+   *
+   * 与 `uvcpp_tcp_server::start_worker_listeners()` 同一个装置（`shared_ptr` 包
+   * 一个 `promise`、5 秒墙钟上限），理由也一样：投递是异步的，而调用方要的是
+   * "这件事已经做完了"这个状态。
+   *
+   * @param loop_index 取 0..n−1。**0 号就地跑**（那就是调用方自己那条循环，
+   *        投递没有意义 —— 见 `uvcpp_tcp_server::post_to_loop()`）。
+   * @return true = 跑完了（`fn` 里无论做成没做成，都算跑完）；false = 没投出去
+   *         或者超时，两种情况都已经在 stderr 上说明。
+   */
+  bool run_on_quic_loop(size_t loop_index, std::function<void()> fn);
+
+  /**
+   * @brief 建一个 QUIC 端点、绑上、开始收包。**必须在 \p loop 那条循环的线程
+   *        上跑**（句柄只能在它自己的循环上建）。
+   *
+   * @param ip            绑的地址（`nullptr`/空 = 通配 IPv4）。
+   * @param reuseport     要不要带 `UV_UDP_REUSEPORT` 去绑（扇出的成员要）。
+   * @param port_io       入参是登记的端口；**出参**是内核实际给的那个（`0` 号
+   *                      端口那一次要靠它把真号传播给后面的端点）。
+   * @param rc_out        失败时的 libuv 错误码。
+   * @return 成功时是端点指针（**所有权交给调用方**）；失败时 nullptr，端点已经
+   *         自己收干净了。
+   */
+  uvcpp_quic_server* start_quic_endpoint(uvcpp_loop* loop, const char* ip,
+                                         bool reuseport, int* port_io,
+                                         int* rc_out);
+
+  /**
+   * @brief 收掉第 \p loop_index 条循环上**属于本层**的那一份：先删 h3 层，
+   *        再删 QUIC 端点，最后清掉那一格计数。
+   *
+   * **必须在第 `loop_index` 条循环的线程上跑。** 它是析构的三段里 (A) 与 (C)
+   * 的公共正文（A 段把它投到 1..n−1 号上，C 段在 0 号上就地跑），也是
+   * `listen_quic()` 建到一半失败时回滚用的那一份。
+   *
+   * 次序与今天的析构逐字同源：**先删 h3 再删端点** —— h3 层持有 QUIC 连接，
+   * 反过来不成立（`uvcpp_h3_connection` 的类注释写着"持有者必须在 QUIC 连接被
+   * 端点释放之前销毁本对象"）。这里**不**调 `h3->close()`：此刻对端多半早就
+   * 没了，而端点析构本来就会把它的连接放掉。
+   */
+  void teardown_quic_loop(size_t loop_index);
+
+  /**
    * @brief 底层 QUIC 连接结束了：摘表 + 删 h3 层。**幂等**。
    *
    * 由 `on_disconnect` 调，析构里也走一遍（那条路上 `on_disconnect` 可能从没
@@ -1217,25 +1386,47 @@ class UVCPP_API uvcpp_http_server {
 
 #if UVCPP_HTTP3_ENABLE
   /**
-   * @brief h3 连接的登记表，键是 QUIC 连接。
+   * @brief h3 连接的登记表，**按循环切**（与 @ref contexts_ 同一个形状）。
    *
-   * **只有一张，不按循环切** —— 与 @ref contexts_ 相反，而这**不是取舍**：
-   * QUIC 端点只有一条循环（`uvcpp_quic_server` 不提供多循环扇出，用的就是
-   * `tcp_server_` 那条），所以这张表的每一次访问都落在同一条循环的线程上，
-   * `ctxs_at()` 那套按循环取表的机制在这里没有对应物。
+   * 尺寸 = `loop_count()`，在 @ref listen_quic 里一次定死，此后只读。
+   * `set_loops()` 在 `listen_quic()` 之后返回 `UV_EBUSY`，循环数不会再变，
+   * 扩容也就无从谈起 —— 取表那一路不需要锁，靠的就是这一句。
    *
    * 键用 `uvcpp_quic_connection*` 是唯一的选择：QUIC 连接没有"代次号"，而
    * h3 层与 QUIC 连接一一对应。**值刻意不是 `conn_ctx`** —— 那个结构体在 h1
    * 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付的，哪怕一条 h3
    * 请求都没有。
+   *
+   * **每张表只有它自己那条循环的线程碰** —— 一条连接的全部回调都在它自己那条
+   * 循环上跑（QUIC 端点就是那么建的），所以"这条连接属于哪张表"这个问题不需要
+   * 问连接：**问当前线程**（见 @ref quic_ctxs_here）。
    */
-  std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_;
+  std::vector<std::map<uvcpp_quic_connection*, quic_ctx> > quic_ctxs_;
 
   /**
-   * @brief QUIC 端点。懒建（@ref listen_quic 里），**与 `tcp_server_` 共用
-   *        同一条循环**，所以 @ref run / @ref stop 不必知道它存在也能转起来。
+   * @brief QUIC 端点，**每个循环一个**（0 号 = acceptor 那条）。
+   *
+   * 懒建（@ref listen_quic 里）。`n == 1`（默认）时尺寸为 1，行为与从前逐字
+   * 相同。n > 1 时 n 个端点各带 `UV_UDP_REUSEPORT` 抢同一个端口，内核按四元组
+   * 哈希分流；平台不支持时**只有 0 号**（见 @ref quic_fanout）。
+   *
+   * 每个元素归它自己那条循环的线程管 —— 建、收、拆都在那条线程上。
    */
-  uvcpp_quic_server* quic_server_ = nullptr;
+  std::vector<uvcpp_quic_server*> quic_servers_;
+
+  /**
+   * @brief 每条循环上**登记着的** h3 连接数，只给 @ref quic_connection_count_at
+   *        那一族读数用（`quic_ctxs_[i].size()` 要从别的线程读是不安全的）。
+   *
+   * `quic_ctxs_` **自己不加锁**（它的每一次查找都在每请求的路上），所以这里
+   * 单开一张整数表 + 一把锁：改它的时机只有**建立**与**拆除**一条连接这两处，
+   * 与 h1 的 `clients_` / `clients_mu_` 同一条思路，也不在任何热路上。
+   *
+   * 尺寸与 `quic_ctxs_` 一样在 @ref listen_quic 里定死。
+   */
+  std::vector<int> quic_conn_counts_;
+  /** @brief 护 @ref quic_conn_counts_（跨线程读那两格读数要用）。 */
+  mutable std::mutex quic_conn_counts_mu_;
 
   /// h3 那条腿的身份凭证（@ref set_quic_ssl_context 记下的，建端点时转交）。
   uvcpp_ssl_context* quic_ssl_ctx_ = nullptr;

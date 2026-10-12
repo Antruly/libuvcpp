@@ -624,6 +624,17 @@ uvcpp_loop* uvcpp_tcp_server::loop_at(int index) const {
   return workers_[i]->loop();
 }
 
+bool uvcpp_tcp_server::post_to_loop(int loop_index, std::function<void()> fn) {
+  // 0 号不收投递，理由见头文件：那是调用方自己的循环。这里**不**代为就地跑一遍
+  // —— "投递"与"就地调用"在执行线程上完全不同（前者是异步的），让一个下标把
+  // 两者悄悄混起来，正是最难查的那种"在 3 条循环上跑得好好的，在 1 条上变成
+  // 同步"的形状。调用方要就地跑，自己那一行删掉 `post_to_loop` 就行。
+  if (loop_index <= 0) return false;
+  const size_t i = static_cast<size_t>(loop_index - 1);
+  if (i >= workers_.size()) return false;
+  return workers_[i]->post(std::move(fn));
+}
+
 size_t uvcpp_tcp_server::client_count_at(int loop_index) const {
   uvcpp_loop* want = loop_at(loop_index);
   if (want == nullptr) return 0;
