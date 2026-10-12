@@ -366,6 +366,24 @@ class UVCPP_API uvcpp_web_context
   void run(const std::vector<uvcpp_web_handler>& chain);
 
   /**
+   * @brief 跑一条**上下文自己持有**的链（传进来的是所有权）。
+   *
+   * 与 `run()` 唯一的区别是链的生存期归谁：`run()` 只存指针，要求调用方保证
+   * 那张表活得比请求长（`App` 拿 `chain_storage_` 兜住）；这一条把链搬进
+   * 上下文，于是**调用方不用准备任何长期存储**。
+   *
+   * 为什么需要它：`App` 的链缓存是"启动时建好、此后只读"的（见
+   * `uvcpp_web_app::warm_chain_cache()`）。万一那条契约被违反（`start()` 之后
+   * 又注册路由），缓存就不能再读了 —— 它的键是路由表内部元素的地址，而注册
+   * 可能让那张表重新分配。那时框架改走"这条请求的链现建现用"，而现建出来的
+   * 链没有别的地方可放：它就是这一条的存在理由。
+   *
+   * 代价是**每请求一次分配 + N 个 `std::function` 拷贝**，所以正常路径上
+   * （n > 1 且注册都在 `start()` 之前）一次都不会走到。
+   */
+  void run_owned(std::vector<uvcpp_web_handler> chain);
+
+  /**
    * @brief 放行到链上的下一个处理器。
    *
    * 由 `next()` 调用，也可以直接调（比如 `post()` 回来之后）。看上面的表：
@@ -467,6 +485,21 @@ class UVCPP_API uvcpp_web_context
 
   const std::vector<uvcpp_web_handler>* chain_;
   size_t chain_index_;
+
+  /**
+   * @brief 只有在 `run_owned()` 那条路上才非空：链由上下文自己持有。
+   *
+   * `unique_ptr` 而不是按值成员：绝大多数请求（全部正常路径）走的是
+   * `run()`，一个空指针就够了 —— 按值的话每个请求都要多构造/析构一个
+   * `std::vector`（哪怕它是空的，三个指针的构造也要跟着走一路）。与
+   * `stream_` 用 `unique_ptr` 是同一条理由。
+   *
+   * 它必须**比 `chain_` 活得久**：`chain_` 在 `run_owned()` 里指向它的元素。
+   * 成员按声明序逆序析构，所以它排在 `chain_` **前面**声明（后析构）——
+   * 不过这里其实无所谓：析构时没有任何代码会去读 `chain_` 了（`finish()` 与
+   * `advance()` 都已经跑完）。
+   */
+  std::unique_ptr<std::vector<uvcpp_web_handler> > owned_chain_;
 
   /// 正在 `advance()` 的循环里（同步调 next() 靠它改成"记账"而不是递归）。
   bool advancing_;

@@ -241,6 +241,9 @@ uvcpp_web_app::uvcpp_web_app()
       cache_gen_(0),
       routes_seen_(0),
       middleware_gen_(0),
+      chains_frozen_(false),
+      chain_cache_stale_(false),
+      frozen_change_reported_(false),
       not_found_chain_(nullptr),
       method_not_allowed_chain_(nullptr),
       auto_options_chain_(nullptr),
@@ -1293,8 +1296,18 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
 
   sync_chains();
 
-  const std::vector<uvcpp_web_handler>* chain = build_chain(m.handler);
-  if (chain == nullptr) {
+  // 与 `dispatch()` 同一套：缓存可信就用缓存里的那条链，不可信就现建一条、
+  // 交给上下文自己持有（见 `sync_chains()` 里 `chain_cache_stale_` 那段）。
+  const std::vector<uvcpp_web_handler>* chain = nullptr;
+  std::vector<uvcpp_web_handler> own_chain;
+  const bool own = chain_cache_stale_ && m.handler != nullptr;
+  if (own) {
+    own_chain = build_chain_copy(m.handler);
+  } else {
+    chain = build_chain(m.handler);
+  }
+
+  if (!own && chain == nullptr) {
     // 正常路径到不了：`m.handler` 非空是上面刚判过的。留着兜住"路由表在
     // 认领途中被改"这种极端情况。
     UVCPP_LOG_ERROR(log_category::ROUTER)
@@ -1315,7 +1328,8 @@ http_stream_handler uvcpp_web_app::dispatch_stream(const web_route_match& m,
               uvcpp_tcp_client*) {};
   }
 
-  ctx->run(*chain);
+  if (own) ctx->run_owned(std::move(own_chain));
+  else ctx->run(*chain);
 
   // 返回给 HTTP 层的接管 handler。**它捕获 shared_ptr 是本设计的关键**：
   // 这个 handler 由 HTTP 层的 `conn_ctx::stream_handler` 持有（一个
@@ -2024,6 +2038,26 @@ int uvcpp_web_app::init_process_once() {
   // `set_loops(1)` 虽然也是恒等，但它会让 `workers_` 之外多走一遍"校验 + 设
   // 状态"的路径，而"不调用这个 API"与"调用它"必须在 n==1 下逐字节相同
   // （设计稿 §7）—— 最省事的保证就是根本不进那一支。
+  //
+  // --- 链缓存也要在这里冻结（`warm_chain_cache()`）---------------------
+  //
+  // 上面那句"读的必须已经是冻结好的配置"对**配置**成立，对**链缓存**曾经
+  // 不成立：链缓存的首次构建是惰性的（第一个请求派发时才建），而那段代码是
+  // **写**共享的 `chain_cache_` / `chain_storage_`。于是工作循环一放行，
+  // 几条线程就一起走进同一段写代码里。路线是"先把该建的都建出来"，冻结条件
+  // 就是"这之后不许再写"—— 所以它必须排在这一行放行语句**之前**。
+  //
+  // 位置的另一半理由：全进程共享的还有路由表本身（`router_` 的两条
+  // `set_*` 就在上面几行）—— 那些也是"放行前配好"，同一条规矩。
+  //
+  // **只在 n > 1 时做**（`if` 而不是在函数里早退，为了在这里就把"n==1 这条
+  // 路一个字都不动"读出来）：n == 1 时惰性构建本来就只有一个线程走，没有
+  // 竞争可防；而预建会把**每条路由**的链（`middlewares_.size() + 1` 个
+  // `std::function` 拷贝）在启动时全部做出来、并永久留在 `chain_storage_` 里
+  // —— 路由表大的应用会为"从没被请求过"的路由付这份内存。n == 1 下零收益，
+  // 所以那边保持原样（下面 `set_loops` 那一支也是同样的"不进就不动"）。
+  if (requested_loops_ > 1) warm_chain_cache();
+
   if (requested_loops_ > 1) {
     const int src = tcp->set_loops(requested_loops_);
     if (src != 0) {
@@ -3305,6 +3339,12 @@ void uvcpp_web_app::dispatch(
     const std::shared_ptr<uvcpp_web_context>& ctx, const web_route_match& m) {
   const std::vector<uvcpp_web_handler>* chain = nullptr;
 
+  // "链缓存已经不可信"那条路上的产物（见 MATCHED 那一支）。`bool` 而不是
+  // `!own_chain.empty()` 判：空链在别处也是合法值（`empty_chain_`），两者
+  // 混起来会让"这一条到底走哪条路"变得没法读。
+  std::vector<uvcpp_web_handler> own_chain;
+  bool own = false;
+
   switch (m.result) {
     case web_route_result::MATCHED: {
       if (m.handler == nullptr) break;  // 不该发生，退到 404
@@ -3316,7 +3356,15 @@ void uvcpp_web_app::dispatch(
       // HEAD 回退到 GET：body 照算（内容长度要和 GET 一致）但不发出去。
       if (m.head_of_get) ctx->response().set_head_only(true);
 
-      chain = build_chain(m.handler);
+      if (chain_cache_stale_) {
+        // 缓存不可信（见 `sync_chains()` 那段）：这条请求的链现建现用，交给
+        // 上下文自己拿着。**不查缓存、也不回存** —— 那张表里的键是路由表内部
+        // 元素的地址，而表已经被改过了。
+        own_chain = build_chain_copy(m.handler);
+        own       = true;
+      } else {
+        chain = build_chain(m.handler);
+      }
       break;
     }
     case web_route_result::AUTO_OPTIONS:
@@ -3331,7 +3379,7 @@ void uvcpp_web_app::dispatch(
       break;
   }
 
-  if (chain == nullptr) {
+  if (!own && chain == nullptr) {
     // 正常路径到不了：`sync_chains()` 在派发前一定把三条特殊链建好了，
     // MATCHED 的 handler 也是路由器给的。留着是为了兜住"路由表在派发途中
     // 被改空"这种极端情况 —— 回 500，而不是让请求永远悬着。
@@ -3354,7 +3402,13 @@ void uvcpp_web_app::dispatch(
     return;
   }
 
-  ctx->run(*chain);
+  if (own) {
+    // `run_owned()` 把链搬进上下文（只多一次 `unique_ptr` 的赋值，不再拷
+    // 一份 std::function 数组）—— 上面那个 `own_chain` 到这里就空了。
+    ctx->run_owned(std::move(own_chain));
+  } else {
+    ctx->run(*chain);
+  }
 }
 
 // =========================================================================
@@ -3377,6 +3431,33 @@ void uvcpp_web_app::sync_chains() {
   const size_t streams = stream_router_.route_count();
   if (routes != routes_seen_ || streams != stream_routes_seen_ ||
       middleware_gen_ != cache_gen_) {
+    if (chains_frozen_) {
+      // 冻结之后才发现表变了 ⇒ 有人在 `start()` 之后注册路由/中间件，而现在
+      // 有好几条工作循环正在派发。头文件那条契约把这种用法定成 UB，落到这里
+      // 最直接的一条就是**重建这段会往共享的 `chain_cache_` / `chain_storage_`
+      // 上并发写**。所以一个字节都不写。
+      //
+      // 更进一步：**缓存整个作废**（`chain_cache_stale_`）。重建之所以是必须
+      // 的，本来就是因为缓存按 `const uvcpp_web_handler*` 索引、而那个地址指向
+      // 路由表内部 —— 注册可能让表重新分配，旧键要么悬垂、要么被新处理器复用
+      // 到同一个地址上（命中别人的链，跑错业务而且不报错）。既然现在重建不了，
+      // 那张表就整体不可信了：派发改走"现建现用"（见 `dispatch()`）。
+      //
+      // 日志只报一次：这是每请求都会走到的路径，报多了会把日志冲垮。
+      chain_cache_stale_ = true;
+      if (!frozen_change_reported_) {
+        frozen_change_reported_ = true;
+        UVCPP_LOG_ERROR(log_category::ROUTER)
+            << "set_loops(n > 1) 之后路由表/中间件被改动（路由 "
+            << routes_seen_ << "→" << routes << "，流式 " << stream_routes_seen_
+            << "→" << streams << "，中间件代数 " << cache_gen_ << "→"
+            << middleware_gen_
+            << "）：链缓存已冻结、不再重建，此后每条请求的链现建现用"
+               "（能跑对，但每请求多一次分配）。注册必须全部发生在 start() "
+               "之前。";
+      }
+      return;
+    }
     chain_cache_.clear();
     routes_seen_        = routes;
     stream_routes_seen_ = streams;
@@ -3385,6 +3466,43 @@ void uvcpp_web_app::sync_chains() {
   }
 
   if (!specials_built_) build_special_chains();
+}
+
+void uvcpp_web_app::warm_chain_cache() {
+  // 为什么要在这里把整张缓存建完，而不是等第一个请求来建：
+  //
+  // 上面 `sync_chains()` 的失效分支和 `build_chain()` 的落缓存分支**都是写**
+  // ——「第一次派发时建」意味着这段写代码运行在**某一条工作循环的线程**上。
+  // n == 1 时那就是唯一的线程，没问题；n > 1 时第一个请求落哪条循环是不定的，
+  // 而其余几条马上也会各收到请求、各自走进同一段写代码：`chain_cache_` 是
+  // `std::map`，并发插入/清空就是数据竞争。
+  //
+  // 现场长这样（`set_loops(8)`，h2c 负载，第一次派发即崩）：受害者的
+  // `chain_` 指向 `chain_storage_` 的**尾后**一格 —— 说明它读到的
+  // `chain_cache_[&handler]` 是另一个线程刚写坏的那条记录，于是
+  // `uvcpp_web_context::advance()` 在一条越界的 `std::function` 上调用，
+  // 跳到 `0x100000390`（内存里的垃圾值）SIGSEGV。
+  //
+  // 修法就是把这次"首次构建"提前到放行之前：那时只有调用线程在跑（`set_loops`
+  // 里的 `w->start()` 还没执行），建完即稳态，此后所有派发只读。
+  sync_chains();  // 三条特殊链 + 三个计数器
+
+  // 两张路由表逐条预建。**必须用 `for_each_handler()` 拿到的那个引用** ——
+  // 它与 `match()` 结果里的 `handler` 是同一个对象（同一地址），而链缓存正是
+  // 按那个地址索引的。
+  router_.for_each_handler([this](const uvcpp_web_handler& h) {
+    build_chain(&h);
+    return true;
+  });
+  stream_router_.for_each_handler([this](const uvcpp_web_handler& h) {
+    build_chain(&h);
+    return true;
+  });
+
+  // n == 1 时**不冻结**：单线程下"运行中注册路由"的后果只是命中一条过期链
+  // （`sync_chains()` 下次就会重建成对的），那是既有语义，本提交不动它。
+  // 冻结是给多循环那条路用的安全网，不是新契约。
+  if (requested_loops_ > 1) chains_frozen_ = true;
 }
 
 const std::vector<uvcpp_web_handler>* uvcpp_web_app::build_chain(
@@ -3396,15 +3514,39 @@ const std::vector<uvcpp_web_handler>* uvcpp_web_app::build_chain(
       chain_cache_.find(route_handler);
   if (it != chain_cache_.end()) return it->second;
 
+  if (chain_cache_stale_) {
+    // **兜底，正常路径到不了。** `sync_chains()` 每次派发前都会先跑，它一看到
+    // `chains_frozen_` 下的变化就把 `chain_cache_stale_` 立起来；而两个调用点
+    // （`dispatch()` / 流式那条）在那之后走的是 `build_chain_copy()`，根本不会
+    // 调到这里。
+    //
+    // 留着是为了"将来多了一处调用点"这种情形：那时**查缓存**本身就是错的
+    // （键可能悬垂，或者被新处理器复用了地址 ⇒ 命中别人的链、跑错业务还不
+    // 报错），所以回一条只读的、一定建好的链，让请求有答复而不是悬着。
+    return not_found_chain_ != nullptr ? not_found_chain_ : &empty_chain_;
+  }
+
+  if (chains_frozen_) {
+    // 走到这里说明派发命中了一条**缓存里没有的**处理器，而缓存已经冻结
+    // （= 请求已经在 n 条工作循环上并发跑了）⇒ 有人违反"注册路由要在
+    // `start()` 之前"注册了它。**正常路径到不了这里**：那种情况下
+    // `sync_chains()` 会先把 `chain_cache_stale_` 立起来（上面那一支就接住了）。
+    //
+    // 真走到了也不能建链，两个理由缺一不可：
+    //   1. 建链要写 `chain_cache_` / `chain_storage_`，那是共享表上的并发写；
+    //   2. 就算只往 `chain_storage_` 里塞（deque 的 push_back 不让旧元素搬家），
+    //      `chain_storage_.push_back` **本身**也不是线程安全的 —— 两个线程同时
+    //      动同一张 deque 的 `map`/`start`/`finish` 一样是数据竞争。
+    return not_found_chain_ != nullptr ? not_found_chain_ : &empty_chain_;
+  }
+
   // 组装：全局中间件按注册序 + 路由处理器。拷的是 std::function（每个都
   // 带着自己捕获的状态），所以链一旦建好就不再依赖路由表 —— 这是"每个
   // 请求不重复拷贝中间件"的关键。
-  std::vector<uvcpp_web_handler> chain;
-  chain.reserve(middlewares_.size() + 1);
-  for (size_t i = 0; i < middlewares_.size(); ++i) {
-    chain.push_back(middlewares_[i]);
-  }
-  chain.push_back(*route_handler);
+  //
+  // 组装那段与"现建现用"那条路是同一段代码（`build_chain_copy()`），区别只在
+  // 这里建完还**存**：存进 `chain_storage_` 并由 `chain_cache_` 记下地址。
+  std::vector<uvcpp_web_handler> chain = build_chain_copy(route_handler);
 
   // 存进 deque 再取地址：deque 的 push_back 不会让已有元素搬家，所以上下文
   // 手里那些链指针在整个进程生命周期内都有效（旧链永远不删也是这个原因
@@ -3413,6 +3555,19 @@ const std::vector<uvcpp_web_handler>* uvcpp_web_app::build_chain(
   const std::vector<uvcpp_web_handler>* stored = &chain_storage_.back();
   chain_cache_[route_handler] = stored;
   return stored;
+}
+
+std::vector<uvcpp_web_handler> uvcpp_web_app::build_chain_copy(
+    const uvcpp_web_handler* route_handler) const {
+  std::vector<uvcpp_web_handler> chain;
+  if (route_handler == nullptr) return chain;
+
+  chain.reserve(middlewares_.size() + 1);
+  for (size_t i = 0; i < middlewares_.size(); ++i) {
+    chain.push_back(middlewares_[i]);
+  }
+  chain.push_back(*route_handler);
+  return chain;
 }
 
 void uvcpp_web_app::build_special_chains() {

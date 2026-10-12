@@ -90,10 +90,19 @@
  *
  * **四、注册路由要在 `start()` 之前。** 路由表本身不是线程安全的；运行中
  * 注册会打乱链缓存（框架有路由数量校验兜底，但那是安全网不是用法）。
- * **`set_loops(n > 1)` 之后这条从"会跑错业务"升级成 UB** —— 链缓存
- * （`chain_cache_` / `chain_storage_`）是**全进程共享**的一张表，n 条循环会
- * 同时往里写、同时读，那是 `std::map` 上的数据竞争。单循环时"打乱"最坏是
- * 命中一条过期链，多循环时没有"最坏"，只有未定义。
+ * **`set_loops(n > 1)` 之后这条是 UB** —— 链缓存（`chain_cache_` /
+ * `chain_storage_`）是**全进程共享**的一张表，n 条循环会同时读它；放行工作
+ * 循环之前框架已经把它建到稳态并冻结（`warm_chain_cache()`）。冻结之后框架
+ * **自己**一个字节都不再写那张表（这是"我们不再火上浇油"），检测到路由表/
+ * 中间件变了就报一条 ERROR，此后每条请求的链**现建现用**（`chain_cache_stale_`）
+ * —— 能跑对，但每请求多一次分配。注册必须全部发生在 `start()` 之前。
+ *
+ * 这条契约**对框架自己同样成立**，而且是曾经真的被违反过的地方：链缓存的
+ * 首次构建原本是惰性的（第一个请求派发时才建），于是"用户完全照契约办事、
+ * 框架自己在放行之后写共享表"，n > 1 下就是上面那个数据竞争 —— 表现为
+ * `uvcpp_web_context::advance()` 里那个链指针指到 `chain_storage_` 的
+ * **尾后**去，崩在一条越界的 `std::function` 调用上。冻结就是这一条的修法：
+ * 惰性仍然保留（n == 1 的行为逐字节不变），但**必须在放行之前兑现掉**。
  *
  * 线程模型
  * --------
@@ -1378,7 +1387,40 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   void sync_chains();
   const std::vector<uvcpp_web_handler>* build_chain(
       const uvcpp_web_handler* route_handler);
+
+  /**
+   * @brief 现建一条链**并交出所有权**（不碰缓存、不碰 `chain_storage_`）。
+   *
+   * 只在"缓存已经不可信"那条路上用：`chain_cache_stale_` 为真时，缓存里的键
+   * 是路由表内部元素的地址，而表已经被改过（可能重新分配过）—— 那些键要么
+   * 悬垂、要么被新处理器复用，**查都不能查**。所以那条路上既不算缓存命中，
+   * 也不把结果存回去，建完交给上下文自己拿着（`run_owned()`）。
+   *
+   * `build_chain()` 也复用它来组装（区别只在"组装完存不存"）。
+   */
+  std::vector<uvcpp_web_handler> build_chain_copy(
+      const uvcpp_web_handler* route_handler) const;
+
   void build_special_chains();
+
+  /**
+   * @brief 把整张链缓存**在放行工作循环之前**建完（`init_process_once()` 里调）。
+   *
+   * 见 `sync_chains()` 的实现注释：首次构建是惰性的，而它写 `chain_cache_` /
+   * `chain_storage_` —— 那是全进程共享的表。n == 1 时"第一次派发时建"没问题，
+   * n > 1 时第一个请求落在哪条工作循环是不定的，几条循环会同时走到那段写代码
+   * 上。所以在 `set_loops(n)` 放行线程**之前**，由调用线程自己先把这张表建到
+   * 稳态：此后所有派发都只读它。
+   *
+   * **只在 `requested_loops_ > 1` 时调用**（`init_process_once()` 里那个
+   * `if`）：n == 1 下惰性构建本来就只有一个线程走，没有竞争可防，而预建会把
+   * 每条路由的链都做出来并永久留在 `chain_storage_` 里 —— 路由表大的应用会为
+   * "从没被请求过"的路由付这份内存。所以 n == 1 那条路保持原样、一个字不动。
+   *
+   * 建完把 `chains_frozen_` 立起来 —— 那之后缓存**只读**，检测到变化只报错、
+   * 并整张判死（`chain_cache_stale_`，见 `sync_chains()` 里那段）。
+   */
+  void warm_chain_cache();
 
   // --- 停机 ------------------------------------------------------
 
@@ -1822,6 +1864,34 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   size_t cache_gen_;      ///< 建缓存时的中间件代数
   size_t routes_seen_;    ///< 建缓存时的路由总数
   size_t middleware_gen_; ///< 每加一个中间件 +1
+
+  /**
+   * @brief 链缓存已冻结（`warm_chain_cache()` 里立，仅在 `requested_loops_ > 1`
+   *        时）。
+   *
+   * 立起来之后 `sync_chains()` / `build_chain()` **一个字节都不再写**这两张
+   * 共享表：n 条工作循环同时在跑，重建就是往同一个 `std::map` 上并发写 ——
+   * 头文件「注册路由要在 `start()` 之前」那条契约说得很清楚，那是 UB。
+   * 冻结把"违反契约"从 UB 降级成"新路由不生效 + 日志里一条 ERROR"：
+   * 见 `sync_chains()` 里 `chains_frozen_` 那两个分支。
+   */
+  bool   chains_frozen_;
+
+  /**
+   * @brief 冻结之后表又变了 ⇒ **整个缓存的键都不能再信了**。
+   *
+   * 与 `chains_frozen_` 分开是刻意的：冻结本身是"不再写"，是稳态；这一位才是
+   * "已经坏了，读也别读"。它一旦立起来：
+   *   - `sync_chains()` 不再走重建那条路（重建 = 写共享 `std::map`）；
+   *   - `build_chain()` 不查缓存（键可能悬垂，或者**被新处理器复用了地址** ⇒
+   *     命中到别人的链，跑错业务还不报错）；
+   *   - 派发改走 `build_chain_copy()` + `uvcpp_web_context::run_owned()`。
+   *
+   * 换句话说：宁可每请求多一次分配，也不要"读一张自己都知道不可信的表"。
+   */
+  bool   chain_cache_stale_;
+  /** @brief 冻结之后检测到表变化时，那条 ERROR 日志只报一次。 */
+  bool   frozen_change_reported_;
 
   /**
    * @brief 兜底用的空链。

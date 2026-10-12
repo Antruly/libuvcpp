@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.13-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.14-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -692,7 +692,7 @@
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
   `trailers()`（`src/webapp/uvcpp_web_response.h:465-469`），并在 `send_response()` 里加了
-  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2626-2675`）。
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2660-2709`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
   "另一条拿到同一份字节的路"。判据与量法见下一条
@@ -793,6 +793,44 @@
 
 ### 横向扩展（多事件循环）
 
+- **链缓存的"首次构建"从请求路径上搬走 —— `n > 1` 下它是框架自己踩的一处数据竞争**
+  （`1.6.14-dev`）。链缓存（`chain_cache_` 是 `std::map`、`chain_storage_` 是
+  `std::deque`）原本是**惰性**建的：第一个请求派发到哪个路由，就在那条**工作循环的
+  线程**上把那条链建出来、落进这两张**全进程共享**的表。`n == 1` 时那条线程就是唯一
+  的线程，没问题；`n > 1` 时"第一个请求"落在哪条循环不定，而其余循环马上也会各收到
+  请求、各自走进同一段**写**代码。
+  **这是框架违反自己的成文契约**（`src/webapp/uvcpp_web_app.h`「四、注册路由要在
+  `start()` 之前」）—— 用户完全照契约办事，框架自己在放行之后写共享表。
+  现场：`set_loops(8)` + h2c 负载，受害者 `uvcpp_web_context::advance()` 里的 `chain_`
+  指到 `chain_storage_` 的**尾后**一格（core 里 `chain_storage_.size() == 7`、`chain_
+  == &chain_storage_[7]`），于是在一条越界的 `std::function` 上调用，跳到内存里的垃圾值
+  （`0x100000390`）SIGSEGV。**改前 12 轮里 11 轮当场死、其余轮次 2xx 全是 0。**
+  修法三段：① 路由器补一个 `for_each_handler()` 观测口（交出的引用与 `match()` 结果里
+  的 `handler` 是同一个对象，链缓存正是按那个地址索引的）；② `warm_chain_cache()` 在
+  `init_process_once()` 里、**放行工作循环那一句之前**把三条特殊链与两张路由表的每条
+  链建完，随即冻结（`chains_frozen_`）；③ 冻结之后**框架自己一个字节都不再写**那张表
+  —— 检测到路由表/中间件变了就报一条 ERROR 并把**整张缓存判死**
+  （`chain_cache_stale_`：那些键指向路由表内部元素，表被改过之后要么悬垂、要么被新
+  处理器复用了地址），此后每条请求的链**现建现用**（`build_chain_copy()` +
+  `uvcpp_web_context::run_owned()`）。**降级要答对**：注册 `/late` 会让
+  `router_table::routes` 重新分配，最初那版"整表回 404"的设计连**已经建好链的路由**
+  一起废掉 —— 判据 9(b) 里"照旧答对"两条把它抓住（变异 M11）。
+  **`n == 1` 那条路一个字都没动**（惰性构建本来就没有竞争可防，而预建会让"从没被请求
+  过"的路由也永久占一份链）。
+  判据分三层，都是「拆掉那处守卫就该红」的对照，不是「跑了 N 遍没崩」：
+  **① 确定性那一半** —— `start()` 之后注册路由 ⇒ 日志里恰好一条 ERROR、而整张表照旧
+  答对（含 `n == 1` 对照组）。变异 `M10`（拆掉冻结）与 `M11`（退回"整表回 404"）各自
+  把这一半的三条判据打红，见 [`tests/tools/multiloop_mutation.py`](tests/tools/multiloop_mutation.py)。
+  **② 竞争那一半的规模** —— 手工拆掉 `warm_chain_cache()` 那句（= 修复前的形状）后
+  单实例串行 200 次（`taskset -c 0-3`）：**200/200 红、一次没绿**，其中 105 次是上面
+  那三条确定性判据、79 次是压力形状那条（`并发首派发全部答对` 实测错 3 / 24）、
+  16 次直接 SIGSEGV，另有若干次 glibc 在 `free()` 里抓到堆损坏；不拆则 **200/200 全绿**。
+  这条读数没进变异表（每个变异只跑一次、判红绿，概率红进去就是一份时红时绿的门禁），
+  记在用例注释与变异脚本的文件头里。
+  **③ 真实负载** —— h2c on 8082 × 12 轮、8080 明文前言分流 × 8 轮、h2 走 TLS × 8 轮，
+  **全 0 崩溃**、每轮 43–66 万 2xx（改前同一条路子 12 轮里 11 轮当场死、其余轮次 2xx 全 0）。
+  `doc/multiloop-design.md` 里那段"让这些写离开请求路径的是两件事叠起来"的论证已按本次
+  落地改写。
 - **第四端：UDP / QUIC 也扇出了，形状与上面三层不同**（`1.6.6-dev`）。
   `uvcpp_quic_server::set_reuseport()` + `uvcpp_http_server::set_loops(n)`：UDP 没有
   `accept()`，所以不是"转手 socket"，而是**每端点一个 socket、各带 `UV_UDP_REUSEPORT`

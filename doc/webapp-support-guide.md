@@ -415,8 +415,8 @@ error: no matching function for call to
 ```
 
 正确写法是"先默认构造，再逐字段赋值"（§9 那段）。同类问题还有
-`src/webapp/uvcpp_web_app.h:155-158`：注释声称支持 `uvcpp_web_app_config cfg{8080}`，
-而声明在 `:278` 只有 `uvcpp_web_app_config();`。
+`src/webapp/uvcpp_web_app.h:164-167`：注释声称支持 `uvcpp_web_app_config cfg{8080}`，
+而声明在 `:287` 只有 `uvcpp_web_app_config();`。
 **对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:294-295`）是这一族里唯一写对的
 —— 它的构造函数带默认实参，所以花括号写法可用。
 
@@ -494,7 +494,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 - `uvcpp_web_file_transfer` **必须 `shared_ptr`**（`src/webapp/uvcpp_web_file.h:166`）。
 - `uvcpp_web_file_sink::on_data` 的数据**只在那一句里有效**（`:117-124`）。
 - `uvcpp_web_context::run()` **只存链的指针**
-  （`src/webapp/uvcpp_web_context.h:366`、`:468`）：那张
+  （`src/webapp/uvcpp_web_context.h:366`、`:486`）：那张
   `std::vector<uvcpp_web_handler>` 必须在上下文存活期内有效且不被修改 ——
   **别传一个临时 vector**。
 - `uvcpp_web_connection_registry::find()` 返回内部 `std::unordered_map` 里的指针
@@ -623,8 +623,8 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   拼路径。
 - **`uvcpp_web_file` 不知道 HTTP 的存在**：断连即释放**不在这里**，接线层调
   `cancel()`（`src/webapp/uvcpp_web_file.h:70-71`）。
-- **卡住的出站流没有超时保护**（`src/webapp/uvcpp_web_context.h:393-395`，代价照实记在
-  `src/webapp/uvcpp_web_context.cpp:393-398`）。
+- **卡住的出站流没有超时保护**（`src/webapp/uvcpp_web_context.h:411-413`，代价照实记在
+  `src/webapp/uvcpp_web_context.cpp:409-414`）。
 - **`attach_stream()` 的"必须在链跑起来之前调"没有运行时守卫**
   （`src/webapp/uvcpp_web_context.h:318-330`）：中途挂只会得到一个**永远收不到数据**的 stream，
   静默。

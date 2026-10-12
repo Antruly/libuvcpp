@@ -133,6 +133,22 @@ void uvcpp_web_context::run(const std::vector<uvcpp_web_handler>& chain) {
   advance();
 }
 
+void uvcpp_web_context::run_owned(std::vector<uvcpp_web_handler> chain) {
+  if (chain_ != nullptr) {
+    // 与 `run()` 同一条守卫，报告也借用它那一句（`run()` 会当场拒绝并打
+    // ERROR）—— 这里**不能**先 `reset(owned_chain_)`：那会把上一份链释放掉，
+    // 而 `chain_` 正指着它。
+    run(chain);
+    return;
+  }
+
+  // **先落进自己手里、再 `run()`**：`run()` 只存指针，所以这份链必须活得比
+  // 它长 —— 与 `req_` / `resp_` 按值持有是同一个道理。`move` 进去之后
+  // 形参就空了，`run()` 从头到尾没有多一次拷贝。
+  owned_chain_.reset(new std::vector<uvcpp_web_handler>(std::move(chain)));
+  run(*owned_chain_);
+}
+
 void uvcpp_web_context::advance() {
   // 链已经收尾之后再来调是**安全空操作**：异步 handler 里留着的 next 副本
   // 可能晚于响应发出才被调用，那是使用者的时序问题，不该把框架带崩。

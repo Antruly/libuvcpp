@@ -108,7 +108,7 @@ int main() {
 | `set_compress_min_body_size(size_t)` | `1024` | 触发压缩的最小 body |
 | `set_access_log(bool)` | `true` | 自动装访问日志中间件 |
 | `set_log_level(log_level)` | `INFO` | 全局最低日志等级 |
-| `set_server_header(const std::string&)` | `UVCPP_SERVER_TOKEN`（`"uvcpp"`） | 空 = 不发这个头。默认值**刻意不带版本号**（理由见 `src/webapp/uvcpp_web_app.h:224-229` 那条 @warning）；想发版本号自己取 `uvcpp::version_string()`（`src/uvcpp/uvcpp_version.h:69-69`） |
+| `set_server_header(const std::string&)` | `UVCPP_SERVER_TOKEN`（`"uvcpp"`） | 空 = 不发这个头。默认值**刻意不带版本号**（理由见 `src/webapp/uvcpp_web_app.h:233-238` 那条 @warning）；想发版本号自己取 `uvcpp::version_string()`（`src/uvcpp/uvcpp_version.h:69-69`） |
 | `set_shutdown_grace_ms(int)` | `3000` | 优雅关闭宽限；`0` = 立刻强关 |
 | `set_idle_timeout_ms(int)` | `60000` | 闲置超时（slowloris 防御）；`0` = 关闭 |
 | `set_max_pipelined_requests(size_t)` | `8` | 同一条连接上的在途请求上限；超了回 **503 + close**；`0` = 不限 |

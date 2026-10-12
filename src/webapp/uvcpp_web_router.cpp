@@ -735,6 +735,21 @@ size_t uvcpp_web_router::route_count(http_method method) const {
   return table_ ? table_->count_method(method) : 0;
 }
 
+size_t uvcpp_web_router::for_each_handler(
+    const std::function<bool(const uvcpp_web_handler&)>& fn) const {
+  if (!table_ || !fn) return 0;
+  // 按存储序走，与 `match()` 看到的是同一批对象（`match()` 取的是
+  // `&routes[i].handler`）。索引而不是迭代器：`routes` 是 `std::vector`，
+  // 但回调里一旦有人违反上面的 @warning 去 `add()`，迭代器会当场失效 ——
+  // 用下标至少让 `size()` 每轮重新取，不读到已经释放的那段。
+  size_t n = 0;
+  for (size_t i = 0; i < table_->routes.size(); ++i) {
+    ++n;
+    if (!fn(table_->routes[i].handler)) break;
+  }
+  return n;
+}
+
 void uvcpp_web_router::clear() {
   if (table_) table_->clear();
 }

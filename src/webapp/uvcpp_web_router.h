@@ -57,6 +57,7 @@
 #define SRC_WEBAPP_UVCPP_WEB_ROUTER_H
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -240,6 +241,32 @@ class UVCPP_API uvcpp_web_router {
   size_t route_count() const;
   /** @brief 表里某个方法的路由数（`any()` 注册的算在每个方法里）。 */
   size_t route_count(http_method method) const;
+
+  /**
+   * @brief 逐条访问表里**已注册的处理器对象**（注册期 / 启动期用）。
+   *
+   * 回调收到的引用与 `match()` 结果里 `handler` 字段指的东西**是同一个对象**
+   * （同一地址）—— 框架给处理器做身份映射时用的就是地址（链缓存按
+   * `const uvcpp_web_handler*` 索引）。所以「启动时把每条路由都预先摸一遍」
+   * 只能用这一条：它给出的是路由表**内部**那一个处理器，不是拷贝。
+   *
+   * 存在这个入口的原因写在 `uvcpp_web_app::warm_chain_cache()` 里：链缓存的
+   * 首次构建是惰性的，而它的写操作不是线程安全的，框架必须在放行工作循环
+   * 之前把整张表建完 —— 那需要一份"所有处理器"的清单，在此之前没有任何办法
+   * 拿到它（`route_count()` 只给数目，`full_pattern()` 只给模式串）。
+   *
+   * @param fn 返回 `false` 提前结束。
+   * @return 实际访问过的条数（提前结束时是到那一行为止的数目）。
+   *
+   * @warning 回调期间**不得**再向本视图、也不要向任何共享同一张表的视图
+   *          （`group()` 派生出来的都算）注册路由 —— `add()` 可能让
+   *          `routes` 重新分配，回调手里那个引用当场悬垂。这正是它标着
+   *          "注册期 / 启动期用"的原因：全部注册结束、任何线程开始派发之前，
+   *          调它一次。
+   */
+  size_t for_each_handler(
+      const std::function<bool(const uvcpp_web_handler&)>& fn) const;
+
   /** @brief 清空整张表（所有共享视图一起）。 */
   void clear();
 

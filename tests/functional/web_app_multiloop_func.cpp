@@ -74,6 +74,23 @@
  *    ⇒ `UV_EBUSY`（**不是静默的 0** —— 那种情况下每循环就绪钩子装不上，
  *    工作循环那几格会永远空着）；n>1 时 `run(md)` ⇒ `UV_EINVAL`，而且**之后
  *    `start()` 仍然可用**。
+ * 9. **链缓存在放行工作循环之前就建成稳态**（`warm_chain_cache()`）—— 两半：
+ *
+ *    (a) **并发首派发**：4 条工作循环 + 6 条路由 + 一条中间件，多条客户端线程
+ *        同时首派发，全部答对、中间件跟着链跑。链缓存的首次构建原本是惰性的
+ *        （第一个请求派发时才建），而那段代码**写**全进程共享的
+ *        `chain_cache_` / `chain_storage_` ⇒ n > 1 下几个循环一起走进去就是
+ *        数据竞争（现场：`chain_` 指到 `chain_storage_` 的尾后一格，崩在一条
+ *        越界的 `std::function` 上）。**这条不是确定性判据** —— 竞态没有
+ *        确定性的红，它给的是压力形状，红法是"未改代码上 12 轮里 11 轮当场死"。
+ *    (b) **确定性那一半**：`set_loops(4)` 起服务，`start()` 之后注册路由 ⇒
+ *        日志里恰好一条 ERROR，而**整张表照旧答对**（新注册那条回 200，
+ *        `start()` 之前注册那条也回 200）。链缓存按路由表内部元素的地址索引，
+ *        表一改那些键就不能再信 —— 所以整张缓存判死、此后每请求现建现用
+ *        （`chain_cache_stale_` + `uvcpp_web_context::run_owned()`），但**不**
+ *        往共享表上补写。对照组 n == 1 **不冻结**，运行中注册照常生效。
+ *        未改代码上 (b) 必然红：那时缓存照旧可信 ⇒ 那条 ERROR 一个字都不会打，
+ *        `count_containing(kChainFrozen) == 1` 直接红，与竞争赢不赢无关。
  *
  * **不在本用例里的**：TLS 的多循环语义（每条循环一个 `SSL` 对象 —— 设计稿
  * §4.4，本批没做，`set_loops` 与 `enable_ssl()` 同时用时请自行确认）；
@@ -1431,6 +1448,211 @@ void test_id_high_bits_from_loop() {
         "stop()+join() 在有界墙钟内返回");
 }
 
+// =========================================================================
+// 9. 链缓存在放行之前就建成稳态（n>1 下"第一次派发"不许写共享表）
+// =========================================================================
+
+/** @brief "冻结之后表又变了"那条 ERROR 的特征串（`uvcpp_web_app.cpp` 里那条）。 */
+const char* kChainFrozen = "链缓存已冻结";
+
+/**
+ * @brief 4 条工作循环 + 6 条路由，多条客户端线程同时**首派发**。
+ *
+ * 这是修复前的现场。链缓存的首次构建原本是**惰性**的（第一个请求派发时才建），
+ * 而那段代码是**写**全进程共享的 `chain_cache_`（`std::map`）与
+ * `chain_storage_`（`std::deque`）。n == 1 时只有一个线程会走到它；n > 1 时
+ * "第一个请求"落在哪条循环不定，而其余循环马上也会各收到请求、一起走进同一段
+ * 写代码 ⇒ 数据竞争。现场是 `uvcpp_web_context::advance()` 里那个 `chain_`
+ * 指到 `chain_storage_` 的**尾后**一格，于是在一条越界的 `std::function` 上
+ * 调用，跳到内存里的垃圾值上 SIGSEGV（本机 `set_loops(8)` 下 12 轮里 11 轮
+ * 当场死、其余轮次 2xx 全是 0）。
+ *
+ * 修法是 `warm_chain_cache()`：放行工作循环**之前**由启动线程把整张表建完。
+ *
+ * **诚实说明**：数据竞争本身没有确定性的红，这条给的只是"压力形状 + 断言它
+ * 答对"。确定性那一半在下一条（多循环下运行中注册路由 ⇒ 恰好一条 ERROR，
+ * 且整张表**照旧答对**），变异脚本 M10/M11 把这两半分别拆掉。
+ *
+ * **修前/修后各 200 次（2026-10-13，本机，`taskset -c 0-3` 单实例串行）** ——
+ * 这是本用例的抓手到底有多大牙的实测，不是"跑了 N 遍没崩"那种话：
+ *
+ *     拆掉 `init_process_once()` 里那句 `warm_chain_cache()`（= 修复前的形状）
+ *         200/200 红，一次没绿。分类（按先出现的红）：105 次是**下一条**的
+ *         确定性红（3 条判据，`kChainFrozen` 一条都没打）、79 次是本条的
+ *         竞争红（`并发首派发全部答对`，实测错 3 / 24，随后 `答对数对得上`
+ *         报出 6~22 这种"跑到一半就死"的数）、16 次**直接 SIGSEGV**（rc 139）。
+ *         另有若干次是 glibc 在 `free()` 里抓到堆损坏（rc 134：
+ *         `double free or corruption (fasttop)`、`malloc(): smallbin double
+ *         linked list corrupted`）—— 那是同一场竞争写坏了 `std::deque` 的
+ *         元数据，只是这一轮先踩到堆检查。
+ *     不拆（当前实现）
+ *         200/200 全绿。
+ *
+ * **为什么这条不能进变异表**：上表那 105 次之外的红是概率的（79 + 16 分摊在
+ * 200 次里），而 `multiloop_mutation.py` 每个变异只跑一次、判"红/绿" ——
+ * 把一条概率红登记进去，得到的是一份时红时绿的门禁。放不进去的是**这条
+ * 用例的稳定性**，不是这次测量的结论；结论按上面那两行记在这里。
+ */
+void test_first_dispatch_under_n4() {
+  static const int kRoutes = 6;
+
+  uvcpp_web_app app;
+  configure_for_test(app);
+  check(app.set_loops(4) == 0, "set_loops(4) 成功");
+
+  // 一条中间件：让"链 = 中间件 + 处理器"这件事真的成立 —— 只拷处理器的话，
+  // 建链那段的工作量少一半，压力也就小了。
+  std::atomic<int> mw(0);
+  app.use([&mw](uvcpp_web_request&, uvcpp_web_response&, uvcpp_web_next next) {
+    mw.fetch_add(1);
+    next();
+  });
+  for (int i = 0; i < kRoutes; ++i) {
+    const std::string body = "body-" + std::to_string(i);
+    app.get("/r" + std::to_string(i),
+            [body](uvcpp_web_request&, uvcpp_web_response& resp,
+                   uvcpp_web_next) { resp.text(body); resp.end(); });
+  }
+
+  check(app.start() == 0, "start() 成功");
+  const int port = app.bound_port();
+
+  // 每条线程打全部路由各一遍。首派发因此必然在几条工作循环上并发发生
+  // （`is_fanout()` 时内核按四元组分流，连接散在 0..3 号循环上）。
+  //
+  // 一看到错就收摊：红的时候服务端多半已经死了，而 `get()` 内部有 40 次重试
+  // （Windows 上连不上的既有兜底），40 条请求全跑完能把这条用例拖到 ctest 的
+  // 墙钟上限上去 —— 红的形状会退化成一条 Timeout。
+  const int kThreads = 4;
+  std::atomic<int> ok(0), bad(0);
+  std::vector<std::shared_ptr<std::thread> > ts;
+  for (int t = 0; t < kThreads; ++t) {
+    ts.push_back(std::shared_ptr<std::thread>(new std::thread([&] {
+      for (int i = 0; i < kRoutes; ++i) {
+        uvcpp_http_response r;
+        const std::string want = "body-" + std::to_string(i);
+        if (get(port, "/r" + std::to_string(i), r) && status_of(r) == 200 &&
+            body_of(r) == want) {
+          ok.fetch_add(1);
+        } else {
+          bad.fetch_add(1);
+          break;  // 见上：红的时候不再接着烧重试
+        }
+      }
+    })));
+  }
+  for (size_t i = 0; i < ts.size(); ++i) ts[i]->join();
+
+  check(bad.load() == 0, "并发首派发全部答对（错 " + std::to_string(bad.load()) +
+                             " / " + std::to_string(kThreads * kRoutes) + "）");
+  check(ok.load() == kThreads * kRoutes,
+        "答对数对得上（" + std::to_string(ok.load()) + "）");
+  // 中间件按链跑：**每个被答对的请求至少跑过一次**。用 ≥ 不用 == ——
+  // `get()` 的重试可能让一次请求被服务端处理两遍（响应丢了那次也算跑过）。
+  check(mw.load() >= ok.load(),
+        "中间件跟着每条链跑（" + std::to_string(mw.load()) + " ≥ " +
+            std::to_string(ok.load()) + "）");
+
+  check(stop_and_join_within(app, 15000, "n=4 下 stop()+join() 返回"),
+        "n=4 下 stop()+join() 在有界墙钟内返回");
+}
+
+/**
+ * @brief 冻结的**两条对偶断言**（确定性，不靠竞态碰运气）。
+ *
+ * (a) n = 4：`start()` **之后**注册路由，日志里恰好一条 ERROR，且**整张表
+ *     照旧答对**（新注册的那条回 200，`start()` 之前注册的那条也回 200）。
+ *
+ *     头文件那条契约（"注册路由要在 `start()` 之前"）说得很清楚，n > 1 下
+ *     违反它是 UB。框架的取舍是**降级但答对**：一看到表变了就把整张链缓存
+ *     判死（`chain_cache_stale_`）—— 因为它按路由表内部元素的地址索引，而
+ *     表刚被改过，那些键要么悬垂、要么被新处理器复用了地址；此后每条请求的
+ *     链**现建现用**。宁可每请求多一次分配，也不要读一张自己都知道不可信的
+ *     表。**不**往共享表上补写，所以并发写 `std::map` 那半仍然被挡在门外。
+ *
+ *     这一条在未改的代码上**必然红**：那时缓存照旧可信，`sync_chains()` 会
+ *     就地 clear + 重建（= 在工作循环线程上写共享 `std::map`），而且那条
+ *     ERROR 一个字都不会打 —— 断言 `count_containing(kChainFrozen) == 1`
+ *     直接红，与"竞争赢不赢"无关。
+ *
+ * (b) 对照组 n == 1：**不冻结**，运行中注册照常生效 —— 那是既有语义，
+ *     本次一个字没动。没有这个对照组，(a) 证明不了"是 n > 1 那条路冻结了"。
+ */
+void test_chain_cache_frozen_after_start() {
+  // --- (a) n = 4 ---------------------------------------------------
+  {
+    g_sink.clear();
+
+    uvcpp_web_app app;
+    configure_for_test(app);
+    check(app.set_loops(4) == 0, "set_loops(4) 成功");
+    app.get("/warm", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                        uvcpp_web_next) { resp.text("warm"); resp.end(); });
+    check(app.start() == 0, "start() 成功");
+    const int port = app.bound_port();
+
+    uvcpp_http_response r0;
+    check(get(port, "/warm", r0) && status_of(r0) == 200 &&
+              body_of(r0) == "warm",
+          "start() 之前注册的路由照常答对");
+
+    // 运行中注册 —— 违反契约，框架要把它变成可诊断的降级。
+    app.get("/late", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                        uvcpp_web_next) { resp.text("late"); resp.end(); });
+
+    uvcpp_http_response r1;
+    check(get(port, "/late", r1) && status_of(r1) == 200 &&
+              body_of(r1) == "late",
+          "n=4 下 start() 之后注册的路由照旧答对（链现建现用，回 " +
+              std::to_string(status_of(r1)) + "）");
+    check(g_sink.count_containing(kChainFrozen) == 1,
+          "报了一条「" + std::string(kChainFrozen) + "」（实际 " +
+              std::to_string(g_sink.count_containing(kChainFrozen)) + " 条）");
+    check(!g_sink.first_containing(kChainFrozen).empty(),
+          "那条 ERROR 有原文可查：" + g_sink.first_containing(kChainFrozen));
+
+    uvcpp_http_response r2, r3;
+    check(get(port, "/late", r2) && status_of(r2) == 200 &&
+              body_of(r2) == "late",
+          "再打一次还是答对");
+    check(g_sink.count_containing(kChainFrozen) == 1,
+          "ERROR 只报一次（这条路径每请求都会走到）");
+    check(get(port, "/warm", r3) && status_of(r3) == 200 &&
+              body_of(r3) == "warm",
+          "已建好链的路由不受影响（作废的是缓存，不是路由表）");
+
+    check(stop_and_join_within(app, 15000, "n=4 下 stop()+join() 返回"),
+          "n=4 下 stop()+join() 在有界墙钟内返回");
+  }
+
+  // --- (b) 对照组 n == 1 -------------------------------------------
+  {
+    g_sink.clear();
+
+    uvcpp_web_app app;
+    configure_for_test(app);
+    check(app.loop_count() == 1, "对照组 loop_count() == 1");
+    app.get("/warm", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                        uvcpp_web_next) { resp.text("warm"); resp.end(); });
+    check(app.start() == 0, "对照组 start() 成功");
+    const int port = app.bound_port();
+
+    app.get("/late", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                        uvcpp_web_next) { resp.text("late"); resp.end(); });
+
+    uvcpp_http_response r;
+    check(get(port, "/late", r) && status_of(r) == 200 &&
+              body_of(r) == "late",
+          "n=1 时运行中注册照常生效（不冻结，回 " +
+              std::to_string(status_of(r)) + "）");
+    check(g_sink.count_containing(kChainFrozen) == 0,
+          "n=1 时不打那条 ERROR");
+
+    check(stop_and_join_within(app, 15000, "对照组 stop()+join() 返回"),
+          "对照组 stop()+join() 在有界墙钟内返回");
+  }
+}
+
 }  // namespace
 
 /**
@@ -1567,6 +1789,11 @@ int main() {
   test_start_failure_reclaims_workers();
   std::cout << "-- 启动成功 ⇒ 停机干净（初始化失败的观测面）--" << std::endl;
   test_worker_init_failure_is_not_silent();
+  std::cout << "-- 并发首派发（链缓存在放行前建成稳态）--" << std::endl;
+  test_first_dispatch_under_n4();
+  std::cout << "-- 冻结之后注册路由：照旧答对 + 一条 ERROR（含 n=1 对照）--"
+            << std::endl;
+  test_chain_cache_frozen_after_start();
   std::cout << "-- 对照组 n == 1 --" << std::endl;
   test_control_group_n1();
 
