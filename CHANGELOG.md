@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.46-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.47-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2150,6 +2150,42 @@
   「每请求一次池往返」这件事本身，不是池里有几个线程 —— 按档位把 `threadpool_threads()`
   降下来（`main.cc` 里那条 `DATABASE_MAX_CONN` 分支）**不做**：既换不到读数，又会挤掉
   `/async-db` 的槽位。默认 `POOL` 保持不动。
+
+- **静态腿的每请求系统调用 / 分配有门禁了**（`1.6.47-dev`）。新增
+  `tests/tools/run_static_fs_gate.py`（判据）、`tests/tools/fs_count_shim.c`（量具）与
+  `web_app_static_func.cpp` 的 `fs_count` 用例（采集）—— 用例把 `LOOP_STAT` 档挂在同一个
+  app 的 `/loopstat` 上，与默认档（`/`）成对，好让"投不投池"这件事在同一进程、同一份
+  负载下有对照。这一批静态优化（`1.6.25-dev` 起的 C1–C5）的判据**不是 rps 而是"每请求
+  几次 `realpath`、几次 `stat`、投几次池"**，这类数字确定、不吃压测噪声，所以能当门禁
+  用；但响应字节逐字相同，没有计数器就什么都看不见，那些优化下一轮会被无声地退回去。
+
+  量具是一个 `LD_PRELOAD` 的计数器（本机 `ptrace` 被禁，`strace` 用不了，也不该进 CI）。
+  它自己就踩过三个坑并写在文件头：libuv 在 Linux 上走 `statx` 且是经 `syscall()` 发出去的
+  （只看 `statx` 符号永远是零）；glibc 的 `realpath` 内部走 `__lxstat64` 这类内部别名、
+  不过 PLT（所以这一格的口径是**`realpath` 调用次数**，那才是本库能控制的事）；futex 是
+  内联指令而本仓的 libuv 是静态链进 `libuvcpp.so` 的，它提交池任务时调的是
+  `pthread_cond_signal`（于是这一格恰好等于"每请求投了几次池"，也是 `POOL` 与
+  `LOOP_STAT` 两档唯一的差别）。第四个坑是写变异时踩到的：`_FORTIFY_SOURCE` 会把定长
+  缓冲区上的 `realpath` 改名成 `__realpath_chk`，那一格就恒为 0 —— `objdump -dr` 上看得
+  见；本库的调用点是 `realpath(path, NULL)`，没被改名，如实计到。
+
+  本机读数（100 条命中请求，分母是窗口里**真的回来**的 200 条数，单位：次/请求）：
+
+  | 档 | `realpath` | `lstat` | `newfstatat` | `statx` | `openat`+`open` | `close` | `cond_signal` | `malloc` |
+  |---|---|---|---|---|---|---|---|---|
+  | `POOL`（默认） | 0.000 | 0.000 | 0.000 | **1.000** | 0.000 | 2.250 | **1.000** | 37.8~38.0 |
+  | `LOOP_STAT` | 0.000 | 0.000 | 0.000 | **1.000** | 0.000 | 2.250 | **0.000** | 45.8 |
+
+  门禁判的就是这张表：`realpath`/`lstat`/`newfstatat` 必须为 0、`statx` 必须**恰好一次**
+  （少一次是"没校验"——缓存会把旧字节一直发下去；多一次是白做）、命中不许再 `open`、
+  `POOL` 的 `cond_signal` 恰好 1 而 `LOOP_STAT` 恰好 0、窗口里必须有 100 条 200（分母缩了
+  这张表就不可比）、`malloc` 只当烟感（跨编译器/标准库会漂，界留到 80）。三条变异实测都能
+  让它红：`LOOP_STAT` 也投池 ⇒ `cond_signal` 1.000；命中路径加一次 `web_real_path()` ⇒
+  两档 `realpath` 1.000；命中路径跳过指纹 `stat` ⇒ 两档 `statx` 0.000。`--self-test`
+  是它自己的负对照：不预载量具跑一遍，必须判红而不是"看着全过"。
+
+  **还没进 CI**：它要 `LD_PRELOAD` 加一个 `cc`，且只在 Linux 上有意义（非 Linux 与
+  "这棵树没编 webapp" 都是退出码 3 = 没判，不是通过）。跑法与退出码见脚本头。
 
 ### JSON
 

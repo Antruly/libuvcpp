@@ -210,7 +210,7 @@ executable is on disk; CMake does not delete executables whose source files have
 
 ## `tests/tools/` — the script index
 
-Thirty-five scripts (`ls tests/tools/*.py | wc -l`). Most exist because a specific claim needed
+Thirty-eight scripts (`ls tests/tools/*.py | wc -l`). Most exist because a specific claim needed
 to be *measured* rather than argued, so they are evidence-producing tools, not a coherent
 framework. Several are one-shots kept because deleting them would lose the method.
 
@@ -244,6 +244,7 @@ nothing is the failure mode worth spending a rule on: it looks green forever.
 |---|---|
 | `verify_tree.py` | **The five gates for one build tree** — see below. Use this before claiming a change is verified. |
 | `run_pageheap_gate.py` | Full suite under PageHeap — the only gate that has ever caught a use-after-free. Optional, slow, Windows-only. |
+| `run_static_fs_gate.py` | **Per-request syscall budget for the static legs**, via an `LD_PRELOAD` counter (`fs_count_shim.c`) — `realpath` must be 0, `statx` exactly 1, no re-`open`, and `cond_signal` exactly 1 under `POOL` / 0 under `LOOP_STAT`. `ptrace` is unavailable here and `strace` does not belong in CI; the numbers are deterministic, so they work as a gate where rps cannot see the difference. Linux only (exit `3` elsewhere). |
 | `ctest_list.py` | Answers "which executables should run" **from the ctest manifest, not the disk**. |
 | `check_docs.py` | Documentation gate — the CMake option tables in both READMEs match the options the build actually defines (both directions), every relative link and repo path resolves, and no `doc/*.md` is orphaned. Runs on every push. |
 | `check_doc_snippets.py` | Documentation gate — every ```` ```cpp ```` block in a tracked document actually compiles against a packaged header set. Runs on every push; see [`CONTRIBUTING.md`](../CONTRIBUTING.md#code-blocks-in-documentation) for the block conventions. |

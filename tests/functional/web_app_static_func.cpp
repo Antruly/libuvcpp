@@ -36,6 +36,13 @@
 
 #include <uvcpp/uvcpp_define.h>
 
+#if defined(__linux__)
+// `fs_count` 那条用例要用它取量具的读数接口（见用例头）。放在**文件顶部**而不是
+// 用例旁边：放在 `namespace {` 里的话，头文件里的声明会变成匿名命名空间里的
+// 一份，那是本文件开头警告过的那类"不是同一个实体"的坑。
+#include <dlfcn.h>
+#endif
+
 #include "wait_util.h"
 
 #if UVCPP_WEBAPP_ENABLE
@@ -2055,6 +2062,253 @@ void test_loop_stat() {
   check(st->cache_entries() >= 1, "loop_stat：条目数应当 >= 1");
 }
 
+// ---- 11d. 每请求的系统调用 / 分配预算（`fs_count`，Linux + LD_PRELOAD 量具） ----
+//
+// 这一条判的不是"响应对不对"（那是别的用例的事），而是**热路径每请求花了几次
+// 系统调用**：命中一个已经缓存好的文件时，库该做的只是「一次 `stat` 比对指纹 +
+// 从内存里把字节发出去」—— 既不该 `realpath`（那要沿路径逐分量 `lstat`），
+// 也不该再 `open`/`read` 一遍。这几件事**只有数系统调用才看得见**：响应字节逐字
+// 相同，没到饱和时 rps 也看不出差别，而它们恰恰是 `1.6.25-dev` 起那一批静态
+// 优化的全部内容（C1–C5）。
+//
+// 量具是 `tests/tools/fs_count_shim.c`：一个 `LD_PRELOAD` 的计数器。它必须被
+// **预载**才有读数，所以这一条的形状是：
+//
+//   - 非 Linux：编译期就不存在（`dlfcn` 那套不算可移植）；
+//   - Linux 上没预载：每个函数指针都是 NULL ⇒ 打印一行说明后**不判**。这是
+//     本仓的规矩：没量过 ≠ 量过了。真正把它跑起来的是
+//     `tests/tools/run_static_fs_gate.py`（它编量具、预载、再把下面这些数字
+//     按同一套界复判一遍）。
+//
+// 为什么读数是**过程量**而不是"总数除以请求数"：窗口前后各读一次同一组计数器，
+// 差 ÷ 窗口里的响应条数。窗口里只有这几个 URL 的命中请求，别的线程那点噪声
+// （app 的定时器、压不中的池）进不了分母。
+
+#if defined(__linux__)
+
+/// 量具（`fs_count_shim.c`）导出的**进程内**读数接口。
+///
+/// 用 `dlsym(RTLD_DEFAULT, …)` 而不是直接声明：直接声明的话，没预载时是**链接期**
+/// 的 `undefined reference` —— 那会让这个 target 在没装量具的机器上根本编不过。
+struct fs_count_api {
+  int (*nkinds)();
+  const char* (*kind_name)(int);
+  int (*read)(unsigned long long*, int);
+};
+
+/// 取到接口；没预载返回 nullptr（每个进程只探一次）。
+const fs_count_api* fs_count_open() {
+  static fs_count_api api;
+  static bool probed = false;
+  static bool ok = false;
+  if (!probed) {
+    probed = true;
+    api.nkinds =
+        reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "uvcpp_fscount_nkinds"));
+    api.kind_name = reinterpret_cast<const char* (*)(int)>(
+        dlsym(RTLD_DEFAULT, "uvcpp_fscount_kind_name"));
+    api.read = reinterpret_cast<int (*)(unsigned long long*, int)>(
+        dlsym(RTLD_DEFAULT, "uvcpp_fscount_read"));
+    ok = (api.nkinds != nullptr && api.kind_name != nullptr &&
+          api.read != nullptr);
+  }
+  return ok ? &api : nullptr;
+}
+
+/// 一次快照：类别名 → 累计值。按**名字**取，不按下标 —— 量具那边加一格不会
+/// 让这里的断言悄悄错位到别的计数上。
+struct fs_counts {
+  std::vector<std::pair<std::string, unsigned long long> > v;
+
+  unsigned long long get(const char* name) const {
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (v[i].first == name) return v[i].second;
+    }
+    return 0;
+  }
+};
+
+bool fs_count_snapshot(const fs_count_api& api, fs_counts& out) {
+  const int n = api.nkinds();
+  if (n <= 0) return false;
+  std::vector<unsigned long long> raw(static_cast<size_t>(n), 0);
+  if (api.read(&raw[0], n) <= 0) return false;
+  out.v.clear();
+  for (int i = 0; i < n; ++i) {
+    const char* nm = api.kind_name(i);
+    out.v.push_back(std::make_pair(std::string(nm != nullptr ? nm : ""), raw[i]));
+  }
+  return true;
+}
+
+/// 量一轮：预热 → 快照 A → N 条命中请求 → 快照 B → 每请求的账。
+///
+/// @param prefix 挂载前缀（`/` 是默认档，`/loopstat` 是 `LOOP_STAT` 档）。
+/// @param mode   只用于打印，`POOL` / `LOOP_STAT`。
+void measure_fs_count(const fs_count_api& api, const char* prefix,
+                      const char* mode) {
+  static const char* kUris[] = {"hello.txt", "app.js", "index.html",
+                                "sub/a.txt", "deep/inner/f.txt"};
+  const int kUriCount = 5;
+  /// 每批 4 条：**必须明显低于一条连接的在途上限**（`uvcpp_web_app` 的
+  /// `max_pipelined_requests`，默认 8）。到顶之后 `reject_pipelining()` 会把
+  /// 多出来的那条打成 `503 too many pipelined requests` 并关连接 —— 那量的是
+  /// 流水线闸门，不是文件系统。预热那一轮每条都是未命中（要读盘、要投池），
+  /// 在途是真的会堆起来的，所以头寸要按"整批同时在途"来算。
+  const int kPerBatch = 4;
+  const int kBatches = 25;
+  const int kTotal = kPerBatch * kBatches;
+
+  /// 拼 URL：`prefix` 既可能是 `/`（默认档）也可能是 `/loopstat`。
+  /// 直接把 `"/" + uri` 连起来会得到 `//hello.txt` —— 这台机器上它照样 200，
+  /// 但那是路由凑巧接受，不该把一条带着双斜杠的路径写进判据里。
+  struct Batch {
+    static std::string url(const char* prefix, const char* uri) {
+      std::string u(prefix);
+      if (u.empty() || u[u.size() - 1] != '/') u += '/';
+      u += uri;
+      return u;
+    }
+
+    /// 一批 `count` 条：从 `first` 开始轮着打这几个 URI，**最后一条**让服务端
+    /// 关连接（`raw_batch` 靠那次关闭判定"这批处理完了"）。
+    ///
+    /// `Accept-Encoding: identity` 是显式的：这一条量的是文件系统那一段，
+    /// 不该把压缩变体那一路的字节数混进来。
+    static std::string make(const char* prefix, const char* const* uris,
+                            int uri_count, int first, int count) {
+      std::string out;
+      out.reserve(static_cast<size_t>(count) * 96);
+      for (int i = 0; i < count; ++i) {
+        out += std::string("GET ") +
+               url(prefix, uris[(first + i) % uri_count]) +
+               " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        // **末条 close、前面 keep-alive** —— 这一条本身就是判据：末条那条
+        // `close` 只许影响它自己，前面那几条的响应一条都不许少（见
+        // `uvcpp_web_app.cpp` 的 `send_response()` 里那一段说明）。
+        out += (i + 1 == count) ? "Connection: close\r\n"
+                                : "Connection: keep-alive\r\n";
+        out += "\r\n";
+      }
+      return out;
+    }
+  };
+
+  // 数一批响应里有几条 200。分母用**真的回来了几条**，不是"我发了几条"。
+  struct Count {
+    static int ok200(const std::string& got) {
+      int n = 0;
+      for (size_t p = 0; (p = got.find("HTTP/1.1 200", p)) != std::string::npos;
+           ++p) {
+        ++n;
+      }
+      return n;
+    }
+  };
+
+  // (1) 预热：每个 URI 各来一次。第一次必然未命中（读盘、解析路径、进缓存），
+  //     量测窗口里要的全是命中。
+  {
+    int warm_ok = 0;
+    for (int b = 0; b < kUriCount; b += kPerBatch) {
+      const int n = (std::min)(kPerBatch, kUriCount - b);
+      const std::string got =
+          raw_batch(g_port, Batch::make(prefix, kUris, kUriCount, b, n), 5000);
+      warm_ok += Count::ok200(got);
+    }
+    check_eq_i(warm_ok, kUriCount, std::string("前置：").append(mode).append(
+                                      " 预热请求要全部 200"));
+    if (warm_ok != kUriCount) return;
+  }
+
+  fs_counts a, b;
+  if (!fs_count_snapshot(api, a)) {
+    check(false, "fs_count：读不到量具的计数");
+    return;
+  }
+
+  // (2) 量测窗口：全是命中。分母同样取**真的回来了几条** —— 少回一条就少一个
+  //     分母，比假装 100 条好。
+  int ok_count = 0;
+  for (int i = 0; i < kBatches; ++i) {
+    ok_count += Count::ok200(raw_batch(
+        g_port, Batch::make(prefix, kUris, kUriCount, i * kPerBatch, kPerBatch),
+        5000));
+  }
+  if (!fs_count_snapshot(api, b)) {
+    check(false, "fs_count：读不到量具的计数（窗口后）");
+    return;
+  }
+  check_eq_i(ok_count, kTotal,
+             std::string(mode).append("：窗口里的请求要全部 200"));
+
+  const double n = static_cast<double>(ok_count > 0 ? ok_count : 1);
+  const double realpath = static_cast<double>(b.get("realpath") - a.get("realpath")) / n;
+  const double lstat = static_cast<double>(b.get("lstat") - a.get("lstat")) / n;
+  const double newfstatat =
+      static_cast<double>(b.get("newfstatat") - a.get("newfstatat")) / n;
+  const double statx = static_cast<double>(b.get("statx") - a.get("statx")) / n;
+  const double openat = static_cast<double>(b.get("openat") - a.get("openat")) / n;
+  const double open = static_cast<double>(b.get("open") - a.get("open")) / n;
+  const double close_ = static_cast<double>(b.get("close") - a.get("close")) / n;
+  const double csig = static_cast<double>(b.get("cond_signal") - a.get("cond_signal")) / n;
+  const double malloc_ = static_cast<double>(b.get("malloc") - a.get("malloc")) / n;
+
+  char line[512];
+  std::snprintf(line, sizeof(line),
+                "FSCNT leg=webapp mode=%s req=%d realpath=%.3f lstat=%.3f "
+                "newfstatat=%.3f statx=%.3f openat=%.3f open=%.3f close=%.3f "
+                "cond_signal=%.3f malloc=%.3f",
+                mode, ok_count, realpath, lstat, newfstatat, statx, openat, open,
+                close_, csig, malloc_);
+  std::cout << "  " << line << std::endl;
+
+  // 判据。分母固定，所以这几条都是**每请求**的账。
+  check_eq_i(static_cast<long long>(b.get("realpath") - a.get("realpath")), 0,
+             std::string(mode).append("：命中路径上一次 realpath 都不该有"));
+  check_eq_i(static_cast<long long>(b.get("lstat") - a.get("lstat")), 0,
+             std::string(mode).append("：命中路径上一次 lstat 都不该有"));
+  check_eq_i(static_cast<long long>(b.get("newfstatat") - a.get("newfstatat")), 0,
+             std::string(mode).append("：命中路径上一次 newfstatat 都不该有"
+                                      "（libuv 走 statx）"));
+  // 每请求恰好一次 stat：少一次就是"没校验"（缓存会把旧字节一直发下去），
+  // 多一次就是白做。给 4 的余量是留给窗口边上那些不在请求路径上的零星调用。
+  check(statx >= 1.0 - 1e-9 && statx <= 1.0 + 4.0 / n,
+        std::string(mode).append("：命中路径每请求恰好一次 stat（实测 ")
+            .append(std::to_string(statx)).append("）"));
+  // 命中不许读盘：字节在内存里。
+  check(openat + open <= 4.0 / n,
+        std::string(mode).append("：命中路径不该再打开文件（实测 openat+open=")
+            .append(std::to_string(openat + open)).append("）"));
+  if (std::strcmp(mode, "POOL") == 0) {
+    check(csig >= 1.0 - 1e-9 && csig <= 1.0 + 4.0 / n,
+          "POOL：每请求恰好一次池任务（cond_signal）");
+  } else {
+    check_eq_i(static_cast<long long>(b.get("cond_signal") - a.get("cond_signal")),
+               0, "LOOP_STAT：命中路径一次池任务都不该投");
+  }
+}
+
+#endif  // __linux__
+
+void test_fs_count_budget() {
+  std::cout << "[static] fs_count" << std::endl;
+#if defined(__linux__)
+  const fs_count_api* api = fs_count_open();
+  if (api == nullptr) {
+    std::cout << "  [note] 未预载 fs_count 量具（tests/tools/fs_count_shim.c）"
+                 "—— 这一条不判。跑法见 tests/tools/run_static_fs_gate.py"
+              << std::endl;
+    return;
+  }
+  measure_fs_count(*api, "/", "POOL");
+  measure_fs_count(*api, "/loopstat", "LOOP_STAT");
+#else
+  std::cout << "  [note] 本平台没有这套量具（LD_PRELOAD 的计数器）—— 这一条不判"
+            << std::endl;
+#endif
+}
+
 // ---- 12. 各种选项 ----
 
 void test_options() {
@@ -2308,6 +2562,12 @@ int main() {
 
     std::shared_ptr<uvcpp_web_static> cached = app.serve_static("/cache", k_root);
 
+    // `fs_count` 那条用的 `LOOP_STAT` 档：与 `/` 那一份默认档（`POOL`）成对，
+    // 好让"每请求投几次池"这件事在同一个进程、同一份负载下有个对照。
+    uvcpp_web_static_options loopstat_mount;
+    loopstat_mount.revalidate = uvcpp_web_revalidate::LOOP_STAT;
+    app.serve_static("/loopstat", k_root, loopstat_mount);
+
     // 预压缩孪生文件：`/pc` 用默认阈值（1 MiB），`/pcs` 把阈值压到 4096 字节，
     // 好让"孪生自己超阈值"这条边界在小文件上就能测到。
     uvcpp_web_static_options pc;
@@ -2353,6 +2613,7 @@ int main() {
     if (want("cache")) test_cache();
     if (want("hint")) test_resolve_hint();
     if (want("loop_stat")) test_loop_stat();
+    if (want("fs_count")) test_fs_count_budget();
     if (want("options")) test_options();
     if (want("precompressed")) test_precompressed();
 
