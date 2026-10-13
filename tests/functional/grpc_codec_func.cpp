@@ -161,11 +161,17 @@ void test_frame_length_cap() {
   info("err = " + err);
 
   // 上限是可配的：把上限调到 8，前缀报 4 就过得去了。
-  std::string small;
-  grpc_frame_encode("abcd", small);
-  check(grpc_frame_decode(small.data(), small.size(), got, used, nullptr, 4u) == 0,
+  //
+  // **变量名不能叫 `small`**：MSVC 的 `<rpcndr.h>` 里有一行 `#define small char`
+  // （经 `windows.h` → OLE/RPC 那一串被拉进来，本文件 include `<uv.h>` 就够），
+  // 于是 `std::string small;` 在那边展开成 `std::string char;` —— C2628，一行红
+  // 十档。而 Linux / MinGW 的头上没有这条宏，本地怎么编都是绿的，所以它只能在
+  // MSVC 那一档上现形。凡是编译进产物的源文件都别用 `small` / `hyper` 当标识符。
+  std::string tiny;
+  grpc_frame_encode("abcd", tiny);
+  check(grpc_frame_decode(tiny.data(), tiny.size(), got, used, nullptr, 4u) == 0,
         "上限配成 4 时，4 字节的载荷正常解出（上限不是写死的）");
-  check(grpc_frame_decode(small.data(), small.size(), got, used, nullptr, 3u) ==
+  check(grpc_frame_decode(tiny.data(), tiny.size(), got, used, nullptr, 3u) ==
             UV_EMSGSIZE,
         "上限配成 3 时同一个报文被拒");
 }
