@@ -181,8 +181,8 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   **第三件事，而且是拦路的** —— 见 §9。
 - **不解决 `contexts_` 那一族。** 多进程形态下它们天然正确：每个 worker 一份，就是今天的
   n=1 语义。`uvcpp_http_server` 的 `contexts_`（`src/web/uvcpp_http_server.h:1742-1742`）、
-  `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:2131` /
-  `src/webapp/uvcpp_web_app.h:2072`；这两个容器后来在多循环那条路上被搬进了
+  `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:2149-2149` /
+  `src/webapp/uvcpp_web_app.h:2090-2090`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
   `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:944`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。

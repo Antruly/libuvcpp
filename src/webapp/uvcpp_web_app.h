@@ -1981,10 +1981,28 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                                 shutdown_deadline_ms(0), shutdown_phase(0),
                                 registry(i), flushing(false),
                                 inflight_entries(0), started(false),
-                                finished(false), orphaned(false), init_rc(0) {}
+                                finished(false), orphaned(false), init_rc(0),
+                                ticket(0) {
+      // 票号：全进程单调、从 1 起。它**不是**"第几号循环"（那是 `index`），
+      // 而是"这一格这个对象"的身份 —— 唯一的用处是 `slot_here()` 的线程本地
+      // 缓存判断"还是同一个实例吗"，见那里的键。
+      //
+      // 放在函数体里而不是初始化表里，是为了让那个计数器是**本构造函数**的
+      // 函数局部静态：inline 函数只有一个实体，所以各 TU 看到的是同一个。
+      static std::atomic<unsigned long long> counter(0);
+      ticket = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
 
     /// 循环号。0 号就是调用 `run()` / `start()` 的那个线程跑的那条。
     int index;
+
+    /**
+     * @brief 这一格对象的**身份票号**（全进程单调、从 1 起、不复用）。
+     *
+     * 只被 `slot_here()` 的线程本地缓存读，只在本构造函数里写一次 —— 而那时
+     * 这个对象还没交给任何别的线程，所以它是个普通字段就够，不必是原子的。
+     */
+    unsigned long long ticket;
 
     /// 这条循环的句柄。0 号在构造函数里就装好（`loop()` 在 `start()` 之前
     /// 也必须答得出东西 —— 今天的语义），1..n-1 号由工作循环的启动钩子装。
@@ -2210,6 +2228,19 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   loop_slot& slot_here();
   const loop_slot& slot_here() const;
+
+  /**
+   * @brief 同上，但**没找到就返回 `nullptr`**（而不是回落到 0 号）。
+   *
+   * 就是 `slot_here()` 的那一趟查找本身，抽出来是为了让"这条线程在不在循环
+   * 上"这个问句有一个**不回落**的答案 —— `on_loop_thread()` 要的正是它。
+   *
+   * 从前 `on_loop_thread()` 是"先 `slot_here()` 拿到一格、再锁一次那格的
+   * `tid_mutex` 重问一遍"：因为未命中时 `slot_here()` 给的是 0 号，而那一次
+   * 重问正是分辨"真在 0 号上"与"哪儿都不在"的唯一手段。抽出来之后两个问句共用
+   * 同一趟查找，稳态下（线程本地缓存命中）**一次锁都不取**。
+   */
+  loop_slot* slot_here_or_null();
 
   /**
    * @brief 按 id 高段的循环号定位那**一整格**。

@@ -62,6 +62,13 @@ webapp 多循环（`uvcpp_web_app::set_loops(n)`）那批判据的变异验证�
                                    `router_table::routes` 重新分配，缓存里那些
                                    指向表内部的键就此失效，拿 `not_found_chain_`
                                    顶上去会让**已经建好链的路由**也 404。
+  M12 `slot_here_or_null()` 的命中分支返回 0 号槽位
+                                → 按循环分片的几条一起红（登记表串格）。这条
+                                   钉的是 `1.6.37-dev` 那个线程本地缓存的**命中
+                                   分支**；`owner` + `ticket` 那道跨实例作废
+                                   守卫**没有确定性的红**（要同一条线程先后服务
+                                   两个实例、且 glibc 还回未重新初始化的 TLS
+                                   块），是论证不是测试，理由写在变异体旁边。
 
 为什么表里**没有**"拆掉 `warm_chain_cache()` 那句"那条
 --------------------------------------------------------
@@ -143,7 +150,13 @@ APP_CPP = os.path.join(ROOT, "src", "webapp", "uvcpp_web_app.cpp")
 WSS_CPP = os.path.join(ROOT, "src", "web", "uvcpp_ws_server.cpp")
 STATIC_CPP = os.path.join(ROOT, "src", "webapp", "uvcpp_web_static.cpp")
 
-EXE = "test_web_app_multiloop_func.exe"
+# 平台。这个脚本原先只认作者的 MSVC 多配置树（`<tree>/tests/functional/Release/`
+# 里的 `.exe`，外加一份要手工同步的 `uvcpp.dll`）；而 1.6.3x 这条线的量测都在
+# Linux 上做，那边是**单配置树**：可执行文件就在 `<tree>/tests/functional/`，
+# 并且它自己 rpath 到 `<tree>/libuvcpp.so` ⇒ 重建 `uvcpp` 目标就是同步，
+# 「测试侧 DLL 停在上一版」那个坑在 Linux 上不存在。两侧的差别只有这三处。
+_ON_WIN = os.name == "nt"
+EXE = "test_web_app_multiloop_func.exe" if _ON_WIN else "test_web_app_multiloop_func"
 
 # label, 文件, 原文, 替换
 MUTATIONS = [
@@ -244,6 +257,28 @@ MUTATIONS = [
      "        own_chain = build_chain_copy(m.handler);\n"
      "        own       = true;",
      "        chain = not_found_chain_;  /* MUTATION: 整表回 404 */"),
+
+    # M12：`slot_here_or_null()` 的**命中分支**（`1.6.37-dev` 加的线程本地缓存）。
+    #
+    # `cached.slot` 里存的是对的、命中的判断也是对的，只有返回时被换成 0 号 ——
+    # 于是每条循环线程**第一次**调用拿到自己那一格（那一发走的是下面那个遍历），
+    # 从第二次起全落 0 号。用例里每个请求都要 `reg_here()` ⇒ 一秒之内就兑现。
+    #
+    # 为什么变异打的是命中分支、而不是"把 `ticket` 校验拆掉"：跨实例同地址复用
+    # 那条路要求**同一条 OS 线程先后服务两个 `uvcpp_web_app`**，而且 glibc 得把
+    # 一块没重新初始化的 TLS 块还回来 —— 本机构造不出确定性的红，所以 `owner`
+    # + `ticket` 那一层是**论证**（见 CHANGELOG `1.6.37-dev` 那条），这里只钉
+    # 能钉的那一半。**把守卫换成恒真不构成"没红就说明缓存没用"的反例**：命中分支
+    # 本身有牙，这才是这条缓存值不值得存的判据。
+    ("M12 命中分支返回 0 号槽位", APP_CPP,
+     "  if (cached.owner == this && cached.slot != nullptr &&\n"
+     "      cached.ticket == loops_[0]->ticket) {\n"
+     "    return cached.slot;\n"
+     "  }",
+     "  if (cached.owner == this && cached.slot != nullptr &&\n"
+     "      cached.ticket == loops_[0]->ticket) {\n"
+     "    return loops_[0].get();  /* MUTATION */\n"
+     "  }"),
 ]
 
 # 有牙的判据 vs 附带损伤：M7/M8 的**判别式**是"目标判据响没响"，不是"红不红"。
@@ -341,7 +376,9 @@ def build(tree):
     rc, out = run(["cmake", "--build", tree, "--config", "Release",
                    "--parallel", "2",
                    "--target", "uvcpp", "test_web_app_multiloop_func"])
-    nerr = len(re.findall(r"error C\d+|error LNK|error MSB", out))
+    # MSVC 的错误码 + GCC/Clang（`error:`）与 make（`Error 1`）。
+    nerr = len(re.findall(r"error C\d+|error LNK|error MSB|\berror:|\bError \d+",
+                          out, re.M))
     return rc, nerr, out
 
 
@@ -352,7 +389,12 @@ def sync_dll(tree):
     本脚本走的是 `--target uvcpp test_web_app_multiloop_func`，那条依赖链里没有
     它，于是测试侧的 DLL 会停在上一版。不手动同步就会拿**上一版库**跑变异，
     结果整体错位一格 —— 这条在 `run_idle_mutation.py` 上踩过，照抄它的做法。
+
+    Linux 单配置树没有这一步：测试直接 rpath 到 `$tree/libuvcpp.so`，上一条
+    命令已经把它就地换掉了。
     """
+    if not _ON_WIN:
+        return 0
     src = os.path.join(tree, "Release", "uvcpp.dll")
     with open(src, "rb") as f:
         data = f.read()
@@ -397,7 +439,8 @@ def main():
     args = ap.parse_args()
 
     tree = os.path.join(ROOT, args.tree)
-    exe_dir = os.path.join(tree, "tests", "functional", "Release")
+    exe_dir = os.path.join(tree, "tests", "functional",
+                           "Release" if _ON_WIN else "")
 
     picks = MUTATIONS
     if args.only:

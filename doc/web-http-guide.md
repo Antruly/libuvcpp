@@ -756,7 +756,7 @@ CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 →
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:1019-1030`、`src/web/uvcpp_http_server.cpp:1124-1135`、`src/web/uvcpp_http_server.cpp:2818-2827`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:1499-1504`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:3030-3036`）。
+（`src/webapp/uvcpp_web_app.cpp:3088-3094`）。
 
 ### 静默失败清单
 

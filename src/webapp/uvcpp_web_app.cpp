@@ -2387,9 +2387,16 @@ uvcpp_tcp_server* uvcpp_web_app::tcp_server() {
 // =========================================================================
 
 bool uvcpp_web_app::on_loop_thread() const {
-  const loop_slot& s = slot_here();
-  std::lock_guard<std::mutex> lk(s.tid_mutex);
-  return s.tid_known && s.loop_tid == std::this_thread::get_id();
+  // 一趟查找，**不再回头锁一次**。从前这里必须重问一遍，因为 `slot_here()`
+  // 对未命中的答案是"0 号"、与"真在 0 号上"分不开；`slot_here_or_null()`
+  // 把这两种情形分开了，于是"在不在循环上"就是"这趟查找找没找到"，与
+  // 从前那句 `s.tid_known && s.loop_tid == 本线程` 逐条等价：
+  //
+  //   * 找到了 ⇒ 那格的 `tid_known` 为真、`loop_tid` 就是本线程 ⇒ 从前为真；
+  //   * 没找到 ⇒ 从前拿到的是 0 号那一格，再问一次它是不是本线程 —— 若是，
+  //     那趟查找在 i == 0 就命中了（两个条件当时都成立），不会走到未命中，
+  //     所以没找到时那一问也必为假。
+  return const_cast<uvcpp_web_app*>(this)->slot_here_or_null() != nullptr;
 }
 
 void uvcpp_web_app::post(std::function<void()> fn) {
@@ -2443,18 +2450,69 @@ uvcpp_loop* uvcpp_web_app::loop() const {
   return slot_here().loop;
 }
 
+uvcpp_web_app::loop_slot* uvcpp_web_app::slot_here_or_null() {
+  const std::thread::id me = std::this_thread::get_id();
+
+  /**
+   * @brief 本线程上次在这**同一个实例**上落在哪一格。
+   *
+   * 一条线程在一个实例上只会落在同一格 —— 格子归线程所有，`loops_` 在
+   * worker 起来之后就不再长、也不重排（`set_loops()` 只往里 push，析构才收）。
+   * 所以命中一次就可以一直用；`n == 1` 之外那条路本来要**逐个槽位取锁**，
+   * `n = 32` 时平均十六次以上，实测是请求路径上最大的一处取锁
+   * （`1.6.36-dev` 那一版把静态处理器自己那一段从 9.00/req 收到 1.00/req 之后，
+   * 剩下的 22.98/req 里它一个人占 17.63）。
+   */
+  struct here_cache {
+    const uvcpp_web_app* owner;
+    unsigned long long ticket;
+    loop_slot* slot;
+  };
+  // **只能是 POD**：MinGW 的 emutls 会把非平凡析构的线程本地对象在
+  // `__cxa_thread_atexit` 的析构器跑之前还回堆
+  // （`src/expand/uvcpp_page_heap.cpp:556`）。
+  static thread_local here_cache cached = {nullptr, 0, nullptr};
+
+  // 键是**三个字段一起**：`owner`（实例地址）+ `ticket`（0 号那格的票号，
+  // 全进程单调、从 1 起、不复用）+ 命中的 `slot`。
+  //
+  // 为什么不能只比地址：一个实例析构后在同一地址又建一个，是**常见**形状 ——
+  // 而它的格子也会照同一条分配序列落回同一批地址（`new loop_slot(i)` 大小
+  // 分档相同、序列相同），于是"实例地址 + 格子地址"这一对会原样复现。票号
+  // 单调、不复用，所以这一对（`owner` 与 `ticket`）才是"还是同一个实例"的
+  // 判据。读 `loops_[0]->ticket` 不需要锁：它在本构造函数里写一次，而那时
+  // 这个对象还没交给任何别的线程。
+  if (cached.owner == this && cached.slot != nullptr &&
+      cached.ticket == loops_[0]->ticket) {
+    return cached.slot;
+  }
+
+  for (size_t i = 0; i < loops_.size(); ++i) {
+    loop_slot& s = *loops_[i];
+    {
+      std::lock_guard<std::mutex> lk(s.tid_mutex);
+      if (!(s.tid_known && s.loop_tid == me)) continue;
+    }
+    cached.owner = this;
+    cached.ticket = loops_[0]->ticket;
+    cached.slot = &s;
+    return &s;
+  }
+
+  // **只缓存命中，不缓存未命中**：循环线程在 `init_loop_state()` 记下自己的
+  // 身份**之前**就会调到这里（钩子跑的那一刻 `tid_known` 还是假 —— 设计稿
+  // §4.1.1 那段"下标必须传进来"说的就是这个窗口），那一刻只能落到"哪儿都不
+  // 在"这一支上。把这条否定的答案记下来，等身份记上了就再也翻不了身。
+  return nullptr;
+}
+
 uvcpp_web_app::loop_slot& uvcpp_web_app::slot_here() {
   // n == 1：恒等，而且**一次锁都不多加**（§7："n=1 时不许出现多循环的
   // 残留"）。这一格在构造函数里就建好了，所以 `loops_` 恒非空。
   if (loops_.size() == 1) return *loops_[0];
 
-  const std::thread::id me = std::this_thread::get_id();
-  for (size_t i = 0; i < loops_.size(); ++i) {
-    loop_slot& s = *loops_[i];
-    std::lock_guard<std::mutex> lk(s.tid_mutex);
-    if (s.tid_known && s.loop_tid == me) return s;
-  }
-  return *loops_[0];  // 不在任何循环线程上 ⇒ 0 号（§5.2）
+  loop_slot* s = slot_here_or_null();
+  return s != nullptr ? *s : *loops_[0];  // 不在任何循环线程上 ⇒ 0 号（§5.2）
 }
 
 const uvcpp_web_app::loop_slot& uvcpp_web_app::slot_here() const {
