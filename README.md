@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.6.34--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.6.35--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.6.34-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.6.35-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -304,7 +304,7 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 | `UVCPP_ENABLE_QUIC` | `OFF` | Enable the QUIC transport (ngtcp2, linked static) in the **net layer**. Requires `UVCPP_ENABLE_OPENSSL=ON`, an **OpenSSL ≥ 3.2 with the QUIC API**, and `UVCPP_BUILD_NET=ON` — force-disabled without them. **1.4.1 is a real link protocol: handshake, streams, close and idle timeout work; HTTP/3 rides on top of it (next row).** **As of 1.5.0 all six release legs enable it** (earlier packages did not). See [`doc/quic-guide.md`](doc/quic-guide.md) |
 | `UVCPP_ENABLE_HTTP3` | `OFF` | Enable HTTP/3 (RFC 9114) in the **web layer**, parsed by nghttp3 and carried over the QUIC transport (both linked static). Requires `UVCPP_ENABLE_QUIC=ON` and `UVCPP_BUILD_WEB=ON` — force-disabled without them. **1.4.1 is an end-to-end transport: `uvcpp_http_client` / `uvcpp_http_server` speak it, h1/h2 are untouched (it runs on UDP).** **As of 1.5.0 all six release legs enable it** (earlier packages did not). See [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | Enable the WSDL/SOAP module (XML via pugixml, linked static). Requires `UVCPP_BUILD_WEBAPP=ON`. See [`doc/wsdl-guide.md`](doc/wsdl-guide.md) (the document half) and [`doc/soap-guide.md`](doc/soap-guide.md) (the runtime half) |
-| `UVCPP_ENABLE_YYJSON` | `OFF` | Enable the **optional yyjson JSON backend** (`src/yyjson/`): a *second* parser alongside nlohmann, with the same accessor names (`uvcpp_json_get_string/bool/int/double`), the same statuses, and a bridge into `uvcpp_json_writer`. Its parse is faster, its DOM is smaller, and the parser does not recurse. **Turned off, nothing about the nlohmann path changes** (`using uvcpp_json = nlohmann::json` and every `uvcpp_json_*` keep their behaviour; the exported symbol set and `DT_NEEDED` of the library are unchanged). yyjson is a **private** dependency (one header + one `.c`, compiled as object code into the same `uvcpp` library — no extra artifact), fetched via `FetchContent`. See [`doc/json-guide.md`](doc/json-guide.md) §13 |
+| `UVCPP_ENABLE_YYJSON` | `OFF` | Enable the **optional yyjson JSON backend** (`src/yyjson/`): a *second* parser alongside nlohmann, with the same accessor names (`uvcpp_json_get_string/bool/int/double`), the same statuses, and a bridge into `uvcpp_json_writer`. Its parse is faster, its DOM is smaller, and the parser does not recurse. **Turned off, nothing about the nlohmann path changes** (`using uvcpp_json = nlohmann::json` and every `uvcpp_json_*` keep their behaviour; the exported symbol set and `DT_NEEDED` of the library are unchanged). yyjson is a **private** dependency (one header + one `.c`, compiled as object code into the same `uvcpp` library — no extra artifact), fetched via `FetchContent`. It is **not in the release package** (off means off), but three CI entries really build it (Ubuntu / macOS / MSVC). See [`doc/json-guide.md`](doc/json-guide.md) §13 |
 | `UVCPP_ENABLE_CAPI` | `OFF` | Export the **C ABI** (`src/capi/`, C99 headers for C#/P-Invoke and any other FFI) out of the same `uvcpp` library — no extra artifact. Requires `UVCPP_BUILD_NET=ON` and `UVCPP_BUILD_WEB=ON`; force-disabled without them (the C surface spans net/web/webapp). **Turned on for every release configuration.** See [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_ENABLE_DB` | `OFF` | Enable the **database module** (`src/db/`): one `uvcpp_db_client` per connection over SQLite / MySQL / PostgreSQL, with table-style access to the result rows. It is the only module that **requires a third-party client library** (libsqlite3 / libmysqlclient / libpq) — force-disabled when none of the three is found. **Every release configuration turns it on**, so the prebuilt packages ship it. See [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_ENABLE_DB_SQLITE` | `ON` | Build the SQLite backend of the db module (needs `sqlite3.h` + libsqlite3). Not found ⇒ **this one backend is force-disabled with a warning**; the others still build |

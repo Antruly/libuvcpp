@@ -16,13 +16,13 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `yyjson`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `db-servers` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / db-servers` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `yyjson`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `CI · Windows · MSVC` | `CI · Windows · MSVC / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `CI · Windows · MinGW-w64` | `CI · Windows · MinGW-w64 / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `yyjson`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -38,7 +38,15 @@ QUIC + web, so it could not exist before those two did), which takes the table t
 checks; and then the three `capi` entries (the C ABI layer — Ubuntu, macOS and MSVC; see §5),
 which takes it to **29**. The database module added four more — a `db` entry on Ubuntu, macOS
 and MSVC, plus the single `db-servers` job (MySQL + PostgreSQL through service containers,
-Ubuntu only; see §5) — which takes it to **33**. The `windows` one had never run before that commit, since there is no MSVC on the
+Ubuntu only; see §5) — after which the running total in this paragraph read **33**. 1.6.34
+added the three `yyjson` entries (the optional second JSON backend — Ubuntu, macOS and MSVC;
+see §5), and while doing so the running total was recounted cell by cell against the table
+below: it had been **36**, not 33, since the `db` entries landed (`zlib-off`, the `db-servers`
+and both `config-contract` jobs are all checks, and the earlier totals had stopped counting
+some of them). With the three `yyjson` entries the table is **39**. The table below is the
+machine-checked source; this paragraph is a narrative and is not — treat any number here as
+a claim to re-count rather than to trust.
+The `windows` one had never run before that commit, since there is no MSVC on the
 development machine — that leg's first execution *is* the gate (see §2 for how a new entry is
 supposed to be argued). Two things were
 only learnable by running it:
@@ -89,6 +97,7 @@ layout did not cover them either.
 | macOS `config-contract` | `package_release.py`'s `PLATFORMS` has no macOS key — see §5. |
 | MinGW + WSDL | The same single MinGW job as the three gaps above. `release.yml`'s `mingw-x64` and `mingw-arm64` legs **do** enable WSDL, so it is covered at release time but not on push/PR — which is why it was verified locally on the MinGW x64 shape before being turned on there. |
 | macOS + WSDL | No entry, and macOS never compiles `src/wsdl/`. Lower risk than the MinGW gap above: macOS is not a release platform, so there is no path on which it reaches a user unbuilt. |
+| MinGW + yyjson | The same single MinGW job as the three gaps above. Unlike WSDL there is no release-time coverage standing in for it either: `UVCPP_ENABLE_YYJSON` is never passed by `release.yml` (the module is optional, and the package ships the header as an empty shell), so `src/yyjson/` is compiled on Ubuntu, macOS and MSVC only. What makes the gap acceptable here is that MinGW is GCC + libstdc++ — the same pair as the Ubuntu entry — so the two runtimes that could actually disagree about the byte-identical write-back (`libstdc++` vs `libc++`) are both covered. |
 | MySQL / PostgreSQL on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The two remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 service containers). The other three `db` entries set both backends **explicitly `OFF`** rather than leaving them on: with no server the two tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` on Linux | On Linux and macOS the `db` entries use the **default** path (`find_package(SQLite3)` against the system/SDK library); the from-source path is exercised on MSVC and MinGW. What is platform-specific about it is TLS and extraction — `file(DOWNLOAD)` over Schannel on Windows, MSYS2's libcurl + `ca-certificates` on MinGW — and both of those are covered. The Linux release legs run it on every tag. The cost of this entry, and it is a real one: MSVC and MinGW now need the network **at configure time** (hash-pinned zip from sqlite.org). An offline machine can pre-place it, see §5. |
 | `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
@@ -436,6 +445,46 @@ MSVC. MinGW and macOS are the gap (see §1).
   `web_app_soap_func` — really execute. The entry's gate string names one of them as a
   sentinel; the other three ride the same `ctest` invocation.
 
+### The `yyjson` entries
+
+`yyjson` is `src/yyjson/` — the **optional second JSON parse backend** (`uvcpp_json_doc` over
+[yyjson](https://github.com/ibireme/yyjson), plus accessors that share their names with the
+nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the single
+`UVCPP_ENABLE_YYJSON` switch and runs on **three legs** — Ubuntu, macOS and Windows MSVC
+(MinGW is the gap, as for every other optional module there).
+
+- **It does not replace nlohmann, and it is not in the release package.** `using uvcpp_json =
+  nlohmann::json` and `uvcpp_json_parse/dump/get_*` are unchanged, and `release.yml` does
+  **not** pass `-DUVCPP_ENABLE_YYJSON=ON` — the release package ships
+  `include/yyjson/uvcpp_json_doc.h` as an empty shell (`package_release.py` copies module
+  directories wholesale, so the file's presence is not the gate; the macro is). That makes
+  these three entries the **only** place the module is ever compiled, which is exactly the
+  argument `wsdl`'s entries make, one step stronger.
+- **What these entries buy that nothing else does.** `tests/functional/yyjson_doc_func.cpp`
+  carries the two load-bearing assertions: a 25-row input table where every row is compared
+  **first against a hand-written expectation and then against nlohmann** (comparing only the
+  two libraries to each other would let a parser that says "OK" to everything pass), and five
+  corpora where `uvcpp_json_write` and nlohmann's `dump()` must be **byte-identical**. Without
+  an entry, none of that is ever compiled — "not compiled" and "compiled and green" are
+  different words but the same check colour.
+- **Why macOS is included even though the `wsdl` entries are not.** The gap table in §1
+  justifies the missing macOS `wsdl` entry with "macOS is not a release platform, so there is
+  no path on which it reaches a user unbuilt". That argument does not apply here, because the
+  module is not released at all — and macOS is the one leg that compiles this header with
+  **libc++**, whose `double` formatting is not libstdc++'s. The byte-identical write-back
+  assertion is precisely the kind that differs across those two.
+- **`flags` is `web` plus one switch, and the dep list is byte-identical to `web`'s on all
+  three legs.** `yyjson` is pulled by `FetchContent` (`CMakeLists.txt:1513`, `GIT_TAG` pinned
+  to `YYJSON_VERSION`) and built as an OBJECT library, not found by a package manager, so
+  there is nothing to install — and keeping the package set identical means a red/green
+  difference can only be attributed to the switch.
+- **Gate ② is `yyjson integrated`.** There is no "dependency missing → force the module off"
+  rule here, so the cache entry is only a cheap corroboration; what actually proves the
+  FetchContent resolved and the object library exists is that string. Gate ③
+  (`Including yyjson module in build`) proves `src/yyjson/` entered the source list, and gate
+  ④ (`test_yyjson_doc_func`) proves the test was registered — the file is removed by the
+  glob+FILTER in `tests/functional/CMakeLists.txt` when the module is off.
+
 ### The `capi` entries
 
 `capi` is `src/capi/` — the **C ABI** surface (`extern "C"`, C99 headers, for C#/P-Invoke and
@@ -726,6 +775,9 @@ sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 # zlib-off — deliberately identical to web: the only delta is -DUVCPP_ENABLE_ZLIB=OFF,
 # so a red/green difference is attributable to that switch and nothing else
 sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
+# wsdl | yyjson — deliberately identical to web again: pugixml and yyjson both come from
+# FetchContent, so there is nothing to install and the delta is exactly the switch
+sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 # ssl | h2
 sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 # full
@@ -757,6 +809,8 @@ putting it on the matrix job would start two containers for each of the twelve U
 brew install libuv ninja
 # web
 brew install libuv zlib ninja
+# yyjson — identical to web: yyjson comes from FetchContent, nothing to install
+brew install libuv zlib ninja
 # ssl | h2 | full
 brew install libuv openssl zlib ninja
 # quic — explicit openssl@3, and -DOPENSSL_ROOT_DIR points at it
@@ -772,7 +826,8 @@ brew install libuv ninja
 
 ### Windows MSVC (`ci-windows-msvc.yml`)
 ```bash
-# basic-static | basic-shared | web | capi — no system deps (libuv + llhttp via FetchContent)
+# basic-static | basic-shared | web | capi | wsdl | yyjson — no system deps
+# (libuv + llhttp + pugixml + yyjson all via FetchContent)
 # db — no system deps either: its SQLite is built *from source* (UVCPP_DB_SQLITE_FROM_SOURCE)
 # ssl | h2 | quic | http3
 bash .github/scripts/win-openssl-deps.sh

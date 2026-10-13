@@ -50,6 +50,34 @@ jobs:
               - -DUVCPP_BUILD_WEB=ON
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_ZLIB=ON
+          # yyjson：与 `web` 的 `flags` **逐字相同**，只多一个
+          # `-DUVCPP_ENABLE_YYJSON=ON`。`UVCPP_ENABLE_YYJSON` 默认 OFF，别的格
+          # **一行 `src/yyjson/` 都不编**，所以这一格是那个模块在这条腿上的唯一一次
+          # 编译 —— 少了它，用例里「`uvcpp_json_write` 与 nlohmann `dump()` 逐字节
+          # 相同」那一条在 Apple clang / libc++ 下从没跑过（而它与 libstdc++ 的
+          # `double` 格式化路径不是同一条）。
+          #
+          # 与 wsdl 不同：macOS **没有** wsdl 格（§1 的"未覆盖的格"表里那一行写的
+          # 是"不发版、风险低"），而 yyjson 这一格加得起 —— 它不需要任何新包。
+          #
+          # yyjson 走 FetchContent（根 `CMakeLists.txt:1513`，`GIT_TAG` 钉在
+          # `YYJSON_VERSION`），**不需要新包**；装包表与 `web` 逐字相同 —— 这样两边
+          # 红绿不同只可能归因到那个开关。
+          # 四个门禁串见 doc/ci-guide.md §5。
+          - feature: yyjson
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_YYJSON=ON
+            gate_name: yyjson
+            gate_switch: 'UVCPP_ENABLE_YYJSON:BOOL=ON'
+            gate_integrated: yyjson integrated
+            gate_module: Including yyjson module in build
+            gate_test: test_yyjson_doc_func
+
           - feature: ssl
             flags:
               - -DUVCPP_BUILD_TESTS=ON
@@ -231,7 +259,9 @@ jobs:
         run: |
           case "${{ matrix.feature }}" in
             basic-static|basic-shared|db) brew install libuv ninja ;;
-            web|capi)                  brew install libuv zlib ninja ;;
+            # yyjson 与 `web` 同一份：yyjson 走 FetchContent（见矩阵里那一格的注释），
+            # 不是 Homebrew 的包 —— 装成一样，两边红绿不同就只归因到那个 `-D`。
+            web|capi|yyjson)           brew install libuv zlib ninja ;;
             ssl|h2|full)               brew install libuv openssl zlib ninja ;;
             quic|http3)                brew install libuv zlib ninja openssl@3 ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;

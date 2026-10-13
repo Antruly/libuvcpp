@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.34-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.35-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -1768,16 +1768,48 @@
   两者都要有见证）。深度预扫描搬到核心层之后，它自己的五条断言仍在
   `tests/functional/web_app_request_func.cpp`，**一字未改**。
 
-  ★ **诚实缺口，写在这里而不是藏在"本模块可选"后面**：CI 里**没有任何一条腿**开
-  `UVCPP_ENABLE_YYJSON`，所以上面那几条文档片段与用例里"与 nlohmann 逐条一致"的那一半，
-  **在 CI 里不会被编译**（不是绿，是一段没人跑的路）。本机验过：`-DUVCPP_ENABLE_YYJSON=ON`
-  的树 `cmake --install` 到临时前缀后，`check_doc_snippets.py --pkg <前缀>` 里
-  `doc/json-guide.md` 的 8 条片段全绿，同一棵树上的 `test_yyjson_doc_func` ALL PASS。
+  它**不在发布包里**（`release.yml` 不传这个 `-D`，包里那个头是空的壳，拦住你的是宏
+  而不是文件的缺席），所以它需要一条自己的 CI 腿 —— 那三格与它们各自的理由见下面
+  「配置、打包与 CI」那一节（`1.6.35-dev`）。
+
   另外四处**刻意的**行为不同（成员按文档顺序而非键排序、重复键取第一个而非最后一个、
   `1.0` 写成 `1`、`uvcpp_json_write` 递归而由 `max_depth` 兜住）逐条写在
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **`yyjson` 有了一条自己的 CI 腿：三格（Ubuntu / macOS / MSVC）**（`1.6.35-dev`）。
+  `src/yyjson/` 上个提交刚进来时，CI 里**没有任何一条腿**开 `UVCPP_ENABLE_YYJSON` ——
+  于是那个模块里最重的两条判据（「25 行输入表逐条先与手写期望值比、再与 nlohmann
+  逐条比」与「五份键升序语料上 `uvcpp_json_write` 与 nlohmann `dump()` 逐字节相同」）
+  **一条都不会被编译**，而"没编译"与"编了且过"在 check 的颜色上长得一模一样。
+  这是本仓那条老规矩的又一例（`UVCPP_ENABLE_ZLIB=OFF` + `WEB/WEBAPP=ON` 整整一版没有
+  一格覆盖，#35）：**一个默认关的模块，第一次被编到的地方不能是使用者手上**。
+
+  这一格比 `zlib-off` / `wsdl` 那两格更硬一点：本模块**不在发布包里**
+  （`release.yml` 不传这个 `-D`，包里那个头是空的壳 —— `package_release.py` 是
+  **按模块目录整体拷头**的、与开关无关，所以拦住你的是宏，不是"包里没有这个文件"），
+  所以这三格是它**唯一**会被编译的地方，一次都没有别的路径兜底。
+  `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
+  `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
+  build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
+  —— `CMakeLists.txt:1513`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  这样两边红绿不同只可能归因到那个开关。
+
+  **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是
+  "macOS 不是发布平台，没有一条路径让它未编就到达用户" —— 这条理由在这里**不成立**
+  （本模块根本不发版），而 macOS 是唯一用 **libc++** 编这个头的腿，写回逐字节那条
+  正好是 libstdc++ / libc++ 会分叉的那类断言。MinGW 仍是缺口（它与 Ubuntu 同为
+  GCC + libstdc++），写进 §1 的"未覆盖的格"表。
+
+  **本机先按这一格的原命令行复现过判据**（CI 之外的那一半）：
+  `cmake -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_WEB=ON
+  -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_YYJSON=ON` →
+  配置 rc=0，`UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` /
+  `Including yyjson module in build` 三个串**都在**，`ctest -N` 里有
+  `test_yyjson_doc_func`；而在 `web` 那一格（同一份命令行去掉最后一个 `-D`）上，
+  这三个串**一个都不出现**，只有 `Excluding yyjson module from build` ——
+  所以这几道门禁不是恒真的。全量与用例另一侧的读数见上面「JSON」那一节。
 
 - **`uvcpp_loop_index_of_this_thread()` / `uvcpp_set_loop_index_of_this_thread()`
   补上 `UVCPP_API`**（`1.6.20-dev`）。这两个自由函数在安装集里的公开头

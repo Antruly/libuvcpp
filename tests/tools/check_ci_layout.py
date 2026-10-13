@@ -151,6 +151,19 @@ FEATURE_GATES = {
     # 理由（见上面那段注释）。
     "wsdl": ["UVCPP_ENABLE_WSDL:BOOL=ON", "pugixml integrated",
              "Including wsdl module in build", "test_wsdl_document_func"],
+    # 1.6.34：第二个 JSON 解析后端（`src/yyjson/`）。`UVCPP_ENABLE_YYJSON` 也是
+    # **默认 OFF**，而且它比上面几条更彻底：它**不在发布包里**（release.yml 不传
+    # 这个 `-D`），所以这三格是它唯一会被编译的地方。少了它们，
+    # `tests/functional/yyjson_doc_func.cpp` 那条「25 行输入表逐条与 nlohmann 比 +
+    # 五份语料写回逐字节相同」在 CI 里**一条都不会被编译** —— 而"没编"与"编了且过"
+    # 在 check 的结论里长得一模一样。
+    #
+    # 三格（ubuntu / macOS / MSVC）形状相同：`web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`。
+    # 第二条门禁串盯的是 `yyjson integrated`（FetchContent 真的取到了、对象库真的
+    # 建了）—— 这里没有"依赖不满足就强制关"的从属规则，所以 `CMakeCache.txt` 那条
+    # 也只是个便宜的旁证，真正承重的是它。
+    "yyjson": ["UVCPP_ENABLE_YYJSON:BOOL=ON", "yyjson integrated",
+               "Including yyjson module in build", "test_yyjson_doc_func"],
     # 1.5.x：数据库模块（`src/db/`）。`UVCPP_ENABLE_DB` 也是**默认 OFF**，而它比
     # 上面那几条多一层：它底下三个后端各有一个子开关，**三个都不成时模块会被强制
     # 关闭**（`CMakeLists.txt` 里那条 `set(UVCPP_ENABLE_DB OFF)` 是普通变量，
