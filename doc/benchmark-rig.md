@@ -932,6 +932,38 @@ ext4 上是 921.16）—— 因为它卡的是 CPU，不是 stat。
   其余的调用者是 **libstdc++ 自己**（`std::string(const char*)` 那一族），在库这一侧
   根本看不见 —— 想再往下走就得先数清每请求 11 次 `malloc` 是谁要的，而不是盯着 `strlen`。
 
+## JSON 写出器的量具（仓外探针）
+
+`json-*` 那几档要的是「每请求从活数据现算现序列化」，所以想量「序列化本身值多少」，就得
+把服务端剥到只剩这一件事：**不起事件循环、不发包**，一根只读语料的探针。
+
+- **语料**：HttpArena 仓的 `data/dataset.json`（50 项），与条目 `main.cc` 读的是同一份
+  （平台侧由 `DATASET_PATH` 注入）。
+- **形状**：`{"items":[...],"count":N}`，每项 8 个字段 + 一个现算的 `"total"`，整份
+  **8 397 B**（对应平台的 `json-50` 档）。
+- **四个臂**：A 每项 `nlohmann::json::dump()` 后拼；W 走 `uvcpp_json_writer` 一趟直写；
+  F 手写一趟（栈上两位一取的整数表、光标直推）；E 直接拼**预先算好的**每项字符串
+  —— **E 只是下界诊断**，预序列化缓存在 `json` 档的两种 type 上都不合规。
+- **两处必须做对，否则读数是假的**：
+  1. **两臂都返回 `std::string`，不要一臂复用外部缓冲。** 第一版让 A 臂复用一个缓冲、
+     W 臂每轮新开一个串，量到的就成了「开缓冲」而不是序列化。条目里 `build_json` 本来就是
+     返回一个 `std::string`，两臂都得照这个形状。
+  2. **`taskset -c 2-3` 绑核。** 这台机器同时是桌面机（见上面「本机不是一台安静的压测机」），
+     不绑核时读数被同机负载污染，两版代码的差会被埋掉。
+- **`append_raw` 计数**：另编一份「把库里那个计数器打开」的副本（在 `append_raw` 开头
+  `++g_appends` —— 注意它落在 `namespace uvcpp` 里，探针侧要写
+  `namespace uvcpp { extern size_t g_appends; }`，否则链接期报未定义，而报错信息里
+  只出现裸名字 `g_appends`，看不出是名字空间不对）。量到 **4 073 → 1 536 次**/响应，这是
+  「一个键 4~5 次追加 → 1 次」的直接证据。
+- **A/B 怎么摆**：两臂从同一份源码树编，只有 `uvcpp_json_writer.cpp` 一个文件不同 ——
+  「改前」那份用 `git show HEAD:src/uvcpp/uvcpp_json_writer.cpp` 取。
+- **别用 Python 文本模式拷这个 `.cpp`**：它在 `src/` 下且带 BOM，文本模式读写会**静默**
+  把 CRLF 与 BOM 一起吃掉（本仓撞过，症状只是 Linux 的 `config-contract` 一条红）。A/B 一律
+  走 `git show` 那种二进制安全的取法。
+
+读数在 [`benchmark.md`](benchmark.md) §4.6。
+
+
 ## 这一页不是什么
 
 - 不是读数记录 —— 读数属于跑它的那套硬件加配置，写在 [`benchmark.md`](benchmark.md)。
@@ -946,6 +978,8 @@ ext4 上是 921.16）—— 因为它卡的是 CPU，不是 stat。
 - HttpArena 的 h3 量具：上游 nghttp2 的 `h2load`（`--enable-http3`），钉 v1.69.0。
 - 每请求指令数的量具：`valgrind --tool=callgrind` + `callgrind_control -d`；
   A/B 靠 `LD_LIBRARY_PATH` 换 `libuvcpp.so`，解析与逐函数对比是一次性脚本（不随库发布）。
+- JSON 写出器的量具：一根不起服务的仓外探针（语料是 HttpArena 的 `data/dataset.json`），
+  四个臂 A / W / F / E，加一份把 `append_raw` 计数器打开的副本；同样不随库发布。
 - 平台自己的读数：HttpArena 仓 `site/data/results/<条目>.json`（bot 提交回推送条目的分支）、
   `site/static/logs/`、`site/content/docs/hardware/_index.md`，以及
   `https://www.http-arena.com/badge/index.json`。位置与四个坑见上面「平台自己的读数从哪读」。

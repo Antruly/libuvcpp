@@ -138,6 +138,42 @@ const char k_short_escapes[8] = {'\0', '"', '\\', 'b', 'f', 'n', 'r', 't'};
 
 const char k_hex_digits[17] = "0123456789abcdef";
 
+namespace {
+
+/// 快路栈缓冲：短串的**最坏**展开量（每字节 6 字节的 `\u00xx`，再加引号/冒号）
+/// 能塞进这里时，整个键/值一次追加写完。
+const size_t k_quote_tmp = 256;
+
+/// @brief 与 `append_escaped` 同一套转义规则，但写进裸指针，不碰缓冲。
+///
+/// 调用方保证目标处有 `len * 6` 字节。两条路共用同一份转义表和同一批常量
+/// （短转义字符、十六进制小写），所以产出逐字节相同。
+char* escape_into(const char* p, size_t len, char* out) {
+  const unsigned char* kind = escapes().kind;
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(p[i]);
+    const unsigned char k = kind[c];
+    if (k == 0) {
+      *out++ = static_cast<char>(c);
+      continue;
+    }
+    if (k == 8) {
+      *out++ = '\\';
+      *out++ = 'u';
+      *out++ = '0';
+      *out++ = '0';
+      *out++ = k_hex_digits[(c >> 4) & 0x0Fu];
+      *out++ = k_hex_digits[c & 0x0Fu];
+    } else {
+      *out++ = '\\';
+      *out++ = k_short_escapes[k];
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 /**
  * @brief 十进制无符号整数 → `out`，返回写了几字节（不写 NUL）。
  *
@@ -422,8 +458,27 @@ json_write_status uvcpp_json_writer::key(const char* k, size_t len) {
     // 上一个键还没等到它的值：`{"a" "b":1}` 这种。
     return fail(json_write_status::MISUSE);
   }
+  const bool comma = (f.count > 0);
+  // 快路：逗号、引号、键体、引号、冒号**一次**追加，把一个键的 4~5 次
+  // `std::string::append` 压成 1 次。**只有在这一整段必定不触界时才走** ——
+  // 触界那条路仍然逐段追加，逐字节与原来相同。最坏展开是 6 倍，所以按最坏量
+  // 判，不必先扫一遍算真实长度；长键（> 42 字节）直接回落。
+  if (len <= (k_quote_tmp - 4) / 6 &&
+      written_ + (comma ? 1u : 0u) + 2u + len * 6u + 1u <= max_bytes_) {
+    char tmp[k_quote_tmp];
+    char* w = tmp;
+    if (comma) *w++ = ',';
+    *w++ = '"';
+    w = escape_into(k, len, w);
+    *w++ = '"';
+    *w++ = ':';
+    json_write_status rc = append_raw(tmp, static_cast<size_t>(w - tmp));
+    if (rc != json_write_status::OK) return rc;
+    f.key_open = true;
+    return json_write_status::OK;
+  }
   json_write_status rc = json_write_status::OK;
-  if (f.count > 0) {
+  if (comma) {
     rc = append_raw(",", 1);
     if (rc != json_write_status::OK) return rc;
   }
@@ -527,6 +582,17 @@ json_write_status uvcpp_json_writer::value(const char* s, size_t len) {
   }
   const json_write_status rc = before_value();
   if (rc != json_write_status::OK) return rc;
+  // 快路：`"` + 转义后的值 + `"` 一次追加。判据与 `key()` 那条相同 —— 只在必定
+  // 不触界时才走；触界那条路逐段追加、逐字节不变（用例 6.3 盯着它：触界时缓冲
+  // 里只有 `[` 和那个开引号）。
+  if (len <= (k_quote_tmp - 2) / 6 && written_ + 2u + len * 6u <= max_bytes_) {
+    char tmp[k_quote_tmp];
+    char* w = tmp;
+    *w++ = '"';
+    w = escape_into(s, len, w);
+    *w++ = '"';
+    return append_raw(tmp, static_cast<size_t>(w - tmp));
+  }
   json_write_status r = append_raw("\"", 1);
   if (r == json_write_status::OK) r = append_escaped(s, len);
   if (r == json_write_status::OK) r = append_raw("\"", 1);

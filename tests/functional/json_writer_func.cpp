@@ -316,6 +316,39 @@ void group_escape() {
     // 顺带把长度也算准：5 个短形态各 2 字节、其余 27 个各 6 字节，加两个引号。
     check_eq_u(w.str().size(), 5 * 2 + 27 * 6 + 2, "2.12 转义后的总长度");
   }
+
+  // 长键走的是**回落路**：`key()` 的快路只吃"最坏展开也能塞进 256 字节栈缓冲"
+  // 的键，即 ≤ 42 字节（`(256-4)/6`）。长键的产出必须与逐段追加**逐字节相同**
+  // —— 这正是这次改动需要证明的全部（快路省的是调用次数，不是字节）。
+  {
+    uvcpp_json_writer w;
+    const std::string long_key =
+        std::string(200, 'k') + "\"" + std::string(10, '\n');
+    must_ok(w.object_begin(), "2.13 object_begin");
+    must_ok(w.key(long_key), "2.13 长键（含引号与换行）");
+    must_ok(w.value(1), "2.13 value");
+    must_ok(w.object_end(), "2.13 object_end");
+    must_ok(w.finish(), "2.13 finish");
+    std::string want = "{\"" + std::string(200, 'k') + "\\\"";
+    for (int i = 0; i < 10; ++i) want += "\\n";
+    want += "\":1}";
+    check_eq_s(w.str(), want, "2.13 长键（回落路）的转义与产出");
+  }
+
+  // 42 / 43 是快路的分界（`(256-4)/6 == 42`）。跨过去那一个字节不该让产出有任何
+  // 差别 —— 差一个字节就说明两条路不一致，那是这个改动最坏的形状。
+  for (size_t n = 42; n <= 43; ++n) {
+    uvcpp_json_writer w;
+    const std::string k(n, 'K');
+    const std::string v(n, 'V');
+    must_ok(w.object_begin(), "2.14 object_begin");
+    must_ok(w.key(k), "2.14 分界键");
+    must_ok(w.value(v), "2.14 分界值");
+    must_ok(w.object_end(), "2.14 object_end");
+    must_ok(w.finish(), "2.14 finish");
+    check_eq_s(w.str(), "{\"" + k + "\":\"" + v + "\"}",
+               "2.14 " + std::to_string(n) + " 字节的键与值");
+  }
 }
 
 // =========================================================================
@@ -733,6 +766,17 @@ void group_size_limit() {
     must_ok(w.object_begin(), "6.4 object_begin（1 字节）");
     check_st(w.key("abcdef"), json_write_status::TOO_LARGE,
              "6.4 键触界（1 + 8 = 9 > 4）");
+  }
+  // 6.5 快路的判据是**最坏展开量**，所以它会拒绝一些"其实塞得下"的键 —— 拒绝只
+  // 意味着回落逐段追加，不意味着失败。这一条钉住那个回落：上限正好等于真实字节
+  // 数时键仍然写得进去（1 + 9 = 10 ≤ 10），而快路的账是 4 + 36 + 1 = 41 > 9。
+  {
+    uvcpp_json_writer w(json_write_options(64, 10));
+    must_ok(w.object_begin(), "6.5 object_begin（1 字节）");
+    must_ok(w.key("abcdef"), "6.5 快路拒绝但实际塞得下");
+    check_eq_s(w.str(), "{\"abcdef\":", "6.5 回落路的产出");
+    check_eq_u(w.written(), 10, "6.5 written()");
+    check_st(w.value(1), json_write_status::TOO_LARGE, "6.5 值触界");
   }
 }
 

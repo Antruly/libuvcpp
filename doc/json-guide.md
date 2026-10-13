@@ -93,7 +93,13 @@ std::string doc_build_size(std::size_t size, const std::string& name) {
 这张表是**契约**，不是实现细节。第三、四行那两个分档住在实现里的
 256 项分类表 `escape_table`（`src/uvcpp/uvcpp_json_writer.cpp:110`，用表而不是 `switch`
 是因为每个字节都要判一次），搬运字节的那一段是 `append_escaped()`
-（`src/uvcpp/uvcpp_json_writer.cpp:271`）：
+（`src/uvcpp/uvcpp_json_writer.cpp:307`）：
+
+**这张表只有一个消费者，但有两条搬运路径**：`append_escaped()` 走慢路（逐段追加，缓冲
+快满时用），`escape_into()`（同文件 `src/uvcpp/uvcpp_json_writer.cpp:151`）走快路 ——
+它把整段写进一块栈缓冲、再由调用方一次追加。两条路**共用这张表和下面那五个短形态、
+小写十六进制常量**，所以选哪条只影响追加几次，不影响产出：同一个输入在两版上逐字节相同
+（`tests/functional/json_writer_func.cpp` 的用例 2.13 / 2.14 就是钉这条的）。
 
 | 输入字节 | 产出 | 说明 |
 |---|---|---|
@@ -149,10 +155,10 @@ void doc_escape(std::string& out, const std::string& user_input) {
 ## 6. 失败是粘性的
 
 **所有方法都不抛异常**（本仓的铁律：异常不得穿透 libuv 回调）。第一次失败之后，后续
-调用**直接返回那个错误、不再动缓冲**（`src/uvcpp/uvcpp_json_writer.cpp:243` 的 `fail()`）。
+调用**直接返回那个错误、不再动缓冲**（`src/uvcpp/uvcpp_json_writer.cpp:279` 的 `fail()`）。
 挡住后续调用的是两处：`key()` / `object_end()` / `array_end()` 开口第一句就是
 `if (status_ != OK) return status_;`，写值的那条路走 `check_value()`
-（`src/uvcpp/uvcpp_json_writer.cpp:320`）的同一句。所以错误路径的代码不必层层检查。
+（`src/uvcpp/uvcpp_json_writer.cpp:356`）的同一句。所以错误路径的代码不必层层检查。
 
 ```cpp
 #include <uvcpp/uvcpp_json_writer.h>
@@ -202,7 +208,7 @@ void doc_numbers(uvcpp::uvcpp_json_writer& w) {
 - **整数有八个宽度的重载**（`short` 到 `unsigned long long`），按你给的类型原样写十进制。
   自己选宽度：`size_t` 在 Linux 是 `unsigned long`、在 Windows 是 `unsigned long long`，
   两边都对，但**跨平台比对的 JSON 里最好显式用 `long long`**。
-- **浮点先试"最短可往返"形态**（`format_fp()`，`src/uvcpp/uvcpp_json_writer.cpp:181`）：
+- **浮点先试"最短可往返"形态**（`format_fp()`，`src/uvcpp/uvcpp_json_writer.cpp:217`）：
   `%.15g`（`float` 是 `%.6g`）→ 用 `strtod` 读回来比对，不等再上 `%.17g`（`float` 是
   `%.9g`）。所以 `0.1` 写出来就是 `0.1`，而 π 会写成 17 位 —— 15 位回不到同一个 `double`。
 - **`NaN` 与 `±Inf` 产出 `null`**：JSON 没有这三个字面量（与 nlohmann 的 `dump()` 同）。
@@ -218,7 +224,7 @@ void doc_numbers(uvcpp::uvcpp_json_writer& w) {
   —— 把 `max_depth` 设成 128 得到的仍然是一个能用的 64 层构造器。
   `max_depth = 0` 时只能写一个标量根值，`object_begin()` 会报 `TOO_DEEP`。
 - `max_bytes` 默认 **8 MiB**，数的是**本 writer 自己写进去的字节数**，不是缓冲的总长度。
-  判定在 `append_raw()`（`src/uvcpp/uvcpp_json_writer.cpp:250`）里，写法是
+  判定在 `append_raw()`（`src/uvcpp/uvcpp_json_writer.cpp:286`）里，写法是
   `n > max_bytes_ - written_` —— **减法形态**，回绕不了。
 - 构造时给一个 `std::string&` 就是**直写调用方的缓冲**：产出**追加**到它现有的内容之后，
   不读、不清空、不要求它是空的。`written()` 与 `max_bytes` 都只算自己写的那一段。
@@ -242,7 +248,7 @@ std::size_t doc_reuse(std::string& scratch) {
 }
 ```
 
-`clear()`（`src/uvcpp/uvcpp_json_writer.cpp:601`）把缓冲**截回构造时的长度**而不是清空
+`clear()`（`src/uvcpp/uvcpp_json_writer.cpp:667`）把缓冲**截回构造时的长度**而不是清空
 整个串 —— 把前缀放在缓冲里是合法用法，`clear()` 不该顺手吃掉它。它是为"一个线程上一份
 可复用的缓冲"设计的：省掉每次请求一次分配，而不是每次请求重建一个 writer。
 
