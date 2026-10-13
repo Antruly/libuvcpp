@@ -1623,16 +1623,26 @@ int uvcpp_tcp_client::write(uvcpp_buf* buf,
     }
 #endif
 
-    uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership from buf
-
     uvcpp_write* w = new uvcpp_write();
-    w->set_uv_buf(raw, true);
+    if (buf->is_shared()) {
+      // 共享视图：**不** materialize，直接把那块借出去 —— 与 `uvcpp_write::
+      // adopt_body()` 的 `is_shared()` 支线同一条规则（见 `src/req/uvcpp_write.cpp`）。
+      // `out_uv_buf()` 会把共享视图**先物化成一份自有块**（见 `uvcpp_buf.h` 里那条
+      // "它不是错误，是一次白拷贝"），所以顺序不能反：先判共享、再谈接走所有权。
+      w->append_uv_buf_view(
+          uv_buf_init(const_cast<char*>(buf->get_const_data()),
+                      static_cast<unsigned int>(buf->size())),
+          buf->shared_ref());
+    } else {
+      uv_buf_t* raw = buf->out_uv_buf();  // transfers ownership from buf
+      w->set_uv_buf(raw, true);
+    }
     w->set_self_free(true);  // 释放挪到 callback_write 里，见该类说明
 
     std::shared_ptr<char> life = alive_token();
 
     int rc = tcp_->write(
-        w, w->get_uv_buf(), 1,
+        w, w->get_uv_bufs(), static_cast<unsigned int>(w->get_uv_nbufs()),
         [this, life](uvcpp_write* wr, int status) {
           (void)wr;
           if (!token_alive(life)) {

@@ -183,26 +183,23 @@ int uvcpp_h2_connection::flush() {
   // 只等上线"的帧，任何一次重入 `flush()` 都会把它们再 `drain` 一遍、再发一遍。
   // 取走之后这个类别**结构上**不存在 —— 不必去论证"回调会不会同步跑"。
   //
-  // 字节装在一份 `shared_ptr<std::string>` 里（`swap` 进来，零拷贝），于是"交给
-  // 写层"这一步可以按连接形态二选一：
-  //   * **TLS** —— `SSL_write` 只**读**明文（它把密文拷进自己的 wbio），所以把
-  //     共享视图交给它，这块内存原地不动，**一个字节都不拷**（`out_uv_buf()` 不
-  //     会被走到，见 `uvcpp_tcp_client.h` 那段"TLS 连接上是例外"）；
-  //   * **明文** —— `write(uvcpp_buf*)` 走 `out_uv_buf()` **接走块的所有权**，
-  //     共享视图到那一步会被 `materialize()`（等于白共享一次、照样拷一遍），
-  //     所以明文这一支仍旧拷成一份自有块：**与改动之前逐字节相同**。
-  // 两种形态下"回调触发时这次写已完成、字节可以放掉"这一点都成立。
-  //
-  // 平台那三个静态/json 的 h2 档都是 TLS，而这次省掉的正是**每批帧一次整块
-  // malloc + memcpy**（static-h2 每响应 ~16 KB，单文件探针 ~67 KB）。
+  // 字节装在一份 `shared_ptr<std::string>` 里（`swap` 进来，零拷贝），再按
+  // **共享视图**交给写层 —— TLS 与明文两种形态下都不再拷：
+  //   * **TLS** —— `SSL_write` 只**读**明文（密文是它自己拷进 wbio 的），共享视图
+  //     原地不动，`out_uv_buf()` 那条路根本走不到；
+  //   * **明文** —— `uvcpp_tcp_client::write(uvcpp_buf*, cb)` 认 `is_shared()`
+  //     （与 `uvcpp_write::adopt_body()` 同一条规则）：共享视图走
+  //     `append_uv_buf_view()` 借出去，只有**自有块**才走 `out_uv_buf()` 接走所有权。
+  //     改前这一支是 `new uvcpp_buf(pending->data(), pending->size())` —— 每批帧
+  //     白拷一次整块（`doc/benchmark.md` §4.10 量到：static-h2 明文这条腿每请求
+  //     75 122 B，其中 251 595 B × 21 924 次 ≈ 该腿全部拷贝字节的 22.1%）。
+  // 两种形态下"回调触发时这次写已完成、字节可以放掉"这一点都成立：视图的存活由
+  // `uvcpp_write` 持有的那份引用计数履行，本函数返回、`write_buf_` 在
+  // `on_write_done()` 里被回收，都不影响那批字节。
   std::shared_ptr<std::string> pending = std::make_shared<std::string>();
   pending->swap(out_);
-  if (client_->is_tls()) {
-    write_buf_ = new uvcpp_buf();
-    write_buf_->share(pending);
-  } else {
-    write_buf_ = new uvcpp_buf(pending->data(), pending->size());
-  }
+  write_buf_ = new uvcpp_buf();
+  write_buf_->share(pending);
 
   writing_              = true;
   const std::shared_ptr<char> life = alive_token();

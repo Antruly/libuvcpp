@@ -902,7 +902,8 @@ w->append_uv_buf_view(uv_buf_init(chunk->data(), chunk->size()), chunk);   // �
 
 用 `reserve` 而不是 `resize` 是有意的：`resize` 会把新露出的那段**清零**，等于每批白清 250 KB。
 `append_uv_buf_view()` 是写层**已有的**零拷贝通道（`hold_` 持着 `shared_ptr`、析构时放掉），
-`uvcpp_h2_connection::flush()` 的 TLS 支线已经在用同一个机制（`write_buf_->share(pending)`）。
+`uvcpp_h2_connection::flush()` 的 TLS 支线已经在用同一个机制（`write_buf_->share(pending)`；
+明文那条支线在 §4.11 里并到同一条路上）。
 
 #### 确定性判据：每请求拷贝字节（三臂，含一个变异）
 
@@ -966,7 +967,114 @@ h2 明文那条腿的 `uvcpp_h2_connection::flush()` 是同一件事、同一个
 在那条腿上的对应物，只不过那条腿没有 TLS，走的是明文支线的整块拷贝
 （`write_buf_ = new uvcpp_buf(pending->data(), pending->size())`）。它**不是 TLS 专属**的，
 所以两条腿都能吃到；难点在明文支线今天用 `out_uv_buf()` **接走块的所有权**，
-共享视图到那一步会被 `materialize()`，得先把这条交付路径也改成收视图。
+共享视图到那一步会被 `materialize()`，得先把这条交付路径也改成收视图。**§4.11 就是这一刀。**
+
+### 4.11 同一个形状在 h2 明文那条腿：交付路径收视图，`flush()` 的两条分支合并（**仍是第七套装置**）
+
+#### 卡在哪一步
+
+`uvcpp_h2_connection::flush()` 把 `out_` **换**进一份 `shared_ptr<std::string>`（零拷贝），
+但交给写层的方式按连接形态二选一：TLS 支线走 `write_buf_->share(pending)`（视图），
+明文支线走 `new uvcpp_buf(pending->data(), pending->size())`（**整块拷一遍**）。
+明文这一支不能直接照抄 TLS：`uvcpp_tcp_client::write(uvcpp_buf*, cb)` 无条件
+`buf->out_uv_buf()` **接走块的所有权**，而 `out_uv_buf()` 对共享视图会先 `materialize()`
+—— `uvcpp_buf.h` 自己在那一段写着"它不是错误，是一次白拷贝"。
+
+所以顺序是：**先让交付路径认视图，再合并分支**。判据是 `uvcpp_buf::is_shared()`，
+和 `uvcpp_write::adopt_body()`（`src/req/uvcpp_write.cpp:130`）已经在用的**同一条规则**：
+
+```cpp
+// doc-snippet: fragment — 摘录 `uvcpp_tcp_client::write(uvcpp_buf*, cb)` 的交付段
+uvcpp_write* w = new uvcpp_write();
+if (buf->is_shared()) {                       // 共享视图：借出去，别 materialize
+  w->append_uv_buf_view(uv_buf_init(const_cast<char*>(buf->get_const_data()),
+                                    static_cast<unsigned int>(buf->size())),
+                        buf->shared_ref());
+} else {
+  w->set_uv_buf(buf->out_uv_buf(), true);     // 自有块：照旧接走所有权
+}
+```
+
+`get_const_data()` 就是 `return this->buf.base;`（`uvcpp_buf.cpp:378`），**不物化**；
+`const_cast` 在 C++11 下是必需的（非 const `std::string::data()` 仍返回 `const char*`）。
+顺带把这次写的两处 `get_uv_buf()` / `1` 换成 `get_uv_bufs()` / `get_uv_nbufs()`，
+于是单块与双块两条路径走同一个出口。改完 `flush()` 的这一段只剩：
+
+```cpp
+// doc-snippet: fragment — 摘录 `uvcpp_h2_connection::flush()` 的交付段，改后
+std::shared_ptr<std::string> pending = std::make_shared<std::string>();
+pending->swap(out_);
+write_buf_ = new uvcpp_buf();
+write_buf_->share(pending);                   // 两种连接形态同一条路，都不再拷
+```
+
+改前那两行是 `if (client_->is_tls()) { … share(pending); } else { new uvcpp_buf(pending->data(), pending->size()); }`。
+
+#### 确定性判据：每请求拷贝字节（被测腿 + 两条负对照）
+
+同一个 5 秒形状，`t1` = §4.10 之后那份（明文支线仍整块拷贝），`t3` = 本次改后：
+
+| 腿 | `t1` | `t3` | 判读 |
+|---|---:|---:|---|
+| **h2 明文（被测）** | 25 299 542 732 ÷ 336 969 = **75 078 B** | 19 058 017 954 ÷ 323 754 = **58 866 B** | **−16 212 B（−21.6%）** |
+| h2+TLS（负对照） | 42 807 865 644 ÷ 298 994 = 143 173 B | 41 511 910 200 ÷ 289 203 = 143 538 B | +0.3%，噪声内 |
+| h1 明文（负对照） | 958 011 694 ÷ 354 105 = 2 705.4 B | 937 842 020 ÷ 347 495 = 2 698.9 B | −0.24%，噪声内 |
+
+两条负对照都不该动，机制上说得通：h2+TLS 的 `flush()` 走的是本来就零拷贝的 TLS 支线，
+`t3` 没碰它；h1 腿**根本不进** `uvcpp_h2_connection`。
+
+#### 归因表：那一行整个消失
+
+`t1` 里靶心是它（`--top` 表第 2 名），`t3` 里 `--top 400` 都搜不到：
+
+| 臂 | 调用点 | 调用 | MB | 均 B | `≥16K` | 占该腿字节 |
+|---|---|---:|---:|---:|---:|---:|
+| `t1` | `uvcpp_h2_connection::flush()`（`0x25dd4a`） | 22 638 | 5 599.6 | 247 356 | 15 293 | **22.1%** |
+| `t3` | —— | 0 | 0.0 | — | 0 | **0.0%** |
+
+5 599.6 MB ÷ 336 969 = 16 617 B/请求，与被测腿掉下去的 16 212 B/请求只差 2.4%
+（余下那点差是同一轮里其它站点各自 +0.5~1% 的漂移 —— 两条负对照身上有同样幅度的漂移）。
+
+一处**看起来像**新出现、其实是同一行的改名：`t1` 第 4 名写作
+`std::_Function_handler<…>（0x267753）`、548 755 次 / 5 579.7 MB / 均 10 168，
+`t3` 里同一行写作 `uvcpp_h2_session::impl::cb_read_body（0x267713）`、
+529 878 次 / 5 383.9 MB / 均 10 161 —— 偏移整体挪了 `0x40`（同一个文件改了代码），
+`resolve.py` 取的"最近的前一个符号"跟着变了，实际是**同一个调用点、同一件事**。
+
+#### µs 那条腿：效应落在噪声地板上，如实记
+
+先跑交错 3 轮（h2c 与被测，h2tls 当负对照）：h2 明文 63.5 → 62.9 µs（−0.6），
+而**负对照 h2tls 87.5 → 85.9 µs（−1.6）动得比被测腿还多** —— 这一轮的读数分不开信号。
+改成 h2 明文单腿**交错 7 轮**：
+
+| 臂 | 七轮 `us_per_req` | 中位 |
+|---|---|---:|
+| `t1` | 61.2 / 62.5 / 63.4 / 70.0 / 73.0 / 68.1 / 68.7 | 68.08 |
+| `t3` | 61.5 / 62.4 / 66.4 / 68.4 / 65.8 / 69.5 / 68.8 | **66.42** |
+
+⇒ 中位数 **−1.66 µs（−2.4%）**，方向与量级都对（16 212 B/请求 ÷ §4.10 标定的
+6.7 GB/s ≈ 2.4 µs），但**这一轮证据算弱**：rps 在整轮里从 110 467 单调漂到 96 658
+（前 3 轮两臂都在 61~63，后 4 轮都在 66~73），且 7 轮里 `t3` 更快的只有 4 轮。
+**判据是字节，不是 µs** —— 这一刀的收益（约 2 µs/请求）就压在 3.5 节那台桌面机的噪声带上。
+
+#### 边界与风险
+
+- **视图存活**：借出去的那块由 `uvcpp_write` 持有的引用计数履行，`flush()` 返回、
+  `write_buf_` 在 `on_write_done()` 里被回收都不影响它 —— 与 TLS 支线今天成立的理由相同。
+- **自有块的路径逐字节不变**：`is_shared()` 为假的 `uvcpp_buf` 仍走
+  `out_uv_buf()` + `set_uv_buf(raw, true)`，一行语义没动。
+- **`out_` 的 `swap` 语义不变**：`share()` 对**空**源是 no-op（`uvcpp_buf.cpp:246`），
+  所以"没有待发帧就不写"这条边界不受影响。
+
+#### 下一刀
+
+h2 明文这条腿剩下的开销不再是"某一处整块拷贝"，而是散布的构造与几何增长：
+`t3` 的归因表里 `std::string` 内部 `0x16872f`（185 万次 / 7 423.9 MB / **39.0%**，
+`≥16K` 58 769 次）与 `0x16a024`（796 万次 / 4 380.5 MB / 23.0%）—— 前者是每批帧在
+`out_` 上按 2 倍几何增长被反复搬运的痕迹，可用 `reserve` 一次到位打掉同一形状；
+后者是 h2 数据提供者 `cb_read_body`（529 878 次 / 5 383.9 MB / 均 10 161 B / **28.3%**）
+把每个 body 拷进会话状态的那一步（`uvcpp_h2_session.cpp` 的 `stash_body`），属于阶段 D
+那条内存线的同一块代码，**两条线共用一次改动、分开写结论**。
 
 
 ---
