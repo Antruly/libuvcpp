@@ -342,8 +342,55 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_web_response& html(const std::string& s);
   /// 序列化并设置 `application/json` body。
   uvcpp_web_response& json(const uvcpp_json& j);
-  /** @brief 设置**已经序列化好**的 JSON body（跳过再次 dump）。 */
+  /** @brief 设置**已经序列化好**的 JSON body（跳过再次 dump；**会拷贝一份**）。 */
   uvcpp_web_response& json_str(const std::string& s);
+  /**
+   * @brief 接管一个**已经序列化好**的 JSON body，**不拷贝**。
+   *
+   * 只收右值：交出去的串在本次调用之后归本响应所有（内部是
+   * `uvcpp_buf::share()` 的共享手柄），传左值在编译期就过不去 —— 想拷贝
+   * 一份请用上一版。
+   */
+  uvcpp_web_response& json_str(std::string&& s);
+  /**
+   * @brief 同上，收 C 串（字面量、`c_str()`）。
+   *
+   * **不是**可有可无的便利写法：有了上面两个版本之后，
+   * `json_str("{\"a\":1}")` 这一个调用在「转成 `std::string` 再绑 `const&`」与
+   * 「转成 `std::string` 再绑 `&&`」之间**没有更优者** —— 是编译期歧义。本重载
+   * 让字面量走精确匹配，歧义随之消失。理由与 `body(const char*, size_t, const
+   * char*)` 那一对同源（见上）。
+   */
+  uvcpp_web_response& json_str(const char* s);
+
+  /**
+   * @brief 接管一个串的字节当 body，**不拷贝**（`ct` 空 = 不改 Content-Type）。
+   *
+   * 与 `body(const std::string&, ...)` 只差字节从哪来：那个是
+   * `uvcpp_buf::clone_data()` —— 一次 `malloc(len)` 加一次 `memcpy(len)`，
+   * 长度多少付多少；本版本把这个串的缓冲**接管**过来（一个
+   * `shared_ptr<const std::string>` 句柄加几十字节的控制块），8.4 KB 的 JSON
+   * 响应因此省掉一次 8.4 KB 的 `memcpy` 和一次同尺寸的 `malloc`。
+   *
+   * **只收右值**：交出去的串之后不再属于调用方。左值传不进来（编译期错误），
+   * 因为"共享之后谁都不许写"这条纪律的载体正是句柄上的那个 `const`
+   * （见 `uvcpp_buf::share()`）。
+   */
+  uvcpp_web_response& body_take(std::string&& s,
+                                const std::string& ct = std::string());
+
+  /**
+   * @brief 设这份 body 的**可缓存身份** —— 压缩变体缓存的键。
+   *
+   * 契约只有一处（谁该填、填哪些字段、漏一个会怎样）：`uvcpp_http_response`
+   * 的 `cache_tag` 成员。本函数把它接到链式 API 上；空串（默认）＝不参与。
+   *
+   * 形参走**值传**而不是 `const&` + `&&` 一对：那一对会让
+   * `cache_tag("literal")` 落进上面 `json_str` 的同一个歧义里，而这里的参数
+   * 只有几十字节，值传 + `move` 与重载对的开销逐字相同。
+   */
+  uvcpp_web_response& cache_tag(std::string tag);
+
   /// 设置 `application/octet-stream`（或指定类型）的二进制 body。
   uvcpp_web_response& binary(const char* data, size_t len,
                              const std::string& ct =

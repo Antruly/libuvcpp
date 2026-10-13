@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.30-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.31-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -691,7 +691,7 @@
   `uvcpp_web_app::send_response()` 包办 —— 那是整个框架里唯一同时看得见 `write_stream()`
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
-  `trailers()`（`src/webapp/uvcpp_web_response.h:465-469`），并在 `send_response()` 里加了
+  `trailers()`（`src/webapp/uvcpp_web_response.h:512-516`），并在 `send_response()` 里加了
   三段那条分支（`src/webapp/uvcpp_web_app.cpp:2660-2709`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
@@ -1606,6 +1606,32 @@
   上，属架构改动，本轮不动）；`0x16a024` 那 25.9% 的站点落在 libstdc++ 内部，
   要继续归因得让量具**多记一层调用点**（`return_address(1)`），而不是接着猜。
 
+- **`uvcpp_web_response::body_take()` / `json_str(std::string&&)`：接管的字节不再
+  拷一遍**（`1.6.31-dev`）—— 已有的一族 body 入口全是"拷进来"
+  （`body()` → `uvcpp_buf::clone_data()`），最典型的调用点是
+  `resp.json_str(build_json(n, m))`：每请求现造的一份 8.4 KB JSON 交进响应时又整块
+  拷一次。新入口收**右值**并把那个串的缓冲直接**接管**过来
+  （`uvcpp_buf::share()` 的共享手柄，`std::make_shared<const std::string>(std::move(s))`
+  只移动、不搬字节）；左值传不进来（编译期错误）—— "共享之后谁都不许写"这条纪律的
+  载体是句柄上那个 `const`，不是文档里的一句话。同一个提交补了 `json_str(const char*)`
+  （有了 `const&` + `&&` 这一对之后，`json_str("literal")` 在
+  「转成 `std::string` 再绑 `const&`」与「再绑 `&&`」之间**没有更优者**，是编译期歧义；
+  精确匹配的重载把这个坑填掉，与 `body(const char*, size_t, const char*)` 那一对同源）
+  和链式 `cache_tag(std::string)`（契约仍在 `uvcpp_http_response::cache_tag` 一处，
+  本函数只把它接到 webapp 的链式 API 上）。
+  **判据（确定性，外部量具）**：同一个二进制里只差"这一句怎么交"，
+  20000 次响应 —— `memspy`（`LD_PRELOAD` 的 `memcpy` 拦截，按调用点精确记账）
+  **拷贝调用 61 400 → 41 400、字节 335 934 791 → 167 994 791**，正好
+  每响应少一次 `memcpy(8397)`；`libmcount`（`malloc` 拦截）**调用 21 308 → 41 305、
+  字节 +959 128**，即每响应多一次 **48 B** 的控制块分配。**计划里"省一次 malloc"
+  那半句是错的** —— 那条路上 `uvcpp_alloc_bytes()` 走企业内存池（
+  `UVCPP_ENABLE_MEMORY_POOL`），稳态下池子把 8.4 KB 那块吃掉了，本来就不进
+  `malloc`，所以这一刀换到的是"**少搬 8 397 B 字节、多花 48 B 记账**"，不是
+  "少两笔分配"。时序旁证（同进程交错、9 轮取中位）：这一步 523.13 → 294.19 ns
+  （Δ=229 ns）。回归护栏是 `tests/functional/web_app_response_func.cpp` 的
+  `test_body_take_zero_copy()`：接管之后 `body_data()` 必须是**同一块内存**，
+  且整条序列化路径上 `uvcpp_buf::share_discard_count()` 必须为 **0**
+  （非 0 就是"先共享又要写"的一次白拷贝）；把实现改回 `clone_data()` 这条断言立刻变红。
 
 ### 配置、打包与 CI
 

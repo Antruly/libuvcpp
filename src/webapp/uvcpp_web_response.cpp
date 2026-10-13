@@ -475,6 +475,39 @@ uvcpp_web_response& uvcpp_web_response::json_str(const std::string& s) {
   return body(s, "application/json; charset=utf-8");
 }
 
+uvcpp_web_response& uvcpp_web_response::json_str(std::string&& s) {
+  return body_take(std::move(s), "application/json; charset=utf-8");
+}
+
+uvcpp_web_response& uvcpp_web_response::json_str(const char* s) {
+  if (s == nullptr) return json_str(std::string());
+  return body_take(std::string(s), "application/json; charset=utf-8");
+}
+
+uvcpp_web_response& uvcpp_web_response::body_take(std::string&& s,
+                                                  const std::string& ct) {
+  // `make_shared<const std::string>(std::move(s))` 是**移动构造**：新分配的只有
+  // 控制块（几十字节），几千字节的字节留在原来那块缓冲上，一个都没拷。对照
+  // `body()` 那条路（`clone_data()`）：一次同尺寸 `malloc` + 一次同尺寸 `memcpy`。
+  //
+  // 那个 `const` 不是形式主义 —— `share()` 收的正是
+  // `shared_ptr<const std::string>`，而它就是把"共享之后谁都不许写"这条纪律
+  // 钉在类型上的那道防线（见 `uvcpp_buf::share()` 的长注释）。
+  //
+  // 空串交给 `share()` 的"空共享与 `clear()` 之后的状态一致"那一支，于是
+  // `body_take(std::move(empty))` 与 `body("")` 的结果逐字相同。
+  resp_.body.share(std::make_shared<const std::string>(std::move(s)));
+  if (!ct.empty()) {
+    set_content_type(ct);
+  }
+  return *this;
+}
+
+uvcpp_web_response& uvcpp_web_response::cache_tag(std::string tag) {
+  resp_.cache_tag = std::move(tag);
+  return *this;
+}
+
 uvcpp_web_response& uvcpp_web_response::binary(const char* data, size_t len,
                                                const std::string& ct) {
   return body(data, len, ct);

@@ -444,6 +444,51 @@ void test_body_move_zero_copy() {
 }
 
 // =========================================================================
+// 10b. body_take / json_str(右值)：字节接管，不拷贝也不物化
+// =========================================================================
+void test_body_take_zero_copy() {
+  const std::string payload(4096, 'x');
+
+  // 接管之后 body 指的就是那个串自己的缓冲（没有第二份拷贝），而且**整条序列化
+  // 路径都没有把它物化** —— `share_discard_count()` 记的正是"先共享、又要写"
+  // 那一次白拷贝，这里必须是 0。共享句柄上那个 `const` 就是这道防线
+  // （见 `uvcpp_buf::share()`），本用例是它的回归护栏。
+  uvcpp_buf::reset_share_discard_count();
+  std::string owned(payload);
+  const char* base = owned.data();
+  uvcpp_web_response r;
+  r.body_take(std::move(owned), "application/octet-stream");
+  check(r.body_size() == payload.size(), "body_take 长度正确");
+  check(r.body_data() == base, "body_take 是接管（同一块缓冲，不是复制）");
+  check(has(wire(r), "content-length: 4096\r\n"), "body_take 后 CL 正确");
+  check(wire_body(wire(r)) == payload, "body_take 的字节逐字节相同");
+  check(uvcpp_buf::share_discard_count() == 0,
+        "共享 body 一路序列化下来没有被物化（非 0 就是一次白拷贝）");
+
+  // 空右值与 body("") 同结果：空体、CL 为 0、Content-Type 照设。
+  uvcpp_web_response e;
+  e.json_str(std::string());
+  check(has(wire(e), "content-length: 0\r\n"), "空右值的 CL 是 0");
+  check(has(wire(e), "application/json"), "空右值也设 Content-Type");
+
+  // 左值 / 右值 / C 串三条重载给出**逐字节相同**的报文。
+  const std::string doc = "{\"a\":1,\"b\":[2,3]}";
+  uvcpp_web_response lv, rv, cs;
+  lv.json_str(doc);
+  rv.json_str(std::string(doc));
+  cs.json_str("{\"a\":1,\"b\":[2,3]}");
+  check(wire(lv) == wire(rv), "json_str 左值与右值的报文逐字节相同");
+  check(wire(lv) == wire(cs), "json_str 左值与 C 串重载的报文逐字节相同");
+
+  // cache_tag 落到 `uvcpp_http_response` 那个字段上（契约只有那一处）。
+  uvcpp_web_response t;
+  t.cache_tag("json\x1f50\x1f6").json_str(std::string(doc));
+  check(t.raw().cache_tag == "json\x1f50\x1f6", "cache_tag 写到了 resp_ 上");
+  uvcpp_web_response t2;
+  check(t2.raw().cache_tag.empty(), "默认 cache_tag 是空串（不参与变体缓存）");
+}
+
+// =========================================================================
 // 11. on_sent 回调
 // =========================================================================
 void test_on_sent() {
@@ -554,6 +599,7 @@ int main() {
   test_chunked_not_overridden();
   test_sync_meta_idempotent();
   test_body_move_zero_copy();
+  test_body_take_zero_copy();
   test_on_sent();
   test_misc();
 
