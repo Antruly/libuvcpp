@@ -177,15 +177,32 @@ int uvcpp_h2_connection::flush() {
     return 0;
   }
 
-  // 这一批帧从连接缓冲里**取走**（`swap` 是 O(1)）。`uvcpp_buf(const char*, size_t)`
-  // 是**拷贝**构造，所以本地这份 `pending` 出了本函数就可以放掉。
+  // 这一批帧从连接缓冲里**取走**（`swap` 是 O(1)）。
   //
   // **不留在 `out_` 里**是刻意的：留下的那段时间 `out_` 装的是"已经 serialize、
   // 只等上线"的帧，任何一次重入 `flush()` 都会把它们再 `drain` 一遍、再发一遍。
   // 取走之后这个类别**结构上**不存在 —— 不必去论证"回调会不会同步跑"。
-  std::string pending;
-  pending.swap(out_);
-  write_buf_ = new uvcpp_buf(pending.data(), pending.size());
+  //
+  // 字节装在一份 `shared_ptr<std::string>` 里（`swap` 进来，零拷贝），于是"交给
+  // 写层"这一步可以按连接形态二选一：
+  //   * **TLS** —— `SSL_write` 只**读**明文（它把密文拷进自己的 wbio），所以把
+  //     共享视图交给它，这块内存原地不动，**一个字节都不拷**（`out_uv_buf()` 不
+  //     会被走到，见 `uvcpp_tcp_client.h` 那段"TLS 连接上是例外"）；
+  //   * **明文** —— `write(uvcpp_buf*)` 走 `out_uv_buf()` **接走块的所有权**，
+  //     共享视图到那一步会被 `materialize()`（等于白共享一次、照样拷一遍），
+  //     所以明文这一支仍旧拷成一份自有块：**与改动之前逐字节相同**。
+  // 两种形态下"回调触发时这次写已完成、字节可以放掉"这一点都成立。
+  //
+  // 平台那三个静态/json 的 h2 档都是 TLS，而这次省掉的正是**每批帧一次整块
+  // malloc + memcpy**（static-h2 每响应 ~16 KB，单文件探针 ~67 KB）。
+  std::shared_ptr<std::string> pending = std::make_shared<std::string>();
+  pending->swap(out_);
+  if (client_->is_tls()) {
+    write_buf_ = new uvcpp_buf();
+    write_buf_->share(pending);
+  } else {
+    write_buf_ = new uvcpp_buf(pending->data(), pending->size());
+  }
 
   writing_              = true;
   const std::shared_ptr<char> life = alive_token();
@@ -206,8 +223,10 @@ int uvcpp_h2_connection::flush() {
       // 的 `done` 已经带着 0（成功）躺在会话的 `completed` 里了 —— 线上一个
       // 字节都没有，发起方却收到"发出去了"。放回**前面**（`pending` 在前、
       // 这段时间里 `out_` 新攒的帧在后），字节顺序天然保住。
-      pending.append(out_);
-      out_.swap(pending);
+      // 字节没丢：`pending` 那份 `shared_ptr` 还活着（TLS 那支只是把它交给了
+      // `write_buf_` 的共享视图，引用计数仍在），所以还能整批搬回来。
+      pending->append(out_);
+      out_.swap(*pending);
       return wr;
     }
     // 硬失败：这条连接没救了，`pending` 里这些帧这辈子都上不了线，就地丢掉
@@ -229,7 +248,7 @@ int uvcpp_h2_connection::flush() {
 
   // 受理了才记账。`out_` 此刻装的是**这段时间里新攒的**帧（通常为空），不动它。
   // 上面那条同步失败的路上连接已经 `closed_`，字节一个都没出网，不记。
-  if (!closed_) bytes_out_ += pending.size();
+  if (!closed_) bytes_out_ += pending->size();
   return 0;
 }
 
