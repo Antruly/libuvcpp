@@ -25,7 +25,9 @@
  *                                  帧先攒着）—— 与 4 是两条不同的路径
  *   6. `overflow_rejected`          `set_max_pipelined_requests(2)` + 3 条 → 第三条
  *                                   503 且带 `Connection: close`，前面的照常发完
- *   7. `disconnect_drains_inflight` 流水线两条后立刻断开，在途计数必须归零
+ *   7. `close_last_keeps_earlier_responses` 末条 `Connection: close` **只影响它
+ *                                   自己** —— 三条各回各的，一、二条仍 keep-alive
+ *   8. `disconnect_drains_inflight` 流水线两条后立刻断开，在途计数必须归零
  *
  * 刻意**不覆盖**：HTTP/2、请求侧的读背压（`pause()` 在流水线下的语义）、
  * `Connection: close` 之后同缓冲里剩余请求的处理（会被协议层直接丢弃，见 5）。
@@ -560,7 +562,97 @@ void test_overflow_rejected() {
 }
 
 // =========================================================================
-// 6. 流水线两条后立刻断开 → 在途计数归零
+// 7. 末条 `Connection: close` 只影响它自己 —— 前几条的响应一条都不许少
+// =========================================================================
+
+/**
+ * 一次 write 三条请求，**只有末条**写 `Connection: close`。
+ *
+ * 判据有两面，缺一面就测不出这个缺陷：
+ *
+ *   - **三条响应一条不少。** 三条都走异步中间件，且**第一条最快**（120 ms，
+ *     后两条 500 ms）。这个快慢差是本用例的关键：第一条的响应落线时，后两条
+ *     的处理函数**还没跑**（框架的按序队列里没有它们，HTTP 层的写队列也只剩
+ *     这一块）。修之前 HTTP 层在**序列化那一刻**现问
+ *     `parser->should_keep_alive()`，而那是**连接级**的、llhttp 早已前进到末条
+ *     的状态 —— 末条的 `close` 被当成"整条连接到此为止"，于是服务器在第一条
+ *     响应之后关连接；后两条的响应随后备好时，连接已经注销，只能被丢掉（服务端
+ *     那时打「连接已断开，响应被丢弃」，客户端收到 1 条 + FIN）。
+ *
+ *     三条**一样快**的话这个窗口不存在：三条响应几乎同时备好，会挤进同一个写
+ *     批次，关闭要等队列排空 —— 缺陷就藏起来了（实测过：等速的写法在修前修后
+ *     都回 3 条）。
+ *   - **末条仍然关连接。** 修法是把**每条请求自己**的 keep-alive 结论钉成显式
+ *     头，所以一、二条必须带 `keep-alive`、第三条必须带 `close`，且之后对端
+ *     真的看到 FIN。少了这一面，一个"永远回 keep-alive"的实现也能过上一条。
+ */
+void test_close_last_keeps_earlier_responses() {
+  worker_pool pool;
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.use([&pool](uvcpp_web_request& req, uvcpp_web_response& resp,
+                  uvcpp_web_next next) {
+    (void)resp;
+    const std::string p = req.path();
+    int ms = 0;
+    if (p == "/early") {
+      ms = 120;
+    } else if (p == "/late") {
+      ms = 500;
+    }
+    if (ms == 0) {
+      next();
+      return;
+    }
+    pool.spawn([next, ms]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+      next();
+    });
+  });
+  add_fast_route(app, "/early", "ONE");
+  add_fast_route(app, "/late", "TWO");
+
+  check(app.start_background() == 0, "close_last: 服务启动");
+  const int port = app.bound_port();
+
+  staged_conn c;
+  if (c.open(port)) {
+    check(c.write(get_req("/early") + get_req("/late") +
+                  get_req("/late", "Connection: close\r\n")),
+          "close_last: 一次 write 三条，只有末条 close");
+    check(c.pump_until([&]() { return c.peer_closed(); }, 6000),
+          "close_last: 末条 close 之后连接被关掉");
+
+    const std::vector<resp_info> rs = parse_responses(c.rx());
+    check(rs.size() == 3, "close_last: 三条响应一条都不少（实测 " +
+                              std::to_string(rs.size()) + "）");
+    if (rs.size() == 3) {
+      check(rs[0].body == "ONE" && rs[1].body == "TWO" && rs[2].body == "TWO",
+            "close_last: 三条按请求顺序各是自己的响应（实测 '" + rs[0].body +
+                "'/'" + rs[1].body + "'/'" + rs[2].body + "'）");
+      check(rs[0].status == 200 && rs[1].status == 200 && rs[2].status == 200,
+            "close_last: 三条都是 200（实测 " +
+                std::to_string(rs[0].status) + "/" +
+                std::to_string(rs[1].status) + "/" +
+                std::to_string(rs[2].status) + "）");
+      check(to_lower(rs[0].head).find("connection: keep-alive") !=
+                std::string::npos,
+            "close_last: 第一条是 keep-alive（它自己没说 close）");
+      check(to_lower(rs[1].head).find("connection: keep-alive") !=
+                std::string::npos,
+            "close_last: 第二条是 keep-alive");
+      check(to_lower(rs[2].head).find("connection: close") !=
+                std::string::npos,
+            "close_last: 末条是 close");
+    }
+  }
+
+  app.stop();
+  app.join();
+}
+
+// =========================================================================
+// 8. 流水线两条后立刻断开 → 在途计数归零
 // =========================================================================
 void test_disconnect_drains_inflight() {
   worker_pool pool;
@@ -605,6 +697,8 @@ int main(int argc, char** argv) {
     {"chunked_stream_not_split", test_chunked_stream_not_split},
     {"queued_chunked_response", test_queued_chunked_response},
     {"overflow_rejected", test_overflow_rejected},
+    {"close_last_keeps_earlier_responses",
+     test_close_last_keeps_earlier_responses},
     {"disconnect_drains_inflight", test_disconnect_drains_inflight},
   };
 

@@ -2664,6 +2664,40 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
 
   uvcpp_web_response& r = ctx.response();
 
+  // -------------------------------------------------------------------
+  // h1：把**这一条请求自己**的 keep-alive 结论钉成显式头
+  // -------------------------------------------------------------------
+  //
+  // 不留给 HTTP 层在序列化时现算。那边（`uvcpp_http_server.cpp:1632` 的
+  // `ctx.parser->should_keep_alive()`）用的是**连接级**的解析器状态，而 llhttp
+  // 的 flags 是「最近一条解析完的报文」的：一个 `execute()` 会把流水线里整批
+  // N 条都解完，于是第 1 条响应的序列化（异步响应总要等到池回来）读到的已经
+  // 是**第 N 条**的结论。末条写 `Connection: close` 时，服务器就在第 1 条响应
+  // 之后关连接、第 2..N 条响应全丢（服务端日志「连接 N 已断开，响应被丢弃」，
+  // 客户端只收到 1 条 + FIN）。同步处理函数侥幸躲开：它们的响应在解析器前进
+  // 之前就序列化完了 —— 所以这条缺陷只在"流水线 + 异步响应"下现形。
+  //
+  // 判据取**每请求**的那份副本：`on_http_request()` 里 `take_from()` 把头部整表
+  // 搬成了请求自己的，所以 `is_keep_alive()` 读的是**这一条**请求的
+  // `connection`，与解析器走到哪儿无关；规则本身与 llhttp 逐字一致（1.1 默认
+  // 保持、1.0 默认关闭，见 `uvcpp_web_request.cpp:344-366`）。同一批里每条各判
+  // 各的，正是 RFC 9112 §9.6 说的「每条报文自己的连接选项」。
+  //
+  // **放在这里、而不是派发时**：处理函数跑之前响应表必须还是空的（那条"派发后
+  // body 还空着"的既有约定，见 `web_app_app_func.cpp` 的
+  // `response_header_capacity_reused` 正对照），而这里是三条出口（整包 / 尾随头
+  // / 流式）唯一的共同上游 —— 头必须在这三处**之前**进表：`r.raw()` 一被复制
+  // （尾随头那条）或 `to_string()` 一被调用（HTTP 层那条），表就定稿了。
+  //
+  // 只对 h1（`stream_id == 0`）做：h2/h3 上 `connection` 是**禁用头**
+  // （RFC 9113 §8.2.2），那边也没有「连接级 keep-alive」这回事。处理函数自己设
+  // 过 `connection` 的，优先级仍在它手上 —— HTTP 层与 `begin_stream` 都是这么
+  // 认的（`has_header` 那一句就是给它让路）。
+  if (r.stream_id() == 0 && !r.has_header("connection")) {
+    r.set_header("connection",
+                 ctx.request().is_keep_alive() ? "keep-alive" : "close");
+  }
+
   // 先把 metadata 定下来（`sync_meta()` 是幂等的，发送前本来就一定要调一次）。
   // 放在 `info` 构造**之前**，是为了让下面那条"连接已断"的提前返回也拿到
   // 同一个基准：那条路上 `raw()` 不会被调用（见 `:1602` 分支）。

@@ -736,7 +736,12 @@ CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 →
 ### 协议行为
 
 - **keep-alive**：HTTP/1.1 默认开、1.0 默认关；handler 显式设了 `connection`
-  头就听 handler 的（`src/web/uvcpp_http_server.cpp:1620-1634`）。
+  头就听 handler 的（`src/web/uvcpp_http_server.cpp:1620-1634`）。webapp 这一层
+  还会在**发送前**把「**这一条**请求自己」的结论钉成显式头
+  （`src/webapp/uvcpp_web_app.cpp:2696-2699`）——HTTP 层那边现问的是**连接级**的
+  解析器状态，而 llhttp 的 flags 属于「最近一条解析完的报文」：流水线里末条写
+  `Connection: close` 时，第 1 条响应（异步的那条）序列化时读到的已经是末条的
+  结论，服务器会在第 1 条之后关连接、丢掉第 2..N 条（`1.6.46-dev` 修的）。
 - **`Date` 每个响应都发，且按秒缓存**：四个出报文的口子各补一次 ——
   `send_response`（`src/web/uvcpp_http_server.cpp:1605-1605`）、h1 流式
   `begin_stream`（`src/web/uvcpp_http_server.cpp:1763-1763`）、h2 流式
@@ -784,7 +789,7 @@ CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 →
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:1019-1030`、`src/web/uvcpp_http_server.cpp:1124-1135`、`src/web/uvcpp_http_server.cpp:2818-2827`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:1499-1504`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:3088-3094`）。
+（`src/webapp/uvcpp_web_app.cpp:3122-3128`）。
 
 ### 静默失败清单
 

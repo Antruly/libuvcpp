@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.45-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.46-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -693,7 +693,7 @@
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
   `trailers()`（`src/webapp/uvcpp_web_response.h:512-516`），并在 `send_response()` 里加了
-  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2718-2767`）。
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2752-2801`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
   "另一条拿到同一份字节的路"。判据与量法见下一条
@@ -913,6 +913,35 @@
   证明不了实现没读它。ASan 全量 68/68 连跑 4 轮 0 报。
 
 ### HTTP 与 WebSocket 语义
+
+- **流水线里末条的 `Connection: close` 会把前面几条的响应一起带走**（`1.6.46-dev`）。
+  HTTP/1.1 流水线（一次读缓冲里多条请求）下，**异步响应**的第 1 条在序列化时问的是
+  `uvcpp_http_server` 里那句 `ctx.parser->should_keep_alive()`
+  （`src/web/uvcpp_http_server.cpp:1632-1632`），而 llhttp 的 flags 是**连接级**的、
+  属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
+  读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
+  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2689-2689` 打
+  「连接 N 已断开，响应被丢弃」，客户端收到 1 条 + FIN）。**同步处理函数侥幸躲开**：
+  它们的响应在解析器前进之前就序列化完了 —— 所以这条缺陷只在「流水线 + 异步响应」
+  同时成立的形状里现形，而静态腿（响应要等池）正是这个形状。
+
+  **改法**：webapp 在**发送前**把「**这一条**请求自己」的结论钉成显式 `connection`
+  头（`src/webapp/uvcpp_web_app.cpp:2696-2699`）。判据取每请求的那份副本 ——
+  `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
+  读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
+  （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。
+  HTTP 层本来就认显式头（`:1624-1628`）、`begin_stream` 也认（`:1745-1746`），所以
+  **整包 / 尾随头 / 流式**三条出口一并覆盖，且 `handler` 自己设过 `connection` 的
+  仍然说了算。放在「发送前」而不是「派发时」：处理函数跑之前响应表必须还是空的
+  （那条既有约定由 `web_app_app_func.cpp` 的 `response_header_capacity_reused` 正对照
+  钉着），而 `send_response(ctx)` 是三条出口唯一的共同上游。
+
+  **回归用例** `web_app_pipeline_func.cpp` 的 `close_last_keeps_earlier_responses`：
+  一次 `write` 三条流水线请求，末条带 `close`，且**第一条最快**（120 ms vs 后两条
+  500 ms）—— 这个快慢差是承重的：后两条的响应必须在第一条**落线之后**才备好，
+  否则三条会挤进同一个写批次、关闭要等队列排空，缺陷就藏起来了（实测过：等速写法
+  修前修后都回 3 条）。修前实测**只回 1 条**，修后三条齐全、状态码与各自
+  `connection` 头都对得上，末条之后对端仍能收到 FIN。
 
 - **`http_compress::decompress()` 解不开任何超过 4 KiB 的东西，而且客户端那条路上是静默的**
   （`1.6.32-dev`）。`decompress()` 里两个 `inflate` 循环写的是 `inflate(&strm, Z_FINISH)`
