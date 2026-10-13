@@ -157,6 +157,36 @@ void uvcpp_ws_connection::on_tcp_data(uvcpp_buf* buf) {
   // **不会自己 reset** —— 按设计由调用方负责。连接层原先既没 reset 也没循环，
   // 所以一个连接只处理得了第一帧，之后 `execute()` 永远在第一行进
   // `case COMPLETE: return 0`。这里补上"喂 → 看状态 → reset → 继续喂"。
+  //
+  // **整批帧处理完才泵一次写**（`in_read_dispatch_`）。一次读回调里常常躺着
+  // 十几帧（对端是批发的），逐帧 `pump_send` 会让**第一帧**立刻占住在途位、
+  // 单独成段，后续各帧才凑成第二批 —— 而且**只有本批合并**，跨批不合并。
+  // 合成的效果是一次读一段，段数正好是 `echo-ws-pipeline` 那一档量的东西
+  // （"Write coalescing and syscall reduction on the send path"），实测见
+  // `pump_send` 上面那段注释。
+  //
+  // 守卫是**析构**里收尾，不是为了好看：下面 `PARSE_ERROR` 那条路要
+  // `return`，手写清除会漏。
+  //
+  // **`protocol_failed_` 时不跳过泵**：`protocol_error()` 正是先置这个标志、
+  // 再 `send_close()` 把 Close 帧排进队列的（`uvcpp_ws_connection.cpp`
+  // `protocol_error`），跳过就等于把 Close 帧永远留在队列里 —— 对端收不到
+  // 状态码，本端的 `tcp_->close()` 回调也永远不会被触发。只有 `retired_`
+  // （会话已终结/回收）才真的不该再碰 `tcp_`。
+  struct DispatchGuard {
+    uvcpp_ws_connection* self;
+    ~DispatchGuard() {
+      self->in_read_dispatch_ = false;
+      if (!self->retired_) self->pump_send();
+    }
+  };
+  // **置位必须在守卫构造之前**：这一句漏掉的话 `send_frame` 里的 `if
+  // (!in_read_dispatch_)` 恒为真，整个延后就是死代码 —— 而它不报错、不崩，
+  // 只是段数停在"首帧单独一段 + 其余合并"（实测 0.125 段/帧，而不是应有的
+  // 0.0625）。`close_delivered_on_protocol_error` 那条用例盯着守卫这一侧。
+  in_read_dispatch_ = true;
+  DispatchGuard guard{this};
+
   while (n > 0 && !protocol_failed_) {
     size_t used = parser_.execute(p, n);
     ws_parser_state st = parser_.get_state();
@@ -424,56 +454,116 @@ int uvcpp_ws_connection::send_frame(const uvcpp_ws_frame& frame, std::function<v
   ps.cb = std::move(cb);
   send_q_.push_back(std::move(ps));
 
-  pump_send();
+  // 正在一次读回调里逐帧派发（见 `on_tcp_data`）：先攒着，等整批派发完由
+  // 守卫统一泵一次。其余场合（定时器、用户直接调用）立即泵，一个字都不变。
+  if (!in_read_dispatch_) pump_send();
   return 0;
 }
+
+namespace {
+/// 单次 `uv_write` 最多合并多少字节。
+///
+/// 合并的收益**不在省系统调用**，而在段的大小：一批 16 个 7 字节的回声帧逐帧
+/// 写出去，就是一串十几字节的段，对端每收一个都要回一个 ACK。veth + 8 连接
+/// ×16 深度这一格上量得出来的对照（`server_outsegs` 直接读
+/// `/proc/net/snmp`，帧数取客户端的完成帧；三组各跑两轮取区间）：
+///
+/// | 发送形状 | 段/帧 | 服务端 µs/帧 | 帧/秒 |
+/// |---|---|---|---|
+/// | 逐帧 `uv_write` + NODELAY | 1.0000 | 3.8 ~ 4.5 | 524k ~ 859k |
+/// | 逐帧 `uv_write` + Nagle | 0.62 ~ 0.81 | 3.0 ~ 3.8 | 817k ~ 1,240k |
+/// | **本批合并 + 派发延后（本次）** | **0.0625** | **0.70 ~ 0.88** | **4,111k ~ 5,215k** |
+///
+/// 中间那一行是 v1.6.1 的行为：段数是**内核替我们**压下来的（Nagle 攒到 ACK
+/// 才发），代价是延迟不可控，而且只压得到 0.7 左右；`TCP_NODELAY` 一开就回到
+/// 1.0000，段数立刻由本端的调用形状决定。所以合并不能指望内核，要在这里做。
+/// 底下一行是"一次读回调发一段"：16 帧进来是一段 112 字节出去，段数正好是
+/// 1/16 —— 比 Nagle 还低一个数量级，且没有内核那点延迟代价。
+///
+/// 上限只是"这一批装多少"，装不下的帧留在队列里、写完这批接着泵，所以帧序与
+/// 逐个写完全一致。64 KiB 取在 `UVCPP_TRY_WRITE_MIN_BYTES`(32 KiB) 之上，
+/// 大帧批量还能顺带吃到 `uv_try_write` 那条快路径；小帧批量（ws 的常见形状）
+/// 远够不到这个上限。
+constexpr size_t kSendBatchMaxBytes = 64 * 1024;
+}  // namespace
 
 void uvcpp_ws_connection::pump_send() {
   if (write_in_flight_ || send_q_.empty() || !tcp_) return;
 
-  write_in_flight_ = true;
-
+  // 把队列里装得下的帧拼成一份连续字节，一次交出去。
+  //
   // tcp_->write() 会先把数据**复制**进自己的 uvcpp_buf（uvcpp_buf.cpp 的
   // `uvcpp_buf(const char*, size_t)` 是 memcpy，且 out_uv_buf() 转移所有权），
-  // 所以队首的字节传进去之后就不必再管它 —— 队列本身也因此在写出前可以随便改。
-  const std::string& b = send_q_.front().bytes;
+  // 所以 `send_batch_` 在 write() 返回之后就可以随便重用 —— 队列同时也可以改。
+  send_batch_.clear();
+  size_t n = 0;
+  for (const pending_send& ps : send_q_) {
+    // 至少收一帧：单帧就超过上限时也得发得出去，否则队列永远卡住。
+    if (n > 0 && send_batch_.size() + ps.bytes.size() > kSendBatchMaxBytes) break;
+    send_batch_ += ps.bytes;
+    ++n;
+  }
+  if (n == 0) return;                // 不可能：队首在空缓冲上不会被截断
+
+  in_flight_frames_ = n;
+  write_in_flight_ = true;
+
   // 捕获存活令牌（C++11 没有 init-capture，weak_ptr 具名捕获即可）。这个闭包
   // 由 TCP 客户端持有，可能**活得比会话久** —— 令牌失效就什么都不碰。
   std::weak_ptr<char> tok = alive_token_;
-  int rc = tcp_->write(b.data(), b.size(), [this, tok](int st) {
+  int rc = tcp_->write(send_batch_.data(), send_batch_.size(), [this, tok](int st) {
     if (tok.expired()) return;   // 会话已经终结/回收，别碰任何成员
     on_send_complete(st);
   });
 
   if (rc != 0) {
     // 没提交成功。`uvcpp_tcp_client::write()` 在返回非 0 时**没有保存回调**，
-    // 完成回调不会来，所以队首必须在这里自己结算，否则队列永远卡住。
+    // 完成回调不会来，所以这一批必须在这里自己结算，否则队列永远卡住。
     // UV_EALREADY 意味着有别的代码在直接写这条连接；本层是升级后唯一的写方，
     // 走到这里说明假设被打破了 —— 如实报告错误，绝不静默丢帧。
-    write_in_flight_ = false;
-    pending_send ps = std::move(send_q_.front());
-    send_q_.pop_front();
+    //
+    // 结算整批（而不是只结算队首）：交出去的是 n 帧的字节，n 帧一起失败。
+    // 标志按"结算期间仍算在途"处理，与完成回调那条路同一套次序（下面
+    // on_send_complete 有说明）。
     send_error_ = rc;
-    if (ps.cb) ps.cb(rc);
+    size_t settled = in_flight_frames_;
+    in_flight_frames_ = 0;
+    settle_frames(settled, rc);
+    write_in_flight_ = false;
     fail_pending_sends(rc);
   }
 }
 
 void uvcpp_ws_connection::on_send_complete(int status) {
-  write_in_flight_ = false;
-  if (send_q_.empty()) return;       // 不该发生（队首只有写出后才出队）
-
-  pending_send ps = std::move(send_q_.front());
-  send_q_.pop_front();
+  if (!write_in_flight_) return;     // 不该发生（没有在途写就不会有完成回调）
 
   if (status != 0) send_error_ = status;
-  // 回调可能重入：send_close 的回调会调 tcp_->close()。所以先出队再回调，
-  // 并且回调之后才继续 pump —— 连接已经关了的话 pump 里的 write 会返回
+
+  size_t n = in_flight_frames_;
+  in_flight_frames_ = 0;
+
+  // **结算期间 `write_in_flight_` 必须仍然是 true**：回调可能重入
+  // `send_frame()`（`send_close` 的回调会调 `tcp_->close()`，别的调用方也会
+  // 接着发下一帧），而 `send_frame` 末尾就是 `pump_send()`。标志若先清了，
+  // 新入队的帧会被这里紧跟着的一次 `uv_write` **抢走**——同一批在途写有两个
+  // 完成回调，队列被结算两次。
+  //
+  // 先出队再回调同理：回调里看到的是"这批已经发完了"的状态，而不是"自己还在
+  // 队列里"。回调之后才继续泵 —— 连接已经关了的话 pump 里的 write 会返回
   // UV_ENOTCONN，正好走上面的失败结算。
-  if (ps.cb) ps.cb(status);
+  settle_frames(n, status);
+  write_in_flight_ = false;
 
   if (send_error_ != 0) { fail_pending_sends(send_error_); return; }
   pump_send();
+}
+
+void uvcpp_ws_connection::settle_frames(size_t count, int status) {
+  for (size_t i = 0; i < count && !send_q_.empty(); ++i) {
+    pending_send ps = std::move(send_q_.front());
+    send_q_.pop_front();
+    if (ps.cb) ps.cb(status);
+  }
 }
 
 void uvcpp_ws_connection::fail_pending_sends(int err) {

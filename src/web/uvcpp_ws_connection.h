@@ -282,12 +282,18 @@ class UVCPP_API uvcpp_ws_connection {
   // 返回 UV_EALREADY，**并且在返回之前不保存回调**。原先的 send_frame 对非 0
   // 返回只是释放缓冲就算了 —— 帧静默消失，而返回值恒为 0，调用方看不出来。
   // 队列把"在途"和"待发"分开，帧按序发出，不再有静默丢失。
+  //
+  // 队列**整批合并**成一次 `uv_write`（见 `pump_send`）：一批小帧逐帧写出会
+  // 变成一串十几字节的段，吞吐直接由对端的收包/ACK 行为决定 —— 那是别人的
+  // 旋钮，不是本库的。
   struct pending_send {
     std::string              bytes;  // 已序列化的线上字节
     std::function<void(int)> cb;
   };
   void pump_send();
   void on_send_complete(int status);
+  /** @brief 按序出队并回调 count 帧（在途那批的结算）。 */
+  void settle_frames(size_t count, int status);
   /** @brief 把队列里剩下的帧全部以 err 结算掉（连接已坏，别再留着）。 */
   void fail_pending_sends(int err);
 
@@ -332,6 +338,14 @@ class UVCPP_API uvcpp_ws_connection {
 
   // 发送队列状态
   std::deque<pending_send> send_q_;
+  /// 合并写出用的复用缓冲。`uvcpp_tcp_client::write()` 会先把字节**拷走**，
+  /// 所以交付之后这个缓冲随时可以重用，会话生命周期内只涨不缩。
+  std::string send_batch_;
+  /// 在途的那次 `uv_write` 覆盖了 `send_q_` 队首的多少帧。完成回调按它结算。
+  size_t in_flight_frames_ = 0;
+  /// 正在一次读回调里逐帧派发（`on_tcp_data`）。期间 `send_frame` 只入队不泵，
+  /// 由派发结束时的守卫统一泵一次 —— 一次读进来的十几帧因此只发一段。
+  bool in_read_dispatch_ = false;
   bool write_in_flight_ = false;
   int  send_error_      = 0;   // 非 0 = 发送通道已坏（粘性）
 

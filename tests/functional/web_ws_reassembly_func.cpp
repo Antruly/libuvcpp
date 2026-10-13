@@ -433,6 +433,33 @@ static bool test_close_reason_truncated() {
   return f.get_close_reason().size() == 123;
 }
 
+/**
+ * @brief 协议错误时对端要**真的收到** Close 帧，不只是本端回调了 `on_error`。
+ *
+ * `protocol_error()` 的次序是"先置 `protocol_failed_`，再 `send_close()` 把
+ * Close 帧排进队列"，而这件事发生在一次读回调的逐帧派发里（`on_tcp_data`
+ * 的 `in_read_dispatch_`），派发期间 `send_frame` 只入队、不泵。于是收尾那次
+ * `pump_send()` 是这一帧唯一的出口 —— 它要是在 `protocol_failed_` 上被跳过
+ * （合并写改造时最容易写成这样），Close 帧就永远躺在队列里：本端 `on_error`
+ * 照样响、`errors` 照样非空，上面那几条协议错误用例**全都还是绿的**，而线上
+ * 对端一个字节都收不到，拿不到状态码，只能等超时。
+ *
+ * 所以断言必须落在**客户端解析出来的帧**上，而不是本端的回调计数上。
+ */
+static bool test_close_delivered_on_protocol_error() {
+  scenario s;
+  if (!s.start()) return false;
+  s.drain_client_frames();
+  // 未掩码的客户端帧：§5.1 违规，服务端应以 1002 发 Close 再关连接
+  if (!s.send(raw_frame(0x1, true, "unmasked", false))) return false;
+  s.pump_until([&] { return !s.cframes.empty(); }, 2000);
+  if (s.cframes.empty()) return false;          // 队列没被泵 → 就是这里红
+  const uvcpp_ws_frame& f = s.cframes[0];
+  if (f.opcode != ws_opcode::CLOSE) return false;
+  if (f.get_close_code() != ws_close_code::PROTOCOL_ERROR) return false;
+  return !f.get_close_reason().empty();         // 原因得一起送到
+}
+
 // =========================================================================
 // 驱动
 // =========================================================================
@@ -531,6 +558,7 @@ int main() {
     {"frame_cap",                 test_frame_cap},
     {"send_queue_order",          test_send_queue_order},
     {"close_reason_truncated",    test_close_reason_truncated},
+    {"close_delivered_on_protocol_error", test_close_delivered_on_protocol_error},
     // 两条 RFC 6455 MUST + 一条反向对照（见上面的说明）
     {"unmasked_frame_rejected",   test_unmasked_frame_rejected},
     {"unmasked_control_frame_rejected", test_unmasked_control_frame_rejected},
