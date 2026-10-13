@@ -577,14 +577,14 @@ int doc_static() {
 （`src/web/uvcpp_static_server.h:152-156`）—— 上面那个写法（`files` 先于 `server` 声明、
 后于它析构）是对的。
 
-默认值（构造参数 `src/web/uvcpp_static_server.h:145-147`、成员初值 `:383-384`）：
+默认值（构造参数 `src/web/uvcpp_static_server.h:145-147`、成员初值 `:388-389`）：
 `url_root = "/"`、`index_file = "index.html"`、`spa_fallback = true`、`cache_enabled = true`。
 后两个**有 setter**（`set_spa_fallback()` `:169-169`、`set_cache_enabled()` `:172-172`），
 前两个只能走构造函数。另有两个 setter：`set_precompressed()`（`:222-225`，默认 `false`）
 和 `set_revalidate()`（`:239-242`，默认 `uvcpp_static_revalidate::POOL`）——
 前者见下面讲预压缩孪生的那一节，后者见下面讲校验跑在哪条线程上的那一节。
 构造函数还会把 `local_dir` 去掉尾斜杠、把 `url_root` 规范成 `"/"` 或 `"/xxx"`
-（`src/web/uvcpp_static_server.cpp:219-237`）。
+（`src/web/uvcpp_static_server.cpp:271-289`）。
 
 **它是懒加载的**：首次请求某文件才读盘并进内存缓存，此后每次请求 stat 一次，
 mtime/大小变了就异步重载 —— 所以文件改完**下一个请求就返回新内容**，不需要重启。
@@ -602,10 +602,10 @@ mtime/大小变了就异步重载 —— 所以文件改完**下一个请求就�
 - 防目录穿越靠**段级归一化**（`src/web/uvcpp_static_server.cpp:43-80`），
   并额外拒掉 `\`、`:`、NUL 与控制字符（`:44-48`）。
 - **`spa_fallback` 默认开，意味着找不到文件时也返回 200 的 `index.html`**
-  （`src/web/uvcpp_static_server.cpp:497-502`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
-- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:556-559`
+  （`src/web/uvcpp_static_server.cpp:552-557`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
+- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:613-616`
   取到凭据、`reply_alive()` 逐处核），不是连接 id。
-- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:709-742`）；要可配的用 webapp 层的
+- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:769-802`）；要可配的用 webapp 层的
   `uvcpp_web_static`（`src/webapp/uvcpp_web_static.h`）。
 - **不做实时压缩**：它不填 `resp.cache_tag`，所以 `uvcpp_http_server` 那个按 `cache_tag`
   做键的响应变体缓存对它**不生效** —— 开着 `compress` 时它每请求在循环线程上把整份文件

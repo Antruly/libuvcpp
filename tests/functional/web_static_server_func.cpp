@@ -187,6 +187,15 @@ struct StaticTestServer {
   struct ServeObservation {
     int status;
     bool deferred;
+    /// `resp.body` 是不是一份**共享视图**（`uvcpp_buf::is_shared()`），是的话
+    /// 记下它指向哪一个 `std::string`。
+    ///
+    /// 这一格是"命中路径零拷贝"的确定性判据：缓存里那份字节**借**给响应，
+    /// 而不是拷一份 —— 同一份文件的两次命中必须指向**同一个对象**（指针相等），
+    /// 拷贝实现做不到这一点。它在网络那头看不出来（两种实现发出去的字节
+    /// 逐字节相同），所以只能在这里判。
+    bool shared;
+    const std::string* shared_body;
   };
   std::vector<ServeObservation> serves;
 
@@ -250,6 +259,8 @@ struct StaticTestServer {
         ServeObservation o;
         o.status = static_cast<int>(resp.status_code);
         o.deferred = resp.deferred;
+        o.shared = resp.body.is_shared();
+        o.shared_body = resp.body.shared_ref().get();
         std::lock_guard<std::mutex> lk(obs_mutex);
         serves.push_back(o);
       });
@@ -1482,27 +1493,40 @@ static bool test_loop_stat() {
       const char* want_enc;
       const char* want_body;
       bool want_deferred;   // 处理函数返回之后那一格
+      /// `resp.body` 是不是共享视图（`1` 必须、`0` 必须不是、`-1` 不判）。
+      int want_shared;
+      /// 与本表里第几条**必须指向同一个 `std::string`**（-1 = 不比对）。
+      int same_body_as;
       const char* why;
     };
     const Case cases[] = {
       // 1. 首次请求必然未命中（缓存是空的）⇒ 仍然要读盘 ⇒ 推迟。
-      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, true,
+      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, true, 0, -1,
        "未命中：读盘还在池里"},
       // 2. 同一条 URL 再来一次 ⇒ 命中 ⇒ 就地回完（本条与 POOL 档唯一的差别）。
-      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, false,
+      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, false, 1, -1,
        "命中：循环线程上回完"},
       // 3/4. 索引文件：未命中 → 推迟；再来一次 → 就地。
-      {"/", "", 200, "", "<html>INDEX-V1</html>", true, "索引未命中"},
-      {"/", "", 200, "", "<html>INDEX-V1</html>", false, "索引命中"},
+      {"/", "", 200, "", "<html>INDEX-V1</html>", true, 0, -1, "索引未命中"},
+      {"/", "", 200, "", "<html>INDEX-V1</html>", false, 1, -1, "索引命中"},
       // 5/6. 目录请求要**递归**一次（`/sub` → `/sub/index.html`）：同步档下这一
       //      跳走的是 `stat_dispatch()` 里那份栈上拷贝，`sync_sent` 还得从拷贝
       //      传回原 task。第 6 条是命中，因此必须就地 —— 传不回来的话它会变成
       //      "既没回话也没推迟"，客户端超时。
-      {"/sub", "", 200, "", "<html>SUB-INDEX</html>", true, "目录步进未命中"},
-      {"/sub/", "", 200, "", "<html>SUB-INDEX</html>", false, "目录步进命中"},
+      {"/sub", "", 200, "", "<html>SUB-INDEX</html>", true, 0, -1,
+       "目录步进未命中"},
+      {"/sub/", "", 200, "", "<html>SUB-INDEX</html>", false, 1, -1,
+       "目录步进命中"},
       // 7. SPA 回退（step 2）同样是一跳，落到已经缓存好的 `index.html` ⇒ 就地。
-      {"/some/client/route", "", 200, "", "<html>INDEX-V1</html>", false,
+      {"/some/client/route", "", 200, "", "<html>INDEX-V1</html>", false, 1, -1,
        "SPA 回退命中"},
+      // 8. 再命中一次 `/app.js`：**必须与第 2 条指向同一份字节**。
+      //
+      //    判据是"缓存里那份字节是借出去的、不是拷出去的"：拷贝实现下两次命中
+      //    各有各的 `std::string`，指针不可能相等。发出去的字节两种实现逐字节
+      //    相同，所以这条**只能**在这里判 —— 网络那头看不出来。
+      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, false, 1, 1,
+       "命中：借的是缓存里同一个对象"},
     };
 
     size_t nreq = 0;
@@ -1540,6 +1564,26 @@ static bool test_loop_stat() {
           std::cout << "  [err] #" << i << " " << c.path
                     << " 就地回完但状态是 " << o.status << "\n";
           ok = false;
+        }
+        // body 是借还是拷：命中那几档必须是缓存里那份字节的**共享视图**，
+        // 推迟那几档还没填 body，因此不该有视图。
+        if (c.want_shared >= 0 && o.shared != (c.want_shared == 1)) {
+          std::cout << "  [err] #" << i << " " << c.path
+                    << " body.is_shared()=" << (o.shared ? 1 : 0) << "（期望 "
+                    << c.want_shared << "，" << c.why << "）\n";
+          ok = false;
+        }
+        // 同一个文件的两次命中必须指向同一个对象（见第 8 条那一段）。
+        if (c.same_body_as >= 0) {
+          const size_t k = static_cast<size_t>(c.same_body_as);
+          const StaticTestServer::ServeObservation prev = runner.serve(k);
+          if (!o.shared || prev.shared_body == nullptr ||
+              o.shared_body != prev.shared_body) {
+            std::cout << "  [err] #" << i << " " << c.path
+                      << " 的 body 与 #" << c.same_body_as
+                      << " 不是同一份对象 —— 命中路径上又拷了一份\n";
+            ok = false;
+          }
         }
       }
       ++nreq;

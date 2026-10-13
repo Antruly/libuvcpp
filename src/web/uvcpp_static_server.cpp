@@ -196,6 +196,19 @@ struct uvcpp_static_server::StatTask {
   //     `resp.deferred` 立起来。
   uvcpp_http_response* sync_out;
   bool sync_sent;
+
+  // --- 响应**落点** ---
+  //
+  // 命中与 404 这两条终点都要"造一份响应、再交出去"。造在哪儿有两种可能：
+  //   * 同步档：调用方已经给了对象（`*sync_out`），**就往它里面填** —— 中间
+  //     再摆一个临时的，等于把整份文件多拷一遍（`uvcpp_buf` 的拷贝是深拷贝，
+  //     见下）；
+  //   * 池档：没有调用方的对象可填，落在本字段上，`send_reply()` 直接读它。
+  //
+  // 于是两条路都是"就地填 + 交引用"，谁都不用拷贝。**它按值随 `StatTask` 走**
+  // （`stat_dispatch()` 递归时那份栈上拷贝会连它一起拷），空对象是一次默认
+  // 构造，没有分配。
+  uvcpp_http_response scratch;
 };
 
 // 异步加载任务上下文（worker 线程与事件循环线程之间传递）
@@ -213,6 +226,45 @@ struct uvcpp_static_server::LoadTask {
   bool ok;                      // worker 线程读盘结果
   std::shared_ptr<std::string> data;  // worker 线程填充的文件字节
 };
+
+namespace {
+
+/**
+ * @brief 把缓存里那份字节**就地**填成一份 200，body 走共享视图（不拷贝字节）。
+ *
+ * 与 `uvcpp_http_response::ok(data, len, mime)` 逐字段等价，只差 body 从
+ * "拷一份"换成"借一份"。长度直接用 `data->size()`：与 `ok()` 一样取**实际读到
+ * 的字节数**，不是 stat 报的那个（两者不一致时，短的这份才是真的）。
+ *
+ * 借出去之后这份内容由**响应**与缓存条目共同保活（`shared_ptr`）：缓存条目
+ * 紧接着被淘汰、甚至 `clear_cache()` 清空，也不会让响应手里的指针悬空。
+ */
+void fill_cached_response(uvcpp_http_response& resp,
+                          const std::shared_ptr<std::string>& data,
+                          const std::string& mime, const std::string& variant) {
+  resp.status_code = http_status::OK;
+  resp.status_message = "OK";
+  if (!mime.empty()) resp.set_content_type(mime);
+  resp.body.share(data);
+  apply_variant_headers(resp, variant);
+}
+
+/**
+ * @brief 就地填成 404。字段与 `uvcpp_http_response::not_found()` 逐字一致。
+ *
+ * 就地填而不是"造一份再赋值"：赋值会把框架填好的身份字段（`stream_id`、
+ * `deferred`、`retryable`）一起冲掉，而它们归框架管 —— h2 上 `stream_id` 决定
+ * 这份响应归到哪条流，`send_reply()` 虽然会用凭据里那个覆盖它，但"靠下游兜住"
+ * 不该是就地填的代价。
+ */
+void fill_not_found(uvcpp_http_response& resp) {
+  resp.status_code = http_status::NOT_FOUND;
+  resp.status_message = "Not Found";
+  resp.set_content_type("text/plain");
+  resp.body.clear();
+}
+
+}  // namespace
 
 uvcpp_static_server::uvcpp_static_server() {}
 
@@ -465,10 +517,13 @@ void uvcpp_static_server::stat_step(StatTask* task) {
         }
       }
       if (found) {
-        uvcpp_http_response resp = uvcpp_http_response::ok(
-            hit.data->data(), hit.data->size(), hit.mime);
-        apply_variant_headers(resp, hit.variant);
-        deliver(task, resp);
+        // 就地填进落点：同步档是调用方那个对象，池档是本 task 自带的 —— 两条
+        // 路都不经过临时的 `uvcpp_http_response`（一次深拷贝的 body），body 也
+        // 是借缓存那份字节（`shared_ptr`）而不是拷一份。
+        uvcpp_http_response& out =
+            task->sync_out != nullptr ? *task->sync_out : task->scratch;
+        fill_cached_response(out, hit.data, hit.mime, hit.variant);
+        deliver(task, out);
         return;
       }
     }
@@ -501,15 +556,17 @@ void uvcpp_static_server::stat_step(StatTask* task) {
     return;
   }
 
-  uvcpp_http_response resp = uvcpp_http_response::not_found();
-  deliver(task, resp);
+  uvcpp_http_response& out =
+      task->sync_out != nullptr ? *task->sync_out : task->scratch;
+  fill_not_found(out);
+  deliver(task, out);
 }
 
 void uvcpp_static_server::deliver(StatTask* task, uvcpp_http_response& resp) {
-  if (task->sync_out != nullptr) {
-    // 同步档：`serve()` 还等着往下走，把响应交给它手里的那个对象，别自己发。
+  if (task->sync_out == &resp) {
+    // 同步档：`resp` **就是**调用方那个对象（落点由上面那两句选的），响应已经
+    // 就地填好了，这里只记账 —— `serve()` 还等着往下走，别自己发。
     // 这里不设 `deferred` —— 那个标志归 `serve()` 管（见那里的注释）。
-    *task->sync_out = resp;
     task->sync_sent = true;
     return;
   }
@@ -572,9 +629,12 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
             std::lock_guard<std::mutex> lk(self->mu_);
             self->cache_[task->cache_key] = e;
           }
-          resp = uvcpp_http_response::ok(e.data->data(), e.data->size(), e.mime);
-          apply_variant_headers(resp, task->variant);
+          // 就地填，body 直接借刚读进来的那份（存进缓存的是同一个
+          // `shared_ptr`）—— `ok()` 那一支会把整份文件再拷一遍。
+          fill_cached_response(resp, e.data, e.mime, task->variant);
         } else {
+          // 读盘失败：几字节的常量 body，走 `not_found()` 就好（它带的那几个
+          // 字段正是这里要的）。
           resp = uvcpp_http_response::not_found();
         }
         task->server->send_reply(task->reply, resp);

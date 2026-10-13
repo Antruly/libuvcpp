@@ -313,7 +313,12 @@ private:
                      const std::string& spa_url_path, int step);
 
   /**
-   * @brief 把一份响应交出去：异步档发给 `task->server`，同步档写回调用者的对象。
+   * @brief 把一份**已经填好**的响应交出去：池档发给 `task->server`，同步档只记账。
+   *
+   * 响应是就地填在落点上的（同步档 = 调用方那个 `resp`，池档 = task 自带的
+   * `scratch`，见 `uvcpp_static_server.cpp` 里 `response_slot` 那一处的说明），
+   * 所以这里**只判发不发、不搬字节**：搬一次就是每请求把整份文件白拷一遍
+   * （`uvcpp_buf` 的拷贝是深拷贝）。
    *
    * 两种档**只有这一步不同**，所以收到一处来。同步档还要置 `sync_sent`：
    * `stat_step()` 走到 `load_async()` 那一支时是**不回话**的（改由池里的读盘

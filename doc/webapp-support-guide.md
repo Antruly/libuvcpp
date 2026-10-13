@@ -121,7 +121,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 形态只有第一个实参。登记表全部方法在 `src/webapp/uvcpp_web_connection.h:183-419`。
 
 **一个连接有 `add()` 过的 id 就直接用它，别拿 `uvcpp_tcp_client*` 当身份。**
-按代次核对那套（`src/web/uvcpp_static_server.cpp:556-559` —— 静态器 1.6.8 起拿的是
+按代次核对那套（`src/web/uvcpp_static_server.cpp:613-616` —— 静态器 1.6.8 起拿的是
 `req.reply` 凭据，`reply_alive()` 底下比的还是 `connection_generation()`，
 见 `src/web/uvcpp_http_server.h:820-820`）和新这套（`uvcpp_web_app` 内部的
 `registry_`）都是"单调递增永不复用"，**但两者不通用**，别互相替换。
