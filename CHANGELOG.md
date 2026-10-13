@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.19-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.20-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -1370,6 +1370,20 @@
   503 并关连接，`-m 32` 下那一片 5xx 全是驱动器的参数，不是服务端读数。
 
 ### 配置、打包与 CI
+
+- **`uvcpp_loop_index_of_this_thread()` / `uvcpp_set_loop_index_of_this_thread()`
+  补上 `UVCPP_API`**（`1.6.20-dev`）。这两个自由函数在安装集里的公开头
+  `src/net/uvcpp_loop_worker.h`（`include/net/`）上声明，却一个导出宏都没有 ——
+  库在 Windows 上是 DLL，于是**只有本库内部的 TU 链得上它**，外面任何一份调它的
+  TU 都是 `LNK2019`。这不是假设：本仓自己的
+  `tests/functional/http3_multiloop_func.cpp` 就长在 MSVC 那条 `http3` 腿上
+  （`error LNK2019: unresolved external symbol "int __cdecl
+  uvcpp::uvcpp_loop_index_of_this_thread(void)" ... referenced in function
+  <lambda_...>::operator()`），而 Linux / MinGW / macOS 全绿 ——
+  ELF 与 MinGW 默认导出全部符号，这个缺陷**只在 MSVC 上现形**。**判据**：MSVC 那条
+  `http3` 腿的 `Configure & Build` 从红转绿（此前它连编都编不过，
+  `test_http3_multiloop_func` 因此一次都没在 Windows 上跑过）；Linux / MinGW / macOS
+  三档逐字节不变（`UVCPP_API` 在非 Windows 上展开为空）。
 
 - 使能宏随包发出；宏集与 DLL 不一致从静默垃圾值改为编译期硬失败（`1.1.27`）
 - 22 个公开头带上 UTF-8 BOM，消费者不传 `/utf-8` 时不再级联报错（`1.1.30`）

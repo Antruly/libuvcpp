@@ -97,7 +97,7 @@ int main() {
 
 **已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:307`）
 把"一条循环"变成 **n 条各跑自己循环的线程**，`1..n-1` 号各一条**专用 `std::thread`**
-（`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:66-66` —— 不是 `uv_queue_work`
+（`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:75-75` —— 不是 `uv_queue_work`
 那条线程池）。**"新连接怎么落到某一条循环上"分两种形状**，而且是**运行时探测**出来的
 （同一个二进制在不同平台上不一样）：Linux 上 n 条各自绑同一端口、内核分流（§3 路 (a)，
 **本版已落地**）；Windows 与那个标志被拒时的回落才是下面 §2、§3 讲的"一条接受者 +
@@ -117,7 +117,7 @@ acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
                   → 取出 socket → 平台转手 → post 给 worker[k]，k = i % (n-1)
                   → 立刻关掉自己那份
 worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
-  └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:146-146 起）
+  └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:155-155 起）
        └─ 在**这条循环的线程**上：new uvcpp_tcp_client(worker_loop) 装转手来的 socket
           （src/net/uvcpp_tcp_server.cpp:702 on_handoff_task）→ mark_accepted() → 登记
           → setup_client_callbacks() → TLS 块 → deliver_connection()

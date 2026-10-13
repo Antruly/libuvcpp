@@ -28,6 +28,7 @@
 #define SRC_NET_UVCPP_LOOP_WORKER_H
 
 #include <uvcpp/uvcpp_config.h>
+#include <uvcpp/uvcpp_export.h>
 
 #include <uv.h>
 
@@ -57,11 +58,19 @@ class uvcpp_loop;
  * 调用者的，服务端只能在自己被调用的那一刻写）。
  *
  * 线程退出时会被清回 -1，所以"线程复用后读到上一条循环的号"不会发生。
+ *
+ * **为什么带 `UVCPP_API`**：本头在安装集里（`include/net/`），下面这两个函数
+ * 是它的公开面，而库在 Windows 上是以 DLL 发布的 —— 不带导出宏就**只在本库
+ * 内部链得上**，外面任何一份 TU 调它都是 `LNK2019`。这不是假设：本仓自己的
+ * `tests/functional/http3_multiloop_func.cpp` 就因此让 MSVC 那条 `http3` 腿
+ * 编不过（`error LNK2019: unresolved external symbol
+ * "int __cdecl uvcpp::uvcpp_loop_index_of_this_thread(void)"`），而
+ * Linux/MinGW 全绿 —— ELF/MinGW 默认导出全部符号，这个缺陷只在 MSVC 上现形。
  */
-int uvcpp_loop_index_of_this_thread();
+UVCPP_API int uvcpp_loop_index_of_this_thread();
 
 /** @brief 由循环线程自己写 @ref uvcpp_loop_index_of_this_thread。 */
-void uvcpp_set_loop_index_of_this_thread(int index);
+UVCPP_API void uvcpp_set_loop_index_of_this_thread(int index);
 
 class uvcpp_loop_worker {
  public:

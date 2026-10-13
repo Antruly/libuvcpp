@@ -45,13 +45,14 @@
  *    收），它在分流下改由**监听 socket 普查**负责（每个循环一个监听句柄、属主
  *    pid 相同）：`bench/bench_server.cpp` 的 `--loops N` 与 `/stats`。
  *
- *    **"哪条循环是哪条线程"是问出来的，不是猜的**：
- *    `uvcpp_loop_index_of_this_thread()` 不是导出符号（`src/net/uvcpp_loop_worker.h`
- *    里那三个声明都没有 `UVCPP_API`），用例链不到它 —— 现有那两个多循环用例
- *    （`tcp_multiloop_func` / `web_multiloop_func`）用的也是
- *    `std::this_thread::get_id()`。而 `post(fn, i)` 的语义恰好是"在 i 号循环的
- *    线程上跑 fn"，于是它就是一个现成的公开口子：逐格投一个"报出自己是谁"的
- *    任务，就拿到了"循环号 → 线程身份"这张表（见 `ask_loop_threads`）。
+ *    **"哪条循环是哪条线程"是问出来的，不是猜的**：`post(fn, i)` 的语义恰好是
+ *    "在 i 号循环的线程上跑 fn"，于是它就是一个现成的公开口子 —— 逐格投一个
+ *    "报出自己是谁"的任务，就拿到了"循环号 → 线程身份"这张表（见
+ *    `ask_loop_threads`）。另外那两个多循环用例（`tcp_multiloop_func` /
+ *    `web_multiloop_func`）用的也是 `std::this_thread::get_id()`。
+ *    （`uvcpp_loop_index_of_this_thread()` 在 1.6.20-dev 之前不带 `UVCPP_API`、
+ *    用例链不到它；现在它导出了，但本用例要的是**整张**"循环号 → 线程身份"
+ *    的表，`post()` 一次就够，不必逐条回调去问。）
  * 4. **id 的高段就是它所属的循环号** —— 每个 `on_connection` 收到的 id 都要
  *    满足 `loop_of(id) == client->loop_index()` —— **这条两条形状都成立，是承重
  *    面**。至于"哪条循环分到几条"：转手路上是显式轮转（n=3 时 16 条分给 2 条
@@ -323,10 +324,11 @@ int status_of_raw(const std::string& resp) {
 /**
  * @brief 问出每一格循环的**线程身份**（只用公开 API）。
  *
- * `uvcpp_loop_index_of_this_thread()` 不是导出符号，用例链不到它。而
  * `post(fn, i)` 的语义恰好是"在 i 号循环的线程上跑 fn" —— 于是它就是那个
  * 现成的、公开的"问某条循环要身份"的口子（顺便，这条判据自己也在测
  * `post(fn, loop_index)` 这个重载：投错格的话这张表当场对不上）。
+ * 一次投递换来**整张**"循环号 → 线程身份"的表，比在每条连接的回调里逐个问
+ * `uvcpp_loop_index_of_this_thread()` 更省事，也不必假设那个函数拿得到。
  *
  * @param out 调用前必须已经 resize 到 n。
  * @return true = 每一格都在墙钟内报出了身份。
