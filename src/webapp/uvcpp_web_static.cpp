@@ -32,6 +32,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 
 #include <fcntl.h>
@@ -58,10 +59,34 @@ namespace {
 /// 任务插进来。1 MiB 是「系统调用次数」和「单次阻塞时长」的折中。
 const size_t k_read_chunk = 1024u * 1024u;
 
-std::string i64_to_hex(int64_t v) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%llx", (unsigned long long)v);
-  return std::string(buf);
+/// 把 \p v 的十进制接到 \p out 的尾部。
+///
+/// 不用 `out += std::to_string(v)`：那一句先造一个临时串（短数走 SSO，不落堆，
+/// 但仍然要多走一次移动赋值），而 `snprintf` 到一个栈缓冲区再 `append` 就是
+/// 一次。位数上界：`-9223372036854775808` 是 20 个字符，24 字节够。
+void append_i64_dec(std::string& out, int64_t v) {
+  char buf[24];
+  const int n =
+      std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+  if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
+    out.append(buf, static_cast<size_t>(n));
+  }
+}
+
+/// 无符号整数的十六进制，写进调用方的缓冲区，返回写入长度（不含 NUL）。
+///
+/// 不用 `std::snprintf("%llx")`：那一个要过一遍格式串解析，而这里要写的是
+/// **每个 200 响应**上的那三个数。进位表就只有十六个字符，手写更快也更清楚
+/// （`0` 仍然写成 `0`，不是空串）。
+size_t u64_to_hex_into(char* out, uint64_t v) {
+  char tmp[16];
+  size_t n = 0;
+  do {
+    tmp[n++] = "0123456789abcdef"[v & 0xf];
+    v >>= 4;
+  } while (v != 0);
+  for (size_t i = 0; i < n; ++i) out[i] = tmp[n - 1 - i];
+  return n;
 }
 
 /**
@@ -72,10 +97,42 @@ std::string i64_to_hex(int64_t v) {
  * 「客户端手里那份还要不要重下」，mtime 的分辨率（Windows 100ns / Linux ns）
  * 在实践中够用。真需要内容级指纹的场合，应当由使用者在构建期把指纹编进
  * URL（`app.<hash>.js`），那也是更有效的缓存策略。
+ *
+ * **为什么主路径把它写成 C 串而不是 `std::string`**：这一个值每个 200 响应
+ * 都要发一次，而它只是三个十六进制数加两个连字符。`std::string` 那一版是
+ * `std::string("\"") + a + "-" + b + "-" + c + "\""` —— 五次 `operator+`，
+ * 每一次都产出一个临时串（短的那些走 SSO，一旦拼过 15 字节就落堆）。而这条
+ * 路上**真正需要的那一份**只有头表持有的那份。所以 `finish_job` 写进一个
+ * 栈缓冲区、用 `set_header(const char*, const char*)` 发出去，只有客户端
+ * 真的带了 `If-None-Match` / `If-Range` 时才就地建一个 `std::string` 去比。
  */
+size_t format_etag_into(char* out, size_t cap, int64_t size, int64_t mtime_sec,
+                        int64_t mtime_nsec) {
+  // 三个 int64 各最多 16 个十六进制字符，加两个连字符、两个引号、结尾 NUL
+  // ⇒ 上界 53。要 64 是留了余量的整齐上界。
+  if (cap < 64) {
+    out[0] = '\0';
+    return 0;
+  }
+  size_t n = 0;
+  out[n++] = '"';
+  n += u64_to_hex_into(out + n, static_cast<uint64_t>(size));
+  out[n++] = '-';
+  n += u64_to_hex_into(out + n, static_cast<uint64_t>(mtime_sec));
+  out[n++] = '-';
+  n += u64_to_hex_into(out + n, static_cast<uint64_t>(mtime_nsec));
+  out[n++] = '"';
+  out[n] = '\0';
+  return n;
+}
+
+/// `std::string` 那一版。留着是因为它是这个值的**语义入口**（名字说明了它
+/// 是什么），而调用方只需要 C 串时走上面那份 —— 见 `finish_job` 里的长注释。
 std::string make_etag(int64_t size, int64_t mtime_sec, int64_t mtime_nsec) {
-  return std::string("\"") + i64_to_hex(size) + "-" + i64_to_hex(mtime_sec) +
-         "-" + i64_to_hex(mtime_nsec) + "\"";
+  char buf[64];
+  const size_t n =
+      format_etag_into(buf, sizeof(buf), size, mtime_sec, mtime_nsec);
+  return std::string(buf, n);
 }
 
 /// 去掉 ETag 两端的引号（客户端漏引号时仍然要能比对得上）。
@@ -991,14 +1048,33 @@ struct uvcpp_web_static::Impl {
     return opts.mime != nullptr ? *opts.mime : uvcpp_web_mime_map::default_map();
   }
 
+  /**
+   * @brief 取 Content-Type。
+   *
+   * 返回值那一版对**每个文本类型**至少分配两次：`std::string ct = t` 一次、
+   * `ct += "; charset=utf-8"` 再一次（`ct` 的容量正好等于长度，追加重分配）。
+   * 而调用方下一句就是 `set_content_type()` —— 真正需要的那一份是**头表持有
+   * 的那份**，中间这份纯白付。
+   *
+   * 改成一次：要补后缀的那条路在栈上拼好再构造一次；不补的那条路直接返回
+   * 类型表里的静态串（短于 SSO 上界的类型连构造都不落堆）。
+   *
+   * `strstr` 而不是 `find`：`find` 会为这个 `const char*` 造一个临时
+   * `std::string`，正好是这里要省掉的那一次。
+   */
   std::string content_type_for(const std::string& fs_path) const {
     const char* t = mime_map().lookup(fs_path);
-    std::string ct = (t != nullptr) ? t : "application/octet-stream";
-    if (opts.add_charset && ct.find("charset") == std::string::npos &&
-        uvcpp_web_mime_map::is_text(ct)) {
-      ct += "; charset=utf-8";
-    }
-    return ct;
+    const char* base = (t != nullptr) ? t : "application/octet-stream";
+    if (!opts.add_charset) return std::string(base);
+    if (std::strstr(base, "charset") != nullptr) return std::string(base);
+    if (!uvcpp_web_mime_map::is_text(base)) return std::string(base);
+    // `; charset=utf-8` 是 15 字节；64 够装下任何一个真实的类型名加它。
+    char buf[64];
+    const size_t bl = std::strlen(base);
+    if (bl + 15 >= sizeof(buf)) return std::string(base);  // 兜底：不补
+    std::memcpy(buf, base, bl);
+    std::memcpy(buf + bl, "; charset=utf-8", 15);
+    return std::string(buf, bl + 15);
   }
 
   // ---- LRU（共享一份，受 mu_ 护；`evict()` 例外，见它自己的注释）----
@@ -1567,17 +1643,29 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
   // MIME 取**原文件**那一份（`mime_path`）：孪生文件是同一份表示的另一种
   // 编码，靠 `content-encoding` 声明，类型不该跟着后缀变成 octet-stream。
   const std::string ct = content_type_for(j->mime_path);
-  const std::string etag =
-      opts.etag ? make_etag(j->size, j->mtime_sec, j->mtime_nsec)
-                : std::string();
-  const std::string last_modified =
-      opts.last_modified ? web_http_date(static_cast<time_t>(j->mtime_sec))
-                         : std::string();
+  //
+  // ETag 先写成**栈上的 C 串**：这个值每个 200 响应都要发一次，而需要的只有
+  // 头表持有的那一份 —— 先建 `std::string` 再传 `const std::string&` 是白付
+  // （那条拼接链实测五次 `operator+`）。下面两处真的要比对它的时候
+  // （客户端带了 `If-None-Match` / `If-Range`）才就地建串，那两条路在一次
+  // 压测里是 0 次。
+  char etag_buf[64];
+  size_t etag_len = 0;
+  if (opts.etag) {
+    etag_len = format_etag_into(etag_buf, sizeof(etag_buf), j->size,
+                                j->mtime_sec, j->mtime_nsec);
+  }
 
   // 这几个头在 200/206/304 上都要有，所以先发，后面不再重复。
-  if (opts.etag && !etag.empty()) resp.set_header("etag", etag);
-  if (opts.last_modified && !last_modified.empty()) {
-    resp.set_header("last-modified", last_modified);
+  if (etag_len > 0) resp.set_header("etag", etag_buf);
+  if (opts.last_modified) {
+    // 这一份仍然要一个 `std::string`：`web_http_date()` 的返回值就是它，
+    // 而且它的长度（29）必然超过 SSO 上界。**没有**为它再加一条 C 串形态的
+    // 日期格式化 —— 那会把 IMF-fixdate 的拼法复制成两份，而这里只省一次
+    // 短命分配。
+    const std::string last_modified =
+        web_http_date(static_cast<time_t>(j->mtime_sec));
+    if (!last_modified.empty()) resp.set_header("last-modified", last_modified);
   }
   if (!opts.cache_control.empty()) {
     resp.set_header("cache-control", opts.cache_control);
@@ -1607,7 +1695,8 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
   // ETag 不匹配、但时间戳却在文件之前"这种情况错误地回 304，客户端于是
   // 一直用着旧内容 —— 而且它自己永远发现不了。
   bool not_modified = false;
-  if (opts.etag && !etag.empty() && req.has_header("if-none-match")) {
+  if (etag_len > 0 && req.has_header("if-none-match")) {
+    const std::string etag(etag_buf, etag_len);
     not_modified =
         etag_list_matches(req.header("if-none-match"), etag);
   } else if (opts.last_modified && req.has_header("if-modified-since")) {
@@ -1639,7 +1728,9 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
       const std::string v = web_trim(req.header("if-range"));
       if (!v.empty()) {
         if (v[0] == '"' || web_starts_with_ci(v, "W/")) {
-          range_allowed = !etag.empty() && (strip_quotes(v) == strip_quotes(etag));
+          const std::string etag(etag_buf, etag_len);
+          range_allowed =
+              (etag_len > 0) && (strip_quotes(v) == strip_quotes(etag));
         } else {
           const time_t t = web_parse_http_date(v);
           range_allowed =
@@ -1749,9 +1840,22 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     // 而这份 body 已经是压缩产物，`apply_compression()` 见到
     // `content-encoding` 根本不会进来。设了它只会白占一份变体缓存的位置。
     if (!partial && j->variant.empty()) {
-      resp.raw().cache_tag = j->fs_path + "\x1f" + std::to_string(j->size) +
-                             "\x1f" + std::to_string(j->mtime_sec) + "\x1f" +
-                             std::to_string(j->mtime_nsec);
+      //
+      // **就地拼，不造中间串。** `a + b + c + d` 那一版每加一次都产出一个
+      // 临时串（实测四次分配），而需要的只有目标那一份。`clear()` 之后再
+      // `reserve()` 一次到位，后面几次追加就都在容量里 —— 总共一次分配。
+      // 三个数用不着 `std::to_string`：它返回的串对这几个长度本来就走 SSO，
+      // 白白多拷一遍。
+      std::string& tag = resp.raw().cache_tag;
+      tag.clear();
+      tag.reserve(j->fs_path.size() + 32);
+      tag.append(j->fs_path);
+      tag += '\x1f';
+      append_i64_dec(tag, j->size);
+      tag += '\x1f';
+      append_i64_dec(tag, j->mtime_sec);
+      tag += '\x1f';
+      append_i64_dec(tag, j->mtime_nsec);
     }
   }
 
