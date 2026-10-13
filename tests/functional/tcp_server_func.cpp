@@ -37,7 +37,18 @@ static bool read_tcp_nodelay(uvcpp_tcp_client* client, int* out) {
   if (client->get_tcp()->fileno(sock) != 0) return false;
   if (sock == (uv_os_sock_t)-1) return false;
 
-  int v = -1;
+  // **零初始化，而且只看"零 / 非零"**。两件事逼出来这个写法：
+  //
+  //  - Windows 的 `getsockopt(TCP_NODELAY)` **只写一个字节**（`BOOL`），高三个
+  //    字节留着不动。初始化成 -1（0xFFFFFFFF）就会读回 -255（开）/ -256（关）：
+  //    看着像第三个取值，其实只是那个 -1 的残渣（MinGW 上量到的就是这个）。
+  //  - Darwin 读回来的是内核内部的 `TF_NODELAY` 标志位，值 **4**（macOS 上量到
+  //    的就是这个）。POSIX 从没承诺 `getsockopt` 会把你 `setsockopt` 存进去的
+  //    那个数原样还给你 —— 它只保证"开"与"关"可分。
+  //
+  // 判据因此是 `(v != 0) == want`，而"读没读到"由 `-1` 这个哨兵单独表达
+  // （调用方 `wait_observed_nodelay` 就是靠它等的）。
+  int v = 0;
 #if defined(_WIN32)
   int len = static_cast<int>(sizeof(v));
   if (::getsockopt((SOCKET)sock, IPPROTO_TCP, TCP_NODELAY,
@@ -353,7 +364,8 @@ static bool test_nodelay_accessor() {
 }
 
 /// 套接字那一半：`want` 是喂给 `set_tcp_nodelay()` 的值，判据是**从 fd 上读回来
-/// 的那个 int 恰好等于 `want`**。
+/// 的那一个数"零 / 非零"与 `want` 一致**（为什么不是"恰好等于 1"，
+/// 见 `read_tcp_nodelay` 上面那段：Darwin 回 4、Windows 只写一个字节）。
 ///
 /// 两个方向都要量。只量 true 的话，"忘了设 false"这条永远测不出来（库默认就是
 /// true，什么都不做也绿）；只量 false 的话，把默认翻成 false 这条测不出来。
@@ -366,7 +378,9 @@ static bool test_nodelay_on_socket(int* observed_out, bool want) {
   s.stop();
 
   if (observed_out != nullptr) *observed_out = got;
-  return echoed && got == (want ? 1 : 0);
+  // `got < 0` 是"压根没读到"（accept 回调没把值记进来），别让它借着
+  // "非零即开"混过去 —— 那样 `want == true` 就会假绿。
+  return echoed && got >= 0 && (got != 0) == want;
 }
 
 // =========================================================================
@@ -437,7 +451,8 @@ int main() {
     std::cout << "[tcp_server] tcp_nodelay_default_on\n";
     int got = -1;
     bool r = test_nodelay_on_socket(&got, true);
-    std::cout << "     套接字上的 TCP_NODELAY = " << got << "（期望 1）\n";
+    std::cout << "     套接字上读回 TCP_NODELAY = " << got
+              << "（非零即开；这边期望 开）\n";
     std::cout << "  -> " << (r ? "PASS" : "FAIL") << "\n";
     ok = r && ok;
   }
@@ -445,7 +460,8 @@ int main() {
     std::cout << "[tcp_server] tcp_nodelay_off\n";
     int got = -1;
     bool r = test_nodelay_on_socket(&got, false);
-    std::cout << "     套接字上的 TCP_NODELAY = " << got << "（期望 0）\n";
+    std::cout << "     套接字上读回 TCP_NODELAY = " << got
+              << "（非零即开；这边期望 关）\n";
     std::cout << "  -> " << (r ? "PASS" : "FAIL") << "\n";
     ok = r && ok;
   }
