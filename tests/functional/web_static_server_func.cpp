@@ -178,6 +178,17 @@ struct StaticTestServer {
   int loops;
   /// 是否发盘上的预压缩孪生文件（`set_precompressed()`）。默认关。
   bool precompressed;
+  /// 校验跑在哪条线程上（`set_revalidate()`）。默认 `POOL`。
+  uvcpp_static_revalidate revalidate;
+
+  /// 每条请求在**处理函数返回之后**的 `resp.deferred` 与状态码 ——
+  /// `LOOP_STAT` 档"命中就地回完"这件事只有在这里看得见（客户端那边
+  /// "推迟"与"就地"是同一个响应）。
+  struct ServeObservation {
+    int status;
+    bool deferred;
+  };
+  std::vector<ServeObservation> serves;
 
   std::promise<int> port_promise;
   std::atomic<bool> stop{false};
@@ -194,15 +205,17 @@ struct StaticTestServer {
 
   StaticTestServer(const std::string& r, bool spa,
                    const std::string& mount = std::string("/"),
-                   int nloops = 1, bool pc = false)
+                   int nloops = 1, bool pc = false,
+                   uvcpp_static_revalidate rv = uvcpp_static_revalidate::POOL)
       : root(r), url_root(mount), spa_fallback(spa), loops(nloops),
-        precompressed(pc) {}
+        precompressed(pc), revalidate(rv) {}
 
   int start() {
     thread = std::thread([this]() {
       uvcpp_static_server static_svr(root, url_root);
       static_svr.set_spa_fallback(spa_fallback);
       static_svr.set_precompressed(precompressed);
+      static_svr.set_revalidate(revalidate);
       uvcpp_http_server server;
       // 必须在 `listen()` 之前（见 `uvcpp_http_server::set_loops` 的 @warning）。
       server.set_loops(loops);
@@ -227,7 +240,19 @@ struct StaticTestServer {
         }
       });
 
-      server.on_request(static_svr.handler(&server));
+      // 不直接挂 `static_svr.handler(&server)`，而是包一层：处理函数**返回之后**
+      // 把 `resp.deferred` 记下来。这是 `LOOP_STAT` 唯一与 `POOL` 不同的那件事，
+      // 而它在网络那头看不出来（两种档客户端拿到的响应逐字节相同）。
+      server.on_request([this, &static_svr, &server](uvcpp_http_request& req,
+                                                     uvcpp_http_response& resp,
+                                                     uvcpp_tcp_client* client) {
+        static_svr.serve(req, resp, client, &server);
+        ServeObservation o;
+        o.status = static_cast<int>(resp.status_code);
+        o.deferred = resp.deferred;
+        std::lock_guard<std::mutex> lk(obs_mutex);
+        serves.push_back(o);
+      });
 
       server.bind("127.0.0.1", 0);
       // 读取系统分配的实际端口
@@ -295,6 +320,16 @@ struct StaticTestServer {
     std::lock_guard<std::mutex> lk(obs_mutex);
     return observations[i];
   }
+
+  size_t serve_count() {
+    std::lock_guard<std::mutex> lk(obs_mutex);
+    return serves.size();
+  }
+
+  ServeObservation serve(size_t i) {
+    std::lock_guard<std::mutex> lk(obs_mutex);
+    return serves[i];
+  }
 };
 
 // =========================================================================
@@ -326,6 +361,11 @@ static bool http_get(int port, const std::string& path, int& status, std::string
  * 空字符串表示**不发**那个头。`accept-encoding` 是原样发出去的 —— 包括
  * `gzip;q=0`、`*` 这些专门给那条挑选规则看的形状；它正是 `test_precompressed`
  * 要分辨的那一层，客户端这边一个字节都不该替它规范化。
+ *
+ * **它不能用来测"服务端不回话"**：POSIX 上这条路的阻塞式 socket I/O 里
+ * `timeout_ms` 是被忽略的（`uvcpp_http_client.cpp` 的 `send_wait_ssl` 上写着这句），
+ * 对端不回就永久阻塞。`test_loop_stat` 要抓的恰恰是"漏回话"，所以那边走
+ * @ref raw_get（每次交换的等待是有界的）。
  */
 static bool http_get_enc(int port, const std::string& path,
                          const std::string& accept_encoding,
@@ -386,6 +426,64 @@ static bool raw_exchange(int port, const std::string& req, std::string& out) {
   uvcpp_test::wait_until(loop, [&] { return ended.load(); }, uvcpp_test::kWaitMs);
   out = acc;
   return ended.load();
+}
+
+/** @brief 从响应头块里取状态码；读不懂返回 -1。 */
+static int raw_status(const std::string& head) {
+  const size_t sp = head.find(' ');
+  if (sp == std::string::npos || head.size() < sp + 4) return -1;
+  for (size_t i = 1; i <= 3; ++i) {
+    if (head[sp + i] < '0' || head[sp + i] > '9') return -1;
+  }
+  return (head[sp + 1] - '0') * 100 + (head[sp + 2] - '0') * 10 +
+         (head[sp + 3] - '0');
+}
+
+/** @brief 从响应头块里取某个头的值（名字大小写不敏感）；没有这个头返回空串。 */
+static std::string raw_header(const std::string& head, const std::string& name) {
+  std::string lower = head;
+  for (size_t i = 0; i < lower.size(); ++i) {
+    if (lower[i] >= 'A' && lower[i] <= 'Z') {
+      lower[i] = static_cast<char>(lower[i] - 'A' + 'a');
+    }
+  }
+  const std::string key = "\r\n" + name + ":";
+  const size_t pos = lower.find(key);
+  if (pos == std::string::npos) return std::string();
+  size_t v = pos + key.size();
+  while (v < head.size() && (head[v] == ' ' || head[v] == '\t')) ++v;
+  size_t e = head.find("\r\n", v);
+  if (e == std::string::npos) e = head.size();
+  return head.substr(v, e - v);
+}
+
+/**
+ * @brief 一次有界等待的 GET：自己拼报文 + `Connection: close`，解析状态/编码/body。
+ *
+ * 与 @ref http_get_enc 的差别只有一处，但正是 `test_loop_stat` 需要的那一处：
+ * 每次交换的等待**有界**（`raw_exchange()` 里 `kWaitMs`）。服务端不回话时
+ * `http_get_enc` 会永久阻塞（POSIX 上那条路的 `timeout_ms` 被忽略），一次
+ * 红会变成一次挂死；这里则是 2 秒后返回 false，用例照样打印 FAIL 并继续。
+ */
+static bool raw_get(int port, const std::string& path,
+                    const std::string& accept_encoding, int& status,
+                    std::string& encoding, std::string& body) {
+  std::string req = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+  if (!accept_encoding.empty()) {
+    req += "Accept-Encoding: " + accept_encoding + "\r\n";
+  }
+  req += "Connection: close\r\n\r\n";
+
+  std::string raw;
+  if (!raw_exchange(port, req, raw)) return false;
+  const size_t sep = raw.find("\r\n\r\n");
+  if (sep == std::string::npos) return false;
+
+  const std::string head = raw.substr(0, sep);
+  body = raw.substr(sep + 4);
+  encoding = raw_header(head, "content-encoding");
+  status = raw_status(head);
+  return status > 0;
 }
 
 /** @brief 发一个请求然后**立刻**断开，不等任何响应。 */
@@ -612,6 +710,14 @@ static bool test_construct_and_config() {
   s1.set_spa_fallback(false);
   s1.set_cache_enabled(false);
   s1.clear_cache();
+
+  // 校验档：**默认是池往返那一档**，这是"改动前的行为逐字不变"这条承诺的可执行
+  // 版本 —— 老调用方一行不改，拿到的就是 1.6.24 的行为。
+  if (s1.revalidate() != uvcpp_static_revalidate::POOL) return false;
+  s1.set_revalidate(uvcpp_static_revalidate::LOOP_STAT);
+  if (s1.revalidate() != uvcpp_static_revalidate::LOOP_STAT) return false;
+  s1.set_revalidate(uvcpp_static_revalidate::POOL);
+  if (s1.revalidate() != uvcpp_static_revalidate::POOL) return false;
   return true;
 }
 
@@ -1333,6 +1439,173 @@ static bool test_precompressed() {
   return ok;
 }
 
+// =========================================================================
+// Test 10: `LOOP_STAT` 档（缓存校验就地做在循环线程上）
+// =========================================================================
+//
+// `uvcpp_static_revalidate::LOOP_STAT` 把**唯一的池往返**（那次校验用的 stat）
+// 搬回循环线程，于是一次命中完全不碰线程池。两条档在**网络上**逐字节同形 ——
+// 客户端看不出区别 —— 所以这里把判据分两处钉：
+//
+//   1. **网络那头**：九种请求形状（孪生 / 目录 index / SPA 回退 / 实时更新 /
+//      404）在 `LOOP_STAT` 下的响应必须与 `POOL` 档逐字相同。这一半用的是
+//      与 `test_serve_and_update`、`test_precompressed` 同一批断言值；
+//   2. **处理函数返回之后**的 `resp.deferred`：命中与 404 是 `false`（就地回完），
+//      只有真的落到读盘那条路（缓存未命中）才是 `true`。这一格是两档**唯一**
+//      不同的地方，也正是"搬回循环线程"这句话的确定性判据。
+//
+// 第 2 条还顺带钉住了同步档最容易错的那件事：`deliver()` 写回调用方的 `resp`
+// 之后**不能再自己发一次**（那就成两条响应），而落到 `load_async()` 那一支时
+// **必须**把 `deferred` 立起来（否则谁也不会回这条请求，客户端挂到超时）。
+//
+// 这条用例**一律走 `raw_get()`**（有界等待），不走 `http_get_enc()`：同步档漏
+// 回话的症状就是"服务端一个字节都不发"，而阻塞式客户端在 POSIX 上会永久等下去
+// —— 那样红了也是挂死，不是一条 FAIL。
+
+static bool test_loop_stat() {
+  if (!prepare_fs()) return false;
+
+  bool ok = true;
+  int status = 0;
+  std::string enc, body;
+
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/true, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/true,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    const int port = runner.start();
+
+    struct Case {
+      const char* path;
+      const char* accept_encoding;
+      int want_status;
+      const char* want_enc;
+      const char* want_body;
+      bool want_deferred;   // 处理函数返回之后那一格
+      const char* why;
+    };
+    const Case cases[] = {
+      // 1. 首次请求必然未命中（缓存是空的）⇒ 仍然要读盘 ⇒ 推迟。
+      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, true,
+       "未命中：读盘还在池里"},
+      // 2. 同一条 URL 再来一次 ⇒ 命中 ⇒ 就地回完（本条与 POOL 档唯一的差别）。
+      {"/app.js", "br;q=1, gzip;q=0.8", 200, "br", kAppJsBr, false,
+       "命中：循环线程上回完"},
+      // 3/4. 索引文件：未命中 → 推迟；再来一次 → 就地。
+      {"/", "", 200, "", "<html>INDEX-V1</html>", true, "索引未命中"},
+      {"/", "", 200, "", "<html>INDEX-V1</html>", false, "索引命中"},
+      // 5/6. 目录请求要**递归**一次（`/sub` → `/sub/index.html`）：同步档下这一
+      //      跳走的是 `stat_dispatch()` 里那份栈上拷贝，`sync_sent` 还得从拷贝
+      //      传回原 task。第 6 条是命中，因此必须就地 —— 传不回来的话它会变成
+      //      "既没回话也没推迟"，客户端超时。
+      {"/sub", "", 200, "", "<html>SUB-INDEX</html>", true, "目录步进未命中"},
+      {"/sub/", "", 200, "", "<html>SUB-INDEX</html>", false, "目录步进命中"},
+      // 7. SPA 回退（step 2）同样是一跳，落到已经缓存好的 `index.html` ⇒ 就地。
+      {"/some/client/route", "", 200, "", "<html>INDEX-V1</html>", false,
+       "SPA 回退命中"},
+    };
+
+    size_t nreq = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      const Case& c = cases[i];
+      if (!raw_get(port, c.path, c.accept_encoding, status, enc, body)) {
+        std::cout << "  [err] #" << i << " " << c.path << " 请求没完成\n";
+        ok = false;
+        ++nreq;  // 请求发出去了但没读回来，后面的下标就别指望对得上
+        continue;
+      }
+      if (status != c.want_status || enc != c.want_enc || body != c.want_body) {
+        std::cout << "  [err] #" << i << " " << c.path << " -> " << status
+                  << " enc='" << enc << "' body='" << body << "'（期望 "
+                  << c.want_status << " enc='" << c.want_enc << "' body='"
+                  << c.want_body << "'）\n";
+        ok = false;
+      }
+      const size_t n = runner.serve_count();
+      if (n != nreq + 1) {
+        std::cout << "  [err] #" << i << " " << c.path << " 触发 " << (n - nreq)
+                  << " 次处理函数（期望 1）—— 后面的 deferred 断言对不上号\n";
+        ok = false;
+      } else {
+        const StaticTestServer::ServeObservation o = runner.serve(nreq);
+        if (o.deferred != c.want_deferred) {
+          std::cout << "  [err] #" << i << " " << c.path
+                    << " 处理函数返回后 deferred=" << (o.deferred ? 1 : 0)
+                    << "（期望 " << (c.want_deferred ? 1 : 0) << "，" << c.why
+                    << "）\n";
+          ok = false;
+        } else if (c.want_deferred == false && o.status != c.want_status) {
+          // 就地回完的那几档，状态码**在 `serve()` 返回前**就得是最终值 ——
+          // 否则 `deferred` 那格是假的（置了 200 又推迟去改成 404）。
+          std::cout << "  [err] #" << i << " " << c.path
+                    << " 就地回完但状态是 " << o.status << "\n";
+          ok = false;
+        }
+      }
+      ++nreq;
+    }
+
+    // 8. 实时更新在这条档下必须一样灵：校验仍然真的做了（就地 stat），文件变
+    //    了就要发新字节。这一条是"LOOP_STAT 不是 TTL 缓存"的判据。
+    if (!write_text("app.js", "console.log('JS-V2-LOOPSTAT');")) {
+      ok = false;
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      if (!raw_get(port, "/app.js", "br;q=1, gzip;q=0.8", status, enc, body)) {
+        std::cout << "  [err] 更新后的 /app.js 请求没完成\n";
+        ok = false;
+      } else if (status != 200 || enc != "br" || body != kAppJsBr) {
+        // 改的是**原文件**，孪生没动 ⇒ 仍然发孪生那份（与 POOL 档逐字同策：
+        // 缓存键带后缀，校验的是被发出去的那一份的 mtime/大小）。
+        std::cout << "  [err] 更新后 /app.js -> " << status << " enc='" << enc
+                  << "' body='" << body << "'\n";
+        ok = false;
+      }
+      // 同一个原文件、不带 `accept-encoding` ⇒ 另一条缓存键（原文件那一份），
+      // 所以这里是**未命中** → 推迟 → 拿到新字节。
+      const size_t n0 = runner.serve_count();
+      if (!raw_get(port, "/app.js", "", status, enc, body)) {
+        std::cout << "  [err] 更新后的 /app.js（无 ae）请求没完成\n";
+        ok = false;
+      } else if (status != 200 || body != "console.log('JS-V2-LOOPSTAT');") {
+        std::cout << "  [err] 更新后 /app.js（无 ae）-> " << status << " '"
+                  << body << "'（期望新字节）\n";
+        ok = false;
+      } else if (runner.serve_count() != n0 + 1 ||
+                 runner.serve(n0).deferred != true) {
+        std::cout << "  [err] 原文件那一份换了内容，本该未命中去读盘\n";
+        ok = false;
+      }
+    }
+
+    runner.shutdown();
+  }
+
+  // --- 404：SPA 关掉、孪生关掉，只剩"文件不存在"这一条路 ---
+  //
+  // 终点的 404 也在同步档下就地回，且**不是**推迟 —— 推迟出去就没人回了。
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/false, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/false,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    const int port = runner.start();
+    if (!raw_get(port, "/missing.css", "", status, enc, body)) {
+      std::cout << "  [err] /missing.css 请求没完成\n";
+      ok = false;
+    } else if (status != 404) {
+      std::cout << "  [err] GET /missing.css -> " << status << "（期望 404）\n";
+      ok = false;
+    } else if (runner.serve_count() != 1 || runner.serve(0).deferred) {
+      std::cout << "  [err] 同步档的 404 应当是就地回的（deferred=1 就没人回它了）\n";
+      ok = false;
+    }
+    runner.shutdown();
+  }
+
+  cleanup_fs();
+  return ok;
+}
+
 int main(int argc, char** argv) {
   // **整条输出不许缓冲**。这条文件里有 `set_loops(4)` + 线程池 + 半途断连，
   // 出问题是 SIGSEGV —— 而 ctest 只拿得到进程**真的写进管道**的那些字节。
@@ -1352,6 +1625,7 @@ int main(int argc, char** argv) {
     {"stale_connection_crosstalk", test_stale_connection_crosstalk},
     {"multiloop_concurrency", test_multiloop_concurrency},
     {"precompressed", test_precompressed},
+    {"loop_stat", test_loop_stat},
   };
   // 可选过滤：`test_web_static_server_func.exe <name>` 只跑一条。
   // 间歇性故障的定位全靠它 —— 整跑到一次崩溃要几十秒，单条用例是秒级，

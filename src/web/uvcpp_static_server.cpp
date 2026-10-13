@@ -183,6 +183,19 @@ struct uvcpp_static_server::StatTask {
   std::string variants[2];
   size_t variant_count;
   std::string variant;
+
+  // --- 同步档（`uvcpp_static_revalidate::LOOP_STAT`）专用的两格 ---
+  //
+  // 同步档下这张 task 在**栈**上（循环线程就地走完），响应要**交回调用方的
+  // `resp`**，而不是走 `send_reply()`：那条路是给 deferred 用的，这里
+  // `resp.deferred` 还是 false，再自己发一次就成了两条响应。所以：
+  //   * `sync_out` 非空 = 这是同步档的那张 task；
+  //   * `sync_sent` = 这次请求**已经回完了**（命中与 404 都置它）；
+  //   * `sync_out` 非空而 `sync_sent` 是假 = 走进了 `load_async()`（缓存未命中，
+  //     要读盘）—— 那一支照旧用 deferred 通道自己回话，调用方据此把
+  //     `resp.deferred` 立起来。
+  uvcpp_http_response* sync_out;
+  bool sync_sent;
 };
 
 // 异步加载任务上下文（worker 线程与事件循环线程之间传递）
@@ -316,6 +329,54 @@ bool uvcpp_static_server::resolve_url(const std::string& raw_url,
   return true;
 }
 
+void uvcpp_static_server::run_stat_inline(StatTask* task) const {
+  task->kind = stat_path(task->loop, task->fs_path, task->mtime_sec,
+                         task->mtime_nsec, task->size);
+  // 孪生探查与上面这一次必须在**同一趟**里做完 —— 分成两趟的话，两次 stat
+  // 之间文件可能被换掉，选出来的孪生与刚校验过的 mtime 对不上。
+  if (task->kind != stat_kind::FILE || task->variant_count == 0) return;
+  for (size_t i = 0; i < task->variant_count; ++i) {
+    const std::string cand = task->fs_path + task->variants[i];
+    int64_t s = 0, ns = 0, sz = 0;
+    if (stat_path(task->loop, cand, s, ns, sz) != stat_kind::FILE) {
+      continue;  // 这一种盘上没有，试下一种（有序表的意义就在这）
+    }
+    task->variant = task->variants[i];
+    task->fs_path = cand;
+    task->mtime_sec = s;
+    task->mtime_nsec = ns;
+    task->size = sz;
+    return;
+  }
+}
+
+void uvcpp_static_server::stat_dispatch(StatTask* task, const std::string& fs_path,
+                                        const std::string& url_path,
+                                        const std::string& spa_fs_path,
+                                        const std::string& spa_url_path, int step) {
+  if (revalidate_ == uvcpp_static_revalidate::LOOP_STAT) {
+    // 同步档：目录 index（step 1）与 SPA 回退（step 2）也在这条线程上一路走完
+    // ——`stat_step()` 的递归最深三层，全在栈上，没有池、没有堆。换路径要拷一份
+    // task（候选表与凭据原样带下去），这也是同步档唯一的额外代价。
+    StatTask local = *task;
+    local.fs_path = fs_path;
+    local.url_path = url_path;
+    local.spa_fs_path = spa_fs_path;
+    local.spa_url_path = spa_url_path;
+    local.step = step;
+    local.variant.clear();  // 换文件了，上一步选中的孪生后缀不再适用
+    run_stat_inline(&local);
+    stat_step(&local);
+    // `local` 是栈上那份，它的 `sync_sent` 得**传回去**：`serve()` 看的是最初
+    // 那张 task 上的这一格，决定还要不要设 `resp.deferred`。`sync_out` 是同一个
+    // 指针（拷贝过来的），所以"发过没有"这一格是唯一需要搬的。
+    task->sync_sent = local.sync_sent;
+    return;
+  }
+  stat_async(fs_path, url_path, spa_fs_path, spa_url_path, step, task->reply,
+             task->server, task->variants, task->variant_count);
+}
+
 void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
                                      std::string spa_fs_path,
                                      std::string spa_url_path, int step,
@@ -324,6 +385,8 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
                                      const std::string* variants,
                                      size_t variant_count) {
   StatTask* task = new StatTask();
+  task->sync_out = nullptr;
+  task->sync_sent = false;
   task->self = this;
   task->server = server;
   task->reply = reply;
@@ -347,28 +410,10 @@ void uvcpp_static_server::stat_async(std::string fs_path, std::string url_path,
   uvcpp_work* work = new uvcpp_work();
   int rc = work->queue_work(
       task->loop,
-      // worker 线程：只做元数据，不碰 reply / server
-      [task](uvcpp_work*) {
-        task->kind = stat_path(task->loop, task->fs_path, task->mtime_sec,
-                               task->mtime_nsec, task->size);
-        // 孪生探查也在这个线程上：它同样只有 stat，而且必须在**同一个** work
-        // 里做完 —— 分成两趟的话，两次 stat 之间文件可能被换掉，选出来的孪生
-        // 与刚校验过的 mtime 对不上。
-        if (task->kind != stat_kind::FILE || task->variant_count == 0) return;
-        for (size_t i = 0; i < task->variant_count; ++i) {
-          const std::string cand = task->fs_path + task->variants[i];
-          int64_t s = 0, ns = 0, sz = 0;
-          if (stat_path(task->loop, cand, s, ns, sz) != stat_kind::FILE) {
-            continue;  // 这一种盘上没有，试下一种（有序表的意义就在这）
-          }
-          task->variant = task->variants[i];
-          task->fs_path = cand;
-          task->mtime_sec = s;
-          task->mtime_nsec = ns;
-          task->size = sz;
-          return;
-        }
-      },
+      // worker 线程：只做元数据，不碰 reply / server。函数体与同步档**共用**
+      // 同一份（`run_stat_inline()`）—— 两条路走的必须是同一套 stat，否则
+      // "选了哪个孪生、比的是谁的 mtime" 会在两档之间悄悄分家。
+      [task](uvcpp_work*) { task->self->run_stat_inline(task); },
       [task, work](uvcpp_work*, int /*status*/) {
         uvcpp_static_server* self = task->self;
         self->stat_step(task);
@@ -423,7 +468,7 @@ void uvcpp_static_server::stat_step(StatTask* task) {
         uvcpp_http_response resp = uvcpp_http_response::ok(
             hit.data->data(), hit.data->size(), hit.mime);
         apply_variant_headers(resp, hit.variant);
-        task->server->send_reply(task->reply, resp);
+        deliver(task, resp);
         return;
       }
     }
@@ -444,21 +489,30 @@ void uvcpp_static_server::stat_step(StatTask* task) {
     if (!url.empty() && url[url.size() - 1] != '/') url += '/';
     url += index_file_;
 
-    stat_async(dir, url, task->spa_fs_path, task->spa_url_path, 1, task->reply,
-               task->server, task->variants, task->variant_count);
+    stat_dispatch(task, dir, url, task->spa_fs_path, task->spa_url_path, 1);
     return;
   }
 
   // 还没试过 SPA 回退，且回退目标和刚 stat 的不是同一个 → 试一次。
   if (task->step < 2 && !task->spa_fs_path.empty() &&
       task->spa_fs_path != task->fs_path) {
-    stat_async(task->spa_fs_path, task->spa_url_path, std::string(),
-               std::string(), 2, task->reply, task->server, task->variants,
-               task->variant_count);
+    stat_dispatch(task, task->spa_fs_path, task->spa_url_path, std::string(),
+                  std::string(), 2);
     return;
   }
 
   uvcpp_http_response resp = uvcpp_http_response::not_found();
+  deliver(task, resp);
+}
+
+void uvcpp_static_server::deliver(StatTask* task, uvcpp_http_response& resp) {
+  if (task->sync_out != nullptr) {
+    // 同步档：`serve()` 还等着往下走，把响应交给它手里的那个对象，别自己发。
+    // 这里不设 `deferred` —— 那个标志归 `serve()` 管（见那里的注释）。
+    *task->sync_out = resp;
+    task->sync_sent = true;
+    return;
+  }
   task->server->send_reply(task->reply, resp);
 }
 
@@ -609,6 +663,40 @@ void uvcpp_static_server::serve(uvcpp_http_request& req, uvcpp_http_response& re
     variant_count =
         http_pick_precompressed_variants(req.get_header("accept-encoding"),
                                          variants);
+  }
+
+  if (revalidate_ == uvcpp_static_revalidate::LOOP_STAT) {
+    // 就地 stat 那一档：命中与 404 都在这里回完，只有**未命中**（要读盘）才落到
+    // `load_async()` 去、走 deferred。栈上这张 task 借 `sync_out` 把响应写回
+    // `resp`；`variants` 那份候选表也照 `stat_async` 的做法按值拷进去 —— 递归到
+    // 目录 index / SPA 回退时，`stat_dispatch()` 拷的就是这份拷贝。
+    StatTask task;
+    task.sync_out = &resp;
+    task.sync_sent = false;
+    task.self = this;
+    task.server = server;
+    task.reply = reply;
+    task.loop = reply.loop();
+    task.fs_path = fs_path;
+    task.url_path = url_path;
+    task.spa_fs_path = spa_fs_path;
+    task.spa_url_path = spa_url_path;
+    task.step = 0;
+    task.kind = stat_kind::MISSING;
+    task.mtime_sec = 0;
+    task.mtime_nsec = 0;
+    task.size = 0;
+    task.variant_count = variant_count > 2 ? 2 : variant_count;
+    for (size_t i = 0; i < task.variant_count; ++i) {
+      task.variants[i] = variants[i];
+    }
+
+    run_stat_inline(&task);
+    stat_step(&task);
+    // 落到读盘那条路时（缓存未命中）它自己会异步回，这里不能抢先设 deferred：
+    // `resp` 此刻还是空的，设了就等着读盘回调把它填上 —— 与池档逐字同策。
+    if (!task.sync_sent) resp.deferred = true;
+    return;
   }
 
   // 元数据也要异步取：sync stat 在事件循环线程上是阻塞 IO，

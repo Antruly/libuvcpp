@@ -8,11 +8,14 @@
  *
  * 设计要点（区别于「启动时一次性预载进内存后不再更新」的旧方案）：
  *  - 懒加载：首次请求某文件时才读盘并写入内存缓存；
- *  - 实时更新：每次请求**在线程池里**对目标文件做一次 stat，一旦 mtime/大小
- *    变化即触发异步重载，文件改动后下一个请求立刻返回最新内容；
+ *  - 实时更新：每次请求对目标文件做一次 stat（默认在**线程池**里，见
+ *    @ref set_revalidate），一旦 mtime/大小变化即触发异步重载，文件改动后
+ *    下一个请求立刻返回最新内容；
  *  - 缓存：命中且未变化的文件直接从内存返回，零磁盘 IO；
- *  - 不阻塞事件循环：stat 与读盘都通过 uvcpp_work 丢到 libuv 线程池，
- *    读完后在事件循环线程回调里更新缓存并通过 deferred 响应发送。
+ *  - 不阻塞事件循环：默认下 stat 与读盘都通过 uvcpp_work 丢到 libuv 线程池，
+ *    读完后在事件循环线程回调里更新缓存并通过 deferred 响应发送。选了
+ *    `uvcpp_static_revalidate::LOOP_STAT` 时**只有 stat 那一步**回到循环线程上
+ *    就地做（读盘仍然走池），取舍见 @ref uvcpp_static_revalidate。
  *
  * 用法：
  * @code
@@ -65,6 +68,39 @@ namespace uvcpp {
 
 class uvcpp_loop;
 class uvcpp_work;
+
+/**
+ * @brief 缓存校验（那次 `stat`）跑在哪条线程上。
+ *
+ * 与 `webapp/uvcpp_web_static.h` 里的 `uvcpp_web_revalidate` **是同一件事、
+ * 同一组取舍**（那两个模块互不依赖，所以各自声明一份，行为必须一致）。
+ * 语义在两种取值下**逐字相同**：每个请求都重新校验一次，文件一改，**下一个
+ * 请求**就带新字节。变的只是那一次 `stat` 在哪条线程上做。
+ *
+ * | 档 | 校验在哪 | 缓存命中的代价 |
+ * |---|---|---|
+ * | `POOL` | 线程池 worker（`uvcpp_work`） | 一次池往返 + 一次 `stat` |
+ * | `LOOP_STAT` | 循环线程就地 `stat` | 只有一次 `stat` |
+ *
+ * `LOOP_STAT` 省掉的正是池往返：实测在 h1/h2 那条腿（`uvcpp_web_static`，同一
+ * 台机器、同一个二进制，只换一个环境变量）上，平台形状（`-c 256 -m 32 -D 5s`，
+ * 三次取中位数）每请求用户态 CPU 从 84.571 µs 掉到 64.671 µs（−23.5%），
+ * 而 `strace -f -c` 下 `statx`/req 一格不差（1.00 → 1.00，校验照样做）、
+ * `futex`/req 从 4.51 掉到 0.23。读数与判据见
+ * [`doc/benchmark.md`](../../doc/benchmark.md) §4.7。
+ *
+ * @note **只在本地盘上合算**：循环线程上那次 `stat` 是**阻塞**的 —— ext4 上
+ *       1.35 µs，FUSE / 网络盘上是 46 µs 量级，后者会把同一条循环上的其它连接
+ *       （h3 上还有 QUIC 自己的定时器与丢包重传）一起拖住：尾延迟涨而 rps 看着
+ *       还行。盘型不明就用默认的 `POOL`。
+ * @note 默认 `POOL`，即 1.6.25 之前唯一的行为。
+ */
+enum class uvcpp_static_revalidate : int {
+  /** 校验在线程池 worker 里做。**默认**，也是 1.6.25 之前唯一的行为。 */
+  POOL = 0,
+  /** 校验在循环线程上直接 `stat`。本地盘上的高吞吐场景。 */
+  LOOP_STAT,
+};
 
 /**
  * @brief 静态文件服务：懒加载 + mtime 校验缓存 + 线程池异步读盘。
@@ -188,6 +224,23 @@ public:
   /** @brief 是否发预压缩孪生文件，默认 false。见 @ref set_precompressed。 */
   bool precompressed() const { return precompressed_; }
 
+  /**
+   * @brief 缓存校验（`stat`）跑在哪条线程上，默认 `POOL`。
+   *
+   * 两档的**语义逐字相同**（每个请求都重新校验，文件一改下一个请求就带新字节），
+   * 变的只是那一次 `stat` 在哪条线程上做 —— 取舍与实测见
+   * @ref uvcpp_static_revalidate，与 `uvcpp_web_static_options::revalidate` 是
+   * 同一个开关。`LOOP_STAT` 要显式开，因为它把**阻塞**的一次 `stat` 放回了
+   * 循环线程：本地盘上划算，FUSE / 网络盘上不划算。
+   *
+   * 只影响**校验**那一步：缓存未命中时的读盘仍然走线程池（读一整份文件是
+   * 毫秒级的阻塞，那一条不在这里赌）。
+   */
+  void set_revalidate(uvcpp_static_revalidate mode) { revalidate_ = mode; }
+
+  /** @brief 当前校验档，默认 `uvcpp_static_revalidate::POOL`。 */
+  uvcpp_static_revalidate revalidate() const { return revalidate_; }
+
   /** @brief 当前缓存条目数。 */
   size_t cache_size() const { return cache_.size(); }
 
@@ -236,6 +289,37 @@ private:
 
   /** @brief stat 完成后的分派：目录 → 拼 index 再来一次；不存在 → SPA 回退；否则发。 */
   void stat_step(StatTask* task);
+
+  /**
+   * @brief 一次 stat 的**全部动作**（`stat_path` + 孪生逐级探测）。
+   *
+   * 只碰 \p task 自己的字段，不碰任何与"跑在哪条线程"有关的东西 —— 池里的
+   * worker 与 `LOOP_STAT` 档都在跑它，两条路必须是同一套语义（否则两种档
+   * 会选出不同的孪生）。函数体是从前 worker 闭包里的那段，逐字搬出来。
+   */
+  void run_stat_inline(StatTask* task) const;
+
+  /**
+   * @brief 按 @ref revalidate_ 把一次 stat 投出去：`POOL` 走 @ref stat_async
+   *        （线程池），`LOOP_STAT` 就地做完后立刻 `stat_step()`。
+   *
+   * `LOOP_STAT` 那一支在**栈上**复制一份 task 再跑：真正的 `StatTask` 是
+   * `stat_async` 里 `new` 出来、由 after_work 回调 `delete` 的，同步档没有
+   * 那一步，用局部副本就不会有人去 delete 一块栈内存。
+   */
+  void stat_dispatch(StatTask* task, const std::string& fs_path,
+                     const std::string& url_path,
+                     const std::string& spa_fs_path,
+                     const std::string& spa_url_path, int step);
+
+  /**
+   * @brief 把一份响应交出去：异步档发给 `task->server`，同步档写回调用者的对象。
+   *
+   * 两种档**只有这一步不同**，所以收到一处来。同步档还要置 `sync_sent`：
+   * `stat_step()` 走到 `load_async()` 那一支时是**不回话**的（改由池里的读盘
+   * 回调回），调用者要靠这一格分辨"已经回完了"与"落到了读盘那条路"。
+   */
+  void deliver(StatTask* task, uvcpp_http_response& resp);
 
   /**
    * @brief 异步读盘：线程池读文件，loop 线程更新缓存 + deferred 发送。
@@ -299,6 +383,8 @@ private:
   bool spa_fallback_ = true;
   bool cache_enabled_ = true;
   bool precompressed_ = false;  ///< 见 @ref set_precompressed，默认关
+  /// 校验跑在哪条线程上，见 @ref set_revalidate，默认 `POOL`（池往返那一档）。
+  uvcpp_static_revalidate revalidate_ = uvcpp_static_revalidate::POOL;
 
   /**
    * @brief 内存缓存，**受 `mu_` 护**。

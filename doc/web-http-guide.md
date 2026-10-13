@@ -574,25 +574,27 @@ int doc_static() {
 ```
 
 **`files` 必须活得比 `server` 长。** `handler()` 捕获的是 `this` 裸指针
-（`src/web/uvcpp_static_server.h:116-120`）—— 上面那个写法（`files` 先于 `server` 声明、
+（`src/web/uvcpp_static_server.h:152-156`）—— 上面那个写法（`files` 先于 `server` 声明、
 后于它析构）是对的。
 
-默认值（构造参数 `src/web/uvcpp_static_server.h:109-111`、成员初值 `:299-300`）：
+默认值（构造参数 `src/web/uvcpp_static_server.h:145-147`、成员初值 `:383-384`）：
 `url_root = "/"`、`index_file = "index.html"`、`spa_fallback = true`、`cache_enabled = true`。
-后两个**有 setter**（`set_spa_fallback()` `:133-133`、`set_cache_enabled()` `:136-136`），
-前两个只能走构造函数。另有一个 `set_precompressed()`（`:186-189`，默认 `false`）——
-见下面「预压缩孪生」那条。
+后两个**有 setter**（`set_spa_fallback()` `:169-169`、`set_cache_enabled()` `:172-172`），
+前两个只能走构造函数。另有两个 setter：`set_precompressed()`（`:222-225`，默认 `false`）
+和 `set_revalidate()`（`:239-242`，默认 `uvcpp_static_revalidate::POOL`）——
+前者见下面讲预压缩孪生的那一节，后者见下面讲校验跑在哪条线程上的那一节。
 构造函数还会把 `local_dir` 去掉尾斜杠、把 `url_root` 规范成 `"/"` 或 `"/xxx"`
-（`src/web/uvcpp_static_server.cpp:206-224`）。
+（`src/web/uvcpp_static_server.cpp:219-237`）。
 
-**它是懒加载的**：首次请求某文件才读盘并进内存缓存，此后每次请求在线程池里
-stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下一个请求就返回新内容**，
-不需要重启。
+**它是懒加载的**：首次请求某文件才读盘并进内存缓存，此后每次请求 stat 一次，
+mtime/大小变了就异步重载 —— 所以文件改完**下一个请求就返回新内容**，不需要重启。
+那次 stat 默认在**线程池**里做（整个库的硬性约定是"事件循环线程上不做 IO"），也可以
+搬回循环线程：见下面「校验跑在哪条线程上」。
 
 ### 能力边界（都是它自己声明的）
 
 - **不做 Range / 206、不做 ETag / 304、不做百分号解码**
-  （`src/web/uvcpp_static_server.h:28-43`）。
+  （`src/web/uvcpp_static_server.h:31-46`）。
 - **多循环（`set_loops(n > 1)`）下可用**（1.6.8 起）。`cache_` 与 `retired_` 从前
   是"循环线程只有一条"写的（两张表都没有锁）。这条在 h3 上从"没人跑"变成必需：
   h3 端点默认就扇在 n 条循环上，而 h3 上挂静态文件**只有本类可用**
@@ -600,10 +602,10 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
 - 防目录穿越靠**段级归一化**（`src/web/uvcpp_static_server.cpp:43-80`），
   并额外拒掉 `\`、`:`、NUL 与控制字符（`:44-48`）。
 - **`spa_fallback` 默认开，意味着找不到文件时也返回 200 的 `index.html`**
-  （`src/web/uvcpp_static_server.cpp:453-458`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
-- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:502-505`
+  （`src/web/uvcpp_static_server.cpp:497-502`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
+- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:556-559`
   取到凭据、`reply_alive()` 逐处核），不是连接 id。
-- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:621-654`）；要可配的用 webapp 层的
+- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:709-742`）；要可配的用 webapp 层的
   `uvcpp_web_static`（`src/webapp/uvcpp_web_static.h`）。
 - **不做实时压缩**：它不填 `resp.cache_tag`，所以 `uvcpp_http_server` 那个按 `cache_tag`
   做键的响应变体缓存对它**不生效** —— 开着 `compress` 时它每请求在循环线程上把整份文件
@@ -614,6 +616,33 @@ stat 一次，mtime/大小变了就异步重载 —— 所以文件改完**下�
   边界也一样：孪生文件不存在就退回原文件、带 `Range` 的请求不取孪生。实测（同一份
   `data/static`、8 循环）**933 → 82 451 rps（88×）**，见
   [`benchmark.md`](benchmark.md) §4.4。
+
+### 校验跑在哪条线程上（`set_revalidate`，1.6.26 起）
+
+一次**命中**的请求，本类要做的唯一 IO 是重新校验那一次 `stat`。它在哪条线程上做，
+由 `uvcpp_static_revalidate` 选：
+
+| 档 | stat 在哪 | 一次命中的池往返 |
+|---|---|---|
+| `POOL`（默认） | 线程池 worker | 有（排队 + 池锁 + after-work 回调各一次） |
+| `LOOP_STAT` | **循环线程就地**（`serve()` 里同步做完） | **零** |
+
+**默认是 `POOL`**，也就是 1.6.25 之前唯一的行为 —— 老调用方一行不改，语义逐字不变。
+`LOOP_STAT` 只把**校验那一步**搬回来：缓存未命中时的读盘、以及 `LOOP_STAT` 自己
+递归出的目录 index / SPA 回退，都还是同一套逻辑（命中与 404 在调用者的 `resp` 上回完，
+未命中才落到异步读盘那条路并置 `resp.deferred`）。
+
+为什么它能省：命中路径上 `stat` 是**唯一**需要池的地方，而一次池往返（排队 + 池锁 +
+`uv_work` 的两次 `futex` + after-work 回调）在 8 核饱和、64 连接下是十几微秒量级。
+实测（h3 那条腿、平台形状 `-c 64 -m 64 -t 8 -D 5s`，同一份 `.so`、同一个二进制、
+只差一个环境变量）：`futex`/req **6.28 → 0.66**、`statx`/req **2.24 → 2.24（一个不少）**、
+总系统调用/req **28.81 → 22.62**；`us_per_req` 中位数 **125.733 → 117.361**（−6.7%），
+p99 **170.5 ms → 140.5 ms**。读数与口径见 [`benchmark.md`](benchmark.md) §4.8。
+
+> **只在本地盘上开。** 循环线程上那次 `stat` 是**阻塞**调用：ext4 上 1.35 µs，
+> FUSE / 网络盘上 46 µs 量级（`uvcpp_static_server.h` 的选项注释里两个数都写着）。
+> 后者会拖住同一条循环上的其它连接 —— 尾延迟会先坏，rps 却看着还行，所以要
+> **同时**看这两个数。默认档 `POOL` 就是为此留的：一个字段回退。
 
 ---
 

@@ -595,12 +595,12 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 注释就写着"循环要到请求时才取"）⇒ n>1 之后它必须回答**这条连接所在的那条**循环。
 
 > **答错循环的后果不是"等"，是数据竞争**（外部复核 2026-09-22 更正）。`work->queue_work()`
-> 拿的就是这个 `task->loop`（`src/web/uvcpp_static_server.cpp:348-349`），它的 **after-work
-> 回调在 `task->loop` 的线程上**跑 `stat_step()`（`src/web/uvcpp_static_server.cpp:372-381`），
+> 拿的就是这个 `task->loop`（`src/web/uvcpp_static_server.cpp:411-412`），它的 **after-work
+> 回调在 `task->loop` 的线程上**跑 `stat_step()`（`src/web/uvcpp_static_server.cpp:417-425`），
 > 而 `stat_step()` 里的 `send_response(task->client, resp)` 走的是 `ctxs_of(client)` ——
 > **这条连接自己那张表**。于是 `loop()` 答错循环时，是在**别的循环的线程上改这张连接的
 > ctx 与它下面的句柄**；同一段代码里那句"worker 线程：只做元数据，不碰 reply / server"
-> （`src/web/uvcpp_static_server.cpp:350`）能成立，前提正是 `task->loop` == 连接的循环。
+> （`src/web/uvcpp_static_server.cpp:413`）能成立，前提正是 `task->loop` == 连接的循环。
 
 `post()` 的"发起者循环"怎么定，见 §5。
 
@@ -613,7 +613,7 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 |---|---|---|---|
 | `uvcpp_ws_sessions::sessions_` / `retired_` | `src/web/uvcpp_ws_sessions.h:193-194` | 每次 WS 接管 `push_back`、每次终结搬进 `retired_`、async 回调里 `delete` | `uvcpp_ws_server::shards_`（`src/web/uvcpp_ws_server.h:272`，按连接的循环号分片） |
 | `uvcpp_web_static::Impl` 的 `cache` / `lru` / `bytes` / `hits` / `misses` / `rejected` / `retired` | `src/webapp/uvcpp_web_static.cpp:604-610` 与 `src/webapp/uvcpp_web_static.cpp:631-631` | 命中改 `lru` 与计数、未命中插入并可能 LRU 淘汰；`retire()` 在 after_work 里 `push_back`（`src/webapp/uvcpp_web_static.cpp:639-639`）、`drain_retired()` 在 `serve()` 开头 `delete`（`src/webapp/uvcpp_web_static.cpp:645-645`） | `uvcpp_web_static`，由 `uvcpp_web_app::serve_static()` 造一份（`src/webapp/uvcpp_web_app.cpp:1362-1365`）—— **请求路径上真正活着的那个容器** |
-| `uvcpp_static_server::cache_` / `retired_` | `src/web/uvcpp_static_server.h:310-318` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:519`），读在 `src/web/uvcpp_static_server.cpp:409-413`；`retired_` 由 `drain_retired()` 清扫（`src/web/uvcpp_static_server.cpp:240-255`） | `uvcpp_static_server` 自己 —— **1.6.8 起是 h3 那条腿上的生产路径**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`，h3 上挂静态文件只能用本类），此前只有用例构造它（`tests/functional/web_static_server_func.cpp:203-203`）|
+| `uvcpp_static_server::cache_` / `retired_` | `src/web/uvcpp_static_server.h:396-404` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:573`），读在 `src/web/uvcpp_static_server.cpp:456-462`；`retired_` 由 `drain_retired()` 清扫（`src/web/uvcpp_static_server.cpp:253-269`） | `uvcpp_static_server` 自己 —— **1.6.8 起是 h3 那条腿上的生产路径**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`，h3 上挂静态文件只能用本类），此前只有用例构造它（`tests/functional/web_static_server_func.cpp:215-215`）|
 
 > **本行已落地（1.6.8-dev）**：`mu_` 一把锁护 `cache_` 与 `retired_` 的**表结构**，
 > 且 `retired_` **按循环分桶** —— `delete` 只能在该循环线程上做，合成一个桶会让
