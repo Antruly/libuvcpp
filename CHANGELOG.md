@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.39-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.40-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -1896,6 +1896,51 @@
   语义一个字没改：Content-Type / ETag / `cache_tag` 三个值**逐字节相同**
   （`cache_tag` 的拼接顺序与分隔符 `\x1f` 原样保留，它是压缩缓存的键）。
   `test_web_app_static_func`（约 18 s）与 `test_web_static_server_func`（约 7 s）全绿。
+
+- **静态热路径上的 `job` 对象改走 per-loop 回收站**（`1.6.40-dev`）。上一条量到的
+  每请求分配是 **98.6** 次，其中最大的一块是"每请求 `new job()` / `delete j`" ——
+  而 `job` 不是个小对象：它身上挂着 6 个 `std::string`（`url`/`final_url`/`fs_path`/
+  `mime_path`/`try_variants[2]`/`variant`）、3 个 `vector`（`probes`/`hints`/
+  `fresh_hints`），外加两个 `shared_ptr`。`new job()` 只是第一笔；真正贵的是**每一次
+  请求都要把这些容器重新长到够用**（`url` 装下一条 URL、`hints` 装下这一批候选键
+  ……），而那些容量在请求结束时全被 `~job` 还给了堆。
+
+  改法是按循环分桶的回收站：`job` 用完不 `delete`，而是就地 `reset()` 之后挂进那条
+  循环的 `free_jobs`（上限 `k_free_cap = 512`，超了照旧 `delete`）；下一个请求
+  `take_job()` 从这里取。`reset()` 用 `clear()` 而**不是** `swap` / `shrink_to_fit()`
+  —— 这是整条改动的要点，容量必须留着，还回去就等于没做。松引用的时刻与 `~job`
+  **逐条一致**：`next`（那份让链挂起的上下文引用）与 `data`（响应体）都在 `reset()`
+  里松开，而调用点就是原来 `delete j` 的那三处 —— 这两份引用按着的是上下文与响应体，
+  "晚一拍松"会把已经结束的连接资源多拖一会儿。
+
+  回收站复用的是 `bucket_for()` 那套（桶地址恒定 + 本线程 `thread_local` 缓存），
+  所以它的读写**一次锁都不取**。
+
+  判据还是每请求的分配次数（同一把尺子、同一个入口二进制、只换 `libuvcpp.so`，
+  窗口 20000 请求，每臂三轮）：
+
+  | 臂 | 库 | `malloc`/req（三轮） | 中位数 |
+  |---|---|---|---|
+  | C3 | `HEAD`（1.6.39-dev） | 97.041 / 97.392 / 97.386 | 97.386 |
+  | C4 | 本版 | 91.696 / 92.408 / 92.322 | **92.322** |
+
+  **−5.06/req（−5.2%）**，高于原定的 ≥2。这里要点明的是：收益主要**不在那一次
+  `new`**，而在容器的容量不再每请求重建 —— 单看对象本身只值 1 次分配。
+
+  **`uvcpp_work` 那一半这一版没做，理由是硬的**（同样写在 `retire_bucket` 的注释里）：
+  `uvcpp_work::queue_work()` 在 `loop != nullptr` 时**抛异常**（`src/req/uvcpp_work.cpp`
+  的 `"error,local loop had value"`），而那个 `loop` 是私有成员、缓存之后没有任何公开
+  路径能清掉。复用一个用过的 `uvcpp_work` 会让每个请求都在 `queue_work()` 上抛出去
+  （实测：静态用例整组 500）。要做就得先给那个核心类加一条"可以再次 `queue_work()`"
+  的契约 —— 那是另一处改动、另一套判据，不塞进这一版。
+
+  ASAN/UBSAN（`build-c4san`：RelWithDebInfo + `-fsanitize=address,undefined`）：
+  `test_web_app_static_func` 的泄漏足迹与只带 C3 的对照**逐字节相同**（12477 字节 /
+  16 次分配 —— 这是框架侧 `uvcpp_web_context::create` 的既存泄漏，与本次改动无关），
+  两臂都**没有一条 `[FAIL]` 断言**。`test_web_static_server_func` 另报 7796 字节 /
+  58 次分配：那条腿走的是 `src/web/uvcpp_static_server.cpp`（h3 腿），本版只动了
+  `src/webapp/uvcpp_web_static.cpp`，而那个用例连 `webapp/uvcpp_web_static.h` 都没
+  include ⇒ 不是本次引入的。
 
 ### JSON
 

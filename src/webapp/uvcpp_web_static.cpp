@@ -840,6 +840,49 @@ struct uvcpp_web_static::Impl {
           mtime_sec(0),
           mtime_nsec(0),
           size(0) {}
+
+    /**
+     * @brief 放回回收站之前把自己清干净 —— **容量留着，内容丢掉**。
+     *
+     * 这是 `job` 走回收站的**全部要点**：`url` / `final_url` / `fs_path` /
+     * `mime_path` / `probes` / `hints` / `fresh_hints` 在下一次请求里会被
+     * `operator=` / `push_back()` 复用，只要容量够就**不再分配**。所以这里
+     * 必须是 `clear()`，不能是 `job().swap(*this)` 或 `shrink_to_fit()` ——
+     * 那两种会把容量还回去，等于每请求照旧分配。
+     *
+     * 松引用的时刻与 `~job` **逐条一致**：`next`（那份让链挂起的上下文引用）
+     * 与 `data`（响应体）都在这里松开，而且调用点也就是原来 `delete j` 的
+     * 那三处。这一点是必须对齐的 —— 这两份引用按着的是上下文与响应体，
+     * "晚一拍松"就会把已经结束的连接资源多拖一会儿。
+     */
+    void reset() {
+      self = nullptr;
+      loop = nullptr;
+      req = nullptr;
+      resp = nullptr;
+      next = uvcpp_web_next();
+      url.clear();
+      is_head = false;
+      probes.clear();
+      hints.clear();
+      fresh_hints.clear();
+      try_variants[0].clear();
+      try_variants[1].clear();
+      variant.clear();
+      slot_held = false;
+      probed_on_loop = false;
+      status = probe_status::NOT_FOUND;
+      policy_rejected = false;
+      served_from_cache = false;
+      final_url.clear();
+      fs_path.clear();
+      mime_path.clear();
+      mtime_sec = 0;
+      mtime_nsec = 0;
+      size = 0;
+      data.reset();
+      cfg.reset();
+    }
   };
 
   uvcpp_web_static_options opts;
@@ -937,7 +980,31 @@ struct uvcpp_web_static::Impl {
      * 线程）。这正是分桶的第二个好处 —— 第一个是"只删自己投出去的"。
      */
     std::vector<uvcpp_work*> pending;
+
+    /**
+     * @brief **回收站**：已经清干净、留着复用的对象。
+     *
+     * 与 `pending` 分开是因为两者语义不同：`pending` 是"刚用完、还没处理"，
+     * 回收站里的是"清干净了、随时能发出去"。`take_job()` 从这里取，取不到
+     * 才 `new`；`release_job()` 往这里放。
+     *
+     * **这里只有 `job`，没有 `uvcpp_work`** —— 后者这一版做不了，理由是硬的，
+     * 写在这里免得下次又有人试：`uvcpp_work::queue_work()` 在 `loop != nullptr`
+     * 时**抛异常**（`src/req/uvcpp_work.cpp` 的 `"error,local loop had value"`），
+     * 而那个 `loop` 是私有成员、缓存之后没有任何公开路径能清掉。复用一个用过
+     * 的 `uvcpp_work` 就会在 `queue_work()` 上抛出去（实测：静态用例整组 500）。
+     * 要做就得先给那个核心类加一条"可以再次 `queue_work()`"的契约 —— 那是另一
+     * 处改动、另一套判据，不塞进这一版。
+     *
+     * **有上限**（`k_free_cap`）：稳态下回收站的深度就是这条循环上的在途峰值，
+     * 峰值本身不会因为回收站而变大；但没有上限的话，一次尖峰之后那份深度会被
+     * 一直留着。超上限的这一批照旧 `delete` —— 退化成今天的行为，不是泄漏。
+     */
+    std::vector<job*> free_jobs;
   };
+
+  /// 每条循环的回收站上限（个）。见 `retire_bucket::free_jobs`。
+  static const size_t k_free_cap = 512;
 
   std::map<uvcpp_loop*, retire_bucket> retired;
 
@@ -1005,7 +1072,10 @@ struct uvcpp_web_static::Impl {
     bucket_for(l)->pending.push_back(w);
   }
 
-  /// 真正释放 \p l 那一条循环攒下的。**绝不能在任何回调里调。**
+  /// 真正释放 \p l 那一条循环攒下的 work。**绝不能在任何回调里调。**
+  ///
+  /// `uvcpp_work` 这一版**不复用**（理由见 `retire_bucket`），所以这里仍然是
+  /// "删"，只是 `job` 那一份不再走这条路。
   void drain_retired(uvcpp_loop* l) {
     retire_bucket* b = bucket_for(l);
     if (b->pending.empty()) return;  // 常态：连锁带 map 查找全省掉
@@ -1013,6 +1083,37 @@ struct uvcpp_web_static::Impl {
     mine.swap(b->pending);
     // 锁外删：`~uvcpp_work` 里会发生什么不该由这把锁兜着。
     for (size_t i = 0; i < mine.size(); ++i) delete mine[i];
+  }
+
+  /// 取一个 `job`：回收站里有就复用，没有才 `new`。返回的一定是**干净**的
+  /// （进回收站之前 `reset()` 过），所以调用方看到的与 `new job()` 逐字段相同。
+  job* take_job(uvcpp_loop* l) {
+    retire_bucket* b = bucket_for(l);
+    if (b->free_jobs.empty()) return new job();
+    job* j = b->free_jobs.back();
+    b->free_jobs.pop_back();
+    return j;
+  }
+
+  /**
+   * @brief 归还一个 `job`：就地 `reset()` 再放进回收站。
+   *
+   * **就地**是刻意的，不是图省事：`reset()` 会松开这份 `job` 按着的 `next`
+   * （上下文引用）与 `data`（响应体），而调用它的三处正是原来 `delete j` 的
+   * 那三处。清理时机一个字节都没变，只是内存不再还给堆。
+   *
+   * 回调里（`uvcpp_work` 的 after_work）调用也安全 —— 现状就是在那里
+   * `delete j`。**与 `retire()` 那条约束的区别**：那边不能删是因为被删的
+   * `w` 自己身上存着**正在执行的闭包**；`job` 是另一个对象，身上没有闭包。
+   */
+  void release_job(uvcpp_loop* l, job* j) {
+    retire_bucket* b = bucket_for(l);
+    j->reset();
+    if (b->free_jobs.size() < k_free_cap) {
+      b->free_jobs.push_back(j);
+    } else {
+      delete j;
+    }
   }
 
   /**
@@ -1031,9 +1132,10 @@ struct uvcpp_web_static::Impl {
     }
     for (std::map<uvcpp_loop*, retire_bucket>::iterator it = all.begin();
          it != all.end(); ++it) {
-      for (size_t i = 0; i < it->second.pending.size(); ++i) {
-        delete it->second.pending[i];
-      }
+      // 两份都要：**刚用完还没处理的** work，以及回收站里的 `job`。
+      retire_bucket& b = it->second;
+      for (size_t i = 0; i < b.pending.size(); ++i) delete b.pending[i];
+      for (size_t i = 0; i < b.free_jobs.size(); ++i) delete b.free_jobs[i];
     }
   }
 
@@ -2112,7 +2214,10 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
   //
   // 随之改变的只有 503 的产出位置：从这里的同步回绝变成 `finish_job()` 里的
   // 一个 `probe_status::REJECTED` 分支，响应内容（503 + Retry-After）不变。
-  Impl::job* j = new Impl::job();
+  // 从本循环的回收站里取一个（没有才 `new`）。取到的那个是干净的，下面这些
+  // 赋值**逐条与 `new job()` 之后完全一样**；回收站带来的差别是那些成员串的
+  // 容量还在，于是这些赋值多数不再落堆 —— 见 `Impl::job::reset()`。
+  Impl::job* j = im->take_job(loop);
   j->self = im;
   j->cfg = im->cfg;
   j->loop = loop;
@@ -2158,7 +2263,7 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
       // 删 `j` 就是丢掉那份 next 副本（引用计数回到原样），所以框架在
       // handler 返回时量到的仍然是"这一环没挂起"。
       resp.end();
-      delete j;
+      im->release_job(loop, j);
       return;
     }
     // 走到这里只有一种情形：探到了、要读盘。下面照常投池，worker 只做读盘
@@ -2212,7 +2317,9 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
         // 上下文（连同 `j->resp` 指向的对象）销毁掉，而那份 next 副本
         // 本身就持有上下文，所以它是安全的最后一步。
         const uvcpp_web_next resume = j->next;
-        delete j;
+        // 先归还再 `resume()` —— 与原先"先 `delete j` 再 `resume()`"同一个
+        // 顺序，所以 `next` 那份上下文引用松开的时刻也一模一样。
+        j->self->release_job(j->loop, j);
         if (resume) resume();
       });
   if (rc != 0) {
@@ -2224,7 +2331,7 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
     // 别人的名额还掉。
     // 删掉 job 同时也就丢掉了 next 的那份副本，于是框架照常收尾、
     // 把下面这个 500 发出去。
-    delete j;
+    im->release_job(loop, j);
     resp.server_error();
     resp.end();
   }
