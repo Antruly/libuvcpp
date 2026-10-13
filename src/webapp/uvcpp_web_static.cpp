@@ -525,6 +525,15 @@ struct uvcpp_web_static::Impl {
      */
     bool slot_held;
 
+    /**
+     * @brief **循环线程已经把 `probe_job()` 整个做完了** —— worker 只许读盘。
+     *
+     * 只在 `revalidate == LOOP_STAT` 时为真（见 `serve()`）。worker 看到它就跳过
+     * `probe_job()`，于是**不会有第二次 `stat`**：这次请求的磁盘身份是被循环
+     * 线程那条线程看到的，worker 只负责把已经认定的那个文件读进内存。
+     */
+    bool probed_on_loop;
+
     // worker 产出
     probe_status status;
     bool policy_rejected;
@@ -552,6 +561,7 @@ struct uvcpp_web_static::Impl {
           next(),
           is_head(false),
           slot_held(false),
+          probed_on_loop(false),
           status(probe_status::NOT_FOUND),
           policy_rejected(false),
           served_from_cache(false),
@@ -662,6 +672,11 @@ struct uvcpp_web_static::Impl {
 
   bool cache_enabled() const { return opts.cache_max_entries > 0; }
 
+  /// 校验（以及一切 `stat`）是否搬到了循环线程上。见 `uvcpp_web_revalidate`。
+  bool loop_revalidate() const {
+    return opts.revalidate == uvcpp_web_revalidate::LOOP_STAT;
+  }
+
   const uvcpp_web_mime_map& mime_map() const {
     return opts.mime != nullptr ? *opts.mime : uvcpp_web_mime_map::default_map();
   }
@@ -726,6 +741,30 @@ struct uvcpp_web_static::Impl {
     p.size = it->second.size;
     p.data = it->second.data;
     out.push_back(p);
+  }
+
+  /**
+   * @brief `LOOP_STAT` 那一档的缓存比对：**查 `key` 一个键**，判据与探针一致。
+   *
+   * 判据和 `POOL` 那一支的三个字段逐个相同（大小、mtime 秒、mtime 纳秒）——
+   * 也就是"这份快照还算不算数"在两条路上是**同一个问题**，只是快照的来源
+   * 不同：`POOL` 是 `serve()` 提前拷的，这里是**当场读**的（因为 stat 刚刚在
+   * 同一条线程上做完，中间没有别的东西能插进来）。
+   *
+   * 不提升 LRU：`POOL` 那一支也只是把快照拷进 job，从不碰 `lru`。两条路在
+   * "命中算不算一次使用"上的行为必须一致，否则 `LOOP_STAT` 会悄悄改掉淘汰次序。
+   */
+  bool lookup_cache(const std::string& key, int64_t size, int64_t sec,
+                    int64_t nsec, std::shared_ptr<std::string>& out) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    const std::map<std::string, cache_entry>::const_iterator it = cache.find(key);
+    if (it == cache.end()) return false;
+    if (it->second.size != size || it->second.mtime_sec != sec ||
+        it->second.mtime_nsec != nsec) {
+      return false;
+    }
+    out = it->second.data;
+    return true;
   }
 
   /// 写入并提升到队首。命中与未命中走的是同一条路 —— 命中时它顺带把快照
@@ -832,7 +871,35 @@ struct uvcpp_web_static::Impl {
 
   // ---- 跨线程两侧 ----
 
-  void run_job(job* j);     ///< worker 线程
+  /**
+   * @brief 探路径 + 缓存比对：把 job 填成"知道该做什么"的状态。**不读盘**。
+   *
+   * 在 `POOL` 档里跑在 worker 上（那正是本模块一直以来的样子）；在 `LOOP_STAT`
+   * 档里由 `serve()` 在**循环线程**上直接调一次 —— 这是两档唯一的实现差别，
+   * 函数体一行都不变。
+   */
+  void probe_job(job* j);
+
+  /**
+   * @brief 把 `probe_job()` 认定要读的那份文件读进内存。会阻塞，**要占名额**。
+   *
+   * 只有 `needs_read()` 为真时才该调 —— 它只从 `run_job()` 里被调。
+   */
+  void read_job(job* j);
+
+  /// 探完（可能已在循环线程上探过）之后，这次请求**还要不要读盘**。
+  ///
+  /// 判据只有一条：探到了文件、且手上没有它的字节。`STREAM`/`TOO_LARGE` 是
+  /// 终结态（前者自己按块读、后者一个字节都不读），`NOT_FOUND`/`FORBIDDEN`
+  /// 更没有；命中缓存则已经有了 `data`。
+  bool needs_read(const job* j) const {
+    return j->status == probe_status::OK && !j->data;
+  }
+
+  void run_job(job* j) {  ///< worker 线程（`LOOP_STAT` 下只做后半段）
+    if (!j->probed_on_loop) probe_job(j);
+    if (needs_read(j)) read_job(j);
+  }
   void finish_job(job* j);  ///< loop 线程
 
   /**
@@ -866,7 +933,7 @@ bool uvcpp_web_static::Impl::acquire_slot(job* j) {
   return true;
 }
 
-void uvcpp_web_static::Impl::run_job(job* j) {
+void uvcpp_web_static::Impl::probe_job(job* j) {
   probe_result pr;
   probe_status s = probe_with_index(j->loop, *j->cfg, j->url, pr);
 
@@ -972,13 +1039,31 @@ void uvcpp_web_static::Impl::run_job(job* j) {
     return;
   }
 
-  // 缓存校验：拿 loop 线程给的期望快照和刚 stat 到的真实值比。
-  // 对上了就**不读盘** —— 热文件的成本是一次 stat。
+  // 缓存校验：拿"期望快照"和刚 stat 到的真实值比。对上了就**不读盘** ——
+  // 热文件的成本是一次 stat。
   //
-  // **命中路径不占名额**，这是本模块最关键的一条：命中时 worker 只做了一次
-  // `stat`（几微秒），一个字节的磁盘读都没有，内存面也早就有 `max_cached_file_size`
+  // **命中路径不占名额**，这是本模块最关键的一条：命中时只做了一次 `stat`
+  // （几微秒），一个字节的磁盘读都没有，内存面也早就有 `max_cached_file_size`
   // 封着。让这样一次请求去抢名额，代价是**并发一过闸门就大面积 503**，而收益
   // 是零 —— 实测并发 64 时 71.7% 的请求被拒，其中 99.97% 本来能命中缓存。
+  //
+  // 两档在这一步分岔，**判据完全相同**（键、大小、mtime 秒、mtime 纳秒）：
+  //  - `POOL`：快照是 `serve()` 提前在缓存里拷的（`j->probes`）。stat 在 worker
+  //    上，两件事不在同一刻，只能"先拍快照、后比对"。
+  //  - `LOOP_STAT`：`probe_job()` 就是在循环线程上被调的那一次，stat 与查表
+  //    **一刻完成**，快照这个概念不存在了 —— 直接查 `final_url` 一个键。
+  //    **为什么只查一个键还等价**：上面那一支的循环体里，真正能命中的也只有
+  //    `p.key == j->final_url` 那一条，索引名/SPA 回退/孪生后缀这些候选键在
+  //    这个等式上都会被筛掉。候选列表的意义是"把数据提前拿到手里"，而这里
+  //    数据就地在缓存里，拿到手的方式就是这把锁下面这一次查找。
+  if (j->probed_on_loop) {
+    if (cache_enabled() &&
+        lookup_cache(j->final_url, j->size, j->mtime_sec, j->mtime_nsec,
+                     j->data)) {
+      j->served_from_cache = true;
+    }
+    return;
+  }
   for (size_t i = 0; i < j->probes.size(); ++i) {
     const cache_probe& p = j->probes[i];
     // 比的是**这一份**（可能已经是孪生文件）的身份：键、大小、mtime。键里
@@ -990,7 +1075,9 @@ void uvcpp_web_static::Impl::run_job(job* j) {
       return;
     }
   }
+}
 
+void uvcpp_web_static::Impl::read_job(job* j) {
   // 走到这里只剩一条路：**把文件整读进内存**。这才是闸门要卡的那件事。
   if (!acquire_slot(j)) return;
 
@@ -1287,6 +1374,7 @@ uvcpp_web_static_options::uvcpp_web_static_options(size_t max_file)
       cache_max_bytes(32u * 1024u * 1024u),
       max_cached_file_size(1024u * 1024u),
       precompressed(false),
+      revalidate(uvcpp_web_revalidate::POOL),
       dotfiles(uvcpp_web_dotfile_policy::HIDE),
       follow_symlinks(true),
       add_charset(true),
@@ -1516,7 +1604,34 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
   // 返回之前）—— 框架是在 handler 返回的那一刻量引用数来判断"留没留"的。
   j->next = next;
 
-  if (im->cache_enabled()) {
+  if (im->loop_revalidate()) {
+    // ---- LOOP_STAT：探路径与缓存校验**就在这条线程上做完** ----
+    //
+    // 这里是整个选项的全部实现：把 worker 那前半段提前搬过来同步跑一次。
+    // 探到了、而且缓存里那份还算数（或者已经是终结态），这次请求就**一个池
+    // 任务都不用投** —— 省掉的是"提交 + 唤醒 + after_work 回来"这三次跨线程
+    // 往返。实测在 8 核打满时，本模块每请求的 CPU 里有 12~19 µs 花在
+    // `futex`/`pthread_cond_signal`/`__lll_lock_*` 上，而那一段**全部**来自
+    // 这次往返（`futex`/req ≈ 8 次，命中路径本身一次锁都不该拿）。
+    //
+    // 代价写在选项的注释里：这个 `stat` 会阻塞同一条循环上的其它连接，
+    // 本地盘几微秒、FUSE/网络盘几十微秒到毫秒。**所以默认是 `POOL`。**
+    j->probed_on_loop = true;
+    im->probe_job(j);
+    if (!im->needs_read(j)) {
+      // 命中或终结态。走的是**同一个** `finish_job()`，填出来的响应与 worker
+      // 那条路逐字节相同 —— 区别只在"谁来填"和"投不投池任务"。
+      im->finish_job(j);
+      // 与上面几条同步路径同构：填好、`end()`、不留 next，框架自己收尾。
+      // 删 `j` 就是丢掉那份 next 副本（引用计数回到原样），所以框架在
+      // handler 返回时量到的仍然是"这一环没挂起"。
+      resp.end();
+      delete j;
+      return;
+    }
+    // 走到这里只有一种情形：探到了、要读盘。下面照常投池，worker 只做读盘
+    // 那一段（`probed_on_loop` 为真，它不会再 stat 第二次）。
+  } else if (im->cache_enabled()) {
     im->collect_probes(url, j->try_variants, j->probes);
   }
 

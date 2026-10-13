@@ -128,6 +128,37 @@ enum class uvcpp_web_dotfile_policy : int {
   ALLOW,
 };
 
+/**
+ * @brief 缓存校验（"缓存里那份还算不算数"）在哪条线程上做。
+ *
+ * 两档的**语义完全相同** —— 都是"下一次请求一定拿磁盘上现在的字节"，区别只在
+ * 校验那次 `stat` 跑在哪条线程上：
+ *
+ * | 档 | 校验在哪 | 缓存命中的代价 |
+ * |---|---|---|
+ * | `POOL` | 线程池 worker | 每请求一次池往返（`uv_queue_work` + 唤醒 + `after_work`） |
+ * | `LOOP_STAT` | 请求所在的那条循环线程 | 一次同步 `stat`，**一个池任务都不投** |
+ *
+ * `LOOP_STAT` 之所以成立：校验只需要一次 `stat`，而 `stat` 在本地文件系统上
+ * 是微秒级的（ext4 实测 1.35 µs）。把它放进池子换来的是每请求两次跨线程唤醒
+ * （提交一次、回来一次）—— 实测在 8 核打满时，`uvcpp_web_static` 的每请求
+ * CPU 里有约 12~19 µs 花在 `futex`/`pthread_cond_signal`/`__lll_lock_*` 上，
+ * 而那一段**全部**来自这次池往返。命中时省掉它，等于把那 12~19 µs 直接抹掉。
+ *
+ * @note 代价与适用面（**所以默认是 `POOL`**）：`LOOP_STAT` 把一次阻塞 `stat`
+ *       放在循环线程上，同一条循环上的其它连接要等它。本地盘（ext4/xfs/
+ *       btrfs、tmpfs）上这个等待是微秒级；FUSE、网络盘（NFS/SMB）上是几十
+ *       微秒到毫秒级 —— 实测同一个 `stat` 在 FUSE 挂载上是 46 µs（ext4 的
+ *       34 倍），那时该等的是**别的连接**，该留在池子里。用之前先量一下自己的
+ *       文档根所在文件系统。
+ */
+enum class uvcpp_web_revalidate : int {
+  /** 校验在线程池 worker 里做。**默认**，也是 1.6.24 之前唯一的行为。 */
+  POOL = 0,
+  /** 校验在循环线程上直接 `stat`。本地盘上的高吞吐场景。 */
+  LOOP_STAT,
+};
+
 /** @brief `.well-known` 这类目录即使策略是 `HIDE` 也应当放行的白名单。 */
 struct UVCPP_API uvcpp_web_static_options {
   /** @brief 目录请求时按顺序尝试的索引文件名。默认 `{"index.html"}`。 */
@@ -249,6 +280,14 @@ struct UVCPP_API uvcpp_web_static_options {
    * LRU 的失效比较都取它），所以重新压一遍之后对端必然拿到新的那一份。
    */
   bool precompressed;
+
+  /**
+   * @brief 缓存校验（`stat`）跑在哪条线程上。默认 `POOL`。
+   *
+   * 见 `uvcpp_web_revalidate` 的表格与那段 @note —— **`POOL` 是 1.6.24 之前
+   * 唯一的行为，逐字节等价**；`LOOP_STAT` 只在文档根位于本地文件系统时开。
+   */
+  uvcpp_web_revalidate revalidate;
 
   /** @brief dotfile 策略。默认 `HIDE`（404）。 */
   uvcpp_web_dotfile_policy dotfiles;

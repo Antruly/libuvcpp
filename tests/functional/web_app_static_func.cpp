@@ -1616,6 +1616,132 @@ void test_cache() {
   check_eq(body_of(r), "hello static", "第三次读同一份内容");
 }
 
+// ---- 11b. `revalidate = LOOP_STAT`：校验搬到循环线程 ----
+//
+// 这一档**不改任何对外行为**：同一个 URL 在两条路上必须给出逐字节相同的响应，
+// 命令与缓存判据也逐字相同。所以"响应相等"这一类断言在这里**证明不了东西**
+// —— 把整个选项删掉、永远走池子，它们照样全绿。
+//
+// 能看见它的只有三样：
+//   1. **命中计数**。命中必须在**一次池往返都不投**的情况下发生；计数与
+//      `POOL` 那组逐字相同（1 未命中 + 1 命中）说明校验发生了、而且发生了
+//      **恰好一次**（stat 两次会让 miss 变 2，一次都不做会让内容停在旧值上）。
+//   2. **失效的时机**。改写文件（同长度、只有 mtime 能分辨）之后**第一个**请求
+//      就必须拿到新字节 —— 这是"下一个请求必带新字节"那条契约在循环线程这一档
+//      上的直接体现，也是 `validate.sh` 的 staleness 探针量的事。
+//   3. **软链换向**。逃逸链接在这条路上同样要被挡住：`probe_job()` 一步都没省，
+//      少做的只是"投池"。
+//
+// 自己起一个 App：计数要钉死具体数字，复用共享 App 会被前面的用例改掉。
+void test_loop_stat() {
+  std::cout << "[static] loop_stat" << std::endl;
+
+  const std::string r(k_root);
+  // 同长度改写的靶子。**长度刻意不变**：这样"拿到新字节"只可能来自 mtime
+  // 的纳秒位，而不是尺寸差异，判据才咬得住那条契约。
+  check(write_file(r + "/ls_change.txt", std::string(64, 'a')),
+        "前置：写入 ls_change.txt");
+
+  uvcpp_web_app app;
+  app.set_port(0);
+  app.set_log_level(log_level::WARN);
+  uvcpp_web_static_options loopstat;
+  loopstat.revalidate = uvcpp_web_revalidate::LOOP_STAT;
+  // 孪生文件一起开：那一支在 `probe_job()` 里是**额外的两次 `probe_leaf`**，
+  // 搬不搬到循环线程上是有区别的（`POOL` 下它们在 worker 上），所以要覆盖到。
+  loopstat.precompressed = true;
+  std::shared_ptr<uvcpp_web_static> st =
+      app.serve_static("/ls", k_root, loopstat);
+  check(st != nullptr, "loop_stat：挂载应当成功");
+
+  if (app.start_background() != 0) {
+    check(false, "loop_stat：服务启动失败");
+    return;
+  }
+  const int port = app.bound_port();
+  check(port > 0, "loop_stat：端口有效");
+  uvcpp_http_response rsp;
+
+  // (1) 普通文件：一次未命中、一次命中，内容与 `POOL` 档逐字相同
+  check(get(port, "/ls/hello.txt", rsp), "/ls/hello.txt 应当有响应");
+  check_eq_i(status_of(rsp), 200, "loop_stat：普通文件的 200");
+  check_eq(body_of(rsp), "hello static", "loop_stat：普通文件的内容");
+
+  check(get(port, "/ls/hello.txt", rsp), "第二次取 /ls/hello.txt");
+  check_eq(body_of(rsp), "hello static", "loop_stat：命中的内容与未命中相同");
+
+  // (2) 同长度改写 ⇒ **下一个**请求必须带新字节
+  check(get(port, "/ls/ls_change.txt", rsp), "第一次取 ls_change.txt");
+  check_eq(body_of(rsp), std::string(64, 'a'), "loop_stat：改写前的内容");
+  check(write_file(r + "/ls_change.txt", std::string(64, 'b')),
+        "同长度改写 ls_change.txt（只有 mtime 能分辨）");
+  check(get(port, "/ls/ls_change.txt", rsp), "改写后取 ls_change.txt");
+  check_eq(body_of(rsp), std::string(64, 'b'),
+           "loop_stat：改写后**第一个**请求就必须带新字节");
+  check(get(port, "/ls/ls_change.txt", rsp), "改写后再取一次（应当重新命中）");
+  check_eq(body_of(rsp), std::string(64, 'b'), "loop_stat：重新命中的内容");
+
+  // (3) 目录索引：走的是 `probe_with_index` 那一条，键与 URL 不是同一个字符串
+  check(get(port, "/ls/sub/", rsp), "/ls/sub/ 应当有响应");
+  check_eq(body_of(rsp), "<h1>SUB-INDEX</h1>", "loop_stat：目录索引的内容");
+  check(get(port, "/ls/sub/", rsp), "/ls/sub/ 再取一次");
+  check_eq(body_of(rsp), "<h1>SUB-INDEX</h1>", "loop_stat：目录索引命中");
+
+  // (4) 软链逃逸在这条路上同样挡住（内容判据，不看状态码）
+  check(get(port, "/ls/escape/secret2.txt", rsp),
+        "/ls/escape/secret2.txt 应当有响应");
+  check_hides(body_of(rsp), k_outside_text,
+              "loop_stat：经链接读到根外文件 —— 第 2 道边界没挡住");
+  check(status_of(rsp) != 200, "loop_stat：经链接取根外文件不该回 200");
+  check(get(port, "/ls/inside/a.txt", rsp), "loop_stat：指向根内的链接照常服务");
+  check_eq(body_of(rsp), "sub a", "loop_stat：根内链接的内容");
+
+  // (5) 孪生文件在这条路上照常选中，而且**孪生自己改了也要立刻生效**
+  auto twin = [port](const std::string& path) {
+    raw_result rr = raw_exchange(port,
+                                 "GET " + path +
+                                     " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                     "Connection: close\r\n"
+                                     "Accept-Encoding: br\r\n\r\n",
+                                 3000);
+    return rr.ok ? rr.raw : std::string();
+  };
+  const std::string t1 = twin("/ls/pc.txt");
+  check_eq(raw_header(t1, "content-encoding"), "br",
+           "loop_stat：应当选中 .br 孪生文件");
+  check_eq(raw_body(t1), "BR-SIDECAR-BODY", "loop_stat：孪生文件的字节");
+  const std::string t2 = twin("/ls/pc.txt");
+  check_eq(raw_body(t2), "BR-SIDECAR-BODY", "loop_stat：孪生文件命中");
+  check(write_file(r + "/pc.txt.br", "BR-REWRITTEN"),
+        "改写孪生文件 pc.txt.br");
+  const std::string t3 = twin("/ls/pc.txt");
+  check_eq(raw_body(t3), "BR-REWRITTEN",
+           "loop_stat：孪生文件改写后**第一个**请求就必须带新字节");
+  // 还原，免得影响别的用例（`test_precompressed` 也读这一份）
+  check(write_file(r + "/pc.txt.br", "BR-SIDECAR-BODY"), "还原 pc.txt.br");
+
+  app.stop();
+  app.join();
+
+  // 计数只能在 App 停干净之后读。上面一共 12 次请求，逐条对账：
+  //   hello.txt  ×2 → 1 未命中（首读）+ 1 命中
+  //   ls_change  ×3 → 2 未命中（首读、改写后）+ 1 命中
+  //   sub/       ×2 → 1 未命中（索引键 `/sub/index.html`）+ 1 命中
+  //   inside/a.txt ×1 → 1 未命中（根内链接正常服务，只取过一次）
+  //   pc.txt     ×3 → 2 未命中（孪生首读、孪生改写后）+ 1 命中
+  //   escape/…   ×1 → **不计数**：`probe_job()` 里就是 FORBIDDEN 终结态，
+  //                   `finish_job()` 在那之前就返回了，缓存根本没参与。
+  // 合计：未命中 7、命中 4。
+  std::cout << "[static] loop_stat: hits=" << st->cache_hits()
+            << " misses=" << st->cache_misses()
+            << " entries=" << st->cache_entries() << std::endl;
+  check_eq_i(static_cast<long long>(st->cache_misses()), 7,
+             "loop_stat：未命中次数（含孪生与 inside）");
+  check_eq_i(static_cast<long long>(st->cache_hits()), 4,
+             "loop_stat：命中次数 —— 命中必须在一次池往返都没投的情况下发生");
+  check(st->cache_entries() >= 1, "loop_stat：条目数应当 >= 1");
+}
+
 // ---- 12. 各种选项 ----
 
 void test_options() {
@@ -1905,6 +2031,7 @@ int main() {
     if (want("symlink")) test_symlink_escape();
     if (want("spa")) test_spa_fallback();
     if (want("cache")) test_cache();
+    if (want("loop_stat")) test_loop_stat();
     if (want("options")) test_options();
     if (want("precompressed")) test_precompressed();
 
