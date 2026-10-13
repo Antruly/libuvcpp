@@ -627,7 +627,7 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 | 容器 | 位置 | 写点 | 谁持有 |
 |---|---|---|---|
 | `uvcpp_ws_sessions::sessions_` / `retired_` | `src/web/uvcpp_ws_sessions.h:193-194` | 每次 WS 接管 `push_back`、每次终结搬进 `retired_`、async 回调里 `delete` | `uvcpp_ws_server::shards_`（`src/web/uvcpp_ws_server.h:272`，按连接的循环号分片） |
-| `uvcpp_web_static::Impl` 的 `cache` / `lru` / `bytes` / `hits` / `misses` / `rejected` / `retired` | `src/webapp/uvcpp_web_static.cpp:924-946` 与 `src/webapp/uvcpp_web_static.cpp:1009-1009` | 命中改 `lru` 与计数、未命中插入并可能 LRU 淘汰；`retire()` 在 after_work 里 `push_back`（`src/webapp/uvcpp_web_static.cpp:1071-1071`）、`drain_retired()` 在 `serve()` 开头 `delete`（`src/webapp/uvcpp_web_static.cpp:1079-1079`） | `uvcpp_web_static`，由 `uvcpp_web_app::serve_static()` 造一份（`src/webapp/uvcpp_web_app.cpp:1362-1365`）—— **请求路径上真正活着的那个容器** |
+| `uvcpp_web_static::Impl` 的 `cache` / `lru` / `bytes` / `hits` / `misses` / `rejected` / `retired` | `src/webapp/uvcpp_web_static.cpp:940-962` 与 `src/webapp/uvcpp_web_static.cpp:1025-1025` | 命中改 `lru` 与计数、未命中插入并可能 LRU 淘汰；`retire()` 在 after_work 里 `push_back`（`src/webapp/uvcpp_web_static.cpp:1087-1087`）、`drain_retired()` 在 `serve()` 开头 `delete`（`src/webapp/uvcpp_web_static.cpp:1095-1095`） | `uvcpp_web_static`，由 `uvcpp_web_app::serve_static()` 造一份（`src/webapp/uvcpp_web_app.cpp:1362-1365`）—— **请求路径上真正活着的那个容器** |
 | `uvcpp_static_server::cache_` / `retired_` | `src/web/uvcpp_static_server.h:401-409` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:630`），读在 `src/web/uvcpp_static_server.cpp:508-514`；`retired_` 由 `drain_retired()` 清扫（`src/web/uvcpp_static_server.cpp:305-321`） | `uvcpp_static_server` 自己 —— **1.6.8 起是 h3 那条腿上的生产路径**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`，h3 上挂静态文件只能用本类），此前只有用例构造它（`tests/functional/web_static_server_func.cpp:224-224`）|
 
 > **本行已落地（1.6.8-dev）**：`mu_` 一把锁护 `cache_` 与 `retired_` 的**表结构**，
@@ -799,7 +799,7 @@ n 个循环之后变成跨核缓存行打架**：
   读取口 `reclaim_stats()` / `try_write_stats()` 的签名像实例指标，实际是**全进程聚合**。
 
 **不用动的一条**：`work_limit_`。它按 `UV_THREADPOOL_SIZE × 4`（下限 16，
-`src/webapp/uvcpp_web_work_limit.cpp:206-210`）推导，**从来不看循环数**；而那个线程池本来就是
+`src/webapp/uvcpp_web_work_limit.cpp:222-226`）推导，**从来不看循环数**；而那个线程池本来就是
 进程级的，n 个循环下 16 仍然是对的。`limit_`/`in_flight_` 已经是 `std::atomic`。
 
 ### 4.4 TLS：CTX 共享、SSL 对象不共享

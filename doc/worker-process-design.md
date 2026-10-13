@@ -191,7 +191,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   console sink **自己**那把锁与锁内的 `std::string` 拼接 / `fwrite` 仍在（
   `src/webapp/uvcpp_log_console.cpp:193-256`）⇒ 同一条进程内，打日志的线程们仍然在
   这一处排队。多进程不改变这一点，多进程改的是**别的**东西（见上面的闸门表）。
-- **`work_limit_` 仍按进程推。** `src/webapp/uvcpp_web_work_limit.cpp:206-210` 是
+- **`work_limit_` 仍按进程推。** `src/webapp/uvcpp_web_work_limit.cpp:222-226` 是
   `UV_THREADPOOL_SIZE × 4`（下限 16），与进程数无关 ⇒ n 个 worker 下它**仍然是对的数**。
   要写进文档的是另一件事：**n 个 worker × 每进程 4 条池线程 = 4n 条**，调
   `UV_THREADPOOL_SIZE` 时按每进程算。

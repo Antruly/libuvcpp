@@ -794,8 +794,22 @@ struct uvcpp_web_static::Impl {
      * 名额从 `serve()` 搬进 `run_job()` 之后，"拿过"不再是一条必走的路
      * （命中缓存、404 都不拿），所以归还侧必须有个凭据 —— 否则
      * `release()` 会把别人的名额还掉，闸门自己就成了漏洞。
+     *
+     * **名额在 `run_job()` 末尾就还掉了**（worker 上，走
+     * `release_deferred()`），所以这个标志在 `after_work` 里**恒为 false** ——
+     * 它只在 worker 那一段活着。留着它是因为"拿过没有"这件事本身要在 worker
+     * 上判两次（读盘前取、读完后还）。
      */
     bool slot_held;
+
+    /**
+     * @brief 名额是在 worker 上还的，而那次还名额**欠一次唤醒补派**。
+     *
+     * `release_deferred()` 只记账、不派发（唤醒回调必须跑在 loop 线程上），
+     * 于是由本 job 自己的 `after_work` —— 一个保证会跑的 loop 线程回调 —— 来
+     * 补这一刀 `dispatch_wakeups()`。见 `uvcpp_web_work_limit::release_deferred()`。
+     */
+    bool slot_deferred;
 
     /**
      * @brief **循环线程已经把 `probe_job()` 整个做完了** —— worker 只许读盘。
@@ -833,6 +847,7 @@ struct uvcpp_web_static::Impl {
           next(),
           is_head(false),
           slot_held(false),
+          slot_deferred(false),
           probed_on_loop(false),
           status(probe_status::NOT_FOUND),
           policy_rejected(false),
@@ -870,6 +885,7 @@ struct uvcpp_web_static::Impl {
       try_variants[1].clear();
       variant.clear();
       slot_held = false;
+      slot_deferred = false;
       probed_on_loop = false;
       status = probe_status::NOT_FOUND;
       policy_rejected = false;
@@ -1481,6 +1497,24 @@ struct uvcpp_web_static::Impl {
   void run_job(job* j) {  ///< worker 线程（`LOOP_STAT` 下只做后半段）
     if (!j->probed_on_loop) probe_job(j);
     if (needs_read(j)) read_job(j);
+
+    // **读完了，名额就在这里还** —— 不等 `after_work`。这是 2026-09-24 那次
+    // 分片路改动（见 `read_job` 里 `STREAM` 那一支的注释）在整读路上的同一条：
+    // 闸门想封的是"并发的磁盘读"，而 `after_work` 跑在**循环线程**上 —— 循环
+    // 线程一忙，`after_work` 排不上队，名额就被"一个字节都读完了、只是在等
+    // 循环线程"的请求攥着。后果不是慢，是**误判**：在途数看起来到了 256（= 池
+    // 线程 64 × 4），真正在读盘的却只有 ≤ 64 个，于是后来者被 503 回绝 ——
+    // 而池子其实还有余量。实测（本机 8 核、`taskset -c 0-7`、1024 连接 ×
+    // `-m 32`）：改动前 3,642 个 503，日志就是 `工作池已满（在途 256 / 256）`。
+    //
+    // 走 `release_deferred()` 而不是 `release()`：唤醒回调必须跑在注册它的
+    // 那根线程上（分片传输与上传都注册在 loop 线程上），从 worker 里同步派发
+    // 会让它们跑错线程。记账立刻发生（名额早一拍变松），派发由下面那个
+    // `after_work` 补 —— 那是本 job 一定会走到的、属于 loop 线程的回调。
+    if (j->slot_held) {
+      j->slot_held = false;
+      j->slot_deferred = j->self->work_limit->release_deferred();
+    }
   }
   void finish_job(job* j);  ///< loop 线程
 
@@ -2277,17 +2311,20 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
       loop,
       [j](uvcpp_work*) { j->self->run_job(j); },
       [j](uvcpp_work* w, int) {
-        // 这个回调**本身就是"worker 已经返回"**，所以名额在这里就该还 ——
-        // 早还一拍，排在后面的请求就早一拍被受理。
-        //
-        // **只能还自己拿过的那一份**：名额搬进 worker 之后，"拿过"不再是必走
-        // 的路（命中缓存 / 404 都不拿），无条件 release 会把别人的名额
-        // 还掉 —— 闸门自己就成了漏洞。凭据是 `j->slot_held`。
+        // 名额**已经还过了**，就在 `run_job()` 末尾（见那里的长注释）——
+        // 还一拍都不该等到这里：这个回调跑在**循环线程**上，而循环线程正是
+        // 高负载下最忙的那一根，等到这里还等于让名额被"读完在等循环线程"的
+        // 请求攥着。这里只补它欠下的那一刀唤醒派发：`release_deferred()` 只
+        // 记账不派发（唤醒回调必须跑在注册它的那根线程上，分片传输与上传都
+        // 注册在 loop 线程上），而本回调恰恰是 loop 线程上那个保证会跑的点。
         //
         // 与 `serve()` 里的 `rc != 0` 分支**互斥**（libuv 的约定：
         // `uv_queue_work` 返回 0 才会调 after_work），而且两条路都会 `delete
-        // j`，所以不存在还两次的可能。
-        if (j->slot_held) j->self->work_limit->release();
+        // j`，所以不存在补两次的可能。
+        if (j->slot_deferred) {
+          j->slot_deferred = false;
+          j->self->work_limit->dispatch_wakeups();
+        }
 
         // **绝对不能在回调里 `delete w`。**
         //

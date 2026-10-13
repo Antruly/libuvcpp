@@ -55,6 +55,18 @@
  * 回 `UV_EALREADY`）不在本文件里 —— 那是核心模块自己的契约，装置放在
  * `tests/functional/threadpool_func.cpp`，那边能自己控制进程里的先后次序。
  *
+ * ## 第六条：**记账与派发是两件事**（`1.6.42-dev`）
+ *
+ * 静态整读路径的还名额搬进了 worker 线程（读完当场还，理由与第 7 组那次分片
+ * 路的改动逐条相同：持到 `after_work` 就是持到"循环线程有空"），而唤醒回调
+ * 必须跑在**注册它的那根线程**上。于是 `release()` 拆成 `release_deferred()`
+ * （只记账）+ `dispatch_wakeups()`（在那根线程上补派）。第 15 组
+ * `release_deferred_split` 钉的就是这个拆分本身：账要当场记、派发不许发生
+ * 在 `release_deferred()` 的栈上、返回值可以当判据用、满员时两种还法都不许叫。
+ * 第 16 组 `worker_release_flushed_by_after_work` 钉的是**接线** —— 静态服务
+ * 到底有没有照这套契约用：漏掉 `after_work` 里那一刀补派，症状不是慢一点，
+ * 是那条挂住的分片响应**再也不来**，而这两组之外没有任何用例盖得住它。
+ *
  * ## 为什么不用真慢任务
  *
  * 静态读盘是 `stat` + 读一个小文件，耗时可忽略。要让它"慢"，只能往根里放一
@@ -724,6 +736,232 @@ void test_wakeup_reentrant_registration_not_lost() {
   lim.release();  // 收尾
 }
 
+// =========================================================================
+// 15. `release_deferred()` / `dispatch_wakeups()`：记账与派发拆开
+// =========================================================================
+//
+// `1.6.42-dev` 起，静态整读路径的**还名额**发生在 worker 线程上（`run_job()`
+// 读完当场还），而唤醒回调必须跑在注册它的那根线程上（分片传输、上传都注册
+// 在 loop 线程上）。于是 `release()` 被拆成两半：`release_deferred()` 只记账，
+// 派发交给随后的 loop 线程回调 `dispatch_wakeups()`。
+//
+// 这一组钉的就是"拆开了、而且各半各司其职"：
+//
+//   - **记账要当场发生** —— 否则这次改动一点意义都没有（名额还是晚一拍松）；
+//   - **派发**不许**在 `release_deferred()` 的栈上发生** —— 否则回调就跑到
+//     worker 线程上去了，那是数据竞争不是慢一点；
+//   - 返回值可以当"欠不欠一次补派"的判据用（`uvcpp_web_static` 的 `after_work`
+//     就是照它判的）；
+//   - **满员时两种还法都不许叫**，与 `release()` 的"别乱叫"是同一条。
+void test_release_deferred_split() {
+  {
+    uvcpp_web_work_limit lim(1);
+    int called = 0;
+    check(lim.acquire(), "拆分：占住唯一的名额");
+    const size_t id = lim.add_wakeup([&]() { ++called; });
+    check(id != uvcpp_web_work_limit::INVALID_WAKEUP, "拆分：注册应当成功");
+
+    // ---- 模拟 worker 线程：只记账 ----
+    check(lim.release_deferred(),
+          "拆分：有人等着且名额真的松了 ⇒ 返回值必须是「欠一次补派」");
+    check_eq_i(static_cast<long long>(lim.in_flight()), 0,
+               "拆分：账要**当场**记上（这一条才是这次改动的全部意义）");
+    check(!lim.full(), "拆分：名额当场就松了 —— 后来者不必等 loop 线程");
+    check_eq_i(called, 0,
+               "拆分：**不许**在 release_deferred() 的栈上派发"
+               "（回调要跑在注册它的那根线程上）");
+
+    // ---- 模拟同一笔任务的 after_work（loop 线程）：补派 ----
+    lim.dispatch_wakeups();
+    check_eq_i(called, 1, "拆分：dispatch_wakeups() 必须把那一刀补上");
+    check_eq_i(static_cast<long long>(lim.wakeup_count()), 0,
+               "拆分：补派之后那条一次性条目应当已被消费掉");
+
+    // ---- 账为 0 / 表为空时明说"不欠"，免得调用方白补 ----
+    check(!lim.release_deferred(),
+          "拆分：没账可还 ⇒ 不欠补派（返回值是判据，不是「尽力而为」）");
+    lim.dispatch_wakeups();
+    check_eq_i(called, 1, "拆分：没人等着时补派是空操作");
+    check_eq_i(static_cast<long long>(lim.in_flight()), 0, "拆分：收尾账为 0");
+  }
+
+  {
+    // 上限被调小、在途数暂时大于上限时，"还一次"仍然不满足 `!full()` ——
+    // 两种还法都不许叫（否则就是第 10 组那条无效唤醒风暴）。
+    uvcpp_web_work_limit lim(4);
+    int called = 0;
+    check(lim.acquire() && lim.acquire(), "拆分：先占 2 个");
+    lim.set_limit(1);
+    check(lim.full(), "拆分：在途 2 > 上限 1 ⇒ 仍然是满的");
+    const size_t id = lim.add_wakeup([&]() { ++called; });
+    check(id != uvcpp_web_work_limit::INVALID_WAKEUP, "拆分：注册应当成功");
+
+    check(!lim.release_deferred(),
+          "拆分：还一次仍然满着 ⇒ 不欠补派");
+    lim.dispatch_wakeups();
+    check_eq_i(called, 0, "拆分：满着时补派也不许叫（无效唤醒风暴）");
+
+    lim.release();  // 这一下真的松了 —— `release()` 自己会派发
+    check_eq_i(called, 1, "拆分：名额**真的**变松那一次必须叫到");
+  }
+}
+
+// =========================================================================
+// 16. 接线：worker 上还的那一名额，必须由**同一笔任务的 `after_work`** 补派
+// =========================================================================
+//
+// 第 15 组钉的是 `uvcpp_web_work_limit` 这三条 API **自己的**行为。这一组钉的
+// 是**接线** —— 也就是 `uvcpp_web_static` 到底有没有照那套契约用它们：
+//
+//   `run_job()`（worker）读完整读那一次，用 `release_deferred()` 还名额，
+//   把返回值存进 `j->slot_deferred`；`after_work`（loop 线程）见到它就补一刀
+//   `dispatch_wakeups()`。
+//
+// **为什么单独立一组。** 少了这一组，把 `after_work` 里那两行删掉，**没有任何
+// 用例会红**（第 15 组测的是闸门，不是静态服务的接线），而后果是**永久卡死**：
+// 分片传输的名额是块级借还，拿不到就登记一次唤醒停在块边界上，全靠这一刀叫它。
+// 也就是说"漏了补派"这种改错的症状不是慢一点，是那条响应再也不来。
+//
+// 怎么把"补派只能来自 after_work"变成可判定的：
+//
+//   t0  测试线程占住**唯一**的名额（上限设成 1）
+//   t1  请求 A 打**分片**挂载点 → 读第一块就要名额 → 拿不到 → 停在块边界上、
+//       登记一条唤醒。轮询 `wakeup_count() == 1` 等到它真的停住了
+//       （这一步是**前提断言**：没停住的话下面几条都无意义）
+//   t2  测试线程用 `release_deferred()` 还名额 —— **故意不补派**。它不是 loop
+//       线程，本来也不该由它派发；这一下只把账记上（`in_flight() == 0`）
+//   t3  请求 W 打**整读**挂载点的**冷**文件（必须真的读盘才会占名额）：
+//       worker 里 `release_deferred()` ⇒ `after_work` 补派 ⇒ A 被叫醒
+//
+// 于是"叫醒 A"这件事**只有** `after_work` 那一处能做：t2 那一下被刻意拆开了，
+// 闸门自己不会派发；A 停在块边界上，手里一个名额都没占；池子里也没有别的活儿。
+// 把 `after_work` 里那两行删掉，A 会一直等到客户端超时 ⇒ 本组红。
+//
+// **W 必须是冷文件**：整读只有在 LRU 未命中时才读盘、才占名额；命中是 loop 线程
+// 上直接回的，压根不经闸门。两个挂载点各自持一份 LRU（`serve_static()` 每次都
+// `new` 一个 `uvcpp_web_static`），所以 `/whole/*` 那边的冷热与 `/raw/*` 无关。
+void test_worker_release_flushed_by_after_work() {
+  make_root();
+
+  uvcpp_web_app app;
+  configure_for_test(app);
+  app.set_work_limit(1);  // 名额只有一个来源，"有没有名额"好读
+
+  // 分片挂载点：`max_cached_file_size = 0` = 一律走分片（第 7 组同一招数，
+  // 不必真造一个大文件）。
+  uvcpp_web_static_options o_stream;
+  o_stream.max_cached_file_size = 0;
+  app.serve_static("/raw", k_root, o_stream);
+  // 整读挂载点：走默认阈值（1 MiB），小文件整读进内存 ⇒ 未命中时要占名额。
+  app.serve_static("/whole", k_root);
+
+  check(app.start_background() == 0, "接线-补派：服务启动");
+  const int port = app.bound_port();
+
+  // 对照组：整读那条腿本身是好的（顺带把 hello.txt 读进 `/whole` 那份 LRU ——
+  // 下面 W 用的是另外的**冷**文件，不受影响）。
+  uvcpp_http_response rc0;
+  check(get(port, "/whole/hello.txt", rc0), "接线-补派-对照：请求应当成功");
+  check_eq_i(status_of(rc0), 200, "接线-补派-对照：状态应当是 200");
+
+  // ---- t0：占住唯一的名额 ----
+  check(app.work_limit()->acquire(), "接线-补派：测试占住唯一的名额");
+  check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 1,
+             "接线-补派：在途数应当是 1");
+
+  // ---- t1：请求 A 打分片挂载点，停在块边界上 ----
+  //
+  // ★ **A 的 `send_wait` 那个超时参数在这台机器上不管用** ——
+  //   `uvcpp_http_client.h` 写明了它靠 Windows 的 `SO_RCVTIMEO`/`SO_SNDTIMEO`
+  //   实现，POSIX 上"传入的值会被忽略"（实测：`send_wait(req, resp, 1500)`
+  //   对着一个从不回包的 socket 卡了 20 s 以上）。所以**判据不能建在它超时
+  //   上**：一个"没人叫醒就永久卡死"的用例不能靠对端超时来分出红绿，否则本组
+  //   在变异下是**挂住**而不是**变红**（挂住要靠 ctest 的超时才发现，现场还
+  //   什么都不说）。
+  //
+  //   办法：红绿由下面的 `a_replied` 有界轮询判，A 那条线程等 `app.stop()`
+  //   关掉连接之后自然返回（那时才 `join()`）—— 于是"没人叫醒"意味着 A 一直
+  //   挂着，测试**照样跑完并变红**。
+  std::atomic<bool> a_replied(false);  // A 拿到完整响应了吗
+  int a_rc = -12345;                   // 由 `a_replied` 的 release 建立可见性
+  uvcpp_http_response ra;
+  std::thread client_a([&]() {
+    uvcpp_http_client pc;
+    if (pc.connect_wait("127.0.0.1", port, 2000) != 0) return;
+    a_rc = pc.send_wait(uvcpp_http_request::make_get("/raw/hello.txt"), ra, 8000);
+    a_replied.store(true, std::memory_order_release);
+  });
+
+  // 等它真的停住。`wakeup_count() == 1` 就是"分片传输已经登记了唤醒"的现场
+  // —— 比 `sleep` 确定得多，而且它**不会**被误判成通过：没停住就是前提失败。
+  bool paused = false;
+  for (int i = 0; i < 500; ++i) {
+    if (app.work_limit()->wakeup_count() == 1) {
+      paused = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  check(paused,
+        "接线-补派：前提 —— 分片请求必须已经停在块边界上并登记了唤醒"
+        "（没停住的话本组剩下的断言都没有意义）");
+  check(!a_replied.load(),
+        "接线-补派：前提 —— 停住期间不该有响应回来（名额还攥在测试手里）");
+
+  // ---- t2：还名额，但**故意不补派** ----
+  // 这一步在测试线程上调 —— 从位置上说就是"非 loop 线程"，正是 worker 的处境。
+  check(app.work_limit()->release_deferred(),
+        "接线-补派：有人等着且名额当场变松 ⇒ 应当欠一次补派");
+  check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 0,
+             "接线-补派：账要当场记上（这才是拆分记账的意义）");
+  check_eq_i(static_cast<long long>(app.work_limit()->wakeup_count()), 1,
+             "接线-补派：`release_deferred()` **不许**自己派发 —— 唤醒回调必须"
+             "跑在注册它的那根线程上");
+
+  // ---- t3：请求 W 打整读挂载点的冷文件 —— 补派只能来自它的 after_work ----
+  uvcpp_http_response rw;
+  const std::string w_path =
+      std::string("/whole/") + (k_seq_files[0] + std::strlen(k_root) + 1);
+  check(get(port, w_path, rw), "接线-补派：冷文件的整读请求应当成功");
+  check_eq_i(status_of(rw), 200, "接线-补派：整读应当是 200（这条腿要真的读盘）");
+  check(body_of(rw) == k_text, "接线-补派：整读内容应当正常");
+
+  // A 此刻应当已经被叫醒并自己读完了。**这里是有界轮询，不是 join**：没人叫醒
+  // 的时候 A 会一直挂着（`send_wait` 的超时在这台机器上不管用，见上面那段），
+  // 于是判定必须在 `app.stop()` 之前做完，否则本组会挂住而不是变红。
+  bool resumed = false;
+  for (int i = 0; i < 500; ++i) {
+    if (a_replied.load(std::memory_order_acquire)) {
+      resumed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  check(resumed,
+        "接线-补派：整读那次 `after_work` 的补派必须叫醒挂住的分片请求"
+        "（删掉 `after_work` 里那两行，这一条必红 —— 名额的记账与派发拆开之后，"
+        "这是唯一还在为分片传输派发的点）");
+  check_eq_i(static_cast<long long>(app.work_limit()->wakeup_count()), 0,
+             "接线-补派：被唤醒之后那条一次性条目应当已被消费掉");
+
+  check_eq_i(static_cast<long long>(app.work_limit()->in_flight()), 0,
+             "接线-补派：收尾时在途数应当是 0（两种还法都要与 acquire 配对）");
+
+  // 先停服务再 join：`app.stop()` 会把连接关掉，A 那条线程因此自然返回 ——
+  // 也就是说**没人叫醒的那一支也收得回来**，本组不会留一条永久挂着的线程。
+  app.stop();
+  app.join();
+  client_a.join();
+
+  // `a_rc` / `ra` 只在 `a_replied` 为真（release/acquire 配对）之后读才安全。
+  if (resumed) {
+    check_eq_i(a_rc, 0, "接线-补派：被叫醒的分片请求应当正常收尾");
+    check_eq_i(status_of(ra), 200, "接线-补派：被叫醒的分片请求应当是 200");
+    check(body_of(ra) == k_text, "接线-补派：被叫醒的分片请求内容应当正常");
+  }
+  cleanup_root();
+}
+
 }  // namespace
 
 // =========================================================================
@@ -938,6 +1176,9 @@ int main(int argc, char** argv) {
       {"wakeup_cross_remove", test_wakeup_cross_remove},
       {"wakeup_reentrant_registration_not_lost",
        test_wakeup_reentrant_registration_not_lost},
+      {"release_deferred_split", test_release_deferred_split},
+      {"worker_release_flushed_by_after_work",
+       test_worker_release_flushed_by_after_work},
       {"limit_source", test_limit_source},
   };
 

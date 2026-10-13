@@ -71,27 +71,27 @@ bool uvcpp_web_work_limit::acquire() {
   }
 }
 
-void uvcpp_web_work_limit::release() {
+bool uvcpp_web_work_limit::decrement() {
   size_t cur = in_flight_.load(std::memory_order_relaxed);
   for (;;) {
     // 钳位：多还一次说明调用方记账错了，但**不能**让它下溢 —— 下溢之后
     // `in_flight_` 会是个接近 SIZE_MAX 的巨数，闸门就此永久打开，而且
     // 唯一的症状是"限流突然不管用了"，极难定位。静默忽略一次多余归还，
     // 至少症状是良性的。
-    if (cur == 0) return;
+    if (cur == 0) return false;
     if (in_flight_.compare_exchange_weak(cur, cur - 1,
                                          std::memory_order_acq_rel,
                                          std::memory_order_relaxed)) {
-      break;
+      return true;
     }
   }
+}
 
-  // 真的少了一个在途任务 —— 名额可能刚刚变松，去叫醒等着的人。
-  //
+void uvcpp_web_work_limit::dispatch_wakeups() {
   // **`!full()` 那个前置判断不是省事，是防止无效唤醒风暴**：满是满的说明
   // 谁来都拿不到名额，叫醒一遍只会让每个等待者白跑一次 acquire() 再重新注册。
   // 漏掉这一次唤醒也不会丢事 —— 名额在还被占着的时候就一定还有在途任务，
-  // 那个任务完成时还会再调一次 `release()`，到那时再叫。
+  // 那个任务完成时还会再还一次名额、再叫一遍。
   if (full()) return;
 
   {
@@ -99,6 +99,22 @@ void uvcpp_web_work_limit::release() {
     if (wakeups_.empty()) return;
   }
   notify_wakeups();
+}
+
+void uvcpp_web_work_limit::release() {
+  if (!decrement()) return;
+  // 真的少了一个在途任务 —— 名额可能刚刚变松，去叫醒等着的人。
+  // `full()` / 空表这两道前置判断在 `dispatch_wakeups()` 里。
+  dispatch_wakeups();
+}
+
+bool uvcpp_web_work_limit::release_deferred() {
+  if (!decrement()) return false;
+  // 与 `release()` 逐条同构，只差"派发放在哪里"：那两道前置判断在这里做完，
+  // **不调 `notify_wakeups()`**，把结果作为"欠一次补派"的凭据交回调用方。
+  if (full()) return false;
+  std::lock_guard<std::mutex> lk(wakeup_mu_);
+  return !wakeups_.empty();
 }
 
 size_t uvcpp_web_work_limit::add_wakeup(uvcpp_web_work_wakeup cb) {
