@@ -18,7 +18,11 @@
  *    循环线程同时用，判据是"逐条响应都对且进程活着"；
  *  - **预压缩孪生**（`set_precompressed`）：关时一个孪生都不碰；开时按
  *    `Accept-Encoding` 挑 `.br`/`.gz`，含 `q=0` 是拒绝、`*` 兜底、无孪生退回、
- *    `Range` 不取孪生，以及**缓存命中那一次也要带上 `content-encoding`**。
+ *    `Range` 不取孪生，以及**缓存命中那一次也要带上 `content-encoding`**；
+ *  - **`cache_tag` 与缓存边界**（`1.6.44-dev`）：tag 认的是盘上那份文件（`/` 与
+ *    `/index.html` 同 tag、两个文件不同 tag、内容变了 tag 跟着变、发了孪生就
+ *    不设 tag），以及条目上限/LRU 次序、字节预算、`set_cache_enabled(false)`
+ *    连**写**一起关掉 —— 这些都不进响应头，只能在进程内判。
  *
  * 通过真实的 uvcpp_http_server（后台线程）+ uvcpp_http_client（阻塞同步）
  * 端到端验证，参考 tcp_server_func.cpp 的 server 线程模式。
@@ -180,6 +184,11 @@ struct StaticTestServer {
   bool precompressed;
   /// 校验跑在哪条线程上（`set_revalidate()`）。默认 `POOL`。
   uvcpp_static_revalidate revalidate;
+  /// 缓存开关与两个预算（`set_cache_enabled()` / `set_cache_max_entries()` /
+  /// `set_cache_max_bytes()`）。默认值与类自己的默认值一致。
+  bool cache_enabled = true;
+  size_t cache_max_entries = 256;
+  size_t cache_max_bytes = 32u * 1024u * 1024u;
 
   /// 每条请求在**处理函数返回之后**的 `resp.deferred` 与状态码 ——
   /// `LOOP_STAT` 档"命中就地回完"这件事只有在这里看得见（客户端那边
@@ -196,6 +205,16 @@ struct StaticTestServer {
     /// 逐字节相同），所以只能在这里判。
     bool shared;
     const std::string* shared_body;
+    /// 处理函数返回时 `resp.cache_tag` 的值（`1.6.44-dev` 起本类会填它）。
+    ///
+    /// 它在网络那头**完全看不出来**（不进任何响应头），却是"实时压缩会不会
+    /// 每请求重来一遍"的唯一开关：`uvcpp_http_server` 只拿它当变体缓存的键。
+    /// 所以判据只能在这里 —— 与上面那两格同一个道理。
+    std::string cache_tag;
+    /// 处理函数返回时的 `cache_size()` / `cache_bytes()`。同样是"网络那头看
+    /// 不出来"的状态（上限是进程内的账），只能在这里判。
+    size_t cache_size;
+    size_t cache_bytes;
   };
   std::vector<ServeObservation> serves;
 
@@ -225,6 +244,9 @@ struct StaticTestServer {
       static_svr.set_spa_fallback(spa_fallback);
       static_svr.set_precompressed(precompressed);
       static_svr.set_revalidate(revalidate);
+      static_svr.set_cache_enabled(cache_enabled);
+      static_svr.set_cache_max_entries(cache_max_entries);
+      static_svr.set_cache_max_bytes(cache_max_bytes);
       uvcpp_http_server server;
       // 必须在 `listen()` 之前（见 `uvcpp_http_server::set_loops` 的 @warning）。
       server.set_loops(loops);
@@ -261,6 +283,9 @@ struct StaticTestServer {
         o.deferred = resp.deferred;
         o.shared = resp.body.is_shared();
         o.shared_body = resp.body.shared_ref().get();
+        o.cache_tag = resp.cache_tag;
+        o.cache_size = static_svr.cache_size();
+        o.cache_bytes = static_svr.cache_bytes();
         std::lock_guard<std::mutex> lk(obs_mutex);
         serves.push_back(o);
       });
@@ -1650,6 +1675,406 @@ static bool test_loop_stat() {
   return ok;
 }
 
+// =========================================================================
+// `cache_tag` 与缓存的三个边界（`1.6.44-dev`）
+// =========================================================================
+//
+// 这一节钉的全是**网络那头看不出来**的状态：
+//
+//   - `resp.cache_tag` 不进任何响应头，它是 `uvcpp_http_server` 那个**压缩变体
+//     缓存**的唯一开关键（空 = 不参与）。本类从前不填它 —— 于是走本类的每一条
+//     腿都**每个请求在循环线程上重压一遍整份文件**，而线上字节数与"压一次发
+//     多次"**逐字节相同**，端到端比对发现不了。
+//   - `cache_size()` / `cache_bytes()` 是进程内的账，同样看不出来。它们钉的
+//     是"这张表有上限"：`1.6.44-dev` 之前它是**无上限也无淘汰**的 `std::map`。
+//   - `set_cache_enabled(false)` 从前只关掉"读"、关不掉"写"（写入那一支根本没
+//     看这个开关）—— 于是"关掉缓存"的表照样只增不减。
+//
+// **必须用 `LOOP_STAT` 才判得动**：`POOL` 档下命中是在 stat 任务的 after_work
+// 里才判出来的，那时 `serve()` 早已返回，观测到的是"推迟 + 空 tag"。这不是
+// 两档行为不同，只是观测点不同（两档发出去的响应逐字节相同）——
+// `test_loop_stat` 已经钉过这件事。
+//
+// 未命中那一档在观测点上也**必须**是空 tag：填它的是读盘回来的那个回调，而
+// `serve()` 在那之前就返回了。这一格不是凑数 —— 它是"tag 是**盘上那份字节**的
+// 身份、不是 URL 的身份"这件事在时间上的证据。
+static bool test_cache_tag_and_bounds() {
+  std::cout << "--- cache_tag 与缓存边界 ---\n";
+  if (!prepare_fs()) return false;
+
+  bool ok = true;
+  int status = 0;
+  std::string enc, body;
+
+  /// `index.html` 的 V1 内容；下列断言里的长度就是它的长度（别写死 21，
+  /// 改内容时那个数会跟着漂）。
+  const std::string kIndexV1 = "<html>INDEX-V1</html>";
+
+  /// 把 tag 按 `\x1f` 切成字段，返回字段数（最多 4 段）。
+  struct Split {
+    static size_t run(const std::string& tag, std::string out[4]) {
+      size_t n = 0;
+      size_t i = 0;
+      while (n < 4) {
+        const size_t j = tag.find('\x1f', i);
+        out[n++] = tag.substr(i, j == std::string::npos ? j : j - i);
+        if (j == std::string::npos) break;
+        i = j + 1;
+      }
+      return n;
+    }
+  };
+
+  // --- A. tag 是**文件**的身份，不是 URL 的身份 ---
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/true, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/false,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    const int port = runner.start();
+
+    if (!raw_get(port, "/index.html", "", status, enc, body)) {
+      std::cout << "  [err] /index.html 请求没完成\n";
+      ok = false;
+    } else if (status != 200 || body != kIndexV1) {
+      std::cout << "  [err] /index.html -> " << status << " '" << body
+                << "'（期望 200 / V1）\n";
+      ok = false;
+    } else if (runner.serve_count() != 1) {
+      std::cout << "  [err] 一条请求触发了 " << runner.serve_count()
+                << " 次处理函数（期望 1）—— 后面的下标对不上号\n";
+      ok = false;
+    } else if (!runner.serve(0).deferred) {
+      std::cout << "  [err] 首次请求必然未命中（缓存是空的），应当推迟去读盘\n";
+      ok = false;
+    } else if (!runner.serve(0).cache_tag.empty()) {
+      std::cout << "  [err] 未命中时不该已经有 tag —— 读盘还没回来，此刻还没有"
+                   "「盘上那份字节」这个身份\n";
+      ok = false;
+    }
+
+    // 第二次：命中，tag 必须就位。
+    if (!raw_get(port, "/index.html", "", status, enc, body)) {
+      std::cout << "  [err] /index.html 第二次请求没完成\n";
+      ok = false;
+    } else if (status != 200 || body != kIndexV1) {
+      std::cout << "  [err] 第二次 /index.html -> " << status << " '" << body
+                << "'（期望 200 / V1）\n";
+      ok = false;
+    } else if (runner.serve_count() != 2 || runner.serve(1).deferred) {
+      std::cout << "  [err] 第二次 /index.html 本该命中\n";
+      ok = false;
+    } else {
+      const std::string tag_a = runner.serve(1).cache_tag;
+      std::string f[4];
+      const size_t nf = Split::run(tag_a, f);
+      if (nf != 4 || f[0].empty() || f[1].empty() || f[2].empty() ||
+          f[3].empty()) {
+        std::cout << "  [err] 命中的 tag 应当是四段（盘上路径 / 大小 / mtime 秒"
+                     " / mtime 纳秒），实得 " << nf << " 段：'" << tag_a << "'\n";
+        ok = false;
+      } else {
+        // 第一段是盘上的路径（结尾必须是那个文件名），第二段是文件长度，
+        // 后两段是十进制的时间戳。**不比整串**：盘上路径取决于这里用的相对
+        // 目录，写死了换个工作目录就红，而那与本节要钉的东西无关。
+        const bool path_ok = f[0].size() >= 10 &&
+                             f[0].compare(f[0].size() - 10, 10, "index.html") == 0;
+        const bool size_ok = f[1] == std::to_string(kIndexV1.size());
+        bool digits_ok = true;
+        for (size_t k = 1; k < 4 && digits_ok; ++k) {
+          if (f[k].empty()) digits_ok = false;
+          for (size_t c = 0; c < f[k].size(); ++c) {
+            if (f[k][c] < '0' || f[k][c] > '9') digits_ok = false;
+          }
+        }
+        if (!path_ok) {
+          std::cout << "  [err] tag 第一段不是 index.html 的盘上路径：'" << f[0]
+                    << "'\n";
+          ok = false;
+        }
+        if (!size_ok) {
+          std::cout << "  [err] tag 第二段应当是文件长度 " << kIndexV1.size()
+                    << "，实得 '" << f[1] << "'\n";
+          ok = false;
+        }
+        if (!digits_ok) {
+          std::cout << "  [err] tag 的后三段应当是十进制\n";
+          ok = false;
+        }
+      }
+
+      // 同一份文件、另一条 URL（`/` 经索引步进归到 `/index.html`）⇒
+      // **同一个 tag**。不同就是把同一份文件的两条 URL 各压一遍、各存一份
+      // 压好的字节 —— 变体缓存按 tag 分桶，它认不出这是同一个文件。
+      if (!raw_get(port, "/", "", status, enc, body)) {
+        std::cout << "  [err] / 请求没完成\n";
+        ok = false;
+      } else if (status != 200 || body != kIndexV1) {
+        std::cout << "  [err] / -> " << status << " '" << body << "'（期望 200 / V1）\n";
+        ok = false;
+      } else if (runner.serve_count() != 3 || runner.serve(2).deferred) {
+        std::cout << "  [err] / 应当命中 index.html 那一条\n";
+        ok = false;
+      } else if (runner.serve(2).cache_tag != tag_a) {
+        std::cout << "  [err] `/` 与 `/index.html` 归到同一个文件，tag 必须相同"
+                     " —— 不同就是把同一份文件压了两遍\n    '"
+                  << runner.serve(2).cache_tag << "' vs '" << tag_a << "'\n";
+        ok = false;
+      }
+    }
+
+    // 另一个文件 ⇒ 另一个 tag。
+    if (!raw_get(port, "/lib..min.js", "", status, enc, body)) {
+      std::cout << "  [err] /lib..min.js 请求没完成\n";
+      ok = false;
+    } else if (status != 200 || body != "MINIFIED") {
+      std::cout << "  [err] /lib..min.js -> " << status << " '" << body
+                << "'（期望 200 / MINIFIED）\n";
+      ok = false;
+    } else if (runner.serve_count() != 4 || !runner.serve(3).deferred) {
+      std::cout << "  [err] /lib..min.js 第一次本该未命中\n";
+      ok = false;
+    }
+    if (!raw_get(port, "/lib..min.js", "", status, enc, body)) {
+      std::cout << "  [err] /lib..min.js 第二次请求没完成\n";
+      ok = false;
+    } else if (runner.serve_count() != 5 || runner.serve(4).deferred) {
+      std::cout << "  [err] /lib..min.js 第二次本该命中\n";
+      ok = false;
+    } else if (runner.serve(4).cache_tag == runner.serve(1).cache_tag) {
+      std::cout << "  [err] 两个不同的文件不该算出同一个 tag\n";
+      ok = false;
+    }
+
+    // 内容变了 ⇒ tag 必须变。这里让**长度**变（不赌纳秒级 mtime 的粒度）：
+    // 缓存与 tag 的"变了没有"都同时看 mtime 与 size，长度变是那条判据里
+    // 最不依赖文件系统计数精度的一半。
+    const std::string kIndexV2 = "<html>INDEX-V2-LONGER</html>";
+    if (!write_text("index.html", kIndexV2)) {
+      std::cout << "  [err] 改 index.html 失败\n";
+      ok = false;
+    }
+    if (!raw_get(port, "/index.html", "", status, enc, body)) {
+      std::cout << "  [err] 改写后 /index.html 请求没完成\n";
+      ok = false;
+    } else if (status != 200 || body != kIndexV2) {
+      std::cout << "  [err] 改写后 /index.html -> " << status << "（期望新字节）\n";
+      ok = false;
+    } else if (!runner.serve(5).deferred) {
+      std::cout << "  [err] 改写后第一次本该未命中（长度变了）\n";
+      ok = false;
+    }
+    if (!raw_get(port, "/index.html", "", status, enc, body)) {
+      std::cout << "  [err] 改写后第二次请求没完成\n";
+      ok = false;
+    } else if (runner.serve(6).deferred) {
+      std::cout << "  [err] 改写后第二次本该命中\n";
+      ok = false;
+    } else if (runner.serve(6).cache_tag == runner.serve(1).cache_tag) {
+      std::cout << "  [err] 文件内容变了，tag 必须跟着变 —— 否则变体缓存会把"
+                   "旧字节当成新文件的那一份发出去\n";
+      ok = false;
+    }
+    runner.shutdown();
+  }
+
+  // --- B. 用了孪生文件 ⇒ **不设** tag ---
+  //
+  // 孪生命中时 body 已经是压缩产物，`apply_compression_for()` 见到
+  // `content-encoding` 根本不会进来。设了它只会白占一份变体缓存的位置。
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/true, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/true,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    const int port = runner.start();
+
+    for (int i = 0; i < 2; ++i) {
+      if (!raw_get(port, "/app.js", "br;q=1, gzip;q=0.8", status, enc, body)) {
+        std::cout << "  [err] 孪生第 " << i << " 次请求没完成\n";
+        ok = false;
+      } else if (status != 200 || enc != "br" || body != kAppJsBr) {
+        std::cout << "  [err] 孪生第 " << i << " 次 -> " << status << " enc='"
+                  << enc << "' body='" << body << "'（期望 200 / br / 孪生那份）\n";
+        ok = false;
+      }
+    }
+    if (runner.serve_count() != 2 || runner.serve(1).deferred) {
+      std::cout << "  [err] 孪生第二次本该命中（缓存键带 `.br` 后缀）\n";
+      ok = false;
+    } else if (!runner.serve(1).cache_tag.empty()) {
+      std::cout << "  [err] 发的是盘上孪生（已经是压缩产物），不该设 cache_tag\n";
+      ok = false;
+    }
+    runner.shutdown();
+  }
+
+  // --- C. 条目上限 + LRU 次序 ---
+  //
+  // 上限 2，然后故意让"最近用过"的次序与"插入"的次序不同：A、B 之后**再摸一次
+  // A**，然后插入 C ⇒ 被淘汰的必须是 B。判据是最后再请求一次 B —— 只有真按
+  // LRU 淘汰才成立（按插入顺序淘汰的话走的会是 A）。
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/false, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/false,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    runner.cache_max_entries = 2;
+    const int port = runner.start();
+
+    struct Step {
+      const char* path;
+      bool want_deferred;
+      const char* why;
+    };
+    const Step steps[] = {
+      {"/app.js",      true,  "A 第一次：未命中"},
+      {"/index.html",  true,  "B 第一次：未命中"},
+      {"/app.js",      false, "A 命中（顺带把它提升到队首）"},
+      {"/lib..min.js", true,  "C 第一次：未命中 —— 该把 B 挤出去"},
+      {"/app.js",      false, "A 还在（它是最近用过的）"},
+      {"/index.html",  true,  "B 已被淘汰 ⇒ 又是未命中"},
+    };
+    const size_t nstep = sizeof(steps) / sizeof(steps[0]);
+    for (size_t i = 0; i < nstep; ++i) {
+      const size_t before = runner.serve_count();
+      if (!raw_get(port, steps[i].path, "", status, enc, body)) {
+        std::cout << "  [err] #" << i << " " << steps[i].path << " 请求没完成\n";
+        ok = false;
+        continue;
+      }
+      if (runner.serve_count() != before + 1) {
+        std::cout << "  [err] #" << i << " 触发 " << (runner.serve_count() - before)
+                  << " 次处理函数（期望 1）\n";
+        ok = false;
+        continue;
+      }
+      const StaticTestServer::ServeObservation o = runner.serve(before);
+      if (o.deferred != steps[i].want_deferred) {
+        std::cout << "  [err] #" << i << " " << steps[i].path << " deferred="
+                  << (o.deferred ? 1 : 0) << "（" << steps[i].why << "）\n";
+        ok = false;
+      }
+      // 上限 2：**任何一个观测点上**都不许超过。观测点在插入之前，所以它量的是
+      // "上一次请求留下的表"，正好覆盖"插入之后有没有当场把越界的那条淘汰掉"。
+      if (o.cache_size > 2) {
+        std::cout << "  [err] #" << i << " 缓存条目数 " << o.cache_size
+                  << " 超过上限 2\n";
+        ok = false;
+      }
+    }
+    // 收尾再摸一次 A：此刻表里应当正好 2 条（A 与 B），字节账 > 0。
+    if (!raw_get(port, "/app.js", "", status, enc, body)) {
+      std::cout << "  [err] 收尾请求没完成\n";
+      ok = false;
+    } else if (runner.serve_count() != nstep + 1) {
+      std::cout << "  [err] 收尾请求的处理函数没记上（观测数 "
+                << runner.serve_count() << "）\n";
+      ok = false;
+    } else {
+      const StaticTestServer::ServeObservation o = runner.serve(nstep);
+      if (o.cache_size != 2) {
+        std::cout << "  [err] 6 条请求、上限 2 之后表里应当正好 2 条，实得 "
+                  << o.cache_size << "\n";
+        ok = false;
+      }
+      if (o.cache_bytes == 0) {
+        std::cout << "  [err] 表里有条目，字节账不该是 0\n";
+        ok = false;
+      }
+    }
+    runner.shutdown();
+  }
+
+  // --- D. `set_cache_enabled(false)` 必须连**写**一起关掉 ---
+  //
+  // 从前只关掉了命中那一支的"读"：表照样只增不减，"关了缓存"的进程内存还在涨，
+  // 而且 `cache_size()` 也跟着涨 —— 那不是省一次判断，是个漏洞。
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/false, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/false,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    runner.cache_enabled = false;
+    const int port = runner.start();
+
+    for (int i = 0; i < 2; ++i) {
+      if (!raw_get(port, "/app.js", "", status, enc, body)) {
+        std::cout << "  [err] 关缓存后第 " << i << " 次请求没完成\n";
+        ok = false;
+      } else if (status != 200 || body != kAppJs) {
+        std::cout << "  [err] 关缓存后第 " << i << " 次 -> " << status << " '"
+                  << body << "'（关缓存不影响正确性）\n";
+        ok = false;
+      }
+    }
+    if (runner.serve_count() != 2) {
+      std::cout << "  [err] 关缓存时两条请求都该触发处理函数\n";
+      ok = false;
+    } else if (!runner.serve(1).deferred) {
+      std::cout << "  [err] 关缓存时第二次仍该未命中\n";
+      ok = false;
+    } else if (runner.serve(1).cache_size != 0) {
+      std::cout << "  [err] 关缓存时表必须一直是空的，实得 "
+                << runner.serve(1).cache_size << " 条\n";
+      ok = false;
+    }
+    runner.shutdown();
+  }
+
+  // --- E. 单份文件超过字节预算 ⇒ 干脆不缓存 ---
+  //
+  // 否则它一进来就把整个缓存冲空，然后下一次仍然装不下 —— 退化成"每次请求都
+  // 把缓存冲一遍"，比不缓存更贵，还让别的条目全被误伤。
+  {
+    StaticTestServer runner(kTmpDir, /*spa_fallback=*/false, /*mount=*/"/",
+                            /*nloops=*/1, /*precompressed=*/false,
+                            uvcpp_static_revalidate::LOOP_STAT);
+    // 预算 64：`index.html`（20 出头）装得下，`big.bin`（256 KiB）装不下。
+    runner.cache_max_bytes = 64;
+    const int port = runner.start();
+
+    // 先让 index.html 占住一条，用来判"大文件没把它挤掉"。
+    if (!raw_get(port, "/index.html", "", status, enc, body) ||
+        !raw_get(port, "/index.html", "", status, enc, body)) {
+      std::cout << "  [err] index.html 预热请求没完成\n";
+      ok = false;
+    } else if (status != 200) {
+      std::cout << "  [err] index.html -> " << status << "（期望 200）\n";
+      ok = false;
+    } else if (runner.serve(1).deferred || runner.serve(1).cache_size != 1) {
+      std::cout << "  [err] index.html 小于预算，本该被缓存（deferred="
+                << (runner.serve(1).deferred ? 1 : 0) << " size="
+                << runner.serve(1).cache_size << "）\n";
+      ok = false;
+    }
+
+    const size_t base = runner.serve_count();
+    for (int i = 0; i < 2; ++i) {
+      if (!raw_get(port, "/big.bin", "", status, enc, body)) {
+        std::cout << "  [err] big.bin 第 " << i << " 次请求没完成\n";
+        ok = false;
+      } else if (status != 200 || body.size() != 256u * 1024u) {
+        std::cout << "  [err] big.bin 第 " << i << " 次 -> " << status << "，"
+                  << body.size() << " 字节（期望 200 / 262144）\n";
+        ok = false;
+      }
+    }
+    if (runner.serve_count() != base + 2) {
+      std::cout << "  [err] 超过预算的文件每次都该去读盘（实触发 "
+                << (runner.serve_count() - base) << " 次）\n";
+      ok = false;
+    } else if (!runner.serve(base + 1).deferred) {
+      std::cout << "  [err] big.bin 超过字节预算，第二次仍该未命中\n";
+      ok = false;
+    } else if (runner.serve(base + 1).cache_size != 1) {
+      std::cout << "  [err] big.bin 不该进表，更不该把 index.html 挤掉（实得 "
+                << runner.serve(base + 1).cache_size << " 条）\n";
+      ok = false;
+    }
+    runner.shutdown();
+  }
+
+  cleanup_fs();
+  return ok;
+}
+
 int main(int argc, char** argv) {
   // **整条输出不许缓冲**。这条文件里有 `set_loops(4)` + 线程池 + 半途断连，
   // 出问题是 SIGSEGV —— 而 ctest 只拿得到进程**真的写进管道**的那些字节。
@@ -1670,6 +2095,7 @@ int main(int argc, char** argv) {
     {"multiloop_concurrency", test_multiloop_concurrency},
     {"precompressed", test_precompressed},
     {"loop_stat", test_loop_stat},
+    {"cache_tag_and_bounds", test_cache_tag_and_bounds},
   };
   // 可选过滤：`test_web_static_server_func.exe <name>` 只跑一条。
   // 间歇性故障的定位全靠它 —— 整跑到一次崩溃要几十秒，单条用例是秒级，

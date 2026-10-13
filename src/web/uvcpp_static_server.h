@@ -35,10 +35,17 @@
  * 目录索引以外的协商、也不做百分号解码（`%20` 会被当成三个字面字符去找
  * 文件名 —— 这是能力边界，不是漏洞）。
  *
- * 要 Range/206、ETag/304、If-Range、可配 MIME 表、带容量上限的 LRU 缓存，
- * 用 `webapp/uvcpp_web_static.h` 里的 `uvcpp_web_static`。**新代码建议直接用
+ * 要 Range/206、ETag/304、If-Range、可配 MIME 表，用
+ * `webapp/uvcpp_web_static.h` 里的 `uvcpp_web_static`。**新代码建议直接用
  * 那个** —— 它跑在框架的连接登记表上，异步完成回调不需要担心连接对象被回收。
  * 本类保留给"只想要一个兜底静态处理器、不想引入整个框架"的场合。
+ *
+ * **`1.6.44-dev` 起本类也补齐了两样**（从前正是上面那句劝人换类的理由）：
+ * 内存缓存**有上限**（条目数 + 字节数双重预算，默认 256 条 / 32 MiB，LRU 淘汰，
+ * 见 @ref set_cache_max_entries）、并且**填 `resp.cache_tag`**（于是
+ * `uvcpp_http_server` 那个压缩变体缓存对本类也生效，不再每请求在循环线程上重压
+ * 一遍整份文件）。两样都只是把**已有**的机制接上 —— 契约在
+ * `uvcpp_http_response::cache_tag` 那一处，本类要做的只有"把文件身份填进去"。
  *
  * 本类不做 URL 解码，所以 `%2e%2e%2f` 这类编码绕过在这里天然无效（它会变成
  * 一个名字里带百分号的目录，找不到就是 404）。防穿越靠的是**段级归一化**
@@ -55,6 +62,7 @@
 #if UVCPP_WEB_ENABLE
 
 #include <cstdint>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -168,8 +176,36 @@ public:
   /** @brief 是否启用 SPA 回退（未命中时回退 index.html），默认 true。 */
   void set_spa_fallback(bool enable) { spa_fallback_ = enable; }
 
-  /** @brief 是否启用内存缓存，默认 true。 */
+  /** @brief 是否启用内存缓存，默认 true。见 @ref set_cache_max_entries。 */
   void set_cache_enabled(bool enable) { cache_enabled_ = enable; }
+
+  /**
+   * @brief 内存缓存的**条目上限**，默认 256；传 0 等于关缓存。
+   *
+   * `1.6.44-dev` 之前这张表是**无上限也无淘汰**的：`std::map` 只增不减，一个
+   * 深目录树的站点能把整份语料驻留到进程结束。现在与 `uvcpp_web_static` 的
+   * `cache_max_entries` / `cache_max_bytes` 是同一套记账（同一把尺子量有界的
+   * 东西），淘汰是 LRU：**命中会提升**到队首，逐出从队尾取。
+   *
+   * `set_cache_enabled(false)` 与 `set_cache_max_entries(0)` 的差别只在读法：
+   * 前者是"把缓存关掉"，后者是"预算为零"。两者都让本类**不查也不写**。
+   */
+  void set_cache_max_entries(size_t n) { cache_max_entries_ = n; }
+
+  /** @brief 当前条目上限。 */
+  size_t cache_max_entries() const { return cache_max_entries_; }
+
+  /**
+   * @brief 内存缓存的**字节上限**，默认 32 MiB；**0 = 不限字节**（只按条目数封）。
+   *
+   * 单份文件本身就超过这个预算时**干脆不缓存它** —— 否则它一进来就会把整个
+   * 缓存冲空，然后下一次仍然装不下，退化成"每次请求都把缓存冲一遍"（这一条与
+   * `uvcpp_web_static` 同策）。字节数按 \ref cache_bytes 记。
+   */
+  void set_cache_max_bytes(size_t n) { cache_max_bytes_ = n; }
+
+  /** @brief 当前字节上限。 */
+  size_t cache_max_bytes() const { return cache_max_bytes_; }
 
   /**
    * @brief 是否发盘上的预压缩孪生文件（`foo.br` / `foo.gz`），默认 **false**。
@@ -179,33 +215,51 @@ public:
    *
    * 为什么这件事必须在这里做、而不是靠 `uvcpp_http_server` 的实时压缩：那个
    * 是**开着**的（`compress_enabled_` 默认 true），但它按 `resp.cache_tag`
-   * 缓存压好的变体 —— 而全仓只有 `uvcpp_web_static` 填 `cache_tag`
-   * （`uvcpp_web_static.cpp` 里那一行）。本类不填，于是走本类的每一条腿都
-   * **每个请求在循环线程上重压一遍整个文件**。
+   * 缓存压好的变体 —— 从前全仓只有 `uvcpp_web_static` 填 `cache_tag`
+   * （`uvcpp_web_static.cpp` 里那一行）。**`1.6.44-dev` 起本类也填**
+   * （文件身份：`fs_path` + `size` + `mtime` 秒 + 纳秒），所以走本类的腿不再
+   * 每个请求重压一遍整份文件 —— 一次压、之后按 `cache_tag` 查表。
    *
-   * 实测（探针 `probe.cpp`，本仓 `data/static` 20 个文件轮转、8 条循环、
+   * 实测（探针 `probe.cpp`，HttpArena 的 `data/static` 20 个 URI 轮转、8 条循环、
    * `h2load -p http/1.1 -c 64 -m 2 -n 8000`、
-   * `Accept-Encoding: br;q=1, gzip;q=0.8`；同一份语料的 ext4 拷贝，理由见下）：
+   * `Accept-Encoding: br;q=1, gzip;q=0.8`；每臂 3 次取中位数，2026-10-14 于
+   * `1.6.44-dev`；同一份语料的 ext4 拷贝，理由见下）：
    *
-   * | 本选项 | rps | 8000 请求送出字节 |
-   * |---|---|---|
-   * | 关（每个请求重压） | 933.15（8.57 s） | 173,843,446 |
-   * | 开（发盘上孪生） | **82,451.28**（97.0 ms） | 131,194,904 |
-   * | 差 | **88×** | **−24.5%** |
+   * | 本选项 | 填 `resp.cache_tag` | rps（中位） | 8000 请求送出字节 |
+   * |---|---|---|---|
+   * | 关 | 否（`1.6.44-dev` **之前**的形状） | 977.00（8.19 s） | 173,843,446 |
+   * | 关 | 是（`1.6.44-dev` 起） | 66,554.63（120.20 ms） | 173,843,446 |
+   * | 开（发盘上孪生） | 是 | **89,791.80**（89.10 ms） | 131,194,904 |
+   *
+   * 第一行是**消融臂**：同一份源码，只把 `fill_cached_response()` 里填 tag 的那
+   * 一段关掉、单独链一份 `libuvcpp.so`，其余一个字节不改。有了它这张表才读得动
+   * ——"关"那一栏从 977 到 66 554 这一跳（**68.1×**）全部归因于 `cache_tag`
+   * （每个文件压一次、之后命中变体缓存），而**本选项自己**的贡献是
+   * 66 554 → 89 792（**+34.9%**）。本类填 tag 之前，这条腿每请求都在循环线程上
+   * 把整份文件 deflate 一遍：20 个文件平均 63.6 KB、最大的 `app.js` 204 800 B。
+   *
+   * 旧版这一节记的是「933.15 → 82 451.28（**88×**）」，那个倍率是"关**且不填**
+   * tag"对"开"的比值（今天在同一装置上量是 91.9× = 68.1 × 1.349），其中大头是
+   * 补上 `cache_tag`、不是本选项。**旧版的绝对值也别与上表比**：同一台机器今天
+   * 整体慢得多（把 `1.6.18` 那份发布包挂上同一装置、跑同一条孪生命令 —— 那条路
+   * 两版逐字节同策 —— 得 78,174 ~ 79,411 rps，而当时那一臂记的是 82 451.28），
+   * 只有**同一次会话内**的比值可比。
    *
    * 字节那一栏与文件系统无关，且**不全是 brotli 省下来的**：盘上 20 个文件共
    * 1,271,603 B，其中 15 个有孪生（br 224,029 B / gz 262,407 B，br 比 gz 再少
    * 14.6%），另外 5 个 webp/woff2 没有孪生、按原样发（101,376 B）—— 即盘上
    * 「br + 原样」325,405 B 对「gz + 原样」363,783 B，br 少 10.5%。而关掉本选项时
-   * 发出去的不是原文件、是**实时 deflate 出来的 gzip**，它每轮 426 KB，比盘上
-   * 那套 `.gz` 孪生（363,783 B）还大 —— 所以开这一档同时省掉「一次白压」和
-   * 「一份比预压更差的压缩」。
+   * 发出去的不是原文件、是**实时 deflate 出来的 gzip**：上表"关"那两行每圈
+   * 20 个 URI 送 431,160 B（= 172,463,836 ÷ 400 圈），比盘上那套 `.gz` 孪生
+   * （363,783 B）还大 —— 所以开这一档同时省掉「压一次」和「一份比预压更差的
+   * 压缩」。
    *
    * **rps 那一栏要连同语料所在文件系统一起读**：本机 `data/static` 的原路径挂在
    * ntfs-3g（FUSE）上，一次 `stat` 45.9 µs；同一份 50 个文件原样拷到 ext4 上是
    * 1.35 µs，**34 倍**。开了本选项之后每个请求要多 stat 一次候选结尾名，于是在
-   * ntfs-3g 上这条腿反而只有 32,448 rps（stat 成了瓶颈），在 ext4 上才跑出上表。
-   * 上表因此取 ext4 那份拷贝；量具页 `doc/benchmark-rig.md` 记了这条。
+   * ntfs-3g 上这条腿被 `stat` 拖垮（2026-10-13 那次只量到 32,448 rps），在 ext4
+   * 上才跑出上表。上表因此取 ext4 那份拷贝；量具页 `doc/benchmark-rig.md` 记了
+   * 这条。
    *
    * 挑选规则（只认 `br`/`gzip`、`q=0` 是拒绝、同 q 时 `br` 在前、`*` 兜底）与
    * 技术层的 `uvcpp_web_static` 共用同一份实现 ——
@@ -241,11 +295,24 @@ public:
   /** @brief 当前校验档，默认 `uvcpp_static_revalidate::POOL`。 */
   uvcpp_static_revalidate revalidate() const { return revalidate_; }
 
-  /** @brief 当前缓存条目数。 */
-  size_t cache_size() const { return cache_.size(); }
+  /**
+   * @brief 当前缓存条目数。
+   *
+   * 走 `mu_` 读（`cache_` 是一份被多循环共享的 `std::map`，裸读 `size()` 与
+   * 别的循环上的插入是数据竞争）—— 语义不变，只是把那次读也放进了锁里。
+   */
+  size_t cache_size() const;
 
-  /** @brief 清空缓存。 */
-  void clear_cache() { cache_.clear(); }
+  /**
+   * @brief 当前缓存持有的**字节数**（就是各条目那份 `std::string` 的容量之外
+   *        的**长度**之和，不含 `CacheEntry` 自己的元数据）。
+   *
+   * 与 @ref cache_max_bytes 是同一把尺子的两端。
+   */
+  size_t cache_bytes() const;
+
+  /** @brief 清空缓存（条目、LRU 次序、字节账一起归零）。 */
+  void clear_cache();
 
 private:
   struct CacheEntry {
@@ -258,6 +325,15 @@ private:
     int64_t mtime_sec;
     int64_t mtime_nsec;
     int64_t size;
+    /// 这份文件**在盘上的路径**（孪生命中时是孪生那一份）。
+    ///
+    /// 只为一件事存在：`fill_cached_response()` 要拿它当 `resp.cache_tag` 的
+    /// 身份成分。用**文件路径**而不是 URL 是因为两个 URL 会落到同一个文件
+    /// （`/` 与 `/index.html` 都归到 `<root>/index.html`），它们应当共用同一份
+    /// 压缩变体 —— 键里放 URL 就会各存一份压好的字节。
+    std::string fs_path;
+    /// 在 @ref lru_ 里的位置（队首 = 最近使用）。**受 `mu_` 护**。
+    std::list<std::string>::iterator pos;
   };
 
   struct LoadTask;
@@ -346,6 +422,26 @@ private:
   static std::string mime_of(const std::string& path);
 
   /**
+   * @brief 写入一条缓存条目并提升到队首，然后按预算淘汰。**要求已持有 `mu_`。**
+   *
+   * 名字带 `_locked` 后缀是为了让"光看调用点就知道它不自己拿锁"这件事成立
+   * （与 `uvcpp_web_static` 里 `evict_locked()` 同一个约定）。
+   *
+   * 三件与 `uvcpp_web_static::put()` 逐字相同的事：单份文件超过字节预算时
+   * **干脆不缓存**（否则它一进来就冲空整个缓存，下一次仍然装不下）；同一个键
+   * 覆盖写要把旧条目的字节与 LRU 位置一起撤掉；淘汰从**队尾**取，直到条目数与
+   * 字节数都回到预算内。
+   */
+  void put_cache_locked(const std::string& key,
+                        const std::shared_ptr<std::string>& data,
+                        const std::string& mime, const std::string& variant,
+                        const std::string& fs_path, int64_t msec, int64_t mnsec,
+                        int64_t size);
+
+  /** @brief 按预算从队尾淘汰。**要求已持有 `mu_`**（只从 `put_cache_locked()` 调）。 */
+  void evict_locked();
+
+  /**
    * @brief 把用完的 `uvcpp_work` 挂起来，**下次同一循环进 `serve()` 时**才真正
    *        delete。
    *
@@ -391,6 +487,11 @@ private:
   /// 校验跑在哪条线程上，见 @ref set_revalidate，默认 `POOL`（池往返那一档）。
   uvcpp_static_revalidate revalidate_ = uvcpp_static_revalidate::POOL;
 
+  /// 缓存预算，见 @ref set_cache_max_entries / @ref set_cache_max_bytes。
+  /// 默认与 `uvcpp_web_static_options` 的两个默认值相同（256 条 / 32 MiB）。
+  size_t cache_max_entries_ = 256;
+  size_t cache_max_bytes_ = 32u * 1024u * 1024u;
+
   /**
    * @brief 内存缓存，**受 `mu_` 护**。
    *
@@ -401,6 +502,19 @@ private:
   std::map<std::string, CacheEntry> cache_;
 
   /**
+   * @brief LRU 次序，**队首 = 最近使用**，**受 `mu_` 护**。
+   *
+   * 反向索引在 `CacheEntry::pos` 里，于是"提升"是一次 `splice`（O(1)、不搬
+   * 元素、失效不了别的迭代器）、"淘汰"是一次 `back()` + `pop_back()`。用
+   * `std::list` 而不是"给每条记一个时间戳再扫描"：后者每次淘汰是 O(n) 且要
+   * 时钟（单调时钟读一次在热路径上不是免费的）。
+   */
+  std::list<std::string> lru_;
+
+  /// 当前缓存的字节数（`cache_` 里各条目 `data->size()` 之和），**受 `mu_` 护**。
+  size_t cache_bytes_ = 0;
+
+  /**
    * @brief 待回收的 `uvcpp_work`，**按循环分桶**（见 @ref retire）。
    *
    * **表本身**（增删桶）受 `mu_` 护 —— 两条循环同时 `retired_[l]` 就是往同一张
@@ -409,14 +523,15 @@ private:
   std::map<uvcpp_loop*, std::vector<uvcpp_work*> > retired_;
 
   /**
-   * @brief 护 `cache_` 与 `retired_` 的表结构。
+   * @brief 护 `cache_` + `lru_` + `cache_bytes_` 与 `retired_` 的表结构。
    *
    * **锁，不是分片**，理由与 `uvcpp_web_static` 那份相同：分片会让每片各有一份
    * 缓存，内存成倍而命中率反而掉（同一条路径的请求落到不同片上互相看不见）。
    * 单循环下这把锁没有可争用的对象，代价是一次未争用的 `lock`/`unlock`。
    *
    * `mutable`：`serve()` 走的是非 const 路径，但 `resolve_url()` 这类只读者是
-   * const —— 留成 mutable 免得将来加只读访问器时再回来改一遍。
+   * const —— 留成 mutable 免得将来加只读访问器时再回来改一遍。`clear_cache()`
+   * 与 `cache_bytes()` 也吃这一条（两个都是 `const` 的公开访问器）。
    */
   mutable std::mutex mu_;
 };

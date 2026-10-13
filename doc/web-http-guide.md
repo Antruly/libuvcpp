@@ -578,47 +578,57 @@ int doc_static() {
 ```
 
 **`files` 必须活得比 `server` 长。** `handler()` 捕获的是 `this` 裸指针
-（`src/web/uvcpp_static_server.h:152-156`）—— 上面那个写法（`files` 先于 `server` 声明、
+（`src/web/uvcpp_static_server.h:160-164`）—— 上面那个写法（`files` 先于 `server` 声明、
 后于它析构）是对的。
 
-默认值（构造参数 `src/web/uvcpp_static_server.h:145-147`、成员初值 `:388-389`）：
+默认值（构造参数 `src/web/uvcpp_static_server.h:153-155`、成员初值 `:484-485`）：
 `url_root = "/"`、`index_file = "index.html"`、`spa_fallback = true`、`cache_enabled = true`。
-后两个**有 setter**（`set_spa_fallback()` `:169-169`、`set_cache_enabled()` `:172-172`），
-前两个只能走构造函数。另有两个 setter：`set_precompressed()`（`:222-225`，默认 `false`）
-和 `set_revalidate()`（`:239-242`，默认 `uvcpp_static_revalidate::POOL`）——
-前者见下面讲预压缩孪生的那一节，后者见下面讲校验跑在哪条线程上的那一节。
-构造函数还会把 `local_dir` 去掉尾斜杠、把 `url_root` 规范成 `"/"` 或 `"/xxx"`
-（`src/web/uvcpp_static_server.cpp:271-289`）。
+后两个**有 setter**（`set_spa_fallback()` `:177-177`、`set_cache_enabled()` `:180-180`），
+前两个只能走构造函数。另有一组 setter：`set_precompressed()`（`:276-276`，默认 `false`）、
+缓存的两个预算 `set_cache_max_entries()` / `set_cache_max_bytes()`（`:193-208`，默认
+256 条 / 32 MiB）和 `set_revalidate()`（`:293-293`，默认
+`uvcpp_static_revalidate::POOL`）—— 前者见下面讲预压缩孪生的那一节，后者见下面讲校验跑在
+哪条线程上的那一节。构造函数还会把 `local_dir` 去掉尾斜杠、把 `url_root` 规范成 `"/"` 或
+`"/xxx"`（`src/web/uvcpp_static_server.cpp:321-339`）。
 
 **它是懒加载的**：首次请求某文件才读盘并进内存缓存，此后每次请求 stat 一次，
 mtime/大小变了就异步重载 —— 所以文件改完**下一个请求就返回新内容**，不需要重启。
 那次 stat 默认在**线程池**里做（整个库的硬性约定是"事件循环线程上不做 IO"），也可以
 搬回循环线程：见下面「校验跑在哪条线程上」。
 
+**缓存是有界的（1.6.44 起）**：`条目数 ≤ set_cache_max_entries()` 且
+`字节数 ≤ set_cache_max_bytes()`，超了按 **LRU**（命中即提升）从队尾淘汰；
+单份文件本身就超过字节预算时**根本不缓存它**（否则它一进来就把整张表冲空、下一次仍然
+装不下）。`0` 表示"不限"而不是"预算为零"。这张表被多条循环线程共用，所以
+`cache_size()` / `cache_bytes()` 都是走锁读的，`clear_cache()` 三者一起归零。
+
 ### 能力边界（都是它自己声明的）
 
 - **不做 Range / 206、不做 ETag / 304、不做百分号解码**
-  （`src/web/uvcpp_static_server.h:31-46`）。
+  （`src/web/uvcpp_static_server.h:31-53`）。
 - **多循环（`set_loops(n > 1)`）下可用**（1.6.8 起）。`cache_` 与 `retired_` 从前
   是"循环线程只有一条"写的（两张表都没有锁）。这条在 h3 上从"没人跑"变成必需：
   h3 端点默认就扇在 n 条循环上，而 h3 上挂静态文件**只有本类可用**
   （`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`）。
-- 防目录穿越靠**段级归一化**（`src/web/uvcpp_static_server.cpp:43-80`），
-  并额外拒掉 `\`、`:`、NUL 与控制字符（`:44-48`）。
+- 防目录穿越靠**段级归一化**（`src/web/uvcpp_static_server.cpp:44-81`），
+  并额外拒掉 `\`、`:`、NUL 与控制字符（`:45-49`）。
 - **`spa_fallback` 默认开，意味着找不到文件时也返回 200 的 `index.html`**
-  （`src/web/uvcpp_static_server.cpp:552-557`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
-- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:613-616`
+  （`src/web/uvcpp_static_server.cpp:678-683`）—— 接口写错路径时会静默拿到一页 HTML 而不是 404。
+- 防"地址被复用"用的是**凭据里那个代次号**（`src/web/uvcpp_static_server.cpp:739-742`
   取到凭据、`reply_alive()` 逐处核），不是连接 id。
-- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:769-802`）；要可配的用 webapp 层的
+- MIME 表是**硬编码 switch**（`src/web/uvcpp_static_server.cpp:898-931`）；要可配的用 webapp 层的
   `uvcpp_web_static`（`src/webapp/uvcpp_web_static.h`）。
-- **不做实时压缩**：它不填 `resp.cache_tag`，所以 `uvcpp_http_server` 那个按 `cache_tag`
-  做键的响应变体缓存对它**不生效** —— 开着 `compress` 时它每请求在循环线程上把整份文件
-  deflate 一遍。想省这一次，用 `set_precompressed(true)`（1.6.18 起，默认关）：盘上放了
-  `x.js.br` / `x.js.gz` 就整份读它、原样发出去并附 `content-encoding` 与
-  `vary: accept-encoding`。挑选规则与框架层 `uvcpp_web_static` 的 `precompressed` **是
-  同一份实现**（`web/uvcpp_http_common.h` 的 `http_pick_precompressed_variants()`），
-  边界也一样：孪生文件不存在就退回原文件、带 `Range` 的请求不取孪生。实测（同一份
-  `data/static`、8 循环）**933 → 82 451 rps（88×）**，见
+- **实时压缩对它生效了（1.6.44 起）**：`1.6.43` 及以前它不填 `resp.cache_tag`，于是
+  `uvcpp_http_server` 那个按 `cache_tag` 做键的响应变体缓存对它**不生效** —— 开着
+  `compress` 时它每请求在循环线程上把整份文件 deflate 一遍（20 个文件的语料上整条腿掉到
+  **977 rps**）。现在它填了（文件身份：盘上路径 + 大小 + mtime 秒 + 纳秒），同一个装置上
+  变成压一次、之后查表（**66 554 rps**）。想连那一次也省掉就用
+  `set_precompressed(true)`（1.6.18 起，默认关）：盘上放了 `x.js.br` / `x.js.gz` 就整份
+  读它、原样发出去并附 `content-encoding` 与 `vary: accept-encoding`。挑选规则与框架层
+  `uvcpp_web_static` 的 `precompressed` **是同一份实现**（`web/uvcpp_http_common.h` 的
+  `http_pick_precompressed_variants()`），边界也一样：孪生文件不存在就退回原文件、带
+  `Range` 的请求不取孪生。实测（ext4 语料、8 循环，2026-10-14，
+  **66 554.63 → 89 791.80 rps，+34.9%**，同时线上字节 −24.5%），见
   [`benchmark.md`](benchmark.md) §4.4。
 
 ### 校验跑在哪条线程上（`set_revalidate`，1.6.26 起）

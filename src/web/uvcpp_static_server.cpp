@@ -5,6 +5,7 @@
 
 #include <web/uvcpp_static_server.h>
 
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -230,6 +231,26 @@ struct uvcpp_static_server::LoadTask {
 namespace {
 
 /**
+ * @brief 把 \p v 的十进制接到 \p out 的尾部。
+ *
+ * 与 `webapp/uvcpp_web_static.cpp` 里那一份**逐字相同**，是**故意**各留一份：
+ * 两个模块互不依赖（连 `uvcpp_static_revalidate` 都各自声明一份，见头文件里
+ * 那段说明），而这个函数只服务于 `cache_tag` 的拼装。
+ *
+ * 不用 `out += std::to_string(v)`：那一句先造一个临时串（短数走 SSO，不落堆，
+ * 但仍然要多走一次移动赋值），而 `snprintf` 到一个栈缓冲区再 `append` 就是
+ * 一次。位数上界：`-9223372036854775808` 是 20 个字符，24 字节够。
+ */
+void append_i64_dec(std::string& out, int64_t v) {
+  char buf[24];
+  const int n =
+      std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+  if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
+    out.append(buf, static_cast<size_t>(n));
+  }
+}
+
+/**
  * @brief 把缓存里那份字节**就地**填成一份 200，body 走共享视图（不拷贝字节）。
  *
  * 与 `uvcpp_http_response::ok(data, len, mime)` 逐字段等价，只差 body 从
@@ -238,15 +259,44 @@ namespace {
  *
  * 借出去之后这份内容由**响应**与缓存条目共同保活（`shared_ptr`）：缓存条目
  * 紧接着被淘汰、甚至 `clear_cache()` 清空，也不会让响应手里的指针悬空。
+ *
+ * \p fs_path / \p size / \p msec / \p mnsec 一起构成 `resp.cache_tag` ——
+ * `uvcpp_http_server` 那个**压缩变体缓存**的键（契约在
+ * `uvcpp_http_response::cache_tag`）。四个字段与 LRU 校验原始条目用的那一组
+ * （`cache_key` 的比对三元组 + 路径）**是同一组**，所以"文件变了"必然导致键变，
+ * 不需要任何额外的失效逻辑。
+ *
+ * **用了孪生文件就不设 tag**：tag 是给**实时压缩**的变体缓存当键的，而这份
+ * body 已经是压缩产物 —— `apply_compression_for()` 见到 `content-encoding`
+ * 根本不会进来，设了只会白占一份变体缓存的位置。这一条与
+ * `uvcpp_web_static.cpp` 里那一处**逐字同策**。
  */
 void fill_cached_response(uvcpp_http_response& resp,
                           const std::shared_ptr<std::string>& data,
-                          const std::string& mime, const std::string& variant) {
+                          const std::string& mime, const std::string& variant,
+                          const std::string& fs_path, int64_t size,
+                          int64_t msec, int64_t mnsec) {
   resp.status_code = http_status::OK;
   resp.status_message = "OK";
   if (!mime.empty()) resp.set_content_type(mime);
   resp.body.share(data);
   apply_variant_headers(resp, variant);
+
+  if (variant.empty()) {
+    // 就地拼、不造中间串（`a + b + c + d` 那版每加一次都产出一个临时串）。
+    // 三个数用不着 `std::to_string`：`int64_t` 的字面量转换对这几个长度本来
+    // 就走 SSO，白白多拷一遍。
+    std::string& tag = resp.cache_tag;
+    tag.clear();
+    tag.reserve(fs_path.size() + 48);
+    tag.append(fs_path);
+    tag += '\x1f';
+    append_i64_dec(tag, size);
+    tag += '\x1f';
+    append_i64_dec(tag, msec);
+    tag += '\x1f';
+    append_i64_dec(tag, mnsec);
+  }
 }
 
 /**
@@ -331,6 +381,76 @@ void uvcpp_static_server::drain_all_retired() {
        it != all.end(); ++it) {
     for (size_t i = 0; i < it->second.size(); ++i) delete it->second[i];
   }
+}
+
+// ---- 缓存记账（三处，全在 `mu_` 里）----------------------------------------
+//
+// 这三处的形状与 `uvcpp_web_static::Impl` 的 `put()` / `evict_locked()` /
+// `clear_cache()` 是同一套（同一个"有界的东西该拿什么当尺子"的取舍），差别只在
+// 这里没有解析记忆那一份表。
+
+void uvcpp_static_server::put_cache_locked(
+    const std::string& key, const std::shared_ptr<std::string>& data,
+    const std::string& mime, const std::string& variant,
+    const std::string& fs_path, int64_t msec, int64_t mnsec, int64_t size) {
+  if (!data) return;
+  // 单份文件就超过总预算 ⇒ 干脆不缓存。否则它一进来就会把整个缓存冲空，然后
+  // 下一次仍然装不下，退化成"每次请求都把缓存冲一遍"。
+  // （`cache_max_bytes_ == 0` 是"不限字节"，不是"预算为零"。）
+  if (cache_max_bytes_ > 0 && data->size() > cache_max_bytes_) return;
+
+  std::map<std::string, CacheEntry>::iterator old = cache_.find(key);
+  if (old != cache_.end()) {
+    cache_bytes_ -= old->second.data->size();
+    lru_.erase(old->second.pos);
+    cache_.erase(old);
+  }
+
+  lru_.push_front(key);
+  CacheEntry e;
+  e.data = data;
+  e.mime = mime;
+  e.variant = variant;
+  e.mtime_sec = msec;
+  e.mtime_nsec = mnsec;
+  e.size = size;
+  e.fs_path = fs_path;
+  e.pos = lru_.begin();
+  cache_[key] = e;
+  cache_bytes_ += data->size();
+
+  evict_locked();
+}
+
+void uvcpp_static_server::evict_locked() {
+  while (!lru_.empty() &&
+         (cache_.size() > cache_max_entries_ ||
+          (cache_max_bytes_ > 0 && cache_bytes_ > cache_max_bytes_))) {
+    const std::string& victim = lru_.back();
+    std::map<std::string, CacheEntry>::iterator it = cache_.find(victim);
+    if (it != cache_.end()) {
+      cache_bytes_ -= it->second.data->size();
+      cache_.erase(it);
+    }
+    lru_.pop_back();
+  }
+}
+
+size_t uvcpp_static_server::cache_size() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return cache_.size();
+}
+
+size_t uvcpp_static_server::cache_bytes() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return cache_bytes_;
+}
+
+void uvcpp_static_server::clear_cache() {
+  std::lock_guard<std::mutex> lk(mu_);
+  lru_.clear();
+  cache_.clear();
+  cache_bytes_ = 0;
 }
 
 uvcpp_loop* uvcpp_static_server::loop_of(uvcpp_tcp_client* client,
@@ -500,9 +620,13 @@ void uvcpp_static_server::stat_step(StatTask* task) {
     const std::string cache_key = task->url_path + task->variant;
     // 缓存命中且文件没变 → 内存直出（零磁盘 IO）
     if (cache_enabled_) {
-      // 查与取在锁内，**用**在锁外：命中时把条目**拷一份**出来（`CacheEntry`
-      // 里那块数据是 `shared_ptr`，拷贝是三次指针/整数赋值），这样
-      // `send_reply()` —— 它会一路走到写 socket —— 不在这把锁里跑。
+      // 查、取、**提升 LRU** 都在锁内，**用**在锁外：命中时把条目**拷一份**
+      // 出来（`CacheEntry` 里那块数据是 `shared_ptr`，拷贝是几次指针/整数
+      // 赋值），这样 `send_reply()` —— 它会一路走到写 socket —— 不在这把锁里跑。
+      //
+      // 提升用 `splice`：O(1)、不搬元素、别的迭代器一个都不失效（所以队列里
+      // 其它条目的 `pos` 仍然有效）。这一步把"命中算一次使用"钉住 —— 不提升的
+      // 话，被反复请求的热文件会被一次性的冷文件按插入次序挤出去。
       CacheEntry hit;
       bool found = false;
       {
@@ -512,6 +636,7 @@ void uvcpp_static_server::stat_step(StatTask* task) {
         if (it != cache_.end() && it->second.mtime_sec == task->mtime_sec &&
             it->second.mtime_nsec == task->mtime_nsec &&
             it->second.size == task->size) {
+          lru_.splice(lru_.begin(), lru_, it->second.pos);
           hit = it->second;
           found = true;
         }
@@ -522,7 +647,8 @@ void uvcpp_static_server::stat_step(StatTask* task) {
         // 是借缓存那份字节（`shared_ptr`）而不是拷一份。
         uvcpp_http_response& out =
             task->sync_out != nullptr ? *task->sync_out : task->scratch;
-        fill_cached_response(out, hit.data, hit.mime, hit.variant);
+        fill_cached_response(out, hit.data, hit.mime, hit.variant, hit.fs_path,
+                             hit.size, hit.mtime_sec, hit.mtime_nsec);
         deliver(task, out);
         return;
       }
@@ -616,22 +742,25 @@ void uvcpp_static_server::load_async(const std::string& fs_path,
           return;
         }
         if (task->ok) {
-          CacheEntry e;
-          e.data = task->data;
-          e.mime = uvcpp_static_server::mime_of(task->mime_key);
-          e.variant = task->variant;
-          e.mtime_sec = task->mtime_sec;
-          e.mtime_nsec = task->mtime_nsec;
-          e.size = task->size;
-          {
-            // 插入会动红黑树结构，而别的循环线程可能正在这棵树上查 —— 见头文件
-            // 里 `cache_` 的说明。锁内只做这一次赋值，`mime_of()` 留在外面。
+          const std::string mime = uvcpp_static_server::mime_of(task->mime_key);
+          // **`cache_enabled_` 在这里也要判一次。** 从前只在命中那一支判，
+          // 于是 `set_cache_enabled(false)` 关掉的是"读"、关不掉"写"：表照样
+          // 只增不减（`cache_size()` 也会跟着涨）—— 那是个货真价实的漏洞，
+          // 不是省一次判断。`1.6.44-dev` 起与命中那一支用同一个开关。
+          if (self->cache_enabled_) {
+            // 插入会动红黑树结构、还会动 LRU 队列，而别的循环线程可能正在这
+            // 两处上查/提升 —— 见头文件里 `cache_` 的说明。`mime_of()` 是文件
+            // 系统之外的一次纯计算，留在锁外。
             std::lock_guard<std::mutex> lk(self->mu_);
-            self->cache_[task->cache_key] = e;
+            self->put_cache_locked(task->cache_key, task->data, mime,
+                                   task->variant, task->fs_path, task->mtime_sec,
+                                   task->mtime_nsec, task->size);
           }
           // 就地填，body 直接借刚读进来的那份（存进缓存的是同一个
           // `shared_ptr`）—— `ok()` 那一支会把整份文件再拷一遍。
-          fill_cached_response(resp, e.data, e.mime, task->variant);
+          fill_cached_response(resp, task->data, mime, task->variant,
+                               task->fs_path, task->size, task->mtime_sec,
+                               task->mtime_nsec);
         } else {
           // 读盘失败：几字节的常量 body，走 `not_found()` 就好（它带的那几个
           // 字段正是这里要的）。
