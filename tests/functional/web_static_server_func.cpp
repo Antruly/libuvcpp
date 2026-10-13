@@ -970,6 +970,7 @@ static bool test_stale_connection_crosstalk() {
   if (!prepare_fs()) return false;
 
   StaticTestServer runner(kTmpDir, /*spa_fallback=*/false);
+  std::cout << "  [phase] 起单循环服务端\n";
   int port = runner.start();
 
   bool ok = true;
@@ -988,6 +989,7 @@ static bool test_stale_connection_crosstalk() {
   const int kStale = 16;
   blocker.occupy(32);
 
+  std::cout << "  [phase] 攒 " << kStale << " 条半途断开的连接（线程池占住不放）\n";
   for (int i = 0; i < kStale; ++i) {
     // A_i：请求大文件，写出去就断。它的 stat/读盘排在占位任务后面，
     //       回来时它自己那条连接早没了。
@@ -996,6 +998,7 @@ static bool test_stale_connection_crosstalk() {
     // A_i 的 client 对象随之 delete，地址回到空闲链上。
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
   }
+  std::cout << "  [phase] A 全断开了，连 B 并等池子放行\n";
 
   // **前提自检二**：那 16 条连接必须真的**已经断开**。这是最容易假成立的一环
   // —— 最初这里靠客户端析构断开，服务端一条关闭都没收到（`closes` 恒为 0），
@@ -1059,6 +1062,7 @@ static bool test_stale_connection_crosstalk() {
   }
 
   // 放行：这 N 个完成回调现在才跑，而 B 是活的。
+  std::cout << "  [phase] 放行，等 B 收完\n";
   blocker.release_all();
   b.pump(3000);
   blocker.drain();
@@ -1078,6 +1082,7 @@ static bool test_stale_connection_crosstalk() {
     }
   }
 
+  std::cout << "  [phase] shutdown\n";
   runner.shutdown();
   cleanup_fs();
   return ok;
@@ -1121,6 +1126,7 @@ static bool test_multiloop_concurrency() {
   // （见本函数上面那段：摘掉锁跑到 16 路 × 300 也照样绿），只会让 CI 更慢。
   StaticTestServer runner(kTmpDir, /*spa_fallback=*/false,
                           /*mount=*/"/", /*nloops=*/4);
+  std::cout << "  [phase] 起 4 条工作循环 + acceptor\n";
   int port = runner.start();
 
   const int nthreads = 8;
@@ -1144,6 +1150,7 @@ static bool test_multiloop_concurrency() {
   std::string sample;
 
   std::vector<std::thread> workers;
+  std::cout << "  [phase] 8 路 × 120 并发打（含 /big.bin 那条走线程池的路）\n";
   for (int t = 0; t < nthreads; ++t) {
     workers.push_back(std::thread([&, t]() {
       for (int i = 0; i < per_thread; ++i) {
@@ -1176,6 +1183,7 @@ static bool test_multiloop_concurrency() {
     }));
   }
   for (size_t i = 0; i < workers.size(); ++i) workers[i].join();
+  std::cout << "  [phase] 8 路全部跑完（" << done.load() << " 个请求）\n";
 
   bool ok = true;
   if (bad.load() != 0) {
@@ -1188,6 +1196,7 @@ static bool test_multiloop_concurrency() {
     ok = false;
   }
 
+  std::cout << "  [phase] shutdown\n";
   runner.shutdown();
   cleanup_fs();
   return ok;
@@ -1295,6 +1304,13 @@ static bool test_precompressed() {
 }
 
 int main(int argc, char** argv) {
+  // **整条输出不许缓冲**。这条文件里有 `set_loops(4)` + 线程池 + 半途断连，
+  // 出问题是 SIGSEGV —— 而 ctest 只拿得到进程**真的写进管道**的那些字节。
+  // libc 的缓冲区一旦还在它手里，崩溃现场之前打印的每一条进度都跟着进程一起
+  // 没了，CI 上就只剩一行 `***Exception: SegFault`，连崩在哪条用例（更别说哪一
+  // 步）都看不出来。所以这里关掉缓冲，让每条进度在打印的那一刻就落地。
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+
   bool ok = true;
   struct { const char* name; bool (*fn)(); } tests[] = {
     {"construct_and_config", test_construct_and_config},
