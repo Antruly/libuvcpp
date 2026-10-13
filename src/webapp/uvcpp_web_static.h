@@ -56,6 +56,32 @@
  *
  * 只有第 1 道是**不够的**：纯文本层面 `/link/system32/x` 完全合法。
  *
+ * 路径解析记忆（第 2 道的摊销，选项 `resolve_memo`）
+ * -------------------------------------------------
+ * 第 2 道是**每请求一次 `realpath`**，而 `realpath` 要沿路径逐分量 `lstat`。
+ * 实测（20 个 URL 的混载、ext4、static-h2 形状、20 000 请求的窗口）它占每请求
+ * **2.73 次** `realpath` 调用 —— 这是本模块热路径上最大的一笔文件系统开销。
+ *
+ * 于是把上一次的解析结论记下来：`fs_path`（展开后的绝对路径）加上
+ * `(st_dev, st_ino)`。worker 命中时只做一次 `stat` 比对指纹，不再 `realpath`；
+ * `statx` 次数与不记忆时**逐条相同**（慢路径本来也要 `stat` 一次拿 mtime/size），
+ * 所以这一步是纯赚。
+ *
+ * 为什么这是安全的，而不是"拿路径文本当结论"：`stat` 与 `realpath` 走的是
+ * **同一条 VFS 解析**。`(dev, ino)` 没变 ⟺ 还是那个文件 ⟺ 当初"它在根内"那个
+ * 判断仍然是**对这个文件**的判断。路径被换向时（`/hintdir` 从真目录换成指向
+ * 根外的链接）`stat` 会跟着新链接落到另一个 inode 上 ⇒ 指纹对不上 ⇒ 落回完整
+ * 解析、然后拒绝。`test_resolve_hint` 测的就是这一步：把指纹比对去掉（改成只信
+ * 路径文本）之后它必须变红，而且红在**内容**上（根外那个文件的字节真的发出去了），
+ * 不是红在状态码上。
+ *
+ * **已知且接受的一处行为差异**：路径的落点被整体搬到根外、原位留下一个指向
+ * **同一个 inode** 的链接时（`mv` 到根外 + `ln -s` 回原位），指纹不变 ⇒ 命中
+ * 路径继续按原 URL 服务它，而完整解析会判越界。差别是"曾经被授权过的那份字节
+ * 多活一会儿"，不是读到没被授权过的字节；`rm` 立即生效，`validate.sh` 的
+ * staleness 探针用 `mv -f` 换文件（inode 必变）也不受影响。要绝对严格就关掉
+ * `resolve_memo`（一行）。
+ *
  * 大文件与流式下发
  * ----------------
  * **小文件**（≤ `max_cached_file_size`，默认 1 MiB）走原路：worker 整读进
@@ -288,6 +314,23 @@ struct UVCPP_API uvcpp_web_static_options {
    * 唯一的行为，逐字节等价**；`LOOP_STAT` 只在文档根位于本地文件系统时开。
    */
   uvcpp_web_revalidate revalidate;
+
+  /**
+   * @brief 是否复用上一次的**路径解析**结论。默认 `true`。
+   *
+   * 解析一次 URL 要一次 `realpath`，而 `realpath` 要沿路径逐分量 `lstat`；
+   * 开本选项后，命中缓存的路径只做一次 `stat` 比对 `(st_dev, st_ino)`，
+   * 不再 `realpath`。**系统调用数不变**（慢路径本来也要 `stat` 一次拿
+   * mtime/size），省下的是那一整条 `realpath`。完整的安全论证与"已知的一处
+   * 行为差异"写在 `uvcpp_web_static.h` 文件头的「路径解析记忆」一节。
+   *
+   * 关掉它 = 逐字节回到不做记忆时的行为（每个请求一次 `realpath`）。
+   * 差异**只在一种情形**下可见：某个路径的落点被整体搬到文档根之外、而
+   * 原地留下一个指向**同一个 inode** 的链接 —— 那时记忆里的结论仍然成立
+   * （还是那个文件），完整解析则会判它越界。`tests/functional/
+   * web_app_static_func.cpp` 的 `test_resolve_hint` 覆盖了换向那一步。
+   */
+  bool resolve_memo;
 
   /** @brief dotfile 策略。默认 `HIDE`（404）。 */
   uvcpp_web_dotfile_policy dotfiles;

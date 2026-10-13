@@ -126,6 +126,15 @@ const char* k_outside_dir = "uvcpp_static_test_outside";
 const char* k_outside_secret = "uvcpp_static_test_outside/secret2.txt";
 const char* k_outside_text = "SECOND-SECRET-VIA-LINK";
 
+/**
+ * 根外那个与 `/hintdir/a.txt` **同名**的文件的内容。
+ *
+ * 换向用例要靠它认出"发出去的其实是根外那一份" —— 状态码在那一步是骗人的
+ * （`200` 与 `404` 的差别取决于换向有没有换成功），内容不是。
+ */
+const char* k_repoint_text = "OUTSIDE-AFTER-DIR-REPOINT";
+const char* k_repoint_name = "a.txt";
+
 #ifdef _WIN32
 #include <direct.h>
 #include <sys/stat.h>
@@ -288,6 +297,17 @@ bool build_root() {
   ok = ensure_dir(k_outside_dir) && ok;
   ok = write_file(k_outside_secret, k_outside_text) && ok;
 
+  // 解析记忆（`resolve_hint`）用例的靶子：根内一个目录 + 里面的文件。
+  // 用例会在该 URL 被完整解析过一次之后，把这个目录**换成指向根外的链接**
+  // —— 同一个 URL 的落点从根内变成根外，而路径文本一个字都没变。
+  // 根外那份**同名**文件是必需的：没有它，换向后那个路径根本不存在，
+  // "必须拒绝"的断言会因为 404 而假装通过。
+  ok = ensure_dir(r + "/hintdir") && ok;
+  ok = write_file(r + "/hintdir/" + std::string(k_repoint_name),
+                  "IN-ROOT-HINT-TARGET") && ok;
+  ok = write_file(std::string(k_outside_dir) + "/" + k_repoint_name,
+                  k_repoint_text) && ok;
+
   // 链接逃逸用的两个链接。**两条缺一不可**：
   //   - `escape` 指向根**外**，它必须被挡住 —— 这是第 2 道边界
   //     （`web_resolve_within_root`）唯一的用武之地：路径文本
@@ -315,6 +335,22 @@ void cleanup_root() {
   // 链接要在 `rmdir(root)` **之前**摘掉，否则根目录非空、删不掉。
   remove_dir_link(std::string(k_root) + "/escape");
   remove_dir_link(std::string(k_root) + "/inside");
+
+  // 解析记忆用例会把 `/hintdir` 换成"指向根外的链接"，真目录暂存在
+  // `/hintdir_away`。用例跑到一半就崩的话这个中间态会留在盘上，下一次运行
+  // 就会看到一个**真的指向根外**的链接 —— 先把它摘掉、把真目录改回来，
+  // 否则这条残留会让后面每一次运行都从"根里有个逃逸链接"开始。
+  const std::string hint = std::string(k_root) + "/hintdir";
+  const std::string hint_away = hint + "_away";
+  remove_dir_link(hint);
+  if (!dir_exists(hint) && dir_exists(hint_away)) {
+    std::rename(hint_away.c_str(), hint.c_str());
+  }
+  remove_file(hint + "/" + k_repoint_name);
+  remove_file(hint_away + "/" + k_repoint_name);
+  TEST_RMDIR(hint.c_str());
+  TEST_RMDIR(hint_away.c_str());
+
   remove_file(std::string(k_root) + "/sub/index.html");
   remove_file(std::string(k_root) + "/sub/a.txt");
   remove_file(std::string(k_root) + "/deep/inner/f.txt");
@@ -343,6 +379,7 @@ void cleanup_root() {
   TEST_RMDIR(k_root);
   remove_file(k_secret);
   remove_file(k_outside_secret);
+  remove_file(std::string(k_outside_dir) + "/" + k_repoint_name);
   TEST_RMDIR(k_outside_dir);
 }
 
@@ -1815,7 +1852,84 @@ void test_cache() {
   check_eq(body_of(r), "hello static", "第三次读同一份内容");
 }
 
-// ---- 11b. `revalidate = LOOP_STAT`：校验搬到循环线程 ----
+// ---- 11b. 解析记忆：换向之后必须**重新解析** ----
+//
+// `probe_leaf()` 的第一步是把 `realpath` 的结果记下来（`fs_path` + `(dev,ino)`），
+// 之后命中就只做一次 `stat_real` 比对指纹，不再 `realpath`。理由是 `stat` 与
+// `realpath` 走的是同一条 VFS 解析：**同一个 `(dev,ino)` 就是同一个文件**，
+// 而"这个文件当初被判在根内"的结论跟着那个文件走，不跟着路径文本走。
+//
+// 于是这类用例**只能**盯住两者不再等价的那一刻：文件系统被换向。其余任何
+// 时候，"每次重新解析"与"永远用记忆里的结论"给出逐字节相同的响应 —— 这组
+// 断言在后者（也就是一个根本没在做包含判断的实现）下会**全绿**，什么证明不了。
+//
+// 场景（路径文本一个字都没变）：
+//
+//   1. `/hintdir/a.txt` —— `/hintdir` 是个真目录，落点在根内。解析并记账。
+//   2. 把 `/hintdir` 换成指向根**外**目录的链接 —— 同一个 URL 的落点变成
+//      根外那个**同名**文件。
+//   3. 下一个请求必须重新解析、然后拒绝。
+//
+// 只按路径文本缓存的实现在第 3 步会把根外那个文件发出去：`stat_real(fs_path)`
+// 跟着新链接走、照样成功，而它已经不再检查这次解析落在哪儿。所以判据是
+// **内容**，不是状态码 —— 换向成功与否决定了状态码是 403 还是 404，只有内容
+// 才能把"拒绝"与"漏出去"分开。
+void test_resolve_hint() {
+  std::cout << "[static] resolve_hint" << std::endl;
+  const std::string r(k_root);
+  const std::string url = "/hintdir/" + std::string(k_repoint_name);
+  uvcpp_http_response resp;
+
+  // (1) 烧进记忆：第一次完整解析并记账，第二次走命中路径。
+  check(get(g_port, url, resp), url + " 应当有响应");
+  check_eq(body_of(resp), "IN-ROOT-HINT-TARGET", "换向前的落点应当在根内");
+  check_eq_i(status_of(resp), 200, "换向前应当 200");
+  check(get(g_port, url, resp), "再取一次（命中路径）");
+  check_eq(body_of(resp), "IN-ROOT-HINT-TARGET", "命中路径给的内容必须与首次相同");
+
+  // 对照组：关掉记忆的那一份挂载。它每请求都重新解析，所以下面第 (3) 步的
+  // 拒绝在它那儿是"理所当然"的 —— 正因为理所当然，它才必须一起绿：要是这一
+  // 档也漏，说明问题不在记忆，而在包含判断本身。
+  const std::string off_url = "/nomemo/hintdir/" + std::string(k_repoint_name);
+  check(get(g_port, off_url, resp), off_url + " 应当有响应");
+  check_eq(body_of(resp), "IN-ROOT-HINT-TARGET", "关记忆档换向前的内容");
+  check_eq_i(status_of(resp), 200, "关记忆档换向前应当 200");
+
+  // (2) 换向。**前提要钉死**：换向没成功的话，第 3 步的"必须拒绝"会因为
+  //     那个路径根本不存在而假装通过 —— 那测的就不是包含判断了。
+  const std::string away = r + "/hintdir_away";
+  check(std::rename((r + "/hintdir").c_str(), away.c_str()) == 0,
+        "把 /hintdir 真目录挪走");
+  check(make_dir_link(r + "/hintdir", k_outside_dir),
+        "在 /hintdir 原位建一个指向根外的链接");
+  check(dir_exists(r + "/hintdir"), "换向后的链接必须能解析（否则下面测的是 404）");
+  std::string probe;
+  check(read_file(std::string(k_outside_dir) + "/" + k_repoint_name, probe) &&
+            probe == k_repoint_text,
+        "换向后该 URL 必须真的落到根外那个文件上");
+
+  // (3) 同一个 URL、同一个路径文本，落点已经在根外。
+  check(get(g_port, url, resp), url + " 换向后应当有响应");
+  check_hides(body_of(resp), k_repoint_text,
+              "换向后仍把根外文件发出来了 —— 命中路径没有重新解析");
+  check(status_of(resp) != 200, "换向后落点在根外，不该回 200");
+
+  // 对照组：关掉记忆的挂载同样拒绝（它每请求都重新解析）。
+  check(get(g_port, off_url, resp), off_url + " 换向后应当有响应");
+  check_hides(body_of(resp), k_repoint_text, "关记忆档换向后也不该漏出根外文件");
+  check(status_of(resp) != 200, "关记忆档换向后同样不该回 200");
+
+  // (4) 还原，后面的用例读的是同一个文档根。
+  remove_dir_link(r + "/hintdir");
+  check(std::rename(away.c_str(), (r + "/hintdir").c_str()) == 0, "还原 /hintdir");
+  check(get(g_port, url, resp), "还原后应当有响应");
+  check_eq(body_of(resp), "IN-ROOT-HINT-TARGET", "还原后必须重新服务根内的那一份");
+  check_eq_i(status_of(resp), 200, "还原后应当 200");
+  check(get(g_port, off_url, resp), "关记忆档还原后应当有响应");
+  check_eq_i(status_of(resp), 200, "关记忆档还原后应当 200");
+}
+
+// ---- 11c. `revalidate = LOOP_STAT`：校验搬到循环线程 ----
 //
 // 这一档**不改任何对外行为**：同一个 URL 在两条路上必须给出逐字节相同的响应，
 // 命令与缓存判据也逐字相同。所以"响应相等"这一类断言在这里**证明不了东西**
@@ -2164,6 +2278,13 @@ int main() {
     deny.dotfiles = uvcpp_web_dotfile_policy::DENY;
     app.serve_static("/deny", k_root, deny);
 
+    // 解析记忆的**关**档：换向用例要在这一档上得到同样的拒绝，否则"记忆力
+    // 本身是安全的"这句话就没有对照组（一个永远不用记忆的实现也能通过
+    // `/` 那组断言 —— 那测的就不是记忆了）。
+    uvcpp_web_static_options nomemo;
+    nomemo.resolve_memo = false;
+    app.serve_static("/nomemo", k_root, nomemo);
+
     uvcpp_web_static_options allow;
     allow.dotfiles = uvcpp_web_dotfile_policy::ALLOW;
     app.serve_static("/allow", k_root, allow);
@@ -2230,6 +2351,7 @@ int main() {
     if (want("symlink")) test_symlink_escape();
     if (want("spa")) test_spa_fallback();
     if (want("cache")) test_cache();
+    if (want("hint")) test_resolve_hint();
     if (want("loop_stat")) test_loop_stat();
     if (want("options")) test_options();
     if (want("precompressed")) test_precompressed();

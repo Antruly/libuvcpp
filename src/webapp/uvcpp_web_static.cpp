@@ -235,6 +235,7 @@ struct static_config {
   size_t max_file_size;
   size_t max_cached_file_size;        ///< 超过它就改走分片读（见 options）
   bool follow_symlinks;
+  bool resolve_memo;                  ///< 见选项：关掉就每请求一次 realpath
 };
 
 enum class probe_status {
@@ -286,8 +287,13 @@ struct probe_result {
 
 /// stat 到的是文件还是目录。任何错误（含"是设备文件/管道"）都返回 false，
 /// 让调用方按"不存在"处理 —— 文档根里出现 FIFO 只可能是有人放进去的。
+///
+/// `dev`/`ino` 可选（空表示调用方不关心）：它们和别的字段一起在
+/// `req_cleanup()` 之前抄出来，所以调用方拿到的是一次 stat 的**同一份**
+/// 快照，不存在"抄了 mtime 又抄 inode、两次 stat 之间文件被换掉"。
 bool stat_real(uvcpp_loop* loop, const std::string& path, bool& is_dir,
-               int64_t& sec, int64_t& nsec, int64_t& size) {
+               int64_t& sec, int64_t& nsec, int64_t& size,
+               uint64_t* dev = nullptr, uint64_t* ino = nullptr) {
   uvcpp_fs fs;
   if (fs.stat(loop, path.c_str()) != 0) {
     fs.req_cleanup();
@@ -304,11 +310,107 @@ bool stat_real(uvcpp_loop* loop, const std::string& path, bool& is_dir,
       sec = static_cast<int64_t>(st->st_mtim.tv_sec);
       nsec = static_cast<int64_t>(st->st_mtim.tv_nsec);
       size = static_cast<int64_t>(st->st_size);
+      if (dev != nullptr) *dev = static_cast<uint64_t>(st->st_dev);
+      if (ino != nullptr) *ino = static_cast<uint64_t>(st->st_ino);
       ok = true;
     }
   }
   fs.req_cleanup();
   return ok;
+}
+
+/**
+ * @brief 「上一次这个 URL 被完整解析到哪儿」的记忆 —— 见 `probe_leaf` 的快路径。
+ *
+ * 三个字段缺一不可：`fs_path` 是那次 `web_resolve_within_root()` 的产物（同时
+ * 也是检查的**对象**），`(dev, ino)` 是那一刻这个文件在文件系统里的身份。
+ * 三者的关系是：**只要 `stat(fs_path)` 还能拿回同一对 `(dev, ino)`，那么
+ * `realpath(root + url)` 今天解出来的就还是同一个文件** —— 因为 `stat` 与
+ * `realpath` 走的是同一套 VFS 解析，`stat` 跟到哪个 inode，`realpath` 就
+ * 规范到哪个路径。
+ *
+ * 于是那次解析得出的两个结论都还成立：
+ *  - 「这个文件在根内」—— 它是同一个 inode，内容一字不差；
+ *  - 「它的 mtime/size 是 X」—— 那次是 X，但**今天的值以今天的 stat 为准**，
+ *    快路径并不因此跳过尺寸闸门或缓存比对。
+ *
+ * 为什么 `dev` 必须一起比：inode 号只在**同一个设备内**唯一，跨设备会重号。
+ */
+struct resolve_hint {
+  std::string fs_path;
+  uint64_t dev;
+  uint64_t ino;
+
+  /**
+   * @brief 上一次解析**成不成功**。负数记忆（`false`）同样是钱。
+   *
+   * 它存在的理由是孪生文件那一圈：`probe_job()` 会依序探 `url + ".br"`、
+   * `url + ".gz"`，而语料里**没有**孪生的那些文件两条都要探、两条都失败 ——
+   * 只记正数的话，这批请求每一条都要重跑两次完整的 `realpath`（本机量具上
+   * 这正是 `realpath`/req 停在 0.98 而不是 0 的原因）。解析失败与解析成功
+   * 一样是"查过磁盘得出的结论"，没有理由只记一半。
+   *
+   * 负数记忆的**校验**与正数不同（没有 inode 可比）：靠一次 `lstat()` 仍然
+   * 失败来证明"它还是不在这儿"。两个方向都只要**一次**系统调用，这正是
+   * 快路径值得存在的形状。
+   */
+  bool exists;
+
+  resolve_hint() : dev(0), ino(0), exists(false) {}
+};
+
+/**
+ * @brief 一次请求要用的全部记忆，**按探测 URL 键**，线性扫。
+ *
+ * 键取的是 `probe_leaf()` 的 `url` 参数（也就是真正会被拼出来 stat 的那个
+ * 字符串），不是最终命中的 URL —— 于是索引文件、SPA 回退、预压缩孪生各自
+ * 有自己的一条，三者互不覆盖，`probe_leaf()` 也不必知道"上层最后选了谁"。
+ *
+ * 用 `vector` 而不是 `map`：候选键的个数是 `(1 + 索引名个数 + spa) × 3`，
+ * 正常配置下是个位数 —— 与 `Impl::add_one_probe_locked()` 的去重同一个理由。
+ */
+typedef std::vector<std::pair<std::string, resolve_hint> > hint_vec;
+
+/// 在 `hints` 里找 `url` 的记忆；没有就返回空指针。
+/// **只在快路径上被调一次**，找不到等价于"以前没解析过这个 URL"。
+const resolve_hint* find_hint(const hint_vec* hints, const std::string& url) {
+  if (hints == nullptr) return nullptr;
+  for (size_t i = 0; i < hints->size(); ++i) {
+    if ((*hints)[i].first == url) return &(*hints)[i].second;
+  }
+  return nullptr;
+}
+
+/// 记下 `url` 这次的解析结论（幂等：同一个 `url` 只留最后一条）。
+void record_hint(hint_vec* out, const std::string& url, const std::string& path,
+                 uint64_t dev, uint64_t ino) {
+  if (out == nullptr) return;
+  resolve_hint h;
+  h.fs_path = path;
+  h.dev = dev;
+  h.ino = ino;
+  h.exists = true;
+  for (size_t i = 0; i < out->size(); ++i) {
+    if ((*out)[i].first == url) {
+      (*out)[i].second = h;
+      return;
+    }
+  }
+  out->push_back(std::make_pair(url, h));
+}
+
+/// 记下「`url` 这次解析**没成**」。
+void record_miss_hint(hint_vec* out, const std::string& url) {
+  if (out == nullptr) return;
+  resolve_hint h;
+  h.exists = false;
+  for (size_t i = 0; i < out->size(); ++i) {
+    if ((*out)[i].first == url) {
+      (*out)[i].second = h;
+      return;
+    }
+  }
+  out->push_back(std::make_pair(url, h));
 }
 
 /// 最后一段是不是符号链接。用 `lstat`：它只对**最后一段**不跟随，中间段
@@ -329,20 +431,61 @@ bool lstat_is_symlink(uvcpp_loop* loop, const std::string& path) {
   return link;
 }
 
+/// `lstat` 成功了吗 —— 也就是"这条路径的**最后一段**在不在"（不跟随它）。
+///
+/// 与 `lstat_is_symlink()` 只差**报告什么**：那条报"是不是链接"（出错也报
+/// false），这条报"在不在"。负数记忆的校验用的就是这一条，见 `probe_leaf()`。
+bool lstat_exists(uvcpp_loop* loop, const std::string& path) {
+  uvcpp_fs fs;
+  const bool ok = (fs.lstat(loop, path.c_str()) == 0);
+  fs.req_cleanup();
+  return ok;
+}
+
 /**
  * @brief 把 URL 解析成一个确定的文件（**不处理索引文件**，也不做 SPA 回退）。
  *
  * 「不处理索引」是刻意的：索引只对目录有意义，把它留在上层，递归深度就天然
  * 封顶在 1 —— 不用去证明「index.html 指向一个目录」这种情况不会转圈。
+ *
+ * 第 (2) 步是**唯一**有快慢两档的地方，其余三步逐字不变。快路径的来历：
+ * `realpath()` 是按分量走的 —— 一个 5 段路径就是 5 次 `lstat`，而且它们是
+ * glibc 内部调用（`__lstat64`），既过不了 LD_PRELOAD 也进不了 profiling 的
+ * 符号表，只能看着它在 `stat` 之外凭空多出一倍的 VFS 往返。本机量具上静态腿
+ * 每请求 `realpath` 2.73 次、`statx` 2.25 次（`/tmp/c1/count.sh`）—— 前者纯粹
+ * 是在重复回答一个**昨天就已经回答过、且答案没变**的问题。
+ *
+ * 快路径凭什么敢跳过安全边界：`stat()` 与 `realpath()` 走的是**同一套 VFS
+ * 解析**（都逐分量跟符号链接）。所以「`stat(fs_path)` 还拿回同一对
+ * `(dev, ino)`」这句话的意思就是「`realpath(root + url)` 今天仍然解到同一个
+ * 文件」，而那个文件在上一次解析时**已经**通过了根内包含判断。inode 相同 ⇒
+ * 内容一字不差 ⇒ 那次判断继续成立。
+ *
+ * `hints` 空、或里面没有这个 URL、或指纹对不上，一律落回完整的
+ * `web_resolve_within_root()` —— **回退是默认行为，快路径是例外**。
+ * 于是「文件被换掉」（`mv -f`、删除后重建、甚至是同尺寸的替换）必然因为
+ * inode 变化而回退，行为与从前逐字相同。
+ *
+ * 已知的**唯一**一处行为差异：文件被移出根、原位置留一个指回去的符号链接时，
+ * inode 没变，快路径会继续供这份文件，而完整解析会判 `TRAVERSAL` ⇒ 403。
+ * 供出去的字节仍然只是那次已经授权过的那一份，所以不是越权读取，是「管理员
+ * 移走它」这个意图没被立刻执行 —— 删掉（而不是移走）就会立刻生效。详见
+ * `doc/web-http-guide.md`。
  */
 probe_status probe_leaf(uvcpp_loop* loop, const static_config& cfg,
-                        const std::string& url, probe_result& out) {
+                        const std::string& url, probe_result& out,
+                        const hint_vec* hints = nullptr,
+                        hint_vec* record = nullptr) {
   out = probe_result();
   out.final_url = url;
 
   // (1) 符号链接策略。查的是**未解析**的路径，所以这里自己拼一次 ——
   //     `web_resolve_within_root()` 返回的是展开后的真实路径，那时候再判断
   //     「是不是链接」已经没有意义了。
+  //
+  //     **快路径不跳过这一步**：它判的是"这次请求要走的那个 URL 上有没有
+  //     链接"，与"上次解析到哪儿"是两件事。少跳过一步，就少一类需要在
+  //     "链接被新加上去"时才能发现的差异。
   if (!cfg.follow_symlinks) {
     const std::string joined = web_join_root(cfg.root_real, url);
     if (lstat_is_symlink(loop, joined)) {
@@ -352,25 +495,74 @@ probe_status probe_leaf(uvcpp_loop* loop, const static_config& cfg,
     }
   }
 
-  // (2) 真实路径的包含判断 —— 这才是安全边界，第 (1) 步不是。
   std::string real;
+
+  // (2a) 快路径 —— 只在记忆命中时走。**一次系统调用，零次 `realpath`。**
+  //
+  //      正数记忆：stat 的对象是**上次解析出来的那个路径**，不是
+  //      `root + url` —— 只有前者才与"上次的结论"可比。第 (1) 步已经保证
+  //      了策略面的事，包含面的事由指纹保证。
+  //      负数记忆：反过来查**没解析过**的那条路径（`root + url`），
+  //      "它现在还是不在"就是"上次的失败今天照样成立"。
+  const resolve_hint* h = find_hint(cfg.resolve_memo ? hints : nullptr, url);
+  if (h != nullptr) {
+    if (h->exists) {
+      uint64_t dev = 0;
+      uint64_t ino = 0;
+      if (stat_real(loop, h->fs_path, out.is_dir, out.mtime_sec, out.mtime_nsec,
+                    out.size, &dev, &ino) &&
+          dev == h->dev && ino == h->ino) {
+        out.fs_path = h->fs_path;
+        out.status = probe_status::OK;
+        return out.status;
+      }
+    } else if (!lstat_exists(loop, web_join_root(cfg.root_real, url))) {
+      // `lstat` 失败 ⇒ 这条路径上确实没有东西 ⇒ 完整解析也只会得出
+      // NOT_FOUND（`realpath` 会在同一个分量上以同一个 errno 失败）。
+      out.fs_path.clear();
+      out.status = probe_status::NOT_FOUND;
+      return out.status;
+    }
+    // 对不上（换文件了 / 路径没了 / 变成别的类型了 / 那个东西又出现了）：
+    // 落下去做完整解析。**先把手里的 `out` 清干净** —— 上面那次 `stat_real`
+    // 可能已经往 `out.is_dir/mtime/size` 里写过值了。
+    out = probe_result();
+    out.final_url = url;
+  }
+
+  // (2b) 真实路径的包含判断 —— 这才是安全边界，第 (1) 步不是。
+  //      关掉 `resolve_memo` 时**连记账也不做**：不读的人不该付写的钱，
+  //      而且"关掉"这一档的判据正是"系统调用序列与不做记忆时逐字节相同"。
+  hint_vec* const rec = cfg.resolve_memo ? record : nullptr;
   const web_path_status ws = web_resolve_within_root(cfg.root_real, url, real);
   if (ws != web_path_status::OK) {
     const bool traversal = (ws == web_path_status::TRAVERSAL);
     out.status = traversal ? probe_status::FORBIDDEN : probe_status::NOT_FOUND;
     out.policy_rejected = traversal;
+    // `TRAVERSAL` 不记负数记忆：它的校验需要重做包含判断，而"路径被换向"
+    // 恰恰是记忆最容易过期的那一类，留它走完整解析更划算。
+    if (!traversal) record_miss_hint(rec, url);
     return out.status;
   }
 
-  // (3) stat
+  // (3) stat。`dev`/`ino` 与别的字段取自**同一次** stat，所以记下去的
+  //     指纹与记下去的 mtime/size 描述的是同一个瞬间的文件。
+  uint64_t dev = 0;
+  uint64_t ino = 0;
   if (!stat_real(loop, real, out.is_dir, out.mtime_sec, out.mtime_nsec,
-                 out.size)) {
+                 out.size, &dev, &ino)) {
     out.status = probe_status::NOT_FOUND;
+    // 落在这里的常见情形是"`realpath` 与 `stat` 之间有东西删掉了它"，
+    // 也可能解析到的是 FIFO/设备这类不被接受的类型。两种都按"现在没有"
+    // 记，下次由 `lstat_exists()` 复核 —— 那时东西要是又在了，自然落回
+    // 完整解析。
+    record_miss_hint(rec, url);
     return out.status;
   }
 
   out.fs_path = real;
   out.status = probe_status::OK;
+  record_hint(rec, url, real, dev, ino);
   return out.status;
 }
 
@@ -383,14 +575,16 @@ probe_status probe_leaf(uvcpp_loop* loop, const static_config& cfg,
  * index.html 链接被静默跳过、然后回落到 SPA，问题彻底看不见。
  */
 probe_status probe_with_index(uvcpp_loop* loop, const static_config& cfg,
-                              const std::string& url, probe_result& out) {
-  const probe_status s = probe_leaf(loop, cfg, url, out);
+                              const std::string& url, probe_result& out,
+                              const hint_vec* hints = nullptr,
+                              hint_vec* record = nullptr) {
+  const probe_status s = probe_leaf(loop, cfg, url, out, hints, record);
   if (s != probe_status::OK || !out.is_dir) return s;
 
   for (size_t i = 0; i < cfg.index_names.size(); ++i) {
     probe_result sub;
     const std::string idx_url = join_url(url, cfg.index_names[i]);
-    const probe_status ss = probe_leaf(loop, cfg, idx_url, sub);
+    const probe_status ss = probe_leaf(loop, cfg, idx_url, sub, hints, record);
     if (ss == probe_status::OK && !sub.is_dir) {
       out = sub;
       return ss;
@@ -499,6 +693,26 @@ struct uvcpp_web_static::Impl {
     std::string url;                         ///< 已归一化的请求 URL
     bool is_head;
     std::vector<cache_probe> probes;
+
+    /**
+     * @brief 解析记忆的**输入**：循环线程在取探针的那一次锁里一起拷出来的。
+     *
+     * 与 `probes` 同一个时机、同一把锁、同一份候选键集合 —— 但**互不依赖**：
+     * `probes` 只在缓存里**有**这个键时才有一条，而记忆可以在"没缓存但解析过"
+     * 时也存在（走分片下发的大文件就是这种）。所以它是独立的一份列表，
+     * 不是 `cache_probe` 的一个字段。
+     */
+    hint_vec hints;
+
+    /**
+     * @brief 解析记忆的**输出**：worker 这次完整解析出来的结论，攒着一次性写回。
+     *
+     * 攒起来是为了**只取一次锁**：`probe_leaf()` 一次请求最多被调 6 次
+     * （索引名 × 孪生后缀），每次都自己取锁就把 miss 路径的锁次数乘了六倍。
+     * worker 一次请求至多解析成功 3 条（原文件 + 两个孪生），所以这里通常
+     * 只有 1~2 条。
+     */
+    hint_vec fresh_hints;
 
     /**
      * @brief 客户端**可接受**的预压缩后缀，按 q 降序，至多两个；空串 = 没这一位。
@@ -612,6 +826,20 @@ struct uvcpp_web_static::Impl {
   std::list<std::string> lru;  ///< 队首 = 最近使用（受 `mu_` 护）
   std::map<std::string, cache_entry> cache;  ///< 受 `mu_` 护
   size_t bytes;                 ///< 受 `mu_` 护
+
+  /**
+   * @brief 「这个被探过的 URL 上次解析到哪个文件」—— 见 `probe_leaf()` 的快路径。
+   *
+   * **受 `mu_` 护**，与 `cache` 并列但独立：条目缓存存的是**字节**，这份存的是
+   * **解析结论**，两者的键空间与失效条件都不同（字节按 mtime/size 失效，结论
+   * 按 inode 失效）。`cache_max_entries == 0`（关缓存）时这份表也不建 —— 它
+   * 的上限就是借 `cache_max_entries` 定的。
+   *
+   * 它**不参与任何正确性判定**：丢掉/清空只会让下一次多走一次
+   * `web_resolve_within_root()`，响应逐字节不变。所以它可以在任何时刻被
+   * 整表清掉（`put_hints()` 满了就是这么干的），`clear_cache()` 也顺手清它。
+   */
+  std::map<std::string, resolve_hint> hints_;
 
   /** @brief 命中/未命中（观测用；跨线程，无锁读改写）。 */
   std::atomic<unsigned long long> hits;
@@ -785,29 +1013,109 @@ struct uvcpp_web_static::Impl {
    * 那一份对得上，也天然把 `.br` / `.gz` / 原文件分成三条互不覆盖的条目。
    */
   void collect_probes(const std::string& url, const std::string variants[2],
-                      std::vector<cache_probe>& out) const {
+                      std::vector<cache_probe>& out,
+                      hint_vec* hints = nullptr) const {
     // **整段只取一次锁。** 从前是每个候选键各取一次（1 个索引名 + 2 个后缀
     // ⇒ 条目用的那种配置下每请求最多 6 次），而 `-m 32` 那种形状下这把锁是
     // 真有争用的 —— 每取一次都是一次潜在的 futex。候选键的**全集**不依赖锁
     // 里的任何状态（拼的是 URL 与配置），所以把整段查找包进来不改变语义：
     // 每个条目仍然是在锁内拷出来的快照，worker 照旧拿它去和磁盘上的
     // mtime/size 比对。
+    //
+    // 解析记忆（`hints`）**搭这同一次锁的车**：它的候选键与探针完全同一批，
+    // 而且它本来就是受 `mu_` 护的。于是 C2 的快路径对 POOL 档是**零新增取锁**
+    // —— 这是它没有变成"省下 3 µs 的 realpath、付掉 20 ns 的锁"那种半吊子
+    // 优化的原因。
     std::lock_guard<std::mutex> lk(mu_);
-    add_probe_locked(url, variants, out);
+    add_probe_locked(url, variants, out, hints);
     for (size_t i = 0; i < cfg->index_names.size(); ++i) {
-      add_probe_locked(join_url(url, cfg->index_names[i]), variants, out);
+      add_probe_locked(join_url(url, cfg->index_names[i]), variants, out, hints);
     }
     if (cfg->spa_fallback && !cfg->spa_url.empty()) {
-      add_probe_locked(cfg->spa_url, variants, out);
+      add_probe_locked(cfg->spa_url, variants, out, hints);
+    }
+  }
+
+  /// `LOOP_STAT` 档专用的取记忆：那条路上 `serve()` 不取探针（用不上），
+  /// 所以记忆得自己取 —— 仍然只取**一次**锁。
+  void collect_hints(const std::string& url, const std::string variants[2],
+                     hint_vec& out) const {
+    // 关掉记忆时连取都不取：`probe_leaf()` 那边本来也不会用，白拿一次锁
+    // 会让"关掉之后一次多余的系统调用/加锁都没有"这条判据不成立。
+    if (!cfg->resolve_memo) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    add_hints_locked(url, variants, &out);
+    for (size_t i = 0; i < cfg->index_names.size(); ++i) {
+      add_hints_locked(join_url(url, cfg->index_names[i]), variants, &out);
+    }
+    if (cfg->spa_fallback && !cfg->spa_url.empty()) {
+      add_hints_locked(cfg->spa_url, variants, &out);
     }
   }
 
   /// **要求已持有 `mu_`**（只从 `collect_probes()` 里调）。
   void add_probe_locked(const std::string& key, const std::string variants[2],
-                        std::vector<cache_probe>& out) const {
+                        std::vector<cache_probe>& out,
+                        hint_vec* hints) const {
     add_one_probe_locked(key, out);
+    add_one_hint_locked(key, hints);
     for (size_t i = 0; i < 2; ++i) {
-      if (!variants[i].empty()) add_one_probe_locked(key + variants[i], out);
+      if (!variants[i].empty()) {
+        add_one_probe_locked(key + variants[i], out);
+        add_one_hint_locked(key + variants[i], hints);
+      }
+    }
+  }
+
+  /**
+   * @brief 把 `key` 及其孪生后缀的记忆拷进 `out`。**要求已持有 `mu_`。**
+   *
+   * 单独有一个"从原 URL 进"的入口（而不是只从 `add_probe_locked()` 进），
+   * 是为了让 `LOOP_STAT` 档的 `collect_hints()` 也能复用 —— 那条路上
+   * `serve()` 根本不取探针，用不上 `cache_probe`。
+   */
+  void add_hints_locked(const std::string& key, const std::string variants[2],
+                        hint_vec* out) const {
+    if (out == nullptr || !cache_enabled()) return;
+    add_one_hint_locked(key, out);
+    for (size_t i = 0; i < 2; ++i) {
+      if (!variants[i].empty()) add_one_hint_locked(key + variants[i], out);
+    }
+  }
+
+  /// 记忆的**单键**版本：`variants` 已经在上层展开过了。
+  ///
+  /// 为什么记忆不跟 `cache` 共用一份表：两者的键空间不同 —— 缓存条目的键是
+  /// **最终命中**的那个 URL（索引文件、SPA 入口都算），而记忆的键是
+  /// **被探过**的那个 URL（`probe_leaf()` 收到的参数）。索引文件那一条上两者
+  /// 恰好不同，合并就得在探之前知道"最后会选中谁"，那正是探测要回答的问题。
+  void add_one_hint_locked(const std::string& key, hint_vec* out) const {
+    // 唯一一道闸：`cfg->resolve_memo` 关掉时这份表**永远是空的** ——
+    // `probe_leaf()` 那边也不再记账，所以"关掉 = 逐字节回到不做记忆时"
+    // 这条判据不依赖任何一个调用点记得住这件事。
+    if (out == nullptr || !cfg->resolve_memo) return;
+    for (size_t i = 0; i < out->size(); ++i) {
+      if ((*out)[i].first == key) return;  // 去重：候选键可能撞车
+    }
+    const std::map<std::string, resolve_hint>::const_iterator it =
+        hints_.find(key);
+    if (it == hints_.end()) return;
+    out->push_back(*it);
+  }
+
+  /// worker 侧：把这次完整解析出来的结论写回（**一次锁**）。
+  ///
+  /// 满了就整表清空而不是逐条淘汰：这份表是纯记忆，丢掉任何一条都只意味着
+  /// "下次多走一次 `realpath`"，正确性不受影响；而按 LRU 淘汰要额外养一条
+  /// 链表和一堆迭代器，换来的只是"冷热混杂时少失效几条"。上限取
+  /// `cache_max_entries` —— 与内容缓存同一把尺子，配置一个有界的东西不该
+  /// 需要第二个旋钮。
+  void put_hints(const hint_vec& fresh) {
+    if (!cache_enabled() || fresh.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (hints_.size() + fresh.size() > opts.cache_max_entries) hints_.clear();
+    for (size_t i = 0; i < fresh.size(); ++i) {
+      hints_[fresh[i].first] = fresh[i].second;
     }
   }
 
@@ -919,6 +1227,11 @@ struct uvcpp_web_static::Impl {
     lru.clear();
     cache.clear();
     bytes = 0;
+    // 解析记忆跟着一起清：它记的是"这个 URL 的磁盘身份"，而调用方喊
+    // `clear_cache()` 的场合（换语料、跑合规探针之前）正是"磁盘那边可能
+    // 全变了"的场合。不清它也**不会错**（inode 变了自然会回退），但清掉能
+    // 让"清缓存之后第一次请求必定走完整解析"成为一条可以断言的性质。
+    hints_.clear();
   }
 
   // ---- 计数（`std::atomic`，不取锁）。
@@ -967,6 +1280,9 @@ struct uvcpp_web_static::Impl {
    * 函数体一行都不变。
    */
   void probe_job(job* j);
+
+  /// `probe_job()` 的实体（`probe_job()` 只负责取/放解析记忆那两件外围事）。
+  void probe_job_inner(job* j);
 
   /**
    * @brief 把 `probe_job()` 认定要读的那份文件读进内存。会阻塞，**要占名额**。
@@ -1022,8 +1338,29 @@ bool uvcpp_web_static::Impl::acquire_slot(job* j) {
 }
 
 void uvcpp_web_static::Impl::probe_job(job* j) {
+  // `LOOP_STAT` 档的 `serve()` 不取探针（那条路用不上 `cache_probe`），于是
+  // 解析记忆得在这里自己取 —— **一次锁**。`POOL` 档的记忆是搭 `serve()` 里
+  // `collect_probes()` 那一次锁的车来的，这里什么都不做。
+  //
+  // 为什么值得为 `LOOP_STAT` 多花这一次锁：这一档的 `stat` 与 `realpath` 都
+  // 跑在**循环线程**上，而选项注释里写明它的代价正是"这个阻塞会拖住同一条
+  // 循环上的其它连接"。C2 恰恰是把那里的 5 次 `lstat` 换成 1 次 `stat`，
+  // 对这条线程的价值比对 worker 大。20 ns 的未争用取锁换 3~5 µs 的 VFS
+  // 往返，是这个交换里便宜的那一半。
+  if (j->probed_on_loop) collect_hints(j->url, j->try_variants, j->hints);
+
+  probe_job_inner(j);
+
+  // 这次完整解析出来的结论攒在 `fresh_hints` 里，到这里一次性写回。
+  // 攒的原因见 `job::fresh_hints`；空表时 `put_hints()` 提前返回，**一次锁
+  // 都不取** —— 于是"记忆已经在表里"的那些请求（也就是热路径）不付这份钱。
+  if (!j->fresh_hints.empty()) put_hints(j->fresh_hints);
+}
+
+void uvcpp_web_static::Impl::probe_job_inner(job* j) {
   probe_result pr;
-  probe_status s = probe_with_index(j->loop, *j->cfg, j->url, pr);
+  probe_status s = probe_with_index(j->loop, *j->cfg, j->url, pr, &j->hints,
+                                    &j->fresh_hints);
 
   // SPA 回退：**只对"路径不存在"生效**。被策略挡下的路径绝不能回落到 SPA ——
   // 否则 `/.env` 会拿到一个 200 的 index.html，一次探测就变成了正常响应，
@@ -1031,8 +1368,8 @@ void uvcpp_web_static::Impl::probe_job(job* j) {
   if (s == probe_status::NOT_FOUND && !pr.policy_rejected &&
       j->cfg->spa_fallback && !j->cfg->spa_url.empty()) {
     probe_result sp;
-    const probe_status ss =
-        probe_with_index(j->loop, *j->cfg, j->cfg->spa_url, sp);
+    const probe_status ss = probe_with_index(j->loop, *j->cfg, j->cfg->spa_url,
+                                             sp, &j->hints, &j->fresh_hints);
     if (ss == probe_status::OK && !sp.is_dir) {
       pr = sp;
       s = ss;
@@ -1070,7 +1407,8 @@ void uvcpp_web_static::Impl::probe_job(job* j) {
     if (j->try_variants[i].empty()) break;
     probe_result vp;
     const probe_status vs =
-        probe_leaf(j->loop, *j->cfg, pr.final_url + j->try_variants[i], vp);
+        probe_leaf(j->loop, *j->cfg, pr.final_url + j->try_variants[i], vp,
+                   &j->hints, &j->fresh_hints);
     if (vs == probe_status::OK && !vp.is_dir &&
         static_cast<uint64_t>(vp.size) <=
             static_cast<uint64_t>(j->cfg->max_cached_file_size)) {
@@ -1463,6 +1801,7 @@ uvcpp_web_static_options::uvcpp_web_static_options(size_t max_file)
       max_cached_file_size(1024u * 1024u),
       precompressed(false),
       revalidate(uvcpp_web_revalidate::POOL),
+      resolve_memo(true),
       dotfiles(uvcpp_web_dotfile_policy::HIDE),
       follow_symlinks(true),
       add_charset(true),
@@ -1518,6 +1857,7 @@ uvcpp_web_static::uvcpp_web_static(const std::string& root_dir,
   cfg->max_file_size = opts.max_file_size;
   cfg->max_cached_file_size = opts.max_cached_file_size;
   cfg->follow_symlinks = opts.follow_symlinks;
+  cfg->resolve_memo = opts.resolve_memo;
 
   // 文档根：构造时归一化一次并缓存。之后每个请求都要拿它做包含判断，
   // 每请求算一遍 realpath 是纯浪费（而且那是个系统调用）。
@@ -1720,7 +2060,7 @@ void uvcpp_web_static::serve(uvcpp_web_request& req, uvcpp_web_response& resp,
     // 走到这里只有一种情形：探到了、要读盘。下面照常投池，worker 只做读盘
     // 那一段（`probed_on_loop` 为真，它不会再 stat 第二次）。
   } else if (im->cache_enabled()) {
-    im->collect_probes(url, j->try_variants, j->probes);
+    im->collect_probes(url, j->try_variants, j->probes, &j->hints);
   }
 
   uvcpp_work* work = new uvcpp_work();
