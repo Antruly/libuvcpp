@@ -30,6 +30,7 @@
 
 #include "uvcpp_web_static.h"
 
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 
@@ -583,12 +584,11 @@ struct uvcpp_web_static::Impl {
   std::shared_ptr<uvcpp_web_work_limit> work_limit;
 
   /**
-   * @brief 护 `lru`/`cache`/`bytes`/`hits`/`misses`/`rejected`，外加
-   *        `retired` 那张**表本身**（不含表里的指针指向的东西）。
+   * @brief 护 `lru`/`cache`/`bytes`，外加 `retired` 那张**表本身**（不含
+   *        表里的指针指向的东西，也不含桶里的 `vector`）。
    *
-   * 为什么要锁：多循环下 `serve()`（读缓存）与 `finish_job()`（写缓存、
-   * 计数）分别跑在**不同的循环线程**上，而这几个成员从前是按"loop 线程只有
-   * 一条"写的（`rejected` 的旧注释就写着"只在 loop 线程加减"）。
+   * 为什么要锁：多循环下 `serve()`（读缓存）与 `finish_job()`（写缓存）分别
+   * 跑在**不同的循环线程**上，而这两个成员从前是按"loop 线程只有一条"写的。
    *
    * **锁，不是分片。** 分片会让每片各有一份 LRU：内存成倍、命中率还掉
    * （同一条路径的请求落到不同片上就互相看不见）。这正是 `compress_mu_`
@@ -596,18 +596,26 @@ struct uvcpp_web_static::Impl {
    * 互斥，不是分片」）。单循环下这把锁没有可争用的对象，代价是一次未争用的
    * `lock`/`unlock`。
    *
-   * `mutable`：`add_probe()`/只读访问器都是 const 成员函数。
+   * **它离热路径又远了一步**（每次取锁在 `-m 32` 那档下都是一次潜在的
+   * futex，每请求 8 次的账就是这么来的）：三个计数改成了 `std::atomic`
+   * （它们只被加减，从不参与决策）；循环线程取探针整段只取**一次**锁
+   * （`collect_probes()`）；回收桶空了就一次锁都不取（`bucket_for()`）。
+   * 落到每请求上的取锁次数因此是 1（`POOL` 档取探针那一次）。
+   *
+   * `mutable`：`collect_probes()`/只读访问器都是 const 成员函数。
    */
   mutable std::mutex mu_;
 
-  /** @brief 被 503 挡掉的请求数（观测用；受 `mu_` 护）。 */
-  unsigned long long rejected;
+  /** @brief 被 503 挡掉的请求数（观测用；跨线程，无锁读改写）。 */
+  std::atomic<unsigned long long> rejected;
 
   std::list<std::string> lru;  ///< 队首 = 最近使用（受 `mu_` 护）
   std::map<std::string, cache_entry> cache;  ///< 受 `mu_` 护
   size_t bytes;                 ///< 受 `mu_` 护
-  unsigned long long hits;      ///< 受 `mu_` 护
-  unsigned long long misses;    ///< 受 `mu_` 护
+
+  /** @brief 命中/未命中（观测用；跨线程，无锁读改写）。 */
+  std::atomic<unsigned long long> hits;
+  std::atomic<unsigned long long> misses;
 
   /**
    * @brief 用完待回收的 `uvcpp_work`，**按循环分桶**。
@@ -623,50 +631,124 @@ struct uvcpp_web_static::Impl {
    * 已释放的对象上执行回调（正是上面那段长注释记的同一类危险，只是换了个
    * 触发者）。分桶之后每条循环只删自己投出去的。
    *
-   * **表本身**（增删桶）受 `mu_` 护 —— 两条循环同时 `retired[l]` 就是往
+   * **表本身**（插入新桶）受 `mu_` 护 —— 两条循环同时 `retired[l]` 就是往
    * 同一个 `std::map` 上并发写。桶里的 `delete` 在锁外做。
+   *
+   * **桶一旦建出来就再不 `erase()`**（旧写法每轮 `serve()` 都删一遍键）。
+   * 于是 `std::map` 节点的地址恒定（重平衡只改指针、不搬节点），
+   * `bucket_for()` 就能把指针缓存在本线程上，之后这条循环上的
+   * `retire()`/`drain_retired()` **一次锁都不取**。桶的 `vector` 也因此只被
+   * 一条线程碰（见 `retire_bucket`）。
    *
    * 数量级：两次请求之间完成的活儿，通常就是 1 个。
    */
-  std::map<uvcpp_loop*, std::vector<uvcpp_work*> > retired;
+  struct retire_bucket {
+    /**
+     * @brief 待删的 work 请求。
+     *
+     * **只被那一条循环自己的线程碰**，所以它不需要 `mu_`：`retire()` 在
+     * `uvcpp_work` 的 after_work 回调里调（libuv 保证那个回调跑在**投递它的
+     * 那条循环**上），`drain_retired()` 在 `serve()` 开头调（同一条循环的
+     * 线程）。这正是分桶的第二个好处 —— 第一个是"只删自己投出去的"。
+     */
+    std::vector<uvcpp_work*> pending;
+  };
 
-  Impl() : bytes(0), hits(0), misses(0), rejected(0) {}
+  std::map<uvcpp_loop*, retire_bucket> retired;
+
+  /**
+   * @brief 本线程上 `(this, 循环)` 对应的桶的缓存，见 `bucket_for()`。
+   *
+   * `ticket` 是防"`Impl` 析构后在同一地址又建了一个、而循环指针也复用了
+   * 同一个值"的：票号单调递增、永不复用，所以过期的缓存一定对不上。
+   *
+   * **这个类型必须一直保持"平凡析构"（纯 POD）**：MinGW-w64 下带非平凡析构的
+   * `thread_local` 对象走 `__cxa_thread_atexit`，而 emutls 在那之前就把 TLS 块
+   * 还回堆了 —— 析构读到的是已复用的内存（那个坑的完整现场见
+   * `src/expand/uvcpp_page_heap.cpp:556-574`）。只放指针和整数就没有这个问题：
+   * 编译器根本不登记析构回调。
+   */
+  struct bucket_cache {
+    const Impl* owner;
+    unsigned long long ticket;
+    uvcpp_loop* loop;
+    retire_bucket* bucket;
+  };
+
+  /** @brief 本实例的票号。见 `bucket_cache`。 */
+  unsigned long long instance_id_;
+
+  static unsigned long long next_instance_id() {
+    static std::atomic<unsigned long long> n(0);
+    return n.fetch_add(1, std::memory_order_relaxed) + 1;
+  }
+
+  /**
+   * @brief 取 \p l 的回收桶；没有就建一个。**只在没缓存时才取一次锁。**
+   *
+   * 为什么可以免锁：桶建出来之后地址就不动了（`std::map` 的节点地址恒定，
+   * 而且这张表再没有 `erase()`），而桶里的东西只有这条循环的线程会碰。缓存
+   * 拿 `(this, ticket, loop)` 三重校验，所以"另一个 `Impl` 的桶""另一条循环
+   * 的桶"都命中不了。
+   */
+  retire_bucket* bucket_for(uvcpp_loop* l) {
+    static thread_local bucket_cache c = {nullptr, 0, nullptr, nullptr};
+    if (c.owner == this && c.ticket == instance_id_ && c.loop == l) {
+      return c.bucket;
+    }
+    std::lock_guard<std::mutex> lk(mu_);
+    retire_bucket& b = retired[l];
+    c.owner = this;
+    c.ticket = instance_id_;
+    c.loop = l;
+    c.bucket = &b;
+    return &b;
+  }
+
+  Impl()
+      : rejected(0),
+        bytes(0),
+        hits(0),
+        misses(0),
+        instance_id_(next_instance_id()) {}
 
   ~Impl() { drain_all_retired(); }
 
   /// 记下一个用完的 work 请求（**只能在 after_work 回调里调**，传**投递它的
   /// 那条循环**）。
   void retire(uvcpp_loop* l, uvcpp_work* w) {
-    std::lock_guard<std::mutex> lk(mu_);
-    retired[l].push_back(w);
+    bucket_for(l)->pending.push_back(w);
   }
 
   /// 真正释放 \p l 那一条循环攒下的。**绝不能在任何回调里调。**
   void drain_retired(uvcpp_loop* l) {
+    retire_bucket* b = bucket_for(l);
+    if (b->pending.empty()) return;  // 常态：连锁带 map 查找全省掉
     std::vector<uvcpp_work*> mine;
-    {
-      std::lock_guard<std::mutex> lk(mu_);
-      const std::map<uvcpp_loop*, std::vector<uvcpp_work*> >::iterator it =
-          retired.find(l);
-      if (it == retired.end()) return;
-      mine.swap(it->second);
-      retired.erase(it);
-    }
+    mine.swap(b->pending);
     // 锁外删：`~uvcpp_work` 里会发生什么不该由这把锁兜着。
     for (size_t i = 0; i < mine.size(); ++i) delete mine[i];
   }
 
-  /// 析构用：所有桶一起排空。到这里已经没有别的线程会往里放了。
+  /**
+   * @brief 析构用：所有桶一起排空。
+   *
+   * **前提是"已经没有别的线程会往里放了"**（App 先停、循环先退出），旧写法
+   * 也是同一个前提 —— 它那把锁护住的只是这张表，`erase()` 掉一个桶之后
+   * 再有 `retire()` 进来就是往一个没人看的桶里塞（泄漏，不是崩溃）。这里
+   * 连表一起清掉，语义不变。
+   */
   void drain_all_retired() {
-    std::map<uvcpp_loop*, std::vector<uvcpp_work*> > all;
+    std::map<uvcpp_loop*, retire_bucket> all;
     {
       std::lock_guard<std::mutex> lk(mu_);
       all.swap(retired);
     }
-    for (std::map<uvcpp_loop*, std::vector<uvcpp_work*> >::iterator it =
-             all.begin();
+    for (std::map<uvcpp_loop*, retire_bucket>::iterator it = all.begin();
          it != all.end(); ++it) {
-      for (size_t i = 0; i < it->second.size(); ++i) delete it->second[i];
+      for (size_t i = 0; i < it->second.pending.size(); ++i) {
+        delete it->second.pending[i];
+      }
     }
   }
 
@@ -704,32 +786,46 @@ struct uvcpp_web_static::Impl {
    */
   void collect_probes(const std::string& url, const std::string variants[2],
                       std::vector<cache_probe>& out) const {
-    add_probe(url, variants, out);
+    // **整段只取一次锁。** 从前是每个候选键各取一次（1 个索引名 + 2 个后缀
+    // ⇒ 条目用的那种配置下每请求最多 6 次），而 `-m 32` 那种形状下这把锁是
+    // 真有争用的 —— 每取一次都是一次潜在的 futex。候选键的**全集**不依赖锁
+    // 里的任何状态（拼的是 URL 与配置），所以把整段查找包进来不改变语义：
+    // 每个条目仍然是在锁内拷出来的快照，worker 照旧拿它去和磁盘上的
+    // mtime/size 比对。
+    std::lock_guard<std::mutex> lk(mu_);
+    add_probe_locked(url, variants, out);
     for (size_t i = 0; i < cfg->index_names.size(); ++i) {
-      add_probe(join_url(url, cfg->index_names[i]), variants, out);
+      add_probe_locked(join_url(url, cfg->index_names[i]), variants, out);
     }
     if (cfg->spa_fallback && !cfg->spa_url.empty()) {
-      add_probe(cfg->spa_url, variants, out);
+      add_probe_locked(cfg->spa_url, variants, out);
     }
   }
 
-  void add_probe(const std::string& key, const std::string variants[2],
-                 std::vector<cache_probe>& out) const {
-    add_one_probe(key, out);
+  /// **要求已持有 `mu_`**（只从 `collect_probes()` 里调）。
+  void add_probe_locked(const std::string& key, const std::string variants[2],
+                        std::vector<cache_probe>& out) const {
+    add_one_probe_locked(key, out);
     for (size_t i = 0; i < 2; ++i) {
-      if (!variants[i].empty()) add_one_probe(key + variants[i], out);
+      if (!variants[i].empty()) add_one_probe_locked(key + variants[i], out);
     }
   }
 
-  void add_one_probe(const std::string& key,
-                     std::vector<cache_probe>& out) const {
+  /**
+   * @brief 把 `key` 的探针快照拷进 `out`；`key` 不在缓存里就什么都不做。
+   *
+   * **要求已持有 `mu_`。**
+   *
+   * 去重是对 `out` 的线性扫描（候选键确实会撞车：`spa_url` 可能就是某个
+   * 索引名）。**故意没换成 `std::set`**：候选键的个数是
+   * `(1 + 索引名个数 + spa) × 3`，正常配置下是个位数，十几次字符串比较比给
+   * 每个键建一个红黑树节点（每次都要分配）划算。
+   */
+  void add_one_probe_locked(const std::string& key,
+                            std::vector<cache_probe>& out) const {
     for (size_t i = 0; i < out.size(); ++i) {
       if (out[i].key == key) return;  // 去重：候选键可能撞车
     }
-    // 整段都在锁里：探针是**快照**（拷的是 mtime/size 和一个 shared_ptr 引用
-    // 计数），拷完这一次就与 `cache` 无关了，worker 拿它去和磁盘上的
-    // mtime/size 比对 —— 语义与从前逐字相同。
-    std::lock_guard<std::mutex> lk(mu_);
     const std::map<std::string, cache_entry>::const_iterator it =
         cache.find(key);
     if (it == cache.end()) return;
@@ -825,22 +921,17 @@ struct uvcpp_web_static::Impl {
     bytes = 0;
   }
 
-  // ---- 计数（受 mu_ 护；`finish_job()` / `finish_job()` 的 REJECTED 分支
-  //      都在循环线程上，但多循环下不止一条）----
-  void note_hit() {
-    std::lock_guard<std::mutex> lk(mu_);
-    ++hits;
-  }
+  // ---- 计数（`std::atomic`，不取锁）。
+  //
+  // 这三个数各自只被加减、从不参与任何决策，从前跟着邻居一起取 `mu_` 纯属
+  // 历史遗留。但**不能**因此退化成裸 `unsigned long long`：多循环下它们是真
+  // 有并发写的（`finish_job()` 跑在各自的循环线程上），那就是数据竞争。
+  // 计数本身是观测量，不需要与别的字段构成任何不变量，所以用 relaxed。
+  void note_hit() { hits.fetch_add(1, std::memory_order_relaxed); }
 
-  void note_miss() {
-    std::lock_guard<std::mutex> lk(mu_);
-    ++misses;
-  }
+  void note_miss() { misses.fetch_add(1, std::memory_order_relaxed); }
 
-  void note_rejected() {
-    std::lock_guard<std::mutex> lk(mu_);
-    ++rejected;
-  }
+  void note_rejected() { rejected.fetch_add(1, std::memory_order_relaxed); }
 
   // ---- 只读访问器（外面那几个 public 的就转发到这里）----
 
@@ -855,18 +946,15 @@ struct uvcpp_web_static::Impl {
   }
 
   unsigned long long hit_count() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return hits;
+    return hits.load(std::memory_order_relaxed);
   }
 
   unsigned long long miss_count() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return misses;
+    return misses.load(std::memory_order_relaxed);
   }
 
   unsigned long long rejected_count() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return rejected;
+    return rejected.load(std::memory_order_relaxed);
   }
 
   // ---- 跨线程两侧 ----
@@ -924,8 +1012,8 @@ bool uvcpp_web_static::Impl::acquire_slot(job* j) {
   if (!work_limit->acquire()) {
     // `rejected` 是**循环线程**那一侧的计数（`note_rejected()` 在 `finish_job()`
     // 里），而这里在 worker 上，所以计数不在这里加 —— 这一支只写 job 自己的
-    // 状态，不碰任何共享量。（`mu_` 能护住它，但那会让 worker 去抢一把本该
-    // 只属于循环线程的锁；把写点留在业主那侧更省事，也少一处跨线程的锁。）
+    // 状态，不碰任何共享量。把写点留在业主那侧更省事，也少一处跨线程的写
+    // （那个计数今天已经是原子的，但"由业主记自己的账"这条分工没变）。
     j->status = probe_status::REJECTED;
     return false;
   }
@@ -1122,7 +1210,7 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
     case probe_status::REJECTED:
       // 名额没抢到。形状与原先 `serve()` 里那一支**逐字一致** —— 只是判定的
       // 位置从"投递之前"挪到了"真要读盘之前"（见 `run_job`）。
-      note_rejected();  // 观测用计数；多循环下不止一条循环线程会加减，故走锁
+      note_rejected();  // 观测用计数；多循环下不止一条循环线程会加减，故用原子
       UVCPP_LOG_WARN(log_category::STATIC)
           << "工作池已满（在途 " << (work_limit ? work_limit->in_flight() : 0)
           << " / " << (work_limit ? work_limit->limit() : 0)
