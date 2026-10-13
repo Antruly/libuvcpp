@@ -40,6 +40,7 @@
  * 的 DCID」这类错误**恒等抵消**，在 CI 上永远看不见（`745608c` 的缺陷正是
  * 如此）。那一段的判据、量法与读数写在它自己的注释里。
  */
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -118,18 +119,92 @@ const int kDeadlineMs = 5000;
 /// 这一段就是让 CI 在没有 `h2load` 的情况下也走一遍那个形状。
 const size_t kMismatchedServerScidLen = 8;
 
-/// 第 6 段串行回声的轮数与总墙钟上界。
+/// 第 6 段串行回声的轮数。
 ///
-/// **两个数都是实测定的**（本机、回环、8 核，各跑 3 遍）：好的一档 20 次串行
-/// 回声 **44 / 44 / 45 ms**（一次回环往返是亚毫秒，剩下的全是 `wait_until` 那
+/// **实测定的**（本机、回环、8 核，各跑 3 遍）：好的一档 20 次串行回声
+/// **44 / 44 / 45 ms**（一次回环往返是亚毫秒，剩下的全是 `wait_until` 那
 /// 1 ms 的轮询粒度）；把服务端查表那个长度换回「对端 SCID 长度」的坏实现下
 /// **一轮都过不去** —— deadline 放到 30 s 也是 0/20。
-///
-/// 上界取 500 ms（离正常值 11 倍，离"一轮都过不去"无穷倍）而不是贴着实测值
-/// 取，是因为这条判据不该去区分"慢"与"不通"：那是两个不同的结论，而**两者都
-/// 是红的**。500 ms 这个数只负责"别把一次正经的回环往返判成缺陷"。
 const int kMismatchRoundTrips = 20;
-const int kMismatchBudgetMs   = 500;
+
+/// 每轮允许花掉多少个"轮询粒度"，外加一个固定宽限（毫秒）。
+///
+/// **这里原来写的是一个绝对毫秒数（500 ms）**，理由是"本机实测 44 ms 的 11 倍，
+/// 够宽了"。它不够宽，而且错得不体面：`wait_until()` 每轮 `sleep_for(1ms)` 一次，
+/// 而那个 `sleep_for(1ms)` 的**实际**代价是**系统定时器粒度**，随机器变 ——
+/// 本机实测 1.06 ms（下面那张表里的 1 ms），Windows runner 上则大一个数量级。
+/// 于是在 Windows runner 上 20 轮实测 **505 / 508 ms**（**25.4 ms/轮**，
+/// `CI · Windows · MSVC` 的 `quic` 与 `http3` 两条腿同时判红、各报一次），
+/// 而**库里一行没错**：那个数就是那台机器的定时器粒度，`wait_util.h:37-48`
+/// 那张表记的 Windows 默认粒度 15.6 ms 与之同量级。任何写死的毫秒预算都等于把
+/// 跑它的机器写进判据，这正是 `wait_util.h` 开头那段在说的毛病 —— 这次轮到这条
+/// 判据自己犯。
+///
+/// 所以改成「每轮不超过 `quantum × 8 + 10` ms」，`quantum` 在**同一进程里现测**
+/// （`measure_poll_quantum_ms()`，量法见它的注释）：
+///
+/// | 机器 | `quantum` | 每轮预算 | 20 轮实测 | 余量 |
+/// |---|---|---|---|---|
+/// | 本机（回环、8 核） | 1 ms | 18 ms | 42–43 ms | 8 倍 |
+/// | Windows runner | 16 ms（由 25.4 ms/轮 与该表 15.6 ms 反推，见下） | 138 ms | 505–508 ms | 5 倍 |
+///
+/// Windows 那一行的 `quantum` 是**反推**的，不是量到的：那条腿的日志里只有
+/// `508 ms` 这个总数。反推它的办法是这张表自己的 15.6 ms —— 四舍五入到 16 ms
+/// 之后，每轮预算 138 ms 落在实测 25.4 ms 的 5.4 倍处，与另一行同一种尺度。
+/// 判据不依赖这个反推：它每次运行都量自己那台。
+///
+/// 而**这条预算真正要拦的东西在另一个数量级上**：一个 PTO 约 1.02 s/轮
+/// （`kDeadlineMs` 只有 5 s ⇒ 那种实现连 20 轮都走不完，先红在 `done` 那一条上），
+/// 一次延迟 ACK 造成的停顿也有几十到上百毫秒/轮。
+///
+/// 8 和 10 这两个数不是实测定的，是"明摆着够"定的：本机实测一**轮**往返只花
+/// 2.1 ms（43 ÷ 20），而每轮预算容得下 18 个 1 ms 的轮询；10 ms 那一项只为了在
+/// `quantum` 恰好等于 1 ms 的机器上别把预算压到 8 ms/轮。
+const int kMismatchPollsPerRoundTrip = 8;
+const int kMismatchSlackMs           = 10;
+
+/// 本进程里 `wait_until()` **一次轮询**要花多少毫秒（5 次取样取中位数）。
+///
+/// `wait_until(loop, [] { return false; }, 1)` 恰好跑一轮：`pred()` 假 ⇒
+/// `elapsed_ms(0) >= 1` 不成立 ⇒ 泵一次循环 + `sleep_for(1ms)` ⇒ 下一轮
+/// `elapsed_ms >= 1` 成立、返回。所以每次调用的耗时就是"一次轮询"的代价，
+/// 包含 `loop->run(UV_RUN_NOWAIT)` 本身 —— 那正是串行回声每一轮都要付的两样。
+///
+/// **取样用微秒、报数四舍五入到毫秒**：毫秒截断会把秤的量程也截掉 ——
+/// 本机实测这个轮询是 1.06 ms（单独量 `sleep_for(1ms)` 是 1.058 ms，加上泵一次
+/// 空循环仍在 1.1 ms 以内），截断就报 1、四舍五入也报 1；而一台真按 15.6 ms
+/// 走的机器（`wait_util.h:37-48` 那张表里 Windows 的默认粒度）截断报 15、
+/// 四舍五入报 16。两种写法都不影响这条判据的自洽（预算由同一个数推出来），
+/// 差别只在**日志可读性**：报一个四舍五入过的数，才看得出"为什么预算是这个值"。
+///
+/// 取中位数而不是均值：一次调度抖动不该把判据的尺度改掉。本机单独量
+/// `sleep_for(1ms)` 的 5 次取样是 **1.055 / 1.055 / 1.055 / 1.067 / 1.082 ms**
+/// （三轮都是这个形状，中位 1.06），本来就齐；忙起来的机器上不齐，那时中位数
+/// 比均值抗一次抖动。
+/// 下限钳到 1 ms：`sleep_for` 的实现在任何平台上都不会**少于**请求的时长，
+/// 钳下限只是防秤本身出零。
+long long measure_poll_quantum_ms(uvcpp::uvcpp_loop* loop) {
+  long long s[5];
+  for (int i = 0; i < 5; ++i) {
+    const std::chrono::steady_clock::time_point t =
+        std::chrono::steady_clock::now();
+    uvcpp_test::wait_until(loop, [] { return false; }, 1);
+    const long long us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - t)
+                             .count();
+    s[i] = (us + 500) / 1000;  // 微秒 → 毫秒，四舍五入
+  }
+  for (int i = 0; i < 5; ++i) {
+    for (int j = i + 1; j < 5; ++j) {
+      if (s[j] < s[i]) {
+        const long long tmp = s[i];
+        s[i]                = s[j];
+        s[j]                = tmp;
+      }
+    }
+  }
+  return s[2] < 1 ? 1 : s[2];
+}
 
 // ---------------------------------------------------------------------------
 // 跨分块的载荷（第 4 段用）
@@ -623,6 +698,16 @@ void test_streams_with_mismatched_cid_len() {
     return;
   }
 
+  // 预算现推：**就在这条循环上、就在握手之后量**，因为下面每一轮付的正是
+  // 「泵一次这条循环 + `sleep_for(1ms)`」那一笔（见 `measure_poll_quantum_ms`）。
+  //
+  // 量在最前面那一档会偏小：那时循环里只有握手流量。放在这里，量到的粒度里
+  // 含着一条活连接的收发包代价 —— 判据宁可量得准，不可量得宽。
+  const long long quantum_ms = measure_poll_quantum_ms(&loop);
+  const long long budget_ms =
+      static_cast<long long>(kMismatchRoundTrips) *
+      (quantum_ms * kMismatchPollsPerRoundTrip + kMismatchSlackMs);
+
   const std::chrono::steady_clock::time_point t0 =
       std::chrono::steady_clock::now();
   int done = 0;
@@ -647,12 +732,19 @@ void test_streams_with_mismatched_cid_len() {
     ++done;
   }
   const long long total_ms = uvcpp_test::elapsed_ms(t0);
+  // 三个数一起打：结论、实得、以及**这一台的粒度与由它推出来的预算**。
+  // 这条判据红过一次（Windows runner 上 508 ms vs 写死的 500 ms），当时那一行
+  // 报不出粒度，只能靠翻 `wait_util.h` 去猜；现在它自己报。
   std::cout << "  [CID] " << done << "/" << kMismatchRoundTrips
-            << " 次串行回声共 " << total_ms << " ms" << std::endl;
+            << " 次串行回声共 " << total_ms << " ms（本机轮询粒度 " << quantum_ms
+            << " ms ⇒ 预算 " << budget_ms << " ms）" << std::endl;
   check_eq_i(done, kMismatchRoundTrips, "每一轮都收到了回声");
-  check(total_ms < kMismatchBudgetMs,
-        "串行回声总耗时 < " + std::to_string(kMismatchBudgetMs) + " ms（实得 " +
-            std::to_string(total_ms) + " ms）—— 坏实现下每个来回都要等一个 PTO");
+  check(total_ms < budget_ms,
+        "串行回声总耗时 < " + std::to_string(budget_ms) + " ms（实得 " +
+            std::to_string(total_ms) + " ms；预算 = (本机轮询粒度 " +
+            std::to_string(quantum_ms) + " ms × 8 + 10 ms) × " +
+            std::to_string(kMismatchRoundTrips) +
+            " 轮）—— 坏实现下每个来回都要等一个 PTO");
 
   check_eq_i(client.close(), 0, "close() 返回 0");
 }
