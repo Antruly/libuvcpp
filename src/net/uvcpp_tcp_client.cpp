@@ -2549,6 +2549,17 @@ void uvcpp_tcp_client::tls_flush_out() {
   if (tls_ssl_ == nullptr) return;
 
   // wbio 里新产生的密文全部抽干。memory BIO 无界，所以这一步不会失败。
+  //
+  // ★ 先 `reserve` 一次到位。上一批在下面被 `swap` 走了，所以 `tls_out_` 每批
+  //   都从 0 开始涨，而 `append` 的增长是**翻倍**的 —— 一批 250 KB 要额外付
+  //   ~2×250 KB 的搬运。`pending_ciphertext()` 恰好给出这批有多少字节，于是
+  //   那次翻倍搬运可以整段省掉，只剩"BIO → 串"这一遍（这一遍省不掉：
+  //   `take_ciphertext` 就是 `BIO_read`）。
+  //
+  //   用 `reserve` 而不是 `resize`：后者把新露出的那段**清零**，等于每批白清
+  //   250 KB 的 memset，比它要省的那次搬运还贵。
+  const size_t pend = tls_ssl_->pending_ciphertext();
+  if (pend > 0) tls_out_.reserve(tls_out_.size() + pend);
   char buf[16384];
   size_t n;
   while ((n = tls_ssl_->take_ciphertext(buf, sizeof(buf))) > 0) {
@@ -2560,21 +2571,37 @@ void uvcpp_tcp_client::tls_flush_out() {
 
   // 同一时刻只投一个密文写。libuv 本身允许多个 uv_write 排队，但"一次一个"
   // 让完成回调的语义变成确定的：回调到了 = 这一批密文已经出网。
-  std::string chunk;
-  chunk.swap(tls_out_);
-
-  uvcpp_buf bufcpp(chunk.data(), chunk.size());
-  uv_buf_t* raw = bufcpp.out_uv_buf();  // 数据所有权转移给 raw
+  //
+  // 这一批**不再拷第二遍**：`swap` 出来的那份 `std::string` 按**共享视图**交给
+  // 写层，它的存活由请求对象持有的那份引用计数履行 —— libuv 那句"缓冲要活到
+  // 完成回调"因此成立，本函数返回、局部变量析构都不影响那批字节。
+  //
+  // 改前是 `uvcpp_buf bufcpp(chunk.data(), chunk.size())` + `out_uv_buf()`：把
+  // 整批密文**再拷一份**自有块交出去，而 `chunk` 出本函数就析构 —— 那份拷贝
+  // 纯属白付。
+  std::shared_ptr<std::string> chunk = std::make_shared<std::string>();
+  chunk->swap(tls_out_);
 
   uvcpp_write* w = new uvcpp_write();
-  w->set_uv_buf(raw, true);
+  // 只有一块 —— 这批密文本来就是连续的，没有头/体之分，于是第 1 块留空、视图
+  // 走第 2 块那个槽位。第 1 块那个 `{nullptr, 0}` 项不贡献任何字节（长度为 0
+  // 的 iovec 合法）。
+  //
+  // `const_cast` 不是多余的：本仓是 `CMAKE_CXX_STANDARD 11`，非 const 的
+  // `std::string::data()` 在这个标准下仍返回 `const char*`（返回 `char*` 是 C++17
+  // 才有的），而 `uv_buf_init` 收的是 `char*`。视图层只读这块内存，所以这个
+  // 转换在语义上也是安全的。上面 `tls_out_.empty()` 已经挡掉了空串。
+  w->append_uv_buf_view(
+      uv_buf_init(const_cast<char*>(chunk->data()),
+                  static_cast<unsigned int>(chunk->size())),
+      chunk);
   w->set_self_free(true);  // 释放挪到 callback_write 里，见该类说明
 
   tls_out_busy_ = true;
 
   std::shared_ptr<char> life = alive_token();
   int rc = tcp_->write(
-      w, w->get_uv_buf(), 1,
+      w, w->get_uv_bufs(), static_cast<unsigned int>(w->get_uv_nbufs()),
       [this, life](uvcpp_write* wr, int status) {
         (void)wr;
         if (!token_alive(life)) {
