@@ -30,55 +30,11 @@ const char* json_status_name(json_status status) {
 json_parse_options::json_parse_options(size_t depth, size_t bytes)
     : max_depth(depth), max_bytes(bytes) {}
 
-// =========================================================================
-// 深度预扫描
-// =========================================================================
-
-size_t uvcpp_json_max_nesting(const char* data, size_t len) {
-  if (data == nullptr || len == 0) return 0;
-
-  size_t depth = 0;
-  size_t max_depth = 0;
-  bool in_string = false;
-  bool escaped = false;
-
-  for (size_t i = 0; i < len; ++i) {
-    const char c = data[i];
-
-    if (in_string) {
-      // 字符串内部一律不计深度，否则 {"a":"[[[[[["} 会被误判成很深。
-      if (escaped) {
-        escaped = false;
-      } else if (c == '\\') {
-        escaped = true;
-      } else if (c == '"') {
-        in_string = false;
-      }
-      continue;
-    }
-
-    switch (c) {
-      case '"':
-        in_string = true;
-        break;
-      case '[':
-      case '{':
-        ++depth;
-        if (depth > max_depth) max_depth = depth;
-        break;
-      case ']':
-      case '}':
-        // 不配对的多余闭合括号不增加深度；深度为 0 时忽略。
-        if (depth > 0) --depth;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return max_depth;
-}
-
+// 深度预扫描（`uvcpp_json_max_nesting`）搬到了核心层 —— 定义在
+// `src/uvcpp/uvcpp_json_scan.cpp`，声明由本模块的公开头带出来。搬家的理由是
+// yyjson 后端也要用它、而那条路不能依赖 webapp；搬家的判据是"行为逐字不变"，
+// 所以下面这条 `parse` 里的调用点一个字都没改。
+//
 // =========================================================================
 // 解析
 // =========================================================================

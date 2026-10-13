@@ -42,6 +42,10 @@
 #include <string>
 
 #include <uvcpp/uvcpp_export.h>
+// 深度预扫描（`uvcpp_json_max_nesting`）从本模块搬到了核心层：yyjson 后端
+// （`<yyjson/uvcpp_json_doc.h>`）要用**同一个**判定，而它不能依赖 webapp。
+// 声明从这里消失、定义从 `.cpp` 里消失，但名字、签名、语义都没变。
+#include <uvcpp/uvcpp_json_scan.h>
 
 namespace uvcpp {
 
@@ -111,13 +115,11 @@ UVCPP_API json_status uvcpp_json_parse(const char* data, size_t len,
 /** @brief `std::string` 版本。 */
 UVCPP_API json_status uvcpp_json_parse(const std::string& s, uvcpp_json& out);
 
-/**
- * @brief 估算输入的最大嵌套深度。
- *
- * 跳过字符串字面量（含转义），所以 `{"a":"[[[[[["}` 的深度是 1，不是 7。
- * 这个函数是上面第 2 条防护的实现，单独暴露出来是为了能直接测它。
- */
-UVCPP_API size_t uvcpp_json_max_nesting(const char* data, size_t len);
+// `uvcpp_json_max_nesting` 曾经定义在本模块（它是上面那条深度防线的实现），
+// 现在已经搬到核心层 `<uvcpp/uvcpp_json_scan.h>`（见文件顶部的 include）——
+// 因为 yyjson 后端（`<yyjson/uvcpp_json_doc.h>`）也要用**同一个**深度判定，
+// 而它不能依赖 webapp（webapp 默认 OFF）。名字与签名逐字未变，
+// 所以 `#include <webapp/uvcpp_web_json.h>` + 调用这件事对使用者没有变化。
 
 // =========================================================================
 // 序列化

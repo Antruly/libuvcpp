@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.33--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.34--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.33-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.34-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -296,6 +296,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_ENABLE_QUIC` | `OFF` | 启用 **net 层**的 QUIC 传输（ngtcp2，静态链入）。需要 `UVCPP_ENABLE_OPENSSL=ON`、**一份带 QUIC API 的 OpenSSL ≥ 3.2**，以及 `UVCPP_BUILD_NET=ON` —— 缺一即强制关闭。**1.4.1 是一条真能通信的链路协议：握手、流收发、关闭与空闲超时都通了；HTTP/3 架在它上面（下一行）。** **1.5.0 起六条发布腿的预编译包都打开它**（此前发布包不带 QUIC）。见 [`doc/quic-guide.md`](doc/quic-guide.md) |
 | `UVCPP_ENABLE_HTTP3` | `OFF` | 启用 **web 层**的 HTTP/3（RFC 9114），由 nghttp3 解析，跑在 QUIC 传输之上（两者都静态链入）。需要 `UVCPP_ENABLE_QUIC=ON` 与 `UVCPP_BUILD_WEB=ON` —— 缺一即强制关闭。**1.4.1 是一条端到端可用的传输：`uvcpp_http_client` / `uvcpp_http_server` 都说它，而 h1/h2 一个字节没动（它跑在 UDP 上）。** **1.5.0 起六条发布腿的预编译包都打开它**（此前发布包不带 HTTP/3）。见 [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md)（文档那一半）与 [`doc/soap-guide.md`](doc/soap-guide.md)（运行时那一半） |
+| `UVCPP_ENABLE_YYJSON` | `OFF` | 启用**可选的 yyjson JSON 后端**（`src/yyjson/`）：nlohmann 之外**第二个**解析器，访问器与 nlohmann 路径**同名**（`uvcpp_json_get_string/bool/int/double`）、状态同义、并有通到 `uvcpp_json_writer` 的桥。解析更快、DOM 更小、解析器不递归。**关掉时 nlohmann 那条路一个字节都不变**（`using uvcpp_json = nlohmann::json` 与全部 `uvcpp_json_*` 行为照旧；库的导出符号集与 `DT_NEEDED` 也逐字相同）。yyjson 是**私有**依赖（单头 + 单 `.c`，以目标文件形式并进同一个 `uvcpp` 库 —— 不多一个产物），由 `FetchContent` 取源码。见 [`doc/json-guide.md`](doc/json-guide.md) §13 |
 | `UVCPP_ENABLE_CAPI` | `OFF` | 导出 **C ABI**（`src/capi/`，C99 头，给 C#/P-Invoke 以及别的 FFI 用），编进**同一个** `uvcpp` 库 —— 不多一个产物。需要 `UVCPP_BUILD_NET=ON` 与 `UVCPP_BUILD_WEB=ON`，缺一即强制关闭（C 面横跨 net/web/webapp）。**每一个发布配置都打开它。** 见 [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_ENABLE_DB` | `OFF` | 启用**数据库模块**（`src/db/`）：一个连接一个 `uvcpp_db_client`，底下是 SQLite / MySQL / PostgreSQL 三个后端，结果行按表的方式取。它是全仓**唯一一个必需第三方客户端库**（libsqlite3 / libmysqlclient / libpq）的模块 —— 三个都找不到就强制关闭。**每一个发布配置都打开它**，所以预编译包里带着这个模块。见 [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_ENABLE_DB_SQLITE` | `ON` | 编 db 模块的 SQLite 后端（要 `sqlite3.h` 与 libsqlite3）。找不到时**只强制关掉这一个**并出声，其余后端照编 |

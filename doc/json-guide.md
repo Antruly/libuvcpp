@@ -4,7 +4,8 @@
 它是**核心模块**：永远在编、零依赖、不吃任何 `UVCPP_ENABLE_*` 开关，也不需要 nlohmann。
 
 这一页讲的是"怎么用它"，以及"它的边界在哪"。它不是 JSON **解析**指南 —— 解析与 DOM
-在 `webapp/uvcpp_web_json.h`（nlohmann 后端），见 [`webapp-guide.md`](webapp-guide.md)。
+在 `webapp/uvcpp_web_json.h`（nlohmann 后端），见 [`webapp-guide.md`](webapp-guide.md)；
+本页 §13 讲**第二个**可选的解析后端（yyjson），它默认关着。
 
 ## 目录
 
@@ -20,6 +21,7 @@
 10. [线程与所有权](#10-线程与所有权)
 11. [这份代码的判据](#11-这份代码的判据)
 12. [没做的（如实列出）](#12-没做的如实列出)
+13. [第二个解析后端：yyjson（可选）](#13-第二个解析后端yyjson可选)
 
 ---
 
@@ -41,7 +43,7 @@
 ## 2. 编译期条件与包含
 
 - **没有开关。** 它是核心模块，`UVCPP_ENABLE_NET` / `_WEB` / `_WEBAPP` 一个都不影响它；
-  `CMakeLists.txt:1197-1197` 那个收 `src/uvcpp/` 下源文件的 GLOB 已经把它收进去了。
+  `CMakeLists.txt:1229-1229` 那个收 `src/uvcpp/` 下源文件的 GLOB 已经把它收进去了。
 - **不需要 nlohmann、不需要 OpenSSL、不需要 zlib。** 头文件只带
   `<cstddef>` 与 `<string>`，实现只多带 `<cmath> <cstdio> <cstdlib> <cstring> <new> <stdexcept>`。
 - **C++11**（本仓没有 per-target 覆盖），所以没有 `std::string_view`、没有 `if constexpr`。
@@ -344,3 +346,195 @@ bool doc_round_trip(const std::string& text, long long& out_size) {
 - **不认识任何"对象/结构体"**：本页只讲"手写字段"，把结构体整个写成 JSON 是**反射那一层**
   的事（它接在本模块的 writer 上，产出这一侧因此仍然是"无 DOM"的）—— 那一层有
   自己的一页：[`json-reflect-guide.md`](json-reflect-guide.md)。
+
+---
+
+## 13. 第二个解析后端：yyjson（可选）
+
+本页 §1–§12 讲的全是**产出**那一侧（`uvcpp_json_writer`，核心模块、零依赖、永远在编）。
+**读入**那一侧在这之前只有一条路：`webapp/uvcpp_web_json.h` 的 nlohmann 后端 ——
+header-only、语义完整、也**慢**：每个值占一个 `std::map` / `std::vector` 节点，一份
+几 KB 的文档解析下来是成百上千次 `operator new`。
+
+`src/yyjson/` 给同一件事提供**第二个后端**：`uvcpp_json_doc` 拿 [yyjson](https://github.com/ibireme/yyjson)
+解析，然后可以
+
+* 用与 nlohmann 路径**同名**的访问器取值（`uvcpp_json_get_string/bool/int/double`），
+* 用同一套"查不到就给默认值"的语义遍历（`uvcpp_json_object_iter` / `at()`），
+* 用**同一个**输出器写回去（`uvcpp_json_write` 把 DOM 喂给本页的 `uvcpp_json_writer`）。
+
+也就是说：想换后端的人，改的是**变量的类型**，不是成片的调用点。
+
+**这不是替换。** `using uvcpp_json = nlohmann::json` 一个字没动，`uvcpp_json_parse` /
+`uvcpp_json_dump` / `uvcpp_json_get_*` 的行为一个字没改（nlohmann 那侧的重载仍在）。
+两个后端可以同时出现在一个工程里，甚至一个函数里 —— `uvcpp_json_get_int` 有**两组**
+重载，第一参数是 `uvcpp_json` 还是 `uvcpp_json_value` 就决定了走哪个后端。
+
+### 13.1 怎么开
+
+| | |
+|---|---|
+| CMake 选项 | `-DUVCPP_ENABLE_YYJSON=ON`，**默认 OFF** |
+| 包含 | `#include <yyjson/uvcpp_json_doc.h>` |
+| 依赖 | yyjson（单头 + 单 `.c`），**私有**：`<yyjson.h>` 只出现在本模块的 `.cpp` 里 |
+| 关掉时 | `src/yyjson/` **整个不参与编译**，这个头里的声明也整段消失
+
+最后一行要说清楚：关掉时 include 它**不是"降级"，是"这个模块不在库里"**（与 `webapp/`、
+`wsdl/`、`quic/` 同形，报的是未声明的类型而不是"这个函数返回了什么默认值"）。判据是
+**默认配置不受影响** —— 见 §13.5。
+
+一处容易想反的地方，顺便记清楚：`cmake --install` 的规则挂在 `UVCPP_ENABLE_YYJSON` 上
+（关掉时不装这个头），但**发布包是 `tests/tools/package_release.py` 按模块目录整体拷头
+做出来的、不看开关** —— 所以关着 yyjson 的包里照样能找到 `include/yyjson/uvcpp_json_doc.h`，
+只是一个空的壳（宏为 0，里面一个声明都没有）。真正拦住你的是宏，不是"包里没有这个文件"。
+
+### 13.2 五分钟上手
+
+```cpp
+#include <yyjson/uvcpp_json_doc.h>
+
+#include <string>
+
+// 把一份请求体解出来，取两个字段，再用本库自己的 writer 写回去。
+std::string doc_roundtrip(const std::string& body, bool* ok) {
+  uvcpp::uvcpp_json_doc doc;
+  if (doc.parse(body) != uvcpp::json_doc_status::OK) {   // 失败时 doc 不被改动
+    *ok = false;
+    return std::string();
+  }
+
+  const uvcpp::uvcpp_json_value root = doc.root();
+  long long size = 0;
+  const bool has_size = uvcpp::uvcpp_json_get_int(root, "size", size);
+  const std::string name =
+      uvcpp::uvcpp_json_get_string(root, "name", "unnamed");  // 取不到给默认值
+
+  std::string out;
+  uvcpp::uvcpp_json_writer w(out);
+  const uvcpp::json_write_status ws = uvcpp::uvcpp_json_write(root, w);
+
+  *ok = has_size && (ws == uvcpp::json_write_status::OK);
+  return out;
+}
+```
+
+三处与 nlohmann 路径**不同名**的东西，都是刻意的：
+
+- `uvcpp_json_doc` 是**拥有**整棵 DOM 的那个对象（不可拷贝、可移动，移动后源对象
+  `valid() == false`，与 `std::unique_ptr` 同形）。nlohmann 那边 DOM 就是 `uvcpp_json` 本身。
+- `uvcpp_json_value` 是**视图**：文档 `reset()` / 重新 `parse()` / 析构之后，之前拿到的
+  值全部悬空（与 `std::string_view` 同形）。
+- `json_doc_options` 与 webapp 的 `json_parse_options` 是**各自独立的类型**（本模块不依赖
+  webapp，所以共用不了那一个），但**默认值相同**：深度 64、8 MiB。
+
+### 13.3 与 nlohmann 路径**如实**存在的四处不同
+
+四处都是**设计选择**、不是待修的差异。写在这里是为了让"换后端"这件事可预期：
+
+| # | 这一处 | 本后端 | nlohmann 路径 |
+|---|---|---|---|
+| 1 | 成员顺序 | **文档里的顺序**（yyjson 按读入次序存） | 按键**排序**（对象类型是 `std::map`），`dump()` 出来也是排序的 |
+| 2 | 重复键 | 取**第一个**（`obj_get` 语义） | 取**最后一个**（`std::map` 插入覆盖） |
+| 3 | 数字写回去的形态 | `1.0` 写成 `1`；17 位有效数字的 double 写 17 位 | `dump()` 走自己的最短往返算法，写 `1.0` |
+| 4 | 输出那一侧的递归 | `uvcpp_json_write` **递归**，深度由解析时的 `max_depth` 兜住 | `dump()` 也是递归的（同一条约束，只是默认深度不同） |
+
+四条各自的判据：
+
+1. 键序**不是数据**：`uvcpp_json_get_*` 与 `get(key)` 都不受它影响。要逐字节比两份输出，
+   就得让源文档的键**本来就是有序的**（用例就是这么写的：五份语料的键全部升序排）。
+2. 两边都**接受**重复键（都报 OK），只是取值不同。RFC 8259 里重复键"行为不可移植"，
+   所以这不是谁对谁错；用例把**两边各自的行为都钉住**，而不是假装它们一样。
+3. 这是 `uvcpp_json_writer` 早就定下的行为（见 §7），**值相同、字节可能不同**。本模块不改它，
+   也不为它背锅；要让数字形态也一致，走 nlohmann 那一半。
+4. 深度两边都用 `<uvcpp/uvcpp_json_scan.h>` 预扫描，所以 `TOO_DEEP` 是**同一条线**；
+   但把 `max_depth` 设到几千以上、又拿 `uvcpp_json_write` 去写那份文档，栈是你自己的。
+
+### 13.4 状态与 nlohmann 路径的对照
+
+`json_doc_status` 是 `json_status` 前五项的同义物（一样的判定顺序、一样的边界）：
+
+| 本后端 | nlohmann 路径 | 判定 |
+|---|---|---|
+| `EMPTY` | `EMPTY` | `data == nullptr \|\| len == 0` |
+| `TOO_LARGE` | `TOO_LARGE` | `len > max_bytes` |
+| `TOO_DEEP` | `TOO_DEEP` | `uvcpp_json_max_nesting() > max_depth` |
+| `SYNTAX` | `SYNTAX` | 其余一切解析失败（含纯空白输入 —— 它不是"空"，是"不是 JSON"） |
+| `NO_MEMORY` | （`bad_alloc`） | 分配失败：本后端**不抛异常**，报这个 |
+
+不在这张表里的三个（`MISMATCH`/`MISSING`/`UNKNOWN`）来自 webapp 的**反射读入**，不属于解析。
+
+### 13.5 判据
+
+| 用例 | 它判什么 |
+|---|---|
+| `tests/functional/yyjson_doc_func.cpp` | 下面这一整列 |
+
+* **与 nlohmann 路径状态逐条一致**：一张 25 行的表（16 条坏输入 + 边界：空、纯空白、超长、
+  超深、BOM、非法 UTF-8、重复键、64 与 65 层、又长又深、又深又坏、`max_depth = 0`），
+  每条**先与手写期望值比**，再（webapp 开着时）**与 nlohmann 逐条比**。判"两边一样"而不判
+  "其中一边是什么"，是特意的：一个对什么都说 OK 的解析器让两边都错也能全绿。
+* **逐字节相同**：五份语料（转义、控制字符与 UTF-8、整数两端、浮点、数组）的键全部升序排，
+  于是 `uvcpp_json_write` 的产出与 nlohmann `dump()` **逐字节相等**。这半边另有一条
+  **反空洞**断言：先确认 nlohmann 侧产出**非空且不是 `null`**，否则两边一起坏也判绿。
+* **数字语义相同**：把两边输出都交给 nlohmann 再比 `==`，覆盖 `1.0` / `0.0` / `-0.0` /
+  17 位 double / denormal / 超 uint64 的大整数；另有一条专门钉住第 3 条不同是**真的**
+  （`{"v":1.0}`：本后端 `{"v":1}`、nlohmann `{"v":1.0}`）。
+* **`memory_bytes()` 的可测形式**：空文档是 0、`reset()` 后回到 0、反复失败（200 次）后
+  文档**逐字节不变**（与一份新解析的同文文档比）、移动之后不重复计数。
+* **解析器不递归**：十万层的输入，把上限抬到它之上就真解析（而不是爆栈）。这一条是
+  "本后端能报 TOO_DEEP"之外的另一半 —— 深度是**策略**，栈是**物理**，两者都要有见证。
+
+**吞吐与常驻内存不在门禁里**，它们是这一节的读数（§13.6）。压测数字进用例就是造一条
+会随机变红的门禁。
+
+### 13.6 量出来的两个数
+
+量具在**仓外**（`/tmp/yyexp/bench.cpp`，不进仓库）：200 次预热 + 5 轮 × 20,000 次取最好，
+`taskset -c 0-3`。语料是一份 `{"items":[{id,name,category,price,quantity,active,tags[]}…],"total":n}`
+（键按升序写，好让两边的产出可比），三档规模。
+
+**解析吞吐**（ns/次，越小越好）。两个口径都给：**库入口**是
+`uvcpp_json_parse(s, doc)` 对 `doc.parse(s)`，**纯解析**是 `nlohmann::json::parse` 对
+`doc.parse(s)` —— 前者多含 webapp 那层的门（EMPTY/TOO_LARGE/TOO_DEEP 预扫描 +
+`is_discarded()`），所以两个数不一样，两个都写出来免得把"入口的开销"记成"解析器的差距"。
+
+| 语料 | 库入口 | 纯解析 | 小文档（220 B，一次请求体那种） |
+|---|---|---|---|
+| 1,147 B / 10 项 | 21,070 → 1,569（**13.4×**） | 15,184 → 1,569（9.7×） | 2,510 → 226（11.1×） |
+| 5,727 B / 50 项 | 114,634 → 7,478（**15.3×**） | 79,311 → 7,478（10.6×） | 2,502 → 228（11.0×） |
+| 22,973 B / 200 项 | 451,279 → 30,863（**14.6×**） | 315,150 → 30,863（10.2×） | 2,487 → 216（11.5×） |
+
+**DOM 常驻内存**（同一份文档解析完，峰值）：
+
+| 语料 | nlohmann | yyjson | 倍数 | 分配次数 |
+|---|---|---|---|---|
+| 1,147 B | 8,312 B（7.25× 输入） | 4,367 B（3.81× 输入） | **1.9×** | 318 → 2 |
+| 5,727 B | 40,632 B（7.09× 输入） | 21,155 B（3.69× 输入） | **1.9×** | 1,481 → 2 |
+| 22,973 B | 161,832 B（7.04× 输入） | 84,385 B（3.67× 输入） | **1.9×** | 5,835 → 2 |
+
+**这两列不是同一把尺子的读数**，必须写出来：nlohmann 那一列来自量具里全局覆盖的
+`operator new`（数的是**申请**字节），yyjson 那一列来自后端的 `memory_bytes()`（数的是
+**它自己的分配器实测**）—— 因为 yyjson 走的是 `std::malloc`，全局 `operator new` 覆盖
+**看不到它**（这是量具的一处真实盲区，值得单独记）。两个口径都是"这次解析向系统要了多少
+字节"，量级可比，但**不是逐字节同源**。要一把真正统一的尺子，得给 yyjson 也包一层
+`operator new` —— 那要求它用 C++ 的分配路径，代价比这个数大。
+
+### 13.7 成本与诚实缺口（如实列出）
+
+- **多一个第三方依赖**（yyjson 0.13.0）。只在 ON 时进构建，OFF 时**一个目标文件都不编**；
+  取源码用的是 `FetchContent_Populate` 而不是 `MakeAvailable`，所以 yyjson 自己那套
+  `install()` 规则**不会**被登记（上游 `YYJSON_INSTALL` 默认是 **ON**）。
+- **默认 OFF**，而且 CI 里**没有任何一条腿开它**（见 `tests/tools/check_doc_snippets.py`
+  里的 `DEFAULT_OFF` 与 [`ci-guide.md`](ci-guide.md) 那张表）。所以本页上面那几条片段、
+  以及用例里"与 nlohmann 逐条一致"的那一半，**在 CI 里不会被编译**。这不是"绿"，
+  是一段没人跑的路 —— 写在这里，而不是藏在"本模块可选"这句话后面。
+- 上面**手工验过一次**：本机 `-DUVCPP_ENABLE_YYJSON=ON` 的树 `cmake --install` 到
+  一个临时前缀（`include/yyjson/uvcpp_json_doc.h` 与 `include/uvcpp/uvcpp_json_scan.h`
+  都在），拿该前缀跑 `python3 tests/tools/check_doc_snippets.py --pkg <前缀>` ——
+  **本页这几条片段（含 §13.2 那条）判绿**。同一棵树上的
+  `test_yyjson_doc_func` 也是 ALL PASS。
+- **对照那一半需要 webapp**：nlohmann 是 webapp 的依赖，`UVCPP_BUILD_WEBAPP=OFF` 的树上
+  那条 include 不存在。用例把那半整段套在 `#if UVCPP_WEBAPP_ENABLE` 里，并打印一行
+  **显眼的 `[SKIP]`** —— 不是静默通过（本仓最忌讳的那种绿）。
+- **不给"换后端"提供自动迁移**：两边的类型名不同（`uvcpp_json` / `uvcpp_json_doc`），
+  换的时候编译器会指出来；但不提供兼容层，也不打算把默认后端换掉。

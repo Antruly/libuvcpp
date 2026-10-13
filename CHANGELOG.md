@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.33-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.34-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -31,6 +31,7 @@
   - [内存与缓冲](#内存与缓冲)
   - [公开契约与安全](#公开契约与安全)
   - [性能](#性能)
+  - [JSON](#json)
   - [配置、打包与 CI](#配置打包与-ci)
 - [逐个版本](#逐个版本)
   - [v1.6.4 (2026-10-12)](#v164-2026-10-12)
@@ -302,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2432-2432`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2601-2601`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -639,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1572-1574`、`CMakeLists.txt:2338-2343`）——
+  两处都摘掉**（`CMakeLists.txt:1679-1681`、`CMakeLists.txt:2493-2498`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -1709,6 +1710,72 @@
   （三条键装着同一份 6 档字节）。两次变异里"解压回来等于原文"那几条**全绿** —— 这就是
   "每一层看着都对、只有字节数与档位不符"的注脚，也是 ② 的口径只能是**比字节**、
   而且比之前得先钉住"确实走了 gzip"这个前提的原因。
+
+### JSON
+
+- **第二个 JSON 解析后端：yyjson（可选，默认关）**（`1.6.34-dev`）。本仓的 JSON
+  **读入**那一侧此前只有一条路：`webapp/uvcpp_web_json.h` 的 nlohmann —— header-only、
+  语义完整、也慢（每个值一个 `std::map` / `std::vector` 节点，一份几 KB 的文档解下来
+  成百上千次 `operator new`）。新增 `src/yyjson/` 模块：`uvcpp_json_doc` 拿
+  [yyjson](https://github.com/ibireme/yyjson) 解析，配一套**与 nlohmann 路径同名**的
+  访问器（`uvcpp_json_get_string/bool/int/double`，靠第一参数类型区分重载）、同名的
+  遍历（`uvcpp_json_object_iter` / `at()` / `get()`），以及把 DOM 喂回
+  `uvcpp_json_writer` 的桥（`uvcpp_json_write`）。
+
+  **这是"另一个可选项"，不是"替换"**：`using uvcpp_json = nlohmann::json` 一个字没动，
+  `uvcpp_json_parse` / `uvcpp_json_dump` / `uvcpp_json_get_*` 的行为一个字没改。两者可以
+  同时出现在一个工程里，甚至一个函数里。
+
+  **关掉时的判据**（默认配置，逐条实测）：① 库的**导出符号集与 `DT_NEEDED` 逐字相同**
+  —— `nm -D --defined-only` 与 `readelf -d` 的 diff 都是**空的**；② 编译单元只多一个：
+  深度预扫描从 `webapp/uvcpp_web_json.cpp` 搬到核心层 `src/uvcpp/uvcpp_json_scan.cpp`
+  （同一个判定要给两个后端用，而 yyjson 那侧不能依赖默认关着的 webapp），搬的是**代码
+  逐行相同**的那一段；③ `uvcpp_config.h` 之外的头一个不改、ctest 用例数一条不多不少
+  （两侧都是 92 条）。`.so` 的字节数会动几十~几百字节（多一个目标文件、嵌进去的
+  `__FILE__` 串长度也不同）—— 那**不是**判据，拿它当判据的话换个构建目录就会"变红"。
+
+  **读数**（量具在仓外，200 次预热 + 5 轮 × 20,000 次取最好，`taskset -c 0-3`；
+  语料是 `{"items":[{id,name,category,price,quantity,active,tags[]}…],"total":n}`，
+  键按升序写以便两边产出可比）：
+
+  | 语料 | 库入口 ns/次 | 纯解析 ns/次 | 220 B 小文档 ns/次 |
+  |---|---|---|---|
+  | 1 147 B / 10 项 | 21 070 → 1 569（**13.4×**） | 15 184 → 1 569（9.7×） | 2 510 → 226（11.1×） |
+  | 5 727 B / 50 项 | 114 634 → 7 478（**15.3×**） | 79 311 → 7 478（10.6×） | 2 502 → 228（11.0×） |
+  | 22 973 B / 200 项 | 451 279 → 30 863（**14.6×**） | 315 150 → 30 863（10.2×） | 2 487 → 216（11.5×） |
+
+  「库入口」是 `uvcpp_json_parse(s, doc)` 对 `doc.parse(s)`，「纯解析」是
+  `nlohmann::json::parse` 对 `doc.parse(s)` —— 前者多含 webapp 那层的门
+  （EMPTY/TOO_LARGE/TOO_DEEP 预扫描 + `is_discarded()`）。两个口径都写出来，免得把
+  "入口的开销"记成"解析器的差距"。
+
+  **DOM 常驻内存**：同一份文档解完，nlohmann 8 312 / 40 632 / 161 832 B（输入的
+  7.0~7.3×），yyjson 4 367 / 21 155 / 84 385 B（输入的 3.67~3.81×），**稳定在 1.9×**；
+  分配次数 318 / 1 481 / 5 835 → **2**。★ 这两列**不是同一把尺子的读数**，必须一起写：
+  nlohmann 那列来自量具里全局覆盖的 `operator new`（数**申请**字节），yyjson 那列来自
+  后端的 `memory_bytes()`（它自己的分配器**实测**）—— 因为 yyjson 走 `std::malloc`，
+  全局 `operator new` 覆盖**看不到它**。两个口径都是"这次解析向系统要了多少字节"，
+  量级可比，但不是逐字节同源。
+
+  **判据**是 `tests/functional/yyjson_doc_func.cpp`（新，约 900 行）：一张 25 行的输入
+  表（16 条坏输入 + 空 / 纯空白 / 超长 / 超深 / BOM / 非法 UTF-8 / 重复键 / 64 与 65 层 /
+  又长又深 / 又深又坏 / `max_depth = 0`）**每条先与手写期望值比、再与 nlohmann 逐条比**
+  —— 只判"两边一样"是不够的，一个对什么都说 OK 的解析器让两边都错也能全绿；五份键升序的
+  语料上 `uvcpp_json_write` 与 nlohmann `dump()` **逐字节相同**（并先断言 nlohmann 侧产出
+  非空且不是 `null`，否则两边一起坏也判绿）；数字语料两边输出交给 nlohmann 再比 `==`；
+  `memory_bytes()` 空为 0、`reset()` 后回 0、反复失败 200 次后文档**逐字节不变**；以及
+  **十万层**的输入把上限抬到它之上就真解析（读入器**不递归** —— 深度是策略、栈是物理，
+  两者都要有见证）。深度预扫描搬到核心层之后，它自己的五条断言仍在
+  `tests/functional/web_app_request_func.cpp`，**一字未改**。
+
+  ★ **诚实缺口，写在这里而不是藏在"本模块可选"后面**：CI 里**没有任何一条腿**开
+  `UVCPP_ENABLE_YYJSON`，所以上面那几条文档片段与用例里"与 nlohmann 逐条一致"的那一半，
+  **在 CI 里不会被编译**（不是绿，是一段没人跑的路）。本机验过：`-DUVCPP_ENABLE_YYJSON=ON`
+  的树 `cmake --install` 到临时前缀后，`check_doc_snippets.py --pkg <前缀>` 里
+  `doc/json-guide.md` 的 8 条片段全绿，同一棵树上的 `test_yyjson_doc_func` ALL PASS。
+  另外四处**刻意的**行为不同（成员按文档顺序而非键排序、重复键取第一个而非最后一个、
+  `1.0` 写成 `1`、`uvcpp_json_write` 递归而由 `max_depth` 兜住）逐条写在
+  `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
 

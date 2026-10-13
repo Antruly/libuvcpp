@@ -215,7 +215,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
                 "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/",
-                "capi/", "db/")
+                "capi/", "db/", "yyjson/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -289,7 +289,7 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/", "nghttp3/")
 # `quic/` 属于**第一档**（"宏为 0 时类会消失"）：本模块的**四个**公开头整段套在
 # `#if UVCPP_QUIC_ENABLE` 里（另外两个头 `uvcpp_quic_ngtcp2.h` 与
 # `uvcpp_quic_session.h` 是私有的，不进包、文档也不该引它们）。模块关掉时
-# `CMakeLists.txt:2434-2434` 的 install 规则确实不装它们，
+# `CMakeLists.txt:2603-2603` 的 install 规则确实不装它们，
 # 但那条只挡住 `cmake --install`：`package_release.py` 是从 `src/` 逐目录拷头的、
 # 与开关无关（同上面 wsdl 那段记的形状，实测过 —— 一份 `UVCPP_ENABLE_QUIC=OFF`
 # 的包里有 `include/quic/` 四个头，而没有 `uvcpp_quic_ngtcp2.h`）。所以在**发布包**
@@ -316,6 +316,21 @@ MODULE_REQ = {
     "quic/": "UVCPP_QUIC_ENABLE",
     "http3/": "UVCPP_HTTP3_ENABLE",
     "db/": "UVCPP_DB_ENABLE",
+    # `yyjson/` 属于第一档，机制与 `wsdl/` 逐字相同：本模块**唯一**的公开头
+    # （`src/yyjson/uvcpp_json_doc.h`）整段套在 `#if UVCPP_YYJSON_ENABLE` 里
+    # ——宏为 0 时里面的类直接消失，片段报的是"未声明类型"。所以**只要**这个
+    # 包没开 yyjson，那几条片段就不能判，登记它正是为了让那种情形走"前提不满足"
+    # 而不是让它们去编一个空头。
+    #
+    # 顺带记清一件容易想反的事：`package_release.py` 是**按模块目录整体拷头**
+    # 的，不看 `UVCPP_ENABLE_*`（关掉 web 时才额外剔掉 `WEB_GATED_HEADERS`）。
+    # 所以关着 yyjson 的包里**照样有** `include/yyjson/uvcpp_json_doc.h` ——
+    # 只是一个空的壳。真正把它拦住的是宏，不是"包里没有这个文件"。
+    #
+    # **补一句它比 wsdl 更该登记的理由**：yyjson 那个宏默认 **OFF**，
+    # 也就是说"没开它的包"恰好是最常见的那个 —— 这条记录一直在承重，不是一道
+    # 只在边角配置上才生效的防线（与下面 `quic/` 那段记的形状相同）。
+    "yyjson/": "UVCPP_YYJSON_ENABLE",
 }
 
 # 发布包里**永远关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。
@@ -347,7 +362,19 @@ MODULE_REQ = {
 # 就等于在那个模块上把这条门禁关掉一半，所以每一行都得单独交代理由 —— 不是"顺手
 # 也关着"。`web/` `ssl/` `http2/` 这些在 `build-cfg` 里全是开的，它们缺席只能说明
 # **拿错了包**，那正是该退 3 的情形，**不许**进这张表。
-DEFAULT_OFF = {"UVCPP_QUIC_ENABLE", "UVCPP_HTTP3_ENABLE"}
+# `UVCPP_YYJSON_ENABLE` 是**第三条**，判据与 quic/h3 相同（`UVCPP_ENABLE_YYJSON`
+# 默认 OFF、`release.yml` 六条腿一条都不开它），但它的**代价**必须单独写清楚，
+# 因为它是三条里唯一一个"本可以不必这样"的：`doc/json-guide.md` 的 yyjson 那一节
+# 是本批新写的，理论上可以整段标成不判。没那么做 —— 与 h3 那条同一个理由：标了
+# 就再也回不来（哪天发布包开了 yyjson，那几条片段不会自己回到被判集合里），
+# 而这张表自己会回来。
+#
+# 同样如实记下代价：那几条片段**在 CI 里不会被编译**。判它们要一份
+# `-DUVCPP_ENABLE_YYJSON=ON` 的包，而 CI 里没有任何一条腿产出这样的包（都是
+# 临时 configure 的树，不是 `package_release.py` 出的包）。手工验过一次：
+# 本机 `-DUVCPP_ENABLE_YYJSON=ON` 装出来的前缀下，`doc/json-guide.md` 那几条
+# 片段判绿（见该篇 §yyjson 末尾那段的记录）。
+DEFAULT_OFF = {"UVCPP_QUIC_ENABLE", "UVCPP_HTTP3_ENABLE", "UVCPP_YYJSON_ENABLE"}
 
 CONFIG_REL = os.path.join("include", "uvcpp", "uvcpp_config.h")
 

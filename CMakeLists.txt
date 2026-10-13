@@ -73,6 +73,33 @@ option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/lo
 # 见 src/http2/ 的 pimpl 说明）。
 option(UVCPP_ENABLE_WSDL "Enable WSDL/SOAP module (XML via pugixml, needs UVCPP_BUILD_WEBAPP)" OFF)
 
+# yyjson JSON 后端（`src/yyjson/`）—— 把**解析**这一段的第二个实现摆出来。
+#
+# 它与 webapp 那条 nlohmann 路径**并存**，不是替换：`using uvcpp_json =
+# nlohmann::json` 一个字不改，`uvcpp_json_parse` / `uvcpp_json_dump` /
+# `uvcpp_json_get_*` 的行为一个字不改。开这个模块的人得到的是**另一组类型**
+# （`uvcpp_json_doc` / `uvcpp_json_value`）与**同名**的取值入口，以及一条
+# "DOM 写回 `uvcpp_json_writer`"的桥。定位在 `src/yyjson/uvcpp_json_doc.h` 的
+# 文件头里写全了，包括与 nlohmann 路径如实存在的四处不同（成员顺序、重复键、
+# 数字写回的形态、写回的递归深度）。
+#
+# 依赖：**yyjson**（单头 + 单 .c）。它同样是**私有依赖** —— `<yyjson.h>` 只出现
+# 在 `src/yyjson/uvcpp_json_doc.cpp` 里，公开头一个 yyjson 类型都不出现（迭代器
+# 用一个 `alignas(std::max_align_t)` 的字节数组装着，`static_assert` 在 .cpp 里
+# 盯着大小），所以使用者既不需要它的头也不需要它的库（与 pugixml 在 wsdl 里的
+# 位置相同）。
+#
+# **它不属于 webapp，也不依赖 web/webapp** —— 这是它与 wsdl 的关键区别：wsdl 建
+# 在 webapp 之上（所以 webapp 关掉时它被强制关闭），而这一层是核心模块，webapp
+# 关掉的树上照样能开。默认 **OFF**。
+#
+# 关掉时的判据是**默认配置不受影响**（三条，见 `src/yyjson/uvcpp_json_doc.h` 的
+# 文件头：导出符号集与 `DT_NEEDED` 逐字相同；编译单元只多一个，即共用的深度预扫
+# 描 `src/uvcpp/uvcpp_json_scan.{h,cpp}` 从 webapp 搬出来给两个后端用、逐行相同；
+# `.so` 字节数会动但那**不是**判据）。两后端并存，nlohmann 那条路行为不变。
+option(UVCPP_ENABLE_YYJSON
+  "Enable the optional yyjson JSON backend (src/yyjson/: fast parse + compact DOM, alongside nlohmann)" OFF)
+
 # QUIC 传输层 —— net 层的一条**链路协议**，为后面的 HTTP/3 铺路。
 #
 # 后端是 **ngtcp2**，位置与 nghttp2 之于 HTTP/2 完全相同：协议栈归它，本库只做
@@ -225,6 +252,11 @@ set(LIBUV_VERSION "v1.51.0" CACHE STRING "libuv git tag/branch to fetch when usi
 # JSON 后端版本（仅 webapp 需要）。v3.11.x 是支持 C++11 的最后一条线，
 # 上游从 v3.12 起要求 C++11 之外的特性。
 set(NLOHMANN_JSON_VERSION "v3.11.3" CACHE STRING "nlohmann/json tag to fetch when building webapp")
+
+# 第二个 JSON 后端的解析器版本（仅 UVCPP_ENABLE_YYJSON 需要）。0.13.0 是本仓
+# 实测过的那一档（桥的输出与 nlohmann `dump()` 逐字节相同的那批语料、以及
+# 状态映射那 16 条坏输入，都是在它上面量出来的）；升版本要重跑那两条判据。
+set(YYJSON_VERSION "0.13.0" CACHE STRING "yyjson tag to fetch when building the yyjson backend")
 
 # WSDL/SOAP 的 XML 后端版本（仅 UVCPP_ENABLE_WSDL 需要）。v1.14 是 C++11 兼容的
 # 一档；再往上的版本对编译器/标准的要求要单独核一遍才升。
@@ -1266,6 +1298,19 @@ if(UVCPP_ENABLE_DB)
   source_group("db" FILES ${DB_SRC_FILES})
 endif()
 
+# yyjson module source_group
+# CONFIGURE_DEPENDS 的理由与 quic/http3/capi/db 那几段逐字相同（新加一个 .cpp 不
+# 重新 configure 就不会被编进去，而"编过了"与"编了这个文件"长得一模一样）。同一个
+# YYJSON_SRC_FILES 还在下面被用来做"空模块"判据。
+#
+# **glob 的是我们自己的 `src/yyjson/`，不是 FetchContent 取下来的那棵树**
+# （上游那棵只有一个 yyjson.c，由上面那个 OBJECT 库单独编）。
+if(UVCPP_ENABLE_YYJSON)
+  file(GLOB YYJSON_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/yyjson/*.h" "${CMAKE_SOURCE_DIR}/src/yyjson/*.cpp")
+  source_group("yyjson" FILES ${YYJSON_SRC_FILES})
+endif()
+
 # read version from header (src/uvcpp/uvcpp_version.h)
 file(READ "${CMAKE_SOURCE_DIR}/src/uvcpp/uvcpp_version.h" UVCPP_VERSION_H)
 string(REGEX MATCH "#define[ \t]+UVCPP_VERSION_MAJOR[ \t]+([0-9]+)" _ ${UVCPP_VERSION_H})
@@ -1430,6 +1475,68 @@ if(UVCPP_ENABLE_WSDL)
 else()
   add_compile_definitions(UVCPP_WSDL_ENABLE=0)
   message(STATUS "WSDL/SOAP module disabled (UVCPP_WSDL_ENABLE=0)")
+endif()
+
+# =========================================================================
+# yyjson —— 可选 JSON 后端的解析器（`src/yyjson/`）
+# =========================================================================
+# 与上面 pugixml 那一段有两处**实质不同**，两处都是刻意的：
+#
+#   1. **不 `add_subdirectory`**。yyjson 上游的 CMakeLists 建一个 `yyjson` 目标，
+#      而且 `YYJSON_INSTALL` 默认 **ON** —— 所以这里**不能**用
+#      `FetchContent_MakeAvailable`（它等价于 `add_subdirectory`）：那会把上游
+#      自己那套 install 规则一并登记，把 `yyjson-config.cmake` / `yyjson.pc`
+#      写进 configure 期的 `${CMAKE_INSTALL_PREFIX}`（一个绝对路径，与
+#      `cmake --install --prefix` 无关）。zlib 那一段踩过同一个坑，解法也一样：
+#      `FetchContent_Populate` 只把源码取下来，目标我们自己建。
+#      顺带还免掉了"用普通变量压上游 option()"那一整套 —— pugixml 那里记着一大段
+#      实测：普通变量压不压得住 option() 由**各子目录自己的 `cmake_minimum_required`**
+#      决定（CMP0077），照抄一份是抄不来结论的。这里一个上游开关都不碰。
+#
+#   2. **建的是 OBJECT 库，不是静态库**。yyjson 只有一个 `.c`，做成静态库会多
+#      一个产物、多一条 `install(EXPORT uvcppTargets)` 要照顾的目标（nlohmann
+#      那一段的注释写了那条规矩的代价）；OBJECT 库把目标文件直接并进下面四个
+#      uvcpp 目标，装出去的还是同样的四条产物、不多不少。
+#      `POSITION_INDEPENDENT_CODE ON` 是**必须**的 —— 这些目标文件要进
+#      `libuvcpp.so`。
+#
+# 一个 `YYJSON_*` 宏都不定义：上游的默认值就是我们想要的（读与写都开、UTF-8
+# 校验开、`YYJSON_READER_DEPTH_LIMIT` 为 0 即不设上限）。**深度上限由我们自己的
+# 预扫描管**（`src/uvcpp/uvcpp_json_scan.h`），那是运行时的、两个后端共用的一条
+# 判据；把这个编译期开关也拧上会多出"两套上限谁生效"的问题，而且关不掉
+# （它是编译期常量）。少一处配置就少一处漂移。
+if(UVCPP_ENABLE_YYJSON)
+  add_compile_definitions(UVCPP_YYJSON_ENABLE=1)
+  message(STATUS "yyjson JSON backend enabled (UVCPP_YYJSON_ENABLE=1)")
+
+  message(STATUS "Fetching yyjson via FetchContent (tag=${YYJSON_VERSION})")
+  FetchContent_Declare(
+    yyjson
+    GIT_REPOSITORY https://github.com/ibireme/yyjson.git
+    GIT_TAG        ${YYJSON_VERSION}
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_GetProperties(yyjson)
+  if(NOT yyjson_POPULATED)
+    FetchContent_Populate(yyjson)
+  endif()
+
+  # 「取到的东西不是 yyjson」必须当场红。不红的话编出来的是一个留着未定义符号的
+  # 库：错误落在**链接期**、指向我们自己的 `uvcpp_json_doc.cpp`，看着像我们写错了
+  # 一个函数名。与 quic/http3/capi 那三段"开了开关但目录是空的"是同一条教训 ——
+  # 「没测」必须表现为失败。
+  if(NOT EXISTS "${yyjson_SOURCE_DIR}/src/yyjson.c")
+    message(FATAL_ERROR
+      "yyjson 源码树里没有 src/yyjson.c（${yyjson_SOURCE_DIR}）—— 上游改了目录"
+      "结构，或者 YYJSON_VERSION=${YYJSON_VERSION} 指错了 tag。")
+  endif()
+
+  add_library(uvcpp_yyjson OBJECT "${yyjson_SOURCE_DIR}/src/yyjson.c")
+  set_target_properties(uvcpp_yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  message(STATUS "yyjson integrated (tag=${YYJSON_VERSION}, object)")
+else()
+  add_compile_definitions(UVCPP_YYJSON_ENABLE=0)
+  message(STATUS "yyjson JSON backend disabled (UVCPP_YYJSON_ENABLE=0)")
 endif()
 
 if(UVCPP_ENABLE_ZLIB)
@@ -1739,6 +1846,29 @@ else()
   endif()
 endif()
 
+# 根据 UVCPP_ENABLE_YYJSON 排除 yyjson 模块。形状与上面 capi/db 那两段逐字相同
+# —— 包括为什么两个列表都要排（SOURCES 管编不编，HEADERS 管会不会进安装/导出）。
+#
+# 与它们唯一的差别：这一段关掉的**只是我们自己的那一层**（`src/yyjson/`）。
+# FetchContent 取下来的 yyjson 由上面那个 `if(UVCPP_ENABLE_YYJSON)` 段自己管，
+# 它在这个开关为 OFF 时**根本不下载**。
+if(NOT UVCPP_ENABLE_YYJSON)
+  message(STATUS "Excluding yyjson module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/yyjson/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/yyjson/")
+else()
+  message(STATUS "Including yyjson module in build (yyjson ${YYJSON_VERSION})")
+
+  # 「开了开关但目录是空的」同样必须当场红，理由与 quic/http3/capi/db 那几格
+  # 逐字相同：一个空的 src/yyjson/ 会编出一个"开关是 ON、一行 yyjson 代码都没有"
+  # 的库，而 cache、configure 日志、构建、测试**全绿**。
+  if(NOT YYJSON_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_ENABLE_YYJSON=ON 但 src/yyjson/ 下一个文件都没有 —— 这个配置会编出"
+      "一个不含任何 yyjson 后端的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
+endif()
+
 # Create uvcpp targets according to user selection.
 # Shared target
 if(UVCPP_BUILD_SHARED)
@@ -1894,6 +2024,7 @@ _uvcpp_literal01(UVCPP_NET_ENABLE       UVCPP_BUILD_NET)
 _uvcpp_literal01(UVCPP_WEB_ENABLE       UVCPP_BUILD_WEB)
 _uvcpp_literal01(UVCPP_WEBAPP_ENABLE    UVCPP_BUILD_WEBAPP)
 _uvcpp_literal01(UVCPP_WSDL_ENABLE      UVCPP_ENABLE_WSDL)
+_uvcpp_literal01(UVCPP_YYJSON_ENABLE    UVCPP_ENABLE_YYJSON)
 _uvcpp_literal01(UVCPP_ZLIB_ENABLE      UVCPP_ENABLE_ZLIB)
 _uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
 _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
@@ -1961,6 +2092,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_WEB_ENABLE=${UVCPP_WEB_ENABLE}
       UVCPP_WEBAPP_ENABLE=${UVCPP_WEBAPP_ENABLE}
       UVCPP_WSDL_ENABLE=${UVCPP_WSDL_ENABLE}
+      UVCPP_YYJSON_ENABLE=${UVCPP_YYJSON_ENABLE}
       UVCPP_ZLIB_ENABLE=${UVCPP_ZLIB_ENABLE}
       UVCPP_OPENSSL_ENABLE=${UVCPP_OPENSSL_ENABLE}
       UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
@@ -2178,6 +2310,29 @@ if(UVCPP_ENABLE_WSDL)
 endif()
 
 # =========================================================================
+# yyjson 后端的接线 —— 目标文件 + 私有 include 目录
+# =========================================================================
+if(UVCPP_ENABLE_YYJSON)
+  foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_tgt})
+      # include **PRIVATE**：`<yyjson.h>` 只出现在 `src/yyjson/uvcpp_json_doc.cpp`
+      # 里，公开头一个 yyjson 类型都不出现（迭代器的状态装在一个
+      # `alignas(std::max_align_t)` 的字节数组里，大小由 .cpp 的 `static_assert`
+      # 顶着）—— 使用者既不需要它的 include，也不需要它的库。
+      #
+      # 目标文件用 `target_sources(... $<TARGET_OBJECTS:...>)` 并进去，**不是**
+      # `target_link_libraries`：OBJECT 库经 `target_link_libraries` 会在**静态**
+      # 目标上把 `$<LINK_ONLY:uvcpp_yyjson>` 写进 `INTERFACE_LINK_LIBRARIES`，而
+      # `install(EXPORT uvcppTargets)` 要求导出集里每个非 IMPORTED 目标也在导出集
+      # 里（pugixml/zlib 那两段包 `$<BUILD_INTERFACE:>` 正是为了这件事）。
+      # `$<TARGET_OBJECTS:>` 是**源码级**的注入，压根不进接口，也就不需要那层包装。
+      target_include_directories(${_tgt} PRIVATE "${yyjson_SOURCE_DIR}/src")
+      target_sources(${_tgt} PRIVATE $<TARGET_OBJECTS:uvcpp_yyjson>)
+    endif()
+  endforeach()
+endif()
+
+# =========================================================================
 # 数据库模块依赖链接 — libsqlite3 / libmysqlclient / libpq
 # =========================================================================
 # PRIVATE + `$<BUILD_INTERFACE:>`：
@@ -2356,6 +2511,20 @@ file(GLOB WSDL_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/wsdl/*.h")
 list(FILTER WSDL_HEADER_FILES EXCLUDE REGEX "uvcpp_wsdl_pugixml\\.h$")
 if(WSDL_HEADER_FILES AND UVCPP_ENABLE_WSDL)
   install(FILES ${WSDL_HEADER_FILES} DESTINATION include/wsdl)
+endif()
+
+# src/yyjson/ 的公开头不依赖 yyjson 本身（`<yyjson.h>` 只出现在 .cpp 里，公开头
+# 一个 yyjson 类型都不出现），所以只装我们自己的头 —— 与 http2/wsdl 那两条同一个
+# 理由。
+#
+# **已知的、刻意的不一致**（与 wsdl/quic 那两条同形，不是遗漏）：
+# `package_release.py` 是**从 `src/` 逐目录拷头**的、与开关无关，所以发布包里
+# `include/yyjson/` 在、而模块没编（`UVCPP_YYJSON_ENABLE` 在包里是 0，整段声明被
+# `#if` 摘掉）。这正是 `check_doc_snippets.py` 的 `DEFAULT_OFF` 要登记它、
+# `MODULE_REQ` 也要登记它的原因：**头在不在包里**这一半只是本地形状。
+file(GLOB YYJSON_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/yyjson/*.h")
+if(YYJSON_HEADER_FILES AND UVCPP_ENABLE_YYJSON)
+  install(FILES ${YYJSON_HEADER_FILES} DESTINATION include/yyjson)
 endif()
 
 # ---------------------------------------------------------------------------
