@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.31-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.32-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -912,6 +912,37 @@
   证明不了实现没读它。ASan 全量 68/68 连跑 4 轮 0 报。
 
 ### HTTP 与 WebSocket 语义
+
+- **`http_compress::decompress()` 解不开任何超过 4 KiB 的东西，而且客户端那条路上是静默的**
+  （`1.6.32-dev`）。`decompress()` 里两个 `inflate` 循环写的是 `inflate(&strm, Z_FINISH)`
+  + `while (ret == Z_OK)`，而 zlib 对 `Z_FINISH` 的约定是：**输出缓冲被填满**时返回
+  `Z_BUF_ERROR`(-5)、**不是** `Z_OK`。于是循环在**第一块**（内部输出块 4096 B）就退出、
+  `ret != Z_STREAM_END`，整条判成失败，接着掉进下面那条 raw deflate 回退 —— 同样失败。
+  **症状**：解压后超过 4 KiB 的东西一律解不开；4 KiB 以内一次 `inflate()` 就
+  `Z_STREAM_END`，全好。**独立证据**（不是推理）：一个只链 `-lz` 的 30 行独立 C 程序，
+  喂一段压完 ≈ 7 KB 的流：`Z_NO_FLUSH` 每块返回 `Z_OK`、`Z_FINISH` 在**第 0 次**调用上
+  就返回 `-5`。**改法**：参数换 `Z_NO_FLUSH`，退出条件从"只看返回值"补成"返回值 **且**
+  缓冲真的被填满"（`Z_NO_FLUSH` 下 `Z_OK` 而 `avail_out != 0` 只剩"输入用完了"一个含义；
+  少了后半句，一个恰好整块结束的流会在最后一次白转，更坏的情况是"返回 `Z_OK` 却毫无进展"
+  时原地死循环）。
+  **判据**：`tests/functional/web_http_client_func.cpp` 的 `compress_large` —— 1500 行
+  ≈ 70 KB 的原文，gzip / deflate / 裸流（去掉 zlib 包装走回退分支）三条腿逐字节还原。
+  把参数改回 `Z_FINISH` 它立刻变红，而同一个文件里几十字节的 `compress_gzip` /
+  `compress_deflate` **仍然是绿的** —— 这正是这个缺陷能活到现在的原因：**旧用例的正文
+  从来没有填满过那个 4 KiB 块**，参数写错也测不出来。
+  同一提交补上客户端那个"两半承诺只兑现一半"的缺口。`set_compression_enabled(true)` 的
+  文档写的是"请求补 `accept-encoding`、响应收全后自动解压"，但这两件事此前**只写在异步
+  `send()` 那条路上**：两条阻塞路径（`send_wait_plain` / `send_wait_ssl`）一个都不做，
+  请求不补头、响应也不解压，调用方拿到的是贴着 `content-encoding: gzip` 的压缩字节。
+  现在两半各收进一个私有助手（`add_accept_encoding()` / `decompress_response_body()`），
+  **三条交付路径共用同一份**（三处各写一份必然再次分叉）。**端到端判据**：
+  `tests/functional/web_app_app_func.cpp` 的 `compression_wiring` (c) —— 一个开着自动解压的
+  客户端取 70 KB 的 `/largetext`，断言 `content-encoding` 被摘掉、正文逐字节等于原文；
+  并且**先用默认（不自动解压）的客户端钉住前提**：线上的字节确实是 gzip 流（`1f 8b`）、
+  **压缩后**的长度还在客户端那个 1024 的解压门槛之上 —— 否则上面那两条可以靠"服务端根本
+  没压"而恒真。变异验证同上：改回 `Z_FINISH`，(c) 的两条主断言红、两条前提断言仍绿。
+  公开头 `src/web/uvcpp_http_client.h` 的 `set_compression_enabled()` 文档同步写明它覆盖
+  异步与阻塞两条路，并把"正文（压缩后）< 1024 B 不解压、且门槛改不了"这条一起写进去。
 
 - **WebSocket 的发送队列整批合并成一次 `uv_write`，并把泵推迟到一次读派发结束之后**
   （`1.6.21-dev`）。`1.6.13-dev` 把 `TCP_NODELAY` 默认打开（理由见下面「接受连接时默认关

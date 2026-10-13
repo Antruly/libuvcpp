@@ -219,14 +219,14 @@ TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字�
 那四个 `send_*` 是"`submit_*` + `flush()`"的合并 —— 忘了 `flush()` 就是
 "响应提交了但一个字节都没发"这种最难查的静默失败（`src/http2/uvcpp_h2_connection.h:74`）。
 
-库内那份接好的实现（`src/web/uvcpp_http_server.cpp:2801-2801` 起）的调用序列：
+库内那份接好的实现（`src/web/uvcpp_http_server.cpp:2831-2831` 起）的调用序列：
 
 1. 分流点判 ALPN，是 h2 就走另一条路（`src/web/uvcpp_http_server.cpp:996-996`）；
-2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:2801-2801`）；
-3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:2806-2806`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:2868-2868`）；
-4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:2873-2873`）；
-5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:2875-2875`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:2876-2876`）；
-6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:2959-2959` 起）。
+2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:2831-2831`）；
+3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:2836-2836`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:2898-2898`）；
+4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:2903-2903`）；
+5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:2905-2905`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:2908-2908`）；
+6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:2989-2989` 起）。
 
 一个能编的最小响应侧写法：
 
@@ -279,7 +279,7 @@ done)` → 最后一块 `end_stream = true`。三处要点：
 **低层没有请求侧的合并入口** —— `uvcpp_h2_connection` 上的四个 `send_*` 全是响应侧的。
 客户端提交完请求**必须自己调 `flush()`**。这一点在
 `tests/functional/web_ssl_h2_server_func.cpp:460` 有一段专门的告诫，
-库内正解在 `src/web/uvcpp_http_client.cpp:1321-1321`：
+库内正解在 `src/web/uvcpp_http_client.cpp:1359-1359`：
 
 ```cpp
 // doc-snippet: fragment — 从库内调用点摘的三句，前后文不在本页
@@ -314,12 +314,12 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 ```
 
 `uvcpp_http_client` 那条线是同一套顺序：`set_http2_enabled(true)`
-（`src/web/uvcpp_http_client.cpp:1237-1237`）→ `connect()` 里 `enable_tls` 加 ALPN 名单
+（`src/web/uvcpp_http_client.cpp:1275-1275`）→ `connect()` 里 `enable_tls` 加 ALPN 名单
 （`:275` / `:291`，`h2` 在前、`http/1.1` 兜底）→ connect 成功回调里读
-`tls_alpn_selected()`（`:310`）→ `start_h2()`（`:314` → `:1260-1260`）→ 装回调（`:1262-1262`）
-→ `h2_->start(sc, cc)`（`:1296-1296`）→ `send()` 分流到 `send_h2`（`:440`）。
+`tls_alpn_selected()`（`:310`）→ `start_h2()`（`:314` → `:1298-1298`）→ 装回调（`:1300-1300`）
+→ `h2_->start(sc, cc)`（`:1334-1334`）→ `send()` 分流到 `send_h2`（`:440`）。
 
-**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:445`、
+**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:474-474`、
 `src/web/uvcpp_http_server.h:357-357`）—— 低层的两条线都要显式打开，
 只有 `webapp/` 框架层是零配置自动协商。
 
@@ -343,13 +343,13 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 `on_request_end` 的触发条件是**「这条流的 END_STREAM 到了」**，不是"有请求体才算"
 （`src/http2/uvcpp_h2_session.cpp:558-558`）。HEADERS 自带 END_STREAM 的请求（也就是
 绝大多数 GET）**也会触发**，而且是紧接着 `on_request` 同步来的 —— 库内自己就依赖
-这一点：`src/web/uvcpp_http_server.cpp:2828-2829` 明说那里**不能** `erase` 流状态，
+这一点：`src/web/uvcpp_http_server.cpp:2858-2859` 明说那里**不能** `erase` 流状态，
 无 body 的请求这两下是背靠背的，擦掉之后那条请求就没人派发了。
 
 **二、客户端交付响应只能放 `on_response_end`。** 带 body 的响应里 `on_response` 的
 `end_stream` **恒为 false**，而 DATA 的 END_STREAM 不经过任何回调 ——
 没有 `on_response_end` 就分不出"响应到头了"和"响应全收完了"
-（`src/web/uvcpp_http_client.cpp:1274-1274`、`src/http2/uvcpp_h2_session.h:155-161`）。
+（`src/web/uvcpp_http_client.cpp:1312-1312`、`src/http2/uvcpp_h2_session.h:155-161`）。
 
 另外，**服务端侧的 `uvcpp_h2_stream::response` 初值是 `HTTP_STATUS_NONE` 而不是 `200`**
 （`src/http2/uvcpp_h2_session.h:71`）。这不是疏漏：流在响应头到达之前被 RST
@@ -391,7 +391,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 | `:scheme` 与实际传输层一致 | TLS 只接受 `https`、明文只接受 `http`，不符即 RST（两个都收等于给混淆代理开门，RFC 9113 §8.1.1） | `src/http2/uvcpp_h2_session.cpp:384-387` |
 
 **没有闲置超时**（`src/http2/` 里 grep `idle|timeout|keepalive` 零命中）。
-`src/web/uvcpp_http_server.h:1343-1346` 提到的那个 idle sweep 属于 **webapp 层**
+`src/web/uvcpp_http_server.h:1359-1362` 提到的那个 idle sweep 属于 **webapp 层**
 （默认 60 s），既不是 h1 服务器自带的，也不覆盖 h2 连接。
 
 对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:431-431`）、
@@ -473,7 +473,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:863-863
 
 可不可重试的判定**不在这一层**，在 `web/` 侧：`H2_ERR_REFUSED_STREAM` 才算
 `retryable`，`NO_ERROR` 与 `CANCEL` 都算正常收尾
-（`src/web/uvcpp_http_client.cpp:1407-1407`）。
+（`src/web/uvcpp_http_client.cpp:1445-1445`）。
 
 ---
 

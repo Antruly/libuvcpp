@@ -952,6 +952,23 @@ void test_compression_wiring() {
     resp.end();
   });
 
+  // (c) 用的大语料。两个门槛都要过：原文本身远大于 4 KiB，而**压完**还得
+  //     不小于客户端那个 `compress_min_body_`（默认 1024，客户端只在压缩后
+  //     ≥ 它时才解压）。70 KB 的文本压完约 7 KB，两个都过。
+  std::string corpus;
+  for (int i = 0; i < 1500; ++i) {
+    corpus += "line " + std::to_string(i) +
+              ": 0123456789 abcdefghijklmnopqrstuvwxyz\n";
+  }
+  app.get("/largetext", [corpus](uvcpp_web_request& req,
+                                 uvcpp_web_response& resp,
+                                 uvcpp_web_next next) {
+    (void)req;
+    (void)next;
+    resp.text(corpus);
+    resp.end();
+  });
+
   check(app.start_background() == 0, "压缩服务启动");
   const int port = app.bound_port();
 
@@ -981,6 +998,62 @@ void test_compression_wiring() {
         "4000 字节的重复内容压完之后确实变小了");
   check(!http_get_header(gz.headers, "vary").empty(),
         "做过编码决策就带 vary（缓存/CDN 正确性）");
+
+  // (c) 端到端：70 KB 的正文，客户端**开着**自动解压 —— 必须真的解得开。
+  //
+  //     这一条盯的是 `http_compress::decompress()` 里那个 4 KiB 内部输出块。
+  //     早先那里写的是 `inflate(…, Z_FINISH)` + `while (ret == Z_OK)`，而输出块
+  //     **第一次被填满**时 `inflate` 返回的是 `Z_BUF_ERROR`(-5)、不是 `Z_OK`，
+  //     于是循环只走了一块就退出、`ret != Z_STREAM_END` ⇒ 整条判成失败。
+  //     上面 (a)/(b) 两条的正文（4000 字节的 'a'、以及压缩态）一次 `inflate()`
+  //     就 `Z_STREAM_END`，**从来填不满那块**，对这个缺陷是全盲的。
+  //
+  //     客户端那条路上解压失败是**静默**的（`result.success` 为假就不替换
+  //     body），调用方只会拿到一段还贴着 `content-encoding: gzip` 的压缩字节。
+  //     所以这里必须断言"解出来的正文逐字节等于原文"，而不是"有响应"。
+  //
+  //     两个前提都要过，缺一个这条就退化成恒真：原文远大于 4 KiB（由 corpus
+  //     保证），**压完**还得 ≥ 客户端那个 `compress_min_body_`（默认 1024）——
+  //     否则客户端压根不去解。
+  {
+    uvcpp_http_request lreq = uvcpp_http_request::make_get("/largetext");
+    lreq.set_header("accept-encoding", "gzip");
+
+    // 先钉住**前提**，否则下面那两条可以靠"服务端根本没压"而恒真：这一条用
+    // 默认（不自动解压）的客户端，看的正是线上字节 —— 必须是 gzip 流，
+    // 且**压缩后**的长度 ≥ 客户端那个 1024 的门槛（否则客户端压根不去解，
+    // 断言又会静默变空）。原文 70 KB，压完约 6~7 KB。
+    uvcpp_http_response raw_out;
+    check(roundtrip(port, lreq, raw_out), "（前提）大正文取到压缩字节");
+    const size_t wire = raw_out.body.size();
+    check(wire > 2 &&
+              static_cast<unsigned char>(raw_out.body.get_const_data()[0]) == 0x1f &&
+              static_cast<unsigned char>(raw_out.body.get_const_data()[1]) == 0x8b,
+          "（前提）/largetext 的正文真的是 gzip 流");
+    check(wire >= 1024 && wire < corpus.size(),
+          "（前提）压缩后长度落在客户端的解压门槛与原文之间");
+
+    uvcpp_http_response lout;
+    bool lgot = false;
+    for (int i = 0; i < 40 && !lgot; ++i) {
+      uvcpp_http_client client;
+      client.set_compression_enabled(true);
+      if (client.connect_wait("127.0.0.1", port, 2000) == 0 &&
+          client.send_wait(lreq, lout, 5000) == 0) {
+        lgot = true;
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+    }
+    check(lgot, "大正文请求有响应");
+    check(status_of(lout) == 200, "大正文响应仍是 200");
+    // 解压成功时客户端会把 `content-encoding` 摘掉；还挂着就说明解压没发生或
+    // 失败了，此时 body 是压缩字节 —— 下面那条会连带报红。
+    check(http_get_header(lout.headers, "content-encoding").empty(),
+          "客户端解压成功后摘掉了 content-encoding");
+    check(body_of(lout) == corpus,
+          "70 KB 正文跨过 4 KiB 输出块边界后仍逐字节还原");
+  }
 
   app.stop();
   app.join();

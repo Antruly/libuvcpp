@@ -516,11 +516,11 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   const bool add_conn_close = !keep_alive_ && !req.has_header("connection");
 
 #if UVCPP_ZLIB_ENABLE
-  // If compression enabled, add Accept-Encoding (on a mutable copy)
+  // 压缩开着就补 accept-encoding（在**可变副本**上补，调用方的请求对象不动）。
+  // 这条规则与两条阻塞路径共用 `add_accept_encoding()` —— 从前是各写一份，
+  // 阻塞那两份干脆漏了。
   uvcpp_http_request req_copy = req;
-  if (compress_enabled_ && !req_copy.has_header("accept-encoding")) {
-    req_copy.set_header("accept-encoding", "gzip, deflate");
-  }
+  add_accept_encoding(req_copy);
   if (add_conn_close) req_copy.set_header("connection", "close");
   std::string raw = req_copy.to_string();
 #else
@@ -730,34 +730,7 @@ void uvcpp_http_client::on_response_complete() {
   }
 
 #if UVCPP_ZLIB_ENABLE
-  // Auto-decompress response body if Content-Encoding is set
-  if (compress_enabled_) {
-    std::string ce = http_get_header(pending_resp_.headers, "content-encoding");
-    if (!ce.empty()) {
-      http_compress_method enc = http_compress_method::NONE;
-      {
-        std::string cel = ce;
-        for (auto& c : cel)
-          c = static_cast<char>(http_lower_ascii(static_cast<unsigned char>(c)));
-        if (cel == "gzip" || cel == "x-gzip")
-          enc = http_compress_method::GZIP;
-        else if (cel == "deflate" || cel == "x-deflate")
-          enc = http_compress_method::DEFLATE;
-      }
-      if (enc != http_compress_method::NONE &&
-          pending_resp_.body.size() >= compress_min_body_) {
-        auto result = http_compress::decompress(
-            pending_resp_.body.get_const_data(),
-            pending_resp_.body.size());
-        if (result.success) {
-          pending_resp_.body.clear();
-          pending_resp_.body.clone(result.data);
-          pending_resp_.remove_header("content-encoding");
-          pending_resp_.remove_header("content-length");
-        }
-      }
-    }
-  }
+  decompress_response_body(pending_resp_);
 #endif
 
   if (user_cb_) {
@@ -766,6 +739,59 @@ void uvcpp_http_client::on_response_complete() {
     cb(pending_resp_, 0);
   }
 }
+
+#if UVCPP_ZLIB_ENABLE
+// ---------------------------------------------------------------------------
+// 压缩：请求侧补 accept-encoding / 响应侧就地解压（三条交付路径共用）
+// ---------------------------------------------------------------------------
+
+void uvcpp_http_client::add_accept_encoding(uvcpp_http_request& req) const {
+  // 调用方自己设过 `accept-encoding` 就不覆盖 —— 他的偏好（比如只收 deflate
+  // 或干脆不收）优先于这个开关。
+  if (compress_enabled_ && !req.has_header("accept-encoding")) {
+    req.set_header("accept-encoding", "gzip, deflate");
+  }
+}
+
+void uvcpp_http_client::decompress_response_body(uvcpp_http_response& resp) {
+  if (!compress_enabled_) return;
+
+  std::string ce = http_get_header(resp.headers, "content-encoding");
+  if (ce.empty()) return;
+
+  // 大小写不敏感（`Content-Encoding: GZIP` 是合法的），所以先整串折小写再比。
+  http_compress_method enc = http_compress_method::NONE;
+  {
+    std::string cel = ce;
+    for (auto& c : cel)
+      c = static_cast<char>(http_lower_ascii(static_cast<unsigned char>(c)));
+    if (cel == "gzip" || cel == "x-gzip")
+      enc = http_compress_method::GZIP;
+    else if (cel == "deflate" || cel == "x-deflate")
+      enc = http_compress_method::DEFLATE;
+    // 认不出的编码（`br`、`zstd`…）**原样留着**：宁可把压缩字节交给调用方，
+    // 也不要谎报已经解开了。
+  }
+  if (enc == http_compress_method::NONE) return;
+
+  // 门槛比的是**压缩后**的正文长度（`compress_min_body_` 的文档如此），不是
+  // 解开之后的。小响应压完常常更大，解它没有意义。
+  if (resp.body.size() < compress_min_body_) return;
+
+  const http_compress_result result =
+      http_compress::decompress(resp.body.get_const_data(), resp.body.size());
+  // 失败就**什么都不改**：调用方至少还能看到 `content-encoding` 与压缩字节，
+  // 而不是一个"看起来是明文、其实是半截流"的 body。
+  if (!result.success) return;
+
+  resp.body.clear();
+  resp.body.clone(result.data);
+  // 两个头都必须摘：留着 `content-length` 会让下一个读它的人拿压缩长度去量
+  // 明文，留着 `content-encoding` 则等于对调用方谎报正文还是压缩态。
+  resp.remove_header("content-encoding");
+  resp.remove_header("content-length");
+}
+#endif  // UVCPP_ZLIB_ENABLE
 
 // =========================================================================
 // Convenience: GET / POST
@@ -1116,6 +1142,9 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
   // 划定（见 read_one_message），连接因此可以像异步路径一样复用。
   uvcpp_http_request r = req;
   if (!r.has_header("host")) r.set_header("host", host_);
+#if UVCPP_ZLIB_ENABLE
+  add_accept_encoding(r);
+#endif
   std::string raw = r.to_string();
 
   // 阻塞式 SSL 写入
@@ -1135,6 +1164,9 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
   parse_response_head(head, resp);
   resp.body.clear();
   resp.body.clone_data(body.data(), body.size());
+#if UVCPP_ZLIB_ENABLE
+  decompress_response_body(resp);
+#endif
   set_status(HTTP_CLIENT_COMPLETE);
   clear_status(HTTP_CLIENT_ERROR);
   return 0;
@@ -1176,6 +1208,9 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
   // 构造请求：补 Host；**不再强塞 `Connection: close`**（理由同 send_wait_ssl）
   uvcpp_http_request r = req;
   if (!r.has_header("host")) r.set_header("host", host_);
+#if UVCPP_ZLIB_ENABLE
+  add_accept_encoding(r);
+#endif
   std::string raw = r.to_string();
 
   // 阻塞式写入
@@ -1198,6 +1233,9 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
   parse_response_head(head, resp);
   resp.body.clear();
   resp.body.clone_data(body.data(), body.size());
+#if UVCPP_ZLIB_ENABLE
+  decompress_response_body(resp);
+#endif
   set_status(HTTP_CLIENT_COMPLETE);
   clear_status(HTTP_CLIENT_ERROR);
   return 0;

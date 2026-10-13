@@ -53,7 +53,7 @@
   会把明文整条腿判死，而两个都收等于给混淆代理开后门，RFC 9113 §8.1.1）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
   收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:558-558`）。
-- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1387`，RFC 9113 §8.7）：
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1425-1425`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
@@ -162,7 +162,7 @@
   （`src/web/uvcpp_http_client.cpp:710-730`），第二次 `send()` 同步拒成
   `UV_ENOTCONN` —— 与 h2 那条 `peer_goaway_received()` 的提前拦截同一形状；
   `set_keep_alive(false)` 则让请求真的带上 `connection: close`
-  （`src/web/uvcpp_http_client.cpp:516-531`）。
+  （`src/web/uvcpp_http_client.cpp:516-535`）。
   用例：`tests/functional/web_http_client_keepalive_func.cpp`。
   两件事都属于 h1，与本页的 h2 无关，留在这儿只为了让下次盘查的人不必再核一遍。
 

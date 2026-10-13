@@ -301,15 +301,27 @@ http_compress_result http_compress::decompress(const char* data, size_t len) {
 
   int ret;
   const size_t C = 4096;
+  // `Z_NO_FLUSH` 不是随手写的，**Z_FINISH 在这里是个缺陷**：输出缓冲被填满时，
+  // `inflate()` 对 `Z_FINISH` 的约定是返回 `Z_BUF_ERROR`(-5)，而不是 `Z_OK` ——
+  // 于是 `while (ret == Z_OK)` 在**第一块**就退出、`ret != Z_STREAM_END`，整个
+  // 解压被判成失败，再掉进下面那条 raw deflate 回退（同样失败）。症状是
+  // **解压后超过 4 KiB 的东西一律解不开**，4 KiB 以内的全好（一次就
+  // `Z_STREAM_END`）—— 所以小体的往返用例一直是绿的，这也是它一直没被发现的原因。
+  // `Z_NO_FLUSH` 才是"输入还没完、我还要接着输出"的那个参数：填满返回 `Z_OK`。
+  //
+  // 退出条件也从"只看返回值"补成"返回值 + 缓冲真的被填满了"：`Z_NO_FLUSH` 下
+  // `Z_OK` 而 `avail_out != 0` 只剩一个含义 —— 输入用完了，没有下一块了。
+  // 少了后半句，一个恰好整块结束的流会在最后那次调用上白转（更坏的情况是
+  // "返回 Z_OK 但毫无进展"时原地死循环）。
   do {
     unsigned char tmp[C];
     strm.next_out  = tmp;
     strm.avail_out = C;
-    ret = inflate(&strm, Z_FINISH);
+    ret = inflate(&strm, Z_NO_FLUSH);
     size_t written = C - strm.avail_out;
     if (written > 0)
       result.data.append_data(reinterpret_cast<const char*>(tmp), written);
-  } while (ret == Z_OK);
+  } while (ret == Z_OK && strm.avail_out == 0);
 
   // Determine which encoding was detected
   if (ret == Z_STREAM_END) {
@@ -324,15 +336,16 @@ http_compress_result http_compress::decompress(const char* data, size_t len) {
       result.data.clear();
       strm.next_in  = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(data));
       strm.avail_in = static_cast<uInt>(len);
+      // 同上面那条：`Z_NO_FLUSH` + "缓冲真的填满了"，理由见那段说明。
       do {
         unsigned char tmp[C];
         strm.next_out  = tmp;
         strm.avail_out = C;
-        ret = inflate(&strm, Z_FINISH);
+        ret = inflate(&strm, Z_NO_FLUSH);
         size_t written = C - strm.avail_out;
         if (written > 0)
           result.data.append_data(reinterpret_cast<const char*>(tmp), written);
-      } while (ret == Z_OK);
+      } while (ret == Z_OK && strm.avail_out == 0);
       result.success = (ret == Z_STREAM_END);
       result.method = http_compress_method::DEFLATE;
       inflateEnd(&strm);

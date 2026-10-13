@@ -171,6 +171,64 @@ static bool test_compress_deflate_roundtrip() {
 }
 
 // =========================================================================
+// Test 7b: 解压后**跨过内部输出块边界**（> 4 KiB）的往返
+// =========================================================================
+//
+// 上面两条的原文都只有几十字节，一次 `inflate()` 就 `Z_STREAM_END` —— 于是
+// 那个 4 KiB 的输出块**从来没被填满过**，`inflate()` 的参数写错也测不出来。
+// 实测（zlib 1.3，本用例就是量具）：输出超过 4 KiB 时 `inflate(…, Z_FINISH)`
+// 在**第一块**填满时就返回 `Z_BUF_ERROR`(-5) 而不是 `Z_OK`，于是
+// `while (ret == Z_OK)` 立刻退出、`ret != Z_STREAM_END` ⇒ **整条解压被判成失败**。
+// 症状是"解压后超过 4 KiB 的响应一律解不开"，而 4 KiB 以内全好 —— 客户端那条
+// 路上，解压失败是**静默**的（`uvcpp_http_client.cpp` 只在 `result.success` 时才
+// 替换 body），调用方拿到的是还带着 `content-encoding: gzip` 的压缩字节。
+//
+// 这条用例的原文是 70 KB 量级、要十几块才输出完，正好压住那个边界：把参数改回
+// `Z_FINISH` 它就红。两条腿各压一个循环 —— zlib 包装那条（`15+32` 自动识别）与
+// raw deflate 那条回退分支。
+static bool test_compress_large_roundtrip() {
+  std::string plain;
+  for (int i = 0; i < 1500; ++i) {
+    plain += "line " + std::to_string(i) +
+             ": 0123456789 abcdefghijklmnopqrstuvwxyz\n";
+  }
+  // 前置：原文必须远远超过 4 KiB（那个内部输出块），且多跨几块 —— 只跨一块的话
+  // "第二次调用的那条退出条件"还没用上。
+  if (plain.size() <= 4096 * 4) return false;
+
+  const auto body_of = [](const http_compress_result& cr) {
+    return std::string(cr.data.get_const_data(), cr.data.size());
+  };
+
+  const http_compress_method methods[2] = {http_compress_method::GZIP,
+                                           http_compress_method::DEFLATE};
+  for (int m = 0; m < 2; ++m) {
+    const http_compress_result c =
+        http_compress::compress(plain.data(), plain.size(), methods[m]);
+    if (!c.success) return false;
+    const http_compress_result d =
+        http_compress::decompress(c.data.get_const_data(), c.data.size());
+    if (!d.success) return false;
+    if (body_of(d) != plain) return false;
+  }
+
+  // raw deflate（没有 zlib 头/尾）走的是 `decompress` 里那条回退分支。去掉 zlib
+  // 包装的头 2 字节与尾 4 字节（adler32）就是裸流 —— deflate 的块结构与之无关。
+  const http_compress_result z =
+      http_compress::compress(plain.data(), plain.size(),
+                              http_compress_method::DEFLATE);
+  if (!z.success || z.data.size() < 8) return false;
+  const std::string wrapped = body_of(z);
+  const std::string raw = wrapped.substr(2, wrapped.size() - 6);
+  const http_compress_result rd =
+      http_compress::decompress(raw.data(), raw.size());
+  if (!rd.success) return false;
+  if (body_of(rd) != plain) return false;
+
+  return true;
+}
+
+// =========================================================================
 // Test 8: Accept-Encoding parsing
 // =========================================================================
 static bool test_accept_encoding_parse() {
@@ -296,6 +354,7 @@ int main() {
 #if UVCPP_ZLIB_ENABLE
     {"compress_gzip", test_compress_gzip_roundtrip},
     {"compress_deflate", test_compress_deflate_roundtrip},
+    {"compress_large", test_compress_large_roundtrip},
     {"accept_encoding", test_accept_encoding_parse},
     {"mime_exclusion", test_mime_exclusion},
 #endif

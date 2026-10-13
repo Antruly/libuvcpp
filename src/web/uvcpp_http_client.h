@@ -213,7 +213,14 @@ class UVCPP_API uvcpp_http_client {
 
 #if UVCPP_ZLIB_ENABLE
   /** @brief Enable/disable automatic Accept-Encoding + response decompression.
-   *         Default: OFF — user must opt in explicitly. */
+   *         Default: OFF — user must opt in explicitly.
+   *
+   *         两半都覆盖**异步与阻塞两条路径**：异步的 `send()` 与阻塞的
+   *         `send_wait()` / `send_wait_plain()` / `send_wait_ssl()`。
+   *         （1.6.31 之前只有异步那条兑现，阻塞那两条静默地什么都不做。）
+   *
+   *         注意 **门槛**：正文（压缩后）小于 1024 字节时不解压，
+   *         `content-encoding` 也照样留着 —— 且客户端没有设这个门槛的接口。 */
   void set_compression_enabled(bool enable);
   bool is_compression_enabled() const;
 #endif
@@ -345,6 +352,28 @@ class UVCPP_API uvcpp_http_client {
   void on_tcp_close();
 
   void on_response_complete();
+
+#if UVCPP_ZLIB_ENABLE
+  /**
+   * @brief 按 `content-encoding` 就地解压 `resp`（并把 `content-encoding` /
+   *        `content-length` 摘掉）。
+   *
+   * **三条交付路径共用这一个**（异步 h1 的 `on_response_complete`、阻塞的
+   * `send_wait_plain` / `send_wait_ssl`）—— 从前它是内联在异步那条路上的，
+   * 于是 `set_compression_enabled(true)` 在阻塞路径上**两半承诺都没兑现**：
+   * 请求不补 `accept-encoding`、响应也不解压，调用方拿到的是贴着
+   * `content-encoding: gzip` 的压缩字节。三处各写一份必然再次分叉。
+   *
+   * 不满足条件时（开关关着、没有 `content-encoding`、编码不认识、正文小于
+   * `compress_min_body_`、解压失败）一律**原样不动** —— 解压失败在客户端是
+   * 静默的，所以判据在调用方那边只能是"正文逐字节等于原文"。
+   * 见 `tests/functional/web_app_app_func.cpp` 的 `compression_wiring` (c)。
+   */
+  void decompress_response_body(uvcpp_http_response& resp);
+
+  /** @brief 请求侧的那一半：开关开着且调用方自己没设过就补 `accept-encoding`。 */
+  void add_accept_encoding(uvcpp_http_request& req) const;
+#endif
 
 #if UVCPP_NGHTTP2_ENABLE
   // h2 的回调都在 mem_recv/drain 里**同步**跑，而它们最终会调进用户的
