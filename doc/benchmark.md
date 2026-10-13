@@ -1403,6 +1403,109 @@ sleep 25 && kill -TERM <pid>
 `cpuab2.sh`），**不随仓库发布**；这一节记的是读数与口径，不是脚本。
 
 
+### 4.15 静态整读的名额是在哪根线程上还的：`static-h2` 那批假 503（**第十套装置**，仓内确定性用例 + 交替 A/B）
+
+#### 机制：名额的持有时长被「循环线程有多忙」决定了
+
+工作池闸门（`uvcpp_web_work_limit`，见 `src/webapp/uvcpp_web_work_limit.h`）封的是
+「**并发的磁盘读**」。可是 `1.6.42-dev` 之前，静态整读那条路是这么记账的：
+
+    loop 线程      acquire_slot() 之前先投池
+    worker 线程    read_job()：取名额 → 读盘
+    loop 线程      after_work()：还名额
+
+**还名额那一步跑在循环线程上，而循环线程正是高负载下最忙的那一根。** 于是名额的持有
+时长不是「读盘要多久」，而是「读盘要多久 **+ 从读完到循环线程轮到 `after_work`**」。
+压满的时候后一项远大于前者：`in_flight` 顶到上限（`UV_THREADPOOL_SIZE=64` 时是
+`64 × 4 = 256`），真正在读盘的只有 ≤ 64 个，后来者一律被 `503 + Retry-After` 回绝。
+
+这不是新病理，是**同一个病理的第二条路**：分片那条路 2026-09-24 已经改成「按块借还」
+（`1.3.6-dev`，见 `uvcpp_web_file_transfer::set_chunk_gate()`），当时服务端日志的现场
+是 `工作池已满（在途 0 / 16）` —— **在途 0 却拒绝**。整读这条路的现场是
+`工作池已满（在途 256 / 256）`，两行日志说的是同一件事：**账面上的"在途"与实际并行
+度脱钩了**。
+
+#### 修法：记账搬到 worker，派发留在 loop 线程
+
+「在 worker 上直接 `release()`」是**不安全**的：唤醒回调必须跑在**注册它的那根线程**
+上，而现有两个注册方（`src/webapp/uvcpp_web_file.cpp` 的分片块闸门 → `resume()`、
+`src/webapp/uvcpp_web_upload.cpp` → `on_slot_available()`）回调里都要续做 loop 上的
+I/O —— 从 worker 里同步派发等于让它们跑在 worker 上，那是数据竞争。
+
+所以把闸门的「记账」与「派发」拆开：
+
+| 入口 | 记账 | 派发 | 在哪根线程上调 |
+|---|---|---|---|
+| `release()` | 当场 | 当场 | 唤醒回调所属的那根（= 注册它的那根） |
+| `release_deferred()` | 当场 | **不派发** | 任何线程（worker 就是这一支） |
+| `dispatch_wakeups()` | —— | 派发 | 只在唤醒回调所属的那根 |
+
+`run_job()` 在 worker 上读完**当场** `release_deferred()`，同一笔任务在 loop 线程上的
+`after_work` 补那一刀 `dispatch_wakeups()`。语义上有一处要紧的地方：**不会丢唤醒** ——
+等待者只在「在途数已达上限」时才注册，那一刻必然至少有一个在途任务还没还过名额，它
+结算时的检查必在注册之后 ⇒ 一定看得见这个等待者。
+
+#### 判据一（确定性，不吃压测噪声）：仓内两组用例，且**变异必须变红**
+
+`tests/functional/web_app_worklimit_func.cpp` 新增两组：
+
+- `release_deferred_split` 钉闸门自身：账要**当场**记上；`release_deferred()` 的栈上
+  **不许**发生派发；满员时两种还法都不许叫（无效唤醒风暴）。
+- `worker_release_flushed_by_after_work` 钉**接线**（`uvcpp_web_static` 到底有没有照
+  这套契约用）：上限压到 1，测试线程占住那唯一的名额，让一条**分片**请求停在块边界上
+  并登记唤醒（`wakeup_count() == 1`，有界轮询，这是前提断言）；然后测试线程故意
+  **只** `release_deferred()` 不补派；再让一个**冷文件**的整读请求去打整读挂载点 ——
+  它 worker 里那次 `release_deferred()` 与 `after_work` 里那一刀是**唯一**还能叫醒那条
+  分片传输的东西（它自己一个名额都没占、池子里也没有别的活儿）。
+
+**变异实测**：把 `after_work` 里那两行删掉 ⇒ 该组 2 条红
+（`整读那次 after_work 的补派必须叫醒挂住的分片请求`、`被唤醒之后那条一次性条目应当
+已被消费掉`）。这一条比红本身更重要：**在这个组存在之前，"接线漏了补派"没有任何用例
+盖得住**，而它的症状不是慢一点，是那条响应**再也不来**。
+
+#### 这把尺子上的一处坑（如实记）
+
+第一版用例把红绿判在「A 的 `send_wait(req, resp, 8000)` 超时返回非 0」上。实测
+**那个超时不生效**：`uvcpp_http_client.h` 写明它靠 Windows 的
+`SO_RCVTIMEO`/`SO_SNDTIMEO` 实现、POSIX 上「传入的值会被忽略」，单独验过一遍 ——
+`send_wait(req, resp, 1500)` 对着一个从不回包的 socket 卡了 20 s 以上。于是变异下用例
+是**挂住**（要等 ctest 的超时才发现、现场什么都不说），不是变红。改成：判定用有界轮询
+（`a_replied`），A 那条线程等 `app.stop()` 关掉连接之后自然返回，那时才 `join()`。
+
+#### 判据二：交替 A/B（**只认同一轮里两臂的差**）
+
+形状同 §4.14 那一格（1024 连接 × `-m 32`、20 个静态 URI、`br;q=1, gzip;q=0.8`、
+`UV_THREADPOOL_SIZE=64`、ext4 语料），但**只跑 20 s 且交替起服务**：改动前 / 本版
+轮流、各 3 轮，读的是 `h2load` 自己那行状态码计数。
+
+| 轮 | 改动前 5xx | 本版 5xx | 改动前 2xx | 本版 2xx |
+|---|---|---|---|---|
+| 1 | 17,883 | 0 | 1,663,894 | 1,643,319 |
+| 2 | 14,747 | 0 | 1,648,941 | 1,638,128 |
+| 3 | 15,126 | 0 | 1,635,661 | 1,658,477 |
+
+5xx 那一栏的方向是**干净的**（≈2xx 的 **0.94%** → 0）；2xx 那一栏在噪声内，**不要**
+拿它说事 —— 先单跑一轮看到 −2.5% 就当成劣化，交替三轮才知道那是漂移（第 3 轮反而是
+本版多）。0.94% 听着不大，但它是同一台服务在同一形状下的**稳定拒绝**，不是抖动；
+这一刀同时让名额早一拍变松（后来者不必再等那根最忙的线程）。
+
+#### 复现
+
+```bash
+# 判据一：仓内，一条命令
+build-all/tests/functional/test_web_app_worklimit_func            # 全组
+build-all/tests/functional/test_web_app_worklimit_func worker_release  # 只跑第 16 组
+# 变异：删掉 src/webapp/uvcpp_web_static.cpp 里 after_work 那段 if (j->slot_deferred)…
+
+# 判据二：交替起服务，每次换同一份 LD_LIBRARY_PATH
+taskset -c 0-7 env UV_THREADPOOL_SIZE=64 LD_LIBRARY_PATH=$LIB <server> &
+taskset -c 8-15 h2load -i static-h2-uris.txt -H 'Accept-Encoding: br;q=1, gzip;q=0.8' \
+  -c 1024 -m 32 -t 8 -D 20s
+```
+
+量具脚本在仓外（`/tmp/wl/ab503.sh`），**不随仓库发布**；这一节记的是读数与口径。
+
+
 ## 5. 结果三：稳定性
 
 10 分钟持续压测（动态路由 + 连接 churn + WebSocket 混合）：
