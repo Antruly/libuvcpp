@@ -1911,6 +1911,21 @@ static constexpr size_t kCompressVariantMaxEntry = 4u * 1024u * 1024u;
 // 各封一件事：字节封大文件，条数封碎片。
 static constexpr size_t kCompressVariantMaxEntries = 1024;
 
+// 档位在键里占**一个字符**：`-1`（`k_compress_level_default`，即
+// `Z_DEFAULT_COMPRESSION`）→ `'#'`，0..9 → `'0'+n`。
+//
+// 定长是有意的。变长的十进制串会与 `cache_tag` 粘成同一个键：档位 1 配 tag
+// "2x" 与档位 12 配 tag "x" 拼出来一模一样 —— 而"12 档不存在"只是**今天**的
+// 巧合（`clamp_compress_level` 的上限是 9），不是不变量。定长前缀使
+// `(编码, 档位, tag) -> 键` 是单射，与编码字符同一个理由（见 `.h` 里那段）。
+//
+// 单射还依赖"拿到的档位已经夹紧"：`set_compress_level()` 存的就是夹过的值，
+// 而 `-1` 与 `0..9` 正好 11 个取值 → 11 个不同字符。未夹紧的 15 会落到 `'?'`，
+// 不会与 5 撞，但那是运气不是设计 —— 夹紧在入口那一次做完。
+static char compress_level_key_char(int level) {
+  return level < 0 ? '#' : static_cast<char>('0' + level);
+}
+
 size_t uvcpp_http_server::compress_variant_total_bytes_locked() const {
   size_t n = 0;
   for (std::map<std::string, compress_variant>::const_iterator it =
@@ -2035,6 +2050,10 @@ bool uvcpp_http_server::apply_compression_for(
   // 配置一变，要么在门前就 early-return（压根不查表），要么查不到（miss）——
   // 不存在"配置改了、表里还发旧结果"这回事。**谁要把查表提到门前，这条就破了。**
   //
+  // 第五个旋钮 `set_compress_level` 走的是**第三条**路：它不改"要不要压"（那
+  // 四个判的才是这个），只改"压成什么字节"，所以它既不在门前返回、也不指望
+  // miss —— 它**进键**（见下）。于是它一变就必然 miss，同样不可能发出旧结果。
+  //
   // 另外半句（这一条是量出来的）：**提前查表也换不到你要的东西。** 热路径上曾经
   // 有过一次**纯白付**的拷贝 —— 静态层先把整份文件拷进 `resp.body`（248 KB 那
   // 档是 253952 B/响应），而命中那一支下一句 `clear()` 就把它丢掉了。消掉它的
@@ -2042,15 +2061,28 @@ bool uvcpp_http_server::apply_compression_for(
   // 查表提前：查表再早，只要身体已经拷进来，那次拷贝照样白付。而且它**早不了**：
   // 键里的 `cache_tag` 与门槛要看的 `body.size()` 都是身体就位之后才有的。
   //
-  // 键 = `编码字符 + cache_tag`，编码在前（理由见头文件）。今天
-  // `http_compress::compress` 没有 level 参数、档位写死 `Z_DEFAULT_COMPRESSION`，
-  // 所以 `(编码, tag)` 就是完整的键；**哪天加了档位旋钮，档位也必须进键**，
-  // 否则表里会静默发出旧档位压出来的字节。
+  // 键 = `编码字符 + 档位字符 + cache_tag`：两个**定长**前缀都在前、`cache_tag`
+  // 在尾（理由见 `.h` 里那段，以及 `compress_level_key_char` 上面那段）。
+  //
+  // 三样都是"这一条变体是谁"的必要成分。少一样就会把另一档压出来的字节当成这一
+  // 档的发给对端，而**每一层看着都对**：编码对、`content-length` 与实际的体自洽、
+  // 解压出来也逐字节相同 —— 只有线上字节数与档位不符，那正是"省掉的 CPU"与
+  // "多花的带宽"这笔账算错的方向。
+  //
+  // 这里**不**在 `set_compress_level()` 里顺手清表：清表与进键是两条互相顶替的
+  // 机制，两条都在的话"档位入不入键"就再也观测不到了 —— 清完表里只剩当前档位，
+  // 把档位从键里删掉照样全绿（`web_app_app_func.cpp` 那条客户端用例刚吃过一次
+  // 同形的亏：整条链上一处都没压，`body == 原文` 照样成立 —— 于是那里补了"线上
+  // 字节以 `1f 8b` 开头"这类前提断言）。只留进键这一条，于是"换档后必须重新压"
+  // 可以直接量到。
+  // 代价是改档位后上一代那条会滞留到被 LRU 淘汰（另一档的字节还在表里占着）。
+  // 档位通常只在启动期设一次，那时表本来就是空的；跑着改也正确，只是会多留一条。
   const bool cacheable = !resp.cache_tag.empty() &&
                          resp.body.size() <= kCompressVariantMaxEntry;
+  const int level = compress_level();
   const std::string vkey =
       cacheable ? std::string(1, best == http_compress_method::GZIP ? 'g' : 'd') +
-                      resp.cache_tag
+                      compress_level_key_char(level) + resp.cache_tag
                 : std::string();
 
   // 头这三件事命中与未命中都要做，且**必须逐字一样** —— 命中路径与现算是同一个
@@ -2099,7 +2131,7 @@ bool uvcpp_http_server::apply_compression_for(
 
   const size_t src_size = resp.body.size();
   auto result = http_compress::compress(resp.body.get_const_data(),
-                                        resp.body.size(), best);
+                                        resp.body.size(), best, level);
   if (!result.success) return false;
 
   // 压出来的那份字节**只存在一份**：响应与表共用同一个句柄（第 ④ 步）。
@@ -3356,6 +3388,15 @@ void uvcpp_http_server::set_compress_excluded_types(
 }
 void uvcpp_http_server::add_compress_excluded_type(const std::string& mime_type) {
   compress_excluded_types_.push_back(mime_type);
+}
+void uvcpp_http_server::set_compress_level(int level) {
+  // 存**夹过的**值：键里那个档位字符靠"不同档位不同字符"才成立（见下面
+  // `compress_level_key_char`），而未夹紧的 15 与 5 会落到同一个字符上。
+  compress_level_.store(http_compress::clamp_compress_level(level),
+                        std::memory_order_relaxed);
+}
+int uvcpp_http_server::compress_level() const {
+  return compress_level_.load(std::memory_order_relaxed);
 }
 #endif
 

@@ -584,6 +584,23 @@ class UVCPP_API uvcpp_http_server {
 
   /** @brief Add a single MIME type to the exclusion list. */
   void add_compress_excluded_type(const std::string& mime_type);
+
+  /**
+   * @brief 压缩档位：`-1` 是 zlib 的 `Z_DEFAULT_COMPRESSION`，其余 0..9。
+   *        默认 `http_compress::k_compress_level_default`（= `-1`）。
+   *
+   * 与另外四个压缩旋钮的区别：那四个改的是**判据**（要不要压），这个改的是
+   * **压成哪些字节** —— 压这件事照样发生。所以档位进的是变体缓存的**键**
+   * （见 `apply_compression_for()` 里造键那一段），而那四个走的是"改完要么
+   * 提前返回、要么查不到"。
+   *
+   * 也可以**在服务跑着的时候改**：成员是原子的，改完下一个请求就按新档位来。
+   * 这既是它和那四个的又一处不同，也是"档位进键"能被独立观测到的前提 ——
+   * 换档之后旧档位那条**仍然留在表里**（键不同），换回去还能拿回它自己的字节。
+   * 取值由 `http_compress::clamp_compress_level()` 夹进合法区间，越界不报错。
+   */
+  void set_compress_level(int level);
+  int compress_level() const;
 #endif
 
   /**
@@ -1785,6 +1802,15 @@ class UVCPP_API uvcpp_http_server {
 #if UVCPP_ZLIB_ENABLE
   bool compress_enabled_ = true;
   size_t compress_min_body_ = 1024;
+  /// 压缩档位，-1 = `Z_DEFAULT_COMPRESSION`（与
+  /// `http_compress::k_compress_level_default` 同值；那个头文件不引 zlib，
+  /// 所以不能在这里直接引用它）。
+  ///
+  /// 原子而不是普通 int：另四个压缩旋钮改的是判据，
+  /// 而这个改的是键里的一个字符 —— 它要能在跑着的
+  /// 实例上被改才能被量到（见上面 set_compress_level
+  /// 的说明），两条循环线程会同时读写它。
+  std::atomic<int> compress_level_{-1};
   std::vector<std::string> compress_excluded_types_;
 
   // -------------------------------------------------------------------
@@ -1797,7 +1823,7 @@ class UVCPP_API uvcpp_http_server {
   // 只有填了 `cache_tag` 的响应有资格进来（今天只有静态文件那条路填），
   // 于是动态响应的行为与本缓存逐字无关，爆炸半径圈死在一个路由族。
   //
-  // 键是 `编码字符 + cache_tag`，**编码在前**是有意的：单字符前缀使
+  // 键是 `编码字符 + 档位字符 + cache_tag`，**两个定长前缀都在前**是有意的：单字符前缀使
   // `(编码, tag) -> 键` 单射，后缀则不然（tag 自己含分隔符时会撞成同一个键）。
   // -------------------------------------------------------------------
   struct compress_variant {

@@ -19,7 +19,7 @@
 - 包含方式：`<grpc/uvcpp_grpc.h>`、`<grpc/uvcpp_grpc_server.h>`。
 - 依赖：帧与 varint 那半**只依赖 `<cstdint>` 与 `libuv` 的错误码**（
   `src/grpc/uvcpp_grpc.h:41`）；服务端那半额外依赖 `web/uvcpp_http_common.h`
-  与 `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:790-790`）。
+  与 `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:791-791`）。
 
 > 本页讲**怎么用**，以及**为什么这么切**。与本页配对的两份用例是
 > `tests/functional/grpc_codec_func.cpp`（编解码，任何配置下都跑）与
@@ -62,7 +62,7 @@ HEADERS   尾随头 grpc-status: 0（自带 END_STREAM）
   Trailers-Only 的失败应答读成"200，body 是空的"。
 - **`grpc-status` 按规范必须走尾随头**，不走首部（gRPC 的 `PROTOCOL-HTTP2.md` 定在
   那里；RFC 9113 §8.1 提供了"首部之后还能有一个头块"这条机制）。本库为此在 1.6.9 补了
-  `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:790-790`）。
+  `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:791-791`）。
 - 失败应答可以**只有第三段**（没有 DATA）—— gRPC 里叫 **Trailers-Only**。本模块的
   两条失败路径都是这个形状（`src/grpc/uvcpp_grpc_server.cpp:115-131`）。
 

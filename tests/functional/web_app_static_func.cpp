@@ -51,6 +51,15 @@
 
 using namespace uvcpp;
 
+// `http_compress` 必须在**全局**作用域里引入：下面那个 `namespace {` 里的用例
+// 靠 `using namespace uvcpp;` 看得见它。把 include 放进匿名命名空间也编得过，
+// 但那时它是 `{anon}::uvcpp::http_compress`，与库对外导出的那个
+// `::uvcpp::http_compress` **不是同一个实体** —— 名字解析找得到它、链接期找的
+// 是另一个符号。症状是编译期一片“not declared”，而不是“找不到头文件”。
+#if UVCPP_ZLIB_ENABLE
+#include <web/uvcpp_http_compress.h>
+#endif
+
 namespace {
 
 int g_failures = 0;
@@ -905,7 +914,7 @@ void test_head() {
 // 表里应当有几条、字节账该是多少"，在那里必然失败。
 //
 // 它们的**全部内容**都关于压缩，没有一条是别的主题顺带断言压缩，所以守卫
-// 包住**函数与它们的调用点**：在那个配置下这四条根本不存在，而不是
+// 包住**函数与它们的调用点**：在那个配置下这几条根本不存在，而不是
 // "静默跳过"（语义见 `tests/functional/CMakeLists.txt:32-38`）。
 // 调用点在下面 `main()` 里，也一并守卫 —— 漏掉一处就是链接期报错。
 // =========================================================================
@@ -1182,6 +1191,196 @@ void test_compress_variant() {
   }
   check_eq_i(static_cast<long long>(discarded), 0,
              "共享进来的文件体在整条响应链上被物化了若干次（见上面那段说明）");
+}
+
+// ---- 6c. 压缩档位旋钮 ----
+
+// 判据分两层，而**第二层才是这个旋钮存在的理由**：
+//
+//   ① API 层：三参数 `compress()` 的产出必须与"显式传默认档位"那份**逐字节相同**
+//      —— 这个重载在加旋钮之前就存在，谁都不该因为加了旋钮而拿到别的字节。
+//      不同档位的产出必须两两不同、且都能解回原文。`clamp_compress_level()` 的
+//      越界行为是那 11 个合法取值（`-1` 与 0..9）之外唯一一件它会做的事。
+//   ② 服务器层：**换档之后必须重新压**。档位进了变体缓存的键，所以 1 档与 9 档
+//      在同一张表里是两条互不干扰的条目；键里少了那个字符，9 档那次就会命中
+//      1 档那条，把 1 档的字节当成 9 档的发出去 —— 而**每一层看着都对**：编码
+//      对、`content-length` 与体自洽、解压出来也逐字节相同，只有字节数与档位
+//      不符。所以这条判据不能只看"解出来一样"，必须比**字节**。
+//
+// 换档是**在跑着的实例上**换的（成员是原子的，见 `.h` 那段）：这既是"档位进键"
+// 唯一能被观测到的形状，也顺带钉住了"这个旋钮不是只能启动前设"。换档**不清表**
+// —— 清了的话表里只剩当前档位，"档位入不入键"就再也测不出来了（`web_app_app_func.cpp`
+// 那条客户端用例刚吃过一次同形的亏：整条链上一处都没压，"解出来等于原文"照样成立；
+// 所以这里的 ② 先把"确实走了 gzip"与"报的长度读得满"钉成前提）。
+//
+// 换回来那一发（9 档之后换回 1 档）是这套判据里最硬的一条：它要求**两张档位的
+// 条目同时活着**，而且各自拿回自己的字节。只把档位当"最后一次生效的配置"记着的
+// 实现（无论记在表外还是表里）在这一发上就露了。
+void test_compress_level() {
+  std::cout << "[static] 压缩档位" << std::endl;
+
+  const std::string r(k_root);
+  // 语料必须**够长且档位敏感**：三档压出来的字节数得两两不同（下面比的是字节，
+  // 不只是长度），否则"档位生效"那条判据自己就把自己废掉了。这段文本在 zlib 1.3
+  // 上是 7062 / 6242 / 5834 B（档位 1 / 6 / 9，原文 69 548 B）—— 见 CHANGELOG。
+  std::string plain;
+  for (int i = 0; i < 1200; ++i) {
+    plain += "line " + std::to_string(i) +
+             ": the quick brown fox jumps over the lazy dog " +
+             std::to_string((i * 7) % 977) + "\n";
+  }
+  check(write_file(r + "/lvl_level.txt", plain),
+        "前置：写入档位用例的文件");
+
+  const auto body_of = [](const http_compress_result& cr) {
+    return std::string(cr.data.get_const_data(), cr.data.size());
+  };
+
+  // ---- ① API 层 ----
+  const char* p = plain.data();
+  const size_t n = plain.size();
+  const auto gz = [p, n](int lv) {
+    return http_compress::compress(p, n, http_compress_method::GZIP, lv);
+  };
+  const http_compress_result ref =
+      http_compress::compress(p, n, http_compress_method::GZIP);
+  const http_compress_result dflt =
+      gz(http_compress::k_compress_level_default);
+
+  check(ref.success && dflt.success, "① 三参数与显式默认档都要成功");
+  check(body_of(ref) == body_of(dflt),
+        "① 三参数 compress() 必须与显式传默认档位逐字节相同"
+        "（这个重载不许因为加了旋钮而变字节）");
+
+  const std::string b1 = body_of(gz(1));
+  const std::string b6 = body_of(gz(6));
+  const std::string b9 = body_of(gz(9));
+  check(!b1.empty() && !b6.empty() && !b9.empty(), "① 三档都要有产出");
+  check(b1 != b6 && b6 != b9 && b1 != b9, "① 三档压出来的字节必须两两不同");
+  check(b1.size() > b9.size(),
+        "① 1 档的产物必须比 9 档大（语料的档位敏感性；这条不成立说明语料选错了，"
+        "而不是实现错了）");
+  // `k_compress_level_default` 是 `Z_DEFAULT_COMPRESSION`（今天等价 6 档），而库里
+  // 把 `-1` 与 `6` 当成**两个键**（见 `uvcpp_http_server.cpp` 里 `compress_level_key_char`）：多一条
+  // 6 档条目，代价是 6 KB。有意为之 —— `Z_DEFAULT_COMPRESSION` 是 zlib 保留改主意
+  // 的值，把 `-1` 归一成 `6` 就等于把那个主意抄进我们的键里，它哪天变了我们会跟着
+  // 发错。所以这里**不**断言 `b6 == body_of(ref)`：那是 zlib 的等价关系，不是本库
+  // 的契约。（本机 zlib 1.3 上两者逐字节相同，这条注释就是那个读数。）
+  check(http_compress::clamp_compress_level(-100) == -1,
+        "① 档位下界：-100 夹到 -1");
+  check(http_compress::clamp_compress_level(100) == 9, "① 档位上界：100 夹到 9");
+  check(http_compress::clamp_compress_level(6) == 6, "① 区间内的档位原样通过");
+  check(http_compress::clamp_compress_level(-1) == -1,
+        "① -1 是合法取值，不是“越界”");
+
+  const std::string three[3] = {b1, b6, b9};
+  const int three_lv[3] = {1, 6, 9};
+  for (int i = 0; i < 3; ++i) {
+    const http_compress_result dec = http_compress::decompress(
+        three[i].data(), three[i].size());
+    check(dec.success, "① " + std::to_string(three_lv[i]) + " 档的产物必须解得开");
+    check(body_of(dec) == plain,
+          "① " + std::to_string(three_lv[i]) + " 档解回来必须逐字节等于原文");
+  }
+
+  // ---- ② 服务器层 ----
+  uvcpp_web_app app;
+  app.set_port(0);
+  app.set_log_level(log_level::WARN);
+  // 挂载点关掉静态层 LRU（同 `test_compress_variant` 的理由）：每次请求都重新读盘，
+  // 量到的命中只可能来自压缩变体表本身。
+  uvcpp_web_static_options nolru;
+  nolru.cache_max_entries = 0;
+  app.serve_static("/lvl", k_root, nolru);
+
+  if (app.start_background() != 0) {
+    check(false, "档位：服务启动失败");
+    return;
+  }
+  const int port = app.bound_port();
+  check(port > 0, "档位：端口有效");
+
+  const auto fetch = [port](const std::string& path) {
+    raw_result rr = raw_exchange(
+        port,
+        "GET " + path +
+            " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+            "Accept-Encoding: gzip\r\n\r\n",
+        3000);
+    return rr.ok ? rr.raw : std::string();
+  };
+
+  const std::string base = fetch("/lvl/lvl_level.txt");  // 默认档：miss + 存
+  app.http_server()->set_compress_level(1);
+  const std::string one = fetch("/lvl/lvl_level.txt");   // 1 档：miss + 存
+  const std::string one2 = fetch("/lvl/lvl_level.txt");  // 1 档：命中
+  app.http_server()->set_compress_level(9);
+  const std::string nine = fetch("/lvl/lvl_level.txt");  // 9 档：miss + 存
+  app.http_server()->set_compress_level(1);
+  const std::string one3 = fetch("/lvl/lvl_level.txt");  // 1 档：命中（那一条还在）
+
+  app.stop();
+  app.join();
+
+  // 计数只能在 App 停干净之后读（同 `test_compress_variant` 的理由）。
+  const uvcpp_http_server::compress_variant_stat s =
+      app.http_server()->compress_variant_stats();
+  std::cout << "[static] compress_level: hits=" << s.hits
+            << " misses=" << s.misses << " stored=" << s.stored
+            << " entries=" << s.entries << " bytes=" << s.bytes
+            << " | base=" << raw_body(base).size()
+            << " lv1=" << raw_body(one).size()
+            << " lv9=" << raw_body(nine).size() << std::endl;
+
+  check(!base.empty() && !one.empty() && !one2.empty() && !nine.empty() &&
+            !one3.empty(),
+        "② 五发请求都要有响应");
+  check_eq(raw_header(base, "content-encoding"), "gzip",
+           "② 前置：确实走了 gzip（不是“压根没压所以五发字节都一样”）");
+  check_eq_i(static_cast<long long>(raw_body(base).size()),
+             std::stoll(raw_header(base, "content-length")),
+             "② 前置：报的长度必须真的读得满");
+
+  // 这三条是主判据。
+  check(raw_body(one) != raw_body(base),
+        "② 换到 1 档之后必须重新压：字节不许等于默认档那份"
+        "（档位整个没生效就会红在这里）");
+  check(raw_body(nine) != raw_body(one),
+        "② 换到 9 档之后必须重新压：字节不许等于 1 档那份"
+        "（档位没进缓存键就会红在这里 —— 9 档那发会命中 1 档那条）");
+  check(raw_body(one3) == raw_body(one),
+        "② 换回 1 档：表里那条 1 档条目还在，字节与第一次逐字相同"
+        "（只记“最后一次生效的档位”的实现在这里露）");
+  check(raw_body(one2) == raw_body(one),
+        "② 同档重复请求：命中，字节与上一次逐字相同");
+
+  // 四发**字节两两不同**，但解出来是同一份原文 —— 这正是上面说的"每一层看着都对"：
+  // 谁要是按"解压结果相同"来判断档位有没有生效，这四发全部相同。
+  for (size_t i = 0; i < 4; ++i) {
+    const std::string* rr4[4] = {&base, &one, &nine, &one2};
+    const http_compress_result dec = http_compress::decompress(
+        raw_body(*rr4[i]).data(), raw_body(*rr4[i]).size());
+    check(dec.success && body_of(dec) == plain,
+          "② 第 " + std::to_string(i) + " 发解回来必须逐字节等于原文（档位只改字节，"
+          "不改内容）");
+  }
+  check(raw_body(nine).size() < raw_body(one).size(),
+        "② 9 档的线上字节数必须小于 1 档（同一份原文、同一段语料）");
+
+  // 计数钉死：三档各一次未命中 + 各存一条；两次同档重复请求命中。
+  check_eq_i(static_cast<long long>(s.misses), 3, "② 三次换档都是未命中");
+  check_eq_i(static_cast<long long>(s.stored), 3, "② 三档各存一条");
+  check_eq_i(static_cast<long long>(s.hits), 2, "② 两次同档重复请求 = 2 次命中");
+  check_eq_i(static_cast<long long>(s.entries), 3,
+             "② 表里三条 —— 三档**共存**，这就是“档位进键”的形状");
+  // 两边来源不同：左边是表里那些句柄长度**求和**出来的，右边是**线上**实测的
+  // `raw_body().size()` 三发之和。度量错对象（拿源长度 / 拿 `uvcpp_buf::size()`）
+  // 或漏掉档位那个字符（两条键并成一条 ⇒ 少一条）都会红。
+  check_eq_i(static_cast<long long>(s.bytes),
+             static_cast<long long>(raw_body(base).size() +
+                                    raw_body(one).size() +
+                                    raw_body(nine).size()),
+             "② 表内字节总量 == 三档线上长度之和");
 }
 
 // ---- 6b. 字节总量必须**随淘汰**降（#17 第 ④ 步那条静默腿）----
@@ -2082,6 +2281,7 @@ int main() {
   // zlib 关着时它们不存在 —— 守卫与定义那边是同一对，见上面那一大段说明。
 #if UVCPP_ZLIB_ENABLE
   test_compress_variant();
+  test_compress_level();
   test_variant_byte_account_on_evict();
   test_variant_byte_cap_on_evict();
 #endif  // UVCPP_ZLIB_ENABLE

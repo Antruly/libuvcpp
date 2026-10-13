@@ -201,14 +201,19 @@ namespace {
 // 线程局部而不是全局：压缩跑在各条循环线程上，一份共享内核就得加锁，把省下来
 // 的有还回去。代价是调用过压缩的线程各常驻一份内核 —— 它只在真被用到时才分配。
 //
-// `deflateReset()` 换不了窗口参数（gzip 是 31、zlib 是 15），所以记着上一回是
-// 哪一种；换档时老老实实 end 掉再 init 一次。
+// `deflateReset()` 换不了任何**创建内核时定下的**参数。这一类参数今天有两个：
+// 窗口（gzip 是 31、zlib 是 15）与档位。所以槽里要记着上一回是哪一组，两者
+// 有一个对不上就老老实实 end 掉再 init 一次 —— 只比窗口的话，从 6 档换到 1 档
+// 会**静默地**继续用 6 档的内核（`deflateReset()` 不会把它调低），产出的字节
+// 与记录的档位不符，而变体缓存是**按档位分键**的：于是 1 档那个键下面存着的
+// 是 6 档的字节，一路错到底且每一层看着都对。
 struct deflate_slot {
   z_stream strm;
   bool     inited;
   int      window_bits;
+  int      level;
 
-  deflate_slot() : inited(false), window_bits(0) {
+  deflate_slot() : inited(false), window_bits(0), level(0) {
     std::memset(&strm, 0, sizeof(strm));
   }
   ~deflate_slot() {
@@ -223,8 +228,20 @@ deflate_slot& deflate_slot_for_this_thread() {
 
 }  // namespace
 
+int http_compress::clamp_compress_level(int level) {
+  if (level < k_compress_level_min) return k_compress_level_min;
+  if (level > k_compress_level_max) return k_compress_level_max;
+  return level;
+}
+
 http_compress_result http_compress::compress(const char* data, size_t len,
                                                http_compress_method method) {
+  return compress(data, len, method, k_compress_level_default);
+}
+
+http_compress_result http_compress::compress(const char* data, size_t len,
+                                               http_compress_method method,
+                                               int level) {
   http_compress_result result;
   result.method = method;
   if (!data || len == 0) { result.success = true; return result; }
@@ -236,9 +253,13 @@ http_compress_result http_compress::compress(const char* data, size_t len,
     default: result.success = false; return result;
   }
 
+  // 先夹紧再进内核：`deflateInit2` 对越界档位返回 `Z_STREAM_ERROR`，而调用方
+  // 没有理由为"档位写大了"去处理一个失败 —— 见头文件里那条。
+  const int lv = clamp_compress_level(level);
+
   deflate_slot& slot = deflate_slot_for_this_thread();
   int rv;
-  if (slot.inited && slot.window_bits == window_bits) {
+  if (slot.inited && slot.window_bits == window_bits && slot.level == lv) {
     rv = deflateReset(&slot.strm);
   } else {
     if (slot.inited) {
@@ -246,11 +267,12 @@ http_compress_result http_compress::compress(const char* data, size_t len,
       slot.inited = false;
     }
     std::memset(&slot.strm, 0, sizeof(slot.strm));
-    rv = deflateInit2(&slot.strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+    rv = deflateInit2(&slot.strm, lv, Z_DEFLATED,
                       window_bits, 8, Z_DEFAULT_STRATEGY);
     if (rv == Z_OK) {
       slot.inited = true;
       slot.window_bits = window_bits;
+      slot.level = lv;
     }
   }
   if (rv != Z_OK) {
