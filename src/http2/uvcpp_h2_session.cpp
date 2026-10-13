@@ -899,7 +899,7 @@ uint32_t uvcpp_h2_session::goaway_code() const { return impl_->goaway_code; }
 
 bool uvcpp_h2_session::in_nghttp2() const { return impl_->in_nghttp2; }
 
-int uvcpp_h2_session::drain(std::string& out) {
+int uvcpp_h2_session::drain(std::string& out, size_t max_bytes) {
   if (!impl_->session) return 0;
 
   // 冲出去的帧会**同步**回调回来（`session_after_frame_sent1` 撞上 RST_STREAM
@@ -918,6 +918,10 @@ int uvcpp_h2_session::drain(std::string& out) {
     if (n < 0) return static_cast<int>(n);
     if (n == 0) return 0;
     out.append(reinterpret_cast<const char*>(data), static_cast<size_t>(n));
+    // 断点只看**已经攒够没有**，不试着切帧：`mem_send` 一次整帧，切了就
+    // 得自己拼回来，而"剩下的留在 nghttp2 里"本来就是合法的状态。
+    // 因此一批最多超出 `max_bytes` 一帧（≤ `max_frame_size`）。
+    if (max_bytes != 0 && out.size() >= max_bytes) return 0;
   }
 }
 

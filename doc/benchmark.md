@@ -1275,6 +1275,134 @@ D 最低，但**同一臂内部的散度（±8%）比臂间差还大**（C 的�
 ---
 
 
+### 4.14 h2 每批最多吐 64 KiB：`static-h2` 的 2.7 GiB 是从「批次大小」里来的（**第九套装置**）
+
+#### 机制：一批有多大，由**对端通告的窗口**决定，不由本库决定
+
+`uvcpp_h2_connection::flush()` 最早是「把 nghttp2 里所有就绪的帧一次榨干」，然后整块交给
+`uvcpp_tcp_client::write()`。榨多少是 `nghttp2_session_mem_send2()` 说了算，而它的出站
+字节量上限是**对端通告的窗口**：`h2load` 的 `-w`（流窗口）与 `-W`（连接窗口）默认都是
+`30`，也就是 2^30−1 ≈ 1 GiB。
+
+于是平台那一格（1024 连接 / `-m 32`）下，服务端会把一条连接上**所有**就绪的响应体攒成
+一批推出去。一批 = 32 条流 × 约 16.5 KiB ≈ **500 KiB**，而它同时存在于三个地方：
+
+1. `session_->drain(out_)` 攒出来的那一批明文（`out_.reserve` 出来的 `std::string`）；
+2. `flush()` 里 `make_shared<std::string>` + `swap` 之后挂在 `pending` / `write_buf_`
+   上的同一批，一直活到 `on_write_done()`；
+3. `SSL_write` 把它拷进写 BIO 的 `BUF_MEM` —— 链路是
+   `ssl3_write_bytes` → `tls_retry_write_records` → `BIO_write` → `mem_write` →
+   `BUF_MEM_grow_clean` → `CRYPTO_clear_realloc`。
+
+第 3 条是常驻的那一条：**`BUF_MEM_grow_clean` 只增不减**，一条连接历史上最大的一批
+就是它此后一直占着的容量。1024 条连接 × 约 500 KiB × 2（明文 + 密文）就是量级。
+
+#### 判据一：峰值时刻的活堆归因（抽样，只用于排序）
+
+压测第 25 s（`h2load` 仍在跑）给服务端发 SIGTERM，预载的 `libjemdump.so` 在信号处理器里
+调 `mallctl("prof.dump")` 再 `_exit(0)` —— 于是 dump 落在**峰值**上。采样率
+`lg_prof_sample:19`（512 KiB），`addr2line` 按 `/proc/<pid>/maps` 的模块基址符号化。
+
+改动前，活堆 **816.8 MiB**，排下来只有两条：
+
+| 栈 | 字节 | 占比 |
+|---|---|---|
+| `BUF_MEM_grow_clean` ← `mem_write` ← `BIO_write` ← `SSL_write` | 470.0 MiB | 58% |
+| `uvcpp_h2_connection::flush()` 里的那一批（`out_.reserve`） | 344.3 MiB | 42% |
+| 其余全部（合计） | < 1 MiB | <1% |
+
+**这不是泄漏。** 压测停下 5 s 之后再 dump 一次，活堆只剩约 18 MB —— 连接关完就没了。
+RSS 不回落是分配器的保留页（glibc arena / jemalloc `MADV_FREE` 衰减），
+按轮次看 RSS 单调上涨（1691.9 → 2801.1 → 3425.0 MiB）是**分配器高水位棘轮**，不是活对象。
+
+旁证（窗口消融）：把 `h2load` 的窗口降到 `-w 16 -W 16`（64 KiB），同一形状的
+VmHWM 从 2807.9 MiB 掉到 586.4 MiB，而 `-w 20 -W 20`（1 MiB）仍是 2908.3 MiB ——
+自变量确实是「一批多大」，不是「请求多大」。
+
+#### 判据二：修完之后的精确账（`mallctl`，无抽样误差）
+
+改法只有一处：`uvcpp_h2_session::drain(std::string& out, size_t max_bytes = 0)` 多一个
+上限，`uvcpp_h2_connection::flush()` 传 `k_max_drain_batch = 64 KiB`。断点**只判「攒够
+没有」，不切帧**：`mem_send` 一次给一整帧，而「没榨完的留在 nghttp2 自己的出站队列里」
+本来就是合法状态（下一次 `drain()` 接着吐）。所以一批最多超出上限**一帧**。
+
+同一形状（c1024 / `-m 32`）、同一时刻（t=25 s）、同一条 30 s 压测，读分配器自己的账：
+
+| 指标 | 改动前 | 本版 | 变化 |
+|---|---|---|---|
+| `Allocated`（活堆） | 1472.8 MiB | 382.0 MiB | **−74.1%** |
+| `active` | 1551.0 MiB | 451.6 MiB | −70.9% |
+| `metadata` | 30.9 MiB | 26.9 MiB | −13.0% |
+| `resident` | 2206.4 MiB | 634.4 MiB | −71.3% |
+| `mapped` | 2266.5 MiB | 698.4 MiB | −69.2% |
+| `retained`（脏页） | 902.5 MiB | 319.6 MiB | −64.6% |
+| `VmRSS`（同一刻） | 2054.9 MiB | 583.5 MiB | −71.6% |
+
+另一套口径（只用内核的 `VmHWM`，不预载 jemalloc；每形状先跑一轮热机丢掉）：
+
+| 形状 | 改动前 HWM | 本版 HWM | 改动前 rps | 本版 rps |
+|---|---|---|---|---|
+| A `static` c1024 `-m 32`（平台形状） | 2890.3 MiB | **724.1 MiB** | 63,366 | 71,158 |
+| B `static` c1024 `-m 1` | 492.6 MiB | 436.1 MiB | 42,896 | 47,661 |
+| C `static` c256 `-m 32` | 766.0 MiB | **215.6 MiB** | 63,584 | 69,029 |
+| D 非静态 c1024 `-m 32`（地板） | 144.2 MiB | 145.1 MiB | 582,836 | 620,825 |
+
+D 那一行是**对照臂**：它不经过静态处理器，两臂的 HWM 只差 0.6%，而 rps 也有 +6.5% ——
+也就是说四个形状里普遍存在一个「后跑的那一臂更快」的机器漂移，rps 的涨幅不能全部记在
+这一刀头上。**内存那条线不受影响**：A/C 掉的是 4 倍与 3.6 倍，D 一格没动。
+
+#### 判据三：CPU 上不花钱（配对 A/B）
+
+饱和档的 rps 量的是「谁先撞墙」，跨轮不可比；同一臂连着跑三遍，臂内极差就有 9%，
+足以把改动的效果整个盖掉。所以改成**交替**起服务（改动前 / 本版 轮流，各 3 轮 × 3 次读数），
+只看**同一轮里两臂的差**：
+
+| 轮 | 改动前 µs/请求 | 本版 µs/请求 | Δ |
+|---|---|---|---|
+| 1 | 118.16 | 115.60 | −2.56 |
+| 2 | 97.67 | 93.47 | −4.20 |
+| 3 | 93.82 | 92.98 | −0.84 |
+
+**配对差中位 −2.24 µs/请求**（口径：`/proc/<pid>/stat` 的 (utime+stime) ÷ 该轮 2xx 数）。
+三对里本版全部更省 —— 封顶没有代价，方向上还略好（少一次大块 `memcpy` 与少一轮分配器
+增长）。
+
+#### 剩下的那一块，以及为什么不动它
+
+封顶之后写 BIO 那一栈**仍然是剖析里最大的单条**（约占采样总量的 60%），只是绝对值掉了
+一个数量级：现在每连接的发送缓冲封在 64 KiB，而残余的每连接约 373 KiB 里，大头是
+**每连接固定缓冲**（TLS 16 KiB 读 + 16 KiB 写 + nghttp2 出站 buf，约 56 KiB/连接，
+见剖析里 `tls_setup_read_buffer` / `tls_setup_write_buffer` / `nghttp2_bufs_init3`
+三条各占约 4.5 MiB 缩放值）与分配器保留（`resident − allocated` = 252 MiB）。
+不是某一次拷贝。
+
+**没有**再做「写 BIO 排空后换一个 `BIO_s_mem()`」：那最多省 64 KiB × 1024 ≈ 64 MiB
+（HWM 的 ≤9%），代价是给 TLS 写路径加一条新的失败模式。按「只动占比最大的那块」的
+口径，这块已经被上一刀吃掉了。
+
+#### 一句关于这把尺子的话
+
+jemalloc 采样剖析的**绝对量不能当尺子**：同一份 dump 按它自己存的缩放值求和，
+比同一时刻的 `Allocated` 低 3.5×（`lg_prof_sample:16`）到 9.7×（`:19`），而两个
+采样率之间又彼此对不上。所以本页一律**用剖析看排序、用 `mallctl` 看总量**；
+两张表不要混读。
+
+#### 复现
+
+```bash
+# 精确账（峰值时刻 SIGTERM → malloc_stats_print + prof.dump）
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$JEM/libjemdump.so \
+  MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:$JEM/peak \
+  JEMSTATS=$JEM/stats.txt UV_THREADPOOL_SIZE=64 <server> &
+h2load -i static-h2-uris.txt -H 'Accept-Encoding: br;q=1, gzip;q=0.8' \
+  -c 1024 -m 32 -t 8 -D 30s &
+sleep 25 && kill -TERM <pid>
+```
+
+量具在仓外（`/tmp/arena-run/phase7/`：`jempeak.sh` / `jemsym.py` / `memshape.sh` /
+`cpuab2.sh`），**不随仓库发布**；这一节记的是读数与口径，不是脚本。
+
+
 ## 5. 结果三：稳定性
 
 10 分钟持续压测（动态路由 + 连接 churn + WebSocket 混合）：

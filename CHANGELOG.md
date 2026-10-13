@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.40-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.41-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -1941,6 +1941,64 @@
   58 次分配：那条腿走的是 `src/web/uvcpp_static_server.cpp`（h3 腿），本版只动了
   `src/webapp/uvcpp_web_static.cpp`，而那个用例连 `webapp/uvcpp_web_static.h` 都没
   include ⇒ 不是本次引入的。
+
+- **h2 每批最多吐 64 KiB —— `static-h2` 那 2.7 GiB 常驻是从"批次大小"里来的**（`1.6.41-dev`）。
+  `uvcpp_h2_connection::flush()` 原来是"把 nghttp2 里所有就绪的帧一次榨干"再交给
+  `uvcpp_tcp_client::write()`。一批有多大，取决的不是本库，而是**对端通告的窗口** ——
+  而 `h2load` 的 `-w`/`-W` 默认都是 2^30−1（约 1 GiB）。于是平台那一格（1024 连接 /
+  `-m 32`）下，服务端会把一条连接上所有就绪的响应体攒成**一批约 500 KiB** 一次推出去：
+  一批 = 32 条流 × 约 16.5 KiB。
+
+  这批字节在三个地方各留一份，而且**每一份都活到连接结束**：`SSL_write` 把它们拷进写
+  BIO 的 `BUF_MEM`（`ssl3_write_bytes` → `tls_retry_write_records` → `BIO_write` →
+  `mem_write` → `BUF_MEM_grow_clean` → `CRYPTO_clear_realloc`），而
+  `BUF_MEM_grow_clean` **只增不减** —— 一条连接历史上最大的一批就是它容量的下限；
+  同一批还作为 `pending` / `write_buf_` 活在 `flush()` 与 `on_write_done()` 之间。
+
+  归因读数（jemalloc 5.3 在**峰值时刻** dump：压测第 25 s，`h2load` 仍在跑，
+  `lg_prof_sample:19`）：活堆 816.8 MiB，其中 **470.0 MiB（58%）** 是上面那条写 BIO 的
+  `BUF_MEM_grow_clean`，**344.3 MiB（42%）** 是 `flush()` 里 `out_.reserve` 出来的那一批，
+  其余全部加起来不到 1 MiB。**不是泄漏**：压测停下 5 s 后再 dump，活堆只剩约 18 MB；
+  RSS 不回落是分配器的保留页。
+
+  修法只有一处：`uvcpp_h2_session::drain(std::string& out, size_t max_bytes = 0)` 多一个
+  上限，`uvcpp_h2_connection::flush()` 传 `k_max_drain_batch = 64 KiB`。断点**只判"攒够
+  没有"，不去切帧** —— `mem_send` 一次给一整帧，切了得自己拼回来，而"没榨完的留在
+  nghttp2 自己的出站队列里"本来就是合法状态（下一次 `drain()` 接着吐，`on_write_done()`
+  会再冲一次），所以一批最多超出上限**一帧**。上限做在会话里而不是调用方：只有那里知道
+  "一批"在哪断，而断点必须落在帧边界上。**它也不是"每连接每请求的上限"** —— 一个发送
+  缓冲封 64 KiB，与 `H3_MAX_WRITE_VECS = 16` 是同一种量。
+
+  判据用**分配器自己的精确账**（`mallctl` 的 `stats.allocated` / `active` / `resident`，
+  没有抽样误差；同一形状 c1024/`-m 32`、同一时刻 t=25 s、同一条 30 s 压测）：
+
+  | 指标 | 改动前（`1.6.40-dev`） | 本版 | 变化 |
+  |---|---|---|---|
+  | `Allocated`（活堆） | 1472.8 MiB | 382.0 MiB | **−74.1%** |
+  | `active` | 1551.0 MiB | 451.6 MiB | −70.9% |
+  | `resident` | 2206.4 MiB | 634.4 MiB | −71.3% |
+  | `mapped` | 2266.5 MiB | 698.4 MiB | −69.2% |
+  | `retained`（脏页） | 902.5 MiB | 319.6 MiB | −64.6% |
+
+  另一台装置（只看内核的 `VmHWM`，不预载 jemalloc）同一批形状：平台那一格
+  **2890.3 → 724.1 MiB**（rps 63,366 → 71,158），256 连接档 **766.0 → 215.6 MiB**
+  （63,584 → 69,029），同连接数但不流水线（`-m 1`）492.6 → 436.1 MiB（42,896 → 47,661）。
+  不经过静态处理器的对照档 144.2 → 145.1 MiB —— 这一刀只对"多路复用攒批"这个形状生效。
+
+  CPU 上它**不花钱**：交替起服务（改动前 / 本版 轮流）各取 9 个读数，用
+  `/proc/<pid>/stat` 的 (utime+stime) ÷ 2xx，**配对差中位 −2.24 µs/请求**
+  （三对 −2.56 / −4.20 / −0.84）。单臂连着跑会把机器漂移读成效果（同一臂内部极差 9%），
+  所以这一条只认配对差、不认两次中位数之差。
+
+  **留一句老实话**：封顶之后写 BIO 那一栈仍是剖析里最大的单条（约占采样总量的 60%），
+  只是绝对值掉了一个数量级；残余的每连接约 373 KiB 里，大头是**每连接固定缓冲**
+  （TLS 16 KiB 读 + 16 KiB 写 + nghttp2 出站 buf，约 56 KiB/连接）与分配器保留，
+  不是某一次拷贝。**没有**再做"写 BIO 排空后换一个 `BIO_s_mem()`"：那最多省
+  64 KiB × 1024 ≈ 64 MiB（HWM 的 ≤9%），代价是给 TLS 写路径加一条新的失败模式，不值。
+
+  采样剖析的绝对量**不能当尺子**：同一份 dump 按 jemalloc 自己存的缩放值求和，比
+  `Allocated` 低 3.5×（`lg_prof_sample:16`）到 9.7×（`:19`）—— 它只用来看**排序**，
+  总量一律取 `mallctl`。
 
 ### JSON
 

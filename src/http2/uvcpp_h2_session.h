@@ -252,14 +252,21 @@ class UVCPP_API uvcpp_h2_session {
   int recv(const char* data, size_t len);
 
   /**
-   * @brief 把当前所有待发字节榨干到 @p out。
+   * @brief 把待发字节榨到 @p out，最多 @p max_bytes 字节（0 = 不限）。
    *
    * 内部循环到 `mem_send` 返回 0 为止。合并成**一次** `write()` 是本层的硬
    * 契约：`uvcpp_tcp_client::write` 一次只允许一个异步写在飞，TLS 层还再叠一层。
+   * `max_bytes` 不改这条契约 —— 它只让"这一次"短一点，没榨完的帧留在 nghttp2
+   * 自己的出站队列里，等下一次 `drain()`（`on_write_done()` 会再冲一次）。
+   * 没有它，一批的大小由**对端通告的窗口**决定（`h2load` 默认 `-w`/`-W` 都是
+   * 2^30−1），服务端于是把一条连接上所有就绪的响应体攒成一批全推出去 ——
+   * 实测那一批约 500 KiB/连接，同一形状下 1024 连接常驻 ~800 MiB 活堆。
+   * 为什么不把上限做进调用方：只有这里知道"一批"在哪断，断点必须落在帧边界上
+   * （`append` 一次一整帧）。
    *
    * @return 0 成功；负值为 nghttp2 错误码（同样按致命处理）。
    */
-  int drain(std::string& out);
+  int drain(std::string& out, size_t max_bytes = 0);
 
   /**
    * @brief 当前是否正跑在 nghttp2 的调用栈里（`recv()` 的 `mem_recv` 或

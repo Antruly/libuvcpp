@@ -15,7 +15,7 @@
 ### 1.1 会话层（`uvcpp_h2_session`）
 
 建在 `nghttp2` 上，**不含任何 socket、不含任何 libuv 调用** —— 收发就是一对
-字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:252-252`、`:262-262`）。
+字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:252-252`、`:269-269`）。
 所以这一层既不依赖 TLS 也不依赖事件循环，用例可以拿两个对象面对面地喂字节
 （`tests/functional/h2_session_func.cpp`）。
 
@@ -39,7 +39,7 @@
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:1096-1102`）。
+  （`src/http2/uvcpp_h2_session.cpp:1100-1106`）。
 - **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
   错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
@@ -133,7 +133,7 @@
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**（两个枚举值上也标了这一点）。
 - **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:182-194`）：
   三类里的"`want_read`/`want_write` 双双为假"那一类**不可达** —— 这两个是公开成员
-  （`src/http2/uvcpp_h2_session.h:426-426`、`:428-428`），但本层没有任何一处拿它们判定致命。
+  （`src/http2/uvcpp_h2_session.h:433-433`、`:435-435`），但本层没有任何一处拿它们判定致命。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
@@ -207,7 +207,7 @@
 | 缺陷 | 症状 | 修法 |
 |---|---|---|
 | 服务端停机**不道别** | 停机时直接关连接，对端只看到连接断了，分不清"服务端在收摊"和"网络挂了" | 新增 `uvcpp_http_server::begin_h2_goaway()` 与 `uvcpp_h2_connection::begin_goaway()`；webapp 停机的第 0 拍只发 GOAWAY，**隔一拍**才关连接 —— 挤在同一拍里对端拿到的仍然是"断了" |
-| `on_read` 里结算出来的 `done` **没人跑** | 对端一个 `RST_STREAM` 打过来，会话会把那条流还没上线的块整体作废并塞进 `completed` —— 而一个字节都不用回，`flush()` 起不了写，`on_write_done` 就不来，那批 `done` 永远躺在队列里；等它的人（框架流式响应的 `pending_bytes_`）永远等不到 ⇒ 那条流的上下文永远不释放，停机时宽限期白等满 | `on_read()` 收尾补一次 `run_completed()`（`src/http2/uvcpp_h2_connection.cpp:119-130`） |
+| `on_read` 里结算出来的 `done` **没人跑** | 对端一个 `RST_STREAM` 打过来，会话会把那条流还没上线的块整体作废并塞进 `completed` —— 而一个字节都不用回，`flush()` 起不了写，`on_write_done` 就不来，那批 `done` 永远躺在队列里；等它的人（框架流式响应的 `pending_bytes_`）永远等不到 ⇒ 那条流的上下文永远不释放，停机时宽限期白等满 | `on_read()` 收尾补一次 `run_completed()`（`src/http2/uvcpp_h2_connection.cpp:157-168`） |
 | 拆连接时**丢掉**在飞的 `done` | 同一条路的另一半：连接被整个丢掉（对端 `close()`、不发 RST）时 `remove_ctx` 直接 `delete` 掉 h2 层，队列里那些块一声不吭 —— 与 h1 那边"队列里的写一律以 `UV_ECANCELED` 唤醒"的既定契约不一致 | 新增 `take_cancelled_dones()`：会话层 `cancel_pending_out()` 把待发块整体作废并**取走**，由 `remove_ctx` 在 `contexts_.erase(it)` **之后**才逐个跑 —— 跑早了 `write_stream()` 会掉进 h1 分支，把收尾时补的那笔写挂到一条根本不是 h1 的连接上（`stream_id` 被静默丢掉） |
 | `run_completed()` 里两处 **use-after-free** | 令牌已死那一支还去写 `in_dones_ = false`；`on_write_done` 里 `flush()` 可能同步走到 `finish_close()` → `c->close(cb)` → `notify_disconnect()`，而持有者的契约正是"在这里销毁本对象" ⇒ 之后每一句都在往释放过的内存上写 | 令牌在每一句之前重新问一次；令牌真死了**连收尾都不做**（要收尾的对象已经不存在，没什么可收的） |
 | 服务端析构**漏掉** h2 层 | `~uvcpp_http_server()` 只 `delete parser`，而 h2 层是连接上下文 `new` 出来的、没有任何别的表登记它 ⇒ 每条还活着的 h2 连接漏一个 nghttp2 会话和它的缓冲区 | 析构里一并 `delete`。走得到这里的只有"客户端先于服务端被释放"那条路：`close_all_clients()` 在句柄已关完时走 `release_client()`，只 `delete`、一个回调都不发 ⇒ `remove_ctx` 从没跑过 |
@@ -314,7 +314,7 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1518-1518`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1522-1522`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关

@@ -15,6 +15,44 @@
 
 namespace uvcpp {
 
+namespace {
+
+/**
+ * @brief 一次 `flush()` 最多从 nghttp2 榨出多少字节（见 `drain()` 的说明）。
+ *
+ * **这是一个内存上限，不是吞吐旋钮。** 一批的字节在这一刻有**三份同时活着**：
+ * `out_`/`pending` 那份明文（在飞的 `uv_write` 持有）、OpenSSL 写 BIO 里那份
+ * 密文（`mem_write` 拷进去的），以及 `tls_out_` 抽出来交给 libuv 的那份。
+ * 三份都随"一批"线性增长，而**一批的大小在没有上限时由对端通告的窗口决定**
+ * —— `h2load` 默认 `-w`/`-W` 都是 2^30−1，于是服务端把一条连接上所有就绪的
+ * 响应体（32 路 × ~16.5 KiB ≈ 500 KiB）一次全推出去。
+ *
+ * 实测（`/tmp/arena-run/phase7/jempeak.sh`，1024 连接 × `-m 32`，jemalloc 抽样
+ * 活堆在压测峰值那一刻 dump）：活堆 816.8 MiB，其中
+ *   * 470.0 MiB（58%）`SSL_write` → `BIO_write` → `BUF_MEM_grow_clean` ——
+ *     写 BIO 的 `BUF_MEM`。`BUF_MEM_grow_clean` **只增不减**，所以每条连接
+ *     永久留下"它历史上最大那一批"的容量；
+ *   * 344.3 MiB（42%）`uvcpp_h2_connection::flush()` 里 `out_.reserve` 出来的
+ *     串 —— 就是那一批明文本身，在飞的时候由 `write_buf_` 的共享视图持有；
+ *   * 其余全部加起来 < 1 MiB。
+ * 也就是说这 800 多 MiB 就是"~1.5 × 一批 × 连接数"。把一批压到 64 KiB，
+ * 同一形状下这两项各自掉到 1/8。旁证：只把客户端的窗口收到 64 KiB
+ * （`h2load -w 16 -W 16`）峰值就从 2808 MiB 掉到 586 MiB —— 那正说明这一块
+ * 内存是"我们按对端窗口囤的"，不是泄漏（压测停 15 s、连接全关之后 jemalloc
+ * 的活堆只剩 ~18 MiB）。
+ *
+ * 为什么是 64 KiB 而不是更小：一条连接的写路径是**串行**的（`writing_` 一次
+ * 只放一个写在飞），一批小到几十 KiB 就意味着把一个 500 KiB 的响应窗拆成十
+ * 几次 `SSL_write` + `uv_write` 往返，换来的常驻已经只剩几十 MiB。64 KiB 是
+ * "常驻掉到噪声级"与"写次数不显著变多"之间的拐点。
+ *
+ * 这不是新花样：h3 那条腿早就有同形状的上限（`H3_MAX_WRITE_VECS`，见
+ * `src/http3/uvcpp_h3_common.h`），语义也一样 —— "吐不完的下一轮接着吐"。
+ */
+const size_t k_max_drain_batch = 64u * 1024u;
+
+}  // namespace
+
 uvcpp_h2_connection::uvcpp_h2_connection(uvcpp_tcp_client* client,
                                          bool              server_side)
     : client_(client), session_(new uvcpp_h2_session(server_side)) {
@@ -177,7 +215,7 @@ int uvcpp_h2_connection::flush() {
   // 连接上（`out_hint_` 归零，回到几何增长，行为只会退化不会错）。
   if (out_hint_ > 0) out_.reserve(out_.size() + out_hint_);
 
-  const int rv = session_->drain(out_);
+  const int rv = session_->drain(out_, k_max_drain_batch);
   if (rv != 0) {
     shutdown();
     return rv;
