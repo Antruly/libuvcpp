@@ -302,7 +302,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 
 | 容器 | 位置 | 触碰频率 |
 |---|---|---|
-| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1706-1706` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
+| `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1725-1725` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | ~~`uvcpp_web_app::inflight_`~~ → `loop_slot::inflight` | `src/webapp/uvcpp_web_app.h:2072`（**已切开**，W4 / 2c） | **每请求** |
 | ~~`uvcpp_web_app::upgraded_`~~ → `loop_slot::upgraded` | `src/webapp/uvcpp_web_app.h:2131`（**已切开**，W4 / 2c） | 每次 WS 升级 |
 | `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:944` | 接受 / 关闭 / 计数 |
@@ -331,7 +331,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 > 落地的是**一个实例、内部按循环切表**：`contexts_` 从一张
 > `std::map<uvcpp_tcp_client*, conn_ctx>` 变成
 > `std::vector<std::map<uvcpp_tcp_client*, conn_ctx> >`
-> （`src/web/uvcpp_http_server.h:1706-1706`），索引 = `uvcpp_tcp_client::loop_index()`；
+> （`src/web/uvcpp_http_server.h:1725-1725`），索引 = `uvcpp_tcp_client::loop_index()`；
 > 取表只有三个入口 —— `ctxs_of(client)`（有连接时）、`ctxs_here()`（没有连接、
 > 靠线程本地的循环号，`src/net/uvcpp_loop_worker.h` 那对
 > `uvcpp_loop_index_of_this_thread()`）、`ctxs_at(i)`；`n == 1` 时
@@ -613,7 +613,7 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 |---|---|---|---|
 | `uvcpp_ws_sessions::sessions_` / `retired_` | `src/web/uvcpp_ws_sessions.h:193-194` | 每次 WS 接管 `push_back`、每次终结搬进 `retired_`、async 回调里 `delete` | `uvcpp_ws_server::shards_`（`src/web/uvcpp_ws_server.h:272`，按连接的循环号分片） |
 | `uvcpp_web_static::Impl` 的 `cache` / `lru` / `bytes` / `hits` / `misses` / `rejected` / `retired` | `src/webapp/uvcpp_web_static.cpp:594-600` 与 `src/webapp/uvcpp_web_static.cpp:621` | 命中改 `lru` 与计数、未命中插入并可能 LRU 淘汰；`retire()` 在 after_work 里 `push_back`（`src/webapp/uvcpp_web_static.cpp:629`）、`drain_retired()` 在 `serve()` 开头 `delete`（`src/webapp/uvcpp_web_static.cpp:635`） | `uvcpp_web_static`，由 `uvcpp_web_app::serve_static()` 造一份（`src/webapp/uvcpp_web_app.cpp:1362-1365`）—— **请求路径上真正活着的那个容器** |
-| `uvcpp_static_server::cache_` / `retired_` | `src/web/uvcpp_static_server.h:310-318` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:519`），读在 `src/web/uvcpp_static_server.cpp:409-413`；`retired_` 由 `drain_retired()` 清扫（`src/web/uvcpp_static_server.cpp:240-255`） | `uvcpp_static_server` 自己 —— **1.6.8 起是 h3 那条腿上的生产路径**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`，h3 上挂静态文件只能用本类），此前只有用例构造它（`tests/functional/web_static_server_func.cpp:199`）|
+| `uvcpp_static_server::cache_` / `retired_` | `src/web/uvcpp_static_server.h:310-318` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:519`），读在 `src/web/uvcpp_static_server.cpp:409-413`；`retired_` 由 `drain_retired()` 清扫（`src/web/uvcpp_static_server.cpp:240-255`） | `uvcpp_static_server` 自己 —— **1.6.8 起是 h3 那条腿上的生产路径**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`，h3 上挂静态文件只能用本类），此前只有用例构造它（`tests/functional/web_static_server_func.cpp:203-203`）|
 
 > **本行已落地（1.6.8-dev）**：`mu_` 一把锁护 `cache_` 与 `retired_` 的**表结构**，
 > 且 `retired_` **按循环分桶** —— `delete` 只能在该循环线程上做，合成一个桶会让
@@ -694,20 +694,20 @@ W4 之后改成了**连接自己那条**（`client->get_loop()`），分片用�
 **这两条是这次重过一遍的产出，之前设计稿与外部复核都没提到它们。**
 
 > **一处例外（2026-09-22 修正）：压缩变体表不属于这一份。** 它早先被列在上面，是错的
-> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1789-1789`）是
+> —— `uvcpp_http_server::compress_variants_`（`src/web/uvcpp_http_server.h:1817-1817`）是
 > **请求期惰性写**的缓存：命中时改 `last_used` / `compress_variant_clock_` 并计数
-> （`src/web/uvcpp_http_server.cpp:2061-2061`），未命中时插入并可能触发 LRU 淘汰
-> （`src/web/uvcpp_http_server.cpp:2114-2114`、`src/web/uvcpp_http_server.cpp:1908-1908`）。
+> （`src/web/uvcpp_http_server.cpp:2077-2077`），未命中时插入并可能触发 LRU 淘汰
+> （`src/web/uvcpp_http_server.cpp:2130-2130`、`src/web/uvcpp_http_server.cpp:1924-1924`）。
 > 多循环下这些写来自**多条循环线程** ⇒ 它和 `compress_variant_clock_` / `_hits_` /
-> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1790-1793`）一起加锁；
+> `_misses_` / `_stored_`（`src/web/uvcpp_http_server.h:1818-1821`）一起加锁；
 > **按循环切不成立** —— 它本来就是跨循环共用的缓存，切了就退回每循环各自 deflate。
 >
-> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1807-1807`）
+> **已落地**：`mutable std::mutex compress_mu_`（`src/web/uvcpp_http_server.h:1835-1835`）
 > 一把**非递归**锁护住那张表与四个计数。加锁点只有三个**外层入口** —— 命中
-> （`src/web/uvcpp_http_server.cpp:2061-2061`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
+> （`src/web/uvcpp_http_server.cpp:2077-2077`）、存入（含淘汰，**同一次临界区**：淘汰那句要读
 > 整张表的字节总量，拆成两次加锁会让别的循环插在中间按一个已不成立的总量做决定）、
 > `compress_variant_stats()`。两个帮手改名成 `..._locked()`
-> （`src/web/uvcpp_http_server.h:1818-1818` / `src/web/uvcpp_http_server.h:1822-1822`），意思就是"调用方已持锁" ——
+> （`src/web/uvcpp_http_server.h:1846-1846` / `src/web/uvcpp_http_server.h:1850-1850`），意思就是"调用方已持锁" ——
 > 淘汰要算字节总量，所以这两个互相调用，同一条非递归锁不能进两次。
 > 临界区里只碰表与计数：命中那条路把共享句柄**拷出锁外**再 `share()`，
 > `finish_headers()` 也在锁外（它改的是响应，不碰表）。
@@ -818,7 +818,7 @@ if (it == ctxs_here().end()) return;   // 两个容器的 end() 相比
 连接所属的那条循环。§4.1.1 己 那条（工作项投错循环）与"不在任何循环线程上"恰好破坏它 ——
 那时比较的是**两个不同容器**的迭代器（标准上是 UB；`std::map` 的 `end()` 是各自表头节点的
 地址，于是"找不到"这条早退**恒不成立**），后面紧跟着的 `it->second` 就解引用了 `end()`。
-⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:2688-2688`
+⇒ 19 处全部改成"表取一次、拿它自己的 `end()` 比"；`src/web/uvcpp_http_server.cpp:2756-2756`
 那处 `ctxs_here()` 是**有意的**（`begin_h2_goaway()` 要的就是本循环那张表），不动。
 
 **（二）`ctxs_at(-1)` 在多循环下直接终止，不再夹回 0 号。** `-1` 不是越界，它的含义是
@@ -974,9 +974,9 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > 这条要写进 `uvcpp_web_app::set_loops()` 的 doc block（理由与出处见 §4.1 的理由更正块）。
 >
 > **停机那一族另有一条硬约束（2026-09-22，外部复核 §1）**：`begin_h2_goaway()` 只翻
-> **本循环**那张表（`src/web/uvcpp_http_server.cpp:2688-2688` 的 `ctxs_here()`），而
+> **本循环**那张表（`src/web/uvcpp_http_server.cpp:2756-2756` 的 `ctxs_here()`），而
 > `ctxs_at(-1)` 在 `contexts_.size() > 1` 且调用者不在任何循环线程上时直接
-> `std::abort()`（`src/web/uvcpp_http_server.cpp:483-488`）⇒ **停机那一族必须"每条
+> `std::abort()`（`src/web/uvcpp_http_server.cpp:491-496`）⇒ **停机那一族必须"每条
 > 循环各跑一次、且每次都在该循环自己的线程上"**。顺着这条往回看，今天的 `stop()`
 > （`src/webapp/uvcpp_web_app.cpp:2261`）在 n>1 下是坏的：非循环线程进来时它走
 > `post(...)`，而 `post()` 的落点是 0 号（§5.2）⇒ 1..n−1 的停机状态机永远不会被推进，

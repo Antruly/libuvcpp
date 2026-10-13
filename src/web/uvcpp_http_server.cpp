@@ -374,6 +374,14 @@ uvcpp_http_server::~uvcpp_http_server() {
     }
     tbl.clear();
   }
+  // 登记簿跟着表一起空掉（"键集 ≡ 各表的键并集"这条不变量在这里也要成立）：
+  // 上面那一轮把表清干净了，簿子留着的话，`ctx_gens_` 就会答出"已经不在任何表里"
+  // 的代次号 —— 正是这个 API 最不该给的答案（`is_connected()` 会对一条早已注销的
+  // 连接报 true）。此刻循环线程都已经停（见上），这一句不是同步，只是维持不变量。
+  {
+    std::lock_guard<std::mutex> lk(ctx_gen_mu_);
+    ctx_gens_.clear();
+  }
 #if UVCPP_HTTP3_ENABLE
   // -------------------------------------------------------------------
   // (C) 0 号那一格：它就是我们此刻所在这条循环（`run()` 在调用方线程上跑），
@@ -1000,6 +1008,7 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
   // 先自增再赋值：0 要留给"不在登记表里"，不然"第 0 条连接"和"没连接"就分不开了。
   ctx.generation = ++next_generation_;
   ctxs_of(client)[client] = ctx;
+  note_ctx_generation(client, ctx.generation);  // 与上一句成对，见它的声明
 
   // 连接级钩子在**登记之后**才跑：钩子的用途就是"给这条连接做簿记"，而簿记
   // 的第一步是拿到它的身份 —— `connection_generation(client)` 得先有效。
@@ -1375,8 +1384,15 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   // Body over the cap: the buffer was truncated, so there is nothing sane to
   // route. Reject and close.
   if (ctx.body_overflow) {
+    // 长度**数一遍再写**：这里从前写的是 23，而 "413 Payload Too Large" 只有 21
+    // 个字符 —— 每走一次这条 413 分支都会从这个字面量后面多读 2 个字节
+    // （ASan：`global-buffer-overflow ... READ of size 23`）。越过去的那 2 个字节
+    // 落在紧挨着的下一个字面量上（rodata 里字面量是挨着排的），所以读了几年也
+    // 没人发现：不越页、不越段，只有 ASan 的全局变量影子内存看得见。
+    // 写成 `sizeof(字面量) - 1` 让编译器去数，字面量改了长度跟着改。
     uvcpp_http_response resp = uvcpp_http_response::make(
-        http_status::PAYLOAD_TOO_LARGE, "413 Payload Too Large", 23);
+        http_status::PAYLOAD_TOO_LARGE, "413 Payload Too Large",
+        sizeof("413 Payload Too Large") - 1);
     resp.set_header("connection", "close");
     ctx.body_buf.clear();
     send_response(client, resp);
@@ -2509,14 +2525,57 @@ void uvcpp_http_server::close_connection(uvcpp_tcp_client* client) {
   client->close();
 }
 
+void uvcpp_http_server::note_ctx_generation(uvcpp_tcp_client* client,
+                                            uint64_t generation) {
+  if (client == nullptr) return;
+  std::lock_guard<std::mutex> lk(ctx_gen_mu_);
+  ctx_gens_[client] = generation;
+}
+
+void uvcpp_http_server::forget_ctx_generation(uvcpp_tcp_client* client) {
+  if (client == nullptr) return;
+  std::lock_guard<std::mutex> lk(ctx_gen_mu_);
+  ctx_gens_.erase(client);
+}
+
 uint64_t uvcpp_http_server::connection_generation(
     uvcpp_tcp_client* client) const {
   if (client == nullptr) return 0;
-  // 这是个 const 成员，走 `ctxs_of()` 的 const 重载（越界兜底是同一份实现）。
-  const std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
-  std::map<uvcpp_tcp_client*, conn_ctx>::const_iterator it = tbl.find(client);
-  if (it == tbl.end()) return 0;
-  return it->second.generation;
+  // **查登记簿，一张按循环切的表都不碰、`client` 指向的内存一个字节都不读。**
+  //
+  // 本 API 的文档用法（见头文件那条的 @code 段）就是"把开始时记下的那个指针、
+  // 过一会儿在异步完成回调里再问一次"——而那时连接**可能已经 delete 掉了**，
+  // 手里这个指针是悬垂的。`contexts_` 对这个问题的两个答法都走不通：
+  //
+  //   * 走 `ctxs_of()`：多循环下它必须先读 `client->loop_index()` 才知道查哪张
+  //     表，而那就是对被释放对象的解引用（单循环下它有一条
+  //     `contexts_.size() == 1` 的快路径，读完不读 —— 所以缺陷只在
+  //     `set_loops(n>1)` 下存在）。实测 1.6.19：
+  //     `tests/functional/web_static_server_func.cpp` 的 `multiloop_concurrency`
+  //     跑完 `set_loops(4)` 之后，正是拿一批已经释放的 `uvcpp_tcp_client*` 来
+  //     问代次号（用例注释："当 key 用、不解引用"）。Linux + ASan **5/5 次**
+  //     报 `heap-buffer-overflow ... READ of size 8`；MinGW 那条 CI 腿上就是
+  //     `***Exception: SegFault`（Windows 的堆把释放掉的页还给系统，读它是访问
+  //     违例；Linux/macOS 上那块内存通常还映射着，所以只有 ASan 看得见）。
+  //   * 逐张表扫一遍（本轮先试过这一版）：那是**跨循环读别人的表**，与那条循环
+  //     自己的 insert/erase 是数据竞争。头文件里 `contexts_` 那条注释写着"一张
+  //     全局表在两条循环上并发 insert/erase 是 UB，不是'慢一点'"——把一张表换成
+  //     四张并不改变这件事。实测同一条用例当场变成
+  //     `heap-use-after-free`：`_Rb_tree::find` ← 这里 ← `on_connection` 回调，
+  //     被读的那个结点是另一条循环的线程刚在 `remove_ctx` 里 erase 掉的。
+  //
+  // 于是另立一张只讲"这地址上现在是哪条连接"的表（`ctx_gens_`）：写入只在连接
+  // **登记**与**摘除**那四处，与 `contexts_` 的增删成对（`note_ctx_generation()` /
+  // `forget_ctx_generation()`），读侧只有本函数与 `is_connected()`，**没有每请求
+  // 的调用者**（派发那条路走 `ctxs_here()` / 手上已有的 `ctx`）。
+  //
+  // 地址被新连接复用时，这里答出的是**新连接**的代次号 —— 与调用方记下的那个
+  // 对不上，正是文档要的语义；一条连接都没有就如实返回 0，此时不该往那个地址
+  // 写任何字节。
+  std::lock_guard<std::mutex> lk(ctx_gen_mu_);
+  std::map<uvcpp_tcp_client*, uint64_t>::const_iterator it =
+      ctx_gens_.find(client);
+  return it == ctx_gens_.end() ? 0 : it->second;
 }
 
 bool uvcpp_http_server::is_connected(uvcpp_tcp_client* client) const {
@@ -2590,7 +2649,15 @@ bool uvcpp_http_server::reply_alive(const uvcpp_http_reply& reply) const {
   }
 #endif
   if (reply.client_ == nullptr) return false;
-  const std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(reply.client_);
+  // **用凭据自己带的循环号选表**，不要去读 `reply.client_` 指向的内存 ——
+  // 凭据存在的全部意义就是"连接已经消失之后还能拿它来问"，那时
+  // `reply.client_` 是悬垂的（`ctxs_of()` 会读 `client->loop_index()`，那是
+  // UAF；单循环下它有快路径不读，所以这也只在 `set_loops(n>1)` 下现形）。
+  // 与上面 h3 那条支路同源：那边也是用 `reply.loop_index_` 选表。
+  //
+  // `ctxs_at()` 的 const 重载对表外的号夹回 0 号，找不到就返回 false ——
+  // 宁可不发，也不往一条可能已经换人的连接上写。
+  const std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_at(reply.loop_index_);
   std::map<uvcpp_tcp_client*, conn_ctx>::const_iterator it =
       tbl.find(reply.client_);
   return it != tbl.end() && it->second.generation == reply.generation_;
@@ -2659,6 +2726,7 @@ void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
     it->second.h2 = nullptr;
 #endif
     tbl.erase(it);
+    forget_ctx_generation(client);  // 与上一句成对，见它的声明
 
     // 放掉复用形态那个写请求（连同它的头部缓冲）。**放在唤醒 `done` 之前**：
     // 那些闭包最自然的动作就是再写一块，而那一刻本表项已经没有了。
@@ -2706,6 +2774,7 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client,
   ctx.parser = nullptr;  // 与 h2 互斥：h2 连接上没有 llhttp
   ctx.generation = ++next_generation_;
   ctxs_of(client)[client] = ctx;
+  note_ctx_generation(client, ctx.generation);  // 与上一句成对，见它的声明
 
   // 与本层 h1 那条路**次序一致**：登记之后才跑连接钩子，钩子里的
   // `connection_generation(client)` 才拿得到身份。
@@ -2776,9 +2845,11 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client,
     // 条目**留着**：延迟应答还要回来读 `is_head` / `accept_encoding`。
 
     if (overflow) {
+      // 长度同 h1 那条 413：`sizeof(字面量) - 1`，别手写（理由见那里的注释）。
       uvcpp_http_response resp =
           uvcpp_http_response::make(http_status::PAYLOAD_TOO_LARGE,
-                                    "413 Payload Too Large", 23);
+                                    "413 Payload Too Large",
+                                    sizeof("413 Payload Too Large") - 1);
       send_h2_response(client, st.stream_id, resp);
       return;
     }
@@ -2832,6 +2903,9 @@ void uvcpp_http_server::switch_to_h2c(uvcpp_tcp_client* client,
   if (it == tbl.end()) return;  // 原始数据钩子里已经把连接关了
   uvcpp_http_parser* parser = it->second.parser;
   tbl.erase(it);
+  // 摘了旧的、下面 `on_tcp_connection_h2()` 立刻登记新的（同一句同步代码里），
+  // 中间没有任何回调能观察到这个空隙 —— 与表这边的次序逐字一致。
+  forget_ctx_generation(client);
   delete parser;
 
   client->read_stop();

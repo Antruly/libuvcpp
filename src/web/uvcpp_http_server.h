@@ -1694,6 +1694,25 @@ class UVCPP_API uvcpp_http_server {
   std::atomic<uint64_t> next_generation_{0};
 
   /**
+   * @brief 代次号的**跨循环登记簿**：`client -> generation`（@ref connection_generation
+   *        与 @ref is_connected 专用）。
+   *
+   * `contexts_` 答不了那个问题，两个答法都走不通：走 `ctxs_of()` 要先读
+   * `client->loop_index()`，而那个指针可能已经悬垂（那正是这条 API 存在的理由）；
+   * 逐张表扫一遍则是**跨循环读别人的表**，与那条循环自己的 insert/erase 是数据
+   * 竞争。两种都在 `web_static_server_func` 的 `multiloop_concurrency` 上被 ASan
+   * 抓到过，细节记在 `connection_generation()` 的实现里。
+   *
+   * 于是单开这一张**只讲一件事**的表 + 一把锁：写侧只在连接**登记**与**摘除**
+   * 那四处（与 `contexts_` 的增删同进同出），读侧只有那两个入口，**不在任何每请求
+   * 路径上**（派发走 `ctxs_here()` / 手上的 `ctx`，一次都不碰这里）。
+   *
+   * 与 `contexts_` 同进同出的那条不变量：**这儿的键集 ≡ 全部表里的键并集**。
+   */
+  mutable std::mutex ctx_gen_mu_;
+  std::map<uvcpp_tcp_client*, uint64_t> ctx_gens_;
+
+  /**
    * @brief 连接上下文登记表，**按循环切**（下标 = `uvcpp_tcp_client::loop_index()`）。
    *
    * 这正是多循环的闸门：一条连接的全部回调都在它自己那条循环的线程上跑，
@@ -1753,6 +1772,15 @@ class UVCPP_API uvcpp_http_server {
   const std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_of(
       uvcpp_tcp_client* client) const;
   const std::map<uvcpp_tcp_client*, conn_ctx>& ctxs_at(int loop_index) const;
+
+  /**
+   * @brief @ref ctx_gens_ 的写侧：登记 / 摘除一条连接。
+   *
+   * **必须与 `contexts_` 的增删成对调用**（登记那两句后面、`tbl.erase()` 后面），
+   * 否则那张登记簿会答出"不在表里却报得出代次号"这类自相矛盾的答案。
+   */
+  void note_ctx_generation(uvcpp_tcp_client* client, uint64_t generation);
+  void forget_ctx_generation(uvcpp_tcp_client* client);
 
 #if UVCPP_ZLIB_ENABLE
   bool compress_enabled_ = true;

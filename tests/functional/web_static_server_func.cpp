@@ -188,6 +188,10 @@ struct StaticTestServer {
   std::vector<ConnObservation> observations;
   int closes = 0;
 
+  /// `connection_generation()` 拿一个野指针问出来的值。只能被 1 或 0 ——
+  /// 见 `start()` 里那一句：这是"本 API 不许解引用传进来的指针"的确定性判据。
+  uint64_t wild_generation = 0;
+
   StaticTestServer(const std::string& r, bool spa,
                    const std::string& mount = std::string("/"),
                    int nloops = 1, bool pc = false)
@@ -247,11 +251,31 @@ struct StaticTestServer {
 
       // 循环停了、连接登记表也空了，这时再问一次代次号：**全部应当是 0**。
       // 这里把（可能已经悬垂的）旧指针当 map 的 key 用，不解引用 —— 这正是
-      // 生产代码里 `connection_matches()` 做的事。
+      // `connection_generation()` 文档里那条用法（"开始时记下、异步回来再问
+      // 一次"），而 `uvcpp_static_server` 从前那个 `connection_matches()` 也是
+      // 这么做的。
       std::lock_guard<std::mutex> lk(obs_mutex);
       for (size_t i = 0; i < observations.size(); ++i) {
         observations[i].generation_at_close =
             server.connection_generation(observations[i].client);
+      }
+
+      // **上面那句是"解不解引用"这件事的确定性判据。**
+      //
+      // 悬垂指针读出来的东西通常还是老值、还被 `ctxs_at()` 的越界兜底夹住，
+      // 所以"跑完没崩"证明不了实现没读它。`set_loops(4)` 下这一点是能钉死的：
+      // 传一个**必然未映射**的地址进去，只要实现里读了 `client->anything`
+      // 就是当场 SIGSEGV（1.6.19 修之前，多循环的 `ctxs_of()` 会读
+      // `client->loop_index()`，这一句就是段错误；Linux + ASan 报的是
+      // `heap-buffer-overflow ... READ of size 8`）。返回值也必须是 0：
+      // 没有哪张表会登记 `(uvcpp_tcp_client*)1`。
+      wild_generation =
+          server.connection_generation(reinterpret_cast<uvcpp_tcp_client*>(1));
+      if (wild_generation != 0) {
+        std::fprintf(stderr,
+                     "[web_static_server] connection_generation(野指针) = %llu，"
+                     "期望 0 —— 说明它把那个地址当成一条真连接了\n",
+                     static_cast<unsigned long long>(wild_generation));
       }
     });
     return port_promise.get_future().get();
@@ -1198,6 +1222,12 @@ static bool test_multiloop_concurrency() {
 
   std::cout << "  [phase] shutdown\n";
   runner.shutdown();
+  // 关机之后服务端线程已经 join，这时读它留下的那个数是安全的。
+  if (runner.wild_generation != 0) {
+    std::cout << "  [err] connection_generation(野指针) = "
+              << runner.wild_generation << "，期望 0\n";
+    ok = false;
+  }
   cleanup_fs();
   return ok;
 }

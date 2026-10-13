@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.18-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.19-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -887,7 +887,41 @@
   析构注释里那句「调用方的责任」，所以它不是偶发：4 核 + 8 路并发下 2000 次崩 18 次，
   改后 0 次。（`1.6.4`）
 
+- **`connection_generation()` / `reply_alive()` 不再解引用传进来的那个指针**（`1.6.19-dev`）。
+  前者的文档用法就是「开始时记下这个指针、异步回来再问一次」，那时连接**可能已经
+  delete**（文档里连"地址被新连接复用"那种情形都写了）；后者更是专为"连接已经没了"设计的
+  入口。而两者的实现都要先读一次 `client->loop_index()` 才知道查哪张表 —— 多循环下
+  `contexts_` 按循环切开，这一步就是 use-after-free（单循环有 `contexts_.size() == 1`
+  的快路径不读，所以缺陷只在 `set_loops(n > 1)` 下存在）。
+  `tests/functional/web_static_server_func.cpp` 的 `multiloop_concurrency` 拿一批已释放的
+  `uvcpp_tcp_client*` 来问：Linux + ASan **5/5 次**报
+  `heap-buffer-overflow ... READ of size 8`（栈是 `ctxs_of()` 里那句 `client->loop_index()`
+  ← `connection_generation()`）；MinGW 那条 CI 腿上就是
+  `91/109 Test #91: test_web_static_server_func ....***Exception: SegFault`（Windows 的堆
+  把释放掉的页还给系统，读它是访问违例；Linux/macOS 上那块内存通常还映射着，只有 ASan 看得见）。
+  **改法**：另立一张 `client -> 代次号` 的登记簿（`ctx_gens_` + 一把锁），它的写入与
+  `contexts_` 的增删**成对** —— 只在连接登记 / 摘除那四处，读侧只有这两个入口，两者都
+  不在每请求的路上 ⇒ 一次表都不查、`client` 指向的内存一个字节都不读。`reply_alive()`
+  的 h1 支路改成用凭据**自己带的循环号**选表，与 h3 那条支路同一个形状（那边一直是用
+  `reply.loop_index_`）。中途试过"逐张表扫一遍"，当场被 ASan 换成 `heap-use-after-free`：
+  `_Rb_tree::find` 读到的是另一条循环的线程刚在 `remove_ctx` 里 `erase` 掉的结点 ——
+  跨循环读别人的表本来就是 `contexts_` 那条注释里写明的 UB，换成四张表并不改变这件事。
+  **判据**：同一条用例里改为传一个**必然未映射**的地址 `(uvcpp_tcp_client*)1`（实现只要
+  读它就当场段错误，返回值必须是 `0`），于是不用 ASan 也能在普通 CI 上钉住这条契约
+  —— 悬垂指针读出来的东西往往还是老值、还被 `ctxs_at()` 的越界兜底夹住，"跑完没崩"
+  证明不了实现没读它。ASan 全量 68/68 连跑 4 轮 0 报。
+
 ### HTTP 与 WebSocket 语义
+
+- **413 那个响应体此前每次都会多读 2 个字节**（`1.6.19-dev`）。两处
+  `uvcpp_http_response::make(PAYLOAD_TOO_LARGE, "413 Payload Too Large", 23)` 里的 `23`
+  是**手写的长度**，而那个字面量只有 21 个字符 —— `clone_data` 于是从字面量后面多读了
+  2 个字节（ASan：`global-buffer-overflow ... READ of size 23`，报在
+  `tests/functional/web_stream_func.cpp` 那条**超长请求体**的用例上）。越过去的那 2 个
+  字节落在 rodata 里紧挨着的下一个字面量上，所以**不越页、不越段**，只有 ASan 的全局变量
+  影子内存看得见 —— 这个缺陷从 `c304a4c` 起就在（不是本版引入的）。**改法**：两处都写成
+  `sizeof("413 Payload Too Large") - 1`，让编译器去数，字面量改了长度跟着改。**判据**：
+  `ctest -j4` 全量 68/68 连跑 5 轮 0 报；改前那条用例每跑必报。
 
 - **静态器能直接发盘上的预压缩孪生文件了 —— `precompressed` 选项（默认关）**（`1.6.15-dev`）。
   `x.js.br` / `x.js.gz` 在盘上就整份读它、原样发出去，附 `content-encoding` 与
