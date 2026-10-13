@@ -167,6 +167,16 @@ int uvcpp_h2_connection::flush() {
   // 冲一次，排队的东西一个都不会丢；`on_write_done()` 那条路同理。
   if (session_->in_nghttp2()) return 0;
 
+  // `drain()` 是把本批帧一段一段 `append` 进 `out_` 的，而 `out_` 每批都被
+  // **整批取走**（下面那个 `swap`）—— 容量一个字节也留不下来，于是每批都从 0
+  // 开始按 2 倍几何增长，搬的总字节 ≈ 2 × 终值，再摊上十几次 `malloc`/`free`。
+  // 上一批的大小就是这一批**免费**的预测（同一个连接上批与批高度相关），
+  // `reserve` 一次到位就把它压成一次分配、零次搬运。
+  //
+  // 上限 1 MiB 是**有意**的：没有它，一次异常大的批会把这块内存长期钉在这个
+  // 连接上（`out_hint_` 归零，回到几何增长，行为只会退化不会错）。
+  if (out_hint_ > 0) out_.reserve(out_.size() + out_hint_);
+
   const int rv = session_->drain(out_);
   if (rv != 0) {
     shutdown();
@@ -246,6 +256,9 @@ int uvcpp_h2_connection::flush() {
   // 受理了才记账。`out_` 此刻装的是**这段时间里新攒的**帧（通常为空），不动它。
   // 上面那条同步失败的路上连接已经 `closed_`，字节一个都没出网，不记。
   if (!closed_) bytes_out_ += pending->size();
+  // 记下这一批的大小当下一次的 `reserve` 提示（超过 1 MiB 就不再提示，
+  // 理由见本函数顶上那段）。
+  out_hint_ = (pending->size() <= (1u << 20)) ? pending->size() : 0;
   return 0;
 }
 

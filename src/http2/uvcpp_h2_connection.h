@@ -238,6 +238,8 @@ class UVCPP_API uvcpp_h2_connection {
   bool   in_dones_      = false;
 
   std::string  out_;
+  /// 上一批帧有多少字节 —— 只当 `out_` 的 `reserve` 提示用，不参与任何语义。
+  size_t       out_hint_  = 0;
   uvcpp_buf*   write_buf_ = nullptr;
   size_t       bytes_in_  = 0;
   size_t       bytes_out_ = 0;
