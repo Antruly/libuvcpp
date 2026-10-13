@@ -122,9 +122,21 @@ struct uvcpp_h2_session::impl {
   /// **必须堆分配**：它的地址会被写进 `nghttp2_data_source.ptr` 并一直用到该流
   /// 发完，而请求那条路上"拿到 stream id"发生在提交**之后** —— 存值就得先有个
   /// 键，存 `std::map` 又会被后续插入之外的删除动作搬走。堆上取址最省事也最稳。
+  ///
+  /// 字节是**按引用**持有的，不拷贝一份自己的。走到这里的 body 绝大多数本来
+  /// 就是一份共享视图（静态层的 `body_share`、压缩缓存的 `resp.body.share(...)`），
+  /// 再拷一份只换来"这份字节我独占"—— 而独占没有意义：那块内存由静态层的 LRU
+  /// 与这里的 `shared_ptr` 共同保活，谁先放手都不会悬垂。
+  ///
+  /// 省下的是**每响应一次整块 malloc + memcpy**（static-h2 那批语料是每请求
+  /// 16 KB，单文件探针 67 KB）。它同时也是高并发下驻留内存涨得最快的那一笔：
+  /// 每个在途响应各持一份私有副本，而副本里的字节与缓存里的是同一份内容。
+  ///
+  /// 非共享的 body（`resp.body(ptr, len)` 那条路、Range 的部分视图）在这里
+  /// **拷一次**成共享形态，与改动之前逐字节等价。
   struct out_body {
-    std::string data;
-    size_t      offset = 0;
+    std::shared_ptr<const std::string> data;
+    size_t                             offset = 0;
   };
 
   nghttp2_session*    session     = nullptr;
@@ -284,8 +296,12 @@ struct uvcpp_h2_session::impl {
     out_streams.erase(it);
   }
 
-  /// 为 @p id 换一块新的 body（旧的丢弃）。返回的指针在流关闭前一直有效。
-  out_body* stash_body(int32_t id, std::string body) {
+  /// 为 @p id 挂上一份 body（旧的丢弃）。返回的指针在流关闭前一直有效。
+  ///
+  /// 收的是**共享句柄**而不是字节：调用方要么把已有的共享视图接过来（引用计数
+  /// +1），要么自己 `make_shared` 一份 —— 后者与旧的按值 `std::string` 参数
+  /// 代价相同（一次拷贝），前者是零拷贝。
+  out_body* stash_body(int32_t id, std::shared_ptr<const std::string> body) {
     std::unique_ptr<out_body> ob(new out_body());
     ob->data = std::move(body);
     out_body* raw = ob.get();
@@ -691,13 +707,15 @@ struct uvcpp_h2_session::impl {
                                     size_t length, uint32_t* data_flags,
                                     nghttp2_data_source* source, void*) {
     auto* ob   = static_cast<out_body*>(source->ptr);
-    const size_t left = ob->data.size() - ob->offset;
+    // `data` 非空由构造保证：只有 body 非空时才提交 provider（见 `submit_response`
+    // / `submit_status` / `submit_request` 三处）。
+    const size_t left = ob->data->size() - ob->offset;
     const size_t n    = left < length ? left : length;
     if (n > 0) {
-      std::memcpy(buf, ob->data.data() + ob->offset, n);
+      std::memcpy(buf, ob->data->data() + ob->offset, n);
       ob->offset += n;
     }
-    if (ob->offset >= ob->data.size()) *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    if (ob->offset >= ob->data->size()) *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     return static_cast<nghttp2_ssize>(n);
   }
 
@@ -1120,8 +1138,15 @@ int uvcpp_h2_session::submit_response(int32_t stream_id,
     return nghttp2_submit_response2(impl_->session, stream_id, nv.data(),
                                     nv.size(), nullptr);
   }
-  impl::out_body* ob = impl_->stash_body(
-      stream_id, std::string(resp.body.get_const_data(), resp.body.size()));
+  // body 按**引用**交出去（见 `out_body`）：共享视图直接接引用计数（静态文件、
+  // 压缩缓存都是这一支，零拷贝），只有非共享的那种才在这里物化成一份
+  // `shared_ptr` —— 那一次拷贝与旧的 `std::string(...)` 同价，不是新增。
+  std::shared_ptr<const std::string> body = resp.body.shared_ref();
+  if (!body) {
+    body = std::make_shared<const std::string>(resp.body.get_const_data(),
+                                               resp.body.size());
+  }
+  impl::out_body* ob = impl_->stash_body(stream_id, std::move(body));
 
   nghttp2_data_provider2 prd;
   prd.source.ptr    = ob;
@@ -1346,7 +1371,10 @@ int uvcpp_h2_session::submit_status(int32_t stream_id, int status,
     return nghttp2_submit_response2(impl_->session, stream_id, nv.data(),
                                     nv.size(), nullptr);
   }
-  impl::out_body* ob = impl_->stash_body(stream_id, body);
+  // `body` 是调用方传进来的 const 引用（本层没有它的所有权），所以这一支
+  // 仍然要拷一次 —— 与旧的按值参数逐字节同价。
+  impl::out_body* ob = impl_->stash_body(
+      stream_id, std::make_shared<const std::string>(body));
   nghttp2_data_provider2 prd;
   prd.source.ptr    = ob;
   prd.read_callback = &impl::cb_read_body;
@@ -1430,7 +1458,9 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   const nghttp2_data_provider2*   prd_ptr = nullptr;
   if (!body.empty()) {
     pending.reset(new impl::out_body());
-    pending->data     = std::move(body);
+    // 请求体是**本层自己的**（按值参数），所以这一次只是把它包进共享句柄，
+    // 不是拷贝：`make_shared` 直接移动构造那份 `std::string`。
+    pending->data     = std::make_shared<const std::string>(std::move(body));
     prd.source.ptr    = pending.get();
     prd.read_callback = &impl::cb_read_body;
     prd_ptr           = &prd;
