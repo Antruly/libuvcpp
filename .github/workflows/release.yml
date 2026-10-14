@@ -1030,11 +1030,20 @@ jobs:
           # 目录约定：`$HOME/client-headers/usr/include/{mysql,postgresql}`，与下面
           # 两个 configure 里那四个 `-DUVCPP_DB_*_INCLUDE_DIR=` **必须同表**。
           # 改这里就要改那里。
+          #
+          # `-t jammy` **不是可选的**：这张镜像上另外配了 PGDG（`pgdg22.04`），于是
+          # `libpq-dev` 的候选成了 `18.6-1.pgdg22.04+2` —— 而那个版本在这张镜像上
+          # **没有可取回的源**，`apt-get download` 以 100 直接退出。1.7.0 的空转里
+          # 两条 Linux 腿各自实测到同一条：
+          #   E: Can't find a source to download version '18.6-1.pgdg22.04+2'
+          #      of 'libpq-dev:{amd64,arm64}'
+          # 我们要的只是头、版本号无所谓，所以用 `-t` 把候选钉回发行版那一档（它建
+          # 的 990 pin 盖过第三方源的 500），而不是去猜第三方仓库此刻的状态。
           rm -rf "$HOME/client-headers"
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            apt-get download libmysqlclient-dev libpq-dev
+            apt-get download -t jammy libmysqlclient-dev libpq-dev
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )
@@ -1290,11 +1299,14 @@ jobs:
           # 一步的注释里）。这条腿的 `apt-get download` 拿到的是 **arm64 的 .deb**，
           # 头是同一份源码生成的，与 x64 那条腿取到的逐字节相同的那几个文件。
           # 目录约定同表：`$HOME/client-headers/usr/include/{mysql,postgresql}`。
+          # `-t jammy` 的理由在 linux-x64 那一步的注释里（PGDG 的候选版本没有可取回
+          # 的源 ⇒ 不带 `-t` 时 `apt-get download` 以 100 退出）；这条腿实测到的
+          # 是 `libpq-dev:arm64` 那一份，根因与修法逐字相同。
           rm -rf "$HOME/client-headers"
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            apt-get download libmysqlclient-dev libpq-dev
+            apt-get download -t jammy libmysqlclient-dev libpq-dev
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )

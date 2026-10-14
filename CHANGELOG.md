@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.56-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.57-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2412,6 +2412,28 @@
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **两条 Linux 发布腿的客户端头取不到：`apt-get download` 以 100 退出**（`1.6.57-dev`）。
+  这是 1.7.0 的空转（`release.yml` 的 `workflow_dispatch` + `dry_run=true`）第一次
+  真的跑那一步时红出来的，两条腿同一条：
+
+  ```
+  E: Can't find a source to download version '18.6-1.pgdg22.04+2' of 'libpq-dev:amd64'
+  E: Can't find a source to download version '18.6-1.pgdg22.04+2' of 'libpq-dev:arm64'
+  ```
+
+  根因不在我们这一侧的写法：runner 镜像上**另外配了 PGDG**（`pgdg22.04`），于是
+  `libpq-dev` 的候选成了 `18.6-1.pgdg22.04+2` —— 而那个版本在这张镜像上**没有可取回
+  的源**，`apt-get download` 直接在取包之前就以 100 退出。修法是把候选钉回发行版那
+  一档：`apt-get download -t jammy libmysqlclient-dev libpq-dev`（`-t` 建的 990 pin
+  盖过第三方源的 500），我们要的只是头、版本号无所谓，所以不去猜第三方仓库此刻的
+  状态。本机验过 `apt-get download -t <codename>` 确实按指定 suite 选版本。
+
+  同一次空转里另外四条腿（MinGW x64/arm64、MSVC x64/arm64）**全绿**：新加的
+  `.github/scripts/win-client-headers.sh` 在真镜像上把两份钉版本的 MSYS2 头取到并用
+  上了，六条腿的 17 枚模块断言在 Windows 侧全过，MinGW 那条自包含断言实测
+  `libuvcpp.dll` 的导入表里只有 Windows 自带 DLL（没有 `libpq`/`libmariadb`）——
+  `UVCPP_DB_RUNTIME_LOAD` 的 dlopen 设计在真发布腿上成立。
 
 - **两版 README 的功能覆盖数字按新的 MinGW 格改准**（`1.6.56-dev`）。上一条把
   `ci-mingw64.yml` 那条**单 job** 也开了 yyjson 与 brotli，而 README 的
