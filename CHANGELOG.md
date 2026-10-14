@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.53-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.54-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -303,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2938-2938`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3047-3047`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -640,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1884-1886`、`CMakeLists.txt:2830-2835`）——
+  两处都摘掉**（`CMakeLists.txt:1951-1953`、`CMakeLists.txt:2939-2944`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -750,6 +750,45 @@
 一个都没找到时整个模块被强制关掉并打一条说明怎么修的 warning，而不是留一个
 "能配置、链不上"的组合（`1.5.3`）
 
+- **MySQL / PostgreSQL 的客户端库改成可以运行时加载：`UVCPP_DB_RUNTIME_LOAD`**
+  （`1.6.54-dev`，默认 `OFF`）。直接链的后果不是"少个功能"而是**进程起不来**：
+  `DT_NEEDED`（Windows 上是 PE 的导入表）是**加载期**解析的，产物上多一条
+  `libmysqlclient.so.21` / `libpq.so.5`，没装过那两种客户端库的机器连 `libuvcpp.so`
+  都**加载不了** —— 哪怕这个程序只跑 HTTP、一行 `db` 代码都不碰。本机实测（同一个
+  只 `printf` 的 `hello`，装好的前缀形态）：
+
+  ```
+  $ ldd libuvcpp.so | grep 'not found'
+          libmysqlclient.so.21 => not found
+          libpq.so.5 => not found
+  $ ./hello
+  ./hello: error while loading shared libraries: libmysqlclient.so.21:
+           cannot open shared object file: No such file or directory      # rc=127
+  ```
+
+  开了之后符号由 `dlopen("libmysqlclient.so.21" / "libpq.so.5", RTLD_NOW |
+  RTLD_LOCAL)`（Windows 上是 `LoadLibraryA`）取，产物上**一条 `DT_NEEDED` 都不多**，
+  而没装库的机器上除"真去连 MySQL/PG"之外一切照常：那种连接在 `open()` 拿到
+  `NO_DRIVER`，`last_error()` 里逐个列出**试过哪个库名、各自什么原因**，并给出两条
+  出路（装一个客户端库，或 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY`
+  指路 —— 设了它就**只试那一个**，这也正是"没装库"那条路的确定性旋钮）。
+
+  **`--no-undefined` 是这个开关的必要配套，不是洁癖**：调用点全改成经一张 `dlsym`
+  填出来的函数指针表走，而**共享库默认允许未定义符号** —— 原本以为"漏改一处调用点
+  ⇒ 链接期 `undefined reference`"能当判据，**实测是错的**：`ld` 不吭声，产物带着一个
+  没人提供的 `mysql_query`，于是**每个使用者**在加载这个 `.so` 时炸，正是这个开关要
+  消灭的形状。所以这一档下给 ELF 的共享目标补 `LINKER:--no-undefined`，漏一处就红
+  （变异实测：`undefined reference to 'mysql_query'`，`make` rc=2）。
+
+  它改的只是**符号从哪来**，不是**有哪些后端**：配置期仍旧要 `mysql.h` /
+  `libpq-fe.h`（`MYSQL_BIND` / `PQresult` 这些类型的布局必须从真的头里读），
+  `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE` 的含义照旧是"头找到了"，
+  `uvcpp_db_drivers()` 的输出也不变 —— 于是 `NO_DRIVER` 有**两条**来路（后端没编
+  进来 / 编进来了但这台机器没库），`uvcpp_db_status.h` 里那一段文档注释把两条分开
+  写清了。三个新私有头（`uvcpp_db_{mysql,pgsql}_api.h`、`uvcpp_db_runtime_load.h`）
+  同时进了 `CMakeLists.txt` 的安装排除与 `package_release.py` 的 `PRIVATE_HEADERS`。
+  默认 `OFF`，今天的行为逐字节不变（实测：`DT_NEEDED` 两条照旧、`nm -D -u` 里那
+  54 个 `mysql_*`/`PQ*` 照旧、`dlopen`/`dlsym` 引用数 0）
 - **占位符是方言差异，本模块不换算。** 写 `?` 还是 `$1` 由你选的那个后端决定，
   原样透传给驱动。六种组合（三后端 × 两种写法）逐个实测：
   PG `?`→`prepare_failed`、PG `$1`→ok、MySQL `?`→ok、MySQL `$1`→`prepare_failed`、
@@ -2370,6 +2409,19 @@
 
 ### 配置、打包与 CI
 
+- **新增开关 `UVCPP_DB_RUNTIME_LOAD`（默认 `OFF`）：db 的 MySQL/PG 后端不再把
+  客户端库写到链接行上**（`1.6.54-dev`）。理由与实测都在上面「数据库」那一节；
+  这一条只记配置/打包面的落点：`CMakeLists.txt` 里 MySQL 那段的 `find_library`
+  与 PG 那段的 `find_package(PostgreSQL)` 都被 `if(NOT UVCPP_DB_RUNTIME_LOAD)` 绕开
+  （只留 `find_path` 找头，PG 那边**故意不用** `FindPostgreSQL` —— 它的判据一个包
+  同时含头与库，还会去读 `PostgreSQL_LIBRARY` 那个 cache 变量），
+  `UVCPP_DB_RUNTIME_LOAD` 同时进 `cmake/uvcpp_config.h.in`（带 `#error` 反向守卫）
+  与 `check_config_contract.py` 的 `MACROS`。开关名与宏名同名，靠
+  `_uvcpp_literal01(UVCPP_DB_RUNTIME_LOAD UVCPP_DB_RUNTIME_LOAD)` 这一句统一。
+  打包侧：三个新私有头进了 `package_release.py` 的 `PRIVATE_HEADERS`
+  与 `CMakeLists.txt` 的 `install(FILES)` 排除（两处是一对，只改一处不报错）。
+  README 两版与 `doc/build-guide.md` 的开关表、`doc/db-guide.md` 新增的
+  「客户端库运行时加载」一节一起改
 - **静态链接进来的依赖，符号一并导出去了 ⇒ ELF 上给共享目标加
   `--exclude-libs,ALL`，yyjson 那半另修**（`1.6.53-dev`）。本仓在非 Windows 上 `UVCPP_API` 是**空的**
   （`src/uvcpp/uvcpp_export.h:17`），也没有 `-fvisibility=hidden`、没有 version
@@ -2392,17 +2444,17 @@
   dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）把我们的嵌入依赖藏起来，
   libpq 就会解析到**系统**那份、与它自己的 libcrypto 自洽。
 
-  修法一（`CMakeLists.txt:2370-2412`，`UNIX AND NOT APPLE`，只给共享目标
+  修法一（`CMakeLists.txt:2445-2487`，`UNIX AND NOT APPLE`，只给共享目标
   `uvcpp`/`uvcpp_s`）：`target_link_options(… PRIVATE "LINKER:--exclude-libs,ALL")`。
   它只藏**来自静态归档**的符号，而这两个目标是
-  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2080`）
+  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2147-2147`）
   **直接拿我们自己的目标文件**建的、不经归档 ⇒ 我们自己的 API 与 `uvcpp_c_*` 那套
   C ABI 照样导出。只给共享目标加是因为静态库没有导出表，藏了反而让 `uvcpp_a` 的消费者
   在最终链接时找不到本该由我们提供的符号；只给 ELF 加是因为 Apple 的 ld 没有这个选项
   （那边是 `-exported_symbols_list`），而发布腿里本来也没有 macOS。
 
   修法二：`uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经
-  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2667`）**直接进最终链接、也不经归档** ⇒
+  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2776-2776`）**直接进最终链接、也不经归档** ⇒
   上面那条对它无效（实测加不加都是 43 个 `yyjson_*`）。那边改用
   `C_VISIBILITY_PRESET hidden` **加** `target_compile_definitions(uvcpp_yyjson PRIVATE
   yyjson_api=)`。**第二半是承重的**：上游 `yyjson.h` 给每个公开函数**显式**贴了
@@ -2446,16 +2498,16 @@
   记过是陷阱（它只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索路径）。
 
   修法照 `UVCPP_DB_SQLITE_FROM_SOURCE`（`CMakeLists.txt:189`）的命名与形状加一个
-  **默认 OFF** 的选项（`CMakeLists.txt:216-217`），把整段发现包进
-  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:392`）。注意是**连发现都不
+  **默认 OFF** 的选项（`CMakeLists.txt:233-234`），把整段发现包进
+  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:409-409`）。注意是**连发现都不
   调用**，不是"找到了也偏不用"：`find_path`/`find_library` 的结果会写进 cache，
   调用过一次，`UVCPP_BROTLI_INCLUDE_DIR` 之类就一直留在那棵树里，同一棵树翻开关时
   会把上一轮的答案漏过来。所以每个"找到系统那份"的判据都**显式**带上
-  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:403`、`CMakeLists.txt:407`、
-  `CMakeLists.txt:415`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
+  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:420-420`、`CMakeLists.txt:424-424`、
+  `CMakeLists.txt:432-432`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
   选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
-  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:493`），链接段
-  （`CMakeLists.txt:2520`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:510-510`），链接段
+  （`CMakeLists.txt:2629-2629`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
   动，所以既有使用者的行为逐字节不变。
 
   判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON
@@ -2638,7 +2690,7 @@
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1660`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1727`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是

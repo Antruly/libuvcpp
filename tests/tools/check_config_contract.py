@@ -87,6 +87,11 @@ MACROS = [
     "UVCPP_DB_SQLITE_ENABLE",
     "UVCPP_DB_MYSQL_ENABLE",
     "UVCPP_DB_PGSQL_ENABLE",
+    # 名字不带 `_ENABLE`：它不是"哪个模块在不在"，是 MySQL/PG 那两个后端的符号
+    # 走链接还是走运行时加载。仍然进这张表，因为使用者必须能从生成头里看出
+    # 这份产物走的是哪条路（两条路的**失败方式**不同，见 uvcpp_config.h.in 里
+    # 那一段）。`GUARD_RE` 只认 `_ENABLE` 结尾的宏，所以它不参与那份扫描。
+    "UVCPP_DB_RUNTIME_LOAD",
     "UVCPP_TRY_WRITE_ENABLE",
     "UVCPP_TRY_WRITE_MIN_BYTES",
     "UVCPP_UDP_GSO_ENABLE",

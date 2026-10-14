@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.53--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.54--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.53-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.54-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -306,6 +306,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | 这个 SQLite 后端改成用一份**钉死哈希的源码 amalgamation** 自己编（一个静态 `sqlite3.c`，强制 PIC），不走 `find_package(SQLite3)`。**六条发布腿走的就是它**：链系统的 `libsqlite3.so` 会多一条 `DT_NEEDED`、破坏发布包的"自包含"承诺，而 Ubuntu 24.04 上系统的 `libsqlite3.a` 不是 PIC（实测 `R_X86_64_PC32 … can not be used when making a shared object`）。配置期需要联网，或者自己把 zip 放到位 —— 两种做法都写在 [`doc/db-guide.md`](doc/db-guide.md) 里 |
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` 与 libmysqlclient）。装在非标准位置时：`-DCMAKE_PREFIX_PATH=…` 或 `-DUVCPP_DB_MYSQL_INCLUDE_DIR=… -DUVCPP_DB_MYSQL_LIBRARY=…` |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` 与 libpq）。装在非标准位置时：`-DCMAKE_PREFIX_PATH=…` 或 `-DPostgreSQL_INCLUDE_DIR=… -DPostgreSQL_LIBRARY=…` |
+| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL / PostgreSQL 的符号不从链接行上来，改成**运行时**打开一份客户端库（`dlopen` / `LoadLibrary`）再取。**六条发布腿用的就是它，而理由在包的**使用者**身上，不在库里**：`DT_NEEDED`（Windows 上是导入表）是**加载期**解析的，链上 libmysqlclient/libpq 就等于"从没装过这两种客户端库的机器连**加载**这份库都做不到"—— 哪怕它只跑 HTTP、一行 `db` 代码都不碰。开了之后，那种机器上除"真去连 MySQL/PG"之外一切照常，而真去连时拿到的是 `uvcpp_db_status::NO_DRIVER` 加一句写清了试过哪些库名的话（可用环境变量 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` 指定路径）。它改的只是**符号从哪来**，不是**有哪些后端**：配置期仍然要 `mysql.h` / `libpq-fe.h`（`MYSQL_BIND` 的布局必须从真的头里读），所以 `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE` 的含义照旧是"头找到了"。默认 `OFF`，今天的行为逐字节不变。见 [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
 | `UVCPP_STATIC_RUNTIME` | `OFF` | 把编译器运行时（`libgcc`/`libstdc++`）静态链进库。**仅 MinGW 与 Linux 有效，MSVC 上是空操作** —— MSVC 用 `/MD`，发布包里自带 `vcruntime`/`msvcp` |

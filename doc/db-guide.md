@@ -46,6 +46,7 @@ cmake --build build-db -j
 | `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | 上面那个 SQLite 后端改用**钉死哈希的源码 amalgamation**自己编，不走 `find_package`。**六条发布腿都是这个**（见下一节） |
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` + libmysqlclient） |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` + libpq） |
+| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节） |
 
 三个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
 想明确裁掉哪一个才写 `=OFF`（那时连"找不到"的警告都不会有）。
@@ -66,6 +67,14 @@ cmake --build build-db -j
 -- Including db module in build (database integration)
 ```
 
+开了 `UVCPP_DB_RUNTIME_LOAD` 时这两行会换个说法（后半截是**头**的出处，
+不再是库的出处）：
+
+```
+-- db: MySQL 后端开（运行时加载，不链 libmysqlclient；头来自 /usr/include/mysql）
+-- db: PostgreSQL 后端开（运行时加载，不链 libpq；头来自 /usr/include/postgresql）
+```
+
 运行期问一句更直接：
 
 ```cpp
@@ -81,6 +90,79 @@ int main() {
 ```
 
 预编译包少哪个后端时，**这一行是第一个该看的地方**。
+
+> **注意这一行说的是"编进来没有"，不是"这台机器上能不能用"。**
+> 开了 `UVCPP_DB_RUNTIME_LOAD` 之后这两件事分了家：MySQL 打印在清单里，
+> 只代表**这个库带了这个后端**；客户端库在不在是**运行时**才知道的
+> （下一节）。要问"现在真能用吗"，看 `open()` 的返回码。
+
+### 客户端库运行时加载：`UVCPP_DB_RUNTIME_LOAD`
+
+**为什么要有它。** 直接链客户端库时，`libpq.so.5` / `libmysqlclient.so.21` 会
+变成产物的一条 `DT_NEEDED`，而 **`DT_NEEDED` 是加载期解析的**：装了 libuvcpp
+的机器上只要缺这一条，**进程根本起不来** —— 一行 db 代码都没跑，甚至这个程序
+压根不碰数据库。Windows 同理（PE 的导入表）。
+
+本机实测（同一个 `hello`，只 `printf`，一行 db 代码不跑）：
+
+```
+$ ldd libuvcpp.so | grep 'not found'
+        libmysqlclient.so.21 => not found
+        libpq.so.5 => not found
+$ ./hello
+./hello: error while loading shared libraries: libmysqlclient.so.21:
+         cannot open shared object file: No such file or directory     # rc=127
+```
+
+开了这个开关之后，改由**运行时**去找：
+
+```bash
+cmake -S . -B build-db -DUVCPP_ENABLE_DB=ON \
+      -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+      -DUVCPP_DB_RUNTIME_LOAD=ON
+```
+
+| | 直接链（默认，`OFF`） | 运行时加载（`ON`） |
+|---|---|---|
+| 链接期要 | `mysql.h`/`libpq-fe.h` **+** 客户端库 | 只要头（`libmysqlclient-dev` / `libpq-dev`） |
+| 产物的 `DT_NEEDED` | 多两条 | **一条都不多** |
+| 机器上没装客户端库 | **进程起不来** | 进程照常跑；HTTP、SQLite 一切照常 |
+| 真去连 MySQL/PG | 能连 | 返回 `NO_DRIVER` + `last_error()` 里写明**试过哪几个库名** |
+| 找库的办法 | 链接器（`/etc/ld.so.cache`、`RPATH`） | 固定的候选名列表，或 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` |
+
+候选名（按顺序试，全试完才报错）：
+
+| 平台 | MySQL | libpq |
+|---|---|---|
+| Linux | `libmysqlclient.so.21`、`libmysqlclient.so.24`、`libmariadb.so.3`、`libmysqlclient.so` | `libpq.so.5`、`libpq.so` |
+| Windows | `libmysql.dll`、`libmariadb.dll`、`mysqlclient.dll` | `libpq.dll` |
+| macOS | `libmysqlclient.21.dylib`、`libmariadb.3.dylib`、`libmysqlclient.dylib` | `libpq.5.dylib`、`libpq.dylib` |
+
+两个环境变量是**显式指定**，设了它就**只试这一个**（不再走候选名列表）——
+装在非标准前缀下的人用它，而它同时是**"没装库"那条路的确定性旋钮**：
+指向一个不存在的路径，就能在装好了库的机器上复现"没装"的样子。
+
+```bash
+UVCPP_DB_PGSQL_LIBRARY=/nonexistent/libpq.so.5 ./myapp
+# last_error(): 加载 PostgreSQL 客户端库失败，试过这些名字都没打开：
+#   UVCPP_DB_PGSQL_LIBRARY=/nonexistent/libpq.so.5（...: cannot open shared object file: ...）。
+#   装一份 libpq（...），或者把环境变量 UVCPP_DB_PGSQL_LIBRARY 指到 libpq 的完整路径。
+```
+
+拿到的句柄**永不释放**：没有哪个时刻能保证"再也不会有人用它"（活连接、活语句
+都可能还在），卸掉比留着危险。
+
+**它只改"符号从哪来"，不改后端在不在**：`UVCPP_DB_MYSQL_ENABLE` /
+`UVCPP_DB_PGSQL_ENABLE` 那两个宏照旧是"头找得到就是 1"，
+`uvcpp_db_drivers()` 的输出也不变。换句话说 `NO_DRIVER` 现在有**两条**来路
+（后端没编进来 / 编进来了但这台机器没库），`last_error()` 会说清是哪一条 ——
+详见 `uvcpp_db_status.h` 里 `NO_DRIVER` 那一段的文档注释。
+
+**共享库上这一档还多一条链接选项 `--no-undefined`**（ELF）：调用点全改成经
+`api()` 那张 `dlsym` 函数指针表走，而**共享库默认允许未定义符号** ——
+漏绑/漏改一处，`ld` 不吭声，产物却带着一个没人提供的 `mysql_query`，
+于是**每个使用者**在加载这个 `.so` 时就炸。`--no-undefined` 把这条不变式交还
+给链接器：漏一处就是链接期红。
 
 ### 预编译包里的 SQLite 是**从源码编的**：`UVCPP_DB_SQLITE_FROM_SOURCE`
 
@@ -135,7 +217,7 @@ MySQL / PostgreSQL 是**显式关**的，不是"找不到"：runner 上装着 `l
 
 ### 客户端库装在非标准位置
 
-不用新开关，走 CMake 的常规搜索路径：
+**默认（直接链）**：不用新开关，走 CMake 的常规搜索路径：
 
 ```bash
 cmake -DUVCPP_ENABLE_DB=ON -DCMAKE_PREFIX_PATH=/opt/mysql ..
@@ -148,6 +230,24 @@ cmake -DUVCPP_ENABLE_DB=ON \
       -DPostgreSQL_INCLUDE_DIR=/opt/pgsql/include \
       -DPostgreSQL_LIBRARY=/opt/pgsql/lib/libpq.so ..
 ```
+
+**开了 `UVCPP_DB_RUNTIME_LOAD`**：位置的找法分成两截 ——
+
+* **头**（编译期）仍旧走上面那套，但 PG 那边**不再用 `find_package(PostgreSQL)`**
+  （它一个判据同时含头与库，而"库在不在"这条路上与我们无关；它还会去读
+  `PostgreSQL_LIBRARY` 那个 cache 变量）。改成一个 `find_path`，所以给的是
+  `-DUVCPP_DB_PGSQL_INCLUDE_DIR=/opt/pgsql/include`（MySQL 那个同名变量照旧）。
+* **库**（运行期）与构建**完全无关**，构建期给什么都没用。装库的人在**跑的时候**
+  用环境变量指路，而且设了就**只试这一个**：
+
+  ```bash
+  UVCPP_DB_MYSQL_LIBRARY=/opt/mysql/lib/libmysqlclient.so.21 \
+  UVCPP_DB_PGSQL_LIBRARY=/opt/pgsql/lib/libpq.so.5 \
+    ./myapp
+  ```
+
+  注意这**不是** CMake cache 变量 —— 与构建期那两个同名变量是**同名不同物**，
+  别指望 `cmake -DUVCPP_DB_PGSQL_LIBRARY=…` 会影响运行时（那时链接行上根本没有它）。
 
 ### 静态库上的已知缺口
 
@@ -162,6 +262,11 @@ target_link_libraries(myapp PRIVATE uvcpp_a sqlite3 pq mysqlclient)
 这是**故意**的取舍，与 zlib / nghttp2 那几处同形：把绝对路径写进导出集会过得了
 `install(EXPORT)` 却搬到别的机器才断，比缺一条 `target_link_libraries` 更难查
 （后者是链接期一句 `undefined reference to sqlite3_open_v2`，指向明确）。
+
+**开了 `UVCPP_DB_RUNTIME_LOAD` 时这一节不适用**：MySQL/PG 的客户端库根本不在
+`UVCPP_DB_LINK_LIBS` 里（那正是那个开关干的事），所以静态库的使用方也**不用**
+再补 `pq`/`mysqlclient` —— 只剩 SQLite 那一条要不要补，取决于它是系统那份还是
+`UVCPP_DB_SQLITE_FROM_SOURCE` 编进来的静态目标。
 
 ---
 

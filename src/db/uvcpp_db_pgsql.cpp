@@ -14,7 +14,12 @@
 
 #if UVCPP_DB_ENABLE && UVCPP_DB_PGSQL_ENABLE
 
-#include <libpq-fe.h>
+// `libpq-fe.h` 与"要哪些符号"都在这一个头里（清单与结构体各用一半）。
+#include "db/uvcpp_db_pgsql_api.h"
+
+#if UVCPP_DB_RUNTIME_LOAD
+#include "db/uvcpp_db_runtime_load.h"
+#endif
 
 #include <cerrno>
 #include <cstdlib>
@@ -25,7 +30,111 @@
 namespace uvcpp {
 namespace db_detail {
 
+// ---------------------------------------------------------------------------
+// 那 21 个符号从哪来 —— 与 MySQL 那边同一个形状，理由（`DT_NEEDED` 是加载期
+// 解析的、链接器兜底在这条路上不存在）详见 `uvcpp_db_mysql.cpp` 同一处。
+// ---------------------------------------------------------------------------
+#if UVCPP_DB_RUNTIME_LOAD
+
 namespace {
+
+/// 候选名。带版本号的 soname 在前：`libpq.so` 那个符号链接属于 `-dev` 包，
+/// 只装了 `libpq5` 的机器上没有它。Windows 与 macOS 侧没有 soname 这一套，
+/// 用各自的惯例名（`libpq.dll` / `libpq.5.dylib`）。
+const char* const kClientLibraryNames[] = {
+#if defined(_WIN32)
+    "libpq.dll",
+    nullptr
+#elif defined(__APPLE__)
+    "libpq.5.dylib",
+    "libpq.dylib",
+    nullptr
+#else
+    "libpq.so.5",
+    "libpq.so",
+    nullptr
+#endif
+};
+
+/// 逐个取符号，缺一个就整张表作废（理由见 MySQL 那边）。
+bool bind_client_api(void* handle, pgsql_api* t, const char** missing) {
+#define UVCPP_DB_PGSQL_BIND(name)                    \
+  t->name = reinterpret_cast<decltype(t->name)>(     \
+      uvcpp_db_lookup_symbol(handle, #name));        \
+  if (t->name == nullptr) {                          \
+    *missing = #name;                                \
+    return false;                                    \
+  }
+  UVCPP_DB_PGSQL_SYMBOLS(UVCPP_DB_PGSQL_BIND)
+#undef UVCPP_DB_PGSQL_BIND
+  return true;
+}
+
+struct api_state {
+  pgsql_api table;
+  bool ok;
+  std::string loaded_name;
+  std::string error;
+};
+
+api_state load_client_api() {
+  api_state st = {pgsql_api(), false, std::string(), std::string()};
+
+  std::string tried;
+  void* handle = uvcpp_db_open_client_library(kClientLibraryNames,
+                                              "UVCPP_DB_PGSQL_LIBRARY", &tried,
+                                              &st.loaded_name);
+  if (handle == nullptr) {
+    st.error =
+        "加载 PostgreSQL 客户端库失败，试过这些名字都没打开：" + tried +
+        "。装一份 libpq（Debian/Ubuntu 上是 libpq5，RHEL 系是 libpq，"
+        "macOS 上 postgresql 的 libpq），或者把环境变量 UVCPP_DB_PGSQL_LIBRARY "
+        "指到 libpq 的完整路径。只用 SQLite 的话不用管这一条。";
+    return st;
+  }
+
+  const char* missing = nullptr;
+  if (!bind_client_api(handle, &st.table, &missing)) {
+    st.error = "PostgreSQL 客户端库 " + st.loaded_name + " 里缺少符号 " +
+               missing + " —— 版本太旧或不是 libpq。";
+    return st;
+  }
+  st.ok = true;
+  return st;
+}
+
+api_state& client_api_state() {
+  // 第一次真要用 PostgreSQL 时才加载，不是加载这份库的时候。理由同 MySQL 那边。
+  static api_state st = load_client_api();
+  return st;
+}
+
+}  // namespace
+
+const pgsql_api& uvcpp_db_pgsql_api() { return client_api_state().table; }
+
+const std::string& uvcpp_db_pgsql_load_error() {
+  return client_api_state().error;
+}
+
+#else  // 直接链接
+
+namespace {
+
+#define UVCPP_DB_PGSQL_ADDR(name) &::name,
+const pgsql_api kClientApi = {UVCPP_DB_PGSQL_SYMBOLS(UVCPP_DB_PGSQL_ADDR)};
+#undef UVCPP_DB_PGSQL_ADDR
+
+}  // namespace
+
+const pgsql_api& uvcpp_db_pgsql_api() { return kClientApi; }
+
+#endif  // UVCPP_DB_RUNTIME_LOAD
+
+namespace {
+
+/// 那把函数表，短名字。下面每一处对 libpq 的调用都写成 `api().PQxxx(...)`。
+const pgsql_api& api() { return uvcpp_db_pgsql_api(); }
 
 // PostgreSQL 的内置类型 OID。这些是**稳定值**，写死在 `pg_type.dat` 里、
 // 从 PG 7 至今没变过，所以不需要带一份 `pg_type_d.h`（那是服务端头文件，
@@ -186,12 +295,12 @@ class pg_result {
  public:
   explicit pg_result(PGresult* r) : r_(r) {}
   ~pg_result() {
-    if (r_) PQclear(r_);
+    if (r_) api().PQclear(r_);
   }
   PGresult* get() const { return r_; }
   bool ok() const { return r_ != nullptr; }
   ExecStatusType status() const {
-    return r_ ? PQresultStatus(r_) : PGRES_FATAL_ERROR;
+    return r_ ? api().PQresultStatus(r_) : PGRES_FATAL_ERROR;
   }
 
  private:
@@ -258,6 +367,13 @@ class pgsql_driver : public uvcpp_db_driver {
   uvcpp_db_status open(const uvcpp_db_url& url, std::string* err) {
     close();
 
+    // 客户端库在不在 —— 早于任何一次 `api().PQxxx`，理由与 MySQL 那边同一处。
+    const std::string& load_error = uvcpp_db_pgsql_load_error();
+    if (!load_error.empty()) {
+      *err = load_error;
+      return uvcpp_db_status::NO_DRIVER;
+    }
+
     // ★ 用 `PQconnectdbParams`，**不**拼 `"host=... password=..."` 那种
     //   conninfo 字符串。拼字符串有两个洞，而且第二个是安全洞：
     //   1. 口令里有空格 / 单引号就散架（`p ass` 之后那截会被当成新关键字）；
@@ -284,10 +400,10 @@ class pgsql_driver : public uvcpp_db_driver {
     keys.push_back(nullptr);
     values.push_back(nullptr);
 
-    conn_ = PQconnectdbParams(&keys[0], &values[0], 0);
-    if (!conn_ || PQstatus(conn_) != CONNECTION_OK) {
+    conn_ = api().PQconnectdbParams(&keys[0], &values[0], 0);
+    if (!conn_ || api().PQstatus(conn_) != CONNECTION_OK) {
       *err = std::string("连接 PostgreSQL 失败：") +
-             (conn_ ? PQerrorMessage(conn_) : "PQconnectdbParams 返回空");
+             (conn_ ? api().PQerrorMessage(conn_) : "PQconnectdbParams 返回空");
       close();
       return uvcpp_db_status::OPEN_FAILED;
     }
@@ -302,7 +418,7 @@ class pgsql_driver : public uvcpp_db_driver {
 
   void close() {
     if (conn_) {
-      PQfinish(conn_);
+      api().PQfinish(conn_);
       conn_ = nullptr;
     }
   }
@@ -312,13 +428,13 @@ class pgsql_driver : public uvcpp_db_driver {
       *err = "PostgreSQL 连接没打开";
       return uvcpp_db_status::NOT_CONNECTED;
     }
-    if (PQstatus(conn_) != CONNECTION_OK) {
-      *err = std::string("PostgreSQL 连接已失效：") + PQerrorMessage(conn_);
+    if (api().PQstatus(conn_) != CONNECTION_OK) {
+      *err = std::string("PostgreSQL 连接已失效：") + api().PQerrorMessage(conn_);
       return uvcpp_db_status::EXEC_FAILED;
     }
     // PQstatus 只看得到**本地**已知的状态（对端悄悄消失时它照样是 OK），
     // 所以要真发一次极轻的往返。
-    pg_result res(PQexec(conn_, "SELECT 1"));
+    pg_result res(api().PQexec(conn_, "SELECT 1"));
     if (res.status() != PGRES_TUPLES_OK) {
       *err = std::string("PostgreSQL ping 失败：") + pq_error(res.get());
       return uvcpp_db_status::EXEC_FAILED;
@@ -338,7 +454,7 @@ class pgsql_driver : public uvcpp_db_driver {
       return uvcpp_db_status::MISUSE;
     }
     if (params.empty()) {
-      pg_result res(PQexec(conn_, sql.c_str()));
+      pg_result res(api().PQexec(conn_, sql.c_str()));
       return fill_table(res, out, err);
     }
     return exec_params(sql, params, out, nullptr, err);
@@ -353,7 +469,7 @@ class pgsql_driver : public uvcpp_db_driver {
       return uvcpp_db_status::NOT_CONNECTED;
     }
     if (params.empty()) {
-      pg_result res(PQexec(conn_, sql.c_str()));
+      pg_result res(api().PQexec(conn_, sql.c_str()));
       return fill_table(res, nullptr, err, affected);
     }
     return exec_params(sql, params, nullptr, affected, err);
@@ -368,17 +484,17 @@ class pgsql_driver : public uvcpp_db_driver {
     // `lastval()` 是"本会话最近一次 nextval()"，语义上最接近 MySQL 的
     // LAST_INSERT_ID()。会话里没取过序列时它报 55000 —— 那不是错误，是
     // "这张表没有序列"，所以映射成 UNSUPPORTED 而不是 EXEC_FAILED。
-    pg_result res(PQexec(conn_, "SELECT lastval()"));
+    pg_result res(api().PQexec(conn_, "SELECT lastval()"));
     if (res.status() != PGRES_TUPLES_OK) {
       *err = "这个会话还没用过序列（表没有 SERIAL/IDENTITY 列？）";
       return uvcpp_db_status::UNSUPPORTED;
     }
-    if (PQntuples(res.get()) < 1 || PQgetisnull(res.get(), 0, 0)) {
+    if (api().PQntuples(res.get()) < 1 || api().PQgetisnull(res.get(), 0, 0)) {
       *err = "lastval() 没有返回行";
       return uvcpp_db_status::UNSUPPORTED;
     }
     out->set_int64(static_cast<int64_t>(
-        std::strtoll(PQgetvalue(res.get(), 0, 0), nullptr, 10)));
+        std::strtoll(api().PQgetvalue(res.get(), 0, 0), nullptr, 10)));
     return uvcpp_db_status::OK;
   }
 
@@ -400,7 +516,7 @@ class pgsql_driver : public uvcpp_db_driver {
     }
     std::vector<char> buf(text.size() * 2 + 1);
     int error = 0;
-    const size_t n = PQescapeStringConn(conn_, buf.data(), text.c_str(),
+    const size_t n = api().PQescapeStringConn(conn_, buf.data(), text.c_str(),
                                         text.size(), &error);
     if (error != 0) {
       // 走到这里说明连接里存的编码信息不对（服务端字符集与 client_encoding
@@ -423,10 +539,10 @@ class pgsql_driver : public uvcpp_db_driver {
       out.push_back('"');
       return out;
     }
-    char* quoted = PQescapeIdentifier(conn_, ident.c_str(), ident.size());
+    char* quoted = api().PQescapeIdentifier(conn_, ident.c_str(), ident.size());
     if (!quoted) return std::string();
     const std::string out(quoted);
-    PQfreemem(quoted);
+    api().PQfreemem(quoted);
     return out;
   }
 
@@ -504,10 +620,10 @@ class pgsql_driver : public uvcpp_db_driver {
  private:
   const char* pq_error(PGresult* res) const {
     if (res) {
-      const char* m = PQresultErrorMessage(res);
+      const char* m = api().PQresultErrorMessage(res);
       if (m && m[0]) return m;
     }
-    return conn_ ? PQerrorMessage(conn_) : "连接已关闭";
+    return conn_ ? api().PQerrorMessage(conn_) : "连接已关闭";
   }
 
   /// `PQexecParams`。`out` 与 `affected` 至少有一个非空（调用方保证）。
@@ -531,7 +647,7 @@ class pgsql_driver : public uvcpp_db_driver {
                        : params[i].to_text();
       values[i] = storage[i].c_str();
     }
-    pg_result res(PQexecParams(conn_, sql.c_str(),
+    pg_result res(api().PQexecParams(conn_, sql.c_str(),
                                static_cast<int>(params.size()), nullptr,
                                values.empty() ? nullptr : &values[0], nullptr,
                                nullptr, 0));
@@ -550,7 +666,7 @@ class pgsql_driver : public uvcpp_db_driver {
     const ExecStatusType st = res.status();
     if (st == PGRES_COMMAND_OK) {
       if (affected) {
-        const char* tuples = PQcmdTuples(res.get());
+        const char* tuples = api().PQcmdTuples(res.get());
         *affected = (tuples && tuples[0]) ? std::strtoll(tuples, nullptr, 10) : 0;
       }
       if (out) out->set_affected_rows(0);
@@ -558,20 +674,20 @@ class pgsql_driver : public uvcpp_db_driver {
     }
     if (st != PGRES_TUPLES_OK) {
       *err = std::string("PostgreSQL 执行失败：") + pq_error(res.get());
-      return sqlstate_status(PQresultErrorField(res.get(), PG_DIAG_SQLSTATE));
+      return sqlstate_status(api().PQresultErrorField(res.get(), PG_DIAG_SQLSTATE));
     }
     if (out) fill_rows(res.get(), out);
-    if (affected) *affected = PQntuples(res.get());
+    if (affected) *affected = api().PQntuples(res.get());
     return uvcpp_db_status::OK;
   }
 
   void fill_rows(PGresult* res, uvcpp_db_table* out) {
-    const int ncols = PQnfields(res);
-    const int nrows = PQntuples(res);
+    const int ncols = api().PQnfields(res);
+    const int nrows = api().PQntuples(res);
     std::vector<std::string> names;
     names.reserve(static_cast<size_t>(ncols));
     for (int c = 0; c < ncols; ++c) {
-      const char* n = PQfname(res, c);
+      const char* n = api().PQfname(res, c);
       names.push_back(n ? n : "");
     }
     out->reset_columns(std::move(names));
@@ -579,12 +695,12 @@ class pgsql_driver : public uvcpp_db_driver {
     for (int r = 0; r < nrows; ++r) {
       uvcpp_db_row& row = out->add_row();
       for (int c = 0; c < ncols; ++c) {
-        if (PQgetisnull(res, r, c)) {
+        if (api().PQgetisnull(res, r, c)) {
           row.push(uvcpp_db_value());
           continue;
         }
-        row.push(value_from_pg(PQftype(res, c), PQgetvalue(res, r, c),
-                               PQgetlength(res, r, c)));
+        row.push(value_from_pg(api().PQftype(res, c), api().PQgetvalue(res, r, c),
+                               api().PQgetlength(res, r, c)));
       }
     }
     out->set_affected_rows(nrows);
@@ -596,7 +712,7 @@ class pgsql_driver : public uvcpp_db_driver {
       if (err) *err = "PostgreSQL 连接没打开";
       return uvcpp_db_status::NOT_CONNECTED;
     }
-    pg_result res(PQexec(conn_, sql));
+    pg_result res(api().PQexec(conn_, sql));
     if (res.status() != PGRES_COMMAND_OK) {
       if (err) {
         *err = std::string("PostgreSQL 执行失败（") + sql + "）：" +

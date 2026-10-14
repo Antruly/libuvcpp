@@ -155,6 +155,18 @@
 #  define UVCPP_DB_PGSQL_ENABLE @UVCPP_DB_PGSQL_ENABLE@
 #endif
 
+/* MySQL / PostgreSQL 两个后端的符号是**链接进来的**还是**运行时取**的。
+   它是"这份产物长什么样"，不是"有哪些模块"，但同样必须让使用者看得见：这两条
+   路的**失败方式**不一样（链接的那条在加载期就报缺库、进程起不来；运行时加载的
+   那条进程照起，真去连时才拿到 NO_DRIVER），而使用者拿到一句错误信息之后要判断的
+   正是"这是我没装库还是这份包没编这个后端"。 */
+#if defined(UVCPP_DB_RUNTIME_LOAD) && (UVCPP_DB_RUNTIME_LOAD != @UVCPP_DB_RUNTIME_LOAD@)
+#  error "UVCPP_DB_RUNTIME_LOAD=@UVCPP_DB_RUNTIME_LOAD@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_RUNTIME_LOAD
+#  define UVCPP_DB_RUNTIME_LOAD @UVCPP_DB_RUNTIME_LOAD@
+#endif
+
 #if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
 #  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
 #endif

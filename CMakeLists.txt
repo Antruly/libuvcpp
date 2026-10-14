@@ -190,6 +190,23 @@ option(UVCPP_DB_SQLITE_FROM_SOURCE
   "Build the SQLite backend from a pinned source amalgamation (static) instead of the system libsqlite3" OFF)
 option(UVCPP_ENABLE_DB_MYSQL  "Build the MySQL backend of the db module (needs libmysqlclient)" ON)
 option(UVCPP_ENABLE_DB_PGSQL  "Build the PostgreSQL backend of the db module (needs libpq)" ON)
+# MySQL / PostgreSQL 两个后端**不在链接行上出现**，改成运行时打开客户端库。
+#
+# 这是给**预编译包**用的：`DT_NEEDED`（Windows 上是导入表）是**加载期**解析的，
+# 链上 libmysqlclient/libpq 就等于"没装这两种客户端库的机器上连加载都失败"——
+# 哪怕使用者只跑 HTTP、一行 db 代码都不碰。开了这个开关之后，那种机器上除"真去连
+# MySQL/PG"之外一切照常，而真去连时拿到的是 `uvcpp_db_status::NO_DRIVER` 加一句
+# 写清了试过哪些库名的话（`uvcpp_db_client::last_error()`）。
+#
+# 注意它**只管"符号从哪来"**，不改"后端在不在"：仍然要有 `mysql.h`/`libpq-fe.h`
+# 才能把后端编进来（头是编译期的东西，运行时加载也省不掉），`UVCPP_DB_*_ENABLE`
+# 的取值照旧由头在不在决定。所以这个开关**不会**让一个原本编不出 MySQL 后端的
+# 环境凭空多出这个后端。
+#
+# 与 `UVCPP_DB_SQLITE_FROM_SOURCE` / `UVCPP_BROTLI_FROM_SOURCE`（上面）是同一个
+# 形状：名字说的是"这份依赖怎么来"。
+option(UVCPP_DB_RUNTIME_LOAD
+  "Load the MySQL/PostgreSQL client libraries at run time instead of linking them (keeps the artifact free of DT_NEEDED entries for them)" OFF)
 
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
@@ -1119,34 +1136,84 @@ if(UVCPP_ENABLE_DB)
     find_path(UVCPP_DB_MYSQL_INCLUDE_DIR
       NAMES mysql.h
       PATH_SUFFIXES mysql include/mysql)
-    find_library(UVCPP_DB_MYSQL_LIBRARY
-      NAMES mysqlclient libmysqlclient mysqlclient_r mariadb)
-    if(UVCPP_DB_MYSQL_INCLUDE_DIR AND UVCPP_DB_MYSQL_LIBRARY)
+    # `UVCPP_DB_RUNTIME_LOAD=ON` 时**不找库**：符号由 dlsym 在运行时取，链接行上
+    # 多一条 libmysqlclient 正是这个开关要消掉的东西。头照找 —— 头是编译期的
+    # 东西（`MYSQL_BIND`/`MYSQL_FIELD` 的布局要从真的 mysql.h 里读），运行时加载
+    # 也省不掉。于是"配置期找不到库"不再等于"这个后端不存在"。
+    if(NOT UVCPP_DB_RUNTIME_LOAD)
+      find_library(UVCPP_DB_MYSQL_LIBRARY
+        NAMES mysqlclient libmysqlclient mysqlclient_r mariadb)
+    endif()
+    if(UVCPP_DB_MYSQL_INCLUDE_DIR AND
+       (UVCPP_DB_RUNTIME_LOAD OR UVCPP_DB_MYSQL_LIBRARY))
       list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_MYSQL_INCLUDE_DIR}")
-      list(APPEND UVCPP_DB_LINK_LIBS "${UVCPP_DB_MYSQL_LIBRARY}")
-      message(STATUS "db: MySQL 后端开（${UVCPP_DB_MYSQL_LIBRARY}）")
+      if(UVCPP_DB_RUNTIME_LOAD)
+        message(STATUS
+          "db: MySQL 后端开（运行时加载，不链 libmysqlclient；"
+          "头来自 ${UVCPP_DB_MYSQL_INCLUDE_DIR}）")
+      else()
+        list(APPEND UVCPP_DB_LINK_LIBS "${UVCPP_DB_MYSQL_LIBRARY}")
+        message(STATUS "db: MySQL 后端开（${UVCPP_DB_MYSQL_LIBRARY}）")
+      endif()
     else()
-      message(WARNING
-        "UVCPP_ENABLE_DB_MYSQL=ON 但找不到 libmysqlclient（要 mysql.h 与 "
-        "libmysqlclient）。已强制关闭这个后端 —— 其余后端照编。"
-        "指定位置用 -DCMAKE_PREFIX_PATH=… 或 -DUVCPP_DB_MYSQL_INCLUDE_DIR=… "
-        "-DUVCPP_DB_MYSQL_LIBRARY=…。")
+      # 两种缺法的出路不同，所以分两句：`UVCPP_DB_RUNTIME_LOAD=ON` 时少的只可能
+      # 是头（库根本不参与配置），这时候让人去装 `-dev` 包是对的；关着的时候
+      # "找不到库"才是常见的那一种。
+      if(UVCPP_DB_RUNTIME_LOAD)
+        message(WARNING
+          "UVCPP_ENABLE_DB_MYSQL=ON 但找不到 mysql.h。已强制关闭这个后端 —— "
+          "其余后端照编。`UVCPP_DB_RUNTIME_LOAD=ON` 不等于不用头："
+          "`MYSQL_BIND` 这些类型要从真的 mysql.h 里读，所以仍然需要一个装了"
+          "头文件的客户端库（Debian/Ubuntu 上是 libmysqlclient-dev 或 "
+          "libmariadb-dev）。")
+      else()
+        message(WARNING
+          "UVCPP_ENABLE_DB_MYSQL=ON 但找不到 libmysqlclient（要 mysql.h 与 "
+          "libmysqlclient）。已强制关闭这个后端 —— 其余后端照编。"
+          "指定位置用 -DCMAKE_PREFIX_PATH=… 或 -DUVCPP_DB_MYSQL_INCLUDE_DIR=… "
+          "-DUVCPP_DB_MYSQL_LIBRARY=…。")
+      endif()
       set(UVCPP_ENABLE_DB_MYSQL OFF)
     endif()
   endif()
 
   # ---- PostgreSQL ----
   if(UVCPP_ENABLE_DB_PGSQL)
-    find_package(PostgreSQL QUIET)
-    if(PostgreSQL_FOUND)
-      list(APPEND UVCPP_DB_LINK_LIBS PostgreSQL::PostgreSQL)
-      message(STATUS "db: PostgreSQL 后端开（libpq ${PostgreSQL_VERSION_STRING}）")
+    if(UVCPP_DB_RUNTIME_LOAD)
+      # 与 MySQL 那段同一条理由：只要头。这里**故意不用**
+      # `find_package(PostgreSQL)` —— 它一个包判据同时含头与库，而
+      # "库在不在"这件事在运行时加载这条路上与我们无关；更要紧的是它会去读
+      # `PostgreSQL_LIBRARY` 那个 cache 变量，于是"上一次配置留下的库路径"
+      # 会影响这一次的成败（发布腿上就踩过这个形状的坑，见 release.yml 里
+      # `find_package(PostgreSQL QUIET)` 那句注释）。
+      find_path(UVCPP_DB_PGSQL_INCLUDE_DIR
+        NAMES libpq-fe.h
+        PATH_SUFFIXES postgresql include/postgresql pgsql include/pgsql)
+      if(UVCPP_DB_PGSQL_INCLUDE_DIR)
+        list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_PGSQL_INCLUDE_DIR}")
+        message(STATUS
+          "db: PostgreSQL 后端开（运行时加载，不链 libpq；"
+          "头来自 ${UVCPP_DB_PGSQL_INCLUDE_DIR}）")
+      else()
+        message(WARNING
+          "UVCPP_ENABLE_DB_PGSQL=ON 但找不到 libpq-fe.h。已强制关闭这个后端 —— "
+          "其余后端照编。`UVCPP_DB_RUNTIME_LOAD=ON` 不等于不用头（PQresult "
+          "这些类型要从真的 libpq-fe.h 里读），所以仍然需要一个装着头文件的"
+          "客户端库（Debian/Ubuntu 上是 libpq-dev）。")
+        set(UVCPP_ENABLE_DB_PGSQL OFF)
+      endif()
     else()
-      message(WARNING
-        "UVCPP_ENABLE_DB_PGSQL=ON 但找不到 libpq（要 libpq-fe.h 与 libpq）。"
-        "已强制关闭这个后端 —— 其余后端照编。指定位置用 -DCMAKE_PREFIX_PATH=… "
-        "或 -DPostgreSQL_INCLUDE_DIR=… -DPostgreSQL_LIBRARY=…。")
-      set(UVCPP_ENABLE_DB_PGSQL OFF)
+      find_package(PostgreSQL QUIET)
+      if(PostgreSQL_FOUND)
+        list(APPEND UVCPP_DB_LINK_LIBS PostgreSQL::PostgreSQL)
+        message(STATUS "db: PostgreSQL 后端开（libpq ${PostgreSQL_VERSION_STRING}）")
+      else()
+        message(WARNING
+          "UVCPP_ENABLE_DB_PGSQL=ON 但找不到 libpq（要 libpq-fe.h 与 libpq）。"
+          "已强制关闭这个后端 —— 其余后端照编。指定位置用 -DCMAKE_PREFIX_PATH=… "
+          "或 -DPostgreSQL_INCLUDE_DIR=… -DPostgreSQL_LIBRARY=…。")
+        set(UVCPP_ENABLE_DB_PGSQL OFF)
+      endif()
     endif()
   endif()
 
@@ -2245,6 +2312,13 @@ _uvcpp_literal01(UVCPP_DB_ENABLE        UVCPP_ENABLE_DB)
 _uvcpp_literal01(UVCPP_DB_SQLITE_ENABLE UVCPP_ENABLE_DB_SQLITE)
 _uvcpp_literal01(UVCPP_DB_MYSQL_ENABLE  UVCPP_ENABLE_DB_MYSQL)
 _uvcpp_literal01(UVCPP_DB_PGSQL_ENABLE  UVCPP_ENABLE_DB_PGSQL)
+# 名字两边**一样**，这是这份文件里唯一的一处（别的都是 `UVCPP_ENABLE_X` 对
+# `UVCPP_X_ENABLE`）。理由：它不属于那两个族里的任何一个 —— 既不是"开关某个
+# 模块"（`UVCPP_ENABLE_*`），也不只是"这份依赖怎么来"（`*_FROM_SOURCE`，那两个
+# 连宏都没有）。它同时是后两者，而且使用者要从生成头里看出这份产物走的是哪条路，
+# 所以两边同名最省事：`if(UVCPP_DB_RUNTIME_LOAD)` 在 CMake 里读的是那个
+# `option()`（ON/OFF），在源码里读的是这个字面量（1/0），指的是同一件事。
+_uvcpp_literal01(UVCPP_DB_RUNTIME_LOAD    UVCPP_DB_RUNTIME_LOAD)
 _uvcpp_literal01(UVCPP_TRY_WRITE_ENABLE UVCPP_ENABLE_TRY_WRITE)
 _uvcpp_literal01(UVCPP_UDP_GSO_ENABLE   UVCPP_ENABLE_UDP_GSO)
 
@@ -2315,6 +2389,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_DB_SQLITE_ENABLE=${UVCPP_DB_SQLITE_ENABLE}
       UVCPP_DB_MYSQL_ENABLE=${UVCPP_DB_MYSQL_ENABLE}
       UVCPP_DB_PGSQL_ENABLE=${UVCPP_DB_PGSQL_ENABLE}
+      UVCPP_DB_RUNTIME_LOAD=${UVCPP_DB_RUNTIME_LOAD}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
       UVCPP_UDP_GSO_ENABLE=${UVCPP_UDP_GSO_ENABLE}
@@ -2407,6 +2482,40 @@ if(UNIX AND NOT APPLE)
   foreach (_uvcpp_t uvcpp uvcpp_s)
     if (TARGET ${_uvcpp_t})
       target_link_options(${_uvcpp_t} PRIVATE "LINKER:--exclude-libs,ALL")
+    endif()
+  endforeach()
+endif()
+
+# -------------------------------------------------------------------------
+# `UVCPP_DB_RUNTIME_LOAD` 那一档：给共享目标加 `--no-undefined`
+#
+# **为什么非要这一条。** 本仓的 `UVCPP_DB_RUNTIME_LOAD` 把 MySQL/PG 的调用点全部
+# 改成 `api().mysql_xxx(...)`，`api()` 背后是一张 `dlsym` 填出来的函数指针表 ——
+# 漏绑一个符号**没有任何链接期兜底**（那张表是普通成员，缺失就是空指针调用）。
+# 原本以为"漏改一处调用点 ⇒ 链接期 undefined reference"能当判据，**实测是错的**：
+# 共享库默认**允许**未定义符号（`ld` 不报，只是把它留给加载期），
+#
+#     nm -D -u build-dbdlopen/libuvcpp.so | grep mysql_query
+#     → U mysql_query                        （编译链接**全都过了**）
+#
+# 后果比"编不过"严重得多：`libuvcpp.so` 带着一个没人提供的 `mysql_query`，
+# 于是**任何一个使用者**在 `dlopen`/加载这个 `.so` 时就炸 —— 正是运行时加载
+# 要消灭的那个形状。只有真去链一个**可执行文件**时才会红
+# （`/usr/bin/ld: ../../libuvcpp.so: undefined reference to 'mysql_query'`），
+# 而 `UVCPP_BUILD_TESTS=OFF` 的树上连那一步都没有。
+#
+# 所以在这里把不变式交还给链接器：这一档下共享库里**不许**有未定义符号。
+# 符号本来全都该由我们自己的目标文件或 NEEDED 里的库提供，所以这一条能过；
+# 过不去就说明确实漏了一处（或某个绑定漏了）。
+#
+# 只加在 `UVCPP_DB_RUNTIME_LOAD` 这一档：不变式是它引进的、也只有它在破坏时不报错。
+# 直接链那一档没有这个风险（调用点解析到链接进来的库），不该被顺手改掉链接行为。
+# 与 `--exclude-libs,ALL` 一样只给 ELF，也只给**共享**目标（静态库没有"未定义符号"
+# 这个概念，那要等最终链接才知道）。
+if(UVCPP_DB_RUNTIME_LOAD AND UNIX AND NOT APPLE)
+  foreach (_uvcpp_t uvcpp uvcpp_s)
+    if (TARGET ${_uvcpp_t})
+      target_link_options(${_uvcpp_t} PRIVATE "LINKER:--no-undefined")
     endif()
   endforeach()
 endif()
@@ -3001,11 +3110,21 @@ endif()
 # 它一旦装出去，"驱动接口可以随便改"这句话就不成立了。三个后端的 .cpp 与
 # `uvcpp_db_factory.cpp` 都带它，所以它必须留在源树里。
 #
+# 另外三份也是私有的（`UVCPP_DB_RUNTIME_LOAD` 那套）：
+#   * `uvcpp_db_mysql_api.h` / `uvcpp_db_pgsql_api.h` —— 函数指针表，就是后端
+#     的内部 ABI；它们还各自 `#include <mysql/mysql.h>` / `<libpq-fe.h>`，
+#     而**公开面一个客户端库的类型都不出现**（`uvcpp_db_client.h` 只带自己的
+#     头），装出去等于让使用者以为那份客户端头也是我们的依赖。
+#   * `uvcpp_db_runtime_load.h` —— `dlopen`/`dlsym` 的两个原语，纯内部。
+#
 # **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
 # 那个脚本自己按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，
 # `package_release.py` 打出来的包里照样会带上它。
 file(GLOB DB_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/db/*.h")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_driver\\.h$")
+list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_mysql_api\\.h$")
+list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_pgsql_api\\.h$")
+list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_runtime_load\\.h$")
 if(DB_HEADER_FILES AND UVCPP_ENABLE_DB)
   install(FILES ${DB_HEADER_FILES} DESTINATION include/db)
 endif()

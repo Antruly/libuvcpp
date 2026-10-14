@@ -20,16 +20,13 @@
 
 #if UVCPP_DB_ENABLE && UVCPP_DB_MYSQL_ENABLE
 
-// mysql.h 的位置各家发行版不一样：Debian/Ubuntu 装在 `<mysql/mysql.h>`，
-// 但官方 tarball 与 vcpkg 是扁平的 `<mysql.h>`。CMake 那边两个候选目录都挂。
-#if defined(__has_include)
-#if __has_include(<mysql/mysql.h>)
-#include <mysql/mysql.h>
-#else
-#include <mysql.h>
-#endif
-#else
-#include <mysql.h>
+// `mysql.h` 本身（含"各家发行版装在哪儿"那两级查找）与**要哪些符号**都在这个头
+// 里 —— 那份 33 个符号的清单这个文件与它各用一半：这边展开成绑定/初始化，
+// 那边展开成结构体成员。理由写在 `uvcpp_db_mysql_api.h` 的开头。
+#include "db/uvcpp_db_mysql_api.h"
+
+#if UVCPP_DB_RUNTIME_LOAD
+#include "db/uvcpp_db_runtime_load.h"
 #endif
 
 #include <chrono>
@@ -38,6 +35,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -45,7 +43,160 @@
 namespace uvcpp {
 namespace db_detail {
 
+// ---------------------------------------------------------------------------
+// 那 33 个符号从哪来：两条形态，一个调用点
+// ---------------------------------------------------------------------------
+// 不开 `UVCPP_DB_RUNTIME_LOAD`（默认）时就是**直接链接**：表在编译期填好，每个
+// 成员都是指向链接器解析过的符号的地址常量，落在 `.data.rel.ro` 里 —— 没有运行时
+// 初始化，`nm -u` 里那 33 个符号照旧由链接行提供，今天的行为一个字没变。
+//
+// 开了之后改成**运行时加载**：先打开一份客户端库，再逐个取符号填表。收益不在库里，
+// 在**用这份预编译包的人**身上：`DT_NEEDED` 是**加载期**解析的，链上
+// libmysqlclient 意味着"没装 MySQL 客户端库的机器上连加载都失败"，哪怕一行 db
+// 代码都不跑、只用 HTTP 也一样。改成运行时加载之后，那种机器上除了"真去连 MySQL"
+// 之外一切照常，而真去连时拿到的是一句写清了试过哪些名字的话。
+//
+// 代价是**少了一层链接器兜底**：这条路上那 33 个符号一个都不出现在 `nm -u` 里，
+// 所以"清单少写一个成员"不会有链接错误替你抓，第一次调用它就是跳到空指针。
+// 这正是上面那份清单只写一遍、由 X 宏展开到三处的唯一理由。
+#if UVCPP_DB_RUNTIME_LOAD
+
 namespace {
+
+/// 候选名。顺序是"最可能命中"的顺序，而**不是**字典序：
+///
+///   * 带版本号的 soname 排前面：运行时机器上装的是 `libmysqlclient21` /
+///     `libmariadb3` 这种**运行时**包，不带版本号的 `libmysqlclient.so` 那个
+///     符号链接属于 `-dev` 包，没装 dev 的机器上根本不存在 —— 把它排前面会让
+///     "装了的机器反而找不到"。
+///   * MariaDB 的 `libmariadb` 必须在列：它与 libmysqlclient **ABI 兼容**
+///     （同一个 C API，MariaDB 是 MySQL 的分支），Debian/Ubuntu 上
+///     `libmysqlclient21` 与 `libmariadb3` 常常只装后者。少了它，一个
+///     `apt install mariadb-client` 的机器会被判成"没装客户端库"。
+///   * `libmysqlclient.so.24` / `.so.21` 都列：前者是 MySQL 8.4 起换的 soname，
+///     后者是 8.0/MariaDB 时代最广的那一个（"20"是 5.7 的，也能用，但它已经不
+///     在任何还支持的发行版里，列它只增加噪音 —— 真遇到的话 `-dev` 的那个
+///     `.so` 和 `libmariadb.so.3` 都在前面兜着）。
+const char* const kClientLibraryNames[] = {
+#if defined(_WIN32)
+    // Windows 上没有 soname 那一套：DLL 名由构建者定，而这几个是官方与
+    // vcpkg/msys2 各自给的默认名。`libmysql.dll` 是 vcpkg 的，`libmariadb.dll`
+    // 是 MariaDB Connector/C 的。
+    "libmysql.dll",
+    "libmariadb.dll",
+    "mysqlclient.dll",
+    nullptr
+#elif defined(__APPLE__)
+    "libmysqlclient.21.dylib",
+    "libmariadb.3.dylib",
+    "libmysqlclient.dylib",
+    nullptr
+#else
+    "libmysqlclient.so.21",
+    "libmysqlclient.so.24",
+    "libmariadb.so.3",
+    "libmysqlclient.so",
+    nullptr
+#endif
+};
+
+/// 逐个取符号。**缺一个就整张表作废**（返回 false），不"取到几个算几个"：
+/// 半张表比没有表更坏 —— 前 20 个函数能用、第 21 个跳到空指针，而这种错要到
+/// 用户跑某一句特定的 SQL 时才现形。缺哪个用 `missing` 报出去（它是 **#name**，
+/// 与 `nm -u` 里的拼法一致）。
+bool bind_client_api(void* handle, mysql_api* t, const char** missing) {
+#define UVCPP_DB_MYSQL_BIND(name)                    \
+  t->name = reinterpret_cast<decltype(t->name)>(     \
+      uvcpp_db_lookup_symbol(handle, #name));        \
+  if (t->name == nullptr) {                          \
+    *missing = #name;                                \
+    return false;                                    \
+  }
+  UVCPP_DB_MYSQL_SYMBOLS(UVCPP_DB_MYSQL_BIND)
+#undef UVCPP_DB_MYSQL_BIND
+  return true;
+}
+
+/// 加载结论。`table` 只在 `ok` 为真时可信；失败时它是一张**全空**的表，这是
+/// 故意的 —— 调用点本该先看 `error`，万一漏看，空指针比野指针好定位。
+struct api_state {
+  mysql_api table;
+  bool ok;
+  std::string loaded_name;
+  std::string error;
+};
+
+api_state load_client_api() {
+  api_state st = {mysql_api(), false, std::string(), std::string()};
+
+  std::string tried;
+  void* handle = uvcpp_db_open_client_library(kClientLibraryNames,
+                                              "UVCPP_DB_MYSQL_LIBRARY", &tried,
+                                              &st.loaded_name);
+  if (handle == nullptr) {
+    st.error =
+        "加载 MySQL 客户端库失败，试过这些名字都没打开：" + tried +
+        "。装一个 MySQL 或 MariaDB 的**客户端库**（Debian/Ubuntu 上是 "
+        "libmysqlclient21 或 libmariadb3，RHEL 系是 mysql-libs 或 "
+        "mariadb-connector-c），或者把环境变量 UVCPP_DB_MYSQL_LIBRARY 指到那份"
+        "动态库的完整路径。只用 SQLite 的话不用管这一条。";
+    return st;
+  }
+
+  const char* missing = nullptr;
+  if (!bind_client_api(handle, &st.table, &missing)) {
+    // 这条与"没装库"是**两回事**，所以措辞要分开：库在，只是版本不对（或者
+    // 拿到的不是 MySQL 客户端库）。把文件名写进去，否则没法定位。
+    st.error = "MySQL 客户端库 " + st.loaded_name + " 里缺少符号 " + missing +
+               " —— 版本太旧或不是 MySQL/MariaDB 的客户端库。";
+    return st;
+  }
+  st.ok = true;
+  return st;
+}
+
+api_state& client_api_state() {
+  // C++11 的函数内静态量：初始化**线程安全**（magic static），且不是编译期
+  // 初始化 ⇒ 加载发生在**第一次真的要用 MySQL** 的时候，不是加载这份库的时候。
+  // 后者很重要：把 dlopen 放进命名空间作用域的动态初始化里，任何 `import`/链上
+  // 这份库的程序都会在启动时去开一次 libmysqlclient。
+  static api_state st = load_client_api();
+  return st;
+}
+
+}  // namespace
+
+const mysql_api& uvcpp_db_mysql_api() { return client_api_state().table; }
+
+const std::string& uvcpp_db_mysql_load_error() {
+  return client_api_state().error;
+}
+
+#else  // 直接链接
+
+namespace {
+
+/// 编译期就填好的表。每一项都是地址常量 ⇒ 静态初始化，没有运行时开销，
+/// 也没有"这个变量初始化了没有"的问题。
+#define UVCPP_DB_MYSQL_ADDR(name) &::name,
+const mysql_api kClientApi = {UVCPP_DB_MYSQL_SYMBOLS(UVCPP_DB_MYSQL_ADDR)};
+#undef UVCPP_DB_MYSQL_ADDR
+
+}  // namespace
+
+const mysql_api& uvcpp_db_mysql_api() { return kClientApi; }
+
+#endif  // UVCPP_DB_RUNTIME_LOAD
+
+namespace {
+
+/// 那把函数表，短名字。下面每一处对客户端库的调用都写成 `api().mysql_xxx(...)`。
+///
+/// 是一个**函数**而不是一个文件级的 `const mysql_api& api = ...`：后者是动态
+/// 初始化，会让 dlopen 发生在**这份库被加载的时候**，而不是"要用 MySQL 的时候"。
+/// 名字取短是因为它要出现在 82 行里，而每一行都是 `api().` 开头 —— 长的前缀
+/// 会把真正的信息（调的是哪个函数）挤出视野。
+const mysql_api& api() { return uvcpp_db_mysql_api(); }
 
 /// `MYSQL_BIND::is_null` / `::error` 指向的元素类型：MySQL 8 是 `bool`，
 /// MySQL 5.7 与 MariaDB 是 `my_bool`（即 `char`）。写死哪一个都会在另一半
@@ -112,11 +263,24 @@ bool sql_has_placeholder(const std::string& sql) {
   return sql.find('?') != std::string::npos;
 }
 
-/// `mysql_library_init` 每进程只该调一次，而且它**不是线程安全**的
+/// `mysql_server_init` 每进程只该调一次，而且它**不是线程安全**的
 /// （文档原话：调用它之前不能起别的线程）。用 `std::call_once` 收口。
+///
+/// ★ 这里写的是**符号名** `mysql_server_init`，不是源码里那个 `mysql_library_init`
+/// —— 后者在 `mysql.h:421` 上是一条 `#define`，而 `nm -u` 里出现的是前者。
+/// 表里的成员名一律照符号名（清单是从 `nm -u` 抄的），所以这一处也跟着改。
+///
+/// 空表也要能过：运行时加载失败时 `api()` 交出来的每个成员都是空指针，所以
+/// 先判一下再调 —— 这个函数在**构造函数**里被调用，那时还没有 `err` 可以带
+/// 原因出去，所以不能在这里报错（真要报错的地方是 `open()`）。
 void ensure_library_initialized() {
   static std::once_flag once;
-  std::call_once(once, []() { mysql_library_init(0, nullptr, nullptr); });
+  std::call_once(once, []() {
+    const mysql_api& a = api();
+    if (a.mysql_server_init != nullptr) {
+      a.mysql_server_init(0, nullptr, nullptr);
+    }
+  });
 }
 
 /// 这些类型驱动按**二进制** `MYSQL_TIME` 写、`length` 报 `sizeof(MYSQL_TIME)`。
@@ -268,7 +432,18 @@ class mysql_driver : public uvcpp_db_driver {
 
   uvcpp_db_status open(const uvcpp_db_url& url, std::string* err) {
     close();
-    conn_ = mysql_init(nullptr);
+    // 第一件事，早于任何一次 `api().xxx`：客户端库在不在。开了
+    // `UVCPP_DB_RUNTIME_LOAD` 时这是**使用者最可能撞上的失败**（他没装客户端库），
+    // 所以它必须是一句能照着做的话，而不是一次空指针跳转。不开那个开关时这句
+    // 恒为空串，编译器会把整段优化掉。
+    const std::string& load_error = uvcpp_db_mysql_load_error();
+    if (!load_error.empty()) {
+      *err = load_error;
+      // `NO_DRIVER` 而不是 `OPEN_FAILED`：返回码表里这两格的分工正是"这个后端
+      // 用不了"与"连上了但没连成"。
+      return uvcpp_db_status::NO_DRIVER;
+    }
+    conn_ = api().mysql_init(nullptr);
     if (!conn_) {
       *err = "mysql_init 失败（内存不够）";
       return uvcpp_db_status::OUT_OF_MEMORY;
@@ -279,42 +454,42 @@ class mysql_driver : public uvcpp_db_driver {
     unsigned int connect_timeout = 10;
     unsigned int io_timeout = static_cast<unsigned int>(
         timeout_ms_ > 0 ? (timeout_ms_ + 999) / 1000 : 5);
-    mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
-    mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &io_timeout);
-    mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &io_timeout);
+    api().mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
+    api().mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &io_timeout);
+    api().mysql_options(conn_, MYSQL_OPT_WRITE_TIMEOUT, &io_timeout);
 
     // CLIENT_MULTI_STATEMENTS：一次 execute() 里能放多条以分号隔开的语句。
     // 开着它是**便利**也是**风险**（拼接的 SQL 能注入第二条语句），所以
     // `doc/db-guide.md` 里明写：拼接 SQL 时必须参数化。
-    MYSQL* ok = mysql_real_connect(
+    MYSQL* ok = api().mysql_real_connect(
         conn_, url.host.empty() ? nullptr : url.host.c_str(),
         url.user.empty() ? nullptr : url.user.c_str(),
         url.password.empty() ? nullptr : url.password.c_str(),
         url.database.empty() ? nullptr : url.database.c_str(),
         url.port ? url.port : 3306, nullptr, CLIENT_MULTI_STATEMENTS);
     if (!ok) {
-      *err = std::string("连接 MySQL 失败：") + mysql_error(conn_);
-      mysql_close(conn_);
+      *err = std::string("连接 MySQL 失败：") + api().mysql_error(conn_);
+      api().mysql_close(conn_);
       conn_ = nullptr;
       return uvcpp_db_status::OPEN_FAILED;
     }
 
     // utf8mb4 优先，失败退 utf8（5.5.3 之前的服务端不认 utf8mb4）。
     // 退不成=utf8 失败才算开不了 —— 用别的字符集连上去，中文会静默变问号。
-    if (mysql_set_character_set(conn_, "utf8mb4") != 0 &&
-        mysql_set_character_set(conn_, "utf8") != 0) {
+    if (api().mysql_set_character_set(conn_, "utf8mb4") != 0 &&
+        api().mysql_set_character_set(conn_, "utf8") != 0) {
       *err = std::string("设置字符集失败（utf8mb4 与 utf8 都不行）：") +
-             mysql_error(conn_);
-      mysql_close(conn_);
+             api().mysql_error(conn_);
+      api().mysql_close(conn_);
       conn_ = nullptr;
       return uvcpp_db_status::OPEN_FAILED;
     }
 
     // 锁等待超时压到 3 秒：默认的 50 秒会让一次偶发锁冲突卡住整个调用方。
     // 失败**不算开不了连接**（老服务端/没有 InnoDB 时会失败），所以只记不返回。
-    if (mysql_query(conn_, "SET innodb_lock_wait_timeout=3") != 0) {
+    if (api().mysql_query(conn_, "SET innodb_lock_wait_timeout=3") != 0) {
       last_warning_ = std::string("SET innodb_lock_wait_timeout 失败：") +
-                      mysql_error(conn_);
+                      api().mysql_error(conn_);
     }
 
     in_transaction_ = false;
@@ -323,7 +498,7 @@ class mysql_driver : public uvcpp_db_driver {
 
   void close() {
     if (conn_) {
-      mysql_close(conn_);
+      api().mysql_close(conn_);
       conn_ = nullptr;
     }
     in_transaction_ = false;
@@ -334,8 +509,8 @@ class mysql_driver : public uvcpp_db_driver {
       *err = "MySQL 连接没打开";
       return uvcpp_db_status::NOT_CONNECTED;
     }
-    if (mysql_ping(conn_) != 0) {
-      *err = std::string("MySQL ping 失败：") + mysql_error(conn_);
+    if (api().mysql_ping(conn_) != 0) {
+      *err = std::string("MySQL ping 失败：") + api().mysql_error(conn_);
       return uvcpp_db_status::EXEC_FAILED;
     }
     return uvcpp_db_status::OK;
@@ -390,7 +565,7 @@ class mysql_driver : public uvcpp_db_driver {
     }
     // `mysql_insert_id` 是连接级的、由上一次 INSERT 写下的，不用再发一次
     // `SELECT LAST_INSERT_ID()` —— 少一次往返，而且不会与别的语句打架。
-    const my_ulonglong id = mysql_insert_id(conn_);
+    const my_ulonglong id = api().mysql_insert_id(conn_);
     if (id == 0) {
       *err = "上一次 INSERT 没有产生自增值（没插过 / 表没有 AUTO_INCREMENT）";
       return uvcpp_db_status::UNSUPPORTED;
@@ -433,7 +608,7 @@ class mysql_driver : public uvcpp_db_driver {
       return out;
     }
     std::vector<char> buf(text.size() * 2 + 1);
-    const unsigned long n = mysql_real_escape_string(
+    const unsigned long n = api().mysql_real_escape_string(
         conn_, buf.data(), text.c_str(), static_cast<unsigned long>(text.size()));
     return std::string(buf.data(), n);
   }
@@ -499,7 +674,7 @@ class mysql_driver : public uvcpp_db_driver {
     // 所以这里改了只影响后续的 SELECT，文档里写明。
     const std::string sql =
         "SET SESSION max_execution_time = " + std::to_string(timeout_ms_);
-    mysql_query(conn_, sql.c_str());
+    api().mysql_query(conn_, sql.c_str());
   }
 
  private:
@@ -514,24 +689,24 @@ class mysql_driver : public uvcpp_db_driver {
 
   uvcpp_db_status query_raw(const std::string& sql, uvcpp_db_table* out,
                             std::string* err) {
-    if (mysql_query(conn_, sql.c_str()) != 0) {
-      *err = std::string("MySQL 执行失败：") + mysql_error(conn_);
+    if (api().mysql_query(conn_, sql.c_str()) != 0) {
+      *err = std::string("MySQL 执行失败：") + api().mysql_error(conn_);
       // 语法错 / 表列不存在在这里报 `PREPARE_FAILED`（判据见
       // `raw_channel_status`），不是一律 `EXEC_FAILED`。
-      return raw_channel_status(mysql_errno(conn_));
+      return raw_channel_status(api().mysql_errno(conn_));
     }
-    MYSQL_RES* res = mysql_store_result(conn_);
+    MYSQL_RES* res = api().mysql_store_result(conn_);
     if (!res) {
       // DDL 之类本来就没有结果集 —— 此时 mysql_errno 才是判据。
-      if (mysql_errno(conn_) != 0) {
-        *err = std::string("MySQL 取结果失败：") + mysql_error(conn_);
+      if (api().mysql_errno(conn_) != 0) {
+        *err = std::string("MySQL 取结果失败：") + api().mysql_error(conn_);
         return uvcpp_db_status::EXEC_FAILED;
       }
       return uvcpp_db_status::OK;
     }
 
-    const unsigned int n = mysql_num_fields(res);
-    MYSQL_FIELD* fields = mysql_fetch_fields(res);
+    const unsigned int n = api().mysql_num_fields(res);
+    MYSQL_FIELD* fields = api().mysql_fetch_fields(res);
     std::vector<std::string> names;
     names.reserve(n);
     for (unsigned int i = 0; i < n; ++i) {
@@ -544,8 +719,8 @@ class mysql_driver : public uvcpp_db_driver {
 
     int64_t rows = 0;
     MYSQL_ROW row = nullptr;
-    while ((row = mysql_fetch_row(res)) != nullptr) {
-      unsigned long* lengths = mysql_fetch_lengths(res);
+    while ((row = api().mysql_fetch_row(res)) != nullptr) {
+      unsigned long* lengths = api().mysql_fetch_lengths(res);
       uvcpp_db_row& dst = out->add_row();
       for (unsigned int i = 0; i < n; ++i) {
         if (!row[i]) {
@@ -561,17 +736,17 @@ class mysql_driver : public uvcpp_db_driver {
       }
       ++rows;
     }
-    mysql_free_result(res);
+    api().mysql_free_result(res);
     out->set_affected_rows(rows);
     return uvcpp_db_status::OK;
   }
 
   uvcpp_db_status execute_raw(const std::string& sql, int64_t* affected,
                               std::string* err) {
-    if (mysql_query(conn_, sql.c_str()) != 0) {
-      const unsigned int code = mysql_errno(conn_);
+    if (api().mysql_query(conn_, sql.c_str()) != 0) {
+      const unsigned int code = api().mysql_errno(conn_);
       if (!should_retry(code)) {
-        *err = std::string("MySQL 执行失败：") + mysql_error(conn_);
+        *err = std::string("MySQL 执行失败：") + api().mysql_error(conn_);
         return raw_channel_status(code);
       }
       return retry_execute_raw(sql, affected, err, 1);
@@ -583,15 +758,15 @@ class mysql_driver : public uvcpp_db_driver {
                                     std::string* err, int attempt) {
     if (attempt >= kMaxRetries) {
       *err = "MySQL 执行失败：重试 " + std::to_string(kMaxRetries) +
-             " 次仍拿不到锁：" + mysql_error(conn_);
+             " 次仍拿不到锁：" + api().mysql_error(conn_);
       return uvcpp_db_status::EXEC_FAILED;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(kRetryBaseDelayMs *
                                                           (1 << (attempt - 1))));
-    if (mysql_query(conn_, sql.c_str()) != 0) {
-      const unsigned int code = mysql_errno(conn_);
+    if (api().mysql_query(conn_, sql.c_str()) != 0) {
+      const unsigned int code = api().mysql_errno(conn_);
       if (!should_retry(code)) {
-        *err = std::string("MySQL 重试执行失败：") + mysql_error(conn_);
+        *err = std::string("MySQL 重试执行失败：") + api().mysql_error(conn_);
         return raw_channel_status(code);
       }
       return retry_execute_raw(sql, affected, err, attempt + 1);
@@ -600,7 +775,7 @@ class mysql_driver : public uvcpp_db_driver {
   }
 
   uvcpp_db_status finish_execute_raw(int64_t* affected, std::string* err) {
-    const my_ulonglong n = mysql_affected_rows(conn_);
+    const my_ulonglong n = api().mysql_affected_rows(conn_);
     if (affected) {
       // `mysql_affected_rows` 是 `my_ulonglong`，(my_ulonglong)-1 表示"读不出"。
       *affected = (n == static_cast<my_ulonglong>(-1))
@@ -610,11 +785,11 @@ class mysql_driver : public uvcpp_db_driver {
     // ★ 结果集必须消费掉：不消费的话，同一条连接上的下一条语句会报
     //   "Commands out of sync; you can't run this command now"。
     //   DDL（ALTER TABLE 之类）同样会返回一个空结果集，不能跳过这一步。
-    MYSQL_RES* res = mysql_store_result(conn_);
+    MYSQL_RES* res = api().mysql_store_result(conn_);
     if (res) {
-      mysql_free_result(res);
-    } else if (mysql_errno(conn_) != 0) {
-      *err = std::string("MySQL 取结果失败：") + mysql_error(conn_);
+      api().mysql_free_result(res);
+    } else if (api().mysql_errno(conn_) != 0) {
+      *err = std::string("MySQL 取结果失败：") + api().mysql_error(conn_);
       return uvcpp_db_status::EXEC_FAILED;
     }
     return uvcpp_db_status::OK;
@@ -634,9 +809,9 @@ class mysql_driver : public uvcpp_db_driver {
   uvcpp_db_status query_prepared(const std::string& sql,
                                  const std::vector<uvcpp_db_value>& params,
                                  uvcpp_db_table* out, std::string* err) {
-    MYSQL_STMT* stmt = mysql_stmt_init(conn_);
+    MYSQL_STMT* stmt = api().mysql_stmt_init(conn_);
     if (!stmt) {
-      *err = std::string("mysql_stmt_init 失败：") + mysql_error(conn_);
+      *err = std::string("mysql_stmt_init 失败：") + api().mysql_error(conn_);
       return uvcpp_db_status::OUT_OF_MEMORY;
     }
     // 从这里开始每一条出口都要 `mysql_stmt_close` —— 用一个小的守卫对象收口，
@@ -644,18 +819,18 @@ class mysql_driver : public uvcpp_db_driver {
     // 服务端的 prepared handle）。
     struct stmt_guard {
       MYSQL_STMT* s;
-      ~stmt_guard() { mysql_stmt_close(s); }
+      ~stmt_guard() { api().mysql_stmt_close(s); }
     } guard = {stmt};
 
-    if (mysql_stmt_prepare(stmt, sql.c_str(),
+    if (api().mysql_stmt_prepare(stmt, sql.c_str(),
                            static_cast<unsigned long>(sql.size())) != 0) {
       // 旧服务端在预处理协议上不支持这条语句（`ER_UNSUPPORTED_PS`）时退到裸
       // 通道。只有"本来就没参数"的调用能退 —— 有参数时裸通道没法绑定，
       // 那种情况下 1295 是真的不支持，如实报准备失败。
-      if (params.empty() && mysql_stmt_errno(stmt) == kErrUnsupportedPs) {
+      if (params.empty() && api().mysql_stmt_errno(stmt) == kErrUnsupportedPs) {
         return query_raw(sql, out, err);
       }
-      *err = std::string("MySQL 准备语句失败：") + mysql_stmt_error(stmt);
+      *err = std::string("MySQL 准备语句失败：") + api().mysql_stmt_error(stmt);
       return uvcpp_db_status::PREPARE_FAILED;
     }
 
@@ -664,21 +839,21 @@ class mysql_driver : public uvcpp_db_driver {
       return uvcpp_db_status::BIND_FAILED;
     }
 
-    if (mysql_stmt_execute(stmt) != 0) {
+    if (api().mysql_stmt_execute(stmt) != 0) {
       // 在事务里 `should_retry` 已经返回 false，所以走到重试分支必然不在事务
       // 中，重放这一条语句是安全的。
-      const bool retried = should_retry(mysql_stmt_errno(stmt)) &&
+      const bool retried = should_retry(api().mysql_stmt_errno(stmt)) &&
                            retry_prepared_execute(stmt, err);
       if (!retried) {
         if (err->empty()) {
-          *err = std::string("MySQL 执行失败：") + mysql_stmt_error(stmt);
+          *err = std::string("MySQL 执行失败：") + api().mysql_stmt_error(stmt);
         }
         return uvcpp_db_status::EXEC_FAILED;
       }
     }
 
-    if (mysql_stmt_store_result(stmt) != 0) {
-      *err = std::string("MySQL 取结果失败：") + mysql_stmt_error(stmt);
+    if (api().mysql_stmt_store_result(stmt) != 0) {
+      *err = std::string("MySQL 取结果失败：") + api().mysql_stmt_error(stmt);
       return uvcpp_db_status::EXEC_FAILED;
     }
     return read_prepared_result(stmt, out, err);
@@ -688,52 +863,52 @@ class mysql_driver : public uvcpp_db_driver {
     for (int attempt = 1; attempt < kMaxRetries; ++attempt) {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(kRetryBaseDelayMs * (1 << (attempt - 1))));
-      if (mysql_stmt_execute(stmt) == 0) return true;
-      if (!should_retry(mysql_stmt_errno(stmt))) break;
+      if (api().mysql_stmt_execute(stmt) == 0) return true;
+      if (!should_retry(api().mysql_stmt_errno(stmt))) break;
     }
-    *err = std::string("MySQL 重试执行失败：") + mysql_stmt_error(stmt);
+    *err = std::string("MySQL 重试执行失败：") + api().mysql_stmt_error(stmt);
     return false;
   }
 
   uvcpp_db_status execute_prepared(const std::string& sql,
                                    const std::vector<uvcpp_db_value>& params,
                                    int64_t* affected, std::string* err) {
-    MYSQL_STMT* stmt = mysql_stmt_init(conn_);
+    MYSQL_STMT* stmt = api().mysql_stmt_init(conn_);
     if (!stmt) {
-      *err = std::string("mysql_stmt_init 失败：") + mysql_error(conn_);
+      *err = std::string("mysql_stmt_init 失败：") + api().mysql_error(conn_);
       return uvcpp_db_status::OUT_OF_MEMORY;
     }
     struct stmt_guard {
       MYSQL_STMT* s;
-      ~stmt_guard() { mysql_stmt_close(s); }
+      ~stmt_guard() { api().mysql_stmt_close(s); }
     } guard = {stmt};
 
-    if (mysql_stmt_prepare(stmt, sql.c_str(),
+    if (api().mysql_stmt_prepare(stmt, sql.c_str(),
                            static_cast<unsigned long>(sql.size())) != 0) {
       // 与 `query_prepared` 同一处回退，理由写在那里。
-      if (params.empty() && mysql_stmt_errno(stmt) == kErrUnsupportedPs) {
+      if (params.empty() && api().mysql_stmt_errno(stmt) == kErrUnsupportedPs) {
         return execute_raw(sql, affected, err);
       }
-      *err = std::string("MySQL 准备语句失败：") + mysql_stmt_error(stmt);
+      *err = std::string("MySQL 准备语句失败：") + api().mysql_stmt_error(stmt);
       return uvcpp_db_status::PREPARE_FAILED;
     }
     bound_params bound;
     if (!bind_params(stmt, params, &bound, err)) {
       return uvcpp_db_status::BIND_FAILED;
     }
-    if (mysql_stmt_execute(stmt) != 0) {
+    if (api().mysql_stmt_execute(stmt) != 0) {
       // `retry_prepared_execute` 成功时不动 `err`；失败时它自己写好了原因。
-      const bool retried = should_retry(mysql_stmt_errno(stmt)) &&
+      const bool retried = should_retry(api().mysql_stmt_errno(stmt)) &&
                            retry_prepared_execute(stmt, err);
       if (!retried) {
         if (err->empty()) {
-          *err = std::string("MySQL 执行失败：") + mysql_stmt_error(stmt);
+          *err = std::string("MySQL 执行失败：") + api().mysql_stmt_error(stmt);
         }
         return uvcpp_db_status::EXEC_FAILED;
       }
     }
     if (affected) {
-      *affected = static_cast<int64_t>(mysql_stmt_affected_rows(stmt));
+      *affected = static_cast<int64_t>(api().mysql_stmt_affected_rows(stmt));
     }
     return uvcpp_db_status::OK;
   }
@@ -759,7 +934,7 @@ class mysql_driver : public uvcpp_db_driver {
     // 两个值（1.5.x 上实测到过：套件里"多给参数 -> BIND_FAILED"那条拿到的是
     // OK）。少给则是另一个症状：数组不够长，服务端读的是越界的绑定。
     const size_t want =
-        static_cast<size_t>(mysql_stmt_param_count(stmt));
+        static_cast<size_t>(api().mysql_stmt_param_count(stmt));
     if (want != params.size()) {
       *err = "MySQL 参数个数对不上：语句要 " + std::to_string(want) + " 个，给了 " +
              std::to_string(params.size()) + " 个";
@@ -854,8 +1029,8 @@ class mysql_driver : public uvcpp_db_driver {
       out->lengths[i] = b.buffer_length;
     }
 
-    if (mysql_stmt_bind_param(stmt, out->binds.data()) != 0) {
-      *err = std::string("绑定参数失败：") + mysql_stmt_error(stmt);
+    if (api().mysql_stmt_bind_param(stmt, out->binds.data()) != 0) {
+      *err = std::string("绑定参数失败：") + api().mysql_stmt_error(stmt);
       return false;
     }
     return true;
@@ -874,15 +1049,15 @@ class mysql_driver : public uvcpp_db_driver {
   ///    **静默截断**（旧实现就是直接在 `while (fetch(stmt) == 0)` 里过掉了）。
   uvcpp_db_status read_prepared_result(MYSQL_STMT* stmt, uvcpp_db_table* out,
                                        std::string* err) {
-    MYSQL_RES* meta = mysql_stmt_result_metadata(stmt);
+    MYSQL_RES* meta = api().mysql_stmt_result_metadata(stmt);
     if (!meta) return uvcpp_db_status::OK;  // 没有结果集：DDL / 无返回
     struct res_guard {
       MYSQL_RES* r;
-      ~res_guard() { mysql_free_result(r); }
+      ~res_guard() { api().mysql_free_result(r); }
     } rguard = {meta};
 
-    const unsigned int n = mysql_num_fields(meta);
-    MYSQL_FIELD* fields = mysql_fetch_fields(meta);
+    const unsigned int n = api().mysql_num_fields(meta);
+    MYSQL_FIELD* fields = api().mysql_fetch_fields(meta);
 
     std::vector<std::string> names;
     names.reserve(n);
@@ -925,17 +1100,17 @@ class mysql_driver : public uvcpp_db_driver {
         binds[i].buffer_length = static_cast<unsigned long>(buffers[i].size());
       }
     }
-    if (mysql_stmt_bind_result(stmt, binds.data()) != 0) {
-      *err = std::string("绑定结果集失败：") + mysql_stmt_error(stmt);
+    if (api().mysql_stmt_bind_result(stmt, binds.data()) != 0) {
+      *err = std::string("绑定结果集失败：") + api().mysql_stmt_error(stmt);
       return uvcpp_db_status::EXEC_FAILED;
     }
 
     int64_t rows = 0;
     for (;;) {
-      const int rc = mysql_stmt_fetch(stmt);
+      const int rc = api().mysql_stmt_fetch(stmt);
       if (rc == MYSQL_NO_DATA) break;
       if (rc != 0 && rc != MYSQL_DATA_TRUNCATED) {
-        *err = std::string("MySQL 取结果失败：") + mysql_stmt_error(stmt);
+        *err = std::string("MySQL 取结果失败：") + api().mysql_stmt_error(stmt);
         return uvcpp_db_status::EXEC_FAILED;
       }
 
@@ -954,7 +1129,7 @@ class mysql_driver : public uvcpp_db_driver {
           one.buffer_type = binds[i].buffer_type;
           one.buffer = full.data();
           one.buffer_length = static_cast<unsigned long>(full.size());
-          if (mysql_stmt_fetch_column(stmt, &one, i, 0) == 0) {
+          if (api().mysql_stmt_fetch_column(stmt, &one, i, 0) == 0) {
             dst.push(value_from_column(full.data(), lengths[i], fields[i]));
           } else {
             dst.push(value_from_column(
@@ -1000,12 +1175,12 @@ class mysql_driver : public uvcpp_db_driver {
       *err = "MySQL 连接没打开";
       return uvcpp_db_status::NOT_CONNECTED;
     }
-    if (mysql_query(conn_, sql) != 0) {
-      *err = std::string("MySQL 执行失败（") + sql + "）：" + mysql_error(conn_);
+    if (api().mysql_query(conn_, sql) != 0) {
+      *err = std::string("MySQL 执行失败（") + sql + "）：" + api().mysql_error(conn_);
       return uvcpp_db_status::EXEC_FAILED;
     }
-    MYSQL_RES* res = mysql_store_result(conn_);
-    if (res) mysql_free_result(res);
+    MYSQL_RES* res = api().mysql_store_result(conn_);
+    if (res) api().mysql_free_result(res);
     return uvcpp_db_status::OK;
   }
 
