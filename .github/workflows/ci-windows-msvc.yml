@@ -83,8 +83,11 @@ jobs:
 
           # yyjson：与 `web` 的 `flags` **逐字相同**，只多一个
           # `-DUVCPP_ENABLE_YYJSON=ON`。理由与上面 wsdl 那一格同源（那一条讲的是
-          # "默认 OFF 的模块第一次被编到不该是发版那一刻"），只是 yyjson **不发版**
-          # —— 它在发布包里是关着的，所以这一格是它**唯一**会被编译的地方。
+          # "默认 OFF 的模块第一次被编到不该是发版那一刻"）：`UVCPP_ENABLE_YYJSON`
+          # 也是默认 OFF，别的格都不编译 `src/yyjson/`。**1.7.0 起发布腿也开它**，
+          # 所以这一格与 `wsdl` 那格是同一句话 —— 发布配置在 push/PR 阶段的替身
+          # （1.6.34 加这一格时它还是"发布包里关着、这里是唯一编译处"，那句话到
+          # 1.7.0 作废了；`check_doc_snippets.py` 的 `DEFAULT_OFF` 里那条豁免同批删掉）。
           #
           # 这一格在 MSVC 上格外值钱：yyjson 的读入与数字格式化在 MSVC 的 CRT 下
           # 走的是另一套（`_snprintf` / `strtod` 那条），而用例里那几条断言恰好是
@@ -637,6 +640,12 @@ jobs:
             # linux 两个 config-contract 就是这么红的）。四个开关与 release.yml 的
             # msvc 腿逐字相同 —— 包括 `UVCPP_DB_SQLITE_FROM_SOURCE=ON`：Windows 上
             # 本来就没有系统 sqlite3，发布腿走的就是这条路。
+            #
+            # `-DUVCPP_ENABLE_YYJSON=ON` 是第三次，但机制与上一条**相反**：1.7.0 起
+            # 发布腿开 yyjson，`check_doc_snippets.py` 的 `DEFAULT_OFF` 里
+            # `UVCPP_YYJSON_ENABLE` 那条豁免**同批删掉**，于是这条腿（两棵树）必须
+            # 跟着开 —— 少改一边，linux 与 windows 两个 config-contract 会同时退 3。
+            # 与 linux 那一份逐字相同（那边的注释写了为什么判的是生成的头）。
             echo "=== configure ==="
             cfg=0
             cmake -S . -B build-cfg -DCMAKE_BUILD_TYPE=Release \
@@ -648,6 +657,7 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
@@ -673,6 +683,13 @@ jobs:
             grep -q '^#  define UVCPP_DB_ENABLE 1$' \
               build-cfg/include/uvcpp/uvcpp_config.h || {
               echo "::error title=config-contract::生成头里 UVCPP_DB_ENABLE 不是 1，doc-snippets 会把 db 片段全判成\"没判\"（SQLite 源码那份没编进来？见上面的配置日志）"; exit 1; }
+            # yyjson：来由与上面三条**相反**（上面是"这一档不开模块 ⇒ 退 3"，这条是
+            # "模块本来被豁免、现在豁免没了 ⇒ 必须开"）。同样判生成的头 —— FetchContent
+            # 取不到 yyjson 时会当场 FATAL_ERROR，那句话是用来分清"坏在哪一步"的。
+            # linux 那份有完整来龙去脉，两边逐字相同，改一边就要改另一边。
+            grep -q '^#  define UVCPP_YYJSON_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_YYJSON_ENABLE 不是 1，doc-snippets 会把 json-guide 的 yyjson 片段判成\"没判\"并退 3（这棵树与发布腿一样传了 -DUVCPP_ENABLE_YYJSON=ON，它应该是 1）"; exit 1; }
 
             echo "=== build ==="
             bld=0
@@ -700,6 +717,7 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \

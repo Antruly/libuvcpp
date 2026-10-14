@@ -75,10 +75,14 @@ cause — see [`RELEASE.md`](../RELEASE.md).
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | nghttp2 + OpenSSL + web | OpenSSL off, or web off |
 | `UVCPP_ENABLE_QUIC` | `OFF` | ngtcp2 + OpenSSL ≥ 3.2 **with the QUIC API** + net | OpenSSL off, net off, or OpenSSL without the QUIC API |
 | `UVCPP_ENABLE_WSDL` | `OFF` | pugixml + webapp | webapp off |
+| `UVCPP_ENABLE_YYJSON` | `OFF` | yyjson (fetched from source; one header + one `.c`) | — (it fetches instead of switching off) |
 | `UVCPP_ENABLE_CAPI` | `OFF` | net + web (nothing else — the C surface is a thin wrapper) | net off, or web off |
 | `UVCPP_ENABLE_DB` | `OFF` | any one of libsqlite3 / libmysqlclient / libpq | **all three** backend libraries missing |
+| `UVCPP_ENABLE_DB_MYSQL` | `ON` | `mysql.h` + libmysqlclient — with `UVCPP_DB_RUNTIME_LOAD=ON`, the header **only** | that backend's header missing |
+| `UVCPP_ENABLE_DB_PGSQL` | `ON` | `libpq-fe.h` + libpq — with `UVCPP_DB_RUNTIME_LOAD=ON`, the header **only** | that backend's header missing |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | network, or the hash-pinned zip placed by hand | — |
 | `UVCPP_DB_RUNTIME_LOAD` | `OFF` | — (still needs `mysql.h` / `libpq-fe.h`, but not the libraries) | — |
+| `UVCPP_DB_MYSQL_INCLUDE_DIR` / `UVCPP_DB_PGSQL_INCLUDE_DIR` | *(discovered)* | — | — (pre-seed either to skip the search; the release legs do) |
 | `UVCPP_BROTLI_FROM_SOURCE` | `OFF` | network, or brotli's source placed by hand | — |
 
 The **target** used for linking is chosen by testing `TARGET uv_a` / `TARGET uv`, not by assuming

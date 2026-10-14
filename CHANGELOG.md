@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.54-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.55-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2399,15 +2399,65 @@
   两者都要有见证）。深度预扫描搬到核心层之后，它自己的五条断言仍在
   `tests/functional/web_app_request_func.cpp`，**一字未改**。
 
-  它**不在发布包里**（`release.yml` 不传这个 `-D`，包里那个头是空的壳，拦住你的是宏
+  它当时**不在发布包里**（`release.yml` 不传这个 `-D`，包里那个头是空的壳，拦住你的是宏
   而不是文件的缺席），所以它需要一条自己的 CI 腿 —— 那三格与它们各自的理由见下面
-  「配置、打包与 CI」那一节（`1.6.35-dev`）。
+  「配置、打包与 CI」那一节（`1.6.35-dev`）。**这一句 1.7.0 起作废**：发布腿也传
+  `-DUVCPP_ENABLE_YYJSON=ON`，包里那个宏是 1（见「配置、打包与 CI」里 `1.6.55-dev`
+  那条）。**注意作废的只是"不在包里"这半句**：`UVCPP_ENABLE_YYJSON` 在 CMake 里
+  **默认仍是 `OFF`**，自己 `cmake -S . -B build` 而不传 `-D` 的人拿到的仍旧是
+  nlohmann 那条路 —— 变的是发布腿的参数，不是默认值。
 
   另外四处**刻意的**行为不同（成员按文档顺序而非键排序、重复键取第一个而非最后一个、
   `1.0` 写成 `1`、`uvcpp_json_write` 递归而由 `max_depth` 兜住）逐条写在
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **预编译包第一次真的"全功能"：yyjson、brotli 与 db 的两个远程后端都进包**
+  （`1.6.55-dev`）。此前 `release.yml` 十条 configure 里**一条都不传**
+  `-DUVCPP_ENABLE_YYJSON` 与 `-DUVCPP_ENABLE_BROTLI`，而 MySQL/PG 是**显式
+  `=OFF`** —— 所以"包里是全功能的"这句话有一处差集，且它的方向是**发布包比源码
+  默认构建少**。十条 configure 各补：
+
+  ```
+  -DUVCPP_ENABLE_YYJSON=ON
+  -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON
+  -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON -DUVCPP_DB_RUNTIME_LOAD=ON
+  ```
+
+  brotli 必须**同时**传 `UVCPP_BROTLI_FROM_SOURCE=ON`：它的发现顺序是"先系统后
+  源码"，而发布腿不能听天由命 —— 镜像哪天装上 `libbrotli-dev`，配置期就会**静默**
+  改走共享库，产物多出三条 `DT_NEEDED` 而**没有任何断言会红**（`ldd` 名单原本也
+  没有 brotli，已补上 `libbrotlienc/dec/common` 与 `mysqlclient`/`pq`）。
+  MySQL/PG 走运行时加载（上面 1.6.54-dev 那条），所以它们的客户端库仍然
+  **不在**链接行上 —— 两条 Linux 腿为此新增一条反向断言：`nm -D -u` 里未定义的
+  `mysql_` / `PQ` 符号数必须是 0。
+
+- **六条腿的模块断言从 13 枚扩到 17 枚**（`1.6.55-dev`）。新增
+  `UVCPP_YYJSON_ENABLE`、`UVCPP_BROTLI_ENABLE`、`UVCPP_DB_MYSQL_ENABLE`、
+  `UVCPP_DB_PGSQL_ENABLE`。判据仍读**生成的头**（`<tree>/include/uvcpp/
+  uvcpp_config.h`）而不是 `CMakeCache.txt` —— db 那族在静默降级时缓存照旧写着
+  `ON` 而编译器看到 0，只 grep 缓存的断言会放行一个缺功能的包。
+
+- **Windows 上的 MySQL/PG 头**（`1.6.55-dev`）。两条 MSVC 腿的镜像上没有这两个
+  客户端库的开发头（`windows-11-arm` 上连 PostgreSQL 都没有），所以四条 Windows
+  腿**共用同一份钉死版本的头**：新增 `.github/scripts/win-client-headers.sh`，从
+  MSYS2 的 `.pkg.tar.zst`（`mirror.msys2.org` 上的**不可变 URL**，版本号写在文件名
+  里）取出来放进 `C:/client-headers/{mysql,pgsql}`，两条 MSVC 腿各加一步调用它。
+  Linux 两条腿反过来：`apt-get download libmysqlclient-dev libpq-dev` + `dpkg -x`
+  摆一份头出来，**一个包都不装** —— jammy 上这两个都 `Depends: libssl-dev`，而
+  发布腿有一条"**不装** libssl-dev"的不变量（22.04 那份是 3.0.2、没有 QUIC API，
+  装上会让 `find_package` 静默产出一个坏包）。四个 include 目录用
+  `-DUVCPP_DB_{MYSQL,PGSQL}_INCLUDE_DIR=` 直接喂进去（`find_path` 认预置的 cache
+  变量），绕开整个发现过程。
+
+- **`check_doc_snippets.py` 的 `DEFAULT_OFF` 里删掉 `UVCPP_YYJSON_ENABLE`**
+  （`1.6.55-dev`）。那张表只在宏为 0 时救场；发布腿开了 yyjson 之后它就变成了
+  "结构性关着"里的例外。删掉它**必须**与三个 config-contract 档（Linux / MSVC /
+  MinGW）同时传 `-DUVCPP_ENABLE_YYJSON=ON` 一起做 —— 否则那三档会在
+  `doc/json-guide.md` 上退 3，而症状看起来像文档腐烂。本机实测两条方向都验过：
+  yyjson 开着的包 `[绿] doc/json-guide.md 编过 8/8 条`、全库 102/202、`rc=0`；
+  换一棵 yyjson 关着的旧包，同一条片段变 `[跳]`、整条**退 3**。
 
 - **新增开关 `UVCPP_DB_RUNTIME_LOAD`（默认 `OFF`）：db 的 MySQL/PG 后端不再把
   客户端库写到链接行上**（`1.6.54-dev`）。理由与实测都在上面「数据库」那一节；
@@ -2683,10 +2733,13 @@
   这是本仓那条老规矩的又一例（`UVCPP_ENABLE_ZLIB=OFF` + `WEB/WEBAPP=ON` 整整一版没有
   一格覆盖，#35）：**一个默认关的模块，第一次被编到的地方不能是使用者手上**。
 
-  这一格比 `zlib-off` / `wsdl` 那两格更硬一点：本模块**不在发布包里**
+  这一格比 `zlib-off` / `wsdl` 那两格更硬一点：本模块当时**不在发布包里**
   （`release.yml` 不传这个 `-D`，包里那个头是空的壳 —— `package_release.py` 是
   **按模块目录整体拷头**的、与开关无关，所以拦住你的是宏，不是"包里没有这个文件"），
   所以这三格是它**唯一**会被编译的地方，一次都没有别的路径兜底。
+  （**1.7.0 起发布腿也开它**，于是这三格与 `wsdl` 那三格变成同一句话 —— 发布配置在
+  push/PR 阶段的替身，而"唯一"不再成立。`check_doc_snippets.py` 的 `DEFAULT_OFF`
+  里 `UVCPP_YYJSON_ENABLE` 那条豁免同批删掉，三个 config-contract 档跟着开它。）
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent

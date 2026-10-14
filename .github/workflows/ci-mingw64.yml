@@ -35,12 +35,18 @@ jobs:
         with:
           msystem: MINGW64
           update: false
+          # 最后两个是 1.7.0 起加的：发布腿的 db 模块这一版**三个后端全开**
+          # （MySQL/PG 走 `UVCPP_DB_RUNTIME_LOAD=ON`），而运行时加载省掉的是**链接**、
+          # 省不掉**编译** —— 头必须在（见 `.github/scripts/win-client-headers.sh`
+          # 头部那段）。这一格是"发布产物用的那条工具链"，所以它也要有。
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-openssl
             mingw-w64-x86_64-python
+            mingw-w64-x86_64-libmariadbclient
+            mingw-w64-x86_64-postgresql
 
       - name: Configure & Build
         run: |
@@ -74,16 +80,27 @@ jobs:
           #   照样在，而 dll 里一个 `uvcpp_c_*` 符号都没有 —— 正是"头在、符号不在"
           #   那个只能在运行时才炸的形状。`check_config_contract.py` 判据 4 就是
           #   冲着它来的（CAPI=0 时它会 `[跳]`，这条腿改完才真的判得动）。
-          # ④ -DUVCPP_ENABLE_DB=ON + -DUVCPP_DB_SQLITE_FROM_SOURCE=ON + 两个远程
-          #   后端 OFF —— 与 `release.yml` 的 mingw-x64 / mingw-arm64 两条腿
-          #   **逐字同一份**数据库配置（那边的注释 ⑤ 列了整条理由链）。这一条 CI
-          #   腿是"发布产物用的那条工具链"在 push/PR 阶段的替身，所以发布腿开了
-          #   的模块这里也要开：否则"数据库模块在 MinGW 上编不编得过"第一次被问到
-          #   就是发版那一刻。
+          # ④ -DUVCPP_ENABLE_DB=ON + -DUVCPP_DB_SQLITE_FROM_SOURCE=ON —— 与
+          #   `release.yml` 的 mingw-x64 / mingw-arm64 两条腿**逐字同一份**数据库
+          #   配置（那边的注释 ⑤ 列了整条理由链）。这一条 CI 腿是"发布产物用的那条
+          #   工具链"在 push/PR 阶段的替身，所以发布腿开了的模块这里也要开：否则
+          #   "数据库模块在 MinGW 上编不编得过"第一次被问到就是发版那一刻。
           #   FROM_SOURCE 在这里还有一条本地的理由：MSYS2 的 `mingw-w64-x86_64-sqlite3`
           #   给的是 `libsqlite3.dll.a`，find_library 挑中它 ⇒ dll 多一个 sqlite3.dll
           #   依赖，正好撞上下面那条"自包含"断言；而源码那份编成**静态**库，
           #   链进 dll 不留任何外部名字。
+          #
+          # ⑤ 1.7.0 起发布包要"全功能"，这一格跟着补三样：`UVCPP_ENABLE_YYJSON`、
+          #   `UVCPP_ENABLE_BROTLI`（配 `UVCPP_BROTLI_FROM_SOURCE=ON`）与 db 的两个
+          #   **远程后端**。理由与 `release.yml` 里新写的 ⑥⑦ 两段逐字同源，这里只
+          #   记这一格特有的两点：
+          #     · 这三样在 MinGW 上**从来没被编过**（`doc/ci-guide.md` §1 的"未覆盖的
+          #       格"原先写着"MinGW 不建 yyjson / 不建 brotli"）—— 而发布腿的
+          #       mingw-x64 / mingw-arm64 恰恰就是 MinGW。不在这里补，这两个组合
+          #       第一次相遇就是打标签那天；
+          #     · `-DUVCPP_DB_RUNTIME_LOAD=ON` 之后链接行上不出现 libmariadb/libpq，
+          #       所以下面那条**自包含断言**从这一版起正面证明了这件事 —— 谁把
+          #       `RUNTIME_LOAD` 关掉（那两个后端就会直接链进来），它会立刻红。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
@@ -91,8 +108,13 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
@@ -107,6 +129,24 @@ jobs:
             exit 1; }
           grep -q 'Including db module in build' ci-logs/mingw-configure.log || {
             echo "::error title=mingw-db::src/db/ 没进源列表 —— 编出来的 dll 不含数据库模块"; exit 1; }
+          # 1.7.0 起补的那几样的门禁。与上面两道同一条规矩，而这里更必要：这四样
+          # 在 MinGW 上**从来没被编过**，所以"没编"与"编了且过"在 check 的结论里
+          # 长得一模一样（`FEATURE_GATES` 那张表管不到这个文件 —— 它不是矩阵）。
+          #   · `yyjson integrated` / `brotli enabled` 是**两条发现支路共印**的那两句
+          #     （brotli 那边若走了系统 pkg-config，印的是 `Using system brotli via
+          #     pkg-config`，与 `integrated (tag=…)` 不同 —— 这里配的是
+          #     `BROTLI_FROM_SOURCE=ON`，所以顺带也在断言"确实走了取源码那条");
+          #   · `db: MySQL/PostgreSQL 后端开（运行时加载` 是 `RUNTIME_LOAD=ON` 那一支
+          #     独有的措辞（关着的时候印的是 `（<库路径>）`），所以它同时断言了
+          #     "后端在"与"没有链进来"两件事。
+          for m in 'yyjson integrated' 'Including yyjson module in build' \
+                   'brotli enabled' 'HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)' \
+                   'db: MySQL 后端开（运行时加载' 'db: PostgreSQL 后端开（运行时加载'; do
+            grep -q "$m" ci-logs/mingw-configure.log || {
+              echo "::error title=mingw-modules::配置消息里没有 '$m' —— 这一格没在测它（发布腿会）"
+              grep -E 'yyjson|brotli|db:|CMake (Warning|Error)' ci-logs/mingw-configure.log | head -20
+              exit 1; }
+          done
           bld=0
           cmake --build build-mingw --parallel 4 2>&1 | tee ci-logs/mingw-build.log || bld=$?
           if [ "$bld" != "0" ]; then
@@ -128,8 +168,13 @@ jobs:
             -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
             -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
             -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
@@ -174,11 +219,13 @@ jobs:
           # 门禁 2（数据库模块）：这一格不是矩阵，`gate_test` 没地方挂，所以直接判。
           # 少了这一句，"模块关了但 ctest 报 100% passed"这条路径在 MinGW 上无人拦
           # —— 那正是 Linux 那几格用第四条门禁串拦下来的形状。
-          if ! ctest --test-dir build-mingw -N 2>&1 | grep -q test_db_sqlite_func; then
-            echo "::error title=mingw-db::test_db_sqlite_func 没被注册 —— 模块被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
-            ctest --test-dir build-mingw -N 2>&1 | tail -20
-            exit 1
-          fi
+          for t in test_db_sqlite_func test_yyjson_doc_func test_web_http_client_func; do
+            if ! ctest --test-dir build-mingw -N 2>&1 | grep -q "$t"; then
+              echo "::error title=mingw-modules::$t 没被注册 —— 模块被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
+              ctest --test-dir build-mingw -N 2>&1 | tail -20
+              exit 1
+            fi
+          done
           rc=0
           out=$(ctest --test-dir build-mingw --output-on-failure \
             --timeout 60 --exclude-regex "test_shutdown_func" 2>&1) || rc=$?

@@ -1265,6 +1265,13 @@ jobs:
             # 两个远程后端显式 OFF。这么做还有两个副产品：这一档**不需要**
             # `libsqlite3-dev`（也就顺带量了"发布那条路在没有系统 sqlite3 的机器上
             # 走得通"），以及 runner 上万一哪天装上 libpq-dev 也不会静默链进去。
+            #
+            # `-DUVCPP_ENABLE_YYJSON=ON` 是**第三次**发生，机制却与前面两次相反：
+            # 前两次是"这一档加了模块才能判那几条片段"，这一次是"片段那边**取消了
+            # 豁免**，所以这一档必须跟着开"。1.7.0 起发布腿开 yyjson（预编译包要
+            # 带全部可选功能），`check_doc_snippets.py` 的 `DEFAULT_OFF` 里
+            # `UVCPP_YYJSON_ENABLE` 那一条**同批删掉** —— 两边必须一起改，只改一边
+            # 就是这条腿退 3。详见下面那条 `UVCPP_YYJSON_ENABLE` 断言上的注释。
             echo "=== configure ==="
             cfg=0
             extra=(-DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -1278,6 +1285,7 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
@@ -1305,6 +1313,16 @@ jobs:
             grep -q '^#  define UVCPP_DB_ENABLE 1$' \
               build-cfg/include/uvcpp/uvcpp_config.h || {
               echo "::error title=config-contract::生成头里 UVCPP_DB_ENABLE 不是 1，doc-snippets 会把 db 片段全判成\"没判\"（三个后端一个都没集成？见上面的配置日志）"; exit 1; }
+            # yyjson 是 1.7.0 起加的第四条同类断言，而且它这条**与前面几条的来由
+            # 正好相反**：前面几条是"这一档不开某个模块，doc-snippets 会退 3"，
+            # 而 yyjson 本来在 `check_doc_snippets.py` 的 `DEFAULT_OFF` 那张豁免表里
+            # （"发布配置里结构性地关着"）。1.7.0 起发布腿开了它，豁免**同批删掉**，
+            # 于是这一档必须**同时**把它开起来 —— 少一个方向，那条腿就会退 3，而
+            # 症状看起来像"文档腐烂"。这里判的是生成的头（不是缓存）：FetchContent
+            # 取不到 yyjson 时模块会当场 `FATAL_ERROR`，但"哪一边坏了"要靠这句话说清。
+            grep -q '^#  define UVCPP_YYJSON_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_YYJSON_ENABLE 不是 1，doc-snippets 会把 json-guide 的 yyjson 片段判成\"没判\"并退 3（这棵树现在与发布腿一样传了 -DUVCPP_ENABLE_YYJSON=ON，所以它应该是 1）"; exit 1; }
 
             echo "=== build ==="
             bld=0
@@ -1330,6 +1348,7 @@ jobs:
               -DUVCPP_ENABLE_NGHTTP2=ON \
               -DUVCPP_ENABLE_WSDL=ON \
               -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
@@ -1377,7 +1396,7 @@ jobs:
           fi
           exit "$rc"
 
-      # 挂在**这一档**的理由：它是唯一同时满足"七个模块全 ON、真的产出一个包、
+      # 挂在**这一档**的理由：它是唯一同时满足"可选模块全 ON、真的产出一个包、
       # 有 python"的档。门禁要的就是一个全开的包 —— 关着模块的包只会让它把大半
       # 片段判成"跳过"（退 3），判不出东西。
       #

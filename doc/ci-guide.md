@@ -100,12 +100,22 @@ layout did not cover them either.
 | macOS `config-contract` | `package_release.py`'s `PLATFORMS` has no macOS key — see §5. |
 | MinGW + WSDL | The same single MinGW job as the three gaps above. `release.yml`'s `mingw-x64` and `mingw-arm64` legs **do** enable WSDL, so it is covered at release time but not on push/PR — which is why it was verified locally on the MinGW x64 shape before being turned on there. |
 | macOS + WSDL | No entry, and macOS never compiles `src/wsdl/`. Lower risk than the MinGW gap above: macOS is not a release platform, so there is no path on which it reaches a user unbuilt. |
-| MinGW + yyjson | The same single MinGW job as the three gaps above. Unlike WSDL there is no release-time coverage standing in for it either: `UVCPP_ENABLE_YYJSON` is never passed by `release.yml` (the module is optional, and the package ships the header as an empty shell), so `src/yyjson/` is compiled on Ubuntu, macOS and MSVC only. What makes the gap acceptable here is that MinGW is GCC + libstdc++ — the same pair as the Ubuntu entry — so the two runtimes that could actually disagree about the byte-identical write-back (`libstdc++` vs `libc++`) are both covered. |
-| MinGW + brotli | The same single MinGW job as the gaps above, and the same shape as `yyjson`: `UVCPP_ENABLE_BROTLI` is never passed by `release.yml`, so `src/web/uvcpp_http_compress.cpp`'s brotli branches are compiled on Ubuntu, macOS and MSVC only. The Ubuntu-only `brotli-no-zlib` cell covers the `libstdc++`-vs-`libc++` question for the brotli path (the brotli encoder is C, but the C++ wrapper that hands it a `std::string` is not), so what MinGW would add is a second GCC, not a second runtime. |
 | MySQL / PostgreSQL on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The two remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 service containers). The other three `db` entries set both backends **explicitly `OFF`** rather than leaving them on: with no server the two tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` on Linux | On Linux and macOS the `db` entries use the **default** path (`find_package(SQLite3)` against the system/SDK library); the from-source path is exercised on MSVC and MinGW. What is platform-specific about it is TLS and extraction — `file(DOWNLOAD)` over Schannel on Windows, MSYS2's libcurl + `ca-certificates` on MinGW — and both of those are covered. The Linux release legs run it on every tag. The cost of this entry, and it is a real one: MSVC and MinGW now need the network **at configure time** (hash-pinned zip from sqlite.org). An offline machine can pre-place it, see §5. |
 | `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
 | **base build with `UVCPP_BUILD_NET=OFF`** | `tests/functional/CMakeLists.txt` filters web/webapp/ssl/h2/wsdl/quic and **not** net, so `NET=OFF` would compile net test files against a library with `src/net/` filtered out — red by construction. Opening this cell needs that filter first. Today "base" therefore means net at its default (on) with `WEB=OFF`, i.e. the two `basic-*` entries. |
+
+**Two rows left this table in 1.7.0: `MinGW + yyjson` and `MinGW + brotli`.** Both were
+"MinGW never compiles this" gaps, and the 1.7.0 release-package work closed them by adding
+`-DUVCPP_ENABLE_YYJSON=ON` / `-DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON` (plus
+the two remote `db` backends under `UVCPP_DB_RUNTIME_LOAD=ON`) to that single job's one
+configure — the same `-D`s `release.yml` now passes, so the MinGW push/PR job becomes the
+release config's stand-in there rather than a leg that meets `src/yyjson/` for the first time
+on tag day. The job is still a **single** job, so `MinGW + QUIC/HTTP3/h2` and
+`MinGW + WSDL` above are untouched. `check_ci_layout.py`'s `FEATURE_GATES` cannot see any of
+this: it walks **matrix entries** only and this file has no matrix — the gate strings for the
+three newly added modules are hardcoded in the job's own step (look for `yyjson integrated`,
+`brotli enabled`, `db: SQLite 后端开`).
 
 The three workflows that need a second (artifact-only, `UVCPP_BUILD_TESTS=OFF`) tree —
 `mingw64`, `config-contract` on Linux and `config-contract` on MSVC — build
@@ -405,13 +415,21 @@ It runs on **three legs** — Ubuntu, macOS and Windows MSVC. MinGW is the gap (
   the package-manager route is tried first. If the `quic` entry on MSVC goes red with
   `ngtcp2 integrated` missing, that is the fallback, not a redesign.
 
-**The `config-contract` packages and the prebuilt release packages are now two different
+**The `config-contract` packages and the prebuilt release packages are two different
 module sets, on purpose** — and each is judged by its own artifact, never by a shared
 assumption. As of **1.5.0** `release.yml` enables QUIC/HTTP3 on all six legs (each leg
-supplies a QUIC-capable OpenSSL >= 3.2; see the table at the top of that file), and as of
-**1.5.2** it enables `WSDL` too; the two `config-contract` jobs enable `WSDL` but not
-QUIC/HTTP3. So the two sets differ in exactly one direction each, and neither is the other's
-substitute.
+supplies a QUIC-capable OpenSSL >= 3.2; see the table at the top of that file), as of
+**1.5.2** it enables `WSDL` too, and as of **1.7.0** it enables `yyjson`, `brotli` (from
+source) and the two remote `db` backends (`MySQL`/`PostgreSQL`, via
+`UVCPP_DB_RUNTIME_LOAD`) — see §5's `yyjson` and `brotli` entries and the `release.yml`
+header. The two `config-contract` jobs enable `WSDL` and `yyjson` but **not** QUIC/HTTP3,
+brotli, or the remote `db` backends.
+So the containment is now one-directional: everything `config-contract` turns on, the release
+legs also turn on, and the release legs additionally carry QUIC/HTTP3 + brotli + MySQL/PG.
+That is the safe direction for the two `config-contract` jobs, whose job is the
+install→consume contract and the generated-header/diagnostic contract, not feature parity —
+and it is why the yyjson and brotli cells exist in the per-platform matrices (§5), since the
+release-only features would otherwise be compiled for the first time on tag day.
 So "does *this* package have QUIC?" is answered by the per-leg assertion step reading
 `<tree>/include/uvcpp/uvcpp_config.h`, **never** by grepping `CMakeCache.txt`: the QUIC/HTTP3
 guard chain emits `message(WARNING)` and plain-`set()`s the option OFF, so the cache keeps
@@ -454,16 +472,20 @@ MSVC. MinGW and macOS are the gap (see §1).
 `yyjson` is `src/yyjson/` — the **optional second JSON parse backend** (`uvcpp_json_doc` over
 [yyjson](https://github.com/ibireme/yyjson), plus accessors that share their names with the
 nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the single
-`UVCPP_ENABLE_YYJSON` switch and runs on **three legs** — Ubuntu, macOS and Windows MSVC
-(MinGW is the gap, as for every other optional module there).
+`UVCPP_ENABLE_YYJSON` switch and runs on **four** legs — the three `yyjson` matrix entries
+(Ubuntu, macOS, Windows MSVC) plus the single `ci-mingw64.yml` job, whose one configure also
+passes `-DUVCPP_ENABLE_YYJSON=ON` since 1.7.0 (that cell has no matrix entry, so §1's gap
+table lost its `MinGW + yyjson` row rather than gaining a row here).
 
-- **It does not replace nlohmann, and it is not in the release package.** `using uvcpp_json =
-  nlohmann::json` and `uvcpp_json_parse/dump/get_*` are unchanged, and `release.yml` does
-  **not** pass `-DUVCPP_ENABLE_YYJSON=ON` — the release package ships
-  `include/yyjson/uvcpp_json_doc.h` as an empty shell (`package_release.py` copies module
-  directories wholesale, so the file's presence is not the gate; the macro is). That makes
-  these three entries the **only** place the module is ever compiled, which is exactly the
-  argument `wsdl`'s entries make, one step stronger.
+- **It does not replace nlohmann.** `using uvcpp_json = nlohmann::json` and
+  `uvcpp_json_parse/dump/get_*` are unchanged. As of **1.7.0** it is also **in** the release
+  package: all six `release.yml` legs pass `-DUVCPP_ENABLE_YYJSON=ON`, so these three entries
+  are the same argument `wsdl`'s entries make — the release configuration's stand-in on
+  push/PR, not a substitute for it. (Before 1.7.0 `release.yml` did **not** pass that `-D`
+  and the package shipped `include/yyjson/uvcpp_json_doc.h` as an empty shell —
+  `package_release.py` copies module directories wholesale, so the file's presence was never
+  the gate; the macro is. That mechanism is unchanged, only the macro's value in the official
+  package is.)
 - **What these entries buy that nothing else does.** `tests/functional/yyjson_doc_func.cpp`
   carries the two load-bearing assertions: a 25-row input table where every row is compared
   **first against a hand-written expectation and then against nlohmann** (comparing only the
@@ -473,10 +495,10 @@ nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the sing
   different words but the same check colour.
 - **Why macOS is included even though the `wsdl` entries are not.** The gap table in §1
   justifies the missing macOS `wsdl` entry with "macOS is not a release platform, so there is
-  no path on which it reaches a user unbuilt". That argument does not apply here, because the
-  module is not released at all — and macOS is the one leg that compiles this header with
-  **libc++**, whose `double` formatting is not libstdc++'s. The byte-identical write-back
-  assertion is precisely the kind that differs across those two.
+  no path on which it reaches a user unbuilt". That argument does not apply here: even before
+  1.7.0, when the module was not in the release package at all, macOS was the one leg that
+  compiles this header with **libc++**, whose `double` formatting is not libstdc++'s. The
+  byte-identical write-back assertion is precisely the kind that differs across those two.
 - **`flags` is `web` plus one switch, and the dep list is byte-identical to `web`'s on all
   three legs.** `yyjson` is pulled by `FetchContent` (`CMakeLists.txt:1727`, `GIT_TAG` pinned
   to `YYJSON_VERSION`) and built as an OBJECT library, not found by a package manager, so
@@ -494,8 +516,11 @@ nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the sing
 `brotli` is the second **body** compressor (`UVCPP_ENABLE_BROTLI`, default `OFF`) behind the
 same `uvcpp_http_compress` layer that already carried zlib — the encoder plus the
 `Accept-Encoding` negotiation that picks between `gzip`/`deflate`/`br`. It runs on **four
-cells**: `brotli` on Ubuntu, macOS and MSVC, plus a fourth Ubuntu-only `brotli-no-zlib`
-(`-DUVCPP_ENABLE_ZLIB=OFF -DUVCPP_ENABLE_BROTLI=ON`). MinGW is the gap (see §1).
+matrix cells**: `brotli` on Ubuntu, macOS and MSVC, plus a fourth Ubuntu-only
+`brotli-no-zlib` (`-DUVCPP_ENABLE_ZLIB=OFF -DUVCPP_ENABLE_BROTLI=ON`) — and, since 1.7.0, on
+the single `ci-mingw64.yml` job as well (`-DUVCPP_ENABLE_BROTLI=ON
+-DUVCPP_BROTLI_FROM_SOURCE=ON`, a cell with no matrix entry; §1 lost its `MinGW + brotli`
+gap row over it).
 
 - **The fourth cell is not redundant with `zlib-off`.** The two switches are independent, so
   the build has four states; the table had three of them (`web` = `(1||1)`, `zlib-off` =

@@ -19,6 +19,77 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.7.0 重点 (Highlights)
+
+这一版把「预编译包是全功能的」这句话补完。此前它有一处**差集**：`release.yml` 十条配置
+里**一条都不传** `UVCPP_ENABLE_YYJSON` 与 `UVCPP_ENABLE_BROTLI`，而 db 模块的两个远程
+后端是**显式 `=OFF`**。所以从包里能拿到的能力，比从源码默认构建拿到的少三样。1.7.0 起
+差集为空：`yyjson`、`brotli`、`MySQL`、`PostgreSQL` 都在包里，六条腿一致。
+
+### 三样东西，三种进包方式
+
+| | 怎么进包 | 为什么是这种方式 |
+|---|---|---|
+| `yyjson` | `-DUVCPP_ENABLE_YYJSON=ON`，走 FetchContent 取源码，以目标文件形式并进同一个 `uvcpp` 库 | 单头 + 单 `.c`，没有共享库可链，也没有包要多一个 |
+| `brotli` | `-DUVCPP_ENABLE_BROTLI=ON` **加** `-DUVCPP_BROTLI_FROM_SOURCE=ON` | 发现顺序是"先系统后源码"。发布腿**不能**听天由命：镜像哪天装了 `libbrotli-dev`，配置期就会静默改走共享库，`.so` / `.dll` 上多出三条 `DT_NEEDED` 而**不会有任何一条断言变红**（`ldd` 黑名单里原本也没有 brotli —— 已经补上） |
+| `MySQL` / `PostgreSQL` | `-DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON` 加 `-DUVCPP_DB_RUNTIME_LOAD=ON` | 见下一节 |
+
+### 为什么 MySQL/PG 是「编进去、运行时加载」
+
+`DT_NEEDED`（Windows 上是 PE 导入表）是**加载期**解析的，不是调用期。所以链上
+`libmysqlclient` / `libpq` 的后果不是"用到才报错"，而是**没装这两种客户端库的机器连
+`libuvcpp.so` 都加载不起来** —— 哪怕那个程序只跑 HTTP、一行 `db` 代码都不碰。1.6.x 的
+六个包正是靠把这两个后端**关掉**来躲开这件事。
+
+`UVCPP_DB_RUNTIME_LOAD=ON` 换了一条路：两个后端照编进库（`mysql.h` / `libpq-fe.h` 在
+配置期仍然要，`MYSQL_BIND` 的布局必须从真的头里读），但客户端库在**运行时**才
+`dlopen` / `LoadLibrary`，符号从一张函数指针表上取。于是：
+
+- 没装客户端库的机器上，除"真去连 MySQL/PG"之外一切照常；
+- 真去连时拿到的是 `uvcpp_db_status::NO_DRIVER` 加一句写清了**试过哪些库名**的话，
+  而不是一句裸的 `dlopen` 失败；`UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY`
+  可以指一个明确路径。
+
+**这是一处行为变更，写在这里而不是悄悄改**：此前"配置期没找到客户端库 ⇒ 那个后端不
+存在（宏是 0）"，此后是"后端存在，有没有库要运行时才知道"。`uvcpp_db_drivers()` 在
+1.7.0 的包里打印 `sqlite,mysql,postgres`。**从源码构建的人不受影响** —— 新开关默认
+`OFF`，今天的行为逐字节不变。
+
+### 为了让这条路走得通，构建侧另有两处改动
+
+- **`--exclude-libs,ALL`（ELF 上的共享目标）。** 本仓在非 Windows 上 `UVCPP_API` 是空的，
+  链进去的静态库符号**全部导出**。`dlopen("libpq.so.5")` 之后，它那份按系统 OpenSSL 编的
+  `SSL_*` 调用会先撞上我们导出的那份，同进程两份 libcrypto、一手建一手放 —— 堆损坏。
+  这个链接选项只藏**来自静态归档**的符号，我们自己的 API（含 `uvcpp_c_*` 的 C ABI）
+  直接由目标文件构成，照样导出。判据是 `nm -D` 里 `SSL_new` / `EVP_*` / `Brotli*` 归零，
+  而 `check_capi_symbols.py` 与 `.pc` 可链接性两条门禁仍绿。
+- **Windows 上的客户端头。** 两条 MSVC 腿的镜像上没有 MySQL/PG 的开发头（`windows-11-arm`
+  上连 PostgreSQL 都没有），所以四条 Windows 腿**共用一份钉死版本的头**：从 MSYS2 的
+  `.pkg.tar.zst`（`mirror.msys2.org` 上的不可变 URL）取出来放进 `C:/client-headers/`，
+  由 `.github/scripts/win-client-headers.sh` 做。Linux 两条腿则用
+  `apt-get download libmysqlclient-dev libpq-dev` + `dpkg -x` 摆一份头出来 —— **不装包**：
+  jammy 上这两个都 `Depends: libssl-dev`，而发布腿有一条"不装 libssl-dev"的不变量
+  （22.04 那份是 3.0.2，没有 QUIC API，装上会让 `find_package` 静默产出一个坏包）。
+
+### 断言清单从 13 枚扩到 17 枚
+
+六条腿的模块断言读的是**生成的头**（`<tree>/include/uvcpp/uvcpp_config.h`），不是
+`CMakeCache.txt` —— 后者在静默降级时照旧写着 `=ON`。新增的四枚是
+`UVCPP_YYJSON_ENABLE`、`UVCPP_BROTLI_ENABLE`、`UVCPP_DB_MYSQL_ENABLE`、
+`UVCPP_DB_PGSQL_ENABLE`。同一批还加了两条**反向**断言：Linux 两条腿在 `nm -D -u` 里
+数未定义的 `mysql_` / `PQ` 符号（应为 0），`ldd` 黑名单补上
+`libbrotlienc/dec/common` 与 `mysqlclient` / `pq`。
+
+### 换包之前
+
+- **C++ API 与 C ABI 都没有破坏性改动**，C ABI 版本仍是 `1`。
+- 包里的模块集合**变大了**（`UVCPP_YYJSON_ENABLE` / `UVCPP_BROTLI_ENABLE` 由 0 变 1，
+  `uvcpp_db_drivers()` 由 `sqlite` 变 `sqlite,mysql,postgres`），
+  而库本身对外的 `DT_NEEDED` **一条没多** —— 这正是上面那两处构建侧改动的目的。
+- 自包含的含义要按新的写法理解：Linux 上 `ldd libuvcpp.so` 除 libc 一类仍无其他；
+  MinGW 的 DLL 依赖表照样只有 Windows 自带模块。**唯一的运行期例外**是真要连
+  MySQL / PostgreSQL 时，那台机器上得有对应的客户端库。
+
 ## v1.6.4 重点 (Highlights)
 
 `v1.6.3` 之后的补丁版，一条改动：**多循环（`set_loops(n > 1)`）下服务端析构不再与工作循环抢同一张表**。
@@ -721,9 +792,11 @@ v1.1.0 在 v1.0.0 的 libuv 封装之上，**新增了网络层、HTTP/1.1 与 W
 ## 构建要求 (Requirements)
 
 C++11 或更高、CMake 3.20+、libuv 1.0.0+，支持 Windows / Linux / macOS。可选依赖：
-OpenSSL（TLS；QUIC 与 HTTP/3 还要 ≥ 3.2）、zlib（压缩）、llhttp 与 nlohmann/json
-（HTTP / Web 框架，可由 FetchContent 自动获取）、pugixml（WSDL/SOAP）、ngtcp2 与
-nghttp3（QUIC / HTTP/3）、libsqlite3 / libmysqlclient / libpq（数据库，至少一个）。
+OpenSSL（TLS；QUIC 与 HTTP/3 还要 ≥ 3.2）、zlib（压缩）、brotli（响应体的第二种
+`Content-Encoding`）、llhttp 与 nlohmann/json（HTTP / Web 框架，可由 FetchContent
+自动获取）、yyjson（可选的第二个 JSON 解析后端）、pugixml（WSDL/SOAP）、ngtcp2 与
+nghttp3（QUIC / HTTP/3）、libsqlite3 / libmysqlclient / libpq（数据库，至少一个 ——
+预编译包三个后端都在，其中 MySQL/PG 的客户端库是**运行时**才加载的）。
 各平台依赖与全部开关在 [doc/build-guide.md](doc/build-guide.md)。
 
 ## 使用示例 (Example)
@@ -757,24 +830,41 @@ nghttp3（QUIC / HTTP/3）、libsqlite3 / libmysqlclient / libpq（数据库，�
 `1.5.0` 起**每一档的发布档与调试档都是全功能的**：QUIC + HTTP/3 + C ABI
 （`UVCPP_QUIC_ENABLE` / `UVCPP_HTTP3_ENABLE` / `UVCPP_CAPI_ENABLE` 都是 1，此前的发布包
 这三项是 0 —— 逐条的来路与判据见上面「`v1.5.0` 重点」）。**数据库模块自 `1.5.3` 起也进了
-六条腿**（`UVCPP_DB_ENABLE` 从 0 变 1），但**只带 SQLite 一个后端** —— 见下面那一段。
+六条腿**（`UVCPP_DB_ENABLE` 从 0 变 1），`1.7.0` 起 **yyjson、brotli 与 db 的两个远程
+后端也都进包** —— 「全功能」这句话到 1.7.0 才真的没有差集（在那之前 `release.yml`
+既不传 `UVCPP_ENABLE_YYJSON` 也不传 `UVCPP_ENABLE_BROTLI`，MySQL/PG 更是显式 `=OFF`）。
 
-**包里的数据库模块只有 SQLite。** 六条腿各传四个 `-D`：
+**包里的 db 模块 1.7.0 起三个后端都在。** 六条腿各传这几个 `-D`：
 
 ```
 -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
--DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF
+-DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+-DUVCPP_DB_RUNTIME_LOAD=ON
 ```
 
-两个 `OFF` 是**显式**关的，不是"找不到"：发布腿的 runner 上装着 `libpq-dev`，
+`1.6.x` 及以前后两行是 `-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF`，
+而且是**显式**关的、不是"找不到"：发布腿的 runner 上装着 `libpq-dev`，
 `find_package(PostgreSQL QUIET)` 会**静默**成功，于是 `libuvcpp.so` 悄悄多一条
 `libpq.so.5` 的 `DT_NEEDED` —— 而"装到别的机器上跑不起来"正是发布腿那条 `ldd` 断言要拦的
-形状（名单里 `sqlite3` / `mysqlclient` / `pq` 三枚都在）。SQLite 那份也**不链系统的**：
-`UVCPP_DB_SQLITE_FROM_SOURCE=ON` 让配置期下一份**钉死哈希**的 amalgamation、编成静态且带
-PIC 的 `uvcpp_sqlite3` 链进去 —— 链系统的 `libsqlite3.so` 会多一条 `DT_NEEDED`，而 Ubuntu
-24.04 上系统的 `libsqlite3.a` 不是 PIC。所以预编译包里 `uvcpp_db_drivers()` 只打印
-`sqlite`；要 MySQL / PostgreSQL 就**从源码编**（默认三个后端都开，那时它们按各自那份
-客户端库正常链接）。两条理由的实测数据在 [`doc/db-guide.md`](doc/db-guide.md)。
+形状（名单里 `sqlite3` / `mysqlclient` / `pq` 三枚都在）。**1.7.0 换了一条路而不是继续关着
+它**：`UVCPP_DB_RUNTIME_LOAD=ON` 让这两个后端编进库里、但客户端库在**运行时**才
+`dlopen`/`LoadLibrary`。理由是 `DT_NEEDED`（Windows 上是导入表）**加载期**解析 ——
+链上就等于"没装过这两种客户端库的机器连**加载**这份包都做不到"，哪怕它只跑 HTTP。
+开了之后那种机器一切照常，只有真去连 MySQL/PG 时才会拿到
+`uvcpp_db_status::NO_DRIVER` 加一句写清了试过哪些库名的话。所以 `uvcpp_db_drivers()`
+现在打印 `sqlite,mysql,postgres`，而"这台机器上能不能用 MySQL"是运行期的事。
+
+SQLite 那一份仍**不链系统的**：`UVCPP_DB_SQLITE_FROM_SOURCE=ON` 让配置期下一份
+**钉死哈希**的 amalgamation、编成静态且带 PIC 的 `uvcpp_sqlite3` 链进去 —— 链系统的
+`libsqlite3.so` 会多一条 `DT_NEEDED`，而 Ubuntu 24.04 上系统的 `libsqlite3.a` 不是 PIC。
+两条理由的实测数据在 [`doc/db-guide.md`](doc/db-guide.md)。
+
+**这就是"自包含"这句话在 1.7.0 的准确写法**：Linux 上 `ldd libuvcpp.so` 除 libc 一类
+之外仍然什么都不多（brotli 走 `UVCPP_BROTLI_FROM_SOURCE=ON` 静态链，MySQL/PG 根本
+不在链接行上）；MinGW 的 DLL 依赖表照样只有 Windows 自带的那几个模块。**唯一的例外是
+运行期**：真要连 MySQL / PostgreSQL，那台机器上得有对应的客户端库（`libmysqlclient` /
+`libmariadb` / `libpq`，Windows 上是 `libmysql.dll` / `libmariadb.dll` / `libpq.dll`），
+或者用 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` 指个路径。
 
 本版本提供 **6 个平台**（x64 与 arm64 × MinGW-w64 / MSVC / GCC）的预编译动态库，
 **每档都含发布版与调试版两份**（`v1.1.0` 起就是 6 份，此前这里只列了 3 个 x64 ——
@@ -795,7 +885,7 @@ nlohmann/json、zlib 的头）、`lib/pkgconfig/`（`uvcpp.pc` 与 `uvcpp-debug.
 
 | 文件 | 说明 |
 |---|---|
-| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / OpenSSL / nghttp2 / ngtcp2 / nghttp3 / SQLite 以及 MinGW 运行时均已静态链接进去** |
+| `bin/libuvcpp.dll` | 动态库。**libuv / llhttp / zlib / brotli / OpenSSL / nghttp2 / ngtcp2 / nghttp3 / SQLite 以及 MinGW 运行时均已静态链接进去**。MySQL / PostgreSQL **不在**这张依赖表里：它们的客户端库是 `UVCPP_DB_RUNTIME_LOAD=ON` 下运行时才打开的，没装也只影响"真去连这两家" |
 | `lib/libuvcpp.dll.a` | 导入库（供 MinGW/GCC 链接，`-luvcpp`） |
 | `bin/libuvcppd.dll` | **调试档**动态库（MSVC 那份叫 `uvcppd.dll`）。用法与前提见下面「调试档」一节 |
 | `lib/libuvcppd.dll.a` | 调试档导入库（`-luvcppd`）；MSVC 那份是 `uvcppd.lib` |

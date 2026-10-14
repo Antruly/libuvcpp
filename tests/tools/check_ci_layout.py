@@ -152,22 +152,31 @@ FEATURE_GATES = {
     "wsdl": ["UVCPP_ENABLE_WSDL:BOOL=ON", "pugixml integrated",
              "Including wsdl module in build", "test_wsdl_document_func"],
     # 1.6.34：第二个 JSON 解析后端（`src/yyjson/`）。`UVCPP_ENABLE_YYJSON` 也是
-    # **默认 OFF**，而且它比上面几条更彻底：它**不在发布包里**（release.yml 不传
-    # 这个 `-D`），所以这三格是它唯一会被编译的地方。少了它们，
-    # `tests/functional/yyjson_doc_func.cpp` 那条「25 行输入表逐条与 nlohmann 比 +
-    # 五份语料写回逐字节相同」在 CI 里**一条都不会被编译** —— 而"没编"与"编了且过"
-    # 在 check 的结论里长得一模一样。
+    # **默认 OFF**。1.6.34 那会儿它比上面几条更彻底 —— 发布腿一条都不开它，所以
+    # 这三格是它**唯一**会被编译的地方；**1.7.0 起不再是**：发布腿也开了它，这三格
+    # 从此与 `wsdl` 那三格同形（发布配置在 push/PR 阶段的替身）。
+    # 少了它们，`tests/functional/yyjson_doc_func.cpp` 那条「25 行输入表逐条与
+    # nlohmann 比 + 五份语料写回逐字节相同」在 push/PR 阶段**一条都不会被编译** ——
+    # 而"没编"与"编了且过"在 check 的结论里长得一模一样，且发布腿只在打标签那天跑。
     #
     # 三格（ubuntu / macOS / MSVC）形状相同：`web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`。
     # 第二条门禁串盯的是 `yyjson integrated`（FetchContent 真的取到了、对象库真的
     # 建了）—— 这里没有"依赖不满足就强制关"的从属规则，所以 `CMakeCache.txt` 那条
     # 也只是个便宜的旁证，真正承重的是它。
+    #
+    # **还有第四处：`ci-mingw64.yml` 那条单 job。** 1.7.0 起它那唯一一处 configure
+    # 也传 `-DUVCPP_ENABLE_YYJSON=ON`（与 `-DUVCPP_ENABLE_BROTLI=ON`、db 的两个远程
+    # 后端同批加，理由写在那个步骤的注释 ⑤ 里）。那张表**看不到它** —— 本判据遍历的
+    # 是**矩阵条目**，而那个文件没有矩阵（`NO_MATRIX_CELL`）。它的三条门禁串写死在
+    # 那一格里，改那一格时别只改 `-D`。
     "yyjson": ["UVCPP_ENABLE_YYJSON:BOOL=ON", "yyjson integrated",
                "Including yyjson module in build", "test_yyjson_doc_func"],
     # 1.6.48：压缩层多了第三个编码器（`src/web/uvcpp_http_compress.cpp` 的 brotli
     # 那一支）。`UVCPP_ENABLE_BROTLI` 也是**默认 OFF** —— 与上面几条同一个理由，
     # 而这里多一层：`UVCPP_ENABLE_BROTLI=OFF` 时**这一格什么都不编**，
-    # `parse_accept_encoding()` 连 `br` 都不会返回。
+    # `parse_accept_encoding()` 连 `br` 都不会返回。（1.7.0 起发布腿也开它了，
+    # 所以这四格与 `yyjson`/`wsdl` 一样成了发布配置的替身，而不再是唯一的编译处；
+    # MinGW 那条单 job 同批也开了它，与 `yyjson` 那条同一个去处。）
     #
     # ubuntu 有两格（`brotli` 与 `brotli-no-zlib`）—— 第二格不是凑数：
     # "有 brotli、没有 zlib"那整条分支（协商里 gzip/deflate 问不出来、静态腿

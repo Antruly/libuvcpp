@@ -55,6 +55,66 @@ permissions:
 # **一律读生成的头**（`<tree>/include/uvcpp/uvcpp_config.h`）而不是 cache ——
 # 判据得是"编译器真读到了什么"。理由写在 mingw-x64 那条断言步的注释里。
 
+# ---------------------------------------------------------------------------
+# 1.7.0 起：上面那句"全功能"才真的全 —— 补上 yyjson / brotli / MySQL+PostgreSQL
+# ---------------------------------------------------------------------------
+# 1.5.0 写下"全功能"时漏了三个开关，1.7.0 才补上。补之前先把口径钉死：把
+# `CMakeLists.txt` 里每个 `option(UVCPP_ENABLE_*)` 与十处 configure 对一遍，
+# "**默认 OFF 且发布腿没传**"的集合在 1.6.x 里**恰好有两个元素**；补完之后这个
+# 集合是**空的**（本机用一段脚本对过，不是数出来的）。口径只算 `UVCPP_ENABLE_*`：
+# `UVCPP_BUILD_EXAMPLES` / `UVCPP_BUILD_BENCH` 同样默认 OFF 且不传，但那两个问的是
+# "要不要顺手编示例与跑分程序"，不影响库本身导出什么。
+#
+#   ⑥ UVCPP_ENABLE_YYJSON / UVCPP_ENABLE_BROTLI —— 上面那两个元素。
+#      yyjson 是**第二个 JSON 后端**（`src/yyjson/`，与 nlohmann **并存**、不是
+#      二选一：公开头一个 yyjson 类型都不出现，它是私有依赖、单头加单 .c）；
+#      brotli 是响应的 `Content-Encoding: br`。
+#
+#      这一条必须配 `UVCPP_BROTLI_FROM_SOURCE=ON`（1.6.52 新增，见
+#      CMakeLists.txt 里 brotli 发现那一段）。不配就是听天由命 —— 发现顺序是
+#      pkg-config → find_path/find_library → FetchContent，而 Linux 腿今天"干净"
+#      只是因为那条 `apt-get install` 只装了 zlib1g-dev/ninja-build。哪天镜像或
+#      msys2 自带了 libbrotli，配置期会**静默**改走系统共享库，产物凭空多三条
+#      DT_NEEDED（libbrotlienc/dec/common），而 zlib 那条用的
+#      `-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON` 在这里**不管用**：它只挡
+#      `find_package`，挡不住 `pkg_check_modules`。下面 ldd 那份名单里也补了
+#      `brotli` —— 开关是"让它静态进去"，名单是"万一没进去就当场红"，两件事。
+#
+#   ⑦ db 的 MySQL / PostgreSQL 两个后端 —— 1.6.x 为止十处 configure 都显式传
+#      `-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF`，包里只有 SQLite。
+#      这一版改成**三个后端都在**，但这条路有个陷阱，也是它比 ⑥ 麻烦得多的原因：
+#      直接链 libmysqlclient/libpq 会让"自包含"当场作废，而且失败方式不是"少个
+#      功能"，是**进程根本起不来** ——
+#
+#          DT_NEEDED（Windows 上是 PE 的导入表）是**加载期**解析的。产物上多一条
+#          `libpq.so.5`，没装过 libpq 的机器连 `libuvcpp.so` 都加载不了，哪怕那个
+#          程序只跑 HTTP、一行 db 代码都不碰。
+#
+#      所以六条腿都配 `-DUVCPP_DB_RUNTIME_LOAD=ON`（1.6.54 新增，**默认 OFF** ⇒
+#      既有使用者的构建逐字节不变）：符号走 `dlopen(RTLD_NOW | RTLD_LOCAL)` /
+#      `LoadLibraryA` 运行时取，链接行上不出现这两个库。
+#
+#      **但"省掉链接"省不掉编译**：头必须在（`MYSQL_BIND`/`MYSQL_FIELD`/`PQresult`
+#      这些按值、按布局用到的类型不能靠手抄结构体赌 ABI —— 那正是这条路要躲开的
+#      东西）。于是六条腿各自去弄一份头，三种来路：
+#        · mingw-x64 / mingw-arm64 —— MSYS2 的 `mingw-w64-*-libmariadbclient` 与
+#          `-postgresql` 进了 job 的 `install:` 列表，头在 `$MINGW_PREFIX/include/`；
+#        · msvc-x64 / msvc-arm64 —— 镜像上都没有（MySQL 那一项是 `Install-MysqlCli`
+#          装的**命令行工具**、没有头；`windows-11-arm` 连 PostgreSQL 都没有），
+#          两条腿统一跑 `.github/scripts/win-client-headers.sh` 取同一份钉死版本的
+#          MSYS2 `.pkg.tar.zst`；
+#        · linux-x64 / linux-arm64 —— `apt-get download` 取 `.deb`、`dpkg -x` 摊开，
+#          **一个包都不 install**：jammy 的 `libmysqlclient-dev` 与 `libpq-dev` **都**
+#          `Depends: libssl-dev`，装任何一个都会把上面那条"不装 libssl-dev"的规矩
+#          破掉（整段理由链在 linux-x64 那一步的注释里）。
+#
+#      于是失败形状变成"没装客户端库的机器照常跑 HTTP/SQLite，只有真去连
+#      MySQL/PG 才拿到一条说人话的错误"，而不是"整个库加载不了"。下面那条 ldd
+#      断言里 `mysqlclient|pq` 两个名字从此**正面**证明这件事成立（谁把链接行改
+#      回去，它立刻红）；Linux 两条腿另外多一条 `nm -D -u` 的判据，量的是"还剩
+#      几个未定义的 mysql_/PQ 符号"—— 那是 `ldd` 看不见的另一半（漏改一处调用点
+#      的形状，见那一步的注释）。
+
 jobs:
   # ---------------------------------------------------------------------------
   # Windows x64 / MinGW-w64 —— 这是主发布产物（依赖全静态，任意 64 位 Windows 可用）
@@ -77,12 +137,22 @@ jobs:
         with:
           msystem: MINGW64
           update: false
+          # 最后两个是 1.7.0 起的：发布包要带 db 模块的 MySQL/PG 两个后端，而
+          # `UVCPP_DB_RUNTIME_LOAD=ON` 省掉的是**链接**、省不掉**编译** ——
+          # `MYSQL_BIND`/`MYSQL_FIELD` 这些按值按布局用到的类型要从真的
+          # `mysql.h` 读（见 `.github/scripts/win-client-headers.sh` 头部那段）。
+          # 包里的头落在 `$MINGW_PREFIX/include/mysql/mysql.h` 与
+          # `$MINGW_PREFIX/include/libpq-fe.h`（2026-10-14 在 `packages.msys2.org`
+          # 上逐个核过文件表），下面 configure 里那两个 `_INCLUDE_DIR` 就是照
+          # 这个布局指过去的。
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-openssl
             mingw-w64-x86_64-python
+            mingw-w64-x86_64-libmariadbclient
+            mingw-w64-x86_64-postgresql
 
       - name: Configure & Build
         run: |
@@ -139,8 +209,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -162,8 +237,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -222,11 +302,20 @@ jobs:
       # 打开它同时要满足 `UVCPP_BUILD_WEBAPP=ON`（WSDL 的前提，否则配置期静默降级），
       # 而六条腿本来就都开着。
       #
-      # **`UVCPP_DB_ENABLE` / `UVCPP_DB_SQLITE_ENABLE` 同理。** db 模块的开关与宏
-      # 同名加后缀，**但这一族的内层宏是按后端各一枚**（`UVCPP_DB_SQLITE_ENABLE` /
-      # `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE`），而"关掉的后端"在生成头里
-      # 是**如实写 0** 的 —— 所以这里只量真的要求开的那两枚。为什么只开 SQLite、
-      # MySQL/PG 为什么显式关：见 mingw-x64 配置那一步 ⑤ 那段注释。
+      # **`UVCPP_DB_ENABLE` / 三个后端宏同理。** db 模块的开关与宏同名加后缀，
+      # **但这一族的内层宏是按后端各一枚**（`UVCPP_DB_SQLITE_ENABLE` /
+      # `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE`）。**1.7.0 起三枚都在这一串
+      # 里** —— 在那之前这里只量 `UVCPP_DB_SQLITE_ENABLE`，因为另两个被显式
+      # `=OFF`。为什么现在开着、以及"开着"与"链接行上有它"为什么不是一回事，见
+      # mingw-x64 配置那一步 ⑤ 那段注释。
+      #
+      # **`UVCPP_YYJSON_ENABLE` / `UVCPP_BROTLI_ENABLE` 是 1.7.0 新加的两枚。** 它们
+      # 与 WSDL 那次同形（默认 OFF、发布腿显式开），但更隐蔽一点：yyjson 在没有这两行
+      # 之前是**发布腿一条都不开**的，所以"包里没有它"曾经是发布配置的事实而不是缺陷。
+      # 这两枚进了清单，就等于把"包里必须真有 yyjson / brotli"变成一条会红的断言。
+      # 注意 brotli 的宏是 `UVCPP_BROTLI_ENABLE`（跟着 `UVCPP_ENABLE_BROTLI`），
+      # 而它还有一个派生宏 `UVCPP_HTTP_COMPRESS_ENABLE` —— 这里量的是前者：派生宏
+      # 在"没开 zlib"的构建里也是 1，分不出是哪个编码器在库里。
       #
       # 两份产物都量：调试档与发布档是**两次独立的 configure**，漏传只让其中一份
       # 缺功能 —— 而那一份正是使用者拿去调试时才撞上的。
@@ -253,7 +342,9 @@ jobs:
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
-              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE
+              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+              UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
 
@@ -302,6 +393,10 @@ jobs:
         with:
           msystem: CLANGARM64
           update: false
+          # 最后两个与 mingw-x64 同一件事：发布包要带 db 的 MySQL/PG 两个后端，而
+          # `UVCPP_DB_RUNTIME_LOAD=ON` 省的是链接、省不掉编译 —— 头必须在。
+          # 这两个包名 2026-10-14 在 `packages.msys2.org` 上核过（`clang-aarch64`
+          # 仓里都在，版本与 x86_64 那条仓同步发布）。
           install: >-
             mingw-w64-clang-aarch64-clang
             mingw-w64-clang-aarch64-cmake
@@ -310,6 +405,8 @@ jobs:
             mingw-w64-clang-aarch64-python
             mingw-w64-clang-aarch64-libc++
             mingw-w64-clang-aarch64-libunwind
+            mingw-w64-clang-aarch64-libmariadbclient
+            mingw-w64-clang-aarch64-postgresql
 
       # 这条腿的机器本机不存在（没有 arm64 的 Windows 开发机），三个探点只能在这里
       # 实测。这一步**故意不设断言**：要的是数据，把关交给下面真正会拦人的白名单
@@ -364,8 +461,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -384,8 +486,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -454,7 +561,9 @@ jobs:
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
-              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE
+              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+              UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
 
@@ -510,6 +619,16 @@ jobs:
         shell: bash
         run: bash .github/scripts/win-openssl-deps.sh
 
+      # MySQL/PG 的**头**。这条腿的机器上一份都没有：镜像里 MySQL 那一项是
+      # `Install-MysqlCli.ps1` 装的命令行工具（没有头），PostgreSQL 14 虽然装着
+      # 但只有 x64 这一条腿有、另一条（windows-11-arm）连 PostgreSQL 都没有 ——
+      # 所以两条 MSVC 腿统一用 `win-client-headers.sh` 取同一份钉死版本的头，
+      # 而不是一条用镜像自带的、一条用别处来的。理由与"为什么不用 MSYS2 那份"
+      # 全在脚本头部。
+      - name: Install MySQL / PostgreSQL client headers
+        shell: bash
+        run: bash .github/scripts/win-client-headers.sh
+
       - name: Configure & Build
         shell: bash
         run: |
@@ -528,8 +647,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR=C:/client-headers/mysql \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR=C:/client-headers/pgsql \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -573,7 +697,9 @@ jobs:
             UVCPP_WEBAPP_ENABLE UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE \
             UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE \
             UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
-            UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE
+            UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+            UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+            UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           exit $rc
 
       - name: Test
@@ -715,6 +841,13 @@ jobs:
           nmake /nologo install_sw
           if errorlevel 1 exit /b 1
 
+      # 与 msvc-x64 同一个脚本、同一份钉死版本的头：`windows-11-arm` 那张镜像里
+      # **连 PostgreSQL 都没有**（`Windows11-Arm64-Readme.md` 里 postgres 零命中，
+      # MySQL 那一项是命令行工具、没有头），所以这一条腿必须自己取。
+      - name: Install MySQL / PostgreSQL client headers
+        shell: bash
+        run: bash .github/scripts/win-client-headers.sh
+
       - name: Configure & Build
         shell: bash
         run: |
@@ -745,8 +878,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR=C:/client-headers/mysql \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR=C:/client-headers/pgsql \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -822,7 +960,9 @@ jobs:
             UVCPP_WEBAPP_ENABLE UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE \
             UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE \
             UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
-            UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE
+            UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+            UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+            UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           exit $rc
 
       - name: Test
@@ -867,6 +1007,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zlib1g-dev ninja-build
+
+          # MySQL / PostgreSQL 的**头**：`apt-get download` 只取 `.deb`、`dpkg -x`
+          # 就地摊开，**一个包都不 install**。理由不是洁癖，是上面那条"不装
+          # libssl-dev"的规矩要求这么做：jammy 的 `libmysqlclient-dev` 与
+          # `libpq-dev` **都 `Depends: libssl-dev`**（本机 `apt-cache depends` 逐个
+          # 读过），而 `--no-install-recommends` 去不掉 Depends。靠
+          # `-DOPENSSL_ROOT_DIR` 去"盖住"一份多出来的 3.0.2 则是把一条不变量换成
+          # 一句祈祷 —— 上面那段说的静默坏包就是这么来的。
+          #
+          # 而这里真正需要的只是**编译期**的头：`UVCPP_DB_RUNTIME_LOAD=ON` 之后链接行
+          # 上本来就不出现这两个库，运行期要的是**使用者**机器上那份客户端库（那正是
+          # 这个开关的全部意义）。把头所在的目录指给 configure 就够了 —— 与两条 MSVC
+          # 腿（`.github/scripts/win-client-headers.sh`）做的是同一件事，只是那边上游
+          # 是 MSYS2 的 `.pkg.tar.zst`（Windows 镜像上没有第二种选择）、这边是 Ubuntu
+          # 的 `.deb`；两条路都**不 install**，所以两条腿的依赖集合都没变。
+          #
+          # 判据落在**头在不在**（`test -f`），与 win-client-headers.sh 同一条规矩：
+          # 取不到就当场红，绝不"跳过这一步继续编" —— 那样编出来的包少两个后端，
+          # 而它会一路走到发版。
+          #
+          # 目录约定：`$HOME/client-headers/usr/include/{mysql,postgresql}`，与下面
+          # 两个 configure 里那四个 `-DUVCPP_DB_*_INCLUDE_DIR=` **必须同表**。
+          # 改这里就要改那里。
+          rm -rf "$HOME/client-headers"
+          mkdir -p "$HOME/client-headers"
+          (
+            cd "$HOME/client-headers"
+            apt-get download libmysqlclient-dev libpq-dev
+            for d in ./*.deb; do dpkg -x "$d" .; done
+            rm -f ./*.deb
+          )
+          test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
+          test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
 
       - name: Build OpenSSL with the QUIC API
         run: |
@@ -938,8 +1111,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -959,8 +1137,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -997,7 +1180,14 @@ jobs:
             # 发布包，而它的三个客户端库本来都长着"链系统那份也能编过"的样子。这份
             # 名单原先**一个都没收** —— 于是把 `-DUVCPP_DB_SQLITE_FROM_SOURCE` 删掉、
             # 改成链系统 libsqlite3.so 时，这条断言会一条条放行。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq)[^ ]*\.so[^ ]*' | sort -u || true)
+            # `brotli` 是 1.7.0 起进这份产物的：它由 `UVCPP_BROTLI_FROM_SOURCE=ON`
+            # 强制走 FetchContent 静态编（CMakeLists.txt 那段），而 22.04 的
+            # `libbrotli-dev` 是"装了就能静默改成动态链"的另一份候选 —— 名字写进
+            # 来才是判据，否则那三个 `.so`（`libbrotlienc`/`libbrotlidec`/
+            # `libbrotlicommon`）会一条不响地进包。它同时还是那条 `UVCPP_BROTLI_
+            # FROM_SOURCE` 开关的**兜底**：开关哪天被删掉、而 runner 上正好有
+            # libbrotli，这里当场红。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -1005,6 +1195,22 @@ jobs:
             soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$soft" ]; then
               echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
+            fi
+            # `UVCPP_DB_RUNTIME_LOAD=ON` 的**正面**判据，与上面那条 ldd 是两件事：
+            # `ldd` 只看 DT_NEEDED（"有没有链上"），看不见"有一个没人提供的
+            # `mysql_query` 挂在那里"—— 而那正是**漏改一处调用点**、且 `--no-undefined`
+            # 没生效时的形状。阶段 3 实测过这一条：共享库**默认允许**未定义符号，
+            # 故意留一处裸 `mysql_query(` 之后 `make` 照样 rc=0、只是 `nm -D -u` 里
+            # 多一行 `U mysql_query`，而 `UVCPP_BUILD_TESTS=OFF` 的调试档连"链一个
+            # 可执行文件"那一步都没有。所以这里直接量"还剩几个"。
+            #
+            # 0 是今天的事实（本机 build-dbdlopen 量过）；`--no-undefined`
+            # （CMakeLists.txt 那一段）是同一件事的另一半 —— 两条都在，任何一边
+            # 被人删掉另一条还会响。
+            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ' || true)
+            if [ "$undef" != "0" ]; then
+              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
+              rc=1
             fi
           done
           exit $rc
@@ -1037,7 +1243,9 @@ jobs:
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
-              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE
+              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+              UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
 
@@ -1078,6 +1286,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zlib1g-dev ninja-build
 
+          # MySQL/PG 的头：只取 `.deb` 摊开、不 install（整段理由链在 linux-x64 那
+          # 一步的注释里）。这条腿的 `apt-get download` 拿到的是 **arm64 的 .deb**，
+          # 头是同一份源码生成的，与 x64 那条腿取到的逐字节相同的那几个文件。
+          # 目录约定同表：`$HOME/client-headers/usr/include/{mysql,postgresql}`。
+          rm -rf "$HOME/client-headers"
+          mkdir -p "$HOME/client-headers"
+          (
+            cd "$HOME/client-headers"
+            apt-get download libmysqlclient-dev libpq-dev
+            for d in ./*.deb; do dpkg -x "$d" .; done
+            rm -f ./*.deb
+          )
+          test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
+          test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
+
       # 与 linux-x64 那一同名步骤逐字同构（同一份源码、同一套参数、同一条自检），
       # 只有 `--prefix` 下的那份库是 aarch64 的 —— OpenSSL 的 Configure 按机器
       # 自己挑目标（这里挑到 linux-aarch64），不需要我们传。`-fPIC` 在 aarch64 上
@@ -1114,8 +1337,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -1134,8 +1362,13 @@ jobs:
             -DUVCPP_ENABLE_CAPI=ON \
             -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
             -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
-            -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
@@ -1163,7 +1396,14 @@ jobs:
             # 发布包，而它的三个客户端库本来都长着"链系统那份也能编过"的样子。这份
             # 名单原先**一个都没收** —— 于是把 `-DUVCPP_DB_SQLITE_FROM_SOURCE` 删掉、
             # 改成链系统 libsqlite3.so 时，这条断言会一条条放行。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq)[^ ]*\.so[^ ]*' | sort -u || true)
+            # `brotli` 是 1.7.0 起进这份产物的：它由 `UVCPP_BROTLI_FROM_SOURCE=ON`
+            # 强制走 FetchContent 静态编（CMakeLists.txt 那段），而 22.04 的
+            # `libbrotli-dev` 是"装了就能静默改成动态链"的另一份候选 —— 名字写进
+            # 来才是判据，否则那三个 `.so`（`libbrotlienc`/`libbrotlidec`/
+            # `libbrotlicommon`）会一条不响地进包。它同时还是那条 `UVCPP_BROTLI_
+            # FROM_SOURCE` 开关的**兜底**：开关哪天被删掉、而 runner 上正好有
+            # libbrotli，这里当场红。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -1171,6 +1411,22 @@ jobs:
             soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$soft" ]; then
               echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
+            fi
+            # `UVCPP_DB_RUNTIME_LOAD=ON` 的**正面**判据，与上面那条 ldd 是两件事：
+            # `ldd` 只看 DT_NEEDED（"有没有链上"），看不见"有一个没人提供的
+            # `mysql_query` 挂在那里"—— 而那正是**漏改一处调用点**、且 `--no-undefined`
+            # 没生效时的形状。阶段 3 实测过这一条：共享库**默认允许**未定义符号，
+            # 故意留一处裸 `mysql_query(` 之后 `make` 照样 rc=0、只是 `nm -D -u` 里
+            # 多一行 `U mysql_query`，而 `UVCPP_BUILD_TESTS=OFF` 的调试档连"链一个
+            # 可执行文件"那一步都没有。所以这里直接量"还剩几个"。
+            #
+            # 0 是今天的事实（本机 build-dbdlopen 量过）；`--no-undefined`
+            # （CMakeLists.txt 那一段）是同一件事的另一半 —— 两条都在，任何一边
+            # 被人删掉另一条还会响。
+            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ' || true)
+            if [ "$undef" != "0" ]; then
+              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
+              rc=1
             fi
           done
           exit $rc
@@ -1203,7 +1459,9 @@ jobs:
               UVCPP_ENABLE_MEMORY_POOL UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE \
               UVCPP_NGHTTP2_ENABLE UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE \
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
-              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE
+              UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+              UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
 

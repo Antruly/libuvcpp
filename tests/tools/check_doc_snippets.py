@@ -333,7 +333,9 @@ MODULE_REQ = {
     "yyjson/": "UVCPP_YYJSON_ENABLE",
 }
 
-# 发布包里**永远关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。
+# 发布配置里**结构性地关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。
+# （"结构性"三个字是这张表的准入条件，不是"此刻关着" —— `UVCPP_YYJSON_ENABLE` 1.7.0
+# 出表就是因为发布腿把它开了，见下面那条。）
 #
 # 为什么非有这张表不可：CI 的 config-contract job 拿 `package_release.py` 出的包判片段，
 # 而那个包**所有模块全开**（`build-cfg` 的开关表就是照这个选的）。`quic` 是**第一个**
@@ -362,19 +364,28 @@ MODULE_REQ = {
 # 就等于在那个模块上把这条门禁关掉一半，所以每一行都得单独交代理由 —— 不是"顺手
 # 也关着"。`web/` `ssl/` `http2/` 这些在 `build-cfg` 里全是开的，它们缺席只能说明
 # **拿错了包**，那正是该退 3 的情形，**不许**进这张表。
-# `UVCPP_YYJSON_ENABLE` 是**第三条**，判据与 quic/h3 相同（`UVCPP_ENABLE_YYJSON`
-# 默认 OFF、`release.yml` 六条腿一条都不开它），但它的**代价**必须单独写清楚，
-# 因为它是三条里唯一一个"本可以不必这样"的：`doc/json-guide.md` 的 yyjson 那一节
-# 是本批新写的，理论上可以整段标成不判。没那么做 —— 与 h3 那条同一个理由：标了
-# 就再也回不来（哪天发布包开了 yyjson，那几条片段不会自己回到被判集合里），
-# 而这张表自己会回来。
+# `UVCPP_YYJSON_ENABLE` 曾经是**第三条**（1.6.34 加进来，理由与 quic/h3 相同：
+# `UVCPP_ENABLE_YYJSON` 默认 OFF、`release.yml` 六条腿一条都不开它），**1.7.0 删掉了**。
+# 删掉的方式正是上面那句"这张表自己会回来"预言的：发布腿从 1.7.0 起传
+# `-DUVCPP_ENABLE_YYJSON=ON`，于是发布包里这个宏就是 1、不再"结构性地关着"，
+# 那 4 条片段自动回到被判集合里。
 #
-# 同样如实记下代价：那几条片段**在 CI 里不会被编译**。判它们要一份
-# `-DUVCPP_ENABLE_YYJSON=ON` 的包，而 CI 里没有任何一条腿产出这样的包（都是
-# 临时 configure 的树，不是 `package_release.py` 出的包）。手工验过一次：
-# 本机 `-DUVCPP_ENABLE_YYJSON=ON` 装出来的前缀下，`doc/json-guide.md` 那几条
-# 片段判绿（见该篇 §yyjson 末尾那段的记录）。
-DEFAULT_OFF = {"UVCPP_QUIC_ENABLE", "UVCPP_HTTP3_ENABLE", "UVCPP_YYJSON_ENABLE"}
+# **删这一行不是可选的，也不是能分开做的**：这张表只在宏为 0 时救场，宏变成 1 之后
+# 它就没用了；而三个 config-contract 档（Linux / MSVC / MinGW）拿的都是
+# `package_release.py` 出的包 —— 它们必须**同时**传 `-DUVCPP_ENABLE_YYJSON=ON`，
+# 否则那三档会在 `doc/json-guide.md` 上退 3（症状像"文档腐烂"，其实是拿错了包）。
+# 同一批改的还有三处断言，都在那三个 CI 文件里。
+#
+# 判据（2026-10-14 本机实测，比原来那次"`cmake --install` 到临时前缀"更接近发布形状）：
+# `build-vfy-yy`（`web` + `webapp` + `openssl` + `zlib` + `nghttp2` + `wsdl` + `capi` +
+# `yyjson` + `db`(SQLite 源码) + `--exclude-libs,ALL` 的那棵发布形树）经
+# `package_release.py --platform linux-x64` 出包，包内 `UVCPP_YYJSON_ENABLE` 是 1，
+# 拿它跑 `check_doc_snippets.py --pkg …` ⇒ **`[绿] doc/json-guide.md 编过 8/8 条`**，
+# 全库 `候选 202 条：编过 102 条`、`rc=0`。
+#
+# 仍然留在这张表里的两条（quic / http3）与 yyjson 的差别只有一句：**发布腿到现在
+# 也还是不开它们**。哪天开了，照上面这条路走一遍、把那一行删掉即可。
+DEFAULT_OFF = {"UVCPP_QUIC_ENABLE", "UVCPP_HTTP3_ENABLE"}
 
 CONFIG_REL = os.path.join("include", "uvcpp", "uvcpp_config.h")
 

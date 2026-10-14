@@ -14,7 +14,8 @@ SQLite / MySQL / PostgreSQL 三个后端，SQL 由调用方写，结果按**表*
 > 并把三家**真不一样**的地方如实写在这里，而不是假装它们一样。
 >
 > 它默认**关**（`UVCPP_ENABLE_DB=OFF`）：它是全仓唯一一个必需第三方客户端库的
-> 模块。发布配置**显式打开**它，所以预编译包里带着这个模块。
+> 模块。发布配置**显式打开**它，所以预编译包里带着这个模块 —— 而且**三个后端都在**
+> （1.7.0 起；SQLite 从源码编，MySQL/PG 编进来但库走运行时加载，见 §1 与 §3）。
 
 ## 目录
 
@@ -89,7 +90,8 @@ int main() {
 }
 ```
 
-预编译包少哪个后端时，**这一行是第一个该看的地方**。
+自己编的包少哪个后端时（**官方预编译包 1.7.0 起三个都在**，不会有这一行缺项），
+**这一行是第一个该看的地方**。
 
 > **注意这一行说的是"编进来没有"，不是"这台机器上能不能用"。**
 > 开了 `UVCPP_DB_RUNTIME_LOAD` 之后这两件事分了家：MySQL 打印在清单里，
@@ -166,23 +168,29 @@ UVCPP_DB_PGSQL_LIBRARY=/nonexistent/libpq.so.5 ./myapp
 
 ### 预编译包里的 SQLite 是**从源码编的**：`UVCPP_DB_SQLITE_FROM_SOURCE`
 
-六条发布腿各传四个 `-D`：
+六条发布腿各传这几个 `-D`（**1.7.0 起**；在那之前后两行是 `=OFF`）：
 
 ```
 -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
--DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF
+-DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+-DUVCPP_DB_RUNTIME_LOAD=ON
 ```
 
-也就是说 —— **预编译包里的 db 模块只有 SQLite 一个后端**（`uvcpp_db_drivers()`
-只会打印 `sqlite`）。这不是漏配，是两条实测理由把另两条路都堵死了：
+也就是说 —— **预编译包里的 db 模块三个后端都在**（`uvcpp_db_drivers()` 会打印
+`sqlite,mysql,postgres` —— 是**驱动的稳定短名**，`pgsql` 只是 `scheme` 的别名之一，
+见下面的别名表），但 MySQL/PG 的**客户端库**是运行时才打开的，链接行上
+不出现（见下面「客户端库运行时加载」那一节）。SQLite 那一半必须从源码编，不是漏配，
+是两条实测理由把另两条路都堵死了：
 
 | 想链系统的那份 | 实测结果 |
 |---|---|
 | `libsqlite3.so` | 产物多一条 `DT_NEEDED`。发布腿有一条 `ldd` 断言在拦这个形状（原本的名单里还没有 `sqlite3` —— 已经补上，否则它会一条条放行） |
 | `libsqlite3.a` | Ubuntu 24.04 上那份**不是 PIC**：`gcc -shared -fPIC … /usr/lib/x86_64-linux-gnu/libsqlite3.a` 当场报 `relocation R_X86_64_PC32 against symbol 'sqlite3CtypeMap' can not be used when making a shared object; recompile with -fPIC` |
 
-MySQL / PostgreSQL 是**显式关**的，不是"找不到"：runner 上装着 `libpq-dev` 时
-`find_package` 会**静默**成功，发布包就悄悄多一条 `libpq.so.5` 的 `DT_NEEDED`。
+MySQL / PostgreSQL 在 1.6.x 的包里是**显式关**的，不是"找不到"：runner 上装着
+`libpq-dev` 时 `find_package` 会**静默**成功，发布包就悄悄多一条 `libpq.so.5` 的
+`DT_NEEDED`。1.7.0 起放着 D 那条路不用了 —— 后端编进去、库运行时取 —— 因为
+`DT_NEEDED` 是加载期解析的：链上就等于"没装客户端库的机器连**加载**这份包都做不到"。
 
 打开这个开关之后，配置期会做这几件事（都可以在本机复现）：
 

@@ -5,7 +5,8 @@
 
 这一页讲的是"怎么用它"，以及"它的边界在哪"。它不是 JSON **解析**指南 —— 解析与 DOM
 在 `webapp/uvcpp_web_json.h`（nlohmann 后端），见 [`webapp-guide.md`](webapp-guide.md)；
-本页 §13 讲**第二个**可选的解析后端（yyjson），它默认关着。
+本页 §13 讲**第二个**可选的解析后端（yyjson），它默认关着（**官方预编译包自 1.7.0
+起开着**，见 §13.1）。
 
 ## 目录
 
@@ -374,7 +375,7 @@ header-only、语义完整、也**慢**：每个值占一个 `std::map` / `std::
 
 | | |
 |---|---|
-| CMake 选项 | `-DUVCPP_ENABLE_YYJSON=ON`，**默认 OFF** |
+| CMake 选项 | `-DUVCPP_ENABLE_YYJSON=ON`，**默认 OFF**（但**发布包自 1.7.0 起开着**，见 §13.7） |
 | 包含 | `#include <yyjson/uvcpp_json_doc.h>` |
 | 依赖 | yyjson（单头 + 单 `.c`），**私有**：`<yyjson.h>` 只出现在本模块的 `.cpp` 里 |
 | 关掉时 | `src/yyjson/` **整个不参与编译**，这个头里的声明也整段消失
@@ -385,11 +386,15 @@ header-only、语义完整、也**慢**：每个值占一个 `std::map` / `std::
 
 一处容易想反的地方，顺便记清楚：`cmake --install` 的规则挂在 `UVCPP_ENABLE_YYJSON` 上
 （关掉时不装这个头），但**发布包是 `tests/tools/package_release.py` 按模块目录整体拷头
-做出来的、不看开关** —— 所以关着 yyjson 的包里照样能找到 `include/yyjson/uvcpp_json_doc.h`，
-只是一个空的壳（宏为 0，里面一个声明都没有）。真正拦住你的是宏，不是"包里没有这个文件"。
+做出来的、不看开关** —— 所以一个把 yyjson 关掉的包里照样能找到
+`include/yyjson/uvcpp_json_doc.h`，只是一个空的壳（宏为 0，里面一个声明都没有）。
+真正拦住你的是宏，不是"包里没有这个文件"。（**官方预编译包自 1.7.0 起不关它**：
+六条腿都传 `-DUVCPP_ENABLE_YYJSON=ON`，包里那个头的宏是 1。上面这句讲的是机制，
+不是今天发布包的状态。）
 
-`-DUVCPP_ENABLE_YYJSON=ON` 这个组合**在 CI 里真的有一格**（而且这里只有三格：
-Ubuntu / macOS / MSVC）—— 它不是"发布了但没人编过"的那种可选模块。三格的门禁串、
+`-DUVCPP_ENABLE_YYJSON=ON` 这个组合**在 CI 里真的有三格**（Ubuntu / macOS / MSVC）
+—— 自 1.7.0 起发布腿也开着它，所以这三格是发布配置在 push/PR 阶段的替身，而"发布了
+但没人编过"这句话对 yyjson **已经不再成立**（1.6.x 的包才是那个状态）。三格的门禁串、
 装包表、以及为什么 macOS 那一格在而 `wsdl` 没有 macOS 格，见
 [`ci-guide.md`](ci-guide.md) §5 的 `yyjson` 那一节。
 
@@ -529,23 +534,28 @@ std::string doc_roundtrip(const std::string& body, bool* ok) {
 - **多一个第三方依赖**（yyjson 0.13.0）。只在 ON 时进构建，OFF 时**一个目标文件都不编**；
   取源码用的是 `FetchContent_Populate` 而不是 `MakeAvailable`，所以 yyjson 自己那套
   `install()` 规则**不会**被登记（上游 `YYJSON_INSTALL` 默认是 **ON**）。
-- **默认 OFF，但它有一条自己的 CI 腿**：`yyjson`，三格（Ubuntu / macOS / MSVC），
-  `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`。**这一格不是可选的** ——
-  本模块**不在发布包里**（包里那个头是空的壳，拦住你的是宏不是文件的缺席，见 §13.1），
-  所以这三格是它唯一会被编译的地方；没有它们，用例里"与 nlohmann 逐条一致"的那一半
-  与写回逐字节那条**一条都不会被编译**，而"没编译"与"编了且过"是同一个颜色。
-  四道门禁串与"为什么是这三格"写在 [`ci-guide.md`](ci-guide.md) §5 的 `yyjson` 那一节；
-  macOS 那一格在的理由是**它用 libc++**，而写回逐字节那条正好是跨 libstdc++/libc++
-  会分叉的那类断言。
-- `check_doc_snippets.py` 里本页那几条片段对**发布包**仍然判 `[跳·默认关]`
-  （`DEFAULT_OFF`）：发布包的 `UVCPP_YYJSON_ENABLE` 就是 0，缺席是发布配置的事实，
-  不是文档腐烂。
+- **默认 OFF，但它在 CI 与发布腿上都真的被编**：`yyjson` 三格（Ubuntu / macOS / MSVC）
+  的 `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，而**六条发布腿自 1.7.0 起
+  也传同一个 `-D`** —— 所以官方预编译包里 `UVCPP_YYJSON_ENABLE` 是 1，模块真的在库里
+  （1.6.x 及以前不是：那时包里只有一个空壳头，这三格是它唯一的编译处）。三格仍然不是
+  可选的：发布腿只在打标签那天跑，push/PR 阶段靠的就是它们。四道门禁串与"为什么是这
+  三格"写在 [`ci-guide.md`](ci-guide.md) §5 的 `yyjson` 那一节；macOS 那一格在的理由是
+  **它用 libc++**，而写回逐字节那条正好是跨 libstdc++/libc++ 会分叉的那类断言。
+- `check_doc_snippets.py` 里本页那几条片段曾经对**发布包**判 `[跳·默认关]`
+  （`DEFAULT_OFF` 里的 `UVCPP_YYJSON_ENABLE`）。1.7.0 起发布包开着 yyjson，**那条豁免
+  同批删掉了** —— 现在本页片段拿官方包跑是真编真判的（§13.7 末条那个手工验证就是
+  用一棵 `-DUVCPP_ENABLE_YYJSON=ON` 的树装出来的前缀做的）。
 - 上面**手工验过一次**：本机 `-DUVCPP_ENABLE_YYJSON=ON` 的树 `cmake --install` 到
   一个临时前缀（`include/yyjson/uvcpp_json_doc.h` 与 `include/uvcpp/uvcpp_json_scan.h`
   都在），拿该前缀跑 `python3 tests/tools/check_doc_snippets.py --pkg <前缀>` ——
   **本页这几条片段（含 §13.2 那条）判绿**。同一棵树上的
   `test_yyjson_doc_func` 也是 ALL PASS（全量 93/93）；四个 CI 门禁串也按 `yyjson`
-  那一格的原命令行在本机复现过。
+  那一格的原命令行在本机复现过。**豁免删掉之后又按发布包的形状验了一遍**
+  （`package_release.py --platform linux-x64` 出的那棵树，包内
+  `UVCPP_YYJSON_ENABLE` 是 1）：`check_doc_snippets.py --pkg …` ⇒ 本页
+  **编过 8/8 条**、全库 `编过 102/202 条`、`rc=0`。反向对照也做过：拿一棵
+  yyjson 关着的旧包跑同一条命令，本页第 402 行那条片段变成 `[跳]`、整条**退 3**
+  —— 这正是三个 config-contract 档必须跟着传 `-DUVCPP_ENABLE_YYJSON=ON` 的原因。
 - **对照那一半需要 webapp**：nlohmann 是 webapp 的依赖，`UVCPP_BUILD_WEBAPP=OFF` 的树上
   那条 include 不存在。用例把那半整段套在 `#if UVCPP_WEBAPP_ENABLE` 里，并打印一行
   **显眼的 `[SKIP]`** —— 不是静默通过（本仓最忌讳的那种绿）。
