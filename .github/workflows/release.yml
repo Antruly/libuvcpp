@@ -1044,25 +1044,31 @@ jobs:
           # `Pin-Priority: 1001` 的 preferences 也改不动（两次都取到 16.15）。
           # `-t jammy` 就是照这条推断先写、并让第二次空转照样红掉的那一版。
           #
-          # 所以改成：从 `apt-cache madison` 里挑一行**开源于发行版归档**的版本号
-          # （源 URL 里带 `ubuntu.com`；runner 用的是 `azure.archive.ubuntu.com`），
-          # 再按 `pkg=ver` 交回去 —— 那时 apt 只负责取，不负责挑。我们要的只是头、
-          # 版本号无所谓，所以不必去猜第三方仓库此刻的状态。取不到版本号就当场红，
-          # 与 win-client-headers.sh 同一条规矩。
+          # 所以改成：把 `madison` 列的版本号**一版一版试取**，哪一版取回来就用哪一版
+          # —— "取不取得到"直接问 apt，不从来源名去推断。这条判据是被第三次空转改出来
+          # 的：第一版写的是"源 URL 里带 `ubuntu.com` 的那一行"，而 runner 把源重写成
+          # `mirror+file:/etc/apt/apt-mirrors.txt`，那一列里根本没有域名
+          # （`libmysqlclient-dev` 三条全是这个形状），于是守卫每次都报"没有可取回的
+          # 版本"——守卫本身是对的（宁可红，也不静默发半个包），错的是那个谓词。我们
+          # 要的只是头，版本号无所谓；每一版都试不动就当场红，与 win-client-headers.sh
+          # 同一条规矩。
           rm -rf "$HOME/client-headers"
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
             for p in libmysqlclient-dev libpq-dev; do
-              v=$(apt-cache madison "$p" | grep -F 'ubuntu.com' | head -n1 \
-                    | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}')
-              if [ -z "$v" ]; then
-                echo "::error title=linux-client-headers::${p} 在发行版归档里没有可取回的版本"
+              ok=""
+              for v in $(apt-cache madison "$p" \
+                           | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); if (!seen[$2]++) print $2}'); do
+                if apt-get download "${p}=${v}" 2>/dev/null; then ok="$v"; break; fi
+                echo "    ${p}=${v} 取不到源，试下一版"
+              done
+              if [ -z "$ok" ]; then
+                echo "::error title=linux-client-headers::${p} 的每一版都取不回 .deb"
                 apt-cache madison "$p" || true
                 exit 1
               fi
-              echo "--- 发行版归档里的 ${p}=${v}"
-              apt-get download "${p}=${v}"
+              echo "--- 取回的 ${p}=${ok}"
             done
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
@@ -1319,24 +1325,27 @@ jobs:
           # 一步的注释里）。这条腿的 `apt-get download` 拿到的是 **arm64 的 .deb**，
           # 头是同一份源码生成的，与 x64 那条腿取到的逐字节相同的那几个文件。
           # 目录约定同表：`$HOME/client-headers/usr/include/{mysql,postgresql}`。
-          # 版本号自己给的理由在 linux-x64 那一步的注释里（PGDG 的候选版本最高、
-          # 却没有可取回的源 ⇒ 不显式给版本号时 `apt-get download` 以 100 退出；
-          # 而 `-t` 与 preferences 都改不动它的候选，同样是实测的）。这条腿实测
-          # 到的是 `libpq-dev:arm64` 那一份，根因与修法逐字相同。
+          # "一版一版试取"的理由链在 linux-x64 那一步的注释里（PGDG 的候选版本最高、
+          # 却没有可取回的源 ⇒ 不显式给版本号时 `apt-get download` 以 100 退出；而
+          # `-t` 与 preferences 都改不动它的候选，按来源名去筛也筛不准，全是实测的）。
+          # 这条腿实测到的是 `libpq-dev:arm64` 那一份，根因与修法逐字相同。
           rm -rf "$HOME/client-headers"
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
             for p in libmysqlclient-dev libpq-dev; do
-              v=$(apt-cache madison "$p" | grep -F 'ubuntu.com' | head -n1 \
-                    | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}')
-              if [ -z "$v" ]; then
-                echo "::error title=linux-client-headers::${p} 在发行版归档里没有可取回的版本"
+              ok=""
+              for v in $(apt-cache madison "$p" \
+                           | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); if (!seen[$2]++) print $2}'); do
+                if apt-get download "${p}=${v}" 2>/dev/null; then ok="$v"; break; fi
+                echo "    ${p}=${v} 取不到源，试下一版"
+              done
+              if [ -z "$ok" ]; then
+                echo "::error title=linux-client-headers::${p} 的每一版都取不回 .deb"
                 apt-cache madison "$p" || true
                 exit 1
               fi
-              echo "--- 发行版归档里的 ${p}=${v}"
-              apt-get download "${p}=${v}"
+              echo "--- 取回的 ${p}=${ok}"
             done
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
