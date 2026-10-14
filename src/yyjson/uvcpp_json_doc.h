@@ -156,6 +156,18 @@ struct UVCPP_API json_doc_options {
 /// DOM 里的一个值（视图，不拥有数据）。定义在下面。
 class UVCPP_API uvcpp_json_value;
 
+/// 把文档写出去。**这条前置声明是给 MSVC 用的，不要挪走。**
+///
+/// 同一个函数在类里还会作为 `uvcpp_json_value` 的 `friend` 出现一次（它要读
+/// 私有的 `val_`，见下面的类定义）。MSVC 要求 `__declspec(dllexport/dllimport)`
+/// 出现在**第一条**声明上：先有 friend、后有带 `UVCPP_API` 的那条，就是
+/// `error C2375: 'uvcpp::uvcpp_json_write': redefinition; different linkage`。
+/// GCC / clang 对这个顺序不敏感（属性后置也认同一实体），所以本机两条腿都绿、
+/// 只有 MSVC 红。放在这里 —— 类定义之前 —— 才能让带属性的那条排第一。
+/// 真正的文档写在下面那条同签名声明上（`UVCPP_YYJSON_ENABLE` 段的末尾）。
+UVCPP_API json_write_status uvcpp_json_write(const uvcpp_json_value& v,
+                                             uvcpp_json_writer& w);
+
 /**
  * @brief 一份解析好的 JSON 文档（**拥有**整棵 DOM）。
  *

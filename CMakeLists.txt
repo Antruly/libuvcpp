@@ -419,6 +419,17 @@ if(UVCPP_BUILD_WEB)
         # `uvcpp_http_compress.cpp` 只 `#include <brotli/encode.h>`，不关心叫法。
         set(UVCPP_BROTLI_LIBS brotlienc brotlidec)
         set(UVCPP_BROTLI_FROM_SOURCE TRUE)
+        # include 目录**必须显式给**：下面链接用的是 `$<TARGET_FILE:...>`（求值成
+        # 路径字符串，理由见 install(EXPORT) 那段的长注释），它**不带使用要求** ——
+        # 而按目标名链接本来会把 `brotlienc` 的 `INTERFACE_INCLUDE_DIRECTORIES`
+        # 一并带过来。少了这一行，取源码这条支路在**本机照样编得过**：系统的
+        # `libbrotli-dev` 让 `/usr/include/brotli/encode.h` 落在**编译器的默认搜索
+        # 路径**里（`-M` 一查就看见它解析去了 /usr/include，而不是 FetchContent 的
+        # 那份），MSVC 上前提不成立，直接 `error C1083: Cannot open include file:
+        # 'brotli/encode.h'`。⭐ 下面链接那段注释里那条"把系统 brotli 藏起来"的配方
+        # （`CMAKE_IGNORE_PATH`）只骗得过 CMake 的 `find_*`、**骗不过编译器的默认
+        # 搜索路径**，所以本机验证要看 `-M` 解析出的**实际路径**，不能只看"编过了"。
+        set(UVCPP_BROTLI_INCLUDE_DIRS ${brotli_SOURCE_DIR}/c/include)
         message(STATUS "brotli integrated (tag=${BROTLI_VERSION})")
       endif()
     endif()
@@ -2335,6 +2346,22 @@ if(UVCPP_BUILD_WEB)
         #   -DFETCHCONTENT_SOURCE_DIR_BROTLI=<brotli 克隆> \
         #   -DFETCHCONTENT_SOURCE_DIR_LLHTTP=<llhttp 克隆> \
         #   -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=<nlohmann 克隆>
+        #
+        # ⚠️ 上面那个 `CMAKE_IGNORE_PATH` 配方**骗得过 CMake 的 `find_*`，骗不过
+        # **编译器自己的默认搜索路径**。它成功地让 `UVCPP_BROTLI_INCLUDE_DIR` 变成
+        # `NOTFOUND`、于是走了取源码这条支路 —— 但 `#include <brotli/encode.h>` 仍然
+        # 由 `/usr/include/brotli/encode.h`（`libbrotli-dev`）解析掉，**本机一路绿**，
+        # 而这条支路其实一个 brotli include 目录都没往编译行上加。MSVC 上没有系统
+        # brotli，前提不成立 ⇒ `error C1083: Cannot open include file:
+        # 'brotli/encode.h'`，`brotli` 那一格从 1.6.48 起一直红，藏在同一格的
+        # 贪婪 `\x` 报错后面没露出来。
+        # 量它的正确办法是**看 `-M` 解析出的实际路径**，而不是"编过了"：
+        # 取 `compile_commands.json` 里 `uvcpp_http_compress.cpp` 那条命令行加 `-M`，
+        # 修复前解析到 `/usr/include/brotli/encode.h`、修复后解析到 FetchContent 的
+        # `${brotli_SOURCE_DIR}/c/include/brotli/encode.h`。所以取源码那条分支**必须
+        # 自己把 include 目录写出来**（上面那段 `set(UVCPP_BROTLI_INCLUDE_DIRS ...)`），
+        # 不能指望目标名把使用要求带过来 —— 这里链接用的偏偏是 `$<TARGET_FILE:>`
+        # （路径形式，见上）。
         # ------------------------------------------------------------------
         if(UVCPP_BROTLI_FROM_SOURCE)
           target_link_libraries(${_tgt} PRIVATE

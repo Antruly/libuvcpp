@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.49-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.50-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -303,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2756-2756`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2783-2783`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -640,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1772-1774`、`CMakeLists.txt:2648-2653`）——
+  两处都摘掉**（`CMakeLists.txt:1783-1785`、`CMakeLists.txt:2675-2680`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -2370,6 +2370,48 @@
 
 ### 配置、打包与 CI
 
+- **brotli 的 FetchContent 支路一个 include 目录都没加 ⇒ MSVC 的 `brotli` 格
+  `error C1083`**（`1.6.50-dev`）。`UVCPP_ENABLE_BROTLI=ON` 而机器上没有系统 brotli
+  时（macOS 与 MSVC 都走这条），`src/web/uvcpp_http_compress.cpp` 的
+  `#include <brotli/encode.h>` 编不过。根因是我们自己那套 `install(EXPORT)` 绕法：
+  链接写的是 `$<BUILD_INTERFACE:$<TARGET_FILE:brotlienc>>`，它求值成一个**路径
+  字符串**、**不带使用要求** —— 而按目标名链接本来会把 `brotlienc` 的
+  `INTERFACE_INCLUDE_DIRECTORIES` 一并带过来，换成路径形式就没了。系统那条支路拿到
+  的是 `PkgConfig::BROTLIENC`（IMPORTED 目标），一直是好的，所以只有取源码这一支中招；
+  这一格从 `1.6.48-dev` 加上起就一直红，只是被同一格的贪婪 `\x` 报错挡在前面。
+
+  ⭐ **这条原来"能在本机量"，但量具本身是坏的。** 原配方用
+  `-DCMAKE_IGNORE_PATH='/usr/include;...'` 把系统 brotli 藏起来以强制走取源码支路，
+  可 `CMAKE_IGNORE_PATH` **只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索
+  路径**：`UVCPP_BROTLI_INCLUDE_DIR` 确实变成 `NOTFOUND`、支路也确实走对了，但
+  `#include <brotli/encode.h>` 仍由 `/usr/include/brotli/encode.h`（`libbrotli-dev`）
+  解析掉 ⇒ **本机全绿，而编译行上一个 brotli 目录都没有**。判据因此改成**看 `-M`
+  解析出的实际路径**，而不是"编过了"：取 `compile_commands.json` 里那条 TU 的命令行
+  加 `-M`，修复前解析到 `/usr/include/brotli/encode.h`、修复后解析到 FetchContent 的
+  `${brotli_SOURCE_DIR}/c/include/brotli/encode.h`；`flags.make` 的 `CXX_INCLUDES`
+  也从"没有 brotli 目录"变成 `-I<brotli 源码>/c/include`。修复是一行
+  `set(UVCPP_BROTLI_INCLUDE_DIRS ${brotli_SOURCE_DIR}/c/include)`（下面那条
+  `if(UVCPP_BROTLI_INCLUDE_DIRS)` 早就在，只是取源码支路从没喂过它），再加上把这条
+  误导性配方与它的教训写进那段注释。
+
+- **`uvcpp_json_write` 的 friend 声明排在了带 `UVCPP_API` 的声明前面 ⇒ MSVC 的
+  `yyjson` 格 `error C2375`**（`1.6.50-dev`）。`src/yyjson/uvcpp_json_doc.h` 里这个
+  函数要读 `uvcpp_json_value` 的私有成员，于是先在类内以 `friend`（**不带**
+  `UVCPP_API`）出现、之后才在命名空间级以 `UVCPP_API` 出现。MSVC 要求
+  `__declspec(dllexport/dllimport)` 落在**第一条**声明上，顺序反了就是
+  `error C2375: 'uvcpp::uvcpp_json_write': redefinition; different linkage`；GCC 与
+  clang 对属性后置不敏感（认作同一实体），所以本机两条腿都绿、只有 MSVC 红。修法是把
+  带 `UVCPP_API` 的那条声明**提到类定义之前**（紧跟 `uvcpp_json_value` 的前置声明），
+  类里那个 friend 退化成一条普通重声明。
+
+  这一处**是本仓唯一一处这种形状**：扫 `src/**/*.h` 找"同一个函数先是类内 friend、
+  后面又有列 0 起的 `UVCPP_API` 声明"，全仓只有 1 个函数，修复后属性声明在前。
+  判据：新建一棵 `UVCPP_ENABLE_YYJSON=ON` 的树（`web` + `webapp` + zlib，与 CI 那一格
+  逐字相同的 `flags`）编过（`0 error`，`test_yyjson_doc_func` 在其中），
+  `ctest -R "yyjson|json"` **5/5** 过；两条 yyjson TU 另过一遍
+  `clang++-18 -fsyntax-only`（rc=0）。MSVC 那条腿本身本机判不了（没有 Windows
+  工具链），只能等 CI。
+
 - **`\x1f` 字面量被贪婪的 `\x` 吃掉 ⇒ macOS / MSVC 两条腿编挂**（`1.6.49-dev`）。
   `tests/functional/web_app_response_func.cpp` 里那个变体 tag 写成了整串
   `"json\x1f50\x1f6"`。C/C++ 的 `\x` 转义**贪婪** —— 它把后面所有十六进制位都吃掉，
@@ -2451,7 +2493,7 @@
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1577`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1588`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是
