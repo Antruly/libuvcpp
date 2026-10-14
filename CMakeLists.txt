@@ -1679,7 +1679,36 @@ if(UVCPP_ENABLE_YYJSON)
   endif()
 
   add_library(uvcpp_yyjson OBJECT "${yyjson_SOURCE_DIR}/src/yyjson.c")
-  set_target_properties(uvcpp_yyjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  # `C_VISIBILITY_PRESET hidden` 是"别把嵌进来的依赖的符号导出"那件事的**另一种形状**
+  # （那一段在文件靠后，"非 Windows：别把嵌进来的静态依赖的符号一并导出"）：
+  # `uvcpp_yyjson` 是 **OBJECT** 库，目标文件经 `$<TARGET_OBJECTS:>`（下面"yyjson 后端的
+  # 接线"那段）**直接进最终链接、不经归档** ⇒ `--exclude-libs,ALL` 对它无效。
+  # 实测：加了那条之后 `build-yyjson/libuvcpp.so` 照旧导出 **43** 个 `yyjson_*`。
+  #
+  # 藏起来不会伤到任何人，因为 yyjson 在这里**没有对外声明**：`<yyjson.h>` 只出现在
+  # `src/yyjson/uvcpp_json_doc.cpp` 一个文件里（全仓 grep 过，`tests/` 用的都是我们自己的
+  # `uvcpp_json_doc.h`），公开头一个 yyjson 类型都不出现，库外的人本来就没有声明可调。
+  # 库内部的引用在**静态链接期**就解析掉了，隐藏可见性只影响"能不能被库外看见"。
+  #
+  # 为什么值得改：漏出去的 `yyjson_read_opts` 之类会在**全局作用域**里和进程里另一个
+  # 也用 yyjson 的 .so 撞名，谁先加载谁说话 —— 与 OpenSSL 那条同一类隐患，只是概率低。
+  # MSVC 忽略这条属性（Windows 侧的导出由 `__declspec(dllexport)` 决定，本来就不会漏，
+  # 也就没有这个毛病），所以它只在 ELF / Mach-O 上起作用 —— 正是需要它的地方。
+  #
+  # **`-Dyyjson_api=` 那一行是承重的**：光有 `C_VISIBILITY_PRESET hidden` **不够**，
+  # 因为上游头给每个公开函数都**显式**贴了默认可见性（`yyjson.h`：
+  # `#define yyjson_api __attribute__((visibility("default")))`），而显式的属性压倒
+  # `-fvisibility=hidden`。实测就是这么回来的：只加 `C_VISIBILITY_PRESET hidden` 时
+  # 仍是 43 个符号。所幸上游头把那一整块包在 `#ifndef yyjson_api` 里（那是个**有意的**
+  # 覆盖点），所以命令行上先把它定义成空 ⇒ 头里那块 `#define` 整个不进编译 ⇒ 没有显式
+  # 属性拦路，`-fvisibility=hidden` 才管到。空定义在 Windows 上是死代码（那边这个宏本来
+  # 就是空的），只有 ELF/Mach-O 需要它。
+  # 只给 `uvcpp_yyjson` 自己加：`uvcpp_json_doc.cpp` 那边看到的是"声明为默认可见、定义为
+  # 隐藏"—— 引用照样在静态链接期解析到，只是这个符号不出现在 .dynsym 里，正是我们要的。
+  target_compile_definitions(uvcpp_yyjson PRIVATE yyjson_api=)
+  set_target_properties(uvcpp_yyjson PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden)
   message(STATUS "yyjson integrated (tag=${YYJSON_VERSION}, object)")
 else()
   add_compile_definitions(UVCPP_YYJSON_ENABLE=0)
@@ -2336,6 +2365,50 @@ if (TARGET uvcpp_a)
 endif()
 if (TARGET uvcpp_a_s)
   set_target_properties(uvcpp_a_s PROPERTIES DEBUG_POSTFIX "d")
+endif()
+
+# ---------------------------------------------------------------------------
+# 非 Windows：别把**嵌进来的静态依赖**的符号一并导出
+# ---------------------------------------------------------------------------
+# 本仓在非 Windows 上 `UVCPP_API` 是**空的**（`src/uvcpp/uvcpp_export.h:17`），也没有
+# `-fvisibility=hidden`、没有 version script ⇒ 今天 `libuvcpp.so` 把它**静态链进来**的
+# 那些库的符号一起导出了。实测（静态 OpenSSL 那棵树，`DT_NEEDED` 里没有 libssl）：
+#
+#     nm -D --defined-only build-vfy-cfg/libuvcpp.so \
+#       | grep -E 'SSL_new|SSL_CTX_new|EVP_EncryptInit_ex|X509_new'   → 4/4 全在
+#
+# 为什么这必须在"db 后端运行时加载"（`UVCPP_DB_RUNTIME_LOAD`）之前修掉，而不是洁癖：
+# 那条路要 `dlopen("libpq.so.5")`，而 **libpq 自己要用 OpenSSL**。它那份按系统 OpenSSL
+# 编的 `SSL_*` 在**全局作用域**里会先撞上我们导出的这一套，同时它 NEEDED 的
+# `libcrypto.so.3` 也会被加载 ⇒ 同进程两份 libcrypto，`X509`/`BIGNUM` 一手建一手放
+# ⇒ 堆损坏。把我们的嵌入依赖藏起来，它就会解析到**系统**那份、与它自己的 libcrypto
+# 自洽。（这不是 dlopen 新造的毛病：今天任何"既链 libuvcpp.so 又链 libpq.so.5"的程序
+# 已经踩它；dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）
+#
+# `--exclude-libs,ALL` 只藏**来自静态归档**的符号，而 `uvcpp`/`uvcpp_s` 是
+# `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`:2080`）**直接拿我们自己的目标文件**
+# 建的、不经归档 ⇒ 我们自己的 API（含 `uvcpp_*` 那套 C ABI）照样导出。这正是判据所在：
+# `tests/tools/check_capi_symbols.py`（C ABI 锁文件一个字都不许动）与
+# `check_config_contract.py` 的 `.pc` 可链接性判据必须同时保持绿 —— 它们绿了，就说明
+# 藏掉的确实只有"别人的"符号。
+#
+# 只给**共享**目标加：静态库那边根本没有导出表，藏了不但无意义，还会让 `uvcpp_a` 的
+# 消费者在最终链接时找不到本该由我们提供的符号。
+#
+# 只给 ELF（`UNIX AND NOT APPLE`）：Apple 的 ld 没有这个选项（那边是
+# `-exported_symbols_list` / `-hidden-l`），而发布腿里本来也没有 macOS。
+#
+# 这一条覆盖不到的另一种形状（已经单独修掉了，见上面 `uvcpp_yyjson` 那一段）：
+# `uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经 `$<TARGET_OBJECTS:>`（`:2667`）直接进
+# 最终链接、同样不经归档 ⇒ `--exclude-libs` 对它无效（实测：加不加这一条，
+# `nm -D --defined-only build-yyjson/libuvcpp.so | grep -cE '[TWiDBR] yyjson_'` 都是 43）。
+# 那边靠的是 `C_VISIBILITY_PRESET hidden` + `-Dyyjson_api=`，不是这一条。
+if(UNIX AND NOT APPLE)
+  foreach (_uvcpp_t uvcpp uvcpp_s)
+    if (TARGET ${_uvcpp_t})
+      target_link_options(${_uvcpp_t} PRIVATE "LINKER:--exclude-libs,ALL")
+    endif()
+  endforeach()
 endif()
 
 # =========================================================================

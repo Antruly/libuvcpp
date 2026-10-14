@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.52-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.53-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -303,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2865-2865`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2938-2938`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -640,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1855-1857`、`CMakeLists.txt:2757-2762`）——
+  两处都摘掉**（`CMakeLists.txt:1884-1886`、`CMakeLists.txt:2830-2835`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -2370,6 +2370,67 @@
 
 ### 配置、打包与 CI
 
+- **静态链接进来的依赖，符号一并导出去了 ⇒ ELF 上给共享目标加
+  `--exclude-libs,ALL`，yyjson 那半另修**（`1.6.53-dev`）。本仓在非 Windows 上 `UVCPP_API` 是**空的**
+  （`src/uvcpp/uvcpp_export.h:17`），也没有 `-fvisibility=hidden`、没有 version
+  script ⇒ 凡是**静态归档**链进来的东西，符号全都进了 `.dynsym`。实测（`build-vfy-cfg`，
+  `DT_NEEDED` 里没有 libssl 的那棵树）：
+
+  ```
+  nm -D --defined-only build-vfy-cfg/libuvcpp.so | grep -cE ' [TWiDBR] SSL_new$'   → 1
+  ```
+
+  `SSL_new` / `SSL_CTX_new` / `EVP_EncryptInit_ex` / `X509_new` 四个一个不少，静态
+  nghttp2 的 `nghttp2_session_client_new`、`uvcpp_sqlite3` 的 `sqlite3_open` 同样在。
+  也就是说 `libuvcpp.so` 当时在**全局作用域**里对外冒充了一份 OpenSSL。
+
+  为什么这不是洁癖、而是必须在"db 后端运行时加载"之前修掉：那条路要
+  `dlopen("libpq.so.5")`，而 **libpq 自己要用 OpenSSL**。它那份按系统 OpenSSL 编的
+  `SSL_*` 会先在全局作用域撞上我们导出的这一套，同时它 `NEEDED` 的 `libcrypto.so.3`
+  也被加载 ⇒ 同进程两份 libcrypto，`X509`/`BIGNUM` 一手建一手放 ⇒ 堆损坏。（这不是
+  dlopen 新造的毛病：今天任何"既链 `libuvcpp.so` 又链 `libpq.so.5`"的程序已经踩它；
+  dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）把我们的嵌入依赖藏起来，
+  libpq 就会解析到**系统**那份、与它自己的 libcrypto 自洽。
+
+  修法一（`CMakeLists.txt:2370-2412`，`UNIX AND NOT APPLE`，只给共享目标
+  `uvcpp`/`uvcpp_s`）：`target_link_options(… PRIVATE "LINKER:--exclude-libs,ALL")`。
+  它只藏**来自静态归档**的符号，而这两个目标是
+  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2080`）
+  **直接拿我们自己的目标文件**建的、不经归档 ⇒ 我们自己的 API 与 `uvcpp_c_*` 那套
+  C ABI 照样导出。只给共享目标加是因为静态库没有导出表，藏了反而让 `uvcpp_a` 的消费者
+  在最终链接时找不到本该由我们提供的符号；只给 ELF 加是因为 Apple 的 ld 没有这个选项
+  （那边是 `-exported_symbols_list`），而发布腿里本来也没有 macOS。
+
+  修法二：`uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经
+  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2667`）**直接进最终链接、也不经归档** ⇒
+  上面那条对它无效（实测加不加都是 43 个 `yyjson_*`）。那边改用
+  `C_VISIBILITY_PRESET hidden` **加** `target_compile_definitions(uvcpp_yyjson PRIVATE
+  yyjson_api=)`。**第二半是承重的**：上游 `yyjson.h` 给每个公开函数**显式**贴了
+  `__attribute__((visibility("default")))`，显式属性压倒 `-fvisibility=hidden` ——
+  只加 preset 仍是 43 个；所幸上游把那一整块包在 `#ifndef yyjson_api` 里（那是个有意的
+  覆盖点），命令行上先定义成空 ⇒ 头里那段 `#define` 不进编译。藏它对谁都没影响：全仓
+  只有 `src/yyjson/uvcpp_json_doc.cpp` 一个文件 include `<yyjson.h>`，公开头里一个
+  yyjson 类型都不出现。
+
+  判据 —— **同一批目标文件、同一条链接命令，只差那一个 `-Wl,--exclude-libs,ALL`**
+  （从 `build-vfy-cfg` 的 ninja 链接行里删掉该参数重链到 `/tmp`，两边的导出表逐条比）：
+
+  | 量 | 改之前 | 改之后 |
+  |---|---|---|
+  | `--defined-only` 导出总数 | 18031 | **4012** |
+  | `SSL_new` / `SSL_CTX_new` / `EVP_EncryptInit_ex` / `X509_new` | 1/1/1/1 | **0/0/0/0** |
+  | `nghttp2_session_client_new` / `sqlite3_open` | 1/1 | **0/0** |
+  | 名字里含 `uvcpp` 的导出 | 3674 | **3674**（被藏掉的 14019 个里，0 个是我们的） |
+  | `yyjson_*`（`build-yyjson`） | 43 | **0** |
+
+  两条变异都得红，实测都红：① 链接行去掉 `--exclude-libs,ALL` ⇒ 总数回到 18031、
+  `SSL_new` 回来；② 编译 `yyjson.c` 时去掉 `-Dyyjson_api=`（保留 preset）⇒ 43 回来；
+  去掉 `-fvisibility=hidden`（保留空定义）⇒ 43 也回来 —— 两半各自承重，不是二选一。
+  另外 `ctest`：`build-all` 127/127、`build-yyjson` 93/93、`build-brotli2` 92/92；
+  `check_capi_symbols.py --tree build-vfy-cfg` 6 片逐条对上（C ABI 锁文件一个字没动）、
+  `check_config_contract.py` 的 `.pc` 可链接性与 C 消费方判据仍绿 —— 这两条绿就说明
+  藏掉的确实只有"别人的"符号。
+
 - **brotli 到底链系统那份还是自己取源码，从来没被钉住 ⇒ 新增
   `UVCPP_BROTLI_FROM_SOURCE`**（`1.6.52-dev`）。发现顺序是 pkg-config →
   `find_path`/`find_library` → FetchContent，也就是**先系统后源码**：在装了
@@ -2394,7 +2455,7 @@
   `CMakeLists.txt:415`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
   选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
   那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:493`），链接段
-  （`CMakeLists.txt:2447`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  （`CMakeLists.txt:2520`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
   动，所以既有使用者的行为逐字节不变。
 
   判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON

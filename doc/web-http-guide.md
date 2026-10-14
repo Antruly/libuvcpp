@@ -87,7 +87,7 @@
 | HTTP/2 | `UVCPP_NGHTTP2_ENABLE` | `set_http2_enabled()` 那一组消失 |
 
 两行"响应压缩"是**同一个块的两个来源**：压缩器的总开关是
-`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:1723-1723`）——
+`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:1752-1752`）——
 任一为 1 就有这个块，两个都为 0 才整块消失。三个"块"的开关都默认 OFF，brotli
 那条也是（`CMakeLists.txt:205-219` 那一组 `option()`，四个块开关默认全是 OFF）。编译进 `UVCPP_SRC_FILES` 的是
 `src/web/*.cpp` 全体（`CMakeLists.txt:1390-1390`），但每个 `.cpp` 里的功能块同样带宏。

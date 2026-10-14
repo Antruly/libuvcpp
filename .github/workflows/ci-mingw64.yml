@@ -62,7 +62,7 @@ jobs:
           #
           # ② -DBUILD_SHARED_LIBS=OFF —— 管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #   llhttp_shared ⇒ 依赖 libllhttp.dll）。它不管 uvcpp 自己
-          #   （CMakeLists.txt:1819-1819 是显式的 `add_library(uvcpp SHARED ...)`）。
+          #   （CMakeLists.txt:1848-1848 是显式的 `add_library(uvcpp SHARED ...)`）。
           #   本地 A/B 过：OFF 时链接行是 `_deps/llhttp-build/libllhttp.a`，ON 时是
           #   `libllhttp.dll.a`。装到 FetchContent 的 libuv 上时它顺带也管 libuv
           #   （708 行挑 `uv_a`），但那一路在 CI 上本来就走不到。
