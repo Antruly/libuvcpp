@@ -1249,7 +1249,20 @@ jobs:
           mkdir -p ci-logs
           {
             # 这一档照抄 release.yml 里 linux 那份（它已经在真实发版里跑通了）：
-            # 依赖全静态（PIC + OPENSSL_USE_STATIC_LIBS + STATIC_RUNTIME）。
+            # 依赖全静态（PIC + OPENSSL_USE_STATIC_LIBS）。
+            #
+            # **`-DUVCPP_STATIC_RUNTIME=ON` 是唯一一处不再照抄的地方 —— 而它当年正是
+            # 漏掉那个缺陷的原因，所以这里留一段。** release.yml 的两条 Linux 腿
+            # 2026-10-14 起都不传它了：带这个开关的**共享** `.so` 与"用系统
+            # `libstdc++.so.6` 的使用者"互斥（`std::once_flag` / `std::__future_base`
+            # 那族模板实例是 COMDAT、进两边的导出表，动态解析按"可执行文件优先" ⇒
+            # 一侧的 `__once_proxy` 跳进另一侧的 `_FUN`），那轮预演上 9 条用例当场崩
+            # （5 SEGV / 4 SIGABRT），理由逐字写在 release.yml 的 Configure & Build 上方。
+            # 这一档之所以量不到它：**本档 `UVCPP_BUILD_TESTS=OFF`**，而
+            # `check_doc_snippets.py` 只编译片段（`-c -o obj`）、不链接也不执行，
+            # 所以这个形状在这里永远只被"编过"，从没被"跑过"。判"Linux 的共享
+            # `.so` 能不能被别人直接用"的是发布预演那两条 Linux 腿的 Test 步骤。
+            # 详见 doc/ci-guide.md 的"已知缺口"。
             #
             # `-DUVCPP_ENABLE_CAPI=ON` 是**照抄的一部分**，不是额外加码：release.yml
             # 六条腿现在都开它，于是发布包里**有** `include/capi/` 那几个头。这个

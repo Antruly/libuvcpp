@@ -175,6 +175,19 @@ static-release recipe below needs two switches rather than one.
 `vcruntime`/`msvcp` alongside the DLL instead. Setting it on an MSVC build does nothing at all;
 it is not a way to make an MSVC package self-contained.
 
+**On Linux, do not turn this on for a shared `libuvcpp.so` that other C++ programs will link.**
+The Unix branch appends `-static-libgcc -static-libstdc++` to *both* `CMAKE_SHARED_LINKER_FLAGS`
+and `CMAKE_EXE_LINKER_FLAGS`, so the `.so` and every executable that links it each carry their own
+libstdc++; the `std::once_flag` / `std::__future_base` template instantiations are COMDAT, land in
+both export tables, and resolve "executable first", so one side's `__once_proxy` jumps into the
+other side's `_FUN`. Measured 2026-10-14: nine tests crash (five SEGV, four SIGABRT) in that
+configuration, and the same crash reproduces with the `.so` static and the *consumer* linked
+against the system `libstdc++.so.6` — i.e. it is not a test artefact. That is why the release
+workflow does not pass the flag on its two Linux legs, and why `ldd libuvcpp.so` there lists
+`libstdc++.so.6` / `libgcc_s.so.1`. On MinGW the flag stays useful and correct: PE has no global
+symbol scope for the two copies to collide in, and the user's machine may not have
+`libstdc++-6.dll` at all.
+
 `UVCPP_ENABLE_TRY_WRITE` (ON) lets the write path attempt `uv_try_write` before copying the
 payload into an internal buffer. `UVCPP_TRY_WRITE_MIN_BYTES` (32768) is the smallest payload
 worth trying — below it, the write goes down the ordinary path without even attempting the fast

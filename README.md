@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.6.59--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.6.60--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.6.59-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.6.60-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -318,7 +318,7 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 | `UVCPP_DB_RUNTIME_LOAD` | `OFF` | Take the MySQL / PostgreSQL symbols from a client library loaded **at run time** (`dlopen` / `LoadLibrary`) instead of linking it. **The six release legs use it, and the reason is the packages' users, not the library**: `DT_NEEDED` (the PE import table on Windows) is resolved at **load time**, so linking libmysqlclient/libpq means a machine that has never installed either cannot even *load* the library — even if it only ever runs HTTP and never touches `db`. With this on, such a machine runs everything except "actually connecting to MySQL/PG", where it gets `uvcpp_db_status::NO_DRIVER` plus a message naming the candidates that were tried (`UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` override the search). It changes only *where the symbols come from*, not *which backends exist*: `mysql.h` / `libpq-fe.h` are still needed at configure time (`MYSQL_BIND`'s layout has to come from the real header), so `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE` still mean "the header was found". Default `OFF` leaves today's behaviour byte-for-byte. See [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | Prefer system-installed libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | Fetch and build libuv from source via `FetchContent` |
-| `UVCPP_STATIC_RUNTIME` | `OFF` | Statically link the compiler runtime (`libgcc`/`libstdc++`) into the library. **MinGW and Linux only — a no-op on MSVC**, which uses `/MD` and ships `vcruntime`/`msvcp` in the package |
+| `UVCPP_STATIC_RUNTIME` | `OFF` | Statically link the compiler runtime (`libgcc`/`libstdc++`) into the library. **MinGW and Linux only — a no-op on MSVC**, which uses `/MD` and ships `vcruntime`/`msvcp` in the package. **On Linux it also applies to every executable, and a *shared* `libuvcpp.so` built with it cannot be combined with a consumer that uses the system `libstdc++.so.6`** — both copies instantiate the same COMDAT templates (`std::once_flag`'s `__once_proxy`, `std::__future_base::_State_baseV2`) and ELF's global symbol scope makes one side jump into the other's frame, so the failure is a run-time segfault or `double free`, **not a link error**. **That is why the release workflow's two Linux legs no longer pass it** (1.7.0 onwards) — the Linux packages therefore need the system `libstdc++.so.6` / `libgcc_s.so.1`, which every distro with a C++ runtime already has. The two MinGW legs still pass it: PE has no global symbol scope, so there is nothing to interpose, and a MinGW user's machine may not have `libstdc++-6.dll`. See [`doc/build-guide.md`](doc/build-guide.md) |
 | `UVCPP_ENABLE_TRY_WRITE` | `ON` | Try `uv_try_write` before copying into a write buffer |
 | `UVCPP_TRY_WRITE_MIN_BYTES` | `32768` | Smallest payload worth attempting `uv_try_write` for (a `CACHE STRING`, not an `option()`) |
 | `UVCPP_ENABLE_UDP_GSO` | `ON` when Windows **and** `UVCPP_ENABLE_QUIC=ON`, else `OFF` | Send-side UDP Segmentation Offload for the QUIC transport: hand a batch of equal-sized datagrams to the stack in **one** `WSASendTo` via `UDP_SEND_MSG_SIZE`, instead of one syscall per datagram. The segment size is taken from what each aggregate write reports, so the wire carries exactly the datagrams it carries today. **Windows only** — the code is compiled out elsewhere and the switch is a no-op there. See [`doc/quic-guide.md`](doc/quic-guide.md) |

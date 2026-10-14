@@ -55,7 +55,7 @@
 1.7.0 的包里打印 `sqlite,mysql,postgres`。**从源码构建的人不受影响** —— 新开关默认
 `OFF`，今天的行为逐字节不变。
 
-### 为了让这条路走得通，构建侧另有两处改动
+### 为了让这条路走得通，构建侧另有三处改动
 
 - **`--exclude-libs,ALL`（ELF 上的共享目标）。** 本仓在非 Windows 上 `UVCPP_API` 是空的，
   链进去的静态库符号**全部导出**。`dlopen("libpq.so.5")` 之后，它那份按系统 OpenSSL 编的
@@ -70,6 +70,21 @@
   `apt-get download libmysqlclient-dev libpq-dev` + `dpkg -x` 摆一份头出来 —— **不装包**：
   jammy 上这两个都 `Depends: libssl-dev`，而发布腿有一条"不装 libssl-dev"的不变量
   （22.04 那份是 3.0.2，没有 QUIC API，装上会让 `find_package` 静默产出一个坏包）。
+- **Linux 两条腿不再传 `-DUVCPP_STATIC_RUNTIME=ON`。** 这个开关在 UNIX 上把
+  `-static-libgcc -static-libstdc++` 同时追加到**共享目标**与**可执行文件**的链接行
+  （`CMakeLists.txt` 里那一段），于是 `libuvcpp.so` 与每一个链接它的 C++ 可执行文件
+  各自带一份 libstdc++ ⇒ 同进程两份。同一份模板实例（`std::once_flag` /
+  `std::__future_base` 那一族）是 COMDAT、两边都进导出表，动态解析按"可执行文件优先"
+  ⇒ 一侧的 `__once_proxy` 会跳进另一侧的 `_FUN`。2026-10-14 那轮预演 9 条用例当场崩
+  （5 条 SEGV、4 条 SIGABRT，x64 与 arm64 逐条相同），全是"跨线程 + future/promise"
+  那一类。**这不是用例特有的毛病**：把 .so 摆成"静态 libstdc++"、只让用例去链系统那份
+  `libstdc++.so.6` —— 也就是**任何一个普通使用者的形状** —— 同一条用例照样段错误；
+  把开关去掉之后这 9 条与整棵 136 条用例零失败（其中 2 条 db 用例因没起数据库而跳过）。
+  所以"预编译包给别人直接用"与"静态 libstdc++ 的 .so"是互斥的，选前者。代价是 Linux 的
+  `ldd` 多出
+  `libstdc++.so.6` 与 `libgcc_s.so.1` —— 装了 `apt` 的 Linux 上本来就有（`libstdc++6`
+  是 `apt` 自己的依赖）。Windows 两条 MinGW 腿**照旧开着**：PE 没有全局符号作用域，
+  不存在互相顶掉的问题，而 MinGW 用户机器上未必有 `libstdc++-6.dll`。
 
 ### 断言清单从 13 枚扩到 17 枚
 
@@ -85,10 +100,12 @@
 - **C++ API 与 C ABI 都没有破坏性改动**，C ABI 版本仍是 `1`。
 - 包里的模块集合**变大了**（`UVCPP_YYJSON_ENABLE` / `UVCPP_BROTLI_ENABLE` 由 0 变 1，
   `uvcpp_db_drivers()` 由 `sqlite` 变 `sqlite,mysql,postgres`），
-  而库本身对外的 `DT_NEEDED` **一条没多** —— 这正是上面那两处构建侧改动的目的。
-- 自包含的含义要按新的写法理解：Linux 上 `ldd libuvcpp.so` 除 libc 一类仍无其他；
-  MinGW 的 DLL 依赖表照样只有 Windows 自带模块。**唯一的运行期例外**是真要连
-  MySQL / PostgreSQL 时，那台机器上得有对应的客户端库。
+  而 yyjson / brotli / db 这三个后端带来的 `DT_NEEDED` **一条没多** —— 这正是上面
+  那几处构建侧改动的目的。（Linux 上总数**多了两条**，来自最后那一条改动，与模块无关。）
+- 自包含的含义要按新的写法理解：Linux 上 `ldd libuvcpp.so` 除 libc 与 C++ 运行时
+  （`libstdc++.so.6` / `libgcc_s.so.1`，见上）之外仍无其他；MinGW 的 DLL 依赖表照样
+  只有 Windows 自带模块。**运行期的例外有两处**：真要连 MySQL / PostgreSQL 时那台
+  机器上得有对应的客户端库；C++ 运行时那份则是基础库，装了 `apt` 的发行版本来就有。
 
 ## v1.6.4 重点 (Highlights)
 
@@ -859,12 +876,26 @@ SQLite 那一份仍**不链系统的**：`UVCPP_DB_SQLITE_FROM_SOURCE=ON` 让配
 `libsqlite3.so` 会多一条 `DT_NEEDED`，而 Ubuntu 24.04 上系统的 `libsqlite3.a` 不是 PIC。
 两条理由的实测数据在 [`doc/db-guide.md`](doc/db-guide.md)。
 
-**这就是"自包含"这句话在 1.7.0 的准确写法**：Linux 上 `ldd libuvcpp.so` 除 libc 一类
-之外仍然什么都不多（brotli 走 `UVCPP_BROTLI_FROM_SOURCE=ON` 静态链，MySQL/PG 根本
-不在链接行上）；MinGW 的 DLL 依赖表照样只有 Windows 自带的那几个模块。**唯一的例外是
-运行期**：真要连 MySQL / PostgreSQL，那台机器上得有对应的客户端库（`libmysqlclient` /
-`libmariadb` / `libpq`，Windows 上是 `libmysql.dll` / `libmariadb.dll` / `libpq.dll`），
-或者用 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` 指个路径。
+**这就是"自包含"这句话在 1.7.0 的准确写法**：Linux 上 `ldd libuvcpp.so` 除 libc 与 C++
+运行时（`libstdc++.so.6` / `libgcc_s.so.1`，见下）之外仍然什么都不多（brotli 走
+`UVCPP_BROTLI_FROM_SOURCE=ON` 静态链，MySQL/PG 根本不在链接行上）；MinGW 的 DLL 依赖表
+照样只有 Windows 自带的那几个模块。**运行期的例外有两处**：其一，真要连
+MySQL / PostgreSQL，那台机器上得有对应的客户端库（`libmysqlclient` / `libmariadb` /
+`libpq`，Windows 上是 `libmysql.dll` / `libmariadb.dll` / `libpq.dll`），或者用
+`UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` 指个路径；其二，C++ 运行时那一份
+是基础库 —— `libstdc++6` 本身就是 `apt` 的依赖，任何能装软件包的 Linux 都有。
+
+那两条 Linux 腿**不再传 `-DUVCPP_STATIC_RUNTIME`**，而这一条是被实测逼出来的：
+这个开关在 UNIX 上会把 `-static-libgcc -static-libstdc++` 同时塞进共享目标与可执行文件
+的链接行，于是 `libuvcpp.so` 与每一个链接它的 C++ 可执行文件各带一份 libstdc++，同进程
+两份；`std::once_flag` / `std::__future_base` 那族模板实例是 COMDAT、两边都进导出表，
+动态解析按"可执行文件优先" ⇒ 一侧的 `__once_proxy` 会跳进另一侧的 `_FUN`。2026-10-14
+那轮发布预演里 9 条用例当场崩（5 条 SEGV、4 条 SIGABRT，x64 与 arm64 逐条相同），全是
+"跨线程 + future/promise"那一类；**改用例救不了它**：把 .so 摆成静态 libstdc++、只让
+用例去链系统那份 `libstdc++.so.6`（正是**任何一个普通使用者**的形状），同一条用例照样
+段错误，而把开关去掉之后 9 条与整棵 136 条用例零失败（其中 2 条 db 用例因没起数据库而
+跳过）。Windows 两条 MinGW 腿**照旧开着**：
+PE 没有全局符号作用域，不会互相顶掉，而 MinGW 用户机器上未必有 `libstdc++-6.dll`。
 
 本版本提供 **6 个平台**（x64 与 arm64 × MinGW-w64 / MSVC / GCC）的预编译动态库，
 **每档都含发布版与调试版两份**（`v1.1.0` 起就是 6 份，此前这里只列了 3 个 x64 ——

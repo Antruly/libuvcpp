@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.59-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.60-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2412,6 +2412,39 @@
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **Linux 两条发布腿不再传 `UVCPP_STATIC_RUNTIME`：带它的共享 `.so` 与使用者那份
+  `libstdc++` 是互斥的**（`1.6.60-dev`）。上一条把取头那步修好之后，空转第一次真的走到
+  `Test` 那一步，两条 Linux 腿当场红在同 9 条用例上（5 条 SEGV、4 条 SIGABRT，x64 与
+  arm64 逐条相同），全是"跨线程 + future/promise"那一类。
+
+  根因是**同一个进程里两份 libstdc++**：`UVCPP_STATIC_RUNTIME` 在 UNIX 上把
+  `-static-libgcc -static-libstdc++` 同时加进 `CMAKE_SHARED_LINKER_FLAGS` 与
+  `CMAKE_EXE_LINKER_FLAGS`（`CMakeLists.txt` 的 `UVCPP_STATIC_RUNTIME` 那一段），于是
+  发布的 `libuvcpp.so` 与每一个链它的可执行文件各自带一份。`std::once_flag` /
+  `std::__future_base` 那族模板实例是 COMDAT、两边都进导出表，而 ELF 的动态解析是
+  **可执行文件优先** ⇒ 一侧的 `__once_proxy` 跳进另一侧的 `_FUN`。gdb 抓到的正是
+  `uvcpp_loop_worker::thread_main(std::promise<int>*)` 里 `pthread_once` 那一步；`ldd`
+  也证实两边都不需要 `libstdc++.so.6`（各自静态带了一份）。
+
+  **这不是用例特有的毛病**（所以"改用例"这条退路不存在）：把 `.so` 摆成静态
+  libstdc++、只让用例去链系统那份 `libstdc++.so.6` —— 也就是**任何一个普通使用者的
+  形状** —— 同一条用例照样段错误。本机 `build-relrepro` 两种形状各量了一遍；把开关
+  去掉之后 9 条全绿、整棵 136 条用例零失败（2 条 db 用例因没起数据库而跳过）。
+
+  改法是**两条 Linux 腿的四处 configure 都不再传它**（`release.yml`），两条 MinGW 腿
+  照旧 —— PE 没有全局符号作用域，两份不会互相顶掉，而 MinGW 用户机器上未必有
+  `libstdc++-6.dll`。"可以被别人直接使用"与"静态 libstdc++ 的 .so"两者只能选一个，
+  选前者。代价是 Linux 包的 `ldd` 从此列出 `libstdc++.so.6` 与 `libgcc_s.so.1`（装了
+  apt 的 Linux 上本来就有，`libstdc++6` 是 apt 自己的依赖）；那个步骤相应地从"警告"
+  改成"记录实测值"，并写明它**不在**了才是要回头查的形状。
+
+  **它为什么能藏 68 个提交**：Linux 侧唯一传这个开关的格子是 `config-contract`，而那
+  棵树 `UVCPP_BUILD_TESTS=OFF`（`check_doc_snippets.py` 只 `-c` 编译片段、不链接也不
+  执行），所以这个形状在 push/PR 上**只被编过、从没被跑过**；发布腿那边 `Test` 一步
+  自 `v1.6.4`（`faf1e50`）起就没绿过 —— 前面取头那步先红了，轮不到它。
+  `doc/ci-guide.md` 的"已知缺口"表、`doc/build-guide.md` 的 Runtime behaviour 一节与
+  两条 Linux 腿的 configure 上方现在都记着这条。
 
 - **两条 Linux 发布腿的客户端头取不到：`apt-get download` 以 100 退出**（`1.6.57-dev`）。
   这是 1.7.0 的空转（`release.yml` 的 `workflow_dispatch` + `dry_run=true`）第一次

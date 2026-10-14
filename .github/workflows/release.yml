@@ -1121,7 +1121,37 @@ jobs:
           set -o pipefail
           # BUILD_SHARED_LIBS=OFF 让 FetchContent 进来的 libuv/llhttp/zlib 都编成
           # 静态库；OPENSSL_USE_STATIC_LIBS 让系统的 libssl/libcrypto 也静态链。
-          # 合起来 .so 除 libc 外没有运行时依赖。
+          # 合起来 .so 除 libc 与 C++ 运行时（`libstdc++`/`libgcc_s`，见下）外
+          # 没有运行时依赖。
+          #
+          # **这条腿 1.7.0 起不再传 `-DUVCPP_STATIC_RUNTIME=ON`，这是实测结论。**
+          # 那个开关在 UNIX 上会把 `-static-libgcc -static-libstdc++` 同时追加到
+          # `CMAKE_SHARED_LINKER_FLAGS` **与** `CMAKE_EXE_LINKER_FLAGS`（CMakeLists.txt
+          # 里那一段），于是 `libuvcpp.so` 与**每一个**测试可执行文件各自带一份
+          # libstdc++ ⇒ 同一进程里两份。同一份模板实例（`std::once_flag` /
+          # `__future_base` 那一族）是 COMDAT，两边都进导出表，动态解析按
+          # "可执行文件优先" ⇒ 一侧的 `__once_proxy` 会跳进另一侧的 `_FUN`。
+          # 2026-10-14 那轮预演 9 条用例当场崩（x64 与 arm64 逐条相同）：
+          # `test_tcp_client_func`、`test_tcp_multiloop_func`、`test_web_multiloop_func`、
+          # `test_http3_multiloop_func`、`test_web_static_server_func`、
+          # `test_web_app_{context,middleware,response}_func`、`test_db_sqlite_async_func`
+          # —— 全是"跨线程 + future/promise"那一类（5 条 SEGV、4 条 SIGABRT）。
+          #
+          # **这不是用例特有的毛病**，改用例没用：把 .so 摆成"静态 libstdc++"、
+          # 只把用例改成链系统那份 `libstdc++.so.6`（也就是**任何一个普通 C++ 使用者**
+          # 的形状），同一条用例照样段错误 —— 本机 `build-relrepro` 两种形状各量过一遍，
+          # 而把开关去掉后 9 条全绿、整棵 136 条用例零失败（其中 2 条 db 用例因没起数据库
+          # 而跳过）。所以"被别人直接使用"这条
+          # 要求与"静态 libstdc++ 的 .so"是互斥的，选前者。
+          #
+          # 代价是 `ldd` 多出 `libstdc++.so.6` 与 `libgcc_s.so.1`：两者是所有装了
+          # `apt` 的 Linux 都有的基础库（`libstdc++6` 本身就是 `apt` 的依赖），
+          # 比"每个使用者都可能踩的两份 libstdc++"划算得多。**Windows 那两条 MinGW 腿
+          # 照旧开着**：PE 没有全局符号作用域，不存在互相顶掉的问题，而 MinGW 用户
+          # 机器上未必有 `libstdc++-6.dll`（那两条腿的注释里写了各自的理由）。
+          # 下面 `Report runtime deps` 那一步的期望值也跟着改了 —— 它原来是
+          # "看见 libstdc++ 就 warn"，现在是"看见就算预期、不看见才该问一句"。
+          #
           # UVCPP_BUILD_LIBUV_FROM_SOURCE=ON 钉死"libuv 从源码编"：22.04 现在没装
           # libuv，但只要哪天 runner 镜像带了，find_library 就会静默改成动态链
           # （cmake 那行的 `libuv1-dev` 只有 basic job 装，这里没有，但别靠这个）。
@@ -1155,7 +1185,7 @@ jobs:
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
-            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux --parallel 4
 
@@ -1181,7 +1211,7 @@ jobs:
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
-            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux-dbg --parallel 4
 
@@ -1205,8 +1235,8 @@ jobs:
             echo "--- so=$so"
             ldd "$so"
             # 第三方库必须是静态进去的：这几个在用户机器上不一定有，缺了就是
-            # "装了跑不起来"。libstdc++/libgcc_s 只警告不失败 —— glibc 那边偶尔
-            # 仍会渗出 libgcc_s，钉死它会让发布卡在一件不致命的事上。
+            # "装了跑不起来"。C++ 运行时（`libstdc++`/`libgcc_s`）不在这份名单里，
+            # 它们单独说 —— 见下面那一段。
             # ngtcp2/nghttp3 是 1.5.0 起新进这份产物的两枚：它们由本仓 FetchContent
             # 以 `ENABLE_SHARED_LIB=OFF` 压成静态（CMakeLists.txt 里那两段），所以
             # 今天**不可能**出现在这里 —— 把它写进名单是为了让"哪天有人把上游那个
@@ -1227,10 +1257,15 @@ jobs:
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
             fi
-            soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
-            if [ -n "$soft" ]; then
-              echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
-            fi
+            # libstdc++/libgcc_s 在这里**不再是警告**：1.7.0 起这条腿有意不传
+            # `UVCPP_STATIC_RUNTIME`（理由见上面 Configure & Build 那一大段 ——
+            # 静态 libstdc++ 的 .so 会与普通使用者那份在同一进程里互相顶掉
+            # COMDAT 模板实例，9 条用例当场崩）。所以这里只**记录**实测值：
+            # 这句话的语义已经从"静态运行时没生效"翻成了"就是要共享的那一份"，
+            # 再 warn 只会训练人忽略警告。反过来，它要是**不在**了，就该回头问
+            # 一句是不是有人把那个开关加回去了 —— 那正是要避免的形状。
+            shared_rt=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u | tr '\n' ' ' || true)
+            echo "--- 共享 C++ 运行时（预期有）: ${shared_rt:-（无 —— UVCPP_STATIC_RUNTIME 又被打开了？见上面那段）}"
             # `UVCPP_DB_RUNTIME_LOAD=ON` 的**正面**判据，与上面那条 ldd 是两件事：
             # `ldd` 只看 DT_NEEDED（"有没有链上"），看不见"有一个没人提供的
             # `mysql_query` 挂在那里"—— 而那正是**漏改一处调用点**、且 `--no-undefined`
@@ -1378,6 +1413,10 @@ jobs:
       - name: Configure & Build
         run: |
           set -o pipefail
+          # 开关与 linux-x64 那条腿逐字相同 —— 包括"**不传** `-DUVCPP_STATIC_RUNTIME`"
+          # 这一条。两条 Linux 腿栽的是同一个坑（静态 libstdc++ 的 .so 与使用者那份
+          # 在同一进程里互相顶掉 COMDAT 模板实例），实测与推导写在 linux-x64 的
+          # Configure & Build 上方那一大段，这里不重复。
           cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -1398,7 +1437,7 @@ jobs:
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
-            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux --parallel 4
 
@@ -1423,7 +1462,7 @@ jobs:
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
-            -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
+            -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-linux-dbg --parallel 4
 
@@ -1460,10 +1499,15 @@ jobs:
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
             fi
-            soft=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u || true)
-            if [ -n "$soft" ]; then
-              echo "::warning title=linux-runtime-still-shared::静态运行时没完全生效: $soft"
-            fi
+            # libstdc++/libgcc_s 在这里**不再是警告**：1.7.0 起这条腿有意不传
+            # `UVCPP_STATIC_RUNTIME`（理由见上面 Configure & Build 那一大段 ——
+            # 静态 libstdc++ 的 .so 会与普通使用者那份在同一进程里互相顶掉
+            # COMDAT 模板实例，9 条用例当场崩）。所以这里只**记录**实测值：
+            # 这句话的语义已经从"静态运行时没生效"翻成了"就是要共享的那一份"，
+            # 再 warn 只会训练人忽略警告。反过来，它要是**不在**了，就该回头问
+            # 一句是不是有人把那个开关加回去了 —— 那正是要避免的形状。
+            shared_rt=$(ldd "$so" | grep -oE 'lib(stdc\+\+|gcc_s)[^ ]*\.so[^ ]*' | sort -u | tr '\n' ' ' || true)
+            echo "--- 共享 C++ 运行时（预期有）: ${shared_rt:-（无 —— UVCPP_STATIC_RUNTIME 又被打开了？见上面那段）}"
             # `UVCPP_DB_RUNTIME_LOAD=ON` 的**正面**判据，与上面那条 ldd 是两件事：
             # `ldd` 只看 DT_NEEDED（"有没有链上"），看不见"有一个没人提供的
             # `mysql_query` 挂在那里"—— 而那正是**漏改一处调用点**、且 `--no-undefined`

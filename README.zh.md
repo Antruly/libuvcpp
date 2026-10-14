@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.59--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.60--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.59-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.60-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -310,7 +310,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL / PostgreSQL 的符号不从链接行上来，改成**运行时**打开一份客户端库（`dlopen` / `LoadLibrary`）再取。**六条发布腿用的就是它，而理由在包的**使用者**身上，不在库里**：`DT_NEEDED`（Windows 上是导入表）是**加载期**解析的，链上 libmysqlclient/libpq 就等于"从没装过这两种客户端库的机器连**加载**这份库都做不到"—— 哪怕它只跑 HTTP、一行 `db` 代码都不碰。开了之后，那种机器上除"真去连 MySQL/PG"之外一切照常，而真去连时拿到的是 `uvcpp_db_status::NO_DRIVER` 加一句写清了试过哪些库名的话（可用环境变量 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` 指定路径）。它改的只是**符号从哪来**，不是**有哪些后端**：配置期仍然要 `mysql.h` / `libpq-fe.h`（`MYSQL_BIND` 的布局必须从真的头里读），所以 `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE` 的含义照旧是"头找到了"。默认 `OFF`，今天的行为逐字节不变。见 [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | 优先使用系统安装的 libuv |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | 用 `FetchContent` 拉取并源码构建 libuv |
-| `UVCPP_STATIC_RUNTIME` | `OFF` | 把编译器运行时（`libgcc`/`libstdc++`）静态链进库。**仅 MinGW 与 Linux 有效，MSVC 上是空操作** —— MSVC 用 `/MD`，发布包里自带 `vcruntime`/`msvcp` |
+| `UVCPP_STATIC_RUNTIME` | `OFF` | 把编译器运行时（`libgcc`/`libstdc++`）静态链进库。**仅 MinGW 与 Linux 有效，MSVC 上是空操作** —— MSVC 用 `/MD`，发布包里自带 `vcruntime`/`msvcp`。**在 Linux 上它还同时作用于每个可执行文件，而带它的*共享* `libuvcpp.so` 与"用系统 `libstdc++.so.6` 的使用者"是互斥的** —— 两份 libstdc++ 各自实例化同一批 COMDAT 模板（`std::once_flag` 的 `__once_proxy`、`std::__future_base::_State_baseV2`），而 ELF 的全局符号作用域让一侧跳进另一侧的栈帧，于是失败形状是运行期段错误或 `double free`，**不是链接错误**。**这就是发布流程的两条 Linux 腿都不再传它的原因**（1.7.0 起）—— Linux 包因此需要系统里的 `libstdc++.so.6` / `libgcc_s.so.1`，任何带 C++ 运行时的发行版本来就有。两条 MinGW 腿照旧传：PE 没有全局符号作用域，不存在互相顶掉，而 MinGW 用户机器上未必有 `libstdc++-6.dll`。见 [`doc/build-guide.md`](doc/build-guide.md) |
 | `UVCPP_ENABLE_TRY_WRITE` | `ON` | 拷贝进写缓冲之前先试一次 `uv_try_write` |
 | `UVCPP_TRY_WRITE_MIN_BYTES` | `32768` | 值得尝试 `uv_try_write` 的最小载荷（是 `CACHE STRING`，不是 `option()`） |
 | `UVCPP_ENABLE_UDP_GSO` | Windows **且** `UVCPP_ENABLE_QUIC=ON` 时为 `ON`，否则 `OFF` | QUIC 传输的发送侧 UDP 分段卸载：把一批等长的数据报用 `UDP_SEND_MSG_SIZE` 在**一次** `WSASendTo` 里交给协议栈，而不是每个数据报一次系统调用。分段尺寸取自每次聚合写回填的值，所以线上跑的还是今天那些数据报。**仅 Windows** —— 其余平台这段代码被编掉，开关在那里是空操作。见 [`doc/quic-guide.md`](doc/quic-guide.md) |
