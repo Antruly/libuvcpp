@@ -410,14 +410,58 @@ if(UVCPP_BUILD_WEB)
           GIT_TAG         ${BROTLI_VERSION}
           GIT_SHALLOW     TRUE
         )
+        # ⚠️ **必须把 BUILD_SHARED_LIBS 压成 OFF**（理由与 nghttp2 那条同一个，
+        # 见下面 `uvcpp_nghttp2_configure` 那段）：上游是
+        # `option(BUILD_SHARED_LIBS "Build shared libraries" ON)`（v1.1.0 的
+        # `CMakeLists.txt:13`）—— **默认就是 ON**，而它又是全局的、随使用者的缓存变化。
+        # 不压的后果只有 Windows 上现形：`brotlienc` 变成一个 **DLL**，
+        # `$<TARGET_FILE:brotlienc>` 于是求值成 `brotlienc.dll`，把它写进
+        # `target_link_libraries` 就是
+        #   brotlienc.dll : fatal error LNK1107: invalid or corrupt file
+        # （MSVC 只接受 `.lib` —— 静态库或导入库）。把 `.so` 的路径丢给链接器在 Linux 上
+        # 是合法的，所以本机与 Ubuntu 腿**全绿**、只有 MSVC 红。
+        # 顺带也是刻意的：链 DLL 会让用我们库的人多两个运行时依赖
+        # （`brotlienc.dll` / `brotlidec.dll`），nghttp2 那条明确选过"静态是刻意的，
+        # packager 的 DLL 清单一行都不用改"。
+        # 上游 `cmake_minimum_required(VERSION 3.15)` ⇒ CMP0077 是 NEW ⇒ **普通变量**
+        # 就压得住它的 `option()`，不用 `... CACHE ... FORCE`、也就不污染根 cache。
+        # 用 function 缩作用域（照 nghttp2 那条抄），免得改掉根作用域的 BUILD_SHARED_LIBS。
+        function(uvcpp_brotli_add_subdir)
+          set(BUILD_SHARED_LIBS OFF)
+          add_subdirectory(${brotli_SOURCE_DIR} ${brotli_BINARY_DIR} EXCLUDE_FROM_ALL)
+        endfunction()
         FetchContent_GetProperties(brotli)
         if(NOT brotli_POPULATED)
           FetchContent_Populate(brotli)
-          add_subdirectory(${brotli_SOURCE_DIR} ${brotli_BINARY_DIR} EXCLUDE_FROM_ALL)
+          uvcpp_brotli_add_subdir()
         endif()
+        # 「没压住」必须**当场**红，不能拖到链接期 —— 那时看到的是
+        # `brotlienc.dll : LNK1107`、指向我们自己写的 `target_link_libraries`，
+        # 看着像我们把库名写错了。与 quic/http3/capi/yyjson 那几段"开了开关但什么都
+        # 没建出来"是同一条教训：**没测**必须表现为失败。
+        if(NOT TARGET brotlienc OR NOT TARGET brotlidec OR NOT TARGET brotlicommon)
+          message(FATAL_ERROR
+            "取源码的 brotli 没有建出 brotlienc/brotlidec/brotlicommon 三个目标 —— "
+            "上游改了目标名或者改了目录结构。")
+        endif()
+        foreach(_brotli_t brotlienc brotlidec brotlicommon)
+          get_target_property(_brotli_ty ${_brotli_t} TYPE)
+          if(NOT _brotli_ty STREQUAL "STATIC_LIBRARY")
+            message(FATAL_ERROR
+              "取源码的 brotli 建出来的 ${_brotli_t} 类型是 ${_brotli_ty}，不是 "
+              "STATIC_LIBRARY —— BUILD_SHARED_LIBS 没压住（CMP0077 变成 OLD 了？），"
+              "或者上游把目标改成了别的东西。链 DLL 的路径在 MSVC 上是 "
+              "LNK1107（invalid or corrupt file）。")
+          endif()
+        endforeach()
+        unset(_brotli_t)
+        unset(_brotli_ty)
         # 1.1.0 起的 target 名；别名 `Brotli::brotlienc` 是它自己给的，
         # `uvcpp_http_compress.cpp` 只 `#include <brotli/encode.h>`，不关心叫法。
-        set(UVCPP_BROTLI_LIBS brotlienc brotlidec)
+        # **三个都要列**：静态链法下面 `$<TARGET_FILE:brotlienc>` 只给 enc 那一份
+        # 归档，`brotlicommon` 里的符号（`BrotliEnsureCapacity` 那一族）不会自己跟过来
+        # —— 共享那条支路以前是"碰巧对"的（`.so` 自带 `NEEDED` 记着 brotlicommon）。
+        set(UVCPP_BROTLI_LIBS brotlienc brotlidec brotlicommon)
         set(UVCPP_BROTLI_FROM_SOURCE TRUE)
         # include 目录**必须显式给**：下面链接用的是 `$<TARGET_FILE:...>`（求值成
         # 路径字符串，理由见 install(EXPORT) 那段的长注释），它**不带使用要求** ——
@@ -2363,11 +2407,21 @@ if(UVCPP_BUILD_WEB)
         # 不能指望目标名把使用要求带过来 —— 这里链接用的偏偏是 `$<TARGET_FILE:>`
         # （路径形式，见上）。
         # ------------------------------------------------------------------
+        # `brotlicommon` **必须一起列**：路径形式不带使用要求，`brotlienc` 对
+        # `brotlicommon` 的那条 PUBLIC 依赖不会跟过来。以前是"碰巧对"—— 那时取源码
+        # 支路拿到的是 `.so`/`.dll`，前者的 `NEEDED` 自记着 brotlicommon、后者靠导入库
+        # 连带。现在三个都是静态库（见上面 `uvcpp_brotli_add_subdir`），少一个就是
+        # `undefined reference to BrotliEnsureCapacity` 那一族。
+        #
+        # 另：静态**是刻意的**，别改成 `$<TARGET_LINKER_FILE:>` 去链导入库 ——
+        # 那会在 Windows 上给用我们库的人多三个运行时依赖（三个 DLL），
+        # nghttp2 那条选过同一样东西。
         if(UVCPP_BROTLI_FROM_SOURCE)
           target_link_libraries(${_tgt} PRIVATE
             $<BUILD_INTERFACE:$<TARGET_FILE:brotlienc>>
-            $<BUILD_INTERFACE:$<TARGET_FILE:brotlidec>>)
-          add_dependencies(${_tgt} brotlienc brotlidec)
+            $<BUILD_INTERFACE:$<TARGET_FILE:brotlidec>>
+            $<BUILD_INTERFACE:$<TARGET_FILE:brotlicommon>>)
+          add_dependencies(${_tgt} brotlienc brotlidec brotlicommon)
         else()
           target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:${UVCPP_BROTLI_LIBS}>)
         endif()

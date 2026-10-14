@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.50-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.51-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -303,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2783-2783`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2837-2837`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -640,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1783-1785`、`CMakeLists.txt:2675-2680`）——
+  两处都摘掉**（`CMakeLists.txt:1827-1829`、`CMakeLists.txt:2729-2734`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -2370,6 +2370,47 @@
 
 ### 配置、打包与 CI
 
+- **brotli 取源码支路把 DLL 的路径写进了链接行 ⇒ MSVC 的 `brotli` 格
+  `LNK1107`**（`1.6.51-dev`）。`1.6.50-dev` 把 include 目录补上之后，那一格从
+  `error C1083` 变成
+
+      _deps\brotli-build\Release\brotlienc.dll : fatal error LNK1107:
+      invalid or corrupt file: cannot read at 0x2F8
+
+  根因是上游 brotli 的 `option(BUILD_SHARED_LIBS "Build shared libraries" ON)`
+  （v1.1.0 上游自己的 `brotli/CMakeLists.txt:13`）**默认就是 ON**，而它是全局的、随使用者的缓存变化
+  —— 我们在根上也是 ON，于是取下来的 brotli 建出的是 **DLL**，
+  `$<TARGET_FILE:brotlienc>` 求值成 `brotlienc.dll`，MSVC 只接受 `.lib`（静态库或
+  导入库）。把 `.so` 的路径丢给链接器在 Linux 上是合法的，所以本机与 Ubuntu 腿
+  **全绿**、又是只有 MSVC 红 —— 与 `1.6.50-dev` 那条同一种形状。
+
+  修法照 `nghttp2` 那条抄：用一个 function 缩作用域把 `BUILD_SHARED_LIBS` 压成
+  `OFF`（上游 `cmake_minimum_required(VERSION 3.15)` ⇒ CMP0077 是 NEW ⇒ **普通变量**
+  就压得住它的 `option()`，不用 `CACHE ... FORCE`、也就不污染根 cache）。顺带这也是
+  **刻意的**：链 DLL 会让用我们库的人多两个运行时依赖，nghttp2 那条明确选过"静态是
+  刻意的，packager 的 DLL 清单一行都不用改"。
+
+  两处配套：
+
+  1. **`brotlicommon` 必须一起列**。路径形式不带使用要求，`brotlienc` 对
+     `brotlicommon` 的那条 PUBLIC 依赖不会跟过来 —— 以前是**碰巧对**的（那时拿到的是
+     `.so`，它的 `NEEDED` 自记着 brotlicommon），三个都变静态之后少一个就是
+     `undefined reference to BrotliEnsureCapacity` 那一族。
+  2. **"没压住"必须当场红**：`add_subdirectory` 之后逐个查
+     `get_target_property(... TYPE)`，不是 `STATIC_LIBRARY` 就 `FATAL_ERROR`。
+     拖到链接期看到的是 `brotlienc.dll : LNK1107`、指向我们自己写的
+     `target_link_libraries`，看着像我们把库名写错了。
+
+  判据（本机，取源码支路的树）：① `CMakeFiles/uvcpp.dir/link.txt` 里三个都是
+  `<brotli-build>/libbrotli{enc,dec,common}.a`（改之前是 `.so`）；
+  ② `ldd libuvcpp.so` **没有** `libbrotli*`（改之前有三条）—— 这一条同时证明
+  "不新增运行时依赖"真的做到了；③ `nm -D --defined-only libuvcpp.so | grep -c brotli`
+  = 39，符号确实并进来了；④ `make -j8` rc=0、0 error，`ctest -R "compress|brotli|static"`
+  3/3 过；⑤ 系统 brotli 那条支路（`find_library`，Ubuntu 的 `libbrotli-dev`）
+  重新配置 + 编 `uvcpp_a` rc=0，**没被这次改动碰到**（`UVCPP_BROTLI_LIBS` 的赋值在
+  `UVCPP_BROTLI_FROM_SOURCE` 分支里，链接行那段只改了 that 分支）。
+  MSVC 那条腿本机判不了（没有 Windows 工具链），只能等 CI。
+
 - **brotli 的 FetchContent 支路一个 include 目录都没加 ⇒ MSVC 的 `brotli` 格
   `error C1083`**（`1.6.50-dev`）。`UVCPP_ENABLE_BROTLI=ON` 而机器上没有系统 brotli
   时（macOS 与 MSVC 都走这条），`src/web/uvcpp_http_compress.cpp` 的
@@ -2493,7 +2534,7 @@
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1588`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1632`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是
