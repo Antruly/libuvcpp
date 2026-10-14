@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.55-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.56-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2412,6 +2412,14 @@
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **两版 README 的功能覆盖数字按新的 MinGW 格改准**（`1.6.56-dev`）。上一条把
+  `ci-mingw64.yml` 那条**单 job** 也开了 yyjson 与 brotli，而 README 的
+  `UVCPP_ENABLE_YYJSON` / `UVCPP_ENABLE_BROTLI` 两行还写着旧的覆盖数（"三个"/"四个
+  CI 条目"，且只列矩阵里的那几格）。改成点名那条单 job 的新数字，并给
+  「Optional features」表补上一直缺的 yyjson 一行 —— 那张表原先只列 web/net 的开关，
+  引子句"`UVCPP_BUILD_WEB=ON` 一个都不会替你打开"却写得像整表都是 web 的，一并
+  改准（yyjson 属 `json` 模块）。
 
 - **预编译包第一次真的"全功能"：yyjson、brotli 与 db 的两个远程后端都进包**
   （`1.6.55-dev`）。此前 `release.yml` 十条 configure 里**一条都不传**
