@@ -1031,19 +1031,39 @@ jobs:
           # 两个 configure 里那四个 `-DUVCPP_DB_*_INCLUDE_DIR=` **必须同表**。
           # 改这里就要改那里。
           #
-          # `-t jammy` **不是可选的**：这张镜像上另外配了 PGDG（`pgdg22.04`），于是
-          # `libpq-dev` 的候选成了 `18.6-1.pgdg22.04+2` —— 而那个版本在这张镜像上
-          # **没有可取回的源**，`apt-get download` 以 100 直接退出。1.7.0 的空转里
-          # 两条 Linux 腿各自实测到同一条：
+          # **版本号必须自己给**（`pkg=ver`），不能交给 `apt-get download` 去挑：
+          # 它挑的是"版本号最大的那个"，而这张镜像上 PGDG 的 `libpq-dev` 是
+          # `18.6-1.pgdg22.04+2` —— 版本最高，且在这张镜像上**没有可取回的源**，
+          # 于是它在取包之前就以 100 退出。1.7.0 的空转里两条 Linux 腿各自实测到：
           #   E: Can't find a source to download version '18.6-1.pgdg22.04+2'
           #      of 'libpq-dev:{amd64,arm64}'
-          # 我们要的只是头、版本号无所谓，所以用 `-t` 把候选钉回发行版那一档（它建
-          # 的 990 pin 盖过第三方源的 500），而不是去猜第三方仓库此刻的状态。
+          #
+          # **而"把候选钉回发行版"这条路走不通 —— `apt-get download` 不看任何 pin**。
+          # 这两条都是实测的，不是推断：本机对同一台机器上 `libpq-dev` 的两个候选
+          # （noble-updates 16.15 / noble 16.2）量过，`-t noble` 改不动它，一份
+          # `Pin-Priority: 1001` 的 preferences 也改不动（两次都取到 16.15）。
+          # `-t jammy` 就是照这条推断先写、并让第二次空转照样红掉的那一版。
+          #
+          # 所以改成：从 `apt-cache madison` 里挑一行**开源于发行版归档**的版本号
+          # （源 URL 里带 `ubuntu.com`；runner 用的是 `azure.archive.ubuntu.com`），
+          # 再按 `pkg=ver` 交回去 —— 那时 apt 只负责取，不负责挑。我们要的只是头、
+          # 版本号无所谓，所以不必去猜第三方仓库此刻的状态。取不到版本号就当场红，
+          # 与 win-client-headers.sh 同一条规矩。
           rm -rf "$HOME/client-headers"
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            apt-get download -t jammy libmysqlclient-dev libpq-dev
+            for p in libmysqlclient-dev libpq-dev; do
+              v=$(apt-cache madison "$p" | grep -F 'ubuntu.com' | head -n1 \
+                    | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}')
+              if [ -z "$v" ]; then
+                echo "::error title=linux-client-headers::${p} 在发行版归档里没有可取回的版本"
+                apt-cache madison "$p" || true
+                exit 1
+              fi
+              echo "--- 发行版归档里的 ${p}=${v}"
+              apt-get download "${p}=${v}"
+            done
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )
@@ -1299,14 +1319,25 @@ jobs:
           # 一步的注释里）。这条腿的 `apt-get download` 拿到的是 **arm64 的 .deb**，
           # 头是同一份源码生成的，与 x64 那条腿取到的逐字节相同的那几个文件。
           # 目录约定同表：`$HOME/client-headers/usr/include/{mysql,postgresql}`。
-          # `-t jammy` 的理由在 linux-x64 那一步的注释里（PGDG 的候选版本没有可取回
-          # 的源 ⇒ 不带 `-t` 时 `apt-get download` 以 100 退出）；这条腿实测到的
-          # 是 `libpq-dev:arm64` 那一份，根因与修法逐字相同。
+          # 版本号自己给的理由在 linux-x64 那一步的注释里（PGDG 的候选版本最高、
+          # 却没有可取回的源 ⇒ 不显式给版本号时 `apt-get download` 以 100 退出；
+          # 而 `-t` 与 preferences 都改不动它的候选，同样是实测的）。这条腿实测
+          # 到的是 `libpq-dev:arm64` 那一份，根因与修法逐字相同。
           rm -rf "$HOME/client-headers"
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            apt-get download -t jammy libmysqlclient-dev libpq-dev
+            for p in libmysqlclient-dev libpq-dev; do
+              v=$(apt-cache madison "$p" | grep -F 'ubuntu.com' | head -n1 \
+                    | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}')
+              if [ -z "$v" ]; then
+                echo "::error title=linux-client-headers::${p} 在发行版归档里没有可取回的版本"
+                apt-cache madison "$p" || true
+                exit 1
+              fi
+              echo "--- 发行版归档里的 ${p}=${v}"
+              apt-get download "${p}=${v}"
+            done
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )

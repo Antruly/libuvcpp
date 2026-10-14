@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.57-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.58-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2422,12 +2422,22 @@
   E: Can't find a source to download version '18.6-1.pgdg22.04+2' of 'libpq-dev:arm64'
   ```
 
-  根因不在我们这一侧的写法：runner 镜像上**另外配了 PGDG**（`pgdg22.04`），于是
-  `libpq-dev` 的候选成了 `18.6-1.pgdg22.04+2` —— 而那个版本在这张镜像上**没有可取回
-  的源**，`apt-get download` 直接在取包之前就以 100 退出。修法是把候选钉回发行版那
-  一档：`apt-get download -t jammy libmysqlclient-dev libpq-dev`（`-t` 建的 990 pin
-  盖过第三方源的 500），我们要的只是头、版本号无所谓，所以不去猜第三方仓库此刻的
-  状态。本机验过 `apt-get download -t <codename>` 确实按指定 suite 选版本。
+  根因不在我们这一侧的写法：runner 镜像上另外有一份 PGDG 的 `libpq-dev`
+  （`18.6-1.pgdg22.04+2`），版本号比发行版归档里那份高，**却没有可取回的源** ——
+  `apt-get download` 挑的是"版本最大的那个"，于是在取包之前就以 100 退出。
+
+  **修法走错过一次，记在这里免得下次重走**：第一版写的是把候选钉回发行版那一档，
+  `apt-get download -t jammy …`，结果第二次空转照样红在同一条上。原因是
+  **`apt-get download` 不看任何 pin** —— `-t`（990）与一份 `Pin-Priority: 1001` 的
+  preferences 都改不动它的候选，本机对同一台机器上 `libpq-dev` 的两个候选
+  （noble-updates 16.15 / noble 16.2）量过，两次都取到 16.15。第一次写这条时"本机
+  验过 `-t` 可用"是个**不成立的对照**：本机没有第二个来源，取到同一个版本说明不了
+  任何事。
+
+  真正的修法是**自己把版本号给出来**：从 `apt-cache madison` 里挑一行开源于发行版
+  归档的版本（源 URL 里带 `ubuntu.com`），再按 `pkg=ver` 交回去，让 apt 只负责取、
+  不负责挑（`1.6.58-dev`）。取不到版本号就 `::error` 当场红。这一段本机用真 apt
+  整块跑过：两个包都按解析出的版本取到，`mysql.h` 与 `libpq-fe.h` 落在约定路径上。
 
   同一次空转里另外四条腿（MinGW x64/arm64、MSVC x64/arm64）**全绿**：新加的
   `.github/scripts/win-client-headers.sh` 在真镜像上把两份钉版本的 MSYS2 头取到并用
