@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.48-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.49-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -2369,6 +2369,32 @@
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **`\x1f` 字面量被贪婪的 `\x` 吃掉 ⇒ macOS / MSVC 两条腿编挂**（`1.6.49-dev`）。
+  `tests/functional/web_app_response_func.cpp` 里那个变体 tag 写成了整串
+  `"json\x1f50\x1f6"`。C/C++ 的 `\x` 转义**贪婪** —— 它把后面所有十六进制位都吃掉，
+  于是 `\x1f50` 是一个越界码位（0x1f50 > 0xFF），`\x1f6` 同理。**clang 与 MSVC 判
+  error**（`error: hex escape sequence out of range` / `error C7744: escape sequence
+  '\x1f50' out of range`），**GCC 只给一条 warning 然后按低字节截断**（rc=0）。本机
+  开发在 Linux 上，于是这条红从引进它的 `2a622cb`（`1.6.31-dev`）起挂了 17 个开发档，
+  直到 macOS 腿报出来 —— 而且是**十二条腿里红六条绿六条**：红的是带
+  `-DUVCPP_BUILD_WEBAPP=ON` 的那六格（`web`/`yyjson`/`brotli`/`ssl`/`h2`/`capi`，
+  MSVC 上还多一条 `wsdl`），`full`/`quic`/`http3` 没开 WEBAPP、`basic-*`/`db` 关了
+  WEB，七格都没编到这个文件。**「某格绿」要问的是这一格编没编到** —— 这一条红能漏
+  17 个档，正是因为绿的那几格本来就没编它。
+
+  修的不只是那两处字面量：写入与断言当时用的是**同一串**错字面量，两边一起被 GCC
+  截断 ⇒ 比得再严也恒真，**这条判据在 Linux 上根本测不出来**。现在字面量按段拼
+  （`"json\x1f" "50\x1f" "6"`，转义在引号处终止），并**断言真实字节**（长度 9、
+  `[4]`/`[7]` 是 `'\x1f'`、`"json"`/`"50"`/`'6'` 各就各位）—— 那一条在 GCC 的截断下
+  也会红，把「只有非 GCC 工具链能发现」变成「三条腿都能发现」。
+
+  判据（都在本机量的）：① 同一条 TU 的真实命令行、只把编译器换成 `clang++-18`
+  （`-fsyntax-only`），HEAD 版 2 个 error（485:20、486:35，与 CI 批注逐字对上）、
+  修好后 0 个；② 另起一棵 `clang++-18` 的全量树（WEB + WEBAPP + BROTLI + TESTS）
+  编过 —— clang 碰到第一个 error 就停，所以只看 CI 那条批注**说明不了别的 TU** ——
+  `0` 个 error、`ctest 92/92`，`test_web_app_response_func` 在其中（`#59 Passed`）；
+  ③ GCC 腿不劣化：重编该目标并跑，`[response] ALL PASS`。
 
 - **brotli 有了自己的 CI 腿：四格（Ubuntu 两格 / macOS / MSVC）**（`1.6.48-dev`）。
   `UVCPP_ENABLE_BROTLI` **默认 OFF**，别的格一行 brotli 的代码都不编 —— 与 `wsdl`

@@ -481,9 +481,20 @@ void test_body_take_zero_copy() {
   check(wire(lv) == wire(cs), "json_str 左值与 C 串重载的报文逐字节相同");
 
   // cache_tag 落到 `uvcpp_http_response` 那个字段上（契约只有那一处）。
+  //
+  // 字面量必须**按段拼**：`\x` 会贪婪地吃掉后面所有十六进制位，`"json\x1f50\x1f6"`
+  // 里 `\x1f50` 是一个越界的码位 —— clang 直接报 `error: hex escape sequence out
+  // of range`，GCC 只给一条 warning 然后按低字节截断。所以拆成相邻字面量，并且
+  // **断言真实字节**：两处写法相同的错字面量会互相抵消，比得再严也恒真，而线上
+  // 分隔符是 `tag += '\x1f'`（`uvcpp_web_static.cpp`）拼出来的真 0x1f。
+  const std::string tag = "json\x1f" "50\x1f" "6";
+  check(tag.size() == 9 && tag[4] == '\x1f' && tag[7] == '\x1f' &&
+            tag.compare(0, 4, "json") == 0 && tag.compare(5, 2, "50") == 0 &&
+            tag[8] == '6',
+        "tag 字面量真的是 json + 0x1f + 50 + 0x1f + 6，没有被贪婪的 \\x 吃掉");
   uvcpp_web_response t;
-  t.cache_tag("json\x1f50\x1f6").json_str(std::string(doc));
-  check(t.raw().cache_tag == "json\x1f50\x1f6", "cache_tag 写到了 resp_ 上");
+  t.cache_tag(tag).json_str(std::string(doc));
+  check(t.raw().cache_tag == tag, "cache_tag 写到了 resp_ 上");
   uvcpp_web_response t2;
   check(t2.raw().cache_tag.empty(), "默认 cache_tag 是空串（不参与变体缓存）");
 }
