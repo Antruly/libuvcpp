@@ -267,7 +267,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2997-2997`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:3025-3025`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -435,7 +435,7 @@ MSVC. MinGW and macOS are the gap (see §1).
   entry at all and shipped two classes of defect (#35).
 - **It is `web` plus one switch**, exactly as `zlib-off` is `web` minus one, and its dep list
   is **byte-identical to `web`'s**. That is deliberate: `pugixml` is pulled by `FetchContent`
-  (`CMakeLists.txt:1572`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
+  (`CMakeLists.txt:1600`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
   there is nothing to install — and keeping the package set identical means a red/green
   difference between the two legs can only be attributed to the switch itself.
 - **All four gates are load-bearing here.** Gate ② is `pugixml integrated` (the FetchContent
@@ -478,7 +478,7 @@ nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the sing
   **libc++**, whose `double` formatting is not libstdc++'s. The byte-identical write-back
   assertion is precisely the kind that differs across those two.
 - **`flags` is `web` plus one switch, and the dep list is byte-identical to `web`'s on all
-  three legs.** `yyjson` is pulled by `FetchContent` (`CMakeLists.txt:1632`, `GIT_TAG` pinned
+  three legs.** `yyjson` is pulled by `FetchContent` (`CMakeLists.txt:1660`, `GIT_TAG` pinned
   to `YYJSON_VERSION`) and built as an OBJECT library, not found by a package manager, so
   there is nothing to install — and keeping the package set identical means a red/green
   difference can only be attributed to the switch.

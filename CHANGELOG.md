@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.51-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.52-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -303,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2837-2837`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2865-2865`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -640,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1827-1829`、`CMakeLists.txt:2729-2734`）——
+  两处都摘掉**（`CMakeLists.txt:1855-1857`、`CMakeLists.txt:2757-2762`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -2370,6 +2370,49 @@
 
 ### 配置、打包与 CI
 
+- **brotli 到底链系统那份还是自己取源码，从来没被钉住 ⇒ 新增
+  `UVCPP_BROTLI_FROM_SOURCE`**（`1.6.52-dev`）。发现顺序是 pkg-config →
+  `find_path`/`find_library` → FetchContent，也就是**先系统后源码**：在装了
+  `libbrotli-dev` 的机器上，"链的是静态 `.a`"会**静默**变成"链系统那份 `.so`"，
+  产物上多出 `libbrotlienc` / `libbrotlidec` / `libbrotlicommon` 三条 `DT_NEEDED`
+  —— 与发布包"除 libc 外无运行时依赖"直接冲突。CI 上一直没撞上只是因为那几台
+  runner 碰巧没装 brotli；而这一版的发布包要在**全平台**把这个后端打开，
+  靠"碰巧"不行。当时更麻烦的是**不会有任何一道断言变红**：`release.yml` 那条 ldd
+  黑名单里并没有 `brotli`。
+
+  zlib 那条的挡法在这里**不管用** —— `-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON` 只挡
+  `find_package`，挡不住 `pkg_check_modules`；而 `CMAKE_IGNORE_PATH` 本仓已经明文
+  记过是陷阱（它只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索路径）。
+
+  修法照 `UVCPP_DB_SQLITE_FROM_SOURCE`（`CMakeLists.txt:189`）的命名与形状加一个
+  **默认 OFF** 的选项（`CMakeLists.txt:216-217`），把整段发现包进
+  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:392`）。注意是**连发现都不
+  调用**，不是"找到了也偏不用"：`find_path`/`find_library` 的结果会写进 cache，
+  调用过一次，`UVCPP_BROTLI_INCLUDE_DIR` 之类就一直留在那棵树里，同一棵树翻开关时
+  会把上一轮的答案漏过来。所以每个"找到系统那份"的判据都**显式**带上
+  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:403`、`CMakeLists.txt:407`、
+  `CMakeLists.txt:415`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
+  选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
+  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:493`），链接段
+  （`CMakeLists.txt:2447`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  动，所以既有使用者的行为逐字节不变。
+
+  判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON
+  -DUVCPP_BROTLI_FROM_SOURCE=ON -DFETCHCONTENT_SOURCE_DIR_BROTLI=/tmp/brotli-src`）：
+  ① 配置打印 `Fetching brotli via FetchContent (tag=v1.1.0)`，configure rc=0；
+  ② **`-M` 解析出的头路径**是 `/tmp/brotli-src/c/include/brotli/encode.h`，不是
+  `/usr/include/brotli/encode.h`（后者才是"系统那份又顶上来"的样子 —— 这条判据的
+  形状是 `1.6.50-dev` 那条教训留下的：`CMAKE_IGNORE_PATH` 那套配方能让本机**全绿**
+  而编译行上一个 brotli 目录都没有）；③ `readelf -d libuvcpp.so | grep NEEDED |
+  grep -ci brotli` = 0；④ `ctest` 92/92。
+  ⑤ 另一半判据被证明是**承重的**，不是想当然：先用
+  `-DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON` 另建一棵树逼它走 `find_*` 支路
+  （cache 里于是留下 `UVCPP_BROTLI_INCLUDE_DIR:PATH=/usr/include` 与
+  `UVCPP_BROTLIENC_LIB:FILEPATH=/usr/lib/x86_64-linux-gnu/libbrotlienc.so`），再在
+  **同一棵树里**把选项翻成 `ON` 重配 —— 仍然打印 `Fetching brotli via
+  FetchContent`。
+  MSVC / MinGW 那两条腿本机判不了（没有 Windows 工具链），等 CI。
+
 - **brotli 取源码支路把 DLL 的路径写进了链接行 ⇒ MSVC 的 `brotli` 格
   `LNK1107`**（`1.6.51-dev`）。`1.6.50-dev` 把 include 目录补上之后，那一格从
   `error C1083` 变成
@@ -2534,7 +2577,7 @@
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1632`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1660`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是

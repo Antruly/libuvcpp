@@ -78,6 +78,7 @@ cause — see [`RELEASE.md`](../RELEASE.md).
 | `UVCPP_ENABLE_CAPI` | `OFF` | net + web (nothing else — the C surface is a thin wrapper) | net off, or web off |
 | `UVCPP_ENABLE_DB` | `OFF` | any one of libsqlite3 / libmysqlclient / libpq | **all three** backend libraries missing |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | network, or the hash-pinned zip placed by hand | — |
+| `UVCPP_BROTLI_FROM_SOURCE` | `OFF` | network, or brotli's source placed by hand | — |
 
 The **target** used for linking is chosen by testing `TARGET uv_a` / `TARGET uv`, not by assuming
 a name: libuv 1.36 built both unconditionally, but from 1.51 `uv` is controlled by libuv's own

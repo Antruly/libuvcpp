@@ -204,6 +204,17 @@ option(UVCPP_BUILD_BENCH "Build the benchmark range (bench/)" OFF)
 # =========================================================================
 option(UVCPP_ENABLE_ZLIB    "Enable zlib (gzip, WebSocket Per-Message Deflate)"  OFF)
 option(UVCPP_ENABLE_BROTLI  "Enable brotli (br content-encoding on responses)"   OFF)
+# 强制 brotli **取源码并静态链**：跳过 pkg-config 与 find_path/find_library，
+# 直接走 FetchContent。发布腿传的就是它，理由两条，都会让"系统那份"成为错误选择：
+#   · 链系统 `libbrotlienc.so`/`libbrotlidec.so` 会给产物添三条 DT_NEEDED
+#     （enc/dec/common），与发布包的"除 libc 外无运行时依赖"直接冲突；
+#   · 发现顺序是**先系统后源码**，所以"发布腿今天没事"只是因为 runner 上碰巧没装
+#     libbrotli —— 哪天镜像或 msys2 装了，配置期会**静默**换成共享库。
+#     zlib 那条用的 `-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON` 在这里不管用：它只挡
+#     `find_package`，挡不住 `pkg_check_modules`。
+# 与 `UVCPP_DB_SQLITE_FROM_SOURCE`（上面）是同一个形状：名字说的是"这份依赖怎么来"。
+option(UVCPP_BROTLI_FROM_SOURCE
+  "Fetch brotli from source and link it statically instead of using the system library" OFF)
 option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS + WSS)"                     OFF)
 option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN, plus opt-in cleartext h2c)" OFF)
 
@@ -372,23 +383,36 @@ if(UVCPP_BUILD_WEB)
   # `#include <zlib.h>`，所以才要 PUBLIC 链接 + 随包发头）。这里都不需要：
   # 共享库靠 DT_NEEDED 带走，静态库的使用者自己把 `-lbrotlienc -lbrotlidec` 接上。
   if(UVCPP_ENABLE_BROTLI)
-    # 先 pkg-config（发行版的标准装法），再 find_path/find_library 兜底
-    # （Windows 的 vcpkg / MSYS2 前缀、以及 Conan 那种只给路径的布局都落在这里：
-    # 它们不一定带 .pc，但一定有 `brotli/encode.h` 与那一对库）。
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-      pkg_check_modules(BROTLIENC QUIET IMPORTED_TARGET libbrotlienc)
-      pkg_check_modules(BROTLIDEC QUIET IMPORTED_TARGET libbrotlidec)
+    # 下面这一段是**系统**那条支路。`UVCPP_BROTLI_FROM_SOURCE=ON`（发布腿传的就是它）
+    # 时它一步都不走 —— 不是"找到了也偏不用"，而是**连发现都不调用**。理由是
+    # find_path/find_library 的结果会写进 cache：调用过一次，`UVCPP_BROTLI_INCLUDE_DIR`
+    # 之类就一直留在那棵树里，同一棵树翻开关时会把上一轮的答案漏过来。所以下面每个
+    # "找到系统那份"的判据都**显式**带上 `NOT UVCPP_BROTLI_FROM_SOURCE`，而不是
+    # 指望"没调用=没找到"。
+    if(NOT UVCPP_BROTLI_FROM_SOURCE)
+      # 先 pkg-config（发行版的标准装法），再 find_path/find_library 兜底
+      # （Windows 的 vcpkg / MSYS2 前缀、以及 Conan 那种只给路径的布局都落在这里：
+      # 它们不一定带 .pc，但一定有 `brotli/encode.h` 与那一对库）。
+      find_package(PkgConfig QUIET)
+      if(PkgConfig_FOUND)
+        pkg_check_modules(BROTLIENC QUIET IMPORTED_TARGET libbrotlienc)
+        pkg_check_modules(BROTLIDEC QUIET IMPORTED_TARGET libbrotlidec)
+      endif()
     endif()
 
-    if(TARGET PkgConfig::BROTLIENC AND TARGET PkgConfig::BROTLIDEC)
+    if(NOT UVCPP_BROTLI_FROM_SOURCE AND TARGET PkgConfig::BROTLIENC AND TARGET PkgConfig::BROTLIDEC)
       set(UVCPP_BROTLI_LIBS PkgConfig::BROTLIENC PkgConfig::BROTLIDEC)
       message(STATUS "Using system brotli via pkg-config (${BROTLIENC_VERSION})")
     else()
-      find_path(UVCPP_BROTLI_INCLUDE_DIR NAMES brotli/encode.h)
-      find_library(UVCPP_BROTLIENC_LIB NAMES brotlienc libbrotlienc brotlienc-static libbrotlienc-static)
-      find_library(UVCPP_BROTLIDEC_LIB NAMES brotlidec libbrotlidec brotlidec-static libbrotlidec-static)
-      if(UVCPP_BROTLI_INCLUDE_DIR AND UVCPP_BROTLIENC_LIB AND UVCPP_BROTLIDEC_LIB)
+      if(NOT UVCPP_BROTLI_FROM_SOURCE)
+        find_path(UVCPP_BROTLI_INCLUDE_DIR NAMES brotli/encode.h)
+        find_library(UVCPP_BROTLIENC_LIB NAMES brotlienc libbrotlienc brotlienc-static libbrotlienc-static)
+        find_library(UVCPP_BROTLIDEC_LIB NAMES brotlidec libbrotlidec brotlidec-static libbrotlidec-static)
+      endif()
+      # 后半个判据挡的是"同一棵树里上一轮发现过系统 brotli、cache 里还留着那几条
+      # 路径"的情形：那时 `find_path/find_library` 一次都没调用，三个变量却是有值的。
+      # 发布腿每次都是新树，撞不上；本机翻开关时会撞上。
+      if(NOT UVCPP_BROTLI_FROM_SOURCE AND UVCPP_BROTLI_INCLUDE_DIR AND UVCPP_BROTLIENC_LIB AND UVCPP_BROTLIDEC_LIB)
         set(UVCPP_BROTLI_LIBS ${UVCPP_BROTLIENC_LIB} ${UVCPP_BROTLIDEC_LIB})
         set(UVCPP_BROTLI_INCLUDE_DIRS ${UVCPP_BROTLI_INCLUDE_DIR})
         message(STATUS "Using system brotli (${UVCPP_BROTLIENC_LIB})")
@@ -462,6 +486,10 @@ if(UVCPP_BUILD_WEB)
         # 归档，`brotlicommon` 里的符号（`BrotliEnsureCapacity` 那一族）不会自己跟过来
         # —— 共享那条支路以前是"碰巧对"的（`.so` 自带 `NEEDED` 记着 brotlicommon）。
         set(UVCPP_BROTLI_LIBS brotlienc brotlidec brotlicommon)
+        # 这个变量问的是「**取过源码没有**」，不是「`UVCPP_BROTLI_FROM_SOURCE` 开着没有」
+        # —— 选项开着固然走到这里，选项关着而系统那份没找到时也走这里（下同）。
+        # 值一样，所以这里置普通变量去压同名的 cache 条目不会打架；下面链接段按它
+        # 选 `$<TARGET_FILE:...>`（路径形式，不带使用要求）。
         set(UVCPP_BROTLI_FROM_SOURCE TRUE)
         # include 目录**必须显式给**：下面链接用的是 `$<TARGET_FILE:...>`（求值成
         # 路径字符串，理由见 install(EXPORT) 那段的长注释），它**不带使用要求** ——
