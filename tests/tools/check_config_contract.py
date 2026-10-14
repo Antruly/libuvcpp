@@ -73,6 +73,11 @@ MACROS = [
     "UVCPP_WSDL_ENABLE",
     "UVCPP_YYJSON_ENABLE",
     "UVCPP_ZLIB_ENABLE",
+    "UVCPP_BROTLI_ENABLE",
+    # 派生值，`(0||1)` 这种形状而不是 0/1 —— 所以下面挑反例注入值时它自动落选
+    # （那一句只挑取值恰为 "0"/"1" 的宏）。它的两位真相源是生成头与导出集，
+    # 判据 ③ 的取值比对照样覆盖它。
+    "UVCPP_HTTP_COMPRESS_ENABLE",
     "UVCPP_OPENSSL_ENABLE",
     "UVCPP_NGHTTP2_ENABLE",
     "UVCPP_QUIC_ENABLE",

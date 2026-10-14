@@ -67,6 +67,28 @@
 #  define UVCPP_ZLIB_ENABLE @UVCPP_ZLIB_ENABLE@
 #endif
 
+#if defined(UVCPP_BROTLI_ENABLE) && (UVCPP_BROTLI_ENABLE != @UVCPP_BROTLI_ENABLE@)
+#  error "UVCPP_BROTLI_ENABLE=@UVCPP_BROTLI_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_BROTLI_ENABLE
+#  define UVCPP_BROTLI_ENABLE @UVCPP_BROTLI_ENABLE@
+#endif
+
+/* 1 if this build has an HTTP body compressor at all, i.e. if either encoder is
+   in — 它不是开关，是两个编码器开关的**或**（`UVCPP_HTTP_COMPRESS_ENABLE` =
+   `(UVCPP_ZLIB_ENABLE || UVCPP_BROTLI_ENABLE)`）。
+
+   `uvcpp_http_server` 那套（协商 → 变体缓存 → 响应头）与 `uvcpp_web_app`
+   那一条转发判的都是它。**用它而不是用 `UVCPP_ZLIB_ENABLE`**：这个值由构建
+   代进一个**字面量表达式**（`(0||1)` 这种），三处（本头、目录编译定义、目标
+   导出集）存的是同一个字符串 —— 各自算一位迟早会漂。 */
+#if defined(UVCPP_HTTP_COMPRESS_ENABLE) && (UVCPP_HTTP_COMPRESS_ENABLE != (@UVCPP_ZLIB_ENABLE@||@UVCPP_BROTLI_ENABLE@))
+#  error "UVCPP_HTTP_COMPRESS_ENABLE=(@UVCPP_ZLIB_ENABLE@||@UVCPP_BROTLI_ENABLE@) in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HTTP_COMPRESS_ENABLE
+#  define UVCPP_HTTP_COMPRESS_ENABLE (@UVCPP_ZLIB_ENABLE@||@UVCPP_BROTLI_ENABLE@)
+#endif
+
 #if defined(UVCPP_OPENSSL_ENABLE) && (UVCPP_OPENSSL_ENABLE != @UVCPP_OPENSSL_ENABLE@)
 #  error "UVCPP_OPENSSL_ENABLE=@UVCPP_OPENSSL_ENABLE@ in this build; remove your own definition of it"
 #endif

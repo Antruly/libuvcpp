@@ -567,12 +567,15 @@ class UVCPP_API uvcpp_http_server {
   bool has_raw_data_hook() const;
 
   // -------------------------------------------------------------------
-  // Compression (UVCPP_ZLIB_ENABLE=1 only)
+  // Compression (needs UVCPP_HTTP_COMPRESS_ENABLE=1)
   // -------------------------------------------------------------------
+  // 守卫用 `UVCPP_HTTP_COMPRESS_ENABLE`（= zlib 或 brotli 任一编进来了），
+  // **不是** `UVCPP_ZLIB_ENABLE`：这一整块（协商 → 变体缓存 → 响应头）与"用哪个
+  // 编码器"是两件事 —— `br` 进来之后，zlib 关着也照样能把压缩这条路走完。
 
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_HTTP_COMPRESS_ENABLE
   /** @brief Enable/disable automatic response body compression.
-   *         Default: enabled when UVCPP_ZLIB_ENABLE=1. */
+   *         Default: enabled when UVCPP_HTTP_COMPRESS_ENABLE=1. */
   void set_compression_enabled(bool enable);
   bool is_compression_enabled() const;
 
@@ -598,6 +601,13 @@ class UVCPP_API uvcpp_http_server {
    * 这既是它和那四个的又一处不同，也是"档位进键"能被独立观测到的前提 ——
    * 换档之后旧档位那条**仍然留在表里**（键不同），换回去还能拿回它自己的字节。
    * 取值由 `http_compress::clamp_compress_level()` 夹进合法区间，越界不报错。
+   *
+   * **只对 gzip / deflate 有效。** `br` 的档位是 brotli 质量，量纲与取值区间都
+   * 不同（`-1..9` 对 `0..11`），本类不为它开第二个旋钮：`br` 一律用
+   * `http_compress::k_brotli_quality_default`，理由（为什么是 5、为什么这个默认
+   * 值本身就是算出来的极大点）写在 `uvcpp_http_compress.h` 那段表里。
+   * 于是 `br` 变体的键里那个档位字符是个常量 —— 单射照样成立（见
+   * `compress_level_key_char`），只是换档位会把 `br` 那几条也一并作废、重压一遍。
    */
   void set_compress_level(int level);
   int compress_level() const;
@@ -1799,7 +1809,7 @@ class UVCPP_API uvcpp_http_server {
   void note_ctx_generation(uvcpp_tcp_client* client, uint64_t generation);
   void forget_ctx_generation(uvcpp_tcp_client* client);
 
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_HTTP_COMPRESS_ENABLE
   bool compress_enabled_ = true;
   size_t compress_min_body_ = 1024;
   /// 压缩档位，-1 = `Z_DEFAULT_COMPRESSION`（与

@@ -11,14 +11,14 @@
 `web/` 的两条线（`uvcpp_http_server` / `uvcpp_http_client`）各有一份接好的实现可以照抄，
 本页在 [§5](#5-服务端怎么回一条响应) 与 [§6](#6-客户端怎么发一条请求) 给了它们的调用序列。
 
-- 打开方式：`-DUVCPP_ENABLE_NGHTTP2=ON`。**默认 OFF**（`CMakeLists.txt:207-207`），
+- 打开方式：`-DUVCPP_ENABLE_NGHTTP2=ON`。**默认 OFF**（`CMakeLists.txt:208-208`），
   而且缺 OpenSSL 或缺 web 模块时会被**强制**置 OFF 并打 warning
-  （`CMakeLists.txt:431-431`、`CMakeLists.txt:440-440`）—— 因为 `uvcpp_h2_stream`
+  （`CMakeLists.txt:495-495`、`CMakeLists.txt:504-504`）—— 因为 `uvcpp_h2_stream`
   里直接放 `uvcpp_http_request` / `uvcpp_http_response`
   （`src/http2/uvcpp_h2_session.h:70`）。
 - 包含方式：`<http2/uvcpp_h2_session.h>`、`<http2/uvcpp_h2_connection.h>`、
   `<http2/uvcpp_h2_common.h>`。私有的 `<http2/uvcpp_h2_nghttp2.h>` **不安装**
-  （`CMakeLists.txt:2583-2583`）。
+  （`CMakeLists.txt:2738-2738`）。
 
 > 本页讲**怎么用**。它与 [HTTP/2 支持现状](./http2-status.md) 分工：那篇讲
 > **实现进度、写死的折衷、已知缺口**，本页不重复那些，需要时直接链过去。
@@ -72,12 +72,12 @@ int drain(std::string& out, size_t max_bytes = 0);                // src/http2/u
 ## 2. 编译期条件
 
 `UVCPP_NGHTTP2_ENABLE` **在任何构建里都有定义**，只是值不同：ON ⇒ `1`，OFF ⇒ `0`
-（`CMakeLists.txt:2030-2030`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
+（`CMakeLists.txt:2128-2128`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
 （`src/http2/uvcpp_h2_common.h:19`、`src/http2/uvcpp_h2_session.h:33`、`src/http2/uvcpp_h2_connection.h:27`）。
 
 为 0 时：头**还在**（源码树里能 include、也编得过），但里面**一个类型都不声明** ——
 写 `uvcpp_h2_session s(true);` 会"未定义类型"。安装出来的包里则**根本没有这几个头**
-（`CMakeLists.txt:2583-2583` 只在开关 ON 时装）。
+（`CMakeLists.txt:2738-2738` 只在开关 ON 时装）。
 
 所以使用者的写法是把自己的那段包起来：
 
@@ -219,14 +219,14 @@ TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字�
 那四个 `send_*` 是"`submit_*` + `flush()`"的合并 —— 忘了 `flush()` 就是
 "响应提交了但一个字节都没发"这种最难查的静默失败（`src/http2/uvcpp_h2_connection.h:74`）。
 
-库内那份接好的实现（`src/web/uvcpp_http_server.cpp:2833-2833` 起）的调用序列：
+库内那份接好的实现（`src/web/uvcpp_http_server.cpp:2869-2869` 起）的调用序列：
 
 1. 分流点判 ALPN，是 h2 就走另一条路（`src/web/uvcpp_http_server.cpp:996-996`）；
-2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:2833-2833`）；
-3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:2838-2838`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:2900-2900`）；
-4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:2907-2907`）；
-5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:2907-2907`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:2910-2910`）；
-6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:2991-2991` 起）。
+2. `new uvcpp_h2_connection(client, /*server_side=*/true)`（`src/web/uvcpp_http_server.cpp:2869-2869`）；
+3. 装 `uvcpp_h2_session::callbacks`（`src/web/uvcpp_http_server.cpp:2874-2874`）与 `uvcpp_h2_connection::callbacks`（`src/web/uvcpp_http_server.cpp:2936-2936`）；
+4. 挂框架自己的关闭回调 —— **最终 `delete` 在那里**（`src/web/uvcpp_http_server.cpp:2943-2943`）；
+5. `h2->start(h2c, cc)`（`src/web/uvcpp_http_server.cpp:2943-2943`）；失败就 `h2->close_now()`（`src/web/uvcpp_http_server.cpp:2946-2946`）；
+6. 业务处理完之后 `h2->send_response(stream_id, resp, omit_body)`（`src/web/uvcpp_http_server.cpp:3027-3027` 起）。
 
 一个能编的最小响应侧写法：
 
@@ -343,7 +343,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 `on_request_end` 的触发条件是**「这条流的 END_STREAM 到了」**，不是"有请求体才算"
 （`src/http2/uvcpp_h2_session.cpp:558-558`）。HEADERS 自带 END_STREAM 的请求（也就是
 绝大多数 GET）**也会触发**，而且是紧接着 `on_request` 同步来的 —— 库内自己就依赖
-这一点：`src/web/uvcpp_http_server.cpp:2860-2861` 明说那里**不能** `erase` 流状态，
+这一点：`src/web/uvcpp_http_server.cpp:2896-2897` 明说那里**不能** `erase` 流状态，
 无 body 的请求这两下是背靠背的，擦掉之后那条请求就没人派发了。
 
 **二、客户端交付响应只能放 `on_response_end`。** 带 body 的响应里 `on_response` 的
@@ -391,7 +391,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 | `:scheme` 与实际传输层一致 | TLS 只接受 `https`、明文只接受 `http`，不符即 RST（两个都收等于给混淆代理开门，RFC 9113 §8.1.1） | `src/http2/uvcpp_h2_session.cpp:384-387` |
 
 **没有闲置超时**（`src/http2/` 里 grep `idle|timeout|keepalive` 零命中）。
-`src/web/uvcpp_http_server.h:1360-1363` 提到的那个 idle sweep 属于 **webapp 层**
+`src/web/uvcpp_http_server.h:1370-1373` 提到的那个 idle sweep 属于 **webapp 层**
 （默认 60 s），既不是 h1 服务器自带的，也不覆盖 h2 连接。
 
 对端的观测口：`peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.h:438-438`）、

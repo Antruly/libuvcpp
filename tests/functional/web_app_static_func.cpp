@@ -63,7 +63,7 @@ using namespace uvcpp;
 // 但那时它是 `{anon}::uvcpp::http_compress`，与库对外导出的那个
 // `::uvcpp::http_compress` **不是同一个实体** —— 名字解析找得到它、链接期找的
 // 是另一个符号。症状是编译期一片“not declared”，而不是“找不到头文件”。
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_ZLIB_ENABLE || UVCPP_BROTLI_ENABLE
 #include <web/uvcpp_http_compress.h>
 #endif
 
@@ -1663,6 +1663,141 @@ void test_variant_byte_cap_on_evict() {
 }
 #endif  // UVCPP_ZLIB_ENABLE
 
+// ---- 6e. brotli 变体也进同一张表（`UVCPP_BROTLI_ENABLE=1` 才有） ----
+//
+// 这一节**不在** `UVCPP_ZLIB_ENABLE` 下（上面那一大段压缩用例都在），因为
+// "只编 brotli 的构建"正是 `UVCPP_HTTP_COMPRESS_ENABLE` 这个派生宏存在的理由，
+// 挂在 zlib 下面它就永远量不到那种配置。
+//
+// 判据的着力点是**键里的编码字符**（`compress_method_key_char`）：
+//
+//   ① 前置：`Accept-Encoding: br` 真的被压了（`content-encoding: br`，且长度
+//      小于原文）—— 少了它，下面"两次字节相同"会退化成"两次都没压"而假绿。
+//   ② 命中/未命中：两次 br 请求必须是**一次存、一次命中**（只读计数器）。
+//   ③ **编码进键**：紧接着发一次 `Accept-Encoding: gzip`，必须是一次新的
+//      miss+store（`entries` 涨到 2），而且两次的**体不同**。
+//      把编码字符从键里去掉，第 3 次请求就会命中 br 那条：响应头写着
+//      `content-encoding: gzip`、体却是 brotli 字节 —— 客户端解出来是垃圾，
+//      而 `content-length` 与实际体自洽、每一层看着都对。这条用例是唯一能
+//      在本地把它钉红的东西。
+//   ④ br 的字节数必须**少于**同一份文件的 gzip 变体 —— 那正是这一整条改动
+//      的判据（`json-comp` 按字节平方计价，rps 反而是降的，如实写在这里）。
+//
+// 这一节里凡是需要**第二个编码器**才能成立的部分（③ 与 ④ 的对比项）挂在
+// `UVCPP_ZLIB_ENABLE` 下；只编 brotli 的构建（cfg-01）里它们换成另一条断言：
+// 客户端要 gzip 而我们编不出来时，必须**原样发原文**，不许拿 br 的字节冒充。
+#if UVCPP_BROTLI_ENABLE
+void test_compress_variant_brotli() {
+  std::cout << "[static] brotli 变体缓存" << std::endl;
+
+  const std::string r(k_root);
+  // 语料：一份高重复度的文本（JSON 那类），br 对它明显优于 gzip。
+  std::string payload;
+  for (int i = 0; payload.size() < 32768; ++i) {
+    payload += "{\"id\":" + std::to_string(i) +
+               ",\"name\":\"widget\",\"category\":\"tools\","
+               "\"price\":\"12.34\",\"quantity\":7,\"active\":true}\n";
+  }
+  check(write_file(r + "/vcv_br.txt", payload), "前置：写入 vcv_br.txt");
+
+  uvcpp_web_app app;
+  app.set_port(0);
+  app.set_log_level(log_level::WARN);
+  uvcpp_web_static_options nolru;
+  nolru.cache_max_entries = 0;  // 关掉静态层 LRU：量到的命中只可能来自变体表
+  app.serve_static("/vcb", k_root, nolru);
+
+  if (app.start_background() != 0) {
+    check(false, "brotli 变体：服务启动失败");
+    return;
+  }
+  const int port = app.bound_port();
+  check(port > 0, "brotli 变体：端口有效");
+
+  const auto fetch = [port](const char* accept) {
+    const raw_result rr = raw_exchange(
+        port,
+        std::string("GET /vcb/vcv_br.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    "Connection: close\r\nAccept-Encoding: ") +
+            accept + "\r\n\r\n",
+        3000);
+    return rr.ok ? rr.raw : std::string();
+  };
+
+  const std::string b1 = fetch("br");
+  const std::string b2 = fetch("br");
+  const std::string g1 = fetch("gzip");
+
+  app.stop();
+  app.join();
+
+  // 计数只能在 App 停干净之后读（表是 `std::map`，并发读不安全）。
+  const uvcpp_http_server::compress_variant_stat s =
+      app.http_server()->compress_variant_stats();
+  std::cout << "[static] brotli 变体: hits=" << s.hits << " misses=" << s.misses
+            << " stored=" << s.stored << " entries=" << s.entries
+            << " bytes=" << s.bytes << std::endl;
+
+  check(!b1.empty() && !b2.empty() && !g1.empty(), "brotli 变体：三条请求都要有响应");
+
+  // ① 前置：真的走了 brotli
+  check_eq(raw_header(b1, "content-encoding"), "br",
+           "前置：Accept-Encoding: br 时必须是 content-encoding: br");
+  check_ne(raw_header(b1, "content-length"), std::to_string(payload.size()),
+           "前置：br 变体的 Content-Length 必须不等于原文长度（否则根本没压）");
+  check_eq_i(static_cast<long long>(raw_body(b1).size()),
+             std::stoll(raw_header(b1, "content-length")),
+             "前置：报的长度必须真的读得满");
+  check(static_cast<size_t>(std::stoll(raw_header(b1, "content-length"))) <
+            payload.size(),
+        "前置：br 变体必须比原文小");
+  check_eq(raw_header(b2, "content-encoding"), "br",
+           "第二次的 Content-Encoding 与第一次相同");
+  check(raw_body(b1) == raw_body(b2), "第二次的字节与第一次逐字相同");
+
+  // ② 一次存、一次命中。第三条请求（`Accept-Encoding: gzip`）能不能**存下**
+  //    一条变体，取决于这一份构建里有没有 zlib 编码器 —— 计数按它算，不写死 2。
+  const int n_enc = UVCPP_ZLIB_ENABLE ? 2 : 1;
+  check_eq_i(static_cast<long long>(s.hits), 1, "br：应当恰好一次命中");
+  check_eq_i(static_cast<long long>(s.stored), n_enc,
+             "br：存入的变体数 == 本构建可用的编码器数");
+  check_eq_i(static_cast<long long>(s.misses), n_enc, "br：未命中数 == 存入数");
+
+  // ③ 编码进键：gzip 那条必须与 br 那条**不是同一个变体**（需要两个编码器）
+  const long long br_n = std::stoll(raw_header(b1, "content-length"));
+#if UVCPP_ZLIB_ENABLE
+  check_eq_i(static_cast<long long>(s.entries), 2,
+             "编码进键：br 与 gzip 必须是表里两条（编码字符没进键就只会有 1 条）");
+  check_eq(raw_header(g1, "content-encoding"), "gzip",
+           "Accept-Encoding: gzip 时必须是 content-encoding: gzip");
+  check(raw_body(g1) != raw_body(b1),
+        "编码串味：br 那条变体的字节被当成 gzip 发出来了");
+
+  // ④ 这一整条改动的判据：br 比 gzip 小多少（字节数，不是 rps）
+  const long long gz_n = std::stoll(raw_header(g1, "content-length"));
+  std::cout << "[static] brotli vs gzip 线上字节: br=" << br_n << " gzip=" << gz_n
+            << std::endl;
+  check(br_n < gz_n, "br 变体必须比同一份文件的 gzip 变体小");
+
+  // 表内字节总量 = 两条变体之和（求和写坏 / 度量错对象会红）
+  check_eq_i(static_cast<long long>(s.bytes), br_n + gz_n,
+             "表内字节数 == br 与 gzip 两条变体长度之和");
+#else
+  // 只编 brotli：客户端指名要 gzip，我们编不出来 —— 这时**必须原样发原文**。
+  // 拿 br 的字节冒充 gzip（头写着 gzip、体是 br）在这里会红。
+  check_eq(raw_body(g1), payload,
+           "编不出客户端要的编码时必须发原文，不能拿别的编码冒充");
+  check_eq_i(static_cast<long long>(std::stoll(raw_header(g1, "content-length"))),
+             static_cast<long long>(payload.size()),
+             "编不出编码时的 Content-Length 必须是原文长度");
+  check_eq_i(static_cast<long long>(s.entries), 1,
+             "只编 brotli 时表里只该有 br 这一条");
+  check_eq_i(static_cast<long long>(s.bytes), br_n,
+             "表内字节数 == br 那一条的长度");
+#endif
+}
+#endif  // UVCPP_BROTLI_ENABLE
+
 // ---- 7. 尺寸闸门 ----
 
 void test_size_gate() {
@@ -2668,6 +2803,13 @@ int main() {
   test_variant_byte_account_on_evict();
   test_variant_byte_cap_on_evict();
 #endif  // UVCPP_ZLIB_ENABLE
+
+  // brotli 那条**不在**上面那个 `#if` 里：它有自己的守卫（定义那边也是），
+  // 而它存在的理由恰恰是"只编 brotli 的构建"（`UVCPP_HTTP_COMPRESS_ENABLE` =
+  // zlib 或 brotli）。放进 zlib 的 `#if` 里，那条配置下它一次都跑不到。
+#if UVCPP_BROTLI_ENABLE
+  test_compress_variant_brotli();
+#endif
 
   cleanup_root();
 

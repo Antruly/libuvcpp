@@ -72,7 +72,7 @@
 **这七个头里没有一个用 `UVCPP_WEBAPP_ENABLE` 守卫自己。** 21 个 webapp 头
 里只有 `src/webapp/uvcpp_web_ws_client.h:52` 一处（`#endif` 在 `:402`）用了这个宏。
 所以"没开 webapp 却 include 了这七个头"是**链接期失败**（那几个 `.cpp` 没进构建，
-`CMakeLists.txt:1687-1688`），不是编译期被 `#if` 挡住。这与 `uvcpp_web_ws_client.h`
+`CMakeLists.txt:1780-1781`），不是编译期被 `#if` 挡住。这与 `uvcpp_web_ws_client.h`
 的做法不一致 —— 看上去是历史的，不是设计。
 
 头在包里的位置是平铺的 `include/webapp/`：
@@ -123,7 +123,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 **一个连接有 `add()` 过的 id 就直接用它，别拿 `uvcpp_tcp_client*` 当身份。**
 按代次核对那套（`src/web/uvcpp_static_server.cpp:739-742` —— 静态器 1.6.8 起拿的是
 `req.reply` 凭据，`reply_alive()` 底下比的还是 `connection_generation()`，
-见 `src/web/uvcpp_http_server.h:837-837`）和新这套（`uvcpp_web_app` 内部的
+见 `src/web/uvcpp_http_server.h:847-847`）和新这套（`uvcpp_web_app` 内部的
 `registry_`）都是"单调递增永不复用"，**但两者不通用**，别互相替换。
 第三套是裸 `uvcpp_tcp_client*` —— 前两套的存在就是为了不用它。
 

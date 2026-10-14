@@ -1898,7 +1898,10 @@ int uvcpp_http_server::send_trailers(uvcpp_tcp_client* client, int32_t stream_id
 
 // 压缩变体表的总字节上限。#11 第 3 条量出来的是"重复 deflate"这一项，
 // 而 deflate 的产物通常比原文小，所以按**压缩后**字节记账真正占的内存只会更少。
-#if UVCPP_ZLIB_ENABLE
+// 这一整块（变体缓存的上下界、淘汰、记账）与 `apply_compression_for` 收在
+// `UVCPP_HTTP_COMPRESS_ENABLE` 下 —— **不是** `UVCPP_ZLIB_ENABLE`：缓存存的是
+// "某个编码 + 某个档位 + 某个 tag 压出来的字节"，而编码现在有两个来源。
+#if UVCPP_HTTP_COMPRESS_ENABLE
 static constexpr size_t kCompressVariantMaxBytes = 32u * 1024u * 1024u;
 
 // 单条上限。没有它，一个大文件（静态路径可以到 MiB 级）的变体进来就能把整张表
@@ -1924,6 +1927,40 @@ static constexpr size_t kCompressVariantMaxEntries = 1024;
 // 不会与 5 撞，但那是运气不是设计 —— 夹紧在入口那一次做完。
 static char compress_level_key_char(int level) {
   return level < 0 ? '#' : static_cast<char>('0' + level);
+}
+
+// 编码字符。**必须与 `http_pick_precompressed_variants()`（`uvcpp_http_common.h`）
+// 的优先级同序**：那边 br > gzip > deflate 是"盘上有孪生文件时挑哪个"的次序，
+// 这边是"现场编出来的是哪个"的次序 —— 同一份请求里只有一个编码会被选中，但
+// 两处一旦不同序，同一次协商在两条路上会得到不同的答案（一条发 `.br`、一条
+// 现编 gzip），线上就是**同一份资源两种字节**。
+//
+// 字符本身只要求"三个编码互不相同、都不是 `'0'..'9'` 或 `'#'`"（否则会与紧随
+// 其后的档位字符粘成同一个键）：`'b'`/`'g'`/`'d'` 满足，且与文件后缀同名，
+// 排查报文时一眼能对上是哪一支。
+//
+// 兜底走 `'d'`：`best` 到不了这里 —— `parse_accept_encoding()` 只会返回这三种
+// 之一（`NONE` 在上面就 early-return 了），所以这个分支只为"以后又加了编码却
+// 忘了改这里"时**不产生重复字符**，宁可多打一次压缩。
+static char compress_method_key_char(http_compress_method m) {
+  switch (m) {
+    case http_compress_method::BROTLI:  return 'b';
+    case http_compress_method::GZIP:    return 'g';
+    case http_compress_method::DEFLATE: return 'd';
+    default:                            return 'd';
+  }
+}
+
+// `content-encoding` 头值，与上面那个字符一一对应（同一个 switch 的两半，
+// 分开写是因为一处要字符、一处要字符串；`http_compress_method_to_string()`
+// 不在公共头里，且这里的三个值就是 RFC 里那三个字面量）。
+static const char* compress_method_header_value(http_compress_method m) {
+  switch (m) {
+    case http_compress_method::BROTLI:  return "br";
+    case http_compress_method::GZIP:    return "gzip";
+    case http_compress_method::DEFLATE: return "deflate";
+    default:                            return "deflate";
+  }
 }
 
 size_t uvcpp_http_server::compress_variant_total_bytes_locked() const {
@@ -1953,11 +1990,11 @@ void uvcpp_http_server::compress_variant_evict_locked() {
     compress_variants_.erase(victim);
   }
 }
-#endif  // UVCPP_ZLIB_ENABLE
+#endif  // UVCPP_HTTP_COMPRESS_ENABLE
 
 uvcpp_http_server::compress_variant_stat
 uvcpp_http_server::compress_variant_stats() const {
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_HTTP_COMPRESS_ENABLE
   // 三条外层入口之一：这里独占地读四个计数 + 整张表（`entries` 与 `bytes` 都从表里
   // 算），读一半就有别的循环写进去的话，`entries`/`bytes` 会与计数对不上。
   std::lock_guard<std::mutex> lk(compress_mu_);
@@ -1969,9 +2006,9 @@ uvcpp_http_server::compress_variant_stats() const {
   s.bytes   = compress_variant_total_bytes_locked();
   return s;
 #else
-  // 头文件里明写了"zlib 关掉时返回全零、调用方不必跟着条件编译"，而成员本身
-  // 在 `#if` 里 —— 少了这条分支，zlib 一关整个文件就编不过。本机默认树恰好是
-  // 开的（CMakeLists 默认 OFF，webapp 树一律 ON），所以只在别的树/CI 上看得见。
+  // 头文件里明写了"压缩器关掉时返回全零、调用方不必跟着条件编译"，而成员本身
+  // 在 `#if` 里 —— 少了这条分支，两个编码器都关掉时整个文件就编不过。本机默认树
+  // 恰好是开的（CMakeLists 默认 OFF，webapp 树一律 ON），所以只在别的树/CI 上看得见。
   return compress_variant_stat();
 #endif
 }
@@ -1986,7 +2023,7 @@ bool uvcpp_http_server::apply_compression(conn_ctx& ctx,
 
 bool uvcpp_http_server::apply_compression_for(
     const std::string& accept_encoding, uvcpp_http_response& resp) {
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_HTTP_COMPRESS_ENABLE
   if (!compress_enabled_) return false;
 
   // 流式响应（`transfer-encoding` 已经在头部里声明了）**不压缩**：body 还不
@@ -2081,15 +2118,14 @@ bool uvcpp_http_server::apply_compression_for(
                          resp.body.size() <= kCompressVariantMaxEntry;
   const int level = compress_level();
   const std::string vkey =
-      cacheable ? std::string(1, best == http_compress_method::GZIP ? 'g' : 'd') +
+      cacheable ? std::string(1, compress_method_key_char(best)) +
                       compress_level_key_char(level) + resp.cache_tag
                 : std::string();
 
   // 头这三件事命中与未命中都要做，且**必须逐字一样** —— 命中路径与现算是同一个
   // 响应形状，差别只在字节从哪来。
   const auto finish_headers = [&resp, best]() {
-    resp.set_header("content-encoding",
-                    best == http_compress_method::GZIP ? "gzip" : "deflate");
+    resp.set_header("content-encoding", compress_method_header_value(best));
     // Remove any stale Content-Length — to_string() re-adds it from the new
     // (compressed) body size.
     resp.remove_header("content-length");
@@ -3372,7 +3408,7 @@ int uvcpp_http_server::get_status() const { return status_; }
 bool uvcpp_http_server::has_status(int flags) const { return (status_ & flags) == flags; }
 uvcpp_tcp_server* uvcpp_http_server::get_tcp_server() { return tcp_server_; }
 
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_HTTP_COMPRESS_ENABLE
 void uvcpp_http_server::set_compression_enabled(bool enable) {
   compress_enabled_ = enable;
 }

@@ -1525,6 +1525,91 @@ taskset -c 8-15 h2load -i static-h2-uris.txt -H 'Accept-Encoding: br;q=1, gzip;q
 量具脚本在仓外（`/tmp/wl/ab503.sh`），**不随仓库发布**；这一节记的是读数与口径。
 
 
+### 4.16 第三个编码器（`br`）：它换的是线上字节，而"换得值不值"取决于有没有 `cache_tag`（**第十一套装置**，仓内微基准 + 自建服务的交替 A/B）
+
+这一节记的是 `1.6.48-dev` 那条可选开关 `UVCPP_ENABLE_BROTLI`（**默认关**）。
+放在这一页是为了把口径钉死：**它不是一条提速改动**，判据是"① 线上字节更少、
+② 解压回来逐字节相同"，而它到底值不值，要拿平台 `json-comp` 的计价公式算。
+
+#### 机制：两条编码走的是同一条命中路径，编码名只在键里
+
+`uvcpp_http_server::apply_compression_for()` 的变体缓存键是
+`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2119-2122`）。
+命中时只做一次 `std::map` 查找 + 一次 `shared_ptr` 递句柄 —— **gzip 与 `br` 是
+同一条路径**。所以"开 `br`"在此处的代价是**每个 tag 一次**，不是每请求一次；
+反过来说，响应没有 `cache_tag` 时它每请求重压，而 `br` 的编码比 deflate 贵得多。
+
+#### 读数一：线上字节（三份真实语料，同一份 `libuvcpp_a.a`）
+
+语料是平台 `json-comp` 那条 round-robin 的三个真实响应体，与条目
+`build_json()` 的产物逐字节相同：
+
+| 形状 | 原文 | gzip L6 | deflate L6 | **br q5** | br q0（缺陷档） |
+|---|---:|---:|---:|---:|---:|
+| `/json/25?m=4` | 4 190 B | 961 B | 949 B | **847 B**（−11.9 %） | 1 202 B（+25.1 %） |
+| `/json/40?m=8` | 6 707 B | 1 313 B | 1 301 B | **1 168 B**（−11.0 %） | 1 685 B（+28.3 %） |
+| `/json/50?m=6` | 8 397 B | 1 546 B | 1 534 B | **1 370 B**（−11.4 %） | 2 007 B（+29.8 %） |
+
+百分比相对 gzip L6。q0 那一列是**缺陷**不是选项：服务器把 `compress_level()`
+（默认 `-1`）原样喂给四参数那份 `compress()`，而 `clamp_brotli_quality(-1)` 当时
+收成的是 `k_brotli_quality_min` = 0（"最快档"）而不是默认档 5 —— 也就是说"开 `br`"
+会真的把响应**压大** 25~30 %。修法是一行哨兵（负数 = 该 method 自己的默认档），
+用例里用一段**不对称**断言钉住：默认档那份必须与显式 q5 逐字节相同，**且 q0 必须
+严格更大**。
+
+#### 读数二：每请求代价，以及 `cache_tag` 开关把它乘到哪儿去
+
+微基准（`-O2`、预热 20 次后取 4 000 次平均、`taskset -c 2`，同一进程内交替压
+同一份 `8 397 B`）：gzip L6 **39.9 µs**、`br` q5 **144.7 µs**（**3.6×**，
+`/json/40` 那份是 30.0 → 121.8）。
+
+自建服务的交替 A/B（`uvcpp_web_app` 起在 ext4 语料上、64 条 h1 连接、
+每臂 5 轮 × 200 000 次、`taskset -c 0-3`、三个 round-robin URI 轮转，
+服务端是**同一份二进制**，只差客户端报不报 `br` 与 `/json` 填不填 `cache_tag`）：
+
+| `/json` 填 `cache_tag` | `Accept-Encoding` | µs/请求（5 轮中位） | 线上字节/请求 |
+|---|---|---:|---:|
+| 是 | `gzip` | 8.85 | 1 498.9 B |
+| 是 | `gzip, br` | **8.55** | **1 350.9 B**（×0.901） |
+| 否 | `gzip` | 51.60 | 1 498.9 B |
+| 否 | `gzip, br` | **88.60**（×1.72） | 1 350.9 B（×0.901） |
+
+两件事一起读：
+
+- **填了 `cache_tag`**：`br` 与 gzip 的差（8.55 vs 8.85 µs）落在轮次之间的散布里 ——
+  命中路径上它不比 gzip 贵，而字节少 9.9 %。按平台
+  `eff = rps × (min_bpr / bpr)²` 算，字节那一项是 **×1.23**。
+- **没填 `cache_tag`**（也就是**今天条目的形状**：`handle_json()` 不填）：3.6× 的
+  编码代价直接落到 rps 上，`eff` 变成 `0.58 × 1.23` = **0.72**，**倒扣 28 %**。
+
+所以这一条不默认开、而且**库侧只落一半**：`br` 是库的能力，要不要在某个条目上开
+属于那个条目的判断，前提是它先把响应体的指纹写进 `cache_tag`。
+
+#### 复现
+
+```bash
+# 判据一：仓内，两条命令（新断言都在这个 ctest 名里）
+build-all/tests/functional/test_web_http_client_func     # compress_brotli / accept_encoding_no_zlib / …
+build-all/tests/functional/test_web_app_static_func      # 静态腿那张表里的 br 变体
+# 四个构建格（默认关的那两格必须逐字不变）
+cmake -B /tmp/cfg-00 -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON
+cmake -B /tmp/cfg-01 -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+      -DUVCPP_ENABLE_ZLIB=OFF -DUVCPP_ENABLE_BROTLI=ON
+cmake -B /tmp/cfg-10 -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_ZLIB=ON
+cmake -B /tmp/cfg-11 -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+      -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_BROTLI=ON
+
+# 判据二：仓外那条交替 A/B —— 它自己起停服务，客户端只换报不报 br
+# （64 条 h1 连接、每臂 20 万次、三个 round-robin URI 轮转；
+#   服务端用 CACHE_TAG=0|1 选填不填 cache_tag）
+taskset -c 0-3 /tmp/brq/rig/run3.sh    # 逐臂读 /proc/<pid>/stat 的 utime+stime ÷ 2xx
+```
+
+字节/µs 那两张表的量具在仓外（`/tmp/brq/meas/m.cpp` 微基准、
+`/tmp/brq/rig/run3.sh` 交替 A/B 与读 `/proc/<pid>/stat` 的 `cpr.sh`），
+**不随仓库发布**；这一节记的是读数与口径。
+
+
 ## 5. 结果三：稳定性
 
 10 分钟持续压测（动态路由 + 连接 churn + WebSocket 混合）：

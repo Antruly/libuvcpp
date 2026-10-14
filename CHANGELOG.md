@@ -11,7 +11,7 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.6.47-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.6.48-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -303,7 +303,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2601-2601`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:2756-2756`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -640,7 +640,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1679-1681`、`CMakeLists.txt:2493-2498`）——
+  两处都摘掉**（`CMakeLists.txt:1772-1774`、`CMakeLists.txt:2648-2653`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -693,7 +693,7 @@
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
   `trailers()`（`src/webapp/uvcpp_web_response.h:512-516`），并在 `send_response()` 里加了
-  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2752-2801`）。
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2753-2802`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
   "另一条拿到同一份字节的路"。判据与量法见下一条
@@ -920,13 +920,13 @@
   （`src/web/uvcpp_http_server.cpp:1632-1632`），而 llhttp 的 flags 是**连接级**的、
   属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
   读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
-  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2689-2689` 打
+  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2690-2690` 打
   「连接 N 已断开，响应被丢弃」，客户端收到 1 条 + FIN）。**同步处理函数侥幸躲开**：
   它们的响应在解析器前进之前就序列化完了 —— 所以这条缺陷只在「流水线 + 异步响应」
   同时成立的形状里现形，而静态腿（响应要等池）正是这个形状。
 
   **改法**：webapp 在**发送前**把「**这一条**请求自己」的结论钉成显式 `connection`
-  头（`src/webapp/uvcpp_web_app.cpp:2696-2699`）。判据取每请求的那份副本 ——
+  头（`src/webapp/uvcpp_web_app.cpp:2697-2700`）。判据取每请求的那份副本 ——
   `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
   读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
   （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。
@@ -2187,6 +2187,122 @@
   **还没进 CI**：它要 `LD_PRELOAD` 加一个 `cc`，且只在 Linux 上有意义（非 Linux 与
   "这棵树没编 webapp" 都是退出码 3 = 没判，不是通过）。跑法与退出码见脚本头。
 
+- **brotli 编码器 + 变体协商（`UVCPP_ENABLE_BROTLI`，默认关）**（`1.6.48-dev`）——
+  压缩层此前只有 gzip 与 deflate（`zlib` 那一个后端，变体键只有 `'g'`/`'d'`）。
+  这一条补上第三个编码器与它的协商，**默认关**，关掉时逐字节不变（见下面"关掉时的
+  判据"）。它只可能影响 `json-comp` 那一档：三条静态腿发的是盘上的孪生文件
+  （`http_pick_precompressed_variants()`，与这个开关无关），另两档 json 不发
+  `Accept-Encoding`（已逐条核过），而 `json-comp` 的客户端**固定发**
+  `Accept-Encoding: gzip, br`。
+
+  **先修掉一个会让这一整条改动净亏的默认档缺陷**。服务器侧的
+  `apply_compression_for()` 把 `compress_level()`（默认值 `k_compress_level_default`
+  = -1）**原样**喂给四参数那份 `compress()` —— 它对 method 是无知的。负数在
+  deflate 侧的含义是"zlib 的默认档"（它本身就是 -1，退化成恒等），可到了 brotli 侧
+  `clamp_brotli_quality(-1)` 以前会收成 `k_brotli_quality_min` = **0**，也就是
+  "最快档"而不是默认档 5。于是"开 br"实际是"用 q0 编"，而 q0 **比 gzip 还大**：
+  平台那三个 round-robin 形状上实测 q0 比 gzip L6 大 25~30%（q5 则小 11%）。
+  `json-comp` 是**按字节平方计价**的（见下），开了 br 反而扣分。修法是一行哨兵：
+  负数一律 = "该 method 自己的默认档"。两个夹紧函数**仍然不能合并**成一把
+  `[a,b]` 尺子：上限 9 vs 11 会把 brotli 的 10 悄悄降成 9。
+
+  **判据（如实写成）**：`cache_tag` 落地之后 br **对 rps 没有贡献**，它换的是
+  **线上字节数**，所以判据只能是这两条 —— ① 线上字节更少；② 解压回来**逐字节相同**。
+  不是"提分"，更不是"更快"。
+
+  **① 线上字节**。语料就是平台那条 round-robin 的三个真实响应体（`data/dataset.json`
+  的前 25/40/50 项，`total = price × quantity × m`，与条目 `build_json()` 逐字节相同），
+  同一台机、同一份 `libuvcpp_a.a`：
+
+  | 形状 | 原文 | gzip L6 | deflate L6 | **br q5** | br q0（缺陷下的档） |
+  |---|---:|---:|---:|---:|---:|
+  | `/json/25?m=4` | 4 190 B | 961 B | 949 B | **847 B**（−11.9%） | 1 202 B（+25.1%） |
+  | `/json/40?m=8` | 6 707 B | 1 313 B | 1 301 B | **1 168 B**（−11.0%） | 1 685 B（+28.3%） |
+  | `/json/50?m=6` | 8 397 B | 1 546 B | 1 534 B | **1 370 B**（−11.4%） | 2 007 B（+29.8%） |
+
+  百分比那一列是相对 gzip L6。q5 与显式传 5 的那一份**逐字节相同**（用例里钉住）。
+  ② 三条的 `decompress()` 结果与原文逐字节相同。
+
+  **③ 代价（这才是这一条为什么不默认开）**。同一次量测的 µs/请求（`-O2`，
+  20 次预热后取 4 000 次平均，`taskset -c 2`）：`/json/50` 上 gzip L6 39.9 µs、
+  **br q5 144.7 µs（3.6×）**；`/json/40` 上是 30.0 → 121.8（4.1×）。按平台
+  `eff = rps × (min_bpr / bpr)²` 算，3.6× 的 CPU 换 11% 的字节是**净亏**
+  （0.28 × 1.23 = 0.34）。
+
+  **④ `cache_tag` 一开，上面那个代价就没了**。变体缓存的键是
+  `编码字符 + 档位字符 + cache_tag`（`1.6.33-dev` 那条），命中路径只有一次查表
+  加一次 `shared_ptr` 递句柄 —— **gzip 与 br 走的是同一条路径，编码只在键里**。
+  所以只要响应带 `cache_tag`，br 的压缩代价是**每个 tag 一次**而不是每请求一次。
+  本机 A/B（64 条 h1 连接、每臂 5 轮 × 200 000 次、`taskset -c 0-3`、三个
+  round-robin URI 轮转、服务端是同一份二进制，只差客户端报不报 `br` 与
+  `/json` 要不要填 `cache_tag`）：
+
+  | `/json` 填 `cache_tag` | `Accept-Encoding` | µs/请求（5 轮中位） | 线上字节/请求 |
+  |---|---|---:|---:|
+  | 是 | `gzip` | 8.85 | 1 498.9 B |
+  | 是 | `gzip, br` | **8.55** | **1 350.9 B**（×0.901） |
+  | 否 | `gzip` | 51.60 | 1 498.9 B |
+  | 否 | `gzip, br` | **88.60**（×1.72） | 1 350.9 B（×0.901） |
+
+  「否」那两行是**今天条目的形状**（`handle_json()` 不填 `cache_tag`）：每请求重压，
+  br 的 3.6× 直接落到 rps 上，`eff` 变成 0.58 × 1.23 = **0.72**，也就是**倒扣 28%**。
+  「是」那两行里 br 与 gzip 的差（8.55 vs 8.85）落在次间散布内 —— **它在命中路径上
+  不比 gzip 贵**，而字节少了 9.9%，`eff` 相对同一名次的对手是 **×1.23**。
+
+  所以这一条的结论写在这里，免得后面有人照着"br 更小"就去开：**编码器与协商是库的
+  能力（默认关）；把它在条目上打开必须同时给 `/json` 填 `resp.cache_tag`（库侧从
+  `1.6.31-dev` 起就有 `uvcpp_web_response::cache_tag()`），否则是净亏**。这两件事
+  分属库与条目，**本次只落库侧那一半**。
+
+  **合规性（一并记下，别当它不存在）**：条目 `meta.json` 的 `mode` 是 `standard`，
+  那个档的规则原文里有 "No pre-compressed caches"。`compress_variants_` 是**引擎
+  内建**的响应压缩中间件（规则要求的正是 "the framework or engine's built-in
+  response compression"），今天全仓只有静态腿在用它、且那条路上的字节**本来就来自
+  磁盘上预先压好的孪生文件**；把它用在 `/json` 上是**一次判断，不是一次实现** ——
+  这件事必须由条目的维护者去和平台确认，不能由库里这一条默默替他们决定。这也是
+  C15 只做库侧、不动条目的第二个理由。
+
+  **关掉时的判据（默认配置，逐条实测）**：① 五个构建格
+  （zlib×brotli 的 00/01/10/11 与"brotli 取自源码"那一格）里，**00 与 10** 的
+  用例集与产物与改动前逐字相同；② `UVCPP_HTTP_COMPRESS_ENABLE=(1||0)` 与
+  `(1||1)`/`(0||1)`/`(0||0)` 四种拼写都由
+  `tests/tools/check_config_contract.py` 的契约钉住（brotli 与 zlib 各写各的
+  `set(...)`，派生的那个宏才拼得对）；③ 公共头一个不改（`uvcpp_http_compress.h` 里
+  `BROTLI` 这个枚举值**无条件存在** —— `content-encoding: br` 在盘上孪生文件那条
+  路上一直发得出去，能不能**现场编**才由宏决定），`parse_accept_encoding()` 在
+  brotli 关着时不会返回它。
+
+  **判据是哪些用例**。`tests/functional/web_http_client_func.cpp`：`*` 的兜底序
+  变成 br > gzip > deflate（与静态腿选孪生的 `http_pick_precompressed_variants()`
+  同序），所以凡是靠 `*` 兜底的期望改成读四个按构建算出来的常量；新增
+  `test_accept_encoding_no_zlib()`（只编 brotli 时 gzip/deflate 问不出来、`*` 兜到
+  br、`*, br;q=0` 什么都不发）与 `test_accept_encoding_no_encoder()`
+  （一个编码器都没有时一律 NONE）；`clamp_brotli_quality(-1)` 改成断言
+  `k_brotli_quality_default`，并新增一段**不对称**的回归断言 —— 三参数那份、把
+  服务器默认档原样透传的那份，都必须与显式 q5 逐字节相同，**且 q0 必须严格更大**
+  （前两条恒等断言在"全都退化成同一个档"的实现上也会绿）。把那一行哨兵删掉，
+  `compress_brotli` 立刻变红。`tests/functional/web_app_static_func.cpp` 的
+  `test_compress_variant_brotli()` 里，凡是需要**第二个编码器**才成立的部分
+  （br 与 gzip 是表里两条、字节不同、`br_n < gz_n`）挂在 `UVCPP_ZLIB_ENABLE` 下；
+  只编 brotli 的那一格换成另一条断言：客户端指名要 gzip 而我们编不出来时**必须原样
+  发原文**，不许拿 br 的字节冒充（头写着 gzip、体是 br，每一层看着都对）。
+
+- **`UVCPP_ENABLE_BROTLI=ON` 且 brotli 取自源码时，`install(EXPORT)` 在 generate
+  阶段就失败**（`1.6.48-dev`）。取源码那条支路拿到的是本工程的**普通目标**
+  `brotlienc`/`brotlidec`，把它们按目标名写进 `target_link_libraries` （逐项包
+  `$<BUILD_INTERFACE:>` 也试过，不是分号展开成裸名的问题）会让
+  `install(TARGETS ... EXPORT uvcppTargets)` 报
+  `requires target "brotlienc" that is not in any export set`；换成
+  `$<TARGET_FILE:...>`（求值成一个**路径字符串**，不再记目标依赖）即过。系统那条
+  支路拿到的是 IMPORTED 目标 `PkgConfig::BROTLIENC/DEC`，导出集**不管 IMPORTED
+  目标**，所以一直是好的 —— 这条缺陷只在 macOS / Windows / 任何取源码的消费者那里
+  现形，而本仓在它之前**没有一格编过这条路**。代价是路径形式不替我们记构建顺序，
+  所以补了 `add_dependencies(${_tgt} brotlienc brotlidec)`。至于是导出集检查的哪一层
+  没把 `$<BUILD_INTERFACE:>` 剥干净，**没有追到底**（同一个形状在一个两目标的最小
+  复现里是被剥成 `$<LINK_ONLY:>` 的，与这里对不上）；CMakeLists 里只记下可复现的
+  那条分界，别把它当成解释。量法（把系统 brotli 藏起来，其余依赖用本地克隆喂进去，
+  免得配置期联网）写在那个分支的注释里。
+
 ### JSON
 
 - **第二个 JSON 解析后端：yyjson（可选，默认关）**（`1.6.34-dev`）。本仓的 JSON
@@ -2254,6 +2370,46 @@
 
 ### 配置、打包与 CI
 
+- **brotli 有了自己的 CI 腿：四格（Ubuntu 两格 / macOS / MSVC）**（`1.6.48-dev`）。
+  `UVCPP_ENABLE_BROTLI` **默认 OFF**，别的格一行 brotli 的代码都不编 —— 与 `wsdl`
+  和 `yyjson` 同一个形状的老问题：**一个默认关的模块，第一次被编到的地方不能是
+  使用者手上**。四格的形状：
+
+  | 格 | 平台 | `UVCPP_ENABLE_ZLIB` | `UVCPP_ENABLE_BROTLI` | brotli 从哪来 |
+  |---|---|---|---|---|
+  | `brotli` | ubuntu | ON | ON | 系统的（`libbrotli-dev`，pkg-config） |
+  | `brotli` | macOS | ON | ON | FetchContent（不装包） |
+  | `brotli` | MSVC | ON | ON | FetchContent（不装包） |
+  | `brotli-no-zlib` | ubuntu | **OFF** | ON | 系统的（`libbrotli-dev`） |
+
+  第四格不是凑数：库与用例里**有一整条分支只在"有 brotli、没有 zlib"时才编译**
+  （协商里 gzip/deflate 问不出来、`*` 兜到 br；静态腿那条把 `test_compress_variant_brotli`
+  的对比项换成"编不出客户端要的编码时必须原样发原文"）。没有这一格，那些断言
+  在 CI 里**一条都不会被编译**，而"没编译"与"编了且过"在 check 的颜色上长得
+  一模一样。`zlib-off` 那一格覆盖的是反方向（zlib 关、brotli 也关），两格合起来
+  才是四象限。
+
+  **门禁串**（写成四个 `gate_*` 字段，配置与测试两步各用一半）：`gate_switch` =
+  `UVCPP_ENABLE_BROTLI:BOOL=ON`（缓存里那个开关真的 ON）；`gate_integrated` =
+  `brotli enabled`（`CMakeLists.txt` 里那句**与发现路径无关**的消息 —— 系统与
+  FetchContent 两条支路的其它消息是**不同**的，拿它们当门禁串会在三格里红两格，
+  这一条写在 ci-guide.md §5）；`gate_module` =
+  `HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)`（派生的那个宏拼对了，
+  它才是"两个编码器都在库里"的见证；`web` 那一格是 `(1||0)`，所以这个串区分得开）；
+  `gate_test` = `test_web_http_client_func`（**必须是 ctest 的名字** —— 协商与
+  q5/q0 那几条断言是那个二进制里的子用例，`ctest -N` 里看不到 `test_compress_brotli`
+  这个名字）。
+
+  装包表只在 Ubuntu 那两格多一个 `libbrotli-dev`（就是 `pkg-config` 找的
+  `libbrotlienc` / `libbrotlidec` 那一对）；macOS 与 MSVC 那一格**一个新包都没有**
+  （brotli 走 FetchContent，`GIT_TAG` 钉在 `BROTLI_VERSION`），装包表与 `web`
+  逐字相同 —— 这样两边红绿不同只可能归因到那个开关。**而 macOS / MSVC 那两格正是
+  "brotli 取自源码"这条支路在 CI 里的唯一一次运行**，它此前在 generate 阶段就失败
+  （见上面「性能」那一节的第二条），本机是把系统 brotli 藏起来才量到的。
+
+  平台覆盖的口径：MinGW **没有**这一格（单 job，且它与 Ubuntu 同为 GCC +
+  libstdc++），记进 ci-guide.md §1 的"未覆盖的格"表。
+
 - **`yyjson` 有了一条自己的 CI 腿：三格（Ubuntu / macOS / MSVC）**（`1.6.35-dev`）。
   `src/yyjson/` 上个提交刚进来时，CI 里**没有任何一条腿**开 `UVCPP_ENABLE_YYJSON` ——
   于是那个模块里最重的两条判据（「25 行输入表逐条先与手写期望值比、再与 nlohmann
@@ -2269,7 +2425,7 @@
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1513`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1577`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是

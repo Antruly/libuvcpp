@@ -104,7 +104,7 @@ jobs:
           # 模块关掉时它们被 `tests/functional/CMakeLists.txt` 的 glob+FILTER 摘掉，
           # 而 ctest 报 "100% tests passed" 时并不会说"少了几条"。
           #
-          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1453`），
+          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1517`），
           # 装包表与 `web` 那一格逐字相同 —— 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
           - feature: wsdl
@@ -139,7 +139,7 @@ jobs:
           # nlohmann 那侧照编照跑（`web_app_request_func` 里深度预扫描的五条断言
           # 也在），yyjson 那侧的新用例才拿得到对照物。
           #
-          # **不需要任何新包**：yyjson 走 FetchContent（`CMakeLists.txt:1513`，
+          # **不需要任何新包**：yyjson 走 FetchContent（`CMakeLists.txt:1577`，
           # `GIT_TAG` 钉在 `YYJSON_VERSION`），装包表与 `web` 那一格逐字相同 ——
           # 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -156,6 +156,62 @@ jobs:
             gate_integrated: yyjson integrated
             gate_module: Including yyjson module in build
             gate_test: test_yyjson_doc_func
+
+          # brotli：与 `web` 的 `flags` **逐字相同**，只多一个
+          # `-DUVCPP_ENABLE_BROTLI=ON` —— 与 `wsdl` / `yyjson` 是同一个形状。
+          #
+          # 这一格存在的理由与那两条同源：`UVCPP_ENABLE_BROTLI` **默认 OFF**，
+          # 别的格一行 brotli 的代码都不编。少了它，「线上字节比 gzip 小」与
+          # 「解压回来逐字节相同」那几条断言在 CI 里一条都不会被编译。
+          #
+          # 这一条腿走的是**系统 brotli**（`libbrotli-dev` → pkg-config 的
+          # `PkgConfig::BROTLIENC/DEC`）；macOS / MSVC 那两格走 FetchContent。
+          # 两条支路印出来的消息**不一样**，所以第二条门禁串取的是那句与路径无关的
+          # `brotli enabled`（详见 doc/ci-guide.md §5）。
+          #
+          # 第三条门禁串盯的是派生的那个宏：`UVCPP_HTTP_COMPRESS_ENABLE` 由
+          # zlib 与 brotli 两个开关**拼**出来，`(1||1)` 才是"两个编码器都在库里"
+          # 的见证（`web` 那一格是 `(1||0)`，`zlib-off` 是 `(0||0)`）。
+          # 第四条是 ctest 的**用例名**，不是二进制里的子用例名：协商与 q5/q0
+          # 那几条断言长在 `test_web_http_client_func` 里，`ctest -N` 只会打印
+          # 后者。
+          # 四个门禁串见 doc/ci-guide.md §5。
+          - feature: brotli
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_BROTLI=ON
+            gate_name: brotli
+            gate_switch: 'UVCPP_ENABLE_BROTLI:BOOL=ON'
+            gate_integrated: brotli enabled
+            gate_module: 'HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)'
+            gate_test: test_web_http_client_func
+
+          # brotli-no-zlib：四象限里剩下的那一格（zlib OFF + brotli ON）。
+          # `zlib-off` 覆盖的是它的对角（两个都关），而**这一格**才编得到那整条
+          # "有 brotli、没有 zlib"的分支：
+          #   `test_accept_encoding_no_zlib()`（gzip/deflate 问不出来、`*` 兜到 br、
+          #   `*, br;q=0` 什么都不发 —— 头文件承诺的是"只返回这一份构建编得出来的
+          #   编码"），以及 `test_compress_variant_brotli()` 里 `#else` 那半边
+          #   （客户端指名要 gzip 而我们编不出来时必须**原样发原文**，不许拿 br
+          #   的字节冒充）。少了这一格，那些断言在 CI 里一条都不会被编译。
+          # 第三个门禁串因此是 `(0||1)` —— 它同时钉住了"派生宏真的按两个开关拼"。
+          - feature: brotli-no-zlib
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=OFF
+              - -DUVCPP_ENABLE_BROTLI=ON
+            gate_name: brotli
+            gate_switch: 'UVCPP_ENABLE_BROTLI:BOOL=ON'
+            gate_integrated: brotli enabled
+            gate_module: 'HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(0||1)'
+            gate_test: test_web_http_client_func
 
           - feature: ssl
             flags:
@@ -415,6 +471,17 @@ jobs:
             # （`GIT_TAG` 钉在 `YYJSON_VERSION`），**不发包管理器**，所以这里一个新
             # 包都没有。
             yyjson)                    pkgs="libuv1-dev zlib1g-dev ninja-build" ;;
+            # brotli：与 `web` **逐字相同**，只多一个 `libbrotli-dev` —— 这一格走
+            # pkg-config 那条支路（`pkg_check_modules(libbrotlienc/libbrotlidec)`），
+            # 而 macOS / MSVC 那两格走 FetchContent。装的是 `.pc` 与那两个 `.so`
+            # 都有的那个包名（不是 `libbrotli-dev` 之外的东西）。
+            brotli)                    pkgs="libuv1-dev zlib1g-dev libbrotli-dev ninja-build" ;;
+            # brotli-no-zlib：**故意不装 zlib1g-dev**（与 `zlib-off` 那条反过来：
+            # 那一条故意装得和 `web` 一样）。这一格量的是"没有 zlib 编码器"时
+            # 协商与静态腿的分支，装了 zlib 反而会让 `find_package(ZLIB)` 悄悄
+            # 成功、把那一格变成一次假覆盖。`UVCPP_ENABLE_ZLIB=OFF` 时
+            # `find_package(ZLIB)` 压根不会被调用，所以这里不装是自洽的。
+            brotli-no-zlib)            pkgs="libuv1-dev libbrotli-dev ninja-build" ;;
             ssl|h2)                    pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             full)                      pkgs="libuv1-dev libssl-dev zlib1g-dev ninja-build" ;;
             quic)                      pkgs="libuv1-dev zlib1g-dev" ;;

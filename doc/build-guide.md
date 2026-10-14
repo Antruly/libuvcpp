@@ -70,6 +70,7 @@ cause — see [`RELEASE.md`](../RELEASE.md).
 | `UVCPP_USE_SYSTEM_LIBUV` | `ON` | — | — |
 | `UVCPP_BUILD_LIBUV_FROM_SOURCE` | `OFF` | network (or `_local_deps/`) | — |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | zlib | — |
+| `UVCPP_ENABLE_BROTLI` | `OFF` | brotli (`libbrotlienc` + `libbrotlidec`), or network for the `FetchContent` fallback | — (it fetches instead of switching off) |
 | `UVCPP_ENABLE_OPENSSL` | `OFF` | OpenSSL | — |
 | `UVCPP_ENABLE_NGHTTP2` | `OFF` | nghttp2 + OpenSSL + web | OpenSSL off, or web off |
 | `UVCPP_ENABLE_QUIC` | `OFF` | ngtcp2 + OpenSSL ≥ 3.2 **with the QUIC API** + net | OpenSSL off, net off, or OpenSSL without the QUIC API |

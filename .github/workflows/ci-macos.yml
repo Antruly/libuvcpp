@@ -60,7 +60,7 @@ jobs:
           # 与 wsdl 不同：macOS **没有** wsdl 格（§1 的"未覆盖的格"表里那一行写的
           # 是"不发版、风险低"），而 yyjson 这一格加得起 —— 它不需要任何新包。
           #
-          # yyjson 走 FetchContent（根 `CMakeLists.txt:1513`，`GIT_TAG` 钉在
+          # yyjson 走 FetchContent（根 `CMakeLists.txt:1577`，`GIT_TAG` 钉在
           # `YYJSON_VERSION`），**不需要新包**；装包表与 `web` 逐字相同 —— 这样两边
           # 红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -77,6 +77,31 @@ jobs:
             gate_integrated: yyjson integrated
             gate_module: Including yyjson module in build
             gate_test: test_yyjson_doc_func
+
+          # brotli：与 `web` 的 `flags` **逐字相同**，只多一个
+          # `-DUVCPP_ENABLE_BROTLI=ON`。`UVCPP_ENABLE_BROTLI` 默认 OFF，
+          # 别的格一行 brotli 的代码都不编。
+          #
+          # **这一格与 Ubuntu 那一格的差别是"brotli 从哪来"**：macOS 上不装
+          # `brotli` 这个 Homebrew 包（装了会走 pkg-config / find_library 那条，
+          # 就量不到取源码那条支路了），于是它落进 FetchContent —— 而取源码那条
+          # 支路此前在 generate 阶段就因 `install(EXPORT uvcppTargets)` 失败
+          # （见 CHANGELOG「性能」那一节的第二条）。这一格是它在 CI 里的唯一一次
+          # 运行，也是**唯一用 libc++ 编它**的一次。
+          # 四个门禁串见 doc/ci-guide.md §5。
+          - feature: brotli
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_BROTLI=ON
+            gate_name: brotli
+            gate_switch: 'UVCPP_ENABLE_BROTLI:BOOL=ON'
+            gate_integrated: brotli enabled
+            gate_module: 'HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)'
+            gate_test: test_web_http_client_func
 
           - feature: ssl
             flags:
@@ -261,7 +286,10 @@ jobs:
             basic-static|basic-shared|db) brew install libuv ninja ;;
             # yyjson 与 `web` 同一份：yyjson 走 FetchContent（见矩阵里那一格的注释），
             # 不是 Homebrew 的包 —— 装成一样，两边红绿不同就只归因到那个 `-D`。
-            web|capi|yyjson)           brew install libuv zlib ninja ;;
+            # brotli 也与 `web` 同一份：这一格**故意不装** Homebrew 的 `brotli`
+            # 包 —— 装了就走系统那条支路，而这一格要量的正是取源码那条
+            # （FetchContent，见矩阵里那一格的注释）。
+            web|capi|yyjson|brotli)    brew install libuv zlib ninja ;;
             ssl|h2|full)               brew install libuv openssl zlib ninja ;;
             quic|http3)                brew install libuv zlib ninja openssl@3 ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;

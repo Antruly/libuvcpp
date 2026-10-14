@@ -231,6 +231,41 @@ static bool test_compress_large_roundtrip() {
 // =========================================================================
 // Test 8: Accept-Encoding parsing
 // =========================================================================
+//
+// `parse_accept_encoding()` 的结果**随这一份构建编得出哪些编码而变**：本函数在
+// `UVCPP_ZLIB_ENABLE` 里（下面那批 gzip/deflate 期望是它的前提），但 brotli 可以
+// 同时编进来，这时 `*` 的兜底结果会整体前移一位。所以凡是靠 `*` 兜底的期望都不
+// 写死 gzip，而是读下面这四个常量 —— 兜底序 = br > gzip > deflate，与静态腿选
+// 孪生文件的 `http_pick_precompressed_variants()` 同序。
+//
+// 只编 brotli 的构建（`UVCPP_ZLIB_ENABLE=0`）**不跑本函数**（它的前提不成立）；
+// 那一种构建的协商由下面的 `test_accept_encoding_no_zlib()` 与
+// `test_compress_brotli()` 里的协商段覆盖。
+static const http_compress_method k_star_first =
+#if UVCPP_BROTLI_ENABLE
+    http_compress_method::BROTLI;
+#else
+    http_compress_method::GZIP;
+#endif
+static const http_compress_method k_star_wo_gzip =
+#if UVCPP_BROTLI_ENABLE
+    http_compress_method::BROTLI;
+#else
+    http_compress_method::DEFLATE;
+#endif
+static const http_compress_method k_star_wo_deflate =
+#if UVCPP_BROTLI_ENABLE
+    http_compress_method::BROTLI;
+#else
+    http_compress_method::GZIP;
+#endif
+static const http_compress_method k_star_wo_both =
+#if UVCPP_BROTLI_ENABLE
+    http_compress_method::BROTLI;
+#else
+    http_compress_method::NONE;
+#endif
+
 static bool test_accept_encoding_parse() {
   // Basic
   if (http_compress::parse_accept_encoding("gzip, deflate") != http_compress_method::GZIP)
@@ -251,9 +286,8 @@ static bool test_accept_encoding_parse() {
   // x- variants
   if (http_compress::parse_accept_encoding("x-gzip") != http_compress_method::GZIP)
     return false;
-  // Wildcard → gzip
-  if (http_compress::parse_accept_encoding("*") != http_compress_method::GZIP)
-    return false;
+  // 通配符 → 本构建的首选项（zlib-only 是 gzip，带 brotli 是 br）
+  if (http_compress::parse_accept_encoding("*") != k_star_first) return false;
   // q=0 should skip
   if (http_compress::parse_accept_encoding("gzip;q=0, deflate") != http_compress_method::DEFLATE)
     return false;
@@ -263,14 +297,15 @@ static bool test_accept_encoding_parse() {
   // `gzip;q=0, deflate` 之所以通过，靠的是"deflate 显式出现且 q 更高"，
   // 一旦两侧都只由 `*` 覆盖，原来的实现就会把 gzip 选回来 —— 也就是发一个
   // 客户端刚声明过收不了的编码。下面四条钉住这一点。
-  if (http_compress::parse_accept_encoding("*, gzip;q=0") != http_compress_method::DEFLATE)
+  if (http_compress::parse_accept_encoding("*, gzip;q=0") != k_star_wo_gzip)
     return false;
-  if (http_compress::parse_accept_encoding("gzip;q=0, *") != http_compress_method::DEFLATE)
+  if (http_compress::parse_accept_encoding("gzip;q=0, *") != k_star_wo_gzip)
     return false;
-  if (http_compress::parse_accept_encoding("*, deflate;q=0") != http_compress_method::GZIP)
+  if (http_compress::parse_accept_encoding("*, deflate;q=0") != k_star_wo_deflate)
     return false;
-  if (http_compress::parse_accept_encoding("*, gzip;q=0, deflate;q=0") !=
-      http_compress_method::NONE)
+  // gzip 与 deflate 都被排掉：zlib-only 的构建里一个候选都不剩 ⇒ NONE；
+  // 带 brotli 的构建里 `*` 仍然覆盖 br ⇒ br。
+  if (http_compress::parse_accept_encoding("*, gzip;q=0, deflate;q=0") != k_star_wo_both)
     return false;
   // 注：这里**没有**钉"显式项比 `*` 的 q 更高时该听谁的"（例如
   // `*, gzip;q=0.5` 里 gzip 到底是 1.0 还是 0.5）。按 RFC 该由显式项说了算，
@@ -339,6 +374,290 @@ static bool test_mime_exclusion() {
 #endif  // UVCPP_ZLIB_ENABLE
 
 // =========================================================================
+// Test 7c: brotli（`UVCPP_BROTLI_ENABLE=1` 才有）
+// =========================================================================
+//
+// 这一节**不在** `UVCPP_ZLIB_ENABLE` 里：只编 brotli 的构建（`-DUVCPP_ENABLE_ZLIB=OFF
+// -DUVCPP_ENABLE_BROTLI=ON`）也必须跑到它 —— 那正是 `UVCPP_HTTP_COMPRESS_ENABLE`
+// 这个派生宏存在的理由，把它挂在 zlib 下面这条用例就永远量不到那条配置。
+//
+// 判据分三层：
+//   ① 往返：解压后与原文**逐字节相同**（含一份 > 16 KiB、输出跨过 4 KiB 内部块
+//      的语料 —— 手工流式循环最容易错的就是"最后一块算两遍"，那会让产物变成
+//      两倍大，而只解前一半也能"成功"，所以还必须断言字节数）。
+//   ② 无跨请求残留：连着压 A、B、A，第二次的 A 必须与第一次**逐字节相同**。
+//      brotli 的 API 里没有 `BrotliEncoderReset()`（`encode.h` 里只有
+//      `CreateInstance` / `Compress` / `CompressStream`），所以每次都是新状态 ——
+//      这条用例把"哪天有人图省事把状态缓存起来"钉红：缓存的窗口跨到上一份响应上，
+//      产出的字节就会随前一个请求而变。
+//   ③ 协商：`br` 与 gzip/deflate 的优先级、`q=0`、`*` 的兜底序，必须与静态腿选
+//      孪生文件那套 `http_pick_precompressed_variants()` **同序** —— 否则同一份
+//      资源走孪生发 `br`、走现场压缩发 `gzip`。
+#if UVCPP_BROTLI_ENABLE
+#include <web/uvcpp_http_compress.h>
+
+/** 可压语料：`json` 那类重复度高的文本。 */
+static std::string brotli_text_corpus(size_t n) {
+  std::string s;
+  s.reserve(n);
+  for (size_t i = 0; s.size() < n; ++i) {
+    s += "{\"id\":" + std::to_string(i) +
+         ",\"name\":\"item\",\"category\":\"tools\",\"active\":true}\n";
+  }
+  s.resize(n);
+  return s;
+}
+
+/** 不可压语料：LCG 伪随机字节（确定性）。用来把**输出**顶到 4 KiB 块以上。 */
+static std::string brotli_noise_corpus(size_t n) {
+  std::string s(n, '\0');
+  uint32_t x = 0x12345678u;
+  for (size_t i = 0; i < n; ++i) {
+    x = x * 1103515245u + 12345u;
+    s[i] = static_cast<char>((x >> 16) & 0xff);
+  }
+  return s;
+}
+
+static bool test_compress_brotli() {
+  const auto body_of = [](const http_compress_result& r) {
+    return std::string(r.data.get_const_data(), r.data.size());
+  };
+
+  // ── ① 往返 ────────────────────────────────────────────────────────────
+  const std::string text = brotli_text_corpus(40 * 1024);
+  {
+    const http_compress_result c = http_compress::compress(
+        text.data(), text.size(), http_compress_method::BROTLI);
+    if (!c.success) return false;
+    if (c.data.size() == 0 || c.data.size() >= text.size()) return false;
+    if (c.method != http_compress_method::BROTLI) return false;
+
+    const http_compress_result d =
+        http_compress::decompress(c.data.get_const_data(), c.data.size());
+    if (!d.success) return false;
+    // 解不出来时必须落回 GZIP（inflate 那一支），落回去说明 br 那一支根本没接上
+    if (d.method != http_compress_method::BROTLI) return false;
+    if (body_of(d) != text) return false;
+  }
+  {
+    // 高熵输入：br 的产物会**大于** 4 KiB，流式循环因此必须走到"填满一块就换
+    // 下一块"那条路 —— "最后一块重复计入"那个错法正是在这里现形。
+    const std::string noise = brotli_noise_corpus(64 * 1024);
+    const http_compress_result c = http_compress::compress(
+        noise.data(), noise.size(), http_compress_method::BROTLI);
+    if (!c.success) return false;
+    // 上界：一份高熵输入压不出花样来，产物必须落在"原文 + 一点包装"附近。
+    // 少了这条，'把最后一块算了两遍'（产物 ≈ 2×）照样能过往返断言。
+    if (c.data.size() > noise.size() + 1024) return false;
+    const http_compress_result d =
+        http_compress::decompress(c.data.get_const_data(), c.data.size());
+    if (!d.success) return false;
+    if (body_of(d) != noise) return false;
+  }
+
+  // ── ①′ 默认档 = `k_brotli_quality_default`，而**不是** quality 0 ─────
+  // 三参数那份（以及把服务器默认档 `k_compress_level_default` 原样透传进来的
+  // 四参数那份）必须与显式 q5 逐字节相同。少了这一段，"默认档退化成 q0"照样
+  // 能过上面对称性不敏感的往返断言 —— 而它对 `json-comp` 是致命的：本机
+  // 32 820 B 的语料 q0 = 1 784 B、q5 = 620 B，q0 比 gzip 的 1 118 B 还大 60%，
+  // 也就是"开了 br 反而扣分"。
+  {
+    const std::string s = brotli_text_corpus(20 * 1024);
+    const http_compress_result def = http_compress::compress(
+        s.data(), s.size(), http_compress_method::BROTLI);
+    const http_compress_result q5 = http_compress::compress(
+        s.data(), s.size(), http_compress_method::BROTLI,
+        http_compress::k_brotli_quality_default);
+    const http_compress_result neg = http_compress::compress(
+        s.data(), s.size(), http_compress_method::BROTLI,
+        http_compress::k_compress_level_default);
+    const http_compress_result q0 = http_compress::compress(
+        s.data(), s.size(), http_compress_method::BROTLI, 0);
+    if (!def.success || !q5.success || !neg.success || !q0.success) return false;
+    if (body_of(def) != body_of(q5)) return false;
+    if (body_of(neg) != body_of(q5)) return false;
+    // 上面两条恒等断言在"全都退化成同一个档"的实现上也会绿，所以再钉一条
+    // **不对称**的：q0 必须严格更大。q0 与 q5 的产物在本机语料上差 2.9×。
+    if (q0.data.size() <= def.data.size()) return false;
+  }
+
+  // ── ② 无跨请求残留（每次都是全新状态） ───────────────────────────────
+  {
+    const std::string a = brotli_text_corpus(9000);
+    const std::string b = brotli_noise_corpus(9000);
+    const http_compress_result a1 = http_compress::compress(
+        a.data(), a.size(), http_compress_method::BROTLI);
+    const http_compress_result b1 = http_compress::compress(
+        b.data(), b.size(), http_compress_method::BROTLI);
+    const http_compress_result a2 = http_compress::compress(
+        a.data(), a.size(), http_compress_method::BROTLI);
+    if (!a1.success || !b1.success || !a2.success) return false;
+    if (body_of(a1) != body_of(a2)) return false;
+  }
+
+  // ── 档位：q0 与 q11 都要能往返，且 q11 不会更大 ──────────────────────
+  {
+    const std::string s = brotli_text_corpus(12 * 1024);
+    const http_compress_result lo = http_compress::compress(
+        s.data(), s.size(), http_compress_method::BROTLI, 0);
+    const http_compress_result hi = http_compress::compress(
+        s.data(), s.size(), http_compress_method::BROTLI, 11);
+    if (!lo.success || !hi.success) return false;
+    if (hi.data.size() > lo.data.size()) return false;
+    const http_compress_result d =
+        http_compress::decompress(hi.data.get_const_data(), hi.data.size());
+    if (!d.success || body_of(d) != s) return false;
+
+    // 三参数那份用的是 `k_brotli_quality_default`，必须落在合法区间里
+    if (http_compress::k_brotli_quality_default < http_compress::k_brotli_quality_min ||
+        http_compress::k_brotli_quality_default > http_compress::k_brotli_quality_max)
+      return false;
+  }
+
+  // ── 夹紧：与 `clamp_compress_level` 同一条理由（越界落到最近端点） ──
+  // 负数 = **哨兵**（"用这个编码器自己的默认档"），不是"很小的质量"：
+  // 服务器侧 `set_compress_level()` 的默认值 `k_compress_level_default`(-1)
+  // 会**原样**流到 brotli 这一支，收成 0 就等于默认档悄悄变成"最快档"。
+  if (http_compress::clamp_brotli_quality(-100) !=
+      http_compress::k_brotli_quality_default)
+    return false;
+  if (http_compress::clamp_brotli_quality(-1) !=
+      http_compress::k_brotli_quality_default)
+    return false;
+  if (http_compress::clamp_brotli_quality(100) != http_compress::k_brotli_quality_max)
+    return false;
+  if (http_compress::clamp_brotli_quality(5) != 5) return false;
+  // 两个夹紧函数**不能合并**成"夹进 [a,b]"一把尺子：上限 9 vs 11 会把 brotli 的
+  // 10 悄悄降成 9。deflate 侧"负数 = 默认档"是退化的（它的默认档本身就是 -1）。
+  if (http_compress::clamp_compress_level(-1) != -1) return false;
+  if (http_compress::clamp_compress_level(-100) != -1) return false;
+
+  // ── ③ 协商 ───────────────────────────────────────────────────────────
+  if (http_compress::parse_accept_encoding("br") != http_compress_method::BROTLI)
+    return false;
+  // 同 q：br 赢（与静态腿的孪生选择同序）
+  if (http_compress::parse_accept_encoding("gzip, br") != http_compress_method::BROTLI)
+    return false;
+  if (http_compress::parse_accept_encoding("br, gzip, deflate") !=
+      http_compress_method::BROTLI)
+    return false;
+  // 显式 q 说了算
+#if UVCPP_ZLIB_ENABLE
+  if (http_compress::parse_accept_encoding("gzip;q=1, br;q=0.5") !=
+      http_compress_method::GZIP)
+    return false;
+#endif
+  if (http_compress::parse_accept_encoding("gzip;q=0.5, br;q=1") !=
+      http_compress_method::BROTLI)
+    return false;
+  // `*` 的兜底序也是 br 优先
+  if (http_compress::parse_accept_encoding("*") != http_compress_method::BROTLI)
+    return false;
+#if UVCPP_ZLIB_ENABLE
+  // br 被拒之后落到 gzip；只编 brotli 的构建里没有可落的编码 ⇒ NONE，
+  // 那一条由 `test_accept_encoding_no_zlib()` 钉。
+  if (http_compress::parse_accept_encoding("*, br;q=0") != http_compress_method::GZIP)
+    return false;
+#endif
+  // 显式拒掉 br 之后不能再被 `*` 选回来
+  if (http_compress::parse_accept_encoding("br;q=0") != http_compress_method::NONE)
+    return false;
+#if UVCPP_ZLIB_ENABLE
+  if (http_compress::parse_accept_encoding("br;q=0, *") != http_compress_method::GZIP)
+    return false;
+#endif
+  // 大写编码名（RFC 9110：编码名大小写不敏感）
+  if (http_compress::parse_accept_encoding("BR") != http_compress_method::BROTLI)
+    return false;
+  return true;
+}
+#endif  // UVCPP_BROTLI_ENABLE
+
+// =========================================================================
+// Test 7d: 没编 brotli 的构建里，`br` 必须当作**认不出的编码**
+// =========================================================================
+//
+// 与上面那条互补的负对照。少了它，"协商结果只说得出编得出来的编码"这条规矩
+// 只在 brotli 开着的树里被量过 —— 而它真正的用武之地正是 brotli 关着的树。
+// `Accept-Encoding: br` 单独出现时必须发原文（`NONE`）：客户端只列了 br，说明
+// 它认的就只有 br，退到 gzip 与发一个它没要的编码是一回事。
+#if !UVCPP_BROTLI_ENABLE && UVCPP_ZLIB_ENABLE
+#include <web/uvcpp_http_compress.h>
+static bool test_accept_encoding_no_brotli() {
+  if (http_compress::parse_accept_encoding("br") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("br, gzip") != http_compress_method::GZIP)
+    return false;
+  // `*` 不会兜到 br 上（这一份构建里 br 不在候选里）
+  if (http_compress::parse_accept_encoding("*") != http_compress_method::GZIP)
+    return false;
+  // 而 gzip/deflate 在 zlib 开着的构建里照旧照常
+  if (http_compress::parse_accept_encoding("gzip") != http_compress_method::GZIP)
+    return false;
+  return true;
+}
+#endif
+
+// =========================================================================
+// Test 8b: 协商在"只编了 brotli"的构建里（`UVCPP_ZLIB_ENABLE=0`）
+// =========================================================================
+//
+// `test_accept_encoding_parse()` 的前提是 zlib 在，`test_accept_encoding_no_brotli()`
+// 的前提是 brotli 不在；这两条合起来漏掉了"只编 brotli"这一格。头文件对
+// `parse_accept_encoding()` 的承诺是"只返回这一份构建编得出来的编码"，本函数就
+// 钉它另一面：gzip/deflate 问不出来。
+#if !UVCPP_ZLIB_ENABLE && UVCPP_BROTLI_ENABLE
+#include <web/uvcpp_http_compress.h>
+static bool test_accept_encoding_no_zlib() {
+  if (http_compress::parse_accept_encoding("gzip") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("deflate") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("gzip;q=1, br;q=0.5") !=
+      http_compress_method::BROTLI)
+    return false;
+  // gzip 编不出来 ⇒ `gzip, br` 里只有 br 可选（不因为客户端把 gzip 写在前面就
+  // 退到 NONE）
+  if (http_compress::parse_accept_encoding("gzip, br") != http_compress_method::BROTLI)
+    return false;
+  // `*` 兜到 br
+  if (http_compress::parse_accept_encoding("*") != http_compress_method::BROTLI)
+    return false;
+  // `*, br;q=0`：`*` 覆盖的候选（只有 br）全被拒 ⇒ 什么都不发
+  if (http_compress::parse_accept_encoding("*, br;q=0") != http_compress_method::NONE)
+    return false;
+  return true;
+}
+#endif
+
+// =========================================================================
+// Test 8c: 一个编码器都没有的构建（`UVCPP_ZLIB_ENABLE=0` 且 `UVCPP_BROTLI_ENABLE=0`）
+// =========================================================================
+//
+// 这一格连 HTTP 层的压缩都关掉了（`UVCPP_HTTP_COMPRESS_ENABLE=(0||0)`），但
+// `parse_accept_encoding()` 这个符号仍然在（`uvcpp_http_compress.h` 里它的声明在
+// 两个 `_ENABLE` 之外，且定义无条件编译 —— 公共符号表不随构建选项变，
+// `check_capi_symbols` 量的就是这件事）。它必须一律回 NONE：协商结果里出现任何
+// 一个"编不出来"的编码，就等于对一个只列了它的客户端撒谎。
+#if !UVCPP_ZLIB_ENABLE && !UVCPP_BROTLI_ENABLE
+#include <web/uvcpp_http_compress.h>
+static bool test_accept_encoding_no_encoder() {
+  if (http_compress::parse_accept_encoding("*") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("gzip, deflate") !=
+      http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("br") != http_compress_method::NONE)
+    return false;
+  if (http_compress::parse_accept_encoding("gzip;q=1, br;q=1, *") !=
+      http_compress_method::NONE)
+    return false;
+  return true;
+}
+#endif
+
+// =========================================================================
 // main
 // =========================================================================
 int main() {
@@ -357,6 +676,18 @@ int main() {
     {"compress_large", test_compress_large_roundtrip},
     {"accept_encoding", test_accept_encoding_parse},
     {"mime_exclusion", test_mime_exclusion},
+#endif
+#if UVCPP_BROTLI_ENABLE
+    {"compress_brotli", test_compress_brotli},
+#endif
+#if !UVCPP_BROTLI_ENABLE && UVCPP_ZLIB_ENABLE
+    {"accept_encoding_no_brotli", test_accept_encoding_no_brotli},
+#endif
+#if !UVCPP_ZLIB_ENABLE && UVCPP_BROTLI_ENABLE
+    {"accept_encoding_no_zlib", test_accept_encoding_no_zlib},
+#endif
+#if !UVCPP_ZLIB_ENABLE && !UVCPP_BROTLI_ENABLE
+    {"accept_encoding_no_encoder", test_accept_encoding_no_encoder},
 #endif
   };
 

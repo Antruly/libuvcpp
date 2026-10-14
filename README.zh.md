@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.6.47--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.6.48--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.6.47-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.6.48-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -142,7 +142,8 @@ MSVC 那份不可再分发的调试版运行库**不在包里** —— 写在
 
 | 开关 | 加上什么 |
 |---|---|
-| `UVCPP_ENABLE_ZLIB` | WebSocket 压缩扩展（RFC 7692, Per-Message Deflate） |
+| `UVCPP_ENABLE_ZLIB` | WebSocket 压缩扩展（RFC 7692, Per-Message Deflate），以及 HTTP 响应体的 gzip/deflate `Content-Encoding` |
+| `UVCPP_ENABLE_BROTLI` | HTTP 响应体的第二种 `Content-Encoding`：`br`（同等代价下比 gzip 小约 11 %） |
 | `UVCPP_ENABLE_OPENSSL` | HTTPS / WSS |
 | `UVCPP_ENABLE_NGHTTP2` | HTTP/2（RFC 9113）—— 默认走 TLS + ALPN，显式开之后另有明文 h2（先验知识，RFC 9113 §3.4）。不显式开就不升级 |
 | `UVCPP_ENABLE_QUIC` | net 层的 QUIC 传输（RFC 9000）—— 需要带 QUIC API 的 OpenSSL ≥ 3.2 |
@@ -297,6 +298,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_ENABLE_HTTP3` | `OFF` | 启用 **web 层**的 HTTP/3（RFC 9114），由 nghttp3 解析，跑在 QUIC 传输之上（两者都静态链入）。需要 `UVCPP_ENABLE_QUIC=ON` 与 `UVCPP_BUILD_WEB=ON` —— 缺一即强制关闭。**1.4.1 是一条端到端可用的传输：`uvcpp_http_client` / `uvcpp_http_server` 都说它，而 h1/h2 一个字节没动（它跑在 UDP 上）。** **1.5.0 起六条发布腿的预编译包都打开它**（此前发布包不带 HTTP/3）。见 [`doc/http3-guide.md`](doc/http3-guide.md) |
 | `UVCPP_ENABLE_WSDL` | `OFF` | 启用 WSDL/SOAP 模块（XML 后端 pugixml，静态链入）。需要 `UVCPP_BUILD_WEBAPP=ON`。见 [`doc/wsdl-guide.md`](doc/wsdl-guide.md)（文档那一半）与 [`doc/soap-guide.md`](doc/soap-guide.md)（运行时那一半） |
 | `UVCPP_ENABLE_YYJSON` | `OFF` | 启用**可选的 yyjson JSON 后端**（`src/yyjson/`）：nlohmann 之外**第二个**解析器，访问器与 nlohmann 路径**同名**（`uvcpp_json_get_string/bool/int/double`）、状态同义、并有通到 `uvcpp_json_writer` 的桥。解析更快、DOM 更小、解析器不递归。**关掉时默认配置不受影响**（`using uvcpp_json = nlohmann::json` 与全部 `uvcpp_json_*` 行为照旧；库的导出符号集与 `DT_NEEDED` 逐字相同 —— `.so` 的字节数会动，那不是判据）。yyjson 是**私有**依赖（单头 + 单 `.c`，以目标文件形式并进同一个 `uvcpp` 库 —— 不多一个产物），由 `FetchContent` 取源码；它**不在发布包里**（关了就是关了），但 CI 有三格真的开着它（Ubuntu / macOS / MSVC）。见 [`doc/json-guide.md`](doc/json-guide.md) §13 |
+| `UVCPP_ENABLE_BROTLI` | `OFF` | 启用 **brotli 响应体编码器** —— 除 gzip/deflate 之外多一种 `Content-Encoding: br`，由同一套 `Accept-Encoding` 协商选出来（`q` 相同时 br 胜出，因为它更小；`*` 与"没编 zlib"的那种构建也各有断言）。**它换到的是线上字节数，不是速度**：默认质量下同一份响应体比 gzip 6 档小约 11 %，而压缩变体是从响应缓存里取的，所以每请求代价与 gzip 相同 —— 不填 cache tag 的条目会每请求重压一遍。默认质量是 `5`（brotli 自己的默认值），**故意不是 `0`**。**关掉时逐字不变**（协商里没有 `br`；库的导出符号集与 `DT_NEEDED` 都不动）。brotli 是**私有**依赖：系统里有就走 pkg-config/`find_library`，没有就走 `FetchContent` 取源码（tag 钉在 `BROTLI_VERSION`）—— **两个**静态库，所以静态库使用者要自己链 `-lbrotlienc -lbrotlidec`。它**不在发布包里**，但 CI 有四格真的开着它（Ubuntu 的 `brotli` 与 `brotli-no-zlib`、macOS、MSVC）。见 [`doc/web-http-guide.md`](doc/web-http-guide.md) |
 | `UVCPP_ENABLE_CAPI` | `OFF` | 导出 **C ABI**（`src/capi/`，C99 头，给 C#/P-Invoke 以及别的 FFI 用），编进**同一个** `uvcpp` 库 —— 不多一个产物。需要 `UVCPP_BUILD_NET=ON` 与 `UVCPP_BUILD_WEB=ON`，缺一即强制关闭（C 面横跨 net/web/webapp）。**每一个发布配置都打开它。** 见 [`doc/capi-guide.md`](doc/capi-guide.md) |
 | `UVCPP_ENABLE_DB` | `OFF` | 启用**数据库模块**（`src/db/`）：一个连接一个 `uvcpp_db_client`，底下是 SQLite / MySQL / PostgreSQL 三个后端，结果行按表的方式取。它是全仓**唯一一个必需第三方客户端库**（libsqlite3 / libmysqlclient / libpq）的模块 —— 三个都找不到就强制关闭。**每一个发布配置都打开它**，所以预编译包里带着这个模块。见 [`doc/db-guide.md`](doc/db-guide.md) |
 | `UVCPP_ENABLE_DB_SQLITE` | `ON` | 编 db 模块的 SQLite 后端（要 `sqlite3.h` 与 libsqlite3）。找不到时**只强制关掉这一个**并出声，其余后端照编 |

@@ -203,6 +203,7 @@ option(UVCPP_BUILD_BENCH "Build the benchmark range (bench/)" OFF)
 # Web 子开关 — 仅在 UVCPP_BUILD_WEB=ON 时有效
 # =========================================================================
 option(UVCPP_ENABLE_ZLIB    "Enable zlib (gzip, WebSocket Per-Message Deflate)"  OFF)
+option(UVCPP_ENABLE_BROTLI  "Enable brotli (br content-encoding on responses)"   OFF)
 option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS + WSS)"                     OFF)
 option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN, plus opt-in cleartext h2c)" OFF)
 
@@ -211,6 +212,7 @@ option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENS
 # =========================================================================
 set(LLHTTP_VERSION  "release/v9.2.0" CACHE STRING "llhttp git tag to fetch")
 set(ZLIB_VERSION    "v1.3.1"         CACHE STRING "zlib git tag to fetch")
+set(BROTLI_VERSION  "v1.1.0"         CACHE STRING "brotli git tag to fetch")
 set(OPENSSL_VERSION "openssl-3.4.0"  CACHE STRING "OpenSSL git tag to fetch")
 set(NGHTTP2_VERSION "v1.70.0"        CACHE STRING "nghttp2 git tag to fetch")
 set(NGTCP2_VERSION  "v1.25.0"        CACHE STRING "ngtcp2 git tag to fetch")
@@ -357,6 +359,68 @@ if(UVCPP_BUILD_WEB)
       # 被清掉时还会让整个 install 中断）。普通变量每次配置重新算，不会残留。
       set(UVCPP_ZLIB_FROM_SOURCE TRUE)
       message(STATUS "zlib integrated (tag=${ZLIB_VERSION})")
+    endif()
+  endif()
+
+  # -------------------------------------------------------------------
+  # brotli
+  # -------------------------------------------------------------------
+  # 只用它的**编码器与解码器**（`libbrotlienc` / `libbrotlidec`，两者都依赖
+  # `libbrotlicommon`），而且只从 `src/web/uvcpp_http_compress.cpp` 里用 —— 头文件
+  # 是 `.cpp` 私有的，**公共头一个 brotli 类型都不出现**（与 zlib 那条完全不同：
+  # `uvcpp_ws_parser.h` 是公开且会被安装的头，它在 `#if UVCPP_ZLIB_ENABLE` 里直接
+  # `#include <zlib.h>`，所以才要 PUBLIC 链接 + 随包发头）。这里都不需要：
+  # 共享库靠 DT_NEEDED 带走，静态库的使用者自己把 `-lbrotlienc -lbrotlidec` 接上。
+  if(UVCPP_ENABLE_BROTLI)
+    # 先 pkg-config（发行版的标准装法），再 find_path/find_library 兜底
+    # （Windows 的 vcpkg / MSYS2 前缀、以及 Conan 那种只给路径的布局都落在这里：
+    # 它们不一定带 .pc，但一定有 `brotli/encode.h` 与那一对库）。
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(BROTLIENC QUIET IMPORTED_TARGET libbrotlienc)
+      pkg_check_modules(BROTLIDEC QUIET IMPORTED_TARGET libbrotlidec)
+    endif()
+
+    if(TARGET PkgConfig::BROTLIENC AND TARGET PkgConfig::BROTLIDEC)
+      set(UVCPP_BROTLI_LIBS PkgConfig::BROTLIENC PkgConfig::BROTLIDEC)
+      message(STATUS "Using system brotli via pkg-config (${BROTLIENC_VERSION})")
+    else()
+      find_path(UVCPP_BROTLI_INCLUDE_DIR NAMES brotli/encode.h)
+      find_library(UVCPP_BROTLIENC_LIB NAMES brotlienc libbrotlienc brotlienc-static libbrotlienc-static)
+      find_library(UVCPP_BROTLIDEC_LIB NAMES brotlidec libbrotlidec brotlidec-static libbrotlidec-static)
+      if(UVCPP_BROTLI_INCLUDE_DIR AND UVCPP_BROTLIENC_LIB AND UVCPP_BROTLIDEC_LIB)
+        set(UVCPP_BROTLI_LIBS ${UVCPP_BROTLIENC_LIB} ${UVCPP_BROTLIDEC_LIB})
+        set(UVCPP_BROTLI_INCLUDE_DIRS ${UVCPP_BROTLI_INCLUDE_DIR})
+        message(STATUS "Using system brotli (${UVCPP_BROTLIENC_LIB})")
+      else()
+        message(STATUS "Fetching brotli via FetchContent (tag=${BROTLI_VERSION})")
+        # 这里用 `FetchContent_Populate` + `add_subdirectory(... EXCLUDE_FROM_ALL)`，
+        # 但**理由与 zlib 那条不一样**（别看串了）：brotli 自己有
+        # `BROTLI_BUNDLED_MODE`，在"有父目录"时它默认 ON，于是它一条 install
+        # 规则都不登记（v1.1.0 的 CMakeLists.txt:35-46 决定默认值、:180-201 是
+        # 那个 `if(NOT BROTLI_BUNDLED_MODE)`）—— 所以"污染 --prefix"那条对它
+        # 不成立。需要 `EXCLUDE_FROM_ALL` 的是另外两样：它的命令行工具
+        # `add_executable(brotli ...)`（:170，默认会编）与它的测试目标。
+        # 测试另外还要 `BROTLI_DISABLE_TESTS`：光靠 EXCLUDE_FROM_ALL 挡不住
+        # `add_test()` 进 ctest 名册（zlib 那条踩过一模一样的坑，见上面）。
+        set(BROTLI_DISABLE_TESTS ON CACHE BOOL "Disable brotli tests" FORCE)
+        FetchContent_Declare(
+          brotli
+          GIT_REPOSITORY  https://github.com/google/brotli.git
+          GIT_TAG         ${BROTLI_VERSION}
+          GIT_SHALLOW     TRUE
+        )
+        FetchContent_GetProperties(brotli)
+        if(NOT brotli_POPULATED)
+          FetchContent_Populate(brotli)
+          add_subdirectory(${brotli_SOURCE_DIR} ${brotli_BINARY_DIR} EXCLUDE_FROM_ALL)
+        endif()
+        # 1.1.0 起的 target 名；别名 `Brotli::brotlienc` 是它自己给的，
+        # `uvcpp_http_compress.cpp` 只 `#include <brotli/encode.h>`，不关心叫法。
+        set(UVCPP_BROTLI_LIBS brotlienc brotlidec)
+        set(UVCPP_BROTLI_FROM_SOURCE TRUE)
+        message(STATUS "brotli integrated (tag=${BROTLI_VERSION})")
+      endif()
     endif()
   endif()
 
@@ -1539,13 +1603,42 @@ else()
   message(STATUS "yyjson JSON backend disabled (UVCPP_YYJSON_ENABLE=0)")
 endif()
 
+# 每个分支里**顺便**把同名 CMake 变量也定下来（值就是 `_uvcpp_literal01` 稍后算出的
+# 那一个），因为下面那条派生宏要在**这一处**拼字符串：CMake 的 `${VAR}` 是在**读**
+# 这一行时求值的，而 `_uvcpp_literal01` 那一批在文件靠后（2000 行开外）才跑 ——
+# 靠后取用会拼出 `(||)` 这种空壳（配置看着成功、宏却恒为假，只有真去编才炸）。
+# 后面 `_uvcpp_literal01(UVCPP_ZLIB_ENABLE ...)` 会把同一个值再算一遍覆盖掉，幂等。
 if(UVCPP_ENABLE_ZLIB)
+  set(UVCPP_ZLIB_ENABLE 1)
   add_compile_definitions(UVCPP_ZLIB_ENABLE=1)
   message(STATUS "zlib enabled (UVCPP_ZLIB_ENABLE=1)")
 else()
+  set(UVCPP_ZLIB_ENABLE 0)
   add_compile_definitions(UVCPP_ZLIB_ENABLE=0)
   message(STATUS "zlib disabled (UVCPP_ZLIB_ENABLE=0)")
 endif()
+
+if(UVCPP_ENABLE_BROTLI)
+  set(UVCPP_BROTLI_ENABLE 1)
+  add_compile_definitions(UVCPP_BROTLI_ENABLE=1)
+  message(STATUS "brotli enabled (UVCPP_BROTLI_ENABLE=1)")
+else()
+  set(UVCPP_BROTLI_ENABLE 0)
+  add_compile_definitions(UVCPP_BROTLI_ENABLE=0)
+  message(STATUS "brotli disabled (UVCPP_BROTLI_ENABLE=0)")
+endif()
+
+# `UVCPP_HTTP_COMPRESS_ENABLE` 不是选项，是上面两个的**或**：它答的是"这份构建的
+# HTTP 正文压缩器存不存在"，而这件事现在有两个来源（gzip/deflate 来自 zlib，
+# br 来自 brotli）。`uvcpp_http_server` 那套（协商 → 变体缓存 → 响应头）与
+# `uvcpp_web_app` 那一条转发用的都是它 —— 少这一格，`-DUVCPP_ENABLE_BROTLI=ON`
+# 配 zlib 关掉会造出一个"编进来了、却一条路都到不了"的编码器。
+#
+# 值写成 `(0||1)` 这种**字面量表达式**而不是算好的一位：这里要与生成头、
+# 目标导出集逐字一致，而三处各自算一遍迟早会漂 —— 干脆让预处理器去算，
+# 三处存的是同一个字符串（`check_config_contract.py` 的判据 ③ 量的就是这条）。
+add_compile_definitions("UVCPP_HTTP_COMPRESS_ENABLE=(${UVCPP_ZLIB_ENABLE}||${UVCPP_BROTLI_ENABLE})")
+message(STATUS "HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(${UVCPP_ZLIB_ENABLE}||${UVCPP_BROTLI_ENABLE})")
 
 if(UVCPP_ENABLE_OPENSSL)
   add_compile_definitions(UVCPP_OPENSSL_ENABLE=1)
@@ -2026,6 +2119,11 @@ _uvcpp_literal01(UVCPP_WEBAPP_ENABLE    UVCPP_BUILD_WEBAPP)
 _uvcpp_literal01(UVCPP_WSDL_ENABLE      UVCPP_ENABLE_WSDL)
 _uvcpp_literal01(UVCPP_YYJSON_ENABLE    UVCPP_ENABLE_YYJSON)
 _uvcpp_literal01(UVCPP_ZLIB_ENABLE      UVCPP_ENABLE_ZLIB)
+_uvcpp_literal01(UVCPP_BROTLI_ENABLE    UVCPP_ENABLE_BROTLI)
+# 派生值：不是开关，是上面那两个的或。**必须在 `_uvcpp_literal01` 之后**（它要的是
+# 字面量的 0/1，不是 ON/OFF），且与上面 `add_compile_definitions` 那一处同源 ——
+# 两处从结构上不可能漂移，理由见那里。
+set(UVCPP_HTTP_COMPRESS_ENABLE "(${UVCPP_ZLIB_ENABLE}||${UVCPP_BROTLI_ENABLE})")
 _uvcpp_literal01(UVCPP_OPENSSL_ENABLE   UVCPP_ENABLE_OPENSSL)
 _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
 _uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
@@ -2094,6 +2192,8 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_WSDL_ENABLE=${UVCPP_WSDL_ENABLE}
       UVCPP_YYJSON_ENABLE=${UVCPP_YYJSON_ENABLE}
       UVCPP_ZLIB_ENABLE=${UVCPP_ZLIB_ENABLE}
+      UVCPP_BROTLI_ENABLE=${UVCPP_BROTLI_ENABLE}
+      "UVCPP_HTTP_COMPRESS_ENABLE=${UVCPP_HTTP_COMPRESS_ENABLE}"
       UVCPP_OPENSSL_ENABLE=${UVCPP_OPENSSL_ENABLE}
       UVCPP_NGHTTP2_ENABLE=${UVCPP_NGHTTP2_ENABLE}
       UVCPP_QUIC_ENABLE=${UVCPP_QUIC_ENABLE}
@@ -2191,6 +2291,61 @@ if(UVCPP_BUILD_WEB)
         elseif(ZLIB_FOUND)
           target_link_libraries(${_tgt} PUBLIC $<BUILD_INTERFACE:${ZLIB_LIBRARIES}>)
           target_include_directories(${_tgt} PUBLIC $<BUILD_INTERFACE:${ZLIB_INCLUDE_DIRS}>)
+        endif()
+      endif()
+      if(UVCPP_ENABLE_BROTLI)
+        # **PRIVATE**：没有公开头会 `#include <brotli/...>`（`uvcpp_http_compress.h`
+        # 一个 brotli 类型都不出现，`<brotli/encode.h>` 只在那个 .cpp 里），所以
+        # bro 的头、宏、库一样都不往外传；包含目录同理。
+        # 静态库的使用者仍要自己链 `-lbrotlienc -lbrotlidec`（共享库靠 DT_NEEDED
+        # 带走）—— 与 zlib 在静态那侧的取舍同形。
+        #
+        # ------------------------------------------------------------------
+        # 链接形式分两支，**只因为 `install(EXPORT uvcppTargets)` 对"目标名"和
+        # "路径"两种写法的检查不一样**。实测（2026-10-14，CMake 3.28.3）：
+        #
+        # 取源码那条支路拿到的是本工程的**普通目标** `brotlienc`/`brotlidec`，
+        # 把它们按 `$<BUILD_INTERFACE:目标名>` 写进去（逐项包也试过，不是分号
+        # 展开成裸名的问题）**仍然**在 generate 阶段失败：
+        #   install(EXPORT "uvcppTargets" ...) includes target "uvcpp" which
+        #   requires target "brotlienc" that is not in any export set.
+        #   install(EXPORT "uvcppTargets" ...) includes target "uvcpp" which
+        #   requires target "brotlidec" that is not in any export set.
+        # 而换成为 `$<TARGET_FILE:...>`（求值成一个**路径字符串**，不再记目标
+        # 依赖）立刻就过了 —— 同一份 CMake 里两种写法的差别只有"名字 vs 路径"。
+        # 至于是导出集检查的哪一层没把 `$<BUILD_INTERFACE:>` 剥干净，**没有追
+        # 到底**（同一个形状在一个两目标的最小复现里是被剥成 `$<LINK_ONLY:>` 的，
+        # 与这里对不上）；这里只记下可复现的那条分界，别把它当成解释。
+        #
+        # 由此多出来的一件事：路径形式不会替我们记构建顺序，`brotlienc`/`brotlidec`
+        # 又是 `EXCLUDE_FROM_ALL` 子目录里的目标，所以必须显式 `add_dependencies`。
+        #
+        # 系统那条支路拿到的是 IMPORTED 目标 `PkgConfig::BROTLIENC/DEC`，导出集
+        # 检查不管 IMPORTED 目标 —— 那条一直是好的（Ubuntu CI 每天在跑），所以
+        # 保持原样不动，免得为一个跑得到的配置去改一个跑得好的配置。
+        #
+        # **这条支路在 CI 之外没人跑过**（macOS/Windows 才有 FetchContent），量它的
+        # 办法是把系统 brotli 藏起来 —— `PkgConfig` 在本工程里**只**被 brotli 这
+        # 一段用，关掉它不影响别的依赖；其余 FetchContent 依赖用本地克隆喂进去，
+        # 免得配置期去联网：
+        #   -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_ENABLE_ZLIB=OFF \
+        #   -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON \
+        #   -DCMAKE_IGNORE_PATH='/usr/include;/usr/lib/x86_64-linux-gnu' \
+        #   -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+        #   -DFETCHCONTENT_SOURCE_DIR_BROTLI=<brotli 克隆> \
+        #   -DFETCHCONTENT_SOURCE_DIR_LLHTTP=<llhttp 克隆> \
+        #   -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=<nlohmann 克隆>
+        # ------------------------------------------------------------------
+        if(UVCPP_BROTLI_FROM_SOURCE)
+          target_link_libraries(${_tgt} PRIVATE
+            $<BUILD_INTERFACE:$<TARGET_FILE:brotlienc>>
+            $<BUILD_INTERFACE:$<TARGET_FILE:brotlidec>>)
+          add_dependencies(${_tgt} brotlienc brotlidec)
+        else()
+          target_link_libraries(${_tgt} PRIVATE $<BUILD_INTERFACE:${UVCPP_BROTLI_LIBS}>)
+        endif()
+        if(UVCPP_BROTLI_INCLUDE_DIRS)
+          target_include_directories(${_tgt} PRIVATE $<BUILD_INTERFACE:${UVCPP_BROTLI_INCLUDE_DIRS}>)
         endif()
       endif()
     endif()

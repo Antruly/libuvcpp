@@ -16,13 +16,13 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `yyjson`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `yyjson`, `brotli`, `brotli-no-zlib`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `db-servers` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / db-servers` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `yyjson`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `yyjson`, `brotli`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `CI · Windows · MSVC` | `CI · Windows · MSVC / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `CI · Windows · MinGW-w64` | `CI · Windows · MinGW-w64 / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `yyjson`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `yyjson`, `brotli`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -43,7 +43,10 @@ added the three `yyjson` entries (the optional second JSON backend — Ubuntu, m
 see §5), and while doing so the running total was recounted cell by cell against the table
 below: it had been **36**, not 33, since the `db` entries landed (`zlib-off`, the `db-servers`
 and both `config-contract` jobs are all checks, and the earlier totals had stopped counting
-some of them). With the three `yyjson` entries the table is **39**. The table below is the
+some of them). With the three `yyjson` entries the table is **39**. 1.6.48 added the four
+`brotli` entries — `brotli` on Ubuntu, macOS and MSVC plus a fourth Ubuntu-only
+`brotli-no-zlib` (the only cell that compiles the compressor's "no zlib" branches; see §5) —
+which takes it to **43**. The table below is the
 machine-checked source; this paragraph is a narrative and is not — treat any number here as
 a claim to re-count rather than to trust.
 The `windows` one had never run before that commit, since there is no MSVC on the
@@ -98,6 +101,7 @@ layout did not cover them either.
 | MinGW + WSDL | The same single MinGW job as the three gaps above. `release.yml`'s `mingw-x64` and `mingw-arm64` legs **do** enable WSDL, so it is covered at release time but not on push/PR — which is why it was verified locally on the MinGW x64 shape before being turned on there. |
 | macOS + WSDL | No entry, and macOS never compiles `src/wsdl/`. Lower risk than the MinGW gap above: macOS is not a release platform, so there is no path on which it reaches a user unbuilt. |
 | MinGW + yyjson | The same single MinGW job as the three gaps above. Unlike WSDL there is no release-time coverage standing in for it either: `UVCPP_ENABLE_YYJSON` is never passed by `release.yml` (the module is optional, and the package ships the header as an empty shell), so `src/yyjson/` is compiled on Ubuntu, macOS and MSVC only. What makes the gap acceptable here is that MinGW is GCC + libstdc++ — the same pair as the Ubuntu entry — so the two runtimes that could actually disagree about the byte-identical write-back (`libstdc++` vs `libc++`) are both covered. |
+| MinGW + brotli | The same single MinGW job as the gaps above, and the same shape as `yyjson`: `UVCPP_ENABLE_BROTLI` is never passed by `release.yml`, so `src/web/uvcpp_http_compress.cpp`'s brotli branches are compiled on Ubuntu, macOS and MSVC only. The Ubuntu-only `brotli-no-zlib` cell covers the `libstdc++`-vs-`libc++` question for the brotli path (the brotli encoder is C, but the C++ wrapper that hands it a `std::string` is not), so what MinGW would add is a second GCC, not a second runtime. |
 | MySQL / PostgreSQL on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The two remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 service containers). The other three `db` entries set both backends **explicitly `OFF`** rather than leaving them on: with no server the two tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` on Linux | On Linux and macOS the `db` entries use the **default** path (`find_package(SQLite3)` against the system/SDK library); the from-source path is exercised on MSVC and MinGW. What is platform-specific about it is TLS and extraction — `file(DOWNLOAD)` over Schannel on Windows, MSYS2's libcurl + `ca-certificates` on MinGW — and both of those are covered. The Linux release legs run it on every tag. The cost of this entry, and it is a real one: MSVC and MinGW now need the network **at configure time** (hash-pinned zip from sqlite.org). An offline machine can pre-place it, see §5. |
 | `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
@@ -263,7 +267,7 @@ removed on 2026-09-17 after measuring them instead of trusting the label:
 | `test_memory_pool` | "Pre-existing hang (multi-thread pool alloc on Windows)" | 0 failures, ≤1 s per run |
 
 Both had been exclusions for defects fixed long before. `test_memory_pool`'s is
-documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2761-2761`), fixed and
+documented: it was a missing-DLL-copy bug (see `CMakeLists.txt:2916-2916`), fixed and
 left in the exclude list anyway. `test_tcp_func`'s dual-loop teardown is most
 likely the `~uvcpp_tcp_server` fix, which is what removed the two `sleep_for`
 calls that were joining the worker thread — that is an inference from the
@@ -431,7 +435,7 @@ MSVC. MinGW and macOS are the gap (see §1).
   entry at all and shipped two classes of defect (#35).
 - **It is `web` plus one switch**, exactly as `zlib-off` is `web` minus one, and its dep list
   is **byte-identical to `web`'s**. That is deliberate: `pugixml` is pulled by `FetchContent`
-  (`CMakeLists.txt:1453`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
+  (`CMakeLists.txt:1517`, `GIT_TAG` pinned to `PUGIXML_VERSION`), not by a package manager, so
   there is nothing to install — and keeping the package set identical means a red/green
   difference between the two legs can only be attributed to the switch itself.
 - **All four gates are load-bearing here.** Gate ② is `pugixml integrated` (the FetchContent
@@ -474,7 +478,7 @@ nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the sing
   **libc++**, whose `double` formatting is not libstdc++'s. The byte-identical write-back
   assertion is precisely the kind that differs across those two.
 - **`flags` is `web` plus one switch, and the dep list is byte-identical to `web`'s on all
-  three legs.** `yyjson` is pulled by `FetchContent` (`CMakeLists.txt:1513`, `GIT_TAG` pinned
+  three legs.** `yyjson` is pulled by `FetchContent` (`CMakeLists.txt:1577`, `GIT_TAG` pinned
   to `YYJSON_VERSION`) and built as an OBJECT library, not found by a package manager, so
   there is nothing to install — and keeping the package set identical means a red/green
   difference can only be attributed to the switch.
@@ -484,6 +488,46 @@ nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the sing
   (`Including yyjson module in build`) proves `src/yyjson/` entered the source list, and gate
   ④ (`test_yyjson_doc_func`) proves the test was registered — the file is removed by the
   glob+FILTER in `tests/functional/CMakeLists.txt` when the module is off.
+
+### The `brotli` entries
+
+`brotli` is the second **body** compressor (`UVCPP_ENABLE_BROTLI`, default `OFF`) behind the
+same `uvcpp_http_compress` layer that already carried zlib — the encoder plus the
+`Accept-Encoding` negotiation that picks between `gzip`/`deflate`/`br`. It runs on **four
+cells**: `brotli` on Ubuntu, macOS and MSVC, plus a fourth Ubuntu-only `brotli-no-zlib`
+(`-DUVCPP_ENABLE_ZLIB=OFF -DUVCPP_ENABLE_BROTLI=ON`). MinGW is the gap (see §1).
+
+- **The fourth cell is not redundant with `zlib-off`.** The two switches are independent, so
+  the build has four states; the table had three of them (`web` = `(1||1)`, `zlib-off` =
+  `(0||0)`, and everything else) and no cell ever compiled **`(0||1)`**. That is the only
+  state in which two whole groups of code exist: the `#else` half of
+  `test_compress_variant_brotli()` — a client that names `gzip` when this build cannot produce
+  it must get the **identity** body, not brotli bytes wearing a gzip label — and
+  `test_accept_encoding_no_zlib()`, which pins the header's promise that negotiation only ever
+  returns encodings *this* build can emit (`*` falls through to `br`; `*, br;q=0` emits
+  nothing). Without the cell those assertions are never compiled anywhere, so deleting them
+  would be green.
+- **The switch is the only difference from `web`, on every leg.** `flags` is `web`'s list plus
+  `-DUVCPP_ENABLE_BROTLI=ON`; the three system legs add `libbrotli-dev` (Ubuntu) / nothing
+  (macOS — Homebrew's `brotli` is deliberately **not** installed so the `FetchContent` leg is
+  the one that runs) / nothing (MSVC, from-source). Keeping the rest of the list identical
+  means a red/green difference can only be attributed to the switch.
+- **The two discovery paths print different strings, so neither may be a gate.** System legs
+  print `Using system brotli via pkg-config (1.1.0)`; the from-source leg prints
+  `brotli integrated (tag=v1.1.0)`. The gate string is therefore `brotli enabled`, which both
+  print, and it is the analogue of `yyjson integrated` — with one difference worth naming:
+  here a **missing** dependency does force the module back off (`find_package`/`pkg-config`
+  fails ⇒ the option is reset with a warning), so this string is load-bearing in the same way
+  `Including <module> module in build` is elsewhere.
+- **Gate ③ is the derived macro, and it is what makes the fourth cell a gate rather than a
+  second copy of `web`.** `HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=` is spelled
+  `(zlib||brotli)` from the two switches, so `web` asserts `(1||1)`, `zlib-off` asserts
+  `(0||0)` and `brotli-no-zlib` asserts `(0||1)`. Those three readings together are what pins
+  the spelling: a macro that ignored one switch would satisfy one cell and contradict another.
+- **Gate ④ has to be a `ctest` name, not the sub-test name.** The new assertions live inside
+  `test_web_http_client_func` (`tests/functional/web_http_client_func.cpp`), and `ctest -N`
+  only ever prints that. Registering the sub-test name as `gate_test` would make the gate
+  unpassable — it is the same trap `h2` and `capi` document.
 
 ### The `capi` entries
 
@@ -778,6 +822,13 @@ sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 # wsdl | yyjson — deliberately identical to web again: pugixml and yyjson both come from
 # FetchContent, so there is nothing to install and the delta is exactly the switch
 sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
+# brotli — web's list plus libbrotli-dev; on this leg brotli comes from the system package
+# (pkg-config) rather than FetchContent, which is the point: the two discovery paths must
+# both be exercised, and the from-source one is what macOS and MSVC run
+sudo apt-get install -y libuv1-dev zlib1g-dev libbrotli-dev ninja-build
+# brotli-no-zlib — the same list minus zlib1g-dev: it is the (zlib OFF + brotli ON) cell,
+# so it must not have zlib available to find
+sudo apt-get install -y libuv1-dev libbrotli-dev ninja-build
 # ssl | h2
 sudo apt-get install -y libuv1-dev libssl-dev zlib1g-dev ninja-build
 # full
@@ -811,6 +862,9 @@ brew install libuv ninja
 brew install libuv zlib ninja
 # yyjson — identical to web: yyjson comes from FetchContent, nothing to install
 brew install libuv zlib ninja
+# brotli — again identical to web, and here that is on purpose twice over: Homebrew does
+# have a `brotli` package, and *not* installing it is what keeps this the from-source leg
+brew install libuv zlib ninja
 # ssl | h2 | full
 brew install libuv openssl zlib ninja
 # quic — explicit openssl@3, and -DOPENSSL_ROOT_DIR points at it
@@ -826,8 +880,8 @@ brew install libuv ninja
 
 ### Windows MSVC (`ci-windows-msvc.yml`)
 ```bash
-# basic-static | basic-shared | web | capi | wsdl | yyjson — no system deps
-# (libuv + llhttp + pugixml + yyjson all via FetchContent)
+# basic-static | basic-shared | web | capi | wsdl | yyjson | brotli — no system deps
+# (libuv + llhttp + pugixml + yyjson + brotli all via FetchContent)
 # db — no system deps either: its SQLite is built *from source* (UVCPP_DB_SQLITE_FROM_SOURCE)
 # ssl | h2 | quic | http3
 bash .github/scripts/win-openssl-deps.sh

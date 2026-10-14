@@ -164,6 +164,34 @@ FEATURE_GATES = {
     # 也只是个便宜的旁证，真正承重的是它。
     "yyjson": ["UVCPP_ENABLE_YYJSON:BOOL=ON", "yyjson integrated",
                "Including yyjson module in build", "test_yyjson_doc_func"],
+    # 1.6.48：压缩层多了第三个编码器（`src/web/uvcpp_http_compress.cpp` 的 brotli
+    # 那一支）。`UVCPP_ENABLE_BROTLI` 也是**默认 OFF** —— 与上面几条同一个理由，
+    # 而这里多一层：`UVCPP_ENABLE_BROTLI=OFF` 时**这一格什么都不编**，
+    # `parse_accept_encoding()` 连 `br` 都不会返回。
+    #
+    # ubuntu 有两格（`brotli` 与 `brotli-no-zlib`）—— 第二格不是凑数：
+    # "有 brotli、没有 zlib"那整条分支（协商里 gzip/deflate 问不出来、静态腿
+    # 换成"编不出客户端要的编码就必须原样发原文"）只在它下面编译。
+    #
+    # 第二条门禁串**必须与发现路径无关**：系统那两格走 pkg-config、macOS/MSVC
+    # 走 FetchContent，两条支路印的是不同的消息（`Using system brotli via
+    # pkg-config (...)` / `brotli integrated (tag=...)`），拿它们当门禁串会在三格
+    # 里红两格。`brotli enabled` 在两条支路上都印（`CMakeLists.txt` 里那个
+    # `if(UVCPP_ENABLE_BROTLI)` 的 else 分支），而且开关关着时它不出现。
+    #
+    # 第三条盯的是**派生的那个宏**：`UVCPP_HTTP_COMPRESS_ENABLE` 由 zlib 与
+    # brotli 两个开关拼出来，`(1||1)` / `(0||1)` 才是"哪个编码器在库里"的见证
+    # （`web` 那一格是 `(1||0)`、`zlib-off` 是 `(0||0)`），所以它区分得开。
+    #
+    # 第四条**必须是一个 ctest 用例名**：协商与 q5/q0 那几条断言长在
+    # `test_web_http_client_func` 里，二进制内部的子用例名（`compress_brotli`、
+    # `accept_encoding_no_zlib`）在 `ctest -N` 的输出里看不到。
+    "brotli": ["UVCPP_ENABLE_BROTLI:BOOL=ON", "brotli enabled",
+               "HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)",
+               "test_web_http_client_func"],
+    "brotli-no-zlib": ["UVCPP_ENABLE_BROTLI:BOOL=ON", "brotli enabled",
+                       "HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(0||1)",
+                       "test_web_http_client_func"],
     # 1.5.x：数据库模块（`src/db/`）。`UVCPP_ENABLE_DB` 也是**默认 OFF**，而它比
     # 上面那几条多一层：它底下三个后端各有一个子开关，**三个都不成时模块会被强制
     # 关闭**（`CMakeLists.txt` 里那条 `set(UVCPP_ENABLE_DB OFF)` 是普通变量，

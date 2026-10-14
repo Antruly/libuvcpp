@@ -1920,13 +1920,14 @@ int uvcpp_web_app::init_process_once() {
   http_->set_max_body_size(cfg_.max_body_size);
   http_->set_max_header_bytes(cfg_.max_header_bytes);
   http_->set_max_url_bytes(cfg_.max_url_bytes);
-#if UVCPP_ZLIB_ENABLE
+#if UVCPP_HTTP_COMPRESS_ENABLE
   http_->set_compression_enabled(cfg_.compression);
   http_->set_compress_min_body_size(cfg_.compress_min_body_size);
 #else
   if (cfg_.compression) {
     UVCPP_LOG_INFO(log_category::HTTP)
-        << "构建时未启用 zlib，本配置下的 compression 不生效（响应将以明文发送）";
+        << "构建时未启用任何编码器（zlib / brotli 都没编进来），本配置下的 "
+           "compression 不生效（响应将以明文发送）";
   }
 #endif
 

@@ -63,7 +63,7 @@ jobs:
           # **发版那一刻** —— 而 release.yml 的 msvc-x64 / msvc-arm64 两条腿都开着
           # 它。这一格就是那两条腿在 push/PR 阶段的替身。
           #
-          # pugixml 走 FetchContent（根 `CMakeLists.txt:1453`，`GIT_TAG` 钉在
+          # pugixml 走 FetchContent（根 `CMakeLists.txt:1517`，`GIT_TAG` 钉在
           # `PUGIXML_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
           # 的装包需求与 `web` 逐字相同。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -92,7 +92,7 @@ jobs:
           # nlohmann 再比 `==`」—— 平台间差异正是在这种地方现形。
           # （yaml 里这段 `-D` 之所以放在块序列里、不折成一行，见 §1。）
           #
-          # yyjson 走 FetchContent（根 `CMakeLists.txt:1513`，`GIT_TAG` 钉在
+          # yyjson 走 FetchContent（根 `CMakeLists.txt:1577`，`GIT_TAG` 钉在
           # `YYJSON_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
           # 的装包需求与 `web` 逐字相同。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -109,6 +109,30 @@ jobs:
             gate_integrated: yyjson integrated
             gate_module: Including yyjson module in build
             gate_test: test_yyjson_doc_func
+
+          # brotli：与 `web` 的 `flags` **逐字相同**，只多一个
+          # `-DUVCPP_ENABLE_BROTLI=ON`。`UVCPP_ENABLE_BROTLI` 默认 OFF，
+          # 别的格一行 brotli 的代码都不编。
+          #
+          # **不需要新包**：brotli 走 FetchContent（根 `CMakeLists.txt` 的
+          # `BROTLI_VERSION`），装包表与 `web` 逐字相同 —— 这样两边红绿不同只可能
+          # 归因到那个开关。它同时是取源码那条支路在 MSVC 上的唯一一次运行（那条
+          # 支路此前在 generate 阶段的 `install(EXPORT uvcppTargets)` 上就失败，
+          # 见 CHANGELOG「性能」那一节的第二条）。
+          # 四个门禁串见 doc/ci-guide.md §5。
+          - feature: brotli
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_BUILD_WEB=ON
+              - -DUVCPP_BUILD_WEBAPP=ON
+              - -DUVCPP_ENABLE_ZLIB=ON
+              - -DUVCPP_ENABLE_BROTLI=ON
+            gate_name: brotli
+            gate_switch: 'UVCPP_ENABLE_BROTLI:BOOL=ON'
+            gate_integrated: brotli enabled
+            gate_module: 'HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)'
+            gate_test: test_web_http_client_func
 
           - feature: ssl
             flags:
@@ -313,11 +337,11 @@ jobs:
         run: |
           case "${{ matrix.feature }}" in
             # wsdl 也在这一组：pugixml 走 FetchContent，与 zlib 一样不是系统依赖。
-            # yyjson 同理（`CMakeLists.txt:1513` 的 FetchContent）。
+            # yyjson 同理（`CMakeLists.txt:1577` 的 FetchContent）。
             # db 也是：它的 SQLite 是**从源码编**的（`UVCPP_DB_SQLITE_FROM_SOURCE`），
             # 所以 Windows 上不需要任何 sqlite 包 —— 这一格一个系统依赖都没有，
             # 别把它塞进 win-openssl-deps.sh（那是 OpenSSL 专用的）。
-            basic-static|basic-shared|web|capi|wsdl|yyjson|db) echo "(这一格没有系统依赖)" ;;
+            basic-static|basic-shared|web|capi|wsdl|yyjson|db|brotli) echo "(这一格没有系统依赖)" ;;
             ssl|h2|quic|http3)             bash .github/scripts/win-openssl-deps.sh ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
