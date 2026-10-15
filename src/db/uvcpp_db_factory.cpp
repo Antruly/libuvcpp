@@ -211,6 +211,13 @@ std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_driver(
     return nullptr;
 #endif
   }
+  if (scheme == "odbc") {
+#if UVCPP_DB_ODBC_ENABLE
+    return uvcpp_db_make_odbc();
+#else
+    return nullptr;
+#endif
+  }
   return nullptr;
 }
 
@@ -236,17 +243,25 @@ bool uvcpp_db_driver_available(const std::string& scheme) {
     return false;
 #endif
   }
+  if (scheme == "odbc") {
+#if UVCPP_DB_ODBC_ENABLE
+    return true;
+#else
+    return false;
+#endif
+  }
   return false;
 }
 
 bool uvcpp_db_driver_known(const std::string& scheme) {
-  return scheme == "sqlite" || scheme == "mysql" || scheme == "postgres";
+  return scheme == "sqlite" || scheme == "mysql" || scheme == "postgres" ||
+         scheme == "odbc";
 }
 
 std::string uvcpp_db_available_drivers() {
   std::string out;
-  const char* kAll[] = {"sqlite", "mysql", "postgres"};
-  for (size_t i = 0; i < 3; ++i) {
+  const char* kAll[] = {"sqlite", "mysql", "postgres", "odbc"};
+  for (size_t i = 0; i < 4; ++i) {
     if (!uvcpp_db_driver_available(kAll[i])) continue;
     if (!out.empty()) out.push_back(',');
     out.append(kAll[i]);

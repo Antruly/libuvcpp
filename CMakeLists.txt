@@ -190,6 +190,15 @@ option(UVCPP_DB_SQLITE_FROM_SOURCE
   "Build the SQLite backend from a pinned source amalgamation (static) instead of the system libsqlite3" OFF)
 option(UVCPP_ENABLE_DB_MYSQL  "Build the MySQL backend of the db module (needs libmysqlclient)" ON)
 option(UVCPP_ENABLE_DB_PGSQL  "Build the PostgreSQL backend of the db module (needs libpq)" ON)
+# ODBC 后端是**通用**的：它只要求一套 ODBC 头加一个驱动管理器，具体连什么库由
+# 连接串里的 `Driver=` 决定。接 SQL Server 走的就是这条路 —— 微软没有给 SQL Server
+# 一个可链接的 C 客户端库，`msodbcsql18` 本身就是 ODBC 驱动。
+#
+# 与另两个后端不同，它**没有** `UVCPP_DB_RUNTIME_LOAD` 那条路：驱动管理器
+# （Linux 的 libodbc、Windows 的 odbc32）本来就该在，而且很小。真正按需加载的是
+# 它下面的**具体驱动**，那件事由驱动管理器自己干，不归我们管。
+option(UVCPP_ENABLE_DB_ODBC
+  "Build the ODBC backend of the db module (needs ODBC headers + a driver manager; the data source is chosen by the connection string)" ON)
 # MySQL / PostgreSQL 两个后端**不在链接行上出现**，改成运行时打开客户端库。
 #
 # 这是给**预编译包**用的：`DT_NEEDED`（Windows 上是导入表）是**加载期**解析的，
@@ -1217,12 +1226,49 @@ if(UVCPP_ENABLE_DB)
     endif()
   endif()
 
-  # ---- 三个都关掉 ⇒ 整个模块关掉（见上面那段理由）----
+  if(UVCPP_ENABLE_DB_ODBC)
+    # 只要两样：头（sql.h）与驱动管理器（Linux 的 libodbc / Windows 的 odbc32）。
+    # 找的是 `sql.h` 而不是 `sqltypes.h` —— 后者在很多包的残留里都有，前者才代表
+    # 一套完整的 ODBC 头。
+    find_path(UVCPP_DB_ODBC_INCLUDE_DIR
+      NAMES sql.h
+      PATH_SUFFIXES include odbc include/odbc)
+    if(NOT UVCPP_DB_ODBC_INCLUDE_DIR)
+      message(WARNING
+        "UVCPP_ENABLE_DB_ODBC=ON 但找不到 sql.h。已强制关闭这个后端 —— "
+        "其余后端照编。Debian/Ubuntu 上装 unixodbc-dev，RHEL 系是 unixODBC-devel。")
+      set(UVCPP_ENABLE_DB_ODBC OFF)
+    elseif(WIN32)
+      # Windows 的 ODBC 是系统组件：头在 SDK 里，库就是 odbc32.dll（一定在）。
+      list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_ODBC_INCLUDE_DIR}")
+      list(APPEND UVCPP_DB_LINK_LIBS odbc32)
+      message(STATUS "db: ODBC 后端开（Windows 系统 odbc32）")
+    else()
+      # 这里找的是 unixODBC 的 `libodbc`。注意 `libodbc.so` 这个**开发符号链接**
+      # 是 unixodbc-dev 才给的：只装运行时的 unixodbc 时，`.so.2` 在而 `.so` 不在，
+      # 于是头与库都找不到 —— 会走到上面那条"找不到 sql.h"，
+      # 而不是在这里报一句让人去猜"为什么装了 unixodbc 还不行"。
+      find_library(UVCPP_DB_ODBC_LIBRARY NAMES odbc)
+      if(UVCPP_DB_ODBC_LIBRARY)
+        list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_ODBC_INCLUDE_DIR}")
+        list(APPEND UVCPP_DB_LINK_LIBS "${UVCPP_DB_ODBC_LIBRARY}")
+        message(STATUS "db: ODBC 后端开（驱动管理器 ${UVCPP_DB_ODBC_LIBRARY}）")
+      else()
+        message(WARNING
+          "UVCPP_ENABLE_DB_ODBC=ON 但只找到 sql.h、找不到 libodbc。已强制关闭这个"
+          "后端 —— 其余后端照编。Debian/Ubuntu 上装 unixodbc-dev（只装 unixodbc "
+          "运行时不带 .so 符号链接）。")
+        set(UVCPP_ENABLE_DB_ODBC OFF)
+      endif()
+    endif()
+  endif()
+
+  # ---- 四个都关掉 ⇒ 整个模块关掉（见上面那段理由）----
   if(NOT UVCPP_ENABLE_DB_SQLITE AND NOT UVCPP_ENABLE_DB_MYSQL AND
-     NOT UVCPP_ENABLE_DB_PGSQL)
+     NOT UVCPP_ENABLE_DB_PGSQL AND NOT UVCPP_ENABLE_DB_ODBC)
     message(WARNING
-      "UVCPP_ENABLE_DB=ON 但 SQLite / MySQL / PostgreSQL 三个后端一个都没成 —— "
-      "这样的库会编出一个谁也打不开的 uvcpp_db_client。已强制关闭 db 模块。")
+      "UVCPP_ENABLE_DB=ON 但 SQLite / MySQL / PostgreSQL / ODBC 四个后端一个都没"
+      "成 —— 这样的库会编出一个谁也打不开的 uvcpp_db_client。已强制关闭 db 模块。")
     set(UVCPP_ENABLE_DB OFF)
   endif()
 endif()
@@ -1870,11 +1916,11 @@ else()
   add_compile_definitions(UVCPP_DB_ENABLE=0)
   message(STATUS "Database module disabled (UVCPP_DB_ENABLE=0)")
 endif()
-# 三个后端宏**不受主开关守卫**：主开关关掉时它们照样按"这个后端编不编"取 0。
+# 四个后端宏**不受主开关守卫**：主开关关掉时它们照样按"这个后端编不编"取 0。
 # 写成 `if(UVCPP_ENABLE_DB) ... else 三个都 0` 的话，`uvcpp_db_factory.cpp` 里
 # 那句 `#if UVCPP_DB_SQLITE_ENABLE` 在模块关掉时是**未定义标识符**（求值为 0，
 # 结果碰巧一样）—— 碰巧一样的东西不该靠碰巧。
-foreach(_uvcpp_db_backend SQLITE MYSQL PGSQL)
+foreach(_uvcpp_db_backend SQLITE MYSQL PGSQL ODBC)
   if(UVCPP_ENABLE_DB_${_uvcpp_db_backend})
     add_compile_definitions(UVCPP_DB_${_uvcpp_db_backend}_ENABLE=1)
   else()
@@ -2312,6 +2358,7 @@ _uvcpp_literal01(UVCPP_DB_ENABLE        UVCPP_ENABLE_DB)
 _uvcpp_literal01(UVCPP_DB_SQLITE_ENABLE UVCPP_ENABLE_DB_SQLITE)
 _uvcpp_literal01(UVCPP_DB_MYSQL_ENABLE  UVCPP_ENABLE_DB_MYSQL)
 _uvcpp_literal01(UVCPP_DB_PGSQL_ENABLE  UVCPP_ENABLE_DB_PGSQL)
+_uvcpp_literal01(UVCPP_DB_ODBC_ENABLE   UVCPP_ENABLE_DB_ODBC)
 # 名字两边**一样**，这是这份文件里唯一的一处（别的都是 `UVCPP_ENABLE_X` 对
 # `UVCPP_X_ENABLE`）。理由：它不属于那两个族里的任何一个 —— 既不是"开关某个
 # 模块"（`UVCPP_ENABLE_*`），也不只是"这份依赖怎么来"（`*_FROM_SOURCE`，那两个
@@ -2389,6 +2436,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_DB_SQLITE_ENABLE=${UVCPP_DB_SQLITE_ENABLE}
       UVCPP_DB_MYSQL_ENABLE=${UVCPP_DB_MYSQL_ENABLE}
       UVCPP_DB_PGSQL_ENABLE=${UVCPP_DB_PGSQL_ENABLE}
+      UVCPP_DB_ODBC_ENABLE=${UVCPP_DB_ODBC_ENABLE}
       UVCPP_DB_RUNTIME_LOAD=${UVCPP_DB_RUNTIME_LOAD}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
