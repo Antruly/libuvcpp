@@ -480,6 +480,35 @@ void test_body_take_zero_copy() {
   check(wire(lv) == wire(rv), "json_str 左值与右值的报文逐字节相同");
   check(wire(lv) == wire(cs), "json_str 左值与 C 串重载的报文逐字节相同");
 
+  // `json()` 走的是同一条接管路径（`body_take`），不是 `body()` 的拷贝版。
+  // 报文上两者**逐字相同**（上面两条断言谁都过），能分开它们的只有
+  // `is_shared()`：拷贝版 `body()` 走 `clone_data()`，body 是自有缓冲、共享
+  // 句柄为空；接管版把刚 dump 出来那整块接过来（`/json/50` 一档 8 397 字节）。
+  // **本条是本改动唯一的回归护栏：谁把 `body_take` 换回 `body`，只有这里会红。**
+  uvcpp_json doc_json;
+  check(uvcpp_json_parse(doc, doc_json) == json_status::OK, "用例文档解析成功");
+  uvcpp_buf::reset_share_discard_count();
+  uvcpp_web_response jr;
+  jr.json(doc_json);
+  check(wire_body(wire(jr)) == doc, "json() 的体就是 dump 出来的那串");
+  check(has(wire(jr), "application/json"), "json() 的 Content-Type 没变");
+  check(jr.raw().body.is_shared(),
+        "json() 是接管而不是拷贝（换回 body() 时这条会红）");
+  check(uvcpp_buf::share_discard_count() == 0,
+        "共享 body 一路序列化下来没有被物化（非 0 就是一次白拷贝）");
+
+  // 新增的 `const char*` 那条重载与 `const std::string&` 那条**同语义**：
+  // 空指针与空串一视同仁（都不动 Content-Type）。默认实参在两条上都没有，
+  // 所以两种写法都能编过、必须给出同一份报文。
+  uvcpp_web_response np, es, ref_ct;
+  np.body_take(std::string(doc), nullptr);
+  es.body_take(std::string(doc), "");
+  ref_ct.body_take(std::string(doc), std::string());
+  check(wire(np) == wire(ref_ct),
+        "body_take 的 nullptr 与默认 ct 报文逐字节相同");
+  check(wire(es) == wire(ref_ct),
+        "body_take 的空串与默认 ct 报文逐字节相同");
+
   // cache_tag 落到 `uvcpp_http_response` 那个字段上（契约只有那一处）。
   //
   // 字面量必须**按段拼**：`\x` 会贪婪地吃掉后面所有十六进制位，`"json\x1f50\x1f6"`

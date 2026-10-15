@@ -735,7 +735,7 @@
   `uvcpp_web_app::send_response()` 包办 —— 那是整个框架里唯一同时看得见 `write_stream()`
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
-  `trailers()`（`src/webapp/uvcpp_web_response.h:512-516`），并在 `send_response()` 里加了
+  `trailers()`（`src/webapp/uvcpp_web_response.h:523-527`），并在 `send_response()` 里加了
   三段那条分支（`src/webapp/uvcpp_web_app.cpp:2753-2802`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
@@ -2485,6 +2485,56 @@
   行为不变的证据不是"看着像"：`test_db_sqlite_async_func` 装的日志钩子是按**内容**
   断言的（要求行里出现 `A_MARK`，那是 SQL 文本经 `brief_sql()` 之后的残留），
   三后端树里 `db_sqlite_{func,async_func,pool_func}` 全过。
+
+- **`resp.json()` 的应答体不再多拷一遍：每应答 −8 349 字节**（`1.7.2-dev`）。
+  `uvcpp_web_response::json()` 此前走 `body(const std::string&)`，而那条路的实现是
+  `clone_data()` —— `uvcpp_json_dump()` 刚交出来的那块（`/json/50` 一档 8 397 字节）
+  还要再 `malloc` 一块同样大的、`memcpy` 一遍。现在改走 `body_take()`，与
+  `json_str(std::string&&)` 同一条路：整块接过来，一次拷贝都不做。两种写法的
+  **可见结果逐字相同**（报文、`Content-Length`、`Content-Type` 都不动）。
+
+  顺带补的 `body_take(std::string&&, const char*)` 重载不是顺手加的：`json()` 往
+  `ct` 位置传的 `"application/json; charset=utf-8"` 是 34 字符，绑到
+  `const std::string&` 上要先建一个**临时串**（MSVC 的 SSO 只有 15 字符）—— 那就是
+  "省掉一次 8.4 KB 的 `malloc` + `memcpy`"旁边又添一次小 `malloc`，实测正好
+  **+1.00 次/请求**。这一对重载与 `body(const std::string&, const char*)` /
+  `body(const char*, size_t, const char*)` 那一对**逐字同理**，后者那处文件注释
+  早写着为什么需要它。
+
+  判据一（分配账，`/json/50?m=6`、固定 **20 000 请求**的窗口、A B B A、
+  `LD_PRELOAD` 拦 `malloc`/`calloc`/`realloc`）：分配 **1004.0176 / 1004.0178 →
+  1004.0179 / 1004.0172 次/请求**（没动，组内散布 ±0.0007），字节 **168 579.3 /
+  168 579.7 → 160 230.7 / 160 230.0 /请求**（−8 348.9、−4.95%，散布 ±0.4 B）。
+
+  判据二（拷贝账，同一形状，换成拦 `memcpy`/`memmove` 的 `LD_PRELOAD`，A B B A）：
+  次数 **2 592.0014 / 2 591.0015 / 2 591.0015 / 2 592.0013 次/请求**（正好
+  **−1.0000** 次），字节 **36 066.0 / 27 669.0 / 27 669.0 / 36 066.0 字节/请求**
+  （**−8 397.0**，组内一格不动）。这 −8 397 与同一档 `curl -w %{size_download}`
+  量到的应答体长度**逐字节相同** —— 少掉的就是"那块体被整段拷一遍"这件事本身。
+
+  判据三（指令数，callgrind `--collect-jumps=no --cache-sim=no --branch-sim=no`，
+  热身之后 `callgrind_control -z` 清零、窗口之后 `-d` 落盘，总账用
+  `callgrind_annotate --auto=no` 的 PROGRAM TOTALS 读）：A B B A = **1 138 898.1 /
+  1 129 449.9 / 1 128 789.2 / 1 138 237.3 Ir/请求** ⇒ 改后 **−9 448 Ir/请求
+  （−0.83%）**，两臂各约 660 的组内散布，间隙是散布的 6 倍以上。这一笔比"少一次
+  `memcpy`"该有的量级大，是因为 `clone_data()` 那一路**不只是多一次拷贝**：它还多
+  一次 8.4 KB 的 `malloc` + `free`，而那个尺寸超出 tcache（默认上限 1 032 字节），
+  走的是 unsorted/small bin 那条更长的路。
+
+  这一笔 −8 349 对得上账、且**两个数字要一起读**：省掉的是 `clone_data()` 那块
+  **8 397 字节**（同一档量具 `curl -w %{size_download}` 实测的应答体长度，逐字节
+  对上），多出来的是 `body_take` 那条路本来就要的那个 **48 字节**共享控制块
+  （`make_shared<const std::string>`：libstdc++ 的 `_Sp_counted_ptr_inplace` = 16 字节
+  计数 + `sizeof(std::string)` 32 = 48）—— 8 397 − 48 = **8 349**。所以**分配次数
+  一格不动是对的**（2 → 2：少一块大的、多一块小的），变的是**每请求分配出去的
+  字节数**与那一次 8.4 KB 的 `memcpy`。拿"次数没降"当"没效果"会读反。
+
+  **如实记一句这笔账的份量**：上面那 −0.83% 是**这段处理器路径**上的指令数，
+  不是平台那一档的分。折到平台读数上它比同一档两次读数之间的散布还小（第五轮那组
+  对照落在 ±4% 内）—— 所以这一条只按上面那三个**确定性计数**记账，不按平台读数
+  记账。真正的护栏是用例：`test_web_app_response_func` 里
+  `jr.raw().body.is_shared()` 那条**区分得开**接管与拷贝（报文那两条断言区分不开，
+  两种写法谁都过）—— 做了一次**变异**，把 `json()` 改回 `body()`，只有这一条变红。
 
 ### JSON
 
