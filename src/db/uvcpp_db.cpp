@@ -65,6 +65,17 @@ struct uvcpp_db_client::impl {
       log(line);
     }
   }
+
+  /// 惰性版本：**只有真的装了回调**才会去构造那一行。
+  ///
+  /// 造一行日志并不便宜：`brief_sql()` 要把整条 SQL 扫一遍、再 `reserve` 一次，
+  /// 而那条 `operator+` 链每越过 SSO 的 15 字符就再分配一次（一行约 250 字节
+  /// ⇒ 六七次分配）。**不装回调是生产路径上的常态**，那时的开销应当恰好是零
+  /// —— 与 `log_level::OFF` 是阈值而不是"藏起来"是同一个道理。
+  template <typename Build>
+  void log_lazy(Build build) {
+    if (log) log(build());
+  }
 };
 
 uvcpp_db_client::uvcpp_db_client() : impl_(new impl()) {}
@@ -202,15 +213,17 @@ uvcpp_db_status uvcpp_db_client::query(const std::string& sql,
 
   if (!uvcpp_db_ok(st)) {
     impl_->last_error = err;
-    impl_->log_line(std::string("query failed | ") + uvcpp_db_status_name(st) +
-                    " | " + std::to_string(ms) + " ms | " + brief_sql(sql) +
-                    " | " + err);
+    impl_->log_lazy([&] {
+      return std::string("query failed | ") + uvcpp_db_status_name(st) + " | " +
+             std::to_string(ms) + " ms | " + brief_sql(sql) + " | " + err;
+    });
     return st;
   }
-  impl_->log_line("query ok | " + std::to_string(out->row_count()) + " 行 | " +
-                  std::to_string(ms) + " ms | " + brief_sql(sql) +
-                  (params.empty() ? "" : " | 参数 " +
-                                             std::to_string(params.size())));
+  impl_->log_lazy([&] {
+    return "query ok | " + std::to_string(out->row_count()) + " 行 | " +
+           std::to_string(ms) + " ms | " + brief_sql(sql) +
+           (params.empty() ? "" : " | 参数 " + std::to_string(params.size()));
+  });
   return uvcpp_db_status::OK;
 }
 
@@ -244,16 +257,18 @@ uvcpp_db_status uvcpp_db_client::execute(const std::string& sql,
 
   if (!uvcpp_db_ok(st)) {
     impl_->last_error = err;
-    impl_->log_line(std::string("execute failed | ") +
-                    uvcpp_db_status_name(st) + " | " + std::to_string(ms) +
-                    " ms | " + brief_sql(sql) + " | " + err);
+    impl_->log_lazy([&] {
+      return std::string("execute failed | ") + uvcpp_db_status_name(st) +
+             " | " + std::to_string(ms) + " ms | " + brief_sql(sql) + " | " +
+             err;
+    });
     return st;
   }
-  impl_->log_line("execute ok | 影响 " +
-                  std::to_string(affected ? *affected : -1) + " 行 | " +
-                  std::to_string(ms) + " ms | " + brief_sql(sql) +
-                  (params.empty() ? "" : " | 参数 " +
-                                             std::to_string(params.size())));
+  impl_->log_lazy([&] {
+    return "execute ok | 影响 " + std::to_string(affected ? *affected : -1) +
+           " 行 | " + std::to_string(ms) + " ms | " + brief_sql(sql) +
+           (params.empty() ? "" : " | 参数 " + std::to_string(params.size()));
+  });
   return uvcpp_db_status::OK;
 }
 
