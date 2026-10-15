@@ -206,21 +206,16 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
 
   web_split_path_query(raw_url_, raw_path_, query_string_);
 
-  // 路径解码用 plus_as_space = false —— 路径里的 '+' 是字面加号。
+  // 归一化成路由与中间件看到的那条路径（解码 + 折叠）。两条规则的分工与
+  // 顺序理由（`+` 是字面加号、`%2F` 解码后充当分隔符、所以**必须先解码再
+  // 折叠**）都写在 `web_normalize_path()` 的注释里 —— 那里是这三处
+  // （本函数 / `claim_stream()` / `on_ws_upgrade()`）唯一的归一化入口。
   //
-  // 注意由此产生的一条规则：**`%2F` 解码成 `/`，所以它充当分隔符**。
-  // 也就是说 `/api/a%2Fb` 解出来是 `/api/a/b`，路由会按两段匹配。这是有意
-  // 选择的（Express 等框架同样在解码后的路径上匹配），写在文档里，而不是
-  // 让 `%2F` 变成一个隐形的、只有攻击者会用的第三态。
-  path_ = web_url_decode(raw_path_, /*plus_as_space=*/false);
-
-  // 折叠连续斜杠，与路由切段（`split_path()`）看齐 —— 否则路由会把
-  // `//api/me` 匹配到 `/api/me` 那条，而中间件从 `path()` 拿到的是
-  // `//api/me`，按前缀写的鉴权（`p.rfind("/api/", 0) == 0`）当场被绕过。
-  //
-  // 必须在**解码之后**做：`%2F` 解出来就是 `/`，先折叠会让 `/a%2F%2Fb` 与
-  // `/a%2Fb` 得到不同的段划分，而文档写明解码后的 `/` 充当分隔符。
-  path_ = web_collapse_slashes(path_);
+  // 先赋值再原地归一，而不是 `path_ = web_normalize_path(...)` 那种形态：
+  // `path_` 的容量是上一条请求留下的，够用时这次 `assign` 是纯 memcpy、一次
+  // 分配都不做；归一那一步在路径本来就最简时更是连一个字节都不碰。
+  path_ = raw_path_;
+  web_normalize_path(path_);
 
   // 关心的几个头解析一次缓存下来。http_headers 是线性表，每次 get_header
   // 都是 O(头数) 次大小写不敏感比较，而 content_type 在 is_json()/is_form()

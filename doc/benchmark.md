@@ -1477,7 +1477,7 @@ E 是**关掉那个开关**的同一份库，它逐列等于 C ⇒ "关掉 = 回
 只放一个 URL 的请求表再量一遍：带孪生文件的（`app.js`）是 `2 realpath + 2 statx`，
 没有孪生的（`bold.woff2`）是 **`5 realpath + 3 statx`**。多出来的那几次不是噪声 ——
 `web_real_path(allow_missing=true)` 在整条路径 `realpath` 失败之后**还要再解析一次
-父目录**（`src/webapp/uvcpp_web_util.cpp:796`、`:813`），所以一次**失败**的解析是 2 次 `realpath`
+父目录**（`src/webapp/uvcpp_web_util.cpp:854-854`、`src/webapp/uvcpp_web_util.cpp:871-871`），所以一次**失败**的解析是 2 次 `realpath`
 而不是 1 次。加权 `(15×2 + 5×5)/20 = 2.75` 对 `(15×2 + 5×3)/20 = 2.25`，与上面
 实测的 2.734 / 2.245 对上（差的那点是混载里连接建立期的零头）。
 

@@ -165,6 +165,32 @@ UVCPP_API void web_split_path_query(const std::string& raw_url,
 UVCPP_API std::string web_collapse_slashes(const std::string& path);
 
 /**
+ * @brief 把**已经切出来的路径**归一化成路由与中间件看到的那条串：先解码、
+ *        再折叠连续斜杠。**原地**改写，所以调用方不需要第三块缓冲。
+ *
+ * 这是 `uvcpp_web_request::take_from()`、`uvcpp_web_app::claim_stream()` 和
+ * `uvcpp_web_app::on_ws_upgrade()` 三处**唯一**的归一化入口。那三处原先各写
+ * 一遍等价的 `web_collapse_slashes(web_url_decode(raw_path, false))`，一致性
+ * 只靠注释维持（三处都写着"必须与另外两处完全一致"）。收敛到这里之后，
+ * "同一个 URL 在路由表、流式表、WS 表里看到同一条路径"是**构造上**成立的。
+ *
+ * 两条规则的顺序不能换，理由是 `%2F`：
+ *   - 解码用 `plus_as_space = false` —— 路径里的 `+` 是字面加号；
+ *   - **解码后**的 `/` 充当分隔符，所以 `/api/a%2Fb` 会按两段匹配。这是有意
+ *     选择的（Express 等框架同样在解码后的路径上匹配）；
+ *   - 因此折叠必须在解码**之后**：先折的话 `/a%2F%2Fb` 与 `/a%2Fb` 会得到
+ *     不同的段划分，与上面那条规则矛盾。
+ *
+ * 折叠的理由与 `web_collapse_slashes()` 相同：路由会把 `//api/me` 匹配到
+ * `/api/me` 那条，而中间件从 `path()` 拿到的是 `//api/me` —— 按前缀写的鉴权
+ * （`p.rfind("/api/", 0) == 0`）当场被绕过。
+ *
+ * **已经是最简形式时一个字节都不动**（无 `%`、以 `/` 开头、不含 `//`、末尾
+ * 不是 `/`），而这是绝大多数请求的形状。
+ */
+UVCPP_API void web_normalize_path(std::string& path);
+
+/**
  * @brief 解析查询串为有序键值对。
  *
  * 保序、允许重复键、允许空值。键与值都做百分号解码（`+` → 空格）。

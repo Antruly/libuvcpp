@@ -1187,13 +1187,13 @@ http_stream_handler uvcpp_web_app::claim_stream(uvcpp_http_request& req,
   // `web_split_path_query` + `web_url_decode`（两次分配）。
   if (stream_router_.route_count() == 0) return http_stream_handler();
 
-  // 路径算法必须与 `uvcpp_web_request::take_from` 和 `on_ws_upgrade` **完全
-  // 一致**，否则同一个 URL 在流式表和普通表里会匹配到不同的路径。
-  std::string raw_path;
+  // 路径归一化走 `web_normalize_path()` —— 与 `uvcpp_web_request::take_from`
+  // 和 `on_ws_upgrade` 是**同一个函数**，所以同一个 URL 在流式表和普通表里
+  // 匹配到的路径不可能不同（以前是三处各写一遍、靠注释保持一致）。
+  std::string path;
   std::string query_string;
-  web_split_path_query(req.url, raw_path, query_string);
-  const std::string path =
-      web_collapse_slashes(web_url_decode(raw_path, /*plus_as_space=*/false));
+  web_split_path_query(req.url, path, query_string);
+  web_normalize_path(path);
 
   web_route_match m = stream_router_.match(req.method, path);
   if (m.result != web_route_result::MATCHED || m.handler == nullptr) {
@@ -1488,16 +1488,16 @@ uvcpp_web_app& uvcpp_web_app::websocket(
 
 void uvcpp_web_app::on_ws_upgrade(uvcpp_http_request& req,
                                   uvcpp_tcp_client* client) {
-  // **先算路径，且不碰请求。** 用的是与 `uvcpp_web_request::take_from` 完全
-  // 相同的两个自由函数，所以 WS 路由与 HTTP 路由看到的路径一定是同一个。
+  // **先算路径，且不碰请求。** 归一化走 `web_normalize_path()` —— 与
+  // `uvcpp_web_request::take_from`、`claim_stream()` 是同一个函数，所以 WS
+  // 路由与 HTTP 路由看到的路径一定是同一个。
   //
   // 为什么强调"不碰请求"：没命中就要回落成普通 HTTP 请求，那条路要能拿到
   // 完整的 body。先 `take_from()` 再回落的话，body 已经被搬走一次了。
-  std::string raw_path;
+  std::string path;
   std::string query_string;
-  web_split_path_query(req.url, raw_path, query_string);
-  const std::string path =
-      web_collapse_slashes(web_url_decode(raw_path, /*plus_as_space=*/false));
+  web_split_path_query(req.url, path, query_string);
+  web_normalize_path(path);
 
   bool hit = false;
   if (ws_server_ != nullptr && !ws_handlers_.empty()) {
