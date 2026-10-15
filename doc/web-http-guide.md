@@ -712,7 +712,7 @@ p99 **170.5 ms → 140.5 ms**。读数与口径见 [`benchmark.md`](benchmark.md
 
 zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`），最小 body 1024
 （`src/web/uvcpp_http_server.h:1814-1814`），排除的 MIME 走 `default_excluded_mime_types()`
-（`src/web/uvcpp_http_compress.cpp:215-242`）。压缩变体缓存三道限：
+（`src/web/uvcpp_http_compress.cpp:216-243`）。压缩变体缓存三道限：
 单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1905-1915`）。
 
 **第五个旋钮：档位。** `set_compress_level()` / `compress_level()`
@@ -734,7 +734,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`�
 协商（`http_compress::parse_accept_encoding()`，`Accept-Encoding` 里 `q` 相同时
 `br` > `gzip` > `deflate`，`*` 兜底、`br;q=0` 排除、指名要一个本构建编不出来的
 编码时**原样发原文**而不是拿另一种编码的字节冒充 ——
-`src/web/uvcpp_http_compress.cpp:122-183`）、**同一张**排除 MIME 表、
+`src/web/uvcpp_http_compress.cpp:123-184`）、**同一张**排除 MIME 表、
 **同一个**变体缓存。这不是为了快：质量档固定在
 `http_compress::k_brotli_quality_default`（= 5，`src/web/uvcpp_http_compress.h:160`），
 默认档下单份语料比 gzip 6 档**小 11 % 左右**，而每请求的代价与 gzip 相同 ——
@@ -742,7 +742,10 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`�
 出现在**键**里（`编码字符 + 档位字符 + cache_tag`），两条路走的是同一条
 （`src/web/uvcpp_http_server.cpp:2119-2122`）。反过来说：**不填 `cache_tag` 就
 每请求重压一遍**，那时 `br` 比 gzip 更贵（本机 8.4 KB 那份：gzip 51.6 µs、
-`br` 88.6 µs），所以"要不要开"取决于条目有没有把响应体的指纹写进 `cache_tag`。
+`br` 88.6 µs —— 这一遍里有一半以上花在**编码器状态每请求重建**要的那 ~728 KB 上，
+把它改成线程本地竞技场之后同一把尺子上 `br` 掉到 88.57 µs、`br`/`gzip` 由 3.25 降到
+1.78，详见 `benchmark.md` §4.17；**但仍没过 gzip**），所以"要不要开"取决于条目
+有没有把响应体的指纹写进 `cache_tag`。
 `br` 没有独立的质量旋钮：`set_compress_level()`
 （`src/web/uvcpp_http_server.h:612`）只管 gzip/deflate 那个量纲（`-1` 与 0..9），
 `br` 用 `0..11`，两把尺子不能共用（`clamp_brotli_quality()` 与
