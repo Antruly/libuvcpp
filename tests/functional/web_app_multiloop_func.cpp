@@ -1360,6 +1360,163 @@ void test_static_cache_reput_bytes() {
 }
 
 // =========================================================================
+// 7c. `revalidate = LOOP_STAT` 在**两条工作循环**上
+// =========================================================================
+
+/**
+ * @brief `LOOP_STAT` 档的静态服务跑在两条工作循环上时，同一个 URL 必须被
+ *        **两条循环各自的那份前台副本**都答对。
+ *
+ * **为什么要单独一条**：`LOOP_STAT` 档把"校验 + 缓存比对"整段搬到循环线程
+ * 上，于是那一档的解析记忆与缓存字节各有一份**按循环分的**前台副本；而
+ * `POOL` 档一次都碰不到它们（每一次访问都挂在 `probed_on_loop` 上）。上面
+ * 7 与 7b 两条用的都是默认档（`POOL`），`test_loop_stat`
+ * （`web_app_static_func.cpp`）走的虽然是 `LOOP_STAT` 却只有**一条**循环 ——
+ * 于是"同一个键、两条循环、各自给答案"这个形状没有任何用例看着。这也是这两张
+ * 表唯一会出错的形状：键一样、循环不同。
+ *
+ * 判据全是内容与计数，不看墙钟。每条连接落 `1 + i % 2`（见 7 那条的说明），
+ * 所以第 i 次请求走的是哪条循环是确定的、可数的：
+ *
+ *  - 12 次同一个 URL ⇒ 未命中恰好 1 次（只有全局表那一条），命中 11 次；
+ *  - 改写文件（**换了长度**，于是 `size` 一项就能分辨，不依赖 mtime 的纳秒位）
+ *    ⇒ 之后**第一个**请求就要带新字节；
+ *  - 再走 4 次让两条循环的前台副本都刷新到新身份 —— 其中最后一次是**前台
+ *    命中**（零取锁那条路），答错就会在这里现形；
+ *  - `clear_cache()` ⇒ 条目清零，之后**第一个**请求必须是未命中（两轮，各发
+ *    一次，好让两条循环都被看到）。它作证的是"前台副本按不住字节"（弱引用）；
+ *    解析记忆那份前台副本的代际作废由 `web_app_static_func.cpp` 的
+ *    `measure_memo_reset()` 看着 —— 见下面那段注释。
+ */
+void test_static_cache_two_loops_loopstat() {
+  if (!prepare_static_fs()) {
+    check(false, "建不出静态临时目录");
+    return;
+  }
+
+  uvcpp_web_app app;
+  configure_for_test(app);
+  check(app.set_loops(3) == 0, "LOOP_STAT：set_loops(3) 成功");
+
+  uvcpp_web_static_options opts;
+  opts.revalidate = uvcpp_web_revalidate::LOOP_STAT;
+  opts.cache_max_entries = 8;
+  opts.cache_max_bytes = 1u * 1024u * 1024u;
+  opts.max_cached_file_size = 1u * 1024u * 1024u;
+  std::shared_ptr<uvcpp_web_static> st =
+      app.serve_static("/s", kStaticDir, opts);
+  check(st != nullptr, "LOOP_STAT：serve_static 拿到了对象");
+
+  check(app.start() == 0, "LOOP_STAT：start() 成功");
+  const int port = app.bound_port();
+
+  const int kReqs = 12;
+  int ok = 0;
+  for (int i = 0; i < kReqs; ++i) {
+    uvcpp_http_response r;
+    if (get(port, "/s/app.js", r) && status_of(r) == 200 &&
+        body_of(r) == kStaticBody) {
+      ++ok;
+    }
+  }
+  check(ok == kReqs, "LOOP_STAT：12 次请求全部拿到正文字节（" +
+                         std::to_string(ok) + "/" + std::to_string(kReqs) + "）");
+
+  if (st) {
+    check(st->cache_entries() == 1,
+          "LOOP_STAT：全局缓存只有 1 条（实际 " +
+              std::to_string(st->cache_entries()) + "）");
+    check(st->cache_bytes() == std::strlen(kStaticBody),
+          "LOOP_STAT：cache_bytes() == 文件长度（实际 " +
+              std::to_string(st->cache_bytes()) + "）");
+    // 前台副本按的是**弱**引用，所以它一条字节都不占：12 次里只有全局表
+    // 那一次是真的未命中，之后每一次（含另一条循环第一次落到全局表上取的
+    // 那一次）都是命中。
+    check(st->cache_misses() == 1, "LOOP_STAT：12 次里只该有 1 次未命中（实际 " +
+                                     std::to_string(st->cache_misses()) + "）");
+    check(st->cache_hits() == static_cast<unsigned long long>(kReqs - 1),
+          "LOOP_STAT：其余 11 次都是命中（实际 " +
+              std::to_string(st->cache_hits()) + "）");
+  }
+
+  // ---- 改写（换长度 ⇒ 只看 size 就能分辨） ----
+  const std::string kFourth = "body-of-app-js-REWRITTEN-across-two-loops";
+  check(kFourth.size() != std::strlen(kStaticBody),
+        "新正文长度不同（上面那条断言的前提）");
+  check(write_static_body(kFourth), "LOOP_STAT：改写静态文件成功");
+
+  for (int i = 0; i < 4; ++i) {
+    uvcpp_http_response r;
+    check(get(port, "/s/app.js", r) && status_of(r) == 200 &&
+              body_of(r) == kFourth,
+          "LOOP_STAT：改写后第 " + std::to_string(i + 1) +
+              " 次请求就要带新字节（两条循环交替）");
+  }
+  if (st) {
+    check(st->cache_misses() == 2,
+          "LOOP_STAT：改写之后恰好多了 1 次未命中（实际 " +
+              std::to_string(st->cache_misses()) + "）");
+    check(st->cache_hits() == static_cast<unsigned long long>(kReqs + 2),
+          "LOOP_STAT：改写后 4 次里 3 次命中（实际 " +
+              std::to_string(st->cache_hits()) + "）");
+    check(st->cache_bytes() == kFourth.size(),
+          "LOOP_STAT：改写后 cache_bytes() == **新**长度（实际 " +
+              std::to_string(st->cache_bytes()) + "）");
+  }
+
+  // ---- clear_cache：前台副本不许把清掉的字节继续发出去 ----
+  //
+  // 每一轮**只发一次**请求，判据是"这一次必须是未命中"。这一条成立的前提是
+  // 那次请求落到的循环手上确实还留着一条身份对得上的副本：上面那 4 次改写后
+  // 的请求已经把两条循环都刷成了新身份，所以两条都满足，这次请求落在哪条循环
+  // 上都一样。
+  //
+  // **它作证的是"前台副本按不住字节"**（`body_entry::data` 是**弱**引用），
+  // 不是"代际标记生效了"：清空把全局表里最后一份强引用放掉，弱引用当场失效，
+  // 于是落到全局表上、未命中。把那条弱引用改成强引用，这里就会变成 0 次未命中。
+  // 代际标记管的是另一半（**解析记忆**的前台副本，它不含弱引用，只能靠一个
+  // 整数作废），那一条的判据在 `web_app_static_func.cpp` 的 `measure_memo_reset()`
+  // 里，看的是 `clear_cache()` 之后第一个请求的 `realpath` 计数。
+  //
+  // 为什么是两轮：清空之间请求是交替落循环的（`1 + i % 2`），两轮通常各覆盖
+  // 一条循环。就算连接在这里不交替（两轮落在同一条上），下面这两条断言也仍然
+  // 成立 —— 只是第二条循环少看了一眼，不会因此变成假绿。
+  //
+  // 为什么不能"清空后连发两次、断言涨 2"：第一次未命中会把全局表重新填上，
+  // 第二次于是**合法地**全局命中（另加一次前台登记）。那是设计如此，不是漏。
+  if (st) {
+    for (int round = 0; round < 2; ++round) {
+      const unsigned long long miss_before = st->cache_misses();
+      const unsigned long long hit_before = st->cache_hits();
+      const std::string tag = "（第 " + std::to_string(round + 1) + " 轮）";
+      st->clear_cache();
+      check(st->cache_entries() == 0,
+            "LOOP_STAT：clear_cache 之后条目应当清零" + tag + "（实际 " +
+                std::to_string(st->cache_entries()) + "）");
+
+      uvcpp_http_response r;
+      check(get(port, "/s/app.js", r) && status_of(r) == 200 &&
+                body_of(r) == kFourth,
+            "LOOP_STAT：clear_cache 之后内容照旧正确" + tag);
+      check(st->cache_misses() - miss_before == 1 &&
+                st->cache_hits() == hit_before,
+            "LOOP_STAT：clear_cache 之后的下一个请求必须是未命中" + tag +
+                "（misses 涨 " + std::to_string(st->cache_misses() - miss_before) +
+                "、hits 涨 " + std::to_string(st->cache_hits() - hit_before) +
+                "；前台副本没跟着失效就会撞在旧副本上）");
+    }
+    check(st->cache_entries() == 1,
+          "LOOP_STAT：清空之后重新缓存回 1 条（实际 " +
+              std::to_string(st->cache_entries()) + "）");
+  }
+
+  check(stop_and_join_within(app, 20000, "stop()+join() 返回"),
+        "LOOP_STAT：stop()+join() 在有界墙钟内返回");
+
+  cleanup_static_fs();
+}
+
+// =========================================================================
 // 8. 对照组：n == 1 逐字不变
 // =========================================================================
 
@@ -1787,6 +1944,8 @@ int main() {
   test_static_cache_two_loops();
   std::cout << "-- 静态缓存：重插同一个键时的字节账 --" << std::endl;
   test_static_cache_reput_bytes();
+  std::cout << "-- 静态缓存（LOOP_STAT 档，两条循环各自的前台副本）--" << std::endl;
+  test_static_cache_two_loops_loopstat();
   std::cout << "-- 启动失败要收回工作循环 --" << std::endl;
   test_start_failure_reclaims_workers();
   std::cout << "-- 启动成功 ⇒ 停机干净（初始化失败的观测面）--" << std::endl;

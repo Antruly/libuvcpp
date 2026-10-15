@@ -752,7 +752,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`�
 `clamp_compress_level()` 之所以不合并，就是这条）。**`.br` 孪生文件与这个开关
 无关**：`http_pick_precompressed_variants()`（`src/web/uvcpp_http_common.h:641`）
 只看 `Accept-Encoding` 与盘上有没有那个文件，盘上有 `.br` 就照发（连
-`vary: accept-encoding` 一起发，`src/webapp/uvcpp_web_static.cpp:1810-1824`）——
+`vary: accept-encoding` 一起发，`src/webapp/uvcpp_web_static.cpp:2132-2146`）——
 开关管的是"现场编得出编不出 `br`"，不管"能不能转发别人编好的 `br`"。
 
 排除表里带 `/` 的条目按**前缀**匹配（`image/` 管住所有位图），不带 `/` 的按**精确**

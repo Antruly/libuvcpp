@@ -605,6 +605,10 @@ int raw_status(const std::string& raw) {
 
 int g_port = 0;
 
+/// `/loopstat` 那个挂载的句柄。`fs_count` 那条要拿它喊 `clear_cache()`，
+/// 所以不能像别的挂载那样把 `shared_ptr` 丢掉。
+std::shared_ptr<uvcpp_web_static> g_loopstat_st;
+
 // ---- 1. 基本响应与 MIME ----
 
 void test_basic_and_mime() {
@@ -2426,6 +2430,68 @@ void measure_fs_count(const fs_count_api& api, const char* prefix,
 
 #endif  // __linux__
 
+/// `clear_cache()` 之后**下一个**请求必须走完整解析 —— 用 `realpath` 计数看。
+///
+/// 解析记忆是**纯记忆**（不参与任何正确性判定，见 `uvcpp_web_static.h`），所以
+/// "清完还留着记忆"**不会答错**：每条记忆在使用前都会被 `probe_leaf()` 重新
+/// `stat` 一遍。要护住的是另一件事 —— `Impl::clear_cache()` 里那句
+/// "让'清缓存之后第一次请求必定走完整解析'成为一条可以断言的性质"。`LOOP_STAT`
+/// 档比 `POOL` 档多了一层**按循环分的前台副本**，那层要是没跟着一起失效，这条
+/// 性质就只对全局表成立，而前台副本是**先被问**的那个。
+///
+/// 为什么只有 `realpath` 看得见：命中路径上一次都没有（上面那几条断言就是这个
+/// 意思），完整解析恰好一次。别的计数都辨不出"记不记得住"这件事。
+///
+/// @param prefix 只能是 `LOOP_STAT` 档的挂载前缀 —— `POOL` 档不碰前台副本，
+///               这条断言在那边**恒真**，测不出东西来。
+void measure_memo_reset(const fs_count_api& api, const char* prefix,
+                        const std::shared_ptr<uvcpp_web_static>& st) {
+  if (!st) {
+    check(false, "memo_reset：没拿到 LOOP_STAT 挂载的句柄");
+    return;
+  }
+  const std::string url = std::string(prefix) + "/hello.txt";
+  uvcpp_http_response r;
+
+  // 预热两次：第一次完整解析（把记忆烧进去），第二次走命中。
+  check(get(g_port, url.c_str(), r) && body_of(r) == "hello static",
+        "memo_reset：预热第一次拿到正文");
+  check(get(g_port, url.c_str(), r) && body_of(r) == "hello static",
+        "memo_reset：预热第二次拿到正文（此后走记忆）");
+
+  fs_counts a{}, b{}, c{};
+  if (!fs_count_snapshot(api, a)) {
+    check(false, "memo_reset：读不到计数");
+    return;
+  }
+
+  st->clear_cache();
+  check(get(g_port, url.c_str(), r) && body_of(r) == "hello static",
+        "memo_reset：clear_cache 之后照旧答对");
+  if (!fs_count_snapshot(api, b)) {
+    check(false, "memo_reset：读不到计数");
+    return;
+  }
+  check(get(g_port, url.c_str(), r) && body_of(r) == "hello static",
+        "memo_reset：再取一次照旧答对");
+  if (!fs_count_snapshot(api, c)) {
+    check(false, "memo_reset：读不到计数");
+    return;
+  }
+
+  const long long after_clear =
+      static_cast<long long>(b.get("realpath") - a.get("realpath"));
+  const long long after_again =
+      static_cast<long long>(c.get("realpath") - b.get("realpath"));
+  // 前台副本跟着 `clear_cache()` 一起作废的唯一判据：清完那一次必须重新解析。
+  // 少了代次标记，请求会撞在按循环分的那份记忆副本上，这里就是 0。
+  check_eq_i(after_clear, 1,
+             "memo_reset：clear_cache 之后**第一个**请求必须走完整解析"
+             "（1 次 realpath）");
+  check_eq_i(after_again, 0,
+             "memo_reset：紧接着那一次又该走记忆（0 次 realpath）");
+}
+
 void test_fs_count_budget() {
   std::cout << "[static] fs_count" << std::endl;
 #if defined(__linux__)
@@ -2438,6 +2504,7 @@ void test_fs_count_budget() {
   }
   measure_fs_count(*api, "/", "POOL");
   measure_fs_count(*api, "/loopstat", "LOOP_STAT");
+  measure_memo_reset(*api, "/loopstat", g_loopstat_st);
 #else
   std::cout << "  [note] 本平台没有这套量具（LD_PRELOAD 的计数器）—— 这一条不判"
             << std::endl;
@@ -2701,7 +2768,7 @@ int main() {
     // 好让"每请求投几次池"这件事在同一个进程、同一份负载下有个对照。
     uvcpp_web_static_options loopstat_mount;
     loopstat_mount.revalidate = uvcpp_web_revalidate::LOOP_STAT;
-    app.serve_static("/loopstat", k_root, loopstat_mount);
+    g_loopstat_st = app.serve_static("/loopstat", k_root, loopstat_mount);
 
     // 预压缩孪生文件：`/pc` 用默认阈值（1 MiB），`/pcs` 把阈值压到 4096 字节，
     // 好让"孪生自己超阈值"这条边界在小文件上就能测到。

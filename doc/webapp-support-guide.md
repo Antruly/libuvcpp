@@ -560,7 +560,7 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   `cancel()` 抢同一个对象（库内两处派发点都在循环线程上：整读路径由 `after_work`
   补派 —— `1.6.42-dev` 起记账已搬到 worker，`on_read_done` 的块级路径直接 `release()`）。
 - **它不接管所有权**：传的是**借用**指针，存活期由调用方保证 —— 静态路由借的是
-  App 的 `work_limit()`（`src/webapp/uvcpp_web_static.cpp:1926-1926`，且那一步在
+  App 的 `work_limit()`（`src/webapp/uvcpp_web_static.cpp:2248-2248`，且那一步在
   `t->start()` 之前）。它也是唯一一个**会挡掉违约**的 setter：跑起来之后换闸门
   会被**静默忽略**（`src/webapp/uvcpp_web_file.cpp:107`）—— 那时手上可能正攥着旧
   闸门的名额，换掉就没有对象可还了。
