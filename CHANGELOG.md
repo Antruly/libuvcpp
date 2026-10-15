@@ -410,6 +410,47 @@
   写在 `uvcpp_quic_session.h` 里，而调用点自己发明了一个 —— 拿对端 SCID 长度顶上。
   两端同源的用例永远看不见它（本库客户端也选 18 字节），换一个对端才现形。（`1.6.5-dev`）
 
+- **一个 QUIC 数据报装多条流的 STREAM 帧 —— `sendmsg` 从 1.03 次/请求降到 0.05**
+  （`1.7.2-dev`）。`quic_session::do_flush()` 现在每轮都带
+  `NGTCP2_WRITE_STREAM_FLAG_MORE` 调 `ngtcp2_conn_writev_stream()`。不带这个位走的是
+  ngtcp2 的默认行为 —— 它自己的文档原话是 "by default, application can only send
+  1 STREAM frame in one QUIC packet"（`ngtcp2.h`）—— 于是收侧一个数据报能装 28 个请求、
+  **发侧一个应答一个数据报**，每个包都单独走一遍包头构造、AEAD 与 `ngtcp2_conn_write_pkt`。
+  读数（本机 h3 档 `-c 64 -m 64 -t 9 -D 5s`，A B B A，确定性判据）：`sendmsg`/请求
+  **1.0316 / 1.0360 → 0.0428 / 0.0561**（19~24×），系统态微秒/请求
+  **3.498 / 5.322 → 0.404 / 0.630**，合计微秒/请求 **16.299 / 24.428 → 12.750 / 15.651**。
+  每请求字节量不变（13.28 → 13.25）。
+
+  这里有个坑留给下一个人：**"包还开着"不能用返回值的正负判**。`ngtcp2_conn.c` 在返回
+  `NGTCP2_ERR_STREAM_DATA_BLOCKED` **之前**就置上了 `NGTCP2_CONN_FLAG_PPE_PENDING`，
+  所以判据是 `more = (flags & MORE) != 0 && nwrite < 0`，而且
+  `NGTCP2_ERR_WRITE_MORE`（同样是负数）必须单独认出来、不能落进"连接级错误"那一支。
+  判错的症状不是"慢一点"：带着 `PPE_PENDING` 去调 `ngtcp2_conn_read_pkt()` 会撞上
+  `ngtcp2_conn.c` 里的 `assert(!(conn->flags & NGTCP2_CONN_FLAG_PPE_PENDING))`。
+  **触发条件是连接级流控** —— 突发超过对端广告的 `MAX_DATA` 才会走到那条返回上，而一个
+  一个地发请求永远到不了那个水位，所以这条缺陷在既有用例下**一条都不会红**。新增
+  `tests/functional/http3_large_body_func.cpp` 专打它（9 条请求、合计约 1.8 MiB，在
+  `connect` 回调里一次发出，逐字节比对），在新码上 3/3 绿、在旧码上 3/3 以那条断言中止。
+
+- **发送队列每块的容量按「这次要写多少」定 —— h3 每请求的分配字节 −89.6%、峰值常驻内存
+  −40 MiB**（`1.7.2-dev`）。`stream_send` 的块此前一律 `reserve(kChunkSize)`（64 KiB），
+  而那个值是按 2 MiB 单流的大块传输量出来的，HTTP/3 的常态却是"每条流只发几百字节"——
+  于是每块都是 64 KiB 里只用掉最前面一点。本机 h3 量具（`-c 64 -m 64`）上的账：
+  **每请求分配 65 778 字节里 65 536 是这一个 `reserve`，占全部分配字节的 91.6%**；而
+  64 连接 × 64 条并发流 × 64 KiB = 256 MiB 的活块，与平台 `baseline-h3-64` 报的
+  238 MiB 对得上 —— 它不只是一个显示数字，每块都要被写一遍、再被 ngtcp2 读一遍，
+  4096 块散在堆上，每次访问都是冷页。
+
+  改成在 `[kMinChunkSize, kChunkSize]` 之间按这次写入量取容量之后：分配字节/请求
+  **72 374.8 → 7 507.5**（−89.6%，A B B A 两序各一次），峰值 RSS
+  **91 / 90 MiB → 51 / 50 MiB**；而分配**次数**几乎不动（53.3891 → 53.3875）——
+  这一条省的是"每块占多大"，不是"分配几次"。`utime+stime` 在服务端受限的形状上是
+  12.03 → 11.91 µs/请求，落在散布内（无回归；本机端到端本来就分辨不了库内改动）。
+
+  代价是 `next_sendable_stream()` 里"第几块 + 块内偏移"不能再一次除法算出来，改成从
+  前往后累加地跳过 `sent_off - base_off` 个字节。**`settle()` 不用改** —— 它本来就是拿
+  `chunks.front().size()` 判整块确认的，与每块多大无关。
+
 ### HTTP/3（web 层）
 
 - **h3 上的「稍后应答」通了 —— `static-h3` 那一档从此订阅得上**（`1.6.8-dev`）：

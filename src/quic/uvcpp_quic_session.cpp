@@ -1479,20 +1479,31 @@ int quic_session::write_stream(int64_t stream_id, const char* data, size_t len,
   }
 
   if (len != 0) {
-    // 往最后一块里塞，塞满就开新块。**每块出生时 `reserve(kChunkSize)` 且
+    // 往最后一块里塞，塞满就开新块。**每块出生时 `reserve()` 一次定下容量、
     // 此后只写到这里为止** —— 这两条合起来保证块内地址一生不变，而那是
     // 递给 ngtcp2 的指针能一直有效的前提（见头里 `stream_send` 的注释）。
     // 用 `insert` 而不是 `resize`+`memcpy`：写入的是**从未递出去过**的那一段
     // （起点 `write_off >= sent_off`），所以既不搬字节也不碰已有数据。
+    //
+    // 容量**按这次写的量**定（`[kMinChunkSize, kChunkSize]` 之间），不是无条件
+    // `kChunkSize`：一条只发几百字节的流就只占一块 1 KiB，而不是 64 KiB。理由与
+    // 实测账见头里 `kMinChunkSize` 的注释。**"块大小不固定"这件事的另一半在
+    // `next_sendable_stream()`** —— 那里的"第几块 + 块内偏移"从一次除法换成了
+    // 一次累加，这是本改动唯一要同步的地方。
     size_t done = 0;
     while (done < len) {
       if (s.chunks.empty() ||
-          s.chunks.back().size() == stream_send::kChunkSize) {
+          s.chunks.back().size() == s.chunks.back().capacity()) {
+        size_t cap = len - done;
+        if (cap < stream_send::kMinChunkSize) cap = stream_send::kMinChunkSize;
+        if (cap > stream_send::kChunkSize) cap = stream_send::kChunkSize;
         s.chunks.emplace_back();
-        s.chunks.back().reserve(stream_send::kChunkSize);
+        s.chunks.back().reserve(cap);
       }
       ::std::vector<uint8_t>& c = s.chunks.back();
-      const size_t room = stream_send::kChunkSize - c.size();
+      // 用 `capacity()` 而不是另存一个"这块打算多大"的数：`reserve()` 之后
+      // 容量就是那块的天花板，而上面的循环条件正是拿它当"满了"的判据。
+      const size_t room = c.capacity() - c.size();
       const size_t take = room < (len - done) ? room : (len - done);
       c.insert(c.end(), data + done, data + done + take);
       done += take;
@@ -1588,21 +1599,27 @@ bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
     if (remaining != 0) {
       // 把 `[sent_off, write_off)` 描述成至多 `kMaxStreamVecs` 段连续内存。
       //
-      // 除最后一块外每块都是满的（本结构的稳态），所以"第几块 + 块内偏移"
-      // 一次除法就算得出来。**描不完也没关系**：一次调用只可能编进一个包
-      // （~1200 B），剩下的下一轮再描 —— 而每轮都是从同一个 `sent_off` 起算，
-      // 所以描述永远是"从下一个待发字节开始"的，不会漏。
-      const uint64_t rel = s.sent_off - s.base_off;
-      size_t idx = static_cast<size_t>(rel / stream_send::kChunkSize);
-      size_t off = static_cast<size_t>(rel % stream_send::kChunkSize);
-      for (; idx < s.chunks.size() && cnt < kMaxStreamVecs; ++idx) {
+      // **不能再用"第几块 + 块内偏移"一次除法算**：块容量是按写入量定的
+      // （见 `kMinChunkSize`），大小不齐。改成从前往后累加地跳过
+      // `sent_off - base_off` 个字节。块数不多（一块至少 1 KiB，而这里描述的
+      // 至多是"还没发出去的量"），这点线性扫描比一次除法贵不了多少。
+      //
+      // **描不完也没关系**：一次调用只可能编进一个包（~1200 B），剩下的下一轮
+      // 再描 —— 而每轮都是从同一个 `sent_off` 起算，所以描述永远是"从下一个
+      // 待发字节开始"的，不会漏。
+      uint64_t skip = s.sent_off - s.base_off;
+      for (size_t idx = 0; idx < s.chunks.size() && cnt < kMaxStreamVecs;
+           ++idx) {
         const ::std::vector<uint8_t>& c = s.chunks[idx];
-        if (off >= c.size()) break;  // 只在最后一块上可能（见上面的稳态）
-        datav[cnt].base = const_cast<uint8_t*>(c.data() + off);
-        datav[cnt].len = c.size() - off;
+        if (skip >= c.size()) {
+          skip -= c.size();
+          continue;
+        }
+        datav[cnt].base = const_cast<uint8_t*>(c.data() + skip);
+        datav[cnt].len = c.size() - static_cast<size_t>(skip);
         total += datav[cnt].len;
         ++cnt;
-        off = 0;
+        skip = 0;
       }
     } else {
       // 只剩一个 FIN 要发：**空数据 + FIN 位**是合法的一次调用（ngtcp2 文档：
