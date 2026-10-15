@@ -1,8 +1,10 @@
 # 数据库模块指南
 
 `src/db/` 是**库外的一层薄封装**：一个连接 = 一个 `uvcpp_db_client`，底下挂
-SQLite / MySQL / PostgreSQL 三个后端，SQL 由调用方写，结果按**表**取（列名 →
-值）。它不参与事件循环，也不是 ORM —— 没有模型、没有迁移、没有关系映射。
+SQLite / MySQL / PostgreSQL / ODBC 四个后端，SQL 由调用方写，结果按**表**取
+（列名 → 值）。前三个各对着**一种**数据库，第四个对着的是一个**接口** —— 连什么库由
+连接串里的驱动名决定（见 [§1](#1-怎么开) 的「ODBC：驱动管理器与**具体驱动**」）。
+它不参与事件循环，也不是 ORM —— 没有模型、没有迁移、没有关系映射。
 （建在它上面、替你把 `uv_queue_work` 那段样板写掉的 `uvcpp_db_async` 与
 `uvcpp_db_pool` 才碰循环，见 [§3](#3-公开面)；**底座本身**不认识 `uvcpp_loop`。）
 
@@ -10,12 +12,17 @@ SQLite / MySQL / PostgreSQL 三个后端，SQL 由调用方写，结果按**表*
 >
 > **同步的底座**（异步门面与连接池建在它上面）、**一个 client 一个连接**、
 > **不自动重连**、**返回码不抛异常**，
-> 把三个后端在"同一条 SQL 该得到同一个结果"这件事上钉到一套契约里，
-> 并把三家**真不一样**的地方如实写在这里，而不是假装它们一样。
+> 把 SQLite / MySQL / PostgreSQL 三个后端在"同一条 SQL 该得到同一个结果"这件事上
+> 钉到一套契约里（第四个后端 ODBC 也进了这套套件，但它的方言按数据源分派 ——
+> [§6](#6-三个后端钉住的一致与如实列出的三处不同) 写了它偏在哪、
+> [§11](#11-没做的如实列出) 写了哪一族还没跑过），并把各家**真不一样**的地方如实
+> 写在这里，而不是假装它们一样。
 >
 > 它默认**关**（`UVCPP_ENABLE_DB=OFF`）：它是全仓唯一一个必需第三方客户端库的
-> 模块。发布配置**显式打开**它，所以预编译包里带着这个模块 —— 而且**三个后端都在**
-> （1.7.0 起；SQLite 从源码编，MySQL/PG 编进来但库走运行时加载，见 §1 与 §3）。
+> 模块。发布配置**显式打开**它，所以预编译包里带着这个模块 —— `1.7.0` 那个包里
+> SQLite / MySQL / PostgreSQL **三个都在**（SQLite 从源码编，MySQL/PG 编进来但库走
+> 运行时加载，见 §1 与 §3）。ODBC 是 `1.7.1-dev` 才加的，**还没有哪个已发布的包
+> 带过它**。
 
 ## 目录
 
@@ -47,15 +54,16 @@ cmake --build build-db -j
 | `UVCPP_DB_SQLITE_FROM_SOURCE` | `OFF` | 上面那个 SQLite 后端改用**钉死哈希的源码 amalgamation**自己编，不走 `find_package`。**六条发布腿都是这个**（见下一节） |
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` + libmysqlclient） |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` + libpq） |
-| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节） |
+| `UVCPP_ENABLE_DB_ODBC` | `ON` | 编 ODBC 后端（要 `sql.h` + 驱动管理器）。**连什么库不在这里定** —— 那是连接串里 `Driver=` 的事（见下面「ODBC：驱动管理器与**具体驱动**」） |
+| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节）。ODBC 不走这条路，理由见那一节 |
 
-三个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
+四个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
 想明确裁掉哪一个才写 `=OFF`（那时连"找不到"的警告都不会有）。
 
 降级链是**两级**，两级都是 `message(WARNING)` + 普通变量 `set(... OFF)`：
 
 1. 某一个后端找不到 → 关掉**那一个**，其余照编；
-2. 三个都关掉了 → 关掉**整个模块** —— 那样的库能编出一个 `uvcpp_db_client`，
+2. 四个都关掉了 → 关掉**整个模块** —— 那样的库能编出一个 `uvcpp_db_client`，
    但它谁也打不开，属于"能配置、跑不起来"。
 
 所以 `CMakeCache.txt` 里 `UVCPP_ENABLE_DB_MYSQL:BOOL=ON` **不代表**它编进去了
@@ -65,8 +73,14 @@ cmake --build build-db -j
 -- db: SQLite 后端开（3.45.1）
 -- db: MySQL 后端开（/usr/lib/x86_64-linux-gnu/libmysqlclient.so）
 -- db: PostgreSQL 后端开（libpq 16.15）
+-- db: ODBC 后端开（驱动管理器 /usr/lib/x86_64-linux-gnu/libodbc.so）
 -- Including db module in build (database integration)
 ```
+
+ODBC 那一行报的是**驱动管理器**（Windows 上是 `-- db: ODBC 后端开（Windows 系统
+odbc32）`）—— 它**不是**"这台机器连得上某个数据源"：那件事只有 `open()` 才知道，
+见下面「ODBC：驱动管理器与**具体驱动**」。找不到 `sql.h`、或只找到头没找到
+`libodbc` 时，这一行换成一条 warning 并**只关掉 ODBC 这一个后端**，其余照编。
 
 开了 `UVCPP_DB_RUNTIME_LOAD` 时这两行会换个说法（后半截是**头**的出处，
 不再是库的出处）：
@@ -84,13 +98,14 @@ cmake --build build-db -j
 #include <db/uvcpp_db.h>
 
 int main() {
-  // "sqlite,mysql,postgres" —— 只列**真的编进来**的那几个
+  // "sqlite,mysql,postgres,odbc" —— 只列**真的编进来**的那几个
   std::printf("%s\n", uvcpp::uvcpp_db_drivers().c_str());
   return 0;
 }
 ```
 
-自己编的包少哪个后端时（**官方预编译包 1.7.0 起三个都在**，不会有这一行缺项），
+自己编的包少哪个后端时（**官方预编译包 1.7.0 里三个都在**，不会有这一行缺项；
+ODBC 从 `1.7.1-dev` 起进默认配置，还没有哪个已发布的包带过它），
 **这一行是第一个该看的地方**。
 
 > **注意这一行说的是"编进来没有"，不是"这台机器上能不能用"。**
@@ -166,6 +181,52 @@ UVCPP_DB_PGSQL_LIBRARY=/nonexistent/libpq.so.5 ./myapp
 于是**每个使用者**在加载这个 `.so` 时就炸。`--no-undefined` 把这条不变式交还
 给链接器：漏一处就是链接期红。
 
+### ODBC：驱动管理器与**具体驱动**是两件事
+
+前三个后端各自钉死一种客户端库（libsqlite3 / libmysqlclient / libpq），ODBC 对着
+的是一个**接口**：编进来的是 ODBC **驱动管理器**（Linux 的 `libodbc`、Windows 的
+系统 `odbc32`），**连到哪张库**由连接串里的 `Driver=`（或 `DSN=`）决定。那个**具体
+驱动**（比如 SQL Server 的 `ODBC Driver 18 for SQL Server`，官方 `msodbcsql18`）
+**既不归构建管、也不归这个库管**：装没装、装的是哪一版，只有 `open()` 那一刻才
+知道。接 SQL Server 走的就是这条路 —— 微软没给它一个可链接的 C 客户端库，它给的
+就是 ODBC 驱动，所以在 C 层没有第二个选择；而这个后端本身是**按通用写的**：能连
+SQL Server，也能连任何装得出 ODBC 驱动的数据源（Oracle、DB2、达梦……），全文件
+没有一处"是 SQL Server 就怎么着"。
+
+由此有三条与前三个后端不同的、值得先知道的：
+
+* **开关说的是"这份产物有没有这个后端"，不是"能不能连上"。** 配置期只要 `sql.h`
+  与驱动管理器两样。缺 `sql.h` 时打一条 warning（Debian/Ubuntu 上装 `unixodbc-dev`，
+  RHEL 系 `unixODBC-devel`）并只关掉 ODBC 这一个后端。**只装运行时 `unixodbc` 的
+  机器上也会走到这条**：那个包给的是 `libodbc.so.2`，而 `.so` 这个**开发符号链接**
+  是 `unixodbc-dev` 才有的 —— 所以要的是 `unixodbc-dev`，不是 `unixodbc`。
+* **连接失败时报的是驱动管理器给的原文**（驱动名写错时就是它那句"找不到数据源、
+  也没有默认驱动"），本模块不把它改写成自己的话：这句话是判"我的连接串写错了"
+  还是"这台机器没装驱动"唯一有用的信息。它**不走 `NO_DRIVER` 那条路** ——
+  `NO_DRIVER` 的含义是"这个后端没编进这份包"（见 [§2](#2-连接串)）。
+* **没有 `UVCPP_DB_RUNTIME_LOAD` 那条路，这是有意的。** 上面那一节存在的理由是
+  "缺了客户端库会让**进程起不来**"；ODBC 这边不成立：驱动管理器本来就该在、而且
+  很小，真正按需加载的是它下面的**具体驱动**，那件事归驱动管理器自己管。
+* **但它把驱动管理器**链**进来 —— 这一条的代价要单独知道。** SQLite 可以
+  （`UVCPP_DB_SQLITE_FROM_SOURCE`）编进产物、MySQL/PG 可以走运行时加载，ODBC 这份
+  默认是**直接链** `libodbc.so.2`（Windows 上是系统 `odbc32.dll`，本来就在，不算
+  代价）。于是 Linux 的产物上多一条 `DT_NEEDED`：
+
+  ```
+  $ objdump -p build-odbc/libuvcpp.so | grep NEEDED
+    NEEDED               libuv.so.1
+    NEEDED               libodbc.so.2
+    NEEDED               libstdc++.so.6
+  ```
+
+  没装 unixODBC 的机器上，这一条就是**加载期**失败 —— 正是上面「运行时加载」那一节
+  要消灭的形状。要不要留它由你定：`-DUVCPP_ENABLE_DB_ODBC=OFF` 去掉这条依赖，其余
+  三个后端照编。不改成运行时加载的理由不是"它小"，而是**它本身就是找驱动的那个
+  东西**：自己没有它，也就没法去找别的。
+
+连接串里的默认驱动名（`ODBC Driver 18 for SQL Server`）**只是默认**：`?Driver=` 或
+`?DSN=` 一写就换掉（见 [§2](#2-连接串)）。
+
 ### 预编译包里的 SQLite 是**从源码编的**：`UVCPP_DB_SQLITE_FROM_SOURCE`
 
 六条发布腿各传这几个 `-D`（**1.7.0 起**；在那之前后两行是 `=OFF`）：
@@ -176,10 +237,16 @@ UVCPP_DB_PGSQL_LIBRARY=/nonexistent/libpq.so.5 ./myapp
 -DUVCPP_DB_RUNTIME_LOAD=ON
 ```
 
-也就是说 —— **预编译包里的 db 模块三个后端都在**（`uvcpp_db_drivers()` 会打印
-`sqlite,mysql,postgres` —— 是**驱动的稳定短名**，`pgsql` 只是 `scheme` 的别名之一，
-见下面的别名表），但 MySQL/PG 的**客户端库**是运行时才打开的，链接行上
-不出现（见下面「客户端库运行时加载」那一节）。SQLite 那一半必须从源码编，不是漏配，
+也就是说 —— **`1.7.0` 那个预编译包里的 db 模块三个后端都在**（`uvcpp_db_drivers()`
+会打印 `sqlite,mysql,postgres` —— 是**驱动的稳定短名**，`pgsql` 只是 `scheme` 的
+别名之一，见下面的别名表），但 MySQL/PG 的**客户端库**是运行时才打开的，链接行上
+不出现（见下面「客户端库运行时加载」那一节）。**ODBC 是 `1.7.1-dev` 才加的，这六条
+腿的 `-D` 清单里还没有它** —— 它默认 `ON`，所以下一版的包里**会**有它，那意味着
+Linux 包上多一条 `DT_NEEDED libodbc.so.2`（Windows 上是系统 `odbc32`，不算代价）。
+这件事该由发布配置**显式**写出来（`-DUVCPP_ENABLE_DB_ODBC=ON` 或 `=OFF`），而不是
+靠默认值漂进去 —— 留在这里当一条待办。
+
+SQLite 那一半必须从源码编，不是漏配，
 是两条实测理由把另两条路都堵死了：
 
 | 想链系统的那份 | 实测结果 |
@@ -237,6 +304,10 @@ cmake -DUVCPP_ENABLE_DB=ON \
 cmake -DUVCPP_ENABLE_DB=ON \
       -DPostgreSQL_INCLUDE_DIR=/opt/pgsql/include \
       -DPostgreSQL_LIBRARY=/opt/pgsql/lib/libpq.so ..
+# ODBC 是本模块自己的两个 find_*
+cmake -DUVCPP_ENABLE_DB=ON \
+      -DUVCPP_DB_ODBC_INCLUDE_DIR=/opt/unixodbc/include \
+      -DUVCPP_DB_ODBC_LIBRARY=/opt/unixodbc/lib/libodbc.so ..
 ```
 
 **开了 `UVCPP_DB_RUNTIME_LOAD`**：位置的找法分成两截 ——
@@ -259,12 +330,13 @@ cmake -DUVCPP_ENABLE_DB=ON \
 
 ### 静态库上的已知缺口
 
-三个客户端库挂在 `$<BUILD_INTERFACE:>` + `PRIVATE` 下：**共享库**上
-`DT_NEEDED` 会跟着走，使用方什么都不用做；**静态库**（`uvcpp_a` / `uvcpp_a_s`）
-上那一条不传给消费者，使用方要自己链：
+四个后端用到的库（`sqlite3` / `pq` / `mysqlclient` / ODBC 的驱动管理器 `odbc`）
+挂在 `$<BUILD_INTERFACE:>` + `PRIVATE` 下：**共享库**上 `DT_NEEDED` 会跟着走，
+使用方什么都不用做；**静态库**（`uvcpp_a` / `uvcpp_a_s`）上那一条不传给消费者，
+使用方要自己链：
 
 ```cmake
-target_link_libraries(myapp PRIVATE uvcpp_a sqlite3 pq mysqlclient)
+target_link_libraries(myapp PRIVATE uvcpp_a sqlite3 pq mysqlclient odbc)
 ```
 
 这是**故意**的取舍，与 zlib / nghttp2 那几处同形：把绝对路径写进导出集会过得了
@@ -274,7 +346,8 @@ target_link_libraries(myapp PRIVATE uvcpp_a sqlite3 pq mysqlclient)
 **开了 `UVCPP_DB_RUNTIME_LOAD` 时这一节不适用**：MySQL/PG 的客户端库根本不在
 `UVCPP_DB_LINK_LIBS` 里（那正是那个开关干的事），所以静态库的使用方也**不用**
 再补 `pq`/`mysqlclient` —— 只剩 SQLite 那一条要不要补，取决于它是系统那份还是
-`UVCPP_DB_SQLITE_FROM_SOURCE` 编进来的静态目标。
+`UVCPP_DB_SQLITE_FROM_SOURCE` 编进来的静态目标。**ODBC 那一条不受这个开关影响**：
+驱动管理器照旧在链接行上，所以静态库的使用方照旧要补（Windows 上是 `odbc32`）。
 
 ---
 
@@ -284,15 +357,31 @@ target_link_libraries(myapp PRIVATE uvcpp_a sqlite3 pq mysqlclient)
 sqlite:///abs/path/app.db        sqlite://rel/path.db       sqlite::memory:
 mysql://user:pass@host:3306/dbname
 postgres://user:pass@host:5432/dbname
+odbc://user:pass@host:1433/dbname?Driver={ODBC Driver 18 for SQL Server}
+odbc:?DSN=MyDsn
 ```
 
 | 项 | 规则 |
 |---|---|
 | scheme 别名 | `postgres` / `postgresql` / `pgsql` / `pg` → `postgres`；`mariadb` → `mysql`。**别名归一化之后**才去做"认不认得"的判断 |
-| 缺省端口 | MySQL 3306、PostgreSQL 5432 |
+| 缺省端口 | MySQL 3306、PostgreSQL 5432。**ODBC 没有缺省端口**：不写就不是 `tcp:host,port` 而是 `Server=tcp:host` |
 | 密码 | 可省（`mysql://root@host/db`）。URL 里带特殊字符要自己转义，本模块不做 URL 解码 |
 | SQLite 的路径 | `sqlite://` 后面**原样**当一个路径用（不解析 user/host/port）。父目录不存在时驱动会**建**出来 |
+| ODBC 的 host / 库名 | `host:port` → `Server=tcp:host,port`，`/dbname` → `Database=`，`user:pass@` → `Uid=` / `Pwd=` |
+| ODBC 的 `?` 之后 | **原样**追加到 ODBC 连接串末尾（本模块不解析它，`;` 分隔），所以那里能写任何驱动认得的键 |
 | 没带 scheme | `BAD_URL`。报错原文里会带上传进来的整串 |
+
+ODBC 那两行的**默认值只补缺**：连接串里已经写了 `Driver=` / `DSN=` / `FILEDSN=`
+就**一个都不补**（`?DSN=MyDsn` 那行就是完全不碰主机与库名的用法）；没写时补的是
+`Driver={ODBC Driver 18 for SQL Server}` 加一条 `Encrypt=no`（18 版默认强制加密，
+而内网库多半没配证书 —— 不显式关掉的话，使用者会先撞上一个"证书不受信任"的握手
+错误，然后去怀疑连接串写错了）。同样，没给账号时补 `Trusted_Connection=yes`
+（Windows 集成认证：同域部署下更该用的方式，而且没有口令进连接串，也就不会进日志），
+`?Uid=` / `?User=` 里写了一个就不补。
+
+`Server=tcp:host,port` 这个**带逗号的写法是 SQL Server 的**。别的驱动的连接串文法
+各认各的，认不出 `,port` 的那个会忽略它或报错 —— 这是"通用驱动"在连接串这一层的
+固有代价，写在这里而不是藏起来：换数据源时 `?` 之后通常也要跟着换。
 
 ### `BAD_URL` 与 `NO_DRIVER` 是两件事
 
@@ -305,6 +394,11 @@ postgres://user:pass@host:5432/dbname
 判据是「这个 scheme 是不是本模块支持过的后端」（`uvcpp_db_driver_known()`），
 **不是**「这份构建里有没有」。用后者的话两种情况都是假，分不开 —— 而"打不开连接"
 这个笼统说法，恰恰是最没用的一句错误信息。用例里两条都有断言。
+
+ODBC 上还有**第三种**"打不开"，它在返回码上不算前两种：后端编进来了、驱动管理器
+也在，缺的是**那个数据源的驱动**（或者驱动名写错了）。这一种要到 `open()` 才知道，
+返回的是驱动管理器给的原话，`last_error()` 里就是它 —— 别去 `NO_DRIVER` 那边找
+（那条只会在"这份包没编 ODBC 后端"时出现）。
 
 ---
 
@@ -703,15 +797,33 @@ std::string quote_table(uvcpp::uvcpp_db_client& db,
 
 ## 6. 三个后端：钉住的一致，与如实列出的三处不同
 
+> **这一节的标题说的是 SQLite / MySQL / PostgreSQL 三家**，ODBC 单独放在紧接着的
+> 「ODBC 换了一列」里。ODBC **已经进了同一个共用套件**
+> （`tests/functional/db_odbc_func.cpp`；方言按 `Driver=` 认出来的驱动族挑，读数见
+> 下面表格的最后一行），但它**跑过的那条路是 ODBC 到 SQLite**：SQL Server 那一族
+> 仍然是**没跑**的（见 [§11](#11-没做的如实列出)）。读到"三个后端"、"三家"时，
+> ODBC 不在里面。
+
 ### 钉住的一致（共用套件 `tests/functional/db_suite.h`，三家各跑一遍）
 
 本机实测的读数（数字各不相同是**设计如此**，见下面"三处真不一样"）：
 
-| 后端 | 通过 | 不适用 | 日志里的那两行 |
+| 后端 | 通过 | 不适用 | 不适用的那几行 |
 |---|---|---|---|
-| SQLite | 157 | 2 | `没编进来的后端 -> NO_DRIVER`、`原生时间类型标签`（它没有原生时间类型） |
-| MySQL | 159 | 1 | `没编进来的后端 -> NO_DRIVER`（这份构建三个后端都在） |
+| SQLite | 196 | 1 | `原生时间类型标签`（它没有原生时间类型） |
+| ODBC（到 SQLite） | 181 | 3 | `原生时间类型标签`、`last_insert_id`、`外键约束` |
+| MySQL | 159 | 1 | ——（沿用旧读数） |
 | PostgreSQL | 159 | 1 | 同上 |
+
+ODBC 那一行之外还有**另一组 ODBC 专属用例**（日志里单独一段，`-- ODBC 专属 --`，
+57 通过 / 0 失败）：共用套件判"三家一致"的那些契约，ODBC 专属那一组判它自己的坑。
+
+口径写清楚：读数是**这台机器、这份构建**（SQLite 与 ODBC 编进来，MySQL /
+PostgreSQL 没编）跑出来的；SQLite 那一行在 ODBC 关掉重编重跑时同样是 196 / 1，
+所以它不随"编不编 ODBC"变。MySQL / PostgreSQL 两行**是上一轮的读数**，本机没有
+可跑的 MySQL/PG 服务端，这一轮只重测了 SQLite 与 ODBC。SQLite 那一行同样和更早的
+文档对不上（旧数字是 157 / 2，本树上复现不出来）—— 复现不出来的旧读数不留着当
+"约等于"，直接换成现测数字。
 
 "不适用"是**独立的一格计数器**，与"通过"分开打印 —— 跳过永远不会在日志里
 伪装成通过。
@@ -747,6 +859,31 @@ std::string quote_table(uvcpp::uvcpp_db_client& db,
 日期时间一律以**文本**形态保存（`"YYYY-MM-DD"`、`"HH:MM:SS"`、
 `"YYYY-MM-DD HH:MM:SS"`）：这是三家都能无损往返、且人眼直接可读的表示。
 SQLite 本来就没有日期类型，PostgreSQL 的文本格式恰好就是这个形状。
+
+### ODBC 换了一列（差别在**驱动**里，不在后端里）
+
+前三家的差别在**库里**；ODBC 的差别在**驱动**里。同一个 `odbc` 后端，`Driver=` 指的
+是 SQLite 的 ODBC 驱动还是 SQL Server 的，占位符写法、自增主键声明、定点列声明就跟着
+变 —— 这也是它必须有两个 `dialect` 实现（`odbc_sqlite_dialect` / `odbc_mssql_dialect`）
+的原因：断开的是"后端"与"方言"的绑定。共用套件里"不能分叉断言"这条规矩对它同样成立，
+多出来的自由度**只**体现在方言上。
+
+| 项 | ODBC 到 SQLite（sqliteodbc，跑过） | ODBC 到 SQL Server（**没跑**） |
+|---|---|---|
+| `$1` 占位符 | **不接受**（`parameter marker count incorrect`） | —— |
+| 语法错 / 表不存在 | 报 `EXEC_FAILED`：`SQLPrepare` 只**登记**，不解析 SQL | —— |
+| 自增主键 | `INTEGER PRIMARY KEY AUTOINCREMENT` | —— |
+| 定点（钱） | 没有，`TEXT` 存字符串 | —— |
+| 外键 | 连接里不开 `PRAGMA foreign_keys` → **不**强制 | —— |
+| `last_insert_id()` | 没有这条路 → 不适用 | —— |
+
+右列的破折号**不是"待填"**，是"没跑" —— 那台机器上没装 msodbcsql18，右列的列声明
+只是写在 `odbc_mssql_dialect` 里等着跑，别当成已经对过。
+
+第二行那条是 `dialect::prepares_eagerly()` 这个钩子存在的理由：`SQLPrepare` 是当下
+解析 SQL、还是只把语句登记下来等 `SQLExecute` 才报错，是驱动的自由。套件不假定它，
+只按声明的能力判返回码 —— 说"预处理阶段失败"的地方在这类驱动上报的是 `EXEC_FAILED`，
+而那同样是真的失败，只是**晚一步**。
 
 ### 后端各自怎么读结果（想看清"为什么某条断言长这样"时看这里）
 
@@ -877,8 +1014,13 @@ uvcpp::uvcpp_db_status transfer(uvcpp::uvcpp_db_client& db) {
 
 ## 10. 本地怎么跑
 
-三条用例在 `tests/functional/`：`db_sqlite_func.cpp`（**不需要服务端**，永远真
-跑）、`db_mysql_func.cpp`、`db_pgsql_func.cpp`。共用套件在 `db_suite.h`。
+四条用例在 `tests/functional/`：`db_sqlite_func.cpp`（**不需要服务端**，永远真
+跑）、`db_mysql_func.cpp`、`db_pgsql_func.cpp`、`db_odbc_func.cpp`。共用套件在
+`db_suite.h`。
+
+**ODBC 那一条要一个真的数据源**（服务器、或一个本地文件库的驱动），所以它排在第
+四：给不出 URL 时退 3（未判定），而不是拿一份默认方言硬跑。它的**方言按 `Driver=`
+挑** —— ODBC 的方言属于数据源、不属于这个后端，认不出就退 3：
 
 ```bash
 cmake -S . -B build-db3 -DUVCPP_BUILD_TESTS=ON -DUVCPP_ENABLE_DB=ON
@@ -892,6 +1034,16 @@ export UVCPP_DB_TEST_MYSQL_URL='mysql://root@127.0.0.1:3306/uvcpp_test'
 export UVCPP_DB_TEST_PGSQL_URL='postgresql://uvcpp@127.0.0.1:5432/uvcpp_test'
 ./build-db3/tests/functional/test_db_mysql_func
 ./build-db3/tests/functional/test_db_pgsql_func
+
+# ODBC：SQL Server（本后端存在的理由）
+export UVCPP_DB_TEST_ODBC_URL='odbc://sa:pw@127.0.0.1:1433/uvcpp_test?Driver={ODBC Driver 18 for SQL Server}'
+./build-db3/tests/functional/test_db_odbc_func
+
+# ODBC：也可以走 sqliteodbc —— 不用服务端，一条命令就能把这条用例跑起来
+# （Ubuntu：apt-get install unixodbc libsqliteodbc，驱动落在
+#  /usr/lib/x86_64-linux-gnu/odbc/libsqlite3odbc.so）
+export UVCPP_DB_TEST_ODBC_URL='odbc:?Driver=/usr/lib/x86_64-linux-gnu/odbc/libsqlite3odbc.so;Database=/tmp/uvcpp_odbc.db'
+./build-db3/tests/functional/test_db_odbc_func
 ```
 
 **套件里有 `DROP TABLE` / `CREATE TABLE`，URL 必须指向一个一次性的库。**
@@ -901,7 +1053,12 @@ export UVCPP_DB_TEST_PGSQL_URL='postgresql://uvcpp@127.0.0.1:5432/uvcpp_test'
 |---|---|
 | `UVCPP_DB_TEST_MYSQL_URL` | MySQL 用例的连接串。没有它 → 退出码 **3**（未判定） |
 | `UVCPP_DB_TEST_PGSQL_URL` | PostgreSQL 用例的连接串，同上 |
+| `UVCPP_DB_TEST_ODBC_URL` | ODBC 用例的连接串，同上（认不出 `Driver=` 是哪一族也退 3） |
 | `UVCPP_DB_TEST_REQUIRE` | 设了它，缺 URL 就是**失败**（退出码 1），不是跳过 |
+
+**ODBC 这一条不在 CI 里**：那几台 runner 上没有任何 ODBC 数据源，装了驱动管理器也
+只够跑"驱动名不存在时报 `OPEN_FAILED`"（那是它自己的一条断言），跑不了共用套件。
+所以它的读数只能在本地产出 —— 见 [§11](#11-没做的如实列出) 里哪些还真没有。
 
 退出码 3 是照本仓 gate 脚本的规矩来的：**「未判定」不是「通过」**。ctest 那边用
 `SKIP_RETURN_CODE 3` 把它报成 `***Skipped` —— 与 `Passed` 在日志里是两个词。
@@ -926,6 +1083,18 @@ Windows 上走的是 `UVCPP_DB_SQLITE_FROM_SOURCE`（MSYS2 若装了
 
 ## 11. 没做的（如实列出）
 
+* **ODBC 到 SQL Server 本身。** 这个后端进了共用套件（`db_odbc_func.cpp`，
+  `UVCPP_DB_TEST_ODBC_URL`），但**跑过的那条路是 ODBC 到 SQLite**（sqliteodbc，
+  Ubuntu，驱动管理器 unixODBC；读数 181 通过 / 0 失败 / 3 不适用 + 57 条 ODBC 专属
+  断言）。SQL Server 那一族的方言是**照语法写的、没跑过**：`msodbcsql18`、Windows、
+  DSN 形式的连接串、`SQL Server` 的 `IDENTITY` / `DATETIME2` / `BIT` 逐条落到读数
+  上都还没有。要跑真 SQL Server 时，红的第一条先怀疑那份方言（`odbc_mssql_dialect`）
+  的写法，而不是后端本身。**在那之前，别把"ODBC 到 SQL Server"当成与另外三家同等
+  "验证过"的后端。**
+* **ODBC 的 `last_insert_id()`（除了 SQL Server 那一族）。** 它发的就是
+  `SCOPE_IDENTITY()`，别的数据源不认，如实返回 `UNSUPPORTED`（实测：sqliteodbc 上
+  报 `UNSUPPORTED` 并留下原因，不是编一个 0 出来）。别的数据源要报自增值，得先有
+  一条按数据源分派的写法。
 * **协程（`co_await` / C++20 那套）。** 异步门面给的是**回调 + future**两种形状
   （见 [§3](#3-公开面)），本库是 C++11 的，不引入协程。
 * **门面的背压。** 不限制在途条数 —— 一个连接本来就是串行的，排队等锁不会更快。

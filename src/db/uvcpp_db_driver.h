@@ -54,7 +54,7 @@ namespace db_detail {
 /// 密码里带 `@` 是常见的（`p@ssw0rd`），按第一个切会把密码截断、把剩下的
 /// 当成主机名 —— 症状是「连接被拒」，而配置看起来完全正常。
 struct uvcpp_db_url {
-  std::string scheme;    // 规范化后的 "sqlite" / "mysql" / "postgres"
+  std::string scheme;    // 规范化后的 "sqlite" / "mysql" / "postgres" / "odbc"
   std::string user;
   std::string password;
   std::string host;
@@ -71,7 +71,7 @@ class uvcpp_db_driver {
  public:
   virtual ~uvcpp_db_driver() = default;
 
-  /// 驱动的稳定短名："sqlite" / "mysql" / "postgres"。
+  /// 驱动的稳定短名："sqlite" / "mysql" / "postgres" / "odbc"。
   virtual const char* name() const = 0;
 
   virtual uvcpp_db_status open(const uvcpp_db_url& url, std::string* err) = 0;

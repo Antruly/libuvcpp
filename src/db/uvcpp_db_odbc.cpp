@@ -17,14 +17,22 @@
  *
  * ## 坑一：`SQLWCHAR` 的宽度不是固定的
  *
- * 微软的 ODBC 头里 `SQLWCHAR` 是 `unsigned short`（2 字节，UTF-16）；unixODBC
- * 默认是 `wchar_t`（Linux 上 4 字节，UTF-32）。同一份源码在两边"看起来一样、
- * 跑起来不一样"：按 2 字节算字符偏移，在 unixODBC 上会把每个字符的后半截当成
- * 下一个字符的开头，中文表名第一个字就错，而且是**静默**错。
+ * 微软的 ODBC 头里 `SQLWCHAR` 是 `unsigned short`（2 字节，UTF-16）。unixODBC
+ * **默认也是 2 字节**（`sqltypes.h` 里 `typedef unsigned short WCHAR`），但它的
+ * `typedef` 被 `#ifdef SQL_WCHART_CONVERT` 夹着，而那个宏是**使用方**在
+ * `#include <sql.h>` 之前定义的（头里的原话："if this is set, then use a 4 byte
+ * unicode definition, instead of the 2 byte definition that MS use"）。定义了就
+ * 变 `wchar_t`（Linux 上 4 字节，UTF-32）。
  *
- * 所以下面不假设宽度：转换按 `sizeof(SQLWCHAR)` 分支，2 字节走 UTF-16、4 字节走
+ * 所以宽度既不能按平台假设，也不能按驱动管理器假设 —— 它是**编译这份代码的人**
+ * 定的。按 2 字节算字符偏移、实际是 4 字节时，每个字符的后半截会被当成下一个
+ * 字符的开头，中文表名第一个字就错，而且是**静默**错。
+ *
+ * 下面不假设宽度：转换按 `sizeof(SQLWCHAR)` 分支，2 字节走 UTF-16、4 字节走
  * UTF-32。判据取**编译期的 `sizeof`**，不是平台宏 —— 平台宏会漏掉"Linux 上装了
  * 微软驱动管理器"这种组合，而那正是 CI 与开发机常见的样子。
+ *
+ * 宽度定了之后，还有第二件要记的事：**长度指示器的单位是字节**（见坑四）。
  *
  * ## 坑二：文本参数不能用 ANSI 形态送
  *
@@ -38,6 +46,24 @@
  * `SQLBindCol` 要求给每一列一个**定长**缓冲，而定长这个数本身就是要猜的：猜小了
  * 长文本被静默截断，猜大了每行都白占内存。这里改用 `SQLGetData` 的分块循环，
  * 两头都不猜。代价是每格多一次函数调用 —— 对报表与表浏览这类用途完全划算。
+ *
+ * ## 坑四：`SQL_C_WCHAR` 的长度指示器是**字节**
+ *
+ * `SQLBindParameter` 的第 5 个参数（ColumnSize）在 `SQL_C_WCHAR` 下按**字符**数
+ * 给，而第 8 个（BufferLength）与长度指示器按**字节**数给。单位不一致，而且按字符
+ * 给指示器时**不报错**：驱动从缓冲里只搬 `n` 个字节，于是 `n` 个字符存进去变成
+ * `floor(n/2)` 个 —— "张三" 变 "张"，纯 ASCII 就是砍一半。实测矩阵里，"2 字节单元 +
+ * 字节长度" 存回 'abcdef'/'张三' 完好，"2 字节单元 + 字符长度" 复现出 'abc'/'张'，
+ * 与本模块当时的症状一致。
+ *
+ * ## 坑五：绑定缓冲必须是**每个参数一份**
+ *
+ * `SQLBindParameter` 只记指针 —— 缓冲、`StrLen_or_IndPtr` 都是。执行发生在**所有**
+ * 参数都绑完之后，所以拿几个成员变量在循环里反复赋值，等于让每个参数都指向最后一
+ * 轮写进去的那份数据；`(?, ?, ?, ?)` 逐行绑 (1,2,'t0','uu0')、(11,12,'t1','uu1')、
+ * (21,22,'t2','uu2')，实测库里进去的是 (2,2,'t','u')、(12,12,'t','u')、(22,22,'t','u')
+ * —— 四个参数全成了最后一个的值，**一个错都不报**。绑定存储因此是
+ * `std::vector<bound_param>`，下标一一对应，且**先 `resize` 再绑**。
  */
 
 #include <db/uvcpp_db_driver.h>
@@ -281,6 +307,19 @@ std::string sql_brief(const std::string& sql) {
   if (one.size() <= 120) return one;
   return one.substr(0, 120) + "…";
 }
+
+/// 空串 / 空 BLOB 绑定时交给驱动的那枚**有效**指针。
+///
+/// 不能用 `nullptr` 顶替"零长度"：实测 sqliteodbc 上 `nullptr` + 长度 0 会被存成
+/// **NULL**，而"有效指针 + 长度 0"才存成空串 —— 于是 `e_val NOT NULL DEFAULT ''`
+/// 那种列直接报约束冲突，症状是"插入失败"，离真正的原因（缓冲指针是空的）隔着
+/// 一层。规范上 `SQL_NULL_DATA` 才是 NULL 的表达，长度 0 是空串；有的驱动把
+/// "缓冲是空指针"也当成 NULL 的一种写法，这一手就是防它。
+///
+/// 一字节哨兵够用：长度是 0，驱动一个字节都不会读，更不会写它 —— 所以几个线程
+/// 同时绑各自的空串也安全（这几个全局量从头到尾只被读）。
+unsigned char kEmptyByte = 0;
+SQLWCHAR kEmptyWide = 0;
 
 }  // namespace
 
@@ -932,10 +971,24 @@ class odbc_driver : public uvcpp_db_driver {
     SQLSMALLINT len = 0;
     const SQLRETURN rc = SQLGetInfoW(dbc_, SQL_IDENTIFIER_QUOTE_CHAR, buf,
                                      sizeof(buf), &len);
-    if (SQL_SUCCEEDED(rc) && len >= 1) {
-      return to_utf8(buf, static_cast<size_t>(len));
-    }
-    return "\"";  // 主流数据源都是它，报不出来时按标准走
+    if (!SQL_SUCCEEDED(rc)) return "\"";
+
+    // 取串用**结尾 NUL**，不用 `len`。
+    //
+    // `SQLGetInfo` 的 `len` 报的是**字节数**（W 形态也是），按"字符个数"用它就会
+    // 把结尾那个 NUL 也当内容收进引号串里 —— 于是 `quote_` 从 1 个字符变成
+    // 2 个（`"` 后面跟一个 NUL），下面 `quote_.size() == 1` 那条"内部引号翻倍"
+    // 的分支再也进不去。症状是**静默**的：普通标识符照旧能拼（NUL 在驱动那头被
+    // 截掉），一旦标识符里真有引号，拼出来的就是语法错的 SQL。实测：表名
+    // `uvcpp_odd"name` 拼成 `"<NUL>uvcpp_odd"name"<NUL>`，驱动报 unrecognized
+    // token；引号串 `"`（实测 `len=2` 字节）。
+    //
+    // 结尾 NUL 是规范保证的，而且"报字节数"和"报字符数"两种驱动都自洽 —— 比猜
+    // `len` 的单位稳。
+    size_t units = 0;
+    while (units < sizeof(buf) / sizeof(buf[0]) && buf[units] != 0) ++units;
+    if (units == 0) return "\"";  // 空串按标准走
+    return to_utf8(buf, units);
   }
 
   // -------------------------------------------------------------------------
@@ -945,9 +998,18 @@ class odbc_driver : public uvcpp_db_driver {
   uvcpp_db_status exec_on(SQLHSTMT stmt, const std::string& sql,
                           const std::vector<uvcpp_db_value>& params,
                           std::string* err) {
-    if (params.empty()) {
-      // 无参数走 SQLExecDirect：省一次 prepare，而且 DDL 在有些驱动上压根
-      // prepare 不了（MySQL 那边为同一件事单独留了条裸通道，这里同理）。
+    // 无参数走 SQLExecDirect：省一次 prepare，而且 DDL 在有些驱动上压根
+    // prepare 不了（MySQL 那边为同一件事单独留了条裸通道，这里同理）。
+    //
+    // 但 SQL 里**有占位符**却一个参数都没给时不能走这条：裸执行下去，有的驱动把
+    // 没绑的占位符当 NULL（`WHERE id = ?` 变 `WHERE id = NULL`，静默 0 行），有的
+    // 报 "unbound parameters"（`EXEC_FAILED`）。两种都不是要的答案 —— 参数个数
+    // 对不上是 `BIND_FAILED`，而且要**在执行之前**报出来。判据取"SQL 里有没有
+    // `?`"这个保守扫描：它在字符串字面量里也会命中，代价只是多走一次 prepare，
+    // 而漏判的代价是静默错数据（实测 sqliteodbc：0 个参数 + 1 个占位符，裸执行
+    // 拿到的是 `EXEC_FAILED: unbound parameters in query`）。
+    const bool may_bind = !params.empty() || sql.find('?') != std::string::npos;
+    if (!may_bind) {
       wstr wsql(sql);
       const SQLRETURN rc = SQLExecDirectW(stmt, wsql.p(), wsql.len());
       if (!SQL_SUCCEEDED(rc)) {
@@ -999,73 +1061,87 @@ class odbc_driver : public uvcpp_db_driver {
   /// 文本一律送 `SQL_C_WCHAR`（理由见文件头坑二）。数值按各自的 C 类型送，让驱动
   /// 端做转换 —— 全送文本也能跑，但那样服务端拿不到类型信息，索引与隐式转换都会
   /// 退化。
+  ///
+  /// 这里有两处**静默**失败的坑，都踩过：
+  ///
+  /// 1. 缓冲是**每个参数一份**（`bound_`），不是一份共用。`SQLBindParameter` 只记
+  ///    指针，共用一份的话最后绑的那个参数会把前面每个都覆盖掉 —— 实测四个参数
+  ///    (1,2,'t0','uu0')/(11,12,'t1','uu1')… 全变成 (2,2,'t','u') 这类值，不报错。
+  /// 2. `SQL_C_WCHAR` 的长度指示器单位是**字节**，不是字符。按字符给的症状是长文本
+  ///    被砍掉一半（`floor(n/2)`）："张三" 存进去变成 "张"，`n` 个字符存 `n/2` 个。
   uvcpp_db_status bind_all(SQLHSTMT stmt,
                            const std::vector<uvcpp_db_value>& params,
                            std::string* err) {
-    // `SQLBindParameter` 只记指针，数据要活到 `SQLExecute`，所以这些缓冲是**成员**
-    // —— 不能用"每次循环一个局部 string 再取 c_str()"的写法，那样 SQLExecute 读到
-    // 的是一批已经析构的内存。
-    text_bufs_.clear();
-    text_bufs_.reserve(params.size());
+    // ★ 一次 resize 到位，然后在下面**只写元素、不增删**：`SQLBindParameter` 交出去
+    // 的是 `&bound_[i]` 里那些成员的地址，绑定中途再分配会把它们全变成野指针。
+    bound_.clear();
+    bound_.resize(params.size());
 
     for (size_t i = 0; i < params.size(); ++i) {
       const uvcpp_db_value& v = params[i];
+      bound_param& b = bound_[i];
       const SQLUSMALLINT index = static_cast<SQLUSMALLINT>(i + 1);
       SQLRETURN rc = SQL_SUCCESS;
 
       if (v.is_null()) {
         // 空值的两个条件：C 类型随便（不读缓冲），长度指示器必须是 SQL_NULL_DATA。
         rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_CHAR,
-                              SQL_VARCHAR, 0, 0, nullptr, 0, &null_ind_);
+                              SQL_VARCHAR, 0, 0, nullptr, 0, &b.null_ind);
       } else {
         switch (v.type()) {
           case uvcpp_db_type::INT64:
-            int64_buf_ = v.to_int64();
+            b.i64 = v.to_int64();
             rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_SBIGINT,
-                                  SQL_BIGINT, 0, 0, &int64_buf_, 0, nullptr);
+                                  SQL_BIGINT, 0, 0, &b.i64, 0, nullptr);
             break;
           case uvcpp_db_type::UINT64:
-            uint64_buf_ = v.to_uint64();
+            b.u64 = v.to_uint64();
             // 超 INT64_MAX 的 uint64 不能塞进 SQL_BIGINT —— 那会在服务端变成负数。
             // 本模块没有"无符号大整数"这种 SQL 参数类型，所以拒绝，而不是截断。
-            if (uint64_buf_ > static_cast<uint64_t>(INT64_MAX)) {
+            if (b.u64 > static_cast<uint64_t>(INT64_MAX)) {
               *err = "第 " + std::to_string(i + 1) +
                      " 个参数是无符号数且超过 int64 上限，本模块不支持";
               return uvcpp_db_status::BIND_FAILED;
             }
             rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_UBIGINT,
-                                  SQL_BIGINT, 0, 0, &uint64_buf_, 0, nullptr);
+                                  SQL_BIGINT, 0, 0, &b.u64, 0, nullptr);
             break;
           case uvcpp_db_type::DOUBLE:
-            double_buf_ = v.to_double();
+            b.dbl = v.to_double();
             rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_DOUBLE,
-                                  SQL_DOUBLE, 0, 0, &double_buf_, 0, nullptr);
+                                  SQL_DOUBLE, 0, 0, &b.dbl, 0, nullptr);
             break;
           case uvcpp_db_type::BOOL:
-            bit_buf_ = v.to_bool() ? 1 : 0;
+            b.bit = v.to_bool() ? 1 : 0;
             rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_BIT,
-                                  SQL_BIT, 0, 0, &bit_buf_, 0, nullptr);
+                                  SQL_BIT, 0, 0, &b.bit, 0, nullptr);
             break;
           case uvcpp_db_type::BLOB:
-            bin_buf_ = v.bytes();
-            bin_len_ = static_cast<SQLLEN>(bin_buf_.size());
+            b.bin = v.bytes();
+            b.len = static_cast<SQLLEN>(b.bin.size());
             rc = SQLBindParameter(
                 stmt, index, SQL_PARAM_INPUT, SQL_C_BINARY,
-                bin_buf_.size() > 8000 ? SQL_LONGVARBINARY : SQL_VARBINARY,
-                static_cast<SQLULEN>(bin_buf_.size()), 0,
-                bin_buf_.empty() ? nullptr : &bin_buf_[0],
-                static_cast<SQLLEN>(bin_buf_.size()), &bin_len_);
+                b.bin.size() > 8000 ? SQL_LONGVARBINARY : SQL_VARBINARY,
+                static_cast<SQLULEN>(b.bin.size()), 0,
+                b.bin.empty() ? static_cast<SQLPOINTER>(&kEmptyByte)
+                              : static_cast<SQLPOINTER>(&b.bin[0]),
+                static_cast<SQLLEN>(b.bin.size()), &b.len);
             break;
           default: {  // TEXT / DATE / TIME / DATETIME
-            text_bufs_.push_back(to_sqlwchar(v.bytes()));
-            std::basic_string<SQLWCHAR>& w = text_bufs_.back();
-            text_len_ = static_cast<SQLLEN>(w.size());
+            b.text = to_sqlwchar(v.bytes());
+            std::basic_string<SQLWCHAR>& w = b.text;
+            // 第 5 个参数（ColumnSize）在 `SQL_C_WCHAR` 下按**字符**数给，第 8 个
+            // （BufferLength）与指示器按**字节**数给 —— 两者的单位不一样，这正是
+            // 上面坑 2 的来处。
+            b.len = static_cast<SQLLEN>(w.size() * sizeof(SQLWCHAR));
             const bool long_text = w.size() > kMaxPlainChars;
             rc = SQLBindParameter(
                 stmt, index, SQL_PARAM_INPUT, SQL_C_WCHAR,
                 long_text ? SQL_WLONGVARCHAR : SQL_WVARCHAR,
-                static_cast<SQLULEN>(w.size()), 0, w.empty() ? nullptr : &w[0],
-                static_cast<SQLLEN>(w.size() * sizeof(SQLWCHAR)), &text_len_);
+                static_cast<SQLULEN>(w.size()), 0,
+                w.empty() ? static_cast<SQLPOINTER>(&kEmptyWide)
+                          : static_cast<SQLPOINTER>(&w[0]),
+                static_cast<SQLLEN>(w.size() * sizeof(SQLWCHAR)), &b.len);
             break;
           }
         }
@@ -1214,8 +1290,15 @@ class odbc_driver : public uvcpp_db_driver {
       // SQL_C_WCHAR 时 ind 报的是**字节数**（这是 ODBC 里唯一按字节报长度的
       // 地方），换算成字符个数的锅在这里背 —— 直接把 ind 当字符数用，结果会
       // 少一半，而且中文越长错得越明显。
+      //
+      // 还有第二件事：`ind` 是**整个值**的字节数，不是这一块拿到的；而驱动在
+      // 填满缓冲时**不会**用光最后一个单元 —— 它要给结尾 NUL 留位置。所以一块
+      // 最多装 `kChunk - 1` 个数据单元，按 `kChunk` 夹会多收一个，把那个 NUL
+      // 当成数据。实测（sqliteodbc，3000 字符、缓冲 2048 单元）：第 0 块报
+      // `ind=6000` 却只写了 2047 个数据单元 + NUL；按 `ind/宽度` 记成 2048，
+      // 最后读出来 3001 个字符，**尾巴上多一个 0x00 字节**。
       size_t chars = static_cast<size_t>(ind) / sizeof(SQLWCHAR);
-      if (chars > kChunk) chars = kChunk;
+      if (chars > kChunk - 1) chars = kChunk - 1;
       acc.append(buf, chars);
       if (rc == SQL_SUCCESS) break;
       // SQL_SUCCESS_WITH_INFO = 还有下一块
@@ -1447,17 +1530,27 @@ class odbc_driver : public uvcpp_db_driver {
   /// 按标准取 `"`。
   std::string quote_ = "\"";
 
-  // 绑定缓冲。是成员而不是局部变量，因为 SQLBindParameter 只记指针、数据要活到
-  // SQLExecute —— 见 bind_all 里的说明。
-  std::vector<std::basic_string<SQLWCHAR> > text_bufs_;
-  std::string bin_buf_;
-  int64_t int64_buf_ = 0;
-  uint64_t uint64_buf_ = 0;
-  double double_buf_ = 0.0;
-  unsigned char bit_buf_ = 0;
-  SQLLEN null_ind_ = SQL_NULL_DATA;
-  SQLLEN text_len_ = 0;
-  SQLLEN bin_len_ = 0;
+  /// 一个参数的**私有**绑定存储。
+  ///
+  /// `SQLBindParameter` 只记指针（`StrLen_or_IndPtr` 记的也是指针），而 `SQLExecute`
+  /// 发生在**所有**参数都绑完之后 —— 所以每个参数都得有自己的一份存储。用成员变量
+  /// 共用一份的症状是**静默**的：`(?, ?, ?, ?)` 逐行绑 (1,2,'t0','uu0')、(11,12,…)
+  /// 实测四列全变成最后一个参数的值，一个错都不报（见 `bind_all`）。
+  struct bound_param {
+    std::basic_string<SQLWCHAR> text;  // SQL_C_WCHAR 的字符缓冲
+    std::string bin;                   // SQL_C_BINARY 的字节缓冲
+    int64_t i64 = 0;
+    uint64_t u64 = 0;
+    double dbl = 0.0;
+    unsigned char bit = 0;
+    SQLLEN len = 0;             // 文本/二进制的长度指示器，单位**字节**
+    SQLLEN null_ind = SQL_NULL_DATA;
+  };
+
+  /// 绑定缓冲。是成员而不是局部变量，因为 `SQLBindParameter` 只记指针、数据要活到
+  /// `SQLExecute`。**先 `resize` 再绑**，绑定期间不许再让它重新分配（不要 `push_back`）
+  /// —— 那会让已经交出去的指针全部失效。见 `bind_all`。
+  std::vector<bound_param> bound_;
 };
 
 const SQLWCHAR odbc_driver::kPing[] = {'S', 'E', 'L', 'E', 'C', 'T',

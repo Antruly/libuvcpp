@@ -776,6 +776,47 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `<windows.h>` 里的 typedef，对 `enum class` 的限定名没影响），所以那行在 Windows 上
   是空操作。
 
+- **ODBC 后端进了共用套件，套件立刻抓出它自己的六处**（`1.7.1-dev`）。用例在
+  `tests/functional/db_odbc_func.cpp`：方言按 `Driver=` 认出来的驱动族分派
+  （`odbc_sqlite_dialect` / `odbc_mssql_dialect`），认不出的族退 **3**。本机对着
+  sqliteodbc + unixODBC 跑：**181 通过 / 0 失败 / 3 不适用**，另有 **57 条 ODBC
+  专属**（日志里单独一段）。这一组数全是**量出来的**，不是照着文档推的：
+
+  1. `SQLBindParameter` 只**记指针**（缓冲**和** `StrLen_or_IndPtr` 都记），绑定的
+     存储必须活到 `SQLExecute` 之后，而且**每个参数各一份**。共用一份时，四个参数
+     `(1, 2, 't0', 'uu0')` 存进去读回来是 `(2, 2, 't', 'u')` —— 每个都只剩最后一次
+     写入的一个字节；
+  2. `SQL_C_WCHAR` 的长度指示器单位是**字节**：给字符数会把 `"张三"` 截成 `"张"`、
+     `'abcdef'` 截成 `'abc'`；
+  3. 空串与 NULL 是靠**指针**分的：有效指针 + `ind=0` 是空串，`nullptr` + `ind=0` 是
+     NULL。空串上 `std::string::data()` 给不给非空指针是实现自由，所以代码里备了两个
+     哑元（`kEmptyByte` / `kEmptyWide`）——这条错了的话，写空串会**响**在非空约束上，
+     而不是静默存成 NULL；
+  4. 分块读时一个**满**块只给 `BufferUnits - 1` 个数据单元（驱动给 NUL 留位），按整块
+     计数会把 3000 字节读成 3001 字节；
+  5. `SQLGetInfo` 的 W 形态返回的长度也**是字节**：拿它当单元数会让引号字符 `"` 变成
+     2 个"字符"，于是"内层引号双写"那一支被跳过，怪表名 `uvcpp_odd"name` 被拼成
+     `"<NUL>uvcpp_odd"name"<NUL>`。改成认尾部的 NUL，不看那个长度；
+  6. 无参数那条快路径绕过了 `SQLNumParams` 检查：语句里写了 `?` 却一个参数都不给时
+     报的是 `EXEC_FAILED`，而这是**绑定**阶段的错，该报 `BIND_FAILED`。
+
+  另有两处是**驱动的自由**，不是我们的 bug —— 套件改成"按声明的能力判"，不硬凑断言：
+  sqliteodbc 的 `SQLPrepare` 只**登记**不解析（语法错与表不存在要到 `SQLExecute` 才
+  报），因此 `db_suite.h` 多了一个 `dialect::prepares_eagerly()`；它同样**不接受**
+  `$1` 占位符（`parameter marker count incorrect`），所以 ODBC→SQLite 的
+  `accepts_dollar_placeholder()` 是 `false`（原来是照"ODBC 应该有"猜的 `true`）。
+  这两条改的是共用套件，所以 SQLite 那一家按同一份套件重跑过：**196 通过 / 0 失败 /
+  1 不适用**，改动没有扰动别的后端。
+
+  顺手把两条套件原本没走到的路也**量了**并钉成断言（都过）：二进制跨块
+  （3 KB BLOB，逐字节相等 —— `SQL_C_BINARY` 没有终止符，满块给满 `kChunk`），以及
+  4 字节 UTF-8 字符（UTF-16 是**代理对**）正好骑在块边界上（写路径按代理对编码，
+  驱动不会在缓冲边界把它劈开）。
+
+  **没跑的是 ODBC 到 SQL Server 那一族**：`odbc_mssql_dialect` 写好了（`INT
+  IDENTITY(1,1) PRIMARY KEY` / `NVARCHAR(MAX)` / `VARBINARY(MAX)` / `DATETIME2` /
+  `BIT` / `DECIMAL(18,2)`），但这台机器上没装 msodbcsql18。别把它当成已经对过。
+
 - **MySQL / PostgreSQL 的客户端库改成可以运行时加载：`UVCPP_DB_RUNTIME_LOAD`**
   （`1.6.54-dev`，默认 `OFF`）。直接链的后果不是"少个功能"而是**进程起不来**：
   `DT_NEEDED`（Windows 上是 PE 的导入表）是**加载期**解析的，产物上多一条
