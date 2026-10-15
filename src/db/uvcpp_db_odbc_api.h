@@ -41,6 +41,33 @@
 #error "ODBC 后端按符号名做运行时加载：编 src/db/uvcpp_db_odbc.cpp 时 ODBC_STD 与 UNICODE 都必须未定义（它们会把 SQL* 名字重定向到别的符号，两种构建方式会分叉）。"
 #endif
 
+// Windows 的 ODBC 头**不是自给自足**的，`<windows.h>` 必须先来。
+//
+// 微软那套 `sqltypes.h` 是拿 Windows 自己的类型拼出 ODBC 类型表的：`SQLLEN` /
+// `SQLULEN` 走 `INT64` / `UINT64`（`winnt.h`），`SQLHWND` 走 `HWND`（`windef.h`），
+// `SQLGUID` 走 `GUID`（`guiddef.h`）—— 全在 `<windows.h>` 里。少了它，第一条错是
+// `sqltypes.h(64,9): error C4430: missing type specifier` 指着 `typedef INT64 SQLLEN;`，
+// 看上去像 Windows SDK 坏了，其实一行关系都没有（真试过：照着这个症状去换 SDK 版本，
+// 换到最新的一样红）。
+//
+// unixODBC 的 `sqltypes.h` 相反：它在没有 `<windows.h>` 的平台上**自己补一套**类型
+// （`#define BOOL int` 那种就是这套补丁的一部分），所以 Linux 上漏掉这个顺序照样编得过。
+// 这个坑只在 Windows 现形 —— 也正因为这样，它在这份代码第一次上 Windows 之前一直没露头。
+//
+// `WIN32_LEAN_AND_MEAN` + `NOMINMAX` 是本文件自带的两条卫生：这个是**公共头**，谁包含
+// 它就等于把 `<windows.h>` 拖进自己的 TU（本仓 `uvcpp_web_json_reflect.h` 那一段注释记
+// 的正是跟着来的 `std::numeric_limits<T>::max` 被当成宏调用）。少拉一半 Windows 头，外加
+// 不放出 `min` / `max` 两个宏，代价为零。
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 #include <sql.h>
 #include <sqlext.h>
 
@@ -49,8 +76,10 @@
 // 展开成 `uvcpp_db_type::int`，报出来的错是 "expected unqualified-id before 'int'"
 // —— 离真正的原因隔着一层。这里直接 `#undef`：ODBC 头已经预处理完，这个宏的使命
 // 结束了（理由与观察详见 `uvcpp_db_odbc.cpp` 文件头）。微软那套 `sqltypes.h` 不发
-// 这个宏（Windows 上 `BOOL` 是 `<windows.h>` 里的 typedef），所以在 Windows 上这行
-// 是空操作。
+// 这个宏（Windows 上 `BOOL` 是上面那个 `<windows.h>` 里的 typedef），所以在 Windows
+// 上这行是空操作 —— 这也是为什么上面那个 include 不能省：不包含 `<windows.h>` 时
+// `BOOL` 既不是 ODBC 头给的宏、也没有 typedef 兜着，`uvcpp_db_type::BOOL` 会直接
+// 变成未定义标识符。
 #undef BOOL
 
 #include <string>
