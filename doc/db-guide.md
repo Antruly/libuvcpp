@@ -22,7 +22,8 @@ SQLite / MySQL / PostgreSQL / ODBC 四个后端，SQL 由调用方写，结果�
 > 模块。发布配置**显式打开**它，所以预编译包里带着这个模块 —— `1.7.0` 那个包里
 > SQLite / MySQL / PostgreSQL **三个都在**（SQLite 从源码编，MySQL/PG 编进来但库走
 > 运行时加载，见 §1 与 §3）。ODBC 是 `1.7.1-dev` 才加的，**还没有哪个已发布的包
-> 带过它**。
+> 带过它**；它和 MySQL/PG 走同一条运行时加载（链上的是**驱动管理器**，也是"客户端
+> 库"那一类）。
 
 ## 目录
 
@@ -55,7 +56,7 @@ cmake --build build-db -j
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` + libmysqlclient） |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` + libpq） |
 | `UVCPP_ENABLE_DB_ODBC` | `ON` | 编 ODBC 后端（要 `sql.h` + 驱动管理器）。**连什么库不在这里定** —— 那是连接串里 `Driver=` 的事（见下面「ODBC：驱动管理器与**具体驱动**」） |
-| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节）。ODBC 不走这条路，理由见那一节 |
+| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG/ODBC 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节）。ODBC 那一份加载的是**驱动管理器**，具体驱动仍由它自己加载 |
 
 四个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
 想明确裁掉哪一个才写 `=OFF`（那时连"找不到"的警告都不会有）。
@@ -115,10 +116,12 @@ ODBC 从 `1.7.1-dev` 起进默认配置，还没有哪个已发布的包带过�
 
 ### 客户端库运行时加载：`UVCPP_DB_RUNTIME_LOAD`
 
-**为什么要有它。** 直接链客户端库时，`libpq.so.5` / `libmysqlclient.so.21` 会
-变成产物的一条 `DT_NEEDED`，而 **`DT_NEEDED` 是加载期解析的**：装了 libuvcpp
-的机器上只要缺这一条，**进程根本起不来** —— 一行 db 代码都没跑，甚至这个程序
-压根不碰数据库。Windows 同理（PE 的导入表）。
+**为什么要有它。** 直接链客户端库时，`libpq.so.5` / `libmysqlclient.so.21` /
+`libodbc.so.2` 会变成产物的一条 `DT_NEEDED`，而 **`DT_NEEDED` 是加载期解析的**：
+装了 libuvcpp 的机器上只要缺这一条，**进程根本起不来** —— 一行 db 代码都没跑，
+甚至这个程序压根不碰数据库。Windows 同理（PE 的导入表），**只有 `odbc32.dll` 是
+例外**：它属于操作系统，链接它不算代价 —— 所以这一档对 ODBC 的意义集中在
+Linux / macOS 的产物上（那上面 ODBC 的"客户端库"是普通包 unixODBC）。
 
 本机实测（同一个 `hello`，只 `printf`，一行 db 代码不跑）：
 
@@ -136,24 +139,25 @@ $ ./hello
 ```bash
 cmake -S . -B build-db -DUVCPP_ENABLE_DB=ON \
       -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+      -DUVCPP_ENABLE_DB_ODBC=ON \
       -DUVCPP_DB_RUNTIME_LOAD=ON
 ```
 
 | | 直接链（默认，`OFF`） | 运行时加载（`ON`） |
 |---|---|---|
-| 链接期要 | `mysql.h`/`libpq-fe.h` **+** 客户端库 | 只要头（`libmysqlclient-dev` / `libpq-dev`） |
-| 产物的 `DT_NEEDED` | 多两条 | **一条都不多** |
-| 机器上没装客户端库 | **进程起不来** | 进程照常跑；HTTP、SQLite 一切照常 |
-| 真去连 MySQL/PG | 能连 | 返回 `NO_DRIVER` + `last_error()` 里写明**试过哪几个库名** |
-| 找库的办法 | 链接器（`/etc/ld.so.cache`、`RPATH`） | 固定的候选名列表，或 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` |
+| 链接期要 | `mysql.h`/`libpq-fe.h`/`sql.h` **+** 客户端库 | 只要头（`libmysqlclient-dev` / `libpq-dev` / `unixodbc-dev`） |
+| 产物的 `DT_NEEDED` | 多三条 | **一条都不多** |
+| 机器上没装那些库 | **进程起不来** | 进程照常跑；HTTP、SQLite 一切照常 |
+| 真去连 MySQL/PG/ODBC | 能连 | 返回 `NO_DRIVER` + `last_error()` 里写明**试过哪几个库名** |
+| 找库的办法 | 链接器（`/etc/ld.so.cache`、`RPATH`） | 固定的候选名列表，或 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` / `UVCPP_DB_ODBC_LIBRARY` |
 
 候选名（按顺序试，全试完才报错）：
 
-| 平台 | MySQL | libpq |
-|---|---|---|
-| Linux | `libmysqlclient.so.21`、`libmysqlclient.so.24`、`libmariadb.so.3`、`libmysqlclient.so` | `libpq.so.5`、`libpq.so` |
-| Windows | `libmysql.dll`、`libmariadb.dll`、`mysqlclient.dll` | `libpq.dll` |
-| macOS | `libmysqlclient.21.dylib`、`libmariadb.3.dylib`、`libmysqlclient.dylib` | `libpq.5.dylib`、`libpq.dylib` |
+| 平台 | MySQL | libpq | ODBC（驱动管理器） |
+|---|---|---|---|
+| Linux | `libmysqlclient.so.21`、`libmysqlclient.so.24`、`libmariadb.so.3`、`libmysqlclient.so` | `libpq.so.5`、`libpq.so` | `libodbc.so.2`、`libodbc.so` |
+| Windows | `libmysql.dll`、`libmariadb.dll`、`mysqlclient.dll` | `libpq.dll` | `odbc32.dll`（系统件，一定在） |
+| macOS | `libmysqlclient.21.dylib`、`libmariadb.3.dylib`、`libmysqlclient.dylib` | `libpq.5.dylib`、`libpq.dylib` | `libodbc.2.dylib`、`libodbc.dylib` |
 
 两个环境变量是**显式指定**，设了它就**只试这一个**（不再走候选名列表）——
 装在非标准前缀下的人用它，而它同时是**"没装库"那条路的确定性旋钮**：
@@ -170,16 +174,17 @@ UVCPP_DB_PGSQL_LIBRARY=/nonexistent/libpq.so.5 ./myapp
 都可能还在），卸掉比留着危险。
 
 **它只改"符号从哪来"，不改后端在不在**：`UVCPP_DB_MYSQL_ENABLE` /
-`UVCPP_DB_PGSQL_ENABLE` 那两个宏照旧是"头找得到就是 1"，
+`UVCPP_DB_PGSQL_ENABLE` / `UVCPP_DB_ODBC_ENABLE` 那三个宏照旧是"头找得到就是 1"，
 `uvcpp_db_drivers()` 的输出也不变。换句话说 `NO_DRIVER` 现在有**两条**来路
 （后端没编进来 / 编进来了但这台机器没库），`last_error()` 会说清是哪一条 ——
 详见 `uvcpp_db_status.h` 里 `NO_DRIVER` 那一段的文档注释。
 
 **共享库上这一档还多一条链接选项 `--no-undefined`**（ELF）：调用点全改成经
 `api()` 那张 `dlsym` 函数指针表走，而**共享库默认允许未定义符号** ——
-漏绑/漏改一处，`ld` 不吭声，产物却带着一个没人提供的 `mysql_query`，
-于是**每个使用者**在加载这个 `.so` 时就炸。`--no-undefined` 把这条不变式交还
-给链接器：漏一处就是链接期红。
+漏绑/漏改一处，`ld` 不吭声，产物却带着一个没人提供的 `mysql_query`（或
+`SQLExecDirectW`），于是**每个使用者**在加载这个 `.so` 时就炸。`--no-undefined`
+把这条不变式交还给链接器：漏一处就是链接期红。加 ODBC 那一份时这条兜底直接生效
+过 —— `nm -u …/uvcpp_db_odbc.cpp.o` 里剩下 **0 个** `SQL*` 未定义符号。
 
 ### ODBC：驱动管理器与**具体驱动**是两件事
 
@@ -204,25 +209,37 @@ SQL Server，也能连任何装得出 ODBC 驱动的数据源（Oracle、DB2、�
   也没有默认驱动"），本模块不把它改写成自己的话：这句话是判"我的连接串写错了"
   还是"这台机器没装驱动"唯一有用的信息。它**不走 `NO_DRIVER` 那条路** ——
   `NO_DRIVER` 的含义是"这个后端没编进这份包"（见 [§2](#2-连接串)）。
-* **没有 `UVCPP_DB_RUNTIME_LOAD` 那条路，这是有意的。** 上面那一节存在的理由是
-  "缺了客户端库会让**进程起不来**"；ODBC 这边不成立：驱动管理器本来就该在、而且
-  很小，真正按需加载的是它下面的**具体驱动**，那件事归驱动管理器自己管。
-* **但它把驱动管理器**链**进来 —— 这一条的代价要单独知道。** SQLite 可以
-  （`UVCPP_DB_SQLITE_FROM_SOURCE`）编进产物、MySQL/PG 可以走运行时加载，ODBC 这份
-  默认是**直接链** `libodbc.so.2`（Windows 上是系统 `odbc32.dll`，本来就在，不算
-  代价）。于是 Linux 的产物上多一条 `DT_NEEDED`：
+* **它也走 `UVCPP_DB_RUNTIME_LOAD`：链上的是驱动管理器，那也是"客户端库"。**
+  起先这里写的是"ODBC 不走这条路，因为驱动管理器本来就该在、而且很小" —— 那句话
+  **只在 Windows 上成立**（`odbc32.dll` 属于操作系统，和 `ws2_32` 同类，链接它没有
+  代价）；Linux / macOS 上驱动管理器是一个普通包（unixODBC），链上它就是在产物里
+  加一条 `DT_NEEDED libodbc.so.2`，正是上面「运行时加载」那一节要消灭的形状：
 
   ```
-  $ objdump -p build-odbc/libuvcpp.so | grep NEEDED
+  两棵树只差 `-DUVCPP_DB_RUNTIME_LOAD` 这一个开关（其余逐条相同）：
+
+  $ readelf -d /tmp/uvcpp-off/libuvcpp.so | grep NEEDED  # 关（默认）
     NEEDED               libuv.so.1
+    NEEDED               libsqlite3.so.0
     NEEDED               libodbc.so.2
+    NEEDED               libstdc++.so.6
+
+  $ readelf -d /tmp/uvcpp-rt/libuvcpp.so | grep NEEDED   # -DUVCPP_DB_RUNTIME_LOAD=ON
+    NEEDED               libuv.so.1
+    NEEDED               libsqlite3.so.0
     NEEDED               libstdc++.so.6
   ```
 
-  没装 unixODBC 的机器上，这一条就是**加载期**失败 —— 正是上面「运行时加载」那一节
-  要消灭的形状。要不要留它由你定：`-DUVCPP_ENABLE_DB_ODBC=OFF` 去掉这条依赖，其余
-  三个后端照编。不改成运行时加载的理由不是"它小"，而是**它本身就是找驱动的那个
-  东西**：自己没有它，也就没法去找别的。
+  于是它和 MySQL/PG 同一条规矩：**开** ⇒ 产物里不出现这个库，"这台机器没装
+  unixODBC"推迟到**真去连**那一次（拿到的是 `NO_DRIVER` 加一句写清了试过哪些库名
+  的话）；**关**（默认）⇒ 老实链上。两件事别混：**驱动管理器**是这一层的依赖，
+  它下面的**具体驱动**由它自己 `dlopen`，那是 `open()` 那一刻的事（上面第一条）。
+
+  候选名是各平台的惯例名（Linux `libodbc.so.2` / `libodbc.so`、macOS
+  `libodbc.2.dylib` / `libodbc.dylib`、Windows `odbc32.dll`），要指到别处用
+  `UVCPP_DB_ODBC_LIBRARY`。**iODBC 有意不在候选名里**：它是另一个驱动管理器实现，
+  符号名一样但行为没在本仓量过 —— 想用它就显式指路，别让"打开成功"盖住"换了一个
+  没量过的实现"。
 
 连接串里的默认驱动名（`ODBC Driver 18 for SQL Server`）**只是默认**：`?Driver=` 或
 `?DSN=` 一写就换掉（见 [§2](#2-连接串)）。
@@ -240,11 +257,17 @@ SQL Server，也能连任何装得出 ODBC 驱动的数据源（Oracle、DB2、�
 也就是说 —— **`1.7.0` 那个预编译包里的 db 模块三个后端都在**（`uvcpp_db_drivers()`
 会打印 `sqlite,mysql,postgres` —— 是**驱动的稳定短名**，`pgsql` 只是 `scheme` 的
 别名之一，见下面的别名表），但 MySQL/PG 的**客户端库**是运行时才打开的，链接行上
-不出现（见下面「客户端库运行时加载」那一节）。**ODBC 是 `1.7.1-dev` 才加的，这六条
-腿的 `-D` 清单里还没有它** —— 它默认 `ON`，所以下一版的包里**会**有它，那意味着
-Linux 包上多一条 `DT_NEEDED libodbc.so.2`（Windows 上是系统 `odbc32`，不算代价）。
-这件事该由发布配置**显式**写出来（`-DUVCPP_ENABLE_DB_ODBC=ON` 或 `=OFF`），而不是
-靠默认值漂进去 —— 留在这里当一条待办。
+不出现（见下面「客户端库运行时加载」那一节）。
+
+**ODBC 是 `1.7.1-dev` 才加的，这六条腿的 `-D` 清单里还没有它。**
+它默认 `ON`，但决定它在不在包里的不止 `-D`：**Linux 那几条腿上还得装
+`unixodbc-dev`** —— 现在的 `apt-get install` 只装 `zlib1g-dev ninja-build`，runner
+上没有 `sql.h`，上面那条 warning 会把 ODBC 后端**强制关掉**，于是 Linux 包照样没有
+它（Windows 腿上 `sql.h` 来自 SDK，所以 Windows 包里会有）。补上之后不必担心多出
+依赖：腿里已经有 `-DUVCPP_DB_RUNTIME_LOAD=ON`，ODBC 跟着它走，**不会**往产物里添
+`DT_NEEDED libodbc.so.2`，那六条腿只需要装头。这件事该由发布配置**显式**写出来
+（`-DUVCPP_ENABLE_DB_ODBC=ON` + runner 上的 `unixodbc-dev`），而不是靠默认值漂进去
+—— 留在这里当一条待办。
 
 SQLite 那一半必须从源码编，不是漏配，
 是两条实测理由把另两条路都堵死了：

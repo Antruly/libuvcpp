@@ -305,7 +305,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3095-3095`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3118-3118`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -642,7 +642,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1997-1999`、`CMakeLists.txt:2987-2992`）——
+  两处都摘掉**（`CMakeLists.txt:2020-2022`、`CMakeLists.txt:3010-3015`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -763,9 +763,9 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   后端"，而"要连的那个数据源有没有装驱动"**只有 `open()` 才知道** —— 驱动名写错时
   拿到的是驱动管理器给的原文（"找不到数据源、也没有默认驱动"），不是我们编的话。
   配置期只要两样：`sql.h` 与驱动管理器（Linux 的 `libodbc`、Windows 的系统 `odbc32`）。
-  **没有 `UVCPP_DB_RUNTIME_LOAD` 那条路**：驱动管理器本来就该在、而且很小；真正按需
-  加载的是它下面的**具体驱动**，那件事归驱动管理器自己管（本机 `-- db: ODBC 后端开
-  （驱动管理器 …/libodbc.so）`，编、链 rc=0）。
+  **它也认 `UVCPP_DB_RUNTIME_LOAD`**：起先这里写的是"驱动管理器本来就该在、而且很小，
+  所以不走那条路"，那句话**只在 Windows 上成立** —— 下一节第一条就是按实测改它的
+  （本机 `-- db: ODBC 后端开（驱动管理器 …/libodbc.so）`，编、链 rc=0）。
 
   写这一片时踩到一处值得记下来的头文件陷阱：unixODBC 的 `sqltypes.h` 第 75 行有一句
   `#define BOOL int`（给没有 `<windows.h>` 的平台补齐 ODBC 那套类型表），它会把
@@ -816,6 +816,38 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   **没跑的是 ODBC 到 SQL Server 那一族**：`odbc_mssql_dialect` 写好了（`INT
   IDENTITY(1,1) PRIMARY KEY` / `NVARCHAR(MAX)` / `VARBINARY(MAX)` / `DATETIME2` /
   `BIT` / `DECIMAL(18,2)`），但这台机器上没装 msodbcsql18。别把它当成已经对过。
+
+- **ODBC 也接上了 `UVCPP_DB_RUNTIME_LOAD`：它的"客户端库"就是驱动管理器**
+  （`1.7.1-dev`，默认 `OFF`）。修的是上面那条里的一句判断：把驱动管理器链上，在
+  **Linux / macOS 上就是一条 `DT_NEEDED libodbc.so.2`** —— 正是这个开关要消灭的形状
+  （"没装 unixODBC 的机器连加载这份 `.so` 都做不到"）。**只有 Windows 是例外**：
+  `odbc32.dll` 属于操作系统，和 `ws2_32` 同类，链接它没有代价。本机两档实测 ——
+  两棵树（`/tmp/uvcpp-off` 与 `/tmp/uvcpp-rt`）**只差这一个开关**，其余开关逐条相同：
+
+  ```
+  $ readelf -d /tmp/uvcpp-off/libuvcpp.so | grep NEEDED   # 关（默认）
+    NEEDED               libuv.so.1
+    NEEDED               libsqlite3.so.0
+    NEEDED               libodbc.so.2
+  $ readelf -d /tmp/uvcpp-rt/libuvcpp.so | grep NEEDED    # -DUVCPP_DB_RUNTIME_LOAD=ON
+    NEEDED               libuv.so.1
+    NEEDED               libsqlite3.so.0
+  $ nm -u …/uvcpp_db_odbc.cpp.o | grep -c ' U SQL'        # 24 → 0
+  ```
+
+  那张函数表是**从 `nm -u` 的目标文件里数出来的 24 个入口**，不是照着 grep 抄的：
+  `SQLGetInfo` 在文件里只出现在一句注释里（用的是 W 形态 `SQLGetInfoW`），照着文本
+  抄会把一个没人提供的符号抄进表里。新私有头 `src/db/uvcpp_db_odbc_api.h` 与
+  `uvcpp_db_pgsql_api.h` 同形（进安装排除与 `package_release.py` 的
+  `PRIVATE_HEADERS`），64 处调用点改成 `api().SQLxxx(...)`，`open()` 先看
+  `uvcpp_db_odbc_load_error()`，非空就报 `NO_DRIVER` 并把候选名与各自的失败原因写在
+  里面。**`#error` 那道闸门这次是必需的**：`ODBC_STD` 会把 `SQLAllocHandle` 重定向到
+  `SQLAllocHandleStd`、`UNICODE` 会把 `SQLSetStmtAttr` 重定向到 `SQLSetStmtAttrW`
+  （两处都在头文件里的条件宏里），按名字取符号的构建方式与直接链的会**分叉**，所以
+  编这个 `.cpp` 时两者都必须未定义，否则当场红。负路径也量了：
+  `UVCPP_DB_ODBC_LIBRARY=/nonexistent/libodbc.so.2` ⇒ `no_driver` 加那句逐个列出试过
+  哪些库名的话。两档各跑一遍套件，读数一致：ODBC **181 / 0 / 3**（另 57 条 ODBC
+  专属）、SQLite **196 / 0 / 1**。默认 `OFF` 的行为逐字节不变。
 
 - **MySQL / PostgreSQL 的客户端库改成可以运行时加载：`UVCPP_DB_RUNTIME_LOAD`**
   （`1.6.54-dev`，默认 `OFF`）。直接链的后果不是"少个功能"而是**进程起不来**：
@@ -2648,17 +2680,17 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）把我们的嵌入依赖藏起来，
   libpq 就会解析到**系统**那份、与它自己的 libcrypto 自洽。
 
-  修法一（`CMakeLists.txt:2493-2535`，`UNIX AND NOT APPLE`，只给共享目标
+  修法一（`CMakeLists.txt:2516-2558`，`UNIX AND NOT APPLE`，只给共享目标
   `uvcpp`/`uvcpp_s`）：`target_link_options(… PRIVATE "LINKER:--exclude-libs,ALL")`。
   它只藏**来自静态归档**的符号，而这两个目标是
-  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2193-2193`）
+  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2216-2216`）
   **直接拿我们自己的目标文件**建的、不经归档 ⇒ 我们自己的 API 与 `uvcpp_c_*` 那套
   C ABI 照样导出。只给共享目标加是因为静态库没有导出表，藏了反而让 `uvcpp_a` 的消费者
   在最终链接时找不到本该由我们提供的符号；只给 ELF 加是因为 Apple 的 ld 没有这个选项
   （那边是 `-exported_symbols_list`），而发布腿里本来也没有 macOS。
 
   修法二：`uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经
-  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2824-2824`）**直接进最终链接、也不经归档** ⇒
+  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2847-2847`）**直接进最终链接、也不经归档** ⇒
   上面那条对它无效（实测加不加都是 43 个 `yyjson_*`）。那边改用
   `C_VISIBILITY_PRESET hidden` **加** `target_compile_definitions(uvcpp_yyjson PRIVATE
   yyjson_api=)`。**第二半是承重的**：上游 `yyjson.h` 给每个公开函数**显式**贴了
@@ -2702,16 +2734,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   记过是陷阱（它只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索路径）。
 
   修法照 `UVCPP_DB_SQLITE_FROM_SOURCE`（`CMakeLists.txt:189`）的命名与形状加一个
-  **默认 OFF** 的选项（`CMakeLists.txt:242-243`），把整段发现包进
-  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:418-418`）。注意是**连发现都不
+  **默认 OFF** 的选项（`CMakeLists.txt:246-247`），把整段发现包进
+  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:422-422`）。注意是**连发现都不
   调用**，不是"找到了也偏不用"：`find_path`/`find_library` 的结果会写进 cache，
   调用过一次，`UVCPP_BROTLI_INCLUDE_DIR` 之类就一直留在那棵树里，同一棵树翻开关时
   会把上一轮的答案漏过来。所以每个"找到系统那份"的判据都**显式**带上
-  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:429-429`、`CMakeLists.txt:433-433`、
-  `CMakeLists.txt:441-441`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
+  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:433-433`、`CMakeLists.txt:437-437`、
+  `CMakeLists.txt:445-445`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
   选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
-  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:519-519`），链接段
-  （`CMakeLists.txt:2677-2677`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:523-523`），链接段
+  （`CMakeLists.txt:2700-2700`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
   动，所以既有使用者的行为逐字节不变。
 
   判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON
@@ -2897,7 +2929,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1773`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1796`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是

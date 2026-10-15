@@ -194,28 +194,32 @@ option(UVCPP_ENABLE_DB_PGSQL  "Build the PostgreSQL backend of the db module (ne
 # 连接串里的 `Driver=` 决定。接 SQL Server 走的就是这条路 —— 微软没有给 SQL Server
 # 一个可链接的 C 客户端库，`msodbcsql18` 本身就是 ODBC 驱动。
 #
-# 与另两个后端不同，它**没有** `UVCPP_DB_RUNTIME_LOAD` 那条路：驱动管理器
-# （Linux 的 libodbc、Windows 的 odbc32）本来就该在，而且很小。真正按需加载的是
-# 它下面的**具体驱动**，那件事由驱动管理器自己干，不归我们管。
+# 与另两个后端一样，它也认 `UVCPP_DB_RUNTIME_LOAD`：链上的是**驱动管理器**
+# （Linux 的 libodbc、macOS 的 libodbc.dylib、Windows 的 odbc32），而 Linux/macOS
+# 上它是一个普通包 —— 没装的机器会栽在那条 `DT_NEEDED libodbc.so.2` 上，与
+# libmysqlclient/libpq 完全同构。Windows 上 `odbc32.dll` 属于操作系统，链接它没有
+# 这个代价，所以这一档主要在 Linux/macOS 的包上说话。真正按需加载的**具体驱动**
+# 是另一件事，那件事由驱动管理器自己干，不归我们管。
 option(UVCPP_ENABLE_DB_ODBC
   "Build the ODBC backend of the db module (needs ODBC headers + a driver manager; the data source is chosen by the connection string)" ON)
-# MySQL / PostgreSQL 两个后端**不在链接行上出现**，改成运行时打开客户端库。
+# MySQL / PostgreSQL / ODBC 三个后端**不在链接行上出现**，改成运行时打开客户端库
+# （ODBC 那一份是**驱动管理器**，具体驱动由它自己加载）。
 #
 # 这是给**预编译包**用的：`DT_NEEDED`（Windows 上是导入表）是**加载期**解析的，
-# 链上 libmysqlclient/libpq 就等于"没装这两种客户端库的机器上连加载都失败"——
-# 哪怕使用者只跑 HTTP、一行 db 代码都不碰。开了这个开关之后，那种机器上除"真去连
-# MySQL/PG"之外一切照常，而真去连时拿到的是 `uvcpp_db_status::NO_DRIVER` 加一句
-# 写清了试过哪些库名的话（`uvcpp_db_client::last_error()`）。
+# 链上 libmysqlclient/libpq/libodbc 就等于"没装这些客户端库的机器上连加载都失败"
+# ——哪怕使用者只跑 HTTP、一行 db 代码都不碰。开了这个开关之后，那种机器上除"真去
+# 连 MySQL/PG/ODBC"之外一切照常，而真去连时拿到的是 `uvcpp_db_status::NO_DRIVER`
+# 加一句写清了试过哪些库名的话（`uvcpp_db_client::last_error()`）。
 #
-# 注意它**只管"符号从哪来"**，不改"后端在不在"：仍然要有 `mysql.h`/`libpq-fe.h`
-# 才能把后端编进来（头是编译期的东西，运行时加载也省不掉），`UVCPP_DB_*_ENABLE`
-# 的取值照旧由头在不在决定。所以这个开关**不会**让一个原本编不出 MySQL 后端的
-# 环境凭空多出这个后端。
+# 注意它**只管"符号从哪来"**，不改"后端在不在"：仍然要有
+# `mysql.h`/`libpq-fe.h`/`sql.h` 才能把后端编进来（头是编译期的东西，运行时加载也
+# 省不掉），`UVCPP_DB_*_ENABLE` 的取值照旧由头在不在决定。所以这个开关**不会**让
+# 一个原本编不出某个后端的环境凭空多出这个后端。
 #
 # 与 `UVCPP_DB_SQLITE_FROM_SOURCE` / `UVCPP_BROTLI_FROM_SOURCE`（上面）是同一个
 # 形状：名字说的是"这份依赖怎么来"。
 option(UVCPP_DB_RUNTIME_LOAD
-  "Load the MySQL/PostgreSQL client libraries at run time instead of linking them (keeps the artifact free of DT_NEEDED entries for them)" OFF)
+  "Load the MySQL/PostgreSQL/ODBC client libraries at run time instead of linking them (keeps the artifact free of DT_NEEDED entries for them)" OFF)
 
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
@@ -1240,16 +1244,35 @@ if(UVCPP_ENABLE_DB)
       set(UVCPP_ENABLE_DB_ODBC OFF)
     elseif(WIN32)
       # Windows 的 ODBC 是系统组件：头在 SDK 里，库就是 odbc32.dll（一定在）。
+      # `UVCPP_DB_RUNTIME_LOAD=ON` 时连这条导入库也不要（符号由 `LoadLibrary` 取），
+      # 差别只是链接行上少一条 —— 这个平台上两种做法都安全。
       list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_ODBC_INCLUDE_DIR}")
-      list(APPEND UVCPP_DB_LINK_LIBS odbc32)
-      message(STATUS "db: ODBC 后端开（Windows 系统 odbc32）")
+      if(UVCPP_DB_RUNTIME_LOAD)
+        message(STATUS
+          "db: ODBC 后端开（运行时加载 odbc32.dll，不链导入库；"
+          "头来自 ${UVCPP_DB_ODBC_INCLUDE_DIR}）")
+      else()
+        list(APPEND UVCPP_DB_LINK_LIBS odbc32)
+        message(STATUS "db: ODBC 后端开（Windows 系统 odbc32）")
+      endif()
     else()
       # 这里找的是 unixODBC 的 `libodbc`。注意 `libodbc.so` 这个**开发符号链接**
       # 是 unixodbc-dev 才给的：只装运行时的 unixodbc 时，`.so.2` 在而 `.so` 不在，
       # 于是头与库都找不到 —— 会走到上面那条"找不到 sql.h"，
       # 而不是在这里报一句让人去猜"为什么装了 unixodbc 还不行"。
-      find_library(UVCPP_DB_ODBC_LIBRARY NAMES odbc)
-      if(UVCPP_DB_ODBC_LIBRARY)
+      #
+      # `UVCPP_DB_RUNTIME_LOAD=ON` 时**不找库**（与 MySQL 那段同一条理由：链接行上
+      # 多一条 libodbc 正是这个开关要消掉的东西）—— 于是配置期只剩"有没有 sql.h"
+      # 这一件事，"这台机器没装 unixODBC 运行库"不再等于"编不出这个后端"。
+      if(NOT UVCPP_DB_RUNTIME_LOAD)
+        find_library(UVCPP_DB_ODBC_LIBRARY NAMES odbc)
+      endif()
+      if(UVCPP_DB_RUNTIME_LOAD)
+        list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_ODBC_INCLUDE_DIR}")
+        message(STATUS
+          "db: ODBC 后端开（运行时加载，不链 libodbc；"
+          "头来自 ${UVCPP_DB_ODBC_INCLUDE_DIR}）")
+      elseif(UVCPP_DB_ODBC_LIBRARY)
         list(APPEND UVCPP_DB_INCLUDE_DIRS "${UVCPP_DB_ODBC_INCLUDE_DIR}")
         list(APPEND UVCPP_DB_LINK_LIBS "${UVCPP_DB_ODBC_LIBRARY}")
         message(STATUS "db: ODBC 后端开（驱动管理器 ${UVCPP_DB_ODBC_LIBRARY}）")
@@ -1257,7 +1280,7 @@ if(UVCPP_ENABLE_DB)
         message(WARNING
           "UVCPP_ENABLE_DB_ODBC=ON 但只找到 sql.h、找不到 libodbc。已强制关闭这个"
           "后端 —— 其余后端照编。Debian/Ubuntu 上装 unixodbc-dev（只装 unixodbc "
-          "运行时不带 .so 符号链接）。")
+          "运行时不带 .so 符号链接），或者用 -DUVCPP_DB_RUNTIME_LOAD=ON 只要头。")
         set(UVCPP_ENABLE_DB_ODBC OFF)
       endif()
     endif()
@@ -3158,9 +3181,10 @@ endif()
 # 它一旦装出去，"驱动接口可以随便改"这句话就不成立了。三个后端的 .cpp 与
 # `uvcpp_db_factory.cpp` 都带它，所以它必须留在源树里。
 #
-# 另外三份也是私有的（`UVCPP_DB_RUNTIME_LOAD` 那套）：
-#   * `uvcpp_db_mysql_api.h` / `uvcpp_db_pgsql_api.h` —— 函数指针表，就是后端
-#     的内部 ABI；它们还各自 `#include <mysql/mysql.h>` / `<libpq-fe.h>`，
+# 另外四份也是私有的（`UVCPP_DB_RUNTIME_LOAD` 那套）：
+#   * `uvcpp_db_mysql_api.h` / `uvcpp_db_pgsql_api.h` / `uvcpp_db_odbc_api.h`
+#     —— 函数指针表，就是后端的内部 ABI；它们还各自
+#     `#include <mysql/mysql.h>` / `<libpq-fe.h>` / `<sql.h>`，
 #     而**公开面一个客户端库的类型都不出现**（`uvcpp_db_client.h` 只带自己的
 #     头），装出去等于让使用者以为那份客户端头也是我们的依赖。
 #   * `uvcpp_db_runtime_load.h` —— `dlopen`/`dlsym` 的两个原语，纯内部。
@@ -3172,6 +3196,7 @@ file(GLOB DB_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/db/*.h")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_driver\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_mysql_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_pgsql_api\\.h$")
+list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_odbc_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_runtime_load\\.h$")
 if(DB_HEADER_FILES AND UVCPP_ENABLE_DB)
   install(FILES ${DB_HEADER_FILES} DESTINATION include/db)

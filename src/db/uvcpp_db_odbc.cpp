@@ -70,20 +70,12 @@
 
 #if UVCPP_DB_ENABLE && UVCPP_DB_ODBC_ENABLE
 
-#include <sql.h>
-#include <sqlext.h>
+// ODBC 头（以及"要哪些符号"的那份清单）都在这里：清单与结构体各用一半。
+#include "db/uvcpp_db_odbc_api.h"
 
-// unixODBC 的 `sqltypes.h` 第 75 行有一句 `#define BOOL int`（在没有 `<windows.h>`
-// 的平台上补齐 ODBC 那套类型表）。它会把这个文件里唯一一处 `uvcpp_db_type::BOOL`
-// 展开成 `uvcpp_db_type::int`，报出来的错是 "expected unqualified-id before 'int'"
-// —— 离真正的原因隔着一层，第一次遇到很费时间。
-//
-// 这里直接 `#undef`：ODBC 头已经预处理完，这个宏的使命结束了；本文件从头到尾
-// **不用** ODBC 的 `BOOL`（全文件只有上面那一个枚举常量叫 BOOL）。
-// 微软那套 `sqltypes.h` 不发这个宏（Windows 上 `BOOL` 是 `<windows.h>` 里的
-// typedef，对 `enum class` 的限定名没影响），所以这行只在 unixODBC 上起作用，
-// 在 Windows 上是个空操作。
-#undef BOOL
+#if UVCPP_DB_RUNTIME_LOAD
+#include "db/uvcpp_db_runtime_load.h"
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -98,7 +90,124 @@
 
 namespace uvcpp {
 namespace db_detail {
+
+// ---------------------------------------------------------------------------
+// 那 24 个符号从哪来 —— 与前两个后端同一个形状，理由（`DT_NEEDED` 是加载期解析的、
+// 链接器兜底在这条路上不存在）详见 `uvcpp_db_mysql.cpp` 同一处。
+//
+// ODBC 这一份比 MySQL/PG 多一层意思：链上的是**驱动管理器**。Linux 与 macOS 上它是
+// 一个普通包（unixODBC），没装的机器会因为一条 `DT_NEEDED libodbc.so.2` **连
+// `libuvcpp.so` 都加载不了**，哪怕程序一行 db 代码都不碰 —— 与 libmysqlclient/libpq
+// 一模一样的形状。Windows 上 `odbc32.dll` 属于操作系统（和 `ws2_32` 同类），链接它
+// 没有这个代价，所以这条开关主要在 Linux/macOS 的包上有意义。
+// ---------------------------------------------------------------------------
+#if UVCPP_DB_RUNTIME_LOAD
+
 namespace {
+
+/// 候选名。带版本号的 soname 在前：`libodbc.so` 那个符号链接属于 `-dev` 包，
+/// 只装了 `unixodbc` 的机器上没有它。Windows 与 macOS 侧没有 soname 这一套，
+/// 用各自的惯例名（`odbc32.dll` / `libodbc.2.dylib`）。
+///
+/// **iODBC 不在候选名里**：它是另一个驱动管理器实现，符号名相同但行为没有在本仓
+/// 量过 —— 想用它就显式指路（`UVCPP_DB_ODBC_LIBRARY`），别让"打开成功"掩盖
+/// "换了一个没量过的实现"。
+const char* const kDriverManagerNames[] = {
+#if defined(_WIN32)
+    "odbc32.dll",
+    nullptr
+#elif defined(__APPLE__)
+    "libodbc.2.dylib",
+    "libodbc.dylib",
+    nullptr
+#else
+    "libodbc.so.2",
+    "libodbc.so",
+    nullptr
+#endif
+};
+
+/// 逐个取符号，缺一个就整张表作废（理由见 MySQL 那边）。
+bool bind_manager_api(void* handle, odbc_api* t, const char** missing) {
+#define UVCPP_DB_ODBC_BIND(name)                   \
+  t->name = reinterpret_cast<decltype(t->name)>(   \
+      uvcpp_db_lookup_symbol(handle, #name));      \
+  if (t->name == nullptr) {                        \
+    *missing = #name;                              \
+    return false;                                  \
+  }
+  UVCPP_DB_ODBC_SYMBOLS(UVCPP_DB_ODBC_BIND)
+#undef UVCPP_DB_ODBC_BIND
+  return true;
+}
+
+struct api_state {
+  odbc_api table;
+  bool ok;
+  std::string loaded_name;
+  std::string error;
+};
+
+api_state load_manager_api() {
+  api_state st = {odbc_api(), false, std::string(), std::string()};
+
+  std::string tried;
+  void* handle = uvcpp_db_open_client_library(kDriverManagerNames,
+                                              "UVCPP_DB_ODBC_LIBRARY", &tried,
+                                              &st.loaded_name);
+  if (handle == nullptr) {
+    st.error =
+        "加载 ODBC 驱动管理器失败，试过这些名字都没打开：" + tried +
+        "。装一份驱动管理器（Debian/Ubuntu 上是 unixodbc，RHEL 系是 unixODBC，"
+        "macOS 上是 Homebrew 的 unixodbc），或者把环境变量 UVCPP_DB_ODBC_LIBRARY "
+        "指到它的完整路径。只用别的后端时不用管这一条。注意这是**管理器**那一层："
+        "管理器在、某个数据源的驱动没装，是 open() 时才会知道的事（那时的报错"
+        "原文来自管理器）。";
+    return st;
+  }
+
+  const char* missing = nullptr;
+  if (!bind_manager_api(handle, &st.table, &missing)) {
+    st.error = "ODBC 驱动管理器 " + st.loaded_name + " 里缺少符号 " + missing +
+               " —— 版本太旧或不是一套完整的 ODBC 驱动管理器。";
+    return st;
+  }
+  st.ok = true;
+  return st;
+}
+
+api_state& manager_api_state() {
+  // 第一次真要用 ODBC 时才加载，不是加载这份库的时候。理由同 MySQL 那边。
+  static api_state st = load_manager_api();
+  return st;
+}
+
+}  // namespace
+
+const odbc_api& uvcpp_db_odbc_api() { return manager_api_state().table; }
+
+const std::string& uvcpp_db_odbc_load_error() {
+  return manager_api_state().error;
+}
+
+#else  // 直接链接
+
+namespace {
+
+#define UVCPP_DB_ODBC_ADDR(name) &::name,
+const odbc_api kManagerApi = {UVCPP_DB_ODBC_SYMBOLS(UVCPP_DB_ODBC_ADDR)};
+#undef UVCPP_DB_ODBC_ADDR
+
+}  // namespace
+
+const odbc_api& uvcpp_db_odbc_api() { return kManagerApi; }
+
+#endif  // UVCPP_DB_RUNTIME_LOAD
+
+namespace {
+
+/// 那把函数表，短名字。下面每一处对驱动管理器的调用都写成 `api().SQLxxx(...)`。
+const odbc_api& api() { return uvcpp_db_odbc_api(); }
 
 // ---------------------------------------------------------------------------
 // UTF-8 <-> SQLWCHAR
@@ -254,7 +363,7 @@ std::string odbc_diag(SQLSMALLINT handle_type, SQLHANDLE handle) {
   SQLINTEGER native = 0;
   SQLSMALLINT len = 0;
   for (SQLSMALLINT rec = 1;; ++rec) {
-    const SQLRETURN rc = SQLGetDiagRecW(
+    const SQLRETURN rc = api().SQLGetDiagRecW(
         handle_type, handle, rec, state, &native, msg,
         static_cast<SQLSMALLINT>(sizeof(msg) / sizeof(msg[0]) - 1), &len);
     if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) break;
@@ -273,7 +382,7 @@ std::string odbc_sqlstate(SQLSMALLINT handle_type, SQLHANDLE handle) {
   SQLWCHAR state[8];
   SQLINTEGER native = 0;
   SQLSMALLINT len = 0;
-  if (!SQL_SUCCEEDED(SQLGetDiagRecW(handle_type, handle, 1, state, &native,
+  if (!SQL_SUCCEEDED(api().SQLGetDiagRecW(handle_type, handle, 1, state, &native,
                                     nullptr, 0, &len))) {
     return std::string();
   }
@@ -332,6 +441,14 @@ class odbc_driver : public uvcpp_db_driver {
   bool is_open() const { return dbc_ != nullptr; }
 
   uvcpp_db_status open(const uvcpp_db_url& url, std::string* err) {
+    // 驱动管理器没到手就没什么可做的了（`UVCPP_DB_RUNTIME_LOAD=OFF` 时这一句永远
+    // 是空串，因为那时符号是链接期解析的）—— 报的是加载那句人话，不是"连接失败"。
+    const std::string& load_error = uvcpp_db_odbc_load_error();
+    if (!load_error.empty()) {
+      *err = load_error;
+      return uvcpp_db_status::NO_DRIVER;
+    }
+
     close();
 
     // 每个连接一份 ENV。共享一份能省一点，但要引入引用计数和一条"谁最后走谁
@@ -340,7 +457,7 @@ class odbc_driver : public uvcpp_db_driver {
     const uvcpp_db_status ost = open_env(err);
     if (!uvcpp_db_ok(ost)) return ost;
 
-    SQLRETURN rc = SQLAllocHandle(SQL_HANDLE_DBC, env_, &dbc_);
+    SQLRETURN rc = api().SQLAllocHandle(SQL_HANDLE_DBC, env_, &dbc_);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "分配 ODBC 连接句柄失败：" + odbc_diag(SQL_HANDLE_ENV, env_);
       release_all();
@@ -353,14 +470,14 @@ class odbc_driver : public uvcpp_db_driver {
     // 也记一份 —— 哪天上层的只读判断漏了，这里还有一道。ODBC 没规定驱动必须实现
     // 它，不支持的驱动会返回错误，所以失败**当警告吞掉**：一个不支持只读模式的
     // 数据源不该因此完全连不上。
-    SQLSetConnectAttr(
+    api().SQLSetConnectAttr(
         dbc_, SQL_ATTR_ACCESS_MODE,
         reinterpret_cast<SQLPOINTER>(static_cast<intptr_t>(SQL_MODE_READ_ONLY)),
         0);
 
     const int login_s = login_timeout_ms_ / 1000;
     if (login_s > 0) {
-      SQLSetConnectAttr(
+      api().SQLSetConnectAttr(
           dbc_, SQL_ATTR_LOGIN_TIMEOUT,
           reinterpret_cast<SQLPOINTER>(static_cast<intptr_t>(login_s)), 0);
     }
@@ -369,7 +486,7 @@ class odbc_driver : public uvcpp_db_driver {
     wstr wconn(conn);
     SQLWCHAR out_buf[1024];
     SQLSMALLINT out_len = 0;
-    rc = SQLDriverConnectW(
+    rc = api().SQLDriverConnectW(
         dbc_, nullptr, wconn.p(), wconn.slen(), out_buf,
         static_cast<SQLSMALLINT>(sizeof(out_buf) / sizeof(out_buf[0]) - 1),
         &out_len, SQL_DRIVER_NOPROMPT);
@@ -394,10 +511,10 @@ class odbc_driver : public uvcpp_db_driver {
       if (in_transaction_) {
         // 开关事务的连接被直接关掉时，ODBC 的行为是"回滚"，这里显式结束一次，
         // 不把结果交给实现细节。
-        SQLEndTran(SQL_HANDLE_DBC, dbc_, SQL_ROLLBACK);
+        api().SQLEndTran(SQL_HANDLE_DBC, dbc_, SQL_ROLLBACK);
         in_transaction_ = false;
       }
-      SQLDisconnect(dbc_);
+      api().SQLDisconnect(dbc_);
     }
     release_all();
   }
@@ -412,15 +529,15 @@ class odbc_driver : public uvcpp_db_driver {
     SQLHSTMT stmt = nullptr;
     const uvcpp_db_status ast = alloc_stmt(&stmt, err);
     if (!uvcpp_db_ok(ast)) return ast;
-    const SQLRETURN rc = SQLExecDirectW(stmt, const_cast<SQLWCHAR*>(kPing),
+    const SQLRETURN rc = api().SQLExecDirectW(stmt, const_cast<SQLWCHAR*>(kPing),
                                         SQL_NTS);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "ODBC ping 失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
-      SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
       return uvcpp_db_status::EXEC_FAILED;
     }
-    const SQLRETURN fr = SQLFetch(stmt);
-    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    const SQLRETURN fr = api().SQLFetch(stmt);
+    api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     if (!SQL_SUCCEEDED(fr)) {
       *err = "ODBC ping 取不到结果";
       return uvcpp_db_status::EXEC_FAILED;
@@ -449,11 +566,11 @@ class odbc_driver : public uvcpp_db_driver {
     if (!uvcpp_db_ok(ast)) return ast;
     const uvcpp_db_status est = exec_on(stmt, sql, params, err);
     if (!uvcpp_db_ok(est)) {
-      SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
       return est;
     }
     const uvcpp_db_status rst = fetch_all(stmt, out, err);
-    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     return rst;
   }
 
@@ -475,17 +592,17 @@ class odbc_driver : public uvcpp_db_driver {
     if (!uvcpp_db_ok(ast)) return ast;
     const uvcpp_db_status est = exec_on(stmt, sql, params, err);
     if (!uvcpp_db_ok(est)) {
-      SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
       return est;
     }
 
     // DDL 与部分 INSERT 报不出行数，ODBC 用 SQL_NO_TOTAL(-1) 表达，而那正好是
     // "报不出"这个契约（头文件写的：后端报不出时写 -1）。
     SQLLEN rows = 0;
-    if (affected && SQL_SUCCEEDED(SQLRowCount(stmt, &rows)) && rows >= 0) {
+    if (affected && SQL_SUCCEEDED(api().SQLRowCount(stmt, &rows)) && rows >= 0) {
       *affected = static_cast<int64_t>(rows);
     }
-    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     return uvcpp_db_status::OK;
   }
 
@@ -506,17 +623,17 @@ class odbc_driver : public uvcpp_db_driver {
     SQLHSTMT stmt = nullptr;
     const uvcpp_db_status ast = alloc_stmt(&stmt, err);
     if (!uvcpp_db_ok(ast)) return ast;
-    const SQLRETURN rc = SQLExecDirectW(
+    const SQLRETURN rc = api().SQLExecDirectW(
         stmt, const_cast<SQLWCHAR*>(kScopeIdentity), SQL_NTS);
     if (!SQL_SUCCEEDED(rc)) {
-      SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
       *err = "这个数据源报不出自增值（SCOPE_IDENTITY 不被支持）";
       return uvcpp_db_status::UNSUPPORTED;
     }
     bool is_null = false;
     int64_t v = 0;
     const uvcpp_db_status st = read_scalar_int64(stmt, 1, &v, &is_null, err);
-    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     if (!uvcpp_db_ok(st)) return st;
     if (is_null) {
       *err = "这条连接还没成功 INSERT 过，拿不到自增 id";
@@ -540,7 +657,7 @@ class odbc_driver : public uvcpp_db_driver {
       *err = "事务已经开着，本模块不支持嵌套事务";
       return uvcpp_db_status::EXEC_FAILED;
     }
-    const SQLRETURN rc = SQLSetConnectAttr(
+    const SQLRETURN rc = api().SQLSetConnectAttr(
         dbc_, SQL_ATTR_AUTOCOMMIT,
         reinterpret_cast<SQLPOINTER>(
             static_cast<intptr_t>(SQL_AUTOCOMMIT_OFF)),
@@ -621,11 +738,11 @@ class odbc_driver : public uvcpp_db_driver {
     // 这个函数安静地只列出名字叫 "TABLE" 的表 —— 不报错，只是结果是空的。
     static const SQLWCHAR kTableType[] = {'T', 'A', 'B', 'L', 'E', 0};
     const SQLRETURN rc =
-        SQLTablesW(stmt, nullptr, 0, nullptr, 0, nullptr, 0,
+        api().SQLTablesW(stmt, nullptr, 0, nullptr, 0, nullptr, 0,
                    const_cast<SQLWCHAR*>(kTableType), SQL_NTS);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "ODBC 列不出表：" + odbc_diag(SQL_HANDLE_STMT, stmt);
-      SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
       return uvcpp_db_status::EXEC_FAILED;
     }
 
@@ -634,23 +751,23 @@ class odbc_driver : public uvcpp_db_driver {
     // "刚建的表能被列出来"，拼上模式名会让它匹配不上。
     std::vector<std::string> names;
     for (;;) {
-      const SQLRETURN fr = SQLFetch(stmt);
+      const SQLRETURN fr = api().SQLFetch(stmt);
       if (fr == SQL_NO_DATA) break;
       if (!SQL_SUCCEEDED(fr)) {
         *err = "ODBC 取表名失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
-        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         return uvcpp_db_status::EXEC_FAILED;
       }
       bool is_null = false;
       std::string name;
       const uvcpp_db_status st = read_text_column(stmt, 3, &name, &is_null, err);
       if (!uvcpp_db_ok(st)) {
-        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         return st;
       }
       if (!is_null && !name.empty()) names.push_back(name);
     }
-    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
 
     // 排序去重放在本地做：SQLTables 的顺序由驱动决定，而同一个库在 msodbcsql 与
     // FreeTDS 下给出的顺序不一样 —— 那会让"同一份操作在四个后端得到同一份结果"
@@ -678,10 +795,10 @@ class odbc_driver : public uvcpp_db_driver {
       SQLHSTMT pk = nullptr;
       if (uvcpp_db_ok(alloc_stmt(&pk, err))) {
         wstr wt(table);
-        if (SQL_SUCCEEDED(SQLPrimaryKeysW(pk, nullptr, 0, nullptr, 0, wt.p(),
+        if (SQL_SUCCEEDED(api().SQLPrimaryKeysW(pk, nullptr, 0, nullptr, 0, wt.p(),
                                           wt.slen()))) {
           for (;;) {
-            const SQLRETURN fr = SQLFetch(pk);
+            const SQLRETURN fr = api().SQLFetch(pk);
             if (fr == SQL_NO_DATA) break;
             if (!SQL_SUCCEEDED(fr)) break;
             bool is_null = false;
@@ -693,7 +810,7 @@ class odbc_driver : public uvcpp_db_driver {
             }
           }
         }
-        SQLFreeHandle(SQL_HANDLE_STMT, pk);
+        api().SQLFreeHandle(SQL_HANDLE_STMT, pk);
       }
       // 取不到主键不是错误：视图与无主键的表都取不到，而它们照样有列。
     }
@@ -702,11 +819,11 @@ class odbc_driver : public uvcpp_db_driver {
     const uvcpp_db_status ast = alloc_stmt(&stmt, err);
     if (!uvcpp_db_ok(ast)) return ast;
     wstr wt(table);
-    const SQLRETURN rc = SQLColumnsW(stmt, nullptr, 0, nullptr, 0, wt.p(),
+    const SQLRETURN rc = api().SQLColumnsW(stmt, nullptr, 0, nullptr, 0, wt.p(),
                                      wt.slen(), nullptr, 0);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "ODBC 取表结构失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
-      SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
       return uvcpp_db_status::EXEC_FAILED;
     }
 
@@ -718,11 +835,11 @@ class odbc_driver : public uvcpp_db_driver {
     out->set_table_name(table);
 
     for (;;) {
-      const SQLRETURN fr = SQLFetch(stmt);
+      const SQLRETURN fr = api().SQLFetch(stmt);
       if (fr == SQL_NO_DATA) break;
       if (!SQL_SUCCEEDED(fr)) {
         *err = "ODBC 取表结构失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
-        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         return uvcpp_db_status::EXEC_FAILED;
       }
       bool null_name = false, null_type = false, null_def = false;
@@ -735,14 +852,14 @@ class odbc_driver : public uvcpp_db_driver {
         st = read_text_column(stmt, 13, &column_def, &null_def, err);
       }
       if (!uvcpp_db_ok(st)) {
-        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         return st;
       }
       bool null_nullable = false;
       int64_t nullable = 0;
       st = read_scalar_int64(stmt, 11, &nullable, &null_nullable, err);
       if (!uvcpp_db_ok(st)) {
-        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         return st;
       }
 
@@ -760,7 +877,7 @@ class odbc_driver : public uvcpp_db_driver {
       row.push(uvcpp_db_value(in_pk ? "PRI" : ""));
       row.push(null_def ? uvcpp_db_value() : uvcpp_db_value(column_def));
     }
-    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     return uvcpp_db_status::OK;
   }
 
@@ -914,14 +1031,14 @@ class odbc_driver : public uvcpp_db_driver {
   // -------------------------------------------------------------------------
 
   uvcpp_db_status open_env(std::string* err) {
-    SQLRETURN rc = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env_);
+    SQLRETURN rc = api().SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env_);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "分配 ODBC 环境句柄失败（装了 ODBC 驱动管理器吗？）";
       return uvcpp_db_status::NO_DRIVER;
     }
     // 声明 ODBC 3.x 而不是驱动管理器的默认值：不声明时拿到的可能是 ODBC 2 的
     // 行为，而 SQLColumns / 诊断记录的形状在 ODBC 2 与 3 下不一样。
-    rc = SQLSetEnvAttr(env_, SQL_ATTR_ODBC_VERSION,
+    rc = api().SQLSetEnvAttr(env_, SQL_ATTR_ODBC_VERSION,
                        reinterpret_cast<SQLPOINTER>(
                            static_cast<intptr_t>(SQL_OV_ODBC3)),
                        0);
@@ -936,21 +1053,21 @@ class odbc_driver : public uvcpp_db_driver {
 
   void release_env() {
     if (env_) {
-      SQLFreeHandle(SQL_HANDLE_ENV, env_);
+      api().SQLFreeHandle(SQL_HANDLE_ENV, env_);
       env_ = nullptr;
     }
   }
 
   void release_all() {
     if (dbc_) {
-      SQLFreeHandle(SQL_HANDLE_DBC, dbc_);
+      api().SQLFreeHandle(SQL_HANDLE_DBC, dbc_);
       dbc_ = nullptr;
     }
     release_env();
   }
 
   uvcpp_db_status alloc_stmt(SQLHSTMT* out, std::string* err) {
-    const SQLRETURN rc = SQLAllocHandle(SQL_HANDLE_STMT, dbc_, out);
+    const SQLRETURN rc = api().SQLAllocHandle(SQL_HANDLE_STMT, dbc_, out);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "分配 ODBC 语句句柄失败：" + odbc_diag(SQL_HANDLE_DBC, dbc_);
       return uvcpp_db_status::NOT_CONNECTED;
@@ -960,7 +1077,7 @@ class odbc_driver : public uvcpp_db_driver {
       // 向上取整成 1 —— 退成 0 会变成永不超时，那不是调用方要的。
       int secs = (timeout_ms_ + 999) / 1000;
       if (secs < 1) secs = 1;
-      SQLSetStmtAttr(*out, SQL_ATTR_QUERY_TIMEOUT,
+      api().SQLSetStmtAttr(*out, SQL_ATTR_QUERY_TIMEOUT,
                      reinterpret_cast<SQLPOINTER>(static_cast<intptr_t>(secs)), 0);
     }
     return uvcpp_db_status::OK;
@@ -969,7 +1086,7 @@ class odbc_driver : public uvcpp_db_driver {
   std::string query_identifier_quote() {
     SQLWCHAR buf[16];
     SQLSMALLINT len = 0;
-    const SQLRETURN rc = SQLGetInfoW(dbc_, SQL_IDENTIFIER_QUOTE_CHAR, buf,
+    const SQLRETURN rc = api().SQLGetInfoW(dbc_, SQL_IDENTIFIER_QUOTE_CHAR, buf,
                                      sizeof(buf), &len);
     if (!SQL_SUCCEEDED(rc)) return "\"";
 
@@ -1011,7 +1128,7 @@ class odbc_driver : public uvcpp_db_driver {
     const bool may_bind = !params.empty() || sql.find('?') != std::string::npos;
     if (!may_bind) {
       wstr wsql(sql);
-      const SQLRETURN rc = SQLExecDirectW(stmt, wsql.p(), wsql.len());
+      const SQLRETURN rc = api().SQLExecDirectW(stmt, wsql.p(), wsql.len());
       if (!SQL_SUCCEEDED(rc)) {
         *err = "ODBC 执行失败：" + odbc_diag(SQL_HANDLE_STMT, stmt) +
                "（SQL：" + sql_brief(sql) + "）";
@@ -1027,7 +1144,7 @@ class odbc_driver : public uvcpp_db_driver {
     }
 
     wstr wsql(sql);
-    SQLRETURN rc = SQLPrepareW(stmt, wsql.p(), wsql.len());
+    SQLRETURN rc = api().SQLPrepareW(stmt, wsql.p(), wsql.len());
     if (!SQL_SUCCEEDED(rc)) {
       *err = "ODBC 准备语句失败：" + odbc_diag(SQL_HANDLE_STMT, stmt) +
              "（SQL：" + sql_brief(sql) + "）";
@@ -1038,7 +1155,7 @@ class odbc_driver : public uvcpp_db_driver {
     // 驱动会把没绑的占位符当 NULL 用，于是 `WHERE id = ?` 变成 `WHERE id = NULL`，
     // 静默返回 0 行 —— 症状是"数据没了"，而不是"报错了"。
     SQLSMALLINT want = 0;
-    rc = SQLNumParams(stmt, &want);
+    rc = api().SQLNumParams(stmt, &want);
     if (SQL_SUCCEEDED(rc) && static_cast<size_t>(want) != params.size()) {
       *err = "参数个数对不上：SQL 里 " + std::to_string(want) + " 个占位符，传了 " +
              std::to_string(params.size()) + " 个";
@@ -1048,7 +1165,7 @@ class odbc_driver : public uvcpp_db_driver {
     const uvcpp_db_status bst = bind_all(stmt, params, err);
     if (!uvcpp_db_ok(bst)) return bst;
 
-    rc = SQLExecute(stmt);
+    rc = api().SQLExecute(stmt);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "ODBC 执行失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
       return uvcpp_db_status::EXEC_FAILED;
@@ -1085,13 +1202,13 @@ class odbc_driver : public uvcpp_db_driver {
 
       if (v.is_null()) {
         // 空值的两个条件：C 类型随便（不读缓冲），长度指示器必须是 SQL_NULL_DATA。
-        rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_CHAR,
+        rc = api().SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_CHAR,
                               SQL_VARCHAR, 0, 0, nullptr, 0, &b.null_ind);
       } else {
         switch (v.type()) {
           case uvcpp_db_type::INT64:
             b.i64 = v.to_int64();
-            rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_SBIGINT,
+            rc = api().SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_SBIGINT,
                                   SQL_BIGINT, 0, 0, &b.i64, 0, nullptr);
             break;
           case uvcpp_db_type::UINT64:
@@ -1103,23 +1220,23 @@ class odbc_driver : public uvcpp_db_driver {
                      " 个参数是无符号数且超过 int64 上限，本模块不支持";
               return uvcpp_db_status::BIND_FAILED;
             }
-            rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_UBIGINT,
+            rc = api().SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_UBIGINT,
                                   SQL_BIGINT, 0, 0, &b.u64, 0, nullptr);
             break;
           case uvcpp_db_type::DOUBLE:
             b.dbl = v.to_double();
-            rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_DOUBLE,
+            rc = api().SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_DOUBLE,
                                   SQL_DOUBLE, 0, 0, &b.dbl, 0, nullptr);
             break;
           case uvcpp_db_type::BOOL:
             b.bit = v.to_bool() ? 1 : 0;
-            rc = SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_BIT,
+            rc = api().SQLBindParameter(stmt, index, SQL_PARAM_INPUT, SQL_C_BIT,
                                   SQL_BIT, 0, 0, &b.bit, 0, nullptr);
             break;
           case uvcpp_db_type::BLOB:
             b.bin = v.bytes();
             b.len = static_cast<SQLLEN>(b.bin.size());
-            rc = SQLBindParameter(
+            rc = api().SQLBindParameter(
                 stmt, index, SQL_PARAM_INPUT, SQL_C_BINARY,
                 b.bin.size() > 8000 ? SQL_LONGVARBINARY : SQL_VARBINARY,
                 static_cast<SQLULEN>(b.bin.size()), 0,
@@ -1135,7 +1252,7 @@ class odbc_driver : public uvcpp_db_driver {
             // 上面坑 2 的来处。
             b.len = static_cast<SQLLEN>(w.size() * sizeof(SQLWCHAR));
             const bool long_text = w.size() > kMaxPlainChars;
-            rc = SQLBindParameter(
+            rc = api().SQLBindParameter(
                 stmt, index, SQL_PARAM_INPUT, SQL_C_WCHAR,
                 long_text ? SQL_WLONGVARCHAR : SQL_WVARCHAR,
                 static_cast<SQLULEN>(w.size()), 0,
@@ -1162,7 +1279,7 @@ class odbc_driver : public uvcpp_db_driver {
 
   uvcpp_db_status fetch_all(SQLHSTMT stmt, uvcpp_db_table* out, std::string* err) {
     SQLSMALLINT column_count = 0;
-    SQLRETURN rc = SQLNumResultCols(stmt, &column_count);
+    SQLRETURN rc = api().SQLNumResultCols(stmt, &column_count);
     if (!SQL_SUCCEEDED(rc)) {
       *err = "ODBC 取结果列数失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
       return uvcpp_db_status::EXEC_FAILED;
@@ -1180,7 +1297,7 @@ class odbc_driver : public uvcpp_db_driver {
       SQLULEN column_size = 0;
       SQLSMALLINT decimal_digits = 0;
       SQLSMALLINT nullable = SQL_NULLABLE_UNKNOWN;
-      rc = SQLDescribeColW(
+      rc = api().SQLDescribeColW(
           stmt, static_cast<SQLUSMALLINT>(i + 1), name_buf,
           static_cast<SQLSMALLINT>(sizeof(name_buf) / sizeof(name_buf[0]) - 1),
           &name_len, &data_type, &column_size, &decimal_digits, &nullable);
@@ -1200,7 +1317,7 @@ class odbc_driver : public uvcpp_db_driver {
     out->reset_columns(std::move(names));
 
     for (;;) {
-      rc = SQLFetch(stmt);
+      rc = api().SQLFetch(stmt);
       if (rc == SQL_NO_DATA) break;
       if (!SQL_SUCCEEDED(rc)) {
         *err = "ODBC 取行失败：" + odbc_diag(SQL_HANDLE_STMT, stmt);
@@ -1217,7 +1334,7 @@ class odbc_driver : public uvcpp_db_driver {
     // 一条语句可能带多个结果集（存储过程里中途再 SELECT 一次就是）。契约只描述
     // "一个结果表"，所以只取第一个，但要把剩下的**丢掉**，否则下一次在同一句柄上
     // 执行会撞上"还有未读结果"。
-    while (SQL_SUCCEEDED(SQLMoreResults(stmt))) {
+    while (SQL_SUCCEEDED(api().SQLMoreResults(stmt))) {
       // 空转，直到没有更多结果集
     }
 
@@ -1232,7 +1349,7 @@ class odbc_driver : public uvcpp_db_driver {
   bool read_fixed(SQLHSTMT stmt, SQLUSMALLINT col, SQLSMALLINT c_type, void* buf,
                   size_t len, bool* is_null) {
     SQLLEN ind = 0;
-    const SQLRETURN rc = SQLGetData(stmt, col, c_type, buf, len, &ind);
+    const SQLRETURN rc = api().SQLGetData(stmt, col, c_type, buf, len, &ind);
     if (rc == SQL_NO_DATA || ind == SQL_NULL_DATA) {
       *is_null = true;
       return true;
@@ -1276,7 +1393,7 @@ class odbc_driver : public uvcpp_db_driver {
     for (;;) {
       SQLLEN ind = 0;
       const SQLRETURN rc =
-          SQLGetData(stmt, col, SQL_C_WCHAR, buf, sizeof(buf), &ind);
+          api().SQLGetData(stmt, col, SQL_C_WCHAR, buf, sizeof(buf), &ind);
       if (rc == SQL_NO_DATA) break;
       if (ind == SQL_NULL_DATA) {
         *is_null = true;
@@ -1317,7 +1434,7 @@ class odbc_driver : public uvcpp_db_driver {
     for (;;) {
       SQLLEN ind = 0;
       const SQLRETURN rc =
-          SQLGetData(stmt, col, SQL_C_BINARY, buf, sizeof(buf), &ind);
+          api().SQLGetData(stmt, col, SQL_C_BINARY, buf, sizeof(buf), &ind);
       if (rc == SQL_NO_DATA) break;
       if (ind == SQL_NULL_DATA) {
         *is_null = true;
@@ -1500,14 +1617,14 @@ class odbc_driver : public uvcpp_db_driver {
       *err = "没有开着的事务";
       return uvcpp_db_status::EXEC_FAILED;
     }
-    const SQLRETURN rc = SQLEndTran(SQL_HANDLE_DBC, dbc_, how);
+    const SQLRETURN rc = api().SQLEndTran(SQL_HANDLE_DBC, dbc_, how);
     if (!SQL_SUCCEEDED(rc)) {
       *err = std::string("ODBC ") + (how == SQL_COMMIT ? "提交" : "回滚") +
              "失败：" + odbc_diag(SQL_HANDLE_DBC, dbc_);
       return uvcpp_db_status::EXEC_FAILED;
     }
     // 回到自动提交，下一次 begin 才能重新关一次。
-    SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT,
+    api().SQLSetConnectAttr(dbc_, SQL_ATTR_AUTOCOMMIT,
                       reinterpret_cast<SQLPOINTER>(
                           static_cast<intptr_t>(SQL_AUTOCOMMIT_ON)),
                       0);
