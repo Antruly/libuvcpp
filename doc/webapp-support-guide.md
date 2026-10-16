@@ -200,7 +200,7 @@ void doc_mime_override() {
 ```
 
 内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:482-482`，实现
-`src/webapp/uvcpp_web_util.cpp:1053-1056`），`builtin_size()` 也转调它
+`src/webapp/uvcpp_web_util.cpp:1065-1068`），`builtin_size()` 也转调它
 （`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
 
@@ -512,7 +512,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 
 而 `uvcpp_web_util` 里另有**两个哨兵值**：`web_hex_value()` 失败返回 `-1`
 （`src/webapp/uvcpp_web_util.cpp:127-132`），`web_parse_http_date()` 失败返回 `(time_t)-1`
-（`src/webapp/uvcpp_web_util.cpp:1245-1246`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
+（`src/webapp/uvcpp_web_util.cpp:1257-1258`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
 **这几种码一个都不要喂给 `uv_strerror()`**，会得到看似合理的垃圾。
 
 ---
@@ -587,17 +587,17 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 只放行 `/` 是安全的。
 
 **`web_build_cookie()` 只校验 name 与 value。**
-`path`（`src/webapp/uvcpp_web_util.cpp:543-546`）与 `same_site`（`src/webapp/uvcpp_web_util.cpp:555-560`）是**原样拼接**的
+`path`（`src/webapp/uvcpp_web_util.cpp:555-558`）与 `same_site`（`src/webapp/uvcpp_web_util.cpp:567-572`）是**原样拼接**的
 —— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:269-271` 只描述了取值
-集合，没声明"会校验"。`name` 是校验的（`src/webapp/uvcpp_web_util.cpp:533-536`，非 token 字符直接返回空串），
-`value` 也是编码的（`src/webapp/uvcpp_web_util.cpp:541-541`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
-设计：`SameSite=None` 会自动补 `Secure`（`src/webapp/uvcpp_web_util.cpp:558-561`）。
+集合，没声明"会校验"。`name` 是校验的（`src/webapp/uvcpp_web_util.cpp:545-548`，非 token 字符直接返回空串），
+`value` 也是编码的（`src/webapp/uvcpp_web_util.cpp:553-553`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
+设计：`SameSite=None` 会自动补 `Secure`（`src/webapp/uvcpp_web_util.cpp:570-573`）。
 
 **`web_sanitize_filename()` 只能当元数据。** 它不保证是合法文件名（`*` `?` `"`
 照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:441-445`）；`max_len` 是**软**
 上限（设备名保护会让结果多一字节，`src/webapp/uvcpp_web_util.h:437-439`）。
 
-**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:326-356`）—— `;` 会被当成
+**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:326-368`）—— `;` 会被当成
 值的一部分。头 `:176-185` 没写分隔符。
 
 **连接身份有三套，不要混。** 见 §3。

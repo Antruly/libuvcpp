@@ -967,23 +967,30 @@ http_request_handler uvcpp_http_server::find_handler(
   // to the handler (this layer has no query parser of its own — the webapp
   // layer's is `web_parse_query()`). Without this, "GET /api/x?id=1" would
   // never match a route registered as "/api/x".
-  std::string p = path;
-  size_t q = p.find('?');
-  if (q != std::string::npos) p = p.substr(0, q);
+  //
+  // 剥查询串只算**长度**，不落成 `std::string`：`path` 来自请求行解析，长
+  // 度常常超过 SSO 的 15 字节 ⇒ `std::string p = path` 每请求一次堆分配 +
+  // 一次 free，再加上 substr 那次。比较用 `compare(0, n, r.path)`，它不构造
+  // 子串（先比长度、再 memcmp）。
+  const size_t q = path.find('?');
+  const size_t n = (q == std::string::npos) ? path.size() : q;
   for (const auto& r : routes_) {
-    if (r.method == method && r.path == p) return r.handler;
+    if (r.method == method && r.path.size() == n &&
+        path.compare(0, n, r.path) == 0)
+      return r.handler;
   }
   return default_handler_;
 }
 
 http_stream_handler uvcpp_http_server::find_stream_handler(
     http_method method, const std::string& path) {
-  // Match on "method + path" (query string stripped), like find_handler.
-  std::string p = path;
-  size_t q = p.find('?');
-  if (q != std::string::npos) p = p.substr(0, q);
+  // Match on "method + path" (query string stripped), like find_handler --
+  // 同样只算长度、不构造剥掉查询串的临时串。
+  const size_t q = path.find('?');
+  const size_t n = (q == std::string::npos) ? path.size() : q;
   for (const auto& r : routes_) {
-    if (r.method == method && r.path == p && r.stream_handler)
+    if (r.method == method && r.path.size() == n &&
+        path.compare(0, n, r.path) == 0 && r.stream_handler)
       return r.stream_handler;
   }
   return http_stream_handler();

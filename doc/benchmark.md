@@ -2064,7 +2064,7 @@ E 是**关掉那个开关**的同一份库，它逐列等于 C ⇒ "关掉 = 回
 只放一个 URL 的请求表再量一遍：带孪生文件的（`app.js`）是 `2 realpath + 2 statx`，
 没有孪生的（`bold.woff2`）是 **`5 realpath + 3 statx`**。多出来的那几次不是噪声 ——
 `web_real_path(allow_missing=true)` 在整条路径 `realpath` 失败之后**还要再解析一次
-父目录**（`src/webapp/uvcpp_web_util.cpp:854-854`、`src/webapp/uvcpp_web_util.cpp:871-871`），所以一次**失败**的解析是 2 次 `realpath`
+父目录**（`src/webapp/uvcpp_web_util.cpp:866-866`、`src/webapp/uvcpp_web_util.cpp:883-883`），所以一次**失败**的解析是 2 次 `realpath`
 而不是 1 次。加权 `(15×2 + 5×5)/20 = 2.75` 对 `(15×2 + 5×3)/20 = 2.25`，与上面
 实测的 2.734 / 2.245 对上（差的那点是混载里连接建立期的零头）。
 
@@ -2351,7 +2351,7 @@ taskset -c 8-15 h2load -i static-h2-uris.txt -H 'Accept-Encoding: br;q=1, gzip;q
 #### 机制：两条编码走的是同一条命中路径，编码名只在键里
 
 `uvcpp_http_server::apply_compression_for()` 的变体缓存键是
-`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2119-2122`）。
+`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2126-2129`）。
 命中时只做一次 `std::map` 查找 + 一次 `shared_ptr` 递句柄 —— **gzip 与 `br` 是
 同一条路径**。所以"开 `br`"在此处的代价是**每个 tag 一次**，不是每请求一次；
 反过来说，响应没有 `cache_tag` 时它每请求重压，而 `br` 的编码比 deflate 贵得多。
@@ -3008,6 +3008,136 @@ cp -p /tmp/latrig/entry.dom /tmp/latrig/entry && /tmp/latrig/snap.sh /tmp/latrig
 cp -p /tmp/latrig/entry.stream /tmp/latrig/entry && /tmp/latrig/snap.sh /tmp/latrig/snap3_stream/
 # h2c 腿（换 .so，入口同一份；这一条量的是库里的读缓冲池，与上面无关）：
 ENTRY=/tmp/latrig/entry.stream ARM=/tmp/latrig/before /tmp/latrig/ab2.sh 0-5 6-17 h2b 'http://127.0.0.1:8082/json/50?m=6' -c 64 -m 4 -n 400000
+```
+
+
+### 4.22 h1 动态热路上的三处白拷：路由查找不再拷 `path`、状态行/响应头一次 `resize` 直写、查询串整串只扫一遍（**第十七套装置**，callgrind 指令数 + 逐字节比对）
+
+#### 结论先说：−11.03% 的用户态指令，但**动不了 `latency-500k-8cpu` 那一档**
+
+三处都在 h1 动态热路上，**都不改一个字节的输出**（18 种请求形状逐字节相同）。真实工作点
+（8 条循环、`taskset 10-17`、`c=1024`、`/baseline11?a=13&b=42`）上，**每请求的用户态指令数
+22 836.1 → 20 317.6 = −11.03%**。
+
+**但这一档要的不是 11%。** `latency-500k-8cpu` 给 8 个线程、目标 500 000 rps ⇒ 每请求得
+**≤16 µs**；本仓那一格是 **30.65 µs**（同档头名 14.56~15.63，最好的真框架 hical **18.60**）。
+而指令数**只算用户态** —— 系统调用那半边（10~12.5 µs）一行不动。按本仓实测的换算
+（约 2 000~3 000 指令 ≈ 1 µs 用户 CPU）⇒ −2 518 指令只值 **−0.8 ~ −1.3 µs**，对 30.65 µs 的
+总账 ≈ **−3 ~ −4%**。**微优化在这一档几乎没有杠杆**，理由见本节最后那一小节。
+
+#### 三处改动
+
+| # | 位置 | 原来 | 现在 |
+|---|---|---|---|
+| E2 | `src/web/uvcpp_http_server.cpp` 的 `find_handler` / `find_stream_handler` | `std::string p = path;` 再 `p.substr(0, q)` —— `path` 来自请求行，长度常超过 SSO 的 15 字节 ⇒ **每次调用一次堆分配 + 一次 `free`**（两个函数各一次/请求） | 只算剥掉查询串后的**长度** `n`，比较用 `path.compare(0, n, r.path)`（不构造子串） |
+| E3 | `src/web/uvcpp_http_response.cpp` 的 `to_string_into` | 状态行 + **每个响应头各 4 次 `append`**（`_M_append` 933 次/请求），中间还要零填充 | `est` 补齐成真上界（原来漏算了 `content-length` 那一段），一次 `resize` 出头部区间，`memcpy` + 立即写字节直填，最后 `resize` 回真实长度 |
+| E4 | `src/webapp/uvcpp_web_util.cpp` 的 `web_parse_query` | 先 `substr` 出 `kv` 再切两刀，然后**每个键、每个值各调一次** `web_url_decode`（每次还要两次 `find`） | 整串只扫一遍 `%`/`+`；一个都不出现时键值直接在 `query` 上切片、**不做解码**，也不用中间 `std::string` |
+
+#### 判据一：逐字节（18 种请求形状，0 处不同）
+
+`/tmp/latrig/bytes.sh` 对改前/改后两个 `.so`（同一份入口二进制）各抓一遍。形状：
+`base`、`Accept-Encoding: gzip` / `deflate, br`、`HEAD`、百分号编码（`q=a%20b&x=1+2`）、
+裸键（`?a&b=1`）、空段（`?a=1&&b=2`）、`?=v&k=`、无查询串、空查询串（`?`）、
+`/json/50?m=6`、`/json/1?m=2`、`/json/0?m=0`、404、`/`、`/pipeline`、`OPTIONS`、keep-alive。
+**18 个应答逐一比对：0 处不同**（只把 `date:` 那一行的值掩掉）。
+
+这一条是"这类改动允许做"的**准入判据**：序列化路径一动，逐字节相同就不再是"没坏"，而是
+"没变"。
+
+#### 判据二：确定性指令数（callgrind，真实工作点）
+
+`cg8.sh` 的形状：valgrind + `--instr-atstart=no` 起服务，`h2load -c 1024 -m 1` 先打
+2 000 个热身（不计入），再打 **20 000 个**、其间 `callgrind_control -i on` / `-d`。
+
+| 臂 | 窗口里的请求数 | 自计总指令 | 指令/请求 |
+|---|---:|---:|---:|
+| 改前 #1 | 22 000（**热身那 2 000 个漏进了窗口**） | 494 196 237 | 22 463.5 |
+| 改前 #2 | 20 000 | 456 721 445 | **22 836.1**（诚实基线） |
+| 改后 | 20 000 | 406 352 585 | **20 317.6** |
+| | | | **−2 518.4 = −11.03%** |
+
+**改前那一臂必须跑两遍**，而且第一遍的窗口里混进了别的东西：它的自计总数除出来正好是
+**22 000** 个请求（= 2 000 热身 + 20 000 计数），而 `do_lookup_x` / `_dl_lookup_symbol_x` /
+`_dl_relocate_object` / `ossl_fnv1a_hash` 这四个**一次性**的动态链接/lazy binding 函数只在
+第一遍里出现，合计 **384.5 指令/请求** —— 两遍改前差 1.7%（≈388/req）几乎全由它解释。
+**所以用来比的是改前 #2。**
+
+逐函数对得上（callgrind 的**调用次数是精确的**，即使名字被 mangle 掉）。下表是自计开销
+变化最大的 16 项，**合计 −2 518.4 /请求，等于总差**：
+
+| 函数 | 改前 #2 | 改后 | Δ | 归谁 |
+|---|---:|---:|---:|---|
+| `basic_string::_M_append(const char*, size_t)` | 933.1 | 157.1 | **−776.0** | E3 |
+| `__memcpy_avx_unaligned_erms` | 987.9 | 660.8 | **−327.0** | E3 |
+| `web_url_decode` | 258.0 | **0.0** | **−258.0** | E4（不需要解码就一次不调） |
+| `web_parse_query` | 722.0 | 519.0 | **−203.0** | E4（去掉 `kv` 白拷与逐段 `find`） |
+| `basic_string::find(char, size_t)` | 422.0 | 278.0 | −144.0 | E4 |
+| `__memchr_avx2` | 361.0 | 247.0 | −114.0 | E4 |
+| `_int_free` | 617.1 | 509.2 | −107.8 | E2 |
+| `malloc` | 495.1 | 405.4 | −89.7 | E2 |
+| `find_handler` | 133.0 | 47.0 | −86.0 | E2 |
+| `find_stream_handler` | 123.0 | 38.0 | −85.0 | E2 |
+| `free` | 432.7 | 354.8 | −78.0 | E2 |
+| `basic_string::_M_construct<char*>` | 161.0 | 87.0 | −74.0 | E4 |
+| `to_string_into` | 581.2 | 515.3 | −65.9 | E3 |
+| `???:0x000000000495c060`（`append` 的 PLT 桩） | 60.0 | 10.0 | −50.0 | E3 |
+| `???:0x0000000005297260`（libstdc++ 内 `memcpy` 的 PLT 桩） | 68.3 | 20.3 | −48.0 | E3 |
+| `basic_string::_M_replace_aux`（**新增**） | 0.0 | 52.0 | +52.0 | E3：最后那次 `resize` 回真实长度 |
+
+**分配器那四行合起来 −307.5 /请求，正是 E2 去掉的那两次分配 + 两次释放**（这是 E2 的
+独立见证：指令数按函数归因，与"字节没变"是两条互不相干的证据）。
+
+**那些 `???:0x…` 形状的行是 PLT 桩** —— `fn=` 里名字是个**字面地址**。要靠 caller 归因才
+认得出它们是谁（`/tmp/latrig/{callers,edges}.py`）。**直接 `sed` 看某一段 `fn=` 块会得出
+"`to_string_into` 每请求只 append 一次"这种错结论**：callgrind 按 caller 上下文**把同一个
+函数拆成好几块**，只有加总才是真数。
+
+#### 判据三：用例
+
+`build-all` 干净重编后 **127/127 通过**（另：`build-yyjson` 93/93、`build-brotli` 92/92、
+Linux 默认档 47/47）。
+
+#### 端到端这一次**没有作证据**
+
+同一形状的 A/B 本来要按老规矩交错跑，但这台机器上**用户自己的两个 vitest worker**
+（`MainThread` 一串 node 进程）以 200~296% CPU 漂在 `0-17` 上 —— 按本仓的规矩**不动别人的
+进程** ⇒ 端到端这次分辨不了库内改动，连"没有反向"的旁证都不给。**本节的三条判据都是确定性
+的**（字节、指令数、用例），端到端缺的只是那层陪衬。
+
+#### 为什么说这一档微优化到头了
+
+`latency-500k-8cpu` 的分数形状是
+`100 × min(1, rps/500000) × (0.5×cpuScore + 0.25×p99Score + 0.25×meanScore)`，而 `p99` /
+`mean` 两项与我们差着三个数量级、恒被钳到 0；8 个线程上 `rps` 又只由 `cpu_per_req` 决定
+（8 × 10⁶ / 16 µs = 500 000）。所以这一格近似 `100 × min(1, 16/cpu) × 0.5 × min(1, 14.56/cpu)`，
+`cpu = 30.65` ⇒ 约 **12/100**。
+
+要够到分数线得 `cpu ≤ 16 µs`（**−48%**），要够到 hical 那一格（`18.60`）得 **−39%**。
+而本节把 h1 的用户态热路翻了一遍：**没有单一主项**（22.5k 指令/请求，top-40 函数合计只占
+~45%），剩下能减的池子 —— 路由匹配（`match` 345 + `match_pattern` 164 + `split_path` 138 +
+`web_split_path_query` 214 ≈ 860）、请求头搬运（`take_from` 436 + `take_headers_into` 174 +
+7 次 `emplace_back` 398 ≈ 1 000）、分配器（≈1 300，约 9 次 `malloc`/请求）—— **全加起来 ~14%，不够
+那 39% 的零头**。⇒ **h1 这一层已到本仓能靠微优化碰的边界**（计划里预登记的"风险 2"，
+触发条件成立）。
+
+**一条还站着的疑点**（不在"库里某一行"的层面，留给后面）：同样 2.03 次系统调用/请求、
+2.01 个包、零锁、零缺页的前提下，本机那台极简参照服务器的**内核态只花 6.4 µs**（用户态
+0.6），我们是 10~12.5 µs。SMT 抬价与 iovec 条数这两个解释都做过对照、都被证伪；第三个
+解释没有。
+
+#### 复现
+
+```bash
+# 逐字节：两个臂各一个 .so，入口二进制同一份（LIBDIR 指向改前/改后那棵 build-docker）
+LIBDIR=/tmp/eq/libA /tmp/latrig/bytes.sh /tmp/eq/before
+LIBDIR=/tmp/eq/libB /tmp/latrig/bytes.sh /tmp/eq/after
+# 断言：18 个 .bin 逐一相同（把 date: 那一行的值掩掉再比）
+# 指令数（8 循环 / c=1024，量具 /tmp/latrig/cg8.sh）
+/tmp/latrig/cg8.sh 20000 cgb11d     # 改前（跑两遍，第一遍会混进热身那 2000 个请求）
+/tmp/latrig/cg8.sh 20000 cgb11c     # 改后
+# dump 落在 <label>.out.1（不是 .out）；逐函数自计开销与 caller 归因：
+/tmp/latrig/callers.py /tmp/latrig/cgb11d.out.1 '_M_append'
+/tmp/latrig/edges.py   /tmp/latrig/cgb11c.out.1 'to_string_into'
 ```
 
 
