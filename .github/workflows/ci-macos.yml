@@ -60,7 +60,7 @@ jobs:
           # 与 wsdl 不同：macOS **没有** wsdl 格（§1 的"未覆盖的格"表里那一行写的
           # 是"不发版、风险低"），而 yyjson 这一格加得起 —— 它不需要任何新包。
           #
-          # yyjson 走 FetchContent（根 `CMakeLists.txt:1727`，`GIT_TAG` 钉在
+          # yyjson 走 FetchContent（根 `CMakeLists.txt:1796`，`GIT_TAG` 钉在
           # `YYJSON_VERSION`），**不需要新包**；装包表与 `web` 逐字相同 —— 这样两边
           # 红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。

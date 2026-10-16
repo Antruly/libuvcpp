@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1528-1536`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1597-1605`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
@@ -103,13 +103,14 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
                    "uvcpp_db_driver.h",
                    # 同样私有，但是另一条理由：`UVCPP_DB_RUNTIME_LOAD` 用的
                    # **函数指针表**就是后端的内部 ABI（漏绑一个符号就是空指针
-                   # 调用，没有任何链接期兜底），而两份 api 头还各自
-                   # `#include <mysql/mysql.h>` / `<libpq-fe.h>` —— 发出去等于
-                   # 让使用者以为客户端库的头也是我们的依赖。公开面
+                   # 调用，没有任何链接期兜底），而三份 api 头还各自
+                   # `#include <mysql/mysql.h>` / `<libpq-fe.h>` / `<sql.h>` ——
+                   # 发出去等于让使用者以为客户端库的头也是我们的依赖。公开面
                    # （`uvcpp_db_client.h`）一个客户端库的类型都不出现。
                    # `uvcpp_db_runtime_load.h` 是 `dlopen`/`dlsym` 的两个原语。
                    "uvcpp_db_mysql_api.h",
                    "uvcpp_db_pgsql_api.h",
+                   "uvcpp_db_odbc_api.h",
                    "uvcpp_db_runtime_load.h"}
 
 # 按**构建树**决定要不要发的头：与 `PRIVATE_HEADERS` 那条规矩不同，它们不是
@@ -122,9 +123,9 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
 # 的错误码，任何配置下都发。
 #
 # `CMakeLists.txt` 的 `list(FILTER UVCPP_HEADERS EXCLUDE REGEX
-# "src/grpc/uvcpp_grpc_server\\.h")`（`CMakeLists.txt:1951-1953`）与
+# "src/grpc/uvcpp_grpc_server\\.h")`（`CMakeLists.txt:2020-2022`）与
 # `list(FILTER GRPC_HEADER_FILES EXCLUDE REGEX "uvcpp_grpc_server\\.h$")`
-# （`CMakeLists.txt:2939-2944`）是同一条排除的两处 —— **三处必须一起改**：
+# （`CMakeLists.txt:3010-3015`）是同一条排除的两处 —— **三处必须一起改**：
 # 这里漏了只影响发布包，CMake 那两处漏了只影响 `cmake --install`，三边都不报错。
 WEB_GATED_HEADERS = {"uvcpp_grpc_server.h"}
 
@@ -251,7 +252,14 @@ SYSTEM_DLLS = {
     "comdlg32.dll", "crypt32.dll", "cryptbase.dll", "dbghelp.dll", "dnsapi.dll",
     "dwmapi.dll", "gdi32.dll", "gdi32full.dll", "imm32.dll", "iphlpapi.dll",
     "kernel32.dll", "kernelbase.dll", "msvcrt.dll", "mswsock.dll",
-    "netapi32.dll", "normaliz.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll",
+    # `odbc32.dll` 是 1.7.2 补进来的，Windows 的 ODBC 驱动管理器：System32 里必有
+    # （和 `ws2_32.dll` 同类，属操作系统组件，不可再分发也不需要分发）。db 模块的
+    # ODBC 后端在 `UVCPP_DB_RUNTIME_LOAD=OFF`（**默认档**）时就是链它，所以少了这一
+    # 行的后果是"默认配置在 Windows 上打不出包"：`imports 里非 Windows 自带的` 会列
+    # 上它，接着按 `runtime_roots` 找不到 ⇒ 记进 `missing[]` ⇒ 退出 2。
+    # 抓到它的是 MSVC 那两条 config-contract 腿（它们不传 `RUNTIME_LOAD`，于是走
+    # 默认档、链了导入库；六条发布腿传 `ON`，导入表里没有它 —— 所以发版路径上看不见）。
+    "netapi32.dll", "normaliz.dll", "ntdll.dll", "odbc32.dll", "ole32.dll", "oleaut32.dll",
     "powrprof.dll", "psapi.dll", "rpcrt4.dll", "secur32.dll", "setupapi.dll",
     "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "usp10.dll",
     "version.dll", "win32u.dll", "winmm.dll", "winspool.drv", "ws2_32.dll",
@@ -1156,7 +1164,7 @@ def main():
 
     # **曾经是差异 2**：补 zlib.h / zconf.h —— `web/uvcpp_ws_parser.h` 在
     # UVCPP_ZLIB_ENABLE=1 时要 include 它，而 install 规则里原先没有这一条。
-    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:3156-3159`），所以这
+    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:3229-3232`），所以这
     # 不再是"刻意的差异"，只是本脚本手工组装 stage、**不走 `cmake --install`** 时
     # 对同一件事的重复一遍 —— 两边必须落到同一个位置（`include/` 顶层）。
     z = dep_src(tree, repo, "zlib-131") or dep_src(tree, repo, "zlib")

@@ -54,7 +54,7 @@ namespace db_detail {
 /// 密码里带 `@` 是常见的（`p@ssw0rd`），按第一个切会把密码截断、把剩下的
 /// 当成主机名 —— 症状是「连接被拒」，而配置看起来完全正常。
 struct uvcpp_db_url {
-  std::string scheme;    // 规范化后的 "sqlite" / "mysql" / "postgres"
+  std::string scheme;    // 规范化后的 "sqlite" / "mysql" / "postgres" / "odbc"
   std::string user;
   std::string password;
   std::string host;
@@ -71,7 +71,7 @@ class uvcpp_db_driver {
  public:
   virtual ~uvcpp_db_driver() = default;
 
-  /// 驱动的稳定短名："sqlite" / "mysql" / "postgres"。
+  /// 驱动的稳定短名："sqlite" / "mysql" / "postgres" / "odbc"。
   virtual const char* name() const = 0;
 
   virtual uvcpp_db_status open(const uvcpp_db_url& url, std::string* err) = 0;
@@ -123,6 +123,10 @@ class uvcpp_db_driver {
 std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_sqlite();
 std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_mysql();
 std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_pgsql();
+/// ODBC 是**通用**驱动，不是 SQL Server 专用：口径由连接串里的 `Driver=` 决定。
+/// 之所以它在，是因为微软没给 SQL Server 一个可链接的 C 客户端库 —— 官方的
+/// `msodbcsql18` 就是 ODBC 驱动。见 `uvcpp_db_odbc.cpp` 的文件头。
+std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_odbc();
 
 /// 按 scheme 造驱动。没编进来的后端返回 `nullptr`（**不是**抛异常、
 /// 也不是造一个打不开的壳）—— 调用方据此报 `NO_DRIVER`。
@@ -142,7 +146,7 @@ bool uvcpp_db_driver_available(const std::string& scheme);
 /// 传进来的必须是 `uvcpp_db_url::parse()` 规范化之后的 scheme。
 bool uvcpp_db_driver_known(const std::string& scheme);
 
-/// 编进来的后端名，逗号分隔、按 sqlite,mysql,postgres 顺序。空串表示一个都没有。
+/// 编进来的后端名，逗号分隔、按 sqlite,mysql,postgres,odbc 顺序。空串表示一个都没有。
 std::string uvcpp_db_available_drivers();
 
 }  // namespace db_detail

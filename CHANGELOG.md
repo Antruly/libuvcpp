@@ -305,7 +305,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3047-3047`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3118-3118`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -683,7 +683,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:1951-1953`、`CMakeLists.txt:2939-2944`）——
+  两处都摘掉**（`CMakeLists.txt:2020-2022`、`CMakeLists.txt:3010-3015`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -787,11 +787,143 @@
 
 ### 数据库（`src/db/`）
 
-一个连接一个 `uvcpp_db_client`，**同一套接口盖住 SQLite / MySQL / PostgreSQL**
-三个后端，结果行按表取（列名或列号）。**默认关**（`UVCPP_ENABLE_DB`），而且是本库
-**唯一需要第三方客户端库**的模块（libsqlite3 / libmysqlclient / libpq）—— 三个后端
-一个都没找到时整个模块被强制关掉并打一条说明怎么修的 warning，而不是留一个
-"能配置、链不上"的组合（`1.5.3`）
+一个连接一个 `uvcpp_db_client`，**同一套接口盖住 SQLite / MySQL / PostgreSQL /
+ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（`UVCPP_ENABLE_DB`），而且是
+本库**唯一需要第三方客户端库**的模块（libsqlite3 / libmysqlclient / libpq / 驱动
+管理器 + 具体 ODBC 驱动）—— 四个后端一个都没找到时整个模块被强制关掉并打一条说明
+怎么修的 warning，而不是留一个"能配置、链不上"的组合（`1.5.3`）
+
+- **ODBC 后端：它是第四个后端，但与前三个不同类 —— 它对着的不是一种数据库，是一个
+  接口**（`1.7.1-dev`）。前三个各自钉死一种客户端库与一种方言，`odbc://` 连到哪张
+  库、哪种方言、甚至哪个厂商，全由连接串里的 `Driver=`（或 `DSN=`）决定；本驱动
+  **只试那一个驱动名，不遍历**。进它的直接原因是 SQL Server：微软没给 SQL Server
+  一个可链接的 C 客户端库，官方 `msodbcsql18` **本身就是**一个 ODBC 驱动，想接它就
+  只能走这条路（这也是本仓第一个不是"为了某一种库"而写的后端）。
+
+  于是有两条**必须分开看**的事实：`UVCPP_DB_ODBC_ENABLE` 说的是"这份产物里有没有这个
+  后端"，而"要连的那个数据源有没有装驱动"**只有 `open()` 才知道** —— 驱动名写错时
+  拿到的是驱动管理器给的原文（"找不到数据源、也没有默认驱动"），不是我们编的话。
+  配置期只要两样：`sql.h` 与驱动管理器（Linux 的 `libodbc`、Windows 的系统 `odbc32`）。
+  **它也认 `UVCPP_DB_RUNTIME_LOAD`**：起先这里写的是"驱动管理器本来就该在、而且很小，
+  所以不走那条路"，那句话**只在 Windows 上成立** —— 下一节第一条就是按实测改它的
+  （本机 `-- db: ODBC 后端开（驱动管理器 …/libodbc.so）`，编、链 rc=0）。
+
+  写这一片时踩到一处值得记下来的头文件陷阱：unixODBC 的 `sqltypes.h` 第 75 行有一句
+  `#define BOOL int`（给没有 `<windows.h>` 的平台补齐 ODBC 那套类型表），它会把
+  `src/db/uvcpp_db_odbc.cpp` 里唯一一处 `uvcpp_db_type::BOOL` 展开成
+  `uvcpp_db_type::int`，报出来的错是"expected unqualified-id before 'int'" —— 离真正
+  的原因隔着一层。收尾是一句 `#undef BOOL`（ODBC 头已经预处理完，这个宏使命结束，
+  本文件从头到尾不用它）。微软那套 `sqltypes.h` 不发这个宏（Windows 上 `BOOL` 是
+  `<windows.h>` 里的 typedef，对 `enum class` 的限定名没影响），所以那行在 Windows 上
+  是空操作。
+
+- **ODBC 后端进了共用套件，套件立刻抓出它自己的六处**（`1.7.1-dev`）。用例在
+  `tests/functional/db_odbc_func.cpp`：方言按 `Driver=` 认出来的驱动族分派
+  （`odbc_sqlite_dialect` / `odbc_mssql_dialect`），认不出的族退 **3**。本机对着
+  sqliteodbc + unixODBC 跑：**181 通过 / 0 失败 / 3 不适用**，另有 **57 条 ODBC
+  专属**（日志里单独一段）。这一组数全是**量出来的**，不是照着文档推的：
+
+  1. `SQLBindParameter` 只**记指针**（缓冲**和** `StrLen_or_IndPtr` 都记），绑定的
+     存储必须活到 `SQLExecute` 之后，而且**每个参数各一份**。共用一份时，四个参数
+     `(1, 2, 't0', 'uu0')` 存进去读回来是 `(2, 2, 't', 'u')` —— 每个都只剩最后一次
+     写入的一个字节；
+  2. `SQL_C_WCHAR` 的长度指示器单位是**字节**：给字符数会把 `"张三"` 截成 `"张"`、
+     `'abcdef'` 截成 `'abc'`；
+  3. 空串与 NULL 是靠**指针**分的：有效指针 + `ind=0` 是空串，`nullptr` + `ind=0` 是
+     NULL。空串上 `std::string::data()` 给不给非空指针是实现自由，所以代码里备了两个
+     哑元（`kEmptyByte` / `kEmptyWide`）——这条错了的话，写空串会**响**在非空约束上，
+     而不是静默存成 NULL；
+  4. 分块读时一个**满**块只给 `BufferUnits - 1` 个数据单元（驱动给 NUL 留位），按整块
+     计数会把 3000 字节读成 3001 字节；
+  5. `SQLGetInfo` 的 W 形态返回的长度也**是字节**：拿它当单元数会让引号字符 `"` 变成
+     2 个"字符"，于是"内层引号双写"那一支被跳过，怪表名 `uvcpp_odd"name` 被拼成
+     `"<NUL>uvcpp_odd"name"<NUL>`。改成认尾部的 NUL，不看那个长度；
+  6. 无参数那条快路径绕过了 `SQLNumParams` 检查：语句里写了 `?` 却一个参数都不给时
+     报的是 `EXEC_FAILED`，而这是**绑定**阶段的错，该报 `BIND_FAILED`。
+
+  另有两处是**驱动的自由**，不是我们的 bug —— 套件改成"按声明的能力判"，不硬凑断言：
+  sqliteodbc 的 `SQLPrepare` 只**登记**不解析（语法错与表不存在要到 `SQLExecute` 才
+  报），因此 `db_suite.h` 多了一个 `dialect::prepares_eagerly()`；它同样**不接受**
+  `$1` 占位符（`parameter marker count incorrect`），所以 ODBC→SQLite 的
+  `accepts_dollar_placeholder()` 是 `false`（原来是照"ODBC 应该有"猜的 `true`）。
+  这两条改的是共用套件，所以 SQLite 那一家按同一份套件重跑过：**196 通过 / 0 失败 /
+  1 不适用**，改动没有扰动别的后端。
+
+  顺手把两条套件原本没走到的路也**量了**并钉成断言（都过）：二进制跨块
+  （3 KB BLOB，逐字节相等 —— `SQL_C_BINARY` 没有终止符，满块给满 `kChunk`），以及
+  4 字节 UTF-8 字符（UTF-16 是**代理对**）正好骑在块边界上（写路径按代理对编码，
+  驱动不会在缓冲边界把它劈开）。
+
+  **没跑的是 ODBC 到 SQL Server 那一族**：`odbc_mssql_dialect` 写好了（`INT
+  IDENTITY(1,1) PRIMARY KEY` / `NVARCHAR(MAX)` / `VARBINARY(MAX)` / `DATETIME2` /
+  `BIT` / `DECIMAL(18,2)`），但这台机器上没装 msodbcsql18。别把它当成已经对过。
+
+- **ODBC 也接上了 `UVCPP_DB_RUNTIME_LOAD`：它的"客户端库"就是驱动管理器**
+  （`1.7.1-dev`，默认 `OFF`）。修的是上面那条里的一句判断：把驱动管理器链上，在
+  **Linux / macOS 上就是一条 `DT_NEEDED libodbc.so.2`** —— 正是这个开关要消灭的形状
+  （"没装 unixODBC 的机器连加载这份 `.so` 都做不到"）。**只有 Windows 是例外**：
+  `odbc32.dll` 属于操作系统，和 `ws2_32` 同类，链接它没有代价。本机两档实测 ——
+  两棵树（`/tmp/uvcpp-off` 与 `/tmp/uvcpp-rt`）**只差这一个开关**，其余开关逐条相同：
+
+  ```
+  $ readelf -d /tmp/uvcpp-off/libuvcpp.so | grep NEEDED   # 关（默认）
+    NEEDED               libuv.so.1
+    NEEDED               libsqlite3.so.0
+    NEEDED               libodbc.so.2
+  $ readelf -d /tmp/uvcpp-rt/libuvcpp.so | grep NEEDED    # -DUVCPP_DB_RUNTIME_LOAD=ON
+    NEEDED               libuv.so.1
+    NEEDED               libsqlite3.so.0
+  $ nm -u …/uvcpp_db_odbc.cpp.o | grep -c ' U SQL'        # 24 → 0
+  ```
+
+  那张函数表是**从 `nm -u` 的目标文件里数出来的 24 个入口**，不是照着 grep 抄的：
+  `SQLGetInfo` 在文件里只出现在一句注释里（用的是 W 形态 `SQLGetInfoW`），照着文本
+  抄会把一个没人提供的符号抄进表里。新私有头 `src/db/uvcpp_db_odbc_api.h` 与
+  `uvcpp_db_pgsql_api.h` 同形（进安装排除与 `package_release.py` 的
+  `PRIVATE_HEADERS`），64 处调用点改成 `api().SQLxxx(...)`，`open()` 先看
+  `uvcpp_db_odbc_load_error()`，非空就报 `NO_DRIVER` 并把候选名与各自的失败原因写在
+  里面。**`#error` 那道闸门这次是必需的**：`ODBC_STD` 会把 `SQLAllocHandle` 重定向到
+  `SQLAllocHandleStd`、`UNICODE` 会把 `SQLSetStmtAttr` 重定向到 `SQLSetStmtAttrW`
+  （两处都在头文件里的条件宏里），按名字取符号的构建方式与直接链的会**分叉**，所以
+  编这个 `.cpp` 时两者都必须未定义，否则当场红。负路径也量了：
+  `UVCPP_DB_ODBC_LIBRARY=/nonexistent/libodbc.so.2` ⇒ `no_driver` 加那句逐个列出试过
+  哪些库名的话。两档各跑一遍套件，读数一致：ODBC **181 / 0 / 3**（另 57 条 ODBC
+  专属）、SQLite **196 / 0 / 1**。默认 `OFF` 的行为逐字节不变。
+
+- **"这台机器没装驱动管理器"从一句手工复现的话，变成一个有用例钉住的形状**
+  （`1.7.2-dev`）。上面那条里的负路径（`UVCPP_DB_ODBC_LIBRARY=/nonexistent/…` ⇒
+  `no_driver`）此前**没有任何自动化**：`tests/`、`bench/` 里三个 `UVCPP_DB_*_LIBRARY`
+  旋钮全零命中，它只活在文档里当一段"你可以这样试"。新用例
+  `tests/functional/db_odbc_nodrv_func.cpp` 把用户那句要求（"没有 ODBC 动态库时其他
+  功能正常运行、用的时候报异常"）逐条钉住：`open("odbc://u:p@127.0.0.1:1/…")` 回的是
+  **`NO_DRIVER`**（不是含糊的 `OPEN_FAILED`、更不是崩），`is_open()` 为假，`last_error()`
+  是一句说得出**试过哪几个库名**的人话，同一进程里再开一个 `sqlite::memory:` 照常
+  CREATE/INSERT/SELECT。
+
+  前提不去卸载任何东西 —— 由 ctest 的 `ENVIRONMENT` 属性把那个旋钮指到一个不存在的
+  路径（这正是 `uvcpp_db_runtime_load.h` 里写明这个旋钮的用途）。**它必须是独立的
+  可执行文件**：ODBC 的符号表走 magic static、句柄永不释放，同一个进程里成功加载过
+  一次之后，再设环境变量就不生效了。前提不成立（变量没传到、或路径居然存在）时返回
+  **非零即红**，不是跳过 —— 这个前提是我们自己设的，没有不确定性可言，退回跳过只会
+  让这条用例悄悄失效。
+
+  顺手修掉一处同门的老毛病：`test_db_odbc_func` 原来不在 `SKIP_RETURN_CODE 3` 那一串
+  里，于是在装了 `unixodbc-dev` 却没配数据源的机器上（CI 就是）它显示成 `Failed`，
+  而真相是"未判定"。判据现在归位。
+
+- **两个 ODBC 新文件补上 UTF-8 BOM**（`1.7.2-dev`）。`src/db/uvcpp_db_odbc_api.h`
+  里全是中文注释却没带 BOM，而 `src/db/` 下 24 个文件里只有它与
+  `uvcpp_db_odbc.cpp` 没带（前两个后端各自的 `*_api.h` 都带）。这条不是风格问题：
+  MSVC 读无 BOM 的源文件时按系统 ANSI 代码页（简中 936/GBK）解码，一个三字节汉字被
+  当成两个双字节字符、字节边界整体错位，该在注释里的 `*` 变成运算符、`*/` 落到注释
+  外，于是其后每个头都在"注释外"被解析、一路级联到 `<algorithm>`，**报错地点与病因
+  完全无关**。仓内看不见，因为顶层 `CMakeLists.txt` 的 `/utf-8` 是**目录作用域**的 ——
+  它进不了导出集，也到不了"直接把源码树给 msvc"那条消费路径。
+
+  抓到它的是 `config-contract` 腿的 `check_header_encoding()`（判的是 `src/` 下每一个
+  `.h`，不只安装集里那些）。它本来就该在分支自己的 CI 上红过：`feature/db-odbc` 没有
+  对着 master 开过 PR，而这几个文件是随 `1.7.1-dev` 那几个提交进来的。`package_release.py`
+  里那段"含非 ASCII 又没 BOM 就补一个"的兜底**救不了**它 —— 私有头不进包。
 
 - **MySQL / PostgreSQL 的客户端库改成可以运行时加载：`UVCPP_DB_RUNTIME_LOAD`**
   （`1.6.54-dev`，默认 `OFF`）。直接链的后果不是"少个功能"而是**进程起不来**：
@@ -2803,6 +2935,96 @@
 
 ### 配置、打包与 CI
 
+- **`package_release.py` 的"Windows 自带模块"表补上 `odbc32.dll`**（`1.7.2-dev`）。
+  这张表只用来判断"要不要打进包里"，漏一个的代价不是静默坏包而是**打不出包**：db 的
+  ODBC 后端在 `UVCPP_DB_RUNTIME_LOAD=OFF`（**默认档**）的 Windows 构建上就是链
+  `odbc32`，于是 `uvcpp.dll` 的导入表里有它，而打包那步的自检会把"非 Windows 自带"
+  的导入项逐个去 `runtime_roots` 里找、找不到就 `missing[]` + 退出 2 —— 也就是说
+  **默认配置在 Windows 上根本产不出包**（`odbc32.dll` 属操作系统组件，System32 里
+  必有，与 `ws2_32.dll` 同类，既不可再分发也不需要分发）。
+
+  这条是 MSVC 那两条 `config-contract` 腿抓到的：它们**不传** `UVCPP_DB_RUNTIME_LOAD`
+  （走默认档、链导入库），而六条发布腿传 `ON`（符号由 `LoadLibrary` 取、导入表里没有
+  它）—— 所以**发版路径上看不见这个形状**，只有 PR 上那两条腿能看见。这也正是那两条腿
+  与发布腿"配置不逐字相同"的价值所在：它们各自量到一个方向的坏包。
+
+- **六条发布腿显式打开 db 的第四个后端（ODBC），并且每一条都显式给出 `sql.h` 在哪**
+  （`1.7.2-dev`）。此前 `release.yml` 全文零次提到 odbc：`UVCPP_ENABLE_DB_ODBC` 默认就是
+  `ON`，而找不到 `sql.h` 时走的是 `message(WARNING)` + 普通变量 `set(... OFF)` ——
+  `CMakeCache.txt` 里照旧写着 `ON`、生成头里却是 `0`、包里少一个后端，**一条断言都不会
+  红**。十条 configure 全部补上 `-DUVCPP_ENABLE_DB_ODBC=ON` 与
+  `-DUVCPP_DB_ODBC_INCLUDE_DIR=`，头的来源按腿分两种：两条 MinGW 腿用 MSYS2 的
+  `mingw-w64-{x86_64,clang-aarch64}-unixodbc`（唯一一套**给 mingw 编的** ODBC 头，
+  落在 `$MINGW_PREFIX/include/unixodbc/`；SDK 那份是给 MSVC 的，混进 mingw 是拿一个
+  没人试过的组合去赌），两条 MSVC 腿用 Windows SDK 的 `<SDK>/Include/<ver>/um`
+  （新脚本 `.github/scripts/win-odbc-headers.sh` 挑出来）；两条 Linux 腿照 MySQL/PG 的
+  老规矩 `apt-get download unixodbc-dev` 加 `dpkg -x`，**不 install**。
+
+  三个只有真编一次才会露出来的坑，都写进 `release.yml` 的注释了：SDK 那份**不能按字典
+  序**挑（字典序把 `10.0.17763.0` 排在最前，于是 `um` 来自老 SDK 而 `<windows.h>` 来自
+  新的，报出来是 `oaidl.h` / `propidlbase.h` / `sqltypes.h` 里成百条 `C4430` /
+  `C2144`）；两条 Linux 腿的 `ldd` 名单与 `nm -D -u` 计数各补一条 ODBC 判据，而两条
+  MinGW 腿的导入表白名单 **一个字都没动** —— 里面没有 `odbc32.dll`，那正是"运行期加载
+  失效就会红"的唯一守卫。六条腿的模块断言（读的是生成头，不是 cache）因此从 17 枚变
+  **18 枚**。
+
+- **`unixodbc-dev` 的头布局随发行版变，而第一版判据把它写成了"发行版的属性"**
+  （`1.7.2-dev`）。第一次空转（2026-10-17）两条 Linux 腿当场红在
+  `linux-odbc-headers::unixodbc-dev 里没摊出 unixodbc.h`——**守卫本身没错**（宁可红，
+  也不静默发一个少后端的包），错的是那个谓词。实测两份 `.deb` 的文件表：
+
+  | | `sqltypes.h` 里的 include | `unixodbc.h` |
+  |---|---|---|
+  | jammy `2.3.9-5ubuntu0.1`（`ubuntu-22.04` / `-arm`） | 只有 `#include <wchar.h>` | **全包没有** |
+  | noble `2.3.12`（开发机 Mint 22.3 那份） | 多一句 `#include "unixodbc.h"` | `usr/include/<multiarch>/unixodbc.h` |
+
+  也就是说"少挂一层"这件事**只有 noble 那种布局才有**，在 jammy 上要求 `unixodbc.h`
+  存在，等于把一个完全正常的包判红。改法是两半：软链那步变成"**有就挂、没有就算了**"，
+  判据本身换成**编一次**——把后端真正 include 的 `<sql.h>` + `<sqlext.h>` 用
+  `c++ -std=c++11 -I <摊开的 include 目录> -fsyntax-only` 过一遍。后者与发行版、与布局
+  都无关，而且直接就是"这个后端能不能编"本身（本地对 jammy 平布局、noble 拆布局、以及
+  故意放一个空 `sql.h` 三种情形各跑过一遍，前两种绿、第三种红并打出编译器原文）。
+  软链那步另有一处细节写进注释了：`ln -sfn` 的目标按**链接所在目录**解析，喂相对路径会
+  建出自指的坏链接（`$HOME` 派生出来的 `_inc` 本来就是绝对的，所以发布腿上不会犯）。
+  **教训**：开发机的发行版不能当普遍规律 —— 这个坑就是照 noble 验出来、在 jammy 上红的。
+
+- **两条 MinGW 发布腿在真编之前一次都没编过，一编就红：unixODBC 那份 `sqltypes.h` 的
+  "补 windows 类型"段与 `winnt.h` 硬碰**（`1.7.2-dev`）。同一次空转里 `mingw-x64` /
+  `mingw-arm64` 两条腿红在 `Configure & Build`，而整条腿**只有一处** error：
+
+      sqltypes.h 第 109 行: error: conflicting declaration 'typedef short unsigned int WCHAR'
+      winnt.h 第 320 行:    note: previous declaration as 'typedef wchar_t WCHAR'
+
+  病灶是那段补丁的**开关**——它不叫"有没有 `<windows.h>`"，叫
+  `ALREADY_HAVE_WINDOWS_TYPE`，而**这个宏谁都不定义**，所以 `<windows.h>` 明明已经在前面
+  进来过，它照样把 ODBC 那套类型补一遍。补出来的 `CHAR` / `WORD` / `DWORD` / `BYTE` /
+  `LPDWORD` 与 `winnt.h` 逐字相同（C++ 里重复 typedef 合法，一声不响），只有 `WCHAR`
+  不同：它给 `unsigned short`，`winnt.h` 给的是 `wchar_t`。MSVC 上永远碰不到，因为
+  Windows SDK 那份 `sqltypes.h` 是微软自己写的、没有这一整段补丁 —— **所以这个坑与上一段
+  的"头布局"同源：都只在一条腿的平台上现形**。
+
+  解法用这段补丁自己的开关 `SQL_WCHART_CONVERT`（`sqltypes.h` 第 106 行）：打开后 `WCHAR` 就是
+  `wchar_t`，与 `winnt.h` 逐字相同、冲突消失。这不是权宜之计，语义上本来就该这样 ——
+  Windows 的 ODBC 宽字符接口就是 `wchar_t`（2 字节），`unsigned short` 那个是 unixODBC 给
+  "没有 `<windows.h>` 的平台"准备的默认值（它的注释自己写的）。`SQLWCHAR` 由
+  `typedef WCHAR` 派生，跟着一起对上，**尺寸不变、仍是 2 字节** ⇒ 后端里那条"按
+  `sizeof(SQLWCHAR)` 编译期分 UTF-16 / UTF-32"的转换走的还是 MSVC 上已经在跑的那条路，
+  **不新增代码路径**。判据写成"`_WIN32` 但不是 `_MSC_VER`"而不是 `__MINGW32__`（真正的分界
+  是"手上这份 `sqltypes.h` 是 unixODBC 的还是微软的"；万一有人拿 mingw 配 SDK 的头，这个宏
+  在微软那份里一次都没被引用、是空操作）；**Linux 上必须不开** —— 那里 `wchar_t` 是 4
+  字节，开了就是把 `SQLWCHAR` 从 2 字节改成 4 字节，那是改 ABI 不是修 bug。
+
+  同一条腿还带一句 `'CALLBACK' redefined` **警告**（同一段补丁的 `#define CALLBACK` 空定义
+  盖掉了 `minwindef.h` 的 `#define CALLBACK __stdcall`，而且它**出完 include 不复原**）。
+  它不致命，但等于把这个宏借走不还，所以顺手用 `push_macro` / `#undef` / `pop_macro` 借
+  出去再还回来；万一哪个编译器不认这两个 pragma，按标准它们是被忽略的，结果退回原样、
+  不更坏。
+
+  **教训与上一段同一个，只是换了个维度**：上一段是"开发机的发行版不能当普遍规律"，这一段
+  是"**Linux 上编得过不能推出 mingw 上也编得过**"—— 这两条腿的头是按 `packages.msys2.org`
+  的文件表核的、不是编出来的，而"文件表里有 `sql.h`"与"这份 `sql.h` 能和 `<windows.h>`
+  一起编"是两件事。
+
 - **`RELEASE.md` 的「发布包」那张表补上 1.7.0 那一轮**（`1.6.61-dev`）。表原来只有
   `1.5.2` / `1.5.3` 两行（小标题也写着"两轮扩容"），而 1.7.0 把包里的模块从十三个扩到
   十七个这件事**没进表** —— 按"哪一版多了什么"去查的人会查到一份停在这里的账。补上
@@ -2971,17 +3193,17 @@
   dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）把我们的嵌入依赖藏起来，
   libpq 就会解析到**系统**那份、与它自己的 libcrypto 自洽。
 
-  修法一（`CMakeLists.txt:2445-2487`，`UNIX AND NOT APPLE`，只给共享目标
+  修法一（`CMakeLists.txt:2516-2558`，`UNIX AND NOT APPLE`，只给共享目标
   `uvcpp`/`uvcpp_s`）：`target_link_options(… PRIVATE "LINKER:--exclude-libs,ALL")`。
   它只藏**来自静态归档**的符号，而这两个目标是
-  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2147-2147`）
+  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2216-2216`）
   **直接拿我们自己的目标文件**建的、不经归档 ⇒ 我们自己的 API 与 `uvcpp_c_*` 那套
   C ABI 照样导出。只给共享目标加是因为静态库没有导出表，藏了反而让 `uvcpp_a` 的消费者
   在最终链接时找不到本该由我们提供的符号；只给 ELF 加是因为 Apple 的 ld 没有这个选项
   （那边是 `-exported_symbols_list`），而发布腿里本来也没有 macOS。
 
   修法二：`uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经
-  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2776-2776`）**直接进最终链接、也不经归档** ⇒
+  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2847-2847`）**直接进最终链接、也不经归档** ⇒
   上面那条对它无效（实测加不加都是 43 个 `yyjson_*`）。那边改用
   `C_VISIBILITY_PRESET hidden` **加** `target_compile_definitions(uvcpp_yyjson PRIVATE
   yyjson_api=)`。**第二半是承重的**：上游 `yyjson.h` 给每个公开函数**显式**贴了
@@ -3025,16 +3247,16 @@
   记过是陷阱（它只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索路径）。
 
   修法照 `UVCPP_DB_SQLITE_FROM_SOURCE`（`CMakeLists.txt:189`）的命名与形状加一个
-  **默认 OFF** 的选项（`CMakeLists.txt:233-234`），把整段发现包进
-  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:409-409`）。注意是**连发现都不
+  **默认 OFF** 的选项（`CMakeLists.txt:246-247`），把整段发现包进
+  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:422-422`）。注意是**连发现都不
   调用**，不是"找到了也偏不用"：`find_path`/`find_library` 的结果会写进 cache，
   调用过一次，`UVCPP_BROTLI_INCLUDE_DIR` 之类就一直留在那棵树里，同一棵树翻开关时
   会把上一轮的答案漏过来。所以每个"找到系统那份"的判据都**显式**带上
-  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:420-420`、`CMakeLists.txt:424-424`、
-  `CMakeLists.txt:432-432`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
+  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:433-433`、`CMakeLists.txt:437-437`、
+  `CMakeLists.txt:445-445`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
   选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
-  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:510-510`），链接段
-  （`CMakeLists.txt:2629-2629`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:523-523`），链接段
+  （`CMakeLists.txt:2700-2700`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
   动，所以既有使用者的行为逐字节不变。
 
   判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON
@@ -3220,7 +3442,7 @@
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1727`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1796`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是
