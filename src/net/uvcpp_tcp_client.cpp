@@ -30,6 +30,142 @@
 
 namespace uvcpp {
 
+// ---------------------------------------------------------------------------
+// 读缓冲的线程局部自由表
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/**
+ * @brief 每线程一张的**读缓冲**自由表（按精确尺寸取还，只服务大块）。
+ *
+ * 背景：libuv 给 TCP 流的 `suggested_size` 是 **64 KiB**，于是每条连接**每次读**
+ * 都要向分配器要一块 64 KiB，读回调返回后再还掉 —— `pipeline = 1` 的档上这就是
+ * "每请求一进一出"。而这一进一出的代价远不止"一次 `malloc` 一次 `free`"：
+ *
+ * - 64 KiB 落在 glibc 的 large bin 上。`_int_malloc` 接这种请求时得先把 unsorted
+ *   bin 里的块逐个归位（`unlink_chunk`）、要不到还要**顺手做一次 fastbin 合并**
+ *   （`malloc_consolidate`，把本线程所有小块 free 表扫一遍塞进 unsorted bin）。
+ * - 这笔账在"每请求只分配十来次"的 h1 baseline 上量不出来（实测在±0 量级），
+ *   但在**每应答分配上千次**的那几条路上（nlohmann DOM 的 json 档、async-db 的
+ *   行物化、WS 回声）会被放大成热点。
+ *
+ * 把这块缓冲挂到**线程**上（而不是随每次读生灭）之后，`/json/50?m=6` 上
+ * `_int_malloc` 12.01% → 4.06%、`malloc_consolidate` 4.72% → 0.03%、
+ * `unlink_chunk` 1.84% → 0.02%（callgrind，同一份入口、同一个 URL）。
+ *
+ * 为什么按**精确尺寸**取还而不是尺寸类：libuv 在给定平台上的 `suggested_size`
+ * 是个常数（64 KiB），`sz == 0` 那条路要 4096 —— 实际只会用到这两种尺寸，向上
+ * 取整反而会把"取到一块"变成"取到一块尺寸不对的"，只能丢掉。两个槽、每槽两块
+ * 就够了：每条循环线程**同时活着**的读缓冲只有 1~2 块。
+ *
+ * **为什么不与 `uvcpp_malloc_block_cache`（`uvcpp_alloc.h`）合并成一张**：那张表
+ * 的上限是 4 KiB、槽位 4×64，服务的是 `uvcpp_buf` 自己的块（尺寸多而小）。合成
+ * 一张要么把上限抬到 64 KiB（那张表的最大占用会从 1 MiB 涨到 8 MiB），要么让大块
+ * 挤掉小块 —— 而这两类块的寿命形状本来就不同。
+ *
+ * 链表指针在**表里**、不在块里：于是对块的内容不作任何假设，接手方拿到的内容也
+ * 同样不保证是 0 —— 与 `alloc_raw()` 的契约一致（那条路本来就"不清零"，见
+ * `uvcpp_buf.cpp` 里的说明）。
+ *
+ * 内存上界：每线程 `kSlotCount × kSlotMax` 块，实际就是 2 × 2 × 64 KiB =
+ * 256 KiB（那张 4 KiB 的表是 1 MiB）。
+ */
+class read_block_cache {
+ public:
+  enum {
+    kSlotCount = 2,                 ///< 两个尺寸槽（实测只会用到 4096 / 64 KiB）
+    kSlotMax = 2,                   ///< 每槽最多留几块
+    kMinCachedBytes = 4096,         ///< 比这更小的块根本不走这条路（见上面的 4096 兜底）
+    kMaxCachedBytes = 256 * 1024    ///< 再大就是"这东西不该留"，直接还回去
+  };
+
+  /** @brief 取一块**正好** `size` 字节的存货；没有就返回 nullptr（调用方退回真分配）。 */
+  void* take(std::size_t size) noexcept {
+    if (size < kMinCachedBytes || size > kMaxCachedBytes) return nullptr;
+    for (unsigned i = 0; i < kSlotCount; ++i) {
+      slot& s = slots_[i];
+      if (s.size != size || s.count == 0) continue;
+      return s.head[--s.count];
+    }
+    return nullptr;
+  }
+
+  /**
+   * @brief 还一块。收下了返回 true；尺寸不认 / 表里没有空槽返回 false —— 这时
+   *        **调用方自己**走 `uvcpp_free_bytes()`（那张表与这张服务的是同一族块，
+   *        但"谁来还"必须由调用方决定：内存池配置下这块不是 `std::malloc` 来的）。
+   */
+  bool put(void* p, std::size_t size) noexcept {
+    if (p == nullptr) return true;  // 没什么可还的，也算处理完了
+    if (size < kMinCachedBytes || size > kMaxCachedBytes) return false;
+    for (unsigned i = 0; i < kSlotCount; ++i) {
+      slot& s = slots_[i];
+      if (s.size == size) {
+        if (s.count >= kSlotMax) return false;  // 表满了，多留只是白占内存
+        s.head[s.count++] = p;
+        return true;
+      }
+      if (s.size == 0) {  // 空槽，收下这个尺寸
+        s.size    = size;
+        s.head[0] = p;
+        s.count   = 1;
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  struct slot {
+    std::size_t size;      ///< 这个槽服务的块尺寸；0 = 槽还空着
+    unsigned count;        ///< 表上有几块
+    void* head[kSlotMax];  ///< 自由块表 —— 在**表里**，不在块里（见类注释）
+  };
+  slot slots_[kSlotCount];
+};
+
+/// 本线程的表。`= {}` 让它常量初始化（没有 `__cxa_guard_*`），结构体平凡析构
+/// ⇒ **不登记** `__cxa_thread_atexit`；跨线程还块只是把块留在还的那个线程的表里，
+/// 正确性不受影响（块是 `malloc` 来的，谁 free 都行）。
+inline read_block_cache& read_block_cache_here() noexcept {
+  static thread_local read_block_cache cache = {};
+  return cache;
+}
+
+/// 取一块读缓冲：先看本线程的表，没有就真分配。
+inline void alloc_read_buf(uv_buf_t* bf, std::size_t len) {
+#if !UVCPP_ENABLE_MEMORY_POOL
+  void* p = read_block_cache_here().take(len);
+  if (p != nullptr) {
+    bf->base = static_cast<char*>(p);
+    bf->len  = len;
+    return;
+  }
+#endif
+  uvcpp_buf::alloc_buf(bf, len);
+}
+
+/**
+ * @brief 还一块读缓冲：先进本线程的表，表满或尺寸不认才真还。
+ *
+ * 尺寸在这一侧是**已知**的：`uv_buf_t::len` 就是当初 `alloc_buf()` 要的那个尺寸
+ * （libuv 把 alloc 回调填的那个 `uv_buf_t` 原样传回读回调）。所以不需要
+ * `malloc_usable_size()` 那类平台相关的反查 —— 这正是这张表能按精确尺寸做的前提。
+ *
+ * 企业内存池配置下这条表整条不启用（与 `uvcpp_buf::free_own()` 同一条纪律：
+ * 池里的块要按池的规矩还，不能留在表里过夜），行为与改前**逐字相同**。
+ */
+inline void free_read_buf(const uv_buf_t* bf) {
+  if (bf == nullptr || bf->base == nullptr) return;
+#if !UVCPP_ENABLE_MEMORY_POOL
+  if (read_block_cache_here().put(bf->base, bf->len)) return;
+#endif
+  uvcpp_free_bytes(bf->base);
+}
+
+}  // namespace
+
 // =========================================================================
 // Trampolines — bridge C-style callbacks to std::function stored on heap.
 // These break the std::function copy-chain through libuv's callback layers.
@@ -1115,16 +1251,25 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
     // 整条吃下时 `wl == 0`：这一份是空块（`uvcpp_buf` 对 0 长度不分配也不拷，
     // 得到一个 `{nullptr, 0}`），下面那次 `uv_write` 只负责**交付完成回调**，
     // 一个字节都不会重发。0 长度的 `uv_write` 不是新形状 —— 调用方本来就可以
-    // `write(data, 0)`，那时上游走到的是同一处。
+    // `write(data, 0)`，那时上游走到的是同一处。值形态下这个空块的 base 是
+    // nullptr，于是这一笔连包装带块一共两次分配都省掉了。
+    //
+    // 交接走 `release_uv_buf()`（值形态）而不是 `out_uv_buf()`，与 4 参重载同一
+    // 条理由：后者那个 `uv_buf_t` 包装只是中转 —— `uvcpp_write` 本来就把
+    // `uv_buf_t` 按值存着（`first_block_`）—— 于是每笔异步写白付一次分配、一次
+    // 释放（WS 回声那条路实测各 1.00 次/消息）。归属一字不改：块还是交给
+    // `uvcpp_write`，只是不再有包装要放。
     uvcpp_buf bufcpp(wp, wl);
-    uv_buf_t* raw_buf = bufcpp.out_uv_buf();
+    uv_buf_t  hb;
+    bufcpp.release_uv_buf(&hb);
 #else
     uvcpp_buf bufcpp(data, len);
-    uv_buf_t* raw_buf = bufcpp.out_uv_buf();
+    uv_buf_t  hb;
+    bufcpp.release_uv_buf(&hb);
 #endif
 
     uvcpp_write* w = new uvcpp_write();
-    w->set_uv_buf(raw_buf, true);
+    w->set_uv_buf_block(hb);
     // 请求对象的释放交给 callback_write 在**回调返回之后**做。回调里 `delete wr`
     // 删的是正在执行的闭包本身（见 uvcpp_write::callback_write）。
     w->set_self_free(true);
@@ -1251,7 +1396,7 @@ int uvcpp_tcp_client::write_wait(const char* data, size_t len,
 
   if (rc != 0) {
     last_error_code_ = rc;
-    delete w;  // also frees raw_buf->base and raw_buf (owned)
+    delete w;  // 也放掉第 1 块（值形态，块归 uvcpp_write）
     return rc;
   }
 
@@ -1770,7 +1915,7 @@ int uvcpp_tcp_client::arm_async_read() {
           // 下面两条交付路径收发的**已经是明文**。
           if (tls_ssl_ != nullptr) {
             const int trc = tls_feed(buf->base, static_cast<size_t>(nread));
-            uvcpp_free_bytes(buf->base);
+            free_read_buf(buf);
             if (trc != 0) {
               // tls_fail 已经通知过读侧和关闭回调了。
               // **此后 *this 可能已经不存在** —— 直接返回，不许再碰成员。
@@ -1835,12 +1980,12 @@ int uvcpp_tcp_client::arm_async_read() {
                   stderr,
                   "[uvcpp_tcp_client] read callback threw (unknown)\n");
             }
-            uvcpp_free_bytes(base);
+            free_read_buf(buf);
           } else {
             // --- 原始读路径（保持不变）---
             uvcpp_buf tmp_buf;
             tmp_buf.clone_data(buf->base, static_cast<size_t>(nread));
-            uvcpp_free_bytes(buf->base);
+            free_read_buf(buf);
 
             if (read_fn_) {
               // 同上面框架那一路：`read_arg_` 指向的**就是此刻正在执行的
@@ -1864,7 +2009,7 @@ int uvcpp_tcp_client::arm_async_read() {
             // 等握手的 connect 回调会永远不来。
             if (tls_ssl_ != nullptr && tls_connect_pending_) {
               tls_fail(static_cast<int>(nread), nread == UV_EOF);
-              if (buf->base != nullptr) uvcpp_free_bytes(buf->base);
+              if (buf->base != nullptr) free_read_buf(buf);
               return;  // tls_fail 可能已经删掉本对象
             }
 #endif
@@ -1915,7 +2060,7 @@ int uvcpp_tcp_client::arm_async_read() {
           }
           // Free the buffer even on error/EOF
           if (buf->base != nullptr) {
-            uvcpp_free_bytes(buf->base);
+            free_read_buf(buf);
           }
         }
       });
@@ -2947,7 +3092,7 @@ bool uvcpp_tcp_client::wait_for_condition(
 
 void uvcpp_tcp_client::internal_alloc_cb(uvcpp_handle* /*h*/, size_t sz,
                                           uv_buf_t* buf) {
-  uvcpp_buf::alloc_buf(buf, sz > 0 ? sz : 4096);
+  alloc_read_buf(buf, sz > 0 ? sz : 4096);
 }
 
 void uvcpp_tcp_client::on_internal_read(uvcpp_stream* /*s*/, ssize_t nread,
@@ -2961,7 +3106,7 @@ void uvcpp_tcp_client::on_internal_read(uvcpp_stream* /*s*/, ssize_t nread,
     // 一个静默的错答案，比报错难查得多。
     if (tls_ssl_ != nullptr) {
       const int trc = tls_feed(buf->base, static_cast<size_t>(nread));
-      uvcpp_free_bytes(buf->base);
+      free_read_buf(buf);
       if (trc != 0) return;  // tls_fail 已经通知过；此后不许再碰成员
       tls_flush_out();
       tls_deliver_plain();  // 同步模式下会攒进 read_cache_
@@ -2975,7 +3120,7 @@ void uvcpp_tcp_client::on_internal_read(uvcpp_stream* /*s*/, ssize_t nread,
 
     // Append data to the read cache
     read_cache_->append_data(buf->base, static_cast<size_t>(nread));
-    uvcpp_free_bytes(buf->base);
+    free_read_buf(buf);
 
     // Check if cache exceeds limit — pause reading
     if (read_cache_->size() > max_read_cache_size_) {
@@ -2993,12 +3138,12 @@ void uvcpp_tcp_client::on_internal_read(uvcpp_stream* /*s*/, ssize_t nread,
     // Notify close callbacks on connection close or error.
     fire_close_callbacks();
     if (buf->base != nullptr) {
-      uvcpp_free_bytes(buf->base);
+      free_read_buf(buf);
     }
   } else {
     // nread == 0: no data, but EAGAIN/EWOULDBLOCK — nothing to do
     if (buf->base != nullptr) {
-      uvcpp_free_bytes(buf->base);
+      free_read_buf(buf);
     }
   }
 }

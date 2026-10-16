@@ -324,25 +324,37 @@ std::vector<std::pair<std::string, std::string> > web_parse_query(
   }
 
   size_t start = 0;
+  // 整串只扫一遍：`%` 与 `+` 一个都不出现时，逐段的"解码"恒等于原样拷贝
+  // （这正是 `web_url_decode` 快路那两条判据）。原先它对**每个键、每个值**各
+  // 调一次 `web_url_decode`，`?a=1&b=1` 就是 4 次调用、每次还要两次
+  // `find`（`%`、`+`）—— callgrind 上 h1 baseline 的 `find(char)` 18 次/请求
+  // 里有一半是这么来的。
+  const bool need_decode = query.find('%') != std::string::npos ||
+                           query.find('+') != std::string::npos;
+
   while (true) {
     const size_t amp = query.find('&', start);
     const size_t end = (amp == std::string::npos) ? query.size() : amp;
 
     // 跳过空段（"a=1&&b=2" 中间那个）
     if (end > start) {
-      const std::string kv = query.substr(start, end - start);
-      const size_t eq = kv.find('=');
-      std::string k;
-      std::string v;
-      if (eq == std::string::npos) {
-        k = kv;  // 裸键，值为空
+      // 键、值的区间直接在 `query` 上定：不再先 substr 出 `kv` 再切两刀
+      // （那一次 substr 是纯粹的白拷）。
+      const size_t eq = query.find('=', start);
+      if (eq == std::string::npos || eq >= end) {
+        std::string k(query, start, end - start);  // 裸键，值为空
+        out.push_back(std::make_pair(need_decode ? web_url_decode(k, true) : k,
+                                     std::string()));
       } else {
-        k = kv.substr(0, eq);
-        v = kv.substr(eq + 1);  // 值里可以再有 '='
+        std::string k(query, start, eq - start);
+        std::string v(query, eq + 1, end - eq - 1);  // 值里可以再有 '='
+        // 查询串里 '+' 是空格，所以 plus_as_space = true
+        if (need_decode) {
+          k = web_url_decode(k, true);
+          v = web_url_decode(v, true);
+        }
+        out.push_back(std::make_pair(std::move(k), std::move(v)));
       }
-      // 查询串里 '+' 是空格，所以 plus_as_space = true
-      out.push_back(std::make_pair(web_url_decode(k, true),
-                                   web_url_decode(v, true)));
     }
 
     if (amp == std::string::npos) break;

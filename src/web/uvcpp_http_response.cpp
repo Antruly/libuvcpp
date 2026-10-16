@@ -183,6 +183,20 @@ void append_hex(std::string& out, unsigned long long v) {
   out.append(p, static_cast<size_t>(tmp + sizeof(tmp) - p));
 }
 
+// 同 `append_dec`，但写进**裸指针**、返回新位置 —— 给下面"整段头部一次性
+// resize 之后用指针落笔"的写法用。字节与 `append_dec` 逐字节相同。
+char* append_dec_raw(char* w, unsigned long long v) {
+  char tmp[24];
+  char* p = tmp + sizeof(tmp);
+  do {
+    *--p = static_cast<char>('0' + (v % 10));
+    v /= 10;
+  } while (v != 0);
+  const size_t n = static_cast<size_t>(tmp + sizeof(tmp) - p);
+  ::memcpy(w, p, n);
+  return w + n;
+}
+
 }  // namespace
 
 std::string uvcpp_http_response::to_string(bool include_body) const {
@@ -243,47 +257,92 @@ void uvcpp_http_response::to_string_into(std::string& result,
       chunked = true;
     }
   }
-  if (include_body) est += body.size() + 24;
+  // 下面改成"先 resize 到**上界**、再用裸指针落笔"，所以 `est` 这一次必须真的是
+  // 上界：以前它只是估算（估小了只是多一次增长，无所谓），现在估小了就会写出
+  // 缓冲区。两处补齐 —— 状态行那 32 字节要覆盖
+  // `' ' + 负号 + 20 位十进制 + ' ' + CRLF + 空行的 CRLF` = 27，够；
+  // `content-length` 那一条要补齐 `"content-length: "`(16) + 20 位 + CRLF(2)。
+  if (!chunked && !has_cl && body.size() > 0) est += 16 + 20 + 2;
+  const size_t body_extra = include_body ? body.size() + 24 : 0;
+  est += body_extra;
+  // 头部块自己的上界。**`resize` 只能按这个来** —— 按 `est` 来会把
+  // `body_extra` 也一起零填充，body 一大（json 那条腿 8 KB）就是每响应白填
+  // 8 KB，比省下来的 append 还贵。
+  const size_t head_bound = est - body_extra;
 
   // 复用形态（`to_string_into` 的调用方）下 `result` 的容量是上一次留下的：只要
   // `est` 没涨过它，这一句连 `reserve` 都不做 ⇒ 整条响应一次分配都没有。
   if (est > result.capacity()) result.reserve(est);
 
-  // --- Status line ---
-  result.append(version_c, version_len);
-  result += ' ';
-  // 状态码按 **int** 打印，与原实现 `oss << static_cast<int>(status_code)` 逐字一致。
-  // `append_dec` 收的是无符号，直接传下去的话 `static_cast<http_status>(-1)`
-  // 那种非法值会被印成 18446744073709551615，而不是原来的 -1 —— 都是坏报文，
-  // 但"这次改动不改字节"这句话就没法无条件成立了。多一个分支换那句话成立。
-  const int code = static_cast<int>(status_code);
-  if (code < 0) {
-    result += '-';
-    append_dec(result, static_cast<unsigned long long>(-static_cast<long long>(code)));
-  } else {
-    append_dec(result, static_cast<unsigned long long>(code));
-  }
-  result += ' ';
-  result.append(reason_c, reason_len);
-  result += "\r\n";
+  // --- Status line + headers ---
+  //
+  // 原先每个头是 4 次 `result += ...`（名、": "、值、CRLF），加状态行与空行
+  // 一共 25 次 `_M_append`/响应。每次都要过一次 PLT、一次容量检查、一次
+  // `memcpy` 调用（callgrind：`_M_append` 自身 31 条 + 那次 `memcpy` 14.6 条，
+  // 合起来 25 × 46 ≈ 1150 条/请求，是这一层最大的一笔）。这里改成"一次
+  // `resize` 到上界、之后整段头部用裸指针写"：每个头只剩名、值两次
+  // `memcpy`，`: ` 与 CRLF 各是两条立即数存储。`resize` 那次零填充只覆盖
+  // 头部（约 200 B），比 25 次 append 便宜。
+  //
+  // 落笔的顺序、每段字节与原实现**逐字节相同**（`resize` 到 `head_bound` 保证
+  // 不会越界，末尾再按实际长度收回）。
+  result.resize(head_bound);
+  {
+    char* w = &result[0];
+    char* const begin = w;
 
-  for (const auto& h : headers) {
-    result += h.name;
-    result += ": ";
-    result += h.value;
-    result += "\r\n";
-  }
+    ::memcpy(w, version_c, version_len);
+    w += version_len;
+    *w++ = ' ';
+    // 状态码按 **int** 打印，与原实现 `oss << static_cast<int>(status_code)` 逐字一致。
+    // `append_dec` 收的是无符号，直接传下去的话 `static_cast<http_status>(-1)`
+    // 那种非法值会被印成 18446744073709551615，而不是原来的 -1 —— 都是坏报文，
+    // 但"这次改动不改字节"这句话就没法无条件成立了。多一个分支换那句话成立。
+    const int code = static_cast<int>(status_code);
+    if (code < 0) {
+      *w++ = '-';
+      w = append_dec_raw(
+          w, static_cast<unsigned long long>(-static_cast<long long>(code)));
+    } else {
+      w = append_dec_raw(w, static_cast<unsigned long long>(code));
+    }
+    *w++ = ' ';
+    ::memcpy(w, reason_c, reason_len);
+    w += reason_len;
+    *w++ = '\r';
+    *w++ = '\n';
 
-  if (chunked) {
-    // Chunked: no Content-Length (included)
-  } else if (!has_cl && body.size() > 0) {
-    result += "content-length: ";
-    append_dec(result, static_cast<unsigned long long>(body.size()));
-    result += "\r\n";
-  }
+    for (const auto& h : headers) {
+      const size_t nl = h.name.size();
+      const size_t vl = h.value.size();
+      ::memcpy(w, h.name.data(), nl);
+      w += nl;
+      *w++ = ':';
+      *w++ = ' ';
+      ::memcpy(w, h.value.data(), vl);
+      w += vl;
+      *w++ = '\r';
+      *w++ = '\n';
+    }
 
-  // --- Blank line ---
-  result += "\r\n";
+    if (chunked) {
+      // Chunked: no Content-Length (included)
+    } else if (!has_cl && body.size() > 0) {
+      static const char kCL[] = "content-length: ";
+      ::memcpy(w, kCL, sizeof(kCL) - 1);
+      w += sizeof(kCL) - 1;
+      w = append_dec_raw(w, static_cast<unsigned long long>(body.size()));
+      *w++ = '\r';
+      *w++ = '\n';
+    }
+
+    // --- Blank line ---
+    *w++ = '\r';
+    *w++ = '\n';
+
+    // 按**实际**长度收回来。只减不增 ⇒ 不重新分配、不搬字节。
+    result.resize(static_cast<size_t>(w - begin));
+  }
 
   // 只序列化头部：到这里已经是一条完整的头部块（状态行 + 各头 + 空行）。
   if (!include_body) return;
