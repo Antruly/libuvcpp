@@ -2428,8 +2428,6 @@ void measure_fs_count(const fs_count_api& api, const char* prefix,
   }
 }
 
-#endif  // __linux__
-
 /// `clear_cache()` 之后**下一个**请求必须走完整解析 —— 用 `realpath` 计数看。
 ///
 /// 解析记忆是**纯记忆**（不参与任何正确性判定，见 `uvcpp_web_static.h`），所以
@@ -2491,6 +2489,8 @@ void measure_memo_reset(const fs_count_api& api, const char* prefix,
   check_eq_i(after_again, 0,
              "memo_reset：紧接着那一次又该走记忆（0 次 realpath）");
 }
+
+#endif  // __linux__
 
 void test_fs_count_budget() {
   std::cout << "[static] fs_count" << std::endl;
