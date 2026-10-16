@@ -2907,7 +2907,10 @@ library is acceptable』的例外里。**所以这两档的合规约束不同，
    DOM 路 —— 所以"拒绝"只改变**怎么产生**这些字节，改变不了**响应里是什么字节**。
 3. 列索引**每应答解析一次**（`table.column_index()`），行循环里改按下标取；文本列用
    `bytes()`（对 TEXT 型它与 `to_text()` 返回同样的字节，但交回引用而不是每个单元格拷一个
-   `std::string`）。
+   `std::string`）。`operator[]` 与 `bytes()` 都返回**引用**，所以 `tags` 那一格也接成
+   `const std::string&` —— 写成 `const std::string`（**值**）会白拷一次，tags 那种长度
+   （`["new", "limited", "eco", "popular"]`，34 字节）超出 SSO，是**每行一次堆分配**。
+   这一处是第一版写错、被分配计数器抓回来的（见下面判据二的两行）。
 
 **键序刻意保持 DOM 那一套**（`count` 在前、每项按 `std::map` 的迭代序），尽管 JSON 对象无序、
 平台的校验器又是 `json.load()` 解析后再判结构（`scripts/validate.sh:2195-2214`：只查
@@ -2923,17 +2926,21 @@ library is acceptable』的例外里。**所以这两档的合规约束不同，
 | `/async-db?min=9999&max=9999&limit=50` | 22 | 相同 |
 | `/json/50?m=6`、`/json/1?m=3`（不走这条路的对照） | 8 397 / 203 | 相同 |
 
-#### 判据二：`LD_PRELOAD` 分配计数器（`-c 64 -n 40000`，两轮）
+#### 判据二：`LD_PRELOAD` 分配计数器（`-c 64 -n 40000`，A B B A 四轮）
 
 | | 分配/应答 | 字节/应答 | µs/请求（user / sys） |
 |---|---:|---:|---:|
-| 改前（DOM） | 773.797 ／ 773.775 | 63 733 ／ 63 730 | 253.500（222.25 / 31.25）／ 273.250（242.00 / 31.25） |
-| 改后（流式） | **95.753 ／ 95.769** | **28 815 ／ 28 818** | **93.500（58.25 / 35.25）／ 95.250（60.50 / 34.75）** |
+| 改前（DOM） | 773.793 ／ 773.821 | 63 732 ／ 63 736 | 269.250（240.25 / 29.00）／ 244.000（216.25 / 27.75） |
+| 改后（流式） | **79.728 ／ 79.750** | **28 305 ／ 28 308** | **85.500（52.25 / 33.25）／ 87.250（53.25 / 34.00）** |
 
-**每应答少 678 次分配（−87.6%）、少 34.9 KB**；两臂在分配这一栏上隔着一个数量级，
-µs/应答也是隔开的（改后那两轮的最差 95.25 < 改前那两轮的最好 253.5）。改后剩下的
-95.75 次是**驱动侧**的行物化（`value_from_pg` 每单元格两次分配那笔，§2.2 的另一半，
-本轮没动）。
+**每应答少 694 次分配（−89.7%）、少 35.4 KB**；两臂在分配这一栏上隔着一个数量级，
+µs/应答也是隔开的（改后那两轮的最差 87.25 < 改前那两轮的最好 244.00）。改后剩下的
+79.7 次是**驱动侧**的行物化（`value_from_pg` 每单元格两次分配那笔，本轮没动）。
+
+**这一栏抓到了第一版的第二个错**：那一版把 `tags` 接成 `const std::string`（值）而不是
+引用，读数因此停在 **95.753 ／ 95.769**、字节 28 815 ／ 28 818。改成引用后分配 −16.0 ／
+−16.0 次、字节 −510 ／ −510（20 行里 16 行的 tags 溢出 SSO，4 行短到落在小串优化里），
+µs/应答再 −8.0 ／ −8.0。**分配计数器在这里的作用不是"验收"，是"读代码时看不见的那一次拷贝"**。
 
 #### 判据三：h2c 那条 json 腿上的读缓冲池（§4.20 的独立确认）
 
@@ -2972,14 +2979,17 @@ address at address 0x125957"），墙钟下同一条路跑几千万个请求没�
 #### 复现
 
 ```bash
-# 装置（仓外）：/tmp/latrig/{mke.sh,adb.sh,ab2.sh}
+# 装置（仓外）：/tmp/latrig/{mke.sh,snap.sh,adb.sh,ab2.sh}
 #   入口源码：仓库那份 main.cc（改后）与 git show HEAD:…（改前），各自过 mke.sh 编成
-#   /tmp/latrig/entry.{stream,dom}（sha256 4ded3962… / 10f145d2…，各 208 312 / 202 680 字节）
+#   /tmp/latrig/entry.{stream,dom}（sha256 aa02856a… / 10f145d2…，各 208 312 / 202 680 字节）
 #   库两臂用的是**同一个** .so（入口侧改动）：build-docker/libuvcpp.so = 4a632c01…
 /tmp/latrig/mke.sh /tmp/latrig/main.dom.cc dom
 /tmp/latrig/mke.sh .../HttpArena/frameworks/libuvcpp/main.cc stream
-/tmp/latrig/adb.sh dom    0-7 8-17 adbdom 64 40000
-/tmp/latrig/adb.sh stream 0-7 8-17 adbstr 64 40000
+/tmp/latrig/adb.sh dom    0-7 8-17 adbr_dom 64 40000
+/tmp/latrig/adb.sh stream 0-7 8-17 adbr_stream 64 40000
+# 逐字节比对（snap.sh 从 $RIG/entry 起服务，两个臂各跑一遍、5 个 body 逐一 cmp）：
+cp -p /tmp/latrig/entry.dom /tmp/latrig/entry && /tmp/latrig/snap.sh /tmp/latrig/snap3_dom/
+cp -p /tmp/latrig/entry.stream /tmp/latrig/entry && /tmp/latrig/snap.sh /tmp/latrig/snap3_stream/
 # h2c 腿（换 .so，入口同一份）：
 ENTRY=/tmp/latrig/entry.stream ARM=/tmp/latrig/before /tmp/latrig/ab2.sh 0-5 6-17 h2b 'http://127.0.0.1:8082/json/50?m=6' -c 64 -m 4 -n 400000
 ```
