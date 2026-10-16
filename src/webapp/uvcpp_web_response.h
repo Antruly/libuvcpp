@@ -379,6 +379,17 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_web_response& body_take(std::string&& s,
                                 const std::string& ct = std::string());
 
+  /*
+   * `ct` 走 C 串的那一版，理由与上面 `body(const std::string&, const char*)`
+   * 那一对**逐字相同**：`json()` / `json_str()` 往 `ct` 位置传的都是
+   * `"application/json; charset=utf-8"`（34 字符，SSO 之外），绑到
+   * `const std::string&` 上就要先建一个临时串 —— 于是"省掉一次 8.4 KB 的
+   * `malloc` + `memcpy`"旁边又添了一次小 `malloc`。本版让字面量精确匹配，
+   * 那一笔随之消失（调用点零改动，重载决议自己选）。**刻意不给默认值**，
+   * 否则与上一版的默认实参撞成歧义。
+   */
+  uvcpp_web_response& body_take(std::string&& s, const char* ct);
+
   /**
    * @brief 设这份 body 的**可缓存身份** —— 压缩变体缓存的键。
    *

@@ -857,6 +857,16 @@ void quic_session::do_flush() {
   //
   // 挑流不花钱：没有可发的流时它返回 false，第一轮照样会发出那一次空请求。
   bool first = true;
+  // 包里**还开着**（判据见下面 `more = ...` 那一处，比"返回了
+  // `NGTCP2_ERR_WRITE_MORE`"更宽）。包开着时每一轮必须
+  // 拿**同一个** `buf` / `ps` / `pi` / `ts` 接着调（`ngtcp2.h:5274-5280` 的
+  // "Application has to specify the same |conn|, |path|, |pi|, |dest|,
+  // |destlen|, and |ts| parameters, otherwise the behaviour is undefined"），
+  // 所以这几个都声明在循环外、一轮都不重建。
+  bool more = false;
+  // 撞上了"这一条流现在发不了"。包开着时**不能就此收工** —— 契约要求一直调到
+  // 0 / 一个正数 / 那三个错误码之一（见下），所以下一轮只把包收尾、不再挑流。
+  bool stopping = false;
   for (unsigned round = 0; round < kMaxFlushRounds; ++round) {
     int64_t stream_id = -1;
     ngtcp2_vec datav[kMaxStreamVecs];
@@ -864,41 +874,88 @@ void quic_session::do_flush() {
     size_t handed = 0;
     uint32_t flags = 0;
 
-    const bool have = next_sendable_stream(&stream_id, datav, &datavcnt,
-                                           &handed, &flags);
-    if (!have && !first) break;
-    first = false;
+    if (!stopping) {
+      const bool have = next_sendable_stream(&stream_id, datav, &datavcnt,
+                                             &handed, &flags);
+      if (!have && !more && !first) break;
+      first = false;
+      if (have) {
+        // **一个数据报尽量多装几条流。** 不加这个位时 ngtcp2 的默认行为是
+        // "一个包一个 STREAM 帧"（文档原话 "by default, application can only
+        // send 1 STREAM frame in one QUIC packet"），于是"收侧一个数据报装 28 个
+        // 请求、发侧一个应答一个数据报"——本机 `sendmsg` 1.029/请求 对
+        // `recvmsg` 0.035/请求，那 28 倍就是这个位造成的，而每个包都要单独走
+        // 一遍包头构造、AEAD、`conn_write_pkt`、`ngtcp2_ppe_final`。
+        //
+        // `MORE` 的语义就是 `send(2)` 的 `MSG_MORE`：库把这个包**攥着不封口**，
+        // 返回 `NGTCP2_ERR_WRITE_MORE` 让你继续往里加。加不下了它自己返回一个
+        // **正数**（完整包，可以发了），没有东西可加时返回 0。
+        flags |= NGTCP2_WRITE_STREAM_FLAG_MORE;
+      } else {
+        // 没有可发的流了。这一轮的任务是**把开着的那个包收尾**：不带 `MORE`
+        // 地调一次、`stream_id = -1`，库就走 `ngtcp2_ppe_final` 把攒好的包
+        // 交出来（`ngtcp2_conn.c:4547-4550`）。`pkt_empty` 那条路只在包里
+        // **一个字节都没有**时才返回 0（`ngtcp2_conn.c:4460-4467`），所以
+        // 这里不存在"把已经有数据的包丢掉"的形状。
+        stream_id = -1;
+        datavcnt = 0;
+        handed = 0;
+        flags = 0;
+      }
+    }
+    stopping = false;
 
     ngtcp2_ssize datalen = -1;
-    // **不用 `NGTCP2_WRITE_STREAM_FLAG_MORE`。** 用了它之后，ngtcp2 要求
-    // "在写满一个包之前不许调任何别的 API、只能一直调这个直到它返回 0 或一个
-    // 正数"，而且 `NGTCP2_ERR_WRITE_MORE` 那条分支必须原参重试 —— 那是把多个
-    // STREAM 帧塞进同一个包用的优化。反过来，不用它时 ngtcp2 的默认行为就是
-    // "一个包一个 STREAM 帧"（它自己的文档用词就是 "by default"），语义简单
-    // 得多：每一轮要么拿到一个**完整的包**，要么 0，要么一个错误码。
     const ngtcp2_ssize nwrite = ngtcp2_conn_writev_stream(
         conn_, &ps.path, &pi, buf, sizeof(buf), &datalen, flags, stream_id,
         datavcnt != 0 ? datav : nullptr, datavcnt, ts);
 
+    // **这一轮之后包还开着吗？** 判据**不是**"返回了 `NGTCP2_ERR_WRITE_MORE`"
+    // —— 那样会漏掉一条路：带着 `MORE` 调、而这条流被流控挡住时，库里是
+    // **先**把 `PPE_PENDING` 记上、**再**返回 `NGTCP2_ERR_STREAM_DATA_BLOCKED`
+    // 的（`ngtcp2_conn.c:4444-4452`，那个赋值在 `return` 之前）。按"只有 MORE
+    // 才算开着"来判，这一支就会带着 `PPE_PENDING` 返回，下一次
+    // `ngtcp2_conn_read_pkt` 立刻撞上
+    // `assert(!(conn->flags & NGTCP2_CONN_FLAG_PPE_PENDING))` —— 大响应体上
+    // 一跑就中（小响应体撞不到，因为包还没满就收尾了）。
+    //
+    // 所以取**保守**的那一侧：只要这一轮带了 `MORE`、而返回值不是正数，就认为
+    // 包开着。判错这一侧的代价只是**一次多余的收尾调用**（包里没东西时它返回
+    // 0，与本函数第一轮那次"空请求"同形，什么也不做）；判错另一侧的代价是
+    // 崩溃。**正数是唯一的确定收尾**：只有它在 `ngtcp2_conn.c:4598` 真的调了
+    // `conn_reset_ppe_pending`。
+    more = (flags & NGTCP2_WRITE_STREAM_FLAG_MORE) != 0 && nwrite < 0;
+
     if (nwrite < 0) {
-      if (nwrite == NGTCP2_ERR_STREAM_DATA_BLOCKED ||
-          nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
-          nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
-        // 这三种都是"**这一条流**现在发不了"，不是连接错误。ngtcp2 允许换一条
-        // 流继续往同一个包里装 —— 但那是 `MORE` 那条路（见上）。这里直接收工：
-        // 剩下的流会在下一个包到达时被重新拾起，而流控/流状态的每一次变化
-        // 都**必须**由一个包带来，所以那一刻一定会来。
+      if (nwrite == NGTCP2_ERR_WRITE_MORE) {
+        // 这一笔已经编进那个还没封口的包（`*pdatalen >= 0` 是这一支的断言）。
+        // 记账在下面统一做，然后接着往**同一个**包里装下一条流 —— 这正是
+        // `MORE` 的用处。**注意它也是负数**，所以这一支必须显式认出来，
+        // 否则会掉进下面那条"其余都是连接级错误"里被判成致命错误。
+      } else if (nwrite == NGTCP2_ERR_STREAM_DATA_BLOCKED ||
+                 nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
+                 nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
+        // 这三种都是"**这一条流**现在发不了"，不是连接错误。库允许换一条流
+        // 继续往同一个包里装 —— 那正是 `MORE` 那条路。但流控/流状态的每一次
+        // 变化都**必须**由一个包带来，所以"现在发不了"不会一直成立：剩下的流
+        // 会在下一个包到达时被重新拾起。
         if (nwrite == NGTCP2_ERR_STREAM_NOT_FOUND ||
             nwrite == NGTCP2_ERR_STREAM_SHUT_WR) {
           // 这一条对我们来说已经不存在/不能写了。留着它，每一轮 flush 都会在
           // 第一轮撞同一堵墙，把它后面那些流**全部饿死**。
           send_q_.erase(stream_id);
         }
+        // 包开着的话先收尾再收工 —— 否则就违反了"一直调到终止返回值"那条契约。
+        if (more) {
+          stopping = true;
+          continue;
+        }
+        break;
+      } else {
+        // 其余都是连接级错误：发一个终包再收尾。
+        handle_conn_error(static_cast<int>(nwrite));
         break;
       }
-      // 其余都是连接级错误：发一个终包再收尾。
-      handle_conn_error(static_cast<int>(nwrite));
-      break;
     }
 
     if (datalen >= 0 && stream_id >= 0) {
@@ -916,12 +973,15 @@ void quic_session::do_flush() {
         // 会设 fin 位（文档原话："If all given data is encoded as STREAM frame in
         // dest, and if flags & FIN is nonzero, fin flag is set"）。所以这里比的是
         // "这次编进去的字节数 == 这次给它的字节数"，不是"队列空了"。
+        // `MORE` 那一支也一样成立：帧是当场写进 `dest` 的，只是包还没封口。
         if (s.fin_requested && !s.fin_written &&
             (datavcnt == 0 || n == handed)) {
           s.fin_written = true;
         }
       }
     }
+
+    if (nwrite == NGTCP2_ERR_WRITE_MORE) continue;
 
     // 0 = 成功但这一轮没有东西要发（拥塞窗口满、或被放大攻击限流）。
     // **不是失败**，也不该再转下去。
@@ -930,6 +990,28 @@ void quic_session::do_flush() {
     if (ps.path.remote.addr != nullptr) {
       send_(buf, static_cast<size_t>(nwrite), ps.path.remote.addr,
             static_cast<int>(ps.path.remote.addrlen));
+    }
+  }
+
+  // 轮数用尽时包里**可能还开着**（`MORE` 让一轮只装一帧，所以能装到
+  // `kMaxFlushRounds` 帧才停）。此时**必须**在**这一轮**把它收尾：库里那份
+  // 待完成的包状态挂在连接上，而 `buf` / `ps` / `pi` 是这里的栈上对象 ——
+  // 一返回就没了，下一次 `do_flush` 再拿新地址去续那个包就是文档里的
+  // "behaviour is undefined"（`ngtcp2.h:5274-5280`）。正常路径走不到这里
+  // （本档每连接 64 条流 < 128 轮），但这不是可以留给"正常路径"的假设。
+  if (more) {
+    ngtcp2_ssize datalen = -1;
+    const ngtcp2_ssize nwrite = ngtcp2_conn_writev_stream(
+        conn_, &ps.path, &pi, buf, sizeof(buf), &datalen, 0, -1, nullptr, 0,
+        ts);
+    if (nwrite > 0 && ps.path.remote.addr != nullptr) {
+      send_(buf, static_cast<size_t>(nwrite), ps.path.remote.addr,
+            static_cast<int>(ps.path.remote.addrlen));
+    } else if (nwrite < 0 && nwrite != NGTCP2_ERR_WRITE_MORE &&
+               nwrite != NGTCP2_ERR_STREAM_DATA_BLOCKED &&
+               nwrite != NGTCP2_ERR_STREAM_NOT_FOUND &&
+               nwrite != NGTCP2_ERR_STREAM_SHUT_WR) {
+      handle_conn_error(static_cast<int>(nwrite));
     }
   }
 
@@ -1397,20 +1479,31 @@ int quic_session::write_stream(int64_t stream_id, const char* data, size_t len,
   }
 
   if (len != 0) {
-    // 往最后一块里塞，塞满就开新块。**每块出生时 `reserve(kChunkSize)` 且
+    // 往最后一块里塞，塞满就开新块。**每块出生时 `reserve()` 一次定下容量、
     // 此后只写到这里为止** —— 这两条合起来保证块内地址一生不变，而那是
     // 递给 ngtcp2 的指针能一直有效的前提（见头里 `stream_send` 的注释）。
     // 用 `insert` 而不是 `resize`+`memcpy`：写入的是**从未递出去过**的那一段
     // （起点 `write_off >= sent_off`），所以既不搬字节也不碰已有数据。
+    //
+    // 容量**按这次写的量**定（`[kMinChunkSize, kChunkSize]` 之间），不是无条件
+    // `kChunkSize`：一条只发几百字节的流就只占一块 1 KiB，而不是 64 KiB。理由与
+    // 实测账见头里 `kMinChunkSize` 的注释。**"块大小不固定"这件事的另一半在
+    // `next_sendable_stream()`** —— 那里的"第几块 + 块内偏移"从一次除法换成了
+    // 一次累加，这是本改动唯一要同步的地方。
     size_t done = 0;
     while (done < len) {
       if (s.chunks.empty() ||
-          s.chunks.back().size() == stream_send::kChunkSize) {
+          s.chunks.back().size() == s.chunks.back().capacity()) {
+        size_t cap = len - done;
+        if (cap < stream_send::kMinChunkSize) cap = stream_send::kMinChunkSize;
+        if (cap > stream_send::kChunkSize) cap = stream_send::kChunkSize;
         s.chunks.emplace_back();
-        s.chunks.back().reserve(stream_send::kChunkSize);
+        s.chunks.back().reserve(cap);
       }
       ::std::vector<uint8_t>& c = s.chunks.back();
-      const size_t room = stream_send::kChunkSize - c.size();
+      // 用 `capacity()` 而不是另存一个"这块打算多大"的数：`reserve()` 之后
+      // 容量就是那块的天花板，而上面的循环条件正是拿它当"满了"的判据。
+      const size_t room = c.capacity() - c.size();
       const size_t take = room < (len - done) ? room : (len - done);
       c.insert(c.end(), data + done, data + done + take);
       done += take;
@@ -1506,21 +1599,27 @@ bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
     if (remaining != 0) {
       // 把 `[sent_off, write_off)` 描述成至多 `kMaxStreamVecs` 段连续内存。
       //
-      // 除最后一块外每块都是满的（本结构的稳态），所以"第几块 + 块内偏移"
-      // 一次除法就算得出来。**描不完也没关系**：一次调用只可能编进一个包
-      // （~1200 B），剩下的下一轮再描 —— 而每轮都是从同一个 `sent_off` 起算，
-      // 所以描述永远是"从下一个待发字节开始"的，不会漏。
-      const uint64_t rel = s.sent_off - s.base_off;
-      size_t idx = static_cast<size_t>(rel / stream_send::kChunkSize);
-      size_t off = static_cast<size_t>(rel % stream_send::kChunkSize);
-      for (; idx < s.chunks.size() && cnt < kMaxStreamVecs; ++idx) {
+      // **不能再用"第几块 + 块内偏移"一次除法算**：块容量是按写入量定的
+      // （见 `kMinChunkSize`），大小不齐。改成从前往后累加地跳过
+      // `sent_off - base_off` 个字节。块数不多（一块至少 1 KiB，而这里描述的
+      // 至多是"还没发出去的量"），这点线性扫描比一次除法贵不了多少。
+      //
+      // **描不完也没关系**：一次调用只可能编进一个包（~1200 B），剩下的下一轮
+      // 再描 —— 而每轮都是从同一个 `sent_off` 起算，所以描述永远是"从下一个
+      // 待发字节开始"的，不会漏。
+      uint64_t skip = s.sent_off - s.base_off;
+      for (size_t idx = 0; idx < s.chunks.size() && cnt < kMaxStreamVecs;
+           ++idx) {
         const ::std::vector<uint8_t>& c = s.chunks[idx];
-        if (off >= c.size()) break;  // 只在最后一块上可能（见上面的稳态）
-        datav[cnt].base = const_cast<uint8_t*>(c.data() + off);
-        datav[cnt].len = c.size() - off;
+        if (skip >= c.size()) {
+          skip -= c.size();
+          continue;
+        }
+        datav[cnt].base = const_cast<uint8_t*>(c.data() + skip);
+        datav[cnt].len = c.size() - static_cast<size_t>(skip);
         total += datav[cnt].len;
         ++cnt;
-        off = 0;
+        skip = 0;
       }
     } else {
       // 只剩一个 FIN 要发：**空数据 + FIN 位**是合法的一次调用（ngtcp2 文档：

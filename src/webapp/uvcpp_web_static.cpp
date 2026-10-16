@@ -926,11 +926,19 @@ struct uvcpp_web_static::Impl {
    * 互斥，不是分片」）。单循环下这把锁没有可争用的对象，代价是一次未争用的
    * `lock`/`unlock`。
    *
+   * **唯一的例外是解析记忆**（`retire_bucket::memo`）：每条循环各存一份答案
+   * 副本，热路径上一次锁都不取。它与上面那段不冲突，因为两者不是一回事 ——
+   * 那是**纯记忆**的副本（丢了只多走一次 `realpath`，不参与任何判定），而
+   * `cache`/`lru` 分片会同时改掉内存、命中率与淘汰次序。理由见那个成员的
+   * 注释。
+   *
    * **它离热路径又远了一步**（每次取锁在 `-m 32` 那档下都是一次潜在的
    * futex，每请求 8 次的账就是这么来的）：三个计数改成了 `std::atomic`
    * （它们只被加减，从不参与决策）；循环线程取探针整段只取**一次**锁
-   * （`collect_probes()`）；回收桶空了就一次锁都不取（`bucket_for()`）。
-   * 落到每请求上的取锁次数因此是 1（`POOL` 档取探针那一次）。
+   * （`collect_probes()`）；回收桶空了就一次锁都不取（`bucket_for()`）；
+   * `LOOP_STAT` 档的解析记忆走前台副本（`memo_lookup()`）。落到每请求上的
+   * 取锁次数因此是 1 —— `POOL` 档是 `collect_probes()` 那一次，`LOOP_STAT`
+   * 档是 `lookup_cache()` 那一次（缓存比对本身仍要查全局表，见它的注释）。
    *
    * `mutable`：`collect_probes()`/只读访问器都是 const 成员函数。
    */
@@ -954,12 +962,91 @@ struct uvcpp_web_static::Impl {
    * 它**不参与任何正确性判定**：丢掉/清空只会让下一次多走一次
    * `web_resolve_within_root()`，响应逐字节不变。所以它可以在任何时刻被
    * 整表清掉（`put_hints()` 满了就是这么干的），`clear_cache()` 也顺手清它。
+   *
+   * **`LOOP_STAT` 档的热路径不读这张表**：那条路上每条循环有一份前台副本
+   * （`retire_bucket::memo`，零取锁），只有冷启动、以及前台那份被作废/没答上来
+   * 的那一次请求才会落到这里。这张表在多循环下仍然是**唯一**权威的那份 ——
+   * 前台是从它这儿拷出去、也随时可以丢掉的。
    */
   std::map<std::string, resolve_hint> hints_;
 
   /** @brief 命中/未命中（观测用；跨线程，无锁读改写）。 */
   std::atomic<unsigned long long> hits;
   std::atomic<unsigned long long> misses;
+
+  /**
+   * @brief 前台副本的**代次**：`clear_cache()` 每喊一次加一。
+   *
+   * 每条循环那份前台副本（`retire_bucket::memo` 与 `retire_bucket::body`）
+   * 里的条目都记着自己是哪一代的。对不上就**当作没有**（不读也不删，等下一次
+   * 回写就地换掉）。
+   *
+   * 为什么 `clear_cache()` 必须让它们作废：那份函数的调用方（换语料、跑合规
+   * 探针之前）要的是一条**可以断言的性质** —— "清缓存之后第一次请求必定走
+   * 完整解析"（全局表那边是 `hints_.clear()` 给的，内容那边是 `cache.clear()`
+   * 给的）。前台副本如果活得比它们长，这条断言就不成立了：请求会拿一份
+   * "本该被忘掉"的记忆或字节直接命中。
+   *
+   * **容量性的清空不算**（`put_hints()` 满了那一下）：那是全局表自己的容量
+   * 策略，不是"结论变了"，而前台那份仍然是**有效的记忆**（它每次被用都要
+   * 当场校验，见 `memo_lookup()`）。
+   *
+   * `acquire`/`release` 配对：发布方在锁内 `fetch_add(release)`，读方在
+   * `load(acquire)` —— 要的是"看见新代次"这件事本身，而不是别的字段的可见性。
+   */
+  std::atomic<unsigned long long> front_gen_;
+
+  /**
+   * @brief 前台解析记忆的一条**备选答案**：一份 `hint_vec` + 它是在哪对后缀下取的。
+   *
+   * 为什么要带后缀：`collect_hints()` 的候选键是
+   * `(URL | URL+索引名 | SPA) × ("", v0, v1)` 展开出来的，而 `variants` 来自
+   * **每个请求自己的** `Accept-Encoding`（带 `Range` 的请求还会把这一对整对
+   * 清空，见 `serve()`）。所以同一个 URL 在不同请求上答案不同 —— 一张
+   * `URL → 答案` 的表必须把"这份答案是哪对后缀下的"一起记住，否则一个混着
+   * 两种 `Accept-Encoding` 的客户端就会拿到张冠李戴的记忆。
+   *
+   * 表里**至多两条**（`k_alt_max`）：真实的取值空间就是这个量级（带后缀的
+   * 一对，以及不带后缀的空对）。再多就说明"这个 URL 的答案一直在变"，那时
+   * 每次都落回全局表 —— 也就是不做前台时的行为，没有正确性代价。
+   */
+  struct memo_alt {
+    std::string v0;
+    std::string v1;
+    hint_vec hints;
+  };
+  static const size_t k_alt_max = 2;
+
+  /// 前台记忆里的一条：`gen` 那一代下，某个 `job::url` 的答案（队首 = 最近用过）。
+  struct memo_entry {
+    unsigned long long gen;
+    std::vector<memo_alt> alts;
+    memo_entry() : gen(0) {}
+  };
+
+  /**
+   * @brief 前台**内容**副本里的一条：对全局条目那份字节的**弱**引用 + 它当时的身份。
+   *
+   * 与 `cache_entry` 的差别只有这一处 —— **弱引用**。这条副本不按着字节，它
+   * 只是"全局表里那份还在不在"的一个旁证：全局表把它淘汰掉（LRU/超预算），
+   * 这里当场就 `expired()`，落回全局那条路重新读盘。
+   *
+   * 那正是它与"分片"的分野，也是上面 `mu_` 那段"锁，不是分片"仍然成立的原因：
+   * **分片各存一份字节（内存成倍、命中率还掉），这里连一个字节都不存** ——
+   * 每条循环多的只是几个键、三个整数和一个控制块的弱计数，`bytes` 的账一个
+   * 字节都不动。内容只存一份、立刻都还在全局表里。
+   *
+   * 身份的三个字段与全局表判命中用的**完全相同**（大小、mtime 秒、mtime 纳秒），
+   * 所以"这份字节还算不算数"在两条路上仍然是同一个问题、同一个答案。
+   */
+  struct body_entry {
+    unsigned long long gen;
+    int64_t size;
+    int64_t mtime_sec;
+    int64_t mtime_nsec;
+    std::weak_ptr<std::string> data;
+    body_entry() : gen(0), size(0), mtime_sec(0), mtime_nsec(0) {}
+  };
 
   /**
    * @brief 用完待回收的 `uvcpp_work`，**按循环分桶**。
@@ -1017,6 +1104,40 @@ struct uvcpp_web_static::Impl {
      * 一直留着。超上限的这一批照旧 `delete` —— 退化成今天的行为，不是泄漏。
      */
     std::vector<job*> free_jobs;
+
+    /**
+     * @brief 这条循环自己的**前台解析记忆**：`job::url` → 那次的答案。
+     *
+     * 与全局那张 `hints_` 是**同一份信息的两处存放**，取舍完全不同：全局那份
+     * 每读一次要取一次 `mu_`（`LOOP_STAT` 档下那是每请求的第二次取锁），
+     * 这份一次锁都不取，代价是每条循环各存一份。
+     *
+     * **只被那一条循环自己的线程碰** —— 与 `pending`/`free_jobs` 同一条约束，
+     * 而且比它们更严：`LOOP_STAT` 档下 `collect_hints()`（读）与
+     * `probe_job()` 的回写（写）都在循环线程上，`POOL` 档则**一次都不碰**
+     * （见 `memo_store()` 的入口条件）。所以它不需要锁，也不需要分片。
+     *
+     * **上限借用 `cache_max_entries`** —— 与 `put_hints()` 同一把尺子、
+     * 同一个理由（配置一个有界的东西不该需要第二个旋钮）：满了整表清掉，
+     * 丢掉任何一条都只意味着"下次多走一次 `realpath`"。
+     */
+    std::map<std::string, memo_entry> memo;
+
+    /**
+     * @brief 这条循环自己的**前台内容副本**：`job::final_url` → 那份字节的弱引用。
+     *
+     * 与 `memo` 同一条约束（只被这条循环自己的线程碰，`LOOP_STAT` 档专有，
+     * 见 `body_store()`），也是同一个目的：`LOOP_STAT` 档的缓存比对
+     * （`lookup_cache()`）每请求要取一次 `mu_`，而实测那一次持有所花的
+     * 544~627 ns 里大头同样是取锁本身，后面还跟着 1.3~2.4 µs 的**等锁**。
+     * 这一份把那笔账也整段去掉。
+     *
+     * **它不存字节**（弱引用，见 `body_entry`），所以它与 `cache` 不构成
+     * 两份缓存：这里只是"那条路不必再问全局表"的一个抄本。
+     *
+     * 上限同样借 `cache_max_entries`（与 `put_hints()` 同一把尺子）。
+     */
+    std::map<std::string, body_entry> body;
   };
 
   /// 每条循环的回收站上限（个）。见 `retire_bucket::free_jobs`。
@@ -1078,6 +1199,7 @@ struct uvcpp_web_static::Impl {
         bytes(0),
         hits(0),
         misses(0),
+        front_gen_(0),
         instance_id_(next_instance_id()) {}
 
   ~Impl() { drain_all_retired(); }
@@ -1230,13 +1352,24 @@ struct uvcpp_web_static::Impl {
     }
   }
 
-  /// `LOOP_STAT` 档专用的取记忆：那条路上 `serve()` 不取探针（用不上），
-  /// 所以记忆得自己取 —— 仍然只取**一次**锁。
-  void collect_hints(const std::string& url, const std::string variants[2],
-                     hint_vec& out) const {
+  /**
+   * @brief `LOOP_STAT` 档专用的取记忆：那条路上 `serve()` 不取探针（用不上），
+   *        所以记忆得自己取。
+   *
+   * **先问本循环那份前台副本**（`memo_lookup()`），命中就一次锁都不取；没命中
+   * 才落到全局表上取**一次**锁，并把答案顺手拷进前台（`memo_store()`）。
+   *
+   * \p l 是这条循环 —— 只有它能把前台表取出来（`bucket_for()`）。从前这个
+   * 函数没有这个参数，因为那时它只需要全局表。
+   *
+   * **不是 `const` 了**：前台表是懒建的（第一次 `bucket_for()` 要建桶）。
+   */
+  void collect_hints(uvcpp_loop* l, const std::string& url,
+                     const std::string variants[2], hint_vec& out) {
     // 关掉记忆时连取都不取：`probe_leaf()` 那边本来也不会用，白拿一次锁
     // 会让"关掉之后一次多余的系统调用/加锁都没有"这条判据不成立。
     if (!cfg->resolve_memo) return;
+    if (memo_lookup(l, url, variants, out)) return;
     std::lock_guard<std::mutex> lk(mu_);
     add_hints_locked(url, variants, &out);
     for (size_t i = 0; i < cfg->index_names.size(); ++i) {
@@ -1245,6 +1378,108 @@ struct uvcpp_web_static::Impl {
     if (cfg->spa_fallback && !cfg->spa_url.empty()) {
       add_hints_locked(cfg->spa_url, variants, &out);
     }
+  }
+
+  /**
+   * @brief 前台解析记忆的**读**侧：这条循环自己那份 `URL → 答案`，**零取锁**。
+   *
+   * 为什么可以有一份副本而不改变任何判定：全局那张 `hints_` 是**纯记忆** ——
+   * 它自己不参与正确性（丢了只多走一次 `realpath`，见 `hints_` 的注释），
+   * 而每一条记忆在被用的时候都要**当场校验**（`probe_leaf()` 的 (2a)：正数
+   * 比对 `dev`/`ino`，负数再 `lstat` 一次）。所以一份副本即使过期，也只会在
+   * 那一步落回完整解析，再由 `fresh_hints` 改成新的 —— **前台表因此与它所
+   * 复制的那张表站在同一条船上**：不参与任何判定，只决定"要不要省下这一次
+   * `realpath`"。
+   *
+   * 为什么只在 `LOOP_STAT` 档有：这张表没有锁，它成立的前提是"只有这条循环
+   * 自己的线程碰它"。`LOOP_STAT` 档下读（本函数所在的 `collect_hints()`）与
+   * 写（`probe_job()` 的回写）都在循环线程上 —— 这是那条路把 `stat` 搬到
+   * 循环线程换来的副产品。`POOL` 档的回写在 worker 上，那时这张表**一次都
+   * 不碰**（`probe_job()` 里由 `probed_on_loop` 分岔），行为与不做前台时
+   * 逐字节相同。
+   *
+   * 为什么值得：`LOOP_STAT` 档的读侧从前每请求取一次 `mu_`，而实测那一次
+   * 的持有时长里**大部分是取锁本身**（争用下的 `futex` 唤醒与持锁线程被
+   * 抢占），不是临界区里的那点活。前台表把这笔账整段去掉：热路径上一把
+   * 共享的锁都不碰，也就没有可争用的缓存行。
+   */
+  bool memo_lookup(uvcpp_loop* l, const std::string& url,
+                   const std::string variants[2], hint_vec& out) {
+    if (!cache_enabled()) return false;  // 全局表那条路也不会给答案
+    std::map<std::string, memo_entry>& tab = bucket_for(l)->memo;
+    const std::map<std::string, memo_entry>::iterator it = tab.find(url);
+    if (it == tab.end()) return false;
+    if (it->second.gen != front_gen_.load(std::memory_order_acquire)) {
+      return false;  // 上一代（`clear_cache()` 之后）：不读，也不在这里删
+    }
+    for (size_t i = 0; i < it->second.alts.size(); ++i) {
+      if (it->second.alts[i].v0 != variants[0] ||
+          it->second.alts[i].v1 != variants[1]) {
+        continue;
+      }
+      // 队首 = 最近用过。两条的容量，`swap` 一次就是完整的一次 LRU 更新。
+      if (i != 0) std::swap(it->second.alts[0], it->second.alts[i]);
+      out = it->second.alts[0].hints;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * @brief 前台解析记忆的**写**侧：`probe_job()` 探完之后的回写。**零取锁。**
+   *
+   * 两条互斥的出路，判据是"这次解析动没动结论"：
+   *
+   *  - `fresh` 非空 = 这次**完整解析过**（记忆没答上来，或者答上来的那条当场
+   *    校验没通过）。此时全局表刚被 `put_hints()` 合并进新结论，而手里这份
+   *    `hints` 里混着旧的 —— **丢掉这条**比留一条旧的安全：下一条请求会重新
+   *    从全局表拷一份（那时它拿到的就是合并后的那份）。
+   *  - `fresh` 空 = 记忆**全答上来了**。这时 `hints` 就是全局表对这个 URL 的
+   *    完整答案，逐字节可拷 —— 这才是前台表会被填满的那条路（也正是热路径：
+   *    一条 URL 被探过、被记下之后，之后每次请求都从这里出）。
+   *
+   * 只在 `LOOP_STAT` 档被调（`probed_on_loop`），所以这张表**只被它自己那条
+   * 循环的线程碰**，不需要锁 —— 这是 `retire_bucket::memo` 能免锁的全部前提。
+   */
+  void memo_store(uvcpp_loop* l, const std::string& url,
+                  const std::string variants[2], const hint_vec& hints,
+                  const hint_vec& fresh) {
+    if (!cache_enabled()) return;
+    std::map<std::string, memo_entry>& tab = bucket_for(l)->memo;
+    const std::map<std::string, memo_entry>::iterator it = tab.find(url);
+    if (!fresh.empty()) {
+      if (it != tab.end()) tab.erase(it);
+      return;
+    }
+    if (hints.empty()) return;  // 全局表里本来就没有这个 URL 的记忆
+
+    const unsigned long long gen = front_gen_.load(std::memory_order_acquire);
+    memo_entry* e = nullptr;
+    if (it == tab.end()) {
+      // 上限与 `put_hints()` 同款：满了整表清掉，不做逐条淘汰。
+      if (tab.size() >= opts.cache_max_entries) tab.clear();
+      e = &tab[url];
+    } else {
+      e = &it->second;
+      if (e->gen != gen) {
+        e->alts.clear();  // 上一代的后缀集合可能已经不成立了
+      }
+    }
+    e->gen = gen;
+
+    for (size_t i = 0; i < e->alts.size(); ++i) {
+      if (e->alts[i].v0 == variants[0] && e->alts[i].v1 == variants[1]) {
+        e->alts[i].hints = hints;  // 就地替换（容量复用），并提到队首
+        if (i != 0) std::swap(e->alts[0], e->alts[i]);
+        return;
+      }
+    }
+    if (e->alts.size() >= k_alt_max) e->alts.pop_back();  // 顶掉最久没用过的
+    e->alts.push_back(memo_alt());
+    memo_alt& a = e->alts.back();
+    a.v0 = variants[0];
+    a.v1 = variants[1];
+    a.hints = hints;
   }
 
   /// **要求已持有 `mu_`**（只从 `collect_probes()` 里调）。
@@ -1351,9 +1586,40 @@ struct uvcpp_web_static::Impl {
    *
    * 不提升 LRU：`POOL` 那一支也只是把快照拷进 job，从不碰 `lru`。两条路在
    * "命中算不算一次使用"上的行为必须一致，否则 `LOOP_STAT` 会悄悄改掉淘汰次序。
+   *
+   * **先问本循环那份前台副本**（`retire_bucket::body`，零取锁），没命中才落到
+   * 全局表上取**一次**锁；全局那边命中之后顺手把结果登记进前台（见
+   * `body_store()`）。为什么这笔账值得单独记一次：实测这一次取锁的持有是
+   * 544~627 ns、后面还跟着 1.3~2.4 µs 的等锁（本机 9 条循环、`-m 32`），
+   * 而它下面真正干的活只是**一次 `std::map` 查找加一次 `shared_ptr` 拷贝**。
+   *
+   * **不是 `const` 了**：前台表是懒建/懒填的。
    */
-  bool lookup_cache(const std::string& key, int64_t size, int64_t sec,
-                    int64_t nsec, std::shared_ptr<std::string>& out) const {
+  bool lookup_cache(uvcpp_loop* l, const std::string& key, int64_t size,
+                    int64_t sec, int64_t nsec,
+                    std::shared_ptr<std::string>& out) {
+    // 桶**只在这里取一次**（`bucket_for()` 可能会取 `mu_`），下面登记时把它
+    // 传下去 —— `body_store()` 不再自己取桶。理由不是省一次查找：这里往下
+    // 那个 `lock_guard` 是**非递归**的，`body_store()` 若在锁里去取一个新桶，
+    // 就是自死锁（`bucket_for()` 的线程本地缓存会把这件事盖住，直到某天有人
+    // 把登记挪到别的线程上 —— 那时它不会再报错，只会挂住）。
+    retire_bucket* const b = cache_enabled() ? bucket_for(l) : nullptr;
+    if (b != nullptr) {
+      std::map<std::string, body_entry>& tab = b->body;
+      const std::map<std::string, body_entry>::iterator fit = tab.find(key);
+      if (fit != tab.end() &&
+          fit->second.gen == front_gen_.load(std::memory_order_acquire) &&
+          fit->second.size == size && fit->second.mtime_sec == sec &&
+          fit->second.mtime_nsec == nsec) {
+        out = fit->second.data.lock();
+        if (out) return true;
+        // 全局表那边已经把它淘汰了（弱引用是唯一还能看见这件事的地方）。
+        // 擦掉这条再落下去问全局 —— 这次会走一次完整的全局查找，而不是
+        // 拿一份已经不存在的字节去应答。
+        tab.erase(fit);
+      }
+    }
+
     std::lock_guard<std::mutex> lk(mu_);
     const std::map<std::string, cache_entry>::const_iterator it = cache.find(key);
     if (it == cache.end()) return false;
@@ -1362,7 +1628,43 @@ struct uvcpp_web_static::Impl {
       return false;
     }
     out = it->second.data;
+    // 顺手登记一份前台。**登记在这里而不是 `put()` 里**：`put()` 只知道
+    // "刚读进来那一份"，而"全局表里这份还算数"是**这一次查找**得出的结论，
+    // 也是前台下一次能命中的唯一依据。代价是每条循环每个键多取一次锁
+    // （登记的这一下），之后同一条循环上全是零取锁。
+    body_store(b, key, out, size, sec, nsec);
     return true;
+  }
+
+  /**
+   * @brief 把一份**确实还算数**的字节登记进本循环的前台副本。
+   *
+   * 只从 `lookup_cache()` 里调（那里是 `LOOP_STAT` 档的循环线程，也正是这张表
+   * 唯一的写者）。登记的是**弱引用**：这条副本按不住字节，也就不会让
+   * `bytes` 的账与全局表脱节（见 `body_entry`）。
+   *
+   * \p b 由调用方传进来，**它们都不会为 nullptr**：调用点已经确认了
+   * `cache_enabled()`、并且那次 `bucket_for()` 与这里同线程同循环。所以本函数
+   * **不自己取桶** —— 它是在持有 `mu_` 的情况下被调的，再去 `bucket_for()`
+   * 一个新桶就是自死锁（非递归锁）。
+   *
+   * 上限与 `put_hints()` 同款：满了整表清掉，不做逐条淘汰。丢掉任何一条只
+   * 意味着"下次多取一次锁"，没有正确性代价。
+   */
+  void body_store(retire_bucket* b, const std::string& key,
+                  const std::shared_ptr<std::string>& data, int64_t size,
+                  int64_t sec, int64_t nsec) {
+    if (b == nullptr || !data) return;
+    std::map<std::string, body_entry>& tab = b->body;
+    if (tab.size() >= opts.cache_max_entries && tab.find(key) == tab.end()) {
+      tab.clear();
+    }
+    body_entry& e = tab[key];
+    e.gen = front_gen_.load(std::memory_order_acquire);
+    e.size = size;
+    e.mtime_sec = sec;
+    e.mtime_nsec = nsec;
+    e.data = data;
   }
 
   /// 写入并提升到队首。命中与未命中走的是同一条路 —— 命中时它顺带把快照
@@ -1426,6 +1728,11 @@ struct uvcpp_web_static::Impl {
     // 全变了"的场合。不清它也**不会错**（inode 变了自然会回退），但清掉能
     // 让"清缓存之后第一次请求必定走完整解析"成为一条可以断言的性质。
     hints_.clear();
+    // **每条循环那份前台副本也要一起作废**，否则上面那条性质只对全局表成立：
+    // 请求会从 `retire_bucket::memo` 里拿到一份"本该被忘掉"的记忆直接命中。
+    // 加代次而不是去遍历每条循环的表 —— 那些表**不能被这条线程碰**（它们没有
+    // 锁，见 `retire_bucket::memo`），一个整数就能让它们全部失效。
+    front_gen_.fetch_add(1, std::memory_order_release);
   }
 
   // ---- 计数（`std::atomic`，不取锁）。
@@ -1551,15 +1858,22 @@ bool uvcpp_web_static::Impl::acquire_slot(job* j) {
 
 void uvcpp_web_static::Impl::probe_job(job* j) {
   // `LOOP_STAT` 档的 `serve()` 不取探针（那条路用不上 `cache_probe`），于是
-  // 解析记忆得在这里自己取 —— **一次锁**。`POOL` 档的记忆是搭 `serve()` 里
+  // 解析记忆得在这里自己取。`POOL` 档的记忆是搭 `serve()` 里
   // `collect_probes()` 那一次锁的车来的，这里什么都不做。
   //
-  // 为什么值得为 `LOOP_STAT` 多花这一次锁：这一档的 `stat` 与 `realpath` 都
+  // 为什么值得为 `LOOP_STAT` 专门取一次记忆：这一档的 `stat` 与 `realpath` 都
   // 跑在**循环线程**上，而选项注释里写明它的代价正是"这个阻塞会拖住同一条
   // 循环上的其它连接"。C2 恰恰是把那里的 5 次 `lstat` 换成 1 次 `stat`，
-  // 对这条线程的价值比对 worker 大。20 ns 的未争用取锁换 3~5 µs 的 VFS
-  // 往返，是这个交换里便宜的那一半。
-  if (j->probed_on_loop) collect_hints(j->url, j->try_variants, j->hints);
+  // 对这条线程的价值比对 worker 大。
+  //
+  // **这笔交换里贵的那一半后来换了地方**：起初量的是"未争用的取锁 20 ns 换
+  // 3~5 µs 的 VFS 往返"，但那 20 ns 只在单循环下成立 —— 多循环打满时这一次
+  // 取锁是**真的有争用**的，实测持有 1534 ns（本机 9 条循环、`-m 32`），其中
+  // 大头是取锁本身而不是临界区里的活。所以现在的读侧先问本循环那份前台副本
+  // （`memo_lookup()`，零取锁），只有没命中才落到全局表上。
+  if (j->probed_on_loop) {
+    collect_hints(j->loop, j->url, j->try_variants, j->hints);
+  }
 
   probe_job_inner(j);
 
@@ -1567,6 +1881,14 @@ void uvcpp_web_static::Impl::probe_job(job* j) {
   // 攒的原因见 `job::fresh_hints`；空表时 `put_hints()` 提前返回，**一次锁
   // 都不取** —— 于是"记忆已经在表里"的那些请求（也就是热路径）不付这份钱。
   if (!j->fresh_hints.empty()) put_hints(j->fresh_hints);
+
+  // 前台副本的回写。与 `put_hints()` 同一个分岔条件（`probed_on_loop`），
+  // 所以 `POOL` 档一次都不碰这张表。顺序要紧：先 `put_hints()` 把新结论并进
+  // 全局表，再让 `memo_store()` 决定"拷一份"还是"丢掉一条"（判据是
+  // `fresh_hints` 空不空，见它的注释）。
+  if (j->probed_on_loop) {
+    memo_store(j->loop, j->url, j->try_variants, j->hints, j->fresh_hints);
+  }
 }
 
 void uvcpp_web_static::Impl::probe_job_inner(job* j) {
@@ -1696,8 +2018,8 @@ void uvcpp_web_static::Impl::probe_job_inner(job* j) {
   //    数据就地在缓存里，拿到手的方式就是这把锁下面这一次查找。
   if (j->probed_on_loop) {
     if (cache_enabled() &&
-        lookup_cache(j->final_url, j->size, j->mtime_sec, j->mtime_nsec,
-                     j->data)) {
+        lookup_cache(j->loop, j->final_url, j->size, j->mtime_sec,
+                     j->mtime_nsec, j->data)) {
       j->served_from_cache = true;
     }
     return;

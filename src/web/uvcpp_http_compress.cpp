@@ -11,6 +11,7 @@
 #if UVCPP_WEB_ENABLE
 
 #include <algorithm>
+#include <cstdlib>   /* std::malloc / std::free —— brotli 竞技场那一支 */
 #include <cstring>
 #include <sstream>
 #if UVCPP_ZLIB_ENABLE
@@ -363,6 +364,111 @@ int brotli_lgwin_for(size_t len) {
   return lg;
 }
 
+
+// 竞技场的上限与起点。起点只决定第一次要多少；上限保证「线程数 × 每线程」是有界的
+// （下面那条工作点收敛到上面那个合计，见 `brotli_arena`）。
+const size_t kBrArenaCap   = static_cast<size_t>(1) << 20;   // 1 MiB
+const size_t kBrArenaStart = static_cast<size_t>(64) << 10;  // 64 KiB
+
+/**
+ * brotli 编码器状态要的那块内存，改成从线程本地的竞技场里发。
+ *
+ * **状态本身复用不了** —— 上面 deflate 那段把理由写全了：brotli 没有
+ * `BrotliEncoderReset()`，每请求都得 `CreateInstance` / `DestroyInstance` 一遍。
+ * 但**它要的内存可以**复用。这一支复刻 deflate 那支的手法（线程本地、一次分配、
+ * 跨请求携带），只是携带的东西从「内核」换成了「内存在哪」。
+ *
+ * 为什么非做不可：那份状态不小，而且正好踩在 glibc 的痛处上。本机一个 8.4 KB 的
+ * 正文，一次生命期里 25 次分配、合计 **697 KB**，其中两块**正好 256 KiB** —— 在
+ * 默认的 mmap 阈值（128 KB）之上，就是让 `json-comp` 从 42 000 rps 掉到 15 800 rps
+ * 的那一类内核争用（deflate 那段有原话）。这条路的实测代价是**每请求 72.06 次
+ * 缺页**（同一台服务器、同一条请求走 gzip 是 0.00）；而把 glibc 逼着不还内存之后
+ * 缺页归零、每请求 CPU 从 ~515 掉到 387 µs。⇒ 功过就在「这块内存在请求之间
+ * 有没有被还给内核」这一件事上。
+ *
+ * 竞技场**只发不收**：一次压缩里 brotli 要的块都在它自己的生命期内还回来，而
+ * `BrotliEncoderDestroyInstance()` 返回之后一块都不剩（这是它的契约），所以整段
+ * 用完把游标拨回 0 就够 —— 不需要空闲链，也不需要每块的头部。
+ *
+ * 装不下就回落 `std::malloc`（大正文的块会超过上限），同时记下水位，下一个请求
+ * 按需长大。水位是自测出来的高水位，不是估的：本机那条工作点第一请求走回落、
+ * 之后收敛到约 700 KB（就是上面那个合计），**再也不长**。
+ *
+ * **产出不可能变**：brotli 编出来的字节与它要的内存从哪来无关（本机在
+ * q4/5/6/9/11 × 三份语料 15 组上逐字节比过，同 `compress()` 那一支的既有判据）。
+ *
+ * 这条路**不可重入，也不需要它可重入**：`compress()` 是叶子，一路不回调用户代码，
+ * 所以同一个线程不会在压缩当中再压一次 —— `brotli_arena_begin()` 把游标拨回 0
+ * 才因此是安全的。
+ */
+struct brotli_arena {
+  char*  lo;    // 区间 [lo, lo + size)
+  size_t size;  // 已经要了多少
+  size_t used;  // 这一次用掉多少（含对齐填料）
+  size_t hwm;   // 见过的最高水位
+  size_t over;  // 这一次回落到 std::malloc 的字节数
+
+  brotli_arena() : lo(NULL), size(0), used(0), hwm(0), over(0) {}
+  ~brotli_arena() { std::free(lo); }
+};
+
+brotli_arena& brotli_arena_for_this_thread() {
+  static thread_local brotli_arena arena;
+  return arena;
+}
+
+// 开工前：游标拨回，并照上一回的水位把竞技场长大（只在请求**之间**长大 ——
+// 手里还发着块的时候不能动 `lo`）。
+void brotli_arena_begin(brotli_arena& a) {
+  a.used = 0;
+  a.over = 0;
+  if (a.hwm > a.size && a.size < kBrArenaCap) {
+    size_t want = a.size ? a.size * 2 : kBrArenaStart;
+    if (want < a.hwm) want = a.hwm;
+    if (want > kBrArenaCap) want = kBrArenaCap;
+    char* p = static_cast<char*>(std::malloc(want));
+    if (p != NULL) {
+      std::free(a.lo);
+      a.lo = p;
+      a.size = want;
+    }
+  }
+}
+
+void* brotli_arena_alloc(void* opaque, size_t n) {
+  brotli_arena& a = *static_cast<brotli_arena*>(opaque);
+  // 16 字节对齐：brotli 那几张表里放的是指针与 64 位字，头文件没写死对齐要求，
+  // 按最宽的常见值给。
+  const size_t off = (16 - (a.used & 15)) & 15;
+  if (a.lo != NULL && a.used + off + n <= a.size) {
+    char* p = a.lo + a.used + off;
+    a.used += off + n;
+    return p;
+  }
+  // 放不下（大正文会超过上限）：抬水位、回落 `std::malloc`。
+  //
+  // 交出去的指针**偏开 16 字节**，好处是它必然与竞技场那一段不同源（竞技场那块
+  // 是活着的堆分配，`malloc` 不会发到它里面去），`free` 那边于是只需回答"落没落在
+  // 区间里"，不必再记这块是怎么来的。偏出来的 16 字节是纯填充：长度用不上，`free`
+  // 是按固定偏移减回去的。
+  const size_t need = a.used + off + n;
+  if (need > a.hwm) a.hwm = need;
+  a.over += n;
+  void* raw = std::malloc(n + 16);
+  if (raw == NULL) return NULL;
+  return static_cast<char*>(raw) + 16;
+}
+
+void brotli_arena_free(void* opaque, void* p) {
+  if (p == NULL) return;
+  brotli_arena& a = *static_cast<brotli_arena*>(opaque);
+  // 落在竞技场区间里的：整段回收 —— `brotli_arena_begin()` 拨游标那一下就是全部，
+  // 这里什么也不做（`DestroyInstance` 返回后一块都不剩，见上）。
+  if (a.lo != NULL && p >= a.lo && p < a.lo + a.size) return;
+  // 剩下的只可能是回落那一支发出去的，按 `alloc` 里那个固定偏移减回去。
+  std::free(static_cast<char*>(p) - 16);
+}
+
 }  // namespace
 
 #endif  // UVCPP_BROTLI_ENABLE
@@ -402,7 +508,13 @@ http_compress_result http_compress::compress(const char* data, size_t len,
     const int q     = clamp_brotli_quality(level);
     const int lgwin = brotli_lgwin_for(len);
 
-    BrotliEncoderState* st = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+    // 状态复用不了，但**它要的内存可以** —— 那 ~700 KB 从线程本地的竞技场里发，
+    // 整段用完一并回收，于是那些页不回内核，也就没有下一次的缺页（见上面
+    // `brotli_arena` 那段：72.06 → 0.00 次缺页/请求，~515 → 387 µs）。
+    brotli_arena& arena = brotli_arena_for_this_thread();
+    brotli_arena_begin(arena);
+    BrotliEncoderState* st = BrotliEncoderCreateInstance(
+        brotli_arena_alloc, brotli_arena_free, &arena);
     if (st == NULL) {
       result.success = false;
       return result;

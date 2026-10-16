@@ -192,7 +192,7 @@ agg2 里有 `assert(buflen >= path_max_udp_payloadlen)`。
 建 socket 的 —— `uv_udp_init`（AF_UNSPEC）之后 `handle->socket` 还是
 `INVALID_SOCKET`，这时 `uv_fileno` 返回 `UV_EBADF`，`setsockopt` 无从谈起。本机实测：
 bind 前 `fileno rc=-4083 sock=-1`，bind 后 `rc=0 sock=628`。所以探测点落在
-`init_client()`/`init_server()` 的末尾（`setup_gso()`，`uvcpp_quic_session.cpp:943`），
+`init_client()`/`init_server()` 的末尾（`setup_gso()`，`uvcpp_quic_session.cpp:1025`），
 不是建对象的时候。
 
 **坑二：`setsockopt` 成功 ≠ 协议栈真会切。** 本机实测 512…65483 **全都返回成功**，

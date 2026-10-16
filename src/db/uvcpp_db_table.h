@@ -62,6 +62,11 @@ class UVCPP_API uvcpp_db_row {
   /// 构造侧：追加一个单元格（驱动填结果集时用）。
   void push(uvcpp_db_value value) { cells_.push_back(std::move(value)); }
 
+  /// 构造侧：预留单元格容量。驱动在填之前就知道这一行有几列（`PQnfields`
+  /// 那类接口给的），预留一下就能把 `push` 的逐次增长（1-2-4-8-…）整段省掉 ——
+  /// 每行 9 列是 5 次分配，而异步那一档每应答 20 行就是 100 次。
+  void reserve(size_t n) { cells_.reserve(n); }
+
  private:
   friend class uvcpp_db_table;
 
@@ -105,6 +110,10 @@ class UVCPP_API uvcpp_db_table {
   void reset_columns(std::vector<std::string> names);
   /// 追加一行，并把当前列名快照发给它。
   uvcpp_db_row& add_row();
+  /// 预留行的容量。驱动知道结果有几行（`PQntuples` 那类接口给的）时先调它，
+  /// 省掉 `std::vector<uvcpp_db_row>` 的逐次增长；顺带让 `add_row()` 返回的
+  /// 引用在后续 `add_row()` 之后仍然有效（预留够时不会搬家）。
+  void reserve_rows(size_t n) { rows_.reserve(n); }
   /// 清空列与行，保留名字等元信息。
   void clear();
 

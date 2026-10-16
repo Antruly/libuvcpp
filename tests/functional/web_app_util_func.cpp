@@ -164,6 +164,24 @@ void test_split_and_query() {
   web_split_path_query("/a?x=1#f", p, q);
   check_eq(q, "x=1", "fragment 在查询串之后也应剥掉");
 
+  // 绝对形式 **与** fragment 同时出现：`#` 是在剥掉 scheme://authority
+  // **之后**才找的，两者叠在一起时内部只能拷一次。这条是那段写时复制分支的
+  // 直接用例 —— 顺序写反（先找 `#` 再剥 scheme）就会在这里露出来。
+  web_split_path_query("http://example.com/a#f", p, q);
+  check_eq(p, "/a", "absolute-form 与 fragment 同时出现");
+  check_eq(q, "", "absolute-form 与 fragment 同时出现时无查询串");
+
+  web_split_path_query("https://example.com/a/b?x=1#f", p, q);
+  check_eq(p, "/a/b", "absolute-form + 查询串 + fragment");
+  check_eq(q, "x=1", "absolute-form + 查询串 + fragment 的查询串");
+
+  // 输出参数是**覆盖**而不是追加：先塞脏值再调用。
+  p = "STALE";
+  q = "STALE";
+  web_split_path_query("/x", p, q);
+  check_eq(p, "/x", "无查询串时路径是覆盖式写入");
+  check_eq(q, "", "无查询串时必须清掉旧值");
+
   typedef std::vector<std::pair<std::string, std::string> > params_t;
 
   const params_t a = web_parse_query("a=1&b=2");
@@ -193,6 +211,55 @@ void test_split_and_query() {
 
   check(web_parse_query("").empty(), "空查询串");
   check(web_parse_query("a=1&&b=2").size() == 2, "跳过空段");
+}
+
+// =========================================================================
+// 3b. 路径折叠 `web_collapse_slashes()`
+//
+// 这个函数原先一条用例都没有，而它是**路由与中间件看路径的唯一入口**：
+// `take_from()` / `claim_stream()` / `on_ws_upgrade()` 三处都是
+// `web_collapse_slashes(web_url_decode(raw_path, false))`，折叠出来的串同时
+// 决定路由匹配和中间件看到的 `path()`。所以下面这张期望值表就是它的规格。
+//
+// 表里刻意包含了快路与慢路的**分界**：`/a` 与 `/a/b` 走快路（原样返回），
+// `/a/`、`/a//b`、`//a` 走慢路。两边都必须给出同一个答案。
+void test_collapse_slashes() {
+  std::cout << "[util] collapse_slashes" << std::endl;
+
+  struct {
+    const char* in;
+    const char* want;
+    const char* what;
+  } kCases[] = {
+      {"", "/", "空串给根"},
+      {"/", "/", "单斜杠"},
+      {"///", "/", "全是斜杠"},
+      {"/a", "/a", "最简形式（快路）"},
+      {"/a/b", "/a/b", "多段最简形式（快路）"},
+      {"/a/b/c", "/a/b/c", "三段最简形式（快路）"},
+      {"//a", "/a", "前导双斜杠"},
+      {"/a//b", "/a/b", "中间双斜杠"},
+      {"/a///b", "/a/b", "中间三斜杠"},
+      {"/a/", "/a", "尾斜杠被吃掉"},
+      {"/a/b/", "/a/b", "多段尾斜杠"},
+      {"/a//", "/a", "尾斜杠 + 双斜杠"},
+      {"a/b", "/a/b", "无前导斜杠补一个"},
+      {"a//b", "/a/b", "无前导斜杠且要折叠"},
+      {"/a%2Fb", "/a%2Fb", "折叠不碰百分号编码"},
+      {"/..", "/..", "不解析点段（那是另一层的事）"},
+  };
+
+  for (size_t i = 0; i < sizeof(kCases) / sizeof(kCases[0]); ++i) {
+    check_eq(web_collapse_slashes(kCases[i].in), kCases[i].want, kCases[i].what);
+  }
+
+  // 幂等：折叠过的串再折叠一次必须一模一样。快路正是靠这一点才敢直接返回
+  // 输入 —— 若某个输入折叠后仍会被再改一次，那说明快路的判据写漏了条件。
+  for (size_t i = 0; i < sizeof(kCases) / sizeof(kCases[0]); ++i) {
+    const std::string once = web_collapse_slashes(kCases[i].in);
+    const std::string twice = web_collapse_slashes(once);
+    check_eq(twice, once, "折叠必须幂等");
+  }
 }
 
 // =========================================================================
@@ -825,6 +892,7 @@ int main() {
   test_string_helpers();
   test_url_encode_decode();
   test_split_and_query();
+  test_collapse_slashes();
   test_cookies();
   test_sanitize_accept();
   test_sanitize_reject();

@@ -156,9 +156,9 @@ void doc_query(const std::string& query) {
 }
 ```
 
-`web_sanitize_path()` 是**纯文本、不碰文件系统**（`src/webapp/uvcpp_web_util.h:317-320`），
+`web_sanitize_path()` 是**纯文本、不碰文件系统**（`src/webapp/uvcpp_web_util.h:343-346`），
 挡不住符号链接；`web_resolve_within_root()` 才真的去解析真实路径
-（`:372-386`，`TRAVERSAL` 对 403、`NOT_FOUND` 对 404）。只用第一个是不够的。
+（`src/webapp/uvcpp_web_util.h:398-412`，`TRAVERSAL` 对 403、`NOT_FOUND` 对 404）。只用第一个是不够的。
 
 其余分组：
 
@@ -174,7 +174,7 @@ void doc_query(const std::string& query) {
 
 `web_path_options` 是这一族里**唯一**用对了构造方式的：
 `web_path_options(size_t max_length = 4096, size_t max_depth = 64, bool decode = true)`
-（`src/webapp/uvcpp_web_util.h:294-295` 带默认实参的 explicit 构造函数），所以
+（`src/webapp/uvcpp_web_util.h:320-321` 带默认实参的 explicit 构造函数），所以
 `web_path_options{1024}` 与 `web_path_options(4096, 64, false)` 两种写法都行。
 
 ---
@@ -199,8 +199,8 @@ void doc_mime_override() {
 }
 ```
 
-内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:456`，实现
-`src/webapp/uvcpp_web_util.cpp:995-998`），`builtin_size()` 也转调它
+内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:482-482`，实现
+`src/webapp/uvcpp_web_util.cpp:1053-1056`），`builtin_size()` 也转调它
 （`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
 
@@ -312,7 +312,7 @@ void doc_send_file(uvcpp::uvcpp_loop* loop, doc_file_sink& sink,
   调用方丢掉自己的 `shared_ptr` 即可。
 - **`on_done` 恰好一次**（`:134-146`），`status` 是 **libuv 码**（0 / `UV_ECANCELED` /
   `UV_EINVAL` 之类），不是 HTTP 码 —— 响应层自己会翻
-  （`src/webapp/uvcpp_web_response.cpp:1264-1284`）。
+  （`src/webapp/uvcpp_web_response.cpp:1282-1302`）。
 
 **必须由 `shared_ptr` 持有**（`:164`，内部用 `shared_from_this()`）。放栈上会在
 `start()` 里抛 `std::bad_weak_ptr`，而且**不是编译错误**。
@@ -417,7 +417,7 @@ error: no matching function for call to
 正确写法是"先默认构造，再逐字段赋值"（§9 那段）。同类问题还有
 `src/webapp/uvcpp_web_app.h:164-167`：注释声称支持 `uvcpp_web_app_config cfg{8080}`，
 而声明在 `:287` 只有 `uvcpp_web_app_config();`。
-**对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:294-295`）是这一族里唯一写对的
+**对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:320-321`）是这一族里唯一写对的
 —— 它的构造函数带默认实参，所以花括号写法可用。
 
 ### 上不上色是两个条件
@@ -458,7 +458,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 ### `web_split_path_query()` 比头文件说的做得多
 
 `src/webapp/uvcpp_web_util.h:133-147` 只说"拆 path/query + 剥 `#fragment`"，实现还会**先剥掉
-绝对形式（代理风格）的 `http://host`**（`src/webapp/uvcpp_web_util.cpp:206-210`）——
+绝对形式（代理风格）的 `http://host`**（`src/webapp/uvcpp_web_util.cpp:229-233`）——
 `GET http://x/../y HTTP/1.1` 这种请求目标。头文件没写这一条。
 
 ### 点落在目录名里时会取错
@@ -512,7 +512,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 
 而 `uvcpp_web_util` 里另有**两个哨兵值**：`web_hex_value()` 失败返回 `-1`
 （`src/webapp/uvcpp_web_util.cpp:127-132`），`web_parse_http_date()` 失败返回 `(time_t)-1`
-（`:1187-1188`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
+（`src/webapp/uvcpp_web_util.cpp:1245-1246`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
 **这几种码一个都不要喂给 `uv_strerror()`**，会得到看似合理的垃圾。
 
 ---
@@ -560,7 +560,7 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   `cancel()` 抢同一个对象（库内两处派发点都在循环线程上：整读路径由 `after_work`
   补派 —— `1.6.42-dev` 起记账已搬到 worker，`on_read_done` 的块级路径直接 `release()`）。
 - **它不接管所有权**：传的是**借用**指针，存活期由调用方保证 —— 静态路由借的是
-  App 的 `work_limit()`（`src/webapp/uvcpp_web_static.cpp:1926-1926`，且那一步在
+  App 的 `work_limit()`（`src/webapp/uvcpp_web_static.cpp:2248-2248`，且那一步在
   `t->start()` 之前）。它也是唯一一个**会挡掉违约**的 setter：跑起来之后换闸门
   会被**静默忽略**（`src/webapp/uvcpp_web_file.cpp:107`）—— 那时手上可能正攥着旧
   闸门的名额，换掉就没有对象可还了。
@@ -581,24 +581,24 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 窗口退化成"切片缓冲那一份"（`src/webapp/uvcpp_web_file.h:127-132`）—— 允许，但不是有界的了。
 
 **`web_url_encode()` 的 `keep` 优先于 `plus_for_space`。**
-`src/webapp/uvcpp_web_util.cpp:179` 先判 `unreserved || keep.find(c) != npos`，**再**判
+`src/webapp/uvcpp_web_util.cpp:195-195` 先判 `unreserved || keep.find(c) != npos`，**再**判
 `c == ' ' && plus_for_space`。所以 `keep` 里放空格或 `+` 会让它们**原样输出** ——
 查询串里一个原样输出的 `+` 会被对端解成空格。头 `:109-121` 没提这个优先级。
 只放行 `/` 是安全的。
 
 **`web_build_cookie()` 只校验 name 与 value。**
-`path`（`src/webapp/uvcpp_web_util.cpp:485-488`）与 `same_site`（`:497-502`）是**原样拼接**的
-—— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:228-230` 只描述了取值
-集合，没声明"会校验"。`name` 是校验的（`:475-478`，非 token 字符直接返回空串），
-`value` 也是编码的（`:483`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
-设计：`SameSite=None` 会自动补 `Secure`（`:500-503`）。
+`path`（`src/webapp/uvcpp_web_util.cpp:543-546`）与 `same_site`（`src/webapp/uvcpp_web_util.cpp:555-560`）是**原样拼接**的
+—— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:269-271` 只描述了取值
+集合，没声明"会校验"。`name` 是校验的（`src/webapp/uvcpp_web_util.cpp:533-536`，非 token 字符直接返回空串），
+`value` 也是编码的（`src/webapp/uvcpp_web_util.cpp:541-541`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
+设计：`SameSite=None` 会自动补 `Secure`（`src/webapp/uvcpp_web_util.cpp:558-561`）。
 
 **`web_sanitize_filename()` 只能当元数据。** 它不保证是合法文件名（`*` `?` `"`
-照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:415-419`）；`max_len` 是**软**
-上限（设备名保护会让结果多一字节，`:411-413`）。
+照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:441-445`）；`max_len` 是**软**
+上限（设备名保护会让结果多一字节，`src/webapp/uvcpp_web_util.h:437-439`）。
 
-**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:268-298`）—— `;` 会被当成
-值的一部分。头 `:160-169` 没写分隔符。
+**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:326-356`）—— `;` 会被当成
+值的一部分。头 `:176-185` 没写分隔符。
 
 **连接身份有三套，不要混。** 见 §3。
 
@@ -612,10 +612,10 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   C++11 没有，所以全部吃 `const std::string&`。
 - **`web_collapse_slashes()` 刻意不做**：不解码、不处理 `.` / `..`（与路由切段保持
   一致，挡目录穿越要用 `web_sanitize_path()`，`src/webapp/uvcpp_web_util.h:158-161`）。
-- **`web_join_root()` 不做安全判断**（`src/webapp/uvcpp_web_util.h:342`），判断在
-  `web_is_within_root()`（`:347-357`，实现用"前缀 + 分隔符"而不是裸前缀比较）。
+- **`web_join_root()` 不做安全判断**（`src/webapp/uvcpp_web_util.h:368-368`），判断在
+  `web_is_within_root()`（`src/webapp/uvcpp_web_util.h:373-383`，实现用"前缀 + 分隔符"而不是裸前缀比较）。
 - **其他 `multipart/*` 子类型不支持**（`mixed` 等）：`web_multipart_boundary()` 返回
-  空串让调用方拒绝（`src/webapp/uvcpp_web_util.h:209-212`）。
+  空串让调用方拒绝（`src/webapp/uvcpp_web_util.h:235-238`）。
 - **multipart 只认 CRLF**（`src/webapp/uvcpp_web_multipart.h:69-73`）：裸 LF 在边界处不接受、
   在部件头里直接 400 —— 理由是请求走私。`[LWSP]` 上限 128 字节
   （`src/webapp/uvcpp_web_multipart.h:60-62`），超了明确失败而不是当 body。

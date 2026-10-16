@@ -132,6 +132,22 @@ int web_hex_value(char c) {
 }
 
 std::string web_url_decode(const std::string& s, bool plus_as_space, bool* ok) {
+  // 快路：没有任何**需要改写**的字节时，结果恒等于输入、`ok` 恒为真。
+  //
+  // 判据与下面的循环逐条等价：`%` 一律改写（合法转义改字节；非法序列也走
+  // `out += '%'`，只是把 `good` 翻假），`+` 只在 `plus_as_space` 时改写。
+  // 两者都不出现 ⇒ 循环退化成"逐字节把自己接回去"，白付一次 `reserve`
+  // 加 N 次 `operator+=`。
+  //
+  // 这条快路不是可有可无的：`?a=1&b=1` 这种查询**每请求要解码 4 次**
+  // （两个参数，键和值各一次，见 `web_parse_query`），而绝大多数查询里连
+  // 一个 `%` 都没有。h1 baseline 上量到每请求 5 次调用、545 条指令。
+  if (s.find('%') == std::string::npos &&
+      (!plus_as_space || s.find('+') == std::string::npos)) {
+    if (ok != nullptr) *ok = true;
+    return s;
+  }
+
   std::string out;
   out.reserve(s.size());
   bool good = true;
@@ -198,33 +214,58 @@ std::string web_url_encode(const std::string& s, const std::string& keep,
 
 void web_split_path_query(const std::string& raw_url, std::string& path,
                           std::string& query) {
-  std::string u = raw_url;
+  // **不无条件拷贝 raw_url。** 原来这里第一句是 `std::string u = raw_url;`，
+  // 也就是每个请求目标都整串拷一次；可是绝对形式（代理风格）和带 `#` 的都是
+  // 少数，绝大多数请求目标（`/a/b?x=1`）拷这一趟只为在它上面切两刀，而切出来
+  // 的两段各自又要拷一次 —— 三次分配里有一次是纯浪费。
+  //
+  // 改成"只读地指回入参，真要改写时才落到 `u` 上"。
+  std::string u;
+  const std::string* src = &raw_url;
 
   // 绝对形式（代理风格）：`GET http://host/path HTTP/1.1`。
   // 必须先把 scheme://authority 剥掉 —— 否则整串会被当成路径，
   // 而且 authority 里的内容会混进路径里（`http://x/../y` 之类）。
-  if (web_starts_with_ci(u, "http://") || web_starts_with_ci(u, "https://")) {
-    const size_t scheme_end = u.find("://") + 3;
-    const size_t slash = u.find('/', scheme_end);
-    u = (slash == std::string::npos) ? std::string("/") : u.substr(slash);
+  if (web_starts_with_ci(raw_url, "http://") ||
+      web_starts_with_ci(raw_url, "https://")) {
+    const size_t scheme_end = raw_url.find("://") + 3;
+    const size_t slash = raw_url.find('/', scheme_end);
+    u = (slash == std::string::npos) ? std::string("/") : raw_url.substr(slash);
+    src = &u;
   }
 
   // 片段标识符：HTTP 请求目标里不该有，但客户端库时常带上。
-  const size_t hash = u.find('#');
-  if (hash != std::string::npos) u.erase(hash);
+  const size_t hash = src->find('#');
+  if (hash != std::string::npos) {
+    if (src != &u) {  // 还没拷过：现在才拷，之后都在 `u` 上改
+      u = raw_url;
+      src = &u;
+    }
+    u.erase(hash);
+  }
 
-  const size_t q = u.find('?');
+  const size_t q = src->find('?');
   if (q == std::string::npos) {
-    path = u;
+    path = *src;
     query.clear();
   } else {
-    path = u.substr(0, q);
-    query = u.substr(q + 1);
+    path = src->substr(0, q);
+    query = src->substr(q + 1);
   }
 }
 
 std::string web_collapse_slashes(const std::string& path) {
   if (path.empty()) return "/";
+
+  // 快路：已经是最简形式就原样返回。三条判据都是从下面的循环反推出来的 ——
+  // 以 `/` 开头（循环无条件先写一个 `/`，否则会凭空多出前导斜杠）、
+  // 末尾不是 `/`（循环会把尾斜杠吃掉：`/a/` → `/a`）、
+  // 且不含 `//`（连续斜杠正是它存在的理由）。
+  // 三条同时成立时，循环的输出与输入逐字节相同。
+  if (path[0] == '/' && path[path.size() - 1] != '/' &&
+      path.find("//") == std::string::npos) {
+    return path;
+  }
 
   std::string out;
   out.reserve(path.size());
@@ -244,6 +285,23 @@ std::string web_collapse_slashes(const std::string& path) {
   // 不合 `/` 开头的输入（不该出现，`web_split_path_query()` 总会给出 `/` 开头的）
   // 也照样把它当绝对路径处理 —— 与其返回一个可疑的串，不如给出确定的形式。
   return out;
+}
+
+void web_normalize_path(std::string& path) {
+  // 快路：既要解不动、也要折不动的路径，归一化的结果就是它自己 ——
+  // **原地什么都不做**（一个字节都不碰，也就一次分配都没有）。
+  //
+  // 判据：`%` 是解码唯一会改的字节（路径里 `+` 不解，见函数注释），
+  // 而折叠改的只有"以 `/` 开头 / 中间 `//` / 末尾 `/`"这三件事。
+  if (path.find('%') == std::string::npos && !path.empty() &&
+      path[0] == '/' && path[path.size() - 1] != '/' &&
+      path.find("//") == std::string::npos) {
+    return;
+  }
+
+  // 慢路：两个临时串都在这里被完整构造好之后才赋回 `path`，所以
+  // `path` 既是入参又是目的地是安全的（两个右值都独立于它）。
+  path = web_collapse_slashes(web_url_decode(path, /*plus_as_space=*/false));
 }
 
 std::vector<std::pair<std::string, std::string> > web_parse_query(

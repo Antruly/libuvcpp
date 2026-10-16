@@ -225,6 +225,7 @@ class sqlite_driver : public uvcpp_db_driver {
       const int step = sqlite3_step(stmt);
       if (step == SQLITE_ROW) {
         uvcpp_db_row& row = out->add_row();
+        row.reserve(static_cast<size_t>(column_count));
         for (int i = 0; i < column_count; ++i) {
           row.push(column_value(stmt, i));
         }
@@ -361,10 +362,12 @@ class sqlite_driver : public uvcpp_db_driver {
     out->clear();
     out->reset_columns({"name", "type", "nullable", "key", "default"});
     out->set_table_name(table);
+    out->reserve_rows(raw.row_count());
     for (size_t i = 0; i < raw.row_count(); ++i) {
       const bool not_null = raw.at(i, "notnull").to_int64() != 0;
       const bool in_pk = raw.at(i, "pk").to_int64() != 0;
       uvcpp_db_row& row = out->add_row();
+      row.reserve(5);  // 下面固定 5 列
       row.push(uvcpp_db_value(raw.at(i, "name").to_text()));
       row.push(uvcpp_db_value(raw.at(i, "type").to_text()));
       row.push(uvcpp_db_value(not_null ? "NO" : "YES"));

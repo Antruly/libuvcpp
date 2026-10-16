@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.7.1--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.7.2--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.7.1-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.7.2-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -26,12 +26,12 @@
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.7.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-msvc-x64.zip) |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.7.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-msvc-arm64.zip) |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.7.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-mingw-x64.zip) |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.7.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-mingw-arm64.zip) |
-| Linux x64 | GCC | [libuvcpp-1.7.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-linux-x64.zip) |
-| Linux arm64 | GCC | [libuvcpp-1.7.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-linux-arm64.zip) |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.7.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-msvc-x64.zip) · 21.8 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.7.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-msvc-arm64.zip) · 22.7 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.7.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-mingw-x64.zip) · 27.1 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.7.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-mingw-arm64.zip) · 20.8 MB |
+| Linux x64 | GCC | [libuvcpp-1.7.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-linux-x64.zip) · 24.9 MB |
+| Linux arm64 | GCC | [libuvcpp-1.7.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.7.0/libuvcpp-1.7.0-linux-arm64.zip) · 25.2 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。

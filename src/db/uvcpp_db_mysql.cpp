@@ -655,8 +655,10 @@ class mysql_driver : public uvcpp_db_driver {
     out->clear();
     out->reset_columns({"name", "type", "nullable", "key", "default"});
     out->set_table_name(table);
+    out->reserve_rows(raw.row_count());
     for (size_t i = 0; i < raw.row_count(); ++i) {
       uvcpp_db_row& row = out->add_row();
+      row.reserve(5);  // 下面固定 5 列
       row.push(uvcpp_db_value(raw.at(i, "Field").to_text()));
       row.push(uvcpp_db_value(raw.at(i, "Type").to_text()));
       row.push(uvcpp_db_value(raw.at(i, "Null").to_text()));
@@ -719,9 +721,12 @@ class mysql_driver : public uvcpp_db_driver {
 
     int64_t rows = 0;
     MYSQL_ROW row = nullptr;
+    // 这里**不能**预留行容量：`mysql_num_rows` 在 MySQL 的头里是个宏（`res->row_count`），
+    // 不是能进 dlopen 表里的符号，所以这份构建拿不到它。列数照样能预留。
     while ((row = api().mysql_fetch_row(res)) != nullptr) {
       unsigned long* lengths = api().mysql_fetch_lengths(res);
       uvcpp_db_row& dst = out->add_row();
+      dst.reserve(n);
       for (unsigned int i = 0; i < n; ++i) {
         if (!row[i]) {
           dst.push(uvcpp_db_value());
@@ -1115,6 +1120,7 @@ class mysql_driver : public uvcpp_db_driver {
       }
 
       uvcpp_db_row& dst = out->add_row();
+      dst.reserve(n);
       for (unsigned int i = 0; i < n; ++i) {
         if (is_null[i]) {
           dst.push(uvcpp_db_value());

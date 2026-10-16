@@ -622,12 +622,14 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 ##### 重过一遍**新发现的两张表**：§4 那张闸门表漏了它们
 
 按"容器是不是 per-object"这个判据（§4 的判据）扫 `src/web/*.h` + `src/webapp/*.h` 的成员容器，
-**除 §4 已列的四条外还有两张**，都在**请求路径上被写**：
+**除 §4 已列的四条外还有三张**，都在**请求路径上被写**（第三张是静态腿那批优化
+后加的，见底下那段）：
 
 | 容器 | 位置 | 写点 | 谁持有 |
 |---|---|---|---|
 | `uvcpp_ws_sessions::sessions_` / `retired_` | `src/web/uvcpp_ws_sessions.h:193-194` | 每次 WS 接管 `push_back`、每次终结搬进 `retired_`、async 回调里 `delete` | `uvcpp_ws_server::shards_`（`src/web/uvcpp_ws_server.h:272`，按连接的循环号分片） |
-| `uvcpp_web_static::Impl` 的 `cache` / `lru` / `bytes` / `hits` / `misses` / `rejected` / `retired` | `src/webapp/uvcpp_web_static.cpp:940-962` 与 `src/webapp/uvcpp_web_static.cpp:1025-1025` | 命中改 `lru` 与计数、未命中插入并可能 LRU 淘汰；`retire()` 在 after_work 里 `push_back`（`src/webapp/uvcpp_web_static.cpp:1087-1087`）、`drain_retired()` 在 `serve()` 开头 `delete`（`src/webapp/uvcpp_web_static.cpp:1095-1095`） | `uvcpp_web_static`，由 `uvcpp_web_app::serve_static()` 造一份（`src/webapp/uvcpp_web_app.cpp:1362-1365`）—— **请求路径上真正活着的那个容器** |
+| `uvcpp_web_static::Impl` 的 `cache` / `lru` / `bytes` / `hints_` / `hits` / `misses` / `rejected` / `retired` | `src/webapp/uvcpp_web_static.cpp:947-975` 与 `src/webapp/uvcpp_web_static.cpp:1146-1146` | 命中改 `lru` 与计数、未命中插入并可能 LRU 淘汰；`retire()` 在 after_work 里 `push_back`（`src/webapp/uvcpp_web_static.cpp:1209-1209`）、`drain_retired()` 在 `serve()` 开头 `delete`（`src/webapp/uvcpp_web_static.cpp:1217-1217`） | `uvcpp_web_static`，由 `uvcpp_web_app::serve_static()` 造一份（`src/webapp/uvcpp_web_app.cpp:1362-1365`）—— **请求路径上真正活着的那个容器** |
+| `retire_bucket::memo` / `::body`（`LOOP_STAT` 档的**前台副本**）+ 给它们作废用的 `front_gen_` | `src/webapp/uvcpp_web_static.cpp:1124-1124`、`src/webapp/uvcpp_web_static.cpp:1140-1140`、`src/webapp/uvcpp_web_static.cpp:997-997` | 每次 `probe_job()`：`memo_lookup()` 读、`memo_store()` 写（`src/webapp/uvcpp_web_static.cpp:1406-1406`、`src/webapp/uvcpp_web_static.cpp:1444-1444`）；`lookup_cache()` 读、`body_store()` 写（`src/webapp/uvcpp_web_static.cpp:1598-1598`、`src/webapp/uvcpp_web_static.cpp:1654-1654`） | `retired` 那张 `map<uvcpp_loop*, retire_bucket>` 里的桶，**按循环分** —— 上面那一行是"全局唯一、靠 `mu_` 共享"，这两张是"每条循环自己的，**一把锁都不取**" |
 | `uvcpp_static_server::cache_` / `lru_` / `cache_bytes_` / `retired_` | `src/web/uvcpp_static_server.h:495-523` | 未命中时 `self->cache_[task->cache_key] = e`（`src/web/uvcpp_static_server.cpp:630`），读在 `src/web/uvcpp_static_server.cpp:632-638`；`lru_` 在命中时被 `splice` 提升、超预算时从队尾淘汰（`1.6.44-dev` 起才有）；`retired_` 由 `drain_retired()` 清扫（`src/web/uvcpp_static_server.cpp:355-371`） | `uvcpp_static_server` 自己 —— **1.6.8 起是 h3 那条腿上的生产路径**（`uvcpp_http_server` 没有 `uvcpp_web_app` 那种 `serve_static()`，h3 上挂静态文件只能用本类），此前只有用例构造它（`tests/functional/web_static_server_func.cpp:243-243`）|
 
 > **本行已落地（1.6.8-dev）**：`mu_` 一把锁护 `cache_` 与 `retired_` 的**表结构**，
@@ -647,6 +649,25 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 > 所以动它不动 ABI）；
 > 而 `uvcpp_static_server` 那份另算。⇒ 请求路径上真正活着的容器**原先根本没进这张表**，
 > 现已补成独立一行。
+
+**第三张（`retire_bucket::memo` / `::body`）是这张表上唯一"故意不加锁"的一行，
+理由只有一条：写它的那条线程就是读它的那条线程。** 静态腿的全局 `mu_` 曾经在
+`LOOP_STAT` 档的每请求热路上取两次锁（实测 2.03 次/请求、每次持有 1.5 µs 量级，
+是那一档并行的实际上限），修法不是把临界区变短（空临界区也要 905 ns，代价在
+**抢锁本身**），而是**让这条循环把答案拷一份放在自己桶里**：解析记忆（`memo`）与
+缓存字节的身份（`body`）各一份前台副本，命中就一把锁都不取，没命中才落到全局表
+上取一次、顺手登记。所以这一行有两处**不能想当然动**的地方：
+
+1. **`retire_bucket` 是按循环分的，不是按对象的** —— 前台副本的正确性完全建立在
+   "桶里的东西只有桶主那条循环碰"之上。往 `memo`/`body` 里写之前必须先确认手上
+   那条线程就是 `bucket_for(loop)` 的那个 `loop` 的线程；`probe_job()` 里那几处
+   调用都挂在 `probed_on_loop` 上（`POOL` 档一次都不进），这一条就是那个开关的
+   全部意义。
+2. **字节那一份是弱引用**（`body_entry::data` 是 `std::weak_ptr`）：前台按不住
+   字节，于是 `cache_bytes()` 的账仍然只由全局表决定，`clear_cache()` 把全局表
+   里最后一份强引用放掉时弱引用**当场失效**。这不是省事，是那张表"共享一份、
+   换锁不换分片"的结论仍然成立的前提 —— 改成强引用就等于把缓存分片，
+   内存会翻倍、命中率会掉，而那正是 §4 判据说不能做的事。
 
 **`ws_sessions` 那一张比"并发 `vector::push_back`"更重**：它自己还带一个 `drain_async_`
 （`src/web/uvcpp_ws_sessions.h:195`），而那个 async 是 `set_loop(http_server_->get_tcp_server()->get_loop())`
