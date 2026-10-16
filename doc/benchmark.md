@@ -2766,6 +2766,111 @@ NOTRACE=1 N=2000000 PIPE=16 LIBDIR=<臂目录> /tmp/wsrig/meas.sh 2000000 1 n16p
 vptr 抹掉、闲置扫描首拍段错误）—— 换 `.so` 之前先确认跑的是刚编出来的那一份。
 
 
+### 4.20 h1/h2 每条读事件那一次 64 KiB 分配：`alloc_cb` 的缓冲改从**每线程两张尺寸槽**里发（**第十五套装置**，callgrind 指令数 + `LD_PRELOAD` 分配直方图 + 交替 A/B）
+
+#### 为什么量这条腿
+
+`json` 那一族（`json-h2c-1024` 在第六轮掉到 656 607 rps）当时记的是"DOM 的合规代价、
+不许回退"（memory `json-dom-path-cost`）。**那个结论只说了"不许改 DOM"，没说底下没有别的账。**
+同一条路上还有一个和 DOM 完全无关的固定成本，量出来是**每条读事件一次 64 KiB 的
+`malloc`+`free`**：`internal_alloc_cb` 拿 libuv 给的 `suggested_size`（TCP 流恒为
+**65536**，`_local_deps/libuv/src/unix/stream.c`），交给 `uvcpp_buf::alloc_buf()` →
+匿名命名空间的 `alloc_raw()`（裸 `std::malloc`），read_cb 一返回就 `uvcpp_free_bytes`。
+`pipeline = 1` 时**一个读事件就是一个请求** ⇒ **每请求一次 64 KiB 分配 + 一次释放**。
+
+单看这一对分配不值钱。贵的是它对**分配器**做的事：64 KiB 落在 large bin 一侧，一次
+`free` 会把相邻的可合并块并回去、再按 `FASTBIN_CONSOLIDATION_THRESHOLD` 触发一次
+fastbin 合并扫描 —— 与这条路上真正的大头（nlohmann 的 DOM、行物化、WS 回声那些
+**每应答 ~10²~10³ 次**的小分配）正面撞上。**所以这条腿的收益与"每应答分配多少次"成正比、
+与"每事件分配多大"无关** —— 这也是为什么它在 h1 `baseline11` 上几乎白搭、在 `json` 上很值钱。
+
+#### 确定性判据一：callgrind 指令数（同一份入口、同一个 URL，`-c 4 -n 20000`）
+
+| URL | 改前 | 改后 | 差 |
+|---|---:|---:|---:|
+| `/baseline11?a=1&b=2` | 501 010 150 ／ 500 931 657（两次独立） | **494 196 681** | **−1.36%** |
+| `/json/50?m=6`（应答 8 397 B） | 4 550 109 494 | **3 796 143 977** | **−16.57%** |
+| `/json/1?m=3`（应答 203 B，对照） | 309 083 522 | 挂 shim 版 326 208 715 | **+5.5%**（纯 shim 开销） |
+
+`/json/50?m=6` 那条的归因（自耗，`callgrind_annotate`）：
+
+| 符号 | 改前 | 改后 |
+|---|---:|---:|
+| `malloc.c:_int_malloc` | 546 559 686（12.01%） | 184 573 294（4.86%） |
+| `malloc.c:malloc_consolidate` | 214 831 713（4.72%） | **929 527（0.02%）** |
+| `malloc.c:unlink_chunk.isra.0` | 83 495 443（1.84%） | **916 593（0.02%）** |
+| `malloc.c:_int_free` | 330 250 196 | 330 035 400（不动） |
+
+`baseline11` 那条的指纹是 `_int_malloc` **4 710 713 → 1 750 865**（每应答只分配十来次的那条路，
+省下的就是读缓冲这一对）；它的 `malloc_consolidate` 本来就只有 85 465，**所以 h1 baseline
+这条路上这一刀没有可吃的**。
+
+#### 确定性判据二（零源码改动的预测臂）：`LD_PRELOAD` 那个 shim 先量一遍
+
+按本仓纪律（先量再改），源码版动手之前先用一个 ≤50 行的 `LD_PRELOAD` shim
+（`/tmp/latrig/shim/readpool.c`：拦 `malloc`/`free`，尺寸正好 64 KiB 时走线程本地自由表）
+把同一件事**在不改源码的情况下**量出来：`/json/50?m=6` 4 550 109 494 → **4 062 528 230**，
+其中 shim 自己的 `malloc` + `free` 是 36 318 909 + 92 542 198 = **128.86M（3.2%）**
+⇒ 毛效应 ≈ **−13%**。**源码版（−16.57%）比 shim 版还低那 3.2%** —— 因为 shim 每次都要
+过一遍自己的哈希/自旋锁，而源码版在 `alloc_cb` 里直接命中，一次函数调用都不多。
+
+#### 判据三（端到端，`/proc/<pid>/stat` 括 CPU；同一份入口二进制只换 `.so`，A B B A）
+
+| 形状 | 改前 µs/req | 改后 µs/req |
+|---|---:|---:|
+| `/json/50?m=6`，`-c 256 -n 300000`（srv `0-8`、drv `9-17`） | 139.400 ／ 155.233 | **122.567 ／ 130.500** |
+| `/baseline11`，**照 `latency-500k-8cpu` 的形状**（srv `0-7` = 4 个物理核 + 它们的 SMT 兄弟、drv `8-17`），`-c 1024 -t 8 -n 2000000` | 11.375 ／ 11.430 | 11.455 ／ 11.735 |
+
+第一条：**两臂不重叠**，中位 **147.3 → 126.5 µs（−14.1%）**；rps 44 910~50 934 → 56 285~59 172。
+第二条是这份读数的**负结果，如实记**：中位 11.40 → 11.60（**+1.7%，落在散布内**），
+而且同一条腿在 `srv 0-8 / -n 3000000` 那组里散布大到两臂互相盖住 ⇒
+**这一刀在 h1 `baseline11` 上判"中性"**，只作"没有反向"的旁证。
+（`latency-500k-8cpu` 压的就是 `GET /baseline11?a=1&b=2`，所以这一格对那一档直接可读。）
+
+#### 修法：每线程两张**精确尺寸**的槽，指针存在表里
+
+`src/net/uvcpp_tcp_client.cpp` 顶部新增匿名命名空间的 `class read_block_cache`
+（2 槽 × 每槽 2 块，`4096 ≤ size ≤ 256 KiB`）+ 两个内联包装 `alloc_read_buf` / `free_read_buf`，
+9 处 `uvcpp_free_bytes(buf->base)` 与 1 处 alloc 各改一行。三条设计取舍：
+
+- **按精确尺寸取，不按尺寸类。** 实测这条路上真的只出现两个尺寸（4 KiB 兜底与 64 KiB），
+  精确匹配就零猜测；尺寸类要引入舍入规则，而"发一块比要的小的"是这个库绝不能出的错。
+- **指针存在表里，不写在块的头 8 字节上。** §4.19 刚为同一件事吃过一次亏
+  （`uvcpp_malloc_block_cache` 把链表指针写进块，于是 1~7 字节的块一块也留不住）——
+  这里从第一天就不写块。
+- **与 `uvcpp_malloc_block_cache` 分开两张表。** 那张的上界是 4 KiB × 4 槽 × 64 块
+  = 1 MiB；这张只服务读缓冲这一种尺寸，混进去会让它的 4 KiB 上限变成噪音。
+- **只在 `UVCPP_ENABLE_MEMORY_POOL=0` 编译进来**（Dockerfile 那一档就是 0），池那档原样
+  走 `uvcpp_buf` 的既有路径。每线程最多留 2 × 64 KiB + 2 × 4 KiB = **136 KiB**，表自身 ~2 KiB。
+
+#### 证伪：杠杆不是"缓冲的大小"，也不是 `FASTBIN_CONSOLIDATION_THRESHOLD`
+
+中途试过把读缓冲**封顶到 16 KiB**（就压在 glibc 那个 65536 的阈值之下）：它**确定性地生效了**
+（`LD_PRELOAD` 分配计数器看每请求字节数 **65 920 → 16 796**），而 **callgrind 指令数一格没动**、
+`malloc_consolidate` 也照旧。⇒ 贵的不是"块有多大"，是**每请求那一次 large-bin 分配/释放
+本身**把 `unlink_chunk` 与 fastbin 合并扫描拖进了热路。封顶这条路已经原地撤销，不再考虑。
+
+#### 交互与边界
+
+- 改前那份 `.so` 的 md5 是 `f4ca6ca1…`，**就是 §4.19 的第三臂** ⇒ 这两刀是**叠着**的，
+  本节的"改前"包含 §4.19 的全部改动。
+- 改后 `0ac7c83a…`。两个臂只能是**同一份入口二进制**换 `.so`（理由同 §4.17/§4.19）。
+- 这只对**分配密集**的腿有意义（json 那一族、async-db 的行物化、WS 回声）；对
+  `baseline`/`latency-500k` 这类每应答十来次分配的腿**中性**。
+
+#### 复现
+
+```bash
+# 装置（仓外）：/tmp/latrig/{ab.sh,cg.sh,pool.sh} + 同一份入口二进制 /tmp/latrig/entry
+#   两个臂：/tmp/latrig/before/libuvcpp.so = f4ca6ca1…、/tmp/latrig/after/libuvcpp.so = 0ac7c83a…
+ARM=/tmp/latrig/before /tmp/latrig/ab.sh 0-7 8-17 lb1 'http://127.0.0.1:8080/baseline11?a=1&b=2' -c 1024 -t 8 -n 2000000
+ARM=/tmp/latrig/after  /tmp/latrig/ab.sh 0-7 8-17 la1 'http://127.0.0.1:8080/baseline11?a=1&b=2' -c 1024 -t 8 -n 2000000
+# callgrind（SHIM 空 = 不带 shim）：SHIM= /tmp/latrig/cg.sh 20000 cgj6 'http://127.0.0.1:8080/json/50?m=6'
+# 零源码改动的预测臂：SHIM=/tmp/latrig/shim/readpool.so /tmp/latrig/cg.sh 20000 cgj2 'http://127.0.0.1:8080/json/50?m=6'
+# 仓内判据：ctest -R 'tcp|web|ws|h2'（build-brotli，池关；22/22 绿）
+```
+
+
 ## 5. 结果三：稳定性
 
 10 分钟持续压测（动态路由 + 连接 churn + WebSocket 混合）：
