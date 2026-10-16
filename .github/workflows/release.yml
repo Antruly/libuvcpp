@@ -114,6 +114,67 @@ permissions:
 #      回去，它立刻红）；Linux 两条腿另外多一条 `nm -D -u` 的判据，量的是"还剩
 #      几个未定义的 mysql_/PQ 符号"—— 那是 `ldd` 看不见的另一半（漏改一处调用点
 #      的形状，见那一步的注释）。
+#
+# ---------------------------------------------------------------------------
+# 1.7.2 起：db 的**第四个**后端 ODBC —— 这一节补的是"最容易被静默漏掉"的那一个
+# ---------------------------------------------------------------------------
+#   ⑧ UVCPP_ENABLE_DB_ODBC —— 与 ⑦ 的三个后端不同，这一个**默认就是 ON**，所以它
+#      不在"默认 OFF 且发布腿没传"那个差集里（那个差集在 1.7.0 之后已经是空的）。
+#      加它不是为了补差集，是因为它的失败形状**恰好在差集之外**、而正确性只由生成
+#      头那颗宏决定：
+#
+#          `CMakeLists.txt` 对它的处理是"找不到 `sql.h` ⇒ `message(WARNING)` +
+#          `set(UVCPP_ENABLE_DB_ODBC OFF)`"。那是一句**普通变量赋值** ⇒
+#          `CMakeCache.txt` 里照旧写着 `UVCPP_ENABLE_DB_ODBC:BOOL=ON`，只有生成的
+#          `uvcpp_config.h` 里那颗宏是 0（这一条与 1.5.0 那次 QUIC/HTTP3 的静默降级
+#          是同一个形状，理由写在 mingw-x64 那条断言步的注释里）。所以：**读 cache
+#          永远看不出这个后端没进去，只有读生成头才看得出** —— 这就是它必须进那份
+#          断言清单的原因，也是"默认 ON"不能当作"不用管"的原因。
+#
+#          （`UVCPP_DB_RUNTIME_LOAD` 那一步为什么救不了：它管的是**链接**，编不编这个
+#          后端是**头**在决定。两条腿各自独立，任一条没配好就少一个后端。）
+#
+#      六条腿的头**两种来路**，与 ⑦ 的三路同一条纪律（能取到就是取到，取不到当场
+#      红，绝不"跳过这一步继续编"）：
+#        · mingw-x64 / mingw-arm64 —— MSYS2 的 `mingw-w64-{x86_64,clang-aarch64}-unixodbc`
+#          进了 job 的 `install:` 列表。**注意它的头不在 `include/` 下**，而在
+#          `$MINGW_PREFIX/include/unixodbc/`（2026-10-16 在 `packages.msys2.org` 上
+#          逐条核过两个 arch 的文件表：`/mingw64/include/unixodbc/sql.h`、
+#          `/clangarm64/include/unixodbc/sql.h`）—— 指到 `include/` 会**找不到**，
+#          然后就是上面那个静默降级，所以下面 configure 里那份 `_INCLUDE_DIR`
+#          必须带着 `/unixodbc` 这一段。
+#        · msvc-x64 / msvc-arm64 —— 用 Windows SDK 里那份（`<SDK>/Include/<ver>/um/sql.h`），
+#          由 `.github/scripts/win-odbc-headers.sh` 找出来。理由：Microsoft 的 ODBC
+#          头就是 SDK 的一部分、随工具链一起装、且**已经是这个后端验证过的那一份**
+#          （wlzaweb 的 CI 里 libuvcpp 的 ODBC 后端就是在 SDK 头上编出来、并连上真
+#          SQL Server 跑通业务口径的）。
+#
+#          **那段脚本真正承重的地方是"挑哪一版 SDK"**：按**版本号**取最大的那个，
+#          不是字典序。这条是实测出来的 —— 字典序会把 `10.0.17763.0`（第一个
+#          compat-only 的 SDK）排在 `10.0.22621.0` 前面，而把老 SDK 的 `um` 混进新
+#          工具链的头搜索路径，报出来的是 `oaidl.h`/`propidlbase.h`/`sqltypes.h` 里
+#          成百条的 C4430/C2144，看上去像 ODBC 的锅，其实一行关系都没有。脚本里那段
+#          注释写了怎么复现。
+#
+#      两条 mingw 腿拿到的是 **unixODBC** 的头、不是微软那套：这是有意的，也是
+#      `packages.msys2.org` 上给 mingw 编的唯一一份。两个后果都是我们要的：
+#        · 运行期那份 `libodbc` 也是 unixODBC —— 头与实现同一份源码，不存在"按微软
+#          的头编、却在 unixODBC 上跑"的分叉（`src/db/uvcpp_db_odbc.cpp` 头部那条
+#          `SQLWCHAR` 宽度不假设正是为这件事写的：2 字节走 UTF-16、4 字节走 UTF-32，
+#          两种头的差异在那里被消化掉）；
+#        · Windows 上真正加载的仍然是**系统** `odbc32.dll`（`uvcpp_db_odbc.cpp` 的候选
+#          名里 Windows 那一支就是它）—— 所以 mingw 包里连 unixODBC 的 .dll 都不需要，
+#          头只是编译期的事。
+#
+#      **两条 mingw 腿的导入表白名单一个字都不要动。** 那份白名单（下面
+#      "Assert the DLL is self-contained" 那一步）里**没有** `odbc32.dll`，这是想要
+#      的性质：真被链进去时它会当场红，红了就是"运行期加载失效"的信号。为了让断言
+#      变绿而把 `odbc32.dll` 加进白名单，等于把"Windows 上也按需加载"这条唯一的守卫
+#      拆掉。
+#
+#      Linux 两条腿多一条**负面**判据：`ldd` 的白名单加 `odbc` 分支（命中即红 =
+#      runtime load 没生效、被直接链进去了），`nm -D -u` 那条计数加 `SQL[A-Z]`
+#      （ODBC 符号也不该留下未定义残留）。
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -145,6 +206,12 @@ jobs:
           # `$MINGW_PREFIX/include/libpq-fe.h`（2026-10-14 在 `packages.msys2.org`
           # 上逐个核过文件表），下面 configure 里那两个 `_INCLUDE_DIR` 就是照
           # 这个布局指过去的。
+          #
+          # 最后那个 `unixodbc` 是 1.7.2 起的（db 的第四个后端）。**它的头不在
+          # `include/` 下而在 `include/unixodbc/` 下** —— 同一个包页上核过文件表，
+          # 所以下面 configure 里那份 `_INCLUDE_DIR` 带着 `/unixodbc` 这一段。
+          # 拿它是为了**编**（头），运行期加载的是 Windows 系统的 `odbc32.dll`，
+          # 与这个包里的 .dll 无关（整段理由在文件头 ⑧）。
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
@@ -153,6 +220,7 @@ jobs:
             mingw-w64-x86_64-python
             mingw-w64-x86_64-libmariadbclient
             mingw-w64-x86_64-postgresql
+            mingw-w64-x86_64-unixodbc
 
       - name: Configure & Build
         run: |
@@ -182,9 +250,10 @@ jobs:
           #    `EntryPointNotFoundException`。C 层是薄包装：不加外部依赖、不多产物、
           #    不多一个 dll，所以开它不改变发布包的模块集合。
           #
-          # ⑤ UVCPP_ENABLE_DB=ON + UVCPP_DB_SQLITE_FROM_SOURCE=ON（MySQL/PG 显式关）：
+          # ⑤ UVCPP_ENABLE_DB=ON + UVCPP_DB_SQLITE_FROM_SOURCE=ON（1.7.0 起
+          #    MySQL/PG 也显式 ON，1.7.2 起 ODBC 同样）：
           #    "发布包带数据库模块"是这一版的一条**发布判据**，而 SQLite 走**自编
-          #    amalgamation**、另两个后端**显式关**。四条理由全是本机实测出来的，
+          #    amalgamation**。四条理由全是本机实测出来的，
           #    完整版写在 CMakeLists.txt 那段 SQLite 发现上面与 doc/db-guide.md
           #    「预编译包里的 SQLite 是从源码编的」：
           #      · 链系统 `libsqlite3.so` ⇒ 产物多一条 DT_NEEDED，正是下面那条 ldd
@@ -192,13 +261,22 @@ jobs:
           #      · 链系统 `libsqlite3.a` ⇒ Ubuntu 24.04 上那份不是 PIC，塞进 .so
           #        当场 `relocation R_X86_64_PC32 … can not be used when making a
           #        shared object`；
-          #      · MySQL/PG 必须显式 `=OFF`：runner 上装着 libpq-dev 时
-          #        `find_package(PostgreSQL QUIET)` 会**静默**成功，包里就多一条
-          #        `libpq.so.5` —— 那种包在开发机上照样跑得动，只有换台机器才炸；
+          #      · MySQL/PG 在 1.7.0 **之前**是显式 `=OFF` 的：runner 上装着
+          #        libpq-dev 时 `find_package(PostgreSQL QUIET)` 会**静默**成功，
+          #        包里就多一条 `libpq.so.5` —— 那种包在开发机上照样跑得动，只有
+          #        换台机器才炸。1.7.0 起改成"显式 `=ON` + 显式给头目录 + 靠
+          #        `UVCPP_DB_RUNTIME_LOAD=ON` 把链接行擦干净"（文件头 ⑦ 那三种
+          #        头的来路）：要的是**两个后端都在包里**，而不是拿 `=OFF` 换一条
+          #        好看的链接行。这一条今天仍然承重 —— 谁把头目录那一行删掉，
+          #        `find_package` 那一路就又有了机会。
+          #      · ODBC 是同一形状的第四个：它**默认 ON**，但找不到 `sql.h` 时
+          #        只 WARNING 一句就自己关掉（cache 里照旧写着 ON）—— 这一组里
+          #        最容易"少一个后端而没有任何东西响"的就是它。所以它除了显式
+          #        `=ON`，还必须同时给头目录，并被下面那条断言盯着（文件头 ⑧）。
           #      · 三个都关掉时整个模块会被强制关掉，所以 SQLite 那一条不能省。
-          #    与 ③④ 同一条纪律：**十个 configure 一个都不许漏**。这条路不需要任何
-          #    新包、不添任何步骤 —— 依赖是配置期从 sqlite.org 取的一份钉死哈希的
-          #    zip（本机实测：哈希与 sqlite.org 下载页上印的那个逐字相同）。
+          #    与 ③④ 同一条纪律：**十个 configure 一个都不许漏**。SQLite 这条路
+          #    不需要任何新包、不添任何步骤 —— 依赖是配置期从 sqlite.org 取的一份
+          #    钉死哈希的 zip（本机实测：哈希与 sqlite.org 下载页上印的那个逐字相同）。
           cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
@@ -213,9 +291,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -241,9 +321,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -302,12 +384,21 @@ jobs:
       # 打开它同时要满足 `UVCPP_BUILD_WEBAPP=ON`（WSDL 的前提，否则配置期静默降级），
       # 而六条腿本来就都开着。
       #
-      # **`UVCPP_DB_ENABLE` / 三个后端宏同理。** db 模块的开关与宏同名加后缀，
+      # **`UVCPP_DB_ENABLE` / 四个后端宏同理。** db 模块的开关与宏同名加后缀，
       # **但这一族的内层宏是按后端各一枚**（`UVCPP_DB_SQLITE_ENABLE` /
-      # `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE`）。**1.7.0 起三枚都在这一串
-      # 里** —— 在那之前这里只量 `UVCPP_DB_SQLITE_ENABLE`，因为另两个被显式
-      # `=OFF`。为什么现在开着、以及"开着"与"链接行上有它"为什么不是一回事，见
-      # mingw-x64 配置那一步 ⑤ 那段注释。
+      # `UVCPP_DB_MYSQL_ENABLE` / `UVCPP_DB_PGSQL_ENABLE` /
+      # `UVCPP_DB_ODBC_ENABLE`）。**1.7.0 起前三枚都在这一串里** —— 在那之前这里只量
+      # `UVCPP_DB_SQLITE_ENABLE`，因为另两个被显式 `=OFF`。为什么现在开着、以及"开着"
+      # 与"链接行上有它"为什么不是一回事，见 mingw-x64 配置那一步 ⑤ 那段注释。
+      #
+      # **`UVCPP_DB_ODBC_ENABLE` 是 1.7.2 新加的第四枚**，也是这一串里唯一一个
+      # **"开关默认 ON、仍必须量"**的：它不走"默认 OFF + 发布腿显式开"那条路，而是
+      # 走"找不到 `sql.h` 就 `set(... OFF)`"那条静默降级 —— 于是**这正是**上面那段
+      # 说的"cache 里照旧 ON、生成头里是 0"的形状。换句话说：对前三枚，这条断言拦的
+      # 是"发布腿忘了传开关"；对这一枚，它拦的是"这条腿没弄到头"。两者的判据是同一个
+      # （生成头），但第二种更隐蔽 —— 开关默认 ON 这件事本身会让人以为它不用管。
+      # 整段理由（六条腿各自去哪儿弄头、mingw 那份为什么在 `include/unixodbc/` 下）
+      # 在文件头 ⑧。
       #
       # **`UVCPP_YYJSON_ENABLE` / `UVCPP_BROTLI_ENABLE` 是 1.7.0 新加的两枚。** 它们
       # 与 WSDL 那次同形（默认 OFF、发布腿显式开），但更隐蔽一点：yyjson 在没有这两行
@@ -344,6 +435,7 @@ jobs:
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_DB_ODBC_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -397,6 +489,12 @@ jobs:
           # `UVCPP_DB_RUNTIME_LOAD=ON` 省的是链接、省不掉编译 —— 头必须在。
           # 这两个包名 2026-10-14 在 `packages.msys2.org` 上核过（`clang-aarch64`
           # 仓里都在，版本与 x86_64 那条仓同步发布）。
+          #
+          # `unixodbc` 是 1.7.2 起的第四个后端，2026-10-16 在同一个站上核过
+          # （`clangarm64` 仓里有，2.3.14-1，与 `mingw64` 那份同版本），**头的布局
+          # 也一样在 `include/unixodbc/` 下** —— 下面 configure 里那份 `_INCLUDE_DIR`
+          # 与 mingw-x64 逐字相同。理由（为什么 mingw 两条腿用 unixODBC 的头而不是
+          # 微软 SDK 那份）在文件头 ⑧。
           install: >-
             mingw-w64-clang-aarch64-clang
             mingw-w64-clang-aarch64-cmake
@@ -407,6 +505,7 @@ jobs:
             mingw-w64-clang-aarch64-libunwind
             mingw-w64-clang-aarch64-libmariadbclient
             mingw-w64-clang-aarch64-postgresql
+            mingw-w64-clang-aarch64-unixodbc
 
       # 这条腿的机器本机不存在（没有 arm64 的 Windows 开发机），三个探点只能在这里
       # 实测。这一步**故意不设断言**：要的是数据，把关交给下面真正会拦人的白名单
@@ -465,9 +564,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -490,9 +591,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -563,6 +666,7 @@ jobs:
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_DB_ODBC_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -637,6 +741,15 @@ jobs:
           # 不带这个开关就会链成 uv.dll），② 让 llhttp 静态（否则 llhttp.dll）。
           # zlib 不受 ② 影响（CMakeLists.txt:2353-2354 明确链 zlibstatic）。
           # MSVC 侧 uvcpp 自己仍走 /MD + 包内自带 VC++ 运行库，与此无关。
+          #
+          # ODBC 的**头**：db 的第四个后端（1.7.2 起进发布包），头在 Windows SDK
+          # 里，但要自己找出来 —— `find_path(sql.h)` 不会去翻 SDK 的 `um` 目录，
+          # 找不到就直接静默降级（生成头里那颗宏是 0，cache 里照旧 ON）。整段理由
+          # （为什么用 SDK 那份而不是 unixODBC、为什么**必须按版本号取最大**、别改成
+          # 字典序）在 `.github/scripts/win-odbc-headers.sh` 头部。
+          # 取不到时它 exit 1 ⇒ 这一步当场停（`shell: bash` 是 `-eo pipefail`），
+          # 不会带着一份少后端的配置继续编下去。
+          odbc_inc=$(bash .github/scripts/win-odbc-headers.sh)
           cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64 \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
@@ -651,9 +764,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR=C:/client-headers/mysql \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR=C:/client-headers/pgsql \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$odbc_inc" \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -699,6 +814,7 @@ jobs:
             UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
             UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
             UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+            UVCPP_DB_ODBC_ENABLE \
             UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           exit $rc
 
@@ -868,6 +984,12 @@ jobs:
           # OPENSSL_ROOT_DIR 必须显式给：不给的话 find_package 会在镜像里乱找，
           # 而 choco 那份是 x64 的 —— 把 x64 的 .lib 链进 arm64 是响亮失败，
           # 但"找不到 ⇒ QUIET 静默关掉 SSL"是静默坏包，两种都不能靠运气。
+          #
+          # ODBC 的头与 msvc-x64 逐字同源（`win-odbc-headers.sh`）：SDK 那份、
+          # 按版本号取最大的 `um`。这条腿的镜像是 windows-11-arm，SDK 版本号与
+          # windows-2022 未必相同 —— 所以这里**必须**还是走那个脚本去算，不能把
+          # 那条腿实测到的路径抄过来。
+          odbc_inc=$(bash .github/scripts/win-odbc-headers.sh)
           cmake -S . -B build-msvc -A arm64 -T v143 \
             -DBUILD_SHARED_LIBS=OFF \
             -DUVCPP_BUILD_LIBUV_FROM_SOURCE=ON \
@@ -882,9 +1004,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR=C:/client-headers/mysql \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR=C:/client-headers/pgsql \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$odbc_inc" \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -962,6 +1086,7 @@ jobs:
             UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
             UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
             UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+            UVCPP_DB_ODBC_ENABLE \
             UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           exit $rc
 
@@ -1027,9 +1152,53 @@ jobs:
           # 取不到就当场红，绝不"跳过这一步继续编" —— 那样编出来的包少两个后端，
           # 而它会一路走到发版。
           #
-          # 目录约定：`$HOME/client-headers/usr/include/{mysql,postgresql}`，与下面
-          # 两个 configure 里那四个 `-DUVCPP_DB_*_INCLUDE_DIR=` **必须同表**。
+          # `unixodbc-dev` 是 1.7.2 起的第三个（db 的第四个后端 ODBC，头在
+          # `usr/include/sql.h`，与另两个同一个 `dpkg -x` 里摊出来）。写在这里是
+          # 为了**同一个机制**，不是同一个理由：它**不依赖 libssl-dev**（本机
+          # `apt-cache depends` 读过：只依赖 libodbc2/libodbccr2/libodbcinst2 三个
+          # 运行库），也就是说这一条即便 `install` 也不会破坏上面那条"不装
+          # libssl-dev"的规矩。仍然不 install，理由是另外两条：
+          #   · 这三份头要的是同一种东西、同一个判据、同一个目录约定，三条包名走
+          #     两个机制只会让人下次改漏一处；
+          #   · 这台机器上**没有** odbc 的运行库（`.deb` 里那份 `.so` 摊在
+          #     `$HOME/client-headers` 下、不在链接器的搜索路径里），于是"产物没链
+          #     libodbc"这件事多一层保障：`UVCPP_DB_RUNTIME_LOAD=ON` 一旦被人从下面
+          #     configure 里删掉，`find_library(odbc)` 在这里也找不到东西可链 ——
+          #     而下面那条 ldd 断言是最后一道（那时它才有机会红）。
+          # （ODBC 在 Linux 上要的**只是头**：`UVCPP_DB_RUNTIME_LOAD=ON` 时
+          # `CMakeLists.txt` 连 `find_library(odbc)` 都不跑，运行期那份 `libodbc.so.2`
+          # 是**使用者**机器上的事 —— 这正是这个开关的全部意义。）
+          #
+          # 目录约定：`$HOME/client-headers/usr/include/{mysql,postgresql}` 与
+          # `$HOME/client-headers/usr/include`（ODBC 的 `sql.h` 直接落在 `include/`
+          # 下，与前两个不同层 —— 本机 `dpkg -x` 后 `find` 过一遍），与下面两个
+          # configure 里那**六个** `-DUVCPP_DB_*_INCLUDE_DIR=` **必须同表**。
           # 改这里就要改那里。
+          #
+          # ⚠️ `unixodbc-dev` 是三个包里唯一一个**自己的头不在同一层**的，而且
+          # 这件事只有真编一次才会露出来（本机 `dpkg -x` 之后编 `uvcpp_db_odbc.cpp`
+          # 撞到过）：`.deb` 里是
+          #
+          #   usr/include/sql.h / sqlext.h / sqltypes.h …      与架构无关的公共头
+          #   usr/include/<multiarch>/unixodbc.h               ← `sqltypes.h` 第 56 行
+          #   usr/include/<multiarch>/unixODBC/unixodbc_conf.h   那句 `#include "unixodbc.h"`
+          #
+          # （`<multiarch>` 是 `x86_64-linux-gnu` / `aarch64-linux-gnu`，两条腿各一份。）
+          # `unixodbc.h` 只在 `SIZEOF_LONG_INT` 还没被定义时才被包含，而真机上这两层
+          # 本来都在编译器的默认搜索路径里（`/usr/include` 与 gcc 自己的 multiarch
+          # 目录），所以**装了 unixodbc-dev 的人一辈子看不到这个分层**。我们只把
+          # `usr/include` 这一层交给 `-DUVCPP_DB_ODBC_INCLUDE_DIR=`，于是那一层掉了，
+          # 症状是一句 `sqltypes.h:56:10: fatal error: unixodbc.h: 没有那个文件或目录`
+          # —— 看着像头坏了，其实是搜索路径少一层。
+          #
+          # 补法是**把那份头挂到公共头旁边**（符号链接，不是拷贝）：这样
+          # `-I usr/include` 一个目录就够。`unixodbc.h` 里那句
+          # `#include "unixODBC/unixodbc_conf.h"` 是按**打开它的那个路径**解析的，
+          # 所以 `unixODBC/` 这个目录也要一起挂 —— 少挂它，下一个错就是那句找不到
+          # `unixodbc_conf.h`。
+          #
+          # 这条只影响"把头摊在一个目录里"的做法，与 `CMakeLists.txt` 无关：在真机上
+          # `find_path(sql.h)` 拿到的就是 `/usr/include`，下面那一层由 gcc 自己带上。
           #
           # **版本号必须自己给**（`pkg=ver`），不能交给 `apt-get download` 去挑：
           # 它挑的是"版本号最大的那个"，而这张镜像上 PGDG 的 `libpq-dev` 是
@@ -1056,7 +1225,7 @@ jobs:
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            for p in libmysqlclient-dev libpq-dev; do
+            for p in libmysqlclient-dev libpq-dev unixodbc-dev; do
               ok=""
               for v in $(apt-cache madison "$p" \
                            | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); if (!seen[$2]++) print $2}'); do
@@ -1073,8 +1242,24 @@ jobs:
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )
+          # `unixodbc-dev` 那份头被 Debian 拆成两层 —— 挂上来，理由见 linux-x64 那条
+          # "Install deps" 里那一大段（`unixodbc.h` 在 `usr/include/<multiarch>/` 下，
+          # 而 `sqltypes.h` 是 `#include "unixodbc.h"`）。找不到就当场红，与其余三份头
+          # 同一条规矩，并把摊出来的东西打出来：镜像换一版、布局变了要能一眼看出来。
+          _inc="$HOME/client-headers/usr/include"
+          _uoh=$(find "$_inc" -mindepth 2 -maxdepth 2 -name unixodbc.h -print -quit)
+          if [ -z "$_uoh" ]; then
+            echo "::error title=linux-odbc-headers::unixodbc-dev 里没摊出 unixodbc.h，ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
+            find "$_inc" -maxdepth 3 -name '*.h' | sort || true
+            exit 1
+          fi
+          ln -sfn "$_uoh" "$_inc/unixodbc.h"
+          ln -sfn "$(dirname "$_uoh")/unixODBC" "$_inc/unixODBC"
           test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
           test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
+          test -f "$HOME/client-headers/usr/include/sql.h"
+          test -f "$HOME/client-headers/usr/include/unixodbc.h"
+          test -f "$HOME/client-headers/usr/include/unixODBC/unixodbc_conf.h"
 
       - name: Build OpenSSL with the QUIC API
         run: |
@@ -1180,9 +1365,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -1206,9 +1393,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -1252,7 +1441,12 @@ jobs:
             # `libbrotlicommon`）会一条不响地进包。它同时还是那条 `UVCPP_BROTLI_
             # FROM_SOURCE` 开关的**兜底**：开关哪天被删掉、而 runner 上正好有
             # libbrotli，这里当场红。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq)[^ ]*\.so[^ ]*' | sort -u || true)
+            # `odbc` 是 1.7.2 起的：ODBC 那一族（`libodbc`/`libodbcinst`/`libodbccr`）
+            # 与 mysql/pq 同形 —— `UVCPP_DB_RUNTIME_LOAD=ON` 时链接行上不该有它。
+            # 这条比另两个更值得留神：**这条腿上根本没装 unixODBC 的运行库**（只
+            # `dpkg -x` 摊了头，那份 `libodbc.so.2` 不在链接器搜索路径里），所以
+            # 真出现在这里，说明有人把运行库装上了并把 `RUNTIME_LOAD` 那一档弄丢了。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -1277,9 +1471,15 @@ jobs:
             # 0 是今天的事实（本机 build-dbdlopen 量过）；`--no-undefined`
             # （CMakeLists.txt 那一段）是同一件事的另一半 —— 两条都在，任何一边
             # 被人删掉另一条还会响。
-            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ' || true)
+            #
+            # `SQL[A-Z]` 是 1.7.2 起补进来的第三个前缀（ODBC 那 24 个符号全以
+            # `SQL` 开头、第四个大写字母接着）。落地时对本机一次真配置的
+            # `libuvcpp.so` 量过：加了它之后仍然是 0（没加之前量到的也是 0 ——
+            # 这条判据今天**不会**红，它拦的是"哪天有人把 `uvcpp_db_odbc_api.h`
+            # 里那张符号表换回直接调用"）。
+            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]' || true)
             if [ "$undef" != "0" ]; then
-              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
+              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ/SQL* 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
               rc=1
             fi
           done
@@ -1315,6 +1515,7 @@ jobs:
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_DB_ODBC_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -1359,7 +1560,9 @@ jobs:
           # MySQL/PG 的头：只取 `.deb` 摊开、不 install（整段理由链在 linux-x64 那
           # 一步的注释里）。这条腿的 `apt-get download` 拿到的是 **arm64 的 .deb**，
           # 头是同一份源码生成的，与 x64 那条腿取到的逐字节相同的那几个文件。
-          # 目录约定同表：`$HOME/client-headers/usr/include/{mysql,postgresql}`。
+          # 目录约定同表：`$HOME/client-headers/usr/include/{mysql,postgresql}`
+          # 加 `$HOME/client-headers/usr/include`（ODBC 的 `sql.h`；1.7.2 起的第三个
+          # 包 `unixodbc-dev`，为什么也走"只摊开不 install"在 linux-x64 那一步）。
           # "一版一版试取"的理由链在 linux-x64 那一步的注释里（PGDG 的候选版本最高、
           # 却没有可取回的源 ⇒ 不显式给版本号时 `apt-get download` 以 100 退出；而
           # `-t` 与 preferences 都改不动它的候选，按来源名去筛也筛不准，全是实测的）。
@@ -1368,7 +1571,7 @@ jobs:
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            for p in libmysqlclient-dev libpq-dev; do
+            for p in libmysqlclient-dev libpq-dev unixodbc-dev; do
               ok=""
               for v in $(apt-cache madison "$p" \
                            | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); if (!seen[$2]++) print $2}'); do
@@ -1385,8 +1588,24 @@ jobs:
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )
+          # `unixodbc-dev` 那份头被 Debian 拆成两层 —— 挂上来，理由见 linux-x64 那条
+          # "Install deps" 里那一大段（`unixodbc.h` 在 `usr/include/<multiarch>/` 下，
+          # 而 `sqltypes.h` 是 `#include "unixodbc.h"`）。找不到就当场红，与其余三份头
+          # 同一条规矩，并把摊出来的东西打出来：镜像换一版、布局变了要能一眼看出来。
+          _inc="$HOME/client-headers/usr/include"
+          _uoh=$(find "$_inc" -mindepth 2 -maxdepth 2 -name unixodbc.h -print -quit)
+          if [ -z "$_uoh" ]; then
+            echo "::error title=linux-odbc-headers::unixodbc-dev 里没摊出 unixodbc.h，ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
+            find "$_inc" -maxdepth 3 -name '*.h' | sort || true
+            exit 1
+          fi
+          ln -sfn "$_uoh" "$_inc/unixodbc.h"
+          ln -sfn "$(dirname "$_uoh")/unixODBC" "$_inc/unixODBC"
           test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
           test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
+          test -f "$HOME/client-headers/usr/include/sql.h"
+          test -f "$HOME/client-headers/usr/include/unixodbc.h"
+          test -f "$HOME/client-headers/usr/include/unixODBC/unixodbc_conf.h"
 
       # 与 linux-x64 那一同名步骤逐字同构（同一份源码、同一套参数、同一条自检），
       # 只有 `--prefix` 下的那份库是 aarch64 的 —— OpenSSL 的 Configure 按机器
@@ -1432,9 +1651,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -1457,9 +1678,11 @@ jobs:
             -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
             -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -1494,7 +1717,12 @@ jobs:
             # `libbrotlicommon`）会一条不响地进包。它同时还是那条 `UVCPP_BROTLI_
             # FROM_SOURCE` 开关的**兜底**：开关哪天被删掉、而 runner 上正好有
             # libbrotli，这里当场红。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq)[^ ]*\.so[^ ]*' | sort -u || true)
+            # `odbc` 是 1.7.2 起的：ODBC 那一族（`libodbc`/`libodbcinst`/`libodbccr`）
+            # 与 mysql/pq 同形 —— `UVCPP_DB_RUNTIME_LOAD=ON` 时链接行上不该有它。
+            # 这条比另两个更值得留神：**这条腿上根本没装 unixODBC 的运行库**（只
+            # `dpkg -x` 摊了头，那份 `libodbc.so.2` 不在链接器搜索路径里），所以
+            # 真出现在这里，说明有人把运行库装上了并把 `RUNTIME_LOAD` 那一档弄丢了。
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -1519,9 +1747,15 @@ jobs:
             # 0 是今天的事实（本机 build-dbdlopen 量过）；`--no-undefined`
             # （CMakeLists.txt 那一段）是同一件事的另一半 —— 两条都在，任何一边
             # 被人删掉另一条还会响。
-            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ' || true)
+            #
+            # `SQL[A-Z]` 是 1.7.2 起补进来的第三个前缀（ODBC 那 24 个符号全以
+            # `SQL` 开头、第四个大写字母接着）。落地时对本机一次真配置的
+            # `libuvcpp.so` 量过：加了它之后仍然是 0（没加之前量到的也是 0 ——
+            # 这条判据今天**不会**红，它拦的是"哪天有人把 `uvcpp_db_odbc_api.h`
+            # 里那张符号表换回直接调用"）。
+            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]' || true)
             if [ "$undef" != "0" ]; then
-              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
+              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ/SQL* 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
               rc=1
             fi
           done
@@ -1557,6 +1791,7 @@ jobs:
               UVCPP_HTTP3_ENABLE UVCPP_WSDL_ENABLE \
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+              UVCPP_DB_ODBC_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
