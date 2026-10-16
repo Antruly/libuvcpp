@@ -21,9 +21,10 @@ SQLite / MySQL / PostgreSQL / ODBC 四个后端，SQL 由调用方写，结果�
 > 它默认**关**（`UVCPP_ENABLE_DB=OFF`）：它是全仓唯一一个必需第三方客户端库的
 > 模块。发布配置**显式打开**它，所以预编译包里带着这个模块 —— `1.7.0` 那个包里
 > SQLite / MySQL / PostgreSQL **三个都在**（SQLite 从源码编，MySQL/PG 编进来但库走
-> 运行时加载，见 §1 与 §3）。ODBC 是 `1.7.1-dev` 才加的，**还没有哪个已发布的包
-> 带过它**；它和 MySQL/PG 走同一条运行时加载（链上的是**驱动管理器**，也是"客户端
-> 库"那一类）。
+> 运行时加载，见 §1 与 §3）。ODBC 是第四个后端，`1.7.2-dev` 起六条发布腿也**显式
+> 打开**它（**还没有哪个已发布的包带过它** —— `1.7.1` 这个号没发过）；它和 MySQL/PG
+> 走同一条运行时加载（链上的是**驱动管理器**，也是"客户端库"那一类），所以带着它
+> 的包在没装驱动管理器的机器上照样起得来，只是真去连时拿到 `NO_DRIVER`。
 
 ## 目录
 
@@ -106,7 +107,7 @@ int main() {
 ```
 
 自己编的包少哪个后端时（**官方预编译包 1.7.0 里三个都在**，不会有这一行缺项；
-ODBC 从 `1.7.1-dev` 起进默认配置，还没有哪个已发布的包带过它），
+`1.7.2-dev` 起六条发布腿**显式**开 ODBC，所以它也会出现在这一行里），
 **这一行是第一个该看的地方**。
 
 > **注意这一行说的是"编进来没有"，不是"这台机器上能不能用"。**
@@ -150,6 +151,11 @@ cmake -S . -B build-db -DUVCPP_ENABLE_DB=ON \
 | 机器上没装那些库 | **进程起不来** | 进程照常跑；HTTP、SQLite 一切照常 |
 | 真去连 MySQL/PG/ODBC | 能连 | 返回 `NO_DRIVER` + `last_error()` 里写明**试过哪几个库名** |
 | 找库的办法 | 链接器（`/etc/ld.so.cache`、`RPATH`） | 固定的候选名列表，或 `UVCPP_DB_MYSQL_LIBRARY` / `UVCPP_DB_PGSQL_LIBRARY` / `UVCPP_DB_ODBC_LIBRARY` |
+
+（最后那一行那三个环境变量是**可以拿来造条件**的：它一设，候选名一个都不再试
+—— 所以**指到一个不存在的路径**就等于"这台机器没装这个客户端库"，这是确定性地
+复现这一档的**唯一**办法，也是 `test_db_odbc_nodrv_func` 用的办法，见 §10。
+它是**排他**的：想指到别处就得把**完整路径**给对。）
 
 候选名（按顺序试，全试完才报错）：
 
@@ -241,17 +247,42 @@ SQL Server，也能连任何装得出 ODBC 驱动的数据源（Oracle、DB2、�
   符号名一样但行为没在本仓量过 —— 想用它就显式指路，别让"打开成功"盖住"换了一个
   没量过的实现"。
 
+#### 为什么不学 SQLite 那份，把 ODBC **静态链进去**
+
+这个问题一定会被再问一遍（"SQLite 能全静态编进去，ODBC 为什么不行、为什么还要装
+东西"），所以答案写在这里，而不是留给下一个人再想一次：
+
+* **静态链消灭的是"管理器这层可替换"，换不来"不用装东西"。** ODBC 后端的契约是
+  "编进来的是一层**接口**，连哪张库由 `Driver=`/`DSN=` 在 `open()` 那一刻决定"。
+  驱动管理器存在的意义就是按那个名字去 `dlopen` **具体驱动**（`msodbcsql18` 之类）。
+  把管理器静态链上，那份 `dlopen` 一样要发生、那个具体驱动一样得装 —— 也就是说
+  `1.7.2` 的静态链版本到了现场，**该装的还是装，只是少了一层的可替换性**。
+* **Windows 上它连"合规"都过不去。** `odbc32.dll` 是操作系统组件，不可再分发
+  （同一类里还有 `ws2_32.dll`）。把它静态链进自己的产物，既没有上游给的静态库，
+  也不是允许的做法 —— 而目标平台正是 Windows。
+* **Linux/macOS 上它有害。** 驱动管理器在那是普通包（unixODBC），静态链进去多一条
+  `DT_NEEDED`，正是上面「客户端库运行时加载」那一节要消灭的形状。
+* **它也不解决这份文档开头那个问题。** 真正会缺的是**具体驱动**（比如
+  `ODBC Driver 18 for SQL Server`），那是个几 MB 的安装包，跟本库怎么编没关系。
+
+所以这一档的答案是：**静态链不适用，也不需要**。产物里编进的是那 1600 多行后端代码
+（本来就在 `libuvcpp.so`/`.dll` 里），缺的只是"管理器这一层的一次 `dlopen`"；要
+ODBC 的机器上装一份驱动管理器 + 具体驱动就能用，没装的机器上**其余三个后端一切
+照常**，只有真去连 `odbc://` 时拿到 `NO_DRIVER` 与一句写清了试过哪些库名的话
+（这一条有独立用例钉着：`tests/functional/db_odbc_nodrv_func.cpp`，见 §10）。
+
 连接串里的默认驱动名（`ODBC Driver 18 for SQL Server`）**只是默认**：`?Driver=` 或
 `?DSN=` 一写就换掉（见 [§2](#2-连接串)）。
 
 ### 预编译包里的 SQLite 是**从源码编的**：`UVCPP_DB_SQLITE_FROM_SOURCE`
 
-六条发布腿各传这几个 `-D`（**1.7.0 起**；在那之前后两行是 `=OFF`）：
+六条发布腿各传这几个 `-D`（**1.7.0 起**前五行、**`1.7.2` 起**第六行；在那之前后两行是 `=OFF`）：
 
 ```
 -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
 -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
--DUVCPP_DB_RUNTIME_LOAD=ON
+-DUVCPP_DB_RUNTIME_LOAD=ON -DUVCPP_ENABLE_DB_ODBC=ON \
+-DUVCPP_DB_ODBC_INCLUDE_DIR=<那份 sql.h 在哪>
 ```
 
 也就是说 —— **`1.7.0` 那个预编译包里的 db 模块三个后端都在**（`uvcpp_db_drivers()`
@@ -259,15 +290,32 @@ SQL Server，也能连任何装得出 ODBC 驱动的数据源（Oracle、DB2、�
 别名之一，见下面的别名表），但 MySQL/PG 的**客户端库**是运行时才打开的，链接行上
 不出现（见下面「客户端库运行时加载」那一节）。
 
-**ODBC 是 `1.7.1-dev` 才加的，这六条腿的 `-D` 清单里还没有它。**
-它默认 `ON`，但决定它在不在包里的不止 `-D`：**Linux 那几条腿上还得装
-`unixodbc-dev`** —— 现在的 `apt-get install` 只装 `zlib1g-dev ninja-build`，runner
-上没有 `sql.h`，上面那条 warning 会把 ODBC 后端**强制关掉**，于是 Linux 包照样没有
-它（Windows 腿上 `sql.h` 来自 SDK，所以 Windows 包里会有）。补上之后不必担心多出
-依赖：腿里已经有 `-DUVCPP_DB_RUNTIME_LOAD=ON`，ODBC 跟着它走，**不会**往产物里添
-`DT_NEEDED libodbc.so.2`，那六条腿只需要装头。这件事该由发布配置**显式**写出来
-（`-DUVCPP_ENABLE_DB_ODBC=ON` + runner 上的 `unixodbc-dev`），而不是靠默认值漂进去
-—— 留在这里当一条待办。
+**ODBC 是第四个，`1.7.2-dev` 起六条腿都显式开、且每一条都显式给出头在哪**
+（**`1.7.1` 这个号没发过，所以还没有哪个已发布的包带过它**）。这件事**必须显式**，
+不能靠默认值：`UVCPP_ENABLE_DB_ODBC` 默认就是 `ON`，而它找不到 `sql.h` 时的后果是
+**静默降级** —— `message(WARNING)` + 普通变量 `set(... OFF)`，`CMakeCache.txt` 里
+照样写着 `ON`、生成头里却是 0、包里少一个后端，**一条断言都不会红**。所以发布腿上是
+两件事一起写：
+
+| 腿 | `sql.h` 从哪来 | 为什么是它 |
+|---|---|---|
+| `mingw-x64` / `mingw-arm64` | MSYS2 包 `mingw-w64-{x86_64,clang-aarch64}-unixodbc`，头在 `$MINGW_PREFIX/include/unixodbc/` | 这是唯一一套**给 mingw 编的** ODBC 头；Windows SDK 那份是给 MSVC 的（`__declspec`/SAL/`#pragma`），混进 mingw 是拿一个没人试过的组合去赌。运行期反正加载系统 `odbc32.dll`，两种头在这个后端里等价 |
+| `msvc-x64` / `msvc-arm64` | Windows SDK 的 `<SDK>/Include/<ver>/um`，由 `.github/scripts/win-odbc-headers.sh` **按版本号取最大**的那一份 | SDK 自带、随工具链走，不用网络也不用解包。取"版本号最大"而不是字典序：字典序会把 `10.0.17763.0` 排在最前，于是 `um` 来自一份老 SDK 而 `<windows.h>` 来自新的，报出来是 `oaidl.h`/`propidlbase.h`/`sqltypes.h` 里成百条 `C4430`/`C2144`，看着像 SDK 坏了 |
+| `linux-x64` / `linux-arm64` | `apt-get download unixodbc-dev` + `dpkg -x`（**不 install**，与 `libmysqlclient-dev`/`libpq-dev` 同一个机制） | 与那两份头同一条规矩：只要头。腿里 `-DUVCPP_DB_RUNTIME_LOAD=ON`，配置期连 `find_library(odbc)` 都不跑，所以 ODBC 不会往产物里多添一条 `DT_NEEDED libodbc.so.2` |
+
+> Linux 那份头有个**只有把包摊到一个目录里才会遇到**的坑：Debian 把
+> `usr/include` 与 `usr/include/<multiarch>/` 分成两层，而 `sqltypes.h` 里有一句
+> `#include "unixodbc.h"`（`unixodbc.h` 在**第二层**）。真机上两层都在编译器的默认
+> 搜索路径里，所以装了 `unixodbc-dev` 的人一辈子看不到这个分层；发布腿只把
+> `usr/include` 这一层交给 `-D`，于是它掉了 —— 症状是编译 `sqltypes.h` 时那句
+> `#include` 报 `fatal error: unixodbc.h: 没有那个文件或目录`。腿里把那一层
+> **软链**到公共头旁边补上（见 `release.yml` 里 `ln -sfn … unixodbc.h` 那两行）。
+
+六条腿的产物断言里也因此多了一枚 `UVCPP_DB_ODBC_ENABLE` —— 它读的是**生成头**
+（`<tree>/include/uvcpp/uvcpp_config.h`），不是 `CMakeCache.txt`：上面那条"cache 里
+照旧 ON"的降级形状只有读生成头才拦得住。两条 Linux 腿还各多两条负向判据
+（`ldd` 的名单里加 `odbc`、`nm -D -u` 的计数加 `SQL[A-Z]`），两条 mingw 腿的导入表
+白名单**一个字都没动** —— 里面没有 `odbc32.dll`，这正是想要的：真链进去了它就会红。
 
 SQLite 那一半必须从源码编，不是漏配，
 是两条实测理由把另两条路都堵死了：
@@ -823,9 +871,9 @@ std::string quote_table(uvcpp::uvcpp_db_client& db,
 > **这一节的标题说的是 SQLite / MySQL / PostgreSQL 三家**，ODBC 单独放在紧接着的
 > 「ODBC 换了一列」里。ODBC **已经进了同一个共用套件**
 > （`tests/functional/db_odbc_func.cpp`；方言按 `Driver=` 认出来的驱动族挑，读数见
-> 下面表格的最后一行），但它**跑过的那条路是 ODBC 到 SQLite**：SQL Server 那一族
-> 仍然是**没跑**的（见 [§11](#11-没做的如实列出)）。读到"三个后端"、"三家"时，
-> ODBC 不在里面。
+> 下面表格的最后一行），而**本仓**跑过的那条路是 ODBC 到 SQLite。SQL Server 那一族
+> 本仓量不到（[§11](#11-没做的如实列出) 说了为什么，以及**下游一个私有项目的 CI
+> 已经把它跑到了哪一步**）。读到"三个后端"、"三家"时，ODBC 不在里面。
 
 ### 钉住的一致（共用套件 `tests/functional/db_suite.h`，三家各跑一遍）
 
@@ -837,6 +885,12 @@ std::string quote_table(uvcpp::uvcpp_db_client& db,
 | ODBC（到 SQLite） | 181 | 3 | `原生时间类型标签`、`last_insert_id`、`外键约束` |
 | MySQL | 159 | 1 | ——（沿用旧读数） |
 | PostgreSQL | 159 | 1 | 同上 |
+
+> ODBC 那一行的 181/3 是**关掉 MySQL 与 PG** 时量的。把另外两个后端一起打开会是
+> **180/4**：多的那条不适用是 `没编进来的后端 -> NO_DRIVER` —— 它只有在"这份构建
+> 真的缺了某个后端"时才是个能跑的断言，四个后端都在的树上它按设计记 N/A。
+> 两个读数都是对的，差别在构建配置，不在后端。（`1.7.2` 的发布包是四个都在的那一
+> 种，所以现场看到的是 180/4。）
 
 ODBC 那一行之外还有**另一组 ODBC 专属用例**（日志里单独一段，`-- ODBC 专属 --`，
 57 通过 / 0 失败）：共用套件判"三家一致"的那些契约，ODBC 专属那一组判它自己的坑。
@@ -891,7 +945,7 @@ SQLite 本来就没有日期类型，PostgreSQL 的文本格式恰好就是这�
 的原因：断开的是"后端"与"方言"的绑定。共用套件里"不能分叉断言"这条规矩对它同样成立，
 多出来的自由度**只**体现在方言上。
 
-| 项 | ODBC 到 SQLite（sqliteodbc，跑过） | ODBC 到 SQL Server（**没跑**） |
+| 项 | ODBC 到 SQLite（sqliteodbc，跑过） | ODBC 到 SQL Server（**本仓没量**） |
 |---|---|---|
 | `$1` 占位符 | **不接受**（`parameter marker count incorrect`） | —— |
 | 语法错 / 表不存在 | 报 `EXEC_FAILED`：`SQLPrepare` 只**登记**，不解析 SQL | —— |
@@ -900,8 +954,9 @@ SQLite 本来就没有日期类型，PostgreSQL 的文本格式恰好就是这�
 | 外键 | 连接里不开 `PRAGMA foreign_keys` → **不**强制 | —— |
 | `last_insert_id()` | 没有这条路 → 不适用 | —— |
 
-右列的破折号**不是"待填"**，是"没跑" —— 那台机器上没装 msodbcsql18，右列的列声明
-只是写在 `odbc_mssql_dialect` 里等着跑，别当成已经对过。
+右列的破折号**不是"待填"**，是"**本仓**量不到" —— 跑这一列要一台真 SQL Server，而
+本仓的 CI 里没有、也不该有（见 §11）。这些列声明写在 `odbc_mssql_dialect` 里，等着
+一台真库来对。
 
 第二行那条是 `dialect::prepares_eagerly()` 这个钩子存在的理由：`SQLPrepare` 是当下
 解析 SQL、还是只把语句登记下来等 `SQLExecute` 才报错，是驱动的自由。套件不假定它，
@@ -1078,6 +1133,21 @@ export UVCPP_DB_TEST_ODBC_URL='odbc:?Driver=/usr/lib/x86_64-linux-gnu/odbc/libsq
 | `UVCPP_DB_TEST_PGSQL_URL` | PostgreSQL 用例的连接串，同上 |
 | `UVCPP_DB_TEST_ODBC_URL` | ODBC 用例的连接串，同上（认不出 `Driver=` 是哪一族也退 3） |
 | `UVCPP_DB_TEST_REQUIRE` | 设了它，缺 URL 就是**失败**（退出码 1），不是跳过 |
+| `UVCPP_DB_ODBC_LIBRARY` | 指到驱动管理器的完整路径。**指到一个不存在的路径**就等于"这台机器没装驱动管理器"—— `test_db_odbc_nodrv_func` 就是这么跑的（ctest 的 `ENVIRONMENT` 属性替它设好，见 §1 那张候选名表） |
+
+**`test_db_odbc_nodrv_func` 是另一条，与上面三条形状不同**：它不要数据源，要的是
+"**这台机器上没有驱动管理器**"，验的是"没装 unixODBC 时 `open("odbc://…")` 回
+`NO_DRIVER` + 一句人话、而同一进程里 SQLite 照常可用"。所以它**不需要任何环境变量
+就跟着 `ctest` 跑**（前提由 `tests/functional/CMakeLists.txt` 里的 `ENVIRONMENT`
+设好），前提不成立时是**红**、不是跳过 —— 它不该有"这台机器没配好"这种借口。
+手动跑：
+
+```bash
+UVCPP_DB_ODBC_LIBRARY=/nonexistent/libodbc.so.2 ./build-db3/tests/functional/test_db_odbc_nodrv_func
+```
+
+它必须是**独立可执行文件**（不能并进 `test_db_odbc_func`）：ODBC 的符号加载走
+magic static，**同一个进程里成功加载过一次之后，再设这个环境变量也不再生效**。
 
 **ODBC 这一条不在 CI 里**：那几台 runner 上没有任何 ODBC 数据源，装了驱动管理器也
 只够跑"驱动名不存在时报 `OPEN_FAILED`"（那是它自己的一条断言），跑不了共用套件。
@@ -1106,14 +1176,27 @@ Windows 上走的是 `UVCPP_DB_SQLITE_FROM_SOURCE`（MSYS2 若装了
 
 ## 11. 没做的（如实列出）
 
-* **ODBC 到 SQL Server 本身。** 这个后端进了共用套件（`db_odbc_func.cpp`，
-  `UVCPP_DB_TEST_ODBC_URL`），但**跑过的那条路是 ODBC 到 SQLite**（sqliteodbc，
-  Ubuntu，驱动管理器 unixODBC；读数 181 通过 / 0 失败 / 3 不适用 + 57 条 ODBC 专属
-  断言）。SQL Server 那一族的方言是**照语法写的、没跑过**：`msodbcsql18`、Windows、
-  DSN 形式的连接串、`SQL Server` 的 `IDENTITY` / `DATETIME2` / `BIT` 逐条落到读数
-  上都还没有。要跑真 SQL Server 时，红的第一条先怀疑那份方言（`odbc_mssql_dialect`）
-  的写法，而不是后端本身。**在那之前，别把"ODBC 到 SQL Server"当成与另外三家同等
-  "验证过"的后端。**
+* **ODBC 到 SQL Server 本身 —— *本仓*没量，但下游的 CI 已经跑到"真库上执行查询"
+  这一步了。** 先说本仓这一半：这个后端进了共用套件（`db_odbc_func.cpp`，
+  `UVCPP_DB_TEST_ODBC_URL`），但本仓跑过的那条路是 ODBC 到 SQLite（sqliteodbc，
+  Ubuntu，驱动管理器 unixODBC）。SQL Server 那一族的方言（`odbc_mssql_dialect`）在
+  **本仓的测试集里一次都没执行过** —— 这里加不进去：跑它要一台真 SQL Server，而
+  CI 里没有。
+  再说另一半，因为它比"完全没验过"要强，不写出来会让人误判成熟度：**下游那个
+  私有项目**（这个后端存在的理由就是它）的 CI 里有一段"探得到就跑、探不到就跳过"
+  的步骤，在 Windows runner 上找到 SQL Server LocalDB 与一个能连它的 ODBC 驱动
+  时，会让它打出来的包**真的建一条连接、真的执行查询、真的把结果读回来**
+  （`SELECT DB_NAME(), CONVERT(varchar(30), GETDATE(), 120), @@VERSION`，走的就是
+  本库的 ODBC 后端），并且另外用一份夹具库把两条业务口径（会员统计、引车员检测
+  统计）的数字逐个对过 —— 那是 `odbc_mssql_dialect` 第一次落到真 SQL Server 上。
+  **但那是另一个仓库的 CI**：本仓既不能复现它、也不该把"某台机器上恰好有
+  LocalDB"写成自己的一条判据。所以两句话一起成立：**方言在真库上跑通过（下游
+  验的），而本仓这一列读数仍然是空的**。下面的表说的就是后者。
+* **ODBC 到 SQL Server 那些**逐条**读数**（`IDENTITY` / `DATETIME2` / `BIT` 落成
+  什么类型、`$1` 占位符在 mssql 方言下写成什么、DSN 形式的连接串）。这些是上面
+  那条"本仓没量"的具体条目：真去跑真库时，红的第一条先怀疑那份方言的写法，而不是
+  后端本身。**在这一列被谁真量出来之前，别把"ODBC 到 SQL Server"当成与另外三家
+  同等"验证过"的后端。**
 * **ODBC 的 `last_insert_id()`（除了 SQL Server 那一族）。** 它发的就是
   `SCOPE_IDENTITY()`，别的数据源不认，如实返回 `UNSUPPORTED`（实测：sqliteodbc 上
   报 `UNSUPPORTED` 并留下原因，不是编一个 0 出来）。别的数据源要报自增值，得先有

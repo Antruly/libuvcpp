@@ -890,6 +890,27 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   哪些库名的话。两档各跑一遍套件，读数一致：ODBC **181 / 0 / 3**（另 57 条 ODBC
   专属）、SQLite **196 / 0 / 1**。默认 `OFF` 的行为逐字节不变。
 
+- **"这台机器没装驱动管理器"从一句手工复现的话，变成一个有用例钉住的形状**
+  （`1.7.2-dev`）。上面那条里的负路径（`UVCPP_DB_ODBC_LIBRARY=/nonexistent/…` ⇒
+  `no_driver`）此前**没有任何自动化**：`tests/`、`bench/` 里三个 `UVCPP_DB_*_LIBRARY`
+  旋钮全零命中，它只活在文档里当一段"你可以这样试"。新用例
+  `tests/functional/db_odbc_nodrv_func.cpp` 把用户那句要求（"没有 ODBC 动态库时其他
+  功能正常运行、用的时候报异常"）逐条钉住：`open("odbc://u:p@127.0.0.1:1/…")` 回的是
+  **`NO_DRIVER`**（不是含糊的 `OPEN_FAILED`、更不是崩），`is_open()` 为假，`last_error()`
+  是一句说得出**试过哪几个库名**的人话，同一进程里再开一个 `sqlite::memory:` 照常
+  CREATE/INSERT/SELECT。
+
+  前提不去卸载任何东西 —— 由 ctest 的 `ENVIRONMENT` 属性把那个旋钮指到一个不存在的
+  路径（这正是 `uvcpp_db_runtime_load.h` 里写明这个旋钮的用途）。**它必须是独立的
+  可执行文件**：ODBC 的符号表走 magic static、句柄永不释放，同一个进程里成功加载过
+  一次之后，再设环境变量就不生效了。前提不成立（变量没传到、或路径居然存在）时返回
+  **非零即红**，不是跳过 —— 这个前提是我们自己设的，没有不确定性可言，退回跳过只会
+  让这条用例悄悄失效。
+
+  顺手修掉一处同门的老毛病：`test_db_odbc_func` 原来不在 `SKIP_RETURN_CODE 3` 那一串
+  里，于是在装了 `unixodbc-dev` 却没配数据源的机器上（CI 就是）它显示成 `Failed`，
+  而真相是"未判定"。判据现在归位。
+
 - **MySQL / PostgreSQL 的客户端库改成可以运行时加载：`UVCPP_DB_RUNTIME_LOAD`**
   （`1.6.54-dev`，默认 `OFF`）。直接链的后果不是"少个功能"而是**进程起不来**：
   `DT_NEEDED`（Windows 上是 PE 的导入表）是**加载期**解析的，产物上多一条
@@ -2728,6 +2749,28 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **六条发布腿显式打开 db 的第四个后端（ODBC），并且每一条都显式给出 `sql.h` 在哪**
+  （`1.7.2-dev`）。此前 `release.yml` 全文零次提到 odbc：`UVCPP_ENABLE_DB_ODBC` 默认就是
+  `ON`，而找不到 `sql.h` 时走的是 `message(WARNING)` + 普通变量 `set(... OFF)` ——
+  `CMakeCache.txt` 里照旧写着 `ON`、生成头里却是 `0`、包里少一个后端，**一条断言都不会
+  红**。十条 configure 全部补上 `-DUVCPP_ENABLE_DB_ODBC=ON` 与
+  `-DUVCPP_DB_ODBC_INCLUDE_DIR=`，头的来源按腿分两种：两条 MinGW 腿用 MSYS2 的
+  `mingw-w64-{x86_64,clang-aarch64}-unixodbc`（唯一一套**给 mingw 编的** ODBC 头，
+  落在 `$MINGW_PREFIX/include/unixodbc/`；SDK 那份是给 MSVC 的，混进 mingw 是拿一个
+  没人试过的组合去赌），两条 MSVC 腿用 Windows SDK 的 `<SDK>/Include/<ver>/um`
+  （新脚本 `.github/scripts/win-odbc-headers.sh` 挑出来）；两条 Linux 腿照 MySQL/PG 的
+  老规矩 `apt-get download unixodbc-dev` 加 `dpkg -x`，**不 install**。
+
+  三个只有真编一次才会露出来的坑，都写进 `release.yml` 的注释了：SDK 那份**不能按字典
+  序**挑（字典序把 `10.0.17763.0` 排在最前，于是 `um` 来自老 SDK 而 `<windows.h>` 来自
+  新的，报出来是 `oaidl.h` / `propidlbase.h` / `sqltypes.h` 里成百条 `C4430` /
+  `C2144`）；Debian 的 `unixodbc-dev` 把 `unixodbc.h` 放在 `usr/include/<multiarch>/`
+  下，而 `sqltypes.h` 里有一句 `#include "unixodbc.h"` —— 真机上两层都在编译器的默认
+  搜索路径里，只有"把包摊进一个目录"的做法会掉这一层（发布腿软链补上）；两条 Linux 腿
+  的 `ldd` 名单与 `nm -D -u` 计数各补一条 ODBC 判据，而两条 MinGW 腿的导入表白名单
+  **一个字都没动** —— 里面没有 `odbc32.dll`，那正是"运行期加载失效就会红"的唯一守卫。
+  六条腿的模块断言（读的是生成头，不是 cache）因此从 17 枚变 **18 枚**。
 
 - **`RELEASE.md` 的「发布包」那张表补上 1.7.0 那一轮**（`1.6.61-dev`）。表原来只有
   `1.5.2` / `1.5.3` 两行（小标题也写着"两轮扩容"），而 1.7.0 把包里的模块从十三个扩到
