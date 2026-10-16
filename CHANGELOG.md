@@ -2911,6 +2911,43 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   建出自指的坏链接（`$HOME` 派生出来的 `_inc` 本来就是绝对的，所以发布腿上不会犯）。
   **教训**：开发机的发行版不能当普遍规律 —— 这个坑就是照 noble 验出来、在 jammy 上红的。
 
+- **两条 MinGW 发布腿在真编之前一次都没编过，一编就红：unixODBC 那份 `sqltypes.h` 的
+  "补 windows 类型"段与 `winnt.h` 硬碰**（`1.7.2-dev`）。同一次空转里 `mingw-x64` /
+  `mingw-arm64` 两条腿红在 `Configure & Build`，而整条腿**只有一处** error：
+
+      sqltypes.h 第 109 行: error: conflicting declaration 'typedef short unsigned int WCHAR'
+      winnt.h 第 320 行:    note: previous declaration as 'typedef wchar_t WCHAR'
+
+  病灶是那段补丁的**开关**——它不叫"有没有 `<windows.h>`"，叫
+  `ALREADY_HAVE_WINDOWS_TYPE`，而**这个宏谁都不定义**，所以 `<windows.h>` 明明已经在前面
+  进来过，它照样把 ODBC 那套类型补一遍。补出来的 `CHAR` / `WORD` / `DWORD` / `BYTE` /
+  `LPDWORD` 与 `winnt.h` 逐字相同（C++ 里重复 typedef 合法，一声不响），只有 `WCHAR`
+  不同：它给 `unsigned short`，`winnt.h` 给的是 `wchar_t`。MSVC 上永远碰不到，因为
+  Windows SDK 那份 `sqltypes.h` 是微软自己写的、没有这一整段补丁 —— **所以这个坑与上一段
+  的"头布局"同源：都只在一条腿的平台上现形**。
+
+  解法用这段补丁自己的开关 `SQL_WCHART_CONVERT`（`sqltypes.h` 第 106 行）：打开后 `WCHAR` 就是
+  `wchar_t`，与 `winnt.h` 逐字相同、冲突消失。这不是权宜之计，语义上本来就该这样 ——
+  Windows 的 ODBC 宽字符接口就是 `wchar_t`（2 字节），`unsigned short` 那个是 unixODBC 给
+  "没有 `<windows.h>` 的平台"准备的默认值（它的注释自己写的）。`SQLWCHAR` 由
+  `typedef WCHAR` 派生，跟着一起对上，**尺寸不变、仍是 2 字节** ⇒ 后端里那条"按
+  `sizeof(SQLWCHAR)` 编译期分 UTF-16 / UTF-32"的转换走的还是 MSVC 上已经在跑的那条路，
+  **不新增代码路径**。判据写成"`_WIN32` 但不是 `_MSC_VER`"而不是 `__MINGW32__`（真正的分界
+  是"手上这份 `sqltypes.h` 是 unixODBC 的还是微软的"；万一有人拿 mingw 配 SDK 的头，这个宏
+  在微软那份里一次都没被引用、是空操作）；**Linux 上必须不开** —— 那里 `wchar_t` 是 4
+  字节，开了就是把 `SQLWCHAR` 从 2 字节改成 4 字节，那是改 ABI 不是修 bug。
+
+  同一条腿还带一句 `'CALLBACK' redefined` **警告**（同一段补丁的 `#define CALLBACK` 空定义
+  盖掉了 `minwindef.h` 的 `#define CALLBACK __stdcall`，而且它**出完 include 不复原**）。
+  它不致命，但等于把这个宏借走不还，所以顺手用 `push_macro` / `#undef` / `pop_macro` 借
+  出去再还回来；万一哪个编译器不认这两个 pragma，按标准它们是被忽略的，结果退回原样、
+  不更坏。
+
+  **教训与上一段同一个，只是换了个维度**：上一段是"开发机的发行版不能当普遍规律"，这一段
+  是"**Linux 上编得过不能推出 mingw 上也编得过**"—— 这两条腿的头是按 `packages.msys2.org`
+  的文件表核的、不是编出来的，而"文件表里有 `sql.h`"与"这份 `sql.h` 能和 `<windows.h>`
+  一起编"是两件事。
+
 - **`RELEASE.md` 的「发布包」那张表补上 1.7.0 那一轮**（`1.6.61-dev`）。表原来只有
   `1.5.2` / `1.5.3` 两行（小标题也写着"两轮扩容"），而 1.7.0 把包里的模块从十三个扩到
   十七个这件事**没进表** —— 按"哪一版多了什么"去查的人会查到一份停在这里的账。补上

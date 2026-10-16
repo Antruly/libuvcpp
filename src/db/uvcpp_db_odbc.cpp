@@ -24,6 +24,10 @@
  * unicode definition, instead of the 2 byte definition that MS use"）。定义了就
  * 变 `wchar_t`（Linux 上 4 字节，UTF-32）。
  *
+ * 本仓自己在**非 MSVC 的 Windows**（mingw）上把它打开，且只在那里 —— 不是为了改宽度
+ * （那里 `wchar_t` 也是 2 字节），是因为不打开就编不过：unixODBC 补出来的 `WCHAR` 与
+ * `winnt.h` 的 `typedef wchar_t WCHAR` 是硬冲突。证据与理由在 `uvcpp_db_odbc_api.h`。
+ *
  * 所以宽度既不能按平台假设，也不能按驱动管理器假设 —— 它是**编译这份代码的人**
  * 定的。按 2 字节算字符偏移、实际是 4 字节时，每个字符的后半截会被当成下一个
  * 字符的开头，中文表名第一个字就错，而且是**静默**错。

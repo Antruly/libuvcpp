@@ -50,9 +50,11 @@
 // 看上去像 Windows SDK 坏了，其实一行关系都没有（真试过：照着这个症状去换 SDK 版本，
 // 换到最新的一样红）。
 //
-// unixODBC 的 `sqltypes.h` 相反：它在没有 `<windows.h>` 的平台上**自己补一套**类型
-// （`#define BOOL int` 那种就是这套补丁的一部分），所以 Linux 上漏掉这个顺序照样编得过。
-// 这个坑只在 Windows 现形 —— 也正因为这样，它在这份代码第一次上 Windows 之前一直没露头。
+// unixODBC 的 `sqltypes.h` 相反：它**自己补一套**类型（`#define BOOL int` 那种就是这套补丁
+// 的一部分），所以 Linux 上漏掉这个顺序照样编得过。补不补看的是一个叫
+// `ALREADY_HAVE_WINDOWS_TYPE` 的宏、**不是** `<windows.h>` 在不在 —— 于是 mingw 上会多出
+// 下面那段只有 mingw 才有的第二层。顺序坑本身只在 Windows 现形 —— 也正因为这样，它在这份
+// 代码第一次上 Windows 之前一直没露头。
 //
 // `WIN32_LEAN_AND_MEAN` + `NOMINMAX` 是本文件自带的两条卫生：这个是**公共头**，谁包含
 // 它就等于把 `<windows.h>` 拖进自己的 TU（本仓 `uvcpp_web_json_reflect.h` 那一段注释记
@@ -68,8 +70,48 @@
 #  include <windows.h>
 #endif
 
+// mingw 上的第二层。unixODBC 那份 `sqltypes.h` 里"补 windows 类型"那一段的开关是
+// `ALREADY_HAVE_WINDOWS_TYPE` —— **这个宏谁都不定义**，所以哪怕 `<windows.h>` 刚从上面进来
+// 过，它照样补一遍。补出来的 `CHAR` / `WORD` / `DWORD` / `BYTE` / `LPDWORD` 与 `winnt.h`
+// 逐字相同（C++ 里重复 typedef 合法，一声不响），但 `WCHAR` 不同：它给 `unsigned short`，
+// 而 `winnt.h` 早已 `typedef wchar_t WCHAR` —— **硬冲突，也是两条 mingw 发布腿唯一的编译
+// 错误**：
+//
+//   sqltypes.h 第 109 行: error: conflicting declaration 'typedef short unsigned int WCHAR'
+//   winnt.h 第 320 行:    note: previous declaration as 'typedef wchar_t WCHAR'
+//
+// MSVC 上不冲突：Windows SDK 那份 `sqltypes.h` 是微软自己写的，没有这一整段补丁。这个坑与
+// 上面那个顺序坑同源，**只在 mingw 现形**。
+//
+// 解法就是这段补丁自己的开关 `SQL_WCHART_CONVERT`（`sqltypes.h` 第 106 行）：打开后 `WCHAR` 是
+// `wchar_t`，与 `winnt.h` 逐字相同，冲突消失。语义上也更对 —— Windows 的 ODBC 宽字符接口
+// 本来就是 `wchar_t`（2 字节），`unsigned short` 那个是 unixODBC 给"没有 `<windows.h>` 的
+// 平台"准备的默认值（它自己的注释就这么写的，`sqltypes.h` 第 30-38 行）。`SQLWCHAR` 由
+// `typedef WCHAR` 派生（第 467 行），跟着一起对，**尺寸不变、仍是 2 字节**。
+//
+// 判据写成"Windows 上但不是 MSVC"而不是 `__MINGW32__`：真正的分界是"手上这份 `sqltypes.h`
+// 是 unixODBC 的还是微软的"，而 Windows 上非 MSVC 的工具链拿到的就是 unixODBC 那份；万一
+// 有人拿 mingw 去配 SDK 的头，这个宏在微软那份里**一次都没被引用**，是空操作、不会误伤。
+// Linux 上必须**不**开：那里 `wchar_t` 是 4 字节，开了就把 `SQLWCHAR` 从 2 字节改成 4 字节
+// —— 那是改 ABI，不是修 bug。
+#if defined(_WIN32) && !defined(_MSC_VER)
+#  define SQL_WCHART_CONVERT
+// 同一段补丁里的 `#define CALLBACK`（空定义）会盖掉 `minwindef.h` 的
+// `#define CALLBACK __stdcall`，GCC 因此报一句 `'CALLBACK' redefined`；而它**出完 include
+// 也不复原**，等于把这个宏借走不还。借出去、还回来：`#undef` 之后 unixODBC 那句成了全新
+// 定义（不报重定义），`pop_macro` 再把 `minwindef` 的原定义还回去。万一哪个编译器不认这
+// 两个 pragma，它们按标准是被忽略的，结果就退回今天这个样子（一句警告 + 宏留在空定义），
+// 不更坏。
+#  pragma push_macro("CALLBACK")
+#  undef CALLBACK
+#endif
+
 #include <sql.h>
 #include <sqlext.h>
+
+#if defined(_WIN32) && !defined(_MSC_VER)
+#  pragma pop_macro("CALLBACK")
+#endif
 
 // unixODBC 的 `sqltypes.h` 第 75 行有一句 `#define BOOL int`（在没有 `<windows.h>`
 // 的平台上补齐 ODBC 那套类型表）。它会把这个文件里唯一一处 `uvcpp_db_type::BOOL`
