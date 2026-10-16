@@ -2871,53 +2871,62 @@ ARM=/tmp/latrig/after  /tmp/latrig/ab.sh 0-7 8-17 la1 'http://127.0.0.1:8080/bas
 ```
 
 
-### 4.21 `async-db` 那条应答的 DOM：改从流式构造器直写（**第十六套装置**，逐字节比对 + `LD_PRELOAD` 分配计数器 + 入口侧交替 A/B）
+### 4.21 `async-db` 那条应答的 DOM 改流式构造器：**量过、判为不合规、没有采纳**（**第十六套装置**，逐字节比对 + `LD_PRELOAD` 分配计数器 + 合规判读）
 
-#### 为什么这一档可以换、`json-*` 那一族不能
+#### 结论先说：这一档要的是"proper json parser"，所以改回 DOM
 
-§4.20 把 `json` 那一族的回落记成"DOM 的**合规代价**，不许回退"。那条结论**只适用于
-`json-*`**，因为那一族的 `standard` 栏写死了两件事：`json-compressed/implementation.md`
-的「Must use **the framework standard JSON serialization** … no bypassing the response
-pipeline」与 `json-h2c/implementation.md` 的「no **custom serializers**」；而
-`add-framework/implementation-rules/frameworks/standard.md`（"Use standard libraries and
-drivers"）要的正是生态里那个成品库，`tuned.md` 又把 "Alternative JSON serializers" 列在
-tuned 一栏 ⇒ **入口的 `uvcpp_json_writer` 在 `json-*` 上属于 tuned 手法，`mode: standard`
-的我们不能用。**
+维护者 2026-10-15T14:48:01Z 在 PR #1568 上给的原文只有一句：
 
-`h1/async-database/implementation.md` 的 `standard` 栏只有一句：「Must use an async
-PostgreSQL driver with standard connection pooling. Size the pool from `DATABASE_MAX_CONN`」——
-**整份档里没有一个字管 JSON 库**，它甚至反过来点名这一列该怎么处理：「**Tags are JSONB** -
-Postgres returns them as native JSON, no string parsing needed」。而 `uvcpp_json_writer`
-是**框架自己带的**公开头（`<uvcpp/uvcpp_json_writer.h>`），恰好落在 standard.md 那条
+> You need to use a proper json parser (for example nlohmann/json) for tests that do
+> json serialization, unless you classify as an engine.
+
+当时那一轮的树（`9257623`）把 `json-*` 与 `/async-db`**一起**换到了 `uvcpp_json_writer`
+上。判断这条指令射程的那份证据不在 `json-*` 的档里，而在这一档自己的档里 ——
+`h1/async-database/implementation.md:38` 把它列进了"这一档在量什么"：
+
+> - **Result parsing + JSON serialization** - converting Postgres rows to structured JSON
+>   with nested objects
+
+⇒ `/async-db` 就是"a test that does json serialization"，而 `uvcpp_json_writer` 是
+`tuned.md` 列在 tuned 一栏的 "Alternative JSON serializers"；本入口 `meta.json` 写着
+`"type": "emerging"`、`"mode": "standard"`，两个都不是 `engine` ⇒ 豁免条件不成立。
+**换成流式构造器，正好把这一档声明它要量的那件事拿掉**，省下来的客户端 CPU 是拿合规换的。
+
+还有一件更直接的：**入口自己的 `meta.json` 里已经把这件事写下过**——
+`"description": "… JSON serialized per request through the framework's uvcpp_json DOM
+(nlohmann/json, **no pre-rendered bytes**) …"`。真换上去，那段描述就成了假的。
+
+这一档的 `standard` 栏确实一个字没提 JSON 库（只有「async PostgreSQL driver with standard
+connection pooling … Size the pool from `DATABASE_MAX_CONN`」），而 standard.md 又有那条
 『If the framework itself bundles or officially recommends a specific library, that
-library is acceptable』的例外里。**所以这两档的合规约束不同，改动只能落在一档上。**
+library is acceptable』的例外 —— **这条推理链是通的，但它绕不过维护者那句直接的、写明
+"json serialization"的话**。而且收益正好落在没有分的地方：这一档是 **Reference-only**，
+对合成奖牌分贡献 0（`implementation.md` 顶部自己写着），改与不改只动它自己那一格
+`cpu_per_req_us`。**为一个 0 分的格子去撞一条已经被告知过一次的规则，不合算。**
 
-（顺带一个更硬的旁证：这一档是 **Reference-only**，对合成奖牌分贡献 0 —— 收益只体现在
-`cpu_per_req_us` 那一栏上。这一点在提交说明里要写明。）
+（`json-*` 那一族身上的规则更直接：`json-compressed` 的 standard 栏是「Must use the
+framework standard JSON serialization … no bypassing the response pipeline」、`json-h2c`
+是「no custom serializers」。**§4.20 把那一族记成"DOM 是合规代价、不许回退"，这一节是同
+一条规则落在第二个档上的样子** —— 不是"这一档不一样"，是"这一档也一样"。）
 
-#### 改法
+#### 那这一档还剩什么合规的客户端 CPU 可做
 
-入口 `frameworks/libuvcpp/main.cc`，三处：
+判据二那一栏把账分得很干净：**774 次分配/应答里 694 次是 DOM，剩下 79.7 次是驱动侧的
+行物化**（`src/db/uvcpp_db_pgsql.cpp` 的 `value_from_pg`，每个单元格两次分配）。
+去掉 DOM 那 694 次不许做，**那就只剩驱动侧这 79.7 次是可动的那一半**，而且它是库里的、
+与 JSON 无关的纯客户端开销。这一节把 DOM 那一半的账量清楚，价值就在这里：
+它把"这一档还能改什么"从一句猜测变成了一个数（79.7 / 774 ≈ 10%）。
 
-1. `build_async_db_json_stream()`（新增）：`uvcpp_json_writer` 直写一个 `std::string`，
-   `resp.json_str(std::move(body))` 整块接走。**没有 DOM、没有中间树、没有 `dump()` 那一遍**。
-2. `write_jsonb_string_array()`（新增）：`tags` 那一列的**快路**。它本来就是
-   `["fast", "new"]` 这样的数组字面量，逐个元素交给 `value()`（转义归构造器管）就是全部转换，
-   **一次分配都不产生**。含反斜杠的、或不是"字符串数组"形状的，**拒绝**并整条回落到原来的
-   DOM 路 —— 所以"拒绝"只改变**怎么产生**这些字节，改变不了**响应里是什么字节**。
-3. 列索引**每应答解析一次**（`table.column_index()`），行循环里改按下标取；文本列用
-   `bytes()`（对 TEXT 型它与 `to_text()` 返回同样的字节，但交回引用而不是每个单元格拷一个
-   `std::string`）。`operator[]` 与 `bytes()` 都返回**引用**，所以 `tags` 那一格也接成
-   `const std::string&` —— 写成 `const std::string`（**值**）会白拷一次，tags 那种长度
-   （`["new", "limited", "eco", "popular"]`，34 字节）超出 SSO，是**每行一次堆分配**。
-   这一处是第一版写错、被分配计数器抓回来的（见下面判据二的两行）。
+#### 量到的数（留档，免得重走）
 
-**键序刻意保持 DOM 那一套**（`count` 在前、每项按 `std::map` 的迭代序），尽管 JSON 对象无序、
-平台的校验器又是 `json.load()` 解析后再判结构（`scripts/validate.sh:2195-2214`：只查
-`count` 等于 limit、有 `rating.score`、`tags` 是 list、`active` 是 bool）。理由是把"形状没变"
-变成**可判的**而不是"看代码觉得没变"。
+改法（`build_async_db_json_stream()` + `write_jsonb_string_array()` 直写
+`resp.json_str(std::move(body))`，列索引每应答解析一次、`tags` 那一列按 JSONB 文本原样透传）
+与下面三栏读数都留着；**入口那一版已经 `git checkout` 回去了，树是干净的**。
 
-#### 判据一：逐字节比对（5 个应答，含 50 行那个）
+**逐字节比对（5 个应答，含 50 行那个）** —— 键序刻意保持 DOM 那一套（`count` 在前、每项按
+`std::map` 的迭代序），尽管平台的校验器是 `json.load()` 解析后再判结构
+（`scripts/validate.sh:2195-2214`：只查 `count` 等于 limit、有 `rating.score`、`tags` 是
+list、`active` 是 bool），理由是把"形状没变"变成**可判的**：
 
 | 请求 | 字节数 | `cmp` |
 |---|---:|---|
@@ -2926,7 +2935,7 @@ library is acceptable』的例外里。**所以这两档的合规约束不同，
 | `/async-db?min=9999&max=9999&limit=50` | 22 | 相同 |
 | `/json/50?m=6`、`/json/1?m=3`（不走这条路的对照） | 8 397 / 203 | 相同 |
 
-#### 判据二：`LD_PRELOAD` 分配计数器（`-c 64 -n 40000`，A B B A 四轮）
+**`LD_PRELOAD` 分配计数器（`-c 64 -n 40000`，A B B A 四轮）**：
 
 | | 分配/应答 | 字节/应答 | µs/请求（user / sys） |
 |---|---:|---:|---:|
@@ -2934,15 +2943,16 @@ library is acceptable』的例外里。**所以这两档的合规约束不同，
 | 改后（流式） | **79.728 ／ 79.750** | **28 305 ／ 28 308** | **85.500（52.25 / 33.25）／ 87.250（53.25 / 34.00）** |
 
 **每应答少 694 次分配（−89.7%）、少 35.4 KB**；两臂在分配这一栏上隔着一个数量级，
-µs/应答也是隔开的（改后那两轮的最差 87.25 < 改前那两轮的最好 244.00）。改后剩下的
-79.7 次是**驱动侧**的行物化（`value_from_pg` 每单元格两次分配那笔，本轮没动）。
+µs/应答也是隔开的（改后那两轮的最差 87.25 < 改前那两轮的最好 244.00）。**这 694 次就是
+DOM 的价钱；剩下的 79.7 次才是驱动侧。**
 
 **这一栏抓到了第一版的第二个错**：那一版把 `tags` 接成 `const std::string`（值）而不是
 引用，读数因此停在 **95.753 ／ 95.769**、字节 28 815 ／ 28 818。改成引用后分配 −16.0 ／
 −16.0 次、字节 −510 ／ −510（20 行里 16 行的 tags 溢出 SSO，4 行短到落在小串优化里），
-µs/应答再 −8.0 ／ −8.0。**分配计数器在这里的作用不是"验收"，是"读代码时看不见的那一次拷贝"**。
+µs/应答再 −8.0 ／ −8.0。**分配计数器在这里的作用不是"验收"，是"读代码时看不见的那一次拷贝"**
+—— `operator[]` 与 `bytes()` 都返回引用，写成值就是白拷。
 
-#### 判据三：h2c 那条 json 腿上的读缓冲池（§4.20 的独立确认）
+#### 顺带量到的一条 —— **这一条是采纳了的**（属 §4.20）：h2c 那条 json 腿上的读缓冲池
 
 §4.20 的 h2 侧只给了"同一份代码路径"的推断，没有 h2 自己的读数。补上（`-p h2c`、
 8082、`-c 64 -m 4 -n 400000`、srv `0-5` drv `6-17`，同一份入口二进制换 `.so`）：
@@ -2980,17 +2990,23 @@ address at address 0x125957"），墙钟下同一条路跑几千万个请求没�
 
 ```bash
 # 装置（仓外）：/tmp/latrig/{mke.sh,snap.sh,adb.sh,ab2.sh}
-#   入口源码：仓库那份 main.cc（改后）与 git show HEAD:…（改前），各自过 mke.sh 编成
-#   /tmp/latrig/entry.{stream,dom}（sha256 aa02856a… / 10f145d2…，各 208 312 / 202 680 字节）
+#   → 注意：入口的流式版**没有进仓**，下面这一臂是装置里的产物；
+#     仓里（以及平台那一轮）跑的是 DOM 那一版。
+#   入口两臂：仓库 HEAD 那份 main.cc（DOM，`git checkout` 后的状态）与装置里改过的
+#   那一份，各自过 mke.sh 编成 /tmp/latrig/entry.{dom,stream}
+#   （sha256 10f145d2… / aa02856a…，各 202 680 / 208 312 字节）
 #   库两臂用的是**同一个** .so（入口侧改动）：build-docker/libuvcpp.so = 4a632c01…
+cp -p .../HttpArena/frameworks/libuvcpp/main.cc /tmp/latrig/main.dom.cc
 /tmp/latrig/mke.sh /tmp/latrig/main.dom.cc dom
-/tmp/latrig/mke.sh .../HttpArena/frameworks/libuvcpp/main.cc stream
+# 流式那一臂的源：装置里那份改过的 main.cc（`mke.sh` 会先替掉 4 个路径常量再编）；
+# 这里直接喂它那次 sed 的产物（`main.stream.rig.cc`，208 312 字节的入口就是它编出来的）
+/tmp/latrig/mke.sh /tmp/latrig/main.stream.rig.cc stream
 /tmp/latrig/adb.sh dom    0-7 8-17 adbr_dom 64 40000
 /tmp/latrig/adb.sh stream 0-7 8-17 adbr_stream 64 40000
 # 逐字节比对（snap.sh 从 $RIG/entry 起服务，两个臂各跑一遍、5 个 body 逐一 cmp）：
 cp -p /tmp/latrig/entry.dom /tmp/latrig/entry && /tmp/latrig/snap.sh /tmp/latrig/snap3_dom/
 cp -p /tmp/latrig/entry.stream /tmp/latrig/entry && /tmp/latrig/snap.sh /tmp/latrig/snap3_stream/
-# h2c 腿（换 .so，入口同一份）：
+# h2c 腿（换 .so，入口同一份；这一条量的是库里的读缓冲池，与上面无关）：
 ENTRY=/tmp/latrig/entry.stream ARM=/tmp/latrig/before /tmp/latrig/ab2.sh 0-5 6-17 h2b 'http://127.0.0.1:8082/json/50?m=6' -c 64 -m 4 -n 400000
 ```
 
