@@ -1175,27 +1175,36 @@ jobs:
           # configure 里那**六个** `-DUVCPP_DB_*_INCLUDE_DIR=` **必须同表**。
           # 改这里就要改那里。
           #
-          # ⚠️ `unixodbc-dev` 是三个包里唯一一个**自己的头不在同一层**的，而且
-          # 这件事只有真编一次才会露出来（本机 `dpkg -x` 之后编 `uvcpp_db_odbc.cpp`
-          # 撞到过）：`.deb` 里是
+          # ⚠️ `unixodbc-dev` 的头**布局随发行版变**，而且它是三个包里唯一一个会
+          # 因此编不过的 —— 这件事只有真编一次才会露出来。1.7.2 第一次空转量到两份：
           #
-          #   usr/include/sql.h / sqlext.h / sqltypes.h …      与架构无关的公共头
-          #   usr/include/<multiarch>/unixodbc.h               ← `sqltypes.h` 第 56 行
-          #   usr/include/<multiarch>/unixODBC/unixodbc_conf.h   那句 `#include "unixodbc.h"`
+          #   jammy 2.3.9-5ubuntu0.1（`ubuntu-22.04` 与 `ubuntu-22.04-arm` 两条腿）
+          #     usr/include/{sql,sqlext,sqltypes,sqlucode,…}.h   平的，就这一层
+          #     `sqltypes.h` 只 `#include <wchar.h>`；**全包没有 `unixodbc.h`**
+          #   noble 2.3.12（开发机那份）
+          #     usr/include/<multiarch>/unixodbc.h
+          #     usr/include/<multiarch>/unixODBC/unixodbc_conf.h
+          #     `sqltypes.h` 第 56 行有一句 `#include "unixodbc.h"` ← 少挂就编不过
           #
           # （`<multiarch>` 是 `x86_64-linux-gnu` / `aarch64-linux-gnu`，两条腿各一份。）
-          # `unixodbc.h` 只在 `SIZEOF_LONG_INT` 还没被定义时才被包含，而真机上这两层
-          # 本来都在编译器的默认搜索路径里（`/usr/include` 与 gcc 自己的 multiarch
-          # 目录），所以**装了 unixodbc-dev 的人一辈子看不到这个分层**。我们只把
-          # `usr/include` 这一层交给 `-DUVCPP_DB_ODBC_INCLUDE_DIR=`，于是那一层掉了，
-          # 症状是一句 `sqltypes.h:56:10: fatal error: unixodbc.h: 没有那个文件或目录`
-          # —— 看着像头坏了，其实是搜索路径少一层。
+          # 真机上这两层本来都在编译器的默认搜索路径里（`/usr/include` 与 gcc 自己的
+          # multiarch 目录），所以**装了 unixodbc-dev 的人一辈子看不到这个分层**；
+          # 我们只把 `usr/include` 这一层交给 `-DUVCPP_DB_ODBC_INCLUDE_DIR=`，在 noble
+          # 那种布局下症状是一句 `sqltypes.h:56:10: fatal error: unixodbc.h: 没有那个
+          # 文件或目录` —— 看着像头坏了，其实是搜索路径少一层。
           #
-          # 补法是**把那份头挂到公共头旁边**（符号链接，不是拷贝）：这样
-          # `-I usr/include` 一个目录就够。`unixodbc.h` 里那句
+          # 补法是**把那份头挂到公共头旁边**（符号链接，不是拷贝），这样 `-I
+          # usr/include` 一个目录就够。`unixodbc.h` 里那句
           # `#include "unixODBC/unixodbc_conf.h"` 是按**打开它的那个路径**解析的，
           # 所以 `unixODBC/` 这个目录也要一起挂 —— 少挂它，下一个错就是那句找不到
           # `unixodbc_conf.h`。
+          #
+          # ⚠️⚠️ **但这只在 noble 那种布局下需要。** jammy 是平的、连 `unixodbc.h`
+          # 都没有，硬要求它存在就是把判据写成了"发行版的属性"而不是"我们的要求"
+          # —— 第一版正是这么写的，于是在两条 jammy 腿上把一个**完全正常**的包判红
+          # （`linux-odbc-headers`，2026-10-17 那次空转）。所以下面那段改成"**有就挂、
+          # 没有就算了**"，真正的判据是**编一次**（见同一步末尾那个 probe）。
+          # 另外：开发机是 Mint 22.3（基于 noble），照它验出来的布局**不能当普遍规律**。
           #
           # 这条只影响"把头摊在一个目录里"的做法，与 `CMakeLists.txt` 无关：在真机上
           # `find_path(sql.h)` 拿到的就是 `/usr/include`，下面那一层由 gcc 自己带上。
@@ -1242,24 +1251,35 @@ jobs:
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )
-          # `unixodbc-dev` 那份头被 Debian 拆成两层 —— 挂上来，理由见 linux-x64 那条
-          # "Install deps" 里那一大段（`unixodbc.h` 在 `usr/include/<multiarch>/` 下，
-          # 而 `sqltypes.h` 是 `#include "unixodbc.h"`）。找不到就当场红，与其余三份头
-          # 同一条规矩，并把摊出来的东西打出来：镜像换一版、布局变了要能一眼看出来。
+          # `unixodbc-dev` 的头：noble 那种布局要挂、jammy 那种不用（两者的差见本步
+          # 上面那一大段）。所以这里是"**有就挂**" —— 没找到**不是**错误。
           _inc="$HOME/client-headers/usr/include"
           _uoh=$(find "$_inc" -mindepth 2 -maxdepth 2 -name unixodbc.h -print -quit)
-          if [ -z "$_uoh" ]; then
-            echo "::error title=linux-odbc-headers::unixodbc-dev 里没摊出 unixodbc.h，ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
-            find "$_inc" -maxdepth 3 -name '*.h' | sort || true
-            exit 1
+          if [ -n "$_uoh" ]; then
+            # 用绝对路径：`$_inc` 来自 `$HOME`，本来就是绝对的。`ln -sfn` 的目标按
+            # **链接所在目录**解析，喂相对路径会建出一个自指的坏链接（本机试过：
+            # `noble/usr/include/unixodbc.h -> noble/usr/include/noble/…`，照样编不过）。
+            ln -sfn "$_uoh" "$_inc/unixodbc.h"
+            ln -sfn "$(dirname "$_uoh")/unixODBC" "$_inc/unixODBC"
           fi
-          ln -sfn "$_uoh" "$_inc/unixodbc.h"
-          ln -sfn "$(dirname "$_uoh")/unixODBC" "$_inc/unixODBC"
           test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
           test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
           test -f "$HOME/client-headers/usr/include/sql.h"
-          test -f "$HOME/client-headers/usr/include/unixodbc.h"
-          test -f "$HOME/client-headers/usr/include/unixODBC/unixodbc_conf.h"
+          # ODBC 这一份的判据**不是 `unixodbc.h` 在不在**（那是发行版的属性，不是我们
+          # 的要求，见本步上面那一大段），而是把后端真正 include 的那两个头**编一次**：
+          # 后端只有 `#include <sql.h>` 与 `<sqlext.h>`（Windows 上多一个 `<windows.h>`
+          # 且必须排在最前），没有别的隐含要求 —— 所以这个 probe 就是它的编译期前提
+          # 本身，发行版怎么换、布局怎么变都判得对。用 `c++ -std=c++11` 是因为真实的
+          # TU 是 C++ 源文件（那两个是 C 头），与库同一个标准。
+          _probe=$(mktemp -d)
+          printf '#include <sql.h>\n#include <sqlext.h>\n' > "$_probe/probe.cpp"
+          if ! c++ -std=c++11 -I "$_inc" -fsyntax-only "$_probe/probe.cpp" 2>"$_probe/err.txt"; then
+            echo "::error title=linux-odbc-headers::-I $_inc 编不过 <sql.h>/<sqlext.h> —— ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
+            sed 's/^/    /' "$_probe/err.txt" || true
+            find "$_inc" -maxdepth 3 -name '*.h' | sort | sed 's/^/    /' || true
+            exit 1
+          fi
+          rm -rf "$_probe"
 
       - name: Build OpenSSL with the QUIC API
         run: |
@@ -1588,24 +1608,35 @@ jobs:
             for d in ./*.deb; do dpkg -x "$d" .; done
             rm -f ./*.deb
           )
-          # `unixodbc-dev` 那份头被 Debian 拆成两层 —— 挂上来，理由见 linux-x64 那条
-          # "Install deps" 里那一大段（`unixodbc.h` 在 `usr/include/<multiarch>/` 下，
-          # 而 `sqltypes.h` 是 `#include "unixodbc.h"`）。找不到就当场红，与其余三份头
-          # 同一条规矩，并把摊出来的东西打出来：镜像换一版、布局变了要能一眼看出来。
+          # `unixodbc-dev` 的头：noble 那种布局要挂、jammy 那种不用（两者的差见本步
+          # 上面那一大段）。所以这里是"**有就挂**" —— 没找到**不是**错误。
           _inc="$HOME/client-headers/usr/include"
           _uoh=$(find "$_inc" -mindepth 2 -maxdepth 2 -name unixodbc.h -print -quit)
-          if [ -z "$_uoh" ]; then
-            echo "::error title=linux-odbc-headers::unixodbc-dev 里没摊出 unixodbc.h，ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
-            find "$_inc" -maxdepth 3 -name '*.h' | sort || true
-            exit 1
+          if [ -n "$_uoh" ]; then
+            # 用绝对路径：`$_inc` 来自 `$HOME`，本来就是绝对的。`ln -sfn` 的目标按
+            # **链接所在目录**解析，喂相对路径会建出一个自指的坏链接（本机试过：
+            # `noble/usr/include/unixodbc.h -> noble/usr/include/noble/…`，照样编不过）。
+            ln -sfn "$_uoh" "$_inc/unixodbc.h"
+            ln -sfn "$(dirname "$_uoh")/unixODBC" "$_inc/unixODBC"
           fi
-          ln -sfn "$_uoh" "$_inc/unixodbc.h"
-          ln -sfn "$(dirname "$_uoh")/unixODBC" "$_inc/unixODBC"
           test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
           test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
           test -f "$HOME/client-headers/usr/include/sql.h"
-          test -f "$HOME/client-headers/usr/include/unixodbc.h"
-          test -f "$HOME/client-headers/usr/include/unixODBC/unixodbc_conf.h"
+          # ODBC 这一份的判据**不是 `unixodbc.h` 在不在**（那是发行版的属性，不是我们
+          # 的要求，见本步上面那一大段），而是把后端真正 include 的那两个头**编一次**：
+          # 后端只有 `#include <sql.h>` 与 `<sqlext.h>`（Windows 上多一个 `<windows.h>`
+          # 且必须排在最前），没有别的隐含要求 —— 所以这个 probe 就是它的编译期前提
+          # 本身，发行版怎么换、布局怎么变都判得对。用 `c++ -std=c++11` 是因为真实的
+          # TU 是 C++ 源文件（那两个是 C 头），与库同一个标准。
+          _probe=$(mktemp -d)
+          printf '#include <sql.h>\n#include <sqlext.h>\n' > "$_probe/probe.cpp"
+          if ! c++ -std=c++11 -I "$_inc" -fsyntax-only "$_probe/probe.cpp" 2>"$_probe/err.txt"; then
+            echo "::error title=linux-odbc-headers::-I $_inc 编不过 <sql.h>/<sqlext.h> —— ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
+            sed 's/^/    /' "$_probe/err.txt" || true
+            find "$_inc" -maxdepth 3 -name '*.h' | sort | sed 's/^/    /' || true
+            exit 1
+          fi
+          rm -rf "$_probe"
 
       # 与 linux-x64 那一同名步骤逐字同构（同一份源码、同一套参数、同一条自检），
       # 只有 `--prefix` 下的那份库是 aarch64 的 —— OpenSSL 的 Configure 按机器
