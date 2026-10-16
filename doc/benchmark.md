@@ -2871,6 +2871,120 @@ ARM=/tmp/latrig/after  /tmp/latrig/ab.sh 0-7 8-17 la1 'http://127.0.0.1:8080/bas
 ```
 
 
+### 4.21 `async-db` 那条应答的 DOM：改从流式构造器直写（**第十六套装置**，逐字节比对 + `LD_PRELOAD` 分配计数器 + 入口侧交替 A/B）
+
+#### 为什么这一档可以换、`json-*` 那一族不能
+
+§4.20 把 `json` 那一族的回落记成"DOM 的**合规代价**，不许回退"。那条结论**只适用于
+`json-*`**，因为那一族的 `standard` 栏写死了两件事：`json-compressed/implementation.md`
+的「Must use **the framework standard JSON serialization** … no bypassing the response
+pipeline」与 `json-h2c/implementation.md` 的「no **custom serializers**」；而
+`add-framework/implementation-rules/frameworks/standard.md`（"Use standard libraries and
+drivers"）要的正是生态里那个成品库，`tuned.md` 又把 "Alternative JSON serializers" 列在
+tuned 一栏 ⇒ **入口的 `uvcpp_json_writer` 在 `json-*` 上属于 tuned 手法，`mode: standard`
+的我们不能用。**
+
+`h1/async-database/implementation.md` 的 `standard` 栏只有一句：「Must use an async
+PostgreSQL driver with standard connection pooling. Size the pool from `DATABASE_MAX_CONN`」——
+**整份档里没有一个字管 JSON 库**，它甚至反过来点名这一列该怎么处理：「**Tags are JSONB** -
+Postgres returns them as native JSON, no string parsing needed」。而 `uvcpp_json_writer`
+是**框架自己带的**公开头（`<uvcpp/uvcpp_json_writer.h>`），恰好落在 standard.md 那条
+『If the framework itself bundles or officially recommends a specific library, that
+library is acceptable』的例外里。**所以这两档的合规约束不同，改动只能落在一档上。**
+
+（顺带一个更硬的旁证：这一档是 **Reference-only**，对合成奖牌分贡献 0 —— 收益只体现在
+`cpu_per_req_us` 那一栏上。这一点在提交说明里要写明。）
+
+#### 改法
+
+入口 `frameworks/libuvcpp/main.cc`，三处：
+
+1. `build_async_db_json_stream()`（新增）：`uvcpp_json_writer` 直写一个 `std::string`，
+   `resp.json_str(std::move(body))` 整块接走。**没有 DOM、没有中间树、没有 `dump()` 那一遍**。
+2. `write_jsonb_string_array()`（新增）：`tags` 那一列的**快路**。它本来就是
+   `["fast", "new"]` 这样的数组字面量，逐个元素交给 `value()`（转义归构造器管）就是全部转换，
+   **一次分配都不产生**。含反斜杠的、或不是"字符串数组"形状的，**拒绝**并整条回落到原来的
+   DOM 路 —— 所以"拒绝"只改变**怎么产生**这些字节，改变不了**响应里是什么字节**。
+3. 列索引**每应答解析一次**（`table.column_index()`），行循环里改按下标取；文本列用
+   `bytes()`（对 TEXT 型它与 `to_text()` 返回同样的字节，但交回引用而不是每个单元格拷一个
+   `std::string`）。
+
+**键序刻意保持 DOM 那一套**（`count` 在前、每项按 `std::map` 的迭代序），尽管 JSON 对象无序、
+平台的校验器又是 `json.load()` 解析后再判结构（`scripts/validate.sh:2195-2214`：只查
+`count` 等于 limit、有 `rating.score`、`tags` 是 list、`active` 是 bool）。理由是把"形状没变"
+变成**可判的**而不是"看代码觉得没变"。
+
+#### 判据一：逐字节比对（5 个应答，含 50 行那个）
+
+| 请求 | 字节数 | `cmp` |
+|---|---:|---|
+| `/async-db?min=10&max=50&limit=20` | 3 255 | 相同 |
+| `/async-db?min=1&max=400&limit=50` | 8 007 | 相同 |
+| `/async-db?min=9999&max=9999&limit=50` | 22 | 相同 |
+| `/json/50?m=6`、`/json/1?m=3`（不走这条路的对照） | 8 397 / 203 | 相同 |
+
+#### 判据二：`LD_PRELOAD` 分配计数器（`-c 64 -n 40000`，两轮）
+
+| | 分配/应答 | 字节/应答 | µs/请求（user / sys） |
+|---|---:|---:|---:|
+| 改前（DOM） | 773.797 ／ 773.775 | 63 733 ／ 63 730 | 253.500（222.25 / 31.25）／ 273.250（242.00 / 31.25） |
+| 改后（流式） | **95.753 ／ 95.769** | **28 815 ／ 28 818** | **93.500（58.25 / 35.25）／ 95.250（60.50 / 34.75）** |
+
+**每应答少 678 次分配（−87.6%）、少 34.9 KB**；两臂在分配这一栏上隔着一个数量级，
+µs/应答也是隔开的（改后那两轮的最差 95.25 < 改前那两轮的最好 253.5）。改后剩下的
+95.75 次是**驱动侧**的行物化（`value_from_pg` 每单元格两次分配那笔，§2.2 的另一半，
+本轮没动）。
+
+#### 判据三：h2c 那条 json 腿上的读缓冲池（§4.20 的独立确认）
+
+§4.20 的 h2 侧只给了"同一份代码路径"的推断，没有 h2 自己的读数。补上（`-p h2c`、
+8082、`-c 64 -m 4 -n 400000`、srv `0-5` drv `6-17`，同一份入口二进制换 `.so`）：
+
+| 臂 | µs/请求（两次） | user / sys |
+|---|---:|---|
+| `before`（无池） | 132.075 ／ 131.975 | 129.20 / 2.88、129.18 / 2.80 |
+| `after`（有池） | **120.750 ／ 124.200** | 118.03 / 2.73、121.58 / 2.62 |
+
+**−8.9%**，两臂不重叠。比 h1 `/json/50?m=6` 的 −14.1% 小一截，方向合理：h2c 一条连接上
+压着 4 条流，**每请求的读事件数比 pipeline=1 的 h1 少**，可省的那部分也就少。
+
+**另外两次跑法测不出东西，一并记下来免得重走**：按档的形状（`-c 1024 -m 32`）和
+`-c 64 -m 4 -r 20000` 都不行 —— 前者压测端自己就是瓶颈（同臂内散布 ±25%，且**两臂的
+先后顺序**能解释全部差值，反序再跑一次就翻转）；后者这台 h2load 的 `-r` 是**连接**速率，
+`-r 20000 -c 64` 直接报 `the connection rate must be smaller than or equal to the number
+of clients`。**这台机器的 h2c 腿只有在服务端确实是瓶颈时才有分辨率。**
+
+#### 一个要记下的教训：那一次"逐字节相同"是恒真的
+
+第一版把 `object_begin()` 忘了（根对象没开），于是 `member("count", …)` 在 `depth == 0`
+上返回 `MISUSE`，函数**每一次都返回 false**、每一次都走进回落。此时逐字节比对**必然全绿**
+—— 因为它比的正是"回落路对回落路"。是分配计数器（773.798 → 774.806，只多了 `reserve` 那
+一笔 3 264 字节）先露的马脚，再往回落分支里塞一个 `fprintf` 才把它钉死（24 000/24 000 次）。
+**"输出没变"只有在"新路真的走了"被独立证明之后才有意义** —— 这也是这一轮三个判据必须同时有的原因。
+
+#### 备注：这条路上的 callgrind 不稳
+
+`async-db` 的 DOM 臂在 callgrind 下以 `SIGBUS` 死在
+`serializer<…>::dump → _M_append → __memcpy_avx_unaligned_erms`（"Non-existent physical
+address at address 0x125957"），墙钟下同一条路跑几千万个请求没事。所以本节只用**分配计数**
+与 `/proc` 的 `utime/stime` 作确定性判据，指令数不作为这一节的证据。
+
+#### 复现
+
+```bash
+# 装置（仓外）：/tmp/latrig/{mke.sh,adb.sh,ab2.sh}
+#   入口源码：仓库那份 main.cc（改后）与 git show HEAD:…（改前），各自过 mke.sh 编成
+#   /tmp/latrig/entry.{stream,dom}（sha256 4ded3962… / 10f145d2…，各 208 312 / 202 680 字节）
+#   库两臂用的是**同一个** .so（入口侧改动）：build-docker/libuvcpp.so = 4a632c01…
+/tmp/latrig/mke.sh /tmp/latrig/main.dom.cc dom
+/tmp/latrig/mke.sh .../HttpArena/frameworks/libuvcpp/main.cc stream
+/tmp/latrig/adb.sh dom    0-7 8-17 adbdom 64 40000
+/tmp/latrig/adb.sh stream 0-7 8-17 adbstr 64 40000
+# h2c 腿（换 .so，入口同一份）：
+ENTRY=/tmp/latrig/entry.stream ARM=/tmp/latrig/before /tmp/latrig/ab2.sh 0-5 6-17 h2b 'http://127.0.0.1:8082/json/50?m=6' -c 64 -m 4 -n 400000
+```
+
+
 ## 5. 结果三：稳定性
 
 10 分钟持续压测（动态路由 + 连接 churn + WebSocket 混合）：
