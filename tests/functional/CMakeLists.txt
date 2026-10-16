@@ -236,21 +236,53 @@ if(UVCPP_ENABLE_DB AND UVCPP_DB_LINK_LIBS)
   endforeach()
 endif()
 
-# MySQL / PostgreSQL 那两条要一个**真的服务端**，所以它们自己按环境变量决定
-# 跑还是判"未判定"（退出码 3）。ctest 得知道 3 是什么意思，否则"这台机器上
+# MySQL / PostgreSQL / ODBC 那三条要一个**真的服务端**（ODBC 要的是一份它的
+# `UVCPP_DB_TEST_ODBC_URL` 指得到的、装得出驱动的数据源），所以它们自己按环境变量
+# 决定跑还是判"未判定"（退出码 3）。ctest 得知道 3 是什么意思，否则"这台机器上
 # 没有 MySQL"会显示成 `Failed` —— 而把它改成 `return 0` 又会显示成 `Passed`，
 # 那是本仓最忌讳的那种绿：**没测过**长得和**测过了**一模一样。
 #
 # `SKIP_RETURN_CODE` 是 ctest 自带的那一格（3.0 起），报出来的是
 # `***Skipped`，与 `Passed` 在日志里是两个词。
 #
+# `test_db_odbc_func` 是 1.7.2 补进这一串的：原来这份构建里**只有它漏了**这一格，
+# 而它的漏法和另两条不同 —— 另两条在 CI 里从来都是"URL 已经给了"（服务容器起来
+# 了），所以没设 `SKIP_RETURN_CODE` 时是**当场红**、改对了才有跳过语义；ODBC 这条
+# 到今天为止**没有任何一格 CI 给过 `UVCPP_DB_TEST_ODBC_URL`**，于是谁在装了
+# `unixodbc-dev` 的机器上跑一次 `ctest`（这正好是"ODBC 后端在、只是没数据源"这个
+# 最常见的开发机形态），看到的都是 `Failed` —— 而真相是"未判定"。它不属于下面
+# 那条"永远真跑"的例外：没有数据源时它连一条 SQL 都发不出去。
+#
 # SQLite 那条**不设**这个属性：它不需要服务端，永远真跑。给它也设上的话，
 # 将来某条路径误返回 3 就会从"红"退化成"跳过"。
 #
 # CI 上还会额外设 `UVCPP_DB_TEST_REQUIRE=1`：那时缺 URL 是**失败**（退出码 1），
-# 不是跳过 —— 服务容器都起了还跳过，说明配置写错了，必须红。
-foreach(_db_remote test_db_mysql_func test_db_pgsql_func)
+# 不是跳过 —— 服务容器都起了还跳过，说明配置写错了，必须红。（这一条对 ODBC 同样
+# 成立：哪天有哪一格真起了个数据源，就该把那格的 `UVCPP_DB_TEST_REQUIRE=1` 也配上。）
+foreach(_db_remote test_db_mysql_func test_db_pgsql_func test_db_odbc_func)
   if(TARGET ${_db_remote})
     set_tests_properties(${_db_remote} PROPERTIES SKIP_RETURN_CODE 3)
   endif()
 endforeach()
+
+# `test_db_odbc_nodrv_func` 的前提是"这台机器上**没有** ODBC 驱动管理器"，而它
+# **不去卸载任何东西**：把 `UVCPP_DB_ODBC_LIBRARY` 指到一个不存在的路径就行
+# （那个旋钮写在文档里的用途就是这个，见 `src/db/uvcpp_db_runtime_load.h`）。
+# 于是"没装 unixODBC"这件事在这里是**确定性的**，与 runner 上装没装无关 ——
+# 这也是为什么它不设 `SKIP_RETURN_CODE`：没有"机器没配好所以跳过"这一档，
+# 前提完全在我们手里，不成立就该红（用例自己会检查那个路径真的不存在）。
+#
+# 它是**独立目标**而不是并进 `db_odbc_func.cpp`：ODBC 的符号加载走 magic static，
+# 进程内一旦成功加载过管理器，之后再设环境变量也不生效（"句柄永不释放"的后果）。
+# 所以要测"加载失败"，必须在一个还没碰过 ODBC 的进程里设好这个变量 —— ctest 的
+# `ENVIRONMENT` 属性恰好是唯一能保证这件事的地方。
+if(TARGET test_db_odbc_nodrv_func)
+  if(WIN32)
+    # Z: 在 CI 的 Windows 镜像上不存在（`win-client-headers.sh` 那些步骤都不用盘符）。
+    set(_uvcpp_odbc_nodrv_path "Z:/nonexistent/odbc32.dll")
+  else()
+    set(_uvcpp_odbc_nodrv_path "/nonexistent/libodbc.so.2")
+  endif()
+  set_tests_properties(test_db_odbc_nodrv_func PROPERTIES
+    ENVIRONMENT "UVCPP_DB_ODBC_LIBRARY=${_uvcpp_odbc_nodrv_path}")
+endif()
