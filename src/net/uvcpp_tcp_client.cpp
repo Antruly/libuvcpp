@@ -1115,16 +1115,25 @@ int uvcpp_tcp_client::write(const char* data, size_t len,
     // 整条吃下时 `wl == 0`：这一份是空块（`uvcpp_buf` 对 0 长度不分配也不拷，
     // 得到一个 `{nullptr, 0}`），下面那次 `uv_write` 只负责**交付完成回调**，
     // 一个字节都不会重发。0 长度的 `uv_write` 不是新形状 —— 调用方本来就可以
-    // `write(data, 0)`，那时上游走到的是同一处。
+    // `write(data, 0)`，那时上游走到的是同一处。值形态下这个空块的 base 是
+    // nullptr，于是这一笔连包装带块一共两次分配都省掉了。
+    //
+    // 交接走 `release_uv_buf()`（值形态）而不是 `out_uv_buf()`，与 4 参重载同一
+    // 条理由：后者那个 `uv_buf_t` 包装只是中转 —— `uvcpp_write` 本来就把
+    // `uv_buf_t` 按值存着（`first_block_`）—— 于是每笔异步写白付一次分配、一次
+    // 释放（WS 回声那条路实测各 1.00 次/消息）。归属一字不改：块还是交给
+    // `uvcpp_write`，只是不再有包装要放。
     uvcpp_buf bufcpp(wp, wl);
-    uv_buf_t* raw_buf = bufcpp.out_uv_buf();
+    uv_buf_t  hb;
+    bufcpp.release_uv_buf(&hb);
 #else
     uvcpp_buf bufcpp(data, len);
-    uv_buf_t* raw_buf = bufcpp.out_uv_buf();
+    uv_buf_t  hb;
+    bufcpp.release_uv_buf(&hb);
 #endif
 
     uvcpp_write* w = new uvcpp_write();
-    w->set_uv_buf(raw_buf, true);
+    w->set_uv_buf_block(hb);
     // 请求对象的释放交给 callback_write 在**回调返回之后**做。回调里 `delete wr`
     // 删的是正在执行的闭包本身（见 uvcpp_write::callback_write）。
     w->set_self_free(true);
@@ -1251,7 +1260,7 @@ int uvcpp_tcp_client::write_wait(const char* data, size_t len,
 
   if (rc != 0) {
     last_error_code_ = rc;
-    delete w;  // also frees raw_buf->base and raw_buf (owned)
+    delete w;  // 也放掉第 1 块（值形态，块归 uvcpp_write）
     return rc;
   }
 

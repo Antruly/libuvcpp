@@ -1,6 +1,37 @@
 ﻿#include "uvcpp_write.h"
 #include <uvcpp/uvcpp_alloc.h>
+
 namespace uvcpp {
+namespace {
+
+/**
+ * @brief 放掉一块**自有块**（`uvcpp_buf` 那条路交出来的，块来自 `std::malloc`）。
+ *
+ * 第 1、第 2 块都走这里，为的是**只有一处**知道"还块该还给谁"：
+ *
+ *   * 内存池那档 —— 块不是 malloc 族的，原样 `uvcpp_free`；
+ *   * 其余 —— 还给**本线程**的自由表（取的那一侧在 `uvcpp_buf::resize_impl()`，
+ *     见 `uvcpp_alloc.h` 里 `uvcpp_malloc_block_cache` 的类注释）。
+ *
+ * `size` 传块的**真实尺寸**（`uvcpp_buf` 的 `capacity_`）；拿不到时传 0 或传
+ * 可见长度 `len` 都安全 —— `put()` 按精确尺寸匹配，键偏小只会"少复用"，绝不会
+ * 给出比要的小的块（`len` 恒 ≤ 真实容量）。尺寸对不上表里的任何一个槽时
+ * `put()` 当场 `std::free`，与改前的 `uvcpp_free` 逐字同义。
+ *
+ * @param base 块的**原始**头；调用方不许先把 `base` 加过偏移再传进来。
+ * @param size 这张表给这块记的尺寸键。
+ */
+inline void release_own_block(void *base, ::std::size_t size) noexcept {
+#if UVCPP_ENABLE_MEMORY_POOL
+  (void)size;
+  uvcpp::uvcpp_free(base);
+#else
+  uvcpp::uvcpp_malloc_cache_here().put(base, size);
+#endif
+}
+
+}  // namespace
+
 uvcpp_write::uvcpp_write()
     : uvcpp_req(uvcpp::uvcpp_alloc<uv_write_t>()),
       uv_buf_owner(false),
@@ -13,8 +44,14 @@ uvcpp_write::uvcpp_write()
 }
 uvcpp_write::~uvcpp_write() {
   // 值形态的第 1 块：只放块，`uv_buf` 指向的是成员，不能 uvcpp_free。
+  // 还回自由表 —— 与 `release_second()` 同一笔账、同一个理由：WS 回声那条路上
+  // 它就是每消息那 7 字节的报文块（`write()` 的 3 参重载拷进来的），改前
+  // 每消息造一次、放一次，一次也轮不到下一条消息用。
   if (first_block_base_ != nullptr) {
-    uvcpp::uvcpp_free(first_block_base_);
+    release_own_block(first_block_base_,
+                      (first_block_.base == first_block_base_)
+                          ? static_cast<::std::size_t>(first_block_.len)
+                          : static_cast<::std::size_t>(0));
     first_block_base_ = nullptr;
   }
   if (uv_buf_owner && uv_buf != nullptr) {
@@ -49,16 +86,11 @@ void uvcpp_write::release_second() {
     //   块大小）⇒ 按它做键只会"少复用"，绝不会给出比要的小的块。两条对不上时按
     //   0 走，`put()` 当场 `std::free`，与改前的 `uvcpp_free` 逐字同义。
     //
-    //   内存池那档不碰：那里的块不是 malloc 族的。
-#if UVCPP_ENABLE_MEMORY_POOL
-    uvcpp::uvcpp_free(second_block_base_);
-#else
-    uvcpp::uvcpp_malloc_cache_here().put(
-        second_block_base_,
-        (pair_[1].base == second_block_base_)
-            ? static_cast<size_t>(pair_[1].len)
-            : static_cast<size_t>(0));
-#endif
+    //   内存池那档不碰：那里的块不是 malloc 族的（分流在 `release_own_block()`）。
+    release_own_block(second_block_base_,
+                      (pair_[1].base == second_block_base_)
+                          ? static_cast<size_t>(pair_[1].len)
+                          : static_cast<size_t>(0));
     second_block_base_ = nullptr;
   }
   hold_.reset();
@@ -78,7 +110,10 @@ void uvcpp_write::set_uv_buf(uv_buf_t *bf, bool owner) {
   // 两种形态择一：换上指针形态就把值形态那一块按它自己的归属放掉，否则它
   // 再也没人放（析构只看 first_block_base_，会被这一句覆盖掉）。
   if (first_block_base_ != nullptr) {
-    uvcpp::uvcpp_free(first_block_base_);
+    release_own_block(first_block_base_,
+                      (first_block_.base == first_block_base_)
+                          ? static_cast<::std::size_t>(first_block_.len)
+                          : static_cast<::std::size_t>(0));
     first_block_base_ = nullptr;
   }
   uv_buf = bf;
@@ -96,7 +131,10 @@ void uvcpp_write::set_uv_buf_block(uv_buf_t bf) {
     uv_buf_owner = false;
   }
   if (first_block_base_ != nullptr) {
-    uvcpp::uvcpp_free(first_block_base_);
+    release_own_block(first_block_base_,
+                      (first_block_.base == first_block_base_)
+                          ? static_cast<::std::size_t>(first_block_.len)
+                          : static_cast<::std::size_t>(0));
   }
   first_block_      = bf;
   first_block_base_ = bf.base;

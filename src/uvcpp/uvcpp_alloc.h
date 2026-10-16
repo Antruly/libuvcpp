@@ -296,9 +296,19 @@ inline bool operator!=(const uvcpp_block_allocator<T>&,
  * 尺寸类按精确尺寸匹配，不做向上取整（与 `uvcpp_block_cache` 同一条理由：
  * 向上取整会让"取一块存货"变成"取一块尺寸不对的"）。
  *
+ * **自由表不放在块里。** 每个槽是一张 `void*` 数组（`head[kSlotMax]`），链表
+ * 指针存在表里而不是块的头 8 字节上。这不是风格问题：把"下一块"写进块本身
+ * 要求 `size >= sizeof(void*)`，于是 1~7 字节的块一块也留不住，`put()` 只能
+ * 原地 `std::free`、`try_take()` 也就永远命不中 —— 而 5~7 字节正是 WebSocket
+ * 那条路上最热的尺寸（`"hello"` 回声一次要三块 5 字节、一块 7 字节，实测
+ * `resize_impl` 的裸 `malloc` 稳定 4.00 次/消息，改前这四次一次都进不了表）。
+ * 表外置之后 `put()`/`try_take()` 对块的大小再无任何假设，也不再**写**取到的
+ * 块（改前那 8 字节是被链表指针覆盖掉的，接手方拿到的内容同样不保证）。
+ *
  * 上界：单块不超过 `kMaxCachedBytes`，每槽不超过 `kSlotMax` 块 ⇒ 本线程最多留下
- * `kSlotCount * kSlotMax * kMaxCachedBytes`（4 × 64 × 4 KiB = 1 MiB）。这个数与
- * M6 那张表同量级（4 × 256 × ~1.3 KiB），刻意没有再大。
+ * `kSlotCount * kSlotMax * kMaxCachedBytes`（4 × 64 × 4 KiB = 1 MiB）的**块**；
+ * 表自身是 `kSlotCount * (kSlotMax + 2) * sizeof(void*)`（≈ 2 KiB）。
+ * 前者与 M6 那张表同量级（4 × 256 × ~1.3 KiB），刻意没有再大。
  */
 class uvcpp_malloc_block_cache {
  public:
@@ -309,11 +319,8 @@ class uvcpp_malloc_block_cache {
     if (size == 0 || size > kMaxCachedBytes) return nullptr;
     for (unsigned i = 0; i < kSlotCount; ++i) {
       slot& s = slots_[i];
-      if (s.size != size || s.head == nullptr) continue;
-      void* p = s.head;
-      s.head = *static_cast<void**>(p);  // 自由块的头 8 字节存下一块的地址
-      --s.count;
-      return p;
+      if (s.size != size || s.count == 0) continue;
+      return s.head[--s.count];
     }
     return nullptr;
   }
@@ -321,8 +328,7 @@ class uvcpp_malloc_block_cache {
   /** @brief 还一块回来。太大、表满、或没有空闲的尺寸槽，就直接 `std::free`。 */
   void put(void* p, std::size_t size) noexcept {
     if (p == nullptr) return;
-    // 小到放不下链表指针的块不留（`uvcpp_buf` 不会要这么小的块，兜一下）。
-    if (size < sizeof(void*) || size > kMaxCachedBytes) {
+    if (size == 0 || size > kMaxCachedBytes) {
       std::free(p);
       return;
     }
@@ -334,28 +340,28 @@ class uvcpp_malloc_block_cache {
           std::free(p);
           return;
         }
-        *static_cast<void**>(p) = s.head;
-        s.head = p;
-        ++s.count;
+        s.head[s.count++] = p;
         return;
       }
-      if (spare == nullptr && s.size == 0) spare = &s;
+      // 空槽，或者**已经排空**的槽，都可以改服务这个尺寸 —— 后者是必要的：
+      // 长期运行的线程一定会换工作形状，钉死在旧尺寸上的槽等于把这张表缩到
+      // 只剩头几个尺寸（改前就是这样：`count` 掉到 0 的槽永远不会被再分配）。
+      if (spare == nullptr && (s.size == 0 || s.count == 0)) spare = &s;
     }
     if (spare == nullptr) {
       std::free(p);
       return;
     }
-    spare->size = size;
-    *static_cast<void**>(p) = nullptr;
-    spare->head = p;
-    spare->count = 1;
+    spare->size    = size;
+    spare->head[0] = p;
+    spare->count   = 1;
   }
 
  private:
   struct slot {
-    std::size_t size;  ///< 这个槽服务的块尺寸；0 = 槽还空着
-    void* head;        ///< 自由块单链表
-    unsigned count;    ///< 链上有几块（上限 kSlotMax，防长跑把内存留住）
+    std::size_t size;      ///< 这个槽服务的块尺寸；0 = 槽还空着
+    unsigned count;        ///< 表上有几块（上限 kSlotMax，防长跑把内存留住）
+    void* head[kSlotMax];  ///< 自由块表 —— 在**表里**，不在块里（见类注释）
   };
   slot slots_[kSlotCount];
 };
