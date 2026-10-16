@@ -155,6 +155,18 @@
 #  define UVCPP_DB_PGSQL_ENABLE @UVCPP_DB_PGSQL_ENABLE@
 #endif
 
+/* ODBC 后端。注意它与上面三个不是一类：SQLite/MySQL/PostgreSQL 各对着**一种**
+   数据库，而这个对着**一个接口** —— 连什么库由连接串里的 `Driver=`（或 `DSN=`）
+   决定，本驱动不去试别的驱动名。所以"这个后端在不在"与"要连的那个数据源有没有
+   驱动"是两件事：后者要到 `open()` 才知道，报错是驱动管理器给的原文（驱动名写错
+   时就是它那句"找不到数据源、也没有默认驱动"）。 */
+#if defined(UVCPP_DB_ODBC_ENABLE) && (UVCPP_DB_ODBC_ENABLE != @UVCPP_DB_ODBC_ENABLE@)
+#  error "UVCPP_DB_ODBC_ENABLE=@UVCPP_DB_ODBC_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_ODBC_ENABLE
+#  define UVCPP_DB_ODBC_ENABLE @UVCPP_DB_ODBC_ENABLE@
+#endif
+
 /* MySQL / PostgreSQL 两个后端的符号是**链接进来的**还是**运行时取**的。
    它是"这份产物长什么样"，不是"有哪些模块"，但同样必须让使用者看得见：这两条
    路的**失败方式**不一样（链接的那条在加载期就报缺库、进程起不来；运行时加载的

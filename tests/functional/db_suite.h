@@ -73,7 +73,19 @@ class dialect {
   /// 在 SQLite 上跑绿，**不**代表它在 PostgreSQL 上也行 —— 那边报
   /// `PREPARE_FAILED`（`syntax error at end of input`）。所以"绿了"这件事得按
   /// 后端分开说，见证见 `test_placeholder_dialect()`。
+  ///
+  /// **同一个数据源走 ODBC 会变成 false**：ODBC 到 SQLite 这条路上占位符是
+  /// 驱动在数，sqliteodbc 只认 `?`（实测 `$1` 报
+  /// `parameter marker count incorrect`）。所以"SQLite 收 `$1`"是**那个后端**的
+  /// 性质，不是 SQLite 这个数据库的性质。
   virtual bool accepts_dollar_placeholder() const { return false; }
+
+  /// `SQLPrepare` 在这个后端/驱动上是不是**真的**准备了。默认 true。
+  ///
+  /// false 表示准备是空操作，SQL 要到执行那一刻才被解析 —— 于是语法错、表不存在
+  /// 这类错在 `test_errors()` 里报的是 `EXEC_FAILED` 而不是 `PREPARE_FAILED`。
+  /// ODBC 把"什么时候解析"交给驱动，sqliteodbc 就是这种（读数是实测的）。
+  virtual bool prepares_eagerly() const { return true; }
 
   /// 一张"每种类型来一列"的表。`e_val` 三家的声明都必须带
   /// `NOT NULL DEFAULT ''` —— 见 `test_empty_string_is_not_null()`。
@@ -620,14 +632,21 @@ inline void test_schema(harness& h, const std::string& table) {
 
 /// 10. 错误路径。**每一条都必须"不执行任何语句"地失败**，而不是执行一半。
 inline void test_errors(harness& h, const std::string& table) {
+  // 语法错与表不存在，在**准备期**就报出来的后端是 PREPARE_FAILED；准备是空操作
+  // 的那种驱动（`prepares_eagerly() == false`，ODBC 到 sqliteodbc 就是）要到执行
+  // 那一刻才知道，报的必然是 EXEC_FAILED。这不是两种"坏"，是同一个错被两条路
+  // 发现 —— 所以判据按后端分开写，而不是把某个后端的读数当成通用契约。
+  const uvcpp_db_status want_prepare =
+      h.d->prepares_eagerly() ? uvcpp_db_status::PREPARE_FAILED
+                              : uvcpp_db_status::EXEC_FAILED;
+
   const std::string bad_sql = "SELCT * FROM " + table;
   uvcpp_db_table t;
-  h.eq_status(h.db->query(bad_sql, &t), uvcpp_db_status::PREPARE_FAILED,
-              "语法错的 SQL -> PREPARE_FAILED");
+  h.eq_status(h.db->query(bad_sql, &t), want_prepare, "语法错的 SQL");
 
   uvcpp_db_table t2;
   h.eq_status(h.db->query("SELECT * FROM uvcpp_no_such_table_xyz", &t2),
-              uvcpp_db_status::PREPARE_FAILED, "不存在的表 -> PREPARE_FAILED");
+              want_prepare, "不存在的表");
 
   // 参数个数对不上：三家必须在**本地**或**服务端**同一处拒绝，且报同一个码。
   // 不统一的话，调用方就没法写一句 `if (st == BIND_FAILED) 修参数`。

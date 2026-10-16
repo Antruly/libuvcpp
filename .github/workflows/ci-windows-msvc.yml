@@ -63,7 +63,7 @@ jobs:
           # **发版那一刻** —— 而 release.yml 的 msvc-x64 / msvc-arm64 两条腿都开着
           # 它。这一格就是那两条腿在 push/PR 阶段的替身。
           #
-          # pugixml 走 FetchContent（根 `CMakeLists.txt:1667`，`GIT_TAG` 钉在
+          # pugixml 走 FetchContent（根 `CMakeLists.txt:1736`，`GIT_TAG` 钉在
           # `PUGIXML_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
           # 的装包需求与 `web` 逐字相同。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -95,7 +95,7 @@ jobs:
           # nlohmann 再比 `==`」—— 平台间差异正是在这种地方现形。
           # （yaml 里这段 `-D` 之所以放在块序列里、不折成一行，见 §1。）
           #
-          # yyjson 走 FetchContent（根 `CMakeLists.txt:1727`，`GIT_TAG` 钉在
+          # yyjson 走 FetchContent（根 `CMakeLists.txt:1796`，`GIT_TAG` 钉在
           # `YYJSON_VERSION`），**不需要新包**；它与 zlib 同一个形状，所以这一格
           # 的装包需求与 `web` 逐字相同。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -340,7 +340,7 @@ jobs:
         run: |
           case "${{ matrix.feature }}" in
             # wsdl 也在这一组：pugixml 走 FetchContent，与 zlib 一样不是系统依赖。
-            # yyjson 同理（`CMakeLists.txt:1727` 的 FetchContent）。
+            # yyjson 同理（`CMakeLists.txt:1796` 的 FetchContent）。
             # db 也是：它的 SQLite 是**从源码编**的（`UVCPP_DB_SQLITE_FROM_SOURCE`），
             # 所以 Windows 上不需要任何 sqlite 包 —— 这一格一个系统依赖都没有，
             # 别把它塞进 win-openssl-deps.sh（那是 OpenSSL 专用的）。
