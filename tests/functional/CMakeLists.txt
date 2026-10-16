@@ -93,17 +93,25 @@ if(NOT UVCPP_ENABLE_HTTP3)
 endif()
 
 # Exclude yyjson tests when the yyjson module is not enabled.
-# 命名约定：**文件名里含 `yyjson` 的用例就需要 yyjson 模块**（现在只有一条
-# `yyjson_doc_func.cpp`）。`[^/]*` 前缀同样是必须的 —— `file(GLOB)` 给的是全路径，
+# 命名约定：**文件名里含 `yyjson` 的用例就需要 yyjson 模块**（现在两条：
+# `yyjson_doc_func.cpp` 测解析侧、`yyjson_build_func.cpp` 测构造侧 —— 两侧各一条，
+# 与库里的两组类型对应）。`[^/]*` 前缀同样是必须的 —— `file(GLOB)` 给的是全路径，
 # 写 `^yyjson_` 永远匹配不上（h2 那条踩过，注释在上面）。
 #
-# 这一条不能省：yyjson 模块默认 **OFF**，而 `src/yyjson/uvcpp_json_doc.h` 的整段
-# 声明都在 `#if UVCPP_YYJSON_ENABLE` 里面 —— 不摘掉的话，默认配置下这条用例
-# 会因为"`uvcpp_json_doc` 没有声明"而**编译失败**（不是跳过，是整个 job 红）。
+# 两条都是 GLOB 进来的：**新增 `yyjson_*` 用例不需要改这里**，过滤器自动覆盖。
+# （反过来说：改了这个 glob 之后要重新 configure 才看得见新文件。）
 #
-# 另外注意：这条用例**不需要** webapp（本模块在核心层），所以它**不**带
+# 这一条不能省：yyjson 模块默认 **OFF**，而 `src/yyjson/uvcpp_json_doc.h` 的整段
+# 声明都在 `#if UVCPP_YYJSON_ENABLE` 里面 —— 不摘掉的话，默认配置下这两条用例
+# 会因为"`uvcpp_json_doc` 没有声明"而**编译失败**（不是跳过，是整个 job 红）。
+# 关掉模块时"没测"必须表现为**用例不存在**：所以 `YYJSON=OFF` 的树上用例数不变，
+# 而不是多出两条恒真的绿。
+#
+# 另外注意：这两条用例**都不需要** webapp（本模块在核心层），所以它**不**带
 # `web_app_` 前缀 —— 带了的话，`WEBAPP=OFF, YYJSON=ON` 这个组合下它会被上面
-# 那条 `web_app_.*` 顺手摘掉，表现为"模块开着却一次都没测"。
+# 那条 `web_app_.*` 顺手摘掉，表现为"模块开着却一次都没测"。两条里各自与
+# nlohmann 对照的那几组落在 `#if UVCPP_WEBAPP_ENABLE` 里并**打印一行 SKIP**，
+# 其余分组在 `WEBAPP=OFF` 的树上也真跑。
 if(NOT UVCPP_ENABLE_YYJSON)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*yyjson[^/]*\.cpp$")
 endif()

@@ -5,8 +5,8 @@
 
 这一页讲的是"怎么用它"，以及"它的边界在哪"。它不是 JSON **解析**指南 —— 解析与 DOM
 在 `webapp/uvcpp_web_json.h`（nlohmann 后端），见 [`webapp-guide.md`](webapp-guide.md)；
-本页 §13 讲**第二个**可选的解析后端（yyjson），它默认关着（**官方预编译包自 1.7.0
-起开着**，见 §13.1）。
+本页 §13 讲 **yyjson 那一侧**：解析、构造、写回三件事都由本库 bundle 的这一份库做
+（CMake 默认关着，**官方预编译包自 1.7.0 起开着**，见 §13.1）。
 
 ## 目录
 
@@ -22,7 +22,7 @@
 10. [线程与所有权](#10-线程与所有权)
 11. [这份代码的判据](#11-这份代码的判据)
 12. [没做的（如实列出）](#12-没做的如实列出)
-13. [第二个解析后端：yyjson（可选）](#13-第二个解析后端yyjson可选)
+13. [yyjson 那一侧：解析、构造、写回（可选）](#13-yyjson-那一侧解析构造写回可选)
 
 ---
 
@@ -350,26 +350,33 @@ bool doc_round_trip(const std::string& text, long long& out_size) {
 
 ---
 
-## 13. 第二个解析后端：yyjson（可选）
+## 13. yyjson 那一侧：解析、构造、写回（可选）
 
-本页 §1–§12 讲的全是**产出**那一侧（`uvcpp_json_writer`，核心模块、零依赖、永远在编）。
+本页 §1–§12 讲的是**写法**那一侧（`uvcpp_json_writer`，核心模块、零依赖、永远在编）。
 **读入**那一侧在这之前只有一条路：`webapp/uvcpp_web_json.h` 的 nlohmann 后端 ——
 header-only、语义完整、也**慢**：每个值占一个 `std::map` / `std::vector` 节点，一份
 几 KB 的文档解析下来是成百上千次 `operator new`。
 
-`src/yyjson/` 给同一件事提供**第二个后端**：`uvcpp_json_doc` 拿 [yyjson](https://github.com/ibireme/yyjson)
-解析，然后可以
+`src/yyjson/` 是本库自己 bundle 的那份 [yyjson](https://github.com/ibireme/yyjson) 的出口，
+**两个方向都走它**（"一个模块、两侧"，见 `src/yyjson/uvcpp_json_doc.h` 的文件头）：
 
-* 用与 nlohmann 路径**同名**的访问器取值（`uvcpp_json_get_string/bool/int/double`），
-* 用同一套"查不到就给默认值"的语义遍历（`uvcpp_json_object_iter` / `at()`），
-* 用**同一个**输出器写回去（`uvcpp_json_write` 把 DOM 喂给本页的 `uvcpp_json_writer`）。
+* **解析**：`uvcpp_json_doc` 拿 yyjson 解析，之后可以
+  * 用与 nlohmann 路径**同名**的访问器取值（`uvcpp_json_get_string/bool/int/double`），
+  * 用同一套"查不到就给默认值"的语义遍历（`uvcpp_json_object_iter` / `at()`）。
+* **构造**：`uvcpp_json_builder` 用 yyjson 的**可变 DOM** 建一棵树，句柄是
+  `uvcpp_json_node`（§13.8）；也能用 `add_copy()` 把解析侧的一棵子树整块搬进来。
+* **写回**：`uvcpp_json_write` 走 **yyjson 自己的序列化器**
+  （`yyjson_val_write_buf` / `yyjson_mut_val_write_buf`）。1.7.2 以前它把 DOM 喂给本页的
+  `uvcpp_json_writer`，那道桥**已删** —— `uvcpp_json_write` 换了签名，是一次
+  **API 变更**（`CHANGELOG.md` 的 `### JSON` 段里有）。
 
-也就是说：想换后端的人，改的是**变量的类型**，不是成片的调用点。
+所以这一侧**来路与出路都是同一份生态里已有的生产级库**，一行手搓序列化都没有 ——
+想换后端的人，改的是**变量的类型**，不是成片的调用点。
 
 **这不是替换。** `using uvcpp_json = nlohmann::json` 一个字没动，`uvcpp_json_parse` /
 `uvcpp_json_dump` / `uvcpp_json_get_*` 的行为一个字没改（nlohmann 那侧的重载仍在）。
-两个后端可以同时出现在一个工程里，甚至一个函数里 —— `uvcpp_json_get_int` 有**两组**
-重载，第一参数是 `uvcpp_json` 还是 `uvcpp_json_value` 就决定了走哪个后端。
+两侧可以同时出现在一个工程里，甚至一个函数里 —— `uvcpp_json_get_int` 有**两组**
+重载，第一参数是 `uvcpp_json` 还是 `uvcpp_json_value` 就决定了走哪一侧。
 
 ### 13.1 怎么开
 
@@ -405,7 +412,7 @@ header-only、语义完整、也**慢**：每个值占一个 `std::map` / `std::
 
 #include <string>
 
-// 把一份请求体解出来，取两个字段，再用本库自己的 writer 写回去。
+// 把一份请求体解出来，取两个字段，再用 yyjson 自己的序列化器写回去。
 std::string doc_roundtrip(const std::string& body, bool* ok) {
   uvcpp::uvcpp_json_doc doc;
   if (doc.parse(body) != uvcpp::json_doc_status::OK) {   // 失败时 doc 不被改动
@@ -419,9 +426,10 @@ std::string doc_roundtrip(const std::string& body, bool* ok) {
   const std::string name =
       uvcpp::uvcpp_json_get_string(root, "name", "unnamed");  // 取不到给默认值
 
+  // 写回：产出由 yyjson 自己的序列化器产生 —— 写之前 out 被清空，
+  // 成功时 out 就是那头 JSON，失败时它为空。
   std::string out;
-  uvcpp::uvcpp_json_writer w(out);
-  const uvcpp::json_write_status ws = uvcpp::uvcpp_json_write(root, w);
+  const uvcpp::json_write_status ws = uvcpp::uvcpp_json_write(root, out);
 
   *ok = has_size && (ws == uvcpp::json_write_status::OK);
   return out;
@@ -437,27 +445,42 @@ std::string doc_roundtrip(const std::string& body, bool* ok) {
 - `json_doc_options` 与 webapp 的 `json_parse_options` 是**各自独立的类型**（本模块不依赖
   webapp，所以共用不了那一个），但**默认值相同**：深度 64、8 MiB。
 
-### 13.3 与 nlohmann 路径**如实**存在的四处不同
+### 13.3 与 nlohmann 路径**如实**存在的三处不同
 
-四处都是**设计选择**、不是待修的差异。写在这里是为了让"换后端"这件事可预期：
+三处都是**设计选择**、不是待修的差异。写在这里是为了让"换后端"这件事可预期：
 
-| # | 这一处 | 本后端 | nlohmann 路径 |
+| # | 这一处 | yyjson 这一侧 | nlohmann 路径 |
 |---|---|---|---|
-| 1 | 成员顺序 | **文档里的顺序**（yyjson 按读入次序存） | 按键**排序**（对象类型是 `std::map`），`dump()` 出来也是排序的 |
+| 1 | 成员顺序 | **文档里的顺序**（yyjson 按读入次序存；构造侧是**插入顺序**） | 按键**排序**（对象类型是 `std::map`），`dump()` 出来也是排序的 |
 | 2 | 重复键 | 取**第一个**（`obj_get` 语义） | 取**最后一个**（`std::map` 插入覆盖） |
-| 3 | 数字写回去的形态 | `1.0` 写成 `1`；17 位有效数字的 double 写 17 位 | `dump()` 走自己的最短往返算法，写 `1.0` |
-| 4 | 输出那一侧的递归 | `uvcpp_json_write` **递归**，深度由解析时的 `max_depth` 兜住 | `dump()` 也是递归的（同一条约束，只是默认深度不同） |
+| 3 | 浮点写回去的形态 | 写回走 yyjson 自己的序列化器：科学记数法的**阈值**是 ECMAScript 那条线（`1e-6 ≤ \|x\| < 1e21` 一律定点），指数里**没有 `+`**（`1e300`） | `dump()` 走自己的最短往返算法：`1e+15`、`1e-05`、`1e+300` |
 
-四条各自的判据：
+**整数、字符串转义、UTF-8 这三块两边逐字节相同**：`1.0` 两边都写 `1.0`、`\u0000` 是小写
+十六进制、`中文` 原样不转义、`/` 不转义。（1.7.2 之前的写器把 `1.0` 写成 `1` —— 那是旧的
+第 3 处不同，换掉写器之后**没了**。）
+
+三处各自的判据：
 
 1. 键序**不是数据**：`uvcpp_json_get_*` 与 `get(key)` 都不受它影响。要逐字节比两份输出，
-   就得让源文档的键**本来就是有序的**（用例就是这么写的：五份语料的键全部升序排）。
+   就得让两边的键**本来就是同序的**（用例里的语料键一律升序写，构造侧那条路在建树时
+   **按键的升序插入** —— `add_copy()` 搬过来的子树保留的是**源文档的键序**，别拿它去
+   对齐 nlohmann 的排序）。
 2. 两边都**接受**重复键（都报 OK），只是取值不同。RFC 8259 里重复键"行为不可移植"，
    所以这不是谁对谁错；用例把**两边各自的行为都钉住**，而不是假装它们一样。
-3. 这是 `uvcpp_json_writer` 早就定下的行为（见 §7），**值相同、字节可能不同**。本模块不改它，
-   也不为它背锅；要让数字形态也一致，走 nlohmann 那一半。
-4. 深度两边都用 `<uvcpp/uvcpp_json_scan.h>` 预扫描，所以 `TOO_DEEP` 是**同一条线**；
-   但把 `max_depth` 设到几千以上、又拿 `uvcpp_json_write` 去写那份文档，栈是你自己的。
+3. 差别**只在浮点的科学记数法**，两种形态，都是**实测**的（用例第 6/7/8 组按那张表逐条钉）：
+   (a) **阈值不同** —— `1e15` 这一侧写 `1000000000000000.0`、nlohmann 写 `1e+15`；`1e-5`
+   这一侧写 `0.00001`、nlohmann 写 `1e-05`；(b) **正指数差一个 `+`** —— `1e300` 对
+   `1e+300`（负指数没有这个符号，所以 `1e-300` / `5e-324` / `2.5e-10` 两边逐字节相同）。
+   **值相同、字节不同**，别写"逐字节全同"。
+
+**写回不递归了**：yyjson 的写器用显式栈（缓冲尾部那段 `yyjson_write_ctx`），所以老的第 4 处
+不同（"本后端递归、栈是你自己的"）**没有了** —— 两侧都不递归，深度只受解析侧预扫描
+（`<uvcpp/uvcpp_json_scan.h>`，默认 64）与内存的限制。十万层的文档写得出来，用例里有一条
+钉着这件事。
+
+还有一条**不对称**：`dump()` 遇到非法 UTF-8 会抛 `type_error.316`，这一侧原样透传那些字节
+（`YYJSON_WRITE_ALLOW_INVALID_UNICODE`，与老写器一样二进制安全）。所以"两份输出逐字节比"
+这件事在含非法字节的语料上**没有对照物** —— 用例里那条是单向的。
 
 ### 13.4 状态与 nlohmann 路径的对照
 
@@ -477,22 +500,37 @@ std::string doc_roundtrip(const std::string& body, bool* ok) {
 
 | 用例 | 它判什么 |
 |---|---|
-| `tests/functional/yyjson_doc_func.cpp` | 下面这一整列 |
+| `tests/functional/yyjson_doc_func.cpp` | 解析侧 + 写回 |
+| `tests/functional/yyjson_build_func.cpp` | 构造侧（`uvcpp_json_builder` / `uvcpp_json_node`，§13.8） |
 
 * **与 nlohmann 路径状态逐条一致**：一张 25 行的表（16 条坏输入 + 边界：空、纯空白、超长、
   超深、BOM、非法 UTF-8、重复键、64 与 65 层、又长又深、又深又坏、`max_depth = 0`），
   每条**先与手写期望值比**，再（webapp 开着时）**与 nlohmann 逐条比**。判"两边一样"而不判
   "其中一边是什么"，是特意的：一个对什么都说 OK 的解析器让两边都错也能全绿。
-* **逐字节相同**：五份语料（转义、控制字符与 UTF-8、整数两端、浮点、数组）的键全部升序排，
-  于是 `uvcpp_json_write` 的产出与 nlohmann `dump()` **逐字节相等**。这半边另有一条
-  **反空洞**断言：先确认 nlohmann 侧产出**非空且不是 `null`**，否则两边一起坏也判绿。
+* **写回：逐字节相同的那几份 + 如实不同的那一格**：四份语料（转义、控制字符与 UTF-8、
+  整数两端、数组）的键全部升序排，于是 `uvcpp_json_write` 的产出与 nlohmann `dump()`
+  **逐字节相等**；这半边另有一条**反空洞**断言：先确认 nlohmann 侧产出**非空且不是
+  `null`**，否则两边一起坏也判绿。`1e+300` 那一份**单独**列成"值相同、字节在第 3 处不同"
+  那一格，并同时钉住两边的字节（`{"c":1e300}` 对 `{"c":1e+300}`）。浮点那张表按 §13.3 的
+  形态逐格写死（`1` / `1.0` / `0.0` / `-0.0` / `1e15` / `1e-5` / `1e21` / `1e300` / 17 位
+  double / denormal…）。
 * **数字语义相同**：把两边输出都交给 nlohmann 再比 `==`，覆盖 `1.0` / `0.0` / `-0.0` /
-  17 位 double / denormal / 超 uint64 的大整数；另有一条专门钉住第 3 条不同是**真的**
-  （`{"v":1.0}`：本后端 `{"v":1}`、nlohmann `{"v":1.0}`）。
+  17 位 double / denormal / 超 uint64 的大整数。第 3 条不同有**两条**见证：`{"v":1.0}` 两边
+  现在**一致**（换掉写器之后旧写器的 `{"v":1}` 没了），`{"v":1e300}` 两边**不一致**
+  （`1e300` 对 `1e+300`）。
+* **两侧都不递归**：十万层的文档既能解析（把上限抬到它之上）也能**写出来**，同一条用例钉住
+  两侧（`out == deep`）。这一条是"能报 TOO_DEEP"之外的另一半 —— 深度是**策略**，栈是**物理**，
+  两者都要有见证。
 * **`memory_bytes()` 的可测形式**：空文档是 0、`reset()` 后回到 0、反复失败（200 次）后
   文档**逐字节不变**（与一份新解析的同文文档比）、移动之后不重复计数。
-* **解析器不递归**：十万层的输入，把上限抬到它之上就真解析（而不是爆栈）。这一条是
-  "本后端能报 TOO_DEEP"之外的另一半 —— 深度是**策略**，栈是**物理**，两者都要有见证。
+* **构造侧**（`yyjson_build_func.cpp`，九组）：各类型往返（建树 → 写 → 重新解析 → 取值）；
+  键与字符串的**拷贝**语义（临时 `std::string` 当键、栈缓冲区当键、含 `\0` 的键）；`add_copy()`
+  在**源文档析构之后**仍然正确；**句柄稳定性**（取一个句柄，往同一容器再加一万个元素，
+  旧句柄仍有效、且仍是那个节点）；记账（空树 0 / `reset()` 回 0 / 移动把计数带走 /
+  `reserve()` 降低分配次数）；键序 = **插入序**（含重复键）；与 nlohmann 的逐字节对照
+  （**升序插入**时相同，非升序时给出键序分歧的见证）；失败路径（错的容器类型、无效节点、
+  `nullptr` 字符串与键、失败之后树**一字不变**、`last_error()`、一个异常都不抛）；
+  写回侧（无效节点写 `null`、标量与空容器当根、缓冲复用、写→解析→写幂等）。
 
 **吞吐与常驻内存不在门禁里**，它们是这一节的读数（§13.6）。压测数字进用例就是造一条
 会随机变红的门禁。
@@ -548,16 +586,95 @@ std::string doc_roundtrip(const std::string& body, bool* ok) {
 - 上面**手工验过一次**：本机 `-DUVCPP_ENABLE_YYJSON=ON` 的树 `cmake --install` 到
   一个临时前缀（`include/yyjson/uvcpp_json_doc.h` 与 `include/uvcpp/uvcpp_json_scan.h`
   都在），拿该前缀跑 `python3 tests/tools/check_doc_snippets.py --pkg <前缀>` ——
-  **本页这几条片段（含 §13.2 那条）判绿**。同一棵树上的
-  `test_yyjson_doc_func` 也是 ALL PASS（全量 93/93）；四个 CI 门禁串也按 `yyjson`
-  那一格的原命令行在本机复现过。**豁免删掉之后又按发布包的形状验了一遍**
-  （`package_release.py --platform linux-x64` 出的那棵树，包内
-  `UVCPP_YYJSON_ENABLE` 是 1）：`check_doc_snippets.py --pkg …` ⇒ 本页
-  **编过 8/8 条**、全库 `编过 102/202 条`、`rc=0`。反向对照也做过：拿一棵
-  yyjson 关着的旧包跑同一条命令，本页第 402 行那条片段变成 `[跳]`、整条**退 3**
-  —— 这正是三个 config-contract 档必须跟着传 `-DUVCPP_ENABLE_YYJSON=ON` 的原因。
+  **本页这几条片段（含 §13.2 与 §13.8 那两条）判绿**。同一棵树上的 ctest 也是
+  全绿（94/94）；四个 CI 门禁串也按 `yyjson` 那一格的原命令行在本机复现过。
+  **豁免删掉之后又按发布包的形状验了一遍**（`package_release.py --platform linux-x64`
+  出的那棵树，包内 `UVCPP_YYJSON_ENABLE` 是 1）：`check_doc_snippets.py --pkg …` ⇒
+  本页 **编过 9/9 条**、一条不跳；整仓那一行是 `候选 203 条：编过 75 条 … 跳过 32 条`、
+  退 3 —— **那个数与本页无关**，它由"这个前缀里开了几个模块"决定（那棵树没开
+  wsdl / ssl / quic 这些），本页 9 条全部真编真判。反向对照也做过：拿一棵 yyjson
+  关着的旧包跑同一条命令，本页 §13.2 那条片段变成 `[跳]`、整条**退 3** —— 这正是
+  三个 config-contract 档必须跟着传 `-DUVCPP_ENABLE_YYJSON=ON` 的原因。
+- **一条 API 变更**：`uvcpp_json_write(const uvcpp_json_value&, uvcpp_json_writer&)`
+  在 1.7.2 **被删掉**，换成 `uvcpp_json_write(const uvcpp_json_value&, std::string&)`
+  （构造侧另有一条收 `uvcpp_json_node` 的重载）。仓内调用点只有
+  `tests/functional/yyjson_doc_func.cpp` 的三处，但它是**公开 API** ⇒ `CHANGELOG.md`
+  的 `### JSON` 段明写、本页与模块头重写。**旧路那两道闸也没了**：过去调用方用
+  `json_write_options` 的 `max_depth` / `max_bytes` 兜住写回，换掉写器之后这两道门
+  不存在了（解析侧的深度门仍在，默认 64；输出侧只剩一条 64 MiB 的失控上限 + 一条
+  精确尺寸的分配式慢路）。这是"换"这个选择的直接代价，写在这里不掩饰。
 - **对照那一半需要 webapp**：nlohmann 是 webapp 的依赖，`UVCPP_BUILD_WEBAPP=OFF` 的树上
-  那条 include 不存在。用例把那半整段套在 `#if UVCPP_WEBAPP_ENABLE` 里，并打印一行
-  **显眼的 `[SKIP]`** —— 不是静默通过（本仓最忌讳的那种绿）。
+  那条 include 不存在。**两个**用例文件里与 nlohmann 对照的那几组都整段套在
+  `#if UVCPP_WEBAPP_ENABLE` 里，并打印一行**显眼的 `[SKIP]`** —— 不是静默通过
+  （本仓最忌讳的那种绿）；其余分组在 `WEBAPP=OFF` 的树上真跑。
 - **不给"换后端"提供自动迁移**：两边的类型名不同（`uvcpp_json` / `uvcpp_json_doc`），
   换的时候编译器会指出来；但不提供兼容层，也不打算把默认后端换掉。
+
+### 13.8 构造侧：`uvcpp_json_builder`
+
+§13.2 那条片段是"解出来、读两个字段、原样写回去"。这一节是**另一个方向**：自己建一棵树。
+
+```cpp
+#include <yyjson/uvcpp_json_doc.h>
+
+#include <string>
+
+// 建一份 {"count":3,"items":["a","b"],"total":1.5}，用 yyjson 自己的写器写出去。
+std::string build_json(bool* ok) {
+  uvcpp::uvcpp_json_builder b;
+  const uvcpp::uvcpp_json_node root = b.make_object();
+  b.set_root(root);                         // 挂成根；已经有根时返回 false
+
+  b.add_int(root, "count", 3);
+  const uvcpp::uvcpp_json_node items = b.add_array(root, "items");
+  b.push_string(items, "a");                // 键与字符串都是**拷进来**的
+  b.push_string(items, std::string("b"));   // 传临时对象也安全
+  b.add_double(root, "total", 1.5);
+
+  std::string out;
+  const uvcpp::json_write_status ws = uvcpp::uvcpp_json_write(root, out);
+  *ok = (ws == uvcpp::json_write_status::OK);
+  return out;
+}
+```
+
+`out` 里是 `{"count":3,"items":["a","b"],"total":1.5}` —— 键序就是**插入序**（第 1 处不同）。
+
+几件要记住的：
+
+- **两个类型，不是给 `uvcpp_json_doc` 加方法**：yyjson 的**可变值读不出来** ——
+  `yyjson_val` 是 16 字节（tag + uni，子节点是一段连续数组），`yyjson_mut_val` 是 24 字节
+  （多一个 `next`，子节点是循环链表）。两套句柄互不通用，所以构造侧有它自己的一组类型，
+  公开头里一个 yyjson 类型都不出现（与解析侧同形）。
+- **`uvcpp_json_node` 是视图**：builder `reset()` / 析构之后，之前拿到的节点全部悬空
+  （与 `uvcpp_json_value` 对 `uvcpp_json_doc` 的关系一样）。但**容器长大不会让它悬空** ——
+  追加只搬容器自己那张子指针表，所以"取一个句柄、往同一容器再加一万个元素、再用旧句柄"
+  是**成立**的（用例里钉着）。
+- **失败一律返回 `false` / 无效节点，不抛异常**，也不改动已经建好的部分；原因在
+  `last_error()` 里（yyjson 的可变 API 只回 `bool` / `NULL`，那句话是本模块自己写的）。
+  传 `nullptr` 当字符串是**失败**，不是空串也不是 `null` —— 要 null 用 `add_null()`。
+- **分配**：整棵树从 builder 自己的字符串池 / 值池里出，池按 2 倍长块 ⇒ 一棵 50 项的树是
+  **13 次** `malloc`（同一棵树走 nlohmann 的 `std::map` DOM 是 **2,625 次** `operator new`；
+  两把尺子都是"向堆要了几次"，不是同一个计数器，见 §13.6 末段那条告诫）。**写回自己不向堆
+  要内存** —— 这条不能拿 `allocation_count()` 证（那条路用的是写回自己的一块账本，压根不
+  记在 builder 头上），得从**进程外面**数：`LD_PRELOAD` 一个 `malloc` 计数器，同一棵 50 项
+  的树、"建树 + 写回"是 **14.002 次/调用**、"只建树不写"是 **14.000** ⇒ 多出来的那 0.002
+  是**第一次**把缓冲长大那几次摊到 2 000 次调用上的尾巴，稳态一次都不分配。同一棵树交给
+  yyjson 自己的 `yyjson_mut_val_write` 是 **27 次**（多出来的是它那条"小缓冲起步、按需
+  长大"的路）。`13` 与 `14` 不矛盾：builder 自己那块计数块的一次 `new` 不算在
+  `allocation_count()` 里。
+  `reserve(vals, str_bytes)` 只是给池一个初始尺寸的提示（建树**之前**调），不调也正确。
+  `memory_bytes()` / `peak_bytes()` / `allocation_count()` 是同一个借用分配器的实测。
+- **写回那一侧的数**（同一棵 builder 树、8 397 B 的产出，min-of-7×3000、`taskset -c 10`）：
+  我们这条路 **7.9 µs**、yyjson 自己的 `yyjson_mut_val_write` **8.9 µs**、直接往一块足够
+  大的缓冲里写（`yyjson_mut_val_write_buf`）**7.5 µs** ⇒ **写回不比"自己调 yyjson"慢**；
+  同一棵树的 nlohmann 路（DOM + `dump()`）是 **129.6 µs**。**快路的缓冲必须比产出大**：
+  写器把 `yyjson_write_ctx` 栈放在缓冲尾部，而且每写一段之前按**最坏展开量**预留（字符串
+  那条是 `str_len * 6 + 16`，见 `yyjson.c` 的 `incr_len`），所以"刚好装下"一定失败、差的
+  还不是一两个字节 ⇒ 装不下就**翻倍重试**，成功的 `resize(len)` 把多出来的容量留在 `out`
+  里，同一形状从第二次起一遍过。
+- **`add_copy()` / `push_copy()`** 是两个 DOM 之间**唯一**的通道：把解析侧的一棵子树整块
+  深拷进来（一遍迭代扫描，字符串进池），**拷完与源文档再无关系**，源 `uvcpp_json_doc`
+  可以立刻析构。**它保留的是源文档的键序** —— 想对齐 nlohmann 的排序就得自己按键的升序
+  重新插一遍（用例第 7 组把这处分歧钉着）。
+- **不做 `remove` / `rename`**：构造侧不需要，要删就重建。

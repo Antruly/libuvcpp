@@ -73,15 +73,14 @@ option(UVCPP_BUILD_WEBAPP "Build web application framework (router/middleware/lo
 # 见 src/http2/ 的 pimpl 说明）。
 option(UVCPP_ENABLE_WSDL "Enable WSDL/SOAP module (XML via pugixml, needs UVCPP_BUILD_WEBAPP)" OFF)
 
-# yyjson JSON 后端（`src/yyjson/`）—— 把**解析**这一段的第二个实现摆出来。
+# yyjson JSON 后端（`src/yyjson/`）—— 把 JSON 的**解析与写入**两个方向都摆出来。
 #
-# 它与 webapp 那条 nlohmann 路径**并存**，不是替换：`using uvcpp_json =
-# nlohmann::json` 一个字不改，`uvcpp_json_parse` / `uvcpp_json_dump` /
-# `uvcpp_json_get_*` 的行为一个字不改。开这个模块的人得到的是**另一组类型**
-# （`uvcpp_json_doc` / `uvcpp_json_value`）与**同名**的取值入口，以及一条
-# "DOM 写回 `uvcpp_json_writer`"的桥。定位在 `src/yyjson/uvcpp_json_doc.h` 的
-# 文件头里写全了，包括与 nlohmann 路径如实存在的四处不同（成员顺序、重复键、
-# 数字写回的形态、写回的递归深度）。
+# 它与 webapp 那条 nlohmann 路径**并存**，不是替换：`using uvcpp_json = nlohmann::json`
+# 一个字不改，`uvcpp_json_parse` / `uvcpp_json_dump` / `uvcpp_json_get_*` 的行为一个字不改。
+# 开这个模块的人得到**两组新类型**（解析侧 `uvcpp_json_doc` + `uvcpp_json_value`，构造侧
+# `uvcpp_json_builder` + `uvcpp_json_node`）与**同名**的取值入口，以及 `uvcpp_json_write`
+# —— 它用 **yyjson 自己的序列化器**写回（1.7.2 起属 **API 变更**：通到本库手写
+# `uvcpp_json_writer` 的那道桥已删除）。三处不同见 `uvcpp_json_doc.h` 文件头。
 #
 # 依赖：**yyjson**（单头 + 单 .c）。它同样是**私有依赖** —— `<yyjson.h>` 只出现
 # 在 `src/yyjson/uvcpp_json_doc.cpp` 里，公开头一个 yyjson 类型都不出现（迭代器
@@ -91,14 +90,15 @@ option(UVCPP_ENABLE_WSDL "Enable WSDL/SOAP module (XML via pugixml, needs UVCPP_
 #
 # **它不属于 webapp，也不依赖 web/webapp** —— 这是它与 wsdl 的关键区别：wsdl 建
 # 在 webapp 之上（所以 webapp 关掉时它被强制关闭），而这一层是核心模块，webapp
-# 关掉的树上照样能开。默认 **OFF**。
+# 关掉的树上照样能开。默认 **OFF**（发布包是另一回事：六条发布腿都显式传
+# `-DUVCPP_ENABLE_YYJSON=ON` —— 这个默认值面对的是**最小源码构建**）。
 #
 # 关掉时的判据是**默认配置不受影响**（三条，见 `src/yyjson/uvcpp_json_doc.h` 的
 # 文件头：导出符号集与 `DT_NEEDED` 逐字相同；编译单元只多一个，即共用的深度预扫
 # 描 `src/uvcpp/uvcpp_json_scan.{h,cpp}` 从 webapp 搬出来给两个后端用、逐行相同；
 # `.so` 字节数会动但那**不是**判据）。两后端并存，nlohmann 那条路行为不变。
 option(UVCPP_ENABLE_YYJSON
-  "Enable the optional yyjson JSON backend (src/yyjson/: fast parse + compact DOM, alongside nlohmann)" OFF)
+  "Enable the optional yyjson JSON backend (src/yyjson/: fast parse + compact DOM, build + yyjson's own serializer, alongside nlohmann)" OFF)
 
 # QUIC 传输层 —— net 层的一条**链路协议**，为后面的 HTTP/3 铺路。
 #

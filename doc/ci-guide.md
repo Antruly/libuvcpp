@@ -470,9 +470,12 @@ MSVC. MinGW and macOS are the gap (see §1).
 
 ### The `yyjson` entries
 
-`yyjson` is `src/yyjson/` — the **optional second JSON parse backend** (`uvcpp_json_doc` over
-[yyjson](https://github.com/ibireme/yyjson), plus accessors that share their names with the
-nlohmann ones and a bridge back into `uvcpp_json_writer`). It hangs off the single
+`yyjson` is `src/yyjson/` — the **optional JSON backend built on this library's own bundled
+copy of [yyjson](https://github.com/ibireme/yyjson)**: `uvcpp_json_doc` / `uvcpp_json_value`
+parse, `uvcpp_json_builder` / `uvcpp_json_node` construct a mutable tree, and
+`uvcpp_json_write` serialises with **yyjson's own writer** (the accessors share their names
+with the nlohmann ones; the old bridge back into `uvcpp_json_writer` was removed in 1.7.2,
+which is also an API change to `uvcpp_json_write`). It hangs off the single
 `UVCPP_ENABLE_YYJSON` switch and runs on **four** legs — the three `yyjson` matrix entries
 (Ubuntu, macOS, Windows MSVC) plus the single `ci-mingw64.yml` job, whose one configure also
 passes `-DUVCPP_ENABLE_YYJSON=ON` since 1.7.0 (that cell has no matrix entry, so §1's gap
@@ -491,9 +494,16 @@ table lost its `MinGW + yyjson` row rather than gaining a row here).
   carries the two load-bearing assertions: a 25-row input table where every row is compared
   **first against a hand-written expectation and then against nlohmann** (comparing only the
   two libraries to each other would let a parser that says "OK" to everything pass), and five
-  corpora where `uvcpp_json_write` and nlohmann's `dump()` must be **byte-identical**. Without
-  an entry, none of that is ever compiled — "not compiled" and "compiled and green" are
-  different words but the same check colour.
+  corpora where `uvcpp_json_write` and nlohmann's `dump()` must be **byte-identical** (one
+  more corpus is deliberately *not*: it pins the single shape where the two writers really do
+  differ — the scientific-notation form of a double). Without an entry, none of that is ever
+  compiled — "not compiled" and "compiled and green" are different words but the same check
+  colour.
+  `tests/functional/yyjson_build_func.cpp` adds the construction side (nine groups: round
+  trips, key/string copy semantics, `add_copy` after the source doc dies, handle stability
+  under 10 000 appends, the allocation accounting, insertion-order keys, the byte-for-byte
+  comparison against nlohmann when keys are inserted in ascending order, the failure paths,
+  and the write side).
 - **Why macOS is included even though the `wsdl` entries are not.** The gap table in §1
   justifies the missing macOS `wsdl` entry with "macOS is not a release platform, so there is
   no path on which it reaches a user unbuilt". That argument does not apply here: even before
@@ -510,7 +520,9 @@ table lost its `MinGW + yyjson` row rather than gaining a row here).
   FetchContent resolved and the object library exists is that string. Gate ③
   (`Including yyjson module in build`) proves `src/yyjson/` entered the source list, and gate
   ④ (`test_yyjson_doc_func`) proves the test was registered — the file is removed by the
-  glob+FILTER in `tests/functional/CMakeLists.txt` when the module is off.
+  glob+FILTER in `tests/functional/CMakeLists.txt` when the module is off. It is a
+  **sentinel for one of two** yyjson test binaries (`test_yyjson_build_func` rides the same
+  `ctest`); the one string is enough because the filter that removes them is one rule.
 
 ### The `brotli` entries
 

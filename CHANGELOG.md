@@ -2722,7 +2722,84 @@
 
   另外四处**刻意的**行为不同（成员按文档顺序而非键排序、重复键取第一个而非最后一个、
   `1.0` 写成 `1`、`uvcpp_json_write` 递归而由 `max_depth` 兜住）逐条写在
-  `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
+  `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。**这一份"四处"在第 1.7.2 缩成
+  三处**：写回换成 yyjson 自己的序列化器之后，`1.0` 两边一致了、写回也不再递归 ——
+  见下面那条。
+
+- **yyjson 补齐"完整解析 + 完整写入"：构造器 + 用自己的序列化器写回**（`1.7.2-dev`）。
+  `src/yyjson/` 此前只会**解析**（模块里 `yyjson_mut_*` 一次都没出现过），写回那道桥
+  `uvcpp_json_write(const uvcpp_json_value&, uvcpp_json_writer&)` 走的是**本库手写的
+  流写器**。这次把两个方向都落到**同一个生态里已有的生产级库**上：新增构造侧两个类型，
+  写回换成 yyjson 自己的序列化器。
+
+  **API 变更（破坏性）**：`uvcpp_json_write(…, uvcpp_json_writer&)` **删除**，换成
+  `uvcpp_json_write(const uvcpp_json_value&, std::string&)`，另加一条收构造侧句柄的
+  `uvcpp_json_write(const uvcpp_json_node&, std::string&)`。契约：**写之前 `out` 被清空**，
+  成功时它就是产出（不含结尾 NUL），失败时为空。仓内调用点只有三条（都在
+  `tests/functional/yyjson_doc_func.cpp`），但它是**公开 API** ⇒ 在这里明写。
+  旧路那两道闸**随之没了**：过去调用方用 `json_write_options` 的 `max_depth` / `max_bytes`
+  兜住写回，换掉写器之后这两道门不存在（解析侧的深度门仍在，默认 64；输出侧只剩一条
+  64 MiB 的失控上限 + 一条精确尺寸的分配式慢路）。
+
+  **新增 `uvcpp_json_builder` + `uvcpp_json_node`**（都落在已有的
+  `src/yyjson/uvcpp_json_doc.h` 里，不新增源文件 —— 新头会被 `cmake --install` 的 glob
+  装出去，而私有头一旦引用 `<yyjson.h>` 就是个装出去的坏头）。用 yyjson 的**可变 DOM**：
+  `make_object()` / `make_array()` 造游离容器，`add_*` / `push_*` 填，`set_root()` 挂根，
+  `add_copy()` / `push_copy()` 把解析侧的子树整块深拷进来（**两个 DOM 之间唯一的通道**，
+  拷完与源文档再无关系，源 `uvcpp_json_doc` 可以立刻析构）。键与字符串值**一律拷进
+  builder 自己的池**（传临时 `std::string`、传栈缓冲区、传含 `\0` 的键都安全）；键走
+  `yyjson_mut_strncpy` + `yyjson_mut_obj_add`（公开 API、O(1) 追加、允许重复键），
+  **不用** `yyjson_mut_obj_add_strncpy`（它的键是**借**的）也**不用** `yyjson_mut_obj_put`
+  （同名键线性查找 ⇒ 建 n 键对象是 O(n²)）。失败一律返回 `false` / 无效节点、**不抛异常**、
+  不改动已建好的部分（原因在 `last_error()` 里）。
+
+  **写回**：`yyjson_val_write_buf` / `yyjson_mut_val_write_buf` 走快路 —— 缓冲**必须比产出
+  **大**：写器把 `yyjson_write_ctx` 栈放在缓冲尾部，而且每写一段之前按**最坏展开量**预留
+  （字符串那条是 `str_len * 6 + 16`，见上游 `yyjson.c` 的 `incr_len`），所以"刚好装下"一定
+  失败、差的还不是一两个字节（实测 2 692 B 的产出要 > 2 820 B 才写得下）。装不下就**翻倍
+  重试**；成功的 `resize(len)` 把多出来的容量留在 `out` 里 ⇒ 同一形状的响应从第二次起
+  一遍过、**稳态零分配**。这条路上**只有"缓冲不够"一种可失败原因**（`YYJSON_NULL_ALC` 下
+  `realloc` 恒返空），超过 64 MiB 才转精确尺寸的分配式慢路（用模块自己的 `alloc_stats`
+  分配器；任何尺寸都能成功，代价是大文档多一次拷贝）。`out` 长大那几步（`resize` /
+  `assign`）**可能抛** `std::bad_alloc` —— 本模块不抛异常，那道壳把它收成 `NO_MEMORY`。三个写
+  标志 `YYJSON_WRITE_LOWERCASE_HEX | YYJSON_WRITE_INF_AND_NAN_AS_NULL |
+  YYJSON_WRITE_ALLOW_INVALID_UNICODE` 是"逐字节对齐旧写器"的关键：yyjson 默认的控制字符
+  十六进制是**大写**、非法 UTF-8 默认换成 `�`。**不开** ESCAPE_UNICODE / ESCAPE_SLASH /
+  PRETTY。无效视图仍写固定的 4 个字节 `null`（不经过序列化器）。
+
+  **写的形态有两处如实不同（旧的"第 3 处不同"换了形状）**：① 科学记数法的**阈值**是
+  ECMAScript 那条线（`1e-6 ≤ |x| < 1e21` 一律定点）⇒ `1e15` 写
+  `1000000000000000.0`、`1e-5` 写 `0.00001`；② 正指数**不带 `+`** ⇒ `1e300` 而不是
+  `1e+300`。整数、转义、UTF-8 三块与 nlohmann **逐字节相同**（`1.0` 现在两边都写 `1.0`
+  —— 旧写器写的是 `1`，这一条**改判**）。**旧的"第 4 处不同"（写回递归）消失**：yyjson
+  的写器用显式栈，两侧都不递归，十万层的文档写得出来（用例钉着）。另有一条**不对称**：
+  `dump()` 遇到非法 UTF-8 会抛 `type_error.316`，这一侧原样透传（二进制安全）⇒ 含非法
+  字节的语料上"逐字节比"没有对照物，用例里那条是单向的。
+
+  **分配账**（本机实测，50 项的树、同一份数据）：构造侧 **13 次** `malloc`（同样的树走
+  nlohmann 的 `std::map` DOM 是 **2,625 次** `operator new`；两把尺子都是"向堆要了几次"，
+  不是同一个计数器）；写回那一侧得从**进程外面**数（写回用的是它自己那块账本，不记在
+  builder 头上）：`LD_PRELOAD` 一个 `malloc` 计数器 ⇒ "建树 + 写回" **14.002 次/调用**、
+  "只建树不写" **14.000**，即**写回自己不向堆要内存**（多出来的 0.002 是首次把缓冲长大
+  那几次摊下来的）。同一棵树交给 yyjson 自己的 `yyjson_mut_val_write` 是 **27 次**。
+
+  **写回那一侧的耗时**（同一棵 builder 树、8 397 B 的产出，min-of-7×3000、`taskset -c 10`）：
+  我们这条路 **7.9 µs**、yyjson 自己的 `yyjson_mut_val_write` **8.9 µs**、直接往足够大的
+  缓冲里写 **7.5 µs**；同一棵树的 nlohmann 路（DOM + `dump()`）**129.6 µs**。⇒ 换掉手搓
+  写器不是性能牺牲，**写回还比自己调 yyjson 的 one-shot 写器快**（省掉它那条"小缓冲起步、
+  按需长大"的路）。
+
+  **用例**：`tests/functional/yyjson_doc_func.cpp` 按新形态重推（第 5/6/7/8 组；
+  `1e+300` 那一份从"逐字节"里**拿出来**单列成"值相同、字节在第 3 处不同"的见证，另加
+  两侧都不递归的那一条）；新增 `tests/functional/yyjson_build_func.cpp`（九组，见
+  `doc/json-guide.md` §13.5/§13.8）。文件名含 `yyjson` ⇒ `tests/functional/CMakeLists.txt`
+  那条 glob 过滤器自动覆盖，`YYJSON=OFF` 的树上用例数**不变**。
+
+  **文档重新定位**：此前本仓自己把它叫"第二个后端、默认 OFF"（`tuned.md` 的调优清单里
+  也列着 alternative serializer）。现在两侧合起来是"**官方并列后端**：解析与写入都出自
+  本库 bundle 的这一份库，一行手搓序列化都没有"。`doc/json-guide.md` §13（含新增 §13.8）、
+  `doc/ci-guide.md` 的 `yyjson` 那一节、两张 README 的表格格都按这个改。**CMake 默认值
+  不动**（仍是 `OFF`，它面对的是最小源码构建）；"开箱即用"由六条发布腿满足。
 
 ### 配置、打包与 CI
 

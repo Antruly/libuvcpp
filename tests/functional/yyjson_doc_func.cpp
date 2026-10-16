@@ -9,10 +9,12 @@
  *   1. **状态逐条一致**：同一份输入，两个后端必须给出同一个结论。这是一张
  *      手写的期望表（25 条：16 条坏输入 + 边界），**两半都拿它判** —— 本后端
  *      判一次，nlohmann 路径再判一次，两次都对着同一列期望值。
- *   2. **桥的产出逐字节相同**：键序与数字形态都落在两份实现都同意的那一批语料
+ *   2. **写回的产出逐字节相同**：键序与数字形态都落在两份实现都同意的那一批语料
  *      上时，`uvcpp_json_write` 写出来的字节必须与 nlohmann 的 `dump()` 一样。
- *   3. **自己说不出口的地方如实钉住**：四处已声明（文件头）的不同 —— 成员顺序、
- *      重复键、数字形态、深度 —— 每处都有**直接**断言，而不是只在注释里写着。
+ *      **这句话有一个已量出来的边界**：`1e-5`/`1e15`/`1e300` 这一类指数形态两边
+ *      不同（第 3 处不同），那批语料**不进**这条判据，它们走第 8 组。
+ *   3. **自己说不出口的地方如实钉住**：三处已声明（文件头）的不同 —— 成员顺序、
+ *      重复键、浮点形态 —— 每处都有**直接**断言，而不是只在注释里写着。
  *
  * ## 两半，各有一半必须说清
  *
@@ -170,7 +172,12 @@ const char* k_corpus_c =
     "{\"big\":18446744073709551615,\"neg\":-9223372036854775808,"
     "\"pos\":9223372036854775807,\"zero\":0}";
 const char* k_corpus_d =
-    "{\"a\":0.1,\"b\":-2.25,\"c\":1e+300,\"d\":123456789.5}";
+    "{\"a\":0.1,\"b\":-2.25,\"d\":123456789.5}";
+// 第 3 处不同（浮点写回去的形态）的那一份：**单独列出来**，因为它不能进"逐字节
+// 相同"那条判据 —— `1e+300` 本后端写 `1e300`，nlohmann 写 `1e+300`。混在
+// `k_corpus_d` 里会让第 7 组从"逐字节"退化成"逐字节，除了这个键"，那种判据
+// 迟早会被人当成"这两边就是不一样"而放宽掉。
+const char* k_corpus_exp = "{\"c\":1e+300}";
 const char* k_corpus_array = "[[],[1],[[2,3]],{},{\"k\":\"v\"}]";
 
 // =========================================================================
@@ -638,16 +645,21 @@ void group_get_helpers() {
 }
 
 // =========================================================================
-// 第 5 组：桥（DOM → uvcpp_json_writer）
+// 第 5 组：写回（DOM → JSON 文本，走 yyjson 自己的序列化器）
 // =========================================================================
 
-/// @brief 把一份文档写进本库的输出器，返回产出的字节。
+/**
+ * @brief 把一份文档写出去，返回产出的字节。
+ *
+ * 顺带钉住新签名的那条契约：**成功时 `out` 非空、失败时 `out` 为空**。判据不能
+ * 只看状态码 —— "返回 OK 但什么都没写"那种实现同样会让下面全部比对空转。
+ */
 std::string write_doc(const uvcpp_json_doc& doc, const std::string& what) {
-  uvcpp_json_writer w;
-  check_st(uvcpp_json_write(doc.root(), w), json_write_status::OK,
+  std::string out;
+  check_st(uvcpp_json_write(doc.root(), out), json_write_status::OK,
            what + "：uvcpp_json_write 的状态");
-  must_ok(w.finish(), what + "：finish");
-  return w.str();
+  check(!out.empty(), what + "：写出来的不是空串");
+  return out;
 }
 
 void group_bridge_self() {
@@ -662,7 +674,10 @@ void group_bridge_self() {
       {"corpus_a", k_corpus_a, "x\\ny\\\"z\\\\w\""},
       {"corpus_b", k_corpus_b, "\\u0000"},
       {"corpus_c", k_corpus_c, "18446744073709551615"},
-      {"corpus_d", k_corpus_d, "1e+300"},
+      {"corpus_d", k_corpus_d, "-2.25"},
+      // 第 3 处不同的那一份也在这里走一遍**同一套**自证（可再解析、写→读→写幂等）
+      // —— 它与 nlohmann 字节不同，但那不代表它可以在"自己这边"少一层检查。
+      {"corpus_exp", k_corpus_exp, "1e300"},
       {"corpus_array", k_corpus_array, "[[2,3]]"},
   };
   for (size_t i = 0; i < sizeof(cs) / sizeof(cs[0]); ++i) {
@@ -684,22 +699,28 @@ void group_bridge_self() {
   }
 
   // 无效视图写成 `null`：与 `value((const char*)nullptr)` 同一个理由 —— 没有
-  // 这个值在 JSON 里有确切表示，不该让整份响应构造失败。
+  // 这个值在 JSON 里有确切表示，不该让整份响应构造失败。注意这条**不经过
+  // yyjson**（它是 4 个固定字节），所以它同时是"无效句柄被挡住了"的见证。
   {
     uvcpp_json_doc doc;
     must_ok(doc.parse("{\"a\":1}"), "6.2 语料");
-    uvcpp_json_writer w;
-    check_st(uvcpp_json_write(doc.root().get("nope"), w), json_write_status::OK,
+    std::string out;
+    check_st(uvcpp_json_write(doc.root().get("nope"), out), json_write_status::OK,
              "6.2 缺失键写出去不是错误");
-    must_ok(w.finish(), "6.2 finish");
-    check_eq_s(w.str(), "null", "6.2 缺失键写出 null");
+    check_eq_s(out, "null", "6.2 缺失键写出 null");
 
     const uvcpp_json_value nothing;
-    uvcpp_json_writer w2;
-    check_st(uvcpp_json_write(nothing, w2), json_write_status::OK,
+    std::string out2;
+    check_st(uvcpp_json_write(nothing, out2), json_write_status::OK,
              "6.2 默认构造的无效视图也写 null");
-    must_ok(w2.finish(), "6.2 finish");
-    check_eq_s(w2.str(), "null", "6.2 默认构造的无效视图写出 null");
+    check_eq_s(out2, "null", "6.2 默认构造的无效视图写出 null");
+
+    // 构造侧同一条（同一个自由函数、另一个重载）。
+    const uvcpp_json_node no_node;
+    std::string out3;
+    check_st(uvcpp_json_write(no_node, out3), json_write_status::OK,
+             "6.2 无效节点也写 null");
+    check_eq_s(out3, "null", "6.2 无效节点写出 null");
   }
 
   // 标量根值、字符串根值、数组根值都能直接当根写。
@@ -712,11 +733,55 @@ void group_bridge_self() {
     check_eq_s(write_doc(d2, "6.3"), "\"hi\"", "6.3 字符串根写出 \"hi\"");
     check_eq_s(write_doc(d3, "6.3"), "[1,2]", "6.3 数组根写出 [1,2]");
   }
+
+  // 缓冲复用：同一份文档写两遍，第二遍**逐字节相同**。
+  // 这一条是"快路的起点取 `out.capacity()`"那个设计的判据 —— 第二次进快路时
+  // `out` 的容量是上一次留下的，如果那里算错了尺寸，第二遍就会掉进慢路（结果
+  // 还对，但设计意图反了）或者写坏。它同时也是"输出没有粘上上一次的尾巴"的见证。
+  {
+    uvcpp_json_doc doc;
+    must_ok(doc.parse(k_corpus_a), "6.4 语料");
+    std::string buf;
+    check_st(uvcpp_json_write(doc.root(), buf), json_write_status::OK, "6.4 第一遍");
+    const std::string first = buf;
+    check(!first.empty(), "6.4 第一遍非空");
+    // 再来一遍，**同一个 out**（不清空、不复用变量之外的东西）。
+    check_st(uvcpp_json_write(doc.root(), buf), json_write_status::OK, "6.4 第二遍");
+    check_eq_s(buf, first, "6.4 复用同一个 out 的第二遍逐字节相同");
+    // 再喂一份**不同**的文档进同一个 out：契约是"写之前 out 被清空"，所以产出
+    // 必须是新文档的、不带上一份的残留。
+    uvcpp_json_doc small;
+    must_ok(small.parse("{\"z\":1}"), "6.4 第二份语料");
+    check_st(uvcpp_json_write(small.root(), buf), json_write_status::OK, "6.4 换文档");
+    check_eq_s(buf, "{\"z\":1}", "6.4 换一份文档之后 out 被清空重写");
+  }
+
+  // **写回不递归**：十万层深的文档写得出来。老的那道桥走的是本库递归的
+  // `uvcpp_json_writer`（当时"栈是你自己的"是第 4 处不同）；现在两边都不递归
+  // —— yyjson 的写器用从缓冲尾部抠出来的显式 `yyjson_write_ctx` 栈。
+  // 这一条是那句话唯一的判据：深度 100 000 在默认 8 MiB 栈上递归必崩。
+  {
+    const size_t k_deep = 100000;
+    uvcpp_json_doc doc;
+    json_doc_options opt;
+    opt.max_depth = k_deep + 8;
+    const std::string deep = std::string(k_deep, '[') + "1" +
+                             std::string(k_deep, ']');
+    const json_doc_status st = doc.parse(deep.c_str(), deep.size(), opt);
+    check_st(st, json_doc_status::OK, "6.5 十万层文档解析（深度门抬到 100008）");
+    if (st == json_doc_status::OK) {
+      std::string out;
+      check_st(uvcpp_json_write(doc.root(), out), json_write_status::OK,
+               "6.5 十万层文档写回（不递归）");
+      check_eq_s(out, deep, "6.5 十万层文档写回逐字节等于输入");
+    }
+  }
 }
 
 #if UVCPP_WEBAPP_ENABLE
 void group_bridge_vs_nlohmann() {
-  // ★ 逐字节相同。前提是那份语料的两边都已声明同意的部分：键序、数字形态。
+  // ★ 逐字节相同。前提是那批语料的键序与数字形态都落在**两边都同意**的范围内
+  // —— 所以 `k_corpus_exp` 不在这张表里，它自己下面有一段。
   // 每个语料都先断言 nlohmann 侧**解析成功且产出非空** —— 否则一个失败的
   // nlohmann 侧会 dump 出 "null"，比对面要是也恰好是 "null" 就假绿了。
   const char* corpora[] = {k_corpus_a, k_corpus_b, k_corpus_c, k_corpus_d,
@@ -734,7 +799,30 @@ void group_bridge_vs_nlohmann() {
 
     const std::string ours = write_doc(doc, "7.1 语料 " + std::to_string(i));
     check_eq_s(ours, theirs,
-               "7.1 语料 " + std::to_string(i) + "：桥的产出与 dump() 逐字节相同");
+               "7.1 语料 " + std::to_string(i) + "：写回的产出与 dump() 逐字节相同");
+  }
+
+  // ★ 第 3 处不同（浮点写回去的形态）：`1e+300` 这一格两边**字节不同**。
+  // 判据分两层，缺一不可：
+  //   ① 字节确实不同（否则第 3 处不同就是句空话，随时可能被一次"顺手对齐"抹掉）；
+  //   ② 两边的**值**相同（把两份产出都交给 nlohmann 再 `==`，用第三方判语义）。
+  // 只判 ① 会把"写坏了"也算成"如实地不同"。
+  {
+    const std::string text(k_corpus_exp);
+    uvcpp_json_doc doc;
+    must_ok(doc.parse(text), "7.2 本后端解析");
+    const std::string ours = write_doc(doc, "7.2");
+
+    uvcpp_json j1, j2;
+    must_ok_nl(uvcpp_json_parse(text, j1), "7.2 nlohmann 解析原文");
+    const std::string theirs = uvcpp_json_dump(j1);
+    must_ok_nl(uvcpp_json_parse(ours, j2), "7.2 nlohmann 解析我们的产出");
+    check(j1 == j2, "7.2 第 3 处不同：两边的**值**相同（字节：" + ours + " vs " +
+                        theirs + "）");
+    check(ours != theirs, "7.2 第 3 处不同：字节**确实**不同（" + ours + " vs " +
+                              theirs + "）");
+    check_eq_s(ours, "{\"c\":1e300}", "7.2 本后端写 1e300（指数不带加号）");
+    check_eq_s(theirs, "{\"c\":1e+300}", "7.2 nlohmann 写 1e+300（指数带加号）");
   }
 }
 #endif
@@ -744,9 +832,17 @@ void group_bridge_vs_nlohmann() {
 // =========================================================================
 
 void group_numbers() {
-  // 形态是手写的（`uvcpp_json_writer` 的最短往返，见它文件头）：整数值的浮点会
-  // 掉小数点、整数保持整数、`1e2` 只留下 `100`。**值相同、字节可能不同** 这句
-  // 话在这张表里就是逐条的数。
+  // 形态是**量出来的**，不是推出来的：这张表每一条都是拿真实现（本轮改完之后的
+  // `uvcpp_json_write`）打印出来抄的，见 `doc/json-guide.md` §13 与本组末尾那条
+  // "阈值"注释。yyjson 的浮点写器跟的是 **ECMAScript 的 Number::toString**
+  // （`1e-6 ≤ |x| < 1e21` 走定点、其余走指数），与老写器（最短往返 + 能省就省）
+  // 与 nlohmann（`%g` 一族的阈值）**都不是同一条线**。
+  //
+  // 已确认的形态三条（都是与老那道桥**改判**过的地方）：
+  //   * 整数值的浮点**保留** `.0`（`1.0` → `1.0`；老写器写 `1`，nlohmann 也写 `1.0`
+  //     ⇒ 这一格现在两边**一致了**）；
+  //   * 指数**不带加号**（`1e+300` → `1e300`）；
+  //   * `-0.0` 保留符号。
   struct num_case {
     const char* text;   ///< 输入（一个数字当根值）
     const char* want;   ///< 本库写出来的字节；空串表示"形态不写死，只判值"
@@ -755,16 +851,39 @@ void group_numbers() {
   const num_case cases[] = {
       {"1", "1", 1.0},
       {"-1", "-1", -1.0},
-      {"1.0", "1", 1.0},
-      {"0.0", "0", 0.0},
-      {"-0.0", "-0", -0.0},
+      {"0", "0", 0.0},
+      {"4294967295", "4294967295", 4294967295.0},
+      // 整数值的浮点：小数点**在**（这一格老写器写 `1`、`0`、`-0`）。
+      {"1.0", "1.0", 1.0},
+      {"0.0", "0.0", 0.0},
+      {"-0.0", "-0.0", -0.0},
       {"0.1", "0.1", 0.1},
-      {"1e2", "100", 100.0},
-      {"1E+2", "100", 100.0},
       {"2.5", "2.5", 2.5},
-      {"1e+300", "1e+300", 1e300},
-      // π 的形态**不写死**（15 位还是 17 位是实现的最短往返算法的自由），
-      // 但它必须能往返 —— 见下面那条 strtod 断言。
+      {"123456789.5", "123456789.5", 123456789.5},
+      {"-2.25", "-2.25", -2.25},
+      // `1e2` 这种整数值的指数入力，出来是定点形态（还带 `.0`）。
+      {"1e2", "100.0", 100.0},
+      {"1E+2", "100.0", 100.0},
+      // 定点/指数的阈值（下界 1e-6，上界 1e21）—— 这条界线两侧各钉两格。
+      {"1e-4", "0.0001", 1e-4},
+      {"1e-5", "0.00001", 1e-5},
+      {"1e-6", "0.000001", 1e-6},
+      {"1e-7", "1e-7", 1e-7},
+      {"1e14", "100000000000000.0", 1e14},
+      {"1e15", "1000000000000000.0", 1e15},
+      {"1e16", "10000000000000000.0", 1e16},
+      // 上界这一侧：`1e21` 起走指数。
+      {"1e21", "1e21", 1e21},
+      {"1e23", "1e23", 1e23},
+      // 指数**不带加号**：老写器与 nlohmann 都写 `1e+300`。
+      {"1e+300", "1e300", 1e300},
+      {"1e100", "1e100", 1e100},
+      {"1e308", "1e308", 1e308},
+      // 小指数这边两边一致（都带减号），留两格防"整个指数都动了"。
+      {"1e-300", "1e-300", 1e-300},
+      {"5e-324", "5e-324", 5e-324},
+      // π 的形态**不写死**（最短往返算法是实现的自由），但它必须能往返 —— 见
+      // 下面那条 strtod 断言。
       {"3.141592653589793", "", 3.141592653589793},
       {"18446744073709551615", "18446744073709551615",
        18446744073709551615.0},
@@ -780,6 +899,8 @@ void group_numbers() {
                  std::string("8.1 ") + cases[i].text + " 写出来的形态");
     }
     // 独立见证：真解析器读回来必须是同一个值（"最短往返"就是这句话）。
+    // 注意 `-0.0` 那一格：`back == want_d` 对 `-0.0` **恒真**（IEEE 的 `-0.0 ==
+    // 0.0`），所以负零的符号由上面那条字节判据负责，这条只管"没被读成别的数"。
     char* end = nullptr;
     errno = 0;
     const double back = std::strtod(out.c_str(), &end);
@@ -850,19 +971,39 @@ void group_numbers() {
     check(a == b, std::string("8.4 ") + values[i] + "：两边的**值**相同（字节：" +
                       ours + " vs " + text + "）");
   }
-  // 而且这股不同是**真实存在**的（不是"碰巧一样"）：`1.0` 在 nlohmann 那边
-  // 是 `1.0`，在桥这边是 `1`。
+
+  // 8.5 `1.0` 这一格**改判过**：老写器（`uvcpp_json_writer` 的最短往返）写 `1`，
+  // 两边字节不同；现在 yyjson 的写器与 nlohmann 都写 `1.0` ⇒ **一致**。
+  // 这一条留着不是为了"证明一样"，是为了钉住"这一格是核对过的"—— 免得哪天
+  // 有人把两边又写岔了却以为"第 3 处不同嘛，正常"。
   {
     uvcpp_json j;
     must_ok_nl(uvcpp_json_parse("{\"v\":1.0}", j), "8.5 nlohmann 侧");
-    check_eq_s(uvcpp_json_dump(j), "{\"v\":1.0}",
-               "8.5 nlohmann 写回小数点在（第 3 处不同确实存在）");
+    check_eq_s(uvcpp_json_dump(j), "{\"v\":1.0}", "8.5 nlohmann 写 1.0");
     uvcpp_json_doc doc;
     must_ok(doc.parse("{\"v\":1.0}"), "8.5 本后端");
-    check_eq_s(write_doc(doc, "8.5"), "{\"v\":1}", "8.5 桥这边写 1");
+    check_eq_s(write_doc(doc, "8.5"), "{\"v\":1.0}",
+               "8.5 本后端也写 1.0（这一格与 nlohmann 一致）");
+  }
+
+  // 8.6 而第 3 处不同**确实还在**，只是换了那一格：指数。`1e300` 本后端不带
+  // 加号、nlohmann 带。判据两层：字节不同 **且** 值相同。
+  {
+    uvcpp_json j;
+    must_ok_nl(uvcpp_json_parse("{\"v\":1e300}", j), "8.6 nlohmann 侧");
+    check_eq_s(uvcpp_json_dump(j), "{\"v\":1e+300}",
+               "8.6 nlohmann 的正指数带加号");
+    uvcpp_json_doc doc;
+    must_ok(doc.parse("{\"v\":1e300}"), "8.6 本后端");
+    const std::string ours = write_doc(doc, "8.6");
+    check_eq_s(ours, "{\"v\":1e300}", "8.6 本后端的正指数不带加号");
+    uvcpp_json a, b;
+    must_ok_nl(uvcpp_json_parse("{\"v\":1e300}", a), "8.6 原文");
+    must_ok_nl(uvcpp_json_parse(ours, b), "8.6 本后端的产出");
+    check(a == b, "8.6 字节不同但**值**相同（第 3 处不同确实存在）");
   }
 #else
-  std::cout << "  [SKIP] 8.4–8.5 与 nlohmann 的数字语义对照需要 webapp" << std::endl;
+  std::cout << "  [SKIP] 8.4–8.6 与 nlohmann 的数字语义对照需要 webapp" << std::endl;
 #endif
 }
 
