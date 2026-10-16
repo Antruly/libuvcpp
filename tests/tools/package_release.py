@@ -252,7 +252,14 @@ SYSTEM_DLLS = {
     "comdlg32.dll", "crypt32.dll", "cryptbase.dll", "dbghelp.dll", "dnsapi.dll",
     "dwmapi.dll", "gdi32.dll", "gdi32full.dll", "imm32.dll", "iphlpapi.dll",
     "kernel32.dll", "kernelbase.dll", "msvcrt.dll", "mswsock.dll",
-    "netapi32.dll", "normaliz.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll",
+    # `odbc32.dll` 是 1.7.2 补进来的，Windows 的 ODBC 驱动管理器：System32 里必有
+    # （和 `ws2_32.dll` 同类，属操作系统组件，不可再分发也不需要分发）。db 模块的
+    # ODBC 后端在 `UVCPP_DB_RUNTIME_LOAD=OFF`（**默认档**）时就是链它，所以少了这一
+    # 行的后果是"默认配置在 Windows 上打不出包"：`imports 里非 Windows 自带的` 会列
+    # 上它，接着按 `runtime_roots` 找不到 ⇒ 记进 `missing[]` ⇒ 退出 2。
+    # 抓到它的是 MSVC 那两条 config-contract 腿（它们不传 `RUNTIME_LOAD`，于是走
+    # 默认档、链了导入库；六条发布腿传 `ON`，导入表里没有它 —— 所以发版路径上看不见）。
+    "netapi32.dll", "normaliz.dll", "ntdll.dll", "odbc32.dll", "ole32.dll", "oleaut32.dll",
     "powrprof.dll", "psapi.dll", "rpcrt4.dll", "secur32.dll", "setupapi.dll",
     "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "usp10.dll",
     "version.dll", "win32u.dll", "winmm.dll", "winspool.drv", "ws2_32.dll",

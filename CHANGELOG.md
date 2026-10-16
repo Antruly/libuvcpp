@@ -911,6 +911,20 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   里，于是在装了 `unixodbc-dev` 却没配数据源的机器上（CI 就是）它显示成 `Failed`，
   而真相是"未判定"。判据现在归位。
 
+- **两个 ODBC 新文件补上 UTF-8 BOM**（`1.7.2-dev`）。`src/db/uvcpp_db_odbc_api.h`
+  里全是中文注释却没带 BOM，而 `src/db/` 下 24 个文件里只有它与
+  `uvcpp_db_odbc.cpp` 没带（前两个后端各自的 `*_api.h` 都带）。这条不是风格问题：
+  MSVC 读无 BOM 的源文件时按系统 ANSI 代码页（简中 936/GBK）解码，一个三字节汉字被
+  当成两个双字节字符、字节边界整体错位，该在注释里的 `*` 变成运算符、`*/` 落到注释
+  外，于是其后每个头都在"注释外"被解析、一路级联到 `<algorithm>`，**报错地点与病因
+  完全无关**。仓内看不见，因为顶层 `CMakeLists.txt` 的 `/utf-8` 是**目录作用域**的 ——
+  它进不了导出集，也到不了"直接把源码树给 msvc"那条消费路径。
+
+  抓到它的是 `config-contract` 腿的 `check_header_encoding()`（判的是 `src/` 下每一个
+  `.h`，不只安装集里那些）。它本来就该在分支自己的 CI 上红过：`feature/db-odbc` 没有
+  对着 master 开过 PR，而这几个文件是随 `1.7.1-dev` 那几个提交进来的。`package_release.py`
+  里那段"含非 ASCII 又没 BOM 就补一个"的兜底**救不了**它 —— 私有头不进包。
+
 - **MySQL / PostgreSQL 的客户端库改成可以运行时加载：`UVCPP_DB_RUNTIME_LOAD`**
   （`1.6.54-dev`，默认 `OFF`）。直接链的后果不是"少个功能"而是**进程起不来**：
   `DT_NEEDED`（Windows 上是 PE 的导入表）是**加载期**解析的，产物上多一条
@@ -2749,6 +2763,19 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `doc/json-guide.md` §13.3 与模块头里，不是待修的差异。
 
 ### 配置、打包与 CI
+
+- **`package_release.py` 的"Windows 自带模块"表补上 `odbc32.dll`**（`1.7.2-dev`）。
+  这张表只用来判断"要不要打进包里"，漏一个的代价不是静默坏包而是**打不出包**：db 的
+  ODBC 后端在 `UVCPP_DB_RUNTIME_LOAD=OFF`（**默认档**）的 Windows 构建上就是链
+  `odbc32`，于是 `uvcpp.dll` 的导入表里有它，而打包那步的自检会把"非 Windows 自带"
+  的导入项逐个去 `runtime_roots` 里找、找不到就 `missing[]` + 退出 2 —— 也就是说
+  **默认配置在 Windows 上根本产不出包**（`odbc32.dll` 属操作系统组件，System32 里
+  必有，与 `ws2_32.dll` 同类，既不可再分发也不需要分发）。
+
+  这条是 MSVC 那两条 `config-contract` 腿抓到的：它们**不传** `UVCPP_DB_RUNTIME_LOAD`
+  （走默认档、链导入库），而六条发布腿传 `ON`（符号由 `LoadLibrary` 取、导入表里没有
+  它）—— 所以**发版路径上看不见这个形状**，只有 PR 上那两条腿能看见。这也正是那两条腿
+  与发布腿"配置不逐字相同"的价值所在：它们各自量到一个方向的坏包。
 
 - **六条发布腿显式打开 db 的第四个后端（ODBC），并且每一条都显式给出 `sql.h` 在哪**
   （`1.7.2-dev`）。此前 `release.yml` 全文零次提到 odbc：`UVCPP_ENABLE_DB_ODBC` 默认就是
