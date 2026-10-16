@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/db/uvcpp_db_odbc.cpp
  * @brief ODBC 后端：一份驱动，覆盖所有提供 ODBC 驱动的数据源。
  * @author zhuweiye

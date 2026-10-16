@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/db/uvcpp_db_odbc_api.h
  * @brief ODBC（驱动管理器）函数表：`UVCPP_DB_RUNTIME_LOAD` 的那一半。
  * @author zhuweiye
