@@ -1828,9 +1828,18 @@ jobs:
 
           rm -rf stage
           cmake --install build-pkg --prefix "$PWD/stage/usr"
-          # 系统包负责的头**不许**进 stage：dpkg 会因为这些文件与
+          # 系统包负责的头**不许**进产物：dpkg 会因为这些文件与
           # `nlohmann-json3-dev` / `libuv1-dev` / `zlib1g-dev` 冲突而拒绝安装。
-          for p in include/nlohmann include/libuv include/zlib.h include/zconf.h; do
+          #
+          # 判据落在哪里，取决于这些头是怎么来的 —— 两半的来路不一样：
+          #   * libuv / zlib：包树链的是**系统**库，CMake 本来就不会装它们的头。
+          #     所以这一半在安装阶段判就够了：出现了就意味着依赖被改回了源码构建。
+          #   * nlohmann（以及 FetchContent 的 `llhttp.h`）：上游 CMake 自带
+          #     install 规则，stage 里**必然有**它们；`make_packages.py` 是在
+          #     复制出来的那份树里剪掉的（它的 PRUNE）。v1.7.4 第一次跑这一步
+          #     就是在 stage 上判 nlohmann、于是两条 Linux 腿都红在一个本就该存在
+          #     的东西上。这一半只能判**产物**。
+          for p in include/libuv include/zlib.h include/zconf.h; do
             if [ -e "stage/usr/$p" ]; then
               echo "::error title=linux-pkg-header-conflict::stage 里有 $p（应由系统包提供）"
               exit 1
@@ -1839,6 +1848,28 @@ jobs:
 
           python3 packaging/nfpm/make_packages.py \
             --stage "$PWD/stage/usr" --out dist --arch amd64
+
+          # 产物的头清单。deb 用 dpkg-deb（一定有）；rpm 用 rpm -qlp（runner 上
+          # 不一定有 —— 没有就明说没判，不假装判过）。
+          check_headers() {
+            local f="$1" hit
+            hit=$(grep -oE '\.?/usr/include/(nlohmann|libuv)/[^ ]*|\.?/usr/include/(zlib|zconf|llhttp)\.h' \
+                  | head -3 || true)
+            if [ -n "$hit" ]; then
+              echo "::error title=linux-pkg-header-conflict::$f 里带了系统包/私有依赖的头：$hit"
+              exit 1
+            fi
+          }
+          for f in dist/*.deb; do
+            dpkg-deb -c "$f" | check_headers "$f"
+          done
+          if command -v rpm >/dev/null 2>&1; then
+            for f in dist/*.rpm; do
+              rpm -qlp "$f" | check_headers "$f"
+            done
+          else
+            echo "（本机没有 rpm，rpm 包的头清单未读回 —— 它与 deb 出自同一棵剪过的树）"
+          fi
 
       - name: Package
         run: |
@@ -2223,7 +2254,10 @@ jobs:
 
           rm -rf stage
           cmake --install build-pkg --prefix "$PWD/stage/usr"
-          for p in include/nlohmann include/libuv include/zlib.h include/zconf.h; do
+          # 判据与 x64 那条同构（为什么分「安装阶段」与「产物」两半，理由全在
+          # 那边的注释里）：libuv/zlib 的头不该出现，nlohmann/llhttp 的头由打包
+          # 脚本剪掉、只能判产物。
+          for p in include/libuv include/zlib.h include/zconf.h; do
             if [ -e "stage/usr/$p" ]; then
               echo "::error title=linux-pkg-header-conflict::stage 里有 $p（应由系统包提供）"
               exit 1
@@ -2232,6 +2266,26 @@ jobs:
 
           python3 packaging/nfpm/make_packages.py \
             --stage "$PWD/stage/usr" --out dist --arch arm64
+
+          check_headers() {
+            local f="$1" hit
+            hit=$(grep -oE '\.?/usr/include/(nlohmann|libuv)/[^ ]*|\.?/usr/include/(zlib|zconf|llhttp)\.h' \
+                  | head -3 || true)
+            if [ -n "$hit" ]; then
+              echo "::error title=linux-pkg-header-conflict::$f 里带了系统包/私有依赖的头：$hit"
+              exit 1
+            fi
+          }
+          for f in dist/*.deb; do
+            dpkg-deb -c "$f" | check_headers "$f"
+          done
+          if command -v rpm >/dev/null 2>&1; then
+            for f in dist/*.rpm; do
+              rpm -qlp "$f" | check_headers "$f"
+            done
+          else
+            echo "（本机没有 rpm，rpm 包的头清单未读回 —— 它与 deb 出自同一棵剪过的树）"
+          fi
 
       - name: Package
         run: |
