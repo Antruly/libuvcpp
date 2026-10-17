@@ -221,7 +221,11 @@ def specs_for(fmt, version, arch):
             "libc6 (>= 2.34)",
             "libstdc++6 (>= 11)",
             "libgcc-s1",
-            "libuv1 (>= 1.44.0)",
+            # 下限就是**包树实际按哪一版编的**：CI 在 jammy 上装的是 1.43.0。
+            # 别照发布 zip 内嵌的 1.51 写 —— 那样 jammy 用户会被 apt 拒装，而
+            # .so 并不需要它（1.44 的 `uv_available_parallelism` 在库里已有
+            # 按版本号的兜底，更晚的 API 本来就有守卫）。
+            "libuv1 (>= 1.43.0)",
             "zlib1g",
         ]
         devel_deps = [

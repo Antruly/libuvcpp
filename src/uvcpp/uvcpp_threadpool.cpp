@@ -40,6 +40,18 @@
 #include <stdlib.h>  // _putenv_s / _putenv
 #endif
 
+// 只有按 libuv < 1.44 的头编译时才需要（见下面 available_parallelism_compat()）。
+#if defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x012C00
+#  if defined(_WIN32)
+#    include <windows.h>  // GetProcessAffinityMask
+#  elif defined(__linux__)
+#    include <sched.h>    // sched_getaffinity / CPU_COUNT（glibc 的 _GNU_SOURCE 扩展）
+#  endif
+#  if !defined(_WIN32)
+#    include <unistd.h>    // sysconf(_SC_NPROCESSORS_ONLN)
+#  endif
+#endif
+
 namespace uvcpp {
 
 namespace {
@@ -119,10 +131,59 @@ unsigned int env_threadpool_size() {
   return nthreads;
 }
 
+#if defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x012C00
+/**
+ * @brief `uv_available_parallelism()` 的替身，**只在 libuv < 1.44 时编进来**。
+ *
+ * 发行版包那棵树按**系统** libuv 构建，而 `uv_available_parallelism()` 是
+ * libuv **1.44.0** 才有的：Ubuntu 22.04（jammy）给的是 1.43.0，v1.7.4 第一次
+ * 跑包树时正是这一句让两条 Linux 腿挂在 `uvcpp_threadpool.cpp` 上。
+ *
+ * 这里照 libuv 自己的取法数一遍 —— 本进程的**亲和性掩码** —— 不退回
+ * `std::thread::hardware_concurrency()`：后者数的是宿主的在线 CPU，在 cpuset
+ * 限住的容器里偏高，而那正是本库选 `uv_available_parallelism()` 的理由
+ * （见 uvcpp_threadpool.h 的 @brief 与 @note，两条边界同样适用）。
+ *
+ * 只影响**按老 libuv 编出来的**发行版包；zip 那套把 1.51 静态编进去，
+ * 走的是上面那条原函数。
+ */
+unsigned int available_parallelism_compat() {
+#if defined(__linux__)
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+    const int n = CPU_COUNT(&set);
+    if (n > 0) return static_cast<unsigned int>(n);
+  }
+#elif defined(_WIN32)
+  DWORD_PTR process_mask = 0;
+  DWORD_PTR system_mask = 0;
+  if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask,
+                             &system_mask) != 0) {
+    unsigned int n = 0;
+    for (DWORD_PTR m = process_mask; m != 0; m >>= 1) {
+      n += static_cast<unsigned int>(m & static_cast<DWORD_PTR>(1));
+    }
+    if (n > 0) return n;
+  }
+#endif
+#if !defined(_WIN32)
+  // 其余平台（macOS / BSD），以及上面那条系统调用没成功的场合：在线 CPU 数。
+  const long online = sysconf(_SC_NPROCESSORS_ONLN);
+  if (online > 0) return static_cast<unsigned int>(online);
+#endif
+  return 1;
+}
+#endif  // UV_VERSION_HEX < 0x012C00
+
 }  // namespace
 
 unsigned int uvcpp_default_threadpool_size() {
+#if defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x012C00
+  unsigned int n = available_parallelism_compat();
+#else
   unsigned int n = uv_available_parallelism();
+#endif
   if (n == 0) n = 1;  // 它自己保证 >=1；这里只是不让 0 漏过去
   if (n > kLibuvMaxThreadpoolSize) n = kLibuvMaxThreadpoolSize;  // libuv 那边也会夹
   return n;

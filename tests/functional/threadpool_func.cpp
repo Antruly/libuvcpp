@@ -215,11 +215,21 @@ int main() {
   // 1. 默认值：与时间无关的纯函数
   // -----------------------------------------------------------------
   const unsigned int def = uvcpp_default_threadpool_size();
-  const unsigned int parallel = uv_available_parallelism();
   check(def >= 1 && def <= 1024, "默认：应当落在 1..1024");
+#if defined(UV_VERSION_HEX) && UV_VERSION_HEX >= 0x012C00
+  const unsigned int parallel = uv_available_parallelism();
   check_eq_i(static_cast<long long>(def),
              static_cast<long long>(parallel == 0 ? 1 : parallel),
              "默认：应当就是 uv_available_parallelism()（0 兜成 1）");
+#else
+  // libuv < 1.44 没有 `uv_available_parallelism()`（Ubuntu 22.04 的包树就是
+  // 1.43.0）：库里走的是同一条亲和性掩码算法的替身，而它在匿名命名空间里，
+  // 用例够不着 —— "等于它"这条判据在老 libuv 上本来就写不出来。留下的是
+  // 上一行的范围判据，外加"同一进程两次调用同值"（替身没有随机成分）。
+  check_eq_i(static_cast<long long>(def),
+             static_cast<long long>(uvcpp_default_threadpool_size()),
+             "默认：同一进程两次调用应当同值");
+#endif
 
   // -----------------------------------------------------------------
   // 2. **还没投过**：环境变量 → 读数
