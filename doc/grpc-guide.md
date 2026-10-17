@@ -10,7 +10,7 @@
 这个分法不是洁癖，是**依赖事实**：编解码那半的每一个参数都是 `std::string` / `uint32_t`
 （`src/grpc/uvcpp_grpc.h:100-194`），而服务端那半的每个参数都是 web 层的类型
 （`src/grpc/uvcpp_grpc_server.h:116-132`）。所以关掉 web 模块时前者照编照装、后者
-**从构建与安装里都摘掉**（`CMakeLists.txt:2031-2033`、`CMakeLists.txt:3047-3052`）——
+**从构建与安装里都摘掉**（`CMakeLists.txt:2031-2033`、`CMakeLists.txt:3055-3060`）——
 装在 `include/grpc/` 下，而不是 `include/web/` 下。
 
 - 打开方式：**没有开关**。编解码那半任何配置下都在；服务端那半跟着 `UVCPP_BUILD_WEB`

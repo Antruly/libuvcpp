@@ -125,7 +125,7 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
 # `CMakeLists.txt` 的 `list(FILTER UVCPP_HEADERS EXCLUDE REGEX
 # "src/grpc/uvcpp_grpc_server\\.h")`（`CMakeLists.txt:2031-2033`）与
 # `list(FILTER GRPC_HEADER_FILES EXCLUDE REGEX "uvcpp_grpc_server\\.h$")`
-# （`CMakeLists.txt:3047-3052`）是同一条排除的两处 —— **三处必须一起改**：
+# （`CMakeLists.txt:3055-3060`）是同一条排除的两处 —— **三处必须一起改**：
 # 这里漏了只影响发布包，CMake 那两处漏了只影响 `cmake --install`，三边都不报错。
 WEB_GATED_HEADERS = {"uvcpp_grpc_server.h"}
 
@@ -1164,7 +1164,7 @@ def main():
 
     # **曾经是差异 2**：补 zlib.h / zconf.h —— `web/uvcpp_ws_parser.h` 在
     # UVCPP_ZLIB_ENABLE=1 时要 include 它，而 install 规则里原先没有这一条。
-    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:3266-3269`），所以这
+    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:3274-3277`），所以这
     # 不再是"刻意的差异"，只是本脚本手工组装 stage、**不走 `cmake --install`** 时
     # 对同一件事的重复一遍 —— 两边必须落到同一个位置（`include/` 顶层）。
     z = dep_src(tree, repo, "zlib-131") or dep_src(tree, repo, "zlib")

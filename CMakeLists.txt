@@ -2236,12 +2236,20 @@ if(UVCPP_BUILD_SHARED)
   # 这个形状：`find_package(uvcpp)` 之后调 `uv_version_string()` 直接
   # `DSO missing from command line`。
   #
-  # 写**裸名字** `uv` 是有意的：这条分支下 `uv` 不是 CMake target（`LIBUV_LIB`
-  # 是 `find_library` 的绝对路径），导出后就是一个普通库名。FetchContent 那条
-  # 分支不能这么做 —— 那里的 `uv` 是真 target，作为接口依赖导出后，使用者会得到
+  # 导出用**裸名字** `uv` 是有意的：这条分支下 `uv` 不是 CMake target（`LIBUV_LIB`
+  # 是 `find_library` 的绝对路径），导出后就是一个普通库名，使用者 `-luv` 由链接器
+  # 在系统库目录里找 —— 发行版包的场景正是如此。FetchContent 那条分支不能这么做
+  # —— 那里的 `uv` 是真 target，作为接口依赖导出后，使用者会得到
   # "link interface contains uv but the target was not found"。
+  #
+  # 但**树内**必须用绝对路径（`BUILD_INTERFACE`）：这台构建机上的 libuv 未必在链接器
+  # 的默认搜索路径里（macOS 的 brew libuv 在 /opt/homebrew/lib），裸 `-luv` 会让
+  # 每个链接 `uvcpp` 的目标直接失败 —— 2026-10-18 的 macOS CI 十一个共享库格子就
+  # 是这么红的。`INSTALL_INTERFACE` 只影响导出后的使用方，所以两条各归各位。
   if (NOT UVCPP_LIBUV_FROM_SOURCE)
-    target_link_libraries(uvcpp INTERFACE uv)
+    target_link_libraries(uvcpp INTERFACE
+      $<BUILD_INTERFACE:${LIBUV_LIB}>
+      $<INSTALL_INTERFACE:uv>)
   endif()
   if (UVCPP_BUILD_LIBUV_FROM_SOURCE)
     add_library(uvcpp_s SHARED ${UVCPP_SOURCES} ${UVCPP_HEADERS})
