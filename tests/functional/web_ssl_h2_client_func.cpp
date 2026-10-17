@@ -1106,7 +1106,15 @@ void scenario_drop_with_inflight(int port, uvcpp_ssl_context* cctx,
 
   // 前置：这条请求真的到了对端。没有它，对端可能压根没拆连接，客户端等来的是
   // 别的东西 —— 那样这条用例测的就不是"在飞的流"了。
-  check(uvcpp_test::wait_flag([&st, reqs_before] {
+  //
+  // **必须泵客户端的循环来等，不能用 `wait_flag`**。这条请求是刚才 `send()` 交
+  // 给客户端的，字节还压在这一侧没发出去；`wait_flag` 不泵循环，就只会干等一个
+  // 永远不会被改的跨线程标志。它以前能过，是因为握手那笔写的完成回调恰好先落地、
+  // 下一拍 `flush()` 抢在等之前把帧发出去了 —— 那是 libuv ≥1.44 上的时序巧合。
+  // 换了运行时（Ubuntu 22.04 的 1.43.0）同一个动作变成 `UV_EALREADY`：帧被
+  // `uvcpp_h2_connection::flush()` 放回 `out_`（字节没丢），等下一次 `flush()`
+  // 重发 —— 而那一次没人泵。于是这里空等满 2 s，红在一个与场景无关的地方。
+  check(uvcpp_test::wait_until(c.loop(), [&st, reqs_before] {
           return st.requests.load() > reqs_before;
         }, uvcpp_test::kWaitMs),
         "vanish[前置]: 对端没收到这条请求");
@@ -1146,7 +1154,7 @@ void scenario_drop_with_inflight(int port, uvcpp_ssl_context* cctx,
             "\"，应为 h2（前置）");
   check(d.send_keyed("vh", uvcpp_http_request::make_get("/vanish-head")) == 0,
         "vanish-head: send() 失败");
-  check(uvcpp_test::wait_flag([&st, reqs_before2] {
+  check(uvcpp_test::wait_until(d.loop(), [&st, reqs_before2] {
           return st.requests.load() > reqs_before2;
         }, uvcpp_test::kWaitMs),
         "vanish-head[前置]: 对端没收到这条请求");

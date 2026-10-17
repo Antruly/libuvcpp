@@ -388,7 +388,15 @@ void test_reconnect_after_restart() {
         "对端走了，on_close 报了出来");
   check(last_close_code == static_cast<int>(ws_close_code::GOING_AWAY),
         "Close 码是 1001（实际 " + std::to_string(last_close_code) + "）");
-  check(!cli.is_open(), "这时候没连上");
+  // 「没连上」这件事**要泵到它成立为止**，不能在 `on_close` 之后直接采一下：
+  // `on_close` 说的是"对端怎么走的"，而 `is_open()` 读的是会话在不在 ——
+  // 会话要等本端把回敬的 Close 帧写出去、TCP 跟着关掉，才在终结观察者里被
+  // 摘掉（见 `uvcpp_ws_connection::notify_retired`）。中间隔着一次写完成，
+  // 而写完成什么时候到是运行时的时序：libuv ≥1.44 上恰好能在这一拍里走完，
+  // 1.43（Ubuntu 22.04 的包树）上要下一拍 —— 于是直接采会红在一个与重连
+  // 无关的地方。上面场景 1 里 `close()` 之后那句 `pump_for(cli, 200)` 是
+  // 同一件事。
+  check(pump_cli(cli, [&] { return !cli.is_open(); }), "这时候没连上");
 
   // 同一个端口上起一个新的服务端。
   echo_server srv2;
