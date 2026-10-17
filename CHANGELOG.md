@@ -793,6 +793,33 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 管理器 + 具体 ODBC 驱动）—— 四个后端一个都没找到时整个模块被强制关掉并打一条说明
 怎么修的 warning，而不是留一个"能配置、链不上"的组合（`1.5.3`）
 
+- **PostgreSQL 的异步查询走真异步：查询挂在调用方自己的循环上，不占线程**
+  （`1.7.2-dev`）。`uvcpp_db_pool` 的异步接口（`query(loop, …)` / `execute(loop, …)`）
+  此前只有一种实现：`uv_queue_work` 把一次阻塞查询丢进 libuv 线程池，**每请求两次
+  跨线程交接**。现在 PG 这条腿改用驱动自己带的非阻塞协议 —— `PQsendQueryParams` +
+  `PQflush`，`uv_poll` 盯 `PQsocket()`，`PQconsumeInput` / `PQisBusy` / `PQgetResult`
+  收结果 —— 回调的形状、线程、返回码**一个都没变**（入口那一侧一行没改），变的只是
+  等待发生在哪儿。`uvcpp_db_client::query_async()` 是这条路的公开入口；池子默认用它，
+  `set_native_async(false)` 可以按回线程池。MySQL / SQLite / ODBC 没有可用的异步协议，
+  照旧走线程池；`insert` 也不在这条路上（要"执行 + 取 `lastval()`"两次往返）。
+
+  读数（仓外量具，8 条循环 × 128 条在途、256 条连接，三次交替 A/B、中间 20 s 冷却）：
+  **每请求 CPU 中位 65.69 → 42.56 µs（−35%），最好的一对 −44%**；取锁 9.27 次/请求。
+  同并发（8 条在飞）下真异步只比"阻塞在循环里"多 6.6 µs，多出来的 12.8 µs 是
+  "在途从 8 条涨到 1024 条"买来的（而 rps 没涨）。逐项账（3 次 `epoll_ctl`、其中 2 次
+  是 libuv `uv_poll_init` 的探针、+8.8 次 malloc、+5 次取锁）、坑与复现写在
+  `doc/benchmark.md` §4.24。
+
+  **一条必须写进契约的约束**：真异步这条路上查询的 I/O 由那条循环驱动，所以**别带着
+  在飞的查询 `loop.stop()`**（或在回调都还没到时就析构循环）—— 那几条永远不会落地，
+  池子析构会一直等 `work_in_flight` 归零，症状是进程退不出去。线程池那条路没有这个
+  问题。约定写在 `src/db/uvcpp_db_pool.h` 的类注释里，用例
+  `tests/functional/db_pgsql_async_func.cpp` 钉住正常收尾那一侧。
+
+  顺带把 `async-database` 那档读法的合规歧义做实了：它的 `standard` 规则原文是
+  "Must use an async PostgreSQL driver with standard connection pooling"——现在这条腿
+  是真的 async driver，不再是"把阻塞 libpq 包一层"。
+
 - **ODBC 后端：它是第四个后端，但与前三个不同类 —— 它对着的不是一种数据库，是一个
   接口**（`1.7.1-dev`）。前三个各自钉死一种客户端库与一种方言，`odbc://` 连到哪张
   库、哪种方言、甚至哪个厂商，全由连接串里的 `Driver=`（或 `DSN=`）决定；本驱动

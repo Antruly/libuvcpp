@@ -28,33 +28,43 @@
 namespace uvcpp {
 namespace db_detail {
 
-/// 这张库要用的**全部** libpq 符号（21 个）。
+/// 这张库要用的**全部** libpq 符号（27 个）。
 /// 顺序与 `nm -u …uvcpp_db_pgsql.cpp.o | sort` 一致。
 ///
 /// 清单里**没有** `PQunescapeBytea`：它只出现在源码的一句注释里（讲
 /// `bytea_output='hex'` 为什么不靠它），`nm -u` 里也没有它。照源码里的标识符
 /// 抄清单就会把这种"注释里提到的名字"抄进来，得到一个永远找不到的符号。
+///
+/// 末尾那 6 个（`PQconsumeInput` / `PQflush` / `PQgetResult` / `PQisBusy` /
+/// `PQsendQueryParams` / `PQsocket`）是**真异步查询**那一路要的：它们从
+/// PG 7.4 就在，与其余 21 个同一条稳定性论证（见文件头）。
 #define UVCPP_DB_PGSQL_SYMBOLS(X) \
   X(PQclear)                      \
   X(PQcmdTuples)                  \
   X(PQconnectdbParams)            \
+  X(PQconsumeInput)               \
   X(PQerrorMessage)               \
   X(PQescapeIdentifier)           \
   X(PQescapeStringConn)           \
   X(PQexec)                       \
   X(PQexecParams)                 \
   X(PQfinish)                     \
+  X(PQflush)                      \
   X(PQfname)                      \
   X(PQfreemem)                    \
   X(PQftype)                      \
   X(PQgetisnull)                  \
   X(PQgetlength)                  \
+  X(PQgetResult)                  \
   X(PQgetvalue)                   \
+  X(PQisBusy)                     \
   X(PQnfields)                    \
   X(PQntuples)                    \
   X(PQresultErrorField)           \
   X(PQresultErrorMessage)         \
   X(PQresultStatus)               \
+  X(PQsendQueryParams)            \
+  X(PQsocket)                     \
   X(PQstatus)
 
 /// 函数表。成员名 = 符号名。

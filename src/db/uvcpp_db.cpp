@@ -57,6 +57,9 @@ struct uvcpp_db_client::impl {
   std::string last_error;
   int timeout_ms = 5000;
   log_callback log;
+  /// 这条连接上正有一条**真异步**查询在飞。连接的协议状态是"一问一答"，
+  /// 两条同时在飞就会把应答读串。
+  bool async_busy = false;
 
   void log_line(const std::string& line) {
     if (log) {
@@ -288,6 +291,60 @@ uvcpp_db_value uvcpp_db_client::last_insert_id() {
   uvcpp_db_value out;
   last_insert_id(&out);
   return out;
+}
+
+bool uvcpp_db_client::supports_async_query() const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+  return impl_->driver && impl_->driver->async_query_supported();
+}
+
+bool uvcpp_db_client::query_async(
+    uvcpp_loop* loop, const std::string& sql, const uvcpp_db_params& params,
+    std::function<void(uvcpp_db_status, uvcpp_db_table)> done) {
+  std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+  if (!impl_->driver || !impl_->driver->is_open()) {
+    impl_->last_error = "连接没打开";
+    return false;
+  }
+  if (!impl_->driver->async_query_supported()) {
+    impl_->last_error = "这个后端不支持异步查询";
+    return false;
+  }
+  if (impl_->async_busy) {
+    impl_->last_error = "这条连接上已经有一条异步查询在飞（不能并发用一条连接）";
+    return false;
+  }
+  if (!done) {
+    impl_->last_error = "query_async 的完成回调是空的";
+    return false;
+  }
+  impl_->async_busy = true;
+
+  // 门面这一层只做三件事：把 `async_busy` 复位、把错误记进 `last_error`、
+  // 把用户的回调放到**锁外**调（回调里再用这条连接是合法的 —— 那时上面那条
+  // 查询已经完了）。
+  std::string err;
+  const bool ok = impl_->driver->query_async(
+      loop, sql, params.values(),
+      [this, done](db_detail::uvcpp_db_async_result r) {
+        uvcpp_db_status st = r.status;
+        uvcpp_db_table table = std::move(r.table);
+        {
+          std::lock_guard<std::recursive_mutex> lk(impl_->mutex);
+          impl_->async_busy = false;
+          if (!uvcpp_db_ok(st)) {
+            impl_->last_error =
+                r.error.empty() ? uvcpp_db_status_name(st) : r.error;
+          }
+        }
+        done(st, std::move(table));
+      },
+      &err);
+  if (!ok) {
+    impl_->async_busy = false;
+    impl_->last_error = err;
+  }
+  return ok;
 }
 
 uvcpp_db_status uvcpp_db_client::last_insert_id(uvcpp_db_value* out) {

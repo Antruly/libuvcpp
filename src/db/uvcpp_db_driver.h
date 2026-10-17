@@ -31,6 +31,7 @@
 #if UVCPP_DB_ENABLE
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +42,9 @@
 #include <db/uvcpp_db_value.h>
 
 namespace uvcpp {
+
+class uvcpp_loop;
+
 namespace db_detail {
 
 /// 连接串。形状：
@@ -65,6 +69,17 @@ struct uvcpp_db_url {
   static uvcpp_db_status parse(const std::string& text, uvcpp_db_url* out,
                                std::string* err);
 };
+
+/// 一条**异步**查询的产物。`error` 与 `last_error()` 同一个口径（人读的一句话，
+/// 成功时是空串）。
+struct uvcpp_db_async_result {
+  uvcpp_db_status status = uvcpp_db_status::EXEC_FAILED;
+  uvcpp_db_table table;
+  std::string error;
+};
+
+/// 异步查询的完成回调：**在投递时那条 `uvcpp_loop` 的线程上**调一次。
+using uvcpp_db_async_done = std::function<void(uvcpp_db_async_result)>;
 
 /// 一个后端。生命周期由 `uvcpp_db_client` 独占持有。
 class uvcpp_db_driver {
@@ -115,6 +130,32 @@ class uvcpp_db_driver {
 
   /// 语句/锁等待超时（毫秒）。后端有自己的下限，实现里会说明。
   virtual void set_timeout_ms(int /*ms*/) {}
+
+  // ---- 真异步（不占线程）----
+  //
+  // "真"是有确切含义的：查询的**等待**发生在投递它的那条 `uvcpp_loop` 上
+  // （`uv_poll` 盯后端自己的 socket），而不是 `uv_queue_work` 的一条工作线程上。
+  // 两者的差别在多并发下是数量级的：走线程池时每条在途查询各占一条工作线程，
+  // 线程池只能按"连接数"定大小（入口就是这么定的），而那样的线程数本身会把
+  // 每请求 CPU 抬高一大截（本机实测见 `doc/benchmark.md` §4.24）。
+  //
+  // **连接不能并发用**：投一条之前调用方必须保证这条连接上没有别的查询在跑
+  // （`uvcpp_db_client` 用一个 `async_busy` 位挡着）。
+
+  /// 这个后端能不能真异步。默认不能 —— 只有实现了的后端才返回 true。
+  virtual bool async_query_supported() const { return false; }
+
+  /// 把一条查询投到 `loop` 上。**不阻塞**，`done` 在那条循环的线程上被调一次。
+  ///
+  /// 返回 false = **没有投出去**（后端不支持、连接没开、内存不够），此时 `done`
+  /// 不会被调，原因写进 `err`。返回 true 之后 `done` 必然且只会被调一次 ——
+  /// 连接断了也一样（那就以 `NOT_CONNECTED` 完成，调用方据此丢弃这条连接）。
+  virtual bool query_async(uvcpp_loop* /*loop*/, const std::string& /*sql*/,
+                           const std::vector<uvcpp_db_value>& /*params*/,
+                           uvcpp_db_async_done /*done*/, std::string* err) {
+    if (err) *err = "这个后端不支持异步查询";
+    return false;
+  }
 };
 
 /// 各后端的构造函数。定义在各自的 .cpp 里，且那个文件整体被

@@ -24,8 +24,11 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
+
+#include <handle/uvcpp_loop.h>
 
 namespace uvcpp {
 namespace db_detail {
@@ -399,6 +402,106 @@ uvcpp_db_status sqlstate_status(const char* sqlstate) {
   return uvcpp_db_status::EXEC_FAILED;
 }
 
+/// 失败文案。`res` 为空时退到连接上的最后一条错误（同步与异步两条路共用）。
+const char* pq_error_text(PGconn* conn, PGresult* res) {
+  if (res != nullptr) {
+    const char* m = api().PQresultErrorMessage(res);
+    if (m && m[0]) return m;
+  }
+  return conn ? api().PQerrorMessage(conn) : "连接已关闭";
+}
+
+/// 把绑定参数编成 libpq 要的**文本**形态。
+///
+/// `storage` 里的每个串必须比 `values` 活得久 —— `values[i]` 是它的 `c_str()`。
+/// 调用方把两个都放在自己的栈上，`PQexecParams` / `PQsendQueryParams` 都是**同步
+/// 拷走**参数内容的（拼进连接自己的输出缓冲），所以函数返回之后就不需要它们了。
+void encode_params(const std::vector<uvcpp_db_value>& params,
+                   std::vector<std::string>* storage,
+                   std::vector<const char*>* values) {
+  storage->assign(params.size(), std::string());
+  values->assign(params.size(), nullptr);
+  for (size_t i = 0; i < params.size(); ++i) {
+    if (params[i].is_null()) continue;  // nullptr = SQL NULL
+    // BLOB 必须编成 bytea 的文本形态（`\x...`）再发；其余类型 `to_text()`
+    // 就是服务端要的形态。
+    (*storage)[i] = params[i].type() == uvcpp_db_type::BLOB
+                        ? encode_bytea(params[i].bytes())
+                        : params[i].to_text();
+    (*values)[i] = (*storage)[i].c_str();
+  }
+}
+
+/// `PGresult` 的行 → `uvcpp_db_table`。
+void fill_rows_into(PGresult* res, uvcpp_db_table* out) {
+  const pgsql_api& a = api();
+  const int ncols = a.PQnfields(res);
+  const int nrows = a.PQntuples(res);
+
+  std::vector<std::string> names;
+  names.reserve(static_cast<size_t>(ncols));
+  // 列的 OID **只按列变化**，所以每列取一次。改造前这一句在每格的循环里 ——
+  // 20 行 × 9 列就是 180 次 libpq 调用换 9 个只跟列有关的值。
+  std::vector<unsigned int> types(static_cast<size_t>(ncols), 0u);
+  for (int c = 0; c < ncols; ++c) {
+    const char* n = a.PQfname(res, c);
+    names.push_back(n ? n : "");
+    types[static_cast<size_t>(c)] = a.PQftype(res, c);
+  }
+  out->reset_columns(std::move(names));
+
+  // 行数与列数都是 `PGresult` 直接报出来的，所以两个 `std::vector` 的容量都能
+  // 一次到位：20 行 × 9 列的应答本来是 6 + 20×5 = 106 次「增长」分配，改完是 2 次。
+  out->reserve_rows(static_cast<size_t>(nrows));
+  for (int r = 0; r < nrows; ++r) {
+    uvcpp_db_row& row = out->add_row();
+    row.reserve(static_cast<size_t>(ncols));
+    for (int c = 0; c < ncols; ++c) {
+      if (a.PQgetisnull(res, r, c)) {
+        row.push(uvcpp_db_value());
+        continue;
+      }
+      row.push(value_from_pg(types[static_cast<size_t>(c)],
+                             a.PQgetvalue(res, r, c), a.PQgetlength(res, r, c)));
+    }
+  }
+  out->set_affected_rows(nrows);
+}
+
+/// `PGresult` → 结果集 / 影响行数 / 返回码。同步与异步两条路都走这里。
+uvcpp_db_status fill_table_from(PGconn* conn, PGresult* res, uvcpp_db_table* out,
+                                std::string* err, int64_t* affected = nullptr) {
+  if (affected) *affected = -1;
+  if (res == nullptr) {
+    // 连 `PGresult` 都没有：连接断了或协议乱了，没有 SQLSTATE 可看。
+    *err = std::string("PostgreSQL 执行失败：") + pq_error_text(conn, nullptr);
+    return uvcpp_db_status::EXEC_FAILED;
+  }
+  const ExecStatusType st = api().PQresultStatus(res);
+  if (st == PGRES_COMMAND_OK) {
+    const char* tuples = api().PQcmdTuples(res);
+    const int64_t n =
+        (tuples && tuples[0]) ? std::strtoll(tuples, nullptr, 10) : 0;
+    if (affected) *affected = n;
+    // 异步那一侧只有一张结果表可用，影响行数就放在表上报出去。
+    if (out) out->set_affected_rows(n);
+    return uvcpp_db_status::OK;
+  }
+  if (st != PGRES_TUPLES_OK) {
+    *err = std::string("PostgreSQL 执行失败：") + pq_error_text(conn, res);
+    return sqlstate_status(api().PQresultErrorField(res, PG_DIAG_SQLSTATE));
+  }
+  if (out) fill_rows_into(res, out);
+  if (affected) *affected = api().PQntuples(res);
+  return uvcpp_db_status::OK;
+}
+
+/// 真异步查询的实现（定义在 `pgsql_driver` 之后）。
+bool start_async_query(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
+                       const std::string& sql,
+                       const std::vector<uvcpp_db_value>& params,
+                       uvcpp_db_async_done done, std::string* err);
+
 }  // namespace
 
 class pgsql_driver : public uvcpp_db_driver {
@@ -408,6 +511,22 @@ class pgsql_driver : public uvcpp_db_driver {
 
   const char* name() const { return "postgres"; }
   bool is_open() const { return conn_ != nullptr; }
+  bool async_query_supported() const { return true; }
+
+  bool query_async(uvcpp_loop* loop, const std::string& sql,
+                   const std::vector<uvcpp_db_value>& params,
+                   uvcpp_db_async_done done, std::string* err) {
+    if (loop == nullptr) {
+      *err = "query_async 的 loop 是空的";
+      return false;
+    }
+    if (!conn_) {
+      *err = "PostgreSQL 连接没打开";
+      return false;
+    }
+    return start_async_query(conn_, loop, timeout_ms_, sql, params,
+                             std::move(done), err);
+  }
 
   uvcpp_db_status open(const uvcpp_db_url& url, std::string* err) {
     close();
@@ -481,7 +600,8 @@ class pgsql_driver : public uvcpp_db_driver {
     // 所以要真发一次极轻的往返。
     pg_result res(api().PQexec(conn_, "SELECT 1"));
     if (res.status() != PGRES_TUPLES_OK) {
-      *err = std::string("PostgreSQL ping 失败：") + pq_error(res.get());
+      *err = std::string("PostgreSQL ping 失败：") +
+             pq_error_text(conn_, res.get());
       return uvcpp_db_status::EXEC_FAILED;
     }
     return uvcpp_db_status::OK;
@@ -500,7 +620,7 @@ class pgsql_driver : public uvcpp_db_driver {
     }
     if (params.empty()) {
       pg_result res(api().PQexec(conn_, sql.c_str()));
-      return fill_table(res, out, err);
+      return fill_table_from(conn_, res.get(), out, err);
     }
     return exec_params(sql, params, out, nullptr, err);
   }
@@ -515,7 +635,7 @@ class pgsql_driver : public uvcpp_db_driver {
     }
     if (params.empty()) {
       pg_result res(api().PQexec(conn_, sql.c_str()));
-      return fill_table(res, nullptr, err, affected);
+      return fill_table_from(conn_, res.get(), nullptr, err, affected);
     }
     return exec_params(sql, params, nullptr, affected, err);
   }
@@ -663,14 +783,6 @@ class pgsql_driver : public uvcpp_db_driver {
   }
 
  private:
-  const char* pq_error(PGresult* res) const {
-    if (res) {
-      const char* m = api().PQresultErrorMessage(res);
-      if (m && m[0]) return m;
-    }
-    return conn_ ? api().PQerrorMessage(conn_) : "连接已关闭";
-  }
-
   /// `PQexecParams`。`out` 与 `affected` 至少有一个非空（调用方保证）。
   ///
   /// 参数一律以**文本**形式传（`paramFormats` 传 nullptr ⇒ 全文本），类型
@@ -681,78 +793,14 @@ class pgsql_driver : public uvcpp_db_driver {
                               const std::vector<uvcpp_db_value>& params,
                               uvcpp_db_table* out, int64_t* affected,
                               std::string* err) {
-    std::vector<std::string> storage(params.size());
-    std::vector<const char*> values(params.size(), nullptr);
-    for (size_t i = 0; i < params.size(); ++i) {
-      if (params[i].is_null()) continue;  // nullptr = SQL NULL
-      // BLOB 必须编成 bytea 的文本形态（`\x...`）再发；其余类型 `to_text()`
-      // 就是服务端要的形态。
-      storage[i] = params[i].type() == uvcpp_db_type::BLOB
-                       ? encode_bytea(params[i].bytes())
-                       : params[i].to_text();
-      values[i] = storage[i].c_str();
-    }
+    std::vector<std::string> storage;
+    std::vector<const char*> values;
+    encode_params(params, &storage, &values);
     pg_result res(api().PQexecParams(conn_, sql.c_str(),
                                static_cast<int>(params.size()), nullptr,
                                values.empty() ? nullptr : &values[0], nullptr,
                                nullptr, 0));
-    return fill_table(res, out, err, affected);
-  }
-
-  /// `PGresult` → `uvcpp_db_table` / 影响行数 / 错误码。
-  uvcpp_db_status fill_table(const pg_result& res, uvcpp_db_table* out,
-                             std::string* err, int64_t* affected = nullptr) {
-    if (affected) *affected = -1;
-    if (!res.ok()) {
-      // 连 `PGresult` 都没有：连接断了或协议乱了，没有 SQLSTATE 可看。
-      *err = std::string("PostgreSQL 执行失败：") + pq_error(nullptr);
-      return uvcpp_db_status::EXEC_FAILED;
-    }
-    const ExecStatusType st = res.status();
-    if (st == PGRES_COMMAND_OK) {
-      if (affected) {
-        const char* tuples = api().PQcmdTuples(res.get());
-        *affected = (tuples && tuples[0]) ? std::strtoll(tuples, nullptr, 10) : 0;
-      }
-      if (out) out->set_affected_rows(0);
-      return uvcpp_db_status::OK;
-    }
-    if (st != PGRES_TUPLES_OK) {
-      *err = std::string("PostgreSQL 执行失败：") + pq_error(res.get());
-      return sqlstate_status(api().PQresultErrorField(res.get(), PG_DIAG_SQLSTATE));
-    }
-    if (out) fill_rows(res.get(), out);
-    if (affected) *affected = api().PQntuples(res.get());
-    return uvcpp_db_status::OK;
-  }
-
-  void fill_rows(PGresult* res, uvcpp_db_table* out) {
-    const int ncols = api().PQnfields(res);
-    const int nrows = api().PQntuples(res);
-    std::vector<std::string> names;
-    names.reserve(static_cast<size_t>(ncols));
-    for (int c = 0; c < ncols; ++c) {
-      const char* n = api().PQfname(res, c);
-      names.push_back(n ? n : "");
-    }
-    out->reset_columns(std::move(names));
-
-    // 行数与列数都是 `PGresult` 直接报出来的，所以两个 `std::vector` 的容量都能
-    // 一次到位：20 行 × 9 列的应答本来是 6 + 20×5 = 106 次「增长」分配，改完是 2 次。
-    out->reserve_rows(static_cast<size_t>(nrows));
-    for (int r = 0; r < nrows; ++r) {
-      uvcpp_db_row& row = out->add_row();
-      row.reserve(static_cast<size_t>(ncols));
-      for (int c = 0; c < ncols; ++c) {
-        if (api().PQgetisnull(res, r, c)) {
-          row.push(uvcpp_db_value());
-          continue;
-        }
-        row.push(value_from_pg(api().PQftype(res, c), api().PQgetvalue(res, r, c),
-                               api().PQgetlength(res, r, c)));
-      }
-    }
-    out->set_affected_rows(nrows);
+    return fill_table_from(conn_, res.get(), out, err, affected);
   }
 
   /// `BEGIN` / `COMMIT` / `ROLLBACK` / `SET ...` 这类没有返回值也没有参数的。
@@ -765,7 +813,7 @@ class pgsql_driver : public uvcpp_db_driver {
     if (res.status() != PGRES_COMMAND_OK) {
       if (err) {
         *err = std::string("PostgreSQL 执行失败（") + sql + "）：" +
-               pq_error(res.get());
+               pq_error_text(conn_, res.get());
       }
       return uvcpp_db_status::EXEC_FAILED;
     }
@@ -788,6 +836,293 @@ class pgsql_driver : public uvcpp_db_driver {
 std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_pgsql() {
   return std::unique_ptr<uvcpp_db_driver>(new pgsql_driver());
 }
+
+// ---------------------------------------------------------------------------
+// 真异步：一条查询的等待发生在调用方那条 `uvcpp_loop` 上
+// ---------------------------------------------------------------------------
+//
+// 走的正是 libpq 自己的异步协议，不是"把阻塞调用塞进线程池"：
+//
+//     PQsendQueryParams  把查询拼进连接的输出缓冲（不等往返）
+//     PQflush            flush 到哪了：0 全发出去了 / 1 还堵着 / -1 断了
+//     uv_poll            盯 `PQsocket()` 的 fd —— 可写就继续 flush，可读就收
+//     PQconsumeInput     把服务端来的字节收进连接
+//     PQisBusy           收齐了没有
+//     PQgetResult        取一条结果（多语句会来好几条，最后一条算数，与 PQexec 一致）
+//
+// 为什么值得这么写（本机实测，`/tmp/adbrig`，见 `doc/benchmark.md` §4.24）：
+// 走线程池时**每条在途查询各占一条工作线程**，池子只能按连接数定大小；而 256 条
+// 工作线程本身就把每请求 CPU 抬到 61.6 µs，同步下界是 31.2 µs。
+
+namespace {
+
+/// 一条在途的真异步查询。**自己删自己**：两个 uv 句柄的关闭回调都到了就交付
+/// 用户回调、然后 `delete this`。投递失败时由 `start_async_query` 自己删。
+///
+/// 连接归谁：任务只借 `PGconn*`，**不拥有也不关它**。连接坏掉时以
+/// `NOT_CONNECTED` 完成，关它的是调用方（连接池据此丢弃）。
+class pg_async_task {
+ public:
+  static bool start(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
+                    const std::string& sql,
+                    const std::vector<uvcpp_db_value>& params,
+                    uvcpp_db_async_done done, std::string* err);
+
+ private:
+  pg_async_task(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
+                uvcpp_db_async_done done)
+      : conn_(conn), loop_(loop), timeout_ms_(timeout_ms),
+        done_(std::move(done)) {}
+  pg_async_task(const pg_async_task&);
+  pg_async_task& operator=(const pg_async_task&);
+
+  bool init_handles(std::string* err);
+  void send(const std::string& sql,
+            const std::vector<uvcpp_db_value>& params);
+  void on_io(int status, int events);
+  void on_timeout();
+  void drain_results();
+  void finish(uvcpp_db_status st, std::string error);
+  void release_handles();
+  void deliver();
+
+  static void poll_cb(uv_poll_t* h, int status, int events) {
+    static_cast<pg_async_task*>(h->data)->on_io(status, events);
+  }
+  static void timer_cb(uv_timer_t* h) {
+    static_cast<pg_async_task*>(h->data)->on_timeout();
+  }
+  static void close_cb(uv_handle_t* h) {
+    pg_async_task* self = static_cast<pg_async_task*>(h->data);
+    if (--self->open_handles_ == 0) self->deliver();
+  }
+
+  PGconn* conn_ = nullptr;
+  uvcpp_loop* loop_ = nullptr;
+  int timeout_ms_ = 0;
+  uvcpp_db_async_done done_;
+
+  uv_poll_t poll_;
+  uv_timer_t timer_;
+  bool poll_open_ = false;
+  bool timer_open_ = false;
+  int open_handles_ = 0;
+
+  bool want_write_ = false;
+  bool finishing_ = false;
+  uvcpp_db_status status_ = uvcpp_db_status::EXEC_FAILED;
+  std::string error_;
+  PGresult* result_ = nullptr;
+};
+
+bool pg_async_task::init_handles(std::string* err) {
+  const int fd = api().PQsocket(conn_);
+  if (fd < 0) {
+    *err = "PQsocket() 拿不到连接的套接字";
+    return false;
+  }
+  uv_loop_t* loop = reinterpret_cast<uv_loop_t*>(loop_->get_handle());
+#if defined(_WIN32)
+  const int rc = uv_poll_init_socket(loop, &poll_,
+                                     static_cast<uv_os_sock_t>(fd));
+#else
+  const int rc = uv_poll_init(loop, &poll_, fd);
+#endif
+  if (rc != 0) {
+    *err = std::string("uv_poll_init 失败（") + uv_strerror(rc) + "）";
+    return false;
+  }
+  poll_.data = this;
+  poll_open_ = true;
+  ++open_handles_;
+  // 计时器是**安全网**，init 不上就不设超时（查询照样跑）—— 服务端那边还有
+  // `statement_timeout` 兜着，所以这不是"没有超时"，只是少一道客户端保险。
+  if (uv_timer_init(loop, &timer_) == 0) {
+    timer_.data = this;
+    timer_open_ = true;
+    ++open_handles_;
+  }
+  return true;
+}
+
+void pg_async_task::send(const std::string& sql,
+                         const std::vector<uvcpp_db_value>& params) {
+  std::vector<std::string> storage;
+  std::vector<const char*> values;
+  encode_params(params, &storage, &values);
+
+  if (!api().PQsendQueryParams(conn_, sql.c_str(),
+                               static_cast<int>(params.size()), nullptr,
+                               values.empty() ? nullptr : &values[0], nullptr,
+                               nullptr, 0)) {
+    const bool bad = api().PQstatus(conn_) != CONNECTION_OK;
+    finish(bad ? uvcpp_db_status::NOT_CONNECTED : uvcpp_db_status::EXEC_FAILED,
+           std::string("PQsendQueryParams 失败：") +
+               api().PQerrorMessage(conn_));
+    return;
+  }
+
+  const int flushed = api().PQflush(conn_);
+  if (flushed < 0) {
+    finish(uvcpp_db_status::NOT_CONNECTED,
+           std::string("把查询写给 PostgreSQL 时连接断了：") +
+               api().PQerrorMessage(conn_));
+    return;
+  }
+  want_write_ = (flushed != 0);
+  const int rc = uv_poll_start(
+      &poll_, want_write_ ? (UV_READABLE | UV_WRITABLE) : UV_READABLE,
+      poll_cb);
+  if (rc != 0) {
+    finish(uvcpp_db_status::EXEC_FAILED,
+           std::string("启动轮询失败（") + uv_strerror(rc) + "）");
+    return;
+  }
+  // 客户端的保险比服务端的 `statement_timeout` **晚 1 秒**：正常情况下该由
+  // 服务端那条干净地报 `57014 query_canceled`（连接还能用），只有在连接整个
+  // 哑掉时才会走到这里。
+  if (timer_open_ && timeout_ms_ > 0) {
+    uv_timer_start(&timer_, timer_cb,
+                   static_cast<uint64_t>(timeout_ms_) + 1000, 0);
+  }
+}
+
+void pg_async_task::on_io(int status, int events) {
+  if (finishing_) return;
+  if (status != 0) {
+    finish(uvcpp_db_status::NOT_CONNECTED,
+           std::string("轮询 PostgreSQL 的套接字失败（") + uv_strerror(status) +
+               "）");
+    return;
+  }
+  if ((events & UV_WRITABLE) != 0) {
+    const int flushed = api().PQflush(conn_);
+    if (flushed < 0) {
+      finish(uvcpp_db_status::NOT_CONNECTED,
+             std::string("把查询写给 PostgreSQL 时连接断了：") +
+                 api().PQerrorMessage(conn_));
+      return;
+    }
+    if (flushed == 0) {
+      want_write_ = false;
+      uv_poll_start(&poll_, UV_READABLE, poll_cb);
+    }
+  }
+  if ((events & UV_READABLE) != 0) drain_results();
+}
+
+void pg_async_task::drain_results() {
+  if (!api().PQconsumeInput(conn_)) {
+    finish(uvcpp_db_status::NOT_CONNECTED,
+           std::string("读 PostgreSQL 的结果失败：") +
+               api().PQerrorMessage(conn_));
+    return;
+  }
+  // 与 `PQexec` 同一套规矩：多语句会给好几条结果，**最后一条算数**，前面那些
+  // 当场清掉（不认它们就不会有人去清，每次都是几 KB 的泄漏）。
+  while (!api().PQisBusy(conn_)) {
+    PGresult* r = api().PQgetResult(conn_);
+    if (r == nullptr) {
+      finish(uvcpp_db_status::OK, std::string());
+      return;
+    }
+    if (result_ != nullptr) api().PQclear(result_);
+    result_ = r;
+  }
+}
+
+void pg_async_task::on_timeout() {
+  // 到点了还没有结果 ⇒ 这条连接上还压着一条查询，**不能再用**。用
+  // `NOT_CONNECTED` 报告（而不是 `EXEC_FAILED`）就是为了让连接池丢掉它：
+  // 交回池子的下一只手会读到上一条查询的应答。
+  finish(uvcpp_db_status::NOT_CONNECTED,
+         "查询超过 " + std::to_string(timeout_ms_) +
+             " ms 没有结果，连接已不可复用");
+}
+
+void pg_async_task::finish(uvcpp_db_status st, std::string error) {
+  if (finishing_) return;
+  finishing_ = true;
+  status_ = st;
+  error_ = std::move(error);
+  release_handles();
+}
+
+void pg_async_task::release_handles() {
+  // 只关句柄，**不动连接**：fd 归 libpq，`uv_poll` 的关闭不会关它。
+  if (poll_open_) {
+    uv_poll_stop(&poll_);
+    uv_close(reinterpret_cast<uv_handle_t*>(&poll_), close_cb);
+    poll_open_ = false;
+  }
+  if (timer_open_) {
+    uv_timer_stop(&timer_);
+    uv_close(reinterpret_cast<uv_handle_t*>(&timer_), close_cb);
+    timer_open_ = false;
+  }
+}
+
+void pg_async_task::deliver() {
+  uvcpp_db_async_result out;
+  out.status = status_;
+  out.error = error_;
+  if (result_ != nullptr) {
+    // **只有已经判定为 OK 的那条结果才拿 `result_` 去覆盖状态。**
+    // 对端死掉时 libpq 会先递上来一条 `PGRES_FATAL_ERROR`（"terminating
+    // connection due to administrator command"），紧接着下一次轮询才报
+    // EBADF —— 如果不加这道门，`fill_table_from` 会把已经定好的
+    // `NOT_CONNECTED` 改写成 `EXEC_FAILED`，池子于是把一条**死了的**连接
+    // 还回空闲表（实测：`test_not_connected_on_peer_death` 就是这么红的）。
+    if (uvcpp_db_ok(out.status)) {
+      out.status = fill_table_from(conn_, result_, &out.table, &out.error,
+                                   nullptr);
+    }
+    api().PQclear(result_);
+    result_ = nullptr;
+  }
+  if (!uvcpp_db_ok(out.status) && out.error.empty()) {
+    out.error = uvcpp_db_status_name(out.status);
+  }
+  auto done = std::move(done_);
+  done_ = uvcpp_db_async_done();
+  if (done) {
+    // `done` 里可能关掉这条连接（连接池按 `NOT_CONNECTED` 丢弃它）—— 上面已经
+    // 是最后一次碰 `conn_`，所以从这里往下不再解引用它。
+    done(std::move(out));
+  }
+  delete this;
+}
+
+bool pg_async_task::start(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
+                          const std::string& sql,
+                          const std::vector<uvcpp_db_value>& params,
+                          uvcpp_db_async_done done, std::string* err) {
+  pg_async_task* task =
+      new (std::nothrow) pg_async_task(conn, loop, timeout_ms, std::move(done));
+  if (task == nullptr) {
+    *err = "分配异步查询任务失败";
+    return false;
+  }
+  // 句柄先建、查询后发：反过来的话，"发出去了但建不出句柄"会留下一条**压着
+  // 结果**的连接，而那时我们连一条完成回调都没法给。
+  if (!task->init_handles(err)) {
+    delete task;
+    return false;
+  }
+  task->send(sql, params);
+  return true;
+}
+
+bool start_async_query(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
+                       const std::string& sql,
+                       const std::vector<uvcpp_db_value>& params,
+                       uvcpp_db_async_done done, std::string* err) {
+  return pg_async_task::start(conn, loop, timeout_ms, sql, params,
+                              std::move(done), err);
+}
+
+}  // namespace
+
 
 }  // namespace db_detail
 }  // namespace uvcpp

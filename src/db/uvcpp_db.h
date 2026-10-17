@@ -67,6 +67,8 @@
 
 namespace uvcpp {
 
+class uvcpp_loop;
+
 class UVCPP_API uvcpp_db_client {
  public:
   /// 日志回调：每次 query/execute 之后调一次，内容是 SQL、参数个数、行数/影响
@@ -134,6 +136,38 @@ class UVCPP_API uvcpp_db_client {
   /// 最近一次 INSERT 的自增值；拿不到时是 NULL 值。
   uvcpp_db_value last_insert_id();
   uvcpp_db_status last_insert_id(uvcpp_db_value* out);
+
+  // ---- 真异步查询（不占线程）----
+
+  /// 这个连接的后端能不能**真异步**。现在只有 PostgreSQL 能 —— 它自带
+  /// 异步协议（`PQsendQueryParams` + `PQsocket` + `PQgetResult`），查询的等待
+  /// 由 `uv_poll` 盯连接自己的套接字，**不占线程池的一条工作线程**。
+  ///
+  /// 走 `<db/uvcpp_db_async.h>` / `<db/uvcpp_db_pool.h>` 那两条异步门面时，
+  /// 能真异步的后端会自动走这条路（`uvcpp_db_pool::set_native_async` 可关）；
+  /// 其余后端仍走线程池。
+  bool supports_async_query() const;
+
+  /// 把一条查询投到 `loop` 上。**不阻塞**，`done` 在那条循环的线程上被调一次。
+  ///
+  /// 返回 true = 投出去了，`done` 必然且只会被调一次；返回 false = **没投出去**
+  /// （后端不支持、连接没开、这条连接上已经有一条异步查询在飞），原因在
+  /// `last_error()` 里。
+  ///
+  /// 两条硬约束，都是因为连接只有一条：
+  ///
+  ///   1. **同一条连接上不能有两条在飞的异步查询**（第二条会返回 false）。
+  ///      要并发就开多个 client，或者直接用 `uvcpp_db_pool`；
+  ///   2. **在这条查询回来之前不要关掉/销毁这个 client，也不要销毁那条循环。**
+  ///      连接是 client 的，回调也是它调的，两者都必须是活的。
+  ///
+  /// `done` 的第一个参数是 `NOT_CONNECTED` 时，这条连接上的会话已经不可信
+  /// （超时或对端断开），**不能再用**。
+  /// 表按**值**给出：结果从后端一路移进回调，少一次整表拷贝（池子那条热路上
+  /// 每请求省一次行数组的分配）。
+  bool query_async(
+      uvcpp_loop* loop, const std::string& sql, const uvcpp_db_params& params,
+      std::function<void(uvcpp_db_status, uvcpp_db_table)> done);
 
   // ---- 事务 ----
 
