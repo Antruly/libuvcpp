@@ -317,6 +317,11 @@ if (UVCPP_BUILD_LIBUV_FROM_SOURCE OR NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIB OR N
   # When fetched, prefer building/using the libuv target provided by libuv CMake
   set(LIBUV_INCLUDE_DIR ${libuv_SOURCE_DIR}/include)
   set(LIBUV_LIB uv)
+  set(UVCPP_LIBUV_FROM_SOURCE TRUE)
+else()
+  # 这条分支的 libuv 是系统的：`uvcpp.pc` 的 `Requires: libuv` 只在它成立时才写
+  # （见下面 pkg-config 那一段）。FetchContent 那条没有对应的 .pc 可依赖。
+  set(UVCPP_LIBUV_FROM_SOURCE FALSE)
 endif()
 
 # =========================================================================
@@ -1508,6 +1513,12 @@ else()
 endif()
 option(UVCPP_BUILD_STATIC "Build static uvcpp library" ${_default_uvcpp_build_static})
 
+# 给共享库设 VERSION/SOVERSION（`libuvcpp.so.1.7.3` → `libuvcpp.so.1` → `libuvcpp.so`）。
+# **默认关**：发布 zip 里是单个 `libuvcpp.so`，`tests/tools/package_release.py`
+# 的 `shutil.copy2` 与 `check_config_contract.py` 都按那个名字取文件。发行版包
+# （.deb/.rpm）要的正是符号链接链，由包构建显式打开（见 `packaging/`）。
+option(UVCPP_SET_SOVERSION "Set VERSION/SOVERSION on the shared library (distro packaging)" OFF)
+
 # Organize sources into Visual Studio source groups for readability.
 file(GLOB UVCPP_SRC_FILES "${CMAKE_SOURCE_DIR}/src/uvcpp/*.h" "${CMAKE_SOURCE_DIR}/src/uvcpp/*.cpp")
 file(GLOB HANDLE_SRC_FILES "${CMAKE_SOURCE_DIR}/src/handle/*.h" "${CMAKE_SOURCE_DIR}/src/handle/*.cpp")
@@ -2219,6 +2230,19 @@ if(UVCPP_BUILD_SHARED)
     target_compile_definitions(uvcpp PRIVATE UVCPP_EXPORTS)
     target_link_libraries(uvcpp PRIVATE ws2_32)
   endif()
+  # 系统 libuv 那棵树（发行版包的 `.deb`/`.rpm`）**必须**把 libuv 放进导出的
+  # link interface：公开头里有 `<uv.h>`，使用者也常直接调 `uv_*`，光靠 `.so` 的
+  # DT_NEEDED 只能让库**加载**得起来，不能让使用者的链接行拿到 `-luv`。本机量过
+  # 这个形状：`find_package(uvcpp)` 之后调 `uv_version_string()` 直接
+  # `DSO missing from command line`。
+  #
+  # 写**裸名字** `uv` 是有意的：这条分支下 `uv` 不是 CMake target（`LIBUV_LIB`
+  # 是 `find_library` 的绝对路径），导出后就是一个普通库名。FetchContent 那条
+  # 分支不能这么做 —— 那里的 `uv` 是真 target，作为接口依赖导出后，使用者会得到
+  # "link interface contains uv but the target was not found"。
+  if (NOT UVCPP_LIBUV_FROM_SOURCE)
+    target_link_libraries(uvcpp INTERFACE uv)
+  endif()
   if (UVCPP_BUILD_LIBUV_FROM_SOURCE)
     add_library(uvcpp_s SHARED ${UVCPP_SOURCES} ${UVCPP_HEADERS})
     target_link_libraries(uvcpp_s PRIVATE ${LIBUV_LIB})
@@ -2511,6 +2535,19 @@ if (TARGET uvcpp_a)
 endif()
 if (TARGET uvcpp_a_s)
   set_target_properties(uvcpp_a_s PROPERTIES DEBUG_POSTFIX "d")
+endif()
+
+# 发行版包用的 SONAME。只在 ELF 上设：Windows 没有 SONAME，macOS 会改名成
+# `libuvcpp.1.dylib`（本仓没有 macOS 发布腿，不给它添没验证过的形态）。
+# 默认关，理由见 `UVCPP_SET_SOVERSION` 的定义处。
+if (UVCPP_SET_SOVERSION AND UNIX AND NOT APPLE)
+  foreach (_uvcpp_so uvcpp uvcpp_s)
+    if (TARGET ${_uvcpp_so})
+      set_target_properties(${_uvcpp_so} PROPERTIES
+        VERSION ${UVCPP_VERSION}
+        SOVERSION ${UVCPP_VERSION_MAJOR})
+    endif()
+  endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -3233,6 +3270,34 @@ endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/src/uvcpp.h")
   install(FILES ${CMAKE_SOURCE_DIR}/src/uvcpp.h DESTINATION include)
 endif()
+
+# pkg-config 文件。发布 zip 那份是 `tests/tools/package_release.py` 手写的
+# （zip 不走 install 规则）；这里补的是 `cmake --install` 这条路 —— .deb/.rpm
+# 与源码安装都从它拿。路径全部相对 `${pcfiledir}`，所以 `--prefix` 改到哪儿都成立：
+#   /usr/lib/pkgconfig     -> prefix=/usr,     libdir=/usr/lib
+#   /usr/lib64/pkgconfig   -> prefix=/usr,     libdir=/usr/lib64
+#
+# `Requires` 只列**公开头里会出现**的依赖：`<uv.h>`（src/net、src/grpc）与
+# `<zlib.h>`（src/web/uvcpp_ws_parser.h）。OpenSSL/brotli 的公开头里没有，
+# nlohmann 没有 .pc —— 那两样走包管理器的 Depends/Requires。
+#
+# 只列**系统**依赖。FetchContent 编进来的 libuv/zlib 没有可依赖的 .pc（那种安装
+# 本来也发不出它们的头，不是一份能被别人消费的前缀，见上面装 zlib 头那段）；
+# 写成 `Requires: libuv` 会让 pkg-config 去找一份不存在的包，直接报错。
+set(UVCPP_PC_REQUIRES "")
+if(NOT UVCPP_LIBUV_FROM_SOURCE)
+  string(APPEND UVCPP_PC_REQUIRES "libuv")
+endif()
+if(UVCPP_ENABLE_ZLIB AND NOT UVCPP_ZLIB_FROM_SOURCE)
+  if(UVCPP_PC_REQUIRES)
+    string(APPEND UVCPP_PC_REQUIRES " ")
+  endif()
+  string(APPEND UVCPP_PC_REQUIRES "zlib")
+endif()
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/uvcpp.pc.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/uvcpp.pc" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/uvcpp.pc"
+        DESTINATION lib/pkgconfig)
 
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/uvcppConfigVersion.cmake"
   VERSION ${UVCPP_VERSION}

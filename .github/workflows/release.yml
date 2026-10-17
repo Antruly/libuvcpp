@@ -229,15 +229,15 @@ jobs:
           # ① UVCPP_BUILD_LIBUV_FROM_SOURCE=ON：不带 preset 时它默认 OFF，
           #    `find_library` 会撞上 runner 镜像 MSYS2 自带的 libuv.dll.a，链成
           #    共享库 ⇒ 依赖 libuv-1.dll。BUILD_SHARED_LIBS 救不了这一路
-          #    （CMakeLists.txt:1473-1473 判的是 TARGET uv_a，而 find_library 给的是路径）。
+          #    （CMakeLists.txt:1478-1478 判的是 TARGET uv_a，而 find_library 给的是路径）。
           # ② BUILD_SHARED_LIBS=OFF：管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #    llhttp_shared ⇒ 依赖 libllhttp.dll）。zlib 不受影响，
-          #    CMakeLists.txt:2353-2354 明确链 zlibstatic。
+          #    CMakeLists.txt:2377-2378 明确链 zlibstatic。
           # 本机所有树都走 CMakePresets（它有 ①），所以这两条从来没在本机复现过。
           #
           # ③ UVCPP_ENABLE_NGHTTP2=ON：这个开关**默认 OFF**（CMakeLists.txt:159-159），
           #    而这几个打包装的 job 一直没传它 —— 于是包里根本没有 h2，README 却在
-          #    介绍它。nghttp2 是唯一被强制静态的依赖（CMakeLists.txt:620-634），
+          #    介绍它。nghttp2 是唯一被强制静态的依赖（CMakeLists.txt:625-639），
           #    所以开它不会给产物添任何 dll。六个打包 job 都必须传，任何一个漏了
           #    就会发一个"同版本号但少一半功能"的包。
           #
@@ -708,7 +708,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # 不靠镜像里"碰巧装了 OpenSSL"：没找到时 `find_package(OpenSSL QUIET)` 会把
-      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:547-547），那样发出去的包
+      # UVCPP_ENABLE_OPENSSL 静默置 OFF（CMakeLists.txt:552-552），那样发出去的包
       # 一句 SSL 都没有 —— 而它的生成头会**如实**说 0，使用者照配也拿不到 SSL。
       #
       # 这条要求由 `.github/scripts/win-openssl-deps.sh` 兑现，而且比原来那一行更硬：
@@ -739,7 +739,7 @@ jobs:
           set -o pipefail
           # 同 mingw-x64：① 让 libuv 从源码静态编（runner 上若有系统 libuv，
           # 不带这个开关就会链成 uv.dll），② 让 llhttp 静态（否则 llhttp.dll）。
-          # zlib 不受 ② 影响（CMakeLists.txt:2353-2354 明确链 zlibstatic）。
+          # zlib 不受 ② 影响（CMakeLists.txt:2377-2378 明确链 zlibstatic）。
           # MSVC 侧 uvcpp 自己仍走 /MD + 包内自带 VC++ 运行库，与此无关。
           #
           # ODBC 的**头**：db 的第四个后端（1.7.2 起进发布包），头在 Windows SDK
@@ -836,10 +836,76 @@ jobs:
             --tree build-msvc --platform msvc-x64 --config Release \
             --debug-tree build-msvc --out dist
 
+      # 安装程序的内容就是上面那一步产出的 stage 目录 —— 不再重新组装文件清单。
+      # `packaging/windows/libuvcpp.iss` 里写了为什么（那是已经过全部自检的那棵
+      # 树，再抄一份清单就是第二个真相来源）。
+      #
+      # 签名证书是**可选**的：没有 `WINDOWS_CERT_PFX_BASE64` 时只打一行 warning、
+      # 安装包照出。缺证书是配置问题，不该让整条发布腿红 —— 但也不能悄悄跳过，
+      # 所以 warning 里点名了该看 RELEASE.md 的哪一节。
+      - name: Build installer
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = 'x64'
+          $zip = Get-ChildItem "dist/libuvcpp-*-msvc-$arch.zip" | Select-Object -First 1
+          if (-not $zip) { throw "dist 下没有 libuvcpp-*-msvc-$arch.zip —— Package 那一步没产出" }
+          $base = $zip.BaseName
+          # 用正则而不是 `-split`：版本号里一旦出现连字符（预发布那种），split
+          # 取到的是半截版本号，而它只影响**文件名**，ISCC 那边照样能编过。
+          if ($base -notmatch '-(\d+\.\d+\.\d+)-msvc-') { throw "从 $base 里取不出版本号" }
+          $ver = $Matches[1]
+          $stage = Join-Path (Get-Location) "dist/$base"
+          if (-not (Test-Path $stage)) { throw "没有 stage 目录 $stage" }
+          Write-Host "version=$ver stage=$stage"
+
+          choco install innosetup --no-progress -y | Out-Host
+          $iscc = Get-ChildItem 'C:\Program Files (x86)\Inno Setup*\ISCC.exe' |
+                    Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $iscc) { throw "找不到 ISCC.exe（choco innosetup 装了但没落到预期路径）" }
+          Write-Host "ISCC: $($iscc.FullName) $($iscc.VersionInfo.FileVersion)"
+
+          # ArchAllowed 必须显式给：.iss 的默认值是 `x64compatible`，arm64 那一步
+          # 不给它就会编出一个自称 x64compatible 的 arm64 安装包。
+          $isccArgs = @("/DMyVersion=$ver", "/DMyArch=$arch", "/DArchAllowed=x64compatible",
+                        "/DStageDir=$stage", "/DOutputDir=$((Get-Location).Path)\dist")
+          $pfx = $null
+          if ($env:WINDOWS_CERT_PFX_BASE64) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                          Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw "找不到 signtool.exe（Windows SDK 装了吗？）" }
+            $cmd = '"{0}" sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f "{1}" /p "{2}" $f' -f $signtool.FullName, $pfx, $env:WINDOWS_CERT_PASSWORD
+            $isccArgs += '/DSignSetup=1'
+            $isccArgs += "/Ssigntool=$cmd"
+            Write-Host "签名工具: $($signtool.FullName)"
+          } else {
+            Write-Host "::warning title=no-signing-cert::没有 WINDOWS_CERT_PFX_BASE64，安装包不签名（见 packaging/README.md 的「首次发布前的一次性准备」）"
+          }
+
+          & $iscc.FullName @isccArgs
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
+          if ($pfx) { Remove-Item $pfx -Force }
+
+          $exe = Join-Path (Get-Location) "dist/libuvcpp-$ver-msvc-$arch-setup.exe"
+          if (-not (Test-Path $exe)) { throw "ISCC 报成功但没有 $exe" }
+          Write-Host "built: $exe ($((Get-Item $exe).Length) 字节)"
+          if ($pfx -or $env:WINDOWS_CERT_PFX_BASE64) {
+            $sig = Get-AuthenticodeSignature $exe
+            Write-Host "signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "安装包签名无效：$($sig.Status)" }
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: msvc-x64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -1106,10 +1172,73 @@ jobs:
             --tree build-msvc --platform msvc-arm64 --config Release \
             --debug-tree build-msvc --out dist
 
+      # 与 msvc-x64 的 `Build installer` 同构（理由全在那边）。两处不同：
+      # ① `$arch = 'arm64'`；② Inno Setup 的 arm64 支持是 **6.3 起**才有的，
+      # 这条腿多一道版本判据 —— choco 哪天回退到 6.2，报出来的是 "ARMCore
+      # 平台不认识" 那种一眼看不出所以然的错，不如在这里点名。
+      - name: Build installer
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = 'arm64'
+          $zip = Get-ChildItem "dist/libuvcpp-*-msvc-$arch.zip" | Select-Object -First 1
+          if (-not $zip) { throw "dist 下没有 libuvcpp-*-msvc-$arch.zip —— Package 那一步没产出" }
+          $base = $zip.BaseName
+          # 用正则而不是 `-split`：版本号里一旦出现连字符（预发布那种），split
+          # 取到的是半截版本号，而它只影响**文件名**，ISCC 那边照样能编过。
+          if ($base -notmatch '-(\d+\.\d+\.\d+)-msvc-') { throw "从 $base 里取不出版本号" }
+          $ver = $Matches[1]
+          $stage = Join-Path (Get-Location) "dist/$base"
+          if (-not (Test-Path $stage)) { throw "没有 stage 目录 $stage" }
+          Write-Host "version=$ver stage=$stage"
+
+          choco install innosetup --no-progress -y | Out-Host
+          $iscc = Get-ChildItem 'C:\Program Files (x86)\Inno Setup*\ISCC.exe' |
+                    Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $iscc) { throw "找不到 ISCC.exe（choco innosetup 装了但没落到预期路径）" }
+          $iv = [version]$iscc.VersionInfo.FileVersion
+          Write-Host "ISCC: $($iscc.FullName) $iv"
+          if ($iv -lt [version]'6.3') { throw "Inno Setup $iv 不支持 arm64（要 6.3+）" }
+
+          $isccArgs = @("/DMyVersion=$ver", "/DMyArch=$arch", "/DArchAllowed=arm64",
+                        "/DStageDir=$stage", "/DOutputDir=$((Get-Location).Path)\dist")
+          $pfx = $null
+          if ($env:WINDOWS_CERT_PFX_BASE64) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                          Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw "找不到 signtool.exe（Windows SDK 装了吗？）" }
+            $cmd = '"{0}" sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f "{1}" /p "{2}" $f' -f $signtool.FullName, $pfx, $env:WINDOWS_CERT_PASSWORD
+            $isccArgs += '/DSignSetup=1'
+            $isccArgs += "/Ssigntool=$cmd"
+            Write-Host "签名工具: $($signtool.FullName)"
+          } else {
+            Write-Host "::warning title=no-signing-cert::没有 WINDOWS_CERT_PFX_BASE64，安装包不签名（见 packaging/README.md 的「首次发布前的一次性准备」）"
+          }
+
+          & $iscc.FullName @isccArgs
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
+          if ($pfx) { Remove-Item $pfx -Force }
+
+          $exe = Join-Path (Get-Location) "dist/libuvcpp-$ver-msvc-$arch-setup.exe"
+          if (-not (Test-Path $exe)) { throw "ISCC 报成功但没有 $exe" }
+          Write-Host "built: $exe ($((Get-Item $exe).Length) 字节)"
+          if ($env:WINDOWS_CERT_PFX_BASE64) {
+            $sig = Get-AuthenticodeSignature $exe
+            Write-Host "signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "安装包签名无效：$($sig.Status)" }
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: msvc-arm64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -1546,6 +1675,129 @@ jobs:
           ctest --test-dir build-linux --output-on-failure --timeout 60 \
             --exclude-regex "test_shutdown_func"
 
+      # -------------------------------------------------------------------
+      # 发行版包（.deb / .rpm）用**另一棵树**：系统 libuv + 系统 zlib。
+      #
+      # 为什么不复用上面那棵：公开头里有 `<uv.h>`（`src/net/*`、`src/grpc/*`）
+      # 与 `<zlib.h>`（`src/web/uvcpp_ws_parser.h`）。发布 zip 把这两样静态编进
+      # `libuvcpp.so`，把它装到 `/usr/lib` 之后，使用者按 `libuv1-dev` 的头编译、
+      # 调用系统 libuv —— 同一个进程里两份 libuv，结构体布局不同就是内存破坏。
+      # 所以两棵树**形状不同**，别为了省时间把这里改成复用 build-linux。
+      #
+      # 其余开关与发布树逐字相同（少一个 `-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON`，
+      # 因为这里要的正是系统 zlib）。OpenSSL 继续用本 job 刚编的静态那份：
+      # 发行版的 `libssl3`/`libssl3t64` 版本地狱与 QUIC API 都躲开。
+      # -------------------------------------------------------------------
+      - name: Configure & build the package tree (system libuv/zlib)
+        run: |
+          set -euo pipefail
+          # `libuv1-dev` 与上面"绝不装 libssl-dev"那条不冲突（jammy 上它只依赖
+          # libuv1 与 libc6-dev）。装完再把那条不变量验一遍：防的是哪天上游给它
+          # 加了 libssl-dev 依赖，配置期静默改用一份没有 QUIC API 的 OpenSSL。
+          sudo apt-get install -y libuv1-dev
+          if dpkg -s libssl-dev >/dev/null 2>&1; then
+            echo "::error title=linux-ssl-dev-installed::libuv1-dev 把 libssl-dev 拖进来了 —— 这条腿的 OpenSSL 必须是自编的那份"
+            exit 1
+          fi
+          cmake -S . -B build-pkg -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=OFF -DUVCPP_USE_SYSTEM_LIBUV=ON \
+            -DUVCPP_SET_SOVERSION=ON \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
+            -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
+            -DUVCPP_BUILD_EXPAND=ON
+          cmake --build build-pkg --parallel 4
+
+          # 与发布树那条"模块真的开着"同构：包树的 OpenSSL 也来自本 job，
+          # 静默降级同样只会在生成头里现形。
+          hdr=build-pkg/include/uvcpp/uvcpp_config.h
+          test -f "$hdr"
+          rc=0
+          for k in UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
+                   UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE \
+                   UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE \
+                   UVCPP_WSDL_ENABLE UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+                   UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+                   UVCPP_DB_ODBC_ENABLE UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE; do
+            grep -qE "^#  define ${k} 1$" "$hdr" || {
+              echo "::error title=linux-pkg-module-off::${k} 在 build-pkg 里不是 1，发行版包会缺功能"
+              grep -E "^#  define ${k} " "$hdr" || true
+              rc=1
+            }
+          done
+          exit $rc
+
+      # 这是"系统 libuv/zlib 这套配置"的唯一验证：包树与发布树只有依赖来源这一处
+      # 不同，所以这里红了就是包树红了。少了这一步，包树就是一棵没人跑过的树。
+      - name: Test the package tree
+        run: |
+          ctest --test-dir build-pkg --output-on-failure --timeout 60 \
+            --exclude-regex "test_shutdown_func"
+
+      - name: Build .deb / .rpm
+        run: |
+          set -euo pipefail
+          so=$(ls build-pkg/libuvcpp.so.*.* | head -1)
+          echo "--- so=$so"
+          readelf -d "$so" | grep -E 'SONAME|NEEDED'
+          soname=$(readelf -d "$so" | sed -n 's/.*SONAME.*\[\(.*\)\]/\1/p')
+          if [ "$soname" != "libuvcpp.so.1" ]; then
+            echo "::error title=linux-pkg-soname::SONAME 是 '$soname'，发行版包要 libuvcpp.so.1（UVCPP_SET_SOVERSION 没生效？）"
+            exit 1
+          fi
+          needed=$(readelf -d "$so" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+          echo "--- NEEDED: $needed"
+          # 与发布树**相反**的判据：这几样在包树里必须真的链成动态库。写进来是
+          # 因为"以为链了系统库、其实又被静态编进来"是本仓踩过的形状（见上面
+          # Configure 里那些 FROM_SOURCE 开关的来历）。
+          for want in libuv.so.1 libz.so.1 libstdc++.so.6 libgcc_s.so.1 libc.so.6; do
+            case " $needed " in
+              *" $want "*) ;;
+              *) echo "::error title=linux-pkg-needed-missing::$so 的 NEEDED 里没有 $want"; exit 1 ;;
+            esac
+          done
+          bad=$(echo "$needed" | grep -oE 'lib(ssl|crypto|brotli|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc)[^ ]*\.so[^ ]*' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=linux-pkg-not-static::$so 动态依赖了: $bad"
+            exit 1
+          fi
+          undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]' || true)
+          if [ "$undef" != "0" ]; then
+            echo "::error title=linux-pkg-db-symbols::$so 里还有 $undef 个未定义的 db 符号"
+            exit 1
+          fi
+
+          rm -rf stage
+          cmake --install build-pkg --prefix "$PWD/stage/usr"
+          # 系统包负责的头**不许**进 stage：dpkg 会因为这些文件与
+          # `nlohmann-json3-dev` / `libuv1-dev` / `zlib1g-dev` 冲突而拒绝安装。
+          for p in include/nlohmann include/libuv include/zlib.h include/zconf.h; do
+            if [ -e "stage/usr/$p" ]; then
+              echo "::error title=linux-pkg-header-conflict::stage 里有 $p（应由系统包提供）"
+              exit 1
+            fi
+          done
+
+          python3 packaging/nfpm/make_packages.py \
+            --stage "$PWD/stage/usr" --out dist --arch amd64
+
       - name: Package
         run: |
           # 同上：普通标量会把续行折成空格，argparse 收不到 --tree 直接退出 2。
@@ -1556,7 +1808,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.deb
+            dist/*.rpm
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -1833,6 +2088,107 @@ jobs:
           ctest --test-dir build-linux --output-on-failure --timeout 60 \
             --exclude-regex "test_shutdown_func"
 
+      # 与 linux-x64 那段逐字同构（理由、判据、为什么另开一棵树全在那边），
+      # 只有两处不同：`--arch arm64`，以及 `libuv1-dev` 在这张镜像上同样是
+      # 只依赖 libuv1 与 libc6-dev。
+      - name: Configure & build the package tree (system libuv/zlib)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y libuv1-dev
+          if dpkg -s libssl-dev >/dev/null 2>&1; then
+            echo "::error title=linux-ssl-dev-installed::libuv1-dev 把 libssl-dev 拖进来了 —— 这条腿的 OpenSSL 必须是自编的那份"
+            exit 1
+          fi
+          cmake -S . -B build-pkg -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DUVCPP_BUILD_LIBUV_FROM_SOURCE=OFF -DUVCPP_USE_SYSTEM_LIBUV=ON \
+            -DUVCPP_SET_SOVERSION=ON \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON -DUVCPP_BUILD_STATIC=OFF \
+            -DUVCPP_BUILD_WEB=ON -DUVCPP_BUILD_WEBAPP=ON \
+            -DUVCPP_ENABLE_ZLIB=ON -DUVCPP_ENABLE_OPENSSL=ON \
+            -DUVCPP_ENABLE_NGHTTP2=ON \
+            -DUVCPP_ENABLE_CAPI=ON \
+            -DUVCPP_ENABLE_QUIC=ON -DUVCPP_ENABLE_HTTP3=ON \
+            -DUVCPP_ENABLE_WSDL=ON \
+            -DUVCPP_ENABLE_YYJSON=ON \
+            -DUVCPP_ENABLE_BROTLI=ON -DUVCPP_BROTLI_FROM_SOURCE=ON \
+            -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+            -DUVCPP_ENABLE_DB_ODBC=ON \
+            -DUVCPP_DB_RUNTIME_LOAD=ON \
+            -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
+            -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
+            -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
+            -DUVCPP_BUILD_EXPAND=ON
+          cmake --build build-pkg --parallel 4
+
+          hdr=build-pkg/include/uvcpp/uvcpp_config.h
+          test -f "$hdr"
+          rc=0
+          for k in UVCPP_NET_ENABLE UVCPP_WEB_ENABLE UVCPP_WEBAPP_ENABLE \
+                   UVCPP_ZLIB_ENABLE UVCPP_OPENSSL_ENABLE UVCPP_NGHTTP2_ENABLE \
+                   UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE \
+                   UVCPP_WSDL_ENABLE UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
+                   UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
+                   UVCPP_DB_ODBC_ENABLE UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE; do
+            grep -qE "^#  define ${k} 1$" "$hdr" || {
+              echo "::error title=linux-pkg-module-off::${k} 在 build-pkg 里不是 1，发行版包会缺功能"
+              grep -E "^#  define ${k} " "$hdr" || true
+              rc=1
+            }
+          done
+          exit $rc
+
+      - name: Test the package tree
+        run: |
+          ctest --test-dir build-pkg --output-on-failure --timeout 60 \
+            --exclude-regex "test_shutdown_func"
+
+      - name: Build .deb / .rpm
+        run: |
+          set -euo pipefail
+          so=$(ls build-pkg/libuvcpp.so.*.* | head -1)
+          echo "--- so=$so"
+          readelf -d "$so" | grep -E 'SONAME|NEEDED'
+          soname=$(readelf -d "$so" | sed -n 's/.*SONAME.*\[\(.*\)\]/\1/p')
+          if [ "$soname" != "libuvcpp.so.1" ]; then
+            echo "::error title=linux-pkg-soname::SONAME 是 '$soname'，发行版包要 libuvcpp.so.1（UVCPP_SET_SOVERSION 没生效？）"
+            exit 1
+          fi
+          needed=$(readelf -d "$so" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')
+          echo "--- NEEDED: $needed"
+          for want in libuv.so.1 libz.so.1 libstdc++.so.6 libgcc_s.so.1 libc.so.6; do
+            case " $needed " in
+              *" $want "*) ;;
+              *) echo "::error title=linux-pkg-needed-missing::$so 的 NEEDED 里没有 $want"; exit 1 ;;
+            esac
+          done
+          bad=$(echo "$needed" | grep -oE 'lib(ssl|crypto|brotli|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc)[^ ]*\.so[^ ]*' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=linux-pkg-not-static::$so 动态依赖了: $bad"
+            exit 1
+          fi
+          undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]' || true)
+          if [ "$undef" != "0" ]; then
+            echo "::error title=linux-pkg-db-symbols::$so 里还有 $undef 个未定义的 db 符号"
+            exit 1
+          fi
+
+          rm -rf stage
+          cmake --install build-pkg --prefix "$PWD/stage/usr"
+          for p in include/nlohmann include/libuv include/zlib.h include/zconf.h; do
+            if [ -e "stage/usr/$p" ]; then
+              echo "::error title=linux-pkg-header-conflict::stage 里有 $p（应由系统包提供）"
+              exit 1
+            fi
+          done
+
+          python3 packaging/nfpm/make_packages.py \
+            --stage "$PWD/stage/usr" --out dist --arch arm64
+
       - name: Package
         run: |
           python3 tests/tools/package_release.py \
@@ -1842,7 +2198,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux-arm64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.deb
+            dist/*.rpm
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -1932,8 +2291,17 @@ jobs:
           else
             gh release create "$TAG" --title "libuvcpp $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          # --clobber：重跑时覆盖同名资产，让这条流程幂等
-          gh release upload "$TAG" dist/*.zip --clobber
+          # --clobber：重跑时覆盖同名资产，让这条流程幂等。
+          # 用数组而不是裸 glob：某个 glob 一个都没匹配上时，bash 会把**字面量**
+          # `dist/*.exe` 当成路径传给 gh，报的是一条和实际原因无关的错。
+          shopt -s nullglob
+          assets=(dist/*.zip dist/*.deb dist/*.rpm dist/*.exe)
+          echo "上传 ${#assets[@]} 个资产：${assets[*]}"
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error title=no-assets::dist/ 里一个资产都没有"
+            exit 1
+          fi
+          gh release upload "$TAG" "${assets[@]}" --clobber
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)"'
 
       # 空转也要**说出来**发的是什么：否则 dry_run 的日志里最后一步是空的，
@@ -1944,3 +2312,124 @@ jobs:
           echo "dry_run=true：跳过 gh release create/edit/upload（不碰任何已公开的 ref）"
           echo "真发布时会发到 tag ${{ inputs.tag }} 的资产："
           ls -la dist/*.zip
+
+  # ---------------------------------------------------------------------------
+  # 自建 apt / dnf 仓库 → gh-pages。
+  #
+  # 这是"让 Linux 用户用一条命令装上"的那一半：`publish` 发的是给人下载的
+  # 文件，这里发的是给包管理器读的索引。两者并列，互不依赖。
+  #
+  # 三条硬规矩：
+  #   * **只有真发布才跑**（`dry_run` 不碰任何公开 ref）；
+  #   * **没有 GPG 私钥就整个跳过**（`::warning`，job 保持绿）：不产出未签名
+  #     仓库，但也不拿"还没配密钥"去卡住发版 —— 安装包与 zip 照发，只是 apt/dnf
+  #     这两个通道在密钥就位前不存在。密钥一配，下一次真发布自己就长出来；
+  #   * **钉 24.04**：`createrepo-c` 在它的 universe 里，22.04 没有。
+  #
+  # 仓库是增量维护的（旧版本的包留着，每包每架构留最近 5 个），所以这个 job
+  # 每次都要先把上一次的 gh-pages 取下来。
+  # ---------------------------------------------------------------------------
+  publish-repo:
+    needs: [linux-x64, linux-arm64]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x64
+          path: pkgs
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64
+          path: pkgs
+
+      # 先在**不花任何代价**的前提下判一下密钥在不在，后面三步都挂在它的输出上。
+      # 用 `::warning` 而不是 `::error`：这是"还没配"，不是"配错了"。
+      - name: Check for the signing key
+        id: gpg
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=gpg-private-key-missing::没有 GPG_PRIVATE_KEY secret —— 这次跳过 apt/dnf 仓库发布（安装包与 zip 照发）。一次性准备见 packaging/README.md"
+          fi
+
+      - name: Install repo tools
+        if: steps.gpg.outputs.have_key == 'true'
+        run: |
+          sudo apt-get update
+          # apt-ftparchive 随 apt 而来；只差 createrepo-c 与 gpg（后者镜像自带，
+          # 写出来是为了让这条 job 的依赖一眼看全）。
+          sudo apt-get install -y createrepo-c gnupg
+
+      - name: Import the signing key
+        if: steps.gpg.outputs.have_key == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          # 临时 GNUPGHOME：runner 上那份 keyring 是共享的，别往里塞长期私钥。
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --list-secret-keys
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      - name: Build the repository tree
+        if: steps.gpg.outputs.have_key == 'true'
+        env:
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          SITE="$RUNNER_TEMP/site"
+          # 先问"分支在不在"，别拿 `git fetch` 的失败当判据：那样网络抖一下
+          # 就会走 orphan 分支、把整段仓库历史换掉（旧版本连同索引一起消失）。
+          # `ls-remote --exit-code` 的 2 就是"没有匹配的 ref"，其余非 0 是真错。
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch --quiet --depth 1 origin \
+              "+refs/heads/gh-pages:refs/remotes/origin/gh-pages"
+            git worktree add --quiet --detach "$SITE" origin/gh-pages
+          else
+            rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "::error title=gh-pages-probe-failed::读不到 origin/gh-pages（exit $rc），不敢重建历史"
+              exit 1
+            fi
+            echo "gh-pages 还不存在：这次建一个空树"
+            # 真·孤儿：没有父提交，gh-pages 的历史从这一版开始。
+            git worktree add --quiet --detach "$SITE" HEAD
+            ( cd "$SITE" && git checkout -q --orphan gh-pages \
+              && git rm -rqf . && git clean -qfdx )
+          fi
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          python3 packaging/repo/publish.py \
+            --site "$SITE" --packages pkgs \
+            --pages-url "https://${owner}.github.io/${repo}" \
+            --gpg-key "$GPG_KEY_ID"
+          echo "---- 树 ----"
+          find "$SITE" -maxdepth 3 -type f | sort | sed "s|$SITE/||"
+
+      - name: Commit & push gh-pages
+        if: steps.gpg.outputs.have_key == 'true'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/site"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有变化（同一版本重跑），不产生空提交"
+            exit 0
+          fi
+          TAG="${{ inputs.tag || github.ref_name }}"
+          git commit -q -m "repo: ${TAG}"
+          git push --quiet origin HEAD:gh-pages
+          echo "gh-pages -> $(git rev-parse --short HEAD)"

@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${pcfiledir}/..
+includedir=${prefix}/include
+
+Name: uvcpp
+Description: Modern C++ wrapper for libuv
+Version: @UVCPP_VERSION@
+Requires: @UVCPP_PC_REQUIRES@
+Cflags: -I${includedir}
+Libs: -L${libdir} -luvcpp

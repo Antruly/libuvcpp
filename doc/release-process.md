@@ -195,6 +195,79 @@ is read at configure time and the library does not include the header. Re-run
 `cmake -S . -B <tree>`, and check the version string in the generated `uvcppConfig.cmake` rather
 than the artifacts' timestamps.
 
+## Distro packages and the package repositories
+
+Since 1.7.3 a release also publishes installable packages and keeps two signed
+repositories on GitHub Pages, so `apt install libuvcpp-dev` and
+`dnf install libuvcpp-devel` work without downloading a zip. Three extra steps ride
+on the same workflow; none of them changes the six zips.
+
+**A second build tree (`build-pkg`), on the two Linux legs only.** It is configured
+like the release legs — same module switches, same static OpenSSL — with three
+deliberate differences:
+
+| | release legs | `build-pkg` |
+|---|---|---|
+| libuv | built from source, linked statically | **system** `libuv1-dev`, `libuv.so.1` |
+| zlib | `CMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON` | **system** `zlib1g-dev`, `libz.so.1` |
+| SONAME | off (`UVCPP_SET_SOVERSION` defaults to `OFF`) | **on** — `libuvcpp.so.1.7.3` → `.so.1` → `.so` |
+
+The reason the package has to link the system libuv is the public headers: they
+`#include <uv.h>`, and `uvcpp_loop` wraps `uv_loop_t`. A package that quietly carried
+its own libuv would put two instances in one process as soon as a consumer compiled
+against `libuv1-dev`. The zips are the opposite trade: self-contained, no system
+libuv, and therefore never installed into `/usr/lib`. Mixing the two is the hazard.
+
+`build-pkg` is **built and tested** (`ctest`, same exclusions as the release leg)
+before anything is packaged; that run is the only place this configuration is
+exercised. Two assertions follow the build: the `.so`'s `DT_NEEDED` must contain
+`libuv.so.1`, `libz.so.1`, `libstdc++.so.6`, `libgcc_s.so.1`, `libc.so.6` and none
+of ssl/crypto/brotli/llhttp/nghttp2/ngtcp2/nghttp3/sqlite3/mysqlclient/pq/odbc, and
+`nm -D -u` must show no unresolved `mysql_`/`PQ`/`SQL[A-Z]` symbols. The install
+prefix is then checked to contain none of `include/nlohmann`, `include/libuv`,
+`zlib.h`, `zconf.h` — those belong to the `-dev` packages' dependencies, and shipping
+them too makes dpkg refuse the install with a file conflict.
+
+`packaging/nfpm/make_packages.py` turns that prefix into `libuvcpp1` /
+`libuvcpp-dev` (`.deb`) and `libuvcpp1` / `libuvcpp-devel` (`.rpm`), using nfpm
+pinned by version **and sha256** in `packaging/nfpm/nfpm.pin`. Keep the pin: a
+floating packager turns one tag into two different packages.
+
+**The Windows installers** are built by the two MSVC legs from the stage directory
+`package_release.py` already produced — `packaging/windows/libuvcpp.iss` does not
+re-list the files, it packs the whole directory. That stage has already passed the
+import-table and debug-CRT checks; a second file list would be a second truth.
+Signing is enabled by secrets (`WINDOWS_CERT_PFX_BASE64`, `WINDOWS_CERT_PASSWORD`);
+without them the installer is still built, unsigned, with a `::warning` — a missing
+certificate is a configuration problem, not a build failure.
+
+**`publish-repo`** (`needs: [linux-x64, linux-arm64]`, skipped on `dry_run`) assembles
+the `gh-pages` tree with `packaging/repo/publish.py`: `apt/` gets `InRelease`,
+`Release.gpg` and per-architecture `Packages`; `rpm/` gets `repodata/` plus a
+detached `repomd.xml.asc`. When `GPG_PRIVATE_KEY` is absent the job **skips the whole
+publish with a warning** instead of failing the release or publishing an unsigned
+repository — the packages and zips still ship, and the apt/dnf channels simply do not
+exist until the key is configured (the next real release creates them). The `.rpm` files themselves are not signed (the trust anchor is
+`repomd.xml`), so the shipped `.repo` file says `gpgcheck=0` + `repo_gpgcheck=1`.
+Signing the packages instead would have to happen *before* the Release upload, or
+the same version's sha256 would differ between the two copies.
+
+The site is incremental: `publish-repo` checks out the previous `gh-pages`, adds the
+new packages, rebuilds the indexes over the whole tree, and prunes to the newest
+`--keep` (default 5) versions per package per architecture — GitHub Pages caps a site
+at 1 GB.
+
+One-time setup before the first release that uses these channels:
+
+1. Create the repository signing key and put the **private** key and fingerprint in
+   the repository secrets `GPG_PRIVATE_KEY` and `GPG_KEY_ID`. The export commands are
+   in [`packaging/README.md`](../packaging/README.md) (the "首次发布前的一次性准备"
+   section).
+2. Convert the Windows code-signing PFX to base64 and store it plus its password as
+   `WINDOWS_CERT_PFX_BASE64` / `WINDOWS_CERT_PASSWORD`.
+3. After the first `publish-repo` run creates `gh-pages`, point Settings → Pages at
+   that branch. Until then the site 404s; the job itself is green.
+
 ## Known gaps
 
 These are recorded rather than fixed. They are real, and a reader should not assume the process
@@ -251,3 +324,5 @@ controls.
 - [`build-guide.md`](build-guide.md) — the switches, including the static-build recipe
 - [`testing-guide.md`](testing-guide.md) — what the legs' test steps actually run
 - [`ci-guide.md`](ci-guide.md) — the CI job matrix for ordinary pushes
+- [`packaging/README.md`](../packaging/README.md) — how the `.deb`/`.rpm`, the Windows
+  installer and the two signed repositories are built, and why they link the system libuv

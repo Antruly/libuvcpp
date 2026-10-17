@@ -37,9 +37,46 @@
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
 <!-- downloads:end -->
 
+## 安装
+
+除 zip 之外，每个版本还喂着两条包管理渠道。两者装的都是开发面 —— 头文件、
+CMake 配置、`uvcpp.pc` —— 所以装完 `find_package(uvcpp CONFIG)` 与
+`pkg-config --cflags --libs uvcpp` 立刻可用。
+
+**Windows** —— 从 Release 资产里下 `libuvcpp-<ver>-msvc-<arch>-setup.exe`
+（已签名）直接运行。它装到 `Program Files\libuvcpp`，可选把 `bin\` 加进系统
+`PATH`，并注册卸载程序。
+
+**Debian / Ubuntu**（apt）：
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://antruly.github.io/libuvcpp/apt/key.asc |
+  sudo tee /etc/apt/keyrings/libuvcpp.asc >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/libuvcpp.asc] https://antruly.github.io/libuvcpp/apt stable main" |
+  sudo tee /etc/apt/sources.list.d/libuvcpp.list
+sudo apt update
+sudo apt install libuvcpp-dev
+```
+
+**Fedora / RHEL / openSUSE**（dnf；openSUSE 上把 `dnf` 换成 `zypper`）：
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/libuvcpp.repo https://antruly.github.io/libuvcpp/rpm/libuvcpp.repo
+sudo dnf install libuvcpp-devel
+```
+
+两条渠道的仓库元数据都带 GPG 签名（apt 是 `InRelease`，dnf 是
+`repomd.xml.asc`），用的就是上面取的这把公钥。
+
+> 发行版包链的是**系统的** `libuv` 与 `zlib`（依赖 `libuv1-dev` / `zlib1g-dev`、
+> `libuv-devel` / `zlib-devel`），而上面的 zip 是自包含的。两者不要混用：
+> 把自包含的那份链进一个同时也加载系统 libuv 的进程，同一个进程里就是两份 libuv。
+
 ## 目录
 
 - [下载](#下载)
+- [安装](#安装)
 - [概述](#概述)
 - [功能特性](#功能特性)
 - [文档](#文档)
@@ -286,6 +323,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_BUILD_STATIC` | 自动 | 构建静态 uvcpp 库 |
 | `UVCPP_BUILD_SHARED` | 自动 | 构建动态 uvcpp 库 |
 | `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` 保持「自动」，跟随 libuv 自己的 `BUILD_SHARED_LIBS` |
+| `UVCPP_SET_SOVERSION` | `OFF` | 给共享库设 `VERSION`/`SOVERSION`，装出去的 `libuvcpp.so` 于是变成 `libuvcpp.so.1.7.3` → `libuvcpp.so.1` → `libuvcpp.so` 这条链。**只给发行版包用，默认关是有意的**：发布 zip 里就是一个不带版本号的 `libuvcpp.so`（`tests/tools/package_release.py` 拷的就是这个名字，`check_config_contract.py` 查的也是它），全仓只有 `.deb`/`.rpm` 那棵树打开它。只在 ELF 上生效 —— Windows 上是空操作，macOS 上跳过（在那里它会把文件改名成 `libuvcpp.1.dylib`）。见 [`packaging/README.md`](packaging/README.md) |
 | `UVCPP_BUILD_EXPAND` | `OFF` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |

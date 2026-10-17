@@ -1,0 +1,12 @@
+# nfpm —— 从一棵 `cmake --install` 前缀同时生成 .deb 与 .rpm。
+#
+# 固定版本 + 每个架构的 sha256。**不接受 latest**：这个二进制会出现在发布
+# 流水线里，版本漂移必须是一次可见的改动。升级时三处一起改（version、
+# 两个 hash），然后跑：
+#     python3 packaging/nfpm/make_packages.py --check-tool
+#
+# hash 来自同一个 release 的 checksums.txt。
+version=2.48.0
+base_url=https://github.com/goreleaser/nfpm/releases/download/v2.48.0
+linux_x86_64_sha256=6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+linux_arm64_sha256=a9a75213763783b7669719e505474c748c5ad7dc66591a195619deb50f85c2f4
