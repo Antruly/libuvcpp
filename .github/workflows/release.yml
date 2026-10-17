@@ -900,7 +900,18 @@ jobs:
           if ($pfx -or $env:WINDOWS_CERT_PFX_BASE64) {
             $sig = Get-AuthenticodeSignature $exe
             Write-Host "signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
-            if ($sig.Status -ne 'Valid') { throw "安装包签名无效：$($sig.Status)" }
+            if ($sig.Status -ne 'Valid') {
+              # 自签名证书天生的"不受信任"：链停在一张没人信过的根上，Status 是
+              # `UnknownError`（`HashMismatch` 才是包被改过，那个照旧判死）。
+              # 自签只警告 —— 它存在的意义是先把签名链路跑通。
+              $c = $sig.SignerCertificate
+              $selfSigned = $c -and ($c.Subject -eq $c.Issuer)
+              if ($selfSigned -and $sig.Status -in @('UnknownError', 'NotTrusted')) {
+                Write-Host "::warning title=self-signed-installer::安装包用自签名证书（$($c.Subject)）签的：签名与哈希完整，但证书不受信任，用户仍会看到未知发布者"
+              } else {
+                throw "安装包签名无效：$($sig.Status)"
+              }
+            }
           }
 
       - uses: actions/upload-artifact@v4
@@ -1264,7 +1275,16 @@ jobs:
           if ($env:WINDOWS_CERT_PFX_BASE64) {
             $sig = Get-AuthenticodeSignature $exe
             Write-Host "signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
-            if ($sig.Status -ne 'Valid') { throw "安装包签名无效：$($sig.Status)" }
+            if ($sig.Status -ne 'Valid') {
+              # 同 msvc-x64：自签证书的 `UnknownError` 只警告，其余状态判死。
+              $c = $sig.SignerCertificate
+              $selfSigned = $c -and ($c.Subject -eq $c.Issuer)
+              if ($selfSigned -and $sig.Status -in @('UnknownError', 'NotTrusted')) {
+                Write-Host "::warning title=self-signed-installer::安装包用自签名证书（$($c.Subject)）签的：签名与哈希完整，但证书不受信任，用户仍会看到未知发布者"
+              } else {
+                throw "安装包签名无效：$($sig.Status)"
+              }
+            }
           }
 
       - uses: actions/upload-artifact@v4

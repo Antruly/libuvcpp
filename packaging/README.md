@@ -167,6 +167,39 @@ python3 packaging/repo/publish.py --site /path/to/gh-pages-checkout \
 2. **Windows 证书**：PFX 转 base64 存 `WINDOWS_CERT_PFX_BASE64`，
    密码存 `WINDOWS_CERT_PASSWORD`。两个都缺就跳过签名并 `::warning`。
 
+   转换与上传：
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("codesign.pfx")) | Set-Clipboard
+   ```
+
+   ```sh
+   gh secret set WINDOWS_CERT_PFX_BASE64 -R Antruly/libuvcpp < codesign.b64
+   gh secret set WINDOWS_CERT_PASSWORD  -R Antruly/libuvcpp
+   ```
+
+   **先用自签名证书跑通链路**（没有信誉价值，用户仍会看到"未知发布者"）：
+
+   ```sh
+   openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 1095 \
+     -keyout key.pem -out cert.pem \
+     -subj "/CN=libuvcpp (self-signed)/O=libuvcpp" \
+     -addext "keyUsage=critical,digitalSignature" \
+     -addext "extendedKeyUsage=codeSigning"
+   # PBE 用 SHA1-3DES：Windows 的 PFX 导入对 OpenSSL 3 默认的 PBES2 不一定认
+   openssl pkcs12 -export -out codesign.pfx -inkey key.pem -in cert.pem \
+     -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
+   ```
+
+   签名逻辑本身不用改：workflow 用 Windows SDK 的 `signtool`（`/fd sha256
+   /td sha256 /tr http://timestamp.digicert.com`），经 ISCC 的 `/DSignSetup=1
+   /Ssigntool=…` 同时签安装程序与卸载程序（`SignedUninstaller=yes`），编完再
+   `Get-AuthenticodeSignature` 回验。**自签证书验出来的状态可能是 `UnknownError`
+   （链停在没人信任的根上）**，CI 只对这种"签发者 == 主体"的自签情形放行并打
+   `::warning title=self-signed-installer`；`HashMismatch` 之类的照旧判死。
+
+   换成真证书时**不要再生成自签**，只把两个 secret 换掉即可。
+
 3. **GitHub Pages**：第一次 `publish-repo` 会 push 一个 `gh-pages` 分支；之后在
    Settings → Pages 里把来源选成那个分支（或 `gh api` 设一次）。在此之前
    `https://antruly.github.io/libuvcpp/` 返回 404，`publish-repo` 本身照样绿。
