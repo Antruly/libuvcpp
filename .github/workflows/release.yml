@@ -873,15 +873,26 @@ jobs:
           $isccArgs = @("/DMyVersion=$ver", "/DMyArch=$arch", "/DArchAllowed=x64compatible",
                         "/DStageDir=$stage", "/DOutputDir=$((Get-Location).Path)\dist")
           $pfx = $null
+          $wrap = $null
           if ($env:WINDOWS_CERT_PFX_BASE64) {
             $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
             $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
                           Sort-Object FullName -Descending | Select-Object -First 1
             if (-not $signtool) { throw "找不到 signtool.exe（Windows SDK 装了吗？）" }
-            $cmd = '"{0}" sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f "{1}" /p "{2}" $f' -f $signtool.FullName, $pfx, $env:WINDOWS_CERT_PASSWORD
+            # ISCC 的 /S 值里一旦同时有空格和引号（signtool 在 `Program Files
+            # (x86)` 下、命令行本身也得带引号），传过去会被拆成多段，ISCC 报
+            # "You may not specify more than one script filename" —— 2026-10-18
+            # 用自签证书第一次真跑签名时踩到。落成一个路径无空格的 .cmd 包装器，
+            # 值里只留路径 + `$f`（后者是 ISCC 强制的占位符，缺了报
+            # "$f sequence is missing"），文件名由 ISCC 追加、包装器里收 %1。
+            $wrap = Join-Path $env:RUNNER_TEMP 'sign.cmd'
+            Set-Content -Path $wrap -Encoding ascii -Value @(
+              '@echo off',
+              ('"{0}" sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f "{1}" /p "{2}" %1' -f $signtool.FullName, $pfx, $env:WINDOWS_CERT_PASSWORD)
+            )
             $isccArgs += '/DSignSetup=1'
-            $isccArgs += "/Ssigntool=$cmd"
+            $isccArgs += "/Ssigntool=$wrap `$f"
             Write-Host "签名工具: $($signtool.FullName)"
           } else {
             Write-Host "::warning title=no-signing-cert::没有 WINDOWS_CERT_PFX_BASE64，安装包不签名（见 packaging/README.md 的「首次发布前的一次性准备」）"
@@ -892,7 +903,9 @@ jobs:
           # 参数，打印用法后以 1 退出，看着像编译失败、其实是没给脚本。
           & $iscc.FullName @isccArgs packaging/windows/libuvcpp.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
+          # 包装器里是明文口令，和 PFX 一起删掉
           if ($pfx) { Remove-Item $pfx -Force }
+          if ($wrap) { Remove-Item $wrap -Force }
 
           $exe = Join-Path (Get-Location) "dist/libuvcpp-$ver-msvc-$arch-setup.exe"
           if (-not (Test-Path $exe)) { throw "ISCC 报成功但没有 $exe" }
@@ -1248,15 +1261,26 @@ jobs:
           $isccArgs = @("/DMyVersion=$ver", "/DMyArch=$arch", "/DArchAllowed=arm64",
                         "/DStageDir=$stage", "/DOutputDir=$((Get-Location).Path)\dist")
           $pfx = $null
+          $wrap = $null
           if ($env:WINDOWS_CERT_PFX_BASE64) {
             $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
             $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
                           Sort-Object FullName -Descending | Select-Object -First 1
             if (-not $signtool) { throw "找不到 signtool.exe（Windows SDK 装了吗？）" }
-            $cmd = '"{0}" sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f "{1}" /p "{2}" $f' -f $signtool.FullName, $pfx, $env:WINDOWS_CERT_PASSWORD
+            # ISCC 的 /S 值里一旦同时有空格和引号（signtool 在 `Program Files
+            # (x86)` 下、命令行本身也得带引号），传过去会被拆成多段，ISCC 报
+            # "You may not specify more than one script filename" —— 2026-10-18
+            # 用自签证书第一次真跑签名时踩到。落成一个路径无空格的 .cmd 包装器，
+            # 值里只留路径 + `$f`（后者是 ISCC 强制的占位符，缺了报
+            # "$f sequence is missing"），文件名由 ISCC 追加、包装器里收 %1。
+            $wrap = Join-Path $env:RUNNER_TEMP 'sign.cmd'
+            Set-Content -Path $wrap -Encoding ascii -Value @(
+              '@echo off',
+              ('"{0}" sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com /f "{1}" /p "{2}" %1' -f $signtool.FullName, $pfx, $env:WINDOWS_CERT_PASSWORD)
+            )
             $isccArgs += '/DSignSetup=1'
-            $isccArgs += "/Ssigntool=$cmd"
+            $isccArgs += "/Ssigntool=$wrap `$f"
             Write-Host "签名工具: $($signtool.FullName)"
           } else {
             Write-Host "::warning title=no-signing-cert::没有 WINDOWS_CERT_PFX_BASE64，安装包不签名（见 packaging/README.md 的「首次发布前的一次性准备」）"
@@ -1267,7 +1291,9 @@ jobs:
           # 参数，打印用法后以 1 退出，看着像编译失败、其实是没给脚本。
           & $iscc.FullName @isccArgs packaging/windows/libuvcpp.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
+          # 包装器里是明文口令，和 PFX 一起删掉
           if ($pfx) { Remove-Item $pfx -Force }
+          if ($wrap) { Remove-Item $wrap -Force }
 
           $exe = Join-Path (Get-Location) "dist/libuvcpp-$ver-msvc-$arch-setup.exe"
           if (-not (Test-Path $exe)) { throw "ISCC 报成功但没有 $exe" }

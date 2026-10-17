@@ -193,7 +193,10 @@ python3 packaging/repo/publish.py --site /path/to/gh-pages-checkout \
 
    签名逻辑本身不用改：workflow 用 Windows SDK 的 `signtool`（`/fd sha256
    /td sha256 /tr http://timestamp.digicert.com`），经 ISCC 的 `/DSignSetup=1
-   /Ssigntool=…` 同时签安装程序与卸载程序（`SignedUninstaller=yes`），编完再
+   /Ssigntool=…` 同时签安装程序与卸载程序（`SignedUninstaller=yes`）。`/S` 的值
+   不能写成带引号的整条命令（会被拆段，ISCC 报 "You may not specify more than one
+   script filename"），所以它先落成一个路径无空格的 `.cmd` 包装器、值里只留
+   `包装器路径 $f`（`$f` 是 ISCC 强制的占位符）。编完再
    `Get-AuthenticodeSignature` 回验。**自签证书验出来的状态可能是 `UnknownError`
    （链停在没人信任的根上）**，CI 只对这种"签发者 == 主体"的自签情形放行并打
    `::warning title=self-signed-installer`；`HashMismatch` 之类的照旧判死。
