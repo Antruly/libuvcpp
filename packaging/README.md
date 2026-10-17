@@ -35,9 +35,11 @@ CI 里由 `.github/workflows/release.yml` 按顺序调用；本文只讲**为什
 默认 `OFF`，只有包这棵树打开。
 
 **已知的 API 差集（libuv 版本闸门）**：包是对着**构建机自带的 libuv 头**编的
-（CI 的 `linux-x64` 钉 Ubuntu 22.04 ⇒ libuv 1.44.2），而 zip 对着仓里钉的 libuv 编。
+（CI 的 `linux-x64` 钉 Ubuntu 22.04 ⇒ **libuv 1.43.0**：这条不是抄文档，1.7.4 的
+`libuvcpp1` 包自己写着 `Depends: libuv1 (>= 1.43.0)`），而 zip 对着仓里钉的 libuv 编。
+`uv_available_parallelism` 是 1.44 才有的，本库对 1.43 有亲和性兜底实现。
 本库有几处 `#if UV_VERSION_MINOR >= N` 的公开闸门，其中 `N = 45` 的那批在
-1.44 上整段编不进去：
+1.43 上整段编不进去：
 
 | 门槛 | 涉及 |
 |---|---|
