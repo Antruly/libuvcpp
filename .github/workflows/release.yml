@@ -1691,14 +1691,22 @@ jobs:
       - name: Configure & build the package tree (system libuv/zlib)
         run: |
           set -euo pipefail
-          # `libuv1-dev` 与上面"绝不装 libssl-dev"那条不冲突（jammy 上它只依赖
-          # libuv1 与 libc6-dev）。装完再把那条不变量验一遍：防的是哪天上游给它
-          # 加了 libssl-dev 依赖，配置期静默改用一份没有 QUIC API 的 OpenSSL。
-          sudo apt-get install -y libuv1-dev
-          if dpkg -s libssl-dev >/dev/null 2>&1; then
-            echo "::error title=linux-ssl-dev-installed::libuv1-dev 把 libssl-dev 拖进来了 —— 这条腿的 OpenSSL 必须是自编的那份"
+          # `libuv1-dev` 与上面"绝不装 libssl-dev"那条不冲突（jammy 的元数据里它只
+          # 依赖 libuv1 与 libc6-dev）。要防的是哪天上游给它加了 libssl-dev 依赖。
+          #
+          # **别用"装完还在不在"当判据**：`ubuntu-22.04` 的 runner 镜像**本来就预装**
+          # libssl-dev 3.0.2（actions/runner-images 的 `Ubuntu2204-Readme.md` 里有这
+          # 一行），所以 `dpkg -s libssl-dev` 恒真。2026-10-18 的 v1.7.4 发布第一次跑
+          # 这一步，两条 Linux 腿就是被这条假判据拦下的。
+          #
+          # 也别用 `apt-get install --dry-run` 的 `Inst` 行：libssl-dev 既然预装着，
+          # 就算上游真加了这条依赖，apt 也不会再"安装"它 ⇒ 假绿。要看的是**声明的
+          # 依赖**本身，`apt-cache depends` 与安装状态无关。
+          if apt-cache depends libuv1-dev | grep -qE '(^|[[:space:]])libssl-dev([[:space:]]|$)'; then
+            echo "::error title=linux-ssl-dev-pulled::libuv1-dev 的依赖会把 libssl-dev 拉进来 —— 这条腿的 OpenSSL 必须是自编的那份"
             exit 1
           fi
+          sudo apt-get install -y libuv1-dev
           cmake -S . -B build-pkg -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -2089,16 +2097,18 @@ jobs:
             --exclude-regex "test_shutdown_func"
 
       # 与 linux-x64 那段逐字同构（理由、判据、为什么另开一棵树全在那边），
-      # 只有两处不同：`--arch arm64`，以及 `libuv1-dev` 在这张镜像上同样是
-      # 只依赖 libuv1 与 libc6-dev。
+      # 只有一处不同：`--arch arm64`。
       - name: Configure & build the package tree (system libuv/zlib)
         run: |
           set -euo pipefail
-          sudo apt-get install -y libuv1-dev
-          if dpkg -s libssl-dev >/dev/null 2>&1; then
-            echo "::error title=linux-ssl-dev-installed::libuv1-dev 把 libssl-dev 拖进来了 —— 这条腿的 OpenSSL 必须是自编的那份"
+          # 判据是 libuv1-dev **声明的依赖**里有没有 libssl-dev，不是"装完它还在不在"
+          # —— 这张镜像本来就预装 libssl-dev，`dpkg -s` 恒真；`apt --dry-run` 的
+          # `Inst` 行同样看不见已装包的依赖（同 linux-x64 那段）。
+          if apt-cache depends libuv1-dev | grep -qE '(^|[[:space:]])libssl-dev([[:space:]]|$)'; then
+            echo "::error title=linux-ssl-dev-pulled::libuv1-dev 的依赖会把 libssl-dev 拉进来 —— 这条腿的 OpenSSL 必须是自编的那份"
             exit 1
           fi
+          sudo apt-get install -y libuv1-dev
           cmake -S . -B build-pkg -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
