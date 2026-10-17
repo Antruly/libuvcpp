@@ -19,6 +19,86 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.7.4 重点 (Highlights)
+
+`v1.7.0` 之后的补丁版：六条腿的 zip 用法与 1.7.0 完全相同，多出来的是**可以直接
+安装的发行版包**；库里则合进了一轮性能与数据库的改动。开发档 `1.7.1`–`1.7.3`
+折进这一版。
+
+### 三条安装命令（本版新增）
+
+| 平台 | 装什么 |
+|---|---|
+| Debian / Ubuntu | `apt install libuvcpp-dev` |
+| Fedora / RHEL 系 | `dnf install libuvcpp-devel` |
+| Windows | 双击 `libuvcpp-1.7.4-msvc-<arch>-setup.exe` |
+
+两条 Linux 通道走的是自建仓库（apt 在 `https://antruly.github.io/libuvcpp/apt`，
+dnf 在 `/rpm`），仓库元数据签名，客户端按 `packaging/README.md` 里那几行配置一次即可。
+**本版发布时签名密钥尚未配置**，所以这两条命令暂时会 404 —— CI 在这种情况下会跳过
+仓库发布并打出 warning，安装包本身照常作为 Release 资产发布，可以手工
+`dpkg -i` / `rpm -i` 安装。密钥就位后的下一次发布自动建出仓库。
+
+### 包与 zip 不是一回事
+
+`.deb` / `.rpm` / 安装程序链**系统**的 `libuv.so.1` / `libz.so.1`：公开头里有
+`<uv.h>`，`uvcpp_loop` 包的是 `uv_loop_t`，包里若再静态带一份 libuv，使用者照系统头
+编译就是同进程两份实例 —— 真实的堆破坏风险。所以安装包适合"系统包管理器里已经有
+libuv"的机器，装完可以 `find_package(uvcpp CONFIG)` 或 `pkg-config uvcpp`。
+六个 zip 仍是自包含的（除 libc 与 C++ 运行时外无依赖），**不要**把它们装进 `/usr/lib`。
+两者的选择标准是"这台机器愿不愿意用系统 libuv"，不是"哪个更新"。
+
+安装包里的数据库后端是四个：`uvcpp_db_drivers()` 返回 `sqlite,mysql,postgres,odbc`。
+
+### 这一版快了多少
+
+下面都是**本机量具**的读数（不是平台那套装置），逐条账与判据在
+[`doc/benchmark.md`](https://github.com/Antruly/libuvcpp/blob/master/doc/benchmark.md)：
+
+| 测点 | 改前 | **1.7.4** |
+|---|---:|---:|
+| h1 动态热路，callgrind 指令/请求（三处白拷） | 22 836.1 | **20 317.6（−11.03%）** |
+| h1 动态热路，callgrind 指令/请求（一趟扫表等） | 19 153.0 | **17 952.0（−6.27%）** |
+| 静态腿取锁次数/请求（`LD_PRELOAD` 计数） | 2.03 | **0.02~0.03** |
+| WS 回声分配次数/消息 | 11.26 | **6.26** |
+| `/json/50?m=6` callgrind 指令数 | 4 550 109 494 | **3 796 143 977（−16.57%）** |
+| HTTP/3 每请求分配字节 | 72 374.8 | **7 507.5（−89.6%）** |
+| HTTP/3 `sendmsg` 次数/请求 | 1.03 | **0.05** |
+| `async-db` 分配次数/应答 | 204.78 | **102.77** |
+| PostgreSQL 异步查询 CPU/请求 | 65.69 µs | **42.56 µs（−35%）** |
+| brotli 每请求缺页 | 72.06 | **0.00** |
+
+静态腿那一条值得单独说：平台给每一档的 cpuset 是同一个，而走静态处理器的档全封在
+22~31 核、同轮 `json-tls-4096` 在更低的每请求成本下用掉 63 核 —— 缺的是并行度。
+量到的是热路上一把**跨循环的全局锁**（每次请求取 2.03 次、持有 3.7~4.2 µs），
+修法是每循环一份前台副本；空临界区对照证明贵在争用本身，不在临界区里的活。
+
+### 数据库：第四个后端，与一条真异步的路
+
+**ODBC** 对着的是接口而不是某一种库：连什么、哪种方言，全由连接串里的 `Driver=` /
+`DSN=` 决定。进它的直接原因是 SQL Server —— 微软没给可链接的 C 客户端库，官方
+`msodbcsql18` 本身就是 ODBC 驱动。它没有 `UVCPP_DB_RUNTIME_LOAD` 那条路：驱动管理器
+本来就该在，按需加载下面的具体驱动是管理器自己的事。
+
+**PostgreSQL 的异步查询**不再把阻塞查询丢进 libuv 线程池，改走驱动自带的非阻塞协议
+（`PQsendQueryParams` + `PQflush`，`uv_poll` 盯 `PQsocket()`）。回调的形状、线程、
+返回码都不变。**新契约**：别带着在飞的查询 `loop.stop()` —— I/O 由那条循环驱动，
+停了查询就永远落不了地，池子析构会一直等。这一条写进了 `uvcpp_db_pool.h` 的类注释，
+两个跑法在
+[`doc/db-guide.md`](https://github.com/Antruly/libuvcpp/blob/master/doc/db-guide.md)。
+
+### 换包之前
+
+- **C ABI 没有改动**，`UVCPP_C_ABI_VERSION` 仍是 `1`。
+- **C++ 侧有两处要重编**：
+  - `uvcpp_json_write(value, uvcpp_json_writer&)` 这条旧签名**删除**，换成
+    `uvcpp_json_write(value, std::string&)`（yyjson 后端，写的是 yyjson 自己的
+    序列化器）。同一版新增构造侧 `uvcpp_json_builder` / `uvcpp_json_node`，键与
+    字符串值一律拷进 builder 的池，传临时对象、栈缓冲、含 `\0` 的键都安全。
+  - `uvcpp_http_request` 的公开布局多一个 `signed char keep_alive`（三态，`-1` =
+    没算过）。用旧头配新 `.so` 会有布局不一致，重编即可。
+- 包里模块集合同样变大了一处：ODBC（`UVCPP_DB_ODBC_ENABLE` 由 0 变 1）。
+
 ## v1.7.0 重点 (Highlights)
 
 这一版有两条主线：**HTTP/1.1 / HTTP/2 / HTTP/3 / WebSocket 的吞吐与常驻内存**（`v1.6.4`

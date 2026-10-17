@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.7.3--dev-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.7.4-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.7.3-dev` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.7.4` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -332,7 +332,7 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 | `UVCPP_BUILD_STATIC` | auto | Build static uvcpp library |
 | `UVCPP_BUILD_SHARED` | auto | Build shared uvcpp library |
 | `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | Keep `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` at `auto`, following libuv's own `BUILD_SHARED_LIBS` |
-| `UVCPP_SET_SOVERSION` | `OFF` | Set `VERSION`/`SOVERSION` on the shared library, so an installed `libuvcpp.so` becomes the chain `libuvcpp.so.1.7.3` → `libuvcpp.so.1` → `libuvcpp.so`. **This is for distro packages only, and it is off by default on purpose**: the release zips deliberately carry one unversioned `libuvcpp.so` (that is the name `tests/tools/package_release.py` copies and `check_config_contract.py` checks), and the `.deb`/`.rpm` build is the only thing that turns it on. ELF only — a no-op on Windows, and skipped on macOS (there it would rename the file to `libuvcpp.1.dylib`). See [`packaging/README.md`](packaging/README.md) |
+| `UVCPP_SET_SOVERSION` | `OFF` | Set `VERSION`/`SOVERSION` on the shared library, so an installed `libuvcpp.so` becomes the chain `libuvcpp.so.1.7.4` → `libuvcpp.so.1` → `libuvcpp.so`. **This is for distro packages only, and it is off by default on purpose**: the release zips deliberately carry one unversioned `libuvcpp.so` (that is the name `tests/tools/package_release.py` copies and `check_config_contract.py` checks), and the `.deb`/`.rpm` build is the only thing that turns it on. ELF only — a no-op on Windows, and skipped on macOS (there it would rename the file to `libuvcpp.1.dylib`). See [`packaging/README.md`](packaging/README.md) |
 | `UVCPP_BUILD_EXPAND` | `OFF` | Build expand module (memory pool) |
 | `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |

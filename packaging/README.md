@@ -79,8 +79,8 @@ python3 packaging/nfpm/make_packages.py --stage "$PWD/stage/usr" --out dist
 ## `windows/`：Inno Setup
 
 ```powershell
-ISCC.exe /DMyVersion=1.7.3 /DMyArch=x64 `
-         /DStageDir=D:\...\dist\libuvcpp-1.7.3-msvc-x64 `
+ISCC.exe /DMyVersion=1.7.4 /DMyArch=x64 `
+         /DStageDir=D:\...\dist\libuvcpp-1.7.4-msvc-x64 `
          /DOutputDir=D:\...\dist `
          packaging\windows\libuvcpp.iss
 ```

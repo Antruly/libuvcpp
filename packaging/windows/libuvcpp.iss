@@ -6,8 +6,8 @@
 ; 这里再抄一遍清单就成了第二个真相来源，迟早和它不一致。
 ;
 ; 用法（CI 里就是这么调的）：
-;   ISCC.exe /DMyVersion=1.7.3 /DMyArch=x64 \
-;            /DStageDir=D:\...\dist\libuvcpp-1.7.3-msvc-x64 \
+;   ISCC.exe /DMyVersion=1.7.4 /DMyArch=x64 \
+;            /DStageDir=D:\...\dist\libuvcpp-1.7.4-msvc-x64 \
 ;            /DOutputDir=D:\...\dist  packaging\windows\libuvcpp.iss
 ;
 ; 要签名时再加两项：

@@ -197,7 +197,7 @@ than the artifacts' timestamps.
 
 ## Distro packages and the package repositories
 
-Since 1.7.3 a release also publishes installable packages and keeps two signed
+Since 1.7.4 a release also publishes installable packages and keeps two signed
 repositories on GitHub Pages, so `apt install libuvcpp-dev` and
 `dnf install libuvcpp-devel` work without downloading a zip. Three extra steps ride
 on the same workflow; none of them changes the six zips.
@@ -210,7 +210,7 @@ deliberate differences:
 |---|---|---|
 | libuv | built from source, linked statically | **system** `libuv1-dev`, `libuv.so.1` |
 | zlib | `CMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON` | **system** `zlib1g-dev`, `libz.so.1` |
-| SONAME | off (`UVCPP_SET_SOVERSION` defaults to `OFF`) | **on** — `libuvcpp.so.1.7.3` → `.so.1` → `.so` |
+| SONAME | off (`UVCPP_SET_SOVERSION` defaults to `OFF`) | **on** — `libuvcpp.so.1.7.4` → `.so.1` → `.so` |
 
 The reason the package has to link the system libuv is the public headers: they
 `#include <uv.h>`, and `uvcpp_loop` wraps `uv_loop_t`. A package that quietly carried

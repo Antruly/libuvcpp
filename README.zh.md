@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![版本](https://img.shields.io/badge/version-1.7.3--dev-blue.svg)](./RELEASE.md)
+[![版本](https://img.shields.io/badge/version-1.7.4-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 基于 [libuv](https://github.com/libuv/libuv) 的现代 C++11 封装库 — 面向对象的异步 I/O，
 支持双模式（异步回调/同步等待）、HTTP/1.1、WebSocket（RFC 6455）和 SSL/TLS。
 
-- **版本**：`1.7.3-dev` — **作者**：`zhuweiye` — **许可证**：`MIT`
+- **版本**：`1.7.4` — **作者**：`zhuweiye` — **许可证**：`MIT`
 - **语言**：[English](./README.md) · [中文](./README.zh.md)
 
 ## 下载
@@ -323,7 +323,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_BUILD_STATIC` | 自动 | 构建静态 uvcpp 库 |
 | `UVCPP_BUILD_SHARED` | 自动 | 构建动态 uvcpp 库 |
 | `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` 保持「自动」，跟随 libuv 自己的 `BUILD_SHARED_LIBS` |
-| `UVCPP_SET_SOVERSION` | `OFF` | 给共享库设 `VERSION`/`SOVERSION`，装出去的 `libuvcpp.so` 于是变成 `libuvcpp.so.1.7.3` → `libuvcpp.so.1` → `libuvcpp.so` 这条链。**只给发行版包用，默认关是有意的**：发布 zip 里就是一个不带版本号的 `libuvcpp.so`（`tests/tools/package_release.py` 拷的就是这个名字，`check_config_contract.py` 查的也是它），全仓只有 `.deb`/`.rpm` 那棵树打开它。只在 ELF 上生效 —— Windows 上是空操作，macOS 上跳过（在那里它会把文件改名成 `libuvcpp.1.dylib`）。见 [`packaging/README.md`](packaging/README.md) |
+| `UVCPP_SET_SOVERSION` | `OFF` | 给共享库设 `VERSION`/`SOVERSION`，装出去的 `libuvcpp.so` 于是变成 `libuvcpp.so.1.7.4` → `libuvcpp.so.1` → `libuvcpp.so` 这条链。**只给发行版包用，默认关是有意的**：发布 zip 里就是一个不带版本号的 `libuvcpp.so`（`tests/tools/package_release.py` 拷的就是这个名字，`check_config_contract.py` 查的也是它），全仓只有 `.deb`/`.rpm` 那棵树打开它。只在 ELF 上生效 —— Windows 上是空操作，macOS 上跳过（在那里它会把文件改名成 `libuvcpp.1.dylib`）。见 [`packaging/README.md`](packaging/README.md) |
 | `UVCPP_BUILD_EXPAND` | `OFF` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |
