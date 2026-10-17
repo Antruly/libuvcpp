@@ -41,13 +41,27 @@ What a package contains, and why it is laid out that way:
 
 ## Install
 
-Besides the zips, every release feeds two package channels. Both install the dev
+Besides the zips, releases ship `.deb` / `.rpm` packages and — once the repository
+signing key is configured — feed two package channels. Both install the dev
 surface — headers, the CMake config, `uvcpp.pc` — so `find_package(uvcpp CONFIG)`
 and `pkg-config --cflags --libs uvcpp` work right after installing.
 
-**Windows** — run `libuvcpp-<ver>-msvc-<arch>-setup.exe` from the release assets
-(signed). It installs to `Program Files\libuvcpp`, optionally adds `bin\` to the
-system `PATH`, and registers an uninstaller.
+> **The apt/dnf channels are not live yet** (`GPG_PRIVATE_KEY` is not configured),
+> so the packages are published as release assets only. Install them directly:
+>
+> ```sh
+> sudo apt install ./libuvcpp1_<ver>-1_amd64.deb ./libuvcpp-dev_<ver>-1_amd64.deb
+> # or, on the RPM side:
+> sudo rpm -i libuvcpp1-<ver>-1.x86_64.rpm libuvcpp-devel-<ver>-1.x86_64.rpm
+> ```
+>
+> The two channel sections below describe what those commands become once the key
+> is in place.
+
+**Windows** — run `libuvcpp-<ver>-msvc-<arch>-setup.exe` from the release assets.
+It is **not code-signed yet** (the certificate is not configured), so SmartScreen
+warns on first run. It installs to `Program Files\libuvcpp`, optionally adds `bin\`
+to the system `PATH`, and registers an uninstaller.
 
 **Debian / Ubuntu** (apt):
 

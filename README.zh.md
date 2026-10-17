@@ -39,13 +39,24 @@
 
 ## 安装
 
-除 zip 之外，每个版本还喂着两条包管理渠道。两者装的都是开发面 —— 头文件、
-CMake 配置、`uvcpp.pc` —— 所以装完 `find_package(uvcpp CONFIG)` 与
-`pkg-config --cflags --libs uvcpp` 立刻可用。
+除 zip 之外，发布还带 `.deb` / `.rpm` 包，并在**仓库签名密钥配置好之后**喂着两条
+包管理渠道。两者装的都是开发面 —— 头文件、CMake 配置、`uvcpp.pc` —— 所以装完
+`find_package(uvcpp CONFIG)` 与 `pkg-config --cflags --libs uvcpp` 立刻可用。
 
-**Windows** —— 从 Release 资产里下 `libuvcpp-<ver>-msvc-<arch>-setup.exe`
-（已签名）直接运行。它装到 `Program Files\libuvcpp`，可选把 `bin\` 加进系统
-`PATH`，并注册卸载程序。
+> **apt/dnf 两条渠道目前还没上线**（`GPG_PRIVATE_KEY` 未配置），这一版只把包
+> 作为 Release 资产发布。直接装：
+>
+> ```sh
+> sudo apt install ./libuvcpp1_<ver>-1_amd64.deb ./libuvcpp-dev_<ver>-1_amd64.deb
+> # rpm 这边：
+> sudo rpm -i libuvcpp1-<ver>-1.x86_64.rpm libuvcpp-devel-<ver>-1.x86_64.rpm
+> ```
+>
+> 下面那两节写的是密钥就位之后这两条命令会变成什么样。
+
+**Windows** —— 从 Release 资产里下 `libuvcpp-<ver>-msvc-<arch>-setup.exe` 直接运行。
+**这一版还没做代码签名**（证书尚未配置），首次运行 SmartScreen 会警告。它装到
+`Program Files\libuvcpp`，可选把 `bin\` 加进系统 `PATH`，并注册卸载程序。
 
 **Debian / Ubuntu**（apt）：
 
