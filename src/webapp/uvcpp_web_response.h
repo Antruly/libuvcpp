@@ -743,6 +743,20 @@ class UVCPP_API uvcpp_web_response {
   const uvcpp_http_response& raw() const;
 
   /**
+   * @brief 底层响应 —— **不先 `sync_meta()`**。
+   *
+   * 只给"刚刚已经同步过、之后没有碰过 body 与长度头"的调用点用：框架的发送
+   * 出口就是这种形状（`send_response()` 入口处为了拿访问日志的基准已经同步过
+   * 一次，两者之间只补了 `server` 一个头）。`sync_meta()` 不便宜 ——
+   * 它要扫一遍头表问"有没有 content-length"、再扫一遍问 chunked、再按需
+   * `set_header()` —— 每请求多跑一遍是白付的。
+   *
+   * 与 `raw()` 的区别**只有**那一次同步。别在没同步过的地方用它：body 与
+   * `content-length` 对不上时，报文会声明一个错长度。
+   */
+  uvcpp_http_response& raw_after_sync() { return resp_; }
+
+  /**
    * @brief 标上这条响应属于哪条 h2 流（0 = HTTP/1.1）。**由框架在派发之前调**。
    *
    * 刻意不走 `raw()`：那个非 const 版会先 `sync_meta()`，而在这里跑一次是在

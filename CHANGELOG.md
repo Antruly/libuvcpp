@@ -1131,7 +1131,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **流水线里末条的 `Connection: close` 会把前面几条的响应一起带走**（`1.6.46-dev`）。
   HTTP/1.1 流水线（一次读缓冲里多条请求）下，**异步响应**的第 1 条在序列化时问的是
   `uvcpp_http_server` 里那句 `ctx.parser->should_keep_alive()`
-  （`src/web/uvcpp_http_server.cpp:1639-1639`），而 llhttp 的 flags 是**连接级**的、
+  （`src/web/uvcpp_http_server.cpp:1691-1691`），而 llhttp 的 flags 是**连接级**的、
   属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
   读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
   响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2690-2690` 打
@@ -2075,7 +2075,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   这两列数还逐条对得上一个模型（按 URL 拆开量出来的）：带孪生文件的 15 个 URL 是
   `2 realpath + 2 statx`（主文件 1+1，孪生候选命中 1+1），没有孪生的 5 个是
   `5 realpath + 3 statx` —— 因为 `web_real_path(allow_missing=true)` 在整条路径
-  `realpath` 失败后**还要再解析一次父目录**（`src/webapp/uvcpp_web_util.cpp:866-866`、`src/webapp/uvcpp_web_util.cpp:883-883`），所以一次
+  `realpath` 失败后**还要再解析一次父目录**（`src/webapp/uvcpp_web_util.cpp:894-894`、`src/webapp/uvcpp_web_util.cpp:911-911`），所以一次
   **失败**的解析是 2 次 `realpath` 而不是 1 次。加权 `(15×2+5×5)/20 = 2.75` 与
   `(15×2+5×3)/20 = 2.25`，与实测的 2.734 / 2.245 对上。
 
@@ -2786,6 +2786,30 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   边界 —— 逐函数归因里**没有单一支配项**（每请求 ~20.3 k 指令，头 40 个函数约占 45%），
   剩下还能收的三池（路由匹配 ≈860、头部搬运 ≈1 000、分配器 ≈1 300 指令/请求）加起来
   ~14%，够不到所需的 −39%/−48%。逐函数表、判据与复现写在 `doc/benchmark.md` §4.22。（`1.7.2-dev`）
+- **h1 动态热路再收一轮：每请求用户态指令 19 153.0 → 17 952.0 = −6.27%**（`1.7.2-dev`）。
+  七处，合计**不改一个字节的应答**（18 种请求形状对着上一版 `.so` 逐字节比对，只掩 `date`）：
+  - `uvcpp_web_request::take_from()`：关心的四个头（`host` / `content-type` /
+    `content-length` / `accept-encoding`）**一趟扫完**，且值改成**写进成员**而不是按值
+    取回 —— `http_get_header()` 返回的是 `std::string`，值一过 SSO 线就是一次 malloc。
+  - `uvcpp_http_request::keep_alive` 新增三态字段（`-1` 没算过 / `0` 关 / `1` 保持）。传输层
+    在 `extract_metadata()` 里**本来就**算了 `llhttp_should_keep_alive()`，带下来之后 web 层
+    不必每请求重扫一遍头表（`uvcpp_web_request::is_keep_alive()` 134 → 0 指令/请求）。
+  - `uvcpp_http_server::send_response()`：4 次 `has_header()` + 1 次 `get_header()` 换成
+    **一趟扫表**（`has_header` 412 → 94、`get_header` 147 → 0）。
+  - `host_header_violates()` 与 `transfer_encoding_is_void()` 合成
+    `message_header_violates()`：同一份头表，按名字长度分流（4 / 17），一趟判完。
+  - `uvcpp_web_response::raw_after_sync()`：webapp 的发送出口刚同步过一次，不再来第二遍
+    （`sync_meta` 310 → 89）。
+  - `web_parse_query_into()`：`&`/`=` 一趟找完、整串只判一次 `%`/`+`；`reserve(4)` 消掉
+    "空向量从 1 长到 2 扩两次"那两笔分配。
+  - `uvcpp_web_router::match()`：**全字面量**路由改走一张 `模式 → 候选下标` 的表，
+    跳过 `split_path()` 的 vector 分配与逐段比较（参数路由与通配路由照旧走通例）。
+  ★ **公开类型的布局变了**：`uvcpp_http_request` 多一个 `signed char` 字段 —— 消费方要
+  重编（1.7.2 尚未发布，按开发版记账）。
+  ★ **与 §4.22 同一把尺子**：`cg8.sh`（8 循环、`taskset 10-17`、`c=1024`、`m=1`、
+  `/baseline11?a=13&b=42`），五臂的顺序读数 19 153.0 → 19 036.1 → 18 613.0 → 17 985.2 →
+  17 952.0 ⇒ **−6.27%**。指令数只算用户态，折到端到端的换算与"这一档为什么仍然不是
+  `latency-500k-8cpu` 的杠杆"见 §4.22 与 `doc/benchmark.md` §4.23。
 
 ### JSON
 

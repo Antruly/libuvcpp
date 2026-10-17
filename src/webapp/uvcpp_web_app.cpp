@@ -2769,7 +2769,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
     // 体与头分开：`begin_stream()` 只读状态码与头列表，所以头块里那份体必须
     // 先摘出来 —— 留着它不会多发字节（头列表里没有它），但会让下面那句
     // `notify_sent()` 之后还挂着一份已经发完的字节。
-    uvcpp_http_response head = r.raw();
+    uvcpp_http_response head = r.raw_after_sync();
     std::string        body;
     if (head.body.size() > 0) {
       body.assign(head.body.get_const_data(), head.body.size());
@@ -2890,7 +2890,7 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // HEAD 那一支要再换算一次：压缩算过了（那正是 HEAD 的 `content-length` 与
   // GET 一致的原因），但字节**一个都没上线**，而契约是"实际写入连接的字节数、
   // HEAD 时为 0"。与流式那处的 `head_only() ? 0 : stream_bytes_written()` 同形状。
-  const size_t sent_body_bytes = http_->send_response(client, r.raw());
+  const size_t sent_body_bytes = http_->send_response(client, r.raw_after_sync());
   info.body_bytes = r.head_only() ? 0 : sent_body_bytes;
 
   r.notify_sent(info);

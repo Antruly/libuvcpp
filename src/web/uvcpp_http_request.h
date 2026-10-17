@@ -52,6 +52,20 @@ class UVCPP_API uvcpp_http_request {
   int32_t       stream_id = 0;
 
   /**
+   * @brief 这条请求的 keep-alive 结论：`-1` = 没算过，`0` = 关闭，`1` = 保持。
+   *
+   * 传输层在头部解析完的那一刻**已经算过**了（`llhttp_should_keep_alive()`：
+   * HTTP/1.1 默认保持、HTTP/1.0 默认关闭，`Connection` 的值按 token 逐个小写
+   * 比较）—— 见 `uvcpp_http_parser::extract_metadata()`。把它带下来，web 层就
+   * 不必每请求再扫一遍头表。
+   *
+   * 默认 `-1` 是**故意的**：手搭的请求（测试、h2/h3 那条没有连接语义的腿、
+   * `from_parser()` 之外的构造路径）头部与传输层未必一致，此时下游仍按头表
+   * 自己算，行为与没有这个字段时逐条相同。
+   */
+  signed char   keep_alive = -1;
+
+  /**
    * @brief 这条请求的「稍后回话」凭据 —— 见 @ref uvcpp_http_reply。
    *
    * 三条传输上**都**会被框架填好（h1 / h2 / h3），处理函数按值留一份就能在

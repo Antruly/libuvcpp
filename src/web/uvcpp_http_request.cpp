@@ -180,6 +180,7 @@ uvcpp_http_request uvcpp_http_request::from_parser(
   req.method  = parser.get_method();
   req.url     = parser.get_url();
   req.version = parser.get_uvcpp_http_version();
+  req.keep_alive = parser.should_keep_alive() ? 1 : 0;
   req.headers = parser.get_headers();
   req.body.clone(body);
   return req;

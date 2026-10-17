@@ -138,7 +138,6 @@ uvcpp_web_request::uvcpp_web_request()
       upload_(nullptr),
       src_(),
       body_(),
-      raw_url_(),
       raw_path_(),
       path_(),
       query_string_(),
@@ -148,6 +147,7 @@ uvcpp_web_request::uvcpp_web_request()
       accept_encoding_(),
       host_(),
       content_length_(0),
+      keep_alive_cache_(0),
       peer_ip_(),
       peer_port_(0),
       query_parsed_(false),
@@ -177,7 +177,8 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   // 一次，后面每一跳都是搬家。
   //
   // 代价与 body 那条同源，一并写进契约：`take_from()` 之后源请求的 `headers`
-  // 与 `url` 也空了。**三个标量（`method` / `version` / `stream_id`）刻意留
+  // 空了（`url` **不搬**，见下面那段：`raw()` 还要从这里读原始目标）。
+  // **三个标量（`method` / `version` / `stream_id`）刻意留
   // 原值**：HTTP 层的 h2 路径正是靠 `take_from()` 之后读 `stream_id` 回填流号的。
   src_.method    = src.method;
   src_.version   = src.version;
@@ -202,9 +203,11 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
 
   method_  = src_.method;
   version_ = src_.version;
-  raw_url_ = src_.url;
-
-  web_split_path_query(raw_url_, raw_path_, query_string_);
+  // URL 就留在 `src_.url` 里，**不再拷第二份**：`raw_url()` 直接返回它，
+  // `raw()` 里看到的也是同一份 ⇒ 不再有"搬走之后源的 url 空了"这种分叉。
+  // （以前这里是 `raw_url_ = src_.url`，一过 15 字节的 SSO 线就是每请求一次
+  // malloc + free；改成搬走又会把 `raw().url` 清空，违反那个逃生口的契约。）
+  web_split_path_query(src_.url, raw_path_, query_string_);
 
   // 归一化成路由与中间件看到的那条路径（解码 + 折叠）。两条规则的分工与
   // 顺序理由（`+` 是字面加号、`%2F` 解码后充当分隔符、所以**必须先解码再
@@ -217,17 +220,59 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   path_ = raw_path_;
   web_normalize_path(path_);
 
-  // 关心的几个头解析一次缓存下来。http_headers 是线性表，每次 get_header
-  // 都是 O(头数) 次大小写不敏感比较，而 content_type 在 is_json()/is_form()
-  // 里会被反复问到。
-  content_type_ = http_get_header(src_.headers, "content-type");
-  accept_encoding_ = http_get_header(src_.headers, "accept-encoding");
-  host_ = http_get_header(src_.headers, "host");
-
-  const std::string cl = http_get_header(src_.headers, "content-length");
-  if (!cl.empty() && !parse_size(cl, content_length_)) {
-    content_length_ = 0;  // 非法声明按 0 处理；不信任这个值做分配
+  // 关心的几个头**一次遍历**取完。
+  //
+  // 以前这里是 4 次 `http_get_header()`：4 遍线性表，每格一次大小写不敏感
+  // 比较，而且它按**值**返回（`return h.value`）—— 值一过 SSO 线就是每请求
+  // 一次 malloc + free。改成赋值到成员里：成员带着上一条请求留下的容量，
+  // 够用时一次分配都不做。
+  //
+  // 判据逐条对齐 `http_get_header()`：同名头出现多次时**先到的那条赢**。
+  // 所以每个名字配一个 `seen` 位，命中之后不再覆盖。名字长度先比一次，
+  // 长度不对连字节都不用看。
+  enum { kSeenType = 1, kSeenEncoding = 2, kSeenHost = 4, kSeenLength = 8 };
+  content_type_.clear();
+  accept_encoding_.clear();
+  host_.clear();
+  content_length_ = 0;
+  unsigned seen = 0;
+  for (size_t i = 0; i < src_.headers.size(); ++i) {
+    const http_header& h = src_.headers[i];
+    const size_t n = h.name.size();
+    if (n == 4) {  // host
+      if ((seen & kSeenHost) == 0 &&
+          http_name_iequal(h.name.data(), n, "host", 4)) {
+        host_ = h.value;
+        seen |= kSeenHost;
+      }
+    } else if (n == 12 && (seen & kSeenType) == 0) {  // content-type
+      if (http_name_iequal(h.name.data(), n, "content-type", 12)) {
+        content_type_ = h.value;
+        seen |= kSeenType;
+      }
+    } else if (n == 14 && (seen & kSeenLength) == 0) {  // content-length
+      if (http_name_iequal(h.name.data(), n, "content-length", 14)) {
+        if (!parse_size(h.value, content_length_)) {
+          content_length_ = 0;  // 非法声明按 0 处理；不信任这个值做分配
+        }
+        seen |= kSeenLength;
+      }
+    } else if (n == 15 && (seen & kSeenEncoding) == 0) {  // accept-encoding
+      if (http_name_iequal(h.name.data(), n, "accept-encoding", 15)) {
+        accept_encoding_ = h.value;
+        seen |= kSeenEncoding;
+      }
+    }
+    if (seen == (kSeenType | kSeenEncoding | kSeenHost | kSeenLength)) break;
   }
+  // keep-alive：传输层说了就听它的，没说（`-1`）才留给 `is_keep_alive()` 按
+  // 头表算。缓存里 0 = 没算过正是"没说"的编码，所以两边是同一个三态。
+  //
+  // 「上一条请求的结论不能留到这一条」依旧成立：这里**一定**会被赋一次值
+  // （`-1` 也赋），不存在保留旧结论的那条路。
+  keep_alive_cache_ = (src.keep_alive == 0 || src.keep_alive == 1)
+                          ? src.keep_alive
+                          : 0;
 }
 
 void uvcpp_web_request::adopt_headers(http_headers& src) {
@@ -337,6 +382,11 @@ double uvcpp_web_request::encoding_qvalue(const std::string& encoding) const {
 }
 
 bool uvcpp_web_request::is_keep_alive() const {
+  // 结论缓存到请求对象的生存期结束：`send_response()` 每条请求问一次，而
+  // 「一次线性表扫描 + 按逗号切 token + 每个 token 一次 trim」在 1024 连接的
+  // 热路上是能看见的。0 = 没算过（`take_from()` 会归零）。
+  if (keep_alive_cache_ != 0) return keep_alive_cache_ == 1;
+
   // Connection 可以是逗号列表（"keep-alive, Upgrade"），所以要按 token 找，
   // 不能整串比较。
   const std::string conn = header("connection");
@@ -354,10 +404,11 @@ bool uvcpp_web_request::is_keep_alive() const {
     start = comma + 1;
   }
 
-  if (version_ == uvcpp_http_version::HVER_11) {
-    return !has_close;  // HTTP/1.1 默认保持
-  }
-  return has_keep_alive;  // HTTP/1.0 默认关闭
+  const bool keep = (version_ == uvcpp_http_version::HVER_11)
+                        ? !has_close          // HTTP/1.1 默认保持
+                        : has_keep_alive;     // HTTP/1.0 默认关闭
+  keep_alive_cache_ = keep ? 1 : 2;
+  return keep;
 }
 
 // =========================================================================
@@ -368,7 +419,14 @@ const std::vector<std::pair<std::string, std::string> >&
 uvcpp_web_request::query_params() const {
   if (!query_parsed_) {
     query_parsed_ = true;
-    query_params_ = web_parse_query(query_string_);
+    // 填进**成员自己的**那条向量：同一个请求对象上重复问只解析一次，而且
+    // 也不用先造一条临时向量再整体搬过来。
+    //
+    // **不要以为容量会跨请求留着**：`uvcpp_web_request` 是每请求新建的
+    // （`uvcpp_web_context::create()`），上一次请求的向量随上下文一起没了 ——
+    // 实测每请求仍是 1 次分配。真正的复用口是 `adopt_tables()` 那族
+    // （头表 / 响应表），查询向量没接进去。
+    web_parse_query_into(query_string_, query_params_);
   }
   return query_params_;
 }
@@ -393,7 +451,7 @@ uvcpp_web_request::form_params() const {
       // body_str() 在这里才把 body 复制成 string —— 只有真的要解析表单时
       // 才付这次拷贝。表单和查询串的编码规则相同（`+` 是空格、
       // `%XX` 是字节），所以直接复用 web_parse_query。
-      form_params_ = web_parse_query(body_str());
+      web_parse_query_into(body_str(), form_params_);
     } else if (is_multipart()) {
       // **这里是步骤 8 之前的一个窟窿**：multipart 请求走到这里原本什么都不做，
       // 于是 `req.form("x")` 对一份完全合法的 multipart 表单**静默返回空** ——

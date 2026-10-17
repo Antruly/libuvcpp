@@ -135,63 +135,72 @@ bool host_value_is_valid(const std::string& raw) {
 }
 
 /**
- * @brief RFC 9112 §3.2 的三条 MUST 是否被违反：HTTP/1.1 请求必须**恰好一个**、
- *        且字段值合法的 `Host`。
+ * @brief 两条「畸形报文」判据，一趟扫表判完：Host（RFC 9112 §3.2）与空的
+ *        `Transfer-Encoding`（§6.1）。
  *
+ * **Host §3.2**：HTTP/1.1 请求必须**恰好一个**、且字段值合法的 `Host`。
  * 缺、多于一行（值相同也一样）、字段值非法，三种都回 400。判据里"多于一行"
  * 与值无关，所以两行同值也算 —— RFC 那句写的是 "more than one Host header
  * field line"，没有给同值开例外。
- *
  * **HTTP/1.0 不受此限**：`Host` 是 1.1 才引入的，1.0 的请求没有它不算违规，
  * 本库照旧服务（探针里 `http10-no-host` 那条把两种处置都算合格，即为此）。
  *
- * @return true = 违反 §3.2，调用方回 400。
- */
-bool host_header_violates(const http_headers& hs, uvcpp_http_version ver) {
-  if (ver != uvcpp_http_version::HVER_11) return false;
-  const http_header* seen = nullptr;
-  for (size_t i = 0; i < hs.size(); ++i) {
-    // 头名在解析器里是**原样保留**的（`ll_on_header_field` 逐字 append，
-    // 不小写化），所以比大小写无关的那种比法，和 `message_has_body` 一致。
-    if (!http_name_equal(hs[i].name, "host")) continue;
-    if (seen != nullptr) return true;
-    seen = &hs[i];
-  }
-  if (seen == nullptr) return true;
-  return !host_value_is_valid(seen->value);
-}
-
-/**
- * @brief 有没有一条 `Transfer-Encoding` 头，且**它的值整个是空的**。
- *
- * RFC 9112 §6.1 的 ABNF 是 `Transfer-Encoding = #transfer-coding`、
- * `transfer-coding = token`、`token = 1*tchar` —— 空串里一个 `tchar` 都没有，
- * 不匹配任何一条。所以这样一行头**语法上在、语义上一个编码都没声明**，留下
- * 一个框架歧义：前端按"TE 存在"（§6.3：压过 `Content-Length`）还是按"TE 空
+ * **Transfer-Encoding §6.1**：有这一行、但它的值整个是空的。ABNF 是
+ * `Transfer-Encoding = #transfer-coding`、`transfer-coding = token`、
+ * `token = 1*tchar` —— 空串里一个 `tchar` 都没有，不匹配任何一条。留下一
+ * 个框架歧义：前端按"TE 存在"（§6.3：压过 `Content-Length`）还是按"TE 空
  * 所以不存在"（退回 `Content-Length`）处置？两边不一致就是请求走私。
- *
- * **只判"所有 TE 行合起来一个元素都没有"**：`Transfer-Encoding: ,chunked`
- * 那种前面挂着空列表元素的是合法的（RFC 9110 §5.6.1.2：收方 MUST 解析并忽略
- * 合理数量的空列表元素），多行 `TE` 等价于把它们按逗号接起来，所以只要**有
- * 任何一行非空**就不算违规，交给下面原有的判据。
- *
+ * 判据只看"所有 TE 行合起来一个元素都没有"：`Transfer-Encoding: ,chunked`
+ * 那种前面挂着空列表元素的是合法的（RFC 9110 §5.6.1.2），多行 `TE` 等价于
+ * 把它们按逗号接起来，所以只要**有任何一行非空**就不算违规。
  * 注：非空但不认识的编码（`TE: identity`）以及 `TE: chunked` 与 `CL` 同时出现，
- * llhttp 自己就判畸形了，走的是上面 `has_error()` 那条 400 ＋ 关连接的路。
- * 本函数补的正是它漏掉的那一格：值为空时 llhttp **不把 TE 记成存在**。
+ * llhttp 自己就判畸形了，走的是 `has_error()` 那条 400 ＋ 关连接的路；本函数
+ * 补的正是它漏掉的那一格：值为空时 llhttp **不把 TE 记成存在**。
  *
- * @return true = 应当回 400。
+ * @return true = 违反其中一条，调用方回 400。
  */
-bool transfer_encoding_is_void(const http_headers& hs) {
-  bool any_te_line = false;
+bool message_header_violates(const http_headers& hs, uvcpp_http_version ver) {
+  // 两条判据读的是**同一份头表**，原先各扫一遍（`host_header_violates` +
+  // `transfer_encoding_is_void`）。合起来一趟就够：名字先按长度分流
+  // （`host` 4 / `transfer-encoding` 17），长度不对的头连字节都不用比。
+  // 这一段在 h1 的每请求成本里是 438 条（callgrind，`-c 1024 -m 1` 工作点）。
+  //
+  // 头名在解析器里是**原样保留**的（`ll_on_header_field` 逐字 append，
+  // 不小写化），所以比大小写无关的那种比法，和 `message_has_body` 一致。
+  const bool check_host = (ver == uvcpp_http_version::HVER_11);
+  size_t host_count = 0;
+  const http_header* host = nullptr;
+  bool te_line = false;        // 有没有 `Transfer-Encoding` 那一行
+  bool te_has_content = false; // 其中有没有任何一行带一个非空白字符
   for (size_t i = 0; i < hs.size(); ++i) {
-    if (!http_name_equal(hs[i].name, "transfer-encoding")) continue;
-    any_te_line = true;
-    const std::string& v = hs[i].value;
-    for (size_t k = 0; k < v.size(); ++k) {
-      if (v[k] != ' ' && v[k] != '\t') return false;   // 这行有内容
+    const http_header& h = hs[i];
+    const size_t n = h.name.size();
+    if (n == 4) {
+      if (check_host && http_name_iequal(h.name.data(), n, "host", 4)) {
+        ++host_count;
+        // 第一行的值就是下面要验的那个（多余的行本身已经是违规了）。
+        if (host == nullptr) host = &h;
+      }
+      continue;
+    }
+    if (n == 17 && !te_has_content &&
+        http_name_iequal(h.name.data(), n, "transfer-encoding", 17)) {
+      te_line = true;
+      const std::string& v = h.value;
+      for (size_t k = 0; k < v.size(); ++k) {
+        if (v[k] != ' ' && v[k] != '\t') {  // 这行有内容
+          te_has_content = true;
+          break;
+        }
+      }
     }
   }
-  return any_te_line;
+  // Host：缺、多于一行（值相同也一样）、字段值非法，三种都算违规。
+  if (check_host && (host_count != 1 || !host_value_is_valid(host->value))) {
+    return true;
+  }
+  // Transfer-Encoding：有这一行、但所有行合起来一个元素都没有。
+  return te_line && !te_has_content;
 }
 
 #if UVCPP_HTTP3_ENABLE
@@ -1093,9 +1102,8 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
     // 此刻头表还在解析器上：`take_headers_into()` 是下面那条建视图的路上才
     // 搬的，所以这里读得到全部头。
     const http_headers& h1_headers = pctx->parser->get_headers();
-    if (host_header_violates(h1_headers,
-                             pctx->parser->get_uvcpp_http_version()) ||
-        transfer_encoding_is_void(h1_headers)) {
+    if (message_header_violates(h1_headers,
+                                pctx->parser->get_uvcpp_http_version())) {
       reject_early(*pctx, client, http_status::BAD_REQUEST,
                    /*message_will_complete=*/true);
       return;
@@ -1125,6 +1133,8 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
       pctx->stream_request.method  = pctx->parser->get_method();
       pctx->stream_request.url     = pctx->parser->get_url();
       pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
+      pctx->stream_request.keep_alive =
+          pctx->parser->should_keep_alive() ? 1 : 0;
       pctx->parser->take_headers_into(pctx->stream_request.headers);
       pctx->stream_view_built = true;
       built_view = true;
@@ -1148,6 +1158,8 @@ void uvcpp_http_server::on_tcp_connection(uvcpp_tcp_client* client) {
         pctx->stream_request.method  = pctx->parser->get_method();
         pctx->stream_request.url     = pctx->parser->get_url();
         pctx->stream_request.version = pctx->parser->get_uvcpp_http_version();
+        pctx->stream_request.keep_alive =
+            pctx->parser->should_keep_alive() ? 1 : 0;
         pctx->parser->take_headers_into(pctx->stream_request.headers);
         pctx->stream_view_built = true;
       }
@@ -1427,6 +1439,10 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
     req.url       = ctx.parser->get_url();
     req.version   = ctx.parser->get_uvcpp_http_version();
     req.stream_id = 0;  // h1 路径恒为 0（h2 走 `dispatch_h2_request`，不经过这里）
+    // keep-alive 的结论解析器**已经算好了**（`extract_metadata()` 里那句
+    // `llhttp_should_keep_alive()`）。带下去，web 层就不用每请求再扫一遍头表：
+    // 那边 `is_keep_alive()` 的懒计算正是"没拿到就自己按 Connection 算"。
+    req.keep_alive = ctx.parser->should_keep_alive() ? 1 : 0;
     // 与上面那两条建视图的路**同一个形状**：头表是**搬**过来的，不是拷的。
     // 拷一份 = 一次向量分配**外加每个非 SSO 的值各一次**（libstdc++ 的界是
     // 15 字节，`Host: 127.0.0.1:8081` 这种就超了）；搬 = 一个字符串都不分配
@@ -1448,7 +1464,7 @@ void uvcpp_http_server::on_request_complete(uvcpp_tcp_client* client) {
   // Capture what send_response() needs later: for a deferred response the
   // parser is reset (and its headers replaced) before the response is sent,
   // so these cannot be read back off the parser at send time.
-  ctx.accept_encoding = http_get_header(req.headers, "accept-encoding");
+  http_get_header_into(req.headers, "accept-encoding", ctx.accept_encoding);
   ctx.is_head = (req.method == http_method::HTTP_HEAD);
 
   // 「稍后回话」凭据（见 `uvcpp_http_reply`）：h1 上它背后只有这条 TCP 连接，
@@ -1624,15 +1640,51 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   // Server -> client compression. Done here so deferred responses are covered.
   apply_compression(ctx, resp);
 
+  // ★ 一次扫表拿齐四件事：`connection` 在不在、它的值是不是 `close`、
+  //   有没有 `content-length` / `transfer-encoding`。改前这里是四次
+  //   `has_header()` 加一次 `get_header()`（后者还造一个 `std::string` 再丢掉），
+  //   每次都是从表头扫到表尾 —— 响应头常态就五六个，但这五次扫描在 callgrind
+  //   上是每请求 412 条，而它们换来的信息量就是这四个布尔。
+  //
+  //   长度先分流（10/14/17）再逐字节小写比较：名字长度不等的头连比较都省了，
+  //   `date`(4)/`server`(6)/`content-type`(12) 这些一趟就跳过去。
+  //   `connection` 与 `content-length` 可能有重复项（`set_header` 会覆盖，
+  //   但处理函数直接 `headers.push_back` 就能塞第二份）—— 取**第一个**匹配项，
+  //   与 `http_get_header()` / `http_has_header()` 的语义一致。
+  bool has_conn = false;
+  bool conn_close = false;
+  bool has_content_length = false;
+  bool has_transfer_encoding = false;
+  for (size_t i = 0; i < resp.headers.size(); ++i) {
+    const http_header& h = resp.headers[i];
+    const size_t n = h.name.size();
+    if (n == 10) {
+      if (!has_conn && http_name_iequal(h.name.data(), n, "connection", 10)) {
+        has_conn = true;
+        // 字段值不要求保留大小写，所以按名字比较那条路（大小写不敏感）比。
+        conn_close = http_name_equal(h.value, "close");
+      }
+    } else if (n == 14) {
+      if (!has_content_length &&
+          http_name_iequal(h.name.data(), n, "content-length", 14)) {
+        has_content_length = true;
+      }
+    } else if (n == 17) {
+      if (!has_transfer_encoding &&
+          http_name_iequal(h.name.data(), n, "transfer-encoding", 17)) {
+        has_transfer_encoding = true;
+      }
+    }
+  }
+
   // Keep-Alive (RFC 7230 Section 6.3):
   // HTTP/1.1 defaults to keep-alive unless Connection: close
   // HTTP/1.0 defaults to close unless Connection: keep-alive
   bool keep_alive;
-  if (resp.has_header("connection")) {
+  if (has_conn) {
     // Respect an explicit header set by the handler (e.g. streaming endpoints
-    // force close). Compare case-insensitively — field values are not required
-    // to preserve case.
-    keep_alive = !http_name_equal(resp.get_header("connection"), "close");
+    // force close).
+    keep_alive = !conn_close;
   } else {
     // Only consult the parser when the response does not decide for itself:
     // after a parse error its keep-alive state is not meaningful.
@@ -1644,14 +1696,14 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
     // A HEAD response carries the headers a GET would, including its
     // Content-Length, but no body. Pin Content-Length before dropping the
     // body, otherwise it would be computed as 0.
-    if (!resp.has_header("content-length") && resp.body.size() > 0) {
+    if (!has_content_length && resp.body.size() > 0) {
       resp.set_header("content-length",
                       std::to_string(static_cast<unsigned long long>(
                           resp.body.size())));
     }
     resp.body.clear();
-  } else if (!resp.has_header("content-length") &&
-             !resp.has_header("transfer-encoding") && resp.body.size() == 0) {
+  } else if (!has_content_length && !has_transfer_encoding &&
+             resp.body.size() == 0) {
     // An empty body still needs an explicit Content-Length: 0, otherwise a
     // keep-alive client cannot tell where this response ends.
     resp.set_header("content-length", "0");
@@ -1669,7 +1721,7 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
   // （判错时退回合并那条路，多一次拷贝），不会悄悄走成"第二块不是那条报文的后半
   // 段"。方向选对了，两边就不会因为将来加一种编码而分叉。
   const bool two_bufs = !ctx.is_head && resp.body.size() > 0 &&
-                        !resp.has_header("transfer-encoding");
+                        !has_transfer_encoding;
 
   // HEAD 走「只序列化头部」那一支，**必须显式传 false**：清空 body 并不足以
   // 让报文正确 —— 一个声明了 `transfer-encoding: chunked` 的 HEAD 响应在

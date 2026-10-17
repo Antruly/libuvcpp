@@ -313,41 +313,70 @@ std::vector<std::pair<std::string, std::string> > web_parse_query(
   // 所以这一次 `reserve` 之后不会再扩容。
   //
   // 不预留的话，`?a=1&b=1` 这种两个参数的查询要撞一次 `_M_realloc_insert` ——
-  // 那一次要把已经装好的键值对**整体搬走**再释放旧块，callgrind 上 h1 baseline
-  // 每请求 154.4 条，比这一趟数 `&`（同一量具下约 25 条）贵一个量级。
-  {
-    size_t segs = 1;
-    for (size_t i = 0; i < query.size(); ++i) {
-      if (query[i] == '&') ++segs;
-    }
-    out.reserve(segs);
+  // 那一次要把已经装好的键值对**整体搬走**再释放旧块。
+  //
+  // **热路径不付这一趟**：`uvcpp_web_request::query_params()` 走的是
+  // `web_parse_query_into()`，目的地是请求对象上那条跨请求复用的向量 ——
+  // 容量上一条请求就长好了，`clear()` 只改 size。这条按值返回的形态留给
+  // "手上没有可复用容器"的调用方。
+  size_t segs = 1;
+  for (size_t i = 0; i < query.size(); ++i) {
+    if (query[i] == '&') ++segs;
   }
+  if (out.capacity() < segs) out.reserve(segs);
+  web_parse_query_into(query, out);
+  return out;
+}
 
-  size_t start = 0;
-  // 整串只扫一遍：`%` 与 `+` 一个都不出现时，逐段的"解码"恒等于原样拷贝
-  // （这正是 `web_url_decode` 快路那两条判据）。原先它对**每个键、每个值**各
-  // 调一次 `web_url_decode`，`?a=1&b=1` 就是 4 次调用、每次还要两次
-  // `find`（`%`、`+`）—— callgrind 上 h1 baseline 的 `find(char)` 18 次/请求
-  // 里有一半是这么来的。
+void web_parse_query_into(
+    const std::string& query,
+    std::vector<std::pair<std::string, std::string> >& out) {
+  // 契约：先清。**只改 size、不还容量** —— 这正是复用形态的全部意义
+  // （`query_params_` 是请求对象的成员，容量跨请求留着）。
+  out.clear();
+  if (query.empty()) return;
+
+  // 容量不够就先要一小块：本条路上**目的地是每请求新建的**（`query_params_`
+  // 挂在 `uvcpp_web_request` 上，而那个对象每请求一个），所以 `clear()` 之后
+  // 容量通常是 0，逐次 `push_back` 会按 1 → 2 扩两次 —— 第一次分配一块、
+  // 第二次再分配一块并把前一块搬走释放掉。这里一次性要 4 个位置（一次分配、
+  // 常见的 1~3 个参数再也不会扩容），四个以上才走正常的增长路径。
+  //
+  // 4 是个宽松的估计，不是协议常量：`?a=1&b=2` 这类两个参数的查询占绝大多数，
+  // 而 4 × 64 B = 256 B 的常驻对每连接一个请求对象来说是噪声。
+  if (out.capacity() < 4) out.reserve(4);
+
+  // 整串只查一次：`%` 与 `+` 一个都不出现时，逐段的"解码"恒等于原样拷贝
+  // （这正是 `web_url_decode` 快路那两条判据）。
   const bool need_decode = query.find('%') != std::string::npos ||
                            query.find('+') != std::string::npos;
 
-  while (true) {
-    const size_t amp = query.find('&', start);
-    const size_t end = (amp == std::string::npos) ? query.size() : amp;
+  const size_t n = query.size();
+  size_t start = 0;
+  while (start < n) {
+    // `&` 与 `=` **一趟**找完。原先每段各调两次 `std::string::find(char)`
+    // （一次找 `&`、一次找 `=`，后者还要再判一次有没有越过段尾）：
+    // `?a=1&b=2` 就是 4 次 find、每次一刀 memchr —— callgrind 上
+    // h1 baseline 的 `find(char)` 12 次/请求里，大头是这么来的。
+    // 这里一次线性扫描，边界语义与旧实现逐条相同（见下面的分支）。
+    size_t amp = n;
+    size_t eq  = n;
+    for (size_t i = start; i < n; ++i) {
+      const char ch = query[i];
+      if (ch == '&') { amp = i; break; }
+      if (ch == '=' && eq == n) eq = i;
+    }
 
     // 跳过空段（"a=1&&b=2" 中间那个）
-    if (end > start) {
-      // 键、值的区间直接在 `query` 上定：不再先 substr 出 `kv` 再切两刀
-      // （那一次 substr 是纯粹的白拷）。
-      const size_t eq = query.find('=', start);
-      if (eq == std::string::npos || eq >= end) {
-        std::string k(query, start, end - start);  // 裸键，值为空
+    if (amp > start) {
+      if (eq >= amp) {
+        // 段里没有 `=`：裸键，值为空
+        std::string k(query, start, amp - start);
         out.push_back(std::make_pair(need_decode ? web_url_decode(k, true) : k,
                                      std::string()));
       } else {
         std::string k(query, start, eq - start);
-        std::string v(query, eq + 1, end - eq - 1);  // 值里可以再有 '='
+        std::string v(query, eq + 1, amp - eq - 1);  // 值里可以再有 '='
         // 查询串里 '+' 是空格，所以 plus_as_space = true
         if (need_decode) {
           k = web_url_decode(k, true);
@@ -357,10 +386,9 @@ std::vector<std::pair<std::string, std::string> > web_parse_query(
       }
     }
 
-    if (amp == std::string::npos) break;
+    if (amp >= n) break;
     start = amp + 1;
   }
-  return out;
 }
 
 const std::string* web_find_param(

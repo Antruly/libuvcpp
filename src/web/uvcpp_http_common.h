@@ -462,6 +462,44 @@ inline std::string http_get_header(const http_headers& hdrs,
 }
 
 /**
+ * @brief Find a header value by name, **writing into an existing string**.
+ *
+ * 与 `http_get_header()` 的差别只有一个，但热路上它是决定性的：那个按**值**
+ * 返回（`return h.value;`），值一过 SSO 线就是一次 malloc —— 调用方再用它
+ * 赋值 / 移动，那一份就白扔了。这里 `out = h.value`，`out` 是**连接级**成员，
+ * 带着上一条请求留下的容量，够用时一次分配都不做，一条连接上只有第一次
+ * （以及遇到更长的值时）才真的分配。
+ *
+ * 头不存在时 `out` 会被**清空**（不是保持原值）：调用方要的是"这条请求的这个
+ * 头是什么"，上一条请求的值不该留在这儿。返回值表示有没有这个头。
+ */
+inline bool http_get_header_into(const http_headers& hdrs, const char* name,
+                                 std::string& out) {
+  const size_t n = http_name_len(name);
+  for (const auto& h : hdrs) {
+    if (http_name_iequal(h.name.data(), h.name.size(), name, n)) {
+      out = h.value;
+      return true;
+    }
+  }
+  out.clear();
+  return false;
+}
+
+/** @copydoc http_get_header_into(const http_headers&, const char*, std::string&) */
+inline bool http_get_header_into(const http_headers& hdrs,
+                                 const std::string& name, std::string& out) {
+  for (const auto& h : hdrs) {
+    if (http_name_equal(h.name, name)) {
+      out = h.value;
+      return true;
+    }
+  }
+  out.clear();
+  return false;
+}
+
+/**
  * @brief Check whether a header exists (case-insensitive).
  */
 inline bool http_has_header(const http_headers& hdrs, const std::string& name) {

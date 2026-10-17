@@ -205,6 +205,18 @@ UVCPP_API void web_normalize_path(std::string& path);
 UVCPP_API std::vector<std::pair<std::string, std::string> > web_parse_query(
     const std::string& query);
 
+/**
+ * @brief 与 @ref web_parse_query 同一条解析规则，结果写进调用方给的容器。
+ *
+ * **先 `clear()` 再填**（只改 size、不还容量）—— 于是把请求对象上那条
+ * `query_params_` 传进来时，稳态下一次分配都不做。`uvcpp_web_request::
+ * query_params()` 走的正是这条；按值返回的那个形态留给手上没有可复用容器的
+ * 调用方（它额外数一遍 `&` 好一次 `reserve` 到位）。
+ */
+UVCPP_API void web_parse_query_into(
+    const std::string& query,
+    std::vector<std::pair<std::string, std::string> >& out);
+
 /** @brief 在键值对数组里查第一个匹配的键。找不到返回 nullptr。 */
 UVCPP_API const std::string* web_find_param(
     const std::vector<std::pair<std::string, std::string> >& params,

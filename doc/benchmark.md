@@ -2214,7 +2214,7 @@ E 是**关掉那个开关**的同一份库，它逐列等于 C ⇒ "关掉 = 回
 只放一个 URL 的请求表再量一遍：带孪生文件的（`app.js`）是 `2 realpath + 2 statx`，
 没有孪生的（`bold.woff2`）是 **`5 realpath + 3 statx`**。多出来的那几次不是噪声 ——
 `web_real_path(allow_missing=true)` 在整条路径 `realpath` 失败之后**还要再解析一次
-父目录**（`src/webapp/uvcpp_web_util.cpp:866-866`、`src/webapp/uvcpp_web_util.cpp:883-883`），所以一次**失败**的解析是 2 次 `realpath`
+父目录**（`src/webapp/uvcpp_web_util.cpp:894-894`、`src/webapp/uvcpp_web_util.cpp:911-911`），所以一次**失败**的解析是 2 次 `realpath`
 而不是 1 次。加权 `(15×2 + 5×5)/20 = 2.75` 对 `(15×2 + 5×3)/20 = 2.25`，与上面
 实测的 2.734 / 2.245 对上（差的那点是混载里连接建立期的零头）。
 
@@ -2501,7 +2501,7 @@ taskset -c 8-15 h2load -i static-h2-uris.txt -H 'Accept-Encoding: br;q=1, gzip;q
 #### 机制：两条编码走的是同一条命中路径，编码名只在键里
 
 `uvcpp_http_server::apply_compression_for()` 的变体缓存键是
-`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2126-2129`）。
+`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2178-2181`）。
 命中时只做一次 `std::map` 查找 + 一次 `shared_ptr` 递句柄 —— **gzip 与 `br` 是
 同一条路径**。所以"开 `br`"在此处的代价是**每个 tag 一次**，不是每请求一次；
 反过来说，响应没有 `cache_tag` 时它每请求重压，而 `br` 的编码比 deflate 贵得多。
@@ -3288,6 +3288,77 @@ LIBDIR=/tmp/eq/libB /tmp/latrig/bytes.sh /tmp/eq/after
 # dump 落在 <label>.out.1（不是 .out）；逐函数自计开销与 caller 归因：
 /tmp/latrig/callers.py /tmp/latrig/cgb11d.out.1 '_M_append'
 /tmp/latrig/edges.py   /tmp/latrig/cgb11c.out.1 'to_string_into'
+```
+
+### 4.23 h1 动态热路再收一轮：一趟扫表、把传输层已经算过的 keep-alive 带下来、路由字面量表（**第十八套装置**，callgrind 指令数 + 逐字节比对）
+
+#### 结论先说：−6.27% 的用户态指令，位置与 §4.22 相同
+
+**19 153.0 → 17 952.0 指令/请求（−6.27%）**，7 个测点全在 h1 动态热路（`/baseline11?a=13&b=42`）。
+和 §4.22 一样，这不是 `latency-500k-8cpu` 那一格的杠杆（理由见 §4.22 最后一小节），
+它是"确定的百分之几，顺手做掉"。**18 种请求形状的应答逐字节不变**。
+
+#### 七处改动
+
+| # | 位置 | 原来 | 现在 |
+|---|---|---|---|
+| F1 | `src/webapp/uvcpp_web_request.cpp` 的 `take_from()` | 4 次 `http_get_header()`；它**按值返回** `std::string`，值一过 SSO 线就一次 malloc | 一趟扫表，命中时**写进成员**（成员带着容量概念，实际是每请求新对象 ⇒ 少的是那次返回值） |
+| F2 | `uvcpp_http_request::keep_alive` 三态 + `uvcpp_web_request::is_keep_alive()` | web 层每请求重扫头表、按逗号切 token | 传输层 `extract_metadata()` 里算过的 `llhttp_should_keep_alive()` 带下来；`-1` 才回落 |
+| F3 | `uvcpp_http_server::send_response()` | 4 次 `has_header()` + 1 次 `get_header()`（后者还造一个 `std::string` 再丢掉） | 一趟扫表拿齐 `connection` / 是否 `close` / `content-length` / `transfer-encoding` |
+| F4 | `on_tcp_connection()` 的畸形报文判据 | `host_header_violates()` 与 `transfer_encoding_is_void()` 各扫一遍头表 | 合成 `message_header_violates()`，按名字长度分流（4 / 17） |
+| F5 | `uvcpp_web_app::send_response()` | 发送出口又 `r.raw()` 一次 ⇒ 第二次 `sync_meta()` | `raw_after_sync()`（入口处已同步过，中间只补了 `server` 一个头） |
+| F6 | `web_parse_query_into()` | 逐段两次 `find(char)`；空向量从 1 长到 2 扩两次 | `&`/`=` 一趟找完、整串只判一次 `%`/`+`；`reserve(4)` |
+| F7 | `uvcpp_web_router::match()` | 每条请求都 `split_path()`（vector 分配 + N 份段拷贝）再逐段比 | **全字面量**路由走 `模式 → 候选下标` 表，一次 map 查找；参数/通配路由照旧 |
+
+F2 的判据尤其要说清：`llhttp_should_keep_alive()` 与 web 层原来那段扫表**语义相同**
+（1.1 默认保持、1.0 默认关闭、`Connection` 按 token 小写比较），所以这不是"换个来源再赌
+一次"，而是"同一个结论别算两遍"。`tests/functional/web_app_request_func.cpp` 的
+"keep-alive 判定"一组（手搭请求 ⇒ 走回落那条）原样通过。
+
+#### 判据一：逐字节（18 种请求形状，0 处不同）
+
+`/tmp/latrig/bytes.sh` 对**上一版 `.so`**（10-16 那棵树的产物）与当前树各抓一遍，18 个
+`.bin` 把 `date:` 那一行的值掩掉后逐一相同。形状表与 §4.22 相同（含 gzip/deflate、HEAD、
+百分号编码、裸键、空段、`?=v&k=`、`/json/*`、404、`/pipeline`、keep-alive）。
+
+#### 判据二：确定性指令数（同一把尺子，五臂）
+
+| 臂 | 自计总指令 | 指令/请求 | 相对前一臂 |
+|---|---:|---:|---:|
+| 改前 | 383 060 907 | 19 153.0 | — |
+| F6 + F1 + F2 | 380 721 131 | 19 036.1 | −0.61% |
+| + F3 | 372 259 209 | 18 613.0 | −2.22% |
+| + F4 + F5 + F6 的 `reserve(4)` | 359 703 449 | 17 985.2 | −3.37% |
+| + `raw_url()` 与 `src_.url` 合一 | 359 039 972 | **17 952.0** | −0.18% |
+
+#### 逐函数对得上（改前 → 改后，指令/请求）
+
+| 函数 | 改前 | 改后 | 说明 |
+|---|---:|---:|---|
+| `uvcpp_http_response::has_header(const char*)` | 412 | 94 | F3：4 次 → 1 次 |
+| `uvcpp_http_response::get_header(...)` | 147 | 0 | F3 |
+| `uvcpp_http_server::send_response(...)`（自计） | 169 | 285 | F3 的扫描内联进来了，**与上面两行合并看**：728 → 379 |
+| `uvcpp_web_response::sync_meta()` | 310 | 89 | F5：每请求少一次 |
+| `uvcpp_web_request::is_keep_alive()` | 134 | 0 | F2 |
+| `web_parse_query` → `web_parse_query_into` | 519 | 499 | F6：换了实现，净变化很小（分摊在原函数里的 `find` 与分配迁走了） |
+| `std::string::find(char)` | 278 | 168 | F6 |
+| `__memchr_avx2` / `__strlen_avx2` | 247 / 268 | 171 / 198 | 上面两条的下游 |
+
+**一处如实记**：F1（`take_from()` 一趟扫）单看是**中性偏负**的（`take_from` 313 → 299，
+但它多出来的分支被 `get_header` 的消失抵掉了）—— 真正的收益来自"值不再按值返回"，
+而那一段的分配在 `malloc/free` 那几行里，量级与本表的噪声同阶。所以这一条按
+"少一条路径"记账，不按指令数记账。
+
+#### 复现
+
+```bash
+# 逐字节：上一版 .so 与当前树各来一遍
+cp /tmp/latrig/after/libuvcpp.so "$L/build-docker/libuvcpp.so" && /tmp/latrig/bytes.sh /tmp/bytes.before
+ninja -C "$L/build-docker" uvcpp && /tmp/latrig/bytes.sh /tmp/bytes.after
+# 断言：18 个 .bin 掩掉 date 后逐一相同
+# 指令数（8 循环 / c=1024，量具 /tmp/latrig/cg8.sh；dump 落在 <label>.out.1）
+/tmp/latrig/cg8.sh 20000 cg8.new      # 改前（跑两遍取第二遍）
+/tmp/latrig/cg8.sh 20000 cg8.q5       # 改后
 ```
 
 

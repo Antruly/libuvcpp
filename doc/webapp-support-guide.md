@@ -133,7 +133,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 
 `webapp/uvcpp_web_util.h` 是**纯函数模块，没有类**，39 个公开声明。
 它的头注释（`:10-11`）解释的是**为什么要新开这个模块** —— web 层连一个 query
-解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:966-969`），
+解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:975-978`），
 不是"这一页里的东西不存在"。`src/web/` 下也确实没有任何 query / cookie / URL 解码
 helper。
 
@@ -156,9 +156,9 @@ void doc_query(const std::string& query) {
 }
 ```
 
-`web_sanitize_path()` 是**纯文本、不碰文件系统**（`src/webapp/uvcpp_web_util.h:343-346`），
+`web_sanitize_path()` 是**纯文本、不碰文件系统**（`src/webapp/uvcpp_web_util.h:355-358`），
 挡不住符号链接；`web_resolve_within_root()` 才真的去解析真实路径
-（`src/webapp/uvcpp_web_util.h:398-412`，`TRAVERSAL` 对 403、`NOT_FOUND` 对 404）。只用第一个是不够的。
+（`src/webapp/uvcpp_web_util.h:410-424`，`TRAVERSAL` 对 403、`NOT_FOUND` 对 404）。只用第一个是不够的。
 
 其余分组：
 
@@ -174,7 +174,7 @@ void doc_query(const std::string& query) {
 
 `web_path_options` 是这一族里**唯一**用对了构造方式的：
 `web_path_options(size_t max_length = 4096, size_t max_depth = 64, bool decode = true)`
-（`src/webapp/uvcpp_web_util.h:320-321` 带默认实参的 explicit 构造函数），所以
+（`src/webapp/uvcpp_web_util.h:332-333` 带默认实参的 explicit 构造函数），所以
 `web_path_options{1024}` 与 `web_path_options(4096, 64, false)` 两种写法都行。
 
 ---
@@ -199,8 +199,8 @@ void doc_mime_override() {
 }
 ```
 
-内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:482-482`，实现
-`src/webapp/uvcpp_web_util.cpp:1065-1068`），`builtin_size()` 也转调它
+内置表**只有一份**：`web_mime_builtin_table()`（`src/webapp/uvcpp_web_util.h:494-494`，实现
+`src/webapp/uvcpp_web_util.cpp:1093-1096`），`builtin_size()` 也转调它
 （`src/webapp/uvcpp_web_mime.cpp:135-139`）。所以"同一个文件在 `web_mime_type()` 和静态服务里
 类型不一样"这类漂移在结构上被排除了 —— 值得知道，因为这类漂移很难查。
 
@@ -417,7 +417,7 @@ error: no matching function for call to
 正确写法是"先默认构造，再逐字段赋值"（§9 那段）。同类问题还有
 `src/webapp/uvcpp_web_app.h:164-167`：注释声称支持 `uvcpp_web_app_config cfg{8080}`，
 而声明在 `:287` 只有 `uvcpp_web_app_config();`。
-**对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:320-321`）是这一族里唯一写对的
+**对照组**：`web_path_options`（`src/webapp/uvcpp_web_util.h:332-333`）是这一族里唯一写对的
 —— 它的构造函数带默认实参，所以花括号写法可用。
 
 ### 上不上色是两个条件
@@ -512,7 +512,7 @@ close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-33
 
 而 `uvcpp_web_util` 里另有**两个哨兵值**：`web_hex_value()` 失败返回 `-1`
 （`src/webapp/uvcpp_web_util.cpp:127-132`），`web_parse_http_date()` 失败返回 `(time_t)-1`
-（`src/webapp/uvcpp_web_util.cpp:1257-1258`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
+（`src/webapp/uvcpp_web_util.cpp:1285-1286`）。`-1` 在 POSIX 上**正好等于 `UV_EPERM`** ——
 **这几种码一个都不要喂给 `uv_strerror()`**，会得到看似合理的垃圾。
 
 ---
@@ -587,17 +587,17 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 只放行 `/` 是安全的。
 
 **`web_build_cookie()` 只校验 name 与 value。**
-`path`（`src/webapp/uvcpp_web_util.cpp:555-558`）与 `same_site`（`src/webapp/uvcpp_web_util.cpp:567-572`）是**原样拼接**的
+`path`（`src/webapp/uvcpp_web_util.cpp:583-586`）与 `same_site`（`src/webapp/uvcpp_web_util.cpp:595-600`）是**原样拼接**的
 —— `same_site` 传 `"Lax; Domain=evil"` 就能注入额外属性。头 `:269-271` 只描述了取值
-集合，没声明"会校验"。`name` 是校验的（`src/webapp/uvcpp_web_util.cpp:545-548`，非 token 字符直接返回空串），
-`value` 也是编码的（`src/webapp/uvcpp_web_util.cpp:553-553`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
-设计：`SameSite=None` 会自动补 `Secure`（`src/webapp/uvcpp_web_util.cpp:570-573`）。
+集合，没声明"会校验"。`name` 是校验的（`src/webapp/uvcpp_web_util.cpp:573-576`，非 token 字符直接返回空串），
+`value` 也是编码的（`src/webapp/uvcpp_web_util.cpp:581-581`，用比 RFC 6265 更严的 `A-Za-z0-9-._~`）。附带一条正面
+设计：`SameSite=None` 会自动补 `Secure`（`src/webapp/uvcpp_web_util.cpp:598-601`）。
 
 **`web_sanitize_filename()` 只能当元数据。** 它不保证是合法文件名（`*` `?` `"`
-照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:441-445`）；`max_len` 是**软**
-上限（设备名保护会让结果多一字节，`src/webapp/uvcpp_web_util.h:437-439`）。
+照过），也**永远不能拿去拼路径**（`src/webapp/uvcpp_web_util.h:453-457`）；`max_len` 是**软**
+上限（设备名保护会让结果多一字节，`src/webapp/uvcpp_web_util.h:449-451`）。
 
-**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:326-368`）—— `;` 会被当成
+**`web_parse_query()` 只按 `&` 切**（`src/webapp/uvcpp_web_util.cpp:331-396`）—— `;` 会被当成
 值的一部分。头 `:176-185` 没写分隔符。
 
 **连接身份有三套，不要混。** 见 §3。
@@ -612,10 +612,10 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
   C++11 没有，所以全部吃 `const std::string&`。
 - **`web_collapse_slashes()` 刻意不做**：不解码、不处理 `.` / `..`（与路由切段保持
   一致，挡目录穿越要用 `web_sanitize_path()`，`src/webapp/uvcpp_web_util.h:158-161`）。
-- **`web_join_root()` 不做安全判断**（`src/webapp/uvcpp_web_util.h:368-368`），判断在
-  `web_is_within_root()`（`src/webapp/uvcpp_web_util.h:373-383`，实现用"前缀 + 分隔符"而不是裸前缀比较）。
+- **`web_join_root()` 不做安全判断**（`src/webapp/uvcpp_web_util.h:380-380`），判断在
+  `web_is_within_root()`（`src/webapp/uvcpp_web_util.h:385-395`，实现用"前缀 + 分隔符"而不是裸前缀比较）。
 - **其他 `multipart/*` 子类型不支持**（`mixed` 等）：`web_multipart_boundary()` 返回
-  空串让调用方拒绝（`src/webapp/uvcpp_web_util.h:235-238`）。
+  空串让调用方拒绝（`src/webapp/uvcpp_web_util.h:247-250`）。
 - **multipart 只认 CRLF**（`src/webapp/uvcpp_web_multipart.h:69-73`）：裸 LF 在边界处不接受、
   在部件头里直接 400 —— 理由是请求走私。`[LWSP]` 上限 128 字节
   （`src/webapp/uvcpp_web_multipart.h:60-62`），超了明确失败而不是当 body。

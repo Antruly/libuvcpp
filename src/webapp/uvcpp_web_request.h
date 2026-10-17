@@ -162,8 +162,13 @@ class UVCPP_API uvcpp_web_request {
   /** @brief 方法名（"GET"、"POST"…），静态字符串。 */
   const char* method_name() const;
 
-  /** @brief 原始请求目标，**含查询串**（可能有百分号编码）。 */
-  const std::string& raw_url() const { return raw_url_; }
+  /**
+   * @brief 原始请求目标，**含查询串**（可能有百分号编码）。
+   *
+   * 直接返回 `raw()` 那个请求对象里的 `url` —— 两者本来就是同一份东西，
+   * 再存一份等于每请求多一次分配（URL 一过 15 字节的 SSO 线就要 malloc）。
+   */
+  const std::string& raw_url() const { return src_.url; }
 
   /** @brief 解码并归一化后的路径。查询串已剥离。 */
   const std::string& path() const { return path_; }
@@ -472,7 +477,6 @@ class UVCPP_API uvcpp_web_request {
 
   uvcpp_http_request src_;   ///< 源请求里**搬**过来的那几个字段（见 take_from）
   uvcpp_buf          body_;  ///< 从 src_ 搬过来的 body，真正持有
-  std::string        raw_url_;
   std::string        raw_path_;
   std::string        path_;
   std::string        query_string_;
@@ -486,6 +490,13 @@ class UVCPP_API uvcpp_web_request {
   std::string accept_encoding_;
   std::string host_;
   size_t      content_length_;
+
+  /// `is_keep_alive()` 的懒结论：0 = 没算过，1 = 保持，2 = 关闭。
+  ///
+  /// 开关在 `take_from()` 里归零（上一条请求的 Connection 结论不能留到这一条）。
+  /// 它算起来不便宜 —— 一次线性表扫描加按逗号切 token，而 `send_response()`
+  /// 每条请求都要问一次。
+  mutable signed char keep_alive_cache_;
 
   std::string peer_ip_;
   unsigned int peer_port_;

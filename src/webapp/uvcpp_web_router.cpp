@@ -279,6 +279,18 @@ struct uvcpp_web_router::router_table {
   /// 带通配：按**通配符之前的段数**分桶（可匹配 N >= k+1）
   std::map<size_t, route_bucket> wildcard_index;
 
+  /// **全字面量**路由：完整模式 → 候选下标（注册序）。
+  ///
+  /// 快路专用。请求路径与模式逐字节相等时（`/baseline11` 这种），切段、
+  /// 桶查找、逐段比较三件事全部可以跳过 —— 那条路每请求一次 `split_path()`
+  /// 的 vector 分配加 N 份段拷贝，而这里的键就是路径本身，一次 map 查找。
+  ///
+  /// 只放**不含参数也不含通配**的模式：有一条参数段，请求路径就不再等于
+  /// 模式串，快路也就不成立。`has_literal` 让"一条字面量路由都没注册"的
+  /// 应用（纯参数路由）连那次 map 查找都不用做。
+  std::map<std::string, std::vector<size_t> > literal_paths;
+  bool has_literal = false;
+
   /**
    * @brief 找一条**会遮住** `e` 的既有路由（同模式，且方法相同、或有一方是 ANY）。
    *
@@ -306,6 +318,18 @@ struct uvcpp_web_router::router_table {
     } else {
       exact_index[e.segments.size()].add(idx, e.segments);
     }
+    if (!has_any_dynamic(e.segments)) {
+      literal_paths[e.pattern].push_back(idx);
+      has_literal = true;
+    }
+  }
+
+  /// 模式里有没有参数段或通配段（有就不是"全字面量"，快路不认）。
+  static bool has_any_dynamic(const std::vector<pattern_segment>& segs) {
+    for (size_t i = 0; i < segs.size(); ++i) {
+      if (segs[i].kind != SEG_LITERAL) return true;
+    }
+    return false;
   }
 
   /// 遍历所有候选下标（次序：先精确段数那一桶，再 k = 0..n-1 的通配桶）。
@@ -597,6 +621,56 @@ web_route_match uvcpp_web_router::match(http_method method,
                                         const std::string& path) const {
   web_route_match r;
   if (!table_ || table_->routes.empty()) return r;  // NOT_FOUND
+
+  // -----------------------------------------------------------------------
+  // 快路：路径与某条**全字面量**路由逐字节相等。
+  //
+  // 这一步省掉的是 `split_path()`（每请求一次 vector 分配 + N 份段拷贝）、
+  // 桶查找，以及 `match_pattern()` 的逐段比较。判定为什么与下面的通例
+  // **等价**：字面量段在每一段的特异度都是最高的（2 > 参数 1 > 通配 0），
+  // 而这里比的是**整条路径**，所以"命中的那条"必然是全序里最具体的那条；
+  // 同一路径上的多条候选（GET/POST 各注册一次）按注册序挑，与通例里
+  // "特异度打平时保留先注册的那条"逐条相同。
+  //
+  // 两种情形**刻意留在通例里**：同一条路径存在但不是这个方法（要算
+  // `Allow`，那条是冷路径），以及路径在切段后才会相等（`//a/` 这类，
+  // 而 `web_normalize_path()` 早已把它们折叠过）。
+  // -----------------------------------------------------------------------
+  if (table_->has_literal) {
+    std::map<std::string, std::vector<size_t> >::const_iterator lit =
+        table_->literal_paths.find(path);
+    if (lit != table_->literal_paths.end()) {
+      const std::vector<size_t>& cand = lit->second;
+      const router_table::route_entry* pick = nullptr;
+      bool pick_head_of_get = false;
+      for (size_t i = 0; i < cand.size(); ++i) {
+        const router_table::route_entry& e = table_->routes[cand[i]];
+        if (e.any_method || e.method == method) {
+          pick = &e;
+          break;
+        }
+      }
+      const bool head_fallback =
+          (method == http_method::HTTP_HEAD) && head_as_get_;
+      if (pick == nullptr && head_fallback) {
+        for (size_t i = 0; i < cand.size(); ++i) {
+          const router_table::route_entry& e = table_->routes[cand[i]];
+          if (e.method == http_method::HTTP_GET) {
+            pick = &e;
+            pick_head_of_get = true;
+            break;
+          }
+        }
+      }
+      if (pick != nullptr) {
+        r.result = web_route_result::MATCHED;
+        r.handler = &pick->handler;
+        r.pattern = &pick->pattern;
+        r.head_of_get = pick_head_of_get;
+        return r;  // 全字面量模式没有路径参数，`r.params` 保持空
+      }
+    }
+  }
 
   const std::vector<std::string> segs = split_path(path);
 
