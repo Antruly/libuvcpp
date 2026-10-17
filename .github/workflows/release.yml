@@ -887,7 +887,10 @@ jobs:
             Write-Host "::warning title=no-signing-cert::没有 WINDOWS_CERT_PFX_BASE64，安装包不签名（见 packaging/README.md 的「首次发布前的一次性准备」）"
           }
 
-          & $iscc.FullName @isccArgs
+          # 脚本文件必须当**位置参数**给它 —— `$isccArgs` 里全是 `/D`/`/S` 选项。
+          # 2026-10-18 的 v1.7.4 发布第一次跑这一步就漏了它：ISCC 收到零个位置
+          # 参数，打印用法后以 1 退出，看着像编译失败、其实是没给脚本。
+          & $iscc.FullName @isccArgs packaging/windows/libuvcpp.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
           if ($pfx) { Remove-Item $pfx -Force }
 
@@ -1220,7 +1223,10 @@ jobs:
             Write-Host "::warning title=no-signing-cert::没有 WINDOWS_CERT_PFX_BASE64，安装包不签名（见 packaging/README.md 的「首次发布前的一次性准备」）"
           }
 
-          & $iscc.FullName @isccArgs
+          # 脚本文件必须当**位置参数**给它 —— `$isccArgs` 里全是 `/D`/`/S` 选项。
+          # 2026-10-18 的 v1.7.4 发布第一次跑这一步就漏了它：ISCC 收到零个位置
+          # 参数，打印用法后以 1 退出，看着像编译失败、其实是没给脚本。
+          & $iscc.FullName @isccArgs packaging/windows/libuvcpp.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
           if ($pfx) { Remove-Item $pfx -Force }
 
