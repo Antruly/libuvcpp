@@ -307,13 +307,13 @@ src/net/uvcpp_net_read.h:64-66 43399d7dcc1030a1 6a7190feba1e96eb c06619ce873af23
 src/net/uvcpp_net_read.h:68-68 46111d0759e14584 46111d0759e14584 -
 src/net/uvcpp_socket_handoff.cpp:65-75 4d25a74c938455d1 236b2c747eac9d35 7819f4acd244ac14
 src/net/uvcpp_socket_handoff.h:73-73 3686c76bdea51b26 3686c76bdea51b26 -
-src/net/uvcpp_tcp_client.cpp:1323-1326 1e036d71316a81c6 48d033810df113d5 795893c2adb7c920
-src/net/uvcpp_tcp_client.cpp:2262-2270 5df26d1bf4b7dbca 48d033810df113d5 7b437c7951bf385f
+src/net/uvcpp_tcp_client.cpp:1346-1349 1e036d71316a81c6 48d033810df113d5 795893c2adb7c920
+src/net/uvcpp_tcp_client.cpp:2285-2293 5df26d1bf4b7dbca 48d033810df113d5 7b437c7951bf385f
 src/net/uvcpp_tcp_client.cpp:235-237 b9d221d83892b526 06638547ede78bae 9d56ef46118aa3bf
 src/net/uvcpp_tcp_client.cpp:251-254 368c836c79756789 a30cd62faf3fc446 da95b372e94e3078
-src/net/uvcpp_tcp_client.cpp:2554-2554 16b916cd1ad9897f 16b916cd1ad9897f -
+src/net/uvcpp_tcp_client.cpp:2577-2577 16b916cd1ad9897f 16b916cd1ad9897f -
 src/net/uvcpp_tcp_client.cpp:324-324 f1be8ca66f4149b5 f1be8ca66f4149b5 -
-src/net/uvcpp_tcp_client.cpp:814-818 85543241fdfec789 79dc8849065080ef da39a3ee5e6b4b0d
+src/net/uvcpp_tcp_client.cpp:837-841 85543241fdfec789 79dc8849065080ef da39a3ee5e6b4b0d
 src/net/uvcpp_tcp_client.h:193-205 b82385b59a1dcbd5 431c7b51a40a3c3a c4d564fd38050022
 src/net/uvcpp_tcp_client.h:217-217 0efd806ccd819af8 0efd806ccd819af8 -
 src/net/uvcpp_tcp_client.h:221-221 760ad7b5012e9f1f 760ad7b5012e9f1f -

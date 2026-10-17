@@ -620,8 +620,31 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     connect_arg_ = nullptr;
   }
   if (write_arg_ != nullptr) {
-    delete static_cast<std::function<void(int)>*>(write_arg_);
-    write_arg_ = nullptr;
+    // **这一格是联合体**：普通异步写（`write`）存 `std::function<void(int)>*`，
+    // 复用形态（`write_owned`）存 `owned_write_state*`，按 `write_fn_` 区分。
+    //
+    // 照 `std::function` 删复用形态那一块是**类型混淆**，而且后果是一种很安静
+    // 的"看起来像回调"的崩溃：`owned_write_state` 偏移 16 的那个字段是 `fn`
+    // （也就是 `uvcpp_http_server::recycle_write_done`），正好落在 libstdc++
+    // `_M_manager` 的槽位上 ⇒ 析构函数把它当管理器调用一次，实参恰好是
+    // `(两块 _Any_data, __destroy_functor)`，于是
+    // `recycle_write_done(state, state, 3, 垃圾)` 就地跑进 `settle_write`，
+    // 拿堆上那块状态当 http 服务器去查 `contexts_`。
+    // 实测栈（Release 包树配置、`test_web_http_server_func` 的
+    // `deferred_response_is_compressed`）：
+    //   ~uvcpp_http_server → ~uvcpp_tcp_server → ~uvcpp_tcp_client:623
+    //   → recycle_write_done → settle_write → ctxs_of → SIGSEGV 在空的
+    //   `contexts_` 上取 `contexts_[0]`。
+    // 发布 zip 那棵树只是"这一笔恰好已经结算完"才没撞上，不是这条分支不存在。
+    if (write_fn_ == trampoline_owned) {
+      // 状态归请求对象（`w->get_data()`）所有：上面已把 `st->client` 置空，
+      // 完成回调走 `owned_write_done` 的"客户端已析构"那条路，连同请求一起
+      // 放掉。这里一格都不能删。
+      write_arg_ = nullptr;
+    } else {
+      delete static_cast<std::function<void(int)>*>(write_arg_);
+      write_arg_ = nullptr;
+    }
   }
   if (read_arg_ != nullptr) {
     delete static_cast<std::function<void(uvcpp_buf*)>*>(read_arg_);
