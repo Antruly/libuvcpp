@@ -8,7 +8,7 @@
 | 服务端 | `uvcpp_grpc_server.h` / `.cpp` | 把上面那半接到 `uvcpp_http_server` 上：三段应答的顺序、尾随头、百分号编码 | **要** |
 
 这个分法不是洁癖，是**依赖事实**：编解码那半的每一个参数都是 `std::string` / `uint32_t`
-（`src/grpc/uvcpp_grpc.h:100-194`），而服务端那半的每个参数都是 web 层的类型
+（`src/grpc/uvcpp_grpc.h:122-216`），而服务端那半的每个参数都是 web 层的类型
 （`src/grpc/uvcpp_grpc_server.h:116-132`）。所以关掉 web 模块时前者照编照装、后者
 **从构建与安装里都摘掉**（`CMakeLists.txt:2031-2033`、`CMakeLists.txt:3055-3060`）——
 装在 `include/grpc/` 下，而不是 `include/web/` 下。
@@ -18,7 +18,7 @@
   `UVCPP_BUILD_WEB` 打架的旋钮，而两半的依赖是死的、不需要调用方表态。
 - 包含方式：`<grpc/uvcpp_grpc.h>`、`<grpc/uvcpp_grpc_server.h>`。
 - 依赖：帧与 varint 那半**只依赖 `<cstdint>` 与 `libuv` 的错误码**（
-  `src/grpc/uvcpp_grpc.h:41`）；服务端那半额外依赖 `web/uvcpp_http_common.h`
+  `src/grpc/uvcpp_grpc.h:42`）；服务端那半额外依赖 `web/uvcpp_http_common.h`
   与 `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:801-801`）。
 
 > 本页讲**怎么用**，以及**为什么这么切**。与本页配对的两份用例是
@@ -76,20 +76,20 @@ HEADERS   尾随头 grpc-status: 0（自带 END_STREAM）
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-constexpr size_t GRPC_FRAME_HEADER_SIZE = 5u;                      // src/grpc/uvcpp_grpc.h:51
-constexpr size_t GRPC_FRAME_MAX_MESSAGE_BYTES = 4u * 1024u * 1024u; // src/grpc/uvcpp_grpc.h:54
+constexpr size_t GRPC_FRAME_HEADER_SIZE = 5u;                      // src/grpc/uvcpp_grpc.h:73
+constexpr size_t GRPC_FRAME_MAX_MESSAGE_BYTES = 4u * 1024u * 1024u; // src/grpc/uvcpp_grpc.h:76
 
 int grpc_frame_encode(const std::string& message, std::string& out,
                       size_t max_message_bytes = GRPC_FRAME_MAX_MESSAGE_BYTES);
-                                                                   // src/grpc/uvcpp_grpc.h:100
+                                                                   // src/grpc/uvcpp_grpc.h:122
 int grpc_frame_decode(const char* data, size_t len, std::string& message, size_t& consumed,
                       std::string* err = nullptr,
                       size_t max_message_bytes = GRPC_FRAME_MAX_MESSAGE_BYTES);
-                                                                   // src/grpc/uvcpp_grpc.h:119
+                                                                   // src/grpc/uvcpp_grpc.h:141
 int grpc_frame_decode_exact(const char* data, size_t len, std::string& message,
                             std::string* err = nullptr,
                             size_t max_message_bytes = GRPC_FRAME_MAX_MESSAGE_BYTES);
-                                                                   // src/grpc/uvcpp_grpc.h:133
+                                                                   // src/grpc/uvcpp_grpc.h:155
 ```
 
 前缀是 **1 字节压缩标志 + 4 字节大端长度**（`src/grpc/uvcpp_grpc.cpp:34` 手工按字节
@@ -129,13 +129,13 @@ int grpc_frame_decode_exact(const char* data, size_t len, std::string& message,
 
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
-int grpc_varint_encode(std::string& out, uint64_t value);          // src/grpc/uvcpp_grpc.h:150
+int grpc_varint_encode(std::string& out, uint64_t value);          // src/grpc/uvcpp_grpc.h:172
 int grpc_varint_decode(const char* data, size_t len, uint64_t& value, size_t& consumed,
-                       std::string* err = nullptr);                // src/grpc/uvcpp_grpc.h:164
+                       std::string* err = nullptr);                // src/grpc/uvcpp_grpc.h:186
 int grpc_field_put_int32(std::string& out, uint32_t field, int32_t value);
-                                                                   // src/grpc/uvcpp_grpc.h:178
+                                                                   // src/grpc/uvcpp_grpc.h:200
 int grpc_field_get_int32(const char* data, size_t len, uint32_t field, int32_t& value,
-                         std::string* err = nullptr);              // src/grpc/uvcpp_grpc.h:193
+                         std::string* err = nullptr);              // src/grpc/uvcpp_grpc.h:215
 ```
 
 varint 是 protobuf 的 base-128：每字节 7 位，最高位是"后面还有"的续位，**小端组**

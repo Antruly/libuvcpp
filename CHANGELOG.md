@@ -3703,7 +3703,10 @@ CPU −23%。
 **修复**：ODBC 在 mingw 上 unixODBC 的 `WCHAR` 与 `winnt.h` 硬冲突（`1.7.2-dev`）；
 两个 ODBC 新文件补 UTF-8 BOM；默认档在 Windows 上把 `odbc32.dll` 记进"Windows 自带
 模块"表，否则打不出包；静态腿的 `memo_reset` 量具落在 `__linux__` 守卫之外，让
-macOS / MSVC / MinGW 十四条腿全红（`1.7.2-dev`）。
+macOS / MSVC / MinGW 十四条腿全红（`1.7.2-dev`）。发布当天又补了两处**只有走系统
+libuv 才会现形**的问题：`UV_ENODATA` 是 libuv 1.49 才有的名字（Ubuntu 22.04 的系统
+libuv 是 1.44.2），现在 gRPC 头里按 libuv 自己的编码补了兜底、单元测试也跟着 1.45
+的守卫走；Windows 安装程序那一步漏传 `.iss` 脚本（ISCC 打印用法后以 1 退出）。
 
 **打包与安装**：`cmake --install` 现在产 `lib/pkgconfig/uvcpp.pc`；新开关
 `UVCPP_SET_SOVERSION`（默认 `OFF`）只给包这棵树开，zip 里仍是单个 `libuvcpp.so`；

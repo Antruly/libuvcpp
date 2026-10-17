@@ -34,12 +34,34 @@
 
 #include <uvcpp/uvcpp_config.h>
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
-#include <uv.h>  // UV_EINVAL / UV_ENOENT / UV_EMSGSIZE / UV_ENODATA
+#include <uv.h>  // UV_EINVAL / UV_ENOENT / UV_EMSGSIZE / UV_ENODATA（兜底见下）
 #include <uvcpp/uvcpp_export.h>
+
+// libuv 直到 **1.49.0** 才把 `ENODATA` 放进公开错误码表（`uv.h` 里那条
+// `XX(ENODATA, "no data available")`）；1.44~1.48 的发行版没有这个名字
+// （Ubuntu 22.04 / Debian 12 是 1.44.2，Ubuntu 24.04 是 1.48）。发行版包按
+// **系统** libuv 构建，而本模块的返回值契约里就有它（见下面几个函数的
+// @return），所以在这里补一份。取值与 libuv 自己的 `UV__ENODATA` 逐位相同：
+// 有 `ENODATA` 的平台是 `-ENODATA`，FreeBSD 用 -9919，其余用 -4024 —— 抄的是
+// libuv `uv/errno.h` 里同一段分支，别自己另造一个值。
+//
+// 判据只能按**版本号**：`UV_ENODATA` 在 libuv 里是枚举常量（`UV_ERRNO_MAP`
+// 展开出来的），`defined(UV_ENODATA)` 永远是假 —— 写成 `#ifndef` 会在 1.49+
+// 上把这个名字变成宏，把后面的枚举用法顶掉。
+#if !defined(UV_ENODATA) && defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x013100
+#  if defined(ENODATA) && !defined(_WIN32)
+#    define UV_ENODATA (-(ENODATA))
+#  elif defined(__FreeBSD__)
+#    define UV_ENODATA (-9919)
+#  else
+#    define UV_ENODATA (-4024)
+#  endif
+#endif
 
 namespace uvcpp {
 
