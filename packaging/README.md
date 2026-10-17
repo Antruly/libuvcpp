@@ -133,13 +133,34 @@ python3 packaging/repo/publish.py --site /path/to/gh-pages-checkout \
 1. **建签名密钥**（私钥只进 GitHub Secrets，不进仓库）：
 
    ```sh
-   gpg --batch --quick-generate-key "libuvcpp repository <antruly@users.noreply.github.com>" rsa3072 sign never
+   # 必须 %no-protection —— 别用 `--quick-generate-key`。它在 batch 下生成的是
+   # "空口令、但仍带 S2K 保护"的密钥：本机 gpg 会拿空口令试一次就签了，runner 的
+   # gpg-agent 却老老实实要 pinentry，报
+   # `gpg: signing failed: Inappropriate ioctl for device`，而 `--passphrase ''`
+   # 在 batch 下被当成"没给口令"（`No passphrase given`）。2026-10-18 踩过。
+   cat > /tmp/uvcpp-keyparams <<'EOF'
+   %no-protection
+   Key-Type: RSA
+   Key-Length: 3072
+   Key-Usage: sign
+   Name-Real: libuvcpp repository
+   Name-Email: antruly@users.noreply.github.com
+   Expire-Date: 0
+   %commit
+   EOF
+   gpg --batch --generate-key /tmp/uvcpp-keyparams
    gpg --list-secret-keys --with-colons <邮箱>        # 记下 fpr
    gpg --batch --armor --export-secret-keys <fpr>     # → secret GPG_PRIVATE_KEY
    gpg --batch --armor --export <fpr>                 # → 仓库里的 key.asc（脚本自动导出）
+   gpg --list-packets <导出的 .asc> | grep -E 'protect|s2k'   # 必须一条都搜不到
    ```
 
    两个 secret：`GPG_PRIVATE_KEY`（ASCII-armored 私钥）与 `GPG_KEY_ID`（指纹）。
+   `publish-repo` 的「Import the signing key」会当场盲签一次，密钥带保护就直接红，
+   不用等到建仓库树那一步才现形。
+
+   吊销证书在 `openpgp-revocs.d/<fpr>.rev`，**与私钥一起备份**（丢了就再也作废不了
+   这把 key）；备份别只放 GitHub —— Secrets 是只写不读的。
 
 2. **Windows 证书**：PFX 转 base64 存 `WINDOWS_CERT_PFX_BASE64`，
    密码存 `WINDOWS_CERT_PASSWORD`。两个都缺就跳过签名并 `::warning`。

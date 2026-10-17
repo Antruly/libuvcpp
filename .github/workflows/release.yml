@@ -2472,12 +2472,25 @@ jobs:
         if: steps.gpg.outputs.have_key == 'true'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
         run: |
           # 临时 GNUPGHOME：runner 上那份 keyring 是共享的，别往里塞长期私钥。
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
           mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
           printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
           gpg --batch --list-secret-keys
+          # 当场盲签一次，判据就是"不带口令能不能签"。`--quick-generate-key` 在
+          # batch 下产出的密钥**空口令但仍带 S2K 保护**：本机 gpg 拿空口令就签了，
+          # runner 的 agent 却要 pinentry，只会在建仓库树那步报
+          # `Inappropriate ioctl for device` —— 那条报错看不出是密钥形状的问题，
+          # 2026-10-18 为此白跑了两轮。改用 `%no-protection` 生成（见 packaging/README.md）。
+          echo smoke > "$RUNNER_TEMP/smoke.txt"
+          if ! gpg --batch --yes --digest-algo SHA256 --local-user "$GPG_KEY_ID" \
+                   --clearsign -o "$RUNNER_TEMP/smoke.asc" "$RUNNER_TEMP/smoke.txt"; then
+            echo "::error title=gpg-key-needs-passphrase::签名密钥在 runner 上要口令（Inappropriate ioctl for device）。请改用 %no-protection 生成的密钥，见 packaging/README.md 的「首次发布前的一次性准备」"
+            exit 1
+          fi
+          echo "盲签通过：$(wc -c < "$RUNNER_TEMP/smoke.asc") 字节"
           echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
 
       - name: Build the repository tree
