@@ -1202,9 +1202,37 @@ jobs:
           $iscc = Get-ChildItem 'C:\Program Files (x86)\Inno Setup*\ISCC.exe' |
                     Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $iscc) { throw "找不到 ISCC.exe（choco innosetup 装了但没落到预期路径）" }
-          $iv = [version]$iscc.VersionInfo.FileVersion
+          # 版本**别从 `VersionInfo.FileVersion` 读**：v1.7.4 第一次跑这一步时，
+          # 两个 msvc 腿上都读成 `0.0.0.0`（choco 那份 6.7.1 的 exe 没有可读的
+          # 版本资源）。x64 那边只是把它打印出来，arm64 这边拿它比 6.3 —— 于是
+          # 一个装着 6.7.1 的 runner 被判成"不支持 arm64"。改从卸载登记表读
+          # `DisplayVersion`；两处都读不出来时**不拦**，只报警 —— 判据是辅助，
+          # 真不支持时 ISCC 自己会报 "Unknown architecture"。
+          $iv = $null
+          $fv = $iscc.VersionInfo.FileVersion
+          if ($fv -and $fv -ne '0.0.0.0') {
+            try { $iv = [version]$fv } catch { $iv = $null }
+          }
+          if ($null -eq $iv) {
+            $roots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+                       'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+                       'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+            foreach ($root in $roots) {
+              $k = Get-ChildItem $root -ErrorAction SilentlyContinue |
+                     Where-Object { $_.PSChildName -like 'InnoSetup*' -or $_.PSChildName -like 'Inno Setup*' } |
+                     Select-Object -First 1
+              if (-not $k) { continue }
+              $dv = (Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue).DisplayVersion
+              if (-not $dv) { continue }
+              try { $iv = [version]$dv; break } catch { $iv = $null }
+            }
+          }
           Write-Host "ISCC: $($iscc.FullName) $iv"
-          if ($iv -lt [version]'6.3') { throw "Inno Setup $iv 不支持 arm64（要 6.3+）" }
+          if ($null -eq $iv) {
+            Write-Host "::warning title=iscc-version-unknown::读不出 Inno Setup 的版本（FileVersion 与卸载登记表都没有），跳过 arm64 那条 6.3+ 判据；编译若报平台不认识就是它"
+          } elseif ($iv -lt [version]'6.3') {
+            throw "Inno Setup $iv 不支持 arm64（要 6.3+）"
+          }
 
           $isccArgs = @("/DMyVersion=$ver", "/DMyArch=$arch", "/DArchAllowed=arm64",
                         "/DStageDir=$stage", "/DOutputDir=$((Get-Location).Path)\dist")
