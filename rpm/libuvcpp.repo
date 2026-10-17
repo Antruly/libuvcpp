@@ -1,0 +1,9 @@
+[libuvcpp]
+name=libuvcpp - Modern C++ wrapper for libuv
+baseurl=https://antruly.github.io/libuvcpp/rpm/$basearch
+enabled=1
+# .rpm 本身没有逐包签名（签名链在 repomd.xml 上），所以 gpgcheck=0；
+# 元数据签名照样校验，包被换掉时会因为 repomd 的校验和不符而失败。
+gpgcheck=0
+repo_gpgcheck=1
+gpgkey=https://antruly.github.io/libuvcpp/rpm/key.asc

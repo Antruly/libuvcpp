@@ -1,0 +1,28 @@
+Architectures: amd64 arm64
+Codename: stable
+Components: main
+Date: Sat, 17 Oct 2026 21:40:03 +0000
+Description: libuvcpp — Modern C++ wrapper for libuv
+Label: libuvcpp
+Origin: libuvcpp
+Suite: stable
+MD5Sum:
+ 0ec815865b37907d9b1224e182eb7d0b             1419 main/binary-amd64/Packages
+ 7524e8d1cbfccb2ee5a14cdb764cbbea              734 main/binary-amd64/Packages.gz
+ 8d37912717f7fbf31ac260f87085f99d             1419 main/binary-arm64/Packages
+ 069d9e9deb02218583687ada49dde065              735 main/binary-arm64/Packages.gz
+SHA1:
+ 51c5317743cf00feb3acb42e73c881a3a859df27             1419 main/binary-amd64/Packages
+ a9264df25ffabc3472b0d0e3134eca7f59ddf757              734 main/binary-amd64/Packages.gz
+ b2b0dbaaf1d5f2714e6838c362ae7384ab1afb7e             1419 main/binary-arm64/Packages
+ c70513ef426a10fd7de226a3a0a2d7c01e93a1a5              735 main/binary-arm64/Packages.gz
+SHA256:
+ faa4f3b17835bce347c2fcf256aa6421a0297bbcb9b0e4f42ce42d4c80ad8970             1419 main/binary-amd64/Packages
+ 1226940c9b81d8e96a023e799044b83f7ac1b4954846b88ee81402f7de8d7caa              734 main/binary-amd64/Packages.gz
+ a81ab5f06cc1a3f267b56925eaee0634f1acf8f6595d902d668cb040e291bd3b             1419 main/binary-arm64/Packages
+ a01a28f748f16cd8a1b2fb88e20066d050a92a2c6103532859ba94bb30354dd3              735 main/binary-arm64/Packages.gz
+SHA512:
+ 15efbb08ce5d1412e1e1ee2f0dd3745d68ecf6cbb2462ee9f5c9475cda5bc66f5309f4e4dd8805d3872adde84954b4d5d96ca6eb4cd83a59dcc4dde6f7b34dc8             1419 main/binary-amd64/Packages
+ 6d31ffe30b43aa3a0516363dd9a6d8f9260c616ef128201c455ffbb7e81b53f37d1fbe5eba7526064226863a460954ca54be46602bd25385cf43e8a571fe404f              734 main/binary-amd64/Packages.gz
+ 3b7ecf54e92caf8548b9799e14f1692aba5ff503778dce5161b9794adf3cfc1d88b8e5dd9238224d1997845de7bf67fb0bf99a583cbd8e1462ed2d1aaf78479b             1419 main/binary-arm64/Packages
+ a7714cb4e411c483beaf5bfa08d62e1fb6ee969f1b873dfd168e30a2fdf784e94a730df46a30bfe6c820e2eb39fa119d4331051892038cef9afd56ffffca461d              735 main/binary-arm64/Packages.gz

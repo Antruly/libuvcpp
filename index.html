@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>libuvcpp packages</title></head>
+<body><pre># libuvcpp — Modern C++ wrapper for libuv
+
+## Debian / Ubuntu
+
+    sudo install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://antruly.github.io/libuvcpp/apt/key.asc |
+      sudo tee /etc/apt/keyrings/libuvcpp.asc &gt;/dev/null
+    echo "deb [signed-by=/etc/apt/keyrings/libuvcpp.asc] https://antruly.github.io/libuvcpp/apt stable main" |
+      sudo tee /etc/apt/sources.list.d/libuvcpp.list
+    sudo apt update
+    sudo apt install libuvcpp-dev
+
+## Fedora / RHEL / openSUSE（dnf / zypper）
+
+    sudo curl -fsSL -o /etc/yum.repos.d/libuvcpp.repo https://antruly.github.io/libuvcpp/rpm/libuvcpp.repo
+    sudo dnf install libuvcpp-devel
+
+## 文件
+
+- `apt/` — Debian 仓库（`InRelease` 已签名）
+- `rpm/` — RPM 仓库（`repomd.xml.asc`）
+- 源码与发布包：&lt;https://github.com/Antruly/libuvcpp&gt;
+
+## 注意
+
+这些包链接**系统的** `libuv` 与 `zlib`；GitHub Release 里的 zip 是自包含的，
+两者不要混用（同一个进程里出现两份 libuv 是内存破坏风险）。
+</pre></body></html>
