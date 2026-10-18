@@ -69,7 +69,7 @@ static void expect_all_prefixes_need_more(const std::string& buf,
 // classify_host
 // =========================================================================
 static void test_classify_host() {
-  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
 
   CHECK(classify_host("127.0.0.1", atyp));
   CHECK(atyp == uvcpp_socks5_atyp::IPV4);
@@ -81,10 +81,10 @@ static void test_classify_host() {
   CHECK(atyp == uvcpp_socks5_atyp::IPV6);
 
   CHECK(classify_host("example.com", atyp));
-  CHECK(atyp == uvcpp_socks5_atyp::DOMAIN);
+  CHECK(atyp == uvcpp_socks5_atyp::DOMAIN_NAME);
 
   CHECK(classify_host("a", atyp));
-  CHECK(atyp == uvcpp_socks5_atyp::DOMAIN);
+  CHECK(atyp == uvcpp_socks5_atyp::DOMAIN_NAME);
 
   // 含 ':' 却不是合法 IPv6 ⇒ 不是"当成域名"，是拒绝（域名里不可能有冒号）。
   CHECK(!classify_host("not:an:ip", atyp));
@@ -94,7 +94,7 @@ static void test_classify_host() {
 
   // 域名长度 255 可编，256 不可。
   CHECK(classify_host(std::string(255, 'a'), atyp));
-  CHECK(atyp == uvcpp_socks5_atyp::DOMAIN);
+  CHECK(atyp == uvcpp_socks5_atyp::DOMAIN_NAME);
   CHECK(!classify_host(std::string(256, 'a'), atyp));
 }
 
@@ -273,16 +273,16 @@ static void test_request() {
                     uvcpp_socks5_endpoint(uvcpp_socks5_atyp::IPV6, "::1",
                                           65535));
   roundtrip_request(uvcpp_socks5_command::CONNECT,
-                    uvcpp_socks5_endpoint(uvcpp_socks5_atyp::DOMAIN,
+                    uvcpp_socks5_endpoint(uvcpp_socks5_atyp::DOMAIN_NAME,
                                           "example.com", 443));
   roundtrip_request(uvcpp_socks5_command::CONNECT,
-                    uvcpp_socks5_endpoint(uvcpp_socks5_atyp::DOMAIN,
+                    uvcpp_socks5_endpoint(uvcpp_socks5_atyp::DOMAIN_NAME,
                                           std::string(255, 'a'), 80));
 
   // 256 字节域名编不出来。
   std::string out;
   CHECK(!append_address(out, uvcpp_socks5_endpoint(
-                                 uvcpp_socks5_atyp::DOMAIN,
+                                 uvcpp_socks5_atyp::DOMAIN_NAME,
                                  std::string(256, 'a'), 80)));
 
   // 坏帧：VER、RSV、ATYP。
@@ -413,7 +413,7 @@ static void test_udp_datagram() {
                                            payload_off));
 
   // 域名与 IPv6 两种 ATYP 也要能往返。
-  const uvcpp_socks5_endpoint dom(uvcpp_socks5_atyp::DOMAIN, "example.org",
+  const uvcpp_socks5_endpoint dom(uvcpp_socks5_atyp::DOMAIN_NAME, "example.org",
                                   5353);
   std::string wire6;
   CHECK(encode_udp_datagram(wire6, dom, payload, sizeof(payload) - 1));

@@ -1298,7 +1298,7 @@ int uvcpp_tcp_client::socks5_send(const std::string& bytes,
 
 int uvcpp_tcp_client::socks5_send_request(
     const ::std::shared_ptr<char>& life) {
-  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
   if (!socks5_detail::classify_host(socks5_target_host_, atyp)) {
     socks5_last_error_ = "invalid SOCKS5 target host";
     return UV_EINVAL;

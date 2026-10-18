@@ -122,7 +122,13 @@ struct target_state {
   int               port = -1;
 };
 
+// 这一档的 TLS 是可选的：`UVCPP_OPENSSL_ENABLE=0` 的构建里既没有
+// `uvcpp_ssl_context`，`uvcpp_tcp_server` 也没有 `set_ssl_context()`。
+#if UVCPP_OPENSSL_ENABLE
 void run_target(target_state& st, uvcpp_ssl_context* sctx) {
+#else
+void run_target(target_state& st) {
+#endif
   uvcpp_tcp_server server;
 
   std::string pending;
@@ -145,7 +151,9 @@ void run_target(target_state& st, uvcpp_ssl_context* sctx) {
         if (wrc != 0) st.reply_fail.fetch_add(1);
       });
 
+#if UVCPP_OPENSSL_ENABLE
   if (sctx != nullptr) server.set_ssl_context(sctx);
+#endif
 
   int rc = server.bindIpv4("127.0.0.1", 0);
   if (rc != 0) {
@@ -182,9 +190,13 @@ struct target_thread {
   target_state      st;
   std::thread       thread;
 
-  explicit target_thread(uvcpp_ssl_context* sctx) {
+#if UVCPP_OPENSSL_ENABLE
+  explicit target_thread(uvcpp_ssl_context* sctx = nullptr) {
     thread = std::thread(run_target, std::ref(st), sctx);
   }
+#else
+  target_thread() { thread = std::thread(run_target, std::ref(st)); }
+#endif
 
   int port() {
     while (!st.ready.load()) {
@@ -266,7 +278,7 @@ void scenario_plain_http() {
   std::cout << "[socks5-http] plain start" << std::endl;
 
   proxy_thread  proxy;
-  target_thread target(nullptr);
+  target_thread target;
   check(target.port() > 0, "目标服务端 listen 成功（前置）");
   if (target.port() <= 0) return;
 
@@ -320,7 +332,7 @@ void scenario_plain_http() {
 void scenario_proxy_down() {
   std::cout << "[socks5-http] proxy down start" << std::endl;
 
-  target_thread target(nullptr);
+  target_thread target;
   if (target.port() <= 0) {
     check(false, "目标服务端 listen 成功（前置）");
     return;

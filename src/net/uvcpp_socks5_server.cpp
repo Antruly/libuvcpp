@@ -108,7 +108,7 @@ bool endpoint_to_sockaddr(const uvcpp_socks5_endpoint& ep,
  */
 bool resolve_target(const uvcpp_socks5_endpoint& target,
                     struct sockaddr_storage& out) {
-  if (target.atyp != uvcpp_socks5_atyp::DOMAIN) {
+  if (target.atyp != uvcpp_socks5_atyp::DOMAIN_NAME) {
     return endpoint_to_sockaddr(target, out);
   }
   if (target.host.empty() || target.port <= 0 || target.port > 65535) {

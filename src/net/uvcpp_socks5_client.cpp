@@ -585,7 +585,7 @@ int uvcpp_socks5_client::connect_target(const std::string& host, int port,
                                         std::function<void(int)> cb) {
   if (cb == nullptr) return connect_target_wait(host, port);
 
-  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
   if (!socks5_detail::classify_host(host, atyp) || port <= 0 || port > 65535) {
     last_error_      = "invalid SOCKS5 target";
     last_error_code_ = UV_EINVAL;
@@ -602,7 +602,7 @@ int uvcpp_socks5_client::connect_target(const std::string& host, int port,
 
 int uvcpp_socks5_client::connect_target_wait(const std::string& host, int port,
                                              int timeout_ms) {
-  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
   if (!socks5_detail::classify_host(host, atyp) || port <= 0 || port > 65535) {
     last_error_      = "invalid SOCKS5 target";
     last_error_code_ = UV_EINVAL;

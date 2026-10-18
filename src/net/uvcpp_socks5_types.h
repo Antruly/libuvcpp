@@ -26,10 +26,15 @@ enum class uvcpp_socks5_command : uint8_t {
   UDP_ASSOCIATE = 0x03
 };
 
-/** @brief 地址类型字节（RFC 1928 §5）。 */
+/**
+ * @brief 地址类型字节（RFC 1928 §5）。
+ *
+ * 域名那一档叫 `DOMAIN_NAME` 而不是 `DOMAIN`：`<rpcndr.h>`（Windows）等系统头
+ * 会把 `DOMAIN` 定义成宏，枚举项与宏同名时 MSVC / MinGW / macOS 都直接编不过。
+ */
 enum class uvcpp_socks5_atyp : uint8_t {
   IPV4 = 0x01,
-  DOMAIN = 0x03,
+  DOMAIN_NAME = 0x03,
   IPV6 = 0x04
 };
 
@@ -77,7 +82,7 @@ struct uvcpp_socks5_endpoint {
 
   bool is_ipv4() const { return atyp == uvcpp_socks5_atyp::IPV4; }
   bool is_ipv6() const { return atyp == uvcpp_socks5_atyp::IPV6; }
-  bool is_domain() const { return atyp == uvcpp_socks5_atyp::DOMAIN; }
+  bool is_domain() const { return atyp == uvcpp_socks5_atyp::DOMAIN_NAME; }
 };
 
 }  // namespace uvcpp

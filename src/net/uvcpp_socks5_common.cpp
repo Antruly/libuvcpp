@@ -90,7 +90,7 @@ parse_status parse_address_ex(const char* p, std::size_t len, std::size_t& off,
       out.port = port;
       return parse_status::OK;
     }
-    case uvcpp_socks5_atyp::DOMAIN: {
+    case uvcpp_socks5_atyp::DOMAIN_NAME: {
       std::uint8_t n = 0;
       if (!read_u8(p, len, off, n)) return parse_status::NEED_MORE;
       if (n == 0) return parse_status::ERROR;
@@ -99,7 +99,7 @@ parse_status parse_address_ex(const char* p, std::size_t len, std::size_t& off,
       off += n;
       int port = 0;
       if (!read_port(p, len, off, port)) return parse_status::NEED_MORE;
-      out.atyp = uvcpp_socks5_atyp::DOMAIN;
+      out.atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
       out.host.swap(host);
       out.port = port;
       return parse_status::OK;
@@ -124,7 +124,7 @@ bool classify_host(const std::string& host, uvcpp_socks5_atyp& atyp) {
     return true;
   }
   if (host.size() > 255) return false;
-  atyp = uvcpp_socks5_atyp::DOMAIN;
+  atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
   return true;
 }
 
@@ -148,9 +148,9 @@ bool append_address(std::string& out, const uvcpp_socks5_endpoint& ep) {
       append_port(out, ep.port);
       return true;
     }
-    case uvcpp_socks5_atyp::DOMAIN:
+    case uvcpp_socks5_atyp::DOMAIN_NAME:
       if (ep.host.empty() || ep.host.size() > 255) return false;
-      out.push_back(static_cast<char>(uvcpp_socks5_atyp::DOMAIN));
+      out.push_back(static_cast<char>(uvcpp_socks5_atyp::DOMAIN_NAME));
       out.push_back(static_cast<char>(ep.host.size()));
       out.append(ep.host);
       append_port(out, ep.port);

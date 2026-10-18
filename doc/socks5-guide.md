@@ -144,7 +144,7 @@ namespace uvcpp {
 
 enum class uvcpp_socks5_command : uint8_t { CONNECT = 0x01, BIND = 0x02,
                                             UDP_ASSOCIATE = 0x03 };
-enum class uvcpp_socks5_atyp : uint8_t { IPV4 = 0x01, DOMAIN = 0x03,
+enum class uvcpp_socks5_atyp : uint8_t { IPV4 = 0x01, DOMAIN_NAME = 0x03,
                                          IPV6 = 0x04 };
 enum class uvcpp_socks5_reply : uint8_t { SUCCEEDED = 0x00, GENERAL_FAILURE,
                                           NOT_ALLOWED, NETWORK_UNREACHABLE,

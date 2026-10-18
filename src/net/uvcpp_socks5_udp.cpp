@@ -217,7 +217,7 @@ int uvcpp_socks5_udp::send_to(const uvcpp_socks5_endpoint& target,
 int uvcpp_socks5_udp::send_to(const std::string& host, int port,
                               const void* data, std::size_t len,
                               std::function<void(int)> cb) {
-  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
   if (!socks5_detail::classify_host(host, atyp)) {
     last_error_ = "invalid SOCKS5 UDP target host";
     return UV_EINVAL;
@@ -260,7 +260,7 @@ int uvcpp_socks5_udp::send_to_wait(const uvcpp_socks5_endpoint& target,
 int uvcpp_socks5_udp::send_to_wait(const std::string& host, int port,
                                    const void* data, std::size_t len,
                                    int timeout_ms) {
-  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN_NAME;
   if (!socks5_detail::classify_host(host, atyp)) {
     last_error_ = "invalid SOCKS5 UDP target host";
     return UV_EINVAL;
