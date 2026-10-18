@@ -1119,6 +1119,12 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
         } else {
           set_status(TCP_CLIENT_ERROR);
           last_error_code_ = status;
+          // 配了代理却连不上代理：把这句也记进 `socks5_last_error()`。
+          // 否则调用方只能看到一个裸的 ECONNREFUSED，还得自己去猜"是目标
+          // 还是代理"。协商阶段的失败由 `socks5_finish()` 负责写。
+          if (socks5_enabled() && socks5_last_error_.empty()) {
+            socks5_last_error_ = uv_strerror(status);
+          }
         }
 
         if (status == 0 && socks5_pending_) {

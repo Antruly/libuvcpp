@@ -388,7 +388,9 @@ class UVCPP_API uvcpp_tcp_client {
    * - `tls_host_want_` 仍是**目标**主机名：SNI 与证书校验必须对目标，不是代理。
    * - 协商完成之前**不会**触发连接回调；失败了回调拿到非 0，`status` 是
    *   `TCP_CLIENT_ERROR`，`get_last_error()` 是 libuv 错误码，
-   *   `socks5_last_error()` 是代理侧的原话（应答码文本、认证失败等）。
+   *   `socks5_last_error()` 是代理侧的原话（应答码文本、认证失败等）；
+   *   代理**连不上**时它给的是那次 TCP 失败的原因（`uv_strerror`），
+   *   因为这时没有"代理的话"可引。
    * - 协商超时与连接超时共用 `connect_wait` 的 `timeout_ms` / 异步路径的
    *   默认 30 s。
    *

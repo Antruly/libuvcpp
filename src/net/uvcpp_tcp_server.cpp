@@ -84,6 +84,13 @@ uvcpp_tcp_server::uvcpp_tcp_server() {
   status_ = TCP_SERVER_NONE;
 }
 
+uvcpp_tcp_server::uvcpp_tcp_server(uvcpp_loop* loop) {
+  loop_      = loop;
+  tcp_       = new uvcpp_tcp(loop_);
+  owns_loop_ = false;
+  status_    = TCP_SERVER_NONE;
+}
+
 uvcpp_tcp_server::~uvcpp_tcp_server() {
   // -------------------------------------------------------------------
   // 第零步：**先**把工作线程停掉、join 完，再走下面那四步。
@@ -149,7 +156,10 @@ uvcpp_tcp_server::~uvcpp_tcp_server() {
   // `~uvcpp_tcp_client` / `~uvcpp_ws_client` 同一条策略：泄漏一块仍然有效的
   // 内存，换掉一个必然发生的 use-after-free。（目前没有用例走这一路：测试里
   // 的 server 都是栈对象，析构发生在泵返回之后。）
-  if (loop_ != nullptr && !loop_->is_running()) {
+  // 外部循环那条路**整段跳过**（`owns_loop_ == false`）：循环不是我们的，
+  // 关它等于把同一条循环上别的对象的句柄连同它们的事件一起废掉，
+  // `delete loop_` 更是直接还别人的内存。句柄该关的上面已经关过了。
+  if (loop_ != nullptr && owns_loop_ && !loop_->is_running()) {
     for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
       loop_->run(UV_RUN_NOWAIT);
     }

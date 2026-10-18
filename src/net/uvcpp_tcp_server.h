@@ -125,6 +125,19 @@ class UVCPP_API uvcpp_tcp_server {
   UVCPP_DEFINE_FUNC(uvcpp_tcp_server)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_tcp_server)
 
+  /**
+   * @brief 用一条**外部**事件循环（与 `uvcpp_tcp_client(uvcpp_loop*)` 同一
+   *        约定：本对象不拥有它，析构时也不关不删）。
+   *
+   * 为什么需要：`set_loops(n > 1)` 的工作循环由本类自己起，但**0 号循环**
+   * （接受者）原先只能是本类自建的那一条。上层要在自己那条循环上收一条
+   * 临时监听器时（SOCKS5 的 BIND、需要与既有连接同循环的辅助服务），
+   * 没有办法把那个监听器放进调用方的循环 —— 于是有了这个构造。
+   *
+   * @warning 外部循环必须**活得比本对象长**，并且 `run()` 由调用方负责。
+   */
+  explicit uvcpp_tcp_server(uvcpp_loop* loop);
+
   // -----------------------------------------------------------------
   // Accessors
   // -----------------------------------------------------------------
@@ -908,6 +921,14 @@ class UVCPP_API uvcpp_tcp_server {
 
   uvcpp_loop* loop_ = nullptr;
   uvcpp_tcp*  tcp_  = nullptr;
+  /**
+   * @brief 本对象是否拥有 `loop_`（外部循环构造时为 false）。
+   *
+   * 析构的第三步（泵循环、`loop_close()`、`delete loop_`）只在这一位为真时
+   * 跑。外部循环那条路上**整段跳过**：循环不是我们的，关它等于把同一条循环
+   * 上别的对象的句柄连同它们的事件一起废掉，`delete` 更是直接还别人的内存。
+   */
+  bool owns_loop_ = true;
   bool stopped_     = false;  ///< true if stop() already closed the handle
 
   /**
