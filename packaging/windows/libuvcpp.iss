@@ -67,6 +67,10 @@ OutputBaseFilename=libuvcpp-{#MyVersion}-msvc-{#MyArch}-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; 图标由仓根的 `uvcpp.png`（1600²、圆角方形、带透明角）转成多尺寸 ICO，
+; 7 个尺寸 16~256 都在一个文件里（Windows 按 DPI 自己挑）。`SourcePath`
+; 是 .iss 所在目录 —— ISCC 的工作目录会随调用方式变，别写相对路径。
+SetupIconFile={#SourcePath}\libuvcpp.ico
 SetupLogging=yes
 ; 机器级安装（写到 Program Files 与系统 PATH），要管理员。
 PrivilegesRequired=admin

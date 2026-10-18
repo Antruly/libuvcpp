@@ -98,6 +98,9 @@ ISCC.exe /DMyVersion=1.7.4 /DMyArch=x64 `
 * 签名由 `/DSignSetup=1` + `/Ssigntool=...` 打开；没给就不签、安装包照出
   （缺证书是配置问题，不是构建失败）。
 * arm64 需要 Inno Setup **6.3+**（`ArchitecturesAllowed=arm64` 到那时才有）。
+* 图标是 `windows/libuvcpp.ico`（由仓根的 `uvcpp.png` 转出的 7 个尺寸，
+  16~256），`SetupIconFile` 指向它；安装程序、卸载程序和"应用和功能"里
+  显示的都是这张。换 logo 时重跑一次转换，别只改 png —— `.ico` 是独立文件。
 
 ## `repo/`：gh-pages 上的 apt / dnf 仓库
 
