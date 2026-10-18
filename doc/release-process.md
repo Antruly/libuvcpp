@@ -268,6 +268,11 @@ One-time setup before the first release that uses these channels:
 3. After the first `publish-repo` run creates `gh-pages`, point Settings → Pages at
    that branch. Until then the site 404s; the job itself is green.
 
+All three are done for this repository: the channels went live with `v1.7.4`
+(`gh-pages` at `7dffd00`, signed by `0D7F 9D96 … 7C3A 011C`), and both installers
+are signed with the self-signed certificate — `signtool` reports success, while
+SmartScreen still warns because the certificate is not from a public CA.
+
 ## Known gaps
 
 These are recorded rather than fixed. They are real, and a reader should not assume the process
