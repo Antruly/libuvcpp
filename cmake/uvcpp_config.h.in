@@ -124,6 +124,13 @@
 #  define UVCPP_CAPI_ENABLE @UVCPP_CAPI_ENABLE@
 #endif
 
+#if defined(UVCPP_REDIS_ENABLE) && (UVCPP_REDIS_ENABLE != @UVCPP_REDIS_ENABLE@)
+#  error "UVCPP_REDIS_ENABLE=@UVCPP_REDIS_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_REDIS_ENABLE
+#  define UVCPP_REDIS_ENABLE @UVCPP_REDIS_ENABLE@
+#endif
+
 #if defined(UVCPP_DB_ENABLE) && (UVCPP_DB_ENABLE != @UVCPP_DB_ENABLE@)
 #  error "UVCPP_DB_ENABLE=@UVCPP_DB_ENABLE@ in this build; remove your own definition of it"
 #endif

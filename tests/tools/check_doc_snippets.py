@@ -215,7 +215,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
                 "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/",
-                "capi/", "db/", "yyjson/")
+                "capi/", "db/", "redis/", "yyjson/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -289,7 +289,7 @@ NOT_BUNDLED = ("openssl/", "nghttp2/", "ngtcp2/", "nghttp3/")
 # `quic/` 属于**第一档**（"宏为 0 时类会消失"）：本模块的**四个**公开头整段套在
 # `#if UVCPP_QUIC_ENABLE` 里（另外两个头 `uvcpp_quic_ngtcp2.h` 与
 # `uvcpp_quic_session.h` 是私有的，不进包、文档也不该引它们）。模块关掉时
-# `CMakeLists.txt:3165-3165` 的 install 规则确实不装它们，
+# `CMakeLists.txt:3232-3232` 的 install 规则确实不装它们，
 # 但那条只挡住 `cmake --install`：`package_release.py` 是从 `src/` 逐目录拷头的、
 # 与开关无关（同上面 wsdl 那段记的形状，实测过 —— 一份 `UVCPP_ENABLE_QUIC=OFF`
 # 的包里有 `include/quic/` 四个头，而没有 `uvcpp_quic_ngtcp2.h`）。所以在**发布包**
@@ -331,6 +331,13 @@ MODULE_REQ = {
     # 也就是说"没开它的包"恰好是最常见的那个 —— 这条记录一直在承重，不是一道
     # 只在边角配置上才生效的防线（与下面 `quic/` 那段记的形状相同）。
     "yyjson/": "UVCPP_YYJSON_ENABLE",
+    # `redis/` 是第一档（"宏为 0 时类会消失"）：唯一的公开头
+    # `src/redis/uvcpp_redis.h` 整段套在 `#if UVCPP_REDIS_ENABLE` 里（第 33 行到
+    # 第 303 行）。模块关掉时 `package_release.py` 照样把这份头拷进包（它按模块
+    # 目录整体拷、不看开关），于是片段只会**真编不过** —— 报的是未声明类型。
+    # 登记它才判得成"这个包没编 redis"。默认是 ON，所以它平时不承重；承重的是
+    # `UVCPP_BUILD_NET=OFF` 把 redis 强制关掉的那一格。
+    "redis/": "UVCPP_REDIS_ENABLE",
 }
 
 # 发布配置里**结构性地关着**的模块：它们的缺席是**发布配置的事实**，不是"前提不满足"。

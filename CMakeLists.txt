@@ -221,6 +221,16 @@ option(UVCPP_ENABLE_DB_ODBC
 option(UVCPP_DB_RUNTIME_LOAD
   "Load the MySQL/PostgreSQL/ODBC client libraries at run time instead of linking them (keeps the artifact free of DT_NEEDED entries for them)" OFF)
 
+# Redis 客户端（`src/redis/`）—— **默认 ON**，而且**没有任何第三方依赖**：
+# RESP2/RESP3 的编解码是本仓自己实现的（`src/redis/uvcpp_redis_resp.cpp`），
+# 传输复用 `uvcpp_tcp_client`，不用 hiredis、不链任何东西。
+#
+# 它跟的是 net 模块：`UVCPP_BUILD_NET=OFF` 时会被强制关掉（下面有那一条守卫）。
+# 这也是它与 `UVCPP_ENABLE_DB` 最大的区别 —— DB 默认关是因为它**必需**第三方
+# 客户端库，Redis 默认开是因为它不需要。
+option(UVCPP_ENABLE_REDIS
+  "Enable the Redis client (src/redis/): built-in RESP2/RESP3 over uvcpp_tcp_client, no external dependency" ON)
+
 # 可运行示例（examples/）。默认关：它是给使用者看的，不进库本身。
 option(UVCPP_BUILD_EXAMPLES "Build the examples in examples/" OFF)
 
@@ -748,6 +758,20 @@ if(UVCPP_ENABLE_QUIC AND NOT UVCPP_BUILD_NET)
     "UVCPP_ENABLE_QUIC=ON 需要 UVCPP_BUILD_NET=ON（QUIC 是 net 层的一条链路协议，"
     "并且复用 src/net/uvcpp_net_read.h 的 net_read_result 事件契约）。已强制关闭 quic。")
   set(UVCPP_ENABLE_QUIC OFF)
+endif()
+
+# Redis 客户端建在 `uvcpp_tcp_client` 上，没有 net 就没有传输。
+#
+# 与上面 quic/capi 那几条同形：`set(... OFF)` 是**普通变量**、不是 cache 写，
+# 所以 `CMakeCache.txt` 里仍然是 `UVCPP_ENABLE_REDIS:BOOL=ON` —— 下面排除块里
+# 那句 `Excluding redis module from build` 才是可观测面（CI 与测试都 grep 它）。
+#
+# 位置同样必须早于 `_uvcpp_literal01` 那一批与 `REDIS_SRC_FILES` 那个 GLOB。
+if(UVCPP_ENABLE_REDIS AND NOT UVCPP_BUILD_NET)
+  message(WARNING
+    "UVCPP_ENABLE_REDIS=ON 需要 UVCPP_BUILD_NET=ON（Redis 客户端把 RESP 跑在 "
+    "uvcpp_tcp_client 上，没有 net 模块就没有传输层）。已强制关闭 redis。")
+  set(UVCPP_ENABLE_REDIS OFF)
 endif()
 
 # -------------------------------------------------------------------------
@@ -1592,6 +1616,15 @@ if(UVCPP_ENABLE_DB)
   source_group("db" FILES ${DB_SRC_FILES})
 endif()
 
+# redis module source_group
+# CONFIGURE_DEPENDS 的理由与 db/capi/quic/http3 那几段逐字相同。同一个
+# REDIS_SRC_FILES 还在下面被用来做"空模块"判据。
+if(UVCPP_ENABLE_REDIS)
+  file(GLOB REDIS_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/redis/*.h" "${CMAKE_SOURCE_DIR}/src/redis/*.cpp")
+  source_group("redis" FILES ${REDIS_SRC_FILES})
+endif()
+
 # yyjson module source_group
 # CONFIGURE_DEPENDS 的理由与 quic/http3/capi/db 那几段逐字相同（新加一个 .cpp 不
 # 重新 configure 就不会被编进去，而"编过了"与"编了这个文件"长得一模一样）。同一个
@@ -1943,6 +1976,14 @@ else()
   message(STATUS "C ABI disabled (UVCPP_CAPI_ENABLE=0)")
 endif()
 
+if(UVCPP_ENABLE_REDIS)
+  add_compile_definitions(UVCPP_REDIS_ENABLE=1)
+  message(STATUS "Redis client enabled (UVCPP_REDIS_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_REDIS_ENABLE=0)
+  message(STATUS "Redis client disabled (UVCPP_REDIS_ENABLE=0)")
+endif()
+
 if(UVCPP_ENABLE_DB)
   add_compile_definitions(UVCPP_DB_ENABLE=1)
   message(STATUS "Database module enabled (UVCPP_DB_ENABLE=1)")
@@ -2198,6 +2239,25 @@ else()
   endif()
 endif()
 
+# 根据 UVCPP_ENABLE_REDIS 排除 redis 模块。形状与上面 capi/db 那两段逐字相同 ——
+# 包括为什么两个列表都要排（SOURCES 管编不编，HEADERS 管会不会进安装/导出）。
+if(NOT UVCPP_ENABLE_REDIS)
+  message(STATUS "Excluding redis module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/redis/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/redis/")
+else()
+  message(STATUS "Including redis module in build (built-in RESP2/RESP3 client)")
+
+  # 「开了开关但目录是空的」必须当场红，理由与 quic/http3/capi/db 那几格逐字
+  # 相同：一个空的 src/redis/ 会编出一个"开关是 ON、一行 Redis 代码都没有"的库，
+  # 而 cache、configure 日志、构建、测试**全绿**。
+  if(NOT REDIS_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_ENABLE_REDIS=ON 但 src/redis/ 下一个文件都没有 —— 这个配置会编出一个"
+      "不含任何 Redis 代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
+endif()
+
 # 根据 UVCPP_ENABLE_YYJSON 排除 yyjson 模块。形状与上面 capi/db 那两段逐字相同
 # —— 包括为什么两个列表都要排（SOURCES 管编不编，HEADERS 管会不会进安装/导出）。
 #
@@ -2409,6 +2469,7 @@ _uvcpp_literal01(UVCPP_NGHTTP2_ENABLE   UVCPP_ENABLE_NGHTTP2)
 _uvcpp_literal01(UVCPP_QUIC_ENABLE      UVCPP_ENABLE_QUIC)
 _uvcpp_literal01(UVCPP_HTTP3_ENABLE     UVCPP_ENABLE_HTTP3)
 _uvcpp_literal01(UVCPP_CAPI_ENABLE      UVCPP_ENABLE_CAPI)
+_uvcpp_literal01(UVCPP_REDIS_ENABLE     UVCPP_ENABLE_REDIS)
 _uvcpp_literal01(UVCPP_DB_ENABLE        UVCPP_ENABLE_DB)
 _uvcpp_literal01(UVCPP_DB_SQLITE_ENABLE UVCPP_ENABLE_DB_SQLITE)
 _uvcpp_literal01(UVCPP_DB_MYSQL_ENABLE  UVCPP_ENABLE_DB_MYSQL)
@@ -2487,6 +2548,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_QUIC_ENABLE=${UVCPP_QUIC_ENABLE}
       UVCPP_HTTP3_ENABLE=${UVCPP_HTTP3_ENABLE}
       UVCPP_CAPI_ENABLE=${UVCPP_CAPI_ENABLE}
+      UVCPP_REDIS_ENABLE=${UVCPP_REDIS_ENABLE}
       UVCPP_DB_ENABLE=${UVCPP_DB_ENABLE}
       UVCPP_DB_SQLITE_ENABLE=${UVCPP_DB_SQLITE_ENABLE}
       UVCPP_DB_MYSQL_ENABLE=${UVCPP_DB_MYSQL_ENABLE}
@@ -3250,6 +3312,19 @@ list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_odbc_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_runtime_load\\.h$")
 if(DB_HEADER_FILES AND UVCPP_ENABLE_DB)
   install(FILES ${DB_HEADER_FILES} DESTINATION include/db)
+endif()
+
+# src/redis/ 的公开头：只有 `uvcpp_redis.h` 一份进包。`uvcpp_redis_resp.h` 是
+# **私有头** —— 它带出 `uvcpp_redis_value_impl` 的完整定义、解析器的状态与
+# `uvcpp_redis_value_factory`，那些都是模块内部契约，不是 API。
+#
+# **这处排除与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对**：
+# 那个脚本按文件名清单摘私有头，两处必须一起改 —— 只改这里的话，打出来的包里
+# 照样会带上它。
+file(GLOB REDIS_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/redis/*.h")
+list(FILTER REDIS_HEADER_FILES EXCLUDE REGEX "uvcpp_redis_resp\\.h$")
+if(REDIS_HEADER_FILES AND UVCPP_ENABLE_REDIS)
+  install(FILES ${REDIS_HEADER_FILES} DESTINATION include/redis)
 endif()
 
 # If we built libuv from source as part of this project, install its public headers too

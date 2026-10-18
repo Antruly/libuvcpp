@@ -147,6 +147,12 @@ if(NOT UVCPP_ENABLE_DB_ODBC)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_odbc[^/]*\.cpp$")
 endif()
 
+# Redis 用例同理：`UVCPP_ENABLE_REDIS=0` 时公开头整段落在 `#if` 外面，不摘
+# 就是编译失败而不是跳过。
+if(NOT UVCPP_ENABLE_REDIS)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*redis[^/]*\.cpp$")
+endif()
+
 foreach(test_src ${FUNC_SOURCES})
   get_filename_component(test_name ${test_src} NAME_WE)
   string(REGEX REPLACE "[^a-zA-Z0-9_]" "_" exe_name "test_${test_name}")
@@ -273,6 +279,14 @@ foreach(_db_remote test_db_mysql_func test_db_pgsql_func
     set_tests_properties(${_db_remote} PROPERTIES SKIP_RETURN_CODE 3)
   endif()
 endforeach()
+
+# Redis 的真实服务端用例同一档：本机没起 `redis-server` 时返回 3（未判定），
+# CI 的腿上起了服务器并设 `UVCPP_REDIS_TEST_REQUIRE=1` —— 那时缺服务器是失败。
+# 假服务端用例（`redis_client_func` / `redis_resp_func`）不设这一格：它们不依赖
+# 任何外部服务，误返回 3 只会把真红伪装成跳过。
+if(TARGET test_redis_real_func)
+  set_tests_properties(test_redis_real_func PROPERTIES SKIP_RETURN_CODE 3)
+endif()
 
 # 两条 IPv6 回环用例：绑 `::1` 失败时返回 3（= 这台机器没开 IPv6 栈）。
 #

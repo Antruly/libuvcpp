@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))  # tests/tools -> tests -> repo
 
 def _header_version():
-    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1608-1616`
+    """版本号的唯一来源是 `src/uvcpp/uvcpp_version.h`（`CMakeLists.txt:1641-1649`
     在 configure 期读的也是它）。这里以前写死 "1.1.0"：标签打到 v1.1.5 时，产出的
     zip 名和 uvcpp.pc 的 Version 仍然自称 1.1.0 —— 两者只差一个字符串，出包时谁也
     不会去核对。读不到就停下，不自作主张退回默认值：一个名字说谎的包比不出包更坏。
@@ -55,7 +55,7 @@ VERSION = _header_version()
 # 各模块的公开头目录。expand 现在也要装 —— 内存池已修复，发布产物带池
 # （见 RELEASE.md），使用者需要 uvcpp_page_heap.h 才能用 uvcpp_alloc。
 MODULES = ["uvcpp", "handle", "req", "expand", "net", "web", "webapp", "ssl", "http2",
-           "wsdl", "quic", "http3", "capi", "db", "grpc", "yyjson"]
+           "wsdl", "quic", "http3", "capi", "db", "redis", "grpc", "yyjson"]
 
 # 不发的头：`uvcpp_h2_nghttp2.h` 把 `<nghttp2/nghttp2.h>` 拉进来（这是它存在的
 # 全部理由 —— 让别的头不用拉），装出去就把"使用者不需要 nghttp2"这个结论作废了，
@@ -116,7 +116,13 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
                    # （枚举与端点），编解码没有稳定性承诺。与 `CMakeLists.txt`
                    # 的 `list(FILTER NET_HEADER_FILES EXCLUDE REGEX ...)` 是一对，
                    # 两处必须一起改。
-                   "uvcpp_socks5_common.h"}
+                   "uvcpp_socks5_common.h",
+                   # RESP 编解码与值节点的内部表示：公开面只到
+                   # `uvcpp_redis_value`（pimpl 之后只剩一个 shared_ptr）。与
+                   # `CMakeLists.txt` 的
+                   # `list(FILTER REDIS_HEADER_FILES EXCLUDE REGEX "uvcpp_redis_resp\\.h$")`
+                   # 是一对，两处必须一起改。
+                   "uvcpp_redis_resp.h"}
 
 # 按**构建树**决定要不要发的头：与 `PRIVATE_HEADERS` 那条规矩不同，它们不是
 # "永远不发"，而是"这个配置下发了就是坏包"。
@@ -128,9 +134,9 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
 # 的错误码，任何配置下都发。
 #
 # `CMakeLists.txt` 的 `list(FILTER UVCPP_HEADERS EXCLUDE REGEX
-# "src/grpc/uvcpp_grpc_server\\.h")`（`CMakeLists.txt:2031-2033`）与
+# "src/grpc/uvcpp_grpc_server\\.h")`（`CMakeLists.txt:2072-2074`）与
 # `list(FILTER GRPC_HEADER_FILES EXCLUDE REGEX "uvcpp_grpc_server\\.h$")`
-# （`CMakeLists.txt:3055-3060`）是同一条排除的两处 —— **三处必须一起改**：
+# （`CMakeLists.txt:3122-3127`）是同一条排除的两处 —— **三处必须一起改**：
 # 这里漏了只影响发布包，CMake 那两处漏了只影响 `cmake --install`，三边都不报错。
 WEB_GATED_HEADERS = {"uvcpp_grpc_server.h"}
 
@@ -1169,7 +1175,7 @@ def main():
 
     # **曾经是差异 2**：补 zlib.h / zconf.h —— `web/uvcpp_ws_parser.h` 在
     # UVCPP_ZLIB_ENABLE=1 时要 include 它，而 install 规则里原先没有这一条。
-    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:3274-3277`），所以这
+    # 2026-10-12 起 install 规则自己也装了（`CMakeLists.txt:3354-3357`），所以这
     # 不再是"刻意的差异"，只是本脚本手工组装 stage、**不走 `cmake --install`** 时
     # 对同一件事的重复一遍 —— 两边必须落到同一个位置（`include/` 顶层）。
     z = dep_src(tree, repo, "zlib-131") or dep_src(tree, repo, "zlib")

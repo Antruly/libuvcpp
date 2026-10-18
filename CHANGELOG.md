@@ -27,6 +27,7 @@
   - [HTTP/2](#http2)
   - [gRPC（`src/grpc/`）](#grpcsrcgrpc)
   - [数据库（`src/db/`）](#数据库srcdb)
+  - [Redis（`src/redis/`）](#redissrcredis)
   - [横向扩展（多事件循环）](#横向扩展多事件循环)
   - [HTTP 与 WebSocket 语义](#http-与-websocket-语义)
   - [TLS 与网络](#tls-与网络)
@@ -306,7 +307,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3163-3163`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3230-3230`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -684,7 +685,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:2031-2033`、`CMakeLists.txt:3055-3060`）——
+  两处都摘掉**（`CMakeLists.txt:2072-2074`、`CMakeLists.txt:3122-3127`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -1041,6 +1042,28 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **池子先走一步不能崩**：投出异步活之后立刻 `delete` 池子，析构等 work 相收完
   （存活凭证 + 在飞计数），回调不被调、进程不崩。三后端共用套件（`db_suite.h`）
   加一节 `test_pool`，远程后端也吃到（`1.5.3`）
+
+### Redis（`src/redis/`）
+
+- **内置 RESP2/RESP3 客户端：不用 hiredis，零外部依赖**（`1.7.5-dev`）。
+  `src/redis/` 自己实现 RESP 的编码与**增量**解析，传输建在 `uvcpp_tcp_client` 上；
+  新选项 `UVCPP_ENABLE_REDIS` **默认 ON**（与 db 默认 OFF 相反：它不要任何第三方
+  客户端库），`UVCPP_BUILD_NET=OFF` 时强制关闭。宏 `UVCPP_REDIS_ENABLE` 走与其它
+  模块同一套 `#error` 防重复定义。
+- **公开面只到 `uvcpp_redis_value` 为止，解析器是私有头**（`1.7.5-dev`）。
+  `uvcpp_redis_resp.h` 不进安装、也在 `package_release.py` 的 `PRIVATE_HEADERS`
+  里 —— 两处同一次改。值用 `shared_ptr<const impl>` 做 pimpl（C++11 对"不完整
+  类型的 `vector` 成员"没有标准保证），拷贝只加引用计数。
+- **应答的分类钉在测试里**（`1.7.5-dev`）：Redis 的 `-ERR` 是 `status == 0` 且
+  `is_error()`，传输错误才让 status 非 0 —— 混起来调用方就没法区分"命令写错"与
+  "连接没了"。`redis_resp_func` 逐字节拆包验 `NEED_MORE` 时 `off` 不动、
+  `redis_client_func` 用进程内假服务端验 AUTH/SELECT/HELLO 3 的顺序与
+  pipeline 配对、`redis_real_func` 对真实 `redis-server` 验方言；没有服务器时
+  它是 `***Skipped`（`SKIP_RETURN_CODE 3`），CI 的腿设
+  `UVCPP_REDIS_TEST_REQUIRE=1` 把缺服务器变成失败。
+- **一句话的边界**：Cluster / Sentinel / 连接池 / hiredis 兼容层都不做；
+  `EVAL` 这类靠通用 `command()` 发。见 [`doc/redis-guide.md`](doc/redis-guide.md)
+  与 [`doc/db-driver-policy.md`](doc/db-driver-policy.md)。
 
 ### 横向扩展（多事件循环）
 
@@ -3317,17 +3340,17 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）把我们的嵌入依赖藏起来，
   libpq 就会解析到**系统**那份、与它自己的 libcrypto 自洽。
 
-  修法一（`CMakeLists.txt:2561-2603`，`UNIX AND NOT APPLE`，只给共享目标
+  修法一（`CMakeLists.txt:2623-2665`，`UNIX AND NOT APPLE`，只给共享目标
   `uvcpp`/`uvcpp_s`）：`target_link_options(… PRIVATE "LINKER:--exclude-libs,ALL")`。
   它只藏**来自静态归档**的符号，而这两个目标是
-  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2227-2227`）
+  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2287-2287`）
   **直接拿我们自己的目标文件**建的、不经归档 ⇒ 我们自己的 API 与 `uvcpp_c_*` 那套
   C ABI 照样导出。只给共享目标加是因为静态库没有导出表，藏了反而让 `uvcpp_a` 的消费者
   在最终链接时找不到本该由我们提供的符号；只给 ELF 加是因为 Apple 的 ld 没有这个选项
   （那边是 `-exported_symbols_list`），而发布腿里本来也没有 macOS。
 
   修法二：`uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经
-  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2892-2892`）**直接进最终链接、也不经归档** ⇒
+  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2954-2954`）**直接进最终链接、也不经归档** ⇒
   上面那条对它无效（实测加不加都是 43 个 `yyjson_*`）。那边改用
   `C_VISIBILITY_PRESET hidden` **加** `target_compile_definitions(uvcpp_yyjson PRIVATE
   yyjson_api=)`。**第二半是承重的**：上游 `yyjson.h` 给每个公开函数**显式**贴了
@@ -3371,16 +3394,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   记过是陷阱（它只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索路径）。
 
   修法照 `UVCPP_DB_SQLITE_FROM_SOURCE`（`CMakeLists.txt:189`）的命名与形状加一个
-  **默认 OFF** 的选项（`CMakeLists.txt:246-247`），把整段发现包进
-  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:427-427`）。注意是**连发现都不
+  **默认 OFF** 的选项（`CMakeLists.txt:256-257`），把整段发现包进
+  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:437-437`）。注意是**连发现都不
   调用**，不是"找到了也偏不用"：`find_path`/`find_library` 的结果会写进 cache，
   调用过一次，`UVCPP_BROTLI_INCLUDE_DIR` 之类就一直留在那棵树里，同一棵树翻开关时
   会把上一轮的答案漏过来。所以每个"找到系统那份"的判据都**显式**带上
-  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:438-438`、`CMakeLists.txt:442-442`、
-  `CMakeLists.txt:450-450`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
+  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:448-448`、`CMakeLists.txt:452-452`、
+  `CMakeLists.txt:460-460`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
   选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
-  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:528-528`），链接段
-  （`CMakeLists.txt:2745-2745`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:538-538`），链接段
+  （`CMakeLists.txt:2807-2807`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
   动，所以既有使用者的行为逐字节不变。
 
   判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON
@@ -3566,7 +3589,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1807`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1840`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是
