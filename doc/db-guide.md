@@ -61,16 +61,18 @@ cmake --build build-db -j
 | `UVCPP_ENABLE_DB_MYSQL` | `ON` | 编 MySQL 后端（要 `mysql.h` + libmysqlclient） |
 | `UVCPP_ENABLE_DB_PGSQL` | `ON` | 编 PostgreSQL 后端（要 `libpq-fe.h` + libpq） |
 | `UVCPP_ENABLE_DB_ODBC` | `ON` | 编 ODBC 后端（要 `sql.h` + 驱动管理器）。**连什么库不在这里定** —— 那是连接串里 `Driver=` 的事（见下面「ODBC：驱动管理器与**具体驱动**」） |
-| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG/ODBC 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节）。ODBC 那一份加载的是**驱动管理器**，具体驱动仍由它自己加载 |
+| `UVCPP_ENABLE_DB_MONGODB` | `ON` | 编 MongoDB 后端（要 `mongoc/mongoc.h` + `bson/bson.h`，只要头）。它**不是** `uvcpp_db_client` 的后端，是同一个模块里的另一个类，详见下面「MongoDB 是同一个模块里的**另一个类**」 |
+| `UVCPP_DB_RUNTIME_LOAD` | `OFF` | MySQL/PG/ODBC/MongoDB 的**客户端库**改成运行时加载（`dlopen`/`LoadLibrary`），只是**不在链接行上出现** —— 头还是要（见下面「运行时加载」一节）。ODBC 那一份加载的是**驱动管理器**，具体驱动仍由它自己加载 |
 
-四个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
-想明确裁掉哪一个才写 `=OFF`（那时连"找不到"的警告都不会有）。
+SQL 那四个子开关的语义是**"找得到就编、找不到就降级并出声"**，不是"我要不要用它"：
+想明确裁掉哪一个才写 `=OFF`（那时连"找不到"的警告都不会有）。MongoDB 那一个守同一条
+规矩，但它不属于 `uvcpp_db_client` 的后端清单。
 
 降级链是**两级**，两级都是 `message(WARNING)` + 普通变量 `set(... OFF)`：
 
 1. 某一个后端找不到 → 关掉**那一个**，其余照编；
-2. 四个都关掉了 → 关掉**整个模块** —— 那样的库能编出一个 `uvcpp_db_client`，
-   但它谁也打不开，属于"能配置、跑不起来"。
+2. 五个后端（SQL 四个 + MongoDB）都关掉了 → 关掉**整个模块** —— 那样的库能编出一个
+   `uvcpp_db_client`，但它谁也打不开，属于"能配置、跑不起来"。
 
 所以 `CMakeCache.txt` 里 `UVCPP_ENABLE_DB_MYSQL:BOOL=ON` **不代表**它编进去了
 —— 缓存不是判据。判据是配置期的这几行，CI 与用例都 grep 它们：
@@ -118,6 +120,19 @@ int main() {
 > 开了 `UVCPP_DB_RUNTIME_LOAD` 之后这两件事分了家：MySQL 打印在清单里，
 > 只代表**这个库带了这个后端**；客户端库在不在是**运行时**才知道的
 > （下一节）。要问"现在真能用吗"，看 `open()` 的返回码。
+
+### MongoDB 是同一个模块里的**另一个类**
+
+`UVCPP_ENABLE_DB_MONGODB`（默认 `ON`）编的是 `<db/uvcpp_mongo.h>` 里的
+`uvcpp_mongo_client`。它**不在 `uvcpp_db_client` 的后端清单里**：
+`uvcpp_db_drivers()` 不会打印 `mongodb`，SQL 那一套结果表、绑定、事务也与它无关 ——
+它的公开面是 JSON 进、JSON 出（`insert_one` / `find` / `update_one` / `delete_one` /
+`command` / `ping`，同步与异步各一份）。
+
+它守同一条"找不到头就只关掉自己并出声"的规矩，但客户端库**一律运行时加载**：
+链接行上没有 `libmongoc` / `libbson`，发布包里也没有它们。缺库时 `open()` 回
+`NO_DRIVER`，进程与别的后端一切照常。完整说明见
+[`mongodb-guide.md`](mongodb-guide.md)。
 
 ### 客户端库运行时加载：`UVCPP_DB_RUNTIME_LOAD`
 

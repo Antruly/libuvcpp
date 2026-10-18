@@ -202,6 +202,24 @@ option(UVCPP_ENABLE_DB_PGSQL  "Build the PostgreSQL backend of the db module (ne
 # 是另一件事，那件事由驱动管理器自己干，不归我们管。
 option(UVCPP_ENABLE_DB_ODBC
   "Build the ODBC backend of the db module (needs ODBC headers + a driver manager; the data source is chosen by the connection string)" ON)
+# MongoDB（`<db/uvcpp_mongo.h>`）—— **与上面四个后端不是同一种东西**：
+#
+#  * 它不在 `uvcpp_db_client` 的工厂里，是一个独立类（JSON 进、JSON 出）。
+#  * 客户端库 `libmongoc-1.0` / `libbson-1.0` **不随包分发**（发布包固定走
+#    `UVCPP_DB_RUNTIME_LOAD=ON`，只 `dlopen`/`LoadLibrary` 使用者自己装的那份）。
+#  * 头找不到时后端不编进来，但**公开类仍然存在**：`open()` 返回
+#    `uvcpp_db_status::NO_DRIVER`，`backend_available()` 是 `false`，进程与其它
+#    模块一切照常。这是这个后端存在的意义 —— "这台机器没用 MongoDB" 不该表现为
+#    链接错误或加载失败。
+#
+# 所以这个开关被降级（找不到头）时**不会**像另外四个那样把整个 db 模块拖下水；
+# 只有"四个 SQL 后端全关 & MongoDB 也没成"时，模块才整体关掉（见下面那条检查）。
+option(UVCPP_ENABLE_DB_MONGODB
+  "Build the MongoDB backend of the db module (needs mongoc.h + bson.h; the client library is loaded at run time and never bundled)" ON)
+# 可选：mongo-c-driver 的**公共头根**（例如 `/usr/include`，或者一份解包出来的
+# `/tmp/mongoc-root/usr/include`）。留空就按常规路径找。
+set(UVCPP_DB_MONGODB_INCLUDE_DIR "" CACHE PATH
+  "Root directory that contains libmongoc-1.0/ and libbson-1.0/ (optional)")
 # MySQL / PostgreSQL / ODBC 三个后端**不在链接行上出现**，改成运行时打开客户端库
 # （ODBC 那一份是**驱动管理器**，具体驱动由它自己加载）。
 #
@@ -1315,12 +1333,88 @@ if(UVCPP_ENABLE_DB)
     endif()
   endif()
 
-  # ---- 四个都关掉 ⇒ 整个模块关掉（见上面那段理由）----
+  if(UVCPP_ENABLE_DB_MONGODB)
+    # 头是编译期的东西，`UVCPP_DB_RUNTIME_LOAD=ON` 也省不掉（符号表要 `decltype`
+    # 真的函数签名）。两份头在两个不同的目录：
+    #   /usr/include/libmongoc-1.0/mongoc/mongoc.h
+    #   /usr/include/libbson-1.0/bson/bson.h
+    # `UVCPP_DB_MONGODB_INCLUDE_DIR` 指的是它们**共同的上一层**（/usr/include），
+    # 所以先按那个 HINTS 找，再按常见的发行版后缀找。
+    if(UVCPP_DB_MONGODB_INCLUDE_DIR)
+      # 使用者显式指了根目录 ⇒ 只用它。混进系统路径的话，"我指的是这份头"会
+      # 悄悄变成"系统那份也在候选里"，而两份版本不同时出错的是运行期。
+      find_path(UVCPP_DB_MONGOC_INCLUDE_DIR
+        NAMES mongoc/mongoc.h
+        HINTS "${UVCPP_DB_MONGODB_INCLUDE_DIR}"
+        PATH_SUFFIXES libmongoc-1.0 include/libmongoc-1.0
+        NO_DEFAULT_PATH)
+      find_path(UVCPP_DB_BSON_INCLUDE_DIR
+        NAMES bson/bson.h
+        HINTS "${UVCPP_DB_MONGODB_INCLUDE_DIR}"
+        PATH_SUFFIXES libbson-1.0 include/libbson-1.0
+        NO_DEFAULT_PATH)
+    else()
+      find_path(UVCPP_DB_MONGOC_INCLUDE_DIR
+        NAMES mongoc/mongoc.h
+        PATH_SUFFIXES libmongoc-1.0 include/libmongoc-1.0)
+      find_path(UVCPP_DB_BSON_INCLUDE_DIR
+        NAMES bson/bson.h
+        PATH_SUFFIXES libbson-1.0 include/libbson-1.0)
+    endif()
+    if(NOT UVCPP_DB_MONGOC_INCLUDE_DIR OR NOT UVCPP_DB_BSON_INCLUDE_DIR)
+      # 降级，但**不是**致命 —— 公开类会退化成桩（`open()` → `NO_DRIVER`）。
+      # 这一条必须显式说出来：使用者看到的"后端不在"要有原因，而不是等到
+      # 运行期才猜。
+      message(WARNING
+        "UVCPP_ENABLE_DB_MONGODB=ON 但找不到 mongoc/mongoc.h 或 bson/bson.h"
+        "（找到的是 mongoc=${UVCPP_DB_MONGOC_INCLUDE_DIR} bson=${UVCPP_DB_BSON_INCLUDE_DIR}）。"
+        "这个后端不编进来，`uvcpp_mongo_client::open()` 会返回 NO_DRIVER，"
+        "其余模块照常。装上 mongo-c-driver 的开发包（Debian/Ubuntu 上是 "
+        "libmongoc-dev，RHEL 系是 mongo-c-driver-devel，macOS 是 brew 的 "
+        "mongo-c-driver），或者用 -DUVCPP_DB_MONGODB_INCLUDE_DIR=… 指路。")
+      set(UVCPP_ENABLE_DB_MONGODB OFF)
+    else()
+      list(APPEND UVCPP_DB_INCLUDE_DIRS
+        "${UVCPP_DB_MONGOC_INCLUDE_DIR}" "${UVCPP_DB_BSON_INCLUDE_DIR}")
+      if(UVCPP_DB_RUNTIME_LOAD)
+        # 与 MySQL/PG/ODBC 同一条：链接行上不出现客户端库，符号由 dlsym 取。
+        message(STATUS
+          "db: MongoDB 后端开（运行时加载 libmongoc/libbson，不链；"
+          "头来自 ${UVCPP_DB_MONGOC_INCLUDE_DIR} 与 ${UVCPP_DB_BSON_INCLUDE_DIR}）")
+      else()
+        # 直接链接形态：两份库都要。少一份就不是"编得过但跑不起来"，
+        # 而是链接期的一条 undefined reference —— 在配置期把话说清楚更好。
+        find_library(UVCPP_DB_MONGOC_LIBRARY NAMES mongoc-1.0)
+        find_library(UVCPP_DB_BSON_LIBRARY NAMES bson-1.0)
+        if(UVCPP_DB_MONGOC_LIBRARY AND UVCPP_DB_BSON_LIBRARY)
+          list(APPEND UVCPP_DB_LINK_LIBS
+            "${UVCPP_DB_MONGOC_LIBRARY}" "${UVCPP_DB_BSON_LIBRARY}")
+          message(STATUS
+            "db: MongoDB 后端开（直接链接 ${UVCPP_DB_MONGOC_LIBRARY} + "
+            "${UVCPP_DB_BSON_LIBRARY}）")
+        else()
+          message(WARNING
+            "UVCPP_ENABLE_DB_MONGODB=ON 找到了头，但找不到 libmongoc-1.0 / "
+            "libbson-1.0 的**开发符号链接**（mongoc=${UVCPP_DB_MONGOC_LIBRARY} "
+            "bson=${UVCPP_DB_BSON_LIBRARY}）。这个后端不编进来，其余模块照常。"
+            "装上 -dev/-devel 包，或者用 -DUVCPP_DB_RUNTIME_LOAD=ON 只要头。")
+          set(UVCPP_ENABLE_DB_MONGODB OFF)
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # ---- 四个 SQL 后端都关掉、MongoDB 也没成 ⇒ 整个模块关掉 ----
+  #
+  # MongoDB 计数进来是因为 `uvcpp_mongo_client` 也住在 `#if UVCPP_DB_ENABLE` 里：
+  # 只剩它一个能用时把模块关掉，等于把唯一可用的后端也裁掉。
   if(NOT UVCPP_ENABLE_DB_SQLITE AND NOT UVCPP_ENABLE_DB_MYSQL AND
-     NOT UVCPP_ENABLE_DB_PGSQL AND NOT UVCPP_ENABLE_DB_ODBC)
+     NOT UVCPP_ENABLE_DB_PGSQL AND NOT UVCPP_ENABLE_DB_ODBC AND
+     NOT UVCPP_ENABLE_DB_MONGODB)
     message(WARNING
-      "UVCPP_ENABLE_DB=ON 但 SQLite / MySQL / PostgreSQL / ODBC 四个后端一个都没"
-      "成 —— 这样的库会编出一个谁也打不开的 uvcpp_db_client。已强制关闭 db 模块。")
+      "UVCPP_ENABLE_DB=ON 但 SQLite / MySQL / PostgreSQL / ODBC / MongoDB 五个"
+      "后端一个都没成 —— 这样的库会编出一个谁也打不开的 uvcpp_db_client。"
+      "已强制关闭 db 模块。")
     set(UVCPP_ENABLE_DB OFF)
   endif()
 endif()
@@ -1991,11 +2085,11 @@ else()
   add_compile_definitions(UVCPP_DB_ENABLE=0)
   message(STATUS "Database module disabled (UVCPP_DB_ENABLE=0)")
 endif()
-# 四个后端宏**不受主开关守卫**：主开关关掉时它们照样按"这个后端编不编"取 0。
+# 五个后端宏（SQL 四个 + MongoDB）**不受主开关守卫**：主开关关掉时它们照样按"这个后端编不编"取 0。
 # 写成 `if(UVCPP_ENABLE_DB) ... else 三个都 0` 的话，`uvcpp_db_factory.cpp` 里
 # 那句 `#if UVCPP_DB_SQLITE_ENABLE` 在模块关掉时是**未定义标识符**（求值为 0，
 # 结果碰巧一样）—— 碰巧一样的东西不该靠碰巧。
-foreach(_uvcpp_db_backend SQLITE MYSQL PGSQL ODBC)
+foreach(_uvcpp_db_backend SQLITE MYSQL PGSQL ODBC MONGODB)
   if(UVCPP_ENABLE_DB_${_uvcpp_db_backend})
     add_compile_definitions(UVCPP_DB_${_uvcpp_db_backend}_ENABLE=1)
   else()
@@ -2475,6 +2569,7 @@ _uvcpp_literal01(UVCPP_DB_SQLITE_ENABLE UVCPP_ENABLE_DB_SQLITE)
 _uvcpp_literal01(UVCPP_DB_MYSQL_ENABLE  UVCPP_ENABLE_DB_MYSQL)
 _uvcpp_literal01(UVCPP_DB_PGSQL_ENABLE  UVCPP_ENABLE_DB_PGSQL)
 _uvcpp_literal01(UVCPP_DB_ODBC_ENABLE   UVCPP_ENABLE_DB_ODBC)
+_uvcpp_literal01(UVCPP_DB_MONGODB_ENABLE UVCPP_ENABLE_DB_MONGODB)
 # 名字两边**一样**，这是这份文件里唯一的一处（别的都是 `UVCPP_ENABLE_X` 对
 # `UVCPP_X_ENABLE`）。理由：它不属于那两个族里的任何一个 —— 既不是"开关某个
 # 模块"（`UVCPP_ENABLE_*`），也不只是"这份依赖怎么来"（`*_FROM_SOURCE`，那两个
@@ -2554,6 +2649,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_DB_MYSQL_ENABLE=${UVCPP_DB_MYSQL_ENABLE}
       UVCPP_DB_PGSQL_ENABLE=${UVCPP_DB_PGSQL_ENABLE}
       UVCPP_DB_ODBC_ENABLE=${UVCPP_DB_ODBC_ENABLE}
+      UVCPP_DB_MONGODB_ENABLE=${UVCPP_DB_MONGODB_ENABLE}
       UVCPP_DB_RUNTIME_LOAD=${UVCPP_DB_RUNTIME_LOAD}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
@@ -3293,10 +3389,12 @@ endif()
 # 它一旦装出去，"驱动接口可以随便改"这句话就不成立了。三个后端的 .cpp 与
 # `uvcpp_db_factory.cpp` 都带它，所以它必须留在源树里。
 #
-# 另外四份也是私有的（`UVCPP_DB_RUNTIME_LOAD` 那套）：
-#   * `uvcpp_db_mysql_api.h` / `uvcpp_db_pgsql_api.h` / `uvcpp_db_odbc_api.h`
+# 另外五份也是私有的（`UVCPP_DB_RUNTIME_LOAD` 那套）：
+#   * `uvcpp_db_mysql_api.h` / `uvcpp_db_pgsql_api.h` / `uvcpp_db_odbc_api.h` /
+#     `uvcpp_db_mongodb_api.h`
 #     —— 函数指针表，就是后端的内部 ABI；它们还各自
-#     `#include <mysql/mysql.h>` / `<libpq-fe.h>` / `<sql.h>`，
+#     `#include <mysql/mysql.h>` / `<libpq-fe.h>` / `<sql.h>` /
+#     `<mongoc/mongoc.h>` + `<bson/bson.h>`，
 #     而**公开面一个客户端库的类型都不出现**（`uvcpp_db_client.h` 只带自己的
 #     头），装出去等于让使用者以为那份客户端头也是我们的依赖。
 #   * `uvcpp_db_runtime_load.h` —— `dlopen`/`dlsym` 的两个原语，纯内部。
@@ -3309,6 +3407,7 @@ list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_driver\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_mysql_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_pgsql_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_odbc_api\\.h$")
+list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_mongodb_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_runtime_load\\.h$")
 if(DB_HEADER_FILES AND UVCPP_ENABLE_DB)
   install(FILES ${DB_HEADER_FILES} DESTINATION include/db)

@@ -138,7 +138,7 @@
 #  define UVCPP_DB_ENABLE @UVCPP_DB_ENABLE@
 #endif
 
-/* 三个后端宏：模块关掉时它们是 0（不是"未定义"）。写成"未定义"的话
+/* 后端宏：模块关掉时它们是 0（不是"未定义"）。写成"未定义"的话
    `#if UVCPP_DB_SQLITE_ENABLE` 求值也是 0，结果碰巧一样 —— 而碰巧一样的东西
    在 `-Wundef` 下会变成一条警告，且它自己说不清"这个后端是关着还是模块没编"。 */
 #if defined(UVCPP_DB_SQLITE_ENABLE) && (UVCPP_DB_SQLITE_ENABLE != @UVCPP_DB_SQLITE_ENABLE@)
@@ -172,6 +172,17 @@
 #endif
 #ifndef UVCPP_DB_ODBC_ENABLE
 #  define UVCPP_DB_ODBC_ENABLE @UVCPP_DB_ODBC_ENABLE@
+#endif
+
+/* MongoDB 后端。它与上面几个的**失败方式**不同：客户端库本仓不随包分发，
+   所以"这份构建有没有编 MongoDB"（编译期，看 mongoc.h 在不在）与"这台机器
+   装没装 libmongoc/libbson"（运行期，第一次 open() 才知道）是两件事。前者看
+   这个宏，后者看 open() 的返回值（两种都是 NO_DRIVER，last_error() 分开说）。 */
+#if defined(UVCPP_DB_MONGODB_ENABLE) && (UVCPP_DB_MONGODB_ENABLE != @UVCPP_DB_MONGODB_ENABLE@)
+#  error "UVCPP_DB_MONGODB_ENABLE=@UVCPP_DB_MONGODB_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_DB_MONGODB_ENABLE
+#  define UVCPP_DB_MONGODB_ENABLE @UVCPP_DB_MONGODB_ENABLE@
 #endif
 
 /* MySQL / PostgreSQL 两个后端的符号是**链接进来的**还是**运行时取**的。

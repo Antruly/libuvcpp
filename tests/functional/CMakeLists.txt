@@ -144,7 +144,17 @@ if(NOT UVCPP_ENABLE_DB_PGSQL)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_pgsql[^/]*\.cpp$")
 endif()
 if(NOT UVCPP_ENABLE_DB_ODBC)
-  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_odbc[^/]*\.cpp$")
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_odbc[^/]*\\.cpp$")
+endif()
+# MongoDB 是**两条**用例、两种摘法：
+#
+#   * `db_mongodb_func.cpp` 要一个真的 mongod，后端没编进来时它一次都跑不了
+#     ⇒ 摘掉（"没编进来"该表现为用例不存在，不是失败）。
+#   * `db_mongodb_nodrv_func.cpp` **必须留下**：它验的正是"后端/客户端库不在时
+#     调用方看到什么"，桩构建里同样有意义（那时它断言的是
+#     `backend_available()==false` + `NO_DRIVER`）。
+if(NOT UVCPP_ENABLE_DB_MONGODB)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_mongodb_func\\.cpp$")
 endif()
 
 # Redis 用例同理：`UVCPP_ENABLE_REDIS=0` 时公开头整段落在 `#if` 外面，不摘
@@ -274,7 +284,7 @@ endif()
 # 不是跳过 —— 服务容器都起了还跳过，说明配置写错了，必须红。（这一条对 ODBC 同样
 # 成立：哪天有哪一格真起了个数据源，就该把那格的 `UVCPP_DB_TEST_REQUIRE=1` 也配上。）
 foreach(_db_remote test_db_mysql_func test_db_pgsql_func
-        test_db_pgsql_async_func test_db_odbc_func)
+        test_db_pgsql_async_func test_db_odbc_func test_db_mongodb_func)
   if(TARGET ${_db_remote})
     set_tests_properties(${_db_remote} PROPERTIES SKIP_RETURN_CODE 3)
   endif()
@@ -320,4 +330,23 @@ if(TARGET test_db_odbc_nodrv_func)
   endif()
   set_tests_properties(test_db_odbc_nodrv_func PROPERTIES
     ENVIRONMENT "UVCPP_DB_ODBC_LIBRARY=${_uvcpp_odbc_nodrv_path}")
+endif()
+
+# `test_db_mongodb_nodrv_func` 同一条形状：两个客户端库变量各指一个不存在的
+# 路径。与 ODBC 那条一样是**独立目标**（加载走 magic static，进程内第一次
+# 接触之后环境变量就不再生效），也一样**不设** `SKIP_RETURN_CODE`。
+#
+# 桩构建（没有 mongoc.h）里这两个变量根本不会被读 —— 用例自己知道
+# `backend_available()==false`，于是断言的是另一句话。所以这一段对两种构建
+# 都成立，不需要按 `UVCPP_ENABLE_DB_MONGODB` 分支。
+if(TARGET test_db_mongodb_nodrv_func)
+  if(WIN32)
+    set(_uvcpp_mongoc_nodrv_path "Z:/nonexistent/mongoc-1.0.dll")
+    set(_uvcpp_bson_nodrv_path "Z:/nonexistent/bson-1.0.dll")
+  else()
+    set(_uvcpp_mongoc_nodrv_path "/nonexistent/libmongoc-1.0.so.0")
+    set(_uvcpp_bson_nodrv_path "/nonexistent/libbson-1.0.so.0")
+  endif()
+  set_tests_properties(test_db_mongodb_nodrv_func PROPERTIES
+    ENVIRONMENT "UVCPP_DB_MONGOC_LIBRARY=${_uvcpp_mongoc_nodrv_path};UVCPP_DB_BSON_LIBRARY=${_uvcpp_bson_nodrv_path}")
 endif()

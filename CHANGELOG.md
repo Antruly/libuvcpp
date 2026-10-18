@@ -307,7 +307,7 @@
   `doc/quic-guide.md` §8 的措辞是"契约改了"，不是"缺口补了"（`1.4.1`）
 - **那一对私有头。** `uvcpp_quic_session.h` 里是 `ngtcp2_conn*`、`SSL*` 与
   `ngtcp2_path_storage`，字段布局跟着 ngtcp2 的版本走 —— 它是第二个私有头，与
-  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3230-3230`）、打包也排除
+  `uvcpp_quic_ngtcp2.h` 并列。两个都不安装（`CMakeLists.txt:3326-3326`）、打包也排除
   （`tests/tools/package_release.py` 的 `PRIVATE_HEADERS`）；量过：
   `cmake --install build-quic --prefix /tmp/inst` 落进 `include/quic/` 的正好是那
   四个公开头（`1.4.1`）
@@ -685,7 +685,7 @@
   `std::string` / `uint32_t` / `const char*`，**不认识连接、不认识响应**，所以
   `UVCPP_BUILD_WEB=OFF` 时照编照装。`uvcpp_grpc_server.{h,cpp}` 把上面那半接到
   `uvcpp_http_server` 上，它的每一个参数都是 web 层的类型，web 关掉时**从构建与安装
-  两处都摘掉**（`CMakeLists.txt:2072-2074`、`CMakeLists.txt:3122-3127`）——
+  两处都摘掉**（`CMakeLists.txt:2166-2168`、`CMakeLists.txt:3218-3223`）——
   实测：`-DUVCPP_BUILD_WEB=OFF` 的树上 `src/grpc/uvcpp_grpc.cpp` 照编、装到前缀里的
   只有 `include/grpc/uvcpp_grpc.h`；`build-capi-all` 上前缀里两个头都在。
   **不加 `UVCPP_ENABLE_GRPC`**：两半的依赖是死的，多一个旋钮只会多一个能与
@@ -802,6 +802,20 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   编进库但不链、不带它们的客户端库；MongoDB、SQL Server、Oracle、达梦等只走运行时
   接入，缺库时 `open()` 返回 `NO_DRIVER`，进程照常。同时修正了 `RELEASE.md` 里
   「ODBC 没有运行时加载那条路」与 `doc/ci-guide.md` 里「包里只有 SQLite」两处旧结论。
+
+- **MongoDB 后端：只要头、运行时加载 `libmongoc` / `libbson`，产物里没有它们**
+  （`1.7.5-dev`）。新增 `<db/uvcpp_mongo.h>` 的 `uvcpp_mongo_client`：JSON 进、JSON 出，
+  `insert_one` / `find` / `update_one`（含 upsert）/ `delete_one` / `command` /
+  `ping` 同步与异步各一份（异步走 `uv_queue_work`，回调在调用方循环上），
+  公开面里一个 BSON 类型都不出现。编译期只要 `mongoc/mongoc.h` 与 `bson/bson.h`
+  （`-DUVCPP_ENABLE_DB_MONGODB`，默认 `ON`）；`UVCPP_DB_RUNTIME_LOAD=ON` 时链接行上
+  一个 mongoc 符号都没有，`UVCPP_DB_MONGOC_LIBRARY` / `UVCPP_DB_BSON_LIBRARY` 可指定
+  路径。**缺库不是错误**：`open()` 回 `NO_DRIVER`（错误串列出试过哪些名字），进程、
+  HTTP 服务和别的后端一切照常；配置期找不到头时公开类仍在，同样回 `NO_DRIVER` 并说明
+  "这份构建没编后端"。它**不在** `uvcpp_db_drivers()` 的清单里 —— 它不是
+  `uvcpp_db_client` 的后端。用例 `db_mongodb_nodrv_func`（两种构建都跑）与
+  `db_mongodb_func`（要真 mongod，没有就退 3）。见
+  [`doc/mongodb-guide.md`](doc/mongodb-guide.md)。
 
 - **PostgreSQL 的异步查询走真异步：查询挂在调用方自己的循环上，不占线程**
   （`1.7.2-dev`）。`uvcpp_db_pool` 的异步接口（`query(loop, …)` / `execute(loop, …)`）
@@ -3340,17 +3354,17 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   dlopen 只是把这条路变成**每个装了 libpq 的人**的默认路径。）把我们的嵌入依赖藏起来，
   libpq 就会解析到**系统**那份、与它自己的 libcrypto 自洽。
 
-  修法一（`CMakeLists.txt:2623-2665`，`UNIX AND NOT APPLE`，只给共享目标
+  修法一（`CMakeLists.txt:2719-2761`，`UNIX AND NOT APPLE`，只给共享目标
   `uvcpp`/`uvcpp_s`）：`target_link_options(… PRIVATE "LINKER:--exclude-libs,ALL")`。
   它只藏**来自静态归档**的符号，而这两个目标是
-  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2287-2287`）
+  `add_library(uvcpp SHARED ${UVCPP_SOURCES} …)`（`CMakeLists.txt:2381-2381`）
   **直接拿我们自己的目标文件**建的、不经归档 ⇒ 我们自己的 API 与 `uvcpp_c_*` 那套
   C ABI 照样导出。只给共享目标加是因为静态库没有导出表，藏了反而让 `uvcpp_a` 的消费者
   在最终链接时找不到本该由我们提供的符号；只给 ELF 加是因为 Apple 的 ld 没有这个选项
   （那边是 `-exported_symbols_list`），而发布腿里本来也没有 macOS。
 
   修法二：`uvcpp_yyjson` 是 **OBJECT** 库，它的目标文件经
-  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:2954-2954`）**直接进最终链接、也不经归档** ⇒
+  `$<TARGET_OBJECTS:>`（`CMakeLists.txt:3050-3050`）**直接进最终链接、也不经归档** ⇒
   上面那条对它无效（实测加不加都是 43 个 `yyjson_*`）。那边改用
   `C_VISIBILITY_PRESET hidden` **加** `target_compile_definitions(uvcpp_yyjson PRIVATE
   yyjson_api=)`。**第二半是承重的**：上游 `yyjson.h` 给每个公开函数**显式**贴了
@@ -3394,16 +3408,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   记过是陷阱（它只骗得过 CMake 的 `find_*`，骗不过编译器自己的默认搜索路径）。
 
   修法照 `UVCPP_DB_SQLITE_FROM_SOURCE`（`CMakeLists.txt:189`）的命名与形状加一个
-  **默认 OFF** 的选项（`CMakeLists.txt:256-257`），把整段发现包进
-  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:437-437`）。注意是**连发现都不
+  **默认 OFF** 的选项（`CMakeLists.txt:274-275`），把整段发现包进
+  `if(NOT UVCPP_BROTLI_FROM_SOURCE)`（`CMakeLists.txt:455-455`）。注意是**连发现都不
   调用**，不是"找到了也偏不用"：`find_path`/`find_library` 的结果会写进 cache，
   调用过一次，`UVCPP_BROTLI_INCLUDE_DIR` 之类就一直留在那棵树里，同一棵树翻开关时
   会把上一轮的答案漏过来。所以每个"找到系统那份"的判据都**显式**带上
-  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:448-448`、`CMakeLists.txt:452-452`、
-  `CMakeLists.txt:460-460`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
+  `NOT UVCPP_BROTLI_FROM_SOURCE`（`CMakeLists.txt:466-466`、`CMakeLists.txt:470-470`、
+  `CMakeLists.txt:478-478`），而不是指望"没调用 = 没找到"。取源码那条支路一个字没改：
   选项开着 ⇒ 跳过发现 ⇒ `BROTLIENC_LIB` 仍是 `NOTFOUND` ⇒ 自然落进那一支 ⇒
-  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:538-538`），链接段
-  （`CMakeLists.txt:2807-2807`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
+  那里照旧 `set(UVCPP_BROTLI_FROM_SOURCE TRUE)`（`CMakeLists.txt:556-556`），链接段
+  （`CMakeLists.txt:2903-2903`）也就照旧按 `$<TARGET_FILE:...>` 取静态库。默认值一个都没
   动，所以既有使用者的行为逐字节不变。
 
   判据（本机，`build-brotli2`：`-DUVCPP_ENABLE_BROTLI=ON
@@ -3589,7 +3603,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `flags` = `web` 加一个 `-DUVCPP_ENABLE_YYJSON=ON`，四道门禁串
   `UVCPP_ENABLE_YYJSON:BOOL=ON` / `yyjson integrated` / `Including yyjson module in
   build` / `test_yyjson_doc_func`；装包表与 `web` **逐字相同**（yyjson 走 FetchContent
-  —— `CMakeLists.txt:1840`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
+  —— `CMakeLists.txt:1934`，`GIT_TAG` 钉在 `YYJSON_VERSION` —— **不发包管理器**），
   这样两边红绿不同只可能归因到那个开关。
 
   **为什么 macOS 有一格、而 `wsdl` 没有**：`ci-guide.md` §1 给缺 macOS `wsdl` 的理由是
