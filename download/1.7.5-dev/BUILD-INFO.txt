@@ -1,0 +1,54 @@
+libuvcpp 1.7.5-dev — Linux x64 预编译包
+==================================================
+
+源码
+  commit      3ae4dffe89cbff44d062edccd422855cdfb1f2cc
+  分支        release/1.6.1
+  版本串      1.7.5-dev（UVCPP_VERSION_STRING）
+  说明        这是开发快照，不是正式发布。正式版本见 GitHub Releases
+              以及 apt / dnf 渠道。
+
+归档
+  libuvcpp-1.7.5-linux-x64.zip
+              file name 由 tests/tools/package_release.py 按“基础版本号”
+              生成（1.7.5），版本串本身带 -dev；内容与下面的构建清单一致。
+  解压后是一棵可用的安装树：
+              include/  lib/  bindings/  README.md  CHANGELOG.md
+              RELEASE.md  LICENSE
+  使用：      unzip libuvcpp-1.7.5-linux-x64.zip
+              g++ app.cpp -Ilibuvcpp-1.7.5-linux-x64/include \
+                  -Llibuvcpp-1.7.5-linux-x64/lib -luvcpp
+              或者用 lib/pkgconfig/uvcpp.pc（pkg-config --cflags --libs uvcpp）。
+
+构建
+  时间        2026-10-18T19:25:01Z
+  平台        Linux x86_64（Ubuntu 24.04 / Mint 22.3，GCC 13.3.0）
+  CMake       Release，-DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+  静态编入    libuv / zlib / OpenSSL 3.5.3（带 QUIC API）/ brotli / llhttp /
+              nghttp2 1.70.0 / ngtcp2 1.25.0 / nghttp3 1.18.0 / pugixml /
+              nlohmann-json / yyjson 0.13.0 / SQLite amalgamation
+
+模块（生成的 uvcpp_config.h）
+  NET WEB WEBAPP WSDL ZLIB BROTLI OPENSSL NGHTTP2 QUIC HTTP3 CAPI REDIS
+  DB + DB_SQLITE DB_MYSQL DB_PGSQL DB_ODBC DB_MONGODB YYJSON EXPAND
+  （HTTP/1.1、HTTP/2、HTTP/3/QUIC、WebSocket、WSDL/SOAP、C ABI、Redis、
+   SOCKS5 客户端与服务端，以及数据库层）
+
+动态依赖
+  libstdc++.so.6 / libgcc_s.so.1 / libm.so.6 / libc.so.6 —— 除此之外没有
+  第三方动态库（libssl、libuv、libz、libnghttp2 … 全部静态编入）。
+  因此本包要求 glibc >= 2.38、libstdc++ 的 GLIBCXX_3.4.32（GCC 13 运行时）：
+  Ubuntu 22.04（glibc 2.35）不能直接用。正式发布包由 CI 在 22.04 上编，
+  下限更低。
+
+数据库客户端库
+  按仓库的驱动策略，MySQL / PostgreSQL / ODBC / MongoDB 四家**不随包分发**
+  客户端库；运行时用 dlopen 打开使用者自己装的那一份。
+  缺库时 open() 返回 NO_DRIVER，进程与 HTTP 服务照常运行。
+  MongoDB 的搜索名：libmongoc-1.0.so.0 / libbson-1.0.so.0（1.x），
+  libmongoc2.so.2（2.x）；可用 UVCPP_DB_MONGOC_LIBRARY /
+  UVCPP_DB_BSON_LIBRARY 指定绝对路径。
+  Redis 内置 RESP2/RESP3 客户端，不需要任何外部库。
+
+校验
+  sha256sum -c SHA256SUMS
