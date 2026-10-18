@@ -78,8 +78,10 @@ libuv"的机器，装完可以 `find_package(uvcpp CONFIG)` 或 `pkg-config uvcp
 
 **ODBC** 对着的是接口而不是某一种库：连什么、哪种方言，全由连接串里的 `Driver=` /
 `DSN=` 决定。进它的直接原因是 SQL Server —— 微软没给可链接的 C 客户端库，官方
-`msodbcsql18` 本身就是 ODBC 驱动。它没有 `UVCPP_DB_RUNTIME_LOAD` 那条路：驱动管理器
-本来就该在，按需加载下面的具体驱动是管理器自己的事。
+`msodbcsql18` 本身就是 ODBC 驱动。它与 MySQL / PG 走同一条 `UVCPP_DB_RUNTIME_LOAD`
+（1.7.2 起）：链上的是**驱动管理器**，具体驱动仍由管理器按需加载，所以没装驱动管理器的
+机器照样能加载这个库，只是真去连时拿到 `NO_DRIVER`。各家驱动**随不随包**的完整口径见
+[`doc/db-driver-policy.md`](https://github.com/Antruly/libuvcpp/blob/master/doc/db-driver-policy.md)。
 
 **PostgreSQL 的异步查询**不再把阻塞查询丢进 libuv 线程池，改走驱动自带的非阻塞协议
 （`PQsendQueryParams` + `PQflush`，`uv_poll` 盯 `PQsocket()`）。回调的形状、线程、

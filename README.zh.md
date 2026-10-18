@@ -285,7 +285,7 @@ int main() {
 | expand | [doc/expand-guide.md](doc/expand-guide.md) | 内存池、页堆、span，以及它们默认关着的理由 |
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
-| db（SQLite / MySQL / PostgreSQL） | [doc/db-guide.md](doc/db-guide.md) | 一个连接一个 `uvcpp_db_client`、三个后端、连接串的语法、返回码表、共用套件钉住的那一条跨后端契约（以及三家**真不一样**的三处）、参数绑定、事务与「事务里不重试」的规矩、`DECIMAL` 要付的代价、建在同一条连接上的异步门面（`uvcpp_db_async`，回调 + future）与可选的连接池，以及怎么对着真服务端跑测试 |
+| db（SQLite / MySQL / PostgreSQL） | [doc/db-guide.md](doc/db-guide.md) | 一个连接一个 `uvcpp_db_client`、三个后端、连接串的语法、返回码表、共用套件钉住的那一条跨后端契约（以及三家**真不一样**的三处）、参数绑定、事务与「事务里不重试」的规矩、`DECIMAL` 要付的代价、建在同一条连接上的异步门面（`uvcpp_db_async`，回调 + future）与可选的连接池，以及怎么对着真服务端跑测试。各家驱动**随不随包**的规矩 —— 哪些后端在仓里、哪些客户端库**不在**包里、缺库时是什么现象 —— 见 [`doc/db-driver-policy.md`](doc/db-driver-policy.md) |
 | C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.5.3 起八片全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db，共 402 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`（db 那一片还要它自己的 `-DUVCPP_ENABLE_DB=ON` 加一个后端）。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份 C# 绑定（覆盖前七片那 321 个，db 那 81 个是如实列出的缺口） |
 | 构建与打包 | [doc/build-guide.md](doc/build-guide.md) | 每个开关是什么意思、开关之间怎么组合、构建树、平台依赖、仓库结构，以及值得认识的失败 |
 | 性能实测 | [doc/benchmark.md](doc/benchmark.md) | 每连接内存、吞吐与稳定性的实测读数 |

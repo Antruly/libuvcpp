@@ -745,13 +745,16 @@ above). Two things follow that are easy to get backwards:
   backend**, and the three `capi` entries are the only place the symbol lock judges the db
   slice. Neither leg can be dropped without silently losing one of those.
 
-**Release configurations** pass `-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON` with
-`-DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF` on all ten configure points. The two
-explicit `OFF`s are load-bearing rather than tidiness: those legs run on runners that have
-`libpq-dev` installed, `find_package(PostgreSQL QUIET)` would succeed silently, and the shipped
-`libuvcpp.so` would grow a `libpq.so.5` `DT_NEEDED` that the release `ldd` assertion exists to
-ban. Packages therefore carry **SQLite only** — the other two backends need a client library the
-user installs anyway, and a source build gets all three by default.
+**Release configurations** pass `-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON`
+together with `-DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON
+-DUVCPP_ENABLE_DB_ODBC=ON -DUVCPP_DB_RUNTIME_LOAD=ON` on all ten configure points.
+The `RUNTIME_LOAD` is load-bearing rather than tidiness: those legs run on runners that
+have `libpq-dev` installed, `find_package(PostgreSQL QUIET)` would succeed silently, and
+the shipped `libuvcpp.so` would grow a `libpq.so.5` `DT_NEEDED` that the release `ldd`
+assertion exists to ban. Packages therefore carry **all four backends' code**, but **no
+database client library**: MySQL / PostgreSQL / ODBC symbols are taken from libraries
+loaded at run time. That is also why 1.6.x's "SQLite only" shape is gone — see
+[`db-driver-policy.md`](db-driver-policy.md) for the full policy.
 
 ### The macro contract: `config-contract` (and the `mingw64` tail)
 

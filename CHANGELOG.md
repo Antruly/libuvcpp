@@ -794,6 +794,14 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 管理器 + 具体 ODBC 驱动）—— 四个后端一个都没找到时整个模块被强制关掉并打一条说明
 怎么修的 warning，而不是留一个"能配置、链不上"的组合（`1.5.3`）
 
+- **驱动随包策略单独成文**（`1.7.5-dev`）：新增
+  [`doc/db-driver-policy.md`](doc/db-driver-policy.md)，把「仓里有没有后端代码」、
+  「产物里带不带客户端库」、「缺库时是什么现象」三件事分开写。口径是：**「支持直接
+  项目集成」说的是仓里有后端代码，不是随包分发 `.so` / `.dll`** —— MySQL / PostgreSQL
+  编进库但不链、不带它们的客户端库；MongoDB、SQL Server、Oracle、达梦等只走运行时
+  接入，缺库时 `open()` 返回 `NO_DRIVER`，进程照常。同时修正了 `RELEASE.md` 里
+  「ODBC 没有运行时加载那条路」与 `doc/ci-guide.md` 里「包里只有 SQLite」两处旧结论。
+
 - **PostgreSQL 的异步查询走真异步：查询挂在调用方自己的循环上，不占线程**
   （`1.7.2-dev`）。`uvcpp_db_pool` 的异步接口（`query(loop, …)` / `execute(loop, …)`）
   此前只有一种实现：`uv_queue_work` 把一次阻塞查询丢进 libuv 线程池，**每请求两次
