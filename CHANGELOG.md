@@ -11,10 +11,10 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
-`v1.7.4`。想按时间线读，翻到最后的「逐个版本」。
+`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.7.6-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`。
+当前源码树是 **1.8.0**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -3816,6 +3816,49 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.8.0 (2026-10-19)
+
+`v1.7.4` 之后的功能版 —— 开发档 `1.7.5`–`1.7.6` 折进来。三条新主线都是**零外部
+依赖**（或者可以完全缺席）的：内置 RESP2/RESP3 的 Redis 客户端、运行时加载
+`libmongoc` / `libbson` 的 MongoDB 后端、做全了 CONNECT / BIND / UDP ASSOCIATE 的
+SOCKS5 客户端与服务端；同时把「第三方数据库驱动随不随包走」写成一条明确的政策。
+
+**新增**：
+
+- **Redis（`src/redis/`）**：`uvcpp_redis_client` + `uvcpp_redis_value`，仓里自己实现
+  RESP2/RESP3 的编码与增量解析，传输建在 `uvcpp_tcp_client` 上。不用 hiredis，
+  `UVCPP_ENABLE_REDIS` 默认 ON。AUTH / SELECT / `HELLO 3` / pipeline / pub-sub /
+  `rediss://` 都在；解析器 `uvcpp_redis_resp.h` 是私有头。Cluster / Sentinel /
+  连接池不做。
+- **MongoDB（`src/db/uvcpp_mongo.h`）**：JSON 进、JSON 出，同步与异步各一套；
+  编译只要 `mongoc.h` / `bson.h`，**产物里不带** libmongoc / libbson ——
+  `UVCPP_DB_RUNTIME_LOAD=ON` 下运行时 `dlopen`，缺库时 `open()` 回 `NO_DRIVER`，
+  进程与 HTTP 服务照常。`UVCPP_DB_MONGOC_LIBRARY` / `UVCPP_DB_BSON_LIBRARY`
+  可指定路径。它不在 `uvcpp_db_drivers()` 的清单里（不是 `uvcpp_db_client` 的后端）。
+- **SOCKS5（`src/net/`）**：RFC 1928 / RFC 1929，客户端与服务端、三种命令全做，
+  no-auth 与用户名密码、IPv4 / IPv6 / 域名都认。`uvcpp_tcp_client` /
+  `uvcpp_http_client` / `uvcpp_ws_client` / `uvcpp_web_ws_client` 各有一组透明
+  CONNECT 代理接口，目标域名交给代理解析，TLS 固定为「先协商、后握手」；
+  h3 与代理互斥，返回 `UV_ENOTSUP` 而**不静默直连**。UDP 分片不重组（`FRAG ≠ 0`
+  丢弃），GSSAPI 与 SOCKS4/SOCKS4a 不做。
+- **驱动随包政策**：新增 [`doc/db-driver-policy.md`](doc/db-driver-policy.md)，
+  把「仓里有后端代码」「产物带不带客户端库」「缺库时什么现象」分开写清。
+  MySQL / PostgreSQL 编进库但运行时加载；MSSQL / Oracle / 达梦等只走 ODBC。
+- **发布与 CI**：发布腿带上 MongoDB 头并断言 `ldd` / `nm` 里没有 mongoc / bson
+  符号，CI 起 mongod 与 redis-server 跑真实用例；Windows 安装程序换项目 logo。
+
+**修复**：`uvcpp_web_app` 在多 app 各设不同日志等级时不再静默覆盖（打 WARN 说明
+谁赢）；上传临时名不再经过进程级锁；接口地址表只建一次；空路由模式告警自带定位；
+ISCC 的 `/S` 值改走 `.cmd` 包装器（内联命令串会被拆段）；自签名安装包只告警，
+签名链路可以先跑通。
+
+**兼容性**：公开 API 只增不改。`UVCPP_ENABLE_REDIS` 默认 ON 是新增模块；现有构建
+若显式关掉 `UVCPP_BUILD_NET`，Redis 会跟着关掉并打 warning。
+
+**发布态**：版本头 MINOR 7 → 8、PATCH 6 → 0、`UVCPP_VERSION_IS_RELEASE` 0 → 1。
+两版 README 的徽章与版本行、CHANGELOG 的折叠表/标签清单、RELEASE.md 新增
+「v1.8.0 重点」小节同步更新。
 
 ### v1.7.4 (2026-10-18)
 

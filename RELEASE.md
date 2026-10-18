@@ -19,6 +19,63 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.0 重点 (Highlights)
+
+`v1.7.4` 之后的功能版。三个新模块都遵守同一条边界：**要么零外部依赖，要么可以完全
+缺席** —— 内置 Redis 不借 hiredis，MongoDB 只 `dlopen` 使用者自己装的那份客户端库，
+SOCKS5 只用 libuv。开发档 `1.7.5`–`1.7.6` 折进这一版。
+
+### 三个新模块
+
+| 模块 | 公开头 | 依赖形态 |
+|---|---|---|
+| Redis（RESP2/RESP3） | `<redis/uvcpp_redis.h>` | 无第三方库，默认编进库 |
+| MongoDB | `<db/uvcpp_mongo.h>` | 只要头；运行时加载 `libmongoc` / `libbson` |
+| SOCKS5（客户端 + 服务端） | `<net/uvcpp_socks5_*.h>` | 只用 libuv |
+
+Redis 客户端覆盖 AUTH、SELECT、`HELLO 3`、pipeline、pub-sub 与 `rediss://`；
+解析器是私有的增量实现，公开面只到 `uvcpp_redis_value`。Cluster / Sentinel /
+连接池这一版不做。
+
+MongoDB 是 JSON 进、JSON 出：`insert_one` / `find` / `update_one` / `delete_one` /
+`command` / `ping`，同步与异步各一份。**发布产物里没有 `libmongoc.so` / `.dll`**：
+`UVCPP_DB_RUNTIME_LOAD=ON` 下运行时打开机器上那一份，缺库时 `open()` 返回
+`NO_DRIVER`、错误串列出试过的库名，进程和别的后端一切照常。
+
+SOCKS5 把 RFC 1928 的三种命令都做了（CONNECT / BIND / UDP ASSOCIATE），no-auth 与
+RFC 1929 用户名密码、IPv4 / IPv6 / 域名三种地址类型都认。`uvcpp_tcp_client`、
+`uvcpp_http_client`、`uvcpp_ws_client`、`uvcpp_web_ws_client` 各有一组透明
+CONNECT 代理接口；打开代理后目标主机**不在本地做 DNS**（与 `curl --socks5-hostname`
+同义），TLS 的顺序固定为「先 SOCKS 协商、后握手」，SNI 与证书校验用的仍是目标
+主机名。HTTP/3 与代理互斥：两边谁先谁后都返回 `UV_ENOTSUP`，**绝不静默直连**。
+
+### 驱动随包：仓里有代码 ≠ 随包发库
+
+新增的 [驱动随包策略](https://github.com/Antruly/libuvcpp/blob/master/doc/db-driver-policy.md)
+把三件事分开写：仓里有没有后端代码、产物里带不带客户端库、缺库时是什么现象。
+MySQL / PostgreSQL 编进库但**不链也不带**它们的客户端库（运行时加载）；SQL Server /
+Oracle / 达梦等只保留 ODBC 接入面，驱动由使用者自己装。MongoDB 同样只保留运行时
+引用 —— 即使它的客户端库本身是 Apache-2.0，也不随包分发。
+
+### 构建与发布
+
+- 新选项 `UVCPP_ENABLE_REDIS`（默认 **ON**）、`UVCPP_ENABLE_DB_MONGODB`（默认 **ON**）；
+  新宏 `UVCPP_REDIS_ENABLE`、`UVCPP_DB_MONGODB_ENABLE` 进配置契约门禁。
+- 发布腿带上 MongoDB 头，缺头当场红，不静默发半个包；`ldd` 黑名单与未定义符号
+  断言覆盖 `mongoc` / `bson`，包里的数据库后端仍是 `sqlite,mysql,postgres,odbc`。
+- CI 的 Linux 腿起 `mongod` 与 `redis-server` 跑真实用例；缺服务器时用例退 3，
+  那条腿设 `*_TEST_REQUIRE=1` 把「跳过」变成失败。
+- Windows 安装程序换成项目自己的 logo；自签名证书只告警、不挡发布。
+
+### 换之前
+
+- 公开 API 只增不改，已有代码不需要改。
+- 默认构建会多编一个 Redis 模块；不需要就 `-DUVCPP_ENABLE_REDIS=OFF`。
+- MongoDB 头仍然只在**编进后端**时需要；产物运行时不要求机器上有它。
+- SOCKS5 服务端的**默认配置是开放代理**（no-auth、不限目标）。生产上要用
+  `authenticator` / `allow_target` 收紧，并绑回环地址；见
+  [SOCKS5 指南](https://github.com/Antruly/libuvcpp/blob/master/doc/socks5-guide.md)。
+
 ## v1.7.4 重点 (Highlights)
 
 `v1.7.0` 之后的补丁版：六条腿的 zip 用法与 1.7.0 完全相同，多出来的是**可以直接
