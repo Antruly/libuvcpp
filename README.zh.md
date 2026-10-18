@@ -272,6 +272,7 @@ int main() {
 | JSON（核心） | [doc/json-guide.md](doc/json-guide.md) | 手写 JSON 响应：转义契约、失败语义、各种上限，以及怎么接到响应层 |
 | JSON（反射） | [doc/json-reflect-guide.md](doc/json-reflect-guide.md) | 用一个宏标出字段表、两个方向共用：分层与包含、读入语义、错误报告，以及 C++11 化多出来的那件手工活 |
 | net | [doc/net-guide.md](doc/net-guide.md) | TCP/UDP 客户端与服务端；异步与同步双模式，以及两者不能混用的地方 |
+| SOCKS5 | [doc/socks5-guide.md](doc/socks5-guide.md) | 完整的客户端与服务端：CONNECT / BIND / UDP ASSOCIATE、no-auth 与 RFC 1929、IPv4/IPv6/域名；内置到 `uvcpp_tcp_client` / HTTP / WS 客户端的透明 CONNECT 代理、UDP 数据面、背压与超时，以及「默认配置就是开放代理」那条警告 |
 | web（HTTP 半边） | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP 服务端/客户端/解析器/静态服务；关服为什么是两步 |
 | web（WS 半边） | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket 握手、帧、关闭码 |
 | webapp（框架） | [doc/webapp-guide.md](doc/webapp-guide.md) | 路由、中间件、请求响应、上传、静态服务、WebSocket、日志 —— 以及 §19 的多循环横向扩展 |

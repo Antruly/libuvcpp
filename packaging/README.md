@@ -20,7 +20,7 @@ CI 里由 `.github/workflows/release.yml` 按顺序调用；本文只讲**为什
 |---|---|---|
 | libuv / zlib | **静态编进** `libuvcpp.so`，不依赖系统包 | **链系统的** `libuv.so.1` / `libz.so.1` |
 | OpenSSL / brotli / llhttp / nghttp2 / ngtcp2 / nghttp3 | 静态编入 | 同左（公开头不暴露它们的类型，而且能避开 `libssl3` 换名的版本地狱） |
-| MySQL / PostgreSQL / ODBC | `UVCPP_DB_RUNTIME_LOAD=ON`，运行时 `dlopen` | 同左 |
+| MySQL / PostgreSQL / ODBC / MongoDB | `UVCPP_DB_RUNTIME_LOAD=ON`，运行时 `dlopen` | 同左 |
 | 文件名 | 单个 `libuvcpp.so` | `libuvcpp.so.<ver>` → `.so.<major>` → `.so` |
 | 构建开关 | （默认） | `-DUVCPP_SET_SOVERSION=ON` |
 

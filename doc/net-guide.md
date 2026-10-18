@@ -13,6 +13,9 @@
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一层没做"的地方都明确标出来
 > ——那些地方比 API 更容易踩。
 
+SOCKS5（CONNECT / BIND / UDP ASSOCIATE，客户端 + 服务端）建在这一层之上，
+单独成页：[`socks5-guide.md`](socks5-guide.md)。
+
 ---
 
 ## 目录

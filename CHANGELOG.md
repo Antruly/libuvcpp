@@ -28,6 +28,7 @@
   - [gRPC（`src/grpc/`）](#grpcsrcgrpc)
   - [数据库（`src/db/`）](#数据库srcdb)
   - [Redis（`src/redis/`）](#redissrcredis)
+  - [SOCKS5（`src/net/`）](#socks5srcnet)
   - [横向扩展（多事件循环）](#横向扩展多事件循环)
   - [HTTP 与 WebSocket 语义](#http-与-websocket-语义)
   - [TLS 与网络](#tls-与网络)
@@ -1078,6 +1079,44 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **一句话的边界**：Cluster / Sentinel / 连接池 / hiredis 兼容层都不做；
   `EVAL` 这类靠通用 `command()` 发。见 [`doc/redis-guide.md`](doc/redis-guide.md)
   与 [`doc/db-driver-policy.md`](doc/db-driver-policy.md)。
+
+### SOCKS5（`src/net/`）
+
+- **完整的 SOCKS5 客户端与服务端，CONNECT / BIND / UDP ASSOCIATE 三种命令全做**
+  （`1.7.5-dev`）。RFC 1928 / RFC 1929，只用 libuv，没有第三方代理库；no-auth 与
+  用户名密码两种方法、IPv4 / IPv6 / 域名三种地址类型都认。新增公开头
+  `<net/uvcpp_socks5_types.h>`（枚举与端点）、`<net/uvcpp_socks5_client.h>`、
+  `<net/uvcpp_socks5_server.h>`、`<net/uvcpp_socks5_udp.h>`；线格式编解码
+  `uvcpp_socks5_common.h` 是私有头，不进安装。UDP 分片重组、GSSAPI、
+  SOCKS4/SOCKS4a 不做（RFC 1928 允许不支持分片），`FRAG ≠ 0` 的数据报丢弃并计数。
+- **HTTP / WebSocket / TCP 客户端的透明 CONNECT 代理**（`1.7.5-dev`）。
+  `uvcpp_tcp_client`、`uvcpp_http_client`、`uvcpp_ws_client`、`uvcpp_web_ws_client`
+  各有一组 `set_socks5_proxy()` / `clear_socks5_proxy()` / `socks5_enabled()` /
+  `socks5_last_error()`。打开之后目标主机**不在本地做 DNS**（域名以 `ATYP=DOMAIN`
+  交给代理解析，`curl --socks5-hostname` 的语义）；TLS 的顺序固定为"先协商、后握手"，
+  SNI 与证书校验用的仍是**目标**主机名。`uvcpp_http_client` 的 h3 与代理互斥：
+  两边谁先谁后都返回 `UV_ENOTSUP`，**绝不静默直连**。
+- **独立客户端**（`1.7.5-dev`）：`uvcpp_socks5_client` 把三种命令都暴露出来，
+  同步 / 异步各一套。控制连接上的读**始终归本对象**（`stream()->read_start()`
+  会拿到 `UV_EALREADY`），握手之后、`read_start()` 之前到达的应用字节先攒着
+  （上限 2 MiB）再补投。BIND 的两次应答分别交付（代理绑定地址、对端地址）；
+  UDP 关联先在本地绑一个 UDP socket 再把地址放进请求，代理回通配地址时替换成
+  代理自己的地址，**关联的生命周期绑在控制 TCP 上** —— 控制连接一关，UDP socket
+  自动关掉。
+- **服务端**（`1.7.5-dev`）：每条控制连接一个状态机，上游连接、BIND 监听器、
+  UDP socket 全部建在**连接自己那条循环**上，所以 `set_loops(n)` 天然分片。
+  策略（`uvcpp_socks5_server_options`）含认证、目标白名单 `allow_target`、
+  三种命令的开关、握手 / 连上游 / 等对端 / UDP 空闲四组超时与 `max_connections`。
+  上游错误按 REP 映射（拒绝 → `CONNECTION_REFUSED`、网络不可达 → 03、主机不可达 /
+  超时 → 04、权限 → 02、地址族不支持 → 08）。UDP 关联由**首个合法数据报锁定**
+  客户端地址；转发方向各有一条发送队列，1 MiB 高水位暂停源读、256 KiB 低水位恢复。
+  **默认配置就是开放代理**（no-auth + 不限目标），文档把生产上该怎么收紧写清楚了。
+- **用例**（`1.7.5-dev`）：`socks5_parser_func`（纯编解码、截断前缀必须是
+  `NEED_MORE`、域名 255/256 边界）、`socks5_client_func`（三种命令的回环、
+  no-auth / 用户名密码、域名与 IPv6 目标）、`socks5_server_func`（REP 映射、
+  白名单、握手超时、会话上限）、`socks5_udp_func`（中继、首包锁定、FRAG 丢弃、
+  控制连接关闭后的释放）、`socks5_http_func`（`uvcpp_http_client` 经代理访问本仓
+  服务端，含 SOCKS 之后接 TLS 的顺序）。见 [`doc/socks5-guide.md`](doc/socks5-guide.md)。
 
 ### 横向扩展（多事件循环）
 
@@ -3069,6 +3108,27 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   不动**（仍是 `OFF`，它面对的是最小源码构建）；"开箱即用"由六条发布腿满足。
 
 ### 配置、打包与 CI
+
+- **发布腿把 MongoDB 的头也带上，CI 起 mongod 与 redis-server**（`1.7.5-dev`）。
+  六条发布腿的十二处 configure 全部显式传 `-DUVCPP_ENABLE_DB_MONGODB=ON` 与
+  `-DUVCPP_DB_MONGODB_INCLUDE_DIR=`：两条 Linux 腿 `apt-get download libmongoc-dev
+  libbson-dev` 后 `dpkg -x`（**照旧不 install**），并对
+  `libmongoc-1.0/mongoc/mongoc.h` / `libbson-1.0/bson/bson.h` 各做一次 `test -f`
+  与 `-fsyntax-only` 编译探针，取不到当场红；两条 MinGW 腿用 MSYS2 的
+  `mingw-w64-{x86_64,clang-aarch64}-mongo-c-driver`（2.5.4-1，头是平的
+  `include/{mongoc,bson}`）；两条 MSVC 腿的 `win-client-headers.sh` 从同一份
+  MinGW 包取头（它的 `bson/config.h` / `bson/compat.h` 对 MSVC 可用）。
+  两条 Linux 腿的 `ldd` 黑名单与 `nm -D -u` 计数补上 `mongoc` / `bson`，模块断言
+  多两枚（`UVCPP_DB_MONGODB_ENABLE`、`UVCPP_REDIS_ENABLE`）。加载器的候选名补上
+  mongo-c-driver 2.0 的 SONAME（`libmongoc2.so.2` / `libmongoc2.dll` /
+  `libmongoc2.dylib`，bson 同理）—— 1.x 的名字仍在前。MinGW 的 push/PR 腿
+  （发布产物的同一条工具链）也补同样的头与开关，并断言配置日志里有
+  `db: MongoDB 后端开`。`ci-linux-ubuntu.yml` 的 `db-servers` 作业新增
+  `mongo:7` 与 `redis:7` 两个服务容器，配上 `UVCPP_DB_TEST_MONGODB_URL`、
+  `UVCPP_REDIS_TEST_URL` 与 `UVCPP_REDIS_TEST_REQUIRE=1`；注册用例清单加上
+  `test_db_mongodb_func` 与 `test_redis_real_func`。`db_mongodb_nodrv_func` 在
+  直接链接（`UVCPP_DB_RUNTIME_LOAD=OFF`）的构建里不注册 —— 那时"两份客户端库
+  打不开"的前提表达不出来，用例会看到 `OPEN_FAILED` 而不是 `NO_DRIVER`。
 
 - **发行版包与自建仓库：`.deb` / `.rpm` / Windows 安装程序**（`1.7.3-dev`）。
   发布流程在原有六条 zip 之外多出三样产物，六条 zip 本身**行为逐字不变**：
