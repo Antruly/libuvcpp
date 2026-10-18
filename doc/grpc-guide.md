@@ -10,11 +10,11 @@
 这个分法不是洁癖，是**依赖事实**：编解码那半的每一个参数都是 `std::string` / `uint32_t`
 （`src/grpc/uvcpp_grpc.h:122-216`），而服务端那半的每个参数都是 web 层的类型
 （`src/grpc/uvcpp_grpc_server.h:116-132`）。所以关掉 web 模块时前者照编照装、后者
-**从构建与安装里都摘掉**（`CMakeLists.txt:2031-2033`、`CMakeLists.txt:3055-3060`）——
+**从构建与安装里都摘掉**（`CMakeLists.txt:2072-2074`、`CMakeLists.txt:3122-3127`）——
 装在 `include/grpc/` 下，而不是 `include/web/` 下。
 
 - 打开方式：**没有开关**。编解码那半任何配置下都在；服务端那半跟着 `UVCPP_BUILD_WEB`
-  走（`CMakeLists.txt:2031-2031`）。加一个 `UVCPP_ENABLE_GRPC` 只会多一个能与
+  走（`CMakeLists.txt:2072-2072`）。加一个 `UVCPP_ENABLE_GRPC` 只会多一个能与
   `UVCPP_BUILD_WEB` 打架的旋钮，而两半的依赖是死的、不需要调用方表态。
 - 包含方式：`<grpc/uvcpp_grpc.h>`、`<grpc/uvcpp_grpc_server.h>`。
 - 依赖：帧与 varint 那半**只依赖 `<cstdint>` 与 `libuv` 的错误码**（

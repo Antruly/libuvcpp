@@ -57,7 +57,7 @@
 
 **一、连接的生死归 `uvcpp_tcp_server`，不归 http 层。** 新连接在业务回调**之前**
 就被登记并装好收尾（`src/net/uvcpp_tcp_server.h:53-58`），关闭时框架摘除并 `delete`
-（`src/net/uvcpp_tcp_server.cpp:129-131`）。http 层那张 `contexts_` 表**不拥有**
+（`src/net/uvcpp_tcp_server.cpp:136-138`）。http 层那张 `contexts_` 表**不拥有**
 `uvcpp_tcp_client`。所以地址会被复用 —— 判"还是不是原来那条连接"要用
 `connection_generation()`（[§6](#6-异步响应)），不能比指针。
 
@@ -67,7 +67,7 @@
 **三、`web/` 有 h2，但入口有三条。** 服务端 `set_http2_enabled(true)`
 （`src/web/uvcpp_http_server.h:357-357`）加 TLS+ALPN，服务端 `set_h2c_enabled(true)`
 （明文先验知识，RFC 9113 §3.4），客户端 `set_http2_enabled(true)`
-（`src/web/uvcpp_http_client.h:474-474`）。
+（`src/web/uvcpp_http_client.h:506-506`）。
 前两条都**默认关**；只有 `webapp/` 框架层默认开、零配置自动协商。
 **不做 `Upgrade: h2c` 协商**（RFC 9113 已删除该机制），**也不做嗅探** —— 明文这条腿
 只认那 24 个字节。
@@ -87,15 +87,15 @@
 | HTTP/2 | `UVCPP_NGHTTP2_ENABLE` | `set_http2_enabled()` 那一组消失 |
 
 两行"响应压缩"是**同一个块的两个来源**：压缩器的总开关是
-`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:1899-1899`）——
+`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:1932-1932`）——
 任一为 1 就有这个块，两个都为 0 才整块消失。三个"块"的开关都默认 OFF，brotli
-那条也是（`CMakeLists.txt:235-249` 那一组 `option()`，四个块开关默认全是 OFF）。编译进 `UVCPP_SRC_FILES` 的是
-`src/web/*.cpp` 全体（`CMakeLists.txt:1537-1537`），但每个 `.cpp` 里的功能块同样带宏。
+那条也是（`CMakeLists.txt:245-259` 那一组 `option()`，四个块开关默认全是 OFF）。编译进 `UVCPP_SRC_FILES` 的是
+`src/web/*.cpp` 全体（`CMakeLists.txt:1561-1561`），但每个 `.cpp` 里的功能块同样带宏。
 
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
 （`tests/functional/web_ssl_h2_client_func.cpp:185`）。握手超时归
-`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:792`）。
+`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:805-805`）。
 
 ---
 
@@ -138,7 +138,7 @@ int main() {
 
 **`uvcpp_http_server` 的公开 API 里没有 `close()`。** 唯一能"关服"的是 `stop()`
 （`:385`），而它 = `tcp_server_->stop()`：**只关监听句柄，不动已建立的连接**
-（`src/net/uvcpp_tcp_server.h:490-503`）。已经在处理的请求照跑。
+（`src/net/uvcpp_tcp_server.h:503-516`）。已经在处理的请求照跑。
 
 ```cpp
 #include <net/uvcpp_tcp_server.h>
@@ -470,8 +470,8 @@ int doc_client_async() {
 ```
 
 `send` / `get` / `post` 的回调签名逐字是
-`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:170-185`）。
-交付的 `resp` 是成员 `pending_resp_`（`:449`）的 const 引用 —— **存到下次 `send()`
+`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:202-217`）。
+交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:481-481`）的 const 引用 —— **存到下次 `send()`
 就被覆写**。
 
 **异步路径没有超时，`connect()` 也不设**（`src/web/uvcpp_http_client.cpp:56-60`）。
@@ -481,7 +481,7 @@ int doc_client_async() {
 "对端在响应收完前断开"时 `send()` 的回调永远不来。
 
 **在响应回调里 `delete` 客户端是预期的用法。** 所有闭包都捕一个 `alive_token_`
-弱引用（`src/web/uvcpp_http_client.h:432-443`），析构第一件事就 reset
+弱引用（`src/web/uvcpp_http_client.h:464-475`），析构第一件事就 reset
 （`src/web/uvcpp_http_client.cpp:76`）—— 你不需要为它做任何额外的事。
 
 ### 同步
@@ -506,40 +506,40 @@ int doc_client_sync() {
 ```
 
 **同一个 client 上同步与异步不能交叉**，越界一律 `UV_ENOTSUP`
-（`src/web/uvcpp_http_client.cpp:271`、`:431`、`:574`、`:598`）。
+（`src/web/uvcpp_http_client.cpp:280-280`、`src/web/uvcpp_http_client.cpp:440-440`、`src/web/uvcpp_http_client.cpp:583-583`、`src/web/uvcpp_http_client.cpp:607-607`）。
 
 ### 三个容易写错的地方
 
 **一、keep-alive 有两个方向：请求那头听调用方的，响应那头听对端的。**
-`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:427-427` 初值 `true`、
-`:235` 声明、`src/web/uvcpp_http_client.cpp:841-841` setter）。`set_keep_alive(false)`
-会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:516-535`）；
+`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:459-459` 初值 `true`、
+`:235` 声明、`src/web/uvcpp_http_client.cpp:850-850` setter）。`set_keep_alive(false)`
+会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:525-544`）；
 默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是
 `uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:156-159`）。
 **响应**说的同样作数：`on_response_complete()` 按 llhttp 算出的
 `should_keep_alive()`（HTTP 版本默认值 + `Connection` 的**逗号列表**）判断这条连接
 还能不能再用，不能就当场清掉 `HTTP_CLIENT_CONNECTED`
-（`src/web/uvcpp_http_client.cpp:710-730`）—— 此后第二次 `send()` 拿到
+（`src/web/uvcpp_http_client.cpp:719-739`）—— 此后第二次 `send()` 拿到
 `UV_ENOTCONN`，而不是往一条服务端已决定关闭的连接上写。
 `tests/functional/web_http_client_keepalive_func.cpp` 把这三条都钉住了。
 
 **二、开了 OpenSSL 的构建里 `send_wait()` 走的是阻塞 fd，不是事件循环。**
-`src/web/uvcpp_http_client.cpp:587-604` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
+`src/web/uvcpp_http_client.cpp:596-613` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
 有 TLS 就走阻塞路径，没有才走"轮询 loop + 1ms sleep"的异步实现。
-后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:992-995` 把这段历史写下来了）。
+后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:1001-1004` 把这段历史写下来了）。
 
 **三、阻塞路径的 `timeout_ms` 只有 Windows 生效。**
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 两处都被 `#ifdef _WIN32` 包着
-（`src/web/uvcpp_http_client.cpp:1134-1138`、`:1202-1206`），POSIX 上**不设**，
+（`src/web/uvcpp_http_client.cpp:1143-1147`、`src/web/uvcpp_http_client.cpp:1211-1215`），POSIX 上**不设**，
 `send_wait()` / `send_wait_plain()` 在 Linux/macOS 上可以无限阻塞。头文件现在把这个
-缺口写在参数说明里（`src/web/uvcpp_http_client.h:139-141`、`:155-159`），
+缺口写在参数说明里（`src/web/uvcpp_http_client.h:171-173`、`src/web/uvcpp_http_client.h:187-191`），
 不再让读者以为有超时兜底。
 
 **四、阻塞路径读不到任何字节时返回 0，而 `resp` 是默认的 200 OK。**
-`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1226-1235`），空头交给
+`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1235-1244`），空头交给
 `parse_response_head()` 之后什么都不改，`status_code` 保持初值 200。
 **判据只能是返回值**。（异步 h1 路径相反：错误时会把 `status_code` 设成
-`HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:458-460`。）
+`HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:467-469`。）
 
 ### 没有的东西
 
@@ -547,7 +547,7 @@ int doc_client_sync() {
 `redirect|30[1238]` 零命中 —— 3xx 只是一个状态码交给你。
 
 **压缩默认关，且门槛改不了。** `set_compression_enabled(true)`
-（`src/web/uvcpp_http_client.h:214-226`）之后请求会补
+（`src/web/uvcpp_http_client.h:246-258`）之后请求会补
 `accept-encoding: gzip, deflate`、响应收全后自动解压 —— **异步与阻塞两条路径都算**
 （`send()` 与 `send_wait()` / `send_wait_plain()` / `send_wait_ssl()`）。顺带记一笔
 **曾经不是这样**：`1.6.32` 之前这两件事只写在异步那条路上，阻塞那两条静默地什么都不做
@@ -730,7 +730,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`�
 1 档是 65.4 → 42.8 µs、1 566 → 1 957 字节），所以默认值一个字节都没动。
 
 **第六个旋钮：`br`（brotli）。** `UVCPP_ENABLE_BROTLI`（默认 OFF，
-`CMakeLists.txt:236-236`）给压缩器加上第二种编码：`br` 与 gzip/deflate 走**同一套**
+`CMakeLists.txt:246-246`）给压缩器加上第二种编码：`br` 与 gzip/deflate 走**同一套**
 协商（`http_compress::parse_accept_encoding()`，`Accept-Encoding` 里 `q` 相同时
 `br` > `gzip` > `deflate`，`*` 兜底、`br;q=0` 排除、指名要一个本构建编不出来的
 编码时**原样发原文**而不是拿另一种编码的字节冒充 ——

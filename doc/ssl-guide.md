@@ -65,7 +65,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 或链接错误**，只会在运行时读到错位的垃圾。
 
 关掉这个选项时：`src/ssl/` 会被从源文件与头文件列表里排除，**而且根本不安装 ssl 头**
-（`CMakeLists.txt:3135-3136`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
+（`CMakeLists.txt:3202-3203`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
 找不到文件。同理，`uvcpp_tcp_server::set_ssl_context()` 在关掉时**连声明都不存在**。
 
 运行时"关掉 TLS"不是宏，是 `set_ssl_context(nullptr)`。
@@ -258,7 +258,7 @@ bool has_alpn_select() const;
 
 | 落点 | 声明 | 所有权说明 |
 |---|---|---|
-| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:696` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`:689-691`） |
+| `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:709-709` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`src/net/uvcpp_tcp_server.h:702-704`） |
 | `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:221-221` | "生命周期必须覆盖**整条连接**"（`:217`） |
 | `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:2090-2090` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
@@ -302,7 +302,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **握手失败怎么知道：**
 
 - 服务端：握手成功才 `deliver_connection()`；失败**只记账**，`on_connection`
-  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:680-688`）。
+  **一次都不被调用**（`src/net/uvcpp_tcp_server.h:693-701`）。
 - 客户端：`set_tls_ready_callback(cb)`，`status == 0` 成功；**只触发一次**，失败时在
   关闭回调**之前**触发（那时对象还活着）。
 - 握手期连接不在上层登记表里，`idle_timeout_ms` 覆盖不到——所以有
@@ -320,7 +320,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
 （`src/ssl/uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
-（`src/net/uvcpp_tcp_client.cpp:2577-2577`）——所以**必须看各 `load_*` 的返回值**，
+（`src/net/uvcpp_tcp_client.cpp:3157-3157`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
 
 **先装私钥后装证书会返回 `false`**，见 §4。
@@ -328,12 +328,12 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **服务端上 `PEER_STRICT` 不校验主机名**（客户端上会），见 §5。
 
 **TLS 上 `uvcpp_buf*` 的零拷贝不成立**：调用之后那个 buf **仍然是满的**，
-（`src/net/uvcpp_tcp_client.h:399-402`）。
+（`src/net/uvcpp_tcp_client.h:459-462`）。
 
 **握手完成前写必然失败**（`UV_ENOTCONN`），`SSL_write` 要求握手已完成。
 
 **同步/异步混用返回 `UV_ENOTSUP`**，而不是把明文写进一条已加密的连接
-（`src/web/uvcpp_http_client.h:236-245`）。
+（`src/web/uvcpp_http_client.h:268-277`）。
 
 **怎么确认过滤器真的接上了：** 在连接回调里断言 `is_tls_handshake_done()`，并对收到的
 字节按预期**明文**内容比对。测试就是这么做的——`tests/functional/web_ssl_server_func.cpp:131-135`

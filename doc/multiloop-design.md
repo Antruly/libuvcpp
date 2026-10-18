@@ -95,33 +95,33 @@ int main() {
 
 ### 1.1 已经落地的那一半：net 层的 `set_loops(n)`
 
-**已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:307`）
+**已实现**（1.2.21-dev）：`uvcpp_tcp_server::set_loops(n)`（`src/net/uvcpp_tcp_server.h:320-320`）
 把"一条循环"变成 **n 条各跑自己循环的线程**，`1..n-1` 号各一条**专用 `std::thread`**
 （`uvcpp_loop_worker`，`src/net/uvcpp_loop_worker.h:75-75` —— 不是 `uv_queue_work`
 那条线程池）。**"新连接怎么落到某一条循环上"分两种形状**，而且是**运行时探测**出来的
 （同一个二进制在不同平台上不一样）：Linux 上 n 条各自绑同一端口、内核分流（§3 路 (a)，
 **本版已落地**）；Windows 与那个标志被拒时的回落才是下面 §2、§3 讲的"一条接受者 +
 显式轮转转手"。想知道这次是哪一种：`is_fanout()`。配套读法：`loop_count()`
-（`src/net/uvcpp_tcp_server.h:363`）、`client_count_at(i)`
-（`src/net/uvcpp_tcp_server.h:446`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
-（`src/net/uvcpp_tcp_server.h:236` 起是完整的对外说明）。
+（`src/net/uvcpp_tcp_server.h:376-376`）、`client_count_at(i)`
+（`src/net/uvcpp_tcp_server.h:459-459`）。**不调用它或 `set_loops(1)` 与今天逐字节相同**
+（`src/net/uvcpp_tcp_server.h:249` 起是完整的对外说明）。
 
 ```
 acceptor 循环（0 号 = 今天的 loop_，调用者的线程跑它）
   └─ uv_connection_cb
-       ├─ n == 1：今天那条路，逐字不动（src/net/uvcpp_tcp_server.cpp:427）
+       ├─ n == 1：今天那条路，逐字不动（src/net/uvcpp_tcp_server.cpp:437-437）
        ├─ n > 1 且**分流**（Linux）：0 号自己那份就地收下，与 n == 1 同形
-       │           （src/net/uvcpp_tcp_server.cpp:417 accept_on_loop）
+       │           （src/net/uvcpp_tcp_server.cpp:427-427 accept_on_loop）
        └─ n > 1 且**转手**（Windows）：accept 进一个**临时句柄**
-                  （src/net/uvcpp_tcp_server.cpp:421 accept_and_handoff）
+                  （src/net/uvcpp_tcp_server.cpp:431-431 accept_and_handoff）
                   → 取出 socket → 平台转手 → post 给 worker[k]，k = i % (n-1)
                   → 立刻关掉自己那份
 worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
   └─ 邮箱回调里排空（src/net/uvcpp_loop_worker.h:155-155 起）
        └─ 在**这条循环的线程**上：new uvcpp_tcp_client(worker_loop) 装转手来的 socket
-          （src/net/uvcpp_tcp_server.cpp:702 on_handoff_task）→ mark_accepted() → 登记
+          （src/net/uvcpp_tcp_server.cpp:712-712 on_handoff_task）→ mark_accepted() → 登记
           → setup_client_callbacks() → TLS 块 → deliver_connection()
-          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:729 finish_accept）
+          （用户的连接回调在这里被调用，src/net/uvcpp_tcp_server.cpp:739-739 finish_accept）
 ```
 
 **去向是显式轮转，不是内核散列**，所以分布是**确定性**的（第 i 条必然落在
@@ -131,7 +131,7 @@ worker[k] 线程：loop[k].run(UV_RUN_DEFAULT)
 
 - **转手必须在 `mark_accepted()` 之前**，也就是整条尾巴（登记、`setup_client_callbacks`、
   TLS、`deliver_connection`）都必须在**目标循环的线程**上跑 —— `enable_tls()` 会当场在这条
-  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:772`）。
+  循环上 arm 一次读（`src/net/uvcpp_tcp_server.cpp:782-782`）。
 - **POSIX 的 `uv_accept` 硬断言同循环**（`libuv:unix/stream.c:539`），所以转手靠
   `dup()` + `uv_tcp_open`（后者"已存在"的检查是**按循环**做的，跨循环共用一个 fd 不会被拒、
   只会 double close）。
@@ -305,7 +305,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1752-1752` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | ~~`uvcpp_web_app::inflight_`~~ → `loop_slot::inflight` | `src/webapp/uvcpp_web_app.h:2102-2102`（**已切开**，W4 / 2c） | **每请求** |
 | ~~`uvcpp_web_app::upgraded_`~~ → `loop_slot::upgraded` | `src/webapp/uvcpp_web_app.h:2161-2161`（**已切开**，W4 / 2c） | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:944` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:965-965` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** 它原来只有一份
 `loop_tid_`/`post_queue_`，投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。
@@ -361,7 +361,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 > `on_tcp_connection()` → `ctxs_of()`。
 
 > **更正（2026-09-22，外部复核）：上面"worker 线程是在那个调用里放行的"是错的。**
-> 放行点是 `set_loops()` **自己的** `w->start()`（`src/net/uvcpp_tcp_server.cpp:557`），
+> 放行点是 `set_loops()` **自己的** `w->start()`（`src/net/uvcpp_tcp_server.cpp:567-567`），
 > 比 `uvcpp_tcp_server::listen()` **更早**；`listen()` 里那句 `contexts_.resize()`
 > 之所以还赶得上，靠的是另一条事实 —— **监听还没起来 ⇒ 一条连接都进不来**
 > （`uvcpp_tcp_server::listen()` 是绑端口 + `uv_listen()` 的地方），**不是**靠
@@ -370,14 +370,14 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 > 这个更正有实际后果：按旧说法，只要 resize 在 `listen()` 之前就安全；按事实，
 > `contexts_` 必须在 **`set_loops()` 返回之前**就定好尺寸，而"一条连接都进不来"
 > 只是把那段时间窗遮住了。次序本身由别的两句锁着：`set_loops()` 在已经在听时
-> 返回 `UV_EBUSY`（`src/net/uvcpp_tcp_server.cpp:515`），而 accept 回调分叉看的
-> 是 `!workers_.empty()`（`src/net/uvcpp_tcp_server.cpp:413`）—— 两句都预设
+> 返回 `UV_EBUSY`（`src/net/uvcpp_tcp_server.cpp:525-525`），而 accept 回调分叉看的
+> 是 `!workers_.empty()`（`src/net/uvcpp_tcp_server.cpp:423-423`）—— 两句都预设
 > "`set_loops()` 先跑完、线程已经在跑"。
 
 **但"接受者就是这个循环"在那条路上不再成立 —— 这正是 net 层要转手的原因。**
 `:266` 的 `new uvcpp_tcp_client(loop_)` 与 `:269` 的 `s->accept(...)` 今天是 **n==1 那条分支**；
-n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:654` 的 `accept_and_handoff`），
-客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:702` 的 `on_handoff_task`）。
+n>1 时先把连接 accept 进一个**临时句柄**（`src/net/uvcpp_tcp_server.cpp:664-664` 的 `accept_and_handoff`），
+客户端对象是在**目标工作循环的线程**上建的（`src/net/uvcpp_tcp_server.cpp:712-712` 的 `on_handoff_task`）。
 ⇒ webapp 层要接的话，**每个 `uvcpp_http_server` 的 `tcp_server` 各自 `set_loops(n)`**
 仍然成立（每个 app 一份循环组），但"接受者即本循环"这条直觉要换成 §1.1 那张图。
 
@@ -439,7 +439,7 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 **先每进程、后每循环**的次序调它们（`src/webapp/uvcpp_web_app.cpp:1723-1789` 与
 `src/webapp/uvcpp_web_app.cpp:1864-1903`，理由见 §4.1.1 甲）。上面 ①② 两条后果随之消失：
 那两句现在**只跑一次**，而且跑在放行任何工作循环**之前** —— 放行点是 `set_loops()`
-自己的 `w->start()`（`src/net/uvcpp_tcp_server.cpp:557`），所以这份配置在放行那
+自己的 `w->start()`（`src/net/uvcpp_tcp_server.cpp:567-567`），所以这份配置在放行那
 一刻已经冻结。（**不是**"从 `listen()` 里面放行"—— 那处旧说法已在上面的更正块里
 改掉，两处引的是同一次外部复核。）
 
@@ -815,7 +815,7 @@ n 个循环之后变成跨核缓存行打架**：
   sink **自己**那把锁 —— 锁内做 `std::string` 拼接与 `fwrite`。多循环下这是唯一一处
   **每条请求都可能**撞上的进程级锁。
 - 三条 atomic：请求 id（`src/webapp/uvcpp_web_middleware.cpp:63-65`，每请求）、
-  reclaim / try_write 计数器（`src/net/uvcpp_tcp_client.cpp:235-237`、`:251-254`）、
+  reclaim / try_write 计数器（`src/net/uvcpp_tcp_client.cpp:236-238`、`src/net/uvcpp_tcp_client.cpp:252-255`）、
   `share_discard_count_`（`src/uvcpp/uvcpp_buf.cpp:227`）。注意后两条的形状会骗人：
   读取口 `reclaim_stats()` / `try_write_stats()` 的签名像实例指标，实际是**全进程聚合**。
 
@@ -886,7 +886,7 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 ⇒ `begin_shutdown()` 只在接受者那条循环上跑，工作循环**既不进停机状态机、也不会被停**
 ⇒ 那几格里 `async` 与两个定时器没人删 ⇒ `uv_loop_close` 撞上未关句柄返 `UV_EBUSY`
 ⇒ **整块循环内存泄漏**（正是 net 层 `uvcpp_loop_worker.cpp:163-164` 与
-`uvcpp_tcp_server.cpp:103-119` 记着的那一族）。
+`src/net/uvcpp_tcp_server.cpp:110-126` 记着的那一族）。
 
 落地形状：逐个槽位 `post([this]{ begin_shutdown(); }, i)`，**发起者那条循环就地跑**
 （与 n==1 同形，不为多循环多绕一次异步）。"就地"的判据是 `on_loop_thread()` **加**指针
@@ -999,7 +999,7 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 ## 5. 对外约束
 
 > **net 层已经把这节的四条落进头文件了**（`set_loops()` 的 doc block，
-> `src/net/uvcpp_tcp_server.h:237` 起）：`n=1` 逐字节相同、`on_connection` 可能并发、
+> `src/net/uvcpp_tcp_server.h:250-250` 起）：`n=1` 逐字节相同、`on_connection` 可能并发、
 > `close_all_clients()` 在 `n>1` 时是异步发起、`pause_read()` 只在自己循环的线程上调。
 > **面向使用者的版本在 [net 层指南](./net-guide.md) 的多循环那一节**
 > （含 Windows 那条风险的完整交代）。下面 §5.2/§5.3 是**webapp 层**还没定的部分。
@@ -1023,8 +1023,8 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > （`uvcpp_tcp_server::stop()` 里的 `tcp_->close(...)`）——扇出之后"谁第一个进来谁执行
 > 那句 close"，而第一个进来的可能是工作循环 ⇒ **跨循环 `uv_close`**（libuv 里那不是
 > 线程安全的）。它本身是**真幂等**（早退判据 `!has_status(TCP_SERVER_LISTENING)`
-> 在 `src/net/uvcpp_tcp_server.cpp:895`，而第一次进来就在
-> `src/net/uvcpp_tcp_server.cpp:901` `clear_status`），
+> 在 `src/net/uvcpp_tcp_server.cpp:905-905`，而第一次进来就在
+> `src/net/uvcpp_tcp_server.cpp:911-911` `clear_status`），
 > 所以"只让 0 号发"与"每条循环都发"在结果上等价，但前者才是对的形状。
 >
 > **这一段在 1.2.23-dev 已落地，而且它是本批唯一一处"计划写错、设计稿写对"的地方**
@@ -1038,9 +1038,9 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 承诺 —— 与姊妹篇 §5.1 同一条纪律。
 
 **net 层这一半已经做过了**：连接回调那段收尾被抽成 `finish_accept()`，由
-`accept_on_loop()` 共用 —— `src/net/uvcpp_tcp_server.cpp:427`（n==1）与
-`src/net/uvcpp_tcp_server.cpp:417`（分流时 0 号自己那一条）走的是**同一个**调用；转手那条
-是 `src/net/uvcpp_tcp_server.cpp:421` 的 `accept_and_handoff()`。变异"绕开转手"
+`accept_on_loop()` 共用 —— `src/net/uvcpp_tcp_server.cpp:437-437`（n==1）与
+`src/net/uvcpp_tcp_server.cpp:427-427`（分流时 0 号自己那一条）走的是**同一个**调用；转手那条
+是 `src/net/uvcpp_tcp_server.cpp:431-431` 的 `accept_and_handoff()`。变异"绕开转手"
 （`accept_and_handoff` 那条分支改成 `false &&`）让 n=4 档红在"接受者循环留了 16 条连接"
 与"接受者线程上跑了连接回调"两条判据上（§1.1）。
 

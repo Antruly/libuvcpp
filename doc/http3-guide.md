@@ -24,18 +24,18 @@
 - 打开方式：`-DUVCPP_ENABLE_HTTP3=ON`。**默认 OFF**（`CMakeLists.txt:143-143`），
   而且下面两种情况会被**强制**置 OFF 并打 warning，而不是留一个"能配置、链不上、
   跑不起来"的组合：
-  1. 没开 QUIC（`CMakeLists.txt:978-978`）—— HTTP/3 是 QUIC 之上的一条应用协议，
+  1. 没开 QUIC（`CMakeLists.txt:1002-1002`）—— HTTP/3 是 QUIC 之上的一条应用协议，
      没有 QUIC 它没有字节可以跑在上面；
-  2. 没开 web 层（`CMakeLists.txt:985-985`）—— 这条传输的公开面就在
+  2. 没开 web 层（`CMakeLists.txt:1009-1009`）—— 这条传输的公开面就在
      `uvcpp_http_client` / `uvcpp_http_server` 上，web 关掉时它没有使用者。
 - 包含方式：`<http3/uvcpp_h3_common.h>`、`<http3/uvcpp_h3_connection.h>`。
   私有的 `<http3/uvcpp_h3_nghttp3.h>` 与 `<http3/uvcpp_h3_session.h>` **都不安装**
-  （`CMakeLists.txt:3186-3186`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:3253-3253`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 两个公开头整段套在 `#if UVCPP_HTTP3_ENABLE` 里，web 层那边新加的
   `listen_quic()` / `set_http3_enabled()` 也是，所以**不开关就一个名字都看不到**。
   这与 `quic/`、`web/`、`ssl/`、`http2/`、`wsdl/` 同档。
-- 开关与依赖：nghttp3 走 FetchContent（`NGHTTP3_VERSION`，`CMakeLists.txt:263-263`），
-  静态链入 `nghttp3_static`（`CMakeLists.txt:2848-2848`）—— 详见
+- 开关与依赖：nghttp3 走 FetchContent（`NGHTTP3_VERSION`，`CMakeLists.txt:273-273`），
+  静态链入 `nghttp3_static`（`CMakeLists.txt:2910-2910`）—— 详见
   [§5](#5-cmake-接线与那条-check-撞名的坑)。
 
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一版没做"的地方都明确
@@ -287,7 +287,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 ```
 
 - `uvcpp_http_server::listen_quic()` 在 `src/web/uvcpp_http_server.h:270`，
-  客户端那一侧是 `set_http3_enabled()`（`src/web/uvcpp_http_client.h:329-329`）。
+  客户端那一侧是 `set_http3_enabled()`（`src/web/uvcpp_http_client.h:361-361`）。
   **整个 h3 公开面都套在 `#if UVCPP_HTTP3_ENABLE` 里** —— 没编进来时它不存在，
   这是**编译期**的"没有"，不是运行时返回错误。
 - **`"h3"` 绝不进 TCP 的 ALPN 列表。** h3 只跑在 QUIC（UDP）上；在 TCP 的
@@ -360,14 +360,14 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 ## 5. CMake 接线与那条 `check` 撞名的坑
 
 1. `option(UVCPP_ENABLE_HTTP3 ...)` 挨着 QUIC 那个（`CMakeLists.txt:143-143`），
-   **默认 OFF**；两条守卫（`CMakeLists.txt:978-978`、`CMakeLists.txt:985-985`）用普通变量 `set(... OFF)` 降级并出声 ——
+   **默认 OFF**；两条守卫（`CMakeLists.txt:1002-1002`、`CMakeLists.txt:1009-1009`）用普通变量 `set(... OFF)` 降级并出声 ——
    照 QUIC 那套。**别只 grep `CMakeCache.txt`**：降级不是 cache 写，所以 cache 里
    仍然是 `UVCPP_ENABLE_HTTP3:BOOL=ON`，一个"被降级了"的配置和一个"真开了"的配置
    在 cache 那一层长得一模一样。配置成功的标志是这行 STATUS：
 
    ```
-   nghttp3 integrated (tag=v1.18.0, static)          # CMakeLists.txt:1416-1416
-   Including http3 module in build (nghttp3 v1.18.0) # CMakeLists.txt:2103-2103
+   nghttp3 integrated (tag=v1.18.0, static)          # CMakeLists.txt:1440-1440
+   Including http3 module in build (nghttp3 v1.18.0) # CMakeLists.txt:2144-2144
    ```
 
 2. **依赖用 `FetchContent_Declare` + `Populate` + `add_subdirectory(... EXCLUDE_FROM_ALL)`，
@@ -385,17 +385,17 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
    要删掉 `build*/_deps/uvcpp-nghttp3-src/` 再 configure。
 
 4. **后置断言两条**：`if(NOT TARGET nghttp3_static)` FATAL
-   （`CMakeLists.txt:1404-1404`；**裸目标名，没有 ALIAS**，别去猜
+   （`CMakeLists.txt:1428-1428`；**裸目标名，没有 ALIAS**，别去猜
    `nghttp3::nghttp3_static`），以及把 `POSITION_INDEPENDENT_CODE` 读回来断言
-   （`CMakeLists.txt:1339-1339`）—— 后者是"Linux 上 `libuvcpp.so` 链接失败"这件事的成因。
+   （`CMakeLists.txt:1363-1363`）—— 后者是"Linux 上 `libuvcpp.so` 链接失败"这件事的成因。
 
 5. **三处编译定义同步**：`cmake/uvcpp_config.h.in` 的 `UVCPP_HTTP3_ENABLE` 段、
    目录级 `add_compile_definitions`、PUBLIC `target_compile_definitions`，
-   外加 `_uvcpp_literal01(UVCPP_HTTP3_ENABLE UVCPP_ENABLE_HTTP3)`（`CMakeLists.txt:2410-2410`）。
+   外加 `_uvcpp_literal01(UVCPP_HTTP3_ENABLE UVCPP_ENABLE_HTTP3)`（`CMakeLists.txt:2470-2470`）。
    四处不一致会以 `#error` 或静默的 ABI 错配收场，`check_config_contract.py` 盯着
    其中一个方向。
 
-6. **链接是 PRIVATE**（`CMakeLists.txt:2848-2848` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
+6. **链接是 PRIVATE**（`CMakeLists.txt:2910-2910` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
    （`src/http3/uvcpp_h3_connection.h:287`），它经公开头调用、链接期解析。
@@ -410,7 +410,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
    模块"，所以 §3.3 那条明明只用 web 层 API 的片段也列了
    `<http3/uvcpp_h3_connection.h>` —— 不列的话它会**被编**，而它调的
    `set_http3_enabled()` / `listen_quic()` 整段在 `#if UVCPP_HTTP3_ENABLE` 里
-   （`uvcpp_http_client.h:329`、`uvcpp_http_server.h:220`），于是报的是"未声明的
+   （`src/web/uvcpp_http_client.h:361-361`、`uvcpp_http_server.h:220`），于是报的是"未声明的
    成员"：那是**假红**（文档没腐烂，是那个包没编 h3）。
    登记之后，`config-contract` job 手里那个包会把这三条判成 `[跳·默认关]` 而不是
    `[跳]`，**退出码不会抬到 3**。两个宏（`UVCPP_QUIC_ENABLE`、`UVCPP_HTTP3_ENABLE`）
@@ -463,7 +463,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
 `src/web/uvcpp_http_server.h:1666-1666`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
-的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:502-508`）
+的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:534-540`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假
 的分支。不新增每连接或每请求的 `std::function`，不新增锁、不新增分配、不新增虚调用。
 
@@ -488,7 +488,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 1. **别指望从公开 h3 头里看到 nghttp3。** `<nghttp3/nghttp3.h>` 只出现在私有的
    `src/http3/uvcpp_h3_nghttp3.h` 里，而它和持有 nghttp3 句柄的
-   `src/http3/uvcpp_h3_session.h` **两个都不安装**（`CMakeLists.txt:3186-3186`）、打包
+   `src/http3/uvcpp_h3_session.h` **两个都不安装**（`CMakeLists.txt:3253-3253`）、打包
    也排除。理由与 quic 那一对逐字相同：一是使用者不该被逼着去配 nghttp3 的搜索
    路径才能 include 一个本库的头；二是 `uvcpp_h3_session.h` 的字段布局直接跟着
    nghttp3 的版本走 —— 一旦漏进公开面，那个版本就变成了本库的 ABI。这处排除与
@@ -530,7 +530,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 9. **`h3_header` / `h3_response` 这类小件不能花括号初始化，这是 C++11 的硬规矩。**
    它们有一格带默认成员初值（`kind = h3_header_kind::REGULAR`），而"C++11 里带
    默认成员初值的类**不算聚合体**"—— 这条限制到 C++14 才放开。本库的编译标准是
-   C++11（`CMakeLists.txt:265-265` 的 `set(CMAKE_CXX_STANDARD 11)`），所以
+   C++11（`CMakeLists.txt:275-275` 的 `set(CMAKE_CXX_STANDARD 11)`），所以
    `h3_header{"accept", "*/*", …}` 在消费者那里编不过，报的是
    `no matching function for call to 'h3_header::h3_header(<brace-enclosed
    initializer list>)'`。**逐格赋值**不会踩到它，本库自己的代码也是这么写的

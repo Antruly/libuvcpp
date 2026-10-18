@@ -260,12 +260,12 @@ int  connect(const std::string& url,
              std::function<void(uvcpp_ws_connection*, int error)> cb);  // src/web/uvcpp_ws_client.h:66
 int  connect_wait(const std::string& url, uvcpp_ws_connection*& out_conn,
                   int timeout_ms = 30000);                              // src/web/uvcpp_ws_client.h:70
-uvcpp_ws_connection* session() const;                                   // src/web/uvcpp_ws_client.h:83
+uvcpp_ws_connection* session() const;                                   // src/web/uvcpp_ws_client.h:102-102
 void close(ws_close_code code = ws_close_code::NORMAL,
-           const std::string& reason = std::string());                  // src/web/uvcpp_ws_client.h:122
-int  run(uv_run_mode md = UV_RUN_DEFAULT);                              // src/web/uvcpp_ws_client.h:129
-void stop();                                                            // src/web/uvcpp_ws_client.h:130
-void set_ssl_context(uvcpp_ssl_context* ctx);                           // src/web/uvcpp_ws_client.h:169
+           const std::string& reason = std::string());                  // src/web/uvcpp_ws_client.h:141-141
+int  run(uv_run_mode md = UV_RUN_DEFAULT);                              // src/web/uvcpp_ws_client.h:148-148
+void stop();                                                            // src/web/uvcpp_ws_client.h:149-149
+void set_ssl_context(uvcpp_ssl_context* ctx);                           // src/web/uvcpp_ws_client.h:188-188
 ```
 
 ```cpp
@@ -309,7 +309,7 @@ void doc_run_client() {
 
 ### 客户端没有 `on_ping` / `on_pong` 转发
 
-`cli.on_*` 只有 text / binary / close / error 四个（`src/web/uvcpp_ws_client.h:105-108`），
+`cli.on_*` 只有 text / binary / close / error 四个（`src/web/uvcpp_ws_client.h:124-127`），
 而连接层有 ping / pong（`src/web/uvcpp_ws_connection.h:174`）。要观测 ping/pong 得
 `cli.session()->on_ping(...)` 自己拿指针装 —— 注意 `session()` 终结后返回 `nullptr`
 （`src/web/uvcpp_ws_client.cpp:424`）。连接层仍会自动回 pong，不受影响。
@@ -425,7 +425,7 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 `conn->enable_compression(true, dp)`（`src/web/uvcpp_ws_server.cpp:243`），
 客户端自动 `conn->enable_compression(false, deflate_params_)`
 （`src/web/uvcpp_ws_client.cpp:384`）。要关掉就 `set_compression(cfg)` 把 `enabled` 置 false
-（`src/web/uvcpp_ws_server.h:234` / `src/web/uvcpp_ws_client.h:164`，**只在
+（`src/web/uvcpp_ws_server.h:234` / `src/web/uvcpp_ws_client.h:183-183`，**只在
 `UVCPP_ZLIB_ENABLE=1` 时编译**）。
 
 阈值 `set_compress_min_size(size_t n)` 默认 `0`，也就是**都压**

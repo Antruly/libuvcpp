@@ -11,14 +11,14 @@
 `web/` 的两条线（`uvcpp_http_server` / `uvcpp_http_client`）各有一份接好的实现可以照抄，
 本页在 [§5](#5-服务端怎么回一条响应) 与 [§6](#6-客户端怎么发一条请求) 给了它们的调用序列。
 
-- 打开方式：`-DUVCPP_ENABLE_NGHTTP2=ON`。**默认 OFF**（`CMakeLists.txt:249-249`），
+- 打开方式：`-DUVCPP_ENABLE_NGHTTP2=ON`。**默认 OFF**（`CMakeLists.txt:259-259`），
   而且缺 OpenSSL 或缺 web 模块时会被**强制**置 OFF 并打 warning
-  （`CMakeLists.txt:613-613`、`CMakeLists.txt:622-622`）—— 因为 `uvcpp_h2_stream`
+  （`CMakeLists.txt:623-623`、`CMakeLists.txt:632-632`）—— 因为 `uvcpp_h2_stream`
   里直接放 `uvcpp_http_request` / `uvcpp_http_response`
   （`src/http2/uvcpp_h2_session.h:70`）。
 - 包含方式：`<http2/uvcpp_h2_session.h>`、`<http2/uvcpp_h2_connection.h>`、
   `<http2/uvcpp_h2_common.h>`。私有的 `<http2/uvcpp_h2_nghttp2.h>` **不安装**
-  （`CMakeLists.txt:3145-3145`）。
+  （`CMakeLists.txt:3212-3212`）。
 
 > 本页讲**怎么用**。它与 [HTTP/2 支持现状](./http2-status.md) 分工：那篇讲
 > **实现进度、写死的折衷、已知缺口**，本页不重复那些，需要时直接链过去。
@@ -72,12 +72,12 @@ int drain(std::string& out, size_t max_bytes = 0);                // src/http2/u
 ## 2. 编译期条件
 
 `UVCPP_NGHTTP2_ENABLE` **在任何构建里都有定义**，只是值不同：ON ⇒ `1`，OFF ⇒ `0`
-（`CMakeLists.txt:2408-2408`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
+（`CMakeLists.txt:2468-2468`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
 （`src/http2/uvcpp_h2_common.h:19`、`src/http2/uvcpp_h2_session.h:33`、`src/http2/uvcpp_h2_connection.h:27`）。
 
 为 0 时：头**还在**（源码树里能 include、也编得过），但里面**一个类型都不声明** ——
 写 `uvcpp_h2_session s(true);` 会"未定义类型"。安装出来的包里则**根本没有这几个头**
-（`CMakeLists.txt:3145-3145` 只在开关 ON 时装）。
+（`CMakeLists.txt:3212-3212` 只在开关 ON 时装）。
 
 所以使用者的写法是把自己的那段包起来：
 
@@ -188,7 +188,7 @@ struct callbacks {
    （`src/http2/uvcpp_h2_connection.cpp:115-115` 用 `read_start_events`），
    而没连上的 client 上这个调用返回 `UV_ENOTCONN` —— **而且那个失败是静默的**，
    没人会再 arm 一次。库内正解是等到 connect 成功回调里才 `new`
-   （`src/web/uvcpp_http_client.cpp:312`）。
+   （`src/web/uvcpp_http_client.cpp:321-321`）。
 2. **ALPN 必须已经协商成 `h2`。** connection 的构造函数**不校验**这一点
    （`src/http2/uvcpp_h2_connection.cpp:56` 只存指针），但头文件的参数说明要求它
    （`src/http2/uvcpp_h2_connection.h:54`）。谁建谁自己判：
@@ -279,7 +279,7 @@ done)` → 最后一块 `end_stream = true`。三处要点：
 **低层没有请求侧的合并入口** —— `uvcpp_h2_connection` 上的四个 `send_*` 全是响应侧的。
 客户端提交完请求**必须自己调 `flush()`**。这一点在
 `tests/functional/web_ssl_h2_server_func.cpp:460` 有一段专门的告诫，
-库内正解在 `src/web/uvcpp_http_client.cpp:1359-1359`：
+库内正解在 `src/web/uvcpp_http_client.cpp:1368-1368`：
 
 ```cpp
 // doc-snippet: fragment — 从库内调用点摘的三句，前后文不在本页
@@ -314,12 +314,12 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 ```
 
 `uvcpp_http_client` 那条线是同一套顺序：`set_http2_enabled(true)`
-（`src/web/uvcpp_http_client.cpp:1275-1275`）→ `connect()` 里 `enable_tls` 加 ALPN 名单
-（`:275` / `:291`，`h2` 在前、`http/1.1` 兜底）→ connect 成功回调里读
-`tls_alpn_selected()`（`:310`）→ `start_h2()`（`:314` → `:1298-1298`）→ 装回调（`:1300-1300`）
-→ `h2_->start(sc, cc)`（`:1334-1334`）→ `send()` 分流到 `send_h2`（`:440`）。
+（`src/web/uvcpp_http_client.cpp:1284-1284`）→ `connect()` 里 `enable_tls` 加 ALPN 名单
+（`src/web/uvcpp_http_client.cpp:284-284` / `src/web/uvcpp_http_client.cpp:300-300`，`h2` 在前、`http/1.1` 兜底）→ connect 成功回调里读
+`tls_alpn_selected()`（`src/web/uvcpp_http_client.cpp:319-319`）→ `start_h2()`（`src/web/uvcpp_http_client.cpp:323-323` → `src/web/uvcpp_http_client.cpp:1307-1307`）→ 装回调（`src/web/uvcpp_http_client.cpp:1309-1309`）
+→ `h2_->start(sc, cc)`（`src/web/uvcpp_http_client.cpp:1343-1343`）→ `send()` 分流到 `send_h2`（`src/web/uvcpp_http_client.cpp:449-449`）。
 
-**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:474-474`、
+**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:506-506`、
 `src/web/uvcpp_http_server.h:357-357`）—— 低层的两条线都要显式打开，
 只有 `webapp/` 框架层是零配置自动协商。
 
@@ -349,7 +349,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 **二、客户端交付响应只能放 `on_response_end`。** 带 body 的响应里 `on_response` 的
 `end_stream` **恒为 false**，而 DATA 的 END_STREAM 不经过任何回调 ——
 没有 `on_response_end` 就分不出"响应到头了"和"响应全收完了"
-（`src/web/uvcpp_http_client.cpp:1312-1312`、`src/http2/uvcpp_h2_session.h:155-161`）。
+（`src/web/uvcpp_http_client.cpp:1321-1321`、`src/http2/uvcpp_h2_session.h:155-161`）。
 
 另外，**服务端侧的 `uvcpp_h2_stream::response` 初值是 `HTTP_STATUS_NONE` 而不是 `200`**
 （`src/http2/uvcpp_h2_session.h:71`）。这不是疏漏：流在响应头到达之前被 RST
@@ -473,7 +473,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:863-863
 
 可不可重试的判定**不在这一层**，在 `web/` 侧：`H2_ERR_REFUSED_STREAM` 才算
 `retryable`，`NO_ERROR` 与 `CANCEL` 都算正常收尾
-（`src/web/uvcpp_http_client.cpp:1445-1445`）。
+（`src/web/uvcpp_http_client.cpp:1454-1454`）。
 
 ---
 
@@ -484,7 +484,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:863-863
 
 **`uvcpp_h2_connection` 必须在 socket 连上之后才建。** 它自己装读回调，
 而没连上的 client 上 `read_start_events` 返回 `UV_ENOTCONN` —— 那个失败没人会再 arm
-（`src/web/uvcpp_http_client.cpp:312`、`tests/functional/web_ssl_h2_server_func.cpp:409`）。
+（`src/web/uvcpp_http_client.cpp:321-321`、`tests/functional/web_ssl_h2_server_func.cpp:409`）。
 
 **ALPN 要自己确认。** 构造函数不校验 `tls_alpn_selected() == "h2"`，但头文件的参数
 说明要求它已经协商好（`src/http2/uvcpp_h2_connection.h:54`）。谁建谁判。

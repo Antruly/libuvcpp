@@ -53,7 +53,7 @@
   会把明文整条腿判死，而两个都收等于给混淆代理开后门，RFC 9113 §8.1.1）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
   收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:558-558`）。
-- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1425-1425`，RFC 9113 §8.7）：
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1434-1434`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
@@ -73,7 +73,7 @@
 
 ### 1.3 三个接入面
 
-- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:263`）
+- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:295-295`）
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:355-355`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
@@ -82,13 +82,13 @@
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
 - **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
   写明了理由（引了就把 nghttp2 的 include 路径扩散给每个使用者与测试 TU）。
-  `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:249-249`），缺 OpenSSL 或缺 web
+  `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:259-259`），缺 OpenSSL 或缺 web
   模块时还会被强制置 OFF 并告警。
 
 ### 1.4 依赖与产物
 
 `nghttp2` 是**唯一被强制静态**的依赖：`uvcpp_nghttp2_configure()`
-（`CMakeLists.txt:644-644`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
+（`CMakeLists.txt:654-654`，在 function 作用域里 `BUILD_STATIC_LIBS ON`）把一个
 静态 `nghttp2_static` 交给链接器。实测 `pe_imports()`：开了 h2 的 DLL 与没开的
 相比，非白名单依赖集合**都是** `llhttp.dll uv.dll zlib1.dll` —— 开 h2 不新增
 任何 DLL 依赖。
@@ -146,7 +146,7 @@
   `tcp_` 里、`uv_run` 的嵌套计数要在 `uv_run` 返回之后才减），谁来拆都是往栈上还在用的
   内存里写。代价是**每个这样被删掉的客户端漏一份**（`uvcpp_loop` + `uvcpp_tcp_client`
   + 解析器，h2 上再加一个 nghttp2 会话）。这与 `~uvcpp_tcp_client`
-  （`src/net/uvcpp_tcp_client.cpp:324-324`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
+  （`src/net/uvcpp_tcp_client.cpp:325-325`，同一句判据）、`~uvcpp_ws_client` 是同一条策略：
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
 - **一处已死的成员**（只报告，本批没动）：
@@ -159,10 +159,10 @@
   也是空的，一个字节都不影响发出去的请求。
   现在两个方向都兑现了：响应说 `close`（含 `Connection` 逗号列表里不在首项的
   `close`）就在交付回调之前清掉 `HTTP_CLIENT_CONNECTED`
-  （`src/web/uvcpp_http_client.cpp:710-730`），第二次 `send()` 同步拒成
+  （`src/web/uvcpp_http_client.cpp:719-739`），第二次 `send()` 同步拒成
   `UV_ENOTCONN` —— 与 h2 那条 `peer_goaway_received()` 的提前拦截同一形状；
   `set_keep_alive(false)` 则让请求真的带上 `connection: close`
-  （`src/web/uvcpp_http_client.cpp:516-535`）。
+  （`src/web/uvcpp_http_client.cpp:525-544`）。
   用例：`tests/functional/web_http_client_keepalive_func.cpp`。
   两件事都属于 h1，与本页的 h2 无关，留在这儿只为了让下次盘查的人不必再核一遍。
 
@@ -377,7 +377,7 @@ ctest --test-dir build-h2 -C Release --timeout 60
    - `copy_test_dlls` 是 `add_custom_target(... ALL ...)`，命令全是
      `${CMAKE_COMMAND} -E copy_if_different`，**一个 `pwsh` 都不沾**，构建日志里
      "Copy uvcpp/libuv DLLs into test folders" 那行就是它。它确实会跑。真正
-     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:3471-3471`
+     `0xc0000135` 满屏的根因是这张目标**曾经没带 `ALL`**（见 `CMakeLists.txt:3551-3551`
      的注释），与 `pwsh` 无关。
    - 日志里那句 `'pwsh.exe' 不是内部或外部命令` 来自 **vcpkg 的
      `scripts/buildsystems/msbuild/vcpkg.targets`**（`applocal.ps1`），而且它自己
