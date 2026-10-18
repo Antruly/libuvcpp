@@ -148,13 +148,17 @@ uint64_t seed_once() {
  * 客户端决定不了自己落在盘上的名字。名字可预测本身不是主要威胁（攻击者对
  * `upload_dir` 没有写权限），但"不用客户端给的名字"是。
  *
- * 锁只防"有人在别的线程建会话"（正常用法是整个上传都在 loop 线程上）。
- * `std::mt19937_64` 不是线程安全的，一条 mutex 换掉一整类难查的问题。
+ * `std::mt19937_64` 不是线程安全的，而 `set_loops(n)` 之后这个函数会在 n 个
+ * 循环线程上被跑到 —— 早先的写法是一把**进程级** `static mutex`，它把上传
+ * 路径上所有循环串成了一条线（每个会话建一次，多循环下就是一个跨循环的
+ * 串行点）。改成每线程一份之后没有共享状态，也就不需要锁。
+ *
+ * 种子也逐线程摇：共用同一个种子会让不同线程拿到**同一个序列**，而它们本来
+ * 就可能在同一个时刻各建一个会话 —— 撞名由 `O_EXCL` 兜底，但那是一次白跑的
+ * 失败重试。`seed_once()` 每次调都是独立的 `random_device` + 时间。
  */
 std::string make_temp_name() {
-  static std::mutex mu;
-  static std::mt19937_64 rng(seed_once());
-  std::lock_guard<std::mutex> lk(mu);
+  thread_local std::mt19937_64 rng(seed_once());
   const uint64_t v = rng();
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%016llx",

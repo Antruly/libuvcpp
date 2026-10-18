@@ -496,7 +496,14 @@ bool uvcpp_web_router::add(http_method method, const std::string& pattern,
     // 不能省。`full_pattern("")` 会经 join_pattern 变成 "/"，于是
     // `get("")` 被**静默**注册成根路由 —— 调用方以为注册失败了（或者以为
     // 注册了别的什么），实际却抢走了 "/"。宁可吵。
-    UVCPP_LOG_WARN(log_category::ROUTER) << "拒绝注册空模式";
+    //
+    // 方法名要打出来：这条警告不带调用点，只有 "GET" / "POST" 这种信息能让
+    // 对方翻回自己的注册处（issue #37：一个"只有 /hello"的 app 也报这条，
+    // 打出来才能确定空串是从哪个 verb 进来的）。
+    UVCPP_LOG_WARN(log_category::ROUTER)
+        << "拒绝注册空模式（" << http_method_str(method)
+        << "）—— 空串会经规范化成 \"/\" 并抢走根路由，所以这里直接拒绝；"
+           "要注册根路由请写 \"/\"";
     return false;
   }
   if (!table_) table_.reset(new router_table());
@@ -538,7 +545,10 @@ bool uvcpp_web_router::any(const std::string& pattern,
     return false;
   }
   if (pattern.empty()) {
-    UVCPP_LOG_WARN(log_category::ROUTER) << "拒绝注册空模式";
+    // 与 `add()` 那条同一句，只是没有 verb 可打（`any` 不绑方法）。
+    UVCPP_LOG_WARN(log_category::ROUTER)
+        << "拒绝注册空模式（ANY）—— 空串会经规范化成 \"/\" 并抢走根路由，"
+           "所以这里直接拒绝；要注册根路由请写 \"/\"";
     return false;
   }
   if (!table_) table_.reset(new router_table());
