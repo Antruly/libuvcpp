@@ -27,11 +27,16 @@
 namespace uvcpp {
 namespace socks5_detail {
 
-/** @brief 增量解析的三种结果。 */
+/**
+ * @brief 增量解析的三种结果。
+ *
+ * 格式错误那档叫 `MALFORMED` 而不是 `ERROR`：Windows 的 `<wingdi.h>` 有
+ * `#define ERROR 0`，宏展开不看 `enum class` 作用域（同 `log_level::ERR`）。
+ */
 enum class parse_status {
   NEED_MORE,  ///< 缓冲里还没有完整的一帧
   OK,         ///< 解析出一帧，`consumed` 是它占的字节数
-  ERROR       ///< 格式错误（版本/RSV/长度/ATYP）
+  MALFORMED   ///< 格式错误（版本/RSV/长度/ATYP）
 };
 
 // 各阶段允许的最大帧长（超过即可判定为恶意/错位，直接断连接）。

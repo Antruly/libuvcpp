@@ -50,7 +50,7 @@ void test_resp2_types() {
         "STATUS");
 
   check(feed_one(p, "-ERR unknown command 'foo'\r\n", v) &&
-            v.type() == uvcpp::uvcpp_redis_type::ERROR && v.is_error() &&
+            v.type() == uvcpp::uvcpp_redis_type::ERROR_REPLY && v.is_error() &&
             v.as_string() == "ERR unknown command 'foo'",
         "ERROR");
 
@@ -131,7 +131,7 @@ void test_resp3_types() {
         "map");
 
   check(feed_one(p, "!21\r\nSYNTAX invalid syntax\r\n", v) &&
-            v.type() == uvcpp::uvcpp_redis_type::ERROR &&
+            v.type() == uvcpp::uvcpp_redis_type::ERROR_REPLY &&
             v.as_string() == "SYNTAX invalid syntax",
         "blob error");
 

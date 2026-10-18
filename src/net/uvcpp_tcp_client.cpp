@@ -1332,7 +1332,7 @@ void uvcpp_tcp_client::socks5_feed(const char* data, std::size_t len,
                                                 socks5_in_.size(), used,
                                                 method);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         socks5_last_error_ = "malformed method-selection reply";
         socks5_finish(UV_EPROTO, life);
         return;
@@ -1393,7 +1393,7 @@ void uvcpp_tcp_client::socks5_feed(const char* data, std::size_t len,
           socks5_detail::parse_auth_response(socks5_in_.data(),
                                              socks5_in_.size(), used, status);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         socks5_last_error_ = "malformed authentication reply";
         socks5_finish(UV_EPROTO, life);
         return;
@@ -1420,7 +1420,7 @@ void uvcpp_tcp_client::socks5_feed(const char* data, std::size_t len,
           socks5_detail::parse_reply(socks5_in_.data(), socks5_in_.size(),
                                      used, rep, bound);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         socks5_last_error_ = "malformed CONNECT reply";
         socks5_finish(UV_EPROTO, life);
         return;

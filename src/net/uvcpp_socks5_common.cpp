@@ -66,7 +66,7 @@ parse_status parse_address_ex(const char* p, std::size_t len, std::size_t& off,
       std::memcpy(&a4.sin_addr, p + off, 4);
       off += 4;
       char text[INET_ADDRSTRLEN] = {0};
-      if (uv_ip4_name(&a4, text, sizeof(text)) != 0) return parse_status::ERROR;
+      if (uv_ip4_name(&a4, text, sizeof(text)) != 0) return parse_status::MALFORMED;
       int port = 0;
       if (!read_port(p, len, off, port)) return parse_status::NEED_MORE;
       out.atyp = uvcpp_socks5_atyp::IPV4;
@@ -82,7 +82,7 @@ parse_status parse_address_ex(const char* p, std::size_t len, std::size_t& off,
       std::memcpy(&a6.sin6_addr, p + off, 16);
       off += 16;
       char text[INET6_ADDRSTRLEN] = {0};
-      if (uv_ip6_name(&a6, text, sizeof(text)) != 0) return parse_status::ERROR;
+      if (uv_ip6_name(&a6, text, sizeof(text)) != 0) return parse_status::MALFORMED;
       int port = 0;
       if (!read_port(p, len, off, port)) return parse_status::NEED_MORE;
       out.atyp = uvcpp_socks5_atyp::IPV6;
@@ -93,7 +93,7 @@ parse_status parse_address_ex(const char* p, std::size_t len, std::size_t& off,
     case uvcpp_socks5_atyp::DOMAIN_NAME: {
       std::uint8_t n = 0;
       if (!read_u8(p, len, off, n)) return parse_status::NEED_MORE;
-      if (n == 0) return parse_status::ERROR;
+      if (n == 0) return parse_status::MALFORMED;
       if (off + n > len) return parse_status::NEED_MORE;
       std::string host(p + off, n);
       off += n;
@@ -105,7 +105,7 @@ parse_status parse_address_ex(const char* p, std::size_t len, std::size_t& off,
       return parse_status::OK;
     }
   }
-  return parse_status::ERROR;  // 0x00 / 0x02 / 0x05... 都不是合法 ATYP
+  return parse_status::MALFORMED;  // 0x00 / 0x02 / 0x05... 都不是合法 ATYP
 }
 
 }  // namespace
@@ -225,11 +225,11 @@ parse_status parse_greeting(const char* p, std::size_t len,
                             std::size_t& consumed,
                             std::vector<std::uint8_t>& methods) {
   consumed = 0;
-  if (len > kMaxGreetingBytes) return parse_status::ERROR;
+  if (len > kMaxGreetingBytes) return parse_status::MALFORMED;
   if (len < 2) return parse_status::NEED_MORE;
-  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::ERROR;
+  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::MALFORMED;
   const std::size_t n = static_cast<std::uint8_t>(p[1]);
-  if (n == 0) return parse_status::ERROR;
+  if (n == 0) return parse_status::MALFORMED;
   const std::size_t total = 2 + n;
   if (len < total) return parse_status::NEED_MORE;
   methods.assign(p + 2, p + total);
@@ -242,7 +242,7 @@ parse_status parse_method_selection(const char* p, std::size_t len,
                                     uvcpp_socks5_method& method) {
   consumed = 0;
   if (len < 2) return parse_status::NEED_MORE;
-  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::ERROR;
+  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::MALFORMED;
   method = static_cast<uvcpp_socks5_method>(static_cast<std::uint8_t>(p[1]));
   consumed = 2;
   return parse_status::OK;
@@ -252,12 +252,12 @@ parse_status parse_auth_request(const char* p, std::size_t len,
                                 std::size_t& consumed, std::string& user,
                                 std::string& password) {
   consumed = 0;
-  if (len > kMaxAuthBytes) return parse_status::ERROR;
+  if (len > kMaxAuthBytes) return parse_status::MALFORMED;
   std::size_t off = 0;
   std::uint8_t ver = 0;
   std::uint8_t ulen = 0;
   if (!read_u8(p, len, off, ver)) return parse_status::NEED_MORE;
-  if (ver != 0x01) return parse_status::ERROR;
+  if (ver != 0x01) return parse_status::MALFORMED;
   if (!read_u8(p, len, off, ulen)) return parse_status::NEED_MORE;
   std::string u;
   if (!read_bytes(p, len, off, ulen, u)) return parse_status::NEED_MORE;
@@ -275,7 +275,7 @@ parse_status parse_auth_response(const char* p, std::size_t len,
                                  std::size_t& consumed, std::uint8_t& status) {
   consumed = 0;
   if (len < 2) return parse_status::NEED_MORE;
-  if (static_cast<std::uint8_t>(p[0]) != 0x01) return parse_status::ERROR;
+  if (static_cast<std::uint8_t>(p[0]) != 0x01) return parse_status::MALFORMED;
   status = static_cast<std::uint8_t>(p[1]);
   consumed = 2;
   return parse_status::OK;
@@ -285,10 +285,10 @@ parse_status parse_request(const char* p, std::size_t len,
                            std::size_t& consumed, uvcpp_socks5_command& cmd,
                            uvcpp_socks5_endpoint& target) {
   consumed = 0;
-  if (len > kMaxRequestBytes) return parse_status::ERROR;
+  if (len > kMaxRequestBytes) return parse_status::MALFORMED;
   if (len < 4) return parse_status::NEED_MORE;
-  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::ERROR;
-  if (static_cast<std::uint8_t>(p[2]) != 0x00) return parse_status::ERROR;  // RSV
+  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::MALFORMED;
+  if (static_cast<std::uint8_t>(p[2]) != 0x00) return parse_status::MALFORMED;  // RSV
   cmd = static_cast<uvcpp_socks5_command>(static_cast<std::uint8_t>(p[1]));
   std::size_t off = 3;
   const parse_status st = parse_address_ex(p, len, off, target);
@@ -302,8 +302,8 @@ parse_status parse_reply(const char* p, std::size_t len,
                          uvcpp_socks5_endpoint& bound) {
   consumed = 0;
   if (len < 4) return parse_status::NEED_MORE;
-  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::ERROR;
-  if (static_cast<std::uint8_t>(p[2]) != 0x00) return parse_status::ERROR;
+  if (static_cast<std::uint8_t>(p[0]) != 0x05) return parse_status::MALFORMED;
+  if (static_cast<std::uint8_t>(p[2]) != 0x00) return parse_status::MALFORMED;
   rep = static_cast<uvcpp_socks5_reply>(static_cast<std::uint8_t>(p[1]));
   std::size_t off = 3;
   const parse_status st = parse_address_ex(p, len, off, bound);
@@ -317,8 +317,8 @@ parse_status decode_udp_datagram(const char* p, std::size_t len,
                                  std::size_t& payload_off) {
   payload_off = 0;
   if (len < 4) return parse_status::NEED_MORE;
-  if (p[0] != '\0' || p[1] != '\0') return parse_status::ERROR;  // RSV
-  if (p[2] != '\0') return parse_status::ERROR;                  // FRAG != 0
+  if (p[0] != '\0' || p[1] != '\0') return parse_status::MALFORMED;  // RSV
+  if (p[2] != '\0') return parse_status::MALFORMED;                  // FRAG != 0
   std::size_t off = 3;
   const parse_status st = parse_address_ex(p, len, off, from);
   if (st != parse_status::OK) return st;

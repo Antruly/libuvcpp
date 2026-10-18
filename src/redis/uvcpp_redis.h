@@ -63,7 +63,14 @@ struct uvcpp_redis_value_factory;
  */
 enum class uvcpp_redis_type : std::uint8_t {
   STATUS,      ///< `+OK\r\n`
-  ERROR,       ///< `-ERR ...\r\n`（错误也是一种应答：回调的 status 仍是 0）
+  /**
+   * @brief `-ERR ...\r\n`（错误也是一种应答：回调的 `status` 仍是 0）。
+   *
+   * 叫 `ERROR_REPLY` 而不是 `ERROR`：Windows 的 `<wingdi.h>` 有
+   * `#define ERROR 0`，宏展开不看 `enum class` 作用域，写成 `ERROR`
+   * 在 windows.h 之后 include 本头时直接编不过（同 `log_level::ERR`）。
+   */
+  ERROR_REPLY,
   INTEGER,     ///< `:1000\r\n`
   BULK,        ///< `$5\r\nhello\r\n`（也含 RESP3 的大整数与逐字字符串）
   ARRAY,       ///< `*2\r\n...`（也含 RESP3 的 push `>`）

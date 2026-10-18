@@ -179,7 +179,7 @@ uvcpp_redis_parser::result parse_value(cursor& c, int depth, bool& push,
           return uvcpp_redis_parser::DONE;
         }
         case '-': {
-          out = make_node(uvcpp_redis_type::ERROR);
+          out = make_node(uvcpp_redis_type::ERROR_REPLY);
           out->text.assign(text, line_len);
           return uvcpp_redis_parser::DONE;
         }
@@ -273,7 +273,7 @@ uvcpp_redis_parser::result parse_value(cursor& c, int depth, bool& push,
         out = make_node(uvcpp_redis_type::BULK);
         out->text.assign(c.p + data_off + 4, data_len - 4);
       } else if (t == '!') {
-        out = make_node(uvcpp_redis_type::ERROR);
+        out = make_node(uvcpp_redis_type::ERROR_REPLY);
         out->text.assign(c.p + data_off, data_len);
       } else {
         out = make_node(uvcpp_redis_type::BULK);
@@ -444,7 +444,7 @@ bool uvcpp_redis_value::is_null() const {
 }
 
 bool uvcpp_redis_value::is_error() const {
-  return p_ != nullptr && p_->type == uvcpp_redis_type::ERROR;
+  return p_ != nullptr && p_->type == uvcpp_redis_type::ERROR_REPLY;
 }
 
 const std::string& uvcpp_redis_value::as_string() const {

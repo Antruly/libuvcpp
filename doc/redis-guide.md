@@ -110,7 +110,7 @@ URL 解析失败时 `connect()` **直接返回错误码且不触发回调**（�
 | `uvcpp_redis_type` | 线上编码 | 取值方式 |
 |---|---|---|
 | `STATUS` | `+OK\r\n` | `as_string()` |
-| `ERROR` | `-ERR ...\r\n` / `!<len>` | `as_string()`；`is_error()` 为真 |
+| `ERROR_REPLY` | `-ERR ...\r\n` / `!<len>` | `as_string()`；`is_error()` 为真 |
 | `INTEGER` | `:1000\r\n` | `as_integer()` |
 | `BULK` | `$5\r\nhello\r\n` | `as_string()` |
 | `ARRAY` | `*2\r\n...` | `size()` / `at(i)` |
@@ -207,7 +207,7 @@ class uvcpp_redis_client {
 ### 5.2 Redis 的错误应答不是传输错误
 
 `-ERR` / `-WRONGTYPE` 这类应答**是一种应答**：回调的 `status == 0`，
-`reply.type() == ERROR`、`reply.is_error()` 为真、`reply.as_string()` 是服务器原话。
+`reply.type() == ERROR_REPLY`、`reply.is_error()` 为真、`reply.as_string()` 是服务器原话。
 传输错误（断线、写失败、解析失败）才让 `status` 非 0。
 
 这两类必须分开：前者说明"命令写错了"，重连没有意义；后者说明"连接没了"。

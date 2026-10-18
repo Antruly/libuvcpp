@@ -405,7 +405,7 @@ void socks5_server_conn::drive() {
           socks5_detail::parse_greeting(in_.data(), in_.size(), consumed,
                                         methods);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         // 问候都解不出来：没有合法的应答可发，直接收摊。
         notify_session(UV_EPROTO);
         shutdown();
@@ -458,7 +458,7 @@ void socks5_server_conn::drive() {
       const socks5_detail::parse_status st = socks5_detail::parse_auth_request(
           in_.data(), in_.size(), consumed, user, password);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         notify_session(UV_EPROTO);
         shutdown();
         return;
@@ -496,7 +496,7 @@ void socks5_server_conn::drive() {
       const socks5_detail::parse_status st = socks5_detail::parse_request(
           in_.data(), in_.size(), consumed, cmd, target);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         // 请求头都解不出来：同样没有合法的应答可发。
         notify_session(UV_EPROTO);
         shutdown();

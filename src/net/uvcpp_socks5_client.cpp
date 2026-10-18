@@ -360,7 +360,7 @@ void uvcpp_socks5_client::drive() {
           socks5_detail::parse_method_selection(in_.data(), in_.size(), used,
                                                 method);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         fail(UV_EPROTO, "malformed method-selection reply", true);
         return;
       }
@@ -412,7 +412,7 @@ void uvcpp_socks5_client::drive() {
           socks5_detail::parse_auth_response(in_.data(), in_.size(), used,
                                              status);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         fail(UV_EPROTO, "malformed authentication reply", true);
         return;
       }
@@ -432,7 +432,7 @@ void uvcpp_socks5_client::drive() {
       const socks5_detail::parse_status st = socks5_detail::parse_reply(
           in_.data(), in_.size(), used, rep, bound);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         fail(UV_EPROTO, "malformed SOCKS5 reply", true);
         return;
       }
@@ -500,7 +500,7 @@ void uvcpp_socks5_client::drive() {
       const socks5_detail::parse_status st = socks5_detail::parse_reply(
           in_.data(), in_.size(), used, rep, peer);
       if (st == socks5_detail::parse_status::NEED_MORE) return;
-      if (st == socks5_detail::parse_status::ERROR) {
+      if (st == socks5_detail::parse_status::MALFORMED) {
         fail(UV_EPROTO, "malformed BIND reply", true);
         return;
       }

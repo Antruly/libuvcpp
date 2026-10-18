@@ -32,7 +32,7 @@ static const char* parse_status_name(parse_status st) {
   switch (st) {
     case parse_status::NEED_MORE: return "NEED_MORE";
     case parse_status::OK:        return "OK";
-    case parse_status::ERROR:     return "ERROR";
+    case parse_status::MALFORMED:     return "ERROR";
   }
   return "?";
 }
@@ -140,16 +140,16 @@ static void test_greeting() {
   // 超过上界 ⇒ ERROR（不是 NEED_MORE：再等也不会变短）。
   std::string huge = g3;
   huge.push_back('\0');
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_greeting(huge.data(), huge.size(), consumed, out));
 
   // 空方法表、错误版本都是坏的。
   const std::string empty_methods("\x05\x00", 2);
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_greeting(empty_methods.data(), empty_methods.size(),
                                  consumed, out));
   const std::string bad_ver("\x04\x01\x00", 3);
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_greeting(bad_ver.data(), bad_ver.size(), consumed, out));
 
   // encode_greeting 拒绝空表与超长表。
@@ -168,7 +168,7 @@ static void test_greeting() {
                   parse_method_selection(one.data(), one.size(), consumed, sel));
   CHECK(sel == uvcpp_socks5_method::NO_AUTH);
   const std::string bad("\x04\x00", 2);
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_method_selection(bad.data(), bad.size(), consumed, sel));
   CHECK_EQ_STATUS(parse_status::NEED_MORE,
                   parse_method_selection(one.data(), 1, consumed, sel));
@@ -210,7 +210,7 @@ static void test_username_password() {
   // 版本不是 0x01 ⇒ ERROR。
   std::string bad = req;
   bad[0] = '\x02';
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_auth_request(bad.data(), bad.size(), consumed, user,
                                      pass));
 
@@ -228,7 +228,7 @@ static void test_username_password() {
   CHECK_EQ_STATUS(parse_status::NEED_MORE,
                   parse_auth_response(ok.data(), 1, consumed, status));
   const std::string bad_ver("\x02\x00", 2);
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_auth_response(bad_ver.data(), bad_ver.size(), consumed,
                                       status));
 }
@@ -294,26 +294,26 @@ static void test_request() {
 
   std::string bad_ver = good;
   bad_ver[0] = '\x04';
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_request(bad_ver.data(), bad_ver.size(), consumed, cmd,
                                 got));
 
   std::string bad_rsv = good;
   bad_rsv[2] = '\x01';
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_request(bad_rsv.data(), bad_rsv.size(), consumed, cmd,
                                 got));
 
   std::string bad_atyp = good;
   bad_atyp[3] = '\x02';
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_request(bad_atyp.data(), bad_atyp.size(), consumed, cmd,
                                 got));
 
   // 超长帧（262 是上界，263 直接判坏）。
   std::string too_long = good;
   too_long.resize(kMaxRequestBytes + 1, '\0');
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_request(too_long.data(), too_long.size(), consumed, cmd,
                                 got));
 
@@ -351,13 +351,13 @@ static void test_reply() {
 
   std::string bad_ver = wire;
   bad_ver[0] = '\x04';
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_reply(bad_ver.data(), bad_ver.size(), consumed, got_r,
                               got_b));
 
   std::string bad_rsv = wire;
   bad_rsv[2] = '\x07';
-  CHECK_EQ_STATUS(parse_status::ERROR,
+  CHECK_EQ_STATUS(parse_status::MALFORMED,
                   parse_reply(bad_rsv.data(), bad_rsv.size(), consumed, got_r,
                               got_b));
 }
@@ -403,12 +403,12 @@ static void test_udp_datagram() {
   // RSV 非 0 / FRAG 非 0 ⇒ ERROR（本实现不做分片重组）。
   std::string bad_rsv = wire;
   bad_rsv[1] = '\x01';
-  CHECK_EQ_STATUS(parse_status::ERROR, decode_udp_datagram(
+  CHECK_EQ_STATUS(parse_status::MALFORMED, decode_udp_datagram(
                                            bad_rsv.data(), bad_rsv.size(), from,
                                            payload_off));
   std::string frag = wire;
   frag[2] = '\x01';
-  CHECK_EQ_STATUS(parse_status::ERROR, decode_udp_datagram(
+  CHECK_EQ_STATUS(parse_status::MALFORMED, decode_udp_datagram(
                                            frag.data(), frag.size(), from,
                                            payload_off));
 
