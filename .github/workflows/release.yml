@@ -212,6 +212,15 @@ jobs:
           # 所以下面 configure 里那份 `_INCLUDE_DIR` 带着 `/unixodbc` 这一段。
           # 拿它是为了**编**（头），运行期加载的是 Windows 系统的 `odbc32.dll`，
           # 与这个包里的 .dll 无关（整段理由在文件头 ⑧）。
+          #
+          # `mongo-c-driver` 是 1.7.5 起的（db 的第五个后端）。与 odbc 那条同形：
+          # 只拿**头**，运行期 `LoadLibraryA` 使用者装的那份客户端库。**头的布局与
+          # 另外四个都不同**：`$MINGW_PREFIX/include/{mongoc,bson}/…` 是**平的**
+          # （2026-10-19 在 `mirror.msys2.org` 的 `mingw64.db.tar.zst` 里核过文件
+          # 表），没有 Debian 那种 `libmongoc-1.0/` 中间层，所以 configure 里的
+          # `_INCLUDE_DIR` 指 `include` 本身。这个包同时带来 `libmongoc2.dll` /
+          # `libbson2.dll`（2.x 的 SONAME 去掉了 `-1.0`）—— 那两个**不进包**，
+          # 下面那条导入表白名单会拦。
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
@@ -221,6 +230,7 @@ jobs:
             mingw-w64-x86_64-libmariadbclient
             mingw-w64-x86_64-postgresql
             mingw-w64-x86_64-unixodbc
+            mingw-w64-x86_64-mongo-c-driver
 
       - name: Configure & Build
         run: |
@@ -296,6 +306,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -326,6 +338,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -436,6 +450,7 @@ jobs:
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
               UVCPP_DB_ODBC_ENABLE \
+              UVCPP_DB_MONGODB_ENABLE UVCPP_REDIS_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -495,6 +510,10 @@ jobs:
           # 也一样在 `include/unixodbc/` 下** —— 下面 configure 里那份 `_INCLUDE_DIR`
           # 与 mingw-x64 逐字相同。理由（为什么 mingw 两条腿用 unixODBC 的头而不是
           # 微软 SDK 那份）在文件头 ⑧。
+          #
+          # `mongo-c-driver` 是 1.7.5 起的第五个后端，2026-10-19 在同一个站的
+          # `clangarm64.db.tar.zst` 里核过（2.5.4-1，与 `mingw64` 那份同版本），头的
+          # 布局也是**平**的 `include/{mongoc,bson}/`。只拿头：运行期是使用者那份。
           install: >-
             mingw-w64-clang-aarch64-clang
             mingw-w64-clang-aarch64-cmake
@@ -506,6 +525,7 @@ jobs:
             mingw-w64-clang-aarch64-libmariadbclient
             mingw-w64-clang-aarch64-postgresql
             mingw-w64-clang-aarch64-unixodbc
+            mingw-w64-clang-aarch64-mongo-c-driver
 
       # 这条腿的机器本机不存在（没有 arm64 的 Windows 开发机），三个探点只能在这里
       # 实测。这一步**故意不设断言**：要的是数据，把关交给下面真正会拦人的白名单
@@ -569,6 +589,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -596,6 +618,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/unixodbc" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -667,6 +691,7 @@ jobs:
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
               UVCPP_DB_ODBC_ENABLE \
+              UVCPP_DB_MONGODB_ENABLE UVCPP_REDIS_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -723,13 +748,13 @@ jobs:
         shell: bash
         run: bash .github/scripts/win-openssl-deps.sh
 
-      # MySQL/PG 的**头**。这条腿的机器上一份都没有：镜像里 MySQL 那一项是
+      # MySQL/PG/MongoDB 的**头**。这条腿的机器上一份都没有：镜像里 MySQL 那一项是
       # `Install-MysqlCli.ps1` 装的命令行工具（没有头），PostgreSQL 14 虽然装着
       # 但只有 x64 这一条腿有、另一条（windows-11-arm）连 PostgreSQL 都没有 ——
       # 所以两条 MSVC 腿统一用 `win-client-headers.sh` 取同一份钉死版本的头，
       # 而不是一条用镜像自带的、一条用别处来的。理由与"为什么不用 MSYS2 那份"
-      # 全在脚本头部。
-      - name: Install MySQL / PostgreSQL client headers
+      # 全在脚本头部。MongoDB 那一份（1.7.5 起）是同一个脚本、同一个来路。
+      - name: Install MySQL / PostgreSQL / MongoDB client headers
         shell: bash
         run: bash .github/scripts/win-client-headers.sh
 
@@ -769,6 +794,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR=C:/client-headers/mysql \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR=C:/client-headers/pgsql \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$odbc_inc" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR=C:/client-headers/mongo \
             -DUVCPP_BUILD_EXPAND=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
           cmake --build build-msvc --config Release --parallel 4
@@ -815,6 +842,7 @@ jobs:
             UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
             UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
             UVCPP_DB_ODBC_ENABLE \
+            UVCPP_DB_MONGODB_ENABLE UVCPP_REDIS_ENABLE \
             UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           exit $rc
 
@@ -1052,8 +1080,9 @@ jobs:
 
       # 与 msvc-x64 同一个脚本、同一份钉死版本的头：`windows-11-arm` 那张镜像里
       # **连 PostgreSQL 都没有**（`Windows11-Arm64-Readme.md` 里 postgres 零命中，
-      # MySQL 那一项是命令行工具、没有头），所以这一条腿必须自己取。
-      - name: Install MySQL / PostgreSQL client headers
+      # MySQL 那一项是命令行工具、没有头），所以这一条腿必须自己取。MongoDB 那份
+      # （1.7.5 起）与另两份同在一个脚本里。
+      - name: Install MySQL / PostgreSQL / MongoDB client headers
         shell: bash
         run: bash .github/scripts/win-client-headers.sh
 
@@ -1102,6 +1131,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR=C:/client-headers/mysql \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR=C:/client-headers/pgsql \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$odbc_inc" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR=C:/client-headers/mongo \
             -DUVCPP_BUILD_EXPAND=ON \
             -DOPENSSL_ROOT_DIR="$(cygpath -m "$GITHUB_WORKSPACE")/openssl-arm64" \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
@@ -1180,6 +1211,7 @@ jobs:
             UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
             UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
             UVCPP_DB_ODBC_ENABLE \
+            UVCPP_DB_MONGODB_ENABLE UVCPP_REDIS_ENABLE \
             UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           exit $rc
 
@@ -1443,7 +1475,8 @@ jobs:
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            for p in libmysqlclient-dev libpq-dev unixodbc-dev; do
+            for p in libmysqlclient-dev libpq-dev unixodbc-dev \
+                     libmongoc-dev libbson-dev; do
               ok=""
               for v in $(apt-cache madison "$p" \
                            | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); if (!seen[$2]++) print $2}'); do
@@ -1474,6 +1507,12 @@ jobs:
           test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
           test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
           test -f "$HOME/client-headers/usr/include/sql.h"
+          # MongoDB（1.7.5 起）是这批里唯一**跨两个包**的：`libmongoc-dev` 带
+          # `mongoc/`，`libbson-dev` 带 `bson/`（前者 Depends 后者，但我们只
+          # `apt-get download`、不 install，所以两个包名都得在循环里）。两份头
+          # **必须同时到** —— 后端两个都 include，缺一份 configure 就静默降级。
+          test -f "$HOME/client-headers/usr/include/libmongoc-1.0/mongoc/mongoc.h"
+          test -f "$HOME/client-headers/usr/include/libbson-1.0/bson/bson.h"
           # ODBC 这一份的判据**不是 `unixodbc.h` 在不在**（那是发行版的属性，不是我们
           # 的要求，见本步上面那一大段），而是把后端真正 include 的那两个头**编一次**：
           # 后端只有 `#include <sql.h>` 与 `<sqlext.h>`（Windows 上多一个 `<windows.h>`
@@ -1486,6 +1525,20 @@ jobs:
             echo "::error title=linux-odbc-headers::-I $_inc 编不过 <sql.h>/<sqlext.h> —— ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
             sed 's/^/    /' "$_probe/err.txt" || true
             find "$_inc" -maxdepth 3 -name '*.h' | sort | sed 's/^/    /' || true
+            exit 1
+          fi
+          rm -rf "$_probe"
+          # MongoDB 与 ODBC 同一条规矩：判据是**编一次**，不是"文件在不在"。头跨
+          # 两个目录（`libmongoc-1.0/` 与 `libbson-1.0/`），所以两个 `-I` 都要给 ——
+          # `mongoc/mongoc.h` 自己按 `<bson/bson.h>` 找过去。发行版换布局时这里红，
+          # 而不是让 configure 静默降级、发一个少后端的包。
+          _probe=$(mktemp -d)
+          printf '#include <mongoc/mongoc.h>\n#include <bson/bson.h>\n' > "$_probe/probe.cpp"
+          if ! c++ -std=c++11 -I "$_inc/libmongoc-1.0" -I "$_inc/libbson-1.0" \
+                   -fsyntax-only "$_probe/probe.cpp" 2>"$_probe/err.txt"; then
+            echo "::error title=linux-mongoc-headers::-I $_inc/libmongoc-1.0 + libbson-1.0 编不过 <mongoc/mongoc.h>/<bson/bson.h> —— MongoDB 后端会静默降级（生成头里 UVCPP_DB_MONGODB_ENABLE=0），包少一个后端"
+            sed 's/^/    /' "$_probe/err.txt" || true
+            find "$_inc" -maxdepth 2 -name '*.h' | sort | sed 's/^/    /' || true
             exit 1
           fi
           rm -rf "$_probe"
@@ -1599,6 +1652,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -1627,6 +1682,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -1675,7 +1732,7 @@ jobs:
             # 这条比另两个更值得留神：**这条腿上根本没装 unixODBC 的运行库**（只
             # `dpkg -x` 摊了头，那份 `libodbc.so.2` 不在链接器搜索路径里），所以
             # 真出现在这里，说明有人把运行库装上了并把 `RUNTIME_LOAD` 那一档弄丢了。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc)[^ ]*\.so[^ ]*' | sort -u || true)
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc|mongoc|bson)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -1706,9 +1763,9 @@ jobs:
             # `libuvcpp.so` 量过：加了它之后仍然是 0（没加之前量到的也是 0 ——
             # 这条判据今天**不会**红，它拦的是"哪天有人把 `uvcpp_db_odbc_api.h`
             # 里那张符号表换回直接调用"）。
-            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]' || true)
+            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]|mongoc_|bson_' || true)
             if [ "$undef" != "0" ]; then
-              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ/SQL* 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
+              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ/SQL*/mongoc_/bson_ 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
               rc=1
             fi
           done
@@ -1745,6 +1802,7 @@ jobs:
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
               UVCPP_DB_ODBC_ENABLE \
+              UVCPP_DB_MONGODB_ENABLE UVCPP_REDIS_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -1808,6 +1866,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON
@@ -1823,7 +1883,8 @@ jobs:
                    UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE \
                    UVCPP_WSDL_ENABLE UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
                    UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
-                   UVCPP_DB_ODBC_ENABLE UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE; do
+                   UVCPP_DB_ODBC_ENABLE UVCPP_DB_MONGODB_ENABLE \
+                   UVCPP_REDIS_ENABLE UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE; do
             grep -qE "^#  define ${k} 1$" "$hdr" || {
               echo "::error title=linux-pkg-module-off::${k} 在 build-pkg 里不是 1，发行版包会缺功能"
               grep -E "^#  define ${k} " "$hdr" || true
@@ -1965,7 +2026,8 @@ jobs:
           mkdir -p "$HOME/client-headers"
           (
             cd "$HOME/client-headers"
-            for p in libmysqlclient-dev libpq-dev unixodbc-dev; do
+            for p in libmysqlclient-dev libpq-dev unixodbc-dev \
+                     libmongoc-dev libbson-dev; do
               ok=""
               for v in $(apt-cache madison "$p" \
                            | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); if (!seen[$2]++) print $2}'); do
@@ -1996,6 +2058,12 @@ jobs:
           test -f "$HOME/client-headers/usr/include/mysql/mysql.h"
           test -f "$HOME/client-headers/usr/include/postgresql/libpq-fe.h"
           test -f "$HOME/client-headers/usr/include/sql.h"
+          # MongoDB（1.7.5 起）是这批里唯一**跨两个包**的：`libmongoc-dev` 带
+          # `mongoc/`，`libbson-dev` 带 `bson/`（前者 Depends 后者，但我们只
+          # `apt-get download`、不 install，所以两个包名都得在循环里）。两份头
+          # **必须同时到** —— 后端两个都 include，缺一份 configure 就静默降级。
+          test -f "$HOME/client-headers/usr/include/libmongoc-1.0/mongoc/mongoc.h"
+          test -f "$HOME/client-headers/usr/include/libbson-1.0/bson/bson.h"
           # ODBC 这一份的判据**不是 `unixodbc.h` 在不在**（那是发行版的属性，不是我们
           # 的要求，见本步上面那一大段），而是把后端真正 include 的那两个头**编一次**：
           # 后端只有 `#include <sql.h>` 与 `<sqlext.h>`（Windows 上多一个 `<windows.h>`
@@ -2008,6 +2076,20 @@ jobs:
             echo "::error title=linux-odbc-headers::-I $_inc 编不过 <sql.h>/<sqlext.h> —— ODBC 后端会静默降级（生成头里 UVCPP_DB_ODBC_ENABLE=0），包少一个后端"
             sed 's/^/    /' "$_probe/err.txt" || true
             find "$_inc" -maxdepth 3 -name '*.h' | sort | sed 's/^/    /' || true
+            exit 1
+          fi
+          rm -rf "$_probe"
+          # MongoDB 与 ODBC 同一条规矩：判据是**编一次**，不是"文件在不在"。头跨
+          # 两个目录（`libmongoc-1.0/` 与 `libbson-1.0/`），所以两个 `-I` 都要给 ——
+          # `mongoc/mongoc.h` 自己按 `<bson/bson.h>` 找过去。发行版换布局时这里红，
+          # 而不是让 configure 静默降级、发一个少后端的包。
+          _probe=$(mktemp -d)
+          printf '#include <mongoc/mongoc.h>\n#include <bson/bson.h>\n' > "$_probe/probe.cpp"
+          if ! c++ -std=c++11 -I "$_inc/libmongoc-1.0" -I "$_inc/libbson-1.0" \
+                   -fsyntax-only "$_probe/probe.cpp" 2>"$_probe/err.txt"; then
+            echo "::error title=linux-mongoc-headers::-I $_inc/libmongoc-1.0 + libbson-1.0 编不过 <mongoc/mongoc.h>/<bson/bson.h> —— MongoDB 后端会静默降级（生成头里 UVCPP_DB_MONGODB_ENABLE=0），包少一个后端"
+            sed 's/^/    /' "$_probe/err.txt" || true
+            find "$_inc" -maxdepth 2 -name '*.h' | sort | sed 's/^/    /' || true
             exit 1
           fi
           rm -rf "$_probe"
@@ -2061,6 +2143,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -2088,6 +2172,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON \
@@ -2127,7 +2213,7 @@ jobs:
             # 这条比另两个更值得留神：**这条腿上根本没装 unixODBC 的运行库**（只
             # `dpkg -x` 摊了头，那份 `libodbc.so.2` 不在链接器搜索路径里），所以
             # 真出现在这里，说明有人把运行库装上了并把 `RUNTIME_LOAD` 那一档弄丢了。
-            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc)[^ ]*\.so[^ ]*' | sort -u || true)
+            bad=$(ldd "$so" | grep -oE 'lib(ssl|crypto|z|brotli|uv|llhttp|nghttp2|ngtcp2|nghttp3|sqlite3|mysqlclient|pq|odbc|mongoc|bson)[^ ]*\.so[^ ]*' | sort -u || true)
             if [ -n "$bad" ]; then
               echo "::error title=linux-not-self-contained::$so 动态依赖了第三方库: $bad"
               rc=1
@@ -2158,9 +2244,9 @@ jobs:
             # `libuvcpp.so` 量过：加了它之后仍然是 0（没加之前量到的也是 0 ——
             # 这条判据今天**不会**红，它拦的是"哪天有人把 `uvcpp_db_odbc_api.h`
             # 里那张符号表换回直接调用"）。
-            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]' || true)
+            undef=$(nm -D -u "$so" 2>/dev/null | grep -cE 'mysql_|PQ|SQL[A-Z]|mongoc_|bson_' || true)
             if [ "$undef" != "0" ]; then
-              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ/SQL* 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
+              echo "::error title=linux-db-symbols-still-linked::$so 里还有 $undef 个未定义的 mysql_/PQ/SQL*/mongoc_/bson_ 符号 —— 运行期加载那一档没生效（漏改的调用点，或 UVCPP_DB_RUNTIME_LOAD 被关掉了）"
               rc=1
             fi
           done
@@ -2197,6 +2283,7 @@ jobs:
               UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
               UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
               UVCPP_DB_ODBC_ENABLE \
+              UVCPP_DB_MONGODB_ENABLE UVCPP_REDIS_ENABLE \
               UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE
           done
           exit $rc
@@ -2241,6 +2328,8 @@ jobs:
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$HOME/client-headers/usr/include/postgresql" \
             -DUVCPP_DB_ODBC_INCLUDE_DIR="$HOME/client-headers/usr/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$HOME/client-headers/usr/include" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_ROOT_DIR="$HOME/openssl-quic" \
             -DUVCPP_BUILD_EXPAND=ON
@@ -2254,7 +2343,8 @@ jobs:
                    UVCPP_CAPI_ENABLE UVCPP_QUIC_ENABLE UVCPP_HTTP3_ENABLE \
                    UVCPP_WSDL_ENABLE UVCPP_DB_ENABLE UVCPP_DB_SQLITE_ENABLE \
                    UVCPP_DB_MYSQL_ENABLE UVCPP_DB_PGSQL_ENABLE \
-                   UVCPP_DB_ODBC_ENABLE UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE; do
+                   UVCPP_DB_ODBC_ENABLE UVCPP_DB_MONGODB_ENABLE \
+                   UVCPP_REDIS_ENABLE UVCPP_YYJSON_ENABLE UVCPP_BROTLI_ENABLE; do
             grep -qE "^#  define ${k} 1$" "$hdr" || {
               echo "::error title=linux-pkg-module-off::${k} 在 build-pkg 里不是 1，发行版包会缺功能"
               grep -E "^#  define ${k} " "$hdr" || true

@@ -37,8 +37,8 @@ green on all four platforms (2026-09-29). 1.4.1 added the three `http3` entries 
 QUIC + web, so it could not exist before those two did), which takes the table to **26**
 checks; and then the three `capi` entries (the C ABI layer — Ubuntu, macOS and MSVC; see §5),
 which takes it to **29**. The database module added four more — a `db` entry on Ubuntu, macOS
-and MSVC, plus the single `db-servers` job (MySQL + PostgreSQL through service containers,
-Ubuntu only; see §5) — after which the running total in this paragraph read **33**. 1.6.34
+and MSVC, plus the single `db-servers` job (MySQL + PostgreSQL + MongoDB + Redis through
+service containers, Ubuntu only; see §5) — after which the running total in this paragraph read **33**. 1.6.34
 added the three `yyjson` entries (the optional second JSON backend — Ubuntu, macOS and MSVC;
 see §5), and while doing so the running total was recounted cell by cell against the table
 below: it had been **36**, not 33, since the `db` entries landed (`zlib-off`, the `db-servers`
@@ -100,7 +100,7 @@ layout did not cover them either.
 | macOS `config-contract` | `package_release.py`'s `PLATFORMS` has no macOS key — see §5. |
 | MinGW + WSDL | The same single MinGW job as the three gaps above. `release.yml`'s `mingw-x64` and `mingw-arm64` legs **do** enable WSDL, so it is covered at release time but not on push/PR — which is why it was verified locally on the MinGW x64 shape before being turned on there. |
 | macOS + WSDL | No entry, and macOS never compiles `src/wsdl/`. Lower risk than the MinGW gap above: macOS is not a release platform, so there is no path on which it reaches a user unbuilt. |
-| MySQL / PostgreSQL on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The two remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 service containers). The other three `db` entries set both backends **explicitly `OFF`** rather than leaving them on: with no server the two tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. |
+| MySQL / PostgreSQL / MongoDB / Redis on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 + MongoDB 7 + Redis 7 service containers). The other three `db` entries set both SQL backends **explicitly `OFF`** rather than leaving them on: with no server the tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. `redis_real_func` uses the same 3-vs-REQUIRE contract; on the non-Ubuntu legs it simply takes the skip path. |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` on Linux | On Linux and macOS the `db` entries use the **default** path (`find_package(SQLite3)` against the system/SDK library); the from-source path is exercised on MSVC and MinGW. What is platform-specific about it is TLS and extraction — `file(DOWNLOAD)` over Schannel on Windows, MSYS2's libcurl + `ca-certificates` on MinGW — and both of those are covered. The Linux release legs run it on every tag. The cost of this entry, and it is a real one: MSVC and MinGW now need the network **at configure time** (hash-pinned zip from sqlite.org). An offline machine can pre-place it, see §5. |
 | **The Linux `UVCPP_STATIC_RUNTIME=ON` shared library is built but never *run*** | The only Linux cell that passes the switch is `config-contract`, and that tree is `UVCPP_BUILD_TESTS=OFF`; `check_doc_snippets.py` compiles its snippets with `-c` and never links or runs them, so that shape is only ever *compiled* on push/PR. Measured 2026-10-14 (and it is why this row exists): with the switch on, a shared `libuvcpp.so` and a consumer linked against the system `libstdc++.so.6` each instantiate the same COMDAT templates (`std::once_flag`'s `__once_proxy`, `std::__future_base::_State_baseV2`) and ELF resolves them "executable first", so one side jumps into the other's frame — nine functional tests crash (five SEGV, four SIGABRT), and relinking a *single consumer* that way reproduces it, so it is not a test artefact. `release.yml`'s two Linux legs therefore stopped passing the flag in 1.7.0, and the verdict on the shipped Linux `.so` comes from the release dry run's `Test` step — **not from any push/PR gate**. MinGW keeps the flag (PE has no global symbol scope). See `doc/build-guide.md` §Runtime behaviour. |
 | `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
@@ -683,21 +683,24 @@ The four entries, and what each one measures:
   On MinGW it also avoids `libsqlite3.dll.a`: linking that would put `sqlite3.dll` into the DLL's
   imports and trip the self-containment assertion in that file. Configure-time network is required;
   an offline machine can drop the hash-pinned zip into `${build}/_deps/uvcpp-sqlite/`.
-- **Ubuntu `db-servers`** — the two *remote* backends, against real servers. `services:` is
-  job-level, so this cannot be a matrix entry (it would drag two containers into all twelve Ubuntu
-  cells, including `basic-static`). It is the mirror image of the `db` entries: SQLite explicitly
-  `OFF`, MySQL and PostgreSQL `ON`, plus two **reverse** assertions — the configure log must *not*
-  contain `db: SQLite 后端开`, and `test_db_sqlite_func` must *not* be registered. Without those,
-  "`-DUVCPP_ENABLE_DB_SQLITE=OFF` stopped working" is a fully green path on a machine that has
-  sqlite3 anyway.
+- **Ubuntu `db-servers`** — the *remote* db backends (MySQL, PostgreSQL and, since 1.7.5,
+  MongoDB) against real servers, plus Redis 7 for `redis_real_func` (Redis is not a db
+  backend — it needs a real server, which is the same criterion). `services:` is
+  job-level, so this cannot be a matrix entry (it would drag four containers into all twelve
+  Ubuntu cells, including `basic-static`). It is the mirror image of the `db` entries: SQLite
+  explicitly `OFF`, MySQL / PostgreSQL / MongoDB `ON`, plus two **reverse** assertions — the
+  configure log must *not* contain `db: SQLite 后端开`, and `test_db_sqlite_func` must *not*
+  be registered. Without those, "`-DUVCPP_ENABLE_DB_SQLITE=OFF` stopped working" is a fully
+  green path on a machine that has sqlite3 anyway.
 
 What is specific to `db-servers`:
 
-- **`UVCPP_DB_TEST_REQUIRE=1` is the judgement, not `ctest`.** Without a URL the two remote tests
+- **`UVCPP_DB_TEST_REQUIRE=1` is the judgement, not `ctest`.** Without a URL the remote tests
   exit **3** by design, and `tests/functional/CMakeLists.txt` gives them `SKIP_RETURN_CODE 3`, so
-  ctest prints `***Skipped`. That is honest, but a job whose only two interesting tests skipped is
-  **not red**. `UVCPP_DB_TEST_REQUIRE` turns "no URL" into exit 1. Servers are up; if the tests
-  skip, the configuration is wrong, and green would be the worst possible outcome.
+  ctest prints `***Skipped`. That is honest, but a job whose only interesting tests skipped is
+  **not red**. `UVCPP_DB_TEST_REQUIRE` turns "no URL" into exit 1 (and
+  `UVCPP_REDIS_TEST_REQUIRE=1` does the same for `redis_real_func`). Servers are up; if the
+  tests skip, the configuration is wrong, and green would be the worst possible outcome.
 - **MySQL 8 keeps its default authentication plugin** (`caching_sha2_password`), with no
   `--default-authentication-plugin=mysql_native_password`. That flag is the usual reflex, and
   the argument for it sounds solid — caching_sha2 over a **non-TLS** connection makes the client
@@ -723,9 +726,10 @@ What is specific to `db-servers`:
   than dropping it, and a wrong URL is red rather than a quiet skip. (The cluster was set back to
   `trust` afterwards.)
 - **The URLs live in the step's `env:`**, not in the test sources:
-  `mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test` and
-  `postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test`, matching the credentials the two
-  containers are created with.
+  `mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test`,
+  `postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test`,
+  `mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000` and
+  `redis://127.0.0.1:6379/0`, matching what the four containers are created with.
 
 **Since `1.5.3` the C surface of the module rides these same legs.** `src/capi/uvcpp_c_db.h`
 is the eighth slice of the C ABI, and its test `test_capi_db_func` looks at the *same*
@@ -747,14 +751,19 @@ above). Two things follow that are easy to get backwards:
 
 **Release configurations** pass `-DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON`
 together with `-DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON
--DUVCPP_ENABLE_DB_ODBC=ON -DUVCPP_DB_RUNTIME_LOAD=ON` on all ten configure points.
+-DUVCPP_ENABLE_DB_ODBC=ON -DUVCPP_ENABLE_DB_MONGODB=ON -DUVCPP_DB_RUNTIME_LOAD=ON` at
+all twelve configure points.
 The `RUNTIME_LOAD` is load-bearing rather than tidiness: those legs run on runners that
 have `libpq-dev` installed, `find_package(PostgreSQL QUIET)` would succeed silently, and
 the shipped `libuvcpp.so` would grow a `libpq.so.5` `DT_NEEDED` that the release `ldd`
-assertion exists to ban. Packages therefore carry **all four backends' code**, but **no
-database client library**: MySQL / PostgreSQL / ODBC symbols are taken from libraries
-loaded at run time. That is also why 1.6.x's "SQLite only" shape is gone — see
-[`db-driver-policy.md`](db-driver-policy.md) for the full policy.
+assertion exists to ban. Packages therefore carry **all five backends' code**, but **no
+database client library**: MySQL / PostgreSQL / ODBC / MongoDB symbols are taken from
+libraries loaded at run time. That is also why 1.6.x's "SQLite only" shape is gone — see
+[`db-driver-policy.md`](db-driver-policy.md) for the full policy. MongoDB's `libmongoc` /
+`libbson` sit in the same "installed by the user, only referenced" class, and their
+headers come from `libmongoc-dev` / the MSYS2 `mongo-c-driver` package exactly like the
+other client headers. Redis is not in this class at all: it is a built-in RESP client
+with no external library, so every leg compiles it without any package.
 
 ### The macro contract: `config-contract` (and the `mingw64` tail)
 
@@ -884,16 +893,18 @@ sudo apt-get install -y libuv1-dev zlib1g-dev ninja-build
 # libraries are deliberately NOT installed: installing them would turn "explicitly
 # off" into "found and compiled", against two tests that have no server to reach)
 sudo apt-get install -y libuv1-dev libsqlite3-dev ninja-build
-# db-servers — the mirror image: the two remote client libraries, no libsqlite3-dev
-sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev ninja-build
+# db-servers — the mirror image: the remote client libraries, no libsqlite3-dev
+# (libmongoc-dev Depends libbson-dev; both headers and the runtime libs come with it)
+sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev libmongoc-dev ninja-build
 # config-contract — the tree is a copy of the release configuration, so its SQLite comes
 # from the pinned amalgamation (UVCPP_DB_SQLITE_FROM_SOURCE) and needs no package at all
 sudo apt-get install -y libssl-dev zlib1g-dev ninja-build pkg-config
 ```
 
-`db-servers` also declares the two `services:` (MySQL 8.0 and PostgreSQL 16, with
-`--health-cmd` waits), which is why it is a **separate job** — `services:` is job-level, and
-putting it on the matrix job would start two containers for each of the twelve Ubuntu cells.
+`db-servers` also declares the four `services:` (MySQL 8.0, PostgreSQL 16, MongoDB 7 and
+Redis 7, each with its `--health-cmd` wait), which is why it is a **separate job** —
+`services:` is job-level, and putting it on the matrix job would start four containers for
+each of the twelve Ubuntu cells.
 
 ### macOS (`ci-macos.yml`)
 ```bash

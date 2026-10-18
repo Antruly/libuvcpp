@@ -47,6 +47,7 @@ jobs:
             mingw-w64-x86_64-python
             mingw-w64-x86_64-libmariadbclient
             mingw-w64-x86_64-postgresql
+            mingw-w64-x86_64-mongo-c-driver
 
       - name: Configure & Build
         run: |
@@ -91,10 +92,11 @@ jobs:
           #   链进 dll 不留任何外部名字。
           #
           # ⑤ 1.7.0 起发布包要"全功能"，这一格跟着补三样：`UVCPP_ENABLE_YYJSON`、
-          #   `UVCPP_ENABLE_BROTLI`（配 `UVCPP_BROTLI_FROM_SOURCE=ON`）与 db 的两个
-          #   **远程后端**。理由与 `release.yml` 里新写的 ⑥⑦ 两段逐字同源，这里只
+          #   `UVCPP_ENABLE_BROTLI`（配 `UVCPP_BROTLI_FROM_SOURCE=ON`）与 db 的
+          #   **远程后端**。1.7.5 起再加 MongoDB（只找头、不链接，缺库是
+          #   `NO_DRIVER`）。理由与 `release.yml` 里新写的 ⑥⑦ 两段逐字同源，这里只
           #   记这一格特有的两点：
-          #     · 这三样在 MinGW 上**从来没被编过**（`doc/ci-guide.md` §1 的"未覆盖的
+          #     · 这几样在 MinGW 上**从来没被编过**（`doc/ci-guide.md` §1 的"未覆盖的
           #       格"原先写着"MinGW 不建 yyjson / 不建 brotli"）—— 而发布腿的
           #       mingw-x64 / mingw-arm64 恰恰就是 MinGW。不在这里补，这两个组合
           #       第一次相遇就是打标签那天；
@@ -115,6 +117,8 @@ jobs:
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \
@@ -141,7 +145,8 @@ jobs:
           #     "后端在"与"没有链进来"两件事。
           for m in 'yyjson integrated' 'Including yyjson module in build' \
                    'brotli enabled' 'HTTP body compressor: UVCPP_HTTP_COMPRESS_ENABLE=(1||1)' \
-                   'db: MySQL 后端开（运行时加载' 'db: PostgreSQL 后端开（运行时加载'; do
+                   'db: MySQL 后端开（运行时加载' 'db: PostgreSQL 后端开（运行时加载' \
+                   'db: MongoDB 后端开'; do
             grep -q "$m" ci-logs/mingw-configure.log || {
               echo "::error title=mingw-modules::配置消息里没有 '$m' —— 这一格没在测它（发布腿会）"
               grep -E 'yyjson|brotli|db:|CMake (Warning|Error)' ci-logs/mingw-configure.log | head -20
@@ -175,6 +180,8 @@ jobs:
             -DUVCPP_DB_RUNTIME_LOAD=ON \
             -DUVCPP_DB_MYSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include/mysql" \
             -DUVCPP_DB_PGSQL_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
+            -DUVCPP_ENABLE_DB_MONGODB=ON \
+            -DUVCPP_DB_MONGODB_INCLUDE_DIR="$(cygpath -m "$MINGW_PREFIX")/include" \
             -DUVCPP_BUILD_EXPAND=ON -DUVCPP_STATIC_RUNTIME=ON \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON 2>&1 \

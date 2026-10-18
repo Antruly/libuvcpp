@@ -107,13 +107,18 @@ loop.run(UV_RUN_DEFAULT);
 `UVCPP_DB_RUNTIME_LOAD=ON` 时，链接行上**没有** mongoc/bson。第一次 `open()`
 才按下面的顺序找：
 
-| 库 | 环境变量（显式路径，优先） | 候选名（Linux） |
+| 库 | 环境变量（显式路径，优先） | 候选名（Linux，1.x 先试） |
 |---|---|---|
-| libmongoc | `UVCPP_DB_MONGOC_LIBRARY` | `libmongoc-1.0.so.0`、`libmongoc-1.0.so` |
-| libbson | `UVCPP_DB_BSON_LIBRARY` | `libbson-1.0.so.0`、`libbson-1.0.so` |
+| libmongoc | `UVCPP_DB_MONGOC_LIBRARY` | `libmongoc-1.0.so.0`、`libmongoc-1.0.so`、`libmongoc2.so.2`、`libmongoc2.so` |
+| libbson | `UVCPP_DB_BSON_LIBRARY` | `libbson-1.0.so.0`、`libbson-1.0.so`、`libbson2.so.2`、`libbson2.so` |
 
-macOS 是 `libmongoc-1.0.0.dylib` / `libmongoc-1.0.dylib`（bson 同理），Windows 是
-`mongoc-1.0.dll` / `libmongoc-1.0.dll`（bson 同理）。**两份都要**：缺一份就是
+**两组名字是因为 mongo-c-driver 2.0 改了 SONAME**：1.x 是 `libmongoc-1.0.so.0`，
+2.0 起是 `libmongoc2.so.2`（Windows 上 `mongoc-1.0.dll` → `libmongoc2.dll`）。
+两组都试，1.x 在前 —— Debian/Ubuntu 到 24.04 装的都还是 1.x。
+
+macOS 是 `libmongoc-1.0.0.dylib` / `libmongoc-1.0.dylib` / `libmongoc2.dylib`（bson
+同理），Windows 是 `mongoc-1.0.dll` / `libmongoc-1.0.dll` / `mongoc2.dll` /
+`libmongoc2.dll`（bson 同理）。**两份都要**：缺一份就是
 `NO_DRIVER`，错误串列出试过的名字与失败原因。
 
 句柄**永不关闭**（与 MySQL / PostgreSQL / ODBC 同一条约定：进程退出由内核回收，
@@ -124,10 +129,10 @@ macOS 是 `libmongoc-1.0.0.dylib` / `libmongoc-1.0.dylib`（bson 同理），Win
 
 | 系统 | 运行库 | 开发头 |
 |---|---|---|
-| Debian / Ubuntu | `libmongoc-1.0-0`（或 `libmongoc-1.0-0t64`）+ `libbson-1.0-0` | `libmongoc-dev`（带 `libbson-dev`） |
+| Debian / Ubuntu | `libmongoc-1.0-0`（或 `libmongoc-1.0-0t64`）+ `libbson-1.0-0`；2.x 的发行版是 `libmongoc2-2` + `libbson2-2` | `libmongoc-dev`（带 `libbson-dev`） |
 | RHEL / Fedora | `mongo-c-driver` | `mongo-c-driver-devel` |
 | macOS | `brew install mongo-c-driver` | 同一个 formula |
-| Windows | mongo-c-driver 的官方 DLL | 随开发包的头 |
+| Windows | mongo-c-driver 的官方 DLL（1.x 是 `mongoc-1.0.dll`，2.x 是 `libmongoc2.dll`） | 随开发包的头 |
 
 > Ubuntu 24.04 起运行时包带 `t64` 后缀（`time_t` 迁移），这是**包名**的差异，
 > 不影响库名。`libmongoc` 自己还依赖 `libmongocrypt.so.0`（包 `libmongocrypt0`）
@@ -294,8 +299,8 @@ libbson 的原话；`BAD_URL` 只留给连接串。
 
 - 句子里是 `UVCPP_DB_MONGOC_LIBRARY=/path（…）` → 这个路径打不开（常见是路径写错、
   或者它依赖的 `libmongocrypt.so.0` 不在 `LD_LIBRARY_PATH` 上）；
-- 句子里列出一串 `libmongoc-1.0.so.0（…）、libmongoc-1.0.so（…）` → 两者都没找到，
-  装运行库包；
+- 句子里列出一串候选名（`libmongoc-1.0.so.0（…）、…、libmongoc2.so（…）`）→ 全都
+  没找到，装运行库包；
 - 句子里是 `libbson（…）里缺少符号 …` → 版本太旧，或者那份 `.so` 根本不是 libbson。
 
 **`open()` 回 `OPEN_FAILED`，错误里是 `No suitable servers found`。**

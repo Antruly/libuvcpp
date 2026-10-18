@@ -66,23 +66,32 @@ using db_detail::mongoc_api;
 
 #if UVCPP_DB_RUNTIME_LOAD
 
+// 候选名分两组：1.x 与 2.x。**2.x 改了 SONAME**（mongo-c-driver 2.0 起
+// `libmongoc-1.0.so.0` → `libmongoc2.so.2`；Windows 上是 `libmongoc2.dll`），
+// 两者在 API 面上对我们用的这 19 个符号是同一条，所以两组的名字都试一遍。
+// 1.x 在前：Debian/Ubuntu 到 24.04 为止装的都还是 1.x，先命中就等于不多一次
+// `dlopen`。
 const char* const kMongocLibraryNames[] = {
 #if defined(_WIN32)
-    "mongoc-1.0.dll", "libmongoc-1.0.dll", nullptr
+    "mongoc-1.0.dll", "libmongoc-1.0.dll", "mongoc2.dll", "libmongoc2.dll",
+    nullptr
 #elif defined(__APPLE__)
-    "libmongoc-1.0.0.dylib", "libmongoc-1.0.dylib", nullptr
+    "libmongoc-1.0.0.dylib", "libmongoc-1.0.dylib",
+    "libmongoc2.dylib", nullptr
 #else
-    "libmongoc-1.0.so.0", "libmongoc-1.0.so", nullptr
+    "libmongoc-1.0.so.0", "libmongoc-1.0.so", "libmongoc2.so.2",
+    "libmongoc2.so", nullptr
 #endif
 };
 
 const char* const kBsonLibraryNames[] = {
 #if defined(_WIN32)
-    "bson-1.0.dll", "libbson-1.0.dll", nullptr
+    "bson-1.0.dll", "libbson-1.0.dll", "bson2.dll", "libbson2.dll", nullptr
 #elif defined(__APPLE__)
-    "libbson-1.0.0.dylib", "libbson-1.0.dylib", nullptr
+    "libbson-1.0.0.dylib", "libbson-1.0.dylib", "libbson2.dylib", nullptr
 #else
-    "libbson-1.0.so.0", "libbson-1.0.so", nullptr
+    "libbson-1.0.so.0", "libbson-1.0.so", "libbson2.so.2", "libbson2.so",
+    nullptr
 #endif
 };
 

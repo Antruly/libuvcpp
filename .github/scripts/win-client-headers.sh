@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# 在 Windows runner 上把 **MySQL / PostgreSQL 客户端库的头文件** 弄到手。
+# 在 Windows runner 上把 **MySQL / PostgreSQL / MongoDB 客户端库的头文件** 弄到手。
+# （MongoDB 那一份是 1.7.5 起加的，来路与判据与另两份完全相同。）
 #
 # 为什么需要这一步（这是 1.7.0 才发现的事，不是历史遗留）：
 #
@@ -43,20 +44,38 @@
 #   · 这条库要用的 33 个 MySQL 符号、21 个 libpq 符号，在这个版本的头里**一个不缺**
 #     （逐个 grep 过；缺一个的话 `decltype(&::name)` 会当场编不过，也算个兜底）。
 #
+# **MongoDB 那一份（1.7.5 起）是同样核过的**：
+#   · 包是 `mingw-w64-x86_64-mongo-c-driver` 2.5.4-1（2026-10-19 在
+#     `mirror.msys2.org/mingw/mingw64/mingw64.db.tar.zst` 里查到的版本）；
+#   · 头的布局与另两份**都不同**：**平的** `mingw64/include/{mongoc,bson}/`，
+#     没有 Debian 那种 `libmongoc-1.0/` 中间层（tar 文件表逐条核过）。所以落地的
+#     目录约定是 `C:/client-headers/mongo/{mongoc,bson}/`，configure 里那份
+#     `-DUVCPP_DB_MONGODB_INCLUDE_DIR=` 指 `C:/client-headers/mongo`。
+#   · 这个版本里 `bson/config.h` 的 `BSON_OS` 是 2（Windows），`bson/compat.h`
+#     走的是 `#include <winsock2.h>` 那条 Windows 分支，并且**自带**
+#     `_MSC_VER` 的 `ssize_t`/`inttypes.h` 兜底 —— 也就是说这份**为 mingw 生成**
+#     的配置头本来就是 MSVC 能吃的（没有"为 mingw 生成的东西被 MSVC 读到"这种事，
+#     另两份也是同一个道理）。
+#   · 我们要的 19 个符号（4 个 bson + 15 个 mongoc）在这个版本的头里一个不缺
+#     （逐个 `grep -w` 过）。
+#   · 2.x 的库名是 `libmongoc2.dll` / `libbson2.dll`（去掉了 `-1.0`）—— 那份 .dll
+#     **不进包**，运行期由使用者装；本仓的加载器两种名字都试。
+#
 # 判据落在**文件在不在**，不落在 curl 的退出码上：与 `win-openssl-deps.sh` 同一条
 # 规矩 —— 这一步真正要的是"这台机器上有一份能编过的头"，网络抖动、镜像改版都可能
 # 让退出码在两个方向上说谎。取不到就 `exit 1`（`::error` 里带上找过哪些 URL），
 # 绝不"跳过这一步继续编" —— 那样编出来的包缺两个后端，而它会一路走到发版。
 #
-# 目录约定：头落在 `C:/client-headers/{mysql,pgsql}`，与 `release.yml` 里两条
-# MSVC 腿的 `-DUVCPP_DB_MYSQL_INCLUDE_DIR=` / `-DUVCPP_DB_PGSQL_INCLUDE_DIR=`
-# **必须同表**。改这里就要改那里。
+# 目录约定：头落在 `C:/client-headers/{mysql,pgsql,mongo}`，与 `release.yml` 里
+# 两条 MSVC 腿的 `-DUVCPP_DB_MYSQL_INCLUDE_DIR=` / `-DUVCPP_DB_PGSQL_INCLUDE_DIR=` /
+# `-DUVCPP_DB_MONGODB_INCLUDE_DIR=` **必须同表**。改这里就要改那里。
 # ---------------------------------------------------------------------------
 set -u
 
 MIRROR="https://mirror.msys2.org/mingw/mingw64"
 MYSQL_PKG="mingw-w64-x86_64-libmariadbclient-3.4.9-1-any.pkg.tar.zst"
 PGSQL_PKG="mingw-w64-x86_64-postgresql-18.0-1-any.pkg.tar.zst"
+MONGO_PKG="mingw-w64-x86_64-mongo-c-driver-2.5.4-1-any.pkg.tar.zst"
 
 # Git Bash 下 `C:/client-headers` 与 `/c/client-headers` 指的是同一处；分两个变量
 # 写是为了不依赖 MSYS2 那套"把看起来像路径的参数自动改写"的行为（那是 msys2-runtime
@@ -87,9 +106,10 @@ fetch() {
 
 fetch "$MYSQL_PKG" mariadb || exit 1
 fetch "$PGSQL_PKG" pgsql || exit 1
+fetch "$MONGO_PKG" mongo || exit 1
 
 rm -rf "$DEST"
-mkdir -p "$DEST/mysql" "$DEST/pgsql"
+mkdir -p "$DEST/mysql" "$DEST/pgsql" "$DEST/mongo"
 
 # MySQL：整棵 `include/mysql/` 拷过去（里面有 `mysql.h` 与它 include 的那几个
 # `mariadb_*.h`/`ma_*.h`，还有 `mysql/` 子目录 —— `client_plugin.h` 那些要按
@@ -107,8 +127,21 @@ for h in libpq-fe.h libpq-events.h postgres_ext.h; do
   fi
 done
 
+# MongoDB：**两棵树都拷**（`mongoc/` 与 `bson/`），因为后端两个都 include。
+# 包里 `mingw64/include/` 这一层只有这两个目录、没有别的东西，所以"整棵拷"与
+# "逐目录拷"等价；用 `cp -r` 而不是 `cp -r include/.` 是为了**不**把将来可能出现的
+# 其他头（比如 `libmongocrypt/`）悄悄带进一个 MSVC 的 include 路径里 —— 那份
+# crypt 头在 MSVC 下没验过，而它也不在我们要的那条链上。
+for d in mongoc bson; do
+  if ! cp -r "$work/mongo/mingw64/include/$d" "$DEST/mongo/"; then
+    echo "::error title=win-client-headers::$MONGO_PKG 里没有 include/$d —— 包内容变了，钉的版本号要重挑"
+    exit 1
+  fi
+done
+
 rc=0
-for f in "$DEST/mysql/mysql.h" "$DEST/pgsql/libpq-fe.h"; do
+for f in "$DEST/mysql/mysql.h" "$DEST/pgsql/libpq-fe.h" \
+         "$DEST/mongo/mongoc/mongoc.h" "$DEST/mongo/bson/bson.h"; do
   if [ ! -f "$f" ]; then
     echo "::error title=win-client-headers::解完之后 $f 不在"
     rc=1
@@ -120,3 +153,4 @@ fi
 
 echo "MySQL 头在 $DEST_WIN/mysql：" "$(grep -m1 'MARIADB_PACKAGE_VERSION ' "$DEST/mysql/mariadb_version.h" | tr -d '\r')"
 echo "PostgreSQL 头在 $DEST_WIN/pgsql：libpq-fe.h / libpq-events.h / postgres_ext.h（$(ls "$DEST/pgsql" | wc -l | tr -d ' ') 个文件）"
+echo "MongoDB 头在 $DEST_WIN/mongo：mongoc/（$(ls "$DEST/mongo/mongoc" | wc -l | tr -d ' ') 个）与 bson/（$(ls "$DEST/mongo/bson" | wc -l | tr -d ' ') 个）"

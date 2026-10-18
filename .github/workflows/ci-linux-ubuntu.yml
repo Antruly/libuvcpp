@@ -991,27 +991,29 @@ jobs:
           exit "$rc"
 
   # ---------------------------------------------------------------------------
-  # 数据库模块的两个**远程**后端：MySQL 与 PostgreSQL
+  # 需要**真服务端**的用例：MySQL / PostgreSQL（db 模块的两个远程后端）+
+  # MongoDB（db 模块的第五个后端）+ Redis（redis 模块，不是 db 后端）
   #
-  # 为什么单开一个 job 而不挂在上面的 `db` 格上：这两个后端要一个**真的服务端**，
-  # 而 `services:` 是 **job 级**的 —— 挂到那个矩阵 job 上，十二格会各自拖起两个
-  # 容器，并且给 `basic-static` 这种"什么都不开"的格平白加两个系统依赖。
+  # 为什么单开一个 job 而不挂在上面的 `db` 格上：这几个后端要一个**真的服务端**，
+  # 而 `services:` 是 **job 级**的 —— 挂到那个矩阵 job 上，十二格会各自拖起四个
+  # 容器，并且给 `basic-static` 这种"什么都不开"的格平白加四个系统依赖。
   #
-  # 这一格的开关与 `db` 那一格**互不相交**：SQLite 显式 OFF、MySQL 与 PostgreSQL
-  # 显式 ON。于是两边红绿不同只可能归因到后端本身，不会混进"这一格是不是也开了
-  # SQLite"。开发机上这两个后端是拿系统装的 MySQL / PostgreSQL 量的（doc/db-guide.md
-  # 里记了怎么建那个一次性库）；这里换成官方镜像，量的是同一份驱动代码对**另一个
-  # 服务端版本**，以及"多用户 / 多权限的服务器上连接串该怎么写"。
+  # 这一格的开关与 `db` 那一格**互不相交**：SQLite 显式 OFF、MySQL / PostgreSQL /
+  # MongoDB 显式 ON。于是两边红绿不同只可能归因到后端本身，不会混进"这一格是不是
+  # 也开了 SQLite"。开发机上这两个 SQL 后端是拿系统装的 MySQL / PostgreSQL 量的
+  # （doc/db-guide.md 里记了怎么建那个一次性库）；这里换成官方镜像，量的是同一份
+  # 驱动代码对**另一个服务端版本**，以及"多用户 / 多权限的服务器上连接串该怎么写"。
   #
   # 判据不是"ctest 报了绿"。`tests/functional/db_mysql_func.cpp` /
-  # `db_pgsql_func.cpp` 在**没给 URL** 时按设计退 3（未判定），而
-  # `tests/functional/CMakeLists.txt` 给这两条设了 `SKIP_RETURN_CODE 3` ⇒ ctest 报
-  # `***Skipped`。"没测"与"测过了"在 ctest 摘要里是两个词，但**两个都不是红** ——
-  # 所以这里设 `UVCPP_DB_TEST_REQUIRE=1`：缺 URL 就是**失败**（退出码 1，见那两个
+  # `db_pgsql_func.cpp` / `db_mongodb_func.cpp` / `redis_real_func.cpp` 在**没给
+  # URL** 时按设计退 3（未判定），而 `tests/functional/CMakeLists.txt` 给它们设了
+  # `SKIP_RETURN_CODE 3` ⇒ ctest 报 `***Skipped`。"没测"与"测过了"在 ctest 摘要里
+  # 是两个词，但**两个都不是红** —— 所以这里设 `UVCPP_DB_TEST_REQUIRE=1`（与
+  # `UVCPP_REDIS_TEST_REQUIRE=1`）：缺 URL / 连不上就是**失败**（退出码 1，见那些
   # 文件的开头）。服务容器都起了还跳过，只可能是配置写错了，那种时候"绿"是最坏的
   # 结果。
   #
-  # 配置期照 `db` 那一格的三道门禁判（缓存开关、两个后端各自的 `db: <后端> 后端开`、
+  # 配置期照 `db` 那一格的三道门禁判（缓存开关、各后端自己的 `db: <后端> 后端开`、
   # 以及 `src/db/` 真进了源列表）。少任何一条，这一格都会去编一个"库起来了、用例
   # 却连不上"的包然后全绿。这一格不是矩阵，串没地方挂，所以写死在步骤里。
   # ---------------------------------------------------------------------------
@@ -1055,6 +1057,27 @@ jobs:
         options: >-
           --health-cmd="pg_isready -U uvcpp -d uvcpp_test"
           --health-interval=10s --health-timeout=5s --health-retries=12
+      # MongoDB 7 是 1.7.5 起的第三个远程服务端（`db_mongodb_func`）。
+      # `mongosh` 在官方镜像里自带，健康检查就用它发一条 ping —— 与另两个
+      # 容器"用服务端自己的客户端探活"同一个形状。
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+      # Redis 7 是 1.7.5 起的第四个远程服务端（`redis_real_func`）。它**不是**
+      # db 模块的后端（没有连接串后端、也不在 `uvcpp_db_drivers()` 里），只是
+      # 需要一个真的服务端来量 RESP2/RESP3 —— 放在这一格是因为"要真服务端"这条
+      # 判据相同，另开一个 job 只会多拖一次构建。
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=12
     steps:
       - uses: actions/checkout@v4
 
@@ -1069,10 +1092,18 @@ jobs:
       # 否则下一个人照着这条注释去解释一条 MariaDB 上才有的行为会白找半天。
       # **不装 `libsqlite3-dev`**：这一格的 SQLite 是显式 OFF 的，装了反而会让人
       # 以为"这一格也量过 SQLite"（而下面那句反向断言正是冲着这件事来的）。
+      #
+      # `libmongoc-dev`（1.7.5 起，它 Depends `libbson-dev`）：MongoDB 后端的头。
+      # 与两条 Linux 发布腿不同，这里**直接装**而不是 `apt-get download` + `dpkg -x`
+      # —— 那些腿不装的理由是"不破坏不装 libssl-dev 这条不变量"，这一格没有那条
+      # 约束，装进来还能顺带把运行库（`libmongoc-1.0-0` / `libbson-1.0-0`）一起
+      # 带上：这一格用的是**直接链接**（没有传 `-DUVCPP_DB_RUNTIME_LOAD=ON`），
+      # 没有运行库就起不来。
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev ninja-build
+          sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev \
+            libmongoc-dev ninja-build
 
       - name: Configure & Build
         shell: bash
@@ -1104,6 +1135,8 @@ jobs:
               -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=OFF \
               -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
+              -DUVCPP_ENABLE_DB_MONGODB=ON \
+              -DUVCPP_DB_MONGODB_INCLUDE_DIR=/usr/include \
               > ci-logs/db-servers-configure.log 2>&1 || cfg=$?
             echo "CONFIGURE_RC=$cfg"
             cat ci-logs/db-servers-configure.log
@@ -1114,7 +1147,10 @@ jobs:
             # 后两个串是 1.5.3 加 C ABI 时补的：`Including db module in build`
             # 管的是 db 那一片，`Including capi module in build` 管的是 C 面。
             # 后者**必须**是配置消息而不是 cache 比对 —— 见上面 configure 那段 ★①。
-            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'Including db module in build' 'Including capi module in build'; do
+            # `db: MongoDB 后端开` 是 1.7.5 加的：MongoDB 与 ODBC 一样走的是
+            # "找不到头就 `set(... OFF)`"那条静默降级，cache 里照旧 ON —— 所以
+            # 这一条必须看配置消息（正是下面那段注释说的第一种形状）。
+            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'db: MongoDB 后端开' 'Including db module in build' 'Including capi module in build'; do
               grep -q "$m" ci-logs/db-servers-configure.log || {
                 why=$(grep -E 'db:|CMake (Warning|Error)|找不到|No such' \
                   ci-logs/db-servers-configure.log | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
@@ -1154,20 +1190,31 @@ jobs:
 
       - name: Test
         shell: bash
-        # 三个环境变量是这一格与 `db` 那一格的**判据差别**所在：URL 给了才真的连，
-        # REQUIRE 设了才不许退 3。容器名与上面 `services:` 里那两个网络别名一致
+        # 环境变量是这一格与 `db` 那一格的**判据差别**所在：URL 给了才真的连，
+        # REQUIRE 设了才不许退 3。容器名与上面 `services:` 里那几个网络别名一致
         # （`ports:` 映射到 127.0.0.1，用哪个都行 —— 这里走 127.0.0.1，与
-        # doc/db-guide.md 里开发机上那条连接串同形）。
+        # doc/db-guide.md 里开发机上那条连接串同形）。MongoDB / Redis 那两个
+        # 变量是 1.7.5 加的，理由与另外三条逐字相同。
         env:
           UVCPP_DB_TEST_MYSQL_URL: mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test
           UVCPP_DB_TEST_PGSQL_URL: postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test
+          UVCPP_DB_TEST_MONGODB_URL: mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000
           UVCPP_DB_TEST_REQUIRE: "1"
+          UVCPP_REDIS_TEST_URL: redis://127.0.0.1:6379/0
+          UVCPP_REDIS_TEST_REQUIRE: "1"
         run: |
           tree=build-db-servers
           # `test_capi_db_func` 是 1.5.3 加的：它是**这一个 job** 唯一一次让 C 面的
           # db 包装对着**真**服务端跑（另外一个分支 SQLite 的那条腿在 `capi` 那三格）。
           # 它读的是同一组 `UVCPP_DB_TEST_*_URL`，所以这里什么都不用多传。
-          for t in test_db_mysql_func test_db_pgsql_func test_capi_db_func; do
+          #
+          # `test_db_mongodb_nodrv_func` **不在**这张单子里：这一格是直接链接形态
+          # （没传 `UVCPP_DB_RUNTIME_LOAD=ON`），"库不在"这个前提表达不出来 ——
+          # `tests/functional/CMakeLists.txt` 在这种构建里干脆不注册它（理由写在那
+          # 段排除块里）。运行期加载那条路的覆盖在 mingw 腿与两条发布腿的 configure
+          # 上，那里 REQUIRED 的是"链接行干净"，不是 ctest。
+          for t in test_db_mysql_func test_db_pgsql_func test_db_mongodb_func \
+                   test_capi_db_func test_redis_real_func; do
             if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "$t"; then
               echo "::error title=db-servers::$t 没被注册 —— 这个后端被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
               ctest --test-dir "$tree" -N 2>&1 | tail -20

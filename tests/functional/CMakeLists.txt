@@ -152,9 +152,21 @@ endif()
 #     ⇒ 摘掉（"没编进来"该表现为用例不存在，不是失败）。
 #   * `db_mongodb_nodrv_func.cpp` **必须留下**：它验的正是"后端/客户端库不在时
 #     调用方看到什么"，桩构建里同样有意义（那时它断言的是
-#     `backend_available()==false` + `NO_DRIVER`）。
+#     `backend_available()==false` + `NO_DRIVER`）。**唯一例外**是"后端编进来
+#     但直接链接"那种形态，见下面第二段。
 if(NOT UVCPP_ENABLE_DB_MONGODB)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_mongodb_func\\.cpp$")
+endif()
+
+# 第三种形态：后端编进来了、但走的是**直接链接**（`UVCPP_DB_RUNTIME_LOAD=OFF`）。
+# 这时 `db_mongodb_nodrv_func` 的前提（"两份客户端库打不开"）**表达不出来** ——
+# 库就在链接行上，`UVCPP_DB_MONGOC_LIBRARY` 那套覆盖变量根本不会被读，用例会拿
+# 真实驱动去连一个不存在的服务端、看到 `OPEN_FAILED` 而不是 `NO_DRIVER`。
+# 所以这种构建里**不注册**它：不是失败，是这一格没有它要测的那个形态。
+# 桩构建（`UVCPP_ENABLE_DB_MONGODB=OFF`）**不在此列** —— 那里 `backend_available()`
+# 是 false，用例断言的是另一句话，同样有意义。
+if(UVCPP_ENABLE_DB_MONGODB AND NOT UVCPP_DB_RUNTIME_LOAD)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_mongodb_nodrv_func\\.cpp$")
 endif()
 
 # Redis 用例同理：`UVCPP_ENABLE_REDIS=0` 时公开头整段落在 `#if` 外面，不摘

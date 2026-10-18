@@ -5,7 +5,8 @@
 
 一句话：**「支持直接项目集成」说的是仓里有后端代码，不是随包分发客户端的
 `.so` / `.dll`。** 发布包里没有 `libmysqlclient.so`、没有 `libpq.so`，也没有
-`libmongoc-1.0.so`；这些库由使用者的机器自己装，本库在运行期去找它们。
+`libmongoc` / `libbson`（1.x 叫 `libmongoc-1.0.so`，2.x 叫 `libmongoc2.so`）；
+这些库由使用者的机器自己装，本库在运行期去找它们。
 
 ## 一张表
 
@@ -15,7 +16,7 @@
 | **MySQL** | 内建 SQL 后端（`src/db/uvcpp_db_mysql.cpp`） | **不带**。发布配置 `UVCPP_DB_RUNTIME_LOAD=ON`，运行期 `dlopen` 使用者那份 `libmysqlclient` / `libmariadb` | `open()` 返回 `uvcpp_db_status::NO_DRIVER`，进程照常 |
 | **PostgreSQL** | 内建 SQL 后端（`src/db/uvcpp_db_pgsql.cpp`，目前唯一有原生异步查询路径的后端） | **不带**，同上 | 同上 |
 | **Redis** | 本仓自己实现的 RESP2 / RESP3 客户端（`redis` 模块），没有 hiredis、没有别的 Redis 客户端库 | 不需要 | —— |
-| **MongoDB** | 后端代码与运行期符号表（`db` 模块里的 MongoDB 后端） | **不带**。`libmongoc-1.0` / `libbson-1.0` 只被 `dlopen` / `LoadLibrary` 引用 | `open()` 返回 `NO_DRIVER`，进程照常 |
+| **MongoDB** | 后端代码与运行期符号表（`db` 模块里的 MongoDB 后端） | **不带**。`libmongoc` / `libbson`（1.x 与 2.x 的名字都认）只被 `dlopen` / `LoadLibrary` 引用 | `open()` 返回 `NO_DRIVER`，进程照常 |
 | **SQL Server / Oracle / 达梦 / 其他** | **不提供官方驱动**；保留 ODBC 后端作为接入面（`src/db/uvcpp_db_odbc.cpp`） | 不带 ODBC 驱动，也不带驱动管理器本身以外的任何东西 | `open()` 返回驱动管理器的原话（找不到数据源 / 找不到驱动） |
 | **ODBC 驱动本身** | 不提供、不打包 | —— | 使用者自己装 `msodbcsql18`、Oracle Instant Client ODBC、达梦 ODBC 等 |
 
