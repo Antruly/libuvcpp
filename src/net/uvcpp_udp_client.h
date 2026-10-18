@@ -74,6 +74,15 @@ class UVCPP_API uvcpp_udp_client {
   UVCPP_DEFINE_FUNC(uvcpp_udp_client)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_udp_client)
 
+  /**
+   * @brief 共用一个**外部**事件循环：本对象不拥有它，析构时不关不删。
+   *
+   * 与 `uvcpp_tcp_client(uvcpp_loop*)` 同一个形状，给"一个循环上挂多个
+   * 客户端"的场景用（SOCKS5 的 UDP 中继、服务端每条连接自己的收尾）。
+   * 句柄仍然归本对象所有：析构时该关的照关，只是不去动循环。
+   */
+  explicit uvcpp_udp_client(uvcpp_loop* external_loop);
+
   // -----------------------------------------------------------------
   // Accessors
   // -----------------------------------------------------------------
@@ -250,6 +259,8 @@ class UVCPP_API uvcpp_udp_client {
 
   uvcpp_loop* loop_ = nullptr;
   uvcpp_udp*  udp_  = nullptr;
+  /// 循环是不是自己建的：外部循环那条路上析构**不能**关它、更不能删它。
+  bool owns_loop_ = true;
   int status_       = UDP_CLIENT_NONE;
   int last_error_code_ = 0;
 

@@ -45,6 +45,13 @@ uvcpp_udp_client::uvcpp_udp_client() {
   status_ = UDP_CLIENT_NONE;
 }
 
+uvcpp_udp_client::uvcpp_udp_client(uvcpp_loop* external_loop) {
+  owns_loop_ = false;
+  loop_ = external_loop;
+  udp_  = new uvcpp_udp(loop_);
+  status_ = UDP_CLIENT_NONE;
+}
+
 std::shared_ptr<char> uvcpp_udp_client::alive_token() {
   if (!alive_token_) alive_token_.reset(new char(0));
   return alive_token_;
@@ -92,14 +99,20 @@ uvcpp_udp_client::~uvcpp_udp_client() {
     // 也答 0，走 else 里的一次 NOWAIT 收尾 —— 在"还活着"的前提下，判据带上
     // `is_active()` 提供不了任何额外信息。
     if (!udp_->is_closing()) {
-      bool close_done = false;
-      udp_->close([&close_done](uvcpp_handle*) { close_done = true; });
+      if (owns_loop_) {
+        bool close_done = false;
+        udp_->close([&close_done](uvcpp_handle*) { close_done = true; });
 
-      for (int i = 0; i < 64 && !close_done; ++i) {
-        if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
+        for (int i = 0; i < 64 && !close_done; ++i) {
+          if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
+        }
+      } else {
+        // 外部循环：**不能**在这里泵它（它可能正跑在别的对象的事件里，
+        // 甚至正跑在它自己的回调栈上）。关闭照常入队，收尾由循环的主人做。
+        udp_->close([](uvcpp_handle*) {});
       }
     } else {
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
+      if (owns_loop_ && loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
     }
   }
 
@@ -110,7 +123,10 @@ uvcpp_udp_client::~uvcpp_udp_client() {
   // `loop_alive()` 而不是 `loop_close()` —— 后者内部会 `stop()`，而 `uv_run`
   // 的 `while (r != 0 && loop->stop_flag == 0)` 是**进 body 之前**判的，
   // 停标志一立那一轮就整段空转，交替调用等于原地打转。
-  if (loop_ != nullptr) {
+  // 外部循环这条路上这一段**整段跳过**：循环不是我们的，关它等于把同一个循环
+  // 上别的对象的句柄连同它们的事件一起废掉；`delete loop_` 更是直接释放别人的
+  // 内存。句柄该关的上面已经关过了，剩下的收尾归循环的主人。
+  if (loop_ != nullptr && owns_loop_) {
     for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
       loop_->run(UV_RUN_NOWAIT);
     }
