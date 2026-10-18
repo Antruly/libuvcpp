@@ -129,6 +129,38 @@ class UVCPP_API uvcpp_http_client {
   int connect_wait(const char* host, int port, int timeout_ms = 30000);
 
   // -------------------------------------------------------------------
+  // SOCKS5 代理（RFC 1928）—— 默认关
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 让后续连接经 SOCKS5 代理建立。**必须在 `connect()` 之前调**。
+   *
+   * 打开后 `connect()` / `connect_wait()` **只连代理**：目标主机不在本地做
+   * DNS，而是以 `ATYP=DOMAIN` 交给代理解析（`curl --socks5-hostname` 的语义，
+   * 目标域名不出本机）。
+   *
+   * 顺序与 TLS 是固定的：先 SOCKS5 协商、**之后**才在同一个 socket 上做 TLS，
+   * 而 SNI/证书校验用的仍然是**目标**主机名，与代理无关。
+   *
+   * `username`/`password` 都为空 ⇒ 只提供 no-auth 一种方法；否则只提供
+   * RFC 1929 用户名密码认证（同时提供两种会让"服务端选了 no-auth 而使用者
+   * 以为自己在认证"变成静默降级）。
+   *
+   * @return 0 成功；`UV_EINVAL` 参数非法（空 host、端口越界、用户名或口令
+   *         超过 255 字节）；`UV_EBUSY` 连接已建立/正在建立；**开过
+   *         `set_http3_enabled(true)` 时 `UV_ENOTSUP`** —— h3 走 QUIC/UDP，
+   *         SOCKS5 的 UDP ASSOCIATE 不是这条腿，**绝不静默直连**（那是代理
+   *         泄漏）。反过来先设代理再开 h3，`connect()` 也返回 `UV_ENOTSUP`。
+   */
+  int set_socks5_proxy(const std::string& host, int port,
+                       const std::string& username = std::string(),
+                       const std::string& password = std::string());
+  void clear_socks5_proxy();
+  bool socks5_enabled() const;
+  /** @brief 上一次 SOCKS5 失败的人类可读原因（代理拒绝、认证失败、REP 码）。 */
+  const std::string& socks5_last_error() const;
+
+  // -------------------------------------------------------------------
   // Send request
   // -------------------------------------------------------------------
 

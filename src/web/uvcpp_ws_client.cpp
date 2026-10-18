@@ -519,5 +519,37 @@ uvcpp_ws_deflate_config uvcpp_ws_client::get_compression() const {
 void uvcpp_ws_client::set_ssl_context(uvcpp_ssl_context* ctx) { ssl_ctx_ = ctx; }
 #endif
 
+// =========================================================================
+// SOCKS5 代理
+// =========================================================================
+//
+// 全是**转发**：`tcp_` 在构造时就建好了、活到析构，所以不需要在本层另存一份
+// 配置 —— 存两份就有"哪一份才算数"的问题。协议层不承诺重连（重连是
+// `uvcpp_web_ws_client` 的事，它每次换一个全新的本对象），所以也不存在
+// "重建时配置丢了"。
+
+int uvcpp_ws_client::set_socks5_proxy(const std::string& host, int port,
+                                       const std::string& username,
+                                       const std::string& password) {
+  if (tcp_ == nullptr) return UV_EINVAL;
+  const int rc = tcp_->set_socks5_proxy(host, port, username, password);
+  if (rc != 0) last_error_ = rc;
+  return rc;
+}
+
+void uvcpp_ws_client::clear_socks5_proxy() {
+  if (tcp_ != nullptr) tcp_->clear_socks5_proxy();
+}
+
+bool uvcpp_ws_client::socks5_enabled() const {
+  return tcp_ != nullptr && tcp_->socks5_enabled();
+}
+
+const std::string& uvcpp_ws_client::socks5_last_error() const {
+  static const std::string kEmpty;
+  if (tcp_ == nullptr) return kEmpty;
+  return tcp_->socks5_last_error();
+}
+
 }  // namespace uvcpp
 #endif

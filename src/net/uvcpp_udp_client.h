@@ -146,6 +146,20 @@ class UVCPP_API uvcpp_udp_client {
   int send(const char* ip, int port, uvcpp_buf* buf,
            std::function<void(int)> cb = nullptr);
 
+  /**
+   * @brief 发到**已经解析好的** `sockaddr`（`AF_INET` / `AF_INET6` 都接受）。
+   *
+   * 给 SOCKS5 UDP 中继这类"手里已经是 `sockaddr_storage`"的调用方用：
+   * 转回字符串再解析一遍既多一次失败点，也表达不了"解析结果跨地址族"这件事。
+   * 地址在调用期间被 libuv 拷走，栈上的对象可以随用随失。
+   *
+   * 在途契约与其它 `send` 重载相同：同一时刻只允许一笔异步发。
+   */
+  int send_addr(const struct sockaddr* addr, const char* data, size_t len,
+                std::function<void(int)> cb = nullptr);
+  int send_addr_wait(const struct sockaddr* addr, const char* data, size_t len,
+                     int timeout_ms = 30000);
+
   // -----------------------------------------------------------------
   // Send (to connected peer — requires prior connect())
   // -----------------------------------------------------------------

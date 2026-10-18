@@ -6,6 +6,7 @@
  */
 
 #include <net/uvcpp_tcp_client.h>
+#include <net/uvcpp_socks5_common.h>
 #include <req/uvcpp_connect.h>
 #include <req/uvcpp_write.h>
 #include <req/uvcpp_getaddrinfo.h>
@@ -809,12 +810,28 @@ int uvcpp_tcp_client::connect(const char* ip, int port,
   // 整个块都在 `UVCPP_OPENSSL_ENABLE` 里：`tls_host_want_` 与 `apply_tls_hostname()`
   // 都只在这个开关下存在（见头文件里同一道守卫）。**关掉 SSL 的档位里
   // `connect()` 照样要编**，漏了这道守卫就是"本机开着 SSL 编得过、CI 的 basic 档全表红"。
+  //
+  // 配了 SOCKS5 时这里仍是**目标**主机名：TLS 的 SNI 与证书校验必须对目标，
+  // 不能变成代理的地址。
   if (ip != nullptr) {
     tls_host_want_ = ip;
     apply_tls_hostname();
   }
 #endif  // UVCPP_OPENSSL_ENABLE
 
+  if (socks5_proxy_enabled_) {
+    if (ip == nullptr) return UV_EINVAL;
+    if (cb == nullptr) {
+      return connect_wait(ip, port, 30000);
+    }
+    return socks5_connect_async(ip, port, std::move(cb));
+  }
+
+  return connect_transport(ip, port, std::move(cb));
+}
+
+int uvcpp_tcp_client::connect_transport(const char* ip, int port,
+                                        std::function<void(int)> cb) {
   if (cb != nullptr) {
     // --- Async mode ---
     if (has_async_connect_cb_) {
@@ -828,6 +845,16 @@ int uvcpp_tcp_client::connect(const char* ip, int port,
     struct sockaddr_in addr4;
     if (uv_ip4_addr(ip, port, &addr4) == 0) {
       int rc = connect_async(reinterpret_cast<const struct sockaddr*>(&addr4),
+                             std::move(cb));
+      if (rc != 0) has_async_connect_cb_ = false;
+      return rc;
+    }
+
+    // 数字 IPv6 快速路径（IPv6 字面量带 `:`，`uv_ip4_addr` 必失败）。
+    // 必须在 DNS 之前：`AF_INET` 的解析器不认识 `::1` 这种写法。
+    struct sockaddr_in6 addr6;
+    if (uv_ip6_addr(ip, port, &addr6) == 0) {
+      int rc = connect_async(reinterpret_cast<const struct sockaddr*>(&addr6),
                              std::move(cb));
       if (rc != 0) has_async_connect_cb_ = false;
       return rc;
@@ -905,11 +932,30 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
         "async connect callback was registered");
   }
 
+  // 配了 SOCKS5：`ip` 是**目标**，实际要拨的是代理。目标名不做本地解析。
+  const bool via_socks5 = socks5_proxy_enabled_;
+  if (via_socks5) {
+    if (ip == nullptr) {
+      last_error_code_ = UV_EINVAL;
+      return UV_EINVAL;
+    }
+    socks5_target_host_ = ip;
+    socks5_target_port_ = port;
+    socks5_in_.clear();
+    socks5_plain_.clear();
+    socks5_last_error_.clear();
+    socks5_phase_    = socks5_phase::NONE;
+    socks5_pending_  = true;
+  }
+
   // 解析主机名（数字 IP 快速路径 + DNS 回退），阻塞等待
   sockaddr_storage resolved;
   std::memset(&resolved, 0, sizeof(resolved));
-  int rc = resolve_host_sync(ip, port, resolved, timeout_ms);
+  int rc = resolve_host_sync(via_socks5 ? socks5_proxy_host_.c_str() : ip,
+                             via_socks5 ? socks5_proxy_port_ : port,
+                             resolved, timeout_ms);
   if (rc != 0) {
+    socks5_pending_ = false;
     set_status(TCP_CLIENT_ERROR);
     last_error_code_ = rc;
     return rc;
@@ -946,6 +992,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
       });
 
   if (rc != 0) {
+    socks5_pending_ = false;
     clear_status(TCP_CLIENT_CONNECTING);
     set_status(TCP_CLIENT_ERROR);
     last_error_code_ = rc;
@@ -957,12 +1004,37 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
       [this]() { return sync_connect_done_; }, timeout_ms);
 
   if (!completed) {
+    socks5_pending_ = false;
     set_status(TCP_CLIENT_ERROR);
     last_error_code_ = UV_ETIMEDOUT;
     return UV_ETIMEDOUT;
   }
 
-  if (sync_connect_result_ != 0) return sync_connect_result_;
+  if (sync_connect_result_ != 0) {
+    socks5_pending_ = false;
+    return sync_connect_result_;
+  }
+
+  if (via_socks5) {
+    // 协商要在循环里推进：arm_async_read 装的那个回调会在 nread>0 时先看
+    // `socks5_phase_`，把字节喂给状态机。
+    if (!read_started_) {
+      const int arc = arm_async_read();
+      if (arc != 0) {
+        socks5_pending_ = false;
+        set_status(TCP_CLIENT_ERROR);
+        last_error_code_ = arc;
+        return arc;
+      }
+    }
+    rc = socks5_run_sync(timeout_ms);
+    socks5_pending_ = false;
+    if (rc != 0) {
+      set_status(TCP_CLIENT_ERROR);
+      last_error_code_ = rc;
+      return rc;
+    }
+  }
 
 #if UVCPP_OPENSSL_ENABLE
   if (tls_ssl_ != nullptr) {
@@ -975,6 +1047,17 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
         last_error_code_ = arc;
         return arc;
       }
+    }
+    // SOCKS5 协商成功时同一段里可能已经带来目标服务端的 TLS 记录。
+    if (!socks5_plain_.empty()) {
+      std::string pending;
+      pending.swap(socks5_plain_);
+      if (tls_feed(pending.data(), pending.size()) != 0) {
+        if (last_error_code_ == 0) last_error_code_ = UV_EPROTO;
+        set_status(TCP_CLIENT_ERROR);
+        return last_error_code_;
+      }
+      tls_flush_out();
     }
     tls_drive_handshake();
     tls_flush_out();
@@ -1038,32 +1121,17 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
           last_error_code_ = status;
         }
 
-#if UVCPP_OPENSSL_ENABLE
-        if (status == 0 && tls_ssl_ != nullptr) {
-          // **握手没完成之前不回调使用者。** 契约是「回调到了就能直接发应用
-          // 数据」，而 TLS 连接在握手完成前发不出明文 —— 若在这里就回调，
-          // 使用者紧接着的 write() 会撞上还没建立的会话。
-          tls_connect_pending_ = true;
-
-          // 握手要靠读事件推进：没人读就永远等不到 ServerHello。
+        if (status == 0 && socks5_pending_) {
+          // 代理连上了，但这条 TCP 还只是"代理控制连接"：先协商，协商成功
+          // 才算真正连上目标。握手要靠读事件推进（与 TLS 同一个理由）。
+          socks5_pending_ = false;
           if (!read_started_) arm_async_read();
-          tls_drive_handshake();
-          if (token_alive(life)) tls_flush_out();
-          if (token_alive(life) && tls_handshake_done_) {
-            tls_deliver_plain();  // 此阶段还没有消费者，会先攒着
-            if (token_alive(life)) tls_complete_connect();
-          }
+          const int hrc = socks5_begin_handshake(life);
+          if (hrc != 0 && token_alive(life)) socks5_finish(hrc, life);
           return;
         }
-#endif
 
-        // 用户回调在**闭包还在栈上**的时候调用（invoke_completion 已经把
-        // m_connect_cb 搬走了），所以这里碰 this 是安全的。
-        if (connect_fn_) {
-          connect_fn_(status, connect_arg_);
-          connect_fn_  = nullptr;
-          connect_arg_ = nullptr;
-        }
+        continue_after_connect(status, life);
       });
 
   if (rc != 0) {
@@ -1082,6 +1150,449 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
   return 0;
 }
 
+int uvcpp_tcp_client::connect_sockaddr(const struct sockaddr* addr,
+                                       std::function<void(int)> cb) {
+  if (addr == nullptr || cb == nullptr) return UV_EINVAL;
+  if (addr->sa_family != AF_INET && addr->sa_family != AF_INET6) {
+    return UV_EAFNOSUPPORT;
+  }
+  if (has_async_connect_cb_) return UV_EALREADY;
+
+  has_async_connect_cb_ = true;
+  set_status(TCP_CLIENT_CONNECTING);
+
+  const int rc = connect_async(addr, std::move(cb));
+  if (rc != 0) {
+    // 与 `connect()` 的两条分支一致：没发起成功就把在途标志放掉，否则这条
+    // 客户端会被一次立即失败永久毒化（下一次 connect 恒 UV_EALREADY）。
+    has_async_connect_cb_ = false;
+    clear_status(TCP_CLIENT_CONNECTING);
+  }
+  return rc;
+}
+
+// =========================================================================
+// SOCKS5 代理（RFC 1928 / RFC 1929）
+// =========================================================================
+
+int uvcpp_tcp_client::set_socks5_proxy(const std::string& host, int port,
+                                       const std::string& username,
+                                       const std::string& password) {
+  if (host.empty()) return UV_EINVAL;
+  if (port <= 0 || port > 65535) return UV_EINVAL;
+  if (username.size() > 255 || password.size() > 255) return UV_EINVAL;
+
+  // 只能在"这条连接还没开始"的时候改：已经连着的话，改掉的只是一份没人会
+  // 再读的配置，而使用者会以为下一次写就走了代理。
+  if (has_status(TCP_CLIENT_CONNECTING) || has_status(TCP_CLIENT_CONNECTED) ||
+      has_async_connect_cb_ || socks5_phase_ != socks5_phase::NONE ||
+      socks5_pending_) {
+    last_error_code_ = UV_EBUSY;
+    return UV_EBUSY;
+  }
+
+  socks5_proxy_enabled_ = true;
+  socks5_proxy_host_    = host;
+  socks5_proxy_port_    = port;
+  socks5_proxy_user_    = username;
+  socks5_proxy_pass_    = password;
+  socks5_last_error_.clear();
+  return 0;
+}
+
+void uvcpp_tcp_client::clear_socks5_proxy() {
+  if (has_status(TCP_CLIENT_CONNECTING) || has_status(TCP_CLIENT_CONNECTED) ||
+      has_async_connect_cb_ || socks5_phase_ != socks5_phase::NONE ||
+      socks5_pending_) {
+    return;  // 连接进行中/已建立：与 set 同一条理由，静默忽略
+  }
+  socks5_proxy_enabled_ = false;
+  socks5_proxy_host_.clear();
+  socks5_proxy_port_ = 0;
+  socks5_proxy_user_.clear();
+  socks5_proxy_pass_.clear();
+  socks5_last_error_.clear();
+}
+
+bool uvcpp_tcp_client::socks5_enabled() const {
+  return socks5_proxy_enabled_;
+}
+
+const std::string& uvcpp_tcp_client::socks5_last_error() const {
+  return socks5_last_error_;
+}
+
+int uvcpp_tcp_client::socks5_connect_async(const std::string& target_host,
+                                           int target_port,
+                                           std::function<void(int)> cb) {
+  socks5_target_host_ = target_host;
+  socks5_target_port_ = target_port;
+  socks5_in_.clear();
+  socks5_plain_.clear();
+  socks5_last_error_.clear();
+  socks5_phase_  = socks5_phase::NONE;
+  socks5_sync_   = false;
+  socks5_pending_ = true;
+
+  // 只解析**代理**主机；目标主机名原样交给代理（这正是 SOCKS5 的语义）。
+  // `connect_transport` 在完成分支里看到 `socks5_pending_` 就转进协商。
+  const int rc = connect_transport(socks5_proxy_host_.c_str(),
+                                   socks5_proxy_port_, std::move(cb));
+  if (rc != 0) socks5_pending_ = false;
+  return rc;
+}
+
+int uvcpp_tcp_client::socks5_begin_handshake(
+    const ::std::shared_ptr<char>& life) {
+  socks5_in_.clear();
+  socks5_phase_ = socks5_phase::GREETING;
+
+  // 只提供**一种**方法：配了用户名密码就只给 0x02，否则只给 0x00。
+  // 同时提供两种会让"服务端选了 no-auth 而使用者以为自己在认证"变成可能，
+  // 那是一种静默的降级。
+  std::vector<std::uint8_t> methods;
+  methods.push_back(socks5_proxy_user_.empty()
+                        ? static_cast<std::uint8_t>(uvcpp_socks5_method::NO_AUTH)
+                        : static_cast<std::uint8_t>(
+                              uvcpp_socks5_method::USERNAME_PASSWORD));
+
+  const std::string greeting = socks5_detail::encode_greeting(methods);
+  if (greeting.empty()) {
+    socks5_last_error_ = "cannot encode SOCKS5 greeting";
+    return UV_EINVAL;
+  }
+  return socks5_send(greeting, life);
+}
+
+int uvcpp_tcp_client::socks5_send(const std::string& bytes,
+                                  const ::std::shared_ptr<char>& life) {
+  if (bytes.empty()) return UV_EINVAL;
+
+  uvcpp_buf bufcpp(bytes.data(), bytes.size());
+  uv_buf_t* raw_buf = bufcpp.out_uv_buf();
+
+  uvcpp_write* w = new uvcpp_write();
+  w->set_uv_buf(raw_buf, true);
+  w->set_self_free(true);
+
+  const int rc = tcp_->write(
+      w, w->get_uv_buf(), 1,
+      [this, life](uvcpp_write* wr, int status) {
+        (void)wr;
+        if (!token_alive(life)) return;
+        if (status != 0) socks5_finish(status, life);
+      });
+
+  if (rc != 0) {
+    delete w;
+    return rc;
+  }
+  return 0;
+}
+
+int uvcpp_tcp_client::socks5_send_request(
+    const ::std::shared_ptr<char>& life) {
+  uvcpp_socks5_atyp atyp = uvcpp_socks5_atyp::DOMAIN;
+  if (!socks5_detail::classify_host(socks5_target_host_, atyp)) {
+    socks5_last_error_ = "invalid SOCKS5 target host";
+    return UV_EINVAL;
+  }
+  const uvcpp_socks5_endpoint target(atyp, socks5_target_host_,
+                                     socks5_target_port_);
+  const std::string req = socks5_detail::encode_request(
+      uvcpp_socks5_command::CONNECT, target);
+  if (req.empty()) {
+    socks5_last_error_ = "cannot encode SOCKS5 CONNECT request";
+    return UV_EINVAL;
+  }
+  return socks5_send(req, life);
+}
+
+void uvcpp_tcp_client::socks5_feed(const char* data, std::size_t len,
+                                   const ::std::shared_ptr<char>& life) {
+  if (socks5_phase_ == socks5_phase::NONE ||
+      socks5_phase_ == socks5_phase::DONE) {
+    return;
+  }
+  socks5_in_.append(data, len);
+
+  for (;;) {
+    std::size_t used = 0;
+
+    if (socks5_phase_ == socks5_phase::GREETING) {
+      uvcpp_socks5_method method = uvcpp_socks5_method::NO_ACCEPTABLE;
+      const socks5_detail::parse_status st =
+          socks5_detail::parse_method_selection(socks5_in_.data(),
+                                                socks5_in_.size(), used,
+                                                method);
+      if (st == socks5_detail::parse_status::NEED_MORE) return;
+      if (st == socks5_detail::parse_status::ERROR) {
+        socks5_last_error_ = "malformed method-selection reply";
+        socks5_finish(UV_EPROTO, life);
+        return;
+      }
+      socks5_in_.erase(0, used);
+
+      if (method == uvcpp_socks5_method::NO_ACCEPTABLE) {
+        socks5_last_error_ = "proxy: no acceptable authentication method";
+        socks5_finish(UV_EACCES, life);
+        return;
+      }
+      if (method == uvcpp_socks5_method::USERNAME_PASSWORD) {
+        if (socks5_proxy_user_.empty()) {
+          socks5_last_error_ =
+              "proxy requires username/password, none was configured";
+          socks5_finish(UV_EACCES, life);
+          return;
+        }
+        socks5_phase_ = socks5_phase::AUTH;
+        const std::string auth = socks5_detail::encode_auth_request(
+            socks5_proxy_user_, socks5_proxy_pass_);
+        if (auth.empty()) {
+          socks5_last_error_ = "invalid username/password";
+          socks5_finish(UV_EINVAL, life);
+          return;
+        }
+        const int rc = socks5_send(auth, life);
+        if (rc != 0) {
+          if (token_alive(life)) socks5_finish(rc, life);
+          return;
+        }
+        continue;
+      }
+      if (method == uvcpp_socks5_method::NO_AUTH) {
+        if (!socks5_proxy_user_.empty()) {
+          socks5_last_error_ =
+              "proxy selected no-auth although only username/password was "
+              "offered";
+          socks5_finish(UV_EPROTO, life);
+          return;
+        }
+        socks5_phase_ = socks5_phase::REQUEST;
+        const int rc = socks5_send_request(life);
+        if (rc != 0) {
+          if (token_alive(life)) socks5_finish(rc, life);
+          return;
+        }
+        continue;
+      }
+      socks5_last_error_ = "unknown authentication method from proxy";
+      socks5_finish(UV_EPROTO, life);
+      return;
+    }
+
+    if (socks5_phase_ == socks5_phase::AUTH) {
+      std::uint8_t status = 0xFF;
+      const socks5_detail::parse_status st =
+          socks5_detail::parse_auth_response(socks5_in_.data(),
+                                             socks5_in_.size(), used, status);
+      if (st == socks5_detail::parse_status::NEED_MORE) return;
+      if (st == socks5_detail::parse_status::ERROR) {
+        socks5_last_error_ = "malformed authentication reply";
+        socks5_finish(UV_EPROTO, life);
+        return;
+      }
+      socks5_in_.erase(0, used);
+      if (status != 0) {
+        socks5_last_error_ = "username/password authentication failed";
+        socks5_finish(UV_EACCES, life);
+        return;
+      }
+      socks5_phase_ = socks5_phase::REQUEST;
+      const int rc = socks5_send_request(life);
+      if (rc != 0) {
+        if (token_alive(life)) socks5_finish(rc, life);
+        return;
+      }
+      continue;
+    }
+
+    if (socks5_phase_ == socks5_phase::REQUEST) {
+      uvcpp_socks5_reply rep = uvcpp_socks5_reply::GENERAL_FAILURE;
+      uvcpp_socks5_endpoint bound;
+      const socks5_detail::parse_status st =
+          socks5_detail::parse_reply(socks5_in_.data(), socks5_in_.size(),
+                                     used, rep, bound);
+      if (st == socks5_detail::parse_status::NEED_MORE) return;
+      if (st == socks5_detail::parse_status::ERROR) {
+        socks5_last_error_ = "malformed CONNECT reply";
+        socks5_finish(UV_EPROTO, life);
+        return;
+      }
+      socks5_in_.erase(0, used);
+      if (rep != uvcpp_socks5_reply::SUCCEEDED) {
+        socks5_last_error_ = socks5_detail::reply_string(rep);
+        socks5_finish(socks5_detail::reply_to_error(rep), life);
+        return;
+      }
+
+      // 成功。**同一段里可能还跟着目标服务端的应用字节**（隧道已经通了），
+      // 先在手上留着，等消费者出现再补投。
+      if (!socks5_in_.empty()) {
+        socks5_plain_.swap(socks5_in_);
+        socks5_in_.clear();
+      }
+      socks5_finish(0, life);
+      return;
+    }
+
+    return;
+  }
+}
+
+void uvcpp_tcp_client::socks5_finish(int error,
+                                     const ::std::shared_ptr<char>& life) {
+  if (!token_alive(life)) return;
+
+  if (error == 0) {
+    socks5_phase_ = socks5_phase::DONE;
+    if (socks5_sync_) return;  // 同步路径由 connect_wait 接着走
+    continue_after_connect(0, life);
+    return;
+  }
+
+  socks5_phase_   = socks5_phase::NONE;
+  socks5_pending_ = false;
+  clear_status(TCP_CLIENT_CONNECTING);
+  set_status(TCP_CLIENT_ERROR);
+  last_error_code_ = error;
+  if (socks5_last_error_.empty()) socks5_last_error_ = uv_strerror(error);
+
+  if (socks5_sync_) return;  // connect_wait 看 last_error_code_
+
+  connect_callback_t fn  = connect_fn_;
+  void*              arg = connect_arg_;
+  connect_fn_  = nullptr;
+  connect_arg_ = nullptr;
+  has_async_connect_cb_ = false;
+  if (fn != nullptr) fn(error, arg);
+}
+
+int uvcpp_tcp_client::socks5_run_sync(int timeout_ms) {
+  socks5_sync_ = true;
+  const int rc = socks5_begin_handshake(alive_token());
+  if (rc != 0) {
+    socks5_sync_ = false;
+    socks5_phase_ = socks5_phase::NONE;
+    socks5_pending_ = false;
+    if (socks5_last_error_.empty()) socks5_last_error_ = uv_strerror(rc);
+    last_error_code_ = rc;
+    return rc;
+  }
+
+  const bool done = wait_for_condition(
+      [this]() {
+        return socks5_phase_ == socks5_phase::DONE ||
+               socks5_phase_ == socks5_phase::NONE;
+      },
+      timeout_ms);
+  socks5_sync_ = false;
+
+  if (!done) {
+    socks5_phase_ = socks5_phase::NONE;
+    socks5_last_error_ = "SOCKS5 handshake timed out";
+    last_error_code_ = UV_ETIMEDOUT;
+    return UV_ETIMEDOUT;
+  }
+  if (socks5_phase_ == socks5_phase::NONE) {
+    // socks5_finish 已经把具体错误码记下来了
+    return last_error_code_ != 0 ? last_error_code_ : UV_EPROTO;
+  }
+  return 0;
+}
+
+void uvcpp_tcp_client::socks5_deliver_plain() {
+  if (socks5_plain_.empty()) return;
+  // 与服务端自动读同一约定：它不是消费者，留着等真正的消费者。
+  if (auto_read_installed_) return;
+
+  if (!net_read_cb_ && read_fn_ == nullptr) {
+    if (sync_read_wanted_ && !has_async_read_cb_) {
+      ensure_read_cache();
+      read_cache_->append_data(socks5_plain_.data(), socks5_plain_.size());
+      socks5_plain_.clear();
+    }
+    return;
+  }
+
+  std::string out;
+  out.swap(socks5_plain_);
+
+  if (net_read_cb_) {
+    net_read_result r;
+    r.event = net_read_event::DATA;
+    r.data  = out.data();
+    r.size  = out.size();
+    r.error = 0;
+    r.fin   = false;
+    uvcpp_net_read_cb cb = net_read_cb_;
+    try {
+      cb(*this, r);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "[uvcpp_tcp_client] read callback threw: %s\n",
+                   e.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "[uvcpp_tcp_client] read callback threw (unknown)\n");
+    }
+    return;
+  }
+
+  read_callback_t fn  = read_fn_;
+  void*           arg = read_arg_;
+  if (fn == nullptr) return;
+  uvcpp_buf tmp;
+  tmp.clone_data(out.data(), out.size());
+  fn(&tmp, arg);
+}
+
+void uvcpp_tcp_client::continue_after_connect(
+    int status, const ::std::shared_ptr<char>& life) {
+  if (!token_alive(life)) return;
+
+#if UVCPP_OPENSSL_ENABLE
+  if (status == 0 && tls_ssl_ != nullptr) {
+    // **握手没完成之前不回调使用者。** 契约是「回调到了就能直接发应用
+    // 数据」，而 TLS 连接在握手完成前发不出明文 —— 若在这里就回调，
+    // 使用者紧接着的 write() 会撞上还没建立的会话。
+    tls_connect_pending_ = true;
+
+    // 握手要靠读事件推进：没人读就永远等不到 ServerHello。
+    if (!read_started_) arm_async_read();
+
+    // SOCKS5 协商成功时同一段里可能已经带来目标服务端的 TLS 记录，
+    // 直接喂给 SSL 层；失败时 tls_fail 会带着 `tls_connect_pending_` 收尾。
+    if (!socks5_plain_.empty()) {
+      std::string pending;
+      pending.swap(socks5_plain_);
+      if (tls_feed(pending.data(), pending.size()) != 0) return;
+      if (!token_alive(life)) return;
+      tls_flush_out();
+    }
+
+    tls_drive_handshake();
+    if (token_alive(life)) tls_flush_out();
+    if (token_alive(life) && tls_handshake_done_) {
+      tls_deliver_plain();  // 此阶段还没有消费者，会先攒着
+      if (token_alive(life)) tls_complete_connect();
+    }
+    return;
+  }
+#endif
+
+  // 明文：SOCKS5 之后一起到的字节先过一遍补投（此刻还没有消费者，
+  // 所以实际上只是留在 socks5_plain_ 里等 read_start/read_wait）。
+  socks5_deliver_plain();
+
+  // 用户回调在**闭包还在栈上**的时候调用（invoke_completion 已经把
+  // m_connect_cb 搬走了），所以这里碰 this 是安全的。
+  if (connect_fn_) {
+    connect_fn_(status, connect_arg_);
+    connect_fn_  = nullptr;
+    connect_arg_ = nullptr;
+  }
+}
+
 int uvcpp_tcp_client::resolve_host_sync(const char* host, int port,
                                         sockaddr_storage& out,
                                         int timeout_ms) {
@@ -1089,6 +1600,13 @@ int uvcpp_tcp_client::resolve_host_sync(const char* host, int port,
   struct sockaddr_in addr4;
   if (uv_ip4_addr(host, port, &addr4) == 0) {
     std::memcpy(&out, &addr4, sizeof(addr4));
+    return 0;
+  }
+
+  // 数字 IPv6 快速路径（与 connect() 同一条规则）
+  struct sockaddr_in6 addr6;
+  if (uv_ip6_addr(host, port, &addr6) == 0) {
+    std::memcpy(&out, &addr6, sizeof(addr6));
     return 0;
   }
 
@@ -1930,6 +2448,24 @@ int uvcpp_tcp_client::arm_async_read() {
         if (nread > 0) {
           set_status(TCP_CLIENT_READABLE);
 
+          // --- SOCKS5 协商 ---
+          //
+          // 排在 TLS 过滤层之前：协商阶段的字节是**明文 SOCKS5 协议**，
+          // 而 TLS 只可能出现在协商**之后**（TLS 是打在隧道上的，隧道还没建
+          // 起来时 `tls_ssl_` 必然是空的 —— 但顺序写死更不容易被以后改坏）。
+          //
+          // `socks5_feed` 收尾时可能触发用户的连接回调，而那个回调里最自然的
+          // 写法就是把这条客户端删掉，所以调完只能碰 `buf`（局部），不许再碰
+          // 任何成员。
+          if (socks5_phase_ == socks5_phase::GREETING ||
+              socks5_phase_ == socks5_phase::AUTH ||
+              socks5_phase_ == socks5_phase::REQUEST) {
+            ::std::shared_ptr<char> life5 = alive_token();
+            socks5_feed(buf->base, static_cast<size_t>(nread), life5);
+            free_read_buf(buf);
+            return;
+          }
+
 #if UVCPP_OPENSSL_ENABLE
           // --- TLS 过滤层 ---
           //
@@ -2017,6 +2553,23 @@ int uvcpp_tcp_client::arm_async_read() {
               read_callback_t fn  = read_fn_;
               void*           arg = read_arg_;
               fn(&tmp_buf, arg);
+            } else if (sync_read_wanted_) {
+              // 这一条回调是 `arm_async_read()` 装的（不是 `on_internal_read`
+              // 那条同步专用回调），所以同步读者原先**收不到**这里的数据：
+              // 两条分支都不走，字节被静默丢掉。
+              //
+              // 平时走不到 —— 同步读在 `read_start(nullptr)` 里会自己装
+              // `on_internal_read`。但 SOCKS5 协商会在 connect 阶段就把这条
+              // 回调装上（握手要靠它推进），于是 `read_started_` 已经是真，
+              // 之后的 `read_start(nullptr)` 直接早返回，同步读者的唯一入口
+              // 就成了这里。与 `on_internal_read` 保持同一行为。
+              ensure_read_cache();
+              read_cache_->append_data(tmp_buf.get_const_data(),
+                                       tmp_buf.size());
+              if (read_cache_->size() > max_read_cache_size_) {
+                tcp_->read_stop();
+                read_cache_paused_ = true;
+              }
             }
           }
         } else {
@@ -2024,6 +2577,21 @@ int uvcpp_tcp_client::arm_async_read() {
             last_error_code_ = static_cast<int>(nread);
             if (nread != UV_EOF) {
               set_status(TCP_CLIENT_ERROR);
+            }
+
+            // SOCKS5 协商期间对端断开：连接回调必须收到这个错误，否则它会
+            // 永远不回来 —— 与下面 TLS 那段同一个理由。
+            if (socks5_phase_ == socks5_phase::GREETING ||
+                socks5_phase_ == socks5_phase::AUTH ||
+                socks5_phase_ == socks5_phase::REQUEST) {
+              if (nread == UV_EOF) {
+                socks5_last_error_ =
+                    "proxy closed the connection during negotiation";
+              }
+              ::std::shared_ptr<char> life5 = alive_token();
+              socks5_finish(static_cast<int>(nread), life5);
+              if (buf->base != nullptr) free_read_buf(buf);
+              return;  // 回调里可能已经删掉本对象
             }
 
 #if UVCPP_OPENSSL_ENABLE
@@ -2142,6 +2710,8 @@ int uvcpp_tcp_client::read_start(std::function<void(uvcpp_buf*)> cb) {
     // 数据不见了"，而 TLS 1.3 恰恰允许这样发。
     if (rc == 0 && tls_ssl_ != nullptr) tls_deliver_plain();
 #endif
+    // SOCKS5 协商成功时一起到的应用字节同理（没有代理/没多出来时是空操作）。
+    if (rc == 0) socks5_deliver_plain();
     return rc;
   } else {
     // --- Enable sync read cache ---
@@ -2179,6 +2749,7 @@ int uvcpp_tcp_client::read_start(std::function<void(uvcpp_buf*)> cb) {
     // 同上：把握手期间攒下的明文补进读缓存，否则 read_wait 永远等不到它。
     if (tls_ssl_ != nullptr) tls_deliver_plain();
 #endif
+    socks5_deliver_plain();  // 同上，明文侧的对应物
     return 0;
   }
 }
@@ -2246,6 +2817,7 @@ int uvcpp_tcp_client::read_wait(uvcpp_buf& out_buf, int timeout_ms) {
 #if UVCPP_OPENSSL_ENABLE
   if (tls_ssl_ != nullptr) tls_deliver_plain();
 #endif
+  socks5_deliver_plain();  // now sync_read_wanted_ is set, overflow goes to cache
 
   // Wait for data in the cache
   bool has_data = wait_for_condition(
@@ -2303,6 +2875,7 @@ int uvcpp_tcp_client::read_start_events(const uvcpp_net_read_cb& cb) {
 #if UVCPP_OPENSSL_ENABLE
   if (rc == 0 && tls_ssl_ != nullptr) tls_deliver_plain();
 #endif
+  if (rc == 0) socks5_deliver_plain();
   return rc;
 }
 
@@ -2341,6 +2914,7 @@ int uvcpp_tcp_client::read_resume() {
   // 在 rbio 里的字节），恢复时一并补投。
   if (rc == 0 && tls_ssl_ != nullptr) tls_deliver_plain();
 #endif
+  if (rc == 0) socks5_deliver_plain();
   return rc;
 }
 
@@ -3122,6 +3696,17 @@ void uvcpp_tcp_client::on_internal_read(uvcpp_stream* /*s*/, ssize_t nread,
                                          const uv_buf_t* buf) {
   if (nread > 0) {
     set_status(TCP_CLIENT_READABLE);
+
+    // SOCKS5 协商：这条回调正常不会在协商期间装上（协商自己 arm 的是
+    // `arm_async_read`），但万一装上，字节也必须进状态机而不是读缓存。
+    if (socks5_phase_ == socks5_phase::GREETING ||
+        socks5_phase_ == socks5_phase::AUTH ||
+        socks5_phase_ == socks5_phase::REQUEST) {
+      ::std::shared_ptr<char> life5 = alive_token();
+      socks5_feed(buf->base, static_cast<size_t>(nread), life5);
+      free_read_buf(buf);
+      return;
+    }
 
 #if UVCPP_OPENSSL_ENABLE
     // 同步读路径（read_start(nullptr) / read_wait）也必须过 TLS 过滤器。

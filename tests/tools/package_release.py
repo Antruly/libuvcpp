@@ -111,7 +111,12 @@ PRIVATE_HEADERS = {"uvcpp_h2_nghttp2.h", "uvcpp_wsdl_pugixml.h",
                    "uvcpp_db_mysql_api.h",
                    "uvcpp_db_pgsql_api.h",
                    "uvcpp_db_odbc_api.h",
-                   "uvcpp_db_runtime_load.h"}
+                   "uvcpp_db_runtime_load.h",
+                   # SOCKS5 线格式编解码：公开面只到 `uvcpp_socks5_types.h`
+                   # （枚举与端点），编解码没有稳定性承诺。与 `CMakeLists.txt`
+                   # 的 `list(FILTER NET_HEADER_FILES EXCLUDE REGEX ...)` 是一对，
+                   # 两处必须一起改。
+                   "uvcpp_socks5_common.h"}
 
 # 按**构建树**决定要不要发的头：与 `PRIVATE_HEADERS` 那条规矩不同，它们不是
 # "永远不发"，而是"这个配置下发了就是坏包"。

@@ -274,6 +274,18 @@ foreach(_db_remote test_db_mysql_func test_db_pgsql_func
   endif()
 endforeach()
 
+# 两条 IPv6 回环用例：绑 `::1` 失败时返回 3（= 这台机器没开 IPv6 栈）。
+#
+# **跳过与通过必须能分开**：没有 IPv6 时用例一个断言都跑不到，若 `return 0`
+# 就会和"真跑过并且对了"长得一模一样 —— 那正是本仓最忌讳的那种绿。用
+# `SKIP_RETURN_CODE` 把它报成 `***Skipped`。判据在用例自己手里（`bindIpv6`
+# 的返回值），不是"看 runner 上装没装什么"。
+foreach(_v6 test_tcp_client_ipv6_func test_udp_client_ipv6_func)
+  if(TARGET ${_v6})
+    set_tests_properties(${_v6} PROPERTIES SKIP_RETURN_CODE 3)
+  endif()
+endforeach()
+
 # `test_db_odbc_nodrv_func` 的前提是"这台机器上**没有** ODBC 驱动管理器"，而它
 # **不去卸载任何东西**：把 `UVCPP_DB_ODBC_LIBRARY` 指到一个不存在的路径就行
 # （那个旋钮写在文档里的用途就是这个，见 `src/db/uvcpp_db_runtime_load.h`）。

@@ -32,6 +32,9 @@ uvcpp_web_ws_client::uvcpp_web_ws_client()
       ,
       ssl_ctx_(nullptr)
 #endif
+      ,
+      socks5_enabled_(false),
+      socks5_port_(0)
 {
   inner_ = new uvcpp_ws_client();
 }
@@ -130,6 +133,13 @@ void uvcpp_web_ws_client::install() {
 #if UVCPP_ZLIB_ENABLE
   inner_->set_compression(deflate_cfg_);
 #endif
+  // 顺序在 TLS/压缩之后只是习惯问题：`uvcpp_ws_client::set_socks5_proxy()`
+  // 只是把配置交给底下的 `uvcpp_tcp_client`，与 `enable_tls()` 无关 ——
+  // 真正的先后（SOCKS5 协商先、TLS 后）由 TCP 客户端保证。
+  if (socks5_enabled_) {
+    inner_->set_socks5_proxy(socks5_host_, socks5_port_, socks5_user_,
+                             socks5_pass_);
+  }
 }
 
 #if UVCPP_OPENSSL_ENABLE
@@ -155,6 +165,51 @@ uvcpp_ws_deflate_config uvcpp_web_ws_client::get_compression() const {
   return deflate_cfg_;
 }
 #endif
+
+// =========================================================================
+// SOCKS5 代理
+// =========================================================================
+
+int uvcpp_web_ws_client::set_socks5_proxy(const std::string& host, int port,
+                                           const std::string& username,
+                                           const std::string& password) {
+  // 在这里校验，而不是转给底层等它的返回值：底层此刻可能正连着（返回
+  // `UV_EBUSY`），但那不该算失败 —— 本层**每次 `connect()` 都重建**底层，
+  // 下一次连接一定会用上这份配置。所以校验在这里做完，存下来就是生效。
+  if (host.empty()) return UV_EINVAL;
+  if (port <= 0 || port > 65535) return UV_EINVAL;
+  if (username.size() > 255 || password.size() > 255) return UV_EINVAL;
+
+  socks5_enabled_ = true;
+  socks5_host_    = host;
+  socks5_port_    = port;
+  socks5_user_    = username;
+  socks5_pass_    = password;
+
+  if (inner_ != nullptr) {
+    // 返回值忽略：`UV_EBUSY` 表示"当前这条连接改不了"，而它本来就只对
+    // **下一次**连接负责。
+    inner_->set_socks5_proxy(host, port, username, password);
+  }
+  return 0;
+}
+
+void uvcpp_web_ws_client::clear_socks5_proxy() {
+  socks5_enabled_ = false;
+  socks5_host_.clear();
+  socks5_port_ = 0;
+  socks5_user_.clear();
+  socks5_pass_.clear();
+  if (inner_ != nullptr) inner_->clear_socks5_proxy();
+}
+
+bool uvcpp_web_ws_client::socks5_enabled() const { return socks5_enabled_; }
+
+const std::string& uvcpp_web_ws_client::socks5_last_error() const {
+  static const std::string kEmpty;
+  if (inner_ == nullptr) return kEmpty;
+  return inner_->socks5_last_error();
+}
 
 // =========================================================================
 // 连接 / 重连

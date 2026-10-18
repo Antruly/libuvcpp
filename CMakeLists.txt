@@ -3039,6 +3039,11 @@ if(EXPAND_HEADER_FILES AND UVCPP_BUILD_EXPAND)
 endif()
 
 file(GLOB NET_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/net/*.h")
+# SOCKS5 的线格式编解码是**内部契约**，不是 API：公开面只到
+# `uvcpp_socks5_types.h`（枚举与端点）为止，编解码函数没有稳定性承诺。
+# 与 `tests/tools/package_release.py` 的 `PRIVATE_HEADERS` 是一对，
+# **两处必须一起改**（同 db 模块 `uvcpp_db_driver.h` 那条规矩）。
+list(FILTER NET_HEADER_FILES EXCLUDE REGEX "uvcpp_socks5_common\\.h$")
 if(NET_HEADER_FILES)
   install(FILES ${NET_HEADER_FILES} DESTINATION include/net)
 endif()

@@ -244,6 +244,15 @@ int uvcpp_http_client::connect(const char* host, int port,
   // h3 换的是**传输**（UDP），所以它在最前面判：`cb` 为空那条路（= `connect_wait`
   // 的同步写法）对 h3 不成立，理由写在 `set_http3_enabled()` 的说明里。
   if (http3_enabled_) {
+    // SOCKS5 是**TCP 上**的握手，h3 走 QUIC/UDP —— 这条腿没有代理可用。
+    // 退化成直连就是代理泄漏（请求从本机 IP 出去了，而调用方以为走了代理），
+    // 所以宁可当场失败。
+    if (tcp_ != nullptr && tcp_->socks5_enabled()) {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = UV_ENOTSUP;
+      if (cb) cb(UV_ENOTSUP);
+      return UV_ENOTSUP;
+    }
     if (!cb) {
       last_error_code_ = UV_ENOTSUP;
       return UV_ENOTSUP;
@@ -1862,6 +1871,42 @@ void uvcpp_http_client::on_h3_disconnect(uvcpp_h3_connection&) {
 }
 
 #endif  // UVCPP_HTTP3_ENABLE
+
+// =========================================================================
+// SOCKS5 代理（放在 h3 那个条件编译块**之外**：h3 没编进来时这套 API 照样在）
+// =========================================================================
+
+int uvcpp_http_client::set_socks5_proxy(const std::string& host, int port,
+                                         const std::string& username,
+                                         const std::string& password) {
+  // 校验留给底层，但 h3 这条要在**这里**挡：`set_http3_enabled()` 是 void，
+  // 它挡不了；让使用者到 `connect()` 才发现也晚了半天。两个方向都挡
+  // （先设代理再开 h3 ⇒ `connect()` 也返回 `UV_ENOTSUP`），**绝不静默直连**。
+#if UVCPP_HTTP3_ENABLE
+  if (http3_enabled_) {
+    last_error_code_ = UV_ENOTSUP;
+    return UV_ENOTSUP;
+  }
+#endif
+  if (tcp_ == nullptr) return UV_EINVAL;
+  const int rc = tcp_->set_socks5_proxy(host, port, username, password);
+  last_error_code_ = rc;
+  return rc;
+}
+
+void uvcpp_http_client::clear_socks5_proxy() {
+  if (tcp_ != nullptr) tcp_->clear_socks5_proxy();
+}
+
+bool uvcpp_http_client::socks5_enabled() const {
+  return tcp_ != nullptr && tcp_->socks5_enabled();
+}
+
+const std::string& uvcpp_http_client::socks5_last_error() const {
+  static const std::string kEmpty;
+  if (tcp_ == nullptr) return kEmpty;
+  return tcp_->socks5_last_error();
+}
 
 }  // namespace uvcpp
 

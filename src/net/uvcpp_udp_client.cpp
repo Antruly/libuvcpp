@@ -288,12 +288,40 @@ int send_to_addr_impl(uvcpp_udp* udp, uvcpp_loop* loop, int& last_err,
                        const char* ip, int port,
                        uv_buf_t* raw, uvcpp_udp_send* w,
                        std::function<void(uvcpp_udp_send*, int)> cb) {
-  struct sockaddr_in addr;
-  int rc = uv_ip4_addr(ip, port, &addr);
-  if (rc != 0) { last_err = rc; delete w; return rc; }
+  // 与 `bind()` 同一条分流规则：带 `:` 的是 IPv6 字面量，其余按 IPv4 解。
+  // 地址只在这一帧里存在 —— `uv_udp_send` 会把它拷进请求对象。
+  struct sockaddr_storage storage;
+  std::memset(&storage, 0, sizeof(storage));
+  int rc;
+  if (std::strchr(ip, ':') != nullptr) {
+    struct sockaddr_in6 addr6;
+    rc = uv_ip6_addr(ip, port, &addr6);
+    if (rc != 0) { last_err = rc; delete w; return rc; }
+    std::memcpy(&storage, &addr6, sizeof(addr6));
+  } else {
+    struct sockaddr_in addr4;
+    rc = uv_ip4_addr(ip, port, &addr4);
+    if (rc != 0) { last_err = rc; delete w; return rc; }
+    std::memcpy(&storage, &addr4, sizeof(addr4));
+  }
 
   rc = udp->send(w, w->get_uv_buf(), 1,
-                 reinterpret_cast<const struct sockaddr*>(&addr), cb);
+                 reinterpret_cast<const struct sockaddr*>(&storage), cb);
+  if (rc != 0) { last_err = rc; delete w; return rc; }
+  return 0;
+}
+
+int send_sockaddr_impl(uvcpp_udp* udp, int& last_err,
+                       const struct sockaddr* addr,
+                       uv_buf_t* raw, uvcpp_udp_send* w,
+                       std::function<void(uvcpp_udp_send*, int)> cb) {
+  if (addr == nullptr ||
+      (addr->sa_family != AF_INET && addr->sa_family != AF_INET6)) {
+    last_err = UV_EAFNOSUPPORT;
+    delete w;
+    return UV_EAFNOSUPPORT;
+  }
+  const int rc = udp->send(w, w->get_uv_buf(), 1, addr, cb);
   if (rc != 0) { last_err = rc; delete w; return rc; }
   return 0;
 }
@@ -384,6 +412,90 @@ int uvcpp_udp_client::send_wait(const char* ip, int port, const char* data,
           return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
         }
         (void)wr;  // 释放由 callback_udp_send 事后做
+        if (status != 0) last_error_code_ = status;
+        sync_send_result_ = status;
+        sync_send_done_   = true;
+      });
+
+  if (rc != 0) return rc;
+
+  if (!wait_for_condition([this]() { return sync_send_done_; }, timeout_ms)) {
+    last_error_code_ = UV_ETIMEDOUT;
+    return UV_ETIMEDOUT;
+  }
+  return sync_send_result_;
+}
+
+int uvcpp_udp_client::send_addr(const struct sockaddr* addr, const char* data,
+                                size_t len, std::function<void(int)> cb) {
+  if (addr == nullptr) return UV_EINVAL;
+  if (cb != nullptr) {
+    if (has_async_send_cb_) return UV_EALREADY;
+    has_async_send_cb_ = true;
+    send_fn_  = trampoline_send;
+    send_arg_ = new std::function<void(int)>(cb);
+    std::shared_ptr<char> life = alive_token();
+
+    uvcpp_buf bufcpp(data, len);
+    uv_buf_t* raw = bufcpp.out_uv_buf();
+    uvcpp_udp_send* w = new uvcpp_udp_send();
+    w->set_uv_buf(raw, true);
+    w->set_self_free(true);
+
+    int rc = send_sockaddr_impl(
+        udp_, last_error_code_, addr, raw, w,
+        [this, life](uvcpp_udp_send* wr, int status) {
+          if (!token_alive(life)) {
+            return;
+          }
+          (void)wr;
+          if (status != 0) last_error_code_ = status;
+          auto  fn  = send_fn_;
+          void* arg = send_arg_;
+          send_fn_  = nullptr;
+          send_arg_ = nullptr;
+          has_async_send_cb_ = false;
+          if (fn) fn(status, arg);
+        });
+
+    if (rc != 0) {
+      delete static_cast<std::function<void(int)>*>(send_arg_);
+      send_fn_  = nullptr;
+      send_arg_ = nullptr;
+      has_async_send_cb_ = false;
+      return rc;
+    }
+    return 0;
+  }
+  return send_addr_wait(addr, data, len, 30000);
+}
+
+int uvcpp_udp_client::send_addr_wait(const struct sockaddr* addr,
+                                     const char* data, size_t len,
+                                     int timeout_ms) {
+  if (addr == nullptr) return UV_EINVAL;
+  if (has_async_send_cb_) {
+    throw std::runtime_error(
+        "uvcpp_udp_client::send_addr_wait: cannot mix sync/async send");
+  }
+
+  sync_send_done_   = false;
+  sync_send_result_ = 0;
+  std::shared_ptr<char> life = alive_token();
+
+  uvcpp_buf bufcpp(data, len);
+  uv_buf_t* raw = bufcpp.out_uv_buf();
+  uvcpp_udp_send* w = new uvcpp_udp_send();
+  w->set_uv_buf(raw, true);
+  w->set_self_free(true);
+
+  int rc = send_sockaddr_impl(
+      udp_, last_error_code_, addr, raw, w,
+      [this, life](uvcpp_udp_send* wr, int status) {
+        if (!token_alive(life)) {
+          return;
+        }
+        (void)wr;
         if (status != 0) last_error_code_ = status;
         sync_send_result_ = status;
         sync_send_done_   = true;

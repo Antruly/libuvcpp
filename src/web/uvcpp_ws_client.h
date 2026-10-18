@@ -72,6 +72,25 @@ class UVCPP_API uvcpp_ws_client {
                    int timeout_ms = 30000);
 
   // -------------------------------------------------------------------
+  // SOCKS5 代理（RFC 1928）—— 默认关，**必须在 connect() 之前调**
+  // -------------------------------------------------------------------
+  //
+  // 打开后 `connect()` / `connect_wait()` 只连代理；`ws://` / `wss://` 的
+  // 主机名以 `ATYP=DOMAIN` 交给代理解析（本端不做 DNS）。`wss://` 的 TLS
+  // 仍然是对**目标**做 SNI/证书校验 —— 顺序是"先 SOCKS5 协商，后 TLS"。
+  //
+  // 与 `uvcpp_http_client` 那套同名同义；底层都在 `uvcpp_tcp_client` 里。
+  // 本组件没有 h3 腿，所以不存在"h3 与代理冲突"那条。
+
+  int set_socks5_proxy(const std::string& host, int port,
+                       const std::string& username = std::string(),
+                       const std::string& password = std::string());
+  void clear_socks5_proxy();
+  bool socks5_enabled() const;
+  /** @brief 上一次 SOCKS5 失败的人类可读原因。 */
+  const std::string& socks5_last_error() const;
+
+  // -------------------------------------------------------------------
   // 会话 / 收发 / 关闭 —— 都是**转发给当前会话**（0 或 1 个）
   // -------------------------------------------------------------------
   //

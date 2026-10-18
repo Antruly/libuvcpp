@@ -355,6 +355,64 @@ class UVCPP_API uvcpp_tcp_client {
    */
   int connect_wait(const char* ip, int port, int timeout_ms = 30000);
 
+  /**
+   * @brief 用**已经解析好的** `sockaddr` 发起一次异步连接。
+   *
+   * 与 `connect(ip, port, cb)` 的区别只在地址来源：那一个要自己做数字 IP
+   * 快路径或 DNS，这一个直接把 libuv 的 `sockaddr` 交给 `uv_tcp_connect`。
+   * 给 SOCKS5 服务端这类**已经拿到解析结果**的调用方用 —— 它需要
+   * `AF_UNSPEC` 的解析结果同时覆盖 IPv4 与 IPv6，而 `connect()` 的历史行为
+   * 是"域名只解析 `AF_INET`"。
+   *
+   * @param addr 不能为空；`AF_INET` / `AF_INET6` 都接受。
+   * @param cb   不能为空（同步语义请用 `connect_wait`）。
+   * @return 0 表示已发起；非 0 为 libuv 错误码，且 `cb` 不会被调用。
+   */
+  int connect_sockaddr(const struct sockaddr* addr,
+                       std::function<void(int)> cb);
+
+  // -----------------------------------------------------------------
+  // SOCKS5 代理（RFC 1928 / RFC 1929）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 之后每次 `connect()` 都先经这个 SOCKS5 代理建隧道。
+   *
+   * 只支持 CONNECT（TCP 隧道）：这是 `uvcpp_tcp_client` 的形状决定的。
+   * BIND / UDP ASSOCIATE 用独立的 `uvcpp_socks5_client`。
+   *
+   * 打开之后：
+   * - **目标地址不在本地做 DNS** —— `connect(host, port)` 的 `host` 原样以
+   *   `ATYP=DOMAIN` 交给代理（数字 IPv4/IPv6 则用对应的 ATYP）。这既是代理
+   *   的本意，也让"本地解析不了的域名"照样能连。
+   * - `tls_host_want_` 仍是**目标**主机名：SNI 与证书校验必须对目标，不是代理。
+   * - 协商完成之前**不会**触发连接回调；失败了回调拿到非 0，`status` 是
+   *   `TCP_CLIENT_ERROR`，`get_last_error()` 是 libuv 错误码，
+   *   `socks5_last_error()` 是代理侧的原话（应答码文本、认证失败等）。
+   * - 协商超时与连接超时共用 `connect_wait` 的 `timeout_ms` / 异步路径的
+   *   默认 30 s。
+   *
+   * 只能在**没有连接在进行或已建立**的客户端上调用（否则 `UV_EBUSY`）。
+   *
+   * @param host     代理主机名或数字地址。
+   * @param port     代理端口（1..65535）。
+   * @param username 非空表示走 RFC 1929 用户名密码认证（此时只提供 0x02 一种方法）。
+   * @param password 与 `username` 配套；用户名非空时最长 255 字节。
+   * @return 0 成功；`UV_EINVAL` / `UV_EBUSY`。
+   */
+  int set_socks5_proxy(const std::string& host, int port,
+                       const std::string& username = std::string(),
+                       const std::string& password = std::string());
+
+  /** @brief 关掉代理（同样只能在连接之前调用）。 */
+  void clear_socks5_proxy();
+
+  /** @brief 是否配置了代理。 */
+  bool socks5_enabled() const;
+
+  /** @brief 最近一次 SOCKS5 失败的人类可读原因（无失败时为空串）。 */
+  const std::string& socks5_last_error() const;
+
   // -----------------------------------------------------------------
   // Write
   // -----------------------------------------------------------------
@@ -828,6 +886,87 @@ class UVCPP_API uvcpp_tcp_client {
    */
   int resolve_host_sync(const char* host, int port, sockaddr_storage& out,
                         int timeout_ms);
+
+  /** @brief `connect()` 的本体：连 `ip:port`（不经代理），完成后走 TLS/用户回调。 */
+  int connect_transport(const char* ip, int port, std::function<void(int)> cb);
+
+  // -----------------------------------------------------------------
+  // SOCKS5 代理的内部状态机
+  // -----------------------------------------------------------------
+  //
+  // 三个客户端（tcp / http / ws）共用这一份：后两者只是把
+  // `set_socks5_proxy()` 转给内部那条 `uvcpp_tcp_client`。协商发生在
+  // "TCP 已连上代理"与"TLS 握手/用户回调"之间，所以它必须插在
+  // `connect_async` 的完成分支里 —— 与 TLS 占的是同一个位置。
+
+  /** @brief 握手阶段；`NONE` 表示当前没有握手在跑（不代表没配代理）。 */
+  enum class socks5_phase { NONE, GREETING, AUTH, REQUEST, DONE };
+
+  /** @brief 先连代理，连上后在完成分支里转进握手。 */
+  int socks5_connect_async(const std::string& target_host, int target_port,
+                           std::function<void(int)> cb);
+
+  /** @brief 在已连通的代理连接上发出问候、进入状态机。 */
+  int socks5_begin_handshake(const ::std::shared_ptr<char>& life);
+
+  /** @brief 吃进一段代理方向的字节；错误路径会就地收尾。 */
+  void socks5_feed(const char* data, size_t len,
+                   const ::std::shared_ptr<char>& life);
+
+  /** @brief 发一段握手字节（裸 TCP，不经过 TLS 过滤层）。 */
+  int socks5_send(const std::string& bytes,
+                  const ::std::shared_ptr<char>& life);
+
+  /** @brief 进入 REQUEST 阶段并发出 CONNECT 请求。 */
+  int socks5_send_request(const ::std::shared_ptr<char>& life);
+
+  /**
+   * @brief 握手收尾。
+   *
+   * `error == 0` 时接着走 TLS 握手或用户回调；否则置 `TCP_CLIENT_ERROR`
+   * 并把错误交给连接回调。`life` 是调用方手上那份存活令牌。
+   */
+  void socks5_finish(int error, const ::std::shared_ptr<char>& life);
+
+  /** @brief 同步路径用：在循环里把握手推完。 */
+  int socks5_run_sync(int timeout_ms);
+
+  /**
+   * @brief 把"握手之后、消费者出现之前"到达的应用字节补投出去。
+   *
+   * 与 `tls_deliver_plain()` 同一套约定：没有消费者就留着，等
+   * `read_start()` / `read_wait()` / `read_start_events()` 注册时再投。
+   */
+  void socks5_deliver_plain();
+
+  /**
+   * @brief 传输层已连通（代理协商也已完成）之后的那一段：
+   *        有 TLS 就推进握手，否则触发用户的连接回调。
+   *
+   * 直连与走代理两条路共用它，免得 TLS/回调次序写两遍、改一处漏一处。
+   */
+  void continue_after_connect(int status, const ::std::shared_ptr<char>& life);
+
+  bool        socks5_proxy_enabled_ = false;
+  std::string socks5_proxy_host_;
+  int         socks5_proxy_port_ = 0;
+  std::string socks5_proxy_user_;
+  std::string socks5_proxy_pass_;
+
+  /// 本次 `connect` 是否要走代理。只有 `socks5_connect_async` 会置它：
+  /// `connect_sockaddr`（服务端上游）与 `connect_async` 的 DNS 回退都直连。
+  bool socks5_pending_ = false;
+
+  /// 握手在**同步** `connect_wait` 的泵循环里跑：完成时只置 `DONE`，
+  /// 由 `connect_wait` 接着走 TLS / 返回，不在这里触发连接回调。
+  bool socks5_sync_ = false;
+
+  socks5_phase socks5_phase_ = socks5_phase::NONE;
+  std::string  socks5_target_host_;
+  int          socks5_target_port_ = 0;
+  std::string  socks5_in_;    ///< 握手期间的入站累积
+  std::string  socks5_plain_; ///< 握手后、消费者出现前的应用字节
+  std::string  socks5_last_error_;
 
   // -----------------------------------------------------------------
   // Member variables

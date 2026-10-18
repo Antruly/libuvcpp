@@ -336,6 +336,23 @@ class UVCPP_API uvcpp_web_ws_client {
   uvcpp_ws_deflate_config get_compression() const;
 #endif
 
+  // -------------------------------------------------------------------
+  // SOCKS5 代理（RFC 1928）—— 默认关
+  // -------------------------------------------------------------------
+  //
+  // 与 `set_ssl_context()` 同一个形状：存一份在本层，**每次重建底层客户端时
+  // 重新装上去**（`do_restart()` 每次 `connect()` 都换新，重连也换）。
+  // 于是重连沿用同一份代理设置，不会"第一次走了代理、重连走了直连"——后者
+  // 就是代理泄漏。
+
+  int set_socks5_proxy(const std::string& host, int port,
+                       const std::string& username = std::string(),
+                       const std::string& password = std::string());
+  void clear_socks5_proxy();
+  bool socks5_enabled() const;
+  /** @brief 上一次 SOCKS5 失败的人类可读原因（转发底层）。 */
+  const std::string& socks5_last_error() const;
+
  private:
   /** @brief 换一个底层协议层客户端并重新发起连接（只在循环之外调用）。 */
   void do_restart();
@@ -386,6 +403,14 @@ class UVCPP_API uvcpp_web_ws_client {
   /// `connect()`（以及每次重连）都换新，装晚了就是"配置在重建时丢了"。
   uvcpp_ws_deflate_config deflate_cfg_;
 #endif
+
+  /// SOCKS5 代理设置。同样存一份、每次重建时重装 —— 重连必须沿用，否则
+  /// "第一次走代理、重连直连"就是代理泄漏。
+  bool        socks5_enabled_;
+  std::string socks5_host_;
+  int         socks5_port_;
+  std::string socks5_user_;
+  std::string socks5_pass_;
 
   /** @brief 本次 `connect()` 的回调（一次性，报第一次尝试的结果）。 */
   std::function<void(int)> connect_cb_;
