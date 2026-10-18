@@ -316,6 +316,7 @@ class uvcpp_socks5_client {
 ### 5.3 CONNECT
 
 ```cpp
+// doc-snippet: fragment — 只展示协商顺序；`c` 是前文已建好的客户端
 c.connect("127.0.0.1", 1080, [&](int st) {
   if (st != 0) return;
   c.connect_target("example.com", 80, [&](int st2) {
@@ -331,6 +332,7 @@ c.connect("127.0.0.1", 1080, [&](int st) {
 ### 5.4 BIND
 
 ```cpp
+// doc-snippet: fragment — 只展示两次应答的顺序；`c` 是前文已建好的客户端
 uvcpp::uvcpp_socks5_endpoint bound;
 uvcpp::uvcpp_socks5_endpoint peer;
 
