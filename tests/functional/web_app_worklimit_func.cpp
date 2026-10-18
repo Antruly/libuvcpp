@@ -67,6 +67,13 @@
  * 到底有没有照这套契约用：漏掉 `after_work` 里那一刀补派，症状不是慢一点，
  * 是那条挂住的分片响应**再也不来**，而这两组之外没有任何用例盖得住它。
  *
+ * ## 第七条：**循环数不放大上限**
+ *
+ * `set_loops(n)` 多开的是事件循环，投递的仍是**同一个** libuv 线程池，所以
+ * "池子 × 4"这个上限与 n 无关（第 17 组 `loops_do_not_scale_limit`）。现在
+ * 的实现本来就对，这一组是回归钉子：把 n 乘进去会让上限虚增 n 倍而并行度
+ * 一点没多 —— 而且**从外部看不出来**，`in_flight()` 离新上限远得很。
+ *
  * ## 为什么不用真慢任务
  *
  * 静态读盘是 `stat` + 读一个小文件，耗时可忽略。要让它"慢"，只能往根里放一
@@ -1153,6 +1160,43 @@ void test_limit_source() {
   cleanup_root();
 }
 
+// =========================================================================
+// 17. 循环数**不该**影响在途上限
+// =========================================================================
+/**
+ * 上限是"线程池 × 4"，而**线程池是进程级的一份**：`set_loops(n)` 只是多开
+ * n-1 条事件循环，它们投递的都是同一个池子里的活儿。所以上限不许跟着 n 乘
+ * —— 那样上限虚增 n 倍，而真正能并行干活的线程一个都没多，闸门等于没装
+ * （还看不出来：`in_flight()` 远小于上限，永远不饱和）。
+ *
+ * 现状本来就对（`default_limit()` 根本不看循环数），所以这条是**回归用例**：
+ * 它的价值全在将来 —— 谁"顺手"把 n 乘进去、或者把默认值改成"每循环一份"
+ * 时，这里会红。第二半（`start()` 之后）同样重要：重算那一步若哪天改成
+ * "按循环数放大"，构造时那半还是对的，只有启动后才错。
+ */
+void test_loops_do_not_scale_limit() {
+  make_root();
+  const size_t base = uvcpp_web_work_limit::default_limit();
+
+  uvcpp_web_app app;
+  configure_for_test(app);
+  check(app.set_loops(4) == 0, "循环数：set_loops(4) 应当成功");
+  check_eq_i(static_cast<long long>(app.loop_count()), 4,
+             "循环数：前提 —— 循环数确实设成了 4");
+  check_eq_i(static_cast<long long>(app.work_limit()->limit()),
+             static_cast<long long>(base),
+             "循环数：set_loops(4) 之后上限仍应是 default_limit()（不乘 n）");
+
+  check(app.start_background() == 0, "循环数：多循环服务启动");
+  check_eq_i(static_cast<long long>(app.work_limit()->limit()),
+             static_cast<long long>(base),
+             "循环数：start() 的重算也不许乘循环数");
+  app.stop();
+  app.join();
+
+  cleanup_root();
+}
+
 int main(int argc, char** argv) {
   std::cout << std::unitbuf;
   const std::string only = (argc > 1) ? argv[1] : std::string();
@@ -1180,6 +1224,7 @@ int main(int argc, char** argv) {
       {"worker_release_flushed_by_after_work",
        test_worker_release_flushed_by_after_work},
       {"limit_source", test_limit_source},
+      {"loops_do_not_scale_limit", test_loops_do_not_scale_limit},
   };
 
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {

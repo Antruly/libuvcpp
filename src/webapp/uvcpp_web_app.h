@@ -369,6 +369,14 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    *       等级保持使用者自己设的值（默认 `INFO`）。调过之后以本函数为准，
    *       在 `start()` 时套用到 `uvcpp_logger`。
    *
+   * @note **等级是进程级的，不是每个 app 一份。** `uvcpp_logger` 是单例，
+   *       所以同一进程里起多个 `uvcpp_web_app`、各调各的 `set_log_level()`
+   *       时，**后 `start()` 的那个赢**，先启动的那个此后的日志也按新等级
+   *       过滤。冲突（两个 app 显式设了不同的值）会在 `CORE` 模块打一条
+   *       WARN，说明以谁为准（每次冲突的 `start()` 都会打，不静默）。想让
+   *       不同部分用不同等级，用 `uvcpp_logger::set_level(log_category, ...)`
+   *       按模块设（那同样是进程级的），或在各自的日志调用处自己判断。
+   *
    * 早先版本在 `start()` 里**无条件**把全局等级改成这里的值（默认 `INFO`），
    * 于是 `uvcpp_logger::instance().set_level(...)` 在 `start()` 之前设的一律
    * 被静默吃掉 —— 连本仓的靶场 `bench/bench_server.cpp` 都栽在这上面（它的
@@ -454,6 +462,10 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    * 之间调用的 `uvcpp_set_threadpool_size()` 就反映不到上限上 —— 而"在 `main()`
    * 开头设池子、之后才 `app.start()`"恰恰是最自然的写法。调过本方法之后不再
    * 重算：那时上限是用户明确给的数，重算等于把它改掉。
+   *
+   * **上限与 `set_loops(n)` 无关。** n 条事件循环共用同一个 libuv 线程池，
+   * 闸门封的是"这个池子里在途多少个活儿"，不是"每条循环几个"——按 n 乘会让
+   * 上限虚增 n 倍而并行度一个都没多。见 `uvcpp_web_work_limit::default_limit()`。
    *
    * 影响的是**静态文件服务**：名额满时它回 **503 + `Retry-After`**，而不是
    * 把一个线程池任务继续堆到队尾。上传路径（3b）的分工不同 —— 那里字节还在

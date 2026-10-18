@@ -262,6 +262,13 @@ class UVCPP_API uvcpp_web_work_limit {
    * **每次调用都现算**（不是构造时算好存着）—— 所以 `uvcpp_web_app::start()`
    * 在用户没显式设过上限时能靠重算一次把"构造之后才调的
    * `uvcpp_set_threadpool_size()`"接上。
+   *
+   * @note **只跟线程池大小有关，与 `set_loops(n)` 无关。** 一个进程共用 libuv
+   *       那一个线程池（`uvcpp_set_threadpool_size()` 设的就是它），n 条事件
+   *       循环投递的是**同一个池子**里的活儿。若按 n 去乘，上限会变成
+   *       `n × 池子 × 4`，而真正能并行干活的线程一个都没多 —— 闸门就名存实亡
+   *       了。所以 `set_loops(n)` 不改这个数（有回归用例钉着：
+   *       `web_app_worklimit_func.cpp` 的 `loops_do_not_scale_limit`）。
    */
   static size_t default_limit();
 

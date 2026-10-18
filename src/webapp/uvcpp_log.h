@@ -306,6 +306,11 @@ public:
    * @note 本函数**立即**生效，不等到 `uvcpp_web_app::start()`。若同时用了
    *       `uvcpp_web_app::set_log_level()`，以**显式调用过的那个**为准
    *       （见那个函数的说明）。
+   *
+   * @note 等级是**进程级**的，没有「每个 `uvcpp_web_app` 一份」这种东西：
+   *       同一进程里多个 app 各调 `set_log_level()` 时，后 `start()` 的
+   *       覆盖前一个（冲突时框架会打一条 WARN）。分模块调
+   *       `set_level(log_category, ...)` 也同样是进程级的。
    */
   void set_level(log_level level);
   /** @brief 只给某个模块设置等级阈值。 */

@@ -49,6 +49,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <uvcpp/uvcpp_define.h>
 
@@ -75,6 +76,41 @@ void check(bool cond, const std::string& what) {
     ++g_failures;
   }
 }
+
+/**
+ * @brief 收集日志记录的 sink（`log_level_precedence` 的进程级那一半要用）。
+ *
+ * 与 `web_app_context_func.cpp` / `web_app_multiloop_func.cpp` 里的同名类是
+ * 同一个写法、各自一份：测试文件之间不共享头，免得为几行代码加一层依赖。
+ * `write()` 自己加锁 —— `uvcpp_logger` 调用 sink 时**不持锁**（见
+ * `uvcpp_logger::write()` 的说明），所以并发写全靠 sink 自己。
+ */
+class capturing_sink : public uvcpp_log_sink {
+ public:
+  void write(const uvcpp_log_record& record) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    records_.push_back(record);
+  }
+  size_t count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_.size();
+  }
+  /// 有没有一条记录同时含这两段文字（等级名、模块名都可以）。
+  bool message_contains_all(const std::string& a, const std::string& b) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < records_.size(); ++i) {
+      if (records_[i].message.find(a) != std::string::npos &&
+          records_[i].message.find(b) != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  mutable std::mutex            mutex_;
+  std::vector<uvcpp_log_record> records_;
+};
 
 // =========================================================================
 // 客户端侧小工具
@@ -2188,6 +2224,63 @@ void test_log_level_precedence() {
   }
 }
 
+/**
+ * **多个 app 在同一个进程里：等级是进程级的，后者赢，且必须响一声。**
+ *
+ * `uvcpp_logger` 是单例 —— 一份全局等级没有「每个 app 自己的那份」这种东西。
+ * 于是两个 app 各调各的 `set_log_level()` 时，后 `start()` 的会覆盖前一个，
+ * 而前一个此后的日志过滤就和它的设置对不上了。这件事**没法做成各留一份**，
+ * 但**静默**是不行的：没有那条 WARN，人只会看到"我明明设了 DEBUG，为什么
+ * 另一个 app 的 DEBUG 日志没出来"，然后去怀疑路由、怀疑 sink。
+ *
+ * 两臂都是判据：
+ *   - 等级最终等于**后启动**那个的值（不是先启动的，也不是任何折中）；
+ *   - 冲突确实被打出来了，且点名了两个等级（"谁把谁顶掉了"）。
+ *
+ * 判定用的是捕获 sink，不是肉眼 —— 这条消息的可见性本身也受等级影响
+ * （新等级是 `ERR` 时它以 `ERR` 打出来），第二臂同时钉住了这个抬档。
+ */
+void test_log_level_is_process_wide() {
+  capturing_sink sink;
+  uvcpp_log_sink* const old_sink = uvcpp_logger::instance().sink();
+  const log_level old_level = uvcpp_logger::instance().global_level();
+  uvcpp_logger::instance().set_sink(&sink);
+
+  {
+    uvcpp_web_app first;
+    first.set_host("127.0.0.1")
+        .set_port(0)
+        .set_access_log(false)
+        .set_log_level(log_level::DEBUG);
+    check(first.start_background() == 0, "进程级：第一个 app 启动");
+    check(uvcpp_logger::instance().global_level() == log_level::DEBUG,
+          "进程级：第一个 app 的显式等级应当生效");
+    const size_t before = sink.count();
+
+    uvcpp_web_app second;
+    second.set_host("127.0.0.1")
+        .set_port(0)
+        .set_access_log(false)
+        .set_log_level(log_level::ERR);
+    check(second.start_background() == 0, "进程级：第二个 app 启动");
+    check(uvcpp_logger::instance().global_level() == log_level::ERR,
+          "进程级：后 start() 的赢（一份等级没法各留一份）");
+    check(sink.count() > before,
+          "进程级：冲突必须响一声，不能静默覆盖");
+    // 等级名是 "DEBUG" / "ERROR"（`uvcpp_log_level_name()` 的展示名）。
+    check(sink.message_contains_all("DEBUG", "ERROR"),
+          "进程级：提示里应当点名两个等级（谁把谁顶掉了）");
+
+    second.stop();
+    second.join();
+    first.stop();
+    first.join();
+  }
+
+  uvcpp_logger::instance().set_sink(old_sink);
+  uvcpp_logger::instance().set_level(old_level);
+}
+
 // =========================================================================
 // 22. Host / Transfer-Encoding 校验：**认领路径**上也得受检
 // =========================================================================
@@ -2320,6 +2413,7 @@ int main(int argc, char** argv) {
       {"response_header_capacity_reused",
        test_response_header_capacity_reused},
       {"log_level_precedence", test_log_level_precedence},
+      {"log_level_is_process_wide", test_log_level_is_process_wide},
       {"host_validation_on_claim_path",
        test_host_validation_on_claim_path},
   };

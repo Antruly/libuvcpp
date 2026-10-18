@@ -72,6 +72,80 @@ namespace {
 const size_t kRespTablesRecycleMax = 256;
 
 /**
+ * @brief 「上一个把**进程级**日志等级显式设掉的是哪个 app」。
+ *
+ * `uvcpp_logger` 是进程级单例：一个进程只有一份全局等级，**没有**「这是哪个
+ * app 的等级」这回事。而 `uvcpp_web_app::set_log_level()` 是按 app 调的 ——
+ * 同一进程里起两个 app、各设各的等级时，后 `start()` 的那个会把前一个的值
+ * 顶掉（构造函数里挡不住：等级是在 `start()` 里才套用到单例上的），然后
+ * 两边看到的日志过滤都和自己的设置对不上，却没有任何提示。
+ *
+ * 这里只记「谁、设成了什么」，用来在**冲突**时响一声。行为本身不改：后
+ * `start()` 的仍然赢 —— 一份等级不可能同时满足两个值，这是唯一能做的事。
+ *
+ * 提示**不去重**：冲突每次 `start()` 都会再说一遍。触发它的条件是"进程里
+ * 有两个 app 显式设了不同的等级"，而这件事每次启动都是真的；按组合去重的话
+ * 反而会出现"第二次重启就不响了"，让最需要看见它的场景安静下去。
+ */
+struct web_app_log_level_claim {
+  std::mutex mutex;
+  const void* owner;  ///< 上一个显式设等级的 `uvcpp_web_app`（`this`）
+  int level;          ///< 它设的值（`log_level` 的底层值）
+
+  web_app_log_level_claim()
+      : owner(nullptr), level(static_cast<int>(log_level::INFO)) {}
+};
+
+/// 进程内唯一的那份记账（函数内静态：跨 TU 也就一份）。
+web_app_log_level_claim& log_level_claim() {
+  static web_app_log_level_claim claim;
+  return claim;
+}
+
+/**
+ * @brief 把一个 app 显式设的等级套到进程级单例上；与别的 app 冲突时警告一次。
+ *
+ * 顺序是「**先套用、再警告**」：消息的可见性应当由**赢的那个**设置决定，
+ * 而不是被顶掉的那个。打印等级也因此取 `WARN` 与新等级里更**严**的一档 ——
+ * 新等级是 `ERR` 时 `WARN` 必然被自己的阈值滤掉，可这条消息说的正是「你
+ * 要求的等级把别人的设置挡住了」，所以跟着抬一档才送得到。不抬到 `FATAL`：
+ * 那是「致命错误」的档位，自定义 sink 里对 FATAL 做 abort/flush&exit 的很常见，
+ * 一条配置提示不该触发它们 —— 赢家设成 `FATAL`/`OFF` 时这条提示就不打了
+ * （对方要的就是「几乎不听」，尊重它）。
+ */
+void apply_process_wide_log_level(const void* owner, log_level level) {
+  web_app_log_level_claim& claim = log_level_claim();
+
+  bool conflict = false;
+  log_level prev = log_level::INFO;
+  {
+    std::lock_guard<std::mutex> lock(claim.mutex);
+    if (claim.owner != nullptr && claim.owner != owner &&
+        claim.level != static_cast<int>(level)) {
+      prev = static_cast<log_level>(claim.level);
+      conflict = true;
+    }
+    claim.owner = owner;
+    claim.level = static_cast<int>(level);
+  }
+
+  uvcpp_logger::instance().set_level(level);
+
+  if (!conflict || level == log_level::OFF || level == log_level::FATAL) return;
+
+  const log_level emit =
+      (level == log_level::ERR) ? log_level::ERR : log_level::WARN;
+  UVCPP_LOG_STREAM(emit, log_category::CORE)
+      << "日志等级是**进程级**的：`uvcpp_logger` 是单例，一个进程只有一份。"
+      << "本 app 显式设的是 " << uvcpp_log_level_name(level)
+      << "，而此前另一个 app 已把它设成 " << uvcpp_log_level_name(prev)
+      << "；两个值不可能同时生效，后 start() 的赢 —— 所以从现在起整个进程按 "
+      << uvcpp_log_level_name(level)
+      << " 过滤，另一个 app 此后的日志也会跟着变。多个 app 想要各自的等级，"
+         "只能在各自的日志调用处自己判断，或者换一个 sink。";
+}
+
+/**
  * @brief 流式响应的字节出口 —— `uvcpp_web_stream_sink` 在本层的落地。
  *
  * 之所以要这一层而不是让 `uvcpp_web_response` 直接拿 `uvcpp_tcp_client*`：
@@ -1840,8 +1914,13 @@ int uvcpp_web_app::init_process_once() {
   // 在 `start()` 之前调用就一定被顶回 `cfg_.min_log_level`（默认 INFO），而且
   // 没有任何提示。`min_log_level` 的默认值不等于"用户想要 INFO"，它只是"没人
   // 说过话"，两者必须分开 —— 和下面 `work_limit_explicit_` 是同一个道理。
+  //
+  // 套用以外的另一半是**记账**：`uvcpp_logger` 是进程级的，同一进程里两个
+  // app 各设各的等级时后者会静默顶掉前者。`apply_process_wide_log_level()`
+  // 不改变"后者赢"这个事实（一份等级没法同时满足两个值），只负责在冲突时
+  // 响一声并说清以谁为准 —— 见那里。
   if (log_level_explicit_) {
-    uvcpp_logger::instance().set_level(cfg_.min_log_level);
+    apply_process_wide_log_level(this, cfg_.min_log_level);
   }
 
   // 工作池在途上限：**没被用户显式设过就按此刻的线程池大小重算**。

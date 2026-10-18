@@ -737,7 +737,7 @@
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
   `trailers()`（`src/webapp/uvcpp_web_response.h:523-527`），并在 `send_response()` 里加了
-  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2753-2802`）。
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2832-2881`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
   "另一条拿到同一份字节的路"。判据与量法见下一条
@@ -1036,6 +1036,26 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 横向扩展（多事件循环）
 
+- **日志等级是进程级的 —— 多个 app 各设各的时，现在会明说谁赢**（`1.7.5-dev`）。
+  `uvcpp_logger` 是单例，`set_log_level()` 写的是那唯一一份等级；同一进程里起
+  多个 `uvcpp_web_app`、各自显式设了**不同**的等级时，此前是后 `start()` 的静默
+  覆盖前一个 —— 先启动的那个此后也按新等级过滤，而调用方看不出来。现在框架记着
+  「上一个显式设等级的是哪个 app、设的什么值」，冲突时在 `CORE` 打一条 WARN，
+  写明双方的值与「后启动的赢」；赢家是 `LOG_ERROR` 时这条消息自己抬到 ERROR，
+  才不会被同一条阈值吃掉（绝不抬到 FATAL —— 自定义 sink 可能对 FATAL 直接
+  abort），`OFF` 与 `FATAL` 下照旧一个字不吐。**不查重**：冲突条件只在真配错时
+  为真，去重会让最重要的那次重复消失。`set_log_level()` 与
+  `uvcpp_logger::set_level()` 的 `@note` 都写明这条（分模块设等级同样是进程级
+  的）。用例 `log_level_is_process_wide` 用一个捕获 sink 钉住「冲突后有 WARN、
+  且两个等级名都在里面」。
+- **在途闸门的上限与 `set_loops(n)` 无关 —— 补文档、补用例钉住**（`1.7.5-dev`）。
+  `uvcpp_web_work_limit::default_limit()` 是「线程池大小 × 4」（下限 16），而
+  `set_loops(n)` 扇出的是**同一条 libuv 线程池**上的事件循环：池里能并行干活的
+  线程一个都没多。按 n 乘会让上限虚增 n 倍，闸门就名存实亡。此前行为本来就对
+  （`start()` 里那次重算不看循环数），只是没有任何文字或判据说明这一点 —— 现在
+  `set_work_limit()` 与 `default_limit()` 的 `@note` 都写死了这条，回归用例
+  `loops_do_not_scale_limit` 在 `set_loops(4)` 之后与 `start_background()` 之后
+  各判一次：上限仍等于 `default_limit()`。
 - **链缓存的"首次构建"从请求路径上搬走 —— `n > 1` 下它是框架自己踩的一处数据竞争**
   （`1.6.14-dev`）。链缓存（`chain_cache_` 是 `std::map`、`chain_storage_` 是
   `std::deque`）原本是**惰性**建的：第一个请求派发到哪个路由，就在那条**工作循环的
@@ -1174,17 +1194,17 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   （`src/web/uvcpp_http_server.cpp:1691-1691`），而 llhttp 的 flags 是**连接级**的、
   属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
   读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
-  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2690-2690` 打
+  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2769-2769` 打
   「连接 N 已断开，响应被丢弃」，客户端收到 1 条 + FIN）。**同步处理函数侥幸躲开**：
   它们的响应在解析器前进之前就序列化完了 —— 所以这条缺陷只在「流水线 + 异步响应」
   同时成立的形状里现形，而静态腿（响应要等池）正是这个形状。
 
   **改法**：webapp 在**发送前**把「**这一条**请求自己」的结论钉成显式 `connection`
-  头（`src/webapp/uvcpp_web_app.cpp:2697-2700`）。判据取每请求的那份副本 ——
+  头（`src/webapp/uvcpp_web_app.cpp:2776-2779`）。判据取每请求的那份副本 ——
   `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
   读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
   （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。
-  HTTP 层本来就认显式头（`:1624-1628`）、`begin_stream` 也认（`:1745-1746`），所以
+  HTTP 层本来就认显式头（`src/web/uvcpp_http_server.cpp:1684-1687`）、`begin_stream` 也认（`src/web/uvcpp_http_server.cpp:1803-1808`），所以
   **整包 / 尾随头 / 流式**三条出口一并覆盖，且 `handler` 自己设过 `connection` 的
   仍然说了算。放在「发送前」而不是「派发时」：处理函数跑之前响应表必须还是空的
   （那条既有约定由 `web_app_app_func.cpp` 的 `response_header_capacity_reused` 正对照
