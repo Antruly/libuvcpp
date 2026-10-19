@@ -1,27 +1,25 @@
-libuvcpp 1.7.6-dev — Linux x64 预编译包
+libuvcpp 1.8.0 — Linux x64 预编译包（发布版）
 ==================================================
 
 源码
-  commit      738b4ad2d72e7b58583e53630944ff8b69f5afdc
+  commit      f3b0b0dc9052621d60884142be6e3fef137f24c8
   分支        release/1.6.1
-  版本串      1.7.6-dev（UVCPP_VERSION_STRING）
-  说明        这是开发快照，不是正式发布。正式版本见 GitHub Releases
-              以及 apt / dnf 渠道。
+  版本串      1.8.0（UVCPP_VERSION_STRING，发布态）
+  说明        这是正式发布版的 Linux x64 快照。正式发布包（六个平台）见
+              GitHub Releases，发行版包见 apt / dnf 渠道。
 
 归档
-  libuvcpp-1.7.6-linux-x64.zip
-              file name 由 tests/tools/package_release.py 按“基础版本号”
-              生成；版本串本身带 -dev，内容与本清单一致。
-  解压后是一棵可用的安装树：
+  libuvcpp-1.8.0-linux-x64.zip
+              解压后是一棵可用的安装树：
               include/  lib/  bindings/  README.md  CHANGELOG.md
               RELEASE.md  LICENSE
-  使用：      unzip libuvcpp-1.7.6-linux-x64.zip
-              g++ app.cpp -Ilibuvcpp-1.7.6-linux-x64/include \
-                  -Llibuvcpp-1.7.6-linux-x64/lib -luvcpp
+  使用：      unzip libuvcpp-1.8.0-linux-x64.zip
+              g++ app.cpp -Ilibuvcpp-1.8.0-linux-x64/include \
+                  -Llibuvcpp-1.8.0-linux-x64/lib -luvcpp
               或者用 lib/pkgconfig/uvcpp.pc（pkg-config --cflags --libs uvcpp）。
 
 构建
-  时间        2026-10-18T20:09:32Z
+  时间        2026-10-19T00:42Z
   平台        Linux x86_64（Ubuntu 24.04 / Mint 22.3，GCC 13.3.0）
   CMake       Release，-DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
   静态编入    libuv / zlib / OpenSSL 3.5.3（带 QUIC API）/ brotli / llhttp /
@@ -38,8 +36,8 @@ libuvcpp 1.7.6-dev — Linux x64 预编译包
   libstdc++.so.6 / libgcc_s.so.1 / libm.so.6 / libc.so.6 —— 除此之外没有
   第三方动态库（libssl、libuv、libz、libnghttp2 … 全部静态编入）。
   因此本包要求 glibc >= 2.38、libstdc++ 的 GLIBCXX_3.4.32（GCC 13 运行时）：
-  Ubuntu 22.04（glibc 2.35）不能直接用。正式发布包由 CI 在 22.04 上编，
-  下限更低。
+  Ubuntu 22.04（glibc 2.35）不能直接用。GitHub Releases 上的正式包由 CI
+  在 22.04 上编，下限更低。
 
 数据库客户端库
   按仓库的驱动策略，MySQL / PostgreSQL / ODBC / MongoDB 四家**不随包分发**
@@ -51,5 +49,5 @@ libuvcpp 1.7.6-dev — Linux x64 预编译包
   Redis 内置 RESP2/RESP3 客户端，不需要任何外部库。
 
 自检
-  uvcpp_c_version_string() == "1.7.6-dev"
+  uvcpp_c_version_string() == "1.8.0"
   sha256sum -c SHA256SUMS
