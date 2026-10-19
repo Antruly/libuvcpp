@@ -15,6 +15,23 @@ SHA512: 5d0021f304bce348dae2568fed74fe1714a506d06546612b47a2f0527bce137d865081b3
 Homepage: https://github.com/Antruly/libuvcpp
 Description: Modern C++ wrapper for libuv
 
+Package: libuvcpp-dev
+Architecture: arm64
+Version: 1.8.0-1
+Priority: optional
+Section: libdevel
+Maintainer: Antruly <antruly@users.noreply.github.com>
+Installed-Size: 1838
+Depends: libuvcpp1 (= 1.8.0-1), libuv1-dev, zlib1g-dev, nlohmann-json3-dev
+Filename: pool/main/l/libuvcpp/libuvcpp-dev_1.8.0-1_arm64.deb
+Size: 629870
+MD5sum: 22dcf8ad2a9316c485c115fd5ef5a07b
+SHA1: 5208ec101497deb55f5654646bccfda2f3935d87
+SHA256: 77fd48119cb26e2360dd20acd98b0db8d6bd3a9b54b576dfaa19636ba9a7f7dc
+SHA512: af4ff1eac8f93a88af837a6f45ebd84ee4bcc262fa7775e29884ddf5957f15efea581c7d12671691036dd94c4a1b73feaec96b2e43f47c8232bea74ab18ab85d
+Homepage: https://github.com/Antruly/libuvcpp
+Description: Modern C++ wrapper for libuv
+
 Package: libuvcpp1
 Architecture: arm64
 Version: 1.7.4-1
@@ -29,6 +46,23 @@ MD5sum: ce5ba5e7ee344600b711ff40c7e87f81
 SHA1: fef7e0163edf27fdda88debbce6611eb79772ad5
 SHA256: b0996fd0d0a52498f8e4892d26269a878b11ae52b483a112b5160d08742a5bfa
 SHA512: 8ca2d450f9a7feb85c2eee5c0ad34a532fb024f0ed983ef3daf36cdcd6c2c466c1389515b876b909b44f9db461298d086c3c6a91501abefea30ccbd284339d65
+Homepage: https://github.com/Antruly/libuvcpp
+Description: Modern C++ wrapper for libuv
+
+Package: libuvcpp1
+Architecture: arm64
+Version: 1.8.0-1
+Priority: optional
+Section: libs
+Maintainer: Antruly <antruly@users.noreply.github.com>
+Installed-Size: 14255
+Depends: libc6 (>= 2.34), libstdc++6 (>= 11), libgcc-s1, libuv1 (>= 1.43.0), zlib1g
+Filename: pool/main/l/libuvcpp/libuvcpp1_1.8.0-1_arm64.deb
+Size: 6308372
+MD5sum: b61ca00e8eaee2f062ed539b489b4a4f
+SHA1: 3c436451256eebaf64d103f1d2b148355e15dbc8
+SHA256: f2ce3073a5046591b79539b76c4b74127166d8b1a042595b0b7c4483115c6600
+SHA512: 59108e7a0365ebba3d7a3fbbb2103b32ac4448bcefb796de3d7c98a534ac83c3b6cd1312faace812a712b5360915247f516737c478c9cadc7f34fe7ee2bbc715
 Homepage: https://github.com/Antruly/libuvcpp
 Description: Modern C++ wrapper for libuv
 
