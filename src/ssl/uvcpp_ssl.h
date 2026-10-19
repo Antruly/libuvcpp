@@ -158,6 +158,9 @@ class UVCPP_API uvcpp_ssl {
    */
   bool set_verify_hostname(const char* host, size_t len);
 
+  /** @brief Set the TLS SNI server name (must be called before the handshake). */
+  bool set_server_name(const char* host, size_t len);
+
   /**
    * @brief 本连接所属的上下文；没有返回 nullptr。
    *

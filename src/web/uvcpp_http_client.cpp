@@ -1099,6 +1099,16 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
   // h2 的 TLS 层必须走内存 BIO（`uvcpp_tcp_client` 那条），两者不能混。
   // 写出来之后，将来往 ctx 上加了客户端 ALPN 也不会意外把这条路径带进 h2。
   ssl_->set_alpn_protos({"http/1.1"});
+  // 与 `uvcpp_tcp_client::apply_tls_hostname()` 同一条规则：SNI 只带 DNS 名，
+  // IP 字面量（RFC 6066 §3）不发。证书校验仍然按 `host_` 走下面那条。
+  struct sockaddr_in  sni_addr4;
+  struct sockaddr_in6 sni_addr6;
+  const bool is_ip_literal =
+      uv_ip4_addr(host_.c_str(), 0, &sni_addr4) == 0 ||
+      uv_ip6_addr(host_.c_str(), 0, &sni_addr6) == 0;
+  if (!is_ip_literal) {
+    ssl_->set_server_name(host_.c_str(), host_.size());
+  }
 
   // 主机名校验**必须在这里单独接一次**。这条路是 `*_wait` 系列专用的：它自己
   // `new uvcpp_ssl(ssl_ctx_, fd)`，**根本不经过 `uvcpp_tcp_client::connect()`**，
