@@ -14,6 +14,7 @@
 #include <web/uvcpp_http_compress.h>
 #include <handle/uvcpp_tcp.h>
 #include <req/uvcpp_write.h>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -24,9 +25,16 @@
 #include <functional>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/time.h>  // struct timeval（SO_RCVTIMEO / SO_SNDTIMEO）
+#endif
+
 #if UVCPP_OPENSSL_ENABLE
 #include <ssl/uvcpp_ssl.h>
 #include <ssl/uvcpp_ssl_context.h>
+// `SSL_ERROR_*`：同步路径要区分「对端干净关闭」与「读超时」，只看
+// `uvcpp_ssl::read()` 的 0 分不出来（两者都返回 0）。
+#include <openssl/ssl.h>
 #endif
 
 // h2 的头只在这一层出现。公开头里只有前置声明 —— 见 uvcpp_http_client.h 那段。
@@ -347,6 +355,10 @@ int uvcpp_http_client::connect(const char* host, int port,
   return connect_wait(host, port);
 }
 
+// 定义在下面的"阻塞 socket 助手"一节；`connect_wait` 的 TLS 分支要用它给
+// 握手装超时，所以先声明。
+static void set_socket_timeout(uv_os_sock_t fd, int timeout_ms);
+
 int uvcpp_http_client::connect_wait(const char* host, int port,
                                      int timeout_ms) {
   host_ = host;
@@ -399,9 +411,17 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
 #if UVCPP_OPENSSL_ENABLE
       if (ssl_enabled_) {
         uv_os_sock_t sock;
-        if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) != 0 ||
-            do_ssl_handshake(static_cast<int>(sock)) <= 0) {
+        if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) != 0) {
           set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1;
+        }
+        // TCP 连上了但对端不发 ServerHello 时，阻塞的 SSL_connect 会一直等 ——
+        // 握手同样要有墙钟上限（与两条 send_wait 用的是同一个 socket 选项）。
+        set_socket_timeout(sock, timeout_ms);
+        const int hrc = do_ssl_handshake(static_cast<int>(sock));
+        if (hrc <= 0) {
+          set_status(HTTP_CLIENT_ERROR);
+          last_error_code_ = hrc;
+          return hrc;
         }
       }
 #endif
@@ -896,6 +916,77 @@ static void set_socket_blocking(uv_os_sock_t fd, bool blocking) {
 #endif
 }
 
+// 阻塞 socket 的收发超时。**两个平台都有对应选项**：Windows 是毫秒 DWORD，
+// POSIX 是 `struct timeval`。从前这段整块包在 `#ifdef _WIN32` 里，于是
+// `timeout_ms` 在 Linux/macOS 上被静默忽略，对端不响应就无限阻塞（uvp#39）。
+// 注意这是**每次 I/O** 的超时，不是整次请求的 deadline。
+static void set_socket_timeout(uv_os_sock_t fd, int timeout_ms) {
+  if (timeout_ms <= 0) return;
+#ifdef _WIN32
+  DWORD tv = static_cast<DWORD>(timeout_ms);
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&tv), sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+             reinterpret_cast<const char*>(&tv), sizeof(tv));
+#else
+  struct timeval tv;
+  tv.tv_sec  = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+// 阻塞 socket 的一次 recv：> 0 字节数，0 = 对端关闭，< 0 = 负的 libuv 错误码。
+// 超时（EAGAIN/EWOULDBLOCK/ETIMEDOUT）必须与 EOF 分开 —— `read_one_message`
+// 靠这个区分「半条响应」和「对端走了」。
+static int sync_recv(uv_os_sock_t sock, char* buf, size_t len) {
+  for (;;) {
+#ifdef _WIN32
+    const int n = ::recv(sock, buf, static_cast<int>(len), 0);
+    if (n > 0) return n;
+    if (n == 0) return 0;
+    const int e = WSAGetLastError();
+    if (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK) return UV_ETIMEDOUT;
+    return UV_EIO;
+#else
+    const ssize_t n = ::recv(sock, buf, len, 0);
+    if (n > 0) return static_cast<int>(n);
+    if (n == 0) return 0;
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+      return UV_ETIMEDOUT;
+    }
+    return UV_EIO;
+#endif
+  }
+}
+
+// 同步 SSL 读：与 `sync_recv` 同一个契约。`uvcpp_ssl::read()` 对 WANT_READ 与
+// ZERO_RETURN 都返回 0，只能再看 `last_ssl_error()`：阻塞 socket + SO_RCVTIMEO
+// 下 WANT_READ 就是"读超时"，ZERO_RETURN 才是对端干净关闭。
+#if UVCPP_OPENSSL_ENABLE
+static int sync_ssl_read(uvcpp_ssl* ssl, char* buf, size_t len) {
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    errno = 0;
+    const int n = ssl->read(buf, len);
+    if (n > 0) return n;
+    if (n < 0) return UV_EPROTO;
+    const int se = ssl->last_ssl_error();
+    if (se == SSL_ERROR_ZERO_RETURN) return 0;  // 对端干净关闭
+    if ((se == SSL_ERROR_WANT_READ || se == SSL_ERROR_WANT_WRITE) &&
+        errno == EINTR) {
+      continue;  // 被信号打断：重试（有上界）
+    }
+    if (se == SSL_ERROR_WANT_READ || se == SSL_ERROR_WANT_WRITE) {
+      return UV_ETIMEDOUT;  // 阻塞 socket + 读超时
+    }
+    return 0;  // 没有更细的信息：按 EOF 处理，与旧行为一致
+  }
+  return UV_ETIMEDOUT;
+}
+#endif
+
 // 解析 HTTP 响应头，小写化后查找指定 header 的值（返回空串表示不存在）
 static std::string get_header_value(const std::string& head,
                                     const std::string& name) {
@@ -1025,9 +1116,15 @@ static bool chunked_complete(const std::string& s, size_t pos) {
 // 现在改成：头读满 → 看 transfer-encoding / content-length 决定还要读多少 →
 // 够了一条报文就返回，多余字节不吞、连接留给下一次请求。两者都没有时才退化
 // 为读至 EOF（此时上面的循环已经把数据收完，不会再阻塞）。
-static bool read_one_message(const std::function<int(char*, size_t)>& rd,
-                             std::string& head, std::string& body,
-                             bool head_request) {
+static int read_one_message(const std::function<int(char*, size_t)>& rd,
+                            std::string& head, std::string& body,
+                            bool head_request) {
+  // 返回值：0 = 拿到一条完整报文；负的 libuv 错误码 = 读失败/超时/半条报文。
+  //
+  // 旧实现把 `n <= 0` 一律当 EOF：对端收下请求后不响应、`SO_RCVTIMEO` 到点
+  // 返回 EAGAIN 时，这里会把"什么都还没读到"当成成功，调用方拿到一个保留默认
+  // `200 OK` 的空响应（uvp#39）。现在读错误与超时原样往上传，只有真正的 EOF
+  // （`rd` 返回 0）才是"对端关了"。
   std::string all;
   char buf[8192];
 
@@ -1037,16 +1134,17 @@ static bool read_one_message(const std::function<int(char*, size_t)>& rd,
     hdrEnd = all.find("\r\n\r\n");
     if (hdrEnd != std::string::npos) break;
     int n = rd(buf, sizeof(buf));
-    if (n <= 0) break;  // EOF / 错误 / 超时 —— 不再等
+    if (n < 0) return n;  // 超时 / socket 错误
+    if (n == 0) break;    // EOF
     all.append(buf, static_cast<size_t>(n));
   }
 
   if (hdrEnd == std::string::npos) {
-    // 一个字节都没读到，或对端没给完整的头就断了：head 置空、body 为空，
-    // 由调用方按"没有响应"处理（状态码保留其默认值）。
+    // 一个字节都没读到，或对端没给完整的头就断了：这是"没有响应"，不是成功。
+    // 状态码由调用方复位成 `HTTP_STATUS_NONE`（见 send_wait_* 的入口）。
     head = all;
     body.clear();
-    return !all.empty();
+    return UV_EOF;
   }
 
   head = all.substr(0, hdrEnd);
@@ -1058,7 +1156,7 @@ static bool read_one_message(const std::function<int(char*, size_t)>& rd,
   // （它让 llhttp 置 F_SKIPBODY），两条路都得告诉解析器"这条不领 body"。
   if (head_request) {
     body.clear();
-    return true;
+    return 0;
   }
 
   const size_t bodyStart = hdrEnd + 4;
@@ -1089,11 +1187,21 @@ static bool read_one_message(const std::function<int(char*, size_t)>& rd,
     } else if (haveLen) {
       if (all.size() - bodyStart >= wantLen) break;
     } else {
-      break;  // 无分帧信息：阶段 1 已读到 EOF，能拿到的都拿到了
+      break;  // 无分帧信息：EOF 才是报文边界（阶段 1 已读到 EOF）
     }
     int n = rd(buf, sizeof(buf));
-    if (n <= 0) break;
+    if (n < 0) return n;  // 超时 / socket 错误
+    if (n == 0) break;    // EOF
     all.append(buf, static_cast<size_t>(n));
+  }
+
+  // EOF 时如果分帧规则说"还没收够"，这条报文是**截断**的 —— 不能把半条正文
+  // 当成功交出去（旧实现会静默截断）。关闭定界（既无长度也无 chunked）的响应
+  // 例外：EOF 本来就是它的结束标志。
+  if (chunked) {
+    if (!chunked_complete(all, bodyStart)) return UV_EOF;
+  } else if (haveLen) {
+    if (all.size() - bodyStart < wantLen) return UV_EOF;
   }
 
   std::string raw = all.substr(bodyStart);
@@ -1104,7 +1212,7 @@ static bool read_one_message(const std::function<int(char*, size_t)>& rd,
   } else {
     body = raw;
   }
-  return true;
+  return 0;
 }
 
 int uvcpp_http_client::do_ssl_handshake(int fd) {
@@ -1138,10 +1246,19 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
     ssl_->set_verify_hostname(host_.c_str(), host_.size());
   }
 
-  int rc = ssl_->handshake();
-  // 非阻塞 socket 下 handshake 可能返回 0（WANT_READ/WANT_WRITE），重试几次兜底
-  for (int i = 0; i < 4 && rc == 0; ++i) rc = ssl_->handshake();
-  return rc;
+  // 阻塞 socket + `SO_RCVTIMEO`：`handshake()` 返回 0（WANT_READ/WANT_WRITE）
+  // 只有两种来由 —— 超时，或被信号打断（`EINTR`）。后者必须重试：一次无关的
+  // 信号不该让握手失败（本机的测试进程里就复现过：`SSL_connect` 13 ms 返回
+  // WANT_READ 且 `errno == EINTR`）。重试**有上界**，不会把一次超时放大成多次：
+  // 真正超时的那一次 `errno` 是 EAGAIN/EWOULDBLOCK，直接返回。
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    errno = 0;
+    const int rc = ssl_->handshake();
+    if (rc == 1) return 1;
+    if (rc < 0) return UV_EPROTO;
+    if (errno != EINTR) return UV_ETIMEDOUT;
+  }
+  return UV_ETIMEDOUT;
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,17 +1280,19 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
 #endif
   if (!ssl_) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
 
-  // 设置 socket 收发超时，避免阻塞挂死。**只有 Windows 这一支设了** —— POSIX 上
-  // 既没有 `SO_RCVTIMEO` 的等价写法也没有别处兜底，`timeout_ms` 在那里被忽略
-  // ⇒ `send_wait*` 在 Linux/macOS 上仍可能无限阻塞。这是**已知缺口**，不是双保险。
+  // 失败时调用方看到的必须是一份"没收到响应"的应答，而不是构造时那个
+  // `200 OK`（uvp#39：日志里出现"请求失败，但状态码 200"）。
+  resp.status_code    = HTTP_STATUS_NONE;
+  resp.status_message = http_status_reason(HTTP_STATUS_NONE);
+
   uv_os_sock_t sock;
-  if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) == 0) {
-#ifdef _WIN32
-    DWORD tv = static_cast<DWORD>(timeout_ms);
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-#endif
+  if (uvcpp_handle::fileno(tcp_->get_tcp(), sock) != 0) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = -1;
+    return -1;
   }
+  // 两个平台都装收发超时（见 set_socket_timeout 的说明）。
+  set_socket_timeout(sock, timeout_ms);
 
   // 构造请求：补 Host；**不再强塞 `Connection: close`** —— 报文边界由分帧规则
   // 划定（见 read_one_message），连接因此可以像异步路径一样复用。
@@ -1184,18 +1303,33 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
 #endif
   std::string raw = r.to_string();
 
-  // 阻塞式 SSL 写入
+  // 阻塞式 SSL 写入。0 = WANT_WRITE（阻塞 socket + SO_SNDTIMEO 下就是超时），
+  // 不能当成"写完了"静默跳出。
   size_t sent = 0;
   while (sent < raw.size()) {
-    int n = ssl_->write(raw.data() + sent, raw.size() - sent);
-    if (n < 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
-    if (n == 0) break;  // 阻塞 socket 下不应出现，防御性跳出
+    const int n = ssl_->write(raw.data() + sent, raw.size() - sent);
+    if (n < 0) {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = UV_EPROTO;
+      return UV_EPROTO;
+    }
+    if (n == 0) {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = UV_ETIMEDOUT;
+      return UV_ETIMEDOUT;
+    }
     sent += static_cast<size_t>(n);
   }
 
   std::string head, body;
-  read_one_message([this](char* p, size_t n) { return ssl_->read(p, n); }, head,
-                   body, req.method == http_method::HTTP_HEAD);
+  const int rrc = read_one_message(
+      [this](char* p, size_t n) { return sync_ssl_read(ssl_, p, n); }, head, body,
+      req.method == http_method::HTTP_HEAD);
+  if (rrc != 0) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = rrc;
+    return rrc;
+  }
 
   // 状态行 + 全部 header 落进 resp（两条阻塞路径共用，见 parse_response_head）
   parse_response_head(head, resp);
@@ -1233,14 +1367,13 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
     return -1;
   }
 
-  // 把 socket 设为阻塞模式，并设置收发超时，避免挂死。超时同样是**仅 Windows**
-  // 生效（见 `send_wait_ssl` 同处的说明）—— POSIX 上这一支同样有无限阻塞的缺口。
+  // 阻塞模式 + 两个平台都装收发超时（与 send_wait_ssl 同源）。
   set_socket_blocking(sock, true);
-#ifdef _WIN32
-  DWORD tv = static_cast<DWORD>(timeout_ms);
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-#endif
+  set_socket_timeout(sock, timeout_ms);
+
+  // 失败时交付"没收到响应"，而不是构造时那个 200 OK（同 send_wait_ssl）。
+  resp.status_code    = HTTP_STATUS_NONE;
+  resp.status_message = http_status_reason(HTTP_STATUS_NONE);
 
   // 构造请求：补 Host；**不再强塞 `Connection: close`**（理由同 send_wait_ssl）
   uvcpp_http_request r = req;
@@ -1250,21 +1383,36 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
 #endif
   std::string raw = r.to_string();
 
-  // 阻塞式写入
+  // 阻塞式写入：超时（EAGAIN/EWOULDBLOCK/ETIMEDOUT）与真错误分开报。
   size_t sent = 0;
   while (sent < raw.size()) {
-    int n = static_cast<int>(::send(sock, raw.data() + sent,
-                                    static_cast<int>(raw.size() - sent), 0));
-    if (n <= 0) { set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1; }
-    sent += static_cast<size_t>(n);
+    const int n = static_cast<int>(::send(
+        sock, raw.data() + sent, static_cast<int>(raw.size() - sent), 0));
+    if (n > 0) { sent += static_cast<size_t>(n); continue; }
+    set_status(HTTP_CLIENT_ERROR);
+#ifdef _WIN32
+    const int e = WSAGetLastError();
+    last_error_code_ = (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK)
+                           ? UV_ETIMEDOUT
+                           : UV_EIO;
+#else
+    last_error_code_ =
+        (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)
+            ? UV_ETIMEDOUT
+            : UV_EIO;
+#endif
+    return last_error_code_;
   }
 
   std::string head, body;
-  read_one_message(
-      [sock](char* p, size_t n) {
-        return static_cast<int>(::recv(sock, p, static_cast<int>(n), 0));
-      },
-      head, body, req.method == http_method::HTTP_HEAD);
+  const int rrc = read_one_message(
+      [sock](char* p, size_t n) { return sync_recv(sock, p, n); }, head, body,
+      req.method == http_method::HTTP_HEAD);
+  if (rrc != 0) {
+    set_status(HTTP_CLIENT_ERROR);
+    last_error_code_ = rrc;
+    return rrc;
+  }
 
   // 状态行 + 全部 header 落进 resp（两条阻塞路径共用，见 parse_response_head）
   parse_response_head(head, resp);

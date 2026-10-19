@@ -168,9 +168,10 @@ class UVCPP_API uvcpp_http_client {
    * @brief Send an HTTP request and wait for the full response (sync).
    * @param req        Request to send.
    * @param resp       [out] Populated response.
-   * @param timeout_ms Timeout in milliseconds. **仅 Windows 生效** —— 这一支的超时
-   *                   靠 `SO_RCVTIMEO`/`SO_SNDTIMEO`，POSIX 上没有对应实现（见
-   *                   `send_wait_plain` 的说明），那里传入的值会被忽略。
+   * @param timeout_ms Timeout in milliseconds. **两个平台都生效** —— 这一支的超时
+   *                   靠 `SO_RCVTIMEO`/`SO_SNDTIMEO`（Windows 毫秒 DWORD、POSIX
+   *                   `struct timeval`，见 `send_wait_plain` 的说明）。它是
+   *                   **每次 I/O** 的超时，不是整次请求的总 deadline。
    * @return 0 on success, libuv error code on failure.
    */
   int send_wait(const uvcpp_http_request& req,
@@ -184,10 +185,11 @@ class UVCPP_API uvcpp_http_client {
    * 析构需做 close-dance，存在内存安全隐患；本方法直接对已连接 socket 做同步
    * 收发，绕开 libuv 异步读路径，析构期句柄处于 inactive，安全。
    *
-   * @note `timeout_ms` **只有 Windows 支生效**：实现里那段
-   *       `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 包在 `#ifdef _WIN32` 中，POSIX
-   *       既没有等价写法也没有别处兜底，所以 Linux/macOS 上对端不响应时本方法
-   *       仍可能**无限阻塞**。这是已知缺口，让调用方误以为有超时会很难查。
+   * @note `timeout_ms` 在 **Windows 与 POSIX 上都生效**（`set_socket_timeout()`：
+   *       Windows 用毫秒 `DWORD`，POSIX 用 `struct timeval`）。它是**每次 I/O**
+   *       的超时，不是整次请求的总 deadline —— 对端每隔略小于 `timeout_ms` 发一个
+   *       字节仍能把请求拖长。读超时/半条报文返回 `UV_ETIMEDOUT` / `UV_EOF`，
+   *       失败时 `resp.status_code` 是 `HTTP_STATUS_NONE`（不再是默认的 200）。
    */
   int send_wait_plain(const uvcpp_http_request& req,
                       uvcpp_http_response& resp,
