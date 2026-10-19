@@ -2,7 +2,7 @@ libuvcpp 1.8.0 — Linux x64 预编译包（发布版）
 ==================================================
 
 源码
-  commit      f3b0b0dc9052621d60884142be6e3fef137f24c8
+  commit      13685c18266e97af748250c2a08ab49bfdeb1321
   分支        release/1.6.1
   版本串      1.8.0（UVCPP_VERSION_STRING，发布态）
   说明        这是正式发布版的 Linux x64 快照。正式发布包（六个平台）见
@@ -19,7 +19,7 @@ libuvcpp 1.8.0 — Linux x64 预编译包（发布版）
               或者用 lib/pkgconfig/uvcpp.pc（pkg-config --cflags --libs uvcpp）。
 
 构建
-  时间        2026-10-19T00:42Z
+  时间        2026-10-19T02:13Z
   平台        Linux x86_64（Ubuntu 24.04 / Mint 22.3，GCC 13.3.0）
   CMake       Release，-DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
   静态编入    libuv / zlib / OpenSSL 3.5.3（带 QUIC API）/ brotli / llhttp /

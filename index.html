@@ -17,10 +17,25 @@
     sudo curl -fsSL -o /etc/yum.repos.d/libuvcpp.repo https://antruly.github.io/libuvcpp/rpm/libuvcpp.repo
     sudo dnf install libuvcpp-devel
 
+## 预编译包（Linux x64 发布版）
+
+    https://antruly.github.io/libuvcpp/download/1.8.0/libuvcpp-1.8.0-linux-x64.zip
+
+自包含（除 glibc / libstdc++ 外无动态依赖），全模块：HTTP/1.1、HTTP/2、
+HTTP/3（QUIC）、WebSocket、WSDL/SOAP、C API、Redis、SOCKS5，以及数据库层
+（SQLite 内建；MySQL / PostgreSQL / ODBC / MongoDB 在运行时 dlopen 使用者
+自装的那份客户端库，缺库返回 NO_DRIVER 而不影响进程）。
+
+对应源码 `release/1.6.1` 分支 commit `13685c1`（版本串 `1.8.0`）。
+同目录有 `SHA256SUMS` 与 `BUILD-INFO.txt`（构建配置、模块清单、运行要求）。
+**这是发布版 1.8.0 的 Linux x64 构建**：它由 Ubuntu 24.04 的工具链编译，需要
+glibc &gt;= 2.38；GitHub Releases 上的六平台正式包由 CI 在 22.04 上编，下限更低。
+
 ## 文件
 
 - `apt/` — Debian 仓库（`InRelease` 已签名）
 - `rpm/` — RPM 仓库（`repomd.xml.asc`）
+- `download/&lt;版本&gt;/` — 预编译包、`SHA256SUMS`、构建清单
 - 源码与发布包：&lt;https://github.com/Antruly/libuvcpp&gt;
 
 ## 注意
