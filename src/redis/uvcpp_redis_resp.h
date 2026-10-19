@@ -82,7 +82,7 @@ struct uvcpp_redis_value_factory {
  *   else { 协议错误：parser.last_error() / last_error_text() }
  * @endcode
  */
-struct uvcpp_redis_parser {
+struct UVCPP_API uvcpp_redis_parser {
   enum result {
     NEED_MORE = 0,  ///< 数据不够，`off` 未动，可以再来一次
     DONE      = 1,  ///< 解析出一个完整值，`off` 已前移
