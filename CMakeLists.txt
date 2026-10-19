@@ -3153,6 +3153,67 @@ if(UVCPP_BUILD_BENCH)
   add_subdirectory(bench)
 endif()
 
+# =========================================================================
+# 从源码安装：让 `cmake --install` 出来的前缀成为一份**可用**的 SDK（uvp#40）
+# =========================================================================
+#
+# `tests/tools/package_release.py` 手工组装的 release zip 一直是可用的，但从
+# 源码 `cmake --install --prefix X` 出来的前缀有三个缺口（2026-10-20 实测）：
+#   1. 自编译依赖里的共享目标不一定跟着装 —— 没装时 `libuvcpp.so` 的
+#      DT_NEEDED 指着一个前缀里没有的名字，消费者一启动就 `not found`
+#      （MinGW 上是 `0xC0000135` 静默退出）；
+#   2. 共享库没有 RPATH —— 即便依赖就在同一个 lib/ 里，动态链接器也不会找；
+#   3. 自编译 libuv 的头装在 include/libuv/，而公开头写的是 `#include <uv.h>`，
+#      导出的 target 没把这个目录传给消费者。
+#
+# 三段都**幂等**：依赖自己已经装过同名目标的，重复 install(TARGETS) 只会再写
+# 一遍同样的文件。
+
+# (1) 自编译依赖里的共享目标（llhttp/zlib 的 CMake 只在部分配置下自己装）。
+foreach(_uvcpp_dep_tgt llhttp_shared llhttp zlib)
+  if(TARGET ${_uvcpp_dep_tgt})
+    get_target_property(_uvcpp_dep_type ${_uvcpp_dep_tgt} TYPE)
+    if(_uvcpp_dep_type STREQUAL "SHARED_LIBRARY")
+      install(TARGETS ${_uvcpp_dep_tgt}
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+    endif()
+  endif()
+endforeach()
+
+# (2) 安装后的 RPATH：$ORIGIN 让 libuvcpp.so 在自己旁边找 libllhttp.so，
+#     @loader_path 是 macOS 的同一个位置。静态库不需要。
+if(APPLE)
+  set(_uvcpp_install_rpath "@loader_path")
+elseif(UNIX)
+  set(_uvcpp_install_rpath "$ORIGIN")
+endif()
+if(DEFINED _uvcpp_install_rpath)
+  foreach(_uvcpp_tgt uvcpp uvcpp_s)
+    if(TARGET ${_uvcpp_tgt})
+      get_target_property(_uvcpp_tgt_type ${_uvcpp_tgt} TYPE)
+      if(_uvcpp_tgt_type STREQUAL "SHARED_LIBRARY")
+        set_target_properties(${_uvcpp_tgt} PROPERTIES
+                              INSTALL_RPATH "${_uvcpp_install_rpath}")
+      endif()
+    endif()
+  endforeach()
+endif()
+
+# (3) 自编译 libuv 的头目录要跟着导出目标走。**只在自编译时挂**：系统 libuv
+#     不安装 include/libuv，无条件写会让 find_package 在 generate 阶段报
+#     "includes non-existent path"。
+if(UVCPP_BUILD_LIBUV_FROM_SOURCE AND DEFINED libuv_SOURCE_DIR)
+  foreach(_uvcpp_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
+    if(TARGET ${_uvcpp_tgt})
+      target_include_directories(${_uvcpp_tgt} PUBLIC
+        "$<BUILD_INTERFACE:${libuv_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:include/libuv>")
+    endif()
+  endforeach()
+endif()
+
 # install and export
 include(CMakePackageConfigHelpers)
 set(CONFIG_INSTALL_DIR lib/cmake/uvcpp)
@@ -3489,8 +3550,14 @@ endif()
 # 本来也发不出它们的头，不是一份能被别人消费的前缀，见上面装 zlib 头那段）；
 # 写成 `Requires: libuv` 会让 pkg-config 去找一份不存在的包，直接报错。
 set(UVCPP_PC_REQUIRES "")
+set(UVCPP_PC_EXTRA_CFLAGS "")
 if(NOT UVCPP_LIBUV_FROM_SOURCE)
   string(APPEND UVCPP_PC_REQUIRES "libuv")
+else()
+  # 自编译 libuv 的头装在 include/libuv（上面的 install 规则），公开头用的却是
+  # `#include <uv.h>` —— pkg-config 的 Cflags 必须把那个目录带上，否则消费者
+  # `pkg-config --cflags uvcpp` 之后仍然找不到 uv.h（uvp#40 的第三点）。
+  set(UVCPP_PC_EXTRA_CFLAGS " -I\${includedir}/libuv")
 endif()
 if(UVCPP_ENABLE_ZLIB AND NOT UVCPP_ZLIB_FROM_SOURCE)
   if(UVCPP_PC_REQUIRES)

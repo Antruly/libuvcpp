@@ -7,5 +7,5 @@ Name: uvcpp
 Description: Modern C++ wrapper for libuv
 Version: @UVCPP_VERSION@
 Requires: @UVCPP_PC_REQUIRES@
-Cflags: -I${includedir}
+Cflags: -I${includedir}@UVCPP_PC_EXTRA_CFLAGS@
 Libs: -L${libdir} -luvcpp
