@@ -57,7 +57,9 @@ bool parse_int(const char* s, std::size_t n, long long& v) {
   for (; i < n; ++i) {
     if (s[i] < '0' || s[i] > '9') return false;
     const int d = s[i] - '0';
-    if (acc > (std::numeric_limits<long long>::max() - d) / 10) return false;
+    // `( … ::max)()` 的括号不能省：Windows 的 <windows.h> 把 `max` 定义成
+    // 函数式宏，`::max()` 会被展开成 `::(` 而编不过（同 uvcpp_web_json_reflect.h）。
+    if (acc > ((std::numeric_limits<long long>::max)() - d) / 10) return false;
     acc = acc * 10 + d;
   }
   v = neg ? -acc : acc;

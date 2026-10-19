@@ -160,8 +160,20 @@ const int kMismatchRoundTrips = 20;
 /// 8 和 10 这两个数不是实测定的，是"明摆着够"定的：本机实测一**轮**往返只花
 /// 2.1 ms（43 ÷ 20），而每轮预算容得下 18 个 1 ms 的轮询；10 ms 那一项只为了在
 /// `quantum` 恰好等于 1 ms 的机器上别把预算压到 8 ms/轮。
+///
+/// 再乘一个 `kMismatchBudgetFactor`：`quantum` 量的是**空闲循环**泵一次的代价，
+/// 而一轮往返要泵两条循环、还要被调度两次，忙起来的 runner 上两者并不成固定
+/// 比例。macOS runner 上量到 `quantum = 2 ms` ⇒ 26 ms/轮，实测 27.2 ms/轮（543 / 20）
+/// 就已经越线 —— 差 4%，量具比被测噪声还紧。放大 4 倍之后，这台机器有 3.8 倍
+/// 余量（哪怕 `quantum` 量成 1 ms 也有 2.6 倍）。
+///
+/// 这条判据真正要拦的坏实现是 **PTO 量级**：一轮约 1.02 s、20 轮约 20 s。
+/// 各平台 `quantum` 不同，预算落在 1.4 s（1 ms 的机器）到 11 s（16 ms 的机器）
+/// 之间，都还在那个数之下；而健康机器的实测是 43 ms（本机）与 505 ms
+/// （Windows runner），离预算也都有一个数量级。
 const int kMismatchPollsPerRoundTrip = 8;
 const int kMismatchSlackMs           = 10;
+const int kMismatchBudgetFactor      = 4;
 
 /// 本进程里 `wait_until()` **一次轮询**要花多少毫秒（5 次取样取中位数）。
 ///
@@ -705,7 +717,7 @@ void test_streams_with_mismatched_cid_len() {
   // 含着一条活连接的收发包代价 —— 判据宁可量得准，不可量得宽。
   const long long quantum_ms = measure_poll_quantum_ms(&loop);
   const long long budget_ms =
-      static_cast<long long>(kMismatchRoundTrips) *
+      static_cast<long long>(kMismatchRoundTrips) * kMismatchBudgetFactor *
       (quantum_ms * kMismatchPollsPerRoundTrip + kMismatchSlackMs);
 
   const std::chrono::steady_clock::time_point t0 =
@@ -743,6 +755,7 @@ void test_streams_with_mismatched_cid_len() {
         "串行回声总耗时 < " + std::to_string(budget_ms) + " ms（实得 " +
             std::to_string(total_ms) + " ms；预算 = (本机轮询粒度 " +
             std::to_string(quantum_ms) + " ms × 8 + 10 ms) × " +
+            std::to_string(kMismatchBudgetFactor) + " × " +
             std::to_string(kMismatchRoundTrips) +
             " 轮）—— 坏实现下每个来回都要等一个 PTO");
 
