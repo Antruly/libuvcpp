@@ -487,7 +487,7 @@ class UVCPP_API uvcpp_http_client {
   uvcpp_ssl_context* ssl_ctx_ = nullptr;
   uvcpp_ssl*         ssl_    = nullptr;
   bool ssl_enabled_ = false;
-  int do_ssl_handshake(int fd);
+  int do_ssl_handshake(int fd, int timeout_ms);
   int ssl_read(char* buf, size_t len);
   int ssl_write(const char* data, size_t len);
 #endif
