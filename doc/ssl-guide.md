@@ -196,7 +196,7 @@ enum class tls_verify_mode : uint8_t {
 
 **客户端上 `PEER_STRICT` 真的会校验主机名。** 建立连接时，`uvcpp_tcp_client` 与
 `uvcpp_http_client` 把 `connect()` 收到的那个主机名钉给这张证书的校验
-（`src/ssl/uvcpp_ssl.cpp:192-215`）：数字 IP 字面量走 `iPAddress` 匹配，其余走
+（`src/ssl/uvcpp_ssl.cpp:201-224`）：数字 IP 字面量走 `iPAddress` 匹配，其余走
 `dNSName` 匹配。于是「证书链可信、但签发给别的域名」的对端**建立不起来** ——
 这正是 `PEER` 挡不住的那一类。头注释见 `src/ssl/uvcpp_ssl_common.h:50-63`。
 
@@ -320,7 +320,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
 （`src/ssl/uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
-（`src/net/uvcpp_tcp_client.cpp:3157-3157`）——所以**必须看各 `load_*` 的返回值**，
+（`src/net/uvcpp_tcp_client.cpp:3164-3164`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
 
 **先装私钥后装证书会返回 `false`**，见 §4。

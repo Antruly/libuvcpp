@@ -512,31 +512,31 @@ int doc_client_sync() {
 
 **一、keep-alive 有两个方向：请求那头听调用方的，响应那头听对端的。**
 `keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:459-459` 初值 `true`、
-`:235` 声明、`src/web/uvcpp_http_client.cpp:850-850` setter）。`set_keep_alive(false)`
+`:235` 声明、`src/web/uvcpp_http_client.cpp:869-869` setter）。`set_keep_alive(false)`
 会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:525-544`）；
 默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是
 `uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:156-159`）。
 **响应**说的同样作数：`on_response_complete()` 按 llhttp 算出的
 `should_keep_alive()`（HTTP 版本默认值 + `Connection` 的**逗号列表**）判断这条连接
 还能不能再用，不能就当场清掉 `HTTP_CLIENT_CONNECTED`
-（`src/web/uvcpp_http_client.cpp:719-739`）—— 此后第二次 `send()` 拿到
+（`src/web/uvcpp_http_client.cpp:738-758`）—— 此后第二次 `send()` 拿到
 `UV_ENOTCONN`，而不是往一条服务端已决定关闭的连接上写。
 `tests/functional/web_http_client_keepalive_func.cpp` 把这三条都钉住了。
 
 **二、开了 OpenSSL 的构建里 `send_wait()` 走的是阻塞 fd，不是事件循环。**
 `src/web/uvcpp_http_client.cpp:596-613` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
 有 TLS 就走阻塞路径，没有才走"轮询 loop + 1ms sleep"的异步实现。
-后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:1001-1004` 把这段历史写下来了）。
+后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:1020-1023` 把这段历史写下来了）。
 
 **三、阻塞路径的 `timeout_ms` 只有 Windows 生效。**
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 两处都被 `#ifdef _WIN32` 包着
-（`src/web/uvcpp_http_client.cpp:1143-1147`、`src/web/uvcpp_http_client.cpp:1211-1215`），POSIX 上**不设**，
+（`src/web/uvcpp_http_client.cpp:1171-1175`、`src/web/uvcpp_http_client.cpp:1239-1243`），POSIX 上**不设**，
 `send_wait()` / `send_wait_plain()` 在 Linux/macOS 上可以无限阻塞。头文件现在把这个
 缺口写在参数说明里（`src/web/uvcpp_http_client.h:171-173`、`src/web/uvcpp_http_client.h:187-191`），
 不再让读者以为有超时兜底。
 
 **四、阻塞路径读不到任何字节时返回 0，而 `resp` 是默认的 200 OK。**
-`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1235-1244`），空头交给
+`read_one_message()` 的返回值被丢弃（`src/web/uvcpp_http_client.cpp:1263-1272`），空头交给
 `parse_response_head()` 之后什么都不改，`status_code` 保持初值 200。
 **判据只能是返回值**。（异步 h1 路径相反：错误时会把 `status_code` 设成
 `HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:467-469`。）
