@@ -1100,6 +1100,16 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
   // 写出来之后，将来往 ctx 上加了客户端 ALPN 也不会意外把这条路径带进 h2。
   ssl_->set_alpn_protos({"http/1.1"});
 
+  // SNI 只对**域名**发：RFC 6066 §3 禁止 IP 字面量（判据与异步那条路一致）。
+  {
+    struct sockaddr_in _sni4;
+    struct sockaddr_in6 _sni6;
+    if (uv_ip4_addr(host_.c_str(), 0, &_sni4) != 0 &&
+        uv_ip6_addr(host_.c_str(), 0, &_sni6) != 0) {
+      ssl_->set_server_name(host_.c_str(), host_.size());
+    }
+  }
+
   // 主机名校验**必须在这里单独接一次**。这条路是 `*_wait` 系列专用的：它自己
   // `new uvcpp_ssl(ssl_ctx_, fd)`，**根本不经过 `uvcpp_tcp_client::connect()`**，
   // 所以那边钉的主机名到不了这里。漏了这一句，同步 API 上的 `PEER_STRICT` 就退回

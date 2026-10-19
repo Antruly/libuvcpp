@@ -189,6 +189,15 @@ bool uvcpp_ssl::set_alpn_protos(const std::vector<std::string>& protos) {
   return true;
 }
 
+bool uvcpp_ssl::set_server_name(const char* host, size_t len) {
+  if (!ssl_ || host == nullptr || len == 0) return false;
+  if (SSL_set_tlsext_host_name(ssl_, std::string(host, len).c_str()) != 1) {
+    clear_error();
+    return false;
+  }
+  return true;
+}
+
 bool uvcpp_ssl::set_verify_hostname(const char* host, size_t len) {
   if (!ssl_ || host == nullptr || len == 0) return false;
   X509_VERIFY_PARAM* param = SSL_get0_param(ssl_);

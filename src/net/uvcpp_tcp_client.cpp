@@ -3269,6 +3269,19 @@ void uvcpp_tcp_client::apply_tls_hostname() {
   // 从没承诺过的校验（名字对不上的对端从此连不上），`NONE` 则什么都不会发生 ——
   // 两种都是"悄悄改掉既有行为"。本档位的定义就是"校验对端 **+ 主机名**"，所以
   // 钉与不钉**只**看这一个档位。
+  // SNI is not optional: every modern virtual host needs it, and without it the
+  // server either aborts the handshake or serves an unrelated default certificate.
+  //
+  // RFC 6066 §3 禁止在 SNI 里放 IP 字面量：老代价是若干服务端直接拒握手。
+  // 判据与 `connect_transport()` 的数字地址快路径同源（`uv_ip4_addr` /
+  // `uv_ip6_addr`），名字不是 IP 才发。
+  struct sockaddr_in _sni4;
+  struct sockaddr_in6 _sni6;
+  if (uv_ip4_addr(tls_host_want_.c_str(), 0, &_sni4) != 0 &&
+      uv_ip6_addr(tls_host_want_.c_str(), 0, &_sni6) != 0) {
+    tls_ssl_->set_server_name(tls_host_want_.c_str(), tls_host_want_.size());
+  }
+
   uvcpp_ssl_context* ctx = tls_ssl_->context();
   if (ctx == nullptr || ctx->verify_mode() != tls_verify_mode::PEER_STRICT) return;
 
