@@ -118,7 +118,9 @@ X509* gen_cert(EVP_PKEY* pkey) {
   X509_gmtime_adj(X509_get_notBefore(x), 0);
   X509_gmtime_adj(X509_get_notAfter(x), 86400);
   X509_set_pubkey(x, pkey);
-  X509_NAME* name = X509_get_subject_name(x);
+  // LibreSSL/部分 OpenSSL 头把返回值声明成 `const X509_NAME*`（macOS 的 CI 就是
+  // 这么挂的）；`X509_NAME_add_entry_by_txt` 要的却是非 const 指针。
+  X509_NAME* name = const_cast<X509_NAME*>(X509_get_subject_name(x));
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                              reinterpret_cast<const unsigned char*>("localhost"),
                              -1, -1, 0);
