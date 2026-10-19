@@ -30,7 +30,7 @@
      `uvcpp_http_client` / `uvcpp_http_server` 上，web 关掉时它没有使用者。
 - 包含方式：`<http3/uvcpp_h3_common.h>`、`<http3/uvcpp_h3_connection.h>`。
   私有的 `<http3/uvcpp_h3_nghttp3.h>` 与 `<http3/uvcpp_h3_session.h>` **都不安装**
-  （`CMakeLists.txt:3366-3366`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:3427-3427`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 两个公开头整段套在 `#if UVCPP_HTTP3_ENABLE` 里，web 层那边新加的
   `listen_quic()` / `set_http3_enabled()` 也是，所以**不开关就一个名字都看不到**。
   这与 `quic/`、`web/`、`ssl/`、`http2/`、`wsdl/` 同档。
@@ -287,7 +287,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 ```
 
 - `uvcpp_http_server::listen_quic()` 在 `src/web/uvcpp_http_server.h:270`，
-  客户端那一侧是 `set_http3_enabled()`（`src/web/uvcpp_http_client.h:361-361`）。
+  客户端那一侧是 `set_http3_enabled()`（`src/web/uvcpp_http_client.h:363-363`）。
   **整个 h3 公开面都套在 `#if UVCPP_HTTP3_ENABLE` 里** —— 没编进来时它不存在，
   这是**编译期**的"没有"，不是运行时返回错误。
 - **`"h3"` 绝不进 TCP 的 ALPN 列表。** h3 只跑在 QUIC（UDP）上；在 TCP 的
@@ -410,7 +410,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
    模块"，所以 §3.3 那条明明只用 web 层 API 的片段也列了
    `<http3/uvcpp_h3_connection.h>` —— 不列的话它会**被编**，而它调的
    `set_http3_enabled()` / `listen_quic()` 整段在 `#if UVCPP_HTTP3_ENABLE` 里
-   （`src/web/uvcpp_http_client.h:361-361`、`uvcpp_http_server.h:220`），于是报的是"未声明的
+   （`src/web/uvcpp_http_client.h:363-363`、`uvcpp_http_server.h:220`），于是报的是"未声明的
    成员"：那是**假红**（文档没腐烂，是那个包没编 h3）。
    登记之后，`config-contract` job 手里那个包会把这三条判成 `[跳·默认关]` 而不是
    `[跳]`，**退出码不会抬到 3**。两个宏（`UVCPP_QUIC_ENABLE`、`UVCPP_HTTP3_ENABLE`）
@@ -463,7 +463,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
 `src/web/uvcpp_http_server.h:1666-1666`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
-的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:534-540`）
+的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:536-542`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假
 的分支。不新增每连接或每请求的 `std::function`，不新增锁、不新增分配、不新增虚调用。
 
@@ -488,7 +488,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 1. **别指望从公开 h3 头里看到 nghttp3。** `<nghttp3/nghttp3.h>` 只出现在私有的
    `src/http3/uvcpp_h3_nghttp3.h` 里，而它和持有 nghttp3 句柄的
-   `src/http3/uvcpp_h3_session.h` **两个都不安装**（`CMakeLists.txt:3366-3366`）、打包
+   `src/http3/uvcpp_h3_session.h` **两个都不安装**（`CMakeLists.txt:3427-3427`）、打包
    也排除。理由与 quic 那一对逐字相同：一是使用者不该被逼着去配 nghttp3 的搜索
    路径才能 include 一个本库的头；二是 `uvcpp_h3_session.h` 的字段布局直接跟着
    nghttp3 的版本走 —— 一旦漏进公开面，那个版本就变成了本库的 ABI。这处排除与
