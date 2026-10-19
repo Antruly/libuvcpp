@@ -13,7 +13,7 @@
  * 判据逐条（以及"未改的代码 / 坏实现会让它怎么红"）
  * -------------------------------------------------
  * 1. **对照组 n == 1 逐字不变** —— `loop_count() == 1`、请求照常答对、
- *    `connection_count_at(0) == connection_count()`、身份号高段为 0。
+ *    `on_connection` 里采样到那一格的计数等于总数且没有 1 号分片、身份号高段为 0。
  *    没有这个对照组，"n>1 也答对了"证明不了是分片分对了。
  * 2. **停机扇出（本批的主判据，确定性红）** —— n=2 起服务，主线程 `stop()`
  *    之后 `join()` 必须在有界墙钟内返回，**而且不许留下"有循环没退出"的
@@ -1540,6 +1540,22 @@ void test_control_group_n1() {
     resp.end();
   });
 
+  // 计数**在 `on_connection` 里采**：那里连接一定活着（`on_accept()` 先登记再
+  // 回调本钩子），三个量是同一个瞬间的快照。改前是 `get()` 返回后拿两次独立的
+  // 原子读去比 —— 客户端析构与服务端的回收是异步的，两次读之间那条连接正好
+  // 被收掉就是 `1 == 0`：MinGW 腿上真的这样红过一次，而库里一行没错。
+  std::mutex smu;
+  bool   sampled = false;
+  size_t s_at0 = 0, s_total = 0, s_at1 = 0;
+  app.on_connection([&](uvcpp_web_conn_id, uvcpp_tcp_client*) {
+    std::lock_guard<std::mutex> lk(smu);
+    if (sampled) return;
+    s_at0   = app.connection_count_at(0);
+    s_total = app.connection_count();
+    s_at1   = app.connection_count_at(1);
+    sampled = true;
+  });
+
   check(app.start() == 0, "start() 成功");
   const int port = app.bound_port();
 
@@ -1558,9 +1574,17 @@ void test_control_group_n1() {
     check(handler_tid == slot_tid[0],
           "n=1 时请求就在 0 号循环的线程上（没有工作循环）");
   }
-  check(app.connection_count_at(0) == app.connection_count(),
-        "n=1 时全部连接都在 0 号分片上");
-  check(app.connection_count_at(1) == 0, "n=1 时 1 号分片不存在/为空");
+  {
+    std::lock_guard<std::mutex> lk(smu);
+    check(sampled, "n=1 时 on_connection 跑过");
+    // `>= 1` 而不是 `== 1`：`roundtrip()` 会重试，采样点上游可能不止一条在飞。
+    check(s_at0 >= 1 && s_at0 == s_total,
+          "n=1 时全部连接都在 0 号分片上（at0=" + std::to_string(s_at0) +
+              "，total=" + std::to_string(s_total) + "）");
+    // 这条对"`connection_count_at` 不看下标"的坏实现有牙：它会把 0 号的计数
+    // 原样交出来（`s_at1 == s_at0 >= 1`），而不是像越界那样给 0。
+    check(s_at1 == 0, "n=1 时 1 号分片不存在/为空");
+  }
 
   check(stop_and_join_within(app, 15000, "n=1 下 stop()+join() 返回"),
         "n=1 下 stop()+join() 在有界墙钟内返回");
