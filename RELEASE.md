@@ -1286,11 +1286,11 @@ g++ -std=c++11 -g -I include your_app.cpp -L lib -luvcppd -o your_app.exe
   引入，它登记的 install 规则引用了一个从未构建的 `libuv.dll`，且它的规则排在
   本项目的规则之前 —— 一失败就整体中止，本项目的头文件与库一个都装不出来
   （Linux 上没有这个 `.dll`，同一条 install 实测走得通，2026-10-12 验过）。
-  本次的 zip 绕过它、照 `CMakeLists.txt:3082-3501` 的规则手工组装，与 install
+  本次的 zip 绕过它、照 `CMakeLists.txt:3099-3518` 的规则手工组装，与 install
   只剩**一处**刻意的差异：**libuv 的头放在 `include/` 顶层**（本库的公开头写的是
   `#include <uv.h>`，放进 `include/libuv/` 会找不到）。原先还有第二处 —— zip 里
   补了 `zlib.h` / `zconf.h`，而 install 规则里没有这一条 —— **2026-10-12 起
-  install 规则自己也装这两个头**（`CMakeLists.txt:3453-3456`），两边落到同一个
+  install 规则自己也装这两个头**（`CMakeLists.txt:3470-3473`），两边落到同一个
   位置，这处差异消失。
 
 ### MSVC 从源码树 / 安装树取头时要加 `/utf-8` —— 头文件侧已修（1.2.0）

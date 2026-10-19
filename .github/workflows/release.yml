@@ -239,10 +239,10 @@ jobs:
           # ① UVCPP_BUILD_LIBUV_FROM_SOURCE=ON：不带 preset 时它默认 OFF，
           #    `find_library` 会撞上 runner 镜像 MSYS2 自带的 libuv.dll.a，链成
           #    共享库 ⇒ 依赖 libuv-1.dll。BUILD_SHARED_LIBS 救不了这一路
-          #    （CMakeLists.txt:1596-1596 判的是 TARGET uv_a，而 find_library 给的是路径）。
+          #    （CMakeLists.txt:1613-1613 判的是 TARGET uv_a，而 find_library 给的是路径）。
           # ② BUILD_SHARED_LIBS=OFF：管 llhttp（根 CMakeLists.txt:6 默认 ON ⇒
           #    llhttp_shared ⇒ 依赖 libllhttp.dll）。zlib 不受影响，
-          #    CMakeLists.txt:2539-2540 明确链 zlibstatic。
+          #    CMakeLists.txt:2556-2557 明确链 zlibstatic。
           # 本机所有树都走 CMakePresets（它有 ①），所以这两条从来没在本机复现过。
           #
           # ③ UVCPP_ENABLE_NGHTTP2=ON：这个开关**默认 OFF**（CMakeLists.txt:159-159），
@@ -764,7 +764,7 @@ jobs:
           set -o pipefail
           # 同 mingw-x64：① 让 libuv 从源码静态编（runner 上若有系统 libuv，
           # 不带这个开关就会链成 uv.dll），② 让 llhttp 静态（否则 llhttp.dll）。
-          # zlib 不受 ② 影响（CMakeLists.txt:2539-2540 明确链 zlibstatic）。
+          # zlib 不受 ② 影响（CMakeLists.txt:2556-2557 明确链 zlibstatic）。
           # MSVC 侧 uvcpp 自己仍走 /MD + 包内自带 VC++ 运行库，与此无关。
           #
           # ODBC 的**头**：db 的第四个后端（1.7.2 起进发布包），头在 Windows SDK

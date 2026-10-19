@@ -40,7 +40,7 @@
 - 包含方式：`<quic/uvcpp_quic_client.h>`、`<quic/uvcpp_quic_server.h>`、
   `<quic/uvcpp_quic_connection.h>`、`<quic/uvcpp_quic_common.h>`。私有的
   `<quic/uvcpp_quic_ngtcp2.h>` 与 `<quic/uvcpp_quic_session.h>` **都不安装**
-  （`CMakeLists.txt:3326-3326`）—— 理由见 [§7](#7-典型坑) 第一条。
+  （`CMakeLists.txt:3343-3343`）—— 理由见 [§7](#7-典型坑) 第一条。
 - 四个公开头**全部**整段套在 `#if UVCPP_QUIC_ENABLE` 里，所以**不开关就一个类都
   看不到**。这与 `web/`、`ssl/`、`http2/`、`http3/`、`wsdl/` 同档。
 
@@ -254,7 +254,7 @@ nghttp2 / zlib / pugixml 的用法一致。
 
 ```
 ngtcp2 integrated (tag=v1.25.0, static)          # CMakeLists.txt:1002-1002
-Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:2215-2215
+Including quic module in build (ngtcp2 v1.25.0)  # CMakeLists.txt:2232-2232
 ```
 
 > **只 grep `CMakeCache.txt` 是不够的。** 三条降级用的都是**普通变量**
@@ -614,7 +614,7 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 
 1. **别指望从公开头里看到 ngtcp2。** `<ngtcp2/ngtcp2.h>` 只出现在私有的
    `src/quic/uvcpp_quic_ngtcp2.h` 里，而它和持有 ngtcp2 句柄的
-   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:3326-3326`）、打包
+   `src/quic/uvcpp_quic_session.h` **两个都不安装**（`CMakeLists.txt:3343-3343`）、打包
    也被排除。理由有两条：一是使用者不该被逼着去配 ngtcp2 的搜索路径才能 include
    一个本库的头；二是 `uvcpp_quic_session.h` 的成员里就有 `ngtcp2_conn*`、`SSL*`、
    `ngtcp2_path_storage`，它的字段布局直接跟着 ngtcp2 的版本走 —— 一旦漏进公开面，
@@ -628,8 +628,8 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
    调用，符号在链接期解析，照样证明 ngtcp2 真被链上。
 
 3. **`src/quic/` 的源文件被 `list(FILTER … EXCLUDE REGEX "src/quic/")` 排除**
-   （`CMakeLists.txt:2210-2210`，头文件那一条在 `:1597`），而且"开了 QUIC 但目录是空的"
-   会**当场 FATAL**（`CMakeLists.txt:2224-2224`）。后者防的是一棵树同时骗过三道看起来
+   （`CMakeLists.txt:2227-2227`，头文件那一条在 `:2228`），而且"开了 QUIC 但目录是空的"
+   会**当场 FATAL**（`CMakeLists.txt:2241-2241`）。后者防的是一棵树同时骗过三道看起来
    很像门禁的东西：cache 里 `QUIC=ON`、日志里有 `ngtcp2 integrated`、编译也过 ——
    而 `src/quic/` 一个 `.cpp` 都没有，**零行 QUIC 代码被编译过**。"没测"必须表现为
    **失败**，不是表现为**通过**。
