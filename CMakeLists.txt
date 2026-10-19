@@ -1376,6 +1376,23 @@ if(UVCPP_ENABLE_DB)
     else()
       list(APPEND UVCPP_DB_INCLUDE_DIRS
         "${UVCPP_DB_MONGOC_INCLUDE_DIR}" "${UVCPP_DB_BSON_INCLUDE_DIR}")
+
+      # MSYS2 的 CLANG64 / CLANGARM64（clang + libc++ + UCRT）把
+      # `__USE_MINGW_ANSI_STDIO` 默认成 **0**，而 libbson 的 `bson/compat.h`
+      # 见到 0 就直接 `#error`：它那套 PRI* 宏要的是 mingw 自己那份 printf，
+      # 不是 UCRT 的。MINGW64 那条腿跑的是 gcc，这个宏默认就是 1，所以只有
+      # clang 系会红（2026-10-19 的 v1.8.0 发布跑就是这么挂的）。
+      #
+      # 只加在这一个翻译单元上：`uvcpp_db_mongodb_api.h` 是仓里唯一 include
+      # `<bson/bson.h>` 的地方。扩成整库的编译选项会把所有 printf 族换成
+      # `__mingw_*`，与预编译的 libc++.a 混用虽然能链，但没必要为这一条红
+      # 去动全库的 stdio 绑定。
+      if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set_source_files_properties(
+          "${CMAKE_SOURCE_DIR}/src/db/uvcpp_db_mongodb.cpp"
+          PROPERTIES COMPILE_DEFINITIONS "__USE_MINGW_ANSI_STDIO=1")
+      endif()
+
       if(UVCPP_DB_RUNTIME_LOAD)
         # 与 MySQL/PG/ODBC 同一条：链接行上不出现客户端库，符号由 dlsym 取。
         message(STATUS
