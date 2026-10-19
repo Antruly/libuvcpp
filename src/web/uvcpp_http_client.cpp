@@ -688,6 +688,25 @@ void uvcpp_http_client::on_tcp_close() {
   // 把错误码提到这道门外面就会把 `UV_ECANCELED` 覆盖成 h1 那套 `UV_ECONNRESET`。
   if (!user_cb_ || has_status(HTTP_CLIENT_COMPLETE)) return;
 
+  // **以连接关闭定界的响应**（HTTP/1.0、`Connection: close` 且没有
+  // `Content-Length` / `Transfer-Encoding`）只有 EOF 才能判定完整：llhttp 要
+  // `finish()` 才会发 `message_complete`。此前这条路上直接交
+  // `UV_ECONNRESET`，把已经收到的状态行与正文一起当失败丢掉 ——
+  // `openssl s_server`、以及任何用关闭定界的老式服务端都会踩到
+  // （`uvp#274` 的第二个症状）。正文已在 `set_on_body` 里攒着，这里只补
+  // 那一声"报文结束"。
+  //
+  // 只有**已经开始解析**才轮得到 `finish()`：`llhttp_finish` 对一个还没见过
+  // 任何字节的解析器返回 OK —— 不设这道判据，"对端连一个响应字节都没发就断开"
+  // 会从 ECONNRESET 变成一次"成功的空响应"（`test_web_http_client_close_func`
+  // 的场景 1 正是这么红的）。
+  if (parser_ != nullptr &&
+      parser_->get_state() != http_parser_state::IDLE &&
+      parser_->finish() == 0) {
+    on_response_complete();
+    return;
+  }
+
   set_status(HTTP_CLIENT_ERROR);
   last_error_code_ = UV_ECONNRESET;
   // **先挪走再调**（与 `on_response_complete` 同形状）：用户回调里可以析构本
@@ -1099,7 +1118,6 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
   // h2 的 TLS 层必须走内存 BIO（`uvcpp_tcp_client` 那条），两者不能混。
   // 写出来之后，将来往 ctx 上加了客户端 ALPN 也不会意外把这条路径带进 h2。
   ssl_->set_alpn_protos({"http/1.1"});
-
   // SNI 只对**域名**发：RFC 6066 §3 禁止 IP 字面量（判据与异步那条路一致）。
   {
     struct sockaddr_in _sni4;

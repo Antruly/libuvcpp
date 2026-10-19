@@ -222,6 +222,15 @@ foreach(test_src ${FUNC_SOURCES})
   add_test(NAME ${exe_name} COMMAND ${exe_name})
 endforeach()
 
+# `test_web_ssl_client_external_func` 的对端是**裸 OpenSSL + 手写 POSIX socket**
+# （必须换一个实现才看得见同源掩盖掉的两条缺陷，见文件头）。Windows 上没有
+# 这套 socket 调用，用例自己返回 3 —— ctest 需要这一格才把它报成
+# `***Skipped` 而不是 `Failed`。
+if(TARGET test_web_ssl_client_external_func)
+  set_tests_properties(test_web_ssl_client_external_func PROPERTIES
+                       SKIP_RETURN_CODE 3)
+endif()
+
 # `test_web_app_static_func` 是整棵树里最重的一条（CI 上 ubuntu 16.5 s、Windows
 # `web` 21.4 s），而 workflow 给的默认上限是 `--timeout 30`。它的量级由被测面本身
 # 决定 —— 每个请求一条连接、串行走完整条响应链 —— 不是哪条用例写慢了，想减负只能

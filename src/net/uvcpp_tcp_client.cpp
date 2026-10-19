@@ -2492,7 +2492,14 @@ int uvcpp_tcp_client::arm_async_read() {
             // 回调里注册的读回调会错过这段明文（它会先被攒进 tls_plain_，
             // 注册时再补投，所以两种次序都对，但先交付更直接）。
             tls_deliver_plain();
-            tls_complete_connect();
+            // **只有握手真的结束才补 connect 回调。** `tls_complete_connect()`
+            // 自己只检查 `tls_connect_pending_`，而那个标记在握手开始前就立了；
+            // 服务端的第一段数据往往只够走到 ServerHello/Certificate（真实主机
+            // 的证书链常分几个 TCP 段到达，`openssl s_server` 则一次到齐），
+            // 无条件调用会在握手没完时就把"已连接"回调给出去 —— 调用方紧接着
+            // 的 `write()` 拿到 `UV_ENOTCONN`，而握手其实还在推进。本仓用例的
+            // 服务端与客户端同源、证书小，一段就够，所以这条一直没被抓到。
+            if (tls_handshake_done_) tls_complete_connect();
 
             // **握手结束通知必须是这个分支的最后一句**：服务端的 on_connection
             // 可能当场把这条连接关掉（鉴权不过要拒绝它），那之后 `*this` 就没了。
@@ -3446,7 +3453,19 @@ int uvcpp_tcp_client::tls_feed(const char* data, size_t len) {
       }
       tls_ssl_error_ = tls_ssl_->last_ssl_error();
       if (rn == 0 && tls_ssl_error_ == SSL_ERROR_ZERO_RETURN) {
-        // 对端发了 close_notify —— 干净的 TLS 关闭
+        // 对端发了 close_notify —— 干净的 TLS 关闭。
+        //
+        // **先把同一段里已经解出来的明文交付出去，再收尾。** 很多服务端
+        // （HTTP/1.0、`Connection: close`、`openssl s_server`）把整条响应与
+        // close_notify 放在同一段 TCP 数据里发；先前这里直接 `tls_fail`，
+        // `tls_plain_` 里刚解出来的响应就被丢掉，调用方只看到 EOF，而
+        // `uvcpp_http_client` 那条路会把它交付成 ECONNRESET（uvp#274）。
+        //
+        // 消费者可能在 `tls_deliver_plain()` 里把本对象关掉/删掉，之后只能
+        // 靠存活令牌判断，绝不能直接碰成员。
+        std::shared_ptr<char> life = alive_token();
+        tls_deliver_plain();
+        if (!token_alive(life)) return -1;
         tls_fail(0, true);
         return -1;
       }
