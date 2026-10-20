@@ -165,6 +165,7 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   ncb.end_stream        = &uvcpp_h3_session::cb_end_stream;
   ncb.reset_stream      = &uvcpp_h3_session::cb_reset_stream;
   ncb.stream_close2     = &uvcpp_h3_session::cb_stream_close2;
+  ncb.shutdown          = &uvcpp_h3_session::cb_shutdown;
 
   // 刻意**留空**的几格，都是有名字的取舍，不是忘了填：
   //
@@ -175,8 +176,6 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   //   留空而不是填一个"收到就忽略"的实现：忽略会让带 trailers 的响应在
   //   `end_stream` 之前多一个空的头块途经我们的路由判断（那份代码按"一次
   //   `end_headers` = 一次完整请求"写的），静默走错比显式不做更糟。
-  // - `shutdown`：对端发 GOAWAY 的通知。本批不发也不收 GOAWAY（见 doc 里
-  //   "没做的"那张表），所以这一格没有消费者。
   // - `recv_settings` / `recv_settings2`：本层不因对端的 SETTINGS 改自己的行为。
   //   唯一想读的是对端的 `max_field_section_size`，而那个值 nghttp3 压根不给
   //   应用看（可参照的是我们在**发**方向的自觉上限，见 `H3_MAX_SEND_HEADER_BLOCK`）。
@@ -327,6 +326,26 @@ void uvcpp_h3_session::set_max_client_streams_bidi(uint64_t max_streams) {
 void uvcpp_h3_session::set_max_concurrent_streams(size_t n) {
   if (conn_ == nullptr || fatal_) return;
   nghttp3_conn_set_max_concurrent_streams(conn_, n);
+}
+
+// =========================================================================
+// 平滑退场（GOAWAY，#53）
+// =========================================================================
+
+int uvcpp_h3_session::shutdown_notice() {
+  if (conn_ == nullptr) return UV_EINVAL;
+  if (fatal_) return last_error_ != 0 ? last_error_ : -1;
+  return nghttp3_conn_submit_shutdown_notice(conn_);
+}
+
+int uvcpp_h3_session::shutdown() {
+  if (conn_ == nullptr) return UV_EINVAL;
+  if (fatal_) return last_error_ != 0 ? last_error_ : -1;
+  return nghttp3_conn_shutdown(conn_);
+}
+
+bool uvcpp_h3_session::is_drained() const {
+  return conn_ != nullptr && nghttp3_conn_is_drained(conn_) != 0;
 }
 
 // =========================================================================
@@ -632,6 +651,13 @@ int uvcpp_h3_session::cb_recv_data(nghttp3_conn*, int64_t stream_id,
     self->cbs_.on_body(*self, stream_id,
                        reinterpret_cast<const char*>(data), datalen);
   }
+  return 0;
+}
+
+int uvcpp_h3_session::cb_shutdown(nghttp3_conn*, int64_t id, void* ud) {
+  uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
+  cb_guard          g(&self->in_callback_);
+  if (self->cbs_.on_shutdown) self->cbs_.on_shutdown(*self, id);
   return 0;
 }
 

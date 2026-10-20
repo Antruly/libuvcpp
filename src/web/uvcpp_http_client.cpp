@@ -2068,6 +2068,16 @@ void uvcpp_http_client::set_http3_enabled(bool on) { http3_enabled_ = on; }
 
 bool uvcpp_http_client::http3_enabled() const { return http3_enabled_; }
 
+bool uvcpp_http_client::peer_h3_goaway_received() const {
+  if (h3_ != nullptr) return h3_->peer_goaway_received();
+  return h3_peer_goaway_;
+}
+
+int64_t uvcpp_http_client::peer_h3_goaway_last_stream_id() const {
+  if (h3_ != nullptr) return h3_->peer_goaway_last_stream_id();
+  return h3_peer_goaway_id_;
+}
+
 int uvcpp_http_client::connect_quic(const char* host, int port,
                                     std::function<void(int)> cb) {
   // QUIC 没有明文模式（ALPN 是 TLS 扩展），所以没设上下文连 ClientHello 都拼不
@@ -2148,6 +2158,8 @@ int uvcpp_http_client::start_h3() {
   // 返回之后建）。如实报出来，别去 new 一个指向未来的对象。
   if (qconn == nullptr) return UV_ENOTCONN;
 
+  h3_peer_goaway_    = false;
+  h3_peer_goaway_id_ = 0;
   h3_ = new uvcpp_h3_connection(qconn, /*server_side=*/false);
 
   uvcpp_h3_connection::callbacks hc;
@@ -2170,6 +2182,12 @@ int uvcpp_http_client::start_h3() {
   hc.on_error = [this, tok](uvcpp_h3_connection&, int code) {
     if (tok.expired()) return;
     last_error_code_ = code;
+  };
+
+  hc.on_goaway = [this, tok](uvcpp_h3_connection&, int64_t id) {
+    if (tok.expired()) return;
+    h3_peer_goaway_    = true;
+    h3_peer_goaway_id_ = id;
   };
 
   hc.on_disconnect = [this, tok](uvcpp_h3_connection& c) {
@@ -2258,7 +2276,12 @@ void uvcpp_http_client::pump_h3_completed() {
     if (it == h3_streams_.end()) continue;
 
     // 先把要交付的东西攒齐、把条目摘走，再碰用户代码。
-    const uvcpp_http_response resp = h3_to_http_response(r);
+    uvcpp_http_response resp = h3_to_http_response(r);
+    // 对端 GOAWAY 之后，`id` 及以上的流它保证不会再处理 —— 和 h2 的
+    // `REFUSED_STREAM` 同一个结论：重试安全。
+    if (h3_peer_goaway_ && r.stream_id > h3_peer_goaway_id_) {
+      resp.retryable = true;
+    }
     std::function<void(const uvcpp_http_response&, int)> cb =
         std::move(it->second.cb);
     h3_streams_.erase(it);

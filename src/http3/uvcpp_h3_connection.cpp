@@ -261,6 +261,17 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     pending_.erase(info.stream_id);
   };
 
+  sc.on_shutdown = [this, life](uvcpp_h3_session&, int64_t id) {
+    if (!token_alive(life)) return;
+    // `id` 只会不变或变小；notice 是 `NGHTTP3_SHUTDOWN_NOTICE_STREAM_ID`
+    // （一个极大的数）—— 先到 notice、后到最终 GOAWAY 是正常顺序。
+    peer_goaway_    = true;
+    peer_goaway_id_ = id;
+    std::function<void(uvcpp_h3_connection&, int64_t)> cb;
+    if (cbs_.on_goaway) cb = cbs_.on_goaway;
+    if (cb) cb(*this, id);
+  };
+
   sc.on_stop_sending = [this, life](uvcpp_h3_session&, int64_t stream_id,
                                     uint64_t app_error_code) {
     if (!token_alive(life)) return;
@@ -778,7 +789,24 @@ int uvcpp_h3_connection::flush() {
 
   int         rc = 0;
   h3_out_chunk chunk;
-  for (;;) {
+  // 最多两趟：第一趟把当前待发清空；如果这一趟的 nghttp3 回调里调了
+  // `shutdown_notice()` / `shutdown()`（意图被推迟了），退栈之后再开一趟
+  // 把 GOAWAY 编出去。回调里再调一次只会再置位，不会无限循环（第二趟开头
+  // 就清掉了）。
+  for (int pass = 0; pass < 2; ++pass) {
+    if (!self->in_nghttp3()) {
+      if (shutdown_notice_pending_) {
+        shutdown_notice_pending_ = false;
+        const int rv = self->shutdown_notice();
+        if (rv < 0) { rc = rv; break; }
+      }
+      if (shutdown_pending_) {
+        shutdown_pending_ = false;
+        const int rv = self->shutdown();
+        if (rv < 0) { rc = rv; break; }
+      }
+    }
+    for (;;) {
     const int dr = self->drain(chunk);
     if (!token_alive(life)) return rc;
     if (dr < 0) {
@@ -832,10 +860,57 @@ int uvcpp_h3_connection::flush() {
       rc = ar;
       break;
     }
+    }
+    // 还在 nghttp3 的栈里：外层调用者（`on_read` / `recv_stream_data`）会再冲
+    // 一轮，这里不能替它继续。
+    if (self->in_nghttp3()) break;
+    if (!shutdown_notice_pending_ && !shutdown_pending_) break;
   }
 
   pump_closes();
   return rc;
+}
+
+// =========================================================================
+// 平滑退场（GOAWAY，#53）
+// =========================================================================
+
+int uvcpp_h3_connection::shutdown_notice() {
+  if (session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  // 在 nghttp3 的栈里（`on_request` / `on_stream_close` 都是）：它的写函数
+  // 不许重入，记下意图，交给退栈之后那一轮 `flush()`。
+  if (session_->in_nghttp3()) {
+    shutdown_notice_pending_ = true;
+    return 0;
+  }
+  const int rv = session_->shutdown_notice();
+  if (rv != 0) return rv;
+  flush();
+  return 0;
+}
+
+int uvcpp_h3_connection::shutdown() {
+  if (session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  if (session_->in_nghttp3()) {
+    shutdown_pending_ = true;
+    return 0;
+  }
+  const int rv = session_->shutdown();
+  if (rv != 0) return rv;
+  flush();
+  return 0;
+}
+
+bool uvcpp_h3_connection::is_drained() const {
+  return session_ != nullptr && session_->is_drained();
+}
+
+bool uvcpp_h3_connection::peer_goaway_received() const { return peer_goaway_; }
+
+int64_t uvcpp_h3_connection::peer_goaway_last_stream_id() const {
+  return peer_goaway_id_;
 }
 
 int uvcpp_h3_connection::close(int error_code) {

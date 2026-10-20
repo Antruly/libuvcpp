@@ -453,6 +453,17 @@ class UVCPP_API uvcpp_http_client {
    */
   void set_http3_enabled(bool on);
   bool http3_enabled() const;
+
+  /**
+   * @brief 对端在这条 h3 连接上发过 GOAWAY 没有（#53；shutdown notice 也算）。
+   *
+   * 与 h2 的同名访问器一样：断开之后仍然可查 —— "优雅告别"与"网络挂了"在
+   * `send()` 的回调上都是 `UV_ECANCELED`，区别就在这一位。
+   */
+  bool peer_h3_goaway_received() const;
+
+  /** @brief 对端最近一封 h3 GOAWAY 的 `id`（流号；notice 时是一个极大值）。 */
+  int64_t peer_h3_goaway_last_stream_id() const;
 #endif
 
  private:
@@ -642,6 +653,9 @@ class UVCPP_API uvcpp_http_client {
 
   bool http3_enabled_ = false;   // 用户意图（走不走 h3）
   bool h3_active_ = false;       // 本对象现在真的在跑 h3（h3_ 非空且活着）
+  /// 对端 h3 GOAWAY 的最后状态（notice 也记；id 只会不变或变小）。
+  bool    h3_peer_goaway_    = false;
+  int64_t h3_peer_goaway_id_ = 0;
   uvcpp_quic_client*   quic_ = nullptr;  // h3 那条腿的端点。本对象拥有它。
   uvcpp_h3_connection* h3_   = nullptr;  // 不拥有它底下那条 QUIC 连接
   /// 键是**流号**。完成的响应本身在 h3 层的队列里（`take_completed`），

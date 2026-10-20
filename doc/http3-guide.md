@@ -188,7 +188,7 @@ int one_h3_get(uvcpp_quic_connection* quic) {
 
 - **发出去时 `stream_id` 不用填。** `send_request()` 自己开流，并把它写回结果里；
   `h3_request::stream_id` 在**收到**一侧才有意义。
-- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:227`）。
+- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:238`）。
   这是刻意的：队列里可能同时到齐几条，回调里一次性抽干会让调用方在处理第一条时
   看不见第二条的到达，于是"这次回调要不要再排一次"永远答不准。
 - **一条请求恰好在那里出现一次。** 正常收全一次（`error == 0`），中途被 reset /
@@ -398,7 +398,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 6. **链接是 PRIVATE**（`CMakeLists.txt:3045-3045` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
-   （`src/http3/uvcpp_h3_connection.h:287`），它经公开头调用、链接期解析。
+   （`src/http3/uvcpp_h3_connection.h:322`），它经公开头调用、链接期解析。
 
 7. **本机可复现**：nghttp3 也可以用
    `-DFETCHCONTENT_SOURCE_DIR_NGHTTP3=<一份已下好的 nghttp3 源码>` 指过去绕开下载
@@ -463,7 +463,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
 `src/web/uvcpp_http_server.h:1666-1666`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
-的。客户端加了四个成员（两个 `bool`、两个指针，`src/web/uvcpp_http_client.h:643-649`）
+的。客户端加了六个成员（三个 `bool`、一个 `int64`、两个指针，`src/web/uvcpp_http_client.h:654-660`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假
 的分支。不新增每连接或每请求的 `std::function`，不新增锁、不新增分配、不新增虚调用。
 
@@ -505,7 +505,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 3. **只有 FIN、没有数据的块要 `add_write_offset(sid, 0)`。**
    `nghttp3_conn_writev_stream()` 可能吐出一个零字节、只带 FIN 的块，
    `add_write_offset()` 无论如何都要调 —— 少了那一句，这个 FIN 永远发不出去。
-   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:271` 那条注释）。
+   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:283` 那条注释）。
 
 4. **别在 nghttp3 的回调里调它的写函数。** 与 nghttp2 同一条硬规矩：那会在它
    自己的栈上重入。本层的处置是"回调里只置 `want_write_`，`recv_stream_data()`
@@ -547,8 +547,13 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 - **没有 trailers。** 会话层里 `begin_trailers` / `recv_trailer` / `end_trailers`
   三格**留空**，不是填一个"收到就忽略"的实现 —— 忽略会让带 trailers 的响应在
   本层看来"从来没有第二个头块"，调用方等到的是流的收场而不是缺失的原因。
-- **不发也不收 GOAWAY。** 会话层的 `shutdown` 回调留空（`src/http3/uvcpp_h3_session.cpp:178`），
-  主动平滑退场那一条路因此没有接。
+- **GOAWAY 已支持（`1.8.2` 起，#53）。** `uvcpp_h3_connection::shutdown_notice()`
+  发第一封（只是通知，在途流照常）、`shutdown()` 发最终那封，`is_drained()`
+  判收场（全部流结束）。收到对端的 GOAWAY 走 `callbacks::on_goaway`，并用
+  `peer_goaway_received()` / `peer_goaway_last_stream_id()` 回查；
+  `uvcpp_http_client` 同名转发，并据此把 `id` 以上的在途请求标成
+  `retryable`（与 h2 的 `REFUSED_STREAM` 同一个结论）。服务端在 h3 上也可以
+  主动平滑退场。
 - **没有 Server Push。** RFC 9114 里它本来就只剩一格 `SETTINGS_ENABLE_PUSH`，
   本层既不宣告也不处理 `PUSH_PROMISE`。
 - **没有 extended CONNECT**，所以 **h3 上跑不了 WebSocket**。`app.websocket()`

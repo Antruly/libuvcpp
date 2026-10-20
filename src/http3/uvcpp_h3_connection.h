@@ -170,6 +170,17 @@ class UVCPP_API uvcpp_h3_connection {
      * 回调返回后**不要**再碰本对象 —— 持有者应当在这里把它销毁。
      */
     std::function<void(uvcpp_h3_connection&)> on_disconnect;
+
+    /**
+     * @brief 对端发了 GOAWAY（#53）。
+     *
+     * @param id 客户端侧是流号：`id` 及以上的流对端保证不会再处理；值为
+     *           `NGHTTP3_SHUTDOWN_NOTICE_STREAM_ID` 时只是 shutdown notice
+     *           （在途流照常）。服务端侧是 push id（本层不推，通常为 0）。
+     *
+     * 可能多次回调，`id` 只会不变或变小。
+     */
+    std::function<void(uvcpp_h3_connection&, int64_t id)> on_goaway;
   };
 
   /**
@@ -249,6 +260,30 @@ class UVCPP_API uvcpp_h3_connection {
    * 每个回调里记着它 —— 规矩落在本层内部，见会话层类注释里那段。
    */
   int flush();
+
+  // -----------------------------------------------------------------
+  // 平滑退场（GOAWAY，#53）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 发**第一封** GOAWAY（shutdown notice）：对端别再开新流，在途流照常。
+   *
+   * 返回 0 或错误码；内部已经 `flush()` 过，GOAWAY 帧随下一批字节出去。
+   * 隔几个 RTT 之后调 `shutdown()` 发最终那封。
+   */
+  int shutdown_notice();
+
+  /** @brief 发最终 GOAWAY：本端不再接受新流，已有流跑完。 */
+  int shutdown();
+
+  /** @brief 本端所有流都收场了吗（可以安全关 QUIC 连接）。 */
+  bool is_drained() const;
+
+  /** @brief 对端发过 GOAWAY 没有（notice 也算）。 */
+  bool peer_goaway_received() const;
+
+  /** @brief 对端最近一封 GOAWAY 的 `id`；没收到过时是 0。 */
+  int64_t peer_goaway_last_stream_id() const;
 
   // -----------------------------------------------------------------
   // 收场与查询
@@ -392,6 +427,14 @@ class UVCPP_API uvcpp_h3_connection {
   bool        closed_   = false;
   bool        fatal_    = false;
   std::string alpn_;
+
+  /// 对端 GOAWAY 的最后状态（notice 也记；id 只会不变或变小）。
+  bool    peer_goaway_      = false;
+  int64_t peer_goaway_id_   = 0;
+  /// 在 nghttp3 的调用栈里调了 `shutdown_notice()` / `shutdown()`：推迟到
+  /// 栈退干净之后的 `flush()` 里再兑现（写函数禁止重入）。
+  bool shutdown_notice_pending_ = false;
+  bool shutdown_pending_        = false;
 
   /// 还没开出来的关键流条数（3 → 0）。额度没到时停在 1..3。
   int      critical_left_ = 3;

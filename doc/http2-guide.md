@@ -319,7 +319,7 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 `tls_alpn_selected()`（`src/web/uvcpp_http_client.cpp:327-327`）→ `start_h2()`（`src/web/uvcpp_http_client.cpp:331-331` → `src/web/uvcpp_http_client.cpp:1772-1772`）→ 装回调（`src/web/uvcpp_http_client.cpp:1774-1774`）
 → `h2_->start(sc, cc)`（`src/web/uvcpp_http_client.cpp:1815-1815`）→ `send()` 分流到 `send_h2`（`src/web/uvcpp_http_client.cpp:480-480`）。
 
-**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:613-613`、
+**`set_http2_enabled` 默认是关的**（`src/web/uvcpp_http_client.h:624-624`、
 `src/web/uvcpp_http_server.h:357-357`）—— 低层的两条线都要显式打开，
 只有 `webapp/` 框架层是零配置自动协商。
 

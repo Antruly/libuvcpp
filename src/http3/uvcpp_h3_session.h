@@ -205,6 +205,18 @@ class UVCPP_API uvcpp_h3_session {
      * 翻译出来的那个）。**收到它就只有一个正确动作：用那个错误码关掉 QUIC 连接。**
      */
     std::function<void(uvcpp_h3_session&, int nghttp3_error)> on_fatal;
+
+    /**
+     * @brief 对端发了 GOAWAY（#53）。
+     *
+     * @param id 客户端侧是流号；服务端侧是 push id（本层不推，通常为 0）。
+     *           `NGHTTP3_SHUTDOWN_NOTICE_STREAM_ID` 是**第一封**（只是通知，
+     *           在途流照常处理）；其余值是最终 GOAWAY —— `id` 及以上的流
+     *           对端保证不会再处理。
+     *
+     * 可能在同一连接上多次回调，`id` 只会不变或变小。
+     */
+    std::function<void(uvcpp_h3_session&, int64_t id)> on_shutdown;
   };
 
   /// @param server_side true 建服务端会话（等对端提请求），false 建客户端会话。
@@ -315,6 +327,28 @@ class UVCPP_API uvcpp_h3_session {
 
   /// 内部资源的上界（nghttp3 拿它限并发，不是协议上的 SETTINGS）。
   void set_max_concurrent_streams(size_t n);
+
+  // -----------------------------------------------------------------
+  // 平滑退场（GOAWAY，#53）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 发**第一封** GOAWAY：告诉对端"别再开新流了"，在途流照常。
+   *
+   * 之后隔几个 RTT 再调 `shutdown()` 发最终那封。返回 0 或 nghttp3 错误码；
+   * **调用方必须在返回后冲一轮 `drain()`**（与提交响应同一条规矩）。
+   */
+  int shutdown_notice();
+
+  /**
+   * @brief 开始真正的平滑退场：本端不再接受新流，已有的流继续跑完。
+   *
+   * 与 `shutdown_notice()` 一样，返回后要冲一轮 `drain()`。
+   */
+  int shutdown();
+
+  /// 本端所有流都收场了吗（nghttp3 的 `nghttp3_conn_is_drained`）。
+  bool is_drained() const;
 
   // -----------------------------------------------------------------
   // 提出请求 / 提交响应
@@ -458,6 +492,7 @@ class UVCPP_API uvcpp_h3_session {
   static int cb_acked_stream_data(nghttp3_conn* conn, int64_t stream_id,
                                   uint64_t datalen, void* conn_user_data,
                                   void* stream_user_data);
+  static int cb_shutdown(nghttp3_conn* conn, int64_t id, void* conn_user_data);
   static nghttp3_ssize cb_read_data(nghttp3_conn* conn, int64_t stream_id,
                                     nghttp3_vec* vec, size_t veccnt,
                                     uint32_t* pflags, void* conn_user_data,
