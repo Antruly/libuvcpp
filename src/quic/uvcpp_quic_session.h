@@ -200,6 +200,9 @@ struct quic_session_events {
   /// 一个 CID **退休**了（对端 retire，或本端换新）。端点从路由表摘掉它。
   /// 摘掉之前收到的包仍会被 ngtcp2 丢掉，所以这里晚一步不是错，只是白留一段。
   ::std::function<void(const uint8_t* cid, size_t cidlen)> on_remove_cid;
+
+  /// 收到一条 DATAGRAM 帧（RFC 9221）。`data` 只在回调期间有效。
+  ::std::function<void(const uint8_t* data, size_t datalen)> on_datagram;
 };
 
 /**
@@ -424,6 +427,22 @@ class quic_session {
    */
   uint64_t streams_left(bool bidi) const;
 
+  // -----------------------------------------------------------------
+  // DATAGRAM（RFC 9221，#53）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 排一条不可靠数据报。**受理即返回**，真正上线由 `flush()` 做。
+   *
+   * @return 0 已受理；`UV_ENOTCONN` 没握手完/连接没了；`UV_EMSGSIZE` 超过
+   *         对端宣告的 `max_datagram_frame_size`（或对端没开 DATAGRAM）；
+   *         `UV_ENOBUFS` 本端队列满了（上限 `kMaxDatagramQueueBytes`）。
+   */
+  int send_datagram(const uint8_t* data, size_t len);
+
+  /// 对端愿意收的最大 DATAGRAM **帧**大小（0 = 对端不支持）。
+  size_t max_datagram_size() const;
+
   /// 给本类内部的 ngtcp2 静态回调取回 `this` 用（`crypto_get_conn` 也要）。
   ngtcp2_conn* raw_conn() const { return conn_; }
 
@@ -450,6 +469,9 @@ class quic_session {
                                  int64_t stream_id, uint64_t offset,
                                  const uint8_t* data, size_t datalen,
                                  void* user_data, void* stream_user_data);
+  static int cb_recv_datagram(ngtcp2_conn* conn, uint32_t flags,
+                              const uint8_t* data, size_t datalen,
+                              void* user_data);
   static int cb_acked_stream_data_offset(ngtcp2_conn* conn, int64_t stream_id,
                                          uint64_t offset, uint64_t datalen,
                                          void* user_data,
@@ -501,6 +523,9 @@ class quic_session {
 
   /// 真正干活的 `flush()`：`flush()` 只是它外面那层"现在能不能做"的判断。
   void do_flush();
+  /// 把 `dgram_q_` 里的 DATAGRAM 编成包发出去（#53）。在流数据之后调用 ——
+  /// `writev_stream` 的包一旦开着就不能再写 DATAGRAM。
+  void do_flush_datagrams(ngtcp2_tstamp ts);
 
 #if UVCPP_UDP_GSO_ENABLE
   /// 第二层闸门的初始化：问一次端点「这条路支不支持 USO」，支持就把落点缓冲按
@@ -671,6 +696,12 @@ class quic_session {
     size_t op_done = 0;  ///< `op_marks` 里已经回调过的前缀长度
   };
   ::std::map<int64_t, stream_send> send_q_;
+
+  /// 待发的 DATAGRAM（RFC 9221）。每条是**一个完整帧的载荷**，按提交顺序发。
+  /// 队列总量有上限，满了 `send_datagram()` 返回 `UV_ENOBUFS` —— 不可靠数据
+  /// 报没有"慢慢等"的语义，把它无限攒起来只会变成一块内存增长。
+  ::std::deque<::std::vector<uint8_t>> dgram_q_;
+  size_t                               dgram_q_bytes_ = 0;
 
   /// 确认进展：把 `[offset, offset+datalen)` 并进去，并推进 `ack_off`。
   static void note_acked(stream_send& s, uint64_t offset, uint64_t datalen);

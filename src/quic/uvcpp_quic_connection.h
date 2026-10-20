@@ -176,6 +176,16 @@ class UVCPP_API uvcpp_quic_connection {
      * 回调返回后**不要**再碰本对象 —— 端点会在随后把它销毁。
      */
     std::function<void(uvcpp_quic_connection&, int error_code)> on_close;
+
+    /**
+     * @brief 收到一条 DATAGRAM（RFC 9221，#53）。`data` 只在回调期间有效。
+     *
+     * 不可靠：没有重传、没有顺序保证、没有流控。`send_datagram()` 受理成功
+     * 也不代表对端收到 —— 应用自己决定要不要在应用层补。
+     */
+    std::function<void(uvcpp_quic_connection&, const uint8_t* data,
+                       size_t datalen)>
+        on_datagram;
   };
 
   UVCPP_DEFINE_FUNC(uvcpp_quic_connection)
@@ -290,6 +300,31 @@ class UVCPP_API uvcpp_quic_connection {
    * 判据** —— 它报的是一个快照，`open_stream()` 仍可能因为别的原因失败。
    */
   uint64_t streams_left(bool bidi) const;
+
+  // -----------------------------------------------------------------
+  // DATAGRAM（RFC 9221，#53）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 发一条**不可靠**数据报。
+   *
+   * 与流数据的关键区别：没有重传、没有顺序、没有流控。受理成功也不保证对端
+   * 收到 —— 收到的通知是 `callbacks::on_datagram`。
+   *
+   * @return 0 = 已受理（排进发送队列）；`UV_ENOTCONN` = 连接没了 / 没握手完；
+   *         `UV_EMSGSIZE` = 超过对端宣告的 `max_datagram_size()`（或对端没开
+   *         DATAGRAM）；`UV_ENOBUFS` = 本端待发队列满了。
+   */
+  int send_datagram(const char* data, size_t len);
+
+  /**
+   * @brief 对端愿意收的最大 DATAGRAM **帧**大小（RFC 9221）。
+   *
+   * 0 = 对端没开 DATAGRAM（`send_datagram()` 会返回 `UV_EMSGSIZE`）。帧里有
+   * 类型与长度字段，所以实际载荷上限比它略小；本库的发送队列按这个值做上限，
+   * 具体的开销由 ngtcp2 在编码时扣。
+   */
+  size_t max_datagram_size() const;
 
   /**
    * @brief 关掉整条连接。

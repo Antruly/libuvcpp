@@ -90,6 +90,16 @@ const size_t kInitialDcidLen = 18;
 /// 不出去，PMTUD 又变回死的，而且一点声音都没有。
 const size_t kDatagramBufLen = 1500;
 
+/// 本端愿意接收的 DATAGRAM **帧**上限（RFC 9221，含帧类型与长度字段）。
+///
+/// 取 1400 而不是 `kDatagramBufLen`：帧要连同 QUIC 包头、包号、AEAD 标签一起
+/// 塞进一个 UDP 数据报，留出余量之后才不会被自己的接收上限截断。
+const size_t kMaxDatagramFrameSize = 1400;
+
+/// DATAGRAM 待发队列的字节上限。不可靠数据报没有"慢慢等"的语义 —— 无限攒
+/// 只会变成一块内存增长，所以满了就让 `send_datagram()` 返回 `UV_ENOBUFS`。
+const size_t kMaxDatagramQueueBytes = 1024 * 1024;
+
 // 这两条守的是**同一个缺陷的两个入口**，都是"改一个数就把 PMTUD 静默关掉"，
 // 而且关掉之后一切照常工作、只是慢——正是要靠编译器拦下来的那种。
 //
@@ -255,6 +265,8 @@ void fill_transport_params(ngtcp2_transport_params* params,
   // 因此是同一个数，行为对称，也不会出现"对端发 4096、我们只探到 1444"这种
   // 单边拉长的形状。
   params->max_udp_payload_size = kDatagramBufLen;
+  // 宣告我们收得下 DATAGRAM（RFC 9221）。0 = 不支持；非 0 之后对端可以发。
+  params->max_datagram_frame_size = kMaxDatagramFrameSize;
   params->max_idle_timeout =
       static_cast<ngtcp2_duration>(idle_timeout_ms) * NGTCP2_MILLISECONDS;
   // CID 的可用数量。1 是协议允许的最小值，8 是常见默认 —— 取 8 是为了让
@@ -307,6 +319,7 @@ void quic_session::fill_callbacks(ngtcp2_callbacks* cbs, bool is_server) {
   // 本层真正关心、要往外报的几件事。
   cbs->handshake_completed = &quic_session::cb_handshake_completed;
   cbs->recv_stream_data = &quic_session::cb_recv_stream_data;
+  cbs->recv_datagram = &quic_session::cb_recv_datagram;
   cbs->acked_stream_data_offset = &quic_session::cb_acked_stream_data_offset;
   cbs->stream_open = &quic_session::cb_stream_open;
   // 只填 `_2` 那一格：填了它之后 ngtcp2 就不再调另一个（`stream_close`），
@@ -833,6 +846,8 @@ void quic_session::do_flush() {
     // ngtcp2_conn_update_pkt_tx_time"，`ngtcp2.h:7008`）。不补这一句，
     // PTO 与拥塞控制的发包时刻就不推进，症状是"包发出去了但重传计时器
     // 永远不响"。
+    // DATAGRAM 走普通（非 GSO）路径：GSO 那条只批量装 STREAM 帧。
+    do_flush_datagrams(ts);
     ngtcp2_conn_update_pkt_tx_time(conn_, ts);
     return;
   }
@@ -1015,9 +1030,66 @@ void quic_session::do_flush() {
     }
   }
 
+  // 流数据发完之后再发 DATAGRAM。`writev_stream` 的包一旦开着（`MORE`）就
+  // 不能再调 `writev_datagram`；上面的 `if (more)` 已经把那个包收尾了，所以
+  // 这里可以安全地开新包。
+  do_flush_datagrams(ts);
+
   // 文档要求：调过 `writev_stream` 之后必须调它，否则 PTO / 拥塞控制的
   // 发包时刻不会推进，表现为"包发完了但重传计时器永远不响"。
   ngtcp2_conn_update_pkt_tx_time(conn_, ts);
+}
+
+void quic_session::do_flush_datagrams(ngtcp2_tstamp ts) {
+  if (dgram_q_.empty() || conn_ == nullptr) return;
+  if (state_ == quic_connection_state::CLOSED ||
+      state_ == quic_connection_state::DRAINING ||
+      state_ == quic_connection_state::CLOSING) {
+    dgram_q_.clear();
+    dgram_q_bytes_ = 0;
+    return;
+  }
+
+  uint8_t buf[kDatagramBufLen];
+  ngtcp2_path_storage ps;
+  ngtcp2_path_storage_zero(&ps);
+  ngtcp2_pkt_info pi;
+  std::memset(&pi, 0, sizeof(pi));
+
+  while (!dgram_q_.empty()) {
+    std::vector<uint8_t>& d = dgram_q_.front();
+    ngtcp2_vec v;
+    v.base = d.data();
+    v.len  = d.size();
+    int accepted = 0;
+    const ngtcp2_ssize nwrite = ngtcp2_conn_writev_datagram(
+        conn_, &ps.path, &pi, buf, sizeof(buf), &accepted, 0, /*dgram_id=*/0,
+        &v, 1, ts);
+
+    if (nwrite < 0) {
+      if (nwrite == NGTCP2_ERR_INVALID_ARGUMENT) {
+        // 对端没开 DATAGRAM，或者这条比它宣告的还大：丢掉队首，别卡住后面。
+        dgram_q_bytes_ -= d.size();
+        dgram_q_.pop_front();
+        continue;
+      }
+      handle_conn_error(static_cast<int>(nwrite));
+      break;
+    }
+    if (nwrite == 0) break;  // 拥塞控制 / 放大限制：下一轮再试
+
+    if (accepted != 0) {
+      dgram_q_bytes_ -= d.size();
+      dgram_q_.pop_front();
+    }
+    if (ps.path.remote.addr != nullptr) {
+      send_(buf, static_cast<size_t>(nwrite), ps.path.remote.addr,
+            static_cast<int>(ps.path.remote.addrlen));
+    }
+    // 包发出去了但这条没装下（里面装的是 ACK 之类）：再调一次也是同样的
+    // 结果，留给下一轮。
+    if (accepted == 0) break;
+  }
 }
 
 #if UVCPP_UDP_GSO_ENABLE
@@ -1579,6 +1651,33 @@ uint64_t quic_session::streams_left(bool bidi) const {
               : ngtcp2_conn_get_streams_uni_left2(conn_);
 }
 
+int quic_session::send_datagram(const uint8_t* data, size_t len) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  if (data == nullptr || len == 0) return UV_EINVAL;
+  if (state_ == quic_connection_state::CLOSED ||
+      state_ == quic_connection_state::DRAINING ||
+      state_ == quic_connection_state::CLOSING) {
+    return UV_ENOTCONN;
+  }
+  const size_t max_frame = max_datagram_size();
+  if (max_frame == 0) return UV_EMSGSIZE;  // 对端没开 DATAGRAM
+  if (len > max_frame) return UV_EMSGSIZE;
+  if (dgram_q_bytes_ + len > kMaxDatagramQueueBytes) return UV_ENOBUFS;
+
+  dgram_q_.push_back(::std::vector<uint8_t>(data, data + len));
+  dgram_q_bytes_ += len;
+  flush();
+  return 0;
+}
+
+size_t quic_session::max_datagram_size() const {
+  if (conn_ == nullptr) return 0;
+  const ngtcp2_transport_params* tp =
+      ngtcp2_conn_get_remote_transport_params2(conn_);
+  if (tp == nullptr) return 0;
+  return static_cast<size_t>(tp->max_datagram_frame_size);
+}
+
 bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
                                         size_t* datavcnt, size_t* handed,
                                         uint32_t* flags) const {
@@ -1784,6 +1883,20 @@ int quic_session::cb_recv_stream_data(ngtcp2_conn* conn, uint32_t flags,
       return NGTCP2_ERR_CALLBACK_FAILURE;
     }
     ngtcp2_conn_extend_max_offset(conn, datalen);
+  }
+  return 0;
+}
+
+int quic_session::cb_recv_datagram(ngtcp2_conn* conn, uint32_t flags,
+                                   const uint8_t* data, size_t datalen,
+                                   void* user_data) {
+  (void)conn;
+  quic_session* self = static_cast<quic_session*>(user_data);
+  cb_guard guard(self->in_callback_);
+  // 0-RTT 里到达的 DATAGRAM 也照收；`flags & NGTCP2_DATAGRAM_FLAG_0RTT`
+  // 的语义（握手还没完）由调用方按需要处理。
+  if (self->events_.on_datagram != nullptr) {
+    self->events_.on_datagram(data, datalen);
   }
   return 0;
 }

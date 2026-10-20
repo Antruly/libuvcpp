@@ -138,6 +138,12 @@ void uvcpp_quic_connection::endpoint::attach(
     }
   };
 
+  ev.on_datagram = [&c](const uint8_t* data, size_t datalen) {
+    if (c.impl_->cbs.on_datagram != nullptr) {
+      c.impl_->cbs.on_datagram(c, data, datalen);
+    }
+  };
+
   // 读侧的"没有更多了"由两件事各自的**到达**时刻报，不由流的关闭报：
   // FIN 在 `on_stream_data` 那一格里已经报过 `PEER_CLOSED`，reset 在下面那一格
   // 里报。`on_stream_close` 是"两个方向都收场了"的记账事件，**在读侧它没有
@@ -292,6 +298,17 @@ int uvcpp_quic_connection::shutdown_stream_read(int64_t stream_id,
 uint64_t uvcpp_quic_connection::streams_left(bool bidi) const {
   if (impl_->session == nullptr) return 0;
   return impl_->session->streams_left(bidi);
+}
+
+int uvcpp_quic_connection::send_datagram(const char* data, size_t len) {
+  if (impl_->session == nullptr) return UV_ENOTCONN;
+  return impl_->session->send_datagram(
+      reinterpret_cast<const uint8_t*>(data), len);
+}
+
+size_t uvcpp_quic_connection::max_datagram_size() const {
+  if (impl_->session == nullptr) return 0;
+  return impl_->session->max_datagram_size();
 }
 
 int uvcpp_quic_connection::close(int error_code) {

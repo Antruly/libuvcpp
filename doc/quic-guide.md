@@ -179,7 +179,7 @@ PMTUD 会把 path MTU 从 1200 抬到 1444：设大了协议栈**切在包中间
 刚开始时报的是 `10 × max_udp_payload_size` = 12000（`ngtcp2:lib/ngtcp2_cc.c:53` 覆盖掉了
 `ngtcp2:lib/ngtcp2_conn.c:923` 那个 64 KiB），然后随 PMTUD 上抬。缓冲要是按**当前值**开，
 聚合就被压在 8 个包上下（本机实测过这个形状）。开成 64 KiB 上限（`kGsoBufLen`，
-`uvcpp_quic_session.cpp:133`），让 ngtcp2 自己那条 `ngtcp2_min(buflen,
+`src/quic/uvcpp_quic_session.cpp:143`），让 ngtcp2 自己那条 `ngtcp2_min(buflen,
 send_quantum)`（`ngtcp2:lib/ngtcp2_conn.c:14304`）去限才是对的形状。下限仍是 `kDatagramBufLen`：
 agg2 里有 `assert(buflen >= path_max_udp_payloadlen)`。
 
@@ -192,7 +192,7 @@ agg2 里有 `assert(buflen >= path_max_udp_payloadlen)`。
 建 socket 的 —— `uv_udp_init`（AF_UNSPEC）之后 `handle->socket` 还是
 `INVALID_SOCKET`，这时 `uv_fileno` 返回 `UV_EBADF`，`setsockopt` 无从谈起。本机实测：
 bind 前 `fileno rc=-4083 sock=-1`，bind 后 `rc=0 sock=628`。所以探测点落在
-`init_client()`/`init_server()` 的末尾（`setup_gso()`，`uvcpp_quic_session.cpp:1025`），
+`init_client()`/`init_server()` 的末尾（`setup_gso()`，`src/quic/uvcpp_quic_session.cpp:1097`），
 不是建对象的时候。
 
 **坑二：`setsockopt` 成功 ≠ 协议栈真会切。** 本机实测 512…65483 **全都返回成功**，
@@ -470,6 +470,8 @@ int one_round_trip(uvcpp_quic_connection& conn) {
 | `shutdown_stream(stream_id, app_error_code = 0)` | 只关发送方向；队列里没写完的以 `NGTCP2_ERR_STREAM_SHUT_WR` 收场 |
 | `shutdown_stream_read(stream_id, app_error_code = 0)` | 只关**读**方向：给对端发一个 STOP_SENDING（"别再发了"） |
 | `streams_left(bool bidi)` | 现在还能开几条本地流（**累计**上限，不是增量）；没内核时是 0 |
+| `send_datagram(data, len)` | 不可靠数据报（RFC 9221，`1.8.2` 起）；受理进队列，对端收到走 `on_datagram` |
+| `max_datagram_size()` | 对端愿意收的最大 DATAGRAM 帧（0 = 对端没开） |
 | `close(int error_code = 0)` | 发 CONNECTION_CLOSE，`state()` 到 `CLOSING` |
 
 四件签名与语义上的讲究：
@@ -489,9 +491,10 @@ int one_round_trip(uvcpp_quic_connection& conn) {
 - `close(error_code)` 的错误码 0 与非 0 有语义差别：非 0 会被当作**应用错误码**发给
   对端。客户端端点自己的 `close()` 不吃参数 —— 只发一个干净的 CONNECTION_CLOSE。
 
-回调集合 `uvcpp_quic_connection::callbacks` 有**七**个：`on_read`、`on_stream_open`、
-`on_write`、`on_alpn`、`on_close`、`on_streams_available`、`on_stop_sending`。
-七个都在 **loop 线程**上跑，而且 `on_read` /
+回调集合 `uvcpp_quic_connection::callbacks` 有**八**个：`on_read`、`on_stream_open`、
+`on_write`、`on_alpn`、`on_close`、`on_streams_available`、`on_stop_sending`、
+`on_datagram`（`1.8.2` 起）。
+八个都在 **loop 线程**上跑，而且 `on_read` /
 `on_stream_open` / `on_write` 会在某个内部调用**还没返回**的时候就同步跑用户代码 ——
 于是用户代码可以在回调里 `write_stream()` / `close()` 掉这条连接（这两件事都被受理，
 真正的发包推到回调退栈之后），但**回调返回后不要再碰本对象**，尤其是 `on_close`
@@ -687,7 +690,10 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 
 - **本层里没有 HTTP/3，也不该有。** 1.4.1 把它落在了 `src/http3/`
   （[`doc/http3-guide.md`](./http3-guide.md)）—— 这一层是它的地基，不是它。
-- **没有连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath。**
+- **DATAGRAM 已支持（`1.8.2` 起，#53）**：`uvcpp_quic_connection::send_datagram()` /
+  `callbacks::on_datagram` / `max_datagram_size()`（RFC 9221，不可靠、无顺序、
+  无流控；本端宣告的上限是 1400 字节的帧）。**仍然没有**连接迁移、0-RTT、
+  无状态重置与 multipath。
 - ~~**没有多循环支持。**~~ **已撤销（`1.6.6-dev`）**：`uvcpp_quic_server::set_reuseport()` +
   `uvcpp_http_server::set_loops(n)` 这条路通了，扇出走 UDP 自己那条形状（每端点一个
   socket + `UV_UDP_REUSEPORT`），回落与边界见 [§5.2](#52-服务端)。
