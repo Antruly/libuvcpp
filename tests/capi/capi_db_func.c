@@ -915,6 +915,20 @@ static void ctx_init(async_ctx* c) {
   uv_sem_init(&c->sem, 0);
 }
 
+/* 回调里 `uv_sem_post()` 之后，库才执行这一笔的收尾（`in_flight` 减一），所以
+ * 主线程被信号量唤醒的那一刻，在途数可能还没落到 0（Windows 的线程调度下会
+ * 稳定地撞上这个窗口）。这里按上限 5 秒轮询，等账目落平再让调用方断言；
+ * 超时就原样返回当前值，由调用方的 CHECK 报红。 */
+static size_t wait_in_flight_zero(const uvcpp_c_db_async* a) {
+  int i;
+  size_t n = uvcpp_c_db_async_in_flight(a);
+  for (i = 0; i < 5000 && n != 0; ++i) {
+    uv_sleep(1);
+    n = uvcpp_c_db_async_in_flight(a);
+  }
+  return n;
+}
+
 static void on_table_cb(void* ud, int status, uvcpp_c_db_table* t) {
   async_ctx* c = (async_ctx*)ud;
   uv_thread_t self = uv_thread_self();
@@ -1070,8 +1084,8 @@ static void test_async(const char* url, const db_dialect* d) {
   CHECK_INT((int)ctx.in_flight_in_cb, 1);
   /* 在回调里 `free()` 自己：E_STATE。 */
   CHECK_INT(ctx.free_in_cb_rc, UVCPP_C_E_STATE);
-  /* 活收完了，在途回到 0。 */
-  CHECK_INT((int)uvcpp_c_db_async_in_flight(a), 0);
+  /* 活收完了，在途回到 0（收尾发生在信号量 post 之后，所以要等它落平）。 */
+  CHECK_INT((int)wait_in_flight_zero(a), 0);
 
   /* ---- 带参数的那条重载（`params != NULL`）：占位符仍然由调用方按方言给 ---- */
 
