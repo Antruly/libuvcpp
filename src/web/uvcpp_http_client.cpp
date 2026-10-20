@@ -1743,6 +1743,11 @@ size_t uvcpp_http_client::compression_min_body_size() const {
 
 void uvcpp_http_client::set_http2_enabled(bool on) { http2_enabled_ = on; }
 
+void uvcpp_http_client::set_h2_frame_callback(
+    std::function<void(const uvcpp_h2_frame_event&)> cb) {
+  h2_frame_cb_ = std::move(cb);
+}
+
 bool uvcpp_http_client::http2_enabled() const { return http2_enabled_; }
 
 // `h2_` 还在时问活的那一份，拆了之后答抄下来的那一份 —— 两个时机都得对：
@@ -1790,6 +1795,13 @@ int uvcpp_http_client::start_h2() {
     if (tok.expired()) return;
     on_h2_stream_close(s, id, ec);
   };
+  // 逐帧观察（#52）：没设就是空，`on_frame_recv` 里那次判断是唯一代价。
+  if (h2_frame_cb_) {
+    sc.on_frame = [this, tok](const uvcpp_h2_frame_event& ev) {
+      if (tok.expired() || !h2_frame_cb_) return;
+      h2_frame_cb_(ev);
+    };
+  }
   // 连接级致命错误由 `uvcpp_h2_connection::start` 包一层转成 `shutdown()`；
   // 连接真的没了会走下面的 `on_disconnect`，这里不需要另做动作。
   sc.on_fatal = [](uvcpp_h2_session&, int) {};

@@ -172,6 +172,53 @@ enum class h2_stream_state {
                  ///< **当前从不进入** —— 全仓没有一处给它赋值
 };
 
+// =========================================================================
+// 逐帧事件（#52）
+// =========================================================================
+
+/**
+ * @brief 帧类型。数值与 RFC 9113 §6 的帧类型码、nghttp2 的
+ *        `nghttp2_frame_type` **一致** —— 本头不拉 `<nghttp2/nghttp2.h>`。
+ */
+enum uvcpp_h2_frame_type : int {
+  H2_FRAME_DATA          = 0,
+  H2_FRAME_HEADERS       = 1,
+  H2_FRAME_PRIORITY      = 2,
+  H2_FRAME_RST_STREAM    = 3,
+  H2_FRAME_SETTINGS      = 4,
+  H2_FRAME_PUSH_PROMISE  = 5,
+  H2_FRAME_PING          = 6,
+  H2_FRAME_GOAWAY        = 7,
+  H2_FRAME_WINDOW_UPDATE = 8,
+  H2_FRAME_CONTINUATION  = 9,
+};
+
+/** @brief 帧标志位（RFC 9113 §6）。`ACK` 与 `END_STREAM` 都是 0x1。 */
+enum uvcpp_h2_frame_flag : unsigned {
+  H2_FLAG_END_STREAM  = 0x1,
+  H2_FLAG_ACK         = 0x1,
+  H2_FLAG_END_HEADERS = 0x4,
+  H2_FLAG_PADDED      = 0x8,
+  H2_FLAG_PRIORITY    = 0x20,
+};
+
+/**
+ * @brief 收到一帧时的摘要（**不携带 payload**，调试器不该变成抓包器）。
+ *
+ * `length` 是线格式里的帧载荷长度：HEADERS 是头块（压缩后）长度、DATA 是这
+ * 一帧的数据长度。`error_code` / `last_stream_id` 只在 RST_STREAM / GOAWAY 上
+ * 有意义（其余帧为 0）—— 与 `uvcpp_http_client::peer_goaway_*()` 读的是同一
+ * 份值。
+ */
+struct uvcpp_h2_frame_event {
+  int      type          = 0;   ///< `uvcpp_h2_frame_type`
+  unsigned flags         = 0;   ///< `uvcpp_h2_frame_flag` 的按位或
+  int32_t  stream_id     = 0;   ///< 0 = 连接级帧
+  uint32_t length        = 0;   ///< 帧载荷长度（线格式）
+  int32_t  error_code    = 0;   ///< RST_STREAM / GOAWAY 的错误码
+  int32_t  last_stream_id = 0;  ///< 仅 GOAWAY
+};
+
 }  // namespace uvcpp
 
 #endif  // UVCPP_NGHTTP2_ENABLE

@@ -38,15 +38,23 @@
 #include <ssl/uvcpp_ssl.h>  // 同时也声明了 uvcpp::uvcpp_ssl_context
 #endif
 
+#if UVCPP_NGHTTP2_ENABLE
+// `http2/uvcpp_h2_common.h` **自己写明**不依赖 `<nghttp2/nghttp2.h>`，只提供
+// 帧类型与 `uvcpp_h2_frame_event` 这类纯 POD（#52 的回调签名要用）。其余
+// `http2/uvcpp_h2_*.h` 仍然绝不 include —— 它们会把 nghttp2 的 include 路径
+// 扩散给每一个使用者与测试 TU。
+#include <http2/uvcpp_h2_common.h>
+#endif
+
 namespace uvcpp {
 
 class uvcpp_http_parser;
 
 #if UVCPP_NGHTTP2_ENABLE
-// 只前置声明，**绝不** include `http2/uvcpp_h2_*.h`：这是公开头，会把
-// nghttp2 的 include 路径与 `NGHTTP2_STATICLIB` 扩散给每一个使用者与测试 TU，
-// 而本库把 nghttp2 压成静态、链接标 PRIVATE 就是为了不扩散（`src/http2/`
-// 自己的头也守同一条）。定义全在 .cpp 里。
+// 只前置声明，**绝不** include `http2/uvcpp_h2_session.h` 那类会把
+// `<nghttp2/nghttp2.h>` 拉进来的头：这是公开头，会把 nghttp2 的 include
+// 路径与 `NGHTTP2_STATICLIB` 扩散给每一个使用者与测试 TU，而本库把 nghttp2
+// 压成静态、链接标 PRIVATE 就是为了不扩散。
 class uvcpp_h2_connection;
 class uvcpp_h2_session;
 class uvcpp_h2_stream;
@@ -376,6 +384,21 @@ class UVCPP_API uvcpp_http_client {
   bool http2_enabled() const;
 
   /**
+   * @brief 逐帧事件回调（#52）：HEADERS / DATA / RST_STREAM / GOAWAY /
+   *        WINDOW_UPDATE 等，**不携带 payload**。
+   *
+   * **必须在 `connect()` 之前设**：h2 会话在握手完成时才建，回调在那一刻装
+   * 进去。传空函数 = 关掉（默认关，关着时热路径只多一次空 `std::function`
+   * 判断）。
+   *
+   * 跑在客户端自己的循环上；连接拆掉之后不会再回调（`alive_token_` 与
+   * 会话生命周期两道守卫）。`GOAWAY` 事件里的 `error_code` /
+   * `last_stream_id` 与上面三个访问器同源。
+   */
+  void set_h2_frame_callback(
+      std::function<void(const uvcpp_h2_frame_event&)> cb);
+
+  /**
    * @brief 对端在这个连接上发过 GOAWAY 没有。
    *
    * **这是"优雅告别"与"网络挂了"之间唯一的区分手段。** 两者在 `send()` 的
@@ -596,6 +619,8 @@ class UVCPP_API uvcpp_http_client {
   bool     peer_goaway_      = false;
   uint32_t peer_goaway_code_ = 0;
   int32_t  peer_goaway_last_ = 0;
+  /// 逐帧事件回调（#52）；空 = 关，热路径只多一次空 function 判断。
+  std::function<void(const uvcpp_h2_frame_event&)> h2_frame_cb_;
 
   std::map<int32_t, h2_stream_state> h2_streams_;
 #endif

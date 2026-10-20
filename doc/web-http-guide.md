@@ -67,7 +67,7 @@
 **三、`web/` 有 h2，但入口有三条。** 服务端 `set_http2_enabled(true)`
 （`src/web/uvcpp_http_server.h:357-357`）加 TLS+ALPN，服务端 `set_h2c_enabled(true)`
 （明文先验知识，RFC 9113 §3.4），客户端 `set_http2_enabled(true)`
-（`src/web/uvcpp_http_client.h:590-590`）。
+（`src/web/uvcpp_http_client.h:613-613`）。
 前两条都**默认关**；只有 `webapp/` 框架层默认开、零配置自动协商。
 **不做 `Upgrade: h2c` 协商**（RFC 9113 已删除该机制），**也不做嗅探** —— 明文这条腿
 只认那 24 个字节。
@@ -470,8 +470,8 @@ int doc_client_async() {
 ```
 
 `send` / `get` / `post` 的回调签名逐字是
-`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:209-264`）。
-交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:554-554`）的 const 引用 —— **存到下次 `send()`
+`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:217-272`）。
+交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:577-577`）的 const 引用 —— **存到下次 `send()`
 就被覆写**。
 
 **异步路径没有超时，`connect()` 也不设**（`src/web/uvcpp_http_client.cpp:64-68`）。
@@ -481,7 +481,7 @@ int doc_client_async() {
 "对端在响应收完前断开"时 `send()` 的回调永远不来。
 
 **在响应回调里 `delete` 客户端是预期的用法。** 所有闭包都捕一个 `alive_token_`
-弱引用（`src/web/uvcpp_http_client.h:537-548`），析构第一件事就 reset
+弱引用（`src/web/uvcpp_http_client.h:560-571`），析构第一件事就 reset
 （`src/web/uvcpp_http_client.cpp:84-84`）—— 你不需要为它做任何额外的事。
 
 ### 流式响应（`send_stream`，`1.8.2` 起）
@@ -531,8 +531,8 @@ int doc_client_sync() {
 ### 三个容易写错的地方
 
 **一、keep-alive 有两个方向：请求那头听调用方的，响应那头听对端的。**
-`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:532-532` 初值 `true`、
-`src/web/uvcpp_http_client.h:287-287` 声明 `set_keep_alive`、`src/web/uvcpp_http_client.cpp:1079-1079` setter）。`set_keep_alive(false)`
+`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:555-555` 初值 `true`、
+`src/web/uvcpp_http_client.h:295-295` 声明 `set_keep_alive`、`src/web/uvcpp_http_client.cpp:1079-1079` setter）。`set_keep_alive(false)`
 会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:582-601`）；
 默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是
 `uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:156-159`）。
@@ -557,8 +557,8 @@ deadline，**每次读/写之前**按剩余时间收紧这个选项（`sync_recv
 连接与 TLS 握手共用同一个 deadline（`src/web/uvcpp_http_client.cpp:429-429`）。
 于是对端每隔略小于 `timeout_ms` 发一个字节也拖不长整次请求 —— `1.8.2` 之前
 它是**每次 I/O** 的超时，这种"滴字节"的对端能把请求无限拖下去。
-头文件的两处参数说明同步改了（`src/web/uvcpp_http_client.h:173-177`、
-`src/web/uvcpp_http_client.h:192-198`）。
+头文件的两处参数说明同步改了（`src/web/uvcpp_http_client.h:181-185`、
+`src/web/uvcpp_http_client.h:200-206`）。
 
 **四、阻塞路径失败时不再交默认的 200 OK。**
 `read_one_message()` 把读错误、超时和"半条报文"作为负的 libuv 错误码往上传
@@ -582,7 +582,7 @@ TLS 会话；h3 走 QUIC，明确返回空链 / `-1` / 说明串 —— 不是�
 `redirect|30[1238]` 零命中 —— 3xx 只是一个状态码交给你。
 
 **压缩默认关；门槛可配，`br` 要编进 brotli。** `set_compression_enabled(true)`
-（`src/web/uvcpp_http_client.h:294-306`）之后请求会补 `accept-encoding: gzip,
+（`src/web/uvcpp_http_client.h:302-314`）之后请求会补 `accept-encoding: gzip,
 deflate`（编了 brotli 的构建再带上 `br`）、响应收全后自动解压 —— **异步与阻塞
 两条路径都算**（`send()` 与 `send_wait()` / `send_wait_plain()` / `send_wait_ssl()`）。
 顺带记一笔**曾经不是这样**：`1.6.32` 之前这两件事只写在异步那条路上，阻塞那两条

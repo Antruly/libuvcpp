@@ -15,7 +15,7 @@
 ### 1.1 会话层（`uvcpp_h2_session`）
 
 建在 `nghttp2` 上，**不含任何 socket、不含任何 libuv 调用** —— 收发就是一对
-字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:252-252`、`:269-269`）。
+字节流接口 `recv()` / `drain()`（`src/http2/uvcpp_h2_session.h:261-261`、`:278-278`）。
 所以这一层既不依赖 TLS 也不依赖事件循环，用例可以拿两个对象面对面地喂字节
 （`tests/functional/h2_session_func.cpp`）。
 
@@ -39,7 +39,7 @@
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:1100-1106`）。
+  （`src/http2/uvcpp_h2_session.cpp:1117-1123`）。
 - **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
   错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
@@ -52,8 +52,8 @@
   必须与**实际传输层**一致（TLS ⇒ `https`，明文 h2c ⇒ `http`；钉死 `https`
   会把明文整条腿判死，而两个都收等于给混淆代理开后门，RFC 9113 §8.1.1）、连接专属头一律拒、
   重复且不一致的 `content-length` 即拒、多份 `cookie` 按 `; ` 拼回原样、
-  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:558-558`）。
-- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1894-1894`，RFC 9113 §8.7）：
+  收尾的 trailer 识别成"流的结束信号"（`src/http2/uvcpp_h2_session.cpp:575-575`）。
+- **流关闭的错误码分三档**（`src/web/uvcpp_http_client.cpp:1906-1906`，RFC 9113 §8.7）：
   `NO_ERROR` 是我们自己收摊、`REFUSED_STREAM(7)` 是"这条请求没被处理过"、
   `CANCEL(8)` 是"对端不要这条流了" —— 三档都报 `UV_ECANCELED`；其余一律
   `UV_EPROTO`（协议失败）。其中**只有 `REFUSED_STREAM`** 会把
@@ -73,14 +73,14 @@
 
 ### 1.3 三个接入面
 
-- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:375-375`）
+- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:383-383`）
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:355-355`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前
   （`src/webapp/uvcpp_web_app.cpp:536-536`，`kDefaultAlpn` 的定义），用户只能关掉它
   （`set_http2_enabled(false)`，`src/webapp/uvcpp_web_app.h:423-423`），或者自己设
   一份更权威的 ALPN 名单 —— 设过就不覆盖。
-- **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:43-45`
+- **关掉 nghttp2 也能编**：`http2/*.h` 不出现在任何公开头里，`src/web/uvcpp_http_client.h:51-53`
   写明了理由（引了就把 nghttp2 的 include 路径扩散给每个使用者与测试 TU）。
   `UVCPP_ENABLE_NGHTTP2` 默认 OFF（`CMakeLists.txt:277-277`），缺 OpenSSL 或缺 web
   模块时还会被强制置 OFF 并告警。
@@ -131,9 +131,9 @@
 - **流状态机只用了一半。** `h2_stream_state` 有五格
   （`src/http2/uvcpp_h2_common.h:166-173`），真正被赋过值的只有 `OPEN` / `HEADERS_SENT` /
   `SENT`；`CLOSED` 与 `REJECTED` **从没被赋值过**（两个枚举值上也标了这一点）。
-- **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:182-194`）：
+- **`on_fatal` 实际只有两类触发者。** 头注释已写明（`src/http2/uvcpp_h2_session.h:191-203`）：
   三类里的"`want_read`/`want_write` 双双为假"那一类**不可达** —— 这两个是公开成员
-  （`src/http2/uvcpp_h2_session.h:433-433`、`:435-435`），但本层没有任何一处拿它们判定致命。
+  （`src/http2/uvcpp_h2_session.h:442-442`、`:444-444`），但本层没有任何一处拿它们判定致命。
 - **发方向上限的公式是复刻的。** `header_block_fits()` 与
   `nghttp2_hd_deflate_bound()` 逐字一致（后者 `(void)deflater`，是 nv 数组的
   纯函数，所以复刻不会随连接状态漂），`+5` 是 `NGHTTP2_PRIORITY_SPECLEN`。
@@ -150,7 +150,7 @@
   **泄漏一块仍然有效的内存，换掉一个必然发生的 use-after-free**。要收干净得先让
   "析构可以从回调里被调到"这件事本身消失。
 - **一处已死的成员**（只报告，本批没动）：
-  - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:70`）全仓零引用 ——
+  - `HTTP_CLIENT_CLOSING = 0x10`（`src/web/uvcpp_http_client.h:78`）全仓零引用 ——
     这一处**确实不影响行为**，它只是个没接线的状态位。
 - **`keep_alive_` 那一处已经修掉了**（原先列在上面这条清单里，因为后果是真的）。
   当时的形状是：它只在 `on_response_complete()` 里被写、**从没被读**，于是调用方
@@ -314,7 +314,7 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1522-1522`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1539-1539`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关

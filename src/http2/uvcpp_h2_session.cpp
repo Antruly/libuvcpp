@@ -526,6 +526,23 @@ struct uvcpp_h2_session::impl {
       peer_goaway_last = frame->goaway.last_stream_id;
     }
 
+    // 逐帧观察（#52）：默认没装，这里只多一次空 `std::function` 判断。
+    // 放在查表早返回**之前** —— 连接级帧的 stream_id 是 0，查表永远查不到。
+    if (cbs.on_frame) {
+      uvcpp_h2_frame_event ev;
+      ev.type      = static_cast<int>(frame->hd.type);
+      ev.flags     = frame->hd.flags;
+      ev.stream_id = frame->hd.stream_id;
+      ev.length    = static_cast<uint32_t>(frame->hd.length);
+      if (frame->hd.type == NGHTTP2_RST_STREAM) {
+        ev.error_code = frame->rst_stream.error_code;
+      } else if (frame->hd.type == NGHTTP2_GOAWAY) {
+        ev.error_code     = frame->goaway.error_code;
+        ev.last_stream_id = frame->goaway.last_stream_id;
+      }
+      cbs.on_frame(ev);
+    }
+
     // 计数必须在按流号查表**之前** —— 这些帧的 `stream_id` 恒为 0，
     // 落在下面那个 `streams.end()` 的早返回上，一个都数不到。
     //

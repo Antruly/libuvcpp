@@ -180,6 +180,15 @@ class UVCPP_API uvcpp_h2_session {
         on_close;
 
     /**
+     * @brief 每收到一帧回调一次（#52）。默认不装 = 零额外开销。
+     *
+     * 在按流号查表**之前**、连接级帧（SETTINGS/PING/GOAWAY/WINDOW_UPDATE）
+     * 也覆盖；不携带 payload。GOAWAY 的 `error_code` / `last_stream_id` 与
+     * `peer_goaway_*()` 访问器同源。
+     */
+    std::function<void(const uvcpp_h2_frame_event&)> on_frame;
+
+    /**
      * @brief 连接级致命错误：本层已经无法继续处理这条连接。
      *
      * 当前实际触发它的只有两类：`mem_recv` 返回负值（含 `-905` 过量的
