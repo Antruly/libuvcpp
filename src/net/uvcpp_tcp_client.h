@@ -959,6 +959,14 @@ class UVCPP_API uvcpp_tcp_client {
   int                           connect_last_error_ = 0;
   class uvcpp_async*            connect_retry_async_ = nullptr;
   std::shared_ptr<char>         connect_attempt_token_;
+  /**
+   * @brief 这一笔尝试的 TCP 已经连上（SOCKS5 协商已经开始）。
+   *
+   * 代理已应答之后的失败（认证 / REP 码）**不换地址重试**：换个地址不会
+   * 改变代理的答复，而且 `socks5_pending_` 那时已经是 false —— 再连一笔
+   * 会被当成普通 TCP 成功，把"没协商的代理连接"谎报成连上了目标。
+   */
+  bool connect_attempt_negotiated_ = false;
 
   /** @brief `connect()` 的本体：连 `ip:port`（不经代理），完成后走 TLS/用户回调。 */
   int connect_transport(const char* ip, int port, std::function<void(int)> cb);

@@ -1030,6 +1030,7 @@ void uvcpp_tcp_client::start_multi_connect(
   connect_user_cb_       = std::move(cb);
   connect_last_error_    = 0;
   connect_attempt_token_.reset();
+  connect_attempt_negotiated_ = false;
   // 第一次尝试不需要退役句柄：调用方刚建的 `tcp_` 还没连过任何东西。
   connect_attempt_next();
 }
@@ -1049,6 +1050,7 @@ void uvcpp_tcp_client::connect_attempt_next() {
 
   connect_attempt_token_ = std::make_shared<char>(0);
   std::weak_ptr<char> tok = connect_attempt_token_;
+  connect_attempt_negotiated_ = false;
   const sockaddr_storage cur = connect_addrs_[connect_addr_index_++];
 
   clear_status(TCP_CLIENT_CONNECTING);
@@ -1064,6 +1066,13 @@ void uvcpp_tcp_client::connect_attempt_next() {
                                    return;
                                  }
                                  connect_last_error_ = status;
+                                 if (connect_attempt_negotiated_) {
+                                   // 代理已经应答过（认证 / REP 码失败）：换
+                                   // 地址不会改变结果，**不能**再连一笔 ——
+                                   // 那一笔会被当成普通 TCP 成功（见成员注释）。
+                                   finish_multi_connect(status);
+                                   return;
+                                 }
                                  // 下一轮在 async 回调里跑：这里还压着旧句柄
                                  // 的 connect 回调，不能当场换句柄。
                                  post_connect_attempt();
@@ -1081,6 +1090,7 @@ void uvcpp_tcp_client::finish_multi_connect(int status) {
   connect_addrs_.clear();
   connect_addr_index_ = 0;
   connect_attempt_token_.reset();
+  connect_attempt_negotiated_ = false;
   has_async_connect_cb_ = false;
 
   std::function<void(int)> cb = std::move(connect_user_cb_);
@@ -1344,6 +1354,8 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
           // 之后就不再是"连代理失败"了 —— 后面的认证 / REP 失败会重新判。
           socks5_proxy_connect_failed_ = false;
           socks5_pending_ = false;
+          // 这一笔的 TCP 已连上：后续失败（认证 / REP）不再换地址重试。
+          connect_attempt_negotiated_ = true;
           if (!read_started_) arm_async_read();
           const int hrc = socks5_begin_handshake(life);
           if (hrc != 0 && token_alive(life)) socks5_finish(hrc, life);
