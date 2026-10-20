@@ -443,6 +443,12 @@ bool test_ipv6() {
     return false;
   }
 
+  // Wait for the server's relay recv_start() to complete before sending.
+  // On Linux the kernel finishes it in microseconds; on macOS and MSVC it can
+  // take a few ms, enough for the first datagram to be dropped.
+  loop.run(UV_RUN_NOWAIT);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
   rc = client.udp()->send_to("::1", echo.port, "v6", 2);
   if (rc != 0 || !pump_until(&loop, [&got]() { return got == "v6"; }, 5000)) {
     std::cout << "[socks5-udp] ipv6 echo failed (rc=" << rc << ", got='" << got
