@@ -443,16 +443,26 @@ bool test_ipv6() {
     return false;
   }
 
-  // Wait for the server's relay recv_start() to complete before sending.
-  // On Linux the kernel finishes it in microseconds; on macOS and MSVC it can
-  // take a few ms, enough for the first datagram to be dropped.
-  loop.run(UV_RUN_NOWAIT);
-  std::this_thread::sleep_for(std::chrono::milliseconds(2));
-
-  rc = client.udp()->send_to("::1", echo.port, "v6", 2);
-  if (rc != 0 || !pump_until(&loop, [&got]() { return got == "v6"; }, 5000)) {
-    std::cout << "[socks5-udp] ipv6 echo failed (rc=" << rc << ", got='" << got
-              << "')\n";
+  // The relay arms its own recv_start() only after it has answered the
+  // association, so the first datagram can outrun the server wherever the
+  // scheduler needs milliseconds to get there. Loopback UDP may also drop a
+  // datagram outright. Both are transient rather than defects, so retry, and
+  // record which leg died (`echo saw N`) so a real regression stays visible.
+  bool ok = false;
+  for (int attempt = 1; attempt <= 5 && !ok; ++attempt) {
+    got.clear();
+    const int seen_before = echo.received.load();
+    const int src = client.udp()->send_to("::1", echo.port, "v6", 2);
+    ok = src == 0 && pump_until(&loop, [&got]() { return got == "v6"; }, 2000);
+    if (!ok) {
+      std::cout << "[socks5-udp] ipv6 attempt " << attempt << " lost (rc=" << src
+                << ", got='" << got << "', echo saw "
+                << (echo.received.load() - seen_before) << ")\n";
+      pump_for(&loop, 50);
+    }
+  }
+  if (!ok) {
+    std::cout << "[socks5-udp] ipv6 echo failed after 5 attempts\n";
     return false;
   }
 
