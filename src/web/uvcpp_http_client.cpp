@@ -491,6 +491,7 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   clear_status(HTTP_CLIENT_COMPLETE);
   clear_status(HTTP_CLIENT_ERROR);
   body_buf_.clear();
+  stream_discard_ = false;
   response_headers_done_ = false;
   pending_resp_ = uvcpp_http_response();
   // 默认构造是 `200 OK`，而现在**一个字节的响应都还没来**。留一个编出来的
@@ -513,6 +514,26 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   std::weak_ptr<char> tok = alive_token_;
   parser_->set_on_body([this, tok](const char* at, size_t len) {
     if (tok.expired()) return;
+    if (stream_discard_) return;  // cancel_stream() 之后当前批的剩余块
+    if (stream_active_) {
+      // 暂停之后（或暂停指令之后、同一次 execute() 的剩余块）先攒着 ——
+      // 本批最多一个读缓冲，`resume()` 时补投。
+      if (stream_paused_) {
+        if (len > 0) stream_pending_.append(at, len);
+        return;
+      }
+      bool keep_going = true;
+      if (stream_body_cb_ && len > 0) keep_going = stream_body_cb_(at, len);
+      // 回调里可以 cancel_stream() / delete 本对象。
+      if (tok.expired()) return;
+      if (!keep_going) {
+        stream_paused_ = true;
+        // 从**当前读回调内部**停读：uv_read_stop 允许在回调里调，且不会
+        // 清掉 async 读回调（`read_resume()` 接着投递）。
+        if (tcp_ != nullptr) tcp_->read_pause();
+      }
+      return;
+    }
     body_buf_.append_data(at, len);
   });
   parser_->set_on_headers_complete([this, tok]() {
@@ -527,6 +548,11 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
     pending_resp_.status_code    = parser_->get_status_code();
     pending_resp_.status_message = http_status_reason(pending_resp_.status_code);
     pending_resp_.headers        = parser_->get_headers();
+    if (stream_active_ && stream_headers_cb_) {
+      // 头对象借用 `pending_resp_`：只在回调期间保证有效，要留存请自己拷。
+      std::function<void(const uvcpp_http_response&)> cb = stream_headers_cb_;
+      cb(pending_resp_);
+    }
   });
   parser_->set_on_message_complete([this, tok]() {
     if (tok.expired()) return;
@@ -579,6 +605,10 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
     if (status != 0) {
       set_status(HTTP_CLIENT_ERROR);
       last_error_code_ = status;
+      if (stream_active_) {
+        finish_stream(status);
+        return;
+      }
       if (user_cb_) {
         // **先挪走再调**（与 `on_response_complete` 同形状）：用户回调里可以
         // 析构本对象，调完再碰 `user_cb_` 就是往已释放的内存上写。
@@ -594,6 +624,116 @@ int uvcpp_http_client::send(const uvcpp_http_request& req,
   });
 
   return 0;
+}
+
+// =========================================================================
+// Send — streaming response (#51)
+// =========================================================================
+
+int uvcpp_http_client::send_stream(
+    const uvcpp_http_request& req,
+    std::function<void(const uvcpp_http_response& head)> on_headers,
+    std::function<bool(const char* data, size_t len)> on_body,
+    std::function<void(int status)> on_end) {
+#if UVCPP_NGHTTP2_ENABLE
+  if (h2_active_) return UV_ENOTSUP;
+#endif
+#if UVCPP_HTTP3_ENABLE
+  if (h3_active_) return UV_ENOTSUP;
+#endif
+#if UVCPP_OPENSSL_ENABLE
+  // 同步 TLS 会话是 fd-based 阻塞的，不属于这条异步读路径。
+  if (ssl_enabled_ && ssl_ != nullptr) return UV_ENOTSUP;
+#endif
+  if (!on_body || !on_end) return UV_EINVAL;
+  if (stream_active_ || user_cb_) return UV_EBUSY;
+  if (!has_status(HTTP_CLIENT_CONNECTED)) {
+    last_error_code_ = UV_ENOTCONN;
+    return UV_ENOTCONN;
+  }
+
+  stream_headers_cb_       = std::move(on_headers);
+  stream_body_cb_          = std::move(on_body);
+  stream_end_cb_           = std::move(on_end);
+  stream_active_           = true;
+  stream_paused_           = false;
+  stream_complete_pending_ = false;
+  stream_discard_          = false;
+  stream_pending_.clear();
+
+  // 复用完整响应那条异步路径（写请求 + 解析器 + keep-alive 收尾），只是
+  // `set_on_body` / `on_response_complete` 看到 `stream_active_` 后改走分块
+  // 交付、不攒 body。`send()` 的同步错误不会回调 `on_end`（见头文件契约），
+  // 这里把状态清掉即可。
+  const int rc = send(req, nullptr);
+  if (rc != 0) {
+    stream_active_           = false;
+    stream_paused_           = false;
+    stream_complete_pending_ = false;
+    stream_pending_.clear();
+    stream_headers_cb_ = nullptr;
+    stream_body_cb_    = nullptr;
+    stream_end_cb_     = nullptr;
+  }
+  return rc;
+}
+
+int uvcpp_http_client::resume() {
+  if (!stream_active_) return UV_EINVAL;
+  if (!stream_paused_ && stream_pending_.empty() && !stream_complete_pending_) {
+    return 0;  // 没有暂停
+  }
+  stream_paused_ = false;
+
+  if (!stream_pending_.empty()) {
+    std::string chunk;
+    chunk.swap(stream_pending_);
+    bool keep_going = true;
+    if (stream_body_cb_) keep_going = stream_body_cb_(chunk.data(), chunk.size());
+    if (!stream_active_) return 0;  // 回调里 cancel_stream() / 析构
+    if (!keep_going) {
+      stream_paused_ = true;
+      if (tcp_ != nullptr) tcp_->read_pause();
+      return 0;
+    }
+  }
+
+  if (stream_complete_pending_) {
+    finish_stream(0);
+    return 0;
+  }
+  if (tcp_ == nullptr) return 0;
+  return tcp_->read_resume();
+}
+
+void uvcpp_http_client::cancel_stream() {
+  if (!stream_active_) return;
+  // 回调里可以 `delete this`：令牌在析构里失效，之后的 `tcp_->close()` 就不再碰。
+  std::weak_ptr<char> tok = alive_token_;
+  stream_discard_ = true;
+  finish_stream(UV_ECANCELED);
+  if (tok.expired()) return;
+  // 立刻把"连着"摘掉：`tcp_->close()` 的关闭观察者是**之后**才到的，而
+  // 这期间调用方完全可能再 `send()` —— 那会往一条正在关的连接里写。
+  clear_status(HTTP_CLIENT_CONNECTED);
+  set_status(HTTP_CLIENT_ERROR);
+  last_error_code_ = UV_ECANCELED;
+  if (tcp_ != nullptr) tcp_->close();
+}
+
+bool uvcpp_http_client::is_streaming() const { return stream_active_; }
+
+void uvcpp_http_client::finish_stream(int status) {
+  if (!stream_active_) return;
+  stream_active_           = false;
+  stream_paused_           = false;
+  stream_complete_pending_ = false;
+  stream_pending_.clear();
+  std::function<void(int)> end = std::move(stream_end_cb_);
+  stream_end_cb_     = nullptr;
+  stream_headers_cb_ = nullptr;
+  stream_body_cb_    = nullptr;
+  if (end) end(status);
 }
 
 // =========================================================================
@@ -692,6 +832,10 @@ void uvcpp_http_client::on_tcp_data(uvcpp_buf* buf,
   if (parser_->has_error()) {
     set_status(HTTP_CLIENT_ERROR);
     last_error_code_ = UV_EINVAL;
+    if (stream_active_) {
+      finish_stream(last_error_code_);
+      return;
+    }
     if (user_cb_) {
       std::function<void(const uvcpp_http_response&, int)> cb =
           std::move(user_cb_);
@@ -712,6 +856,14 @@ void uvcpp_http_client::on_tcp_close() {
   // 清 `CONNECTED` 才是这条路上该说的话：连接没了，后面的 `send()` 应当
   // 拿到 `UV_ENOTCONN`，而不是写进一条死 socket。
   clear_status(HTTP_CLIENT_CONNECTED);
+
+  if (stream_active_) {
+    // 消息已经完整、只是还有一块暂停期间攒下的 body 没交付：让 `resume()`
+    // 把 pending 交完再报 0，不要在这里提前报成"连接断了"。
+    if (stream_complete_pending_) return;
+    finish_stream(UV_ECONNRESET);
+    return;
+  }
 
   // h2 连接上这条观察者也会响（h2 层用的是 `read_start_events`，`nread < 0`
   // 分支照样往下走 `fire_close_callbacks()`），但断开已经由 `on_h2_disconnect`
@@ -751,11 +903,17 @@ void uvcpp_http_client::on_response_complete() {
   set_status(HTTP_CLIENT_COMPLETE);
   clear_status(HTTP_CLIENT_RECEIVING);
 
+  if (stream_discard_) {   // 已取消：这一批的收尾不再交付任何东西
+    stream_discard_ = false;
+    return;
+  }
+
   pending_resp_.version        = parser_->get_uvcpp_http_version();
   pending_resp_.status_code    = parser_->get_status_code();
   pending_resp_.status_message = http_status_reason(pending_resp_.status_code);
   pending_resp_.headers        = parser_->get_headers();
-  pending_resp_.body.clone(body_buf_);
+  // 流式响应**不攒 body**（常量内存），body 已经在 `set_on_body` 里按块交付。
+  if (!stream_active_) pending_resp_.body.clone(body_buf_);
 
   // 这条连接**还能不能再用**。
   //
@@ -786,6 +944,17 @@ void uvcpp_http_client::on_response_complete() {
     // `on_tcp_close` 走通（见 `tests/functional/web_http_client_close_func.cpp` 的
     // S2）。socket 由本对象析构时统一关。
     clear_status(HTTP_CLIENT_CONNECTED);
+  }
+
+  if (stream_active_) {
+    // 暂停中（或本批还有没交付的 body）：`on_end` 推迟到 `resume()` 把
+    // pending 交完之后 —— 先说完结再补投 body 是错的顺序。
+    if (stream_paused_ || !stream_pending_.empty()) {
+      stream_complete_pending_ = true;
+      return;
+    }
+    finish_stream(0);
+    return;
   }
 
 #if UVCPP_ZLIB_ENABLE

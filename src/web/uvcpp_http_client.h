@@ -209,6 +209,46 @@ class UVCPP_API uvcpp_http_client {
   int send(const uvcpp_http_request& req,
            std::function<void(const uvcpp_http_response&, int)> cb);
 
+  /**
+   * @brief **流式**接收响应体：头一到就回调，body 按到达的块交付。
+   *
+   * 与 `send()` 的完整响应互斥：本接口不把 body 攒进 `uvcpp_http_response`
+   * （100 MiB 的响应也只需要常量内存），也不走自动解压 —— 如果服务端回了
+   * `content-encoding: gzip`，交给 `on_body` 的是**压缩字节**，调用方自己解。
+   * 小响应的内容与 `send()` 逐字节一致，只是交付形状不同。
+   *
+   * 回调（都跑在客户端自己的循环上）：
+   *  - `on_headers(head)`：头收全时一次，`head.body` 为空；
+   *  - `on_body(data, len)`：每块 body 一次。返回 **false = 暂停**：本层立刻
+   *    停止 socket 读，本批剩余字节暂存（最多一个读缓冲），等 `resume()`；
+   *    返回 true 继续。`data` 只在回调期间有效。
+   *  - `on_end(status)`：**恰好一次**。0 = 完整收到；非 0 = libuv 错误码
+   *    （连接提前关闭、解析错误、`UV_ECANCELED` 等）。
+   *
+   * 暂停之后调用 `resume()` 继续；要彻底放弃这条响应用 `cancel_stream()`
+   * （关连接，`on_end(UV_ECANCELED)`）。暂停期间不读 socket，背压是真的，
+   * 不是把字节堆在内存里。
+   *
+   * h2 / h3 连接上返回 `UV_ENOTSUP`（`send_wait` 那条纪律同理）；同步 TLS
+   * 会话（`connect_wait` + `set_ssl_context`）同样不支持。
+   *
+   * @return 0 = 请求已发出；非 0 = 参数/连接错误（不会回调 `on_end`）。
+   */
+  int send_stream(
+      const uvcpp_http_request& req,
+      std::function<void(const uvcpp_http_response& head)> on_headers,
+      std::function<bool(const char* data, size_t len)> on_body,
+      std::function<void(int status)> on_end);
+
+  /** @brief 继续被 `on_body` 返回 false 暂停的流式响应。 */
+  int resume();
+
+  /** @brief 中止当前流式响应：关连接，`on_end(UV_ECANCELED)` 恰好一次。 */
+  void cancel_stream();
+
+  /** @brief 当前是否有流式响应在飞。 */
+  bool is_streaming() const;
+
   // -------------------------------------------------------------------
   // Convenience: GET / POST
   // -------------------------------------------------------------------
@@ -415,6 +455,9 @@ class UVCPP_API uvcpp_http_client {
 
   void on_response_complete();
 
+  /** @brief 收尾一次流式响应（`on_end` 恰好一次），并清掉流式状态。 */
+  void finish_stream(int status);
+
 #if UVCPP_ZLIB_ENABLE
   /**
    * @brief 按 `content-encoding` 就地解压 `resp`（并把 `content-encoding` /
@@ -512,6 +555,17 @@ class UVCPP_API uvcpp_http_client {
   bool response_headers_done_ = false;
 
   std::function<void(const uvcpp_http_response&, int)> user_cb_;
+
+  // --- 流式响应（send_stream）---
+  bool stream_active_ = false;
+  bool stream_paused_ = false;
+  bool stream_complete_pending_ = false;
+  /// cancel_stream() 之后、当前 execute() 还没走完时丢弃后续 body 块。
+  bool stream_discard_ = false;
+  std::string stream_pending_;              ///< 暂停时本批尚未交付的 body
+  std::function<void(const uvcpp_http_response&)> stream_headers_cb_;
+  std::function<bool(const char*, size_t)>        stream_body_cb_;
+  std::function<void(int)>                        stream_end_cb_;
 
 #if UVCPP_OPENSSL_ENABLE
   uvcpp_ssl_context* ssl_ctx_ = nullptr;

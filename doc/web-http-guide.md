@@ -67,7 +67,7 @@
 **三、`web/` 有 h2，但入口有三条。** 服务端 `set_http2_enabled(true)`
 （`src/web/uvcpp_http_server.h:357-357`）加 TLS+ALPN，服务端 `set_h2c_enabled(true)`
 （明文先验知识，RFC 9113 §3.4），客户端 `set_http2_enabled(true)`
-（`src/web/uvcpp_http_client.h:536-536`）。
+（`src/web/uvcpp_http_client.h:590-590`）。
 前两条都**默认关**；只有 `webapp/` 框架层默认开、零配置自动协商。
 **不做 `Upgrade: h2c` 协商**（RFC 9113 已删除该机制），**也不做嗅探** —— 明文这条腿
 只认那 24 个字节。
@@ -470,8 +470,8 @@ int doc_client_async() {
 ```
 
 `send` / `get` / `post` 的回调签名逐字是
-`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:209-224`）。
-交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:511-511`）的 const 引用 —— **存到下次 `send()`
+`std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:209-264`）。
+交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:554-554`）的 const 引用 —— **存到下次 `send()`
 就被覆写**。
 
 **异步路径没有超时，`connect()` 也不设**（`src/web/uvcpp_http_client.cpp:64-68`）。
@@ -481,8 +481,28 @@ int doc_client_async() {
 "对端在响应收完前断开"时 `send()` 的回调永远不来。
 
 **在响应回调里 `delete` 客户端是预期的用法。** 所有闭包都捕一个 `alive_token_`
-弱引用（`src/web/uvcpp_http_client.h:494-505`），析构第一件事就 reset
+弱引用（`src/web/uvcpp_http_client.h:537-548`），析构第一件事就 reset
 （`src/web/uvcpp_http_client.cpp:84-84`）—— 你不需要为它做任何额外的事。
+
+### 流式响应（`send_stream`，`1.8.2` 起）
+
+大响应不要用 `send()` —— 它把整包 body 攒进 `pending_resp_`。`send_stream`
+把头、body、结束分成三个回调，body 按到达的块交付，内存是常量级的：
+
+```cpp
+// doc-snippet: fragment — 流式接收的三个回调
+client.send_stream(req,
+  [](const uvcpp_http_response& head) { /* 头 + 状态码，head.body 为空 */ },
+  [](const char* d, size_t n) { /* 返回 false = 暂停 */ return true; },
+  [](int status) { /* 恰好一次：0 或错误码 */ });
+```
+
+- `on_body` 返回 `false` 时本层**停读 socket**（`read_pause`），本批剩余字节
+  最多一个读缓冲，`client.resume()` 补投后继续 —— 不是把大 body 堆在内存里；
+- `cancel_stream()` 立刻关连接并回调 `on_end(UV_ECANCELED)`，之后 `send()`
+  拿到 `UV_ENOTCONN`（不等关闭观察者）；
+- **不做自动解压**：`content-encoding` 原样保留，交给 `on_body` 的是压缩字节；
+- 目前只有 h1；h2 / h3 连接与同步 TLS 会话返回 `UV_ENOTSUP`。
 
 ### 同步
 
@@ -506,31 +526,31 @@ int doc_client_sync() {
 ```
 
 **同一个 client 上同步与异步不能交叉**，越界一律 `UV_ENOTSUP`
-（`src/web/uvcpp_http_client.cpp:288-288`、`src/web/uvcpp_http_client.cpp:471-471`、`src/web/uvcpp_http_client.cpp:613-613`、`src/web/uvcpp_http_client.cpp:622-622`）。
+（`src/web/uvcpp_http_client.cpp:288-288`、`src/web/uvcpp_http_client.cpp:471-471`、`src/web/uvcpp_http_client.cpp:753-753`、`src/web/uvcpp_http_client.cpp:762-762`）。
 
 ### 三个容易写错的地方
 
 **一、keep-alive 有两个方向：请求那头听调用方的，响应那头听对端的。**
-`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:489-489` 初值 `true`、
-`src/web/uvcpp_http_client.h:247-247` 声明 `set_keep_alive`、`src/web/uvcpp_http_client.cpp:910-910` setter）。`set_keep_alive(false)`
-会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:556-575`）；
+`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:532-532` 初值 `true`、
+`src/web/uvcpp_http_client.h:287-287` 声明 `set_keep_alive`、`src/web/uvcpp_http_client.cpp:1079-1079` setter）。`set_keep_alive(false)`
+会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:582-601`）；
 默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是
 `uvcpp_http_request::to_string()` 补的（`src/web/uvcpp_http_request.cpp:156-159`）。
 **响应**说的同样作数：`on_response_complete()` 按 llhttp 算出的
 `should_keep_alive()`（HTTP 版本默认值 + `Connection` 的**逗号列表**）判断这条连接
 还能不能再用，不能就当场清掉 `HTTP_CLIENT_CONNECTED`
-（`src/web/uvcpp_http_client.cpp:769-789`）—— 此后第二次 `send()` 拿到
+（`src/web/uvcpp_http_client.cpp:927-947`）—— 此后第二次 `send()` 拿到
 `UV_ENOTCONN`，而不是往一条服务端已决定关闭的连接上写。
 `tests/functional/web_http_client_keepalive_func.cpp` 把这三条都钉住了。
 
 **二、开了 OpenSSL 的构建里 `send_wait()` 走的是阻塞 fd，不是事件循环。**
-`src/web/uvcpp_http_client.cpp:627-644` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
+`src/web/uvcpp_http_client.cpp:767-784` 是一个 `#if UVCPP_OPENSSL_ENABLE` 分支：
 有 TLS 就走阻塞路径，没有才走"轮询 loop + 1ms sleep"的异步实现。
-后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:1162-1165` 把这段历史写下来了）。
+后果是**同一个程序的 keep-alive 行为会随构建而变**（`src/web/uvcpp_http_client.cpp:1331-1334` 把这段历史写下来了）。
 
 **三、阻塞路径的 `timeout_ms` 是整次请求的总 deadline（两个平台都生效）。**
 `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` 统一走 `set_socket_timeout()`
-（`src/web/uvcpp_http_client.cpp:945-960`）：Windows 用毫秒 `DWORD`，POSIX 用
+（`src/web/uvcpp_http_client.cpp:1114-1129`）：Windows 用毫秒 `DWORD`，POSIX 用
 `struct timeval`。进入 `send_wait_plain()` / `send_wait_ssl()` 时算一次单调时钟
 deadline，**每次读/写之前**按剩余时间收紧这个选项（`sync_recv_until()` /
 `sync_ssl_read_until()`），到点返回 `UV_ETIMEDOUT`；`connect_wait()` 的 TCP
@@ -542,12 +562,12 @@ deadline，**每次读/写之前**按剩余时间收紧这个选项（`sync_recv
 
 **四、阻塞路径失败时不再交默认的 200 OK。**
 `read_one_message()` 把读错误、超时和"半条报文"作为负的 libuv 错误码往上传
-（`src/web/uvcpp_http_client.cpp:1170-1177`），两条 `send_wait_*` 在入口就把
+（`src/web/uvcpp_http_client.cpp:1339-1346`），两条 `send_wait_*` 在入口就把
 `resp.status_code` 复位成 `HTTP_STATUS_NONE`
-（`src/web/uvcpp_http_client.cpp:1342-1342`、`src/web/uvcpp_http_client.cpp:1445-1445`），
+（`src/web/uvcpp_http_client.cpp:1511-1511`、`src/web/uvcpp_http_client.cpp:1614-1614`），
 并把错误码原样返回。**判据只能是返回值**（`status_code == 0` 只说明"没收到过
 状态行"）。（异步 h1 路径同理：错误时也会把 `status_code` 设成
-`HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:498-500`。）
+`HTTP_STATUS_NONE`，`src/web/uvcpp_http_client.cpp:499-501`。）
 
 **五、TLS 客户端的对端证书是公开的。** `set_ssl_context()` 之后、连接建立到
 关闭之前，可以读 `peer_cert_chain_der()`（DER、叶子在前）、
@@ -562,7 +582,7 @@ TLS 会话；h3 走 QUIC，明确返回空链 / `-1` / 说明串 —— 不是�
 `redirect|30[1238]` 零命中 —— 3xx 只是一个状态码交给你。
 
 **压缩默认关；门槛可配，`br` 要编进 brotli。** `set_compression_enabled(true)`
-（`src/web/uvcpp_http_client.h:254-266`）之后请求会补 `accept-encoding: gzip,
+（`src/web/uvcpp_http_client.h:294-306`）之后请求会补 `accept-encoding: gzip,
 deflate`（编了 brotli 的构建再带上 `br`）、响应收全后自动解压 —— **异步与阻塞
 两条路径都算**（`send()` 与 `send_wait()` / `send_wait_plain()` / `send_wait_ssl()`）。
 顺带记一笔**曾经不是这样**：`1.6.32` 之前这两件事只写在异步那条路上，阻塞那两条
