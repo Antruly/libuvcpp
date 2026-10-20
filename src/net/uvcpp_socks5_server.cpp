@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <deque>
 #include <map>
 #include <memory>
@@ -193,6 +194,7 @@ struct socks5_server_conn {
                      const uvcpp_socks5_server_options& opts,
                      const std::function<void(const uvcpp_socks5_session_info&)>&
                          on_session,
+                     const uvcpp_socks5_session_end_cb& on_session_end,
                      uvcpp_tcp_client* ctrl);
   ~socks5_server_conn();
 
@@ -233,6 +235,11 @@ struct socks5_server_conn {
 
   uvcpp_socks5_server_options opts_;
   std::function<void(const uvcpp_socks5_session_info&)> on_session_;
+  uvcpp_socks5_session_end_cb on_session_end_;
+  uvcpp_socks5_session_stats  stats_;
+  int                         session_status_;
+  bool                        ended_;
+  int                         end_status_;
 
   uvcpp_loop*       loop_;
   uvcpp_tcp_client* ctrl_;
@@ -278,11 +285,16 @@ socks5_server_conn::socks5_server_conn(
     std::atomic<std::size_t>* counter,
     const uvcpp_socks5_server_options& opts,
     const std::function<void(const uvcpp_socks5_session_info&)>& on_session,
+    const uvcpp_socks5_session_end_cb& on_session_end,
     uvcpp_tcp_client* ctrl)
     : counter_(counter),
       life_(make_life_token()),
       opts_(opts),
       on_session_(on_session),
+      on_session_end_(on_session_end),
+      session_status_(0),
+      ended_(false),
+      end_status_(0),
       loop_(ctrl != nullptr ? ctrl->get_loop() : nullptr),
       ctrl_(ctrl),
       closing_(false),
@@ -298,6 +310,11 @@ socks5_server_conn::socks5_server_conn(
       timer_kind_(timer_kind::NONE),
       timer_in_cb_(false),
       close_after_flush_(false) {
+  stats_.started_ms =
+      static_cast<std::int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count());
   if (ctrl_ != nullptr) {
     // 先记对端地址 —— 会话回报要用。
     std::string ip;
@@ -357,6 +374,29 @@ socks5_server_conn::~socks5_server_conn() {
 
   // ctrl_ 归框架所有，不能在这里 delete。
   if (counter_ != nullptr) counter_->fetch_sub(1);
+
+  // 会话结束通知：**恰好一次**，放在资源收尾之后（回调不该看到半拆的会话）。
+  if (!ended_) {
+    ended_ = true;
+    if (on_session_end_) {
+      uvcpp_socks5_session_info info;
+      info.command = command_;
+      info.target  = target_;
+      info.peer    = peer_;
+      info.status  = session_status_ != 0 ? session_status_ : end_status_;
+      const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+      stats_.ended_ms    = static_cast<std::int64_t>(now);
+      stats_.duration_ms = stats_.ended_ms - stats_.started_ms;
+      stats_.end_status  = info.status;
+      try {
+        on_session_end_(info, stats_);
+      } catch (...) {
+        // 观察回调抛异常不影响收尾。
+      }
+    }
+  }
 }
 
 // -------------------------------------------------------------------------
@@ -367,6 +407,7 @@ void socks5_server_conn::on_ctrl_read(uvcpp_buf* buf) {
   if (buf == nullptr || closing_) return;
 
   if (phase_ == stage::RELAY) {
+    stats_.bytes_client_to_target += buf->size();
     enqueue(to_up_, buf->get_const_data(), buf->size());
     return;
   }
@@ -575,6 +616,7 @@ void socks5_server_conn::send_reply(uvcpp_socks5_reply rep,
 }
 
 void socks5_server_conn::notify_session(int status) {
+  session_status_ = status;
   if (notified_ || !on_session_) return;
   notified_ = true;
 
@@ -697,12 +739,16 @@ void socks5_server_conn::on_upstream_event(const net_read_result& r) {
   if (closing_) return;
   if (r.event == net_read_event::DATA) {
     if (r.data != nullptr && r.size > 0) {
+      stats_.bytes_target_to_client += r.size;
       enqueue(to_ctrl_, r.data, r.size);
     }
     return;
   }
   // 对端结束（FIN 或读错）：控制连接也结束。RFC 1928 的隧道没有半关闭语义，
   // 这里不尝试把两个方向拆开。
+  if (r.event == net_read_event::READ_ERROR && end_status_ == 0) {
+    end_status_ = r.error != 0 ? r.error : UV_EIO;
+  }
   shutdown();
 }
 
@@ -872,6 +918,9 @@ void socks5_server_conn::on_udp_datagram(uvcpp_buf* buf, const std::string& ip,
     udp_client_ip_     = ip;
     udp_client_port_   = port;
   } else if (ip != udp_client_ip_ || port != udp_client_port_) {
+    // 目标 → 客户端：这里的 data 是**目标发来的裸载荷**（封装在上面做）。
+    ++stats_.udp_datagrams;
+    stats_.udp_bytes += buf->size();
     uvcpp_socks5_endpoint from;
     uvcpp_socks5_atyp     atyp = uvcpp_socks5_atyp::IPV4;
     if (!socks5_detail::classify_host(ip, atyp)) return;
@@ -905,6 +954,10 @@ void socks5_server_conn::on_udp_datagram(uvcpp_buf* buf, const std::string& ip,
     return;  // RSV/FRAG/坏头：丢弃
   }
   if (payload_off > buf->size()) return;
+
+  // 客户端 → 目标：只统计载荷（封装头不算，见 stats 的说明）。
+  ++stats_.udp_datagrams;
+  stats_.udp_bytes += buf->size() - payload_off;
 
   struct sockaddr_storage target_ss;
   if (target.is_domain()) {
@@ -967,6 +1020,7 @@ void socks5_server_conn::flush(out_queue& q) {
                                 if (!token_alive(life)) return;
                                 q.in_flight = false;
                                 if (status != 0) {
+                                  if (end_status_ == 0) end_status_ = status;
                                   shutdown();
                                   return;
                                 }
@@ -1159,7 +1213,8 @@ void uvcpp_socks5_server::on_accepted(uvcpp_tcp_client* client) {
 
   socks5_server_conn* conn = nullptr;
   try {
-    conn = new socks5_server_conn(&conn_count_, opts_, on_session_, client);
+    conn = new socks5_server_conn(&conn_count_, opts_, on_session_,
+                                  on_session_end_, client);
     (void)conn;
   } catch (...) {
     // 对象没建起来，析构不会跑 —— 这里必须把 `on_accepted()` 预支的那一次
@@ -1167,6 +1222,11 @@ void uvcpp_socks5_server::on_accepted(uvcpp_tcp_client* client) {
     conn_count_.fetch_sub(1);
     client->close(nullptr);
   }
+}
+
+void uvcpp_socks5_server::set_session_end_callback(
+    uvcpp_socks5_session_end_cb cb) {
+  on_session_end_ = std::move(cb);
 }
 
 int uvcpp_socks5_server::listen(

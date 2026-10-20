@@ -352,6 +352,14 @@ class UVCPP_API uvcpp_web_ws_client {
   bool socks5_enabled() const;
   /** @brief 上一次 SOCKS5 失败的人类可读原因（转发底层）。 */
   const std::string& socks5_last_error() const;
+  /**
+   * @brief 最近一次 SOCKS5 失败是否发生在"连代理"阶段（转发底层）。
+   *
+   * 语义与 `uvcpp_ws_client` / `uvcpp_tcp_client` / `uvcpp_http_client`
+   * 的同名方法一致：true = 代理本身连不上；false = 代理已应答，失败来自
+   * 认证或目标（REP 码）。只读。
+   */
+  bool socks5_proxy_connect_failed() const;
 
  private:
   /** @brief 换一个底层协议层客户端并重新发起连接（只在循环之外调用）。 */

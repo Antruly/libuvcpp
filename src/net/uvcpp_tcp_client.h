@@ -258,6 +258,24 @@ class UVCPP_API uvcpp_tcp_client {
   const std::string& tls_alpn_selected() const { return tls_alpn_; }
 
   /**
+   * @brief 对端证书链（DER，叶子在前）。
+   *
+   * 握手完成之后、连接关闭之前可读；非 TLS 连接或握手未完成时返回空。
+   */
+  std::vector<std::vector<unsigned char>> peer_cert_chain_der() const;
+
+  /**
+   * @brief `SSL_get_verify_result()` 的 `X509_V_ERR_*` 数值（0 = 校验通过）。
+   *
+   * 与布尔版的 `verify_peer()` 不同，它能区分过期、域名不匹配、自签名等。
+   * 非 TLS / 没有握手时返回 -1。
+   */
+  long peer_verify_result() const;
+
+  /** @brief 上一条结果的可读文本（`X509_verify_cert_error_string`）。 */
+  std::string peer_verify_error() const;
+
+  /**
    * @brief 握手结束（成功或失败）时通知一次。
    *
    * **服务端用它把"把连接交给上层"推迟到握手之后。** accept 之后先
@@ -897,6 +915,50 @@ class UVCPP_API uvcpp_tcp_client {
    */
   int resolve_host_sync(const char* host, int port, sockaddr_storage& out,
                         int timeout_ms);
+  /**
+   * @brief 解析主机名并返回**全部**候选地址（AF_UNSPEC：A + AAAA）。
+   *
+   * 数字 IPv4 / IPv6 字面量返回单元素列表。顺序即 getaddrinfo 的顺序。
+   */
+  int resolve_host_sync_all(const char* host, int port,
+                            std::vector<sockaddr_storage>& out,
+                            int timeout_ms);
+
+  // -----------------------------------------------------------------
+  // 多地址连接（#44）：AF_UNSPEC 解析出的地址按 getaddrinfo 顺序逐个尝试
+  // -----------------------------------------------------------------
+  //
+  // 每次尝试用一个**新的** `uvcpp_tcp`：libuv 在 connect 失败后不允许复用
+  // 同一个句柄（实测 1.48 上第二次 `uv_tcp_connect` 立刻返回 ECONNABORTED），
+  // 所以旧句柄在两次尝试之间关闭、包装对象交给它自己的关闭回调去删。
+  // 下一轮尝试经一个 0 ms 的 async 投递，**不在旧句柄的 connect 回调栈上**
+  // 动句柄。
+
+  /** @brief 用已解析的地址列表开始一轮多地址连接（异步）。 */
+  void start_multi_connect(std::vector<sockaddr_storage> addrs,
+                           std::function<void(int)> cb);
+
+  /** @brief 尝试列表中的下一个地址（在 async 回调里跑）。 */
+  void connect_attempt_next();
+
+  /** @brief 投递下一轮尝试（等待当前回调栈解开）。 */
+  void post_connect_attempt();
+
+  /** @brief 关闭并回收上一轮尝试的句柄，重建一个新的。 */
+  void retire_attempt_handle();
+
+  /** @brief 收尾整轮多地址连接并回调使用者一次。 */
+  void finish_multi_connect(int status);
+
+  /** @brief 惰性创建把尝试串起来的 async 句柄。 */
+  void init_connect_retry_async();
+
+  std::vector<sockaddr_storage> connect_addrs_;
+  std::size_t                   connect_addr_index_ = 0;
+  std::function<void(int)>      connect_user_cb_;
+  int                           connect_last_error_ = 0;
+  class uvcpp_async*            connect_retry_async_ = nullptr;
+  std::shared_ptr<char>         connect_attempt_token_;
 
   /** @brief `connect()` 的本体：连 `ip:port`（不经代理），完成后走 TLS/用户回调。 */
   int connect_transport(const char* ip, int port, std::function<void(int)> cb);
@@ -1149,7 +1211,8 @@ class UVCPP_API uvcpp_tcp_client {
   /** 握手/读写不可恢复地失败：通知在读的一方并走关闭流程。 */
   void tls_fail(int err, bool peer_closed);
 
-  uvcpp_ssl*  tls_ssl_            = nullptr;
+  uvcpp_ssl*          tls_ssl_ = nullptr;
+  uvcpp_ssl_context*  tls_ctx_ = nullptr;  // 多地址重试要重建会话
   bool        tls_handshake_done_ = false;
   int         tls_ssl_error_      = 0;   ///< 最近一次 SSL_get_error
   std::string tls_alpn_;                 ///< 握手协商出的协议名（空 = 没协商出）

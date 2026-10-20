@@ -358,6 +358,8 @@ int uvcpp_http_client::connect(const char* host, int port,
 // 定义在下面的"阻塞 socket 助手"一节；`connect_wait` 的 TLS 分支要用它给
 // 握手装超时，所以先声明。
 static void set_socket_timeout(uv_os_sock_t fd, int timeout_ms);
+static long long deadline_remain_ms(
+    const std::chrono::steady_clock::time_point& deadline);
 
 int uvcpp_http_client::connect_wait(const char* host, int port,
                                      int timeout_ms) {
@@ -395,6 +397,8 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
   }
 
   auto start = std::chrono::steady_clock::now();
+  const std::chrono::steady_clock::time_point connect_deadline =
+      start + std::chrono::milliseconds(timeout_ms);
   while (!done) {
     loop_->run(UV_RUN_NOWAIT);
     if (std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -415,9 +419,16 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
           set_status(HTTP_CLIENT_ERROR); last_error_code_ = -1; return -1;
         }
         // TCP 连上了但对端不发 ServerHello 时，阻塞的 SSL_connect 会一直等 ——
-        // 握手同样要有墙钟上限（与两条 send_wait 用的是同一个 socket 选项）。
-        set_socket_timeout(sock, timeout_ms);
-        const int hrc = do_ssl_handshake(static_cast<int>(sock));
+        // 握手同样要有墙钟上限，而且与 TCP 连接共用同一个**总** deadline。
+        const long long hs_remain = deadline_remain_ms(connect_deadline);
+        if (hs_remain <= 0) {
+          set_status(HTTP_CLIENT_ERROR);
+          last_error_code_ = UV_ETIMEDOUT;
+          return UV_ETIMEDOUT;
+        }
+        set_socket_timeout(sock, static_cast<int>(hs_remain));
+        const int hrc = do_ssl_handshake(static_cast<int>(sock),
+                                         static_cast<int>(hs_remain));
         if (hrc <= 0) {
           set_status(HTTP_CLIENT_ERROR);
           last_error_code_ = hrc;
@@ -797,7 +808,13 @@ void uvcpp_http_client::add_accept_encoding(uvcpp_http_request& req) const {
   // 调用方自己设过 `accept-encoding` 就不覆盖 —— 他的偏好（比如只收 deflate
   // 或干脆不收）优先于这个开关。
   if (compress_enabled_ && !req.has_header("accept-encoding")) {
+    // 只有编了 brotli 的构建才宣告 `br` —— 否则会出现"协商了 br 却解不开"，
+    // 调用方拿到的是一段压缩字节（#47）。
+#if UVCPP_BROTLI_ENABLE
+    req.set_header("accept-encoding", "gzip, deflate, br");
+#else
     req.set_header("accept-encoding", "gzip, deflate");
+#endif
   }
 }
 
@@ -817,8 +834,12 @@ void uvcpp_http_client::decompress_response_body(uvcpp_http_response& resp) {
       enc = http_compress_method::GZIP;
     else if (cel == "deflate" || cel == "x-deflate")
       enc = http_compress_method::DEFLATE;
-    // 认不出的编码（`br`、`zstd`…）**原样留着**：宁可把压缩字节交给调用方，
-    // 也不要谎报已经解开了。
+#if UVCPP_BROTLI_ENABLE
+    else if (cel == "br")
+      enc = http_compress_method::BROTLI;
+#endif
+    // 认不出的编码（没编 brotli 时的 `br`、`zstd`…）**原样留着**：宁可把
+    // 压缩字节交给调用方，也不要谎报已经解开了。
   }
   if (enc == http_compress_method::NONE) return;
 
@@ -919,7 +940,8 @@ static void set_socket_blocking(uv_os_sock_t fd, bool blocking) {
 // 阻塞 socket 的收发超时。**两个平台都有对应选项**：Windows 是毫秒 DWORD，
 // POSIX 是 `struct timeval`。从前这段整块包在 `#ifdef _WIN32` 里，于是
 // `timeout_ms` 在 Linux/macOS 上被静默忽略，对端不响应就无限阻塞（uvp#39）。
-// 注意这是**每次 I/O** 的超时，不是整次请求的 deadline。
+// 这一项本身是**每次 I/O** 的超时；整次请求的总 deadline 由调用方在每次
+// 收发之前按剩余时间收紧它（`sync_recv_until` / `sync_ssl_read_until`，见 #48）。
 static void set_socket_timeout(uv_os_sock_t fd, int timeout_ms) {
   if (timeout_ms <= 0) return;
 #ifdef _WIN32
@@ -984,6 +1006,35 @@ static int sync_ssl_read(uvcpp_ssl* ssl, char* buf, size_t len) {
     return 0;  // 没有更细的信息：按 EOF 处理，与旧行为一致
   }
   return UV_ETIMEDOUT;
+}
+#endif
+
+// 同步路径的**总** deadline（#48）：`SO_RCVTIMEO`/`SO_SNDTIMEO` 只约束单次
+// I/O，对端每隔略小于超时的时间发一个字节就能把请求无限拖长。每次 I/O 之前
+// 都把 socket 超时设成"剩余时间"，到点统一返回 `UV_ETIMEDOUT`。
+static long long deadline_remain_ms(
+    const std::chrono::steady_clock::time_point& deadline) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             deadline - std::chrono::steady_clock::now())
+      .count();
+}
+
+static int sync_recv_until(uv_os_sock_t sock, char* buf, size_t len,
+                           const std::chrono::steady_clock::time_point& deadline) {
+  const long long remain = deadline_remain_ms(deadline);
+  if (remain <= 0) return UV_ETIMEDOUT;
+  set_socket_timeout(sock, static_cast<int>(remain));
+  return sync_recv(sock, buf, len);
+}
+
+#if UVCPP_OPENSSL_ENABLE
+static int sync_ssl_read_until(
+    uvcpp_ssl* ssl, uv_os_sock_t sock, char* buf, size_t len,
+    const std::chrono::steady_clock::time_point& deadline) {
+  const long long remain = deadline_remain_ms(deadline);
+  if (remain <= 0) return UV_ETIMEDOUT;
+  set_socket_timeout(sock, static_cast<int>(remain));
+  return sync_ssl_read(ssl, buf, len);
 }
 #endif
 
@@ -1215,7 +1266,7 @@ static int read_one_message(const std::function<int(char*, size_t)>& rd,
   return 0;
 }
 
-int uvcpp_http_client::do_ssl_handshake(int fd) {
+int uvcpp_http_client::do_ssl_handshake(int fd, int timeout_ms) {
   if (!ssl_ctx_) return -1;
   delete ssl_;
   ssl_ = new uvcpp_ssl(ssl_ctx_, fd);
@@ -1251,7 +1302,13 @@ int uvcpp_http_client::do_ssl_handshake(int fd) {
   // 信号不该让握手失败（本机的测试进程里就复现过：`SSL_connect` 13 ms 返回
   // WANT_READ 且 `errno == EINTR`）。重试**有上界**，不会把一次超时放大成多次：
   // 真正超时的那一次 `errno` 是 EAGAIN/EWOULDBLOCK，直接返回。
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   for (int attempt = 0; attempt < 8; ++attempt) {
+    const long long remain = deadline_remain_ms(deadline);
+    if (remain <= 0) return UV_ETIMEDOUT;
+    set_socket_timeout(static_cast<uv_os_sock_t>(fd),
+                       static_cast<int>(remain));
     errno = 0;
     const int rc = ssl_->handshake();
     if (rc == 1) return 1;
@@ -1291,7 +1348,9 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
     last_error_code_ = -1;
     return -1;
   }
-  // 两个平台都装收发超时（见 set_socket_timeout 的说明）。
+  // 两个平台都装收发超时；每次 I/O 之前再按"剩余时间"收紧（总 deadline，#48）。
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   set_socket_timeout(sock, timeout_ms);
 
   // 构造请求：补 Host；**不再强塞 `Connection: close`** —— 报文边界由分帧规则
@@ -1307,6 +1366,13 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
   // 不能当成"写完了"静默跳出。
   size_t sent = 0;
   while (sent < raw.size()) {
+    const long long remain = deadline_remain_ms(deadline);
+    if (remain <= 0) {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = UV_ETIMEDOUT;
+      return UV_ETIMEDOUT;
+    }
+    set_socket_timeout(sock, static_cast<int>(remain));
     const int n = ssl_->write(raw.data() + sent, raw.size() - sent);
     if (n < 0) {
       set_status(HTTP_CLIENT_ERROR);
@@ -1323,8 +1389,10 @@ int uvcpp_http_client::send_wait_ssl(const uvcpp_http_request& req,
 
   std::string head, body;
   const int rrc = read_one_message(
-      [this](char* p, size_t n) { return sync_ssl_read(ssl_, p, n); }, head, body,
-      req.method == http_method::HTTP_HEAD);
+      [this, sock, deadline](char* p, size_t n) {
+        return sync_ssl_read_until(ssl_, sock, p, n, deadline);
+      },
+      head, body, req.method == http_method::HTTP_HEAD);
   if (rrc != 0) {
     set_status(HTTP_CLIENT_ERROR);
     last_error_code_ = rrc;
@@ -1367,8 +1435,10 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
     return -1;
   }
 
-  // 阻塞模式 + 两个平台都装收发超时（与 send_wait_ssl 同源）。
+  // 阻塞模式 + 两个平台都装收发超时；每次 I/O 之前按"剩余时间"收紧（#48）。
   set_socket_blocking(sock, true);
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   set_socket_timeout(sock, timeout_ms);
 
   // 失败时交付"没收到响应"，而不是构造时那个 200 OK（同 send_wait_ssl）。
@@ -1386,6 +1456,13 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
   // 阻塞式写入：超时（EAGAIN/EWOULDBLOCK/ETIMEDOUT）与真错误分开报。
   size_t sent = 0;
   while (sent < raw.size()) {
+    const long long remain = deadline_remain_ms(deadline);
+    if (remain <= 0) {
+      set_status(HTTP_CLIENT_ERROR);
+      last_error_code_ = UV_ETIMEDOUT;
+      return UV_ETIMEDOUT;
+    }
+    set_socket_timeout(sock, static_cast<int>(remain));
     const int n = static_cast<int>(::send(
         sock, raw.data() + sent, static_cast<int>(raw.size() - sent), 0));
     if (n > 0) { sent += static_cast<size_t>(n); continue; }
@@ -1406,8 +1483,10 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
 
   std::string head, body;
   const int rrc = read_one_message(
-      [sock](char* p, size_t n) { return sync_recv(sock, p, n); }, head, body,
-      req.method == http_method::HTTP_HEAD);
+      [sock, deadline](char* p, size_t n) {
+        return sync_recv_until(sock, p, n, deadline);
+      },
+      head, body, req.method == http_method::HTTP_HEAD);
   if (rrc != 0) {
     set_status(HTTP_CLIENT_ERROR);
     last_error_code_ = rrc;
@@ -1424,6 +1503,34 @@ int uvcpp_http_client::send_wait_plain(const uvcpp_http_request& req,
   set_status(HTTP_CLIENT_COMPLETE);
   clear_status(HTTP_CLIENT_ERROR);
   return 0;
+}
+
+std::vector<std::vector<unsigned char>>
+uvcpp_http_client::peer_cert_chain_der() const {
+#if UVCPP_HTTP3_ENABLE
+  if (h3_active_) return std::vector<std::vector<unsigned char>>();
+#endif
+  if (ssl_ != nullptr) return ssl_->peer_cert_chain_der();
+  if (tcp_ != nullptr) return tcp_->peer_cert_chain_der();
+  return std::vector<std::vector<unsigned char>>();
+}
+
+long uvcpp_http_client::peer_verify_result() const {
+#if UVCPP_HTTP3_ENABLE
+  if (h3_active_) return -1;
+#endif
+  if (ssl_ != nullptr) return ssl_->peer_verify_result();
+  if (tcp_ != nullptr) return tcp_->peer_verify_result();
+  return -1;
+}
+
+std::string uvcpp_http_client::peer_verify_error() const {
+#if UVCPP_HTTP3_ENABLE
+  if (h3_active_) return "HTTP/3 (QUIC) peer certificates are not exposed";
+#endif
+  if (ssl_ != nullptr) return ssl_->peer_verify_error();
+  if (tcp_ != nullptr) return tcp_->peer_verify_error();
+  return "no TLS session";
 }
 
 int uvcpp_http_client::ssl_read(char* buf, size_t len) {
@@ -1448,6 +1555,14 @@ void uvcpp_http_client::set_compression_enabled(bool enable) {
 }
 bool uvcpp_http_client::is_compression_enabled() const {
   return compress_enabled_;
+}
+
+void uvcpp_http_client::set_compression_min_body_size(size_t bytes) {
+  compress_min_body_ = bytes;
+}
+
+size_t uvcpp_http_client::compression_min_body_size() const {
+  return compress_min_body_;
 }
 #endif
 

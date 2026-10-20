@@ -7,6 +7,7 @@
 
 #include <net/uvcpp_udp_client.h>
 #include <req/uvcpp_udp_send.h>
+#include <req/uvcpp_getaddrinfo.h>
 #include <uvcpp/uvcpp_alloc.h>
 #include <uvcpp/uvcpp_define.h>
 
@@ -278,14 +279,75 @@ int uvcpp_udp_client::bindIpv6(const char* ip, int port) {
   return 0;
 }
 
+int uvcpp_udp_client::resolve_send_addr(const char* host, int port,
+                                       sockaddr_storage& out,
+                                       int timeout_ms) {
+  std::memset(&out, 0, sizeof(out));
+
+  // 数字 IPv4 / IPv6 快速路径（不需要 DNS；`::1` 必须走这一支）。
+  struct sockaddr_in addr4;
+  if (uv_ip4_addr(host, port, &addr4) == 0) {
+    std::memcpy(&out, &addr4, sizeof(addr4));
+    return 0;
+  }
+  struct sockaddr_in6 addr6;
+  if (uv_ip6_addr(host, port, &addr6) == 0) {
+    std::memcpy(&out, &addr6, sizeof(addr6));
+    return 0;
+  }
+
+  // 域名：AF_UNSPEC（A + AAAA），取第一个可用结果。同步接口可以阻塞等待。
+  uvcpp_getaddrinfo resolver;
+  char service[16];
+  snprintf(service, sizeof(service), "%d", port);
+
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family   = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+
+  bool done = false;
+  int  status = 0;
+  struct addrinfo* res = nullptr;
+  int rc = resolver.getaddrinfo(
+      loop_, host, service, &hints,
+      [&done, &status, &res](uvcpp_getaddrinfo*, int st, struct addrinfo* r) {
+        status = st;
+        res    = r;
+        done   = true;
+      });
+  if (rc != 0) return rc;
+  if (!wait_for_condition([&done]() { return done; }, timeout_ms)) {
+    return UV_ETIMEDOUT;
+  }
+  if (status != 0 || res == nullptr) {
+    if (res != nullptr) resolver.freeaddrinfo(res);
+    return (status != 0) ? status : UV_EAI_NONAME;
+  }
+  bool found = false;
+  for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+    if (p->ai_addr == nullptr || p->ai_addrlen == 0) continue;
+    if (p->ai_family != AF_INET && p->ai_family != AF_INET6) continue;
+    std::memcpy(&out, p->ai_addr,
+                static_cast<size_t>(p->ai_addrlen) > sizeof(out)
+                    ? sizeof(out)
+                    : static_cast<size_t>(p->ai_addrlen));
+    found = true;
+    break;
+  }
+  resolver.freeaddrinfo(res);
+  return found ? 0 : UV_EAI_NONAME;
+}
+
 int uvcpp_udp_client::connect(const char* ip, int port) {
-  struct sockaddr_in addr;
-  int rc = uv_ip4_addr(ip, port, &addr);
+  sockaddr_storage storage;
+  int rc = resolve_send_addr(ip, port, storage, 30000);
   if (rc != 0) {
     last_error_code_ = rc;
     return rc;
   }
-  rc = udp_->connect(reinterpret_cast<const struct sockaddr*>(&addr));
+  rc = udp_->connect(reinterpret_cast<const struct sockaddr*>(&storage));
   if (rc != 0) {
     last_error_code_ = rc;
     return rc;
@@ -299,33 +361,6 @@ int uvcpp_udp_client::connect(const char* ip, int port) {
 // =========================================================================
 
 namespace {
-
-int send_to_addr_impl(uvcpp_udp* udp, uvcpp_loop* loop, int& last_err,
-                       const char* ip, int port,
-                       uv_buf_t* raw, uvcpp_udp_send* w,
-                       std::function<void(uvcpp_udp_send*, int)> cb) {
-  // 与 `bind()` 同一条分流规则：带 `:` 的是 IPv6 字面量，其余按 IPv4 解。
-  // 地址只在这一帧里存在 —— `uv_udp_send` 会把它拷进请求对象。
-  struct sockaddr_storage storage;
-  std::memset(&storage, 0, sizeof(storage));
-  int rc;
-  if (std::strchr(ip, ':') != nullptr) {
-    struct sockaddr_in6 addr6;
-    rc = uv_ip6_addr(ip, port, &addr6);
-    if (rc != 0) { last_err = rc; delete w; return rc; }
-    std::memcpy(&storage, &addr6, sizeof(addr6));
-  } else {
-    struct sockaddr_in addr4;
-    rc = uv_ip4_addr(ip, port, &addr4);
-    if (rc != 0) { last_err = rc; delete w; return rc; }
-    std::memcpy(&storage, &addr4, sizeof(addr4));
-  }
-
-  rc = udp->send(w, w->get_uv_buf(), 1,
-                 reinterpret_cast<const struct sockaddr*>(&storage), cb);
-  if (rc != 0) { last_err = rc; delete w; return rc; }
-  return 0;
-}
 
 int send_sockaddr_impl(uvcpp_udp* udp, int& last_err,
                        const struct sockaddr* addr,
@@ -356,6 +391,112 @@ int send_connected_impl(uvcpp_udp* udp, uvcpp_loop* loop, int& last_err,
 // Send (to specific address, const char*)
 // =========================================================================
 
+int uvcpp_udp_client::start_send_to(
+    const char* host, int port, uv_buf_t* raw, uvcpp_udp_send* w,
+    std::function<void(uvcpp_udp_send*, int)> cb) {
+  (void)raw;  // 请求对象里已经有同一块缓冲（`w->get_uv_buf()`）。
+
+  // 数字地址：不开解析器，直接发。
+  struct sockaddr_storage numeric;
+  std::memset(&numeric, 0, sizeof(numeric));
+  bool is_numeric = false;
+  struct sockaddr_in a4;
+  if (uv_ip4_addr(host, port, &a4) == 0) {
+    std::memcpy(&numeric, &a4, sizeof(a4));
+    is_numeric = true;
+  } else {
+    struct sockaddr_in6 a6;
+    if (uv_ip6_addr(host, port, &a6) == 0) {
+      std::memcpy(&numeric, &a6, sizeof(a6));
+      is_numeric = true;
+    }
+  }
+  if (is_numeric) {
+    const int src = udp_->send(
+        w, w->get_uv_buf(), 1,
+        reinterpret_cast<const struct sockaddr*>(&numeric), cb);
+    if (src != 0) {
+      // 提交失败没有完成回调：请求对象与错误码都由这里收尾（与旧实现一致）。
+      last_error_code_ = src;
+      delete w;
+    }
+    return src;
+  }
+
+  // 域名：**异步**解析 —— 异步发送路径里绝不能同步等 DNS（#49）。
+  struct dns_ctx {
+    uvcpp_udp_client* self;
+    uvcpp_udp_send*   w;
+    std::function<void(uvcpp_udp_send*, int)> cb;
+    std::shared_ptr<char> life;
+  };
+  dns_ctx* c = new dns_ctx{this, w, std::move(cb), alive_token()};
+
+  char service[16];
+  snprintf(service, sizeof(service), "%d", port);
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family   = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+
+  uvcpp_getaddrinfo* resolver = new uvcpp_getaddrinfo();
+  const int rc = resolver->getaddrinfo(
+      loop_, host, service, &hints,
+      [c](uvcpp_getaddrinfo* req, int status, struct addrinfo* res) {
+        sockaddr_storage addr;
+        std::memset(&addr, 0, sizeof(addr));
+        bool found = false;
+        if (status == 0 && res != nullptr) {
+          for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+            if (p->ai_addr == nullptr || p->ai_addrlen == 0) continue;
+            if (p->ai_family != AF_INET && p->ai_family != AF_INET6) continue;
+            std::memcpy(&addr, p->ai_addr,
+                        static_cast<size_t>(p->ai_addrlen) > sizeof(addr)
+                            ? sizeof(addr)
+                            : static_cast<size_t>(p->ai_addrlen));
+            found = true;
+            break;
+          }
+        }
+        if (res != nullptr) req->freeaddrinfo(res);
+        delete req;
+
+        int err = (status != 0) ? status : (found ? 0 : UV_EAI_NONAME);
+        uvcpp_udp_send*   ww = c->w;
+        auto              fn = std::move(c->cb);
+        const bool alive = token_alive(c->life);
+        uvcpp_udp_client* self = c->self;
+        delete c;
+
+        if (!alive) {
+          delete ww;  // 客户端已经析构：请求对象没进 libuv，自行释放
+          return;
+        }
+        if (err != 0) {
+          fn(ww, err);
+          delete ww;  // 不经过请求完成路径，不放没人放
+          return;
+        }
+        const int src = self->udp_->send(
+            ww, ww->get_uv_buf(), 1,
+            reinterpret_cast<const struct sockaddr*>(&addr), fn);
+        if (src != 0) {
+          fn(ww, src);
+          delete ww;
+        }
+      });
+
+  if (rc != 0) {
+    last_error_code_ = rc;
+    delete resolver;
+    delete w;
+    delete c;
+    return rc;
+  }
+  return 0;
+}
+
 int uvcpp_udp_client::send(const char* ip, int port, const char* data,
                             size_t len, std::function<void(int)> cb) {
   if (cb != nullptr) {
@@ -372,8 +513,8 @@ int uvcpp_udp_client::send(const char* ip, int port, const char* data,
     w->set_uv_buf(raw, true);
     w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
-    int rc = send_to_addr_impl(
-        udp_, loop_, last_error_code_, ip, port, raw, w,
+    int rc = start_send_to(
+        ip, port, raw, w,
         [this, life](uvcpp_udp_send* wr, int status) {
           if (!token_alive(life)) {
             return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
@@ -421,8 +562,8 @@ int uvcpp_udp_client::send_wait(const char* ip, int port, const char* data,
   w->set_uv_buf(raw, true);
   w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
-  int rc = send_to_addr_impl(
-      udp_, loop_, last_error_code_, ip, port, raw, w,
+  int rc = start_send_to(
+      ip, port, raw, w,
       [this, life](uvcpp_udp_send* wr, int status) {
         if (!token_alive(life)) {
           return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
@@ -551,8 +692,8 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
     w->set_uv_buf(raw, true);
     w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
-    int rc = send_to_addr_impl(
-        udp_, loop_, last_error_code_, ip, port, raw, w,
+    int rc = start_send_to(
+        ip, port, raw, w,
         [this, life](uvcpp_udp_send* wr, int status) {
           if (!token_alive(life)) {
             return;  // 对象已析构：请求对象由 callback_udp_send 事后释放
@@ -594,8 +735,8 @@ int uvcpp_udp_client::send(const char* ip, int port, uvcpp_buf* buf,
     w->set_uv_buf(raw, true);
     w->set_self_free(true);  // 释放交给 callback_udp_send，见 set_self_free
 
-    int rc = send_to_addr_impl(
-        udp_, loop_, last_error_code_, ip, port, raw, w,
+    int rc = start_send_to(
+        ip, port, raw, w,
         [this, life](uvcpp_udp_send* wr, int status) {
           if (!token_alive(life)) {
             return;  // 对象已析构：请求对象由 callback_udp_send 事后释放

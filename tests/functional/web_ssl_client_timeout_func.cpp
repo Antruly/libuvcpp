@@ -49,7 +49,12 @@ int main() {
 
 namespace {
 
-enum server_mode { kSilent, kSilentAfterRequest, kRespondNormally };
+enum server_mode {
+  kSilent,
+  kSilentAfterRequest,
+  kRespondNormally,
+  kDrip
+};
 
 struct server_ctx {
   int listen_fd = -1;
@@ -84,6 +89,21 @@ void* server_main(void* arg) {
     const char resp[] =
         "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
     ::send(fd, resp, sizeof(resp) - 1, 0);
+  } else if (c->mode == kDrip) {
+    // 每隔 900 ms 发一个字节：单次 I/O 的超时永远等不到，只有"总 deadline"
+    // 才会在 ~1 s 处收手（#48）。
+    std::string req;
+    while (req.find("\r\n\r\n") == std::string::npos) {
+      char buf[2048];
+      ssize_t n = ::read(fd, buf, sizeof(buf));
+      if (n <= 0) break;
+      req.append(buf, static_cast<size_t>(n));
+    }
+    for (int i = 0; i < 5; ++i) {
+      char ch = 'H';
+      ::send(fd, &ch, 1, 0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    }
   } else {
     // 静默：不握手、不回包，时间要长过客户端的超时，但别长到拖住 join。
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
@@ -197,6 +217,39 @@ void test_tls_handshake_timeout() {
   ::close(sc.listen_fd);
 }
 
+void test_total_deadline() {
+  server_ctx sc;
+  sc.mode = kDrip;
+  int port = 0;
+  sc.listen_fd = listen_on_loopback(port);
+  check(sc.listen_fd >= 0, "drip: server listening");
+  if (sc.listen_fd < 0) return;
+
+  pthread_t tid;
+  pthread_create(&tid, nullptr, server_main, &sc);
+
+  uvcpp::uvcpp_http_client client;
+  int rc = client.connect_wait("127.0.0.1", port, 3000);
+  check(rc == 0, "drip: connect_wait ok");
+
+  uvcpp::uvcpp_http_response resp;
+  const auto t0 = std::chrono::steady_clock::now();
+  rc = client.send_wait_plain(uvcpp::uvcpp_http_request::make_get("/"), resp,
+                              1000);
+  const long long ms = elapsed_ms(t0);
+  check(rc == UV_ETIMEDOUT,
+        "drip: 每 900 ms 一个字节时也按总 deadline 超时（rc=" +
+            std::to_string(rc) + "）");
+  check(ms >= 800 && ms <= 2600,
+        "drip: 约 1 s 返回，而不是被拖到 4.5 s（实测 " +
+            std::to_string(ms) + " ms）");
+  check(resp.status_code == uvcpp::HTTP_STATUS_NONE,
+        "drip: 超时时状态码是 NONE");
+
+  pthread_join(tid, nullptr);
+  ::close(sc.listen_fd);
+}
+
 void test_normal_exchange() {
   server_ctx sc;
   sc.mode = kRespondNormally;
@@ -228,6 +281,7 @@ void test_normal_exchange() {
 int main() {
   test_plain_read_timeout();
   test_tls_handshake_timeout();
+  test_total_deadline();
   test_normal_exchange();
   if (failures != 0) {
     std::printf("%d check(s) failed\n", failures);

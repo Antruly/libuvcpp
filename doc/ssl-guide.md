@@ -42,7 +42,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 |---|---|---|
 | `uvcpp_ssl_context` | `src/ssl/uvcpp_ssl_context.h:32` | **主类型**。一个上下文可以共享给多条连接（`:8-9`） |
 | `uvcpp_ssl` | `src/ssl/uvcpp_ssl.h:33` | 每连接包装（一个 `SSL*`），`uvcpp_tcp_client` 内部持有 |
-| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:98` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
+| `ssl_detail::alpn_wire_format` | `src/ssl/uvcpp_ssl_common.h:100` | 把 ALPN 名单编成线格式的自由函数，实现细节 |
 
 值类型在 `ssl/uvcpp_ssl_common.h`：`tls_version`、`tls_mode`、`tls_verify_mode`、
 `tls_ctx_status`、`tls_cert_info`。
@@ -196,7 +196,7 @@ enum class tls_verify_mode : uint8_t {
 
 **客户端上 `PEER_STRICT` 真的会校验主机名。** 建立连接时，`uvcpp_tcp_client` 与
 `uvcpp_http_client` 把 `connect()` 收到的那个主机名钉给这张证书的校验
-（`src/ssl/uvcpp_ssl.cpp:201-224`）：数字 IP 字面量走 `iPAddress` 匹配，其余走
+（`src/ssl/uvcpp_ssl.cpp:285-308`）：数字 IP 字面量走 `iPAddress` 匹配，其余走
 `dNSName` 匹配。于是「证书链可信、但签发给别的域名」的对端**建立不起来** ——
 这正是 `PEER` 挡不住的那一类。头注释见 `src/ssl/uvcpp_ssl_common.h:50-63`。
 
@@ -225,6 +225,28 @@ enum class tls_verify_mode : uint8_t {
 （`:277-288`）——服务端是"请求但非强制"要证书，要强制得在应用层用
 `uvcpp_ssl::verify_peer()` 兜。
 
+### 5.1 读取对端证书链与校验码
+
+`verify_peer()` 只有一个 bool；要区分"过期 / 域名不匹配 / 自签名"，看这三条：
+
+| 接口 | 返回 |
+|---|---|
+| `peer_cert_chain_der()` | `std::vector<std::vector<unsigned char>>`，DER、**叶子在前** |
+| `peer_verify_result()` | `SSL_get_verify_result()` 的 `X509_V_ERR_*` 数值（0 = `X509_V_OK`） |
+| `peer_verify_error()` | 上一条的可读文本（`X509_verify_cert_error_string`） |
+
+链两边都**包含叶证书**（OpenSSL 的 `SSL_get_peer_cert_chain()` 在客户端含叶、
+服务端不含，实现按字节去重）。`get_peer_cert_info()` 另外填了 SAN
+（`tls_cert_info::san_dns` / `san_ip`），调用方不必自己解析 DER。
+
+`uvcpp_tcp_client` 与 `uvcpp_http_client` 都转发这三个查询，**握手完成之后、
+连接关闭之前**可读。h1 与 h2 共用同一条 `uvcpp_tcp_client` 的 TLS 会话；h3 走
+QUIC，`uvcpp_http_client` 明确返回空链 / `-1` / 说明串 —— 不是静默的空串。
+
+**注意** `SSL_VERIFY_NONE` 下 `SSL_get_verify_result()` 仍可能是 `X509_V_OK`：
+那表示"没检查"，不是"检查通过"。要判断有没有真的校验，看
+`uvcpp_ssl_context::verify_mode()`。
+
 ---
 
 ## 6. ALPN
@@ -243,7 +265,7 @@ bool has_alpn_select() const;
 其他要点：
 
 - 名单里**空串或长度超过 255 字节的项会被静默丢掉**，不报错；全部丢完导致编码为空时
-  `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:92-95`）。
+  `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:94-97`）。
 - 服务端**挑不中时返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal**
   （`src/ssl/uvcpp_ssl_context.h:155-157`）——写成 fatal 会让所有老客户端连握手都完不成。
 - `has_alpn_select()` 存在的理由是框架默认值与用户策略的冲突：`uvcpp_web_app` 默认要
@@ -320,7 +342,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
 （`src/ssl/uvcpp_ssl_context.cpp:68,70,75,77`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
-（`src/net/uvcpp_tcp_client.cpp:3179-3179`）——所以**必须看各 `load_*` 的返回值**，
+（`src/net/uvcpp_tcp_client.cpp:3410-3410`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
 
 **先装私钥后装证书会返回 `false`**，见 §4。
@@ -328,12 +350,12 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 **服务端上 `PEER_STRICT` 不校验主机名**（客户端上会），见 §5。
 
 **TLS 上 `uvcpp_buf*` 的零拷贝不成立**：调用之后那个 buf **仍然是满的**，
-（`src/net/uvcpp_tcp_client.h:468-471`）。
+（`src/net/uvcpp_tcp_client.h:486-489`）。
 
 **握手完成前写必然失败**（`UV_ENOTCONN`），`SSL_write` 要求握手已完成。
 
 **同步/异步混用返回 `UV_ENOTSUP`**，而不是把明文写进一条已加密的连接
-（`src/web/uvcpp_http_client.h:272-281`）。
+（`src/web/uvcpp_http_client.h:283-292`）。
 
 **怎么确认过滤器真的接上了：** 在连接回调里断言 `is_tls_handshake_done()`，并对收到的
 字节按预期**明文**内容比对。测试就是这么做的——`tests/functional/web_ssl_server_func.cpp:131-135`

@@ -185,7 +185,7 @@ struct uvcpp_socks5_endpoint {
 ## 4. 内置 CONNECT 代理（tcp / http / ws）
 
 `uvcpp_tcp_client`、`uvcpp_http_client`、`uvcpp_ws_client`、`uvcpp_web_ws_client`
-上都有同一组四个函数：
+上都有同一组函数：
 
 ```cpp
 // doc-snippet: fragment — 四个类的签名相同
@@ -195,7 +195,12 @@ int  set_socks5_proxy(const std::string& host, int port,
 void clear_socks5_proxy();
 bool socks5_enabled() const;
 const std::string& socks5_last_error() const;
+bool socks5_proxy_connect_failed() const;   // 1.8.2 起
 ```
+
+`socks5_proxy_connect_failed()` 把"代理连不上"与"代理已应答、但认证或
+目标被拒"分开：前者为 `true`（含代理 DNS 解析失败与连接超时），后者为
+`false`。`socks5_last_error()` 只给文字，两个阶段在它上面长得一样。
 
 语义要点：
 
@@ -406,6 +411,7 @@ class uvcpp_socks5_server {
   int listen(std::function<void(const uvcpp_socks5_session_info&)> on_session
                  = nullptr,
              int backlog = 128);
+  void set_session_end_callback(uvcpp_socks5_session_end_cb cb);  // listen() 前
 
   int port() const;               // bind(0) 用；未绑定时 -1
   std::size_t connection_count() const;
@@ -423,6 +429,9 @@ class uvcpp_socks5_server {
   所以 `set_loops(n > 1)` 时整条链路天然分片，不需要跨线程碰句柄；
 - `on_session` 在每条会话**命令结果确定时**调一次（建立成功 `status == 0`）；
   它跑在会话自己那条循环上；
+- `set_session_end_callback()` 在每条会话**结束时**再调一次（对端关闭、读/写
+  错误、服务端 `close()`、握手失败都覆盖），带累计字节与时长的
+  `uvcpp_socks5_session_stats`；同样跑在会话自己那条循环上；
 - `close()` 停掉新连接并关闭**所有**会话（包括工作循环上的）；已建立的会话由各自的
   收尾路径结束，不会被留下悬空的句柄；
 - 策略在 `listen()` 时**快照**，之后改 `set_options` 不影响已有连接。
@@ -479,6 +488,23 @@ class uvcpp_socks5_server {
 
 `max_connections` 超了会在 accept 之后**立刻关**（TCP 没有"拒绝握手"的机会）。
 `connection_count()` 是当前活跃会话数。
+
+### 6.6 会话结束统计
+
+`set_session_end_callback(cb)` 可选；必须在 `listen()` 之前设。每条会话**恰好
+一次**，`cb(info, stats)`：
+
+| 字段 | 含义 |
+|---|---|
+| `bytes_client_to_target` | CONNECT / BIND 客户端 → 目标转发的载荷字节 |
+| `bytes_target_to_client` | 反方向 |
+| `udp_datagrams` / `udp_bytes` | UDP 关联两个方向合计的数据报数与**载荷**字节 |
+| `started_ms` / `ended_ms` / `duration_ms` | Unix epoch 毫秒与会话时长 |
+| `end_status` | 0 = 正常关闭；非 0 是 libuv 错误码（握手被拒、读/写错误、空闲超时等） |
+
+握手阶段的协议字节不计入；UDP 的封装头也不算。`info.status` 是**命令结果**
+（与 `on_session` 一致）。回调在资源收尾之后、会话自己那条循环上跑，服务端
+没有锁 —— 回调里可以安全地读服务端自己的状态。
 
 ---
 

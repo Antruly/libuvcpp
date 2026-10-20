@@ -13,6 +13,7 @@
 #include <uvcpp/uvcpp_alloc.h>
 #include <uvcpp/uvcpp_define.h>
 #include <handle/uvcpp_timer.h>   // 握手超时（见 tls_arm_handshake_timer）
+#include <handle/uvcpp_async.h>   // 多地址连接的下一轮尝试（#44）
 
 #include <atomic>
 #include <chrono>
@@ -484,6 +485,20 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
       tls_hs_timer_ = nullptr;
     }
 #endif
+    // 多地址连接把尝试串起来的 async 句柄：没关掉的话整个 `uv_loop_t` 会
+    // `EBUSY`（它是非 internal 句柄）。包装对象在关闭完成回调里删 —— 那时
+    // 当前回调栈已经解开。
+    if (connect_retry_async_ != nullptr) {
+      uvcpp_async* a = connect_retry_async_;
+      connect_retry_async_ = nullptr;
+      if (a->get_handle() == nullptr) {
+        delete a;
+      } else if (!a->is_closing()) {
+        a->close([a](uvcpp_handle*) { delete a; });
+      }
+    }
+    connect_attempt_token_.reset();
+    connect_user_cb_ = nullptr;
     loop_          = nullptr;
     read_arg_      = nullptr;
     connect_arg_   = nullptr;
@@ -512,6 +527,19 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
     tls_ssl_ = nullptr;
   }
 #endif
+
+  // 多地址连接的 async 句柄（见上面 running-loop 分支里的同一个理由）。
+  if (connect_retry_async_ != nullptr) {
+    uvcpp_async* a = connect_retry_async_;
+    connect_retry_async_ = nullptr;
+    if (a->get_handle() == nullptr) {
+      delete a;
+    } else if (!a->is_closing()) {
+      a->close([a](uvcpp_handle*) { delete a; });
+    }
+  }
+  connect_attempt_token_.reset();
+  connect_user_cb_ = nullptr;
 
   // The underlying handle may already be closed and freed (_handle nulled) by
   // an outer owner (e.g. uvcpp_http_client closes the tcp directly). Calling
@@ -860,15 +888,17 @@ int uvcpp_tcp_client::connect_transport(const char* ip, int port,
       return rc;
     }
 
-    // 主机名：异步 DNS 解析后连接
+    // 主机名：异步 DNS 解析，**AF_UNSPEC** —— IPv6-only 的主机今天连不上，
+    // 双栈主机也没有回退（#44）。解析结果按 getaddrinfo 的顺序逐个尝试。
     uvcpp_getaddrinfo* resolver = new uvcpp_getaddrinfo();
     char service[16];
     snprintf(service, sizeof(service), "%d", port);
 
     struct addrinfo hints;
     std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;      // 与历史行为一致，仅 IPv4
+    hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
 
     int rc = resolver->getaddrinfo(
         loop_, ip, service, &hints,
@@ -886,19 +916,30 @@ int uvcpp_tcp_client::connect_transport(const char* ip, int port,
             return;
           }
 
-          // 用第一个解析结果发起连接
-          int rc2 = connect_async(res->ai_addr, cb);
+          std::vector<sockaddr_storage> addrs;
+          for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+            if (p->ai_addr == nullptr || p->ai_addrlen == 0) continue;
+            if (p->ai_family != AF_INET && p->ai_family != AF_INET6) continue;
+            sockaddr_storage ss;
+            std::memset(&ss, 0, sizeof(ss));
+            std::memcpy(&ss, p->ai_addr,
+                        static_cast<size_t>(p->ai_addrlen) > sizeof(ss)
+                            ? sizeof(ss)
+                            : static_cast<size_t>(p->ai_addrlen));
+            addrs.push_back(ss);
+          }
           req->freeaddrinfo(res);
           delete req;
 
-          if (rc2 != 0) {
-            // 连接未能发起（例如 socket 创建失败）
+          if (addrs.empty()) {
             clear_status(TCP_CLIENT_CONNECTING);
             set_status(TCP_CLIENT_ERROR);
-            last_error_code_      = rc2;
+            last_error_code_      = UV_EAI_NONAME;
             has_async_connect_cb_ = false;
-            cb(rc2);
+            cb(UV_EAI_NONAME);
+            return;
           }
+          start_multi_connect(std::move(addrs), std::move(cb));
         });
 
     if (rc != 0) {
@@ -915,6 +956,141 @@ int uvcpp_tcp_client::connect_transport(const char* ip, int port,
     // --- Sync mode ---
     return connect_wait(ip, port, 30000);
   }
+}
+
+// =========================================================================
+// 多地址连接（#44）
+// =========================================================================
+
+void uvcpp_tcp_client::init_connect_retry_async() {
+  if (connect_retry_async_ != nullptr) return;
+  connect_retry_async_ = new uvcpp_async();
+  // 存活令牌：析构会把 `*alive_token_` 置 1。`uv_close()` 通常会丢弃还没跑
+  // 的 async 通知，但"通常会"不是契约 —— 回调里先问一句，免得在对象已经
+  // 析构之后还去碰它的成员。
+  std::shared_ptr<char> life = alive_token();
+  connect_retry_async_->init(
+      [this, life](uvcpp_async*) {
+        if (!token_alive(life)) return;
+        connect_attempt_next();
+      },
+      loop_);
+}
+
+void uvcpp_tcp_client::post_connect_attempt() {
+  init_connect_retry_async();
+  if (connect_retry_async_ != nullptr) connect_retry_async_->send();
+}
+
+void uvcpp_tcp_client::retire_attempt_handle() {
+  if (tcp_ != nullptr) {
+    uvcpp_tcp* old = tcp_;
+    tcp_ = nullptr;
+    if (old->get_handle() == nullptr) {
+      delete old;  // 句柄已经摘掉（关闭完成过）
+    } else if (!old->is_closing()) {
+      old->read_stop();
+      // 包装对象交给它自己的关闭完成回调 —— 那时当前回调栈已经解开。
+      old->close([old](uvcpp_handle*) { delete old; });
+    } else {
+      // 关闭回调槽已被占用：包装对象只能留给循环（与析构里同一条取舍）。
+    }
+  }
+  read_started_ = false;
+
+#if UVCPP_OPENSSL_ENABLE
+  // 每次尝试的 TLS 会话必须从零开始：握手状态、明文/密文缓冲、ALPN 都是
+  // **按连接**的，不能带着上一笔的残留去握第二次。
+  tls_handshake_done_  = false;
+  tls_connect_pending_ = false;
+  tls_write_pending_   = false;
+  tls_write_sync_      = false;
+  tls_out_busy_        = false;
+  tls_out_.clear();
+  tls_plain_.clear();
+  tls_ssl_error_       = 0;
+  tls_alpn_.clear();
+  if (tls_hs_timer_ != nullptr) tls_hs_timer_->stop();
+  // 失败过的 SSL 会话不能拿去下一次握手：整份重建（memory BIO 是空的）。
+  if (tls_ctx_ != nullptr) {
+    delete tls_ssl_;
+    tls_ssl_ = nullptr;
+    clear_status(TCP_CLIENT_ERROR);
+    enable_tls(tls_ctx_);
+  }
+#endif
+
+  tcp_ = new uvcpp_tcp(loop_);
+}
+
+void uvcpp_tcp_client::start_multi_connect(
+    std::vector<sockaddr_storage> addrs, std::function<void(int)> cb) {
+  connect_addrs_.swap(addrs);
+  connect_addr_index_    = 0;
+  connect_user_cb_       = std::move(cb);
+  connect_last_error_    = 0;
+  connect_attempt_token_.reset();
+  // 第一次尝试不需要退役句柄：调用方刚建的 `tcp_` 还没连过任何东西。
+  connect_attempt_next();
+}
+
+void uvcpp_tcp_client::connect_attempt_next() {
+  if (connect_user_cb_ == nullptr) return;  // 已经收尾/被取消
+
+  if (connect_addr_index_ >= connect_addrs_.size()) {
+    finish_multi_connect(connect_last_error_ != 0 ? connect_last_error_
+                                                  : UV_EAI_NONAME);
+    return;
+  }
+
+  // 上一笔尝试失败后才走到这里：它的句柄不能复用（libuv 在 connect 失败后
+  // 再复用会立刻 ECONNABORTED），换一个新的，旧的在关闭回调里回收。
+  if (connect_attempt_token_) retire_attempt_handle();
+
+  connect_attempt_token_ = std::make_shared<char>(0);
+  std::weak_ptr<char> tok = connect_attempt_token_;
+  const sockaddr_storage cur = connect_addrs_[connect_addr_index_++];
+
+  clear_status(TCP_CLIENT_CONNECTING);
+  set_status(TCP_CLIENT_CONNECTING);
+  last_error_code_      = 0;
+  has_async_connect_cb_ = true;
+
+  const int rc = connect_async(reinterpret_cast<const struct sockaddr*>(&cur),
+                               [this, tok](int status) {
+                                 if (tok.expired()) return;  // 陈旧尝试
+                                 if (status == 0) {
+                                   finish_multi_connect(0);
+                                   return;
+                                 }
+                                 connect_last_error_ = status;
+                                 // 下一轮在 async 回调里跑：这里还压着旧句柄
+                                 // 的 connect 回调，不能当场换句柄。
+                                 post_connect_attempt();
+                               });
+  if (rc != 0) {
+    connect_last_error_ = rc;
+    // 这一笔连提交都没成功（socket 创建失败之类）：对 SOCKS5 来说仍是
+    // "连代理"阶段失败。
+    if (socks5_pending_) socks5_proxy_connect_failed_ = true;
+    post_connect_attempt();
+  }
+}
+
+void uvcpp_tcp_client::finish_multi_connect(int status) {
+  connect_addrs_.clear();
+  connect_addr_index_ = 0;
+  connect_attempt_token_.reset();
+  has_async_connect_cb_ = false;
+
+  std::function<void(int)> cb = std::move(connect_user_cb_);
+  connect_user_cb_ = nullptr;
+
+  if (status != 0) {
+    set_status(TCP_CLIENT_ERROR);
+    last_error_code_ = status;
+  }
+  if (cb) cb(status);
 }
 
 int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
@@ -949,12 +1125,12 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
     socks5_pending_  = true;
   }
 
-  // 解析主机名（数字 IP 快速路径 + DNS 回退），阻塞等待
-  sockaddr_storage resolved;
-  std::memset(&resolved, 0, sizeof(resolved));
-  int rc = resolve_host_sync(via_socks5 ? socks5_proxy_host_.c_str() : ip,
-                             via_socks5 ? socks5_proxy_port_ : port,
-                             resolved, timeout_ms);
+  // 解析主机名（数字 IP 快速路径 + DNS 回退），**AF_UNSPEC** —— A 与 AAAA
+  // 都要：IPv6-only 的主机今天连不上，双栈主机也没有回退（#44）。
+  std::vector<sockaddr_storage> addrs;
+  int rc = resolve_host_sync_all(via_socks5 ? socks5_proxy_host_.c_str() : ip,
+                                 via_socks5 ? socks5_proxy_port_ : port,
+                                 addrs, timeout_ms);
   if (rc != 0) {
     if (via_socks5) socks5_proxy_connect_failed_ = true;
     socks5_pending_ = false;
@@ -969,56 +1145,83 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
 
   set_status(TCP_CLIENT_CONNECTING);
 
-  uvcpp_connect* conn = new uvcpp_connect();
-  // 释放交给 callback_connect 在**闭包返回之后**做：回调里 `delete r` 删的是
-  // 正在执行的闭包本身。见 uvcpp_req::invoke_completion。
-  conn->set_self_free(true);
-  std::shared_ptr<char> life = alive_token();
-  rc = tcp_->connect(
-      conn, reinterpret_cast<const struct sockaddr*>(&resolved),
-      [this, life](uvcpp_connect* r, int status) {
-        (void)r;  // 释放由 callback_connect 事后做
-        if (!token_alive(life)) {
-          return;  // 对象已析构：请求对象由 trampoline 还回去
-        }
-        clear_status(TCP_CLIENT_CONNECTING);
-        if (status == 0) {
-          set_status(TCP_CLIENT_CONNECTED | TCP_CLIENT_READABLE |
-                     TCP_CLIENT_WRITABLE);
-        } else {
-          set_status(TCP_CLIENT_ERROR);
-          last_error_code_ = status;
-        }
-        sync_connect_result_ = status;
-        sync_connect_done_   = true;
-      });
+  // 按 getaddrinfo 的顺序逐个尝试。每次失败后换一个新的句柄（同一个句柄在
+  // connect 失败后不能复用），总时间由**同一个** deadline 约束。
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  int  last_err  = 0;
+  bool connected = false;
+  for (std::size_t attempt = 0; attempt < addrs.size(); ++attempt) {
+    const long long remain_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now())
+            .count();
+    if (remain_ms <= 0) {
+      last_err = UV_ETIMEDOUT;
+      break;
+    }
+    if (attempt > 0) {
+      retire_attempt_handle();
+      clear_status(TCP_CLIENT_ERROR);
+      set_status(TCP_CLIENT_CONNECTING);
+      last_error_code_ = 0;
+    }
 
-  if (rc != 0) {
+    sync_connect_done_   = false;
+    sync_connect_result_ = 0;
+
+    uvcpp_connect* conn = new uvcpp_connect();
+    // 释放交给 callback_connect 在**闭包返回之后**做：回调里 `delete r` 删的是
+    // 正在执行的闭包本身。见 `uvcpp_req::invoke_completion`。
+    conn->set_self_free(true);
+    std::shared_ptr<char> life = alive_token();
+    rc = tcp_->connect(
+        conn, reinterpret_cast<const struct sockaddr*>(&addrs[attempt]),
+        [this, life](uvcpp_connect* r, int status) {
+          (void)r;  // 释放由 callback_connect 事后做
+          if (!token_alive(life)) {
+            return;  // 对象已析构：请求对象由 trampoline 还回去
+          }
+          clear_status(TCP_CLIENT_CONNECTING);
+          if (status == 0) {
+            set_status(TCP_CLIENT_CONNECTED | TCP_CLIENT_READABLE |
+                       TCP_CLIENT_WRITABLE);
+          } else {
+            set_status(TCP_CLIENT_ERROR);
+            last_error_code_ = status;
+          }
+          sync_connect_result_ = status;
+          sync_connect_done_   = true;
+        });
+
+    if (rc != 0) {
+      delete conn;
+      last_err = rc;
+      continue;
+    }
+
+    if (!wait_for_condition([this]() { return sync_connect_done_; },
+                            static_cast<int>(remain_ms))) {
+      last_err = UV_ETIMEDOUT;
+      continue;
+    }
+
+    if (sync_connect_result_ != 0) {
+      last_err = sync_connect_result_;
+      continue;
+    }
+    connected = true;
+    break;
+  }
+
+  if (!connected) {
     if (via_socks5) socks5_proxy_connect_failed_ = true;
     socks5_pending_ = false;
-    clear_status(TCP_CLIENT_CONNECTING);
     set_status(TCP_CLIENT_ERROR);
-    last_error_code_ = rc;
-    delete conn;
-    return rc;
+    last_error_code_ = last_err != 0 ? last_err : UV_EAI_NONAME;
+    return last_error_code_;
   }
-
-  bool completed = wait_for_condition(
-      [this]() { return sync_connect_done_; }, timeout_ms);
-
-  if (!completed) {
-    if (via_socks5) socks5_proxy_connect_failed_ = true;
-    socks5_pending_ = false;
-    set_status(TCP_CLIENT_ERROR);
-    last_error_code_ = UV_ETIMEDOUT;
-    return UV_ETIMEDOUT;
-  }
-
-  if (sync_connect_result_ != 0) {
-    if (via_socks5) socks5_proxy_connect_failed_ = true;
-    socks5_pending_ = false;
-    return sync_connect_result_;
-  }
+  if (via_socks5) socks5_proxy_connect_failed_ = false;
 
   if (via_socks5) {
     // 协商要在循环里推进：arm_async_read 装的那个回调会在 nread>0 时先看
@@ -1136,6 +1339,10 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
         if (status == 0 && socks5_pending_) {
           // 代理连上了，但这条 TCP 还只是"代理控制连接"：先协商，协商成功
           // 才算真正连上目标。握手要靠读事件推进（与 TLS 同一个理由）。
+          //
+          // 阶段标志到此为止：多地址重试里前一个代理地址失败过，这一笔成功
+          // 之后就不再是"连代理失败"了 —— 后面的认证 / REP 失败会重新判。
+          socks5_proxy_connect_failed_ = false;
           socks5_pending_ = false;
           if (!read_started_) arm_async_read();
           const int hrc = socks5_begin_handshake(life);
@@ -1614,32 +1821,41 @@ void uvcpp_tcp_client::continue_after_connect(
   }
 }
 
-int uvcpp_tcp_client::resolve_host_sync(const char* host, int port,
-                                        sockaddr_storage& out,
-                                        int timeout_ms) {
+int uvcpp_tcp_client::resolve_host_sync_all(const char* host, int port,
+                                            std::vector<sockaddr_storage>& out,
+                                            int timeout_ms) {
+  out.clear();
+
   // 数字 IPv4 快速路径（无需 DNS）
   struct sockaddr_in addr4;
   if (uv_ip4_addr(host, port, &addr4) == 0) {
-    std::memcpy(&out, &addr4, sizeof(addr4));
+    sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    std::memcpy(&ss, &addr4, sizeof(addr4));
+    out.push_back(ss);
     return 0;
   }
 
   // 数字 IPv6 快速路径（与 connect() 同一条规则）
   struct sockaddr_in6 addr6;
   if (uv_ip6_addr(host, port, &addr6) == 0) {
-    std::memcpy(&out, &addr6, sizeof(addr6));
+    sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    std::memcpy(&ss, &addr6, sizeof(addr6));
+    out.push_back(ss);
     return 0;
   }
 
-  // 主机名：DNS 解析（阻塞等待完成）
+  // 主机名：DNS 解析（阻塞等待完成）。**AF_UNSPEC**：A 与 AAAA 都收。
   uvcpp_getaddrinfo resolver;
   char service[16];
   snprintf(service, sizeof(service), "%d", port);
 
   struct addrinfo hints;
   std::memset(&hints, 0, sizeof(hints));
-  hints.ai_family   = AF_INET;
+  hints.ai_family   = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
 
   bool done = false;
   int  status = 0;
@@ -1663,8 +1879,30 @@ int uvcpp_tcp_client::resolve_host_sync(const char* host, int port,
     return (status != 0) ? status : UV_EAI_NONAME;
   }
 
-  std::memcpy(&out, res->ai_addr, res->ai_addrlen);
+  for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+    if (p->ai_addr == nullptr || p->ai_addrlen == 0) continue;
+    if (p->ai_family != AF_INET && p->ai_family != AF_INET6) continue;
+    sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    std::memcpy(&ss, p->ai_addr,
+                static_cast<size_t>(p->ai_addrlen) > sizeof(ss)
+                    ? sizeof(ss)
+                    : static_cast<size_t>(p->ai_addrlen));
+    out.push_back(ss);
+  }
   resolver.freeaddrinfo(res);
+
+  if (out.empty()) return UV_EAI_NONAME;
+  return 0;
+}
+
+int uvcpp_tcp_client::resolve_host_sync(const char* host, int port,
+                                        sockaddr_storage& out,
+                                        int timeout_ms) {
+  std::vector<sockaddr_storage> all;
+  const int rc = resolve_host_sync_all(host, port, all, timeout_ms);
+  if (rc != 0) return rc;
+  out = all.front();
   return 0;
 }
 
@@ -3177,6 +3415,7 @@ void uvcpp_tcp_client::clear_on_close() {
 int uvcpp_tcp_client::enable_tls(uvcpp_ssl_context* ctx) {
   if (tls_ssl_ != nullptr) return UV_EALREADY;
   if (ctx == nullptr || !ctx->is_ready()) return UV_EINVAL;
+  tls_ctx_ = ctx;
 
   // fd=0：**不装 socket BIO**。装了就回到 SSL_set_fd 那条死路上了。
   tls_ssl_ = new uvcpp_ssl(ctx, 0);
@@ -3573,6 +3812,22 @@ void uvcpp_tcp_client::tls_complete_connect() {
   connect_arg_ = nullptr;
   has_async_connect_cb_ = false;
   if (fn != nullptr) fn(0, arg);
+}
+
+std::vector<std::vector<unsigned char>>
+uvcpp_tcp_client::peer_cert_chain_der() const {
+  if (tls_ssl_ == nullptr) return std::vector<std::vector<unsigned char>>();
+  return tls_ssl_->peer_cert_chain_der();
+}
+
+long uvcpp_tcp_client::peer_verify_result() const {
+  if (tls_ssl_ == nullptr) return -1;
+  return tls_ssl_->peer_verify_result();
+}
+
+std::string uvcpp_tcp_client::peer_verify_error() const {
+  if (tls_ssl_ == nullptr) return "no TLS session";
+  return tls_ssl_->peer_verify_error();
 }
 
 void uvcpp_tcp_client::tls_notify_ready(int status) {

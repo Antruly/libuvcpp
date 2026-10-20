@@ -170,10 +170,11 @@ class UVCPP_API uvcpp_http_client {
    * @brief Send an HTTP request and wait for the full response (sync).
    * @param req        Request to send.
    * @param resp       [out] Populated response.
-   * @param timeout_ms Timeout in milliseconds. **两个平台都生效** —— 这一支的超时
-   *                   靠 `SO_RCVTIMEO`/`SO_SNDTIMEO`（Windows 毫秒 DWORD、POSIX
-   *                   `struct timeval`，见 `send_wait_plain` 的说明）。它是
-   *                   **每次 I/O** 的超时，不是整次请求的总 deadline。
+   * @param timeout_ms **整次请求的总 deadline**（毫秒，两个平台都生效）：
+   *                   进入时算一次单调时钟 deadline，每次读写之前按剩余时间
+   *                   收紧 `SO_RCVTIMEO`/`SO_SNDTIMEO`，到点返回 `UV_ETIMEDOUT`。
+   *                   对端每隔略小于 `timeout_ms` 发一个字节也拖不过这个上限
+   *                   （1.8.2 之前它是每次 I/O 的超时）。
    * @return 0 on success, libuv error code on failure.
    */
   int send_wait(const uvcpp_http_request& req,
@@ -187,11 +188,13 @@ class UVCPP_API uvcpp_http_client {
    * 析构需做 close-dance，存在内存安全隐患；本方法直接对已连接 socket 做同步
    * 收发，绕开 libuv 异步读路径，析构期句柄处于 inactive，安全。
    *
-   * @note `timeout_ms` 在 **Windows 与 POSIX 上都生效**（`set_socket_timeout()`：
-   *       Windows 用毫秒 `DWORD`，POSIX 用 `struct timeval`）。它是**每次 I/O**
-   *       的超时，不是整次请求的总 deadline —— 对端每隔略小于 `timeout_ms` 发一个
-   *       字节仍能把请求拖长。读超时/半条报文返回 `UV_ETIMEDOUT` / `UV_EOF`，
-   *       失败时 `resp.status_code` 是 `HTTP_STATUS_NONE`（不再是默认的 200）。
+   * @note `timeout_ms` 是**整次请求的总 deadline**（Windows 与 POSIX 都生效）：
+   *       进入时算一次单调时钟 deadline，每次收发之前用剩余时间收紧
+   *       `SO_RCVTIMEO`/`SO_SNDTIMEO`（`set_socket_timeout()`）。单次 I/O 的
+   *       socket 超时仍然是兜底，但总时间由 deadline 说了算 —— 对端每隔略小于
+   *       `timeout_ms` 发一个字节也拖不长（1.8.2 之前它是每次 I/O 的超时）。
+   *       读超时/半条报文返回 `UV_ETIMEDOUT` / `UV_EOF`，失败时
+   *       `resp.status_code` 是 `HTTP_STATUS_NONE`（不再是默认的 200）。
    */
   int send_wait_plain(const uvcpp_http_request& req,
                       uvcpp_http_response& resp,
@@ -255,10 +258,18 @@ class UVCPP_API uvcpp_http_client {
    *         `send_wait()` / `send_wait_plain()` / `send_wait_ssl()`。
    *         （1.6.31 之前只有异步那条兑现，阻塞那两条静默地什么都不做。）
    *
-   *         注意 **门槛**：正文（压缩后）小于 1024 字节时不解压，
-   *         `content-encoding` 也照样留着 —— 且客户端没有设这个门槛的接口。 */
+   *         能解的编码：`gzip` / `deflate`；编了 brotli 的构建另有 `br`
+   *         （此时 `Accept-Encoding` 也自动带上它）。
+   *
+   *         注意 **门槛**：正文（压缩后）小于 `compression_min_body_size()`
+   *         字节时不解压，`content-encoding` 也照样留着。默认 1024；
+   *         用 `set_compression_min_body_size(0)` 关掉门槛。 */
   void set_compression_enabled(bool enable);
   bool is_compression_enabled() const;
+
+  /** @brief 解压门槛（压缩后正文的字节数）。0 = 总是解压。默认 1024。 */
+  void set_compression_min_body_size(size_t bytes);
+  size_t compression_min_body_size() const;
 #endif
 
   // -------------------------------------------------------------------
@@ -286,6 +297,21 @@ class UVCPP_API uvcpp_http_client {
   int send_wait_ssl(const uvcpp_http_request& req,
                     uvcpp_http_response& resp,
                     int timeout_ms);
+
+  /**
+   * @brief 对端证书链（DER，叶子在前）。
+   *
+   * h1 与 h2 都可读（两者共用 `uvcpp_tcp_client` 的 TLS 会话）；同步 `*_wait`
+   * 路径读的是本对象自己的 SSL。h3 走 QUIC，这里返回空 —— 明确不支持，
+   * 而不是静默给一份空链。
+   */
+  std::vector<std::vector<unsigned char>> peer_cert_chain_der() const;
+
+  /** @brief `SSL_get_verify_result()` 的 `X509_V_ERR_*` 数值；无 TLS 时 -1。 */
+  long peer_verify_result() const;
+
+  /** @brief 上一条结果的可读文本；无 TLS 时返回说明串。 */
+  std::string peer_verify_error() const;
 #endif
 
 #if UVCPP_NGHTTP2_ENABLE
@@ -491,7 +517,7 @@ class UVCPP_API uvcpp_http_client {
   uvcpp_ssl_context* ssl_ctx_ = nullptr;
   uvcpp_ssl*         ssl_    = nullptr;
   bool ssl_enabled_ = false;
-  int do_ssl_handshake(int fd);
+  int do_ssl_handshake(int fd, int timeout_ms);
   int ssl_read(char* buf, size_t len);
   int ssl_write(const char* data, size_t len);
 #endif

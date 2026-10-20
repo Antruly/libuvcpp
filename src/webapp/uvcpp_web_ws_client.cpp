@@ -211,6 +211,11 @@ const std::string& uvcpp_web_ws_client::socks5_last_error() const {
   return inner_->socks5_last_error();
 }
 
+bool uvcpp_web_ws_client::socks5_proxy_connect_failed() const {
+  if (inner_ == nullptr) return false;
+  return inner_->socks5_proxy_connect_failed();
+}
+
 // =========================================================================
 // 连接 / 重连
 // =========================================================================

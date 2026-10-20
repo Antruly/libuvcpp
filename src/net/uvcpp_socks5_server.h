@@ -36,6 +36,7 @@
 #include <uvcpp/uvcpp_export.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -135,6 +136,55 @@ struct uvcpp_socks5_session_info {
 };
 
 /**
+ * @brief 一条会话结束时的累计统计。
+ *
+ * 字节数只统计**转发载荷**（CONNECT/BIND 两个方向分开）；UDP 关联把两个
+ * 方向的数据报合在一起统计。握手阶段的协议字节不计入。
+ */
+struct uvcpp_socks5_session_stats {
+  uvcpp_socks5_session_stats()
+      : bytes_client_to_target(0),
+        bytes_target_to_client(0),
+        udp_datagrams(0),
+        udp_bytes(0),
+        started_ms(0),
+        ended_ms(0),
+        duration_ms(0),
+        end_status(0) {}
+
+  /** @brief 客户端 → 目标（CONNECT / BIND）的字节数。 */
+  std::uint64_t bytes_client_to_target;
+  /** @brief 目标 → 客户端（CONNECT / BIND）的字节数。 */
+  std::uint64_t bytes_target_to_client;
+  /** @brief UDP 关联处理过的数据报数（两个方向合计）。 */
+  std::uint64_t udp_datagrams;
+  /** @brief UDP 关联处理过的载荷字节数（两个方向合计）。 */
+  std::uint64_t udp_bytes;
+  /** @brief 会话开始时间（Unix epoch 毫秒）。 */
+  std::int64_t started_ms;
+  /** @brief 会话结束时间（Unix epoch 毫秒）。 */
+  std::int64_t ended_ms;
+  /** @brief 持续时长（毫秒）。 */
+  std::int64_t duration_ms;
+  /**
+   * @brief 结束原因：0 = 正常关闭；非 0 是 libuv 错误码（握手被拒、读/写错误、
+   *        空闲超时等）。
+   */
+  int end_status;
+};
+
+/**
+ * @brief 一条会话结束时的通知（恰好一次）。
+ *
+ * 触发时机：对端关闭、读/写错误、服务端 `close()`、握手失败都覆盖。
+ * 在**会话自己那条循环**上调用；不持有服务端任何锁（服务端没有锁）。
+ * 回调里可以安全地调用 `uvcpp_socks5_server` 的访问器。
+ */
+using uvcpp_socks5_session_end_cb =
+    std::function<void(const uvcpp_socks5_session_info&,
+                       const uvcpp_socks5_session_stats&)>;
+
+/**
  * @brief SOCKS5 服务端。
  *
  * 生命周期：本对象**不拥有**会话对象 —— 每条连接的状态机由框架在连接关闭时
@@ -182,6 +232,14 @@ class UVCPP_API uvcpp_socks5_server {
       std::function<void(const uvcpp_socks5_session_info&)> on_session = nullptr,
       int backlog = 128);
 
+  /**
+   * @brief 会话结束回调（可选；必须在 `listen()` 之前设置）。
+   *
+   * 每条会话**恰好一次**：对端关闭、读/写错误、服务端 `close()`、握手失败
+   * 都覆盖。在会话自己的循环上调用，不持锁；回调里可以读服务端状态。
+   */
+  void set_session_end_callback(uvcpp_socks5_session_end_cb cb);
+
   /** @brief 实际监听端口（`bind()` 用 0 之后有效）；未绑定时 -1。 */
   int port() const;
 
@@ -207,6 +265,7 @@ class UVCPP_API uvcpp_socks5_server {
   std::atomic<std::size_t> conn_count_;
   uvcpp_socks5_server_options opts_;
   std::function<void(const uvcpp_socks5_session_info&)> on_session_;
+  uvcpp_socks5_session_end_cb on_session_end_;
   std::string last_error_;
 };
 

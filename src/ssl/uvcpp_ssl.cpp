@@ -14,6 +14,7 @@
 #include <openssl/err.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>  // X509_VERIFY_PARAM_set1_host / _ip_asc
+#include <openssl/x509v3.h>   // GENERAL_NAMES / SAN 解析
 #include <openssl/bio.h>   // BIO_s_mem / BIO_ctrl（内存 BIO 模式）
 #include <cstring>
 
@@ -159,6 +160,40 @@ tls_cert_info uvcpp_ssl::get_peer_cert_info() const {
   if (X509_digest(cert, EVP_sha256(), md, &mdlen) == 1) {
     for (unsigned int i=0;i<mdlen;i++) { char h[3]; snprintf(h,sizeof(h),"%02x",md[i]); info.fingerprint+=h; }
   }
+  // SAN（可选）：调用方不必自己再解析 DER。
+  GENERAL_NAMES* names = static_cast<GENERAL_NAMES*>(
+      X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+  if (names != nullptr) {
+    for (int i = 0; i < sk_GENERAL_NAME_num(names); ++i) {
+      const GENERAL_NAME* gn = sk_GENERAL_NAME_value(names, i);
+      if (gn == nullptr) continue;
+      if (gn->type == GEN_DNS) {
+        const ASN1_STRING* dns = gn->d.dNSName;
+        if (dns != nullptr) {
+          info.san_dns.emplace_back(
+              reinterpret_cast<const char*>(ASN1_STRING_get0_data(dns)),
+              static_cast<size_t>(ASN1_STRING_length(dns)));
+        }
+      } else if (gn->type == GEN_IPADD) {
+        const ASN1_OCTET_STRING* ip = gn->d.iPAddress;
+        if (ip == nullptr) continue;
+        const unsigned char* b = ASN1_STRING_get0_data(ip);
+        const int n = ASN1_STRING_length(ip);
+        char buf[64] = {0};
+        if (n == 4) {
+          snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        } else if (n == 16) {
+          snprintf(buf, sizeof(buf),
+                   "%x%x:%x%x:%x%x:%x%x:%x%x:%x%x:%x%x:%x%x",
+                   b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                   b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+        }
+        if (buf[0] != '\0') info.san_ip.emplace_back(buf);
+      }
+    }
+    GENERAL_NAMES_free(names);
+  }
+
   X509_free(cert);
   return info;
 }
@@ -170,6 +205,55 @@ bool uvcpp_ssl::verify_peer() const {
 }
 
 bool uvcpp_ssl::is_handshake_done() const { return handshake_done_; }
+
+std::vector<std::vector<unsigned char>> uvcpp_ssl::peer_cert_chain_der() const {
+  std::vector<std::vector<unsigned char>> out;
+  if (!ssl_) return out;
+
+  auto push_cert = [&out](X509* x) {
+    if (x == nullptr) return;
+    unsigned char* der = nullptr;
+    const int n = i2d_X509(x, &der);
+    if (n > 0 && der != nullptr) {
+      // 去重：客户端侧 `SSL_get_peer_cert_chain()` 里**已经含叶证书**，
+      // 与上面单独取的叶会重复一次。
+      std::vector<unsigned char> bytes(der, der + n);
+      bool dup = false;
+      for (const auto& e : out) {
+        if (e.size() == bytes.size() &&
+            std::memcmp(e.data(), bytes.data(), e.size()) == 0) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) out.push_back(std::move(bytes));
+    }
+    if (der != nullptr) OPENSSL_free(der);
+  };
+
+  // 叶证书：服务端侧 `SSL_get_peer_cert_chain()` 不包含它，单独取一次。
+  X509* leaf = SSL_get_peer_certificate(ssl_);
+  push_cert(leaf);
+  if (leaf != nullptr) X509_free(leaf);
+
+  STACK_OF(X509)* chain = SSL_get_peer_cert_chain(ssl_);
+  if (chain != nullptr) {
+    for (int i = 0; i < sk_X509_num(chain); ++i) {
+      push_cert(sk_X509_value(chain, i));
+    }
+  }
+  return out;
+}
+
+long uvcpp_ssl::peer_verify_result() const {
+  if (!ssl_) return -1;
+  return static_cast<long>(SSL_get_verify_result(ssl_));
+}
+
+std::string uvcpp_ssl::peer_verify_error() const {
+  if (!ssl_) return "no TLS session";
+  return X509_verify_cert_error_string(SSL_get_verify_result(ssl_));
+}
 std::string uvcpp_ssl::get_last_error() const { return last_error_; }
 
 // =========================================================================

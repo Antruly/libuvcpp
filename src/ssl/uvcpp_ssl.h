@@ -187,6 +187,24 @@ class UVCPP_API uvcpp_ssl {
   /** @brief Verify peer certificate (returns true if valid). */
   bool verify_peer() const;
 
+  /**
+   * @brief 对端证书链（DER，叶子在前）。
+   *
+   * 客户端返回服务端发来的链（含叶证书）；服务端返回客户端发来的链（含叶）。
+   * 握手完成前、或没有 SSL 时返回空。
+   */
+  std::vector<std::vector<unsigned char>> peer_cert_chain_der() const;
+
+  /**
+   * @brief `SSL_get_verify_result()`：`X509_V_ERR_*` 数值。
+   *
+   * 0 = `X509_V_OK`。没有 SSL / 握手未完成时返回 -1。
+   */
+  long peer_verify_result() const;
+
+  /** @brief 上一条结果的可读文本（`X509_verify_cert_error_string`）。 */
+  std::string peer_verify_error() const;
+
   // -------------------------------------------------------------------
   // Status
   // -------------------------------------------------------------------

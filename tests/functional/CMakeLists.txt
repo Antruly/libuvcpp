@@ -116,6 +116,12 @@ if(NOT UVCPP_ENABLE_YYJSON)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*yyjson[^/]*\.cpp$")
 endif()
 
+# 解压（br/gzip）用例需要 zlib 与 brotli **两者**：缺任一就摘掉 —— 与上面
+# "没测表现为用例不存在"同一条规矩（用例自己的 #else 分支只是打印 SKIP）。
+if(NOT UVCPP_ENABLE_ZLIB OR NOT UVCPP_ENABLE_BROTLI)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*http_client_br[^/]*\.cpp$")
+endif()
+
 # Exclude database tests when the db module is not enabled.
 # 命名约定：**文件名里含 `db` 的用例就需要 db 模块**（`db_sqlite_func.cpp` 等）。
 # `[^/]*` 前缀是必须的 —— `file(GLOB)` 给的是全路径，写 `^db_` 永远匹配不上

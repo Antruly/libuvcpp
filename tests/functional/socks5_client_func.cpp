@@ -25,6 +25,7 @@
 #include <deque>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -62,14 +63,32 @@ struct SocksServer {
   std::atomic<bool> stop;
   std::atomic<int>  sessions;
   std::atomic<int>  last_status;
+  std::atomic<int>  end_count;
+  std::mutex        mu;
+  uvcpp::uvcpp_socks5_session_stats last_stats;
+  uvcpp::uvcpp_socks5_session_info  last_info;
   int               port;
 
-  SocksServer() : ready(false), stop(false), sessions(0), last_status(0), port(0) {}
+  SocksServer()
+      : ready(false),
+        stop(false),
+        sessions(0),
+        last_status(0),
+        end_count(0),
+        port(0) {}
 
   void start() {
     thread = std::thread([this]() {
       uvcpp::uvcpp_socks5_server srv;
       srv.set_options(opts);
+      srv.set_session_end_callback(
+          [this](const uvcpp::uvcpp_socks5_session_info& info,
+                 const uvcpp::uvcpp_socks5_session_stats& stats) {
+            std::lock_guard<std::mutex> lk(mu);
+            last_info = info;
+            last_stats = stats;
+            end_count.fetch_add(1);
+          });
       srv.bind("127.0.0.1", 0);
       port = srv.port();
       srv.listen([this](const uvcpp::uvcpp_socks5_session_info& info) {
@@ -91,6 +110,11 @@ struct SocksServer {
     while (!ready.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+  }
+
+  void stop_server() {
+    stop.store(true);
+    if (thread.joinable()) thread.join();
   }
 
   ~SocksServer() {
@@ -508,6 +532,150 @@ bool test_udp_associate() {
 }
 
 // -------------------------------------------------------------------------
+// 会话结束统计（#46）
+// -------------------------------------------------------------------------
+bool wait_for_count(std::atomic<int>& counter, int want, int timeout_ms) {
+  const std::chrono::steady_clock::time_point start =
+      std::chrono::steady_clock::now();
+  while (counter.load() < want) {
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count() > timeout_ms) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return true;
+}
+
+bool test_connect_session_stats() {
+  std::cout << "[socks5] connect_stats start\n";
+  TcpEchoServer echo;
+  echo.start();
+  SocksServer proxy;
+  proxy.start();
+
+  uvcpp::uvcpp_loop loop;
+  uvcpp::uvcpp_socks5_client client(&loop);
+  int rc = client.connect_wait("127.0.0.1", proxy.port, 5000);
+  if (rc == 0) rc = client.connect_target_wait("127.0.0.1", echo.port, 5000);
+  if (rc != 0) {
+    std::cout << "[socks5] connect_stats: connect failed: " << uv_strerror(rc)
+              << "\n";
+    return false;
+  }
+  std::string got;
+  client.read_start([&got](uvcpp::uvcpp_buf* b) {
+    if (b != nullptr && b->size() > 0) got.append(b->get_const_data(), b->size());
+  });
+  const char* msg = "stats-payload-0123456789";  // 24 bytes
+  const std::size_t len = std::strlen(msg);
+  rc = client.write_wait(msg, len, 5000);
+  if (rc != 0 || !pump_until(&loop, [&got, len]() { return got.size() >= len; }, 5000)) {
+    std::cout << "[socks5] connect_stats: echo failed\n";
+    return false;
+  }
+  client.close();
+  pump_for(&loop, 20);
+
+  if (!wait_for_count(proxy.end_count, 1, 5000)) {
+    std::cout << "[socks5] connect_stats: end callback not fired\n";
+    return false;
+  }
+  std::lock_guard<std::mutex> lk(proxy.mu);
+  const auto& st = proxy.last_stats;
+  if (st.bytes_client_to_target != len || st.bytes_target_to_client != len) {
+    std::cout << "[socks5] connect_stats: byte counters wrong ("
+              << st.bytes_client_to_target << "/" << st.bytes_target_to_client
+              << ")\n";
+    return false;
+  }
+  if (st.udp_datagrams != 0 || st.duration_ms < 0 ||
+      st.ended_ms < st.started_ms) {
+    std::cout << "[socks5] connect_stats: stats inconsistent\n";
+    return false;
+  }
+  std::cout << "[socks5] connect_stats ok\n";
+  return true;
+}
+
+bool test_udp_session_stats() {
+  std::cout << "[socks5] udp_stats start\n";
+  UdpEchoServer echo;
+  echo.start();
+  SocksServer proxy;
+  proxy.start();
+
+  uvcpp::uvcpp_loop loop;
+  uvcpp::uvcpp_socks5_client client(&loop);
+  int rc = client.connect_wait("127.0.0.1", proxy.port, 5000);
+  uvcpp::uvcpp_socks5_endpoint relay;
+  if (rc == 0) rc = client.udp_associate_wait(relay, 5000);
+  if (rc != 0 || client.udp() == nullptr) {
+    std::cout << "[socks5] udp_stats: associate failed\n";
+    return false;
+  }
+  std::string got;
+  client.udp()->recv_start(
+      [&got](int, const uvcpp::uvcpp_socks5_endpoint&, const void* data,
+             std::size_t len) {
+        if (data != nullptr && len > 0) {
+          got.append(static_cast<const char*>(data), len);
+        }
+      });
+  const char* msg = "udp-stats";  // 9 bytes
+  rc = client.udp()->send_to("127.0.0.1", echo.port, msg, std::strlen(msg));
+  if (rc != 0 || !pump_until(&loop, [&got, msg]() { return got == msg; }, 5000)) {
+    std::cout << "[socks5] udp_stats: echo failed\n";
+    return false;
+  }
+  client.close();
+  pump_for(&loop, 20);
+
+  if (!wait_for_count(proxy.end_count, 1, 5000)) {
+    std::cout << "[socks5] udp_stats: end callback not fired\n";
+    return false;
+  }
+  std::lock_guard<std::mutex> lk(proxy.mu);
+  const auto& st = proxy.last_stats;
+  // 客户端 → 目标 1 个、目标 → 客户端 1 个。
+  if (st.udp_datagrams != 2 || st.udp_bytes != 2 * std::strlen(msg)) {
+    std::cout << "[socks5] udp_stats: udp counters wrong (" << st.udp_datagrams
+              << ", " << st.udp_bytes << ")\n";
+    return false;
+  }
+  std::cout << "[socks5] udp_stats ok\n";
+  return true;
+}
+
+bool test_server_stop_ends_sessions() {
+  std::cout << "[socks5] stop_stats start\n";
+  TcpEchoServer echo;
+  echo.start();
+  SocksServer proxy;
+  proxy.start();
+
+  uvcpp::uvcpp_loop loop;
+  uvcpp::uvcpp_socks5_client client(&loop);
+  int rc = client.connect_wait("127.0.0.1", proxy.port, 5000);
+  if (rc == 0) rc = client.connect_target_wait("127.0.0.1", echo.port, 5000);
+  if (rc != 0) {
+    std::cout << "[socks5] stop_stats: connect failed\n";
+    return false;
+  }
+  // 会话仍然活着；停服务端后必须收到结束回调。
+  proxy.stop_server();
+  if (!wait_for_count(proxy.end_count, 1, 5000)) {
+    std::cout << "[socks5] stop_stats: end callback not fired on server stop\n";
+    return false;
+  }
+  client.close();
+  pump_for(&loop, 20);
+  std::cout << "[socks5] stop_stats ok\n";
+  return true;
+}
+
+// -------------------------------------------------------------------------
 // uvcpp_tcp_client 的 SOCKS5 失败阶段
 // -------------------------------------------------------------------------
 int closed_port() {
@@ -626,6 +794,9 @@ int main() {
   ok = test_bind() && ok;
   ok = test_udp_associate() && ok;
   ok = test_proxy_failure_stage() && ok;
+  ok = test_connect_session_stats() && ok;
+  ok = test_udp_session_stats() && ok;
+  ok = test_server_stop_ends_sessions() && ok;
 
   if (!ok) {
     std::cout << "[socks5] FAILED\n";

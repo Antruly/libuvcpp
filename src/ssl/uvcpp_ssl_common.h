@@ -83,6 +83,8 @@ struct tls_cert_info {
   std::string not_before;    // Validity start
   std::string not_after;     // Validity end
   std::string fingerprint;   // SHA-256 fingerprint (hex)
+  std::vector<std::string> san_dns;  // Subject Alternative Name: DNS 项
+  std::vector<std::string> san_ip;   // Subject Alternative Name: IP 项（已格式化）
 };
 
 // =========================================================================

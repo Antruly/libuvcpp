@@ -815,7 +815,7 @@ n 个循环之后变成跨核缓存行打架**：
   sink **自己**那把锁 —— 锁内做 `std::string` 拼接与 `fwrite`。多循环下这是唯一一处
   **每条请求都可能**撞上的进程级锁。
 - 三条 atomic：请求 id（`src/webapp/uvcpp_web_middleware.cpp:63-65`，每请求）、
-  reclaim / try_write 计数器（`src/net/uvcpp_tcp_client.cpp:236-238`、`src/net/uvcpp_tcp_client.cpp:252-255`）、
+  reclaim / try_write 计数器（`src/net/uvcpp_tcp_client.cpp:237-239`、`src/net/uvcpp_tcp_client.cpp:253-256`）、
   `share_discard_count_`（`src/uvcpp/uvcpp_buf.cpp:227`）。注意后两条的形状会骗人：
   读取口 `reclaim_stats()` / `try_write_stats()` 的签名像实例指标，实际是**全进程聚合**。
 

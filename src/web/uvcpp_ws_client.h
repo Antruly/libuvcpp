@@ -89,6 +89,14 @@ class UVCPP_API uvcpp_ws_client {
   bool socks5_enabled() const;
   /** @brief 上一次 SOCKS5 失败的人类可读原因。 */
   const std::string& socks5_last_error() const;
+  /**
+   * @brief 最近一次 SOCKS5 失败是否发生在"连代理"阶段。
+   *
+   * 语义与 `uvcpp_tcp_client` / `uvcpp_http_client` 的同名方法一致：为 true
+   * 表示代理本身连不上（含认证协商前的连接失败）；为 false 表示代理已应答，
+   * 失败来自认证或目标（REP 码）。只读，不改变任何状态。
+   */
+  bool socks5_proxy_connect_failed() const;
 
   // -------------------------------------------------------------------
   // 会话 / 收发 / 关闭 —— 都是**转发给当前会话**（0 或 1 个）

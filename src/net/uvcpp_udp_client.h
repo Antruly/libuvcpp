@@ -124,7 +124,12 @@ class UVCPP_API uvcpp_udp_client {
   // Bind / Connect
   // -----------------------------------------------------------------
 
-  /** @brief Bind to local address (auto-detect IPv4/IPv6). */
+  /**
+   * @brief Bind to local address (auto-detect IPv4/IPv6).
+   *
+   * `ip` 只接受**数字地址**（`0.0.0.0`、`::` 等）；域名返回 `UV_EINVAL`。
+   * 与 `send` / `connect` 不同，本地绑定不引入 DNS 依赖。
+   */
   int bind(const char* ip, int port);
 
   /** @brief Bind to IPv4 address. */
@@ -139,6 +144,9 @@ class UVCPP_API uvcpp_udp_client {
    * After connecting, send() can be called without specifying an
    * address.  This does NOT establish a real connection — it just
    * sets the default destination for packets.
+   *
+   * `ip` 可以是数字地址，也可以是**主机名**：域名走 `AF_UNSPEC` 解析
+   * （A + AAAA），取第一个可用结果 —— 这条是同步接口，DNS 也同步等待。
    */
   int connect(const char* ip, int port);
 
@@ -146,6 +154,13 @@ class UVCPP_API uvcpp_udp_client {
   // Send (to specific address)
   // -----------------------------------------------------------------
 
+  /**
+   * @brief 发到 `host:port`。`host` 可以是数字地址，也可以是主机名。
+   *
+   * 域名用 `AF_UNSPEC` 解析（A + AAAA），取第一个可用结果。异步重载在
+   * **事件循环上**解析、绝不阻塞调用线程；`send_wait` 同步等待解析。
+   * DNS 失败返回可区分的 `UV_EAI_*`。
+   */
   int send(const char* ip, int port, const char* data, size_t len,
            std::function<void(int)> cb = nullptr);
   int send_wait(const char* ip, int port, const char* data, size_t len,
@@ -215,6 +230,24 @@ class UVCPP_API uvcpp_udp_client {
   void stop();
 
  private:
+  /**
+   * @brief 把 host 解析成一个发送地址（阻塞；数字字面量直接成功）。
+   *
+   * 主机名用 AF_UNSPEC：A 与 AAAA 都接受，取第一个可用结果。数字字面量
+   * 不触网。失败返回可区分的错误（DNS 是 `UV_EAI_*`）。
+   */
+  int resolve_send_addr(const char* host, int port, sockaddr_storage& out,
+                        int timeout_ms);
+
+  /**
+   * @brief 异步发送的公共入口：数字地址直接发，域名先异步解析再发。
+   *
+   * `cb` 是请求完成回调（由调用方拼好）；DNS 失败时它以错误码落地，
+   * 并负责释放 `w`（不经过 libuv 的请求完成路径）。
+   */
+  int start_send_to(const char* host, int port, uv_buf_t* raw,
+                    uvcpp_udp_send* w,
+                    std::function<void(uvcpp_udp_send*, int)> cb);
   void set_status(int flags);
   void clear_status(int flags);
 

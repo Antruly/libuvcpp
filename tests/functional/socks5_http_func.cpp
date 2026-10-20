@@ -25,6 +25,7 @@
 #include <net/uvcpp_tcp_client.h>
 #include <net/uvcpp_tcp_server.h>
 #include <web/uvcpp_http_client.h>
+#include <web/uvcpp_ws_client.h>
 
 #if UVCPP_OPENSSL_ENABLE
 #include <ssl/uvcpp_ssl_context.h>
@@ -62,11 +63,13 @@ struct proxy_state {
   std::atomic<bool> stop{false};
   std::atomic<int>  sessions{0};
   std::atomic<int>  last_status{0};
+  uvcpp_socks5_server_options opts;  // 默认值即"开放代理"，现有场景不受影响
   int               port = -1;
 };
 
 void run_proxy(proxy_state& st) {
   uvcpp_socks5_server srv;
+  srv.set_options(st.opts);
   srv.bind("127.0.0.1", 0);
   st.port = srv.port();
   srv.listen([&st](const uvcpp_socks5_session_info& info) {
@@ -429,6 +432,66 @@ void scenario_socks_then_tls(uvcpp_ssl_context& sctx,
 }
 #endif  // UVCPP_OPENSSL_ENABLE
 
+// =========================================================================
+// WebSocket 客户端也要能区分 SOCKS5 的失败阶段（与 tcp/http client 同义）
+// =========================================================================
+
+int closed_tcp_port() {
+  uvcpp_loop loop;
+  uvcpp_tcp tcp(&loop);
+  struct sockaddr_in bind_addr;
+  if (uv_ip4_addr("127.0.0.1", 0, &bind_addr) != 0) return 0;
+  if (tcp.bind(reinterpret_cast<const struct sockaddr*>(&bind_addr), 0) != 0) {
+    return 0;
+  }
+  struct sockaddr_in name;
+  int namelen = static_cast<int>(sizeof(name));
+  if (tcp.getsockname(reinterpret_cast<struct sockaddr*>(&name), &namelen) != 0) {
+    return 0;
+  }
+  return ntohs(name.sin_port);
+}
+
+void scenario_ws_proxy_stage() {
+  // --- 代理连不上：阶段是"连代理" ---
+  {
+    const int dead = closed_tcp_port();
+    uvcpp_ws_client ws;
+    check(ws.set_socks5_proxy("127.0.0.1", dead) == 0,
+          "ws: set_socks5_proxy 受理（代理端口关闭）");
+    uvcpp_ws_connection* conn = nullptr;
+    const int rc = ws.connect_wait("ws://127.0.0.1:9/", conn, 2000);
+    check(rc != 0, "ws: 代理不可达时 connect_wait 失败");
+    check(ws.socks5_proxy_connect_failed(),
+          "ws: 代理不可达被归类为 proxy-connect 失败");
+  }
+
+  // --- 代理已应答、认证失败：不能算"连代理" ---
+  {
+    // `proxy_thread` 在构造时就起线程，改不了 opts；这里先填好再起。
+    proxy_state st;
+    st.opts.allow_no_auth = false;
+    st.opts.allow_username_password = true;
+    st.opts.authenticator = [](const std::string& u, const std::string& p) {
+      return u == "alice" && p == "secret";
+    };
+    std::thread th(run_proxy, std::ref(st));
+    while (!st.ready.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    uvcpp_ws_client ws;
+    check(ws.set_socks5_proxy("127.0.0.1", st.port, "alice", "wrong") == 0,
+          "ws: set_socks5_proxy 受理（错误口令）");
+    uvcpp_ws_connection* conn = nullptr;
+    const int rc = ws.connect_wait("ws://127.0.0.1:9/", conn, 3000);
+    check(rc != 0, "ws: 认证失败时 connect_wait 失败");
+    check(!ws.socks5_proxy_connect_failed(),
+          "ws: 认证失败不能算 proxy-connect 失败");
+
+    st.stop.store(true);
+    th.join();
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -436,6 +499,7 @@ int main() {
 
   scenario_plain_http();
   scenario_proxy_down();
+  scenario_ws_proxy_stage();
 
 #if UVCPP_OPENSSL_ENABLE
   {

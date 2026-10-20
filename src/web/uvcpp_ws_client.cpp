@@ -551,5 +551,10 @@ const std::string& uvcpp_ws_client::socks5_last_error() const {
   return tcp_->socks5_last_error();
 }
 
+bool uvcpp_ws_client::socks5_proxy_connect_failed() const {
+  if (tcp_ == nullptr) return false;
+  return tcp_->socks5_proxy_connect_failed();
+}
+
 }  // namespace uvcpp
 #endif
