@@ -417,6 +417,14 @@ bool uvcpp_ssl_context::is_ready() const { return status_ == TLS_CTX_READY; }
 int uvcpp_ssl_context::get_status() const { return status_; }
 std::string uvcpp_ssl_context::get_last_error() const { return last_error_; }
 
+void uvcpp_ssl_context::set_max_early_data(uint32_t n) {
+  if (ctx_ != nullptr) SSL_CTX_set_max_early_data(ctx_, n);
+}
+
+uint32_t uvcpp_ssl_context::max_early_data() const {
+  return ctx_ != nullptr ? SSL_CTX_get_max_early_data(ctx_) : 0;
+}
+
 }  // namespace uvcpp
 
 #endif  // UVCPP_OPENSSL_ENABLE

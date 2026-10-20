@@ -288,7 +288,7 @@ bool has_alpn_select() const;
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。
 
 上下文对象本身的地址被 OpenSSL 长期持有——ALPN 选择回调通过 `arg` 拿到的就是成员
-`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:209`，实现
+`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:218`，实现
 `SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_)`）。
 **所以不要移动它、不要提前析构它。**
 

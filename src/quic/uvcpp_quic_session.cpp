@@ -377,6 +377,7 @@ void quic_session::fill_callbacks(ngtcp2_callbacks* cbs, bool is_server) {
   // 路径校验结果（#53）。这一格**必须**填：不填的话 ngtcp2 仍会自己校验，
   // 但应用看不到"新路径可不可用"。
   cbs->path_validation = &quic_session::cb_path_validation;
+  cbs->tls_early_data_rejected = &quic_session::cb_early_data_rejected;
   cbs->acked_stream_data_offset = &quic_session::cb_acked_stream_data_offset;
   cbs->stream_open = &quic_session::cb_stream_open;
   // 只填 `_2` 那一格：填了它之后 ngtcp2 就不再调另一个（`stream_close`），
@@ -523,6 +524,15 @@ int quic_session::setup_tls(uvcpp_ssl_context* ssl_ctx, bool is_server,
     (void)ssl_ctx->apply_alpn_to_ssl(ssl_, alpn);
   }
 
+  if (!is_server) {
+    // TLS 1.3 的 NewSessionTicket 在握手之后才到，`SSL_get1_session()` 不保证
+    // 拿到带 early_data 的那一张；装一个每连接的回调把它抄下来。
+    SSL_CTX* raw = ssl_ctx->raw_ctx();
+    SSL_CTX_set_session_cache_mode(
+        raw, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+    SSL_CTX_sess_set_new_cb(raw, &quic_session::on_new_session);
+  }
+
   // 原生句柄那一层间接：ngtcp2 v1.25.0 的 conn 里存的是
   // `ngtcp2_crypto_ossl_ctx*`，**不是**裸 `SSL*`。先建 ctx（SSL 可以后填，
   // 所以这里先传 nullptr 再 set），随后的两个 configure 函数会在 SSL 上装好
@@ -552,6 +562,12 @@ int quic_session::setup_tls(uvcpp_ssl_context* ssl_ctx, bool is_server,
   SSL_set_app_data(ssl_, &conn_ref_);
 
   if (is_server) {
+    // 0-RTT：上下文允许 early data 时才在 SSL 上打开 QUIC 的早数据通道
+    // （上下文那一半由 `set_max_early_data()` 设）。
+    if (ssl_ctx->max_early_data() > 0) {
+      SSL_set_max_early_data(ssl_, ssl_ctx->max_early_data());
+      SSL_set_quic_tls_early_data_enabled(ssl_, 1);
+    }
     SSL_set_accept_state(ssl_);
   } else {
     SSL_set_connect_state(ssl_);
@@ -559,6 +575,21 @@ int quic_session::setup_tls(uvcpp_ssl_context* ssl_ctx, bool is_server,
     // 而 `SSL_set_tlsext_host_name` 必须在握手之前调。
     if (server_name != nullptr && server_name[0] != '\0') {
       (void)SSL_set_tlsext_host_name(ssl_, server_name);
+    }
+    // 0-RTT：把上一轮的会话票据装回来；只有票据允许 early data 时才在 SSL
+    // 上打开它（否则 ngtcp2 不会走 0-RTT 包）。
+    if (!early_session_der_.empty()) {
+      const unsigned char* p = reinterpret_cast<const unsigned char*>(
+          early_session_der_.data());
+      SSL_SESSION* sess =
+          d2i_SSL_SESSION(nullptr, &p, (long)early_session_der_.size());
+      if (sess != nullptr) {
+        (void)SSL_set_session(ssl_, sess);
+        if (SSL_SESSION_get_max_early_data(sess) > 0) {
+          SSL_set_quic_tls_early_data_enabled(ssl_, 1);
+        }
+        SSL_SESSION_free(sess);
+      }
     }
   }
 
@@ -665,6 +696,11 @@ int quic_session::init_client(uvcpp_ssl_context* ssl_ctx,
   // 这一步必须在第一次 `writev_stream` **之前**：Initial 密钥由
   // `cb_client_initial` 派生，而它要拿 TLS 原生句柄。
   ngtcp2_conn_set_tls_native_handle(conn_, ossl_ctx_);
+  if (!early_0rtt_tp_.empty()) {
+    (void)ngtcp2_conn_decode_and_set_0rtt_transport_params(
+        conn_, reinterpret_cast<const uint8_t*>(early_0rtt_tp_.data()),
+        early_0rtt_tp_.size());
+  }
 
 #if UVCPP_UDP_GSO_ENABLE
   setup_gso();
@@ -1760,6 +1796,72 @@ int quic_session::initiate_migration(const struct sockaddr* local,
   return 0;
 }
 
+void quic_session::set_early_session(std::string der) {
+  early_session_der_ = std::move(der);
+}
+
+void quic_session::set_0rtt_transport_params(std::string tp) {
+  early_0rtt_tp_ = std::move(tp);
+}
+
+std::string quic_session::export_0rtt_transport_params() const {
+  if (conn_ == nullptr) return std::string();
+  const ngtcp2_transport_params* tp =
+      ngtcp2_conn_get_remote_transport_params2(conn_);
+  if (tp == nullptr) return std::string();
+  uint8_t buf[1024];
+  const ngtcp2_ssize n =
+      ngtcp2_transport_params_encode(buf, sizeof(buf), tp);
+  if (n <= 0) return std::string();
+  return std::string(reinterpret_cast<const char*>(buf), (size_t)n);
+}
+
+int quic_session::on_new_session(SSL* ssl, SSL_SESSION* session) {
+  if (ssl == nullptr || session == nullptr) return 0;
+  auto* ref = static_cast<ngtcp2_crypto_conn_ref*>(SSL_get_app_data(ssl));
+  if (ref == nullptr || ref->user_data == nullptr) return 0;
+  quic_session* self = static_cast<quic_session*>(ref->user_data);
+  unsigned char* der = nullptr;
+  const int n = i2d_SSL_SESSION(session, &der);
+  if (n > 0 && der != nullptr) {
+    self->captured_session_der_.assign(
+        reinterpret_cast<const char*>(der), static_cast<size_t>(n));
+    OPENSSL_free(der);
+  }
+  return 1;  // 1 = 应用已接管这张 session（OpenSSL 文档要求）
+}
+
+std::string quic_session::export_session_der() const {
+  if (!captured_session_der_.empty()) return captured_session_der_;
+  if (ossl_ctx_ == nullptr) return std::string();
+  SSL* ssl = ngtcp2_crypto_ossl_ctx_get_ssl(ossl_ctx_);
+  if (ssl == nullptr) return std::string();
+  SSL_SESSION* sess = SSL_get1_session(ssl);
+  if (sess == nullptr) return std::string();
+  unsigned char* der = nullptr;
+  const int n = i2d_SSL_SESSION(sess, &der);
+  std::string out;
+  if (n > 0 && der != nullptr) {
+    out.assign(reinterpret_cast<const char*>(der), static_cast<size_t>(n));
+    OPENSSL_free(der);
+  }
+  SSL_SESSION_free(sess);
+  return out;
+}
+
+int quic_session::early_data_status() const {
+  if (ssl_ == nullptr) return 0;
+  return SSL_get_early_data_status(ssl_);
+}
+
+bool quic_session::early_data_rejected() const {
+  if (conn_ != nullptr && ngtcp2_conn_get_tls_early_data_rejected2(conn_) != 0) {
+    return true;
+  }
+  return ssl_ != nullptr &&
+         SSL_get_early_data_status(ssl_) == SSL_EARLY_DATA_REJECTED;
+}
+
 bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
                                         size_t* datavcnt, size_t* handed,
                                         uint32_t* flags) const {
@@ -1923,12 +2025,22 @@ void quic_session::fill_random(uint8_t* dest, size_t destlen) {
 // =========================================================================
 
 int quic_session::cb_handshake_completed(ngtcp2_conn* conn, void* user_data) {
-  (void)conn;
   quic_session* self = static_cast<quic_session*>(user_data);
   cb_guard guard(self->in_callback_);
 
   self->handshake_done_ = true;
   self->refresh_state();
+  // OpenSSL 的 QUIC 层会把 early data 的接受/拒绝结果放在 SSL 里，而 ngtcp2
+  // 需要显式被告知"被拒了"才会走回退（并触发 `tls_early_data_rejected`）。
+  if (self->ssl_ != nullptr &&
+      SSL_get_early_data_status(self->ssl_) == SSL_EARLY_DATA_REJECTED &&
+      !self->early_data_rejected_notified_) {
+    self->early_data_rejected_notified_ = true;
+    (void)ngtcp2_conn_tls_early_data_rejected(conn);
+    if (self->events_.on_early_data_rejected) {
+      self->events_.on_early_data_rejected();
+    }
+  }
 
   // ALPN 是**协商**出来的，不是我们设进去的那个 —— 读 SSL 里的结果，
   // 不要回头去看配置。
@@ -1994,6 +2106,18 @@ int quic_session::cb_path_validation(ngtcp2_conn*, uint32_t, const ngtcp2_path* 
     if (addr_to_text(path->remote.addr, path->remote.addrlen, ip, port)) {
       self->events_.on_path_validation(
           ip, port, res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS);
+    }
+  }
+  return 0;
+}
+
+int quic_session::cb_early_data_rejected(ngtcp2_conn*, void* user_data) {
+  quic_session* self = static_cast<quic_session*>(user_data);
+  cb_guard guard(self->in_callback_);
+  if (!self->early_data_rejected_notified_) {
+    self->early_data_rejected_notified_ = true;
+    if (self->events_.on_early_data_rejected) {
+      self->events_.on_early_data_rejected();
     }
   }
   return 0;

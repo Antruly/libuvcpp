@@ -161,6 +161,35 @@ class UVCPP_API uvcpp_quic_client {
    */
   int migrate_local_address();
 
+  // -----------------------------------------------------------------
+  // 0-RTT（#53）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 下一次 `connect()` 使用的 TLS 会话票据（DER；空 = 不开 0-RTT）。
+   *
+   * 票据来自上一次连接的 `export_session_ticket()`；服务端上下文必须
+   * `set_max_early_data()` 打开，票据才会允许 early data。
+   */
+  void set_session_ticket(std::string der);
+
+  /** @brief 导出当前 TLS 会话（DER）；没有会话时返回空串。 */
+  std::string export_session_ticket() const;
+
+  /// 已经收到并捕获了一张 NewSessionTicket 没有（0-RTT 就绪的判据）。
+  bool has_session_ticket() const;
+
+  /**
+   * @brief 下一次 `connect()` 使用的 0-RTT 传输参数（上一轮对端宣告的）。
+   *
+   * 与票据一起用：不带它的话，握手前 `open_stream()` 会以
+   * `NGTCP2_ERR_STREAM_ID_BLOCKED` 拒绝（不知道对端放开了多少条流）。
+   */
+  void set_0rtt_transport_params(std::string tp);
+
+  /** @brief 导出对端的传输参数（0-RTT 用）；握手未完成时返回空串。 */
+  std::string export_0rtt_transport_params() const;
+
   /**
    * @brief 关掉端点与它名下的连接：先发 CONNECTION_CLOSE，再收 socket 与定时器。
    *

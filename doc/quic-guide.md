@@ -192,7 +192,7 @@ agg2 里有 `assert(buflen >= path_max_udp_payloadlen)`。
 建 socket 的 —— `uv_udp_init`（AF_UNSPEC）之后 `handle->socket` 还是
 `INVALID_SOCKET`，这时 `uv_fileno` 返回 `UV_EBADF`，`setsockopt` 无从谈起。本机实测：
 bind 前 `fileno rc=-4083 sock=-1`，bind 后 `rc=0 sock=628`。所以探测点落在
-`init_client()`/`init_server()` 的末尾（`setup_gso()`，`src/quic/uvcpp_quic_session.cpp:1156`），
+`init_client()`/`init_server()` 的末尾（`setup_gso()`，`src/quic/uvcpp_quic_session.cpp:1192`），
 不是建对象的时候。
 
 **坑二：`setsockopt` 成功 ≠ 协议栈真会切。** 本机实测 512…65483 **全都返回成功**，
@@ -699,10 +699,12 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
   **客户端可以主动迁移**（`1.8.3-dev` 起，#53）：
   `uvcpp_quic_client::migrate_local_address()` 换一个本地 UDP 源端口并走 ngtcp2
   的路径校验；服务端只能被动接受（NAT rebinding）。
-- **明确不支持 0-RTT。** 客户端不缓存/复用会话票据，也不发送 early data；
-  `early_data` 状态没有公开面。服务端即使收到 0-RTT 包，也没有应用可见的入口。
-  **无状态重置（stateless reset 处理）与 multipath 同样没有。** 这三样都是协议级
-  特性，不是接线：要做得先有票据存储、replay 语义与路径集合的应用契约。
+- **0-RTT 已支持（`1.8.3-dev` 起，#53）**：服务端 `uvcpp_ssl_context::set_max_early_data()`
+  打开；客户端 `set_session_ticket()` + `set_0rtt_transport_params()` 复用上一轮的
+  票据与传输参数，握手前即可 `open_stream()` / `write_stream()`；状态走
+  `uvcpp_quic_connection::early_data_status()`（OpenSSL：0 = NOT_SENT、1 = REJECTED、
+  2 = ACCEPTED）与 `early_data_rejected()`，被拒时自动回退 1-RTT。
+  **无状态重置（stateless reset 处理）与 multipath 仍然没有**，这两样不在路线图上。
 - ~~**没有多循环支持。**~~ **已撤销（`1.6.6-dev`）**：`uvcpp_quic_server::set_reuseport()` +
   `uvcpp_http_server::set_loops(n)` 这条路通了，扇出走 UDP 自己那条形状（每端点一个
   socket + `UV_UDP_REUSEPORT`），回落与边界见 [§5.2](#52-服务端)。

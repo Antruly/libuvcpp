@@ -248,6 +248,11 @@
 
 ### QUIC 传输（net 层）
 
+- **0-RTT**（`1.8.3-dev`，#53）：服务端 `set_max_early_data()`；客户端
+  `set_session_ticket()` + `set_0rtt_transport_params()`（上一轮的票据与传输
+  参数），握手前可开流写数据；`early_data_status()` / `early_data_rejected()`
+  暴露接受/拒绝状态，被拒自动回退 1-RTT。NewSessionTicket 由
+  `SSL_CTX_sess_set_new_cb` 捕获。
 - **客户端主动迁移**（`1.8.3-dev`，#53）：`uvcpp_quic_client::migrate_local_address()`
   换一个本地 UDP 源端口并发起 ngtcp2 路径校验；服务端看到新源地址后按被动迁移
   处理。被动迁移的通知（`on_path_validation` / `on_path_changed`）上一版已有。

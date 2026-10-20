@@ -205,6 +205,9 @@ class UVCPP_API uvcpp_quic_connection {
      */
     std::function<void(uvcpp_quic_connection&, const std::string& ip, int port)>
         on_path_changed;
+
+    /// 服务端拒绝了 0-RTT（#53）；早到的应用数据按"没发过"重做。
+    std::function<void(uvcpp_quic_connection&)> on_early_data_rejected;
   };
 
   UVCPP_DEFINE_FUNC(uvcpp_quic_connection)
@@ -344,6 +347,16 @@ class UVCPP_API uvcpp_quic_connection {
    * 具体的开销由 ngtcp2 在编码时扣。
    */
   size_t max_datagram_size() const;
+
+  // -----------------------------------------------------------------
+  // 0-RTT 状态（#53）
+  // -----------------------------------------------------------------
+
+  /** @brief `SSL_get_early_data_status()`：0 = 没发、1 = 拒绝、2 = 接受。 */
+  int early_data_status() const;
+
+  /** @brief ngtcp2 是否报过 early data 被拒。 */
+  bool early_data_rejected() const;
 
   /**
    * @brief 关掉整条连接。

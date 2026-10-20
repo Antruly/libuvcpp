@@ -189,6 +189,15 @@ class UVCPP_API uvcpp_ssl_context {
   // Internal access (for uvcpp_ssl)
   // -------------------------------------------------------------------
   ssl_ctx_st* raw_ctx() const { return ctx_; }
+
+  /**
+   * @brief 服务端 0-RTT：允许的 early data 上限（#53）。0 = 关（默认）。
+   *
+   * 只对 QUIC 服务端有意义：打开之后 `uvcpp_quic_server` 才会在 TLS 上启用
+   * 0-RTT 并把带 `max_early_data` 的 ticket 发给客户端。
+   */
+  void set_max_early_data(uint32_t n);
+  uint32_t max_early_data() const;
   tls_mode get_mode() const { return mode_; }
 
  private:

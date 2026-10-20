@@ -210,6 +210,9 @@ struct quic_session_events {
 
   /// 当前发送路径的远端地址变了（NAT rebinding / 迁移完成）。
   ::std::function<void(const ::std::string& ip, int port)> on_path_changed;
+
+  /// 服务端拒绝了 0-RTT（#53）。应用应当把早到的数据当成"没发过"重做。
+  ::std::function<void()> on_early_data_rejected;
 };
 
 /**
@@ -460,6 +463,33 @@ class quic_session {
   int initiate_migration(const struct sockaddr* local,
                          const struct sockaddr* remote);
 
+  // -----------------------------------------------------------------
+  // 0-RTT（#53）
+  // -----------------------------------------------------------------
+
+  /** @brief 下一次 `init_client()` 使用的会话票据（DER；空 = 不开 0-RTT）。 */
+  void set_early_session(::std::string der);
+
+  /** @brief 导出当前 TLS 会话（DER）。没有会话时返回空串。 */
+  ::std::string export_session_der() const;
+
+  /// 已经通过 `new_session_cb` 捕获到一张票没有（0-RTT 就绪的判据）。
+  bool has_captured_session_ticket() const {
+    return !captured_session_der_.empty();
+  }
+
+  /** @brief 下一次 `init_client()` 使用的 0-RTT 传输参数（对端上一轮的）。 */
+  void set_0rtt_transport_params(::std::string tp);
+
+  /** @brief 导出对端的传输参数（0-RTT 用）。握手未完成时返回空串。 */
+  ::std::string export_0rtt_transport_params() const;
+
+  /** @brief `SSL_get_early_data_status()`：0 = NOT_SENT、1 = REJECTED、2 = ACCEPTED。 */
+  int early_data_status() const;
+
+  /** @brief ngtcp2 是否报过 early data 被拒。 */
+  bool early_data_rejected() const;
+
   /// 给本类内部的 ngtcp2 静态回调取回 `this` 用（`crypto_get_conn` 也要）。
   ngtcp2_conn* raw_conn() const { return conn_; }
 
@@ -494,6 +524,10 @@ class quic_session {
                                 const ngtcp2_path* fallback_path,
                                 ngtcp2_path_validation_result res,
                                 void* user_data);
+  static int cb_early_data_rejected(ngtcp2_conn* conn, void* user_data);
+  /// TLS 1.3 NewSessionTicket 的落点（`SSL_CTX_sess_set_new_cb`）。
+  static int on_new_session(SSL* ssl, SSL_SESSION* session);
+  friend int quic_session_new_session_cb(SSL*, SSL_SESSION*);
   static int cb_acked_stream_data_offset(ngtcp2_conn* conn, int64_t stream_id,
                                          uint64_t offset, uint64_t datalen,
                                          void* user_data,
@@ -726,6 +760,15 @@ class quic_session {
   /// 待发的 DATAGRAM（RFC 9221）。每条是**一个完整帧的载荷**，按提交顺序发。
   /// 队列总量有上限，满了 `send_datagram()` 返回 `UV_ENOBUFS` —— 不可靠数据
   /// 报没有"慢慢等"的语义，把它无限攒起来只会变成一块内存增长。
+  /// 下一次 `init_client()` 的会话票据（DER）。
+  ::std::string early_session_der_;
+  /// 下一次 `init_client()` 的 0-RTT 传输参数（对端上一轮宣告的）。
+  ::std::string early_0rtt_tp_;
+  /// 最近一张 NewSessionTicket 的 DER（`export_session_der()` 优先用它）。
+  ::std::string captured_session_der_;
+  /// `on_early_data_rejected` 只报一次。
+  bool early_data_rejected_notified_ = false;
+
   ::std::deque<::std::vector<uint8_t>> dgram_q_;
   size_t                               dgram_q_bytes_ = 0;
 

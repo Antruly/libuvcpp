@@ -156,6 +156,12 @@ void uvcpp_quic_connection::endpoint::attach(
     }
   };
 
+  ev.on_early_data_rejected = [&c]() {
+    if (c.impl_->cbs.on_early_data_rejected != nullptr) {
+      c.impl_->cbs.on_early_data_rejected(c);
+    }
+  };
+
   // 读侧的"没有更多了"由两件事各自的**到达**时刻报，不由流的关闭报：
   // FIN 在 `on_stream_data` 那一格里已经报过 `PEER_CLOSED`，reset 在下面那一格
   // 里报。`on_stream_close` 是"两个方向都收场了"的记账事件，**在读侧它没有
@@ -321,6 +327,16 @@ int uvcpp_quic_connection::send_datagram(const char* data, size_t len) {
 size_t uvcpp_quic_connection::max_datagram_size() const {
   if (impl_->session == nullptr) return 0;
   return impl_->session->max_datagram_size();
+}
+
+int uvcpp_quic_connection::early_data_status() const {
+  if (impl_->session == nullptr) return 0;
+  return impl_->session->early_data_status();
+}
+
+bool uvcpp_quic_connection::early_data_rejected() const {
+  if (impl_->session == nullptr) return false;
+  return impl_->session->early_data_rejected();
 }
 
 int uvcpp_quic_connection::close(int error_code) {

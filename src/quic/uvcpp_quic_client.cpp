@@ -101,6 +101,11 @@ struct uvcpp_quic_client::impl {
 
   uint64_t idle_timeout_ms = 30000;
 
+  /// 下一次 `connect()` 的会话票据（0-RTT，#53）。
+  std::string session_ticket;
+  /// 下一次 `connect()` 的 0-RTT 传输参数（上一轮对端的）。
+  std::string early_0rtt_tp;
+
   uvcpp_udp*   udp   = nullptr;
   uvcpp_timer* timer = nullptr;
   /// 本对象名下那条连接。**拥有它** —— 收尾时 delete。
@@ -476,6 +481,8 @@ struct uvcpp_quic_client::impl {
       pending_teardown = true;
     });
 
+    s->set_early_session(session_ticket);
+    s->set_0rtt_transport_params(early_0rtt_tp);
     rc = s->init_client(
         ssl_ctx, effective_alpn(),
         reinterpret_cast<const struct sockaddr*>(&local_sa),
@@ -611,6 +618,34 @@ int uvcpp_quic_client::connect(const char* host, int port,
 }
 
 uvcpp_quic_connection* uvcpp_quic_client::connection() { return impl_->conn; }
+
+void uvcpp_quic_client::set_session_ticket(std::string der) {
+  impl_->session_ticket = std::move(der);
+}
+
+void uvcpp_quic_client::set_0rtt_transport_params(std::string tp) {
+  impl_->early_0rtt_tp = std::move(tp);
+}
+
+std::string uvcpp_quic_client::export_0rtt_transport_params() const {
+  if (impl_->conn == nullptr) return std::string();
+  quic_detail::quic_session* s = impl_->sess();
+  if (s == nullptr) return std::string();
+  return s->export_0rtt_transport_params();
+}
+
+bool uvcpp_quic_client::has_session_ticket() const {
+  if (impl_->conn == nullptr) return false;
+  quic_detail::quic_session* s = impl_->sess();
+  return s != nullptr && s->has_captured_session_ticket();
+}
+
+std::string uvcpp_quic_client::export_session_ticket() const {
+  if (impl_->conn == nullptr) return std::string();
+  quic_detail::quic_session* s = impl_->sess();
+  if (s == nullptr) return std::string();
+  return s->export_session_der();
+}
 
 int uvcpp_quic_client::migrate_local_address() {
   if (impl_->conn == nullptr || impl_->udp == nullptr) return UV_ENOTCONN;
