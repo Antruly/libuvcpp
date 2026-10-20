@@ -73,7 +73,7 @@
 
 ### 1.3 三个接入面
 
-- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:307-307`）
+- **低层库**：`uvcpp_http_client::set_http2_enabled`（`src/web/uvcpp_http_client.h:309-309`）
   与 `uvcpp_http_server::set_http2_enabled`（`src/web/uvcpp_http_server.h:355-355`），
   **都默认关**。
 - **框架（webapp）**：零配置自动协商。ALPN 名单里 `h2` 在前

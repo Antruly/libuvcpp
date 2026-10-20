@@ -415,6 +415,15 @@ class UVCPP_API uvcpp_tcp_client {
   /** @brief 最近一次 SOCKS5 失败的人类可读原因（无失败时为空串）。 */
   const std::string& socks5_last_error() const;
 
+  /**
+   * @brief 最近一次 SOCKS5 失败是否发生在"连代理"这一步。
+   *
+   * `socks5_last_error()` 里，代理不可达与目标拒绝都可能写成
+   * `connection refused`；本方法把两者分开：true 表示 TCP 连接/DNS 失败在
+   * 代理一侧，false 表示代理已经应答（认证、请求或协议失败）。
+   */
+  bool socks5_proxy_connect_failed() const;
+
   // -----------------------------------------------------------------
   // Write
   // -----------------------------------------------------------------
@@ -962,6 +971,9 @@ class UVCPP_API uvcpp_tcp_client {
   /// 握手在**同步** `connect_wait` 的泵循环里跑：完成时只置 `DONE`，
   /// 由 `connect_wait` 接着走 TLS / 返回，不在这里触发连接回调。
   bool socks5_sync_ = false;
+
+  /// 最近一次失败在"连代理"阶段（见 `socks5_proxy_connect_failed()`）。
+  bool socks5_proxy_connect_failed_ = false;
 
   socks5_phase socks5_phase_ = socks5_phase::NONE;
   std::string  socks5_target_host_;

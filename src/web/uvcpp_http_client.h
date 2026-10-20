@@ -159,6 +159,8 @@ class UVCPP_API uvcpp_http_client {
   bool socks5_enabled() const;
   /** @brief 上一次 SOCKS5 失败的人类可读原因（代理拒绝、认证失败、REP 码）。 */
   const std::string& socks5_last_error() const;
+  /** @brief 上一次失败是否发生在"连代理"阶段；见 `uvcpp_tcp_client`. */
+  bool socks5_proxy_connect_failed() const;
 
   // -------------------------------------------------------------------
   // Send request

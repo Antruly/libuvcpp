@@ -2084,6 +2084,10 @@ const std::string& uvcpp_http_client::socks5_last_error() const {
   return tcp_->socks5_last_error();
 }
 
+bool uvcpp_http_client::socks5_proxy_connect_failed() const {
+  return tcp_ != nullptr && tcp_->socks5_proxy_connect_failed();
+}
+
 }  // namespace uvcpp
 
 #endif  // UVCPP_WEB_ENABLE
