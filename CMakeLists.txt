@@ -2451,11 +2451,24 @@ endif()
 # Use target-based include directories so exported/installable targets do not
 # contain absolute source-tree paths. During build use the source include
 # directory; when installed consumers should use the installed "include".
+#
+# `include/libuv` 只在**我们自己编了 libuv** 时才进安装接口：那种安装会执行
+# 下面那条 `install(DIRECTORY .../include/ DESTINATION include/libuv)`，路径
+# 一定存在。用系统 libuv 时根本不会装这个目录，把它写进
+# INTERFACE_INCLUDE_DIRECTORIES 会让每个 `find_package(uvcpp)` 的使用者在
+# generate 阶段直接报 "includes non-existent path"。
+set(_uvcpp_libuv_install_include "")
+if(UVCPP_LIBUV_FROM_SOURCE)
+  set(_uvcpp_libuv_install_include "$<INSTALL_INTERFACE:include/libuv>")
+endif()
 if (TARGET uvcpp)
   target_include_directories(uvcpp PUBLIC
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
+    # 公开头写的是 `#include <uv.h>`。用 FetchContent 编 libuv 时，它的头装
+    # 在 include/libuv/（下面那条 install 规则），不给消费者这一条就找不到。
+    ${_uvcpp_libuv_install_include}
   )
 endif()
 if (TARGET uvcpp_a)
@@ -2463,6 +2476,9 @@ if (TARGET uvcpp_a)
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
+    # 公开头写的是 `#include <uv.h>`。用 FetchContent 编 libuv 时，它的头装
+    # 在 include/libuv/（下面那条 install 规则），不给消费者这一条就找不到。
+    ${_uvcpp_libuv_install_include}
   )
 endif()
 if (TARGET uvcpp_s)
@@ -2470,6 +2486,9 @@ if (TARGET uvcpp_s)
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
+    # 公开头写的是 `#include <uv.h>`。用 FetchContent 编 libuv 时，它的头装
+    # 在 include/libuv/（下面那条 install 规则），不给消费者这一条就找不到。
+    ${_uvcpp_libuv_install_include}
   )
 endif()
 if (TARGET uvcpp_a_s)
@@ -2477,6 +2496,9 @@ if (TARGET uvcpp_a_s)
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
+    # 公开头写的是 `#include <uv.h>`。用 FetchContent 编 libuv 时，它的头装
+    # 在 include/libuv/（下面那条 install 规则），不给消费者这一条就找不到。
+    ${_uvcpp_libuv_install_include}
   )
 endif()
 
@@ -3247,6 +3269,46 @@ if (TARGET uvcpp_a_s)
     RUNTIME DESTINATION bin)
 endif()
 
+# FetchContent 依赖的**运行时**库。
+#
+# `cmake --install` 原先只装 uvcpp 自己：Linux 上得到一份 DT_NEEDED
+# `libllhttp.so.9.2` 的 libuvcpp.so，前缀里却没有它；Windows 上是 0xC0000135
+# （STATUS_DLL_NOT_FOUND）。发布 zip 由 `tests/tools/package_release.py` 手工
+# 收集这些文件，所以只有 install 这条路坏了 —— 而源码安装走的正是它。
+#
+# 只装 SHARED_LIBRARY：静态依赖的头/库本来就不该出现在前缀里，系统依赖
+# （uv/ssl/z）由发行版提供。`install(TARGETS ...)` 会一并生成 SONAME 符号
+# 链接，`install(FILES $<TARGET_FILE:...>)` 不会。
+foreach(_uvcpp_dep uv uv_a llhttp llhttp_shared llhttp_static zlib zlibstatic zlib1)
+  if(TARGET ${_uvcpp_dep})
+    get_target_property(_uvcpp_dep_type ${_uvcpp_dep} TYPE)
+    if(_uvcpp_dep_type STREQUAL "SHARED_LIBRARY")
+      install(TARGETS ${_uvcpp_dep}
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+    endif()
+  endif()
+endforeach()
+
+# 同目录里的依赖（上面刚装进来的 llhttp，或系统里的 zlib/openssl）要能被
+# 安装后的 libuvcpp.so 找到。CMake 默认不写 RPATH，`cmake --install --prefix`
+# 到任意目录之后 `ldd libuvcpp.so` 就是 `libllhttp.so.9.2 => not found`。
+# 用 $ORIGIN / @loader_path 只指向库自己所在目录，不扩大搜索范围。
+if(UNIX)
+  if(APPLE)
+    set(_uvcpp_install_rpath "@loader_path")
+  else()
+    set(_uvcpp_install_rpath "$ORIGIN")
+  endif()
+  foreach(_uvcpp_t uvcpp uvcpp_s)
+    if(TARGET ${_uvcpp_t})
+      set_target_properties(${_uvcpp_t} PROPERTIES
+        INSTALL_RPATH "${_uvcpp_install_rpath}")
+    endif()
+  endforeach()
+endif()
+
 # Install header files (flat) to avoid accidental nested `include/uvcpp/uvcpp/...`
 file(GLOB UVCPP_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/uvcpp/*.h")
 if(UVCPP_HEADER_FILES)
@@ -3550,14 +3612,13 @@ endif()
 # 本来也发不出它们的头，不是一份能被别人消费的前缀，见上面装 zlib 头那段）；
 # 写成 `Requires: libuv` 会让 pkg-config 去找一份不存在的包，直接报错。
 set(UVCPP_PC_REQUIRES "")
-set(UVCPP_PC_EXTRA_CFLAGS "")
+set(UVCPP_PC_CFLAGS "")
 if(NOT UVCPP_LIBUV_FROM_SOURCE)
   string(APPEND UVCPP_PC_REQUIRES "libuv")
 else()
-  # 自编译 libuv 的头装在 include/libuv（上面的 install 规则），公开头用的却是
-  # `#include <uv.h>` —— pkg-config 的 Cflags 必须把那个目录带上，否则消费者
-  # `pkg-config --cflags uvcpp` 之后仍然找不到 uv.h（uvp#40 的第三点）。
-  set(UVCPP_PC_EXTRA_CFLAGS " -I\${includedir}/libuv")
+  # 公开头里的 `#include <uv.h>`：FetchContent 的头装在 include/libuv/，
+  # 没有 `Requires: libuv` 可依赖，只能自己把路径加上。
+  string(APPEND UVCPP_PC_CFLAGS " -I${includedir}/libuv")
 endif()
 if(UVCPP_ENABLE_ZLIB AND NOT UVCPP_ZLIB_FROM_SOURCE)
   if(UVCPP_PC_REQUIRES)
