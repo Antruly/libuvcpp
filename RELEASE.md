@@ -1333,7 +1333,7 @@ g++ -std=c++11 -g -I include your_app.cpp -L lib -luvcppd -o your_app.exe
   只剩**一处**刻意的差异：**libuv 的头放在 `include/` 顶层**（本库的公开头写的是
   `#include <uv.h>`，放进 `include/libuv/` 会找不到）。原先还有第二处 —— zip 里
   补了 `zlib.h` / `zconf.h`，而 install 规则里没有这一条 —— **2026-10-12 起
-  install 规则自己也装这两个头**（`CMakeLists.txt:3531-3534`），两边落到同一个
+  install 规则自己也装这两个头**（`CMakeLists.txt:3593-3596`），两边落到同一个
   位置，这处差异消失。
 
 ### MSVC 从源码树 / 安装树取头时要加 `/utf-8` —— 头文件侧已修（1.2.0）
