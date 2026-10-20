@@ -20,18 +20,18 @@
 ## 下载
 
 <!-- downloads:start -->
-最新版本是 **v1.8.1**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
+最新版本是 **v1.8.2**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
 全部公开头文件、`uvcpp.pc` 与 CMake 包配置，旁边不需要再放任何 DLL 或 `.so`。
 某一版的包里到底开了哪些模块，按版本记在 [CHANGELOG.md](./CHANGELOG.md) 里。
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.1-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-msvc-x64.zip) · 23.1 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.1-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-msvc-arm64.zip) · 24.1 MB |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.8.1-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-x64.zip) · 28.7 MB |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.8.1-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-arm64.zip) · 22.0 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.1-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-linux-x64.zip) · 26.3 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.1-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-linux-arm64.zip) · 26.6 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-x64.zip) · 23.3 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-arm64.zip) · 24.3 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.8.2-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-x64.zip) · 28.8 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.8.2-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-arm64.zip) · 22.2 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.2-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-x64.zip) · 26.6 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.2-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-arm64.zip) · 26.8 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
@@ -333,7 +333,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_BUILD_STATIC` | 自动 | 构建静态 uvcpp 库 |
 | `UVCPP_BUILD_SHARED` | 自动 | 构建动态 uvcpp 库 |
 | `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` 保持「自动」，跟随 libuv 自己的 `BUILD_SHARED_LIBS` |
-| `UVCPP_SET_SOVERSION` | `OFF` | 给共享库设 `VERSION`/`SOVERSION`，装出去的 `libuvcpp.so` 于是变成 `libuvcpp.so.1.8.1` → `libuvcpp.so.1` → `libuvcpp.so` 这条链。**只给发行版包用，默认关是有意的**：发布 zip 里就是一个不带版本号的 `libuvcpp.so`（`tests/tools/package_release.py` 拷的就是这个名字，`check_config_contract.py` 查的也是它），全仓只有 `.deb`/`.rpm` 那棵树打开它。只在 ELF 上生效 —— Windows 上是空操作，macOS 上跳过（在那里它会把文件改名成 `libuvcpp.1.dylib`）。见 [`packaging/README.md`](packaging/README.md) |
+| `UVCPP_SET_SOVERSION` | `OFF` | 给共享库设 `VERSION`/`SOVERSION`，装出去的 `libuvcpp.so` 于是变成 `libuvcpp.so.1.8.2` → `libuvcpp.so.1` → `libuvcpp.so` 这条链。**只给发行版包用，默认关是有意的**：发布 zip 里就是一个不带版本号的 `libuvcpp.so`（`tests/tools/package_release.py` 拷的就是这个名字，`check_config_contract.py` 查的也是它），全仓只有 `.deb`/`.rpm` 那棵树打开它。只在 ELF 上生效 —— Windows 上是空操作，macOS 上跳过（在那里它会把文件改名成 `libuvcpp.1.dylib`）。见 [`packaging/README.md`](packaging/README.md) |
 | `UVCPP_BUILD_EXPAND` | `OFF` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |

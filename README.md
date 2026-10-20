@@ -20,19 +20,19 @@ object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 645
 ## Download
 
 <!-- downloads:start -->
-The newest release is **v1.8.1**. Six prebuilt packages, each one self-contained — the
+The newest release is **v1.8.2**. Six prebuilt packages, each one self-contained — the
 Release and Debug builds of the library, all the public headers, `uvcpp.pc` and the CMake
 package files, and no extra DLLs or `.so` files to ship alongside. Which modules a given
 package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
 
 | Platform | Toolchain | Package |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.1-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-msvc-x64.zip) · 23.1 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.1-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-msvc-arm64.zip) · 24.1 MB |
-| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.1-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-x64.zip) · 28.7 MB |
-| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.1-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-mingw-arm64.zip) · 22.0 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.1-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-linux-x64.zip) · 26.3 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.1-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.1/libuvcpp-1.8.1-linux-arm64.zip) · 26.6 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-x64.zip) · 23.3 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-arm64.zip) · 24.3 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.2-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-x64.zip) · 28.8 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.2-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-arm64.zip) · 22.2 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.2-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-x64.zip) · 26.6 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.2-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-arm64.zip) · 26.8 MB |
 
 Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
 What a package contains, and why it is laid out that way:
@@ -345,7 +345,7 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 | `UVCPP_BUILD_STATIC` | auto | Build static uvcpp library |
 | `UVCPP_BUILD_SHARED` | auto | Build shared uvcpp library |
 | `UVCPP_FOLLOW_LIBUV_BUILD` | `ON` | Keep `UVCPP_BUILD_SHARED`/`UVCPP_BUILD_STATIC` at `auto`, following libuv's own `BUILD_SHARED_LIBS` |
-| `UVCPP_SET_SOVERSION` | `OFF` | Set `VERSION`/`SOVERSION` on the shared library, so an installed `libuvcpp.so` becomes the chain `libuvcpp.so.1.8.1` → `libuvcpp.so.1` → `libuvcpp.so`. **This is for distro packages only, and it is off by default on purpose**: the release zips deliberately carry one unversioned `libuvcpp.so` (that is the name `tests/tools/package_release.py` copies and `check_config_contract.py` checks), and the `.deb`/`.rpm` build is the only thing that turns it on. ELF only — a no-op on Windows, and skipped on macOS (there it would rename the file to `libuvcpp.1.dylib`). See [`packaging/README.md`](packaging/README.md) |
+| `UVCPP_SET_SOVERSION` | `OFF` | Set `VERSION`/`SOVERSION` on the shared library, so an installed `libuvcpp.so` becomes the chain `libuvcpp.so.1.8.2` → `libuvcpp.so.1` → `libuvcpp.so`. **This is for distro packages only, and it is off by default on purpose**: the release zips deliberately carry one unversioned `libuvcpp.so` (that is the name `tests/tools/package_release.py` copies and `check_config_contract.py` checks), and the `.deb`/`.rpm` build is the only thing that turns it on. ELF only — a no-op on Windows, and skipped on macOS (there it would rename the file to `libuvcpp.1.dylib`). See [`packaging/README.md`](packaging/README.md) |
 | `UVCPP_BUILD_EXPAND` | `OFF` | Build expand module (memory pool) |
 | `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
