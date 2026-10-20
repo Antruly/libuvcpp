@@ -507,6 +507,115 @@ bool test_udp_associate() {
   return true;
 }
 
+// -------------------------------------------------------------------------
+// uvcpp_tcp_client 的 SOCKS5 失败阶段
+// -------------------------------------------------------------------------
+int closed_port() {
+  uvcpp::uvcpp_tcp_server server;
+  if (server.bind("127.0.0.1", 0) != 0) return 0;
+  struct sockaddr_in name;
+  int namelen = static_cast<int>(sizeof(name));
+  std::memset(&name, 0, sizeof(name));
+  if (server.get_tcp() == nullptr ||
+      server.get_tcp()->getsockname(reinterpret_cast<struct sockaddr*>(&name),
+                                    &namelen) != 0) {
+    return 0;
+  }
+  return ntohs(name.sin_port);
+}
+
+bool test_proxy_failure_stage() {
+  std::cout << "[socks5] proxy_failure_stage start\n";
+
+  // --- 代理连不上：阶段必须是"连代理" ---
+  {
+    const int dead_port = closed_port();
+    uvcpp::uvcpp_tcp_client client;
+    if (client.set_socks5_proxy("127.0.0.1", dead_port) != 0) {
+      std::cout << "[socks5] set_socks5_proxy failed\n";
+      return false;
+    }
+    const int rc = client.connect_wait("127.0.0.1", 80, 2000);
+    if (rc == 0) {
+      std::cout << "[socks5] dead proxy unexpectedly connected\n";
+      return false;
+    }
+    if (!client.socks5_proxy_connect_failed()) {
+      std::cout << "[socks5] dead proxy was not reported as a proxy-connect failure\n";
+      return false;
+    }
+    client.close();
+    pump_for(client.get_loop(), 20);
+  }
+
+  // --- 代理回了 REP=connection refused：阶段不能算"连代理" ---
+  {
+    SocksServer proxy;
+    proxy.start();
+    const int target_port = closed_port();
+    uvcpp::uvcpp_tcp_client client;
+    if (client.set_socks5_proxy("127.0.0.1", proxy.port) != 0) return false;
+    const int rc = client.connect_wait("127.0.0.1", target_port, 3000);
+    if (rc == 0) {
+      std::cout << "[socks5] refused target unexpectedly connected\n";
+      return false;
+    }
+    if (client.socks5_proxy_connect_failed()) {
+      std::cout << "[socks5] target refusal was misreported as a proxy-connect failure\n";
+      return false;
+    }
+    client.close();
+    pump_for(client.get_loop(), 20);
+  }
+
+  // --- 认证失败发生在代理应答之后 ---
+  {
+    SocksServer proxy;
+    proxy.opts.allow_no_auth           = false;
+    proxy.opts.allow_username_password = true;
+    proxy.opts.authenticator = [](const std::string& u, const std::string& p) {
+      return u == "alice" && p == "secret";
+    };
+    proxy.start();
+    uvcpp::uvcpp_tcp_client client;
+    if (client.set_socks5_proxy("127.0.0.1", proxy.port, "alice", "wrong") != 0) {
+      return false;
+    }
+    const int rc = client.connect_wait("127.0.0.1", 80, 3000);
+    if (rc == 0) {
+      std::cout << "[socks5] wrong password unexpectedly connected\n";
+      return false;
+    }
+    if (client.socks5_proxy_connect_failed()) {
+      std::cout << "[socks5] auth failure was misreported as a proxy-connect failure\n";
+      return false;
+    }
+    client.close();
+    pump_for(client.get_loop(), 20);
+  }
+
+  // --- 成功路径不复位错：标志必须保持 false ---
+  {
+    TcpEchoServer echo;
+    echo.start();
+    SocksServer proxy;
+    proxy.start();
+    uvcpp::uvcpp_tcp_client client;
+    if (client.set_socks5_proxy("127.0.0.1", proxy.port) != 0) return false;
+    const int rc = client.connect_wait("127.0.0.1", echo.port, 3000);
+    if (rc != 0 || client.socks5_proxy_connect_failed()) {
+      std::cout << "[socks5] successful proxy connect reported a failure stage: "
+                << uv_strerror(rc) << "\n";
+      return false;
+    }
+    client.close();
+    pump_for(client.get_loop(), 20);
+  }
+
+  std::cout << "[socks5] proxy_failure_stage ok\n";
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -516,6 +625,7 @@ int main() {
   ok = test_connect_auth() && ok;
   ok = test_bind() && ok;
   ok = test_udp_associate() && ok;
+  ok = test_proxy_failure_stage() && ok;
 
   if (!ok) {
     std::cout << "[socks5] FAILED\n";

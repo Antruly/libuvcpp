@@ -944,6 +944,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
     socks5_in_.clear();
     socks5_plain_.clear();
     socks5_last_error_.clear();
+    socks5_proxy_connect_failed_ = false;
     socks5_phase_    = socks5_phase::NONE;
     socks5_pending_  = true;
   }
@@ -955,6 +956,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
                              via_socks5 ? socks5_proxy_port_ : port,
                              resolved, timeout_ms);
   if (rc != 0) {
+    if (via_socks5) socks5_proxy_connect_failed_ = true;
     socks5_pending_ = false;
     set_status(TCP_CLIENT_ERROR);
     last_error_code_ = rc;
@@ -992,6 +994,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
       });
 
   if (rc != 0) {
+    if (via_socks5) socks5_proxy_connect_failed_ = true;
     socks5_pending_ = false;
     clear_status(TCP_CLIENT_CONNECTING);
     set_status(TCP_CLIENT_ERROR);
@@ -1004,6 +1007,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
       [this]() { return sync_connect_done_; }, timeout_ms);
 
   if (!completed) {
+    if (via_socks5) socks5_proxy_connect_failed_ = true;
     socks5_pending_ = false;
     set_status(TCP_CLIENT_ERROR);
     last_error_code_ = UV_ETIMEDOUT;
@@ -1011,6 +1015,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
   }
 
   if (sync_connect_result_ != 0) {
+    if (via_socks5) socks5_proxy_connect_failed_ = true;
     socks5_pending_ = false;
     return sync_connect_result_;
   }
@@ -1119,6 +1124,7 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
         } else {
           set_status(TCP_CLIENT_ERROR);
           last_error_code_ = status;
+          if (socks5_pending_) socks5_proxy_connect_failed_ = true;
           // 配了代理却连不上代理：把这句也记进 `socks5_last_error()`。
           // 否则调用方只能看到一个裸的 ECONNREFUSED，还得自己去猜"是目标
           // 还是代理"。协商阶段的失败由 `socks5_finish()` 负责写。
@@ -1173,6 +1179,7 @@ int uvcpp_tcp_client::connect_sockaddr(const struct sockaddr* addr,
     // 客户端会被一次立即失败永久毒化（下一次 connect 恒 UV_EALREADY）。
     has_async_connect_cb_ = false;
     clear_status(TCP_CLIENT_CONNECTING);
+    if (socks5_pending_) socks5_proxy_connect_failed_ = true;
   }
   return rc;
 }
@@ -1228,6 +1235,10 @@ const std::string& uvcpp_tcp_client::socks5_last_error() const {
   return socks5_last_error_;
 }
 
+bool uvcpp_tcp_client::socks5_proxy_connect_failed() const {
+  return socks5_proxy_connect_failed_;
+}
+
 int uvcpp_tcp_client::socks5_connect_async(const std::string& target_host,
                                            int target_port,
                                            std::function<void(int)> cb) {
@@ -1236,6 +1247,7 @@ int uvcpp_tcp_client::socks5_connect_async(const std::string& target_host,
   socks5_in_.clear();
   socks5_plain_.clear();
   socks5_last_error_.clear();
+  socks5_proxy_connect_failed_ = false;
   socks5_phase_  = socks5_phase::NONE;
   socks5_sync_   = false;
   socks5_pending_ = true;
@@ -1244,7 +1256,10 @@ int uvcpp_tcp_client::socks5_connect_async(const std::string& target_host,
   // `connect_transport` 在完成分支里看到 `socks5_pending_` 就转进协商。
   const int rc = connect_transport(socks5_proxy_host_.c_str(),
                                    socks5_proxy_port_, std::move(cb));
-  if (rc != 0) socks5_pending_ = false;
+  if (rc != 0) {
+    socks5_proxy_connect_failed_ = true;
+    socks5_pending_ = false;
+  }
   return rc;
 }
 
