@@ -148,7 +148,9 @@ class UVCPP_API uvcpp_udp_client {
    * sets the default destination for packets.
    *
    * `ip` 可以是数字地址，也可以是**主机名**：域名走 `AF_UNSPEC` 解析
-   * （A + AAAA），取第一个可用结果 —— 这条是同步接口，DNS 也同步等待。
+   * （A + AAAA），再按 socket 的地址族挑第一个匹配的候选（双栈名字的第一个
+   * 未必兼容）；未绑定的句柄取第一个，本地族由 libuv 的延迟绑定决定。
+   * 这条是同步接口，DNS 也同步等待。
    */
   int connect(const char* ip, int port);
 
@@ -159,9 +161,10 @@ class UVCPP_API uvcpp_udp_client {
   /**
    * @brief 发到 `host:port`。`host` 可以是数字地址，也可以是主机名。
    *
-   * 域名用 `AF_UNSPEC` 解析（A + AAAA），取第一个可用结果。异步重载在
-   * **事件循环上**解析、绝不阻塞调用线程；`send_wait` 同步等待解析。
-   * DNS 失败返回可区分的 `UV_EAI_*`。
+   * 域名用 `AF_UNSPEC` 解析（A + AAAA），再按 socket 的地址族挑第一个匹配
+   * 的候选；未绑定的句柄取第一个。异步重载在**事件循环上**解析、绝不阻塞
+   * 调用线程；`send_wait` 同步等待解析。DNS 失败返回可区分的 `UV_EAI_*`；
+   * 解析成功但一个候选都不属于 socket 的地址族时返回 `UV_EAFNOSUPPORT`。
    */
   int send(const char* ip, int port, const char* data, size_t len,
            std::function<void(int)> cb = nullptr);

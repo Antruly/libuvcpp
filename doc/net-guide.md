@@ -725,9 +725,13 @@ int main() {
 - 客户端侧另有 `recv_wait(out_buf, timeout_ms)` 和 `set_max_read_cache_size()`，
   同步与异步同样是二选一。
 - `uvcpp_udp_client` 的 `send` / `send_wait` / `connect` 接受**域名**：解析走
-  `AF_UNSPEC`（A + AAAA），取第一个可用结果。异步 `send` 在事件循环上解析，
-  **不阻塞调用线程**；`send_wait` 同步等解析。DNS 失败返回可区分的 `UV_EAI_*`。
-  `bind()` 只收数字地址（本地绑定不引入 DNS 依赖），域名返回 `UV_EINVAL`。
+  `AF_UNSPEC`（A + AAAA），再按 **socket 的地址族**挑第一个匹配的候选 ——
+  双栈名字（`localhost` → `::1` + `127.0.0.1`）的第一个未必兼容，直接发会
+  `EAFNOSUPPORT`。未绑定的句柄取第一个（本地族由 libuv 的延迟绑定决定）。
+  异步 `send` 在事件循环上解析，**不阻塞调用线程**；`send_wait` 同步等解析。
+  DNS 失败返回可区分的 `UV_EAI_*`；解析成功但一个候选都不匹配 socket 的族时
+  返回 `UV_EAFNOSUPPORT`。`bind()` 只收数字地址（本地绑定不引入 DNS 依赖），
+  域名返回 `UV_EINVAL`。
 
 ---
 
