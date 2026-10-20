@@ -397,7 +397,7 @@ bool ended() const;
 - 流式响应上 `end()` 的语义变成"结束这条流"。
 - 类里**没有** `send()` 成员，`deferred()` / `set_deferred()` 只是本层一枚**没人读**的
   记录标志；真正决定"框架替不替你发"的是 `uvcpp_http_response::deferred`
-  （`src/web/uvcpp_http_response.h:45-49`）。
+  （`src/web/uvcpp_http_response.h:52-56`）。
 
 ### elsewhere
 

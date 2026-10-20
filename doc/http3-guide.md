@@ -61,7 +61,7 @@
 
 | 类 / 结构 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_h3_connection` | `src/http3/uvcpp_h3_connection.h:130` | 一条 h3 连接的**驱动层**：持有那条 `uvcpp_quic_connection*`，管三条关键单向流、写序列化、完成队列 |
+| `uvcpp_h3_connection` | `src/http3/uvcpp_h3_connection.h:135` | 一条 h3 连接的**驱动层**：持有那条 `uvcpp_quic_connection*`，管三条关键单向流、写序列化、完成队列 |
 | `h3_request` / `h3_response` | `src/http3/uvcpp_h3_connection.h:75`、`:100` | 一次请求 / 一次响应（伪头拆成具名成员） |
 | `h3_header` / `h3_header_kind` | `src/http3/uvcpp_h3_common.h:151`、`:136` | 一个头字段；伪头用具名枚举，不写 `":method"` 字面量 |
 | `h3_header_budget` | `src/http3/uvcpp_h3_common.h:194` | 头块尺寸预算累加器（**本层唯一的防线**，见 [§7](#7-典型坑)） |
@@ -188,7 +188,7 @@ int one_h3_get(uvcpp_quic_connection* quic) {
 
 - **发出去时 `stream_id` 不用填。** `send_request()` 自己开流，并把它写回结果里；
   `h3_request::stream_id` 在**收到**一侧才有意义。
-- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:238`）。
+- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:243`）。
   这是刻意的：队列里可能同时到齐几条，回调里一次性抽干会让调用方在处理第一条时
   看不见第二条的到达，于是"这次回调要不要再排一次"永远答不准。
 - **一条请求恰好在那里出现一次。** 正常收全一次（`error == 0`），中途被 reset /
@@ -398,7 +398,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 6. **链接是 PRIVATE**（`CMakeLists.txt:3045-3045` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
-   （`src/http3/uvcpp_h3_connection.h:322`），它经公开头调用、链接期解析。
+   （`src/http3/uvcpp_h3_connection.h:338`），它经公开头调用、链接期解析。
 
 7. **本机可复现**：nghttp3 也可以用
    `-DFETCHCONTENT_SOURCE_DIR_NGHTTP3=<一份已下好的 nghttp3 源码>` 指过去绕开下载
@@ -505,7 +505,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 3. **只有 FIN、没有数据的块要 `add_write_offset(sid, 0)`。**
    `nghttp3_conn_writev_stream()` 可能吐出一个零字节、只带 FIN 的块，
    `add_write_offset()` 无论如何都要调 —— 少了那一句，这个 FIN 永远发不出去。
-   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:283` 那条注释）。
+   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:297` 那条注释）。
 
 4. **别在 nghttp3 的回调里调它的写函数。** 与 nghttp2 同一条硬规矩：那会在它
    自己的栈上重入。本层的处置是"回调里只置 `want_write_`，`recv_stream_data()`
@@ -544,9 +544,16 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 按仓库惯例，这一节必须老实写。以下都是**这一版真的没有**，不是"文档没写"：
 
-- **没有 trailers。** 会话层里 `begin_trailers` / `recv_trailer` / `end_trailers`
-  三格**留空**，不是填一个"收到就忽略"的实现 —— 忽略会让带 trailers 的响应在
-  本层看来"从来没有第二个头块"，调用方等到的是流的收场而不是缺失的原因。
+- **trailers 已支持（`1.8.2` 起，#53）。** 会话层把同一流上的第二个头块单独交付
+  （`callbacks::on_begin_trailers` / `on_trailer` / `on_end_trailers`），连接层
+  落到 `h3_request::trailers` / `h3_response::trailers`：
+  - 发送：填好 `trailers` 再 `send_request()` / `send_response()`，本层会在 body
+    之后提交（调用顺序在 `flush()` 之前，因此不会错过 nghttp3 的窗口）；
+  - 接收：`on_request` 的 `req.trailers`、`take_completed()` 的 `resp.trailers`；
+  - **请求 trailers 要求有 body**：nghttp3 对无 body 的请求直接标 END_STREAM，
+    之后提交 trailers 是 `INVALID_STATE`，本层如实返回 `UV_EINVAL`；
+  - web 层：客户端把响应 trailers 交付到 `uvcpp_http_response::trailers`，服务端
+    处理函数读 `uvcpp_http_request::trailers`、填 `uvcpp_http_response::trailers`。
 - **GOAWAY 已支持（`1.8.2` 起，#53）。** `uvcpp_h3_connection::shutdown_notice()`
   发第一封（只是通知，在途流照常）、`shutdown()` 发最终那封，`is_drained()`
   判收场（全部流结束）。收到对端的 GOAWAY 走 `callbacks::on_goaway`，并用

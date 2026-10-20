@@ -1289,7 +1289,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
   读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
   （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。
-  HTTP 层本来就认显式头（`src/web/uvcpp_http_server.cpp:1684-1687`）、`begin_stream` 也认（`src/web/uvcpp_http_server.cpp:1803-1808`），所以
+  HTTP 层本来就认显式头（`src/web/uvcpp_http_server.cpp:1692-1695`）、`begin_stream` 也认（`src/web/uvcpp_http_server.cpp:1811-1816`），所以
   **整包 / 尾随头 / 流式**三条出口一并覆盖，且 `handler` 自己设过 `connection` 的
   仍然说了算。放在「发送前」而不是「派发时」：处理函数跑之前响应表必须还是空的
   （那条既有约定由 `web_app_app_func.cpp` 的 `response_header_capacity_reused` 正对照

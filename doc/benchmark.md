@@ -2501,7 +2501,7 @@ taskset -c 8-15 h2load -i static-h2-uris.txt -H 'Accept-Encoding: br;q=1, gzip;q
 #### 机制：两条编码走的是同一条命中路径，编码名只在键里
 
 `uvcpp_http_server::apply_compression_for()` 的变体缓存键是
-`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2178-2181`）。
+`编码字符 + 档位字符 + cache_tag`（`src/web/uvcpp_http_server.cpp:2186-2189`）。
 命中时只做一次 `std::map` 查找 + 一次 `shared_ptr` 递句柄 —— **gzip 与 `br` 是
 同一条路径**。所以"开 `br`"在此处的代价是**每个 tag 一次**，不是每请求一次；
 反过来说，响应没有 `cache_tag` 时它每请求重压，而 `br` 的编码比 deflate 贵得多。

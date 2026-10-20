@@ -89,6 +89,9 @@ struct UVCPP_API h3_request {
   /// 请求体。**本层会在内存里攒满整个体**（上限 `H3_DEFAULT_MAX_BODY_BYTES`），
   /// 不做流式 —— 本批没有流式请求体那一档。
   std::string body;
+  /// trailers（#53）。收到时是本层填的；发送时 `send_request()` 会在请求体
+  /// 之后把它们提交出去。
+  std::vector<h3_header> trailers;
 };
 
 /**
@@ -103,6 +106,8 @@ struct UVCPP_API h3_response {
   int status = 0;
   std::vector<h3_header> headers;
   std::string body;
+  /// trailers（#53）。服务端填它，`send_response()` 会在响应体之后提交出去。
+  std::vector<h3_header> trailers;
   /**
    * @brief 这次请求的收场：0 = 正常；非 0 = 没能干净收场。
    *
@@ -252,6 +257,17 @@ class UVCPP_API uvcpp_h3_connection {
   /// 只发 `:status` 的最小响应 + `flush()`。
   int send_status(int64_t stream_id, int status,
                   const std::string& body = std::string());
+
+  /**
+   * @brief 提交 trailers（#53），并立刻冲出去。
+   *
+   * 必须在 `send_response()` / `send_request()` **之后**调；nghttp3 保证它排在
+   * 响应体之后。**调用即意味着该方向的发送结束**（RFC 9114 §4.1）。
+   *
+   * @return 0 成功；`UV_ENOTCONN` 连接没了；`UV_EINVAL` 空名字/空列表；
+   *         `UV_EMSGSIZE` 头块超上限；其余是 nghttp3 错误码。
+   */
+  int send_trailers(int64_t stream_id, const std::vector<h3_header>& trailers);
 
   /**
    * @brief 把会话里待发的字节全部写出去。可以重复调（没东西发就是空操作）。

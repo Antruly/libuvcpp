@@ -253,6 +253,14 @@ bool h3_to_web_request(const h3_request& in, uvcpp_http_request& out) {
   }
   out.body = uvcpp_buf(in.body.data(), in.body.size());
 
+  out.trailers.reserve(in.trailers.size());
+  for (size_t i = 0; i < in.trailers.size(); ++i) {
+    http_header h;
+    h.name  = in.trailers[i].name;
+    h.value = in.trailers[i].value;
+    out.trailers.push_back(h);
+  }
+
   // `:authority` 与 `host` 对不上就是**畸形**（RFC 9114 §4.3.1 逐字要求拒掉）：
   // 两个头各说一个主机名是请求走私 / 缓存投毒的经典入口，h2 那边同一条判据
   // （`uvcpp_h2_session.cpp` 里对 `:authority` 那一段）。两个都到齐时必须一致；
@@ -3359,9 +3367,19 @@ int uvcpp_http_server::send_h3_response(uvcpp_quic_connection* conn,
   }
   out.body = resp.body.to_string();
 
+  out.trailers.reserve(resp.trailers.size());
+  for (size_t i = 0; i < resp.trailers.size(); ++i) {
+    h3_header h;
+    h.name  = resp.trailers[i].name;
+    h.value = resp.trailers[i].value;
+    out.trailers.push_back(h);
+  }
+
   // 连接专属头（含 h1 那套 keep-alive 要用的 `connection`）由**会话层**统一
   // 剥掉 —— 这里不判 keep-alive：h3 的连接是整个 QUIC 连接，没有"这条消息之后
   // 要不要关连接"这回事。
+  // `out.trailers` 由 `send_response()` 在抽干 body reader **之前**提交 ——
+  // 那里是唯一还来得及的时机（见它的注释）。
   return h3->send_response(out, /*omit_body=*/is_head);
 }
 

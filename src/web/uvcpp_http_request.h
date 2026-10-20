@@ -41,6 +41,13 @@ class UVCPP_API uvcpp_http_request {
   std::string   url     = "/";
   uvcpp_http_version  version = static_cast<uvcpp_http_version>(1);
   http_headers  headers;
+  /**
+   * @brief 请求 trailers（h3 才有；#53）。
+   *
+   * 收到时由 h3 层填好；h1/h2 恒为空。请求要**发** trailers 用
+   * `uvcpp_h3_connection::send_trailers()`（本层不替 HTTP 客户端发请求 trailers）。
+   */
+  http_headers  trailers;
   uvcpp_buf     body;
 
   /**

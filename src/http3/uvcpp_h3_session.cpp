@@ -161,6 +161,9 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   ncb.begin_headers     = &uvcpp_h3_session::cb_begin_headers;
   ncb.recv_header       = &uvcpp_h3_session::cb_recv_header;
   ncb.end_headers       = &uvcpp_h3_session::cb_end_headers;
+  ncb.begin_trailers    = &uvcpp_h3_session::cb_begin_trailers;
+  ncb.recv_trailer      = &uvcpp_h3_session::cb_recv_trailer;
+  ncb.end_trailers      = &uvcpp_h3_session::cb_end_trailers;
   ncb.stop_sending      = &uvcpp_h3_session::cb_stop_sending;
   ncb.end_stream        = &uvcpp_h3_session::cb_end_stream;
   ncb.reset_stream      = &uvcpp_h3_session::cb_reset_stream;
@@ -172,10 +175,6 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   // - `stream_close`：V4 之前的老形状，只带一个错误码，分不出两个方向。
   //   填了它反而会在上游把 `stream_close2` 也设为非空时出现"两个都调"的疑虑；
   //   我们只要 `stream_close2`。
-  // - `begin_trailers` / `recv_trailer` / `end_trailers`：**本批不处理 trailers**。
-  //   留空而不是填一个"收到就忽略"的实现：忽略会让带 trailers 的响应在
-  //   `end_stream` 之前多一个空的头块途经我们的路由判断（那份代码按"一次
-  //   `end_headers` = 一次完整请求"写的），静默走错比显式不做更糟。
   // - `recv_settings` / `recv_settings2`：本层不因对端的 SETTINGS 改自己的行为。
   //   唯一想读的是对端的 `max_field_section_size`，而那个值 nghttp3 压根不给
   //   应用看（可参照的是我们在**发**方向的自觉上限，见 `H3_MAX_SEND_HEADER_BLOCK`）。
@@ -432,6 +431,37 @@ int uvcpp_h3_session::submit_request(int64_t stream_id,
   return submit(headers, body, false, stream_id, true);
 }
 
+int uvcpp_h3_session::submit_trailers(
+    int64_t stream_id, const std::vector<h3_header>& headers) {
+  if (conn_ == nullptr) return UV_EINVAL;
+  if (fatal_) return last_error_ != 0 ? last_error_ : -1;
+
+  size_t total = 0;
+  std::vector<nghttp3_nv> nva;
+  nva.reserve(headers.size());
+  for (size_t i = 0; i < headers.size(); ++i) {
+    const h3_header& h = headers[i];
+    if (h.name.empty()) return UV_EINVAL;
+    if (h.kind == h3_header_kind::REGULAR &&
+        h3_is_connection_specific(h.name)) {
+      continue;
+    }
+    total += h.name.size() + h.value.size() + 32;
+    if (total > H3_MAX_SEND_HEADER_BLOCK) return UV_EMSGSIZE;
+    nghttp3_nv nv;
+    nv.name     = reinterpret_cast<const uint8_t*>(h.name.data());
+    nv.value    = reinterpret_cast<const uint8_t*>(h.value.data());
+    nv.namelen  = h.name.size();
+    nv.valuelen = h.value.size();
+    nv.flags    = NGHTTP3_NV_FLAG_NONE;
+    nva.push_back(nv);
+  }
+  if (nva.empty()) return UV_EINVAL;
+
+  // nghttp3 会把 nva 拷一份，并在写方向上排在已有的 DATA 之后。
+  return nghttp3_conn_submit_trailers(conn_, stream_id, nva.data(), nva.size());
+}
+
 int uvcpp_h3_session::submit_response(int64_t stream_id,
                                       const std::vector<h3_header>& headers,
                                       std::string body, bool omit_body) {
@@ -635,6 +665,53 @@ int uvcpp_h3_session::cb_end_headers(nghttp3_conn*, int64_t stream_id, int fin,
   if (self->cbs_.on_end_headers) {
     self->cbs_.on_end_headers(*self, stream_id, fin != 0);
   }
+  return 0;
+}
+
+int uvcpp_h3_session::cb_begin_trailers(nghttp3_conn*, int64_t stream_id,
+                                        void* ud, void*) {
+  uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
+  cb_guard          g(&self->in_callback_);
+  stream_rec& s = self->stream_of(stream_id);
+  // trailers 是**第二个头块**，预算按同一个算法重新起算。
+  s.budget.reset(static_cast<size_t>(self->max_field_section_size_));
+  s.budget_reported = false;
+  if (self->cbs_.on_begin_trailers) {
+    self->cbs_.on_begin_trailers(*self, stream_id);
+  }
+  return 0;
+}
+
+int uvcpp_h3_session::cb_recv_trailer(nghttp3_conn*, int64_t stream_id,
+                                      int32_t token, nghttp3_rcbuf* name,
+                                      nghttp3_rcbuf* value, uint8_t, void* ud,
+                                      void*) {
+  uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
+  cb_guard          g(&self->in_callback_);
+
+  h3_header h;
+  h.name  = rcbuf_to_string(name);
+  h.value = rcbuf_to_string(value);
+  h.kind  = kind_of_token(token);
+
+  stream_rec& s = self->stream_of(stream_id);
+  if (s.budget_reported) return 0;
+  if (!s.budget.add(h.name.size(), h.value.size())) {
+    s.budget_reported = true;
+    if (self->cbs_.on_header_budget_exceeded) {
+      self->cbs_.on_header_budget_exceeded(*self, stream_id, s.budget.used());
+    }
+    return 0;
+  }
+  if (self->cbs_.on_trailer) self->cbs_.on_trailer(*self, stream_id, h);
+  return 0;
+}
+
+int uvcpp_h3_session::cb_end_trailers(nghttp3_conn*, int64_t stream_id, int,
+                                      void* ud, void*) {
+  uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
+  cb_guard          g(&self->in_callback_);
+  if (self->cbs_.on_end_trailers) self->cbs_.on_end_trailers(*self, stream_id);
   return 0;
 }
 

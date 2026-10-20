@@ -130,6 +130,20 @@ class UVCPP_API uvcpp_h3_session {
     std::function<void(uvcpp_h3_session&, int64_t stream_id, bool fin)>
         on_end_headers;
 
+    /**
+     * @brief trailers 头块开始（#53）。**trailers 是同一流上的第二个头块**，
+     *        与第一个头块分开报，不会混进 `on_header`。
+     */
+    std::function<void(uvcpp_h3_session&, int64_t stream_id)> on_begin_trailers;
+
+    /// 收到一个 trailer 字段。
+    std::function<void(uvcpp_h3_session&, int64_t stream_id,
+                       const h3_header& field)>
+        on_trailer;
+
+    /// trailers 头块收全（之后这条流的读方向也就结束了）。
+    std::function<void(uvcpp_h3_session&, int64_t stream_id)> on_end_trailers;
+
     /// 收到一段 body（服务端侧是请求体、客户端侧是响应体）。`data` 只在本次
     /// 回调内有效。
     std::function<void(uvcpp_h3_session&, int64_t stream_id, const char* data,
@@ -369,6 +383,15 @@ class UVCPP_API uvcpp_h3_session {
                      std::string body = std::string());
 
   /**
+   * @brief 提交 trailers（#53）。**调用即意味着发送方向结束**（RFC 9114 §4.1）。
+   *
+   * 必须在 `submit_request()` / `submit_response()` 之后调；nghttp3 保证它排在
+   * 响应体之后。返回 0 或错误码；调用方之后照常 `drain()`。
+   */
+  int submit_trailers(int64_t stream_id,
+                      const std::vector<h3_header>& headers);
+
+  /**
    * @brief 服务端：提交响应（头块 + 可选 body）。
    *
    * @param omit_body true = 只发头块、不发 body（HEAD、204、304 走这一支）。
@@ -474,6 +497,14 @@ class UVCPP_API uvcpp_h3_session {
                             void* stream_user_data);
   static int cb_end_headers(nghttp3_conn* conn, int64_t stream_id, int fin,
                             void* conn_user_data, void* stream_user_data);
+  static int cb_begin_trailers(nghttp3_conn* conn, int64_t stream_id,
+                               void* conn_user_data, void* stream_user_data);
+  static int cb_recv_trailer(nghttp3_conn* conn, int64_t stream_id,
+                             int32_t token, nghttp3_rcbuf* name,
+                             nghttp3_rcbuf* value, uint8_t flags,
+                             void* conn_user_data, void* stream_user_data);
+  static int cb_end_trailers(nghttp3_conn* conn, int64_t stream_id, int fin,
+                             void* conn_user_data, void* stream_user_data);
   static int cb_recv_data(nghttp3_conn* conn, int64_t stream_id,
                           const uint8_t* data, size_t datalen,
                           void* conn_user_data, void* stream_user_data);

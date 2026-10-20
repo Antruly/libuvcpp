@@ -196,6 +196,29 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     if (server_side_ && fin) dispatch_request(stream_id);
   };
 
+  sc.on_begin_trailers = [this, life](uvcpp_h3_session&, int64_t stream_id) {
+    if (!token_alive(life)) return;
+    stream_of(stream_id);  // 确保账在；trailers 自己不需要新状态
+  };
+
+  sc.on_trailer = [this, life](uvcpp_h3_session&, int64_t stream_id,
+                               const h3_header& field) {
+    if (!token_alive(life)) return;
+    stream_rec& s = stream_of(stream_id);
+    // 与 `on_header` 分开：第二个头块只进 `trailers`，不混进首部。
+    if (server_side_) {
+      s.req.trailers.push_back(field);
+    } else {
+      s.resp.trailers.push_back(field);
+    }
+  };
+
+  sc.on_end_trailers = [this, life](uvcpp_h3_session&, int64_t) {
+    if (!token_alive(life)) return;
+    // 不需要动作：trailers 之后紧接着就是 `on_end_stream` / 流的收场，
+    // 交付时机由那里统一决定。
+  };
+
   sc.on_body = [this, life](uvcpp_h3_session&, int64_t stream_id,
                             const char* data, size_t len) {
     if (!token_alive(life)) return;
@@ -699,6 +722,11 @@ int64_t uvcpp_h3_connection::send_request(const h3_request& req) {
   if (closed_ || fatal_) return UV_ENOTCONN;
   if (server_side_) return UV_EINVAL;  // 服务端不提请求（本批没有客户端推送）
   if (!ready_) return UV_EAGAIN;       // 关键流还没开出来，协议还没开始跑
+  // nghttp3 把"无 body 的请求"直接标成写了 END_STREAM（`submit_request()` 里
+  // `dr == NULL` 那一支），之后提交 trailers 是 `INVALID_STATE`。请求 trailers
+  // 因此要求有 body（gRPC 等真实用法都有）；没有 body 时如实拒绝，别让它变成
+  // 一个 -102。
+  if (!req.trailers.empty() && req.body.empty()) return UV_EINVAL;
 
   const int64_t sid = conn_->open_stream(true);
   if (sid < 0) return sid;  // `NGTCP2_ERR_STREAM_ID_BLOCKED` 如实透传
@@ -734,6 +762,13 @@ int64_t uvcpp_h3_connection::send_request(const h3_request& req) {
     streams_.erase(sid);
     return rc;
   }
+  if (!req.trailers.empty()) {
+    // 必须在 `flush()` **之前**提交：nghttp3 的 trailers 是流帧队列里排在
+    // DATA 之后的一帧，而 DATA 的 reader 一旦被抽干、流就被标成写了 END_STREAM，
+    // 那时再提交它是 `NGHTTP3_ERR_INVALID_STATE`。
+    const int trc = session_->submit_trailers(sid, req.trailers);
+    if (trc != 0) return trc;
+  }
   flush();
   return sid;
 }
@@ -763,6 +798,22 @@ int uvcpp_h3_connection::send_response(const h3_response& resp,
 
   const int rc =
       session_->submit_response(resp.stream_id, hs, resp.body, omit_body);
+  if (rc != 0) return rc;
+  if (!resp.trailers.empty()) {
+    // 同 `send_request()`：排在 DATA 之后、必须在抽干 reader 之前提交。
+    const int trc = session_->submit_trailers(resp.stream_id, resp.trailers);
+    if (trc != 0) return trc;
+  }
+  flush();
+  return 0;
+}
+
+int uvcpp_h3_connection::send_trailers(
+    int64_t stream_id, const std::vector<h3_header>& trailers) {
+  if (conn_ == nullptr || session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  if (streams_.find(stream_id) == streams_.end()) return UV_EINVAL;
+  const int rc = session_->submit_trailers(stream_id, trailers);
   if (rc != 0) return rc;
   flush();
   return 0;

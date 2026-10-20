@@ -40,6 +40,13 @@ class UVCPP_API uvcpp_http_response {
   http_status   status_code    = http_status::OK;
   std::string   status_message = "OK";
   http_headers  headers;
+  /**
+   * @brief 响应 trailers（h3 才有；#53）。
+   *
+   * 客户端：h3 响应收全后由本层填好（h1/h2 恒为空）。
+   * 服务端：h3 路由处理函数填它，`send_h3_response()` 会在响应体之后发出去。
+   */
+  http_headers  trailers;
   uvcpp_buf     body;
 
   /// When true, the server does NOT send this response immediately after the

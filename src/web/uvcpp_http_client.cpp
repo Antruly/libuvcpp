@@ -2058,6 +2058,13 @@ uvcpp_http_response h3_to_http_response(const h3_response& in) {
     h.value = in.headers[i].value;
     r.headers.push_back(h);
   }
+  r.trailers.reserve(in.trailers.size());
+  for (size_t i = 0; i < in.trailers.size(); ++i) {
+    http_header h;
+    h.name  = in.trailers[i].name;
+    h.value = in.trailers[i].value;
+    r.trailers.push_back(h);
+  }
   if (!in.body.empty()) r.body.append_data(in.body.data(), in.body.size());
   return r;
 }
