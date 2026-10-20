@@ -203,6 +203,13 @@ struct quic_session_events {
 
   /// 收到一条 DATAGRAM 帧（RFC 9221）。`data` 只在回调期间有效。
   ::std::function<void(const uint8_t* data, size_t datalen)> on_datagram;
+
+  /// 一次路径校验的结果（RFC 9000 §8.2，#53）。`success` = 新路径可用。
+  ::std::function<void(const ::std::string& ip, int port, bool success)>
+      on_path_validation;
+
+  /// 当前发送路径的远端地址变了（NAT rebinding / 迁移完成）。
+  ::std::function<void(const ::std::string& ip, int port)> on_path_changed;
 };
 
 /**
@@ -472,6 +479,11 @@ class quic_session {
   static int cb_recv_datagram(ngtcp2_conn* conn, uint32_t flags,
                               const uint8_t* data, size_t datalen,
                               void* user_data);
+  static int cb_path_validation(ngtcp2_conn* conn, uint32_t flags,
+                                const ngtcp2_path* path,
+                                const ngtcp2_path* fallback_path,
+                                ngtcp2_path_validation_result res,
+                                void* user_data);
   static int cb_acked_stream_data_offset(ngtcp2_conn* conn, int64_t stream_id,
                                          uint64_t offset, uint64_t datalen,
                                          void* user_data,
@@ -526,6 +538,10 @@ class quic_session {
   /// 把 `dgram_q_` 里的 DATAGRAM 编成包发出去（#53）。在流数据之后调用 ——
   /// `writev_stream` 的包一旦开着就不能再写 DATAGRAM。
   void do_flush_datagrams(ngtcp2_tstamp ts);
+
+  /// 读包之后对一下 ngtcp2 的当前路径与本地快照；变了就更新快照并报
+  /// `on_path_changed`（#53）。返回是否变化。
+  bool note_current_path();
 
 #if UVCPP_UDP_GSO_ENABLE
   /// 第二层闸门的初始化：问一次端点「这条路支不支持 USO」，支持就把落点缓冲按

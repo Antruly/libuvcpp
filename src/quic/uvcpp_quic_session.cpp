@@ -180,6 +180,60 @@ ngtcp2_addr make_addr(const struct sockaddr* src, int srclen) {
   return a;
 }
 
+/// 把一个 ngtcp2 地址转成 `ip` + 端口（#53 的路径事件用）。
+bool addr_to_text(const ngtcp2_sockaddr* sa, ngtcp2_socklen len,
+                  std::string& ip, int& port) {
+  if (sa == nullptr) return false;
+  char buf[64];
+  if (sa->sa_family == AF_INET && len >= (ngtcp2_socklen)sizeof(sockaddr_in)) {
+    const struct sockaddr_in* s =
+        reinterpret_cast<const struct sockaddr_in*>(sa);
+    if (uv_ip4_name(s, buf, sizeof(buf)) != 0) return false;
+    ip   = buf;
+    port = ntohs(s->sin_port);
+    return true;
+  }
+  if (sa->sa_family == AF_INET6 &&
+      len >= (ngtcp2_socklen)sizeof(sockaddr_in6)) {
+    const struct sockaddr_in6* s =
+        reinterpret_cast<const struct sockaddr_in6*>(sa);
+    if (uv_ip6_name(s, buf, sizeof(buf)) != 0) return false;
+    ip   = buf;
+    port = ntohs(s->sin6_port);
+    return true;
+  }
+  return false;
+}
+
+/// 两个 sockaddr 是不是同一个远端（族 + 端口 + 地址）。
+bool same_ep(const ngtcp2_sockaddr* a, ngtcp2_socklen alen,
+             const ngtcp2_sockaddr* b, ngtcp2_socklen blen) {
+  if (a == nullptr || b == nullptr || a->sa_family != b->sa_family) return false;
+  if (a->sa_family == AF_INET) {
+    if (alen < (ngtcp2_socklen)sizeof(sockaddr_in) ||
+        blen < (ngtcp2_socklen)sizeof(sockaddr_in)) {
+      return false;
+    }
+    const struct sockaddr_in* x = reinterpret_cast<const struct sockaddr_in*>(a);
+    const struct sockaddr_in* y = reinterpret_cast<const struct sockaddr_in*>(b);
+    return x->sin_port == y->sin_port &&
+           x->sin_addr.s_addr == y->sin_addr.s_addr;
+  }
+  if (a->sa_family == AF_INET6) {
+    if (alen < (ngtcp2_socklen)sizeof(sockaddr_in6) ||
+        blen < (ngtcp2_socklen)sizeof(sockaddr_in6)) {
+      return false;
+    }
+    const struct sockaddr_in6* x =
+        reinterpret_cast<const struct sockaddr_in6*>(a);
+    const struct sockaddr_in6* y =
+        reinterpret_cast<const struct sockaddr_in6*>(b);
+    return x->sin6_port == y->sin6_port &&
+           std::memcmp(&x->sin6_addr, &y->sin6_addr, sizeof(x->sin6_addr)) == 0;
+  }
+  return false;
+}
+
 /// 把 `in_callback_` 的加减配成对 —— 回调里有好几条 early return，
 /// 手写 `--` 迟早漏一次，而漏一次的表现是"之后所有 flush 都只记意图、不发包"，
 /// 也就是一条**静默不发数据**的连接，查起来很贵。
@@ -320,6 +374,9 @@ void quic_session::fill_callbacks(ngtcp2_callbacks* cbs, bool is_server) {
   cbs->handshake_completed = &quic_session::cb_handshake_completed;
   cbs->recv_stream_data = &quic_session::cb_recv_stream_data;
   cbs->recv_datagram = &quic_session::cb_recv_datagram;
+  // 路径校验结果（#53）。这一格**必须**填：不填的话 ngtcp2 仍会自己校验，
+  // 但应用看不到"新路径可不可用"。
+  cbs->path_validation = &quic_session::cb_path_validation;
   cbs->acked_stream_data_offset = &quic_session::cb_acked_stream_data_offset;
   cbs->stream_open = &quic_session::cb_stream_open;
   // 只填 `_2` 那一格：填了它之后 ngtcp2 就不再调另一个（`stream_close`），
@@ -358,8 +415,6 @@ void quic_session::fill_callbacks(ngtcp2_callbacks* cbs, bool is_server) {
 
   // **故意没填的几格，写在这里免得后来人以为是漏了：**
   //
-  // - `path_validation`：本层不做连接迁移 —— 地址对不上的包直接按"不可用路径"
-  //   丢掉（见 `read_pkt` 里那段）。
   // - `stream_stop_sending`：**"本端自己把读方向关了"的事后通知**，不是对端的
   //   动作（对端的那个是上面刚填的 `recv_stop_sending`）。不填有两条理由，
   //   第二条是硬的：
@@ -799,6 +854,10 @@ int quic_session::read_pkt(const uint8_t* data, size_t len,
     const int mapped = handle_conn_error(rv);
     if (mapped != 0) return mapped;
   }
+
+  // 对端换了源地址（NAT rebinding / 迁移）：ngtcp2 自己完成了路径校验，这里
+  // 只把"当前路径变了"这件事报给应用，并更新本地那份快照。
+  note_current_path();
 
   // 回调期间攒下的意图到这里才兑现。**先关后发**：已经要关了就不必再发数据。
   if (want_close_) {
@@ -1899,6 +1958,52 @@ int quic_session::cb_recv_datagram(ngtcp2_conn* conn, uint32_t flags,
     self->events_.on_datagram(data, datalen);
   }
   return 0;
+}
+
+int quic_session::cb_path_validation(ngtcp2_conn*, uint32_t, const ngtcp2_path* path,
+                                    const ngtcp2_path*, ngtcp2_path_validation_result res,
+                                    void* user_data) {
+  quic_session* self = static_cast<quic_session*>(user_data);
+  cb_guard guard(self->in_callback_);
+  if (path != nullptr && self->events_.on_path_validation != nullptr) {
+    std::string ip;
+    int         port = 0;
+    if (addr_to_text(path->remote.addr, path->remote.addrlen, ip, port)) {
+      self->events_.on_path_validation(
+          ip, port, res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS);
+    }
+  }
+  return 0;
+}
+
+bool quic_session::note_current_path() {
+  if (conn_ == nullptr) return false;
+  const ngtcp2_path* cur = ngtcp2_conn_get_path2(conn_);
+  if (cur == nullptr || cur->remote.addr == nullptr ||
+      cur->remote.addrlen == 0) {
+    return false;
+  }
+  if (path_.path.remote.addr != nullptr &&
+      same_ep(cur->remote.addr, cur->remote.addrlen, path_.path.remote.addr,
+              path_.path.remote.addrlen)) {
+    return false;
+  }
+  if (cur->remote.addrlen > (ngtcp2_socklen)sizeof(path_.remote_addrbuf)) {
+    return false;
+  }
+  std::memcpy(&path_.remote_addrbuf, cur->remote.addr, cur->remote.addrlen);
+  path_.path.remote.addr =
+      reinterpret_cast<ngtcp2_sockaddr*>(&path_.remote_addrbuf);
+  path_.path.remote.addrlen = cur->remote.addrlen;
+
+  if (events_.on_path_changed != nullptr) {
+    std::string ip;
+    int         port = 0;
+    if (addr_to_text(cur->remote.addr, cur->remote.addrlen, ip, port)) {
+      events_.on_path_changed(ip, port);
+    }
+  }
+  return true;
 }
 
 int quic_session::cb_acked_stream_data_offset(ngtcp2_conn* conn,

@@ -144,6 +144,18 @@ void uvcpp_quic_connection::endpoint::attach(
     }
   };
 
+  ev.on_path_validation = [&c](const std::string& ip, int port, bool success) {
+    if (c.impl_->cbs.on_path_validation != nullptr) {
+      c.impl_->cbs.on_path_validation(c, ip, port, success);
+    }
+  };
+
+  ev.on_path_changed = [&c](const std::string& ip, int port) {
+    if (c.impl_->cbs.on_path_changed != nullptr) {
+      c.impl_->cbs.on_path_changed(c, ip, port);
+    }
+  };
+
   // 读侧的"没有更多了"由两件事各自的**到达**时刻报，不由流的关闭报：
   // FIN 在 `on_stream_data` 那一格里已经报过 `PEER_CLOSED`，reset 在下面那一格
   // 里报。`on_stream_close` 是"两个方向都收场了"的记账事件，**在读侧它没有

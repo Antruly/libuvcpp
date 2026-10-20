@@ -186,6 +186,25 @@ class UVCPP_API uvcpp_quic_connection {
     std::function<void(uvcpp_quic_connection&, const uint8_t* data,
                        size_t datalen)>
         on_datagram;
+
+    /**
+     * @brief 一次路径校验的结果（RFC 9000 §8.2，#53）。
+     *
+     * `success == false` 表示这个新地址不可用；`on_path_changed` 不会为它响。
+     * 典型触发是对端换了源地址（NAT rebinding）或主动迁移。
+     */
+    std::function<void(uvcpp_quic_connection&, const std::string& ip, int port,
+                       bool success)>
+        on_path_validation;
+
+    /**
+     * @brief 当前发送路径的远端变了（路径校验已成功、ngtcp2 已完成迁移）。
+     *
+     * 之后 `send_*` 的目的地址就是 `ip:port` —— 应用通常只需要记日志或更新
+     * 调试器里显示的对端地址。
+     */
+    std::function<void(uvcpp_quic_connection&, const std::string& ip, int port)>
+        on_path_changed;
   };
 
   UVCPP_DEFINE_FUNC(uvcpp_quic_connection)
