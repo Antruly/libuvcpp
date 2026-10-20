@@ -193,6 +193,16 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     if (!token_alive(life)) return;
     stream_rec& s = stream_of(stream_id);
     s.headers_done = true;
+    // extended CONNECT（#53）：请求头收全就交给应用 —— 这条流不会读侧收场，
+    // 等 `on_end_stream` 等于永远等不到。`req.protocol` 非空即为此类。
+    if (server_side_ && !s.req.protocol.empty() && !s.dispatched) {
+      s.dispatched = true;
+      s.raw        = true;
+      std::function<void(uvcpp_h3_connection&, const h3_request&)> cb;
+      if (cbs_.on_connect_request) cb = cbs_.on_connect_request;
+      if (cb) cb(*this, s.req);
+      return;
+    }
     // 头块带 FIN = 这条流没有 body。服务端这边请求已经全了，可以交出去了；
     // 客户端那边**不能**在这里收工 —— 头块结束不代表响应结束的判据要靠
     // `on_end_stream`，两条路都留着，靠 `dispatched` / `completed` 各挡一次。
@@ -226,6 +236,10 @@ void uvcpp_h3_connection::wire_session_callbacks() {
                             const char* data, size_t len) {
     if (!token_alive(life)) return;
     stream_rec& s = stream_of(stream_id);
+    if (s.raw) {
+      if (s.sink_data) s.sink_data(data, len);
+      return;
+    }
     std::string& body = server_side_ ? s.req.body : s.resp.body;
     if (s.overflowed) return;
     if (body.size() + len > H3_DEFAULT_MAX_BODY_BYTES) {
@@ -246,6 +260,12 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     if (!token_alive(life)) return;
     stream_rec& s = stream_of(stream_id);
     s.rx_done = true;
+    if (s.raw) {
+      if (s.sink_end) s.sink_end();
+      if (!token_alive(life)) return;
+      maybe_close_stream(stream_id);
+      return;
+    }
     if (server_side_) {
       dispatch_request(stream_id);
     } else if (s.local && s.request) {
@@ -836,6 +856,84 @@ int uvcpp_h3_connection::send_response(const h3_response& resp,
   }
   flush();
   return 0;
+}
+
+int uvcpp_h3_connection::send_stream_response(
+    int64_t stream_id, const std::vector<h3_header>& headers) {
+  if (conn_ == nullptr || session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  const int rc = session_->submit_stream_response(stream_id, headers);
+  if (rc != 0) return rc;
+  flush();
+  return 0;
+}
+
+int64_t uvcpp_h3_connection::send_stream_request(const h3_request& req) {
+  if (conn_ == nullptr || session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  if (server_side_) return UV_EINVAL;
+  if (!ready_) return UV_EAGAIN;
+  const int64_t sid = conn_->open_stream(true);
+  if (sid < 0) return sid;
+
+  stream_rec rec;
+  rec.local   = true;
+  rec.request = true;
+  rec.req.stream_id  = sid;
+  rec.resp.stream_id = sid;
+  streams_.insert(std::make_pair(sid, rec));
+
+  std::vector<h3_header> hs;
+  hs.push_back(make_pseudo(":method", "CONNECT", h3_header_kind::METHOD));
+  hs.push_back(make_pseudo(":scheme",
+                           req.scheme.empty() ? std::string("https")
+                                              : req.scheme,
+                           h3_header_kind::SCHEME));
+  if (!req.authority.empty()) {
+    hs.push_back(
+        make_pseudo(":authority", req.authority, h3_header_kind::AUTHORITY));
+  }
+  hs.push_back(make_pseudo(
+      ":path", req.path.empty() ? std::string("/") : req.path,
+      h3_header_kind::PATH));
+  hs.push_back(make_pseudo(":protocol", req.protocol, h3_header_kind::PROTOCOL));
+  for (size_t i = 0; i < req.headers.size(); ++i) hs.push_back(req.headers[i]);
+
+  const int rc = session_->submit_stream_request(sid, hs);
+  if (rc != 0) {
+    streams_.erase(sid);
+    return rc;
+  }
+  flush();
+  return sid;
+}
+
+int uvcpp_h3_connection::write_stream_data(int64_t stream_id,
+                                           const char* data, size_t len) {
+  if (session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  const int rc = session_->write_stream_data(stream_id, data, len, false);
+  if (rc != 0) return rc;
+  flush();
+  return 0;
+}
+
+int uvcpp_h3_connection::end_stream_data(int64_t stream_id) {
+  if (session_ == nullptr) return UV_ENOTCONN;
+  if (closed_ || fatal_) return UV_ENOTCONN;
+  const int rc = session_->write_stream_data(stream_id, nullptr, 0, true);
+  if (rc != 0) return rc;
+  flush();
+  return 0;
+}
+
+void uvcpp_h3_connection::set_stream_sink(
+    int64_t stream_id, std::function<void(const char*, size_t)> on_data,
+    std::function<void()> on_end) {
+  stream_rec& s = stream_of(stream_id);
+  s.raw        = true;
+  s.sink_data  = std::move(on_data);
+  s.sink_end   = std::move(on_end);
 }
 
 int uvcpp_h3_connection::send_trailers(

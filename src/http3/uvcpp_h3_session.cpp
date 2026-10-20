@@ -465,6 +465,94 @@ int uvcpp_h3_session::submit_trailers(
   return nghttp3_conn_submit_trailers(conn_, stream_id, nva.data(), nva.size());
 }
 
+int uvcpp_h3_session::submit_stream_response(
+    int64_t stream_id, const std::vector<h3_header>& headers) {
+  if (conn_ == nullptr) return UV_EINVAL;
+  if (fatal_) return last_error_ != 0 ? last_error_ : -1;
+  std::vector<nghttp3_nv> nva;
+  nva.reserve(headers.size());
+  for (size_t i = 0; i < headers.size(); ++i) {
+    const h3_header& h = headers[i];
+    if (h.name.empty()) return UV_EINVAL;
+    if (h.kind == h3_header_kind::REGULAR &&
+        h3_is_connection_specific(h.name)) {
+      continue;
+    }
+    nghttp3_nv nv;
+    nv.name     = reinterpret_cast<const uint8_t*>(h.name.data());
+    nv.value    = reinterpret_cast<const uint8_t*>(h.value.data());
+    nv.namelen  = h.name.size();
+    nv.valuelen = h.value.size();
+    nv.flags    = NGHTTP3_NV_FLAG_NONE;
+    nva.push_back(nv);
+  }
+  if (nva.empty()) return UV_EINVAL;
+  nghttp3_data_reader dr;
+  dr.read_data = &uvcpp_h3_session::cb_read_data;
+  const int rv = nghttp3_conn_submit_response(conn_, stream_id, nva.data(),
+                                              nva.size(), &dr);
+  if (rv != 0) return rv;
+  stream_rec& s = stream_of(stream_id);
+  s.out_streaming = true;
+  s.out_eof       = false;
+  s.out_pending.clear();
+  s.out_handed.clear();
+  s.out_handed_acked = 0;
+  s.state = h3_stream_state::HEADERS_DONE;
+  return 0;
+}
+
+int uvcpp_h3_session::submit_stream_request(
+    int64_t stream_id, const std::vector<h3_header>& headers) {
+  if (conn_ == nullptr) return UV_EINVAL;
+  if (fatal_) return last_error_ != 0 ? last_error_ : -1;
+  std::vector<nghttp3_nv> nva;
+  nva.reserve(headers.size());
+  for (size_t i = 0; i < headers.size(); ++i) {
+    const h3_header& h = headers[i];
+    if (h.name.empty()) return UV_EINVAL;
+    if (h.kind == h3_header_kind::REGULAR &&
+        h3_is_connection_specific(h.name)) {
+      continue;
+    }
+    nghttp3_nv nv;
+    nv.name     = reinterpret_cast<const uint8_t*>(h.name.data());
+    nv.value    = reinterpret_cast<const uint8_t*>(h.value.data());
+    nv.namelen  = h.name.size();
+    nv.valuelen = h.value.size();
+    nv.flags    = NGHTTP3_NV_FLAG_NONE;
+    nva.push_back(nv);
+  }
+  if (nva.empty()) return UV_EINVAL;
+  nghttp3_data_reader dr;
+  dr.read_data = &uvcpp_h3_session::cb_read_data;
+  const int rv = nghttp3_conn_submit_request(conn_, stream_id, nva.data(),
+                                             nva.size(), &dr, nullptr);
+  if (rv != 0) return rv;
+  stream_rec& s = stream_of(stream_id);
+  s.out_streaming = true;
+  s.out_eof       = false;
+  s.out_pending.clear();
+  s.out_handed.clear();
+  s.out_handed_acked = 0;
+  s.state = h3_stream_state::HEADERS_DONE;
+  return 0;
+}
+
+int uvcpp_h3_session::write_stream_data(int64_t stream_id, const char* data,
+                                        size_t len, bool fin) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  std::map<int64_t, stream_rec>::iterator it = streams_.find(stream_id);
+  if (it == streams_.end() || !it->second.out_streaming) return UV_EINVAL;
+  stream_rec& s = it->second;
+  if (s.out_eof) return UV_EINVAL;
+  if (data != nullptr && len > 0) s.out_pending.append(data, len);
+  if (fin) s.out_eof = true;
+  // 之前 reader 返回过 WOULDBLOCK 的话，这一句把它重新排上。
+  nghttp3_conn_resume_stream(conn_, stream_id);
+  return 0;
+}
+
 int uvcpp_h3_session::submit_response(int64_t stream_id,
                                       const std::vector<h3_header>& headers,
                                       std::string body, bool omit_body) {
@@ -841,6 +929,16 @@ int uvcpp_h3_session::cb_acked_stream_data(nghttp3_conn*, int64_t stream_id,
   uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
   cb_guard          g(&self->in_callback_);
 
+  std::map<int64_t, stream_rec>::iterator it = self->streams_.find(stream_id);
+  if (it != self->streams_.end() && it->second.out_streaming) {
+    stream_rec& s = it->second;
+    s.out_handed_acked += static_cast<size_t>(datalen);
+    while (!s.out_handed.empty() &&
+           s.out_handed_acked >= s.out_handed.front().size()) {
+      s.out_handed_acked -= s.out_handed.front().size();
+      s.out_handed.pop_front();
+    }
+  }
   if (self->cbs_.on_acked) self->cbs_.on_acked(*self, stream_id, datalen);
   return 0;
 }
@@ -861,6 +959,26 @@ nghttp3_ssize uvcpp_h3_session::cb_read_data(nghttp3_conn*, int64_t stream_id,
   if (it == self->streams_.end()) return NGHTTP3_ERR_CALLBACK_FAILURE;
 
   stream_rec&  s    = it->second;
+  if (s.out_streaming) {
+    // 活流：一次交一块，交出去的块留在 `out_handed` 里直到被确认。
+    if (!s.out_pending.empty()) {
+      s.out_handed.push_back(std::move(s.out_pending));
+      s.out_pending.clear();
+      std::string& c = s.out_handed.back();
+      vec[0].base = reinterpret_cast<uint8_t*>(&c[0]);
+      vec[0].len  = c.size();
+      if (s.out_eof) *pflags |= NGHTTP3_DATA_FLAG_EOF;
+      return 1;
+    }
+    if (s.out_eof) {
+      *pflags |= NGHTTP3_DATA_FLAG_EOF;
+      return 0;
+    }
+    // 暂时没有数据：这是 nghttp3 的"稍后再来"信号，不是 EOF。数据到了由
+    // `write_stream_data()` 调 `resume_stream()` 把这条流重新排上。
+    return NGHTTP3_ERR_WOULDBLOCK;
+  }
+
   const size_t left = s.out_body.size() - s.out_offset;
   if (left == 0) {
     *pflags |= NGHTTP3_DATA_FLAG_EOF;

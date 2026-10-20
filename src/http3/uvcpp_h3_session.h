@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <string>
@@ -399,6 +400,28 @@ class UVCPP_API uvcpp_h3_session {
                       const std::vector<h3_header>& headers);
 
   /**
+   * @brief 提交一个**活流**响应（extended CONNECT / WebSocket over h3，#53）。
+   *
+   * 与 `submit_response()` 的区别：不带固定 body、也不在提交时结束发送方向；
+   * 之后的字节用 `write_stream_data()` 排进来，`end_stream_data()` 收发送方向。
+   */
+  int submit_stream_response(int64_t stream_id,
+                             const std::vector<h3_header>& headers);
+
+  /// 提交一个**活流**请求（客户端 extended CONNECT，#53）。
+  int submit_stream_request(int64_t stream_id,
+                            const std::vector<h3_header>& headers);
+
+  /**
+   * @brief 往一条活流里排字节（#53）。
+   *
+   * 调用方之后要 `drain()`（端点层会 `flush()`）。`fin` = 发送方向到此为止。
+   * @return 0；`UV_EINVAL` = 不是活流 / 已经 fin；`UV_ENOTCONN` = 没有会话。
+   */
+  int write_stream_data(int64_t stream_id, const char* data, size_t len,
+                        bool fin = false);
+
+  /**
    * @brief 服务端：提交响应（头块 + 可选 body）。
    *
    * @param omit_body true = 只发头块、不发 body（HEAD、204、304 走这一支）。
@@ -490,6 +513,17 @@ class UVCPP_API uvcpp_h3_session {
     /// `acked_stream_data`"）。`out_body` 为空 = 没交过 body，`dr` 传 nullptr。
     std::string      out_body;
     size_t           out_offset = 0;
+    /// **活流**（extended CONNECT / WebSocket over h3，#53）：发方向由一个
+    /// 应用队列驱动，没有数据时 reader 返回 0 但**不置 EOF**，流保持开着。
+    bool             out_streaming = false;
+    bool             out_eof = false;
+    /// 还没交给 nghttp3 的字节（按提交顺序拼在这里）。
+    std::string      out_pending;
+    /// 已经交给 nghttp3、还没被确认的块。`std::deque` 的元素地址在 push_back
+    /// 时不变，而上游会一直引用这些指针到 `acked_stream_data`。
+    std::deque<std::string> out_handed;
+    /// `out_handed` 里已经被确认的字节数（从队首算）。
+    size_t           out_handed_acked = 0;
     /// `on_header_budget_exceeded` 只报一次，靠这一位。
     bool             budget_reported = false;
   };

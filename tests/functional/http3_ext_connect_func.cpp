@@ -74,7 +74,9 @@ void test_ext_connect() {
   const int lrc = server.listen([&](uvcpp_quic_connection* c) {
     srv_h3.reset(new uvcpp_h3_connection(c, /*server_side=*/true));
     uvcpp_h3_connection::callbacks cbs;
-    cbs.on_request = [&](uvcpp_h3_connection& h3, const h3_request& req) {
+    // extended CONNECT 走 `on_connect_request`（头块收全即交付；这条流没有
+    // 读侧收场）。普通请求仍走 `on_request`。
+    cbs.on_connect_request = [&](uvcpp_h3_connection& h3, const h3_request& req) {
       server_method   = req.method;
       server_protocol = req.protocol;
       server_path     = req.path;

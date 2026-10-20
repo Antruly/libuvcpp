@@ -162,6 +162,16 @@ class UVCPP_API uvcpp_h3_connection {
      */
     std::function<void(uvcpp_h3_connection&, const h3_request&)> on_request;
 
+    /**
+     * @brief 收到一条 **extended CONNECT** 请求（`:protocol` 非空，#53）。
+     *
+     * 与 `on_request` 的区别：这条流不会读侧收场（CONNECT 的数据方向要保持
+     * 开着），所以只有**头块收全**这一刻能交给应用；`req.protocol` 是协议名
+     * （例如 `"websocket"`）。应用应当在这里建立会话并回 2xx。
+     */
+    std::function<void(uvcpp_h3_connection&, const h3_request&)>
+        on_connect_request;
+
     /// 一条流关掉了（两个方向都收场之后）。`info` 里两个方向的原因码是分开的。
     std::function<void(uvcpp_h3_connection&, const h3_stream_close_info&)>
         on_stream_close;
@@ -288,6 +298,33 @@ class UVCPP_API uvcpp_h3_connection {
    */
   int send_trailers(int64_t stream_id, const std::vector<h3_header>& trailers);
 
+  // -----------------------------------------------------------------
+  // 活流（extended CONNECT / WebSocket over h3，#53）
+  // -----------------------------------------------------------------
+
+  /** @brief 提交一个活流响应（服务端 extended CONNECT 的 2xx）。 */
+  int send_stream_response(int64_t stream_id,
+                           const std::vector<h3_header>& headers);
+
+  /** @brief 客户端：开一条活流请求（extended CONNECT）。返回流号或负错误码。 */
+  int64_t send_stream_request(const h3_request& req);
+
+  /** @brief 往活流里写字节（发送方向保持开着）。 */
+  int write_stream_data(int64_t stream_id, const char* data, size_t len);
+
+  /** @brief 关闭活流的发送方向（FIN）。 */
+  int end_stream_data(int64_t stream_id);
+
+  /**
+   * @brief 把一条流标记成活流，并安装 DATA / 读侧结束的落点。
+   *
+   * 安装之后这条流的 DATA 不再进 `req.body` / `resp.body`，而是逐块交给
+   * `on_data`；读方向结束（对端 FIN / reset）交给 `on_end`。**至多装一次。**
+   */
+  void set_stream_sink(int64_t stream_id,
+                       std::function<void(const char*, size_t)> on_data,
+                       std::function<void()> on_end);
+
   /**
    * @brief 把会话里待发的字节全部写出去。可以重复调（没东西发就是空操作）。
    *
@@ -411,6 +448,11 @@ class UVCPP_API uvcpp_h3_connection {
     /// 客户端侧：这条响应攒的账；`completed` 是"那条响应已经进过完成队列了"。
     h3_response resp;
     bool     completed    = false;
+    /// **活流**（extended CONNECT，#53）：DATA 直接进 `sink_data`，不再往
+    /// `req.body` / `resp.body` 里攒；读侧结束走 `sink_end`。
+    bool raw = false;
+    std::function<void(const char*, size_t)> sink_data;
+    std::function<void()>                     sink_end;
   };
 
   /// 待确认的写。**这条 FIFO 是承重的**：`on_write` 对每次 `write_stream()`

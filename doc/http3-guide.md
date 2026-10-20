@@ -66,7 +66,7 @@
 | `h3_header` / `h3_header_kind` | `src/http3/uvcpp_h3_common.h:167`、`:136` | 一个头字段；伪头用具名枚举，不写 `":method"` 字面量 |
 | `h3_header_budget` | `src/http3/uvcpp_h3_common.h:210` | 头块尺寸预算累加器（**本层唯一的防线**，见 [§7](#7-典型坑)） |
 | `h3_stream_close_info` | `src/http3/uvcpp_h3_common.h:188` | 一条流的收场，**两个方向分开报** |
-| `uvcpp_h3_session` | `src/http3/uvcpp_h3_session.h:107` | **私有**：纯字节/事件引擎，不碰 socket、不碰 libuv、不碰 QUIC 类型 |
+| `uvcpp_h3_session` | `src/http3/uvcpp_h3_session.h:108` | **私有**：纯字节/事件引擎，不碰 socket、不碰 libuv、不碰 QUIC 类型 |
 
 **会话层与连接层的分工照抄 `src/http2/`。** 会话只管协议（收字节 / 吐字节），
 连接管字节从哪来、往哪去。跳到连接层是**客户端与 web 层**的入口：`send_request()`
@@ -188,7 +188,7 @@ int one_h3_get(uvcpp_quic_connection* quic) {
 
 - **发出去时 `stream_id` 不用填。** `send_request()` 自己开流，并把它写回结果里；
   `h3_request::stream_id` 在**收到**一侧才有意义。
-- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:262`）。
+- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:272`）。
   这是刻意的：队列里可能同时到齐几条，回调里一次性抽干会让调用方在处理第一条时
   看不见第二条的到达，于是"这次回调要不要再排一次"永远答不准。
 - **一条请求恰好在那里出现一次。** 正常收全一次（`error == 0`），中途被 reset /
@@ -398,7 +398,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 6. **链接是 PRIVATE**（`CMakeLists.txt:3045-3045` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
-   （`src/http3/uvcpp_h3_connection.h:373`），它经公开头调用、链接期解析。
+   （`src/http3/uvcpp_h3_connection.h:410`），它经公开头调用、链接期解析。
 
 7. **本机可复现**：nghttp3 也可以用
    `-DFETCHCONTENT_SOURCE_DIR_NGHTTP3=<一份已下好的 nghttp3 源码>` 指过去绕开下载
@@ -505,7 +505,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 3. **只有 FIN、没有数据的块要 `add_write_offset(sid, 0)`。**
    `nghttp3_conn_writev_stream()` 可能吐出一个零字节、只带 FIN 的块，
    `add_write_offset()` 无论如何都要调 —— 少了那一句，这个 FIN 永远发不出去。
-   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:304` 那条注释）。
+   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:305` 那条注释）。
 
 4. **别在 nghttp3 的回调里调它的写函数。** 与 nghttp2 同一条硬规矩：那会在它
    自己的栈上重入。本层的处置是"回调里只置 `want_write_`，`recv_stream_data()`
@@ -566,9 +566,13 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 - **extended CONNECT 的协议层已支持（`1.8.3-dev` 起，#53）**：会话打开
   `enable_connect_protocol`，`h3_request::protocol` 走 `:protocol`，客户端
   `send_request()` 会把 `:method` 钉成 `CONNECT`；web 层在
-  `uvcpp_http_request::protocol` 读到它。**WebSocket over h3（RFC 9220 的帧层）
-  仍未做**：`app.websocket()` 继续走 HTTP/1.1 的 `Upgrade`；这条 CONNECT 流上
-  的字节收发要调用方自己在 h3 流上做。
+  `uvcpp_http_request::protocol` 读到它。
+- **WebSocket over h3 已支持（`1.8.3-dev` 起，#53）**：
+  `uvcpp_h3_ws_connection::accept()`（服务端，在 `on_connect_request` 里）/
+  `connect()`（客户端）在这条 CONNECT 流上跑 RFC 6455 帧（文本/二进制/
+  PING/PONG/Close/分片，**无掩码**，符合 RFC 8441 §5）。**没有
+  permessage-deflate**（扩展协商留到后续）；`app.websocket()` 仍走 h1 的
+  `Upgrade`，没有自动接到 h3。
 - **QPACK 的部分可观测已支持（`1.8.3-dev` 起，#53）**：对端的 SETTINGS 走
   `callbacks::on_remote_settings` / `remote_settings()`（`qpack_max_dtable_capacity`、
   `qpack_blocked_streams`、`enable_connect_protocol`、`h3_datagram`）；

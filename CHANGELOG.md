@@ -470,6 +470,11 @@
   `enable_connect_protocol`，`h3_request::protocol` / web 层
   `uvcpp_http_request::protocol`；客户端 `send_request()` 会把 `:method` 钉成
   `CONNECT`。WebSocket over h3 的帧层仍未做。
+- **WebSocket over h3**（`1.8.3-dev`，#53）：`uvcpp_h3_ws_connection` 在
+  extended CONNECT 流上跑 RFC 6455 帧（文本/二进制/PING/PONG/Close/分片，
+  无掩码）；h3 连接新增活流数据通道（`send_stream_response()` /
+  `write_stream_data()` / `set_stream_sink()`，reader 用
+  `WOULDBLOCK` + `resume_stream` 保持长连接）。**无 permessage-deflate**。
 - **QPACK 的部分可观测**（`1.8.3-dev`，#53）：对端 SETTINGS 走
   `on_remote_settings` / `remote_settings()`（表容量、阻塞流上限、extended
   CONNECT / h3 datagram 标志）；`deferred_consume` 走
