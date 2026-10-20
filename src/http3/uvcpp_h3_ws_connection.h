@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http3/uvcpp_h3_ws_connection.h
  * @brief WebSocket over HTTP/3（RFC 9220，extended CONNECT 上的 WS 帧，#53）。
  *
