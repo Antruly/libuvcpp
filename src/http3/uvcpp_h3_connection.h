@@ -84,6 +84,15 @@ struct UVCPP_API h3_request {
   /// `host`）；发布出去的场景请填上。
   std::string authority;
   std::string path;
+  /**
+   * @brief `:protocol`（extended CONNECT，RFC 8441 / RFC 9220，#53）。
+   *
+   * 非空时 `send_request()` 会把 `:method` 钉成 `CONNECT` 并带上这个伪头；
+   * 服务端在 `on_request` 里读它（例如 `"websocket"`）。**本层只做协议形状**，
+   * 这条 CONNECT 流上的应用数据由调用方自己读写（`h3_connection` 的
+   * `on_body` / `write_stream` 那一侧）。
+   */
+  std::string protocol;
   /// 普通头，按收到/要发的顺序。
   std::vector<h3_header> headers;
   /// 请求体。**本层会在内存里攒满整个体**（上限 `H3_DEFAULT_MAX_BODY_BYTES`），
@@ -186,6 +195,16 @@ class UVCPP_API uvcpp_h3_connection {
      * 可能多次回调，`id` 只会不变或变小。
      */
     std::function<void(uvcpp_h3_connection&, int64_t id)> on_goaway;
+
+    /// 收到对端的 SETTINGS（#53）。`settings` 是对端宣告的 h3/QPACK 参数。
+    std::function<void(uvcpp_h3_connection&,
+                       const uvcpp_h3_remote_settings& settings)>
+        on_remote_settings;
+
+    /// 一条因 QPACK 同步被阻塞的流解除了，`consumed` 是放开的字节数（#53）。
+    std::function<void(uvcpp_h3_connection&, int64_t stream_id,
+                       size_t consumed)>
+        on_deferred_consume;
   };
 
   /**
@@ -300,6 +319,22 @@ class UVCPP_API uvcpp_h3_connection {
 
   /** @brief 对端最近一封 GOAWAY 的 `id`；没收到过时是 0。 */
   int64_t peer_goaway_last_stream_id() const;
+
+  // -----------------------------------------------------------------
+  // QPACK / 对端 SETTINGS 观测（#53）
+  // -----------------------------------------------------------------
+
+  /** @brief 收到过对端的 SETTINGS 没有。 */
+  bool has_remote_settings() const;
+
+  /** @brief 对端宣告的 h3/QPACK 参数（没收到过时全 0）。 */
+  uvcpp_h3_remote_settings remote_settings() const;
+
+  /** @brief 因 QPACK 同步被阻塞的流解除过几次（`deferred_consume` 次数）。 */
+  uint64_t blocked_stream_events() const;
+
+  /** @brief 这些解除一共放开了多少字节。 */
+  uint64_t blocked_stream_bytes() const;
 
   // -----------------------------------------------------------------
   // 收场与查询
@@ -451,6 +486,13 @@ class UVCPP_API uvcpp_h3_connection {
   /// 栈退干净之后的 `flush()` 里再兑现（写函数禁止重入）。
   bool shutdown_notice_pending_ = false;
   bool shutdown_pending_        = false;
+
+  /// 对端 SETTINGS（#53）。
+  bool                    have_remote_settings_ = false;
+  uvcpp_h3_remote_settings remote_settings_;
+  /// `deferred_consume` 的累计账（只做观测，不拿来还 QUIC 流控）。
+  uint64_t blocked_stream_events_ = 0;
+  uint64_t blocked_stream_bytes_  = 0;
 
   /// 还没开出来的关键流条数（3 → 0）。额度没到时停在 1..3。
   int      critical_left_ = 3;

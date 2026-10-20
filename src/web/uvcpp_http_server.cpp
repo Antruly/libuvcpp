@@ -241,6 +241,7 @@ bool h3_to_web_request(const h3_request& in, uvcpp_http_request& out) {
 
   out.method    = m;
   out.url       = in.path;
+  out.protocol  = in.protocol;
   out.version   = uvcpp_http_version::HVER_30;
   out.stream_id = static_cast<int32_t>(in.stream_id);
 

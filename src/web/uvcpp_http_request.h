@@ -48,6 +48,13 @@ class UVCPP_API uvcpp_http_request {
    * `uvcpp_h3_connection::send_trailers()`（本层不替 HTTP 客户端发请求 trailers）。
    */
   http_headers  trailers;
+  /**
+   * @brief `:protocol`（extended CONNECT，仅 h3；#53）。
+   *
+   * 非空时 h3 客户端会把 `:method` 钉成 `CONNECT`；服务端在 h3 请求里读到它。
+   * h1/h2 上恒为空（那两条腿没有 extended CONNECT）。
+   */
+  std::string   protocol;
   uvcpp_buf     body;
 
   /**

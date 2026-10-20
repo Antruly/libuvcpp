@@ -695,8 +695,10 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
   无流控；本端宣告的上限是 1400 字节的帧）。
 - **连接迁移的“通知”已支持（`1.8.2` 起，#53）**：对端换源地址（NAT rebinding）
   时，路径校验结果走 `callbacks::on_path_validation(success)`，ngtcp2 完成迁移后
-  走 `callbacks::on_path_changed(ip, port)` —— 之后发包用的就是新地址。**主动
-  迁移的入口没有接**（`ngtcp2_conn_initiate_migration` 不在公开面上）。
+  走 `callbacks::on_path_changed(ip, port)` —— 之后发包用的就是新地址。
+  **客户端可以主动迁移**（`1.8.3-dev` 起，#53）：
+  `uvcpp_quic_client::migrate_local_address()` 换一个本地 UDP 源端口并走 ngtcp2
+  的路径校验；服务端只能被动接受（NAT rebinding）。
 - **明确不支持 0-RTT。** 客户端不缓存/复用会话票据，也不发送 early data；
   `early_data` 状态没有公开面。服务端即使收到 0-RTT 包，也没有应用可见的入口。
   **无状态重置（stateless reset 处理）与 multipath 同样没有。** 这三样都是协议级

@@ -2231,6 +2231,7 @@ int uvcpp_http_client::send_h3(
 
   h3_request h3r;
   h3r.method    = http_method_str(out.method);
+  h3r.protocol  = out.protocol;
   h3r.authority = out.get_header("host");
   h3r.path      = out.url.empty() ? std::string("/") : out.url;
   // `scheme` 留空 —— `send_request()` 会把它缺省成 `https`，而那个默认值在 h3

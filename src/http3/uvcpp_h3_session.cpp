@@ -108,6 +108,7 @@ h3_header_kind kind_of_token(int32_t token) {
     case NGHTTP3_QPACK_TOKEN__PATH:      return h3_header_kind::PATH;
     case NGHTTP3_QPACK_TOKEN__STATUS:    return h3_header_kind::STATUS;
     case NGHTTP3_QPACK_TOKEN__AUTHORITY: return h3_header_kind::AUTHORITY;
+    case NGHTTP3_QPACK_TOKEN__PROTOCOL:  return h3_header_kind::PROTOCOL;
     default:                             return h3_header_kind::REGULAR;
   }
 }
@@ -169,6 +170,8 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   ncb.reset_stream      = &uvcpp_h3_session::cb_reset_stream;
   ncb.stream_close2     = &uvcpp_h3_session::cb_stream_close2;
   ncb.shutdown          = &uvcpp_h3_session::cb_shutdown;
+  ncb.recv_settings2    = &uvcpp_h3_session::cb_recv_settings2;
+  ncb.deferred_consume  = &uvcpp_h3_session::cb_deferred_consume;
 
   // 刻意**留空**的几格，都是有名字的取舍，不是忘了填：
   //
@@ -178,9 +181,6 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   // - `recv_settings` / `recv_settings2`：本层不因对端的 SETTINGS 改自己的行为。
   //   唯一想读的是对端的 `max_field_section_size`，而那个值 nghttp3 压根不给
   //   应用看（可参照的是我们在**发**方向的自觉上限，见 `H3_MAX_SEND_HEADER_BLOCK`）。
-  // - `deferred_consume`：只在"流之间互相阻塞、后来解开了"时报账。我们的 QUIC
-  //   层在收到字节时就当场还过流控了（`cb_recv_stream_data`），这份账在我们这里
-  //   没有下家（理由见 `recv_stream_data()` 的 `@warning`）。
   // - `recv_origin` / `end_origin`：ORIGIN 帧（RFC 9412）本批不做。
   // - `rand`：上游建议填（拿去加固对可疑对端的随机化）。**这一格留空是有代价的**，
   //   如实记在 doc 的"没做的"表里，不是"忘了"。
@@ -193,6 +193,9 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   settings.max_field_section_size = max_field_section_size;
   settings.qpack_max_dtable_capacity = qpack_max_dtable_capacity;
   settings.qpack_blocked_streams     = qpack_blocked_streams;
+  // extended CONNECT（RFC 8441 / RFC 9220，#53）：告诉对端我们接受
+  // `:protocol`。**只打开能力，不替应用决定协议名**。
+  settings.enable_connect_protocol   = 1;
 
   const int rv =
       server_side_
@@ -735,6 +738,32 @@ int uvcpp_h3_session::cb_shutdown(nghttp3_conn*, int64_t id, void* ud) {
   uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
   cb_guard          g(&self->in_callback_);
   if (self->cbs_.on_shutdown) self->cbs_.on_shutdown(*self, id);
+  return 0;
+}
+
+int uvcpp_h3_session::cb_recv_settings2(
+    nghttp3_conn*, const nghttp3_proto_settings* settings, void* ud) {
+  uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
+  cb_guard          g(&self->in_callback_);
+  if (settings != nullptr && self->cbs_.on_remote_settings) {
+    uvcpp_h3_remote_settings out;
+    out.max_field_section_size    = settings->max_field_section_size;
+    out.qpack_max_dtable_capacity = settings->qpack_max_dtable_capacity;
+    out.qpack_blocked_streams     = settings->qpack_blocked_streams;
+    out.enable_connect_protocol   = settings->enable_connect_protocol != 0;
+    out.h3_datagram               = settings->h3_datagram != 0;
+    self->cbs_.on_remote_settings(out);
+  }
+  return 0;
+}
+
+int uvcpp_h3_session::cb_deferred_consume(nghttp3_conn*, int64_t stream_id,
+                                          size_t consumed, void* ud, void*) {
+  uvcpp_h3_session* self = static_cast<uvcpp_h3_session*>(ud);
+  cb_guard          g(&self->in_callback_);
+  if (self->cbs_.on_deferred_consume) {
+    self->cbs_.on_deferred_consume(stream_id, consumed);
+  }
   return 0;
 }
 

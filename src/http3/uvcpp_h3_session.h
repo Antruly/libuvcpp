@@ -231,6 +231,13 @@ class UVCPP_API uvcpp_h3_session {
      * 可能在同一连接上多次回调，`id` 只会不变或变小。
      */
     std::function<void(uvcpp_h3_session&, int64_t id)> on_shutdown;
+
+    /// 收到对端的 SETTINGS（#53）。只报一次（对端重发 SETTINGS 时会再报）。
+    std::function<void(const uvcpp_h3_remote_settings&)> on_remote_settings;
+
+    /// 一条因 QPACK 同步而**被阻塞的流**后来解除了，`consumed` 是这次放开的
+    /// 字节数（#53）。本层不拿它还流控（QUIC 层收到时就还过了），只用于观测。
+    std::function<void(int64_t stream_id, size_t consumed)> on_deferred_consume;
   };
 
   /// @param server_side true 建服务端会话（等对端提请求），false 建客户端会话。
@@ -524,6 +531,12 @@ class UVCPP_API uvcpp_h3_session {
                                   uint64_t datalen, void* conn_user_data,
                                   void* stream_user_data);
   static int cb_shutdown(nghttp3_conn* conn, int64_t id, void* conn_user_data);
+  static int cb_recv_settings2(nghttp3_conn* conn,
+                               const nghttp3_proto_settings* settings,
+                               void* conn_user_data);
+  static int cb_deferred_consume(nghttp3_conn* conn, int64_t stream_id,
+                                 size_t consumed, void* conn_user_data,
+                                 void* stream_user_data);
   static nghttp3_ssize cb_read_data(nghttp3_conn* conn, int64_t stream_id,
                                     nghttp3_vec* vec, size_t veccnt,
                                     uint32_t* pflags, void* conn_user_data,

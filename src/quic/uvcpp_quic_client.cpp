@@ -612,6 +612,64 @@ int uvcpp_quic_client::connect(const char* host, int port,
 
 uvcpp_quic_connection* uvcpp_quic_client::connection() { return impl_->conn; }
 
+int uvcpp_quic_client::migrate_local_address() {
+  if (impl_->conn == nullptr || impl_->udp == nullptr) return UV_ENOTCONN;
+  quic_detail::quic_session* s = impl_->sess();
+  if (s == nullptr) return UV_ENOTCONN;
+
+  uvcpp_udp* nu = new uvcpp_udp(impl_->loop);
+  if (nu == nullptr) return UV_ENOMEM;
+
+  sockaddr_storage wild{};
+  int wild_len = 0;
+  make_wildcard(impl_->remote_sa.ss_family, &wild, &wild_len);
+  int rc = nu->bind(reinterpret_cast<const struct sockaddr*>(&wild), 0);
+  if (rc != 0) {
+    delete nu;
+    return rc;
+  }
+
+  sockaddr_storage local{};
+  int local_len = static_cast<int>(sizeof(local));
+  rc = nu->getsockname(reinterpret_cast<struct sockaddr*>(&local), &local_len);
+  if (rc != 0) {
+    delete nu;
+    return rc;
+  }
+
+  impl* e = impl_.get();
+  rc = nu->recv_start(
+      [](uvcpp_handle*, size_t, uv_buf_t* buf) {
+        uvcpp_buf::alloc_buf(buf, kRecvBufLen);
+      },
+      [e](uvcpp_udp*, ssize_t nread, const uv_buf_t* buf,
+          const struct sockaddr* addr, unsigned int flags) {
+        e->on_recv(nread, buf, addr, flags);
+      });
+  if (rc != 0) {
+    delete nu;
+    return rc;
+  }
+
+  // 先换 socket 再发起：`initiate_migration()` 会立刻 `flush()` 出校验探测包，
+  // 那些包必须从**新**源端口出去，否则对端看到的还是旧路径。
+  uvcpp_udp* old = impl_->udp;
+  impl_->udp = nu;
+  rc = s->initiate_migration(
+      reinterpret_cast<const struct sockaddr*>(&local),
+      reinterpret_cast<const struct sockaddr*>(&impl_->remote_sa));
+  if (rc != 0) {
+    impl_->udp = old;
+    delete nu;
+    return rc;
+  }
+  impl_->gso_seg   = 0;
+  impl_->local_sa  = local;
+  impl_->local_len = local_len;
+  delete old;
+  return 0;
+}
+
 int uvcpp_quic_client::close() {
   if (impl_->conn == nullptr) return UV_ENOTCONN;
   quic_detail::quic_session* s = impl_->sess();

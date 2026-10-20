@@ -140,6 +140,22 @@ enum class h3_header_kind {
   PATH,       ///< `:path`
   STATUS,     ///< `:status`
   AUTHORITY,  ///< `:authority`
+  PROTOCOL,   ///< `:protocol`（extended CONNECT，#53）
+};
+
+/**
+ * @brief 对端在 SETTINGS 里宣告的 h3 参数（#53 的 QPACK/扩展可观测面）。
+ *
+ * **这是对端的声明，不是本连接当前的 QPACK 动态表状态** —— 当前动态表大小与
+ * 当前阻塞流数在 nghttp3 的内部结构里，公开头拿不到（见 `doc/http3-guide.md`
+ * §8）。这里给的是对端愿意收什么，调试器足够用它标注"对端开了多大的表"。
+ */
+struct UVCPP_API uvcpp_h3_remote_settings {
+  uint64_t max_field_section_size      = 0;
+  size_t   qpack_max_dtable_capacity   = 0;
+  size_t   qpack_blocked_streams       = 0;
+  bool     enable_connect_protocol     = false;
+  bool     h3_datagram                 = false;
 };
 
 /**

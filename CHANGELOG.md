@@ -248,6 +248,9 @@
 
 ### QUIC 传输（net 层）
 
+- **客户端主动迁移**（`1.8.3-dev`，#53）：`uvcpp_quic_client::migrate_local_address()`
+  换一个本地 UDP 源端口并发起 ngtcp2 路径校验；服务端看到新源地址后按被动迁移
+  处理。被动迁移的通知（`on_path_validation` / `on_path_changed`）上一版已有。
 - **DATAGRAM（RFC 9221）**（`1.8.2`，#53）：`send_datagram()` / `on_datagram` /
   `max_datagram_size()`，宣告 1400 字节帧上限；发送队列 1 MiB 上限，空负载
   `UV_EINVAL`、超限 `UV_EMSGSIZE`。
@@ -463,6 +466,15 @@
 
 ### HTTP/3（web 层）
 
+- **extended CONNECT 的协议层**（`1.8.3-dev`，#53）：打开
+  `enable_connect_protocol`，`h3_request::protocol` / web 层
+  `uvcpp_http_request::protocol`；客户端 `send_request()` 会把 `:method` 钉成
+  `CONNECT`。WebSocket over h3 的帧层仍未做。
+- **QPACK 的部分可观测**（`1.8.3-dev`，#53）：对端 SETTINGS 走
+  `on_remote_settings` / `remote_settings()`（表容量、阻塞流上限、extended
+  CONNECT / h3 datagram 标志）；`deferred_consume` 走
+  `on_deferred_consume` 并累计次数/字节。**当前动态表大小与当前阻塞流数仍拿不到**
+  （nghttp3 1.18 无公开访问器）。
 - **GOAWAY 平滑退场**（`1.8.2`，#53）：`shutdown_notice()` / `shutdown()` /
   `is_drained()`，对端 GOAWAY 走 `on_goaway` + `peer_goaway_*()`；
   `uvcpp_http_client` 把 `id` 以上的在途请求标 `retryable`。
@@ -1313,7 +1325,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **流水线里末条的 `Connection: close` 会把前面几条的响应一起带走**（`1.6.46-dev`）。
   HTTP/1.1 流水线（一次读缓冲里多条请求）下，**异步响应**的第 1 条在序列化时问的是
   `uvcpp_http_server` 里那句 `ctx.parser->should_keep_alive()`
-  （`src/web/uvcpp_http_server.cpp:1691-1691`），而 llhttp 的 flags 是**连接级**的、
+  （`src/web/uvcpp_http_server.cpp:1692-1692`），而 llhttp 的 flags 是**连接级**的、
   属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
   读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
   响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2769-2769` 打
@@ -1326,7 +1338,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
   读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
   （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。
-  HTTP 层本来就认显式头（`src/web/uvcpp_http_server.cpp:1692-1695`）、`begin_stream` 也认（`src/web/uvcpp_http_server.cpp:1811-1816`），所以
+  HTTP 层本来就认显式头（`src/web/uvcpp_http_server.cpp:1693-1696`）、`begin_stream` 也认（`src/web/uvcpp_http_server.cpp:1812-1817`），所以
   **整包 / 尾随头 / 流式**三条出口一并覆盖，且 `handler` 自己设过 `connection` 的
   仍然说了算。放在「发送前」而不是「派发时」：处理函数跑之前响应表必须还是空的
   （那条既有约定由 `web_app_app_func.cpp` 的 `response_header_capacity_reused` 正对照

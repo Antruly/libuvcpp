@@ -150,6 +150,18 @@ class UVCPP_API uvcpp_quic_client {
   uvcpp_quic_connection* connection();
 
   /**
+   * @brief **客户端主动迁移**：换一个本地 UDP 源端口并对新路径做校验（#53）。
+   *
+   * 新 socket 绑到同族的通配地址 + 端口 0；校验（PATH_CHALLENGE/RESPONSE）由
+   * ngtcp2 完成，结果走 `uvcpp_quic_connection::callbacks::on_path_validation`。
+   * 服务端会看到一个新的源地址；成功后本端发包改用新 socket。
+   *
+   * @return 0 = 已发起；`UV_ENOTCONN` = 没连接；其余 = libuv/ngtcp2 错误码
+   *         （发起失败时旧 socket 原样保留）。
+   */
+  int migrate_local_address();
+
+  /**
    * @brief 关掉端点与它名下的连接：先发 CONNECTION_CLOSE，再收 socket 与定时器。
    *
    * @return 0 = 关掉了（或本来就没东西可关）；`UV_ENOTCONN` = 没连过。

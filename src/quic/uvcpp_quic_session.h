@@ -450,6 +450,16 @@ class quic_session {
   /// 对端愿意收的最大 DATAGRAM **帧**大小（0 = 对端不支持）。
   size_t max_datagram_size() const;
 
+  /**
+   * @brief **客户端主动迁移**：在 `local` 上发起路径校验（RFC 9000 §9.5，#53）。
+   *
+   * `remote` 必须是当前对端地址。返回 0 = 已发起（校验结果走
+   * `on_path_validation`，成功后当前路径切到 `local`）；负值 = ngtcp2 错误码。
+   * 服务端没有这个入口（迁移只能由客户端发起）。
+   */
+  int initiate_migration(const struct sockaddr* local,
+                         const struct sockaddr* remote);
+
   /// 给本类内部的 ngtcp2 静态回调取回 `this` 用（`crypto_get_conn` 也要）。
   ngtcp2_conn* raw_conn() const { return conn_; }
 

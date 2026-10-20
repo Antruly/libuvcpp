@@ -170,6 +170,9 @@ void uvcpp_h3_connection::wire_session_callbacks() {
         case h3_header_kind::AUTHORITY:
           s.req.authority = field.value;
           return;
+        case h3_header_kind::PROTOCOL:
+          s.req.protocol = field.value;
+          return;
         default:
           // `:status` 出现在请求里是协议错（nghttp3 自己会拦），落到这里说明
           // 上游放行了 —— 当普通头处理，不另造分支。
@@ -293,6 +296,25 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     std::function<void(uvcpp_h3_connection&, int64_t)> cb;
     if (cbs_.on_goaway) cb = cbs_.on_goaway;
     if (cb) cb(*this, id);
+  };
+
+  sc.on_remote_settings = [this, life](const uvcpp_h3_remote_settings& st) {
+    if (!token_alive(life)) return;
+    have_remote_settings_ = true;
+    remote_settings_      = st;
+    std::function<void(uvcpp_h3_connection&, const uvcpp_h3_remote_settings&)>
+        cb;
+    if (cbs_.on_remote_settings) cb = cbs_.on_remote_settings;
+    if (cb) cb(*this, st);
+  };
+
+  sc.on_deferred_consume = [this, life](int64_t stream_id, size_t consumed) {
+    if (!token_alive(life)) return;
+    ++blocked_stream_events_;
+    blocked_stream_bytes_ += consumed;
+    std::function<void(uvcpp_h3_connection&, int64_t, size_t)> cb;
+    if (cbs_.on_deferred_consume) cb = cbs_.on_deferred_consume;
+    if (cb) cb(*this, stream_id, consumed);
   };
 
   sc.on_stop_sending = [this, life](uvcpp_h3_session&, int64_t stream_id,
@@ -738,10 +760,15 @@ int64_t uvcpp_h3_connection::send_request(const h3_request& req) {
   rec.resp.stream_id = sid;
   streams_.insert(std::make_pair(sid, rec));
 
+  // extended CONNECT（#53）：`:protocol` 非空时 `:method` 必须是 CONNECT
+  // （RFC 8441 §4）。调用方填错了就直接钉成 CONNECT，而不是发一条对端会以
+  // H3_MESSAGE_ERROR 拒掉的请求。
+  const bool ext_connect = !req.protocol.empty();
+  std::string method = req.method.empty() ? std::string("GET") : req.method;
+  if (ext_connect) method = "CONNECT";
+
   std::vector<h3_header> hs;
-  hs.push_back(make_pseudo(":method",
-                           req.method.empty() ? std::string("GET") : req.method,
-                           h3_header_kind::METHOD));
+  hs.push_back(make_pseudo(":method", method, h3_header_kind::METHOD));
   // `:scheme` 缺省成 `https` 不是"猜的"：h3 只跑在 QUIC 上，而 QUIC 没有明文
   // 那一档（ALPN 是 TLS 扩展），所以这一层唯一可能的取值就是它。
   hs.push_back(make_pseudo(":scheme",
@@ -755,6 +782,9 @@ int64_t uvcpp_h3_connection::send_request(const h3_request& req) {
   hs.push_back(make_pseudo(
       ":path", req.path.empty() ? std::string("/") : req.path,
       h3_header_kind::PATH));
+  if (ext_connect) {
+    hs.push_back(make_pseudo(":protocol", req.protocol, h3_header_kind::PROTOCOL));
+  }
   for (size_t i = 0; i < req.headers.size(); ++i) hs.push_back(req.headers[i]);
 
   const int rc = session_->submit_request(sid, hs, req.body);
@@ -962,6 +992,22 @@ bool uvcpp_h3_connection::peer_goaway_received() const { return peer_goaway_; }
 
 int64_t uvcpp_h3_connection::peer_goaway_last_stream_id() const {
   return peer_goaway_id_;
+}
+
+bool uvcpp_h3_connection::has_remote_settings() const {
+  return have_remote_settings_;
+}
+
+uvcpp_h3_remote_settings uvcpp_h3_connection::remote_settings() const {
+  return remote_settings_;
+}
+
+uint64_t uvcpp_h3_connection::blocked_stream_events() const {
+  return blocked_stream_events_;
+}
+
+uint64_t uvcpp_h3_connection::blocked_stream_bytes() const {
+  return blocked_stream_bytes_;
 }
 
 int uvcpp_h3_connection::close(int error_code) {

@@ -1737,6 +1737,29 @@ size_t quic_session::max_datagram_size() const {
   return static_cast<size_t>(tp->max_datagram_frame_size);
 }
 
+int quic_session::initiate_migration(const struct sockaddr* local,
+                                     const struct sockaddr* remote) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  if (local == nullptr || remote == nullptr) return UV_EINVAL;
+  const auto alen = [](const struct sockaddr* a) -> ngtcp2_socklen {
+    if (a->sa_family == AF_INET) return sizeof(sockaddr_in);
+    if (a->sa_family == AF_INET6) return sizeof(sockaddr_in6);
+    return 0;
+  };
+  const ngtcp2_socklen llen = alen(local);
+  const ngtcp2_socklen rlen = alen(remote);
+  if (llen == 0 || rlen == 0) return UV_EINVAL;
+
+  ngtcp2_path_storage ps;
+  ngtcp2_path_storage_init(
+      &ps, reinterpret_cast<const ngtcp2_sockaddr*>(local), llen,
+      reinterpret_cast<const ngtcp2_sockaddr*>(remote), rlen, nullptr);
+  const int rv = ngtcp2_conn_initiate_migration(conn_, &ps.path, now_ns());
+  if (rv != 0) return rv;
+  flush();
+  return 0;
+}
+
 bool quic_session::next_sendable_stream(int64_t* stream_id, ngtcp2_vec* datav,
                                         size_t* datavcnt, size_t* handed,
                                         uint32_t* flags) const {
