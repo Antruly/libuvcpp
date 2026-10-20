@@ -1030,7 +1030,7 @@ void uvcpp_tcp_client::start_multi_connect(
   connect_user_cb_       = std::move(cb);
   connect_last_error_    = 0;
   connect_attempt_token_.reset();
-  connect_attempt_negotiated_ = false;
+  connect_attempt_tcp_up_ = false;
   // 第一次尝试不需要退役句柄：调用方刚建的 `tcp_` 还没连过任何东西。
   connect_attempt_next();
 }
@@ -1050,7 +1050,7 @@ void uvcpp_tcp_client::connect_attempt_next() {
 
   connect_attempt_token_ = std::make_shared<char>(0);
   std::weak_ptr<char> tok = connect_attempt_token_;
-  connect_attempt_negotiated_ = false;
+  connect_attempt_tcp_up_ = false;
   const sockaddr_storage cur = connect_addrs_[connect_addr_index_++];
 
   clear_status(TCP_CLIENT_CONNECTING);
@@ -1066,10 +1066,11 @@ void uvcpp_tcp_client::connect_attempt_next() {
                                    return;
                                  }
                                  connect_last_error_ = status;
-                                 if (connect_attempt_negotiated_) {
-                                   // 代理已经应答过（认证 / REP 码失败）：换
-                                   // 地址不会改变结果，**不能**再连一笔 ——
-                                   // 那一笔会被当成普通 TCP 成功（见成员注释）。
+                                 if (connect_attempt_tcp_up_) {
+                                   // TCP 已经连上，失败发生在 SOCKS5 协商 /
+                                   // TLS 握手：换地址不会改变结果，而且这时
+                                   // 再连一笔会被当成普通 TCP 成功（见成员
+                                   // 注释）。直接收尾。
                                    finish_multi_connect(status);
                                    return;
                                  }
@@ -1090,7 +1091,7 @@ void uvcpp_tcp_client::finish_multi_connect(int status) {
   connect_addrs_.clear();
   connect_addr_index_ = 0;
   connect_attempt_token_.reset();
-  connect_attempt_negotiated_ = false;
+  connect_attempt_tcp_up_ = false;
   has_async_connect_cb_ = false;
 
   std::function<void(int)> cb = std::move(connect_user_cb_);
@@ -1334,6 +1335,8 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
         if (status == 0) {
           set_status(TCP_CLIENT_CONNECTED | TCP_CLIENT_READABLE |
                      TCP_CLIENT_WRITABLE);
+          // TCP 已经连上：此后是 SOCKS5 协商 / TLS 握手，失败不换地址。
+          connect_attempt_tcp_up_ = true;
         } else {
           set_status(TCP_CLIENT_ERROR);
           last_error_code_ = status;
@@ -1354,8 +1357,6 @@ int uvcpp_tcp_client::connect_async(const struct sockaddr* addr,
           // 之后就不再是"连代理失败"了 —— 后面的认证 / REP 失败会重新判。
           socks5_proxy_connect_failed_ = false;
           socks5_pending_ = false;
-          // 这一笔的 TCP 已连上：后续失败（认证 / REP）不再换地址重试。
-          connect_attempt_negotiated_ = true;
           if (!read_started_) arm_async_read();
           const int hrc = socks5_begin_handshake(life);
           if (hrc != 0 && token_alive(life)) socks5_finish(hrc, life);
