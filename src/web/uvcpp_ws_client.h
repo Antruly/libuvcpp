@@ -133,6 +133,21 @@ class UVCPP_API uvcpp_ws_client {
   void on_binary(std::function<void(const uint8_t*, size_t)> cb);
   void on_close(std::function<void(ws_close_code, const std::string&)> cb);
   void on_error(std::function<void(int, const std::string&)> cb);
+  /**
+   * @brief 逐帧接收（不重组、不解压），与 `on_text` / `on_binary` 可同时注册。
+   *
+   * 转发到 `uvcpp_ws_connection::on_frame()`；存在客户端上、每建一个新会话
+   * 装一次，所以 `connect()` 之前调也生效（不会漏掉对端一升级就推来的帧）。
+   */
+  void on_frame(std::function<void(const uvcpp_ws_frame&)> cb);
+
+  /**
+   * @brief 发送一条原始帧（掩码按角色处理）。转发到当前会话。
+   *
+   * 没有会话时返回 `UV_ENOTCONN` 并**立刻**回调 `cb(UV_ENOTCONN)`，不静默丢。
+   */
+  int send_frame(const uvcpp_ws_frame& frame,
+                 std::function<void(int)> cb = nullptr);
 
   /**
    * @brief 优雅关闭：给当前会话发 Close 帧，并把状态置为 `WS_CLIENT_CLOSING`。
@@ -218,6 +233,7 @@ class UVCPP_API uvcpp_ws_client {
 
   /// 用户通过本层装的回调。存着是为了"connect 之前装、建会话时装上去"。
   std::function<void(const std::string&)>                on_text_;
+  std::function<void(const uvcpp_ws_frame&)>             on_frame_;
   std::function<void(const uint8_t*, size_t)>            on_bin_;
   std::function<void(ws_close_code, const std::string&)> on_close_;
   std::function<void(int, const std::string&)>           on_error_;

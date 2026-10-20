@@ -210,6 +210,12 @@ void uvcpp_ws_connection::on_tcp_data(uvcpp_buf* buf) {
 void uvcpp_ws_connection::on_ws_frame(const uvcpp_ws_frame& frame) {
   if (protocol_failed_) return;
 
+  // 逐帧观察（#50）：**放在所有自动处理之前**，让调试器看到线上原样
+  // （含随后会被判协议错误的帧）。回调里可能 send/close，甚至触发协议错误，
+  // 所以回来之后要重新看一眼状态。
+  if (on_frame_) on_frame_(frame);
+  if (protocol_failed_) return;
+
   // ---------------------------------------------------------------------
   // 掩码的方向性要求（RFC 6455 §5.1）。
   //
@@ -438,7 +444,16 @@ void uvcpp_ws_connection::protocol_error(ws_close_code code, const std::string& 
 // 发送：队列化，保证顺序且不丢帧
 // =========================================================================
 
-int uvcpp_ws_connection::send_frame(const uvcpp_ws_frame& frame, std::function<void(int)> cb) {
+int uvcpp_ws_connection::send_frame(const uvcpp_ws_frame& frame,
+                                    std::function<void(int)> cb) {
+  // payload 深拷贝（`uvcpp_buf` 的拷贝构造会克隆字节），调用方在返回后可以
+  // 立刻释放自己的缓冲。掩码按本端角色盖，调用方填的 `masked` / 密钥不算数。
+  uvcpp_ws_frame f = frame;
+  apply_mask(f);
+  return send_frame_impl(f, std::move(cb));
+}
+
+int uvcpp_ws_connection::send_frame_impl(const uvcpp_ws_frame& frame, std::function<void(int)> cb) {
   if (!tcp_) { if (cb) cb(-1); return -1; }
   // 懒启动（客户端侧就是靠这一句：升级完成时不 arm，等第一次发帧再 arm，
   // 免得在活跃的读回调里调 read_stop）。标志由 start() 自己置，不在这里置。
@@ -543,7 +558,7 @@ void uvcpp_ws_connection::on_send_complete(int status) {
   in_flight_frames_ = 0;
 
   // **结算期间 `write_in_flight_` 必须仍然是 true**：回调可能重入
-  // `send_frame()`（`send_close` 的回调会调 `tcp_->close()`，别的调用方也会
+  // `send_frame_impl()`（`send_close` 的回调会调 `tcp_->close()`，别的调用方也会
   // 接着发下一帧），而 `send_frame` 末尾就是 `pump_send()`。标志若先清了，
   // 新入队的帧会被这里紧跟着的一次 `uv_write` **抢走**——同一批在途写有两个
   // 完成回调，队列被结算两次。
@@ -608,7 +623,7 @@ int uvcpp_ws_connection::send_data(ws_opcode op, const char* d, size_t n,
 #endif
   }
   apply_mask(f);
-  return send_frame(f, cb);
+  return send_frame_impl(f, cb);
 }
 
 int uvcpp_ws_connection::send_text(const char* d, size_t n, std::function<void(int)> cb) {
@@ -661,14 +676,14 @@ int uvcpp_ws_connection::send_ping(const char* d, size_t n) {
   uvcpp_ws_frame f; f.opcode = ws_opcode::PING;
   if (d && n > 0) f.payload.clone_data(d, n);
   apply_mask(f);
-  return send_frame(f, nullptr);
+  return send_frame_impl(f, nullptr);
 }
 
 int uvcpp_ws_connection::send_pong(const char* d, size_t n) {
   uvcpp_ws_frame f; f.opcode = ws_opcode::PONG;
   if (d && n > 0) f.payload.clone_data(d, n);
   apply_mask(f);
-  return send_frame(f, nullptr);
+  return send_frame_impl(f, nullptr);
 }
 
 int uvcpp_ws_connection::send_close(ws_close_code cd, const std::string& rs) {
@@ -677,7 +692,7 @@ int uvcpp_ws_connection::send_close(ws_close_code cd, const std::string& rs) {
   // 超了会拼出一个对端**必须拒绝**的帧，所以在这里截断，而不是让它发出去。
   f.set_close_payload(cd, rs.size() > 123 ? rs.substr(0, 123) : rs);
   apply_mask(f);
-  return send_frame(f, [this](int) {
+  return send_frame_impl(f, [this](int) {
     // 走 client->close()：直接关句柄会绕过框架的关闭回调，服务端的客户端对象
     // 会被漏在登记表里。关完之后不能再用 tcp_（框架可能已经把它 delete 掉）。
     if (tcp_ && tcp_->get_tcp()) tcp_->close();
@@ -690,6 +705,10 @@ void uvcpp_ws_connection::on_ping(std::function<void(const uint8_t*, size_t)> cb
 void uvcpp_ws_connection::on_pong(std::function<void(const uint8_t*, size_t)> cb) { on_pong_ = std::move(cb); }
 void uvcpp_ws_connection::on_close(std::function<void(ws_close_code, const std::string&)> cb) { on_close_ = std::move(cb); }
 void uvcpp_ws_connection::on_error(std::function<void(int, const std::string&)> cb) { on_error_ = std::move(cb); }
+
+void uvcpp_ws_connection::on_frame(std::function<void(const uvcpp_ws_frame&)> cb) {
+  on_frame_ = std::move(cb);
+}
 
 void uvcpp_ws_connection::set_max_message_size(size_t n) {
   max_message_size_ = n;

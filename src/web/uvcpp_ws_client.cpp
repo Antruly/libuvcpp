@@ -413,6 +413,7 @@ void uvcpp_ws_client::install_callbacks(uvcpp_ws_connection* conn) {
   if (conn == nullptr) return;
   // 没设过的槽跳过：装一个空的 std::function 与"没装"等价，只是白占一层。
   if (on_text_)  conn->on_text(on_text_);
+  if (on_frame_) conn->on_frame(on_frame_);
   if (on_bin_)   conn->on_binary(on_bin_);
   if (on_close_) conn->on_close(on_close_);
   if (on_error_) conn->on_error(on_error_);
@@ -456,6 +457,18 @@ void uvcpp_ws_client::on_text(std::function<void(const std::string&)> cb) {
 void uvcpp_ws_client::on_binary(std::function<void(const uint8_t*, size_t)> cb) {
   on_bin_ = std::move(cb);
   if (session_ != nullptr) session_->on_binary(on_bin_);
+}
+void uvcpp_ws_client::on_frame(std::function<void(const uvcpp_ws_frame&)> cb) {
+  on_frame_ = std::move(cb);
+  if (session_ != nullptr) session_->on_frame(on_frame_);
+}
+int uvcpp_ws_client::send_frame(const uvcpp_ws_frame& frame,
+                                std::function<void(int)> cb) {
+  if (session_ == nullptr) {
+    if (cb) cb(UV_ENOTCONN);
+    return UV_ENOTCONN;
+  }
+  return session_->send_frame(frame, std::move(cb));
 }
 
 void uvcpp_ws_client::on_close(

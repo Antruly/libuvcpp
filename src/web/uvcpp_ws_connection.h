@@ -197,6 +197,42 @@ class UVCPP_API uvcpp_ws_connection {
    */
   void on_error(std::function<void(int, const std::string&)> cb);
 
+  /**
+   * @brief 逐帧接收回调（**原始帧**，不重组、不解压）。
+   *
+   * 与消息级回调的关系：**可以同时注册**。本回调在解析器刚产出一帧时调用，
+   * 控制帧的自动处理与消息重组都在它**之后**，所以 `opcode / fin / rsv1 /
+   * rsv2 / rsv3 / masked / payload` 都是线上原样：
+   *  - 分片消息的每一片各回调一次（`fin == false` 的 TEXT/BINARY，随后是
+   *    `CONTINUATION` 帧），`on_text` / `on_binary` 仍然只在重组完成后回调一次；
+   *  - `payload` 只在回调期间有效，需要留存请自己拷贝；
+   *  - 首帧上的 `rsv1` 表示 permessage-deflate，此时 `payload` 是**压缩字节**，
+   *    本回调不解压。
+   *
+   * **控制帧的自动处理仍然执行**：PING 仍会自动回 PONG、CLOSE 仍会回帧并触发
+   * `on_close`。想完全手动回复的调试器请注意别重复回。
+   *
+   * 回调里调 `send_*` / `send_frame` 是安全的（发送队列保证顺序）。
+   */
+  void on_frame(std::function<void(const uvcpp_ws_frame&)> cb);
+
+  /**
+   * @brief 发送一条**原始帧**（不压缩、不拆/合分片）。
+   *
+   * 掩码按本端角色处理：客户端加、服务端不加（RFC 6455 §5.1），调用方填的
+   * `masked` / `mask_key` 会被覆盖。`payload_len` 被忽略，以
+   * `payload.size()` 为准。`rsv1` 由调用方负责 —— 本接口**不会**替你做
+   * permessage-deflate 压缩，也不会校验分片序列。
+   *
+   * 与 `send_text` / `send_binary` 共用同一条发送队列，帧序不变。
+   * 发一条 `TEXT(fin=false)` 之后要自己补 `CONTINUATION(fin=true)`，否则对端
+   * 看到的分片序列就是断的。
+   *
+   * @return 0 = 已入队；非 0 = 错误码（连接已坏 / 已终结）。
+   */
+  int send_frame(const uvcpp_ws_frame& frame,
+                 std::function<void(int)> cb = nullptr);
+
   // -------------------------------------------------------------------
   // 接收策略（安全）
   // -------------------------------------------------------------------
@@ -266,7 +302,7 @@ class UVCPP_API uvcpp_ws_connection {
   /** @brief TEXT/BINARY 共用的发送路径（含压缩决策）。 */
   int  send_data(ws_opcode op, const char* d, size_t n, std::function<void(int)> cb);
   /** @return 0 已入队/已发出；非 0 表示这一帧没能发出去（错误码）。 */
-  int  send_frame(const uvcpp_ws_frame& frame, std::function<void(int)> cb);
+  int  send_frame_impl(const uvcpp_ws_frame& frame, std::function<void(int)> cb);
 
   /**
    * @brief 按本端角色给帧盖上掩码（RFC 6455 §5.1：客户端发出的帧 MUST 掩码、
@@ -365,6 +401,7 @@ class UVCPP_API uvcpp_ws_connection {
 #endif
 
   std::function<void(const std::string&)>    on_text_;
+  std::function<void(const uvcpp_ws_frame&)> on_frame_;
   std::function<void(const uint8_t*, size_t)> on_bin_;
   std::function<void(const uint8_t*, size_t)> on_ping_;
   std::function<void(const uint8_t*, size_t)> on_pong_;
