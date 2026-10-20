@@ -89,15 +89,24 @@ X509* make_cert(EVP_PKEY* key, const char* cn, X509* issuer,
   X509_gmtime_adj(X509_get_notAfter(x), not_after_days * 86400L);
   X509_set_pubkey(x, key);
 
-  X509_NAME* name = X509_get_subject_name(x);
+  // 不碰 `X509_get_subject_name(x)` 的返回值：新一点的 OpenSSL（macOS CI
+  // 上那份）把它声明成 `const X509_NAME*`，而 `X509_NAME_add_entry_by_txt`
+  // 要非 const。单独建一个名字对象、设进去再释放 —— 两个 setter 都会拷贝。
+  X509_NAME* name = X509_NAME_new();
+  if (name == nullptr) {
+    X509_free(x);
+    return nullptr;
+  }
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                              reinterpret_cast<const unsigned char*>(cn), -1,
                              -1, 0);
+  X509_set_subject_name(x, name);
   if (issuer != nullptr) {
     X509_set_issuer_name(x, X509_get_subject_name(issuer));
   } else {
     X509_set_issuer_name(x, name);
   }
+  X509_NAME_free(name);
   if (is_ca) add_ext(x, NID_basic_constraints, "critical,CA:TRUE");
   if (san != nullptr) add_ext(x, NID_subject_alt_name, san);
 

@@ -204,9 +204,9 @@ void test_brotli_above_threshold() {
 }
 
 void test_threshold() {
-  const std::string small = "tiny-br";
+  const std::string tiny_body = "tiny-br";
   one_shot_server srv;
-  srv.start(make_response(http_compress_method::BROTLI, small));
+  srv.start(make_response(http_compress_method::BROTLI, tiny_body));
   if (srv.port <= 0) {
     check(false, "br/small: server listening");
     return;
@@ -219,7 +219,7 @@ void test_threshold() {
 
   client_result r2;
   run_client(srv.port, 0, false, r2);
-  check(r2.send_status.load() == 0 && r2.body == small,
+  check(r2.send_status.load() == 0 && r2.body == tiny_body,
         "threshold: 设为 0 后同一 body 被解开");
   check(r2.headers_ce.empty(), "threshold: 解开后 content-encoding 被摘掉");
 }
