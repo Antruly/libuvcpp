@@ -157,7 +157,10 @@ struct stream_server {
       const size_t kChunk = 16 * 1024;
       size_t off = 0;
       while (off < body.size()) {
-        const size_t n = std::min(kChunk, body.size() - off);
+        // 不用 `std::min`：Windows 头把 `min` 定义成宏，`std::min(` 会被展开成
+        // 非法 token（MSVC C2589）。
+        const size_t remain = body.size() - off;
+        const size_t n = kChunk < remain ? kChunk : remain;
         char head[32];
         std::snprintf(head, sizeof(head), "%zx\r\n", n);
         resp += head;
