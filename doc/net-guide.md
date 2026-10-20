@@ -44,7 +44,7 @@ SOCKS5（CONNECT / BIND / UDP ASSOCIATE，客户端 + 服务端）建在这一�
 | `uvcpp_tcp_server` | `src/net/uvcpp_tcp_server.h:123` | `bind` / `listen`，**拥有**每一条 accept 出来的连接，给所有连接共用一份读回调 |
 | `uvcpp_tcp_client` | `src/net/uvcpp_tcp_client.h:99` | 双模式（异步回调 / 同步 `*_wait`）TCP 连接；服务端交给你的那条连接也是它 |
 | `uvcpp_udp_server` | `src/net/uvcpp_udp_server.h:51` | 绑定的 UDP 套接字，交付数据报时带来源 ip/port；没有"连接对象" |
-| `uvcpp_udp_client` | `src/net/uvcpp_udp_client.h:72` | UDP 客户端，`bind`/`connect`、异步与同步发送、内部接收缓存 |
+| `uvcpp_udp_client` | `src/net/uvcpp_udp_client.h:74` | UDP 客户端，`bind`/`connect`、异步与同步发送、内部接收缓存 |
 | `net_read_result` | `src/net/uvcpp_net_read.h:68` | 一次读事件的载体：数据 / 对端关闭 / 读错误 |
 
 `src/net/uvcpp_tcp_server.h:31` include 了 `net/uvcpp_tcp_client.h`，后者又 include 了

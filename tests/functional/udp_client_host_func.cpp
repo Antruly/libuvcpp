@@ -131,6 +131,33 @@ struct echo_server {
   }
 };
 
+// 解析顺序里第一个地址的族（0 = 解析失败）。`connect()` 对一个**未绑定**
+// 的 UDP 句柄没有"换地址重试"的机会（UDP 没有握手），它用的是 getaddrinfo
+// 的第一个结果 —— 用例的服务端必须绑在同一个族上。
+int first_family(const char* host) {
+  uvcpp_loop loop;
+  uvcpp_getaddrinfo resolver;
+  struct addrinfo hints;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  int fam = 0;
+  bool done = false;
+  resolver.getaddrinfo(
+      &loop, host, "0", &hints,
+      [&done, &fam](uvcpp_getaddrinfo* req, int st, struct addrinfo* res) {
+        if (st == 0 && res != nullptr) fam = res->ai_family;
+        if (res) req->freeaddrinfo(res);
+        done = true;
+      });
+  const long long deadline = now_ms() + 5000;
+  while (!done && now_ms() < deadline) {
+    loop.run(UV_RUN_NOWAIT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return fam;
+}
+
 bool hostname_has_family(const char* host, int family) {
   uvcpp_loop loop;
   uvcpp_getaddrinfo resolver;
@@ -240,10 +267,14 @@ void test_sync_hostname_v6(const char* host6) {
 }
 
 void test_connect_hostnames(bool have6, const char* host6) {
+  // 未绑定句柄的 `connect()` 用解析结果里的**第一个**地址（UDP 没有握手，
+  // 换不了地址），所以服务端要绑在同一个族上。
+  const int fam = first_family("localhost");
+  const bool v6 = (fam == AF_INET6);
   echo_server srv;
-  srv.start(false);
+  srv.start(v6);
   if (srv.port <= 0) {
-    check(false, "connect/v4: server listening");
+    check(false, "connect: server listening");
     return;
   }
   uvcpp_udp_client client;

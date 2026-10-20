@@ -224,7 +224,7 @@ RSS(MiB) = 0.0008870 × N + 10.120     R² = 0.9997352
 
 **试过但没采纳**：把读缓冲封顶到 8 KiB（−0.49%，落在散布内，白搭）。而且**不能封在
 `alloc_buf()` 里** —— 它同时给 UDP 用（`src/net/uvcpp_udp_server.cpp:165`、
-`src/net/uvcpp_udp_client.cpp:1097-1097`），而 UDP 是数据报，缓冲小了会**截断报文**。
+`src/net/uvcpp_udp_client.cpp:1148-1148`），而 UDP 是数据报，缓冲小了会**截断报文**。
 
 ### 4.2 接受连接时默认关 Nagle（**另一套装置**，轮流 A/B）
 

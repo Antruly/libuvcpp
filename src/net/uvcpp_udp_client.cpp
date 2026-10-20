@@ -279,24 +279,30 @@ int uvcpp_udp_client::bindIpv6(const char* ip, int port) {
   return 0;
 }
 
-int uvcpp_udp_client::resolve_send_addr(const char* host, int port,
-                                       sockaddr_storage& out,
-                                       int timeout_ms) {
-  std::memset(&out, 0, sizeof(out));
+int uvcpp_udp_client::resolve_send_addrs(const char* host, int port,
+                                         std::vector<sockaddr_storage>& out,
+                                         int timeout_ms) {
+  out.clear();
 
   // 数字 IPv4 / IPv6 快速路径（不需要 DNS；`::1` 必须走这一支）。
   struct sockaddr_in addr4;
   if (uv_ip4_addr(host, port, &addr4) == 0) {
-    std::memcpy(&out, &addr4, sizeof(addr4));
+    sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    std::memcpy(&ss, &addr4, sizeof(addr4));
+    out.push_back(ss);
     return 0;
   }
   struct sockaddr_in6 addr6;
   if (uv_ip6_addr(host, port, &addr6) == 0) {
-    std::memcpy(&out, &addr6, sizeof(addr6));
+    sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    std::memcpy(&ss, &addr6, sizeof(addr6));
+    out.push_back(ss);
     return 0;
   }
 
-  // 域名：AF_UNSPEC（A + AAAA），取第一个可用结果。同步接口可以阻塞等待。
+  // 域名：AF_UNSPEC（A + AAAA），全部收下。同步接口可以阻塞等待。
   uvcpp_getaddrinfo resolver;
   char service[16];
   snprintf(service, sizeof(service), "%d", port);
@@ -325,29 +331,63 @@ int uvcpp_udp_client::resolve_send_addr(const char* host, int port,
     if (res != nullptr) resolver.freeaddrinfo(res);
     return (status != 0) ? status : UV_EAI_NONAME;
   }
-  bool found = false;
   for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
     if (p->ai_addr == nullptr || p->ai_addrlen == 0) continue;
     if (p->ai_family != AF_INET && p->ai_family != AF_INET6) continue;
-    std::memcpy(&out, p->ai_addr,
-                static_cast<size_t>(p->ai_addrlen) > sizeof(out)
-                    ? sizeof(out)
+    sockaddr_storage ss;
+    std::memset(&ss, 0, sizeof(ss));
+    std::memcpy(&ss, p->ai_addr,
+                static_cast<size_t>(p->ai_addrlen) > sizeof(ss)
+                    ? sizeof(ss)
                     : static_cast<size_t>(p->ai_addrlen));
-    found = true;
-    break;
+    out.push_back(ss);
   }
   resolver.freeaddrinfo(res);
-  return found ? 0 : UV_EAI_NONAME;
+  return out.empty() ? UV_EAI_NONAME : 0;
+}
+
+int uvcpp_udp_client::pick_send_addr(
+    const std::vector<sockaddr_storage>& addrs,
+    sockaddr_storage& out) const {
+  if (addrs.empty()) return UV_EAI_NONAME;
+
+  // socket 的地址族：绑定过（或已经发过）就是 `getsockname` 报的那个；
+  // 没绑定的句柄会由 libuv 用第一个目标做延迟绑定，取第一个即可。
+  struct sockaddr_storage local;
+  std::memset(&local, 0, sizeof(local));
+  int local_len = static_cast<int>(sizeof(local));
+  if (udp_->getsockname(reinterpret_cast<struct sockaddr*>(&local),
+                        &local_len) != 0) {
+    out = addrs.front();
+    return 0;
+  }
+
+  const int fam = static_cast<int>(local.ss_family);
+  for (std::size_t i = 0; i < addrs.size(); ++i) {
+    if (static_cast<int>(addrs[i].ss_family) == fam) {
+      out = addrs[i];
+      return 0;
+    }
+  }
+  return UV_EAFNOSUPPORT;
 }
 
 int uvcpp_udp_client::connect(const char* ip, int port) {
-  sockaddr_storage storage;
-  int rc = resolve_send_addr(ip, port, storage, 30000);
+  std::vector<sockaddr_storage> addrs;
+  int rc = resolve_send_addrs(ip, port, addrs, 30000);
   if (rc != 0) {
     last_error_code_ = rc;
     return rc;
   }
-  rc = udp_->connect(reinterpret_cast<const struct sockaddr*>(&storage));
+
+  sockaddr_storage chosen;
+  std::memset(&chosen, 0, sizeof(chosen));
+  rc = pick_send_addr(addrs, chosen);
+  if (rc != 0) {
+    last_error_code_ = rc;
+    return rc;
+  }
+  rc = udp_->connect(reinterpret_cast<const struct sockaddr*>(&chosen));
   if (rc != 0) {
     last_error_code_ = rc;
     return rc;
@@ -444,25 +484,24 @@ int uvcpp_udp_client::start_send_to(
   const int rc = resolver->getaddrinfo(
       loop_, host, service, &hints,
       [c](uvcpp_getaddrinfo* req, int status, struct addrinfo* res) {
-        sockaddr_storage addr;
-        std::memset(&addr, 0, sizeof(addr));
-        bool found = false;
+        std::vector<sockaddr_storage> addrs;
         if (status == 0 && res != nullptr) {
           for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
             if (p->ai_addr == nullptr || p->ai_addrlen == 0) continue;
             if (p->ai_family != AF_INET && p->ai_family != AF_INET6) continue;
-            std::memcpy(&addr, p->ai_addr,
-                        static_cast<size_t>(p->ai_addrlen) > sizeof(addr)
-                            ? sizeof(addr)
+            sockaddr_storage ss;
+            std::memset(&ss, 0, sizeof(ss));
+            std::memcpy(&ss, p->ai_addr,
+                        static_cast<size_t>(p->ai_addrlen) > sizeof(ss)
+                            ? sizeof(ss)
                             : static_cast<size_t>(p->ai_addrlen));
-            found = true;
-            break;
+            addrs.push_back(ss);
           }
         }
         if (res != nullptr) req->freeaddrinfo(res);
         delete req;
 
-        int err = (status != 0) ? status : (found ? 0 : UV_EAI_NONAME);
+        int err = (status != 0) ? status : (addrs.empty() ? UV_EAI_NONAME : 0);
         uvcpp_udp_send*   ww = c->w;
         auto              fn = std::move(c->cb);
         const bool alive = token_alive(c->life);
@@ -478,9 +517,21 @@ int uvcpp_udp_client::start_send_to(
           delete ww;  // 不经过请求完成路径，不放没人放
           return;
         }
+        // 地址族由 socket 决定（`bind()` 之后不能再换）：第一个候选可能是
+        // 另一个地址族（`localhost` → `::1` 而 socket 绑在 `0.0.0.0`）。
+        // `uv_udp_send` 对错族的目标**不报同步错**，而是把请求以
+        // `EAFNOSUPPORT` 异步结算 —— 所以必须在提交之前挑对地址。
+        sockaddr_storage chosen;
+        std::memset(&chosen, 0, sizeof(chosen));
+        const int perr = self->pick_send_addr(addrs, chosen);
+        if (perr != 0) {
+          fn(ww, perr);
+          delete ww;
+          return;
+        }
         const int src = self->udp_->send(
             ww, ww->get_uv_buf(), 1,
-            reinterpret_cast<const struct sockaddr*>(&addr), fn);
+            reinterpret_cast<const struct sockaddr*>(&chosen), fn);
         if (src != 0) {
           fn(ww, src);
           delete ww;

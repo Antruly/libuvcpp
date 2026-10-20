@@ -20,6 +20,8 @@
 #include <handle/uvcpp_udp.h>
 #include <uvcpp/uvcpp_buf.h>
 
+#include <vector>
+
 namespace uvcpp {
 
 /**
@@ -231,13 +233,29 @@ class UVCPP_API uvcpp_udp_client {
 
  private:
   /**
-   * @brief 把 host 解析成一个发送地址（阻塞；数字字面量直接成功）。
+   * @brief 把 host 解析成候选发送地址（阻塞；数字字面量直接成功）。
    *
-   * 主机名用 AF_UNSPEC：A 与 AAAA 都接受，取第一个可用结果。数字字面量
-   * 不触网。失败返回可区分的错误（DNS 是 `UV_EAI_*`）。
+   * 主机名用 AF_UNSPEC：A 与 AAAA 都收，顺序即 getaddrinfo 的顺序。数字
+   * 字面量返回单元素列表、不触网。失败返回可区分的错误（DNS 是 `UV_EAI_*`）。
+   *
+   * 返回**全部**候选而不是第一个：socket 的地址族在 `bind()` 时就定了，
+   * `localhost` 这类双栈名字的第一个结果可能属于另一个地址族，直接发会
+   * `EAFNOSUPPORT` —— 调用方按顺序试到 `uv_udp_send` / `uv_udp_connect`
+   * 接受为止。
    */
-  int resolve_send_addr(const char* host, int port, sockaddr_storage& out,
-                        int timeout_ms);
+  int resolve_send_addrs(const char* host, int port,
+                         std::vector<sockaddr_storage>& out, int timeout_ms);
+
+  /**
+   * @brief 从候选里挑一个与**当前 socket 地址族**一致的目标。
+   *
+   * `bind()` / 首次发送会把 socket 的地址族定下来，之后不能换：双栈名字
+   * （`localhost` → `::1` + `127.0.0.1`）的第一个候选未必是这一个族。
+   * 未绑定的句柄（`getsockname` 失败）取第一个，由 libuv 的延迟绑定决定。
+   * 一个都匹配不上返回 `UV_EAFNOSUPPORT`（DNS 本身是成功的）。
+   */
+  int pick_send_addr(const std::vector<sockaddr_storage>& addrs,
+                     sockaddr_storage& out) const;
 
   /**
    * @brief 异步发送的公共入口：数字地址直接发，域名先异步解析再发。
