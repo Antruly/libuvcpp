@@ -11,11 +11,11 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
-`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1` 是 `v1.8.0` 之后的补丁版，
+`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2` 是它之后的补丁版，
 不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.1**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`。
+当前源码树是 **1.8.2**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -248,6 +248,12 @@
 
 ### QUIC 传输（net 层）
 
+- **DATAGRAM（RFC 9221）**（`1.8.2`，#53）：`send_datagram()` / `on_datagram` /
+  `max_datagram_size()`，宣告 1400 字节帧上限；发送队列 1 MiB 上限，空负载
+  `UV_EINVAL`、超限 `UV_EMSGSIZE`。
+- **连接迁移的路径事件**（`1.8.2`，#53）：`on_path_validation` 与
+  `on_path_changed`；NAT rebinding 由 ngtcp2 校验/迁移，本层只通知。主动迁移、
+  0-RTT、无状态重置与 multipath 仍**明确不支持**。
 - **`uvcpp_quic_server::set_reuseport()`：让一次 `listen()` 带着 `UV_UDP_REUSEPORT` 去绑**
   （`1.6.6-dev`）—— 好让 n 个端点抢同一个端口（扇出的那一半在
   `uvcpp_http_server::set_loops(n)`）。**`is_reuseport()` 报的是「这次绑定真的带上标志了
@@ -457,6 +463,13 @@
 
 ### HTTP/3（web 层）
 
+- **GOAWAY 平滑退场**（`1.8.2`，#53）：`shutdown_notice()` / `shutdown()` /
+  `is_drained()`，对端 GOAWAY 走 `on_goaway` + `peer_goaway_*()`；
+  `uvcpp_http_client` 把 `id` 以上的在途请求标 `retryable`。
+- **trailers**（`1.8.2`，#53）：同一流上的第二个头块单独交付；`h3_request/response`
+  与 web 层的 `uvcpp_http_request/response::trailers`。请求 trailers 要求有 body。
+- **明确不支持**：extended CONNECT / WebSocket over h3、QPACK 连接级可观测字段
+  （上游 nghttp3 1.18 没有公开访问器）。
 - **h3 上的「稍后应答」通了 —— `static-h3` 那一档从此订阅得上**（`1.6.8-dev`）：
   h3 派发从前对 `resp.deferred` 一律回 500 + 写 stderr（那条腿上交给处理函数的
   `uvcpp_tcp_client*` 是 `nullptr`，没有任何东西能"稍后回话"）。补的是
@@ -552,6 +565,10 @@
 实现现状 —— 强制了什么、默认值是什么、哪些是刻意不支持的 —— 见
 [`doc/http2-status.md`](doc/http2-status.md)。
 
+- **可选的逐帧事件回调**（`1.8.2`，#52）：`uvcpp_h2_session::callbacks::on_frame`
+  与 `uvcpp_http_client::set_h2_frame_callback()`，覆盖 HEADERS / DATA /
+  RST_STREAM / GOAWAY / WINDOW_UPDATE（不携带 payload）；GOAWAY 字段与
+  `peer_goaway_*()` 同源。默认关，热路径只多一次空 `std::function` 判断。
 - 接入 [nghttp2](https://github.com/nghttp2/nghttp2)、ALPN 基础设施、h2 会话层与连接层
   （`1.1.1`），并接进请求层与 Web 应用框架（`1.1.2`）
 - `uvcpp_http_client` 与 `uvcpp_http_server` 默认仍是 HTTP/1.1，要显式
@@ -1083,6 +1100,14 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### SOCKS5（`src/net/`）
 
+- **会话结束回调：双方向字节数、UDP 计数、时长与结束原因**（`1.8.2`，#46）。
+  `uvcpp_socks5_server::set_session_end_callback()` 在每条会话**恰好一次**回调，
+  带 `uvcpp_socks5_session_stats`；CONNECT / BIND 的两个方向分开计，UDP 关联合计
+  数据报与载荷字节。服务端 `close()` 时所有活动会话都会收到，回调在会话自己的
+  循环上、不持锁。
+- **`socks5_proxy_connect_failed()` 也转发到 ws 客户端**（`1.8.2`，#54）：
+  `uvcpp_ws_client` 与 `uvcpp_web_ws_client` 与 tcp/http 客户端同义 —— true =
+  代理连不上，false = 代理已应答、失败来自认证或 REP 码。
 - **完整的 SOCKS5 客户端与服务端，CONNECT / BIND / UDP ASSOCIATE 三种命令全做**
   （`1.7.5-dev`）。RFC 1928 / RFC 1929，只用 libuv，没有第三方代理库；no-auth 与
   用户名密码两种方法、IPv4 / IPv6 / 域名三种地址类型都认。新增公开头
@@ -1273,6 +1298,18 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### HTTP 与 WebSocket 语义
 
+- **WebSocket 逐帧接口**（`1.8.2`，#50）：`uvcpp_ws_connection::on_frame()` 与
+  `send_frame()`，客户端层转发；opcode / FIN / RSV1 / masked 是线上原样，控制帧的
+  自动处理（PING→PONG、CLOSE 回帧）仍然执行。用例覆盖分片与 permessage-deflate。
+- **HTTP/1.1 客户端流式响应**（`1.8.2`，#51）：`send_stream(req, on_headers,
+  on_body, on_end)` + `resume()` / `cancel_stream()`；`on_body` 返回 false 会停读
+  socket（真背压），body 不攒内存；h2/h3 暂返回 `UV_ENOTSUP`。
+- **阻塞 `*_wait` 的 `timeout_ms` 改为整次请求的总 deadline**（`1.8.2`，#48）：
+  每次读写之前按剩余时间收紧 socket 超时，对端"每 900 ms 滴一个字节"也拖不过上限；
+  `connect_wait()` 的 TLS 握手共用同一个 deadline。
+- **客户端解 `br`，解压门槛可配**（`1.8.2`，#47）：编了 brotli 的构建在
+  `Accept-Encoding` 里宣告 `br` 并解码；`set_compression_min_body_size(0)` 关掉
+  1024 字节门槛；调用方自己的 `Accept-Encoding` 不被覆盖。
 - **流水线里末条的 `Connection: close` 会把前面几条的响应一起带走**（`1.6.46-dev`）。
   HTTP/1.1 流水线（一次读缓冲里多条请求）下，**异步响应**的第 1 条在序列化时问的是
   `uvcpp_http_server` 里那句 `ctx.parser->should_keep_alive()`
@@ -1482,6 +1519,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### TLS 与网络
 
+- **域名解析改用 `AF_UNSPEC`，多地址逐个尝试**（`1.8.2`，#44）：异步/同步两条路径
+  都按 `getaddrinfo` 顺序尝试，全部失败返回最后一次的真实错误；SNI 与证书校验仍用
+  目标域名。SOCKS5 代理连接与 `connect_wait()` 一并受益。
+- **对端证书链、`X509_V_ERR` 校验码与 SAN 公开**（`1.8.2`，#45）：
+  `peer_cert_chain_der()` / `peer_verify_result()` / `peer_verify_error()`，
+  `tls_cert_info` 补 `san_dns` / `san_ip`；tcp/http 客户端转发，h1/h2 共用，
+  h3 明确返回不支持。
+- **UDP 客户端接受域名并支持 IPv6 `connect`**（`1.8.2`，#49）：域名按 `AF_UNSPEC`
+  解析、按 socket 地址族挑候选（双栈名字的第一个未必兼容）；异步 `send` 在循环上
+  解析；`bind()` 仍只收数字地址。
 - 加载完整证书链，TLS 版本上下限双向生效（`1.1.13`）
 - TLS 握手有超时，且不在超时那条路上留下孤儿定时器（`1.1.14`）
 - 在自己的回调里析构 `tcp_client` 不再按连接数累积包装对象（`1.1.16`）
@@ -3855,6 +3902,38 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.8.2 (2026-10-20)
+
+`v1.8.1` 之后的补丁版，把 uvscope 0.3 / 0.4 需要的一批改动一次落齐（tracking #55）：
+网络层的 AF_UNSPEC 多地址与 UDP 域名、TLS 证书链、SOCKS5 会话统计、brotli 客户端
+解压、阻塞接口的总 deadline，以及 WebSocket 逐帧、HTTP 流式响应、h2 逐帧事件与
+h3/QUIC 的 GOAWAY、trailers、datagram、迁移通知。
+
+**修复**：
+
+- 域名解析改 `AF_UNSPEC`，异步/同步都按 `getaddrinfo` 顺序逐个尝试，失败返回最后
+  一次的真实错误；UDP 客户端接受域名按 socket 地址族挑候选。
+- 阻塞 `send_wait*` 的 `timeout_ms` 是整次请求的总 deadline，对端滴字节也拖不过。
+- 客户端解码 `br`，解压门槛可用 `set_compression_min_body_size()` 配置。
+
+**新增**：
+
+- TLS：`peer_cert_chain_der()` / `peer_verify_result()` / `peer_verify_error()`，
+  `tls_cert_info` 补 SAN。
+- SOCKS5：`set_session_end_callback()`（双方向字节、UDP 计数、时长、结束原因）；
+  `socks5_proxy_connect_failed()` 转发到 ws 客户端。
+- WebSocket：`on_frame()` / `send_frame()`（原始帧，含 RSV1 与分片边界）。
+- HTTP 客户端：`send_stream()` 流式响应 + 背压/取消。
+- HTTP/2：`set_h2_frame_callback()` 逐帧事件。
+- HTTP/3：GOAWAY（`shutdown_notice()`/`shutdown()`/`is_drained()`、`on_goaway`、
+  `retryable`）与 trailers（`h3_request/response::trailers`、web 层同名字段）。
+- QUIC：DATAGRAM（RFC 9221）与连接迁移的 `on_path_validation`/`on_path_changed`。
+
+**兼容性**：公开 API 只增不改；只有 #48 的语义变化是有意的（总 deadline）。
+
+**明确不支持**：0-RTT、extended CONNECT / WebSocket over h3、QPACK 连接级可观测
+字段（上游 nghttp3 1.18 无公开访问器）、主动迁移入口。
 
 ### v1.8.1 (2026-10-20)
 

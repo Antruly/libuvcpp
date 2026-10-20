@@ -695,9 +695,12 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
   无流控；本端宣告的上限是 1400 字节的帧）。
 - **连接迁移的“通知”已支持（`1.8.2` 起，#53）**：对端换源地址（NAT rebinding）
   时，路径校验结果走 `callbacks::on_path_validation(success)`，ngtcp2 完成迁移后
-  走 `callbacks::on_path_changed(ip, port)` —— 之后发包用的就是新地址。**仍然
-  没有**主动迁移的入口（`ngtcp2_conn_initiate_migration` 未接），也没有 0-RTT、
-  无状态重置与 multipath。
+  走 `callbacks::on_path_changed(ip, port)` —— 之后发包用的就是新地址。**主动
+  迁移的入口没有接**（`ngtcp2_conn_initiate_migration` 不在公开面上）。
+- **明确不支持 0-RTT。** 客户端不缓存/复用会话票据，也不发送 early data；
+  `early_data` 状态没有公开面。服务端即使收到 0-RTT 包，也没有应用可见的入口。
+  **无状态重置（stateless reset 处理）与 multipath 同样没有。** 这三样都是协议级
+  特性，不是接线：要做得先有票据存储、replay 语义与路径集合的应用契约。
 - ~~**没有多循环支持。**~~ **已撤销（`1.6.6-dev`）**：`uvcpp_quic_server::set_reuseport()` +
   `uvcpp_http_server::set_loops(n)` 这条路通了，扇出走 UDP 自己那条形状（每端点一个
   socket + `UV_UDP_REUSEPORT`），回落与边界见 [§5.2](#52-服务端)。

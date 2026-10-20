@@ -19,6 +19,47 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.2 重点 (Highlights)
+
+`v1.8.1` 之后的补丁版，把 uvscope 0.3 / 0.4 依赖的一批网络与协议能力一次落齐：
+域名解析的 IPv6 回退、TLS 证书链可读、SOCKS5 会话统计、HTTP 客户端的流式与总
+deadline、WebSocket 逐帧，以及 h2 / h3 / QUIC 的调试面。
+
+### 网络与 TLS
+
+- 域名解析改 `AF_UNSPEC`，按 `getaddrinfo` 顺序逐个尝试（异步与同步），失败返回
+  最后一次的真实错误；UDP 客户端也接受域名，并按 socket 地址族挑候选。
+- 公开对端证书链、`X509_V_ERR` 校验码与 SAN：`peer_cert_chain_der()` /
+  `peer_verify_result()` / `peer_verify_error()`。
+- 阻塞 `*_wait` 的 `timeout_ms` 是整次请求的总 deadline；客户端解码 `br`，门槛可配。
+
+### SOCKS5
+
+- `set_session_end_callback()`：每条会话恰好一次，带双方向字节数、UDP 计数、
+  起止时间与结束原因。
+- `socks5_proxy_connect_failed()` 转发到 ws 客户端，区分「连代理失败」与
+  「认证 / REP 码失败」。
+
+### WebSocket 与 HTTP
+
+- `on_frame()` / `send_frame()`：逐帧观察与发送，RSV1 / FIN / 分片边界可见。
+- `send_stream()`：HTTP/1.1 流式响应，`on_body` 返回 false 停读 socket，支持
+  `resume()` / `cancel_stream()`。
+
+### HTTP/2、HTTP/3 与 QUIC
+
+- h2：`set_h2_frame_callback()`（HEADERS / DATA / RST_STREAM / GOAWAY /
+  WINDOW_UPDATE）。
+- h3：GOAWAY 平滑退场（`shutdown_notice()` / `shutdown()`）与 trailers。
+- QUIC：DATAGRAM（RFC 9221）与连接迁移的路径事件（`on_path_validation` /
+  `on_path_changed`）。
+
+**兼容性**：公开 API 只增不改；唯一有意的语义变化是阻塞 `*_wait` 的 `timeout_ms`
+从「每次 I/O」变成「整次请求的总 deadline」。
+
+**明确不支持**：0-RTT、extended CONNECT / WebSocket over h3、QPACK 连接级可观测
+字段、主动迁移入口。
+
 ## v1.8.1 重点 (Highlights)
 
 `v1.8.0` 之后的补丁版，修的是真实项目（uvscope / uvp）在 1.8.0 上踩到的问题。最要紧的

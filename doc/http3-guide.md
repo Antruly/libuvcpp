@@ -563,8 +563,13 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   主动平滑退场。
 - **没有 Server Push。** RFC 9114 里它本来就只剩一格 `SETTINGS_ENABLE_PUSH`，
   本层既不宣告也不处理 `PUSH_PROMISE`。
-- **没有 extended CONNECT**，所以 **h3 上跑不了 WebSocket**。`app.websocket()`
-  继续走 HTTP/1.1 的 `Upgrade`（h2 上同样不做，见 `doc/http2-status.md`）。
+- **明确不支持 extended CONNECT / WebSocket over h3。** 会话设置里的
+  `enable_connect_protocol` 没有打开，`:protocol` 伪头也没有接；`app.websocket()`
+  继续走 HTTP/1.1 的 `Upgrade`（h2 上同样不做，见 `doc/http2-status.md`）。这是
+  这一版**不做**，不是"还没接线"。
+- **明确不支持 QPACK 连接级可观测字段。** nghttp3 1.18 的公开头里没有动态表
+  大小 / 阻塞流数的访问器（encoder/decoder 是内部结构），本层拿不到；要做得先等
+  上游提供 API。
 - **h3 上没有流式路由。** `post_stream` 的流式处理函数与 `set_stream_claim` 的
   认领钩子在 TCP 那条路上才生效；h3 上撞上它们是**显式拒绝**（500 + 一行 stderr），
   不是静默错路由。（`resp.deferred` **曾经**在这一串里，`1.6.8-dev` 起支持了 ——
