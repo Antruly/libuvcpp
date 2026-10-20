@@ -19,6 +19,49 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.1 重点 (Highlights)
+
+`v1.8.0` 之后的补丁版，修的是真实项目（uvscope / uvp）在 1.8.0 上踩到的问题。最要紧的
+一条是**异步 HTTPS 客户端对任何外部 TLS 服务端都不可用**：仓内用例的 TLS 服务端是本库
+自己的 `uvcpp_tcp_server`，同源对端把三个交付缺陷一起抵消了，公开的 1.8.0 一接上真实
+虚拟主机就只剩超时、`ECONNRESET` 或错误证书。
+
+### 外部 TLS 对端
+
+- 服务端把响应与 `close_notify` 放进同一段 TCP 数据时，客户端先前会**丢掉整条正文**
+  （只看到 EOF / `ECONNRESET`）。现在先交付明文、再收尾。
+- "已连接"回调不再早于握手完成 —— 真实主机的证书链常分几段到达，先前会让紧接着的
+  `write()` 拿到 `UV_ENOTCONN`。
+- 以连接关闭定界的响应（HTTP/1.0、`Connection: close` 且没有长度）会正常收尾，不再被
+  交付成 `ECONNRESET`。
+- 两条客户端路径都发送 **SNI**（新增 `uvcpp_ssl::set_server_name()`）；按 RFC 6066 §3，
+  IP 字面量不发 SNI。
+- 回归用例的对端是**裸 OpenSSL + 手写 POSIX socket**（不是本库的服务端），并且故意把
+  握手的第一个飞行拆成两段 TCP 写、把正文与 `close_notify` 放进同一次 socket 写。
+
+### 阻塞同步接口
+
+- `send_wait*` 的 `timeout_ms` 在 Linux / macOS 上真的生效（此前那段 `setsockopt` 整块
+  在 `#ifdef _WIN32` 里）；`connect_wait()` 的 TLS 握手同样有上限。
+- 读错误与超时不再被当成 EOF：半条报文返回 `UV_EOF`，超时返回 `UV_ETIMEDOUT`。
+- 失败时 `resp.status_code` 是 `HTTP_STATUS_NONE`，不再是默认的 `200 OK`。判据仍应是
+  返回的错误码。
+
+### 从源码安装
+
+`cmake --install` 出来的前缀现在是一份可用的 SDK：自编译依赖的共享库跟着装、共享库带
+`$ORIGIN`（macOS `@loader_path`）RPATH、自编译 libuv 的 `include/libuv` 通过导出的
+target 与 `uvcpp.pc` 传给消费者。`find_package(uvcpp CONFIG)` 与 pkg-config 两条路都
+在本机用消费者工程验过。
+
+### 换之前
+
+- 公开 API 只增不改，已有代码不需要改。
+- 同步 `*_wait` 有两处**有意**的行为变化：`timeout_ms` 在 POSIX 上真的生效；失败时
+  `status_code` 是 0（`HTTP_STATUS_NONE`）。别再把 `status_code == 200` 当成功判据。
+- `cmake --install` 之前要 build 默认目标：FetchContent 的 libuv 会在自己的 install
+  规则里找没编出来的静态库（`libuv.a`）。
+
 ## v1.8.0 重点 (Highlights)
 
 `v1.7.4` 之后的功能版。三个新模块都遵守同一条边界：**要么零外部依赖，要么可以完全

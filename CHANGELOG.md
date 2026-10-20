@@ -11,10 +11,11 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
-`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`。想按时间线读，翻到最后的「逐个版本」。
+`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1` 是 `v1.8.0` 之后的补丁版，
+不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.0**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`。
+当前源码树是 **1.8.1**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -1469,6 +1470,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   要注册根路由请写 `/`。拒绝行为与日志级别都不变：这条 warn 是**有意吵**的，它报的是
   调用方写错了。
 
+- **阻塞 `*_wait` 的超时在 POSIX 上真的生效、失败如实回报**（`1.8.1`）。
+  `SO_RCVTIMEO`/`SO_SNDTIMEO` 从 `#ifdef _WIN32` 里挪出来，两个平台都装（Windows 毫秒
+  `DWORD` / POSIX `struct timeval`）；`connect_wait()` 的 TLS 握手同样限时。
+  `read_one_message()` 不再把 `n <= 0` 一律当 EOF：读错误/超时以负的 libuv 错误码上抛，
+  分帧没收够时返回 `UV_EOF`（不再静默截断）。同步 TLS 读用 `last_ssl_error()` 区分
+  `close_notify` 与 `WANT_READ`。两条 `send_wait_*` 失败时
+  `resp.status_code = HTTP_STATUS_NONE`，不再交付构造时的 200 OK。新增
+  `tests/functional/web_ssl_client_timeout_func.cpp`（手写 POSIX 对端：静默、不握手、
+  正常响应三条）。
+
 ### TLS 与网络
 
 - 加载完整证书链，TLS 版本上下限双向生效（`1.1.13`）
@@ -1516,6 +1527,24 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   1.22–1.57M vs 1.23–1.61M）—— 归因因此落在"应答被写成两段"，而不是"`TCP_NODELAY`
   让什么都快了"；也正因为平台各档都是 `-m 32`/`-m 100`，**这条不是榜单分数的杠杆**，
   它修的是低并发请求/应答的时延
+
+- **TLS 客户端对真实对端的三个交付缺陷**（`1.8.1`）。仓内用例的 TLS 服务端是本库自己的
+  `uvcpp_tcp_server`，同源对端把这三条一起抵消了 —— v1.8.0 的异步 HTTPS 对外部服务端
+  基本不可用：① 服务端把响应与 `close_notify` 放进同一段 TCP 数据时，`tls_feed` 直接
+  收尾，`tls_plain_` 里刚解出来的正文被丢掉（对方发了响应，客户端只看到 EOF /
+  `ECONNRESET`）；② 读回调里无条件 `tls_complete_connect()`，真实主机的证书链常分几段
+  到达，"已连接"回调会在握手完成前交给调用方，紧接着的 `write()` 拿到 `UV_ENOTCONN`；
+  ③ 以连接关闭定界的响应（HTTP/1.0、`Connection: close` 且无
+  `Content-Length`/`Transfer-Encoding`）永远等不到 llhttp 的 `message_complete`，
+  关闭观察者把它交付成 `ECONNRESET` —— 现在 EOF 时在解析器已开始的前提下 `finish()`，
+  对端一个字节没发时保持原来的错误。新增
+  `tests/functional/web_ssl_client_external_func.cpp`：对端是**裸 OpenSSL + 手写 POSIX
+  socket**，故意把第一个握手飞行拆成两段 TCP 写，并把正文与 `close_notify` 放进同一次
+  socket 写（`1.8.1`）
+- **两条客户端路径都发送 SNI**（新增 `uvcpp_ssl::set_server_name()`，`1.8.1`）。异步
+  memory-BIO 与同步阻塞路径此前都不调 `SSL_set_tlsext_host_name()`：现代虚拟主机要么
+  握手失败，要么返回该 IP 的默认证书、随后在主机名校验上失败。按 RFC 6066 §3，IP
+  字面量不发 SNI。
 
 ### 内存与缓冲
 
@@ -3109,6 +3138,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 配置、打包与 CI
 
+- **`cmake --install` 产出的前缀是一份可用 SDK**（`1.8.1`）。三处缺口：自编译依赖的
+  共享目标（`llhttp_shared` / `zlib`）不一定被装（Linux 一启动 `not found`，MinGW 是
+  `0xC0000135` 静默退出）；共享库没有 RPATH（依赖就在同一个 `lib/` 也找不到）；自编译
+  libuv 的头在 `include/libuv/`，而公开头写 `#include <uv.h>`，导出的 target 与
+  `uvcpp.pc` 都没把它传出去。现在按目标类型显式安装、装 `$ORIGIN` / `@loader_path`
+  RPATH、导出 `INSTALL_INTERFACE:include/libuv` 并在 `.pc` 的 Cflags 补
+  `-I${includedir}/libuv`。注意 `tests/tools/package_release.py` 仍有意绕过
+  `cmake --install`（FetchContent 的 libuv 会在 install 规则里找没编出来的
+  `libuv.a`/`libuv.dll`）；这条修的是使用者的源码安装路径 —— 装之前要 build 默认目标。
+
 - **发布腿把 MongoDB 的头也带上，CI 起 mongod 与 redis-server**（`1.7.5-dev`）。
   六条发布腿的十二处 configure 全部显式传 `-DUVCPP_ENABLE_DB_MONGODB=ON` 与
   `-DUVCPP_DB_MONGODB_INCLUDE_DIR=`：两条 Linux 腿 `apt-get download libmongoc-dev
@@ -3816,6 +3855,30 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.8.1 (2026-10-20)
+
+`v1.8.0` 之后的补丁版，修的是真实项目（uvscope / uvp）在 1.8.0 上踩到的问题：
+异步 HTTPS 客户端对外部 TLS 服务端不可用、TLS 不发 SNI、阻塞 `*_wait` 在 POSIX 上忽略
+超时、`cmake --install` 的 SDK 不完整。
+
+**修复**：
+
+- 异步 TLS 路径：`close_notify` 不再吞掉同段到达的正文；"已连接"回调不再早于握手完成；
+  以连接关闭定界的响应正常收尾。新增裸 OpenSSL 外部对端的回归用例。
+- 两条客户端路径发送 SNI（`uvcpp_ssl::set_server_name()`），IP 字面量不发。
+- 阻塞 `send_wait*`：`timeout_ms` 在 Linux/macOS 生效（TLS 握手同样限时）；读错误/超时
+  不再当 EOF；半条报文返回 `UV_EOF`；失败时状态码为 `HTTP_STATUS_NONE`。
+- `cmake --install`：共享依赖随包装、共享库带 `$ORIGIN` / `@loader_path` RPATH、
+  自编译 libuv 的 `include/libuv` 通过导出 target 与 `uvcpp.pc` 传给消费者。
+
+**兼容性**：公开 API 只增不改（`uvcpp_ssl::set_server_name()` 是新增）。同步 `*_wait`
+有两处**有意**的行为变化：`timeout_ms` 在 POSIX 上真的生效；失败时
+`resp.status_code` 是 `HTTP_STATUS_NONE`（0）而不是默认的 200 —— 判据仍应是返回的错误码。
+
+**发布态**：版本头 PATCH 0 → 1、`UVCPP_VERSION_IS_RELEASE` 保持 1。两版 README 的徽章与
+版本行、CHANGELOG 的折叠表/标签清单、RELEASE.md 新增「v1.8.1 重点」小节同步更新；
+README 的下载表在 Release 资产出来后再按十进制 MB 更新（体积不能与版本翻转同提交）。
 
 ### v1.8.0 (2026-10-19)
 
