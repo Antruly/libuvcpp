@@ -196,7 +196,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   要写进文档的是另一件事：**n 个 worker × 每进程 4 条池线程 = 4n 条**，调
   `UV_THREADPOOL_SIZE` 时按每进程算。
 - **统计要跨进程聚合。** `uvcpp_tcp_client` 的 `reclaim_stats()` / `try_write_stats()`
-  （`src/net/uvcpp_tcp_client.h:772-772` / `src/net/uvcpp_tcp_client.h:800-800`）本来就是 `static` 的进程级聚合，
+  （`src/net/uvcpp_tcp_client.h:781-781` / `src/net/uvcpp_tcp_client.h:809-809`）本来就是 `static` 的进程级聚合，
   多进程下变成"每进程一份"，要看总数得自己聚合。
 - **那个突发探针不进仓库、不进 CI。** 它要断言的失败模式（"队列满了会拒连接"）在这台机器上
   **基本不出现**（§8），而且"满了之后是被拒还是挂住"**本身随平台变**（POSIX 给 RST、
