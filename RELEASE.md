@@ -19,6 +19,40 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.3 重点 (Highlights)
+
+`v1.8.2` 之后的补丁版，主线是 **Windows 7 兼容**：四条官方二进制（VS2015 x86/x64、
+MinGW32/64）、一条 VS2013 源码档，以及一个"解压即编"的便携构建 kit。
+
+### Windows 7 官方产物
+
+- **特性档**：`UVCPP_FEATURES`（`net` / `net-ssl` / `web-lite` / `web` / `full`）、
+  `UVCPP_REQUIRE_FEATURES`（列出的特性必须开着，否则 configure 期直接失败）与
+  `UVCPP_WINVER`；web 再拆 `server` / `client` / `ws` / `static` 四个子开关。最终值写进
+  生成的 `uvcpp_config.h`，使用者自己定义同一个宏会得到编译期 `#error`，而不是静默的
+  半截 API。
+- **四条产物**：VS2015 Update 3（v140、`/MT`）x86/x64 与 GCC 8.1 MinGW32/64，
+  libuv 1.40 + OpenSSL 1.1.1w；`web` 档 = HTTP server/client + WebSocket + 静态文件 +
+  gzip。VS2013 不发布二进制，只提供源码档（`net-ssl` / `web-lite`，libuv 1.33）。
+- **便携 kit**：源码树 + 预编译依赖 + `build-kit\build.cmd`。VS2013 用户解压后直接
+  编 `net-ssl` / `web-lite`，不用自己先去建一版 2013 年的 OpenSSL 和 libuv。
+- **实测**：在真实 Windows 7 SP1 x86 上跑过 —— MSVC2015 x86 的六套功能用例
+  （compress / http_server / ssl_client / ssl_server / static_server / ws）与 MinGW32 的
+  compress / http_server 全部 `ALL PASS`，DLL 只导入 Win7 自带的系统 DLL。
+
+### 修复
+
+- **32 位 MinGW：压缩槽的 `thread_local` 改为平凡析构**。原来 `deflate_slot` /
+  `brotli_arena` 带析构（`deflateEnd` / `free`），而 DLL 里非平凡析构的 `thread_local`
+  由 `__cxa_thread_atexit` 登记、emutls 在线程退出时已把 TLS 块还回堆 —— 压缩过的线程
+  一退出就崩在析构里，join 它的线程永远等不到，表现为"测试全绿但进程不退出"。
+- **OpenSSL 1.1.1 下 `web_ssl_*` 用例可编**：启动横幅不再依赖 3.0 才有的
+  `OPENSSL_VERSION_STRING`（新增 `openssl_version_probe.h`）。
+- Windows 上静态 libuv 以裸路径交给 CMake 时，测试链接补 `iphlpapi psapi userenv`。
+
+**兼容性**：公开 API 未变；新增的宏只在 `UVCPP_FEATURES` 非空或显式传开关时生效，
+默认构建与 1.8.2 等价。
+
 ## v1.8.2 重点 (Highlights)
 
 `v1.8.1` 之后的补丁版，把 uvscope 0.3 / 0.4 依赖的一批网络与协议能力一次落齐：

@@ -11,11 +11,11 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
-`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2` 是它之后的补丁版，
+`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3` 是它之后的补丁版，
 不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.2**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`。
+当前源码树是 **1.8.3**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -1319,6 +1319,13 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `thread_local` 引擎（每线程独立播种，避免各线程拿到同一串），锁一并去掉。
 
 ### HTTP 与 WebSocket 语义
+
+- **压缩槽的 `thread_local` 改成平凡析构**（`1.8.3`）：`deflate_slot` /
+  `brotli_arena` 原来带析构（`deflateEnd` / `free`），而 32 位 MinGW 的 DLL 里非平凡
+  析构的 `thread_local` 由 `__cxa_thread_atexit` 登记、emutls 在线程退出时已把 TLS
+  块还回堆 —— 压缩过的线程一退出就崩在析构里，join 它的线程永远等不到（Windows 上
+  表现为"测试全绿但进程不退出"）。现在两个槽只放平凡可析构的成员，内核/竞技场按线程
+  常驻、进程退出交 OS 回收；与 `src/expand/uvcpp_page_heap.cpp:558-576` 的规则一致。
 
 - **WebSocket 逐帧接口**（`1.8.2`，#50）：`uvcpp_ws_connection::on_frame()` 与
   `send_frame()`，客户端层转发；opcode / FIN / RSV1 / masked 是线上原样，控制帧的
@@ -3207,6 +3214,35 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 配置、打包与 CI
 
+- **Windows 7 线：特性档与四条官方二进制**（`1.8.3`）。新增 `UVCPP_FEATURES`
+  （`net` / `net-ssl` / `web-lite` / `web` / `full`）、`UVCPP_REQUIRE_FEATURES`（列出的
+  特性必须开着，否则 configure 期直接失败）与 `UVCPP_WINVER`；web 模块再拆四个子开关
+  （`UVCPP_WEB_SERVER` / `_CLIENT` / `_WS` / `_STATIC`），生成的 `uvcpp_config.h` 把
+  最终开关写进去、使用者自己定义同一个宏会在编译期 `#error`。`src/uvcpp/uvcpp_compat.h`
+  补 VS2013 缺的 C++11 设施（web 档在 VS2013 上自动退到 `web-lite`）。官方 Win7 二进制
+  四条：VS2015 x86/x64（v140、`/MT`）与 MinGW32/64（GCC 8.1），libuv 1.40 +
+  OpenSSL 1.1.1w，`web` = HTTP server/client + WebSocket + 静态文件 + gzip；VS2013 只发
+  源码档（`net-ssl` / `web-lite`，libuv 1.33）。矩阵见 `doc/compatibility.md`。
+
+- **便携构建 kit**（`1.8.3`）。`build-kit/` 的入口加 `packaging/make_build_kit.py`，把
+  源码树与预编译依赖（OpenSSL / libuv / zlib / llhttp，MinGW 还带 GCC 8.1）打成一个
+  zip：解压后 `build-kit\build.cmd <target>` 直接出库。VS2015 + 新 SDK 的
+  `_mm_loadu_si64` 缺口由 `CL=/FI...msvc2015-sdk-compat.h` 补上 —— **不要**塞进
+  `-DCMAKE_CXX_FLAGS`，那会覆盖 MSVC 的 `/EHsc` 默认值，编出一个没有展开语义的 DLL。
+  组包只收 git 文件表里的文件，构建树 / `node_modules` / 测试残留不会混进去。
+
+- **测试可移植性：OpenSSL 1.1.1 与静态 libuv**（`1.8.3`）。`web_ssl_*` 的启动横幅原用
+  3.0 才有的 `OPENSSL_VERSION_STRING`，1.1.1 下 10 个用例 C2065；新增
+  `tests/functional/openssl_version_probe.h`（3.x 用原索引、1.1.1 用 `OPENSSL_VERSION`
+  并剥掉自带的前缀）。Windows 上用裸路径给静态 libuv（`LIBUV_LIB=uv_a.lib`）时测试只挂
+  `ws2_32`，凡拉进 `uv.a(util.c.obj)` 的用例都 LNK2019（`GetAdaptersAddresses` 等三
+  条），同一行补 `iphlpapi psapi userenv`。
+
+- **Win7 实测**（`1.8.3`）。四条官方产物在真实 Windows 7 SP1 x86 上跑过：MSVC2015 x86
+  的六套功能用例（compress / http_server / ssl_client / ssl_server / static_server /
+  ws）与 MinGW32 的 compress / http_server 全部 `ALL PASS`，DLL 只导入 Win7 自带的系统
+  DLL。记录在 `doc/compatibility.md` §8。
+
 - **`cmake --install` 产出的前缀是一份可用 SDK**（`1.8.1`）。三处缺口：自编译依赖的
   共享目标（`llhttp_shared` / `zlib`）不一定被装（Linux 一启动 `not found`，MinGW 是
   `0xC0000135` 静默退出）；共享库没有 RPATH（依赖就在同一个 `lib/` 也找不到）；自编译
@@ -3924,6 +3960,29 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.8.3 (2026-10-24)
+
+`v1.8.2` 之后的补丁版，给 Windows 7 补一整条官方产物线（VS2015 x86/x64、MinGW32/64、
+VS2013 源码档）与便携构建 kit；顺带修掉 32 位 MinGW 压缩线程退出时的崩溃。
+
+**修复**：
+
+- `deflate_slot` / `brotli_arena` 改为平凡析构：32 位 MinGW 的 DLL 里非平凡析构的
+  `thread_local` 在线程退出时拿到野 `this`，压缩过的线程一退出就崩、join 它的线程
+  永远等不到（"ALL PASS 之后进程不退出"）。
+- `web_ssl_*` 用例改用 `openssl_version_probe.h`，OpenSSL 1.1.1 下可编。
+- Windows 上静态 libuv 以裸路径给 CMake 时，测试链接补 `iphlpapi psapi userenv`。
+
+**新增**：
+
+- `UVCPP_FEATURES` / `UVCPP_REQUIRE_FEATURES` / `UVCPP_WINVER` 与 web 四个子开关；
+  `uvcpp_compat.h` 兜住 VS2013。
+- 四条官方 Win7 二进制、两个 MinGW kit 与 VS2013 源码档；`.appveyor.yml`、
+  `build-kit/`、`packaging/make_build_kit.py`、`doc/compatibility.md`。
+
+**兼容性**：公开 API 未变；新增的宏只在 `UVCPP_FEATURES` 非空或显式传开关时生效，
+默认构建等价。
 
 ### v1.8.2 (2026-10-20)
 
