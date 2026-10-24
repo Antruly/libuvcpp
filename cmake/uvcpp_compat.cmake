@@ -147,12 +147,8 @@ macro(uvcpp_apply_compiler_compat)
     # uvcpp_compat.h; everything below needs more than that.
     uvcpp_disable_feature(UVCPP_BUILD_WEBAPP "webapp"
       "requires MSVC >= 1900 (VS2015)")
-    uvcpp_disable_feature(UVCPP_WEB_WS "web-ws"
-      "requires MSVC >= 1900 (thread_local with a non-trivial destructor)")
-    uvcpp_disable_feature(UVCPP_ENABLE_ZLIB "gzip"
-      "requires MSVC >= 1900 (thread_local with a non-trivial destructor)")
     uvcpp_disable_feature(UVCPP_ENABLE_BROTLI "brotli"
-      "requires MSVC >= 1900 (thread_local with a non-trivial destructor)")
+      "requires MSVC >= 1900 (thread_local arena has a constructor)")
     uvcpp_disable_feature(UVCPP_ENABLE_NGHTTP2 "http2"
       "requires MSVC >= 1900 (UCRT vsnprintf and nghttp2's C99 code)")
     uvcpp_disable_feature(UVCPP_ENABLE_QUIC "quic"

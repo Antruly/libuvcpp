@@ -194,6 +194,25 @@
         "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
         "LIBUV_VERSION": "v1.33.0"
       }
+    },
+    {
+      "name": "vs2013-web",
+      "displayName": "VS2013 x86 source build: web (server/client + WS + static + gzip)",
+      "description": "Full web profile on v120: HTTP server/client, WebSocket, static files, gzip. libuv 1.33.0. Pass -DOPENSSL_ROOT_DIR=<prefix>.",
+      "generator": "Visual Studio 12 2013",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build-vs2013-web",
+      "cacheVariables": {
+        "UVCPP_FEATURES": "web",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client;web-ws;web-static;http-compress",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.33.0"
+      }
     }
   ]
 }
