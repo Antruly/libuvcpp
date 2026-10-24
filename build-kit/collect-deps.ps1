@@ -85,8 +85,10 @@ if ($CmakeRoot -and (Test-Path $CmakeRoot)) {
 if ($MingwRoot -and (Test-Path $MingwRoot)) {
   Copy-Dir $MingwRoot (Join-Path $DepsRoot (Split-Path $MingwRoot -Leaf))
 } else {
+  $depsParent = Split-Path $DepsRoot -Parent
+  if (-not $depsParent) { $depsParent = "." }
   foreach ($tc in @("mingw32", "mingw64")) {
-    $p = Join-Path (Split-Path $DepsRoot -Parent) $tc
+    $p = Join-Path $depsParent $tc
     if (Test-Path $p) { Copy-Dir $p (Join-Path $DepsRoot $tc) }
   }
 }
