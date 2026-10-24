@@ -213,13 +213,13 @@ class uvcpp_block_cache {
 /**
  * @brief 本线程的自由表。
  *
- * `= {}` 让它是**常量初始化**的（没有 `__cxa_guard_*`），结构体平凡析构 ⇒
- * **不登记** `__cxa_thread_atexit`。跨线程释放只是把块留在释放那个线程的表里，
+ * 槽是**指针**不是对象：MSVC 2013 的 `__declspec(thread)` 只收标量，类类型会报
+ * C2483；首次使用时分配、随线程存活。跨线程释放只是把块留在释放那个线程的表里，
  * 正确性不受影响（块是 `::operator new` 来的，谁 `delete` 都行）。
  */
-inline uvcpp_block_cache& uvcpp_block_cache_here() UVCPP_NOEXCEPT {
-  static UVCPP_THREAD_LOCAL uvcpp_block_cache cache;
-  return cache;
+inline uvcpp_block_cache& uvcpp_block_cache_here() {
+  static UVCPP_THREAD_LOCAL uvcpp_block_cache* cache = nullptr;
+  if (cache == nullptr) cache = new uvcpp_block_cache();  return *cache;
 }
 
 /**
@@ -369,13 +369,13 @@ class uvcpp_malloc_block_cache {
 /**
  * @brief 本线程的表。
  *
- * `= {}` 让它是**常量初始化**的（没有 `__cxa_guard_*`），结构体平凡析构 ⇒
- * **不登记** `__cxa_thread_atexit`。跨线程释放只是把块留在释放那个线程的表里，
+ * 槽是**指针**不是对象：MSVC 2013 的 `__declspec(thread)` 只收标量，类类型会报
+ * C2483；首次使用时分配、随线程存活。跨线程释放只是把块留在释放那个线程的表里，
  * 正确性不受影响（块是 `std::malloc` 来的，谁 `free` 都行）。
  */
-inline uvcpp_malloc_block_cache& uvcpp_malloc_cache_here() UVCPP_NOEXCEPT {
-  static UVCPP_THREAD_LOCAL uvcpp_malloc_block_cache cache;
-  return cache;
+inline uvcpp_malloc_block_cache& uvcpp_malloc_cache_here() {
+  static UVCPP_THREAD_LOCAL uvcpp_malloc_block_cache* cache = nullptr;
+  if (cache == nullptr) cache = new uvcpp_malloc_block_cache();  return *cache;
 }
 
 } // namespace uvcpp

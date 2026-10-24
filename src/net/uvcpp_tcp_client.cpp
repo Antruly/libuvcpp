@@ -127,12 +127,12 @@ class read_block_cache {
   slot slots_[kSlotCount];
 };
 
-/// 本线程的表。`= {}` 让它常量初始化（没有 `__cxa_guard_*`），结构体平凡析构
-/// ⇒ **不登记** `__cxa_thread_atexit`；跨线程还块只是把块留在还的那个线程的表里，
-/// 正确性不受影响（块是 `malloc` 来的，谁 free 都行）。
-inline read_block_cache& read_block_cache_here() UVCPP_NOEXCEPT {
-  static UVCPP_THREAD_LOCAL read_block_cache cache;
-  return cache;
+/// 本线程的表。槽是指针不是对象：MSVC 2013 的 `__declspec(thread)` 只收标量，
+/// 类类型报 C2483；首次使用时分配、随线程存活。跨线程还块只是把块留在还的那个
+/// 线程的表里，正确性不受影响（块是 `malloc` 来的，谁 free 都行）。
+inline read_block_cache& read_block_cache_here() {
+  static UVCPP_THREAD_LOCAL read_block_cache* cache = nullptr;
+  if (cache == nullptr) cache = new read_block_cache();  return *cache;
 }
 
 /// 取一块读缓冲：先看本线程的表，没有就真分配。

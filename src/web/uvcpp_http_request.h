@@ -215,8 +215,12 @@ class UVCPP_API uvcpp_http_request {
    * `??4uvcpp_http_request@uvcpp@@QEAAAEAV01@$$QEAV01@@Z`（移动赋值），**删除 0 个**。
    * 所以这是一次只增不减的 ABI 变化：用旧头文件编出来的消费者照样链接得上。
    */
+#if !(defined(_MSC_VER) && _MSC_VER < 1900)
   uvcpp_http_request(uvcpp_http_request &&obj) UVCPP_NOEXCEPT = default;
   uvcpp_http_request &operator=(uvcpp_http_request &&obj) UVCPP_NOEXCEPT = default;
+#endif
+  // MSVC 2013 refuses to default a move operation when the class declares its
+  // own copy operations (C2610); there they fall back to the copy pair above.
 };
 
 }  // namespace uvcpp
