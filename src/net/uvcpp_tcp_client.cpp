@@ -83,7 +83,7 @@ class read_block_cache {
   };
 
   /** @brief 取一块**正好** `size` 字节的存货；没有就返回 nullptr（调用方退回真分配）。 */
-  void* take(std::size_t size) noexcept {
+  void* take(std::size_t size) UVCPP_NOEXCEPT {
     if (size < kMinCachedBytes || size > kMaxCachedBytes) return nullptr;
     for (unsigned i = 0; i < kSlotCount; ++i) {
       slot& s = slots_[i];
@@ -98,7 +98,7 @@ class read_block_cache {
    *        **调用方自己**走 `uvcpp_free_bytes()`（那张表与这张服务的是同一族块，
    *        但"谁来还"必须由调用方决定：内存池配置下这块不是 `std::malloc` 来的）。
    */
-  bool put(void* p, std::size_t size) noexcept {
+  bool put(void* p, std::size_t size) UVCPP_NOEXCEPT {
     if (p == nullptr) return true;  // 没什么可还的，也算处理完了
     if (size < kMinCachedBytes || size > kMaxCachedBytes) return false;
     for (unsigned i = 0; i < kSlotCount; ++i) {
@@ -130,8 +130,8 @@ class read_block_cache {
 /// 本线程的表。`= {}` 让它常量初始化（没有 `__cxa_guard_*`），结构体平凡析构
 /// ⇒ **不登记** `__cxa_thread_atexit`；跨线程还块只是把块留在还的那个线程的表里，
 /// 正确性不受影响（块是 `malloc` 来的，谁 free 都行）。
-inline read_block_cache& read_block_cache_here() noexcept {
-  static UVCPP_THREAD_LOCAL read_block_cache cache = {};
+inline read_block_cache& read_block_cache_here() UVCPP_NOEXCEPT {
+  static UVCPP_THREAD_LOCAL read_block_cache cache;
   return cache;
 }
 

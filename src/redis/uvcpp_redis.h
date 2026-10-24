@@ -101,8 +101,8 @@ class UVCPP_API uvcpp_redis_value {
   ~uvcpp_redis_value();
   uvcpp_redis_value(const uvcpp_redis_value& other);
   uvcpp_redis_value& operator=(const uvcpp_redis_value& other);
-  uvcpp_redis_value(uvcpp_redis_value&& other) noexcept;
-  uvcpp_redis_value& operator=(uvcpp_redis_value&& other) noexcept;
+  uvcpp_redis_value(uvcpp_redis_value&& other) UVCPP_NOEXCEPT;
+  uvcpp_redis_value& operator=(uvcpp_redis_value&& other) UVCPP_NOEXCEPT;
 
   /** @brief 本值的类型。 */
   uvcpp_redis_type type() const;

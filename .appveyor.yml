@@ -60,7 +60,7 @@ environment:
       BUILD_DIR: build-mingw32
       KIT_TARGET: mingw32
       PACKAGE_TAG: mingw32
-      MINGW_URL: https://downloads.sourceforge.net/project/mingw-w64/Toolchains%20targetting%20Win32/Personal%20Builds/mingw-builds/8.1.0/threads-posix/dwarf/i686-8.1.0-release-posix-dwarf-rt_v6-rev0.7z
+      MINGW_URL: https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/mingw32-gcc8.1.0-toolchain.7z
 
     - TOOLCHAIN: mingw
       ARCH: x64
@@ -70,7 +70,7 @@ environment:
       BUILD_DIR: build-mingw64
       KIT_TARGET: mingw64
       PACKAGE_TAG: mingw64
-      MINGW_URL: https://downloads.sourceforge.net/project/mingw-w64/Toolchains%20targetting%20Win64/Personal%20Builds/mingw-builds/8.1.0/threads-posix/seh/x86_64-8.1.0-release-posix-seh-rt_v6-rev0.7z
+      MINGW_URL: https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/mingw64-gcc8.1.0-toolchain.7z
 
 install:
   - ps: |
@@ -111,7 +111,7 @@ after_build:
       powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-import-check.ps1 -Toolchain $env:TOOLCHAIN -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Vcvars $env:VCVARS -VcArch $env:VCARCH -MingwDir "deps\$env:MINGW_DIR"
   - cmd: 7z a uvcpp-win7-%ARCH%-%PACKAGE_TAG%.zip .\stage\* -r
   - ps: |
-      powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-collect-kit.ps1 -Target $env:KIT_TARGET -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Toolchain $env:TOOLCHAIN -MingwDir $env:MINGW_DIR
+      powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-collect-kit.ps1 -Target $env:KIT_TARGET -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Toolchain $env:TOOLCHAIN -MingwDir "$env:MINGW_DIR"
 
 artifacts:
   - path: 'uvcpp-win7-*.zip'

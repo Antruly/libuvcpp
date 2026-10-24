@@ -29,8 +29,8 @@ public:
   // 不动，接收方拿到一份拷来的字节。带上共享手柄之后这一点会咬人：把一份
   // "接管来的 body" 装进队列、再 `std::move` 出来，本来零拷贝的两步之间又多出
   // 一整份拷贝，而且不会有任何报错。所以这里是"补上缺的那一半"，不是新语义。
-  uvcpp_buf(uvcpp_buf &&obj) noexcept;
-  uvcpp_buf &operator=(uvcpp_buf &&obj) noexcept;
+  uvcpp_buf(uvcpp_buf &&obj) UVCPP_NOEXCEPT;
+  uvcpp_buf &operator=(uvcpp_buf &&obj) UVCPP_NOEXCEPT;
 
   explicit uvcpp_buf(const char *bf, size_t sz);
   explicit uvcpp_buf(const ::std::string &str);

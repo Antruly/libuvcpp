@@ -240,8 +240,8 @@ class UVCPP_API uvcpp_json_doc {
   uvcpp_json_doc();
   ~uvcpp_json_doc();
 
-  uvcpp_json_doc(uvcpp_json_doc&& other) noexcept;
-  uvcpp_json_doc& operator=(uvcpp_json_doc&& other) noexcept;
+  uvcpp_json_doc(uvcpp_json_doc&& other) UVCPP_NOEXCEPT;
+  uvcpp_json_doc& operator=(uvcpp_json_doc&& other) UVCPP_NOEXCEPT;
   uvcpp_json_doc(const uvcpp_json_doc&) = delete;
   uvcpp_json_doc& operator=(const uvcpp_json_doc&) = delete;
 
@@ -542,8 +542,8 @@ class UVCPP_API uvcpp_json_builder {
   uvcpp_json_builder();
   ~uvcpp_json_builder();
 
-  uvcpp_json_builder(uvcpp_json_builder&& other) noexcept;
-  uvcpp_json_builder& operator=(uvcpp_json_builder&& other) noexcept;
+  uvcpp_json_builder(uvcpp_json_builder&& other) UVCPP_NOEXCEPT;
+  uvcpp_json_builder& operator=(uvcpp_json_builder&& other) UVCPP_NOEXCEPT;
   uvcpp_json_builder(const uvcpp_json_builder&) = delete;
   uvcpp_json_builder& operator=(const uvcpp_json_builder&) = delete;
 

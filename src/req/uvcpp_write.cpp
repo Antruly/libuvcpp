@@ -21,7 +21,7 @@ namespace {
  * @param base 块的**原始**头；调用方不许先把 `base` 加过偏移再传进来。
  * @param size 这张表给这块记的尺寸键。
  */
-inline void release_own_block(void *base, ::std::size_t size) noexcept {
+inline void release_own_block(void *base, ::std::size_t size) UVCPP_NOEXCEPT {
 #if UVCPP_ENABLE_MEMORY_POOL
   (void)size;
   uvcpp::uvcpp_free(base);

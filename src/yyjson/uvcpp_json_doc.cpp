@@ -176,7 +176,7 @@ uvcpp_json_doc::~uvcpp_json_doc() { reset(); }
 // 移动 = 指针搬家。**分配器计数块必须跟着走**：yyjson 的文档里存着
 // `alc.ctx = stats_`，如果计数块留在源对象里、随源对象析构而消失，那份文档
 // 之后的每一次 free 都会写一块已经不属于它的内存。
-uvcpp_json_doc::uvcpp_json_doc(uvcpp_json_doc&& other) noexcept
+uvcpp_json_doc::uvcpp_json_doc(uvcpp_json_doc&& other) UVCPP_NOEXCEPT
     : doc_(other.doc_),
       stats_(other.stats_),
       last_error_(other.last_error_),
@@ -187,7 +187,7 @@ uvcpp_json_doc::uvcpp_json_doc(uvcpp_json_doc&& other) noexcept
   other.last_error_pos_ = 0;
 }
 
-uvcpp_json_doc& uvcpp_json_doc::operator=(uvcpp_json_doc&& other) noexcept {
+uvcpp_json_doc& uvcpp_json_doc::operator=(uvcpp_json_doc&& other) UVCPP_NOEXCEPT {
   if (this != &other) {
     reset();
     doc_ = other.doc_;
@@ -944,7 +944,7 @@ uvcpp_json_builder::~uvcpp_json_builder() { reset(); }
 // 移动 = 指针搬家。**分配器计数块必须跟着走**：yyjson 的可变文档里存着
 // `alc.ctx = stats_`，计数块留在源对象里、随源对象析构而消失的话，那份文档之后
 // 的每一次 free 都会写一块已经不属于它的内存。（与 `uvcpp_json_doc` 同一条理由。）
-uvcpp_json_builder::uvcpp_json_builder(uvcpp_json_builder&& other) noexcept
+uvcpp_json_builder::uvcpp_json_builder(uvcpp_json_builder&& other) UVCPP_NOEXCEPT
     : doc_(other.doc_), stats_(other.stats_), last_error_(other.last_error_) {
   other.doc_ = nullptr;
   other.stats_ = nullptr;
@@ -952,7 +952,7 @@ uvcpp_json_builder::uvcpp_json_builder(uvcpp_json_builder&& other) noexcept
 }
 
 uvcpp_json_builder& uvcpp_json_builder::operator=(
-    uvcpp_json_builder&& other) noexcept {
+    uvcpp_json_builder&& other) UVCPP_NOEXCEPT {
   if (this != &other) {
     reset();
     doc_ = other.doc_;

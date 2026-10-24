@@ -156,7 +156,7 @@ class uvcpp_block_cache {
   enum { kSlotCount = 4, kSlotMax = 256 };
 
   /** @brief 取一块装得下 `size` 字节的存货；没有就返回 nullptr（调用方退回 `operator new`）。 */
-  void* try_take(std::size_t size) noexcept {
+  void* try_take(std::size_t size) UVCPP_NOEXCEPT {
     if (size == 0) return nullptr;
     for (unsigned i = 0; i < kSlotCount; ++i) {
       slot& s = slots_[i];
@@ -170,7 +170,7 @@ class uvcpp_block_cache {
   }
 
   /** @brief 还一块回来。表满、或没有空闲的尺寸槽，就直接 `operator delete`。 */
-  void put(void* p, std::size_t size) noexcept {
+  void put(void* p, std::size_t size) UVCPP_NOEXCEPT {
     if (p == nullptr) return;
     if (size == 0) {
       ::operator delete(p);
@@ -217,8 +217,8 @@ class uvcpp_block_cache {
  * **不登记** `__cxa_thread_atexit`。跨线程释放只是把块留在释放那个线程的表里，
  * 正确性不受影响（块是 `::operator new` 来的，谁 `delete` 都行）。
  */
-inline uvcpp_block_cache& uvcpp_block_cache_here() noexcept {
-  static UVCPP_THREAD_LOCAL uvcpp_block_cache cache = {};
+inline uvcpp_block_cache& uvcpp_block_cache_here() UVCPP_NOEXCEPT {
+  static UVCPP_THREAD_LOCAL uvcpp_block_cache cache;
   return cache;
 }
 
@@ -233,9 +233,9 @@ class uvcpp_block_allocator {
  public:
   typedef T value_type;
 
-  uvcpp_block_allocator() noexcept {}
+  uvcpp_block_allocator() UVCPP_NOEXCEPT {}
   template <typename U>
-  uvcpp_block_allocator(const uvcpp_block_allocator<U>&) noexcept {}
+  uvcpp_block_allocator(const uvcpp_block_allocator<U>&) UVCPP_NOEXCEPT {}
 
   T* allocate(std::size_t n) {
     const std::size_t bytes = n * sizeof(T);
@@ -246,7 +246,7 @@ class uvcpp_block_allocator {
     return static_cast<T*>(::operator new(bytes));
   }
 
-  void deallocate(T* p, std::size_t n) noexcept {
+  void deallocate(T* p, std::size_t n) UVCPP_NOEXCEPT {
     if (n == 1) {
       uvcpp_block_cache_here().put(p, sizeof(T));
       return;
@@ -262,13 +262,13 @@ class uvcpp_block_allocator {
 
 template <typename T, typename U>
 inline bool operator==(const uvcpp_block_allocator<T>&,
-                       const uvcpp_block_allocator<U>&) noexcept {
+                       const uvcpp_block_allocator<U>&) UVCPP_NOEXCEPT {
   return true;
 }
 
 template <typename T, typename U>
 inline bool operator!=(const uvcpp_block_allocator<T>&,
-                       const uvcpp_block_allocator<U>&) noexcept {
+                       const uvcpp_block_allocator<U>&) UVCPP_NOEXCEPT {
   return false;
 }
 
@@ -315,7 +315,7 @@ class uvcpp_malloc_block_cache {
   enum { kSlotCount = 4, kSlotMax = 64, kMaxCachedBytes = 4096 };
 
   /** @brief 取一块**正好** `size` 字节的存货；没有就返回 nullptr（调用方退回 `std::malloc`）。 */
-  void* try_take(std::size_t size) noexcept {
+  void* try_take(std::size_t size) UVCPP_NOEXCEPT {
     if (size == 0 || size > kMaxCachedBytes) return nullptr;
     for (unsigned i = 0; i < kSlotCount; ++i) {
       slot& s = slots_[i];
@@ -326,7 +326,7 @@ class uvcpp_malloc_block_cache {
   }
 
   /** @brief 还一块回来。太大、表满、或没有空闲的尺寸槽，就直接 `std::free`。 */
-  void put(void* p, std::size_t size) noexcept {
+  void put(void* p, std::size_t size) UVCPP_NOEXCEPT {
     if (p == nullptr) return;
     if (size == 0 || size > kMaxCachedBytes) {
       std::free(p);
@@ -373,8 +373,8 @@ class uvcpp_malloc_block_cache {
  * **不登记** `__cxa_thread_atexit`。跨线程释放只是把块留在释放那个线程的表里，
  * 正确性不受影响（块是 `std::malloc` 来的，谁 `free` 都行）。
  */
-inline uvcpp_malloc_block_cache& uvcpp_malloc_cache_here() noexcept {
-  static UVCPP_THREAD_LOCAL uvcpp_malloc_block_cache cache = {};
+inline uvcpp_malloc_block_cache& uvcpp_malloc_cache_here() UVCPP_NOEXCEPT {
+  static UVCPP_THREAD_LOCAL uvcpp_malloc_block_cache cache;
   return cache;
 }
 

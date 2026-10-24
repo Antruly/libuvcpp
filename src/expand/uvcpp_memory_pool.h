@@ -143,13 +143,13 @@ struct pool_block_header {
 
     /// 获取指向用户数据的指针（返回 header 后的地址）
     /// @note 强制内联，确保零开销
-    inline void* to_user_ptr() noexcept {
+    inline void* to_user_ptr() UVCPP_NOEXCEPT {
         return reinterpret_cast<uint8_t*>(this) + BLOCK_HEADER_SIZE;
     }
 
     /// 从用户指针获取 header
     /// @note 强制内联，确保零开销
-    inline static pool_block_header* from_user_ptr(void* ptr) noexcept {
+    inline static pool_block_header* from_user_ptr(void* ptr) UVCPP_NOEXCEPT {
         return reinterpret_cast<pool_block_header*>(reinterpret_cast<uint8_t*>(ptr) - BLOCK_HEADER_SIZE);
     }
 };
@@ -255,7 +255,7 @@ struct memory_pool_config {
 
     /// @brief 类型转数组索引（用于查表法优化）
     /// @note 枚举值 0-7 可直接作为索引，SUPER 类型返回特殊值
-    static UVCPP_CONSTEXPR size_t type_to_index(memory_block_type type) noexcept {
+    static UVCPP_CONSTEXPR size_t type_to_index(memory_block_type type) UVCPP_NOEXCEPT {
         return static_cast<size_t>(type);
     }
 
@@ -527,7 +527,7 @@ public:
     thread_local_cache& operator=(const thread_local_cache&) = delete;
 
     /// @brief 允许移动
-    thread_local_cache(thread_local_cache&& other) noexcept
+    thread_local_cache(thread_local_cache&& other) UVCPP_NOEXCEPT
         : tiny_head(other.tiny_head), tiny_tail(other.tiny_tail), tiny_count(other.tiny_count),
           small_head(other.small_head), small_tail(other.small_tail), small_count(other.small_count),
           medium_small_head(other.medium_small_head), medium_small_tail(other.medium_small_tail), medium_small_count(other.medium_small_count),
@@ -539,7 +539,7 @@ public:
         other.reset();
     }
 
-    thread_local_cache& operator=(thread_local_cache&& other) noexcept {
+    thread_local_cache& operator=(thread_local_cache&& other) UVCPP_NOEXCEPT {
         if (this != &other) {
             release_all();
             tiny_head = other.tiny_head; tiny_tail = other.tiny_tail; tiny_count = other.tiny_count;
@@ -822,8 +822,8 @@ public:
     uvcpp_memory_pool& operator=(const uvcpp_memory_pool&) = delete;
 
     // 允许移动
-    uvcpp_memory_pool(uvcpp_memory_pool&&) noexcept;
-    uvcpp_memory_pool& operator=(uvcpp_memory_pool&&) noexcept;
+    uvcpp_memory_pool(uvcpp_memory_pool&&) UVCPP_NOEXCEPT;
+    uvcpp_memory_pool& operator=(uvcpp_memory_pool&&) UVCPP_NOEXCEPT;
 
     // ============================================================
     // 初始化和关闭

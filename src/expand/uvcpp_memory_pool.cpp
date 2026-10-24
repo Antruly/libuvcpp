@@ -93,7 +93,7 @@ uvcpp_memory_pool::~uvcpp_memory_pool() {
 // 移动语义
 // ============================================================
 
-uvcpp_memory_pool::uvcpp_memory_pool(uvcpp_memory_pool&& other) noexcept
+uvcpp_memory_pool::uvcpp_memory_pool(uvcpp_memory_pool&& other) UVCPP_NOEXCEPT
     : config_(other.config_)
     , global_tiny_pool_(other.global_tiny_pool_)
     , global_small_pool_(other.global_small_pool_)
@@ -137,7 +137,7 @@ uvcpp_memory_pool::uvcpp_memory_pool(uvcpp_memory_pool&& other) noexcept
     other.held_bytes_.store(0, std::memory_order_relaxed);
 }
 
-uvcpp_memory_pool& uvcpp_memory_pool::operator=(uvcpp_memory_pool&& other) noexcept {
+uvcpp_memory_pool& uvcpp_memory_pool::operator=(uvcpp_memory_pool&& other) UVCPP_NOEXCEPT {
     if (this != &other) {
         shutdown();
 

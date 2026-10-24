@@ -47,7 +47,7 @@ uvcpp_buf &uvcpp_buf::operator=(const uvcpp_buf &bf) {
 // 只搬 buf 不搬容量的话源会变成"有指针、容量 0"的外部视图形状，而它明明拥有
 // 那块内存，之后既不会复用也会被 free_own 释放一次 —— 接收方那次释放就成了
 // 二次释放。共享手柄也要搬走（不是拷一份）：这里要的是"这块字节现在归你了"。
-uvcpp_buf::uvcpp_buf(uvcpp_buf &&obj) noexcept : uvcpp_buf() {
+uvcpp_buf::uvcpp_buf(uvcpp_buf &&obj) UVCPP_NOEXCEPT : uvcpp_buf() {
   this->buf       = obj.buf;
   this->capacity_ = obj.capacity_;
   this->shared_   = ::std::move(obj.shared_);
@@ -56,7 +56,7 @@ uvcpp_buf::uvcpp_buf(uvcpp_buf &&obj) noexcept : uvcpp_buf() {
   obj.capacity_   = 0;
 }
 
-uvcpp_buf &uvcpp_buf::operator=(uvcpp_buf &&obj) noexcept {
+uvcpp_buf &uvcpp_buf::operator=(uvcpp_buf &&obj) UVCPP_NOEXCEPT {
   if (this == &obj) {
     return *this;
   }

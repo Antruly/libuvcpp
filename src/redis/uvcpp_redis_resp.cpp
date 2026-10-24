@@ -423,11 +423,11 @@ uvcpp_redis_value& uvcpp_redis_value::operator=(
   return *this;
 }
 
-uvcpp_redis_value::uvcpp_redis_value(uvcpp_redis_value&& other) noexcept
+uvcpp_redis_value::uvcpp_redis_value(uvcpp_redis_value&& other) UVCPP_NOEXCEPT
     : p_(std::move(other.p_)) {}
 
 uvcpp_redis_value& uvcpp_redis_value::operator=(
-    uvcpp_redis_value&& other) noexcept {
+    uvcpp_redis_value&& other) UVCPP_NOEXCEPT {
   p_ = std::move(other.p_);
   return *this;
 }

@@ -32,6 +32,8 @@
 #if defined(_MSC_VER) && _MSC_VER < 1900
 #  define UVCPP_CONSTEXPR const
 #  define UVCPP_THREAD_LOCAL __declspec(thread)
+/* MSVC 2013 has no noexcept specifier at all (C3646), not even an operator. */
+#  define UVCPP_NOEXCEPT
 /*
  * MSVC's printf understands "Iu" for size_t. The C99 "zu" form only arrived
  * with the Universal CRT in VS2015.
@@ -40,6 +42,7 @@
 #else
 #  define UVCPP_CONSTEXPR constexpr
 #  define UVCPP_THREAD_LOCAL thread_local
+#  define UVCPP_NOEXCEPT noexcept
 #  define UVCPP_SIZE_FMT "zu"
 #endif
 
