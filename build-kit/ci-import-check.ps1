@@ -31,7 +31,7 @@ if ($Toolchain -eq "msvc") {
     throw "Win8+/Win10-only import found:`n$($out | Select-String $forbidden)"
   }
 } else {
-  $dll = Get-ChildItem -Path $BuildDir -Recurse -File -Filter "uvcpp.dll" |
+  $dll = Get-ChildItem -Path $BuildDir -Recurse -File -Filter "*uvcpp.dll" |
          Select-Object -First 1
   if (-not $dll) { throw "no uvcpp.dll under $BuildDir" }
   $objdump = Join-Path $MingwDir "bin\objdump.exe"
