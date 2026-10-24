@@ -87,14 +87,14 @@
 | HTTP/2 | `UVCPP_NGHTTP2_ENABLE` | `set_http2_enabled()` 那一组消失 |
 
 两行"响应压缩"是**同一个块的两个来源**：压缩器的总开关是
-`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:2168-2168`）——
+`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:2173-2173`）——
 任一为 1 就有这个块，两个都为 0 才整块消失。三个"块"的开关都默认 OFF，brotli
 那条也是（`CMakeLists.txt:289-303` 那一组 `option()`，四个块开关默认全是 OFF）。编译进 `UVCPP_SRC_FILES` 的是
-`src/web/*.cpp` 全体（`CMakeLists.txt:1755-1755`），但每个 `.cpp` 里的功能块同样带宏。
+`src/web/*.cpp` 全体（`CMakeLists.txt:1760-1760`），但每个 `.cpp` 里的功能块同样带宏。
 
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
-（`tests/functional/web_ssl_h2_client_func.cpp:185`）。握手超时归
+（`tests/functional/web_ssl_h2_client_func.cpp:186-186`）。握手超时归
 `uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:805-805`）。
 
 ---

@@ -133,7 +133,7 @@ Build OpenSSL 1.1.1w with `perl Configure mingw no-shared no-asm` (32-bit) or
 The public headers no longer test `UV_VERSION_MINOR`. They test the capability macros
 derived from the exact libuv this build used:
 
-```c
+```text
 UVCPP_LIBUV_HEX              /* e.g. 0x012800 for 1.40.0 */
 UVCPP_HAVE_FS_MKSTEMP        /* 1.34 */
 UVCPP_HAVE_FS_LUTIME         /* 1.36 */
@@ -231,7 +231,7 @@ webapp, http2, quic, http3, yyjson, capi, db, redis
 
 The generated `uvcpp_config.h` contains the final 0/1 values:
 
-```c
+```text
 #define UVCPP_NET_ENABLE            1
 #define UVCPP_WEB_ENABLE            1
 #define UVCPP_WEB_SERVER_ENABLE     1

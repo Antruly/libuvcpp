@@ -13,12 +13,12 @@
 
 - 打开方式：`-DUVCPP_ENABLE_NGHTTP2=ON`。**默认 OFF**（`CMakeLists.txt:303-303`），
   而且缺 OpenSSL 或缺 web 模块时会被**强制**置 OFF 并打 warning
-  （`CMakeLists.txt:718-718`、`CMakeLists.txt:727-727`）—— 因为 `uvcpp_h2_stream`
+  （`CMakeLists.txt:723-723`、`CMakeLists.txt:732-732`）—— 因为 `uvcpp_h2_stream`
   里直接放 `uvcpp_http_request` / `uvcpp_http_response`
   （`src/http2/uvcpp_h2_session.h:70`）。
 - 包含方式：`<http2/uvcpp_h2_session.h>`、`<http2/uvcpp_h2_connection.h>`、
   `<http2/uvcpp_h2_common.h>`。私有的 `<http2/uvcpp_h2_nghttp2.h>` **不安装**
-  （`CMakeLists.txt:3631-3631`）。
+  （`CMakeLists.txt:3636-3636`）。
 
 > 本页讲**怎么用**。它与 [HTTP/2 支持现状](./http2-status.md) 分工：那篇讲
 > **实现进度、写死的折衷、已知缺口**，本页不重复那些，需要时直接链过去。
@@ -72,12 +72,12 @@ int drain(std::string& out, size_t max_bytes = 0);                // src/http2/u
 ## 2. 编译期条件
 
 `UVCPP_NGHTTP2_ENABLE` **在任何构建里都有定义**，只是值不同：ON ⇒ `1`，OFF ⇒ `0`
-（`CMakeLists.txt:2761-2761`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
+（`CMakeLists.txt:2766-2766`）。三个公开头把**全部内容**包在 `#if UVCPP_NGHTTP2_ENABLE` 里
 （`src/http2/uvcpp_h2_common.h:19`、`src/http2/uvcpp_h2_session.h:33`、`src/http2/uvcpp_h2_connection.h:27`）。
 
 为 0 时：头**还在**（源码树里能 include、也编得过），但里面**一个类型都不声明** ——
 写 `uvcpp_h2_session s(true);` 会"未定义类型"。安装出来的包里则**根本没有这几个头**
-（`CMakeLists.txt:3631-3631` 只在开关 ON 时装）。
+（`CMakeLists.txt:3636-3636` 只在开关 ON 时装）。
 
 所以使用者的写法是把自己的那段包起来：
 
@@ -278,7 +278,7 @@ done)` → 最后一块 `end_stream = true`。三处要点：
 
 **低层没有请求侧的合并入口** —— `uvcpp_h2_connection` 上的四个 `send_*` 全是响应侧的。
 客户端提交完请求**必须自己调 `flush()`**。这一点在
-`tests/functional/web_ssl_h2_server_func.cpp:460` 有一段专门的告诫，
+`tests/functional/web_ssl_h2_server_func.cpp:461-461` 有一段专门的告诫，
 库内正解在 `src/web/uvcpp_http_client.cpp:1840-1840`：
 
 ```cpp
@@ -484,7 +484,7 @@ if (rv < 0) {                        // src/http2/uvcpp_h2_session.cpp:880-880
 
 **`uvcpp_h2_connection` 必须在 socket 连上之后才建。** 它自己装读回调，
 而没连上的 client 上 `read_start_events` 返回 `UV_ENOTCONN` —— 那个失败没人会再 arm
-（`src/web/uvcpp_http_client.cpp:329-329`、`tests/functional/web_ssl_h2_server_func.cpp:409`）。
+（`src/web/uvcpp_http_client.cpp:329-329`、`tests/functional/web_ssl_h2_server_func.cpp:410-410`）。
 
 **ALPN 要自己确认。** 构造函数不校验 `tls_alpn_selected() == "h2"`，但头文件的参数
 说明要求它已经协商好（`src/http2/uvcpp_h2_connection.h:54`）。谁建谁判。

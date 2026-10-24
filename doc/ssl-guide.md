@@ -65,7 +65,7 @@ TLS 在这库里是**过滤层**，不是独立的传输实现：装到 `uvcpp_t
 或链接错误**，只会在运行时读到错位的垃圾。
 
 关掉这个选项时：`src/ssl/` 会被从源文件与头文件列表里排除，**而且根本不安装 ssl 头**
-（`CMakeLists.txt:3621-3622`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
+（`CMakeLists.txt:3626-3627`）——使用者连 `#include <ssl/uvcpp_ssl_context.h>` 都会
 找不到文件。同理，`uvcpp_tcp_server::set_ssl_context()` 在关掉时**连声明都不存在**。
 
 运行时"关掉 TLS"不是宏，是 `set_ssl_context(nullptr)`。
@@ -358,7 +358,7 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 （`src/web/uvcpp_http_client.h:331-340`）。
 
 **怎么确认过滤器真的接上了：** 在连接回调里断言 `is_tls_handshake_done()`，并对收到的
-字节按预期**明文**内容比对。测试就是这么做的——`tests/functional/web_ssl_server_func.cpp:131-135`
+字节按预期**明文**内容比对。测试就是这么做的——`tests/functional/web_ssl_server_func.cpp:132-136`
 的注释写着"收到的是明文才作数：过滤器没接上的话这里会是密文，逐字节比对会失败"。
 
 ---
