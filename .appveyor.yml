@@ -111,12 +111,15 @@ build_script:
 
 after_build:
   - ps: |
-      powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-import-check.ps1 -Toolchain $env:TOOLCHAIN -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Vcvars $env:VCVARS -VcArch $env:VCARCH -MingwDir "deps\$env:MINGW_DIR"
+      $chk = @("-Toolchain", $env:TOOLCHAIN, "-BuildDir", $env:BUILD_DIR, "-Arch", $env:ARCH)
+      if ($env:VCVARS) { $chk += @("-Vcvars", $env:VCVARS, "-VcArch", $env:VCARCH) }
+      if ($env:MINGW_DIR) { $chk += @("-MingwDir", "deps\$env:MINGW_DIR") }
+      & powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-import-check.ps1 @chk
   - cmd: 7z a uvcpp-win7-%ARCH%-%PACKAGE_TAG%.zip .\stage\* -r
   - ps: |
-      $kitArgs = "-Target $env:KIT_TARGET -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Toolchain $env:TOOLCHAIN"
-      if ($env:MINGW_DIR) { $kitArgs += " -MingwDir $env:MINGW_DIR" }
-      powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-collect-kit.ps1 $kitArgs
+      $kit = @("-Target", $env:KIT_TARGET, "-BuildDir", $env:BUILD_DIR, "-Arch", $env:ARCH, "-Toolchain", $env:TOOLCHAIN)
+      if ($env:MINGW_DIR) { $kit += @("-MingwDir", $env:MINGW_DIR) }
+      & powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-collect-kit.ps1 @kit
 
 artifacts:
   - path: 'uvcpp-win7-*.zip'
