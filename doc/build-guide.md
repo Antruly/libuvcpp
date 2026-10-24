@@ -18,7 +18,8 @@ For the shortest path from a fresh clone to a green test run, see
 |---|---|---|
 | CMake | **3.20 or newer** | `cmake_minimum_required(VERSION 3.20)`, declared by the root `CMakeLists.txt`, `tests/CMakeLists.txt`, `tests/unit/CMakeLists.txt` and `tests/functional/CMakeLists.txt` — `tests/expand/` declares none and inherits |
 | C++ standard | **C++11, required** | `CMAKE_CXX_STANDARD 11` + `CMAKE_CXX_STANDARD_REQUIRED ON` |
-| MSVC source charset | `/utf-8` added automatically | `if(MSVC) add_compile_options(/utf-8) endif()` |
+| MSVC source charset | `/utf-8` on VS2015 Update 2+ | `add_compile_options(/utf-8)` is version-guarded in `CMakeLists.txt`; VS2013 relies on UTF-8 BOMs instead |
+| Legacy toolchains | see [`compatibility.md`](compatibility.md) | VS2013 net+ssl / web-lite source profiles, Win7 targets, libuv 1.33/1.40, MinGW GCC 5.3+ |
 
 That last row deserves a warning. `add_compile_options` is **directory-scoped**: the option
 never lands in `INTERFACE_COMPILE_OPTIONS` of the exported target, so a `find_package(uvcpp)`

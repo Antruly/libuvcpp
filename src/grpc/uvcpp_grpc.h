@@ -70,10 +70,10 @@ namespace uvcpp {
 // =========================================================================
 
 /// 帧前缀的字节数：1 字节压缩标志 + 4 字节**大端**长度。
-constexpr size_t GRPC_FRAME_HEADER_SIZE = 5u;
+UVCPP_CONSTEXPR size_t GRPC_FRAME_HEADER_SIZE = 5u;
 
 /// 单条消息的默认上限，与 gRPC 自己那条默认（4 MiB）同值。
-constexpr size_t GRPC_FRAME_MAX_MESSAGE_BYTES = 4u * 1024u * 1024u;
+UVCPP_CONSTEXPR size_t GRPC_FRAME_MAX_MESSAGE_BYTES = 4u * 1024u * 1024u;
 
 /**
  * @brief gRPC 的状态码，`grpc-status` 尾随头的取值。

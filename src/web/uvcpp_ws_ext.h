@@ -30,7 +30,7 @@
 
 #include <uvcpp/uvcpp_config.h>
 
-#if UVCPP_WEB_ENABLE
+#if UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 
 #include <cstddef>
 #include <string>
@@ -193,5 +193,5 @@ UVCPP_API uvcpp_ws_deflate_params ws_deflate_accept_client(
 
 }  // namespace uvcpp
 
-#endif  // UVCPP_WEB_ENABLE
+#endif  // UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 #endif  // SRC_WEB_UVCPP_WS_EXT_H

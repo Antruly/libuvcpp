@@ -16,7 +16,7 @@
 
 #include <uvcpp/uvcpp_config.h>
 
-#if UVCPP_WEB_ENABLE
+#if UVCPP_WEB_ENABLE && UVCPP_WEB_SERVER_ENABLE
 
 #include <atomic>
 #include <functional>
@@ -1889,5 +1889,5 @@ class UVCPP_API uvcpp_http_server {
 
 }  // namespace uvcpp
 
-#endif  // UVCPP_WEB_ENABLE
+#endif  // UVCPP_WEB_ENABLE && UVCPP_WEB_SERVER_ENABLE
 #endif  // SRC_WEB_UVCPP_HTTP_SERVER_H

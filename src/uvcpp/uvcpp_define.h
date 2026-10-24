@@ -2,6 +2,11 @@
 #ifndef SRC_UVCPP_UVCPP_DEFINE_H
 #define SRC_UVCPP_UVCPP_DEFINE_H
 
+/* Generated feature/capability macros and the VS2013 shims must be
+   visible before any module guard below. */
+#include <uvcpp/uvcpp_config.h>
+#include <uvcpp/uvcpp_compat.h>
+
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
 #endif

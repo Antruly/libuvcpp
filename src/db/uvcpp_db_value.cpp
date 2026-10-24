@@ -31,9 +31,9 @@ namespace {
 /// —— IEEE754 双精度用 17 位十进制数一定能唯一还原。
 std::string double_to_text(double v) {
   char buf[40];
-  std::snprintf(buf, sizeof(buf), "%.15g", v);
+  uvcpp_snprintf(buf, sizeof(buf), "%.15g", v);
   if (std::strtod(buf, nullptr) != v) {
-    std::snprintf(buf, sizeof(buf), "%.17g", v);
+    uvcpp_snprintf(buf, sizeof(buf), "%.17g", v);
   }
   return std::string(buf);
 }

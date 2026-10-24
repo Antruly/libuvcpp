@@ -1,5 +1,7 @@
 ﻿#include "uvcpp_loop.h"
 
+#include <mutex>
+
 #if !defined(_WIN32)
 #include <signal.h>
 #endif
@@ -133,10 +135,21 @@ void uvcpp_loop::callback_walk(uv_handle_t *handle, void *arg) {
   }
 }
 
+namespace {
+uvcpp_loop *g_default_loop = nullptr;
+std::once_flag g_default_loop_once;
+}  // namespace
+
 uvcpp_loop *uvcpp_loop::default_loop() {
-  static uvcpp_loop default_loop;
-  default_loop.init();
-  return &default_loop;
+  // VS2013 has no magic statics; a namespace-scope once_flag is initialised
+  // before main (single-threaded) and call_once is available in VS2013.
+  // The object is intentionally leaked at process exit (the default loop
+  // lives as long as the process).
+  std::call_once(g_default_loop_once, []() {
+    g_default_loop = new uvcpp_loop();
+    g_default_loop->init();
+  });
+  return g_default_loop;
 }
 
 int uvcpp_loop::init() {

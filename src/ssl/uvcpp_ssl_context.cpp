@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/ssl/uvcpp_ssl_context.cpp
  * @brief SSL/TLS context implementation wrapping OpenSSL SSL_CTX.
  * @author zhuweiye
@@ -347,9 +347,10 @@ int alpn_select_cb(SSL* /*ssl*/, const unsigned char** out, unsigned char* outle
 //
 // 不做成成员：`uvcpp_ssl_context` 是公开类，加一个 `std::mutex` 成员就改了它的
 // 布局。这把锁只覆盖"改名单"这一小段，不进任何热路径，进程内一把足够。
+std::mutex g_alpn_ctx_mutex;
+
 std::mutex& alpn_ctx_mutex() {
-  static std::mutex m;
-  return m;
+  return g_alpn_ctx_mutex;
 }
 
 }  // namespace

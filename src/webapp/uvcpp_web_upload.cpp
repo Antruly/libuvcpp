@@ -158,10 +158,10 @@ uint64_t seed_once() {
  * 失败重试。`seed_once()` 每次调都是独立的 `random_device` + 时间。
  */
 std::string make_temp_name() {
-  thread_local std::mt19937_64 rng(seed_once());
+  UVCPP_THREAD_LOCAL std::mt19937_64 rng(seed_once());
   const uint64_t v = rng();
   char buf[32];
-  std::snprintf(buf, sizeof(buf), "%016llx",
+  uvcpp_snprintf(buf, sizeof(buf), "%016llx",
                 static_cast<unsigned long long>(v));
   return std::string(buf, 16);
 }

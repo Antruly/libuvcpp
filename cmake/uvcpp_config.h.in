@@ -25,6 +25,17 @@
 #ifndef UVCPP_GENERATED_CONFIG_H
 #define UVCPP_GENERATED_CONFIG_H
 
+/* Every C++ header that includes this generated config also needs the VS2013
+   shims (UVCPP_CONSTEXPR / UVCPP_THREAD_LOCAL / uvcpp_snprintf). Keep the
+   dependency here so a header that includes only uvcpp_config.h -- for
+   example grpc/uvcpp_grpc.h -- still gets them.
+
+   This file is also included by the pure-C headers in src/capi/, so the
+   shim must be C++-only. */
+#ifdef __cplusplus
+#include <uvcpp/uvcpp_compat.h>
+#endif
+
 #if defined(UVCPP_NET_ENABLE) && (UVCPP_NET_ENABLE != @UVCPP_NET_ENABLE@)
 #  error "UVCPP_NET_ENABLE=@UVCPP_NET_ENABLE@ in this build; remove your own definition of it"
 #endif
@@ -37,6 +48,36 @@
 #endif
 #ifndef UVCPP_WEB_ENABLE
 #  define UVCPP_WEB_ENABLE @UVCPP_WEB_ENABLE@
+#endif
+
+/* Web sub-features. They are 0 even when UVCPP_WEB_ENABLE is 1 if the
+   corresponding source files were filtered out at configure time. */
+#if defined(UVCPP_WEB_SERVER_ENABLE) && (UVCPP_WEB_SERVER_ENABLE != @UVCPP_WEB_SERVER_ENABLE@)
+#  error "UVCPP_WEB_SERVER_ENABLE=@UVCPP_WEB_SERVER_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WEB_SERVER_ENABLE
+#  define UVCPP_WEB_SERVER_ENABLE @UVCPP_WEB_SERVER_ENABLE@
+#endif
+
+#if defined(UVCPP_WEB_CLIENT_ENABLE) && (UVCPP_WEB_CLIENT_ENABLE != @UVCPP_WEB_CLIENT_ENABLE@)
+#  error "UVCPP_WEB_CLIENT_ENABLE=@UVCPP_WEB_CLIENT_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WEB_CLIENT_ENABLE
+#  define UVCPP_WEB_CLIENT_ENABLE @UVCPP_WEB_CLIENT_ENABLE@
+#endif
+
+#if defined(UVCPP_WEB_WS_ENABLE) && (UVCPP_WEB_WS_ENABLE != @UVCPP_WEB_WS_ENABLE@)
+#  error "UVCPP_WEB_WS_ENABLE=@UVCPP_WEB_WS_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WEB_WS_ENABLE
+#  define UVCPP_WEB_WS_ENABLE @UVCPP_WEB_WS_ENABLE@
+#endif
+
+#if defined(UVCPP_WEB_STATIC_ENABLE) && (UVCPP_WEB_STATIC_ENABLE != @UVCPP_WEB_STATIC_ENABLE@)
+#  error "UVCPP_WEB_STATIC_ENABLE=@UVCPP_WEB_STATIC_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_WEB_STATIC_ENABLE
+#  define UVCPP_WEB_STATIC_ENABLE @UVCPP_WEB_STATIC_ENABLE@
 #endif
 
 #if defined(UVCPP_WEBAPP_ENABLE) && (UVCPP_WEBAPP_ENABLE != @UVCPP_WEBAPP_ENABLE@)
@@ -224,6 +265,104 @@
 #endif
 #ifndef UVCPP_UDP_GSO_ENABLE
 #  define UVCPP_UDP_GSO_ENABLE @UVCPP_UDP_GSO_ENABLE@
+#endif
+
+/* ---------------------------------------------------------------------
+   libuv capability macros.
+   These are derived from the exact libuv version this build used. Public
+   headers test them instead of `UV_VERSION_MINOR >= N`, so a consumer
+   sees the same API surface the library was compiled with even if its
+   own uv.h is newer or older.
+   --------------------------------------------------------------------- */
+#if defined(UVCPP_LIBUV_HEX) && (UVCPP_LIBUV_HEX != @UVCPP_LIBUV_HEX@)
+#  error "UVCPP_LIBUV_HEX=@UVCPP_LIBUV_HEX@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_LIBUV_HEX
+#  define UVCPP_LIBUV_HEX @UVCPP_LIBUV_HEX@
+#endif
+
+#if defined(UVCPP_TARGET_WINVER) && (UVCPP_TARGET_WINVER != @UVCPP_WINVER@)
+#  error "UVCPP_TARGET_WINVER=@UVCPP_WINVER@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_TARGET_WINVER
+#  define UVCPP_TARGET_WINVER @UVCPP_WINVER@
+#endif
+
+#if defined(UVCPP_HAVE_FS_MKSTEMP) && (UVCPP_HAVE_FS_MKSTEMP != @UVCPP_HAVE_FS_MKSTEMP@)
+#  error "UVCPP_HAVE_FS_MKSTEMP=@UVCPP_HAVE_FS_MKSTEMP@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_FS_MKSTEMP
+#  define UVCPP_HAVE_FS_MKSTEMP @UVCPP_HAVE_FS_MKSTEMP@
+#endif
+
+#if defined(UVCPP_HAVE_FS_LUTIME) && (UVCPP_HAVE_FS_LUTIME != @UVCPP_HAVE_FS_LUTIME@)
+#  error "UVCPP_HAVE_FS_LUTIME=@UVCPP_HAVE_FS_LUTIME@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_FS_LUTIME
+#  define UVCPP_HAVE_FS_LUTIME @UVCPP_HAVE_FS_LUTIME@
+#endif
+
+#if defined(UVCPP_HAVE_FS_SYSTEM_ERROR) && (UVCPP_HAVE_FS_SYSTEM_ERROR != @UVCPP_HAVE_FS_SYSTEM_ERROR@)
+#  error "UVCPP_HAVE_FS_SYSTEM_ERROR=@UVCPP_HAVE_FS_SYSTEM_ERROR@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_FS_SYSTEM_ERROR
+#  define UVCPP_HAVE_FS_SYSTEM_ERROR @UVCPP_HAVE_FS_SYSTEM_ERROR@
+#endif
+
+#if defined(UVCPP_HAVE_UDP_RECVMMSG) && (UVCPP_HAVE_UDP_RECVMMSG != @UVCPP_HAVE_UDP_RECVMMSG@)
+#  error "UVCPP_HAVE_UDP_RECVMMSG=@UVCPP_HAVE_UDP_RECVMMSG@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_UDP_RECVMMSG
+#  define UVCPP_HAVE_UDP_RECVMMSG @UVCPP_HAVE_UDP_RECVMMSG@
+#endif
+
+#if defined(UVCPP_HAVE_TRY_WRITE2) && (UVCPP_HAVE_TRY_WRITE2 != @UVCPP_HAVE_TRY_WRITE2@)
+#  error "UVCPP_HAVE_TRY_WRITE2=@UVCPP_HAVE_TRY_WRITE2@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_TRY_WRITE2
+#  define UVCPP_HAVE_TRY_WRITE2 @UVCPP_HAVE_TRY_WRITE2@
+#endif
+
+#if defined(UVCPP_HAVE_AVAILABLE_PARALLELISM) && (UVCPP_HAVE_AVAILABLE_PARALLELISM != @UVCPP_HAVE_AVAILABLE_PARALLELISM@)
+#  error "UVCPP_HAVE_AVAILABLE_PARALLELISM=@UVCPP_HAVE_AVAILABLE_PARALLELISM@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_AVAILABLE_PARALLELISM
+#  define UVCPP_HAVE_AVAILABLE_PARALLELISM @UVCPP_HAVE_AVAILABLE_PARALLELISM@
+#endif
+
+#if defined(UVCPP_HAVE_METRICS) && (UVCPP_HAVE_METRICS != @UVCPP_HAVE_METRICS@)
+#  error "UVCPP_HAVE_METRICS=@UVCPP_HAVE_METRICS@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_METRICS
+#  define UVCPP_HAVE_METRICS @UVCPP_HAVE_METRICS@
+#endif
+
+#if defined(UVCPP_HAVE_OS_GROUP) && (UVCPP_HAVE_OS_GROUP != @UVCPP_HAVE_OS_GROUP@)
+#  error "UVCPP_HAVE_OS_GROUP=@UVCPP_HAVE_OS_GROUP@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_OS_GROUP
+#  define UVCPP_HAVE_OS_GROUP @UVCPP_HAVE_OS_GROUP@
+#endif
+
+#if defined(UVCPP_HAVE_PASSWD2) && (UVCPP_HAVE_PASSWD2 != @UVCPP_HAVE_PASSWD2@)
+#  error "UVCPP_HAVE_PASSWD2=@UVCPP_HAVE_PASSWD2@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_PASSWD2
+#  define UVCPP_HAVE_PASSWD2 @UVCPP_HAVE_PASSWD2@
+#endif
+
+#if defined(UVCPP_HAVE_TCP_REUSEPORT) && (UVCPP_HAVE_TCP_REUSEPORT != @UVCPP_HAVE_TCP_REUSEPORT@)
+#  error "UVCPP_HAVE_TCP_REUSEPORT=@UVCPP_HAVE_TCP_REUSEPORT@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_TCP_REUSEPORT
+#  define UVCPP_HAVE_TCP_REUSEPORT @UVCPP_HAVE_TCP_REUSEPORT@
+#endif
+
+#if defined(UVCPP_HAVE_UDP_REUSEPORT) && (UVCPP_HAVE_UDP_REUSEPORT != @UVCPP_HAVE_UDP_REUSEPORT@)
+#  error "UVCPP_HAVE_UDP_REUSEPORT=@UVCPP_HAVE_UDP_REUSEPORT@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_HAVE_UDP_REUSEPORT
+#  define UVCPP_HAVE_UDP_REUSEPORT @UVCPP_HAVE_UDP_REUSEPORT@
 #endif
 
 #endif /* UVCPP_GENERATED_CONFIG_H */

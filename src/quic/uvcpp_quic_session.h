@@ -703,7 +703,7 @@ class quic_session {
     ///
     /// **注意这是上限，不是每块的实际容量** —— 实际容量按"这次要写多少"定，
     /// 见 `kMinChunkSize`。
-    static constexpr size_t kChunkSize = 64 * 1024;
+    static UVCPP_CONSTEXPR size_t kChunkSize = 64 * 1024;
 
     /// 开一块时的容量**下限**，也是"这次写的量小于它"时那块的实际容量。
     ///
@@ -723,7 +723,7 @@ class quic_session {
     /// 量（~1200 B）左右，太小会让一次调用要描述的段数变多（`kMaxStreamVecs`
     /// 是 16）。它只是下限 —— 一次写 1 MiB 时容量照样是 `kChunkSize`，所以
     /// 上面那张 2 MiB 的表不受影响。
-    static constexpr size_t kMinChunkSize = 1024;
+    static UVCPP_CONSTEXPR size_t kMinChunkSize = 1024;
     /// 尚存活的字节，按流偏移升序。除最后一块外每块都是满的 —— 这条是本结构
     /// 的稳态（新块只在旧块写满时才开），`next_sendable_stream()` 用它做除法
     /// 定位，`settle()` 用它做整块丢弃。
@@ -790,7 +790,7 @@ class quic_session {
   /// `ngtcp2_pkt.h` 里，公开头拿不到），而一个包连 16 KiB 的一块都装不满
   /// （~1200 B），所以 16 段远够用，同时离那个内部上限留着安全余量。
   /// 注意**不能**按这个数去取那个内部宏 —— 那只在 ngtcp2 的私有头里。
-  static constexpr size_t kMaxStreamVecs = 16;
+  static UVCPP_CONSTEXPR size_t kMaxStreamVecs = 16;
 
   /// 挑一条还有东西可发的流。
   /// @return 有可发的返回 true，并填好 `stream_id` / `datav` / `datavcnt` /

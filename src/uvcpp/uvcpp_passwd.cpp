@@ -33,7 +33,7 @@ int uvcpp_passwd::init() {
   return 0;
 }
 int uvcpp_passwd::get_os_passwd() { return uv_os_get_passwd(passwd); }
-#if UV_VERSION_MINOR >= 45
+#if UVCPP_HAVE_PASSWD2
 int uvcpp_passwd::get_os_passwd(uv_uid_t uid) { return uv_os_get_passwd2(passwd, uid); }
 #endif
 void uvcpp_passwd::free_passwd() { uv_os_free_passwd(passwd); }

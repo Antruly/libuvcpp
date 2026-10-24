@@ -27,10 +27,10 @@ namespace uvcpp_c_detail {
 namespace {
 
 /// 最近一次异常的话。**线程局部**：同一个进程里两条循环线程各记各的，互不覆盖。
-thread_local char g_last_error[512] = {0};
+UVCPP_THREAD_LOCAL char g_last_error[512] = {0};
 
 /// `uvcpp_c_strerror()` 转述 libuv 错误码时的缓冲。同上，线程局部。
-thread_local char g_strerror[512] = {0};
+UVCPP_THREAD_LOCAL char g_strerror[512] = {0};
 
 /// 活句柄登记表。指针的值就是键 —— 不用 `unordered_set<const void*>` 的默认
 /// 哈希而是拿地址本身当哈希，是因为这些键本来就是地址（默认哈希在 libstdc++

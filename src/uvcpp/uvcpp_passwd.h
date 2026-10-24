@@ -24,7 +24,7 @@ public:
 
   /** @brief Load the current process user password information. */
   int get_os_passwd();
-#if UV_VERSION_MINOR >= 45
+#if UVCPP_HAVE_PASSWD2
   /** @brief Load passwd for specific uid (if supported). */
   int get_os_passwd(uv_uid_t uid);
 #endif

@@ -19,7 +19,7 @@
 
 #include <uvcpp/uvcpp_config.h>
 
-#if UVCPP_WEB_ENABLE
+#if UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 
 #include <functional>
 #include <cstdint>
@@ -277,5 +277,5 @@ class UVCPP_API uvcpp_ws_parser {
 
 }  // namespace uvcpp
 
-#endif  // UVCPP_WEB_ENABLE
+#endif  // UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 #endif  // SRC_WEB_UVCPP_WS_PARSER_H

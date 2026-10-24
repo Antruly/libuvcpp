@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/net/uvcpp_loop_worker.cpp
  * @brief Implementation of uvcpp_loop_worker.
  * @author zhuweiye
@@ -28,7 +28,7 @@ const int kExitPumpRounds = 256;
  * 连接、每收一个请求都要按循环切容器），而查表要么带锁、要么按线程身份线性
  * 扫。线程本地量是一次 TLS 读。
  */
-thread_local int t_loop_index = -1;
+UVCPP_THREAD_LOCAL int t_loop_index = -1;
 
 }  // namespace
 

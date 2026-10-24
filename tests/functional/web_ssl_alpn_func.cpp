@@ -48,6 +48,7 @@
 #include <openssl/ssl.h>
 
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -366,7 +367,7 @@ struct scenario_server {
 }  // namespace
 
 int main() {
-  std::cout << "[web_ssl_alpn] OpenSSL " << OpenSSL_version(OPENSSL_VERSION_STRING)
+  std::cout << "[web_ssl_alpn] OpenSSL " << uvcpp_test::openssl_version_text()
             << std::endl;
 
   // ---- 服务端:自签证书 + 宣告名单 --------------------------------------

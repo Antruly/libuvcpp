@@ -101,7 +101,7 @@ class UVCPP_API uvcpp_tcp : public uvcpp_stream {
 // 这一段放在文件**最末尾**是有意的：本头在 `tests/tools/doc_line_refs.lock`
 // 里有一条 59-60 的引用，插在它下面才不会让那条引用位移。
 // ---------------------------------------------------------------------------
-#if defined(UV_VERSION_HEX) && UV_VERSION_HEX >= 0x013100
+#if UVCPP_HAVE_TCP_REUSEPORT
 #define UVCPP_TCP_REUSEPORT_FLAG UV_TCP_REUSEPORT
 #else
 #define UVCPP_TCP_REUSEPORT_FLAG 0

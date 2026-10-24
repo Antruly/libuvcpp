@@ -99,16 +99,16 @@ void format_timestamp(uint64_t epoch_ms, char* out, size_t out_size) {
   std::memset(&tmv, 0, sizeof(tmv));
 #if defined(_WIN32)
   if (localtime_s(&tmv, &secs) != 0) {
-    std::snprintf(out, out_size, "-----------------------");
+    uvcpp_snprintf(out, out_size, "-----------------------");
     return;
   }
 #else
   if (localtime_r(&secs, &tmv) == nullptr) {
-    std::snprintf(out, out_size, "-----------------------");
+    uvcpp_snprintf(out, out_size, "-----------------------");
     return;
   }
 #endif
-  std::snprintf(out, out_size, "%04d-%02d-%02d %02d:%02d:%02d.%03u",
+  uvcpp_snprintf(out, out_size, "%04d-%02d-%02d %02d:%02d:%02d.%03u",
                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour,
                 tmv.tm_min, tmv.tm_sec, millis);
 }
@@ -231,7 +231,7 @@ void uvcpp_console_log_sink::write(const uvcpp_log_record& record) {
 
   if (options_.show_thread) {
     char tid[32];
-    std::snprintf(tid, sizeof(tid), " (tid:%llu)",
+    uvcpp_snprintf(tid, sizeof(tid), " (tid:%llu)",
                   static_cast<unsigned long long>(record.thread_id));
     line += tid;
   }
@@ -241,7 +241,7 @@ void uvcpp_console_log_sink::write(const uvcpp_log_record& record) {
 
   if (options_.show_location && record.file != nullptr) {
     char loc[64];
-    std::snprintf(loc, sizeof(loc), "  (%s:%d)", basename_of(record.file),
+    uvcpp_snprintf(loc, sizeof(loc), "  (%s:%d)", basename_of(record.file),
                   record.line);
     line += loc;
   }

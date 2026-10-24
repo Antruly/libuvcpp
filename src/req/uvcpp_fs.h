@@ -37,7 +37,7 @@ class UVCPP_API uvcpp_fs : public uvcpp_req {
 
 
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 38
+#if UVCPP_HAVE_FS_SYSTEM_ERROR
   int get_system_error();
 #endif
 #endif
@@ -73,7 +73,7 @@ class UVCPP_API uvcpp_fs : public uvcpp_req {
   int mkdtemp(uvcpp_loop* loop, const char* tpl);
 
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 36
+#if UVCPP_HAVE_FS_LUTIME
   int mkstemp(uvcpp_loop* loop, const char* tpl);
 #endif
 #endif
@@ -119,7 +119,7 @@ class UVCPP_API uvcpp_fs : public uvcpp_req {
   int futime(uvcpp_loop* loop, uv_file file, double atime, double mtime);
 
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 36
+#if UVCPP_HAVE_FS_LUTIME
 int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
 #endif
 #endif
@@ -199,7 +199,7 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
               const char* tpl,
               ::std::function<void(uvcpp_fs*)> mkdtemp_cb);
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 34
+#if UVCPP_HAVE_FS_MKSTEMP
   int mkstemp(uvcpp_loop* loop,
               const char* tpl,
               ::std::function<void(uvcpp_fs*)> mkstemp_cb);
@@ -273,7 +273,7 @@ int lutime(uvcpp_loop* loop, const char* path, double atime, double mtime);
              double mtime,
              ::std::function<void(uvcpp_fs*)> futime_cb);
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 34
+#if UVCPP_HAVE_FS_MKSTEMP
   int lutime(uvcpp_loop* loop,
              const char* path,
              double atime,

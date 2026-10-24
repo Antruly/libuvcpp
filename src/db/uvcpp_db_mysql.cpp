@@ -293,17 +293,17 @@ bool is_binary_temporal(enum_field_types type) {
 std::string format_time(const MYSQL_TIME& t, enum_field_types type) {
   char buf[48];
   if (type == MYSQL_TYPE_DATE) {
-    std::snprintf(buf, sizeof(buf), "%04u-%02u-%02u",
+    uvcpp_snprintf(buf, sizeof(buf), "%04u-%02u-%02u",
                   static_cast<unsigned>(t.year), static_cast<unsigned>(t.month),
                   static_cast<unsigned>(t.day));
   } else if (type == MYSQL_TYPE_TIME) {
     // 负的 TIME 合法（MySQL 的 TIME 是区间量，不只是"一天里的时刻"）。
-    std::snprintf(buf, sizeof(buf), "%s%02u:%02u:%02u", t.neg ? "-" : "",
+    uvcpp_snprintf(buf, sizeof(buf), "%s%02u:%02u:%02u", t.neg ? "-" : "",
                   static_cast<unsigned>(t.hour),
                   static_cast<unsigned>(t.minute),
                   static_cast<unsigned>(t.second));
   } else {
-    std::snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
+    uvcpp_snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
                   static_cast<unsigned>(t.year), static_cast<unsigned>(t.month),
                   static_cast<unsigned>(t.day), static_cast<unsigned>(t.hour),
                   static_cast<unsigned>(t.minute),

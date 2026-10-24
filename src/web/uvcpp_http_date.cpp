@@ -44,7 +44,7 @@ struct date_slot {
 };
 
 date_slot& slot_here() {
-  static thread_local date_slot s = {0, false, {0}};
+  static UVCPP_THREAD_LOCAL date_slot s = {0, false, {0}};
   return s;
 }
 
@@ -93,7 +93,7 @@ std::string http_date(time_t t) {
 
   // 30 字节足够装 29 + NUL —— 前提是年份恰好 4 位。
   char buf[k_imf_len + 1];
-  const int n = std::snprintf(buf, sizeof(buf),
+  const int n = uvcpp_snprintf(buf, sizeof(buf),
                               "%s, %02d %s %04d %02d:%02d:%02d GMT",
                               k_wday_names[tmv.tm_wday % 7], tmv.tm_mday,
                               k_mon_names[tmv.tm_mon % 12], tmv.tm_year + 1900,

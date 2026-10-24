@@ -218,7 +218,7 @@ class uvcpp_block_cache {
  * 正确性不受影响（块是 `::operator new` 来的，谁 `delete` 都行）。
  */
 inline uvcpp_block_cache& uvcpp_block_cache_here() noexcept {
-  static thread_local uvcpp_block_cache cache = {};
+  static UVCPP_THREAD_LOCAL uvcpp_block_cache cache = {};
   return cache;
 }
 
@@ -374,7 +374,7 @@ class uvcpp_malloc_block_cache {
  * 正确性不受影响（块是 `std::malloc` 来的，谁 `free` 都行）。
  */
 inline uvcpp_malloc_block_cache& uvcpp_malloc_cache_here() noexcept {
-  static thread_local uvcpp_malloc_block_cache cache = {};
+  static UVCPP_THREAD_LOCAL uvcpp_malloc_block_cache cache = {};
   return cache;
 }
 

@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
 project(uvcpp LANGUAGES C CXX)
 
+# Force-include the compatibility shims into every C++ translation unit of
+# this build. Public headers that need them include uvcpp_config.h (which
+# includes uvcpp_compat.h) or uvcpp_compat.h directly; the .cpp files that
+# only include a module header would otherwise need a per-file include, and
+# adding one at the top of 28 files shifts source line numbers that docs
+# reference. C sources are deliberately excluded: they are third-party C
+# libraries and do not know these C++ macros.
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+  string(APPEND CMAKE_CXX_FLAGS
+         " /FI\"${CMAKE_CURRENT_SOURCE_DIR}/src/uvcpp/uvcpp_compat.h\"")
+else()
+  string(APPEND CMAKE_CXX_FLAGS
+         " -include \"${CMAKE_CURRENT_SOURCE_DIR}/src/uvcpp/uvcpp_compat.h\"")
+endif()
+
 option(UVCPP_BUILD_TESTS "Build tests" ON)
 option(UVCPP_USE_SYSTEM_LIBUV "Prefer system libuv if found" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
@@ -49,6 +64,17 @@ endif()
 # =========================================================================
 option(UVCPP_BUILD_NET  "Build net module (TCP/UDP client/server)"  ON)
 option(UVCPP_BUILD_WEB  "Build web module (HTTP/WebSocket)"         OFF)
+
+# Web 模块的**子特性**。UVCPP_BUILD_WEB 是"这一层在不在"，这四个是"这一层里
+# 哪几块在不在"：VS2013 的 web-lite 源码档只开 server/client，把 WS、静态文件
+# 与压缩关掉；官方 Win7 二进制（VS2015/GCC 8.1）四个都开。
+#
+# 它们只影响**源文件是否参与编译**与公开头里的守卫；关掉时生成的
+# `uvcpp_config.h` 里对应宏是 0，消费者能明确看到这个包没有这块 API。
+option(UVCPP_WEB_SERVER "Build the HTTP/1.1 server part of the web module" ON)
+option(UVCPP_WEB_CLIENT "Build the HTTP/1.1 client part of the web module" ON)
+option(UVCPP_WEB_WS     "Build the WebSocket part of the web module"      ON)
+option(UVCPP_WEB_STATIC "Build the static-file server of the web module"  ON)
 
 # uv_try_write 快速路径：套接字一次吃得下整条待发字节时，省掉"拷进自有缓冲"
 # 那一份用户态拷贝（吃不下就退回原路径，最坏等于不开）。默认开。
@@ -277,6 +303,47 @@ option(UVCPP_ENABLE_OPENSSL "Enable OpenSSL (HTTPS + WSS)"                     O
 option(UVCPP_ENABLE_NGHTTP2 "Enable HTTP/2 via nghttp2 (needs UVCPP_ENABLE_OPENSSL; TLS+ALPN, plus opt-in cleartext h2c)" OFF)
 
 # =========================================================================
+# 特性档（profile）与兼容性判定
+# =========================================================================
+# UVCPP_FEATURES 是一个**便捷入口**，把下面这些零散选项按档位设好：
+#
+#   net       : net only
+#   net-ssl   : net + OpenSSL
+#   web-lite  : net + ssl + HTTP server/client（无 WS/静态/gzip/webapp）
+#   web       : net + ssl + HTTP server/client + WS + 静态 + gzip
+#   full      : web + webapp
+#
+# 留空则完全按各个 UVCPP_* 选项走（历史行为）。档位只是"一次设好几个 option"，
+# 具体能不能编仍由下面 uvcpp_apply_compiler_compat()/uvcpp_apply_libuv_compat()
+# 按编译器、libuv、OpenSSL、Windows 版本判定；不符合的会被关掉并打印原因。
+set(UVCPP_FEATURES "" CACHE STRING
+    "Feature profile: net, net-ssl, web-lite, web, full (empty = individual options)")
+
+# 严格断言：列表里任何一项最终没开，配置期直接失败。官方二进制 CI 用它断言
+# "这个包确实带了它声称的功能"，而不是静默少一个模块。
+#
+# 可用的名字：net, ssl, web, web-server, web-client, web-ws, web-static,
+# http-compress, webapp, http2, quic, http3, yyjson, capi, db, redis。
+set(UVCPP_REQUIRE_FEATURES "" CACHE STRING
+    "Semicolon-separated features that must be enabled; configure fails otherwise")
+
+# 目标 Windows 版本。官方 Win7 二进制是 0x0601；现代构建可以覆盖成 0x0A00。
+if(WIN32)
+  set(UVCPP_WINVER "0x000000" CACHE STRING
+      "Minimum Windows version targeted (_WIN32_WINNT); 0x000000 = toolchain default, Win7 = 0x0601")
+else()
+  set(UVCPP_WINVER "0x000000" CACHE STRING
+      "Minimum Windows version targeted (_WIN32_WINNT); unused on non-Windows")
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/uvcpp_compat.cmake")
+uvcpp_apply_profile()
+
+# 编译器/OS 层面不可能的模块在这里就关掉 —— 必须在依赖 FetchContent 之前，
+# 否则 VS2013 会先去 clone 一个它根本编不了的 nghttp2/nlohmann。
+uvcpp_apply_compiler_compat()
+
+# =========================================================================
 # 依赖库版本覆盖
 # =========================================================================
 set(LLHTTP_VERSION  "release/v9.2.0" CACHE STRING "llhttp git tag to fetch")
@@ -303,7 +370,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 既不进导出集，也到不了预编译包的消费者，所以**新加的**头若含非 ASCII 又忘了
 # BOM，MSVC 使用者依然会中招：那道下限只能由打包脚本兜住
 # （tests/tools/package_release.py 的 copy_header）。
-if(MSVC)
+# `/utf-8` 是 VS2015 Update 2（cl 19.00.23918）才有的；VS2013 的 cl 会当场
+# `D8021: invalid numeric argument '/utf-8'`。VS2015 RTM/Update 1 同样不认，
+# 所以判的是**编译器的完整版本**，不是 MSVC_VERSION（那三个 Update 都是 1900）。
+#
+# VS2013 这条腿靠的是：所有含非 ASCII 的源文件带 UTF-8 BOM（见
+# doc/compatibility.md）。带 BOM 的文件不需要这个开关。
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "19.0.23918")
   add_compile_options(/utf-8)
 endif()
 
@@ -346,6 +420,9 @@ if (UVCPP_BUILD_LIBUV_FROM_SOURCE OR NOT LIBUV_INCLUDE_DIR OR NOT LIBUV_LIB OR N
   set(LIBUV_INCLUDE_DIR ${libuv_SOURCE_DIR}/include)
   set(LIBUV_LIB uv)
   set(UVCPP_LIBUV_FROM_SOURCE TRUE)
+  # CVE-2024-24806 (IDNA NUL termination) is fixed only in libuv 1.48; the
+  # Win7 line is pinned to 1.40, so patch the fetched 1.33-1.47 source.
+  uvcpp_patch_libuv()
 else()
   # 这条分支的 libuv 是系统的：`uvcpp.pc` 的 `Requires: libuv` 只在它成立时才写
   # （见下面 pkg-config 那一段）。FetchContent 那条没有对应的 .pc 可依赖。
@@ -424,7 +501,12 @@ if(UVCPP_BUILD_WEB)
       FetchContent_GetProperties(zlib)
       if(NOT zlib_POPULATED)
         FetchContent_Populate(zlib)
+        # zlib's install rules assume a shared zlib and fail on a static build
+        # with "file INSTALL cannot find .../zlib.dll". We install zlib.h/zconf.h
+        # ourselves below; skip zlib's own install rules in this subdirectory.
+        set(CMAKE_SKIP_INSTALL_RULES TRUE)
         add_subdirectory(${zlib_SOURCE_DIR} ${zlib_BINARY_DIR} EXCLUDE_FROM_ALL)
+        set(CMAKE_SKIP_INSTALL_RULES FALSE)
       endif()
       # 给下面的 install 规则用：这条支路取过源码 ⇒ 头得由我们随包发出去。
       # **不能用 `DEFINED zlib_SOURCE_DIR` 当开关** —— 那是 FetchContent 写进
@@ -1625,6 +1707,12 @@ endif()
 
 include_directories(${LIBUV_INCLUDE_DIR})
 
+# libuv 的精确版本 → UVCPP_HAVE_* 能力宏。公开头里那些
+# `#if UV_VERSION_MINOR >= 45` 改成读这些宏以后，消费者看到的 API 面与
+# 这份 DLL 实际编进去的那一份**同源**，不会再出现"本地头新、库里没有"。
+uvcpp_detect_libuv()
+uvcpp_apply_libuv_compat()
+
 # Option to follow libuv's BUILD_SHARED_LIBS to set sensible defaults for uvcpp.
 # Define this option before deciding default values for UVCPP_BUILD_SHARED/STATIC.
 option(UVCPP_FOLLOW_LIBUV_BUILD "If ON, set UVCPP_BUILD_SHARED/STATIC default to follow libuv's BUILD_SHARED_LIBS" ON)
@@ -1789,6 +1877,48 @@ else()
   add_compile_definitions(UVCPP_WEB_ENABLE=0)
   message(STATUS "Web module disabled (UVCPP_WEB_ENABLE=0)")
 endif()
+
+# Web 子特性。值同样要与生成头、导出集逐字一致，所以三个来源存同一份 0/1。
+foreach(_uvcpp_webopt
+        UVCPP_WEB_SERVER:UVCPP_WEB_SERVER_ENABLE
+        UVCPP_WEB_CLIENT:UVCPP_WEB_CLIENT_ENABLE
+        UVCPP_WEB_WS:UVCPP_WEB_WS_ENABLE
+        UVCPP_WEB_STATIC:UVCPP_WEB_STATIC_ENABLE)
+  string(REPLACE ":" ";" _uvcpp_pair "${_uvcpp_webopt}")
+  list(GET _uvcpp_pair 0 _uvcpp_opt)
+  list(GET _uvcpp_pair 1 _uvcpp_macro)
+  if(${_uvcpp_opt})
+    add_compile_definitions(${_uvcpp_macro}=1)
+    message(STATUS "${_uvcpp_macro}=1")
+  else()
+    add_compile_definitions(${_uvcpp_macro}=0)
+    message(STATUS "${_uvcpp_macro}=0")
+  endif()
+endforeach()
+unset(_uvcpp_webopt)
+unset(_uvcpp_pair)
+unset(_uvcpp_opt)
+unset(_uvcpp_macro)
+
+# libuv 能力宏。放在这里是因为 tests/examples/bench 里有些 TU 在 include 公开头
+# 之前就用它们；生成头是给消费者与库内 TU 的第二份同源值。
+foreach(_uvcpp_cap
+        UVCPP_HAVE_FS_MKSTEMP
+        UVCPP_HAVE_FS_LUTIME
+        UVCPP_HAVE_FS_SYSTEM_ERROR
+        UVCPP_HAVE_UDP_RECVMMSG
+        UVCPP_HAVE_TRY_WRITE2
+        UVCPP_HAVE_AVAILABLE_PARALLELISM
+        UVCPP_HAVE_METRICS
+        UVCPP_HAVE_OS_GROUP
+        UVCPP_HAVE_PASSWD2
+        UVCPP_HAVE_TCP_REUSEPORT
+        UVCPP_HAVE_UDP_REUSEPORT)
+  add_compile_definitions(${_uvcpp_cap}=${${_uvcpp_cap}})
+endforeach()
+add_compile_definitions(UVCPP_LIBUV_HEX=${UVCPP_LIBUV_HEX})
+add_compile_definitions(UVCPP_TARGET_WINVER=${UVCPP_WINVER})
+unset(_uvcpp_cap)
 
 # webapp 依赖 web：web 关掉时强制关掉 webapp，而不是留一个编译不过的配置。
 if(UVCPP_BUILD_WEBAPP AND NOT UVCPP_BUILD_WEB)
@@ -2162,7 +2292,29 @@ if(NOT UVCPP_BUILD_WEB)
   list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/web/")
   list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/web/")
 else()
-  message(STATUS "Including web module in build")
+  message(STATUS "Including web module in build "
+                 "(server=${UVCPP_WEB_SERVER} client=${UVCPP_WEB_CLIENT} "
+                 "ws=${UVCPP_WEB_WS} static=${UVCPP_WEB_STATIC})")
+
+  # 子特性按**文件名**摘，而不是按目录：web 层里 HTTP server/client 与
+  # WS/静态服务是分开的文件，公共的 parser/common/date/request/response/
+  # reply/compress 始终保留。
+  if(NOT UVCPP_WEB_SERVER)
+    list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/web/uvcpp_http_server\\.(cpp|h)$")
+    list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/web/uvcpp_http_server\\.(cpp|h)$")
+  endif()
+  if(NOT UVCPP_WEB_CLIENT)
+    list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/web/uvcpp_http_client\\.(cpp|h)$")
+    list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/web/uvcpp_http_client\\.(cpp|h)$")
+  endif()
+  if(NOT UVCPP_WEB_WS)
+    list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/web/uvcpp_ws_")
+    list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/web/uvcpp_ws_")
+  endif()
+  if(NOT UVCPP_WEB_STATIC)
+    list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/web/uvcpp_static_server\\.(cpp|h)$")
+    list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/web/uvcpp_static_server\\.(cpp|h)$")
+  endif()
 endif()
 
 # gRPC 模块（`src/grpc/`）分两半，摘法**不一样**：
@@ -2392,6 +2544,11 @@ else()
   endif()
 endif()
 
+# 所有依赖发现与自动降级都结束了：这时才做 REQUIRE 断言与汇总，避免
+# "配置期说带了某一个模块、后面因为缺依赖又被悄悄关掉"。
+uvcpp_check_required_features()
+uvcpp_print_summary()
+
 # Create uvcpp targets according to user selection.
 # Shared target
 if(UVCPP_BUILD_SHARED)
@@ -2399,7 +2556,7 @@ if(UVCPP_BUILD_SHARED)
   target_link_libraries(uvcpp PRIVATE ${LIBUV_LIB})
   if (WIN32)
     target_compile_definitions(uvcpp PRIVATE UVCPP_EXPORTS)
-    target_link_libraries(uvcpp PRIVATE ws2_32)
+    target_link_libraries(uvcpp PRIVATE ws2_32 iphlpapi psapi userenv)
   endif()
   # 系统 libuv 那棵树（发行版包的 `.deb`/`.rpm`）**必须**把 libuv 放进导出的
   # link interface：公开头里有 `<uv.h>`，使用者也常直接调 `uv_*`，光靠 `.so` 的
@@ -2427,7 +2584,7 @@ if(UVCPP_BUILD_SHARED)
     target_link_libraries(uvcpp_s PRIVATE ${LIBUV_LIB})
     if (WIN32)
       target_compile_definitions(uvcpp_s PRIVATE UVCPP_EXPORTS)
-      target_link_libraries(uvcpp_s PRIVATE ws2_32)
+      target_link_libraries(uvcpp_s PRIVATE ws2_32 iphlpapi psapi userenv)
     endif()
   endif()
 endif()
@@ -2437,13 +2594,13 @@ if(UVCPP_BUILD_STATIC)
   add_library(uvcpp_a STATIC ${UVCPP_SOURCES} ${UVCPP_HEADERS})
   target_link_libraries(uvcpp_a PRIVATE ${LIBUV_LIB})
   if (WIN32)
-    target_link_libraries(uvcpp_a PRIVATE ws2_32)
+    target_link_libraries(uvcpp_a PRIVATE ws2_32 iphlpapi psapi userenv)
   endif()
   if (UVCPP_BUILD_LIBUV_FROM_SOURCE)
     add_library(uvcpp_a_s STATIC ${UVCPP_SOURCES} ${UVCPP_HEADERS})
     target_link_libraries(uvcpp_a_s PRIVATE ${LIBUV_LIB})
     if (WIN32)
-      target_link_libraries(uvcpp_a_s PRIVATE ws2_32)
+      target_link_libraries(uvcpp_a_s PRIVATE ws2_32 iphlpapi psapi userenv)
     endif()
   endif()
 endif()
@@ -2545,7 +2702,11 @@ endif()
 # `clang-cl` 不认这个开关，所以只给 cl —— 而且**判的是消费者的编译器**：
 # 生成器表达式在拿到这个目标的工程里求值，`find_package(uvcpp)` 的人是 clang-cl
 # 就一个字节都收不到。
-if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+# `/Zc:preprocessor` 是 VS2019 16.5（cl 19.25）才有的。VS2015/2017 的 cl
+# 同样会 `D8021`，所以版本必须判在这里；VS2013/2015/2017 上 `UVCPP_JSON_FIELDS`
+# 反射宏不可用（webapp 本身仍可编，见 doc/compatibility.md）。
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "19.25")
   foreach(_uvcpp_tgt uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
     if(TARGET ${_uvcpp_tgt})
       # 生成器表达式！`INTERFACE` 选项会被原样写进导出集、在**消费者**那边
@@ -2588,6 +2749,10 @@ endfunction()
 _uvcpp_literal01(UVCPP_ENABLE_MEMORY_POOL UVCPP_BUILD_EXPAND)
 _uvcpp_literal01(UVCPP_NET_ENABLE       UVCPP_BUILD_NET)
 _uvcpp_literal01(UVCPP_WEB_ENABLE       UVCPP_BUILD_WEB)
+_uvcpp_literal01(UVCPP_WEB_SERVER_ENABLE UVCPP_WEB_SERVER)
+_uvcpp_literal01(UVCPP_WEB_CLIENT_ENABLE UVCPP_WEB_CLIENT)
+_uvcpp_literal01(UVCPP_WEB_WS_ENABLE     UVCPP_WEB_WS)
+_uvcpp_literal01(UVCPP_WEB_STATIC_ENABLE UVCPP_WEB_STATIC)
 _uvcpp_literal01(UVCPP_WEBAPP_ENABLE    UVCPP_BUILD_WEBAPP)
 _uvcpp_literal01(UVCPP_WSDL_ENABLE      UVCPP_ENABLE_WSDL)
 _uvcpp_literal01(UVCPP_YYJSON_ENABLE    UVCPP_ENABLE_YYJSON)
@@ -2671,6 +2836,10 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_ENABLE_MEMORY_POOL=${UVCPP_ENABLE_MEMORY_POOL}
       UVCPP_NET_ENABLE=${UVCPP_NET_ENABLE}
       UVCPP_WEB_ENABLE=${UVCPP_WEB_ENABLE}
+      UVCPP_WEB_SERVER_ENABLE=${UVCPP_WEB_SERVER_ENABLE}
+      UVCPP_WEB_CLIENT_ENABLE=${UVCPP_WEB_CLIENT_ENABLE}
+      UVCPP_WEB_WS_ENABLE=${UVCPP_WEB_WS_ENABLE}
+      UVCPP_WEB_STATIC_ENABLE=${UVCPP_WEB_STATIC_ENABLE}
       UVCPP_WEBAPP_ENABLE=${UVCPP_WEBAPP_ENABLE}
       UVCPP_WSDL_ENABLE=${UVCPP_WSDL_ENABLE}
       UVCPP_YYJSON_ENABLE=${UVCPP_YYJSON_ENABLE}
@@ -2693,7 +2862,26 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
       UVCPP_UDP_GSO_ENABLE=${UVCPP_UDP_GSO_ENABLE}
+      UVCPP_LIBUV_HEX=${UVCPP_LIBUV_HEX}
+      UVCPP_TARGET_WINVER=${UVCPP_WINVER}
+      UVCPP_HAVE_FS_MKSTEMP=${UVCPP_HAVE_FS_MKSTEMP}
+      UVCPP_HAVE_FS_LUTIME=${UVCPP_HAVE_FS_LUTIME}
+      UVCPP_HAVE_FS_SYSTEM_ERROR=${UVCPP_HAVE_FS_SYSTEM_ERROR}
+      UVCPP_HAVE_UDP_RECVMMSG=${UVCPP_HAVE_UDP_RECVMMSG}
+      UVCPP_HAVE_TRY_WRITE2=${UVCPP_HAVE_TRY_WRITE2}
+      UVCPP_HAVE_AVAILABLE_PARALLELISM=${UVCPP_HAVE_AVAILABLE_PARALLELISM}
+      UVCPP_HAVE_METRICS=${UVCPP_HAVE_METRICS}
+      UVCPP_HAVE_OS_GROUP=${UVCPP_HAVE_OS_GROUP}
+      UVCPP_HAVE_PASSWD2=${UVCPP_HAVE_PASSWD2}
+      UVCPP_HAVE_TCP_REUSEPORT=${UVCPP_HAVE_TCP_REUSEPORT}
+      UVCPP_HAVE_UDP_REUSEPORT=${UVCPP_HAVE_UDP_REUSEPORT}
     )
+    if(WIN32 AND NOT UVCPP_WINVER STREQUAL "0x000000")
+      target_compile_definitions(${_uvcpp_t} PUBLIC
+        _WIN32_WINNT=${UVCPP_WINVER}
+        WINVER=${UVCPP_WINVER}
+      )
+    endif()
   endif()
 endforeach()
 

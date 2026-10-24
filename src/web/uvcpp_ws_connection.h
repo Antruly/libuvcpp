@@ -28,7 +28,7 @@
 
 #include <uvcpp/uvcpp_config.h>
 
-#if UVCPP_WEB_ENABLE
+#if UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 
 #include <cstddef>
 #include <deque>
@@ -411,5 +411,5 @@ class UVCPP_API uvcpp_ws_connection {
 
 }  // namespace uvcpp
 
-#endif  // UVCPP_WEB_ENABLE
+#endif  // UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 #endif  // SRC_WEB_UVCPP_WS_CONNECTION_H

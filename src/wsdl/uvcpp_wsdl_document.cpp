@@ -728,7 +728,7 @@ struct ns_table {
     }
     for (;;) {
       char buf[24];
-      std::snprintf(buf, sizeof(buf), "ns%d", ++invented);
+      uvcpp_snprintf(buf, sizeof(buf), "ns%d", ++invented);
       const std::string cand(buf);
       if (!by_prefix.count(cand)) {
         add_named(cand, uri);

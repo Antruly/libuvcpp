@@ -19,6 +19,7 @@
 #ifndef SRC_EXPAND_UVCPP_MEMORY_POOL_H
 #define SRC_EXPAND_UVCPP_MEMORY_POOL_H
 
+#include <uvcpp/uvcpp_compat.h>
 #include <uvcpp/uvcpp_export.h>
 
 #include <cstddef>
@@ -39,49 +40,49 @@ namespace uvcpp {
 // ============================================================
 
 /// 最小块阈值（64B）
-constexpr size_t TINY_BLOCK_THRESHOLD = 64;
+UVCPP_CONSTEXPR size_t TINY_BLOCK_THRESHOLD = 64;
 
 /// 小块阈值（256B）
-constexpr size_t SMALL_BLOCK_THRESHOLD = 256;
+UVCPP_CONSTEXPR size_t SMALL_BLOCK_THRESHOLD = 256;
 
 /// 中小块阈值（1024B）
-constexpr size_t MEDIUM_SMALL_BLOCK_THRESHOLD = 1024;
+UVCPP_CONSTEXPR size_t MEDIUM_SMALL_BLOCK_THRESHOLD = 1024;
 
 /// 中块阈值（4096B）
-constexpr size_t MEDIUM_BLOCK_THRESHOLD = 4096;
+UVCPP_CONSTEXPR size_t MEDIUM_BLOCK_THRESHOLD = 4096;
 
 /// 中大块阈值（16KB）
-constexpr size_t MEDIUM_LARGE_BLOCK_THRESHOLD = 16384;
+UVCPP_CONSTEXPR size_t MEDIUM_LARGE_BLOCK_THRESHOLD = 16384;
 
 /// 大块阈值（64KB）
-constexpr size_t LARGE_BLOCK_THRESHOLD = 65536;
+UVCPP_CONSTEXPR size_t LARGE_BLOCK_THRESHOLD = 65536;
 
 /// 特大块阈值（256KB）
-constexpr size_t EXTRA_LARGE_BLOCK_THRESHOLD = 262144;
+UVCPP_CONSTEXPR size_t EXTRA_LARGE_BLOCK_THRESHOLD = 262144;
 
 /// 默认内存对齐字节数
-constexpr size_t DEFAULT_MEMORY_ALIGNMENT = 16;
+UVCPP_CONSTEXPR size_t DEFAULT_MEMORY_ALIGNMENT = 16;
 
 /// 每种类型的固定分配大小（用户数据大小，不含header）
-constexpr size_t TINY_BLOCK_SIZE = 64;                   // 64B
-constexpr size_t SMALL_BLOCK_SIZE = 256;                 // 256B
-constexpr size_t MEDIUM_SMALL_BLOCK_SIZE = 1024;         // 1KB
-constexpr size_t MEDIUM_BLOCK_SIZE = 4096;               // 4KB
-constexpr size_t MEDIUM_LARGE_BLOCK_SIZE = 16384;        // 16KB
-constexpr size_t LARGE_BLOCK_SIZE = 65536;               // 64KB
-constexpr size_t EXTRA_LARGE_BLOCK_SIZE = 262144;        // 256KB
+UVCPP_CONSTEXPR size_t TINY_BLOCK_SIZE = 64;                   // 64B
+UVCPP_CONSTEXPR size_t SMALL_BLOCK_SIZE = 256;                 // 256B
+UVCPP_CONSTEXPR size_t MEDIUM_SMALL_BLOCK_SIZE = 1024;         // 1KB
+UVCPP_CONSTEXPR size_t MEDIUM_BLOCK_SIZE = 4096;               // 4KB
+UVCPP_CONSTEXPR size_t MEDIUM_LARGE_BLOCK_SIZE = 16384;        // 16KB
+UVCPP_CONSTEXPR size_t LARGE_BLOCK_SIZE = 65536;               // 64KB
+UVCPP_CONSTEXPR size_t EXTRA_LARGE_BLOCK_SIZE = 262144;        // 256KB
 
 // ============================================================
 // 常量定义
 // ============================================================
 
 /// Header 大小（32字节）
-constexpr size_t BLOCK_HEADER_SIZE = 32;
+UVCPP_CONSTEXPR size_t BLOCK_HEADER_SIZE = 32;
 
 /// 标志位定义
-constexpr uint64_t FLAG_IN_USE = 1ULL << 0;        // 使用中标志
-constexpr uint64_t FLAG_TYPE_MASK = 0x7FULL << 1;   // 类型掩码 (bits 1-6)
-constexpr uint64_t FLAG_USER_MASK = 0xFFULL << 8;  // 用户标志掩码 (bits 8-15)
+UVCPP_CONSTEXPR uint64_t FLAG_IN_USE = 1ULL << 0;        // 使用中标志
+UVCPP_CONSTEXPR uint64_t FLAG_TYPE_MASK = 0x7FULL << 1;   // 类型掩码 (bits 1-6)
+UVCPP_CONSTEXPR uint64_t FLAG_USER_MASK = 0xFFULL << 8;  // 用户标志掩码 (bits 8-15)
 
 // 类型定义（bits 1-6）
 enum class memory_block_type : uint8_t {
@@ -254,12 +255,12 @@ struct memory_pool_config {
 
     /// @brief 类型转数组索引（用于查表法优化）
     /// @note 枚举值 0-7 可直接作为索引，SUPER 类型返回特殊值
-    static constexpr size_t type_to_index(memory_block_type type) noexcept {
+    static UVCPP_CONSTEXPR size_t type_to_index(memory_block_type type) noexcept {
         return static_cast<size_t>(type);
     }
 
     /// @brief 块大小数组（用户数据大小，不含header）
-    static constexpr size_t block_sizes[8] = {
+    static UVCPP_CONSTEXPR size_t block_sizes[8] = {
         TINY_BLOCK_SIZE,                    // 0: TINY
         SMALL_BLOCK_SIZE,                   // 1: SMALL
         MEDIUM_SMALL_BLOCK_SIZE,            // 2: MEDIUM_SMALL
@@ -487,13 +488,13 @@ struct thread_local_cache {
     size_t extra_large_count = 0;
 
     // 容量限制（优化后的值，减少全局池访问）
-    static constexpr size_t TINY_CAPACITY = 1024;      // 64B 块
-    static constexpr size_t SMALL_CAPACITY = 512;       // 256B 块
-    static constexpr size_t MEDIUM_SMALL_CAPACITY = 256; // 1KB 块
-    static constexpr size_t MEDIUM_CAPACITY = 128;     // 4KB 块
-    static constexpr size_t MEDIUM_LARGE_CAPACITY = 64; // 16KB 块
-    static constexpr size_t LARGE_CAPACITY = 32;       // 64KB 块
-    static constexpr size_t EXTRA_LARGE_CAPACITY = 16; // 256KB 块
+    static UVCPP_CONSTEXPR size_t TINY_CAPACITY = 1024;      // 64B 块
+    static UVCPP_CONSTEXPR size_t SMALL_CAPACITY = 512;       // 256B 块
+    static UVCPP_CONSTEXPR size_t MEDIUM_SMALL_CAPACITY = 256; // 1KB 块
+    static UVCPP_CONSTEXPR size_t MEDIUM_CAPACITY = 128;     // 4KB 块
+    static UVCPP_CONSTEXPR size_t MEDIUM_LARGE_CAPACITY = 64; // 16KB 块
+    static UVCPP_CONSTEXPR size_t LARGE_CAPACITY = 32;       // 64KB 块
+    static UVCPP_CONSTEXPR size_t EXTRA_LARGE_CAPACITY = 16; // 256KB 块
 
     // 友元声明：允许 uvcpp_memory_pool 访问私有成员
     friend class uvcpp_memory_pool;
@@ -895,7 +896,7 @@ public:
     // ============================================================
 
     inline static thread_local_cache &get_thread_cache() {
-        static thread_local thread_local_cache cache;
+        static UVCPP_THREAD_LOCAL thread_local_cache cache;
         return cache;
     }
 

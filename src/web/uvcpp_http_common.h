@@ -314,7 +314,7 @@ using http_headers = std::vector<http_header>;
  * 存在的理由见下面那族 `const char*` 重载：没有它，`"transfer-encoding"`
  * 这种 17 字符的字面量会在每个调用点构造一个堆串。
  */
-inline constexpr size_t http_name_len(const char* s, size_t n = 0) {
+inline UVCPP_CONSTEXPR size_t http_name_len(const char* s, size_t n = 0) {
   return (s != nullptr && *s != '\0') ? http_name_len(s + 1, n + 1) : n;
 }
 

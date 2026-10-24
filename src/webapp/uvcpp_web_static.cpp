@@ -67,7 +67,7 @@ const size_t k_read_chunk = 1024u * 1024u;
 void append_i64_dec(std::string& out, int64_t v) {
   char buf[24];
   const int n =
-      std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+      uvcpp_snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
   if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
     out.append(buf, static_cast<size_t>(n));
   }
@@ -1181,7 +1181,7 @@ struct uvcpp_web_static::Impl {
    * 的桶"都命中不了。
    */
   retire_bucket* bucket_for(uvcpp_loop* l) {
-    static thread_local bucket_cache c = {nullptr, 0, nullptr, nullptr};
+    static UVCPP_THREAD_LOCAL bucket_cache c = {nullptr, 0, nullptr, nullptr};
     if (c.owner == this && c.ticket == instance_id_ && c.loop == l) {
       return c.bucket;
     }
@@ -2227,7 +2227,7 @@ void uvcpp_web_static::Impl::finish_job(job* j) {
 
   if (partial) {
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "bytes %lld-%lld/%lld",
+    uvcpp_snprintf(buf, sizeof(buf), "bytes %lld-%lld/%lld",
                   static_cast<long long>(first), static_cast<long long>(last),
                   static_cast<long long>(j->size));
     resp.status(206);

@@ -337,6 +337,13 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_BUILD_EXPAND` | `OFF` | 构建 expand 模块（内存池） |
 | `UVCPP_BUILD_NET` | `ON` | 构建 net 模块（TCP/UDP 客户端/服务端） |
 | `UVCPP_BUILD_WEB` | `OFF` | 构建 web 模块（HTTP + WebSocket） |
+| `UVCPP_WEB_SERVER` | `ON` | 构建 web 模块的 HTTP/1.1 服务端。只在 `UVCPP_BUILD_WEB=ON` 时有意义 |
+| `UVCPP_WEB_CLIENT` | `ON` | 构建 web 模块的 HTTP/1.1 客户端。只在 `UVCPP_BUILD_WEB=ON` 时有意义 |
+| `UVCPP_WEB_WS` | `ON` | 构建 web 模块的 WebSocket 部分（需要非平凡 TLS，VS2013 上自动关闭） |
+| `UVCPP_WEB_STATIC` | `ON` | 构建 web 模块的静态文件服务（需要 `UVCPP_WEB_SERVER=ON`） |
+| `UVCPP_FEATURES` | 空 | 特性档：`net` / `net-ssl` / `web-lite` / `web` / `full`。留空则按各个 `UVCPP_*` 开关走。见 [`doc/compatibility.md`](doc/compatibility.md) |
+| `UVCPP_REQUIRE_FEATURES` | 空 | 分号分隔的特性列表；任何一项最终没开，配置期直接失败（官方二进制 CI 用它断言产物内容） |
+| `UVCPP_WINVER` | `0x000000` | 目标最低 Windows 版本（`_WIN32_WINNT`/`WINVER`）；`0x000000` = 用工具链默认，Win7 = `0x0601`，仅 Windows 生效 |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | 构建 web 应用框架（路由/中间件/静态/上传/日志）。需要 `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | 构建 `examples/` 下的示例 |
 | `UVCPP_BUILD_BENCH` | `OFF` | 构建 `bench/` 下的压测靶场 —— 见 [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |

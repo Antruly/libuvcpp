@@ -65,7 +65,7 @@ std::string generate_request_id() {
   const uint64_t n = ++seq;
   const uint64_t t = now_ms();
   char buf[48];
-  std::snprintf(buf, sizeof(buf), "%012llx%06llx",
+  uvcpp_snprintf(buf, sizeof(buf), "%012llx%06llx",
                 static_cast<unsigned long long>(t & 0xffffffffffffULL),
                 static_cast<unsigned long long>(n & 0xffffffULL));
   return std::string(buf);
@@ -186,7 +186,7 @@ uvcpp_web_middleware web_middleware_cors(const web_cors_options& options) {
 
     if (options.max_age >= 0) {
       char buf[32];
-      std::snprintf(buf, sizeof(buf), "%ld", options.max_age);
+      uvcpp_snprintf(buf, sizeof(buf), "%ld", options.max_age);
       resp.set_header("access-control-max-age", buf);
     }
 

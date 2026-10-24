@@ -127,7 +127,7 @@ int uvcpp_udp::recv_start(std::function<void(uvcpp_handle *, size_t, uv_buf_t*)>
                            callback_udp_recv);
 }
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 39
+#if UVCPP_HAVE_UDP_RECVMMSG
 int uvcpp_udp::using_recvmmsg() { return uv_udp_using_recvmmsg(UVCPP_UDP_HANDLE); }
 
 #endif

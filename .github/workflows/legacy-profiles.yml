@@ -1,0 +1,39 @@
+name: Legacy source profiles
+
+# The official Windows 7 binaries (VS2015 x86/x64, MinGW32/MinGW64) are built
+# by the release pipeline on the pinned toolchains described in
+# doc/compatibility.md. They need VS2015 (not available on GitHub-hosted
+# runners) and, for MinGW, GCC 8.1 with its matching mingw-w64 headers.
+#
+# In particular, do not "fix" a modern mingw-w64 cross build by loosening
+# _WIN32_WINNT: libuv 1.40's src/win/winapi.h defines
+# _TCP_INITIAL_RTO_PARAMETERS itself on Windows 7, and newer mingw-w64
+# headers already define the same struct. That combination fails with a
+# redefinition. The GCC 8.1 toolchain's older headers do not have it.
+#
+# This workflow covers what a hosted Ubuntu runner can prove cheaply: the
+# reduced feature profiles configure and compile, and the source filtering
+# really removes the disabled web sub-features.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux-profiles:
+    name: Linux · ${{ matrix.profile }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [web-lite, web]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libssl-dev zlib1g-dev
+      - name: Configure
+        run: cmake --preset linux-${{ matrix.profile }}
+      - name: Build
+        run: cmake --build build-legacy-${{ matrix.profile }} --parallel 4

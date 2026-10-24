@@ -1,0 +1,124 @@
+# Official Windows 7 binaries and portable build kits.
+#
+# GitHub-hosted Actions images do not carry the VS2015 (v140) toolset, and
+# installing it on those images is unreliable. AppVeyor's "Visual Studio
+# 2015" image is the supported way to build these artifacts. Enable the
+# project in AppVeyor; this file is not used by GitHub Actions.
+#
+# Builds five artifacts (binary zip + kit zip each):
+#   vs2013-x86  : v120, libuv 1.33, web-lite (HTTP server/client)
+#   vs2015-x86  : v140, libuv 1.40, web
+#   vs2015-x64  : v140, libuv 1.40, web
+#   mingw32     : GCC 8.1 i686, libuv 1.40, web
+#   mingw64     : GCC 8.1 x86_64, libuv 1.40, web
+#
+# The "web" profile is HTTP server/client + WebSocket + static + gzip.
+# No webapp, HTTP/2 or QUIC.
+
+version: '{build}'
+image: Visual Studio 2015
+clone_depth: 1
+
+environment:
+  matrix:
+    - TOOLCHAIN: msvc
+      ARCH: x86
+      VCARCH: x86
+      OPENSSL_TARGET: VC-WIN32
+      PRESET: win7-vs2015-x86
+      BUILD_DIR: build-win7-vs2015-x86
+      KIT_TARGET: vs2015-x86
+      PACKAGE_TAG: msvc2015
+      VCVARS: C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat
+
+    - TOOLCHAIN: msvc
+      ARCH: x64
+      VCARCH: x86_amd64
+      OPENSSL_TARGET: VC-WIN64A
+      PRESET: win7-vs2015-x64
+      BUILD_DIR: build-win7-vs2015-x64
+      KIT_TARGET: vs2015-x64
+      PACKAGE_TAG: msvc2015
+      VCVARS: C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat
+
+    - TOOLCHAIN: msvc
+      APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2013
+      ARCH: x86
+      VCARCH: x86
+      OPENSSL_TARGET: VC-WIN32
+      PRESET: vs2013-web-lite
+      BUILD_DIR: build-vs2013-web-lite
+      KIT_TARGET: vs2013-x86
+      PACKAGE_TAG: msvc2013
+      VCVARS: C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\vcvarsall.bat
+
+    - TOOLCHAIN: mingw
+      ARCH: x86
+      MINGW_DIR: mingw32
+      OPENSSL_TARGET: mingw
+      PRESET: ""
+      BUILD_DIR: build-mingw32
+      KIT_TARGET: mingw32
+      PACKAGE_TAG: mingw32
+      MINGW_URL: https://sourceforge.net/projects/mingw-w64/files/Toolchains%20targetting%20Win32/Personal%20Builds/mingw-builds/8.1.0/threads-posix/dwarf/i686-8.1.0-release-posix-dwarf-rt_v6-rev0.7z/download
+
+    - TOOLCHAIN: mingw
+      ARCH: x64
+      MINGW_DIR: mingw64
+      OPENSSL_TARGET: mingw64
+      PRESET: ""
+      BUILD_DIR: build-mingw64
+      KIT_TARGET: mingw64
+      PACKAGE_TAG: mingw64
+      MINGW_URL: https://sourceforge.net/projects/mingw-w64/files/Toolchains%20targetting%20Win64/Personal%20Builds/mingw-builds/8.1.0/threads-posix/seh/x86_64-8.1.0-release-posix-seh-rt_v6-rev0.7z/download
+
+install:
+  - ps: |
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      $deps = Join-Path $env:APPVEYOR_BUILD_FOLDER 'deps'
+      New-Item -ItemType Directory -Force -Path $deps | Out-Null
+      $cmakeDir = Join-Path $deps 'cmake'
+      if (!(Test-Path $cmakeDir)) {
+        Invoke-WebRequest -Uri 'https://github.com/Kitware/CMake/releases/download/v3.25.1/cmake-3.25.1-windows-x86_64.zip' -OutFile (Join-Path $deps 'cmake.zip')
+        7z x (Join-Path $deps 'cmake.zip') -o"$deps" -y | Out-Null
+        Rename-Item (Join-Path $deps 'cmake-3.25.1-windows-x86_64') $cmakeDir
+      }
+      $env:PATH = "$cmakeDir\bin;$env:PATH"
+      cmake --version
+  - ps: |
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      $deps = Join-Path $env:APPVEYOR_BUILD_FOLDER 'deps'
+      Invoke-WebRequest -Uri 'https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz' -OutFile (Join-Path $deps 'openssl.tar.gz')
+      7z x (Join-Path $deps 'openssl.tar.gz') -o"$deps" -y | Out-Null
+      7z x (Join-Path $deps 'openssl.tar') -o"$deps" -y | Out-Null
+  - ps: |
+      if ($env:TOOLCHAIN -eq 'mingw') {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $deps = Join-Path $env:APPVEYOR_BUILD_FOLDER 'deps'
+        Invoke-WebRequest -Uri $env:MINGW_URL -OutFile (Join-Path $deps 'mingw.7z')
+        7z x (Join-Path $deps 'mingw.7z') -o"$deps" -y | Out-Null
+      }
+  - cmd: if "%TOOLCHAIN%"=="msvc" call build-kit\ci-openssl-msvc.cmd "%VCVARS%" %VCARCH% %OPENSSL_TARGET% %ARCH%
+  - cmd: if "%TOOLCHAIN%"=="mingw" call build-kit\ci-openssl-mingw.cmd %MINGW_DIR% %OPENSSL_TARGET% %ARCH%
+
+build_script:
+  - cmd: cd /d %APPVEYOR_BUILD_FOLDER%
+  - cmd: if "%TOOLCHAIN%"=="msvc" call build-kit\ci-build-msvc.cmd "%VCVARS%" %VCARCH% %PRESET% %ARCH% %BUILD_DIR%
+  - cmd: if "%TOOLCHAIN%"=="mingw" call build-kit\ci-build-mingw.cmd %MINGW_DIR% %ARCH% %BUILD_DIR%
+
+after_build:
+  - ps: |
+      powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-import-check.ps1 -Toolchain $env:TOOLCHAIN -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Vcvars $env:VCVARS -VcArch $env:VCARCH -MingwDir "deps\$env:MINGW_DIR"
+  - cmd: 7z a uvcpp-win7-%ARCH%-%PACKAGE_TAG%.zip .\stage\* -r
+  - ps: |
+      powershell -NoProfile -ExecutionPolicy Bypass -File build-kit\ci-collect-kit.ps1 -Target $env:KIT_TARGET -BuildDir $env:BUILD_DIR -Arch $env:ARCH -Toolchain $env:TOOLCHAIN -MingwDir $env:MINGW_DIR
+
+artifacts:
+  - path: 'uvcpp-win7-*.zip'
+    name: uvcpp-win7-package
+  - path: 'build-*/Release/uvcpp.dll'
+    name: uvcpp-win7-dll-msvc
+  - path: 'build-mingw*/uvcpp.dll'
+    name: uvcpp-win7-dll-mingw
+  - path: 'uvcpp-kit-*.zip'
+    name: uvcpp-kit

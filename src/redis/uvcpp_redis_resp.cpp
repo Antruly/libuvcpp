@@ -383,11 +383,11 @@ uvcpp_redis_parser::result uvcpp_redis_parser::next(const char* buf,
 void uvcpp_redis_parser::encode_command(const std::vector<std::string>& args,
                                         std::string& out) {
   char head[32];
-  std::snprintf(head, sizeof(head), "*%llu\r\n",
+  uvcpp_snprintf(head, sizeof(head), "*%llu\r\n",
                 static_cast<unsigned long long>(args.size()));
   out.append(head);
   for (std::size_t i = 0; i < args.size(); ++i) {
-    std::snprintf(head, sizeof(head), "$%llu\r\n",
+    uvcpp_snprintf(head, sizeof(head), "$%llu\r\n",
                   static_cast<unsigned long long>(args[i].size()));
     out.append(head);
     out.append(args[i]);

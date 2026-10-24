@@ -131,7 +131,7 @@ class read_block_cache {
 /// ⇒ **不登记** `__cxa_thread_atexit`；跨线程还块只是把块留在还的那个线程的表里，
 /// 正确性不受影响（块是 `malloc` 来的，谁 free 都行）。
 inline read_block_cache& read_block_cache_here() noexcept {
-  static thread_local read_block_cache cache = {};
+  static UVCPP_THREAD_LOCAL read_block_cache cache = {};
   return cache;
 }
 
@@ -892,7 +892,7 @@ int uvcpp_tcp_client::connect_transport(const char* ip, int port,
     // 双栈主机也没有回退（#44）。解析结果按 getaddrinfo 的顺序逐个尝试。
     uvcpp_getaddrinfo* resolver = new uvcpp_getaddrinfo();
     char service[16];
-    snprintf(service, sizeof(service), "%d", port);
+    uvcpp_snprintf(service, sizeof(service), "%d", port);
 
     struct addrinfo hints;
     std::memset(&hints, 0, sizeof(hints));
@@ -1862,7 +1862,7 @@ int uvcpp_tcp_client::resolve_host_sync_all(const char* host, int port,
   // 主机名：DNS 解析（阻塞等待完成）。**AF_UNSPEC**：A 与 AAAA 都收。
   uvcpp_getaddrinfo resolver;
   char service[16];
-  snprintf(service, sizeof(service), "%d", port);
+  uvcpp_snprintf(service, sizeof(service), "%d", port);
 
   struct addrinfo hints;
   std::memset(&hints, 0, sizeof(hints));

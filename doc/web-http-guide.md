@@ -87,10 +87,10 @@
 | HTTP/2 | `UVCPP_NGHTTP2_ENABLE` | `set_http2_enabled()` 那一组消失 |
 
 两行"响应压缩"是**同一个块的两个来源**：压缩器的总开关是
-`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:2043-2043`）——
+`UVCPP_HTTP_COMPRESS_ENABLE`，它由那两个宏**或**出来（`CMakeLists.txt:2168-2168`）——
 任一为 1 就有这个块，两个都为 0 才整块消失。三个"块"的开关都默认 OFF，brotli
-那条也是（`CMakeLists.txt:263-277` 那一组 `option()`，四个块开关默认全是 OFF）。编译进 `UVCPP_SRC_FILES` 的是
-`src/web/*.cpp` 全体（`CMakeLists.txt:1672-1672`），但每个 `.cpp` 里的功能块同样带宏。
+那条也是（`CMakeLists.txt:289-303` 那一组 `option()`，四个块开关默认全是 OFF）。编译进 `UVCPP_SRC_FILES` 的是
+`src/web/*.cpp` 全体（`CMakeLists.txt:1755-1755`），但每个 `.cpp` 里的功能块同样带宏。
 
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
@@ -747,7 +747,7 @@ p99 **170.5 ms → 140.5 ms**。读数与口径见 [`benchmark.md`](benchmark.md
 
 zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`），最小 body 1024
 （`src/web/uvcpp_http_server.h:1814-1814`），排除的 MIME 走 `default_excluded_mime_types()`
-（`src/web/uvcpp_http_compress.cpp:216-243`）。压缩变体缓存三道限：
+（`src/web/uvcpp_http_compress.cpp:216-242`）。压缩变体缓存三道限：
 单条 ≤ 4 MiB、总量 ≤ 32 MiB、条数 ≤ 1024（`src/web/uvcpp_http_server.cpp:1973-1983`）。
 
 **第五个旋钮：档位。** `set_compress_level()` / `compress_level()`
@@ -765,7 +765,7 @@ zlib 编进来时**压缩默认开**（`src/web/uvcpp_http_server.h:1814-1814`�
 1 档是 65.4 → 42.8 µs、1 566 → 1 957 字节），所以默认值一个字节都没动。
 
 **第六个旋钮：`br`（brotli）。** `UVCPP_ENABLE_BROTLI`（默认 OFF，
-`CMakeLists.txt:264-264`）给压缩器加上第二种编码：`br` 与 gzip/deflate 走**同一套**
+`CMakeLists.txt:290-290`）给压缩器加上第二种编码：`br` 与 gzip/deflate 走**同一套**
 协商（`http_compress::parse_accept_encoding()`，`Accept-Encoding` 里 `q` 相同时
 `br` > `gzip` > `deflate`，`*` 兜底、`br;q=0` 排除、指名要一个本构建编不出来的
 编码时**原样发原文**而不是拿另一种编码的字节冒充 ——

@@ -688,7 +688,7 @@ void uvcpp_http_server::set_quic_ssl_context(uvcpp_ssl_context* ctx) {
     uvcpp_quic_server* ep = quic_servers_[i];
     if (!run_on_quic_loop(i, [ep, ctx]() { ep->set_ssl_context(ctx); })) {
       std::fprintf(stderr,
-                   "[uvcpp_http_server] set_quic_ssl_context(): 第 %zu 条循环"
+                   "[uvcpp_http_server] set_quic_ssl_context(): 第 %" UVCPP_SIZE_FMT " 条循环"
                    "上的 QUIC 端点没换成凭证\n",
                    i);
     }
@@ -714,13 +714,13 @@ bool uvcpp_http_server::run_on_quic_loop(size_t loop_index,
                                                 });
   if (!queued) {
     std::fprintf(stderr,
-                 "[uvcpp_http_server] 第 %zu 条循环不收投递了（已经在收尾？）\n",
+                 "[uvcpp_http_server] 第 %" UVCPP_SIZE_FMT " 条循环不收投递了（已经在收尾？）\n",
                  loop_index);
     return false;
   }
   if (fut.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
     std::fprintf(stderr,
-                 "[uvcpp_http_server] 等第 %zu 条循环做完超过 5 秒，不再等\n",
+                 "[uvcpp_http_server] 等第 %" UVCPP_SIZE_FMT " 条循环做完超过 5 秒，不再等\n",
                  loop_index);
     return false;
   }
@@ -1970,17 +1970,17 @@ int uvcpp_http_server::send_trailers(uvcpp_tcp_client* client, int32_t stream_id
 // `UVCPP_HTTP_COMPRESS_ENABLE` 下 —— **不是** `UVCPP_ZLIB_ENABLE`：缓存存的是
 // "某个编码 + 某个档位 + 某个 tag 压出来的字节"，而编码现在有两个来源。
 #if UVCPP_HTTP_COMPRESS_ENABLE
-static constexpr size_t kCompressVariantMaxBytes = 32u * 1024u * 1024u;
+static UVCPP_CONSTEXPR size_t kCompressVariantMaxBytes = 32u * 1024u * 1024u;
 
 // 单条上限。没有它，一个大文件（静态路径可以到 MiB 级）的变体进来就能把整张表
 // 冲干净 —— 于是"缓存"在最需要它的大文件上反而永远命中不了，典型的最坏组合。
-static constexpr size_t kCompressVariantMaxEntry = 4u * 1024u * 1024u;
+static UVCPP_CONSTEXPR size_t kCompressVariantMaxEntry = 4u * 1024u * 1024u;
 
 // 条数上限。和上面那条**不是一回事**：字节那条只按 body 字节算，而每条另外还挂着
 // 一个键串（含着整条路径）和一个 map 节点 —— 一个满是**小文件**的静态根能造出大量
 // "压完只剩几十字节"的条目，字节数永远涨不到上限、开销却全在键和节点上。两个上限
 // 各封一件事：字节封大文件，条数封碎片。
-static constexpr size_t kCompressVariantMaxEntries = 1024;
+static UVCPP_CONSTEXPR size_t kCompressVariantMaxEntries = 1024;
 
 // 档位在键里占**一个字符**：`-1`（`k_compress_level_default`，即
 // `Z_DEFAULT_COMPRESSION`）→ `'#'`，0..9 → `'0'+n`。
@@ -2429,7 +2429,7 @@ void uvcpp_http_server::pump_write(uvcpp_tcp_client* client) {
 // `enqueue_write` 那段"这里如果拷了，后面两块写得再干净也白搭"）。攒批会把体
 // 拷进这条串里，所以大块不能攒：那等于用一整份 memcpy 去换一次系统调用，方向就
 // 反了。上限之外的那些照旧单独走（`batch_n == 1` 那条路），行为与改动前一致。
-static constexpr size_t kCoalesceMaxBytes = 64u * 1024u;
+static UVCPP_CONSTEXPR size_t kCoalesceMaxBytes = 64u * 1024u;
 
 void uvcpp_http_server::pump_write(conn_ctx& ctx, uvcpp_tcp_client* client) {
   // uvcpp_tcp_client holds at most one async write at a time; the queue is

@@ -2405,9 +2405,10 @@ bool uvcpp_http_client::socks5_enabled() const {
   return tcp_ != nullptr && tcp_->socks5_enabled();
 }
 
+namespace { const std::string kEmptySocks5Error; }
+
 const std::string& uvcpp_http_client::socks5_last_error() const {
-  static const std::string kEmpty;
-  if (tcp_ == nullptr) return kEmpty;
+  if (tcp_ == nullptr) return kEmptySocks5Error;
   return tcp_->socks5_last_error();
 }
 

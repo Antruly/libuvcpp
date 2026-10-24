@@ -349,6 +349,13 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 | `UVCPP_BUILD_EXPAND` | `OFF` | Build expand module (memory pool) |
 | `UVCPP_BUILD_NET` | `ON` | Build net module (TCP/UDP client/server) |
 | `UVCPP_BUILD_WEB` | `OFF` | Build web module (HTTP + WebSocket) |
+| `UVCPP_WEB_SERVER` | `ON` | Build the HTTP/1.1 server part of the web module. Only meaningful with `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_WEB_CLIENT` | `ON` | Build the HTTP/1.1 client part of the web module. Only meaningful with `UVCPP_BUILD_WEB=ON` |
+| `UVCPP_WEB_WS` | `ON` | Build the WebSocket part of the web module (needs a non-trivial thread-local; auto-disabled on VS2013) |
+| `UVCPP_WEB_STATIC` | `ON` | Build the static-file server (requires `UVCPP_WEB_SERVER=ON`) |
+| `UVCPP_FEATURES` | empty | Feature profile: `net` / `net-ssl` / `web-lite` / `web` / `full`. Empty means "use the individual `UVCPP_*` options". See [`doc/compatibility.md`](doc/compatibility.md) |
+| `UVCPP_REQUIRE_FEATURES` | empty | Semicolon-separated features that must be enabled; configure fails if any is disabled (used by the official binary CI) |
+| `UVCPP_WINVER` | `0x000000` | Minimum Windows version targeted (`_WIN32_WINNT` / `WINVER`); `0x000000` = toolchain default, Win7 = `0x0601`, Windows only |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | Build web app framework (router/middleware/static/upload/log). Requires `UVCPP_BUILD_WEB=ON` |
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | Build the examples in `examples/` |
 | `UVCPP_BUILD_BENCH` | `OFF` | Build the benchmark range in `bench/` — see [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |

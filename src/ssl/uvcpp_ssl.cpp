@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/ssl/uvcpp_ssl.cpp
  * @brief Per-connection SSL/TLS wrapper implementation.
  * @author zhuweiye
@@ -158,7 +158,7 @@ tls_cert_info uvcpp_ssl::get_peer_cert_info() const {
 
   unsigned char md[EVP_MAX_MD_SIZE]; unsigned int mdlen=0;
   if (X509_digest(cert, EVP_sha256(), md, &mdlen) == 1) {
-    for (unsigned int i=0;i<mdlen;i++) { char h[3]; snprintf(h,sizeof(h),"%02x",md[i]); info.fingerprint+=h; }
+    for (unsigned int i=0;i<mdlen;i++) { char h[3]; uvcpp_snprintf(h,sizeof(h),"%02x",md[i]); info.fingerprint+=h; }
   }
   // SAN（可选）：调用方不必自己再解析 DER。
   GENERAL_NAMES* names = static_cast<GENERAL_NAMES*>(
@@ -181,9 +181,9 @@ tls_cert_info uvcpp_ssl::get_peer_cert_info() const {
         const int n = ASN1_STRING_length(ip);
         char buf[64] = {0};
         if (n == 4) {
-          snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+          uvcpp_snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
         } else if (n == 16) {
-          snprintf(buf, sizeof(buf),
+          uvcpp_snprintf(buf, sizeof(buf),
                    "%x%x:%x%x:%x%x:%x%x:%x%x:%x%x:%x%x:%x%x",
                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
                    b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);

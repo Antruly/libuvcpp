@@ -180,7 +180,7 @@ struct uvcpp_quic_client::impl {
 
     uvcpp_getaddrinfo resolver;
     char service[16];
-    std::snprintf(service, sizeof(service), "%d", port);
+    uvcpp_snprintf(service, sizeof(service), "%d", port);
 
     struct addrinfo hints;
     std::memset(&hints, 0, sizeof(hints));

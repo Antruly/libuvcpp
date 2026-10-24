@@ -41,7 +41,7 @@
 #endif
 
 // 只有按 libuv < 1.44 的头编译时才需要（见下面 available_parallelism_compat()）。
-#if defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x012C00
+#if !UVCPP_HAVE_AVAILABLE_PARALLELISM
 #  if defined(_WIN32)
 #    include <windows.h>  // GetProcessAffinityMask
 #  elif defined(__linux__)
@@ -131,7 +131,7 @@ unsigned int env_threadpool_size() {
   return nthreads;
 }
 
-#if defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x012C00
+#if !UVCPP_HAVE_AVAILABLE_PARALLELISM
 /**
  * @brief `uv_available_parallelism()` 的替身，**只在 libuv < 1.44 时编进来**。
  *
@@ -174,12 +174,12 @@ unsigned int available_parallelism_compat() {
 #endif
   return 1;
 }
-#endif  // UV_VERSION_HEX < 0x012C00
+#endif  // !UVCPP_HAVE_AVAILABLE_PARALLELISM
 
 }  // namespace
 
 unsigned int uvcpp_default_threadpool_size() {
-#if defined(UV_VERSION_HEX) && UV_VERSION_HEX < 0x012C00
+#if !UVCPP_HAVE_AVAILABLE_PARALLELISM
   unsigned int n = available_parallelism_compat();
 #else
   unsigned int n = uv_available_parallelism();
@@ -231,7 +231,7 @@ int uvcpp_set_threadpool_size(int n) {
   }
 
   char buf[16];  // 10 位十进制 + NUL
-  std::snprintf(buf, sizeof(buf), "%d", want);
+  uvcpp_snprintf(buf, sizeof(buf), "%d", want);
 
   // 承重的是第一句：CRT 那份才是 libuv 读的（实测表里的 A 臂）。
   // 第二句管 Win32 块 —— 本进程的池子不看它，但**子进程**会继承到，

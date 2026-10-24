@@ -85,7 +85,7 @@ int uvcpp_stream::try_write(const uv_buf_t bufs[], unsigned int nbufs) {
 }
 #endif
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 42
+#if UVCPP_HAVE_TRY_WRITE2
 int uvcpp_stream::try_write(const uv_buf_t bufs[], unsigned int nbufs,
                       uvcpp_stream *send_handle) {
   // 同上：`uv_try_write2` 的 `bufs` 也是 `const uv_buf_t[]`。

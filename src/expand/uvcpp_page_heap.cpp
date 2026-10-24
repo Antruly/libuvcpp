@@ -123,7 +123,7 @@ static const size_t k_span_header_size_actual = sizeof(span_header);
 static const size_t k_page_block_header_size_actual = 32;
 
 // Size Class 表 - power-of-two + jemalloc 风格递增
-static constexpr size_class_info k_size_classes[k_num_size_classes] = {
+static UVCPP_CONSTEXPR size_class_info k_size_classes[k_num_size_classes] = {
     // 小块：8B 递增 (8-256B)
     {8,       1,   64},
     {16,      1,   64},
@@ -217,9 +217,9 @@ size_t uvcpp_size_class_index(size_t size)
 // ========================
 class central_cache {
 public:
-    static constexpr size_t k_num_classes = k_num_size_classes;
+    static UVCPP_CONSTEXPR size_t k_num_classes = k_num_size_classes;
     // pop() 遍历 span 链表时的防御性步数上限（链表正常长度是个位数）。
-    static constexpr size_t k_max_span_walk = 4096;
+    static UVCPP_CONSTEXPR size_t k_max_span_walk = 4096;
 
     central_cache() {
         for (auto& c : cache_) {
@@ -375,10 +375,10 @@ extern central_cache g_central_cache;
 
 class thread_cache {
 public:
-    static constexpr size_t k_num_classes = k_num_size_classes;
-    static constexpr size_t k_max_per_class = 256;
-    static constexpr size_t k_refill_batch_size = 8;   // 批量获取数量
-    static constexpr size_t k_return_threshold = 128;  // 归还阈值
+    static UVCPP_CONSTEXPR size_t k_num_classes = k_num_size_classes;
+    static UVCPP_CONSTEXPR size_t k_max_per_class = 256;
+    static UVCPP_CONSTEXPR size_t k_refill_batch_size = 8;   // 批量获取数量
+    static UVCPP_CONSTEXPR size_t k_return_threshold = 128;  // 归还阈值
     
     thread_cache() {
         for (auto& c : cache_) {

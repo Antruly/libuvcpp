@@ -2,7 +2,7 @@
 #include <uvcpp/uvcpp_alloc.h>
 
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 45
+#if UVCPP_HAVE_METRICS
 namespace uvcpp {
 uvcpp_metrics::uvcpp_metrics() {
   this->metrics = uvcpp::uvcpp_alloc<uv_metrics_t>();
@@ -40,7 +40,7 @@ uint64_t uvcpp_metrics::idle_time(uvcpp_loop *loop) {
 }
 uv_metrics_t *uvcpp_metrics::get_metrics() const { return this->metrics; }
 } // namespace uvcpp
-#endif  // UV_VERSION_MINOR >= 45
+#endif  // UVCPP_HAVE_METRICS
 #endif  // UV_VERSION_MAJOR >= 1
 
 

@@ -654,7 +654,7 @@ uvcpp_web_response& uvcpp_web_response::range_not_satisfiable(
   if (total > 0) {
     // 416 的 Content-Range 用 "*" 作范围，total 是资源总长（RFC 7233 §4.4）。
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "bytes */%llu", total);
+    uvcpp_snprintf(buf, sizeof(buf), "bytes */%llu", total);
     set_header("content-range", buf);
   }
   apply_status(*this, 416, true);

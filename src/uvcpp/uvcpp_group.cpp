@@ -1,7 +1,7 @@
 ﻿#include "uvcpp_group.h"
 #include <uvcpp/uvcpp_alloc.h>
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 45
+#if UVCPP_HAVE_OS_GROUP
 namespace uvcpp {
 uvcpp_group::uvcpp_group() {
   this->group = uvcpp::uvcpp_alloc<uv_group_t>();

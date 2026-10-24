@@ -213,8 +213,7 @@ bool http_compress::should_compress(const std::string& content_type,
 // default_excluded_mime_types
 // =========================================================================
 
-const std::vector<std::string>& http_compress::default_excluded_mime_types() {
-  static const std::vector<std::string> types = {
+const std::vector<std::string> g_default_excluded_mime_types = {
     "image/",
     "video/",
     "audio/",
@@ -239,8 +238,10 @@ const std::vector<std::string>& http_compress::default_excluded_mime_types() {
     // 不是整个 `font/`）。
     "font/woff",
     "font/woff2",
-  };
-  return types;
+};
+
+const std::vector<std::string>& http_compress::default_excluded_mime_types() {
+  return g_default_excluded_mime_types;
 }
 
 // =========================================================================
@@ -325,7 +326,7 @@ struct deflate_slot {
 };
 
 deflate_slot& deflate_slot_for_this_thread() {
-  static thread_local deflate_slot slot;
+  static UVCPP_THREAD_LOCAL deflate_slot slot;
   return slot;
 }
 
@@ -413,7 +414,7 @@ struct brotli_arena {
 };
 
 brotli_arena& brotli_arena_for_this_thread() {
-  static thread_local brotli_arena arena;
+  static UVCPP_THREAD_LOCAL brotli_arena arena;
   return arena;
 }
 

@@ -19,7 +19,7 @@
 
 #include <uvcpp/uvcpp_config.h>
 
-#if UVCPP_WEB_ENABLE
+#if UVCPP_WEB_ENABLE && UVCPP_WEB_CLIENT_ENABLE
 
 #include <functional>
 #include <map>
@@ -671,5 +671,5 @@ class UVCPP_API uvcpp_http_client {
 
 }  // namespace uvcpp
 
-#endif  // UVCPP_WEB_ENABLE
+#endif  // UVCPP_WEB_ENABLE && UVCPP_WEB_CLIENT_ENABLE
 #endif  // SRC_WEB_UVCPP_HTTP_CLIENT_H

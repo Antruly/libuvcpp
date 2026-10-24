@@ -104,7 +104,7 @@ jobs:
           # 模块关掉时它们被 `tests/functional/CMakeLists.txt` 的 glob+FILTER 摘掉，
           # 而 ctest 报 "100% tests passed" 时并不会说"少了几条"。
           #
-          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:1891`），
+          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:2016`），
           # 装包表与 `web` 那一格逐字相同 —— 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
           - feature: wsdl
@@ -139,7 +139,7 @@ jobs:
           # nlohmann 那侧照编照跑（`web_app_request_func` 里深度预扫描的五条断言
           # 也在），yyjson 那侧的新用例才拿得到对照物。
           #
-          # **不需要任何新包**：yyjson 走 FetchContent（`CMakeLists.txt:1951`，
+          # **不需要任何新包**：yyjson 走 FetchContent（`CMakeLists.txt:2076`，
           # `GIT_TAG` 钉在 `YYJSON_VERSION`），装包表与 `web` 那一格逐字相同 ——
           # 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -271,7 +271,7 @@ jobs:
           #
           # ★ 这一格的**模块集合**与 `capi` 那一格**不同**，而这不是疏漏：这里
           #   没写 `-DUVCPP_BUILD_WEBAPP=ON`，而它**默认是 OFF**（顶层
-          #   CMakeLists.txt:65）。所以这一格是"CAPI 开着、WEBAPP 关着"这个组合的
+          #   CMakeLists.txt:91-91）。所以这一格是"CAPI 开着、WEBAPP 关着"这个组合的
           #   **唯一**一站 —— 1.4.3 批 2 的 CI 红就是它先报出来的：那时
           #   `src/capi/uvcpp_c_webapp.cpp` 被无条件编进源列表，而它 include 的
           #   nlohmann 只在 `if(UVCPP_BUILD_WEBAPP)` 那段才挂上编译命令行，于是
@@ -773,7 +773,7 @@ jobs:
             echo "::error title=quic-h2::配置过了，但 http2 没被集成"; exit 1; }
 
       # 上面那条只有**两个**来源（nghttp2 + ngtcp2）。1.4.1 又多了**第三个**：
-      # nghttp3 的 `CMakeLists.txt:71` 也有 `add_custom_target(check ...)`，而
+      # nghttp3 的 `CMakeLists.txt:97-97` 也有 `add_custom_target(check ...)`，而
       # 根 `CMakeLists.txt` 里为它打了**第二段**同形的"拷源码 + 摘掉那一行"补丁。
       # h3 那一格自己关着 h2（它的 flags 里没有 NGHTTP2），所以"三个同时在场"
       # 只有这里判得到 —— 缺任何一段补丁，这一条都在**配置期**就红。

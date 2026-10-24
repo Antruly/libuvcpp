@@ -117,7 +117,7 @@ bool resolve_target(const uvcpp_socks5_endpoint& target,
   }
 
   char port_text[16];
-  std::snprintf(port_text, sizeof(port_text), "%d", target.port);
+  uvcpp_snprintf(port_text, sizeof(port_text), "%d", target.port);
 
   struct addrinfo hints;
   std::memset(&hints, 0, sizeof(hints));
@@ -962,7 +962,7 @@ void socks5_server_conn::on_udp_datagram(uvcpp_buf* buf, const std::string& ip,
   struct sockaddr_storage target_ss;
   if (target.is_domain()) {
     char key[512];
-    std::snprintf(key, sizeof(key), "%s:%d", target.host.c_str(), target.port);
+    uvcpp_snprintf(key, sizeof(key), "%s:%d", target.host.c_str(), target.port);
     std::map<std::string, struct sockaddr_storage>::iterator it =
         udp_dns_cache_.find(key);
     if (it == udp_dns_cache_.end()) {

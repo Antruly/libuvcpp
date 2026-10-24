@@ -393,13 +393,13 @@ std::string odbc_sqlstate(SQLSMALLINT handle_type, SQLHANDLE handle) {
   return to_utf8(state, 5);
 }
 
-constexpr int kDefaultTimeoutMs = 5000;
+UVCPP_CONSTEXPR int kDefaultTimeoutMs = 5000;
 /// `SQLGetData` 的分块大小（单位是 `SQLWCHAR` / 字节）。取 2048 是个折中：
 /// 报表行几十个字段时不会反复扩容，32 KB 的文本也只要 16 次往返。
-constexpr size_t kChunk = 2048;
+UVCPP_CONSTEXPR size_t kChunk = 2048;
 /// 超过这个长度就走 LONG 类型。SQL Server 的 nvarchar 上限是 4000，报成
 /// `SQL_WVARCHAR` 送长文本时驱动会报"字符串被截断"。
-constexpr size_t kMaxPlainChars = 4000;
+UVCPP_CONSTEXPR size_t kMaxPlainChars = 4000;
 
 /// `SQLDescribeCol` 的结果，够本驱动映射值类型用了。
 struct column_desc {
@@ -1588,14 +1588,14 @@ class odbc_driver : public uvcpp_db_driver {
 
   static std::string format_date(const SQL_DATE_STRUCT& d) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", static_cast<int>(d.year),
+    uvcpp_snprintf(buf, sizeof(buf), "%04d-%02d-%02d", static_cast<int>(d.year),
                   static_cast<int>(d.month), static_cast<int>(d.day));
     return std::string(buf);
   }
 
   static std::string format_time(const SQL_TIME_STRUCT& t) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", static_cast<int>(t.hour),
+    uvcpp_snprintf(buf, sizeof(buf), "%02d:%02d:%02d", static_cast<int>(t.hour),
                   static_cast<int>(t.minute), static_cast<int>(t.second));
     return std::string(buf);
   }
@@ -1605,7 +1605,7 @@ class odbc_driver : public uvcpp_db_driver {
     // 小数秒**丢掉**：另三个后端的 DATETIME 形态就是秒级
     // （`"YYYY-MM-DD HH:MM:SS"`），这里多带几位小数会让同一个值在四个后端上
     // 文本形态不一致。要小数秒的场合得显式 CAST 成字符串自己取。
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+    uvcpp_snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
                   static_cast<int>(t.year), static_cast<int>(t.month),
                   static_cast<int>(t.day), static_cast<int>(t.hour),
                   static_cast<int>(t.minute), static_cast<int>(t.second));

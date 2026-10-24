@@ -63,6 +63,7 @@
 #include <openssl/x509.h>
 
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -265,7 +266,7 @@ void with_server(const char* cn, const char* cert_path,
 
 int main() {
   std::cout << "[web_ssl_hostname] OpenSSL "
-            << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
+            << uvcpp_test::openssl_version_text() << std::endl;
 
   const char* kCertA = "uvcpp_ssl_hostname_a.pem";  // CN = localhost
   const char* kCertB = "uvcpp_ssl_hostname_b.pem";  // CN = wrong.test

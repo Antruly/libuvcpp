@@ -64,6 +64,7 @@
 #include "http_date_check.h"
 #include "loop_drain.h"
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -594,7 +595,7 @@ void verify_connected(h2_client& c, const char* label) {
 
 int main() {
   std::cout << "[web_ssl_h2_server] OpenSSL "
-            << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
+            << uvcpp_test::openssl_version_text() << std::endl;
 
   uvcpp_ssl_context sctx(tls_mode::SERVER, tls_version::TLS_1_2);
   if (!sctx.is_ready() || !sctx.generate_self_signed("loopback.test", 2048)) {

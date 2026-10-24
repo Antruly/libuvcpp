@@ -305,7 +305,7 @@ int uvcpp_udp_client::resolve_send_addrs(const char* host, int port,
   // 域名：AF_UNSPEC（A + AAAA），全部收下。同步接口可以阻塞等待。
   uvcpp_getaddrinfo resolver;
   char service[16];
-  snprintf(service, sizeof(service), "%d", port);
+  uvcpp_snprintf(service, sizeof(service), "%d", port);
 
   struct addrinfo hints;
   std::memset(&hints, 0, sizeof(hints));
@@ -473,7 +473,7 @@ int uvcpp_udp_client::start_send_to(
   dns_ctx* c = new dns_ctx{this, w, std::move(cb), alive_token()};
 
   char service[16];
-  snprintf(service, sizeof(service), "%d", port);
+  uvcpp_snprintf(service, sizeof(service), "%d", port);
   struct addrinfo hints;
   std::memset(&hints, 0, sizeof(hints));
   hints.ai_family   = AF_UNSPEC;

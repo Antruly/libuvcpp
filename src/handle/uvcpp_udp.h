@@ -110,7 +110,7 @@ class UVCPP_API uvcpp_udp : public uvcpp_handle {
                                    const struct sockaddr*,
                                    unsigned int)> udp_recv_cb_);
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 39
+#if UVCPP_HAVE_UDP_RECVMMSG
   /** @brief Return whether recvmmsg batching is being used (if supported). */
   int using_recvmmsg();
 #endif
@@ -161,7 +161,7 @@ private:
 // 的那一族 —— macOS 就在里面，而那是 CI 的一条腿），所以真伪一律由
 // **那次绑定的返回码**定，不由这个宏定。
 // ---------------------------------------------------------------------------
-#if defined(UV_VERSION_HEX) && UV_VERSION_HEX >= 0x013200
+#if UVCPP_HAVE_UDP_REUSEPORT
 #define UVCPP_UDP_REUSEPORT_FLAG UV_UDP_REUSEPORT
 #else
 #define UVCPP_UDP_REUSEPORT_FLAG 0

@@ -40,6 +40,158 @@
         "FETCHCONTENT_SOURCE_DIR_LIBUV": "${sourceDir}/_local_deps/libuv",
         "FETCHCONTENT_SOURCE_DIR_NGTCP2": "${sourceDir}/_local_deps/ngtcp2"
       }
+    },
+    {
+      "name": "linux-web-lite",
+      "displayName": "Linux source check: web-lite (libuv 1.40)",
+      "description": "net+ssl+HTTP server/client only; validates the legacy source profile without WebSocket/gzip.",
+      "binaryDir": "${sourceDir}/build-legacy-web-lite",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "UVCPP_FEATURES": "web-lite",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.40.0",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "CMAKE_POSITION_INDEPENDENT_CODE": "ON"
+      }
+    },
+    {
+      "name": "linux-web",
+      "displayName": "Linux source check: web (libuv 1.40)",
+      "description": "net+ssl+HTTP server/client+WS+static+gzip; the official Win7 feature set.",
+      "binaryDir": "${sourceDir}/build-legacy-web",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "UVCPP_FEATURES": "web",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client;web-ws;web-static;http-compress",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.40.0",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "CMAKE_POSITION_INDEPENDENT_CODE": "ON"
+      }
+    },
+    {
+      "name": "win7-vs2015-x86",
+      "displayName": "Windows 7 x86, VS2015 Update 3 (official)",
+      "description": "Official Win7 32-bit binary: web profile, libuv 1.40, OpenSSL 1.1.1w. Pass -DOPENSSL_ROOT_DIR=<prefix>.",
+      "generator": "Visual Studio 14 2015",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build-win7-vs2015-x86",
+      "cacheVariables": {
+        "UVCPP_FEATURES": "web",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client;web-ws;web-static;http-compress",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.40.0"
+      }
+    },
+    {
+      "name": "win7-vs2015-x64",
+      "displayName": "Windows 7 x64, VS2015 Update 3 (official)",
+      "description": "Official Win7 64-bit binary: web profile, libuv 1.40, OpenSSL 1.1.1w. Pass -DOPENSSL_ROOT_DIR=<prefix>.",
+      "generator": "Visual Studio 14 2015",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-win7-vs2015-x64",
+      "cacheVariables": {
+        "UVCPP_FEATURES": "web",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client;web-ws;web-static;http-compress",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.40.0"
+      }
+    },
+    {
+      "name": "win7-mingw32",
+      "displayName": "Windows 7 x86, MinGW-w64 GCC 8.1 (official)",
+      "description": "Official Win7 32-bit MinGW binary. Cross-compile with cmake/toolchains/mingw32-win7.cmake.",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw32-win7.cmake",
+      "binaryDir": "${sourceDir}/build-win7-mingw32",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UVCPP_FEATURES": "web",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client;web-ws;web-static;http-compress",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "UVCPP_STATIC_RUNTIME": "ON",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.40.0"
+      }
+    },
+    {
+      "name": "win7-mingw64",
+      "displayName": "Windows 7 x64, MinGW-w64 GCC 8.1 (official)",
+      "description": "Official Win7 64-bit MinGW binary. Cross-compile with cmake/toolchains/mingw64-win7.cmake.",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/mingw64-win7.cmake",
+      "binaryDir": "${sourceDir}/build-win7-mingw64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UVCPP_FEATURES": "web",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client;web-ws;web-static;http-compress",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "UVCPP_STATIC_RUNTIME": "ON",
+        "BUILD_SHARED_LIBS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.40.0"
+      }
+    },
+    {
+      "name": "vs2013-net-ssl",
+      "displayName": "VS2013 x86 source build: net+ssl",
+      "description": "Source-only profile; libuv 1.33.0. Pass -DOPENSSL_ROOT_DIR=<OpenSSL 1.1.1w x86 prefix>.",
+      "generator": "Visual Studio 12 2013",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build-vs2013-net-ssl",
+      "cacheVariables": {
+        "UVCPP_FEATURES": "net-ssl",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.33.0"
+      }
+    },
+    {
+      "name": "vs2013-web-lite",
+      "displayName": "VS2013 x86 source build: web-lite",
+      "description": "net+ssl+HTTP server/client, no WS/static/gzip/webapp. libuv 1.33.0. Pass -DOPENSSL_ROOT_DIR=<prefix>.",
+      "generator": "Visual Studio 12 2013",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build-vs2013-web-lite",
+      "cacheVariables": {
+        "UVCPP_FEATURES": "web-lite",
+        "UVCPP_REQUIRE_FEATURES": "net;ssl;web-server;web-client",
+        "UVCPP_WINVER": "0x0601",
+        "UVCPP_BUILD_TESTS": "OFF",
+        "UVCPP_BUILD_SHARED": "ON",
+        "UVCPP_BUILD_STATIC": "OFF",
+        "UVCPP_BUILD_LIBUV_FROM_SOURCE": "ON",
+        "LIBUV_VERSION": "v1.33.0"
+      }
     }
   ]
 }

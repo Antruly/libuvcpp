@@ -49,6 +49,7 @@
 #include <openssl/ssl.h>
 
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -250,7 +251,7 @@ bool probe_stalled_handshake(int port, int observe_ms, const char* label) {
 }  // namespace
 
 int main() {
-  std::cout << "[web_ssl_app] OpenSSL " << OpenSSL_version(OPENSSL_VERSION_STRING)
+  std::cout << "[web_ssl_app] OpenSSL " << uvcpp_test::openssl_version_text()
             << std::endl;
 
   // 客户端上下文：自签证书的回环用例必须不校验，否则握手就过不去。

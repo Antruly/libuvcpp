@@ -21,6 +21,7 @@
 #ifndef SRC_EXPAND_UVCPP_PAGE_HEAP_H
 #define SRC_EXPAND_UVCPP_PAGE_HEAP_H
 
+#include <uvcpp/uvcpp_compat.h>
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
@@ -144,10 +145,10 @@ size_t uvcpp_size_class_index(size_t size);
 size_t uvcpp_get_page_size_runtime();
 
 // Constants
-constexpr size_t k_page_block_header_size = sizeof(page_block_header);
-constexpr size_t k_span_header_size = sizeof(span_header);
-constexpr size_t k_large_threshold = 256 * 1024;  // 256KB threshold for large allocations
-constexpr size_t k_num_size_classes = 50;
+UVCPP_CONSTEXPR size_t k_page_block_header_size = sizeof(page_block_header);
+UVCPP_CONSTEXPR size_t k_span_header_size = sizeof(span_header);
+UVCPP_CONSTEXPR size_t k_large_threshold = 256 * 1024;  // 256KB threshold for large allocations
+UVCPP_CONSTEXPR size_t k_num_size_classes = 50;
 
 /**
  * @brief TCMalloc-like enterprise memory pool.

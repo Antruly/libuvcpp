@@ -188,7 +188,10 @@ foreach(test_src ${FUNC_SOURCES})
   target_include_directories(${exe_name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(${exe_name} PRIVATE ${UVCPP_LIB_TARGET} ${LIBUV_LIB})
   if(WIN32)
-    target_link_libraries(${exe_name} PRIVATE ws2_32)
+    # iphlpapi/psapi/userenv 是**静态 libuv** 的 util.c 要的（GetAdaptersAddresses /
+    # GetProcessMemoryInfo / GetUserProfileDirectoryW）：LIBUV_LIB 是裸路径时（系统
+    # libuv，uv_a.lib）它不带使用要求，只挂 ws2_32 的用例就会 LNK2019。
+    target_link_libraries(${exe_name} PRIVATE ws2_32 iphlpapi psapi userenv)
   endif()
   # SSL 用例直接用 OpenSSL 的 `SSL_ERROR_*` 常量（光看 uvcpp_ssl 的返回值
   # 分不出「还没完」和「真出错」），所以需要它的头文件与库。

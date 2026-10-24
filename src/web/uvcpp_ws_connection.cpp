@@ -499,7 +499,7 @@ namespace {
 /// 逐个写完全一致。64 KiB 取在 `UVCPP_TRY_WRITE_MIN_BYTES`(32 KiB) 之上，
 /// 大帧批量还能顺带吃到 `uv_try_write` 那条快路径；小帧批量（ws 的常见形状）
 /// 远够不到这个上限。
-constexpr size_t kSendBatchMaxBytes = 64 * 1024;
+UVCPP_CONSTEXPR size_t kSendBatchMaxBytes = 64 * 1024;
 }  // namespace
 
 void uvcpp_ws_connection::pump_send() {
@@ -665,7 +665,7 @@ void uvcpp_ws_connection::apply_mask(uvcpp_ws_frame& f) const {
   // 之后由 PRNG 展开。**这不是密码学强度**，但对"不可预测"这个要求是够的
   // （每帧的密钥不会被同一连接内的前序字节推出来），而且避免了在每帧的发送路径上
   // 做 4 次系统调用 —— 逐帧调 random_device 在 Linux 上就是每帧 4 次读 /dev/urandom。
-  static thread_local std::mt19937_64 rng(std::random_device{}());
+  static UVCPP_THREAD_LOCAL std::mt19937_64 rng(std::random_device{}());
   const uint64_t r = rng();
   for (int i = 0; i < 4; ++i) {
     f.mask_key[i] = static_cast<uint8_t>((r >> (i * 8)) & 0xFF);

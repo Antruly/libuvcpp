@@ -17,13 +17,13 @@ namespace uvcpp {
 namespace {
 
 /// varint 的字节数上界：64 位按 7 位一组要 10 组。
-constexpr size_t kVarintMaxBytes = 10u;
+UVCPP_CONSTEXPR size_t kVarintMaxBytes = 10u;
 
 /// protobuf 的字段号上界 `(1 << 29) - 1`（低三位留给 wire type）。
-constexpr uint32_t kFieldNumberMax = (1u << 29) - 1u;
+UVCPP_CONSTEXPR uint32_t kFieldNumberMax = (1u << 29) - 1u;
 
 /// 帧长度前缀能表达的最大值（4 字节大端）。
-constexpr size_t kFrameLengthMax = 0xFFFFFFFFu;
+UVCPP_CONSTEXPR size_t kFrameLengthMax = 0xFFFFFFFFu;
 
 void set_err(std::string* err, const char* msg) {
   if (err != nullptr) *err = msg;

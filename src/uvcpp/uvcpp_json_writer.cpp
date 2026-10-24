@@ -128,9 +128,10 @@ struct escape_table {
   }
 };
 
+const escape_table g_escape_table;
+
 const escape_table& escapes() {
-  static const escape_table t;
-  return t;
+  return g_escape_table;
 }
 
 /// 值 1..7 对应的那个字符（下标 0 不用）。**没有** `/`。
@@ -218,7 +219,7 @@ int format_fp(double v, bool is_float, char* out, size_t cap) {
   const int short_digits = is_float ? 6 : 15;
   const int long_digits = is_float ? 9 : 17;
 
-  int n = std::snprintf(out, cap, "%.*g", short_digits, v);
+  int n = uvcpp_snprintf(out, cap, "%.*g", short_digits, v);
   if (n < 0 || static_cast<size_t>(n) >= cap) return -1;
 
   char* end = nullptr;
@@ -226,7 +227,7 @@ int format_fp(double v, bool is_float, char* out, size_t cap) {
   const bool round_trips =
       is_float ? (static_cast<float>(back) == static_cast<float>(v)) : (back == v);
   if (!round_trips) {
-    n = std::snprintf(out, cap, "%.*g", long_digits, v);
+    n = uvcpp_snprintf(out, cap, "%.*g", long_digits, v);
     if (n < 0 || static_cast<size_t>(n) >= cap) return -1;
   }
 

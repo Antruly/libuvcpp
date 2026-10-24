@@ -2551,7 +2551,7 @@ uvcpp_web_app::loop_slot* uvcpp_web_app::slot_here_or_null() {
   // **只能是 POD**：MinGW 的 emutls 会把非平凡析构的线程本地对象在
   // `__cxa_thread_atexit` 的析构器跑之前还回堆
   // （`src/expand/uvcpp_page_heap.cpp:556`）。
-  static thread_local here_cache cached = {nullptr, 0, nullptr};
+  static UVCPP_THREAD_LOCAL here_cache cached = {nullptr, 0, nullptr};
 
   // 键是**三个字段一起**：`owner`（实例地址）+ `ticket`（0 号那格的票号，
   // 全进程单调、从 1 起、不复用）+ 命中的 `slot`。

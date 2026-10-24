@@ -680,13 +680,13 @@ bool uvcpp_memory_pool::init_internal(const memory_pool_config& config) {
 void uvcpp_memory_pool::warmup() {
     // 预热：提前分配一些块到全局池，减少冷启动开销
     // 7种类型全部预热，小块预热数量多，大块预热数量少
-    constexpr size_t WARMUP_TINY = 64;
-    constexpr size_t WARMUP_SMALL = 32;
-    constexpr size_t WARMUP_MEDIUM_SMALL = 16;
-    constexpr size_t WARMUP_MEDIUM = 8;
-    constexpr size_t WARMUP_MEDIUM_LARGE = 4;
-    constexpr size_t WARMUP_LARGE = 2;
-    constexpr size_t WARMUP_EXTRA_LARGE = 1;
+    UVCPP_CONSTEXPR size_t WARMUP_TINY = 64;
+    UVCPP_CONSTEXPR size_t WARMUP_SMALL = 32;
+    UVCPP_CONSTEXPR size_t WARMUP_MEDIUM_SMALL = 16;
+    UVCPP_CONSTEXPR size_t WARMUP_MEDIUM = 8;
+    UVCPP_CONSTEXPR size_t WARMUP_MEDIUM_LARGE = 4;
+    UVCPP_CONSTEXPR size_t WARMUP_LARGE = 2;
+    UVCPP_CONSTEXPR size_t WARMUP_EXTRA_LARGE = 1;
 
     // 预热 tiny 块 (64B)
     for (size_t i = 0; i < WARMUP_TINY; ++i) {

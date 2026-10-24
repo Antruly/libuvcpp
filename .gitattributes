@@ -33,3 +33,13 @@
 # 锁文件是脚本逐行读写的产物，Windows 上生成时行尾会是 CRLF。钉成 LF，
 # 让"生成它的机器"不影响存进去的字节。
 tests/tools/doc_line_refs.lock text eol=lf
+
+# Windows 脚本：检出时一律 CRLF，与平台无关。
+#
+# `* text=auto` 只保证"索引里是 LF、检出按 core.eol"——在 Linux 上打包
+# （build-kit 的 MinGW kit 就是这么打的）时，zip 里的 build.cmd 会是
+# LF-only。cmd.exe 对 LF-only 批处理里的 `goto :label` 不保证能认，
+# 而这些文件是给 Windows 用户的入口，所以钉死成 CRLF。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

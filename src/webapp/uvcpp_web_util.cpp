@@ -586,7 +586,7 @@ std::string web_build_cookie(const std::string& name, const std::string& value,
   }
   if (max_age >= 0) {
     char buf[32];
-    const int n = std::snprintf(buf, sizeof(buf), "%ld", max_age);
+    const int n = uvcpp_snprintf(buf, sizeof(buf), "%ld", max_age);
     if (n > 0) {
       out += "; Max-Age=";
       out.append(buf, static_cast<size_t>(n));

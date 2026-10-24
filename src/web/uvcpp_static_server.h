@@ -59,7 +59,7 @@
 
 #include <uvcpp/uvcpp_config.h>
 
-#if UVCPP_WEB_ENABLE
+#if UVCPP_WEB_ENABLE && UVCPP_WEB_STATIC_ENABLE
 
 #include <cstdint>
 #include <list>
@@ -538,5 +538,5 @@ private:
 
 }  // namespace uvcpp
 
-#endif  // UVCPP_WEB_ENABLE
+#endif  // UVCPP_WEB_ENABLE && UVCPP_WEB_STATIC_ENABLE
 #endif  // SRC_WEB_UVCPP_STATIC_SERVER_H

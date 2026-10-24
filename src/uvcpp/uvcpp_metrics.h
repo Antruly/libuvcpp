@@ -12,7 +12,7 @@
 #include <uvcpp/uvcpp_define.h>
 
 #if UV_VERSION_MAJOR >= 1
-#if UV_VERSION_MINOR >= 45
+#if UVCPP_HAVE_METRICS
 #include <handle/uvcpp_loop.h>
 namespace uvcpp {
 class UVCPP_API uvcpp_metrics {

@@ -90,7 +90,7 @@ int main() {
 
 三个从例子里就能看出来的约定：
 
-- **`uvcpp_loop` 的构造函数自己调 `init()`**（`src/handle/uvcpp_loop.cpp:57-63`）。
+- **`uvcpp_loop` 的构造函数自己调 `init()`**（`src/handle/uvcpp_loop.cpp:59-65`）。
   再手写一句 `loop.init()` 是多余的。
 - **句柄的 loop 是构造参数**，不是默认挂在 `default_loop()` 上。`uvcpp_timer t;` 之后
   必须 `t.init(&loop)` 才可用——**无参的 `init()` 不接循环**，它只把句柄状态清零
@@ -146,12 +146,11 @@ debug 构建里还会把整块内存填成 `-1`（`src/handle/uvcpp_loop.h:61-67
 `loop_close()` 返回 0），但别指望它兜住一切。
 
 **`stop()` 可能什么都不做。** 它只在 `loop_alive()` 非零时才调 `uv_stop`
-（`src/handle/uvcpp_loop.cpp:159-164`）。没有活跃句柄时循环本来就会自己退出，
+（`src/handle/uvcpp_loop.cpp:172-177`）。没有活跃句柄时循环本来就会自己退出，
 所以这不影响正确性——但别把 `stop()` 当成"一定能打断阻塞的 `uv_run`"。
 
-**`default_loop()` 每次调用都重跑 `init()`**（`src/handle/uvcpp_loop.cpp:136-140`），
-也就是对同一个 `uv_loop_t` 反复 `uv_loop_init`。libuv 没有定义重复初始化，所以
-**不要把它当成可以随便反复调的东西**——拿一次指针存下来用。
+**`default_loop()` 的 `init()` 只跑一次**（`std::call_once`）（`src/handle/uvcpp_loop.cpp:143-158`），
+所以对同一个 `uv_loop_t` 不会反复 `uv_loop_init`。仍然建议拿一次指针存下来用。
 
 ---
 
@@ -325,7 +324,7 @@ int main() {
 - **`int` 返回值：0 成功，失败是 libuv 的负错误码**（`UV_EINVAL`、`UV_EALREADY`…）。
   最后一个是粘性的，`get_last_error()` 拿得到。
 - **内存不足抛 `std::bad_alloc`**：`src/uvcpp/uvcpp_alloc.h:121-126`、`uvcpp_loop` 的构造
-  （`src/handle/uvcpp_loop.cpp:59-60`）、`uvcpp_req` 的拷贝构造与赋值。（`uvcpp_handle`
+  （`src/handle/uvcpp_loop.cpp:61-62`）、`uvcpp_req` 的拷贝构造与赋值。（`uvcpp_handle`
   的拷贝构造/赋值曾经也在这一列，但它们已删 —— 见 §10。）
 - **`queue_work` 抛的是 `const char*`，不是 `std::exception`**（`src/req/uvcpp_work.cpp:24`）。
   单元测试统一的 `catch (const std::exception&)` **接不住它**。
@@ -351,7 +350,7 @@ int main() {
 **抓 `std::exception` 抓不住 `queue_work` 的异常**，它是字符串字面量。
 
 **Unix 上构造函数会忽略 `SIGPIPE`。** `uvcpp_loop` 的构造函数在进程内装一次
-`SIG_IGN`，但**只在当前处置是 `SIG_DFL` 时才动**（`src/handle/uvcpp_loop.cpp:26`）。
+`SIG_IGN`，但**只在当前处置是 `SIG_DFL` 时才动**（`src/handle/uvcpp_loop.cpp:28`）。
 想自己处理 `SIGPIPE` 就要在造循环**之前**装好。
 
 ---

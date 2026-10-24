@@ -67,6 +67,7 @@
 #include "http_date_check.h"
 #include "loop_drain.h"
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -691,7 +692,7 @@ void run_h2_requests(h2_client& c, app_probe& st, const char* tag) {
 
 int main() {
   std::cout << "[web_ssl_app_h2] OpenSSL "
-            << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
+            << uvcpp_test::openssl_version_text() << std::endl;
 
   std::shared_ptr<uvcpp_ssl_context> cctx = make_client_ctx();
   if (!cctx) {

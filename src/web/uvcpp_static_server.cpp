@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/web/uvcpp_static_server.cpp
  * @brief 静态文件服务实现（懒加载 + mtime 校验缓存 + 线程池异步读盘）。
  */
@@ -244,7 +244,7 @@ namespace {
 void append_i64_dec(std::string& out, int64_t v) {
   char buf[24];
   const int n =
-      std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+      uvcpp_snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
   if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
     out.append(buf, static_cast<size_t>(n));
   }

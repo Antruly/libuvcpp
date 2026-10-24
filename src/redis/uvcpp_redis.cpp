@@ -601,7 +601,7 @@ void uvcpp_redis_client_impl::on_connect(std::uint64_t g, int status) {
     std::vector<std::string> select;
     select.push_back("SELECT");
     char buf[16];
-    std::snprintf(buf, sizeof(buf), "%d", url.db);
+    uvcpp_snprintf(buf, sizeof(buf), "%d", url.db);
     select.push_back(buf);
     handshake.push_back(select);
   }

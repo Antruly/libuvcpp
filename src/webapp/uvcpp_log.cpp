@@ -151,7 +151,7 @@ namespace {
 template <typename T>
 void append_integer(std::string& out, T value, const char* fmt) {
   char tmp[32];
-  const int n = std::snprintf(tmp, sizeof(tmp), fmt, value);
+  const int n = uvcpp_snprintf(tmp, sizeof(tmp), fmt, value);
   if (n > 0) out.append(tmp, static_cast<size_t>(n));
 }
 
@@ -168,7 +168,7 @@ void append_double(std::string& out, double value) {
   char tmp[40];
   int n = 0;
   for (int digits = 6; digits <= 17; ++digits) {  // 17 对 double 永远够
-    n = std::snprintf(tmp, sizeof(tmp), "%.*g", digits, value);
+    n = uvcpp_snprintf(tmp, sizeof(tmp), "%.*g", digits, value);
     if (n <= 0 || static_cast<size_t>(n) >= sizeof(tmp)) break;
     if (std::strtod(tmp, nullptr) == value) break;
   }
@@ -187,7 +187,7 @@ void append_float(std::string& out, float value) {
   char tmp[40];
   int n = 0;
   for (int digits = 6; digits <= 9; ++digits) {  // 9 对 float 永远够
-    n = std::snprintf(tmp, sizeof(tmp), "%.*g", digits,
+    n = uvcpp_snprintf(tmp, sizeof(tmp), "%.*g", digits,
                       static_cast<double>(value));
     if (n <= 0 || static_cast<size_t>(n) >= sizeof(tmp)) break;
     if (std::strtof(tmp, nullptr) == value) break;
@@ -277,7 +277,7 @@ uvcpp_log_stream& uvcpp_log_stream::operator<<(const void* p) {
   // （0000000000001234），和 glibc 的 0x1234 不一致，日志格式会随平台变。
   // 统一成 0x + 小写十六进制。
   char tmp[32];
-  const int n = std::snprintf(tmp, sizeof(tmp), "0x%llx",
+  const int n = uvcpp_snprintf(tmp, sizeof(tmp), "0x%llx",
                               static_cast<unsigned long long>(
                                   reinterpret_cast<uintptr_t>(p)));
   if (n > 0) buf_.append(tmp, static_cast<size_t>(n));

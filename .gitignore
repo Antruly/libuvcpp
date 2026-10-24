@@ -12,6 +12,9 @@
 build/
 build_*/
 build-*/
+# Portable build-kit scripts are source, not a build tree.
+!build-kit/
+!build-kit/**
 build_noexpand/
 build_nopool/
 out/
@@ -89,3 +92,8 @@ _backup_*/
 # 不写成 `bin/` 全局规则：C++ 库里没有叫 bin/ 的正当产物，但写窄一点总归更好读。
 bindings/csharp/**/bin/
 bindings/csharp/**/obj/
+
+# The compatibility layer and toolchain files are source, not generated.
+!cmake/uvcpp_compat.cmake
+!cmake/toolchains/
+!cmake/toolchains/**

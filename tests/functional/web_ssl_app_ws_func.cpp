@@ -63,6 +63,7 @@
 #include <webapp/uvcpp_web_ws_client.h>
 
 #include <openssl/ssl.h>
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -380,7 +381,7 @@ bool make_client_ctx(uvcpp_ssl_context& cctx) {
 
 int main() {
   std::cout << "[web_ssl_app_ws] OpenSSL "
-            << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
+            << uvcpp_test::openssl_version_text() << std::endl;
 
   uvcpp_ssl_context cctx(tls_mode::CLIENT, tls_version::TLS_1_2);
   if (!make_client_ctx(cctx)) {

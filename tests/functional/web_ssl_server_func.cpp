@@ -52,6 +52,7 @@
 #include <openssl/ssl.h>
 
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -340,7 +341,7 @@ std::string state_received(server_state& st) {
 
 int main() {
   std::cout << "[web_ssl_server] OpenSSL "
-            << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
+            << uvcpp_test::openssl_version_text() << std::endl;
 
   // ---- 证书 ---------------------------------------------------------
   uvcpp_ssl_context sctx(tls_mode::SERVER, tls_version::TLS_1_2);

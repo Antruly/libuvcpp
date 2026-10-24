@@ -39,7 +39,7 @@ void json_escape_into(std::string* out, const std::string& s) {
       default:
         if (c < 0x20) {
           char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+          uvcpp_snprintf(buf, sizeof(buf), "\\u%04x", c);
           out->append(buf);
         } else {
           // 0x80 以上按原字节直出：本库全线按 UTF-8 处理，不替调用方重编码。
@@ -176,7 +176,7 @@ std::string uvcpp_db_table::to_json() const {
           break;
         case uvcpp_db_type::BLOB: {
           char buf[48];
-          std::snprintf(buf, sizeof(buf), "\"[blob %lu bytes]\"",
+          uvcpp_snprintf(buf, sizeof(buf), "\"[blob %lu bytes]\"",
                         static_cast<unsigned long>(v.size()));
           out.append(buf);
           break;

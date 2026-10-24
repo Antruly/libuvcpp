@@ -63,6 +63,7 @@
 #include <openssl/ssl.h>
 
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -1178,7 +1179,7 @@ void scenario_drop_with_inflight(int port, uvcpp_ssl_context* cctx,
 
 int main() {
   std::cout << "[web_ssl_h2_client] OpenSSL "
-            << OpenSSL_version(OPENSSL_VERSION_STRING) << std::endl;
+            << uvcpp_test::openssl_version_text() << std::endl;
 
   uvcpp_ssl_context sctx(tls_mode::SERVER, tls_version::TLS_1_2);
   if (!sctx.is_ready() || !sctx.generate_self_signed("loopback.test", 2048)) {

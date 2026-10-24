@@ -46,6 +46,7 @@
 #include <openssl/ssl.h>  // SSL_ERROR_* —— 只返回值分不出「还没完」和「出错」
 
 #include "wait_util.h"
+#include "openssl_version_probe.h"
 
 using namespace uvcpp;
 
@@ -526,7 +527,7 @@ bool run_plaintext_against_tls(int port, const char* label) {
 }  // namespace
 
 int main() {
-  std::cout << "[web_ssl_client] OpenSSL " << OpenSSL_version(OPENSSL_VERSION_STRING)
+  std::cout << "[web_ssl_client] OpenSSL " << uvcpp_test::openssl_version_text()
             << std::endl;
 
   // ---- 服务端证书 + 客户端 ctx --------------------------------------
