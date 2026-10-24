@@ -20,24 +20,41 @@ object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 645
 ## Download
 
 <!-- downloads:start -->
-The newest release is **v1.8.2**. Six prebuilt packages, each one self-contained — the
+The newest release is **v1.8.3**. Six prebuilt packages, each one self-contained — the
 Release and Debug builds of the library, all the public headers, `uvcpp.pc` and the CMake
 package files, and no extra DLLs or `.so` files to ship alongside. Which modules a given
 package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
 
 | Platform | Toolchain | Package |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-x64.zip) · 23.3 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-arm64.zip) · 24.3 MB |
-| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.2-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-x64.zip) · 28.8 MB |
-| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.2-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-arm64.zip) · 22.2 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.2-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-x64.zip) · 26.6 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.2-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-arm64.zip) · 26.8 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.3-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-msvc-x64.zip) · 23.5 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.3-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-msvc-arm64.zip) · 24.4 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.3-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-mingw-x64.zip) · 29.1 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.3-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-mingw-arm64.zip) · 22.3 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.3-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-linux-x64.zip) · 26.7 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.3-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-linux-arm64.zip) · 26.9 MB |
 
 Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
 What a package contains, and why it is laid out that way:
 [doc/release-process.md](doc/release-process.md).
 <!-- downloads:end -->
+
+### Windows 7 (VS2015 / MinGW kits)
+
+Old toolchains cannot build a 2011-era OpenSSL and libuv from scratch, so this line ships
+**portable build kits** instead of plain binaries: the source tree plus a prebuilt dependency
+prefix (OpenSSL 1.1.1w, libuv 1.40, zlib, llhttp — and GCC 8.1 for the MinGW kits) and
+`build-kit\build.cmd`. Extract, run the script for your target, and you have the library;
+VS2013 users build the `net-ssl` / `web-lite` profiles this way. See
+[doc/compatibility.md](doc/compatibility.md).
+
+| Target | Compiler | Kit |
+|---|---|---|
+| Windows 7 x86 | VS2015 Update 3 (v140) | [uvcpp-kit-1.8.3-vs2015-x86.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-vs2015-x86.zip) · 137.2 MB |
+| Windows 7 x64 | VS2015 Update 3 (v140) | [uvcpp-kit-1.8.3-vs2015-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-vs2015-x64.zip) · 145.8 MB |
+| Windows 7 x86 | GCC 8.1 (carried in the kit) | [uvcpp-kit-1.8.3-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-mingw32.zip) · 187.9 MB |
+| Windows 7 x64 | GCC 8.1 (carried in the kit) | [uvcpp-kit-1.8.3-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-mingw64.zip) · 193.2 MB |
+
 
 ## Install
 

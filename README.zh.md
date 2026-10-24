@@ -20,22 +20,37 @@
 ## 下载
 
 <!-- downloads:start -->
-最新版本是 **v1.8.2**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
+最新版本是 **v1.8.3**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
 全部公开头文件、`uvcpp.pc` 与 CMake 包配置，旁边不需要再放任何 DLL 或 `.so`。
 某一版的包里到底开了哪些模块，按版本记在 [CHANGELOG.md](./CHANGELOG.md) 里。
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-x64.zip) · 23.3 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.2-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-msvc-arm64.zip) · 24.3 MB |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.8.2-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-x64.zip) · 28.8 MB |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.8.2-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-mingw-arm64.zip) · 22.2 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.2-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-x64.zip) · 26.6 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.2-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.2/libuvcpp-1.8.2-linux-arm64.zip) · 26.8 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.3-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-msvc-x64.zip) · 23.5 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.3-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-msvc-arm64.zip) · 24.4 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.8.3-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-mingw-x64.zip) · 29.1 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.8.3-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-mingw-arm64.zip) · 22.3 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.3-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-linux-x64.zip) · 26.7 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.3-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/libuvcpp-1.8.3-linux-arm64.zip) · 26.9 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
 <!-- downloads:end -->
+
+### Windows 7（VS2015 / MinGW 便携 kit）
+
+老工具链没法从零编一版 2011 年的 OpenSSL 和 libuv，所以这一线发的是**便携构建 kit**：
+源码树 + 预编译依赖（OpenSSL 1.1.1w、libuv 1.40、zlib、llhttp，MinGW 还带 GCC 8.1）+
+`build-kit\build.cmd`。解压后按目标跑脚本即可出库；VS2013 用这条路径编 `net-ssl` /
+`web-lite`。详见 [doc/compatibility.md](doc/compatibility.md)。
+
+| 目标 | 编译器 | kit |
+|---|---|---|
+| Windows 7 x86 | VS2015 Update 3（v140） | [uvcpp-kit-1.8.3-vs2015-x86.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-vs2015-x86.zip) · 137.2 MB |
+| Windows 7 x64 | VS2015 Update 3（v140） | [uvcpp-kit-1.8.3-vs2015-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-vs2015-x64.zip) · 145.8 MB |
+| Windows 7 x86 | GCC 8.1（kit 内自带） | [uvcpp-kit-1.8.3-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-mingw32.zip) · 187.9 MB |
+| Windows 7 x64 | GCC 8.1（kit 内自带） | [uvcpp-kit-1.8.3-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.3/uvcpp-kit-1.8.3-mingw64.zip) · 193.2 MB |
+
 
 ## 安装
 
