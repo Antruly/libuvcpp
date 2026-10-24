@@ -311,22 +311,29 @@ namespace {
 // 入口；`decode.h` 同理）。所以 brotli 那一支每次都得新建状态 —— 头文件里
 // 那张 q5 = 62.4 µs 的表**已经含**这份状态churn，"能不能靠复用内核把 brotli
 // 拉回来"这条路在 API 上就是封死的。
+// **这个类型必须一直是"平凡析构"的：不许写析构函数去 `deflateEnd()`。**
+//
+// MinGW-w64 下 DLL 里的 `thread_local` 走 emutls，而带非平凡析构的对象是用
+// `__cxa_thread_atexit` 登记析构的：线程退出时 emutls 先把 TLS 块还回堆，登记
+// 的回调才被调用 —— 析构拿到的是野 `this`，读第一个字节（`inited`）就是访问
+// 违例。实测（32 位 mingw，HTTP 全套用例）：压缩过的循环线程一退出就崩在
+// `deflate_slot::~deflate_slot()`，主线程的 `pthread_join` 永远等不到，Windows
+// 上表现为"打完 ALL PASS 之后进程不退出"。完整现场与同一坑的其他受害者见
+// `src/expand/uvcpp_page_heap.cpp:558-576`、`src/web/uvcpp_http_date.cpp:31-40`。
+//
+// 代价是内核按线程常驻到进程结束（`deflateReset()` 复用它，本来就是这个用法），
+// 线程**提前**结束时那块 256 KB 交给 OS 回收。循环线程是进程级寿命，所以稳态下
+// 一个字节都没多花。
 struct deflate_slot {
   z_stream strm;
   bool     inited;
   int      window_bits;
   int      level;
-
-  deflate_slot() : inited(false), window_bits(0), level(0) {
-    std::memset(&strm, 0, sizeof(strm));
-  }
-  ~deflate_slot() {
-    if (inited) deflateEnd(&strm);
-  }
 };
 
 deflate_slot& deflate_slot_for_this_thread() {
-  static UVCPP_THREAD_LOCAL deflate_slot slot;
+  // `= {}` 让它常量初始化：没有 `__cxa_guard_*`，也不登记 TLS 析构。
+  static UVCPP_THREAD_LOCAL deflate_slot slot = {};
   return slot;
 }
 
@@ -410,7 +417,9 @@ struct brotli_arena {
   size_t over;  // 这一次回落到 std::malloc 的字节数
 
   brotli_arena() : lo(NULL), size(0), used(0), hwm(0), over(0) {}
-  ~brotli_arena() { std::free(lo); }
+  // **不要写析构去 `free(lo)`**：与 `deflate_slot` 同一条理由（见上面那段长注释）
+  // ——非平凡析构的 `thread_local` 在 MinGW 的 DLL 里会拿到野 `this`，
+  // 线程退出时等于对任意地址调用 `free()`。竞技场按线程常驻、随进程退出由 OS 回收。
 };
 
 brotli_arena& brotli_arena_for_this_thread() {

@@ -288,6 +288,25 @@ Every automatic disable appends a `name: reason` line to the end-of-configure su
 - 32-bit processes have a smaller address space; test with realistic concurrency and
   `--large-address-aware` (MinGW) / `/LARGEADDRESSAWARE` (MSVC).
 
+### Measured on Windows 7 SP1 x86 (2026-10-24)
+
+A real Windows 7 SP1 x86 host (6.1.7601) ran the kit prebuilts against the functional
+suites. No Win8+/Win10 API is imported — loading the DLL on Win7 is the import-table
+check — and the suites that touch the network pass:
+
+| Artifact | Consumer | Functional suites |
+|---|---|---|
+| `vs2015-x86` kit `prebuilt/bin/uvcpp.dll` (v140, `/MT`) | `version_string()` → `1.8.2` | compress (12), http_server (28), ssl_client, ssl_server, static_server, ws — `ALL PASS` |
+| `mingw32` kit `prebuilt/bin/libuvcpp.dll` (GCC 8.1) | `1.8.2` | compress (13), http_server (28) — `ALL PASS` |
+| `mingw64` kit `prebuilt/bin/libuvcpp.dll` (GCC 8.1) | `1.8.2` | http_server — `ALL PASS` (run under Wine; no 64-bit Win7 host) |
+
+That run also produced the `thread_local` rule now written into
+`src/web/uvcpp_http_compress.cpp`: on 32-bit MinGW a `thread_local` object **with a
+non-trivial destructor** inside the DLL is destroyed through a stale pointer when the
+owning thread exits (`deflate_slot::~deflate_slot()` faulted, and the joining thread
+waited forever). Thread-local caches in this library must stay trivially destructible;
+the full analysis is in `src/expand/uvcpp_page_heap.cpp:558-576`.
+
 ## 9. Known limitations and security notes
 
 - **Windows 7 is end-of-life** (2020-01); this line is a compatibility product, not a
