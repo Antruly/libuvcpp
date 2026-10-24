@@ -3380,7 +3380,7 @@ endif()
 # 一遍同样的文件。
 
 # (1) 自编译依赖里的共享目标（llhttp/zlib 的 CMake 只在部分配置下自己装）。
-foreach(_uvcpp_dep_tgt llhttp_shared llhttp zlib)
+foreach(_uvcpp_dep_tgt llhttp_shared llhttp)
   if(TARGET ${_uvcpp_dep_tgt})
     get_target_property(_uvcpp_dep_type ${_uvcpp_dep_tgt} TYPE)
     if(_uvcpp_dep_type STREQUAL "SHARED_LIBRARY")
@@ -3467,7 +3467,7 @@ endif()
 # 只装 SHARED_LIBRARY：静态依赖的头/库本来就不该出现在前缀里，系统依赖
 # （uv/ssl/z）由发行版提供。`install(TARGETS ...)` 会一并生成 SONAME 符号
 # 链接，`install(FILES $<TARGET_FILE:...>)` 不会。
-foreach(_uvcpp_dep uv uv_a llhttp llhttp_shared llhttp_static zlib zlibstatic zlib1)
+foreach(_uvcpp_dep uv uv_a llhttp llhttp_shared llhttp_static zlibstatic)
   if(TARGET ${_uvcpp_dep})
     get_target_property(_uvcpp_dep_type ${_uvcpp_dep} TYPE)
     if(_uvcpp_dep_type STREQUAL "SHARED_LIBRARY")
