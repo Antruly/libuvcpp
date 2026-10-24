@@ -63,9 +63,12 @@ struct uvcpp_ws_frame {
   bool       rsv3      = false;   // reserved
   ws_opcode  opcode    = ws_opcode::TEXT;
   bool       masked    = false;
-  uint8_t    mask_key[4] = {0};
+  uint8_t    mask_key[4];
   uint64_t   payload_len = 0;
   uvcpp_buf  payload;
+
+  // v120 cannot put an initializer on an array member (C2536); zero it here.
+  uvcpp_ws_frame() { mask_key[0] = mask_key[1] = mask_key[2] = mask_key[3] = 0; }
 
   bool is_control_frame() const {
     return static_cast<uint8_t>(opcode) >= 0x8;
