@@ -19,6 +19,30 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.4 重点 (Highlights)
+
+`v1.8.3` 之后的一版：Windows 7 的三条 MSVC 工具链与两条 MinGW 工具链全部进 CI，
+产物从"源码 kit"换成**二进制包**；VS2013 的支持面从 `web-lite` 扩到完整的 `web` 档。
+
+### Windows 7 二进制包
+
+- `uvcpp-win7-x86-msvc2013.zip` —— VS2013 (v120)：HTTP server/client、WebSocket、
+  静态文件、gzip、SSL（libuv 1.33 / OpenSSL 1.1.1w）。v120 与 v140+ 的 CRT/ABI
+  互不兼容，只能被 VS2013 编出来的程序使用。
+- `uvcpp-win7-{x86,x64}-msvc2015.zip` —— VS2015 Update 3（v140）。
+- `uvcpp-win7-{x86,x64}-mingw{32,64}.zip` —— GCC 8.1。
+- 包内是 DLL + 导入库 + 公开头 + CMake 配置；`uvcpp.dll` 只导入 Windows 自带的系统
+  DLL，旁边不需要再放任何运行时库。
+
+### 明确不支持
+
+- **VS2013 上没有 webapp**：nlohmann/json 从 v1.0.0 起最低就是 VS2015（v120 没有
+  `noexcept` / `constexpr` 关键字）。路由/中间件/上传这一层要用 webapp，请用 VS2015+。
+- 整条 Win7 线没有 HTTP/2、HTTP/3、QUIC（nghttp2 的 C99 代码 / QUIC 需要 C11 +
+  OpenSSL 3）。
+
+**兼容性**：公开 API 未变；VS2013 的 `web` 档是新增组合，`web-lite` 预设保留。
+
 ## v1.8.3 重点 (Highlights)
 
 `v1.8.2` 之后的补丁版，主线是 **Windows 7 兼容**：四条官方二进制（VS2015 x86/x64、

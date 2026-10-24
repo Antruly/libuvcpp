@@ -11,11 +11,11 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
-`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3` 是它之后的补丁版，
+`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4` 是它之后的补丁版，
 不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.3**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`。
+当前源码树是 **1.8.4**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -1319,6 +1319,11 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `thread_local` 引擎（每线程独立播种，避免各线程拿到同一串），锁一并去掉。
 
 ### HTTP 与 WebSocket 语义
+
+- **v120 上的 WebSocket：帧掩码的两处编译缺口**（`1.8.4`）。`uvcpp_ws_frame` 的
+  `mask_key[4] = {0}` 是数组成员上的默认初始化器（v120 报 C2536），改成构造函数清零；
+  掩码 PRNG 的 `static thread_local std::mt19937_64`（类类型，v120 的
+  `__declspec(thread)` 报 C2483）改成指针槽。行为与布局不变。
 
 - **压缩槽的 `thread_local` 改成平凡析构**（`1.8.3`）：`deflate_slot` /
   `brotli_arena` 原来带析构（`deflateEnd` / `free`），而 32 位 MinGW 的 DLL 里非平凡
@@ -3214,6 +3219,19 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 配置、打包与 CI
 
+- **VS2013 支持面扩到 `web` 档**（`1.8.4`）。v120 上放行 WebSocket、静态文件与 gzip：
+  `noexcept` 抽象成 `UVCPP_NOEXCEPT`，三处线程本地缓存改指针槽，压缩槽早已平凡析构 ——
+  于是 compat 层不再自动关闭 `web-ws` / `gzip`，并新增预设 `vs2013-web`（libuv 1.33 +
+  OpenSSL 1.1.1w）。**webapp 仍不支持**：nlohmann/json 从 v1.0.0 起最低就是 VS2015
+  （v120 没有 `noexcept` / `constexpr` 关键字），要 webapp 只能用 VS2015+。
+
+- **AppVeyor 五条腿产出 Win7 二进制**（`1.8.4`）。`.appveyor.yml` 跑 `vs2013-x86`、
+  `vs2015-x86/x64`、`mingw32/64`，每条既出二进制包也出 kit。这一轮修掉的流程问题：
+  FetchContent 的共享 zlib 目标不能装（`cmake --install` 找不到未构建的 `zlib.dll`）；
+  vs2013 预设漏 `BUILD_SHARED_LIBS=OFF`；Windows PowerShell 调原生命令会丢掉空参数；
+  `Split-Path` 对相对路径取不到父目录；MinGW 产物叫 `libuvcpp.dll`；SourceForge 的
+  下载页不是归档 —— MinGW 工具链与 OpenSSL 前缀改由本仓 Release 的固定资产提供。
+
 - **Windows 7 线：特性档与四条官方二进制**（`1.8.3`）。新增 `UVCPP_FEATURES`
   （`net` / `net-ssl` / `web-lite` / `web` / `full`）、`UVCPP_REQUIRE_FEATURES`（列出的
   特性必须开着，否则 configure 期直接失败）与 `UVCPP_WINVER`；web 模块再拆四个子开关
@@ -3960,6 +3978,26 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.8.4 (2026-10-25)
+
+`v1.8.3` 之后的一版：Windows 7 的五条工具链全部进 CI、产物从"源码 kit"换成**二进制包**；
+VS2013 的支持面从 `web-lite` 扩到完整的 `web` 档（WebSocket、静态文件、gzip）。
+
+**新增**：
+
+- VS2013（v120）支持 `web` 档：HTTP server/client、WebSocket、静态文件、gzip；
+  新增预设 `vs2013-web`（libuv 1.33 + OpenSSL 1.1.1w）。
+- AppVeyor 五条腿（vs2013-x86、vs2015-x86/x64、mingw32/64）产出二进制与 kit。
+
+**修复**：
+
+- v120 的三处编译缺口：`noexcept` → `UVCPP_NOEXCEPT`、线程本地缓存改指针槽、
+  `uvcpp_ws_frame::mask_key` 的数组默认初始化（C2536）。
+- AppVeyor / kit 脚本：空参数、相对路径父目录、MinGW 产物名与工具链下载。
+
+**明确不支持**：VS2013 上的 webapp（nlohmann/json 最低 VS2015）；整条 Win7 线的
+HTTP/2、HTTP/3、QUIC。
 
 ### v1.8.3 (2026-10-24)
 

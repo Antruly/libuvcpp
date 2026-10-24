@@ -6,14 +6,16 @@ authoritative answer for *one built artifact*: it tells a consumer exactly which
 sub-features are inside that binary. Do not hand-define those macros; the generated header
 turns a mismatch into a compile-time `#error`.
 
-## 1. Official Windows 7 binaries (4)
+## 1. Official Windows 7 binaries (5)
 
-These are the four artifacts the official CI builds. They all target **Windows 7 SP1 or
-later**, use **libuv 1.40.0**, **OpenSSL 1.1.1w**, and **zlib**, and expose the same feature
-set.
+These are the five artifacts the official CI (AppVeyor, `.appveyor.yml`) builds. They all
+target **Windows 7 SP1 or later**, use **OpenSSL 1.1.1w** and **zlib**, and expose the `web`
+feature set; the VS2013 leg pins **libuv 1.33.0** (the last release v120 can build), the
+others **libuv 1.40.0**.
 
 | Artifact | Compiler | Arch | ABI |
 |---|---|---|---|
+| `win7-x86-msvc2013` | VS2013 (v120) | x86 | **v120; not ABI-compatible with v140+** |
 | `win7-x86-msvc2015` | VS2015 Update 3 (v140) | x86 | MSVC v140; consumable by VS2015–VS2022 |
 | `win7-x64-msvc2015` | VS2015 Update 3 (v140) | x64 | MSVC v140; consumable by VS2015–VS2022 |
 | `win7-x86-mingw` | GCC 8.1 (i686, posix-dwarf) | x86 | GCC 5+ C++11 ABI (new ABI) |
@@ -25,7 +27,7 @@ Common configuration:
 UVCPP_FEATURES=web
 UVCPP_REQUIRE_FEATURES=net;ssl;web-server;web-client;web-ws;web-static;http-compress
 UVCPP_WINVER=0x0601
-LIBUV_VERSION=v1.40.0
+LIBUV_VERSION=v1.40.0        # v1.33.0 for the VS2013 leg
 UVCPP_BUILD_LIBUV_FROM_SOURCE=ON
 UVCPP_BUILD_TESTS=OFF
 BUILD_SHARED_LIBS=OFF          # libuv is linked statically into uvcpp
@@ -254,8 +256,10 @@ is done through CMake, not by editing the generated header.
 
 `cmake/uvcpp_compat.cmake` applies these rules before the module sources are compiled:
 
-- **MSVC 2013** disables webapp, WebSocket, gzip/brotli, HTTP/2, QUIC, HTTP/3, yyjson, WSDL,
-  database and the expand module. The net+ssl and web-lite profiles remain.
+- **MSVC 2013** disables webapp, brotli, HTTP/2, QUIC, HTTP/3, yyjson, WSDL, database and the
+  expand module. The `web` profile (HTTP server/client, WebSocket, static files, gzip) and the
+  smaller `net-ssl` / `web-lite` profiles are supported; **webapp needs VS2015+** because
+  nlohmann/json has required MSVC 2015 since its first release.
 - **GCC < 5.3** is a hard configure error (old libstdc++ ABI).
 - **libuv < 1.34** disables QUIC (the QUIC code uses `uv_sleep`).
 - **Web off** disables all web sub-features, webapp, HTTP/2 and HTTP/3.
@@ -288,6 +292,15 @@ Every automatic disable appends a `name: reason` line to the end-of-configure su
 - 32-bit processes have a smaller address space; test with realistic concurrency and
   `--large-address-aware` (MinGW) / `/LARGEADDRESSAWARE` (MSVC).
 
+### Builds and measurement (1.8.4)
+
+AppVeyor produces all five artifacts on every push (`.appveyor.yml`): the VS2013/VS2015 legs
+build OpenSSL 1.1.1w with `nmake`, the MinGW legs use a prebuilt GCC 8.1 toolchain and
+OpenSSL prefix hosted as release assets (`mingw{32,64}-gcc8.1.0-toolchain.7z`,
+`openssl-1.1.1w-mingw{32,64}.7z`) because OpenSSL's `Configure` on a Windows host only
+accepts nmake/dmake. The import-table check rejects any Win8+/Win10 API in `uvcpp.dll` /
+`libuvcpp.dll`.
+
 ### Measured on Windows 7 SP1 x86 (2026-10-24)
 
 A real Windows 7 SP1 x86 host (6.1.7601) ran the kit prebuilts against the functional
@@ -299,6 +312,7 @@ check — and the suites that touch the network pass:
 | `vs2015-x86` kit `prebuilt/bin/uvcpp.dll` (v140, `/MT`) | `version_string()` → `1.8.2` | compress (12), http_server (28), ssl_client, ssl_server, static_server, ws — `ALL PASS` |
 | `mingw32` kit `prebuilt/bin/libuvcpp.dll` (GCC 8.1) | `1.8.2` | compress (13), http_server (28) — `ALL PASS` |
 | `mingw64` kit `prebuilt/bin/libuvcpp.dll` (GCC 8.1) | `1.8.2` | http_server — `ALL PASS` (run under Wine; no 64-bit Win7 host) |
+| AppVeyor `uvcpp-win7-x86-msvc2013.zip` (v120, `web` profile) | built + import-checked in CI | `uvcpp-win7-*` packages share the `web` profile; v120 adds WebSocket/static/gzip in 1.8.4 |
 
 That run also produced the `thread_local` rule now written into
 `src/web/uvcpp_http_compress.cpp`: on 32-bit MinGW a `thread_local` object **with a
@@ -325,6 +339,9 @@ the full analysis is in `src/expand/uvcpp_page_heap.cpp:558-576`.
   (1.68+ uses C99 designated initializers that MSVC 2015 cannot compile).
 - **QUIC/HTTP/3 are not part of the Win7 line.** They need a C11 toolchain, OpenSSL ≥ 3.2 and
   libuv ≥ 1.34; MSVC has no C11 mode before VS2019 16.7.
-- **webapp on VS2013** is not supported (nlohmann/json's documented minimum is VS2015).
+- **webapp on VS2013** is not supported: nlohmann/json has required MSVC 2015 since its first
+  release (v1.0.0's README lists "Microsoft Visual C++ 14.0 RC"), and v120 lacks the
+  `noexcept` / `constexpr` keywords the header uses. The rest of the `web` profile
+  (HTTP server/client, WebSocket, static files, gzip) builds on v120 since 1.8.4.
 - **Reflection macros** (`UVCPP_JSON_FIELDS`) need VS2019 16.5+ or clang-cl, even when the
   rest of the webapp library builds with VS2015.
