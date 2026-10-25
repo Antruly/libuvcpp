@@ -53,8 +53,24 @@
 | Windows 7 x86 | GCC 8.1 | [uvcpp-win7-x86-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-mingw32.zip) · 6.8 MB |
 | Windows 7 x64 | GCC 8.1 | [uvcpp-win7-x64-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x64-mingw64.zip) · 6.6 MB |
 
-**这些包里没有**：webapp（需要 VS2015+ 工具链，不在这条线上）、HTTP/2、HTTP/3、QUIC。
-同一条 CI 也会产出便携构建 kit（源码树 + 预编译依赖）作为 artifacts，供需要从源码重编的人下载。详见 [doc/compatibility.md](doc/compatibility.md)。
+**这些包里没有**：HTTP/2、HTTP/3、QUIC（整条线都没有），以及只有 VS2013 包缺 webapp ——
+其余四份都带。
+
+### 便携构建 kit（要改库 / 要重编时用）
+
+每个目标还提供一份 **kit**：1.8.5 源码树 + 预编译依赖前缀（OpenSSL 1.1.1w、libuv、
+zlib、llhttp、CMake；MinGW 那份还带 GCC 8.1）+ `build-kit\build.cmd`。需要修改库、
+换档位重编或静态链接时用它；其中的 `prebuilt\` 与上面的二进制包一致。
+
+| 目标 | kit |
+|---|---|
+| Windows 7 x86 · VS2013（`web`） | [uvcpp-kit-1.8.5-vs2013-x86.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-vs2013-x86.zip) · 78.0 MB |
+| Windows 7 x86 · VS2015（`full`） | [uvcpp-kit-1.8.5-vs2015-x86.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-vs2015-x86.zip) · 80.7 MB |
+| Windows 7 x64 · VS2015（`full`） | [uvcpp-kit-1.8.5-vs2015-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-vs2015-x64.zip) · 82.4 MB |
+| Windows 7 x86 · GCC 8.1（`full`） | [uvcpp-kit-1.8.5-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-mingw32.zip) · 188.6 MB |
+| Windows 7 x64 · GCC 8.1（`full`） | [uvcpp-kit-1.8.5-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-mingw64.zip) · 194.0 MB |
+
+详见 [doc/compatibility.md](doc/compatibility.md)。
 
 
 ## 安装

@@ -57,10 +57,11 @@ uses.
 | Windows 7 x86 | GCC 8.1 | [uvcpp-win7-x86-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-mingw32.zip) · 6.8 MB |
 | Windows 7 x64 | GCC 8.1 | [uvcpp-win7-x64-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x64-mingw64.zip) · 6.6 MB |
 
-**Not in these packages:** webapp (needs a VS2015+ toolchain and is outside this line),
-HTTP/2, HTTP/3, QUIC. The same CI also produces the portable build kits (source tree +
-prebuilt dependencies) as artifacts if you want to rebuild from source; see
-[doc/compatibility.md](doc/compatibility.md).
+| Windows 7 x86 · VS2013 (`web`) | [uvcpp-kit-1.8.5-vs2013-x86.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-vs2013-x86.zip) · 78.0 MB |
+| Windows 7 x86 · VS2015 (`full`) | [uvcpp-kit-1.8.5-vs2015-x86.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-vs2015-x86.zip) · 80.7 MB |
+| Windows 7 x64 · VS2015 (`full`) | [uvcpp-kit-1.8.5-vs2015-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-vs2015-x64.zip) · 82.4 MB |
+| Windows 7 x86 · GCC 8.1 (`full`) | [uvcpp-kit-1.8.5-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-mingw32.zip) · 188.6 MB |
+| Windows 7 x64 · GCC 8.1 (`full`) | [uvcpp-kit-1.8.5-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-kit-1.8.5-mingw64.zip) · 194.0 MB |
 
 
 ## Install
