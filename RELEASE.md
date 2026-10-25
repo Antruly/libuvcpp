@@ -19,6 +19,24 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.5 重点 (Highlights)
+
+`v1.8.4` 的补丁：Windows 7 的 **VS2015 与 MinGW 包改成 `full` 档**（带上 webapp），
+VS2013 仍是 `web` 档（不含 webapp，nlohmann/json 最低就是 VS2015）。
+
+### 各包的档位
+
+| 包 | 档位 | webapp |
+|---|---|---|
+| `uvcpp-win7-x86-msvc2013.zip` | `web` | ✗ |
+| `uvcpp-win7-{x86,x64}-msvc2015.zip` | `full` | ✓ |
+| `uvcpp-win7-{x86,x64}-mingw32/64.zip` | `full` | ✓ |
+
+`web` = HTTP/1.1 server/client + WebSocket + 静态文件 + gzip；`full` 在此基础上再加
+webapp（路由、中间件、静态、上传、日志，以及 JSON 请求/响应）。
+
+**仍不支持**（整条 Win7 线）：HTTP/2、HTTP/3、QUIC；brotli 也关着。
+
 ## v1.8.4 重点 (Highlights)
 
 `v1.8.3` 之后的一版：Windows 7 的三条 MSVC 工具链与两条 MinGW 工具链全部进 CI，

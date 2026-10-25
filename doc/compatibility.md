@@ -24,8 +24,8 @@ others **libuv 1.40.0**.
 Common configuration:
 
 ```text
-UVCPP_FEATURES=web
-UVCPP_REQUIRE_FEATURES=net;ssl;web-server;web-client;web-ws;web-static;http-compress
+UVCPP_FEATURES=full        # web for the VS2013 leg
+UVCPP_REQUIRE_FEATURES=net;ssl;web-server;web-client;web-ws;web-static;http-compress;webapp
 UVCPP_WINVER=0x0601
 LIBUV_VERSION=v1.40.0        # v1.33.0 for the VS2013 leg
 UVCPP_BUILD_LIBUV_FROM_SOURCE=ON
@@ -36,8 +36,10 @@ UVCPP_BUILD_STATIC=OFF
 OPENSSL_ROOT_DIR=<OpenSSL 1.1.1w prefix>
 ```
 
-- Web = HTTP/1.1 server and client, WebSocket, static-file server, gzip.
-- **Not included:** webapp, HTTP/2, QUIC, HTTP/3, database, yyjson, C ABI, compile-time expand.
+- `web` = HTTP/1.1 server and client, WebSocket, static-file server, gzip. The VS2015 and MinGW
+  legs build **`full`** (`web` + webapp); VS2013 builds `web` only.
+- **Not included:** HTTP/2, QUIC, HTTP/3, database, yyjson, C ABI, compile-time expand.
+  **webapp** is in the VS2015/MinGW packages, not in the VS2013 one (see §9).
 - MSVC: `/MT` is recommended (`-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`), and the OpenSSL
   static libraries must use the same runtime.
 - MinGW: `UVCPP_STATIC_RUNTIME=ON` and the `mingw{32,64}-win7.cmake` toolchains add
