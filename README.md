@@ -20,19 +20,19 @@ object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 645
 ## Download
 
 <!-- downloads:start -->
-The newest release is **v1.8.4**. Six prebuilt packages, each one self-contained — the
+The newest release is **v1.8.5**. Six prebuilt packages, each one self-contained — the
 Release and Debug builds of the library, all the public headers, `uvcpp.pc` and the CMake
 package files, and no extra DLLs or `.so` files to ship alongside. Which modules a given
 package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
 
 | Platform | Toolchain | Package |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.4-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-msvc-x64.zip) · 23.5 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.4-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-msvc-arm64.zip) · 24.4 MB |
-| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.4-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-mingw-x64.zip) · 29.1 MB |
-| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.4-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-mingw-arm64.zip) · 22.3 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.4-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-linux-x64.zip) · 26.7 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.4-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-linux-arm64.zip) · 26.9 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.5-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-msvc-x64.zip) · 23.5 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.5-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-msvc-arm64.zip) · 24.4 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.5-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-mingw-x64.zip) · 29.1 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.5-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-mingw-arm64.zip) · 22.3 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.5-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-linux-x64.zip) · 26.7 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.5-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-linux-arm64.zip) · 26.9 MB |
 
 Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
 What a package contains, and why it is laid out that way:
@@ -42,19 +42,20 @@ What a package contains, and why it is laid out that way:
 ### Windows 7 binaries
 
 Five packages built by the Windows CI (`.appveyor.yml`) against Windows 7 SP1: a
-self-contained DLL plus its import library, the public headers and the CMake config. Every
-one ships the `web` profile — HTTP/1.1 server and client, WebSocket, static files and gzip,
-over TLS — and `uvcpp.dll` imports only Windows' own DLLs. **VS2013 (v120) is ABI
+self-contained DLL plus its import library, the public headers and the CMake config. All of
+them ship HTTP/1.1 server and client, WebSocket, static files and gzip over TLS; **the VS2015
+and MinGW packages also carry webapp** (the `full` profile), while the VS2013 one is `web`
+only. `uvcpp.dll` imports only Windows' own DLLs. **VS2013 (v120) is ABI
 incompatible with v140+**, so pick the package that matches the compiler your application
 uses.
 
 | Target | Compiler | Package |
 |---|---|---|
-| Windows 7 x86 | VS2013 (v120, libuv 1.33) | [uvcpp-win7-x86-msvc2013.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x86-msvc2013.zip) · 3.7 MB |
-| Windows 7 x86 | VS2015 Update 3 (v140) | [uvcpp-win7-x86-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x86-msvc2015.zip) · 3.8 MB |
-| Windows 7 x64 | VS2015 Update 3 (v140) | [uvcpp-win7-x64-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x64-msvc2015.zip) · 4.4 MB |
-| Windows 7 x86 | GCC 8.1 | [uvcpp-win7-x86-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x86-mingw32.zip) · 5.7 MB |
-| Windows 7 x64 | GCC 8.1 | [uvcpp-win7-x64-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x64-mingw64.zip) · 5.5 MB |
+| Windows 7 x86 | VS2013 (v120, libuv 1.33) | [uvcpp-win7-x86-msvc2013.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-msvc2013.zip) · 3.7 MB |
+| Windows 7 x86 | VS2015 Update 3 (v140) | [uvcpp-win7-x86-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-msvc2015.zip) · 4.6 MB |
+| Windows 7 x64 | VS2015 Update 3 (v140) | [uvcpp-win7-x64-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x64-msvc2015.zip) · 5.4 MB |
+| Windows 7 x86 | GCC 8.1 | [uvcpp-win7-x86-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-mingw32.zip) · 6.8 MB |
+| Windows 7 x64 | GCC 8.1 | [uvcpp-win7-x64-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x64-mingw64.zip) · 6.6 MB |
 
 **Not in these packages:** webapp (needs a VS2015+ toolchain and is outside this line),
 HTTP/2, HTTP/3, QUIC. The same CI also produces the portable build kits (source tree +

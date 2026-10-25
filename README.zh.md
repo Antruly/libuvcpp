@@ -20,18 +20,18 @@
 ## 下载
 
 <!-- downloads:start -->
-最新版本是 **v1.8.4**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
+最新版本是 **v1.8.5**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
 全部公开头文件、`uvcpp.pc` 与 CMake 包配置，旁边不需要再放任何 DLL 或 `.so`。
 某一版的包里到底开了哪些模块，按版本记在 [CHANGELOG.md](./CHANGELOG.md) 里。
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.4-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-msvc-x64.zip) · 23.5 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.4-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-msvc-arm64.zip) · 24.4 MB |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.8.4-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-mingw-x64.zip) · 29.1 MB |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.8.4-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-mingw-arm64.zip) · 22.3 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.4-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-linux-x64.zip) · 26.7 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.4-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/libuvcpp-1.8.4-linux-arm64.zip) · 26.9 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.5-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-msvc-x64.zip) · 23.5 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.5-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-msvc-arm64.zip) · 24.4 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.8.5-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-mingw-x64.zip) · 29.1 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.8.5-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-mingw-arm64.zip) · 22.3 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.5-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-linux-x64.zip) · 26.7 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.5-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-linux-arm64.zip) · 26.9 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
@@ -40,17 +40,18 @@
 ### Windows 7 二进制包
 
 五份包由 Windows CI（`.appveyor.yml`）面向 Windows 7 SP1 构建：自包含的 DLL + 导入库、
-公开头与 CMake 配置。全部是 `web` 档 —— HTTP/1.1 server/client、WebSocket、静态文件、
-gzip、TLS —— 且 `uvcpp.dll` 只导入 Windows 自带的系统 DLL。**VS2013（v120）与 v140+
+公开头与 CMake 配置。HTTP/1.1 server/client、WebSocket、静态文件、gzip、TLS 全都有；
+**VS2015 与 MinGW 的四份包还带 webapp（`full` 档）**，VS2013 那份是 `web` 档。
+`uvcpp.dll` 只导入 Windows 自带的系统 DLL。**VS2013（v120）与 v140+
 的 ABI 不兼容**，请选与你程序所用编译器匹配的那份。
 
 | 目标 | 编译器 | 包 |
 |---|---|---|
-| Windows 7 x86 | VS2013 (v120, libuv 1.33) | [uvcpp-win7-x86-msvc2013.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x86-msvc2013.zip) · 3.7 MB |
-| Windows 7 x86 | VS2015 Update 3 (v140) | [uvcpp-win7-x86-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x86-msvc2015.zip) · 3.8 MB |
-| Windows 7 x64 | VS2015 Update 3 (v140) | [uvcpp-win7-x64-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x64-msvc2015.zip) · 4.4 MB |
-| Windows 7 x86 | GCC 8.1 | [uvcpp-win7-x86-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x86-mingw32.zip) · 5.7 MB |
-| Windows 7 x64 | GCC 8.1 | [uvcpp-win7-x64-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.4/uvcpp-win7-x64-mingw64.zip) · 5.5 MB |
+| Windows 7 x86 | VS2013 (v120, libuv 1.33) | [uvcpp-win7-x86-msvc2013.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-msvc2013.zip) · 3.7 MB |
+| Windows 7 x86 | VS2015 Update 3 (v140) | [uvcpp-win7-x86-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-msvc2015.zip) · 4.6 MB |
+| Windows 7 x64 | VS2015 Update 3 (v140) | [uvcpp-win7-x64-msvc2015.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x64-msvc2015.zip) · 5.4 MB |
+| Windows 7 x86 | GCC 8.1 | [uvcpp-win7-x86-mingw32.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x86-mingw32.zip) · 6.8 MB |
+| Windows 7 x64 | GCC 8.1 | [uvcpp-win7-x64-mingw64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/uvcpp-win7-x64-mingw64.zip) · 6.6 MB |
 
 **这些包里没有**：webapp（需要 VS2015+ 工具链，不在这条线上）、HTTP/2、HTTP/3、QUIC。
 同一条 CI 也会产出便携构建 kit（源码树 + 预编译依赖）作为 artifacts，供需要从源码重编的人下载。详见 [doc/compatibility.md](doc/compatibility.md)。
