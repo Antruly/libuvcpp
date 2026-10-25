@@ -9,7 +9,8 @@ set "BUILD_DIR=%~3"
 set "PATH=%ROOT%\deps\%MINGW_DIR%\bin;%ROOT%\deps\cmake\bin;%PATH%"
 cd /d "%ROOT%" || exit /b 1
 cmake -S . -B "%BUILD_DIR%" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release ^
-  -DUVCPP_FEATURES=web ^
+  -DUVCPP_FEATURES=full ^
+  -DUVCPP_REQUIRE_FEATURES=net;ssl;web-server;web-client;web-ws;web-static;http-compress;webapp ^
   -DUVCPP_WINVER=0x0601 ^
   -DUVCPP_BUILD_TESTS=OFF ^
   -DUVCPP_STATIC_RUNTIME=ON ^
