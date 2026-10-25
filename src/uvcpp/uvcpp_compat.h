@@ -46,6 +46,17 @@
 #  define UVCPP_SIZE_FMT "zu"
 #endif
 
+#if defined(_WIN32)
+/*
+ * Windows 10 SDK 14393 added ENABLE_VIRTUAL_TERMINAL_PROCESSING to wincon.h;
+ * older SDKs (and mingw-w64 8.1's headers) do not have it. The value is fixed
+ * by the console API, so defining it here is safe on every SDK.
+ */
+#  ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#    define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#  endif
+#endif
+
 /**
  * @brief C99 snprintf on every supported CRT.
  *
