@@ -398,7 +398,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 6. **链接是 PRIVATE**（`CMakeLists.txt:3233-3233` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
-   （`src/http3/uvcpp_h3_connection.h:410`），它经公开头调用、链接期解析。
+   （`src/http3/uvcpp_h3_connection.h:422`），它经公开头调用、链接期解析。
 
 7. **本机可复现**：nghttp3 也可以用
    `-DFETCHCONTENT_SOURCE_DIR_NGHTTP3=<一份已下好的 nghttp3 源码>` 指过去绕开下载
@@ -461,7 +461,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 **（c）往共享结构里加了什么：服务端零。** h3 用**另一张表**
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
-`src/web/uvcpp_http_server.h:1666-1666`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
+`src/web/uvcpp_http_server.h:1714-1714`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
 的。客户端加了六个成员（三个 `bool`、一个 `int64`、两个指针，`src/web/uvcpp_http_client.h:654-660`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假

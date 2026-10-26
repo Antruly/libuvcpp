@@ -123,7 +123,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 **一个连接有 `add()` 过的 id 就直接用它，别拿 `uvcpp_tcp_client*` 当身份。**
 按代次核对那套（`src/web/uvcpp_static_server.cpp:739-742` —— 静态器 1.6.8 起拿的是
 `req.reply` 凭据，`reply_alive()` 底下比的还是 `connection_generation()`，
-见 `src/web/uvcpp_http_server.h:847-847`）和新这套（`uvcpp_web_app` 内部的
+见 `src/web/uvcpp_http_server.h:886-886`）和新这套（`uvcpp_web_app` 内部的
 `registry_`）都是"单调递增永不复用"，**但两者不通用**，别互相替换。
 第三套是裸 `uvcpp_tcp_client*` —— 前两套的存在就是为了不用它。
 
@@ -133,7 +133,7 @@ void doc_conn_lookup(uvcpp::uvcpp_web_connection_registry& reg,
 
 `webapp/uvcpp_web_util.h` 是**纯函数模块，没有类**，39 个公开声明。
 它的头注释（`:10-11`）解释的是**为什么要新开这个模块** —— web 层连一个 query
-解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:984-987`），
+解析函数都没有，只把原始请求目标原样交出来（`src/web/uvcpp_http_server.cpp:998-1001`），
 不是"这一页里的东西不存在"。`src/web/` 下也确实没有任何 query / cookie / URL 解码
 helper。
 
