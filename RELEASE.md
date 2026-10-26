@@ -19,6 +19,14 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.7 重点 (Highlights)
+
+`v1.8.6` 的补丁：目录/服务端不可达时不再崩溃，并给 HTTP/3 扩展 CONNECT 流加上发送队列上限。
+
+- **不可达服务器的析构崩溃**：`uvcpp_http_client::connect_wait()` 的连接回调状态改到堆上。连接超时返回后，析构客户端会泵事件循环；迟到的回调不再写入已失效的栈帧（此前表现为 `SIGSEGV in ~uvcpp_http_client`）。
+- **HTTP/3 发送队列上限**：`write_stream_data()` 的待发队列限制为 4 MiB，接收端不读时返回 `UV_ENOBUFS`，避免 h3 中继把进程拖到 OOM。
+- 其余行为与 1.8.6 一致；六个平台包与调试档不变。
+
 ## v1.8.6 重点 (Highlights)
 
 `v1.8.5` 之后的一版：**WebSocket 不再只有 HTTP/1.1 那一档**（#58）。
