@@ -19,6 +19,19 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.6 重点 (Highlights)
+
+`v1.8.5` 之后的一版：**WebSocket 不再只有 HTTP/1.1 那一档**（#58）。
+
+- **HTTP/2 上的 WebSocket（RFC 8441）**：浏览器 `new WebSocket()` 在 h2 上走的
+  就是 extended CONNECT。本次把协议层（`:protocol`、`SETTINGS_ENABLE_CONNECT_PROTOCOL`、
+  `uvcpp_h2_ws_connection`）与 webapp 的按路径路由（`app.websocket_connect()`）
+  一起补上，h2 与 h3 共用一张 WS 路由表；处理器拿到的是传输无关的
+  `uvcpp_web_ws_session&`。
+- **HTTP/3 的 WS 封装**：`uvcpp_h3_ws_server` 把「QUIC 连接 → h3 连接 →
+  按流 accept」这段每条应用都要手拼一遍的生命周期收进库里。
+- **h1 那条路不受影响**：`app.websocket()` 的行为与语义一个字都没改。
+
 ## v1.8.5 重点 (Highlights)
 
 `v1.8.4` 的补丁：Windows 7 的 **VS2015 与 MinGW 包改成 `full` 档**（带上 webapp），
