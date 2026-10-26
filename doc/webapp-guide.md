@@ -698,6 +698,32 @@ size_t ws_recycled_session_count() const;    // 单调递增
 - 缺 `Sec-WebSocket-Key` 时框架自己回 **400**（否则连接会哑掉）。
 - **TLS 不需要额外工作**：`enable_ssl()` 一旦生效，WS 自动就是 WSS。
 
+### 10.1 HTTP/2 / HTTP/3 上的 WebSocket（`websocket_connect`，1.8.6 起，#58）
+
+h1 的 `Upgrade` 只管 TCP 那条腿。浏览器在 h2 上用 `new WebSocket()` 走的是
+**extended CONNECT**（RFC 8441：`:method = CONNECT` + `:protocol = websocket`），
+h3 上同理（RFC 9220）。这两条腿用**另一张路由表**：
+
+```cpp
+app.websocket_connect("/chat/:room",
+                      [](uvcpp_web_ws_request& ws, uvcpp_web_ws_session& s) {
+  const std::string room = ws.param("room") ? *ws.param("room") : "";
+  s.on_text([&s, room](const std::string& m) { /* broadcast(room, m); */ });
+  s.on_close([room](ws_close_code, const std::string&) { /* leave(room); */ });
+});
+```
+
+- 处理器拿到的是**传输无关**的 `uvcpp_web_ws_session&`：`send_text` /
+  `send_binary` / `send_ping` / `send_pong` / `close` / `is_open` 与
+  `uvcpp_ws_connection` 同名同义，`transport()` 报 `HVER_20` 或 `HVER_30`。
+  `ws.connection()`（h1 那个具体类型）在这条路上**恒为 `nullptr`**，用 `ws.session()`。
+- 模式语法、优先级与 `app.websocket()` **相同**，但两张表**独立**：同一个路径想
+  在 h1 与 h2/h3 上都服务，就两处各注册一次。
+- 没注册的模式 ⇒ 那条 CONNECT 流回 `501`（客户端可据此回落 h1），**不会**哑掉。
+- 前提：h2 走 `set_http2_enabled(true)`（默认开）；h3 要在 `start()` 之前用
+  `http_server()->set_quic_ssl_context()` + `listen_quic()` 把那条腿开起来。
+- 会话**归框架所有**：`on_close` 之后不要再碰它；不要 `delete`。
+
 ### 升级请求对象（只在本次调用期间有效）
 
 ```cpp
@@ -1542,7 +1568,8 @@ cmake --build build --config Release --target webapp_demo
 | 收上传 | `app.set_upload_dir(...)` + `app.post_upload(...)`（§8） |
 | SSE | `resp.begin_chunked("text/event-stream")` + `write_chunk(...)`（§9） |
 | 收流式请求体 | `app.post_stream(...)` + `req.stream()->on_data/on_end`（§9） |
-| WS 服务端 | `app.websocket(pattern, handler)`（§10） |
+| WS 服务端（h1 `Upgrade`） | `app.websocket(pattern, handler)`（§10） |
+| WS 服务端（h2/h3 extended CONNECT） | `app.websocket_connect(pattern, handler)`（§10.1） |
 | WS 客户端（带重连） | `uvcpp_web_ws_client` + `set_reconnect(rc)`（§11） |
 | HTTPS / WSS | `app.enable_ssl(cert, key)`（§12） |
 | 跑阻塞的活 | `uvcpp_work` + `next` 的副本（§14） |
