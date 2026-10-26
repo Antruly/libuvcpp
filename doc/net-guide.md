@@ -719,7 +719,7 @@ int main() {
 ```
 
 - `recv_start` 的回调里那个 `uvcpp_buf*` 是**栈上的临时量**，负载是克隆出来的，
-  底层读缓冲回调一返回就释放（`src/net/uvcpp_udp_server.cpp:177-201`）。**不要留那个指针。**
+  底层读缓冲回调一返回就释放（`src/net/uvcpp_udp_server.cpp:197-221`）。**不要留那个指针。**
 - `send(ip, port, data, len, cb = nullptr)` 有**同一个 nullptr 陷阱**：省略 `cb` 就是
   同步发送。
 - 客户端侧另有 `recv_wait(out_buf, timeout_ms)` 和 `set_max_read_cache_size()`，
