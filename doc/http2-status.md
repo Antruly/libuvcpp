@@ -174,7 +174,7 @@
 |---|---|
 | **`Upgrade: h2c` 协商** | **不做**，而且这是按标准做的：这条机制在 RFC 7540 §3.2，RFC 9113 §3.1 **把它删掉了**。本库也**不做**协议嗅探（那是猜，不是判）。 |
 | **明文 h2（先验知识 h2c）** | **做**（1.6.7 起）：连接的**头 24 个字节**与 `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` 逐字节相同时按 h2 处理（RFC 9113 §3.4）。两边都由确定的字节决定，没有"猜"这一档。默认**关**，`set_h2c_enabled(true)` 打开；h2 层与传输层本来就不看 TLS，所以这条路与 ALPN 那条并存。 |
-| **RFC 8441（WebSocket over HTTP/2）** | 不做，看到 `:protocol` 伪头一律按未知伪头拒（`uvcpp_h2_session.cpp` 的 `handle_pseudo`）。 |
+| **RFC 8441（WebSocket over HTTP/2）** | **做**（1.8.6 起，#58）：`:protocol` 作为伪头接收（只许配 `CONNECT`，否则 `RST_STREAM(PROTOCOL_ERROR)`），会话宣告 `SETTINGS_ENABLE_CONNECT_PROTOCOL=1`；`submit_request` 支持 extended CONNECT（发送方向保持开着，`submit_data` 接着发），活流用 `set_stream_sink()` 逐块交付、**不受请求体上限约束**。帧层在 `uvcpp_h2_ws_connection`（文本/二进制/PING/PONG/Close/分片，**无掩码**，RFC 8441 §5）。用例：`tests/functional/h2_ws_func.cpp`。 |
 | **HTTP/3** | **不在本页范围内，而且 1.4.1 起它已经落地了。** 那一层在 `src/http3/`（nghttp3 解析，跑在 `src/quic/` 上，并接进了 web 层），与 h2 是两条**不同的传输**：本页只记 h2 的账，h3 的账记在 [`doc/http3-guide.md`](./http3-guide.md)。这里删掉的那句"HTTP/3 本身一个字节都没有"在 1.4.1 里不再成立 —— 顺着 git 历史读到它的人请以新那份为准。 |
 | **SERVER_PUSH** | 既不发也不收：`SETTINGS_ENABLE_PUSH = 0` 在 `init()` 里就宣告了。 |
 | **h2spec** | 不引入。协议一致性靠上面 1.5 那四个用例 + 会话层用例。 |

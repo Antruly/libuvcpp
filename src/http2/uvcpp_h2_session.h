@@ -463,6 +463,21 @@ class UVCPP_API uvcpp_h2_session {
   /// 对端 GOAWAY 里的 `last_stream_id`；没收到过时是 0。
   int32_t peer_goaway_last_stream_id() const;
 
+  /**
+   * @brief 把一条流标记成**活流**（extended CONNECT / WebSocket over h2，#58）。
+   *
+   * 装上之后这条流的 DATA 不再攒进 `request.body`，而是逐块交给 `on_data`；
+   * 也**不受 `H2_DEFAULT_MAX_BODY_BYTES` 约束** —— 活流是长连接，拿请求体上限
+   * 去卡它等于给 WS 会话定一个寿命。流关闭（RST / 双方向收场 / 连接断开）时
+   * `on_end` 恰好一次；`on_data` / `on_end` 传空即摘掉落点。
+   *
+   * 服务端在 `on_request` 里看到 `request.protocol` 非空时调用；客户端侧由
+   * `uvcpp_h2_ws_connection::connect()` 内部调用。
+   */
+  int set_stream_sink(int32_t stream_id,
+                      std::function<void(const char*, size_t)> on_data,
+                      std::function<void()> on_end);
+
   /// 按 id 找流；没有返回 nullptr。
   uvcpp_h2_stream* find_stream(int32_t stream_id);
 

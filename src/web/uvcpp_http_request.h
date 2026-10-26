@@ -49,10 +49,12 @@ class UVCPP_API uvcpp_http_request {
    */
   http_headers  trailers;
   /**
-   * @brief `:protocol`（extended CONNECT，仅 h3；#53）。
+   * @brief `:protocol`（extended CONNECT，h2/h3；#53、#58）。
    *
-   * 非空时 h3 客户端会把 `:method` 钉成 `CONNECT`；服务端在 h3 请求里读到它。
-   * h1/h2 上恒为空（那两条腿没有 extended CONNECT）。
+   * 非空时 h2/h3 客户端会把 `:method` 钉成 `CONNECT`；服务端在那条腿上读到它
+   * （h2 见 `uvcpp_h2_session` 的 `on_request`，h3 见
+   * `uvcpp_h3_connection::callbacks::on_connect_request`）。**h1 上恒为空** ——
+   * 那条腿只有 `Upgrade`，没有 `:protocol`。
    */
   std::string   protocol;
   uvcpp_buf     body;

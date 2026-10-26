@@ -413,8 +413,16 @@ struct uvcpp_h2_session::impl {
       } else {
         s.response.status_code = static_cast<http_status>(st);
       }
+    } else if (n == ":protocol") {
+      // RFC 8441 extended CONNECT（#58）。**合法性在头块收全时判**：`:protocol`
+      // 可以排在 `:method` 之前，这里还读不到它是不是 CONNECT。
+      if (!want_request || v.empty()) {
+        reject(s.stream_id, NGHTTP2_PROTOCOL_ERROR);
+      } else {
+        s.request.protocol = v;
+      }
     } else {
-      // 没见过的伪头一律拒 —— 包括 RFC 8441 的 `:protocol`（本库不做）。
+      // 没见过的伪头一律拒。
       reject(s.stream_id, NGHTTP2_PROTOCOL_ERROR);
     }
   }
@@ -569,6 +577,13 @@ struct uvcpp_h2_session::impl {
     if (frame->hd.type == NGHTTP2_HEADERS) {
       if (s.rejected) return;
       if (frame->headers.cat == NGHTTP2_HCAT_REQUEST) {
+        // `:protocol` 只对 CONNECT 合法（RFC 8441 §4）。两者的到达顺序不定，
+        // 所以判在这里 —— 头块收全的那一刻。
+        if (!s.request.protocol.empty() &&
+            s.request.method != http_method::HTTP_CONNECT) {
+          reject(id, NGHTTP2_PROTOCOL_ERROR);
+          return;
+        }
         // `on_request` 是"头收全了"，`on_request_end` 是"整条请求完了"。
         // 无 body 时两者背靠背，有 body 时后者要等 DATA（或 trailer）。
         if (cbs.on_request) cbs.on_request(*owner, s, end_stream);
@@ -631,6 +646,25 @@ struct uvcpp_h2_session::impl {
     uvcpp_h2_stream& s = it->second;
     if (s.rejected) return;           // 流要没了：欠额随流消失，不再还
 
+    // 活流（extended CONNECT）：DATA 直接交给落点，不攒 body、也不受请求体
+    // 上限约束 —— 那是长连接，不是请求。
+    // 性能约束：没有活流时这里只多一次 `empty()`，普通 h2 DATA 热路不受影响。
+    auto sink = sinks.empty() ? sinks.end() : sinks.find(id);
+    if (sink != sinks.end()) {
+      if (s.paused) {
+        s.paused_owed += len;
+      } else if (nghttp2_session_consume_stream(session, id, len) != 0) {
+        consume_failed = true;
+        return;
+      }
+      // 与 h3 的 `sink_data` 同一条纪律：回调里**不要**销毁适配器本身
+      // （要收场就在 `on_end` 里做，那个回调是拷出来再调的）。
+      if (sink->second.on_data) {
+        sink->second.on_data(reinterpret_cast<const char*>(data), len);
+      }
+      return;
+    }
+
     s.body_bytes += len;
     if (s.body_bytes > H2_DEFAULT_MAX_BODY_BYTES) {
       reject(id, NGHTTP2_ENHANCE_YOUR_CALM);
@@ -660,6 +694,14 @@ struct uvcpp_h2_session::impl {
     auto it = streams.find(id);
     if (it == streams.end()) return;
     if (cbs.on_close) cbs.on_close(*owner, id, error_code);
+    // 活流的落点：`on_end` 恰好一次，然后摘掉（回调里可能销毁适配器）。
+    // 性能约束同 DATA 热路：没有活流时只多一次 `empty()`。
+    auto sink = sinks.empty() ? sinks.end() : sinks.find(id);
+    if (sink != sinks.end()) {
+      std::function<void()> end = sink->second.on_end;
+      sinks.erase(sink);
+      if (end) end();
+    }
     // 回调之后流引用即失效，所以放最后。
     out_bodies.erase(id);
     // 流式那条路的收尾：还在排队的块这辈子都发不出去了，但它们的 `done`
@@ -667,6 +709,13 @@ struct uvcpp_h2_session::impl {
     cancel_stream_out(id, UV_ECANCELED);
     streams.erase(it);
   }
+
+  /// 活流的落点（#58）。见 `set_stream_sink()`。
+  struct stream_sink {
+    std::function<void(const char*, size_t)> on_data;
+    std::function<void()>                   on_end;
+  };
+  std::map<int32_t, stream_sink> sinks;
 
   uvcpp_h2_session* owner = nullptr;
 
@@ -752,10 +801,19 @@ struct uvcpp_h2_session::impl {
                                       size_t length, uint32_t* data_flags,
                                       nghttp2_data_source* source, void* ud) {
     impl* self = self_of(ud);
-    auto* os   = static_cast<out_stream*>(source->ptr);
+    return pull_out_chunks(self, *static_cast<out_stream*>(source->ptr), buf,
+                           length, data_flags);
+  }
+
+  /// 从 @p os 的队首取不超过 @p length 个字节，语义见 `cb_read_stream`。
+  /// 抽出来是因为 extended CONNECT 的请求流要用**同一个队列形状**，但它的
+  /// `out_stream` 在提交请求时还拿不到地址（流号由 nghttp2 分配）。
+  static nghttp2_ssize pull_out_chunks(impl* self, out_stream& os,
+                                       uint8_t* buf, size_t length,
+                                       uint32_t* data_flags) {
     size_t n = 0;
-    while (os->chunks.size() > 0 && n < length) {
-      out_chunk&   c    = os->chunks.front();
+    while (os.chunks.size() > 0 && n < length) {
+      out_chunk&   c    = os.chunks.front();
       const size_t left = c.data.size() - c.offset;
       const size_t take = (left < length - n) ? left : (length - n);
       if (take > 0) {
@@ -764,13 +822,13 @@ struct uvcpp_h2_session::impl {
         n += take;
         // 记账点**必须**跟着字节走：`out_stream::queued_bytes` 是 `submit_data`
         // 那道上界的输入，只增不减的话跑久了会把一条正常的流误拒。
-        os->queued_bytes -= take;
+        os.queued_bytes -= take;
       }
       if (c.offset >= c.data.size()) {
         // 这块整块交出去了。END_STREAM 的那一块发完就到此为止，后面的块
         // （如果有）不该存在 —— `submit_data` 已经挡住了。
         const bool end = c.end_stream;
-        self->retire_chunk(*os, 0);
+        self->retire_chunk(os, 0);
         if (end) {
           *data_flags |= NGHTTP2_DATA_FLAG_EOF;
           break;
@@ -780,10 +838,34 @@ struct uvcpp_h2_session::impl {
       }
     }
     if (n == 0 && (*data_flags & NGHTTP2_DATA_FLAG_EOF) == 0) {
-      os->deferred = true;
+      os.deferred = true;
       return NGHTTP2_ERR_DEFERRED;
     }
     return static_cast<nghttp2_ssize>(n);
+  }
+
+  /// extended CONNECT（RFC 8441）请求流的 data provider（#58）。
+  ///
+  /// 为什么不能复用 `cb_read_body`：提交请求时流号还没分配，而 `out_body`
+  /// 要求 provider 的 `source->ptr` 在**提交那一刻**就有效。这里改成用回调
+  /// **自带的** `stream_id` 去取那条流的队列 —— `submit_request` 提交时
+  /// `source->ptr` 留空。队列只在 `submit_data` 那一侧才有字节，空队时和
+  /// 流式响应一样返回 DEFERRED，发送方向因此保持开着。
+  ///
+  /// 这条 provider 只挂在 extended CONNECT 的请求流上（WebSocket 那种长连接），
+  /// 普通请求仍走 `cb_read_body`，热路径上一个字节都没多。
+  static nghttp2_ssize cb_read_live(nghttp2_session*, int32_t stream_id,
+                                    uint8_t* buf, size_t length,
+                                    uint32_t* data_flags,
+                                    nghttp2_data_source*, void* ud) {
+    impl* self = self_of(ud);
+    auto it = self->out_streams.find(stream_id);
+    if (it == self->out_streams.end()) {
+      // 流已经没了（RST / GOAWAY 之后被 cancel_stream_out 摘掉）。挂回
+      // DEFERRED 而不是返回 0 —— 返回 0 会让 nghttp2 反复重打包一个空帧。
+      return NGHTTP2_ERR_DEFERRED;
+    }
+    return pull_out_chunks(self, it->second, buf, length, data_flags);
   }
 };
 
@@ -856,6 +938,17 @@ int uvcpp_h2_session::init(const callbacks& cbs, size_t max_header_list_size,
   if (initial_window_size != 0) {
     iv.push_back({NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, initial_window_size});
   }
+#if defined(NGHTTP2_VERSION_NUM) && NGHTTP2_VERSION_NUM >= 0x012700
+  // RFC 8441：不宣告这一项，对端**不许**发 extended CONNECT。nghttp2 1.39.0
+  // 才有这个枚举值，更老的版本直接不宣告（那时这条腿发不出去，`submit_request`
+  // 同步返回 `UV_EPROTONOSUPPORT`）。
+  //
+  // 判据是**版本号**而不是 `#ifdef NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL`：
+  // 它在 nghttp2 里是个 `nghttp2_settings_id` 的**枚举值**，不是宏 —— `#ifdef`
+  // 恒假（本仓踩过：宣告没发出去，客户端那条闸永远拒绝，症状是"等 SETTINGS
+  // 等到超时"）。
+  iv.push_back({NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL, 1});
+#endif
   return nghttp2_submit_settings(impl_->session, NGHTTP2_FLAG_NONE, iv.data(),
                                  iv.size());
 }
@@ -1426,7 +1519,25 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   std::vector<nghttp2_nv>  nv;
   std::vector<std::string> names;
 
-  const std::string method(http_method_str(req.method));
+  const bool extended_connect = !req.protocol.empty();
+  // extended CONNECT 的载荷是**流上的帧**（RFC 8441 §4），不是请求体：两者一起
+  // 给等于让调用方以为那些字节会发出去。判在协议闸之前 —— 这是参数错误，
+  // 与对端宣告了什么无关。
+  if (extended_connect && !body.empty()) return UV_EINVAL;
+#if defined(NGHTTP2_VERSION_NUM) && NGHTTP2_VERSION_NUM >= 0x012700
+  if (extended_connect &&
+      nghttp2_session_get_remote_settings(
+          impl_->session, NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL) == 0) {
+    // 对端没宣告 ENABLE_CONNECT_PROTOCOL：发出去就是协议错误（RFC 8441 §3），
+    // 同步拒掉比让对端 RST 更清楚。
+    return UV_EPROTONOSUPPORT;
+  }
+#else
+  if (extended_connect) return UV_EPROTONOSUPPORT;
+#endif
+
+  const std::string method(http_method_str(
+      extended_connect ? http_method::HTTP_CONNECT : req.method));
   const std::string authority = req.get_header("host");
   store.push_back(method);
   names.push_back(":method");
@@ -1441,6 +1552,10 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   names.push_back(":authority");
   store.push_back(req.url.empty() ? std::string("/") : req.url);
   names.push_back(":path");
+  if (extended_connect) {
+    store.push_back(req.protocol);
+    names.push_back(":protocol");
+  }
 
   for (size_t i = 0; i < req.headers.size(); ++i) {
     const http_header& h = req.headers[i];
@@ -1477,7 +1592,15 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   std::unique_ptr<impl::out_body> pending;
   nghttp2_data_provider2          prd;
   const nghttp2_data_provider2*   prd_ptr = nullptr;
-  if (!body.empty()) {
+  if (extended_connect) {
+    // 活流：provider 从**同名流**的待发队列取字节（见 `cb_read_live`）。
+    // 提交这一刻流号还没分配，所以 `source.ptr` 只能留空 —— 它按回调自带的
+    // `stream_id` 找队列。空队时返回 DEFERRED，HEADERS 不带 END_STREAM，
+    // 发送方向因此保持开着，后面的 `submit_data()` 才接得上。
+    prd.source.ptr    = nullptr;
+    prd.read_callback = &impl::cb_read_live;
+    prd_ptr           = &prd;
+  } else if (!body.empty()) {
     pending.reset(new impl::out_body());
     // 请求体是**本层自己的**（按值参数），所以这一次只是把它包进共享句柄，
     // 不是拷贝：`make_shared` 直接移动构造那份 `std::string`。
@@ -1500,6 +1623,19 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
   uvcpp_h2_stream& s = impl_->stream_of(sid);
   s.request          = req;
   s.request.version  = uvcpp_http_version::HVER_20;
+  if (extended_connect) {
+    // 活流：发送方向保持开着（provider 空队列时 DEFERRED，HEADERS 不带
+    // END_STREAM），所以直接从"头已发"那格起步，`submit_data()` 才能用。
+    s.state = h2_stream_state::HEADERS_SENT;
+    // 队列占位。两件事：
+    //  - `cb_read_live` 按流号找它，provider 第一次被叫时要能置 `deferred`；
+    //  - `frame_pending = true`：这条流的 DATA 帧**已经在提交请求时挂上去了**
+    //    （`nghttp2_submit_request2` 收下了 provider）。不置的话 `submit_data`
+    //    会再提一个，nghttp2 直接回 `NGHTTP2_ERR_DATA_EXIST`（-529）—— 症状
+    //    正是"收到的第一帧就发不出去"。
+    impl::out_stream& os = impl_->out_streams[sid];
+    os.frame_pending = true;
+  }
   return sid;
 }
 
@@ -1510,6 +1646,22 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
 int uvcpp_h2_session::submit_rst(int32_t stream_id, uint32_t error_code) {
   if (!impl_->session) return UV_EINVAL;
   impl_->reject(stream_id, error_code);
+  return 0;
+}
+
+int uvcpp_h2_session::set_stream_sink(
+    int32_t stream_id, std::function<void(const char*, size_t)> on_data,
+    std::function<void()> on_end) {
+  if (!impl_->session) return UV_EINVAL;
+  if (impl_->streams.find(stream_id) == impl_->streams.end()) return UV_EINVAL;
+  if (!on_data && !on_end) {
+    impl_->sinks.erase(stream_id);
+    return 0;
+  }
+  impl::stream_sink s;
+  s.on_data = std::move(on_data);
+  s.on_end  = std::move(on_end);
+  impl_->sinks[stream_id] = std::move(s);
   return 0;
 }
 
