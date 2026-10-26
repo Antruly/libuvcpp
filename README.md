@@ -27,12 +27,12 @@ package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
 
 | Platform | Toolchain | Package |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.8.5-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-msvc-x64.zip) · 23.5 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.5-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-msvc-arm64.zip) · 24.4 MB |
-| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.5-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-mingw-x64.zip) · 29.1 MB |
-| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.5-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-mingw-arm64.zip) · 22.3 MB |
-| Linux x64 | GCC | [libuvcpp-1.8.5-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-linux-x64.zip) · 26.7 MB |
-| Linux arm64 | GCC | [libuvcpp-1.8.5-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.5/libuvcpp-1.8.5-linux-arm64.zip) · 26.9 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.8.6-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.6/libuvcpp-1.8.6-msvc-x64.zip) · 24.0 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.8.6-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.6/libuvcpp-1.8.6-msvc-arm64.zip) · 24.9 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.8.6-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.6/libuvcpp-1.8.6-mingw-x64.zip) · 29.8 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.8.6-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.6/libuvcpp-1.8.6-mingw-arm64.zip) · 22.7 MB |
+| Linux x64 | GCC | [libuvcpp-1.8.6-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.6/libuvcpp-1.8.6-linux-x64.zip) · 27.3 MB |
+| Linux arm64 | GCC | [libuvcpp-1.8.6-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.8.6/libuvcpp-1.8.6-linux-arm64.zip) · 27.5 MB |
 
 Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
 What a package contains, and why it is laid out that way:
