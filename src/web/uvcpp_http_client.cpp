@@ -383,12 +383,20 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
   }
 #endif
 
-  bool done = false;
-  int result = 0;
-
-  int init_rc = tcp_->connect(host, port, [&done, &result](int status) {
-    result = status;
-    done = true;
+  // The connect callback can fire *after* this function returns: on timeout
+  // the caller destroys the client, whose destructor pumps the loop to close
+  // the still-pending TCP handle. Capturing stack references here made that
+  // late callback write into a dead frame (SIGSEGV in
+  // ~uvcpp_http_client when the directory is unreachable). Keep the state on
+  // the heap so a late callback is harmless.
+  struct connect_state {
+    bool done = false;
+    int result = 0;
+  };
+  const auto state = std::make_shared<connect_state>();
+  int init_rc = tcp_->connect(host, port, [state](int status) {
+    state->result = status;
+    state->done = true;
   });
   if (init_rc != 0) {
     // 连接未能发起（例如主机名解析失败）——立即返回，避免空等超时
@@ -399,7 +407,7 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
   auto start = std::chrono::steady_clock::now();
   const std::chrono::steady_clock::time_point connect_deadline =
       start + std::chrono::milliseconds(timeout_ms);
-  while (!done) {
+  while (!state->done) {
     loop_->run(UV_RUN_NOWAIT);
     if (std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start)
@@ -409,6 +417,7 @@ int uvcpp_http_client::connect_wait(const char* host, int port,
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+  const int result = state->result;
 
   if (result == 0) {
     set_status(HTTP_CLIENT_CONNECTED);
