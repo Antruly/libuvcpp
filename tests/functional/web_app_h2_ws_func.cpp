@@ -35,6 +35,7 @@
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_ws.h>
 
+#include "loop_drain.h"
 #include "wait_util.h"
 
 using namespace uvcpp;
@@ -121,6 +122,9 @@ void test_app_h2_ws() {
   if (port <= 0) return;
 
   uvcpp_loop loop;
+  // 句柄都在本对象后面声明 ⇒ 析构顺序「句柄 → 本守卫 → 循环」，
+  // 补上最后那一次把关闭回调拨完的 `uv_run`（否则整个循环对象漏掉）。
+  uvcpp_test::loop_drain drain(&loop);
   uvcpp_tcp_client client(&loop);
   const int crc = client.connect_wait("127.0.0.1", port, 3000);
   check(crc == 0, "客户端连上（rc=" + std::to_string(crc) + "）");

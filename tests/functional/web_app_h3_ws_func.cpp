@@ -33,6 +33,7 @@
 #include <webapp/uvcpp_web_app.h>
 #include <webapp/uvcpp_web_ws.h>
 
+#include "loop_drain.h"
 #include "wait_util.h"
 
 using namespace uvcpp;
@@ -123,6 +124,9 @@ void test_app_h3_ws() {
   }
 
   uvcpp_loop loop;
+  // 句柄都在本对象后面声明 ⇒ 析构顺序「句柄 → 本守卫 → 循环」，
+  // 补上最后那一次把关闭回调拨完的 `uv_run`（否则整个循环对象漏掉）。
+  uvcpp_test::loop_drain drain(&loop);
   uvcpp_ssl_context client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3);
   client_ctx.set_verify_mode(tls_verify_mode::NONE);
 

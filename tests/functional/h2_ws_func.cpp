@@ -42,6 +42,7 @@
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_http_response.h>
 
+#include "loop_drain.h"
 #include "wait_util.h"
 
 using namespace uvcpp;
@@ -104,6 +105,9 @@ void test_session_guards() {
 
 void test_ws() {
   uvcpp_loop loop;
+  // 句柄都在本对象后面声明 ⇒ 析构顺序「句柄 → 本守卫 → 循环」，
+  // 补上最后那一次把关闭回调拨完的 `uv_run`（否则整个循环对象漏掉）。
+  uvcpp_test::loop_drain drain(&loop);
 
   uvcpp_tcp_server server(&loop);
   check(server.bind("127.0.0.1", 0) == 0, "server bind");
