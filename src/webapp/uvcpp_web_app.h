@@ -323,6 +323,12 @@ using uvcpp_web_raw_data_claim = std::function<uvcpp_web_raw_action(
 // App
 // =========================================================================
 
+// extended CONNECT 的分派入口（#58）。**无条件**前向声明：`web/uvcpp_http_server.h`
+// 里那两条是在各自模块开关里的，而本头的那两个成员函数在**两个模块都关**的
+// 配置下也要声明出来（实现里整段是空操作）—— 少了这两句，那个默认配置直接编不过。
+class uvcpp_h2_connection;
+class uvcpp_h3_connection;
+
 /**
  * @brief Web 应用。
  *
@@ -910,6 +916,43 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                            const uvcpp_web_ws_handler& handler);
 
   /**
+   * @brief 注册一条 **extended CONNECT** 上的 WebSocket 路由（RFC 8441 / 9220，
+   *        #58）—— h2 与 h3 共用这一张表。
+   *
+   * 与 @ref websocket 的分工：
+   *
+   * - @ref websocket 是 **h1 的 `Upgrade`**（RFC 6455 §4），处理器拿到的会话是
+   *   `uvcpp_ws_connection*`；
+   * - 本函数是 **h2/h3 的 extended CONNECT**（`:method = CONNECT` +
+   *   `:protocol = websocket`），处理器拿到的会话是**传输无关**的
+   *   `uvcpp_web_ws_session&` —— 浏览器 `new WebSocket()` 在 h2 上走的就是这条。
+   *
+   * ```cpp
+   * app.websocket_connect("/chat/:room",
+   *                       [](uvcpp_web_ws_request& ws, uvcpp_web_ws_session& s) {
+   *   const std::string room = ws.param("room") ? *ws.param("room") : "";
+   *   s.on_text([&s, room](const std::string& m) { broadcast(room, m); });
+   *   s.on_close([room](ws_close_code, const std::string&) { leave(room); });
+   * });
+   * ```
+   *
+   * 模式语法、优先级与 @ref websocket **完全相同**，但两张表**独立**：同一个
+   * 模式可以同时在两张表里，h1 与 h2/h3 各走各的。想让三种传输都服务同一个
+   * 路径，就两处都注册。
+   *
+   * **没注册的模式**：那条 CONNECT 流回 `501 Not Implemented`（浏览器据此回落
+   * 到 h1 的 `Upgrade`），不会静默挂住。
+   *
+   * 前提：h2 要走 `set_http2_enabled(true)`（默认开，ALPN 协商得成才有 h2）；
+   * h3 要在 `start()` 之前用 `http_server()->set_quic_ssl_context()` +
+   * `listen_quic()` 把那条腿开起来（见 `doc/http3-guide.md`）。
+   *
+   * @note 注册必须在 `start()` 之前完成（与 HTTP 路由同一条约定）。
+   */
+  uvcpp_web_app& websocket_connect(const std::string& pattern,
+                                   const uvcpp_web_ws_ext_handler& handler);
+
+  /**
    * @brief WS 服务对象（配置逃生口：压缩策略、会话数……）。
    *
    * 没调过 `enable_wss()` / `websocket()` 时返回 nullptr。
@@ -1359,6 +1402,27 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
                    uvcpp_tcp_client* client);
 
   /**
+   * @brief 把两条 extended-connect 钩子装到 HTTP 层（**幂等**，#58）。
+   *
+   * 由 `websocket_connect()` 调用；装的是"按 `ws_ext_router_` 匹配，命中就
+   * 建会话并跑处理器，没命中就返回 false（HTTP 层回 501）"。
+   */
+  void enable_ws_ext();
+
+  /**
+   * @brief extended CONNECT 的按路径分派（h2/h3 共用）。
+   *
+   * @return true = 已接管（会话已建立、处理器已跑）。false = 没命中路由，
+   *         调用方按"不支持"处置（回 501）。
+   */
+  bool dispatch_ws_connect(const uvcpp_http_request& req,
+                           uvcpp_h2_connection* h2, int32_t h2_stream_id,
+                           uvcpp_h3_connection* h3);
+
+  /** @brief 会话收尾后的延迟回收（`post()` 到下一轮，见 `ws_ext_sessions_`）。 */
+  void reap_ws_ext(uint64_t id);
+
+  /**
    * @brief HTTP 层的流式认领钩子：命中 `stream_router_` 就认领这条消息。
    *
    * 在 headers 解析完、**body 尚未交付**时被调用。返回空 handler = 不认领，
@@ -1560,6 +1624,31 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   uvcpp_web_router ws_router_;
   std::map<std::string, uvcpp_web_ws_handler> ws_handlers_;
+
+  /**
+   * @brief **extended CONNECT**（h2/h3）的 WS 路由表（#58）。
+   *
+   * 与 `ws_router_` 分开是**故意的**：两张表的处理器签名不同（一个是
+   * `uvcpp_ws_connection*`，一个是传输无关的 `uvcpp_web_ws_session&`），
+   * 而同一个模式可以同时在两张表里 —— h1 与 h2/h3 各走各的。
+   */
+  uvcpp_web_router ws_ext_router_;
+  std::map<std::string, uvcpp_web_ws_ext_handler> ws_ext_handlers_;
+
+  /**
+   * @brief 活着的 extended CONNECT 会话，键是自增 id。
+   *
+   * **回收是延迟的**（`post()` 到下一轮）：会话的 `on_close` 是从 ws 连接的
+   * 回调里同步跑起来的，在那里 `delete` 会话等于把正在执行的连接回调连同
+   * `this` 一起拆掉。id 而不是指针做键，是因为回收动作可能晚于会话对象的销毁。
+   */
+  std::map<uint64_t, std::unique_ptr<uvcpp_web_ws_session> > ws_ext_sessions_;
+  /// 护 @ref ws_ext_sessions_：多循环下不同连接的回调跑在不同线程上。
+  mutable std::mutex ws_ext_sessions_mu_;
+  /// 会话 id 自增。多循环下也会并发拿号。
+  std::atomic<uint64_t> next_ws_ext_id_{0};
+  /// 两条 extended-connect 钩子只装一次（`enable_ws_ext()` 幂等）。
+  bool ws_ext_hooks_installed_ = false;
 
   /**
    * @brief 流式路由表 —— 与 `router_` 是**两张独立的表**。

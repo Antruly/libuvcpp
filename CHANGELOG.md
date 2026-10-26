@@ -471,6 +471,15 @@
 
 ### HTTP/3（web 层）
 
+- **`uvcpp_h3_ws_server` 便捷封装**（`1.8.6`，#58）：把 "QUIC 连接 →
+  `uvcpp_h3_connection` → `on_connect_request` → `uvcpp_h3_ws_connection::accept`"
+  这段每条应用都要手拼一遍的生命周期收进库里 —— 每条连接一个 h3 连接、按流号
+  登记 ws 会话、断开时**先销毁会话再销毁连接**、非 websocket 的请求回 404。
+- **webapp 的 extended CONNECT 路由**（`1.8.6`，#58）：
+  `app.websocket_connect(pattern, handler)` 让 h2 与 h3 共用一张 WS 路由表，
+  处理器拿到传输无关的 `uvcpp_web_ws_session&`（发送/回调与
+  `uvcpp_ws_connection` 同名同义）；`app.websocket()` 仍是 h1 的 `Upgrade`。
+  `uvcpp_http_server` 的 `set_h3_extended_connect_handler()` 是它的接线点。
 - **extended CONNECT 的协议层**（`1.8.3-dev`，#53）：打开
   `enable_connect_protocol`，`h3_request::protocol` / web 层
   `uvcpp_http_request::protocol`；客户端 `send_request()` 会把 `:method` 钉成
@@ -587,6 +596,17 @@
 实现现状 —— 强制了什么、默认值是什么、哪些是刻意不支持的 —— 见
 [`doc/http2-status.md`](doc/http2-status.md)。
 
+- **RFC 8441 extended CONNECT 与 WebSocket over h2**（`1.8.6`，#58）：
+  `uvcpp_h2_session` 接收 `:protocol` 伪头（只许配 `CONNECT`，否则
+  `RST_STREAM(PROTOCOL_ERROR)`）、宣告 `SETTINGS_ENABLE_CONNECT_PROTOCOL=1`
+  （判据是 `NGHTTP2_VERSION_NUM` —— 那个常量在 nghttp2 里是**枚举值**，
+  `#ifdef` 恒假）、`submit_request()` 支持 extended CONNECT（发送方向用
+  `cb_read_live` provider 保持开着，`submit_data()` 接着发）、活流用
+  `set_stream_sink()` 逐块交付且**不受请求体上限约束**。帧层
+  `uvcpp_h2_ws_connection`（文本/二进制/PING/PONG/Close/分片，**无掩码**）。
+  `uvcpp_http_server` 新增 `set_h2_extended_connect_handler()`（h3 同名）；
+  webapp 侧 `app.websocket_connect()` 按路径分派、h2 与 h3 共用一张表，
+  没注册的模式回 `501`。普通请求的 DATA 热路径只多一次 `sinks.empty()`。
 - **可选的逐帧事件回调**（`1.8.2`，#52）：`uvcpp_h2_session::callbacks::on_frame`
   与 `uvcpp_http_client::set_h2_frame_callback()`，覆盖 HEADERS / DATA /
   RST_STREAM / GOAWAY / WINDOW_UPDATE（不携带 payload）；GOAWAY 字段与

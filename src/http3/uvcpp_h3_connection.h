@@ -394,6 +394,18 @@ class UVCPP_API uvcpp_h3_connection {
   /// 底层连接已经结束（`on_disconnect` 之前就为真）。
   bool closed() const { return closed_; }
 
+  /**
+   * @brief 存活令牌：本对象析构之后过期（`lock()` 出来是空，或指向 1）。
+   *
+   * 给**不拥有本对象**、却持有 `uvcpp_h3_connection*` 的外层会话用 ——
+   * `uvcpp_h3_ws_connection`（RFC 9220）就是这一类：它析构时要回头摘流上的
+   * 落点，而"连接比它先没"是合法时序。与
+   * `uvcpp_h2_connection::life_token()` 同形，用法也一样。
+   */
+  std::weak_ptr<const char> life_token() {
+    return std::weak_ptr<const char>(alive_token());
+  }
+
   /// 协商出来的 ALPN（握手完成前是空串）。
   std::string alpn_selected() const { return alpn_; }
 

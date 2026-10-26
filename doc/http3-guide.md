@@ -571,8 +571,10 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   `uvcpp_h3_ws_connection::accept()`（服务端，在 `on_connect_request` 里）/
   `connect()`（客户端）在这条 CONNECT 流上跑 RFC 6455 帧（文本/二进制/
   PING/PONG/Close/分片，**无掩码**，符合 RFC 8441 §5）。**没有
-  permessage-deflate**（扩展协商留到后续）；`app.websocket()` 仍走 h1 的
-  `Upgrade`，没有自动接到 h3。
+  permessage-deflate**（扩展协商留到后续）。`app.websocket()` 仍走 h1 的
+  `Upgrade`；**webapp 那条腿用 `app.websocket_connect()`**（1.8.6 起，#58）：
+  它按路径分派 extended CONNECT，h2 与 h3 共用一张表，处理器拿到的是传输无关的
+  `uvcpp_web_ws_session&`。没注册的模式回 `501`。
 - **QPACK 的部分可观测已支持（`1.8.3-dev` 起，#53）**：对端的 SETTINGS 走
   `callbacks::on_remote_settings` / `remote_settings()`（`qpack_max_dtable_capacity`、
   `qpack_blocked_streams`、`enable_connect_protocol`、`h3_datagram`）；

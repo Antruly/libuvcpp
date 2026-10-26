@@ -39,15 +39,20 @@
 #ifndef SRC_WEBAPP_UVCPP_WEB_WS_H
 #define SRC_WEBAPP_UVCPP_WEB_WS_H
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 
 #include <uvcpp/uvcpp_export.h>
 #include <web/uvcpp_http_request.h>
 #include <web/uvcpp_ws_connection.h>
+#include <web/uvcpp_ws_frame.h>
 #include <webapp/uvcpp_web_request.h>
 
 namespace uvcpp {
+
+class uvcpp_web_ws_session;
 
 /**
  * @brief 一次 WebSocket 升级请求的应用层视图。
@@ -91,6 +96,20 @@ class UVCPP_API uvcpp_web_ws_request {
    * 单独一步而不是构造函数参数：会话是异步建起来的，构造本对象时它还不存在。
    */
   void bind_connection(uvcpp_ws_connection* conn) { conn_ = conn; }
+
+  /**
+   * @brief 传输无关的会话视图（extended CONNECT：h2/h3，#58）。
+   *
+   * **h1 的 `Upgrade` 那条路恒为 `nullptr`** —— 那种会话用 @ref connection()。
+   * 要写一份对三种传输都成立的处理器，就用 `session()`；它的发送/回调接口与
+   * `uvcpp_ws_connection` 同名同义。
+   *
+   * 生命周期与 `connection()` 一样：**归框架所有**，`on_close` 之后不要再用。
+   */
+  uvcpp_web_ws_session* session() const { return sess_; }
+
+  /** @brief 由框架绑定。用户不要碰。 */
+  void bind_session(uvcpp_web_ws_session* s) { sess_ = s; }
 
   /** @brief 命中的路由模式（如 `/chat/:room`）。未设置时为空串。 */
   const std::string& route() const { return route_; }
@@ -154,8 +173,59 @@ class UVCPP_API uvcpp_web_ws_request {
   /** 从原始升级请求接管过来的应用层视图。 */
   uvcpp_web_request req_;
 
-  uvcpp_ws_connection* conn_;
+  uvcpp_ws_connection*     conn_ = nullptr;
+  uvcpp_web_ws_session*    sess_ = nullptr;
   std::string route_;
+};
+
+/**
+ * @brief **传输无关**的 WebSocket 会话（extended CONNECT 用；#58）。
+ *
+ * 三种传输里的后两种 —— h2（RFC 8441）与 h3（RFC 9220）—— 走的是同一套
+ * 帧格式，只是承载在流上；这一层把它们收成一个接口，处理器写一次就能同时
+ * 服务两条腿。h1 的 `Upgrade` 会话仍然是 `uvcpp_ws_connection`（它的 API 与
+ * 本接口同名同义，只是没有虚表）。
+ *
+ * 用法（与 `uvcpp_ws_connection` 一致）：
+ * @code
+ *   app.websocket_connect("/chat/:room", [](uvcpp_web_ws_request& ws_req,
+ *                                           uvcpp_web_ws_session& s) {
+ *     s.on_text([&s](const std::string& msg) { s.send_text(msg.data(), msg.size()); });
+ *   });
+ * @endcode
+ *
+ * **生命周期**：对象归框架所有，只在处理器调用期间与之后的有效期内可用 ——
+ * `on_close` 回调里是最后一次能碰它的地方。
+ */
+class UVCPP_API uvcpp_web_ws_session {
+ public:
+  virtual ~uvcpp_web_ws_session();
+
+  uvcpp_web_ws_session(const uvcpp_web_ws_session&)            = delete;
+  uvcpp_web_ws_session& operator=(const uvcpp_web_ws_session&) = delete;
+
+  /** @brief 这条会话跑在哪条传输上：`HVER_20` 或 `HVER_30`。 */
+  virtual uvcpp_http_version transport() const = 0;
+
+  virtual int send_text(const char* data, size_t len)      = 0;
+  virtual int send_binary(const void* data, size_t len)    = 0;
+  virtual int send_ping(const void* data = nullptr, size_t len = 0) = 0;
+  virtual int send_pong(const void* data = nullptr, size_t len = 0) = 0;
+  /** @brief 发 Close 帧并结束发送方向。 */
+  virtual int close(ws_close_code code = ws_close_code::NORMAL,
+                    const std::string& reason = std::string()) = 0;
+  virtual bool is_open() const = 0;
+
+  virtual void on_text(std::function<void(const std::string&)> cb)             = 0;
+  virtual void on_binary(std::function<void(const uint8_t*, size_t)> cb)       = 0;
+  virtual void on_ping(std::function<void(const uint8_t*, size_t)> cb)         = 0;
+  virtual void on_pong(std::function<void(const uint8_t*, size_t)> cb)         = 0;
+  virtual void on_close(
+      std::function<void(ws_close_code, const std::string&)> cb) = 0;
+  virtual void on_error(std::function<void(int, const std::string&)> cb) = 0;
+
+ protected:
+  uvcpp_web_ws_session() {}
 };
 
 /**
@@ -165,6 +235,16 @@ class UVCPP_API uvcpp_web_ws_request {
  * 请求不可以）。
  */
 using uvcpp_web_ws_handler = std::function<void(uvcpp_web_ws_request&)>;
+
+/**
+ * @brief **extended CONNECT** 上 WebSocket 处理器的签名（#58）。
+ *
+ * 与 @ref uvcpp_web_ws_handler 的区别只有第二个参数：给的是传输无关的
+ * @ref uvcpp_web_ws_session，而不是 h1 那条腿的 `uvcpp_ws_connection*`。
+ * 由 `uvcpp_web_app::websocket_connect()` 注册。
+ */
+using uvcpp_web_ws_ext_handler =
+    std::function<void(uvcpp_web_ws_request&, uvcpp_web_ws_session&)>;
 
 }  // namespace uvcpp
 

@@ -192,6 +192,26 @@ class UVCPP_API uvcpp_h2_connection {
 
   uvcpp_h2_session& session() { return *session_; }
   uvcpp_tcp_client* client() const { return client_; }
+
+  /**
+   * @brief 存活令牌：本对象析构之后过期（`lock()` 出来是空，或指向 1）。
+   *
+   * 给**不拥有本对象**、却持有 `uvcpp_h2_connection*` 的外层会话用 ——
+   * `uvcpp_h2_ws_connection`（RFC 8441）就是这一类：它会在析构时回头摘流上的
+   * 落点，而"连接比它先没"是完全合法的时序（应用把连接销毁了，会话还没轮到）。
+   * 判据只能来自连接自己，所以把内部那枚令牌摊出来：
+   *
+   * @code
+   *   std::shared_ptr<const char> life = h2.life_token().lock();
+   *   if (life && *life == 0) { 可以安全地碰 h2 }
+   * @endcode
+   *
+   * 与 `uvcpp_h3_connection::life_token()` 同形。
+   */
+  std::weak_ptr<const char> life_token() {
+    return std::weak_ptr<const char>(alive_token());
+  }
+
   /// 底层连接已经结束。
   bool closed() const { return closed_; }
   /// 正在关（等最后一笔写出去）。

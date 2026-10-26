@@ -96,8 +96,13 @@ class UVCPP_API uvcpp_h2_ws_connection {
   int  send_frame(const uvcpp_ws_frame& f);
   void fail(int code, const std::string& why);
 
-  uvcpp_h2_connection* h2_ = nullptr;
-  int32_t              sid_ = -1;
+  /// h2 连接还在（与 `uvcpp_h2_connection::life_token()` 同一枚令牌）。
+  bool linked() const;
+
+  uvcpp_h2_connection*      h2_ = nullptr;
+  /// 连接比本对象先销毁也合法：任何回头碰它的地方都先问这一枚令牌。
+  std::weak_ptr<const char> life_;
+  int32_t                   sid_ = -1;
   callbacks            cbs_;
   uvcpp_ws_parser      parser_;
   bool                 closed_ = false;

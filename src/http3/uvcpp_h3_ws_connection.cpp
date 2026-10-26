@@ -10,6 +10,8 @@
 #include <cstring>
 #include <utility>
 
+#include <web/uvcpp_http_request.h>
+
 namespace uvcpp {
 
 namespace {
@@ -34,7 +36,10 @@ h3_header make_regular(const std::string& name, const std::string& value) {
 
 uvcpp_h3_ws_connection::uvcpp_h3_ws_connection(uvcpp_h3_connection* h3,
                                                int64_t sid, callbacks cbs)
-    : h3_(h3), sid_(sid), cbs_(std::move(cbs)) {
+    : h3_(h3),
+      life_(h3->life_token()),
+      sid_(sid),
+      cbs_(std::move(cbs)) {
   parser_.set_on_frame(
       [this](const uvcpp_ws_frame& f) { on_frame(f); });
   parser_.set_on_error([this](int code, const char* reason) {
@@ -42,11 +47,17 @@ uvcpp_h3_ws_connection::uvcpp_h3_ws_connection(uvcpp_h3_connection* h3,
   });
 }
 
+bool uvcpp_h3_ws_connection::linked() const {
+  const std::shared_ptr<const char> life = life_.lock();
+  return h3_ != nullptr && life && *life == 0;
+}
+
 uvcpp_h3_ws_connection::~uvcpp_h3_ws_connection() {
-  if (h3_ != nullptr) {
-    // 摘掉流上的 sink：h3 连接里不能留一个指向已析构对象的 this。
-    h3_->set_stream_sink(sid_, nullptr, nullptr);
-  }
+  // 摘掉流上的 sink：h3 连接里不能留一个指向已析构对象的 this。
+  //
+  // **先问令牌**：连接比本对象先销毁是合法时序（webapp 在连接收尾之后才回收
+  // 会话），那时 `h3_` 已经悬垂 —— 唯一安全的判据只有连接自己那枚令牌。
+  if (linked()) h3_->set_stream_sink(sid_, nullptr, nullptr);
 }
 
 std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::accept(
@@ -75,6 +86,29 @@ std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::accept(
   return ws;
 }
 
+std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::accept(
+    uvcpp_h3_connection& h3, int64_t stream_id, const uvcpp_http_request& req,
+    callbacks cbs) {
+  if (req.protocol != "websocket" || stream_id < 0) return nullptr;
+
+  std::vector<h3_header> hs;
+  hs.push_back(make_status(200));
+  // 回显子协议（如果请求里提了）。与上面那个重载逐字相同 —— 两边的头类型
+  // 不同（`h3_header` / `http_header`），但取的就是那一个名字与值。
+  const std::string proto = http_get_header(req.headers, "sec-websocket-protocol");
+  if (!proto.empty()) hs.push_back(make_regular("sec-websocket-protocol", proto));
+  const int rc = h3.send_stream_response(stream_id, hs);
+  if (rc != 0) return nullptr;
+
+  std::unique_ptr<uvcpp_h3_ws_connection> ws(
+      new uvcpp_h3_ws_connection(&h3, stream_id, std::move(cbs)));
+  uvcpp_h3_ws_connection* raw = ws.get();
+  h3.set_stream_sink(
+      stream_id, [raw](const char* d, size_t n) { raw->on_data(d, n); },
+      [raw]() { raw->on_end(); });
+  return ws;
+}
+
 std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::connect(
     uvcpp_h3_connection& h3, const std::string& path,
     const std::string& authority, callbacks cbs) {
@@ -96,7 +130,7 @@ std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::connect(
 }
 
 int uvcpp_h3_ws_connection::send_frame(const uvcpp_ws_frame& f) {
-  if (closed_ || h3_ == nullptr) return -1;
+  if (closed_ || !linked()) return -1;
   // RFC 8441 §5：h2/h3 上的 WebSocket 帧**不需要掩码**（两个方向都不掩）。
   uvcpp_ws_frame out = f;
   out.masked = false;
@@ -143,7 +177,7 @@ int uvcpp_h3_ws_connection::send_pong(const void* data, size_t len) {
 
 int uvcpp_h3_ws_connection::close(ws_close_code code,
                                   const std::string& reason) {
-  if (closed_ || h3_ == nullptr) return -1;
+  if (closed_ || !linked()) return -1;
   uvcpp_ws_frame f;
   f.opcode = ws_opcode::CLOSE;
   f.fin    = true;
@@ -207,7 +241,7 @@ void uvcpp_h3_ws_connection::on_frame(const uvcpp_ws_frame& frame) {
           reply.set_close_payload(code, reason);
           close_sent_ = true;
           send_frame(reply);
-          h3_->end_stream_data(sid_);
+          if (linked()) h3_->end_stream_data(sid_);
         }
         closed_ = true;
         if (cbs_.on_close) cbs_.on_close(code, reason);
@@ -265,7 +299,7 @@ void uvcpp_h3_ws_connection::fail(int code, const std::string& why) {
   f.set_close_payload(static_cast<ws_close_code>(code), why);
   close_sent_ = true;
   send_frame(f);
-  if (h3_ != nullptr) h3_->end_stream_data(sid_);
+  if (linked()) h3_->end_stream_data(sid_);
   closed_ = true;
 }
 

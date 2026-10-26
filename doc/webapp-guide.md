@@ -1052,8 +1052,15 @@ h2 会话的参数在 `uvcpp_h2_session::init()` 上是带默认值的形参，*
   逐字节相同就按 h2（RFC 9113 §3.4）。**默认关**，因为它会让明文端口不再是纯
   HTTP/1.1；打开之后同一个端口两种协议并存，判据是那 24 个字节，不是猜。
   没有 TLS 就没有 ALPN —— 这条路的判据本来也不是 ALPN。
-- **不做 RFC 8441**（WebSocket over h2）：不宣告 `SETTINGS_ENABLE_CONNECT_PROTOCOL`，
-  收到 `:protocol` 一律拒。`app.websocket()` 继续走 HTTP/1.1 的 `Upgrade`。
+- **RFC 8441（WebSocket over h2）与 RFC 9220（WebSocket over h3）**（1.8.6 起，#58）：
+  `app.websocket_connect(pattern, handler)` 把 extended CONNECT
+  （`:method = CONNECT` + `:protocol = websocket`）按路径分派到处理器，h2 与 h3
+  **共用一张表**；处理器拿到的是传输无关的 `uvcpp_web_ws_session&`（发送/回调
+  接口与 `uvcpp_ws_connection` 同名同义）。`app.websocket()` 仍是 **h1 的
+  `Upgrade`**，两张表独立 —— 同一个模式想在三种传输上都服务，就两处都注册。
+  没注册的 extended CONNECT 回 `501`（浏览器据此回落 h1），不会静默挂住。
+  帧层在 `uvcpp_h2_ws_connection` / `uvcpp_h3_ws_connection`，**无掩码**、
+  无 permessage-deflate。
 - **不做 SERVER_PUSH**（RFC 9113 已废弃它）：我们宣告 `SETTINGS_ENABLE_PUSH=0` 且从不发
   `PUSH_PROMISE`。
 - **框架没有为 HTTP/3 加开关**（但它已经能用）。1.4.1 给 `uvcpp_http_server` /

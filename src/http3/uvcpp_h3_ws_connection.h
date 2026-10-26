@@ -37,6 +37,8 @@
 
 namespace uvcpp {
 
+class uvcpp_http_request;
+
 /**
  * @brief 一条 h3 上的 WebSocket 会话。
  *
@@ -68,6 +70,18 @@ class UVCPP_API uvcpp_h3_ws_connection {
       uvcpp_h3_connection& h3, const h3_request& req, callbacks cbs);
 
   /**
+   * @brief 同上，但请求来自**web 层**的 `uvcpp_http_request`（#58）。
+   *
+   * web 层（`uvcpp_web_app::websocket_connect()`）拿到的是它自己的请求对象，
+   * 而不是 `h3_request`；只为了转一手就把 `h3_request` 摊进 webapp 的公开面
+   * 不值得。本重载只读 `req.protocol` / `req.headers` 这两样 —— 与上面那个
+   * 逐字相同。
+   */
+  static std::unique_ptr<uvcpp_h3_ws_connection> accept(
+      uvcpp_h3_connection& h3, int64_t stream_id, const uvcpp_http_request& req,
+      callbacks cbs);
+
+  /**
    * @brief 客户端：开一条 extended CONNECT 并开始收帧。
    *
    * 不等 2xx：帧可以立刻发，服务端拒绝时对流做 RST。
@@ -96,8 +110,13 @@ class UVCPP_API uvcpp_h3_ws_connection {
   int  send_frame(const uvcpp_ws_frame& f);
   void fail(int code, const std::string& why);
 
-  uvcpp_h3_connection* h3_ = nullptr;
-  int64_t              sid_ = -1;
+  /// h3 连接还在（与 `uvcpp_h3_connection::life_token()` 同一枚令牌）。
+  bool linked() const;
+
+  uvcpp_h3_connection*      h3_ = nullptr;
+  /// 连接比本对象先销毁也合法：任何回头碰它的地方都先问这一枚令牌。
+  std::weak_ptr<const char> life_;
+  int64_t                   sid_ = -1;
   callbacks            cbs_;
   uvcpp_ws_parser      parser_;
   bool                 closed_ = false;

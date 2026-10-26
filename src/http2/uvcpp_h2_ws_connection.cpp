@@ -18,18 +18,27 @@ namespace uvcpp {
 
 uvcpp_h2_ws_connection::uvcpp_h2_ws_connection(uvcpp_h2_connection* h2,
                                                int32_t sid, callbacks cbs)
-    : h2_(h2), sid_(sid), cbs_(std::move(cbs)) {
+    : h2_(h2),
+      life_(h2->life_token()),
+      sid_(sid),
+      cbs_(std::move(cbs)) {
   parser_.set_on_frame([this](const uvcpp_ws_frame& f) { on_frame(f); });
   parser_.set_on_error([this](int code, const char* reason) {
     fail(code, reason != nullptr ? std::string(reason) : std::string());
   });
 }
 
+bool uvcpp_h2_ws_connection::linked() const {
+  const std::shared_ptr<const char> life = life_.lock();
+  return h2_ != nullptr && life && *life == 0;
+}
+
 uvcpp_h2_ws_connection::~uvcpp_h2_ws_connection() {
-  if (h2_ != nullptr) {
-    // 摘掉流上的落点：h2 会话里不能留一个指向已析构对象的 this。
-    h2_->session().set_stream_sink(sid_, nullptr, nullptr);
-  }
+  // 摘掉流上的落点：h2 会话里不能留一个指向已析构对象的 this。
+  //
+  // **先问令牌**：连接比本对象先销毁是合法时序（应用先拆了连接，会话晚一步
+  // 才被回收）。那时 `h2_` 已经悬垂，唯一安全的判据只有连接自己那枚令牌。
+  if (linked()) h2_->session().set_stream_sink(sid_, nullptr, nullptr);
 }
 
 std::unique_ptr<uvcpp_h2_ws_connection> uvcpp_h2_ws_connection::accept(
@@ -81,7 +90,7 @@ std::unique_ptr<uvcpp_h2_ws_connection> uvcpp_h2_ws_connection::connect(
 }
 
 int uvcpp_h2_ws_connection::send_frame(const uvcpp_ws_frame& f) {
-  if (closed_ || h2_ == nullptr) return -1;
+  if (closed_ || !linked()) return -1;
   // RFC 8441 §5：h2 上的 WebSocket 帧**不需要掩码**（两个方向都不掩）。
   uvcpp_ws_frame out = f;
   out.masked = false;
@@ -129,7 +138,7 @@ int uvcpp_h2_ws_connection::send_pong(const void* data, size_t len) {
 
 int uvcpp_h2_ws_connection::close(ws_close_code code,
                                   const std::string& reason) {
-  if (closed_ || h2_ == nullptr) return -1;
+  if (closed_ || !linked()) return -1;
   uvcpp_ws_frame f;
   f.opcode = ws_opcode::CLOSE;
   f.fin    = true;
@@ -191,7 +200,7 @@ void uvcpp_h2_ws_connection::on_frame(const uvcpp_ws_frame& frame) {
           reply.set_close_payload(code, reason);
           close_sent_ = true;
           send_frame(reply);
-          if (h2_ != nullptr) {
+          if (linked()) {
             h2_->send_data(sid_, nullptr, 0, /*end_stream=*/true, nullptr);
           }
         }
@@ -251,7 +260,7 @@ void uvcpp_h2_ws_connection::fail(int code, const std::string& why) {
   f.set_close_payload(static_cast<ws_close_code>(code), why);
   close_sent_ = true;
   send_frame(f);
-  if (h2_ != nullptr) {
+  if (linked()) {
     h2_->send_data(sid_, nullptr, 0, /*end_stream=*/true, nullptr);
   }
   closed_ = true;

@@ -944,6 +944,20 @@ void uvcpp_http_server::on_upgrade(upgrade_handler_t handler) {
   upgrade_handler_ = std::move(handler);
 }
 
+#if UVCPP_NGHTTP2_ENABLE
+void uvcpp_http_server::set_h2_extended_connect_handler(
+    h2_extended_connect_handler_t handler) {
+  h2_extended_connect_handler_ = std::move(handler);
+}
+#endif
+
+#if UVCPP_HTTP3_ENABLE
+void uvcpp_http_server::set_h3_extended_connect_handler(
+    h3_extended_connect_handler_t handler) {
+  h3_extended_connect_handler_ = std::move(handler);
+}
+#endif
+
 std::string uvcpp_http_server::take_upgrade_leftover(uvcpp_tcp_client* client) {
   std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
   auto it = tbl.find(client);
@@ -2956,14 +2970,33 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client,
     }
     ss.body.append(d, n);
   };
-  h2c.on_request = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st, bool) {
+  h2c.on_request = [this, client, h2](uvcpp_h2_session&, uvcpp_h2_stream& st,
+                                      bool) {
     std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
     auto cit = tbl.find(client);
     if (cit == tbl.end()) return;
     // 流 id 只增不复用，正常这里本来就是空的；复位是为了万一有残留状态，也不会
     // 把上一条流的判定带给新流。**不能 erase** —— 无 body 的请求 `on_request` 和
     // `on_request_end` 是背靠背的（同上），擦掉之后那条请求就没人派发了。
-    cit->second.h2_streams[st.stream_id] = conn_ctx::h2_stream_state();
+    conn_ctx::h2_stream_state& ss = cit->second.h2_streams[st.stream_id];
+    ss = conn_ctx::h2_stream_state();
+
+    // extended CONNECT（RFC 8441，#58）：这条流的语义是**长连接**，不能走
+    // 普通请求那套"等 body 收尾再派发"—— 它永远收不了尾。头块收全这一刻
+    // 是唯一的接管点，此时流上还没有 DATA 到达，装落点不会漏字节。
+    if (!st.request.protocol.empty()) {
+      ss.extended_connect = true;
+      if (h2_extended_connect_handler_ &&
+          h2_extended_connect_handler_(*h2, st.stream_id, st.request)) {
+        return;  // 已接管：响应与流的生命周期都归调用方
+      }
+      // 没有接管（或钩子返回 false）：明确拒掉。501 让客户端知道这条路
+      // 走不通，可以回落到 h1 的 `Upgrade`。
+      uvcpp_http_response resp =
+          uvcpp_http_response::make(http_status::NOT_IMPLEMENTED);
+      send_h2_response(client, st.stream_id, resp);
+      return;
+    }
   };
   h2c.on_request_end = [this, client](uvcpp_h2_session&, uvcpp_h2_stream& st) {
     std::map<uvcpp_tcp_client*, conn_ctx>& tbl = ctxs_of(client);
@@ -2974,6 +3007,8 @@ void uvcpp_http_server::on_tcp_connection_h2(uvcpp_tcp_client* client,
     auto sit = c.h2_streams.find(st.stream_id);
     if (sit == c.h2_streams.end()) return;
     conn_ctx::h2_stream_state& ss = sit->second;
+    // 活流由接管方处置：它没有"请求收尾"这回事，别当成普通请求再派发一遍。
+    if (ss.extended_connect) return;
 
     std::string body;
     body.swap(ss.body);
@@ -3204,6 +3239,29 @@ void uvcpp_http_server::on_quic_connection(uvcpp_quic_connection* conn) {
       return;
     }
     dispatch_h3_request(conn, req);
+  };
+  // extended CONNECT（RFC 9220，#58）。h3 层把这类请求从 `on_request` 里摘出来
+  // 单独交付 —— 它的读方向永远不会收尾，等"完整请求"就是永远等不到。
+  cbs.on_connect_request = [this, conn](uvcpp_h3_connection& h3,
+                                        const h3_request& h3req) {
+    std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+    std::map<uvcpp_quic_connection*, quic_ctx>::iterator it = t.find(conn);
+    if (it == t.end() || it->second.h3 == nullptr) return;
+
+    uvcpp_http_request req;
+    if (!h3_to_web_request(h3req, req)) {
+      uvcpp_http_response bad =
+          uvcpp_http_response::make(http_status::BAD_REQUEST);
+      send_h3_response(conn, h3req.stream_id, bad);
+      return;
+    }
+    if (h3_extended_connect_handler_ &&
+        h3_extended_connect_handler_(h3, req)) {
+      return;  // 已接管
+    }
+    uvcpp_http_response resp =
+        uvcpp_http_response::make(http_status::NOT_IMPLEMENTED);
+    send_h3_response(conn, h3req.stream_id, resp);
   };
   cbs.on_stream_close = [this, conn](uvcpp_h3_connection&,
                                      const h3_stream_close_info& info) {

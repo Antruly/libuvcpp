@@ -19,4 +19,8 @@ uvcpp_web_ws_request::uvcpp_web_ws_request(uvcpp_http_request& raw)
 
 uvcpp_web_ws_request::~uvcpp_web_ws_request() {}
 
+// 纯虚接口的析构：必须有**一个**带外键的锚点，否则每个用到本头的 TU 都会
+// 各自生成一份 vtable/typeinfo，链接期还得靠 COMDAT 去重（跨 DSO 时不保证）。
+uvcpp_web_ws_session::~uvcpp_web_ws_session() {}
+
 }  // namespace uvcpp

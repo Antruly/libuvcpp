@@ -444,6 +444,45 @@ class UVCPP_API uvcpp_http_server {
   using upgrade_handler_t = std::function<void(uvcpp_http_request&, uvcpp_tcp_client*)>;
   void on_upgrade(upgrade_handler_t handler);
 
+#if UVCPP_NGHTTP2_ENABLE
+  /**
+   * @brief extended CONNECT（RFC 8441）的接管钩子 —— h2 那条腿的
+   *        `on_upgrade`（#58）。
+   *
+   * 一条 `:protocol` 非空的 CONNECT **头块收全时**调用（h2 的 `on_request`
+   * 那一格），此时这条流上还没有任何 DATA 到达 —— 装流落点不会漏字节。
+   *
+   * - 返回 `true` = **已接管**：本层不再为这条流派发普通请求、也不再等它的
+   *   请求体收尾，响应与流的生命周期都归调用方（典型做法是
+   *   `uvcpp_h2_ws_connection::accept()`）。
+   * - 返回 `false`，或者没装：本层回 `501 Not Implemented` 并结束这条流。
+   *   浏览器据此可以回落到 h1 的 `Upgrade`。
+   *
+   * @param stream_id 这条 CONNECT 流的号（`uvcpp_h2_ws_connection::accept`
+   *        的第二个参数）。
+   *
+   * **线程**：连接所属的那条循环线程。
+   */
+  using h2_extended_connect_handler_t = std::function<bool(
+      uvcpp_h2_connection&, int32_t stream_id, const uvcpp_http_request&)>;
+  void set_h2_extended_connect_handler(h2_extended_connect_handler_t handler);
+#endif
+
+#if UVCPP_HTTP3_ENABLE
+  /**
+   * @brief extended CONNECT 的接管钩子 —— h3 那条腿（RFC 9220，#58）。
+   *
+   * 与 h2 那条逐条同义，区别只有两点：h3 层自己的 `on_connect_request` 是
+   * 触发点（同样在头块收全时），以及请求对象里 `stream_id` 已经在
+   * `req.stream_id` 上（h2 的那份是**裸流号**，因为 web 层的请求对象那时还没建）。
+   *
+   * 返回 `false` / 没装：回 `501`。
+   */
+  using h3_extended_connect_handler_t =
+      std::function<bool(uvcpp_h3_connection&, const uvcpp_http_request&)>;
+  void set_h3_extended_connect_handler(h3_extended_connect_handler_t handler);
+#endif
+
   /**
    * @brief 取走"跟着升级请求一起到达的多余字节"（**升级方专用**）。
    *
@@ -1043,6 +1082,15 @@ class UVCPP_API uvcpp_http_server {
       std::string accept_encoding;  ///< 派发时从这条流自己的请求头里取
       bool        overflow = false; ///< 这条流超过了 max_body_size_
       bool        is_head  = false; ///< 这条流是 HEAD
+      /**
+       * @brief 这条流是 extended CONNECT（RFC 8441），已经交给接管钩子。
+       *
+       * 这类流**永远不会**走到 `on_request_end` 的正常派发上（对端不收尾），
+       * 但半关闭 / RST 之前万一真来了一次，必须在这里挡住 —— 否则一条 WS 流
+       * 会被当成普通请求再派发一遍，处理函数拿到一个"没有 body、没有响应出口"
+       * 的幽灵请求。
+       */
+      bool extended_connect = false;
     };
     std::map<int32_t, h2_stream_state> h2_streams;
 
@@ -1697,6 +1745,14 @@ class UVCPP_API uvcpp_http_server {
   std::vector<route_entry> routes_;
   http_request_handler default_handler_;
   upgrade_handler_t upgrade_handler_;
+#if UVCPP_NGHTTP2_ENABLE
+  /// h2 extended CONNECT 的接管钩子（#58）。没装时那条流回 501。
+  h2_extended_connect_handler_t h2_extended_connect_handler_;
+#endif
+#if UVCPP_HTTP3_ENABLE
+  /// h3 extended CONNECT 的接管钩子（#58）。没装时那条流回 501。
+  h3_extended_connect_handler_t h3_extended_connect_handler_;
+#endif
   std::function<void(uvcpp_tcp_client*)> close_handler_;
   /** @brief 新连接钩子（`on_connection`），早于该连接上的任何请求。 */
   std::function<void(uvcpp_tcp_client*)> connection_handler_;
