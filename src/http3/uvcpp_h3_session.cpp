@@ -546,7 +546,18 @@ int uvcpp_h3_session::write_stream_data(int64_t stream_id, const char* data,
   if (it == streams_.end() || !it->second.out_streaming) return UV_EINVAL;
   stream_rec& s = it->second;
   if (s.out_eof) return UV_EINVAL;
-  if (data != nullptr && len > 0) s.out_pending.append(data, len);
+  if (data != nullptr && len > 0) {
+    // Bound the application queue. A peer that stops reading needs its QUIC
+    // flow-control window filled before nghttp3 slows down; without this cap
+    // an extended-CONNECT relay (WebSocket over h3) can append here until the
+    // process is OOM-killed. Returning UV_ENOBUFS tells the caller to drop
+    // this message; MOLK's tile clock repairs the missing pixels.
+    constexpr std::size_t kMaxOutPendingBytes = 4u * 1024u * 1024u;
+    if (s.out_pending.size() + len > kMaxOutPendingBytes) {
+      return UV_ENOBUFS;
+    }
+    s.out_pending.append(data, len);
+  }
   if (fin) s.out_eof = true;
   // 之前 reader 返回过 WOULDBLOCK 的话，这一句把它重新排上。
   nghttp3_conn_resume_stream(conn_, stream_id);
