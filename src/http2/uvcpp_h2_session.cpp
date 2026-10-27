@@ -1052,8 +1052,40 @@ namespace {
  * 之类的优化，必须先把 `store` 的生命周期延到该帧真的写出去为止 —— 那和现在
  * 这个"提交完就扔"的形状是冲突的。
  */
+/// HTTP/2 的 field name 在线上必须全小写（RFC 9113 §8.2.1）。应用层经常设置
+/// 混合大小写的名字；在组帧边界统一规范化，否则 nghttp2 的校验会拒掉整个
+/// 头块，流停在“提交过、一个字节都没发”的状态，客户端只能等到超时。
+std::string lower_header_name(const std::string& name) {
+  std::string out = name;
+  for (char& c : out) {
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  return out;
+}
+
+/// 校验并追加一个普通字段。`names` 指向 `name_store`；调用方提前 reserve，
+/// 保证这些指针在 `nghttp2_submit_*` 之前一直有效。
+bool append_lower_header(const http_header& h,
+                         std::vector<std::string>& name_store,
+                         std::vector<const char*>& names,
+                         std::vector<std::string>& store) {
+  std::string lower = lower_header_name(h.name);
+  if (lower.empty() ||
+      !nghttp2_check_header_name(
+          reinterpret_cast<const uint8_t*>(lower.data()), lower.size()) ||
+      !nghttp2_check_header_value_rfc9113(
+          reinterpret_cast<const uint8_t*>(h.value.data()), h.value.size())) {
+    return false;
+  }
+  name_store.push_back(std::move(lower));
+  names.push_back(name_store.back().c_str());
+  store.push_back(h.value);
+  return true;
+}
+
 bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
                        std::vector<std::string>& store,
+                       std::vector<std::string>& name_store,
                        std::vector<nghttp2_nv>&  nv) {
   const int status = static_cast<int>(resp.status_code);
 
@@ -1090,14 +1122,7 @@ bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
       has_cl   = true;
       continue;  // 值已记下，末尾统一发
     }
-    if (!nghttp2_check_header_name(
-            reinterpret_cast<const uint8_t*>(h.name.data()), h.name.size()) ||
-        !nghttp2_check_header_value_rfc9113(
-            reinterpret_cast<const uint8_t*>(h.value.data()), h.value.size())) {
-      return false;
-    }
-    names.push_back(h.name.c_str());
-    store.push_back(h.value);
+    if (!append_lower_header(h, name_store, names, store)) return false;
   }
 
   // body 非空却没有 `content-length`：补一个。h2 里它只是参考值，
@@ -1149,6 +1174,7 @@ bool build_response_nv(const uvcpp_http_response& resp, bool omit_body,
  */
 bool build_trailer_nv(const http_headers& trailers,
                       std::vector<std::string>& store,
+                      std::vector<std::string>& name_store,
                       std::vector<nghttp2_nv>&  nv) {
   store.clear();
   store.reserve(trailers.size());
@@ -1160,14 +1186,7 @@ bool build_trailer_nv(const http_headers& trailers,
     if (h.name.empty()) return false;
     if (h.name[0] == ':') return false;                // 伪首部：拒，不剥
     if (is_connection_specific(h.name)) continue;      // 连接专属：剥掉
-    if (!nghttp2_check_header_name(
-            reinterpret_cast<const uint8_t*>(h.name.data()), h.name.size()) ||
-        !nghttp2_check_header_value_rfc9113(
-            reinterpret_cast<const uint8_t*>(h.value.data()), h.value.size())) {
-      return false;
-    }
-    names.push_back(h.name.c_str());
-    store.push_back(h.value);
+    if (!append_lower_header(h, name_store, names, store)) return false;
   }
 
   nv.clear();
@@ -1235,8 +1254,10 @@ int uvcpp_h2_session::submit_response(int32_t stream_id,
   if (status_is_bodyless(static_cast<int>(resp.status_code))) omit_body = true;
 
   std::vector<std::string>  store;
+  std::vector<std::string>  name_store;
   std::vector<nghttp2_nv>   nv;
-  if (!build_response_nv(resp, omit_body, store, nv)) return UV_EINVAL;
+  name_store.reserve(resp.headers.size());
+  if (!build_response_nv(resp, omit_body, store, name_store, nv)) return UV_EINVAL;
   // 两条退路都必须在**置 SENT 之前**：置了再退，这条流就停在"说过要发、其实
   // 一个字节都没发"的状态上，而 nghttp2 那边连流都没建 —— 对端只会一直等。
   if (!header_block_fits(nv)) return UV_EMSGSIZE;
@@ -1280,10 +1301,12 @@ int uvcpp_h2_session::submit_headers(int32_t stream_id,
   if (sit->second.state != h2_stream_state::OPEN) return UV_EALREADY;
 
   std::vector<std::string> store;
+  std::vector<std::string> name_store;
   std::vector<nghttp2_nv>  nv;
+  name_store.reserve(resp.headers.size());
   // `omit_body = true` 走的是"不补 content-length"那一支，正是流式要的：
   // 长度此刻不知道，补一个就是在说谎。`resp` 里若已写明就原样发出。
-  if (!build_response_nv(resp, /*omit_body=*/true, store, nv)) return UV_EINVAL;
+  if (!build_response_nv(resp, /*omit_body=*/true, store, name_store, nv)) return UV_EINVAL;
   // 同上：置位之前退，否则流停在"头部发过了"而实际没发。
   if (!header_block_fits(nv)) return UV_EMSGSIZE;
   sit->second.state = h2_stream_state::HEADERS_SENT;
@@ -1414,8 +1437,10 @@ int uvcpp_h2_session::submit_trailer(int32_t stream_id,
   if (!os.chunks.empty()) return UV_EBUSY;
 
   std::vector<std::string> store;
+  std::vector<std::string> name_store;
   std::vector<nghttp2_nv>  nv;
-  if (!build_trailer_nv(trailers, store, nv)) return UV_EINVAL;
+  name_store.reserve(trailers.size());
+  if (!build_trailer_nv(trailers, store, name_store, nv)) return UV_EINVAL;
   // 与另两条提交一样：超限在**动状态之前**退，且退得同步（理由见
   // `header_block_fits()` 那段注释 —— nghttp2 把这个错误处理成"静默丢帧 + 关流"）。
   if (!header_block_fits(nv)) return UV_EMSGSIZE;
@@ -1561,13 +1586,15 @@ int32_t uvcpp_h2_session::submit_request(const uvcpp_http_request& req,
     const http_header& h = req.headers[i];
     if (name_is(h.name, "host")) continue;  // 已经进了 `:authority`
     if (is_connection_specific(h.name)) continue;
-    if (!nghttp2_check_header_name(
-            reinterpret_cast<const uint8_t*>(h.name.data()), h.name.size()) ||
+    std::string lower = lower_header_name(h.name);
+    if (lower.empty() ||
+        !nghttp2_check_header_name(
+            reinterpret_cast<const uint8_t*>(lower.data()), lower.size()) ||
         !nghttp2_check_header_value_rfc9113(
             reinterpret_cast<const uint8_t*>(h.value.data()), h.value.size())) {
       return UV_EINVAL;
     }
-    names.push_back(h.name);
+    names.push_back(std::move(lower));
     store.push_back(h.value);
   }
 

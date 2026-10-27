@@ -335,6 +335,15 @@ int build_app(uvcpp_web_app& app, app_probe& st, bool set_flag, bool enable_h2,
     resp.end();
   });
 
+  // 回归：HTTP/2 要求 field name 全小写。应用层设置混合大小写的 Header 时，
+  // 之前的 h2 响应构建器直接返回 false，流永远不结束，客户端只能等到超时。
+  app.get("/mixed-header", [](uvcpp_web_request&, uvcpp_web_response& resp,
+                              uvcpp_web_next) {
+    resp.set_header("X-Mixed-Case", "ok");
+    resp.text("mixed-ok");
+    resp.end();
+  });
+
   add_stream_routes(app, st);
 
   // 场景 4 才挂静态；路由表在 `start_background()` 之后不再变，所以另外几个场景
@@ -634,8 +643,10 @@ void run_h2_requests(h2_client& c, app_probe& st, const char* tag) {
   check(s1 > 0, std::string(tag) + ": /hello 没提交上");
   const int32_t s2 = c.submit(http_method::HTTP_GET, "/echo/abc");
   check(s2 > 0, std::string(tag) + ": /echo/abc 没提交上");
+  const int32_t s3 = c.submit(http_method::HTTP_GET, "/mixed-header");
+  check(s3 > 0, std::string(tag) + ": /mixed-header 没提交上");
 
-  check(c.wait_responses(2), std::string(tag) + ": 两条响应没在 " +
+  check(c.wait_responses(3), std::string(tag) + ": 三条响应没在 " +
                                  std::to_string(kWaitMs) + "ms 内收齐");
   uvcpp_test::pump_for(c.loop(), 80);
 
@@ -661,6 +672,19 @@ void run_h2_requests(h2_client& c, app_probe& st, const char* tag) {
     // "h2 走的是同一套路由"分开。
     check(r2.body == std::string(kParamEchoPre) + "abc",
           std::string(tag) + ": /echo/abc body = \"" + r2.body + "\"");
+  }
+
+  // HTTP/2 的 field name 必须全小写。应用设置了 `X-Mixed-Case`，框架必须把它
+  // 规范化后发出去，而不是丢掉整条响应。
+  seen_response r3;
+  const bool has3 = c.find_response(s3, r3);
+  check(has3, std::string(tag) + ": 流 " + std::to_string(s3) + " 没有响应");
+  if (has3) {
+    check(r3.end, std::string(tag) + ": /mixed-header 的响应没收完");
+    check(r3.status == 200,
+          std::string(tag) + ": /mixed-header 状态 " + std::to_string(r3.status));
+    check(r3.body == "mixed-ok",
+          std::string(tag) + ": /mixed-header body = \"" + r3.body + "\"");
   }
 
   // 服务端侧同号对座：框架处理函数看到的 `stream_id` 必须就是客户端发出去的那个。
