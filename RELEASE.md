@@ -19,6 +19,16 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.9 重点 (Highlights)
+
+`v1.8.8` 之后的一版：**webapp 的 HTTP/3 普通请求可用**，并补上两个小口子。
+
+- **webapp + h3**：`app.http_server()->listen_quic()` 之后，`app.get()` 这类普通
+  路由终于能在 h3 上答话（此前从 1.4.1 起一律 500，或响应被当成"连接已断开"
+  丢弃）。同步与"稍后回话"两条路都通。
+- **h2 头名小写化**：应用设置 `Cache-Control` 这类混合大小写头不再挂死。
+- **`load_ca_data()`**：从 PEM 字符串装信任 CA（证书固定不必再写临时文件）。
+
 ## v1.8.8 重点 (Highlights)
 
 `v1.8.7` 的补丁：**TLS 客户端析构泄漏 `uvcpp_ssl`**。
