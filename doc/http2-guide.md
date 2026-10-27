@@ -383,9 +383,9 @@ void doc_h2_client_submit(uvcpp::uvcpp_h2_connection* conn) {
 
 | 项 | 值 | 位置 |
 |---|---|---|
-| 单个待发头部块 | 64 KiB（`H2_MAX_SEND_HEADER_BLOCK`） | `src/http2/uvcpp_h2_common.h:57`、设置点 `src/http2/uvcpp_h2_session.cpp:914-914`、自查 `:1216-1216` |
+| 单个待发头部块 | 64 KiB（`H2_MAX_SEND_HEADER_BLOCK`） | `src/http2/uvcpp_h2_common.h:57`、设置点 `src/http2/uvcpp_h2_session.cpp:914-914`、自查 `:1235-1235` |
 | 单流 body | 64 MiB（`H2_DEFAULT_MAX_BODY_BYTES`）→ RST | `src/http2/uvcpp_h2_common.h:32`、`src/http2/uvcpp_h2_session.cpp:669-669` |
-| 单流**待发**队列 | 4 MiB（`H2_DEFAULT_MAX_OUT_STREAM_BYTES`）→ `submit_data` 同步返 `UV_ENOBUFS` | `src/http2/uvcpp_h2_common.h:79`、`src/http2/uvcpp_h2_session.cpp:1322-1322` |
+| 单流**待发**队列 | 4 MiB（`H2_DEFAULT_MAX_OUT_STREAM_BYTES`）→ `submit_data` 同步返 `UV_ENOBUFS` | `src/http2/uvcpp_h2_common.h:79`、`src/http2/uvcpp_h2_session.cpp:1345-1345` |
 | `content-length` 荒谬值 | `> 1<<40` 判非法 | `src/http2/uvcpp_h2_session.cpp:466-466` |
 | 控制帧令牌桶 | burst 64、补充 32 个/秒 | `src/http2/uvcpp_h2_session.cpp:75-76`、`control_frame_ok()` `:217-217` |
 | `:scheme` 与实际传输层一致 | TLS 只接受 `https`、明文只接受 `http`，不符即 RST（两个都收等于给混淆代理开门，RFC 9113 §8.1.1） | `src/http2/uvcpp_h2_session.cpp:384-387` |

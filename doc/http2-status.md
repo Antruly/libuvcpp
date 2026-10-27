@@ -39,7 +39,7 @@
   NGHTTP2_ERR_FRAME_SIZE_ERROR`，而那个错误码是 `is_non_fatal` 的 —— 它在上层
   被处理成"丢掉整帧、关掉这条流、继续跑"，既不通知我们、也不发 RST_STREAM。
   本层在 `submit_*` 里按同一个公式先算一遍，换成同步的 `UV_EMSGSIZE`
-  （`src/http2/uvcpp_h2_session.cpp:1210-1216`）。
+  （`src/http2/uvcpp_h2_session.cpp:1229-1235`）。
 - **收到对端 GOAWAY 之后不再接受新流。** `on_frame_recv` 记下 `last_stream_id` 与
   错误码，`submit_request` 用 `nghttp2_session_check_request_allowed()` 提前拦，
   同步返回 `UV_ENOTCONN`；`peer_goaway_received()` 等三个取值函数把它暴露出去。
@@ -314,7 +314,7 @@ NONE"的实现也能全绿；**m3** h1 不在头完成时记状态码 ⇒ `web_h
 ### 4.3 盘查时判为缺陷、**核下来不是**的（免得下次再盘一遍）
 
 - **"本层可能提交超过对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 的并发流"—— 不成立，
-  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1691-1691`）确实
+  此处更正。** `peer_max_concurrent_streams()`（`src/http2/uvcpp_h2_session.cpp:1718-1718`）确实
   零生产调用方，但 nghttp2 自己就按这个上限**排队**而不是拒绝：超出的请求 HEADERS
   留在 `ob_syn`（`nghttp2:nghttp2_session.c:2315,2346` 上的
   `session_is_outgoing_concurrent_streams_max()` 闸门），流一关
