@@ -2046,10 +2046,22 @@ int uvcpp_web_app::init_process_once() {
   // 流式认领钩子，与上面的兜底 handler 是**互补**的两条路：headers 解析完时
   // 先问这个钩子，命中就认领（此后兜底 handler 不会再被调用），没命中才轮到
   // 它。两条都装，`on_http_request` 对非流式请求的行为因此**一个字节都没变**。
-  http_->set_stream_claim([this](uvcpp_http_request& req,
-                                 uvcpp_tcp_client* client) {
-    return claim_stream(req, client);
-  });
+  //
+  // **只在真的注册过流式路由时才装**（#58 的 webapp h3 那一半）。HTTP 层的
+  // h3 派发器只要看到"装了认领钩子"就**拒绝整条 h3 请求**（`set_stream_claim`
+  // 那套 headers-then-body 的语义在 h3 上不存在，见 `dispatch_h3_request`）——
+  // 而绝大多数应用一条流式路由都没有，却因为这一句无条件安装，整个 webapp
+  // 的 h3 腿从 1.4.1 起一直是 500。没装过流式路由时这个钩子本来就永远返回
+  // 空，装上去只有坏处。
+  //
+  // 装了流式路由的应用仍然会在 h3 上被显式拒绝（那是真实的缺口，不是静默
+  // 错路由）—— 这条保持原样。
+  if (stream_router_.route_count() != 0) {
+    http_->set_stream_claim([this](uvcpp_http_request& req,
+                                   uvcpp_tcp_client* client) {
+      return claim_stream(req, client);
+    });
+  }
 
   // --- 监听 --------------------------------------------------------
 
@@ -2794,6 +2806,50 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   info.ok            = true;
 
   uvcpp_tcp_client* client = reg_client(ctx.connection_id());
+
+#if UVCPP_HTTP3_ENABLE
+  // -------------------------------------------------------------------
+  // h3：没有 `uvcpp_tcp_client`，唯一的回话入口是「稍后回话」凭据（#58）
+  // -------------------------------------------------------------------
+  //
+  // `req.reply` 在三条腿上都是同一件事，h3 上它是**唯一**能回话的东西 ——
+  // `fill_h3_reply()` 在派发前把它填好，`uvcpp_web_request::take_from()` 把它
+  // 按值接了过来。这条分支以前没有，于是 h3 的响应一律落到下面那句
+  // 「连接已断开，响应被丢弃」上（`reg_client(nullptr)` 恒为空）。
+  //
+  // h3 上没有流式响应与尾随头：派发器对**流式路由**是显式拒绝的
+  // （`dispatch_h3_request` 的 `refuse_stream`），而这里的 `streaming()` 只
+  // 可能来自普通路由里调了 `begin_chunked()` —— 那是调用方用错了传输。回
+  // 500 而不是静默丢弃，症状才会落在对端看得见的地方。
+  if (client == nullptr &&
+      ctx.request().raw().reply.version() == uvcpp_http_version::HVER_30) {
+    const uvcpp_http_reply reply = ctx.request().raw().reply;
+    if (r.streaming() || r.has_trailers()) {
+      UVCPP_LOG_WARN(log_category::RESPONSE)
+          << "h3 上不支持流式/尾随头响应（status " << info.status_code
+          << "）—— 回 500";
+      uvcpp_http_response gap =
+          uvcpp_http_response::make(http_status::INTERNAL_SERVER_ERROR);
+      info.ok         = false;
+      info.body_bytes = 0;
+      http_->send_reply(reply, gap);
+      r.notify_sent(info);
+      return;
+    }
+
+    info.body_bytes = r.head_only() ? 0 : r.body_size();
+    const int rc    = http_->send_reply(reply, r.raw_after_sync());
+    info.ok         = (rc == 0);
+    if (rc != 0) {
+      UVCPP_LOG_WARN(log_category::RESPONSE)
+          << "h3 响应没发出去（rc=" << rc << "，status " << info.status_code
+          << "）—— 流可能已经收场";
+    }
+    r.notify_sent(info);
+    return;
+  }
+#endif
+
   if (client == nullptr) {
     // 连接在响应准备好之前断了（客户端提前走了，或者我们 abort 过）。
     // **照样通知** —— 访问日志中间件挂在这一刻上，丢掉通知就等于这次请求
@@ -3089,6 +3145,15 @@ void uvcpp_web_app::context_finished(uvcpp_web_context& ctx) {
   // [rbp+18h]`，rbp 就是 &ctx），普通堆下只是静默读到已释放内存。
   // 本文件下面 `ctx.stream()` 那处早就是这么防的，这行漏了。
   const uvcpp_web_conn_id id = ctx.connection_id();
+
+#if UVCPP_HTTP3_ENABLE
+  // h3：`on_http_request()` 为它补登记过一条**没有 `uvcpp_tcp_client`** 的
+  // 记录（只为拿一个带循环号的 id，见那里的注释）。那条记录没有"连接关闭"
+  // 事件会来摘它 —— 就在这里摘，否则每条 h3 请求都在登记表里留下一条。
+  if (ctx.request().raw().reply.version() == uvcpp_http_version::HVER_30) {
+    reg_here().remove(id);
+  }
+#endif
 
   // 队那一格按 **id** 定位（与入队的 `enqueue_inflight()` 同一把钥匙）。
   // id 无效 ⇒ 没登记过 ⇒ 与"不在表里"同一支。
@@ -3451,12 +3516,20 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   if (id == UVCPP_WEB_INVALID_CONN_ID) {
     // 正常路径到不了这里：连接在 accept 时就登记了。真到了说明有人绕过
     // App 的 accept 钩子直接用了 HTTP 层 —— 现场补一条，比回 500 有用。
+    //
+    // **h3 是例外，而且是常态**：那条腿没有 `uvcpp_tcp_client`，`client` 恒为
+    // nullptr ⇒ `id_of(nullptr)` 永远是无效值。这里给它补一条"没有 client"的
+    // 记录，只为拿到一个**带循环号**的 id（`slot_of` / 表回收都按它定位）；
+    // 它不是真连接，收尾由 `context_finished()` 摘掉。这条路径不打 WARN ——
+    // 每条 h3 请求都会走到，打出来就是刷屏，而且它不是调用方的错。
     std::string ip;
     int port = 0;
     if (client != nullptr) client->getPeerAddrs(ip, port);
     id = reg_here().add(client, ip, port, loop_now_ms(loop()));
-    UVCPP_LOG_WARN(log_category::CORE)
-        << "请求来自未登记的连接，已补登记为 " << id;
+    if (client != nullptr) {
+      UVCPP_LOG_WARN(log_category::CORE)
+          << "请求来自未登记的连接，已补登记为 " << id;
+    }
   }
 
   std::shared_ptr<uvcpp_web_context> ctx = uvcpp_web_context::create(*this, id);

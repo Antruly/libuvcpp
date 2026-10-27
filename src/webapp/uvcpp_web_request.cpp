@@ -184,6 +184,10 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   src_.version   = src.version;
   src_.stream_id = src.stream_id;
   src_.url       = std::move(src.url);
+  // 「稍后回话」的凭据按值接过来（浅句柄，不拥有任何东西）。**h3 上它是框架
+  // 唯一能回话的入口** —— `send_response()` 那条路要 `uvcpp_tcp_client*`，而
+  // h3 没有；少了这一句，webapp 的 h3 响应只能落到"连接已断开"那条丢弃分支上。
+  src_.reply     = src.reply;
 
   // 头表**逐元素搬进 `src_.headers` 已有的缓冲**，不再移动赋值。
   //
