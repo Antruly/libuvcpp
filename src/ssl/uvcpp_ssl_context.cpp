@@ -274,6 +274,40 @@ bool uvcpp_ssl_context::load_ca_file(const std::string& path) {
   return true;
 }
 
+bool uvcpp_ssl_context::load_ca_data(const std::string& pem) {
+  if (!ctx_ || pem.empty()) return false;
+  X509_STORE* store = SSL_CTX_get_cert_store(ctx_);
+  if (store == nullptr) { clear_error(); return false; }
+
+  BIO* bio = BIO_new_mem_buf(pem.c_str(), static_cast<int>(pem.size()));
+  if (bio == nullptr) { clear_error(); return false; }
+
+  bool any = false;
+  for (;;) {
+    // 与 `load_certificate_data()` 同一种读法：先读一张，再循环读剩下的；
+    // 读到干净的文件尾会在错误栈上留 PEM_R_NO_START_LINE，最后统一清掉。
+    X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    if (cert == nullptr) break;
+    any = true;
+    if (X509_STORE_add_cert(store, cert) != 1) {
+      // 同一张证书装两次是**幂等成功**（`load_ca_file()` 对重复项也是静默
+      // 去重）；其余错误（OOM、畸形 DER）如实失败。判据只能看 reason ——
+      // `X509_STORE_add_cert` 失败时都返回 0，不区分。
+      const unsigned long e = ERR_peek_last_error();
+      if (ERR_GET_REASON(e) != X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+        X509_free(cert);
+        BIO_free(bio);
+        clear_error();
+        return false;
+      }
+    }
+    X509_free(cert);
+  }
+  BIO_free(bio);
+  ERR_clear_error();  // 清掉"读到文件尾"留下的 PEM_R_NO_START_LINE
+  return any;
+}
+
 void uvcpp_ssl_context::set_verify_mode(tls_verify_mode mode) {
   // 先记档位，再谈 `ctx_`：`verify_mode()` 是"这条连接要不要钉主机名"的唯一依据，
   // 而建连接那一层读的是**记下来的档位**，不是 `SSL_CTX` 上的 verify 位（后者表达

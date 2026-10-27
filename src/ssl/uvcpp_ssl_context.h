@@ -88,6 +88,23 @@ class UVCPP_API uvcpp_ssl_context {
   bool load_ca_file(const std::string& path);
 
   /**
+   * @brief 从 **PEM 字符串**装入信任 CA（追加到同一个信任库），#61。
+   *
+   * 与 `load_ca_file()` 语义相同，只是来源是内存。两张用途：
+   *
+   *   - **证书固定**：对端把自己的证书经 JSON / 带内消息下发，消费方把它当 CA
+   *     用 —— 不需要为此写临时文件、管权限与清理（Windows 上还要处理文件占用）；
+   *   - 证书是公开材料，本来没有落盘的必要。
+   *
+   * 一张 PEM 里可以有多张证书，**逐张追加**；同一张证书装两次是**幂等成功**
+   * （与 `load_ca_file()` 对重复项的去重行为一致），不是错误。
+   *
+   * @return true = 至少读入并装上了一张证书；false = PEM 为空 / 一张都读不出 /
+   *         信任库写入失败（后两种会把 OpenSSL 错误栈清掉，与其它 `load_*` 一致）。
+   */
+  bool load_ca_data(const std::string& pem);
+
+  /**
    * @brief Set peer certificate verification mode.
    *
    * 默认值：CLIENT 上下文是 `PEER`（并已装入系统信任库），SERVER 是 `NONE`。
