@@ -402,6 +402,18 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
   // 0.74–1.17 MB/min，都不收敛）。
   // -------------------------------------------------------------------
   if (loop_ != nullptr && loop_->is_running()) {
+#if UVCPP_OPENSSL_ENABLE
+    // TLS 对象不能无条件当场 delete：析构可能正发生在自己的 TLS 读回调
+    // （`tls_feed` / `tls_flush_out`）里，那一帧还压着它。按句柄状态分三种：
+    //   - 句柄已摘 / 没有句柄：不可能还有 TLS 回调在栈上，当场释放；
+    //   - 句柄还活着且能排一次 uv_close：交给关闭完成回调（本轮 uv_run
+    //     收尾时跑，栈已解开），与 `read_arg_` 同一时机；
+    //   - 关闭回调槽已被占：只能留下（与 wrapper 那条路相同，罕见且已告警）。
+    // 原先这里直接 `tls_ssl_ = nullptr;` 丢掉指针 —— 每次 TLS 连接泄漏一个
+    // `uvcpp_ssl` 及其 OpenSSL 状态（实测 ~57 KiB/连接）。
+    uvcpp_ssl* tls_orphan = tls_ssl_;
+    tls_ssl_ = nullptr;
+#endif
     if (tcp_ != nullptr) {
       const bool handle_detached = (tcp_->get_handle() == nullptr);
       if (handle_detached) {
@@ -412,6 +424,10 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
           delete static_cast<std::function<void(uvcpp_buf*)>*>(read_arg_);
           read_arg_ = nullptr;
         }
+#if UVCPP_OPENSSL_ENABLE
+        delete tls_orphan;
+        tls_orphan = nullptr;
+#endif
       } else {
         tcp_->read_stop();
         if (!tcp_->is_closing()) {
@@ -424,14 +440,30 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
           // 每次连接漏一个 `std::function` 块 —— 实测那是剩下的大头。
           void* ra = read_arg_;
           read_arg_ = nullptr;
+#if UVCPP_OPENSSL_ENABLE
+          uvcpp_ssl* tls = tls_orphan;
+          tls_orphan = nullptr;
+          tcp_->close([ra, tls](uvcpp_handle* wrapper) {
+            delete static_cast<std::function<void(uvcpp_buf*)>*>(ra);
+            delete tls;
+            delete wrapper;
+            g_reclaim_deferred.fetch_add(1, std::memory_order_relaxed);
+          });
+#else
           tcp_->close([ra](uvcpp_handle* wrapper) {
             delete static_cast<std::function<void(uvcpp_buf*)>*>(ra);
             delete wrapper;
             g_reclaim_deferred.fetch_add(1, std::memory_order_relaxed);
           });
+#endif
         } else {
           // 槽被占，只能留下（见上）。
           g_reclaim_skipped.fetch_add(1, std::memory_order_relaxed);
+#if UVCPP_OPENSSL_ENABLE
+          // 这一支同时把 `tls_orphan` 留下：读回调的帧可能还压在栈上，
+          // 无法安全释放（与 wrapper 同一个理由，已在下面告警）。
+          tls_orphan = nullptr;
+#endif
           std::fprintf(stderr,
                        "[uvcpp_tcp_client] 析构时句柄正在关闭：包装对象的"
                        "关闭回调槽已被占用，只能留在事件循环里\n");
@@ -440,9 +472,13 @@ uvcpp_tcp_client::~uvcpp_tcp_client() {
       tcp_ = nullptr;
     }
 #if UVCPP_OPENSSL_ENABLE
-    // TLS 读路径上 `tls_ssl_` 正压在栈上（`tls_feed` / `tls_flush_out` 还在
-    // 下面那几层里），不能删。
-    tls_ssl_ = nullptr;
+    else {
+      // 没有 TCP 句柄 ⇒ 没有任何回调可能在栈上，可以直接释放。
+      delete tls_orphan;
+      tls_orphan = nullptr;
+    }
+#endif
+#if UVCPP_OPENSSL_ENABLE
 
     // 握手超时定时器：先停掉（停是安全的，从它自己的回调里停也行）。
     // 释放要分情况 —— 如果本对象正是在那个超时回调里被拆掉的，删除包装对象
