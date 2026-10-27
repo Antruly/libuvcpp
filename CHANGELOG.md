@@ -802,7 +802,7 @@
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
   `trailers()`（`src/webapp/uvcpp_web_response.h:523-527`），并在 `send_response()` 里加了
-  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2832-2881`）。
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2888-2937`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
   "另一条拿到同一份字节的路"。判据与量法见下一条
@@ -1376,13 +1376,13 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   （`src/web/uvcpp_http_server.cpp:1706-1706`），而 llhttp 的 flags 是**连接级**的、
   属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
   读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
-  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2769-2769` 打
+  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2781-2781` 打
   「连接 N 已断开，响应被丢弃」，客户端收到 1 条 + FIN）。**同步处理函数侥幸躲开**：
   它们的响应在解析器前进之前就序列化完了 —— 所以这条缺陷只在「流水线 + 异步响应」
   同时成立的形状里现形，而静态腿（响应要等池）正是这个形状。
 
   **改法**：webapp 在**发送前**把「**这一条**请求自己」的结论钉成显式 `connection`
-  头（`src/webapp/uvcpp_web_app.cpp:2776-2779`）。判据取每请求的那份副本 ——
+  头（`src/webapp/uvcpp_web_app.cpp:2788-2791`）。判据取每请求的那份副本 ——
   `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
   读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
   （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。

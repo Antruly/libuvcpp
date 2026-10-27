@@ -219,7 +219,7 @@ void doc_routes(uvcpp::uvcpp_http_server& server) {
   body 不再被服务器缓冲，直接以 `HEADERS` / `BODY` / `END` 三个事件交给你。
 - `set_stream_claim(hook)`（`:263`）：`post_stream` 没中时问它。它返回一个
   `http_stream_handler`（认领）或空（不认领）。`webapp/` 正是靠它把自己的路由器
-  接进来的（`src/webapp/uvcpp_web_app.cpp:2049-2049`）。
+  接进来的（`src/webapp/uvcpp_web_app.cpp:2060-2060`）。
 
 `stream_handler` 拿到的 `req` 是 `ctx.stream_request`，**头部视图只在当次调用内有效，
 要留就自己拷**（`src/web/uvcpp_http_server.h:119-121`）。
@@ -803,7 +803,7 @@ CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 →
 - **keep-alive**：HTTP/1.1 默认开、1.0 默认关；handler 显式设了 `connection`
   头就听 handler 的（`src/web/uvcpp_http_server.cpp:1703-1717`）。webapp 这一层
   还会在**发送前**把「**这一条**请求自己」的结论钉成显式头
-  （`src/webapp/uvcpp_web_app.cpp:2776-2779`）——HTTP 层那边现问的是**连接级**的
+  （`src/webapp/uvcpp_web_app.cpp:2788-2791`）——HTTP 层那边现问的是**连接级**的
   解析器状态，而 llhttp 的 flags 属于「最近一条解析完的报文」：流水线里末条写
   `Connection: close` 时，第 1 条响应（异步的那条）序列化时读到的已经是末条的
   结论，服务器会在第 1 条之后关连接、丢掉第 2..N 条（`1.6.46-dev` 修的）。
@@ -854,7 +854,7 @@ CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 →
 里抛出的异常会被吞掉并打 stderr（`src/web/uvcpp_http_server.cpp:1058-1069`、`src/web/uvcpp_http_server.cpp:1164-1175`、`src/web/uvcpp_http_server.cpp:2936-2945`）。
 **`handler(req, resp, client)` 本身没有 try/catch**（`src/web/uvcpp_http_server.cpp:1545-1550`），
 抛出去会穿过 llhttp 的 C 回调栈。webapp 层自己包了 try/catch 并扇出到错误中间件
-（`src/webapp/uvcpp_web_app.cpp:3202-3208`）。
+（`src/webapp/uvcpp_web_app.cpp:3267-3273`）。
 
 ### 静默失败清单
 
@@ -881,7 +881,7 @@ CPU，产物还**比原文件大**（本仓语料 22 528 → 22 556、18 432 →
 `src/web/uvcpp_http_server.h:1418-1421` 现在都明写这一点。
 **真实的闲置清扫在 webapp 层**：`idle_timeout_ms` 默认 **60000**
 （`src/webapp/uvcpp_web_app.cpp:288-288`），而且为 0 时连扫描句柄都不建
-（`src/webapp/uvcpp_web_app.cpp:2313-2318`）。升级成 WebSocket 的连接被排除在闲置超时之外
+（`src/webapp/uvcpp_web_app.cpp:2325-2330`）。升级成 WebSocket 的连接被排除在闲置超时之外
 （`src/webapp/uvcpp_web_app.h:884-884`）。
 
 **二、`req` 与 `resp` 只在本次调用期间有效。**

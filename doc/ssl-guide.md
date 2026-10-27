@@ -204,7 +204,7 @@ enum class tls_verify_mode : uint8_t {
 证书，没有可校验的名字，所以那一半只对客户端有意义。
 
 **只有 `PEER_STRICT` 才钉主机名**，判据是 `uvcpp_ssl_context::verify_mode()`
-（`src/ssl/uvcpp_ssl_context.h:107`）。设了主机名之后，无论 `SSL_CTX` 上的 verify 位
+（`src/ssl/uvcpp_ssl_context.h:124`）。设了主机名之后，无论 `SSL_CTX` 上的 verify 位
 是什么，OpenSSL 都会在握手末尾做这次检查，而 `SSL_VERIFY_NONE` 下**检查失败也不中止
 握手** —— 对 `NONE` / `PEER` 也钉的话，`PEER` 会凭空多出一层从没承诺过的校验，
 `NONE` 则静默什么都不发生。所以 `NONE` / `PEER` 两条路的行为逐字节不变。
@@ -259,7 +259,7 @@ bool has_alpn_select() const;
 ```
 
 **这里有一个反过来的返回值约定：`SSL_CTX_set_alpn_protos` 成功返回 0**，与 OpenSSL
-大多数接口相反（`src/ssl/uvcpp_ssl_context.cpp:362` 专门写了注释）。本库的包装把它
+大多数接口相反（`src/ssl/uvcpp_ssl_context.cpp:396` 专门写了注释）。本库的包装把它
 翻正成 `bool`，但如果绕到 `raw_ctx()` 自己调，记住这条。
 
 其他要点：
@@ -267,9 +267,9 @@ bool has_alpn_select() const;
 - 名单里**空串或长度超过 255 字节的项会被静默丢掉**，不报错；全部丢完导致编码为空时
   `set_alpn_protos` 返回 `false`（`src/ssl/uvcpp_ssl_common.h:94-97`）。
 - 服务端**挑不中时返回 `SSL_TLSEXT_ERR_NOACK`，不是 fatal**
-  （`src/ssl/uvcpp_ssl_context.h:155-157`）——写成 fatal 会让所有老客户端连握手都完不成。
+  （`src/ssl/uvcpp_ssl_context.h:172-174`）——写成 fatal 会让所有老客户端连握手都完不成。
 - `has_alpn_select()` 存在的理由是框架默认值与用户策略的冲突：`uvcpp_web_app` 默认要
-  替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:166-172`）。
+  替使用者宣告 h2，但**不会覆盖已经显式设过的名单**（`:183-189`）。
 - 每连接的覆盖在 `uvcpp_ssl::set_alpn_protos`，**必须在握手前**调。
 
 ---
@@ -282,13 +282,13 @@ bool has_alpn_select() const;
 |---|---|---|
 | `uvcpp_tcp_server::set_ssl_context` | `src/net/uvcpp_tcp_server.h:709-709` | "生命周期必须覆盖**整个服务端**，本服务端不持有它的所有权，也不负责释放"（`src/net/uvcpp_tcp_server.h:702-704`） |
 | `uvcpp_tcp_client::enable_tls` | `src/net/uvcpp_tcp_client.h:221-221` | "生命周期必须覆盖**整条连接**"（`:217`） |
-| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:2090-2090` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
+| `uvcpp_web_app` | `src/webapp/uvcpp_web_app.cpp:2102-2102` | 全库唯一"有人拥有"的一处：`std::shared_ptr<uvcpp_ssl_context>` |
 
 顺序：`set_ssl_context` **必须在 `listen()` 之前**（`:346-347`），清空用
 `set_ssl_context(nullptr)`。而且它是**在 loop 线程调用**的。
 
 上下文对象本身的地址被 OpenSSL 长期持有——ALPN 选择回调通过 `arg` 拿到的就是成员
-`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:218`，实现
+`alpn_select_wire_` 的地址（`src/ssl/uvcpp_ssl_context.h:235`，实现
 `SSL_CTX_set_alpn_select_cb(ctx_, alpn_select_cb, &alpn_select_wire_)`）。
 **所以不要移动它、不要提前析构它。**
 
