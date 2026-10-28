@@ -1633,9 +1633,15 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   uvcpp_ws_server* ws_server_;
 
-#if UVCPP_ZLIB_ENABLE
   /// 服务端子协议列表。**建 `ws_server_` 时打过去**（同压缩策略的规矩）。
+  ///
+  /// 不受 `UVCPP_ZLIB_ENABLE` 管：子协议协商与 permessage-deflate 是两件事，
+  /// `set_ws_subprotocols()` / `get_ws_subprotocols()` 在关掉 zlib 的构建里也
+  /// 是公开 API。放在下面那个 `#if` 里时，`ZLIB=OFF + WEBAPP=ON` 这一路根本
+  /// 编不过（`ws_subprotocols_` 未声明）。
   std::vector<std::string> ws_subprotocols_;
+
+#if UVCPP_ZLIB_ENABLE
   /// WS permessage-deflate 策略。**建 `ws_server_` 时才打过去** —— 存一份在
   /// App 上（而不是只存在服务上）是为了让 `set_ws_compression()` 能在
   /// `websocket()` 之前调：那时服务器还没建，`ws_server()` 还是 nullptr。
