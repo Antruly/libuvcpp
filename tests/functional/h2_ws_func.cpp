@@ -20,6 +20,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <uv.h>
 
@@ -272,12 +273,127 @@ void test_ws() {
   loop.run(UV_RUN_NOWAIT);
 }
 
+/// 与 h3 那条腿同形：帧回调里把会话删掉是合法用法（应用收到一条错误帧就把整条
+/// 会话收摊）。两帧躺在同一批数据里时，旧实现会拿已析构的解析器解第二帧。
+void test_destroy_in_frame_callback() {
+  uvcpp_loop loop;
+  uvcpp_test::loop_drain drain(&loop);
+
+  uvcpp_tcp_server server(&loop);
+  check(server.bind("127.0.0.1", 0) == 0, "destroy: server bind");
+  const int port = server_port(server);
+  check(port > 0, "destroy: server port");
+
+  std::unique_ptr<uvcpp_h2_connection>    srv_h2;
+  std::unique_ptr<uvcpp_h2_ws_connection> srv_ws;
+  std::vector<std::string> server_texts;
+
+  const int lrc = server.listen([&](uvcpp_tcp_client* client) {
+    srv_h2.reset(new uvcpp_h2_connection(client, /*server_side=*/true));
+    uvcpp_h2_session::callbacks h2cbs;
+    h2cbs.on_request = [&](uvcpp_h2_session&, uvcpp_h2_stream& st, bool) {
+      uvcpp_h2_ws_connection::callbacks wc;
+      wc.on_text = [&](const std::string& message) {
+        server_texts.push_back(message);
+        // The application hangs up from inside the frame callback.
+        srv_ws.reset();
+      };
+      wc.on_error = [](int, const std::string&) {};
+      srv_ws = uvcpp_h2_ws_connection::accept(*srv_h2, st.stream_id,
+                                              st.request, wc);
+      check(srv_ws != nullptr, "destroy: server accept websocket");
+    };
+    uvcpp_h2_connection::callbacks cc;
+    cc.on_disconnect = [&](uvcpp_h2_connection&) {
+      srv_ws.reset();
+      srv_h2.reset();
+    };
+    if (srv_h2->start(h2cbs, cc) != 0) {
+      std::cerr << "destroy: server h2 start failed" << std::endl;
+      ++g_fail;
+    }
+  });
+  check(lrc == 0, "destroy: server listen");
+  if (lrc != 0) return;
+
+  uvcpp_tcp_client client(&loop);
+  std::unique_ptr<uvcpp_h2_connection>    cli_h2;
+  std::unique_ptr<uvcpp_h2_ws_connection> cli_ws;
+  bool connected = false;
+
+  const int crc = client.connect("127.0.0.1", port, [&](int status) {
+    connected = status == 0;
+    if (!connected) return;
+    cli_h2.reset(new uvcpp_h2_connection(&client, /*server_side=*/false));
+    uvcpp_h2_session::callbacks h2cbs;
+    uvcpp_h2_connection::callbacks cc;
+    cc.on_disconnect = [](uvcpp_h2_connection&) {};
+    if (cli_h2->start(h2cbs, cc) != 0) {
+      std::cerr << "destroy: client h2 start failed" << std::endl;
+      ++g_fail;
+      cli_h2.reset();
+    }
+  });
+  check(crc == 0, "destroy: client connect accepted");
+  if (crc != 0) return;
+  check(uvcpp_test::wait_until(&loop, [&] { return connected; }, kDeadlineMs),
+        "destroy: tcp connected");
+
+  uvcpp_h2_ws_connection::callbacks wc;
+  wc.on_close = [](ws_close_code, const std::string&) {};
+  wc.on_error = [](int, const std::string&) {};
+  check(uvcpp_test::wait_until(
+            &loop,
+            [&] {
+              cli_ws = uvcpp_h2_ws_connection::connect(*cli_h2, "/chat",
+                                                       "localhost", wc);
+              return cli_ws != nullptr;
+            },
+            kDeadlineMs),
+        "destroy: client websocket");
+  if (cli_ws == nullptr) return;
+  check(uvcpp_test::wait_until(&loop, [&] { return srv_ws != nullptr; },
+                               kDeadlineMs),
+        "destroy: server side is up");
+
+  // Two text frames in one stream write: they arrive in one `on_data` call,
+  // which is the shape that crashed.
+  std::string frames;
+  for (const char* message : {"one", "two"}) {
+    uvcpp_ws_frame frame;
+    frame.opcode  = ws_opcode::TEXT;
+    frame.fin     = true;
+    frame.masked  = false;
+    frame.payload = uvcpp_buf(message, std::strlen(message));
+    const std::size_t size = uvcpp_ws_parser::calc_frame_size(frame);
+    std::string bytes(size, '\0');
+    uvcpp_ws_parser::build_frame(&bytes[0], frame);
+    frames += bytes;
+  }
+  check(cli_h2->send_data(cli_ws->stream_id(), frames.data(), frames.size(),
+                          /*end_stream=*/false, nullptr) == 0,
+        "destroy: two frames written at once");
+  check(uvcpp_test::wait_until(&loop, [&] { return !server_texts.empty(); },
+                               kDeadlineMs),
+        "destroy: the first frame arrives");
+  // The second frame must not reach the session the first one destroyed.
+  check(server_texts.size() == 1 && server_texts[0] == "one",
+        "destroy: the frame after the close is dropped");
+  check(srv_ws == nullptr, "destroy: the server session is gone");
+
+  cli_ws.reset();
+  cli_h2.reset();
+  server.stop();
+  loop.run(UV_RUN_NOWAIT);
+}
+
 }  // namespace
 
 int main() {
   std::cout << "WebSocket over HTTP/2 (RFC 8441, #58)" << std::endl;
   test_session_guards();
   test_ws();
+  test_destroy_in_frame_callback();
   if (g_fail != 0) {
     std::cerr << g_fail << " check(s) failed" << std::endl;
     return 1;

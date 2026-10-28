@@ -38,6 +38,7 @@ uvcpp_h3_ws_connection::uvcpp_h3_ws_connection(uvcpp_h3_connection* h3,
                                                int64_t sid, callbacks cbs)
     : h3_(h3),
       life_(h3->life_token()),
+      alive_(new char(0)),
       sid_(sid),
       cbs_(std::move(cbs)) {
   parser_.set_on_frame(
@@ -53,6 +54,9 @@ bool uvcpp_h3_ws_connection::linked() const {
 }
 
 uvcpp_h3_ws_connection::~uvcpp_h3_ws_connection() {
+  // **第一件事**：把存活令牌置位。析构完全可能发生在 `on_data` 自己的调用栈
+  // 里（帧回调把会话删了），那时栈上的 on_data 只剩这枚令牌可以看。
+  if (alive_) *alive_ = 1;
   // 摘掉流上的 sink：h3 连接里不能留一个指向已析构对象的 this。
   //
   // **先问令牌**：连接比本对象先销毁是合法时序（webapp 在连接收尾之后才回收
@@ -216,9 +220,17 @@ void uvcpp_h3_ws_connection::on_data(const char* data, size_t len) {
   if (closed_ || data == nullptr || len == 0) return;
   // 解析器每帧之后停在 COMPLETE，必须 reset 才能接着解下一帧（与
   // `uvcpp_ws_connection::on_tcp_data` 的循环同形）。
+  //
+  // 一批数据里常常躺着好几帧。**帧回调可以把本对象删掉**（应用收到一条错误帧
+  // 就把整条会话收摊）：那样再解下一帧就是在已释放
+  // 对象上走解析器，`frame_arg_` 已被析构清成 nullptr，调用会直接崩在
+  // `trampoline_frame`。令牌拿的是强引用，本对象死了它还活着，所以这里每一轮
+  // 只看令牌，回调一返回就检查。
+  const std::shared_ptr<char> alive = alive_;
   size_t off = 0;
   while (off < len && !closed_) {
     const size_t used = parser_.execute(data + off, len - off);
+    if (*alive != 0) return;   // 回调里已经析构：不能再碰 this
     const ws_parser_state st = parser_.get_state();
     if (st == ws_parser_state::COMPLETE) {
       if (used == 0) break;
@@ -303,19 +315,24 @@ void uvcpp_h3_ws_connection::on_frame(const uvcpp_ws_frame& frame) {
 
   if (!frame.fin) return;
 
+  // 先把消息从成员里摘出来，再叫应用：回调里删掉本条会话是合法的，那之后
+  // 这里不能再碰 `message_`（旧写法把 `clear()` 放在回调之后）。
   in_message_ = false;
-  if (message_op_ == ws_opcode::TEXT) {
-    if (cbs_.on_text) cbs_.on_text(message_);
+  const ws_opcode op = message_op_;
+  std::string message;
+  message.swap(message_);
+  if (op == ws_opcode::TEXT) {
+    if (cbs_.on_text) cbs_.on_text(message);
   } else if (cbs_.on_binary) {
-    cbs_.on_binary(reinterpret_cast<const uint8_t*>(message_.data()),
-                   message_.size());
+    cbs_.on_binary(reinterpret_cast<const uint8_t*>(message.data()),
+                   message.size());
   }
-  message_.clear();
 }
 
 void uvcpp_h3_ws_connection::fail(int code, const std::string& why) {
   if (closed_) return;
-  if (cbs_.on_error) cbs_.on_error(code, why);
+  // 本地状态与 Close 帧先收好，再叫应用 —— `on_error` 里把这条会话删掉是
+  // 合法用法，那之后这里不能再碰任何成员（旧写法把回调放在最前面）。
   uvcpp_ws_frame f;
   f.opcode = ws_opcode::CLOSE;
   f.fin    = true;
@@ -324,6 +341,7 @@ void uvcpp_h3_ws_connection::fail(int code, const std::string& why) {
   send_frame(f);
   if (linked()) h3_->end_stream_data(sid_);
   closed_ = true;
+  if (cbs_.on_error) cbs_.on_error(code, why);
 }
 
 }  // namespace uvcpp

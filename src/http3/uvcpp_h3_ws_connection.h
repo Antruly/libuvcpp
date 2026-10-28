@@ -116,6 +116,12 @@ class UVCPP_API uvcpp_h3_ws_connection {
   uvcpp_h3_connection*      h3_ = nullptr;
   /// 连接比本对象先销毁也合法：任何回头碰它的地方都先问这一枚令牌。
   std::weak_ptr<const char> life_;
+  /// 本对象自己的存活令牌（与 `uvcpp_ws_connection::alive_token_` 同一手法）。
+  ///
+  /// 帧回调是应用代码，**在里面把这条会话删掉是合法的**（应用收到一条错误帧
+  /// 就把整条会话收摊）。`on_data` 解完一帧之后
+  /// 只能看这枚令牌，不能再碰 `this` —— 析构把 *alive_ 置 1。
+  std::shared_ptr<char>     alive_;
   int64_t                   sid_ = -1;
   callbacks            cbs_;
   uvcpp_ws_parser      parser_;
