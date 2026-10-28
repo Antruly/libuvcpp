@@ -53,9 +53,11 @@
 
 namespace uvcpp {
 
-class uvcpp_h3_connection;
-struct h3_request;
-class uvcpp_h3_wt_stream;
+// 前向声明带 `UVCPP_API`：定义处带了，先声明不带会让 MSVC 报 C4273
+// （`uvcpp_h3_connection.h` 顶上那段注释说的是同一件事）。
+class UVCPP_API uvcpp_h3_connection;
+struct UVCPP_API h3_request;
+class UVCPP_API uvcpp_h3_wt_stream;
 
 /**
  * @brief 一条 WebTransport 流（双向或单向）。
