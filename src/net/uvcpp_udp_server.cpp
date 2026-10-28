@@ -11,6 +11,7 @@
 #include <uvcpp/uvcpp_define.h>
 
 #include <chrono>
+#include <memory>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -36,6 +37,13 @@ uvcpp_udp_server::uvcpp_udp_server() {
   loop_ = new uvcpp_loop();
   udp_  = new uvcpp_udp(loop_);
   status_ = UDP_SERVER_NONE;
+}
+
+uvcpp_udp_server::uvcpp_udp_server(uvcpp_loop* loop) {
+  loop_      = loop != nullptr ? loop : uvcpp_loop::default_loop();
+  udp_       = new uvcpp_udp(loop_);
+  owns_loop_ = false;
+  status_    = UDP_SERVER_NONE;
 }
 
 std::shared_ptr<char> uvcpp_udp_server::alive_token() {
@@ -72,13 +80,22 @@ uvcpp_udp_server::~uvcpp_udp_server() {
     // —— `recv_stop()` 会把活跃计数减掉，带上它就会把"读过、还开着、已经不
     // 在读"误判成"早就关完了"，于是 socket 不关、句柄留在队列上。
     if (!udp_->is_closing()) {
-      bool close_done = false;
-      udp_->close([&close_done](uvcpp_handle*) { close_done = true; });
-      for (int i = 0; i < 64 && !close_done; ++i) {
-        if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
+      if (owns_loop_) {
+        // `close()` 的回调是**可能晚于本析构**才跑的（64 轮泵不完就留到调用方
+        // 那一拍），所以完成标志不能是栈上的引用 —— 那把回调会写进一个已经退栈
+        // 的帧。共享指针让迟到的回调有一个活着的落点；我们不等它。
+        std::shared_ptr<bool> close_done = std::make_shared<bool>(false);
+        udp_->close([close_done](uvcpp_handle*) { *close_done = true; });
+        for (int i = 0; i < 64 && !*close_done; ++i) {
+          if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
+        }
       }
-    } else {
-      if (loop_ != nullptr) loop_->run(UV_RUN_NOWAIT);
+      // 外部循环：**不显式 close、不泵**（泵别人的循环会替调用方跑循环线程，
+      // 而上面那种带栈上落点的回调在这里必然迟到）。`delete udp_` 的
+      // `free_handle()` 会换成 detached marker 再走 `uv_close` —— 底层是
+      // `uv_close` 之后的收尾，不需要回调里的任何东西，由循环属主那一拍收场。
+    } else if (owns_loop_ && loop_ != nullptr) {
+      loop_->run(UV_RUN_NOWAIT);
     }
     delete udp_;
     udp_ = nullptr;
@@ -91,14 +108,17 @@ uvcpp_udp_server::~uvcpp_udp_server() {
   // 后者内部会 `stop()`，而 `uv_run` 的
   // `while (r != 0 && loop->stop_flag == 0)` 是**进 body 之前**判的，停标志一
   // 立那一轮就整段空转，交替调用等于原地打转。
-  if (loop_ != nullptr) {
+  // 外部循环整段跳过（`owns_loop_ == false`）：循环不是我们的，关它等于把同一条
+  // 循环上别的对象的句柄连同它们的事件一起废掉，`delete loop_` 更是直接还别人的
+  // 内存。句柄该关的上面已经关过了，收尾留给循环的属主。
+  if (loop_ != nullptr && owns_loop_) {
     for (int i = 0; i < 256 && loop_->loop_alive() != 0; ++i) {
       loop_->run(UV_RUN_NOWAIT);
     }
     loop_->loop_close();
     delete loop_;
-    loop_ = nullptr;
   }
+  loop_ = nullptr;
 
   if (recv_arg_ != nullptr) {
     delete static_cast<std::function<void(uvcpp_buf*, const char*, int)>*>(
@@ -379,7 +399,9 @@ void uvcpp_udp_server::stop(std::function<void()> on_stopped) {
 // =========================================================================
 
 int uvcpp_udp_server::run(uv_run_mode md) { return loop_->run(md); }
-void uvcpp_udp_server::stop_loop() { loop_->stop(); }
+void uvcpp_udp_server::stop_loop() {
+  if (owns_loop_ && loop_ != nullptr) loop_->stop();
+}
 
 // =========================================================================
 // Internal

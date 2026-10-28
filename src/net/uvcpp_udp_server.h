@@ -53,6 +53,18 @@ class UVCPP_API uvcpp_udp_server {
   UVCPP_DEFINE_FUNC(uvcpp_udp_server)
   UVCPP_DEFINE_COPY_FUNC_DELETE(uvcpp_udp_server)
 
+  /**
+   * @brief 用一条**外部**事件循环，与 `uvcpp_tcp_server(uvcpp_loop*)` 同一约定：
+   * 本对象**不拥有**它，析构时也不关不删；`run()` 由调用方负责。
+   *
+   * issue #59：`uvcpp_web_app` / 中继这类"一条循环上既有
+   * WS/TCP 又要 UDP 端点"的场景，自带循环的版本会把回调
+   * 放到另一条线程上，跨到循环亲和的连接上就不安全。
+   *
+   * @warning 外部循环必须活得比本对象长。`stop_loop()` 在外部模式下是**空操作**。
+   */
+  explicit uvcpp_udp_server(uvcpp_loop* loop);
+
   // -----------------------------------------------------------------
   // Accessors
   // -----------------------------------------------------------------
@@ -109,6 +121,7 @@ class UVCPP_API uvcpp_udp_server {
   // Loop control
   // -----------------------------------------------------------------
 
+  /** @brief 外部循环模式下不做任何事（那条循环不是本对象的）。 */
   int run(uv_run_mode md = UV_RUN_DEFAULT);
   void stop_loop();
 
@@ -138,6 +151,8 @@ class UVCPP_API uvcpp_udp_server {
 
   uvcpp_loop* loop_ = nullptr;
   uvcpp_udp*  udp_  = nullptr;
+  /// 外部循环构造进来时置 false：析构不关、不删它。
+  bool owns_loop_ = true;
   int status_       = UDP_SERVER_NONE;
   int last_error_code_ = 0;
 
