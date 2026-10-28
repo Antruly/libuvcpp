@@ -15,16 +15,14 @@
  *   | 3  | `GET /status`（无 body、无 `content-length`） | `send_status`（201 + body） | 状态码 201、body 逐字节；服务端那侧 `expected_body` = **E_NOT_FOUND** |
  *   | 5  | `GET /stream` | `send_headers` + 两块 `send_data` | body **逐字节**相等、两个 `done` **恰好各跑一次**；服务端那侧 `expected_body` = **E_NOT_FOUND** |
  *
- * ★ `expected_body` 这一列**故意只在服务端那一侧断言** —— 那一句的语义是**不对称**的，
- *   而且这个不对称来自下一层：`uvcpp_h2_stream` 的 `has_content_length` /
- *   `expected_body` 这一对**只在解请求头时填**（`uvcpp_h2_session.cpp:393-414`，
- *   在 `handle_regular()` 里，那条路只有服务端才走），客户端解响应头走的是另一条
- *   分支，那里只把 `content-length` 原样收进 `response.headers`。
- *   于是：客户端在 `expected_body()` 上**永远**拿到 `E_NOT_FOUND`（本用例也照实
- *   断言这一点，三条流都是），客户端要知道响应体长度得读
- *   `uvcpp_c_h2_stream_response_header(st, "content-length", …)` —— 那是**那个头**
- *   本身，两边都收得到。把"永远不成立的那一侧"写进断言，是个假判据；写进注释
- *   说明它为什么不成立，才是判据。
+ * ★ `expected_body` 这一列**两个方向都要断言**。1.8.12-dev 之前这一句在客户端
+ *   那一侧永远返回 `E_NOT_FOUND`（`has_content_length` / `expected_body` 只在解
+ *   请求头时填，见 `handle_regular()`），响应方向补上 `content-length` 校验之后
+ *   （RFC 9113 §8.1.1 对两个方向同一条规矩），客户端解响应头时这一对也填了。
+ *   所以这里现在有**两列不同的观测**：
+ *     - 服务端（请求方向）：流 1 的请求体长度、流 3/5 无宣告 → `E_NOT_FOUND`；
+ *     - 客户端（响应方向）：流 1 的 `20`、流 3 的 `4`、流 5 流式 → `E_NOT_FOUND`。
+ *   读**那个头本身**仍走 `uvcpp_c_h2_stream_response_header(...)`（原始字符串）。
  *
  * 为什么**不开 TLS**：本层（`uvcpp_h2_connection`）只做"字节从哪来、往哪去"，
  * 它拿的是一个已经能在上面读写的 `uvcpp_tcp_client` —— 它内部**没有任何一句**
@@ -168,12 +166,13 @@ typedef struct {
   int  status;             /* response_status() 的返回值 */
   int  status_rc;          /* 同上那次调用的返回码（E_NOT_FOUND 之类） */
   int  resp_end;           /* on_response_end 到过几次 */
-  /* 这一对名字必须分开，因为它们是**两条不同的路**、返回码也不同：
-   * `exp_body_*` 是 `expected_body()`（本层维护的那个数，客户端侧永远是
-   * `E_NOT_FOUND`），`cont_len_*` 是 `content-length` **那个头**（客户端侧该走
-   * 的路）。合成一个字段的话，"两条路各自对不对"就量不出来了。 */
-  int  exp_body_rc;
-  int  cont_len_rc;
+  /* 这一对名字必须分开，因为它们是**两条不同的路**：
+   * `exp_body_*` 是 `expected_body()`（本层维护的那个**数**，两个方向都维护），
+   * `cont_len_*` 是 `content-length` **那个头**的原始字符串。合成一个字段的话，
+   * "两条路各自对不对"就量不出来了。 */
+  int    exp_body_rc;
+  size_t exp_body;
+  int    cont_len_rc;
   size_t cont_len;
   accum body;
 } stream_slot;
@@ -206,8 +205,8 @@ typedef struct {
   int  missing_rc[kStreams];        /* 查一个不存在的头 */
   int  missing_len[kStreams];       /* 同上，cap=0 先问长度那条路 */
   int  req_body_bytes[kStreams];    /* stream_body_bytes() 在 on_request_end 里 */
-  /* ★ `expected_body()` 的**主场**在这张表的服务端一侧：请求方向的
-   * `content-length` 只有这条路上有人维护（见本文件头部 ★ 那一段）。 */
+  /* `expected_body()` 的**服务端一侧**（请求方向）。客户端一侧在同一条
+   * 服务端循环的另一张表 `g_cs` 里，见本文件头部 ★ 那一段。 */
   int  exp_body_rc[kStreams];
   int  exp_body[kStreams];
   int  req_state[kStreams];
@@ -625,20 +624,25 @@ static void cli_on_response(void* ud, uvcpp_c_h2_connection* c,
     CHECK_STR(buf, "one");
   }
 
-  /* ★ 客户端这一侧 `expected_body()` **永远**是 `E_NOT_FOUND` —— 三条流都一样，
-   * 而这不是 bug，是这一层的语义本来就只维护**请求方向**的那一对
-   * （`has_content_length` / `expected_body` 只在解请求头时填，见本文件头部
-   * ★ 那一段）。这里照实断言"永远不成立"，而不是删掉这个断言：
-   *   - 删掉 → 一个"客户端上它突然开始给数"的改动（比如有人顺手去响应头那条
-   *     路上也填了这一对）不会有人发现；
-   *   - 断言"给数" → 那是把假判据写成判据，它会红，而且红得没道理。
+  /* ★ 客户端这一侧 `expected_body()` **1.8.12-dev 起也填了**（响应方向的
+   * `content-length` 校验）。三条流是三份不同的观测：
+   *   - 流 1（`send_response` + body）：C++ 侧补 `content-length` → 给数；
+   *   - 流 3（`send_status`）：按 C++ 侧约定必写 `content-length` → 给数；
+   *   - 流 5（`send_headers` 起的流式响应）：一个字节都不补 → `E_NOT_FOUND`。
    * 那条"out 不被写"的断言也在：返回非 0 时写 out 是 FFI 面最常见的越界写。 */
   {
     size_t n = 0x5a5a;
     rc = uvcpp_c_h2_stream_expected_body(st, &n);
     cs->slot[slot].exp_body_rc = rc;
-    CHECK_INT(rc, UVCPP_C_E_NOT_FOUND);
-    CHECK_INT((int)n, 0x5a5a);
+    cs->slot[slot].exp_body    = n;
+    if (slot == 2) {
+      CHECK_INT(rc, UVCPP_C_E_NOT_FOUND);
+      CHECK_INT((int)n, 0x5a5a);
+    } else {
+      CHECK_INT(rc, UVCPP_C_OK);
+      CHECK_INT((int)n, slot == 0 ? (int)strlen(kSrvBody)
+                                  : (int)strlen(kStatusBody));
+    }
   }
 
   /* 客户端**该走的那条路**：读 `content-length` **这个头**，再自己转成数
@@ -1077,18 +1081,19 @@ int main(void) {
   CHECK(accum_is(&g_cs.slot[2].body, kStreamBody));
   CHECK_INT(g_cs.slot[2].body.len, (int)strlen(kStreamBody));
 
-  /* ---- `expected_body()` 的不对称，两条路各自断言 ----------------------
+  /* ---- `expected_body()` 两个方向各断言 --------------------------------
    *
-   * 客户端侧（`exp_body_rc`）：三条流**都**是 `E_NOT_FOUND`，连那条服务端
-   * 明明宣告了 `content-length: 20` 的响应也是 —— 因为这一层只维护请求方向
-   * 的那一对（本文件头部 ★ 那一段）。这一条**故意写得这么死**：它是一份
-   * "客户端这条路现在就是不通"的记录，将来谁在响应头那条路上也把这个数填上，
-   * 这一条会红，而那正是该有人来看一眼的时候。
+   * 客户端侧（`exp_body_rc` / `exp_body`）：1.8.12-dev 起响应方向也维护这一对
+   * （RFC 9113 §8.1.1 的 content-length 校验）。流 1 / 3 有宣告 → 给数；
+   * 流 5 是流式、一个 `content-length` 都没有 → `E_NOT_FOUND`。
    *
-   * 客户端该走的那条路（`cont_len_rc` / `cont_len`）：读 `content-length`
-   * 这个头。流 1 / 3 有（分别是 20 与 4），流 5 是流式、没有 → `E_NOT_FOUND`。 */
-  CHECK_INT(g_cs.slot[0].exp_body_rc, UVCPP_C_E_NOT_FOUND);
-  CHECK_INT(g_cs.slot[1].exp_body_rc, UVCPP_C_E_NOT_FOUND);
+   * 客户端读**那个头本身**的那条路（`cont_len_rc` / `cont_len`）仍然在：
+   * 流 1 / 3 有（分别是 20 与 4），流 5 没有 → `E_NOT_FOUND`。两者现在一致，
+   * 但语义不同：一个是解析后的数，一个是原始字符串。 */
+  CHECK_INT(g_cs.slot[0].exp_body_rc, UVCPP_C_OK);
+  CHECK_INT((int)g_cs.slot[0].exp_body, (int)strlen(kSrvBody));
+  CHECK_INT(g_cs.slot[1].exp_body_rc, UVCPP_C_OK);
+  CHECK_INT((int)g_cs.slot[1].exp_body, (int)strlen(kStatusBody));
   CHECK_INT(g_cs.slot[2].exp_body_rc, UVCPP_C_E_NOT_FOUND);
   CHECK_INT(g_cs.slot[0].cont_len_rc, (int)strlen("20"));
   CHECK_INT((int)g_cs.slot[0].cont_len, (int)strlen(kSrvBody));

@@ -303,9 +303,9 @@ public static partial class UvcppNative
     [DllImport(Lib, EntryPoint = "uvcpp_c_h2_stream_body_bytes", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     public static extern nuint uvcpp_c_h2_stream_body_bytes(uvcpp_c_h2_stream st);
 
-    /// <summary>对端宣告的 `content-length`（只在服务端那一侧有意义），非空时写出那个数。</summary>
+    /// <summary>对端宣告的 `content-length`（两个方向都维护），非空时写出那个数。</summary>
     /// <returns>对端给了 `content-length` → 0；没给 → `E_NOT_FOUND`（"没给"与"给了 0"是两件事）。</returns>
-    /// <remarks>客户端侧这一句永远拿到 `E_NOT_FOUND`；客户端要读响应体的 `content-length` 请用 `_response_header()`。回调期句柄，出了回调一律 `E_STALE`。</remarks>
+    /// <remarks>1.8.12-dev 起客户端解响应头时也填这一对（响应方向的 content-length 校验）；要读那个头本身的原始字符串用 `_response_header()`。回调期句柄，出了回调一律 `E_STALE`。</remarks>
     [DllImport(Lib, EntryPoint = "uvcpp_c_h2_stream_expected_body", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     public static extern int uvcpp_c_h2_stream_expected_body(uvcpp_c_h2_stream st, out nuint @out);
 

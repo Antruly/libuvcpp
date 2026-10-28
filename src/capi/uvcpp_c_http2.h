@@ -477,28 +477,24 @@ UVCPP_C_API int uvcpp_c_h2_stream_paused(const uvcpp_c_h2_stream* st);
 UVCPP_C_API size_t uvcpp_c_h2_stream_body_bytes(const uvcpp_c_h2_stream* st);
 
 /**
- * @brief 对端宣告的 `content-length`。**只在服务端那一侧有意义。**
+ * @brief 对端宣告的 `content-length`。**两个方向都维护**（1.8.12-dev 起）。
  *
  * @param out 非空时写出那个数（仅在返回 0 时）。
  * @return 对端给了 `content-length` → 0；**没给** → `UVCPP_C_E_NOT_FOUND`。
  *         "没给"与"给了 0"是两件事：前者是流式体，后者是一条空 body，
  *         业务上要分得开（与批 2 的 `_header()` 同一个理由）。
  *
- * ★ **这一条是不对称的，而且这个不对称来自下一层**：`uvcpp_h2_stream` 的
- *   `has_content_length` / `expected_body` 这一对**只在解请求头时填**
- *   （`uvcpp_h2_session.cpp:408-413` 在 `handle_regular()` 里，那条路只有
- *   `server_side` 才走）。客户端侧解响应头走的是另一条分支，那里只把
- *   `content-length` 原样收进 `response.headers`。
+ * ★ **这一条曾经是不对称的**：1.8.12-dev 之前 `has_content_length` /
+ *   `expected_body` 这一对只在解**请求头**时填（`handle_regular()` 那条路只有
+ *   `server_side` 才走），客户端解响应头只把 `content-length` 原样收进
+ *   `response.headers` —— 于是客户端在这一句上永远拿到 `E_NOT_FOUND`。
+ *   响应方向补上 `content-length` 校验之后（RFC 9113 §8.1.1 对两个方向是
+ *   同一条规矩），这一对在**客户端解响应头**时也填了。
  *
- *   所以：**服务端**（请求方向）这一句给出对端宣告的请求体长度；
- *   **客户端**在这一句上**永远**拿到 `E_NOT_FOUND` —— 那不是本层的缺口，是
- *   "这一层没有维护这个数"。客户端要知道响应体的长度，请读
- *   `uvcpp_c_h2_stream_response_header(st, "content-length", …)`：
- *  那是 `content-length` **这个头**本身，两边都收得到，而且它是什么就说什么
- *   （连"解出来是 0"也照实给），与"这个数由谁来维护"是两回事。
- *
- *   把这条写在这里而不是让它成为"用了才发现"的意外：一个永远返回
- *   `E_NOT_FOUND` 的接口如果不说明，读代码的人会以为客户端那条路上有个 bug。
+ *   现在两个方向给出同一个语义：对端宣告了就给出那个数，没宣告（流式 /
+ *   没有 `content-length`）就是 `E_NOT_FOUND`。要读**那个头本身**（连
+ *   "解出来是 0"的原始字符串）仍请用
+ *   `uvcpp_c_h2_stream_response_header(st, "content-length", …)`。
  */
 UVCPP_C_API int uvcpp_c_h2_stream_expected_body(const uvcpp_c_h2_stream* st,
                                                 size_t* out);
