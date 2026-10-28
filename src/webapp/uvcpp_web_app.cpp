@@ -1550,6 +1550,9 @@ uvcpp_web_app& uvcpp_web_app::enable_wss() {
   // 构造时**不接管** on_upgrade（那是下面这一行的事）：分派权归框架，
   // 因为框架要按路径选处理器，而 ws_server 只能给出一条全局的 on_connection。
   ws_server_ = new uvcpp_ws_server(http_);
+  // 与压缩策略同一条规矩：攒下来的子协议此刻打过去，`set_ws_subprotocols()`
+  // 在 `enable_wss()` 之前调也生效。
+  ws_server_->set_subprotocols(ws_subprotocols_);
 
 #if UVCPP_ZLIB_ENABLE
   // 把攒下来的压缩策略打过去。默认值就是 `uvcpp_ws_server` 自己的默认值
@@ -1564,6 +1567,18 @@ uvcpp_web_app& uvcpp_web_app::enable_wss() {
     self->on_ws_upgrade(req, client);
   });
   return *this;
+}
+
+uvcpp_web_app& uvcpp_web_app::set_ws_subprotocols(
+    const std::vector<std::string>& protos) {
+  ws_subprotocols_ = protos;
+  if (ws_server_ != nullptr) ws_server_->set_subprotocols(protos);
+  return *this;
+}
+
+std::vector<std::string> uvcpp_web_app::get_ws_subprotocols() const {
+  if (ws_server_ != nullptr) return ws_server_->get_subprotocols();
+  return ws_subprotocols_;
 }
 
 #if UVCPP_ZLIB_ENABLE

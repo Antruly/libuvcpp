@@ -878,7 +878,9 @@ int uvcpp_tcp_client::connect(const char* ip, int port,
   // 配了 SOCKS5 时这里仍是**目标**主机名：TLS 的 SNI 与证书校验必须对目标，
   // 不能变成代理的地址。
   if (ip != nullptr) {
-    tls_host_want_ = ip;
+    // 显式的 SNI/校验目标优先于 connect 的 host（连 IP、证书是域名那种）；
+    // 没设时退回 connect 的 host —— 绝大多数连接的形状。
+    tls_host_want_ = tls_host_override_.empty() ? ip : tls_host_override_;
     apply_tls_hostname();
   }
 #endif  // UVCPP_OPENSSL_ENABLE
@@ -1144,7 +1146,7 @@ int uvcpp_tcp_client::connect_wait(const char* ip, int port, int timeout_ms) {
 #if UVCPP_OPENSSL_ENABLE
   // 同 `connect()`：主机名要在 `resolve_host_sync()` 之前留一份。
   if (ip != nullptr) {
-    tls_host_want_ = ip;
+    tls_host_want_ = tls_host_override_.empty() ? ip : tls_host_override_;
     apply_tls_hostname();
   }
 #endif  // UVCPP_OPENSSL_ENABLE

@@ -171,6 +171,34 @@ void uvcpp_ws_server::attach(uvcpp_http_server* http) {
 }
 
 // =========================================================================
+// 子协议（Sec-WebSocket-Protocol）
+// =========================================================================
+
+void uvcpp_ws_server::set_subprotocols(const std::vector<std::string>& protos) {
+  subprotocols_ = protos;
+}
+
+namespace {
+
+/// 逗号分隔的头值 → 逐项 trim（OWS）。空项丢弃。
+std::vector<std::string> split_header_list(const std::string& v) {
+  std::vector<std::string> out;
+  size_t i = 0;
+  while (i <= v.size()) {
+    size_t comma = v.find(',', i);
+    if (comma == std::string::npos) comma = v.size();
+    size_t b = i, e = comma;
+    while (b < e && (v[b] == ' ' || v[b] == '\t')) ++b;
+    while (e > b && (v[e - 1] == ' ' || v[e - 1] == '\t')) --e;
+    if (e > b) out.push_back(v.substr(b, e - b));
+    i = comma + 1;
+  }
+  return out;
+}
+
+}  // namespace
+
+// =========================================================================
 // Upgrade handler
 // =========================================================================
 
@@ -197,12 +225,34 @@ void uvcpp_ws_server::handle_upgrade(
   }
 #endif
 
+  // ---- 子协议选择（RFC 6455 §4.1）------------------------------------
+  //
+  // 服务端只能回**一个**客户端提过的名字；没有交集就不发这个头（合法降级）。
+  // 顺序按**服务端**偏好（`subprotocols_` 的顺序），在客户端列表里找第一命中。
+  std::string chosen_subprotocol;
+  if (!subprotocols_.empty()) {
+    const std::vector<std::string> offered = split_header_list(
+        http_get_header(req.headers, "sec-websocket-protocol"));
+    for (size_t i = 0; i < subprotocols_.size() && chosen_subprotocol.empty();
+         ++i) {
+      for (size_t k = 0; k < offered.size(); ++k) {
+        if (offered[k] == subprotocols_[i]) {
+          chosen_subprotocol = subprotocols_[i];
+          break;
+        }
+      }
+    }
+  }
+
   std::string accept = compute_accept_key(ws_key);
   std::ostringstream oss;
   oss << "HTTP/1.1 101 Switching Protocols\r\n"
       << "Upgrade: websocket\r\n"
       << "Connection: Upgrade\r\n"
       << "Sec-WebSocket-Accept: " << accept << "\r\n";
+  if (!chosen_subprotocol.empty()) {
+    oss << "Sec-WebSocket-Protocol: " << chosen_subprotocol << "\r\n";
+  }
 #if UVCPP_ZLIB_ENABLE
   if (dp.accepted) {
     oss << "Sec-WebSocket-Extensions: " << ws_deflate_response_header(dp) << "\r\n";
@@ -214,7 +264,7 @@ void uvcpp_ws_server::handle_upgrade(
   // Write 101, then start WS connection from the write callback
   // (outside the read callback — safe to call read_start here)
   client->write(wire.c_str(), wire.size(),
-                [this, client, dp, on_ready](int status) {
+                [this, client, dp, on_ready, chosen_subprotocol](int status) {
     // 101 没写出去（对端已经断了 / 写失败）就到此为止：连接已经没有意义，
     // 不该再在它上面建一个 WS 会话并回调用户。原先这里忽略 status，照样建
     // 连接、照样回调，用户拿到的是一个发不出也收不到的会话。
@@ -234,6 +284,7 @@ void uvcpp_ws_server::handle_upgrade(
     }
 
     auto* conn = new uvcpp_ws_connection(client, ws_role::SERVER);
+    if (!chosen_subprotocol.empty()) conn->set_subprotocol(chosen_subprotocol);
     // **先接管所有权，再 start()。** 反过来的话，如果对端在我们 start() 的
     // 过程中就断了（关闭观察者立刻回调），会话会不知道把自己交给谁。
     if (shard != nullptr) shard->adopt(conn);

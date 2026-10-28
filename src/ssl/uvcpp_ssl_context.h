@@ -18,6 +18,7 @@
 #if UVCPP_OPENSSL_ENABLE
 
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <uvcpp/uvcpp_define.h>
@@ -59,6 +60,20 @@ class UVCPP_API uvcpp_ssl_context {
 
   /** @brief Load private key from PEM string. **先装证书再调它**，见上。 */
   bool load_private_key_data(const std::string& pem);
+
+  /**
+   * @brief 把当前证书（叶子）导出成 PEM。**测试与"证书固定"那类场景用**。
+   *
+   * `generate_self_signed()` 生成的证书此前没有出口 —— 想把它交给
+   * `add_sni_certificate_data()` 或别处，只能落盘再读，而临时文件和文件权限
+   * 本身又是一堆平台问题。私钥同理（`private_key_pem()`）。
+   *
+   * @return true = 导出成功；false = 没有证书 / 内存不足。
+   */
+  bool certificate_pem(std::string& out) const;
+
+  /** @brief 把当前私钥导出成**未加密**的 PEM（同一条理由，见上）。 */
+  bool private_key_pem(std::string& out) const;
 
   /**
    * @brief Generate a self-signed certificate (for testing).
@@ -180,6 +195,35 @@ class UVCPP_API uvcpp_ssl_context {
    */
   void set_alpn_select_protos(const std::vector<std::string>& protos);
 
+  // -------------------------------------------------------------------
+  // SNI（服务端虚拟主机 / 多域名证书）
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 服务端：按 SNI 主机名选一套证书。**accept 之前调**。
+   *
+   * 表里的名字大小写不敏感；`*.example.com` 是**一层**标签的通配
+   * （`a.example.com` 命中，`a.b.example.com` 不命中）。同一个名字后加的
+   * **替换**先加的。
+   *
+   * 没带 SNI、或名字不在表里 ⇒ **回落到默认证书**（`load_certificate_*` 装的
+   * 那一套）—— 这是"虚拟主机之外还有一个默认站点"的正常形状，不是错误。
+   *
+   * 回调注册在 `SSL_CTX` 上，所以与 `set_alpn_select_protos()` 同一条纪律：
+   * **accept 开始之后不要再改这张表**（握手线程会读到正在被修改的 `std::map`）。
+   *
+   * @return true = 装上了；false = 不是 SERVER 上下文 / PEM 读不出 / 证书与
+   *         私钥不配对 / 内存不足。
+   */
+  bool add_sni_certificate_data(const std::string& host,
+                                const std::string& cert_pem,
+                                const std::string& key_pem);
+  bool add_sni_certificate_file(const std::string& host,
+                                const std::string& cert_path,
+                                const std::string& key_path);
+  /** @brief 已装了几个 SNI 证书（默认那套不算）。 */
+  size_t sni_certificate_count() const { return sni_ctxs_.size(); }
+
   /**
    * @brief 是否已经装过服务端 ALPN 名单。
    *
@@ -223,6 +267,11 @@ class UVCPP_API uvcpp_ssl_context {
   void set_default_verify();
   void clear_error();
 
+  /// SNI 取证书：OpenSSL 的 servername 回调（注册在 `ctx_` 上）。
+  static int sni_select_cb(ssl_st* ssl, int* al, void* arg);
+  /// 按名字查一张替代 `SSL_CTX`（精确优先，其次一层通配）。
+  ssl_ctx_st* find_sni_ctx(const std::string& host) const;
+
   ssl_ctx_st* ctx_ = nullptr;
   tls_mode    mode_;
   tls_version min_version_;
@@ -234,6 +283,10 @@ class UVCPP_API uvcpp_ssl_context {
   std::string last_error_;
   // 选择回调通过 arg 拿到的是这个成员的地址，所以它必须活得和 ctx_ 一样久。
   std::string alpn_select_wire_;
+
+  /// SNI 名字（小写）→ 一套**独立**的服务端上下文。默认证书不在表里。
+  std::map<std::string, uvcpp_ssl_context*> sni_ctxs_;
+  bool sni_cb_installed_ = false;
 };
 
 }  // namespace uvcpp

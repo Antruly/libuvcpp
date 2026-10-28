@@ -202,7 +202,7 @@ struct callbacks {
    收尾动作。
 
 TLS 与 ALPN 全是 `uvcpp_tcp_client` 内部的事，这一层只读一个字符串
-（`src/net/uvcpp_tcp_client.h:221-221` / `:224` / `:236` / `:258`）。
+（`src/net/uvcpp_tcp_client.h:221-221` / `:224` / `src/net/uvcpp_tcp_client.h:253-253` / `src/net/uvcpp_tcp_client.h:275-275`）。
 `src/http2/` 里**没有一次 `#include` ssl 头**。
 
 ### 唯一的那个连接级回调

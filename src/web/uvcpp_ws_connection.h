@@ -91,6 +91,18 @@ class UVCPP_API uvcpp_ws_connection {
   void start();
 
   /**
+   * @brief 这条连接协商出的子协议（`Sec-WebSocket-Protocol`）；没协商出时为空。
+   *
+   * 由 `uvcpp_ws_server` 在 101 之前按 `set_subprotocols()` 选好并写进这里，
+   * 业务侧在读回调里据此分派（`chat` 走聊天、`superchat` 走另一套）—— 那比
+   * 自己去翻升级请求的头可靠：这条连接上再没有别的地方记着它。
+   */
+  const std::string& subprotocol() const { return subprotocol_; }
+
+  /// 由服务端在 101 之前调；业务代码不需要碰它。
+  void set_subprotocol(const std::string& p) { subprotocol_ = p; }
+
+  /**
    * @brief 补投"跟握手挤在同一批到达"的字节（**升级方专用**）。
    *
    * @param data  WS 字节（升级应答/请求之后剩下的那一截）。
@@ -342,6 +354,8 @@ class UVCPP_API uvcpp_ws_connection {
 
   /// 本端角色。决定掩码检查的方向（见构造函数的说明）。
   ws_role role_ = ws_role::SERVER;
+  /// 协商出的子协议；空 = 没协商（见 `subprotocol()`）。
+  std::string subprotocol_;
 
   /// 只在本类内部用；语义同 `role_ == ws_role::SERVER`。
   bool is_server() const { return role_ == ws_role::SERVER; }

@@ -14,7 +14,7 @@
 `v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9`、`1.8.10` 是它之后的补丁版，
 不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.13-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.8.14-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -816,7 +816,7 @@
   的 `done` 与 `send_trailers()` 的地方，返回 0 是"已声明"。为此给
   `uvcpp_web_response` 补了文档化的尾随头入口 `set_trailers()` / `has_trailers()` /
   `trailers()`（`src/webapp/uvcpp_web_response.h:525-529`），并在 `send_response()` 里加了
-  三段那条分支（`src/webapp/uvcpp_web_app.cpp:2991-3023`）。
+  三段那条分支（`src/webapp/uvcpp_web_app.cpp:3006-3038`）。
   `std::string` 那个重载不是顺手加的：`uvcpp_web_request::take_from()` 把 body **搬**进了
   自己的 `body_`，源请求的 `src_.body` 那之后就空了，所以 `req.raw().body` **不是**
   "另一条拿到同一份字节的路"。判据与量法见下一条
@@ -1390,13 +1390,13 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   （`src/web/uvcpp_http_server.cpp:1719-1719`），而 llhttp 的 flags 是**连接级**的、
   属于「最近一条解析完的报文」—— 一个 `execute()` 会把整批 N 条一次解完，所以第 1 条
   读到的是**第 N 条**的结论。末条写 `close` ⇒ 服务器在第 1 条响应之后关连接，第 2..N 条
-  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2832-2832` 打
+  响应随连接一起消失（服务端那时在 `src/webapp/uvcpp_web_app.cpp:2847-2847` 打
   「连接 N 已断开，响应被丢弃」，客户端收到 1 条 + FIN）。**同步处理函数侥幸躲开**：
   它们的响应在解析器前进之前就序列化完了 —— 所以这条缺陷只在「流水线 + 异步响应」
   同时成立的形状里现形，而静态腿（响应要等池）正是这个形状。
 
   **改法**：webapp 在**发送前**把「**这一条**请求自己」的结论钉成显式 `connection`
-  头（`src/webapp/uvcpp_web_app.cpp:2839-2842`）。判据取每请求的那份副本 ——
+  头（`src/webapp/uvcpp_web_app.cpp:2854-2857`）。判据取每请求的那份副本 ——
   `on_http_request()` 里 `take_from()` 早把头部整表搬成了请求自己的，`is_keep_alive()`
   读的就是这一条的 `connection`，与解析器走到哪儿无关；规则与 llhttp 逐字一致
   （1.1 默认保持、1.0 默认关闭），也就是 RFC 9112 §9.6 的「每条报文自己的连接选项」。

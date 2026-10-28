@@ -50,7 +50,21 @@ std::unique_ptr<uvcpp_h2_ws_connection> uvcpp_h2_ws_connection::accept(
   resp.version     = uvcpp_http_version::HVER_20;
   resp.status_code = http_status::OK;
   // RFC 8441 不使用 `Sec-WebSocket-Accept`；流上不再发 body 头。
-  const std::string proto = req.get_header("sec-websocket-protocol");
+  //
+  // 子协议必须**挑一个**客户端提过的名字回，不能把整串提议原样回过去
+  // （RFC 6455 §4.1；整串在两个客户端都合规时才现形）。这里取客户端列表里的
+  // **第一个** —— 一个合法的服务端选择。需要按服务端偏好选的那条路在 h1 的
+  // `uvcpp_ws_server::set_subprotocols()`，h2/h3 暂不接那张表。
+  std::string proto = req.get_header("sec-websocket-protocol");
+  const size_t comma = proto.find(',');
+  if (comma != std::string::npos) proto.erase(comma);
+  while (!proto.empty() && (proto[proto.size() - 1] == ' ' ||
+                            proto[proto.size() - 1] == '\t')) {
+    proto.erase(proto.size() - 1);
+  }
+  while (!proto.empty() && (proto[0] == ' ' || proto[0] == '\t')) {
+    proto.erase(0, 1);
+  }
   if (!proto.empty()) resp.set_header("sec-websocket-protocol", proto);
 
   const int rc = h2.send_headers(stream_id, resp);

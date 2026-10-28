@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http3/uvcpp_h3_ws_connection.cpp
  * @brief WebSocket over HTTP/3（RFC 9220，#53）。
  */
@@ -66,10 +66,24 @@ std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::accept(
 
   std::vector<h3_header> hs;
   hs.push_back(make_status(200));
-  // 回显子协议（如果请求里提了）。RFC 8441/9220 不使用 `Sec-WebSocket-Accept`。
+  // 子协议：**挑一个**客户端提过的名字（RFC 6455 §4.1），不能把整串提议原样
+  // 回过去 —— 那在两个客户端都合规时才现形。取列表里的第一个（合法选择）。
+  // RFC 8441/9220 不使用 `Sec-WebSocket-Accept`。
   for (size_t i = 0; i < req.headers.size(); ++i) {
     if (req.headers[i].name == "sec-websocket-protocol") {
-      hs.push_back(make_regular("sec-websocket-protocol", req.headers[i].value));
+      std::string proto = req.headers[i].value;
+      const size_t comma = proto.find(',');
+      if (comma != std::string::npos) proto.erase(comma);
+      while (!proto.empty() && (proto[proto.size() - 1] == ' ' ||
+                                proto[proto.size() - 1] == '\t')) {
+        proto.erase(proto.size() - 1);
+      }
+      while (!proto.empty() && (proto[0] == ' ' || proto[0] == '\t')) {
+        proto.erase(0, 1);
+      }
+      if (!proto.empty()) {
+        hs.push_back(make_regular("sec-websocket-protocol", proto));
+      }
       break;
     }
   }
@@ -93,9 +107,18 @@ std::unique_ptr<uvcpp_h3_ws_connection> uvcpp_h3_ws_connection::accept(
 
   std::vector<h3_header> hs;
   hs.push_back(make_status(200));
-  // 回显子协议（如果请求里提了）。与上面那个重载逐字相同 —— 两边的头类型
-  // 不同（`h3_header` / `http_header`），但取的就是那一个名字与值。
-  const std::string proto = http_get_header(req.headers, "sec-websocket-protocol");
+  // 与上面那个重载逐字相同（两边的头类型不同，取的是同一个名字）；只回
+  // **一个**客户端提过的名字，理由见上。
+  std::string proto = http_get_header(req.headers, "sec-websocket-protocol");
+  const size_t comma = proto.find(',');
+  if (comma != std::string::npos) proto.erase(comma);
+  while (!proto.empty() && (proto[proto.size() - 1] == ' ' ||
+                            proto[proto.size() - 1] == '\t')) {
+    proto.erase(proto.size() - 1);
+  }
+  while (!proto.empty() && (proto[0] == ' ' || proto[0] == '\t')) {
+    proto.erase(0, 1);
+  }
   if (!proto.empty()) hs.push_back(make_regular("sec-websocket-protocol", proto));
   const int rc = h3.send_stream_response(stream_id, hs);
   if (rc != 0) return nullptr;

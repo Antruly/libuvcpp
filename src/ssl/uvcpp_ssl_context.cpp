@@ -60,6 +60,16 @@ uvcpp_ssl_context::uvcpp_ssl_context(tls_mode mode, tls_version ver)
 }
 
 uvcpp_ssl_context::~uvcpp_ssl_context() {
+  // SNI 表里的上下文是**本对象拥有**的（`new` 出来、挂在 `sni_ctxs_` 上）。
+  // 先释放它们再释放默认的 `ctx_`：回调注册在 `ctx_` 上，而 `ctx_` 一 free，
+  // 回调连同它的 arg 都不再被调用 —— 次序反过来也不会有问题，但先把"由本对象
+  // 派生出来的东西"收掉更符合所有权链。
+  for (std::map<std::string, uvcpp_ssl_context*>::iterator it =
+           sni_ctxs_.begin();
+       it != sni_ctxs_.end(); ++it) {
+    delete it->second;
+  }
+  sni_ctxs_.clear();
   if (ctx_) { SSL_CTX_free(ctx_); ctx_ = nullptr; }
 }
 
@@ -102,6 +112,31 @@ int openssl_version_of(tls_version ver) {
     case tls_version::TLS_1_3: return TLS1_3_VERSION;
   }
   return TLS1_2_VERSION;
+}
+
+std::string sni_lower(const std::string& s) {
+  std::string out = s;
+  for (size_t i = 0; i < out.size(); ++i) {
+    if (out[i] >= 'A' && out[i] <= 'Z') {
+      out[i] = static_cast<char>(out[i] + ('a' - 'A'));
+    }
+  }
+  return out;
+}
+
+/// 一层标签的通配：`*.example.com` 命中 `a.example.com`，不命中
+/// `a.b.example.com`（RFC 6125 §6.4.3 的"最左标签可以是通配"）。
+bool sni_host_matches(const std::string& pattern, const std::string& host) {
+  if (pattern.size() > 2 && pattern[0] == '*' && pattern[1] == '.') {
+    const std::string suffix = pattern.substr(1);  // ".example.com"
+    if (host.size() <= suffix.size()) return false;
+    if (host.compare(host.size() - suffix.size(), suffix.size(), suffix) != 0) {
+      return false;
+    }
+    const std::string label = host.substr(0, host.size() - suffix.size());
+    return !label.empty() && label.find('.') == std::string::npos;
+  }
+  return pattern == host;
 }
 
 }  // namespace
@@ -306,6 +341,146 @@ bool uvcpp_ssl_context::load_ca_data(const std::string& pem) {
   BIO_free(bio);
   ERR_clear_error();  // 清掉"读到文件尾"留下的 PEM_R_NO_START_LINE
   return any;
+}
+
+// =========================================================================
+// 导出（测试 / 证书固定）
+// =========================================================================
+
+bool uvcpp_ssl_context::certificate_pem(std::string& out) const {
+  out.clear();
+  if (ctx_ == nullptr) return false;
+  X509* leaf = SSL_CTX_get0_certificate(ctx_);
+  if (leaf == nullptr) return false;
+  BIO* bio = BIO_new(BIO_s_mem());
+  if (bio == nullptr) return false;
+  const bool ok = PEM_write_bio_X509(bio, leaf) == 1;
+  if (ok) {
+    char* data = nullptr;
+    const long n = BIO_get_mem_data(bio, &data);
+    if (data != nullptr && n > 0) out.assign(data, static_cast<size_t>(n));
+  }
+  BIO_free(bio);
+  return ok && !out.empty();
+}
+
+bool uvcpp_ssl_context::private_key_pem(std::string& out) const {
+  out.clear();
+  if (ctx_ == nullptr) return false;
+  EVP_PKEY* key = SSL_CTX_get0_privatekey(ctx_);
+  if (key == nullptr) return false;
+  BIO* bio = BIO_new(BIO_s_mem());
+  if (bio == nullptr) return false;
+  const bool ok = PEM_write_bio_PrivateKey(bio, key, nullptr, nullptr, 0,
+                                           nullptr, nullptr) == 1;
+  if (ok) {
+    char* data = nullptr;
+    const long n = BIO_get_mem_data(bio, &data);
+    if (data != nullptr && n > 0) out.assign(data, static_cast<size_t>(n));
+  }
+  BIO_free(bio);
+  return ok && !out.empty();
+}
+
+// =========================================================================
+// SNI（服务端虚拟主机 / 多域名证书）
+// =========================================================================
+
+int uvcpp_ssl_context::sni_select_cb(ssl_st* ssl, int* /*al*/, void* arg) {
+  uvcpp_ssl_context* self = static_cast<uvcpp_ssl_context*>(arg);
+  if (self == nullptr || ssl == nullptr) return SSL_TLSEXT_ERR_NOACK;
+
+  const char* name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+  if (name == nullptr || *name == '\0') {
+    // 没带 SNI（老客户端、按 IP 连）：用默认证书，不是错误。
+    return SSL_TLSEXT_ERR_NOACK;
+  }
+
+  SSL_CTX* alt = self->find_sni_ctx(name);
+  if (alt == nullptr) return SSL_TLSEXT_ERR_NOACK;
+
+  // 把这条连接切到那张上下文上。证书、私钥、协议版本都随之生效；返回值是
+  // 旧上下文，不需要（也不应该）释放它 —— 那由本对象拥有。
+  if (SSL_set_SSL_CTX(ssl, alt) == nullptr) {
+    return SSL_TLSEXT_ERR_ALERT_FATAL;
+  }
+  return SSL_TLSEXT_ERR_OK;
+}
+
+ssl_ctx_st* uvcpp_ssl_context::find_sni_ctx(const std::string& host) const {
+  const std::string h = sni_lower(host);
+
+  std::map<std::string, uvcpp_ssl_context*>::const_iterator it =
+      sni_ctxs_.find(h);
+  if (it != sni_ctxs_.end()) return it->second->raw_ctx();
+
+  // 精确没命中再试通配。表很小（通常个位数），线性扫一遍就够。
+  for (it = sni_ctxs_.begin(); it != sni_ctxs_.end(); ++it) {
+    if (sni_host_matches(it->first, h)) return it->second->raw_ctx();
+  }
+  return nullptr;
+}
+
+bool uvcpp_ssl_context::add_sni_certificate_data(const std::string& host,
+                                                 const std::string& cert_pem,
+                                                 const std::string& key_pem) {
+  if (mode_ != tls_mode::SERVER || ctx_ == nullptr) return false;
+  if (host.empty()) return false;
+
+  // **先建好新的、再换上去**：替换现有条目时，半路失败不能把旧的那一套弄坏
+  // （旧上下文已经被正在跑的握手握着，改它等于给线上连接换证书）。
+  uvcpp_ssl_context* alt = new uvcpp_ssl_context(tls_mode::SERVER, min_version_);
+  if (!alt->is_ready() || !alt->load_certificate_data(cert_pem) ||
+      !alt->load_private_key_data(key_pem) || !alt->check_private_key()) {
+    delete alt;
+    return false;
+  }
+
+  const std::string key = sni_lower(host);
+  std::map<std::string, uvcpp_ssl_context*>::iterator it = sni_ctxs_.find(key);
+  if (it != sni_ctxs_.end()) {
+    delete it->second;
+    it->second = alt;
+  } else {
+    sni_ctxs_.insert(std::make_pair(key, alt));
+  }
+
+  if (!sni_cb_installed_) {
+    SSL_CTX_set_tlsext_servername_callback(ctx_, &uvcpp_ssl_context::sni_select_cb);
+    SSL_CTX_set_tlsext_servername_arg(ctx_, this);
+    sni_cb_installed_ = true;
+  }
+  return true;
+}
+
+bool uvcpp_ssl_context::add_sni_certificate_file(const std::string& host,
+                                                 const std::string& cert_path,
+                                                 const std::string& key_path) {
+  if (mode_ != tls_mode::SERVER || ctx_ == nullptr) return false;
+  if (host.empty()) return false;
+
+  uvcpp_ssl_context* alt = new uvcpp_ssl_context(tls_mode::SERVER, min_version_);
+  if (!alt->is_ready() || !alt->load_certificate_file(cert_path) ||
+      !alt->load_private_key_file(key_path) || !alt->check_private_key()) {
+    delete alt;
+    return false;
+  }
+
+  const std::string key = sni_lower(host);
+  std::map<std::string, uvcpp_ssl_context*>::iterator it = sni_ctxs_.find(key);
+  if (it != sni_ctxs_.end()) {
+    delete it->second;
+    it->second = alt;
+  } else {
+    sni_ctxs_.insert(std::make_pair(key, alt));
+  }
+
+  if (!sni_cb_installed_) {
+    SSL_CTX_set_tlsext_servername_callback(ctx_, &uvcpp_ssl_context::sni_select_cb);
+    SSL_CTX_set_tlsext_servername_arg(ctx_, this);
+    sni_cb_installed_ = true;
+  }
+  return true;
 }
 
 void uvcpp_ssl_context::set_verify_mode(tls_verify_mode mode) {

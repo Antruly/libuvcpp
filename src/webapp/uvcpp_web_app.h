@@ -987,6 +987,21 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_ws_deflate_config get_ws_compression() const;
 #endif
 
+  /**
+   * @brief 服务端 WS 子协议列表（`Sec-WebSocket-Protocol`，RFC 6455 §4.1）。
+   *
+   * 握手时按这个列表的顺序，在客户端的提议里挑第一个命中的写进 101。没有
+   * 交集就不发这个头（合法降级）。业务侧读
+   * `uvcpp_ws_connection::subprotocol()` 拿到协商结果。
+   *
+   * **调用顺序无关**（与 `set_ws_compression()` 同一条规矩）：WS 服务是
+   * `enable_wss()` / `websocket()` 时惰性创建的，配置先存在 App 上、建时打
+   * 过去；已经建好之后调也立刻生效。
+   */
+  uvcpp_web_app& set_ws_subprotocols(const std::vector<std::string>& protos);
+  /** @brief 当前生效的子协议列表（服务已建时读它的，否则读存下来的意图）。 */
+  std::vector<std::string> get_ws_subprotocols() const;
+
   /** @brief 是否已经打开 WS 支持。 */
   bool wss_enabled() const { return ws_server_ != nullptr; }
 
@@ -1619,6 +1634,8 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   uvcpp_ws_server* ws_server_;
 
 #if UVCPP_ZLIB_ENABLE
+  /// 服务端子协议列表。**建 `ws_server_` 时打过去**（同压缩策略的规矩）。
+  std::vector<std::string> ws_subprotocols_;
   /// WS permessage-deflate 策略。**建 `ws_server_` 时才打过去** —— 存一份在
   /// App 上（而不是只存在服务上）是为了让 `set_ws_compression()` 能在
   /// `websocket()` 之前调：那时服务器还没建，`ws_server()` 还是 nullptr。

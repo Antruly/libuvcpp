@@ -236,6 +236,23 @@ class UVCPP_API uvcpp_ws_server {
 #endif
 
   /**
+   * @brief 服务端支持的子协议列表（`Sec-WebSocket-Protocol`，RFC 6455 §4.1）。
+   *
+   * 握手时从客户端的**提议列表**里挑一个：按本列表的顺序找第一个客户端也提
+   * 到了的名字，把它写进 101 响应 —— 服务端**不能**回一个客户端没提过的名字，
+   * 也**不能**把整串提议原样回过去（那是两个客户端都合规时才会暴露的协议违例）。
+   *
+   * 没有交集时**不发**这个头（合法降级：客户端自己决定接不接受），握手照常
+   * 成功 —— 与 permessage-deflate 协商失败同一条处置。需要用这个值做业务分派
+   * 时读 `uvcpp_ws_connection::subprotocol()`。
+   *
+   * 与压缩策略一样，**请在开始 accept 之前调**（握手回调读的是这个 vector）。
+   */
+  void set_subprotocols(const std::vector<std::string>& protos);
+  /** @brief 当前配置的子协议列表（副本）。 */
+  std::vector<std::string> get_subprotocols() const { return subprotocols_; }
+
+  /**
    * @brief 由客户端的 `Sec-WebSocket-Key` 算出 `Sec-WebSocket-Accept`
    *        （RFC 6455 §4.2.2：base64(sha1(key + 固定 GUID))）。
    *
@@ -284,6 +301,9 @@ class UVCPP_API uvcpp_ws_server {
   std::vector<uvcpp_ws_sessions*> shard_snapshot() const;
 
   std::function<void(uvcpp_ws_connection*)> on_conn_;
+
+  /// `set_subprotocols()` 配置的服务端子协议（顺序即服务端偏好）。
+  std::vector<std::string> subprotocols_;
 
 #if UVCPP_ZLIB_ENABLE
   uvcpp_ws_deflate_config deflate_cfg_;

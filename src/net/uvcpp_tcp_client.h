@@ -224,6 +224,23 @@ class UVCPP_API uvcpp_tcp_client {
   bool is_tls() const { return tls_ssl_ != nullptr; }
 
   /**
+   * @brief 覆盖 TLS 的 **SNI 与主机名校验目标**（默认 = `connect()` 的 host）。
+   *
+   * 两个真实用途：
+   *   - **按 IP 连、证书按域名签**：`set_tls_server_name("api.example.com")`
+   *     之后 `connect("10.0.0.5", 443)`，SNI 与 `PEER_STRICT` 的名字校验都看
+   *     域名，而不是 IP（RFC 6066 §3 本来就不许把 IP 放进 SNI）；
+   *   - **服务端虚拟主机 / 多域名证书**：客户端这边要发出正确的名字，服务端
+   *     的 `uvcpp_ssl_context::add_sni_certificate_*` 才选得到那一套。
+   *
+   * 必须在 `connect()` / `connect_wait()` **之前**调；传空串恢复默认。
+   * 不改变要连的地址本身 —— 那仍然由 `connect()` 的参数决定。
+   */
+  void set_tls_server_name(const std::string& host) {
+    tls_host_override_ = host;
+  }
+
+  /**
    * @brief 本条连接宣告支持的 ALPN 协议名（顺序即优先级）。
    *
    * `enable_tls()` 前后调都可以：之前调就先记下、建好 SSL 对象时再装上。
@@ -1232,6 +1249,8 @@ class UVCPP_API uvcpp_tcp_client {
   /// 主机名校验用。**先记下来、能装就装**（与 `tls_alpn_want_` 同一套延迟装配）：
   /// 两条路都合法 —— 先 `enable_tls()` 再 `connect()`，或反过来。
   std::string tls_host_want_;
+  /// `set_tls_server_name()` 设的覆盖值；空 = 跟着 `connect()` 的 host 走。
+  std::string tls_host_override_;
   std::string tls_out_;                  ///< 待发密文（wbio 抽出来的）
   bool        tls_out_busy_       = false;  ///< 有一个密文写在途
   std::string tls_plain_;                ///< 已解密、尚未交付的明文
