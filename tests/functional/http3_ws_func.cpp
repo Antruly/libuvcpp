@@ -9,6 +9,7 @@
  */
 
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -168,11 +169,120 @@ void test_ws() {
   check(!cli_ws->is_open(), "本地关闭后 is_open = false");
 }
 
+/// 帧回调里把会话删掉是合法用法（应用收到一条错误帧就把整条会话收摊）。两帧
+/// 躺在同一批数据里时，旧实现会拿已析构的解析器解第二帧，
+/// 直接崩在 `trampoline_frame`（arg 为 null，2026-10-29 的 h3 relay 崩溃）。
+void test_destroy_in_frame_callback() {
+  uvcpp_loop loop;
+
+  uvcpp_ssl_context server_ctx(tls_mode::SERVER, tls_version::TLS_1_3);
+  if (!server_ctx.generate_self_signed("localhost", 2048)) {
+    check(false, "destroy: server cert");
+    return;
+  }
+  uvcpp_ssl_context client_ctx(tls_mode::CLIENT, tls_version::TLS_1_3);
+  client_ctx.set_verify_mode(tls_verify_mode::NONE);
+
+  uvcpp_quic_server server(&loop);
+  server.set_ssl_context(&server_ctx);
+  if (server.bind("127.0.0.1", 0) != 0) {
+    check(false, "destroy: server bind");
+    return;
+  }
+
+  std::unique_ptr<uvcpp_h3_connection> srv_h3;
+  std::unique_ptr<uvcpp_h3_ws_connection> srv_ws;
+  std::vector<std::string> server_texts;
+
+  const int lrc = server.listen([&](uvcpp_quic_connection* c) {
+    srv_h3.reset(new uvcpp_h3_connection(c, /*server_side=*/true));
+    uvcpp_h3_connection::callbacks cbs;
+    cbs.on_connect_request = [&](uvcpp_h3_connection& h3,
+                                 const h3_request& req) {
+      uvcpp_h3_ws_connection::callbacks wc;
+      wc.on_text = [&](const std::string& message) {
+        server_texts.push_back(message);
+        // The application hangs up from inside the frame callback.
+        srv_ws.reset();
+      };
+      srv_ws = uvcpp_h3_ws_connection::accept(h3, req, wc);
+      check(srv_ws != nullptr, "destroy: server accept websocket");
+    };
+    cbs.on_error = [](uvcpp_h3_connection&, int) {};
+    cbs.on_disconnect = [](uvcpp_h3_connection&) {};
+    check(srv_h3->start(cbs) == 0, "destroy: server h3 start");
+  });
+  check(lrc == 0, "destroy: server listen");
+  if (lrc != 0) return;
+  const int port = server.configured_port();
+
+  uvcpp_quic_client client(&loop);
+  client.set_ssl_context(&client_ctx);
+  std::unique_ptr<uvcpp_h3_connection> cli_h3;
+  std::unique_ptr<uvcpp_h3_ws_connection> cli_ws;
+  bool connected = false;
+  const int crc = client.connect("127.0.0.1", port, [&](int status) {
+    connected = status == 0;
+  });
+  check(crc == 0, "destroy: client connect accepted");
+  if (crc != 0) return;
+
+  cli_h3.reset(
+      new uvcpp_h3_connection(client.connection(), /*server_side=*/false));
+  uvcpp_h3_connection::callbacks cc;
+  cc.on_error = [](uvcpp_h3_connection&, int) {};
+  cc.on_disconnect = [](uvcpp_h3_connection&) {};
+  check(cli_h3->start(cc) == 0, "destroy: client h3 start");
+  check(uvcpp_test::wait_until(&loop, [&] { return connected; }, kDeadlineMs),
+        "destroy: handshake");
+
+  uvcpp_h3_ws_connection::callbacks wc;
+  wc.on_close = [](ws_close_code, const std::string&) {};
+  wc.on_error = [](int, const std::string&) {};
+  cli_ws = uvcpp_h3_ws_connection::connect(*cli_h3, "/chat", "localhost", wc);
+  check(cli_ws != nullptr, "destroy: client websocket");
+  if (cli_ws == nullptr) return;
+  check(uvcpp_test::wait_until(&loop, [&] { return srv_ws != nullptr; },
+                               kDeadlineMs),
+        "destroy: server side is up");
+
+  // Two text frames in one stream write: they arrive in one `on_data` call,
+  // which is the shape that crashed.
+  std::string frames;
+  for (const char* message : {"one", "two"}) {
+    uvcpp_ws_frame frame;
+    frame.opcode = ws_opcode::TEXT;
+    frame.fin    = true;
+    frame.masked = false;
+    frame.payload = uvcpp_buf(message, std::strlen(message));
+    const std::size_t size = uvcpp_ws_parser::calc_frame_size(frame);
+    std::string bytes(size, '\0');
+    uvcpp_ws_parser::build_frame(&bytes[0], frame);
+    frames += bytes;
+  }
+  check(cli_h3->write_stream_data(cli_ws->stream_id(), frames.data(),
+                                  frames.size()) == 0,
+        "destroy: two frames written at once");
+  check(uvcpp_test::wait_until(&loop, [&] { return !server_texts.empty(); },
+                               kDeadlineMs),
+        "destroy: the first frame arrives");
+  // The second frame must not reach the session the first one destroyed.
+  check(server_texts.size() == 1 && server_texts[0] == "one",
+        "destroy: the frame after the close is dropped");
+  check(srv_ws == nullptr, "destroy: the server session is gone");
+
+  cli_ws.reset();
+  cli_h3.reset();
+  srv_h3.reset();
+  uvcpp_test::wait_until(&loop, [] { return false; }, 50);  // let teardown run
+}
+
 }  // namespace
 
 int main() {
   std::cout << "WebSocket over HTTP/3 (#53)" << std::endl;
   test_ws();
+  test_destroy_in_frame_callback();
   if (g_fail != 0) {
     std::cerr << g_fail << " check(s) failed" << std::endl;
     return 1;

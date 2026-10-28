@@ -20,6 +20,7 @@ uvcpp_h2_ws_connection::uvcpp_h2_ws_connection(uvcpp_h2_connection* h2,
                                                int32_t sid, callbacks cbs)
     : h2_(h2),
       life_(h2->life_token()),
+      alive_(new char(0)),
       sid_(sid),
       cbs_(std::move(cbs)) {
   parser_.set_on_frame([this](const uvcpp_ws_frame& f) { on_frame(f); });
@@ -34,6 +35,8 @@ bool uvcpp_h2_ws_connection::linked() const {
 }
 
 uvcpp_h2_ws_connection::~uvcpp_h2_ws_connection() {
+  // 先置位：析构可能就在 `on_data` 的调用栈里（帧回调删掉了这条会话）。
+  if (alive_) *alive_ = 1;
   // 摘掉流上的落点：h2 会话里不能留一个指向已析构对象的 this。
   //
   // **先问令牌**：连接比本对象先销毁是合法时序（应用先拆了连接，会话晚一步
@@ -166,9 +169,13 @@ int uvcpp_h2_ws_connection::close(ws_close_code code,
 
 void uvcpp_h2_ws_connection::on_data(const char* data, size_t len) {
   if (closed_ || data == nullptr || len == 0) return;
+  // 帧回调可能把本对象删掉（见头文件那枚令牌）：解完一帧先看令牌，死了就
+  // 立刻返回，绝不在已释放对象上解下一帧。
+  const std::shared_ptr<char> alive = alive_;
   size_t off = 0;
   while (off < len && !closed_) {
     const size_t used = parser_.execute(data + off, len - off);
+    if (*alive != 0) return;
     const ws_parser_state st = parser_.get_state();
     if (st == ws_parser_state::COMPLETE) {
       if (used == 0) break;
@@ -255,19 +262,24 @@ void uvcpp_h2_ws_connection::on_frame(const uvcpp_ws_frame& frame) {
 
   if (!frame.fin) return;
 
+  // 先把消息从成员里摘出来，再叫应用：回调里删掉本条会话是合法的，那之后
+  // 这里不能再碰 `message_`（旧写法把 `clear()` 放在回调之后）。
   in_message_ = false;
-  if (message_op_ == ws_opcode::TEXT) {
-    if (cbs_.on_text) cbs_.on_text(message_);
+  const ws_opcode op = message_op_;
+  std::string message;
+  message.swap(message_);
+  if (op == ws_opcode::TEXT) {
+    if (cbs_.on_text) cbs_.on_text(message);
   } else if (cbs_.on_binary) {
-    cbs_.on_binary(reinterpret_cast<const uint8_t*>(message_.data()),
-                   message_.size());
+    cbs_.on_binary(reinterpret_cast<const uint8_t*>(message.data()),
+                   message.size());
   }
-  message_.clear();
 }
 
 void uvcpp_h2_ws_connection::fail(int code, const std::string& why) {
   if (closed_) return;
-  if (cbs_.on_error) cbs_.on_error(code, why);
+  // 本地状态与 Close 帧先收好，再叫应用 —— `on_error` 里把这条会话删掉是
+  // 合法用法，那之后这里不能再碰任何成员。
   uvcpp_ws_frame f;
   f.opcode = ws_opcode::CLOSE;
   f.fin    = true;
@@ -278,6 +290,7 @@ void uvcpp_h2_ws_connection::fail(int code, const std::string& why) {
     h2_->send_data(sid_, nullptr, 0, /*end_stream=*/true, nullptr);
   }
   closed_ = true;
+  if (cbs_.on_error) cbs_.on_error(code, why);
 }
 
 }  // namespace uvcpp

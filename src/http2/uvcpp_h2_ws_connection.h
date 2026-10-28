@@ -102,6 +102,10 @@ class UVCPP_API uvcpp_h2_ws_connection {
   uvcpp_h2_connection*      h2_ = nullptr;
   /// 连接比本对象先销毁也合法：任何回头碰它的地方都先问这一枚令牌。
   std::weak_ptr<const char> life_;
+  /// 本对象自己的存活令牌（与 `uvcpp_h3_ws_connection` / `uvcpp_ws_connection`
+  /// 同一手法）：帧回调里删掉这条会话是合法的，`on_data` 解完一帧后只能看
+  /// 这枚令牌，不能再碰 `this`。
+  std::shared_ptr<char>     alive_;
   int32_t                   sid_ = -1;
   callbacks            cbs_;
   uvcpp_ws_parser      parser_;
