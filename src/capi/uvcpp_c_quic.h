@@ -69,8 +69,10 @@
  *
  * 不提供（刻意）
  * --------------
- *   - **0-RTT / 连接迁移 / datagram / multipath**：C++ 侧本来就没有
- *     （`doc/quic-guide.md` §8 那张"没做的"表逐条列着），C 面不会凭空长出来。
+ *   - **0-RTT / 连接迁移 / datagram（RFC 9221）/ multipath**：C++ 侧的
+ *     0-RTT、迁移与 datagram 从 1.8.2 起就有了（见 `doc/quic-guide.md`），
+ *     但这几样**没有进 C ABI** —— 它们的参数与生命周期（会话票据、路径、回调
+ *     里的原始指针）都是 C++ 面才承担得起的形状。C 面要用就先在 C++ 侧包一层。
  *   - `uvcpp_loop*` 的那两个构造函数（`uvcpp_quic_client(uvcpp_loop*)`）：本层
  *     至今没有 `uvcpp_c_loop` 这个句柄类型，为了两个构造函数造一个，等于把
  *     "循环归谁"这件事摆到 C 面上 —— 而端点本来就各带一条循环。要多循环就用

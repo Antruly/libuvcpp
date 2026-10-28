@@ -4,10 +4,11 @@
  * @author zhuweiye
  * @version 1.5.1
  *
- * **1.4.1 的 QUIC 是一条真能通信的链路协议**：握手、流收发、连接关闭与空闲超时
- * 都通了，一条连接上的多条流共用同一条 UDP 口。**没做的**是 HTTP/3（nghttp3 连
- * 依赖都没接）、0-RTT、连接迁移、datagram（RFC 9221）与 multipath —— 这份清单
- * 在 `doc/quic-guide.md` §8 里逐条列着，别在别处另维护一份。
+ * QUIC 传输层已经是一条完整的链路：握手、流收发、连接关闭与空闲超时、0-RTT、
+ * 连接迁移与 **datagram（RFC 9221，1.8.2 起）** 都通了，一条连接上的多条流共用
+ * 同一条 UDP 口。**仍然没做的**是 multipath 与上游的若干加密细节 —— 清单以
+ * `doc/quic-guide.md` §8 为准，别在别处另维护一份。HTTP/3 不在这层（它在
+ * `src/http3/`，1.4.1 起）。
  *
  * 本头**不包含** `<ngtcp2/ngtcp2.h>`（理由见 `uvcpp_quic_ngtcp2.h`）。
  */

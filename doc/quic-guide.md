@@ -89,7 +89,7 @@
 为两套名字相同的语义各写一遍分支，而且两套迟早漂移。复用落在**语义**那一层
 （`net_read_result` / `net_read_event`）；回调的**第一个参数**按本层自己的类型走，
 因为 `uvcpp_net_read_cb` 那个 typedef 写死了 `uvcpp_tcp_client&`
-（`src/quic/uvcpp_quic_common.h:110-138` 有完整理由）。
+（`src/quic/uvcpp_quic_common.h:111-139` 有完整理由）。
 
 **它不属于 web 层。** 所以 `CMakeLists.txt:148-148` 那个 `option()` 刻意**不**放在
 "Web 子开关"那一组里 —— 那组的标题写着"仅在 `UVCPP_BUILD_WEB=ON` 时有效"，而

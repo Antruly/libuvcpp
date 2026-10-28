@@ -17,9 +17,9 @@
 > 循环上既答 h3 也答 h1，这正是下面 [§6](#6-接进-web-层之后-h1-的判据是什么)
 > 那条硬约束的护栏。
 >
-> **没做的**是 POST 之上的那些东西：trailers、GOAWAY、Server Push、流式路由、
-> extended CONNECT（WebSocket over h3）—— 逐条列在下面
-> [§8](#8-没做的如实列出)，别在别处另维护一份。
+> **没做的**是 Server Push、h3 上的流式路由（`post_stream` / `set_stream_claim`）
+> 与 WebTransport 的会话协商扩展（`WT_MAX_SESSIONS` / 子协议协商）—— 逐条列在
+> 下面 [§8](#8-没做的如实列出)，别在别处另维护一份。
 
 - 打开方式：`-DUVCPP_ENABLE_HTTP3=ON`。**默认 OFF**（`CMakeLists.txt:169-169`），
   而且下面两种情况会被**强制**置 OFF 并打 warning，而不是留一个"能配置、链不上、
@@ -61,8 +61,8 @@
 
 | 类 / 结构 | 头 | 角色 |
 |---|---|---|
-| `uvcpp_h3_connection` | `src/http3/uvcpp_h3_connection.h:144` | 一条 h3 连接的**驱动层**：持有那条 `uvcpp_quic_connection*`，管三条关键单向流、写序列化、完成队列 |
-| `h3_request` / `h3_response` | `src/http3/uvcpp_h3_connection.h:75`、`:100` | 一次请求 / 一次响应（伪头拆成具名成员） |
+| `uvcpp_h3_connection` | `src/http3/uvcpp_h3_connection.h:145` | 一条 h3 连接的**驱动层**：持有那条 `uvcpp_quic_connection*`，管三条关键单向流、写序列化、完成队列 |
+| `h3_request` / `h3_response` | `src/http3/uvcpp_h3_connection.h:76`、`:113` | 一次请求 / 一次响应（伪头拆成具名成员） |
 | `h3_header` / `h3_header_kind` | `src/http3/uvcpp_h3_common.h:167`、`:136` | 一个头字段；伪头用具名枚举，不写 `":method"` 字面量 |
 | `h3_header_budget` | `src/http3/uvcpp_h3_common.h:210` | 头块尺寸预算累加器（**本层唯一的防线**，见 [§7](#7-典型坑)） |
 | `h3_stream_close_info` | `src/http3/uvcpp_h3_common.h:188` | 一条流的收场，**两个方向分开报** |
@@ -188,7 +188,7 @@ int one_h3_get(uvcpp_quic_connection* quic) {
 
 - **发出去时 `stream_id` 不用填。** `send_request()` 自己开流，并把它写回结果里；
   `h3_request::stream_id` 在**收到**一侧才有意义。
-- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:272`）。
+- **`take_completed()` 每次至多给一条**（`src/http3/uvcpp_h3_connection.h:287`）。
   这是刻意的：队列里可能同时到齐几条，回调里一次性抽干会让调用方在处理第一条时
   看不见第二条的到达，于是"这次回调要不要再排一次"永远答不准。
 - **一条请求恰好在那里出现一次。** 正常收全一次（`error == 0`），中途被 reset /
@@ -331,7 +331,11 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 | HEAD（报 GET 会有的 `content-length`、不发体、之后同一条连接还能用） | **真实现** | `http3_web_func.cpp` |
 | **STOP_SENDING / 流额度事件 / FIN 与 RESET 分开** | **真实现**（在 QUIC 那一层） | `quic_api_func.cpp`（详见 `doc/quic-guide.md`） |
 | POST 请求体 | **真实现**（在内存里攒满整个体，上限 64 MiB） | `http3_request_func.cpp` |
-| trailers、GOAWAY、Server Push、extended CONNECT（WebSocket over h3） | **没有** | [§8](#8-没做的如实列出) |
+| trailers、GOAWAY | **真实现** | `http3_trailers_func.cpp` / `http3_goaway_func.cpp` |
+| extended CONNECT、WebSocket over h3 | **真实现**（`1.8.3-dev` 起） | `http3_ext_connect_func.cpp` / `http3_ws_func.cpp` |
+| **HTTP/3 Datagram（RFC 9297）** | **真实现**（`1.8.10` 起） | `http3_datagram_func.cpp` |
+| **WebTransport over h3** | **真实现**（`1.8.10` 起，draft-13 语义） | `http3_webtransport_func.cpp` |
+| Server Push | **没有** | [§8](#8-没做的如实列出) |
 | h3 上的流式路由（`post_stream` / `set_stream_claim`） | **没有**（显式拒绝，不静默错路由） | [§8](#8-没做的如实列出) |
 
 **"判据在哪"这一列不是装饰。** 上面每一格都指得到一条会因为它坏掉而变红的断言；
@@ -398,7 +402,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 6. **链接是 PRIVATE**（`CMakeLists.txt:3233-3233` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
-   （`src/http3/uvcpp_h3_connection.h:422`），它经公开头调用、链接期解析。
+   （`src/http3/uvcpp_h3_connection.h:473`），它经公开头调用、链接期解析。
 
 7. **本机可复现**：nghttp3 也可以用
    `-DFETCHCONTENT_SOURCE_DIR_NGHTTP3=<一份已下好的 nghttp3 源码>` 指过去绕开下载
@@ -505,7 +509,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 3. **只有 FIN、没有数据的块要 `add_write_offset(sid, 0)`。**
    `nghttp3_conn_writev_stream()` 可能吐出一个零字节、只带 FIN 的块，
    `add_write_offset()` 无论如何都要调 —— 少了那一句，这个 FIN 永远发不出去。
-   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:305` 那条注释）。
+   本层的 `flush()` 就是这么写的（`src/http3/uvcpp_h3_session.h:315` 那条注释）。
 
 4. **别在 nghttp3 的回调里调它的写函数。** 与 nghttp2 同一条硬规矩：那会在它
    自己的栈上重入。本层的处置是"回调里只置 `want_write_`，`recv_stream_data()`
@@ -534,7 +538,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
    `h3_header{"accept", "*/*", …}` 在消费者那里编不过，报的是
    `no matching function for call to 'h3_header::h3_header(<brace-enclosed
    initializer list>)'`。**逐格赋值**不会踩到它，本库自己的代码也是这么写的
-   （`src/http3/uvcpp_h3_connection.cpp:26` 的 `make_pseudo`）。
+   （`src/http3/uvcpp_h3_connection.cpp:27` 的 `make_pseudo`）。
    **这一条是示例门禁量出来的，不是抄来的**：本文 §3.1 / §3.2 最初就是花括号版本，
    跑一次 `check_doc_snippets.py`（它固定用 `-std=c++11`）报两条红，位置指向这里。
 
@@ -575,6 +579,22 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
   `Upgrade`；**webapp 那条腿用 `app.websocket_connect()`**（1.8.6 起，#58）：
   它按路径分派 extended CONNECT，h2 与 h3 共用一张表，处理器拿到的是传输无关的
   `uvcpp_web_ws_session&`。没注册的模式回 `501`。
+- **HTTP/3 Datagram 已支持（`1.8.10` 起）**：`set_h3_datagram_enabled(true)`
+  （必须在 `start()` 之前）宣告 `SETTINGS_H3_DATAGRAM`；
+  `callbacks::on_datagram(conn, stream_id, data, len)` 与
+  `send_datagram(stream_id, data, len)` 在 **extended CONNECT** 流上收发——帧格式
+  是 QUIC DATAGRAM（RFC 9221）载荷里的 `Quarter Stream ID` 变长整数 + 应用数据
+  （RFC 9297 §2.1）。`max_datagram_size()` 是对端可收的**总帧**上限（quarter id
+  占的字节也算）。普通请求要走 `Datagram-Flow-Id` capsule，本层不做；这类流上
+  `send_datagram()` 返回 `UV_EINVAL`。`dropped_datagrams()` 报被丢弃的入站条数。
+- **WebTransport over h3 已支持（`1.8.10` 起）**：`uvcpp_h3_wt_session`
+  （`http3/uvcpp_h3_wt_session.h`）—— `accept()`（服务端，在 `on_connect_request`
+  里 `req.protocol == "webtransport"`）/ `connect()`（客户端），双向流
+  `open_bidi_stream()`、单向流 `open_uni_stream()`、`send_datagram()`、
+  `WT_CLOSE_SESSION` / `WT_DRAIN_SESSION` capsule。流类型码与 `:protocol` 按
+  **draft-ietf-webtrans-http3-13**（`webtransport` / `0x41` / `0x54`）。
+  **没有**子协议协商（`WT_PROTOCOL`）、`WT_MAX_SESSIONS`、重定向与浏览器互操作
+  验证。
 - **QPACK 的部分可观测已支持（`1.8.3-dev` 起，#53）**：对端的 SETTINGS 走
   `callbacks::on_remote_settings` / `remote_settings()`（`qpack_max_dtable_capacity`、
   `qpack_blocked_streams`、`enable_connect_protocol`、`h3_datagram`）；
