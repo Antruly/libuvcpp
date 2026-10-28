@@ -703,6 +703,8 @@ class UVCPP_API uvcpp_tcp_server {
    *            也不负责释放）。用 `uvcpp_ssl_context` 的 SERVER 模式，
    *            并装好证书/私钥。
    *
+   * **销毁顺序**：上下文必须比本对象活得久 —— 同一作用域里先声明上下文、再声明本对象；
+   * 反过来（先本对象后上下文）时，本对象析构收尾仍会拿这个裸指针去用，是 UB（issue #56）。
    * @warning 必须在 `listen()` 之前设置。清空用 `set_ssl_context(nullptr)`。
    * @warning 必须在 loop 线程调用。
    */

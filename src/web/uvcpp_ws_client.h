@@ -208,6 +208,8 @@ class UVCPP_API uvcpp_ws_client {
 #endif
 
 #if UVCPP_OPENSSL_ENABLE
+  /// 上下文必须比本对象活得久：只存裸指针，析构收尾时还会用它；同一作用域里先声明
+  /// 它、再声明本对象（先本对象后上下文是 UB，issue #56）。
   void set_ssl_context(uvcpp_ssl_context* ctx);
 #endif
 

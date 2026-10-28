@@ -388,6 +388,8 @@ class UVCPP_API uvcpp_http_client {
    *     SSL_read/SSL_write 要独占 socket，接管不了 memory BIO 那条会话。
    *     宁可报错，也不把明文写进一条已经加密的连接。
    */
+  /// 上下文必须比本对象活得久：客户端只存裸指针，析构收尾时 TLS 会话还会用它。
+  /// 同一作用域里**先声明上下文、再声明本对象**；反过来是 UB（issue #56）。
   void set_ssl_context(uvcpp_ssl_context* ctx);
   bool is_ssl_enabled() const;
   /** @brief 同步 SSL 请求路径（阻塞式握手/读写，仅 *_wait 系列使用）。 */

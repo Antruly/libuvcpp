@@ -305,7 +305,7 @@ DragonFly/Solaris/AIX 生效）。改法是：监听 fd 建一次，`dup()` n �
 | `uvcpp_http_server::contexts_` | `src/web/uvcpp_http_server.h:1844-1844` | **每请求**（`.cpp` 里 52 处引用）—— **已切开**（§4.1） |
 | ~~`uvcpp_web_app::inflight_`~~ → `loop_slot::inflight` | `src/webapp/uvcpp_web_app.h:2222-2222`（**已切开**，W4 / 2c） | **每请求** |
 | ~~`uvcpp_web_app::upgraded_`~~ → `loop_slot::upgraded` | `src/webapp/uvcpp_web_app.h:2281-2281`（**已切开**，W4 / 2c） | 每次 WS 升级 |
-| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:965-965` | 接受 / 关闭 / 计数 |
+| `uvcpp_tcp_server::clients_` | `src/net/uvcpp_tcp_server.h:967-967` | 接受 / 关闭 / 计数 |
 
 **比上面几条都靠前的一条：`post()` 本身是单循环的。** 它原来只有一份
 `loop_tid_`/`post_queue_`，投递入口判据是 `loop_tid_ == std::this_thread::get_id()`。

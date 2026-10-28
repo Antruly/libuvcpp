@@ -184,7 +184,7 @@ Windows 要真正能用，得走 **master 自己 `accept()` + 每连接 `WSADupl
   `uvcpp_web_app` 的 `upgraded` / `inflight`（`src/webapp/uvcpp_web_app.h:2281-2281` /
   `src/webapp/uvcpp_web_app.h:2222-2222`；这两个容器后来在多循环那条路上被搬进了
   `loop_slot`，见 `doc/multiloop-design.md` §4.1）、
-  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:965-965`）都不需要切成 per-loop。
+  `uvcpp_tcp_server` 的 `clients_`（`src/net/uvcpp_tcp_server.h:967-967`）都不需要切成 per-loop。
   这是选这条路**白拿**的最大一块。
 - **日志那条闸门在进程内照样存在。** 1.4.0 之后 `src/webapp/uvcpp_log.cpp:416-436` 的
   `write()` 已经**不持锁调 sink** 了（锁内只快照一次 `sink()`，`:342-351`），但默认
