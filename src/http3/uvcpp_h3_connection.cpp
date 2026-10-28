@@ -1145,6 +1145,23 @@ int uvcpp_h3_connection::route_new_stream(int64_t id, const char* data,
   const bool pu = is_peer_uni(id);
   if (!pb && !pu) return 0;  // 关键流/本地流（正常都已经在表里）
 
+  // **快路（普通 h3 请求走这条）**：首字节本身就是完整的 1 字节变长整数
+  // （HTTP 的帧类型 0x00..0x09 与流类型 0x00..0x03 都 < 64），而且不是 WT 的
+  // 两个码 —— 那就一个字节都不用缓冲，直接喂 nghttp3。少了这一步，每个 h3
+  // 请求都要先把头块拷进 `wt_probe::buf` 再喂回去（多一次分配 + 一次拷贝）。
+  if (len > 0 && wt_probes_.find(id) == wt_probes_.end()) {
+    const uint8_t b0 = static_cast<uint8_t>(data[0]);
+    if ((b0 & 0xc0u) == 0) {  // 1 字节 varint
+      const bool is_wt = pb ? (b0 == 0x41u) : (b0 == 0x54u);
+      if (!is_wt) {
+        stream_rec& s = stream_of(id);
+        if (fin) s.fin_delivered = true;
+        if (session_->recv_stream_data(id, data, len, fin, 0) < 0) return -1;
+        return 1;
+      }
+    }
+  }
+
   std::map<int64_t, wt_probe>::iterator it = wt_probes_.find(id);
   if (it == wt_probes_.end()) {
     wt_probe p;
