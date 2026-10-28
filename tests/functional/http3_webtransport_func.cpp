@@ -78,6 +78,8 @@ void test_webtransport() {
   std::unique_ptr<uvcpp_h3_connection>    srv_h3;
   std::unique_ptr<uvcpp_h3_wt_session>    srv_wt;
   bool         server_accepted = false;
+  bool         srv_drain_seen  = false;
+  bool         srv_bidi_end    = false;
   std::string  srv_bidi_got;
   std::string  srv_uni_got;
   bool         srv_uni_end     = false;
@@ -91,6 +93,17 @@ void test_webtransport() {
     hcb.on_connect_request = [&](uvcpp_h3_connection& h3,
                                  const h3_request& req) {
       if (req.protocol != "webtransport") return;
+      if (req.path == "/reject") {
+        // 故意不建会话：客户端应当看到非 2xx 并按失败收场。
+        std::vector<h3_header> hs;
+        h3_header st;
+        st.name  = ":status";
+        st.value = "404";
+        st.kind  = h3_header_kind::STATUS;
+        hs.push_back(st);
+        h3.send_stream_response(req.stream_id, hs);
+        return;
+      }
       uvcpp_h3_wt_session::callbacks wcb;
       wcb.on_stream = [&](uvcpp_h3_wt_session&, uvcpp_h3_wt_stream& s, bool bidi) {
         if (bidi) {
@@ -99,6 +112,7 @@ void test_webtransport() {
             srv_bidi_got.assign(reinterpret_cast<const char*>(d), n);
             sp->write(d, n);  // 回显
           });
+          s.on_end([&]() { srv_bidi_end = true; });
         } else {
           s.on_data([&](const uint8_t* d, size_t n) {
             srv_uni_got.assign(reinterpret_cast<const char*>(d), n);
@@ -111,6 +125,7 @@ void test_webtransport() {
         srv_dgram_got.assign(reinterpret_cast<const char*>(d), n);
         s.send_datagram(d, n);
       };
+      wcb.on_drain = [&](uvcpp_h3_wt_session&) { srv_drain_seen = true; };
       wcb.on_close = [&](uvcpp_h3_wt_session&, uint32_t code,
                          const std::string& why) {
         srv_close_code   = static_cast<int>(code);
@@ -136,8 +151,11 @@ void test_webtransport() {
   std::unique_ptr<uvcpp_h3_connection> cli_h3;
   std::unique_ptr<uvcpp_h3_wt_session> cli_wt;
   bool         connected   = false;
+  bool         cli_opened  = false;
   std::string  cli_dgram_got;
   int          cli_close_code = -1;
+  int          rej_error   = 0;
+  int          rej_close   = -1;
 
   const int crc = client.connect("127.0.0.1", port, [&](int st) {
     connected = st == 0;
@@ -159,6 +177,7 @@ void test_webtransport() {
   wcb.on_datagram = [&](uvcpp_h3_wt_session&, const uint8_t* d, size_t n) {
     cli_dgram_got.assign(reinterpret_cast<const char*>(d), n);
   };
+  wcb.on_open  = [&](uvcpp_h3_wt_session&) { cli_opened = true; };
   wcb.on_close = [&](uvcpp_h3_wt_session&, uint32_t code, const std::string&) {
     cli_close_code = static_cast<int>(code);
   };
@@ -172,9 +191,33 @@ void test_webtransport() {
             kDeadlineMs),
         "客户端开 WebTransport 会话");
   if (!cli_wt) return;
+  // 客户端此刻还没收到 2xx：会话处于 pending，早发的流/datagram 先排队。
+  check(cli_wt->is_pending(), "客户端会话处于 pending（等 2xx）");
+  uvcpp_h3_wt_stream* early = cli_wt->open_bidi_stream();
+  check(early != nullptr, "pending 期间也能开流（先排队）");
+  if (early) check(early->is_pending(), "排队的流 is_pending");
+  if (early) check(early->write("early-bidi", 10) == 0, "pending 期间写流（排队）");
+  check(cli_wt->send_datagram("early-dgram", 11) == 0,
+        "pending 期间发 datagram（排队）");
+
+  check(uvcpp_test::wait_until(&loop, [&] { return cli_opened; }, kDeadlineMs),
+        "客户端收到 2xx，on_open 到达");
+  check(cli_wt->is_open(), "会话 is_open");
   check(uvcpp_test::wait_until(&loop, [&] { return server_accepted; },
                                kDeadlineMs),
         "服务端接受了会话");
+  if (early) {
+    std::string got;
+    early->on_data([&](const uint8_t* d, size_t n) {
+      got.assign(reinterpret_cast<const char*>(d), n);
+    });
+    check(uvcpp_test::wait_until(&loop, [&] { return got == "early-bidi"; },
+                                 kDeadlineMs),
+          "排队流的回显到达（实际 \"" + got + "\"）");
+  }
+  check(uvcpp_test::wait_until(
+            &loop, [&] { return cli_dgram_got == "early-dgram"; }, kDeadlineMs),
+        "排队 datagram 的回显到达（实际 \"" + cli_dgram_got + "\"）");
 
   // ---- 双向流：开流 → 写 → 回显 --------------------------------------
   uvcpp_h3_wt_stream* bidi = nullptr;
@@ -217,8 +260,17 @@ void test_webtransport() {
         "datagram 回显到达客户端（实际 \"" + cli_dgram_got + "\"）");
   check(srv_dgram_got == "hello-dgram", "服务端收到 datagram");
 
+  // ---- Drain capsule --------------------------------------------------
+  check(cli_wt->drain() == 0, "客户端发 WT_DRAIN_SESSION");
+  check(uvcpp_test::wait_until(&loop, [&] { return srv_drain_seen; },
+                               kDeadlineMs),
+        "服务端收到 on_drain");
+
   // ---- Close capsule --------------------------------------------------
   check(cli_wt->close(42, "bye") == 0, "客户端发 WT_CLOSE_SESSION");
+  // 本端 close 必须把关联流按 WT_SESSION_GONE 重置 —— 服务端能看到流收场。
+  check(uvcpp_test::wait_until(&loop, [&] { return srv_bidi_end; }, kDeadlineMs),
+        "本端 close 之后对端流被重置（on_end）");
   check(uvcpp_test::wait_until(&loop, [&] { return srv_close_code == 42; },
                                kDeadlineMs),
         "服务端 on_close 收到 code=42（实际 " +
@@ -228,6 +280,38 @@ void test_webtransport() {
   check(cli_close_code == -1, "本端主动关闭不补 on_close");
 
   cli_wt.reset();
+
+  // ---- 非 2xx：会话建立失败 ------------------------------------------
+  {
+    uvcpp_h3_wt_session::callbacks rcb;
+    rcb.on_open  = [&](uvcpp_h3_wt_session&) { cli_opened = true; };
+    rcb.on_error = [&](uvcpp_h3_wt_session&, int code, const std::string&) {
+      rej_error = code;
+    };
+    rcb.on_close = [&](uvcpp_h3_wt_session&, uint32_t code, const std::string&) {
+      rej_close = static_cast<int>(code);
+    };
+    cli_opened = false;
+    std::unique_ptr<uvcpp_h3_wt_session> rejected;
+    check(uvcpp_test::wait_until(
+              &loop,
+              [&] {
+                rejected = uvcpp_h3_wt_session::connect(*cli_h3, "/reject",
+                                                        "localhost", rcb);
+                return rejected != nullptr;
+              },
+              kDeadlineMs),
+          "开一条会被拒的会话");
+    const bool rejected_ok = uvcpp_test::wait_until(
+        &loop, [&] { return rej_error == 404; }, kDeadlineMs);
+    check(rejected_ok,
+          "非 2xx 触发 on_error(404)（实际 " + std::to_string(rej_error) + "）");
+    check(!cli_opened, "被拒的会话不触发 on_open");
+    check(uvcpp_test::wait_until(&loop, [&] { return rej_close == 0; },
+                                 kDeadlineMs),
+          "被拒的会话随后 on_close");
+    rejected.reset();
+  }
 }
 
 }  // namespace

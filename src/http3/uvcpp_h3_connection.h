@@ -568,6 +568,10 @@ class UVCPP_API uvcpp_h3_connection {
   bool is_peer_bidi(int64_t id) const;
   bool is_peer_uni(int64_t id) const;
 
+  /// 盯一条 CONNECT 流的响应状态（WebTransport 客户端等 2xx）。
+  void watch_wt_response(int64_t stream_id,
+                         std::function<void(int status, int error)> cb);
+
   void  attach_wt_session(int64_t session_sid, uvcpp_h3_wt_session* s);
   void  detach_wt_session(int64_t session_sid, uvcpp_h3_wt_session* s);
   /// 开一条 WT 流并写入 `类型 + 会话流号` 前缀；返回流号或负错误码。
@@ -579,6 +583,9 @@ class UVCPP_API uvcpp_h3_connection {
 
   std::map<int64_t, wt_probe>            wt_probes_;
   std::map<int64_t, uvcpp_h3_wt_session*> wt_sessions_;
+  /// WebTransport 客户端：会话在等 CONNECT 的响应（2xx）。`complete_response`
+  /// 兑现一次并摘掉。
+  std::map<int64_t, std::function<void(int, int)> > wt_response_watchers_;
 
   /// 装会话回调并建出会话（`session_->init()` 也在里面）。拆出来只是为了让
   /// `start()` 读起来短一点。

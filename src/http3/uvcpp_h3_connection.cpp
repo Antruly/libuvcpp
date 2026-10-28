@@ -205,9 +205,9 @@ void uvcpp_h3_connection::wire_session_callbacks() {
                               const h3_header& field) {
     if (!token_alive(life)) return;
     stream_rec& s = stream_of(stream_id);
-    // 第二个头块就是 trailers —— 本批不做（见 doc/http3-guide.md 的"没做的"
-    // 那张表），丢掉而不是往请求里接着塞：塞进去会得到一个"头和体混在一起"
-    // 的请求，那比丢掉更难查。`headers_done` 正是"已经收过一个头块"。
+    // nghttp3 把 trailers 走**另一组**回调（`on_trailer`，见下面），所以这里
+    // 正常情况下见不到第二个头块。这个守卫只挡"同一流上又来一个 HEADERS"的
+    // 畸形形状 —— 塞进首部表会得到一个"头和体混在一起"的请求，更难查。
     if (s.headers_done) return;
 
     if (server_side_) {
@@ -247,6 +247,18 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     if (!token_alive(life)) return;
     stream_rec& s = stream_of(stream_id);
     s.headers_done = true;
+    // WebTransport 客户端：**响应头收全**就是"2xx 到没到"的判据 —— 会话流
+    // 不会收尾（CONNECT 要一直开着），等 `complete_response` 是永远等不到。
+    if (!server_side_ && s.local && s.request && s.resp.status != 0) {
+      std::map<int64_t, std::function<void(int, int)> >::iterator w =
+          wt_response_watchers_.find(stream_id);
+      if (w != wt_response_watchers_.end()) {
+        std::function<void(int, int)> cb = std::move(w->second);
+        wt_response_watchers_.erase(w);
+        cb(s.resp.status, 0);
+        if (!token_alive(life)) return;
+      }
+    }
     // extended CONNECT（#53）：请求头收全就交给应用 —— 这条流不会读侧收场，
     // 等 `on_end_stream` 等于永远等不到。`req.protocol` 非空即为此类。
     if (server_side_ && !s.req.protocol.empty() && !s.dispatched) {
@@ -826,7 +838,8 @@ void uvcpp_h3_connection::dispatch_request(int64_t stream_id) {
 void uvcpp_h3_connection::complete_response(stream_rec& s, int error) {
   if (s.completed) return;
   s.completed = true;
-  h3_response out = s.resp;
+  h3_response      out = s.resp;
+  const int64_t    sid = s.resp.stream_id;
   if (error != 0) {
     // 起头就被掐断的请求可能一个头字段都没收到，那时 `status` 是 0（"没拿到"）。
     // 如实留 0 —— 编一个 5xx 出来就是替对端说话。
@@ -834,6 +847,25 @@ void uvcpp_h3_connection::complete_response(stream_rec& s, int error) {
   }
   out.error = error;
   completed_.push_back(std::move(out));
+
+  // WebTransport 客户端在等这条响应（`watch_wt_response`）。**最后再调**：
+  // 回调跑的是用户代码，完全可能把本对象销毁 —— 调用之后不再碰任何成员。
+  std::map<int64_t, std::function<void(int, int)> >::iterator w =
+      wt_response_watchers_.find(sid);
+  if (w != wt_response_watchers_.end()) {
+    std::function<void(int, int)> cb = std::move(w->second);
+    wt_response_watchers_.erase(w);
+    cb(out.status, error);
+  }
+}
+
+void uvcpp_h3_connection::watch_wt_response(
+    int64_t stream_id, std::function<void(int, int)> cb) {
+  if (cb) {
+    wt_response_watchers_[stream_id] = std::move(cb);
+  } else {
+    wt_response_watchers_.erase(stream_id);
+  }
 }
 
 void uvcpp_h3_connection::maybe_close_stream(int64_t stream_id) {

@@ -68,20 +68,41 @@ const uint64_t kWtSessionGone  = 0x170d7b68;
 uvcpp_h3_wt_stream::~uvcpp_h3_wt_stream() {}
 
 int uvcpp_h3_wt_stream::write(const void* data, size_t len) {
-  if (!open_ || conn_ == nullptr) return UV_ENOTCONN;
+  if (!open_) return UV_ENOTCONN;
+  // 会话还在等 2xx：先排队，建立后由 `flush_pending()` 一次冲出去。
+  if (sid_ < 0) {
+    if (data != nullptr && len > 0) {
+      pending_out_.append(static_cast<const char*>(data), len);
+    }
+    return 0;
+  }
+  if (conn_ == nullptr) return UV_ENOTCONN;
   return conn_->write_wt_stream(sid_, static_cast<const char*>(data), len,
                                 false);
 }
 
 int uvcpp_h3_wt_stream::end() {
-  if (!open_ || conn_ == nullptr) return UV_ENOTCONN;
+  if (!open_) return UV_ENOTCONN;
+  if (sid_ < 0) {
+    pending_end_ = true;
+    open_        = false;
+    return 0;
+  }
+  if (conn_ == nullptr) return UV_ENOTCONN;
   const int rc = conn_->write_wt_stream(sid_, nullptr, 0, true);
   if (rc == 0) open_ = false;
   return rc;
 }
 
 int uvcpp_h3_wt_stream::reset(uint32_t app_error_code) {
-  if (!open_ || conn_ == nullptr) return UV_ENOTCONN;
+  if (!open_) return UV_ENOTCONN;
+  // 还没开出去的流：作废即可（没有 QUIC 流可重置）。
+  if (sid_ < 0) {
+    open_ = false;
+    pending_out_.clear();
+    return 0;
+  }
+  if (conn_ == nullptr) return UV_ENOTCONN;
   const int rc = conn_->shutdown_wt_stream(sid_, app_error_code);
   open_ = false;
   return rc;
@@ -104,8 +125,13 @@ uvcpp_h3_wt_session::uvcpp_h3_wt_session(uvcpp_h3_connection* h3, int64_t sid,
     : h3_(h3), sid_(sid), cbs_(std::move(cbs)) {}
 
 uvcpp_h3_wt_session::~uvcpp_h3_wt_session() {
-  // 先摘登记：此后 h3 连接不再往这里分派任何 datagram / 流。
-  if (h3_ != nullptr) h3_->detach_wt_session(sid_, this);
+  if (alive_) *alive_ = 1;  // 先置位：此后迟到的回调都直接返回
+  // 再摘登记：h3 连接不再往这里分派任何 datagram / 流，也不再兑现
+  // 那条响应 watcher（它捕的是 this）。
+  if (h3_ != nullptr) {
+    h3_->watch_wt_response(sid_, nullptr);
+    h3_->detach_wt_session(sid_, this);
+  }
   // 会话流上的落点也要摘掉（h3 连接里那两个 lambda 捕的是 this）。
   if (h3_ != nullptr) h3_->set_stream_sink(sid_, nullptr, nullptr);
   streams_.clear();
@@ -156,29 +182,36 @@ std::unique_ptr<uvcpp_h3_wt_session> uvcpp_h3_wt_session::connect(
   std::unique_ptr<uvcpp_h3_wt_session> s(
       new uvcpp_h3_wt_session(&h3, sid, std::move(cbs)));
   uvcpp_h3_wt_session* raw = s.get();
+  // 客户端：**等 2xx** 才算建立（draft 要求）。之前开的流/datagram 先排队。
+  raw->open_    = false;
+  raw->pending_ = true;
   h3.attach_wt_session(sid, raw);
   h3.set_stream_sink(sid,
                      [raw](const char* d, size_t n) {
                        raw->on_capsule_data(d, n);
                      },
                      [raw]() { raw->on_capsule_end(); });
+  h3.watch_wt_response(sid, [raw](int status, int error) {
+    raw->on_connect_response(status, error);
+  });
   return s;
 }
 
 uvcpp_h3_wt_stream* uvcpp_h3_wt_session::open_bidi_stream() {
-  return open_ && h3_ != nullptr ? make_stream(h3_->open_wt_stream(sid_, true),
-                                               true)
-                                 : nullptr;
+  if (h3_ == nullptr || terminated_) return nullptr;
+  if (pending_) return make_stream(next_pending_id_--, true);
+  return open_ ? make_stream(h3_->open_wt_stream(sid_, true), true) : nullptr;
 }
 
 uvcpp_h3_wt_stream* uvcpp_h3_wt_session::open_uni_stream() {
-  return open_ && h3_ != nullptr ? make_stream(h3_->open_wt_stream(sid_, false),
-                                               false)
-                                 : nullptr;
+  if (h3_ == nullptr || terminated_) return nullptr;
+  if (pending_) return make_stream(next_pending_id_--, false);
+  return open_ ? make_stream(h3_->open_wt_stream(sid_, false), false) : nullptr;
 }
 
 uvcpp_h3_wt_stream* uvcpp_h3_wt_session::make_stream(int64_t sid, bool bidi) {
-  if (sid < 0) return nullptr;
+  // 负 id 是"还没开出去"的占位（等 2xx 期间），不是错误。
+  if (sid == 0) return nullptr;
   std::unique_ptr<uvcpp_h3_wt_stream> p(new uvcpp_h3_wt_stream(h3_, sid, bidi));
   uvcpp_h3_wt_stream* raw = p.get();
   streams_[sid] = std::move(p);
@@ -186,7 +219,20 @@ uvcpp_h3_wt_stream* uvcpp_h3_wt_session::make_stream(int64_t sid, bool bidi) {
 }
 
 int uvcpp_h3_wt_session::send_datagram(const void* data, size_t len) {
-  if (!open_ || h3_ == nullptr) return UV_ENOTCONN;
+  if (h3_ == nullptr || terminated_) return UV_ENOTCONN;
+  if (pending_) {
+    // 等 2xx 期间排队（有界：64 KiB / 64 条）。「早发的 datagram 静默丢」
+    // 是 1.8.10 的行为，这里改成显式排队或显式 ENOBUFS。
+    if (pending_dgrams_.size() >= 64 ||
+        pending_dgram_bytes_ + len > 64u * 1024u) {
+      return UV_ENOBUFS;
+    }
+    pending_dgrams_.push_back(std::string(
+        data != nullptr && len > 0 ? static_cast<const char*>(data) : "", len));
+    pending_dgram_bytes_ += len;
+    return 0;
+  }
+  if (!open_) return UV_ENOTCONN;
   return h3_->send_datagram(sid_, data, len);
 }
 
@@ -201,8 +247,32 @@ int uvcpp_h3_wt_session::send_capsule(uint64_t type, const std::string& body) {
 }
 
 int uvcpp_h3_wt_session::close(uint32_t code, const std::string& reason) {
-  if (!open_ || h3_ == nullptr) return UV_ENOTCONN;
+  if (h3_ == nullptr) return UV_ENOTCONN;
+  if (terminated_) return UV_EALREADY;
   if (reason.size() > 1024) return UV_EINVAL;  // draft 的上限
+
+  if (pending_) {
+    // 还没建立：不发 capsule（对端可能还没认下会话），只把 CONNECT 流收掉。
+    h3_->end_stream_data(sid_);
+    terminated_ = true;
+    open_       = false;
+    pending_    = false;
+    pending_dgrams_.clear();
+    pending_dgram_bytes_ = 0;
+    streams_.clear();
+    return 0;
+  }
+  if (!open_) return UV_ENOTCONN;
+
+  // draft：终止时把关联流按 `WT_SESSION_GONE` 重置（本端主动关也是终止）。
+  for (std::map<int64_t, std::unique_ptr<uvcpp_h3_wt_stream> >::iterator it =
+           streams_.begin();
+       it != streams_.end(); ++it) {
+    if (it->second->sid_ >= 0) {
+      h3_->shutdown_wt_stream(it->second->sid_, kWtSessionGone);
+    }
+  }
+  streams_.clear();
 
   std::string body;
   body.push_back(static_cast<char>((code >> 24) & 0xffu));
@@ -219,7 +289,6 @@ int uvcpp_h3_wt_session::close(uint32_t code, const std::string& reason) {
   // 发起的，不再补一次 on_close。
   terminated_ = true;
   open_       = false;
-  streams_.clear();
   return rc;
 }
 
@@ -254,8 +323,18 @@ void uvcpp_h3_wt_session::on_capsule_data(const char* data, size_t len) {
       terminate(code, reason);
       return;
     }
-    // WT_DRAIN_SESSION 与未知 capsule：不改变会话状态（draft 允许忽略未知
-    // capsule），消费掉继续。
+    if (type == kWtDrainSession) {
+      capsule_buf_.erase(0, off + clen);
+      // 只是通知：会话仍然可用（draft 明确允许继续用），所以不改 open_。
+      std::function<void(uvcpp_h3_wt_session&)> cb = cbs_.on_drain;
+      if (cb) {
+        const std::shared_ptr<char> life = alive_;
+        cb(*this);
+        if (!life || *life != 0) return;
+      }
+      continue;
+    }
+    // 未知 capsule：draft 允许忽略，消费掉继续。
     capsule_buf_.erase(0, off + clen);
   }
   // 防一把：非法 capsule 长度把缓冲撑爆之前先兜住。
@@ -286,6 +365,19 @@ void uvcpp_h3_wt_session::on_stream_end(int64_t stream_id) {
   std::map<int64_t, std::unique_ptr<uvcpp_h3_wt_stream> >::iterator it =
       streams_.find(stream_id);
   if (it == streams_.end()) return;
+  // 单向流读侧收场就是它的全部生命：回调之后再没人能写它，从表里摘掉。
+  // 回调期间用局部 `keep` 保住对象（用户的 `on_end` 里可能还会读它）。
+  std::unique_ptr<uvcpp_h3_wt_stream> keep;
+  if (!it->second->bidi_) {
+    keep = std::move(it->second);
+    streams_.erase(it);
+  } else {
+    keep = nullptr;
+  }
+  if (keep) {
+    keep->deliver_end();
+    return;
+  }
   it->second->deliver_end();
 }
 
@@ -297,16 +389,108 @@ void uvcpp_h3_wt_session::on_datagram(const uint8_t* data, size_t len) {
   if (cbs_.on_datagram) cbs_.on_datagram(*this, data, len);
 }
 
+void uvcpp_h3_wt_session::on_connect_response(int status, int error) {
+  if (terminated_ || !pending_) return;
+  if (error != 0) {
+    reject(error, "CONNECT stream closed before a 2xx response");
+    return;
+  }
+  if (status < 200 || status >= 300) {
+    reject(status, "WebTransport CONNECT rejected (status " +
+                       std::to_string(status) + ")");
+    return;
+  }
+
+  pending_ = false;
+  open_    = true;
+  flush_pending();
+  if (terminated_) return;  // flush 里开流失败会 reject
+
+  // 用户回调可能销毁本会话 —— 拷出来调，之后不再碰成员。
+  std::function<void(uvcpp_h3_wt_session&)> cb = cbs_.on_open;
+  if (cb) cb(*this);
+}
+
+void uvcpp_h3_wt_session::flush_pending() {
+  if (h3_ == nullptr || !open_ || terminated_) return;
+
+  // 1) 排队开流。先收键再动表：过程中要 erase/insert。
+  std::vector<int64_t> ids;
+  for (std::map<int64_t, std::unique_ptr<uvcpp_h3_wt_stream> >::iterator it =
+           streams_.begin();
+       it != streams_.end(); ++it) {
+    if (it->second->sid_ < 0) ids.push_back(it->first);
+  }
+  for (size_t i = 0; i < ids.size(); ++i) {
+    std::map<int64_t, std::unique_ptr<uvcpp_h3_wt_stream> >::iterator it =
+        streams_.find(ids[i]);
+    if (it == streams_.end()) continue;
+    std::unique_ptr<uvcpp_h3_wt_stream> st = std::move(it->second);
+    streams_.erase(it);
+
+    const int64_t sid = h3_->open_wt_stream(sid_, st->bidi_);
+    if (sid < 0) {
+      reject(static_cast<int>(sid), "open WebTransport stream failed");
+      return;
+    }
+    st->sid_ = sid;
+    if (!st->pending_out_.empty() || st->pending_end_) {
+      const int rc = h3_->write_wt_stream(sid, st->pending_out_.data(),
+                                          st->pending_out_.size(),
+                                          st->pending_end_);
+      st->pending_out_.clear();
+      if (rc != 0) {
+        reject(rc, "flush pending WebTransport stream failed");
+        return;
+      }
+    }
+    streams_[sid] = std::move(st);
+  }
+
+  // 2) 排队的数据报。
+  while (!pending_dgrams_.empty()) {
+    std::string d;
+    d.swap(pending_dgrams_.front());
+    pending_dgrams_.pop_front();
+    pending_dgram_bytes_ -= d.size();
+    if (h3_->send_datagram(sid_, d.data(), d.size()) != 0) {
+      ++dropped_datagrams_;
+    }
+  }
+}
+
+void uvcpp_h3_wt_session::reject(int code, const std::string& why) {
+  if (terminated_) return;
+  pending_ = false;
+  open_    = false;
+
+  // `on_error` 跑的是用户代码，可能把本会话销毁 —— 拿存活令牌兜住。
+  std::function<void(uvcpp_h3_wt_session&, int, const std::string&)> ecb =
+      cbs_.on_error;
+  if (ecb) {
+    const std::shared_ptr<char> life = alive_;
+    ecb(*this, code, why);
+    if (!life || *life != 0) return;
+  }
+  terminate(0, why);
+}
+
 void uvcpp_h3_wt_session::terminate(uint32_t code, const std::string& reason) {
   if (terminated_) return;
   terminated_ = true;
   open_       = false;
+  pending_    = false;
+  pending_dgrams_.clear();
+  pending_dgram_bytes_ = 0;
+  if (h3_ != nullptr) h3_->watch_wt_response(sid_, nullptr);
 
   // 会话没了：把还在的流按 draft 重置（WT_SESSION_GONE）。
   for (std::map<int64_t, std::unique_ptr<uvcpp_h3_wt_stream> >::iterator it =
            streams_.begin();
        it != streams_.end(); ++it) {
-    if (h3_ != nullptr) h3_->shutdown_wt_stream(it->first, kWtSessionGone);
+    if (h3_ != nullptr && it->second->sid_ >= 0) {
+      h3_->shutdown_wt_stream(it->second->sid_, kWtSessionGone);
+    }
   }
   streams_.clear();
 

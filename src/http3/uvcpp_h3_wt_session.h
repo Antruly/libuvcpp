@@ -45,6 +45,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
@@ -75,6 +76,12 @@ class UVCPP_API uvcpp_h3_wt_stream {
   int64_t stream_id() const { return sid_; }
   bool    bidirectional() const { return bidi_; }
   bool    is_open() const { return open_; }
+  /**
+   * @brief 会话还没建立（客户端等 2xx）时的流：`stream_id()` 为负，写会先排队。
+   *
+   * 会话一建立（2xx）就自动开流并冲掉排队字节；被拒则回调 `on_end`、流作废。
+   */
+  bool    is_pending() const { return sid_ < 0; }
 
   /// 往这条流上写。单向流上写就是唯一方向；双向流两个方向都能写。
   int write(const void* data, size_t len);
@@ -103,6 +110,9 @@ class UVCPP_API uvcpp_h3_wt_stream {
   int64_t                                       sid_  = -1;
   bool                                          bidi_ = true;
   bool                                          open_ = true;
+  /// 会话还没建立时排队的写（`sid_ < 0`）。
+  std::string                                   pending_out_;
+  bool                                          pending_end_ = false;
   std::function<void(const uint8_t*, size_t)>   on_data_;
   std::function<void()>                         on_end_;
 };
@@ -121,6 +131,23 @@ class UVCPP_API uvcpp_h3_wt_session {
     /// 会话收到一条 datagram（payload 不含 HTTP/3 的封装）。
     std::function<void(uvcpp_h3_wt_session&, const uint8_t*, size_t)>
         on_datagram;
+    /**
+     * @brief 会话**真正可用**了。**恰好一次。**
+     *
+     * 服务端：`accept()` 发完 2xx 之后；客户端：收到 2xx 响应之后（`connect()`
+     * 之后先排队，见 `is_pending()`）。
+     */
+    std::function<void(uvcpp_h3_wt_session&)> on_open;
+    /// 收到 `WT_DRAIN_SESSION`（只是通知，会话仍然可用）。
+    std::function<void(uvcpp_h3_wt_session&)> on_drain;
+    /**
+     * @brief 会话建立失败（服务端回了非 2xx，或响应带着错误收场）。
+     *
+     * @param code 非 2xx 时是 HTTP 状态码；响应错误时是负的错误码（`UV_ECANCELED` 等）。
+     * 随后还会收到一次 `on_close`。
+     */
+    std::function<void(uvcpp_h3_wt_session&, int code, const std::string&)>
+        on_error;
     /**
      * @brief 会话结束。**恰好一次。**
      *
@@ -184,6 +211,8 @@ class UVCPP_API uvcpp_h3_wt_session {
   int drain();
 
   bool    is_open() const { return open_; }
+  /// 客户端：CONNECT 已发出、还在等 2xx。
+  bool    is_pending() const { return pending_; }
   int64_t stream_id() const { return sid_; }
   /// 本会话上被丢弃的入站 datagram 条数（流被关/会话已终止之后的那些）。
   uint64_t dropped_datagrams() const { return dropped_datagrams_; }
@@ -209,13 +238,29 @@ class UVCPP_API uvcpp_h3_wt_session {
   void terminate(uint32_t code, const std::string& reason);
   int  send_capsule(uint64_t type, const std::string& body);
 
+  /// 客户端：CONNECT 的响应到了。
+  void on_connect_response(int status, int error);
+  /// 会话建立：把排队的流与 datagram 冲出去。
+  void flush_pending();
+  /// 会话被拒 / 建立失败。
+  void reject(int code, const std::string& why);
+
   uvcpp_h3_connection* h3_ = nullptr;
   int64_t              sid_ = -1;
   callbacks            cbs_;
   bool                 open_ = true;
+  bool                 pending_ = false;
+  /// 存活令牌：用户回调里可能把本会话销毁（`on_error` / `on_close`），
+  /// 回调之后要先问一眼再碰成员。
+  std::shared_ptr<char> alive_ = std::make_shared<char>(0);
   bool                 close_sent_ = false;
   bool                 terminated_ = false;
   uint64_t             dropped_datagrams_ = 0;
+
+  /// 客户端等 2xx 期间排队的 datagram（有界；满了 `send_datagram` 回 `UV_ENOBUFS`）。
+  std::deque<std::string> pending_dgrams_;
+  size_t                  pending_dgram_bytes_ = 0;
+  int64_t                 next_pending_id_ = -2;
 
   /// capsule 的解析缓冲（会话流上的字节可能被拆成任意段）。
   std::string capsule_buf_;
