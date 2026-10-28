@@ -1,22 +1,5 @@
 Package: libuvcpp-dev
 Architecture: arm64
-Version: 1.8.4-1
-Priority: optional
-Section: libdevel
-Maintainer: Antruly <antruly@users.noreply.github.com>
-Installed-Size: 1886
-Depends: libuvcpp1 (= 1.8.4-1), libuv1-dev, zlib1g-dev, nlohmann-json3-dev
-Filename: pool/main/l/libuvcpp/libuvcpp-dev_1.8.4-1_arm64.deb
-Size: 645158
-MD5sum: 25c1f114c6f3fab4ce63eeee38c65665
-SHA1: d26bdc1e77269a3773240fd29676d2b1f5259f11
-SHA256: 8a2330b30b0809cc3ea867cd09a9a85b4ee778124619b652b94b50fec1613da3
-SHA512: 3d9bf0783b55f3c91fa683d1922e32276730b3e8aefbaa2c602d8d3e85e415fbe38eba0acfcabfdc0fbd7a152aeb952da737b0c48bff0bd8ba99f4d90d7c9933
-Homepage: https://github.com/Antruly/libuvcpp
-Description: Modern C++ wrapper for libuv
-
-Package: libuvcpp-dev
-Architecture: arm64
 Version: 1.8.5-1
 Priority: optional
 Section: libdevel
@@ -83,20 +66,20 @@ SHA512: e41017f30683d37ef840faa0e836789277d88d0637074d1318e0e4a15817021b6b02a269
 Homepage: https://github.com/Antruly/libuvcpp
 Description: Modern C++ wrapper for libuv
 
-Package: libuvcpp1
+Package: libuvcpp-dev
 Architecture: arm64
-Version: 1.8.4-1
+Version: 1.8.9-1
 Priority: optional
-Section: libs
+Section: libdevel
 Maintainer: Antruly <antruly@users.noreply.github.com>
-Installed-Size: 14362
-Depends: libc6 (>= 2.34), libstdc++6 (>= 11), libgcc-s1, libuv1 (>= 1.43.0), zlib1g
-Filename: pool/main/l/libuvcpp/libuvcpp1_1.8.4-1_arm64.deb
-Size: 6349060
-MD5sum: a149b9a865631415a22ca655eada8469
-SHA1: f6fcae4d5a679706f61b6ba33ac1fd8af404630c
-SHA256: 3c6a36f61fdaed7e42f13518c8203e1c20cba97e205fab487f46d2e65ee4b9b1
-SHA512: 4aa6a61aeb846c925d75d9d7be57b1eb3c9b3772de84c062bde5ff23be117ea996ceb2611c3cf7f20b9562033bf5e4dd28b92b978e250a244e323fe131d86782
+Installed-Size: 1909
+Depends: libuvcpp1 (= 1.8.9-1), libuv1-dev, zlib1g-dev, nlohmann-json3-dev
+Filename: pool/main/l/libuvcpp/libuvcpp-dev_1.8.9-1_arm64.deb
+Size: 652620
+MD5sum: f3050a76d570de479a1cfb97fe2f0b76
+SHA1: c080756e3c70bb2deb57b26910e83cf61a0a7442
+SHA256: 42a634c29a710d68f9a459e395b1e29233dcc3b37918556bbc4785b8a281d1a0
+SHA512: 0dd1b66f1f82d4102b81418757e3b9179d6e92173f3a7221d76490fd8a3a314d6f3ab791ad9627003ca46ff4a948b87414bc75d89dcd7b0965724907f2a6885a
 Homepage: https://github.com/Antruly/libuvcpp
 Description: Modern C++ wrapper for libuv
 
@@ -165,6 +148,23 @@ MD5sum: b6f5e623dab3f1d82c171a3a230cc1f7
 SHA1: 41010bd338afaad146e9e0e744faf299c39591a2
 SHA256: 69509f651099401b1828e482dadc68081aa52ddfc594f6d73891dbaa2c2214b3
 SHA512: 90208a7d6c8aa0f07bd105c2dd97b3c2d9066dc96faa82efcf3b9075a42498cbc84998392dbe82da3a17065a3643be07be8b06c56a829d518ce8712a91843d9e
+Homepage: https://github.com/Antruly/libuvcpp
+Description: Modern C++ wrapper for libuv
+
+Package: libuvcpp1
+Architecture: arm64
+Version: 1.8.9-1
+Priority: optional
+Section: libs
+Maintainer: Antruly <antruly@users.noreply.github.com>
+Installed-Size: 14526
+Depends: libc6 (>= 2.34), libstdc++6 (>= 11), libgcc-s1, libuv1 (>= 1.43.0), zlib1g
+Filename: pool/main/l/libuvcpp/libuvcpp1_1.8.9-1_arm64.deb
+Size: 6385282
+MD5sum: d0e4ff084dcf1f0c1c38e0e8ae8ed923
+SHA1: e98f13708b5b535daba512543627257e7a8f9b82
+SHA256: b8324a53c61026fc397ffb33832a78c3cb6f98da997f04f0b7374f879d0d3f02
+SHA512: 0f89c4b1adbd2cf0c65d3c35823771844081b6a936d628bb22be70d2f3d4a941bc129ea51a3cfcd59f8f55ba3333eb77219c27d6d7758e01dd400e9ce90910db
 Homepage: https://github.com/Antruly/libuvcpp
 Description: Modern C++ wrapper for libuv
 
