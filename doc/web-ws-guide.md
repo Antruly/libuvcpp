@@ -564,7 +564,9 @@ PageHeap 下实测 SEGFAULT（`src/web/uvcpp_ws_client.cpp:124-145`）。
 - **`send_text` / `send_binary` 自己不拆帧**；要发分片得用 `send_frame` 自己
   写 `fin` 与 `CONTINUATION`（[§7](#7-发)）。接收方向仍由消息级回调重组。
 - **没有广播 API、没有会话 id**（[§10](#10-会话表)）。
-- **没有 `rsv2` / `rsv3` 扩展**（HTTP/2 上的 WebSocket 没做）。
+- **没有 `rsv2` / `rsv3` 扩展**。**HTTP/2 上的 WebSocket 从 1.8.6 起支持**
+  （RFC 8441，`uvcpp_h2_ws_connection` / `app.websocket_connect()`），但 h2/h3
+  那条腿没有 permessage-deflate（h1 的 `uvcpp_ws_connection` 有）。
 - **关闭握手只有一半**：发了 Close 就关连接，不等对端回帧、也没有超时（[§9](#9-关闭)）。
 - **解压不检测截断**（`src/web/uvcpp_ws_parser.h:179`）。
 - **`send_close` 不校验关闭码**，1005 / 1006 发得出去（[§9](#9-关闭)）。

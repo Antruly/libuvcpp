@@ -712,9 +712,8 @@ int uvcpp_h3_session::cb_begin_headers(nghttp3_conn*, int64_t stream_id,
 
   stream_rec& s = self->stream_of(stream_id);
   s.state       = h3_stream_state::OPEN;
-  // 每个头块都重置预算。trailers 会是"同一条流上的第二个头块"，那时也要重置 ——
-  // 本批不处理 trailers（回调表里那三格留空），所以这条规矩此刻只有一个消费者，
-  // 但写法上不留"第二个头块沿用第一个账"的坑。
+  // 每个头块都重置预算。trailers 是"同一条流上的第二个头块"，它走
+  // `cb_recv_trailer`（与首部共用同一份预算），所以这条重置对两种头块都成立。
   s.budget.reset(static_cast<size_t>(self->max_field_section_size_));
   s.budget_reported = false;
 

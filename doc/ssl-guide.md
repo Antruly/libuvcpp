@@ -371,9 +371,10 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
   `uvcpp_ssl::set_verify_hostname()`。**正向的数字 IP 用例未覆盖** ——
   `generate_self_signed()` 只产 CN、不产 `subjectAltName`，造不出带 `iPAddress` SAN
   的证书；反向（无 IP SAN 的证书连 IP 必须失败）已覆盖。
-- **完全没有 SNI。** 全仓 grep `SSL_set_tlsext_host_name` / `servername` **零命中**：
-  客户端不发 SNI，服务端也不读。一个 IP 上挂多张证书的虚拟主机式 TLS 服务端**服务
-  不了**，服务端也无法据 SNI 选证书。
+- **SNI：客户端会发，服务端不读。** `uvcpp_ssl::set_server_name()` 走
+  `SSL_set_tlsext_host_name`，`uvcpp_tcp_client` 在连接目标非数字地址时会用它；
+  **服务端没有 SNI 回调**，不能按 SNI 选证书 —— 一个 IP 上挂多张证书的虚拟主机式
+  TLS 服务端**服务不了**。
 - **服务端默认没有信任库**，且**不强制**客户端证书，见 §5。
 - **没有 OCSP、没有 session ticket 配置、没有会话复用开关。**
 - **`tls_version` 的值是"下限"，不是"默认版本"。** 枚举（`src/ssl/uvcpp_ssl_common.h:30-35`）

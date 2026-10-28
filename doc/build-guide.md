@@ -93,8 +93,9 @@ that is what lets the released DLL carry libuv statically.
 
 **Turning on a module does not turn on what it needs.** `UVCPP_BUILD_WEB=ON` does not enable
 zlib or OpenSSL; you opt in explicitly. `UVCPP_ENABLE_NGHTTP2` is the exception in the other
-direction: it is *force-disabled* with a message when OpenSSL is off, because HTTP/2 here is
-TLS + ALPN only — there is no cleartext h2 (h2c) support. `UVCPP_ENABLE_WSDL` is
+direction: it is *force-disabled* with a message when OpenSSL is off, because TLS + ALPN is
+the only way this build lets a peer *negotiate* h2 (cleartext h2c exists since 1.6.7 but is a
+separate opt-in, `set_h2c_enabled()`, default off). `UVCPP_ENABLE_WSDL` is
 force-disabled the same way when `UVCPP_BUILD_WEBAPP=OFF`: it is built on top of the framework,
 so "on but unbuildable" is a worse configuration than "off".
 

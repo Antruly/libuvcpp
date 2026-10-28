@@ -81,9 +81,10 @@ inline const char* quic_default_alpn() {
  *
  * @note 没有"`ESTABLISHED` 之前不能开流"这条限制：QUIC 允许在握手完成前就把流
  *       开出去（`ngtcp2_conn_open_bidi_stream` 的说明里写着可以在握手前调），
- *       那些字节排在 0-RTT 队列里，等密钥齐了一起走。本库不做 0-RTT，所以
- *       实践中第一个应用数据字节总在握手之后 —— 但那是**时序**，不是这里的
- *       一条规则，用例不该拿 `state()` 当"能不能开流"的判据。
+ *       那些字节排在 0-RTT 队列里，等密钥齐了一起走。本库的 0-RTT 要显式
+ *       打开（`set_max_early_data()` / 客户端侧，见 `doc/quic-guide.md` §8），
+ *       默认不发 —— 默认情况下第一个应用数据字节总在握手之后，但那是**时序**，
+ *       不是这里的一条规则，用例不该拿 `state()` 当"能不能开流"的判据。
  */
 enum class quic_connection_state {
   IDLE,         ///< 还没有对端。客户端在此状态可以去 `connect()`。

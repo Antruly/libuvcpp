@@ -450,8 +450,8 @@ error: no matching function for call to
 ### `on_done` 不一定来自 `uv_fs_close`
 
 有三条**没有 close 回调**的路径直接调 `finish()`：open 失败
-（`src/webapp/uvcpp_web_file.cpp:241-247` → `finish()`；`fd_ < 0` 时 `:404-408` 直接收尾）、
-close 提交同步失败（`:420-424`）、`submit_read` 同步失败（`:325-330`）。
+（`src/webapp/uvcpp_web_file.cpp:238-244` → `finish()`；`fd_ < 0` 时 `:401-405` 直接收尾）、
+close 提交同步失败（`:417-421`）、`submit_read` 同步失败（`:322-327`）。
 走到 `on_done` 时 fd 「**已经关完，或者根本没打开过**」（`src/webapp/uvcpp_web_file.h:141-143`），
 所以"在这里销毁 transfer 是安全的"成立，但**别把"回调已返回"当成前置条件**去依赖。
 
@@ -574,7 +574,7 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 
 **`cancel()` 在"因背压停读"这一支上不能省。** 那时**没有任何 fs 操作在途**，
 `cancel()` 必须自己推进状态机，否则 `on_done` 永远不来、fd 一直开着
-（`src/webapp/uvcpp_web_file.cpp:228-234`）。`start()` 之前 `cancel()` 是空操作且**不触发
+（`src/webapp/uvcpp_web_file.cpp:225-231`）。`start()` 之前 `cancel()` 是空操作且**不触发
 `on_done`**（`src/webapp/uvcpp_web_file.h:299-302`）。
 
 **`backlog()` 是唯一的背压信号。** 恒返回 0 的 sink 只是让背压失效，
@@ -628,8 +628,10 @@ boundary 要在建解析器之后**立刻**设，并且检查返回值。
 - **`attach_stream()` 的"必须在链跑起来之前调"没有运行时守卫**
   （`src/webapp/uvcpp_web_context.h:318-330`）：中途挂只会得到一个**永远收不到数据**的 stream，
   静默。
-- **如实记一处代价**：`src/webapp/uvcpp_web_file.cpp:191-197` 承认同步失败路径会漏一份
-  `shared_ptr`（成环），作者判断"实际走不到"。
+- ~~**如实记一处代价**：同步失败路径会漏一份 `shared_ptr`（成环）。~~ **已修（1.9.0）**：
+  根因在 `uvcpp_fs` —— 同步失败时回调永远不会来，但 `fs_*_cb` 留在成员里，而它按值
+  捕了 `shared_from_this()`。现在每一处 `if (rc != 0)` 都当场清掉对应回调
+  （`src/webapp/uvcpp_web_file.cpp:191-197` 的注释也随之更新）。
 
 > 这七个头里**没有 `TODO` / `FIXME` / 未实现字样**。上面这些是"**明确划界**"
 > （设计取舍，可以引用），不是"**还没做**"（待办）。

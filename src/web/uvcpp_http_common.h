@@ -8,7 +8,7 @@
  * The http_method values match llhttp's internal numbering so that the
  * uvcpp_http_parser can map directly without translation.
  *
- * uvcpp_http_version pre-defines HTTP_2_0 as a placeholder for future implementation.
+ * uvcpp_http_version 里的 HVER_20 / HVER_30 是**实值**：h2/h3 两条腿都在用。
  */
 
 #pragma once

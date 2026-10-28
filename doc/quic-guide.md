@@ -14,7 +14,9 @@
 > 33 条、`quic_api_func.cpp` 81 条）。
 >
 > **没做的**是 0-RTT、连接迁移、无状态重置、datagram（RFC 9221）与 multipath
-> —— 逐条列在下面 [§8](#8-没做的如实列出)，别在别处另维护一份。
+> —— 这一句是 1.4.1 的旧话术。**0-RTT（`1.8.3-dev`）、连接迁移（`1.8.2`）、
+> datagram（`1.8.2`）都已支持**，仍然没做的只有**无状态重置与 multipath** ——
+> 逐条列在下面 [§8](#8-没做的如实列出)，别在别处另维护一份。
 >
 > 1.4.1 顺带把三样只对上层有意义的东西从内核接了出来（FIN 与 RESET 分开报、
 > 流额度事件、STOP_SENDING）—— 它们的调用方是 HTTP/3，所以**形状的说明在
@@ -89,7 +91,7 @@
 为两套名字相同的语义各写一遍分支，而且两套迟早漂移。复用落在**语义**那一层
 （`net_read_result` / `net_read_event`）；回调的**第一个参数**按本层自己的类型走，
 因为 `uvcpp_net_read_cb` 那个 typedef 写死了 `uvcpp_tcp_client&`
-（`src/quic/uvcpp_quic_common.h:111-139` 有完整理由）。
+（`src/quic/uvcpp_quic_common.h:112-140` 有完整理由）。
 
 **它不属于 web 层。** 所以 `CMakeLists.txt:148-148` 那个 `option()` 刻意**不**放在
 "Web 子开关"那一组里 —— 那组的标题写着"仅在 `UVCPP_BUILD_WEB=ON` 时有效"，而
@@ -294,7 +296,8 @@ nghttp3 由 HTTP/3 那一层自己接（`CMakeLists.txt` 的 http3 依赖块）�
 | **FIN 与 RESET 分开报**（`net_read_result::fin`，连同 TCP 那四处构造点一起是真话） | **真实现** | `quic_api_func.cpp`（"DATA 的 fin == true"、"RESET-0 带 fin == false"） |
 | **流额度事件** `on_streams_available` + `streams_left(bidi)` | **真实现** | `quic_api_func.cpp`（"没有内核时 streams_left==0"、"服务端的 streams_left(双向) > 0"） |
 | **STOP_SENDING**（`on_stop_sending`）与 `shutdown_stream_read()` | **真实现**（1.4.1 补上的，原是 [§8](#8-没做的如实列出) 那条缺口） | `quic_api_func.cpp`（"客户端收到了对端的 STOP_SENDING"、"应用错误码原样传到"） |
-| 连接迁移、0-RTT、无状态重置、datagram（RFC 9221）、multipath | **没有** | [§8](#8-没做的如实列出) |
+| 连接迁移、0-RTT、datagram（RFC 9221） | **真实现**（`1.8.2` / `1.8.3-dev`，见 §8） | `quic_early_data_func.cpp` / `quic_migration_func.cpp` / `quic_datagram_func.cpp` |
+| 无状态重置、multipath | **没有** | [§8](#8-没做的如实列出) |
 | HTTP/3（nghttp3） | **不在本层**（1.4.1 落在 `src/http3/`） | [`doc/http3-guide.md`](./http3-guide.md) |
 
 **"判据在哪"这一列不是装饰。** 上面每一格都指得到一条会因为它坏掉而变红的断言；
