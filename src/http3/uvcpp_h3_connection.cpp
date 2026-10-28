@@ -13,6 +13,7 @@
 
 #include "http3/uvcpp_h3_nghttp3.h"
 #include "http3/uvcpp_h3_session.h"
+#include "http3/uvcpp_h3_wt_session.h"
 #include "net/uvcpp_net_read.h"
 #include "quic/uvcpp_quic_connection.h"
 
@@ -525,6 +526,48 @@ void uvcpp_h3_connection::on_read(uvcpp_quic_connection& c, int64_t stream_id,
 
   if (r.event == net_read_event::DATA) {
     bytes_in_ += r.size;
+
+    // WebTransport（draft-ietf-webtrans-http3-13）的第一步：**还没登记的对端流**
+    // 要先看首个 varint 是不是 WT 的类型码（双向 `0x41` / 单向 `0x54`）。
+    // 这一步必须发生在 `stream_of()` 与 nghttp3 之前 —— 一条 `0x41` 开头的流
+    // 不是 HTTP 请求，喂给 nghttp3 就是 H3_FRAME_ERROR，整条连接报错。
+    const int pr = route_new_stream(stream_id, r.data, r.size, r.fin);
+    if (!token_alive(life)) return;
+    if (pr < 0) return;   // 协议错，已经 reset 了那条流
+    if (pr == 2) return;  // 字节还不够，已缓冲（等下一段）
+    if (pr == 1) {
+      // 已经处理完（WT 流，或"普通 HTTP 流且缓冲已喂给 nghttp3"）。
+      pump_closes();
+      if (!token_alive(life)) return;
+      flush();
+      return;
+    }
+
+    auto sit = streams_.find(stream_id);
+    if (sit != streams_.end() && sit->second.wt_session >= 0) {
+      // 已登记的 WT 流：DATA 直接交给会话，不碰 nghttp3。
+      stream_rec& s = sit->second;
+      std::map<int64_t, uvcpp_h3_wt_session*>::iterator ws =
+          wt_sessions_.find(s.wt_session);
+      const bool first_fin = r.fin && !s.fin_delivered;
+      if (r.fin) s.fin_delivered = true;
+      if (ws != wt_sessions_.end()) {
+        ws->second->on_stream_data(
+            stream_id, reinterpret_cast<const uint8_t*>(r.data), r.size);
+        if (!token_alive(life)) return;
+        if (first_fin) {
+          // 回调里可能把会话拆了（它会从 `wt_sessions_` 摘掉自己）—— 重新查，
+          // 不拿上面那个迭代器。
+          std::map<int64_t, uvcpp_h3_wt_session*>::iterator w2 =
+              wt_sessions_.find(s.wt_session);
+          if (w2 != wt_sessions_.end()) w2->second->on_stream_end(stream_id);
+          if (!token_alive(life)) return;
+        }
+      }
+      flush();
+      return;
+    }
+
     stream_rec& s = stream_of(stream_id);
     if (r.fin) s.fin_delivered = true;
     const int64_t n = self->recv_stream_data(
@@ -538,6 +581,24 @@ void uvcpp_h3_connection::on_read(uvcpp_quic_connection& c, int64_t stream_id,
   }
 
   if (r.event == net_read_event::PEER_CLOSED && r.fin) {
+    {
+      // WebTransport 流：读方向干净收场 —— 只通知会话，不碰 nghttp3（它根本
+      // 不知道有这条流）。
+      auto wt = streams_.find(stream_id);
+      if (wt != streams_.end() && wt->second.wt_session >= 0) {
+        if (!wt->second.fin_delivered) {
+          wt->second.fin_delivered = true;
+          std::map<int64_t, uvcpp_h3_wt_session*>::iterator ws =
+              wt_sessions_.find(wt->second.wt_session);
+          if (ws != wt_sessions_.end()) {
+            ws->second->on_stream_end(stream_id);
+            if (!token_alive(life)) return;
+          }
+        }
+        flush();
+        return;
+      }
+    }
     stream_rec& s = stream_of(stream_id);
     // 读侧的最后一个通知到了 —— 到这一刻为止，这条流**不会**再有读事件。
     // 关闭（会把它从 nghttp3 里删掉）因此才安全，见 `stream_rec::rx_settled`。
@@ -566,6 +627,23 @@ void uvcpp_h3_connection::on_read(uvcpp_quic_connection& c, int64_t stream_id,
 
   // 剩下的两种：`PEER_CLOSED && !fin`（对端发了 RESET，应用错误码 0）与
   // `READ_ERROR`。语义是同一个 —— **读方向到此为止，但不是干净收尾**。
+  {
+    auto wt = streams_.find(stream_id);
+    if (wt != streams_.end() && wt->second.wt_session >= 0) {
+      std::map<int64_t, uvcpp_h3_wt_session*>::iterator ws =
+          wt_sessions_.find(wt->second.wt_session);
+      if (!wt->second.fin_delivered) {
+        wt->second.fin_delivered = true;
+        if (ws != wt_sessions_.end()) {
+          ws->second->on_stream_end(stream_id);
+          if (!token_alive(life)) return;
+        }
+      }
+      streams_.erase(wt);
+      flush();
+      return;
+    }
+  }
   stream_rec& s = stream_of(stream_id);
   s.rx_settled = true;  // 同上：RESET / 读错误本身就是读侧的最后一个通知
   if (!s.rx_done) {
@@ -1031,11 +1109,221 @@ void uvcpp_h3_connection::on_datagram(const uint8_t* data, size_t datalen) {
     ++dropped_datagrams_;
     return;
   }
+  // WebTransport 会话的 datagram 先交给会话（四分之一流号 = 会话流号 / 4）。
+  std::map<int64_t, uvcpp_h3_wt_session*>::iterator ws = wt_sessions_.find(sid);
+  if (ws != wt_sessions_.end()) {
+    uvcpp_h3_wt_session* session = ws->second;
+    session->on_datagram(data + used, datalen - used);
+    return;
+  }
   // 与其它入口同一条纪律：回调跑的是用户代码，可能把本对象销毁 —— 先拷出来。
   std::function<void(uvcpp_h3_connection&, int64_t, const uint8_t*, size_t)> cb;
   if (cbs_.on_datagram) cb = cbs_.on_datagram;
   if (!cb) return;
   cb(*this, sid, data + used, datalen - used);
+}
+
+// =========================================================================
+// WebTransport（draft-ietf-webtrans-http3-13）
+// =========================================================================
+
+bool uvcpp_h3_connection::is_peer_bidi(int64_t id) const {
+  if (id < 0) return false;
+  // RFC 9000 §2.1：客户端发起的双向流 0 mod 4，服务端发起的 1 mod 4。
+  return server_side_ ? ((id & 0x3) == 0) : ((id & 0x3) == 1);
+}
+
+bool uvcpp_h3_connection::is_peer_uni(int64_t id) const {
+  if (id < 0) return false;
+  return server_side_ ? ((id & 0x3) == 2) : ((id & 0x3) == 3);
+}
+
+int uvcpp_h3_connection::route_new_stream(int64_t id, const char* data,
+                                          size_t len, bool fin) {
+  if (streams_.find(id) != streams_.end()) return 0;  // 已登记：照旧
+  const bool pb = is_peer_bidi(id);
+  const bool pu = is_peer_uni(id);
+  if (!pb && !pu) return 0;  // 关键流/本地流（正常都已经在表里）
+
+  std::map<int64_t, wt_probe>::iterator it = wt_probes_.find(id);
+  if (it == wt_probes_.end()) {
+    wt_probe p;
+    p.bidi = pb;
+    if (data != nullptr && len > 0) p.buf.assign(data, len);
+    p.fin = fin;
+    it = wt_probes_.insert(std::make_pair(id, p)).first;
+  } else {
+    if (data != nullptr && len > 0) it->second.buf.append(data, len);
+    it->second.fin = it->second.fin || fin;
+  }
+
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(it->second.buf.data());
+  uint64_t       type = 0;
+  size_t         used = 0;
+  if (!decode_varint(p, it->second.buf.size(), type, used)) {
+    if (it->second.fin) {
+      // 留一个不完整的类型码：H3_FRAME_ERROR 收场这条流。
+      conn_->shutdown_stream(id, 0x0106);
+      wt_probes_.erase(it);
+      return -1;
+    }
+    return 2;  // 等更多字节
+  }
+
+  const bool is_wt = pb ? (type == 0x41u) : (type == 0x54u);
+  if (!is_wt) {
+    // 普通 HTTP 流：把攒下的字节（含 FIN）整段喂回 nghttp3。
+    //
+    // **必须先把 `stream_rec` 建出来**：① 下一段 DATA 不能再进一次探测
+    // （`route_new_stream` 以"在不在 `streams_` 里"判新流，漏了就会把 HEADERS
+    // 的中间字节当成帧类型，nghttp3 报 H3_FRAME_UNEXPECTED）；② 这一段的 FIN
+    // 要记在 `fin_delivered` 上，否则 `PEER_CLOSED && fin` 会再喂一次 FIN。
+    std::string payload;
+    payload.swap(it->second.buf);
+    const bool pfin = it->second.fin;
+    wt_probes_.erase(it);
+    stream_rec& s = stream_of(id);
+    if (pfin) s.fin_delivered = true;
+    if (session_->recv_stream_data(id, payload.data(), payload.size(), pfin,
+                                   0) < 0) {
+      return -1;  // 致命：`on_fatal` 已经报过
+    }
+    return 1;
+  }
+
+  // WT 流：类型码之后是**会话流号**（变长整数）。
+  uint64_t session = 0;
+  size_t   used2   = 0;
+  if (!decode_varint(p + used, it->second.buf.size() - used, session, used2)) {
+    if (it->second.fin) {
+      conn_->shutdown_stream(id, 0x0106);
+      wt_probes_.erase(it);
+      return -1;
+    }
+    return 2;
+  }
+  const int64_t session_sid = static_cast<int64_t>(session);
+  std::string   rest(it->second.buf, used + used2, std::string::npos);
+  const bool    pfin = it->second.fin;
+  wt_probes_.erase(it);
+
+  // 会话流是**客户端发起的双向流**（0 mod 4）；对不上就是坏号。
+  std::map<int64_t, uvcpp_h3_wt_session*>::iterator ws =
+      (session_sid >= 0 && (session_sid & 0x3) == 0)
+          ? wt_sessions_.find(session_sid)
+          : wt_sessions_.end();
+  if (ws == wt_sessions_.end()) {
+    // draft 说 H3_ID_ERROR。只重置这条流，不拖垮整条连接（见头文件说明）。
+    conn_->shutdown_stream(id, 0x0109);
+    return -1;
+  }
+
+  stream_rec rec;
+  rec.local         = false;
+  rec.request       = false;
+  rec.raw           = true;
+  rec.wt_session    = session_sid;
+  rec.wt_bidi       = pb;
+  rec.fin_delivered = pfin;
+  streams_[id] = rec;
+
+  uvcpp_h3_wt_session* session_ptr = ws->second;
+  session_ptr->on_peer_stream(id, pb);
+  // 用户回调里可能把会话拆掉（析构会从 `wt_sessions_` 摘掉自己）—— 重新查。
+  std::map<int64_t, uvcpp_h3_wt_session*>::iterator again =
+      wt_sessions_.find(session_sid);
+  if (again == wt_sessions_.end() || again->second != session_ptr) return 1;
+  if (!rest.empty()) {
+    again->second->on_stream_data(
+        id, reinterpret_cast<const uint8_t*>(rest.data()), rest.size());
+  }
+  if (pfin) {
+    std::map<int64_t, uvcpp_h3_wt_session*>::iterator a2 =
+        wt_sessions_.find(session_sid);
+    if (a2 != wt_sessions_.end() && a2->second == session_ptr) {
+      a2->second->on_stream_end(id);
+    }
+  }
+  return 1;
+}
+
+void uvcpp_h3_connection::attach_wt_session(int64_t session_sid,
+                                            uvcpp_h3_wt_session* s) {
+  if (s == nullptr) return;
+  wt_sessions_[session_sid] = s;
+}
+
+void uvcpp_h3_connection::detach_wt_session(int64_t session_sid,
+                                            uvcpp_h3_wt_session* s) {
+  std::map<int64_t, uvcpp_h3_wt_session*>::iterator it =
+      wt_sessions_.find(session_sid);
+  if (it != wt_sessions_.end() && it->second == s) wt_sessions_.erase(it);
+  // 这条会话下的流不再有落点：把 `wt_session` 清掉，后续 DATA 一律丢弃
+  // （流本身的收场仍由 QUIC 层负责）。
+  for (std::map<int64_t, stream_rec>::iterator i = streams_.begin();
+       i != streams_.end(); ++i) {
+    if (i->second.wt_session == session_sid) i->second.wt_session = -1;
+  }
+}
+
+int64_t uvcpp_h3_connection::open_wt_stream(int64_t session_sid, bool bidi) {
+  if (conn_ == nullptr || session_ == nullptr) return UV_ENOTCONN;
+  if (!ready_ || closed_ || fatal_) return UV_ENOTCONN;
+  if (wt_sessions_.find(session_sid) == wt_sessions_.end()) return UV_EINVAL;
+
+  const int64_t sid = conn_->open_stream(bidi);
+  if (sid < 0) return sid;  // NGTCP2_ERR_STREAM_ID_BLOCKED 如实透传
+
+  stream_rec rec;
+  rec.local      = true;
+  rec.request    = false;
+  rec.raw        = true;
+  rec.wt_session = session_sid;
+  rec.wt_bidi    = bidi;
+  streams_.insert(std::make_pair(sid, rec));
+
+  uint8_t      prefix[16];
+  size_t       n = encode_varint(bidi ? 0x41u : 0x54u, prefix);
+  n += encode_varint(static_cast<uint64_t>(session_sid), prefix + n);
+  const int rc = conn_->write_stream(
+      sid, reinterpret_cast<const char*>(prefix), n, false);
+  if (rc != 0) {
+    streams_.erase(sid);
+    return rc;
+  }
+  flush();
+  return sid;
+}
+
+int uvcpp_h3_connection::write_wt_stream(int64_t sid, const char* data,
+                                         size_t len, bool fin) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  std::map<int64_t, stream_rec>::iterator it = streams_.find(sid);
+  if (it == streams_.end() || it->second.wt_session < 0) return UV_EINVAL;
+  const int rc = conn_->write_stream(sid, data, len, fin);
+  if (rc != 0) return rc;
+  flush();
+  return 0;
+}
+
+int uvcpp_h3_connection::shutdown_wt_stream(int64_t sid,
+                                            uint64_t app_error_code) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  const int rc = conn_->shutdown_stream(sid, app_error_code);
+  erase_wt_stream(sid);
+  flush();
+  return rc;
+}
+
+int uvcpp_h3_connection::shutdown_wt_read(int64_t sid,
+                                          uint64_t app_error_code) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  return conn_->shutdown_stream_read(sid, app_error_code);
+}
+
+void uvcpp_h3_connection::erase_wt_stream(int64_t sid) {
+  std::map<int64_t, stream_rec>::iterator it = streams_.find(sid);
+  if (it != streams_.end() && it->second.wt_session >= 0) streams_.erase(it);
 }
 
 int uvcpp_h3_connection::write_stream_data(int64_t stream_id,

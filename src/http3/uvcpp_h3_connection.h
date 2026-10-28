@@ -54,6 +54,7 @@ class uvcpp_quic_connection;  // 见 src/quic/uvcpp_quic_connection.h
 // 不需要它（那个类根本没装出去）。**属性要与定义处逐字相同**，否则 MSVC 会在
 // "先声明不带 `__declspec`、定义带"这件事上报 C4273。
 class UVCPP_API uvcpp_h3_session;
+class UVCPP_API uvcpp_h3_wt_session;
 struct net_read_result;
 
 // =========================================================================
@@ -517,6 +518,10 @@ class UVCPP_API uvcpp_h3_connection {
     /// `on_connect_request` 那一刻置位、客户端在提交请求时置位；普通请求一律为假
     /// （RFC 9297 §3 只给 CONNECT 免掉 `Datagram-Flow-Id` 那一套）。
     bool datagram_ok = false;
+    /// WebTransport 流所属的会话（**会话流号**；-1 = 不是 WT 流）。见
+    /// `uvcpp_h3_wt_session`。
+    int64_t wt_session = -1;
+    bool    wt_bidi    = false;
     std::function<void(const char*, size_t)> sink_data;
     std::function<void()>                     sink_end;
   };
@@ -542,6 +547,38 @@ class UVCPP_API uvcpp_h3_connection {
                        uint64_t app_error_code);
   /// QUIC DATAGRAM 的落点：剥掉 `Quarter Stream ID`，校验关联流后交付。
   void on_datagram(const uint8_t* data, size_t datalen);
+
+  // -----------------------------------------------------------------
+  // WebTransport（draft-ietf-webtrans-http3-13）
+  // -----------------------------------------------------------------
+  friend class uvcpp_h3_wt_session;
+  friend class uvcpp_h3_wt_stream;
+
+  /// 一条**新出现的对端流**在读方向上的类型探测（WT 还是 HTTP）。
+  struct wt_probe {
+    std::string buf;
+    bool        bidi = false;
+    bool        fin  = false;
+  };
+
+  /// 新流分流：0 = 普通 HTTP 流（调用方照旧喂 nghttp3）；1 = 已处理；
+  /// 2 = 字节还不够，已缓冲；<0 = 协议错（已 reset）。
+  int route_new_stream(int64_t stream_id, const char* data, size_t len,
+                       bool fin);
+  bool is_peer_bidi(int64_t id) const;
+  bool is_peer_uni(int64_t id) const;
+
+  void  attach_wt_session(int64_t session_sid, uvcpp_h3_wt_session* s);
+  void  detach_wt_session(int64_t session_sid, uvcpp_h3_wt_session* s);
+  /// 开一条 WT 流并写入 `类型 + 会话流号` 前缀；返回流号或负错误码。
+  int64_t open_wt_stream(int64_t session_sid, bool bidi);
+  int  write_wt_stream(int64_t sid, const char* data, size_t len, bool fin);
+  int  shutdown_wt_stream(int64_t sid, uint64_t app_error_code);
+  int  shutdown_wt_read(int64_t sid, uint64_t app_error_code);
+  void erase_wt_stream(int64_t sid);
+
+  std::map<int64_t, wt_probe>            wt_probes_;
+  std::map<int64_t, uvcpp_h3_wt_session*> wt_sessions_;
 
   /// 装会话回调并建出会话（`session_->init()` 也在里面）。拆出来只是为了让
   /// `start()` 读起来短一点。
