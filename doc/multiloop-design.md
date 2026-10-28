@@ -394,10 +394,10 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 （`src/webapp/uvcpp_web_app.h:1713-1713`）。冻结期之后多线程只读，**不需要锁**。
 
 > **理由更正（2026-09-22，外部复核）：这条的理由**不是**"写点都在 `start()` 里"。**
-> `chain_storage_.push_back`（`src/webapp/uvcpp_web_app.cpp:3984-3984`）与
-> `chain_cache_[...]`（`src/webapp/uvcpp_web_app.cpp:3986-3986`）确实在 `start()` 里，但**那两个函数在请求路径上可达**：
-> `sync_chains()`（`src/webapp/uvcpp_web_app.cpp:3848-3848`）被 `src/webapp/uvcpp_web_app.cpp:1422-1422`（流式那条路）与 `src/webapp/uvcpp_web_app.cpp:3761-3761`（派发前）调用，
-> `build_chain()`（`src/webapp/uvcpp_web_app.cpp:3938-3938`）被 `src/webapp/uvcpp_web_app.cpp:1432-1432` 与 `src/webapp/uvcpp_web_app.cpp:3796-3796` 调用。让这些写**离开**请求路径的是
+> `chain_storage_.push_back`（`src/webapp/uvcpp_web_app.cpp:3986-3986`）与
+> `chain_cache_[...]`（`src/webapp/uvcpp_web_app.cpp:3988-3988`）确实在 `start()` 里，但**那两个函数在请求路径上可达**：
+> `sync_chains()`（`src/webapp/uvcpp_web_app.cpp:3850-3850`）被 `src/webapp/uvcpp_web_app.cpp:1422-1422`（流式那条路）与 `src/webapp/uvcpp_web_app.cpp:3763-3763`（派发前）调用，
+> `build_chain()`（`src/webapp/uvcpp_web_app.cpp:3940-3940`）被 `src/webapp/uvcpp_web_app.cpp:1432-1432` 与 `src/webapp/uvcpp_web_app.cpp:3798-3798` 调用。让这些写**离开**请求路径的是
 > 两件事叠起来：① `start()` 之后缓存已热；② `src/webapp/uvcpp_web_app.h:91` 那条
 > **成文契约**「**四、注册路由要在 `start()` 之前**」。按"写点在 `start()` 里"写，
 > 会被读成"运行中注册也无害" —— 而那正是契约里说的**安全网，不是用法**。
@@ -419,7 +419,7 @@ per-loop 那份装：`loop`、循环线程 id、`post_queue_`、两个定时器�
 > ① 插进 **n 份**访问日志中间件（每请求记 n 次。本库对这一档有读数：`off → info`
 > 是 +17~19% rps、每请求 19 → 25 次分配）；
 > ② 更要紧的是**竞态** —— `middlewares_` / `middleware_gen_` 在请求路径上被**读**
-> （`src/webapp/uvcpp_web_app.cpp:3863-3863`、`src/webapp/uvcpp_web_app.cpp:3995-3997`、`src/webapp/uvcpp_web_app.cpp:4009`/`src/webapp/uvcpp_web_app.cpp:4024`/`src/webapp/uvcpp_web_app.cpp:4043`），而 n 条循环**不同时起跑**：
+> （`src/webapp/uvcpp_web_app.cpp:3865-3865`、`src/webapp/uvcpp_web_app.cpp:3997-3999`、`src/webapp/uvcpp_web_app.cpp:4011`/`src/webapp/uvcpp_web_app.cpp:4026`/`src/webapp/uvcpp_web_app.cpp:4045`），而 n 条循环**不同时起跑**：
 > A 循环已经在服务（首命中某路由 ⇒ `build_chain()` 读 `middlewares_`）时，B 循环的
 > 初始化正在 `insert` ⇒ 对 `std::vector<uvcpp_web_middleware>` 与那个 `size_t` 的
 > **未同步读写**。
@@ -1019,7 +1019,7 @@ step 3（`uvcpp_web_app::set_loops(n)`，1.2.23-dev）落地时核出来的七�
 > 那些循环上的 WS/h2 道别与连接关闭也没人做。**step 3 的 `stop()` 要按循环扇出。**
 >
 > 扇出时还有一处必须**只在 0 号**发：`begin_shutdown()` 里那句 `tcp->stop()`
-> （`src/webapp/uvcpp_web_app.cpp:4137-4137`）关的是**接受者的 listener 句柄**
+> （`src/webapp/uvcpp_web_app.cpp:4139-4139`）关的是**接受者的 listener 句柄**
 > （`uvcpp_tcp_server::stop()` 里的 `tcp_->close(...)`）——扇出之后"谁第一个进来谁执行
 > 那句 close"，而第一个进来的可能是工作循环 ⇒ **跨循环 `uv_close`**（libuv 里那不是
 > 线程安全的）。它本身是**真幂等**（早退判据 `!has_status(TCP_SERVER_LISTENING)`

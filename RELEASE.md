@@ -1,4 +1,4 @@
-# libuvcpp Release Notes
+﻿# libuvcpp Release Notes
 
 <!-- 这份文件是**归档**，不是任何一版的正文。
 
@@ -18,6 +18,35 @@
 ## 简介 (Introduction)
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
+
+## v1.9.0 重点 (Highlights)
+
+`v1.8.10` 之后的开发线（`1.8.11`–`1.8.15` 折进本版）：**HTTP 一致性补课、h3 的
+webapp 能力收尾、TLS/WS 的两块服务端能力，外加 QUIC 可观测性。**
+
+- **HTTP 一致性**：h2/h3 的**响应方向** `content-length` 校验（长度撒谎的响应
+  不再被当正常收完）；h1 的尾随头终于走 chunked（`send_trailers()` /
+  `set_trailers()`）；1xx/204/304 不再补 `content-length: 0`；客户端跟随重定向
+  （opt-in、同源、跳数上限）。
+- **h3 / WebTransport**：webapp 的 h3 尾随头与流式响应
+  （`begin_chunked → write_chunk → end`）；WebTransport 的建立时序、`on_open`
+  交付、Close/Drain capsule 与 `SESSION_GONE` 的流重置。
+- **TLS 与 WebSocket**：服务端 SNI 多证书（通配、精确优先、回落默认）与客户端
+  `set_tls_server_name()`；服务端 WS 子协议选择（h1 + App 配置，h2/h3 只回第一个）。
+- **可观测**：`uvcpp_quic_connection::stats()` —— RTT / cwnd / 丢包 / 收发计数。
+- **其它**：Redis RESP3 流式字符串与流式聚合；`uvcpp_fs` 同步失败时释放异步回调；
+  若干文档纠正。
+
+**破坏性（如实列出）**：
+
+- `uvcpp_http_server::send_trailers()` 在 h1 上**不再返 `UV_ENOTSUP`**：没有在途
+  chunked 流（或 HEAD）返 `UV_EINVAL`，其余情况真的把尾随头发出去。
+- C API `uvcpp_c_h2_stream_expected_body()` 在客户端侧由"永远 `E_NOT_FOUND`"
+  变为"响应宣告了就给数"（`UVCPP_C_ABI_VERSION` 仍是 `1`：函数签名没变）。
+- 各公开类**新增了成员/方法**（`uvcpp_ssl_context` 的 SNI 表、`uvcpp_tcp_client`
+  的 SNI 覆盖、`uvcpp_ws_server`/`uvcpp_ws_connection` 的子协议、`uvcpp_web_app`
+  的子协议配置）。按旧头编译的使用者请重新编译 —— 本仓不承诺跨版本的二进制
+  布局兼容（`UVCPP_SET_SOVERSION` 默认关）。
 
 ## v1.8.10 重点 (Highlights)
 

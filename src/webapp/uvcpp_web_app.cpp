@@ -2894,9 +2894,9 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
     if (r.streaming()) {
       // 与 h1/h2 同一条框架流水线（`begin_chunked → write_chunk → end`），
       // 只是出口换成凭据 —— 这条腿上没有 `uvcpp_tcp_client`。组帧由 QUIC 流
-      // 承担：`raw_body_framing()` 判的是 `resp_.stream_id != 0` 或派发时
-      // 置上的 `set_no_chunk_framing(true)` —— h3 的第一条流号就是 0，所以
-      // 后者是必须的（见 `on_http_request()` 里那一句）。
+      // 承担：`raw_body_framing()` 判的是 `resp_.stream_id != 0` 或响应版本
+      // 是 HVER_30（h3 的第一条流号就是 0，所以后者是必须的，见
+      // `on_http_request()` 里那一句）。
       const uvcpp_web_conn_id id = ctx.connection_id();
       r.set_stream_sink(new app_h3_stream_sink(this, reply, id));
 
@@ -3749,8 +3749,10 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   ctx->response().set_stream_id(req.stream_id);
   // **h3 的第一条请求流号就是 0**（QUIC 客户端双向流从 0 起编号），与 h1 的
   // "流号恒为 0" 撞在同一个值上 —— 组帧方式不能靠流号猜，得由传输事实说。
-  ctx->response().set_no_chunk_framing(
-      req.version == uvcpp_http_version::HVER_30);
+  // 走响应上已有的 `version` 字段（不新增成员：公开类的布局一动就是 ABI 破坏）。
+  if (req.version == uvcpp_http_version::HVER_30) {
+    ctx->response().set_transport_version(req.version);
+  }
 
   const uvcpp_web_connection* conn = reg_find(id);
   if (conn != nullptr) {

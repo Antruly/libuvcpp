@@ -206,7 +206,6 @@ uvcpp_web_sent_info::uvcpp_web_sent_info()
 
 uvcpp_web_response::uvcpp_web_response()
     : head_only_(false),
-      no_chunk_framing_(false),
       ended_(false),
       deferred_(false),
       pending_bytes_(0),

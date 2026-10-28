@@ -12,10 +12,11 @@
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
 `v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9`、`1.8.10` 是它之后的补丁版，
-不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
+`1.8.11`–`1.8.15` 折进 `v1.9.0`；
+不折叠、直接发布；`1.8.11`–`1.8.15` 折进 `v1.9.0`。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.15-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`。
+当前源码树是 **1.9.0**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`、`v1.9.0`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -248,6 +249,10 @@
 
 ### QUIC 传输（net 层）
 
+- **连接只读统计**（`1.8.15-dev`）：`uvcpp_quic_connection::stats()` 给出 RTT
+  （最近/最小/平滑/偏差，微秒）、`cwnd` / `ssthresh` / `bytes_in_flight` 与收发
+  包、字节、丢包计数（ngtcp2 `ngtcp2_conn_get_conn_info()`；`pkt_sent` 那一组是
+  1.16 才有的字段）。连接已收场时返回 false 并清零出参。
 - **0-RTT**（`1.8.3-dev`，#53）：服务端 `set_max_early_data()`；客户端
   `set_session_ticket()` + `set_0rtt_transport_params()`（上一轮的票据与传输
   参数），握手前可开流写数据；`early_data_status()` / `early_data_rejected()`
@@ -471,6 +476,19 @@
 
 ### HTTP/3（web 层）
 
+- **WebTransport 的建立时序、关闭与排空**（`1.8.11-dev`）：`accept()` 之后才把
+  `on_open` 交给应用（此前应用在会话真正可用之前就拿到了它）；`WT_DRAIN_SESSION`
+  带 `on_drain` 回调；`SESSION_GONE` 重置关联流；客户端等 2xx 再开流（早到的帧
+  先缓冲/拒绝）。
+- **h2/h3 响应方向的 `content-length` 校验**（`1.8.12-dev`）：RFC 9113 §8.1.1 /
+  RFC 9114 §4.1.2 对两个方向是同一条规矩，此前只校验请求方向。h3 上一条长度
+  撒谎的响应此前被当成**连接级致命错误**（后续请求全部 `UV_ENOTCONN`），现在按
+  流错误处理（RESET/STOP），连接继续可用。
+- **webapp 的 h3 尾随头与流式响应**（`1.8.13-dev`）：`set_trailers()` 走
+  `send_reply()` 的第二个 HEADERS 块（空 body 也给 nghttp3 一个 data reader，
+  否则写方向已关、尾随块提交不上去）；`begin_chunked → write_chunk → end`
+  接进 `req.reply`（QUIC 流上的 DATA + FIN，没有 h1 的 hex 帧）。顺带修掉
+  "h3 第一条流号就是 0、被当成 h1 组帧"的撞值（`set_no_chunk_framing()`）。
 - **HTTP/3 Datagram（RFC 9297）**（`1.8.10`）：`set_h3_datagram_enabled()`
   宣告 `SETTINGS_H3_DATAGRAM`；extended CONNECT 流上 `send_datagram()` /
   `on_datagram()`，帧是 `Quarter Stream ID` 变长整数 + 应用数据，走 QUIC
@@ -613,6 +631,10 @@
 实现现状 —— 强制了什么、默认值是什么、哪些是刻意不支持的 —— 见
 [`doc/http2-status.md`](doc/http2-status.md)。
 
+- **响应方向的 `content-length` 校验**（`1.8.12-dev`）：客户端的响应头也记
+  `content-length`（重复且不一致照样 RST），收尾时与收到的 body 字节数比对；
+  HEAD / 1xx / 204 / 304 的"有长度、没 body"不参与。C API 的
+  `expected_body()` 因此在客户端侧也给数（见「公开契约与安全」）。
 - **RFC 8441 extended CONNECT 与 WebSocket over h2**（`1.8.6`，#58）：
   `uvcpp_h2_session` 接收 `:protocol` 伪头（只许配 `CONNECT`，否则
   `RST_STREAM(PROTOCOL_ERROR)`）、宣告 `SETTINGS_ENABLE_CONNECT_PROTOCOL=1`
@@ -1137,6 +1159,8 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### Redis（`src/redis/`）
 
+- **RESP3 流式字符串与流式聚合**（`1.8.11-dev`）：`$?` / `*?` / `%?` / `~?` /
+  `>?` 的逐块解析，大 value 不再需要整段攒在内存里。
 - **内置 RESP2/RESP3 客户端：不用 hiredis，零外部依赖**（`1.7.5-dev`）。
   `src/redis/` 自己实现 RESP 的编码与**增量**解析，传输建在 `uvcpp_tcp_client` 上；
   新选项 `UVCPP_ENABLE_REDIS` **默认 ON**（与 db 默认 OFF 相反：它不要任何第三方
@@ -1357,6 +1381,21 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### HTTP 与 WebSocket 语义
 
+- **h1 的尾随头走 chunked**（`1.8.12-dev`）：`send_trailers()` 在 h1 上发
+  chunked 末块（`0\r\n` + 字段 + `\r\n`，RFC 9112 §7.1.2），前提是
+  `begin_stream()` 已起一条 `transfer-encoding: chunked` 的流；HEAD 与
+  1xx/204/304 没有末块可挂（`UV_EINVAL`）。webapp 的 `set_trailers()` 在 h1 上
+  自动走这条路，不再"丢弃 + WARN"。
+- **204/304 不再补 `content-length: 0`**（`1.8.12-dev`）：RFC 9110 §8.6；h1 与
+  h3 两条应答路径都改（`to_string()` 本来就不加，所以此前只有端到端用例能抓到）。
+- **客户端跟随重定向（opt-in）**（`1.8.12-dev`）：`set_follow_redirects(true,
+  max_hops = 5)`，只作用于同步 `send_wait()`（`get_wait` / `post_wait` 同）；
+  303 改 GET、307/308 保留方法与 body；只跟**同源**（跨源把 3xx 原样交付，不做
+  自动换主机）；超限 `UV_ELOOP`；`location` 里的 CR/LF 返 `UV_EINVAL`。
+- **服务端 WS 子协议选择**（`1.8.14-dev`）：`uvcpp_ws_server::set_subprotocols()`
+  按服务端偏好从客户端提议里挑**一个**写进 101（没有交集不发这个头）；
+  `uvcpp_ws_connection::subprotocol()` 给业务分派。h2/h3 的 WS 不再把整串提议
+  原样回过去（只回第一个）。
 - **`connect_wait()` 超时后迟到的连接回调不再写死栈帧**（`1.8.7`）：回调状态
   改到堆上（`shared_ptr`）。连接超时返回后客户端析构会泵循环，先前那一笔迟到
   回调写进已退栈的局部变量，表现为 `SIGSEGV in ~uvcpp_http_client`。
@@ -1593,6 +1632,11 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### TLS 与网络
 
+- **服务端 SNI 选证书**（`1.8.14-dev`）：`add_sni_certificate_data()` /
+  `add_sni_certificate_file()`，名字大小写不敏感、`*.example.com` 只匹配一层、
+  精确优先于通配、未知名字回落默认证书；`certificate_pem()` /
+  `private_key_pem()` 在内存里搬证书；客户端 `set_tls_server_name()` 支持
+  "按 IP 连、证书按域名签"（SNI 与 `PEER_STRICT` 都看域名）。
 - **从 PEM 字符串装信任 CA**（`1.8.9`，#61）：`uvcpp_ssl_context::load_ca_data()`
   与 `load_certificate_data` / `load_private_key_data` 对称，逐张追加到同一个信任库、
   重复项幂等。证书固定这类"对端下发 PEM 当 CA"的场景不必再写临时文件。
@@ -1696,6 +1740,11 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 公开契约与安全
 
+- **同步失败时把异步回调放掉**（`1.8.11-dev`）：`uvcpp_fs` 的同步失败分支
+  此前不唤醒已经登记的异步回调，等它的调用方永远挂起。
+- **C API `expected_body()` 两个方向都维护**（`1.8.12-dev`）：响应方向补上
+  `content-length` 校验之后，客户端解响应头时这一对也填了（此前只有服务端
+  请求方向有）。读**那个头本身**的原始字符串仍用 `_response_header()`。
 - `uvcpp_handle` 的拷贝构造、拷贝赋值与 `clone()` **从公开接口删除** —— 它们的实现是
   `memcpy` 一个活着的 `uv_handle_t`（连着 loop 指针与邻居指针），结果是双重释放，或把
   活句柄从自己的循环队列里摘掉（`1.2.5`）。`uvcpp_req` 的拷贝操作**保留**（`uv_req_t`
@@ -4034,6 +4083,43 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.9.0 (2026-10-28)
+
+`v1.8.10` 之后的开发线（`1.8.11`–`1.8.15` 折进本版）：**HTTP 一致性补课、
+h3 的 webapp 能力收尾、TLS/WS 的两块服务端能力，外加 QUIC 可观测性。**
+
+**HTTP 一致性**：
+
+- h2/h3 的**响应方向** `content-length` 校验（长度撒谎的响应不再被当正常收完；
+  h3 上按流错误处理，不再是连接级致命）。
+- h1 的尾随头终于走 chunked（`send_trailers()` / webapp 的 `set_trailers()`）；
+  1xx/204/304 不再补 `content-length: 0`（h1 与 h3 两条路径）。
+- 客户端跟随重定向（opt-in、同源、跳数上限）。
+
+**h3 / WebTransport**：
+
+- webapp 的 h3 尾随头与流式响应（`begin_chunked → write_chunk → end`）。
+- WebTransport 的建立时序、`on_open` 交付、Close/Drain capsule 与 `SESSION_GONE`
+  的流重置。
+
+**TLS 与 WebSocket**：
+
+- 服务端 SNI 多证书（通配、精确优先、回落默认）与客户端 `set_tls_server_name()`。
+- 服务端 WS 子协议选择（h1 + App 配置；h2/h3 只回第一个提议）。
+
+**可观测与其它**：
+
+- `uvcpp_quic_connection::stats()`：RTT / cwnd / 丢包 / 收发计数。
+- Redis RESP3 流式字符串与流式聚合；`uvcpp_fs` 同步失败时释放异步回调。
+- 若干文档纠正（SNI 客户端会发、h2c 已有、0-RTT/datagram 已有、h2 WS 已有）。
+
+**破坏性（如实列出）**：
+
+- `uvcpp_http_server::send_trailers()` 在 h1 上**不再返 `UV_ENOTSUP`**：没有在途
+  chunked 流（或 HEAD）返 `UV_EINVAL`，其余情况真的把尾随头发出去。
+- C API `uvcpp_c_h2_stream_expected_body()` 在客户端侧由"永远 `E_NOT_FOUND`"
+  变为"响应宣告了就给数"。
 
 ### v1.8.10 (2026-10-28)
 

@@ -769,13 +769,14 @@ class UVCPP_API uvcpp_web_response {
   int32_t stream_id() const { return resp_.stream_id; }
 
   /**
-   * @brief 这条响应所在的传输**没有** h1 的 chunked 组帧（h2 / h3）。
+   * @brief 这条响应所在的传输版本。**由派发器在跑处理函数之前置位。**
    *
-   * h2 上 `stream_id != 0` 已经够用；h3 必须显式说一声 —— 它的第一条请求流号
-   * 就是 0（QUIC 的客户端双向流从 0 起编号），与"h1 上流号恒为 0"撞在同一个
-   * 值上。由派发器在跑处理函数**之前**置位。
+   * h3 必须说一声：它的第一条请求流号就是 0（QUIC 的客户端双向流从 0 起编号），
+   * 与"h1 上流号恒为 0"撞在同一个值上 —— 组帧方式不能靠流号猜，得由传输事实
+   * 说。走的是 `resp_` 上已有的 `version` 字段，**不新增成员**（公开类的布局
+   * 一动，按旧头编出来的使用者就是 ABI 破坏）。
    */
-  void set_no_chunk_framing(bool v) { no_chunk_framing_ = v; }
+  void set_transport_version(uvcpp_http_version v) { resp_.version = v; }
 
   // -------------------------------------------------------------------
   // 表的回收口（框架用；用户代码不需要碰）
@@ -836,10 +837,11 @@ class UVCPP_API uvcpp_web_response {
   /// 写进 `raw()`，本层只读它（见 `set_stream_id`）。
   ///
   /// **光看 `stream_id != 0` 不够**：h3 的第一条请求流号就是 0，而它同样没有
-  /// chunked。所以 h3 派发时还会调 `set_no_chunk_framing(true)` 把传输事实
-  /// 钉进来。
+  /// chunked。所以 h3 派发时还会调 `set_transport_version(HVER_30)` 把传输
+  /// 事实钉进来。
   bool raw_body_framing() const {
-    return resp_.stream_id != 0 || no_chunk_framing_;
+    return resp_.stream_id != 0 ||
+           resp_.version == uvcpp_http_version::HVER_30;
   }
 
   // --- 分片下发的内部动作 ---
@@ -897,8 +899,6 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_http_response resp_;
 
   bool head_only_;
-  /// 传输没有 h1 的 chunked 组帧（h2/h3）。见 `raw_body_framing()`。
-  bool no_chunk_framing_;
   bool ended_;
   bool deferred_;
   /// 尾随头（`set_trailers()`）。空表 = 没设 —— h2 上"发一段空的尾随块"是合法
