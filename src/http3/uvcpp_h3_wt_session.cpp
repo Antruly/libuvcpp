@@ -165,6 +165,13 @@ std::unique_ptr<uvcpp_h3_wt_session> uvcpp_h3_wt_session::accept(
                        raw->on_capsule_data(d, n);
                      },
                      [raw]() { raw->on_capsule_end(); });
+  // 服务端在 `200` 落进会话流的那一刻就算建立（draft 的服务端侧没有 "2xx 已
+  // 送达" 这一拍），而 `on_open` 是应用拿到会话的唯一时机：流的落点、datagram
+  // 的分发都要在这个回调之后才被应用接上。客户端那条路在
+  // `on_connect_response()` 里做的正是这一句 —— 服务端漏了它，会话虽然建得出来，
+  // 应用却永远接不上。
+  std::function<void(uvcpp_h3_wt_session&)> open_cb = raw->cbs_.on_open;
+  if (open_cb) open_cb(*raw);
   return s;
 }
 
