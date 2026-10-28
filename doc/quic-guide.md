@@ -584,6 +584,7 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 ### 5.3.1 连接统计（1.9.0）
 
 ```cpp
+// doc-snippet: fragment — 调用点摘录：`conn` 与 `use(...)` 是宿主程序的东西。
 uvcpp_quic_stats st;
 if (conn.stats(st)) {
   // 时间字段是微秒；其余是累计值（不是速率）。

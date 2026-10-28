@@ -277,6 +277,7 @@ bool has_alpn_select() const;
 服务端（虚拟主机 / 多域名）：
 
 ```cpp
+// doc-snippet: fragment — 接口摘录：证书由部署环境提供，不是一个能独立编译的示例。
 uvcpp::uvcpp_ssl_context srv(uvcpp::tls_mode::SERVER, uvcpp::tls_version::TLS_1_3);
 srv.load_certificate_file("default.pem");      // 默认站点
 srv.load_private_key_file("default.key");
