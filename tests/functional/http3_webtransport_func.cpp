@@ -78,6 +78,7 @@ void test_webtransport() {
   std::unique_ptr<uvcpp_h3_connection>    srv_h3;
   std::unique_ptr<uvcpp_h3_wt_session>    srv_wt;
   bool         server_accepted = false;
+  int          srv_open_count  = 0;
   bool         srv_drain_seen  = false;
   bool         srv_bidi_end    = false;
   std::string  srv_bidi_got;
@@ -105,6 +106,13 @@ void test_webtransport() {
         return;
       }
       uvcpp_h3_wt_session::callbacks wcb;
+      // 服务端只有这一个时机能拿到会话：`accept()` 的返回值要等它返回之后
+      // 才有。所以这里必须触发，否则应用根本接不上（流的落点、datagram 的
+      // 分发都在这之后才成立）。
+      wcb.on_open = [&](uvcpp_h3_wt_session&) {
+        ++srv_open_count;
+        check(!server_accepted, "服务端 on_open 先于 accept() 返回");
+      };
       wcb.on_stream = [&](uvcpp_h3_wt_session&, uvcpp_h3_wt_stream& s, bool bidi) {
         if (bidi) {
           uvcpp_h3_wt_stream* sp = &s;
@@ -206,6 +214,8 @@ void test_webtransport() {
   check(uvcpp_test::wait_until(&loop, [&] { return server_accepted; },
                                kDeadlineMs),
         "服务端接受了会话");
+  check(srv_open_count == 1, "服务端 on_open 恰好触发一次（实际 " +
+                                 std::to_string(srv_open_count) + "）");
   if (early) {
     std::string got;
     early->on_data([&](const uint8_t* d, size_t n) {

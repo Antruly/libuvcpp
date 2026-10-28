@@ -134,8 +134,9 @@ class UVCPP_API uvcpp_h3_wt_session {
     /**
      * @brief 会话**真正可用**了。**恰好一次。**
      *
-     * 服务端：`accept()` 发完 2xx 之后；客户端：收到 2xx 响应之后（`connect()`
-     * 之后先排队，见 `is_pending()`）。
+     * 服务端：`accept()` 发完 2xx 之后、**返回之前**（应用此时还拿不到
+     * `accept()` 的返回值，只能靠回调参数接上会话）；客户端：收到 2xx 响应之后
+     * （`connect()` 之后先排队，见 `is_pending()`）。
      */
     std::function<void(uvcpp_h3_wt_session&)> on_open;
     /// 收到 `WT_DRAIN_SESSION`（只是通知，会话仍然可用）。
