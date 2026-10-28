@@ -938,6 +938,34 @@ class UVCPP_API uvcpp_http_server {
    */
   int send_reply(const uvcpp_http_reply& reply, uvcpp_http_response& resp);
 
+#if UVCPP_HTTP3_ENABLE
+  /**
+   * @brief h3 流式响应：发头块，**不**结束发送方向。
+   *
+   * h3 的组帧由 QUIC 流自己承担（没有 h1 那种 chunked 帧），所以 `head` 里
+   * 那些 `content-length` / `transfer-encoding` 会由会话层按连接专属头剥掉；
+   * 调用方只需要给状态码与头部。之后每一块走 `write_h3_stream()`，收尾走
+   * `end_h3_stream()`（发送方向 FIN）。
+   *
+   * @return 0 受理；`UV_EINVAL` 凭据无效 / 不是本服务器的 / 不是 h3；
+   *         `UV_ENOENT` 连接已经收场；其余是 nghttp3 的错误码。
+   */
+  int begin_h3_stream(const uvcpp_http_reply& reply,
+                      uvcpp_http_response& head);
+
+  /**
+   * @brief h3 流式响应：写一块 body。
+   *
+   * 与 `write_stream()` 同一套 done 口径：返回 0 时 `done` 会被调**一次**
+   * （`0` = 已交给 QUIC）；返回非 0 时 `done` **不会被调**，由调用方结算。
+   */
+  int write_h3_stream(const uvcpp_http_reply& reply, std::string bytes,
+                      std::function<void(int)> done);
+
+  /** @brief h3 流式响应：结束发送方向（FIN）。 */
+  int end_h3_stream(const uvcpp_http_reply& reply);
+#endif  // UVCPP_HTTP3_ENABLE
+
  private:
   // -------------------------------------------------------------------
   // Route matching

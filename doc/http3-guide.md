@@ -1,4 +1,4 @@
-# HTTP/3 指南
+﻿# HTTP/3 指南
 
 `src/http3/` 是 **web 层**的一条传输 —— HTTP/3（RFC 9114），解析用
 [nghttp3](https://github.com/ngtcp2/nghttp3)，字节跑在 `src/quic/` 那条链路协议
@@ -301,11 +301,17 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
   —— 纯 h3 的服务端上 TCP 那条腿一次都没 `listen()`，`uvcpp_tcp_server::stop()`
   会同步早返回，少了"停 QUIC 循环"那一句，`run()` 永远不回来。这条有专门一条
   用例钉着（`http3_web_func.cpp` 的 `test_h3_only_stop_returns_from_run()`）。
-- **h3 上暂不支持流式路由。** `post_stream` 注册的流式处理函数与
+- **h3 上暂不支持流式路由（收方向）。** `post_stream` 注册的流式处理函数与
   `set_stream_claim` 装的认领钩子在 TCP 那条路上才生效；一条 h3 请求撞上它们会被
   **显式拒绝**（500 + stderr 一行），而不是被静默路由错。
   **这两条各有断言**（`test_unsupported_paths_refuse_explicitly()`）——
   静默错路由是这一层最容易犯、也最难查的错。
+  **响应方向的流式与尾随头从 1.9.0 起是支持的**（普通处理函数里
+  `begin_chunked → write_chunk → end`、以及 `set_trailers()`）：出口走
+  `req.reply`（h3 没有 `uvcpp_tcp_client`），组帧由 QUIC 流承担 —— 线上是裸
+  字节，没有 h1 的 hex 帧；尾随头是 DATA 之后的第二个 HEADERS 块
+  （RFC 9114 §4.1）。判据：`web_app_http3_stream_func.cpp` /
+  `web_app_http3_trailers_func.cpp`。
 - **推迟应答（`resp.deferred`）在 h3 上是支持的**（`1.6.8-dev` 起，见
   [§9](#9-推迟应答h3-上补上的那一半)）。处理函数拿到的仍然是
   `client == nullptr`（一条 QUIC 连接下面没有 TCP 客户端这回事），但"稍后回话"
@@ -335,6 +341,8 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 | extended CONNECT、WebSocket over h3 | **真实现**（`1.8.3-dev` 起） | `http3_ext_connect_func.cpp` / `http3_ws_func.cpp` |
 | **HTTP/3 Datagram（RFC 9297）** | **真实现**（`1.8.10` 起） | `http3_datagram_func.cpp` |
 | **WebTransport over h3** | **真实现**（`1.8.10` 起，draft-13 语义） | `http3_webtransport_func.cpp` |
+| **webapp 的 h3 尾随头**（`set_trailers()`，DATA 后的第二个 HEADERS） | **真实现**（`1.9.0` 起） | `web_app_http3_trailers_func.cpp` |
+| **webapp 的 h3 流式响应**（`begin_chunked` / `write_chunk` / `end`） | **真实现**（`1.9.0` 起） | `web_app_http3_stream_func.cpp` |
 | Server Push | **没有** | [§8](#8-没做的如实列出) |
 | h3 上的流式路由（`post_stream` / `set_stream_claim`） | **没有**（显式拒绝，不静默错路由） | [§8](#8-没做的如实列出) |
 
@@ -402,7 +410,7 @@ void connect_over_http3(uvcpp_http_client& cli, int udp_port) {
 6. **链接是 PRIVATE**（`CMakeLists.txt:3233-3233` 的 `$<BUILD_INTERFACE:nghttp3_static>`）：
    nghttp3 的头路径不传播给使用者，所以**功能测试不能** `#include
    <nghttp3/nghttp3.h>`；想知道版本就用 `uvcpp_h3_connection::nghttp3_version()`
-   （`src/http3/uvcpp_h3_connection.h:473`），它经公开头调用、链接期解析。
+   （`src/http3/uvcpp_h3_connection.h:480-480`），它经公开头调用、链接期解析。
 
 7. **本机可复现**：nghttp3 也可以用
    `-DFETCHCONTENT_SOURCE_DIR_NGHTTP3=<一份已下好的 nghttp3 源码>` 指过去绕开下载
@@ -465,7 +473,7 @@ h1 写泵、TCP 的 ALPN 列表与分支 —— **全部不改**。唯一的例�
 
 **（c）往共享结构里加了什么：服务端零。** h3 用**另一张表**
 （`std::map<uvcpp_quic_connection*, quic_ctx> quic_ctxs_`，
-`src/web/uvcpp_http_server.h:1722-1722`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
+`src/web/uvcpp_http_server.h:1750-1750`），只在 QUIC 回调里碰；`conn_ctx` **不加任何
 字段** —— 那个结构体在 h1 的**每请求**热路上，往里加一个字都是每个 h1 请求都要付
 的。客户端加了六个成员（三个 `bool`、一个 `int64`、两个指针，`src/web/uvcpp_http_client.h:714-720`）
 —— 那是每**连接**一个的对象，不是每请求一个；`send()` 热路上多的是一个可预测为假

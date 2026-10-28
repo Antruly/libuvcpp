@@ -206,6 +206,7 @@ uvcpp_web_sent_info::uvcpp_web_sent_info()
 
 uvcpp_web_response::uvcpp_web_response()
     : head_only_(false),
+      no_chunk_framing_(false),
       ended_(false),
       deferred_(false),
       pending_bytes_(0),
@@ -753,9 +754,9 @@ void uvcpp_web_response::end() {
     // 是"消息到此为止"，紧随其后的整份文件全成了下一条报文里的垃圾。
     // （`file_finished()` 自己会补终止块，所以这里少发的那一个不会丢。）
     //
-    // h2 上**没有终止块这回事**：流的终点是带 END_STREAM 的那一帧，由 http
-    // 层在 `end_stream()` 里发。这里补的 5 个字节会原样进响应体。
-    if (!on_h2_stream()) {
+    // h2/h3 上**没有终止块这回事**：终点是带 END_STREAM 的帧 / QUIC 流的 FIN，
+    // 由 http 层在 `end_stream()` 里发。这里补的 5 个字节会原样进响应体。
+    if (!raw_body_framing()) {
       pending_buf_.append("0\r\n\r\n");
       pending_bytes_ += 5;
       if (pending_bytes_ > max_stream_bytes_) drain_armed_ = true;
@@ -971,8 +972,8 @@ bool uvcpp_web_response::write_chunk(const char* data, size_t len) {
     return true;
   }
 
-  if (on_h2_stream()) {
-    // h2 上**没有 chunked 帧** —— 边界由 DATA 帧自己划，这一层给的是裸字节。
+  if (raw_body_framing()) {
+    // h2/h3 上没有 chunked 帧 —— 边界由 DATA 帧或 QUIC 流自己划，这一层给裸字节。
     // 照 h1 组帧的话，hex 长度与那两组 CRLF 会成为响应体里实打实的内容：
     // 一条 SSE 流的每个事件前面都挂着 `1a\r\n`，而 `\r\n\r\n` 恰好会被
     // `EventSource` 当成事件分隔符 —— 对端不报错，只是收到一堆垃圾。
@@ -1406,7 +1407,7 @@ void uvcpp_web_response::file_finished(int status, uint64_t bytes_sent) {
     // 第一个字节之前就失败：这条流还有救，改写成错误响应。
     fail_stream_before_head(status);
   } else {
-    if (status == 0 && !head_only_ && !file_raw_ && !on_h2_stream()) {
+    if (status == 0 && !head_only_ && !file_raw_ && !raw_body_framing()) {
       // chunked 的终止块。**`end()` 帮不上忙** —— 它在 `stream_finished_`
       // 上提前返回，而 `send_file*` 的契约是"自足"（用户不必补一句 `end()`），
       // 所以这里必须自己补。

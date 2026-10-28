@@ -1257,6 +1257,20 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
   /** @brief 传输结束后摘掉（无论成功、出错还是被取消）。 */
   void stream_detach_file(uvcpp_web_conn_id id, uvcpp_web_file_transfer* t);
 
+#if UVCPP_HTTP3_ENABLE
+  // -----------------------------------------------------------------
+  // h3 流式响应（没有 `uvcpp_tcp_client`，身份是 `req.reply`）
+  // -----------------------------------------------------------------
+
+  /** @brief 发 h3 流式响应的头块（不结束发送方向）。 */
+  int h3_stream_begin(const uvcpp_http_reply& reply, uvcpp_http_response& head);
+  /** @brief 写一块 body；`done` 的契约与 `stream_write()` 相同。 */
+  int h3_stream_write(const uvcpp_http_reply& reply, std::string bytes,
+                      std::function<void(int)> done);
+  /** @brief 结束发送方向（QUIC 流 FIN）。 */
+  void h3_stream_end(const uvcpp_http_reply& reply);
+#endif  // UVCPP_HTTP3_ENABLE
+
   // -----------------------------------------------------------------
   // uvcpp_web_context_host
   // -----------------------------------------------------------------

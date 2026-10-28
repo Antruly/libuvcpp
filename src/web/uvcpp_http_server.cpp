@@ -2883,6 +2883,73 @@ int uvcpp_http_server::send_reply(const uvcpp_http_reply& reply,
   return static_cast<int>(send_response(reply.client_, resp));
 }
 
+#if UVCPP_HTTP3_ENABLE
+int uvcpp_http_server::begin_h3_stream(const uvcpp_http_reply& reply,
+                                       uvcpp_http_response& head) {
+  if (!reply.valid() || reply.server_ != this || reply.quic_ == nullptr) {
+    return UV_EINVAL;
+  }
+  if (!reply_alive(reply)) return UV_ENOENT;
+  std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
+      t.find(reply.quic_);
+  if (it == t.end() || it->second.h3 == nullptr) return UV_EINVAL;
+  uvcpp_h3_connection* h3 = it->second.h3;
+
+  http_ensure_date(head);
+
+  std::vector<h3_header> hs;
+  h3_header st;
+  st.name  = ":status";
+  st.value = std::to_string(static_cast<int>(head.status_code));
+  st.kind  = h3_header_kind::STATUS;
+  hs.push_back(st);
+  for (size_t i = 0; i < head.headers.size(); ++i) {
+    h3_header h;
+    h.name  = head.headers[i].name;
+    h.value = head.headers[i].value;
+    h.kind  = h3_header_kind::REGULAR;
+    hs.push_back(h);
+  }
+  return h3->send_stream_response(reply.stream_id(), hs);
+}
+
+int uvcpp_http_server::write_h3_stream(const uvcpp_http_reply& reply,
+                                       std::string bytes,
+                                       std::function<void(int)> done) {
+  if (!reply.valid() || reply.server_ != this || reply.quic_ == nullptr) {
+    return UV_EINVAL;
+  }
+  if (!reply_alive(reply)) return UV_ENOENT;
+  std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
+      t.find(reply.quic_);
+  if (it == t.end() || it->second.h3 == nullptr) return UV_EINVAL;
+  uvcpp_h3_connection* h3 = it->second.h3;
+
+  const int rc =
+      h3->write_stream_data(reply.stream_id(), bytes.data(), bytes.size());
+  // 与 `write_stream()` 同一条 done 口径：只有受理（rc == 0）才调；非 0 由
+  // 调用方自己结算。h3 这里没有"写完成"事件 —— `write_stream_data()` 把字节
+  // 交给 QUIC 并立刻 flush，`done(0)` 的含义是"已交给 QUIC"。
+  if (rc == 0 && done) done(0);
+  return rc;
+}
+
+int uvcpp_http_server::end_h3_stream(const uvcpp_http_reply& reply) {
+  if (!reply.valid() || reply.server_ != this || reply.quic_ == nullptr) {
+    return UV_EINVAL;
+  }
+  if (!reply_alive(reply)) return UV_ENOENT;
+  std::map<uvcpp_quic_connection*, quic_ctx>& t = quic_ctxs_here();
+  std::map<uvcpp_quic_connection*, quic_ctx>::iterator it =
+      t.find(reply.quic_);
+  if (it == t.end() || it->second.h3 == nullptr) return UV_EINVAL;
+  uvcpp_h3_connection* h3 = it->second.h3;
+  return h3->end_stream_data(reply.stream_id());
+}
+#endif  // UVCPP_HTTP3_ENABLE
+
 void uvcpp_http_server::remove_ctx(uvcpp_tcp_client* client) {
   // 对端断开走的是**这条路**（`set_on_close` → 这里），不是 close_connection。
   // 所以队列里那几块的 done 必须在这里唤醒 —— 少了这一步，它们永远不响，而
@@ -3458,8 +3525,10 @@ int uvcpp_http_server::send_h3_response(uvcpp_quic_connection* conn,
                       std::to_string(static_cast<unsigned long long>(
                           resp.body.size())));
     }
-  } else if (!resp.has_header("content-length") && resp.body.size() == 0) {
+  } else if (!resp.has_header("content-length") && resp.body.size() == 0 &&
+             !status_forbids_content_length(resp.status_code)) {
     // 空体靠 `content-length: 0` 说明边界（h3 里没有 chunked 这回事）。
+    // 1xx / 204 / 304 例外，与 h1 那一支同一个判据（RFC 9110 §8.6）。
     resp.set_header("content-length", "0");
   }
 

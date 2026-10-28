@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_web_app.cpp
  * @brief uvcpp_web_app 实现。
  * @author zhuweiye
@@ -201,6 +201,57 @@ class app_stream_sink : public uvcpp_web_stream_sink {
   const uvcpp_web_conn_id id_;
   const int32_t           stream_id_;
 };
+
+#if UVCPP_HTTP3_ENABLE
+/**
+ * @brief h3 流式响应的出口 —— 与 `app_stream_sink` 同形，但拿的是**凭据**。
+ *
+ * h3 上没有 `uvcpp_tcp_client`，也没有 `uvcpp_web_conn_id` 这一维（那条请求的
+ * 登记项是临时的）：回话与写块的唯一身份是 `req.reply`（`uvcpp_http_reply`）。
+ * 文件传输的记账仍然走 conn id —— 那是框架自己的登记表，h3 请求在那里也有一
+ * 条临时记录。
+ */
+class app_h3_stream_sink : public uvcpp_web_stream_sink {
+ public:
+  app_h3_stream_sink(uvcpp_web_app* app, const uvcpp_http_reply& reply,
+                     uvcpp_web_conn_id id)
+      : app_(app), reply_(reply), id_(id) {}
+
+  virtual int stream_begin(uvcpp_http_response& head) {
+    if (app_ == nullptr) return UV_ECANCELED;
+    return app_->h3_stream_begin(reply_, head);
+  }
+
+  virtual int stream_write(const std::string& bytes,
+                           const std::function<void(int)>& done) {
+    if (app_ == nullptr) return UV_ECANCELED;
+    return app_->h3_stream_write(reply_, bytes, done);
+  }
+
+  virtual void stream_end(bool /*close_after*/) {
+    // h3 上"结束发送方向"就是 FIN；整条 QUIC 连接不会因为一条流而关。
+    if (app_ == nullptr) return;
+    app_->h3_stream_end(reply_);
+  }
+
+  virtual void stream_attach_file(uvcpp_web_file_transfer* t) {
+    if (app_ == nullptr) return;
+    app_->stream_attach_file(id_, t);
+  }
+
+  virtual void stream_detach_file(uvcpp_web_file_transfer* t) {
+    if (app_ == nullptr) return;
+    app_->stream_detach_file(id_, t);
+  }
+
+  virtual uvcpp_loop* stream_loop() const { return reply_.loop(); }
+
+ private:
+  uvcpp_web_app* const      app_;
+  const uvcpp_http_reply    reply_;
+  const uvcpp_web_conn_id   id_;
+};
+#endif  // UVCPP_HTTP3_ENABLE
 
 /** @brief 看门狗轮询间隔（毫秒）。 */
 const uint64_t kShutdownPollMs = 20;
@@ -2817,28 +2868,50 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // 按值接了过来。这条分支以前没有，于是 h3 的响应一律落到下面那句
   // 「连接已断开，响应被丢弃」上（`reg_client(nullptr)` 恒为空）。
   //
-  // h3 上没有流式响应与尾随头：派发器对**流式路由**是显式拒绝的
-  // （`dispatch_h3_request` 的 `refuse_stream`），而这里的 `streaming()` 只
-  // 可能来自普通路由里调了 `begin_chunked()` —— 那是调用方用错了传输。回
-  // 500 而不是静默丢弃，症状才会落在对端看得见的地方。
+  // h3 上的**尾随头与流式响应都是支持的**（1.9.0）：尾随头走
+  // `send_reply()` → `send_h3_response()`（`h3_response::trailers`，会话层在
+  // DATA 之后提交）；流式走下面那条 `app_h3_stream_sink`（发送方向是 QUIC
+  // 流的 FIN，没有 h1 那种终止块）。
   if (client == nullptr &&
       ctx.request().raw().reply.version() == uvcpp_http_version::HVER_30) {
     const uvcpp_http_reply reply = ctx.request().raw().reply;
-    if (r.streaming() || r.has_trailers()) {
-      UVCPP_LOG_WARN(log_category::RESPONSE)
-          << "h3 上不支持流式/尾随头响应（status " << info.status_code
-          << "）—— 回 500";
-      uvcpp_http_response gap =
-          uvcpp_http_response::make(http_status::INTERNAL_SERVER_ERROR);
-      info.ok         = false;
-      info.body_bytes = 0;
-      http_->send_reply(reply, gap);
-      r.notify_sent(info);
+
+    if (r.streaming()) {
+      // 与 h1/h2 同一条框架流水线（`begin_chunked → write_chunk → end`），
+      // 只是出口换成凭据 —— 这条腿上没有 `uvcpp_tcp_client`。组帧由 QUIC 流
+      // 承担：`raw_body_framing()` 判的是 `resp_.stream_id != 0` 或派发时
+      // 置上的 `set_no_chunk_framing(true)` —— h3 的第一条流号就是 0，所以
+      // 后者是必须的（见 `on_http_request()` 里那一句）。
+      const uvcpp_web_conn_id id = ctx.connection_id();
+      r.set_stream_sink(new app_h3_stream_sink(this, reply, id));
+
+      uvcpp_web_context* const cp = &ctx;
+      uvcpp_web_response* const rp = &r;
+      r.set_stream_finished_cb([cp, rp, id](int status) {
+        uvcpp_web_sent_info si;
+        si.status_code   = rp->status_code();
+        si.body_bytes    = rp->head_only() ? 0 : rp->stream_bytes_written();
+        si.connection_id = id;
+        si.streamed      = true;
+        si.ok            = (status == 0);
+        rp->notify_sent(si);
+        // **这一句之后不得再碰上面任何东西。** 与 h1/h2 那条收尾同一个理由。
+        cp->release();
+      });
+
+      ctx.hold();
+      r.pump_stream();
       return;
     }
 
     info.body_bytes = r.head_only() ? 0 : r.body_size();
-    const int rc    = http_->send_reply(reply, r.raw_after_sync());
+    // `set_trailers()` 存在**框架那一层**（`uvcpp_web_response::trailers_`），
+    // 底层响应的 `trailers` 格子此前只有 h1/h2 那两条出口会去读。h3 走的是
+    // `send_reply()`，它只看 `resp.trailers` —— 不搬这一句，尾随头会静默消失
+    // （而 HTTP 状态码照样是 200，调用方以为发出去了）。
+    uvcpp_http_response& raw = r.raw_after_sync();
+    raw.trailers = r.trailers();
+    const int rc = http_->send_reply(reply, raw);
     info.ok         = (rc == 0);
     if (rc != 0) {
       UVCPP_LOG_WARN(log_category::RESPONSE)
@@ -3189,6 +3262,29 @@ void uvcpp_web_app::stream_detach_file(uvcpp_web_conn_id id,
   }
   if (v.empty()) s->file_transfers.erase(it);
 }
+
+#if UVCPP_HTTP3_ENABLE
+int uvcpp_web_app::h3_stream_begin(const uvcpp_http_reply& reply,
+                                   uvcpp_http_response& head) {
+  const int rc = http_->begin_h3_stream(reply, head);
+  if (rc != 0) {
+    UVCPP_LOG_DEBUG(log_category::RESPONSE)
+        << "h3_stream_begin：凭据 " << reply.describe() << " 已失效（rc=" << rc
+        << "），头部丢弃";
+  }
+  return rc;
+}
+
+int uvcpp_web_app::h3_stream_write(const uvcpp_http_reply& reply,
+                                   std::string bytes,
+                                   std::function<void(int)> done) {
+  return http_->write_h3_stream(reply, std::move(bytes), std::move(done));
+}
+
+void uvcpp_web_app::h3_stream_end(const uvcpp_http_reply& reply) {
+  http_->end_h3_stream(reply);
+}
+#endif  // UVCPP_HTTP3_ENABLE
 
 void uvcpp_web_app::abort_request(uvcpp_web_context& ctx) {
   uvcpp_tcp_client* client = reg_client(ctx.connection_id());
@@ -3636,6 +3732,10 @@ void uvcpp_web_app::on_http_request(uvcpp_http_request& req,
   // 的非 const 版会先 `sync_meta()`，此刻 body 还空着，那会写死一个
   // `content-length: 0`，之后处理函数设的 body 长度就再也改不动了。
   ctx->response().set_stream_id(req.stream_id);
+  // **h3 的第一条请求流号就是 0**（QUIC 客户端双向流从 0 起编号），与 h1 的
+  // "流号恒为 0" 撞在同一个值上 —— 组帧方式不能靠流号猜，得由传输事实说。
+  ctx->response().set_no_chunk_framing(
+      req.version == uvcpp_http_version::HVER_30);
 
   const uvcpp_web_connection* conn = reg_find(id);
   if (conn != nullptr) {

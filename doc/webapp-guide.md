@@ -1,4 +1,4 @@
-<!-- doc-snippets: fragments-default — 本页的例子是摘录，不是完整翻译单元；要编的逐条标 `// doc-snippet: compile`。约定见 CONTRIBUTING.md。 -->
+﻿<!-- doc-snippets: fragments-default — 本页的例子是摘录，不是完整翻译单元；要编的逐条标 `// doc-snippet: compile`。约定见 CONTRIBUTING.md。 -->
 
 # webapp 应用框架开发者指南
 
@@ -641,7 +641,10 @@ resp.end();                 // 流式下 end() = 结束这条流（补终止块�
 
 - `begin_chunked` 必须**在任何 body 之前**调一次；它清 body、去 `content-length`、
   设 `transfer-encoding: chunked`。之后 `body()` / `text()` / `json()` 不再有意义。
-- **组帧归框架**：`write_chunk("data: 1\n\n")` 在线上的字节是 `b\r\ndata: 1\n\n\r\n`。
+- **组帧归框架（h1）**：`write_chunk("data: 1\n\n")` 在线上的字节是
+  `b\r\ndata: 1\n\n\r\n`。**h2 / h3 上没有这层帧**：同一句在线上就是裸的
+  `data: 1\n\n`，边界由 DATA 帧或 QUIC 流自己划（h3 的响应流式与尾随头从
+  1.9.0 起支持）。
 - **背压**：`write_chunk` 返回 **false = 缓冲已到高水位**，应等 `on_drain()` 再继续。
   **数据仍然被收下了，false 不是丢弃**。空块是无操作并返回 true。
 - **没有公开的 flush 方法**。要"立刻推出去"靠的是 `write_chunk()` 自己 + 水位。

@@ -293,8 +293,15 @@ class UVCPP_API uvcpp_h3_connection {
    * @brief 服务端：提交响应并立刻冲出去。
    *
    * @param omit_body true = 只发头块（HEAD / 204 / 304 走这一支）。
+   *        **这时 `resp.trailers` 会被忽略**：写方向在头块之后就已经结束，
+   *        再提交一个尾随块会被 nghttp3 拒；head-only 的响应也没有"末块之后"
+   *        那个位置。
    * @return 0 成功；负值是失败码（`UV_EMSGSIZE` 头块超了我们自己的上限，
    *         其余是 nghttp3 的错误码）。
+   *
+   * @note `resp.trailers` 非空时，即使 body 为空也会给 nghttp3 一个 data
+   *       reader（RFC 9114 §4.1 的第二个 HEADERS 块是合法收尾），所以
+   *       "只有尾随头、没有 DATA" 的响应在这条腿上成立。
    */
   int send_response(const h3_response& resp, bool omit_body = false);
 

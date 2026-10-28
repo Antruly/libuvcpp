@@ -439,7 +439,8 @@ class UVCPP_API uvcpp_h3_session {
    *        `content-length` 语义上等于 GET 的长度，那是调用方的责任。
    */
   int submit_response(int64_t stream_id, const std::vector<h3_header>& headers,
-                      std::string body = std::string(), bool omit_body = false);
+                      std::string body = std::string(), bool omit_body = false,
+                      bool trailers_follow = false);
 
   /// 提交一个只有 `:status` 的最小响应（错误页那一类）。body 可以为空。
   int submit_status(int64_t stream_id, int status, std::string body = std::string());
@@ -595,7 +596,8 @@ class UVCPP_API uvcpp_h3_session {
 
   /// 真正做提交的那一处（`submit_request` / `submit_response` 只差一个函数指针）。
   int submit(const std::vector<h3_header>& headers, std::string& body,
-             bool omit_body, int64_t stream_id, bool request_side);
+             bool omit_body, int64_t stream_id, bool request_side,
+             bool trailers_follow = false);
 
   nghttp3_conn*  conn_        = nullptr;
   bool           server_side_ = false;

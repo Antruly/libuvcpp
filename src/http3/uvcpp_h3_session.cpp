@@ -374,7 +374,8 @@ bool uvcpp_h3_session::is_drained() const {
 
 int uvcpp_h3_session::submit(const std::vector<h3_header>& headers,
                              std::string& body, bool omit_body,
-                             int64_t stream_id, bool request_side) {
+                             int64_t stream_id, bool request_side,
+                             bool trailers_follow) {
   if (conn_ == nullptr) return UV_EINVAL;
   if (fatal_) return last_error_ != 0 ? last_error_ : -1;
 
@@ -423,7 +424,12 @@ int uvcpp_h3_session::submit(const std::vector<h3_header>& headers,
   // `dr == NULL` 就等于"写方向到此为止"，那正是 HEAD / 204 / 304 要的语义
   // （只有头块，没有 DATA，发送方向随即关闭）。用一个空 reader 去表达同一件事，
   // 会在线上多出一个零长 DATA 帧的机会窗口，而那件事没有任何好处。
-  const bool has_body = !omit_body && !body.empty();
+  // `trailers_follow`：这条响应后面还有一个尾随 HEADERS 块。此时**即使 body
+  // 为空也必须给 nghttp3 一个 data reader** —— `dr == NULL` 的语义是"写方向
+  // 到此为止"（见上面那段），流一关就再也提交不了尾随头。reader 会立刻给出
+  // `0 + EOF`，线上可能多一个零长 DATA 帧，那是合法的，也是唯一能让尾随头
+  // 上线的形状。
+  const bool has_body = !omit_body && (!body.empty() || trailers_follow);
 
   const int rv =
       request_side
@@ -584,8 +590,9 @@ int uvcpp_h3_session::write_stream_data(int64_t stream_id, const char* data,
 
 int uvcpp_h3_session::submit_response(int64_t stream_id,
                                       const std::vector<h3_header>& headers,
-                                      std::string body, bool omit_body) {
-  return submit(headers, body, omit_body, stream_id, false);
+                                      std::string body, bool omit_body,
+                                      bool trailers_follow) {
+  return submit(headers, body, omit_body, stream_id, false, trailers_follow);
 }
 
 int uvcpp_h3_session::submit_status(int64_t stream_id, int status,

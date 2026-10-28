@@ -1086,10 +1086,14 @@ int uvcpp_h3_connection::send_response(const h3_response& resp,
     hs.push_back(resp.headers[i]);
   }
 
-  const int rc =
-      session_->submit_response(resp.stream_id, hs, resp.body, omit_body);
+  // HEAD（`omit_body`）上**不发**尾随头：那时 `dr == NULL`，写方向在头块之后
+  // 就关了，再提交一个尾随块会被 nghttp3 拒。head-only 的响应没有 body，也就
+  // 没有"末块之后那段字段"的位置（与 h1 同一条规矩）。
+  const bool want_trailers = !omit_body && !resp.trailers.empty();
+  const int  rc = session_->submit_response(resp.stream_id, hs, resp.body,
+                                            omit_body, want_trailers);
   if (rc != 0) return rc;
-  if (!resp.trailers.empty()) {
+  if (want_trailers) {
     // 同 `send_request()`：排在 DATA 之后、必须在抽干 reader 之前提交。
     const int trc = session_->submit_trailers(resp.stream_id, resp.trailers);
     if (trc != 0) return trc;

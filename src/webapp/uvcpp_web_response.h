@@ -768,6 +768,15 @@ class UVCPP_API uvcpp_web_response {
   void set_stream_id(int32_t stream_id) { resp_.stream_id = stream_id; }
   int32_t stream_id() const { return resp_.stream_id; }
 
+  /**
+   * @brief 这条响应所在的传输**没有** h1 的 chunked 组帧（h2 / h3）。
+   *
+   * h2 上 `stream_id != 0` 已经够用；h3 必须显式说一声 —— 它的第一条请求流号
+   * 就是 0（QUIC 的客户端双向流从 0 起编号），与"h1 上流号恒为 0"撞在同一个
+   * 值上。由派发器在跑处理函数**之前**置位。
+   */
+  void set_no_chunk_framing(bool v) { no_chunk_framing_ = v; }
+
   // -------------------------------------------------------------------
   // 表的回收口（框架用；用户代码不需要碰）
   // -------------------------------------------------------------------
@@ -819,13 +828,19 @@ class UVCPP_API uvcpp_web_response {
   /// `file_started_` 起步，于是 `pump_stream()` 以为已经起步过，**一个字节都不读**。
   void reset_stream_state();
 
-  /// 这条响应挂在一条 h2 流上（`stream_id != 0`）。
+  /// 这条响应的 body 是**裸字节**（h2/h3），不需要 h1 的 chunked 组帧。
   ///
   /// **组帧方式的判据只能是它，不能问 sink。** `write_chunk()` 完全可能出现在
   /// 处理函数体内，而 sink 是处理函数返回之后才装上的 —— 那一刻已经晚了：
   /// 帧已经按 h1 的形状攒进了 `pending_buf_`。所以框架在**派发之前**就把流号
-  /// 写进 `raw()`，本层只读它。
-  bool on_h2_stream() const { return resp_.stream_id != 0; }
+  /// 写进 `raw()`，本层只读它（见 `set_stream_id`）。
+  ///
+  /// **光看 `stream_id != 0` 不够**：h3 的第一条请求流号就是 0，而它同样没有
+  /// chunked。所以 h3 派发时还会调 `set_no_chunk_framing(true)` 把传输事实
+  /// 钉进来。
+  bool raw_body_framing() const {
+    return resp_.stream_id != 0 || no_chunk_framing_;
+  }
 
   // --- 分片下发的内部动作 ---
   /// 追加一块 body，**不组帧**（与 `write_chunk` 的唯一区别就是少了 hex 帧）。
@@ -882,6 +897,8 @@ class UVCPP_API uvcpp_web_response {
   uvcpp_http_response resp_;
 
   bool head_only_;
+  /// 传输没有 h1 的 chunked 组帧（h2/h3）。见 `raw_body_framing()`。
+  bool no_chunk_framing_;
   bool ended_;
   bool deferred_;
   /// 尾随头（`set_trailers()`）。空表 = 没设 —— h2 上"发一段空的尾随块"是合法
