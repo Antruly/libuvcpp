@@ -158,6 +158,70 @@ void test_resp3_types() {
   // 普通数组不是 push。
   push = true;
   check(feed_one(p, "*1\r\n+OK\r\n", m, &push) && !push, "array is not push");
+
+  // ---- RESP3 流式编码（Redis 自己不产，模块可以）-------------------
+  check(feed_one(p, "$?\r\n;5\r\nHello\r\n;6\r\n world\r\n;0\r\n", v) &&
+            v.type() == uvcpp::uvcpp_redis_type::BULK &&
+            v.as_string() == "Hello world",
+        "streamed string");
+  // 只有一个结束块 = 空串。
+  check(feed_one(p, "$?\r\n;0\r\n", v) &&
+            v.type() == uvcpp::uvcpp_redis_type::BULK && v.as_string().empty(),
+        "streamed empty string");
+  check(feed_one(p, "*?\r\n.\r\n", v) &&
+            v.type() == uvcpp::uvcpp_redis_type::ARRAY && v.size() == 0,
+        "streamed empty array");
+
+  check(feed_one(p, "*?\r\n:1\r\n:2\r\n:3\r\n.\r\n", v) &&
+            v.type() == uvcpp::uvcpp_redis_type::ARRAY && v.size() == 3 &&
+            v.at(2).as_integer() == 3,
+        "streamed array");
+  check(feed_one(p, "~?\r\n$1\r\na\r\n.\r\n", v) &&
+            v.type() == uvcpp::uvcpp_redis_type::SET && v.size() == 1,
+        "streamed set");
+  check(feed_one(p, "%?\r\n$1\r\na\r\n:1\r\n.\r\n", v) &&
+            v.type() == uvcpp::uvcpp_redis_type::MAP && v.size() == 1 &&
+            v.items()[0].first.as_string() == "a" &&
+            v.items()[0].second.as_integer() == 1,
+        "streamed map");
+  push = false;
+  check(feed_one(p, ">?\r\n$7\r\nmessage\r\n.\r\n", m, &push) && push &&
+            m.size() == 1 && m.at(0).as_string() == "message",
+        "streamed push");
+
+  // 分片：流式串与流式聚合都必须能跨任意字节边界续上。
+  {
+    uvcpp::uvcpp_redis_parser sp;
+    const std::string frame = "$?\r\n;3\r\nabc\r\n;0\r\n";
+    bool ok = true;
+    for (std::size_t i = 0; i + 1 < frame.size(); ++i) {
+      uvcpp::uvcpp_redis_value part;
+      std::size_t off = 0;
+      if (sp.next(frame.data(), i, off, part) !=
+          uvcpp::uvcpp_redis_parser::NEED_MORE) {
+        ok = false;
+        break;
+      }
+    }
+    ok = ok && feed_one(sp, frame, v) && v.as_string() == "abc";
+    check(ok, "streamed string across fragments");
+  }
+  {
+    uvcpp::uvcpp_redis_parser sp;
+    const std::string frame = "*?\r\n:1\r\n:2\r\n.\r\n";
+    bool ok = true;
+    for (std::size_t i = 0; i + 1 < frame.size(); ++i) {
+      uvcpp::uvcpp_redis_value part;
+      std::size_t off = 0;
+      if (sp.next(frame.data(), i, off, part) !=
+          uvcpp::uvcpp_redis_parser::NEED_MORE) {
+        ok = false;
+        break;
+      }
+    }
+    ok = ok && feed_one(sp, frame, v) && v.size() == 2;
+    check(ok, "streamed aggregate across fragments");
+  }
 }
 
 // =========================================================================
@@ -222,8 +286,26 @@ void test_malformed() {
   check(is_bad("$-2\r\n"), "negative bulk length");
   check(is_bad("*-2\r\n"), "negative array length");
   check(is_bad("*abc\r\n"), "array length not an integer");
-  check(is_bad("*?\r\n"), "streamed aggregate rejected");
-  check(is_bad("$?\r\n"), "streamed bulk rejected");
+  // 流式编码是**支持的**（1.9.0 起），所以这里判的是它们的**坏形状**：
+  // 缺 `;` 前缀、长度不是整数、结束标记不完整 —— 这些都必须立刻 BAD，不能
+  // 当成"还不够"让连接一直等。
+  check(is_bad("$?\r\nx\r\n"), "streamed string chunk without ';'");
+  check(is_bad("$?\r\n;x\r\n"), "streamed chunk length not an integer");
+  check(is_bad("$?\r\n;-1\r\n"), "streamed chunk negative length");
+  check(is_bad("*?\r\n.xx"), "streamed aggregate bad terminator");
+  // 只给一半是 NEED_MORE，不是 BAD：`is_bad` 只认 BAD，所以这两条改成直接断言。
+  {
+    uvcpp::uvcpp_redis_parser sp;
+    uvcpp::uvcpp_redis_value  part;
+    std::size_t off = 0;
+    check(sp.next("*?\r\n", 4, off, part) ==
+              uvcpp::uvcpp_redis_parser::NEED_MORE,
+          "streamed aggregate partial is NEED_MORE");
+    off = 0;
+    check(sp.next("$?\r\n;3\r\nab", 10, off, part) ==
+              uvcpp::uvcpp_redis_parser::NEED_MORE,
+          "streamed string partial is NEED_MORE");
+  }
   check(is_bad("$3\r\nabcd\r\n"), "bulk missing CRLF after data");
   check(is_bad(":x\r\n"), "integer not an integer");
   check(is_bad(",abc\r\n"), "double not a double");

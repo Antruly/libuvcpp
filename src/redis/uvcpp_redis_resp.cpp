@@ -92,7 +92,48 @@ uvcpp_redis_parser::result parse_aggregate(cursor& c, int depth,
   if (!read_line(c, line_off, line_len)) return uvcpp_redis_parser::NEED_MORE;
 
   if (line_len == 1 && c.p[line_off] == '?') {
-    return P.bad(UV_EPROTO, "不支持 RESP3 的流式聚合（*? / %? / ~? / >?）");
+    // RESP3 流式聚合：`<T>?\r\n` + 元素 + `.<CRLF>` 收尾（Redis 自己不产，
+    // 但模块可以用，见 RESP3 规范「Streamed aggregated data types」）。
+    c.off = line_off + line_len + 2;
+    out   = make_node(kind);
+    std::size_t elements = 0;
+    for (;;) {
+      const std::size_t rem = (c.off < c.len) ? (c.len - c.off) : 0;
+      if (rem == 0) return uvcpp_redis_parser::NEED_MORE;
+      if (c.p[c.off] == '.') {
+        if (rem < 3) return uvcpp_redis_parser::NEED_MORE;
+        if (c.p[c.off + 1] != '\r' || c.p[c.off + 2] != '\n') {
+          return P.bad(UV_EPROTO, "流式聚合的结束标记不完整");
+        }
+        c.off += 3;
+        return uvcpp_redis_parser::DONE;
+      }
+      if (is_map) {
+        node_ptr k;
+        node_ptr v;
+        bool dummy = false;
+        uvcpp_redis_parser::result r =
+            parse_value(c, depth + 1, dummy, P, k);
+        if (r != uvcpp_redis_parser::DONE) return r;
+        r = parse_value(c, depth + 1, dummy, P, v);
+        if (r != uvcpp_redis_parser::DONE) return r;
+        out->pairs.push_back(
+            std::make_pair(uvcpp_redis_value_factory::make(k),
+                           uvcpp_redis_value_factory::make(v)));
+        elements += 2;
+      } else {
+        node_ptr v;
+        bool child_push = false;
+        const uvcpp_redis_parser::result r =
+            parse_value(c, depth + 1, child_push, P, v);
+        if (r != uvcpp_redis_parser::DONE) return r;
+        out->elems.push_back(uvcpp_redis_value_factory::make(v));
+        ++elements;
+      }
+      if (elements > P.max_elements) {
+        return P.bad(UV_EPROTO, "流式聚合的元素个数超过上限");
+      }
+    }
   }
 
   long long n = 0;
@@ -239,7 +280,41 @@ uvcpp_redis_parser::result parse_value(cursor& c, int depth, bool& push,
       if (!read_line(c, line_off, line_len)) return uvcpp_redis_parser::NEED_MORE;
 
       if (line_len == 1 && c.p[line_off] == '?') {
-        return P.bad(UV_EPROTO, "不支持 RESP3 的流式字符串（$?）");
+        // RESP3 流式字符串：`$?\r\n` + 一个或多个 `;<len>\r\n<data>\r\n`，
+        // 以 `;0\r\n` 收尾。只有 bulk（`$`）有这种编码。
+        if (t != '$') {
+          return P.bad(UV_EPROTO, "只有 bulk 字符串支持流式编码");
+        }
+        c.off = line_off + line_len + 2;
+        std::string acc;
+        for (;;) {
+          std::size_t co = 0;
+          std::size_t cl = 0;
+          if (!read_line(c, co, cl)) return uvcpp_redis_parser::NEED_MORE;
+          if (cl == 0 || c.p[co] != ';') {
+            return P.bad(UV_EPROTO, "流式字符串的块缺少 ';' 前缀");
+          }
+          long long n = 0;
+          if (!parse_int(c.p + co + 1, cl - 1, n)) {
+            return P.bad(UV_EPROTO, "流式字符串的块长度不合法");
+          }
+          if (n < 0 || static_cast<std::size_t>(n) > P.max_bulk ||
+              acc.size() + static_cast<std::size_t>(n) > P.max_bulk) {
+            return P.bad(UV_EPROTO, "流式字符串超过上限");
+          }
+          c.off = co + cl + 2;
+          if (n == 0) break;  // `;0` 是结束块
+          const std::size_t dl = static_cast<std::size_t>(n);
+          if (c.off + dl + 2 > c.len) return uvcpp_redis_parser::NEED_MORE;
+          if (c.p[c.off + dl] != '\r' || c.p[c.off + dl + 1] != '\n') {
+            return P.bad(UV_EPROTO, "流式字符串的块数据后面缺 CRLF");
+          }
+          acc.append(c.p + c.off, dl);
+          c.off += dl + 2;
+        }
+        out = make_node(uvcpp_redis_type::BULK);
+        out->text = std::move(acc);
+        return uvcpp_redis_parser::DONE;
       }
 
       long long n = 0;
