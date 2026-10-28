@@ -229,7 +229,7 @@ size_t close_all_clients();
 | setter | 约束 |
 |---|---|
 | `set_read_callback` | 必须在 loop 线程调用，且应当在 `listen()` 之前设好（`src/net/uvcpp_tcp_server.h:574-574`） |
-| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:706-707`） |
+| `set_ssl_context` | 必须在 `listen()` 之前设置（`src/net/uvcpp_tcp_server.h:708-709`） |
 | `set_tcp_nodelay` | 必须在 `listen()`（以及 `set_loops(n > 1)`，如果要用）之前调（`src/net/uvcpp_tcp_server.h:235-235`） |
 
 `set_read_callback` 的实现就是一句赋值（`src/net/uvcpp_tcp_server.cpp:1061-1063`），

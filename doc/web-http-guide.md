@@ -67,7 +67,7 @@
 **三、`web/` 有 h2，但入口有三条。** 服务端 `set_http2_enabled(true)`
 （`src/web/uvcpp_http_server.h:357-357`）加 TLS+ALPN，服务端 `set_h2c_enabled(true)`
 （明文先验知识，RFC 9113 §3.4），客户端 `set_http2_enabled(true)`
-（`src/web/uvcpp_http_client.h:684-684`）。
+（`src/web/uvcpp_http_client.h:686-686`）。
 前两条都**默认关**；只有 `webapp/` 框架层默认开、零配置自动协商。
 **不做 `Upgrade: h2c` 协商**（RFC 9113 已删除该机制），**也不做嗅探** —— 明文这条腿
 只认那 24 个字节。
@@ -95,7 +95,7 @@
 `uvcpp_http_server` **自己不碰 TLS** —— 它没有任何 SSL API。要上 https 必须
 `get_tcp_server()->set_ssl_context(...)`，**而且必须在 `listen()` 之前**
 （`tests/functional/web_ssl_h2_client_func.cpp:186-186`）。握手超时归
-`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:805-805`）。
+`uvcpp_tcp_server`（默认 10000 ms，`src/net/uvcpp_tcp_server.h:807-807`）。
 
 ---
 
@@ -471,7 +471,7 @@ int doc_client_async() {
 
 `send` / `get` / `post` 的回调签名逐字是
 `std::function<void(const uvcpp_http_response&, int)>`（`src/web/uvcpp_http_client.h:219-274`）。
-交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:648-648`）的 const 引用 —— **存到下次 `send()`
+交付的 `resp` 是成员 `pending_resp_`（`src/web/uvcpp_http_client.h:650-650`）的 const 引用 —— **存到下次 `send()`
 就被覆写**。
 
 **异步路径没有超时，`connect()` 也不设**（`src/web/uvcpp_http_client.cpp:64-68`）。
@@ -481,7 +481,7 @@ int doc_client_async() {
 "对端在响应收完前断开"时 `send()` 的回调永远不来。
 
 **在响应回调里 `delete` 客户端是预期的用法。** 所有闭包都捕一个 `alive_token_`
-弱引用（`src/web/uvcpp_http_client.h:631-642`），析构第一件事就 reset
+弱引用（`src/web/uvcpp_http_client.h:633-644`），析构第一件事就 reset
 （`src/web/uvcpp_http_client.cpp:84-84`）—— 你不需要为它做任何额外的事。
 
 ### 流式响应（`send_stream`，`1.8.2` 起）
@@ -531,7 +531,7 @@ int doc_client_sync() {
 ### 三个容易写错的地方
 
 **一、keep-alive 有两个方向：请求那头听调用方的，响应那头听对端的。**
-`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:615-615` 初值 `true`、
+`keep_alive_` 是**调用方的偏好**（`src/web/uvcpp_http_client.h:617-617` 初值 `true`、
 `src/web/uvcpp_http_client.h:297-297` 声明 `set_keep_alive`、`src/web/uvcpp_http_client.cpp:1355-1355` setter）。`set_keep_alive(false)`
 会让请求报文带上 `connection: close`（`src/web/uvcpp_http_client.cpp:591-610`）；
 默认的 `true` 则不补头，报文里那条 `connection: keep-alive` 是

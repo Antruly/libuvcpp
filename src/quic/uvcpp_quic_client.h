@@ -80,6 +80,8 @@ class UVCPP_API uvcpp_quic_client {
    * @param ctx 生命周期必须覆盖整条连接（**不属于本对象**）。清空用
    *            `set_ssl_context(nullptr)`。
    *
+   * **销毁顺序**：上下文必须比本对象活得久 —— 同一作用域里先声明上下文、再声明本对象；
+   * 反过来（先本对象后上下文）时，本对象析构收尾仍会拿这个裸指针去用，是 UB（issue #56）。
    * **不设就是没配**：QUIC 没有明文模式（ALPN 是 TLS 扩展），所以
    * `connect()` 时上下文为空会返回 `UV_EINVAL`，而不是退化成一个不加密的连接。
    */

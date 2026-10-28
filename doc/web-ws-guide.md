@@ -288,7 +288,7 @@ void close(ws_close_code code = ws_close_code::NORMAL,
            const std::string& reason = std::string());                  // src/web/uvcpp_ws_client.h:164-165
 int  run(uv_run_mode md = UV_RUN_DEFAULT);                              // src/web/uvcpp_ws_client.h:171-171
 void stop();                                                            // src/web/uvcpp_ws_client.h:172-172
-void set_ssl_context(uvcpp_ssl_context* ctx);                           // src/web/uvcpp_ws_client.h:211-211
+void set_ssl_context(uvcpp_ssl_context* ctx);                           // src/web/uvcpp_ws_client.h:213-213
 ```
 
 ```cpp
