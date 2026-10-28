@@ -55,6 +55,27 @@ class quic_session;
  *
  * **线程**：所有成员都只能在它所属的那条 loop 线程上调用。
  */
+/**
+ * @brief 一条 QUIC 连接的只读统计（`uvcpp_quic_connection::stats()`）。
+ *
+ * 时间字段单位是**微秒**（ngtcp2 内部是纳秒，这里除过 1000）。
+ */
+struct UVCPP_API uvcpp_quic_stats {
+  uint64_t latest_rtt_us    = 0;  ///< 最近一次 RTT 采样
+  uint64_t min_rtt_us       = 0;  ///< 见过的最小 RTT
+  uint64_t smoothed_rtt_us  = 0;  ///< 平滑后的 RTT
+  uint64_t rttvar_us        = 0;  ///< RTT 的平均偏差
+  uint64_t cwnd             = 0;  ///< 拥塞窗口（字节）
+  uint64_t ssthresh         = 0;  ///< 慢启动阈值（字节）
+  uint64_t bytes_in_flight  = 0;  ///< 已发未确认的字节数
+  uint64_t pkt_sent         = 0;  ///< 发出的 QUIC 包数
+  uint64_t pkt_recv         = 0;  ///< 收到的 QUIC 包数（不含被丢弃的）
+  uint64_t pkt_lost         = 0;  ///< 判定丢失的包数（不含 PMTUD）
+  uint64_t pkt_discarded    = 0;  ///< 被丢弃的包数
+  uint64_t bytes_sent       = 0;
+  uint64_t bytes_recv       = 0;
+};
+
 class UVCPP_API uvcpp_quic_connection {
  public:
   /**
@@ -231,6 +252,21 @@ class UVCPP_API uvcpp_quic_connection {
    * 当"还没好"的判据（那是巧合，不是契约）。
    */
   std::string alpn_selected() const;
+
+  /**
+   * @brief 这条连接的只读统计（RTT / 拥塞窗口 / 丢包 / 收发计数）。
+   *
+   * 值来自 ngtcp2 的 `ngtcp2_conn_get_conn_info()`（实测取到的版本是 1.25.0，
+   * 带 `pkt_sent` / `pkt_lost` 那几个 1.16 才有的字段；更老的 ngtcp2 上那几个
+   * 字段恒为 0）。**全部是"到目前为止的累计值"**，不是速率。
+   *
+   * @param out 非空时写入。
+   * @return true = 连接还在、统计可用；false = 连接已经收场（`impl_` 或内核
+   *         已经拆掉）—— 那时 `out` 被清零。
+   *
+   * @note 线程：与本类其余成员相同，只在连接所属的 loop 线程上读。
+   */
+  bool stats(uvcpp_quic_stats& out) const;
 
   // -----------------------------------------------------------------
   // 流

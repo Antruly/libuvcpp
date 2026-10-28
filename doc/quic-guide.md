@@ -1,4 +1,4 @@
-# QUIC 传输层指南
+﻿# QUIC 传输层指南
 
 `src/quic/` 是 **net 层**上的一条**链路协议** —— QUIC（RFC 9000），后端是
 [ngtcp2](https://github.com/ngtcp2/ngtcp2)。它的位置与 `src/http2/` 对 HTTP/2 完全
@@ -75,7 +75,7 @@
 |---|---|---|
 | `uvcpp_quic_client` | `src/quic/uvcpp_quic_client.h:57` | 客户端**端点**：一条 UDP 口 + 它名下的那条连接 |
 | `uvcpp_quic_server` | `src/quic/uvcpp_quic_server.h:65` | 服务端**端点**：一条（或多条）UDP 口 + 它上面**所有**连接 |
-| `uvcpp_quic_connection` | `src/quic/uvcpp_quic_connection.h:58` | 一条 QUIC 连接：状态机、流、CID、ALPN |
+| `uvcpp_quic_connection` | `src/quic/uvcpp_quic_connection.h:79-79` | 一条 QUIC 连接：状态机、流、CID、ALPN |
 | `net_read_result` / `net_read_event` | `src/net/uvcpp_net_read.h:68` | **复用 net 层**的读事件语义（不是本模块新造的） |
 
 **为什么是三个类而不是一个。** `uvcpp_tcp_client` 一个对象既是 socket 又是连接，
@@ -468,6 +468,7 @@ int one_round_trip(uvcpp_quic_connection& conn) {
 | `set_callbacks(const callbacks&)` | 真实现（存值，随时可换） |
 | `state()` | 真状态机：`IDLE → HANDSHAKING → ESTABLISHED → CLOSING → CLOSED` |
 | `alpn_selected()` | 握手完成后是对端选定的协议名；之前是空串 |
+| `stats(uvcpp_quic_stats&)` | 只读统计（1.9.0）：RTT / `cwnd` / `ssthresh` / `bytes_in_flight` / `pkt_sent` / `pkt_recv` / `pkt_lost` / `pkt_discarded` / `bytes_sent` / `bytes_recv` |
 | `open_stream(bool bidi = true)` | 真开流，返回流号；失败返负的错误码 |
 | `write_stream(stream_id, data, len, end_stream = false)` | 受理进发送队列，`on_write` 报完成 |
 | `shutdown_stream(stream_id, app_error_code = 0)` | 只关发送方向；队列里没写完的以 `NGTCP2_ERR_STREAM_SHUT_WR` 收场 |
@@ -579,6 +580,23 @@ TCP 的 `PEER_CLOSED` 本来就是对端 FIN —— 于是这个字段对 TCP �
 **`on_stream_close` 那一格是故意留空的。** 它要等**两个**方向都收场才跑，那时读侧
 早就没有新信息了，拿它再报一次只会让调用方对同一条流收两次尾。本层把读侧的信号
 放在**它自己的到达时刻**上，写侧的收尾则由 `on_write` 报。
+
+### 5.3.1 连接统计（1.9.0）
+
+```cpp
+uvcpp_quic_stats st;
+if (conn.stats(st)) {
+  // 时间字段是微秒；其余是累计值（不是速率）。
+  use(st.smoothed_rtt_us, st.cwnd, st.pkt_lost, st.bytes_in_flight);
+}
+```
+
+值来自 ngtcp2 的 `ngtcp2_conn_get_conn_info()`。`pkt_sent` / `pkt_recv` /
+`pkt_lost` / `pkt_discarded` / `bytes_sent` / `bytes_recv` 是 ngtcp2 1.16 才
+有的字段（本仓取的是 1.25.0）；更老的 ngtcp2 上那几格恒为 0，如实。
+
+**不可用时返回 false 并把 `out` 清零** —— "连接已经收场"与"全是 0"必须分得开。
+线程规则与本类其余成员相同：只在连接所属的 loop 线程上读。
 
 ---
 

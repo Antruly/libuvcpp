@@ -22,6 +22,7 @@
 #include <uv.h>
 
 #include <utility>
+#include <cstring>
 
 #include "quic/uvcpp_quic_session.h"
 
@@ -284,6 +285,36 @@ quic_connection_state uvcpp_quic_connection::state() const {
 std::string uvcpp_quic_connection::alpn_selected() const {
   if (impl_->session == nullptr) return std::string();
   return impl_->session->alpn_selected();
+}
+
+bool uvcpp_quic_connection::stats(uvcpp_quic_stats& out) const {
+  out = uvcpp_quic_stats();
+  if (!impl_ || impl_->session == nullptr) return false;
+  ngtcp2_conn* c = impl_->session->raw_conn();
+  if (c == nullptr) return false;
+
+  ngtcp2_conn_info ci;
+  std::memset(&ci, 0, sizeof(ci));
+  ngtcp2_conn_get_conn_info(c, &ci);
+
+  // ngtcp2 的时长是纳秒；公开面统一成微秒（够用且不容易溢出刻意算错）。
+  out.latest_rtt_us   = ci.latest_rtt / 1000;
+  out.min_rtt_us      = ci.min_rtt / 1000;
+  out.smoothed_rtt_us = ci.smoothed_rtt / 1000;
+  out.rttvar_us       = ci.rttvar / 1000;
+  out.cwnd            = ci.cwnd;
+  out.ssthresh        = ci.ssthresh;
+  out.bytes_in_flight = ci.bytes_in_flight;
+#if defined(NGTCP2_VERSION_NUM) && NGTCP2_VERSION_NUM >= 0x011000
+  // 1.16.0 才有的计数字段；更老的 ngtcp2 上这几格恒为 0（如实，不猜）。
+  out.pkt_sent      = ci.pkt_sent;
+  out.pkt_recv      = ci.pkt_recv;
+  out.pkt_lost      = ci.pkt_lost;
+  out.pkt_discarded = ci.pkt_discarded;
+  out.bytes_sent    = ci.bytes_sent;
+  out.bytes_recv    = ci.bytes_recv;
+#endif
+  return true;
 }
 
 // =========================================================================

@@ -109,10 +109,10 @@ nghttp3 的几个回调直接对应 QUIC 的几个事件，而 1.4.1 的 QUIC �
 TCP 那四处构造点置 `true`（TCP 的 `PEER_CLOSED` 本来就是对端 FIN），所以这个字段
 对 TCP 也是真话。**这就是 §8 里那条"FIN 与 RESET 不再折成一件事"的由来。**
 
-**(b) 流额度事件。** `on_streams_available`（`src/quic/uvcpp_quic_connection.h:106`）
+**(b) 流额度事件。** `on_streams_available`（`src/quic/uvcpp_quic_connection.h:127-127`）
 报"现在可以多开几条本地流"。三条关键单向流在握手刚完成时可能要开，而那一刻对端的
 `initial_max_streams_uni` 未必已经到了 —— 拿不到额度就只能等这条事件，**不能轮询**。
-配额用 `streams_left(bool bidi)`（`src/quic/uvcpp_quic_connection.h:324`）问，它是**累计**上限，不是增量。
+配额用 `streams_left(bool bidi)`（`src/quic/uvcpp_quic_connection.h:360-360`）问，它是**累计**上限，不是增量。
 
 **(c) STOP_SENDING。** `on_stop_sending`（`:131`）报"对端请你别再发了"。它与
 `on_read` 的收尾是**两件事**：那个报"对端不发了"，这个报"对端不要我发了"。
