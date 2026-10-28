@@ -188,13 +188,10 @@ int uvcpp_web_file_transfer::start(const std::string& path, uint64_t first,
     // 一条**已知且已说明**的结束路径），也让后续的 `cancel()`/`resume()` 变成
     // 空操作。
     //
-    // 如实记一处代价：`uvcpp_fs::open` 在同步失败时虽然清了 `async_pending_`，
-    // 但**没有清 `fs_open_cb`**（`uvcpp_fs.cpp:255-263`），而那个闭包按值捕了
-    // `self` —— 于是 `transfer → fs_ → fs_open_cb → transfer` 成环，这一份
-    // `shared_ptr` 再也回不来（`uvcpp_web_upload.cpp` 里记的是同一个取舍：
-    // 用一个内存泄漏换一次 use-after-free 不划算）。**实际上走不到**：本函数
-    // 已经挡掉了 state/loop/sink 三种非法输入，而 `path_.c_str()` 永远有效，
-    // 剩下的同步失败源只有 `UV_EALREADY` —— 本模块从不并发提交，也拿不到。
+    // 同步失败时回调永远不会来，所以 `uvcpp_fs` 必须把那份闭包放掉（1.9.0
+    // 起它在**每一处**同步失败上都清对应的 `fs_*_cb`，见 `uvcpp_fs::open`
+    // 那一支的注释）—— 否则那个按值捕了 `self` 的闭包会跟 `transfer → fs_ →
+    // 闭包 → transfer` 成环。
     state_ = st_done;
     return rc;
   }

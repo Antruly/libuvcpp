@@ -134,13 +134,19 @@ int main() {
     int r1 = fs.stat(&loop, ".", [&](uvcpp_fs* req) {
       gdone.set_value(static_cast<int>(req->get_result()));
     });
-    // second async op on the same fs object while the first is in flight
-    int r2 = fs.stat(&loop, ".", [](uvcpp_fs* req) { (void)req; });
+    // second async op on the same fs object while the first is in flight.
+    // 被拒的那一笔的回调**必须当场放掉**：它可能按值捕了调用方的
+    // `shared_from_this()`（`uvcpp_web_file` 的 open/read 就是这样），留在
+    // `fs_stat_cb` 里就是一条 transfer → fs → 闭包 → transfer 的环。
+    // 判据是 `token` 的引用计数：被拒之后只剩本地这一份。
+    std::shared_ptr<int> token(new int(7));
+    int r2 = fs.stat(&loop, ".", [token](uvcpp_fs* req) { (void)req; (void)token; });
+    const long rejected_refs = token.use_count();
 
     loop.run(UV_RUN_DEFAULT);
     int stat_rc = gdone_future.get();
 
-    bool guard_ok = (r2 == UV_EALREADY);
+    bool guard_ok = (r2 == UV_EALREADY) && (rejected_refs == 1);
     std::cout << "[fs async reuse] guard r1=" << r1 << " r2=" << r2
               << " stat_rc=" << stat_rc
               << " ealready=" << (guard_ok ? "true" : "false") << "\n";

@@ -733,14 +733,13 @@ bool uvcpp_web_upload::pump_step() {
 // 挂起（完成回调再也不发），这是最坏的一种失败。所以每个 submit 都检查返回值，
 // 非零就当作"这笔操作失败了"，直接走完成路径。
 //
-// 代价如实记：`uvcpp_fs` 在同步失败时**已经把回调存进成员**了（见
-// `uvcpp_fs::open` 里 `if (rc != 0) async_pending_ = false;` 那一支 ——
-// `fs_open_cb` 留在原地），而那份闭包按值捕了 `shared_from_this()`。所以若这次
-// 提交恰好是**最后一次**提交，就留下一个断不开的自引用环（内存不回收）。
-// 不在这里 `fs_.reset()` 去清它，是因为那些回调可能正跑在 `uvcpp_fs` 自己的
+// 同步失败时 `uvcpp_fs` 现在会把那份闭包**当场放掉**（1.9.0 起，每一处
+// `if (rc != 0)` 都清对应的 `fs_*_cb`），所以按值捕了 `shared_from_this()` 的
+// 闭包不会再留成 `transfer → fs → 闭包 → transfer` 的自引用环。
+// 这里仍然不 `fs_.reset()`：那些回调可能正跑在 `uvcpp_fs` 自己的
 // `callback_*(uv_fs_t* req)` 栈上，而 `req` 就是会被释放的那个 `uv_fs_t` ——
-// 用一个内存泄漏换一次 use-after-free 不划算。libuv 1.51 的 `uv_fs_*` 异步形态
-// 实际只在 `INIT` 宏的参数校验上返回非零，走到这里需要参数非法，正常路径不可达。
+// 用一个内存泄漏换一次 use-after-free 不划算；现在这件事由 `uvcpp_fs` 负责，
+// 调用方不需要做任何清理。
 // -------------------------------------------------------------------------
 
 void uvcpp_web_upload::submit_open(size_t idx) {

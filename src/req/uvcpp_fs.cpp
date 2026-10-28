@@ -249,8 +249,14 @@ int uvcpp_fs::close(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_close(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, callback_close);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_close_cb = nullptr;
+  }
   return rc;
 }
 
@@ -266,8 +272,14 @@ int uvcpp_fs::open(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_open(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, flags, mode,
                     callback_open);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_open_cb = nullptr;
+  }
   return rc;
 }
 
@@ -284,8 +296,14 @@ int uvcpp_fs::read(uvcpp_loop* loop,
   int rc = uv_fs_read(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                     reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
                     callback_read);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_read_cb = nullptr;
+  }
   return rc;
 }
 
@@ -298,8 +316,14 @@ int uvcpp_fs::unlink(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_unlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_unlink);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_unlink_cb = nullptr;
+  }
   return rc;
 }
 
@@ -316,8 +340,14 @@ int uvcpp_fs::write(uvcpp_loop* loop,
   int rc = uv_fs_write(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                      reinterpret_cast<const ::uv_buf_t *>(bufs), nbufs, offset,
                      callback_write);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_write_cb = nullptr;
+  }
   return rc;
 }
 #if UV_VERSION_MAJOR >= 1
@@ -334,8 +364,14 @@ int uvcpp_fs::copyfile(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_copyfile(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path, flags,
                         callback_copyfile);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_copyfile_cb = nullptr;
+  }
   return rc;
 }
 #endif
@@ -353,8 +389,14 @@ int uvcpp_fs::mkdir(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_mkdir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, mode,
                      callback_mkdir);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_mkdir_cb = nullptr;
+  }
   return rc;
 }
 
@@ -367,8 +409,14 @@ int uvcpp_fs::mkdtemp(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_mkdtemp(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, tpl, callback_mkdtemp);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_mkdtemp_cb = nullptr;
+  }
   return rc;
 }
 
@@ -383,8 +431,14 @@ int uvcpp_fs::mkstemp(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_mkstemp(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, tpl, callback_mkstemp);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_mkstemp_cb = nullptr;
+  }
   return rc;
 }
 #endif
@@ -400,8 +454,14 @@ int uvcpp_fs::rmdir(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_rmdir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_rmdir);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_rmdir_cb = nullptr;
+  }
   return rc;
 }
 
@@ -416,8 +476,14 @@ int uvcpp_fs::scandir(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_scandir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, flags,
                        callback_scandir);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_scandir_cb = nullptr;
+  }
   return rc;
 }
 #if UV_VERSION_MAJOR >= 1
@@ -432,8 +498,14 @@ int uvcpp_fs::opendir(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_opendir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path,
                        callback_opendir);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_opendir_cb = nullptr;
+  }
   return rc;
 }
 
@@ -447,8 +519,14 @@ int uvcpp_fs::readdir(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_readdir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ,
                        (uv_dir_t*)dir->get_dir(), callback_readdir);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_readdir_cb = nullptr;
+  }
   return rc;
 }
 
@@ -462,8 +540,14 @@ int uvcpp_fs::closedir(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_closedir(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ,
                         (uv_dir_t*)dir->get_dir(), callback_closedir);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_closedir_cb = nullptr;
+  }
   return rc;
 }
 #endif
@@ -479,8 +563,14 @@ int uvcpp_fs::stat(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_stat(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_stat);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_stat_cb = nullptr;
+  }
   return rc;
 }
 
@@ -493,8 +583,14 @@ int uvcpp_fs::fstat(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_fstat(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, callback_fstat);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_fstat_cb = nullptr;
+  }
   return rc;
 }
 
@@ -509,8 +605,14 @@ int uvcpp_fs::rename(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_rename(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path,
                       callback_rename);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_rename_cb = nullptr;
+  }
   return rc;
 }
 
@@ -523,8 +625,14 @@ int uvcpp_fs::fsync(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_fsync(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, callback_fsync);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_fsync_cb = nullptr;
+  }
   return rc;
 }
 
@@ -538,8 +646,14 @@ int uvcpp_fs::fdatasync(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_fdatasync(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file,
                          callback_fdatasync);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_fdatasync_cb = nullptr;
+  }
   return rc;
 }
 
@@ -554,8 +668,14 @@ int uvcpp_fs::ftruncate(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_ftruncate(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, offset,
                          callback_ftruncate);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_ftruncate_cb = nullptr;
+  }
   return rc;
 }
 
@@ -572,8 +692,14 @@ int uvcpp_fs::sendfile(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_sendfile(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, out_fd, in_fd,
                         in_offset, length, callback_sendfile);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_sendfile_cb = nullptr;
+  }
   return rc;
 }
 
@@ -588,8 +714,14 @@ int uvcpp_fs::access(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_access(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, mode,
                       callback_access);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_access_cb = nullptr;
+  }
   return rc;
 }
 
@@ -604,8 +736,14 @@ int uvcpp_fs::chmod(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_chmod(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, mode,
                      callback_chmod);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_chmod_cb = nullptr;
+  }
   return rc;
 }
 
@@ -621,8 +759,14 @@ int uvcpp_fs::utime(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_utime(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, atime, mtime,
                      callback_utime);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_utime_cb = nullptr;
+  }
   return rc;
 }
 
@@ -638,8 +782,14 @@ int uvcpp_fs::futime(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_futime(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, atime, mtime,
                       callback_futime);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_futime_cb = nullptr;
+  }
   return rc;
 }
 
@@ -657,8 +807,14 @@ int uvcpp_fs::lutime(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_lutime(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, atime, mtime,
                       callback_lutime);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_lutime_cb = nullptr;
+  }
   return rc;
 }
 #endif
@@ -674,8 +830,14 @@ int uvcpp_fs::lstat(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_lstat(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_lstat);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_lstat_cb = nullptr;
+  }
   return rc;
 }
 
@@ -690,8 +852,14 @@ int uvcpp_fs::link(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_link(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path,
                     callback_link);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_link_cb = nullptr;
+  }
   return rc;
 }
 
@@ -707,8 +875,14 @@ int uvcpp_fs::symlink(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_symlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, new_path, flags,
                        callback_symlink);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_symlink_cb = nullptr;
+  }
   return rc;
 }
 
@@ -722,8 +896,14 @@ int uvcpp_fs::readlink(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_readlink(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path,
                         callback_readlink);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_readlink_cb = nullptr;
+  }
   return rc;
 }
 #if UV_VERSION_MAJOR >= 1
@@ -738,8 +918,14 @@ int uvcpp_fs::realpath(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_realpath(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path,
                         callback_realpath);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_realpath_cb = nullptr;
+  }
   return rc;
 }
 #endif
@@ -757,8 +943,14 @@ int uvcpp_fs::fchmod(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_fchmod(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, mode,
                       callback_fchmod);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_fchmod_cb = nullptr;
+  }
   return rc;
 }
 
@@ -774,8 +966,14 @@ int uvcpp_fs::chown(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_chown(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, uid, gid,
                      callback_chown);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_chown_cb = nullptr;
+  }
   return rc;
 }
 
@@ -791,8 +989,14 @@ int uvcpp_fs::fchown(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_fchown(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, file, uid, gid,
                       callback_fchown);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_fchown_cb = nullptr;
+  }
   return rc;
 }
 #if UV_VERSION_MAJOR >= 1
@@ -809,8 +1013,14 @@ int uvcpp_fs::lchown(uvcpp_loop* loop,
   uvcpp_threadpool_note_use();
   int rc = uv_fs_lchown(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, uid, gid,
                       callback_lchown);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_lchown_cb = nullptr;
+  }
   return rc;
 }
 #endif
@@ -827,8 +1037,14 @@ int uvcpp_fs::statfs(uvcpp_loop* loop,
   async_pending_ = true;
   uvcpp_threadpool_note_use();
   int rc = uv_fs_statfs(OBJ_UVCPP_LOOP_HANDLE(*loop), UVCPP_FS_REQ, path, callback_statfs);
-  if (rc != 0)
+  if (rc != 0) {
     async_pending_ = false;
+    // 同步失败 ⇒ 回调永远不会来。**必须把闭包放掉**：它按值捕了
+    // 调用方的 `shared_from_this()`（`uvcpp_web_file` /
+    // `uvcpp_web_upload`），留在成员里就是一条
+    // transfer → fs → 闭包 → transfer 的环。
+    fs_statfs_cb = nullptr;
+  }
   return rc;
 }
 #endif
