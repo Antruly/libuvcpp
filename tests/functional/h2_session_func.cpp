@@ -420,6 +420,58 @@ bool test_content_length_mismatch_is_reset() {
   return true;
 }
 
+/// 响应方向的 `content-length` 也要校验（1.8.12 / 1.9.0）。
+///
+/// 此前只有服务端请求方向在记它：对端回一条 `content-length: 10`、实际 4 字节
+/// 的响应，客户端会当正常响应收完。RFC 9113 §8.1.1 对两个方向是同一条规矩。
+bool test_response_content_length_mismatch_is_reset() {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.auto_reply = false;
+
+  const int32_t sid =
+      L.client.submit_request(make_req(http_method::HTTP_GET, "/cl"), "");
+  if (sid <= 0) return false;
+  L.pump();  // 请求到达服务端，流还开着
+
+  uvcpp_http_response r;
+  r.status_code = http_status::OK;
+  r.set_header("content-length", "10");  // 撒谎：实际只有 4 字节
+  r.body = mk_buf("abcd");
+  if (L.server.submit_response(sid, r) != 0) return false;
+  L.pump();
+
+  // 客户端必须以非 0 错误码收掉这条流，且**不能**把它当完整响应。
+  if (L.resp_end) return false;
+  if (L.rst_count == 0) return false;
+  return true;
+}
+
+/// 对照：HEAD 的响应可以有 `content-length` 而没有 body（它描述的是 GET 的长度），
+/// 以及 204 同理 —— 这两类不参与长度比对。
+bool test_head_response_content_length_ok() {
+  link& L = make_link();
+  if (!L.init()) return false;
+  L.auto_reply = false;
+
+  const int32_t sid =
+      L.client.submit_request(make_req(http_method::HTTP_HEAD, "/head"), "");
+  if (sid <= 0) return false;
+  L.pump();
+
+  uvcpp_http_response r;
+  r.status_code = http_status::OK;
+  r.set_header("content-length", "10");
+  if (L.server.submit_response(sid, r, /*omit_body=*/true) != 0) return false;
+  L.pump();
+
+  // 正常收尾、没有 RST。
+  if (!L.resp_end) return false;
+  if (L.rst_count != 0) return false;
+  if (L.resp_status != 200) return false;
+  return true;
+}
+
 /// 对端宣告的 MAX_CONCURRENT_STREAMS 要能被读到（批 2c 靠它做并发闸门）。
 bool test_settings_visible() {
   link& L = make_link();
@@ -1556,6 +1608,10 @@ int main() {
     {"custom_headers_roundtrip", test_custom_headers_roundtrip},
     {"status_only_reply", test_status_only_reply},
     {"content_length_mismatch_is_reset", test_content_length_mismatch_is_reset},
+    {"response_content_length_mismatch_is_reset",
+     test_response_content_length_mismatch_is_reset},
+    {"head_response_content_length_ok",
+     test_head_response_content_length_ok},
     {"settings_visible", test_settings_visible},
     {"second_response_is_refused", test_second_response_is_refused},
     {"control_flood_is_capped", test_control_flood_is_capped},

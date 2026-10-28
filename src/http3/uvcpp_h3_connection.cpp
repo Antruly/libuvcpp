@@ -44,6 +44,24 @@ int parse_status(const std::string& v) {
   return n;
 }
 
+/// `content-length` 的值：纯十进制，且不超过一个荒谬上限。
+bool parse_content_length(const std::string& v, size_t& out) {
+  if (v.empty()) return false;
+  size_t cl = 0;
+  for (size_t i = 0; i < v.size(); ++i) {
+    if (v[i] < '0' || v[i] > '9') return false;
+    cl = cl * 10 + static_cast<size_t>(v[i] - '0');
+    if (cl > (static_cast<size_t>(1) << 40)) return false;
+  }
+  out = cl;
+  return true;
+}
+
+/// 这个状态码的响应按定义没有 body（1xx / 204 / 304）。
+bool status_has_no_body(int st) {
+  return (st >= 100 && st < 200) || st == 204 || st == 304;
+}
+
 // -------------------------------------------------------------------------
 // QUIC 变长整数（RFC 9000 §16）—— 只给 HTTP/3 Datagram 的 Quarter Stream ID
 // 用（RFC 9297 §2.1）。自己写 20 行而不是借 ngtcp2 的：那两个是内部头，
@@ -239,6 +257,18 @@ void uvcpp_h3_connection::wire_session_callbacks() {
       s.resp.status = parse_status(field.value);
       return;
     }
+    // `content-length` 两个方向都要记（RFC 9114 同一条规矩）：此前这一层
+    // 一个方向都没校验。
+    if (field.name.size() == 14 && field.name == "content-length") {
+      size_t cl = 0;
+      if (!parse_content_length(field.value, cl) ||
+          (s.has_content_length && s.expected_body != cl)) {
+        s.body_bad = true;
+      } else {
+        s.has_content_length = true;
+        s.expected_body      = cl;
+      }
+    }
     s.resp.headers.push_back(field);
   };
 
@@ -311,6 +341,13 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     }
     std::string& body = server_side_ ? s.req.body : s.resp.body;
     if (s.overflowed) return;
+    // 长度账要在**攒**之前记：先拒，再把字节塞进 body 就晚了。
+    s.body_bytes += len;
+    if (s.has_content_length && s.body_bytes > s.expected_body) {
+      s.body_bad = true;
+      if (conn_ != nullptr) conn_->shutdown_stream(stream_id, 0x010e);
+      return;
+    }
     if (body.size() + len > H3_DEFAULT_MAX_BODY_BYTES) {
       // **上限的兑现方式是当场收场，不是"攒不完就默默继续攒"。** 一旦这里
       // 放行，`body` 就成了对端任意长的内存 —— 而"上限"这个词就没意义了。
@@ -332,6 +369,20 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     if (s.raw) {
       if (s.sink_end) s.sink_end();
       if (!token_alive(life)) return;
+      maybe_close_stream(stream_id);
+      return;
+    }
+    // `content-length` 与实际 body 长度必须一致。响应方向上 HEAD / 1xx / 204 /
+    // 304 的"有长度、没 body"是合法的（HEAD 描述的是 GET 会有的长度）。
+    if (s.has_content_length && !s.body_bad) {
+      const bool bodyless =
+          !server_side_ &&
+          (status_has_no_body(s.resp.status) || s.req.method == "HEAD");
+      if (!bodyless && s.body_bytes != s.expected_body) s.body_bad = true;
+    }
+    if (s.body_bad) {
+      if (conn_ != nullptr) conn_->shutdown_stream(stream_id, 0x010e);
+      s.rx_error = true;
       maybe_close_stream(stream_id);
       return;
     }
@@ -418,6 +469,23 @@ void uvcpp_h3_connection::wire_session_callbacks() {
                                     uint64_t app_error_code) {
     if (!token_alive(life)) return;
     if (conn_) conn_->shutdown_stream(stream_id, app_error_code);
+    if (!token_alive(life)) return;
+
+    // 会话层要求重置这条流（含"响应畸形"那条路，`NGHTTP3_H3_MESSAGE_ERROR`）。
+    // 客户端那条请求必须**有且只有一次**完成事件 —— 否则调用方永远等不到。
+    //
+    // **不要在这里关 nghttp3 的流。** nghttp3 返回 `MALFORMED_HTTP_*` 时并没有
+    // 删掉它自己的流记录；我们从它脚底下 `close_stream` 掉，紧接着到达的那几帧
+    // 就会被当成一条**新流**的帧 → `H3_STREAM_CREATION_ERROR`，整条连接陪葬
+    // （实测：一条长度撒谎的响应之后连接直接 259）。QUIC 侧的 RESET/STOP 已经
+    // 让对端停下；剩下的在途帧由会话层按同一个 MALFORMED 错误吞掉。
+    std::map<int64_t, stream_rec>::iterator it = streams_.find(stream_id);
+    if (it == streams_.end()) return;
+    stream_rec& s = it->second;
+    s.body_bad = true;
+    if (!server_side_ && s.local && s.request && !s.completed) {
+      complete_response(s, UV_ECANCELED);
+    }
   };
 
   sc.on_acked = [](uvcpp_h3_session&, int64_t, uint64_t) {};
@@ -943,6 +1011,9 @@ int64_t uvcpp_h3_connection::send_request(const h3_request& req) {
   rec.local   = true;
   rec.request = true;
   rec.req.stream_id  = sid;
+  // 客户端也要记住方法：响应方向的 `content-length` 比对要靠它区分 HEAD
+  // （HEAD 的响应有长度、没有 body）。
+  rec.req.method     = req.method.empty() ? std::string("GET") : req.method;
   rec.resp.stream_id = sid;
   // `:protocol` 非空 ⇒ 这是一条 extended CONNECT，RFC 9297 的 datagram 直接
   // 按 `sid / 4` 关联到它（普通请求要走 `Datagram-Flow-Id` 那一套，本层不做）。
@@ -1049,6 +1120,7 @@ int64_t uvcpp_h3_connection::send_stream_request(const h3_request& req) {
   rec.local   = true;
   rec.request = true;
   rec.req.stream_id  = sid;
+  rec.req.method     = "CONNECT";
   rec.resp.stream_id = sid;
   // 这条入口按定义只发 extended CONNECT（`:method` 钉成 CONNECT、带
   // `:protocol`）⇒ datagram 可用（RFC 9297）。

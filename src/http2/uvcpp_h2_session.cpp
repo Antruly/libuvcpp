@@ -427,6 +427,25 @@ struct uvcpp_h2_session::impl {
     }
   }
 
+  /// 解析并记录 `content-length`（请求与响应两个方向共用）。
+  ///
+  /// 返回 false = 形状非法 / 重复且不一致。响应方向也要记（#1.8.12）：RFC 9113
+  /// §8.1.1 对两个方向同一条规矩，而此前只有请求方向在记 —— 一个长度对不上的
+  /// 响应会被当正常收完。
+  bool note_content_length(uvcpp_h2_stream& s, const std::string& v) {
+    size_t cl = 0;
+    if (v.empty()) return false;
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (v[i] < '0' || v[i] > '9') return false;
+      cl = cl * 10 + static_cast<size_t>(v[i] - '0');
+      if (cl > (static_cast<size_t>(1) << 40)) return false;  // 荒谬值直接当非法
+    }
+    if (s.has_content_length && s.expected_body != cl) return false;  // 重复且不一致
+    s.has_content_length = true;
+    s.expected_body      = cl;
+    return true;
+  }
+
   void handle_regular(uvcpp_h2_stream& s, const std::string& n,
                       const std::string& v) {
     s.seen_regular_header = true;
@@ -455,26 +474,10 @@ struct uvcpp_h2_session::impl {
       }
     }
     if (n == "content-length") {
-      size_t cl = 0;
-      bool   ok = !v.empty();
-      for (size_t i = 0; i < v.size() && ok; ++i) {
-        if (v[i] < '0' || v[i] > '9') {
-          ok = false;
-          break;
-        }
-        cl = cl * 10 + static_cast<size_t>(v[i] - '0');
-        if (cl > (size_t)1 << 40) ok = false;  // 荒谬值直接当非法
-      }
-      if (!ok) {
+      if (!note_content_length(s, v)) {
         reject(s.stream_id, NGHTTP2_PROTOCOL_ERROR);
         return;
       }
-      if (s.has_content_length && s.expected_body != cl) {
-        reject(s.stream_id, NGHTTP2_PROTOCOL_ERROR);  // 重复且不一致
-        return;
-      }
-      s.has_content_length = true;
-      s.expected_body      = cl;
     }
     s.request.headers.push_back(http_header{n, v});
   }
@@ -513,6 +516,10 @@ struct uvcpp_h2_session::impl {
     } else {
       if (is_connection_specific(n)) {
         reject(id, NGHTTP2_PROTOCOL_ERROR);  // 响应里也不许有
+        return;
+      }
+      if (n == "content-length" && !note_content_length(s, v)) {
+        reject(id, NGHTTP2_PROTOCOL_ERROR);
         return;
       }
       http_reserve_headers(s.response.headers);
@@ -609,7 +616,15 @@ struct uvcpp_h2_session::impl {
   /// body 收完的收尾：先对 `content-length`，再通知。
   void finish_body(int32_t id, uvcpp_h2_stream& s) {
     // `content-length` 与实际 DATA 长度不符是 h2→h1 走私的标准手法。
-    if (s.has_content_length && s.body_bytes != s.expected_body) {
+    //
+    // 响应方向上"头里有 length、但没有 body"是合法的：HEAD 的响应描述的
+    // 是 GET 会有的长度，204/304/1xx 则按定义没有 body。这三种不参与比对。
+    const bool bodyless =
+        !server_side &&
+        (status_is_bodyless(static_cast<int>(s.response.status_code)) ||
+         s.request.method == http_method::HTTP_HEAD);
+    if (!bodyless && s.has_content_length &&
+        s.body_bytes != s.expected_body) {
       reject(id, NGHTTP2_PROTOCOL_ERROR);
       return;
     }

@@ -234,7 +234,22 @@ int64_t uvcpp_h3_session::recv_stream_data(int64_t stream_id, const char* data,
   }
   // 守卫**必须在报错之前就退掉**：`on_fatal` 的接收方要关连接，那一步会
   // `drain()`，而它正是被这个守卫挡着的那个函数。
-  if (rv < 0) return mark_fatal(static_cast<int>(rv));
+  if (rv < 0) {
+    // **畸形请求/响应是流错误，不是连接错误**（RFC 9114 §4.1.2）。nghttp3 自己
+    // 会校验 `content-length` 一类消息形状并返回这两个码；把它当致命处理，代价
+    // 是"对端回了一条长度撒谎的响应"就把整条连接拆掉（实测：一条 `content-length`
+    // 不符的响应之后，同一连接上后续请求全部 `UV_ENOTCONN`）。
+    //
+    // 这里重置那条流（走 `on_reset_stream` → QUIC 的 RESET_STREAM），连接继续。
+    if (rv == NGHTTP3_ERR_MALFORMED_HTTP_MESSAGING ||
+        rv == NGHTTP3_ERR_MALFORMED_HTTP_HEADER) {
+      if (cbs_.on_reset_stream) {
+        cbs_.on_reset_stream(*this, stream_id, NGHTTP3_H3_MESSAGE_ERROR);
+      }
+      return 0;
+    }
+    return mark_fatal(static_cast<int>(rv));
+  }
   return static_cast<int64_t>(rv);
 }
 

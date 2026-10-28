@@ -518,6 +518,14 @@ class UVCPP_API uvcpp_h3_connection {
     /// `on_connect_request` 那一刻置位、客户端在提交请求时置位；普通请求一律为假
     /// （RFC 9297 §3 只给 CONNECT 免掉 `Datagram-Flow-Id` 那一套）。
     bool datagram_ok = false;
+    /// 收到的 body 字节数与对端宣告的 `content-length`（两个方向共用，
+    /// 方向由 `server_side_` 决定）。RFC 9114 §4.1.2 / §4.2：对不上是流错误
+    /// （`H3_MESSAGE_ERROR`）。
+    size_t body_bytes        = 0;
+    size_t expected_body     = 0;
+    bool   has_content_length = false;
+    /// 长度已经判定非法：这条流不再交付给业务层。
+    bool   body_bad          = false;
     /// WebTransport 流所属的会话（**会话流号**；-1 = 不是 WT 流）。见
     /// `uvcpp_h3_wt_session`。
     int64_t wt_session = -1;
