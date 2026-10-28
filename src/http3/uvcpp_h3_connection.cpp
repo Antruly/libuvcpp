@@ -1258,12 +1258,19 @@ void uvcpp_h3_connection::detach_wt_session(int64_t session_sid,
   std::map<int64_t, uvcpp_h3_wt_session*>::iterator it =
       wt_sessions_.find(session_sid);
   if (it != wt_sessions_.end() && it->second == s) wt_sessions_.erase(it);
-  // 这条会话下的流不再有落点：把 `wt_session` 清掉，后续 DATA 一律丢弃
-  // （流本身的收场仍由 QUIC 层负责）。
+  // 这条会话下的流一并收掉。**不能只把 `wt_session` 清成 -1**：那样后续
+  // DATA 会落到普通的 nghttp3 路径上，而 nghttp3 根本不认识这条流
+  // （`H3_STREAM_CREATION_ERROR`，整条连接陪葬）。重置 + 摘记录才是收场。
+  std::vector<int64_t> orphan;
   for (std::map<int64_t, stream_rec>::iterator i = streams_.begin();
        i != streams_.end(); ++i) {
-    if (i->second.wt_session == session_sid) i->second.wt_session = -1;
+    if (i->second.wt_session == session_sid) orphan.push_back(i->first);
   }
+  for (size_t i = 0; i < orphan.size(); ++i) {
+    if (conn_ != nullptr) conn_->shutdown_stream(orphan[i], 0);
+    streams_.erase(orphan[i]);
+  }
+  flush();
 }
 
 int64_t uvcpp_h3_connection::open_wt_stream(int64_t session_sid, bool bidi) {
