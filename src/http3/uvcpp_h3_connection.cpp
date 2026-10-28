@@ -442,6 +442,25 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     if (!token_alive(life)) return;
     have_remote_settings_ = true;
     remote_settings_      = st;
+    // 对端 SETTINGS 到了：等着的 WebTransport datagram 现在才可能发得出去。
+    // **在用户回调之前做** —— 回调里可能把连接或会话拆掉。先取一份快照，
+    // 每次调之前再核对"还是同一个会话"（回调/发送不跑用户代码，但列表可能在
+    // 这期间被改）。
+    if (st.h3_datagram) {
+      std::vector<int64_t> sids;
+      for (std::map<int64_t, uvcpp_h3_wt_session*>::iterator it =
+               wt_sessions_.begin();
+           it != wt_sessions_.end(); ++it) {
+        sids.push_back(it->first);
+      }
+      for (size_t i = 0; i < sids.size(); ++i) {
+        std::map<int64_t, uvcpp_h3_wt_session*>::iterator it =
+            wt_sessions_.find(sids[i]);
+        if (it != wt_sessions_.end() && it->second != nullptr) {
+          it->second->on_peer_datagram_ready();
+        }
+      }
+    }
     std::function<void(uvcpp_h3_connection&, const uvcpp_h3_remote_settings&)>
         cb;
     if (cbs_.on_remote_settings) cb = cbs_.on_remote_settings;

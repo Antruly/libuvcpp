@@ -243,6 +243,10 @@ class UVCPP_API uvcpp_h3_wt_session {
   void on_connect_response(int status, int error);
   /// 会话建立：把排队的流与 datagram 冲出去。
   void flush_pending();
+  /// 只冲排队的数据报；对端还没宣告 `SETTINGS_H3_DATAGRAM` 时**留着**。
+  void flush_pending_datagrams();
+  /// 对端 SETTINGS 到了（h3 连接在本端处理完 SETTINGS 时调）。
+  void on_peer_datagram_ready();
   /// 会话被拒 / 建立失败。
   void reject(int code, const std::string& why);
 

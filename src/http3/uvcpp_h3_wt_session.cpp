@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/http3/uvcpp_h3_wt_session.cpp
  * @brief WebTransport over HTTP/3（draft-ietf-webtrans-http3-13）。
  */
@@ -455,6 +455,18 @@ void uvcpp_h3_wt_session::flush_pending() {
   }
 
   // 2) 排队的数据报。
+  flush_pending_datagrams();
+}
+
+void uvcpp_h3_wt_session::flush_pending_datagrams() {
+  if (h3_ == nullptr || terminated_ || pending_ || !open_) return;
+  // **对端还没宣告 `SETTINGS_H3_DATAGRAM` 就先留着。** RFC 9297 要求看到对端的
+  // SETTINGS 才允许发；而"会话 2xx 到了"与"对端 SETTINGS 处理完了"是两条流，
+  // 顺序不保证。以前在这里直接发，发不出去就把排队的 datagram 记成丢弃 ——
+  // 一条本该送达的早发 datagram 会在 2xx 先于 SETTINGS 的时序下静默消失
+  // （MSVC 的 http3 格子就是这么红的）。等 `on_peer_datagram_ready()` 补发。
+  if (!h3_->peer_h3_datagram()) return;
+
   while (!pending_dgrams_.empty()) {
     std::string d;
     d.swap(pending_dgrams_.front());
@@ -464,6 +476,10 @@ void uvcpp_h3_wt_session::flush_pending() {
       ++dropped_datagrams_;
     }
   }
+}
+
+void uvcpp_h3_wt_session::on_peer_datagram_ready() {
+  flush_pending_datagrams();
 }
 
 void uvcpp_h3_wt_session::reject(int code, const std::string& why) {
