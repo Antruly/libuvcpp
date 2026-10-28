@@ -21,8 +21,11 @@
  *     "web 开、webapp 关"是一份合法且默认的构建（CI 的 `http3` 那一格就是，
  *     见 `ci-linux-ubuntu.yml`）。少了这个前缀，它会落到 webapp 不在的树上编译
  *     失败，而不是"不被测"。
- *   - `h2_` —— 尾随头只有 h2 有。h1 上这条路**不存在**（本库不做 chunked 尾随
- *     头），所以第 4 轮测的是"被丢弃"，不是"也能用"。
+ *   - `h2_` —— 三段结构里"首部、DATA、尾随头"是 h2 的线上形状。h1 上尾随头
+ *     从 1.9.0 起**也能发**（chunked 的末块带字段，RFC 9112 §7.1.2），但 gRPC
+ *     模块本身仍只接 h2/h3（线上协议定死 HTTP/2），所以本文件仍然需要 `h2_`
+ *     这个前缀：第 4 轮的 h1 那条腿测的是**普通 h1 响应**上的 chunked 尾随头，
+ *     不是 h1 上的 gRPC。
  *
  * `grpc_web_send_*` 与 `grpc_parse_unary_body(std::string)` 三条都在
  * `#if UVCPP_WEBAPP_ENABLE` 里（`src/grpc/uvcpp_grpc_server.h` 的第二个开关），
@@ -591,11 +594,11 @@ void test_web_trailers_dropped_on_stream() {
 }
 
 // =========================================================================
-// 第 4 轮：h1 上那条路**不存在** —— 尾随头被丢弃，体照发
+// 第 4 轮：h1 上尾随头**走 chunked**（1.9.0）—— 体照发，字段挂在末块之后
 // =========================================================================
 
-void test_web_trailers_dropped_on_h1() {
-  std::cout << "[4] h1 上尾随头被丢弃（体照发）" << std::endl;
+void test_web_trailers_chunked_on_h1() {
+  std::cout << "[4] h1 上尾随头走 chunked（体照发，末块带字段）" << std::endl;
 
   TestApp   t;
   t.build();
@@ -616,28 +619,39 @@ void test_web_trailers_dropped_on_h1() {
 
   // 1 + 2 = 3 → 帧是 `00 00 00 00 02 08 03`（7 字节）。
   const std::string kFrame = bytes_of("\x00\x00\x00\x00\x02\x08\x03", 7);
+  // 线上形状（RFC 9112 §7.1.2）：`7\r\n` + 帧 + `\r\n` + `0\r\n` + 字段 + `\r\n`。
+  const std::string kBodyChunk = "7\r\n" + kFrame + "\r\n";
+  const std::string kTerminal  = "0\r\ngrpc-status: 0\r\n\r\n";
 
   std::string got;
   const bool  ok = h1_call(
       port, req, got,
-      [&kFrame](const std::string& s) { return s.find(kFrame) != std::string::npos; },
+      [&kTerminal](const std::string& s) {
+        return s.find(kTerminal) != std::string::npos;
+      },
       3000);
 
   const std::string low = to_lower(got);
   info("h1 上收到的前 64 字节：" + hexsp(got));
 
-  check(ok, "h1 上照样收到了那条帧（体没有因为尾随头发不出去而消失）");
+  check(ok, "h1 上收到了终止块 + 尾随头（体没有因为尾随头发不出去而消失）");
   check(got.compare(0, 9, "HTTP/1.1 ") == 0, "回的是 h1 报文，没有半个 h2 帧");
   check(got.compare(0, 12, "HTTP/1.1 200") == 0, "HTTP 状态码仍然是 200");
-  check(low.find("grpc-status") == std::string::npos,
-        "尾随头**没有**被当成普通响应头混进 h1 的首部");
-  check(low.find("grpc-message") == std::string::npos, "也没有第二个字段漏出去");
-  // 体长就是 7 —— 这是"体真的还在、且没被拆成 chunked"的判据。少一个字节
-  // （比如框架把它当成"没有体"的 204 类响应清掉）这条就红。
-  check(low.find("content-length: 7") != std::string::npos,
-        "Content-Length 是 7（帧的字节数），不是 0、也没有改走 chunked");
-  check(low.find("transfer-encoding") == std::string::npos,
-        "没有带 transfer-encoding（本库的 h1 尾随头那条路没做，就不该露出半个迹象）");
+  check(got.find(kBodyChunk) != std::string::npos,
+        "body 按 chunked 帧发出（`7\\r\\n` + 帧 + `\\r\\n`）");
+  check(got.find(kTerminal) != std::string::npos,
+        "终止块 `0\\r\\n` 之后带着 `grpc-status: 0`");
+  check(low.find("content-length") == std::string::npos,
+        "没有 content-length（CL 与 TE 不得共存）");
+  check(low.find("transfer-encoding: chunked") != std::string::npos,
+        "transfer-encoding: chunked 在首部里");
+
+  // 尾随头必须是**第二段**：首部的结束（第一个 `\r\n\r\n`）必须早于
+  // `grpc-status`。若它被塞进首部，这条会红。
+  const size_t hdr_end = got.find("\r\n\r\n");
+  const size_t gs      = got.find("grpc-status");
+  check(hdr_end != std::string::npos && gs != std::string::npos && gs > hdr_end,
+        "grpc-status 在首部之后（尾随头，不是普通响应头）");
 
   t.shutdown();
 }
@@ -650,7 +664,7 @@ int main() {
   test_web_unary_roundtrip();
   test_web_trailers_only();
   test_web_trailers_dropped_on_stream();
-  test_web_trailers_dropped_on_h1();
+  test_web_trailers_chunked_on_h1();
 
   if (g_failures == 0) {
     std::cout << "全部通过" << std::endl;

@@ -1629,6 +1629,19 @@ void uvcpp_http_server::reject_early(conn_ctx& ctx, uvcpp_tcp_client* client,
   send_response(client, resp, /*close_after_write=*/!message_will_complete);
 }
 
+/**
+ * @brief 这个状态码的响应**不许**自动补 `content-length`。
+ *
+ * RFC 9110 §8.6：1xx 与 204 一律不许带；304 只允许回显原始长度，而本层没有
+ * 原始长度可回显。空体响应那一支补 `content-length: 0` 时先把这几种放行 ——
+ * `uvcpp_web_response::sync_meta()` 早就是这条规矩，但那条只影响它自己算出来
+ * 的头；这里补的是 HTTP 层最后那一下。
+ */
+static bool status_forbids_content_length(http_status s) {
+  const int c = static_cast<int>(s);
+  return (c >= 100 && c < 200) || c == 204 || c == 304;
+}
+
 size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
                                         uvcpp_http_response& resp,
                                         bool close_after_write) {
@@ -1726,9 +1739,15 @@ size_t uvcpp_http_server::send_response(uvcpp_tcp_client* client,
     }
     resp.body.clear();
   } else if (!has_content_length && !has_transfer_encoding &&
-             resp.body.size() == 0) {
+             resp.body.size() == 0 &&
+             !status_forbids_content_length(resp.status_code)) {
     // An empty body still needs an explicit Content-Length: 0, otherwise a
     // keep-alive client cannot tell where this response ends.
+    //
+    // **1xx / 204 / 304 例外**（RFC 9110 §8.6）：前两种根本不许带
+    // `content-length`，304 只允许回显原始长度（这里没有原始长度可回显）。
+    // 补一个 `content-length: 0` 就是一条协议违例 —— 而它以前就在这里，
+    // 因为 `to_string()` 本身不加，单测直接看序列化结果时看不出来。
     resp.set_header("content-length", "0");
   }
 
@@ -1972,10 +1991,43 @@ int uvcpp_http_server::send_trailers(uvcpp_tcp_client* client, int32_t stream_id
   }
 #endif  // UVCPP_NGHTTP2_ENABLE
 
-  // h1：尾随头在 h1 上要 chunked 编码（末尾一个零长度块 + 字段），本库没做那条
-  // 路。**明说 `UV_ENOTSUP` 而不是"照发一遍"** —— 后者会把尾随头当成普通响应头
-  // 塞进首部，调用方看到的是"发出去了"，对端看到的是另一份报文。
-  return UV_ENOTSUP;
+  // ---- h1：chunked 的末块带字段（RFC 9112 §7.1.2）----------------------
+  //
+  // 只对**正在流式响应**的连接有效（`begin_stream()` 已经发过带
+  // `transfer-encoding: chunked` 的头部）：尾随头在 h1 上没有别的落点 ——
+  // 它在报文结构里就是终止块之后那段字段，头部那一块此刻早已上线。
+  if (stream_id != 0) return UV_EINVAL;  // h1 上只有"这条连接唯一那条流"
+  // HEAD 的响应没有 body，也就没有"末块"可挂（RFC 9112 §7.1.2）。`begin_stream`
+  // 在 HEAD 上同样会置 `out_streaming`（好让 write_stream 的调用方拿到一致的
+  // 语义），所以这一条得单独挡。
+  if (ctx.is_head) return UV_EINVAL;
+  if (!ctx.out_streaming) return UV_EINVAL;
+
+  // 字段名必须是 token、值里不许有 CR/LF —— 否则就是响应拆分注入。
+  std::string out;
+  out.append("0\r\n");
+  for (size_t i = 0; i < trailers.size(); ++i) {
+    const std::string& n = trailers[i].name;
+    const std::string& v = trailers[i].value;
+    if (n.empty()) return UV_EINVAL;
+    for (size_t k = 0; k < n.size(); ++k) {
+      const unsigned char c = static_cast<unsigned char>(n[k]);
+      if (c <= 0x20 || c >= 0x7f || c == ':') return UV_EINVAL;
+    }
+    for (size_t k = 0; k < v.size(); ++k) {
+      const unsigned char c = static_cast<unsigned char>(v[k]);
+      if (c == '\r' || c == '\n') return UV_EINVAL;
+    }
+    out.append(n);
+    out.append(": ");
+    out.append(v);
+    out.append("\r\n");
+  }
+  out.append("\r\n");
+  // 这一块就是整条流的收尾：与 `end_stream()` 等价（不再发单独的终止块）。
+  ctx.out_streaming = false;
+  enqueue_write(ctx, client, out);
+  return 0;
 }
 
 // 压缩变体表的总字节上限。#11 第 3 条量出来的是"重复 deflate"这一项，

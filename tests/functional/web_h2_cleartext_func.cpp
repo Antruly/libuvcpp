@@ -15,10 +15,11 @@
  *   4. 开关关掉时，同一个字节流必须**逐字节**走今天那条 h1 的路（第七轮）；
  *   5. 第八轮与前言无关，钉的是**这条腿上才有的第二段头** —— 明文 h2 的尾随头
  *      （`grpc-status` 那类，1.6.9）。它挂在这个文件里，是因为尾随头只有在
- *      "一条连接能承载多条流"的协议上才存在，h1 那条腿**没有对应物**：同一份
- *      字节流走到 `send_trailers()` 必须拿到 `UV_ENOTSUP`，而不是被当成普通
- *      响应头混进首部（混进去调用方看着"发出去了"，对端收到的却是另一份报文）。
- *      这一条同样落在第八轮里，用的是同一个 h2c 端口的 h1 那一侧。
+ *      "一条连接能承载多条流"的协议上才这么发，h1 那条腿的形状完全不同：同一份
+ *      字节流在**没有在途 chunked 流**时走到 `send_trailers()` 必须拿到
+ *      `UV_EINVAL`，而不是被当成普通响应头混进首部（混进去调用方看着"发出去了"，
+ *      对端收到的却是另一份报文）。h1 上真正的 chunked 尾随头在
+ *      `web_app_trailers_func.cpp` 里测，这里只钉"前提不成立时明确拒绝"。
  *   6. 第九、十轮判的是**明文这条腿上的 `:scheme`**：RFC 9113 §8.1.1 要求它
  *      与实际 URI 一致，于是明文只能是 `http`、TLS 只能是 `https`，**不符就拒**
  *      （拒掉的那一格拦的是"明文连接自称 https"这种混淆代理入口）。这两轮是
@@ -319,9 +320,11 @@ struct TestServer {
                             });
       });
 
-      // h1 那一侧的尾随头：**必须明着拒掉**。判据只能是返回值 —— 处理函数跑在
-      // 服务端线程上，它自己断言失败时客户端看到的是超时，什么都说明不了。所以
-      // 这里把 rc 编进 body，让客户端那一侧能读到（见第 8 轮）。
+      // h1 那一侧的尾随头：**没有在途的 chunked 流时必须明着拒掉**。判据只能是
+      // 返回值 —— 处理函数跑在服务端线程上，它自己断言失败时客户端看到的是超时，
+      // 什么都说明不了。所以这里把 rc 编进 body，让客户端那一侧能读到（见第 8
+      // 轮）。h1 上真正的尾随头要先 `begin_stream()` 起一条 chunked 流，那条路
+      // 由 `web_app_trailers_func.cpp` 测。
       server.get("/trailers-h1", [&server](uvcpp_http_request& req,
                                            uvcpp_http_response& resp,
                                            uvcpp_tcp_client* client) {
@@ -718,8 +721,9 @@ bool h2_trailers_roundtrip(int port, int& status, std::string& body,
  *   2. **`on_response_end` 那一刻的头列表里有 `grpc-status: 0`** —— 这是尾随头
  *      真的到了的**唯一**证据（它不是首部、也不是 body）；
  *   3. 首部块（`on_response` 那一刻）里**没有**它。
- * 外加同端口的 h1 那一侧：`send_trailers()` 返 `UV_ENOTSUP`，且报文里看不到
- * `grpc-status`（既没有被塞进首部，也没有别的什么"装作发成功了"的路径）。
+ * 外加同端口的 h1 那一侧：**没有在途 chunked 流时** `send_trailers()` 返
+ * `UV_EINVAL`，且报文里看不到 `grpc-status`（既没有被塞进首部，也没有别的什么
+ * "装作发成功了"的路径）。
  *
  * 反例的形状值得写下来：只断言"客户端收到了 END_STREAM"是**假绿** ——
  * 把处理函数里的 `send_trailers()` 换成 `end_stream(client, sid, false)`
@@ -738,9 +742,9 @@ void test_h2c_trailers() {
   http_headers end_headers;
   const bool ok = h2_trailers_roundtrip(port, status, body, end_headers, raw);
 
-  // 同一个端口的 **h1 那一侧**：同样的调用必须拿到 `UV_ENOTSUP`，而且要能从
-  // 报文上看出尾随头**没有**被塞进首部。
-  const std::string want = std::to_string(UV_ENOTSUP);
+  // 同一个端口的 **h1 那一侧**：没有在途的 chunked 流，同样的调用必须拿到
+  // `UV_EINVAL`，而且要能从报文上看出尾随头**没有**被塞进首部。
+  const std::string want = std::to_string(UV_EINVAL);
   std::string       h1_got;
   const bool        h1_ok = write_then_read(
       port, {"GET /trailers-h1 HTTP/1.1\r\nHost: h\r\n\r\n"}, 0, h1_got,
@@ -760,8 +764,8 @@ void test_h2c_trailers() {
         "空值尾随头 grpc-message 也在头列表里（存在性，不是值）");
   check(raw.find("world") != std::string::npos,
         "DATA 载荷里能看到 body 的明文（确认走的是 h2）");
-  info("h1 上 send_trailers() 返回 " + want + "（UV_ENOTSUP）");
-  check(h1_ok, "h1 上 send_trailers() 返回 UV_ENOTSUP（body 里读到的）");
+  info("h1 上 send_trailers() 返回 " + want + "（UV_EINVAL：没有在途 chunked 流）");
+  check(h1_ok, "h1 上 send_trailers() 返回 UV_EINVAL（body 里读到的）");
   check(h1_got.find("grpc-status") == std::string::npos,
         "尾随头没有被当成普通响应头混进 h1 的首部");
 }

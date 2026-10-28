@@ -2882,14 +2882,29 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // 路由的人各踩一次同一个坑，而踩错时**没有任何本地症状**（对端只是解包失败
   // 或者干脆超时）。
   //
-  // 前提（`set_trailers()` 的契约里写明了）：h2 且非流式。两条不成立的前提各给
-  // 一句 WARN —— "以为发了、其实没发"是尾随头最容易发生的失败，而它对本端
-  // 完全静默（对端只是拿不到状态码，多半表现为超时）。
-  if (r.has_trailers() && !r.streaming() && r.stream_id() == 0) {
+  // 前提（`set_trailers()` 的契约里写明了）：h2（或 h1 的 chunked），且非流式。
+  // 不成立的前提各给一句 WARN —— "以为发了、其实没发"是尾随头最容易发生的
+  // 失败，而它对本端完全静默（对端只是拿不到状态码，多半表现为超时）。
+  const int  status_int    = static_cast<int>(r.status_code());
+  const bool no_body_status =
+      (status_int >= 100 && status_int < 200) || status_int == 204 ||
+      status_int == 304;
+
+  if (r.has_trailers() && r.stream_id() == 0 && r.head_only()) {
+    // HEAD 的响应没有 body，也没有"末块"可挂尾随头（RFC 9112 §7.1.2）。
     UVCPP_LOG_WARN(log_category::RESPONSE)
         << "连接 " << ctx.connection_id()
-        << " 是 HTTP/1.1：尾随头（" << r.trailers().size()
-        << " 个字段）已丢弃 —— h1 上的尾随头要 chunked 编码，本库没做那条路";
+        << " 是 HEAD：尾随头（" << r.trailers().size() << " 个字段）已丢弃";
+  }
+
+  if (r.has_trailers() && r.stream_id() == 0 && !r.streaming() &&
+      no_body_status) {
+    // 1xx / 204 / 304 没有 body，也不许用 chunked 定界 —— 尾随头只挂在 chunked
+    // 报文的末块之后，这几种状态码上没有那个位置。
+    UVCPP_LOG_WARN(log_category::RESPONSE)
+        << "连接 " << ctx.connection_id() << " 的状态码是 " << status_int
+        << "（无 body、不许 chunked）：尾随头（" << r.trailers().size()
+        << " 个字段）已丢弃";
   }
 
   if (r.has_trailers() && r.streaming()) {
@@ -3009,6 +3024,61 @@ void uvcpp_web_app::send_response(uvcpp_web_context& ctx) {
   // （见 `send_h2_response`）；为 0 时连接被判成 h1，响应体走
   // `to_string()` 序列化成一条 HTTP/1.1 报文，而 h2 对端在等 HEADERS/DATA 帧
   // —— 一个字节都解析不出来，请求**静默挂死**（没有错误、没有日志，只有超时）。
+
+  // -------------------------------------------------------------------
+  // h1 + 尾随头：走 chunked（begin_stream → write_stream → send_trailers）
+  // -------------------------------------------------------------------
+  //
+  // `send_response()` 一次就把整条报文（含终止块）交出去，没有地方挂第二段头
+  // 块。所以这条路上把 body 自己组一块 chunked 帧，末块交给 `send_trailers()`
+  // 带字段（RFC 9112 §7.1.2：终止块之后那段字段就是尾随头）。
+  //
+  // HEAD、1xx/204/304 都不在此列（上面各 WARN 丢弃）：前者没有 body，后三种
+  // 状态码连 chunked 都不许用，而尾随头只存在于 chunked 报文的末块之后。
+  if (r.has_trailers() && !r.streaming() && r.stream_id() == 0 &&
+      !r.head_only() && !no_body_status) {
+    uvcpp_http_response head = r.raw_after_sync();
+    std::string        body;
+    if (head.body.size() > 0) {
+      body.assign(head.body.get_const_data(), head.body.size());
+    }
+    head.body.clear();
+    // CL 与 TE 不得共存（RFC 9110 §6.4.1）。**按"删干净"写**：`set_header()`
+    // 只覆盖第一条同名头，而处理函数完全可以 `headers.push_back` 塞第二份；
+    // 留下的那一份在线上就是一对自相矛盾的定界头（请求走私那类问题的源头）。
+    while (head.has_header("content-length")) {
+      head.remove_header("content-length");
+    }
+    while (head.has_header("transfer-encoding")) {
+      head.remove_header("transfer-encoding");
+    }
+    head.set_header("transfer-encoding", "chunked");
+    http_->begin_stream(client, head);
+    if (!body.empty()) {
+      char      hex[32];
+      const int hn = uvcpp_snprintf(hex, sizeof(hex), "%llx",
+                                    static_cast<unsigned long long>(body.size()));
+      if (hn > 0) {
+        std::string frame;
+        frame.reserve(static_cast<size_t>(hn) + body.size() + 4);
+        frame.append(hex, static_cast<size_t>(hn));
+        frame.append("\r\n");
+        frame.append(body);
+        frame.append("\r\n");
+        http_->write_stream(client, std::move(frame), nullptr);
+      }
+    }
+    const int trc = http_->send_trailers(client, 0, r.trailers());
+    info.body_bytes = body.size();
+    if (trc != 0) {
+      info.ok = false;
+      UVCPP_LOG_WARN(log_category::RESPONSE)
+          << "连接 " << ctx.connection_id() << " 的尾随头没发出去（rc="
+          << trc << "）";
+    }
+    r.notify_sent(info);
+    return;
+  }
 
   // 交给 HTTP 层序列化并异步写出。压缩、keep-alive 判定、写队列串行化都在
   // 那里面（对 deferred 响应同样成立）。

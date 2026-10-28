@@ -505,13 +505,15 @@ class UVCPP_API uvcpp_web_response {
    * 调用方只需要在这里把那段字段**声明**出来。
    *
    * 规则：
-   *  - **只在 h2（`stream_id != 0`）上有效。** h1 的尾随头要先 chunked 编码，
-   *    本库没做那条路（`uvcpp_http_server::send_trailers()` 在 h1 上返
-   *    `UV_ENOTSUP`）。h1 请求上这一段会被**忽略**并打一条 WARN —— 与
-   *    "照发一遍"不同，后者会把尾随头当普通响应头塞进首部，调用方看到的是
-   *    "发出去了"，对端看到的是另一份报文。
-   *  - **响应体为空时只发一段头**（Trailers-Only）：HEADERS 之后直接是尾随块，
-   *    中间没有 DATA —— 这正是 gRPC 失败路径的形状。
+   *  - **h2 与 h1 都有效，h1 走 chunked。** h2 上是 HEADERS → DATA → HEADERS；
+   *    h1 上框架把头部改成 `transfer-encoding: chunked`、body 按 chunk 发出，
+   *    尾随头挂在终止块之后（RFC 9112 §7.1.2）。**HEAD 与 1xx/204/304 没有
+   *    那个位置**，字段被忽略并打一条 WARN —— 与"照发一遍"不同，后者会把
+   *    尾随头当普通响应头塞进首部，调用方看到的是"发出去了"，对端看到的是
+   *    另一份报文。
+   *  - **响应体为空时也照发**：h2 是只发两段头（Trailers-Only，HEADERS 之后
+   *    直接是尾随块，中间没有 DATA）；h1 是一个 `0\r\n` 终止块带字段。这正是
+   *    gRPC 失败路径的形状（不过 gRPC 模块本身仍只接 h2，见 `doc/grpc-guide.md`）。
    *  - **带尾随头的响应不经过 HTTP 层的压缩。** gRPC 有自己的 `grpc-encoding`，
    *    HTTP 层再压一遍，对端按 gRPC 的规矩解不开；而尾随块本身在压缩之后
    *    还要重算长度，两件事纠缠在一起没有收益。

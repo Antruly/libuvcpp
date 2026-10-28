@@ -74,7 +74,9 @@ int grpc_send_unary(uvcpp_http_server& server, uvcpp_tcp_client* client,
                     uvcpp_http_response& resp, const std::string& message) {
   if (client == nullptr) return UV_EINVAL;
   // `stream_id == 0` 就是 HTTP/1.1（见 `uvcpp_http_response::stream_id`）。gRPC
-  // 不在 h1 上存在 —— 没有尾随头，`grpc-status` 无处安放。硬走下去的话，
+  // 的线上协议定死 HTTP/2（gRPC 的 `PROTOCOL-HTTP2.md`），本模块不接 h1 ——
+  // 即便 HTTP 层从 1.9.0 起能在 h1 上发 chunked 尾随头（RFC 9112 §7.1.2），
+  // gRPC 客户端也不会到那条腿上收 `grpc-status`。硬走下去的话，
   // `begin_stream()` 会把非 0 的流号直接丢掉、`write_stream()` 按 h1 那套把
   // 帧字节当普通 body 发出去：对端收到一条"看着成功"的 200，而 gRPC 那一层
   // 永远等不到状态码。**宁可在这一句上失败得明明白白。**

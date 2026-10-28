@@ -19,7 +19,7 @@
 - 包含方式：`<grpc/uvcpp_grpc.h>`、`<grpc/uvcpp_grpc_server.h>`。
 - 依赖：帧与 varint 那半**只依赖 `<cstdint>` 与 `libuv` 的错误码**（
   `src/grpc/uvcpp_grpc.h:42`）；服务端那半额外依赖 `web/uvcpp_http_common.h`
-  与 `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:840-840`）。
+  与 `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:848-848`）。
 
 > 本页讲**怎么用**，以及**为什么这么切**。与本页配对的两份用例是
 > `tests/functional/grpc_codec_func.cpp`（编解码，任何配置下都跑）与
@@ -62,13 +62,15 @@ HEADERS   尾随头 grpc-status: 0（自带 END_STREAM）
   Trailers-Only 的失败应答读成"200，body 是空的"。
 - **`grpc-status` 按规范必须走尾随头**，不走首部（gRPC 的 `PROTOCOL-HTTP2.md` 定在
   那里；RFC 9113 §8.1 提供了"首部之后还能有一个头块"这条机制）。本库为此在 1.6.9 补了
-  `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:840-840`）。
+  `uvcpp_http_server::send_trailers()`（`src/web/uvcpp_http_server.h:848-848`）。
 - 失败应答可以**只有第三段**（没有 DATA）—— gRPC 里叫 **Trailers-Only**。本模块的
-  两条失败路径都是这个形状（`src/grpc/uvcpp_grpc_server.cpp:115-131`）。
+  两条失败路径都是这个形状（`src/grpc/uvcpp_grpc_server.cpp:117-133`）。
 
-**gRPC 只存在于能承载多条流的协议上**，也就是 h2 / h3。h1 上的 gRPC 要 chunked 编码
-兜尾随头，本库没做 —— 在 h1 上调用本模块会拿到 `UV_EINVAL`（判据是
-`resp.stream_id == 0`，`src/grpc/uvcpp_grpc_server.cpp:73-81`）。
+**gRPC 只存在于能承载多条流的协议上**，也就是 h2 / h3。h1 上调用本模块会拿到
+`UV_EINVAL`（判据是 `resp.stream_id == 0`，`src/grpc/uvcpp_grpc_server.cpp:73-83`）——
+gRPC 的线上协议定死 HTTP/2，客户端不会到 h1 那条腿上收 `grpc-status`。
+（HTTP 层的 `set_trailers()` 从 1.9.0 起**能**在 h1 上发 chunked 尾随头，
+那是给普通 HTTP 响应用的，不改变 gRPC 只接 h2/h3 这条边界。）
 
 ---
 
@@ -239,14 +241,14 @@ void handle_grpc_sum(uvcpp_http_server&                server,
 
 `grpc_send_unary()` 因此只动 `resp` 的两个字段：它置 `deferred = true`（这条应答由处理
 函数自己发，框架别再回一条），然后读只读的 `stream_id`
-（`src/grpc/uvcpp_grpc_server.cpp:73-113`）。
+（`src/grpc/uvcpp_grpc_server.cpp:73-115`）。
 
 **Tailers-Only 为什么可以两句背靠背**：失败那条走
 `begin_stream()` → `send_trailers()`，中间**没有任何数据在飞**，所以
 `send_trailers()` 那条"body 一个字节都不欠"的前置条件当场成立 —— 它的判据只看 **DATA
 队列空不空**（`chunks.empty()`），与发过几段头无关；而 `begin_stream()` 里的
 `submit_headers()` 是**同步**把会话置成 `HEADERS_SENT` 的，所以紧接着的
-`send_trailers()` 不会撞上 `UV_EALREADY`（`src/grpc/uvcpp_grpc_server.cpp:115-131`）。
+`send_trailers()` 不会撞上 `UV_EALREADY`（`src/grpc/uvcpp_grpc_server.cpp:117-133`）。
 
 ### web 框架那一侧：声明，而不是发送
 
@@ -333,15 +335,17 @@ void handle_grpc_sum(uvcpp_web_request&  req,
   底层版**做不到**这件事（它另起一份干净的 `uvcpp_http_response head`），web 版做得到
   —— 这是两个版本**有意**留下来的唯一一处行为差异。
 
-**h1 与流式上会被丢弃，各留一句 WARN。** `set_trailers()` 的前提是"h2 且非流式"：
+**h1 能发（chunked），流式上会被丢弃。** `set_trailers()` 的前提是"非流式"：
 
-- **h1**（`stream_id == 0`）：尾随头按规范要 chunked 编码兜，本库没做那条路，所以字段被
-  丢弃、**体照发**（对端看到一条语法完好的 200 + 那段帧，只是永远等不到 `grpc-status`）。
+- **h1**（`stream_id == 0`）：框架把响应头改成 `transfer-encoding: chunked`，body
+  按 chunk 发出，尾随头挂在终止块之后（RFC 9112 §7.1.2）。**HEAD 与
+  1xx/204/304 除外** —— 那几种响应没有末块可挂，字段被丢弃并打一条 WARN
+  （gRPC 的应答恒是 200，碰不到这条边界）。
 - **流式**（`begin_chunked()` 之后）：那条路的收尾是 `end_stream()`，没有第二段头块的
   位置，同样丢弃。
 
-两条都只记一句 WARN 而不改行为 —— "以为发了、其实没发"是尾随头最容易发生的失败，而它
-对本端完全静默（对端只是拿不到状态码，多半表现为超时）。
+丢弃时只记一句 WARN 而不改行为 —— "以为发了、其实没发"是尾随头最容易发生的失败，
+而它对本端完全静默（对端只是拿不到状态码，多半表现为超时）。
 
 ### 尾随头的内容
 
@@ -372,7 +376,7 @@ int grpc_parse_unary_body(const std::string& body, std::string& message,
 
 两个出参都是必填的，因为它们就是这个函数存在的理由：失败时要回的那条 Trailers-Only
 需要**同时**拿到一句人话和一个 gRPC 状态码，分两次调用去凑只会让每条路由各写一遍那张
-对照表（`src/grpc/uvcpp_grpc_server.cpp:207-224`）。
+对照表（`src/grpc/uvcpp_grpc_server.cpp:209-226`）。
 
 出参语义：成功时 `message` 是解出来的消息字节；失败时它被清空、`fail_status` 是
 该用的状态码、`err` 是那句该放进 `grpc-message` 的话。返回值非 0 时**就是编解码层那个
@@ -382,7 +386,7 @@ int grpc_parse_unary_body(const std::string& body, std::string& message,
 
 ## 6. 错误码对照
 
-编解码层的错误码 → gRPC 状态码（`src/grpc/uvcpp_grpc_server.cpp:207-224` 那张表）：
+编解码层的错误码 → gRPC 状态码（`src/grpc/uvcpp_grpc_server.cpp:209-226` 那张表）：
 
 | 编解码层 | gRPC | 为什么 |
 |---|---|---|
@@ -443,9 +447,9 @@ varint 定在 protobuf 的编码规范里，两边都不随调用方变化。放
   `UV_EINVAL`（`src/grpc/uvcpp_grpc.cpp:240`）。标志位本身留在那里，将来要加看得见往哪加。
 - **不做流式 RPC。** 本模块只有 unary：`grpc_frame_decode_exact()` 的存在就是为了让
   "一条流式请求打到 unary 方法上"这件事**被拒**而不是被当成两条 unary。
-- **不做 h1 上的 gRPC**（要 chunked 兜尾随头），也不做 WebSocket 上的。
-  web 框架那一侧撞上 h1 时的行为是"**尾随头丢弃、体照发 + 一句 WARN**"，
-  不是静默成功也不是报错 —— 见 §4 那条子节。
+- **不做 h1 上的 gRPC**（线上协议定死 HTTP/2；h1 的 chunked 尾随头是给普通 HTTP
+  响应用的），也不做 WebSocket 上的。web 框架那一侧对 h1 的普通响应现在**会**发
+  chunked 尾随头；HEAD 与 1xx/204/304 上丢弃并打一句 WARN —— 见 §4 那条子节。
 - **不做客户端 stub。** 这一层给的是"发一条 gRPC 应答"和"解一条 gRPC 请求"，
   客户端那一侧请照 §1 的三段形状自己收（`uvcpp_h2_session` 的收尾随头那条路本来就在，
   尾随头块 category 是 `HCAT_HEADERS`、字段折进同一个 `response.headers`）。
