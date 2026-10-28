@@ -172,6 +172,20 @@ class UVCPP_API uvcpp_h3_connection {
     std::function<void(uvcpp_h3_connection&, const h3_request&)>
         on_connect_request;
 
+    /**
+     * @brief 收到一条 **HTTP/3 Datagram**（RFC 9297）。
+     *
+     * @param stream_id 它关联的**请求流**（RFC 9297 §2.1 的 Quarter Stream ID
+     *        还原出来的那一条；只有 extended CONNECT 流会走这里）。
+     * @param data      payload（四分之一流号那一段已经剥掉）。**只在回调期间有效。**
+     *
+     * 只有**双方都宣告了 `SETTINGS_H3_DATAGRAM`**、且关联流是 extended CONNECT
+     * 时才会交付；其余一律丢弃并计入 `dropped_datagrams()`。
+     */
+    std::function<void(uvcpp_h3_connection&, int64_t stream_id,
+                       const uint8_t* data, size_t datalen)>
+        on_datagram;
+
     /// 一条流关掉了（两个方向都收场之后）。`info` 里两个方向的原因码是分开的。
     std::function<void(uvcpp_h3_connection&, const h3_stream_close_info&)>
         on_stream_close;
@@ -308,6 +322,42 @@ class UVCPP_API uvcpp_h3_connection {
 
   /** @brief 客户端：开一条活流请求（extended CONNECT）。返回流号或负错误码。 */
   int64_t send_stream_request(const h3_request& req);
+
+  // -----------------------------------------------------------------
+  // HTTP/3 Datagram（RFC 9297）
+  // -----------------------------------------------------------------
+
+  /**
+   * @brief 宣传 `SETTINGS_H3_DATAGRAM = 1`。**必须在 `start()` 之前调**。
+   *
+   * 默认 OFF。打开之后：本端愿意收 H3 datagram，且**对端也宣告**之后
+   * `send_datagram()` 才可用（见 `peer_h3_datagram()`）。
+   */
+  void set_h3_datagram_enabled(bool on);
+  bool h3_datagram_enabled() const { return h3_datagram_enabled_; }
+
+  /// 对端宣告了 `SETTINGS_H3_DATAGRAM`（且本端也开着）。
+  bool peer_h3_datagram() const;
+
+  /**
+   * @brief 在一条 **extended CONNECT** 流上发一条不可靠数据报（RFC 9297）。
+   *
+   * 帧格式：QUIC DATAGRAM（RFC 9221）的载荷 = `Quarter Stream ID` 变长整数
+   * （`stream_id / 4`）+ 应用 payload。**不可靠、无顺序、无流控** —— 与 QUIC
+   * DATAGRAM 同一条语义。
+   *
+   * @return 0 已受理（`flush()` 真正上线）；`UV_ENOTSUP` 本端没开 / 对端没宣告 /
+   *         对端 QUIC 层没开 DATAGRAM；`UV_EINVAL` 这条流不存在或不是 extended
+   *         CONNECT；`UV_EMSGSIZE` 超过对端 `max_datagram_size()`；
+   *         `UV_ENOBUFS` QUIC 层发送队列满。
+   */
+  int send_datagram(int64_t stream_id, const void* data, size_t len);
+
+  /// 一条 H3 datagram 的**总帧上限**（quarter id + payload）；0 = 不可用。
+  size_t max_datagram_size() const;
+
+  /// 因流不存在 / 不是 CONNECT / 未协商而被丢弃的入站 datagram 条数。
+  uint64_t dropped_datagrams() const { return dropped_datagrams_; }
 
   /** @brief 往活流里写字节（发送方向保持开着）。 */
   int write_stream_data(int64_t stream_id, const char* data, size_t len);
@@ -463,6 +513,10 @@ class UVCPP_API uvcpp_h3_connection {
     /// **活流**（extended CONNECT，#53）：DATA 直接进 `sink_data`，不再往
     /// `req.body` / `resp.body` 里攒；读侧结束走 `sink_end`。
     bool raw = false;
+    /// 这条流允许 HTTP/3 Datagram（RFC 9297）：extended CONNECT 请求。服务端在
+    /// `on_connect_request` 那一刻置位、客户端在提交请求时置位；普通请求一律为假
+    /// （RFC 9297 §3 只给 CONNECT 免掉 `Datagram-Flow-Id` 那一套）。
+    bool datagram_ok = false;
     std::function<void(const char*, size_t)> sink_data;
     std::function<void()>                     sink_end;
   };
@@ -486,6 +540,8 @@ class UVCPP_API uvcpp_h3_connection {
                             uint64_t max_streams);
   void on_stop_sending(uvcpp_quic_connection& c, int64_t stream_id,
                        uint64_t app_error_code);
+  /// QUIC DATAGRAM 的落点：剥掉 `Quarter Stream ID`，校验关联流后交付。
+  void on_datagram(const uint8_t* data, size_t datalen);
 
   /// 装会话回调并建出会话（`session_->init()` 也在里面）。拆出来只是为了让
   /// `start()` 读起来短一点。
@@ -544,6 +600,10 @@ class UVCPP_API uvcpp_h3_connection {
   /// 对端 SETTINGS（#53）。
   bool                    have_remote_settings_ = false;
   uvcpp_h3_remote_settings remote_settings_;
+  /// 本端是否宣告了 `SETTINGS_H3_DATAGRAM`（RFC 9297）。
+  bool     h3_datagram_enabled_ = false;
+  /// 被丢弃的入站 datagram（流不存在 / 不是 CONNECT / 未协商）。
+  uint64_t dropped_datagrams_   = 0;
   /// `deferred_consume` 的累计账（只做观测，不拿来还 QUIC 流控）。
   uint64_t blocked_stream_events_ = 0;
   uint64_t blocked_stream_bytes_  = 0;

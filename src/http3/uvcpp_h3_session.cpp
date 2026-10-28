@@ -196,6 +196,9 @@ int uvcpp_h3_session::init(const callbacks& cbs,
   // extended CONNECT（RFC 8441 / RFC 9220，#53）：告诉对端我们接受
   // `:protocol`。**只打开能力，不替应用决定协议名**。
   settings.enable_connect_protocol   = 1;
+  // HTTP/3 Datagram（RFC 9297）：由应用显式打开（默认 OFF）。帧的收发在连接
+  // 层，nghttp3 1.18 只把它当 SETTINGS 里的一位。
+  settings.h3_datagram               = h3_datagram_ ? 1 : 0;
 
   const int rv =
       server_side_

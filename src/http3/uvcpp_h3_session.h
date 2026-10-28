@@ -264,6 +264,16 @@ class UVCPP_API uvcpp_h3_session {
            size_t qpack_max_dtable_capacity = H3_DEFAULT_QPACK_MAX_DTABLE_CAPACITY,
            size_t qpack_blocked_streams = H3_DEFAULT_QPACK_BLOCKED_STREAMS);
 
+  /**
+   * @brief 宣传 `SETTINGS_H3_DATAGRAM = 1`（RFC 9297）。**必须在 `init()` 之前调。**
+   *
+   * 只影响**宣告**：H3 datagram 的帧本身由传输层直接收发（QUIC DATAGRAM，
+   * RFC 9221），nghttp3 1.18 的公开面没有 `submit/recv_datagram` —— 四分之一
+   * 流号那一段的编解码在连接层做（见 `uvcpp_h3_connection::send_datagram`）。
+   */
+  void set_h3_datagram_enabled(bool on) { h3_datagram_ = on; }
+  bool h3_datagram_enabled() const { return h3_datagram_; }
+
   // -----------------------------------------------------------------
   // 收
   // -----------------------------------------------------------------
@@ -595,6 +605,9 @@ class UVCPP_API uvcpp_h3_session {
   bool           fatal_       = false;
   int            last_error_  = 0;
   uint64_t       max_field_section_size_ = H3_DEFAULT_MAX_FIELD_SECTION_SIZE;
+  /// `SETTINGS_H3_DATAGRAM` 的取值来源（RFC 9297）。默认 OFF —— 宣告它等于
+  /// 邀请对端在本连接上发 H3 datagram，那该是应用明确打开的能力。
+  bool           h3_datagram_ = false;
   std::map<int64_t, stream_rec> streams_;
 };
 

@@ -43,6 +43,49 @@ int parse_status(const std::string& v) {
   return n;
 }
 
+// -------------------------------------------------------------------------
+// QUIC 变长整数（RFC 9000 §16）—— 只给 HTTP/3 Datagram 的 Quarter Stream ID
+// 用（RFC 9297 §2.1）。自己写 20 行而不是借 ngtcp2 的：那两个是内部头，
+// 公开面（本文件不在公开头里，但依赖方向仍是 h3 → quic 的公开 API）。
+// -------------------------------------------------------------------------
+
+/// @p v 编成最短形式的变长整数，写进 @p out（最多 8 字节），返回字节数。
+size_t encode_varint(uint64_t v, uint8_t* out) {
+  if (v < 64u) {
+    out[0] = static_cast<uint8_t>(v);
+    return 1;
+  }
+  if (v < 16384u) {
+    out[0] = static_cast<uint8_t>((v >> 8) | 0x40u);
+    out[1] = static_cast<uint8_t>(v & 0xffu);
+    return 2;
+  }
+  if (v < 1073741824u) {
+    out[0] = static_cast<uint8_t>((v >> 24) | 0x80u);
+    out[1] = static_cast<uint8_t>((v >> 16) & 0xffu);
+    out[2] = static_cast<uint8_t>((v >> 8) & 0xffu);
+    out[3] = static_cast<uint8_t>(v & 0xffu);
+    return 4;
+  }
+  out[0] = static_cast<uint8_t>((v >> 56) | 0xc0u);
+  for (int i = 1; i < 8; ++i) {
+    out[i] = static_cast<uint8_t>((v >> (8 * (7 - i))) & 0xffu);
+  }
+  return 8;
+}
+
+/// 解一个变长整数。@return false = 字节不够 / 形状非法。@p used 是消耗的字节数。
+bool decode_varint(const uint8_t* p, size_t n, uint64_t& v, size_t& used) {
+  if (n == 0) return false;
+  const size_t len = static_cast<size_t>(1) << (p[0] >> 6);  // 1 / 2 / 4 / 8
+  if (n < len) return false;
+  uint64_t x = p[0] & 0x3fu;
+  for (size_t i = 1; i < len; ++i) x = (x << 8) | p[i];
+  v    = x;
+  used = len;
+  return true;
+}
+
 }  // namespace
 
 // =========================================================================
@@ -90,6 +133,10 @@ int uvcpp_h3_connection::start(const callbacks& cbs) {
   started_ = true;
   cbs_     = cbs;
 
+  // SETTINGS 在 `on_alpn` 里那次 `session_->init()` 才发出去，而 `on_alpn`
+  // 可能就在下面的兜底那句里同步跑到 —— 所以这一位必须在它之前落。
+  session_->set_h3_datagram_enabled(h3_datagram_enabled_);
+
   wire_session_callbacks();
 
   // **回调要在这里装。** 服务端的 `connection_cb` 是"连接刚建出来"那一刻、
@@ -125,6 +172,12 @@ int uvcpp_h3_connection::start(const callbacks& cbs) {
                                     uint64_t app_error_code) {
     if (!token_alive(life)) return;
     on_stop_sending(c, stream_id, app_error_code);
+  };
+  // HTTP/3 Datagram（RFC 9297）：QUIC DATAGRAM 的载荷由本层解出四分之一流号。
+  qc.on_datagram = [this, life](uvcpp_quic_connection&,
+                                const uint8_t* data, size_t datalen) {
+    if (!token_alive(life)) return;
+    on_datagram(data, datalen);
   };
   conn_->set_callbacks(qc);
 
@@ -196,8 +249,11 @@ void uvcpp_h3_connection::wire_session_callbacks() {
     // extended CONNECT（#53）：请求头收全就交给应用 —— 这条流不会读侧收场，
     // 等 `on_end_stream` 等于永远等不到。`req.protocol` 非空即为此类。
     if (server_side_ && !s.req.protocol.empty() && !s.dispatched) {
-      s.dispatched = true;
-      s.raw        = true;
+      s.dispatched  = true;
+      s.raw         = true;
+      // extended CONNECT 是 RFC 9297 里**免掉 `Datagram-Flow-Id`** 的那一类
+      // 请求：datagram 直接按 `stream_id / 4` 关联到这条流。
+      s.datagram_ok = true;
       std::function<void(uvcpp_h3_connection&, const h3_request&)> cb;
       if (cbs_.on_connect_request) cb = cbs_.on_connect_request;
       if (cb) cb(*this, s.req);
@@ -778,6 +834,9 @@ int64_t uvcpp_h3_connection::send_request(const h3_request& req) {
   rec.request = true;
   rec.req.stream_id  = sid;
   rec.resp.stream_id = sid;
+  // `:protocol` 非空 ⇒ 这是一条 extended CONNECT，RFC 9297 的 datagram 直接
+  // 按 `sid / 4` 关联到它（普通请求要走 `Datagram-Flow-Id` 那一套，本层不做）。
+  rec.datagram_ok = !req.protocol.empty();
   streams_.insert(std::make_pair(sid, rec));
 
   // extended CONNECT（#53）：`:protocol` 非空时 `:method` 必须是 CONNECT
@@ -881,6 +940,9 @@ int64_t uvcpp_h3_connection::send_stream_request(const h3_request& req) {
   rec.request = true;
   rec.req.stream_id  = sid;
   rec.resp.stream_id = sid;
+  // 这条入口按定义只发 extended CONNECT（`:method` 钉成 CONNECT、带
+  // `:protocol`）⇒ datagram 可用（RFC 9297）。
+  rec.datagram_ok = true;
   streams_.insert(std::make_pair(sid, rec));
 
   std::vector<h3_header> hs;
@@ -906,6 +968,74 @@ int64_t uvcpp_h3_connection::send_stream_request(const h3_request& req) {
   }
   flush();
   return sid;
+}
+
+// =========================================================================
+// HTTP/3 Datagram（RFC 9297）
+// =========================================================================
+
+void uvcpp_h3_connection::set_h3_datagram_enabled(bool on) {
+  h3_datagram_enabled_ = on;
+  // 会话在构造函数里就建好了，`init()` 在 `on_alpn` 里才跑 —— 这一句只是把
+  // 意图转交过去；`start()` 里还会再落一次（那时 `started_` 已置，够用）。
+  if (session_) session_->set_h3_datagram_enabled(on);
+}
+
+bool uvcpp_h3_connection::peer_h3_datagram() const {
+  return h3_datagram_enabled_ && have_remote_settings_ &&
+         remote_settings_.h3_datagram;
+}
+
+size_t uvcpp_h3_connection::max_datagram_size() const {
+  if (conn_ == nullptr || !peer_h3_datagram()) return 0;
+  return conn_->max_datagram_size();
+}
+
+int uvcpp_h3_connection::send_datagram(int64_t stream_id, const void* data,
+                                       size_t len) {
+  if (conn_ == nullptr) return UV_ENOTCONN;
+  // 本端没开 / 对端没宣告 ⇒ RFC 9297 下**不许发**（不是"发了被丢"）。
+  if (!peer_h3_datagram()) return UV_ENOTSUP;
+  // 请求流是客户端发起的双向流：`stream_id % 4 == 0`（RFC 9000 §2.1）。
+  // 四分之一流号的定义就是 `stream_id / 4`，余数非 0 的流没有这个映射。
+  if (stream_id < 0 || (stream_id & 0x3) != 0) return UV_EINVAL;
+  std::map<int64_t, stream_rec>::iterator it = streams_.find(stream_id);
+  if (it == streams_.end() || !it->second.datagram_ok) return UV_EINVAL;
+
+  const size_t max_frame = conn_->max_datagram_size();
+  if (max_frame == 0) return UV_ENOTSUP;  // 对端 QUIC 层没开 DATAGRAM
+
+  uint8_t      head[8];
+  const size_t hlen = encode_varint(static_cast<uint64_t>(stream_id) >> 2, head);
+  if (hlen + len > max_frame) return UV_EMSGSIZE;
+
+  std::string frame(reinterpret_cast<const char*>(head), hlen);
+  if (data != nullptr && len > 0) {
+    frame.append(static_cast<const char*>(data), len);
+  }
+  return conn_->send_datagram(frame.data(), frame.size());
+}
+
+void uvcpp_h3_connection::on_datagram(const uint8_t* data, size_t datalen) {
+  if (!peer_h3_datagram()) { ++dropped_datagrams_; return; }
+  uint64_t quarter = 0;
+  size_t   used    = 0;
+  if (!decode_varint(data, datalen, quarter, used) ||
+      quarter > (static_cast<uint64_t>(INT64_MAX) >> 2)) {
+    ++dropped_datagrams_;
+    return;
+  }
+  const int64_t sid = static_cast<int64_t>(quarter << 2);
+  std::map<int64_t, stream_rec>::iterator it = streams_.find(sid);
+  if (it == streams_.end() || !it->second.datagram_ok) {
+    ++dropped_datagrams_;
+    return;
+  }
+  // 与其它入口同一条纪律：回调跑的是用户代码，可能把本对象销毁 —— 先拷出来。
+  std::function<void(uvcpp_h3_connection&, int64_t, const uint8_t*, size_t)> cb;
+  if (cbs_.on_datagram) cb = cbs_.on_datagram;
+  if (!cb) return;
+  cb(*this, sid, data + used, datalen - used);
 }
 
 int uvcpp_h3_connection::write_stream_data(int64_t stream_id,
