@@ -19,6 +19,17 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.8.10 重点 (Highlights)
+
+`v1.8.9` 之后的一版：**HTTP/3 上层**的两块 —— Datagram 与 WebTransport。
+
+- **HTTP/3 Datagram（RFC 9297）**：`SETTINGS_H3_DATAGRAM` 可开关；
+  extended CONNECT 流上 `send_datagram()` / `on_datagram()`，不可靠、无顺序。
+- **WebTransport over HTTP/3**：`uvcpp_h3_wt_session` —— 会话建立、双向/单向流、
+  datagram、Close/Drain capsule（draft-ietf-webtrans-http3-13 语义）。
+  **未做**：子协议协商、`WT_MAX_SESSIONS`、浏览器互操作验证。
+- 顺带更正两处过时注释（quic 公共头与 C ABI 头里"datagram 没做"的旧话术）。
+
 ## v1.8.9 重点 (Highlights)
 
 `v1.8.8` 之后的一版：**webapp 的 HTTP/3 普通请求可用**，并补上两个小口子。

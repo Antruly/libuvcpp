@@ -11,11 +11,11 @@
 `1.1.x` → `v1.2.0`、`1.2.x` → `v1.3.0`、`1.3.x` → `v1.4.0`、`1.4.1`–`1.4.4` → `v1.5.0`、
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
-`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9` 是它之后的补丁版，
+`v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9`、`1.8.10` 是它之后的补丁版，
 不折叠、直接发布。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.8.9**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`。
+当前源码树是 **1.8.10**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -471,6 +471,15 @@
 
 ### HTTP/3（web 层）
 
+- **HTTP/3 Datagram（RFC 9297）**（`1.8.10`）：`set_h3_datagram_enabled()`
+  宣告 `SETTINGS_H3_DATAGRAM`；extended CONNECT 流上 `send_datagram()` /
+  `on_datagram()`，帧是 `Quarter Stream ID` 变长整数 + 应用数据，走 QUIC
+  DATAGRAM（RFC 9221）。普通请求需要 `Datagram-Flow-Id` capsule，不做。
+- **WebTransport over HTTP/3**（`1.8.10`，draft-ietf-webtrans-http3-13）：
+  `uvcpp_h3_wt_session` 的会话建立（`:protocol = webtransport`）、双向/单向流
+  （`0x41` / `0x54` 前缀 + 会话流号）、datagram 与 `WT_CLOSE_SESSION` /
+  `WT_DRAIN_SESSION` capsule。h3 连接新增对端流的类型分流（WT 流不再进 nghttp3）。
+  **没有**子协议协商、`WT_MAX_SESSIONS` 与浏览器互操作验证。
 - **webapp 的普通 HTTP 请求走 h3**（`1.8.9`，#58）：此前 webapp 的 h3 腿从
   1.4.1 起一直是坏的 —— `start()` 无条件安装 `set_stream_claim()`，h3 派发器
   见到它就拒绝整条请求（500）；即便摘掉钩子，响应也走 `reg_client()` 那条只有
@@ -4025,6 +4034,25 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.8.10 (2026-10-28)
+
+`v1.8.9` 之后的一版：**HTTP/3 的两块上层能力** —— Datagram（RFC 9297）与
+WebTransport over h3（draft-13 语义）。
+
+**新增**：
+
+- HTTP/3 Datagram：`SETTINGS_H3_DATAGRAM`、`send_datagram()` / `on_datagram()`、
+  `max_datagram_size()`、`dropped_datagrams()`（extended CONNECT 流上）。
+- WebTransport：`uvcpp_h3_wt_session`（accept/connect、双向/单向流、datagram、
+  Close/Drain capsule）与 `uvcpp_h3_wt_stream`。
+- h3 连接的对端流类型分流：`0x41` / `0x54` 开头的流直接进入 WebTransport，
+  不再交给 nghttp3（否则是 `H3_FRAME_UNEXPECTED`）。
+
+**文档**：
+
+- `uvcpp_quic_common.h` 与 `capi/uvcpp_c_quic.h` 里"datagram C++ 侧本来就没有"
+  的旧话术更正（C++ 侧 1.8.2 起有；C ABI 仍然不暴露）。
 
 ### v1.8.9 (2026-10-27)
 
