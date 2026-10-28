@@ -97,3 +97,6 @@ bindings/csharp/**/obj/
 !cmake/uvcpp_compat.cmake
 !cmake/toolchains/
 !cmake/toolchains/**
+
+# 本地依赖源码树（各机各自准备；不是仓库内容）
+_local_deps/
