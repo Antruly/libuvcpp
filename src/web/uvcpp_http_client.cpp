@@ -749,9 +749,9 @@ void uvcpp_http_client::finish_stream(int status) {
 // Send — sync
 // =========================================================================
 
-int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
-                                  uvcpp_http_response& resp,
-                                  int timeout_ms) {
+int uvcpp_http_client::send_wait_once(const uvcpp_http_request& req,
+                                       uvcpp_http_response& resp,
+                                       int timeout_ms) {
 #if UVCPP_NGHTTP2_ENABLE
   // 与"异步 connect + send_wait"是**同一条纪律**：阻塞式 socket I/O 要独占
   // socket，驱动不了 h2 那条内存 BIO 会话。这里必须报错，**不能**落到
@@ -817,6 +817,273 @@ int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
 
   return result_err;
 #endif
+}
+
+// =========================================================================
+// 重定向跟随（同步 send_wait 那条路）
+// =========================================================================
+
+namespace {
+
+std::string redirect_lower(const std::string& s) {
+  std::string out = s;
+  for (size_t i = 0; i < out.size(); ++i) {
+    const char c = out[i];
+    if (c >= 'A' && c <= 'Z') out[i] = static_cast<char>(c + ('a' - 'A'));
+  }
+  return out;
+}
+
+std::string redirect_trim(const std::string& s) {
+  size_t b = 0, e = s.size();
+  while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+  while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+  return s.substr(b, e - b);
+}
+
+/// RFC 3986 §5.2.4 的实用版：丢掉 `.` / `..` 段，保留结尾的 `/` 与 query。
+///
+/// 不做百分号解码 —— 路径里的 `%2e%2e` 不是点段（RFC 3986 §6.2.2 的等价性
+/// 只对未保留字符成立），在这里解码反而会把 `/a/%2e%2e/b` 变成 `/b`。
+std::string redirect_normalize_path(const std::string& raw) {
+  const size_t q = raw.find('?');
+  std::string  p  = q == std::string::npos ? raw : raw.substr(0, q);
+  const std::string query = q == std::string::npos ? std::string() : raw.substr(q);
+  if (p.empty()) p = "/";
+  if (p[0] != '/') p.insert(p.begin(), '/');
+
+  std::vector<std::string> segs;
+  size_t i = 0;
+  while (i < p.size()) {
+    size_t j = p.find('/', i + 1);
+    if (j == std::string::npos) j = p.size();
+    const std::string seg = p.substr(i, j - i);  // 带前导 '/'
+    if (seg == "/.") {
+      // 丢掉
+    } else if (seg == "/..") {
+      if (!segs.empty()) segs.pop_back();
+    } else if (seg != "/") {
+      segs.push_back(seg);
+    }
+    i = j;
+  }
+  std::string out;
+  for (size_t k = 0; k < segs.size(); ++k) out += segs[k];
+  if (out.empty()) out = "/";
+  // 结尾的 '/' 是语义的一部分（`/a/` 与 `/a` 对服务端不是同一件事）。
+  if (p.size() > 1 && p[p.size() - 1] == '/' && out[out.size() - 1] != '/') {
+    out += '/';
+  }
+  return out + query;
+}
+
+struct redirect_target {
+  bool        has_authority = false;
+  std::string scheme;  ///< "http" / "https"；没有 authority 时为空
+  std::string host;
+  int         port = 0;
+  std::string path;  ///< 归一化之后的 path+query，可直接当请求行里的 URL
+};
+
+/// 解析 `location` 并解析出**跳转目标**；@p cur_url 只用于相对路径的合并。
+///
+/// @return false = `location` 里有 CR/LF（注入面）或端口不合法。
+bool redirect_parse_location(const std::string& raw, const std::string& cur_url,
+                             bool cur_tls, redirect_target& out) {
+  const std::string s0 = redirect_trim(raw);
+  if (s0.find('\r') != std::string::npos ||
+      s0.find('\n') != std::string::npos) {
+    return false;
+  }
+  std::string s = s0;
+  const size_t frag = s.find('#');
+  if (frag != std::string::npos) s.erase(frag);
+
+  std::string rest = s;
+  const std::string low = redirect_lower(s);
+  if (low.compare(0, 7, "http://") == 0) {
+    out.has_authority = true;
+    out.scheme        = "http";
+    rest              = s.substr(7);
+  } else if (low.compare(0, 8, "https://") == 0) {
+    out.has_authority = true;
+    out.scheme        = "https";
+    rest              = s.substr(8);
+  } else if (s.compare(0, 2, "//") == 0) {
+    out.has_authority = true;
+    out.scheme        = cur_tls ? "https" : "http";
+    rest              = s.substr(2);
+  }
+
+  if (out.has_authority) {
+    const size_t auth_end = rest.find_first_of("/?");
+    const std::string authority =
+        auth_end == std::string::npos ? rest : rest.substr(0, auth_end);
+    std::string tail =
+        auth_end == std::string::npos ? std::string() : rest.substr(auth_end);
+    if (authority.empty()) return false;
+
+    // IPv6 字面量：`[::1]:8080`。方括号只在这里存在，`host_` 那边没有。
+    size_t host_end = authority.size();
+    std::string host_port = authority;
+    if (!authority.empty() && authority[0] == '[') {
+      const size_t close = authority.find(']');
+      if (close == std::string::npos) return false;
+      out.host  = authority.substr(1, close - 1);
+      host_end  = close + 1;
+      host_port = authority.substr(host_end);
+    } else {
+      const size_t colon = authority.find(':');
+      host_end = colon == std::string::npos ? authority.size() : colon;
+      out.host = authority.substr(0, host_end);
+      host_port = colon == std::string::npos ? std::string() : authority.substr(colon);
+    }
+    if (out.host.empty()) return false;
+
+    int port = out.scheme == "https" ? 443 : 80;
+    if (!host_port.empty()) {
+      if (host_port[0] != ':') return false;
+      const std::string digits = host_port.substr(1);
+      if (digits.empty() || digits.size() > 5) return false;
+      int v = 0;
+      for (size_t k = 0; k < digits.size(); ++k) {
+        if (digits[k] < '0' || digits[k] > '9') return false;
+        v = v * 10 + (digits[k] - '0');
+      }
+      if (v <= 0 || v > 65535) return false;
+      port = v;
+    }
+    out.port = port;
+
+    if (tail.empty()) tail = "/";
+    if (tail[0] == '?') tail.insert(tail.begin(), '/');
+    if (tail[0] != '/') return false;
+    out.path = redirect_normalize_path(tail);
+    return true;
+  }
+
+  // 相对引用：与当前请求的 URL 合并（RFC 3986 §5.2.2）。
+  if (!s.empty() && s[0] == '?') {
+    std::string base = cur_url;
+    const size_t q = base.find('?');
+    if (q != std::string::npos) base.erase(q);
+    if (base.empty()) base = "/";
+    out.path = redirect_normalize_path(base + s);
+    return true;
+  }
+  if (!s.empty() && s[0] == '/') {
+    out.path = redirect_normalize_path(s);
+    return true;
+  }
+  std::string base = cur_url;
+  const size_t q = base.find('?');
+  if (q != std::string::npos) base.erase(q);
+  const size_t slash = base.rfind('/');
+  if (slash == std::string::npos) {
+    base = "/";
+  } else {
+    base.erase(slash + 1);
+  }
+  if (base.empty() || base[0] != '/') base.insert(base.begin(), '/');
+  out.path = redirect_normalize_path(base + s);
+  return true;
+}
+
+/// `location` 指向的源是否就是这条连接当前的源（scheme + host + port）。
+bool redirect_same_origin(const redirect_target& t, const std::string& host,
+                          int port, bool tls) {
+  if (!t.has_authority) return true;
+  const std::string want_scheme = tls ? "https" : "http";
+  if (t.scheme != want_scheme) return false;
+  if (t.port != port) return false;
+  return redirect_lower(t.host) == redirect_lower(host);
+}
+
+/// 按 RFC 9110 §15.4 改写方法与 body。
+void redirect_rewrite_request(uvcpp_http_request& r, int status) {
+  // 307 / 308 明确要求保留方法与 body。
+  if (status == 307 || status == 308) return;
+  if (r.method == http_method::HTTP_HEAD) return;
+  // 303 一律 GET；301/302 上 POST 按历史行为改成 GET（RFC 允许）。
+  if (status != 303 && r.method != http_method::HTTP_POST) return;
+
+  r.method = http_method::HTTP_GET;
+  r.body.clear();
+  // 留着这些头而 body 是空的，服务端会一直等一个永远不来的 body。
+  r.remove_header("content-length");
+  r.remove_header("content-type");
+  r.remove_header("transfer-encoding");
+  r.remove_header("content-encoding");
+}
+
+}  // namespace
+
+void uvcpp_http_client::set_follow_redirects(bool enable, int max_hops) {
+  follow_redirects_  = enable;
+  max_redirect_hops_ = max_hops > 0 ? max_hops : 5;
+}
+
+int uvcpp_http_client::send_wait(const uvcpp_http_request& req,
+                                  uvcpp_http_response& resp,
+                                  int timeout_ms) {
+  redirect_count_ = 0;
+  last_redirect_location_.clear();
+  if (!follow_redirects_) return send_wait_once(req, resp, timeout_ms);
+
+  const int hops = max_redirect_hops_ > 0 ? max_redirect_hops_ : 5;
+#if UVCPP_OPENSSL_ENABLE
+  const bool cur_tls = is_ssl_enabled();
+#else
+  const bool cur_tls = false;
+#endif
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+
+  uvcpp_http_request cur = req;
+  for (;;) {
+    int remaining = timeout_ms;
+    if (timeout_ms > 0) {
+      const std::chrono::milliseconds left =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              deadline - std::chrono::steady_clock::now());
+      remaining = left.count() > 0 ? static_cast<int>(left.count()) : 0;
+      if (remaining <= 0) {
+        last_error_code_ = UV_ETIMEDOUT;
+        return UV_ETIMEDOUT;
+      }
+    }
+
+    const int rc = send_wait_once(cur, resp, remaining);
+    if (rc != 0) return rc;
+
+    const int sc = static_cast<int>(resp.status_code);
+    if (sc != 301 && sc != 302 && sc != 303 && sc != 307 && sc != 308) {
+      return 0;
+    }
+    const std::string loc = resp.get_header("location");
+    if (loc.empty()) return 0;  // 3xx 但没有 Location：交付给调用方
+
+    if (redirect_count_ >= hops) {
+      last_error_code_ = UV_ELOOP;
+      return UV_ELOOP;
+    }
+
+    redirect_target target;
+    if (!redirect_parse_location(loc, cur.url, cur_tls, target)) {
+      last_error_code_ = UV_EINVAL;
+      return UV_EINVAL;
+    }
+    if (!redirect_same_origin(target, host_, port_, cur_tls)) {
+      // 跨源：**停**，把这一条 3xx 原样交给调用方。见头文件里那段理由。
+      return 0;
+    }
+
+    last_redirect_location_ = loc;
+    ++redirect_count_;
+    cur.url = target.path;
+    redirect_rewrite_request(cur, sc);
+  }
 }
 
 // =========================================================================

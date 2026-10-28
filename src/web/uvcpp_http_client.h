@@ -182,7 +182,9 @@ class UVCPP_API uvcpp_http_client {
    *                   进入时算一次单调时钟 deadline，每次读写之前按剩余时间
    *                   收紧 `SO_RCVTIMEO`/`SO_SNDTIMEO`，到点返回 `UV_ETIMEDOUT`。
    *                   对端每隔略小于 `timeout_ms` 发一个字节也拖不过这个上限
-   *                   （1.8.2 之前它是每次 I/O 的超时）。
+   *                   （1.8.2 之前它是每次 I/O 的超时）。开了
+   *                   `set_follow_redirects()` 时它同样是**整条重定向链**的
+   *                   总预算，不是每一跳各算一份。
    * @return 0 on success, libuv error code on failure.
    */
   int send_wait(const uvcpp_http_request& req,
@@ -293,6 +295,53 @@ class UVCPP_API uvcpp_http_client {
 
   /** @brief Set Connection: keep-alive behaviour (default true). */
   void set_keep_alive(bool enable);
+
+  // -------------------------------------------------------------------
+  // Redirect following (opt-in)
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 跟随 3xx 重定向。**默认关**，而且只作用于**同步**的 `send_wait()`
+   *        （`get_wait()` / `post_wait()` 也走它）。
+   *
+   * 为什么默认关、为什么只有同步那条路：跟随重定向意味着**替调用方**改请求
+   * ——方法（POST → GET）、body、URL 都会被重写。那是一个策略决定，不是传输
+   * 细节；而异步 `send()` 的回调是"一次请求一次回调"的形状，中途换 URL 就得
+   * 在 llhttp 的 message-complete 回调里重入发送路径（解析器正在自己的回调
+   * 里，重置它不安全），所以异步那条腿不做，如实说明而不是半做。
+   *
+   * 规则（RFC 9110 §15.4）：
+   *  - 跟 `301` / `302` / `303` / `307` / `308`，且响应必须带 `location`；
+   *  - `303` 一律改 `GET`（`HEAD` 保持）；`301` / `302` 上 `POST` 改 `GET`
+   *    （浏览器与 curl 的历史行为，RFC 允许）；`307` / `308` **保留方法与
+   *    body**；
+   *  - 改 `GET` 时摘掉 `content-length` / `content-type` / `transfer-encoding`
+   *    / `content-encoding` 并清空 body —— 留着 CL 而 body 空，服务端会一直
+   *    等一个永远不来的 body；
+   *  - **只跟同源**（scheme + host + port 全同）的跳转。跨源直接**停**、把那条
+   *    3xx 原样交付给调用方（`redirect_count()` / `last_redirect_location()`
+   *    仍然可查）。不做自动换主机是**故意的**：跟随一个外部 `Location` 等于
+   *    让服务端把本客户端当成一次 SSRF 跳板，而那条连接上的 TLS/代理设置是
+   *    为原来的源配的。跨源请调用方自己决定（读 `location` 再换客户端）。
+   *  - 跳数上限 `max_hops`（默认 5）。超限返 `UV_ELOOP`，`resp` 里是**最后
+   *    一跳**的 3xx（不是错误页）。
+   *  - `Location` 里出现 CR/LF 一律 `UV_EINVAL`（它要进请求行，是注入面）。
+   *
+   * @param enable   true = 打开；false = 回到单次发送。
+   * @param max_hops 最多跟几跳；`<= 0` 当作默认的 5。只在 @p enable 为真时
+   *                 有意义。
+   */
+  void set_follow_redirects(bool enable, int max_hops = 5);
+  bool follow_redirects() const { return follow_redirects_; }
+  int max_redirect_hops() const { return max_redirect_hops_; }
+
+  /** @brief 上一次 `send_wait()` 实际跟了几跳（0 = 没跟 / 没开）。 */
+  int redirect_count() const { return redirect_count_; }
+
+  /** @brief 上一次 `send_wait()` 里最后一条 `location` 的原始值（没跟过时为空）。 */
+  const std::string& last_redirect_location() const {
+    return last_redirect_location_;
+  }
 
   // -------------------------------------------------------------------
   // Compression (UVCPP_ZLIB_ENABLE=1 only)
@@ -564,6 +613,17 @@ class UVCPP_API uvcpp_http_client {
   int status_ = HTTP_CLIENT_NONE;
   int last_error_code_ = 0;
   bool keep_alive_ = true;
+
+  /// 重定向跟随（`set_follow_redirects()`）。只作用于同步 `send_wait()`。
+  bool        follow_redirects_ = false;
+  int         max_redirect_hops_ = 5;
+  int         redirect_count_ = 0;
+  std::string last_redirect_location_;
+
+  /// `send_wait()` 的**单次**实现：一次请求、一条响应。重定向那条循环在
+  /// 外面（`send_wait()` 本身），所以这里保持"不跟随"的语义不变。
+  int send_wait_once(const uvcpp_http_request& req,
+                     uvcpp_http_response& resp, int timeout_ms);
 
   /// `add_close_observer()` 的句柄，0 表示没注册（那个 API 的保留值）。
   int close_observer_id_ = 0;
