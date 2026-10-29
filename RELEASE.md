@@ -19,6 +19,22 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.9.1 重点 (Highlights)
+
+`v1.9.0` 之后的一版：一条 WebSocket 崩溃修复 + 一个循环亲和的新入口。
+
+- **WebSocket 崩溃修复**：h3/h2 的 WS 会话在帧回调里被应用析构后，`on_data`
+  不再拿已析构的解析器解同一批数据里的下一帧；消息先换出再回调，`fail()` 先
+  收尾再叫 `on_error`。现场是 moLink relay 客户端收到一条错误帧就整条会话收摊。
+- **`uvcpp_udp_server` 支持外部循环**（[#59](https://github.com/Antruly/libuvcpp/issues/59)）：
+  `uvcpp_udp_server(uvcpp_loop*)`，不拥有循环、析构不关不删、`stop_loop()` 在
+  外部模式下是空操作 —— 可以在 `uvcpp_web_app` 所在循环上再收一个 UDP 端点的
+  数据面。
+- **文档**：五个 `set_ssl_context` 入口补上"上下文必须比持有者活得久"
+  （[#56](https://github.com/Antruly/libuvcpp/issues/56)）。
+
+**破坏性**：无。C ABI 版本仍是 `1`。
+
 ## v1.9.0 重点 (Highlights)
 
 `v1.8.10` 之后的开发线（`1.8.11`–`1.8.15` 折进本版）：**HTTP 一致性补课、h3 的
