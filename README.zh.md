@@ -26,12 +26,12 @@
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.9.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.0/libuvcpp-1.9.0-msvc-x64.zip) · 24.3 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.9.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.0/libuvcpp-1.9.0-msvc-arm64.zip) · 25.3 MB |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.9.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.0/libuvcpp-1.9.0-mingw-x64.zip) · 30.3 MB |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.9.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.0/libuvcpp-1.9.0-mingw-arm64.zip) · 23.0 MB |
-| Linux x64 | GCC | [libuvcpp-1.9.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.0/libuvcpp-1.9.0-linux-x64.zip) · 27.8 MB |
-| Linux arm64 | GCC | [libuvcpp-1.9.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.0/libuvcpp-1.9.0-linux-arm64.zip) · 28.0 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.9.1-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.1/libuvcpp-1.9.1-msvc-x64.zip) · 24.4 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.9.1-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.1/libuvcpp-1.9.1-msvc-arm64.zip) · 25.3 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.9.1-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.1/libuvcpp-1.9.1-mingw-x64.zip) · 30.3 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.9.1-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.1/libuvcpp-1.9.1-mingw-arm64.zip) · 23.0 MB |
+| Linux x64 | GCC | [libuvcpp-1.9.1-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.1/libuvcpp-1.9.1-linux-x64.zip) · 27.8 MB |
+| Linux arm64 | GCC | [libuvcpp-1.9.1-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.9.1/libuvcpp-1.9.1-linux-arm64.zip) · 28.0 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
