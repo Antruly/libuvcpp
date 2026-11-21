@@ -120,7 +120,7 @@ int main() {
 ```
 
 客户端侧要能连自签证书，必须**显式**关掉校验——这是有意的设计，让"关掉校验"在调用点
-看得见（`src/ssl/uvcpp_ssl_context.cpp:145-147`）：
+看得见（`src/ssl/uvcpp_ssl_context.cpp:147-149`）：
 
 ```cpp
 #include <memory>
@@ -145,16 +145,16 @@ std::unique_ptr<uvcpp::uvcpp_ssl_context> doc_make_loopback_client() {
 
 | 方法 | 返回 | 要点 |
 |---|---|---|
-| `load_certificate_file(path)` | `bool` | 内部用 `SSL_CTX_use_certificate_chain_file` —— **必须是链**，否则中间证书不发，只信根 CA 的客户端握手失败（`src/ssl/uvcpp_ssl_context.cpp:170-184`） |
+| `load_certificate_file(path)` | `bool` | 内部用 `SSL_CTX_use_certificate_chain_file` —— **必须是链**，否则中间证书不发，只信根 CA 的客户端握手失败（`src/ssl/uvcpp_ssl_context.cpp:172-186`） |
 | `load_private_key_file(path)` | `bool` | 见下面的**顺序陷阱** |
 | `load_certificate_data(pem)` | `bool` | 支持多证书 PEM：叶子 + 逐个 `extra_chain_cert` |
 | `load_private_key_data(pem)` | `bool` | 同样附带配对检查 |
 | `load_ca_file(path)` | `bool` | `SSL_CTX_load_verify_locations` |
-| `generate_self_signed(cn, bits = 2048)` | `bool` | 现场生成 RSA + 自签 X509，有效期 365 天 |
+| `generate_self_signed(cn, bits = 2048)` | `bool` | 现场生成 RSA + 自签 X509（CN + 同名 dNSName SAN），有效期 365 天 |
 | `check_private_key()` | `bool` | 显式配对检查 |
 
 **顺序陷阱：先装证书，再装私钥。** `load_private_key_file` / `load_private_key_data`
-**内部都会调 `SSL_CTX_check_private_key`**（`src/ssl/uvcpp_ssl_context.cpp:196-196`、`src/ssl/uvcpp_ssl_context.cpp:249-249`）。
+**内部都会调 `SSL_CTX_check_private_key`**（`src/ssl/uvcpp_ssl_context.cpp:197-197`、`src/ssl/uvcpp_ssl_context.cpp:250-250`）。
 OpenSSL 在"尚无证书"时该调用返回 0，于是**先装私钥会返回 `false`**——而私钥其实已经
 装进上下文了，属于"报了错但状态已改"——**补装证书之后不用重装私钥**。这个顺序头注释
 现在也写明了（`src/ssl/uvcpp_ssl_context.h:45-51`）。
@@ -212,7 +212,7 @@ enum class tls_verify_mode : uint8_t {
 **绕开 `uvcpp_tcp_client` / `uvcpp_http_client` 直接用 `uvcpp_ssl` 的调用方拿不到这层
 校验** —— 自动通路只覆盖那两个入口，得自己调 `uvcpp_ssl::set_verify_hostname()`。
 
-默认值（`src/ssl/uvcpp_ssl_context.cpp:144-162`）：
+默认值（`src/ssl/uvcpp_ssl_context.cpp:146-164`）：
 
 | 模式 | 默认 |
 |---|---|
@@ -259,7 +259,7 @@ bool has_alpn_select() const;
 ```
 
 **这里有一个反过来的返回值约定：`SSL_CTX_set_alpn_protos` 成功返回 0**，与 OpenSSL
-大多数接口相反（`src/ssl/uvcpp_ssl_context.cpp:571-571` 专门写了注释）。本库的包装把它
+大多数接口相反（`src/ssl/uvcpp_ssl_context.cpp:643-643` 专门写了注释）。本库的包装把它
 翻正成 `bool`，但如果绕到 `raw_ctx()` 自己调，记住这条。
 
 其他要点：
@@ -362,11 +362,11 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
 
 **`uvcpp_ssl_context ctx;` 编得过、链接不过。** `UVCPP_DEFINE_FUNC` 会声明一个默认
 构造函数，但 `.cpp` 里**从未定义它**——唯一定义的是
-`uvcpp_ssl_context(tls_mode, tls_version)`（`src/ssl/uvcpp_ssl_context.cpp:54`）。
+`uvcpp_ssl_context(tls_mode, tls_version)`（`src/ssl/uvcpp_ssl_context.cpp:56-56`）。
 必须传 `tls_mode`。`uvcpp_ssl` 同理。
 
 **`is_ready()` 不反映证书装载失败。** `status_` **只在构造时**赋值
-（`src/ssl/uvcpp_ssl_context.cpp:78,80,85,87`），之后任何 `load_*` 失败都**不改**它。而
+（`src/ssl/uvcpp_ssl_context.cpp:79,81,86,88`），之后任何 `load_*` 失败都**不改**它。而
 `uvcpp_tcp_client::enable_tls()` 恰好只查 `ctx->is_ready()`
 （`src/net/uvcpp_tcp_client.cpp:3461-3461`）——所以**必须看各 `load_*` 的返回值**，
 不能只看 `is_ready()`。
@@ -395,8 +395,8 @@ read/write(): > 0 = 处理的字节数，0 = 需要更多 I/O，< 0 = 真出错
   在 `uvcpp_tcp_client` / `uvcpp_http_client` 上生效，见 §5；服务端上没有可校验的
   名字，仍是 `PEER`；直接用 `uvcpp_ssl` 的调用方要自己调
   `uvcpp_ssl::set_verify_hostname()`。**正向的数字 IP 用例未覆盖** ——
-  `generate_self_signed()` 只产 CN、不产 `subjectAltName`，造不出带 `iPAddress` SAN
-  的证书；反向（无 IP SAN 的证书连 IP 必须失败）已覆盖。
+  `generate_self_signed()` 给 DNS 名写同名的 `dNSName` SAN，但不产 `iPAddress`
+  SAN，造不出带 IP SAN 的证书；反向（无 IP SAN 的证书连 IP 必须失败）已覆盖。
 - **SNI：客户端会发，服务端不读。** `uvcpp_ssl::set_server_name()` 走
   `SSL_set_tlsext_host_name`，`uvcpp_tcp_client` 在连接目标非数字地址时会用它；
   **服务端没有 SNI 回调**，不能按 SNI 选证书 —— 一个 IP 上挂多张证书的虚拟主机式

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file tests/functional/web_ssl_hostname_func.cpp
  * @brief `PEER_STRICT` 的主机名校验（真握手、真证书、两条连接顺序都覆盖）。
  *
@@ -35,10 +35,10 @@
  * 谁先谁后都合法。只测 `enable_tls → connect` 的话，`enable_tls()` 里那句补装
  * 拿掉也照样全绿。
  *
- * 第 2 行是**反向**的 IP 用例：`generate_self_signed()` 只产 CN、不产任何扩展
- * （没有 `subjectAltName`），所以数字 IP 一定对不上 —— 正向的 IP 用例（证书带
- * `iPAddress` SAN、连接名写 IP、期望成功）需要一张本库造不出来的证书，**未覆盖**，
- * 不为它去扩 `generate_self_signed` 的公开签名。
+ * 第 2 行是**反向**的 IP 用例：`generate_self_signed()` 给 DNS 名写 `dNSName`
+ * SAN，但**不产 `iPAddress` SAN**（`cn` 参数没有"这是 IP"的信息，1.9.2 起它
+ * 只对 DNS 名加 SAN）—— 所以数字 IP 一定对不上。正向的 IP 用例（证书带
+ * `iPAddress` SAN、连接名写 IP、期望成功）需要一张本库造不出来的证书，**未覆盖**。
  */
 #include <atomic>
 #include <cstdio>
@@ -205,9 +205,9 @@ struct server_state {
 /**
  * @brief 起一台 TLS 服务端，跑 \p body，然后收掉。
  *
- * 服务端的证书用 `generate_self_signed(cn)` 现造 —— 只有 CN、没有任何扩展。
- * 这一点对上面的表很关键：没有 `subjectAltName` 时 OpenSSL 才回落到 CN 比对
- * （有 dNSName SAN 的话 CN 直接被忽略）。
+ * 服务端的证书用 `generate_self_signed(cn)` 现造 —— CN + 同名 `dNSName` SAN。
+ * **必须带 SAN**：OpenSSL 4.1 起主机名校验不再回落到 CN，只带 CN 的证书在
+ * `PEER_STRICT` 下连 `localhost` 都握不上（4.1 的 runner 上实测）。
  */
 void with_server(const char* cn, const char* cert_path,
                  const std::function<void(int port, const char* cert_path)>& body) {

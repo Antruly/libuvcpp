@@ -14,6 +14,7 @@
 #include <openssl/x509.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/x509v3.h>
 #include <cstring>
 #include <mutex>
 
@@ -276,6 +277,41 @@ bool uvcpp_ssl_context::generate_self_signed(const std::string& cn, int bits) {
   X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                               reinterpret_cast<const unsigned char*>(cn.c_str()), -1, -1, 0);
   X509_set_issuer_name(x509, name);
+
+  // **`subjectAltName` 必须一起写。** OpenSSL 4.1 起主机名校验不再回落到
+  // subject CN（RFC 6125 §6.4.4 的方向），只带 CN 的证书在 `PEER_STRICT` 下
+  // 连 `localhost` 都握不上 —— 4.1 的 CI runner 上是实测。把 CN 同时写进
+  // `dNSName` 后，`generate_self_signed(host)` 生成的证书在现代 OpenSSL 上
+  // 仍能按主机名校验通过；旧版 OpenSSL 也照常匹配（SAN 优先于 CN）。
+  //
+  // 只对"看起来像 DNS 名"的 CN 加 SAN：纯数字/点分（IPv4 字面量）与带 `:`
+  // （IPv6）不加 —— dNSName 装 IP 是错语义，而 `iPAddress` SAN 是另一件事
+  // （本函数的 `cn` 参数没有"这是 IP"的信息，不能替调用方猜）。
+  bool san_ok = !cn.empty();
+  bool all_numeric = true;
+  for (size_t i = 0; i < cn.size() && san_ok; ++i) {
+    const unsigned char ch = static_cast<unsigned char>(cn[i]);
+    const bool digit = ch >= '0' && ch <= '9';
+    const bool alpha = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+    if (!digit) all_numeric = false;
+    if (!digit && !alpha && ch != '-' && ch != '_' && ch != '.') {
+      san_ok = false;
+    }
+  }
+  if (all_numeric) san_ok = false;  // IPv4 字面量
+  if (san_ok) {
+    X509V3_CTX v3;
+    X509V3_set_ctx_nodb(&v3);
+    X509V3_set_ctx(&v3, x509, x509, nullptr, nullptr, 0);
+    const std::string spec = "DNS:" + cn;
+    X509_EXTENSION* ext = X509V3_EXT_conf_nid(
+        nullptr, &v3, NID_subject_alt_name, spec.c_str());
+    if (ext != nullptr) {
+      X509_add_ext(x509, ext, -1);
+      X509_EXTENSION_free(ext);
+    }
+  }
+
   if (X509_sign(x509, pkey, EVP_sha256()) == 0) {
     clear_error(); X509_free(x509); EVP_PKEY_free(pkey); return false;
   }
