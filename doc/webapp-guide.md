@@ -41,6 +41,7 @@
 18. [已知限制](#18-已知限制)
 19. [横向扩展：多循环（`set_loops`）](#19-横向扩展多循环set_loops)
 20. [可观测性：`/health` / `/ready` / `/metrics`](#20-可观测性health--ready--metrics)
+21. [WebSocket 房间与广播](#21-websocket-房间与广播)
 
 ---
 
@@ -1565,6 +1566,38 @@ reg.register_gauge("db_pool_in_use", "Borrowed connections",
   {{"route", "/user/:id"}})`。
 - 不 `install()` 就零成本：没有后台线程、没有定时器、没有全局单例。
   用例：`web_app_metrics_func.cpp`。
+
+---
+
+## 21. WebSocket 房间与广播
+
+`uvcpp_ws_rooms`（`#include <webapp/uvcpp_ws_rooms.h>`）把三件事收在一起：
+`join/leave`、按房间群发、慢客户端策略。
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_ws_rooms rooms;   // 活得比所有会话久（归 app 所有）
+
+app.websocket("/chat/:room", [&](uvcpp::uvcpp_web_ws_request& ws_req) {
+  uvcpp::uvcpp_ws_connection* c = ws_req.connection();
+  rooms.join(c, *ws_req.param("room"));
+});
+
+// 从别的线程（例如定时任务）广播：用 app.post() 投回循环线程
+rooms.broadcast_text("lobby", msg.data(), msg.size());
+```
+
+- **断线自动退订**：`join()` 会给会话挂一个终结观察者
+  （`uvcpp_ws_connection::add_close_observer()`），对端 Close、异常断开、
+  协议错误、本端 `close()`、服务器停机 —— 任何一条终结路径都会把它从所有
+  房间摘掉。业务不需要再手写"on_close 清理"。
+- **慢客户端**：单条连接发送积压 > `uvcpp_ws_broadcast_options::max_queue_bytes`
+  （默认 1 MiB）时，按 `policy` 处理：`DROP`（跳过这一条，默认）或
+  `CLOSE`（1001 关掉）。广播返回值 + `stats()` 里的 `dropped` / `closed_slow`
+  如实记账；一条不读数据的连接拖不慢整场广播。
+- **只在 app 的循环线程上调用**（房间表没有锁）；跨线程用 `app.post()`。
+- 只接 **h1** 会话；跨进程（Redis pub/sub）见 issue #74。用例：
+  `web_app_ws_rooms_func.cpp`。
 
 ---
 

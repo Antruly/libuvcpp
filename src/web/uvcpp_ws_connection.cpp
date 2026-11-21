@@ -1,4 +1,4 @@
-#include <web/uvcpp_ws_connection.h>
+﻿#include <web/uvcpp_ws_connection.h>
 
 #include <random>
 #if UVCPP_WEB_ENABLE
@@ -134,6 +134,17 @@ void uvcpp_ws_connection::notify_retired() {
 
   // 队列里的帧发不出去了，逐条结算 —— 不结算调用方会永远等下去。
   if (!send_q_.empty()) fail_pending_sends(-1);
+
+  // 终结观察者：在属主回收**之前**跑，且必须是本对象还能安全访问的最后一段
+  // 里的一步（回调里可能把本对象从房间表里摘掉，但不该再调本类别的发送方法）。
+  if (!close_observers_.empty()) {
+    std::map<int, std::function<void()>> obs;
+    obs.swap(close_observers_);
+    for (std::map<int, std::function<void()>>::iterator it = obs.begin();
+         it != obs.end(); ++it) {
+      if (it->second) it->second();
+    }
+  }
 
   // 上报属主。回调返回之后本对象随时可能被 delete，所以这必须是最后一步，
   // 并且先把回调搬出来（属主的 delete 会销毁 retire_fn_ 自己）。
@@ -705,6 +716,26 @@ void uvcpp_ws_connection::on_ping(std::function<void(const uint8_t*, size_t)> cb
 void uvcpp_ws_connection::on_pong(std::function<void(const uint8_t*, size_t)> cb) { on_pong_ = std::move(cb); }
 void uvcpp_ws_connection::on_close(std::function<void(ws_close_code, const std::string&)> cb) { on_close_ = std::move(cb); }
 void uvcpp_ws_connection::on_error(std::function<void(int, const std::string&)> cb) { on_error_ = std::move(cb); }
+
+int uvcpp_ws_connection::add_close_observer(std::function<void()> cb) {
+  if (!cb) return 0;
+  const int id = close_observer_next_id_++;
+  close_observers_[id] = std::move(cb);
+  return id;
+}
+
+void uvcpp_ws_connection::remove_close_observer(int id) {
+  close_observers_.erase(id);
+}
+
+size_t uvcpp_ws_connection::pending_send_bytes() const {
+  size_t n = 0;
+  for (std::deque<pending_send>::const_iterator it = send_q_.begin();
+       it != send_q_.end(); ++it) {
+    n += it->bytes.size();
+  }
+  return n;
+}
 
 void uvcpp_ws_connection::on_frame(std::function<void(const uvcpp_ws_frame&)> cb) {
   on_frame_ = std::move(cb);

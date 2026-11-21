@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <uvcpp/uvcpp_define.h>
@@ -199,6 +200,29 @@ class UVCPP_API uvcpp_ws_connection {
    * 回调专门用来回答"对端是怎么走的"。
    */
   void on_close(std::function<void(ws_close_code, const std::string&)> cb);
+
+  /**
+   * @brief 追加一个「会话终结」观察者。**可叠加**，与 `on_close` 不同。
+   *
+   * `on_close` 只有一个槽，而且只在**对端**走人时报告；本方法在任何一条终结
+   * 路径上（对端 Close、异常断开、本端 `close()`、协议错误、属主 `terminate()`）
+   * 都**恰好触发一次**。房间订阅表这类"必须精确摘除"的簿记靠它。
+   *
+   * 回调在终结那一刻**同步**跑；返回之后不要再碰会话（它可能被回收）。
+   *
+   * @return 观察者 id（`remove_close_observer()` 用）；0 = 无效参数。
+   */
+  int add_close_observer(std::function<void()> cb);
+
+  /// 摘掉一个观察者。会话已经终结时是空操作。
+  void remove_close_observer(int id);
+
+  /**
+   * @brief 发送队列里**还没写完**的字节数（含已在途的那一批）。
+   *
+   * 广播的"慢客户端"策略用它判定——本层没有别的公开积压指标。
+   */
+  size_t pending_send_bytes() const;
 
   /**
    * @brief 协议错误回调：`on_error(close_code, reason)`。
@@ -370,6 +394,10 @@ class UVCPP_API uvcpp_ws_connection {
   /// 是否已经通过 on_close_ 告诉过调用方"会话结束"。保证它最多跑一次。
   bool close_notified_ = false;
   retire_fn retire_fn_;
+
+  /// 会话终结观察者；id → 回调。见 `add_close_observer()`。
+  std::map<int, std::function<void()>> close_observers_;
+  int close_observer_next_id_ = 1;
 
   /**
    * @brief 存活令牌（与 `uvcpp_tcp_client::alive_token_` 同一个手法）。
