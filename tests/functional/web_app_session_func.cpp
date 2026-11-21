@@ -13,6 +13,7 @@
  * 7. 内存 store：save/load/destroy/size 与"按最早过期逐出"的上限。
  */
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -94,8 +95,11 @@ reply call(int port, const std::string& path, bool post,
   out.status = static_cast<int>(resp.status_code);
   out.body   = resp.body.to_string();
   for (size_t i = 0; i < resp.headers.size(); ++i) {
-    if (resp.headers[i].name.size() == 10 &&
-        strcasecmp(resp.headers[i].name.c_str(), "set-cookie") == 0) {
+    std::string key = resp.headers[i].name;
+    for (size_t k = 0; k < key.size(); ++k) {
+      key[k] = static_cast<char>(std::tolower(static_cast<unsigned char>(key[k])));
+    }
+    if (key == "set-cookie") {
       out.set_cookies.push_back(resp.headers[i].value);
     }
   }
