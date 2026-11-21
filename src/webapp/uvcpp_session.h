@@ -68,6 +68,22 @@ namespace uvcpp {
 
 class uvcpp_web_request;
 class uvcpp_web_response;
+class uvcpp_session;
+class uvcpp_session_store;
+struct uvcpp_session_options;
+
+// **这两条前置声明必须带 `UVCPP_API`，并且必须排在类里的 friend 声明之前。**
+// MSVC 只认"第一条声明"的 DLL 链接属性：先出现不带属性的 friend、后出现带
+// 属性的命名空间级声明会报 C2375（redefinition; different linkage），
+// 而把属性直接写在 friend 上又会撞 C2487。GCC/clang 对属性位置不敏感，
+// 所以本机看不到。
+UVCPP_API uvcpp_web_middleware uvcpp_session_middleware(
+    std::shared_ptr<uvcpp_session_store> store,
+    const uvcpp_session_options&         opts);
+UVCPP_API void uvcpp_session_logout(uvcpp_web_request& req,
+                                    uvcpp_web_response& resp,
+                                    uvcpp_session_store& store,
+                                    const uvcpp_session_options& opts);
 
 /**
  * @brief 一份会话数据。**不是**线程安全的；只在 loop 线程上用。
@@ -106,11 +122,12 @@ class UVCPP_API uvcpp_session {
  private:
   friend class uvcpp_memory_session_store;
   friend uvcpp_web_middleware uvcpp_session_middleware(
-      std::shared_ptr<class uvcpp_session_store> store,
-      const struct uvcpp_session_options& opts);
-  friend void uvcpp_session_logout(uvcpp_web_request&, uvcpp_web_response&,
-                                   class uvcpp_session_store&,
-                                   const struct uvcpp_session_options&);
+      std::shared_ptr<uvcpp_session_store> store,
+      const uvcpp_session_options&         opts);
+  friend void uvcpp_session_logout(uvcpp_web_request& req,
+                                   uvcpp_web_response& resp,
+                                   uvcpp_session_store& store,
+                                   const uvcpp_session_options& opts);
 
   std::string                        id_;
   std::map<std::string, std::string> data_;
