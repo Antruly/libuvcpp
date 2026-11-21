@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 project(uvcpp LANGUAGES C CXX)
 
 # Force-include the compatibility shims into every C++ translation unit of
@@ -507,6 +507,19 @@ if(UVCPP_BUILD_WEB)
         set(CMAKE_SKIP_INSTALL_RULES TRUE)
         add_subdirectory(${zlib_SOURCE_DIR} ${zlib_BINARY_DIR} EXCLUDE_FROM_ALL)
         set(CMAKE_SKIP_INSTALL_RULES FALSE)
+        # CMake 4.5 的 FindOpenSSL 会给 `OpenSSL::Crypto` / `OpenSSL::SSL` 的
+        # link interface 挂 `ZLIB::ZLIB`（系统 OpenSSL 本身依赖 zlib）。取源码
+        # 那条支路只建了 `zlib` / `zlibstatic`，没有 `ZLIB::ZLIB` —— 于是配置期
+        # 直接报 "The link interface of target OpenSSL::Crypto contains
+        # ZLIB::ZLIB but the target was not found"。补一个别名，让两条支路
+        # 对 OpenSSL 是同一个形状。
+        if(NOT TARGET ZLIB::ZLIB)
+          if(TARGET zlibstatic)
+            add_library(ZLIB::ZLIB ALIAS zlibstatic)
+          elseif(TARGET zlib)
+            add_library(ZLIB::ZLIB ALIAS zlib)
+          endif()
+        endif()
       endif()
       # 给下面的 install 规则用：这条支路取过源码 ⇒ 头得由我们随包发出去。
       # **不能用 `DEFINED zlib_SOURCE_DIR` 当开关** —— 那是 FetchContent 写进
@@ -679,6 +692,13 @@ endif()
 # 引用它，改本文件时**必须逐个按内容重校**（`check_doc_lines.py` 只锁 `src/`
 # 下的引用，这一类它一条都不判；实测已烂过一轮：2026-09-29 修正 39 处，其中 34 处早于 QUIC）。
 if(UVCPP_ENABLE_OPENSSL)
+  # CMake 4.5 的 FindOpenSSL 会引用 `ZLIB::ZLIB`（见上面 zlib 那段）。
+  # web 关掉、只开 QUIC 的树上 zlib 块根本没跑，这里补一次查找；找不到也
+  # 不报 —— 下面 OpenSSL 若真引用它，CMake 自己会把错报在 find_package 上。
+  if(NOT TARGET ZLIB::ZLIB)
+    find_package(ZLIB QUIET)
+  endif()
+
   # Try system OpenSSL first, then FetchContent as fallback
   find_package(OpenSSL QUIET)
   if(OPENSSL_FOUND)
@@ -2556,7 +2576,7 @@ if(UVCPP_BUILD_SHARED)
   target_link_libraries(uvcpp PRIVATE ${LIBUV_LIB})
   if (WIN32)
     target_compile_definitions(uvcpp PRIVATE UVCPP_EXPORTS)
-    target_link_libraries(uvcpp PRIVATE ws2_32 iphlpapi psapi userenv)
+    target_link_libraries(uvcpp PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
   endif()
   # 系统 libuv 那棵树（发行版包的 `.deb`/`.rpm`）**必须**把 libuv 放进导出的
   # link interface：公开头里有 `<uv.h>`，使用者也常直接调 `uv_*`，光靠 `.so` 的
@@ -2584,7 +2604,7 @@ if(UVCPP_BUILD_SHARED)
     target_link_libraries(uvcpp_s PRIVATE ${LIBUV_LIB})
     if (WIN32)
       target_compile_definitions(uvcpp_s PRIVATE UVCPP_EXPORTS)
-      target_link_libraries(uvcpp_s PRIVATE ws2_32 iphlpapi psapi userenv)
+      target_link_libraries(uvcpp_s PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
     endif()
   endif()
 endif()
@@ -2594,13 +2614,13 @@ if(UVCPP_BUILD_STATIC)
   add_library(uvcpp_a STATIC ${UVCPP_SOURCES} ${UVCPP_HEADERS})
   target_link_libraries(uvcpp_a PRIVATE ${LIBUV_LIB})
   if (WIN32)
-    target_link_libraries(uvcpp_a PRIVATE ws2_32 iphlpapi psapi userenv)
+    target_link_libraries(uvcpp_a PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
   endif()
   if (UVCPP_BUILD_LIBUV_FROM_SOURCE)
     add_library(uvcpp_a_s STATIC ${UVCPP_SOURCES} ${UVCPP_HEADERS})
     target_link_libraries(uvcpp_a_s PRIVATE ${LIBUV_LIB})
     if (WIN32)
-      target_link_libraries(uvcpp_a_s PRIVATE ws2_32 iphlpapi psapi userenv)
+      target_link_libraries(uvcpp_a_s PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
     endif()
   endif()
 endif()

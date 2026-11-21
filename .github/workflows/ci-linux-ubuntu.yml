@@ -12,6 +12,12 @@ name: CI · Linux · Ubuntu
 # 不设 `concurrency:`：取消一次正在跑的 run 等于**丢一组门禁**，而门禁是这个
 # 文件唯一的产品。
 #
+# **runner 钉 `ubuntu-24.04`，不用 `ubuntu-latest`。** 2026-11 `ubuntu-latest`
+# 已经漂到 26.04：镜像里的 CMake 是 4.5（FindOpenSSL 会给 OpenSSL::Crypto 的
+# link interface 挂 `ZLIB::ZLIB`），而 `libmongoc-dev` 也不再随镜像提供 ——
+# 两件事都会让 db-servers / config-contract 在"与我们无关"的地方变红。钉版本
+# 是让这组门禁可复现的唯一办法；升级镜像时改这一处、并重跑一次全矩阵。
+#
 # 布局规范（含**未覆盖的格**和为什么）在 doc/ci-guide.md §1。改这个文件之前先看它。
 # 注意四个文件必须**平铺**在 `.github/workflows/` 下：`check_doc_lines.py` 的
 # `SCRIPT_GLOBS` 是 `.github/workflows/*.yml`（没有 `**`），挪进子目录会让
@@ -28,7 +34,7 @@ jobs:
     # 不给 `name` 的话 GitHub 会把整个 matrix（含 flags 数组）拼进 check 名，
     # 又长又会随任何一行开关变化 —— 而分支保护里记的是这个名字。
     name: CI · Linux · Ubuntu / ${{ matrix.feature }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -104,7 +110,7 @@ jobs:
           # 模块关掉时它们被 `tests/functional/CMakeLists.txt` 的 glob+FILTER 摘掉，
           # 而 ctest 报 "100% tests passed" 时并不会说"少了几条"。
           #
-          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:2021`），
+          # **不需要任何新包**：pugixml 走 FetchContent（`CMakeLists.txt:2041`），
           # 装包表与 `web` 那一格逐字相同 —— 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
           - feature: wsdl
@@ -139,7 +145,7 @@ jobs:
           # nlohmann 那侧照编照跑（`web_app_request_func` 里深度预扫描的五条断言
           # 也在），yyjson 那侧的新用例才拿得到对照物。
           #
-          # **不需要任何新包**：yyjson 走 FetchContent（`CMakeLists.txt:2081`，
+          # **不需要任何新包**：yyjson 走 FetchContent（`CMakeLists.txt:2101`，
           # `GIT_TAG` 钉在 `YYJSON_VERSION`），装包表与 `web` 那一格逐字相同 ——
           # 这样两边红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -1019,7 +1025,7 @@ jobs:
   # ---------------------------------------------------------------------------
   db-servers:
     name: CI · Linux · Ubuntu / db-servers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     services:
       # MySQL 8 保持**默认认证插件**（`caching_sha2_password`），不传
@@ -1276,7 +1282,7 @@ jobs:
   # ---------------------------------------------------------------------------
   config-contract:
     name: CI · Linux · Ubuntu / config-contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     # 脚本打印中文。python 写管道时按 locale 选编码（ubuntu 的 C locale 是
     # ASCII）⇒ 在 print 那行 UnicodeEncodeError，看着像脚本 bug。显式钉成 UTF-8。
