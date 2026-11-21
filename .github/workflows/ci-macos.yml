@@ -60,7 +60,7 @@ jobs:
           # 与 wsdl 不同：macOS **没有** wsdl 格（§1 的"未覆盖的格"表里那一行写的
           # 是"不发版、风险低"），而 yyjson 这一格加得起 —— 它不需要任何新包。
           #
-          # yyjson 走 FetchContent（根 `CMakeLists.txt:2081`，`GIT_TAG` 钉在
+          # yyjson 走 FetchContent（根 `CMakeLists.txt:2101`，`GIT_TAG` 钉在
           # `YYJSON_VERSION`），**不需要新包**；装包表与 `web` 逐字相同 —— 这样两边
           # 红绿不同只可能归因到那个开关。
           # 四个门禁串见 doc/ci-guide.md §5。
@@ -111,6 +111,10 @@ jobs:
               - -DUVCPP_BUILD_WEBAPP=ON
               - -DUVCPP_ENABLE_OPENSSL=ON
               - -DUVCPP_ENABLE_ZLIB=ON
+            # Homebrew 的 `openssl` 别名已经指向 4.x；这棵树只认 3.x 的行为
+            # （hostname 校验、ngtcp2 的 QUIC 钩子都在 4.x 上变过）。显式钉
+            # openssl@3，并把 keg-only 的 root 交给 find_package。
+            openssl_root: $(brew --prefix openssl@3)
 
           # h2：门禁的四个串见 doc/ci-guide.md §5。
           # ★ 批 3a（1.4.3）给这一格加了一行 `-DUVCPP_ENABLE_CAPI=ON`：h2 是
@@ -129,6 +133,7 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_ENABLE_NGHTTP2=ON
               - -DUVCPP_ENABLE_CAPI=ON
+            openssl_root: $(brew --prefix openssl@3)
             gate_name: nghttp2
             gate_switch: 'UVCPP_ENABLE_NGHTTP2:BOOL=ON'
             gate_integrated: nghttp2 integrated
@@ -153,6 +158,7 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_BUILD_EXPAND=ON
               - -DUVCPP_ENABLE_CAPI=ON
+            openssl_root: $(brew --prefix openssl@3)
 
           # quic（1.4.1 新增的腿）：和 ubuntu 那条腿的区别**只有 OpenSSL 的来源**。
           # ubuntu 让 ssl 那一格各自装 `libssl-dev`（3.0.13，两个 QUIC 符号都没有），
@@ -275,8 +281,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 装包**按格**：`openssl@3` 只给 quic / http3 那两格显式点名（别的格用
-      # `openssl`，它今天就是 openssl@3 的别名，但那两格不需要钉 root）。
+      # 装包**按格**：所有带 TLS 的格都显式用 `openssl@3`（Homebrew 的
+      # `openssl` 别名已经指向 4.x，而本树只支持 3.x 的行为），并把 keg-only 的
+      # root 交给 find_package。
       # `capi` 与 `web` 同一份 —— C 层不加任何外部依赖。
       # `db` 与 `basic-*` 同一份 —— SQLite 在 macOS 上来自 SDK（理由写在矩阵里
       # 那一格的注释里），Homebrew 的 `sqlite` 是 keg-only，装了反而要钉 root。
@@ -290,7 +297,7 @@ jobs:
             # 包 —— 装了就走系统那条支路，而这一格要量的正是取源码那条
             # （FetchContent，见矩阵里那一格的注释）。
             web|capi|yyjson|brotli)    brew install libuv zlib ninja ;;
-            ssl|h2|full)               brew install libuv openssl zlib ninja ;;
+            ssl|h2|full)               brew install libuv zlib ninja openssl@3 ;;
             quic|http3)                brew install libuv zlib ninja openssl@3 ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac

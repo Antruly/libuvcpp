@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 
 project(uvcpp_functional_tests)
 
@@ -206,7 +206,10 @@ foreach(test_src ${FUNC_SOURCES})
       # OpenSSL 恰好是静态的，于是「换个没传该开关的新树」就 6 个用例 LNK2019×72，
       # 报错还落在 libcrypto 内部。这里自己挂上，别让一个没人写进文档的 -D
       # 成为「测试编不编得出来」的隐藏前提。
-      target_link_libraries(${exe_name} PRIVATE crypt32)
+      # 顺序同根 CMakeLists：MSYS2 的静态 libcrypto 现在引用
+      # `BCryptGenRandom`，GNU ld 对静态归档"后满足前"，所以 `bcrypt` 必须排在
+      # `${UVCPP_SSL_LIBS}` 之后 —— 这一句已经在它们后面。
+      target_link_libraries(${exe_name} PRIVATE bcrypt crypt32)
     endif()
   endif()
   # ⚠️ 想在这棵树下写**白盒**功能用例（include `src/quic/*.h` 那种私有头）的话，

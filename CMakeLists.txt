@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 project(uvcpp LANGUAGES C CXX)
 
 # Force-include the compatibility shims into every C++ translation unit of
@@ -507,6 +507,19 @@ if(UVCPP_BUILD_WEB)
         set(CMAKE_SKIP_INSTALL_RULES TRUE)
         add_subdirectory(${zlib_SOURCE_DIR} ${zlib_BINARY_DIR} EXCLUDE_FROM_ALL)
         set(CMAKE_SKIP_INSTALL_RULES FALSE)
+        # CMake 4.5 的 FindOpenSSL 会给 `OpenSSL::Crypto` / `OpenSSL::SSL` 的
+        # link interface 挂 `ZLIB::ZLIB`（系统 OpenSSL 本身依赖 zlib）。取源码
+        # 那条支路只建了 `zlib` / `zlibstatic`，没有 `ZLIB::ZLIB` —— 于是配置期
+        # 直接报 "The link interface of target OpenSSL::Crypto contains
+        # ZLIB::ZLIB but the target was not found"。补一个别名，让两条支路
+        # 对 OpenSSL 是同一个形状。
+        if(NOT TARGET ZLIB::ZLIB)
+          if(TARGET zlibstatic)
+            add_library(ZLIB::ZLIB ALIAS zlibstatic)
+          elseif(TARGET zlib)
+            add_library(ZLIB::ZLIB ALIAS zlib)
+          endif()
+        endif()
       endif()
       # 给下面的 install 规则用：这条支路取过源码 ⇒ 头得由我们随包发出去。
       # **不能用 `DEFINED zlib_SOURCE_DIR` 当开关** —— 那是 FetchContent 写进
@@ -679,6 +692,13 @@ endif()
 # 引用它，改本文件时**必须逐个按内容重校**（`check_doc_lines.py` 只锁 `src/`
 # 下的引用，这一类它一条都不判；实测已烂过一轮：2026-09-29 修正 39 处，其中 34 处早于 QUIC）。
 if(UVCPP_ENABLE_OPENSSL)
+  # CMake 4.5 的 FindOpenSSL 会引用 `ZLIB::ZLIB`（见上面 zlib 那段）。
+  # web 关掉、只开 QUIC 的树上 zlib 块根本没跑，这里补一次查找；找不到也
+  # 不报 —— 下面 OpenSSL 若真引用它，CMake 自己会把错报在 find_package 上。
+  if(NOT TARGET ZLIB::ZLIB)
+    find_package(ZLIB QUIET)
+  endif()
+
   # Try system OpenSSL first, then FetchContent as fallback
   find_package(OpenSSL QUIET)
   if(OPENSSL_FOUND)
@@ -2681,7 +2701,9 @@ endif()
 if(UVCPP_ENABLE_HTTP3)
   foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
     if(TARGET ${_tgt})
-      target_include_directories(${_tgt} PRIVATE
+      # **BEFORE**：runner 镜像的 `/opt/homebrew/include` 里可能也有一份
+      # nghttp3 头；让我们的源码树那一份永远排在最前。
+      target_include_directories(${_tgt} BEFORE PRIVATE
         "${_uvcpp_nghttp3_src}/lib/includes"
         "${_uvcpp_nghttp3_bin}/lib/includes")
     endif()
@@ -3149,7 +3171,11 @@ if(UVCPP_ENABLE_OPENSSL)
     if(TARGET ${_tgt})
       target_link_libraries(${_tgt} PRIVATE ${UVCPP_SSL_LIBS})
       if(WIN32)
-        target_link_libraries(${_tgt} PRIVATE crypt32 user32 advapi32)
+        # **顺序承重**：静态 libcrypto 现在引用 `BCryptGenRandom`（MSYS2 的
+        # OpenSSL 3.6 起）。GNU ld 对静态归档是"从左到右、后满足前"，所以
+        # `-lbcrypt` 必须排在 libcrypto **之后** —— 写在上面的 ws2_32 那一组
+        # 里（那些在 SSL 之前展开）会留下未定义符号。MSVC 不敏感，同一行照挂。
+        target_link_libraries(${_tgt} PRIVATE bcrypt crypt32 user32 advapi32)
       endif()
     endif()
   endforeach()
@@ -3205,6 +3231,19 @@ if(UVCPP_ENABLE_QUIC)
       target_link_libraries(${_tgt} PRIVATE
         $<BUILD_INTERFACE:ngtcp2_static>
         $<BUILD_INTERFACE:ngtcp2_crypto_ossl_static>)
+      # **头必须来自我们编的那份 ngtcp2。** runner 镜像（macOS 26 起）自带的
+      # Homebrew 包把它自己的 `ngtcp2/ngtcp2.h` 放在 `/opt/homebrew/include`；
+      # 那份头与 FetchContent 编出来的静态库版本一旦不同，`ngtcp2_settings`
+      # 的布局就对不上 —— 运行期表现是每一格 QUIC 用例在
+      # `ngtcp2_settingslen_version: Unreachable.` 上 abort。把源码树那份头
+      # **前置**，压过镜像里的那一份。
+      get_target_property(_uvcpp_ngtcp2_incs ngtcp2_static
+                          INTERFACE_INCLUDE_DIRECTORIES)
+      if(_uvcpp_ngtcp2_incs AND NOT _uvcpp_ngtcp2_incs STREQUAL
+                                "_uvcpp_ngtcp2_incs-NOTFOUND")
+        target_include_directories(${_tgt} BEFORE PRIVATE
+          $<BUILD_INTERFACE:${_uvcpp_ngtcp2_incs}>)
+      endif()
     endif()
   endforeach()
 endif()
