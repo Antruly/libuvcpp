@@ -42,6 +42,7 @@
 19. [横向扩展：多循环（`set_loops`）](#19-横向扩展多循环set_loops)
 20. [可观测性：`/health` / `/ready` / `/metrics`](#20-可观测性health--ready--metrics)
 21. [WebSocket 房间与广播](#21-websocket-房间与广播)
+22. [会话与安全 Cookie](#22-会话与安全-cookie)
 
 ---
 
@@ -1598,6 +1599,41 @@ rooms.broadcast_text("lobby", msg.data(), msg.size());
 - **只在 app 的循环线程上调用**（房间表没有锁）；跨线程用 `app.post()`。
 - 只接 **h1** 会话；跨进程（Redis pub/sub）见 issue #74。用例：
   `web_app_ws_rooms_func.cpp`。
+
+---
+
+## 22. 会话与安全 Cookie
+
+`uvcpp_session.h` 提供可插拔的会话存储 + 安全 Cookie 中间件（issue #70 的第一批；
+Redis/RBAC/CSRF 等见该 issue 的后续）：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+auto store = std::make_shared<uvcpp::uvcpp_memory_session_store>();
+uvcpp::uvcpp_session_options opts;       // sid / 86400s / HttpOnly / SameSite=Lax
+app.use(uvcpp::uvcpp_session_middleware(store, opts));
+
+app.post("/login", [](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& resp,
+                      uvcpp::uvcpp_web_next) {
+  uvcpp::uvcpp_session* s = uvcpp::uvcpp_session_of(req);
+  if (s) { /* 校验账号密码后 */ s->set("uid", "42"); }
+  resp.end();
+});
+```
+
+- **每个请求都有会话**（首次访问即建并下发 `Set-Cookie`）；`sliding` 默认开，
+  每次请求续期；关掉就是绝对过期。
+- Cookie 属性：`HttpOnly`（默认）、`Secure`（`secure=true`）、`SameSite`
+  （`Lax`/`Strict`/`None`）、`Path`、`Max-Age`。
+- 处理器里 `session->set()/erase()` 的东西在响应 `on_sent` 时落库 ——
+  因此**不要**假设 `next()` 返回时已经持久化。
+- 注销：`uvcpp_session_logout(req, resp, *store, opts)`（`resp.end()` 之前调）。
+- 防会话固定：登录成功时 `session->regenerate()`，随后用
+  `uvcpp_session_set_cookie(resp, *session, opts)` 把新 id 发给客户端。
+- 存储接口 `uvcpp_session_store` 可替换（本文件带内存实现，默认上限 10000 条、
+  按最早过期逐出）；多实例共享存储需要 Redis 适配器（后续）。
+- 只在 loop 线程上访问；store 实现要自己对多线程安全。
+  用例：`web_app_session_func.cpp`。
 
 ---
 
