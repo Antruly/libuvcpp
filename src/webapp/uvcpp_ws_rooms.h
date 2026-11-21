@@ -54,6 +54,7 @@
 #if UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 
