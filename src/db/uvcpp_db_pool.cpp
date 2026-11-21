@@ -65,13 +65,23 @@ namespace {
 /// 回调相（跑在调用方自己的循环上）可能一直不来，不能等 —— 所以不在这里记账。
 struct pool_counters {
   std::atomic<size_t> work_in_flight{0};
+
+  // ---- 事务（issue #66）----
+  std::atomic<uint64_t> tx_total{0};
+  std::atomic<uint64_t> tx_committed{0};
+  std::atomic<uint64_t> tx_rolled_back{0};
+  std::atomic<uint64_t> tx_failed{0};
+  std::atomic<uint64_t> tx_timed_out{0};
+  std::atomic<uint64_t> tx_acquire_timeouts{0};
+  std::atomic<uint64_t> tx_total_us{0};
+  std::atomic<uint64_t> tx_max_us{0};
 };
 
 struct pool_job;
 using pool_job_ptr = std::shared_ptr<pool_job>;
 
 struct pool_job {
-  enum kind_t { K_QUERY, K_EXECUTE, K_INSERT };
+  enum kind_t { K_QUERY, K_EXECUTE, K_INSERT, K_TRANSACTION };
 
   kind_t kind = K_QUERY;
   /// **只在 work 相里有值**。work 跑完就置空 —— 从那一刻起，回调相与池子再无
@@ -91,10 +101,30 @@ struct pool_job {
 
   uvcpp_db_pool::table_cb table_cb_fn;
   uvcpp_db_pool::exec_cb exec_cb_fn;
+
+  // ---- 事务 ----
+  uvcpp_db_pool::tx_body tx_body_fn;
+  uvcpp_db_pool::tx_cb   tx_cb_fn;
+  uvcpp_db_tx_options    tx_opts;
+  /// work 相量到的耗时（微秒），回调相只读它。
+  uint64_t tx_elapsed_us = 0;
+  bool     tx_committed  = false;
+  bool     tx_rolled_back = false;
+  bool     tx_acquire_timeout = false;
 };
+
+/// 一次事务在池线程上的完整跑法：借 → begin → 体 → 提交/回滚 → 还。
+///
+/// **必须与 `run_pool_job` 共用同一条"还账"收尾**：`work_in_flight` 减一、
+/// `job->pool` 置空 —— 漏一条，池子析构就会一直等。
+void run_tx_job(const pool_job_ptr& job);
 
 /// 池线程：借 → 干活 → 还。**只碰 job 自己的字段和池子的公开接口**。
 void run_pool_job(const pool_job_ptr& job) {
+  if (job->kind == pool_job::K_TRANSACTION) {
+    run_tx_job(job);
+    return;
+  }
   uvcpp_db_pool* p = job->pool;
   if (p != nullptr) {
     uvcpp_db_client* c = p->acquire();
@@ -139,6 +169,146 @@ void run_pool_job(const pool_job_ptr& job) {
   if (job->counters) job->counters->work_in_flight.fetch_sub(1);
 }
 
+void run_tx_job(const pool_job_ptr& job) {
+  uvcpp_db_pool* p = job->pool;
+  const std::chrono::steady_clock::time_point t0 =
+      std::chrono::steady_clock::now();
+
+  // 唯一的收尾口：记账 + 还 work 相那笔账。**每一条 return 之前都走它**。
+  // 回调相故意不算在 `work_in_flight` 里（与其它异步接口同一条），所以池子
+  // 可以先走一步，`complete_pool_job` 用存活令牌决定还叫不叫用户。
+  const auto settle = [&job, &t0]() {
+    const uint64_t us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
+    job->tx_elapsed_us = us;
+    if (job->counters) {
+      pool_counters& c = *job->counters;
+      c.tx_total.fetch_add(1);
+      if (job->tx_committed) c.tx_committed.fetch_add(1);
+      if (job->tx_rolled_back) c.tx_rolled_back.fetch_add(1);
+      if (!uvcpp_db_ok(job->status)) c.tx_failed.fetch_add(1);
+      if (job->status == uvcpp_db_status::TIMEOUT) c.tx_timed_out.fetch_add(1);
+      if (job->tx_acquire_timeout) c.tx_acquire_timeouts.fetch_add(1);
+      c.tx_total_us.fetch_add(us);
+      uint64_t cur = c.tx_max_us.load();
+      while (us > cur && !c.tx_max_us.compare_exchange_weak(cur, us)) {
+      }
+    }
+    job->pool = nullptr;
+    if (job->counters) job->counters->work_in_flight.fetch_sub(1);
+  };
+
+  if (p == nullptr) {
+    job->status = uvcpp_db_status::MISUSE;
+    job->error  = "池子已经析构";
+    settle();
+    return;
+  }
+
+  uvcpp_db_client* c =
+      job->tx_opts.acquire_timeout_ms >= 0
+          ? p->acquire(job->tx_opts.acquire_timeout_ms)
+          : p->acquire();
+  if (c == nullptr) {
+    job->status = uvcpp_db_status::NO_CONNECTION;
+    job->error  = p->last_error();
+    if (job->error.empty()) job->error = "池子借不出连接";
+    job->tx_acquire_timeout = true;
+    settle();
+    return;
+  }
+
+  const auto release_conn = [p, c](bool broken) {
+    // 与代借代还那组同一条规矩：坏掉的连接不还给下一个人。
+    if (broken) {
+      p->discard(c);
+    } else {
+      p->release(c);
+    }
+  };
+
+  const uvcpp_db_status bst = c->begin();
+  if (!uvcpp_db_ok(bst)) {
+    job->status = bst;
+    job->error  = c->last_error();
+    if (job->error.empty()) job->error = uvcpp_db_status_name(bst);
+    release_conn(bst == uvcpp_db_status::NOT_CONNECTED);
+    settle();
+    return;
+  }
+
+  uvcpp_db_tx tx(c, job->tx_opts.timeout_ms);
+  bool        threw = false;
+  std::string throw_msg;
+  try {
+    if (job->tx_body_fn) job->tx_body_fn(tx);
+  } catch (const std::exception& e) {
+    threw     = true;
+    throw_msg = e.what();
+  } catch (...) {
+    threw     = true;
+    throw_msg = "未知异常类型";
+  }
+
+  if (threw) {
+    if (!tx.committed() && !tx.rolled_back()) {
+      c->rollback();
+      job->tx_rolled_back = true;
+    } else {
+      job->tx_committed = tx.committed();
+      if (tx.rolled_back()) job->tx_rolled_back = true;
+    }
+    job->status = tx.status() != uvcpp_db_status::OK
+                      ? tx.status()
+                      : uvcpp_db_status::EXEC_FAILED;
+    job->error  = "事务体抛异常";
+    if (!throw_msg.empty()) job->error += "：" + throw_msg;
+    // 体里同时还有一条语句失败时，两边的原因都要留下 —— 只报其中一个会让
+    // 另一条线索静默消失。
+    if (!tx.error().empty()) job->error += "；" + tx.error();
+    release_conn(job->status == uvcpp_db_status::NOT_CONNECTED ||
+                 tx.status() == uvcpp_db_status::NOT_CONNECTED);
+    settle();
+    return;
+  }
+
+  if (tx.committed()) {
+    job->tx_committed = true;
+    job->status       = uvcpp_db_status::OK;
+  } else if (tx.rolled_back()) {
+    // 显式回滚是调用方的决定，不算失败；事务里之前那条错误仍如实带回去。
+    job->tx_rolled_back = true;
+    job->status         = tx.status();
+    job->error          = tx.error();
+  } else if (tx.status() != uvcpp_db_status::OK) {
+    // 体里有语句失败、又没显式收尾：回滚。
+    c->rollback();
+    job->tx_rolled_back = true;
+    job->status         = tx.status();
+    job->error          = tx.error();
+  } else {
+    // 正常结束：自动提交。提交失败时再尝试一次回滚（事务可能还开着）。
+    const uvcpp_db_status cm = tx.commit();
+    if (uvcpp_db_ok(cm)) {
+      job->tx_committed = true;
+      job->status       = uvcpp_db_status::OK;
+    } else {
+      c->rollback();
+      job->tx_rolled_back = true;
+      job->status         = cm;
+      job->error          = tx.error();
+      if (job->error.empty()) job->error = c->last_error();
+      if (job->error.empty()) job->error = uvcpp_db_status_name(cm);
+    }
+  }
+
+  release_conn(job->status == uvcpp_db_status::NOT_CONNECTED ||
+               tx.status() == uvcpp_db_status::NOT_CONNECTED);
+  settle();
+}
+
 /// 循环线程：交付。池子没了（或析构了）就不调用户回调 —— 与门面同一条契约。
 void complete_pool_job(const pool_job_ptr& job, int libuv_status) {
   if (libuv_status != 0) {
@@ -155,6 +325,9 @@ void complete_pool_job(const pool_job_ptr& job, int libuv_status) {
       case pool_job::K_EXECUTE:
       case pool_job::K_INSERT:
         if (job->exec_cb_fn) job->exec_cb_fn(job->status, job->affected);
+        break;
+      case pool_job::K_TRANSACTION:
+        if (job->tx_cb_fn) job->tx_cb_fn(job->status, job->error);
         break;
     }
   }
@@ -520,7 +693,10 @@ struct uvcpp_db_pool::impl {
     //
     // `insert` 不在这条路上：它要「执行 + 取 lastval()」两次往返，而这条路的
     // 完成回调只交一张结果表。它仍走线程池 —— 这一点在头文件里写明了。
-    if (job->kind != pool_job::K_INSERT && native_async_ &&
+    // `insert` 与 `transaction` 不走真异步：前者要两次往返，后者是一整段
+    // 阻塞的会话（begin/体/commit），真异步那条路根本没有这个形状。
+    if (job->kind != pool_job::K_INSERT &&
+        job->kind != pool_job::K_TRANSACTION && native_async_ &&
         async_capable_.load()) {
       return submit_native(job, loop);
     }
@@ -1154,6 +1330,38 @@ int uvcpp_db_pool::insert(uvcpp_loop* loop, const std::string& sql,
   pool_job_ptr job = make_pool_job(pool_job::K_INSERT, sql, params);
   job->exec_cb_fn = cb;
   return impl_->submit_job(job, loop);
+}
+
+int uvcpp_db_pool::transaction(uvcpp_loop* loop, const tx_body& body,
+                               const tx_cb& cb,
+                               const uvcpp_db_tx_options& opts) {
+  if (loop == nullptr || !body) return UV_EINVAL;
+  pool_job_ptr job(new pool_job());
+  job->kind       = pool_job::K_TRANSACTION;
+  job->tx_body_fn = body;
+  // **先填回调再投递**：投出去之后那条线程随时可能跑完（与上面几条同理）。
+  job->tx_cb_fn = cb;
+  job->tx_opts  = opts;
+  return impl_->submit_job(job, loop);
+}
+
+uvcpp_db_tx_stats uvcpp_db_pool::tx_stats() const {
+  uvcpp_db_tx_stats out;
+  std::shared_ptr<pool_counters> c;
+  {
+    std::lock_guard<std::mutex> lk(impl_->mu_);
+    c = impl_->counters_;
+  }
+  if (!c) return out;
+  out.total               = c->tx_total.load();
+  out.committed           = c->tx_committed.load();
+  out.rolled_back         = c->tx_rolled_back.load();
+  out.failed              = c->tx_failed.load();
+  out.timed_out           = c->tx_timed_out.load();
+  out.acquire_timeouts    = c->tx_acquire_timeouts.load();
+  out.total_us            = c->tx_total_us.load();
+  out.max_us              = c->tx_max_us.load();
+  return out;
 }
 
 // ---- 调参与观测 ----

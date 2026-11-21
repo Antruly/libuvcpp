@@ -89,6 +89,14 @@ enum class uvcpp_db_status : int {
   ///
   /// 只有 `uvcpp_db_pool` 会产生它。
   NO_CONNECTION,
+
+  /// 事务超过 `uvcpp_db_tx_options::timeout_ms` 的总预算。只在
+  /// `uvcpp_db_pool::transaction()` 那条路上产生；事务已经回滚、连接已经归还。
+  ///
+  /// 语义是「**两条语句之间**发现超时」：阻塞驱动没有"从外部打断一条正在跑的
+  /// 语句"的通用办法，单条语句的上限由连接自己的语句超时（池子的
+  /// `set_timeout_ms()`）负责。
+  TIMEOUT,
 };
 
 /// 返回码的稳定短名（英文、小写下划线），用于日志与测试断言。
