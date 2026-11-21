@@ -85,6 +85,7 @@
 #include <db/uvcpp_db_params.h>
 #include <db/uvcpp_db_status.h>
 #include <db/uvcpp_db_table.h>
+#include <db/uvcpp_db_transaction.h>
 
 namespace uvcpp {
 
@@ -201,6 +202,29 @@ class UVCPP_API uvcpp_db_pool {
   //
   // 返回值：`0` 投出去了，负值是当场没投出去（没 init、loop 为空）。**投递失败
   // 回调不会被调**，与 `uvcpp_db_async` 同一条约定。
+
+  // ---- 异步事务（1.9.2-dev / issue #66）----
+  //
+  // 与上面几条异步查询的关系：那些**每次调用自己借还一条连接**，所以事务
+  // 在上面根本不成立；本方法是"借一条、从头用到尾、再还"的异步版本 ——
+  // 事务体跑在 worker 线程上，期间那条连接固定归它，正常结束自动 `commit`，
+  // 出错/抛异常/超时自动 `rollback`，无论哪条路连接都一定归还。
+  //
+  // 回调在 `loop` 的线程上**恰好一次**；投递失败（`loop` 为空、池子已关、
+  // 体为空）返回负值且**回调不会被调**（与上面几条同一条约定）。返回 0 只说明
+  // "投出去了"，事务成功与否看回调的状态码。
+  //
+  // 事务体里能拿到的是 `uvcpp_db_tx`：`query/execute/insert`，外加显式的
+  // `commit()` / `rollback()`。不调这两句就按"正常则提交、出错则回滚"处理。
+  // 详细语义、超时口径与"不自动重试"那几条见 `db/uvcpp_db_transaction.h`。
+  using tx_cb = std::function<void(uvcpp_db_status, const std::string&)>;
+  using tx_body = std::function<void(uvcpp_db_tx&)>;
+
+  int transaction(uvcpp_loop* loop, const tx_body& body, const tx_cb& cb,
+                  const uvcpp_db_tx_options& opts = uvcpp_db_tx_options());
+
+  /// 事务的累计观测（无锁快照）。语义见 `uvcpp_db_tx_stats`。
+  uvcpp_db_tx_stats tx_stats() const;
 
   int query(uvcpp_loop* loop, const std::string& sql, const table_cb& cb);
   int query(uvcpp_loop* loop, const std::string& sql,

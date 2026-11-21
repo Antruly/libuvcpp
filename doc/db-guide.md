@@ -1,4 +1,4 @@
-# 数据库模块指南
+﻿# 数据库模块指南
 
 `src/db/` 是**库外的一层薄封装**：一个连接 = 一个 `uvcpp_db_client`，底下挂
 SQLite / MySQL / PostgreSQL / ODBC 四个后端，SQL 由调用方写，结果按**表**取
@@ -699,13 +699,14 @@ void transfer(uvcpp::uvcpp_db_pool* pool, int64_t from, int64_t to, int64_t amou
 | 起停 | `init(url, min=1, max=8)` / `close()` |
 | 借还 | `acquire()` / `acquire(timeout_ms)` / `release(c)` / `discard(c)` |
 | 代借代还 | `query(...)` / `execute(...)` / `insert(...)` / `ping()` |
-| 异步 | `query(loop, ...)` / `execute(loop, ...)` / `insert(loop, ...)`（回调形状与门面**完全一致**） |
+| 异步 | `query(loop, ...)` / `execute(loop, ...)` / `insert(loop, ...)`（回调形状与门面**完全一致**）/ `transaction(loop, body, cb, opts)`（见 §7.1） |
 | 调参 | `set_acquire_timeout_ms`(5000) / `set_idle_timeout_ms`(60000) / `set_check_on_acquire`(false) / `set_timeout_ms` |
 | 观测 | `size` / `in_use` / `idle` / `max_size` / `min_size` / `created_total` / `reused_total` / `last_error` / `close_idle` |
 
-**异步池查询每次调用自己借还一条连接**，所以单条语句走它最省事；而**事务走不了异步的**
-—— 它要独占一条连接直到 `commit`，异步那套的借还在回调之前就结束了。事务只有
-`acquire()`/`release()` 这一条路，池子也因此**不提供** `begin()`。
+**异步池查询每次调用自己借还一条连接**，所以单条语句走它最省事；而事务要独占一条
+连接直到 `commit`，那套借还形状在上面不成立 —— 事务走 `transaction()`
+（[§7.1](#71-异步事务pooltransaction)），或者在不在循环上的线程里用
+`acquire()`/`release()` 那条同步路。
 
 #### 异步池查询的两个跑法
 
@@ -1040,6 +1041,39 @@ SQLite 本来就没有日期类型，PostgreSQL 的文本格式恰好就是这�
 ---
 
 ## 7. 事务，以及"事务里不重试"
+
+### 7.1 异步事务（`pool.transaction()`）
+
+```cpp
+// doc-snippet: fragment — body / 回调的形状摘录，不是完整翻译单元
+uvcpp::uvcpp_db_tx_options opts;   // C++11：带默认成员的聚合不能花括号初始化
+opts.timeout_ms = 5000;            // 整个事务的总预算；0 = 不限
+
+pool.transaction(
+    &loop,
+    [](uvcpp::uvcpp_db_tx& tx) {
+      tx.execute("UPDATE account SET balance = balance - ? WHERE id = ?", {100, 1});
+      tx.execute("UPDATE account SET balance = balance + ? WHERE id = ?", {100, 2});
+    },
+    [](uvcpp::uvcpp_db_status st, const std::string& err) {
+      // 循环线程上恰好一次；投递失败时不会来（看返回值）
+    },
+    opts);
+```
+
+- **事务体跑在 worker 线程上**（阻塞驱动，整个事务占一条线程池线程）；借到的
+  连接从头用到尾，`tx.client()` 自始至终是同一个指针。
+- **自动收尾**：体正常返回 → `commit`；有语句失败 / 体抛异常 / 超时 → `rollback`。
+  也可以自己调 `tx.commit()` / `tx.rollback()`。
+- **一定归还连接**：借不出、`begin` 失败、体抛异常、提交失败这几条路都归还
+  （连接坏掉时 `discard`，与其余接口同一条规矩）。
+- **超时**：`timeout_ms` 在**每条语句之前**和**提交之前**检查；到点后不再执行，
+  回滚并归还。单条语句自身的上限仍由 `set_timeout_ms()` 管。
+- **不重试**：失败就是失败，重投新事务由调用方决定。
+- **观测**：`pool.tx_stats()` —— total / committed / rolled_back / failed /
+  timed_out / acquire_timeouts / total_us / max_us。
+
+### 7.2 同步事务（`acquire()` + `begin()`）
 
 ```cpp
 #include <db/uvcpp_db.h>
