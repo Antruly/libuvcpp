@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/uvcpp/uvcpp_metrics_registry.h
  * @brief 进程内的指标注册表：Counter / Gauge / Histogram + Prometheus 文本。
  * @author zhuweiye
