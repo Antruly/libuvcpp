@@ -123,7 +123,7 @@ void test_registry_threads() {
   const int              kPerThread = 5000;
   std::vector<std::thread> threads;
   for (int i = 0; i < kThreads; ++i) {
-    threads.push_back(std::thread([&reg] {
+    threads.push_back(std::thread([&reg, kPerThread] {
       for (int k = 0; k < kPerThread; ++k) reg.inc("conc_total");
     }));
   }
