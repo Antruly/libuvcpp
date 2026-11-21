@@ -19,7 +19,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
 #include <uvcpp/uvcpp_define.h>
 #include <uvcpp/uvcpp_cron.h>
@@ -125,12 +124,8 @@ void test_match_and_next() {
 
 void test_scheduler() {
   std::cout << "-- 调度（真循环）--" << std::endl;
-  uvcpp_loop  loop;
-  uvcpp_timer stopper(&loop);
-  // 3 秒后停循环（在循环线程上拨 stop，避免跨线程调 uv_stop）。
-  stopper.start([&loop](uvcpp_timer*) { loop.stop(); }, 3000, 0);
-
-  uvcpp_cron        cron(&loop);
+  uvcpp_loop loop;
+  uvcpp_cron cron(&loop);
   std::atomic<int>  ticks(0);
   std::atomic<int>  throws(0);
   std::string       err;
@@ -146,8 +141,14 @@ void test_scheduler() {
   check(cron.size() == 2, "任务数 = 2");
   cron.start();
 
-  std::thread th([&loop] { loop.run(); });
-  th.join();
+  // **不用"定时器到点 stop"来收尾**：CI 上那种写法在 uv_run 默认模式里偶发
+  // 退不出来（30s 测试超时；本机不复现）。改成主线程按截止时间拨 `UV_RUN_ONCE`：
+  // 每次至少处理一个事件（cron 的秒级任务保证有事件），3 秒后自己退出。
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+  while (std::chrono::steady_clock::now() < deadline) {
+    loop.run(UV_RUN_ONCE);
+  }
   cron.stop();
 
   const uvcpp_cron_stats s = cron.stats();
