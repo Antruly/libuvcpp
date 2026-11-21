@@ -440,6 +440,40 @@ class UVCPP_API uvcpp_web_request {
   uvcpp_http_request& raw() { return src_; }
   const uvcpp_http_request& raw() const { return src_; }
 
+  // -------------------------------------------------------------------
+  // 请求级属性（中间件挂、处理器取）
+  // -------------------------------------------------------------------
+
+  /**
+   * @brief 挂一个请求级属性（中间件用）。
+   *
+   * 键在同一请求内唯一，后写覆盖先写。值用 `shared_ptr<void>` 存 ——
+   * 中间件与处理器之间没有共享类型时（会话对象、认证结果……）不用为了
+   * 传递加一个基类。对象生存期到本请求结束（请求对象销毁即释放）。
+   *
+   * **只在 loop 线程上有效**；跨线程请 `post()` 回循环线程。
+   */
+  void set_attribute(const std::string& name, std::shared_ptr<void> value) {
+    if (value) {
+      attributes_[name] = std::move(value);
+    } else {
+      attributes_.erase(name);
+    }
+  }
+
+  /// 取一个属性；不存在返回空 shared_ptr。
+  std::shared_ptr<void> attribute(const std::string& name) const {
+    std::map<std::string, std::shared_ptr<void> >::const_iterator it =
+        attributes_.find(name);
+    return it == attributes_.end() ? std::shared_ptr<void>() : it->second;
+  }
+
+  /// 取一个类型化属性（存的时候必须用同一个 `T`）。
+  template <typename T>
+  std::shared_ptr<T> attribute_as(const std::string& name) const {
+    return std::static_pointer_cast<T>(attribute(name));
+  }
+
  private:
   friend class uvcpp_web_context;
   /// 上传路由的派发路径要把会话的结果挂到请求上（`set_upload()`）。
@@ -509,6 +543,9 @@ class UVCPP_API uvcpp_web_request {
   mutable std::vector<std::pair<std::string, std::string> > query_params_;
   mutable std::vector<std::pair<std::string, std::string> > cookies_;
   mutable std::vector<std::pair<std::string, std::string> > form_params_;
+
+  /// 请求级属性（中间件 ↔ 处理器）。键序不重要，用 map 保证覆盖语义。
+  std::map<std::string, std::shared_ptr<void> > attributes_;
 
   // multipart 的**文件**部件。它们与 form_params_ 由同一次解析（同一个
   // `form_parsed_` 标志）一起填好 —— 分两个标志会让"只问 form()"的调用方

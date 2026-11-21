@@ -224,6 +224,10 @@ void uvcpp_web_request::take_from(uvcpp_http_request& src) {
   path_ = raw_path_;
   web_normalize_path(path_);
 
+  // 请求级属性属于"上一条请求"：认领新的原始请求时必须清掉，否则中间件
+  // 上一轮挂的会话指针会活到这一轮。
+  attributes_.clear();
+
   // 关心的几个头**一次遍历**取完。
   //
   // 以前这里是 4 次 `http_get_header()`：4 遍线性表，每格一次大小写不敏感
