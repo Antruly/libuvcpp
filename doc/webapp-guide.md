@@ -40,6 +40,7 @@
 17. [安全](#17-安全)
 18. [已知限制](#18-已知限制)
 19. [横向扩展：多循环（`set_loops`）](#19-横向扩展多循环set_loops)
+20. [可观测性：`/health` / `/ready` / `/metrics`](#20-可观测性health--ready--metrics)
 
 ---
 
@@ -1531,6 +1532,39 @@ join() 已等 N ms，仍有 M 条循环没退出（停机扇出或某条循环�
 设计稿（含两种形状的取舍、"一条接受者 + 转手"的由来、以及那些没做的）见
 [多循环横向扩展设计](./multiloop-design.md)；net 层那一半的用法见
 [net 网络层指南](./net-guide.md) 的多循环一节。
+
+---
+
+## 20. 可观测性：`/health` / `/ready` / `/metrics`
+
+`uvcpp_metrics_registry`（核心层，不依赖 webapp）+ `uvcpp_web_metrics`（端点）：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_metrics_registry reg;
+uvcpp::uvcpp_web_metrics    metrics(reg);
+
+uvcpp::uvcpp_web_app app;
+metrics.install(app);          // /health /ready /metrics + 请求计数/耗时
+metrics.set_ready_check([](std::string& why) {
+  return db_pool_healthy(why); // false 时 why 里写一句人读原因
+});
+
+// 数值本来在别处维护 → 回调 Gauge，render 那一刻取值
+reg.register_gauge("db_pool_in_use", "Borrowed connections",
+                   [&pool] { return static_cast<double>(pool.in_use()); });
+```
+
+- `/health`：恒 200（liveness 不查依赖 —— 数据库挂了该摘流量，不该重启进程）。
+- `/ready`：`set_ready_check()` 返回 false 时 **503**，body 带原因；每个请求现问一次。
+- `/metrics`：Prometheus 文本（`text/plain; version=0.0.4`）。
+- 请求指标（默认开，注册成**最外层**中间件）：`http_requests_total{method,status}`、
+  `http_request_duration_ms{method}`（默认桶 1..10000 ms）、`http_requests_in_flight`；
+  另有 `uvcpp_web_app_connections` 回调 Gauge。
+- **标签里不放 URL 原串**（高基数）；要按路由看，在路由里自己 `reg.inc(...,
+  {{"route", "/user/:id"}})`。
+- 不 `install()` 就零成本：没有后台线程、没有定时器、没有全局单例。
+  用例：`web_app_metrics_func.cpp`。
 
 ---
 
