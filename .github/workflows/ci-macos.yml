@@ -158,6 +158,7 @@ jobs:
               - -DUVCPP_ENABLE_ZLIB=ON
               - -DUVCPP_BUILD_EXPAND=ON
               - -DUVCPP_ENABLE_CAPI=ON
+            openssl_root: $(brew --prefix openssl@3)
 
           # quic（1.4.1 新增的腿）：和 ubuntu 那条腿的区别**只有 OpenSSL 的来源**。
           # ubuntu 让 ssl 那一格各自装 `libssl-dev`（3.0.13，两个 QUIC 符号都没有），

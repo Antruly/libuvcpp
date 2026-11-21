@@ -2576,7 +2576,7 @@ if(UVCPP_BUILD_SHARED)
   target_link_libraries(uvcpp PRIVATE ${LIBUV_LIB})
   if (WIN32)
     target_compile_definitions(uvcpp PRIVATE UVCPP_EXPORTS)
-    target_link_libraries(uvcpp PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
+    target_link_libraries(uvcpp PRIVATE ws2_32 iphlpapi psapi userenv)
   endif()
   # 系统 libuv 那棵树（发行版包的 `.deb`/`.rpm`）**必须**把 libuv 放进导出的
   # link interface：公开头里有 `<uv.h>`，使用者也常直接调 `uv_*`，光靠 `.so` 的
@@ -2604,7 +2604,7 @@ if(UVCPP_BUILD_SHARED)
     target_link_libraries(uvcpp_s PRIVATE ${LIBUV_LIB})
     if (WIN32)
       target_compile_definitions(uvcpp_s PRIVATE UVCPP_EXPORTS)
-      target_link_libraries(uvcpp_s PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
+      target_link_libraries(uvcpp_s PRIVATE ws2_32 iphlpapi psapi userenv)
     endif()
   endif()
 endif()
@@ -2614,13 +2614,13 @@ if(UVCPP_BUILD_STATIC)
   add_library(uvcpp_a STATIC ${UVCPP_SOURCES} ${UVCPP_HEADERS})
   target_link_libraries(uvcpp_a PRIVATE ${LIBUV_LIB})
   if (WIN32)
-    target_link_libraries(uvcpp_a PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
+    target_link_libraries(uvcpp_a PRIVATE ws2_32 iphlpapi psapi userenv)
   endif()
   if (UVCPP_BUILD_LIBUV_FROM_SOURCE)
     add_library(uvcpp_a_s STATIC ${UVCPP_SOURCES} ${UVCPP_HEADERS})
     target_link_libraries(uvcpp_a_s PRIVATE ${LIBUV_LIB})
     if (WIN32)
-      target_link_libraries(uvcpp_a_s PRIVATE ws2_32 iphlpapi psapi userenv bcrypt crypt32)
+      target_link_libraries(uvcpp_a_s PRIVATE ws2_32 iphlpapi psapi userenv)
     endif()
   endif()
 endif()
@@ -2701,7 +2701,9 @@ endif()
 if(UVCPP_ENABLE_HTTP3)
   foreach(_tgt uvcpp uvcpp_s uvcpp_a uvcpp_a_s)
     if(TARGET ${_tgt})
-      target_include_directories(${_tgt} PRIVATE
+      # **BEFORE**：runner 镜像的 `/opt/homebrew/include` 里可能也有一份
+      # nghttp3 头；让我们的源码树那一份永远排在最前。
+      target_include_directories(${_tgt} BEFORE PRIVATE
         "${_uvcpp_nghttp3_src}/lib/includes"
         "${_uvcpp_nghttp3_bin}/lib/includes")
     endif()
@@ -3169,7 +3171,11 @@ if(UVCPP_ENABLE_OPENSSL)
     if(TARGET ${_tgt})
       target_link_libraries(${_tgt} PRIVATE ${UVCPP_SSL_LIBS})
       if(WIN32)
-        target_link_libraries(${_tgt} PRIVATE crypt32 user32 advapi32)
+        # **顺序承重**：静态 libcrypto 现在引用 `BCryptGenRandom`（MSYS2 的
+        # OpenSSL 3.6 起）。GNU ld 对静态归档是"从左到右、后满足前"，所以
+        # `-lbcrypt` 必须排在 libcrypto **之后** —— 写在上面的 ws2_32 那一组
+        # 里（那些在 SSL 之前展开）会留下未定义符号。MSVC 不敏感，同一行照挂。
+        target_link_libraries(${_tgt} PRIVATE bcrypt crypt32 user32 advapi32)
       endif()
     endif()
   endforeach()
@@ -3225,6 +3231,19 @@ if(UVCPP_ENABLE_QUIC)
       target_link_libraries(${_tgt} PRIVATE
         $<BUILD_INTERFACE:ngtcp2_static>
         $<BUILD_INTERFACE:ngtcp2_crypto_ossl_static>)
+      # **头必须来自我们编的那份 ngtcp2。** runner 镜像（macOS 26 起）自带的
+      # Homebrew 包把它自己的 `ngtcp2/ngtcp2.h` 放在 `/opt/homebrew/include`；
+      # 那份头与 FetchContent 编出来的静态库版本一旦不同，`ngtcp2_settings`
+      # 的布局就对不上 —— 运行期表现是每一格 QUIC 用例在
+      # `ngtcp2_settingslen_version: Unreachable.` 上 abort。把源码树那份头
+      # **前置**，压过镜像里的那一份。
+      get_target_property(_uvcpp_ngtcp2_incs ngtcp2_static
+                          INTERFACE_INCLUDE_DIRECTORIES)
+      if(_uvcpp_ngtcp2_incs AND NOT _uvcpp_ngtcp2_incs STREQUAL
+                                "_uvcpp_ngtcp2_incs-NOTFOUND")
+        target_include_directories(${_tgt} BEFORE PRIVATE
+          $<BUILD_INTERFACE:${_uvcpp_ngtcp2_incs}>)
+      endif()
     endif()
   endforeach()
 endif()
