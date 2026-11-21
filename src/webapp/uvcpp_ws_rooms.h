@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/webapp/uvcpp_ws_rooms.h
  * @brief WebSocket 房间与广播：join/leave、按房间群发、慢客户端策略。
  * @author zhuweiye
