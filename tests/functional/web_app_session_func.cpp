@@ -219,8 +219,7 @@ void test_session_flow() {
 
   const reply out = call(port, "/logout", true, sid);
   check(out.status == 200 && out.body == "bye", "注销 200");
-  check(out.cookie_has("Max-Age=0") != std::string::npos,
-        "注销响应让 Cookie 过期");
+  check(out.cookie_has("Max-Age=0"), "注销响应让 Cookie 过期");
   const reply after = call(port, "/me", false, sid);
   check(after.status == 401, "旧 Cookie 注销后失效");
   check(t.store->size() == 1, "store 里旧会话已删（当前只剩新请求建的）");
@@ -230,7 +229,9 @@ void test_session_flow() {
 
 void test_expiry() {
   std::cout << "-- 过期 --" << std::endl;
-  TestApp   t(1);
+  // ttl 给 3 秒：MSVC runner 上"建会话→登录→读"可能就要 1 秒以上，
+  // ttl=1 会把"过期前可读"偶发判成过期（实测整条用例 1.9s）。
+  TestApp   t(3);
   const int port = t.start();
   if (port <= 0) {
     check(false, "app 起来了");
@@ -240,8 +241,8 @@ void test_expiry() {
   const std::string sid = sid_of(call(port, "/me", false).first_cookie());
   check(call(port, "/login", true, sid).status == 200, "登录");
   check(call(port, "/me", false, sid).body == "uid=42", "过期前可读");
-  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-  check(call(port, "/me", false, sid).status == 401, "ttl=1 过期后被拒");
+  std::this_thread::sleep_for(std::chrono::milliseconds(3300));
+  check(call(port, "/me", false, sid).status == 401, "ttl=3 过期后被拒");
   t.shutdown();
 }
 
