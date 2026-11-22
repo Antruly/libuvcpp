@@ -19,6 +19,37 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.10.0 重点 (Highlights)
+
+`v1.9.1` 之后的开发线：**长期运行的服务缺的那几块拼图** —— 异步事务、定时任务、
+进程监管、作业队列、会话/鉴权、指标与 WebSocket 房间。
+
+- **数据库：异步事务。** `uvcpp_db_pool::transaction()` 让事务体独占一条连接，
+  成功自动提交、语句失败或抛异常自动回滚，连接由池子归还；`tx_stats()` 可对账。
+  真 MySQL/PostgreSQL 上用 `CONNECTION_ID()` / `pg_backend_pid()` 验证"多条语句
+  同一条连接"，50 个并发事务在 max=4 的池上全部落地。
+- **长任务三件套。** `uvcpp_cron`（UTC、5/6 段、`next_utc()`）；
+  `uvcpp_process_supervisor`（有界输出、超时、进程组终止、取消；
+  [#69](https://github.com/Antruly/libuvcpp/issues/69) 的 POSIX 批，Windows 的
+  Job Object 未做）；`uvcpp_job_queue`（并发键串行、重试退避、超时、取消、
+  重启恢复；[#67](https://github.com/Antruly/libuvcpp/issues/67) 第一批，异步
+  handler 与持久化后端适配器未做）。
+- **可观测性。** `uvcpp_metrics_registry`（Counter/Gauge/Histogram，Prometheus
+  文本）与 `uvcpp_web_metrics` 的 `/health`、`/ready`、`/metrics`。
+- **WebSocket 房间。** `uvcpp_ws_rooms`：join/leave、按房间群发、断线自动退订、
+  慢客户端策略（DROP / CLOSE 1001）。
+- **会话与安全。** `uvcpp_session`（安全 Cookie、过期/续期/注销/regenerate）与
+  `uvcpp_web_auth`（RBAC、双提交 CSRF）—— [#70](https://github.com/Antruly/libuvcpp/issues/70)
+  的第一、二批；Redis/MySQL/SQLite 存储适配器、密码哈希/限流/审计未做。
+
+**没有做的（如实列出）**：Windows 服务包装
+（[#73](https://github.com/Antruly/libuvcpp/issues/73)）、跨进程 WebSocket 广播
+（[#74](https://github.com/Antruly/libuvcpp/issues/74)）、数据库/作业队列/WS/
+进程监管的集成测试装置（[#75](https://github.com/Antruly/libuvcpp/issues/75)）。
+新增模块**不进 C ABI**（C ABI 仍是 1.5.3 那八片、402 个函数）。
+
+**破坏性**：无。新增模块与公开 API 都是增量；C ABI 版本仍是 `1`。
+
 ## v1.9.1 重点 (Highlights)
 
 `v1.9.0` 之后的一版：一条 WebSocket 崩溃修复 + 一个循环亲和的新入口。

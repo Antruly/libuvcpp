@@ -1606,7 +1606,7 @@ rooms.broadcast_text("lobby", msg.data(), msg.size());
 ## 22. 会话与安全 Cookie
 
 `uvcpp_session.h` 提供可插拔的会话存储 + 安全 Cookie 中间件（issue #70 的第一批；
-Redis/RBAC/CSRF 等见该 issue 的后续）：
+Redis/MySQL/SQLite 等存储适配器见该 issue 的后续；RBAC/CSRF 在 §23）：
 
 ```cpp
 // doc-snippet: fragment — 装配摘录，不是完整翻译单元。

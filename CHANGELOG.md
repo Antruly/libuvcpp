@@ -12,10 +12,10 @@
 `1.5.1`–`1.5.3` → `v1.6.0`；`1.6.1`–`1.6.4` 是它之后的补丁版，不折叠、直接发布；
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
 `v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9`、`1.8.10` 是它之后的补丁版，
-`1.8.11`–`1.8.15` 折进 `v1.9.0`；
-不折叠、直接发布；`1.8.11`–`1.8.15` 折进 `v1.9.0`。想按时间线读，翻到最后的「逐个版本」。
+`1.8.11`–`1.8.15` 折进 `v1.9.0`，`v1.9.1` 是它之后的补丁版（不折叠、直接发布）；
+本行之后的 `1.10.0-dev` 是 `v1.10.0` 的开发线。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.9.1**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+当前源码树是 **1.10.0-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
 报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`、`v1.9.0`、`v1.9.1`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
@@ -32,6 +32,8 @@
   - [Redis（`src/redis/`）](#redissrcredis)
   - [SOCKS5（`src/net/`）](#socks5srcnet)
   - [横向扩展（多事件循环）](#横向扩展多事件循环)
+  - [长任务与调度（cron / 进程监管 / 作业队列）](#长任务与调度cron--进程监管--作业队列)
+  - [可观测性（指标与运维端点）](#可观测性指标与运维端点)
   - [HTTP 与 WebSocket 语义](#http-与-websocket-语义)
   - [TLS 与网络](#tls-与网络)
   - [内存与缓冲](#内存与缓冲)
@@ -889,6 +891,13 @@
 
 ### 数据库（`src/db/`）
 
+- **异步事务**（`1.10.0-dev`）：`uvcpp_db_pool::transaction()` —— 事务体独占一条
+  连接（`tx.client()`），成功自动提交、语句失败或抛异常自动回滚，连接由池子
+  归还；`tx_stats().committed` / `rolled_back` 可对账。同步那条是
+  `acquire()` + `begin()/commit()/rollback()`。用例 `db_sqlite_transaction_func`
+  （控制流与账本）与 `db_transaction_server_func`（真 MySQL/PG：事务体内两次读
+  `CONNECTION_ID()` / `pg_backend_pid()` 必须相等，50 并发在 max=4 的池上全部
+  落地）。
 一个连接一个 `uvcpp_db_client`，**同一套接口盖住 SQLite / MySQL / PostgreSQL /
 ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（`UVCPP_ENABLE_DB`），而且是
 本库**唯一需要第三方客户端库**的模块（libsqlite3 / libmysqlclient / libpq / 驱动
@@ -1383,8 +1392,35 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   上的上传都要在这把锁上排一次队，成了一个与并发无关的全进程串行点。改成
   `thread_local` 引擎（每线程独立播种，避免各线程拿到同一串），锁一并去掉。
 
+### 长任务与调度（cron / 进程监管 / 作业队列）
+
+- **定时任务（cron）**（`1.10.0-dev`）：`uvcpp_cron` —— 5 段与 6 段（秒级）
+  表达式解析、UTC 匹配、`next_utc()`；回调抛异常被吞掉并计数，不影响别的任务。
+  **不支持**名字（`JAN`/`MON`）、`@daily` 这类宏与 `L/W/#` 扩展。用例
+  `cron_func`（解析 / 纯函数 / 真循环调度三层）。
+- **进程监管**（`1.10.0-dev`，#69 的 POSIX 批）：`uvcpp_process_supervisor` ——
+  有界 stdout/stderr、超时、进程组终止（`kill_tree`）、取消与统计。用例
+  `process_supervisor_func`。**Windows 上 `kill_tree` 返回 `UV_ENOTSUP`**
+  （Job Object 是后续），那条腿的用例在 Windows 上显式 SKIP。
+- **作业队列**（`1.10.0-dev`，#67 第一批）：`uvcpp_job_queue` —— 可插拔
+  `uvcpp_job_store`（内置内存实现）、同一 `concurrency_key` 串行、重试退避、
+  超时、取消、队列上限与**重启恢复**。用例 `job_queue_func`。**异步 handler 与
+  持久化后端适配器是后续。**
+
+### 可观测性（指标与运维端点）
+
+- **指标注册表**（`1.10.0-dev`）：`uvcpp_metrics_registry` —— Counter / Gauge /
+  Histogram，标签排序与转义、`le` 累计桶与 `+Inf`、`_sum` / `_count`、回调式
+  Gauge，输出 Prometheus 文本。核心层，不依赖 webapp。
+- **运维端点**（`1.10.0-dev`）：`uvcpp_web_metrics` 给 `uvcpp_web_app` 装
+  `/health`（liveness，恒 200）、`/ready`（可配 ready check，503 带原因）、
+  `/metrics`（请求计数、耗时直方图、在途 Gauge）。用例 `web_app_metrics_func`。
+
 ### HTTP 与 WebSocket 语义
 
+- **WebSocket 房间与广播**（`1.10.0-dev`）：`uvcpp_ws_rooms` —— join/leave、
+  按房间群发、断线自动退订、慢客户端策略（`DROP` 跳过 / `CLOSE` 1001）与统计。
+  用例 `web_app_ws_rooms_func`（全部落在"客户端实际收到了什么"上）。
 - **WS 帧回调里析构会话后不再解下一帧**（`1.9.1`）：h3/h2 的 WS 会话各持一枚
   存活令牌，`on_data` 每解完一帧只看它 —— 应用在 `on_text` 里删掉会话是合法
   用法，旧实现会拿已析构的解析器解同一批里的下一帧（SIGSEGV 在
@@ -1753,6 +1789,14 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 公开契约与安全
 
+- **会话与安全 Cookie**（`1.10.0-dev`，#70 第一批）：`uvcpp_session` ——
+  可插拔存储（内置内存实现）、`sid` Cookie（HttpOnly / SameSite / Secure /
+  Max-Age）、过期、续期、注销与 `regenerate()`。用例 `web_app_session_func`。
+  **Redis / MySQL / SQLite 适配器是后续。**
+- **RBAC 与 CSRF**（`1.10.0-dev`，#70 第二批）：`uvcpp_web_auth` —— 按角色的
+  中间件（401 / 403 / 放行）、`skip_paths`，以及双提交 CSRF（`X-CSRF-Token`
+  或表单 `_csrf`；Cookie 非 HttpOnly、与会话 token 一致）。用例
+  `web_app_auth_func`。密码哈希 / 登录限流 / 审计事件仍留后续。
 - **同步失败时把异步回调放掉**（`1.8.11-dev`）：`uvcpp_fs` 的同步失败分支
   此前不唤醒已经登记的异步回调，等它的调用方永远挂起。
 - **C API `expected_body()` 两个方向都维护**（`1.8.12-dev`）：响应方向补上
