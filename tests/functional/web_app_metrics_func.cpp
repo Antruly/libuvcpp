@@ -232,11 +232,17 @@ void test_endpoints() {
   check(get(port, "/hello").status == 200, "业务请求 200");
   check(get(port, "/missing").status == 404, "未命中路由 404");
 
-  // 先直接渲染一次注册表：此刻没有在途请求（前面的响应都已发完），在途 Gauge
-  // 必须是 0。`/metrics` 那个 HTTP 请求自己在飞的时候会是 1 —— 那是自计数，
-  // 不是泄漏，下面那条断言照实写 1。
-  check(contains(t.reg.render(), "http_requests_in_flight 0"),
-        "metrics（直接读）：在途 Gauge 为 0");
+  // 先直接渲染注册表：没有在途请求时在途 Gauge 必须是 0。
+  // **要轮询等待**：客户端收到响应 ≠ 服务端的 `on_sent` 已经跑过（它在下一次
+  // 循环迭代里才减回去），CI 上出现过刚收完就断言、偶发读到 1 的假红。
+  std::string direct = t.reg.render();
+  for (int i = 0; i < 200 && !contains(direct, "http_requests_in_flight 0");
+       ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    direct = t.reg.render();
+  }
+  check(contains(direct, "http_requests_in_flight 0"),
+        "metrics（直接读）：在途 Gauge 归零");
 
   const reply m = get(port, "/metrics");
   check(m.status == 200, "metrics：200");
