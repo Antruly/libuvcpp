@@ -43,6 +43,7 @@
 20. [可观测性：`/health` / `/ready` / `/metrics`](#20-可观测性health--ready--metrics)
 21. [WebSocket 房间与广播](#21-websocket-房间与广播)
 22. [会话与安全 Cookie](#22-会话与安全-cookie)
+23. [RBAC 与 CSRF](#23-rbac-与-csrf)
 
 ---
 
@@ -1634,6 +1635,35 @@ app.post("/login", [](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& 
   按最早过期逐出）；多实例共享存储需要 Redis 适配器（后续）。
 - 只在 loop 线程上访问；store 实现要自己对多线程安全。
   用例：`web_app_session_func.cpp`。
+
+---
+
+## 23. RBAC 与 CSRF
+
+`uvcpp_web_auth.h`（#70 第二批；密码哈希/限流/审计仍留后续）：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+app.use(uvcpp_session_middleware(store, session_opts));
+app.use(uvcpp_csrf_protect());
+uvcpp::uvcpp_roles_options ropts;
+ropts.skip_paths = {"/login", "/me"};
+app.use(uvcpp_require_roles({"admin"}, ropts));
+
+app.post("/login", [](uvcpp::uvcpp_web_request& req, ...) {
+  uvcpp::uvcpp_session* s = uvcpp::uvcpp_session_of(req);
+  if (s) uvcpp::uvcpp_session_set_roles(*s, {"admin"});
+});
+```
+
+- **RBAC**：角色存在会话数据里（`roles`，逗号分隔）；`require_roles` 是**任一
+  命中**；无会话 / 会话里没有角色键 → **401**，有角色但不匹配 → **403**；
+  `skip_paths` 精确匹配放行（登录、健康检查）。
+- **CSRF**：每会话随机 token，存会话 + 发**非 HttpOnly** Cookie（SameSite=Strict）；
+  不安全方法（非 GET/HEAD/OPTIONS）必须带 `X-CSRF-Token` 或表单 `_csrf`，
+  与会话 token 逐字节相同，否则 403；`uvcpp_csrf_protect()` 必须在会话中间件之后。
+- 没装会话中间件时 `csrf_protect()` 返回 500（配置错误不静默放行）。
+- 用例：`web_app_auth_func.cpp`。
 
 ---
 
