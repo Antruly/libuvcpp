@@ -28,6 +28,7 @@
 10. [没做的（如实列出）](#10-没做的如实列出)
 11. [定时任务（cron）](#11-定时任务cron)
 12. [进程监管（process supervisor）](#12-进程监管process-supervisor)
+13. [作业队列（job queue）](#13-作业队列job-queue)
 
 ---
 
@@ -426,6 +427,42 @@ sup.spawn(spec, on_output, on_exit);
   `UV_ENOTSUP`（Job Object 是 issue #69 的后续）。
 - 不绑定具体程序、不维护业务状态机；重启策略/任务队列留给上层（#67）。
 - 用例：`process_supervisor_func.cpp`（POSIX）。
+
+---
+
+## 13. 作业队列（job queue）
+
+`uvcpp_job_queue`（`#include <uvcpp/uvcpp_job_queue.h>`）是"持久化长任务"的第一批：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_job_queue queue(&loop);              // 默认内存 store
+queue.register_handler("media.transcode", [](uvcpp::uvcpp_job_context& ctx) {
+  // 在 libuv 线程池上同步执行；长循环里轮询 ctx.cancelled()
+});
+queue.start();                                    // 恢复上次未完成的记录
+
+uvcpp::uvcpp_job_submit req;
+req.type = "media.transcode";
+req.concurrency_key = "resource-42";              // 同一 key 严格串行
+req.payload = "{}";
+req.max_retry = 3;
+req.backoff_ms = 1000;                            // 指数退避，封顶 1 小时
+req.timeout_ms = 10 * 60 * 1000;
+queue.submit(req);
+```
+
+- 状态：PENDING / RUNNING / SUCCESS / FAILED / CANCELLED；每次变更写 store 并回调
+  `on_state()`。
+- handler 在 **worker 线程**上同步跑；超时/取消是**协作式**的（置 `ctx.cancelled()`，
+  队列不杀线程）。
+- `concurrency_key` 非空时同一 key 同时只跑一个；`max_concurrent` 默认 4。
+- `max_queue > 0` 时 PENDING 达上限 `submit()` 拒绝（`stats().rejected`）。
+- `start()` 从 store 读回记录；上次停在 RUNNING 的恢复成 PENDING 并标
+  `recovered after restart`。
+- store 接口 `uvcpp_job_store` 可替换（本文件带内存实现）；SQLite/MySQL 适配器与
+  异步 handler 是 #67 的后续。
+- **析构前**必须 `stop()` 且 `running == 0`。用例：`job_queue_func.cpp`。
 
 ---
 
