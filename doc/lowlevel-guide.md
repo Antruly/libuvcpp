@@ -27,6 +27,7 @@
 9. [典型坑](#9-典型坑)
 10. [没做的（如实列出）](#10-没做的如实列出)
 11. [定时任务（cron）](#11-定时任务cron)
+12. [进程监管（process supervisor）](#12-进程监管process-supervisor)
 
 ---
 
@@ -396,6 +397,35 @@ cron.start();                                    // 在 loop.run() 之前
   适合"算下次触发时间"塞进自己的调度器。
 - 每个任务一个 `uvcpp_timer`；**错过不补**，回调抛异常被吞掉并计 `stats().errors`。
 - 用例：`tests/functional/cron_func.cpp`。
+
+---
+
+## 12. 进程监管（process supervisor）
+
+`uvcpp_process_supervisor`（`#include <handle/uvcpp_process_supervisor.h>`）在
+`uvcpp_process` 之上补"长期跑外部程序"需要的那几件事：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_process_supervisor sup(&loop);
+uvcpp::uvcpp_process_spec spec;
+spec.file = "/usr/bin/ffmpeg";
+spec.args = {"-i", in, "-o", out};
+spec.timeout_ms = 10 * 60 * 1000;
+spec.kill_tree = true;
+sup.spawn(spec, on_output, on_exit);
+```
+
+- **有界输出**：`capture_stdout/stderr` 打开管道，数据同时给回调和尾缓冲
+  （`max_output_bytes`，默认 64 KiB/流）；超限丢最旧字节并计入
+  `stdout_truncated`，不会无限吃内存。
+- **超时 / 取消**：先 `SIGTERM`，等 `stop_grace_ms` 再强杀；退出回调**恰好一次**，
+  结果里 `timed_out/cancelled` 说明是谁先动手。
+- **POSIX 进程组终止**：`kill_tree=true`（默认）用 `UV_PROCESS_DETACHED` 让子进程
+  自成进程组，信号发给整组，父进程退出后不留子进程；Windows 上这一版返回
+  `UV_ENOTSUP`（Job Object 是 issue #69 的后续）。
+- 不绑定具体程序、不维护业务状态机；重启策略/任务队列留给上层（#67）。
+- 用例：`process_supervisor_func.cpp`（POSIX）。
 
 ---
 
