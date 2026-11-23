@@ -19,6 +19,42 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.11.0 重点 (Highlights)
+
+`v1.10.0` 之后的开发线：把上一版“留给后续”的那几块补齐 —— 服务化部署、跨进程
+WebSocket 广播、进程重启策略、作业队列的持久化与异步 handler、共享会话与登录限流。
+
+- **服务化部署**（[#73](https://github.com/Antruly/libuvcpp/issues/73)）。
+  `uvcpp_service_run(app, argc, argv)` 一行接入：Windows 服务
+  install / uninstall / start / stop / status（SCM、失败后自动重启）、前台模式
+  SIGINT/SIGTERM 优雅停机、工作目录与环境变量、stdout/stderr 日志重定向与轮转、
+  单实例互斥。CI 的 MSVC `web` 格新增 `web_app_service_scm_func`：真装、真启、
+  `TerminateProcess` 强杀后等 SCM 拉起、stop、uninstall。
+- **跨进程 WebSocket 广播**（[#74](https://github.com/Antruly/libuvcpp/issues/74)）。
+  `uvcpp_ws_bus` 基于 Redis pub/sub：订阅与发布各用一条连接（RESP2 下订阅连接
+  不能 `PUBLISH`）、节点 id 防回环、有界待发队列、指数退避重连并重新订阅。
+  用例里有一条**真两进程**（fork + exec）的双向投递。
+- **进程监管重启策略**（[#69](https://github.com/Antruly/libuvcpp/issues/69) 收尾）。
+  `restart_max` / `restart_backoff_ms` / `restart_backoff_max_ms` 与带
+  `on_restart` 的 `spawn()` 重载；非零退出/被信号杀死才重启，超时、取消、启动
+  失败都不重启，最终 `on_exit` 恰好一次。
+- **作业队列**（[#67](https://github.com/Antruly/libuvcpp/issues/67) 收尾）。
+  `uvcpp_db_job_store`：SQLite / MySQL / PostgreSQL 一份实现，按驱动选占位符与
+  upsert；`register_async_handler`：handler 在 loop 线程上跑、用 `done()` 结束。
+  跨实例恢复与异步重试/取消/超时都有用例；CI 的 `db-servers` 格对三种方言真跑。
+- **共享会话与鉴权**（[#70](https://github.com/Antruly/libuvcpp/issues/70) 收尾）。
+  `uvcpp_async_session_store` + `uvcpp_async_session_middleware()` + Redis 适配器
+  （两个实例共享同一 Redis 的登录态）；`uvcpp_login_limiter`（失败窗口/锁定/审计）、
+  `uvcpp_pbkdf2_sha256`（OpenSSL 构建）。
+
+**测试与门禁**：本地全量 177 条用例；新增/更新的 CI 覆盖包括 Windows SCM 真装真卸、
+真两进程 WS 桥、SQLite/MySQL/PG 作业持久化、双实例共享会话。文档门禁（引用锁、
+版本串、片段编译、CI 布局）全绿。
+
+**破坏性**：C ABI 仍是 `1`、函数集合不变。C++ 侧 `uvcpp_process_spec` /
+`uvcpp_process_result` / `uvcpp_process_supervisor_stats` 尾部新增成员，并新增
+`spawn()` 重载 —— **源码兼容，二进制需要重编**。
+
 ## v1.10.0 重点 (Highlights)
 
 `v1.9.1` 之后的开发线：**长期运行的服务缺的那几块拼图** —— 异步事务、定时任务、
