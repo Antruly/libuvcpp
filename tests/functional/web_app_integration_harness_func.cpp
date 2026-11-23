@@ -49,6 +49,10 @@
 
 #include <uv.h>
 
+#ifndef _WIN32
+#include <dirent.h>
+#endif
+
 #include <uvcpp/uvcpp_define.h>
 
 #if UVCPP_WEBAPP_ENABLE && UVCPP_WEB_WS_ENABLE
@@ -114,6 +118,18 @@ void skip_cap(const char* why) {
   std::printf("== %s: SKIP (%s)\n", cap_name.c_str(), why);
   std::fflush(stdout);
 }
+
+#ifndef _WIN32
+/// 进程打开的 fd 数（Linux 的 `/proc/self/fd` 是唯一不需要额外库的办法）。
+size_t fd_count() {
+  DIR* d = ::opendir("/proc/self/fd");
+  if (d == nullptr) return 0;
+  size_t n = 0;
+  while (::readdir(d) != nullptr) ++n;
+  ::closedir(d);
+  return n;
+}
+#endif
 
 long long ms_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -465,6 +481,10 @@ void cap_ws_and_metrics() {
   metrics.install(app);
   metrics.set_ready_check([](std::string&) { return true; });
 
+#ifndef _WIN32
+  const size_t fd_before = fd_count();
+#endif
+
   if (app.start_background() != 0) {
     check(false, "app.start_background");
     end_cap();
@@ -561,6 +581,15 @@ void cap_ws_and_metrics() {
             std::to_string(app.connection_count()) + "）");
   check(rooms.room_count() == 0,
         "停机后房间表归零（实际 " + std::to_string(rooms.room_count()) + "）");
+#ifndef _WIN32
+  // 资源泄漏：起服务之前与收尾之后的 fd 数应当回到同一水位（允许少量抖动 ——
+  // 动态库/驱动自己的缓存不在我们账上）。这条能抓住"每次起停漏一个 epoll/管道"
+  // 那类慢性泄漏。
+  const size_t fd_after = fd_count();
+  check(fd_after <= fd_before + 8,
+        "起停一轮之后 fd 水位回到基线（" + std::to_string(fd_before) +
+            " -> " + std::to_string(fd_after) + "）");
+#endif
   end_cap();
 }
 

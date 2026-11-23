@@ -13,10 +13,10 @@
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
 `v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9`、`1.8.10` 是它之后的补丁版，
 `1.8.11`–`1.8.15` 折进 `v1.9.0`，`v1.9.1` 是它之后的补丁版（不折叠、直接发布）；
-本行之后的 `1.10.0-dev` 是 `v1.10.0` 的开发线。想按时间线读，翻到最后的「逐个版本」。
+`1.10.0-dev` 折进 `v1.10.0`（已发布）。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.10.0-dev**（开发版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`、`v1.9.0`、`v1.9.1`。
+当前源码树是 **1.10.0**（发布版） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`、`v1.9.0`、`v1.9.1`、`v1.10.0`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -3377,7 +3377,8 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **集成测试 harness**（`1.10.0-dev`，#75）：
   `tests/functional/web_app_integration_harness_func.cpp` 把事务、作业队列、
   WebSocket 房间 + `/health` `/ready` `/metrics`、进程监管放进同一个进程跑，
-  每格收尾检查连接池/队列/房间/连接表/监管器的资源账。外部 DB 默认跳过
+  每格收尾检查连接池/队列/房间/连接表/监管器的资源账，Linux 上另查
+  **fd 水位**（起停一轮后回到基线）。外部 DB 默认跳过
   （`UVCPP_DB_TEST_*_URL` / `UVCPP_DB_TEST_URL`，CI 的 `db-servers` 格子用
   `UVCPP_DB_TEST_REQUIRE=1` 强制真连）。
 - **Win7 官方包分档：VS2015 / MinGW 是 `full`，VS2013 是 `web`**（`1.8.5`）。
@@ -4146,6 +4147,34 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.10.0 (2026-11-23)
+
+`v1.9.1` 之后的一版：**长期运行的服务缺的那几块拼图** —— 异步事务、定时任务、
+进程监管（含 Windows Job Object）、作业队列、会话/RBAC/CSRF、指标与 WebSocket
+房间，外加一套集成测试 harness。
+
+**新增**：
+
+- 数据库异步事务（`uvcpp_db_pool::transaction()`，连接亲和 + 自动提交/回滚）。
+- `uvcpp_cron`、`uvcpp_process_supervisor`（POSIX 进程组 / Windows Job Object）、
+  `uvcpp_job_queue`（并发键、重试退避、超时、取消、重启恢复）。
+- `uvcpp_metrics_registry` + `uvcpp_web_metrics`（`/health` `/ready` `/metrics`）。
+- `uvcpp_ws_rooms`（房间/广播/慢客户端策略）。
+- `uvcpp_session`（可插拔存储、安全 Cookie）与 `uvcpp_web_auth`（RBAC、CSRF）。
+- 集成测试 harness（`web_app_integration_harness_func`）；CI 的 `db-servers`
+  格子同时开 webapp 并用 `UVCPP_DB_TEST_REQUIRE=1` 强制真连。
+
+**修复**：
+
+- session 过期判定的边界（`fix/session-expiry`）。
+- metrics 并发读写的竞态（`fix/metrics-race`）。
+
+**没有做**：Windows 服务包装（#73）、跨进程 WebSocket 广播（#74）、进程监管的
+可选重启策略（#69 剩余）、会话的 Redis/MySQL/SQLite 存储适配器。新增模块
+**不进 C ABI**。
+
+**破坏性**：无（只新增模块与公开 API；C ABI 版本仍是 `1`）。
 
 ### v1.9.1 (2026-10-29)
 
