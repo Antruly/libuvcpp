@@ -27,6 +27,14 @@ if(NOT UVCPP_BUILD_WEBAPP)
   # 判据是"每一条相关的过滤器都能命中它"，不是"名字里带了个 webapp 的词"。
 endif()
 
+  # 服务化用例（`web_app_service_func`）只在 POSIX 上真跑：它靠 fork + SIGTERM
+  # 验"前台模式 + 优雅排空"，Windows 上该验的是 SCM，那条路装/卸服务要管理员
+  # 权限、也不属于 ctest 该干的活。**别的 `service` 命名用例目前没有**，这条
+  # 正则按名字摘。
+  if(WIN32)
+    list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*service[^/]*\.cpp$")
+  endif()
+
 # Exclude SSL tests when OpenSSL is not enabled.
 #
 # 不加这一条的话，关掉 OpenSSL 时那个用例**仍然编译、仍然被 ctest 计入、
@@ -331,6 +339,13 @@ endforeach()
 # 任何外部服务，误返回 3 只会把真红伪装成跳过。
 if(TARGET test_redis_real_func)
   set_tests_properties(test_redis_real_func PROPERTIES SKIP_RETURN_CODE 3)
+endif()
+
+# 跨进程 WS 广播桥（`web_app_ws_bus_redis_func`）用同一组变量与同一档语义：
+# 没有 `UVCPP_REDIS_TEST_URL` 时返回 3（未判定），REQUIRE=1 时缺 URL 是失败。
+if(TARGET test_web_app_ws_bus_redis_func)
+  set_tests_properties(test_web_app_ws_bus_redis_func
+                       PROPERTIES SKIP_RETURN_CODE 3)
 endif()
 
 # 两条 IPv6 回环用例：绑 `::1` 失败时返回 3（= 这台机器没开 IPv6 栈）。

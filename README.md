@@ -2,7 +2,7 @@
   <img src="./uvcpp.svg" alt="libuvcpp logo" width="160" height="160">
 </p>
 
-[![version](https://img.shields.io/badge/version-1.10.0-blue.svg)](./RELEASE.md)
+[![version](https://img.shields.io/badge/version-1.11.0--dev-blue.svg)](./RELEASE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI · Linux · Ubuntu](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-linux-ubuntu.yml)
 [![CI · Windows · MSVC](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml/badge.svg)](https://github.com/Antruly/libuvcpp/actions/workflows/ci-windows-msvc.yml)
@@ -14,7 +14,7 @@
 🔧 Modern C++11 wrapper for [libuv](https://github.com/libuv/libuv) — event-driven I/O with
 object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 6455), and SSL/TLS.
 
-- **Version**: `1.10.0` — **Author**: `zhuweiye` — **License**: `MIT`
+- **Version**: `1.11.0-dev` — **Author**: `zhuweiye` — **License**: `MIT`
 - **Languages**: [English](./README.md) · [中文](./README.zh.md)
 
 ## Download
@@ -311,7 +311,7 @@ CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy.
 | SOCKS5 | [doc/socks5-guide.md](doc/socks5-guide.md) | A complete client and server: CONNECT / BIND / UDP ASSOCIATE, no-auth and RFC 1929, IPv4/IPv6/domains; the transparent CONNECT proxy built into `uvcpp_tcp_client` / HTTP / WS clients, the UDP data plane, backpressure and timeouts, and the "the defaults are an open proxy" warning |
 | web (HTTP half) | [doc/web-http-guide.md](doc/web-http-guide.md) | HTTP server/client/parser/static server; why shutdown takes two calls |
 | web (WS half) | [doc/web-ws-guide.md](doc/web-ws-guide.md) | WebSocket handshake, frames, close codes |
-| webapp (framework) | [doc/webapp-guide.md](doc/webapp-guide.md) | Routing, middleware, request/response, upload, static, WebSocket, logging — multi-loop scaling (§19), metrics/health endpoints (§20), WebSocket rooms (§21), sessions (§22) and RBAC/CSRF (§23) |
+| webapp (framework) | [doc/webapp-guide.md](doc/webapp-guide.md) | Routing, middleware, request/response, upload, static, WebSocket, logging — multi-loop scaling (§19), metrics/health endpoints (§20), WebSocket rooms (§21), sessions (§22), RBAC/CSRF (§23) and service deployment (§24) |
 | webapp (support types) | [doc/webapp-support-guide.md](doc/webapp-support-guide.md) | The seven types under the framework: connection identity, web utilities, MIME, multipart, file transfer, per-request context, console logging |
 | ssl | [doc/ssl-guide.md](doc/ssl-guide.md) | TLS context and per-connection wrapper — the shortest header set and the easiest to get wrong |
 | http2 | [doc/http2-guide.md](doc/http2-guide.md) | Using the low-level session/connection layer |

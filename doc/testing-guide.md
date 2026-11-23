@@ -1,4 +1,4 @@
-# Testing Guide
+﻿# Testing Guide
 
 How the test suite is organised, how to add a test, what the scripts in `tests/tools/` do, and
 why several of the conventions here exist — most of them were paid for once already.
@@ -478,6 +478,23 @@ I2/I3/I4 不依赖任何外部服务：没有 DB URL 时 I1 单独印一行 SKIP
 **不算失败**。退出码：0 = 已判过的格全过；1 = 有格失败。CI 的 `db-servers`
 格子同时开 webapp 与远程后端，并用 `UVCPP_DB_TEST_REQUIRE=1` 让 I1 真的连库
 （缺 URL 即红，不许静默跳过）。
+
+### 跨进程 WS 桥与服务化（#74 / #73）
+
+两条新用例各自钉一块"单进程内测不出来"的东西：
+
+| 用例 | 覆盖 | 外部依赖 |
+|---|---|---|
+| `web_app_ws_bus_redis_func` | `uvcpp_ws_bus`：跨节点投递、不回环、二进制安全、降级排队 `UV_ENOBUFS`、断线重连后重新订阅 | 真 Redis；`UVCPP_REDIS_TEST_URL` 缺省时退 3（SKIP），`UVCPP_REDIS_TEST_REQUIRE=1` 时缺依赖/失败都是红 |
+| `web_app_service_func` | `uvcpp_service_run()`：前台模式 SIGTERM 优雅停机、在途请求排空、单实例互斥、日志落盘与轮转、子命令错误码 | 无；**Windows 上不注册**（SCM 那条路要管理员权限，不属于 ctest） |
+
+```bash
+ctest --test-dir <build> -R "test_web_app_ws_bus_redis_func|test_web_app_service_func" \
+      --output-on-failure
+```
+
+`web_app_service_func` 自己 fork 子进程再发 SIGTERM —— 它验的是"信号进来之后
+进程怎么收场"，不是"信号处理函数注册成功没有"。
 
 ## Running the tests by hand
 

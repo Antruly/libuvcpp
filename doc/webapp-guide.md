@@ -1601,6 +1601,37 @@ rooms.broadcast_text("lobby", msg.data(), msg.size());
 - 只接 **h1** 会话；跨进程（Redis pub/sub）见 issue #74。用例：
   `web_app_ws_rooms_func.cpp`。
 
+### 21.1 跨进程广播：`uvcpp_ws_bus`（issue #74）
+
+多 worker / 多实例部署时，同一条广播要发给**别的进程**里的连接。`uvcpp_ws_bus`
+把 Redis pub/sub 收成 `uvcpp_ws_rooms` 的一层：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_ws_bus_options bopts;
+bopts.channel_prefix = "myapp:ws:";   // 默认 "uvcpp:ws:"
+
+uvcpp::uvcpp_ws_bus bus(&loop, bopts);
+bus.attach(&rooms);                   // 远端消息 → 本进程按房间广播
+bus.start("redis://127.0.0.1:6379/0");
+
+// 发布：本地那一半总是执行，再经 Redis 发给别的节点
+bus.broadcast(rooms, "room:42", data, len);
+```
+
+- **两条连接**：RESP2 下进入订阅模式的连接不能 `PUBLISH`（Redis 会回 `-ERR`），
+  所以本类内部订阅与发布各用一条连接；应用不用管。
+- **不回环**：消息带发布节点的 `node_id`，默认不收自己发的；`deliver_loopback=true`
+  可以打开（诊断/单机验证用）。
+- **降级不是失败**：Redis 不可用或断线时 `publish()` 仍受理并进有界待发队列
+  （`max_pending`，满则 `UV_ENOBUFS`）；`broadcast()` 的本地那一半不受影响。
+- **断线重连**：按 `reconnect_ms` 起、翻倍到 `reconnect_max_ms`，成功后重新订阅
+  并补发队列；`snapshot()` 里 `reconnects` / `degraded` / `last_error` 可观测。
+- 信封格式 `node_len(4, BE) | node | seq(8, BE) | payload`，**二进制安全**
+  （payload 里的 ` `、CRLF 原样到达）。
+- 与其他 webapp 组件一样，**只在构造时给的那条循环的线程上调用**。用例：
+  `web_app_ws_bus_redis_func.cpp`（`UVCPP_REDIS_TEST_URL`，缺省 SKIP）。
+
 ---
 
 ## 22. 会话与安全 Cookie
@@ -1667,6 +1698,66 @@ app.post("/login", [](uvcpp::uvcpp_web_request& req, ...) {
 
 ---
 
+## 24. 服务化部署：Windows 服务与前台模式（issue #73）
+
+`uvcpp_service.h` 让 `main()` 多一行就能装成 Windows 服务，或者在没有 SCM 的
+Linux/macOS 上以前台模式跑（信号驱动优雅停机）：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+int main(int argc, char** argv) {
+  uvcpp::uvcpp_web_app app;
+  app.set_host("0.0.0.0").set_port(8080);
+  app.get("/hello", handler);
+  return uvcpp::uvcpp_service_run(app, argc, argv);
+}
+```
+
+命令行（第一条非选项参数是子命令，缺省 `run`）：
+
+| 子命令 | 作用 |
+|---|---|
+| `run [--foreground]` | 运行。Windows 被 SCM 拉起时走服务模式，直接跑时自动落回前台 |
+| `install` / `uninstall` | Windows：注册 / 停止并注销服务（要管理员权限） |
+| `start` / `stop` / `status` | Windows：SCM 控制与状态查询 |
+
+选项：`--name`、`--display-name`、`--description`、`--config`、`--log`、
+`--log-max-mb`、`--log-files`、`--workdir`、`--env K=V`、`--grace-ms`、
+`--no-single-instance`、`--foreground`。
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_service_options opts;
+opts.name          = "myapp";
+opts.log_file      = "/var/log/myapp.log";
+opts.log_max_bytes = 16u * 1024u * 1024u;   // 16 MiB
+opts.log_max_files = 5;
+opts.configure     = [](uvcpp::uvcpp_web_app& a, const std::string& cfg) {
+  return load_config(a, cfg);               // --config 原样交给你，格式由你定
+};
+return uvcpp::uvcpp_service_run(app, opts, argc, argv);
+```
+
+- **优雅停机**：前台模式的 SIGINT/SIGTERM、Windows 服务的 STOP/SHUTDOWN 都走
+  `uvcpp_web_app::stop()` —— 不再接新连接、等在途请求（最多
+  `shutdown_grace_ms`）→ 关剩下的连接 → 停循环；本模块随后 `join()`。
+- **单实例**：默认开。Windows 用命名互斥体，POSIX 用 `$TMPDIR` 下的 `flock`
+  锁文件（进程死掉自动释放）。第二个实例明确报 `UV_EBUSY` 退出。
+- **日志**：`--log` 给了才把 `stdout`/`stderr` 重定向过去；
+  `--log-max-mb`/`--log-files` 控制轮转（`x.log` → `x.log.1` …，1 秒一次的
+  看门狗检查大小）。
+- **崩溃后拉起**由 SCM 负责：`install` 会配 `SC_ACTION_RESTART`（5 秒后重启，
+  最多 3 次，一天复位）。干净停机不触发。Windows 多进程仍按
+  [多进程横向扩展设计](./worker-process-design.md) 另行处理（#32）。
+- **暂停/继续不支持**：不接受 `SERVICE_ACCEPT_PAUSE_CONTINUE`，SCM 上那两个
+  按钮是灰的 —— 应用层没有"暂停"语义，不装作支持。
+- POSIX 上 `install`/`uninstall`/`start`/`stop`/`status` 返回 `UV_ENOTSUP`：
+  用 systemd / launchd 管进程，`run` 就是它要跑的前台命令。
+- 用例：`web_app_service_func.cpp`（POSIX：信号停机、在途请求排空、单实例、
+  日志轮转、子命令错误码）。
+
+---
+
 ## 可运行示例
 
 `examples/webapp_demo.cpp` —— 默认**自校验**：起一个 app（路由 + 中间件 + 静态 +
@@ -1710,6 +1801,7 @@ cmake --build build --config Release --target webapp_demo
 | HTTPS / WSS | `app.enable_ssl(cert, key)`（§12） |
 | 跑阻塞的活 | `uvcpp_work` + `next` 的副本（§14） |
 | 打日志 | `UVCPP_LOG_INFO(category) << ...`（§16） |
+| 装成 Windows 服务 / 前台部署 | `uvcpp_service_run(app, argc, argv)`（§24） |
 
 相关文档：[CI 维护指南](./ci-guide.md)、[项目 README](../README.zh.md)、
 [多进程横向扩展设计](./worker-process-design.md)（仍是设计稿，未实现）、
