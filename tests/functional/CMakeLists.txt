@@ -358,6 +358,13 @@ if(TARGET test_web_app_ws_bus_redis_func)
                        PROPERTIES SKIP_RETURN_CODE 3)
 endif()
 
+# 异步会话 + Redis 共享 store（`web_app_session_redis_func`）同一档：没有
+# `UVCPP_REDIS_TEST_URL` 时退 3（未判定），REQUIRE=1 时缺 URL 是失败。
+if(TARGET test_web_app_session_redis_func)
+  set_tests_properties(test_web_app_session_redis_func
+                       PROPERTIES SKIP_RETURN_CODE 3)
+endif()
+
 # Windows SCM 用例：装/起/停/卸服务 + 强杀一次等 SCM 拉起，比普通用例慢；
 # 没有管理员权限时退 3（SKIP）—— CI 的 Windows runner 是管理员，那里真跑。
 if(TARGET test_web_app_service_scm_func)

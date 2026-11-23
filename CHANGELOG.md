@@ -1818,11 +1818,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 公开契约与安全
 
+- **共享会话存储**（`1.11.0-dev`，#70 剩余）：`uvcpp_async_session_store` +
+  `uvcpp_async_session_middleware()`（加载完成前挂起链，不阻塞 loop）+ Redis
+  适配器 `uvcpp_redis_session_store`（`uvcpp_session::encode()` 二进制值、TTL 走
+  `EX`、断线重连、未就绪按未命中）。用例 `web_app_session_redis_func`：两个实例
+  共享同一 Redis —— 登录、跨实例读回同一 sid 的 uid、注销后 401。
 - **登录失败限流 / 密码哈希 / 审计**（`1.11.0-dev`，#70 剩余）：
   `uvcpp_login_limiter`（失败窗口 + 锁定 + 审计事件，线程安全、不依赖事件循环）、
   `uvcpp_pbkdf2_sha256`（`UVCPP_OPENSSL_ENABLE=1` 才编：随机盐、常量时间比较、
   畸形/超长编码拒绝）。用例 `web_app_auth_func` 的限流组与
-  `web_ssl_app_auth_password_func`。
+  `web_ssl_app_auth_password_func`；共享会话见上一条。
 - **会话与安全 Cookie**（`1.10.0-dev`，#70 第一批）：`uvcpp_session` ——
   可插拔存储（内置内存实现）、`sid` Cookie（HttpOnly / SameSite / Secure /
   Max-Age）、过期、续期、注销与 `regenerate()`。用例 `web_app_session_func`。

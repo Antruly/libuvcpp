@@ -487,10 +487,11 @@ I2/I3/I4 不依赖任何外部服务：没有 DB URL 时 I1 单独印一行 SKIP
 |---|---|---|
 | `web_app_ws_bus_redis_func` | `uvcpp_ws_bus`：跨节点投递、不回环、二进制安全、降级排队 `UV_ENOBUFS`、断线重连后重新订阅，外加**真两进程**（fork + exec 一个节点，双向投递） | 真 Redis；`UVCPP_REDIS_TEST_URL` 缺省时退 3（SKIP），`UVCPP_REDIS_TEST_REQUIRE=1` 时缺依赖/失败都是红 |
 | `web_app_service_func` | `uvcpp_service_run()`：前台模式 SIGTERM 优雅停机、在途请求排空、单实例互斥、日志落盘与轮转、子命令错误码 | 无；**Windows 上不注册**（POSIX 专属，靠 fork） |
+| `web_app_session_redis_func` | 异步会话中间件 + `uvcpp_redis_session_store`：登录写会话、**另一个实例**按同一 sid 读回、注销后旧 Cookie 401 | 真 Redis；`UVCPP_REDIS_TEST_URL` 缺省退 3，REQUIRE=1 时缺依赖即红 |
 | `web_app_service_scm_func` | Windows SCM：install → start → 访问 `/hello` → 强杀服务进程等 SCM 按失败动作拉起（pid 变化）→ stop 优雅收场 → uninstall 后 `status` 打不到 | **要管理员权限**；默认不编，`-DUVCPP_TEST_SERVICE_SCM=ON`（CI 只开在 MSVC `web` 格）才注册，没权限时退 3 |
 
 ```bash
-ctest --test-dir <build> -R "test_web_app_ws_bus_redis_func|test_web_app_service" \
+ctest --test-dir <build> -R "test_web_app_ws_bus_redis_func|test_web_app_session_redis_func|test_web_app_service" \
       --output-on-failure
 ```
 

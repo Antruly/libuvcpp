@@ -27,9 +27,11 @@
  * （HttpOnly / Secure / SameSite / Path / Max-Age）、过期与滑动续期、注销、
  * 请求级 `uvcpp_session*` 取用。
  *
- * **没做**（issue #70 的其余部分，后续单独提）：Redis / MySQL / SQLite
- * 适配器、密码哈希、登录限流、RBAC 中间件、CSRF token、审计事件。这些都需要
- * 各自的选型或业务模型，不塞进第一版。
+ * **共享存储**：同步 store 之外还有 `uvcpp_async_session_store` +
+ * `uvcpp_async_session_middleware()` —— 加载完成前挂起链，Redis 适配器是
+ * `<webapp/uvcpp_redis_session_store.h>`。密码哈希 / 登录限流 / RBAC / CSRF /
+ * 审计在同目录的 `uvcpp_web_auth.h`。MySQL/SQLite 会话适配器与并发登录策略
+ * 仍是 #70 的后续。
  *
  * ## 语义
  *
@@ -58,6 +60,7 @@
 
 #include <cstddef>
 #include <ctime>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -70,6 +73,7 @@ class uvcpp_web_request;
 class uvcpp_web_response;
 class uvcpp_session;
 class uvcpp_session_store;
+class uvcpp_async_session_store;
 struct uvcpp_session_options;
 
 // **这两条前置声明必须带 `UVCPP_API`，并且必须排在类里的 friend 声明之前。**
@@ -119,8 +123,25 @@ class UVCPP_API uvcpp_session {
   /// 标记注销。中间件看到空 id 就不再 `save()`。
   void invalidate() { id_.clear(); }
 
+  /**
+   * @brief 二进制安全的自包含编码（id / 创建与过期时间 / 全部键值）。
+   *
+   * 给共享存储用：格式由本类定义、不依赖 JSON；`decode()` 失败时对象保持不变。
+   * 格式：`u32 id_len | id | i64 created | i64 expires | u32 count |
+   *        (u32 klen | k | u32 vlen | v)*`，全部小端。
+   */
+  std::string encode() const;
+  bool        decode(const std::string& in);
+
  private:
   friend class uvcpp_memory_session_store;
+  friend uvcpp_web_middleware uvcpp_async_session_middleware(
+      std::shared_ptr<uvcpp_async_session_store> store,
+      const uvcpp_session_options&               opts);
+  friend void uvcpp_async_session_logout(uvcpp_web_request& req,
+                                         uvcpp_web_response& resp,
+                                         uvcpp_async_session_store& store,
+                                         const uvcpp_session_options& opts);
   friend uvcpp_web_middleware uvcpp_session_middleware(
       std::shared_ptr<uvcpp_session_store> store,
       const uvcpp_session_options&         opts);
@@ -202,6 +223,53 @@ UVCPP_API uvcpp_web_middleware uvcpp_session_middleware(
 
 /// 取本请求的会话；中间件没装时返回 nullptr。
 UVCPP_API uvcpp_session* uvcpp_session_of(uvcpp_web_request& req);
+
+// ===========================================================================
+// 异步会话存储（共享 Redis / 数据库用）
+// ===========================================================================
+
+/**
+ * @brief 异步会话存储接口（issue #70 的共享存储）。
+ *
+ * 三个操作的回调都**在同一 loop 线程**上执行、且每个操作**恰好回调一次**。
+ * `load` 失败（连接断了、找不到、过期）一律按"未命中"回调 `done(false)` ——
+ * 中间件会新建一个会话；这是可用性优先的取舍，写在 `ready()` 上，调用方可以
+ * 在未就绪时拒绝请求而不是静默换会话。
+ *
+ * `save/destroy` 的 `done` 可以省略（响应已经发出去了，失败只影响下一次请求）。
+ */
+class UVCPP_API uvcpp_async_session_store {
+ public:
+  virtual ~uvcpp_async_session_store() {}
+
+  /// 连接是否就绪。未就绪时中间件不会尝试 `load`（直接按未命中处理）。
+  virtual bool ready() const = 0;
+
+  virtual void load(const std::string& id, uvcpp_session& out,
+                    std::function<void(bool found)> done) = 0;
+
+  virtual void save(const uvcpp_session& s,
+                    std::function<void(bool ok)> done = nullptr) = 0;
+
+  virtual void destroy(const std::string& id,
+                       std::function<void(bool ok)> done = nullptr) = 0;
+};
+
+/**
+ * @brief 异步会话中间件。语义与同步版一致，只是 `store->load()` 完成前挂起链。
+ *
+ * 只能在 loop 线程上处理请求（与其它中间件一致）。`next` 的副本会保住上下文，
+ * 所以异步加载回调晚到也没关系。
+ */
+UVCPP_API uvcpp_web_middleware uvcpp_async_session_middleware(
+    std::shared_ptr<uvcpp_async_session_store> store,
+    const uvcpp_session_options&               opts = uvcpp_session_options());
+
+/// 异步 store 版的注销：删记录 + 过期 Cookie。
+UVCPP_API void uvcpp_async_session_logout(
+    uvcpp_web_request& req, uvcpp_web_response& resp,
+    uvcpp_async_session_store& store,
+    const uvcpp_session_options& opts = uvcpp_session_options());
 
 /// 按 options 发/刷新一条会话 Cookie（handler 在 `regenerate()` 之后用）。
 UVCPP_API void uvcpp_session_set_cookie(uvcpp_web_response& resp,

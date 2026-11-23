@@ -1224,6 +1224,7 @@ jobs:
                    test_capi_db_func test_redis_real_func \
                    test_db_job_store_func \
                    test_web_app_ws_bus_redis_func \
+                   test_web_app_session_redis_func \
                    test_web_app_integration_harness_func; do
             if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "$t"; then
               echo "::error title=db-servers::$t 没被注册 —— 这个后端被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"

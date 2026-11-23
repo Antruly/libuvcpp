@@ -1663,9 +1663,16 @@ app.post("/login", [](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& 
 - 防会话固定：登录成功时 `session->regenerate()`，随后用
   `uvcpp_session_set_cookie(resp, *session, opts)` 把新 id 发给客户端。
 - 存储接口 `uvcpp_session_store` 可替换（本文件带内存实现，默认上限 10000 条、
-  按最早过期逐出）；多实例共享存储需要 Redis 适配器（后续）。
+  按最早过期逐出）。
+- **多实例共享存储**：`uvcpp_async_session_store` + `uvcpp_async_session_middleware()`
+  —— 加载完成前挂起中间件链，不阻塞 loop 线程；Redis 适配器是
+  `uvcpp_redis_session_store`（`<webapp/uvcpp_redis_session_store.h>`，需要
+  `UVCPP_REDIS_ENABLE`）。值用 `uvcpp_session::encode()` 的二进制格式，TTL 走
+  Redis `EX`。**未就绪时 `load` 按未命中处理**（新建会话）——这是可用性优先的
+  取舍，暴露在 `ready()` 上；要拒绝请求就自己在中间件之前看它。
 - 只在 loop 线程上访问；store 实现要自己对多线程安全。
-  用例：`web_app_session_func.cpp`。
+  用例：`web_app_session_func.cpp`（内存）、`web_app_session_redis_func.cpp`
+  （两个实例共享 Redis：登录、跨实例读回、注销失效）。
 
 ---
 
