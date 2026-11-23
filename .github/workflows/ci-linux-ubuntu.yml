@@ -1109,7 +1109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev \
-            libmongoc-dev ninja-build
+            libmongoc-dev zlib1g-dev ninja-build
 
       - name: Configure & Build
         shell: bash
@@ -1138,7 +1138,8 @@ jobs:
             #   量 —— URL 就在下面 Test 那步的 `env:` 里，C 用例读的是同一批变量。
             cmake -S . -B "$tree" -DCMAKE_BUILD_TYPE=Release \
               -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
-              -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON -DUVCPP_ENABLE_CAPI=ON \
+              -DUVCPP_BUILD_NET=ON -DUVCPP_BUILD_WEB=ON \
+              -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=OFF \
               -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
               -DUVCPP_ENABLE_DB_MONGODB=ON \
@@ -1156,7 +1157,7 @@ jobs:
             # `db: MongoDB 后端开` 是 1.7.5 加的：MongoDB 与 ODBC 一样走的是
             # "找不到头就 `set(... OFF)`"那条静默降级，cache 里照旧 ON —— 所以
             # 这一条必须看配置消息（正是下面那段注释说的第一种形状）。
-            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'db: MongoDB 后端开' 'Including db module in build' 'Including capi module in build'; do
+            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'db: MongoDB 后端开' 'Including db module in build' 'Including capi module in build' 'Including webapp module in build'; do
               grep -q "$m" ci-logs/db-servers-configure.log || {
                 why=$(grep -E 'db:|CMake (Warning|Error)|找不到|No such' \
                   ci-logs/db-servers-configure.log | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
@@ -1220,7 +1221,8 @@ jobs:
           # 段排除块里）。运行期加载那条路的覆盖在 mingw 腿与两条发布腿的 configure
           # 上，那里 REQUIRED 的是"链接行干净"，不是 ctest。
           for t in test_db_mysql_func test_db_pgsql_func test_db_mongodb_func \
-                   test_capi_db_func test_redis_real_func; do
+                   test_capi_db_func test_redis_real_func \
+                   test_web_app_integration_harness_func; do
             if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "$t"; then
               echo "::error title=db-servers::$t 没被注册 —— 这个后端被强制关了，还是 tests/functional/CMakeLists.txt 的过滤正则又写错了？"
               ctest --test-dir "$tree" -N 2>&1 | tail -20

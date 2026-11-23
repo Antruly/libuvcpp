@@ -29,24 +29,27 @@
   真 MySQL/PostgreSQL 上用 `CONNECTION_ID()` / `pg_backend_pid()` 验证"多条语句
   同一条连接"，50 个并发事务在 max=4 的池上全部落地。
 - **长任务三件套。** `uvcpp_cron`（UTC、5/6 段、`next_utc()`）；
-  `uvcpp_process_supervisor`（有界输出、超时、进程组终止、取消；
-  [#69](https://github.com/Antruly/libuvcpp/issues/69) 的 POSIX 批，Windows 的
-  Job Object 未做）；`uvcpp_job_queue`（并发键串行、重试退避、超时、取消、
+  `uvcpp_process_supervisor`（有界输出、超时、进程树终止、取消；POSIX 进程组 /
+  Windows Job Object，[#69](https://github.com/Antruly/libuvcpp/issues/69) 的
+  重启策略仍留给上层）；`uvcpp_job_queue`（并发键串行、重试退避、超时、取消、
   重启恢复；[#67](https://github.com/Antruly/libuvcpp/issues/67) 第一批，异步
   handler 与持久化后端适配器未做）。
 - **可观测性。** `uvcpp_metrics_registry`（Counter/Gauge/Histogram，Prometheus
   文本）与 `uvcpp_web_metrics` 的 `/health`、`/ready`、`/metrics`。
 - **WebSocket 房间。** `uvcpp_ws_rooms`：join/leave、按房间群发、断线自动退订、
   慢客户端策略（DROP / CLOSE 1001）。
+- **集成测试 harness**（[#75](https://github.com/Antruly/libuvcpp/issues/75)）：
+  事务 / 作业队列 / WebSocket 房间 + 运维端点 / 进程监管同进程跑，每格查资源账；
+  外部 DB 默认跳过，CI 的 `db-servers` 格子强制真连。
 - **会话与安全。** `uvcpp_session`（安全 Cookie、过期/续期/注销/regenerate）与
   `uvcpp_web_auth`（RBAC、双提交 CSRF）—— [#70](https://github.com/Antruly/libuvcpp/issues/70)
   的第一、二批；Redis/MySQL/SQLite 存储适配器、密码哈希/限流/审计未做。
 
 **没有做的（如实列出）**：Windows 服务包装
 （[#73](https://github.com/Antruly/libuvcpp/issues/73)）、跨进程 WebSocket 广播
-（[#74](https://github.com/Antruly/libuvcpp/issues/74)）、数据库/作业队列/WS/
-进程监管的集成测试装置（[#75](https://github.com/Antruly/libuvcpp/issues/75)）。
-新增模块**不进 C ABI**（C ABI 仍是 1.5.3 那八片、402 个函数）。
+（[#74](https://github.com/Antruly/libuvcpp/issues/74)）、进程监管的**重启策略**
+（留在 #67 的作业队列那一层）。新增模块**不进 C ABI**（C ABI 仍是 1.5.3 那八片、
+402 个函数）。
 
 **破坏性**：无。新增模块与公开 API 都是增量；C ABI 版本仍是 `1`。
 

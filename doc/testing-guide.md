@@ -453,6 +453,32 @@ These are repository rules, learned the hard way:
   survives, and even then it needs a probe. Asking someone to add coverage for a gap that is
   already covered costs their time twice.
 
+## Integration harness（issue #75）
+
+`tests/functional/web_app_integration_harness_func.cpp` 是**跨模块**的那一层：
+同一进程里把事务、作业队列、WebSocket 房间 + 运维端点、进程监管串起来跑，并且
+每一格结束时检查自己的资源账（连接池 `in_use()`、队列 `pending/running`、房间
+表、连接表、`supervisor.running()`）。
+
+一条命令：
+
+```bash
+ctest --test-dir <build> -R test_web_app_integration_harness_func --output-on-failure
+```
+
+**外部依赖默认跳过**，与 DB 用例共用同一组变量：
+
+| 变量 | 作用 |
+|---|---|
+| `UVCPP_DB_TEST_MYSQL_URL` / `UVCPP_DB_TEST_PGSQL_URL` | 任一存在才跑 I1（真实事务） |
+| `UVCPP_DB_TEST_URL` | 本机没有 MySQL/PG 时的兜底，可以是 `sqlite:///tmp/x.db` |
+| `UVCPP_DB_TEST_REQUIRE=1` | 给了 URL 的 CI 格子：**不许**把"缺依赖"当跳过 |
+
+I2/I3/I4 不依赖任何外部服务：没有 DB URL 时 I1 单独印一行 SKIP，其余照跑，
+**不算失败**。退出码：0 = 已判过的格全过；1 = 有格失败。CI 的 `db-servers`
+格子同时开 webapp 与远程后端，并用 `UVCPP_DB_TEST_REQUIRE=1` 让 I1 真的连库
+（缺 URL 即红，不许静默跳过）。
+
 ## Running the tests by hand
 
 ```bash

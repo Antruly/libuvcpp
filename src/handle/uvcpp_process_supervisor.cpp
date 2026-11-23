@@ -15,7 +15,17 @@
 #include <cstring>
 #include <map>
 
-#ifndef _WIN32
+#ifdef _WIN32
+// Windows 头会定义 min/max 与 `small` 宏，先挡住前两个（`small` 在本文件里
+// 不用，但同一棵树上别的 TU 吃过它的亏）。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <csignal>
 #include <cerrno>
 #include <sys/types.h>
@@ -95,6 +105,12 @@ struct uvcpp_process_supervisor::job {
 
   int pending_closes = 0;
 
+#ifdef _WIN32
+  /// 进程所属的 Job Object（`kill_tree` 且分配成功时非空）。关掉它时
+  /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 会把整棵树一起收掉。
+  HANDLE win_job = nullptr;
+#endif
+
   std::vector<std::string> arg_store;
   std::vector<std::string> env_store;
   std::vector<char*>       argv;
@@ -121,6 +137,13 @@ struct uvcpp_process_supervisor::impl {
       uv_timer_stop(&j->timeout_timer);
       uv_timer_stop(&j->kill_timer);
     }
+#ifdef _WIN32
+    // 主进程退出 = 这次监管的终点：`kill_tree` 的语义是"树跟着走"，后代的
+    // 寿命不该超过它。`TerminateJobObject` 对已经死掉的主进程是空操作。
+    if (j->win_job != nullptr) {
+      TerminateJobObject(j->win_job, 1);
+    }
+#endif
     if (!j->proc_closed) {
       j->proc_closed = true;
       uv_close(reinterpret_cast<uv_handle_t*>(&j->proc), on_close_proc);
@@ -199,7 +222,15 @@ struct uvcpp_process_supervisor::impl {
 
   static void note_closed(job* j) {
     if (j->pending_closes > 0) --j->pending_closes;
-    if (j->pending_closes == 0) delete j;
+    if (j->pending_closes == 0) {
+#ifdef _WIN32
+      if (j->win_job != nullptr) {
+        CloseHandle(j->win_job);
+        j->win_job = nullptr;
+      }
+#endif
+      delete j;
+    }
   }
 
   static void close_handle(uv_handle_t* h, job* j, bool& flag) {
@@ -211,6 +242,17 @@ struct uvcpp_process_supervisor::impl {
   void signal_tree(job* j, bool force) {
     if (!j->proc_started || j->proc_exited) return;
 #ifdef _WIN32
+    if (j->spec.kill_tree && j->win_job != nullptr) {
+      if (force) {
+        // 强杀阶段：整棵树一起收。主进程可能已经退出，这对它是空操作。
+        TerminateJobObject(j->win_job, 1);
+        return;
+      }
+      // Windows 没有 SIGTERM 的"礼貌"语义（uv_process_kill 就是
+      // TerminateProcess）；先杀主进程，树留到强杀阶段/收尾时统一收。
+      uv_process_kill(&j->proc, SIGTERM);
+      return;
+    }
     uv_process_kill(&j->proc, force ? kForceSignal : SIGTERM);
 #else
     if (j->spec.kill_tree) {
@@ -311,7 +353,15 @@ uvcpp_process_supervisor::~uvcpp_process_supervisor() {
     job* j = it->second;
     j->owner = nullptr;
     if (!j->proc_exited) {
+#ifdef _WIN32
+      if (j->win_job != nullptr) {
+        TerminateJobObject(j->win_job, 1);
+      } else {
+        uv_process_kill(&j->proc, kForceSignal);
+      }
+#else
       uv_process_kill(&j->proc, kForceSignal);
+#endif
     }
     uv_timer_stop(&j->timeout_timer);
     uv_timer_stop(&j->kill_timer);
@@ -350,16 +400,6 @@ uint64_t uvcpp_process_supervisor::spawn(
   if (!spec.capture_stdout && !spec.capture_stderr) {
     // 允许，但输出回调永远收不到东西 —— 不拦。
   }
-#ifndef _WIN32
-  if (spec.kill_tree && false) {
-    // 保留给未来平台分支；POSIX 的 detached 已经处理。
-  }
-#else
-  if (spec.kill_tree) {
-    if (err) *err = "Windows 进程树终止（Job Object）尚未实现";
-    return 0;
-  }
-#endif
 
   job* j = new job();
   j->owner      = impl_;
@@ -437,6 +477,41 @@ uint64_t uvcpp_process_supervisor::spawn(
   ++j->pending_closes;  // 进程句柄从这一刻起也会在退出时关一次
   ++impl_->s.spawned;
   impl_->jobs[j->id] = j;
+
+#ifdef _WIN32
+  // `kill_tree`：给子进程建一个 Job Object 并把它分配进去。
+  //
+  // `JOBOBJECT_LIMIT_KILL_ON_JOB_CLOSE` 让"关掉句柄"等价于"杀掉整棵树" ——
+  // 超时/取消时主进程被 TerminateProcess 之后，后代在收尾那一刻也会跟着收掉。
+  //
+  // **分配发生在 `uv_spawn` 返回之后的一瞬**：在此之前子进程已经跑起来了，
+  // 它在这条缝里再派生的后代不在 Job 里。libuv 不暴露 `CREATE_SUSPENDED`，
+  // 这个窗口无法彻底消掉；对"监管自己拉起的进程"这个用法，后缀漏网的概率与
+  // 后果都可接受，写在这里免得被当成完备保证。
+  if (spec.kill_tree) {
+    HANDLE hp = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE,
+                            static_cast<DWORD>(j->proc.pid));
+    if (hp != nullptr) {
+      HANDLE jo = CreateJobObjectW(nullptr, nullptr);
+      if (jo != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+        std::memset(&li, 0, sizeof(li));
+        li.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(jo, JobObjectExtendedLimitInformation, &li,
+                                sizeof(li));
+        if (AssignProcessToJobObject(jo, hp)) {
+          j->win_job = jo;
+        } else {
+          // 当前进程自己在一个不允许嵌套的 Job 里（老 Windows / 受限容器）：
+          // 退回单进程终止语义，spawn 本身照样成功。
+          CloseHandle(jo);
+        }
+      }
+      CloseHandle(hp);
+    }
+  }
+#endif
 
   if (spec.capture_stdout) {
     if (uv_read_start(reinterpret_cast<uv_stream_t*>(&j->out_pipe),

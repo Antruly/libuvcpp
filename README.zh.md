@@ -327,7 +327,7 @@ int main() {
 | 构建与打包 | [doc/build-guide.md](doc/build-guide.md) | 每个开关是什么意思、开关之间怎么组合、构建树、平台依赖、仓库结构，以及值得认识的失败 |
 | 性能实测 | [doc/benchmark.md](doc/benchmark.md) | 每连接内存、吞吐与稳定性的实测读数 |
 | 压测装置 | [doc/benchmark-rig.md](doc/benchmark-rig.md) | 一次压测该怎么定档、怎么钉核，以及什么样的扩展性读数算数而不是噪声 |
-| 测试 | [doc/testing-guide.md](doc/testing-guide.md) | 测试的三层、文件名即过滤键、`tests/tools/` 的脚本索引，以及门禁退出码约定 |
+| 测试 | [doc/testing-guide.md](doc/testing-guide.md) | 测试的三层、文件名即过滤键、集成测试 harness（事务 / 作业队列 / WS 房间 / 进程监管同进程跑）、`tests/tools/` 的脚本索引，以及门禁退出码约定 |
 | CI | [doc/ci-guide.md](doc/ci-guide.md) | 普通推送的 CI 作业矩阵，以及它依赖的 runner 侧装置 |
 | 发布流程 | [doc/release-process.md](doc/release-process.md) | 发布怎么出、六条构建腿各产出什么，以及这条链**没有**检查什么 |
 | 多循环设计 | [doc/multiloop-design.md](doc/multiloop-design.md) | `set_loops(n)` 背后的推演：两种落点形状、哪些东西必须按循环切开，以及还没做的那部分 |

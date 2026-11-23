@@ -1398,10 +1398,10 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   表达式解析、UTC 匹配、`next_utc()`；回调抛异常被吞掉并计数，不影响别的任务。
   **不支持**名字（`JAN`/`MON`）、`@daily` 这类宏与 `L/W/#` 扩展。用例
   `cron_func`（解析 / 纯函数 / 真循环调度三层）。
-- **进程监管**（`1.10.0-dev`，#69 的 POSIX 批）：`uvcpp_process_supervisor` ——
-  有界 stdout/stderr、超时、进程组终止（`kill_tree`）、取消与统计。用例
-  `process_supervisor_func`。**Windows 上 `kill_tree` 返回 `UV_ENOTSUP`**
-  （Job Object 是后续），那条腿的用例在 Windows 上显式 SKIP。
+- **进程监管**（`1.10.0-dev`，#69）：`uvcpp_process_supervisor` —— 有界
+  stdout/stderr、超时、进程树终止（`kill_tree`）、取消与统计。POSIX 走进程组，
+  **Windows 走 Job Object**（`KILL_ON_JOB_CLOSE`，超时/取消/主进程退出时整棵树
+  一起收）。用例 `process_supervisor_func` 跨平台；重启策略仍留给上层（#67）。
 - **作业队列**（`1.10.0-dev`，#67 第一批）：`uvcpp_job_queue` —— 可插拔
   `uvcpp_job_store`（内置内存实现）、同一 `concurrency_key` 串行、重试退避、
   超时、取消、队列上限与**重启恢复**。用例 `job_queue_func`。**异步 handler 与
@@ -3374,6 +3374,12 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 配置、打包与 CI
 
+- **集成测试 harness**（`1.10.0-dev`，#75）：
+  `tests/functional/web_app_integration_harness_func.cpp` 把事务、作业队列、
+  WebSocket 房间 + `/health` `/ready` `/metrics`、进程监管放进同一个进程跑，
+  每格收尾检查连接池/队列/房间/连接表/监管器的资源账。外部 DB 默认跳过
+  （`UVCPP_DB_TEST_*_URL` / `UVCPP_DB_TEST_URL`，CI 的 `db-servers` 格子用
+  `UVCPP_DB_TEST_REQUIRE=1` 强制真连）。
 - **Win7 官方包分档：VS2015 / MinGW 是 `full`，VS2013 是 `web`**（`1.8.5`）。
   `full` = `web` + webapp；`win7-vs2015-x86/x64` 与 `win7-mingw32/64` 四个预设以及
   MinGW 的 CI 脚本都改过去了，`UVCPP_REQUIRE_FEATURES` 里加了 `webapp`，配置期就断言

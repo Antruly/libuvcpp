@@ -16,12 +16,16 @@
  *
  * ## 范围
  *
- * 这一版是 **POSIX 优先**：
+ * 跨平台（libuv `uv_spawn`）：
  *
- * - 启动 / 取消 / 超时 / 退出结果 / 有界输出 / 输出回调：跨平台（libuv `uv_spawn`）；
- * - **进程组终止**：POSIX 上 `UV_PROCESS_DETACHED`（子进程自成会话/进程组）+ 对
- *   `-pid` 发信号；Windows 上 `kill_tree` 返回 `UV_ENOTSUP`（Job Object 是后续，
- *   见 issue #69）。
+ * - 启动 / 取消 / 超时 / 退出结果 / 有界输出 / 输出回调：全平台；
+ * - **进程树终止**：POSIX 上 `UV_PROCESS_DETACHED`（子进程自成会话/进程组）+
+ *   对 `-pid` 发信号；Windows 上给子进程建 **Job Object**
+ *   （`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），超时/取消/主进程退出时整棵树一起
+ *   收掉。**Windows 的分配发生在 `uv_spawn` 返回之后的一瞬** —— 子进程在这条
+ *   缝里再派生的后代不在 Job 里（libuv 不暴露 `CREATE_SUSPENDED`）；机器不允许
+ *   嵌套 Job 时会退回"只杀主进程"，不会拒绝 spawn。
+ * - `kill_tree=false` 时只对进程本身发信号（两平台一致）。
  * - 不绑定任何具体程序、不维护业务状态机；重启策略/任务队列留给上层
  *   （#67 作业队列）。
  *
@@ -73,7 +77,7 @@ struct UVCPP_API uvcpp_process_spec {
   size_t   max_output_bytes; ///< **每条流**保留的尾字节上限
   bool     capture_stdout;
   bool     capture_stderr;
-  bool     kill_tree;  ///< POSIX：子进程自成进程组，信号发给整组
+  bool     kill_tree;  ///< 原样下发给整棵进程树（POSIX 进程组 / Windows Job Object）
 };
 
 /// 一次监管的最终结果。

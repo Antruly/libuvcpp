@@ -1,30 +1,45 @@
 /**
  * @file tests/functional/process_supervisor_func.cpp
- * @brief 进程监管：输出、退出码、超时、进程组终止、取消、有界缓冲。
+ * @brief 进程监管：输出、退出码、超时、进程树终止、取消、有界缓冲。
  *
- * 只在 POSIX 上跑（Windows 的 Job Object 是 issue #69 的后续；这一版在
- * Windows 上 `kill_tree=true` 会返回 ENOTSUP，直接 skip）。
+ * 跨平台，但"进程树"那一条两平台各用各的机制，判据也不同：
+ *
+ * - **POSIX**：`kill_tree` 让子进程自成进程组（`UV_PROCESS_DETACHED`），超时/取消
+ *   时对 `-pid` 发信号。判据是"孙进程（`sleep`）真的没了"（`kill(pid, 0)` 报
+ *   `ESRCH`）。
+ * - **Windows**：`kill_tree` 给子进程建 Job Object
+ *   （`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），超时/取消时整棵树一起收。判据是
+ *   "孙进程本该写的标记文件**没有**出现"—— 孙进程是 PowerShell 里
+ *   `Start-Process` 起来的另一个 PowerShell，4 秒后写文件；监管在 0.5 秒时
+ *   终止整棵树，文件就永远不该落地。
+ *
+ * 其余三组（输出/退出码、取消、有界输出）两平台同一份脚本形状，只是 shell 不同
+ * （`/bin/sh -c` 与 `cmd.exe /c` 或直接 PowerShell）。Windows 上刻意用
+ * PowerShell 而不是 `cmd /c`：cmd 的嵌套引号规则会把脚本拼坏，而 PowerShell 的
+ * `-ArgumentList` 是数组，不需要转义。
  */
 
+#include <chrono>
 #include <cstdio>
-#include <cstdlib>
+#include <thread>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
-
-int main() {
-  std::cout << "SKIP: process supervisor (POSIX) on Windows" << std::endl;
-  return 0;
-}
-
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #else
-
 #include <cerrno>
-#include <chrono>
 #include <csignal>
 #include <sys/types.h>
+#endif
 
 #include <uv.h>
 
@@ -57,6 +72,76 @@ bool run_until(uvcpp_loop& loop, const bool& done, int ms) {
   return done;
 }
 
+/// 一条 `/bin/sh -c` 脚本的 spec（POSIX）。
+#ifndef _WIN32
+uvcpp_process_spec make_sh(const std::string& script) {
+  uvcpp_process_spec s;
+  s.file = "/bin/sh";
+  s.args = std::vector<std::string>{"-c", script};
+  return s;
+}
+#else
+uvcpp_process_spec make_powershell(const std::string& script) {
+  uvcpp_process_spec s;
+  s.file = "powershell.exe";
+  s.args = std::vector<std::string>{"-NoProfile", "-NonInteractive", "-Command",
+                                    script};
+  return s;
+}
+
+std::string temp_dir() {
+  char  buf[MAX_PATH + 1];
+  std::memset(buf, 0, sizeof(buf));
+  const DWORD n = ::GetTempPathA(MAX_PATH, buf);
+  if (n == 0 || n > MAX_PATH) return std::string();
+  return std::string(buf, n);
+}
+
+std::string base64(const std::string& in) {
+  static const char* kTab =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  size_t i = 0;
+  while (i + 2 < in.size()) {
+    const unsigned v = (static_cast<unsigned char>(in[i]) << 16) |
+                       (static_cast<unsigned char>(in[i + 1]) << 8) |
+                       static_cast<unsigned char>(in[i + 2]);
+    out += kTab[(v >> 18) & 0x3F];
+    out += kTab[(v >> 12) & 0x3F];
+    out += kTab[(v >> 6) & 0x3F];
+    out += kTab[v & 0x3F];
+    i += 3;
+  }
+  if (i + 1 == in.size()) {
+    const unsigned v = static_cast<unsigned char>(in[i]) << 16;
+    out += kTab[(v >> 18) & 0x3F];
+    out += kTab[(v >> 12) & 0x3F];
+    out += "==";
+  } else if (i + 2 == in.size()) {
+    const unsigned v = (static_cast<unsigned char>(in[i]) << 16) |
+                       (static_cast<unsigned char>(in[i + 1]) << 8);
+    out += kTab[(v >> 18) & 0x3F];
+    out += kTab[(v >> 12) & 0x3F];
+    out += kTab[(v >> 6) & 0x3F];
+    out += '=';
+  }
+  return out;
+}
+
+/// PowerShell `-EncodedCommand` 的载荷：UTF-16LE 再 base64。
+/// 用它而不是把脚本塞进 `-Command`，是为了绕开嵌套引号：脚本里本来就有
+/// 单引号路径，再经 cmd/PowerShell 两层解析很容易拼坏。
+std::string ps_encoded(const std::string& script) {
+  std::string utf16;
+  utf16.reserve(script.size() * 2);
+  for (size_t i = 0; i < script.size(); ++i) {
+    utf16 += script[i];
+    utf16 += '\0';
+  }
+  return base64(utf16);
+}
+#endif
+
 void test_basic() {
   std::cout << "-- 输出 / 退出码 --" << std::endl;
   uvcpp_loop loop;
@@ -67,11 +152,13 @@ void test_basic() {
   size_t      chunks = 0;
   {
     uvcpp_process_supervisor sup(&loop);
-    uvcpp_process_spec       spec;
-    spec.file    = "/bin/sh";
-    spec.args    = std::vector<std::string>{
-        "-c", "printf OUT; printf ERR >&2; exit 3"};
-    spec.timeout_ms = 5000;
+#ifdef _WIN32
+    uvcpp_process_spec spec = make_powershell(
+        "[Console]::Out.Write('OUT'); [Console]::Error.Write('ERR'); exit 3");
+#else
+    uvcpp_process_spec spec = make_sh("printf OUT; printf ERR >&2; exit 3");
+#endif
+    spec.timeout_ms = 8000;
     const uint64_t id = sup.spawn(
         spec,
         [&](const char* d, size_t n, bool is_err) {
@@ -84,13 +171,14 @@ void test_basic() {
         });
     check(id != 0, "spawn 返回 id");
     if (id == 0) return;
-    check(run_until(loop, done, 5000), "进程收尾");
-    check(result.exit_status == 3, "退出码 3（实际 " +
-                                        std::to_string(result.exit_status) + "）");
+    check(run_until(loop, done, 8000), "进程收尾");
+    check(result.exit_status == 3,
+          "退出码 3（实际 " + std::to_string(result.exit_status) + "）");
     check(result.term_signal == 0, "不是被信号杀死");
-    check(result.stdout_tail == "OUT", "stdout 尾缓冲 = OUT（实际 '" +
-                                           result.stdout_tail + "'）");
-    check(result.stderr_tail == "ERR", "stderr 尾缓冲 = ERR");
+    check(result.stdout_tail.find("OUT") != std::string::npos,
+          "stdout 尾缓冲含 OUT（实际 '" + result.stdout_tail + "'）");
+    check(result.stderr_tail.find("ERR") != std::string::npos,
+          "stderr 尾缓冲含 ERR");
     check(result.stdout_truncated == 0 && result.stderr_truncated == 0,
           "未截断");
     check(chunks >= 1, "output 回调被调用");
@@ -100,7 +188,7 @@ void test_basic() {
 }
 
 void test_timeout_and_tree() {
-  std::cout << "-- 超时 / 进程组终止 --" << std::endl;
+  std::cout << "-- 超时 / 进程树终止 --" << std::endl;
   uvcpp_loop loop;
   bool       done = false;
   uvcpp_process_result result;
@@ -108,36 +196,92 @@ void test_timeout_and_tree() {
   {
     uvcpp_process_supervisor sup(&loop);
     uvcpp_process_spec       spec;
-    spec.file       = "/bin/sh";
-    spec.args       = std::vector<std::string>{
-        "-c", "sleep 30 & echo $!; wait"};
-    spec.timeout_ms = 200;
-    spec.stop_grace_ms = 200;
-    spec.kill_tree  = true;
+#ifdef _WIN32
+    const std::string marker =
+        temp_dir() + "uvcpp_tree_" +
+        std::to_string(static_cast<unsigned long long>(::GetCurrentProcessId())) +
+        "_" +
+        std::to_string(static_cast<unsigned long long>(::GetTickCount64())) +
+        ".txt";
+    ::DeleteFileA(marker.c_str());
+    // 孙进程：4 秒后写标记文件（脚本用 `-EncodedCommand` 传，绕开嵌套引号）。
+    const std::string grandchild =
+        "Start-Sleep -Seconds 4; Set-Content -Path '" + marker +
+        "' -Value x -ErrorAction SilentlyContinue";
+    // 父进程：起孙进程、打印 SPAWNED、然后睡 30 秒。打印 SPAWNED 之后才
+    // 取消，这样"孙进程确实存在过"有证据 —— 否则 PowerShell 启动都没跑完就
+    // 被超时杀掉，这条判据会变成空转。
+    spec = make_powershell(
+        "Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden "
+        "-ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','" +
+        ps_encoded(grandchild) + "'); [Console]::Out.Write('SPAWNED'); "
+        "Start-Sleep -Seconds 30");
+#else
+    spec = make_sh("sleep 30 & echo $!; wait");
+#endif
+#ifndef _WIN32
+    spec.timeout_ms    = 500;
+#endif
+    spec.stop_grace_ms = 300;
+    spec.kill_tree     = true;
     const uint64_t id = sup.spawn(
         spec, [&](const char* d, size_t n, bool) { out.append(d, n); },
         [&](const uvcpp_process_result& r) { result = r; done = true; });
-    check(id != 0, "spawn 返回 id");
-    if (id == 0) return;
-    check(run_until(loop, done, 5000), "超时后收尾");
+    check(id != 0, "spawn 返回 id（kill_tree 被接受）");
+    if (id == 0) {
+#ifdef _WIN32
+      ::DeleteFileA(marker.c_str());
+#endif
+      return;
+    }
+#ifdef _WIN32
+    // 等父进程把孙进程拉起来（打印 SPAWNED），再取消。
+    bool spawned_seen = false;
+    for (int i = 0; i < 400 && !spawned_seen && !done; ++i) {
+      loop.run(UV_RUN_NOWAIT);
+      spawned_seen = out.find("SPAWNED") != std::string::npos;
+      if (!spawned_seen) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(spawned_seen, "孙进程已经创建（父进程打印了 SPAWNED）");
+    check(sup.cancel(id) == 0, "cancel 成功");
+    check(run_until(loop, done, 8000), "取消后收尾");
+    check(result.cancelled, "结果标记 cancelled");
+    check(result.elapsed_ms < 6000,
+          "没有被 30s 的睡眠拖住（" + std::to_string(result.elapsed_ms) +
+              " ms）");
+    // 等过孙进程原本要写标记的时刻（4s），看它有没有活下来。
+    std::this_thread::sleep_for(std::chrono::seconds(6));
+    const bool leaked = ::GetFileAttributesA(marker.c_str()) !=
+                        INVALID_FILE_ATTRIBUTES;
+    check(!leaked, "孙进程随 Job Object 一起被杀（标记文件没有出现）");
+    ::DeleteFileA(marker.c_str());
+    check(sup.stats().cancelled == 1, "stats.cancelled = 1");
+#else
+    check(run_until(loop, done, 8000), "超时后收尾");
     check(result.timed_out, "结果标记 timed_out");
-    check(result.elapsed_ms < 4000, "没有被 30s 的 sleep 拖住（" +
-                                        std::to_string(result.elapsed_ms) +
-                                        " ms）");
-    // 输出的第一行是那个 sleep 的 pid；进程组被杀后它应当不存在了。
-    const size_t nl = out.find('\n');
+    check(result.elapsed_ms < 6000,
+          "没有被 30s 的睡眠拖住（" + std::to_string(result.elapsed_ms) +
+              " ms）");
+    const size_t nl     = out.find('\n');
     const bool   has_pid = nl != std::string::npos && nl > 0;
     check(has_pid, "拿到子进程 pid");
     if (has_pid) {
       const pid_t child = static_cast<pid_t>(std::strtol(out.c_str(), nullptr, 10));
       bool gone = false;
       for (int i = 0; i < 50 && !gone; ++i) {
-        if (::kill(child, 0) != 0 && errno == ESRCH) gone = true;
-        else { struct timespec ts = {0, 20 * 1000 * 1000}; nanosleep(&ts, nullptr); }
+        if (::kill(child, 0) != 0 && errno == ESRCH) {
+          gone = true;
+        } else {
+          struct timespec ts = {0, 20 * 1000 * 1000};
+          nanosleep(&ts, nullptr);
+        }
       }
       check(gone, "子进程（sleep）随进程组一起被杀");
     }
+#endif
+#ifndef _WIN32
     check(sup.stats().timed_out == 1, "stats.timed_out = 1");
+#endif
   }
 }
 
@@ -149,18 +293,25 @@ void test_cancel() {
   uvcpp_process_result result;
   {
     uvcpp_process_supervisor sup(&loop);
-    uvcpp_process_spec       spec;
-    spec.file = "/bin/sh";
-    spec.args = std::vector<std::string>{"-c", "sleep 30"};
-    spec.stop_grace_ms = 200;
+#ifdef _WIN32
+    uvcpp_process_spec spec =
+        make_powershell("Start-Sleep -Seconds 30");
+#else
+    uvcpp_process_spec spec = make_sh("sleep 30");
+#endif
+    spec.stop_grace_ms = 300;
     const uint64_t id = sup.spawn(
         spec, nullptr,
-        [&](const uvcpp_process_result& r) { ++exit_calls; result = r; done = true; });
+        [&](const uvcpp_process_result& r) {
+          ++exit_calls;
+          result = r;
+          done   = true;
+        });
     check(id != 0, "spawn 返回 id");
     if (id == 0) return;
     check(sup.cancel(id) == 0, "cancel 成功");
     check(sup.cancel(id) == 0, "重复 cancel 是幂等成功（进程仍在收尾）");
-    check(run_until(loop, done, 5000), "取消后收尾");
+    check(run_until(loop, done, 8000), "取消后收尾");
     check(result.cancelled, "结果标记 cancelled");
     check(exit_calls == 1, "退出回调恰好一次");
     check(sup.stats().cancelled == 1, "stats.cancelled = 1");
@@ -175,25 +326,28 @@ void test_bounded_output() {
   size_t total = 0;
   {
     uvcpp_process_supervisor sup(&loop);
-    uvcpp_process_spec       spec;
-    spec.file             = "/bin/sh";
-    spec.args             = std::vector<std::string>{"-c", "yes 0123456789 | head -c 200000"};
+#ifdef _WIN32
+    uvcpp_process_spec spec = make_powershell(
+        "[Console]::Out.Write(('0123456789' * 20000))");
+#else
+    uvcpp_process_spec spec =
+        make_sh("yes 0123456789 | head -c 200000");
+#endif
     spec.max_output_bytes = 1024;
-    spec.timeout_ms       = 5000;
+    spec.timeout_ms       = 15000;
     const uint64_t id = sup.spawn(
         spec, [&](const char*, size_t n, bool) { total += n; },
         [&](const uvcpp_process_result& r) { result = r; done = true; });
     check(id != 0, "spawn 返回 id");
     if (id == 0) return;
-    check(run_until(loop, done, 8000), "大输出收尾");
-    check(total > 100000, "回调确实收到了大流量（" +
-                              std::to_string(total) + " 字节）");
+    check(run_until(loop, done, 20000), "大输出收尾");
+    check(total > 100000,
+          "回调确实收到了大流量（" + std::to_string(total) + " 字节）");
     check(result.stdout_tail.size() <= 1024,
           "尾缓冲不超过上限（" + std::to_string(result.stdout_tail.size()) +
               "）");
-    check(result.stdout_truncated > 0, "记录了截断字节数（" +
-                                           std::to_string(result.stdout_truncated) +
-                                           "）");
+    check(result.stdout_truncated > 0,
+          "记录了截断字节数（" + std::to_string(result.stdout_truncated) + "）");
     check(sup.stats().succeeded == 1, "零退出计入 stats.succeeded");
   }
 }
@@ -214,5 +368,3 @@ int main() {
             << std::endl;
   return 1;
 }
-
-#endif  // _WIN32

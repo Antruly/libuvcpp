@@ -327,7 +327,7 @@ CI** (`tests/tools/check_doc_snippets.py`), so they are safe to copy.
 | Build & packaging | [doc/build-guide.md](doc/build-guide.md) | What every switch means and how the switches combine, the build trees, the platform dependencies, the repository layout, and the failures worth recognising |
 | Performance | [doc/benchmark.md](doc/benchmark.md) | Measured per-connection memory, throughput and stability |
 | Benchmark rig | [doc/benchmark-rig.md](doc/benchmark-rig.md) | How to size and pin a benchmark run, and which scaling readings are valid rather than noise |
-| Tests | [doc/testing-guide.md](doc/testing-guide.md) | The three test layers, filename-as-filter-key, the `tests/tools/` index, and the gate exit codes |
+| Tests | [doc/testing-guide.md](doc/testing-guide.md) | The three test layers, filename-as-filter-key, the integration harness (DB / job queue / WebSocket rooms / process supervisor in one process), the `tests/tools/` index, and the gate exit codes |
 | CI | [doc/ci-guide.md](doc/ci-guide.md) | The CI job matrix for ordinary pushes, and the runner-side setup it depends on |
 | Release process | [doc/release-process.md](doc/release-process.md) | How a release is cut, what the six build legs produce, and what the pipeline does not check |
 | Multi-loop design | [doc/multiloop-design.md](doc/multiloop-design.md) | The reasoning behind `set_loops(n)`: the two placement shapes, what had to be split per loop, and what is still open |

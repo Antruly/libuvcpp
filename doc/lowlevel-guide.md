@@ -422,11 +422,15 @@ sup.spawn(spec, on_output, on_exit);
   `stdout_truncated`，不会无限吃内存。
 - **超时 / 取消**：先 `SIGTERM`，等 `stop_grace_ms` 再强杀；退出回调**恰好一次**，
   结果里 `timed_out/cancelled` 说明是谁先动手。
-- **POSIX 进程组终止**：`kill_tree=true`（默认）用 `UV_PROCESS_DETACHED` 让子进程
-  自成进程组，信号发给整组，父进程退出后不留子进程；Windows 上这一版返回
-  `UV_ENOTSUP`（Job Object 是 issue #69 的后续）。
+- **进程树终止**：`kill_tree=true`（默认）。POSIX 用 `UV_PROCESS_DETACHED` 让
+  子进程自成进程组、信号发给整组；Windows 给子进程建 **Job Object**
+  （`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），超时/取消/主进程退出时整棵树一起收。
+  Windows 上分配发生在 `uv_spawn` 返回之后的一瞬 —— 子进程在这条缝里再派生的
+  后代不在 Job 里（libuv 不暴露 `CREATE_SUSPENDED`）；机器不允许嵌套 Job 时退回
+  "只杀主进程"，不会拒绝 spawn。
 - 不绑定具体程序、不维护业务状态机；重启策略/任务队列留给上层（#67）。
-- 用例：`process_supervisor_func.cpp`（POSIX）。
+- 用例：`process_supervisor_func.cpp`（两平台；Windows 那一格用 PowerShell 的
+  `-EncodedCommand` 起一个"4 秒后写标记文件"的孙进程，终止后断言文件不出现）。
 
 ---
 
