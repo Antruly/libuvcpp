@@ -17,6 +17,10 @@ else()
 endif()
 
 option(UVCPP_BUILD_TESTS "Build tests" ON)
+# Windows SCM 用例（web_app_service_scm_func）默认不编：它会在测试机器上
+# 真的 install/start/stop/uninstall 一个服务，需要管理员权限。CI 只在 MSVC
+# 的 `web` 那一格打开；没有管理员权限的机器上用例自己退 3（SKIP）。
+option(UVCPP_TEST_SERVICE_SCM "Build the Windows SCM install/start/stop test" OFF)
 option(UVCPP_USE_SYSTEM_LIBUV "Prefer system libuv if found" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 

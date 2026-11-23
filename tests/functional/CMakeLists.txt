@@ -28,12 +28,18 @@ if(NOT UVCPP_BUILD_WEBAPP)
 endif()
 
   # 服务化用例（`web_app_service_func`）只在 POSIX 上真跑：它靠 fork + SIGTERM
-  # 验"前台模式 + 优雅排空"，Windows 上该验的是 SCM，那条路装/卸服务要管理员
-  # 权限、也不属于 ctest 该干的活。**别的 `service` 命名用例目前没有**，这条
-  # 正则按名字摘。
+  # 验"前台模式 + 优雅排空"。Windows 上另有 SCM 用例（见下），这条按**精确
+  # 文件名**摘，别误伤 `web_app_service_scm_func`。
   if(WIN32)
-    list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*service[^/]*\.cpp$")
+    list(FILTER FUNC_SOURCES EXCLUDE REGEX "/web_app_service_func\.cpp$")
   endif()
+
+# Windows SCM 用例默认不存在：它真的会在这台机器上装/起/停/卸一个服务，必须
+# 有管理员权限。只有显式 `-DUVCPP_TEST_SERVICE_SCM=ON`（CI 的 MSVC `web` 格）
+# 才编它。关着时"没测"表现为用例不存在，而不是又一个恒绿的 SKIP。
+if(NOT (WIN32 AND UVCPP_TEST_SERVICE_SCM))
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*service_scm[^/]*\.cpp$")
+endif()
 
 # Exclude SSL tests when OpenSSL is not enabled.
 #
@@ -195,6 +201,10 @@ foreach(test_src ${FUNC_SOURCES})
   add_executable(${exe_name} ${test_src})
   target_include_directories(${exe_name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(${exe_name} PRIVATE ${UVCPP_LIB_TARGET} ${LIBUV_LIB})
+  if(WIN32 AND test_name MATCHES "service_scm")
+    # 父进程自己也要 OpenSCManager / QueryServiceStatusEx / TerminateProcess。
+    target_link_libraries(${exe_name} PRIVATE advapi32)
+  endif()
   if(WIN32)
     # iphlpapi/psapi/userenv 是**静态 libuv** 的 util.c 要的（GetAdaptersAddresses /
     # GetProcessMemoryInfo / GetUserProfileDirectoryW）：LIBUV_LIB 是裸路径时（系统
@@ -346,6 +356,13 @@ endif()
 if(TARGET test_web_app_ws_bus_redis_func)
   set_tests_properties(test_web_app_ws_bus_redis_func
                        PROPERTIES SKIP_RETURN_CODE 3)
+endif()
+
+# Windows SCM 用例：装/起/停/卸服务 + 强杀一次等 SCM 拉起，比普通用例慢；
+# 没有管理员权限时退 3（SKIP）—— CI 的 Windows runner 是管理员，那里真跑。
+if(TARGET test_web_app_service_scm_func)
+  set_tests_properties(test_web_app_service_scm_func
+                       PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 3)
 endif()
 
 # 两条 IPv6 回环用例：绑 `::1` 失败时返回 3（= 这台机器没开 IPv6 栈）。

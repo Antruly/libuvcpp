@@ -365,6 +365,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 |--------|---------|-------------|
 | `UVCPP_BUILD_TESTS` | `ON` | 构建测试可执行文件 |
 | `UVCPP_BUILD_FUNCTIONAL` | `ON` | 构建功能测试套件（只在 `UVCPP_BUILD_TESTS=ON` 时被读） |
+| `UVCPP_TEST_SERVICE_SCM` | `OFF` | 构建 `web_app_service_scm_func`：真的安装/启动/强杀/卸载一个 Windows 服务。要管理员权限；CI 只在 MSVC 的 `web` 格打开 |
 | `BUILD_SHARED_LIBS` | `ON` | 构建动态库 |
 | `UVCPP_BUILD_STATIC` | 自动 | 构建静态 uvcpp 库 |
 | `UVCPP_BUILD_SHARED` | 自动 | 构建动态 uvcpp 库 |

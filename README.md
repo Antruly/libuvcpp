@@ -366,6 +366,7 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 |--------|---------|-------------|
 | `UVCPP_BUILD_TESTS` | `ON` | Build test executables |
 | `UVCPP_BUILD_FUNCTIONAL` | `ON` | Build the functional test suite (only read when `UVCPP_BUILD_TESTS=ON`) |
+| `UVCPP_TEST_SERVICE_SCM` | `OFF` | Build `web_app_service_scm_func`, which really installs/starts/terminates/uninstalls a Windows service. Needs Administrator; CI turns it on only in the MSVC `web` leg |
 | `BUILD_SHARED_LIBS` | `ON` | Build shared libraries |
 | `UVCPP_BUILD_STATIC` | auto | Build static uvcpp library |
 | `UVCPP_BUILD_SHARED` | auto | Build shared uvcpp library |

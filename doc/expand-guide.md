@@ -14,7 +14,7 @@
 `uvcpp_memory_pool` 与 `uvcpp_memory_pool_span` 在自己的文件之外**零调用者** ——
 它们是给使用者自己拿去的，库内没有任何东西用它们。
 
-- 打开方式：`-DUVCPP_BUILD_EXPAND=ON`（默认 `OFF`，`CMakeLists.txt:31`）
+- 打开方式：`-DUVCPP_BUILD_EXPAND=ON`（默认 `OFF`，`CMakeLists.txt:35`）
 - 包含方式：直接用时 `<expand/uvcpp_memory_pool.h>`；**跟随全库分配策略**用
   `<uvcpp/uvcpp_alloc.h>`，那是唯一被库内使用的入口
 - 打开后 `<uvcpp/uvcpp_alloc.h>` 里所有 `uvcpp_alloc*` 都改道到
@@ -95,18 +95,18 @@ cmake -S . -B build -DUVCPP_BUILD_EXPAND=ON
 | `-DUVCPP_BUILD_EXPAND=ON` | `UVCPP_ENABLE_MEMORY_POOL=1` |
 | `-DUVCPP_BUILD_EXPAND=OFF`（默认） | `UVCPP_ENABLE_MEMORY_POOL=0` |
 
-选项到宏的映射在 `CMakeLists.txt:1876-1882` 一处完成。用预编译包时**什么都不用传** ——
+选项到宏的映射在 `CMakeLists.txt:1880-1886` 一处完成。用预编译包时**什么都不用传** ——
 包里的 `include/uvcpp/uvcpp_config.h` 就是那次构建的值，自己再传一个冲突的值是硬 `#error`。
 
 关掉时 `src/expand/` 整目录被 `list(FILTER ... EXCLUDE REGEX "src/expand/")` 排除
-（`CMakeLists.txt:2289-2298`）。于是"关掉之后包含它"的表现取决于**你的头是怎么来的**
+（`CMakeLists.txt:2293-2302`）。于是"关掉之后包含它"的表现取决于**你的头是怎么来的**
 —— 而能不能编过，只由"那个头在不在你的 include 路径里"决定：
 
 | 你怎么构建 | `#include <expand/uvcpp_memory_pool.h>` 的结果 |
 |---|---|
 | 源码树自己构建（没开开关） | **编得过，链接失败** —— 头还在 `src/expand/` 下，且四个头里**没有任何一个用宏守卫自己**（唯一提到这个宏的地方是 `src/expand/uvcpp_page_heap.h:8` 的一句注释），没有 `#error` 兜底；但符号一个都没编进库 |
 | 用**官方预编译包** | **什么都不用传，直接用** —— 六条发布腿的十处 configure 都传 `-DUVCPP_BUILD_EXPAND=ON`（`release.yml` 里十处都有），包里那个 `uvcpp_config.h` 的 `UVCPP_ENABLE_MEMORY_POOL` 是 **1**，`include/expand/` 那四个头也在。上面那句"用预编译包什么都不用传"在这里是**字面意思** |
-| 自己 `cmake --install` 到一个前缀（没开开关） | **编译期就报找不到头** —— 这条路按开关装头（`CMakeLists.txt:3561-3564`），`include/expand/` 不会被装出去 |
+| 自己 `cmake --install` 到一个前缀（没开开关） | **编译期就报找不到头** —— 这条路按开关装头（`CMakeLists.txt:3565-3568`），`include/expand/` 不会被装出去 |
 | 自己跑 `package_release.py` 打的包（没开开关） | 与第一行同 —— **编得过、链接失败**。它拷头是按 `MODULES` 逐个目录拷的（`tests/tools/package_release.py`），**不看这个开关**，所以 `include/expand/` 照样在包里；但包里那个宏是 0、库里也没有那些符号 |
 
 > **别把第三、四行记成一回事**：`cmake --install` 与 `package_release.py` 是两套独立的
@@ -117,7 +117,7 @@ cmake -S . -B build -DUVCPP_BUILD_EXPAND=ON
 看上去像"某个 `.cpp` 忘了加进构建"，实际是你的开关没开。对照这个模块的四个 `#error`：
 它一个都没有。
 
-> `CMakeLists.txt:28-30` 说生成头已经消除了宏隐患、"所以默认关这件事与那个隐患不再有关系了"。
+> `CMakeLists.txt:32-34` 说生成头已经消除了宏隐患、"所以默认关这件事与那个隐患不再有关系了"。
 > 生成头**只随预编译包发出去**，所以在"拿源码树自己构建"这条路上这句话说过头了 ——
 > 源码树的使用者没有任何东西替他兜住"忘了开开关却包含了头"。这一处**已记在案，本轮未改**。
 

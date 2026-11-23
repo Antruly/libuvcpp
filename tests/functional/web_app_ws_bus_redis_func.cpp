@@ -31,11 +31,20 @@
 
 #include <uv.h>
 
+#ifndef _WIN32
+#include <csignal>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #include <uvcpp/uvcpp_define.h>
 
 #if UVCPP_WEBAPP_ENABLE && UVCPP_REDIS_ENABLE
 
 #include <handle/uvcpp_loop.h>
+#include <handle/uvcpp_signal.h>
+#include <handle/uvcpp_timer.h>
 #include <webapp/uvcpp_ws_bus.h>
 #include <webapp/uvcpp_ws_rooms.h>
 
@@ -92,9 +101,117 @@ bool wait_connected(uvcpp_loop& loop, uvcpp_ws_bus& bus, uvcpp_ws_bus& other,
       loop, [&] { return bus.connected() && other.connected(); }, ms);
 }
 
+
+#ifndef _WIN32
+
+std::string self_exe() {
+  char buf[4096];
+  std::size_t size = sizeof(buf);
+  if (uv_exepath(buf, &size) != 0) return std::string();
+  return std::string(buf, size);
+}
+
+std::string read_file(const std::string& path) {
+  std::string out;
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) return out;
+  char buf[512];
+  std::size_t n = 0;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+  std::fclose(f);
+  return out;
+}
+
+bool file_has(const std::string& path, const std::string& needle) {
+  return read_file(path).find(needle) != std::string::npos;
+}
+
+pid_t spawn_child_node(const std::string& exe, const std::string& node,
+                       const std::string& prefix, const std::string& room_out,
+                       const std::string& result, const std::string& ready) {
+  const pid_t pid = ::fork();
+  if (pid != 0) return pid;
+  ::execl(exe.c_str(), exe.c_str(), "--child-node", node.c_str(),
+          prefix.c_str(), room_out.c_str(), result.c_str(), ready.c_str(),
+          static_cast<char*>(nullptr));
+  ::_exit(127);
+}
+
+bool wait_exit(pid_t pid, int timeout_ms, int& status) {
+  const int steps = timeout_ms / 50;
+  for (int i = 0; i < steps; ++i) {
+    if (::waitpid(pid, &status, WNOHANG) == pid) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// 子进程：只做"另一个节点"该做的事 —— 连 Redis、收到谁的消息就记一行
+// ---------------------------------------------------------------------------
+
+int child_node_main(int argc, char** argv) {
+  if (argc < 7) return 2;
+  const std::string node     = argv[2];
+  const std::string prefix   = argv[3];
+  const std::string room_out = argv[4];
+  const std::string result   = argv[5];
+  const std::string ready    = argv[6];
+
+  const char* url = std::getenv("UVCPP_REDIS_TEST_URL");
+  if (url == nullptr || *url == '\0') return 3;
+
+  uvcpp_loop loop;
+  uvcpp_ws_bus bus(&loop, bus_opts(node, prefix));
+
+  FILE* f = std::fopen(result.c_str(), "ab");
+  if (f == nullptr) return 4;
+  bus.set_on_message([f](const std::string& room, const std::string& payload) {
+    std::fprintf(f, "%s\t%s\n", room.c_str(), payload.c_str());
+    std::fflush(f);
+  });
+  bus.start(url);
+
+  bool announced = false;
+  uvcpp_signal sig(&loop);
+  sig.start(
+      [&loop](uvcpp_signal*, int) { loop.stop(); }, SIGTERM);
+
+  // 连上（发布与订阅两条都就绪）之后才写 ready、才发第一条 —— 父进程拿
+  // ready 文件当"这个节点真的在听"的判据。
+  uvcpp_timer tick(&loop);
+  tick.start(
+      [&](uvcpp_timer*) {
+        if (announced || !bus.connected()) return;
+        announced = true;
+        FILE* r = std::fopen(ready.c_str(), "wb");
+        if (r != nullptr) {
+          std::fprintf(r, "%ld\n", static_cast<long>(uv_os_getpid()));
+          std::fclose(r);
+        }
+        bus.publish(room_out, "child-to-parent");
+      },
+      20, 20);
+
+  loop.run(UV_RUN_DEFAULT);
+  tick.stop();
+  sig.stop();
+  bus.stop();
+  for (int i = 0; i < 16; ++i) loop.run(UV_RUN_NOWAIT);
+  std::fclose(f);
+  return 0;
+}
+
+#endif  // !_WIN32
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+#ifndef _WIN32
+  if (argc > 1 && std::strcmp(argv[1], "--child-node") == 0) {
+    return child_node_main(argc, argv);
+  }
+#endif
   const char* url = std::getenv("UVCPP_REDIS_TEST_URL");
   const char* require = std::getenv("UVCPP_REDIS_TEST_REQUIRE");
   const bool  required = require != nullptr && std::strcmp(require, "1") == 0;
@@ -124,11 +241,18 @@ int main() {
 
   std::vector<received_msg> b_got;
   std::vector<received_msg> loop_got;
+  std::vector<received_msg> a_got;
   b.set_on_message([&](const std::string& room, const std::string& payload) {
     received_msg m;
     m.room    = room;
     m.payload = payload;
     b_got.push_back(m);
+  });
+  a.set_on_message([&](const std::string& room, const std::string& payload) {
+    received_msg m;
+    m.room    = room;
+    m.payload = payload;
+    a_got.push_back(m);
   });
   loopback.set_on_message([&](const std::string& room,
                               const std::string& payload) {
@@ -261,6 +385,67 @@ int main() {
               5000),
           "broadcast() 的远端那一半也送到了 B");
   }
+
+  // ---- 7：真两进程（fork + exec）---------------------------------------
+#ifndef _WIN32
+  {
+    const std::string exe = self_exe();
+    check(!exe.empty(), "拿到自己的可执行文件路径（两进程用例）");
+    const std::string base =
+        "/tmp/uvcpp_ws_bus_" +
+        std::to_string(static_cast<long>(uv_os_getpid()));
+    const std::string result = base + ".result";
+    const std::string ready  = base + ".ready";
+    ::unlink(result.c_str());
+    ::unlink(ready.c_str());
+
+    const pid_t child =
+        spawn_child_node(exe, "node-child-proc", prefix, "room-child-out",
+                         result, ready);
+    check(child > 0, "子进程节点已拉起");
+    check(pump_until(loop, [&] { return file_has(ready, "\n"); }, 10000),
+          "子进程节点连上 Redis（ready 文件出现）");
+
+    // 方向 1：子 → 父。父进程这条集合里只有 A 收了 on_message。
+    check(pump_until(
+              loop,
+              [&] {
+                for (std::size_t i = 0; i < a_got.size(); ++i) {
+                  if (a_got[i].room == "room-child-out" &&
+                      a_got[i].payload == "child-to-parent") {
+                    return true;
+                  }
+                }
+                return false;
+              },
+              8000),
+          "跨进程：父进程收到子进程的广播");
+
+    // 方向 2：父 → 子（子进程把收到的每一行写进 result 文件）。
+    check(a.publish("room-parent-out", "parent-to-child") == 0,
+          "父进程发布给子进程");
+    check(pump_until(
+              loop,
+              [&] { return file_has(result, "room-parent-out\tparent-to-child"); },
+              8000),
+          "跨进程：子进程收到父进程的广播");
+
+    ::kill(child, SIGTERM);
+    int st = 0;
+    const bool done = wait_exit(child, 8000, st);
+    check(done, "子进程节点收到 SIGTERM 后退出");
+    if (done) {
+      check(WIFEXITED(st) && WEXITSTATUS(st) == 0, "子进程退出码 0");
+    } else {
+      ::kill(child, SIGKILL);
+      ::waitpid(child, &st, 0);
+    }
+    ::unlink(result.c_str());
+    ::unlink(ready.c_str());
+  }
+#else
+  std::printf("  [skip] 两进程用例在 Windows 上不跑（没有 fork/exec）\n");
+#endif
 
   // 统计自洽
   check(b.snapshot().received >= b.snapshot().delivered,
