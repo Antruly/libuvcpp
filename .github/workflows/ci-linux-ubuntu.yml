@@ -1,4 +1,4 @@
-﻿name: CI · Linux · Ubuntu
+name: CI · Linux · Ubuntu
 
 # 一平台一个文件 —— 这个文件里**只有** Linux (Ubuntu) 这条腿的测试。四个文件：
 # ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
