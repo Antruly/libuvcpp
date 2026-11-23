@@ -20,19 +20,19 @@ object-oriented APIs, dual-mode async/sync support, HTTP/1.1, WebSocket (RFC 645
 ## Download
 
 <!-- downloads:start -->
-The newest release is **v1.10.0**. Six prebuilt packages, each one self-contained — the
+The newest release is **v1.11.0**. Six prebuilt packages, each one self-contained — the
 Release and Debug builds of the library, all the public headers, `uvcpp.pc` and the CMake
 package files, and no extra DLLs or `.so` files to ship alongside. Which modules a given
 package enables is recorded per version in [CHANGELOG.md](./CHANGELOG.md).
 
 | Platform | Toolchain | Package |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.10.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-msvc-x64.zip) · 25.5 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.10.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-msvc-arm64.zip) · 26.5 MB |
-| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.10.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-mingw-x64.zip) · 32.1 MB |
-| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.10.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-mingw-arm64.zip) · 24.2 MB |
-| Linux x64 | GCC | [libuvcpp-1.10.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-linux-x64.zip) · 29.3 MB |
-| Linux arm64 | GCC | [libuvcpp-1.10.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-linux-arm64.zip) · 29.5 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.11.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-msvc-x64.zip) · 26.1 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.11.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-msvc-arm64.zip) · 27.1 MB |
+| Windows x64 | MinGW-w64 (GCC) | [libuvcpp-1.11.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-mingw-x64.zip) · 32.8 MB |
+| Windows arm64 | MinGW-w64 (clang + libc++) | [libuvcpp-1.11.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-mingw-arm64.zip) · 24.7 MB |
+| Linux x64 | GCC | [libuvcpp-1.11.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-linux-x64.zip) · 29.9 MB |
+| Linux arm64 | GCC | [libuvcpp-1.11.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-linux-arm64.zip) · 30.1 MB |
 
 Every earlier release is on the **[Releases page](https://github.com/Antruly/libuvcpp/releases)**.
 What a package contains, and why it is laid out that way:

@@ -20,18 +20,18 @@
 ## 下载
 
 <!-- downloads:start -->
-最新版本是 **v1.10.0**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
+最新版本是 **v1.11.0**。六个预编译包，每一个都自包含 —— 带 Release 与 Debug 两档库、
 全部公开头文件、`uvcpp.pc` 与 CMake 包配置，旁边不需要再放任何 DLL 或 `.so`。
 某一版的包里到底开了哪些模块，按版本记在 [CHANGELOG.md](./CHANGELOG.md) 里。
 
 | 平台 | 工具链 | 包 |
 |---|---|---|
-| Windows x64 | MSVC 2022 | [libuvcpp-1.10.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-msvc-x64.zip) · 25.5 MB |
-| Windows arm64 | MSVC 2022 | [libuvcpp-1.10.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-msvc-arm64.zip) · 26.5 MB |
-| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.10.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-mingw-x64.zip) · 32.1 MB |
-| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.10.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-mingw-arm64.zip) · 24.2 MB |
-| Linux x64 | GCC | [libuvcpp-1.10.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-linux-x64.zip) · 29.3 MB |
-| Linux arm64 | GCC | [libuvcpp-1.10.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.10.0/libuvcpp-1.10.0-linux-arm64.zip) · 29.5 MB |
+| Windows x64 | MSVC 2022 | [libuvcpp-1.11.0-msvc-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-msvc-x64.zip) · 26.1 MB |
+| Windows arm64 | MSVC 2022 | [libuvcpp-1.11.0-msvc-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-msvc-arm64.zip) · 27.1 MB |
+| Windows x64 | MinGW-w64（GCC） | [libuvcpp-1.11.0-mingw-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-mingw-x64.zip) · 32.8 MB |
+| Windows arm64 | MinGW-w64（clang + libc++） | [libuvcpp-1.11.0-mingw-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-mingw-arm64.zip) · 24.7 MB |
+| Linux x64 | GCC | [libuvcpp-1.11.0-linux-x64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-linux-x64.zip) · 29.9 MB |
+| Linux arm64 | GCC | [libuvcpp-1.11.0-linux-arm64.zip](https://github.com/Antruly/libuvcpp/releases/download/v1.11.0/libuvcpp-1.11.0-linux-arm64.zip) · 30.1 MB |
 
 更早的版本都在 **[Releases 页](https://github.com/Antruly/libuvcpp/releases)**。
 包里装了什么、为什么是这个形状：[doc/release-process.md](doc/release-process.md)。
