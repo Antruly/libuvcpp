@@ -178,12 +178,13 @@ void test_basic() {
   size_t      chunks = 0;
   {
     uvcpp_process_supervisor sup(&loop);
-#ifdef _WIN32
-    uvcpp_process_spec spec = make_powershell(
-        "[Console]::Out.Write('OUT'); [Console]::Error.Write('ERR'); exit 3");
-#else
-    uvcpp_process_spec spec = make_sh("printf OUT; printf ERR >&2; exit 3");
-#endif
+    // **用自己当子进程**，不要 PowerShell：PowerShell 5.1 在冷启动的
+    // Windows runner 上起一次可能超过 8 秒（同一个提交里 brotli 格连续两轮
+    // 都是"进程 8 秒没退出"），而这一组要钉的是"输出 + 退出码"，不是 shell。
+    uvcpp_process_spec spec;
+    spec.file = self_exe();
+    spec.args.push_back("--emit");
+    spec.args.push_back("3");
     spec.timeout_ms = 8000;
     const uint64_t id = sup.spawn(
         spec,
@@ -570,6 +571,13 @@ int main(int argc, char** argv) {
     return 7;  // 第一次：失败
   }
   if (argc >= 3 && std::strcmp(argv[1], "--exit-code") == 0) {
+    return std::atoi(argv[2]);
+  }
+  if (argc >= 3 && std::strcmp(argv[1], "--emit") == 0) {
+    std::fputs("OUT", stdout);
+    std::fputs("ERR", stderr);
+    std::fflush(stdout);
+    std::fflush(stderr);
     return std::atoi(argv[2]);
   }
   if (argc >= 3 && std::strcmp(argv[1], "--sleep") == 0) {
