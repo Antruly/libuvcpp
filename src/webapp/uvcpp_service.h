@@ -113,7 +113,7 @@ struct UVCPP_API uvcpp_service_options {
 };
 
 /** @brief 用默认选项 + 命令行运行。等价于 `uvcpp_service_run(app, opts, argc, argv)`。 */
-int uvcpp_service_run(uvcpp_web_app& app, int argc, char** argv);
+UVCPP_API int uvcpp_service_run(uvcpp_web_app& app, int argc, char** argv);
 
 /**
  * @brief 解析命令行并执行对应子命令。
@@ -122,14 +122,15 @@ int uvcpp_service_run(uvcpp_web_app& app, int argc, char** argv);
  * `start` / `stop` / `status`：Windows 上操作 SCM；其他平台打印一条说明并返回
  * `UV_ENOTSUP`（前台运行仍然可用）。命令行错误返回 `UV_EINVAL`。
  */
-int uvcpp_service_run(uvcpp_web_app& app, const uvcpp_service_options& opts,
-                      int argc, char** argv);
+UVCPP_API int uvcpp_service_run(uvcpp_web_app& app,
+                                const uvcpp_service_options& opts,
+                                int argc, char** argv);
 
 /// 最近一次解析出的 `--config`（没有 = 空串）。在服务启动前就是最终值。
-const std::string& uvcpp_service_config_path();
+UVCPP_API const std::string& uvcpp_service_config_path();
 
 /// 当前进程是否由 SCM 以服务方式拉起（Windows；其他平台恒 false）。
-bool uvcpp_service_is_service();
+UVCPP_API bool uvcpp_service_is_service();
 
 }  // namespace uvcpp
 
