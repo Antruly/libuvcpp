@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file tests/functional/process_supervisor_func.cpp
  * @brief 进程监管：输出、退出码、超时、进程树终止、取消、有界缓冲。
  *
@@ -128,6 +128,15 @@ std::string base64(const std::string& in) {
   return out;
 }
 
+/// 本可执行文件的完整路径（树测试用它把自己拉起当子进程）。
+std::string self_path() {
+  char  buf[MAX_PATH + 1];
+  std::memset(buf, 0, sizeof(buf));
+  const DWORD n = ::GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n == 0 || n > MAX_PATH) return std::string();
+  return std::string(buf, n);
+}
+
 /// PowerShell `-EncodedCommand` 的载荷：UTF-16LE 再 base64。
 /// 用它而不是把脚本塞进 `-Command`，是为了绕开嵌套引号：脚本里本来就有
 /// 单引号路径，再经 cmd/PowerShell 两层解析很容易拼坏。
@@ -204,18 +213,15 @@ void test_timeout_and_tree() {
         std::to_string(static_cast<unsigned long long>(::GetTickCount64())) +
         ".txt";
     ::DeleteFileA(marker.c_str());
-    // 孙进程：4 秒后写标记文件（脚本用 `-EncodedCommand` 传，绕开嵌套引号）。
-    const std::string grandchild =
-        "Start-Sleep -Seconds 4; Set-Content -Path '" + marker +
-        "' -Value x -ErrorAction SilentlyContinue";
-    // 父进程：起孙进程、打印 SPAWNED、然后睡 30 秒。打印 SPAWNED 之后才
-    // 取消，这样"孙进程确实存在过"有证据 —— 否则 PowerShell 启动都没跑完就
-    // 被超时杀掉，这条判据会变成空转。
-    spec = make_powershell(
-        "Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden "
-        "-ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','" +
-        ps_encoded(grandchild) + "'); [Console]::Out.Write('SPAWNED'); "
-        "Start-Sleep -Seconds 30");
+    // **用测试程序自己当父/孙进程**，不走 PowerShell：PowerShell 在
+    // arm64 runner 上启动慢且 stdout 缓冲不可控，会让"父进程打印 SPAWNED"
+    // 这一格在 4 秒内收不到（v1.10.0 的发布 workflow 就是这么红的）。
+    // 自派生的路径没有 shell 引号、没有外部 shell 启动开销。
+    //
+    // 父模式（`--tree-parent <marker>`）：再拉起一个自己（`--write-marker`），
+    // 打印 SPAWNED，然后睡 30 秒。孙模式：睡 4 秒后写标记文件。
+    spec.file = self_path();
+    spec.args = std::vector<std::string>{"--tree-parent", marker};
 #else
     spec = make_sh("sleep 30 & echo $!; wait");
 #endif
@@ -354,7 +360,46 @@ void test_bounded_output() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+#ifdef _WIN32
+  // —— 只给"进程树"那一格用的两个子模式（见 test_timeout_and_tree）——
+  if (argc >= 3 && std::strcmp(argv[1], "--tree-parent") == 0) {
+    const std::string marker = argv[2];
+    // 让监管器先把我们分配进 Job 再派生孙进程（分配发生在 `uv_spawn` 返回
+    // 之后的一瞬；这条 200ms 把那个窗口让开，孙进程因此必然在 Job 里）。
+    ::Sleep(200);
+    const std::string self   = self_path();
+    std::string cmdline = "\"" + self + "\" --write-marker 4 \"" + marker +
+                          "\"";
+    std::vector<char> cmd(cmdline.begin(), cmdline.end());
+    cmd.push_back('\0');
+    STARTUPINFOA        si;
+    PROCESS_INFORMATION pi;
+    std::memset(&si, 0, sizeof(si));
+    std::memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    const BOOL ok = ::CreateProcessA(nullptr, cmd.data(), nullptr, nullptr,
+                                     TRUE, 0, nullptr, nullptr, &si, &pi);
+    if (ok) {
+      ::CloseHandle(pi.hProcess);
+      ::CloseHandle(pi.hThread);
+    }
+    std::printf("SPAWNED");
+    std::fflush(stdout);
+    ::Sleep(30000);
+    return 0;
+  }
+  if (argc >= 4 && std::strcmp(argv[1], "--write-marker") == 0) {
+    ::Sleep(static_cast<DWORD>(std::strtoul(argv[2], nullptr, 10)) * 1000);
+    FILE* f = std::fopen(argv[3], "wb");
+    if (f != nullptr) {
+      std::fputs("x", f);
+      std::fclose(f);
+    }
+    return 0;
+  }
+#endif
+
   std::cout << "[process_supervisor] start" << std::endl;
   test_basic();
   test_timeout_and_tree();

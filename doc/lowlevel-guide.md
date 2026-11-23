@@ -429,8 +429,9 @@ sup.spawn(spec, on_output, on_exit);
   后代不在 Job 里（libuv 不暴露 `CREATE_SUSPENDED`）；机器不允许嵌套 Job 时退回
   "只杀主进程"，不会拒绝 spawn。
 - 不绑定具体程序、不维护业务状态机；重启策略/任务队列留给上层（#67）。
-- 用例：`process_supervisor_func.cpp`（两平台；Windows 那一格用 PowerShell 的
-  `-EncodedCommand` 起一个"4 秒后写标记文件"的孙进程，终止后断言文件不出现）。
+- 用例：`process_supervisor_func.cpp`（两平台；Windows 那一格**用测试程序自己**
+  当父/孙进程——`--tree-parent` 再派生 `--write-marker`，"4 秒后写标记文件"，
+  终止后断言文件不出现；不走 PowerShell，arm64 runner 上它的启动与输出不可靠）。
 
 ---
 
