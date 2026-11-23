@@ -1671,7 +1671,7 @@ app.post("/login", [](uvcpp::uvcpp_web_request& req, uvcpp::uvcpp_web_response& 
 
 ## 23. RBAC 与 CSRF
 
-`uvcpp_web_auth.h`（#70 第二批；密码哈希/限流/审计仍留后续）：
+`uvcpp_web_auth.h`（#70；RBAC / CSRF / 登录失败限流 / PBKDF2 / 审计）：
 
 ```cpp
 // doc-snippet: fragment — 装配摘录，不是完整翻译单元。
@@ -1694,7 +1694,39 @@ app.post("/login", [](uvcpp::uvcpp_web_request& req, ...) {
   不安全方法（非 GET/HEAD/OPTIONS）必须带 `X-CSRF-Token` 或表单 `_csrf`，
   与会话 token 逐字节相同，否则 403；`uvcpp_csrf_protect()` 必须在会话中间件之后。
 - 没装会话中间件时 `csrf_protect()` 返回 500（配置错误不静默放行）。
-- 用例：`web_app_auth_func.cpp`。
+
+登录失败限流、密码哈希与审计：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+uvcpp::uvcpp_login_limiter limiter;        // 5 次 / 300s 窗口 / 锁 300s
+limiter.set_audit([](const uvcpp::uvcpp_auth_event& ev) {
+  audit_log(ev.kind, ev.key, ev.detail);
+});
+
+int wait = 0;
+if (!limiter.allowed(user, &wait)) {       // 429 + Retry-After: wait
+  resp.status(uvcpp::http_status::TOO_MANY_REQUESTS);
+  return;
+}
+if (!check_password(user, password)) {     // 业务自己的校验
+  limiter.record_failure(user);
+  resp.status(uvcpp::http_status::UNAUTHORIZED);
+  return;
+}
+limiter.record_success(user);
+```
+
+- **限流是进程内的**：`allowed/record_failure/record_success` 线程安全、不依赖
+  事件循环；窗口滑过后计数归零，锁定期间不叠加时长。多实例全局限流需要把计数
+  放进共享存储（本层不做）。
+- **审计**：`LOGIN_FAILURE` / `LOGIN_SUCCESS` / `LOCKED_OUT` 三条事件带 key、
+  时间戳与一句 detail；回调在调用 `record_*` 的线程上同步执行。
+- **PBKDF2-HMAC-SHA256**（`uvcpp_pbkdf2_sha256`，`UVCPP_OPENSSL_ENABLE=1` 才编）：
+  编码 `pbkdf2-sha256$<iter>$<hex-salt>$<hex-hash>`，16 字节随机盐、常量时间
+  比较，畸形编码/迭代次数越界一律拒绝。不想要它就把业务自己的校验回调接进来。
+- 用例：`web_app_auth_func.cpp`（RBAC/CSRF + 限流）、
+  `web_ssl_app_auth_password_func.cpp`（PBKDF2）。
 
 ---
 

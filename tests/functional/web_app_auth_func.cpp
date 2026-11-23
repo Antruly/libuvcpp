@@ -244,10 +244,77 @@ void test_role_mismatch() {
 
 }  // namespace
 
+void test_login_limiter() {
+  std::cout << "-- 登录失败限流 --" << std::endl;
+
+  uvcpp_login_limiter_options o;
+  o.max_failures    = 3;
+  o.window_seconds  = 2;
+  o.lockout_seconds = 1;
+  o.max_keys        = 32;
+
+  uvcpp_login_limiter lim(o);
+  std::vector<uvcpp_auth_event> events;
+  lim.set_audit([&events](const uvcpp_auth_event& ev) { events.push_back(ev); });
+
+  int wait = 0;
+  check(lim.allowed("alice", &wait), "没有失败记录时放行");
+  check(!events.size(), "放行本身不发审计事件");
+
+  lim.record_failure("alice");
+  lim.record_failure("alice");
+  check(lim.allowed("alice"), "未达阈值仍放行");
+  lim.record_failure("alice");
+  check(!lim.allowed("alice", &wait), "达到阈值后锁定");
+  check(wait >= 1, "retry_after_seconds 给出剩余秒数");
+
+  int locked_out = 0;
+  int failures   = 0;
+  for (size_t i = 0; i < events.size(); ++i) {
+    if (events[i].kind == uvcpp_auth_event::LOCKED_OUT) ++locked_out;
+    if (events[i].kind == uvcpp_auth_event::LOGIN_FAILURE) ++failures;
+    check(events[i].key == "alice", "事件带 key");
+    check(events[i].at_ms > 0, "事件带时间戳");
+  }
+  check(failures == 3, "三条 LOGIN_FAILURE");
+  check(locked_out == 1, "一条 LOCKED_OUT");
+
+  lim.record_success("alice");
+  check(lim.allowed("alice"), "record_success 清掉锁定");
+  int success = 0;
+  for (size_t i = 0; i < events.size(); ++i) {
+    if (events[i].kind == uvcpp_auth_event::LOGIN_SUCCESS) ++success;
+  }
+  check(success == 1, "LOGIN_SUCCESS 事件");
+
+  // 窗口滑过去：另一个 key 失败一次，睡过一个窗口就重新开始计数。
+  uvcpp_login_limiter_options w;
+  w.max_failures    = 2;
+  w.window_seconds  = 1;
+  w.lockout_seconds = 0;
+  uvcpp_login_limiter short_win(w);
+  short_win.record_failure("bob");
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  check(short_win.allowed("bob"), "窗口过期后失败计数归零");
+  short_win.record_failure("bob");
+  check(short_win.allowed("bob"), "新一轮的第一次仍放行");
+
+  // 表上限：狂塞 key 之后不会无限长。
+  uvcpp_login_limiter_options cap;
+  cap.max_keys = 10;
+  uvcpp_login_limiter capped(cap);
+  for (int i = 0; i < 100; ++i) {
+    capped.record_failure("k" + std::to_string(i));
+  }
+  check(capped.size() <= 10, "max_keys 生效（实际 " +
+                                 std::to_string(capped.size()) + "）");
+}
+
 int main() {
   std::cout << "[web_app_auth] start" << std::endl;
   test_roles_and_csrf();
   test_role_mismatch();
+  test_login_limiter();
   if (g_fail == 0) {
     std::cout << "[web_app_auth] ALL PASS" << std::endl;
     return 0;

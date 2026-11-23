@@ -35,9 +35,23 @@
  * - token 是按会话的，注销/换会话后旧 token 失效；
  * - 安全方法只负责"确保 token 存在并下发 Cookie"。
  *
+ * ## 登录失败限流与审计
+ *
+ * `uvcpp_login_limiter` 是进程内的失败窗口 + 锁定：同一个 key（用户名、IP，
+ * 或两者拼起来）在 `window_seconds` 内失败 `max_failures` 次后锁定
+ * `lockout_seconds`。`allowed()` 返回是否放行（可带 `retry_after_seconds`）；
+ * 事件通过 `set_audit()` 报告（LOGIN_FAILURE / LOGIN_SUCCESS / LOCKED_OUT），
+ * 不内置存储，也不猜你的账号模型。
+ *
+ * ## 密码哈希
+ *
+ * `uvcpp_pbkdf2_sha256` 是**可选**实现（`UVCPP_OPENSSL_ENABLE=1` 才编）：
+ * `pbkdf2-sha256$<iter>$<hex-salt>$<hex-hash>`，盐 16 字节、常量时间比较。
+ * 不想要它就把业务自己的校验回调传给登录处理器 —— 本模块不强制算法。
+ *
  * ## 不做
  *
- * - 密码哈希、登录失败限流、审计事件：需要选型/业务模型，留 #70 后续；
+ * - 并发登录策略（同一账号最多几个会话）：属于会话存储的用户索引，留后续；
  * - 不做基于路径前缀的通配豁免（`skip_paths` 是精确匹配，避免 `/admin`
  *   豁免时把 `/admin/../secret` 这类归一化绕过也放进来）。
  */
@@ -51,6 +65,9 @@
 
 #if UVCPP_WEBAPP_ENABLE
 
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -115,6 +132,111 @@ UVCPP_API uvcpp_web_middleware uvcpp_csrf_protect(
 /// 本请求会话的 CSRF token；没有会话/未生成时返回 nullptr。
 UVCPP_API const std::string* uvcpp_csrf_token(
     uvcpp_web_request& req, const uvcpp_csrf_options& opts = uvcpp_csrf_options());
+
+// ---------------------------------------------------------------------------
+// 登录失败限流 + 审计（#70 剩余）
+// ---------------------------------------------------------------------------
+
+/// 审计事件。`key` 就是调用方给限流器的那个 key。
+struct UVCPP_API uvcpp_auth_event {
+  enum kind_t {
+    LOGIN_FAILURE = 0,
+    LOGIN_SUCCESS = 1,
+    LOCKED_OUT    = 2,
+  };
+  uvcpp_auth_event();
+  kind_t      kind;
+  std::string key;
+  std::string detail;
+  int64_t     at_ms;  ///< epoch 毫秒
+};
+
+using uvcpp_auth_audit_cb = std::function<void(const uvcpp_auth_event&)>;
+
+struct UVCPP_API uvcpp_login_limiter_options {
+  uvcpp_login_limiter_options();
+  int    max_failures;     ///< 窗口内达到这个数就锁定（默认 5）
+  int    window_seconds;   ///< 失败计数窗口（默认 300）
+  int    lockout_seconds;  ///< 锁定时长（默认 300）
+  size_t max_keys;         ///< 表上限；超了淘汰最久没碰的（默认 10000）
+};
+
+/**
+ * @brief 进程内登录失败限流。线程安全；不依赖事件循环。
+ *
+ * 用法（账号不存在也记失败，别让 key 的存在与否泄露出去）：
+ *
+ * ```cpp
+ * int wait = 0;
+ * if (!limiter.allowed(user, &wait)) { resp.status(429); ... }
+ * if (!check_password(...)) { limiter.record_failure(user); ... }
+ * else { limiter.record_success(user); }
+ * ```
+ *
+ * **多实例部署时它只是本进程的**；要全局限流得把失败计数放到共享存储里。
+ */
+class UVCPP_API uvcpp_login_limiter {
+ public:
+  explicit uvcpp_login_limiter(
+      const uvcpp_login_limiter_options& opts = uvcpp_login_limiter_options());
+  ~uvcpp_login_limiter();
+
+  uvcpp_login_limiter(const uvcpp_login_limiter&) = delete;
+  uvcpp_login_limiter& operator=(const uvcpp_login_limiter&) = delete;
+
+  /// 是否放行。锁定时把剩余秒数写进 `retry_after_seconds`（可空）。
+  bool allowed(const std::string& key, int* retry_after_seconds = nullptr);
+
+  /// 记一次失败；达到阈值时进入锁定并发一条 LOCKED_OUT。
+  void record_failure(const std::string& key);
+
+  /// 记一次成功：清掉该 key 的失败计数并发一条 LOGIN_SUCCESS。
+  void record_success(const std::string& key);
+
+  /// 丢掉某个 key 的全部状态（不发事件）。
+  void reset(const std::string& key);
+
+  /// 当前表里的 key 数（测试/观测用）。
+  size_t size() const;
+
+  void set_audit(const uvcpp_auth_audit_cb& cb);
+
+ private:
+  struct impl;
+  std::unique_ptr<impl> impl_;
+};
+
+// ---------------------------------------------------------------------------
+// 密码哈希（可选，OpenSSL）
+// ---------------------------------------------------------------------------
+
+#if UVCPP_OPENSSL_ENABLE
+
+/**
+ * @brief PBKDF2-HMAC-SHA256 的编码/校验。
+ *
+ * 编码格式：`pbkdf2-sha256$<iterations>$<hex salt>$<hex hash>`。盐每次随机
+ * 16 字节；比较用 `CRYPTO_memcmp`（常量时间）。`hash()` 失败返回空串（不抛）。
+ */
+class UVCPP_API uvcpp_pbkdf2_sha256 {
+ public:
+  explicit uvcpp_pbkdf2_sha256(int iterations = 120000,
+                               size_t salt_bytes = 16,
+                               size_t hash_bytes = 32);
+
+  int    iterations() const;
+  /// 编码一个新口令。
+  std::string hash(const std::string& password) const;
+  /// 校验；`encoded` 格式不合法/算法名不对一律 false。
+  bool verify(const std::string& password, const std::string& encoded) const;
+
+ private:
+  int    iterations_;
+  size_t salt_bytes_;
+  size_t hash_bytes_;
+};
+
+#endif  // UVCPP_OPENSSL_ENABLE
 
 }  // namespace uvcpp
 

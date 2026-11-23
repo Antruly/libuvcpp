@@ -1818,6 +1818,11 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### 公开契约与安全
 
+- **登录失败限流 / 密码哈希 / 审计**（`1.11.0-dev`，#70 剩余）：
+  `uvcpp_login_limiter`（失败窗口 + 锁定 + 审计事件，线程安全、不依赖事件循环）、
+  `uvcpp_pbkdf2_sha256`（`UVCPP_OPENSSL_ENABLE=1` 才编：随机盐、常量时间比较、
+  畸形/超长编码拒绝）。用例 `web_app_auth_func` 的限流组与
+  `web_ssl_app_auth_password_func`。
 - **会话与安全 Cookie**（`1.10.0-dev`，#70 第一批）：`uvcpp_session` ——
   可插拔存储（内置内存实现）、`sid` Cookie（HttpOnly / SameSite / Secure /
   Max-Age）、过期、续期、注销与 `regenerate()`。用例 `web_app_session_func`。
