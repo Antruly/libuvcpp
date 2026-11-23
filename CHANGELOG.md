@@ -1414,8 +1414,13 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   （`src/db/`，需要 `UVCPP_ENABLE_DB=ON`）实现同一个 `uvcpp_job_store` 接口 ——
   SQLite / MySQL / PostgreSQL 共用一份实现，按驱动选 `$n`/`?` 与 upsert 语法，
   `open()` 建表。用例 `db_job_store_func`：直接读写、队列跑完后记录仍在、用新
-  store + 新 queue 把 PENDING 捡起来执行（跨进程恢复闭环）。**异步 handler 仍是
-  后续。**
+  store + 新 queue 把 PENDING 捡起来执行（跨进程恢复闭环）。
+- **作业队列的异步 handler**（`1.11.0-dev`，#67 剩余）：
+  `register_async_handler(type, handler)` —— 处理器在 **loop 线程**上运行（可起
+  定时器 / Redis / WS），以 `done(ok, err)` 结束尝试；`ctx` 是 `shared_ptr`，
+  可被异步回调捕获。超时/取消仍协作式：只置 `ctx->cancelled()`，队列不替你收回
+  handler。同步与异步同类型时异步优先。用例 `job_queue_func` 新增异步组（成功、
+  失败重试、运行中取消、超时）。
 - **服务化部署**（`1.11.0-dev`，#73）：`uvcpp_service_run(app, argc, argv)` ——
   Windows 服务安装/卸载/启停（SCM，`install` 配崩溃后自动重启）、前台模式
   （SIGINT/SIGTERM 优雅停机）、工作目录/环境变量、`stdout`/`stderr` 日志重定向

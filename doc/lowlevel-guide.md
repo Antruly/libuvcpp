@@ -479,7 +479,11 @@ queue.submit(req);
   `UVCPP_ENABLE_DB=ON`）——SQLite / MySQL / PostgreSQL 同一个实现，按驱动选
   占位符与 upsert 语法，`open()` 会建表。它让"进程重启后未完成任务能恢复"真正
   跨进程成立（用例 `db_job_store_func.cpp` 用新 store + 新 queue 打开同一个库
-  捡起 PENDING）。异步 handler 仍是 #67 的后续。
+  捡起 PENDING）。**异步 handler**：`register_async_handler(type, handler)` 让
+  处理器在 **loop 线程**上跑（可以起定时器 / Redis / WS），用 `done(ok, err)`
+  结束这次尝试；`ctx` 是 `shared_ptr`，可以安全地被异步回调捕获。同一 type
+  同时注册同步与异步时异步优先。超时/取消对它同样是协作式的 —— 队列只置
+  `ctx->cancelled()`，不会替你收回 handler。
 - **析构前**必须 `stop()` 且 `running == 0`。用例：`job_queue_func.cpp`。
 
 ---

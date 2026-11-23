@@ -24,8 +24,9 @@
  *
  * - **状态**：PENDING / RUNNING / SUCCESS / FAILED / CANCELLED；每次变更写 store
  *   并回调 `on_state()`（loop 线程）。
- * - **handler 在 libuv 线程池里同步执行**（`uvcpp_work`）；不要在里面阻塞循环
- *   线程的东西。异步 handler 是后续（#67 剩余）。
+ * - **同步 handler 在 libuv 线程池里执行**（`uvcpp_work`）；**异步 handler**
+ *   （`register_async_handler`）在 **loop 线程**上执行，用 `done()` 结束尝试。
+ *   同一 type 两者都有时异步优先。超时/取消对两者都是协作式的。
  * - **`concurrency_key`**：同一个非空 key 同时只允许一个 RUNNING；空 = 不限制。
  *   排队顺序按提交 id。
  * - **重试**：失败后 `attempt <= max_retry` 时回到 PENDING，`not_before =
@@ -150,6 +151,25 @@ class UVCPP_API uvcpp_job_context {
 };
 
 using uvcpp_job_handler = std::function<void(uvcpp_job_context&)>;
+
+/// 异步 handler 的完成回调：**恰好调一次**。`ok=false` 时 `error` 写原因。
+using uvcpp_job_done =
+    std::function<void(bool ok, const std::string& error)>;
+
+/**
+ * @brief 跑在 **loop 线程**上的异步 handler。
+ *
+ * 可以启动定时器 / Redis / WS 等循环上的东西，然后调 `done()` 结束这次尝试。
+ * `ctx` 是 `shared_ptr`，可以安全地被异步回调捕获；`done()` 之后再读它只会
+ * 看到空作业（`ctx->cancelled()` 为假）。
+ *
+ * **协作式停机**：超时/取消只置 `ctx->cancelled()`，队列**不会**替你收回
+ * handler —— 你必须（在方便的时候）调 `done()`。否则这次尝试一直占着并发槽，
+ * 析构前的 `running == 0` 也永远不成立。
+ */
+using uvcpp_job_async_handler = std::function<void(
+    std::shared_ptr<uvcpp_job_context> ctx, uvcpp_job_done done)>;
+
 using uvcpp_job_state_cb = std::function<void(const uvcpp_job_record&)>;
 
 /**
@@ -171,6 +191,15 @@ class UVCPP_API uvcpp_job_queue {
   /// 注册处理器。同类型重复注册 = 覆盖。没有处理器时任务失败（不吞）。
   void register_handler(const std::string& type,
                         const uvcpp_job_handler& handler);
+
+  /**
+   * @brief 注册异步处理器（在 loop 线程上跑）。
+   *
+   * 同一 type 同时有同步与异步处理器时**异步优先**。见
+   * `uvcpp_job_async_handler` 的完成/协作约定。
+   */
+  void register_async_handler(const std::string& type,
+                              const uvcpp_job_async_handler& handler);
 
   /// 最大同时执行的作业数（默认 4）。只在没有 RUNNING 时改动才立即生效。
   void set_max_concurrent(size_t n);

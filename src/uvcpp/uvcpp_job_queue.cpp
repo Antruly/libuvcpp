@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/uvcpp/uvcpp_job_queue.cpp
  * @brief 作业队列的实现（内存记录 + uv 线程池执行）。
  * @author zhuweiye
@@ -89,12 +89,13 @@ struct job_impl {
   uvcpp_job_record    rec;
   std::atomic<bool>   cancel_requested;
   std::atomic<bool>   timed_out;
+  std::atomic<bool>   done_once;  ///< 异步 handler 的 done() 只认第一次
   std::string         handler_error;  ///< 仅 worker 写、after_work 读
   bool                has_handler_error;
   uvcpp_work*         work;
   uv_timer_t*         timeout_timer;
 
-  job_impl() : cancel_requested(false), timed_out(false),
+  job_impl() : cancel_requested(false), timed_out(false), done_once(false),
                has_handler_error(false), work(nullptr),
                timeout_timer(nullptr) {}
 };
@@ -146,6 +147,7 @@ struct uvcpp_job_queue::impl {
   std::shared_ptr<uvcpp_job_store>              store;
   std::map<uint64_t, std::shared_ptr<job_impl> > jobs;
   std::map<std::string, uvcpp_job_handler>      handlers;
+  std::map<std::string, uvcpp_job_async_handler> async_handlers;
   std::set<std::string>                         running_keys;
   size_t                                        max_concurrent;
   size_t                                        max_queue;
@@ -210,6 +212,18 @@ void uvcpp_job_queue::impl::release_running(job_impl* j) {
   }
 }
 
+namespace {
+
+void stop_job_timeout_timer(job_impl* j) {
+  if (j->timeout_timer == nullptr) return;
+  uv_timer_stop(j->timeout_timer);
+  uv_close(reinterpret_cast<uv_handle_t*>(j->timeout_timer),
+           [](uv_handle_t* h) { delete reinterpret_cast<uv_timer_t*>(h); });
+  j->timeout_timer = nullptr;
+}
+
+}  // namespace
+
 void uvcpp_job_queue::impl::dispatch() {
   if (!started) return;
   bool progressed = true;
@@ -263,6 +277,47 @@ void uvcpp_job_queue::impl::run_job(const std::shared_ptr<job_impl>& sp) {
           jj->cancel_requested.store(true);
         },
         j->rec.timeout_ms, 0);
+  }
+
+  // 异步优先：它在 loop 线程上跑，自己决定什么时候 done()。
+  std::map<std::string, uvcpp_job_async_handler>::iterator aht =
+      async_handlers.find(j->rec.type);
+  if (aht != async_handlers.end() && aht->second) {
+    j->done_once.store(false);
+    std::shared_ptr<uvcpp_job_context> ctx(new uvcpp_job_context());
+    ctx->impl_->j = j;
+    impl* self    = this;
+    uvcpp_job_done done = [sp, self, ctx](bool ok, const std::string& error) {
+      job_impl* jj = sp.get();
+      // 重复 done()/取消与完成撞车：只认第一次。
+      if (jj->done_once.exchange(true)) return;
+      ctx->impl_->j = nullptr;
+      stop_job_timeout_timer(jj);
+      self->release_running(jj);
+      const bool cancelled = jj->cancel_requested.load();
+      const bool timed_out = jj->timed_out.load();
+      const bool success   = ok && !cancelled && !timed_out;
+      if (!success) {
+        if (jj->rec.error.empty()) {
+          if (!error.empty()) {
+            jj->rec.error = error;
+          } else {
+            jj->rec.error = timed_out ? "timeout" : "failed";
+          }
+        }
+      }
+      self->finish_job(sp, success);
+      self->dispatch();
+    };
+    const uvcpp_job_async_handler ah = aht->second;
+    try {
+      ah(ctx, done);
+    } catch (const std::exception& e) {
+      done(false, e.what());
+    } catch (...) {
+      done(false, "async handler 抛出未知异常");
+    }
+    return;
   }
 
   uvcpp_job_handler handler;
@@ -391,6 +446,11 @@ uvcpp_job_queue::~uvcpp_job_queue() {
 void uvcpp_job_queue::register_handler(const std::string& type,
                                        const uvcpp_job_handler& handler) {
   impl_->handlers[type] = handler;
+}
+
+void uvcpp_job_queue::register_async_handler(
+    const std::string& type, const uvcpp_job_async_handler& handler) {
+  impl_->async_handlers[type] = handler;
 }
 
 void uvcpp_job_queue::set_max_concurrent(size_t n) {

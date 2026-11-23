@@ -149,6 +149,179 @@ void test_retry_and_fail() {
   }
 }
 
+/// 异步 handler 用：`delay_ms` 之后调一次 `done(ok, error)`。
+void schedule_done(uvcpp_loop& loop, int delay_ms, bool ok,
+                   const std::string& error, uvcpp_job_done done) {
+  uv_timer_t* t = new uv_timer_t();
+  uv_timer_init(reinterpret_cast<uv_loop_t*>(loop.get_handle()), t);
+  struct payload {
+    uvcpp_job_done cb;
+    bool           ok;
+    std::string    error;
+  };
+  payload* p = new payload();
+  p->cb      = done;
+  p->ok      = ok;
+  p->error   = error;
+  t->data    = p;
+  uv_timer_start(
+      t,
+      [](uv_timer_t* tt) {
+        payload* pp = static_cast<payload*>(tt->data);
+        tt->data    = nullptr;
+        uvcpp_job_done cb = pp->cb;
+        const bool ok      = pp->ok;
+        const std::string err = pp->error;
+        delete pp;
+        uv_close(reinterpret_cast<uv_handle_t*>(tt),
+                 [](uv_handle_t* h) {
+                   delete reinterpret_cast<uv_timer_t*>(h);
+                 });
+        cb(ok, err);
+      },
+      static_cast<uint64_t>(delay_ms), 0);
+}
+
+void test_async_handlers() {
+  std::cout << "-- 异步 handler --" << std::endl;
+
+  // (1) 成功：done 之后 ctx 失效但对象还在。
+  {
+    uvcpp_loop loop;
+    std::shared_ptr<uvcpp_job_context> seen;
+    {
+      uvcpp_job_queue q(&loop);
+      q.register_async_handler(
+          "async.ok", [&](std::shared_ptr<uvcpp_job_context> ctx,
+                          uvcpp_job_done done) {
+            seen = ctx;
+            schedule_done(loop, 30, true, "", done);
+          });
+      q.start();
+      uvcpp_job_submit req;
+      req.type       = "async.ok";
+      req.timeout_ms = 5000;
+      std::string err;
+      const uint64_t id = q.submit(req, &err);
+      check(id != 0, "异步作业 submit");
+      check(pump(loop,
+                 [&] {
+                   const uvcpp_job_record* r = q.find(id);
+                   return r != nullptr &&
+                          r->state ==
+                              static_cast<int>(uvcpp_job_state::SUCCESS);
+                 },
+                 5000),
+            "异步 handler 调 done(true) 后作业成功");
+      check(q.stats().running == 0, "running 归零");
+      check(seen && !seen->cancelled(), "done 之后 ctx 仍可安全读");
+      q.stop();
+    }
+  }
+
+  // (2) 失败一次后重试成功。
+  {
+    uvcpp_loop loop;
+    std::atomic<int> attempts(0);
+    {
+      uvcpp_job_queue q(&loop);
+      q.register_async_handler(
+          "async.flaky", [&](std::shared_ptr<uvcpp_job_context>,
+                             uvcpp_job_done done) {
+            const int n = ++attempts;
+            schedule_done(loop, 10, n > 1, n > 1 ? "" : "first-fail", done);
+          });
+      q.start();
+      uvcpp_job_submit req;
+      req.type       = "async.flaky";
+      req.max_retry  = 2;
+      req.backoff_ms = 10;
+      req.timeout_ms = 5000;
+      const uint64_t id = q.submit(req);
+      check(id != 0, "异步重试作业 submit");
+      check(pump(loop,
+                 [&] {
+                   const uvcpp_job_record* r = q.find(id);
+                   return r != nullptr &&
+                          r->state ==
+                              static_cast<int>(uvcpp_job_state::SUCCESS);
+                 },
+                 5000),
+            "第二次尝试成功");
+      check(attempts.load() == 2, "handler 跑了两次");
+      check(q.stats().retried >= 1, "retried 计数涨");
+      q.stop();
+    }
+  }
+
+  // (3) 运行中取消：handler 稍后 done(true)，队列仍判 CANCELLED。
+  {
+    uvcpp_loop loop;
+    std::atomic<bool> started(false);
+    {
+      uvcpp_job_queue q(&loop);
+      q.register_async_handler(
+          "async.cancel", [&](std::shared_ptr<uvcpp_job_context>,
+                              uvcpp_job_done done) {
+            started.store(true);
+            schedule_done(loop, 200, true, "", done);
+          });
+      q.start();
+      uvcpp_job_submit req;
+      req.type       = "async.cancel";
+      req.timeout_ms = 5000;
+      const uint64_t id = q.submit(req);
+      check(id != 0, "异步取消作业 submit");
+      check(pump(loop, [&] { return started.load(); }, 3000), "handler 已开始");
+      check(q.cancel(id) == 0, "cancel 成功");
+      check(pump(loop,
+                 [&] { return q.stats().cancelled >= 1; }, 3000),
+            "done 之后归为 CANCELLED");
+      const uvcpp_job_record* r = q.find(id);
+      check(r != nullptr &&
+                r->state == static_cast<int>(uvcpp_job_state::CANCELLED),
+            "记录状态 CANCELLED");
+      q.stop();
+    }
+  }
+
+  // (4) 超时：handler 拖到超时之后才 done，结果按 timeout 落地。
+  {
+    uvcpp_loop loop;
+    std::atomic<bool> started(false);
+    {
+      uvcpp_job_queue q(&loop);
+      q.register_async_handler(
+          "async.timeout", [&](std::shared_ptr<uvcpp_job_context>,
+                               uvcpp_job_done done) {
+            started.store(true);
+            schedule_done(loop, 300, true, "", done);
+          });
+      q.start();
+      uvcpp_job_submit req;
+      req.type       = "async.timeout";
+      req.timeout_ms = 50;
+      req.max_retry  = 0;
+      const uint64_t id = q.submit(req);
+      check(id != 0, "异步超时作业 submit");
+      check(pump(loop, [&] { return started.load(); }, 3000), "handler 已开始");
+      check(pump(loop,
+                 [&] {
+                   const uvcpp_job_record* r = q.find(id);
+                   return r != nullptr &&
+                          r->state ==
+                              static_cast<int>(uvcpp_job_state::FAILED);
+                 },
+                 5000),
+            "超时后落地 FAILED");
+      const uvcpp_job_record* r = q.find(id);
+      check(r != nullptr && r->error == "timeout", "错误是 timeout");
+      check(q.stats().failed >= 1, "stats.failed 计数涨");
+      q.stop();
+    }
+  }
+}
+
 void test_cancel_and_timeout() {
   std::cout << "-- 取消 / 超时 --" << std::endl;
   uvcpp_loop loop;
@@ -305,6 +478,7 @@ int main() {
   test_basic();
   test_concurrency_key();
   test_retry_and_fail();
+  test_async_handlers();
   test_cancel_and_timeout();
   test_queue_full();
   test_recovery();
