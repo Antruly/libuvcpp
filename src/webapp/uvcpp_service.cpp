@@ -505,6 +505,17 @@ void WINAPI service_main(DWORD, LPWSTR*) {
     return;
   }
 
+  // 启动期间可能已经来了 STOP：先把状态收干净，别在 STOP_PENDING 之后
+  // 又报一个 RUNNING。
+  if (WaitForSingleObject(g_stop_event, 0) != WAIT_TIMEOUT) {
+    stop_application(*g_service_app);
+    CloseHandle(g_stop_event);
+    g_stop_event = nullptr;
+    g_service_log = nullptr;
+    report_status(SERVICE_STOPPED, NO_ERROR, 0);
+    return;
+  }
+
   report_status(SERVICE_RUNNING, NO_ERROR, 0);
 
   while (true) {
