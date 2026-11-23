@@ -72,7 +72,7 @@ bool http_get(int port, const std::string& path, const std::string& cookie,
   uvcpp_http_request req = uvcpp_http_request::make_get(path);
   req.set_header("connection", "close");
   if (!cookie.empty()) req.set_header("cookie", cookie);
-  return c.send_wait_plain(req, resp, 5000) == 0;
+  return c.send_wait(req, resp, 5000) == 0;
 }
 
 std::string cookie_from(const uvcpp_http_response& resp) {

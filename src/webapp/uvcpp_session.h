@@ -89,6 +89,16 @@ UVCPP_API void uvcpp_session_logout(uvcpp_web_request& req,
                                     uvcpp_session_store& store,
                                     const uvcpp_session_options& opts);
 
+// 异步版同理：**第一条声明必须带 `UVCPP_API`**，而且必须排在类里的 friend
+// 之前（MSVC 只认第一条声明的链接属性；默认实参放到后面的声明里）。
+UVCPP_API uvcpp_web_middleware uvcpp_async_session_middleware(
+    std::shared_ptr<uvcpp_async_session_store> store,
+    const uvcpp_session_options&               opts);
+UVCPP_API void uvcpp_async_session_logout(uvcpp_web_request& req,
+                                          uvcpp_web_response& resp,
+                                          uvcpp_async_session_store& store,
+                                          const uvcpp_session_options& opts);
+
 /**
  * @brief 一份会话数据。**不是**线程安全的；只在 loop 线程上用。
  */
