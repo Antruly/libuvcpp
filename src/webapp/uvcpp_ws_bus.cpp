@@ -113,6 +113,7 @@ struct uvcpp_ws_bus::impl : std::enable_shared_from_this<uvcpp_ws_bus::impl> {
         backoff(o.reconnect_ms > 0 ? o.reconnect_ms : 1),
         seq(0),
         ever_connected(false),
+        attempt(0),
         pub_ready(false),
         sub_ready(false),
         rooms(nullptr) {}
@@ -139,6 +140,10 @@ struct uvcpp_ws_bus::impl : std::enable_shared_from_this<uvcpp_ws_bus::impl> {
   int                               backoff;
   uint64_t                          seq;
   bool                              ever_connected;
+  /// 每次 `begin_connect()` 加一。异步回调带着自己那一代进来，对不上就丢弃 ——
+  /// 否则"发布连接失败、订阅连接随后成功"会让状态机卡在 SUBSCRIBING 里等一个
+  /// 永远不会来的 `maybe_ready()`（那一半已经被退役了）。
+  uint64_t                          attempt;
 
   // **订阅与发布必须用两条连接**：RESP2 下一条连接一旦进入订阅模式，Redis 只
   // 接受 (P)SUBSCRIBE/UNSUBSCRIBE/PING/QUIT/RESET，PUBLISH 会被回一条 `-ERR`。
@@ -221,15 +226,18 @@ struct uvcpp_ws_bus::impl : std::enable_shared_from_this<uvcpp_ws_bus::impl> {
 
   void begin_connect() {
     state     = CONNECTING;
+    ++attempt;
+    const uint64_t gen_now = attempt;
     pub_ready = false;
     sub_ready = false;
     pub_cli.reset(new uvcpp_redis_client(loop));
     sub_cli.reset(new uvcpp_redis_client(loop));
 
     std::weak_ptr<impl> w = shared_from_this();
-    const int prc = pub_cli->connect(url, [w](int status) {
+    const int prc = pub_cli->connect(url, [w, gen_now](int status) {
       std::shared_ptr<impl> s = w.lock();
-      if (!s || !s->started) return;
+      if (!s || !s->started || s->attempt != gen_now) return;
+      if (s->state != CONNECTING && s->state != SUBSCRIBING) return;
       if (status != 0) {
         s->fail_backoff("连接 Redis（发布连接）失败");
         return;
@@ -242,9 +250,10 @@ struct uvcpp_ws_bus::impl : std::enable_shared_from_this<uvcpp_ws_bus::impl> {
       return;
     }
 
-    const int src = sub_cli->connect(url, [w](int status) {
+    const int src = sub_cli->connect(url, [w, gen_now](int status) {
       std::shared_ptr<impl> s = w.lock();
-      if (!s || !s->started) return;
+      if (!s || !s->started || s->attempt != gen_now) return;
+      if (s->state != CONNECTING) return;
       if (status != 0) {
         s->fail_backoff("连接 Redis（订阅连接）失败");
         return;
@@ -254,14 +263,16 @@ struct uvcpp_ws_bus::impl : std::enable_shared_from_this<uvcpp_ws_bus::impl> {
       const std::vector<std::string> patterns(1, s->opts.channel_prefix + "*");
       const int pc = s->sub_cli->psubscribe(
           patterns,
-          [w2](const std::string& channel, const uvcpp_redis_value& message) {
+          [w2, gen_now](const std::string& channel,
+                        const uvcpp_redis_value& message) {
             std::shared_ptr<impl> s2 = w2.lock();
-            if (!s2 || !s2->started) return;
+            if (!s2 || !s2->started || s2->attempt != gen_now) return;
             s2->on_remote(channel, message);
           },
-          [w2](int sub_status) {
+          [w2, gen_now](int sub_status) {
             std::shared_ptr<impl> s2 = w2.lock();
-            if (!s2 || !s2->started) return;
+            if (!s2 || !s2->started || s2->attempt != gen_now) return;
+            if (s2->state != SUBSCRIBING || !s2->sub_cli) return;
             if (sub_status != 0) {
               s2->fail_backoff("订阅 Redis 频道失败");
               return;
