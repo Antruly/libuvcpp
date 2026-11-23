@@ -317,7 +317,10 @@ struct uvcpp_ws_bus::impl : std::enable_shared_from_this<uvcpp_ws_bus::impl> {
     retire(pub_cli);
     arm_retire_timer();
     arm_timer(backoff);
-    backoff = std::min(backoff * 2, std::max(opts.reconnect_max_ms, 1));
+    // 括号不能省：`<windows.h>` 把 `min`/`max` 定义成宏，`std::min(` 会被
+    // 展开成一段非法记号（MSVC C2589/C2059），GCC/MinGW 那条腿恰好没走到这个
+    // 宏定义上。`(std::min)(...)` 让预处理器看不见函数名后面的 `(`。
+    backoff = (std::min)(backoff * 2, (std::max)(opts.reconnect_max_ms, 1));
   }
 
   void fail_backoff(const char* why) {
