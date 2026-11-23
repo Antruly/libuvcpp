@@ -365,6 +365,12 @@ if(TARGET test_web_app_service_scm_func)
                        PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 3)
 endif()
 
+# 作业队列的数据库持久化（`db_job_store_func`）：SQLite 用临时文件；MySQL /
+# PostgreSQL 只在给了对应 URL 时才跑。一个后端都没有时退 3（未判定）。
+if(TARGET test_db_job_store_func)
+  set_tests_properties(test_db_job_store_func PROPERTIES SKIP_RETURN_CODE 3)
+endif()
+
 # 两条 IPv6 回环用例：绑 `::1` 失败时返回 3（= 这台机器没开 IPv6 栈）。
 #
 # **跳过与通过必须能分开**：没有 IPv6 时用例一个断言都跑不到，若 `return 0`

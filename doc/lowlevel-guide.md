@@ -474,8 +474,12 @@ queue.submit(req);
 - `max_queue > 0` 时 PENDING 达上限 `submit()` 拒绝（`stats().rejected`）。
 - `start()` 从 store 读回记录；上次停在 RUNNING 的恢复成 PENDING 并标
   `recovered after restart`。
-- store 接口 `uvcpp_job_store` 可替换（本文件带内存实现）；SQLite/MySQL 适配器与
-  异步 handler 是 #67 的后续。
+- store 接口 `uvcpp_job_store` 可替换：本文件带内存实现，**数据库适配器**是
+  `uvcpp_db_job_store`（`#include <db/uvcpp_db_job_store.h>`，需要
+  `UVCPP_ENABLE_DB=ON`）——SQLite / MySQL / PostgreSQL 同一个实现，按驱动选
+  占位符与 upsert 语法，`open()` 会建表。它让"进程重启后未完成任务能恢复"真正
+  跨进程成立（用例 `db_job_store_func.cpp` 用新 store + 新 queue 打开同一个库
+  捡起 PENDING）。异步 handler 仍是 #67 的后续。
 - **析构前**必须 `stop()` 且 `running == 0`。用例：`job_queue_func.cpp`。
 
 ---

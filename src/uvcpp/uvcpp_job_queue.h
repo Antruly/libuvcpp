@@ -117,7 +117,8 @@ class UVCPP_API uvcpp_job_store {
 };
 
 /// 进程内实现。队列已经在内存里维护全量记录，这个 store 只是让"重启恢复"
-/// 在同一个 store 对象上可测；真正跨进程持久化需要 SQLite/MySQL 适配器。
+/// 在同一个 store 对象上可测；真正跨进程持久化用 `db/uvcpp_db_job_store.h`
+/// （SQLite / MySQL / PostgreSQL，需要 `UVCPP_ENABLE_DB=ON`）。
 class UVCPP_API uvcpp_memory_job_store : public uvcpp_job_store {
  public:
   uvcpp_memory_job_store();

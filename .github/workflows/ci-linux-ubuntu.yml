@@ -1,4 +1,4 @@
-name: CI · Linux · Ubuntu
+﻿name: CI · Linux · Ubuntu
 
 # 一平台一个文件 —— 这个文件里**只有** Linux (Ubuntu) 这条腿的测试。四个文件：
 # ci-linux-ubuntu.yml / ci-windows-msvc.yml / ci-mingw64.yml / ci-macos.yml。
@@ -1222,6 +1222,7 @@ jobs:
           # 上，那里 REQUIRED 的是"链接行干净"，不是 ctest。
           for t in test_db_mysql_func test_db_pgsql_func test_db_mongodb_func \
                    test_capi_db_func test_redis_real_func \
+                   test_db_job_store_func \
                    test_web_app_ws_bus_redis_func \
                    test_web_app_integration_harness_func; do
             if ! ctest --test-dir "$tree" -N 2>&1 | grep -q "$t"; then
