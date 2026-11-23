@@ -414,7 +414,9 @@ spec.file = "/usr/bin/ffmpeg";
 spec.args = {"-i", in, "-o", out};
 spec.timeout_ms = 10 * 60 * 1000;
 spec.kill_tree = true;
-sup.spawn(spec, on_output, on_exit);
+spec.restart_max = 3;            // 非零退出/被信号杀死后最多再拉起 3 次
+spec.restart_backoff_ms = 1000;  // 1s、2s、4s…（上限 restart_backoff_max_ms）
+sup.spawn(spec, on_output, on_exit, nullptr, on_restart);
 ```
 
 - **有界输出**：`capture_stdout/stderr` 打开管道，数据同时给回调和尾缓冲
@@ -428,8 +430,15 @@ sup.spawn(spec, on_output, on_exit);
   Windows 上分配发生在 `uv_spawn` 返回之后的一瞬 —— 子进程在这条缝里再派生的
   后代不在 Job 里（libuv 不暴露 `CREATE_SUSPENDED`）；机器不允许嵌套 Job 时退回
   "只杀主进程"，不会拒绝 spawn。
-- 不绑定具体程序、不维护业务状态机；重启策略/任务队列留给上层（#67）。
-- 用例：`process_supervisor_func.cpp`（两平台；Windows 那一格**用测试程序自己**
+- **重启策略**：`restart_max > 0` 时，非正常结束（非零退出 / 被信号杀死）
+  按 `restart_backoff_ms` 起、每次翻倍到 `restart_backoff_max_ms` 重新拉起；
+  每次重启前调 `on_restart(result, restart_index, delay_ms)`。**超时、取消、
+  启动失败都不重启**（前两个是调用方的意图，第三个重试只会得到同一个错误）。
+  最终 `on_exit` 仍**恰好一次**，结果里的 `restarts` 是总重启次数；同一个 id
+  跨尝试保持不变，`cancel(id)` 在退避等待中也能取消（结果交 `cancelled=true`）。
+- 不绑定具体程序、不维护业务状态机；任务队列留给上层（#67）。
+- 用例：`process_supervisor_func.cpp`（两平台；重启策略组：失败一次后成功、
+  次数用完、退避中取消、超时不重启；Windows 那一格**用测试程序自己**
   当父/孙进程——`--tree-parent` 再派生 `--write-marker`，"4 秒后写标记文件"，
   终止后断言文件不出现；不走 PowerShell，arm64 runner 上它的启动与输出不可靠）。
 

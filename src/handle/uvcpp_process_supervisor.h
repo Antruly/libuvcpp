@@ -26,8 +26,10 @@
  *   缝里再派生的后代不在 Job 里（libuv 不暴露 `CREATE_SUSPENDED`）；机器不允许
  *   嵌套 Job 时会退回"只杀主进程"，不会拒绝 spawn。
  * - `kill_tree=false` 时只对进程本身发信号（两平台一致）。
- * - 不绑定任何具体程序、不维护业务状态机；重启策略/任务队列留给上层
- *   （#67 作业队列）。
+ * - **重启策略**（`restart_max` / `restart_backoff_ms` /
+ *   `restart_backoff_max_ms`）：非正常结束后按指数退避重新拉起，次数用完为止；
+ *   超时、取消、启动失败都不重启。最终结果只在最后一次尝试结束时交一次。
+ * - 不绑定任何具体程序、不维护业务状态机；任务队列仍留给上层（#67）。
  *
  * ## 输出
  *
@@ -78,6 +80,16 @@ struct UVCPP_API uvcpp_process_spec {
   bool     capture_stdout;
   bool     capture_stderr;
   bool     kill_tree;  ///< 原样下发给整棵进程树（POSIX 进程组 / Windows Job Object）
+
+  // ---- 重启策略（#69 尾部）------------------------------------------
+  /// 非正常结束（非零退出 / 被信号杀死）后最多再拉起几次。0 = 不重启（默认）。
+  /// **超时、取消、启动失败都不重启** —— 前两个是调用方的意图，第三个重试
+  /// 只会得到同一个错误。
+  int      restart_max;
+  /// 首次退避（毫秒）；之后每次翻倍。
+  uint64_t restart_backoff_ms;
+  /// 退避上限（毫秒）；0 = 不设上限。
+  uint64_t restart_backoff_max_ms;
 };
 
 /// 一次监管的最终结果。
@@ -94,6 +106,8 @@ struct UVCPP_API uvcpp_process_result {
   size_t   stderr_truncated;
   std::string stdout_tail;  ///< 最多 max_output_bytes 的尾部
   std::string stderr_tail;
+  /// 这一次最终结果之前已经重启过几次（未启用重启 = 0）。
+  int      restarts;
 };
 
 /// 输出回调：字节只在回调期间有效；`is_stderr` 区分两条流。
@@ -102,12 +116,24 @@ using uvcpp_process_output_cb =
 using uvcpp_process_exit_cb =
     std::function<void(const uvcpp_process_result& result)>;
 
+/**
+ * @brief 即将重启一次的回调（可空）。
+ *
+ * @param result        刚才那一次（失败的）尝试的结果
+ * @param restart_index 这是第几次重启（从 1 开始）
+ * @param delay_ms      本次退避多久之后拉起
+ */
+using uvcpp_process_restart_cb =
+    std::function<void(const uvcpp_process_result& result, int restart_index,
+                       uint64_t delay_ms)>;
+
 struct UVCPP_API uvcpp_process_supervisor_stats {
   uint64_t spawned = 0;
   uint64_t succeeded = 0;
   uint64_t failed = 0;
   uint64_t timed_out = 0;
   uint64_t cancelled = 0;
+  uint64_t restarted = 0;  ///< 实际发起的重启次数
   size_t   running = 0;
 };
 
@@ -134,6 +160,19 @@ class UVCPP_API uvcpp_process_supervisor {
                  uvcpp_process_exit_cb      on_exit   = nullptr,
                  std::string*               err       = nullptr);
 
+  /**
+   * @brief 同上，外加"即将重启"通知。
+   *
+   * 只有 `spec.restart_max > 0` 时才会重启；每次重启前调一次 `on_restart`，
+   * 最终结果仍只在**最后一次尝试**结束时通过 `on_exit` 交一次，里面的
+   * `restarts` 说明一共重启过几次。
+   */
+  uint64_t spawn(const uvcpp_process_spec& spec,
+                 uvcpp_process_output_cb    on_output,
+                 uvcpp_process_exit_cb      on_exit,
+                 std::string*               err,
+                 uvcpp_process_restart_cb   on_restart);
+
   /// 取消一个在跑的进程（SIGTERM → 宽限 → SIGKILL）。不存在/已结束返回 -1。
   int cancel(uint64_t id);
 
@@ -142,6 +181,7 @@ class UVCPP_API uvcpp_process_supervisor {
 
  private:
   struct job;
+  struct chain;
   struct impl;
   impl* impl_;
 };

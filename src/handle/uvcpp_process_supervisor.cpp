@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/handle/uvcpp_process_supervisor.cpp
  * @brief 进程监管的实现（POSIX 进程组 + 有界输出 + 超时）。
  * @author zhuweiye
@@ -39,7 +39,10 @@ uvcpp_process_spec::uvcpp_process_spec()
       max_output_bytes(64 * 1024),
       capture_stdout(true),
       capture_stderr(true),
-      kill_tree(true) {}
+      kill_tree(true),
+      restart_max(0),
+      restart_backoff_ms(1000),
+      restart_backoff_max_ms(60000) {}
 
 uvcpp_process_result::uvcpp_process_result()
     : exit_status(0),
@@ -49,7 +52,8 @@ uvcpp_process_result::uvcpp_process_result()
       cancelled(false),
       elapsed_ms(0),
       stdout_truncated(0),
-      stderr_truncated(0) {}
+      stderr_truncated(0),
+      restarts(0) {}
 
 namespace {
 
@@ -78,6 +82,7 @@ void bounded_append(std::string& buf, const char* data, size_t len,
 
 struct uvcpp_process_supervisor::job {
   impl*                     owner = nullptr;
+  chain*                    c = nullptr;  ///< 有重启策略时指向所属的重启链
   uint64_t                  id = 0;
   uvcpp_process_spec        spec;
   uvcpp_process_output_cb   on_output;
@@ -119,11 +124,44 @@ struct uvcpp_process_supervisor::job {
   std::chrono::steady_clock::time_point started_at;
 };
 
+/**
+ * @brief 一条"会重启"的监管链。id 跨尝试保持不变。
+ *
+ * 引用计数三份：`chains` 表一份、当前尝试的 job 一份（在 `note_closed` 里放）、
+ * 退避定时器一份（在它的关闭完成回调里放）。都为 0 时释放 —— 这样析构、取消、
+ * 重启三条路都不需要猜"还有谁在碰它"。
+ */
+struct uvcpp_process_supervisor::chain {
+  impl*                    owner = nullptr;
+  uint64_t                 id = 0;
+  uvcpp_process_spec       spec;
+  uvcpp_process_output_cb  on_output;
+  uvcpp_process_exit_cb    on_exit;
+  uvcpp_process_restart_cb on_restart;
+
+  int  restarts_done = 0;
+  int  refs = 1;  // 表里那一份
+  bool finished = false;
+  bool cancelled = false;
+  bool timer_init = false;
+  bool timer_open = false;  // init 过且还没 `uv_close`
+
+  uv_timer_t            timer;
+  job*                  current = nullptr;
+  uvcpp_process_result  last_result;
+
+  static void release(chain* c) {
+    if (c == nullptr) return;
+    if (--c->refs <= 0) delete c;
+  }
+};
+
 struct uvcpp_process_supervisor::impl {
   explicit impl(uvcpp_loop* l) : loop(l) {}
 
   uvcpp_loop*                       loop;
   std::map<uint64_t, job*>          jobs;
+  std::map<uint64_t, chain*>        chains;
   uint64_t                          next_id = 1;
   uvcpp_process_supervisor_stats    s;
 
@@ -229,7 +267,10 @@ struct uvcpp_process_supervisor::impl {
         j->win_job = nullptr;
       }
 #endif
+      chain* c = j->c;
       delete j;
+      // job 那一份引用还掉；可能是最后一个引用（正常结束之后）。
+      chain::release(c);
     }
   }
 
@@ -286,6 +327,12 @@ struct uvcpp_process_supervisor::impl {
     uv_timer_stop(&j->timeout_timer);
     uv_timer_stop(&j->kill_timer);
 
+    // 重启优先于"交最终结果"：这条 job 只是链上的一次尝试。
+    if (j->c != nullptr && should_restart(j)) {
+      begin_restart(j);
+      return;
+    }
+
     // 统计 + 回调（回调里新 spawn/cancel 是合法的：这里不持锁、不遍历表）。
     if (j->result.timed_out) {
       ++s.timed_out;
@@ -299,7 +346,13 @@ struct uvcpp_process_supervisor::impl {
     }
     if (j->id != 0) jobs.erase(j->id);
 
-    if (!j->exit_fired && j->on_exit) {
+    if (j->c != nullptr) {
+      chain* c = j->c;
+      c->current = nullptr;
+      j->result.restarts = c->restarts_done;  // 最终结果带上总重启次数
+      // 链上的最终尝试：由这里交唯一一次 on_exit 并把链收掉。
+      finish_chain(c, j->result, true);
+    } else if (!j->exit_fired && j->on_exit) {
       j->exit_fired = true;
       uvcpp_process_exit_cb cb = j->on_exit;
       if (cb) cb(j->result);
@@ -326,6 +379,12 @@ struct uvcpp_process_supervisor::impl {
     ++s.spawned;
     ++s.failed;
     if (j->on_exit) j->on_exit(j->result);
+    if (j->c != nullptr) {
+      // 启动失败不重试：直接把链收掉（on_exit 上面已经交过）。
+      chain* c = j->c;
+      c->current = nullptr;
+      finish_chain(c, j->result, false);
+    }
     // 关闭已经 init 的句柄
     close_handle(reinterpret_cast<uv_handle_t*>(&j->timeout_timer), j,
                  j->time_closed);
@@ -339,6 +398,144 @@ struct uvcpp_process_supervisor::impl {
       close_handle(reinterpret_cast<uv_handle_t*>(&j->err_pipe), j,
                    j->err_closed);
     }
+  }
+
+  /// 真正的"建 job 并 `uv_spawn`"。`c == nullptr` 就是旧的一次性路径。
+  job* launch(chain* c, const uvcpp_process_spec& spec,
+              uvcpp_process_output_cb on_output,
+              uvcpp_process_exit_cb on_exit, std::string* err, int& rc);
+
+  // ---- 重启链 --------------------------------------------------------
+
+  static void on_retry(uv_timer_t* t) {
+    chain* c = static_cast<chain*>(t->data);
+    if (c == nullptr || c->owner == nullptr) return;
+    c->owner->retry_now(c);
+  }
+
+  static void on_retry_close(uv_handle_t* h) {
+    chain* c = static_cast<chain*>(h->data);
+    if (c == nullptr) return;
+    c->timer_open = false;
+    chain::release(c);
+  }
+
+  void close_chain_timer(chain* c) {
+    if (c == nullptr || !c->timer_init || !c->timer_open) return;
+    uv_timer_stop(&c->timer);
+    c->timer_open = false;
+    uv_close(reinterpret_cast<uv_handle_t*>(&c->timer), on_retry_close);
+  }
+
+  uint64_t retry_delay(const chain* c) const {
+    uint64_t d =
+        c->spec.restart_backoff_ms > 0 ? c->spec.restart_backoff_ms : 1;
+    for (int i = 1; i < c->restarts_done; ++i) {
+      if (d > 3600000ull) break;
+      d *= 2;
+    }
+    if (c->spec.restart_backoff_max_ms > 0 &&
+        d > c->spec.restart_backoff_max_ms) {
+      d = c->spec.restart_backoff_max_ms;
+    }
+    return d;
+  }
+
+  bool should_restart(const job* j) const {
+    const chain* c = j->c;
+    if (c == nullptr || c->finished || c->cancelled) return false;
+    if (c->restarts_done >= c->spec.restart_max) return false;
+    if (j->result.timed_out || j->result.cancelled || j->result.error != 0) {
+      return false;
+    }
+    return j->result.exit_status != 0 || j->result.term_signal != 0;
+  }
+
+  void schedule_retry(chain* c, uint64_t delay_ms) {
+    if (c->owner == nullptr || c->finished || c->cancelled) return;
+    if (!c->timer_init) {
+      uv_loop_t* loop =
+          reinterpret_cast<uv_loop_t*>(c->owner->loop->get_handle());
+      uv_timer_init(loop, &c->timer);
+      c->timer.data = c;
+      c->timer_init = true;
+      c->timer_open = true;
+      ++c->refs;  // 定时器那一份
+    }
+    uv_timer_start(&c->timer, on_retry, delay_ms == 0 ? 1 : delay_ms, 0);
+  }
+
+  void retry_now(chain* c) {
+    if (c->finished || c->cancelled || c->owner == nullptr) return;
+    int         rc = 0;
+    std::string err;
+    job* j = launch(c, c->spec, c->on_output, c->on_exit, &err, rc);
+    if (j != nullptr) c->current = j;
+    // 启动失败不重试：`launch` 里的 `fail_spawn` 已经把链收掉了。
+  }
+
+  void begin_restart(job* j) {
+    chain* c = j->c;
+    ++c->restarts_done;
+    ++s.restarted;
+    j->result.restarts = c->restarts_done;
+    c->last_result     = j->result;
+    if (j->id != 0) jobs.erase(j->id);
+    c->current = nullptr;
+
+    const uint64_t delay = retry_delay(c);
+
+    close_handle(reinterpret_cast<uv_handle_t*>(&j->timeout_timer), j,
+                 j->time_closed);
+    close_handle(reinterpret_cast<uv_handle_t*>(&j->kill_timer), j,
+                 j->kill_closed);
+    if (j->spec.capture_stdout) {
+      close_handle(reinterpret_cast<uv_handle_t*>(&j->out_pipe), j,
+                   j->out_closed);
+    }
+    if (j->spec.capture_stderr) {
+      close_handle(reinterpret_cast<uv_handle_t*>(&j->err_pipe), j,
+                   j->err_closed);
+    }
+
+    if (c->on_restart) {
+      uvcpp_process_restart_cb cb = c->on_restart;
+      cb(j->result, c->restarts_done, delay);
+    }
+    schedule_retry(c, delay);
+  }
+
+  /// 收掉整条链：注销 id、关退避定时器、按需交最终结果。
+  void finish_chain(chain* c, const uvcpp_process_result& r, bool deliver) {
+    if (c == nullptr || c->finished) return;
+    c->finished    = true;
+    c->last_result = r;
+    if (c->id != 0) {
+      jobs.erase(c->id);
+      chains.erase(c->id);
+    }
+    close_chain_timer(c);
+    if (deliver && c->on_exit) {
+      uvcpp_process_exit_cb cb = c->on_exit;
+      cb(r);
+    }
+    chain::release(c);
+  }
+
+  int cancel_chain(chain* c) {
+    c->cancelled = true;
+    if (c->current != nullptr) {
+      c->current->result.cancelled = true;
+      if (!c->current->proc_exited) terminate(c->current);
+      return 0;
+    }
+    // 退避等待中：没有进程可杀，直接把这条链收掉（on_exit 仍恰好一次）。
+    uvcpp_process_result r = c->last_result;
+    r.cancelled  = true;
+    r.restarts   = c->restarts_done;
+    ++s.cancelled;
+    finish_chain(c, r, true);
+    return 0;
   }
 };
 
@@ -386,27 +583,45 @@ uvcpp_process_supervisor::~uvcpp_process_supervisor() {
       uv_close(reinterpret_cast<uv_handle_t*>(&j->kill_timer), impl::on_closed);
     }
   }
+  // 重启链：定时器停掉、按引用计数收尾（在飞的 job 自己那一份由
+  // `note_closed` 还，定时器那一份由关闭完成回调还）。
+  for (std::map<uint64_t, chain*>::iterator it = impl_->chains.begin();
+       it != impl_->chains.end(); ++it) {
+    chain* c   = it->second;
+    c->owner   = nullptr;
+    c->finished = true;
+    impl_->close_chain_timer(c);
+  }
+  for (std::map<uint64_t, chain*>::iterator it = impl_->chains.begin();
+       it != impl_->chains.end(); ++it) {
+    chain::release(it->second);
+  }
+  impl_->chains.clear();
   impl_->jobs.clear();
   delete impl_;
 }
 
-uint64_t uvcpp_process_supervisor::spawn(
-    const uvcpp_process_spec& spec, uvcpp_process_output_cb on_output,
-    uvcpp_process_exit_cb on_exit, std::string* err) {
-  if (impl_->loop == nullptr || spec.file.empty()) {
+auto uvcpp_process_supervisor::impl::launch(
+    chain* c, const uvcpp_process_spec& spec,
+    uvcpp_process_output_cb on_output, uvcpp_process_exit_cb exit_cb,
+    std::string* err, int& rc) -> job* {
+  rc = 0;
+  if (loop == nullptr || spec.file.empty()) {
     if (err) *err = "没有循环或可执行文件为空";
-    return 0;
+    return nullptr;
   }
   if (!spec.capture_stdout && !spec.capture_stderr) {
     // 允许，但输出回调永远收不到东西 —— 不拦。
   }
 
   job* j = new job();
-  j->owner      = impl_;
-  j->id         = impl_->next_id++;
+  j->owner      = this;
+  j->c          = c;
+  j->id         = (c != nullptr) ? c->id : next_id++;
+  if (c != nullptr) ++c->refs;  // 当前尝试那一份
   j->spec       = spec;
   j->on_output  = std::move(on_output);
-  j->on_exit    = std::move(on_exit);
+  j->on_exit    = std::move(exit_cb);
   j->started_at = std::chrono::steady_clock::now();
 
   j->arg_store.push_back(spec.file);
@@ -421,10 +636,10 @@ uint64_t uvcpp_process_supervisor::spawn(
   }
   if (!j->envp.empty()) j->envp.push_back(nullptr);
 
-  uv_loop_t* loop = reinterpret_cast<uv_loop_t*>(impl_->loop->get_handle());
-  uv_timer_init(loop, &j->timeout_timer);
+  uv_loop_t* uvloop = reinterpret_cast<uv_loop_t*>(loop->get_handle());
+  uv_timer_init(uvloop, &j->timeout_timer);
   j->timeout_timer.data = j;
-  uv_timer_init(loop, &j->kill_timer);
+  uv_timer_init(uvloop, &j->kill_timer);
   j->kill_timer.data = j;
 
   uv_process_options_t opts;
@@ -446,13 +661,13 @@ uint64_t uvcpp_process_supervisor::spawn(
   stdio[1].flags = UV_IGNORE;
   stdio[2].flags = UV_IGNORE;
   if (spec.capture_stdout) {
-    uv_pipe_init(loop, &j->out_pipe, 0);
+    uv_pipe_init(uvloop, &j->out_pipe, 0);
     j->out_pipe.data = j;
     stdio[1].flags = static_cast<uv_stdio_flags>(UV_CREATE_PIPE | UV_WRITABLE_PIPE);
     stdio[1].data.stream = reinterpret_cast<uv_stream_t*>(&j->out_pipe);
   }
   if (spec.capture_stderr) {
-    uv_pipe_init(loop, &j->err_pipe, 0);
+    uv_pipe_init(uvloop, &j->err_pipe, 0);
     j->err_pipe.data = j;
     stdio[2].flags = static_cast<uv_stdio_flags>(UV_CREATE_PIPE | UV_WRITABLE_PIPE);
     stdio[2].data.stream = reinterpret_cast<uv_stream_t*>(&j->err_pipe);
@@ -464,19 +679,20 @@ uint64_t uvcpp_process_supervisor::spawn(
   j->proc.data = j;
   j->pending_closes = 2 + (spec.capture_stdout ? 1 : 0) +
                       (spec.capture_stderr ? 1 : 0);
-  const int rc = uv_spawn(loop, &j->proc, &opts);
-  if (rc != 0) {
+  const int spawn_rc = uv_spawn(uvloop, &j->proc, &opts);
+  if (spawn_rc != 0) {
     j->spec.capture_stdout = spec.capture_stdout;
     j->spec.capture_stderr = spec.capture_stderr;
-    impl_->fail_spawn(j, rc);
-    if (err) *err = uv_strerror(rc);
-    return 0;
+    fail_spawn(j, spawn_rc);
+    if (err) *err = uv_strerror(spawn_rc);
+    rc = spawn_rc;
+    return nullptr;
   }
 
   j->proc_started = true;
   ++j->pending_closes;  // 进程句柄从这一刻起也会在退出时关一次
-  ++impl_->s.spawned;
-  impl_->jobs[j->id] = j;
+  ++s.spawned;
+  jobs[j->id] = j;
 
 #ifdef _WIN32
   // `kill_tree`：给子进程建一个 Job Object 并把它分配进去。
@@ -532,10 +748,50 @@ uint64_t uvcpp_process_supervisor::spawn(
   if (spec.timeout_ms > 0) {
     uv_timer_start(&j->timeout_timer, impl::on_timeout, spec.timeout_ms, 0);
   }
-  return j->id;
+  return j;
+}
+
+
+uint64_t uvcpp_process_supervisor::spawn(
+    const uvcpp_process_spec& spec, uvcpp_process_output_cb on_output,
+    uvcpp_process_exit_cb on_exit, std::string* err) {
+  int  rc = 0;
+  job* j  = impl_->launch(nullptr, spec, std::move(on_output),
+                          std::move(on_exit), err, rc);
+  return j != nullptr ? j->id : 0;
+}
+
+uint64_t uvcpp_process_supervisor::spawn(
+    const uvcpp_process_spec& spec, uvcpp_process_output_cb on_output,
+    uvcpp_process_exit_cb on_exit, std::string* err,
+    uvcpp_process_restart_cb on_restart) {
+  if (spec.restart_max <= 0) {
+    // 没有重启策略时走旧的一次性路径，行为逐字节不变。
+    return spawn(spec, std::move(on_output), std::move(on_exit), err);
+  }
+  chain* c      = new chain();
+  c->owner      = impl_;
+  c->id         = impl_->next_id++;
+  c->spec       = spec;
+  c->on_output  = std::move(on_output);
+  c->on_exit    = std::move(on_exit);
+  c->on_restart = std::move(on_restart);
+  impl_->chains[c->id] = c;
+
+  int  rc = 0;
+  job* j  = impl_->launch(c, c->spec, c->on_output, c->on_exit, err, rc);
+  if (j == nullptr) {
+    // `fail_spawn` 已经把链收掉并交过 on_exit；与旧路径一致，失败返回 0。
+    return 0;
+  }
+  c->current = j;
+  return c->id;
 }
 
 int uvcpp_process_supervisor::cancel(uint64_t id) {
+  std::map<uint64_t, chain*>::iterator cit = impl_->chains.find(id);
+  if (cit != impl_->chains.end()) return impl_->cancel_chain(cit->second);
+
   std::map<uint64_t, job*>::iterator it = impl_->jobs.find(id);
   if (it == impl_->jobs.end()) return -1;
   job* j = it->second;

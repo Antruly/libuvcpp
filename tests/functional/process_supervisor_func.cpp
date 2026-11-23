@@ -72,6 +72,23 @@ bool run_until(uvcpp_loop& loop, const bool& done, int ms) {
   return done;
 }
 
+std::string self_exe() {
+  char buf[4096];
+  std::size_t n = sizeof(buf);
+  if (uv_exepath(buf, &n) != 0) return std::string();
+  return std::string(buf, n);
+}
+
+std::string temp_file(const std::string& leaf) {
+  char dir[1024];
+  std::size_t n = sizeof(dir);
+  std::string base = ".";
+  if (uv_os_tmpdir(dir, &n) == 0) base.assign(dir, n);
+  char pid[32];
+  std::snprintf(pid, sizeof(pid), "%ld", static_cast<long>(uv_os_getpid()));
+  return base + "/uvcpp_restart_" + pid + "_" + leaf;
+}
+
 /// 一条 `/bin/sh -c` 脚本的 spec（POSIX）。
 #ifndef _WIN32
 uvcpp_process_spec make_sh(const std::string& script) {
@@ -360,7 +377,207 @@ void test_bounded_output() {
 
 }  // namespace
 
+
+void test_restart_policy() {
+  std::cout << "-- 重启策略 --" << std::endl;
+
+  // (1) 第一次以 7 退出，第二次看到标记文件后以 0 退出。
+  {
+    uvcpp_loop loop;
+    bool done = false;
+    bool seen_restart = false;
+    int  exit_calls = 0;
+    int  restart_calls = 0;
+    uint64_t last_delay = 0;
+    uvcpp_process_result result;
+    const std::string marker = temp_file("once");
+    std::remove(marker.c_str());
+    {
+      uvcpp_process_supervisor sup(&loop);
+      uvcpp_process_spec spec;
+      spec.file = self_exe();
+      spec.args.push_back("--exit-once");
+      spec.args.push_back(marker);
+      spec.timeout_ms           = 8000;
+      spec.restart_max          = 2;
+      spec.restart_backoff_ms   = 40;
+      spec.restart_backoff_max_ms = 200;
+
+      const uint64_t id = sup.spawn(
+          spec,
+          [](const char*, size_t, bool) {},
+          [&](const uvcpp_process_result& r) {
+            result = r;
+            done   = true;
+            ++exit_calls;
+          },
+          nullptr,
+          [&](const uvcpp_process_result&, int, uint64_t delay) {
+            seen_restart = true;
+            ++restart_calls;
+            last_delay = delay;
+          });
+      check(id != 0, "重启链 spawn 返回 id");
+      if (id != 0) {
+        check(run_until(loop, done, 12000), "链在失败一次后收尾");
+        check(result.exit_status == 0, "最终退出码 0（第二次成功）");
+        check(result.restarts == 1,
+              "最终结果 restarts=1（实际 " +
+                  std::to_string(result.restarts) + "）");
+        check(restart_calls == 1 && last_delay >= 1,
+              "on_restart 恰好一次并带退避");
+        check(exit_calls == 1, "on_exit 恰好一次");
+        const uvcpp_process_supervisor_stats st = sup.stats();
+        check(st.restarted == 1, "stats.restarted=1");
+        check(st.spawned == 2, "stats.spawned=2（两次尝试）");
+        check(sup.running() == 0, "running() 归零");
+      }
+    }
+    std::remove(marker.c_str());
+  }
+
+  // (2) 一直失败：重启次数用完就交最终结果。
+  {
+    uvcpp_loop loop;
+    bool done = false;
+    int  exit_calls = 0;
+    int  restart_calls = 0;
+    uvcpp_process_result result;
+    {
+      uvcpp_process_supervisor sup(&loop);
+      uvcpp_process_spec spec;
+      spec.file = self_exe();
+      spec.args.push_back("--exit-code");
+      spec.args.push_back("3");
+      spec.timeout_ms             = 8000;
+      spec.restart_max            = 2;
+      spec.restart_backoff_ms     = 20;
+      spec.restart_backoff_max_ms = 40;
+      const uint64_t id = sup.spawn(
+          spec, nullptr,
+          [&](const uvcpp_process_result& r) {
+            result = r;
+            done   = true;
+            ++exit_calls;
+          },
+          nullptr,
+          [&](const uvcpp_process_result&, int, uint64_t) { ++restart_calls; });
+      check(id != 0, "一直失败的链 spawn 返回 id");
+      if (id != 0) {
+        check(run_until(loop, done, 8000), "重启次数用完后收尾");
+        check(result.exit_status == 3, "最终退出码 3");
+        check(result.restarts == 2, "最终结果 restarts=2");
+        check(restart_calls == 2, "on_restart 两次");
+        check(exit_calls == 1, "on_exit 仍恰好一次");
+        const uvcpp_process_supervisor_stats st = sup.stats();
+        check(st.restarted == 2, "stats.restarted=2");
+        check(st.failed == 1, "只把最终结果计入 failed");
+      }
+    }
+  }
+
+  // (3) 退避等待中取消：没有进程可杀，仍要交恰好一次 cancelled。
+  {
+    uvcpp_loop loop;
+    bool restarted_once = false;
+    bool done = false;
+    int  exit_calls = 0;
+    uvcpp_process_result result;
+    {
+      uvcpp_process_supervisor sup(&loop);
+      uvcpp_process_spec spec;
+      spec.file = self_exe();
+      spec.args.push_back("--exit-code");
+      spec.args.push_back("4");
+      spec.timeout_ms         = 8000;
+      spec.restart_max        = 5;
+      spec.restart_backoff_ms = 2000;  // 留足取消窗口
+      const uint64_t id = sup.spawn(
+          spec, nullptr,
+          [&](const uvcpp_process_result& r) {
+            result = r;
+            done   = true;
+            ++exit_calls;
+          },
+          nullptr,
+          [&](const uvcpp_process_result&, int, uint64_t) {
+            restarted_once = true;
+          });
+      check(id != 0, "退避取消组 spawn 返回 id");
+      if (id != 0) {
+        check(run_until(loop, restarted_once, 5000),
+              "第一次失败进入退避等待");
+        check(sup.cancel(id) == 0, "退避等待中 cancel 成功");
+        check(run_until(loop, done, 5000), "取消后链立即收尾");
+        check(result.cancelled, "最终结果 cancelled");
+        check(result.restarts == 1, "已重启 1 次后取消");
+        check(exit_calls == 1, "on_exit 恰好一次");
+        check(sup.stats().cancelled == 1, "stats.cancelled=1");
+        check(sup.running() == 0, "running() 归零");
+      }
+    }
+  }
+
+  // (4) 超时不是"非正常退出"，不重启。
+  {
+    uvcpp_loop loop;
+    bool done = false;
+    int  restart_calls = 0;
+    uvcpp_process_result result;
+    {
+      uvcpp_process_supervisor sup(&loop);
+      uvcpp_process_spec spec;
+      spec.file = self_exe();
+      spec.args.push_back("--sleep");
+      spec.args.push_back("3");
+      spec.timeout_ms     = 150;
+      spec.stop_grace_ms  = 1000;
+      spec.restart_max    = 3;
+      spec.restart_backoff_ms = 20;
+      const uint64_t id = sup.spawn(
+          spec, nullptr,
+          [&](const uvcpp_process_result& r) {
+            result = r;
+            done   = true;
+          },
+          nullptr,
+          [&](const uvcpp_process_result&, int, uint64_t) { ++restart_calls; });
+      check(id != 0, "超时组 spawn 返回 id");
+      if (id != 0) {
+        check(run_until(loop, done, 10000), "超时后收尾");
+        check(result.timed_out, "结果标记 timed_out");
+        check(result.restarts == 0, "超时不重启");
+        check(restart_calls == 0, "on_restart 一次都没被调");
+        check(sup.stats().restarted == 0, "stats.restarted=0");
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv) {
+  // —— 给"重启策略"那一组用的子模式（跨平台）——
+  if (argc >= 3 && std::strcmp(argv[1], "--exit-once") == 0) {
+    FILE* f = std::fopen(argv[2], "rb");
+    if (f != nullptr) {
+      std::fclose(f);
+      return 0;  // 第二次：成功
+    }
+    f = std::fopen(argv[2], "wb");
+    if (f != nullptr) {
+      std::fputs("x", f);
+      std::fclose(f);
+    }
+    return 7;  // 第一次：失败
+  }
+  if (argc >= 3 && std::strcmp(argv[1], "--exit-code") == 0) {
+    return std::atoi(argv[2]);
+  }
+  if (argc >= 3 && std::strcmp(argv[1], "--sleep") == 0) {
+    std::this_thread::sleep_for(
+        std::chrono::seconds(std::atoi(argv[2])));
+    return 0;
+  }
+
 #ifdef _WIN32
   // —— 只给"进程树"那一格用的两个子模式（见 test_timeout_and_tree）——
   if (argc >= 3 && std::strcmp(argv[1], "--tree-parent") == 0) {
@@ -405,6 +622,7 @@ int main(int argc, char** argv) {
   test_timeout_and_tree();
   test_cancel();
   test_bounded_output();
+  test_restart_policy();
   if (g_fail == 0) {
     std::cout << "[process_supervisor] ALL PASS" << std::endl;
     return 0;

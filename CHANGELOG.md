@@ -1401,7 +1401,12 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **进程监管**（`1.10.0-dev`，#69）：`uvcpp_process_supervisor` —— 有界
   stdout/stderr、超时、进程树终止（`kill_tree`）、取消与统计。POSIX 走进程组，
   **Windows 走 Job Object**（`KILL_ON_JOB_CLOSE`，超时/取消/主进程退出时整棵树
-  一起收）。用例 `process_supervisor_func` 跨平台；重启策略仍留给上层（#67）。
+  一起收）。用例 `process_supervisor_func` 跨平台。
+- **进程监管重启策略**（`1.11.0-dev`，#69 收尾）：`restart_max` /
+  `restart_backoff_ms` / `restart_backoff_max_ms` 与带 `on_restart` 的
+  `spawn()` 重载。非正常结束按指数退避重新拉起；超时/取消/启动失败不重启；
+  最终 `on_exit` 恰好一次并带 `restarts`，同一 id 在退避等待中也取消得了。
+  用例 `process_supervisor_func` 的“重启策略”组。
 - **作业队列**（`1.10.0-dev`，#67 第一批）：`uvcpp_job_queue` —— 可插拔
   `uvcpp_job_store`（内置内存实现）、同一 `concurrency_key` 串行、重试退避、
   超时、取消、队列上限与**重启恢复**。用例 `job_queue_func`。**异步 handler 与
