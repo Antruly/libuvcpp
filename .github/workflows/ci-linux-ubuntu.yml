@@ -1327,7 +1327,7 @@ jobs:
           # 段排除块里）。运行期加载那条路的覆盖在 mingw 腿与两条发布腿的 configure
           # 上，那里 REQUIRED 的是"链接行干净"，不是 ctest。
           for t in test_db_mysql_func test_db_pgsql_func test_db_mongodb_func \
-                   test_orm_mysql_func test_orm_pgsql_func test_orm_odbc_func test_capi_db_func test_redis_real_func \
+                   test_orm_mysql_func test_orm_pgsql_func test_orm_odbc_func test_orm_remote_async_func test_capi_db_func test_redis_real_func \
                    test_db_job_store_func \
                    test_web_app_ws_bus_redis_func \
                    test_web_app_session_redis_func \

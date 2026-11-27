@@ -363,8 +363,14 @@ inline int insert_async(
       loop,
       [state, sql_result](uvcpp_db_tx& tx) {
         uvcpp_db_value new_id;
-        const uvcpp_db_status database_status =
-            tx.insert(sql_result.sql, sql_result.params, &new_id);
+        uvcpp_db_status database_status;
+        if (orm_detail::model_has_auto_increment<T>()) {
+          database_status =
+              tx.insert(sql_result.sql, sql_result.params, &new_id);
+        } else {
+          database_status =
+              tx.execute(sql_result.sql, sql_result.params, nullptr);
+        }
         if (!uvcpp_db_ok(database_status)) {
           state->status = uvcpp_orm_status::DB_ERROR;
           state->error = orm_detail::async_db_error("insert",
