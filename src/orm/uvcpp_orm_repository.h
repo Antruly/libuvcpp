@@ -138,7 +138,22 @@ inline bool dialect_from_driver_name(const char* name,
 
 inline bool dialect_from_client(const uvcpp_db_client& db,
                                 uvcpp_orm_dialect* out) {
-  return dialect_from_driver_name(db.driver_name(), out);
+  if (dialect_from_driver_name(db.driver_name(), out)) return true;
+  // ODBC is a generic driver manager: the SQL dialect belongs to the data
+  // source, not to the manager. The only ORM dialect reachable through the
+  // ODBC path today is SQLite; an ODBC SQL Server/Oracle connection must stay
+  // UNSUPPORTED instead of being guessed as SQLite.
+  if (out != nullptr && std::string(db.driver_name()) == "odbc") {
+    std::string url = db.url();
+    for (std::size_t i = 0; i < url.size(); ++i) {
+      if (url[i] >= 'A' && url[i] <= 'Z') url[i] = static_cast<char>(url[i] - 'A' + 'a');
+    }
+    if (url.find("sqlite") != std::string::npos) {
+      *out = uvcpp_orm_dialect::sqlite;
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +187,7 @@ class client_executor {
   }
 
   const char* driver_name() const { return db_->driver_name(); }
+  const std::string& url() const { return db_->url(); }
   bool is_open() const { return db_->is_open(); }
   std::string last_error() const { return db_->last_error(); }
 
@@ -215,6 +231,10 @@ class tx_executor {
   const char* driver_name() const {
     uvcpp_db_client* client = tx_->client();
     return client != nullptr ? client->driver_name() : nullptr;
+  }
+  std::string url() const {
+    uvcpp_db_client* client = tx_->client();
+    return client != nullptr ? client->url() : std::string();
   }
   bool is_open() const {
     uvcpp_db_client* client = tx_->client();
@@ -286,6 +306,7 @@ class pool_executor {
   }
 
   const char* driver_name() const { return client_->driver_name(); }
+  std::string url() const { return client_->url(); }
   bool is_open() const { return client_->is_open(); }
   std::string last_error() const { return client_->last_error(); }
 
@@ -304,7 +325,18 @@ class pool_executor {
 /// 从任意执行器取方言。执行器隐藏了“连接从哪里来”，这里只认驱动名。
 template <typename Executor>
 inline bool dialect_from_executor(const Executor& db, uvcpp_orm_dialect* out) {
-  return dialect_from_driver_name(db.driver_name(), out);
+  if (dialect_from_driver_name(db.driver_name(), out)) return true;
+  if (out != nullptr && std::string(db.driver_name()) == "odbc") {
+    std::string url = db.url();
+    for (std::size_t i = 0; i < url.size(); ++i) {
+      if (url[i] >= 'A' && url[i] <= 'Z') url[i] = static_cast<char>(url[i] - 'A' + 'a');
+    }
+    if (url.find("sqlite") != std::string::npos) {
+      *out = uvcpp_orm_dialect::sqlite;
+      return true;
+    }
+  }
+  return false;
 }
 
 /// 执行器没有可用方言时的错误。`db_status` 尽量贴近真实原因：没 open 就是

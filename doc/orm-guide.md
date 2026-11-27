@@ -821,8 +821,9 @@ bool raw_query(uvcpp::uvcpp_db_client& db) {
 
 “已测”指仓库里的 `orm_*` 用例实际跑过（`orm_model_func`、`orm_sql_func`、
 `orm_sqlite_func`、`orm_mysql_func`、`orm_tx_async_func`）。MySQL 与 PostgreSQL 的同步 CRUD
-在真 8.0 / 16 服务端上跑过；事务内使用与异步回调仍只在 SQLite 上跑，ODBC
-尚未在 ORM 用例里真库验证。“未验证”不是“不能用”：ORM 的执行层
+在真 8.0 / 16 服务端上跑过；ODBC 通过 SQLite 驱动跑了同步 CRUD，但用例显式给
+主键，不把“取到自增 id”算作 ODBC 已验证的能力。事务内使用与异步回调仍只在
+SQLite 上跑。“未验证”不是“不能用”：ORM 的执行层
 复用 db 模块的 `uvcpp_db_client` / `uvcpp_db_pool` / `uvcpp_db_tx`，db 层自己的
 用例是绿的；但不要把 db 层的结论借给 ORM。
 
