@@ -148,11 +148,9 @@ class odbc_sqlite_dialect : public dialect {
   bool has_native_temporal() const { return false; }
   bool decimal_is_native() const { return false; }
 
-  /// **本后端的 `last_insert_id()` 在这条路上报不出来**（它发的是 SQL Server 的
-  /// `SCOPE_IDENTITY()`，SQLite 不认），如实返回 `UNSUPPORTED`。所以这一条在共用
-  /// 套件里是"不适用"，而它**真的**返回什么由
-  /// `test_last_insert_id_is_honest()` 单独钉住 —— 不适用不等于没人管。
-  bool supports_last_insert_id() const { return false; }
+  /// SQLite ODBC 的 `last_insert_id()` 走 `last_insert_rowid()`；本后端现在
+  /// 按连接串里的驱动族选择方言，因此这条路和 SQL Server 一样可以报出自增值。
+  bool supports_last_insert_id() const { return true; }
 
   bool enforces_foreign_keys() const { return false; }
 };
@@ -311,9 +309,10 @@ void test_wide_text_round_trip(harness& h, driver_family fam) {
 /// "刚插进去的数据不见了"。
 void test_last_insert_id_is_honest(harness& h, driver_family fam,
                                    const std::string& url) {
-  if (fam == kFamilySqlServer) {
-    // SQL Server 上这条路是真的实现了的（`SCOPE_IDENTITY()`），归共用套件判。
-    h.skip("报不出来时返回 UNSUPPORTED", "SQL Server 上这条能报出来");
+  if (fam == kFamilySqlServer || fam == kFamilySqlite) {
+    // SQL Server 用 `SCOPE_IDENTITY()`，SQLite ODBC 用 `last_insert_rowid()`；
+    // 两者都由共用套件在真实插入后验证，不再走“必须报 UNSUPPORTED”这条旧判据。
+    h.skip("报不出来时返回 UNSUPPORTED", "这个数据源能报出自增值");
     return;
   }
 
