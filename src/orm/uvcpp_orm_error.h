@@ -67,6 +67,50 @@ enum class uvcpp_orm_status : int {
 
   /// 标志互相矛盾（例如 `nullable<T>` 同时标了 `not_null`）。
   CONFLICTING_FLAGS,
+
+  // ---- SQL 构造（#90）----
+
+  /// 方言不是 SQLite / MySQL / PostgreSQL 之一（通常是 `static_cast` 出来的）。
+  INVALID_DIALECT,
+
+  /// 列名/成员指针不在 `model_traits<T>` 里。查询构造只认模型元数据。
+  UNKNOWN_COLUMN,
+
+  /// SELECT / INSERT 一个列都没有。
+  EMPTY_COLUMN_LIST,
+
+  /// 操作符不是 `uvcpp_orm_operator` 里定义的那几个。
+  INVALID_OPERATOR,
+
+  /// `IN` 的值集合为空。空集合在 SQL 里没有可移植的写法。
+  EMPTY_IN_VALUES,
+
+  /// ORDER BY 方向不是 ASC / DESC 枚举。
+  INVALID_ORDER_DIRECTION,
+
+  /// LIMIT 是负数。
+  INVALID_LIMIT,
+
+  /// OFFSET 是负数。
+  INVALID_OFFSET,
+
+  /// 只给了 OFFSET、没给 LIMIT。SQLite/MySQL 都要求两者同时出现。
+  OFFSET_WITHOUT_LIMIT,
+
+  /// UPDATE / DELETE 没有 WHERE。拒绝全表写操作。
+  EMPTY_WHERE,
+
+  /// UPDATE 一个 SET 列都没有。
+  EMPTY_SET,
+
+  /// COUNT 查询不能和列选择 / ORDER BY / LIMIT / OFFSET 组合。
+  INVALID_COUNT_QUERY,
+
+  /// `raw()` 收到空 SQL（或只有空白）。
+  EMPTY_RAW_SQL,
+
+  /// SQL 里的占位符数量与 `uvcpp_db_params` 的数量对不上。
+  PARAM_COUNT_MISMATCH,
 };
 
 /// 返回码的稳定短名（小写下划线），用于日志与测试断言。
