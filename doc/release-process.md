@@ -120,6 +120,32 @@ The packager also verifies its own output, and these checks are not decoration:
 - **Headers get a BOM if they need one.** See
   [`build-guide.md`](build-guide.md#toolchain-requirements).
 
+### ORM headers and the 1.12.0 release gate
+
+`src/orm/` is part of `package_release.MODULES`, so every package contains
+`include/orm/*.h` regardless of which feature legs enabled the module; there are no ORM
+private headers to exclude. `UVCPP_BUILD_ORM` is an opt-in module (default `OFF`, and
+force-disabled when `UVCPP_ENABLE_DB=OFF`), so the generated `uvcpp_config.h` is the
+authority for whether a particular package has ORM compiled in. The package check is
+therefore: `include/orm/` is present, `UVCPP_ORM_ENABLE` in the packaged config matches
+the build, and a `find_package(uvcpp)` consumer can `#include <orm/...>`. DB-off builds
+must contain neither ORM headers nor ORM symbols.
+
+Before tagging `v1.12.0`, the ORM-specific release gate is:
+
+- the four `orm_*` functional tests (`orm_model_func`, `orm_sql_func`,
+  `orm_sqlite_func`, `orm_tx_async_func`) pass, and the SQLite DB tests do not regress;
+- the cross-backend ORM work (issue #93) has a real MySQL/PostgreSQL CRUD run, or the
+  Release body keeps saying those backends are **not verified** for ORM CRUD;
+- the performance gate (issue #95) passes;
+- the documentation gates (`check_docs.py`, `check_doc_lines.py`,
+  `check_doc_snippets.py` against a package, `check_ci_layout.py`) pass.
+
+A package produced from a tree with system libuv (rather than a `_deps/libuv-src` or
+`_local_deps/libuv` checkout) is not a complete release artifact: the packager aborts
+with "缺少必需的文件" because it cannot copy the libuv headers. That is an environment
+gap, not a reason to fabricate the missing files.
+
 ## What `publish` checks that no single leg can
 
 `publish` needs all six legs, merges their artifacts, and runs one **cross-leg** gate: every zip

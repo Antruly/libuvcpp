@@ -323,7 +323,7 @@ int main() {
 | WSDL（文档 + 发布） | [doc/wsdl-guide.md](doc/wsdl-guide.md) | 把 WSDL 1.1 文档解析成模型、按 QName 查它、发出去或从模型生成一份 |
 | SOAP（信封 + 派发） | [doc/soap-guide.md](doc/soap-guide.md) | 1.1 与 1.2 的信封与 `soap:Fault`、从 binding 推出来的派发键、九种拒绝各算谁的错，以及响应包装元素为什么不是派发键的对称 |
 | db（SQLite / MySQL / PostgreSQL） | [doc/db-guide.md](doc/db-guide.md) | 一个连接一个 `uvcpp_db_client`、三个后端、连接串的语法、返回码表、共用套件钉住的那一条跨后端契约（以及三家**真不一样**的三处）、参数绑定、事务与「事务里不重试」的规矩、`DECIMAL` 要付的代价、建在同一条连接上的异步门面（`uvcpp_db_async`，回调 + future）与可选的连接池，以及怎么对着真服务端跑测试。各家驱动**随不随包**的规矩 —— 哪些后端在仓里、哪些客户端库**不在**包里、缺库时是什么现象 —— 见 [`doc/db-driver-policy.md`](doc/db-driver-policy.md) |
-| ORM（单表） | [doc/orm-guide.md](doc/orm-guide.md) | 1.12.0 建在现有 db 客户端之上的模型元数据与同步 CRUD 层：`nullable<T>`、`model_traits<T>` 声明、SQLite/MySQL/PostgreSQL 的参数化 SQL、结果映射，以及仍属后续工作的事务/异步边界 |
+| ORM（单表） | [doc/orm-guide.md](doc/orm-guide.md) | 1.12.0 建在现有 db 客户端之上的单表 ORM：`nullable<T>` 与 `model_traits<T>` 声明、SQLite/MySQL/PostgreSQL 的参数化单表 SQL 构造、同步 CRUD 与结果映射、在 `uvcpp_db_tx` 事务体内使用、复用 `uvcpp_db_pool` 的回调式异步门面，以及 1.12.0 **明确不做**的清单（JOIN/关联、迁移、复合主键、代码生成、C ABI、协程） |
 | C ABI（`uvcpp_c_*`） | [doc/capi-guide.md](doc/capi-guide.md) | 给 C# / P-Invoke 与其它 FFI 的 `extern "C"` 面：选项与守卫链、五条承重契约（错误码、回调表 `size`、所有权三类、线程规则、ABI 版本）、每个模块提供什么与**明确不提供**什么，以及那张变异表实际量到了什么。**1.5.3 起八片全部就位**（地基 + net + webapp/web + HTTP/2 + QUIC + HTTP/3 + db，共 402 个函数），只差一个 `-DUVCPP_ENABLE_CAPI=ON`（db 那一片还要它自己的 `-DUVCPP_ENABLE_DB=ON` 加一个后端）。**1.5.0 起六条发布腿的预编译包都带着它**，另有 [`bindings/csharp/`](bindings/csharp/README.md) 那份 C# 绑定（覆盖前七片那 321 个，db 那 81 个是如实列出的缺口） |
 | 构建与打包 | [doc/build-guide.md](doc/build-guide.md) | 每个开关是什么意思、开关之间怎么组合、构建树、平台依赖、仓库结构，以及值得认识的失败 |
 | 性能实测 | [doc/benchmark.md](doc/benchmark.md) | 每连接内存、吞吐与稳定性的实测读数 |
@@ -383,7 +383,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_REQUIRE_FEATURES` | 空 | 分号分隔的特性列表；任何一项最终没开，配置期直接失败（官方二进制 CI 用它断言产物内容） |
 | `UVCPP_WINVER` | `0x000000` | 目标最低 Windows 版本（`_WIN32_WINNT`/`WINVER`）；`0x000000` = 用工具链默认，Win7 = `0x0601`，仅 Windows 生效 |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | 构建 web 应用框架（路由/中间件/静态/上传/日志）。需要 `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_BUILD_ORM` | `OFF` | 构建 **ORM 模型元数据层**（`src/orm/`）：`nullable<T>`、列描述符、`model_traits<T>` 与 `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明宏。**不生成 SQL、不做 CRUD、不做迁移** —— 它是 #90/#91 要建在上面的契约层。需要 `UVCPP_ENABLE_DB=ON`（值层复用 `uvcpp_db_value`），DB 关掉时被强制关闭。见 [`doc/ci-guide.md`](doc/ci-guide.md) 的 `orm` CI 格 |
+| `UVCPP_BUILD_ORM` | `OFF` | 构建**单表 ORM**（`src/orm/`）：`nullable<T>`、列描述符、`model_traits<T>` + `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD`、参数化 SQL 构造（SQLite/MySQL/PostgreSQL）、同步 CRUD 与结果映射、在 `uvcpp_db_tx` 事务体内使用，以及复用 `uvcpp_db_pool` 的回调式异步门面。**不做 JOIN/关联、迁移、复合主键、代码生成** —— 见 [`doc/orm-guide.md`](doc/orm-guide.md)。需要 `UVCPP_ENABLE_DB=ON`（值层复用 `uvcpp_db_value`），DB 关掉时被强制关闭。见 [`doc/ci-guide.md`](doc/ci-guide.md) 的 `orm` CI 格 |
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | 构建 `examples/` 下的示例 |
 | `UVCPP_BUILD_BENCH` | `OFF` | 构建 `bench/` 下的压测靶场 —— 见 [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |

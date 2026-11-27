@@ -372,7 +372,7 @@ libuvcpp/
 │   ├── functional/# Functional/integration tests
 │   ├── expand/    # Memory pool tests
 │   └── tools/     # Gate scripts, mutation drivers, probes, the release packager
-├── examples/      # Runnable examples (webapp_demo)
+├── examples/      # Runnable examples (webapp_demo, orm_crud)
 ├── bench/         # The benchmark rig
 ├── bindings/      # C# binding for the C ABI
 ├── doc/           # Every guide — the index is the Documentation table in README.md

@@ -19,6 +19,86 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.12.0 重点 (Highlights)
+
+> **状态：开发中，尚未打 tag。** 下面只写已经实现的能力与已经知道的验证边界；
+> 发布前必须等全量 CI、跨后端 ORM 用例（#93）与性能门禁（#95）通过。
+
+1.12.0 在现有 `db` 模块之上交付**单表 ORM 核心**（#88 的 #89–#92）。模型用
+`UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明，值走 `uvcpp_db_params`，SQL 由
+`select<T>()` / `insert<T>()` / `update<T>()` / `delete_from<T>()` 生成：
+
+- **模型与类型**：`nullable<T>` 显式区分 NULL 与空串；单列主键、自增、非空、
+  只读标志；`validate_model<T>()` 在运行期拒绝无模型、无主键、复合主键、未知
+  类型与矛盾标志。
+- **同步 CRUD**：`find_by_pk` / `find_all` / `insert` / `update` / `remove` /
+  `count`，结果按列名映射；`NOT_FOUND`、`MISSING_COLUMN`、`TYPE_MISMATCH`、
+  `NULL_VIOLATION` 与 `DB_ERROR` 分开。`insert` 跳过自增/只读列并回填
+  `last_insert_id`；UPDATE/DELETE 影响 0 行不是失败。
+- **事务**：ORM 接受 `uvcpp_db_tx&`，不自己 begin/commit；提交、回滚、异常
+  回滚、超时与“第一条失败后不再发语句”全部由 `uvcpp_db_tx` 保证。
+- **异步**：`<orm/uvcpp_orm_async.h>` 的回调式 CRUD 复用 `uvcpp_db_pool`
+  已有路径；回调在循环线程上恰好一次，投递失败返回负的 libuv 码且不调回调。
+- **构建与打包**：`UVCPP_BUILD_ORM`（默认 OFF，依赖 `UVCPP_ENABLE_DB=ON`）；
+  公开头安装到 `include/orm/`；DB OFF 时 ORM 不参与构建；**不新增 C ABI 符号**。
+  新增可运行示例 `examples/orm_crud/`（SQLite 真跑 CRUD）。
+- **明确不做**：JOIN/关联、迁移/schema sync、复合主键、代码生成器、MongoDB ORM、
+  C ABI 暴露、C++20 协程、Unit of Work / identity map / 批量 COPY。
+
+### 支持矩阵（1.12.0）
+
+| 能力 | SQLite | MySQL | PostgreSQL |
+|---|---|---|---|
+| 模型声明与元数据校验 | 已测 | 已测（不连库） | 已测（不连库） |
+| SQL 构造 / 占位符 / 标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） |
+| 同步 CRUD 与结果映射 | 已测（真库） | **未在 ORM 用例里真库验证** | **未在 ORM 用例里真库验证** |
+| 事务内使用 | 已测（真库） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
+| 回调式异步 CRUD | 已测（线程池路径） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
+
+db 模块自己的 MySQL/PostgreSQL 用例是绿的，但 ORM 的执行层映射尚未在这两家的
+真库上跑过。不要把 db 层的结论借给 ORM 当“已验证”。
+
+### 异步真相
+
+异步门面只保证**回调在调用方的循环线程上恰好一次**，以及投递失败时返回负值、
+回调不来。它**不**保证所有后端都是真非阻塞：
+
+- PostgreSQL 走 `uvcpp_db_pool` 已有的真异步路径（`uv_poll` 盯连接套接字）；
+- SQLite / MySQL / ODBC 仍走 `uv_queue_work` 线程池；
+- `insert_async` 走 `pool.transaction()` + 一条 INSERT（两次阻塞往返），
+  不属于真异步路径；
+- ORM 不新增线程或连接池。
+
+### 发布前检查表
+
+- [ ] ORM 子任务关闭（#89–#92 已合并；#93 跨后端测试、#95 性能门禁仍需关闭）。
+- [ ] 全量 CI 在 Linux GCC、Windows MSVC、Windows MinGW、macOS 全绿。
+- [ ] SQLite 的 ORM 用例（`orm_model_func` / `orm_sql_func` /
+      `orm_sqlite_func` / `orm_tx_async_func`）与 DB 用例无回归。
+- [ ] MySQL/PostgreSQL 真库上的 ORM CRUD 用例存在并跑过；没有跑过就保持
+      “未验证”，不要写成已验证。
+- [ ] 性能门禁通过：ORM 相对等价手写 SQL 的 p50/p99 额外开销目标 ≤15%、
+      不得 >25%；`db` 相对 1.11.0 吞吐回退 ≤5%、p99 回退 ≤10%。
+- [ ] `package_release.py` 产物含 `include/orm/*.h`；`find_package(uvcpp)` 后
+      `#include <orm/...>` 可用；DB OFF 构建没有 ORM 头/符号。
+- [ ] 文档门禁：`check_docs.py`、`check_doc_lines.py`、
+      `check_doc_snippets.py`（对已安装包）、`check_ci_layout.py` 全过。
+- [ ] Release 正文用 `release_notes.py` 按 tag 切出本节，并附包内文件清单与
+      RC 证据。
+
+### 升级与回滚
+
+- **升级**：ORM 是**可选的新模块**。不定义 `UVCPP_BUILD_ORM` 或保持默认 OFF 时，
+  既有 DB/HTTP/WS 等模块的行为与 1.11.x 一致；打开它只多 `include/orm/` 与
+  `src/orm/` 的编译。C ABI 函数集合不变，C++ 侧既有 API 源码兼容。
+- **SQLite 空 BLOB**：db 后端对长度为 0 的 BLOB 按 NULL 绑定，ORM 沿用这条
+  既有行为；非空 BLOB 列不要存空 BLOB。
+- **回滚**：把 `UVCPP_BUILD_ORM` 置回 OFF 并重新配置/编译即可；ORM 不改变
+  `src/db/` 的源文件或公开面。已经写入数据库的表结构与数据不受影响 —— ORM
+  本身不建表、不迁移。
+- **打包回滚**：旧包不包含 `include/orm/`；把 ORM 代码撤掉后按旧包重新编译即可，
+  不需要降级 C ABI 版本。
+
 ## v1.11.0 重点 (Highlights)
 
 `v1.10.0` 之后的开发线：把上一版“留给后续”的那几块补齐 —— 服务化部署、跨进程
