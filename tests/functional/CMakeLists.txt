@@ -155,7 +155,10 @@ endif()
 # **用例不存在**，不是"用例失败"（`tests/functional/CMakeLists.txt` 开头那段
 # 注释里的老坑：没测过 ≠ 测过）。
 if(NOT UVCPP_ENABLE_DB_SQLITE)
-  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_sqlite[^/]*\.cpp$")
+  # ORM 的 SQLite 用例（orm_sqlite_func.cpp）不带 db_ 前缀，同样只在 SQLite
+  # 后端编进来时才有意义；一起摘掉，否则 db-servers 档（SQLITE=OFF，只测
+  # mysql/postgres/odbc）会注册它，并在 ctest 里以 no_driver 失败。
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*(db|orm)_sqlite[^/]*\.cpp$")
 endif()
 if(NOT UVCPP_ENABLE_DB_MYSQL)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_mysql[^/]*\.cpp$")
