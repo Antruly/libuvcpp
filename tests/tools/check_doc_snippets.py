@@ -215,7 +215,7 @@ INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^">]+)[">]', re.M)
 # 本库的公开头：`<模块/…>` 或聚合头 `<uvcpp.h>`。**只有这些才算"这是本库的片段"**。
 LIB_PREFIXES = ("uvcpp/", "handle/", "req/", "net/", "web/", "webapp/",
                 "ssl/", "http2/", "expand/", "wsdl/", "quic/", "http3/",
-                "capi/", "db/", "redis/", "yyjson/")
+                "capi/", "db/", "orm/", "redis/", "yyjson/")
 LIB_EXACT = ("uvcpp.h",)
 
 # 随包发的第三方头（`package_release.py` 会把它们放进 `include/`）。
@@ -316,6 +316,10 @@ MODULE_REQ = {
     "quic/": "UVCPP_QUIC_ENABLE",
     "http3/": "UVCPP_HTTP3_ENABLE",
     "db/": "UVCPP_DB_ENABLE",
+    # `orm/` 的公开头整段套在 `#if UVCPP_ORM_ENABLE && UVCPP_DB_ENABLE` 里；
+    # ORM 关掉时头还在包里（package_release.py 按目录拷），但类/模板全部消失。
+    # 登记它，才能把“这个包没编 ORM”判成前提不满足，而不是让片段假红。
+    "orm/": "UVCPP_ORM_ENABLE",
     # `yyjson/` 属于第一档，机制与 `wsdl/` 逐字相同：本模块**唯一**的公开头
     # （`src/yyjson/uvcpp_json_doc.h`）整段套在 `#if UVCPP_YYJSON_ENABLE` 里
     # ——宏为 0 时里面的类直接消失，片段报的是"未声明类型"。所以**只要**这个

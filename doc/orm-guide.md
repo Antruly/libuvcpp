@@ -22,6 +22,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 宏必须写在**全局作用域**；模型是公开成员、无基类、无虚函数的聚合。
 
 ```cpp
+#include <cstdint>
+#include <string>
+
+#include <orm/uvcpp_orm_model.h>
+
 struct user {
   std::int64_t id;
   std::string name;
@@ -49,6 +54,30 @@ UVCPP_ORM_MODEL_END()
 `db_status` 是可选出参，只有数据库执行失败（`DB_ERROR`）时才写后端原始返回码。
 
 ```cpp
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <orm/uvcpp_orm_repository.h>
+
+struct user {
+  std::int64_t id;
+  std::string name;
+  uvcpp::nullable<std::int32_t> age;
+  double score;
+  bool active;
+};
+
+UVCPP_ORM_MODEL(user, "users")
+UVCPP_ORM_FIELD(user, id, "id",
+                UVCPP_ORM_PRIMARY_KEY | UVCPP_ORM_AUTO_INCREMENT)
+UVCPP_ORM_FIELD(user, name, "name", UVCPP_ORM_NOT_NULL)
+UVCPP_ORM_FIELD(user, age, "age", UVCPP_ORM_NONE)
+UVCPP_ORM_FIELD(user, score, "score", UVCPP_ORM_NONE)
+UVCPP_ORM_FIELD(user, active, "active", UVCPP_ORM_NONE)
+UVCPP_ORM_MODEL_END()
+
+int main() {
 uvcpp::uvcpp_db_client db;
 db.open("sqlite:///tmp/app.db");
 
@@ -86,16 +115,47 @@ st = uvcpp::update(db, loaded, &affected, &error);
 // 按主键删除：affected == 0 同样不是失败。
 // T 不在参数列表里出现，所以要显式写 remove<user>。
 st = uvcpp::remove<user>(db, new_id, &affected, &error);
+}
 ```
 
 已经构造好的 SQL 也可以直接执行：
 
 ```cpp
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <orm/uvcpp_orm_repository.h>
+
+struct user {
+  std::int64_t id;
+  std::string name;
+  uvcpp::nullable<std::int32_t> age;
+  double score;
+  bool active;
+};
+
+UVCPP_ORM_MODEL(user, "users")
+UVCPP_ORM_FIELD(user, id, "id",
+                UVCPP_ORM_PRIMARY_KEY | UVCPP_ORM_AUTO_INCREMENT)
+UVCPP_ORM_FIELD(user, name, "name", UVCPP_ORM_NOT_NULL)
+UVCPP_ORM_FIELD(user, age, "age", UVCPP_ORM_NONE)
+UVCPP_ORM_FIELD(user, score, "score", UVCPP_ORM_NONE)
+UVCPP_ORM_FIELD(user, active, "active", UVCPP_ORM_NONE)
+UVCPP_ORM_MODEL_END()
+
+int main() {
+uvcpp::uvcpp_db_client db;
+db.open("sqlite:///tmp/app.db");
+std::vector<user> page;
+std::string error;
+
 uvcpp::uvcpp_orm_sql_result sql =
     uvcpp::select<user>(uvcpp::uvcpp_orm_dialect::sqlite)
         .where_eq(&user::name, std::string("Alice"))
         .build();
-st = uvcpp::find_all(db, sql, &page, &error);
+const uvcpp::uvcpp_orm_status st = uvcpp::find_all(db, sql, &page, &error);
+}
 ```
 
 ## 4. 映射规则
