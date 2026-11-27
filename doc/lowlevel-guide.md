@@ -6,7 +6,7 @@
 
 - 打开方式：**没有开关**。这三个目录总是编进库里，不需要任何 `-D`
 - 包含方式：`#include <uvcpp.h>` 只给**基类**——`uvcpp_loop`、`uvcpp_handle`、
-  `uvcpp_req` 加几个宏头（`src/uvcpp.h:22-24`）。`uvcpp_timer`、`uvcpp_write`、`uvcpp_fs`
+  `uvcpp_req` 加几个宏头（`src/uvcpp.h:23-25`）。`uvcpp_timer`、`uvcpp_write`、`uvcpp_fs`
   这些**具体类型全都要单独 include**，别以为聚合头把它们带进来了
 
 > 本指南里的签名、默认值、行为都对着当前源码核过。凡是"这一层没做"或者"注释与实现对
@@ -45,13 +45,14 @@
 根本没有 `start`/`stop`/`close`，每个派生类只有 `init()` 和完成回调。req 的"结束"就是
 回调跑完。
 
-`<uvcpp.h>` 只聚合这七个头（`src/uvcpp.h:22-24`）：
+`<uvcpp.h>` 只聚合这八个头（`src/uvcpp.h:23-25`）：
 
 ```
 uvcpp/uvcpp_config.h    ← 构建期生成，不在源码树里
 uvcpp/uvcpp_define.h
 uvcpp/uvcpp_version.h
 uvcpp/uvcpp_export.h
+uvcpp/uvcpp_console.h
 handle/uvcpp_handle.h
 handle/uvcpp_loop.h
 req/uvcpp_req.h

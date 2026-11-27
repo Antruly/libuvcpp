@@ -429,7 +429,7 @@ src/ssl/uvcpp_ssl_context.h:39-39 6c2e2d0ddc8a2ded 6c2e2d0ddc8a2ded -
 src/ssl/uvcpp_ssl_context.h:45-51 fc671cd6991d726e 4e031b7a429d6a8c 0ce2548ca67cd895
 src/ssl/uvcpp_ssl_context.h:8-9 3e5c374555875e42 05f9c9ed5fb622ad d157b3cce7414955
 src/ssl/uvcpp_ssl_context.h:89-92 843742827c2d1556 a67bb6b666d88129 b445a818ee2b7ce6
-src/uvcpp.h:22-24 ad320ed9710bf37f ff9890ac12c8ee6e d367d7265f5891d1
+src/uvcpp.h:23-25 ad320ed9710bf37f ff9890ac12c8ee6e d367d7265f5891d1
 src/uvcpp/uvcpp_alloc.h:102-105 27f3fb2fa3d9c174 abe13a5f4b752c07 da39a3ee5e6b4b0d
 src/uvcpp/uvcpp_alloc.h:121-126 3412746a3678c8b0 ce89b8fc319290c6 678726357e166373
 src/uvcpp/uvcpp_alloc.h:19-21 ad3a027337602da7 236b2c747eac9d35 626f85ce9ebf4ef4
