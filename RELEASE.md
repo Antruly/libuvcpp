@@ -21,8 +21,9 @@
 
 ## v1.12.0 重点 (Highlights)
 
-> **状态：开发中，尚未打 tag。** 下面只写已经实现的能力与已经知道的验证边界；
-> 发布前必须等全量 CI、跨后端 ORM 用例（#93）与性能门禁（#95）通过。
+> **状态：功能完成，尚未打 tag。** 本地 Linux 全量构建与 83/83 ctest 已通过，
+> 其中包含真实 MySQL、PostgreSQL 与 ODBC(SQLite) 的 ORM CRUD/事务/异步用例；
+> 全平台 CI 与固定性能机的 #95 门禁仍未执行，因此本节是 RC 候选说明，不是发布公告。
 
 1.12.0 在现有 `db` 模块之上交付**单表 ORM 核心**（#88 的 #89–#92）。模型用
 `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明，值走 `uvcpp_db_params`，SQL 由
@@ -39,6 +40,7 @@
   回滚、超时与“第一条失败后不再发语句”全部由 `uvcpp_db_tx` 保证。
 - **异步**：`<orm/uvcpp_orm_async.h>` 的回调式 CRUD 复用 `uvcpp_db_pool`
   已有路径；回调在循环线程上恰好一次，投递失败返回负的 libuv 码且不调回调。
+  显式主键模型不再调用 `lastval()`，避免 PostgreSQL 在没有序列时中止事务。
 - **构建与打包**：`UVCPP_BUILD_ORM`（默认 OFF，依赖 `UVCPP_ENABLE_DB=ON`）；
   公开头安装到 `include/orm/`；DB OFF 时 ORM 不参与构建；**不新增 C ABI 符号**。
   新增可运行示例 `examples/orm_crud/`（SQLite 真跑 CRUD）。
@@ -47,16 +49,17 @@
 
 ### 支持矩阵（1.12.0）
 
-| 能力 | SQLite | MySQL | PostgreSQL |
-|---|---|---|---|
-| 模型声明与元数据校验 | 已测 | 已测（不连库） | 已测（不连库） |
-| SQL 构造 / 占位符 / 标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） |
-| 同步 CRUD 与结果映射 | 已测（真库） | **未在 ORM 用例里真库验证** | **未在 ORM 用例里真库验证** |
-| 事务内使用 | 已测（真库） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
-| 回调式异步 CRUD | 已测（线程池路径） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
+| 能力 | SQLite | MySQL | PostgreSQL | ODBC(SQLite) |
+|---|---|---|---|---|
+| 模型声明与元数据校验 | 已测 | 已测（不连库） | 已测（不连库） | 已测（不连库） |
+| SQL 构造 / 占位符 / 标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） | 已测（golden，不连库） |
+| 同步 CRUD 与结果映射 | 已测（真库） | 已测（真库，`orm_mysql_func`） | 已测（真库，`orm_pgsql_func`） | 已测（真库，`orm_odbc_func`） |
+| 事务提交/回滚 | 已测（真库） | 已测（真库，34 checks） | 已测（真库，34 checks） | 已测（真库，33 checks） |
+| 回调式异步 CRUD | 已测（线程池路径） | 已测（`orm_remote_async_func`） | 已测（`orm_remote_async_func`） | 已测（`orm_remote_async_func`） |
 
-db 模块自己的 MySQL/PostgreSQL 用例是绿的，但 ORM 的执行层映射尚未在这两家的
-真库上跑过。不要把 db 层的结论借给 ORM 当“已验证”。
+ODBC 用例通过 unixODBC + `libsqlite3odbc` 连接一次性 SQLite 库；它显式写主键，
+不声称 ODBC 能取回自增值。`orm_remote_async_func` 每次选择一组 URL，CI 的
+`db-servers` 跑 MySQL 那一组；本机另外分别跑过 PostgreSQL 与 ODBC 两组。
 
 ### 异步真相
 
@@ -71,16 +74,15 @@ db 模块自己的 MySQL/PostgreSQL 用例是绿的，但 ORM 的执行层映射
 
 ### 发布前检查表
 
-- [ ] ORM 子任务关闭（#89–#92 已合并；#93 跨后端测试、#95 性能门禁仍需关闭）。
-- [ ] 全量 CI 在 Linux GCC、Windows MSVC、Windows MinGW、macOS 全绿。
-- [ ] SQLite 的 ORM 用例（`orm_model_func` / `orm_sql_func` /
-      `orm_sqlite_func` / `orm_tx_async_func`）与 DB 用例无回归。
-- [ ] MySQL/PostgreSQL 真库上的 ORM CRUD 用例存在并跑过；没有跑过就保持
-      “未验证”，不要写成已验证。
-- [ ] 性能门禁通过：ORM 相对等价手写 SQL 的 p50/p99 额外开销目标 ≤15%、
-      不得 >25%；`db` 相对 1.11.0 吞吐回退 ≤5%、p99 回退 ≤10%。
-- [ ] `package_release.py` 产物含 `include/orm/*.h`；`find_package(uvcpp)` 后
-      `#include <orm/...>` 可用；DB OFF 构建没有 ORM 头/符号。
+- [x] ORM 子任务 #89–#92 已合并；#93 的 MySQL/PostgreSQL/ODBC 真库同步 CRUD、事务、异步用例已补并本地通过。
+- [ ] #93 的全平台 CI 与失败注入/隔离/超时覆盖、#95 的固定性能机门禁仍未关闭。
+- [ ] 全量 CI 在 Linux GCC、Windows MSVC、Windows MinGW、macOS 全绿（本次只做了 Linux 本地构建，Actions 仍排队）。
+- [x] SQLite 的 ORM 用例（`orm_model_func` / `orm_sql_func` /
+      `orm_sqlite_func` / `orm_tx_async_func`）与 DB 用例无回归：本地 83/83。
+- [x] MySQL/PostgreSQL/ODBC(SQLite) 真库上的 ORM CRUD 与事务用例存在并跑过；MySQL/PG 34 checks，ODBC 33 checks，远程异步 22 checks。
+- [ ] 固定性能机上的 #95 门禁；开发机 3 轮 A/B 已 `target_met`（pk +4.70%/+8.59%，find_all +8.65%/+13.11%），但缺 p95、固定机器与 1.11.0 同条件 db 基线。
+- [x] 安装包消费者验证过 `find_package(uvcpp)` + `#include <orm/...>`；DB OFF 构建不含 ORM 头/符号。
+- [ ] 六平台 `package_release.py` 产物与包内清单（本机缺 libuv 源码头，未产出完整 zip）。
 - [ ] 文档门禁：`check_docs.py`、`check_doc_lines.py`、
       `check_doc_snippets.py`（对已安装包）、`check_ci_layout.py` 全过。
 - [ ] Release 正文用 `release_notes.py` 按 tag 切出本节，并附包内文件清单与

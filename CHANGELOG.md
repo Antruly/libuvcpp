@@ -1205,12 +1205,16 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
   `examples/orm_crud/`（真实 SQLite 上跑 create table → insert →
   find_by_pk → find_all+total → update → remove，失败以非 0 退出）；
   `package_release.py` 按模块目录收集 `src/orm/*.h`，没有 ORM 私有头。
+- **跨后端真库验证**（`1.12.0-dev`，#93）：`orm_mysql_func` /
+  `orm_pgsql_func` 各 34 checks，`orm_odbc_func` 33 checks，覆盖同步 CRUD、
+  事务提交/回滚与唯一键错误；`orm_remote_async_func` 22 checks，覆盖
+  MySQL/PostgreSQL/ODBC 的回调式 insert/find/update/remove 与投递失败。
+  ODBC 通过 SQLite 驱动，显式写主键，不声称自增值可取。
 - **如实列出的 1.12.0 边界**：不做 JOIN/关联、迁移/schema sync、复合
-  主键、代码生成器、MongoDB ORM、C ABI 暴露或 C++20 协程。SQL 构造的
-  MySQL/PostgreSQL golden 用例已覆盖占位符与标识符转义，但**ORM 的
-  CRUD 映射尚未在真 MySQL/PostgreSQL 上跑过**（`orm_*` 用例目前只对
-  SQLite 真库）；跨后端测试（#93）与性能门禁（#95）仍是发布前的未完成
-  项，详见 [`doc/orm-guide.md`](doc/orm-guide.md) §14。
+  主键、代码生成器、MongoDB ORM、C ABI 暴露或 C++20 协程。跨后端异步
+  用例每次选择一组 URL；CI 的 `db-servers` 跑 MySQL 组，本机另跑
+  PostgreSQL/ODBC 组。固定性能机上的 #95 门禁、全平台 CI 与失败注入/
+  隔离/超时覆盖仍未完成，详见 [`doc/orm-guide.md`](doc/orm-guide.md) §14。
 
 ### Redis（`src/redis/`）
 
