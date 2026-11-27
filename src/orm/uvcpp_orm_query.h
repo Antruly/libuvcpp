@@ -1345,8 +1345,11 @@ inline void scan_raw_placeholders(const std::string& sql,
           while (j < sql.size() && sql[j] >= '0' && sql[j] <= '9') {
             const std::size_t digit =
                 static_cast<std::size_t>(sql[j] - '0');
+            // Windows headers define a `max` macro; parenthesise the member
+            // call so MSVC still parses `numeric_limits<size_t>::max()` as a
+            // function and does not expand the macro.
             const std::size_t maximum =
-                std::numeric_limits<std::size_t>::max();
+                (std::numeric_limits<std::size_t>::max)();
             if (value > (maximum - digit) / 10u) {
               value = maximum;  // 饱和，后面会被“不可能连续”拒掉
             } else {
