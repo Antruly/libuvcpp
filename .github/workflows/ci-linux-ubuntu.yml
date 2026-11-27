@@ -1213,7 +1213,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev \
-            libmongoc-dev zlib1g-dev ninja-build
+            unixodbc-dev libsqliteodbc libmongoc-dev zlib1g-dev ninja-build
 
       - name: Configure & Build
         shell: bash
@@ -1246,7 +1246,7 @@ jobs:
               -DUVCPP_BUILD_WEBAPP=ON -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_ENABLE_DB_SQLITE=OFF \
               -DUVCPP_ENABLE_DB_MYSQL=ON -DUVCPP_ENABLE_DB_PGSQL=ON \
-              -DUVCPP_ENABLE_DB_MONGODB=ON \
+              -DUVCPP_ENABLE_DB_ODBC=ON -DUVCPP_ENABLE_DB_MONGODB=ON \
               -DUVCPP_BUILD_ORM=ON \
               -DUVCPP_DB_MONGODB_INCLUDE_DIR=/usr/include \
               > ci-logs/db-servers-configure.log 2>&1 || cfg=$?
@@ -1262,7 +1262,7 @@ jobs:
             # `db: MongoDB 后端开` 是 1.7.5 加的：MongoDB 与 ODBC 一样走的是
             # "找不到头就 `set(... OFF)`"那条静默降级，cache 里照旧 ON —— 所以
             # 这一条必须看配置消息（正是下面那段注释说的第一种形状）。
-            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'db: MongoDB 后端开' 'Including db module in build' 'Including orm module in build' 'Including capi module in build' 'Including webapp module in build'; do
+            for m in 'db: MySQL 后端开' 'db: PostgreSQL 后端开' 'db: ODBC 后端开' 'db: MongoDB 后端开' 'Including db module in build' 'Including orm module in build' 'Including capi module in build' 'Including webapp module in build'; do
               grep -q "$m" ci-logs/db-servers-configure.log || {
                 why=$(grep -E 'db:|CMake (Warning|Error)|找不到|No such' \
                   ci-logs/db-servers-configure.log | head -10 | tr '\n' ' ' | sed 's/%/%25/g' || true)
@@ -1311,6 +1311,7 @@ jobs:
           UVCPP_DB_TEST_MYSQL_URL: mysql://root:uvcpp@127.0.0.1:3306/uvcpp_test
           UVCPP_DB_TEST_PGSQL_URL: postgresql://uvcpp:uvcpp@127.0.0.1:5432/uvcpp_test
           UVCPP_DB_TEST_MONGODB_URL: mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000
+          UVCPP_DB_TEST_ODBC_URL: odbc:?Driver=/usr/lib/x86_64-linux-gnu/odbc/libsqlite3odbc.so;Database=/tmp/uvcpp_ci_odbc.db
           UVCPP_DB_TEST_REQUIRE: "1"
           UVCPP_REDIS_TEST_URL: redis://127.0.0.1:6379/0
           UVCPP_REDIS_TEST_REQUIRE: "1"
@@ -1326,7 +1327,7 @@ jobs:
           # 段排除块里）。运行期加载那条路的覆盖在 mingw 腿与两条发布腿的 configure
           # 上，那里 REQUIRED 的是"链接行干净"，不是 ctest。
           for t in test_db_mysql_func test_db_pgsql_func test_db_mongodb_func \
-                   test_orm_mysql_func test_orm_pgsql_func test_capi_db_func test_redis_real_func \
+                   test_orm_mysql_func test_orm_pgsql_func test_orm_odbc_func test_capi_db_func test_redis_real_func \
                    test_db_job_store_func \
                    test_web_app_ws_bus_redis_func \
                    test_web_app_session_redis_func \
