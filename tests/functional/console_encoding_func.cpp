@@ -68,7 +68,18 @@ int main() {
     // 管道，这里只关心 Win32 控制台状态。
   }
   if (!console_attached()) {
-    std::printf("SKIP: 没有可用的控制台\n");
+    // 没有控制台也要把"不改全局状态"这条判据跑掉；真跑不了的是 CP 读写。
+    uvcpp::uvcpp_console_encoding no_console =
+        uvcpp::uvcpp_console_set_output_codepage(65001, true);
+    check(!no_console.output_changed && !no_console.input_changed,
+          "无控制台时设置是空操作");
+    check(!uvcpp::uvcpp_console_enable_utf8().output_changed,
+          "无控制台时 enable_utf8 是空操作");
+    if (g_fail != 0) {
+      std::printf("[console_encoding] %d check(s) failed\n", g_fail);
+      return 1;
+    }
+    std::printf("SKIP: 没有可用的控制台（CP 读写未判定）\n");
     return 3;
   }
 
