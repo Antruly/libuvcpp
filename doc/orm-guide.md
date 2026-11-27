@@ -815,16 +815,16 @@ bool raw_query(uvcpp::uvcpp_db_client& db) {
 |---|---|---|---|
 | 模型声明与 `validate_model` | 已测 | 已测（同一套元数据，不连库） | 已测（同一套元数据，不连库） |
 | SQL 构造与占位符/标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） |
-| 同步 CRUD / 结果映射 | 已测（真库） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
+| 同步 CRUD / 结果映射 | 已测（真库） | 已测（真库，`orm_mysql_func`） | 未在 ORM 用例里真库验证 |
 | 事务内使用 | 已测（真库） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
 | 异步回调 | 已测（线程池路径） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
 
 “已测”指仓库里的 `orm_*` 用例实际跑过（`orm_model_func`、`orm_sql_func`、
-`orm_sqlite_func`、`orm_tx_async_func`）。“未在 ORM 用例里真库验证”不是“不能
-用”：ORM 的执行层复用 db 模块的 `uvcpp_db_client` / `uvcpp_db_pool` / `uvcpp_db_tx`，
-db 层自己的 MySQL/PostgreSQL 用例是绿的；但 1.12.0 没有为 ORM 的 CRUD 映射在真
-MySQL/PostgreSQL 上跑一遍。要把它标成“已验证”，需要一条真库上的 ORM 用例，而不是
-把 db 层的结论借过来。
+`orm_sqlite_func`、`orm_mysql_func`、`orm_tx_async_func`）。MySQL 的同步 CRUD
+在真 8.0 服务端上跑过；事务内使用与异步回调仍只在 SQLite 上跑，PostgreSQL 的
+CRUD/事务/异步尚未在 ORM 用例里真库验证。“未验证”不是“不能用”：ORM 的执行层
+复用 db 模块的 `uvcpp_db_client` / `uvcpp_db_pool` / `uvcpp_db_tx`，db 层自己的
+用例是绿的；但不要把 db 层的结论借给 ORM。
 
 **异步真相**：回调的线程与次数有保证；真正的非阻塞只到 PostgreSQL 这一条腿。
 SQLite / MySQL / ODBC 的异步仍是 `uv_queue_work` 线程池，`insert_async` 也走
