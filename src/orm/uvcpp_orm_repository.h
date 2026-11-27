@@ -13,6 +13,16 @@
  *
  * 不新开连接、不拼接值、不绕过 `uvcpp_db_params`、不实现事务/异步/关联。
  *
+ * 执行入口有三种，共用同一套 SQL 构造与结果映射：
+ *
+ *   * `uvcpp_db_client&` —— 同步连接（#91 的路径，语义不变）；
+ *   * `uvcpp_db_tx&` —— 事务内。每条语句都过 `uvcpp_db_tx` 自己的门，因此
+ *     提交/回滚/异常/超时语义完全由现有事务层保证，ORM 不自己 begin/commit；
+ *   * `uvcpp_db_pool&` —— 同步借还一条连接（单语句；`acquire()` 会阻塞）。
+ *
+ * 异步门面在 `<orm/uvcpp_orm_async.h>`：它只把本文件构造好的 SQL 交给
+ * `uvcpp_db_pool` 的现有异步接口，不新开线程、不新开连接池。
+ *
  * ## 映射规则
  *
  *   * 列名**精确匹配**（大小写敏感，与 `uvcpp_db_table::column_index()` 一致）；
@@ -68,8 +78,10 @@
 
 #include <db/uvcpp_db.h>
 #include <db/uvcpp_db_params.h>
+#include <db/uvcpp_db_pool.h>
 #include <db/uvcpp_db_status.h>
 #include <db/uvcpp_db_table.h>
+#include <db/uvcpp_db_transaction.h>
 #include <db/uvcpp_db_value.h>
 #include <orm/uvcpp_orm_error.h>
 #include <orm/uvcpp_orm_model.h>
@@ -89,28 +101,25 @@ inline uvcpp_orm_status set_invalid_argument(std::string* error,
 }
 
 /// 把一次数据库失败翻译成 `DB_ERROR`：保留后端返回码（出参）与原文
-/// （`db.last_error()`，写进 `error`）。不要把所有失败压成一个字符串 ——
-/// 唯一键冲突与“连接没打开”在调用方眼里是两种处置。
-inline uvcpp_orm_status set_db_error(uvcpp_db_client& db,
+/// （执行器的 `last_error()`，写进 `error`）。不要把所有失败压成一个字符串
+/// —— 唯一键冲突与“连接没打开”在调用方眼里是两种处置。
+inline uvcpp_orm_status set_db_error(const std::string& last_error,
                                      uvcpp_db_status status,
                                      const std::string& action,
                                      std::string* error,
                                      uvcpp_db_status* db_status) {
   if (db_status != nullptr) *db_status = status;
   if (error != nullptr) {
-    *error = action + ": " + uvcpp_db_status_name(status) + ": " +
-             db.last_error();
+    *error = action + ": " + uvcpp_db_status_name(status) + ": " + last_error;
   }
   return uvcpp_orm_status::DB_ERROR;
 }
 
-/// 从**已打开**的同步连接上取 SQL 方言。驱动名不认识（或连接没开）时返回
-/// false；调用方据此报 `DB_ERROR`，而不是猜一个方言。
-inline bool dialect_from_client(const uvcpp_db_client& db,
-                                uvcpp_orm_dialect* out) {
-  if (out == nullptr) return false;
-  const char* name = db.driver_name();
-  if (name == nullptr || *name == '\0') return false;
+/// 驱动名 → ORM 方言。驱动名不认识（或连接没开）时返回 false；调用方据此报
+/// `DB_ERROR`，而不是猜一个方言。
+inline bool dialect_from_driver_name(const char* name,
+                                     uvcpp_orm_dialect* out) {
+  if (out == nullptr || name == nullptr || *name == '\0') return false;
   const std::string driver(name);
   if (driver == "sqlite") {
     *out = uvcpp_orm_dialect::sqlite;
@@ -127,9 +136,181 @@ inline bool dialect_from_client(const uvcpp_db_client& db,
   return false;
 }
 
-/// 连接没有可用方言时的错误。`db_status` 尽量贴近真实原因：没 open 就是
+inline bool dialect_from_client(const uvcpp_db_client& db,
+                                uvcpp_orm_dialect* out) {
+  return dialect_from_driver_name(db.driver_name(), out);
+}
+
+// ---------------------------------------------------------------------------
+// 执行适配层（同步连接 / 事务 / 池）
+// ---------------------------------------------------------------------------
+
+/// 同步连接：所有方法原样转发给 `uvcpp_db_client`。这是 #91 的既有路径，
+/// 行为与错误文案都不变。
+class client_executor {
+ public:
+  explicit client_executor(uvcpp_db_client& db) : db_(&db) {}
+
+  bool valid() const { return true; }
+  uvcpp_orm_status invalid_error(const std::string&, std::string*,
+                                 uvcpp_db_status*) const {
+    return uvcpp_orm_status::OK;
+  }
+
+  uvcpp_db_status query(const std::string& sql, const uvcpp_db_params& params,
+                        uvcpp_db_table* out) {
+    return db_->query(sql, params, out);
+  }
+  uvcpp_db_status execute(const std::string& sql,
+                          const uvcpp_db_params& params,
+                          int64_t* affected) {
+    return db_->execute(sql, params, affected);
+  }
+  uvcpp_db_status insert(const std::string& sql, const uvcpp_db_params& params,
+                         uvcpp_db_value* new_id) {
+    return db_->insert(sql, params, new_id);
+  }
+
+  const char* driver_name() const { return db_->driver_name(); }
+  bool is_open() const { return db_->is_open(); }
+  std::string last_error() const { return db_->last_error(); }
+
+ private:
+  uvcpp_db_client* db_;
+};
+
+/// 事务内执行。**每条语句都走 `uvcpp_db_tx` 自己的门**：第一条失败会被
+/// 事务记住，之后的语句直接返回同一个错误；ORM 不自己 begin/commit，也不
+/// 绕过 `tx.status()` / `tx.error()`。这样事务的提交/回滚/超时语义与直接使用
+/// `uvcpp_db_tx` 完全一致。
+class tx_executor {
+ public:
+  explicit tx_executor(uvcpp_db_tx& tx) : tx_(&tx) {}
+
+  bool valid() const { return tx_->client() != nullptr; }
+  uvcpp_orm_status invalid_error(const std::string& action,
+                                 std::string* error,
+                                 uvcpp_db_status* db_status) const {
+    if (db_status != nullptr) *db_status = uvcpp_db_status::MISUSE;
+    return set_error(error, uvcpp_orm_status::DB_ERROR,
+                     action +
+                         ": transaction has no client (uvcpp_db_tx must be "
+                         "constructed by pool.transaction())");
+  }
+
+  uvcpp_db_status query(const std::string& sql, const uvcpp_db_params& params,
+                        uvcpp_db_table* out) {
+    return tx_->query(sql, params, out);
+  }
+  uvcpp_db_status execute(const std::string& sql,
+                          const uvcpp_db_params& params,
+                          int64_t* affected) {
+    return tx_->execute(sql, params, affected);
+  }
+  uvcpp_db_status insert(const std::string& sql, const uvcpp_db_params& params,
+                         uvcpp_db_value* new_id) {
+    return tx_->insert(sql, params, new_id);
+  }
+
+  const char* driver_name() const {
+    uvcpp_db_client* client = tx_->client();
+    return client != nullptr ? client->driver_name() : nullptr;
+  }
+  bool is_open() const {
+    uvcpp_db_client* client = tx_->client();
+    return client != nullptr && client->is_open();
+  }
+  /// 事务已经记下第一笔错误时，`tx.error()` 是失败那一刻的原文快照，
+  /// 比被后续调用覆盖过的 `client->last_error()` 更可信。
+  std::string last_error() const {
+    if (!tx_->error().empty()) return tx_->error();
+    uvcpp_db_client* client = tx_->client();
+    return client != nullptr ? client->last_error() : std::string();
+  }
+
+ private:
+  uvcpp_db_tx* tx_;
+};
+
+/// 池子上的一次**同步**借还。`acquire()` 会阻塞，所以这组重载只给不在
+/// 事件循环上的调用方用（与 `pool.query` / `pool.execute` 同一条约定）。
+class pool_executor {
+ public:
+  explicit pool_executor(uvcpp_db_pool& pool)
+      : pool_(&pool), client_(pool.acquire()) {
+    if (client_ == nullptr) {
+      acquire_error_ = pool.last_error();
+      if (acquire_error_.empty()) acquire_error_ = "pool acquire failed";
+    }
+  }
+
+  pool_executor(const pool_executor&) = delete;
+  pool_executor& operator=(const pool_executor&) = delete;
+
+  ~pool_executor() {
+    if (client_ == nullptr) return;
+    if (broken_) {
+      pool_->discard(client_);
+    } else {
+      pool_->release(client_);
+    }
+  }
+
+  bool valid() const { return client_ != nullptr; }
+  uvcpp_orm_status invalid_error(const std::string& action,
+                                 std::string* error,
+                                 uvcpp_db_status* db_status) const {
+    if (db_status != nullptr) *db_status = uvcpp_db_status::NO_CONNECTION;
+    return set_error(error, uvcpp_orm_status::DB_ERROR,
+                     action + ": pool acquire failed: " + acquire_error_);
+  }
+
+  uvcpp_db_status query(const std::string& sql, const uvcpp_db_params& params,
+                        uvcpp_db_table* out) {
+    const uvcpp_db_status status = client_->query(sql, params, out);
+    note(status);
+    return status;
+  }
+  uvcpp_db_status execute(const std::string& sql,
+                          const uvcpp_db_params& params,
+                          int64_t* affected) {
+    const uvcpp_db_status status = client_->execute(sql, params, affected);
+    note(status);
+    return status;
+  }
+  uvcpp_db_status insert(const std::string& sql, const uvcpp_db_params& params,
+                         uvcpp_db_value* new_id) {
+    const uvcpp_db_status status = client_->insert(sql, params, new_id);
+    note(status);
+    return status;
+  }
+
+  const char* driver_name() const { return client_->driver_name(); }
+  bool is_open() const { return client_->is_open(); }
+  std::string last_error() const { return client_->last_error(); }
+
+ private:
+  void note(uvcpp_db_status status) {
+    // 坏连接不回池子 —— 与池子自己的代借代还同一条规矩。
+    if (status == uvcpp_db_status::NOT_CONNECTED) broken_ = true;
+  }
+
+  uvcpp_db_pool* pool_;
+  uvcpp_db_client* client_;
+  bool broken_ = false;
+  std::string acquire_error_;
+};
+
+/// 从任意执行器取方言。执行器隐藏了“连接从哪里来”，这里只认驱动名。
+template <typename Executor>
+inline bool dialect_from_executor(const Executor& db, uvcpp_orm_dialect* out) {
+  return dialect_from_driver_name(db.driver_name(), out);
+}
+
+/// 执行器没有可用方言时的错误。`db_status` 尽量贴近真实原因：没 open 就是
 /// `NOT_CONNECTED`，打开了一个本层不认识的驱动就是 `UNSUPPORTED`。
-inline uvcpp_orm_status set_no_driver_error(const uvcpp_db_client& db,
+template <typename Executor>
+inline uvcpp_orm_status set_no_driver_error(const Executor& db,
                                             const std::string& action,
                                             std::string* error,
                                             uvcpp_db_status* db_status) {
@@ -514,6 +695,180 @@ inline const void* column_address(const T* object,
 }
 
 // ---------------------------------------------------------------------------
+// SQL 构造（同步 CRUD 与异步门面共用）
+// ---------------------------------------------------------------------------
+//
+// 这一节只把“模型 + 参数”变成 #90 的 `uvcpp_orm_sql_result`，不碰数据库。
+// 同步路径拿它执行；异步路径拿它在**投递之前**构造 SQL（回调线程只做映射）。
+
+/// `SELECT ... WHERE pk = ? LIMIT 1`。
+template <typename T>
+inline uvcpp_orm_status make_find_by_pk_sql(uvcpp_orm_dialect dialect,
+                                            const uvcpp_db_value& id,
+                                            uvcpp_orm_sql_result* out,
+                                            std::string* error) {
+  if (out == nullptr) {
+    return set_invalid_argument(error,
+                                "find_by_pk: SQL result must not be null");
+  }
+  *out = uvcpp_orm_sql_result();
+  if (id.is_null()) {
+    return set_invalid_argument(error,
+                                "find_by_pk: primary key must not be NULL");
+  }
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
+  if (primary_key == nullptr) {
+    return set_error(error, uvcpp_orm_status::NO_PRIMARY_KEY,
+                     "find_by_pk: model has no primary key");
+  }
+
+  *out = select<T>(dialect)
+             .where_eq(primary_key->column_name(), id)
+             .limit(1)
+             .build();
+  if (!out->ok()) {
+    if (error != nullptr) *error = out->error;
+    return out->status;
+  }
+  return uvcpp_orm_status::OK;
+}
+
+/// `INSERT INTO ... (列...) VALUES (...)`。自增列与 `read_only` 列不进入。
+template <typename T>
+inline uvcpp_orm_status make_insert_sql(uvcpp_orm_dialect dialect,
+                                        const T& value,
+                                        uvcpp_orm_sql_result* out,
+                                        std::string* error) {
+  if (out == nullptr) {
+    return set_invalid_argument(error, "insert: SQL result must not be null");
+  }
+  *out = uvcpp_orm_sql_result();
+  const uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_insert_builder<T> builder(dialect);
+  const uvcpp_orm_column* columns = model_traits<T>::columns();
+  const std::size_t count = model_traits<T>::column_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    const uvcpp_orm_column& column = columns[i];
+    if (column.is_auto_increment() || column.is_read_only()) continue;
+    builder.column(column.column_name(),
+                   column_to_db_value(column, column_address(&value, column)));
+  }
+
+  *out = builder.build();
+  if (!out->ok()) {
+    if (error != nullptr) *error = out->error;
+    return out->status;
+  }
+  return uvcpp_orm_status::OK;
+}
+
+/// `UPDATE ... SET ... WHERE pk = ?`。SET 里不含主键与 `read_only` 列。
+template <typename T>
+inline uvcpp_orm_status make_update_sql(uvcpp_orm_dialect dialect,
+                                        const T& value,
+                                        uvcpp_orm_sql_result* out,
+                                        std::string* error) {
+  if (out == nullptr) {
+    return set_invalid_argument(error, "update: SQL result must not be null");
+  }
+  *out = uvcpp_orm_sql_result();
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
+  if (primary_key == nullptr) {
+    return set_error(error, uvcpp_orm_status::NO_PRIMARY_KEY,
+                     "update: model has no primary key");
+  }
+
+  const uvcpp_db_value primary_key_value =
+      column_to_db_value(*primary_key,
+                         column_address(&value, *primary_key));
+  if (primary_key_value.is_null()) {
+    return set_invalid_argument(
+        error, "update: primary key is NULL; refusing to build WHERE " +
+                   std::string(primary_key->column_name()) + " = NULL");
+  }
+
+  uvcpp_orm_update_builder<T> builder(dialect);
+  const uvcpp_orm_column* columns = model_traits<T>::columns();
+  const std::size_t count = model_traits<T>::column_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    const uvcpp_orm_column& column = columns[i];
+    if (column.is_primary_key() || column.is_read_only()) continue;
+    builder.set(column.column_name(),
+                column_to_db_value(column,
+                                   column_address(&value, column)));
+  }
+  builder.where_eq(primary_key->column_name(), primary_key_value);
+
+  *out = builder.build();
+  if (!out->ok()) {
+    if (error != nullptr) *error = out->error;
+    return out->status;
+  }
+  return uvcpp_orm_status::OK;
+}
+
+/// `DELETE FROM ... WHERE pk = ?`。
+template <typename T>
+inline uvcpp_orm_status make_remove_sql(uvcpp_orm_dialect dialect,
+                                        const uvcpp_db_value& id,
+                                        uvcpp_orm_sql_result* out,
+                                        std::string* error) {
+  if (out == nullptr) {
+    return set_invalid_argument(error, "remove: SQL result must not be null");
+  }
+  *out = uvcpp_orm_sql_result();
+  if (id.is_null()) {
+    return set_invalid_argument(error,
+                                "remove: primary key must not be NULL");
+  }
+  const uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
+  if (primary_key == nullptr) {
+    return set_error(error, uvcpp_orm_status::NO_PRIMARY_KEY,
+                     "remove: model has no primary key");
+  }
+
+  *out = delete_from<T>(dialect)
+             .where_eq(primary_key->column_name(), id)
+             .build();
+  if (!out->ok()) {
+    if (error != nullptr) *error = out->error;
+    return out->status;
+  }
+  return uvcpp_orm_status::OK;
+}
+
+/// `SELECT COUNT(*) ...`（保留 WHERE，去掉 LIMIT/OFFSET/ORDER BY）。
+template <typename T>
+inline uvcpp_orm_status make_count_sql(
+    const uvcpp_orm_select_builder<T>& builder, uvcpp_orm_sql_result* out,
+    std::string* error) {
+  if (out == nullptr) {
+    return set_invalid_argument(error, "count: SQL result must not be null");
+  }
+  *out = uvcpp_orm_sql_result();
+  const uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  *out = builder.build_count();
+  if (!out->ok()) {
+    if (error != nullptr) *error = out->error;
+    return out->status;
+  }
+  return uvcpp_orm_status::OK;
+}
+
+// ---------------------------------------------------------------------------
 // 结果集映射
 // ---------------------------------------------------------------------------
 
@@ -637,14 +992,16 @@ inline uvcpp_orm_status map_table(const uvcpp_db_table& table,
 // ---------------------------------------------------------------------------
 
 /// 执行一条 COUNT(*) 查询并读出第一行第一列。
+template <typename Executor>
 inline uvcpp_orm_status execute_count_query(
-    uvcpp_db_client& db, const uvcpp_orm_sql_result& count_sql,
+    Executor& db, const uvcpp_orm_sql_result& count_sql,
     int64_t* total, std::string* error, uvcpp_db_status* db_status) {
   uvcpp_db_table table;
   const uvcpp_db_status status =
       db.query(count_sql.sql, count_sql.params, &table);
   if (!uvcpp_db_ok(status)) {
-    return set_db_error(db, status, "count query", error, db_status);
+    return set_db_error(db.last_error(), status, "count query", error,
+                        db_status);
   }
   if (table.row_count() == 0u || table.column_count() == 0u) {
     return set_error(error, uvcpp_orm_status::MAPPING_FAILED,
@@ -843,9 +1200,61 @@ inline uvcpp_orm_status derive_count_query(
 // 公共执行骨架
 // ---------------------------------------------------------------------------
 
-template <typename T>
+/// 同步/事务/池共用的 `find_by_pk` 骨架。
+template <typename T, typename Executor>
+inline uvcpp_orm_status find_by_pk_impl(Executor& db,
+                                        const uvcpp_db_value& id, T* out,
+                                        std::string* error,
+                                        uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+
+  if (out == nullptr) {
+    return set_invalid_argument(error, "find_by_pk: out must not be null");
+  }
+  if (!db.valid()) {
+    return db.invalid_error("find_by_pk", error, db_status);
+  }
+  if (id.is_null()) {
+    return set_invalid_argument(error,
+                                "find_by_pk: primary key must not be NULL");
+  }
+
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "find_by_pk", error, db_status);
+  }
+
+  uvcpp_orm_sql_result sql_result;
+  status = make_find_by_pk_sql<T>(dialect, id, &sql_result, error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_db_table table;
+  const uvcpp_db_status database_status =
+      db.query(sql_result.sql, sql_result.params, &table);
+  if (!uvcpp_db_ok(database_status)) {
+    return set_db_error(db.last_error(), database_status, "find_by_pk query",
+                        error, db_status);
+  }
+  if (table.row_count() == 0u) {
+    return set_error(
+        error, uvcpp_orm_status::NOT_FOUND,
+        std::string("find_by_pk: no row in table \"") +
+            model_traits<T>::table_name() + "\" matches the primary key");
+  }
+
+  std::vector<column_binding> bindings;
+  status = prepare_bindings<T>(table, &bindings, error);
+  if (status != uvcpp_orm_status::OK) return status;
+  return map_row(table.rows()[0], bindings, 0u, out, error);
+}
+
+template <typename T, typename Executor>
 inline uvcpp_orm_status find_all_impl(
-    uvcpp_db_client& db, const uvcpp_orm_sql_result& select_sql,
+    Executor& db, const uvcpp_orm_sql_result& select_sql,
     const uvcpp_orm_sql_result* count_sql, std::vector<T>* out,
     std::string* error, int64_t* total, uvcpp_db_status* db_status) {
   if (error != nullptr) error->clear();
@@ -853,6 +1262,9 @@ inline uvcpp_orm_status find_all_impl(
 
   if (out == nullptr) {
     return set_invalid_argument(error, "find_all: out must not be null");
+  }
+  if (!db.valid()) {
+    return db.invalid_error("find_all", error, db_status);
   }
   if (!select_sql.ok()) {
     if (error != nullptr) *error = select_sql.error;
@@ -870,7 +1282,7 @@ inline uvcpp_orm_status find_all_impl(
   if (status != uvcpp_orm_status::OK) return status;
 
   uvcpp_orm_dialect dialect;
-  if (!dialect_from_client(db, &dialect)) {
+  if (!dialect_from_executor(db, &dialect)) {
     return set_no_driver_error(db, "find_all", error, db_status);
   }
   if (!dialect_matches(select_sql, dialect, error, "find_all")) {
@@ -894,8 +1306,8 @@ inline uvcpp_orm_status find_all_impl(
   const uvcpp_db_status database_status =
       db.query(select_sql.sql, select_sql.params, &table);
   if (!uvcpp_db_ok(database_status)) {
-    return set_db_error(db, database_status, "find_all query", error,
-                        db_status);
+    return set_db_error(db.last_error(), database_status, "find_all query",
+                        error, db_status);
   }
 
   std::vector<T> rows;
@@ -907,6 +1319,270 @@ inline uvcpp_orm_status find_all_impl(
   return uvcpp_orm_status::OK;
 }
 
+template <typename T, typename Executor>
+inline uvcpp_orm_status insert_impl(Executor& db, const T& value,
+                                    uvcpp_db_value* new_id,
+                                    std::string* error,
+                                    uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (new_id != nullptr) new_id->set_null();
+
+  if (!db.valid()) {
+    return db.invalid_error("insert", error, db_status);
+  }
+
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "insert", error, db_status);
+  }
+
+  uvcpp_orm_sql_result sql_result;
+  status = make_insert_sql<T>(dialect, value, &sql_result, error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  if (new_id != nullptr) {
+    const uvcpp_db_status database_status =
+        db.insert(sql_result.sql, sql_result.params, new_id);
+    if (!uvcpp_db_ok(database_status)) {
+      new_id->set_null();
+      return set_db_error(db.last_error(), database_status, "insert", error,
+                          db_status);
+    }
+    return uvcpp_orm_status::OK;
+  }
+
+  const uvcpp_db_status database_status =
+      db.execute(sql_result.sql, sql_result.params, nullptr);
+  if (!uvcpp_db_ok(database_status)) {
+    return set_db_error(db.last_error(), database_status, "insert", error,
+                        db_status);
+  }
+  return uvcpp_orm_status::OK;
+}
+
+template <typename T, typename Executor>
+inline uvcpp_orm_status update_impl(Executor& db, const T& value,
+                                    int64_t* affected, std::string* error,
+                                    uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (affected != nullptr) *affected = -1;
+
+  if (!db.valid()) {
+    return db.invalid_error("update", error, db_status);
+  }
+
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "update", error, db_status);
+  }
+
+  uvcpp_orm_sql_result sql_result;
+  status = make_update_sql<T>(dialect, value, &sql_result, error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  int64_t changed = -1;
+  const uvcpp_db_status database_status =
+      db.execute(sql_result.sql, sql_result.params, &changed);
+  if (!uvcpp_db_ok(database_status)) {
+    return set_db_error(db.last_error(), database_status, "update", error,
+                        db_status);
+  }
+
+  if (affected != nullptr) *affected = changed;
+  return uvcpp_orm_status::OK;
+}
+
+template <typename T, typename Executor>
+inline uvcpp_orm_status remove_impl(Executor& db, const uvcpp_db_value& id,
+                                    int64_t* affected, std::string* error,
+                                    uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (affected != nullptr) *affected = -1;
+
+  if (!db.valid()) {
+    return db.invalid_error("remove", error, db_status);
+  }
+  if (id.is_null()) {
+    return set_invalid_argument(error,
+                                "remove: primary key must not be NULL");
+  }
+
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "remove", error, db_status);
+  }
+
+  uvcpp_orm_sql_result sql_result;
+  status = make_remove_sql<T>(dialect, id, &sql_result, error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  int64_t changed = -1;
+  const uvcpp_db_status database_status =
+      db.execute(sql_result.sql, sql_result.params, &changed);
+  if (!uvcpp_db_ok(database_status)) {
+    return set_db_error(db.last_error(), database_status, "remove", error,
+                        db_status);
+  }
+
+  if (affected != nullptr) *affected = changed;
+  return uvcpp_orm_status::OK;
+}
+
+template <typename T, typename Executor>
+inline uvcpp_orm_status count_impl(
+    Executor& db, const uvcpp_orm_select_builder<T>& builder, int64_t* total,
+    std::string* error, uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (total == nullptr) {
+    return set_invalid_argument(error, "count: total must not be null");
+  }
+  if (!db.valid()) {
+    return db.invalid_error("count", error, db_status);
+  }
+
+  // 与 #91 的错误顺序一致：先校验模型，再定方言，最后才构造 SQL。
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "count", error, db_status);
+  }
+
+  uvcpp_orm_sql_result count_sql;
+  status = make_count_sql<T>(builder, &count_sql, error);
+  if (status != uvcpp_orm_status::OK) return status;
+  if (!dialect_matches(count_sql, dialect, error, "count")) {
+    return uvcpp_orm_status::INVALID_ARGUMENT;
+  }
+
+  return execute_count_query(db, count_sql, total, error, db_status);
+}
+
+template <typename T, typename Executor>
+inline uvcpp_orm_status count_impl(
+    Executor& db, const uvcpp_orm_sql_result& count_sql, int64_t* total,
+    std::string* error, uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (total == nullptr) {
+    return set_invalid_argument(error, "count: total must not be null");
+  }
+  if (!db.valid()) {
+    return db.invalid_error("count", error, db_status);
+  }
+  if (!count_sql.ok()) {
+    if (error != nullptr) *error = count_sql.error;
+    return count_sql.status;
+  }
+  if (count_sql.sql.empty()) {
+    return set_invalid_argument(error, "count: SQL is empty");
+  }
+
+  uvcpp_orm_status status = validate_model<T>(error);
+  if (status != uvcpp_orm_status::OK) return status;
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "count", error, db_status);
+  }
+  if (!dialect_matches(count_sql, dialect, error, "count")) {
+    return uvcpp_orm_status::INVALID_ARGUMENT;
+  }
+
+  return execute_count_query(db, count_sql, total, error, db_status);
+}
+
+/// `find_all` 的“已构造 SQL”入口：`total` 非空时从 SELECT 推导 COUNT。
+template <typename T, typename Executor>
+inline uvcpp_orm_status find_all_result_impl(
+    Executor& db, const uvcpp_orm_sql_result& sql_result,
+    std::vector<T>* out, std::string* error, int64_t* total,
+    uvcpp_db_status* db_status) {
+  if (total == nullptr) {
+    return find_all_impl<T>(db, sql_result, nullptr, out, error, total,
+                            db_status);
+  }
+
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (!db.valid()) {
+    return db.invalid_error("find_all", error, db_status);
+  }
+  if (out == nullptr) {
+    return set_invalid_argument(error, "find_all: out must not be null");
+  }
+  if (!sql_result.ok()) {
+    if (error != nullptr) *error = sql_result.error;
+    return sql_result.status;
+  }
+
+  uvcpp_orm_dialect dialect;
+  if (!dialect_from_executor(db, &dialect)) {
+    return set_no_driver_error(db, "find_all", error, db_status);
+  }
+  if (!dialect_matches(sql_result, dialect, error, "find_all")) {
+    return uvcpp_orm_status::INVALID_ARGUMENT;
+  }
+
+  uvcpp_orm_sql_result count_sql;
+  const uvcpp_orm_status derived =
+      derive_count_query(sql_result, &count_sql, error);
+  if (derived != uvcpp_orm_status::OK) return derived;
+
+  return find_all_impl<T>(db, sql_result, &count_sql, out, error, total,
+                          db_status);
+}
+
+/// `find_all` 的构造器入口：`total` 非空时用同一个 builder 生成 COUNT。
+template <typename T, typename Executor>
+inline uvcpp_orm_status find_all_builder_impl(
+    Executor& db, const uvcpp_orm_select_builder<T>& builder,
+    std::vector<T>* out, std::string* error, int64_t* total,
+    uvcpp_db_status* db_status) {
+  if (error != nullptr) error->clear();
+  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  if (!db.valid()) {
+    return db.invalid_error("find_all", error, db_status);
+  }
+  if (out == nullptr) {
+    return set_invalid_argument(error, "find_all: out must not be null");
+  }
+
+  const uvcpp_orm_sql_result select_sql = builder.build();
+  if (!select_sql.ok()) {
+    if (error != nullptr) *error = select_sql.error;
+    return select_sql.status;
+  }
+
+  if (total == nullptr) {
+    return find_all_impl<T>(db, select_sql, nullptr, out, error, total,
+                            db_status);
+  }
+
+  const uvcpp_orm_sql_result count_sql = builder.build_count();
+  if (!count_sql.ok()) {
+    if (error != nullptr) *error = count_sql.error;
+    return count_sql.status;
+  }
+
+  return find_all_impl<T>(db, select_sql, &count_sql, out, error, total,
+                          db_status);
+}
+
 }  // namespace orm_detail
 
 // ---------------------------------------------------------------------------
@@ -916,66 +1592,40 @@ inline uvcpp_orm_status find_all_impl(
 /// 按主键查一行。没找到返回 `NOT_FOUND`，且不修改 `out`。
 ///
 /// `db_status` 是可选的后端原始返回码出参：只有 `DB_ERROR` 会写它。
+///
+/// 三种执行器（同步连接 / 事务 / 池）共用同一套 SQL 构造与结果映射：
+///
+///   * `uvcpp_db_client&` —— #91 的路径，行为与错误文案不变；
+///   * `uvcpp_db_tx&` —— 每条语句都过 `uvcpp_db_tx` 自己的门：事务内
+///     第一条失败会被记住，后续语句直接返回同一个错误；ORM 不自己
+///     begin/commit，提交/回滚/超时语义完全由 `uvcpp_db_tx` 保证；
+///   * `uvcpp_db_pool&` —— 同步借还一条连接（`acquire()` 会阻塞，只给不在
+///     事件循环上的调用方；异步请用 `uvcpp_orm_async.h`）。
 template <typename T>
 inline uvcpp_orm_status find_by_pk(uvcpp_db_client& db,
                                    const uvcpp_db_value& id, T* out,
                                    std::string* error = nullptr,
                                    uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  orm_detail::client_executor executor(db);
+  return orm_detail::find_by_pk_impl<T>(executor, id, out, error, db_status);
+}
 
-  if (out == nullptr) {
-    return orm_detail::set_invalid_argument(
-        error, "find_by_pk: out must not be null");
-  }
-  if (id.is_null()) {
-    return orm_detail::set_invalid_argument(
-        error, "find_by_pk: primary key must not be NULL");
-  }
+template <typename T>
+inline uvcpp_orm_status find_by_pk(uvcpp_db_tx& tx,
+                                   const uvcpp_db_value& id, T* out,
+                                   std::string* error = nullptr,
+                                   uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::find_by_pk_impl<T>(executor, id, out, error, db_status);
+}
 
-  uvcpp_orm_status status = validate_model<T>(error);
-  if (status != uvcpp_orm_status::OK) return status;
-
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "find_by_pk", error,
-                                           db_status);
-  }
-
-  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
-  if (primary_key == nullptr) {
-    return orm_detail::set_error(error, uvcpp_orm_status::NO_PRIMARY_KEY,
-                                 "find_by_pk: model has no primary key");
-  }
-
-  const uvcpp_orm_sql_result sql_result =
-      select<T>(dialect)
-          .where_eq(primary_key->column_name(), id)
-          .limit(1)
-          .build();
-  if (!sql_result.ok()) {
-    if (error != nullptr) *error = sql_result.error;
-    return sql_result.status;
-  }
-
-  uvcpp_db_table table;
-  const uvcpp_db_status database_status =
-      db.query(sql_result.sql, sql_result.params, &table);
-  if (!uvcpp_db_ok(database_status)) {
-    return orm_detail::set_db_error(db, database_status, "find_by_pk query",
-                                    error, db_status);
-  }
-  if (table.row_count() == 0u) {
-    return orm_detail::set_error(
-        error, uvcpp_orm_status::NOT_FOUND,
-        std::string("find_by_pk: no row in table \"") +
-            model_traits<T>::table_name() + "\" matches the primary key");
-  }
-
-  std::vector<orm_detail::column_binding> bindings;
-  status = orm_detail::prepare_bindings<T>(table, &bindings, error);
-  if (status != uvcpp_orm_status::OK) return status;
-  return orm_detail::map_row(table.rows()[0], bindings, 0u, out, error);
+template <typename T>
+inline uvcpp_orm_status find_by_pk(uvcpp_db_pool& pool,
+                                   const uvcpp_db_value& id, T* out,
+                                   std::string* error = nullptr,
+                                   uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::find_by_pk_impl<T>(executor, id, out, error, db_status);
 }
 
 /// 执行一条**已构造**的 SELECT 并映射成模型。`total` 非空时额外执行一条
@@ -989,37 +1639,33 @@ inline uvcpp_orm_status find_all(uvcpp_db_client& db,
                                  std::string* error = nullptr,
                                  int64_t* total = nullptr,
                                  uvcpp_db_status* db_status = nullptr) {
-  if (total == nullptr) {
-    return orm_detail::find_all_impl<T>(db, sql_result, nullptr, out, error,
-                                        total, db_status);
-  }
+  orm_detail::client_executor executor(db);
+  return orm_detail::find_all_result_impl<T>(executor, sql_result, out, error,
+                                             total, db_status);
+}
 
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
-  if (out == nullptr) {
-    return orm_detail::set_invalid_argument(
-        error, "find_all: out must not be null");
-  }
-  if (!sql_result.ok()) {
-    if (error != nullptr) *error = sql_result.error;
-    return sql_result.status;
-  }
+template <typename T>
+inline uvcpp_orm_status find_all(uvcpp_db_tx& tx,
+                                 const uvcpp_orm_sql_result& sql_result,
+                                 std::vector<T>* out,
+                                 std::string* error = nullptr,
+                                 int64_t* total = nullptr,
+                                 uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::find_all_result_impl<T>(executor, sql_result, out, error,
+                                             total, db_status);
+}
 
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "find_all", error, db_status);
-  }
-  if (!orm_detail::dialect_matches(sql_result, dialect, error, "find_all")) {
-    return uvcpp_orm_status::INVALID_ARGUMENT;
-  }
-
-  uvcpp_orm_sql_result count_sql;
-  const uvcpp_orm_status derived =
-      orm_detail::derive_count_query(sql_result, &count_sql, error);
-  if (derived != uvcpp_orm_status::OK) return derived;
-
-  return orm_detail::find_all_impl<T>(db, sql_result, &count_sql, out, error,
-                                      total, db_status);
+template <typename T>
+inline uvcpp_orm_status find_all(uvcpp_db_pool& pool,
+                                 const uvcpp_orm_sql_result& sql_result,
+                                 std::vector<T>* out,
+                                 std::string* error = nullptr,
+                                 int64_t* total = nullptr,
+                                 uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::find_all_result_impl<T>(executor, sql_result, out, error,
+                                             total, db_status);
 }
 
 /// 执行一个 SELECT 构造器并映射成模型。`total` 非空时用同一个 WHERE 再生成
@@ -1031,33 +1677,33 @@ inline uvcpp_orm_status find_all(uvcpp_db_client& db,
                                  std::string* error = nullptr,
                                  int64_t* total = nullptr,
                                  uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
+  orm_detail::client_executor executor(db);
+  return orm_detail::find_all_builder_impl<T>(executor, builder, out, error,
+                                              total, db_status);
+}
 
-  if (out == nullptr) {
-    return orm_detail::set_invalid_argument(
-        error, "find_all: out must not be null");
-  }
+template <typename T>
+inline uvcpp_orm_status find_all(uvcpp_db_tx& tx,
+                                 const uvcpp_orm_select_builder<T>& builder,
+                                 std::vector<T>* out,
+                                 std::string* error = nullptr,
+                                 int64_t* total = nullptr,
+                                 uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::find_all_builder_impl<T>(executor, builder, out, error,
+                                              total, db_status);
+}
 
-  const uvcpp_orm_sql_result select_sql = builder.build();
-  if (!select_sql.ok()) {
-    if (error != nullptr) *error = select_sql.error;
-    return select_sql.status;
-  }
-
-  if (total == nullptr) {
-    return orm_detail::find_all_impl<T>(db, select_sql, nullptr, out, error,
-                                        total, db_status);
-  }
-
-  const uvcpp_orm_sql_result count_sql = builder.build_count();
-  if (!count_sql.ok()) {
-    if (error != nullptr) *error = count_sql.error;
-    return count_sql.status;
-  }
-
-  return orm_detail::find_all_impl<T>(db, select_sql, &count_sql, out, error,
-                                      total, db_status);
+template <typename T>
+inline uvcpp_orm_status find_all(uvcpp_db_pool& pool,
+                                 const uvcpp_orm_select_builder<T>& builder,
+                                 std::vector<T>* out,
+                                 std::string* error = nullptr,
+                                 int64_t* total = nullptr,
+                                 uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::find_all_builder_impl<T>(executor, builder, out, error,
+                                              total, db_status);
 }
 
 /// 插入一行。自增列（以及 `read_only` 列）不进入 INSERT；`new_id` 非空时
@@ -1067,53 +1713,29 @@ inline uvcpp_orm_status insert(uvcpp_db_client& db, const T& value,
                                uvcpp_db_value* new_id = nullptr,
                                std::string* error = nullptr,
                                uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
-  if (new_id != nullptr) new_id->set_null();
-
-  uvcpp_orm_status status = validate_model<T>(error);
-  if (status != uvcpp_orm_status::OK) return status;
-
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "insert", error, db_status);
-  }
-
-  uvcpp_orm_insert_builder<T> builder(dialect);
-  const uvcpp_orm_column* columns = model_traits<T>::columns();
-  const std::size_t count = model_traits<T>::column_count();
-  for (std::size_t i = 0; i < count; ++i) {
-    const uvcpp_orm_column& column = columns[i];
-    if (column.is_auto_increment() || column.is_read_only()) continue;
-    builder.column(column.column_name(),
-                   orm_detail::column_to_db_value(
-                       column, orm_detail::column_address(&value, column)));
-  }
-
-  const uvcpp_orm_sql_result sql_result = builder.build();
-  if (!sql_result.ok()) {
-    if (error != nullptr) *error = sql_result.error;
-    return sql_result.status;
-  }
-
-  if (new_id != nullptr) {
-    const uvcpp_db_status database_status =
-        db.insert(sql_result.sql, sql_result.params, new_id);
-    if (!uvcpp_db_ok(database_status)) {
-      new_id->set_null();
-      return orm_detail::set_db_error(db, database_status, "insert", error,
-                                      db_status);
-    }
-    return uvcpp_orm_status::OK;
-  }
-
-  const uvcpp_db_status database_status =
-      db.execute(sql_result.sql, sql_result.params, nullptr);
-  if (!uvcpp_db_ok(database_status)) {
-    return orm_detail::set_db_error(db, database_status, "insert", error,
+  orm_detail::client_executor executor(db);
+  return orm_detail::insert_impl<T>(executor, value, new_id, error,
                                     db_status);
-  }
-  return uvcpp_orm_status::OK;
+}
+
+template <typename T>
+inline uvcpp_orm_status insert(uvcpp_db_tx& tx, const T& value,
+                               uvcpp_db_value* new_id = nullptr,
+                               std::string* error = nullptr,
+                               uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::insert_impl<T>(executor, value, new_id, error,
+                                    db_status);
+}
+
+template <typename T>
+inline uvcpp_orm_status insert(uvcpp_db_pool& pool, const T& value,
+                               uvcpp_db_value* new_id = nullptr,
+                               std::string* error = nullptr,
+                               uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::insert_impl<T>(executor, value, new_id, error,
+                                    db_status);
 }
 
 /// 按主键更新。SET 里不含主键（也不含 `read_only` 列）。受影响 0 行不是
@@ -1123,60 +1745,29 @@ inline uvcpp_orm_status update(uvcpp_db_client& db, const T& value,
                                int64_t* affected = nullptr,
                                std::string* error = nullptr,
                                uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
-  if (affected != nullptr) *affected = -1;
-
-  uvcpp_orm_status status = validate_model<T>(error);
-  if (status != uvcpp_orm_status::OK) return status;
-
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "update", error, db_status);
-  }
-
-  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
-  if (primary_key == nullptr) {
-    return orm_detail::set_error(error, uvcpp_orm_status::NO_PRIMARY_KEY,
-                                 "update: model has no primary key");
-  }
-
-  const uvcpp_db_value primary_key_value = orm_detail::column_to_db_value(
-      *primary_key, orm_detail::column_address(&value, *primary_key));
-  if (primary_key_value.is_null()) {
-    return orm_detail::set_invalid_argument(
-        error, "update: primary key is NULL; refusing to build WHERE " +
-                   std::string(primary_key->column_name()) + " = NULL");
-  }
-
-  uvcpp_orm_update_builder<T> builder(dialect);
-  const uvcpp_orm_column* columns = model_traits<T>::columns();
-  const std::size_t count = model_traits<T>::column_count();
-  for (std::size_t i = 0; i < count; ++i) {
-    const uvcpp_orm_column& column = columns[i];
-    if (column.is_primary_key() || column.is_read_only()) continue;
-    builder.set(column.column_name(),
-                orm_detail::column_to_db_value(
-                    column, orm_detail::column_address(&value, column)));
-  }
-  builder.where_eq(primary_key->column_name(), primary_key_value);
-
-  const uvcpp_orm_sql_result sql_result = builder.build();
-  if (!sql_result.ok()) {
-    if (error != nullptr) *error = sql_result.error;
-    return sql_result.status;
-  }
-
-  int64_t changed = -1;
-  const uvcpp_db_status database_status =
-      db.execute(sql_result.sql, sql_result.params, &changed);
-  if (!uvcpp_db_ok(database_status)) {
-    return orm_detail::set_db_error(db, database_status, "update", error,
+  orm_detail::client_executor executor(db);
+  return orm_detail::update_impl<T>(executor, value, affected, error,
                                     db_status);
-  }
+}
 
-  if (affected != nullptr) *affected = changed;
-  return uvcpp_orm_status::OK;
+template <typename T>
+inline uvcpp_orm_status update(uvcpp_db_tx& tx, const T& value,
+                               int64_t* affected = nullptr,
+                               std::string* error = nullptr,
+                               uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::update_impl<T>(executor, value, affected, error,
+                                    db_status);
+}
+
+template <typename T>
+inline uvcpp_orm_status update(uvcpp_db_pool& pool, const T& value,
+                               int64_t* affected = nullptr,
+                               std::string* error = nullptr,
+                               uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::update_impl<T>(executor, value, affected, error,
+                                    db_status);
 }
 
 /// 按主键删除。受影响 0 行不是错误（返回 `OK`、`affected` 0）。
@@ -1185,48 +1776,26 @@ inline uvcpp_orm_status remove(uvcpp_db_client& db, const uvcpp_db_value& id,
                                int64_t* affected = nullptr,
                                std::string* error = nullptr,
                                uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
-  if (affected != nullptr) *affected = -1;
+  orm_detail::client_executor executor(db);
+  return orm_detail::remove_impl<T>(executor, id, affected, error, db_status);
+}
 
-  if (id.is_null()) {
-    return orm_detail::set_invalid_argument(
-        error, "remove: primary key must not be NULL");
-  }
+template <typename T>
+inline uvcpp_orm_status remove(uvcpp_db_tx& tx, const uvcpp_db_value& id,
+                               int64_t* affected = nullptr,
+                               std::string* error = nullptr,
+                               uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::remove_impl<T>(executor, id, affected, error, db_status);
+}
 
-  uvcpp_orm_status status = validate_model<T>(error);
-  if (status != uvcpp_orm_status::OK) return status;
-
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "remove", error, db_status);
-  }
-
-  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
-  if (primary_key == nullptr) {
-    return orm_detail::set_error(error, uvcpp_orm_status::NO_PRIMARY_KEY,
-                                 "remove: model has no primary key");
-  }
-
-  const uvcpp_orm_sql_result sql_result =
-      delete_from<T>(dialect)
-          .where_eq(primary_key->column_name(), id)
-          .build();
-  if (!sql_result.ok()) {
-    if (error != nullptr) *error = sql_result.error;
-    return sql_result.status;
-  }
-
-  int64_t changed = -1;
-  const uvcpp_db_status database_status =
-      db.execute(sql_result.sql, sql_result.params, &changed);
-  if (!uvcpp_db_ok(database_status)) {
-    return orm_detail::set_db_error(db, database_status, "remove", error,
-                                    db_status);
-  }
-
-  if (affected != nullptr) *affected = changed;
-  return uvcpp_orm_status::OK;
+template <typename T>
+inline uvcpp_orm_status remove(uvcpp_db_pool& pool, const uvcpp_db_value& id,
+                               int64_t* affected = nullptr,
+                               std::string* error = nullptr,
+                               uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::remove_impl<T>(executor, id, affected, error, db_status);
 }
 
 /// 执行一条 COUNT 构造器。`total` 必须非空。
@@ -1236,32 +1805,31 @@ inline uvcpp_orm_status count(uvcpp_db_client& db,
                               int64_t* total,
                               std::string* error = nullptr,
                               uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
-  if (total == nullptr) {
-    return orm_detail::set_invalid_argument(
-        error, "count: total must not be null");
-  }
+  orm_detail::client_executor executor(db);
+  return orm_detail::count_impl<T>(executor, builder, total, error,
+                                   db_status);
+}
 
-  uvcpp_orm_status status = validate_model<T>(error);
-  if (status != uvcpp_orm_status::OK) return status;
+template <typename T>
+inline uvcpp_orm_status count(uvcpp_db_tx& tx,
+                              const uvcpp_orm_select_builder<T>& builder,
+                              int64_t* total,
+                              std::string* error = nullptr,
+                              uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::count_impl<T>(executor, builder, total, error,
+                                   db_status);
+}
 
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "count", error, db_status);
-  }
-
-  const uvcpp_orm_sql_result count_sql = builder.build_count();
-  if (!count_sql.ok()) {
-    if (error != nullptr) *error = count_sql.error;
-    return count_sql.status;
-  }
-  if (!orm_detail::dialect_matches(count_sql, dialect, error, "count")) {
-    return uvcpp_orm_status::INVALID_ARGUMENT;
-  }
-
-  return orm_detail::execute_count_query(db, count_sql, total, error,
-                                         db_status);
+template <typename T>
+inline uvcpp_orm_status count(uvcpp_db_pool& pool,
+                              const uvcpp_orm_select_builder<T>& builder,
+                              int64_t* total,
+                              std::string* error = nullptr,
+                              uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::count_impl<T>(executor, builder, total, error,
+                                   db_status);
 }
 
 /// 执行一条**已构造**的 COUNT 查询。`total` 必须非空。
@@ -1271,33 +1839,31 @@ inline uvcpp_orm_status count(uvcpp_db_client& db,
                               int64_t* total,
                               std::string* error = nullptr,
                               uvcpp_db_status* db_status = nullptr) {
-  if (error != nullptr) error->clear();
-  if (db_status != nullptr) *db_status = uvcpp_db_status::OK;
-  if (total == nullptr) {
-    return orm_detail::set_invalid_argument(
-        error, "count: total must not be null");
-  }
-  if (!count_sql.ok()) {
-    if (error != nullptr) *error = count_sql.error;
-    return count_sql.status;
-  }
-  if (count_sql.sql.empty()) {
-    return orm_detail::set_invalid_argument(error, "count: SQL is empty");
-  }
+  orm_detail::client_executor executor(db);
+  return orm_detail::count_impl<T>(executor, count_sql, total, error,
+                                   db_status);
+}
 
-  uvcpp_orm_status status = validate_model<T>(error);
-  if (status != uvcpp_orm_status::OK) return status;
+template <typename T>
+inline uvcpp_orm_status count(uvcpp_db_tx& tx,
+                              const uvcpp_orm_sql_result& count_sql,
+                              int64_t* total,
+                              std::string* error = nullptr,
+                              uvcpp_db_status* db_status = nullptr) {
+  orm_detail::tx_executor executor(tx);
+  return orm_detail::count_impl<T>(executor, count_sql, total, error,
+                                   db_status);
+}
 
-  uvcpp_orm_dialect dialect;
-  if (!orm_detail::dialect_from_client(db, &dialect)) {
-    return orm_detail::set_no_driver_error(db, "count", error, db_status);
-  }
-  if (!orm_detail::dialect_matches(count_sql, dialect, error, "count")) {
-    return uvcpp_orm_status::INVALID_ARGUMENT;
-  }
-
-  return orm_detail::execute_count_query(db, count_sql, total, error,
-                                         db_status);
+template <typename T>
+inline uvcpp_orm_status count(uvcpp_db_pool& pool,
+                              const uvcpp_orm_sql_result& count_sql,
+                              int64_t* total,
+                              std::string* error = nullptr,
+                              uvcpp_db_status* db_status = nullptr) {
+  orm_detail::pool_executor executor(pool);
+  return orm_detail::count_impl<T>(executor, count_sql, total, error,
+                                   db_status);
 }
 
 }  // namespace uvcpp
