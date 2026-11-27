@@ -215,6 +215,11 @@ if(NOT UVCPP_ENABLE_DB_MYSQL)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*orm_mysql[^/]*\\.cpp$")
 endif()
 
+# 同一规则：PostgreSQL 后端没编进来时，ORM 的 PG 真库用例必须不存在。
+if(NOT UVCPP_ENABLE_DB_PGSQL)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*orm_pgsql[^/]*\\.cpp$")
+endif()
+
 # Redis 用例同理：`UVCPP_ENABLE_REDIS=0` 时公开头整段落在 `#if` 外面，不摘
 # 就是编译失败而不是跳过。
 if(NOT UVCPP_ENABLE_REDIS)
@@ -367,7 +372,8 @@ endif()
 # 成立：哪天有哪一格真起了个数据源，就该把那格的 `UVCPP_DB_TEST_REQUIRE=1` 也配上。）
 foreach(_db_remote test_db_mysql_func test_db_pgsql_func
         test_db_pgsql_async_func test_db_odbc_func test_db_mongodb_func
-        test_db_transaction_server_func test_orm_mysql_func)
+        test_db_transaction_server_func test_orm_mysql_func
+        test_orm_pgsql_func)
   if(TARGET ${_db_remote})
     set_tests_properties(${_db_remote} PROPERTIES SKIP_RETURN_CODE 3)
   endif()
