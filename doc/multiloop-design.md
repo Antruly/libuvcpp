@@ -677,10 +677,10 @@ W4 之后改成了**连接自己那条**（`client->get_loop()`），分片用�
 
 **理由要写准（2026-09-22 按源码核过，原先那句不成立）**：不能说成"在**别的循环的线程**上
 `delete` 一个持有那条循环句柄的 `uvcpp_ws_connection` 在 libuv 层面不成立" ——
-`notify_retired()`（`src/web/uvcpp_ws_connection.cpp:124-163`）在对象进 `retired_` **之前**
+`notify_retired()`（`src/web/uvcpp_ws_connection.cpp:125-164`）在对象进 `retired_` **之前**
 就跑完了：它清零 `close_observer_id_`、摘掉关闭观察者、把 `tcp_` 置空
-（`src/web/uvcpp_ws_connection.cpp:142`）；而 `~uvcpp_ws_connection`
-（`src/web/uvcpp_ws_connection.cpp:44-57`）在 `tcp_ == nullptr` 时
+（`src/web/uvcpp_ws_connection.cpp:143`）；而 `~uvcpp_ws_connection`
+（`src/web/uvcpp_ws_connection.cpp:45-58`）在 `tcp_ == nullptr` 时
 **不碰任何循环句柄**（只剩清 token 与结算未发的帧，都在本进程内存里）。所以
 `drain()` 里那句 `delete`（`src/web/uvcpp_ws_sessions.cpp:135`）**不是**循环亲和的。
 
