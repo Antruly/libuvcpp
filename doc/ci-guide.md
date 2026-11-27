@@ -47,11 +47,14 @@ some of them). With the three `yyjson` entries the table is **39**. 1.6.48 added
 `brotli` entries — `brotli` on Ubuntu, macOS and MSVC plus a fourth Ubuntu-only
 `brotli-no-zlib` (the only cell that compiles the compressor's "no zlib" branches; see §5) —
 which takes it to **43**. 1.12.0 adds the three `orm` entries (the single-table ORM of
-issue #88: `DB=ON + SQLite=ON + ORM=ON` on Ubuntu, macOS and MSVC; the functional
+issue #88: `DB=ON + SQLITE=ON + ORM=ON` on Ubuntu, macOS and MSVC; the functional
 `orm_*` glob runs `test_orm_model_func`, `test_orm_sql_func`, `test_orm_sqlite_func`
 and `test_orm_tx_async_func`, plus `test_db_sqlite_func` to prove the DB path did not
 regress; the existing `db` entries keep `UVCPP_BUILD_ORM=OFF` and are the negative
-gate for it), which takes it to **46**. The table below is the
+gate for it), which takes it to **46**. The single Ubuntu `db-servers` job additionally
+builds with `ORM=ON` and runs `test_orm_mysql_func` against its MySQL 8 service; that is
+not a new matrix entry, it is the real-MySQL ORM pair inside the existing remote-backend
+job.
 machine-checked source; this paragraph is a narrative and is not — treat any number here as
 a claim to re-count rather than to trust.
 The `windows` one had never run before that commit, since there is no MSVC on the
@@ -108,10 +111,9 @@ layout did not cover them either.
 | MySQL / PostgreSQL / MongoDB / Redis on macOS, MSVC and MinGW | Those runners have no database server, and `services:` is **job-level** — it is only available on Ubuntu. The remote backends are measured in the single Ubuntu `db-servers` job (MySQL 8.0 + PostgreSQL 16 + MongoDB 7 + Redis 7 service containers). The other three `db` entries set both SQL backends **explicitly `OFF`** rather than leaving them on: with no server the tests exit 3 (not judged), which ctest prints as `***Skipped` — "not tested" and "tested" are different words but **neither is red**, so leaving them on buys nothing. `redis_real_func` uses the same 3-vs-REQUIRE contract; on the non-Ubuntu legs it simply takes the skip path. |
 | `UVCPP_DB_SQLITE_FROM_SOURCE` on Linux | On Linux and macOS the `db` entries use the **default** path (`find_package(SQLite3)` against the system/SDK library); the from-source path is exercised on MSVC and MinGW. What is platform-specific about it is TLS and extraction — `file(DOWNLOAD)` over Schannel on Windows, MSYS2's libcurl + `ca-certificates` on MinGW — and both of those are covered. The Linux release legs run it on every tag. The cost of this entry, and it is a real one: MSVC and MinGW now need the network **at configure time** (hash-pinned zip from sqlite.org). An offline machine can pre-place it, see §5. |
 | **The Linux `UVCPP_STATIC_RUNTIME=ON` shared library is built but never *run*** | The only Linux cell that passes the switch is `config-contract`, and that tree is `UVCPP_BUILD_TESTS=OFF`; `check_doc_snippets.py` compiles its snippets with `-c` and never links or runs them, so that shape is only ever *compiled* on push/PR. Measured 2026-10-14 (and it is why this row exists): with the switch on, a shared `libuvcpp.so` and a consumer linked against the system `libstdc++.so.6` each instantiate the same COMDAT templates (`std::once_flag`'s `__once_proxy`, `std::__future_base::_State_baseV2`) and ELF resolves them "executable first", so one side jumps into the other's frame — nine functional tests crash (five SEGV, four SIGABRT), and relinking a *single consumer* that way reproduces it, so it is not a test artefact. `release.yml`'s two Linux legs therefore stopped passing the flag in 1.7.0, and the verdict on the shipped Linux `.so` comes from the release dry run's `Test` step — **not from any push/PR gate**. MinGW keeps the flag (PE has no global symbol scope). See `doc/build-guide.md` §Runtime behaviour. |
-| `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
 | **base build with `UVCPP_BUILD_NET=OFF`** | `tests/functional/CMakeLists.txt` filters web/webapp/ssl/h2/wsdl/quic and **not** net, so `NET=OFF` would compile net test files against a library with `src/net/` filtered out — red by construction. Opening this cell needs that filter first. Today "base" therefore means net at its default (on) with `WEB=OFF`, i.e. the two `basic-*` entries. |
 | MinGW + ORM | The single MinGW job is untouched by the `orm` entries. It keeps its one configure and its package→consumer tail; adding ORM there is deferred to the same batch as splitting that job by feature. The ORM is still **compiled and run** on Ubuntu (`g++`), macOS (Apple clang) and MSVC, which is what the issue asks for in this phase. |
-| ORM + MySQL / PostgreSQL / ODBC | **ORM CRUD is only run against SQLite.** `test_orm_sql_func` covers SQL generation, placeholders and identifier escaping for SQLite/MySQL/PostgreSQL without a server; `test_orm_sqlite_func` and `test_orm_tx_async_func` exercise mapping/CRUD/transactions/async on a real SQLite database. The `orm` entries enable SQLite and nothing else, so ORM CRUD mapping against real MySQL/PostgreSQL and ORM-via-ODBC is **not verified** — the db module has its own remote-backend suite, but that is not an ORM test. Do **not** register an `orm_mysql_func` / `orm_pgsql_func` target (or fake its output) before it exists — a missing test must stay "target absent", never a green SKIP. |
+| ORM + PostgreSQL / ODBC | **Real MySQL ORM CRUD is covered; PostgreSQL and ODBC are not.** `test_orm_sql_func` covers SQL generation, placeholders and identifier escaping for SQLite/MySQL/PostgreSQL without a server; `test_orm_sqlite_func` and `test_orm_tx_async_func` exercise mapping/CRUD/transactions/async on a real SQLite database; `test_orm_mysql_func` does the same synchronous CRUD contract against the MySQL 8 service in the Ubuntu `db-servers` job. There is no `orm_pgsql_func` or ORM-via-ODBC test yet, and no ORM PostgreSQL/ODBC coverage is claimed. A missing test stays "target absent" (or, for a compiled but serverless run, `Skipped` via exit 3), never a green pass. |
 
 **Two rows left this table in 1.7.0: `MinGW + yyjson` and `MinGW + brotli`.** Both were
 "MinGW never compiles this" gaps, and the 1.7.0 release-package work closed them by adding
@@ -800,11 +802,10 @@ Two negative gates are deliberately **not** extra matrix entries:
 - The Ubuntu `orm` entry configures a second tree **without building it**, with
   `-DUVCPP_ENABLE_DB=OFF -DUVCPP_BUILD_ORM=ON`, and runs `--mode forced-off`: the configure
   must succeed with the guard's warning, the header must read `0`, `src/orm/` must be
-  excluded, and the build system must not contain an ORM target. Nothing is built there —
-  the rule lives in the configure stage.
-
-The extension point is the name prefix: `orm_sql_func`, `orm_sqlite_func` and
-`orm_tx_async_func` are already picked up by the functional `glob` and run by the same
+The extension point is the name prefix: `orm_sql_func`, `orm_sqlite_func`,
+`orm_mysql_func` and `orm_tx_async_func` are picked up by the functional `glob`;
+future ORM tests named `orm_*` follow the same rule. A remote-backend test must use the
+exit-3 URL contract and must not be registered when its backend is not compiled.
 `orm` entries; future ORM tests named `orm_*` follow the same rule. Do **not** register
 `orm_mysql_func` / `orm_pgsql_func`-shaped targets before they exist; a missing test must
 stay "target absent", not a green SKIP.
