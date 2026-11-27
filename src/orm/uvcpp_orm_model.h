@@ -375,7 +375,7 @@ inline std::string field_label(const uvcpp_orm_column& column) {
 /// 检查顺序：表名 → 字段逐个（列名、类型、标志、重复）→ 主键数量。
 /// 失败返回非 `OK`；错误串里一定带字段名（表名错误除外）。
 template <typename T>
-inline uvcpp_orm_status validate_model(std::string* error) {
+inline uvcpp_orm_status validate_model_uncached(std::string* error) {
   const char* table = model_traits<T>::table_name();
   if (table == nullptr) {
     return orm_detail::set_error(error, uvcpp_orm_status::NO_MODEL,
@@ -478,12 +478,30 @@ inline uvcpp_orm_status validate_model(std::string* error) {
   return uvcpp_orm_status::OK;
 }
 
+/// 校验结果只由静态元数据决定；第一次调用时算一次，之后直接复用。
+/// 失败串也一起缓存；每个调用方拿到的是副本，不共享可变状态。
+template <typename T>
+inline const uvcpp_orm_validation_result& cached_model_validation() {
+  static const uvcpp_orm_validation_result result = [] {
+    uvcpp_orm_validation_result value;
+    value.status = validate_model_uncached<T>(&value.error);
+    return value;
+  }();
+  return result;
+}
+
+/// 校验模型元数据。`error` 可以为空；不为空且失败时写入人读原因。
+template <typename T>
+inline uvcpp_orm_status validate_model(std::string* error) {
+  const uvcpp_orm_validation_result& result = cached_model_validation<T>();
+  if (error != nullptr) *error = result.error;
+  return result.status;
+}
+
 /// 同上，但把返回码与错误串一起返回。
 template <typename T>
 inline uvcpp_orm_validation_result validate_model() {
-  uvcpp_orm_validation_result result;
-  result.status = validate_model<T>(&result.error);
-  return result;
+  return cached_model_validation<T>();
 }
 
 }  // namespace uvcpp
