@@ -238,6 +238,16 @@
 #  define UVCPP_DB_RUNTIME_LOAD @UVCPP_DB_RUNTIME_LOAD@
 #endif
 
+/* 单表 ORM 的模型声明/元数据层。它依赖 DB（值层复用 uvcpp_db_value），
+   所以这份头里它只可能是 DB=1 时的 1。公开头同时守 UVCPP_ORM_ENABLE &&
+   UVCPP_DB_ENABLE 两道。 */
+#if defined(UVCPP_ORM_ENABLE) && (UVCPP_ORM_ENABLE != @UVCPP_ORM_ENABLE@)
+#  error "UVCPP_ORM_ENABLE=@UVCPP_ORM_ENABLE@ in this build; remove your own definition of it"
+#endif
+#ifndef UVCPP_ORM_ENABLE
+#  define UVCPP_ORM_ENABLE @UVCPP_ORM_ENABLE@
+#endif
+
 #if defined(UVCPP_ENABLE_MEMORY_POOL) && (UVCPP_ENABLE_MEMORY_POOL != @UVCPP_ENABLE_MEMORY_POOL@)
 #  error "UVCPP_ENABLE_MEMORY_POOL=@UVCPP_ENABLE_MEMORY_POOL@ in this build; remove your own definition of it"
 #endif

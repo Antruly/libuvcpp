@@ -189,6 +189,20 @@ if(UVCPP_ENABLE_DB_MONGODB AND NOT UVCPP_DB_RUNTIME_LOAD)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_mongodb_nodrv_func\\.cpp$")
 endif()
 
+# ORM 用例只在 `UVCPP_BUILD_ORM=ON` 时存在。
+#
+# 与 db 那条同一条规矩：ORM 关掉时 `src/orm/` 整个不进构建，公开头整段落在
+# `#if UVCPP_ORM_ENABLE && UVCPP_DB_ENABLE` 外面；不摘掉的话 `orm_model_func.cpp`
+# 会在“模块关着”的树上**编译失败**，而不是跳过 —— 那会把整个 job 弄红。
+# 反过来，关掉 ORM 时用例**不存在**，`ctest -R orm_model` 报“没有匹配的用例”，
+# 而不是一条恒绿的空跑。
+#
+# 过滤器只匹配 `orm_` 前缀，不碰 `db_*`：DB 与 ORM 是两件事，DB 关掉时上面
+# 那条 `/db/` 已经管了 `db_*`，这里管 `orm_*`。
+if(NOT UVCPP_BUILD_ORM)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*orm_[^/]*\\.cpp$")
+endif()
+
 # Redis 用例同理：`UVCPP_ENABLE_REDIS=0` 时公开头整段落在 `#if` 外面，不摘
 # 就是编译失败而不是跳过。
 if(NOT UVCPP_ENABLE_REDIS)
