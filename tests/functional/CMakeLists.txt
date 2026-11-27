@@ -166,6 +166,14 @@ endif()
 if(NOT UVCPP_ENABLE_DB_ODBC)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_odbc[^/]*\\.cpp$")
 endif()
+
+# `db_odbc_nodrv_func` 的前提是运行时加载（`UVCPP_DB_RUNTIME_LOAD=ON`）：它把
+# `UVCPP_DB_ODBC_LIBRARY` 指到不存在的路径来复现“管理器不在”。直接链接形态下
+# 管理器已经在 DT_NEEDED 里，这个前提根本表达不出来，注册它只会红；因此目标
+# 必须不存在，而不是让用例去猜一个与构建不符的前提。
+if(NOT UVCPP_DB_RUNTIME_LOAD)
+  list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*db_odbc_nodrv[^/]*\\.cpp$")
+endif()
 # MongoDB 是**两条**用例、两种摘法：
 #
 #   * `db_mongodb_func.cpp` 要一个真的 mongod，后端没编进来时它一次都跑不了
