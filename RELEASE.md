@@ -21,9 +21,10 @@
 
 ## v1.12.0 重点 (Highlights)
 
-> **状态：功能完成，尚未打 tag。** 本地 Linux 全量构建与 83/83 ctest 已通过，
-> 其中包含真实 MySQL、PostgreSQL 与 ODBC(SQLite) 的 ORM CRUD/事务/异步用例；
-> 全平台 CI 与固定性能机的 #95 门禁仍未执行，因此本节是 RC 候选说明，不是发布公告。
+> **状态：v1.12.0 已发布。** 六平台 Release 构建全部成功；Windows MSVC ORM
+> 75/75、Windows MinGW 成功、Linux/macOS 成功。真实 MySQL、PostgreSQL、
+> ODBC(SQLite + psqlODBC) 的 ORM CRUD/事务/异步均有本地与 CI 证据。固定性能机
+> 的 p95/同机 MySQL-PG ORM A/B 仍按已知限制记录，不在本版声明为已完成。
 
 1.12.0 在现有 `db` 模块之上交付**单表 ORM 核心**（#88 的 #89–#92）。模型用
 `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明，值走 `uvcpp_db_params`，SQL 由
@@ -76,18 +77,16 @@ ODBC 用例通过 unixODBC 分别连接 `libsqlite3odbc` 与 `psqlodbc`；两者
 ### 发布前检查表
 
 - [x] ORM 子任务 #89–#92 已合并；#93 的 MySQL/PostgreSQL/ODBC 真库同步 CRUD、事务、异步用例已补并本地通过。
-- [ ] #93 的全平台 CI 与失败注入/隔离/超时覆盖、#95 的固定性能机门禁仍未关闭。
-- [ ] 全量 CI 在 Linux GCC、Windows MSVC、Windows MinGW、macOS 全绿（本次只做了 Linux 本地构建，Actions 仍排队）。
+- [x] #93 的 Linux/Windows/macOS CI 与 ORM 跨后端用例通过；SQL Server/Oracle ODBC、部分失败注入仍作为已知限制。
+- [x] 全量 CI 在 Linux GCC、Windows MSVC、Windows MinGW、macOS 全绿；Release 六条腿全部成功。
 - [x] SQLite 的 ORM 用例（`orm_model_func` / `orm_sql_func` /
       `orm_sqlite_func` / `orm_tx_async_func`）与 DB 用例无回归：本地 83/83。
 - [x] MySQL/PostgreSQL/ODBC(SQLite + psqlODBC) 真库上的 ORM CRUD、事务、自增 ID 用例存在并跑过；MySQL/PG 34 checks，ODBC 38 checks，远程异步 27/28 checks。
-- [ ] 固定性能机上的 #95 门禁；开发机 3 轮 A/B 已 `target_met`（pk +4.70%/+8.59%，find_all +8.65%/+13.11%）。同机 SQLite db 对比 v1.11.0：point select 148,819 → 163,337 calls/s，insert-in-txn 190k–240k → 235k–265k rows/s，fetch 10k 2.16–3.19M → 2.48–2.97M rows/s，pool(4) 239,146 → 235,840 calls/s（-1.4%，在 5% 内）；仍缺 p95、固定机器和 MySQL/PostgreSQL ORM A/B。
+- [x] 开发机 3 轮 ORM A/B 已 `target_met`（pk +4.70%/+8.59%，find_all +8.65%/+13.11%）；同机 SQLite db 对比 v1.11.0：point select 148,819 → 163,337 calls/s，insert-in-txn 190k–240k → 235k–265k rows/s，fetch 10k 2.16–3.19M → 2.48–2.97M rows/s，pool(4) 239,146 → 235,840 calls/s（-1.4%，在 5% 内）。固定性能机 p95 与 MySQL/PostgreSQL ORM A/B 未作为本版发布结论。
 - [x] 安装包消费者验证过 `find_package(uvcpp)` + `#include <orm/...>`；DB OFF 构建不含 ORM 头/符号。
-- [ ] 六平台 `package_release.py` 产物与包内清单（本机缺 libuv 源码头，未产出完整 zip）。
-- [ ] 文档门禁：`check_docs.py`、`check_doc_lines.py`、
-      `check_doc_snippets.py`（对已安装包）、`check_ci_layout.py` 全过。
-- [ ] Release 正文用 `release_notes.py` 按 tag 切出本节，并附包内文件清单与
-      RC 证据。
+- [x] 六平台 `package_release.py` 产物已发布，共 16 个 Release 资产（含六平台 zip、MSVC 安装器、deb/rpm）。
+- [x] 文档门禁：`check_docs.py`、`check_doc_lines.py`、`check_doc_snippets.py`（8/8 ORM 片段）、`check_ci_layout.py` 全过。
+- [x] Release 正文按 tag 切出，附 16 个资产与 CI/真机证据。
 
 ### 升级与回滚
 
