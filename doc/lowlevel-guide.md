@@ -29,6 +29,7 @@
 11. [定时任务（cron）](#11-定时任务cron)
 12. [进程监管（process supervisor）](#12-进程监管process-supervisor)
 13. [作业队列（job queue）](#13-作业队列job-queue)
+14. [Windows 控制台代码页](#14-windows-控制台代码页)
 
 ---
 
@@ -485,6 +486,38 @@ queue.submit(req);
   同时注册同步与异步时异步优先。超时/取消对它同样是协作式的 —— 队列只置
   `ctx->cancelled()`，不会替你收回 handler。
 - **析构前**必须 `stop()` 且 `running == 0`。用例：`job_queue_func.cpp`。
+
+## 14. Windows 控制台代码页
+
+中文 Windows 控制台默认是 936(GBK)，而本库的日志/字符串是 UTF-8。`uvcpp_console.h`
+给一个**显式**入口，不替宿主程序自动改全局状态：
+
+```cpp
+// doc-snippet: fragment — 装配摘录，不是完整翻译单元。
+#include <uvcpp/uvcpp_console.h>
+
+int main() {
+  uvcpp::uvcpp_console_utf8_scope utf8;   // 真控制台下才生效，析构恢复
+  // ... 原样使用 printf / std::cout / 库日志
+}
+```
+
+- **任意代码页**：`uvcpp_console_set_output_codepage(cp, include_input)` ——
+  `cp=0` 不改，`cp` 与当前相同也不改；默认只动**输出**代码页，输入要显式
+  `include_input=true`（改输入会连带影响交互读入/批处理解析）。
+  `uvcpp_console_enable_utf8()` 只是传 65001 的便捷入口。
+- **只在 stdout/stderr 真的是控制台时动手**（`GetConsoleMode` 成功）；重定向
+  到文件/管道、服务进程、无控制台时返回 `changed=false`，不报错。POSIX 上
+  整组接口是空操作（终端编码由 locale/终端决定，库不碰全局 locale）。
+- `uvcpp_console_encoding::restore()` 还原旧值，幂等；RAII 版是
+  `uvcpp_console_utf8_scope`。
+- **故意不自动**：控制台代码页是进程/控制台级状态，改了会影响宿主程序、其它库
+  与同一控制台上的子进程；库加载期改它（静态初始化）还受初始化顺序影响。
+- 替代/叠加：应用 manifest 的 `<activeCodePage>UTF-8</activeCodePage>`
+  （Windows 10 1903+），或让用户 `chcp 65001`。Win7 旧 conhost + 光栅字体对
+  65001 有已知渲染问题，请自行评估。
+- 用例：`console_encoding_func.cpp`（没有控制台时先 `AllocConsole`，仍没有就
+  退 3/SKIP）。
 
 ---
 

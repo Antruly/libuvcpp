@@ -17,6 +17,7 @@
 #include "uvcpp/uvcpp_define.h"
 #include "uvcpp/uvcpp_version.h"
 #include "uvcpp/uvcpp_export.h"
+#include "uvcpp/uvcpp_console.h"
 
 // Common handles and reqs
 #include "handle/uvcpp_handle.h"

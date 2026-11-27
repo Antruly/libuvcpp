@@ -378,6 +378,11 @@ if(TARGET test_db_job_store_func)
   set_tests_properties(test_db_job_store_func PROPERTIES SKIP_RETURN_CODE 3)
 endif()
 
+# 控制台代码页用例：Windows 上没有可用控制台时先 AllocConsole，再不行退 3。
+if(TARGET test_console_encoding_func)
+  set_tests_properties(test_console_encoding_func PROPERTIES SKIP_RETURN_CODE 3)
+endif()
+
 # 两条 IPv6 回环用例：绑 `::1` 失败时返回 3（= 这台机器没开 IPv6 栈）。
 #
 # **跳过与通过必须能分开**：没有 IPv6 时用例一个断言都跑不到，若 `return 0`
