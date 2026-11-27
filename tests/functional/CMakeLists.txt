@@ -199,6 +199,12 @@ endif()
 #
 # 过滤器只匹配 `orm_` 前缀，不碰 `db_*`：DB 与 ORM 是两件事，DB 关掉时上面
 # 那条 `/db/` 已经管了 `db_*`，这里管 `orm_*`。
+#
+# 扩展点（#91/#92）：后续 SQL/CRUD/事务的 ORM 用例继续用 `orm_` 前缀命名，就会
+# 被上面的 glob 自动收进来、也自动受这条过滤器约束，不需要再改这里。**在那之前
+# 不要**注册 `orm_sqlite_func` / `orm_mysql_func` 这类尚未实现的目标：没实现的
+# 用例只能表现为"目标不存在"，不能是一条打印 SKIP 的恒绿用例（见文件开头那段
+# 关于"没测 ≠ 测过"的规矩）。CI 侧的扩展点在 `doc/ci-guide.md` §1 的 `orm` 格。
 if(NOT UVCPP_BUILD_ORM)
   list(FILTER FUNC_SOURCES EXCLUDE REGEX "/[^/]*orm_[^/]*\\.cpp$")
 endif()

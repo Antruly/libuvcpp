@@ -382,7 +382,7 @@ WebSocket，`-DUVCPP_ENABLE_OPENSSL=ON` 是 HTTPS，`-DUVCPP_BUILD_WEBAPP=ON` �
 | `UVCPP_REQUIRE_FEATURES` | 空 | 分号分隔的特性列表；任何一项最终没开，配置期直接失败（官方二进制 CI 用它断言产物内容） |
 | `UVCPP_WINVER` | `0x000000` | 目标最低 Windows 版本（`_WIN32_WINNT`/`WINVER`）；`0x000000` = 用工具链默认，Win7 = `0x0601`，仅 Windows 生效 |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | 构建 web 应用框架（路由/中间件/静态/上传/日志）。需要 `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_BUILD_ORM` | `OFF` | 构建 **ORM 模型元数据层**（`src/orm/`）：`nullable<T>`、列描述符、`model_traits<T>` 与 `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明宏。**不生成 SQL、不做 CRUD、不做迁移** —— 它是 #90/#91 要建在上面的契约层。需要 `UVCPP_ENABLE_DB=ON`（值层复用 `uvcpp_db_value`），DB 关掉时被强制关闭 |
+| `UVCPP_BUILD_ORM` | `OFF` | 构建 **ORM 模型元数据层**（`src/orm/`）：`nullable<T>`、列描述符、`model_traits<T>` 与 `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明宏。**不生成 SQL、不做 CRUD、不做迁移** —— 它是 #90/#91 要建在上面的契约层。需要 `UVCPP_ENABLE_DB=ON`（值层复用 `uvcpp_db_value`），DB 关掉时被强制关闭。见 [`doc/ci-guide.md`](doc/ci-guide.md) 的 `orm` CI 格 |
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | 构建 `examples/` 下的示例 |
 | `UVCPP_BUILD_BENCH` | `OFF` | 构建 `bench/` 下的压测靶场 —— 见 [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | 启用 zlib（WebSocket 压缩） |

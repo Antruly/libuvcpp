@@ -322,11 +322,45 @@ jobs:
               - -DUVCPP_DB_SQLITE_FROM_SOURCE=ON
               - -DUVCPP_ENABLE_DB_MYSQL=OFF
               - -DUVCPP_ENABLE_DB_PGSQL=OFF
+              # 显式关 ORM：这一格同时是 ORM=OFF 的负向门禁（`check_orm_ci.py
+              # --mode disabled`）。默认值也是 OFF，写出来是为了让"既有 DB 用例
+              # 在 ORM 关掉时不回归"这条判据的前提在条目里看得见，而不是靠碰巧。
+              - -DUVCPP_BUILD_ORM=OFF
             gate_name: sqlite3
             gate_switch: 'UVCPP_ENABLE_DB:BOOL=ON'
             gate_integrated: 'db: SQLite 后端开'
             gate_module: Including db module in build
             gate_test: test_db_sqlite_func
+          # ORM 模型元数据层（issue #89）。与 `db` 那一格分开：`db` 保持
+          # ORM=OFF，用来证明"关掉 ORM 时既有数据库用例零回归、且 ORM 用例
+          # 不存在"；这一格才开 ORM。两格红绿不同只归因到 `-DUVCPP_BUILD_ORM`。
+          #
+          # SQLite 与 `db` 那一格一样**从源码编**（`UVCPP_DB_SQLITE_FROM_SOURCE`），
+          # 因为 Windows 上没有系统 sqlite3，而这正是发布包走的那条路。代价同
+          # `db` 那一格：配置期需要联网，离线机器按 doc/db-guide.md 预放 zip。
+          #
+          # 两个用例都要真跑：`test_orm_model_func` 是模型层本身，
+          # `test_db_sqlite_func` 证明同一棵树里 DB 没被 ORM 带坏。`gate_test`
+          # 只挂得下一个名字，第二个由 `check_orm_ci.py --mode enabled` 判
+          # （它也核生成头里的编译宏，那是 `ctest` 看不到的）。
+          #
+          # 扩展点（#91/#92）：SQL/CRUD 的 ORM 用例落地后按 `orm_` 命名就会被
+          # `tests/functional/CMakeLists.txt` 的 glob 自动收进来；**现在不要**
+          # 注册 `orm_sqlite_func` / `orm_mysql_func` 这类还不存在的目标。
+          - feature: orm
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_DB_SQLITE_FROM_SOURCE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
+              - -DUVCPP_BUILD_ORM=ON
+            gate_name: orm
+            gate_switch: 'UVCPP_BUILD_ORM:BOOL=ON'
+            gate_integrated: 'ORM module enabled (UVCPP_ORM_ENABLE=1)'
+            gate_module: Including orm module in build
+            gate_test: test_orm_model_func
     steps:
       - uses: actions/checkout@v4
 
@@ -348,7 +382,10 @@ jobs:
             # db 也是：它的 SQLite 是**从源码编**的（`UVCPP_DB_SQLITE_FROM_SOURCE`），
             # 所以 Windows 上不需要任何 sqlite 包 —— 这一格一个系统依赖都没有，
             # 别把它塞进 win-openssl-deps.sh（那是 OpenSSL 专用的）。
-            basic-static|basic-shared|web|capi|wsdl|yyjson|db|brotli) echo "(这一格没有系统依赖)" ;;
+            # orm 与 db 同一组：ORM 模型层不碰数据库客户端库，而 Windows 上的
+            # SQLite 由 `UVCPP_DB_SQLITE_FROM_SOURCE` 从源码编（见矩阵里 `db`
+            # 与 `orm` 两格的长注释），同样不需要任何系统包。
+            basic-static|basic-shared|web|capi|wsdl|yyjson|db|brotli|orm) echo "(这一格没有系统依赖)" ;;
             ssl|h2|quic|http3)             bash .github/scripts/win-openssl-deps.sh ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
@@ -418,6 +455,37 @@ jobs:
           name: build-log-windows-msvc-${{ matrix.feature }}
           path: ci-logs/
           if-no-files-found: ignore
+
+      # ORM 模型层（#89）的两档配置门禁，判据在 tests/tools/check_orm_ci.py
+      # （三份 workflow 共用同一份脚本）：
+      #   * feature=orm → `--mode enabled`：生成头 UVCPP_ORM_ENABLE=1、`src/orm/`
+      #     进了源列表、`test_orm_model_func` 与 `test_db_sqlite_func` 都注册；
+      #   * feature=db  → `--mode disabled`：同一棵 DB=ON 的树上 ORM 必须为 0，
+      #     `test_orm_model_func` **不存在**，而 `test_db_sqlite_func` 仍在。
+      # 不能只靠 ctest 总数："没编"与"编了且过"在 job 结论里都是非红。
+      - name: Gate — ORM model layer is enabled (orm) / absent (db)
+        if: matrix.feature == 'orm' || matrix.feature == 'db'
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          feat="${{ matrix.feature }}"
+          if [ "$feat" = "orm" ]; then mode=enabled; else mode=disabled; fi
+          # Windows 上优先用 `python`：这个文件里别的 python 调用也用它，
+          # `python3` 在部分镜像上是 Microsoft Store 的占位符。
+          py=python
+          command -v "$py" >/dev/null 2>&1 || py=python3
+          rc=0
+          out=$("$py" tests/tools/check_orm_ci.py --mode "$mode" \
+            --tree "build-$feat" --configure-log "ci-logs/$feat-configure.log" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|\[停\]|Traceback|Error' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=orm-$feat::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
 
       # 一条**共用**的、容错的拷贝步（每一行 `2>/dev/null || true`），替掉原先
       # 每个 job 各写一遍的硬编码清单：非系统 DLL 只有 llhttp（web 起）与 OpenSSL

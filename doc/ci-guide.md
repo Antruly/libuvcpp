@@ -16,13 +16,13 @@ two HTML comments — if you add a feature entry or a platform, that table is pa
 <!-- ci-layout:start -->
 | Workflow file | `job` | Features (matrix entries) | Workflow `name:` | Check names | Runner |
 |---|---|---|---|---|---|
-| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `yyjson`, `brotli`, `brotli-no-zlib`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
+| `.github/workflows/ci-linux-ubuntu.yml` | `linux` | `basic-static`, `basic-shared`, `web`, `zlib-off`, `wsdl`, `yyjson`, `brotli`, `brotli-no-zlib`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db`, `orm` | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / <feature>` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `db-servers` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / db-servers` | `ubuntu-latest` |
 | `.github/workflows/ci-linux-ubuntu.yml` | `config-contract` | （无矩阵） | `CI · Linux · Ubuntu` | `CI · Linux · Ubuntu / config-contract` | `ubuntu-latest` |
-| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `yyjson`, `brotli`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
+| `.github/workflows/ci-windows-msvc.yml` | `windows` | `basic-shared`, `basic-static`, `web`, `wsdl`, `yyjson`, `brotli`, `ssl`, `h2`, `quic`, `http3`, `capi`, `db`, `orm` | `CI · Windows · MSVC` | `CI · Windows · MSVC / <feature>` | `windows-latest` |
 | `.github/workflows/ci-windows-msvc.yml` | `config-contract` | （无矩阵） | `CI · Windows · MSVC` | `CI · Windows · MSVC / config-contract` | `windows-2022` |
 | `.github/workflows/ci-mingw64.yml` | `mingw64` | （无矩阵） | `CI · Windows · MinGW-w64` | `CI · Windows · MinGW-w64 / mingw64` | `windows-latest` (MSYS2) |
-| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `yyjson`, `brotli`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
+| `.github/workflows/ci-macos.yml` | `macos` | `basic-static`, `basic-shared`, `web`, `yyjson`, `brotli`, `ssl`, `h2`, `full`, `quic`, `http3`, `capi`, `db`, `orm` | `CI · macOS` | `CI · macOS / <feature>` | `macos-latest` |
 <!-- ci-layout:end -->
 
 The `Features` cell is a comma-separated list of the file's `feature:` values, or `（无矩阵）`
@@ -46,7 +46,10 @@ and both `config-contract` jobs are all checks, and the earlier totals had stopp
 some of them). With the three `yyjson` entries the table is **39**. 1.6.48 added the four
 `brotli` entries — `brotli` on Ubuntu, macOS and MSVC plus a fourth Ubuntu-only
 `brotli-no-zlib` (the only cell that compiles the compressor's "no zlib" branches; see §5) —
-which takes it to **43**. The table below is the
+which takes it to **43**. 1.12.0 adds the three `orm` entries (the ORM model-metadata layer of
+issue #89: `DB=ON + SQLite=ON + ORM=ON` on Ubuntu, macOS and MSVC, each running both
+`test_orm_model_func` and `test_db_sqlite_func`; the existing `db` entries keep
+`UVCPP_BUILD_ORM=OFF` and are the negative gate for it), which takes it to **46**. The table below is the
 machine-checked source; this paragraph is a narrative and is not — treat any number here as
 a claim to re-count rather than to trust.
 The `windows` one had never run before that commit, since there is no MSVC on the
@@ -105,6 +108,8 @@ layout did not cover them either.
 | **The Linux `UVCPP_STATIC_RUNTIME=ON` shared library is built but never *run*** | The only Linux cell that passes the switch is `config-contract`, and that tree is `UVCPP_BUILD_TESTS=OFF`; `check_doc_snippets.py` compiles its snippets with `-c` and never links or runs them, so that shape is only ever *compiled* on push/PR. Measured 2026-10-14 (and it is why this row exists): with the switch on, a shared `libuvcpp.so` and a consumer linked against the system `libstdc++.so.6` each instantiate the same COMDAT templates (`std::once_flag`'s `__once_proxy`, `std::__future_base::_State_baseV2`) and ELF resolves them "executable first", so one side jumps into the other's frame — nine functional tests crash (five SEGV, four SIGABRT), and relinking a *single consumer* that way reproduces it, so it is not a test artefact. `release.yml`'s two Linux legs therefore stopped passing the flag in 1.7.0, and the verdict on the shipped Linux `.so` comes from the release dry run's `Test` step — **not from any push/PR gate**. MinGW keeps the flag (PE has no global symbol scope). See `doc/build-guide.md` §Runtime behaviour. |
 | `full` + the database module | `full` does not enable `UVCPP_ENABLE_DB`. Turning it on would put a client library into that entry's dependency row, and its gate strings are about the memory pool, so it could not assert that the db tests were registered anyway — the dedicated `db` entries do that. |
 | **base build with `UVCPP_BUILD_NET=OFF`** | `tests/functional/CMakeLists.txt` filters web/webapp/ssl/h2/wsdl/quic and **not** net, so `NET=OFF` would compile net test files against a library with `src/net/` filtered out — red by construction. Opening this cell needs that filter first. Today "base" therefore means net at its default (on) with `WEB=OFF`, i.e. the two `basic-*` entries. |
+| MinGW + ORM | The single MinGW job is untouched by the `orm` entries. It keeps its one configure and its package→consumer tail; adding ORM there is deferred to the same batch as splitting that job by feature. The ORM layer is still **compiled and run** on Ubuntu (`g++`), macOS (Apple clang) and MSVC, which is what the issue asks for in this phase. |
+| ORM + MySQL / PostgreSQL / ODBC | **No ORM CRUD test exists yet.** `src/orm/` is the model-metadata layer of issue #89 only — no SQL construction, no result mapping. The `orm` entries therefore enable SQLite and nothing else, and `test_db_sqlite_func` runs beside `test_orm_model_func` to prove the DB path did not regress. When #91/#92 add `orm_sqlite_func` / `orm_mysql_func`-shaped tests, name them `orm_*`: the functional `glob` picks them up automatically, and the `orm` entries' ctest run will execute them. Do **not** register those targets, or fake their output, before they exist — a missing test must stay "target absent", never a green SKIP. |
 
 **Two rows left this table in 1.7.0: `MinGW + yyjson` and `MinGW + brotli`.** Both were
 "MinGW never compiles this" gaps, and the 1.7.0 release-package work closed them by adding
@@ -764,6 +769,37 @@ libraries loaded at run time. That is also why 1.6.x's "SQLite only" shape is go
 headers come from `libmongoc-dev` / the MSYS2 `mongo-c-driver` package exactly like the
 other client headers. Redis is not in this class at all: it is a built-in RESP client
 with no external library, so every leg compiles it without any package.
+
+### The `orm` entries
+
+1.12.0 adds one `orm` entry on Ubuntu, macOS and MSVC. It is the model-metadata layer of
+issue #89 (`src/orm/`) — `nullable<T>`, column descriptors, `model_traits<T>` and the
+declaration macros — and it touches no database. It still enables `UVCPP_ENABLE_DB=ON` with
+SQLite, because the ORM value layer reuses `uvcpp_db_value`; that is also what makes
+`test_db_sqlite_func` run in the same tree and prove the DB path was not regressed.
+
+The four per-entry gate strings are `UVCPP_BUILD_ORM:BOOL=ON` (the cache), the
+**generated macro** `UVCPP_ORM_ENABLE=1` (not the cache — the DB guard can force the plain
+variable off), `Including orm module in build` (the source list), and
+`test_orm_model_func` (registration). The second test, `test_db_sqlite_func`, does not fit
+the one-name `gate_test` slot; `tests/tools/check_orm_ci.py --mode enabled` checks both
+names plus the generated header, and the same script is reused by all three platforms.
+
+Two negative gates are deliberately **not** extra matrix entries:
+
+- The three `db` entries pass `-DUVCPP_BUILD_ORM=OFF` explicitly and run
+  `check_orm_ci.py --mode disabled`: the header must read `0`, `test_orm_model_func` must
+  not be registered, and `test_db_sqlite_func` must still be registered.
+- The Ubuntu `orm` entry configures a second tree **without building it**, with
+  `-DUVCPP_ENABLE_DB=OFF -DUVCPP_BUILD_ORM=ON`, and runs `--mode forced-off`: the configure
+  must succeed with the guard's warning, the header must read `0`, `src/orm/` must be
+  excluded, and the build system must not contain an ORM target. Nothing is built there —
+  the rule lives in the configure stage.
+
+The extension point for #91/#92 is the name prefix: new ORM tests named `orm_*` are picked
+up by the functional `glob` and run by the same `orm` entries. Do **not** register
+`orm_sqlite_func` / `orm_mysql_func`-shaped targets before they exist; a missing test must
+stay "target absent", not a green SKIP.
 
 ### The macro contract: `config-contract` (and the `mingw64` tail)
 

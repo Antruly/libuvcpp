@@ -443,11 +443,46 @@ jobs:
               - -DUVCPP_ENABLE_DB_SQLITE=ON
               - -DUVCPP_ENABLE_DB_MYSQL=OFF
               - -DUVCPP_ENABLE_DB_PGSQL=OFF
+              # 显式关 ORM：这一格同时是 ORM=OFF 的负向门禁（`check_orm_ci.py
+              # --mode disabled`）。默认值也是 OFF，写出来是为了让"既有 DB 用例
+              # 在 ORM 关掉时不回归"这条判据的前提在条目里看得见，而不是靠碰巧。
+              - -DUVCPP_BUILD_ORM=OFF
             gate_name: sqlite3
             gate_switch: 'UVCPP_ENABLE_DB:BOOL=ON'
             gate_integrated: 'db: SQLite 后端开'
             gate_module: Including db module in build
             gate_test: test_db_sqlite_func
+          # ORM 模型元数据层（issue #89）。**不并进 `db` 那一格**：`db` 保持
+          # ORM=OFF，用来证明"关掉 ORM 时既有数据库用例零回归、且 ORM 用例
+          # 不存在"；这一格才开 ORM。两格红绿不同只归因到 `-DUVCPP_BUILD_ORM`
+          # 这一个开关，不混进"DB 后端这次找没找到"。
+          #
+          # ORM 的值层直接复用 `uvcpp_db_value`，所以 DB 必须同时开；只开 ORM
+          # 的配置由下面的 `Gate — ORM is force-disabled without DB` 反向量。
+          #
+          # 两个用例都要真跑：`test_orm_model_func` 是模型层本身，
+          # `test_db_sqlite_func` 证明同一棵树里 DB 没被 ORM 带坏。`gate_test`
+          # 只挂得下一个名字，第二个由下面的 `check_orm_ci.py --mode enabled`
+          # 判（它也核生成头里的编译宏，那是 `ctest` 看不到的）。
+          #
+          # 扩展点（#91/#92）：SQL/CRUD 的 ORM 用例落地后，按 `orm_` 命名就会被
+          # `tests/functional/CMakeLists.txt` 的 glob 自动收进来并在同一个 ctest
+          # 里跑；**在那之前不要**注册 `orm_sqlite_func` / `orm_mysql_func` 这类
+          # 还不存在的目标 —— 没实现的用例只能是"目标不存在"，不能是恒绿的 SKIP。
+          - feature: orm
+            flags:
+              - -DUVCPP_BUILD_TESTS=ON
+              - -DUVCPP_BUILD_SHARED=ON
+              - -DUVCPP_ENABLE_DB=ON
+              - -DUVCPP_ENABLE_DB_SQLITE=ON
+              - -DUVCPP_ENABLE_DB_MYSQL=OFF
+              - -DUVCPP_ENABLE_DB_PGSQL=OFF
+              - -DUVCPP_BUILD_ORM=ON
+            gate_name: orm
+            gate_switch: 'UVCPP_BUILD_ORM:BOOL=ON'
+            gate_integrated: 'ORM module enabled (UVCPP_ORM_ENABLE=1)'
+            gate_module: Including orm module in build
+            gate_test: test_orm_model_func
     steps:
       - uses: actions/checkout@v4
 
@@ -510,7 +545,10 @@ jobs:
             # 而它们的用例在这台机器上没有服务端可连 —— 那是两条假覆盖（退 3）。
             # `libmysqlclient-dev` / `libpq-dev` 装在那个单独 job 里。
             # 也**不加** `libuv1-dev` 之外的任何东西：这一格量的是数据库模块。
-            db)                        pkgs="libuv1-dev libsqlite3-dev ninja-build" ;;
+            # orm 与 db 同一份：ORM 模型层不碰任何数据库客户端库，但它依赖 DB
+            # 的**值层**（`uvcpp_db_value`），所以这一格的 DB 必须真的开起来，
+            # SQLite 是唯一在 runner 上不需要服务端的后端 ⇒ 与 db 同一份装包。
+            db|orm)                    pkgs="libuv1-dev libsqlite3-dev ninja-build" ;;
             *) echo "::error title=deps::装包表里没有这一格：${{ matrix.feature }}"; exit 1 ;;
           esac
           sudo apt-get install -y $pkgs
@@ -746,6 +784,72 @@ jobs:
           name: build-log-linux-ubuntu-${{ matrix.feature }}
           path: ci-logs/
           if-no-files-found: ignore
+
+      # ORM 模型层（#89）的两档配置门禁。判据全在 tests/tools/check_orm_ci.py 里
+      # （三份 workflow 共用同一份脚本，不各抄一遍）：
+      #   * feature=orm → `--mode enabled`：生成头 UVCPP_ORM_ENABLE=1、`src/orm/`
+      #     进了源列表、`test_orm_model_func` 与 `test_db_sqlite_func` 都注册；
+      #   * feature=db  → `--mode disabled`：同一棵 DB=ON 的树上 ORM 必须为 0，
+      #     `test_orm_model_func` **不存在**，而 `test_db_sqlite_func` 仍在。
+      # 为什么不能只靠 ctest 总数：两条用例"没编"与"编了且过"在 ctest 摘要里
+      # 是两个词，但 job 的结论都是非红 —— 只有显式查名字才分得清。
+      - name: Gate — ORM model layer is enabled (orm) / absent (db)
+        if: matrix.feature == 'orm' || matrix.feature == 'db'
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          feat="${{ matrix.feature }}"
+          if [ "$feat" = "orm" ]; then mode=enabled; else mode=disabled; fi
+          py=python3
+          command -v "$py" >/dev/null 2>&1 || py=python
+          rc=0
+          out=$("$py" tests/tools/check_orm_ci.py --mode "$mode" \
+            --tree "build-$feat" --configure-log "ci-logs/$feat-configure.log" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|\[停\]|Traceback|Error' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=orm-$feat::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
+
+      # DB=OFF + ORM=ON 的**从属规则**。ORM 的值层复用 `uvcpp_db_value`，所以
+      # 这个组合必须在配置期 warn + 把 ORM 强制关掉 —— 而 `set(UVCPP_BUILD_ORM
+      # OFF)` 是普通变量，`CMakeCache.txt` 里照旧写着 ON，只 grep cache 是假绿。
+      # 判据：配置**成功**（不是报错退出）、warning 原话在、生成头是 0、源列表
+      # 排除了 orm、构建系统里没有 ORM 目标。只配不编：量的是配置期规则。
+      - name: Gate — ORM is force-disabled without DB
+        if: matrix.feature == 'orm' && runner.os == 'Linux'
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          tree=build-orm-nodb
+          log=ci-logs/orm-nodb-configure.log
+          mkdir -p ci-logs
+          rc=0
+          cmake -S . -B "$tree" -DCMAKE_BUILD_TYPE=Release \
+            -DUVCPP_BUILD_TESTS=ON -DUVCPP_BUILD_SHARED=ON \
+            -DUVCPP_ENABLE_DB=OFF -DUVCPP_BUILD_ORM=ON \
+            > "$log" 2>&1 || rc=$?
+          if [ "$rc" != "0" ]; then
+            echo "::error title=orm-nodb::DB=OFF + ORM=ON 配置**失败**了 rc=$rc —— 守卫该 warn + 强制关，不是让配置红"
+            tail -40 "$log"
+            exit 1
+          fi
+          rc=0
+          out=$(python3 tests/tools/check_orm_ci.py --mode forced-off \
+            --tree "$tree" --configure-log "$log" 2>&1) || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" != "0" ]; then
+            msg=$(printf '%s\n' "$out" | grep -E '\[红\]|\[停\]|Traceback|Error' \
+              | head -20 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 6000 || true)
+            echo "::error title=orm-nodb::${msg:-rc=$rc (no red line matched)}"
+          fi
+          exit "$rc"
 
       # 这一条覆盖 "http2 与 quic 同时开"：h2 那一格关 quic，quic 那一格关 web。
       # 它防的是一个真实的硬失败 —— ngtcp2 与 nghttp2 都无条件建
