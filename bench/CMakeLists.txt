@@ -51,3 +51,19 @@ if(UVCPP_ENABLE_DB)
 else()
   message(STATUS "bench: UVCPP_ENABLE_DB=OFF，跳过数据库量具")
 endif()
+
+# ORM 端到端 / 纯开销量具。**只在 db 与 ORM 都开着时存在**：它要真实 SQLite，
+# 也要 `src/orm/` 的模型与仓库层。SQL/DDL 按 SQLite 写死（见文件头与
+# bench/orm/README.md），不是跨后端量具，不会给出 MySQL/PostgreSQL 数字。
+# 与 db 量具同一个理由不挂在 webapp 下：db/orm 自己就是一层，webapp 关掉也
+# 照样能量。
+if(UVCPP_ENABLE_DB AND UVCPP_BUILD_ORM)
+  add_executable(uvcpp_bench_orm orm/bench_orm.cpp)
+  target_include_directories(uvcpp_bench_orm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(uvcpp_bench_orm PRIVATE ${UVCPP_LIB_TARGET} ${LIBUV_LIB})
+  if(WIN32)
+    target_link_libraries(uvcpp_bench_orm PRIVATE ws2_32)
+  endif()
+else()
+  message(STATUS "bench: UVCPP_ENABLE_DB 或 UVCPP_BUILD_ORM=OFF，跳过 ORM 量具")
+endif()
