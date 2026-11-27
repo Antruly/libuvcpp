@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/orm/uvcpp_orm_query.h
  * @brief 单表 SQL 构造：SELECT / INSERT / UPDATE / DELETE，按方言生成占位符。
  * @author zhuweiye
