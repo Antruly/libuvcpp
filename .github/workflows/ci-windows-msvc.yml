@@ -731,6 +731,7 @@ jobs:
               -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_ORM=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
@@ -755,6 +756,12 @@ jobs:
             grep -q '^#  define UVCPP_DB_ENABLE 1$' \
               build-cfg/include/uvcpp/uvcpp_config.h || {
               echo "::error title=config-contract::生成头里 UVCPP_DB_ENABLE 不是 1，doc-snippets 会把 db 片段全判成\"没判\"（SQLite 源码那份没编进来？见上面的配置日志）"; exit 1; }
+
+            # ORM 的 8 条文档片段也要这棵树真的编了 ORM；否则 doc-snippets 会
+            # 把 orm-guide 的片段全算成“前提不满足”并退 3。
+            grep -q '^#  define UVCPP_ORM_ENABLE 1$' \
+              build-cfg/include/uvcpp/uvcpp_config.h || {
+              echo "::error title=config-contract::生成头里 UVCPP_ORM_ENABLE 不是 1，doc-snippets 会退 3"; exit 1; }
             # yyjson：来由与上面三条**相反**（上面是"这一档不开模块 ⇒ 退 3"，这条是
             # "模块本来被豁免、现在豁免没了 ⇒ 必须开"）。同样判生成的头 —— FetchContent
             # 取不到 yyjson 时会当场 FATAL_ERROR，那句话是用来分清"坏在哪一步"的。
@@ -791,6 +798,7 @@ jobs:
               -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_ORM=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?

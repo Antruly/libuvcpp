@@ -49,17 +49,18 @@
 
 ### 支持矩阵（1.12.0）
 
-| 能力 | SQLite | MySQL | PostgreSQL | ODBC(SQLite) |
+| 能力 | SQLite | MySQL | PostgreSQL | ODBC(SQLite/psqlODBC) |
 |---|---|---|---|---|
 | 模型声明与元数据校验 | 已测 | 已测（不连库） | 已测（不连库） | 已测（不连库） |
 | SQL 构造 / 占位符 / 标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） | 已测（golden，不连库） |
 | 同步 CRUD 与结果映射 | 已测（真库） | 已测（真库，`orm_mysql_func`） | 已测（真库，`orm_pgsql_func`） | 已测（真库，`orm_odbc_func`） |
-| 事务提交/回滚 | 已测（真库） | 已测（真库，34 checks） | 已测（真库，34 checks） | 已测（真库，33 checks） |
+| 事务提交/回滚 | 已测（真库） | 已测（真库，34 checks） | 已测（真库，34 checks） | 已测（真库，38 checks） |
 | 回调式异步 CRUD | 已测（线程池路径） | 已测（`orm_remote_async_func`） | 已测（`orm_remote_async_func`） | 已测（`orm_remote_async_func`） |
 
-ODBC 用例通过 unixODBC + `libsqlite3odbc` 连接一次性 SQLite 库；它显式写主键，
-不声称 ODBC 能取回自增值。`orm_remote_async_func` 每次选择一组 URL，CI 的
-`db-servers` 跑 MySQL 那一组；本机另外分别跑过 PostgreSQL 与 ODBC 两组。
+ODBC 用例通过 unixODBC 分别连接 `libsqlite3odbc` 与 `psqlodbc`；两者都覆盖
+`last_insert_rowid()` / `lastval()` 自增 ID 回填、事务提交/回滚与唯一键错误。
+`orm_remote_async_func` 每次选择一组 URL，CI 的 `db-servers` 跑 MySQL 那一组；
+本机另外分别跑过 PostgreSQL 与 ODBC 两组。
 
 ### 异步真相
 
@@ -79,8 +80,8 @@ ODBC 用例通过 unixODBC + `libsqlite3odbc` 连接一次性 SQLite 库；它�
 - [ ] 全量 CI 在 Linux GCC、Windows MSVC、Windows MinGW、macOS 全绿（本次只做了 Linux 本地构建，Actions 仍排队）。
 - [x] SQLite 的 ORM 用例（`orm_model_func` / `orm_sql_func` /
       `orm_sqlite_func` / `orm_tx_async_func`）与 DB 用例无回归：本地 83/83。
-- [x] MySQL/PostgreSQL/ODBC(SQLite) 真库上的 ORM CRUD 与事务用例存在并跑过；MySQL/PG 34 checks，ODBC 33 checks，远程异步 22 checks。
-- [ ] 固定性能机上的 #95 门禁；开发机 3 轮 A/B 已 `target_met`（pk +4.70%/+8.59%，find_all +8.65%/+13.11%），但缺 p95、固定机器与 1.11.0 同条件 db 基线。
+- [x] MySQL/PostgreSQL/ODBC(SQLite + psqlODBC) 真库上的 ORM CRUD、事务、自增 ID 用例存在并跑过；MySQL/PG 34 checks，ODBC 38 checks，远程异步 27/28 checks。
+- [ ] 固定性能机上的 #95 门禁；开发机 3 轮 A/B 已 `target_met`（pk +4.70%/+8.59%，find_all +8.65%/+13.11%）。同机 SQLite db 对比 v1.11.0：point select 148,819 → 163,337 calls/s，insert-in-txn 190k–240k → 235k–265k rows/s，fetch 10k 2.16–3.19M → 2.48–2.97M rows/s，pool(4) 239,146 → 235,840 calls/s（-1.4%，在 5% 内）；仍缺 p95、固定机器和 MySQL/PostgreSQL ORM A/B。
 - [x] 安装包消费者验证过 `find_package(uvcpp)` + `#include <orm/...>`；DB OFF 构建不含 ORM 头/符号。
 - [ ] 六平台 `package_release.py` 产物与包内清单（本机缺 libuv 源码头，未产出完整 zip）。
 - [ ] 文档门禁：`check_docs.py`、`check_doc_lines.py`、

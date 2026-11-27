@@ -1477,6 +1477,7 @@ jobs:
               -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_ORM=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-configure.log 2>&1 || cfg=$?
@@ -1540,6 +1541,7 @@ jobs:
               -DUVCPP_ENABLE_CAPI=ON \
               -DUVCPP_ENABLE_YYJSON=ON \
               -DUVCPP_ENABLE_DB=ON -DUVCPP_DB_SQLITE_FROM_SOURCE=ON \
+            -DUVCPP_BUILD_ORM=ON \
               -DUVCPP_ENABLE_DB_MYSQL=OFF -DUVCPP_ENABLE_DB_PGSQL=OFF \
               -DUVCPP_BUILD_EXPAND=ON \
               -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON > ci-logs/cfg-dbg-configure.log 2>&1 || dbg=$?
