@@ -700,6 +700,133 @@ inline const void* column_address(const T* object,
 //
 // 这一节只把“模型 + 参数”变成 #90 的 `uvcpp_orm_sql_result`，不碰数据库。
 // 同步路径拿它执行；异步路径拿它在**投递之前**构造 SQL（回调线程只做映射）。
+//
+// **SQL 文本缓存。** 同一模型/方言的 SELECT/INSERT/UPDATE/DELETE 形状只由
+// 元数据决定，值每次不同。缓存 SQL 文本（不是结果、也不是参数）把点查/更新
+// 热路径上的字符串拼接与列查找省掉；参数仍然逐次构造并绑定，线程安全由
+// C++11 的函数内 static 初始化保证。
+
+template <typename T>
+inline std::string build_pk_select_sql(uvcpp_orm_dialect dialect) {
+  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
+  if (primary_key == nullptr) return std::string();
+  const uvcpp_orm_sql_result result =
+      select<T>(dialect)
+          .where_eq(primary_key->column_name(), uvcpp_db_value())
+          .limit(1)
+          .build();
+  return result.ok() ? result.sql : std::string();
+}
+
+template <typename T>
+inline const std::string& cached_pk_select_sql(uvcpp_orm_dialect dialect) {
+  static const std::string sqlite =
+      build_pk_select_sql<T>(uvcpp_orm_dialect::sqlite);
+  static const std::string mysql =
+      build_pk_select_sql<T>(uvcpp_orm_dialect::mysql);
+  static const std::string postgresql =
+      build_pk_select_sql<T>(uvcpp_orm_dialect::postgresql);
+  switch (dialect) {
+    case uvcpp_orm_dialect::sqlite: return sqlite;
+    case uvcpp_orm_dialect::mysql: return mysql;
+    case uvcpp_orm_dialect::postgresql: return postgresql;
+  }
+  static const std::string empty;
+  return empty;
+}
+
+template <typename T>
+inline std::string build_insert_sql(uvcpp_orm_dialect dialect) {
+  uvcpp_orm_insert_builder<T> builder(dialect);
+  const uvcpp_orm_column* columns = model_traits<T>::columns();
+  const std::size_t count = model_traits<T>::column_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    const uvcpp_orm_column& column = columns[i];
+    if (column.is_auto_increment() || column.is_read_only()) continue;
+    builder.column(column.column_name(), uvcpp_db_value());
+  }
+  const uvcpp_orm_sql_result result = builder.build();
+  return result.ok() ? result.sql : std::string();
+}
+
+template <typename T>
+inline const std::string& cached_insert_sql(uvcpp_orm_dialect dialect) {
+  static const std::string sqlite =
+      build_insert_sql<T>(uvcpp_orm_dialect::sqlite);
+  static const std::string mysql =
+      build_insert_sql<T>(uvcpp_orm_dialect::mysql);
+  static const std::string postgresql =
+      build_insert_sql<T>(uvcpp_orm_dialect::postgresql);
+  switch (dialect) {
+    case uvcpp_orm_dialect::sqlite: return sqlite;
+    case uvcpp_orm_dialect::mysql: return mysql;
+    case uvcpp_orm_dialect::postgresql: return postgresql;
+  }
+  static const std::string empty;
+  return empty;
+}
+
+template <typename T>
+inline std::string build_update_sql(uvcpp_orm_dialect dialect) {
+  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
+  if (primary_key == nullptr) return std::string();
+  uvcpp_orm_update_builder<T> builder(dialect);
+  const uvcpp_orm_column* columns = model_traits<T>::columns();
+  const std::size_t count = model_traits<T>::column_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    const uvcpp_orm_column& column = columns[i];
+    if (column.is_primary_key() || column.is_read_only()) continue;
+    builder.set(column.column_name(), uvcpp_db_value());
+  }
+  builder.where_eq(primary_key->column_name(), uvcpp_db_value());
+  const uvcpp_orm_sql_result result = builder.build();
+  return result.ok() ? result.sql : std::string();
+}
+
+template <typename T>
+inline const std::string& cached_update_sql(uvcpp_orm_dialect dialect) {
+  static const std::string sqlite =
+      build_update_sql<T>(uvcpp_orm_dialect::sqlite);
+  static const std::string mysql =
+      build_update_sql<T>(uvcpp_orm_dialect::mysql);
+  static const std::string postgresql =
+      build_update_sql<T>(uvcpp_orm_dialect::postgresql);
+  switch (dialect) {
+    case uvcpp_orm_dialect::sqlite: return sqlite;
+    case uvcpp_orm_dialect::mysql: return mysql;
+    case uvcpp_orm_dialect::postgresql: return postgresql;
+  }
+  static const std::string empty;
+  return empty;
+}
+
+template <typename T>
+inline std::string build_remove_sql(uvcpp_orm_dialect dialect) {
+  const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
+  if (primary_key == nullptr) return std::string();
+  const uvcpp_orm_sql_result result =
+      delete_from<T>(dialect)
+          .where_eq(primary_key->column_name(), uvcpp_db_value())
+          .build();
+  return result.ok() ? result.sql : std::string();
+}
+
+template <typename T>
+inline const std::string& cached_remove_sql(uvcpp_orm_dialect dialect) {
+  static const std::string sqlite =
+      build_remove_sql<T>(uvcpp_orm_dialect::sqlite);
+  static const std::string mysql =
+      build_remove_sql<T>(uvcpp_orm_dialect::mysql);
+  static const std::string postgresql =
+      build_remove_sql<T>(uvcpp_orm_dialect::postgresql);
+  switch (dialect) {
+    case uvcpp_orm_dialect::sqlite: return sqlite;
+    case uvcpp_orm_dialect::mysql: return mysql;
+    case uvcpp_orm_dialect::postgresql: return postgresql;
+  }
+  static const std::string empty;
+  return empty;
+}
 
 /// `SELECT ... WHERE pk = ? LIMIT 1`。
 template <typename T>
@@ -725,14 +852,14 @@ inline uvcpp_orm_status make_find_by_pk_sql(uvcpp_orm_dialect dialect,
                      "find_by_pk: model has no primary key");
   }
 
-  *out = select<T>(dialect)
-             .where_eq(primary_key->column_name(), id)
-             .limit(1)
-             .build();
-  if (!out->ok()) {
-    if (error != nullptr) *error = out->error;
-    return out->status;
+  const std::string& sql = cached_pk_select_sql<T>(dialect);
+  if (sql.empty()) {
+    return set_error(error, uvcpp_orm_status::MAPPING_FAILED,
+                     "find_by_pk: could not cache the SELECT shape");
   }
+  out->dialect = dialect;
+  out->sql = sql;
+  out->params.add(id).add(std::int64_t(1));
   return uvcpp_orm_status::OK;
 }
 
@@ -749,20 +876,19 @@ inline uvcpp_orm_status make_insert_sql(uvcpp_orm_dialect dialect,
   const uvcpp_orm_status status = validate_model<T>(error);
   if (status != uvcpp_orm_status::OK) return status;
 
-  uvcpp_orm_insert_builder<T> builder(dialect);
+  const std::string& sql = cached_insert_sql<T>(dialect);
+  if (sql.empty()) {
+    return set_error(error, uvcpp_orm_status::EMPTY_COLUMN_LIST,
+                     "insert: model has no writable columns");
+  }
+  out->dialect = dialect;
+  out->sql = sql;
   const uvcpp_orm_column* columns = model_traits<T>::columns();
   const std::size_t count = model_traits<T>::column_count();
   for (std::size_t i = 0; i < count; ++i) {
     const uvcpp_orm_column& column = columns[i];
     if (column.is_auto_increment() || column.is_read_only()) continue;
-    builder.column(column.column_name(),
-                   column_to_db_value(column, column_address(&value, column)));
-  }
-
-  *out = builder.build();
-  if (!out->ok()) {
-    if (error != nullptr) *error = out->error;
-    return out->status;
+    out->params.add(column_to_db_value(column, column_address(&value, column)));
   }
   return uvcpp_orm_status::OK;
 }
@@ -795,23 +921,21 @@ inline uvcpp_orm_status make_update_sql(uvcpp_orm_dialect dialect,
                    std::string(primary_key->column_name()) + " = NULL");
   }
 
-  uvcpp_orm_update_builder<T> builder(dialect);
+  const std::string& sql = cached_update_sql<T>(dialect);
+  if (sql.empty()) {
+    return set_error(error, uvcpp_orm_status::EMPTY_SET,
+                     "update: model has no writable columns");
+  }
+  out->dialect = dialect;
+  out->sql = sql;
   const uvcpp_orm_column* columns = model_traits<T>::columns();
   const std::size_t count = model_traits<T>::column_count();
   for (std::size_t i = 0; i < count; ++i) {
     const uvcpp_orm_column& column = columns[i];
     if (column.is_primary_key() || column.is_read_only()) continue;
-    builder.set(column.column_name(),
-                column_to_db_value(column,
-                                   column_address(&value, column)));
+    out->params.add(column_to_db_value(column, column_address(&value, column)));
   }
-  builder.where_eq(primary_key->column_name(), primary_key_value);
-
-  *out = builder.build();
-  if (!out->ok()) {
-    if (error != nullptr) *error = out->error;
-    return out->status;
-  }
+  out->params.add(primary_key_value);
   return uvcpp_orm_status::OK;
 }
 
@@ -838,13 +962,14 @@ inline uvcpp_orm_status make_remove_sql(uvcpp_orm_dialect dialect,
                      "remove: model has no primary key");
   }
 
-  *out = delete_from<T>(dialect)
-             .where_eq(primary_key->column_name(), id)
-             .build();
-  if (!out->ok()) {
-    if (error != nullptr) *error = out->error;
-    return out->status;
+  const std::string& sql = cached_remove_sql<T>(dialect);
+  if (sql.empty()) {
+    return set_error(error, uvcpp_orm_status::MAPPING_FAILED,
+                     "remove: could not cache the DELETE shape");
   }
+  out->dialect = dialect;
+  out->sql = sql;
+  out->params.add(id);
   return uvcpp_orm_status::OK;
 }
 
@@ -872,12 +997,96 @@ inline uvcpp_orm_status make_count_sql(
 // 结果集映射
 // ---------------------------------------------------------------------------
 
+typedef bool (*column_assign_fn)(const uvcpp_db_value&, void*);
+typedef void (*column_reset_fn)(void*);
+
+template <typename M>
+inline bool assign_base_field(const uvcpp_db_value& value, void* field) {
+  return base_mapper<M>::assign(value, static_cast<M*>(field));
+}
+
+template <typename M>
+inline bool assign_nullable_field(const uvcpp_db_value& value, void* field) {
+  return assign_nullable_value<M>(value, field);
+}
+
+template <typename M>
+inline void reset_nullable_field(void* field) {
+  static_cast<nullable<M>*>(field)->reset();
+}
+
+/// 每个字段的转换函数只按模型选择一次；逐行映射直接调用函数指针，避免在
+/// 每行每个字段上重复做类型 switch。
+inline column_assign_fn column_assigner(uvcpp_orm_type type, bool nullable) {
+#define UVCPP_ORM_DETAIL_ASSIGNER_CASE(tag, cpp_type)                    \
+  case uvcpp_orm_type::tag:                                              \
+    return nullable ? &assign_nullable_field<cpp_type>                   \
+                    : &assign_base_field<cpp_type>;
+  switch (type) {
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(BOOL, bool)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(INT8, std::int8_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(UINT8, std::uint8_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(INT16, std::int16_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(UINT16, std::uint16_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(INT32, std::int32_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(UINT32, std::uint32_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(INT64, std::int64_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(UINT64, std::uint64_t)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(FLOAT, float)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(DOUBLE, double)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(TEXT, std::string)
+    UVCPP_ORM_DETAIL_ASSIGNER_CASE(BLOB, std::vector<std::uint8_t>)
+    case uvcpp_orm_type::DATE:
+    case uvcpp_orm_type::TIME:
+    case uvcpp_orm_type::DATETIME:
+    case uvcpp_orm_type::UNKNOWN:
+      return nullptr;
+  }
+#undef UVCPP_ORM_DETAIL_ASSIGNER_CASE
+  return nullptr;
+}
+
+inline column_reset_fn column_resetter(uvcpp_orm_type type, bool nullable) {
+  if (!nullable) return nullptr;
+#define UVCPP_ORM_DETAIL_RESETTER_CASE(tag, cpp_type) \
+  case uvcpp_orm_type::tag: return &reset_nullable_field<cpp_type>;
+  switch (type) {
+    UVCPP_ORM_DETAIL_RESETTER_CASE(BOOL, bool)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(INT8, std::int8_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(UINT8, std::uint8_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(INT16, std::int16_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(UINT16, std::uint16_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(INT32, std::int32_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(UINT32, std::uint32_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(INT64, std::int64_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(UINT64, std::uint64_t)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(FLOAT, float)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(DOUBLE, double)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(TEXT, std::string)
+    UVCPP_ORM_DETAIL_RESETTER_CASE(BLOB, std::vector<std::uint8_t>)
+    case uvcpp_orm_type::DATE:
+    case uvcpp_orm_type::TIME:
+    case uvcpp_orm_type::DATETIME:
+    case uvcpp_orm_type::UNKNOWN:
+      return nullptr;
+  }
+#undef UVCPP_ORM_DETAIL_RESETTER_CASE
+  return nullptr;
+}
+
 struct column_binding {
-  column_binding() : column(nullptr), index(0u), present(false) {}
+  column_binding()
+      : column(nullptr),
+        index(0u),
+        present(false),
+        assign(nullptr),
+        reset(nullptr) {}
 
   const uvcpp_orm_column* column;
   std::size_t index;
   bool present;
+  column_assign_fn assign;
+  column_reset_fn reset;
 };
 
 /// 按列名把模型字段与结果集列对起来。缺非空列在**映射任何一行之前**就报错，
@@ -893,6 +1102,8 @@ inline uvcpp_orm_status prepare_bindings(
     const uvcpp_orm_column& column = columns[i];
     column_binding binding;
     binding.column = &column;
+    binding.assign = column_assigner(column.type(), column.is_nullable());
+    binding.reset = column_resetter(column.type(), column.is_nullable());
 
     const char* raw_name = column.column_name();
     const std::string name = raw_name != nullptr ? raw_name : "";
@@ -921,7 +1132,15 @@ inline uvcpp_orm_status map_row(const uvcpp_db_row& row,
                                 std::size_t row_index, T* out,
                                 std::string* error) {
   T mapped = T();
-  const std::string row_label = "row " + std::to_string(row_index) + ": ";
+  // 行号只在出错时格式化；热路径上的每一行都不该为一条不会用到的错误串
+  // 付一次 std::string 分配。
+  struct row_label_text {
+    std::size_t index;
+    std::string str() const {
+      return std::string("row ") + std::to_string(index) + ": ";
+    }
+  };
+  const row_label_text row_label = {row_index};
 
   for (std::size_t i = 0; i < bindings.size(); ++i) {
     const column_binding& binding = bindings[i];
@@ -929,7 +1148,7 @@ inline uvcpp_orm_status map_row(const uvcpp_db_row& row,
 
     if (!binding.present) {
       // prepare_bindings() 已经保证只有可空字段会走到这里。
-      reset_nullable_column(*binding.column, field);
+      if (binding.reset != nullptr) binding.reset(field);
       continue;
     }
 
@@ -937,32 +1156,32 @@ inline uvcpp_orm_status map_row(const uvcpp_db_row& row,
     if (value.is_null()) {
       if (!binding.column->is_nullable()) {
         return set_error(error, uvcpp_orm_status::NULL_VIOLATION,
-                         row_label + column_label(*binding.column) +
+                         row_label.str() + column_label(*binding.column) +
                              " is SQL NULL but the field is not nullable");
       }
-      reset_nullable_column(*binding.column, field);
+      if (binding.reset != nullptr) binding.reset(field);
       continue;
     }
 
     if (!db_type_compatible(binding.column->type(), value.type())) {
       return set_error(
           error, uvcpp_orm_status::TYPE_MISMATCH,
-          row_label + column_label(*binding.column) +
+          row_label.str() + column_label(*binding.column) +
               " cannot map database type \"" + value.type_name() +
               "\" into ORM type \"" +
               uvcpp_orm_type_name(binding.column->type()) + "\"");
     }
 
-    if (!assign_column_value(*binding.column, field, value)) {
+    if (binding.assign == nullptr || !binding.assign(value, field)) {
       return set_error(
           error, uvcpp_orm_status::TYPE_MISMATCH,
-          row_label + column_label(*binding.column) +
+          row_label.str() + column_label(*binding.column) +
               " value is out of range for ORM type \"" +
               uvcpp_orm_type_name(binding.column->type()) + "\"");
     }
   }
 
-  *out = mapped;
+  *out = std::move(mapped);
   return uvcpp_orm_status::OK;
 }
 
