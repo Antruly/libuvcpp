@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file src/orm/uvcpp_orm_dialect.h
  * @brief ORM 的 SQL 方言：占位符写法与标识符转义。
  * @author zhuweiye
