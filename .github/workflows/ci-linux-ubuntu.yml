@@ -1213,7 +1213,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libuv1-dev libmysqlclient-dev libpq-dev \
-            unixodbc-dev libsqliteodbc libmongoc-dev zlib1g-dev ninja-build
+            unixodbc-dev libsqliteodbc odbc-postgresql libmongoc-dev zlib1g-dev ninja-build
 
       - name: Configure & Build
         shell: bash
@@ -1370,6 +1370,19 @@ jobs:
               | sed 's/%/%25/g' | head -c 6000 || true)
             if [ -n "$blk" ]; then
               echo "::error title=ctest-db-servers-output::${blk}"
+            fi
+          fi
+          if [ "$rc" = "0" ]; then
+            # The main ctest above used the SQLite ODBC driver. Run the same ORM
+            # ODBC test against psqlODBC as well: this covers a non-SQLite ODBC
+            # data source and the `lastval()` auto-increment path.
+            odbc_rc=0
+            UVCPP_ORM_TEST_ODBC_URL='odbc:?Driver=/usr/lib/x86_64-linux-gnu/odbc/psqlodbcw.so;Server=127.0.0.1;Port=5432;Database=uvcpp_test;Uid=uvcpp;Pwd=uvcpp' \
+              ctest --test-dir "$tree" -R '^test_orm_odbc_func$' --output-on-failure -C Release \
+              || odbc_rc=$?
+            if [ "$odbc_rc" != "0" ]; then
+              echo "::error title=ctest-db-servers-odbc-pg::psqlODBC ORM test failed (rc=$odbc_rc)"
+              exit "$odbc_rc"
             fi
           fi
           exit "$rc"

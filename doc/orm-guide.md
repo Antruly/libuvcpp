@@ -811,22 +811,20 @@ bool raw_query(uvcpp::uvcpp_db_client& db) {
 
 ## 14. 支持矩阵与验证边界
 
-| 能力 | SQLite | MySQL | PostgreSQL |
-|---|---|---|---|
-| 模型声明与 `validate_model` | 已测 | 已测（同一套元数据，不连库） | 已测（同一套元数据，不连库） |
-| SQL 构造与占位符/标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） |
-| 同步 CRUD / 结果映射 | 已测（真库） | 已测（真库，`orm_mysql_func`） | 已测（真库，`orm_pgsql_func`） |
-| 事务内使用 | 已测（真库） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
-| 异步回调 | 已测（线程池路径） | 未在 ORM 用例里真库验证 | 未在 ORM 用例里真库验证 |
+| 能力 | SQLite | MySQL | PostgreSQL | ODBC(SQLite/psqlODBC) |
+|---|---|---|---|---|
+| 模型声明与 `validate_model` | 已测 | 已测（不连库） | 已测（不连库） | 已测（不连库） |
+| SQL 构造与占位符/标识符转义 | 已测 | 已测（golden，不连库） | 已测（golden，不连库） | 已测（golden，不连库） |
+| 同步 CRUD / 结果映射 | 已测（真库） | 已测（真库，`orm_mysql_func`） | 已测（真库，`orm_pgsql_func`） | 已测（真库，`orm_odbc_func`） |
+| 事务内使用 | 已测（真库） | 已测（真库，34 checks） | 已测（真库，34 checks） | 已测（真库，38 checks） |
+| 异步回调 | 已测（线程池路径） | 已测（`orm_remote_async_func`） | 已测（`orm_remote_async_func`） | 已测（`orm_remote_async_func`） |
 
-“已测”指仓库里的 `orm_*` 用例实际跑过（`orm_model_func`、`orm_sql_func`、
-`orm_sqlite_func`、`orm_mysql_func`、`orm_tx_async_func`）。MySQL 与 PostgreSQL 的同步 CRUD
-在真 8.0 / 16 服务端上跑过；ODBC 通过 SQLite 驱动跑了同步 CRUD，但用例显式给
-主键，不把“取到自增 id”算作 ODBC 已验证的能力。事务内使用与异步回调已在 SQLite 上跑；MySQL/PostgreSQL/ODBC 的
-事务提交/回滚已补真库用例，异步回调另有 `orm_remote_async_func` 对这三种
-后端各跑一遍（见该用例的 URL 选择与 CI `db-servers`）。“未验证”不是“不能用”：ORM 的执行层
-复用 db 模块的 `uvcpp_db_client` / `uvcpp_db_pool` / `uvcpp_db_tx`，db 层自己的
-用例是绿的；但不要把 db 层的结论借给 ORM。
+“已测”指仓库里的 `orm_*` 用例实际跑过：`orm_model_func`、`orm_sql_func`、
+`orm_sqlite_func`、`orm_mysql_func`、`orm_pgsql_func`、`orm_odbc_func`、
+`orm_remote_async_func`、`orm_tx_async_func`。ODBC 分别用 SQLite 与 psqlODBC
+两个数据源跑同步 CRUD/事务/自增 ID；远程异步用例每次选择一组 URL（CI 的
+`db-servers` 跑 MySQL 组，本机另跑 PostgreSQL/ODBC 组）。隔离/冲突/超时、
+连接 kill、池耗尽等失败注入仍主要靠 db 套件，不是每个 ORM 后端重复一遍。
 
 **异步真相**：回调的线程与次数有保证；真正的非阻塞只到 PostgreSQL 这一条腿。
 SQLite / MySQL / ODBC 的异步仍是 `uv_queue_work` 线程池，`insert_async` 也走

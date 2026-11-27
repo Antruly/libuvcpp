@@ -487,6 +487,7 @@ class odbc_driver : public uvcpp_db_driver {
     }
 
     const std::string conn = build_connection_string(url);
+    connection_text_ = conn;
     wstr wconn(conn);
     SQLWCHAR out_buf[1024];
     SQLSMALLINT out_len = 0;
@@ -620,18 +621,39 @@ class odbc_driver : public uvcpp_db_driver {
       *err = "ODBC 连接没打开";
       return uvcpp_db_status::NOT_CONNECTED;
     }
-    // SQL Server 的正解是 `SCOPE_IDENTITY()`：只认**本作用域**里刚插的那行。
-    // `@@IDENTITY` 会被触发器里的插入顶掉（插 A 表却拿到触发器写进 B 表的 id），
-    // 那是这条路上最容易踩的错。别的数据源不认 SCOPE_IDENTITY 时会报错，那时
-    // 如实返回 UNSUPPORTED —— 契约里"报不出"就是这个码，不是硬编一个 0。
+
+    // ODBC 没有统一的 last-insert-id：SQL Server 的 `SCOPE_IDENTITY()`、
+    // SQLite 的 `last_insert_rowid()`、PostgreSQL 的 `lastval()` 互不认。
+    // 按连接串里的驱动族选一条；不用“失败再试”的链 —— 在 PG 事务里一条
+    // 失败语句会中止事务，后续候选即使语法正确也拿不到值。
+    std::string family = connection_text_;
+    for (std::size_t i = 0; i < family.size(); ++i) {
+      if (family[i] >= 'A' && family[i] <= 'Z') {
+        family[i] = static_cast<char>(family[i] - 'A' + 'a');
+      }
+    }
+    const SQLWCHAR* sql = kScopeIdentity;
+    if (family.find("sqlite") != std::string::npos) {
+      sql = kLastInsertRowid;
+    } else if (family.find("psqlodbc") != std::string::npos ||
+               family.find("postgres") != std::string::npos) {
+      sql = kLastval;
+    }
+
     SQLHSTMT stmt = nullptr;
     const uvcpp_db_status ast = alloc_stmt(&stmt, err);
     if (!uvcpp_db_ok(ast)) return ast;
     const SQLRETURN rc = api().SQLExecDirectW(
-        stmt, const_cast<SQLWCHAR*>(kScopeIdentity), SQL_NTS);
+        stmt, const_cast<SQLWCHAR*>(sql), SQL_NTS);
     if (!SQL_SUCCEEDED(rc)) {
       api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-      *err = "这个数据源报不出自增值（SCOPE_IDENTITY 不被支持）";
+      *err = "这个数据源报不出自增值（last-insert-id 查询不被支持）";
+      return uvcpp_db_status::UNSUPPORTED;
+    }
+    const SQLRETURN fetch = api().SQLFetch(stmt);
+    if (!SQL_SUCCEEDED(fetch)) {
+      api().SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+      *err = "取自增值失败：结果集没有行";
       return uvcpp_db_status::UNSUPPORTED;
     }
     bool is_null = false;
@@ -646,7 +668,6 @@ class odbc_driver : public uvcpp_db_driver {
     out->set_int64(v);
     return uvcpp_db_status::OK;
   }
-
   uvcpp_db_status begin(std::string* err) {
     if (!dbc_) {
       *err = "ODBC 连接没打开";
@@ -1641,6 +1662,8 @@ class odbc_driver : public uvcpp_db_driver {
   /// 坑一的翻版：在 unixODBC 上编译得过、跑起来全错。
   static const SQLWCHAR kPing[];
   static const SQLWCHAR kScopeIdentity[];
+  static const SQLWCHAR kLastInsertRowid[];
+  static const SQLWCHAR kLastval[];
 
   SQLHENV env_ = nullptr;
   SQLHDBC dbc_ = nullptr;
@@ -1650,6 +1673,8 @@ class odbc_driver : public uvcpp_db_driver {
   /// 标识符引号（`SQLGetInfo(SQL_IDENTIFIER_QUOTE_CHAR)` 的结果）。连上之前
   /// 按标准取 `"`。
   std::string quote_ = "\"";
+  /// 打开时的连接串；用于按驱动族选择 last-insert-id 的 SQL。
+  std::string connection_text_;
 
   /// 一个参数的**私有**绑定存储。
   ///
@@ -1681,6 +1706,13 @@ const SQLWCHAR odbc_driver::kScopeIdentity[] = {
     'S', 'E', 'L', 'E', 'C', 'T', ' ', 'C', 'A', 'S', 'T', '(', 'S', 'C', 'O',
     'P', 'E', '_', 'I', 'D', 'E', 'N', 'T', 'I', 'T', 'Y', '(', ')', ' ', 'A',
     'S', ' ', 'B', 'I', 'G', 'I', 'N', 'T', ')', 0};
+
+const SQLWCHAR odbc_driver::kLastInsertRowid[] = {
+    'S', 'E', 'L', 'E', 'C', 'T', ' ', 'l', 'a', 's', 't', '_', 'i', 'n', 's',
+    'e', 'r', 't', '_', 'r', 'o', 'w', 'i', 'd', '(', ')', 0};
+
+const SQLWCHAR odbc_driver::kLastval[] = {
+    'S', 'E', 'L', 'E', 'C', 'T', ' ', 'l', 'a', 's', 't', 'v', 'a', 'l', '(', ')', 0};
 
 std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_odbc() {
   return std::unique_ptr<uvcpp_db_driver>(new odbc_driver());

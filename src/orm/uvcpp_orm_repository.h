@@ -136,22 +136,29 @@ inline bool dialect_from_driver_name(const char* name,
   return false;
 }
 
+inline bool dialect_from_odbc_url(const std::string& value,
+                                    uvcpp_orm_dialect* out) {
+  if (out == nullptr) return false;
+  // ODBC uses `?` as its parameter marker for every data source, so the ORM's
+  // positional dialect is the only one that can be bound by this backend.
+  // Identifier quoting is double quotes for both SQLite and PostgreSQL; the
+  // data-source-specific DDL/types remain the caller's responsibility.
+  std::string url = value;
+  for (std::size_t i = 0; i < url.size(); ++i) {
+    if (url[i] >= 'A' && url[i] <= 'Z') {
+      url[i] = static_cast<char>(url[i] - 'A' + 'a');
+    }
+  }
+  if (url.empty()) return false;
+  *out = uvcpp_orm_dialect::sqlite;
+  return true;
+}
+
 inline bool dialect_from_client(const uvcpp_db_client& db,
                                 uvcpp_orm_dialect* out) {
   if (dialect_from_driver_name(db.driver_name(), out)) return true;
-  // ODBC is a generic driver manager: the SQL dialect belongs to the data
-  // source, not to the manager. The only ORM dialect reachable through the
-  // ODBC path today is SQLite; an ODBC SQL Server/Oracle connection must stay
-  // UNSUPPORTED instead of being guessed as SQLite.
-  if (out != nullptr && std::string(db.driver_name()) == "odbc") {
-    std::string url = db.url();
-    for (std::size_t i = 0; i < url.size(); ++i) {
-      if (url[i] >= 'A' && url[i] <= 'Z') url[i] = static_cast<char>(url[i] - 'A' + 'a');
-    }
-    if (url.find("sqlite") != std::string::npos) {
-      *out = uvcpp_orm_dialect::sqlite;
-      return true;
-    }
+  if (std::string(db.driver_name()) == "odbc") {
+    return dialect_from_odbc_url(db.url(), out);
   }
   return false;
 }
@@ -326,15 +333,8 @@ class pool_executor {
 template <typename Executor>
 inline bool dialect_from_executor(const Executor& db, uvcpp_orm_dialect* out) {
   if (dialect_from_driver_name(db.driver_name(), out)) return true;
-  if (out != nullptr && std::string(db.driver_name()) == "odbc") {
-    std::string url = db.url();
-    for (std::size_t i = 0; i < url.size(); ++i) {
-      if (url[i] >= 'A' && url[i] <= 'Z') url[i] = static_cast<char>(url[i] - 'A' + 'a');
-    }
-    if (url.find("sqlite") != std::string::npos) {
-      *out = uvcpp_orm_dialect::sqlite;
-      return true;
-    }
+  if (std::string(db.driver_name()) == "odbc") {
+    return dialect_from_odbc_url(db.url(), out);
   }
   return false;
 }
