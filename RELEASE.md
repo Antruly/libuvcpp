@@ -19,6 +19,20 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.11.1 重点 (Highlights)
+
+`v1.11.0` 之后的补丁版，只修一个会崩的连接生命周期问题。
+
+- **WS 发送在 retire 之后不再先压缩**（[#87](https://github.com/Antruly/libuvcpp/issues/87)）。
+  `send_data()` 原来在判活之前就调用 `parser_.compress()`：连接已经 retire、对象
+  已被属主回收时，这一步直接踩进 zlib，上层看到的是一句毫无意义的
+  `SIGSEGV in deflate`（生产侧排查了两天）。现在 `send_data()` 与
+  `send_frame_impl()` 都在发送前先判 `retired_`，retire 之后立刻 `cb(-1)` 并返回
+  -1，与 `feed_pending()`/`close()`/`terminate()` 同一判据。
+  用例 `web_ws_retired_send_func`：terminate 后同回调里发 700 KiB 帧，断言 -1 且
+  完成回调恰好一次。按 id 的安全存活查询/发送（`ws_is_alive` / `ws_send_*`）属于
+  新接口，随 `1.12.0` 发布，不在这条补丁线上。
+
 ## v1.11.0 重点 (Highlights)
 
 `v1.10.0` 之后的开发线：把上一版“留给后续”的那几块补齐 —— 服务化部署、跨进程

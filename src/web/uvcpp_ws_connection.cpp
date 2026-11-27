@@ -473,6 +473,11 @@ int uvcpp_ws_connection::send_frame_impl(const uvcpp_ws_frame& frame, std::funct
   // 发送通道已经坏了（之前某次写失败）：立刻结算，别排队等一个不会来的完成回调。
   if (send_error_ != 0) { if (cb) cb(send_error_); return send_error_; }
 
+  // 与 `feed_pending()/close()/terminate()` 同一判据：退休之后任何发送都不
+  // 再排队，直接结算（`tcp_` 已在退役路径里置空，但先判 retired_ 能挡住
+  // "还没走到那一行就被别的回调插进来"的形状）。
+  if (retired_) { if (cb) cb(-1); return -1; }
+
   pending_send ps;
   size_t sz = uvcpp_ws_parser::calc_frame_size(frame);
   ps.bytes.resize(sz);
@@ -607,6 +612,9 @@ void uvcpp_ws_connection::fail_pending_sends(int err) {
 
 int uvcpp_ws_connection::send_data(ws_opcode op, const char* d, size_t n,
                                    std::function<void(int)> cb) {
+  // **必须排在压缩之前**：retire 之后还要跑一次 64 KiB 级 deflate 不只是浪费，
+  // 对象若已被属主回收，这一步会踩进 zlib（issue #87 的 SIGSEGV 栈）。
+  if (retired_) { if (cb) cb(-1); return -1; }
   uvcpp_ws_frame f;
   f.opcode = op;
   if (d && n > 0) {

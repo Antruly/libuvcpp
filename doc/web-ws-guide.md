@@ -253,7 +253,7 @@ int send_close(ws_close_code code = ws_close_code::NORMAL,
 ```
 
 **逐帧发送：`send_frame(frame, cb)`（`1.8.2` 起）。** `send_text` / `send_binary`
-仍然每次造一个 `fin = true` 的单帧（`src/web/uvcpp_ws_connection.cpp:608-608`）；
+仍然每次造一个 `fin = true` 的单帧（`src/web/uvcpp_ws_connection.cpp:613-613`）；
 要发**分片**、控制帧或自己压好的 permessage-deflate 负载时用 `send_frame`：
 掩码按本端角色处理（客户端加、服务端不加），`rsv1` 与分片边界由调用方负责
 （本层既不替你压缩，也不校验分片序列），帧序与 `send_text` 共用同一条队列。
@@ -374,7 +374,7 @@ void terminate();                                        // src/web/uvcpp_ws_con
 `close()` 的实现只有两句（`src/web/uvcpp_ws_connection.cpp:100`）：
 置 `close_notified_`，然后 `send_close(code, reason)`。而 `send_close` 的完成回调是
 "自己的 Close 帧一写进 TCP，就立刻关底层连接"
-（`src/web/uvcpp_ws_connection.cpp:706-706`）。
+（`src/web/uvcpp_ws_connection.cpp:714-714`）。
 
 **也就是说它不等对端回 Close 帧。** RFC 6455 §7.1.1 的关闭握手在这一层只做了一半，
 而且**没有任何超时或定时器**兜底。头文件 `src/web/uvcpp_ws_connection.h:151` 的措辞与实现
@@ -384,7 +384,7 @@ void terminate();                                        // src/web/uvcpp_ws_con
 `terminate()` 是立即终结、**不发** Close 帧（`src/web/uvcpp_ws_connection.cpp:109`）。
 两个别混。
 
-`send_close` 会把 reason **静默截断到 123 字节**（`src/web/uvcpp_ws_connection.cpp:704-704`）——
+`send_close` 会把 reason **静默截断到 123 字节**（`src/web/uvcpp_ws_connection.cpp:712-712`）——
 控制帧负载上限 125，扣掉 2 字节状态码。截断是有意的：不截就会拼出一个对端
 **必须拒绝**的帧。
 
@@ -412,7 +412,7 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 上表里的含义是按 RFC 补的。缺 1004、1012 / 1013 / 1014。
 
 **没有"1005 / 1006 不能发"的保护**：`send_close(NO_STATUS)` 会照发一个含 1005 的帧
-—— `send_close` 只截断长度，不校验码（`src/web/uvcpp_ws_connection.cpp:700-700`）。
+—— `send_close` 只截断长度，不校验码（`src/web/uvcpp_ws_connection.cpp:708-708`）。
 
 ---
 
