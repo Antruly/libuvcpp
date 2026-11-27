@@ -157,6 +157,47 @@ int main() {
   check(orm_status == uvcpp::uvcpp_orm_status::OK, "count");
   check(counted == 1, "count value");
 
+  // 事务：回滚不留下行；提交留下。用同一个 client，ORM 语句仍在事务里。
+  {
+    check(uvcpp::uvcpp_db_ok(db.begin()), "begin rollback tx");
+    orm_mysql_account bob;
+    bob.email = "bob-rollback@example.com";
+    bob.age = 41;
+    bob.score = 3.0;
+    bob.active = true;
+    uvcpp::uvcpp_db_value bob_id;
+    orm_status = uvcpp::insert(db, bob, &bob_id, &error, &db_status);
+    check(orm_status == uvcpp::uvcpp_orm_status::OK, "insert in rollback tx");
+    check(uvcpp::uvcpp_db_ok(db.rollback()), "rollback tx");
+
+    int64_t after_rollback = -1;
+    orm_status = uvcpp::count<orm_mysql_account>(
+        db,
+        uvcpp::select<orm_mysql_account>(uvcpp::uvcpp_orm_dialect::mysql),
+        &after_rollback, &error, &db_status);
+    check(orm_status == uvcpp::uvcpp_orm_status::OK, "count after rollback");
+    check(after_rollback == 1, "rollback removed the row");
+
+    check(uvcpp::uvcpp_db_ok(db.begin()), "begin commit tx");
+    orm_mysql_account carol;
+    carol.email = "carol-commit@example.com";
+    carol.age = 42;
+    carol.score = 4.0;
+    carol.active = false;
+    uvcpp::uvcpp_db_value carol_id;
+    orm_status = uvcpp::insert(db, carol, &carol_id, &error, &db_status);
+    check(orm_status == uvcpp::uvcpp_orm_status::OK, "insert in commit tx");
+    check(uvcpp::uvcpp_db_ok(db.commit()), "commit tx");
+
+    int64_t after_commit = -1;
+    orm_status = uvcpp::count<orm_mysql_account>(
+        db,
+        uvcpp::select<orm_mysql_account>(uvcpp::uvcpp_orm_dialect::mysql),
+        &after_commit, &error, &db_status);
+    check(orm_status == uvcpp::uvcpp_orm_status::OK, "count after commit");
+    check(after_commit == 2, "commit kept the row");
+  }
+
   // 唯一键冲突必须从数据库透传，而不是被映射成 0 行/成功。
   orm_mysql_account duplicate;
   duplicate.email = "alice@example.com";
