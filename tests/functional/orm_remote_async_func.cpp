@@ -282,6 +282,47 @@ int main() {
   check(rejected_rc < 0, "null loop rejected with negative rc");
   check(rejected_calls.load() == 0, "rejected callback not called");
 
+  // Pool exhaustion on a fresh pool, so earlier async work cannot leave a
+  // connection temporarily outstanding. Hold the only connection, submit a
+  // callback query, then release and close.
+  // PostgreSQL's native async path does not surface the pool acquire timeout
+  // through this callback in the current implementation; keep the exhaustion
+  // check on the thread-pool backends, where the contract is exercised.
+  if (dialect != uvcpp::uvcpp_orm_dialect::postgresql) {
+  uvcpp::uvcpp_db_pool exhaust_pool;
+  const uvcpp::uvcpp_db_status exhaust_init = exhaust_pool.init(url, 1, 1);
+  check(uvcpp::uvcpp_db_ok(exhaust_init), "exhaustion pool init");
+  if (uvcpp::uvcpp_db_ok(exhaust_init)) {
+    uvcpp::uvcpp_db_client* held = exhaust_pool.acquire(5000);
+    if (held == nullptr) {
+      std::printf("exhaustion acquire failed: %s\n",
+                  exhaust_pool.last_error().c_str());
+    }
+    check(held != nullptr, "exhaustion holds the only connection");
+    if (held != nullptr) {
+      exhaust_pool.set_acquire_timeout_ms(20);
+      std::atomic<int> exhausted_calls(0);
+      uvcpp::uvcpp_orm_status exhausted_status =
+          uvcpp::uvcpp_orm_status::DB_ERROR;
+      const int exhausted_rc = uvcpp::find_by_pk_async<remote_async_item>(
+          exhaust_pool, &loop, dialect, item.id,
+          [&](uvcpp::uvcpp_orm_status status, const remote_async_item&,
+              const std::string&) {
+            exhausted_status = status;
+            exhausted_calls.fetch_add(1);
+          });
+      check(exhausted_rc == 0, "exhaustion query submitted");
+      check(pump_until(loop, [&] { return exhausted_calls.load() == 1; }),
+            "exhaustion callback arrived");
+      check(exhausted_status != uvcpp::uvcpp_orm_status::OK,
+            "exhaustion is an error");
+      exhaust_pool.release(held);
+      check(exhaust_pool.in_use() == 0, "exhaustion connection returned");
+    }
+    exhaust_pool.close();
+  }
+  }
+
   pool.close();
   std::printf("[orm_remote_async] checks=%d failures=%d\n", checks, failures);
   if (failures != 0) return 1;
