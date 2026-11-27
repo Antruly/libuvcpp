@@ -29,6 +29,7 @@
   - [HTTP/2](#http2)
   - [gRPC（`src/grpc/`）](#grpcsrcgrpc)
   - [数据库（`src/db/`）](#数据库srcdb)
+  - [ORM（`src/orm/`）](#ormsrcorm)
   - [Redis（`src/redis/`）](#redissrcredis)
   - [SOCKS5（`src/net/`）](#socks5srcnet)
   - [横向扩展（多事件循环）](#横向扩展多事件循环)
@@ -1165,6 +1166,51 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 - **池子先走一步不能崩**：投出异步活之后立刻 `delete` 池子，析构等 work 相收完
   （存活凭证 + 在飞计数），回调不被调、进程不崩。三后端共用套件（`db_suite.h`）
   加一节 `test_pool`，远程后端也吃到（`1.5.3`）
+
+### ORM（`src/orm/`）
+
+- **单表 ORM 核心**（`1.12.0-dev`，#88 的 #89/#90/#91/#92）：建在现有
+  `db` 模块之上的 C++11 模型层与 CRUD 层。模型用
+  `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` 声明表名、列名、单列主键、自增、
+  可空与只读标志；`nullable<T>` 显式区分 SQL NULL 与 `T()` / 空串，
+  `validate_model<T>()` 在运行期拒绝没有模型、没有主键、复合主键、
+  未知字段类型与矛盾标志。公开头安装到 `include/orm/`，不新增 C ABI
+  符号，也不改变 `src/db/` 的任何行为。
+- **参数化单表 SQL 构造**（`1.12.0-dev`，#90）：`select<T>()` /
+  `insert<T>()` / `update<T>()` / `delete_from<T>()` 生成 SQL 与
+  `uvcpp_db_params`；WHERE 支持 eq/ne/lt/le/gt/ge/like、IN、
+  IS NULL / IS NOT NULL 与 `or_where_*`（组内 AND、组间 OR 自动加括号），
+  另有 `order_by`、`limit`/`offset`、`count()` 与 `build_count()`。
+  值一律走参数绑定；表名/列名只能来自模型元数据，标识符按方言加引号。
+  SQLite/MySQL 用 `?`，PostgreSQL 用 `$1..$n`；方言由调用方显式传入。
+  `update`/`delete_from` 没有 WHERE 时拒绝生成，`offset` 没有 `limit`
+  时拒绝生成。`raw()` 逃生舱只校验方言与占位符数量，不做标识符白名单
+  或值改写。
+- **结果映射与同步 CRUD**（`1.12.0-dev`，#91）：`find_by_pk` /
+  `find_all` / `insert` / `update` / `remove` / `count` 接受
+  `uvcpp_db_client`、`uvcpp_db_pool` 或 `uvcpp_db_tx`。结果按**列名**
+  映射（不按列位置），`nullable<T>` 收 NULL 是空态，非空字段收 NULL 是
+  `NULL_VIOLATION`，缺列/类型不匹配/整数越界分别报
+  `MISSING_COLUMN` / `TYPE_MISMATCH`。`insert` 跳过自增与只读列并回填
+  `last_insert_id`；`update` 的 SET 不含主键；`find_by_pk` 没找到返回
+  `NOT_FOUND`；UPDATE/DELETE 影响 0 行仍是 `OK`。
+- **事务与异步集成**（`1.12.0-dev`，#92）：ORM 不自己 begin/commit，
+  `uvcpp_db_tx&` 重载直接复用事务体的连接与第一条失败后不再发语句的
+  语义；`<orm/uvcpp_orm_async.h>` 的回调式 CRUD 复用
+  `uvcpp_db_pool` 的现有异步路径，回调在循环线程上恰好一次，投递失败
+  返回负的 libuv 码且不调回调。PostgreSQL 走池子已有的真异步路径，
+  SQLite/MySQL/ODBC 仍走 `uv_queue_work` 线程池；`insert_async` 走
+  `pool.transaction()` + INSERT 以取回自增值。ORM 不新增线程或连接池。
+- **示例与打包**（`1.12.0-dev`，文档/示例部分）：新增
+  `examples/orm_crud/`（真实 SQLite 上跑 create table → insert →
+  find_by_pk → find_all+total → update → remove，失败以非 0 退出）；
+  `package_release.py` 按模块目录收集 `src/orm/*.h`，没有 ORM 私有头。
+- **如实列出的 1.12.0 边界**：不做 JOIN/关联、迁移/schema sync、复合
+  主键、代码生成器、MongoDB ORM、C ABI 暴露或 C++20 协程。SQL 构造的
+  MySQL/PostgreSQL golden 用例已覆盖占位符与标识符转义，但**ORM 的
+  CRUD 映射尚未在真 MySQL/PostgreSQL 上跑过**（`orm_*` 用例目前只对
+  SQLite 真库）；跨后端测试（#93）与性能门禁（#95）仍是发布前的未完成
+  项，详见 [`doc/orm-guide.md`](doc/orm-guide.md) §14。
 
 ### Redis（`src/redis/`）
 
