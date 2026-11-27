@@ -29,6 +29,24 @@ const char* uvcpp_orm_status_name(uvcpp_orm_status status) {
       return "invalid_auto_increment";
     case uvcpp_orm_status::UNSUPPORTED_TYPE: return "unsupported_type";
     case uvcpp_orm_status::CONFLICTING_FLAGS: return "conflicting_flags";
+    case uvcpp_orm_status::INVALID_DIALECT: return "invalid_dialect";
+    case uvcpp_orm_status::UNKNOWN_COLUMN: return "unknown_column";
+    case uvcpp_orm_status::EMPTY_COLUMN_LIST: return "empty_column_list";
+    case uvcpp_orm_status::INVALID_OPERATOR: return "invalid_operator";
+    case uvcpp_orm_status::EMPTY_IN_VALUES: return "empty_in_values";
+    case uvcpp_orm_status::INVALID_ORDER_DIRECTION:
+      return "invalid_order_direction";
+    case uvcpp_orm_status::INVALID_LIMIT: return "invalid_limit";
+    case uvcpp_orm_status::INVALID_OFFSET: return "invalid_offset";
+    case uvcpp_orm_status::OFFSET_WITHOUT_LIMIT:
+      return "offset_without_limit";
+    case uvcpp_orm_status::EMPTY_WHERE: return "empty_where";
+    case uvcpp_orm_status::EMPTY_SET: return "empty_set";
+    case uvcpp_orm_status::INVALID_COUNT_QUERY:
+      return "invalid_count_query";
+    case uvcpp_orm_status::EMPTY_RAW_SQL: return "empty_raw_sql";
+    case uvcpp_orm_status::PARAM_COUNT_MISMATCH:
+      return "param_count_mismatch";
   }
   return "unknown";
 }
