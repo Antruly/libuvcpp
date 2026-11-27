@@ -21,6 +21,9 @@ out/
 _deps/
 _local_*/
 Testing/
+# db/ORM 基线的原始结果（日志、summary、临时 SQLite 文件）是本机产物，
+# 不进仓库；报告引用命令、机器信息和摘要，原始数据由脚本重新生成。
+bench/orm/results/
 
 # 测试临时目录（用例按相对名在当前目录建）
 #
