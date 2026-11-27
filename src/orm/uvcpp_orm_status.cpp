@@ -47,6 +47,13 @@ const char* uvcpp_orm_status_name(uvcpp_orm_status status) {
     case uvcpp_orm_status::EMPTY_RAW_SQL: return "empty_raw_sql";
     case uvcpp_orm_status::PARAM_COUNT_MISMATCH:
       return "param_count_mismatch";
+    case uvcpp_orm_status::NOT_FOUND: return "not_found";
+    case uvcpp_orm_status::MAPPING_FAILED: return "mapping_failed";
+    case uvcpp_orm_status::MISSING_COLUMN: return "missing_column";
+    case uvcpp_orm_status::TYPE_MISMATCH: return "type_mismatch";
+    case uvcpp_orm_status::NULL_VIOLATION: return "null_violation";
+    case uvcpp_orm_status::DB_ERROR: return "db_error";
+    case uvcpp_orm_status::INVALID_ARGUMENT: return "invalid_argument";
   }
   return "unknown";
 }

@@ -907,6 +907,52 @@ class uvcpp_orm_select_builder
     return result;
   }
 
+  /// 只按 WHERE 生成 `SELECT COUNT(*) FROM ...`，**忽略**已选的列、ORDER BY、
+  /// LIMIT 与 OFFSET。给仓库的 `find_all(..., total)` 用：分页查询本身带
+  /// LIMIT，而总数必须不计分页。
+  ///
+  /// 与 `count()` 的区别：`count()` 是“把这个构造器变成 COUNT 查询”，所以
+  /// 它会拒绝和列选择/ORDER/LIMIT 组合；`build_count()` 是“从同一个 WHERE
+  /// 再生成一条 COUNT 查询”，组合进来的那几项按定义被忽略。两者的 WHERE
+  /// 渲染与参数顺序完全一致（复用 `render_where()`）。
+  uvcpp_orm_sql_result build_count() const {
+    uvcpp_orm_sql_result result;
+    result.dialect = this->dialect_;
+
+    std::string error;
+    const uvcpp_orm_status validated =
+        orm_detail::validate_statement<T>(this->dialect_, &error);
+    if (validated != uvcpp_orm_status::OK) {
+      result.status = validated;
+      result.error = error;
+      return result;
+    }
+    if (this->failed_) {
+      result.status = this->status_;
+      result.error = this->error_;
+      return result;
+    }
+
+    std::string sql = "SELECT COUNT(*) FROM ";
+    orm_detail::append_quoted(&sql, this->dialect_,
+                              model_traits<T>::table_name());
+
+    std::size_t next_index = 0u;
+    std::string where;
+    const uvcpp_orm_status where_status =
+        this->render_where(&where, &result.params, &next_index, &error);
+    if (where_status != uvcpp_orm_status::OK) {
+      result.status = where_status;
+      result.error = error;
+      return result;
+    }
+    sql += where;
+
+    result.status = uvcpp_orm_status::OK;
+    result.sql = sql;
+    return result;
+  }
+
  private:
   void add_order(const uvcpp_orm_column* column, uvcpp_orm_order order) {
     orm_detail::uvcpp_orm_order_term term;

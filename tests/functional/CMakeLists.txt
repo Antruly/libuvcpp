@@ -317,10 +317,14 @@ endif()
 # 与 zlib / nghttp2 那几处同一个形状，见 `doc/db-guide.md` 里记的那个已知缺口）。
 # 不补这一句，`-DUVCPP_BUILD_SHARED=OFF -DUVCPP_ENABLE_DB=ON` 那条配置下这里的
 # 每条 db 用例都是 `undefined reference to sqlite3_open_v2`。
+#
+# ORM 的执行层用例（`orm_*`）同样直接 include `<db/uvcpp_db.h>`，静态库构建
+# 下也需要这份链接行；纯元数据/SQL 构造用例（`orm_model_func` / `orm_sql_func`）
+# 多链一个客户端库没有副作用。两个前缀互不覆盖，写成 OR。
 if(UVCPP_ENABLE_DB AND UVCPP_DB_LINK_LIBS)
   foreach(_db_src ${FUNC_SOURCES})
     get_filename_component(_db_name ${_db_src} NAME_WE)
-    if(_db_name MATCHES "db")
+    if(_db_name MATCHES "db" OR _db_name MATCHES "orm_")
       target_link_libraries(test_${_db_name} PRIVATE ${UVCPP_DB_LINK_LIBS})
     endif()
   endforeach()

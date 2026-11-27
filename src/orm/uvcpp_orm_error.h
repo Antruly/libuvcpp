@@ -111,6 +111,36 @@ enum class uvcpp_orm_status : int {
 
   /// SQL 里的占位符数量与 `uvcpp_db_params` 的数量对不上。
   PARAM_COUNT_MISMATCH,
+
+  // ---- 执行与结果映射（#91）----
+
+  /// 查询成功，但一行都没有（目前只由 `find_by_pk<T>()` 返回）。
+  /// 与 `DB_ERROR` 分开：主键没找到不是数据库失败，调用方通常要分支处理。
+  NOT_FOUND,
+
+  /// 结果集与模型对不上，且不属于下面几种更具体的类别。因为某个字段映射
+  /// 失败而整体放弃；错误串里带行号、字段名与列名。
+  MAPPING_FAILED,
+
+  /// 结果集缺一个**非空**模型字段的列。可空字段缺列是合法的（写空
+  /// `nullable<T>`），非空字段缺列无法凭空造值。错误串里带字段名与列名。
+  MISSING_COLUMN,
+
+  /// 结果值的类型不能映射到模型字段（例如 TEXT 值映射到 `std::int32_t`，
+  /// 或整数超出字段宽度）。错误串里带字段名、列名与实际类型。
+  TYPE_MISMATCH,
+
+  /// SQL NULL 落到了非空字段上。`nullable<T>` 收到 NULL 是成功的空态，
+  /// 不算这一条。
+  NULL_VIOLATION,
+
+  /// 数据库执行失败。具体后端返回码保存在 `uvcpp_db_status` 出参里（以及
+  /// `db.last_error()` 的原文里）；`error` 串里也会带返回码短名与原文。
+  DB_ERROR,
+
+  /// 仓库 API 的参数不合法（空 out 指针、空/NULL 主键、SQL 方言与连接
+  /// 不匹配等）。这是调用方的用法错误，不是数据库错误。
+  INVALID_ARGUMENT,
 };
 
 /// 返回码的稳定短名（小写下划线），用于日志与测试断言。
