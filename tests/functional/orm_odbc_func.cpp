@@ -27,13 +27,26 @@ struct orm_odbc_account {
 };
 
 UVCPP_ORM_MODEL(orm_odbc_account, "orm_odbc_accounts")
-UVCPP_ORM_FIELD(orm_odbc_account, id, "id",
-                UVCPP_ORM_PRIMARY_KEY | UVCPP_ORM_AUTO_INCREMENT)
+// ODBC/psqlODBC does not expose a portable last-insert-id; this test supplies
+// the primary key explicitly for both SQLite and PostgreSQL data sources.
+UVCPP_ORM_FIELD(orm_odbc_account, id, "id", UVCPP_ORM_PRIMARY_KEY)
 UVCPP_ORM_FIELD(orm_odbc_account, email, "email",
                 UVCPP_ORM_NOT_NULL | UVCPP_ORM_UNIQUE)
 UVCPP_ORM_FIELD(orm_odbc_account, age, "age", UVCPP_ORM_NONE)
 UVCPP_ORM_FIELD(orm_odbc_account, score, "score", UVCPP_ORM_NOT_NULL)
 UVCPP_ORM_FIELD(orm_odbc_account, active, "active", UVCPP_ORM_NOT_NULL)
+UVCPP_ORM_MODEL_END()
+
+struct orm_odbc_auto {
+  std::int64_t id;
+  std::string email;
+};
+
+UVCPP_ORM_MODEL(orm_odbc_auto, "orm_odbc_auto")
+UVCPP_ORM_FIELD(orm_odbc_auto, id, "id",
+                UVCPP_ORM_PRIMARY_KEY | UVCPP_ORM_AUTO_INCREMENT)
+UVCPP_ORM_FIELD(orm_odbc_auto, email, "email",
+                UVCPP_ORM_NOT_NULL | UVCPP_ORM_UNIQUE)
 UVCPP_ORM_MODEL_END()
 
 namespace {
@@ -61,6 +74,21 @@ bool require_server() {
   return value != nullptr && std::string(value) == "1";
 }
 
+std::string lower_copy(std::string value) {
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    if (value[i] >= 'A' && value[i] <= 'Z') {
+      value[i] = static_cast<char>(value[i] - 'A' + 'a');
+    }
+  }
+  return value;
+}
+
+bool odbc_url_is_postgres(const std::string& url) {
+  const std::string lower = lower_copy(url);
+  return lower.find("psqlodbc") != std::string::npos ||
+         lower.find("postgres") != std::string::npos;
+}
+
 }  // namespace
 
 int main() {
@@ -86,17 +114,30 @@ int main() {
   uvcpp::uvcpp_db_status db_status = uvcpp::uvcpp_db_status::OK;
   std::string error;
   uvcpp::uvcpp_orm_status orm_status = uvcpp::uvcpp_orm_status::OK;
+  const bool postgres = odbc_url_is_postgres(url);
+  // ODBC's parameter marker is `?` for every data source (psqlODBC included),
+  // so the ORM must use the positional dialect even when the server is
+  // PostgreSQL. Identifier quoting stays double-quoted for both.
+  const uvcpp::uvcpp_orm_dialect dialect =
+      uvcpp::uvcpp_orm_dialect::sqlite;
 
   status = db.execute("DROP TABLE IF EXISTS orm_odbc_accounts");
   check(uvcpp::uvcpp_db_ok(status), "drop table");
-  status = db.execute(
-      "CREATE TABLE orm_odbc_accounts ("
-      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-      "email TEXT NOT NULL UNIQUE,"
-      "age INTEGER NULL,"
-      "score REAL NOT NULL,"
-      "active INTEGER NOT NULL)"
-  );
+  const char* ddl =
+      postgres
+          ? "CREATE TABLE orm_odbc_accounts ("
+            "id BIGINT PRIMARY KEY,"
+            "email VARCHAR(120) NOT NULL UNIQUE,"
+            "age INTEGER NULL,"
+            "score DOUBLE PRECISION NOT NULL,"
+            "active INTEGER NOT NULL)"
+          : "CREATE TABLE orm_odbc_accounts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "email TEXT NOT NULL UNIQUE,"
+            "age INTEGER NULL,"
+            "score REAL NOT NULL,"
+            "active INTEGER NOT NULL)";
+  status = db.execute(ddl);
   check(uvcpp::uvcpp_db_ok(status), "create table");
   if (!uvcpp::uvcpp_db_ok(status)) {
     std::printf("create failed: %s (%s)\n",
@@ -123,6 +164,11 @@ int main() {
 
   orm_odbc_account got;
   orm_status = uvcpp::find_by_pk(db, alice_id, &got, &error, &db_status);
+  if (orm_status != uvcpp::uvcpp_orm_status::OK) {
+    std::printf("find detail: %s | %s | id=%s\n",
+                uvcpp::uvcpp_orm_status_name(orm_status), error.c_str(),
+                alice_id.to_text().c_str());
+  }
   check(orm_status == uvcpp::uvcpp_orm_status::OK, "find_by_pk");
   check(got.email == alice.email, "find_by_pk email");
   check(got.age.has_value() && got.age.value() == 30, "find_by_pk age");
@@ -146,7 +192,7 @@ int main() {
   int64_t total = 0;
   orm_status = uvcpp::find_all(
       db,
-      uvcpp::select<orm_odbc_account>(uvcpp::uvcpp_orm_dialect::sqlite)
+      uvcpp::select<orm_odbc_account>(dialect)
           .where_eq(&orm_odbc_account::email,
                     std::string("alice@example.com")),
       &rows, &error, &total, &db_status);
@@ -157,7 +203,7 @@ int main() {
   int64_t counted = -1;
   orm_status = uvcpp::count<orm_odbc_account>(
       db,
-      uvcpp::select<orm_odbc_account>(uvcpp::uvcpp_orm_dialect::sqlite),
+      uvcpp::select<orm_odbc_account>(dialect),
       &counted, &error, &db_status);
   check(orm_status == uvcpp::uvcpp_orm_status::OK, "count");
   check(counted == 1, "count value");
@@ -178,7 +224,7 @@ int main() {
     int64_t after_rollback = -1;
     orm_status = uvcpp::count<orm_odbc_account>(
         db,
-        uvcpp::select<orm_odbc_account>(uvcpp::uvcpp_orm_dialect::sqlite),
+        uvcpp::select<orm_odbc_account>(dialect),
         &after_rollback, &error, &db_status);
     check(orm_status == uvcpp::uvcpp_orm_status::OK, "count after rollback");
     check(after_rollback == 1, "rollback removed the row");
@@ -197,7 +243,7 @@ int main() {
     int64_t after_commit = -1;
     orm_status = uvcpp::count<orm_odbc_account>(
         db,
-        uvcpp::select<orm_odbc_account>(uvcpp::uvcpp_orm_dialect::sqlite),
+        uvcpp::select<orm_odbc_account>(dialect),
         &after_commit, &error, &db_status);
     check(orm_status == uvcpp::uvcpp_orm_status::OK, "count after commit");
     check(after_commit == 2, "commit kept the row");
@@ -222,6 +268,41 @@ int main() {
 
   orm_status = uvcpp::find_by_pk(db, alice_id, &got, &error, &db_status);
   check(orm_status == uvcpp::uvcpp_orm_status::NOT_FOUND, "find after remove");
+
+  // ODBC last-insert-id: SQLite uses last_insert_rowid(), psqlODBC uses lastval().
+  db.execute("DROP TABLE IF EXISTS orm_odbc_auto");
+  const char* auto_ddl =
+      postgres
+          ? "CREATE TABLE orm_odbc_auto ("
+            "id BIGSERIAL PRIMARY KEY,"
+            "email VARCHAR(120) NOT NULL UNIQUE)"
+          : "CREATE TABLE orm_odbc_auto ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "email TEXT NOT NULL UNIQUE)";
+  status = db.execute(auto_ddl);
+  check(uvcpp::uvcpp_db_ok(status), "create auto table");
+  if (uvcpp::uvcpp_db_ok(status)) {
+    orm_odbc_auto generated;
+    generated.email = "auto@example.com";
+    uvcpp::uvcpp_db_value generated_id;
+    orm_status = uvcpp::insert(db, generated, &generated_id, &error, &db_status);
+    check(orm_status == uvcpp::uvcpp_orm_status::OK, "auto increment insert");
+    if (generated_id.is_null()) {
+      std::printf("auto id detail: direct=%s last_error=%s\n",
+                  db.last_insert_id().to_text().c_str(),
+                  db.last_error().c_str());
+    }
+    check(!generated_id.is_null(), "ODBC last-insert-id returned a value");
+    if (!generated_id.is_null()) {
+      orm_odbc_auto reread;
+      orm_status = uvcpp::find_by_pk(db, generated_id, &reread, &error,
+                                     &db_status);
+      check(orm_status == uvcpp::uvcpp_orm_status::OK,
+            "auto increment find_by_pk");
+      check(reread.email == generated.email, "auto increment email");
+    }
+    db.execute("DROP TABLE IF EXISTS orm_odbc_auto");
+  }
 
   db.execute("DROP TABLE IF EXISTS orm_odbc_accounts");
   std::printf("[orm_odbc] checks=%d failures=%d\n", checks, failures);
