@@ -95,6 +95,9 @@ MACROS = [
     # 这份产物走的是哪条路（两条路的**失败方式**不同，见 uvcpp_config.h.in 里
     # 那一段）。`GUARD_RE` 只认 `_ENABLE` 结尾的宏，所以它不参与那份扫描。
     "UVCPP_DB_RUNTIME_LOAD",
+    # ORM 的开关也进契约：它同时出现在生成头与导出集里，且 DB 关掉时会被
+    # 强制置 0。发布包里的公开头（`include/orm/`）靠这个宏决定声明是否可见。
+    "UVCPP_ORM_ENABLE",
     "UVCPP_TRY_WRITE_ENABLE",
     "UVCPP_TRY_WRITE_MIN_BYTES",
     "UVCPP_UDP_GSO_ENABLE",

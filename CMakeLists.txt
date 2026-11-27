@@ -269,6 +269,15 @@ set(UVCPP_DB_MONGODB_INCLUDE_DIR "" CACHE PATH
 option(UVCPP_DB_RUNTIME_LOAD
   "Load the MySQL/PostgreSQL/ODBC client libraries at run time instead of linking them (keeps the artifact free of DT_NEEDED entries for them)" OFF)
 
+# 单表 ORM 的**模型声明与元数据**层（`src/orm/`）。它不生成 SQL、不做 CRUD，
+# 也不碰任何数据库客户端库；但它的值层复用 `uvcpp_db_value`，所以依赖 DB。
+#
+# 默认 OFF 与 DB 同一条理由：DB 默认关，ORM 没有 DB 就编不出公开头里的类型。
+# 依赖不成立时**配置期警告并强制关掉**（与 DB 后端“找不到就降级并出声”同形），
+# 而不是让使用者在编译期撞一串 `uvcpp_db_value` 未声明。
+option(UVCPP_BUILD_ORM
+  "Enable the ORM model metadata layer (src/orm/); requires UVCPP_ENABLE_DB=ON" OFF)
+
 # Redis 客户端（`src/redis/`）—— **默认 ON**，而且**没有任何第三方依赖**：
 # RESP2/RESP3 的编解码是本仓自己实现的（`src/redis/uvcpp_redis_resp.cpp`），
 # 传输复用 `uvcpp_tcp_client`，不用 hiredis、不链任何东西。
@@ -1546,6 +1555,17 @@ if(UVCPP_ENABLE_DB)
   list(REMOVE_DUPLICATES UVCPP_DB_INCLUDE_DIRS)
 endif()
 
+# ORM 依赖 DB（值层直接用 `uvcpp_db_value`）。位置必须在 DB 的所有降级**之后**
+# —— 上面那一段可能因为“一个后端都没成”把 DB 整个关掉，那种配置下 ORM 同样
+# 没有意义。这里用普通变量 `set(... OFF)`，与 DB 子后端降级同形：cache 里仍然
+# 可能是 ON，判据是下面那句 `Including orm module` 有没有出现。
+if(UVCPP_BUILD_ORM AND NOT UVCPP_ENABLE_DB)
+  message(WARNING
+    "UVCPP_BUILD_ORM=ON 需要 UVCPP_ENABLE_DB=ON（ORM 的值层复用 "
+    "uvcpp_db_value）。已强制关闭 ORM 模块。")
+  set(UVCPP_BUILD_ORM OFF)
+endif()
+
 if(UVCPP_ENABLE_HTTP3)
   # 这两条路径在 `function` 作用域**外面**先定一份：nghttp3_static 不给
   # build-interface 的 include 目录（见下面那段），我们的目标必须自己把它加上，
@@ -1837,6 +1857,15 @@ if(UVCPP_ENABLE_DB)
   file(GLOB DB_SRC_FILES CONFIGURE_DEPENDS
        "${CMAKE_SOURCE_DIR}/src/db/*.h" "${CMAKE_SOURCE_DIR}/src/db/*.cpp")
   source_group("db" FILES ${DB_SRC_FILES})
+endif()
+
+# orm module source_group
+# CONFIGURE_DEPENDS 的理由与 db/capi/quic/http3 那几段逐字相同。同一个
+# ORM_SRC_FILES 还在下面被用来做"空模块"判据。
+if(UVCPP_BUILD_ORM)
+  file(GLOB ORM_SRC_FILES CONFIGURE_DEPENDS
+       "${CMAKE_SOURCE_DIR}/src/orm/*.h" "${CMAKE_SOURCE_DIR}/src/orm/*.cpp")
+  source_group("orm" FILES ${ORM_SRC_FILES})
 endif()
 
 # redis module source_group
@@ -2256,6 +2285,18 @@ else()
   add_compile_definitions(UVCPP_DB_ENABLE=0)
   message(STATUS "Database module disabled (UVCPP_DB_ENABLE=0)")
 endif()
+
+# ORM 的编译宏**不独立于 DB**：`UVCPP_BUILD_ORM` 在 DB 关掉时已经被强制置
+# OFF，所以这里只可能是 0。公开头仍然同时守 `UVCPP_ORM_ENABLE && UVCPP_DB_ENABLE`
+# 两道 —— 消费方手写 `-DUVCPP_ORM_ENABLE=1` 而没有 DB 时，得到的是空声明，
+# 而不是一串 `uvcpp_db_value` 未声明的级联错误。
+if(UVCPP_BUILD_ORM)
+  add_compile_definitions(UVCPP_ORM_ENABLE=1)
+  message(STATUS "ORM module enabled (UVCPP_ORM_ENABLE=1)")
+else()
+  add_compile_definitions(UVCPP_ORM_ENABLE=0)
+  message(STATUS "ORM module disabled (UVCPP_ORM_ENABLE=0)")
+endif()
 # 五个后端宏（SQL 四个 + MongoDB）**不受主开关守卫**：主开关关掉时它们照样按"这个后端编不编"取 0。
 # 写成 `if(UVCPP_ENABLE_DB) ... else 三个都 0` 的话，`uvcpp_db_factory.cpp` 里
 # 那句 `#if UVCPP_DB_SQLITE_ENABLE` 在模块关掉时是**未定义标识符**（求值为 0，
@@ -2523,6 +2564,22 @@ else()
     message(FATAL_ERROR
       "UVCPP_ENABLE_DB=ON 但 src/db/ 下一个文件都没有 —— 这个配置会编出一个"
       "不含任何数据库代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
+  endif()
+endif()
+
+# 根据 UVCPP_BUILD_ORM 排除 orm 模块。形状与 db/capi 那两段逐字相同 ——
+# 包括为什么两个列表都要排（SOURCES 管编不编，HEADERS 管会不会进安装/导出）。
+# 它只影响 `src/orm/`，不改变 `src/db/` 的任何行为。
+if(NOT UVCPP_BUILD_ORM)
+  message(STATUS "Excluding orm module from build")
+  list(FILTER UVCPP_SOURCES EXCLUDE REGEX "src/orm/")
+  list(FILTER UVCPP_HEADERS EXCLUDE REGEX "src/orm/")
+else()
+  message(STATUS "Including orm module in build (model metadata)")
+  if(NOT ORM_SRC_FILES)
+    message(FATAL_ERROR
+      "UVCPP_BUILD_ORM=ON 但 src/orm/ 下一个文件都没有 —— 这个配置会编出一个"
+      "不含任何 ORM 元数据代码的库，而且一路绿。要么把源文件补上，要么关掉这个开关。")
   endif()
 endif()
 
@@ -2800,6 +2857,7 @@ _uvcpp_literal01(UVCPP_DB_MYSQL_ENABLE  UVCPP_ENABLE_DB_MYSQL)
 _uvcpp_literal01(UVCPP_DB_PGSQL_ENABLE  UVCPP_ENABLE_DB_PGSQL)
 _uvcpp_literal01(UVCPP_DB_ODBC_ENABLE   UVCPP_ENABLE_DB_ODBC)
 _uvcpp_literal01(UVCPP_DB_MONGODB_ENABLE UVCPP_ENABLE_DB_MONGODB)
+_uvcpp_literal01(UVCPP_ORM_ENABLE       UVCPP_BUILD_ORM)
 # 名字两边**一样**，这是这份文件里唯一的一处（别的都是 `UVCPP_ENABLE_X` 对
 # `UVCPP_X_ENABLE`）。理由：它不属于那两个族里的任何一个 —— 既不是"开关某个
 # 模块"（`UVCPP_ENABLE_*`），也不只是"这份依赖怎么来"（`*_FROM_SOURCE`，那两个
@@ -2885,6 +2943,7 @@ foreach (_uvcpp_t uvcpp uvcpp_a uvcpp_s uvcpp_a_s)
       UVCPP_DB_ODBC_ENABLE=${UVCPP_DB_ODBC_ENABLE}
       UVCPP_DB_MONGODB_ENABLE=${UVCPP_DB_MONGODB_ENABLE}
       UVCPP_DB_RUNTIME_LOAD=${UVCPP_DB_RUNTIME_LOAD}
+      UVCPP_ORM_ENABLE=${UVCPP_ORM_ENABLE}
       UVCPP_TRY_WRITE_ENABLE=${UVCPP_TRY_WRITE_ENABLE}
       UVCPP_TRY_WRITE_MIN_BYTES=${UVCPP_TRY_WRITE_MIN_BYTES}
       UVCPP_UDP_GSO_ENABLE=${UVCPP_UDP_GSO_ENABLE}
@@ -3782,6 +3841,14 @@ list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_mongodb_api\\.h$")
 list(FILTER DB_HEADER_FILES EXCLUDE REGEX "uvcpp_db_runtime_load\\.h$")
 if(DB_HEADER_FILES AND UVCPP_ENABLE_DB)
   install(FILES ${DB_HEADER_FILES} DESTINATION include/db)
+endif()
+
+# src/orm/ —— 单表 ORM 的模型声明与元数据层。三份头都是公开面：
+# value（nullable + 类型映射）、model（字段元数据/宏/校验）、error（返回码）。
+# 没有私有头 —— 这一层还没有实现细节要藏。
+file(GLOB ORM_HEADER_FILES "${CMAKE_SOURCE_DIR}/src/orm/*.h")
+if(ORM_HEADER_FILES AND UVCPP_BUILD_ORM)
+  install(FILES ${ORM_HEADER_FILES} DESTINATION include/orm)
 endif()
 
 # src/redis/ 的公开头：只有 `uvcpp_redis.h` 一份进包。`uvcpp_redis_resp.h` 是
