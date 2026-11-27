@@ -18,6 +18,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 #include <uvcpp/uvcpp_define.h>
 #include <handle/uvcpp_loop.h>
 #include <net/uvcpp_tcp_client.h>
@@ -97,6 +99,17 @@ class UVCPP_API uvcpp_ws_client {
    * 失败来自认证或目标（REP 码）。只读，不改变任何状态。
    */
   bool socks5_proxy_connect_failed() const;
+
+  /**
+   * @brief 给 HTTP Upgrade 请求追加一个头（Authorization / Cookie / Origin /
+   *        Sec-WebSocket-Protocol 等）。**必须在 connect() 之前调**。
+   *
+   * 标准握手头（Host、Upgrade、Connection、Sec-WebSocket-Key、
+   * Sec-WebSocket-Version、Sec-WebSocket-Extensions）是保留的，按名字大小写
+   * 不敏感地忽略。名字或值里出现 CR/LF 时整条忽略，避免向请求注入额外头。
+   * 同名头（大小写不敏感）覆盖上一次的值，发送顺序为首次添加的顺序。
+   */
+  void set_handshake_header(const std::string& name, const std::string& value);
 
   // -------------------------------------------------------------------
   // 会话 / 收发 / 关闭 —— 都是**转发给当前会话**（0 或 1 个）
@@ -246,6 +259,8 @@ class UVCPP_API uvcpp_ws_client {
   std::string ws_host_;
   std::string ws_path_;
   std::string ws_key_;
+  /// `set_handshake_header()` 存下来的额外 Upgrade 头（按首次添加顺序发送）。
+  std::vector<std::pair<std::string, std::string>> handshake_headers_;
   std::string handshake_buf_;  // accumulates partial 101 response
 
   /// 101 头部之后、跟着同一批到达的字节（第一帧很可能就在里面）。由

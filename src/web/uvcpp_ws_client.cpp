@@ -248,6 +248,27 @@ int uvcpp_ws_client::connect_wait(const std::string& url,
   return err;
 }
 
+void uvcpp_ws_client::set_handshake_header(const std::string& name,
+                                           const std::string& value) {
+  if (name.empty() || name.find_first_of("\r\n") != std::string::npos ||
+      value.find_first_of("\r\n") != std::string::npos) {
+    return;
+  }
+  static const char* kReserved[] = {"host", "upgrade", "connection",
+                                    "sec-websocket-key", "sec-websocket-version",
+                                    "sec-websocket-extensions"};
+  for (const char* reserved : kReserved) {
+    if (uvcpp_ws_ext_detail::token_equal(name, reserved)) return;
+  }
+  for (auto& item : handshake_headers_) {
+    if (uvcpp_ws_ext_detail::token_equal(item.first, name.c_str())) {
+      item.second = value;
+      return;
+    }
+  }
+  handshake_headers_.emplace_back(name, value);
+}
+
 void uvcpp_ws_client::do_handshake(const std::string& host, int port,
                                     const std::string& path, const std::string& key) {
 #if UVCPP_OPENSSL_ENABLE
@@ -300,6 +321,9 @@ void uvcpp_ws_client::do_handshake(const std::string& host, int port,
       if (!ext.empty()) req += "Sec-WebSocket-Extensions: " + ext + "\r\n";
     }
 #endif
+    for (const auto& header : handshake_headers_) {
+      req += header.first + ": " + header.second + "\r\n";
+    }
     req += "\r\n";
     tcp_->write(req.c_str(), req.size(), [this](int) {
       // Read the 101 response

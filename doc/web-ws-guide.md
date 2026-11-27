@@ -45,7 +45,7 @@ HTTP 的服务端与 WS 的服务端会在同一个 `uvcpp_http_server` 上碰�
 | 类 | 头 | 角色 |
 |---|---|---|
 | `uvcpp_ws_server` | `src/web/uvcpp_ws_server.h:46` | 挂在 HTTP 服务器上做**握手**（识别升级 → 算 Accept → 回 101 → 建会话）。自己不管帧收发 |
-| `uvcpp_ws_client` | `src/web/uvcpp_ws_client.h:56` | 解析 `ws://` / `wss://`、发升级请求、校验 101、建会话。**同时持有自己的 loop** |
+| `uvcpp_ws_client` | `src/web/uvcpp_ws_client.h:58` | 解析 `ws://` / `wss://`、发升级请求、校验 101、建会话。**同时持有自己的 loop** |
 | `uvcpp_ws_connection` | `src/web/uvcpp_ws_connection.h:66-66` | 真正的 WS 语义：帧解析与序列化、掩码、分片重组、压缩、Close 握手、发送队列 |
 | `uvcpp_ws_sessions` | `src/web/uvcpp_ws_sessions.h:36` | 会话归属表 + **延迟回收器**。不是广播器 |
 | `uvcpp_ws_parser` | `src/web/uvcpp_ws_parser.h:38` | 纯字节流解析器。正常用不到，`uvcpp_ws_connection` 内部自己持有一个 |
@@ -54,7 +54,7 @@ HTTP 的服务端与 WS 的服务端会在同一个 `uvcpp_http_server` 上碰�
 **服务端与客户端拿到的是同一个类**（`uvcpp_ws_connection`），靠 `ws_role` 区分方向
 （`src/web/uvcpp_ws_connection.h:61-61`）：服务端 `new uvcpp_ws_connection(client, ws_role::SERVER)`
 （`src/web/uvcpp_ws_server.cpp:286-286`），客户端
-`new uvcpp_ws_connection(tcp_, ws_role::CLIENT)`（`src/web/uvcpp_ws_client.cpp:374`）。
+`new uvcpp_ws_connection(tcp_, ws_role::CLIENT)`（`src/web/uvcpp_ws_client.cpp:398`）。
 两侧唯一的差别是掩码方向（`src/web/uvcpp_ws_connection.cpp:251-251`）与压缩窗口方向
 （`src/web/uvcpp_ws_parser.cpp:278`）。
 
@@ -146,10 +146,9 @@ size_t session_count() const;                        // :203
 h2/h3 的 WS（extended CONNECT）只回客户端提议里的**第一个** —— 一个合法的
 服务端选择，那边还没有接服务端偏好表。
 
-**客户端这一层仍然不发**这个头：`uvcpp_ws_client` 的请求里只有 `Host` /
-`Upgrade` / `Connection` / `Sec-WebSocket-Key` / `Sec-WebSocket-Version: 13` /
-可选扩展（`src/web/uvcpp_ws_client.cpp:288`）。要按子协议连，得自持
-`uvcpp_http_server::on_upgrade` 槽、自己拼 101（或者用 h2/h3 那条腿）。
+**客户端**用 `uvcpp_ws_client::set_handshake_header("Sec-WebSocket-Protocol", "chat")`
+提议（`connect()` 之前调）。同一个入口也可以带 `Authorization` / `Cookie` /
+`Origin` 等自定义头；细节见 §8 客户端。
 
 ### 缺 `Sec-WebSocket-Key` 时是**静默**的
 
@@ -300,16 +299,39 @@ int send_close(ws_close_code code = ws_close_code::NORMAL,
 ```cpp
 // doc-snippet: fragment — 对着头文件抄的接口清单，不是完整翻译单元
 int  connect(const std::string& url,
-             std::function<void(uvcpp_ws_connection*, int error)> cb);  // src/web/uvcpp_ws_client.h:66
+             std::function<void(uvcpp_ws_connection*, int error)> cb);  // src/web/uvcpp_ws_client.h:68
 int  connect_wait(const std::string& url, uvcpp_ws_connection*& out_conn,
-                  int timeout_ms = 30000);                              // src/web/uvcpp_ws_client.h:70
-uvcpp_ws_connection* session() const;                                   // src/web/uvcpp_ws_client.h:110-110
+                  int timeout_ms = 30000);                              // src/web/uvcpp_ws_client.h:72
+uvcpp_ws_connection* session() const;                                   // src/web/uvcpp_ws_client.h:123-123
 void close(ws_close_code code = ws_close_code::NORMAL,
-           const std::string& reason = std::string());                  // src/web/uvcpp_ws_client.h:164-165
-int  run(uv_run_mode md = UV_RUN_DEFAULT);                              // src/web/uvcpp_ws_client.h:171-171
-void stop();                                                            // src/web/uvcpp_ws_client.h:172-172
-void set_ssl_context(uvcpp_ssl_context* ctx);                           // src/web/uvcpp_ws_client.h:213-213
+           const std::string& reason = std::string());                  // src/web/uvcpp_ws_client.h:177-178
+int  run(uv_run_mode md = UV_RUN_DEFAULT);                              // src/web/uvcpp_ws_client.h:184-184
+void stop();                                                            // src/web/uvcpp_ws_client.h:185-185
+void set_ssl_context(uvcpp_ssl_context* ctx);                           // src/web/uvcpp_ws_client.h:226-226
+void set_handshake_header(const std::string& name,
+                          const std::string& value);                    // src/web/uvcpp_ws_client.h
 ```
+
+### 自定义 Upgrade 头（1.12.0 起）
+
+`set_handshake_header(name, value)` 在 `connect()` 之前把额外头写进升级请求：
+
+```cpp
+// doc-snippet: fragment — 只演示调用顺序；完整的可编译示例见本节末尾的客户端程序
+uvcpp::uvcpp_ws_client cli;
+cli.set_handshake_header("Authorization", "Bearer token");
+cli.set_handshake_header("Cookie", "sid=1");
+cli.set_handshake_header("Sec-WebSocket-Protocol", "chat");
+cli.connect("ws://127.0.0.1:9000/chat", cb);
+```
+
+规则（`src/web/uvcpp_ws_client.cpp`）：
+
+- 名字或值里出现 `\r` / `\n` 时**整条忽略**，防止把额外头注入请求；
+- `Host`、`Upgrade`、`Connection`、`Sec-WebSocket-Key`、`Sec-WebSocket-Version`、
+  `Sec-WebSocket-Extensions` 是保留头，按名字大小写不敏感地忽略；
+- 同名头（大小写不敏感）覆盖上一次的值，发送顺序按**首次添加**；
+- 与压缩/子协议一样，**在 `connect()` 之前调**；调用之后再设置不会影响已经发出的握手。
 
 ```cpp
 #include <string>
@@ -330,6 +352,9 @@ void doc_run_client() {
     (void)code; (void)reason;
   });
 
+  // 可选：给 Upgrade 请求加自定义头（必须在 connect() 之前）。
+  cli.set_handshake_header("Authorization", "Bearer token");
+
   cli.connect("ws://127.0.0.1:9000/chat",
               [](uvcpp::uvcpp_ws_connection* c, int err) {
                 if (err != 0 || c == nullptr) return;
@@ -345,23 +370,23 @@ void doc_run_client() {
 
 退避、上限、放弃条件**全都是零**，因为**根本没有重连代码**。
 `src/web/` 下 grep `reconnect` 只命中注释（`src/web/uvcpp_ws_client.cpp:120`、
-`src/web/uvcpp_ws_client.cpp:275`），那两处指向的是 `webapp/` 的框架层客户端。
+`src/web/uvcpp_ws_client.cpp:296`），那两处指向的是 `webapp/` 的框架层客户端。
 `uvcpp_ws_client` 是**一次性**的：连一次、用它、结束。
 要重连就自己写，或者直接用 [webapp 指南 §11](./webapp-guide.md#11-websocket-客户端含自动重连)
 里的 `uvcpp_web_ws_client`。相应地，也**没有"停止重连"这个 API**。
 
 ### 客户端没有 `on_ping` / `on_pong` 转发
 
-`cli.on_*` 只有 text / binary / close / error 四个（`src/web/uvcpp_ws_client.h:132-135`），
+`cli.on_*` 只有 text / binary / close / error 四个（`src/web/uvcpp_ws_client.h:145-148`），
 而连接层有 ping / pong（`src/web/uvcpp_ws_connection.h:205-205`）。要观测 ping/pong 得
 `cli.session()->on_ping(...)` 自己拿指针装 —— 注意 `session()` 终结后返回 `nullptr`
-（`src/web/uvcpp_ws_client.cpp:425`）。连接层仍会自动回 pong，不受影响。
+（`src/web/uvcpp_ws_client.cpp:449`）。连接层仍会自动回 pong，不受影响。
 
 ### 状态
 
 ```cpp
 // doc-snippet: fragment — 枚举定义摘录，不是完整翻译单元
-enum ws_client_status : int {     // src/web/uvcpp_ws_client.h:34
+enum ws_client_status : int {     // src/web/uvcpp_ws_client.h:36
   WS_CLIENT_NONE       = 0x00,
   WS_CLIENT_CONNECTING = 0x01,
   WS_CLIENT_OPEN       = 0x02,
@@ -371,14 +396,14 @@ enum ws_client_status : int {     // src/web/uvcpp_ws_client.h:34
 };
 ```
 
-`has_status(flags)` 的实现是 `(status_ & flags) == flags`（`src/web/uvcpp_ws_client.cpp:517`），
+`has_status(flags)` 的实现是 `(status_ & flags) == flags`（`src/web/uvcpp_ws_client.cpp:541`），
 而 `WS_CLIENT_NONE` 是 `0x00` —— 所以 **`has_status(WS_CLIENT_NONE)` 恒为真**。
 只有一个 flag 能用，多选是可以的，但别拿 `NONE` 当"什么都没发生"用。
 
 ### WSS
 
 `wss://` 才会置 `use_tls`、默认端口 443（`src/web/uvcpp_ws_client.cpp:207`），
-TLS 本身由 `tcp_->enable_tls(ssl_ctx_)` 的 memory-BIO 过滤器做（`:277`）。
+TLS 本身由 `tcp_->enable_tls(ssl_ctx_)` 的 memory-BIO 过滤器做（`:298`）。
 
 ---
 
@@ -467,8 +492,8 @@ enum class ws_close_code : uint16_t {   // src/web/uvcpp_ws_frame.h:41
 （`src/web/uvcpp_ws_ext.h:126` 的 `bool enabled = true;`），服务端建会话时自动
 `conn->enable_compression(true, dp)`（`src/web/uvcpp_ws_server.cpp:294-294`），
 客户端自动 `conn->enable_compression(false, deflate_params_)`
-（`src/web/uvcpp_ws_client.cpp:384`）。要关掉就 `set_compression(cfg)` 把 `enabled` 置 false
-（`src/web/uvcpp_ws_server.h:250` / `src/web/uvcpp_ws_client.h:206-206`，**只在
+（`src/web/uvcpp_ws_client.cpp:408`）。要关掉就 `set_compression(cfg)` 把 `enabled` 置 false
+（`src/web/uvcpp_ws_server.h:250` / `src/web/uvcpp_ws_client.h:219-219`，**只在
 `UVCPP_ZLIB_ENABLE=1` 时编译**）。
 
 阈值 `set_compress_min_size(size_t n)` 默认 `0`，也就是**都压**
@@ -523,11 +548,11 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:303-303
 | 掩码方向不对 | 1002 加 `on_error` | `src/web/uvcpp_ws_connection.cpp:252-252` |
 | 对端没发 Close 就断 | `on_close(ABNORMAL_CLOSE, "")` | `src/web/uvcpp_ws_connection.cpp:102` |
 | 终结时队列里还有帧 | 逐条以 `-1` 结算回调 | `src/web/uvcpp_ws_connection.cpp:146` |
-| 客户端无会话时 send | 返回 `UV_ENOTCONN` 并**立刻**回调 | `src/web/uvcpp_ws_client.cpp:437` |
-| 握手响应不是 101 | `on_handshake_complete(-2)` | `src/web/uvcpp_ws_client.cpp:320` |
-| 扩展应答非法 | `on_handshake_complete(-3)` | `src/web/uvcpp_ws_client.cpp:335` |
+| 客户端无会话时 send | 返回 `UV_ENOTCONN` 并**立刻**回调 | `src/web/uvcpp_ws_client.cpp:461` |
+| 握手响应不是 101 | `on_handshake_complete(-2)` | `src/web/uvcpp_ws_client.cpp:344` |
+| 扩展应答非法 | `on_handshake_complete(-3)` | `src/web/uvcpp_ws_client.cpp:359` |
 | `connect_wait` 超时 | 返回 `UV_ETIMEDOUT` | `src/web/uvcpp_ws_client.cpp:244` |
-| 连接中被 `close()` 取消 | `cb(nullptr, UV_ECANCELED)` | `src/web/uvcpp_ws_client.cpp:505` |
+| 连接中被 `close()` 取消 | `cb(nullptr, UV_ECANCELED)` | `src/web/uvcpp_ws_client.cpp:529` |
 
 连接层用裸 `-1`，客户端握手用 `-1` / `-2` / `-3`，`connect_wait` 用 `UV_ETIMEDOUT`，
 取消用 `UV_ECANCELED`，底下的 TCP 层又是 libuv 码。
@@ -553,7 +578,7 @@ void set_max_message_size(size_t n);    // src/web/uvcpp_ws_connection.h:303-303
 **重复 `connect()` 会累积会话。** `connect()` 不检查已有会话
 （`src/web/uvcpp_ws_client.cpp:198`），新会话直接覆盖 `session_`，旧的**仍在
 `sessions_` 里**、回调也还是旧的那一组。`on_session_retired` 里那句
-`if (conn != session_) return;`（`src/web/uvcpp_ws_client.cpp:424`）只防"清错对象"，
+`if (conn != session_) return;`（`src/web/uvcpp_ws_client.cpp:448`）只防"清错对象"，
 不回收旧会话。
 
 **`attach()` 会静默顶掉别人装的升级处理器。**
@@ -576,7 +601,7 @@ else if (on_conn_) { on_conn_(conn); }` —— 用带 `on_ready` 的那个重载
 `~uvcpp_ws_client` 有一条专门的路径（`src/web/uvcpp_ws_client.cpp:146`）：
 `sessions_.abandon()`，loop / tcp / 会话**全部不释放**。理由是三层 use-after-free，
 PageHeap 下实测 SEGFAULT（`src/web/uvcpp_ws_client.cpp:124-145`）。
-头文件 `src/web/uvcpp_ws_client.h:43-55` 专门写了这一条：
+头文件 `src/web/uvcpp_ws_client.h:45-57` 专门写了这一条：
 "回调里 `delete cli` 不崩"是承诺，但代价是漏对象。
 
 **析构不会发 GOING_AWAY。** `~uvcpp_ws_server` 先 `sessions_.shutdown()` 再
