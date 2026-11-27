@@ -387,7 +387,7 @@ foreach(_db_remote test_db_mysql_func test_db_pgsql_func
         test_db_pgsql_async_func test_db_odbc_func test_db_mongodb_func
         test_db_transaction_server_func test_orm_mysql_func
         test_orm_pgsql_func
-        test_orm_odbc_func)
+        test_orm_odbc_func test_orm_remote_async_func)
   if(TARGET ${_db_remote})
     set_tests_properties(${_db_remote} PROPERTIES SKIP_RETURN_CODE 3)
   endif()

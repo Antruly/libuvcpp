@@ -798,6 +798,19 @@ inline const std::string& cached_insert_sql(uvcpp_orm_dialect dialect) {
   return empty;
 }
 
+/// 模型是否有自增列。没有自增列的 INSERT 不应该调用 backend 的
+/// `last_insert_id`：PostgreSQL 的 `lastval()` 在没有序列时会报错并**中止
+/// 当前事务**，即使调用方忽略了返回值，后续 commit 也只会回滚。
+template <typename T>
+inline bool model_has_auto_increment() {
+  const uvcpp_orm_column* columns = model_traits<T>::columns();
+  const std::size_t count = model_traits<T>::column_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    if (columns[i].is_auto_increment()) return true;
+  }
+  return false;
+}
+
 template <typename T>
 inline std::string build_update_sql(uvcpp_orm_dialect dialect) {
   const uvcpp_orm_column* primary_key = model_traits<T>::primary_key();
@@ -1595,7 +1608,7 @@ inline uvcpp_orm_status insert_impl(Executor& db, const T& value,
   status = make_insert_sql<T>(dialect, value, &sql_result, error);
   if (status != uvcpp_orm_status::OK) return status;
 
-  if (new_id != nullptr) {
+  if (new_id != nullptr && model_has_auto_increment<T>()) {
     const uvcpp_db_status database_status =
         db.insert(sql_result.sql, sql_result.params, new_id);
     if (!uvcpp_db_ok(database_status)) {
