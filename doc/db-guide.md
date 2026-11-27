@@ -1309,6 +1309,12 @@ Windows 上走的是 `UVCPP_DB_SQLITE_FROM_SOURCE`（MSYS2 若装了
 * **ORM 那套东西。** 没有模型、没有迁移、没有关系映射、没有查询构造器 ——
   它是"能安全地执行 SQL 并拿到表"，不是 ActiveRecord。命名上叫 `db` 而不是
   `orm`，就是因为后面那半句不打算假装。
+  > 1.12.0 起另有一个**独立的** `src/orm/` 层（issue #89）：`nullable<T>`、列描述符、
+  > `model_traits<T>` 与声明宏，**只做模型声明与元数据校验**，不生成 SQL、不做
+  > CRUD，也不属于 `db` 模块。它的 CI 格（`orm`）Linux / macOS / MSVC 各一条，
+  > 与本模块的 `db` 格分开；跨后端 ORM 用例要等 SQL/CRUD（#90/#91）落地。
+  > 扩展点与未覆盖项写在 [`ci-guide.md`](ci-guide.md) §1 的 `orm` 与 "ORM + MySQL …"
+  > 两行里。
 * **准备语句缓存 / 语句复用。** 每次 `query`/`execute` 都是新的
   `mysql_stmt_prepare` / `PQexecParams`。省掉它换来的是"状态不跨语句泄漏"，
   这个取舍是有意的；要批量插入时请用事务包住循环。

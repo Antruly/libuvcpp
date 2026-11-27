@@ -383,7 +383,7 @@ OpenSSL ≥ 3.2 with the QUIC API for QUIC and HTTP/3), and how the switches int
 | `UVCPP_REQUIRE_FEATURES` | empty | Semicolon-separated features that must be enabled; configure fails if any is disabled (used by the official binary CI) |
 | `UVCPP_WINVER` | `0x000000` | Minimum Windows version targeted (`_WIN32_WINNT` / `WINVER`); `0x000000` = toolchain default, Win7 = `0x0601`, Windows only |
 | `UVCPP_BUILD_WEBAPP` | `OFF` | Build web app framework (router/middleware/static/upload/log). Requires `UVCPP_BUILD_WEB=ON` |
-| `UVCPP_BUILD_ORM` | `OFF` | Build the **ORM model-metadata layer** (`src/orm/`): `nullable<T>`, column descriptors, `model_traits<T>` and the `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` declaration macros. **No SQL, no CRUD, no migrations** — it is the contract layer that issues #90/#91 build on. Requires `UVCPP_ENABLE_DB=ON` (its value layer reuses `uvcpp_db_value`) and is force-disabled without it |
+| `UVCPP_BUILD_ORM` | `OFF` | Build the **ORM model-metadata layer** (`src/orm/`): `nullable<T>`, column descriptors, `model_traits<T>` and the `UVCPP_ORM_MODEL` / `UVCPP_ORM_FIELD` declaration macros. **No SQL, no CRUD, no migrations** — it is the contract layer that issues #90/#91 build on. Requires `UVCPP_ENABLE_DB=ON` (its value layer reuses `uvcpp_db_value`) and is force-disabled without it. See the `orm` CI entries in [`doc/ci-guide.md`](doc/ci-guide.md) |
 | `UVCPP_BUILD_EXAMPLES` | `OFF` | Build the examples in `examples/` |
 | `UVCPP_BUILD_BENCH` | `OFF` | Build the benchmark range in `bench/` — see [`doc/benchmark-rig.md`](doc/benchmark-rig.md) |
 | `UVCPP_ENABLE_ZLIB` | `OFF` | Enable zlib (WebSocket compression) |

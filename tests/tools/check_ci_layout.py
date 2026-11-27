@@ -214,6 +214,23 @@ FEATURE_GATES = {
     # 上面的循环里写着）。
     "db": ["UVCPP_ENABLE_DB:BOOL=ON", "db: SQLite 后端开",
            "Including db module in build", "test_db_sqlite_func"],
+    # 1.12.0：ORM 模型元数据层（`src/orm/`，issue #89）。`UVCPP_BUILD_ORM` 也是
+    # **默认 OFF**，而且比上面几条多一条从属规则：DB 关掉时它会被**强制置 OFF**
+    # （普通变量 `set()`，`CMakeCache.txt` 里照旧写着 ON）。所以这一格的第二条
+    # 门禁串盯的是**生成头里真正生效的那个宏** `UVCPP_ORM_ENABLE=1`，而不是
+    # cache 里的 `UVCPP_BUILD_ORM`。
+    #
+    # 三格（ubuntu / macOS / MSVC）都是"DB=ON + SQLite=ON + ORM=ON"，并且同一个
+    # ctest 里既有 `test_orm_model_func` 也有 `test_db_sqlite_func`。后者不在
+    # FEATURE_GATES 里（一个 feature 的四个串只挂得下一个用例名）—— 它在
+    # `tests/tools/check_orm_ci.py --mode enabled` 里和生成头一起判，三格共用
+    # 同一份脚本。
+    #
+    # 负向的两档也不在这张表里：`db` 那一格（ORM=OFF）和 Linux 那次
+    # DB=OFF+ORM=ON 的配置由同一个脚本的 `--mode disabled` / `--mode
+    # forced-off` 判，步骤写在三个 workflow 里。
+    "orm": ["UVCPP_BUILD_ORM:BOOL=ON", "UVCPP_ORM_ENABLE=1",
+            "Including orm module in build", "test_orm_model_func"],
 }
 
 # 矩阵条目上承载这些串的字段名。文件里必须真的出现 `matrix.<字段>`（判据 6 后半）。
