@@ -1742,6 +1742,68 @@ size_t uvcpp_web_app::ws_session_count() const {
   return ws_server_ != nullptr ? ws_server_->session_count() : 0;
 }
 
+bool uvcpp_web_app::ws_is_alive(uvcpp_ws_id id) const {
+  return ws_server_ != nullptr && ws_server_->is_alive(id);
+}
+
+int uvcpp_web_app::ws_send_text(uvcpp_ws_id id, const std::string& text,
+                                std::function<void(int)> cb) {
+  if (ws_server_ == nullptr || !loop_started()) {
+    if (cb) cb(-1);
+    return -1;
+  }
+  const int idx = ws_server_->loop_index_of(id);
+  if (idx < 0) {
+    if (cb) cb(-1);
+    return -1;
+  }
+  post(
+      [this, id, text, cb]() {
+        if (ws_server_ == nullptr) {
+          if (cb) cb(-1);
+          return;
+        }
+        uvcpp_ws_connection* c = ws_server_->find_live(id);
+        if (c == nullptr) {
+          if (cb) cb(-1);
+          return;
+        }
+        c->send_text(text.data(), text.size(), cb);
+      },
+      idx);
+  return 0;
+}
+
+int uvcpp_web_app::ws_send_binary(uvcpp_ws_id id, const char* data, size_t len,
+                                  std::function<void(int)> cb) {
+  std::string copy;
+  if (data != nullptr && len > 0) copy.assign(data, len);
+  if (ws_server_ == nullptr || !loop_started()) {
+    if (cb) cb(-1);
+    return -1;
+  }
+  const int idx = ws_server_->loop_index_of(id);
+  if (idx < 0) {
+    if (cb) cb(-1);
+    return -1;
+  }
+  post(
+      [this, id, copy, cb]() {
+        if (ws_server_ == nullptr) {
+          if (cb) cb(-1);
+          return;
+        }
+        uvcpp_ws_connection* c = ws_server_->find_live(id);
+        if (c == nullptr) {
+          if (cb) cb(-1);
+          return;
+        }
+        c->send_binary(copy.data(), copy.size(), cb);
+      },
+      idx);
+  return 0;
+}
+
 size_t uvcpp_web_app::ws_recycled_session_count() const {
   return ws_server_ != nullptr ? ws_server_->recycled_session_count() : 0;
 }

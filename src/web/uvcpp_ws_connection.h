@@ -31,6 +31,7 @@
 #if UVCPP_WEB_ENABLE && UVCPP_WEB_WS_ENABLE
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -44,6 +45,9 @@
 #include <web/uvcpp_ws_parser.h>
 
 namespace uvcpp {
+
+/// WebSocket 连接的稳定 id（进程内唯一、单调递增）。见 `uvcpp_ws_connection::id()`。
+typedef ::std::uint64_t uvcpp_ws_id;
 
 /**
  * @brief 本端在一条 WebSocket 连接上的角色。
@@ -145,7 +149,21 @@ class UVCPP_API uvcpp_ws_connection {
    */
   void set_retire_callback(retire_fn cb);
 
-  /** @brief 会话是否还在（还没被判定终结）。 */
+  /**
+   * @brief 本条连接的稳定 id（进程内唯一、从 1 开始）。
+   *
+   * 与裸指针不同，**id 可以安全地跨线程/跨时序保存**：对象被回收之后它只会
+   * 变成"查不到"，不会悬垂。配合 `uvcpp_web_app::ws_is_alive(id)` /
+   * `ws_send_text(id, ...)` 使用。
+   */
+  uvcpp_ws_id id() const { return id_; }
+
+  /**
+   * @brief 会话是否还在（还没被判定终结）。
+   *
+   * @warning 只对**未释放**的对象有意义。属主回收之后成员读就是 UB；跨线程/
+   *          跨时序持有连接时请保存 `id()`，不要靠这个指针存活。
+   */
   bool is_open() const;
 
   /**
@@ -375,6 +393,8 @@ class UVCPP_API uvcpp_ws_connection {
   void protocol_error(ws_close_code code, const std::string& reason);
 
   uvcpp_tcp_client* tcp_ = nullptr;
+  /// 稳定 id（见 `id()`）。构造时从进程级计数器取，之后不变。
+  uvcpp_ws_id id_ = 0;
 
   /// 本端角色。决定掩码检查的方向（见构造函数的说明）。
   ws_role role_ = ws_role::SERVER;

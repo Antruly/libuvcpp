@@ -42,6 +42,9 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 #include <uvcpp/uvcpp_define.h>
 #include <handle/uvcpp_loop.h>
@@ -181,6 +184,22 @@ class UVCPP_API uvcpp_ws_sessions {
   /** @brief 表里的会话（按接管顺序）。仅供观察，不要留存指针。 */
   const std::vector<uvcpp_ws_connection*>& all() const;
 
+  /**
+   * @brief 这个 id 对应的会话**现在**是否还在活动表里（线程安全）。
+   *
+   * 与裸指针不同，id 查不到只说明"没了"，不会踩已释放内存。查询与真正发送
+   * 之间仍有窗口，所以跨线程发送请用 `uvcpp_web_app::ws_send_*`（它把查找
+   * 和发送都放到会话自己的循环上）。
+   */
+  bool is_alive(uvcpp_ws_id id) const;
+
+  /**
+   * @brief 按 id 取活动会话指针（线程安全地取，**但只在属主循环线程上使用**）。
+   *
+   * 返回 nullptr = 已经不在活动表里。拿到的指针只在当前循环回调内可信。
+   */
+  uvcpp_ws_connection* find_live(uvcpp_ws_id id) const;
+
  private:
   uvcpp_ws_sessions(const uvcpp_ws_sessions&);
   uvcpp_ws_sessions& operator=(const uvcpp_ws_sessions&);
@@ -192,6 +211,10 @@ class UVCPP_API uvcpp_ws_sessions {
 
   std::vector<uvcpp_ws_connection*> sessions_;
   std::vector<uvcpp_ws_connection*> retired_;
+  /// id → 活动会话。**只在这里保存旁路索引**：`sessions_` 仍按接管顺序排列。
+  /// 有锁是因为 `is_alive` 会被别的线程调（发送时钟、观察者）。
+  mutable std::mutex id_mu_;
+  std::unordered_map<uvcpp_ws_id, uvcpp_ws_connection*> by_id_;
   uvcpp_async* drain_async_ = nullptr;
 
   /**

@@ -1,10 +1,20 @@
 ﻿#include <web/uvcpp_ws_connection.h>
 
+#include <atomic>
 #include <random>
 #if UVCPP_WEB_ENABLE
 #include <cstring>
 
 namespace uvcpp {
+
+namespace {
+
+uvcpp_ws_id next_ws_id() {
+  static std::atomic<uvcpp_ws_id> next(1);
+  return next.fetch_add(1);
+}
+
+}  // namespace
 
 // 默认构造：转交给两参构造，只是不带传输层（`tcp_` 留空）。
 // 类成员本来就有默认值（`tcp_ = nullptr`、`role_ = ws_role::SERVER`），`start()`
@@ -17,7 +27,7 @@ uvcpp_ws_connection::uvcpp_ws_connection()
     : uvcpp_ws_connection(nullptr, ws_role::SERVER) {}
 
 uvcpp_ws_connection::uvcpp_ws_connection(uvcpp_tcp_client* tcp, ws_role role)
-    : tcp_(tcp), role_(role) {
+    : tcp_(tcp), id_(next_ws_id()), role_(role) {
   // 存活令牌（见头文件）：写完成回调用它判断"会话还在不在"。
   alive_token_ = std::shared_ptr<char>(new char);
   parser_.set_on_frame([this](const uvcpp_ws_frame& f) { on_ws_frame(f); });
@@ -465,6 +475,10 @@ int uvcpp_ws_connection::send_frame(const uvcpp_ws_frame& frame,
 }
 
 int uvcpp_ws_connection::send_frame_impl(const uvcpp_ws_frame& frame, std::function<void(int)> cb) {
+  // 与 `feed_pending()/close()/terminate()` 同一判据：退休之后任何发送都
+  // 不再排队，直接结算（`tcp_` 已在 notify_retired 里置空，但先判 retired_
+  // 能挡住"还没到那一行就被别的回调插进来"的形状）。
+  if (retired_) { if (cb) cb(-1); return -1; }
   if (!tcp_) { if (cb) cb(-1); return -1; }
   // 懒启动（客户端侧就是靠这一句：升级完成时不 arm，等第一次发帧再 arm，
   // 免得在活跃的读回调里调 read_stop）。标志由 start() 自己置，不在这里置。
@@ -607,6 +621,9 @@ void uvcpp_ws_connection::fail_pending_sends(int err) {
 
 int uvcpp_ws_connection::send_data(ws_opcode op, const char* d, size_t n,
                                    std::function<void(int)> cb) {
+  // **必须排在压缩之前**：retire 之后还要跑一次 64 KiB 级 deflate 不只是浪费，
+  // 对象若已被属主回收，这一步会踩进 zlib（issue #87 的 SIGSEGV 栈）。
+  if (retired_) { if (cb) cb(-1); return -1; }
   uvcpp_ws_frame f;
   f.opcode = op;
   if (d && n > 0) {

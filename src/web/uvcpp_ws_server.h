@@ -200,6 +200,22 @@ class UVCPP_API uvcpp_ws_server {
   uvcpp_http_server* get_http_server();
 
   /** @brief 当前活动的 WebSocket 会话数 —— **所有循环之和**。 */
+  /**
+   * @brief 某个 id 的会话现在是否还活着（线程安全；跨循环汇总）。
+   *
+   * 这是 `uvcpp_ws_connection::id()` 的安全查询面：id 查不到只说明"没了"，
+   * 不会悬垂。真正发送请用 `uvcpp_web_app::ws_send_text/binary(id, ...)`，
+   * 那里把"查 + 发"放在会话自己的循环上。
+   */
+  bool is_alive(uvcpp_ws_id id) const;
+
+  /// id 所在的分片下标；不存在返回 -1。线程安全。
+  int loop_index_of(uvcpp_ws_id id) const;
+
+  /// 按 id 取活动会话；**只在属主循环线程上使用**。线程安全地取，但返回的
+  /// 指针只在当前循环回调内可信。
+  uvcpp_ws_connection* find_live(uvcpp_ws_id id) const;
+
   size_t session_count() const;
 
   /**

@@ -427,6 +427,34 @@ void uvcpp_ws_server::stop(std::function<void()> on_stopped) {
 
 uvcpp_http_server* uvcpp_ws_server::get_http_server() { return http_server_; }
 
+bool uvcpp_ws_server::is_alive(uvcpp_ws_id id) const {
+  std::lock_guard<std::mutex> lk(shards_mu_);
+  for (size_t i = 0; i < shards_.size(); ++i) {
+    if (shards_[i] != nullptr && shards_[i]->is_alive(id)) return true;
+  }
+  return false;
+}
+
+int uvcpp_ws_server::loop_index_of(uvcpp_ws_id id) const {
+  std::lock_guard<std::mutex> lk(shards_mu_);
+  for (size_t i = 0; i < shards_.size(); ++i) {
+    if (shards_[i] != nullptr && shards_[i]->is_alive(id)) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+uvcpp_ws_connection* uvcpp_ws_server::find_live(uvcpp_ws_id id) const {
+  std::lock_guard<std::mutex> lk(shards_mu_);
+  for (size_t i = 0; i < shards_.size(); ++i) {
+    if (shards_[i] == nullptr) continue;
+    uvcpp_ws_connection* c = shards_[i]->find_live(id);
+    if (c != nullptr) return c;
+  }
+  return nullptr;
+}
+
 size_t uvcpp_ws_server::session_count() const {
   // **所有分片求和**：任何一片的 `size()` 都只是某一条循环的局部读数。
   // 求和的是原子量，所以可以从任何线程调（用例就是这么轮询它的）。

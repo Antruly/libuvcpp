@@ -1022,6 +1022,30 @@ class UVCPP_API uvcpp_web_app : public uvcpp_web_context_host {
    */
   size_t ws_recycled_session_count() const;
 
+  /**
+   * @brief 某个 WS 会话 id 现在是否还活着（线程安全）。
+   *
+   * 对应 `uvcpp_ws_connection::id()`。**裸连接指针在会话回收后就是悬垂的**，
+   * 跨线程/跨时序持有连接时请保存 id，用它判断；真正发送用下面的
+   * `ws_send_text/binary`，它把"查 + 发"放在会话自己的循环上。
+   *
+   * 会话 retire（对端断开 / Close 帧 / `terminate()`）之后立刻为 false。
+   */
+  bool ws_is_alive(uvcpp_ws_id id) const;
+
+  /**
+   * @brief 按 id 给某条 WS 会话发一帧（线程安全，自动投递到它的循环）。
+   *
+   * @return 0 = 已投递；-1 = 没有这条活会话 / 应用没在跑（此时 `cb` 会**同步**
+   *         收到 -1）。投递之后连接若在真正发送前 retire，`cb` 仍会收到 -1。
+   *
+   * 数据会被拷贝一份（异步投递），返回后调用方可以立刻释放自己的缓冲。
+   */
+  int ws_send_text(uvcpp_ws_id id, const std::string& text,
+                   std::function<void(int)> cb = nullptr);
+  int ws_send_binary(uvcpp_ws_id id, const char* data, size_t len,
+                     std::function<void(int)> cb = nullptr);
+
   // -----------------------------------------------------------------
   // 连接 / 原始数据钩子
   // -----------------------------------------------------------------

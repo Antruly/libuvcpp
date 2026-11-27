@@ -1,4 +1,4 @@
-#include <web/uvcpp_ws_sessions.h>
+﻿#include <web/uvcpp_ws_sessions.h>
 
 #if UVCPP_WEB_ENABLE
 
@@ -34,6 +34,10 @@ void uvcpp_ws_sessions::abandon() {
   abandoned_ = true;
   sessions_.clear();
   retired_.clear();
+  {
+    std::lock_guard<std::mutex> lk(id_mu_);
+    by_id_.clear();
+  }
   live_.store(0);
 }
 
@@ -78,6 +82,10 @@ void uvcpp_ws_sessions::adopt(uvcpp_ws_connection* c) {
   // 自己交给谁。
   c->set_retire_callback([this](uvcpp_ws_connection* s) { on_retired(s); });
   sessions_.push_back(c);
+  {
+    std::lock_guard<std::mutex> lk(id_mu_);
+    by_id_[c->id()] = c;
+  }
   live_.store(sessions_.size());
 }
 
@@ -87,6 +95,10 @@ void uvcpp_ws_sessions::set_retire_observer(
 }
 
 void uvcpp_ws_sessions::on_retired(uvcpp_ws_connection* c) {
+  {
+    std::lock_guard<std::mutex> lk(id_mu_);
+    by_id_.erase(c->id());
+  }
   for (size_t i = 0; i < sessions_.size(); ++i) {
     if (sessions_[i] == c) {
       sessions_.erase(sessions_.begin() + static_cast<long>(i));
@@ -149,6 +161,10 @@ void uvcpp_ws_sessions::recycle_all() {
   std::vector<uvcpp_ws_connection*> live;
   live.swap(sessions_);
   for (size_t i = 0; i < live.size(); ++i) live[i]->terminate();
+  {
+    std::lock_guard<std::mutex> lk(id_mu_);
+    by_id_.clear();
+  }
   live_.store(sessions_.size());
   drain();
 }
@@ -159,6 +175,18 @@ size_t uvcpp_ws_sessions::recycled() const { return recycled_.load(); }
 
 const std::vector<uvcpp_ws_connection*>& uvcpp_ws_sessions::all() const {
   return sessions_;
+}
+
+bool uvcpp_ws_sessions::is_alive(uvcpp_ws_id id) const {
+  std::lock_guard<std::mutex> lk(id_mu_);
+  return by_id_.find(id) != by_id_.end();
+}
+
+uvcpp_ws_connection* uvcpp_ws_sessions::find_live(uvcpp_ws_id id) const {
+  std::lock_guard<std::mutex> lk(id_mu_);
+  std::unordered_map<uvcpp_ws_id, uvcpp_ws_connection*>::const_iterator it =
+      by_id_.find(id);
+  return it == by_id_.end() ? nullptr : it->second;
 }
 
 }  // namespace uvcpp
