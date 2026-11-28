@@ -1498,6 +1498,12 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### HTTP 与 WebSocket 语义
 
+- **查询参数零分配视图**（`1.13.0-dev`，#125）：`uvcpp_web_request::query_param_view()`
+  按名字取一个查询参数，未编码的查询串直接返回指向 `query_string()` 的
+  `(const char*, size_t)` 视图，不建 `query_params()` 的 vector，也不为键值各建
+  `std::string`；含 `%`/`+` 时复用既有解码结果。语义与 `query()` 一致（空段、
+  裸键、空值、重复键取第一个），视图在请求生命周期内有效，必须配合长度使用。
+  用例 `web_app_request_func` 覆盖上述形状与 UTF-8 键。
 - **WS 客户端自定义 Upgrade 头**（`1.12.1`）：
   `uvcpp_ws_client::set_handshake_header(name, value)` 允许在 `connect()` 之前
   追加 `Authorization`、`Cookie`、`Origin`、`Sec-WebSocket-Protocol` 等头。
