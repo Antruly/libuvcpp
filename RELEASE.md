@@ -21,16 +21,27 @@
 
 ## v1.13.0 重点 (Highlights)
 
-> **状态：1.13.0-dev 开发中，尚未发布。** 本版目标是 HTTP/1.1 与 PostgreSQL
-> 异步查询的每请求成本优化，并在 50 核本机与官方 HttpArena 口径上完成回归验证。
-> 下面列的是计划中的改动；只有带实测证据的条目才会保留到正式版正文。
+> **状态：1.13.0 发布候选。** 本版交付查询参数零分配视图，并在 50 核本机
+> 对 1.12.0 基线做了三轮交替 A/B。PostgreSQL prepared statement 缓存实现和
+> 正确性测试完成，但 50 核 A/B 中位回退 19.3%，已从本版撤回，不进入 Release。
 
-- **HTTP/1.1 表示层**：查询参数与请求头的零分配/视图化读取，减少每请求
-  `std::vector`、`std::string` 构造；优先服务 `/baseline11` 这类固定参数形状。
-- **PostgreSQL 异步**：按连接缓存命名 prepared statement，避免每条查询重复
-  parse/plan；在不改变回调线程与返回码契约的前提下降低每请求 CPU。
-- **基准与发布门禁**：1.12.1 / 1.13.0 A/B、50 核 h1 与 async-db 扩展曲线、
-  全量本地 ctest 与六平台 CI；任何回退先做三次隔离复测再下结论。
+- **查询参数零分配视图（#125）**：新增
+  `uvcpp_web_request::query_param_view()`。未编码的查询串直接返回指向
+  `query_string()` 的 `(const char*, size_t)` 视图，不建 `query_params()` 的
+  vector，也不为键值各建 `std::string`；含 `%`/`+` 时复用既有解码结果。
+  语义与 `query()` 一致，视图在请求生命周期内有效，必须配合长度使用。用例
+  `web_app_request_func` 覆盖空段、裸键、空值、重复键、UTF-8 键和非法百分号。
+- **50 核基线 A/B（本机口径，非官方成绩）**：`0-49` cpuset、4096 连接、
+  使用 HttpArena 的 `baseline`/`pipelined` profile，1.12.0 与 1.13.0 交替三轮。
+  `/baseline11` 中位 RPS 从 **233,621** 到 **235,376（+0.75%）**，每请求 CPU
+  从 **1,516.4%** 降到 **1,464.2%（约 −3.4%）**，p99 从 32.3 ms 降到 30.4 ms；
+  `pipelined` 中位 **1,706,897 → 1,719,065（+0.71%）**。绝对值受本机生成器
+  限制，只能作为相对证据。
+- **PostgreSQL prepared statement（#124，未采纳）**：真实 PostgreSQL 16 上
+  缓存命中、参数变化、prepare 失败、`DEALLOCATE ALL`、重连隔离和 64 条上限
+  全部通过；但同一 50 核/1024 连接口径下三轮中位 **38,191 → 30,808 RPS
+  （−19.3%）**，CPU 更低而 p99 更高。代码保留在 `perf/1.13-pg-prepared` 分支，
+  不进入 1.13.0，也不在本版声称 PostgreSQL 性能提升。详见 #124 的负结果记录。
 
 ## v1.12.1 重点 (Highlights)
 
