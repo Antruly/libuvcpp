@@ -13,10 +13,10 @@
 `1.6.5`–`1.6.61` → `v1.7.0`；`1.7.1`–`1.7.3` 是 `v1.7.0` 之后的开发档线，折进
 `v1.7.4`；`1.7.5`–`1.7.6` 折进 `v1.8.0`；`1.8.1`、`1.8.2`、`1.8.3`、`1.8.4`、`1.8.5`、`1.8.6`、`1.8.7`、`1.8.8`、`1.8.9`、`1.8.10` 是它之后的补丁版，
 `1.8.11`–`1.8.15` 折进 `v1.9.0`，`v1.9.1` 是它之后的补丁版（不折叠、直接发布）；
-`1.10.0-dev` 折进 `v1.10.0`（已发布）；`1.11.0-dev` 已折进 `v1.11.0`（已发布）；`1.12.0-dev` 折进 `v1.12.0`（开发中）。想按时间线读，翻到最后的「逐个版本」。
+`1.10.0-dev` 折进 `v1.10.0`（已发布）；`1.11.0-dev` 已折进 `v1.11.0`（已发布）；`1.12.0-dev` 折进 `v1.12.0`（已发布）；`1.12.1-dev` 已折进 `v1.12.1`（已发布）。想按时间线读，翻到最后的「逐个版本」。
 
-当前源码树是 **1.12.0**（发布候选） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
-报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`、`v1.9.0`、`v1.9.1`、`v1.10.0`。
+当前源码树是 **1.12.1**（已发布） —— 即 `src/uvcpp/uvcpp_version.h` 里 `UVCPP_VERSION_STRING`
+报告的那个串。已打过的 tag：`v1.0.0`、`v1.1.0`、`v1.2.0`、`v1.3.0`、`v1.4.0`、`v1.5.0`、`v1.6.0`、`v1.6.1`、`v1.6.2`、`v1.6.3`、`v1.6.4`、`v1.7.0`、`v1.7.4`、`v1.8.0`、`v1.8.1`、`v1.8.2`、`v1.8.3`、`v1.8.4`、`v1.8.5`、`v1.8.6`、`v1.8.7`、`v1.8.8`、`v1.8.9`、`v1.8.10`、`v1.9.0`、`v1.9.1`、`v1.10.0`、`v1.11.0`、`v1.12.0`、`v1.12.1`。
 其中若干条来自本仓第一位外部贡献者 [@sercebr](https://github.com/sercebr) 报的 issue。
 
 ## 目录
@@ -1242,7 +1242,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### SOCKS5（`src/net/`）
 
-- **每条 CONNECT 的上游路由 `route_target`**（`1.12.1-dev`）：
+- **每条 CONNECT 的上游路由 `route_target`**（`1.12.1`）：
   `uvcpp_socks5_server_options::route_target` 按目标返回"直连"或
   `uvcpp_socks5_upstream{host, port, username, password}`。选中上游时服务端复用
   `uvcpp_tcp_client` 的 SOCKS5 协商（连代理 → 认证 → CONNECT 目标），客户端收到的
@@ -1498,7 +1498,7 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### HTTP 与 WebSocket 语义
 
-- **WS 客户端自定义 Upgrade 头**（`1.12.0-dev`）：
+- **WS 客户端自定义 Upgrade 头**（`1.12.1`）：
   `uvcpp_ws_client::set_handshake_header(name, value)` 允许在 `connect()` 之前
   追加 `Authorization`、`Cookie`、`Origin`、`Sec-WebSocket-Protocol` 等头。
   名字/值含 CR/LF 时整条忽略；Host、Upgrade、Connection、Sec-WebSocket-Key/
@@ -4260,6 +4260,18 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 这一节按发版时间倒序，只列**已发布**的 tag。开发档线已折叠进对应的稳定版
 （折叠表见开头），所以这里读到的每一版都是一个真实的 tag。
+
+### v1.12.1 (2026-11-28)
+
+**新增**：SOCKS5 服务端每条 CONNECT 的上游路由（#121）、WS 客户端自定义 Upgrade 头（#119）
+
+- `uvcpp_socks5_server_options::route_target`：按目标返回直连或
+  `uvcpp_socks5_upstream`；选中上游时复用 `uvcpp_tcp_client` 的 SOCKS5 协商，
+  REP 取自最终结果，域名仍以 `ATYP=DOMAIN` 交给上游解析；BIND / UDP ASSOCIATE
+  不经过该钩子。
+- `uvcpp_ws_client::set_handshake_header()`：在 `connect()` 前追加
+  `Authorization`、`Cookie`、`Origin`、`Sec-WebSocket-Protocol` 等 Upgrade 头。
+- 补丁版：没有删除或改名公开符号，二进制可直接替换 1.12.0。
 
 ### v1.11.0 (2026-11-23)
 
