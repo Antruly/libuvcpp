@@ -644,7 +644,48 @@ void socks5_server_conn::begin_connect() {
 
   const life_token life = life_;
   int rc = 0;
-  if (target_.is_domain()) {
+
+  // 路由钩子：true = 这条 CONNECT 交给上游 SOCKS5 代理，false = 直连。
+  // 上游复用 `uvcpp_tcp_client` 自己的 SOCKS5 协商（连代理 → 认证 →
+  // CONNECT 目标），成功之后这条 TCP 就是到目标的数据通道。
+  uvcpp_socks5_upstream route;
+  bool route_via_upstream = false;
+  if (opts_.route_target) {
+    try {
+      route_via_upstream = opts_.route_target(target_, &route);
+    } catch (...) {
+      // 观察回调抛异常不该把连接变成半截状态：按直连处理。
+      route_via_upstream = false;
+    }
+  }
+
+  if (route_via_upstream) {
+    if (route.host.empty() || route.port <= 0 || route.port > 65535) {
+      delete upstream_;
+      upstream_ = nullptr;
+      to_up_.dst = nullptr;
+      notify_session(UV_EINVAL);
+      send_reply(uvcpp_socks5_reply::GENERAL_FAILURE, empty_endpoint(), true);
+      return;
+    }
+    const int proxy_rc = upstream_->set_socks5_proxy(
+        route.host, route.port, route.username, route.password);
+    if (proxy_rc != 0) {
+      delete upstream_;
+      upstream_ = nullptr;
+      to_up_.dst = nullptr;
+      notify_session(proxy_rc);
+      send_reply(socks5_detail::error_to_reply(proxy_rc), empty_endpoint(),
+                 true);
+      return;
+    }
+    // 域名目标以 ATYP=DOMAIN 交给上游解析；数字地址按原样协商。
+    rc = upstream_->connect(
+        target_.host.c_str(), target_.port, [this, life](int status) {
+          if (!token_alive(life)) return;
+          on_upstream_connected(status);
+        });
+  } else if (target_.is_domain()) {
     // 域名交给 `connect()` 那条路解析：它是**异步**的（`uv_getaddrinfo`），
     // 不会在事件循环里阻塞。历史行为是只解析 `AF_INET`，与客户端那条腿一致。
     rc = upstream_->connect(
