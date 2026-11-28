@@ -22,8 +22,10 @@
 #endif
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <new>
 #include <string>
 #include <vector>
@@ -432,6 +434,57 @@ void encode_params(const std::vector<uvcpp_db_value>& params,
   }
 }
 
+/// 每条连接一份的命名 prepared statement 缓存（`sql -> statement 名`）。
+///
+/// 键是**原样的 SQL 文本**（不做规范化）：同一句 SQL 的空白/大小写差异在服务端
+/// 本来就是两条语句，这里也不替调用方合并。值是服务端那条命名语句的名字。
+///
+/// 上限 64 条。装满之后**不再缓存新的 SQL**，那条 SQL 退回 unnamed 的
+/// `PQsendQueryParams`（改造前的行为）—— 不淘汰旧的、不 LRU、也不发
+/// `DEALLOCATE`。理由是这里要保证的只有"缓存影响快慢、不影响结果"：任何淘汰
+/// 策略只要有一处写错，结果就变成跟命中顺序有关的函数；而"满了就退回老路"
+/// 天然不会写错任何结果。
+///
+/// 名字里的序号**单调递增、连接生命周期内不重置**（`clear()` 也不重置），所以
+/// 同一个驱动对象重连前后不会撞名。新连接本来就是新会话、没有旧语句，这条
+/// 单调性只是让"撞名"连理论上都不可能。
+class pg_prepared_cache {
+ public:
+  enum state_t { kPreparing, kReady };
+  struct entry {
+    std::string name;
+    state_t state;
+  };
+  typedef std::map<std::string, entry> map_type;
+  typedef map_type::iterator iterator;
+
+  static const size_t kMaxEntries = 64;
+
+  bool full() const { return entries_.size() >= kMaxEntries; }
+  iterator find(const std::string& sql) { return entries_.find(sql); }
+  iterator end() { return entries_.end(); }
+
+  /// 插入一条 `kPreparing` 记录并给出它的名字；装满时返回 `end()`。
+  iterator begin_prepare(const std::string& sql, std::string* name) {
+    if (full()) return entries_.end();
+    *name = "uvcpp_ps_" + std::to_string(++next_id_);
+    entry e;
+    e.name = *name;
+    e.state = kPreparing;
+    return entries_.insert(std::make_pair(sql, e)).first;
+  }
+
+  void mark_ready(iterator it) { it->second.state = kReady; }
+  void erase(iterator it) { entries_.erase(it); }
+
+  /// 连接关闭 / 重开：服务端那份会话没了，缓存跟着清。序号**不复位**。
+  void clear() { entries_.clear(); }
+
+ private:
+  map_type entries_;
+  uint64_t next_id_ = 0;
+};
+
 /// `PGresult` 的行 → `uvcpp_db_table`。
 void fill_rows_into(PGresult* res, uvcpp_db_table* out) {
   const pgsql_api& a = api();
@@ -497,8 +550,12 @@ uvcpp_db_status fill_table_from(PGconn* conn, PGresult* res, uvcpp_db_table* out
 }
 
 /// 真异步查询的实现（定义在 `pgsql_driver` 之后）。
+///
+/// `cache` 归**连接**（也就是 `pgsql_driver`）所有，任务只借不拥有。任务活着的
+/// 期间连接不会被关（`uvcpp_db_client::query_async` 的约定），而任务在交完
+/// 用户回调之后就不再碰它。
 bool start_async_query(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
-                       const std::string& sql,
+                       pg_prepared_cache* cache, const std::string& sql,
                        const std::vector<uvcpp_db_value>& params,
                        uvcpp_db_async_done done, std::string* err);
 
@@ -524,7 +581,7 @@ class pgsql_driver : public uvcpp_db_driver {
       *err = "PostgreSQL 连接没打开";
       return false;
     }
-    return start_async_query(conn_, loop, timeout_ms_, sql, params,
+    return start_async_query(conn_, loop, timeout_ms_, &prepared_, sql, params,
                              std::move(done), err);
   }
 
@@ -585,6 +642,9 @@ class pgsql_driver : public uvcpp_db_driver {
       api().PQfinish(conn_);
       conn_ = nullptr;
     }
+    // 会话没了，服务端那份命名语句也就不存在了。缓存必须跟着清，否则下一次
+    // open() 之后会拿旧名字去 Bind，报"prepared statement 不存在"。
+    prepared_.clear();
   }
 
   uvcpp_db_status ping(std::string* err) {
@@ -831,6 +891,8 @@ class pgsql_driver : public uvcpp_db_driver {
 
   PGconn* conn_ = nullptr;
   int timeout_ms_ = 5000;
+  /// 命名 prepared statement 缓存（同步路径不用它，只有真异步那条路会填）。
+  pg_prepared_cache prepared_;
 };
 
 std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_pgsql() {
@@ -843,12 +905,18 @@ std::unique_ptr<uvcpp_db_driver> uvcpp_db_make_pgsql() {
 //
 // 走的正是 libpq 自己的异步协议，不是"把阻塞调用塞进线程池"：
 //
-//     PQsendQueryParams  把查询拼进连接的输出缓冲（不等往返）
+//     PQsendPrepare      （缓存未命中）把语句 Parse 成一条**命名**语句
+//     PQsendQueryPrepared（缓存命中 / prepare 落地）用那个名字 Bind/Execute
+//     PQsendQueryParams  （缓存满 / 没有缓存）退回 unnamed 的 Parse+Bind+Execute
 //     PQflush            flush 到哪了：0 全发出去了 / 1 还堵着 / -1 断了
 //     uv_poll            盯 `PQsocket()` 的 fd —— 可写就继续 flush，可读就收
 //     PQconsumeInput     把服务端来的字节收进连接
 //     PQisBusy           收齐了没有
 //     PQgetResult        取一条结果（多语句会来好几条，最后一条算数，与 PQexec 一致）
+//
+// 命名语句按**连接**缓存在 `pg_prepared_cache` 里（`sql -> 名字`）。第一次见到
+// 一句 SQL 要付一次 Parse 的往返，之后每条查询都省掉服务端的 parse/plan；缓存
+// 满 64 条之后新 SQL 退回 unnamed，语义不变。
 //
 // 为什么值得这么写（本机实测，`/tmp/adbrig`，见 `doc/benchmark.md` §4.24）：
 // 走线程池时**每条在途查询各占一条工作线程**，池子只能按连接数定大小；而 256 条
@@ -864,14 +932,18 @@ namespace {
 class pg_async_task {
  public:
   static bool start(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
-                    const std::string& sql,
+                    pg_prepared_cache* cache, const std::string& sql,
                     const std::vector<uvcpp_db_value>& params,
                     uvcpp_db_async_done done, std::string* err);
 
  private:
+  /// 这条查询现在处于哪一段。缓存命中 / 缓存满 / 没有缓存时直接进
+  /// `kPhaseExecute`；未命中且还有空位时先从 `kPhasePrepare` 走一趟。
+  enum phase_t { kPhasePrepare, kPhaseExecute };
+
   pg_async_task(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
-                uvcpp_db_async_done done)
-      : conn_(conn), loop_(loop), timeout_ms_(timeout_ms),
+                pg_prepared_cache* cache, uvcpp_db_async_done done)
+      : conn_(conn), loop_(loop), timeout_ms_(timeout_ms), cache_(cache),
         done_(std::move(done)) {}
   pg_async_task(const pg_async_task&);
   pg_async_task& operator=(const pg_async_task&);
@@ -879,9 +951,12 @@ class pg_async_task {
   bool init_handles(std::string* err);
   void send(const std::string& sql,
             const std::vector<uvcpp_db_value>& params);
+  bool send_execute_prepared();
+  void dispatch_flush();
   void on_io(int status, int events);
   void on_timeout();
   void drain_results();
+  void abandon_pending();
   void finish(uvcpp_db_status st, std::string error);
   void release_handles();
   void deliver();
@@ -900,6 +975,9 @@ class pg_async_task {
   PGconn* conn_ = nullptr;
   uvcpp_loop* loop_ = nullptr;
   int timeout_ms_ = 0;
+  /// 连接自己的缓存，归 `pgsql_driver` 所有；任务只借。可以为空（比如以后
+  /// 有调用方想走无缓存的路），那时行为就是改造前的 unnamed 查询。
+  pg_prepared_cache* cache_ = nullptr;
   uvcpp_db_async_done done_;
 
   uv_poll_t poll_;
@@ -913,6 +991,21 @@ class pg_async_task {
   uvcpp_db_status status_ = uvcpp_db_status::EXEC_FAILED;
   std::string error_;
   PGresult* result_ = nullptr;
+
+  phase_t phase_ = kPhaseExecute;
+  /// 正在准备的那条记录（`has_pending_` 为真时有效）。prepare 还没落地就失败/
+  /// 超时的话要把它从缓存里摘掉 —— 半截记录留着只会让下一次查询白等。
+  pg_prepared_cache::iterator pending_;
+  bool has_pending_ = false;
+  /// 这条查询用的那条已就绪记录（`has_used_` 为真时有效），用来在服务端把
+  /// 语句丢掉之后（`26000`）把它从缓存里摘掉。
+  pg_prepared_cache::iterator used_;
+  bool has_used_ = false;
+  /// 这次要 Bind 的参数（`storage_` 里存文本，`values_` 指向它们）。prepare
+  /// 与 execute 是两次发送，所以这两份必须活到 execute 发出去为止。
+  std::string stmt_name_;
+  std::vector<std::string> storage_;
+  std::vector<const char*> values_;
 };
 
 bool pg_async_task::init_handles(std::string* err) {
@@ -947,21 +1040,89 @@ bool pg_async_task::init_handles(std::string* err) {
 
 void pg_async_task::send(const std::string& sql,
                          const std::vector<uvcpp_db_value>& params) {
-  std::vector<std::string> storage;
-  std::vector<const char*> values;
-  encode_params(params, &storage, &values);
+  // 编码一次、活到 Bind 发出去。prepare 与 execute 是两次发送，所以这两份
+  // 不能像改造前那样放在 send() 的栈上。
+  encode_params(params, &storage_, &values_);
+  const int nparams = static_cast<int>(params.size());
+  const char* const* values = values_.empty() ? nullptr : &values_[0];
 
-  if (!api().PQsendQueryParams(conn_, sql.c_str(),
-                               static_cast<int>(params.size()), nullptr,
-                               values.empty() ? nullptr : &values[0], nullptr,
-                               nullptr, 0)) {
+  // 缓存查找**先于**容量判断：满了也得让已经缓存的 SQL 继续命中。
+  if (cache_ != nullptr) {
+    pg_prepared_cache::iterator it = cache_->find(sql);
+    if (it != cache_->end() && it->second.state == pg_prepared_cache::kReady) {
+      stmt_name_ = it->second.name;
+      used_ = it;
+      has_used_ = true;
+      phase_ = kPhaseExecute;
+      if (!send_execute_prepared()) return;
+      dispatch_flush();
+      return;
+    }
+    if (it != cache_->end()) {
+      // 理论上不该看到 `kPreparing`：一条连接上只允许一条在飞查询。真看到了
+      // （说明有人绕过了那条约定），把它当脏记录丢掉、重新准备。
+      cache_->erase(it);
+    }
+    if (!cache_->full()) {
+      std::string name;
+      pg_prepared_cache::iterator inserted = cache_->begin_prepare(sql, &name);
+      if (inserted != cache_->end()) {
+        pending_ = inserted;
+        has_pending_ = true;
+        stmt_name_ = name;
+        phase_ = kPhasePrepare;
+        // `nParams` 传 0、`paramTypes` 传 nullptr：让服务端从 SQL 上下文推断
+        // 参数类型 —— 与 `PQsendQueryParams(paramTypes=nullptr)` 那条路完全
+        // 同一套推断。真正的参数个数在 `PQsendQueryPrepared` 的 Bind 里对。
+        if (!api().PQsendPrepare(conn_, stmt_name_.c_str(), sql.c_str(), 0,
+                                 nullptr)) {
+          const bool bad = api().PQstatus(conn_) != CONNECTION_OK;
+          abandon_pending();
+          finish(bad ? uvcpp_db_status::NOT_CONNECTED
+                     : uvcpp_db_status::EXEC_FAILED,
+                 std::string("PQsendPrepare 失败：") +
+                     api().PQerrorMessage(conn_));
+          return;
+        }
+        dispatch_flush();
+        return;
+      }
+    }
+  }
+
+  // 没有缓存、或缓存已满：回到改造前的 unnamed 查询。结果语义完全一样，
+  // 只是 PostgreSQL 每次都要重新 parse/plan。
+  phase_ = kPhaseExecute;
+  has_used_ = false;
+  if (!api().PQsendQueryParams(conn_, sql.c_str(), nparams, nullptr, values,
+                               nullptr, nullptr, 0)) {
     const bool bad = api().PQstatus(conn_) != CONNECTION_OK;
     finish(bad ? uvcpp_db_status::NOT_CONNECTED : uvcpp_db_status::EXEC_FAILED,
            std::string("PQsendQueryParams 失败：") +
                api().PQerrorMessage(conn_));
     return;
   }
+  dispatch_flush();
+}
 
+/// 用缓存里的名字发 Bind/Execute。参数仍在 `storage_` / `values_` 里。
+bool pg_async_task::send_execute_prepared() {
+  const int nparams = static_cast<int>(values_.size());
+  const char* const* values = values_.empty() ? nullptr : &values_[0];
+  if (!api().PQsendQueryPrepared(conn_, stmt_name_.c_str(), nparams, values,
+                                 nullptr, nullptr, 0)) {
+    const bool bad = api().PQstatus(conn_) != CONNECTION_OK;
+    finish(bad ? uvcpp_db_status::NOT_CONNECTED : uvcpp_db_status::EXEC_FAILED,
+           std::string("PQsendQueryPrepared 失败：") +
+               api().PQerrorMessage(conn_));
+    return false;
+  }
+  return true;
+}
+
+/// 发出去之后的三件收尾：flush、按"还堵不堵"决定轮询事件、重新起计时器。
+/// 首次发送与 prepare 落地后的第二次发送共用它。
+void pg_async_task::dispatch_flush() {
   const int flushed = api().PQflush(conn_);
   if (flushed < 0) {
     finish(uvcpp_db_status::NOT_CONNECTED,
@@ -980,7 +1141,8 @@ void pg_async_task::send(const std::string& sql,
   }
   // 客户端的保险比服务端的 `statement_timeout` **晚 1 秒**：正常情况下该由
   // 服务端那条干净地报 `57014 query_canceled`（连接还能用），只有在连接整个
-  // 哑掉时才会走到这里。
+  // 哑掉时才会走到这里。prepare 落地后再起一次 —— prepare + execute 各自
+  // 拿到一份完整预算，而不是让解析时间从执行时间里扣。
   if (timer_open_ && timeout_ms_ > 0) {
     uv_timer_start(&timer_, timer_cb,
                    static_cast<uint64_t>(timeout_ms_) + 1000, 0);
@@ -1020,8 +1182,58 @@ void pg_async_task::drain_results() {
   }
   // 与 `PQexec` 同一套规矩：多语句会给好几条结果，**最后一条算数**，前面那些
   // 当场清掉（不认它们就不会有人去清，每次都是几 KB 的泄漏）。
+  //
+  // prepare 那一段多一条承重规矩：**必须收到 `PQgetResult` 返回的 NULL**（命令
+  // 真正结束、连接回到 IDLE）之后才能发 execute。只看那条非空的
+  // `PGRES_COMMAND_OK` 就发下一条，libpq 会报 "another command is already in
+  // progress"。失败也一样 —— 不把命令收干净就直接交付错误，连接池会拿回一条
+  // 还压着 ReadyForQuery 的连接。
   while (!api().PQisBusy(conn_)) {
     PGresult* r = api().PQgetResult(conn_);
+    if (phase_ == kPhasePrepare) {
+      if (r != nullptr) {
+        if (result_ != nullptr) api().PQclear(result_);
+        result_ = r;
+        continue;
+      }
+      // prepare 命令收干净了。结果已经在 `result_` 里（服务端总会给一条）。
+      PGresult* prep = result_;
+      result_ = nullptr;
+      if (prep == nullptr) {
+        abandon_pending();
+        finish(uvcpp_db_status::NOT_CONNECTED,
+               "PostgreSQL 的 PREPARE 没有返回结果");
+        return;
+      }
+      const ExecStatusType pst = api().PQresultStatus(prep);
+      if (pst == PGRES_COMMAND_OK) {
+        api().PQclear(prep);
+        if (has_pending_) {
+          cache_->mark_ready(pending_);
+          used_ = pending_;
+          has_used_ = true;
+          has_pending_ = false;
+        }
+        phase_ = kPhaseExecute;
+        if (!send_execute_prepared()) return;
+        dispatch_flush();
+        if (finishing_) return;
+        continue;
+      }
+      // prepare 失败：按**查询失败**报出去（不偷偷退回 unnamed 再跑一遍）。
+      // SQLSTATE 的映射与执行失败那条路一致（42 类 → PREPARE_FAILED 等）。
+      uvcpp_db_status st = sqlstate_status(
+          api().PQresultErrorField(prep, PG_DIAG_SQLSTATE));
+      std::string msg =
+          std::string("PostgreSQL 执行失败：") + pq_error_text(conn_, prep);
+      api().PQclear(prep);
+      abandon_pending();
+      if (api().PQstatus(conn_) != CONNECTION_OK) {
+        st = uvcpp_db_status::NOT_CONNECTED;
+      }
+      finish(st, std::move(msg));
+      return;
+    }
     if (r == nullptr) {
       finish(uvcpp_db_status::OK, std::string());
       return;
@@ -1029,6 +1241,13 @@ void pg_async_task::drain_results() {
     if (result_ != nullptr) api().PQclear(result_);
     result_ = r;
   }
+}
+
+/// prepare 还没落地就把这条记录摘掉。否则缓存里会留一条永远 `kPreparing`
+/// 的记录，下一次同一句 SQL 会去等一条根本不存在的 prepare。
+void pg_async_task::abandon_pending() {
+  if (has_pending_ && cache_ != nullptr) cache_->erase(pending_);
+  has_pending_ = false;
 }
 
 void pg_async_task::on_timeout() {
@@ -1045,6 +1264,9 @@ void pg_async_task::finish(uvcpp_db_status st, std::string error) {
   finishing_ = true;
   status_ = st;
   error_ = std::move(error);
+  // 没落地就结束（超时、轮询失败、flush 失败）⇒ 缓存里那条 `kPreparing`
+  // 记录作废。已经 ready 的（`has_pending_` 为假）留着 —— 它确实在服务端。
+  abandon_pending();
   release_handles();
 }
 
@@ -1076,6 +1298,17 @@ void pg_async_task::deliver() {
     if (uvcpp_db_ok(out.status)) {
       out.status = fill_table_from(conn_, result_, &out.table, &out.error,
                                    nullptr);
+      // 服务端把这条命名语句丢掉了（`DEALLOCATE` / `DISCARD ALL` 之类）：
+      // 本次查询**不重试**（按约定如实报错），但把缓存记录摘掉，下一次独立
+      // 的查询会重新 prepare，而不是从此每次都在这一句上失败。
+      if (!uvcpp_db_ok(out.status) && has_used_ && cache_ != nullptr) {
+        const char* sqlstate =
+            api().PQresultErrorField(result_, PG_DIAG_SQLSTATE);
+        if (sqlstate != nullptr && std::strcmp(sqlstate, "26000") == 0) {
+          cache_->erase(used_);
+          has_used_ = false;
+        }
+      }
     }
     api().PQclear(result_);
     result_ = nullptr;
@@ -1094,11 +1327,11 @@ void pg_async_task::deliver() {
 }
 
 bool pg_async_task::start(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
-                          const std::string& sql,
+                          pg_prepared_cache* cache, const std::string& sql,
                           const std::vector<uvcpp_db_value>& params,
                           uvcpp_db_async_done done, std::string* err) {
-  pg_async_task* task =
-      new (std::nothrow) pg_async_task(conn, loop, timeout_ms, std::move(done));
+  pg_async_task* task = new (std::nothrow)
+      pg_async_task(conn, loop, timeout_ms, cache, std::move(done));
   if (task == nullptr) {
     *err = "分配异步查询任务失败";
     return false;
@@ -1114,10 +1347,10 @@ bool pg_async_task::start(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
 }
 
 bool start_async_query(PGconn* conn, uvcpp_loop* loop, int timeout_ms,
-                       const std::string& sql,
+                       pg_prepared_cache* cache, const std::string& sql,
                        const std::vector<uvcpp_db_value>& params,
                        uvcpp_db_async_done done, std::string* err) {
-  return pg_async_task::start(conn, loop, timeout_ms, sql, params,
+  return pg_async_task::start(conn, loop, timeout_ms, cache, sql, params,
                               std::move(done), err);
 }
 
