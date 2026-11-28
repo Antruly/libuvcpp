@@ -140,10 +140,8 @@ class UVCPP_API uvcpp_db_client {
   // ---- 真异步查询（不占线程）----
 
   /// 这个连接的后端能不能**真异步**。现在只有 PostgreSQL 能 —— 它自带
-  /// 异步协议（`PQsendPrepare` / `PQsendQueryPrepared` / `PQsendQueryParams`
-  /// 配 `PQsocket` + `PQgetResult`），查询的等待由 `uv_poll` 盯连接自己的
-  /// 套接字，**不占线程池的一条工作线程**。同一条连接上第一次见到的 SQL 会
-  /// 被命名 prepared statement 缓存下来，之后省掉服务端的 parse/plan。
+  /// 异步协议（`PQsendQueryParams` + `PQsocket` + `PQgetResult`），查询的等待
+  /// 由 `uv_poll` 盯连接自己的套接字，**不占线程池的一条工作线程**。
   ///
   /// 走 `<db/uvcpp_db_async.h>` / `<db/uvcpp_db_pool.h>` 那两条异步门面时，
   /// 能真异步的后端会自动走这条路（`uvcpp_db_pool::set_native_async` 可关）；

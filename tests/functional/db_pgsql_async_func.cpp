@@ -27,12 +27,7 @@
  *      `detach_loop` 返回 false 且什么都不做，落地之后返回 true。**这条同时钉住
  *      唤醒句柄是 unreferenced 的**：`loop.run(UV_RUN_DEFAULT)` 必须能返回
  *      （referenced 的话它永远不返回，用例会挂到 watchdog 上）。
- *   5. **命名 prepared statement 缓存**（issue #124）：同一句 SQL 连跑多次只有
- *      第一次 `PREPARE`、参数变化结果仍对、两条不同 SQL 各占一条、prepare 失败
- *      如实报错且不污染缓存、服务端 `DEALLOCATE ALL` 之后不静默重试、重开连接
- *      后缓存不串。
- *   6. **缓存上限 64**：第 65 句退回 unnamed，结果仍然对、缓存不膨胀。
- *   7. **A/B**：同一组查询，`set_native_async(true)` 与 `false` 两条路的结果
+ *   5. **A/B**：同一组查询，`set_native_async(true)` 与 `false` 两条路的结果
  *      逐字节相同。`insert` 在真异步开着时仍走线程池（两次往返），也验一遍。
  */
 
@@ -65,11 +60,9 @@ void check(bool cond, const std::string& what) {
 }
 
 using uvcpp::uvcpp_db_client;
-using uvcpp::uvcpp_db_params;
 using uvcpp::uvcpp_db_pool;
 using uvcpp::uvcpp_db_status;
 using uvcpp::uvcpp_db_table;
-using uvcpp::uvcpp_db_value;
 using uvcpp::uvcpp_loop;
 using uvcpp::uvcpp_timer;
 
@@ -102,50 +95,6 @@ void arm_watchdog(uvcpp_loop* loop, uvcpp_timer* timer) {
         loop->stop();
       },
       5000, 0);
-}
-
-// ---------------------------------------------------------------------------
-// prepared statement 缓存的量具
-// ---------------------------------------------------------------------------
-
-/// 投一条、跑到它落地、把状态与结果集带回来。返回 false = 压根没投出去。
-bool run_async_one(uvcpp_db_client* db, uvcpp_loop* loop, const std::string& sql,
-                   const uvcpp_db_params& params, uvcpp_db_status* status,
-                   uvcpp_db_table* table) {
-  std::atomic<int> calls(0);
-  std::atomic<int> st(-1);
-  const bool submitted = db->query_async(
-      loop, sql, params,
-      [&](uvcpp_db_status s, uvcpp_db_table t) {
-        calls.fetch_add(1);
-        st.store(static_cast<int>(s));
-        *table = std::move(t);
-        loop->stop();
-      });
-  if (!submitted) return false;
-  loop->run(UV_RUN_DEFAULT);
-  *status = static_cast<uvcpp_db_status>(st.load());
-  return calls.load() == 1;
-}
-
-/// 当前会话里由驱动建的命名语句条数（`pg_prepared_statements` 是会话视图）。
-int count_prepared(uvcpp_db_client* db) {
-  uvcpp_db_table t;
-  const uvcpp_db_status st = db->query(
-      "SELECT count(*) AS n FROM pg_prepared_statements "
-      "WHERE name LIKE 'uvcpp_ps_%'",
-      &t);
-  if (!uvcpp::uvcpp_db_ok(st) || t.empty()) {
-    check(false, "读 pg_prepared_statements 失败：" + db->last_error());
-    return -1;
-  }
-  return static_cast<int>(t.rows()[0]["n"].to_int64());
-}
-
-/// 一条查询的标量结果（单行单列 int64）。取不到时给 -1。
-int64_t scalar_int64(const uvcpp_db_table& t) {
-  if (t.empty() || t.column_count() == 0) return -1;
-  return t.rows()[0][static_cast<size_t>(0)].to_int64();
 }
 
 // ---------------------------------------------------------------------------
@@ -390,173 +339,7 @@ int test_pool_native_and_detach() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. 命名 prepared statement 缓存（issue #124）
-// ---------------------------------------------------------------------------
-//
-// 判据分两层：
-//   * **行为**：同一句 SQL 重复跑、换参数、换 SQL，结果逐格对；
-//   * **确证缓存真的在工作**：`pg_prepared_statements` 是会话视图，驱动建的
-//     命名语句会在里面留一行。同一个 SQL 跑三次仍然只有一行 ⇒ 后两次走的是
-//     `PQsendQueryPrepared`，不是又 Parse 了一遍。
-//
-// 另外两条是错误契约：prepare 失败要**如实报错**（不偷偷退回 unnamed）；服务端
-// 把语句丢掉（`DEALLOCATE ALL`）之后本次查询如实失败、**不静默重试**，但下一次
-// 独立查询会重新 prepare。
-int test_prepared_cache() {
-  std::cout << "-- 命名 prepared statement 缓存 --" << std::endl;
-
-  uvcpp_db_client db;
-  if (!open_client(&db)) return 1;
-  prepare_table(&db);
-
-  uvcpp_loop loop;
-  uvcpp_timer watchdog(&loop);
-  arm_watchdog(&loop, &watchdog);
-
-  const std::string sql = "SELECT $1::int * 2 AS v";
-  uvcpp_db_status st = uvcpp_db_status::MISUSE;
-  uvcpp_db_table t;
-
-  check(count_prepared(&db) == 0, "异步查询之前会话里没有驱动建的命名语句");
-
-  // 第一次：缓存未命中 ⇒ 一次 PREPARE + 一次 execute。
-  check(run_async_one(&db, &loop, sql, {21}, &st, &t),
-        "第一次（未命中）回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 42,
-        "第一次的结果是 42，实得 " + std::to_string(scalar_int64(t)));
-  check(count_prepared(&db) == 1,
-        "第一次之后会话里恰好一条命名语句，实得 " +
-            std::to_string(count_prepared(&db)));
-
-  // 第二、三次：同一句 SQL、不同参数。命中缓存，不新增语句。
-  check(run_async_one(&db, &loop, sql, {50}, &st, &t), "第二次回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 100,
-        "换参数（50）结果仍是参数的 2 倍，实得 " +
-            std::to_string(scalar_int64(t)));
-  check(run_async_one(&db, &loop, sql, {-3}, &st, &t), "第三次回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == -6,
-        "负参数（-3）结果是 -6，实得 " + std::to_string(scalar_int64(t)));
-  check(count_prepared(&db) == 1,
-        "同一句 SQL 跑三次仍然只有一条命名语句（后两次是命中），实得 " +
-            std::to_string(count_prepared(&db)));
-
-  // 另一句 SQL：各自一条。
-  check(run_async_one(&db, &loop, "SELECT $1::text || '!' AS v", {"甲"}, &st,
-                      &t),
-        "不同 SQL 的回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && t.column_count() == 1 && !t.empty() &&
-            t.rows()[0][static_cast<size_t>(0)].to_text() == "甲!",
-        "不同 SQL 的结果也逐字节对");
-  check(count_prepared(&db) == 2,
-        "两条不同 SQL 各占一条命名语句，实得 " +
-            std::to_string(count_prepared(&db)));
-
-  // prepare 失败：语句不合法，必须把失败**如实**报成这次查询的结果。
-  check(run_async_one(&db, &loop, "SELECT * FROM uvcpp_ps_missing_table", {},
-                      &st, &t),
-        "prepare 失败的那条回调恰好一次");
-  check(st == uvcpp_db_status::PREPARE_FAILED,
-        "坏 SQL 的返回码是 PREPARE_FAILED，实得 " +
-            std::string(uvcpp::uvcpp_db_status_name(st)));
-  check(count_prepared(&db) == 2,
-        "失败的 prepare 没有留在缓存里，实得 " +
-            std::to_string(count_prepared(&db)));
-
-  // 非致命的 prepare 失败之后连接还能用，缓存里的旧语句也还在。
-  check(run_async_one(&db, &loop, sql, {7}, &st, &t),
-        "prepare 失败之后连接还能继续投查询");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 14,
-        "继续投的那条结果是 14，实得 " + std::to_string(scalar_int64(t)));
-
-  // 服务端把语句丢掉：本次如实失败（EXEC_FAILED）、不静默重试；缓存记录被摘
-  // 掉，下一次独立查询重新 prepare 并恢复。
-  check(uvcpp::uvcpp_db_ok(db.execute("DEALLOCATE ALL")),
-        "同步 DEALLOCATE ALL 执行成功");
-  check(count_prepared(&db) == 0, "DEALLOCATE ALL 之后会话里没有命名语句");
-  check(run_async_one(&db, &loop, sql, {9}, &st, &t),
-        "语句被丢掉之后回调恰好一次");
-  check(st == uvcpp_db_status::EXEC_FAILED,
-        "本次查询如实报 EXEC_FAILED（不静默重试），实得 " +
-            std::string(uvcpp::uvcpp_db_status_name(st)));
-  check(count_prepared(&db) == 0, "失败之后那条缓存记录已被摘掉");
-  check(run_async_one(&db, &loop, sql, {11}, &st, &t),
-        "下一次查询重新 prepare，回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 22,
-        "重新 prepare 后结果恢复为 22，实得 " +
-            std::to_string(scalar_int64(t)));
-  check(count_prepared(&db) == 1, "重新 prepare 后缓存里又有一条");
-
-  // 连接重开：新会话、新缓存 —— 旧语句一条都看不见，第一次查询照样对。
-  db.close();
-  if (!open_client(&db)) return 1;
-  check(count_prepared(&db) == 0,
-        "重开连接后新会话里看不到上一条连接的任何命名语句");
-  check(run_async_one(&db, &loop, sql, {3}, &st, &t),
-        "重开连接后的第一次查询回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 6,
-        "重开连接后结果是 6（缓存没有串），实得 " +
-            std::to_string(scalar_int64(t)));
-  check(count_prepared(&db) == 1, "重开连接后缓存重新建了一条");
-
-  watchdog.stop();
-  uvcpp_test::drain(&loop);
-  db.close();
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// 6. 缓存上限：满了退回 unnamed，结果不变
-// ---------------------------------------------------------------------------
-//
-// 上限是 64。这里造 65 句互不相同的 SQL：前 64 句进缓存，第 65 句因为满了走
-// unnamed。判据是第 65 句的**结果仍然对**、且缓存没有膨胀到 65 —— 也就是
-// "不缓存"只影响快慢，不影响结果。
-int test_prepared_cache_bound() {
-  std::cout << "-- prepared 缓存上限（64）--" << std::endl;
-
-  uvcpp_db_client db;
-  if (!open_client(&db)) return 1;
-
-  uvcpp_loop loop;
-  uvcpp_timer watchdog(&loop);
-  arm_watchdog(&loop, &watchdog);
-
-  bool values_ok = true;
-  uvcpp_db_status st = uvcpp_db_status::MISUSE;
-  uvcpp_db_table t;
-  for (int i = 0; i < 64; ++i) {
-    const std::string sql = "SELECT $1::int + " + std::to_string(i) + " AS v";
-    if (!run_async_one(&db, &loop, sql, {1}, &st, &t) ||
-        !uvcpp::uvcpp_db_ok(st) || scalar_int64(t) != i + 1) {
-      values_ok = false;
-    }
-  }
-  check(values_ok, "前 64 句互不相同的 SQL 结果都对");
-  check(count_prepared(&db) == 64,
-        "缓存里恰好 64 条（上限），实得 " + std::to_string(count_prepared(&db)));
-
-  // 第 65 句：缓存已满 ⇒ 走 unnamed。结果必须仍然对。
-  const std::string over = "SELECT $1::int + 64 AS v";
-  check(run_async_one(&db, &loop, over, {1}, &st, &t),
-        "超出上限的那句回调恰好一次");
-  check(uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 65,
-        "超出上限的那句结果仍然对（65），实得 " +
-            std::to_string(scalar_int64(t)));
-  check(count_prepared(&db) == 64,
-        "超出上限的 SQL 没有撑大缓存，实得 " +
-            std::to_string(count_prepared(&db)));
-  check(run_async_one(&db, &loop, over, {2}, &st, &t) &&
-            uvcpp::uvcpp_db_ok(st) && scalar_int64(t) == 66,
-        "同一句再跑一次（仍未缓存）结果仍然对");
-
-  watchdog.stop();
-  uvcpp_test::drain(&loop);
-  db.close();
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// 7. A/B：真异步 vs 线程池，结果必须一样
+// 5. A/B：真异步 vs 线程池，结果必须一样
 // ---------------------------------------------------------------------------
 
 std::vector<int64_t> run_batch(bool native) {
@@ -675,8 +458,6 @@ int main() {
   test_one_in_flight_only();
   test_not_connected_on_peer_death();
   test_pool_native_and_detach();
-  test_prepared_cache();
-  test_prepared_cache_bound();
   test_ab_native_vs_threadpool();
 
   if (failures != 0) {
