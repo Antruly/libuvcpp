@@ -1491,6 +1491,12 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### HTTP 与 WebSocket 语义
 
+- **WS 客户端自定义 Upgrade 头**（`1.12.0-dev`）：
+  `uvcpp_ws_client::set_handshake_header(name, value)` 允许在 `connect()` 之前
+  追加 `Authorization`、`Cookie`、`Origin`、`Sec-WebSocket-Protocol` 等头。
+  名字/值含 CR/LF 时整条忽略；Host、Upgrade、Connection、Sec-WebSocket-Key/
+  Version/Extensions 是保留头（大小写不敏感）；同名头覆盖，发送顺序按首次
+  添加。用例 `web_ws_client_handshake_header_func`。
 - **WS 连接的 retired 守卫与安全存活查询**（`1.12.0-dev`，#87）：
   `send_data()` 在压缩之前判 `retired_`，`send_frame_impl()` 同样先判 —— retire
   之后发送立即返回 -1，不再先跑一次 deflate（对象已回收时那一步会崩在 zlib）。
