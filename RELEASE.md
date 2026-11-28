@@ -19,6 +19,19 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.13.0 重点 (Highlights)
+
+> **状态：1.13.0-dev 开发中，尚未发布。** 本版目标是 HTTP/1.1 与 PostgreSQL
+> 异步查询的每请求成本优化，并在 50 核本机与官方 HttpArena 口径上完成回归验证。
+> 下面列的是计划中的改动；只有带实测证据的条目才会保留到正式版正文。
+
+- **HTTP/1.1 表示层**：查询参数与请求头的零分配/视图化读取，减少每请求
+  `std::vector`、`std::string` 构造；优先服务 `/baseline11` 这类固定参数形状。
+- **PostgreSQL 异步**：按连接缓存命名 prepared statement，避免每条查询重复
+  parse/plan；在不改变回调线程与返回码契约的前提下降低每请求 CPU。
+- **基准与发布门禁**：1.12.1 / 1.13.0 A/B、50 核 h1 与 async-db 扩展曲线、
+  全量本地 ctest 与六平台 CI；任何回退先做三次隔离复测再下结论。
+
 ## v1.12.1 重点 (Highlights)
 
 > **状态：v1.12.1 已发布。** 六平台 Release 构建全部成功；Linux / Windows / macOS
