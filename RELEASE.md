@@ -19,6 +19,27 @@
 
 **libuvcpp** 是一个基于 libuv 的现代 C++ 封装库，提供简洁的面向对象接口来使用 libuv 的异步 I/O 功能。
 
+## v1.12.1 重点 (Highlights)
+
+> **状态：v1.12.1 已发布。** 六平台 Release 构建全部成功；Linux / Windows / macOS
+> CI 通过。
+
+1.12.1 是 1.12.0 之后的**补丁版**：没有删除或改名任何公开符号，二进制可直接替换。
+
+- **SOCKS5 服务端每条 CONNECT 的上游路由（#121）**：新增
+  `uvcpp_socks5_server_options::route_target`。按目标返回"直连"或
+  `uvcpp_socks5_upstream{host, port, username, password}`；选中上游时服务端复用
+  `uvcpp_tcp_client` 的 SOCKS5 协商（连代理 → 认证 → CONNECT 目标），客户端收到的
+  REP 取自最终结果。域名仍以 `ATYP=DOMAIN` 交给上游解析；回调抛异常按直连处理；
+  BIND 与 UDP ASSOCIATE 不经过该钩子。用例 `route_target_upstream` 覆盖上游链路
+  回环与钩子返回 false 时的直连回落。
+- **WS 客户端自定义 Upgrade 头（#119）**：`uvcpp_ws_client::set_handshake_header()`
+  允许在 `connect()` 之前追加 `Authorization`、`Cookie`、`Origin`、
+  `Sec-WebSocket-Protocol` 等头。保留头（Host / Upgrade / Connection /
+  Sec-WebSocket-Key / Version / Extensions）忽略，含 CR/LF 的名字或值拒绝，
+  同名头覆盖。
+- **CI**：SQLite 后端关闭时不再注册 `orm_sqlite` 用例，修掉 `db-servers` 腿的恒红。
+
 ## v1.12.0 重点 (Highlights)
 
 > **状态：v1.12.0 已发布。** 六平台 Release 构建全部成功；Windows MSVC ORM
