@@ -326,6 +326,215 @@ void test_query_params() {
 }
 
 // =========================================================================
+// 4b. 查询参数的零分配视图（`query_param_view()`）
+// =========================================================================
+
+/// 断言 `query_param_view()` 的结果与既有的 `query()` / `query_params()` 一致。
+///
+/// 三层都查：
+///   1. view 自己的命中结论与值；
+///   2. 与 `query(name)` 一致（同名同值）；
+///   3. 与 `query_params()` 里第一个同名项一致（重复键取第一个）。
+void check_view_eq(const uvcpp_web_request& w, const std::string& name,
+                   bool found, const std::string& want, const char* what) {
+  const char* v = nullptr;
+  size_t n = 0;
+  const bool got = w.query_param_view(name.data(), name.size(), &v, &n);
+
+  if (got != found) {
+    std::cerr << "  [FAIL] " << what << "：命中结论不符（期望 "
+              << (found ? "true" : "false") << "，实际 "
+              << (got ? "true" : "false") << "）" << std::endl;
+    ++g_failures;
+    return;
+  }
+
+  if (!found) {
+    if (v != nullptr) {
+      std::cerr << "  [FAIL] " << what << "：未命中时 value 不是 nullptr"
+                << std::endl;
+      ++g_failures;
+    }
+    if (n != 0) {
+      std::cerr << "  [FAIL] " << what << "：未命中时 value_len 不是 0"
+                << std::endl;
+      ++g_failures;
+    }
+    if (w.query(name) != nullptr) {
+      std::cerr << "  [FAIL] " << what << "：view 说没有，query() 却说有"
+                << std::endl;
+      ++g_failures;
+    }
+    return;
+  }
+
+  if (v == nullptr) {
+    std::cerr << "  [FAIL] " << what << "：命中时 value 为 nullptr"
+              << std::endl;
+    ++g_failures;
+    return;
+  }
+
+  const std::string view_value(v, n);
+  check_eq(view_value, want, what);
+
+  const std::string* ref = w.query(name);
+  if (ref == nullptr) {
+    std::cerr << "  [FAIL] " << what << "：view 说命中，query() 却返回 nullptr"
+              << std::endl;
+    ++g_failures;
+  } else {
+    check_eq(view_value, *ref, what);
+  }
+
+  // query_params() 里第一个同名项（重复键取第一个，与 view/query 一致）
+  const std::vector<std::pair<std::string, std::string> >& ps = w.query_params();
+  bool params_hit = false;
+  for (size_t i = 0; i < ps.size(); ++i) {
+    if (ps[i].first == name) {
+      params_hit = true;
+      check_eq(view_value, ps[i].second, what);
+      break;
+    }
+  }
+  if (!params_hit) {
+    std::cerr << "  [FAIL] " << what
+              << "：view 说命中，query_params() 里却没有同名项" << std::endl;
+    ++g_failures;
+  }
+}
+
+void test_query_param_view() {
+  std::cout << "[request] 查询参数零分配视图" << std::endl;
+
+  // 1) 基准形状：/baseline11?a=13&b=42
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/baseline11?a=13&b=42");
+
+    // 先在**没有**调用过 query_params() 的请求上验证快路：那条路才是会分配
+    // 的，所以此时唯一的分配来源只能是 view 自己。
+    const char* v = nullptr;
+    size_t n = 0;
+    check(w.query_param_view("b", 1, &v, &n), "快路命中 b");
+    check(v != nullptr, "快路命中时 value 非 nullptr");
+    if (v != nullptr) check_eq(std::string(v, n), "42", "快路取到 b=42");
+    // 直接证据：视图指进 query_string() 的缓冲，而不是副本。
+    const std::string& qs = w.query_string();
+    check(v != nullptr && v >= qs.data() && v <= qs.data() + qs.size(),
+          "未编码查询的视图指向 query_string() 缓冲（零分配快路）");
+
+    check_view_eq(w, "a", true, "13", "?a=13&b=42 的 a");
+    check_view_eq(w, "b", true, "42", "?a=13&b=42 的 b");
+    check_view_eq(w, "c", false, "", "?a=13&b=42 的缺失键 c");
+  }
+
+  // 2) 没有查询串
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/no/query");
+    check(w.query_string().empty(), "前置：没有查询串");
+    check_view_eq(w, "a", false, "", "无查询串时任何键都不存在");
+  }
+
+  // 3) 空查询串（只有 '?'）
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?");
+    check(w.query_string().empty(), "前置：`?` 后为空");
+    check_view_eq(w, "a", false, "", "空查询串时任何键都不存在");
+  }
+
+  // 4) %20 / + 解码（整串进编码路）
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?x=a%20b&y=a+b&z=%2B&w=plain");
+    check_view_eq(w, "x", true, "a b", "%20 解码成空格");
+    check_view_eq(w, "y", true, "a b", "查询串里的 '+' 解码成空格");
+    check_view_eq(w, "z", true, "+", "%2B 解码成字面加号");
+    check_view_eq(w, "w", true, "plain", "编码路里未编码的值");
+  }
+
+  // 解码后的**键**同样参与匹配（名字本身不解码，与 query() 一致）
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?a+b=1&%61=2");
+    check_view_eq(w, "a b", true, "1", "键里的 '+' 解码后匹配");
+    check_view_eq(w, "a", true, "2", "键里的 %61 解码后匹配");
+  }
+
+  // 5) 裸键 / 空值 / 空段 / 重复键 / 值里再有 '='
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?a&b=1");
+    check_view_eq(w, "a", true, "", "裸键存在且值为空");
+    check_view_eq(w, "b", true, "1", "裸键后面的正常键");
+  }
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?a=1&&b=2");
+    check_view_eq(w, "a", true, "1", "空段前面的键");
+    check_view_eq(w, "b", true, "2", "空段后面的键");
+    check_eq_i(static_cast<long long>(w.query_params().size()), 2,
+               "空段不产生参数");
+  }
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?a=&b=2");
+    check_view_eq(w, "a", true, "", "空值参数存在且为空串");
+    check_view_eq(w, "b", true, "2", "空值参数后面的键");
+  }
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?k=first&k=second");
+    check_view_eq(w, "k", true, "first", "重复键取第一个");
+    check_eq_i(static_cast<long long>(w.query_params().size()), 2,
+               "重复键在 query_params() 里都保留");
+  }
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?a=b=c&d=1");
+    check_view_eq(w, "a", true, "b=c", "值里可以再有 '='");
+  }
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?=d");
+    check_view_eq(w, "", true, "d", "空键（?=d）可被空名字匹配");
+  }
+
+  // 6) ';' 不是分隔符（与解析器同一条规则）
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?a=1;b=2");
+    check_view_eq(w, "a", true, "1;b=2", "';' 不是分隔符");
+    check_view_eq(w, "b", false, "", "';' 后面的 b 不是独立参数");
+  }
+
+  // 7) 非法百分号序列：解析器按字面保留 '%'，视图必须与之一致
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET, "/x?bad=%zz&ok=1");
+    check_view_eq(w, "bad", true, "%zz", "非法 % 序列按字面保留");
+    check_view_eq(w, "ok", true, "1", "非法序列后面的正常参数");
+  }
+
+  // 8) UTF-8：解析器按字节处理，未编码与百分号编码两种形态都支持
+  {
+    uvcpp_web_request w;
+    make_web_req(w, http_method::HTTP_GET,
+                 "/x?\xE5\x90\x8D\xE5\xAD\x97=v&%E5%90%8D%E5%AD%97=w");
+    // 同一请求里两条键解码后重名，第一个赢（v）。
+    check_view_eq(w, "\xE5\x90\x8D\xE5\xAD\x97", true, "v",
+                  "UTF-8 键（重复键取第一个）");
+
+    uvcpp_web_request e;
+    make_web_req(e, http_method::HTTP_GET, "/x?%E5%90%8D%E5%AD%97=w");
+    check_view_eq(e, "\xE5\x90\x8D\xE5\xAD\x97", true, "w",
+                  "百分号编码的 UTF-8 键解码后匹配");
+  }
+}
+
+// =========================================================================
 // 5. 报头与缓存
 // =========================================================================
 void test_headers() {
@@ -981,6 +1190,7 @@ int main() {
   test_binary_body();
   test_path_and_query();
   test_query_params();
+  test_query_param_view();
   test_headers();
   test_content_length();
   test_accepts_encoding();

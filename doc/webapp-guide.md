@@ -308,6 +308,10 @@ bool is_keep_alive() const;
 ```cpp
 const std::string* query(const std::string& name) const;   // 取不到 → nullptr
 const std::vector<std::pair<std::string,std::string>>& query_params() const;  // 保序、允许重复键
+// 零分配视图：查询串不含 %/+ 时直接指进 query_string() 的缓冲；
+// 输出值必须配合 value_len 使用（可能有 NUL），指针用到请求结束。
+bool query_param_view(const char* name, size_t name_len,
+                      const char** value, size_t* value_len) const;
 bool is_form() const;      const std::string* form(const std::string&) const;
 bool is_multipart() const; const std::vector<uvcpp_web_form_file>& files() const;
 const uvcpp_web_form_file* file(const std::string& name) const;
