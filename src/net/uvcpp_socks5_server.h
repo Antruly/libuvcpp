@@ -51,6 +51,18 @@ class uvcpp_loop;
 class uvcpp_tcp_server;
 
 /**
+ * @brief 一条 CONNECT 选中的人上游代理。
+ */
+struct uvcpp_socks5_upstream {
+  uvcpp_socks5_upstream() : port(0) {}
+
+  std::string host;
+  int         port;
+  std::string username;
+  std::string password;
+};
+
+/**
  * @brief 服务端策略（`listen()` 时快照，之后改不影响已接受的连接）。
  */
 struct uvcpp_socks5_server_options {
@@ -90,6 +102,18 @@ struct uvcpp_socks5_server_options {
    * 域名目标**原样**交给它（不在服务端替调用方解析）；`port` 是主机序。
    */
   std::function<bool(const uvcpp_socks5_endpoint&)> allow_target;
+
+  /**
+   * @brief 每条 CONNECT 的目标路由；返回 true 表示经 `upstream` 转发。
+   *
+   * 上游目前只支持 SOCKS5：服务端用 `uvcpp_tcp_client::set_socks5_proxy()`
+   * 完成"连代理 + 对目标协商"，最终 REP 取自协商结果。域名目标原样交给上游
+   * 解析（ATYP=DOMAIN），不在服务端替调用方解析。回调抛异常按直连处理。
+   * BIND 与 UDP ASSOCIATE 不经过这个钩子。
+   */
+  std::function<bool(const uvcpp_socks5_endpoint& target,
+                     uvcpp_socks5_upstream* upstream)>
+      route_target;
 
   /** @brief 从接受到命令建立的总时限（毫秒；0 = 不限）。 */
   int handshake_timeout_ms;

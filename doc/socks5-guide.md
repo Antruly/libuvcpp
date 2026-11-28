@@ -384,6 +384,9 @@ struct uvcpp_socks5_server_options {
   bool allow_bind;                    // 默认 true
   bool allow_udp_associate;           // 默认 true
   std::function<bool(const uvcpp_socks5_endpoint&)> allow_target;  // 空 = 不限
+  // 每条 CONNECT 走直连还是上游 SOCKS5；空 = 全部直连
+  std::function<bool(const uvcpp_socks5_endpoint&,
+                     uvcpp_socks5_upstream*)> route_target;
 
   int         handshake_timeout_ms;           // 30000
   int         upstream_connect_timeout_ms;    // 30000
@@ -505,6 +508,27 @@ class uvcpp_socks5_server {
 握手阶段的协议字节不计入；UDP 的封装头也不算。`info.status` 是**命令结果**
 （与 `on_session` 一致）。回调在资源收尾之后、会话自己那条循环上跑，服务端
 没有锁 —— 回调里可以安全地读服务端自己的状态。
+
+### 6.7 每条 CONNECT 的上游路由
+
+`route_target` 让服务端按目标决定"直连"还是"经上游 SOCKS5"。返回 `true` 时把
+上游地址填进 `uvcpp_socks5_upstream`：
+
+```cpp
+opts.route_target = [](const uvcpp::uvcpp_socks5_endpoint& target,
+                       uvcpp::uvcpp_socks5_upstream* upstream) {
+  if (target.port != 443) return false;     // 直连
+  upstream->host = "127.0.0.1";
+  upstream->port = 1080;
+  return true;
+};
+```
+
+- 上游目前只支持 SOCKS5：服务端复用 `uvcpp_tcp_client::set_socks5_proxy()`，
+  "连代理 → 认证 → CONNECT 目标"由那条腿完成，客户端收到的 REP 取自最终结果；
+- 域名目标以 `ATYP=DOMAIN` 交给上游解析，服务端不替调用方解析；
+- 回调抛异常按直连处理；BIND / UDP ASSOCIATE 不经过这个钩子；
+- 成功应答里的 `BND.ADDR` 是**到上游代理**那条连接的本端地址（不是到目标的）。
 
 ---
 

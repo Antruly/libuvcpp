@@ -16,6 +16,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <memory>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -326,7 +328,168 @@ bool test_max_connections() {
   return true;
 }
 
+// -------------------------------------------------------------------------
+// 后台 TCP echo：链式转发用例的目标
+// -------------------------------------------------------------------------
+struct EchoTarget {
+  std::thread thread;
+  std::atomic<bool> ready;
+  std::atomic<bool> stop;
+  int port;
+
+  EchoTarget() : ready(false), stop(false), port(0) {}
+
+  void start() {
+    thread = std::thread([this]() {
+      uvcpp::uvcpp_tcp_server server;
+      server.bind("127.0.0.1", 0);
+      struct sockaddr_in name;
+      int namelen = static_cast<int>(sizeof(name));
+      server.get_tcp()->getsockname(reinterpret_cast<struct sockaddr*>(&name),
+                                    &namelen);
+      port = ntohs(name.sin_port);
+      server.listen([](uvcpp::uvcpp_tcp_client* client) {
+        struct echo_state {
+          uvcpp::uvcpp_tcp_client* client;
+          std::deque<std::string> queue;
+          bool in_flight;
+          bool closed;
+          echo_state() : client(nullptr), in_flight(false), closed(false) {}
+          void pump(const std::shared_ptr<echo_state>& self) {
+            while (!closed && !in_flight && !queue.empty()) {
+              const std::string chunk = queue.front();
+              queue.pop_front();
+              in_flight = true;
+              const int rc = client->write(chunk.data(), chunk.size(),
+                                           [self](int) {
+                                             self->in_flight = false;
+                                             self->pump(self);
+                                           });
+              if (rc != 0) {
+                in_flight = false;
+                queue.clear();
+                return;
+              }
+            }
+          }
+        };
+        std::shared_ptr<echo_state> st = std::make_shared<echo_state>();
+        st->client = client;
+        client->add_close_observer([st]() { st->closed = true; });
+        client->read_start([st](uvcpp::uvcpp_buf* b) {
+          if (b == nullptr || b->size() == 0) return;
+          st->queue.push_back(std::string(b->get_const_data(), b->size()));
+          st->pump(st);
+        });
+      });
+      ready.store(true);
+      while (!stop.load()) {
+        server.run(UV_RUN_NOWAIT);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+    while (!ready.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  ~EchoTarget() {
+    stop.store(true);
+    if (thread.joinable()) thread.join();
+  }
+};
+
+bool test_route_target_upstream() {
+  std::cout << "[socks5-server] route_target_upstream start\n";
+
+  EchoTarget via_proxy;
+  EchoTarget direct;
+  via_proxy.start();
+  direct.start();
+
+  SocksServer upstream;  // plain SOCKS5 proxy used as the upstream hop
+  upstream.start();
+
+  std::atomic<int> route_calls{0};
+  SocksServer proxy;
+  proxy.opts.route_target =
+      [&](const uvcpp::uvcpp_socks5_endpoint& target,
+          uvcpp::uvcpp_socks5_upstream* out) {
+        route_calls.fetch_add(1);
+        if (target.port != via_proxy.port) return false;  // stay direct
+        out->host = "127.0.0.1";
+        out->port = upstream.port;
+        return true;
+      };
+  proxy.start();
+
+  uvcpp::uvcpp_loop loop;
+
+  // 1) The hook selects the upstream: data must round-trip through the chain.
+  {
+    uvcpp::uvcpp_socks5_client client(&loop);
+    int rc = client.connect_wait("127.0.0.1", proxy.port, 5000);
+    if (rc == 0) {
+      rc = client.connect_target_wait("127.0.0.1", via_proxy.port, 5000);
+    }
+    if (rc != 0) {
+      std::cout << "[socks5-server] upstream chain connect failed: "
+                << uv_strerror(rc) << "\n";
+      return false;
+    }
+    std::string got;
+    client.read_start([&got](uvcpp::uvcpp_buf* b) {
+      if (b != nullptr && b->size() > 0) {
+        got.append(b->get_const_data(), b->size());
+      }
+    });
+    rc = client.write_wait("upstream", 8, 5000);
+    if (rc != 0 ||
+        !pump_until(&loop, [&got]() { return got == "upstream"; }, 5000)) {
+      std::cout << "[socks5-server] upstream chain echo failed, got '" << got
+                << "'\n";
+      return false;
+    }
+    client.close();
+    pump_for(&loop, 20);
+  }
+
+  // 2) The hook returns false: the same server still dials directly.
+  {
+    uvcpp::uvcpp_socks5_client client(&loop);
+    int rc = client.connect_wait("127.0.0.1", proxy.port, 5000);
+    if (rc == 0) rc = client.connect_target_wait("127.0.0.1", direct.port, 5000);
+    if (rc != 0) {
+      std::cout << "[socks5-server] direct fallback connect failed: "
+                << uv_strerror(rc) << "\n";
+      return false;
+    }
+    std::string got;
+    client.read_start([&got](uvcpp::uvcpp_buf* b) {
+      if (b != nullptr && b->size() > 0) {
+        got.append(b->get_const_data(), b->size());
+      }
+    });
+    rc = client.write_wait("direct", 6, 5000);
+    if (rc != 0 || !pump_until(&loop, [&got]() { return got == "direct"; }, 5000)) {
+      std::cout << "[socks5-server] direct fallback echo failed, got '" << got
+                << "'\n";
+      return false;
+    }
+    client.close();
+    pump_for(&loop, 20);
+  }
+
+  if (route_calls.load() < 2) {
+    std::cout << "[socks5-server] route hook was not consulted\n";
+    return false;
+  }
+  std::cout << "[socks5-server] route_target_upstream ok\n";
+  return true;
+}
+
 }  // namespace
+
 
 int main() {
   bool ok = true;
@@ -336,6 +499,7 @@ int main() {
   ok = test_handshake_timeout() && ok;
   ok = test_slot_release_raw() && ok;
   ok = test_max_connections() && ok;
+  ok = test_route_target_upstream() && ok;
 
   if (!ok) {
     std::cout << "[socks5-server] FAILED\n";

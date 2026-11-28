@@ -1242,6 +1242,13 @@ ODBC** 四个后端，结果行按表取（列名或列号）。**默认关**（
 
 ### SOCKS5（`src/net/`）
 
+- **每条 CONNECT 的上游路由 `route_target`**（`1.12.1-dev`）：
+  `uvcpp_socks5_server_options::route_target` 按目标返回"直连"或
+  `uvcpp_socks5_upstream{host, port, username, password}`。选中上游时服务端复用
+  `uvcpp_tcp_client` 的 SOCKS5 协商（连代理 → 认证 → CONNECT 目标），客户端收到的
+  REP 取自最终结果；域名仍以 `ATYP=DOMAIN` 交给上游解析。回调抛异常按直连处理，
+  BIND 与 UDP ASSOCIATE 不经过该钩子。用例 `socks5_server_func` 新增
+  `route_target_upstream`（上游链路回环 + 钩子返回 false 时直连回落）。
 - **会话结束回调：双方向字节数、UDP 计数、时长与结束原因**（`1.8.2`，#46）。
   `uvcpp_socks5_server::set_session_end_callback()` 在每条会话**恰好一次**回调，
   带 `uvcpp_socks5_session_stats`；CONNECT / BIND 的两个方向分开计，UDP 关联合计
