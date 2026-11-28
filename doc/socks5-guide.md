@@ -515,6 +515,7 @@ class uvcpp_socks5_server {
 上游地址填进 `uvcpp_socks5_upstream`：
 
 ```cpp
+// doc-snippet: fragment — 用法示意，不是可编译的翻译单元
 opts.route_target = [](const uvcpp::uvcpp_socks5_endpoint& target,
                        uvcpp::uvcpp_socks5_upstream* upstream) {
   if (target.port != 443) return false;     // 直连
