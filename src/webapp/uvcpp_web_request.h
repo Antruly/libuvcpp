@@ -239,6 +239,49 @@ class UVCPP_API uvcpp_web_request {
   /** @brief 取一个查询参数。不存在返回 nullptr（注意：可能是空串值）。 */
   const std::string* query(const std::string& name) const;
 
+  /**
+   * @brief 取一个查询参数的**视图**：命中未编码的查询时，不构造
+   *        `query_params()` 那条向量，也不为参数名/值构造 `std::string`。
+   *
+   * 语义与 `query()` **逐字节一致**：调用方传入的 `name` 按原样比较，不由本
+   * 函数解码；查询串没有 `%`/`+` 时名字就是原始字节，查询串含编码时名字按
+   * `query_params()` 解码后的字节比较（与 `query()` 相同）。重复键取第一个，
+   * 裸键（`?a`）与空值（`?a=`）都算"存在且值为空串"，空段（`?a=1&&b=2`）
+   * 跳过，`;` 不是分隔符。
+   *
+   * 零分配快路
+   * ----------
+   * 查询串里既没有 `%` 也没有 `+` 时（`?a=13&b=42` 这种绝大多数形状），
+   * 本函数**一次分配都不做**：直接在 `query_string()` 的缓冲上扫描，返回的
+   * `*value` 指进那块缓冲。
+   *
+   * 编码路径
+   * --------
+   * 查询串里出现 `%` 或 `+` 时（与 `web_parse_query_into()` 的判据相同），
+   * 本函数复用惰性解析的 `query_params()`，把解码结果留在请求对象上，再返回
+   * 指向其中的视图。这条路**会**分配（就是 `query_params()` 本来就要付的
+   * 那一次），但解码只做一遍，之后 `query_params()` / `query()` 都直接复用。
+   *
+   * 生存期
+   * ------
+   * - 快路：`*value` 指向 `query_string()` 的缓冲，随请求对象存活；请求对象
+   *   不再被改写，所以可以安全地一直用到请求结束。
+   * - 编码路：`*value` 指向 `query_params_` 里某个 `std::string` 的缓冲。
+   *   该向量在首次解析后就固定下来（`query_parsed_` 保证不重解），所以同样
+   *   可以用到请求结束。
+   * - **不要**把 `*value` 当成 C 字符串：值里可能有 NUL（`%00`），必须配合
+   *   `*value_len` 使用。
+   *
+   * @param name      参数名（原始字节，不解码）。`name_len` 非 0 时不能为 nullptr。
+   * @param name_len  参数名字节数（名字里可以有 NUL，按字节比较）。
+   * @param value     输出：命中时指向值的首字节（即使长度为 0 也非 nullptr）；
+   *                  未命中时置为 nullptr。可为 nullptr（表示只关心是否存在）。
+   * @param value_len 输出：值字节数；未命中时置 0。可为 nullptr。
+   * @return 命中返回 true；否则 false。
+   */
+  bool query_param_view(const char* name, size_t name_len, const char** value,
+                        size_t* value_len) const;
+
   /** @brief 全部查询参数，保序、允许重复键。 */
   const std::vector<std::pair<std::string, std::string> >& query_params() const;
 

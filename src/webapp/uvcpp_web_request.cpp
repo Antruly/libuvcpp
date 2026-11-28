@@ -6,6 +6,7 @@
 #include <webapp/uvcpp_web_request.h>
 
 #include <cstdlib>
+#include <cstring>   // std::memcmp（query_param_view 的快路）
 #include <iterator>  // std::make_move_iterator（take_from 搬头表用）
 
 // `json()` 便捷版那条失败日志用（`json_status_name()` 由
@@ -441,6 +442,84 @@ uvcpp_web_request::query_params() const {
 
 const std::string* uvcpp_web_request::query(const std::string& name) const {
   return web_find_param(query_params(), name);
+}
+
+bool uvcpp_web_request::query_param_view(const char* name, size_t name_len,
+                                         const char** value,
+                                         size_t* value_len) const {
+  // 先给"未命中"的约定值，后面两条返回路径都不必再各写一遍。
+  if (value != nullptr) *value = nullptr;
+  if (value_len != nullptr) *value_len = 0;
+  if (name == nullptr && name_len != 0) return false;
+
+  const std::string& q = query_string_;
+
+  // ---------------------------------------------------------------------
+  // 快路：没有 `%` 也没有 `+`，解码恒等于原样 ⇒ 直接看原始查询串，零分配。
+  //
+  // 判据与 `web_parse_query_into()` 里那条 `need_decode` **逐字相同**：
+  // 只要整串出现任一编码字节，那条路就会对**所有**键值调用
+  // `web_url_decode()`；不出现时调用它也只是原样返回。所以这里可以安全地
+  // 跳过解码，并且视图能直接指进 `query_string_` 的缓冲。
+  // ---------------------------------------------------------------------
+  if (q.find('%') == std::string::npos &&
+      q.find('+') == std::string::npos) {
+    const size_t n = q.size();
+    const char* const base = q.data();
+
+    size_t start = 0;
+    while (start < n) {
+      // 与解析器同一条扫描：`&` 与段内第一个 `=` 一趟找完。
+      size_t amp = n;
+      size_t eq = n;
+      for (size_t i = start; i < n; ++i) {
+        const char c = q[i];
+        if (c == '&') { amp = i; break; }
+        if (c == '=' && eq == n) eq = i;
+      }
+
+      // 空段（`a=1&&b=2` 中间那个）跳过 —— 解析器也是这么做的。
+      if (amp > start) {
+        const size_t key_len = ((eq < amp) ? eq : amp) - start;
+        if (key_len == name_len &&
+            (name_len == 0 ||
+             std::memcmp(base + start, name, name_len) == 0)) {
+          // 有 `=`：值是 `=` 之后到段尾（值里可以再有 `=`）；
+          // 没有 `=`：裸键，值从段尾开始、长度为 0。
+          const size_t value_begin = (eq < amp) ? eq + 1 : amp;
+          if (value != nullptr) *value = base + value_begin;
+          if (value_len != nullptr) *value_len = amp - value_begin;
+          return true;
+        }
+      }
+
+      if (amp >= n) break;
+      start = amp + 1;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------
+  // 编码路：把活交给既有解析器，**不再写第二份解析规则**。
+  //
+  // 这样一来"视图与 `query()` 一致"是构造上成立的（同一个向量、同一次解析），
+  // 而且解码结果留在请求对象上 —— 之后 `query_params()` / `query()` 不会重解。
+  // 代价是这条路会分配（`query_params()` 本来就要分配），但任务允许：只有
+  // 含 `%`/`+` 的查询才走到这里。
+  // ---------------------------------------------------------------------
+  const std::vector<std::pair<std::string, std::string> >& ps =
+      query_params();
+  for (size_t i = 0; i < ps.size(); ++i) {
+    const std::string& key = ps[i].first;
+    if (key.size() == name_len &&
+        (name_len == 0 ||
+         std::memcmp(key.data(), name, name_len) == 0)) {
+      if (value != nullptr) *value = ps[i].second.data();
+      if (value_len != nullptr) *value_len = ps[i].second.size();
+      return true;
+    }
+  }
+  return false;
 }
 
 bool uvcpp_web_request::is_form() const {

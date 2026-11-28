@@ -13,8 +13,8 @@
 // 生成类似于其它项目的版本宏与字符串
 
 #define UVCPP_VERSION_MAJOR 1
-#define UVCPP_VERSION_MINOR 12
-#define UVCPP_VERSION_PATCH 1
+#define UVCPP_VERSION_MINOR 13
+#define UVCPP_VERSION_PATCH 0
 
 // 0 = 非发布版；1 = 发布版
 #define UVCPP_VERSION_IS_RELEASE 1
